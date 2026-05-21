@@ -142,12 +142,12 @@ flowchart LR
     (the ONE truth for every shape)
 
   overlays/dev/                   overlays/staging/              overlays/prod/
-   ├── kustomization.yaml          ├── kustomization.yaml         ├── kustomization.yaml
+   ├── kustomization.yaml           ├── kustomization.yaml          ├── kustomization.yaml
    │   resources: ../../base        │   resources: ../../base       │   resources: ../../base
    │   images:                      │   images:                     │   images:
    │     - name: catalog            │     - name: catalog           │     - name: catalog
    │       newName: <REG>/catalog   │       newName: <REG>/catalog  │       newName: <REG>/catalog
-   │       newTag: dev-abc123  ◄── │       newTag: staging-abc123◄ │       newTag: prod-abc123 ◄
+   │       newTag: dev-abc123  ◄──  │       newTag: staging-abc123◄ │       newTag: prod-abc123 ◄
    │       digest: sha256:abc123    │       digest: sha256:abc123   │       digest: sha256:abc123
    │   patches:                     │   patches:                    │   patches:
    │     - replicas-1.yaml          │     - replicas-3.yaml         │     - replicas-9.yaml

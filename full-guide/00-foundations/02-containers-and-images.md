@@ -48,12 +48,12 @@ containers. That immutability + identicality is exactly what makes the
    │   App A   │ │   App B   │          │   App A   │ │   App B   │
    │  bins/libs│ │  bins/libs│          │  bins/libs│ │  bins/libs│
    │ Guest OS  │ │ Guest OS  │  <- full ├───────────┴─┴───────────┤
-   │ (kernel)  │ │ (kernel)  │     OS   │   Container runtime      │
-   ├───────────┴─┴───────────┤    each  ├──────────────────────────┤
-   │       Hypervisor        │          │     Host OS (one kernel) │  <- shared
-   ├─────────────────────────┤          ├──────────────────────────┤
-   │       Host hardware     │          │       Host hardware      │
-   └─────────────────────────┘          └──────────────────────────┘
+   │ (kernel)  │ │ (kernel)  │     OS   │   Container runtime     │
+   ├───────────┴─┴───────────┤    each  ├─────────────────────────┤
+   │       Hypervisor        │          │    Host OS (one kernel) │  <- shared
+   ├─────────────────────────┤          ├─────────────────────────┤
+   │       Host hardware     │          │      Host hardware      │
+   └─────────────────────────┘          └─────────────────────────┘
    Isolation: strong (own kernel)       Isolation: process-level (shared kernel)
    Start: tens of seconds               Start: milliseconds
    Size: GBs (whole OS per VM)          Size: MBs (just app + libs)

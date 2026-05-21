@@ -83,21 +83,21 @@ flowchart LR
 ```
                 Bookstore — concentric controls (outer = first to cross)
  ┌──────────────────────────────────────────────────────────────────────────┐
- │ Supply chain   scan + SBOM + sign + admission (Kyverno)        → ch.03     │
+ │ Supply chain   scan + SBOM + sign + admission (Kyverno)        → ch.03   │
  │ ┌──────────────────────────────────────────────────────────────────────┐ │
- │ │ Identity/AuthZ  TLS + authN + RBAC least-priv + per-svc SA  → ch.01    │ │
+ │ │ Identity/AuthZ  TLS + authN + RBAC least-priv + per-svc SA  → ch.01  │ │
  │ │ ┌──────────────────────────────────────────────────────────────────┐ │ │
- │ │ │ Network      default-deny NetworkPolicy, both-ends allow → Part 02 │ │ │
+ │ │ │ Network    default-deny NetworkPolicy, both-ends allow → Part 02 │ │ │
  │ │ │ ┌──────────────────────────────────────────────────────────────┐ │ │ │
- │ │ │ │ Pod        restricted PSA: non-root, drop ALL, seccomp → ch.02 │ │ │ │
+ │ │ │ │ Pod      restricted PSA: non-root, drop ALL, seccomp → ch.02 │ │ │ │
  │ │ │ │ ┌──────────────────────────────────────────────────────────┐ │ │ │ │
- │ │ │ │ │ Data     Secret + ENCRYPTION AT REST (KMS) → Part03+here  │ │ │ │ │
+ │ │ │ │ │ Data     Secret + ENCRYPTION AT REST (KMS) → Part03+here │ │ │ │ │
  │ │ │ │ │          etcd TLS + isolated; backups encrypted          │ │ │ │ │
  │ │ │ │ └──────────────────────────────────────────────────────────┘ │ │ │ │
  │ │ │ └──────────────────────────────────────────────────────────────┘ │ │ │
  │ │ └──────────────────────────────────────────────────────────────────┘ │ │
  │ └──────────────────────────────────────────────────────────────────────┘ │
- │  AUDIT LOG records every layer being exercised/attacked   → here          │
+ │  AUDIT LOG records every layer being exercised/attacked   → here         │
  └──────────────────────────────────────────────────────────────────────────┘
 ```
 

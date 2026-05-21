@@ -76,7 +76,7 @@ Node capacity            = what the machine physically has
   − kube/system reserved = kubelet, runtime, OS daemons
   = Allocatable          = what Pods may actually be scheduled into
  ┌──────────────────────────────── Allocatable memory ───────────────────────────────┐
- │ catalog req │ orders req │ storefront req │  ... unreserved (free for scheduling)  │
+ │ catalog req │ orders req │ storefront req │  ... unreserved (free for scheduling) │
  │■■■■■■■■■■■■■│■■■■■■■■■■■■│■■■■■■■■■■■■■■■■│                                       │
  └─────────────┴────────────┴────────────────┴───────────────────────────────────────┘
    scheduler admits a Pod only if Σ(requests on the node) + new request ≤ Allocatable

@@ -61,18 +61,18 @@ teaching device, not a deployment unit.
 ```
                        Pod  "catalog"   (one IP: 10.244.1.7)
  ┌───────────────────────────────────────────────────────────────────────┐
- │  shared:  NET namespace (1 IP, 1 port space) · IPC · UTS (hostname)    │
+ │  shared:  NET namespace (1 IP, 1 port space) · IPC · UTS (hostname)   │
  │                                                                       │
- │   ┌───────────────────┐   localhost   ┌────────────────────────────┐  │
- │   │ container: catalog │◄────────────► │ container: log-sidecar     │  │
- │   │  app proc :8080    │               │  tails /var/log/app/*.log  │  │
- │   │  own rootfs (img)  │               │  own rootfs (img)          │  │
- │   └─────────┬──────────┘               └──────────────┬─────────────┘  │
- │             │      both mount the SAME emptyDir       │                │
- │             ▼                                          ▼                │
- │        ┌───────────────────────────────────────────────────┐          │
- │        │  volume: varlog (emptyDir)  →  /var/log/app         │          │
- │        └───────────────────────────────────────────────────┘          │
+ │   ┌───────────────────┐   localhost    ┌──────────────────────────┐   │
+ │   │ container: catalog│◄──────────────►│ container: log-sidecar   │   │
+ │   │  app proc :8080   │                │  tails /var/log/app/*.log│   │
+ │   │  own rootfs (img) │                │  own rootfs (img)        │   │
+ │   └─────────┬─────────┘                └──────────────┬───────────┘   │
+ │             │       both mount the SAME emptyDir      │               │
+ │             ▼                                         ▼               │
+ │         ┌─────────────────────────────────────────────────────┐       │
+ │         │  volume: varlog (emptyDir)  →  /var/log/app         │       │
+ │         └─────────────────────────────────────────────────────┘       │
  │                                                                       │
  │   (pause/sandbox container holds the namespaces; not user-visible)    │
  └───────────────────────────────────────────────────────────────────────┘

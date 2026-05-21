@@ -432,20 +432,20 @@ kubectl rollout status statefulset/postgres -n bookstore        # StatefulSet re
 
 ```text
 ┌─ FAST IN THE EXAM (and in real incident response) ───────────────────────────┐
-│ • alias k=kubectl ; export do='--dry-run=client -o yaml' ; export now=     │
-│     '--grace-period=0 --force'  →  k run x --image=nginx $do > x.yaml         │
+│ • alias k=kubectl ; export do='--dry-run=client -o yaml' ; export now=       │
+│     '--grace-period=0 --force'  →  k run x --image=nginx $do > x.yaml        │
 │ • GENERATE, don't hand-write: create/run/expose ... --dry-run=client -o yaml │
-│     > f.yaml, then edit. Faster and less error-prone than typing YAML.        │
-│ • kubectl explain <KIND>.spec.<FIELD> --recursive  before guessing a field.   │
-│ • kubectl <CMD> --help | less  — the per-command flags are exam-legal docs.   │
-│ • -o jsonpath / custom-columns to extract one value fast (image, nodeName).   │
-│ • k get po -w  (or kubectl events -w) to watch a rollout converge live.       │
-│ • k delete po x $now  to skip the 30s graceful term when you need it gone.    │
-│ • Set the namespace ONCE: k config set-context --current --namespace=<NS>.    │
-│ • kubectl debug (NOT exec sh) for distroless; --profile=restricted in a       │
-│     PSA-restricted ns.                                                        │
-│ • --dry-run=server validates against admission (incl. PSA) without applying.  │
-│ • k apply -k <OVERLAY> / k kustomize <OVERLAY> — Kustomize is built in.       │
+│     > f.yaml, then edit. Faster and less error-prone than typing YAML.       │
+│ • kubectl explain <KIND>.spec.<FIELD> --recursive  before guessing a field.  │
+│ • kubectl <CMD> --help | less  — the per-command flags are exam-legal docs.  │
+│ • -o jsonpath / custom-columns to extract one value fast (image, nodeName).  │
+│ • k get po -w  (or kubectl events -w) to watch a rollout converge live.      │
+│ • k delete po x $now  to skip the 30s graceful term when you need it gone.   │
+│ • Set the namespace ONCE: k config set-context --current --namespace=<NS>.   │
+│ • kubectl debug (NOT exec sh) for distroless; --profile=restricted in a      │
+│     PSA-restricted ns.                                                       │
+│ • --dry-run=server validates against admission (incl. PSA) without applying. │
+│ • k apply -k <OVERLAY> / k kustomize <OVERLAY> — Kustomize is built in.      │
 └──────────────────────────────────────────────────────────────────────────────┘
 ```
 
