@@ -124,31 +124,11 @@ jobs:
           sys.exit(1 if broken else 0)
           PY
 
-  mermaid-validity:
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-python@v5
-        with: { python-version: '3.12' }
-      - run: |
-          python3 - <<'PY'
-          import os, re, sys
-          bad, total = [], 0
-          valid_headers = {'flowchart','graph','sequenceDiagram','stateDiagram-v2','classDiagram','erDiagram','journey','gantt','pie','requirementDiagram','mindmap'}
-          for r,_,fs in os.walk('full-guide'):
-              for f in fs:
-                  if not f.endswith('.md'): continue
-                  p = os.path.join(r,f); t = open(p).read()
-                  for m in re.finditer(r'^```mermaid\s*\n([^`]+?)^```', t, re.S|re.M):
-                      total += 1; body = m.group(1)
-                      first = body.splitlines()[0].strip().split()[0] if body.strip() else ''
-                      if first not in valid_headers: bad.append((p,'bad-header',first))
-                      if body.lstrip().startswith('timeline'): bad.append((p,'timeline'))
-                      if '\\n' in body: bad.append((p,'literal-\\n'))
-          print(f'total mermaid blocks: {total}; bad: {len(bad)}')
-          for b in bad[:10]: print('  BAD:', b)
-          sys.exit(1 if bad else 0)
-          PY
+  # The mermaid-validity job that used to live here was a weak header-and-
+  # keyword regex check. It has been superseded by the real mermaid.parse()
+  # validation step in docs.yml, which loads the same parser version
+  # production renders with (10.9.1) and fails the build on any block that
+  # doesn't actually parse. See .github/scripts/validate-mermaid.mjs.
 
   leak-scan:
     runs-on: ubuntu-latest
@@ -163,7 +143,7 @@ jobs:
           [ "$HITS" -eq 0 ] || { echo "FAIL — found leaks"; grep -rniE '/Users/[a-z]|\.colima|on this machine' full-guide --include='*.md' | head -20; exit 1; }
 
   rolling-failure-issue:
-    needs: [helm-lint, helm-template-count, kustomize-counts, terraform-fmt-validate, go-services, link-check, mermaid-validity, leak-scan]
+    needs: [helm-lint, helm-template-count, kustomize-counts, terraform-fmt-validate, go-services, link-check, leak-scan]
     if: failure() && github.event_name == 'schedule'
     runs-on: ubuntu-latest
     steps:

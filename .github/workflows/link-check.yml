@@ -1,0 +1,68 @@
+name: link-check
+
+# External-URL rot detector. The guide cites ~700 external URLs (RFCs,
+# Kubernetes docs, AWS docs, vendor blogs); they decay over years. This
+# workflow re-checks them weekly and on demand, opening (or updating) a
+# rolling issue when any links break. Internal cross-links are already
+# validated on every push by `mkdocs build --strict` in docs.yml — this
+# workflow is external-only.
+
+on:
+  schedule:
+    - cron: '0 4 * * 1'    # Mondays 04:00 UTC
+  workflow_dispatch: {}
+  # On PR, only when the changed files might include new links.
+  pull_request:
+    paths:
+      - 'full-guide/**/*.md'
+      - 'README.md'
+
+permissions:
+  contents: read
+  issues: write    # to open/update the rolling drift issue
+
+jobs:
+  lychee:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Cache lychee results
+        # Cache between runs so unchanged URLs aren't re-fetched every week.
+        uses: actions/cache@v4
+        with:
+          path: .lycheecache
+          key: lychee-${{ github.run_id }}
+          restore-keys: lychee-
+
+      - name: Run lychee
+        id: lychee
+        uses: lycheeverse/lychee-action@v2
+        with:
+          # --accept 200..=299,403,429 covers normal success + the two
+          # status codes used by anti-bot rate limits (e.g. LinkedIn, X,
+          # some npm-hosted docs). Without this, those count as failures.
+          args: >-
+            --verbose
+            --no-progress
+            --cache
+            --max-cache-age 7d
+            --max-redirects 6
+            --max-retries 2
+            --timeout 30
+            --accept '200..=299,403,429'
+            --exclude-path 'full-guide/examples/*/.terraform'
+            'full-guide/**/*.md'
+            'README.md'
+          fail: false                    # Don't fail the job; let the issue carry the signal.
+          output: ./lychee-report.md
+
+      - name: Open or update rolling issue
+        if: env.lychee_exit_code != '0'
+        uses: peter-evans/create-issue-from-file@v5
+        with:
+          title: '[link-check] Broken external links detected'
+          content-filepath: ./lychee-report.md
+          labels: |
+            link-rot
+            automated
