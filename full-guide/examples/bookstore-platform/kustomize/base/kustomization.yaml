@@ -1,0 +1,27 @@
+# Bookstore Platform v2 — Part 13 ch.01 / ch.03: kustomize BASE. Every region
+# overlay starts from this base + adds its own region-specific labels +
+# annotations.
+#
+# What is here: the platform-base namespaces, RBAC, priority classes (the
+# cluster-wide platform stack). The Kueue ClusterQueue (CRD-backed) is NOT
+# in this base — Kueue installs separately, after which a region overlay can
+# add it. The auth/ RequestAuthentication + AuthorizationPolicy are CRD-
+# backed (Istio) and are pulled in by their own Argo CD Application after
+# Istio installs.
+#
+# Render (from repo root):
+#   kubectl kustomize examples/bookstore-platform/kustomize/base
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+
+# Use the v5+ labels form (commonLabels is deprecated).
+labels:
+  - includeSelectors: false
+    pairs:
+      app.kubernetes.io/part-of: bookstore-platform
+      app.kubernetes.io/managed-by: kustomize
+
+resources:
+  # Reference the platform-base directory's own kustomization. Same-tree
+  # relative path; kustomize default load restrictor accepts this.
+  - ../../platform-base

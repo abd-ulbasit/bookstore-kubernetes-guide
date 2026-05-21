@@ -1,0 +1,182 @@
+name: example-trees-check
+
+on:
+  schedule:
+    - cron: '0 3 * * *'  # nightly 03:00 UTC
+  pull_request:
+    paths:
+      - 'full-guide/examples/**'
+      - 'full-guide/**/*.md'
+      - 'mkdocs.yml'
+  workflow_dispatch: {}
+
+permissions:
+  contents: read
+  issues: write   # to open / update the rolling drift issue
+
+jobs:
+  helm-lint:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: azure/setup-helm@v4
+        with: { version: 'v3.16.0' }
+      - run: |
+          helm lint full-guide/examples/bookstore/helm/bookstore
+          # Assert 0 chart(s) failed
+          if helm lint full-guide/examples/bookstore/helm/bookstore 2>&1 | grep -q "0 chart(s) failed"; then
+            echo "OK"
+          else
+            echo "FAIL — chart(s) failed" >&2; exit 1
+          fi
+
+  helm-template-count:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: azure/setup-helm@v4
+        with: { version: 'v3.16.0' }
+      - uses: azure/setup-kubectl@v4
+        with: { version: 'v1.35.0' }
+      - run: |
+          COUNT=$(helm template bookstore full-guide/examples/bookstore/helm/bookstore | grep -c '^kind:')
+          echo "rendered kinds = $COUNT"
+          [ "$COUNT" -eq 49 ] || { echo "FAIL — expected 49 got $COUNT"; exit 1; }
+
+  kustomize-counts:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: azure/setup-kubectl@v4
+        with: { version: 'v1.35.0' }
+      - run: |
+          set -e
+          for entry in dev:45 staging:49 prod:48; do
+            OVERLAY="${entry%:*}"
+            EXPECTED="${entry#*:}"
+            COUNT=$(kubectl kustomize "full-guide/examples/bookstore/kustomize/overlays/$OVERLAY" | grep -c '^kind:')
+            echo "$OVERLAY = $COUNT (expect $EXPECTED)"
+            [ "$COUNT" -eq "$EXPECTED" ] || { echo "FAIL — $OVERLAY"; exit 1; }
+          done
+
+  terraform-fmt-validate:
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        tree:
+          - full-guide/examples/bookstore-platform/terraform
+          - full-guide/examples/bookstore-platform/terraform-account-baseline
+          - full-guide/examples/bookstore-platform/terraform/multi-region
+    steps:
+      - uses: actions/checkout@v4
+      - uses: hashicorp/setup-terraform@v3
+        with: { terraform_version: '1.10.5' }
+      - run: terraform -chdir=${{ matrix.tree }} fmt -recursive -check
+      - run: terraform -chdir=${{ matrix.tree }} init -backend=false -input=false
+      - run: terraform -chdir=${{ matrix.tree }} validate
+
+  go-services:
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        service:
+          - catalog
+          - orders
+          - payments-worker
+          - auth
+          - events
+          - payments-gateway
+          - recommendations
+          - search
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with: { go-version: '1.22' }
+      - run: |
+          DIR="full-guide/examples/bookstore-platform/app/${{ matrix.service }}"
+          if [ ! -d "$DIR" ]; then echo "SKIP — $DIR does not exist (yet)"; exit 0; fi
+          cd "$DIR"
+          go vet ./...
+          go build ./...
+
+  link-check:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with: { python-version: '3.12' }
+      - run: |
+          python3 - <<'PY'
+          import os, re, sys
+          broken, total = [], 0
+          for r,_,fs in os.walk('full-guide'):
+              for f in fs:
+                  if not f.endswith('.md'): continue
+                  p = os.path.join(r, f); t = open(p).read()
+                  for m in re.finditer(r'\]\(([^)]+\.(md|yaml|py|sh|go|json|tpl|sql|hcl|tf))\)', t):
+                      target = m.group(1)
+                      if target.startswith(('http','#','mailto:')): continue
+                      total += 1
+                      resolved = os.path.normpath(os.path.join(os.path.dirname(p), target.split('#')[0]))
+                      if not os.path.exists(resolved): broken.append((p, target))
+          print(f'total internal links: {total}; broken: {len(broken)}')
+          for b in broken[:20]: print('  BROKEN:', b)
+          sys.exit(1 if broken else 0)
+          PY
+
+  mermaid-validity:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with: { python-version: '3.12' }
+      - run: |
+          python3 - <<'PY'
+          import os, re, sys
+          bad, total = [], 0
+          valid_headers = {'flowchart','graph','sequenceDiagram','stateDiagram-v2','classDiagram','erDiagram','journey','gantt','pie','requirementDiagram','mindmap'}
+          for r,_,fs in os.walk('full-guide'):
+              for f in fs:
+                  if not f.endswith('.md'): continue
+                  p = os.path.join(r,f); t = open(p).read()
+                  for m in re.finditer(r'^```mermaid\s*\n([^`]+?)^```', t, re.S|re.M):
+                      total += 1; body = m.group(1)
+                      first = body.splitlines()[0].strip().split()[0] if body.strip() else ''
+                      if first not in valid_headers: bad.append((p,'bad-header',first))
+                      if body.lstrip().startswith('timeline'): bad.append((p,'timeline'))
+                      if '\\n' in body: bad.append((p,'literal-\\n'))
+          print(f'total mermaid blocks: {total}; bad: {len(bad)}')
+          for b in bad[:10]: print('  BAD:', b)
+          sys.exit(1 if bad else 0)
+          PY
+
+  leak-scan:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - run: |
+          set -e
+          HITS=$(grep -rniE '/Users/[a-z]|\.colima|on this machine|developers@eliteitteam|@anthropic' full-guide \
+            --include='*.md' --include='*.yaml' --include='*.py' --include='*.go' --include='*.sh' \
+            --exclude-dir='.terraform' 2>/dev/null | wc -l | tr -d ' ')
+          echo "leak hits = $HITS"
+          [ "$HITS" -eq 0 ] || { echo "FAIL — found leaks"; grep -rniE '/Users/[a-z]|\.colima|on this machine' full-guide --include='*.md' | head -20; exit 1; }
+
+  rolling-failure-issue:
+    needs: [helm-lint, helm-template-count, kustomize-counts, terraform-fmt-validate, go-services, link-check, mermaid-validity, leak-scan]
+    if: failure() && github.event_name == 'schedule'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/github-script@v7
+        with:
+          script: |
+            const { owner, repo } = context.repo;
+            const label = 'nightly-check-failure';
+            const existing = await github.rest.issues.listForRepo({ owner, repo, state: 'open', labels: label });
+            const body = `Nightly check failed in workflow run ${context.runId}. See: https://github.com/${owner}/${repo}/actions/runs/${context.runId}`;
+            if (existing.data.length > 0) {
+              await github.rest.issues.createComment({ owner, repo, issue_number: existing.data[0].number, body });
+            } else {
+              await github.rest.issues.create({ owner, repo, title: 'Nightly example-trees check failing', body, labels: [label] });
+            }

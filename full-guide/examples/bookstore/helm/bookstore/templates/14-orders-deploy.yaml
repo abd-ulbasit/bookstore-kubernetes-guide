@@ -1,0 +1,93 @@
+{{/*
+  orders Deployment (raw-manifests 14-orders-deploy.yaml). Same shape as
+  catalog: Secret-built DB_DSN via the SHARED bookstore.dbEnv helper (so the
+  DB_DSN string is BYTE-IDENTICAL to catalog's), distroless goService
+  restricted SC (UID 65532 + read-only root FS) + a writable /tmp emptyDir,
+  native preStop sleep. AMQP_URL stays unset (rabbitmq runs no-auth as Part-02
+  scaffolding; orders publish is best-effort). Carries ONLY the priority tier
+  (no topology spread / anti-affinity) — faithful to 14-.
+*/}}
+{{- if .Values.orders.enabled }}
+{{- $o := .Values.orders }}
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: orders
+  namespace: {{ include "bookstore.namespace" . }}
+  labels:
+    {{- include "bookstore.labels" (dict "ctx" . "app" "orders") | nindent 4 }}
+spec:
+  replicas: {{ $o.replicaCount }}
+  revisionHistoryLimit: {{ $o.revisionHistoryLimit }}
+  selector:
+    matchLabels:
+      app: orders
+  strategy:
+    type: RollingUpdate
+    rollingUpdate:
+      maxSurge: 1
+      maxUnavailable: 0
+  template:
+    metadata:
+      labels:
+        {{- include "bookstore.labels" (dict "ctx" . "app" "orders" "component" "backend") | nindent 8 }}
+      annotations:
+        checksum/secret: {{ include (print $.Template.BasePath "/16-db-credentials.yaml") . | sha256sum }}
+    spec:
+      serviceAccountName: {{ $o.serviceAccountName }}
+      automountServiceAccountToken: false
+      securityContext:
+        {{- include "bookstore.podSecurityContext" (dict "ctx" . "profile" "goService") | nindent 8 }}
+      priorityClassName: {{ $o.priorityClassName }}
+      {{- include "bookstore.topologySpread" (dict "w" $o "app" "orders") | nindent 6 }}
+      {{- include "bookstore.affinity" (dict "w" $o "app" "orders") | nindent 6 }}
+      {{- with $o.nodeSelector }}
+      nodeSelector:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with $o.tolerations }}
+      tolerations:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      containers:
+        - name: orders
+          image: "{{ $o.image.repository }}:{{ $o.image.tag }}"
+          imagePullPolicy: {{ $o.image.pullPolicy }}
+          securityContext:
+            {{- include "bookstore.containerSecurityContext" (dict "ctx" . "profile" "goService") | nindent 12 }}
+          ports:
+            - name: http
+              containerPort: 8080
+          env:
+            - name: PORT
+              value: "8080"
+            {{- include "bookstore.dbEnv" . | nindent 12 }}
+          startupProbe:
+            httpGet: { path: /healthz, port: http }
+            periodSeconds: 5
+            failureThreshold: 30
+          livenessProbe:
+            httpGet: { path: /healthz, port: http }
+            periodSeconds: 10
+            timeoutSeconds: 2
+            failureThreshold: 3
+          readinessProbe:
+            httpGet: { path: /readyz, port: http }
+            periodSeconds: 5
+            timeoutSeconds: 2
+            failureThreshold: 3
+          lifecycle:
+            preStop:
+              sleep:
+                seconds: {{ $o.preStopSleepSeconds }}
+          resources:
+            {{- toYaml $o.resources | nindent 12 }}
+          volumeMounts:
+            - name: tmp
+              mountPath: /tmp
+      volumes:
+        - name: tmp
+          emptyDir:
+            sizeLimit: 64Mi
+      terminationGracePeriodSeconds: {{ $o.terminationGracePeriodSeconds }}
+{{- end }}

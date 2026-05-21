@@ -1,0 +1,45 @@
+# Bookstore Platform v2 — Part 13 ch.06: the Istio AuthorizationPolicy that
+# permits Stripe to POST /stripe/webhook PUBLIC (no JWT) while still requiring
+# the Stripe-Signature header to be present (defence in depth; the signature
+# verification inside the binary is the real check). Health probes get a
+# narrow allow as well.
+#
+# Split into its own file from `payments-webhook-receiver.yaml` because Istio
+# CRDs cause a client dry-run on the combined manifest to exit non-zero —
+# the AuthorizationPolicy is `security.istio.io/v1` and `--dry-run=client`
+# without Istio installed errors on it. Keeping the Deployment + Service
+# +Secret in the receiver file lets that file dry-run cleanly.
+#
+# !!! CRD-INTRINSIC DRY-RUN — AuthorizationPolicy (Istio)
+#   `AuthorizationPolicy` is `security.istio.io/v1`. WITHOUT Istio:
+#     no matches for kind "AuthorizationPolicy" in version "security.istio.io/v1"
+#   EXPECTED. After Istio is installed this applies.
+#
+# Apply:
+#   kubectl apply -f examples/bookstore-platform/payments/payments-webhook-authz.yaml
+---
+apiVersion: security.istio.io/v1
+kind: AuthorizationPolicy
+metadata:
+  name: allow-stripe-webhook
+  namespace: bookstore-platform-payments
+  labels:
+    app.kubernetes.io/part-of: bookstore-platform
+spec:
+  selector:
+    matchLabels:
+      app: payments-webhook-receiver
+  action: ALLOW
+  rules:
+    - to:
+        - operation:
+            methods: ["POST"]
+            paths: ["/stripe/webhook"]
+      when:
+        # Header presence; the signature value itself is verified in-process.
+        - key: request.headers[stripe-signature]
+          notValues: [""]
+    - to:
+        - operation:
+            methods: ["GET"]
+            paths: ["/healthz", "/readyz"]

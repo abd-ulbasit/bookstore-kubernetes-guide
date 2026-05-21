@@ -1,0 +1,58 @@
+{{/*
+  PodDisruptionBudgets for catalog/storefront/orders (raw-manifests
+  84-pdb.yaml). policy/v1 is BUILT-IN (GA since v1.21) — defaults ON, dry-runs
+  cleanly. minAvailable is matched to each Deployment's replica count.
+  payments-worker gets NO PDB on purpose: it is KEDA-scaled and may legitimately
+  be at 0 replicas, so a minAvailable PDB would be meaningless and could wedge
+  a drain (ch.05). Each PDB is skipped if its workload is disabled.
+*/}}
+{{- if .Values.pdb.enabled }}
+{{- $pdb := .Values.pdb }}
+{{- if and .Values.catalog.enabled (not .Values.canary.enabled) }}
+apiVersion: policy/v1
+kind: PodDisruptionBudget
+metadata:
+  name: catalog
+  namespace: {{ include "bookstore.namespace" . }}
+  labels:
+    {{- include "bookstore.labels" (dict "ctx" . "app" "catalog") | nindent 4 }}
+spec:
+  minAvailable: {{ $pdb.catalog.minAvailable }}
+  selector:
+    matchLabels:
+      app: catalog
+  unhealthyPodEvictionPolicy: {{ $pdb.unhealthyPodEvictionPolicy }}
+{{- end }}
+{{- if .Values.storefront.enabled }}
+---
+apiVersion: policy/v1
+kind: PodDisruptionBudget
+metadata:
+  name: storefront
+  namespace: {{ include "bookstore.namespace" . }}
+  labels:
+    {{- include "bookstore.labels" (dict "ctx" . "app" "storefront") | nindent 4 }}
+spec:
+  minAvailable: {{ $pdb.storefront.minAvailable }}
+  selector:
+    matchLabels:
+      app: storefront
+  unhealthyPodEvictionPolicy: {{ $pdb.unhealthyPodEvictionPolicy }}
+{{- end }}
+{{- if .Values.orders.enabled }}
+---
+apiVersion: policy/v1
+kind: PodDisruptionBudget
+metadata:
+  name: orders
+  namespace: {{ include "bookstore.namespace" . }}
+  labels:
+    {{- include "bookstore.labels" (dict "ctx" . "app" "orders") | nindent 4 }}
+spec:
+  minAvailable: {{ $pdb.orders.minAvailable }}
+  selector:
+    matchLabels:
+      app: orders
+  unhealthyPodEvictionPolicy: {{ $pdb.unhealthyPodEvictionPolicy }}
+{{- end }}
+{{- end }}

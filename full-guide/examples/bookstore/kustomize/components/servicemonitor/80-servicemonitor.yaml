@@ -1,0 +1,97 @@
+# Bookstore — Part 06 ch.01 "Observability: metrics": scrape config as data.
+#
+# Two ServiceMonitor objects tell the Prometheus Operator WHICH Services to
+# scrape and HOW — without editing prometheus.yml. The Operator watches
+# ServiceMonitors, turns each into a scrape job, and reloads Prometheus. This
+# is the "monitoring config is just Kubernetes objects" model (ch.01).
+#
+#   • catalog        — selects the `catalog` Service (40-services.yaml),
+#     scrapes its `http` port at /metrics. catalog exposes
+#     http_requests_total{handler,code} + http_request_duration_seconds (a
+#     histogram, DefBuckets) — app/catalog/main.go. orders is identical and
+#     can be added the same way (left out only to keep the example tight; the
+#     chapter notes it).
+#   • payments-worker — selects the HEADLESS `payments-worker` Service
+#     (40-services.yaml), scrapes its `metrics` port. The worker has no
+#     inbound API but exposes payments_processed_total + Go runtime metrics
+#     (app/payments-worker/main.go); the headless Service exists purely to
+#     give the Operator scrape endpoints (one per Ready Pod).
+#
+# !!! CRD-BACKED — intrinsic dry-run behaviour (exactly like 18-/51-/70-) !!!
+# `ServiceMonitor` is a Prometheus Operator CRD (apiGroup
+# monitoring.coreos.com/v1), NOT a built-in kind. On a cluster WITHOUT the
+# Operator installed, `kubectl apply --dry-run=client -f` (or a whole-dir
+# client dry-run) prints:
+#     error: resource mapping not found for ... kind "ServiceMonitor" in
+#     version "monitoring.coreos.com/v1" ... ensure CRDs are installed first
+#     (no matches for kind "ServiceMonitor")
+# That is EXPECTED and not a manifest defect — identical to the Gateway API
+# (51-), VolumeSnapshot (18-) and Kyverno ClusterPolicy (70-) situations. A
+# whole-dir client dry-run that has not installed the Operator prints this for
+# THIS file (and 81-/83-) only and continues; every built-in object still
+# validates. Schema below verified against the Prometheus Operator
+# monitoring.coreos.com/v1 ServiceMonitor API.
+#
+# !!! THE `release` LABEL MATTERS !!!  kube-prometheus-stack's bundled
+# Prometheus has `serviceMonitorSelector: matchLabels: {release: <helm
+# release name>}` by default. A ServiceMonitor WITHOUT that label is silently
+# ignored (valid object, never scraped — the #1 "my ServiceMonitor does
+# nothing" cause). The hands-on installs the chart as release
+# `kube-prometheus-stack`, so that is the label value here. If you used a
+# different release name, change it (or set the chart value
+# prometheus.prometheusSpec.serviceMonitorSelectorNilUsesHelmValues=false).
+#
+# Requires (to actually apply, not just read):
+#   - kube-prometheus-stack installed (Prometheus Operator + CRDs) in the
+#     `monitoring` namespace (Part 06 ch.01 hands-on)
+#   - 40-services.yaml applied (the catalog + payments-worker Services exist)
+#   - 10-/19- applied (so those Services have Endpoints)
+#   - 60-networkpolicy.yaml rule 10 (monitoring -> :8080) so scrapes are not
+#     blocked once a policy-enforcing CNI is in play
+# Apply (Operator-equipped cluster only):
+#   kubectl apply -f examples/bookstore/raw-manifests/80-servicemonitor.yaml
+#   kubectl get servicemonitor -n bookstore
+#   # then in the Prometheus UI: Status -> Targets -> bookstore/catalog UP
+apiVersion: monitoring.coreos.com/v1
+kind: ServiceMonitor
+metadata:
+  name: catalog
+  namespace: bookstore
+  labels:
+    app: catalog
+    app.kubernetes.io/part-of: bookstore
+    release: kube-prometheus-stack   # MUST match the Prometheus serviceMonitorSelector
+spec:
+  # Select the catalog Service (40-services.yaml) by its labels. The Operator
+  # then scrapes that Service's Endpoints (the catalog Pods).
+  selector:
+    matchLabels:
+      app: catalog
+  namespaceSelector:
+    matchNames: ["bookstore"]
+  endpoints:
+    - port: http                     # the catalog Service's named port (-> 8080)
+      path: /metrics                 # promhttp.Handler() route (app/catalog/main.go)
+      interval: 15s
+      scheme: http
+---
+apiVersion: monitoring.coreos.com/v1
+kind: ServiceMonitor
+metadata:
+  name: payments-worker
+  namespace: bookstore
+  labels:
+    app: payments-worker
+    app.kubernetes.io/part-of: bookstore
+    release: kube-prometheus-stack
+spec:
+  selector:
+    matchLabels:
+      app: payments-worker
+  namespaceSelector:
+    matchNames: ["bookstore"]
+  endpoints:
+    - port: metrics                  # the headless Service's named port (-> 8080)
+      path: /metrics
+      interval: 15s
+      scheme: http

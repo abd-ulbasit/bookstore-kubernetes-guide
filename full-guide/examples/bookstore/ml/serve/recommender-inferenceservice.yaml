@@ -1,0 +1,150 @@
+# Bookstore — Part 12 ch.06 "Model serving and inference": the recommender
+# served as a KServe `InferenceService` (CRD-backed) — request-driven
+# autoscaling, scale-to-zero (Knative serverless mode), model versioning,
+# and built-in canary/A-B at the InferenceService level.
+#
+# !!! CRD-INTRINSIC DRY-RUN (identical precedent to raw-manifests/51-/70-/83-,
+#     argocd/, operators/, chaos/, ml/batch/, ml/train/) !!!
+#   `InferenceService` is a KServe CRD (serving.kserve.io/v1beta1). WITHOUT
+#   KServe (+ Knative Serving + cert-manager + a Knative network layer)
+#   installed a client dry-run prints:
+#     no matches for kind "InferenceService" in version "serving.kserve.io/v1beta1"
+#   EXPECTED and SCHEMA-CORRECT — install KServe first (Part 12 ch.06
+#   Hands-on: pinned Helm `kserve/kserve` -> ns `kserve`; plus pinned
+#   Knative Serving and cert-manager). Schema verified against
+#   serving.kserve.io/v1beta1 (predictor.model.modelFormat + storageUri +
+#   minReplicas/maxReplicas).
+#
+# The PLAIN-DEPLOYMENT equivalent (`recommender-deployment.yaml` +
+# `recommender-service.yaml`) is the KIND-RUNNABLE serving path without
+# KServe; this file is the CRD-backed equivalent that adds the serverless
+# autoscaling + canary mechanics the chapter teaches.
+#
+# RUNTIME — uses KServe's built-in `sklearn` ServingRuntime via the v2
+# (KServe modelmesh-aligned) predictor model API: `modelFormat.name: sklearn`
+# tells KServe to pick the sklearn ServingRuntime that ships with KServe by
+# default. The runtime loads the artifact at `storageUri` and exposes the
+# v1/v2 inference protocols. Because our train.py writes a `model.joblib`
+# whose top-level object is a dict (not a sklearn estimator), the
+# DEFAULT sklearn runtime would not understand it — so this manifest
+# documents the TWO honest options:
+#
+#   OPTION A (this file as written, RECOMMENDED): the CUSTOM-PREDICTOR shape
+#     `predictor.containers[]` points at the SAME image as the plain
+#     Deployment (`bookstore/recommender-serve:dev`). KServe still gives us
+#     serverless scaling + canary at the InferenceService level; our
+#     predictor implements the v1 protocol (`/v1/models/recommender:predict`)
+#     which KServe routes traffic to. This is the documented KServe pattern
+#     for "I have a custom predictor".
+#
+#   OPTION B (commented stub at bottom): the BUILT-IN sklearn runtime shape
+#     for completeness. You'd reshape train.py to dump a sklearn estimator
+#     directly; this is the "use the runtime KServe ships" path.
+#
+# STORAGE URI — KServe canonically loads models from object storage (s3://,
+# gs://, etc.) via a storage initializer. On kind, the `pvc://` form mounts
+# the same PVC the train Job wrote to. The placeholder `gs://your-org-models/…`
+# is honestly marked illustrative.
+#
+# PSA — `bookstore-ml` is `enforce: restricted` (Part 12 ch.01). KServe
+# wraps the predictor container in a Knative `Service` -> `Revision` ->
+# `Deployment`; the securityContext on the predictor container/pod here is
+# carried through to those Pods. ML pods are NOT exempt from PSA.
+apiVersion: serving.kserve.io/v1beta1
+kind: InferenceService
+metadata:
+  name: recommender
+  namespace: bookstore-ml
+  labels:
+    app.kubernetes.io/part-of: bookstore-ml
+    app.kubernetes.io/component: recommender-serve
+    ml.bookstore/path: kserve-inferenceservice
+  annotations:
+    # Knative request-driven autoscaling: scale-to-zero, target concurrency.
+    # minReplicas here and the min-scale annotation both say 0 — KServe reads both; in serverless mode the annotation drives KPA directly.
+    autoscaling.knative.dev/min-scale: "0"
+    autoscaling.knative.dev/max-scale: "5"
+    autoscaling.knative.dev/target: "10"      # concurrent requests per pod
+spec:
+  predictor:
+    # Scale-to-zero serverless path. Set minReplicas: 1 for always-on.
+    minReplicas: 0
+    maxReplicas: 5
+    timeout: 30
+    # Restricted-compliant PodSpec carried into the Knative Revision.
+    automountServiceAccountToken: false
+    securityContext:                       # pod-level — restricted
+      runAsNonRoot: true
+      runAsUser: 65532
+      runAsGroup: 65532
+      fsGroup: 65532
+      seccompProfile:
+        type: RuntimeDefault
+    # OPTION A: custom predictor container. The image implements the v1
+    # inference protocol so KServe's HTTP routing works out of the box.
+    containers:
+      - name: kserve-container             # the name KServe expects
+        image: bookstore/recommender-serve:dev
+        imagePullPolicy: IfNotPresent
+        ports:
+          - containerPort: 8080
+            name: http1
+            protocol: TCP
+        env:
+          - name: MODEL_DIR
+            value: /workspace/model
+          - name: MODEL_NAME
+            value: recommender
+        resources:
+          requests:
+            cpu: "100m"
+            memory: 256Mi
+          limits:
+            cpu: "1"
+            memory: 512Mi
+        readinessProbe:
+          httpGet: { path: /ready, port: 8080 }
+          initialDelaySeconds: 2
+          periodSeconds: 5
+        livenessProbe:
+          httpGet: { path: /healthz, port: 8080 }
+          initialDelaySeconds: 10
+          periodSeconds: 20
+        securityContext:                   # container-level — restricted
+          allowPrivilegeEscalation: false
+          readOnlyRootFilesystem: true
+          capabilities:
+            drop: ["ALL"]
+        volumeMounts:
+          - name: model
+            mountPath: /workspace/model
+            readOnly: true
+          - name: scratch
+            mountPath: /tmp
+    volumes:
+      - name: model                        # the same PVC the train Job wrote
+        persistentVolumeClaim:
+          claimName: recommender-model
+          readOnly: true
+      - name: scratch
+        emptyDir:
+          sizeLimit: 64Mi
+# -----------------------------------------------------------------------------
+# OPTION B (stub — DO NOT UNCOMMENT BLINDLY): the BUILT-IN KServe sklearn
+# ServingRuntime path. Requires train.py to dump a sklearn estimator
+# directly, and the model to live at an URI KServe can fetch (object store
+# in prod; `pvc://recommender-model/model.joblib` on kind). Shown here so
+# both paths are visible in one place; do not paste both into the same file.
+#
+# spec:
+#   predictor:
+#     minReplicas: 0
+#     maxReplicas: 5
+#     model:
+#       modelFormat:
+#         name: sklearn
+#       runtime: kserve-sklearnserver
+#       # On kind: a PVC URI. In prod: gs://your-org-models/recommender/v1
+#       # (honestly marked placeholder).
+#       storageUri: "pvc://recommender-model/"
+# -----------------------------------------------------------------------------

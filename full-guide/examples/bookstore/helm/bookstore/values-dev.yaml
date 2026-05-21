@@ -1,0 +1,40 @@
+# Bookstore — DEV environment overrides.
+#   helm install bookstore ./examples/bookstore/helm/bookstore \
+#     -n bookstore --create-namespace -f examples/bookstore/helm/bookstore/values-dev.yaml
+#
+# Dev is the smallest footprint: one replica per tier (single-node kind),
+# debug logging, the demo Secret, NO autoscaling, NO PDBs (fewer moving parts
+# while iterating). This is essentially the "just make it run locally" preset.
+
+catalog:
+  replicaCount: 1
+  # Single-node kind: relax the hard topology spread so 1 replica schedules
+  # cleanly (it would anyway at replicas:1, but make intent explicit).
+  topologySpread:
+    enabled: false
+storefront:
+  replicaCount: 1
+  topologySpread:
+    enabled: false
+orders:
+  replicaCount: 1
+
+catalogConfig:
+  data:
+    LOG_LEVEL: "debug"
+    REDIS_ADDR: "redis.bookstore.svc.cluster.local:6379"
+    CATALOG_FEATURE_RECOMMENDATIONS: "true"
+    CATALOG_CACHE_TTL_SECONDS: "10"
+
+paymentsWorker:
+  logLevel: "debug"
+
+# Iterate fast: no autoscaler / disruption budgets in dev.
+hpa:
+  enabled: false
+pdb:
+  enabled: false
+
+ingress:
+  enabled: true
+  host: bookstore.localdev.me

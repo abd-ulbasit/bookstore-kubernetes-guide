@@ -1,0 +1,89 @@
+# Bookstore — Part 11 ch.10 "Platform engineering": the CompositeResourceDefinition
+# (XRD) that declares the NEW high-level self-service API `BookstoreEnvironment`.
+# This is the developer-facing face of the PAVED ROAD: a developer supplies a
+# `tenant` name + a `size` and NOTHING about securityContext / RBAC / quota /
+# NetworkPolicy / policy — the Composition (crossplane-composition.yaml) expands
+# it, BY CONSTRUCTION, into the guide's hardened/bounded/isolated stack
+# (Part 05 ch.01-02 + Part 01 ch.03 + Part 02 ch.06 + Part 08 ch.04).
+#
+# CROSSPLANE v2 MODEL (current, accurate): the XR is itself NAMESPACED
+# (apiextensions.crossplane.io/v2, scope: Namespaced) — the developer creates
+# the XR DIRECTLY in a namespace; there is no separate "Claim" object. The v1
+# *Claim* term (scope: LegacyCluster + claimNames) is LEGACY and still
+# supported for back-compat; this guide teaches the v2 namespaced-XR model
+# (better isolation, simpler) and ch.10 "How it works" names the legacy Claim
+# so older clusters/tutorials still make sense. Either way the developer handle
+# is a small, namespaced, RBAC-scopable API; the guardrail expansion is the same.
+#
+# !!! CRD-INTRINSIC DRY-RUN (identical precedent to argocd/ + operator/ +
+#     multicluster/ + 18-/51-/70-/83- + cnpg-/karpenter-)
+#   `CompositeResourceDefinition` is `apiextensions.crossplane.io/v2` — a
+#   Crossplane CRD. WITHOUT Crossplane installed (ch.10 Hands-on step 1, pinned
+#   Helm into crossplane-system), a client dry-run prints:
+#     no matches for kind "CompositeResourceDefinition" in version
+#     "apiextensions.crossplane.io/v2"
+#   EXPECTED, schema-correct — same precedent as examples/bookstore/argocd/*,
+#   operator/config/samples/* (ch.02), multicluster/10- (ch.06). After
+#   Crossplane is installed, `kubectl apply --dry-run=server -f` validates
+#   cleanly and the XRD becomes a real served API (CRD
+#   bookstoreenvironments.platform.bookstore.example.com Established). Schema
+#   verified against the Crossplane v2 XRD spec (scope: Namespaced).
+#
+# ADDITIVE: NEW file; touches no canonical Bookstore manifest, Helm chart,
+# Kustomize overlay, the operator, the argocd/ or multicluster/ trees, or any
+# existing examples/bookstore/** file.
+#
+# Apply (after Crossplane installed — ch.10 step 1):
+#   kubectl apply -f examples/bookstore/platform/crossplane-xrd.yaml
+#   kubectl wait --for=condition=Established \
+#     crd/bookstoreenvironments.platform.bookstore.example.com --timeout=120s
+apiVersion: apiextensions.crossplane.io/v2
+kind: CompositeResourceDefinition
+metadata:
+  name: bookstoreenvironments.platform.bookstore.example.com
+  labels:
+    app.kubernetes.io/part-of: bookstore
+spec:
+  # v2: the XR is NAMESPACED — the developer creates it directly in a namespace
+  # (RBAC-scopable per namespace), no separate cluster-scoped Claim.
+  scope: Namespaced
+  group: platform.bookstore.example.com
+  names:
+    kind: BookstoreEnvironment
+    plural: bookstoreenvironments
+  versions:
+    - name: v1alpha1
+      served: true
+      referenceable: true
+      schema:
+        openAPIV3Schema:
+          type: object
+          properties:
+            spec:
+              type: object
+              # THE ENTIRE DEVELOPER INTERFACE — 2 fields. No security/RBAC/
+              # quota/network knobs: those are the platform's job, expanded by
+              # the Composition. A developer CANNOT request an un-guarded env.
+              properties:
+                tenant:
+                  type: string
+                  description: >-
+                    Tenant name. Drives the provisioned namespace
+                    (bookstore-tenant-<tenant>) and the names of the RBAC/
+                    quota/NetworkPolicy objects in it.
+                  pattern: '^[a-z]([-a-z0-9]*[a-z0-9])?$'
+                  maxLength: 40
+                size:
+                  type: string
+                  description: >-
+                    Coarse t-shirt size; the Composition maps it to the
+                    ResourceQuota/LimitRange totals (small=default here).
+                  enum: [small, medium, large]
+                  default: small
+              required: [tenant]
+            status:
+              type: object
+              properties:
+                namespace:
+                  type: string
+                  description: The guarded namespace this environment provisioned.

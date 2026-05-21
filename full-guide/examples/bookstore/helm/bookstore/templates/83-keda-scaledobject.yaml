@@ -1,0 +1,65 @@
+{{/*
+  KEDA event-driven scaling of payments-worker on RabbitMQ queue depth
+  (raw-manifests 83-keda-scaledobject.yaml). ScaledObject + TriggerAuthentication
+  are KEDA CRDs (keda.sh/v1alpha1) — NOT built-in — so this is behind
+  keda.enabled (default FALSE) and a plain `helm install` does not render it.
+  When enabled, install KEDA via Helm first (kedacore/keda — NEVER a
+  releases/latest/download/keda-<ver>.yaml URL; NOTES documents the Helm
+  install). A client dry-run without KEDA prints the expected
+  `no matches for kind "ScaledObject"/"TriggerAuthentication"` for these only.
+  The rabbitmq-conn Secret is the SCALER's AMQP string (NOT db-credentials —
+  the worker has no DB); demo-only, same caveat as 16-.
+*/}}
+{{- if .Values.keda.enabled }}
+{{- $k := .Values.keda }}
+apiVersion: v1
+kind: Secret
+metadata:
+  name: {{ $k.connectionSecretName }}
+  namespace: {{ include "bookstore.namespace" . }}
+  labels:
+    {{- include "bookstore.labels" (dict "ctx" . "app" "payments-worker") | nindent 4 }}
+type: Opaque
+stringData:
+  host: {{ $k.amqpHost | quote }}
+---
+apiVersion: keda.sh/v1alpha1
+kind: TriggerAuthentication
+metadata:
+  name: rabbitmq-trigger-auth
+  namespace: {{ include "bookstore.namespace" . }}
+  labels:
+    {{- include "bookstore.labels" (dict "ctx" . "app" "payments-worker") | nindent 4 }}
+spec:
+  secretTargetRef:
+    - parameter: host
+      name: {{ $k.connectionSecretName }}
+      key: host
+---
+apiVersion: keda.sh/v1alpha1
+kind: ScaledObject
+metadata:
+  name: payments-worker
+  namespace: {{ include "bookstore.namespace" . }}
+  labels:
+    {{- include "bookstore.labels" (dict "ctx" . "app" "payments-worker") | nindent 4 }}
+spec:
+  scaleTargetRef:
+    apiVersion: apps/v1
+    kind: Deployment
+    name: payments-worker
+  pollingInterval: {{ $k.pollingInterval }}
+  cooldownPeriod: {{ $k.cooldownPeriod }}
+  minReplicaCount: {{ $k.minReplicaCount }}
+  maxReplicaCount: {{ $k.maxReplicaCount }}
+  triggers:
+    - type: rabbitmq
+      metadata:
+        protocol: amqp
+        queueName: {{ $k.queueName }}
+        mode: QueueLength
+        value: {{ $k.queueLength | quote }}
+        activationValue: {{ $k.activationValue | quote }}
+      authenticationRef:
+        name: rabbitmq-trigger-auth
+{{- end }}

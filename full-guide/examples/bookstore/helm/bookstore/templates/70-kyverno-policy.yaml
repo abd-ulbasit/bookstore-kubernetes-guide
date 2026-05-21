@@ -1,0 +1,74 @@
+{{/*
+  Kyverno image supply-chain ClusterPolicy (raw-manifests 70-kyverno-policy
+  .yaml). ClusterPolicy is a Kyverno CRD (kyverno.io/v1) — NOT built-in — so
+  this is behind kyverno.enabled (default FALSE); a plain `helm install` does
+  not render it. Install Kyverno first (Helm: kyverno/kyverno).
+
+  validationFailureAction: Audit ON PURPOSE — Enforce would REJECT the guide's
+  own bookstore/<svc>:dev images (mutable tag, no digest) and blackhole the
+  cluster. The honest production path (sign + push by digest in CI, then
+  Enforce + a real verifyImages rule) is in ch.01 / Part 05 ch.03. Scope:
+  Pods in the bookstore namespace.
+*/}}
+{{- if .Values.kyverno.enabled }}
+{{- $ns := include "bookstore.namespace" . }}
+apiVersion: kyverno.io/v1
+kind: ClusterPolicy
+metadata:
+  name: bookstore-image-supply-chain
+  labels:
+    {{- include "bookstore.commonLabels" . | nindent 4 }}
+  annotations:
+    policies.kyverno.io/title: Bookstore image supply-chain (Audit)
+    policies.kyverno.io/category: Supply Chain Security
+    policies.kyverno.io/description: >-
+      Audit-only: flags Pods using an explicit :latest tag, images not pinned
+      by digest, or pods not setting pod-level runAsNonRoot. Audit (not
+      Enforce) so it cannot reject the guide's own bookstore/<svc>:dev images.
+spec:
+  validationFailureAction: {{ .Values.kyverno.validationFailureAction }}
+  background: {{ .Values.kyverno.background }}
+  rules:
+    - name: disallow-latest-tag
+      match:
+        any:
+          - resources:
+              kinds: ["Pod"]
+              namespaces: ["{{ $ns }}"]
+      validate:
+        message: >-
+          Using a mutable image tag is not allowed. Pin an immutable tag or,
+          better, a digest (Part 05 ch.03). [AUDIT — reported, not blocked]
+        pattern:
+          spec:
+            containers:
+              - image: "!*:latest"
+    - name: require-image-digest
+      match:
+        any:
+          - resources:
+              kinds: ["Pod"]
+              namespaces: ["{{ $ns }}"]
+      validate:
+        message: >-
+          Images should be referenced by immutable digest (name@sha256:...),
+          not a tag. [AUDIT — expected to flag the guide's :dev images]
+        pattern:
+          spec:
+            containers:
+              - image: "*@sha256:*"
+    - name: require-run-as-non-root
+      match:
+        any:
+          - resources:
+              kinds: ["Pod"]
+              namespaces: ["{{ $ns }}"]
+      validate:
+        message: >-
+          Containers must run as non-root: set
+          spec.securityContext.runAsNonRoot=true (Part 05 ch.02).
+        pattern:
+          spec:
+            =(securityContext):
+              =(runAsNonRoot): true
+{{- end }}

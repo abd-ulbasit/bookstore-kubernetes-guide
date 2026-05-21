@@ -1,0 +1,43 @@
+# Bookstore — Part 11 ch.04 "Service mesh": enroll the `bookstore` namespace
+# into the Istio AMBIENT data plane (ztunnel L4 mTLS, no per-pod sidecar).
+#
+# This is a PATCH-SHAPED manifest, NOT a new namespace. It is a `kubectl
+# label` applied to the EXISTING, canonical 00-namespace.yaml object — it does
+# NOT redefine the Namespace (that would fork the PSA-restricted labels the
+# canonical file owns). Shown as YAML only for review; APPLY it with the
+# `kubectl label` in the chapter, never `kubectl apply -f` (applying this bare
+# object would strip the canonical namespace's PSA + ResourceQuota labels).
+#
+# WHY AMBIENT (and not sidecar) FOR THE BOOKSTORE — the PSA footgun:
+#   `bookstore` is `pod-security.kubernetes.io/enforce: restricted`. A
+#   SIDECAR-mode mesh MUTATES every Pod to add an istio-proxy container; that
+#   injected container MUST itself be restricted-compliant (runAsNonRoot,
+#   non-root UID, drop ALL, seccomp RuntimeDefault) or PSA REJECTS the whole
+#   Pod at admission — a real, common outage when a mesh meets a restricted
+#   namespace (see 10-sidecar-mode-podtemplate.yaml for the compliant sidecar
+#   shape and the chapter's footgun section). AMBIENT moves the data path OUT
+#   of the Pod (a per-NODE ztunnel DaemonSet + an optional per-namespace
+#   waypoint Deployment, both in istio-system / their own ns, NOT bookstore),
+#   so the Bookstore Pods are byte-for-byte UNCHANGED — no injected container,
+#   nothing for PSA to reject. That is the primary reason this guide picks
+#   ambient for a restricted-PSA app.
+#
+# CRD/extension note (intrinsic — same precedent as 18-/51-/70-/83-/argocd):
+#   `istio.io/dataplane-mode=ambient` is a plain label; it does NOTHING until
+#   the Istio control plane + CNI + ztunnel are installed (chapter Hands-on
+#   step 1, pinned Helm). With Istio absent the label is inert (not an error);
+#   with the ambient profile installed it enrolls every Pod in the namespace
+#   into ztunnel-mediated mTLS with zero pod mutation.
+#
+# Apply (NOT `kubectl apply -f` — a label patch on the canonical ns):
+#   kubectl label namespace bookstore istio.io/dataplane-mode=ambient
+#   # undo:  kubectl label namespace bookstore istio.io/dataplane-mode-
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: bookstore
+  labels:
+    # The ONE ambient-enrollment label. Everything else about this namespace
+    # (PSA restricted, quotas) is owned by raw-manifests/00-namespace.yaml and
+    # is intentionally NOT repeated here — apply via `kubectl label`, not apply.
+    istio.io/dataplane-mode: ambient

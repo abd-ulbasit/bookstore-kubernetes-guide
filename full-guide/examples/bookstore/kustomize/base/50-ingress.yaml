@@ -1,0 +1,77 @@
+# Bookstore — Part 02 ch.04 "Ingress": one external entrypoint, TLS-terminated.
+#
+# Ingress is L7 HTTP routing into the cluster: host + path rules map to the
+# in-cluster Services from 40-services.yaml. An Ingress CONTROLLER
+# (ingress-nginx here) watches Ingress objects and programs a reverse proxy;
+# the Ingress object alone does nothing without a controller (see ch.04).
+#
+# Routing (host bookstore.localdev.me — *.localdev.me resolves to 127.0.0.1,
+# convenient for local kind; swap for your domain in production):
+#   /            -> storefront:80   (the UI; default-ish catch-all path)
+#   /api/books   -> catalog:80      (rewritten to /books   on the backend)
+#   /api/orders  -> orders:80       (rewritten to /orders  on the backend)
+# TLS is terminated at the Ingress using a Secret holding a cert+key. For
+# local use, generate a self-signed cert (see ch.04 hands-on) and create the
+# Secret `bookstore-tls`; in production this is cert-manager/ACME.
+#
+# This is the Ingress form. 51-gateway.yaml is the EQUIVALENT expressed with
+# Gateway API and is a MUTUALLY EXCLUSIVE ALTERNATIVE — apply 50- OR 51-,
+# never both (they'd bind the same hostname/paths via two different data
+# planes). Both are dry-run valid; pick one stack. See ch.05.
+#
+# Requires:
+#   kubectl apply -f examples/bookstore/raw-manifests/40-services.yaml
+#   # ingress-nginx installed (ch.04 documents the public manifest + kind notes)
+#   # TLS Secret (ch.04):
+#   #   openssl req -x509 -nodes -days 365 -newkey rsa:2048 \
+#   #     -keyout tls.key -out tls.crt -subj "/CN=bookstore.localdev.me" \
+#   #     -addext "subjectAltName=DNS:bookstore.localdev.me"
+#   #   kubectl create secret tls bookstore-tls -n bookstore \
+#   #     --cert=tls.crt --key=tls.key
+# Apply:
+#   kubectl apply -f examples/bookstore/raw-manifests/50-ingress.yaml
+#   kubectl get ingress -n bookstore
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: bookstore
+  namespace: bookstore
+  labels:
+    app.kubernetes.io/part-of: bookstore
+  annotations:
+    # Strip the /api/<svc> prefix so the backend sees its own route
+    # (catalog serves /books, not /api/books). This annotation is
+    # ingress-nginx-specific; other controllers express rewrite differently
+    # (a portability limit ch.05 motivates Gateway API to solve).
+    nginx.ingress.kubernetes.io/rewrite-target: /$2
+spec:
+  ingressClassName: nginx           # which controller owns this Ingress
+  tls:
+    - hosts:
+        - bookstore.localdev.me
+      secretName: bookstore-tls     # cert+key Secret terminates TLS here
+  rules:
+    - host: bookstore.localdev.me
+      http:
+        paths:
+          - path: /api/books(/|$)(.*)
+            pathType: ImplementationSpecific   # regex capture (ingress-nginx)
+            backend:
+              service:
+                name: catalog
+                port:
+                  number: 80
+          - path: /api/orders(/|$)(.*)
+            pathType: ImplementationSpecific
+            backend:
+              service:
+                name: orders
+                port:
+                  number: 80
+          - path: /
+            pathType: Prefix                   # everything else -> the UI
+            backend:
+              service:
+                name: storefront
+                port:
+                  number: 80

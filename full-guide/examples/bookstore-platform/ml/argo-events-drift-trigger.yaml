@@ -1,0 +1,109 @@
+# Bookstore Platform v2 — Part 13 ch.08: Argo Events EventSource + Sensor
+# that watches the `ml.drift` Kafka topic and submits the
+# `recommender-train` WorkflowTemplate on threshold breach.
+#
+# Two CRs:
+#   - EventSource — declares HOW to listen (Kafka, in this case).
+#   - Sensor      — declares WHAT to do when an event arrives (submit a
+#                   Workflow, with parameters derived from the event).
+#
+# Together they close the MLOps loop: prediction -> drift -> retrain.
+#
+# !!! CRD-INTRINSIC DRY-RUN
+#   `EventSource` + `Sensor` are `argoproj.io/v1alpha1` — Argo Events CRDs.
+#   WITHOUT Argo Events (and Argo Workflows for the trigger) installed:
+#     no matches for kind "EventSource" in version "argoproj.io/v1alpha1"
+#     no matches for kind "Sensor"      in version "argoproj.io/v1alpha1"
+#   EXPECTED. Install Argo Events via pinned-Helm (chapter §Hands-on).
+#
+# Apply (after Argo Events + Argo Workflows + `kafka/` + the training
+# workflow template):
+#   kubectl apply -f examples/bookstore-platform/ml/argo-events-drift-trigger.yaml
+---
+# EventSource: watch ml.drift topic.
+apiVersion: argoproj.io/v1alpha1
+kind: EventSource
+metadata:
+  name: ml-drift-eventsource
+  namespace: bookstore-platform-ml
+  labels:
+    app.kubernetes.io/part-of: bookstore-platform
+    app.kubernetes.io/component: ml-drift-trigger
+spec:
+  kafka:
+    drift-events:
+      url: bookstore-platform-kafka-kafka-bootstrap.kafka-system.svc.cluster.local:9092
+      topic: ml.drift
+      # `partition` removed — Argo Events with a `consumerGroup` consumes
+      # ALL partitions of the topic (group assignment via the broker's
+      # protocol). A hardcoded partition: "0" would have ignored 2/3 of
+      # the drift events on the 3-partition topic.
+      jsonBody: true
+      consumerGroup:
+        groupName: argo-events-drift
+        oldest: false
+        rebalanceStrategy: range
+---
+# Sensor: on ml.drift event, submit a new recommender-train Workflow.
+apiVersion: argoproj.io/v1alpha1
+kind: Sensor
+metadata:
+  name: ml-drift-sensor
+  namespace: bookstore-platform-ml
+  labels:
+    app.kubernetes.io/part-of: bookstore-platform
+    app.kubernetes.io/component: ml-drift-trigger
+spec:
+  dependencies:
+    - name: drift-event
+      eventSourceName: ml-drift-eventsource
+      eventName: drift-events
+      # The detector publishes JSON like {"feature":"price","ks":0.34,
+      # "p_value":0.01}; fire only when p_value < 0.05.
+      filters:
+        data:
+          - path: body.p_value
+            type: number
+            comparator: "<"
+            value:
+              - "0.05"
+  triggers:
+    - template:
+        name: submit-retrain-workflow
+        argoWorkflow:
+          group: argoproj.io
+          version: v1alpha1
+          resource: workflows
+          operation: submit
+          source:
+            resource:
+              apiVersion: argoproj.io/v1alpha1
+              kind: Workflow
+              metadata:
+                generateName: recommender-train-on-drift-
+                namespace: bookstore-platform-ml
+                labels:
+                  app.kubernetes.io/part-of: bookstore-platform
+                  bookstore-platform.example.com/trigger: drift
+              spec:
+                workflowTemplateRef:
+                  name: recommender-train
+                serviceAccountName: recommender-train
+                arguments:
+                  parameters:
+                    - name: mlflow-tracking-uri
+                      value: "http://mlflow.mlflow.svc.cluster.local:5000"
+                    - name: experiment-name
+                      value: "recommender-drift-retrain"
+                    - name: min-eval-score
+                      value: "0.45"
+          # Map the drift event's payload onto the Workflow parameters via
+          # `parameters[]`. Two examples — production maps the feature
+          # name + KS statistic into a custom param the train.py can use
+          # to bias the training run (e.g. "this feature drifted —
+          # upweight it"). The chapter walks this.
+          parameters:
+            - src:
+                dependencyName: drift-event
+                dataKey: body.feature
+              dest: spec.arguments.parameters.2.value.feature

@@ -1,0 +1,92 @@
+# Bookstore Platform v2 — Part 13 ch.11: TechDocs MkDocs configuration.
+# Defines the platform-wide MkDocs settings + the MkDocs config that
+# every service's docs/ directory inherits via the
+# `INHERIT: ../tech-docs-base.yml` directive.
+#
+# v1 had no TechDocs; v2 makes service docs discoverable per-Component
+# in Backstage. Each service repo's docs/ directory carries an
+# mkdocs.yml that inherits from this base.
+#
+# This file is a ConfigMap shipped to the Backstage namespace; the
+# TechDocs backend reads it; the techdocs-cli (run in CI per repo)
+# also reads it.
+#
+# Apply:
+#   kubectl apply -f examples/bookstore-platform/backstage/tech-docs-config.yaml
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: backstage-techdocs-config
+  namespace: backstage
+  labels:
+    app.kubernetes.io/name: backstage-techdocs-config
+    app.kubernetes.io/instance: backstage-techdocs-config
+    app.kubernetes.io/part-of: bookstore-platform
+    app.kubernetes.io/component: developer-portal-techdocs
+    app.kubernetes.io/version: "1.0.0"
+data:
+  # The MkDocs base config. Every service's mkdocs.yml inherits from
+  # this via `INHERIT: ../tech-docs-base.yml`. Defines the theme,
+  # plugins, and standard markdown extensions.
+  tech-docs-base.yml: |
+    docs_dir: docs
+
+    theme:
+      name: material
+      features:
+        - navigation.sections
+        - navigation.expand
+        - navigation.top
+        - content.code.copy
+      palette:
+        - scheme: default
+          primary: indigo
+          accent: indigo
+          toggle:
+            icon: material/toggle-switch
+            name: Switch to dark mode
+        - scheme: slate
+          primary: indigo
+          accent: indigo
+          toggle:
+            icon: material/toggle-switch-off
+            name: Switch to light mode
+
+    plugins:
+      - search
+      - mermaid2
+      - techdocs-core
+
+    markdown_extensions:
+      - admonition
+      - attr_list
+      - md_in_html
+      - pymdownx.details
+      - pymdownx.superfences:
+          custom_fences:
+            - name: mermaid
+              class: mermaid
+              format: !!python/name:mermaid2.fence_mermaid
+      - pymdownx.tabbed:
+          alternate_style: true
+      - tables
+      - toc:
+          permalink: true
+
+    extra:
+      bookstore_platform: true
+  # The per-service mkdocs.yml template — included in the
+  # scaffolder skeleton for each new service. Each service customises
+  # `site_name` + `nav`; everything else inherits.
+  mkdocs-template.yml: |
+    INHERIT: ../tech-docs-base.yml
+
+    site_name: <SERVICE-NAME>
+    site_description: <ONE-LINE-DESCRIPTION>
+
+    nav:
+      - Home: index.md
+      - Architecture: architecture.md
+      - Runbook: runbook.md
+      - API: api.md

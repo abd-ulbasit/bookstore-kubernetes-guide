@@ -1,0 +1,96 @@
+# Bookstore Platform v2 — Part 13 ch.08: an Argo CD Application that installs
+# MLflow (community-charts/mlflow) as the v2 model registry. MLflow replaces
+# the X3c-era "ConfigMap stamp" registry (the recommender-cm template in
+# ../bookstore/ml/pipeline/register-cm-template.yaml) with the real thing:
+# tracking server + model registry + artifact store.
+#
+# !!! CRD-INTRINSIC DRY-RUN
+#   `Application` is `argoproj.io/v1alpha1` — an Argo CD CRD. WITHOUT Argo CD:
+#     no matches for kind "Application" in version "argoproj.io/v1alpha1"
+#   EXPECTED. ch.13.03 installs Argo CD; this file applies after.
+#
+# Why community-charts/mlflow vs bitnami/mlflow:
+#   - community-charts/mlflow is the actively-maintained Helm chart for the
+#     OSS MLflow tracking server; it ships current chart values (Postgres
+#     backing, S3 artifact store, OIDC auth) and follows MLflow upstream.
+#   - bitnami/mlflow is a packaged variant; works but lags upstream and adds
+#     the Bitnami-shape conventions. Pick community-charts if you want the
+#     upstream-aligned shape; pick bitnami if your org standardises on
+#     Bitnami charts cluster-wide. The chapter picks community-charts and
+#     calls out the trade.
+#
+# Backing services:
+#   - Tracking DB: the per-region CNPG cluster + a `mlflow` logical DB.
+#   - Artifact store: per-region S3 bucket; ESO-injected creds.
+#
+# Apply (after Argo CD + CNPG + S3-credentials ESO):
+#   kubectl apply -f examples/bookstore-platform/ml/mlflow-application.yaml
+---
+apiVersion: argoproj.io/v1alpha1
+kind: Application
+metadata:
+  name: mlflow
+  namespace: argocd
+  labels:
+    app.kubernetes.io/part-of: bookstore-platform
+    bookstore-platform.example.com/component: ml-registry
+  finalizers:
+    - resources-finalizer.argocd.argoproj.io
+spec:
+  project: default
+  source:
+    chart: mlflow
+    repoURL: https://community-charts.github.io/helm-charts
+    # Pinned: production cadence is to bump deliberately, not auto.
+    targetRevision: "0.10.0"
+    helm:
+      values: |
+        backendStore:
+          # Tracking metadata: per-region CNPG `mlflow` logical DB.
+          # Production credentials via ESO; here a placeholder DSN.
+          postgres:
+            enabled: true
+            host: bookstore-platform-cnpg-rw.cnpg-system.svc.cluster.local
+            port: 5432
+            database: mlflow
+            user: mlflow
+            password: REPLACE-ME-VIA-ESO-NOT-IN-SOURCE
+        artifactRoot:
+          # Per-region S3 bucket. Bucket creation lives in the Crossplane
+          # platform stack (provider-aws), not here.
+          s3:
+            enabled: true
+            bucket: bookstore-platform-mlflow-us-east
+            path: ""
+            awsAccessKeyId: REPLACE-ME-VIA-ESO-NOT-IN-SOURCE
+            awsSecretAccessKey: REPLACE-ME-VIA-ESO-NOT-IN-SOURCE
+        serviceMonitor:
+          enabled: true
+        resources:
+          requests:
+            cpu: 100m
+            memory: 256Mi
+          limits:
+            cpu: 500m
+            memory: 512Mi
+        podSecurityContext:
+          runAsNonRoot: true
+          runAsUser: 65532
+          fsGroup: 65532
+          seccompProfile:
+            type: RuntimeDefault
+        securityContext:
+          allowPrivilegeEscalation: false
+          readOnlyRootFilesystem: true
+          capabilities:
+            drop: ["ALL"]
+  destination:
+    server: https://kubernetes.default.svc
+    namespace: mlflow
+  syncPolicy:
+    automated:
+      prune: true
+      selfHeal: true
+    syncOptions:
+      - CreateNamespace=true
+      - ServerSideApply=true

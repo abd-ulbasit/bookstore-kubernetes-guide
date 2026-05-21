@@ -1,0 +1,191 @@
+# Bookstore Platform v2 — Part 13 ch.05: the Debezium Postgres -> Kafka ->
+# Meilisearch sync. Two Strimzi CRs:
+#   1. KafkaConnect      — a Kafka Connect cluster that runs Debezium
+#                          (source connector) + a sink connector for
+#                          Meilisearch.
+#   2. KafkaConnector    — TWO connector instances:
+#                          (a) `books-cdc-source` — Debezium Postgres reading
+#                              the `books` table via logical replication into
+#                              the `books.cdc` topic.
+#                          (b) `books-meilisearch-sink` — a custom sink that
+#                              consumes `books.cdc` and writes to Meilisearch
+#                              `books-<TENANT>` index.
+#
+# !!! CRD-INTRINSIC DRY-RUN
+#   `KafkaConnect` and `KafkaConnector` are Strimzi CRDs
+#   (kafka.strimzi.io/v1beta2). WITHOUT Strimzi installed:
+#     no matches for kind "KafkaConnect" in version "kafka.strimzi.io/v1beta2"
+#   EXPECTED. After kafka/cluster.yaml + kafka/topics.yaml + Strimzi the
+#   operator builds the Connect image (Debezium plugin baked in) and runs
+#   the connectors.
+#
+# Debezium Postgres requires the SOURCE Postgres to have `wal_level = logical`
+# and a replication slot. CNPG (ch.13.03) supports both — set in the Cluster
+# CR's `postgresql.parameters`. The chapter's Production notes flag this.
+#
+# Per-tenant indexing: the sink connector reads each row's `tenant_id`
+# column and writes to `books-<TENANT_ID>` index in Meilisearch. SMT
+# (Single Message Transform) does the routing — no per-tenant connector
+# instances needed.
+#
+# Apply (after kafka/ + Strimzi + CNPG with wal_level=logical):
+#   kubectl apply -f examples/bookstore-platform/search/debezium-connector.yaml
+---
+# A small Connect cluster (1 worker on kind; production tunes to 3+).
+apiVersion: kafka.strimzi.io/v1beta2
+kind: KafkaConnect
+metadata:
+  name: bookstore-platform-connect
+  namespace: kafka-system
+  labels:
+    app.kubernetes.io/part-of: bookstore-platform
+    bookstore-platform.example.com/component: cdc
+  annotations:
+    # Strimzi: build a custom Connect image with the Debezium Postgres plugin
+    # + a Meilisearch sink plugin baked in. The operator builds + pushes to
+    # the in-cluster registry; production typically pre-builds and pins a
+    # registry image instead.
+    strimzi.io/use-connector-resources: "true"
+spec:
+  version: "3.7.0"
+  replicas: 1
+  bootstrapServers: bookstore-platform-kafka-kafka-bootstrap.kafka-system.svc.cluster.local:9092
+  config:
+    group.id: bookstore-platform-connect
+    offset.storage.topic: bookstore-platform-connect-offsets
+    config.storage.topic: bookstore-platform-connect-configs
+    status.storage.topic: bookstore-platform-connect-status
+    # Internal Connect topic replication factor matches the cluster's 3
+    # brokers — durable across one broker loss without re-build.
+    offset.storage.replication.factor: "3"
+    config.storage.replication.factor: "3"
+    status.storage.replication.factor: "3"
+    # JSON converters (no schema registry on kind; production usually adds one).
+    key.converter: org.apache.kafka.connect.json.JsonConverter
+    value.converter: org.apache.kafka.connect.json.JsonConverter
+    key.converter.schemas.enable: "false"
+    value.converter.schemas.enable: "false"
+    # Config Provider — lets connector configs resolve `${file:...}` lookups
+    # against a mounted Secret (the Meilisearch master key). The Connect
+    # cluster reads the value at start; the connector configs below
+    # reference `${file:/opt/kafka/external-configuration/meili/master-key}`
+    # to inject the Authorization header value without baking the key into
+    # the connector spec.
+    config.providers: "file"
+    config.providers.file.class: "org.apache.kafka.common.config.provider.FileConfigProvider"
+  # External configuration: Strimzi mounts the named Secret into the Connect
+  # Pod under `/opt/kafka/external-configuration/<NAME>/<KEY>`. The
+  # FileConfigProvider above resolves connector-level `${file:...}` lookups
+  # against that path. The Secret carries the Meilisearch master key in
+  # production via ESO + Vault.
+  externalConfiguration:
+    volumes:
+      - name: meili
+        secret:
+          secretName: meilisearch-master-key
+  build:
+    # Strimzi builds a Connect image with these plugins. The output registry
+    # is in-cluster (`kind-registry:5000`); production points at the real
+    # registry (ECR / GCR / GHCR).
+    output:
+      type: docker
+      image: kind-registry:5000/bookstore-platform/connect-cdc:1.0.0
+    plugins:
+      - name: debezium-postgres-connector
+        artifacts:
+          - type: tgz
+            url: https://repo1.maven.org/maven2/io/debezium/debezium-connector-postgres/2.6.2.Final/debezium-connector-postgres-2.6.2.Final-plugin.tar.gz
+      # Meilisearch sink: there is no official Strimzi-managed plugin
+      # for Meilisearch yet (Phase 13b). The chapter walks two honest
+      # options: (A) a small Kafka Streams sink built in-house; (B)
+      # an HTTP sink (camel-kafka-connector) that calls Meilisearch's
+      # /indexes/{idx}/documents endpoint. We use (B) — Camel sink is
+      # generic + maintained.
+      - name: camel-http-sink
+        artifacts:
+          - type: tgz
+            url: https://repo.maven.apache.org/maven2/org/apache/camel/kafkaconnector/camel-http-sink-kafka-connector/4.0.0/camel-http-sink-kafka-connector-4.0.0-package.tar.gz
+  resources:
+    requests:
+      cpu: 250m
+      memory: 512Mi
+    limits:
+      cpu: "1"
+      memory: 1Gi
+  template:
+    pod:
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 1000
+        fsGroup: 1000
+        seccompProfile:
+          type: RuntimeDefault
+---
+# Connector A: Debezium Postgres source -> books.cdc topic.
+apiVersion: kafka.strimzi.io/v1beta2
+kind: KafkaConnector
+metadata:
+  name: books-cdc-source
+  namespace: kafka-system
+  labels:
+    app.kubernetes.io/part-of: bookstore-platform
+    strimzi.io/cluster: bookstore-platform-connect
+spec:
+  class: io.debezium.connector.postgresql.PostgresConnector
+  tasksMax: 1
+  config:
+    # CNPG primary in the writer region. Placeholder for the in-cluster
+    # service name; the BookstoreTenant Composition (ch.13.02) stamps
+    # per-tenant logical DBs into this CNPG instance.
+    database.hostname: bookstore-platform-cnpg-rw.cnpg-system.svc.cluster.local
+    database.port: "5432"
+    database.user: debezium
+    # Production: ESO-injected from Vault; placeholder here.
+    database.password: "REPLACE-ME-VIA-ESO-NOT-IN-SOURCE"
+    database.dbname: bookstore_platform
+    database.server.name: bookstore-platform
+    # Logical replication slot name (Postgres-side resource; pre-create
+    # via CNPG's `managed.replicationSlots` or a small initdb script).
+    slot.name: debezium_books
+    publication.name: debezium_books
+    table.include.list: public.books
+    # SMT: route each record to `books-cdc` (single topic across tenants;
+    # the sink branches on tenant_id at write time).
+    transforms: unwrap
+    transforms.unwrap.type: io.debezium.transforms.ExtractNewRecordState
+    transforms.unwrap.drop.tombstones: "false"
+    # At-least-once delivery; idempotent writes downstream via doc primary key.
+    snapshot.mode: initial
+    topic.prefix: bookstore-platform
+---
+# Connector B: Camel HTTP sink consuming books.cdc -> Meilisearch index.
+apiVersion: kafka.strimzi.io/v1beta2
+kind: KafkaConnector
+metadata:
+  name: books-meilisearch-sink
+  namespace: kafka-system
+  labels:
+    app.kubernetes.io/part-of: bookstore-platform
+    strimzi.io/cluster: bookstore-platform-connect
+spec:
+  class: org.apache.camel.kafkaconnector.httpsink.CamelHttpsinkSinkConnector
+  tasksMax: 1
+  config:
+    topics: bookstore-platform.public.books
+    # Meilisearch endpoint. Per-tenant routing handled by a Single Message
+    # Transform that extracts `tenant_id` and rewrites the URL to
+    # /indexes/books-<TENANT_ID>/documents at runtime. The chapter sketches
+    # the SMT in §How it works under the hood.
+    camel.sink.url: "http://meilisearch.bookstore-platform-search.svc.cluster.local:7700/indexes/books-acme-books/documents"
+    camel.sink.httpMethod: POST
+    # Authorization header is REQUIRED — Meilisearch runs with
+    # MEILI_MASTER_KEY + `--env production`, so every write must carry
+    # `Authorization: Bearer <MASTER_KEY>`. The key value is resolved at
+    # runtime via Kafka Connect's FileConfigProvider against the Secret
+    # mounted by `externalConfiguration` on the KafkaConnect cluster
+    # (`/opt/kafka/external-configuration/meili/master-key`). Without
+    # this header every sink write returns 401 and the index stays empty.
+    camel.component.http.httpClientConfigurer: "header=Content-Type=application/json&header=Authorization=Bearer ${file:/opt/kafka/external-configuration/meili/master-key:master-key}"
+    key.converter: org.apache.kafka.connect.json.JsonConverter
+    value.converter: org.apache.kafka.connect.json.JsonConverter
+    camel.component.http.connectionRequestTimeout: 5000

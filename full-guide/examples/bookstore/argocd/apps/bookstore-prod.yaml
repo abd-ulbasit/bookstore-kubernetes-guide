@@ -1,0 +1,66 @@
+# Bookstore — Part 07 ch.04: the PRODUCTION environment Application.
+#
+# Child of the App-of-Apps root. Points Argo CD at the REAL 6b prod kustomize
+# overlay — the one CI's `bump-manifests` job (ch.03) writes signed image
+# DIGESTS into. The CI→GitOps loop closes HERE: CI commits a digest to
+# overlays/prod/kustomization.yaml → Argo CD detects the commit → syncs prod.
+#
+# overlays/prod → 48 objects (base 49 − the demo Secret, which prod
+# $patch:deletes; a real Secret of the same name is supplied out-of-band by
+# External Secrets / Sealed Secrets / Vault — see ch.04 Production notes and
+# the prod overlay header).
+#
+# CRD-INTRINSIC NOTE: `Application` = `argoproj.io/v1alpha1` (Argo CD CRD).
+# Without Argo CD installed a client dry-run prints `no matches for kind
+# "Application"` — EXPECTED, schema-correct (precedent: raw 18-/51-/70-/80-/
+# 83-, the Helm CRD toggles, the Kustomize components).
+#
+# PLACEHOLDER `repoURL`: generic `https://github.com/your-org/bookstore`.
+apiVersion: argoproj.io/v1alpha1
+kind: Application
+metadata:
+  name: bookstore-prod
+  namespace: argocd
+  finalizers:
+    - resources-finalizer.argocd.argoproj.io
+spec:
+  project: bookstore
+  source:
+    repoURL: https://github.com/your-org/bookstore.git   # PLACEHOLDER — replace your-org
+    # Prod tracks a release ref. CI's bump-manifests commits the signed
+    # digests onto this ref (ch.03); Argo CD reconciles. A stricter setup
+    # points prod at a separate config repo / protected branch the app repo
+    # cannot push to directly (ch.03/ch.04 Production notes).
+    targetRevision: main
+    path: examples/bookstore/kustomize/overlays/prod      # real, verified 6b overlay
+  destination:
+    server: https://kubernetes.default.svc
+    namespace: bookstore
+  syncPolicy:
+    # NOTE: prod automated sync is shown for the teaching loop (CI→Argo). Many
+    # orgs run prod with `automated` OMITTED (manual `argocd app sync` after a
+    # human approves the diff) — Argo still shows drift/OutOfSync, a human
+    # promotes. ch.04 Production notes discuss this; the field is here so the
+    # CI→GitOps demo is end-to-end.
+    automated:
+      prune: true
+      selfHeal: true
+    syncOptions:
+      - CreateNamespace=false      # base owns the PSA-restricted Namespace
+      - ApplyOutOfSyncOnly=true
+      - PruneLast=true             # prune only AFTER the new revision is healthy
+    retry:
+      limit: 5
+      backoff: { duration: 5s, factor: 2, maxDuration: 3m }
+  # REQUIRED: prod keeps the catalog HPA (82-, minReplicas 4 / maxReplicas 12
+  # via the prod overlay JSON6902 patch). The HPA owns `.spec.replicas` at
+  # runtime; Git states a fixed count. ignoreDifferences on that one field
+  # stops Argo's selfHeal from fighting the autoscaler (the "who owns
+  # replicas" rule — analog of KEDA-owns-replicas, Part 06 ch.04; and of
+  # ch.05's Rollout↔HPA interaction).
+  ignoreDifferences:
+    - group: apps
+      kind: Deployment
+      name: catalog
+      jsonPointers:
+        - /spec/replicas

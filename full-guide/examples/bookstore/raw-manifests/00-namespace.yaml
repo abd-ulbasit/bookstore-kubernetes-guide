@@ -1,0 +1,84 @@
+# Bookstore — Part 01 ch.03 "Resources and QoS": the application boundary.
+#
+# Introduces the `bookstore` Namespace plus a ResourceQuota (caps the namespace
+# TOTAL) and a LimitRange (per-container defaults + min/max). From ch.04 onward
+# every Bookstore workload (catalog, storefront, postgres, jobs, ...) is created
+# in this namespace. The Part 00 / ch.01-02 single-Pod files are kept WITHOUT a
+# namespace on purpose — they are frozen object-model teaching snapshots in
+# `default` and are not migrated.
+#
+# This file is numbered 00- so a combined dry-run/apply of the directory
+# creates the Namespace + governance objects before the namespaced workloads.
+#
+# Part 05 ch.02 (Pod Security) increment — the three PodSecurity labels below.
+# Pod Security Admission is a BUILT-IN admission controller (PodSecurityPolicy
+# was REMOVED in v1.25). It reads namespace labels and applies one of the Pod
+# Security Standards (privileged | baseline | restricted) in three modes:
+#   enforce — reject Pods that violate the level (hard gate)
+#   audit   — allow, but annotate the audit log with the violation
+#   warn    — allow, but return a client-visible warning (great in CI / kubectl)
+# `<mode>-version: latest` pins to the newest ruleset (pin to e.g. v1.30 if you
+# need the policy frozen across upgrades). We set `restricted` for ALL THREE
+# modes: every Bookstore workload (10-/11-/14-/20-) was given a
+# `restricted`-satisfying securityContext in Part 05 ch.02, so enforce:
+# restricted does NOT lock out our own pods (verified in ch.02 with a
+# server-side dry-run — no PodSecurity warnings). audit+warn at the same level
+# surface any future regression immediately instead of silently.
+#
+# Apply (re-apply after any kind delete/create so the labels exist before
+# workloads are admitted):
+#   kubectl apply -f examples/bookstore/raw-manifests/00-namespace.yaml
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: bookstore
+  labels:
+    app.kubernetes.io/part-of: bookstore
+    # --- Part 05 ch.02: Pod Security Admission — enforce the `restricted`
+    # standard, and also audit+warn at the same level (defense in depth).
+    pod-security.kubernetes.io/enforce: restricted
+    pod-security.kubernetes.io/enforce-version: latest
+    pod-security.kubernetes.io/audit: restricted
+    pod-security.kubernetes.io/audit-version: latest
+    pod-security.kubernetes.io/warn: restricted
+    pod-security.kubernetes.io/warn-version: latest
+---
+# Caps the SUM of requests/limits across all Pods in the namespace. With these
+# requests.* / limits.* keys present, the API server requires every container
+# to declare the matching request/limit (the LimitRange below supplies sane
+# defaults so that requirement is ergonomic, not a wall of rejections).
+apiVersion: v1
+kind: ResourceQuota
+metadata:
+  name: bookstore-quota
+  namespace: bookstore
+spec:
+  hard:
+    requests.cpu: "2"            # Σ container cpu requests ≤ 2 cores
+    requests.memory: 2Gi
+    limits.cpu: "4"
+    limits.memory: 4Gi
+    pods: "30"
+---
+# Per-CONTAINER governance: inject defaults when a container omits
+# requests/limits, and reject containers outside [min, max].
+apiVersion: v1
+kind: LimitRange
+metadata:
+  name: bookstore-limits
+  namespace: bookstore
+spec:
+  limits:
+    - type: Container
+      default:                   # used as `limits` if the container omits them
+        cpu: 500m
+        memory: 256Mi
+      defaultRequest:            # used as `requests` if the container omits them
+        cpu: 100m
+        memory: 128Mi
+      max:
+        cpu: "2"
+        memory: 1Gi
+      min:
+        cpu: 10m
+        memory: 16Mi

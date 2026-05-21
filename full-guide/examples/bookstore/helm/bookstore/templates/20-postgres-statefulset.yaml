@@ -1,0 +1,108 @@
+{{/*
+  postgres: the REQUIRED headless Service + the StatefulSet (raw-manifests
+  20-postgres-statefulset.yaml). Stock postgres:16 made `restricted` AND
+  bootable: run directly as non-root UID/GID 999 with fsGroup 999 so initdb
+  can write PGDATA without the image's root→gosu step (uid999RW profile, NO
+  read-only root FS — postgres writes sockets/locks outside PGDATA).
+  Credentials via envFrom the db-credentials Secret. Part 04: data tier
+  priority + tolerate the dedicated-DB-node taint + prefer that node.
+*/}}
+{{- if .Values.postgres.enabled }}
+{{- $pg := .Values.postgres }}
+apiVersion: v1
+kind: Service
+metadata:
+  name: postgres                  # MUST equal StatefulSet.spec.serviceName
+  namespace: {{ include "bookstore.namespace" . }}
+  labels:
+    {{- include "bookstore.labels" (dict "ctx" . "app" "postgres") | nindent 4 }}
+spec:
+  clusterIP: None                 # HEADLESS → per-Pod DNS, no VIP
+  selector:
+    app: postgres
+  ports:
+    - name: postgres
+      port: {{ $pg.service.port }}
+      targetPort: {{ $pg.service.port }}
+---
+apiVersion: apps/v1
+kind: StatefulSet
+metadata:
+  name: postgres
+  namespace: {{ include "bookstore.namespace" . }}
+  labels:
+    {{- include "bookstore.labels" (dict "ctx" . "app" "postgres") | nindent 4 }}
+spec:
+  serviceName: postgres
+  replicas: {{ $pg.replicaCount }}
+  podManagementPolicy: OrderedReady
+  selector:
+    matchLabels:
+      app: postgres
+  updateStrategy:
+    type: RollingUpdate
+    rollingUpdate:
+      partition: 0
+  template:
+    metadata:
+      labels:
+        {{- include "bookstore.labels" (dict "ctx" . "app" "postgres") | nindent 8 }}
+    spec:
+      serviceAccountName: {{ $pg.serviceAccountName }}
+      automountServiceAccountToken: false
+      securityContext:
+        {{- include "bookstore.podSecurityContext" (dict "ctx" . "profile" "uid999RW") | nindent 8 }}
+      priorityClassName: {{ $pg.priorityClassName }}
+      {{- with $pg.tolerations }}
+      tolerations:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- include "bookstore.affinity" (dict "w" $pg "app" "postgres") | nindent 6 }}
+      {{- with $pg.nodeSelector }}
+      nodeSelector:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      terminationGracePeriodSeconds: {{ $pg.terminationGracePeriodSeconds }}
+      containers:
+        - name: postgres
+          image: "{{ $pg.image.repository }}:{{ $pg.image.tag }}"
+          imagePullPolicy: {{ $pg.image.pullPolicy }}
+          securityContext:
+            {{- include "bookstore.containerSecurityContext" (dict "ctx" . "profile" "uid999RW") | nindent 12 }}
+          ports:
+            - name: postgres
+              containerPort: 5432
+          envFrom:
+            - secretRef:
+                name: {{ .Values.dbCredentials.secretName }}
+          env:
+            - name: PGDATA
+              value: {{ $pg.pgData | quote }}
+          readinessProbe:
+            exec:
+              command: ["pg_isready", "-U", {{ .Values.dbCredentials.POSTGRES_USER | quote }}, "-d", {{ .Values.dbCredentials.POSTGRES_DB | quote }}]
+            initialDelaySeconds: 10
+            periodSeconds: 5
+          livenessProbe:
+            exec:
+              command: ["pg_isready", "-U", {{ .Values.dbCredentials.POSTGRES_USER | quote }}, "-d", {{ .Values.dbCredentials.POSTGRES_DB | quote }}]
+            initialDelaySeconds: 30
+            periodSeconds: 10
+          resources:
+            {{- toYaml $pg.resources | nindent 12 }}
+          volumeMounts:
+            - name: data
+              mountPath: /var/lib/postgresql/data
+  volumeClaimTemplates:
+    - metadata:
+        name: data
+      spec:
+        accessModes:
+          {{- toYaml $pg.persistence.accessModes | nindent 10 }}
+        resources:
+          requests:
+            storage: {{ $pg.persistence.size }}
+        {{- if $pg.persistence.storageClassName }}
+        storageClassName: {{ $pg.persistence.storageClassName }}
+        {{- end }}
+{{- end }}

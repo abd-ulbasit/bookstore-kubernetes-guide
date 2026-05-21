@@ -1,0 +1,57 @@
+# Bookstore — Part 11 ch.04 "Service mesh": STRICT mTLS for the whole
+# `bookstore` namespace via an Istio PeerAuthentication.
+#
+# WHAT THIS DOES
+#   PeerAuthentication mode: STRICT means every Pod in `bookstore` will ONLY
+#   accept mutually-authenticated TLS connections (SPIFFE workload identity —
+#   spiffe://<trust-domain>/ns/bookstore/sa/<serviceaccount>, issued and
+#   rotated by istiod). Plaintext to a mesh Pod is REFUSED. The application
+#   code (catalog/orders/storefront — app/*/main.go) is UNCHANGED: identity,
+#   the certificate, encryption, and rotation are the mesh's job, transparently
+#   (ambient: enforced by the per-node ztunnel; sidecar: by istio-proxy).
+#
+#   This is east-west (service-to-service) encryption + identity. It is
+#   ORTHOGONAL to the Bookstore's NetworkPolicy (60-networkpolicy.yaml):
+#   NetworkPolicy is L3/L4 allow/deny on the CNI; mTLS is cryptographic
+#   identity. Defense in depth — keep BOTH (Part 02 ch.06 + this).
+#
+# ROLLOUT SAFETY (production note, encoded here):
+#   Going straight to STRICT namespace-wide breaks any not-yet-meshed client.
+#   The safe path is PERMISSIVE first (accept BOTH mTLS and plaintext while you
+#   migrate), confirm all traffic is mTLS in telemetry, THEN flip to STRICT —
+#   the exact analog of the guide's Audit->Enforce (Part 05 ch.03) and
+#   Ignore->Fail webhook (Part 11 ch.01) lifecycles. PERMISSIVE shown below,
+#   commented, as the first step.
+#
+# !!! CRD-INTRINSIC DRY-RUN (identical precedent to 18-/51-/70-/83-/argocd) !!!
+#   `PeerAuthentication` is an Istio CRD (security.istio.io/v1). On a cluster
+#   WITHOUT Istio installed, a client dry-run prints:
+#     no matches for kind "PeerAuthentication" in version "security.istio.io/v1"
+#   That is EXPECTED and schema-correct — the Istio CRDs/control plane must be
+#   installed first (chapter Hands-on step 1, pinned Helm `istio` charts). A
+#   whole-dir dry-run prints this for the CRD-backed files only and continues;
+#   built-in objects still validate. Schema verified against Istio
+#   security.istio.io/v1 PeerAuthentication.
+#
+# Requires: Istio (ambient OR sidecar profile) installed; the `bookstore`
+#   namespace + workloads present; namespace enrolled (ambient: 00-, sidecar:
+#   istio-injection / pod template in 10-sidecar-mode-podtemplate.yaml).
+# Apply:
+#   kubectl apply -f examples/bookstore/mesh/10-peerauthentication-strict-mtls.yaml
+#   kubectl get peerauthentication -n bookstore
+apiVersion: security.istio.io/v1
+kind: PeerAuthentication
+metadata:
+  name: bookstore-strict-mtls
+  namespace: bookstore                # namespace-scoped: applies to ALL Pods here
+  labels:
+    app.kubernetes.io/part-of: bookstore
+spec:
+  # No `selector:` => the policy is NAMESPACE-WIDE (every workload in
+  # `bookstore`). Add `selector.matchLabels` to scope to one workload.
+  mtls:
+    mode: STRICT                      # accept ONLY mutual TLS; refuse plaintext
+    # --- SAFE ROLLOUT: start here, then flip to STRICT ---------------------
+    # mode: PERMISSIVE                # accept BOTH mTLS and plaintext while
+    #                                 # migrating; verify 100% mTLS in
+    #                                 # telemetry BEFORE setting STRICT.

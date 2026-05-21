@@ -1,0 +1,69 @@
+# Bookstore Platform v2 — Part 13 ch.02: Argo CD Application that installs
+# Crossplane via the pinned crossplane-stable Helm chart into the
+# `crossplane-system` namespace.
+#
+# Crossplane's Helm chart pins compatible versions of its core controller;
+# provider-kubernetes and function-patch-and-transform are installed as
+# Crossplane CRs AFTER Crossplane itself is running. We do NOT bundle them
+# into this Application — that creates a chicken-and-egg (the Provider /
+# Function CRDs only exist once Crossplane is up). The README in
+# `../crossplane/` walks the post-install steps.
+#
+# !!! CRD-INTRINSIC DRY-RUN
+#   `Application` is `argoproj.io/v1alpha1` — an Argo CD CRD. WITHOUT Argo
+#   CD installed, a client dry-run prints:
+#     no matches for kind "Application" in version "argoproj.io/v1alpha1"
+#   EXPECTED.
+#
+# Apply (after Argo CD installed):
+#   kubectl apply -f examples/bookstore-platform/argocd/application-crossplane.yaml
+apiVersion: argoproj.io/v1alpha1
+kind: Application
+metadata:
+  name: crossplane
+  namespace: argocd
+  labels:
+    app.kubernetes.io/part-of: bookstore-platform
+  finalizers:
+    - resources-finalizer.argocd.argoproj.io
+spec:
+  project: default
+  source:
+    repoURL: "https://charts.crossplane.io/stable"
+    chart: crossplane
+    # Pinned. Bump deliberately; never `latest`.
+    targetRevision: "1.17.0"
+    helm:
+      releaseName: crossplane
+      values: |
+        # Crossplane's controller securityContext is restricted-compliant by
+        # default in the upstream chart. Spell it out for the audit trail.
+        securityContextCrossplane:
+          runAsNonRoot: true
+          runAsUser: 65532
+          allowPrivilegeEscalation: false
+          readOnlyRootFilesystem: true
+          capabilities:
+            drop: ["ALL"]
+          seccompProfile:
+            type: RuntimeDefault
+        # Resource defaults — kind-friendly. Production tightens.
+        resourcesCrossplane:
+          requests:
+            cpu: 100m
+            memory: 256Mi
+          limits:
+            cpu: "1"
+            memory: 512Mi
+        metrics:
+          enabled: true
+  destination:
+    server: https://kubernetes.default.svc
+    namespace: crossplane-system
+  syncPolicy:
+    automated:
+      prune: false
+      selfHeal: true
+    syncOptions:
+      - CreateNamespace=true
+      - ServerSideApply=true

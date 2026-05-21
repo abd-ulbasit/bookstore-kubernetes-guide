@@ -1,0 +1,62 @@
+# atlantis.yaml.example — sample Atlantis configuration with drift detection.
+#
+# Atlantis is a self-hosted Terraform automation server. It listens to GitHub
+# / GitLab webhooks and runs `terraform plan` / `terraform apply` per pull
+# request, with comment-driven flow ("/atlantis plan", "/atlantis apply").
+#
+# For drift detection, the recommended pattern is a cron-driven plan run that
+# files an issue if the plan produces a non-empty diff. Atlantis itself does
+# not run cron jobs — you wire it via an external scheduler (a Kubernetes
+# CronJob, a GitHub Actions cron workflow, or AWS EventBridge).
+#
+# This file is just the Atlantis side of the wiring: the project config + the
+# workflow that the cron-triggered call invokes.
+#
+# Copy this to atlantis.yaml at the repo root (NOT in this subdirectory).
+
+version: 3
+
+# Project = one Terraform working directory + one state file.
+projects:
+  - name: bookstore-platform
+    dir: examples/bookstore-platform/terraform
+    workspace: default
+    terraform_version: v1.10.5
+    autoplan:
+      enabled: true
+      when_modified:
+        - '*.tf'
+        - '**/*.tf'
+        - '*.tfvars'
+    workflow: drift-aware
+
+# Workflow = the recipe of plan/apply steps.
+workflows:
+  drift-aware:
+    plan:
+      steps:
+        - init:
+            extra_args: ['-input=false']
+        - plan:
+            extra_args:
+              - '-detailed-exitcode'
+              - '-input=false'
+              - '-no-color'
+
+    apply:
+      steps:
+        - apply:
+            extra_args: ['-input=false', '-auto-approve']
+
+# How to invoke from an external cron:
+#
+#   curl -XPOST https://atlantis.your-org.com/events \
+#     -H 'X-Github-Event: workflow_dispatch' \
+#     -H 'Authorization: Bearer <atlantis-secret>' \
+#     -d '{"action":"plan","project":"bookstore-platform"}'
+#
+# Atlantis runs the plan. If exit code is 2 (drift), it posts a comment to
+# the most recent PR — or, if you wire it that way, files a new issue.
+#
+# Atlantis is one option. The GitHub Actions cron approach in nightly-drift.yml
+# is the simpler one for most teams. Pick whichever you're already using.

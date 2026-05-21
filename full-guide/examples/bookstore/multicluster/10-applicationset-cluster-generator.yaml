@@ -1,0 +1,89 @@
+# Bookstore — Part 11 ch.06 "Multi-cluster & fleet": an Argo CD ApplicationSet
+# with a CLUSTER GENERATOR that delivers the Bookstore to EVERY registered
+# cluster from ONE object. This is the fleet-scale version of the Part 07
+# ch.04 App-of-Apps (one root → N hand-written Applications): here ONE
+# ApplicationSet + one template → N AUTO-GENERATED Applications, one per
+# cluster Argo CD knows about.
+#
+# BUILDS ON Part 07 ch.04 (does NOT re-teach Argo CD basics)
+#   Part 07 ch.04 covered Application/AppProject/sync/drift/self-heal and the
+#   App-of-Apps. This file assumes all of that. The NEW idea is the
+#   *generator*: a controller that templates Applications from a data source.
+#   The `clusters` generator's data source is the set of cluster Secrets Argo
+#   CD stores when you `argocd cluster add` (label argocd.argoproj.io/secret-
+#   type=cluster). One Application is generated per matching cluster.
+#
+# !!! CRD-INTRINSIC DRY-RUN (identical precedent to argocd/ + 18-/51-/70-/83-)
+#   `ApplicationSet` is `argoproj.io/v1alpha1` (the Argo CD ApplicationSet
+#   controller CRD). WITHOUT Argo CD (+ the ApplicationSet controller, bundled
+#   with the argo-cd Helm chart) installed, a client dry-run prints:
+#     no matches for kind "ApplicationSet" in version "argoproj.io/v1alpha1"
+#   EXPECTED, schema-correct — same precedent as examples/bookstore/argocd/
+#   *.yaml (Part 07 ch.04). Whole-dir dry-run prints this for CRD-backed files
+#   only and continues. Schema verified against the Argo CD ApplicationSet
+#   argoproj.io/v1alpha1 spec (clusters generator).
+#
+# PLACEHOLDER: `repoURL` is the generic placeholder
+# https://github.com/your-org/bookstore — replace `your-org` with your fork
+# (same convention as examples/bookstore/argocd/apps/*.yaml). The PATH points
+# at the REAL, verified per-env overlays in this repo.
+#
+# PER-CLUSTER VALUE: the generator exposes per-cluster fields ({{name}},
+# {{server}}, and any labels you set on the cluster Secret, e.g.
+# {{metadata.labels.env}}). Below, the cluster's `env` label selects which
+# REAL kustomize overlay it gets — demonstrating a per-cluster overlay value
+# WITHOUT hand-writing an Application per cluster.
+#
+# Requires: Argo CD installed (Part 07 ch.04 Hands-on step 1, pinned Helm);
+#   ≥1 cluster registered with `argocd cluster add` and labelled with `env`;
+#   the `bookstore` AppProject (examples/bookstore/argocd/00-appproject.yaml).
+# Apply:
+#   kubectl apply -n argocd -f examples/bookstore/multicluster/10-applicationset-cluster-generator.yaml
+#   kubectl get applicationset,applications -n argocd
+apiVersion: argoproj.io/v1alpha1
+kind: ApplicationSet
+metadata:
+  name: bookstore-fleet
+  namespace: argocd
+  labels:
+    app.kubernetes.io/part-of: bookstore
+spec:
+  goTemplate: true
+  goTemplateOptions: ["missingkey=error"]
+  generators:
+    # CLUSTER generator: one set of params per cluster Argo CD has registered
+    # (each `argocd cluster add` writes a Secret labelled
+    # argocd.argoproj.io/secret-type=cluster). `selector` narrows to clusters
+    # carrying the `env` label so only intended fleet members are templated.
+    - clusters:
+        selector:
+          matchLabels:
+            bookstore.example.com/fleet: "true"
+  template:
+    metadata:
+      # One Application per cluster: bookstore-<clustername>.
+      name: 'bookstore-{{.name}}'
+      labels:
+        app.kubernetes.io/part-of: bookstore
+    spec:
+      project: bookstore                 # the Part 07 ch.04 AppProject guardrail
+      source:
+        repoURL: https://github.com/your-org/bookstore.git   # PLACEHOLDER — replace your-org
+        targetRevision: main
+        # PER-CLUSTER OVERLAY: the cluster Secret's `env` label
+        # (dev|staging|prod) picks the REAL 6b overlay. Same overlays Part 07
+        # ch.04 reconciles; here selected per cluster, not per hand-written App.
+        path: 'examples/bookstore/kustomize/overlays/{{.metadata.labels.env}}'
+      destination:
+        server: '{{.server}}'            # the generated target cluster
+        namespace: bookstore
+      syncPolicy:
+        automated:
+          prune: true
+          selfHeal: true
+        syncOptions:
+          - CreateNamespace=false        # the kustomize BASE owns the PSA ns
+                                         # (Part 07 ch.04 — identical reason)
+        retry:
+          limit: 5
+          backoff: { duration: 5s, factor: 2, maxDuration: 3m }

@@ -1,0 +1,73 @@
+{{/*
+  storefront Deployment (raw-manifests 11-storefront-deploy.yaml). nginx
+  serving the static UI, purpose-built UNPRIVILEGED (listens :8080, pid +
+  *_temp_path under /tmp). Full PSA `restricted` storefront profile (UID 101 +
+  read-only root FS) + an emptyDir at /tmp (nginx's only writable need). No
+  startupProbe by design (static nginx is ready in <1s). Part 04 scheduling
+  layer: hard topology spread + preferred pod anti-affinity, critical tier.
+*/}}
+{{- if .Values.storefront.enabled }}
+{{- $s := .Values.storefront }}
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: storefront
+  namespace: {{ include "bookstore.namespace" . }}
+  labels:
+    {{- include "bookstore.labels" (dict "ctx" . "app" "storefront") | nindent 4 }}
+spec:
+  replicas: {{ $s.replicaCount }}
+  revisionHistoryLimit: {{ $s.revisionHistoryLimit }}
+  selector:
+    matchLabels:
+      app: storefront
+  strategy:
+    type: RollingUpdate
+    rollingUpdate:
+      maxSurge: 1
+      maxUnavailable: 0
+  template:
+    metadata:
+      labels:
+        {{- include "bookstore.labels" (dict "ctx" . "app" "storefront" "component" "frontend") | nindent 8 }}
+    spec:
+      serviceAccountName: {{ $s.serviceAccountName }}
+      automountServiceAccountToken: false
+      securityContext:
+        {{- include "bookstore.podSecurityContext" (dict "ctx" . "profile" "storefront") | nindent 8 }}
+      priorityClassName: {{ $s.priorityClassName }}
+      {{- include "bookstore.topologySpread" (dict "w" $s "app" "storefront") | nindent 6 }}
+      {{- include "bookstore.affinity" (dict "w" $s "app" "storefront") | nindent 6 }}
+      {{- with $s.nodeSelector }}
+      nodeSelector:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with $s.tolerations }}
+      tolerations:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      containers:
+        - name: storefront
+          image: "{{ $s.image.repository }}:{{ $s.image.tag }}"
+          imagePullPolicy: {{ $s.image.pullPolicy }}
+          securityContext:
+            {{- include "bookstore.containerSecurityContext" (dict "ctx" . "profile" "storefront") | nindent 12 }}
+          ports:
+            - name: http
+              containerPort: 8080
+          readinessProbe:
+            httpGet: { path: /healthz, port: http }
+            periodSeconds: 5
+          livenessProbe:
+            httpGet: { path: /healthz, port: http }
+            periodSeconds: 10
+          resources:
+            {{- toYaml $s.resources | nindent 12 }}
+          volumeMounts:
+            - name: tmp
+              mountPath: /tmp
+      volumes:
+        - name: tmp
+          emptyDir:
+            sizeLimit: 64Mi
+{{- end }}

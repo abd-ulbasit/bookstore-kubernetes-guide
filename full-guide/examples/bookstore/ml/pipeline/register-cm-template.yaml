@@ -1,0 +1,54 @@
+# Bookstore — Part 12 ch.07 "ML pipelines and workflows": the ConfigMap
+# the WorkflowTemplate's `register` step would create at runtime.
+#
+# THIS FILE IS ILLUSTRATIVE / DOCUMENTATION. The real registry stamp is
+# written DYNAMICALLY by `recommender-workflow.yaml`'s `register-step`
+# (via `kubectl create configmap … --dry-run=client -o yaml | kubectl
+# apply -f -`); the runtime name is `recommender-model-registry-<workflow>`
+# so each pipeline run produces its OWN stamp without overwriting prior
+# ones. This file is the *template shape* — the keys + label schema the
+# register step writes — so a reader can `kubectl apply -f` it to see one
+# example object without running the pipeline. The placeholder values are
+# clearly marked.
+#
+# BUILT-IN OBJECT (v1 ConfigMap). Dry-runs cleanly anywhere:
+#   kubectl apply --dry-run=client -f \
+#     examples/bookstore/ml/pipeline/register-cm-template.yaml
+#
+# HONESTLY: a ConfigMap is the KIND-RUNNABLE PROXY for a real model
+# registry. In prod the `register` step posts to MLflow / KFP Model
+# Registry / an OCI artifact registry — see Part 12 ch.07 + ch.08.
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  # Real registry stamps from the WorkflowTemplate get a per-workflow suffix
+  # (`recommender-model-registry-<workflow-name>`). This illustrative one
+  # uses a fixed `-example` suffix so it's clear this is documentation.
+  name: recommender-model-registry-example
+  namespace: bookstore-ml
+  labels:
+    app.kubernetes.io/part-of: bookstore-ml
+    app.kubernetes.io/component: recommender-model-registry
+    ml.bookstore/score: "0.412"      # populated dynamically at runtime
+data:
+  # The model artifact's URI. On kind the train job writes to PVC
+  # `recommender-model`; in prod swap for s3://, gs://, oci://, or an
+  # MLflow `models:/<name>/<version>` URI.
+  model_uri: "pvc://recommender-model/model.joblib"
+  # The eval step's score (the gate metric — avg top-1 cosine over the
+  # synthetic dataset). In prod replace with whatever offline metric the
+  # promotion policy cares about (NDCG@k, CTR uplift on shadow traffic, …).
+  score: "0.412"
+  # When the model was registered. ISO 8601 UTC. Populated by the step.
+  registered_at: "2026-05-19T02:00:00Z"
+  # The Argo Workflows run that produced this stamp. Click-through to
+  # logs + the Workflow UI from here.
+  workflow: "recommender-pipeline-abc12"
+  # Lineage: the dataset URI consumed by the train step. On kind the train
+  # job synthesises from N_BOOKS/N_CUSTOMERS/N_ORDERS into the same PVC;
+  # in prod this is an s3://, gs://, or `dvc://` URI to a versioned dataset.
+  dataset_uri: "pvc://recommender-model/dataset/"
+  # Lineage: the image SHA of the train step (= the pinned code SHA). The
+  # placeholder is the dev tag — in prod pin to `@sha256:<digest>` from your
+  # registry; the Workflow parameter `image-sha` propagates this stamp.
+  image_sha: "bookstore/recommender-train:dev"

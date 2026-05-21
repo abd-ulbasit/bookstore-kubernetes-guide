@@ -1,0 +1,86 @@
+# Bookstore Platform v2 — orders service Deployment (stub)
+# Referenced in Parts 13/14/15. PSA-restricted compliant.
+#
+# Apply:
+#   kubectl apply -f examples/bookstore-platform/app/orders/deployment.yaml
+---
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: orders
+  namespace: bookstore-platform-orders
+  labels:
+    app.kubernetes.io/name: orders
+    app.kubernetes.io/part-of: bookstore-platform
+    app.kubernetes.io/component: orders
+automountServiceAccountToken: false
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: orders
+  namespace: bookstore-platform-orders
+  labels:
+    app: orders
+    app.kubernetes.io/name: orders
+    app.kubernetes.io/instance: orders-dev
+    app.kubernetes.io/part-of: bookstore-platform
+    app.kubernetes.io/component: orders
+    app.kubernetes.io/version: dev
+spec:
+  replicas: 2
+  selector:
+    matchLabels:
+      app: orders
+  template:
+    metadata:
+      labels:
+        app: orders
+        app.kubernetes.io/name: orders
+        app.kubernetes.io/part-of: bookstore-platform
+    spec:
+      serviceAccountName: orders
+      automountServiceAccountToken: false
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 65532
+        runAsGroup: 65532
+        fsGroup: 65532
+        seccompProfile:
+          type: RuntimeDefault
+      containers:
+        - name: orders
+          image: bookstore/orders:dev
+          imagePullPolicy: IfNotPresent
+          env:
+            - { name: PORT, value: "8080" }
+          ports:
+            - { containerPort: 8080, name: http }
+          resources:
+            requests:
+              cpu: 25m
+              memory: 32Mi
+            limits:
+              cpu: 100m
+              memory: 64Mi
+          livenessProbe:
+            httpGet: { path: /healthz, port: 8080 }
+            initialDelaySeconds: 5
+            periodSeconds: 10
+            failureThreshold: 3
+          readinessProbe:
+            httpGet: { path: /healthz, port: 8080 }
+            initialDelaySeconds: 5
+            periodSeconds: 10
+            failureThreshold: 3
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities:
+              drop: ["ALL"]
+          volumeMounts:
+            - name: tmp
+              mountPath: /tmp
+      volumes:
+        - name: tmp
+          emptyDir: {}

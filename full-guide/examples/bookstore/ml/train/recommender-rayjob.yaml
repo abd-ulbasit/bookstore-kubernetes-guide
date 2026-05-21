@@ -1,0 +1,150 @@
+# Bookstore — Part 12 ch.04 "Distributed training": the same recommender
+# training expressed as a KubeRay `RayJob` — a batch submission against a
+# RayCluster (head + N workers). Demonstrates the Ray path; the kind-runnable,
+# REAL artifact-producing path is the sibling `recommender-train-job.yaml`.
+#
+# !!! CRD-INTRINSIC DRY-RUN (identical precedent to raw-manifests/51-/70-/83-,
+#     argocd/, operators/, chaos/, ml/batch/) !!!
+#   `RayJob` is a KubeRay CRD (ray.io/v1). WITHOUT the KubeRay operator
+#   installed a client dry-run prints:
+#     no matches for kind "RayJob" in version "ray.io/v1"
+#   EXPECTED and SCHEMA-CORRECT — install the KubeRay operator first (Part 12
+#   ch.04 Hands-on: pinned Helm `kuberay/kuberay-operator` -> ns `kuberay`).
+#   Schema verified against ray.io/v1 RayJob (rayClusterSpec headGroupSpec
+#   + workerGroupSpecs + entrypoint + shutdownAfterJobFinishes).
+#
+# HONEST SCOPE
+#   The recommender is CPU-trivial item-kNN; this RayJob runs the SAME
+#   train.py as an entrypoint. The point is the RAY shape: a RayJob brings up
+#   an ephemeral RayCluster, runs `entrypoint` on the head, and tears the
+#   cluster down (`shutdownAfterJobFinishes: true`). A real Ray Train job
+#   would parallelise across workers; this file demonstrates the CRD shape
+#   under Kueue, not a fabricated distributed run.
+#
+# KUEUE — labelled onto bookstore-ml-lq. Kueue's RayJob integration gates
+# the whole submission in via spec.suspend (created suspended, fitted against
+# the ClusterQueue, then flipped) — the same all-or-nothing admission as the
+# PyTorchJob and the JobSet (Part 12 ch.03).
+#
+# PSA — `bookstore-ml` is `enforce: restricted`. Every Pod (head + worker)
+# carries the full restricted shape. Ray's official images default to non-root
+# (`ray` user) but DO NOT bundle the rest of PSA-restricted defaults; the
+# spec below applies them explicitly. For real Ray images: keep this shape.
+apiVersion: ray.io/v1
+kind: RayJob
+metadata:
+  name: recommender-train-ray
+  namespace: bookstore-ml
+  labels:
+    app.kubernetes.io/part-of: bookstore-ml
+    app.kubernetes.io/component: recommender-train
+    ml.bookstore/path: rayjob-distributed
+    # Kueue admission integration:
+    kueue.x-k8s.io/queue-name: bookstore-ml-lq
+spec:
+  entrypoint: "python /workspace/train.py"
+  shutdownAfterJobFinishes: true
+  ttlSecondsAfterFinished: 600
+  rayClusterSpec:
+    rayVersion: "2.40.0"
+    enableInTreeAutoscaling: false   # static cluster: keep the example simple
+    headGroupSpec:
+      serviceType: ClusterIP
+      rayStartParams:
+        dashboard-host: "0.0.0.0"
+      template:
+        metadata:
+          labels:
+            app.kubernetes.io/part-of: bookstore-ml
+            app.kubernetes.io/component: recommender-train
+            ml.bookstore/role: ray-head
+        spec:
+          automountServiceAccountToken: false
+          securityContext:                 # pod-level — restricted
+            runAsNonRoot: true
+            runAsUser: 65532
+            runAsGroup: 65532
+            fsGroup: 65532
+            seccompProfile:
+              type: RuntimeDefault
+          containers:
+            - name: ray-head
+              image: bookstore/recommender-train:dev
+              imagePullPolicy: IfNotPresent
+              # The KubeRay operator overrides the entrypoint to start ray.
+              # The `entrypoint` at the top of this spec is what runs against
+              # the cluster once it is ready.
+              resources:
+                requests:
+                  cpu: "500m"
+                  memory: 512Mi
+                limits:
+                  cpu: "1"
+                  memory: 1Gi
+              securityContext:
+                allowPrivilegeEscalation: false
+                readOnlyRootFilesystem: true
+                capabilities:
+                  drop: ["ALL"]
+              volumeMounts:
+                - name: model
+                  mountPath: /workspace/model
+                - name: scratch
+                  mountPath: /tmp
+              ports:
+                - containerPort: 6379  # GCS / redis
+                  name: gcs
+                - containerPort: 8265  # dashboard
+                  name: dashboard
+                - containerPort: 10001 # ray client
+                  name: client
+          volumes:
+            - name: model
+              persistentVolumeClaim:
+                claimName: recommender-model
+            - name: scratch
+              emptyDir:
+                sizeLimit: 64Mi
+    workerGroupSpecs:
+      - groupName: workers
+        replicas: 1
+        minReplicas: 1
+        maxReplicas: 1
+        rayStartParams: {}
+        template:
+          metadata:
+            labels:
+              app.kubernetes.io/part-of: bookstore-ml
+              app.kubernetes.io/component: recommender-train
+              ml.bookstore/role: ray-worker
+          spec:
+            automountServiceAccountToken: false
+            securityContext:
+              runAsNonRoot: true
+              runAsUser: 65532
+              runAsGroup: 65532
+              seccompProfile:
+                type: RuntimeDefault
+            containers:
+              - name: ray-worker
+                image: bookstore/recommender-train:dev
+                imagePullPolicy: IfNotPresent
+                resources:
+                  requests:
+                    cpu: "250m"
+                    memory: 256Mi
+                  limits:
+                    cpu: "1"
+                    memory: 512Mi
+                securityContext:
+                  allowPrivilegeEscalation: false
+                  readOnlyRootFilesystem: true
+                  capabilities:
+                    drop: ["ALL"]
+                volumeMounts:
+                  - name: scratch
+                    mountPath: /tmp
+            volumes:
+              - name: scratch
+                emptyDir:
+                  sizeLimit: 64Mi

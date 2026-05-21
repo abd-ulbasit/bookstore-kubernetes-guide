@@ -1,0 +1,16 @@
+# Bookstore Platform v2 — Part 13 ch.01: kustomization for the platform-base
+# stack. Bundles 00-namespaces.yaml + 01-rbac.yaml + 02-priorityclasses.yaml so
+# overlays can reference this directory as a single resource. 03-kueue-
+# clusterqueue.yaml is INTENTIONALLY EXCLUDED — it is CRD-backed (Kueue) and
+# would fail kustomize render before Kueue is installed; it lands via a
+# separate Application after Kueue installs.
+#
+# Render alone (sanity check):
+#   kubectl kustomize examples/bookstore-platform/platform-base
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+
+resources:
+  - 00-namespaces.yaml
+  - 01-rbac.yaml
+  - 02-priorityclasses.yaml

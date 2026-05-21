@@ -1,0 +1,24 @@
+# config/default — the full operator deployment overlay. `make deploy` does:
+#   kustomize build config/default | kubectl apply -f -
+#
+# Composes: CRD + RBAC + manager Deployment + webhook configs + cert-manager
+# Certificate. Everything lands in namespace bookstore-operator-system (the
+# operator's OWN namespace — NOT the PSA-restricted `bookstore` ns; the manager
+# Pod is itself restricted-compliant). cert-manager must be installed first
+# (pinned Helm chart — the chapter shows this).
+#
+# NOTE (intrinsic, documented per-file): a client/server dry-run of the full
+# build is CLEAN for the built-in pieces (Namespace, SA, Roles/Bindings,
+# Deployment, Service, Mutating/ValidatingWebhookConfiguration, the CRD) and
+# shows `no matches for kind` ONLY for the cert-manager Issuer/Certificate
+# until cert-manager's CRDs are installed — the same precedent as every
+# CRD-backed file in the guide. The CRD itself applies first and is built-in.
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+namespace: bookstore-operator-system
+resources:
+  - ../crd
+  - ../rbac
+  - ../manager
+  - ../webhook
+  - ../certmanager

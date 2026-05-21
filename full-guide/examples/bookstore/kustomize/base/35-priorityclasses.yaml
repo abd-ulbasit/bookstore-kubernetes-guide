@@ -1,0 +1,70 @@
+# Bookstore — Part 04 ch.03 "Priority and preemption": the priority ladder.
+#
+# THREE cluster-scoped PriorityClass objects that rank Bookstore workloads for
+# scheduling and preemption. PriorityClass is NOT namespaced (it is a
+# cluster-wide object) — it has no `metadata.namespace`. A workload opts in via
+# `spec.template.spec.priorityClassName: <name>`.
+#
+# Ladder (higher value = scheduled sooner, evicted/preempted later):
+#   bookstore-data       1000000   postgres (the data tier — lose it, lose data)
+#   bookstore-critical     100000   catalog / orders / storefront (user-facing)
+#   bookstore-batch          1000   db-migrate Job / cleanup CronJob (deferrable)
+#
+# Why these exact gaps: the values only need to ORDER the tiers; the wide gaps
+# leave room to slot future classes between them without renumbering. They are
+# all FAR below the built-in `system-cluster-critical` (2000000000) and
+# `system-node-critical` (2000001000) so Bookstore can never out-prioritise
+# control-plane / node add-ons (CoreDNS, CNI, kube-proxy) — that is deliberate.
+#
+# globalDefault: NONE is true. A `globalDefault: true` class would silently
+# apply to EVERY Pod cluster-wide that omits priorityClassName (including other
+# namespaces) — too blunt and not ours to decide cluster-wide. Pods that do not
+# name a class get priority 0 (or the cluster's existing global default), which
+# is correct: lower than every Bookstore tier here, exactly as intended.
+#
+# Wiring (done in the workload manifests, see ch.03 hands-on):
+#   20-postgres-statefulset.yaml   -> priorityClassName: bookstore-data
+#   10-catalog-deploy.yaml         -> priorityClassName: bookstore-critical
+#   11-storefront-deploy.yaml      -> priorityClassName: bookstore-critical
+#   14-orders-deploy.yaml          -> priorityClassName: bookstore-critical
+#   21-db-migrate-job.yaml         -> priorityClassName: bookstore-batch
+#   22-cleanup-cronjob.yaml        -> priorityClassName: bookstore-batch
+#
+# Requires: nothing (cluster-scoped; apply before/independently of workloads).
+# Apply:
+#   kubectl apply -f examples/bookstore/raw-manifests/35-priorityclasses.yaml
+#   kubectl get priorityclass | grep bookstore
+apiVersion: scheduling.k8s.io/v1
+kind: PriorityClass
+metadata:
+  name: bookstore-data
+  labels:
+    app.kubernetes.io/part-of: bookstore
+value: 1000000                    # highest Bookstore tier: the stateful data
+globalDefault: false
+description: "Bookstore stateful data tier (postgres). Scheduled first, preempted last."
+# preemptionPolicy defaults to PreemptLowerPriority: if no node fits, the
+# scheduler MAY evict lower-priority Pods (batch, then critical) to make room.
+---
+apiVersion: scheduling.k8s.io/v1
+kind: PriorityClass
+metadata:
+  name: bookstore-critical
+  labels:
+    app.kubernetes.io/part-of: bookstore
+value: 100000                     # user-facing services (catalog/orders/storefront)
+globalDefault: false
+description: "Bookstore user-facing services. Above batch, below the data tier."
+---
+apiVersion: scheduling.k8s.io/v1
+kind: PriorityClass
+metadata:
+  name: bookstore-batch
+  labels:
+    app.kubernetes.io/part-of: bookstore
+value: 1000                       # deferrable batch (migration Job / cleanup CronJob)
+globalDefault: false
+# Never preempt anything to run batch work — batch can simply wait for capacity.
+# (It can still BE preempted by the higher tiers above; that is intended.)
+preemptionPolicy: Never
+description: "Bookstore deferrable batch. Never preempts others; yields under pressure."

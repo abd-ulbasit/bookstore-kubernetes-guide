@@ -1,0 +1,93 @@
+# Bookstore — Part 02 ch.02 "Services": redis as a Service/DNS target.
+#
+# NETWORKING SCAFFOLDING ONLY. Part 02 needs redis to exist as a real
+# Deployment + ClusterIP Service so DNS (`redis.bookstore.svc.cluster.local`),
+# kube-proxy routing, and NetworkPolicy egress rules have a concrete target.
+# It is intentionally minimal: official `redis:7`, no persistence, no auth.
+# Durable storage / config for redis is Part 03 (Config & Storage); HA is
+# Part 03 ch.05. Until then catalog runs with REDIS_ADDR UNSET (it degrades
+# gracefully — see app/catalog/main.go), so this is wiring, not a hard dep.
+#
+# Part 05 ch.02 (Pod Security) increment: the `bookstore` namespace enforces
+# the PSA `restricted` standard (00-namespace.yaml), which gates EVERY pod in
+# the namespace — redis included. The stock redis image switches root→redis
+# (UID 999) via gosu in its entrypoint; we instead run directly as 999 (so it
+# is restricted-valid and still starts) and, since this instance is in-memory
+# only (--save "" --appendonly no — it writes nothing), add a small `data`
+# emptyDir for redis's working dir + a read-only root FS. drop ALL +
+# no-privilege-escalation + runAsNonRoot + seccomp RuntimeDefault = restricted.
+#
+# Requires:
+#   kubectl apply -f examples/bookstore/raw-manifests/00-namespace.yaml
+# Apply:
+#   kubectl apply -f examples/bookstore/raw-manifests/12-redis.yaml
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: redis
+  namespace: bookstore
+  labels:
+    app: redis
+    component: cache
+    app.kubernetes.io/part-of: bookstore
+spec:
+  replicas: 1                       # cache; single instance for the guide
+  selector:
+    matchLabels:
+      app: redis
+  template:
+    metadata:
+      labels:
+        app: redis                  # selected by the Service in 40-services.yaml
+        component: cache
+    spec:
+      # --- Part 05 ch.01: dedicated identity, no API token mounted (redis
+      # never calls kube-apiserver). No Bookstore Pod uses the `default` SA.
+      serviceAccountName: redis-sa
+      automountServiceAccountToken: false
+      # --- Part 05 ch.02: pod-level securityContext (PSA `restricted`). Run as
+      # the non-root redis UID/GID 999; fsGroup 999 owns the data emptyDir.
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 999
+        runAsGroup: 999
+        fsGroup: 999
+        seccompProfile:
+          type: RuntimeDefault
+      containers:
+        - name: redis
+          image: redis:7            # official image, pulled from registry (no kind load)
+          args: ["--save", "", "--appendonly", "no"]   # in-memory only (no persistence yet)
+          # --- Part 05 ch.02: container securityContext (PSA `restricted`).
+          # In-memory redis writes nothing; a read-only root FS holds (the
+          # `data` emptyDir below covers redis's working dir just in case).
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities:
+              drop: ["ALL"]
+          ports:
+            - name: redis
+              containerPort: 6379
+          readinessProbe:
+            tcpSocket: { port: redis }
+            periodSeconds: 5
+          livenessProbe:
+            tcpSocket: { port: redis }
+            periodSeconds: 10
+          resources:
+            requests:
+              cpu: 25m
+              memory: 32Mi
+            limits:
+              cpu: 200m
+              memory: 128Mi
+          # --- Part 05 ch.02: redis working dir (/data) on an emptyDir so the
+          # root FS can stay read-only. Ephemeral — matches "no persistence".
+          volumeMounts:
+            - name: data
+              mountPath: /data
+      volumes:
+        - name: data
+          emptyDir:
+            sizeLimit: 64Mi

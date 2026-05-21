@@ -1,0 +1,189 @@
+# Bookstore Platform v2 — Part 13 ch.07: Gateway API at the edge. The v2
+# entry-point pattern — `Gateway` + `HTTPRoute` rather than the legacy
+# Ingress + ingress-controller-specific annotations.
+#
+# Gateway API is the standardised replacement for Ingress in Kubernetes
+# (graduated to GA in v1.1). It carries three semantic primitives:
+#   - GatewayClass — the controller implementation (Istio, Envoy Gateway,
+#                    Contour, Cilium Gateway, etc.).
+#   - Gateway      — a logical load-balancer (listeners, addresses, TLS).
+#   - HTTPRoute    — how requests reaching the Gateway map to Services.
+# This file installs all three for the Istio implementation; Istio's
+# ingressgateway is the data-plane.
+#
+# !!! CRD-INTRINSIC DRY-RUN
+#   `Gateway` and `HTTPRoute` are `gateway.networking.k8s.io/v1` — the
+#   Gateway API standard CRDs. WITHOUT the Gateway API CRDs installed (a
+#   one-shot `kubectl apply` of the Standard channel YAML):
+#     no matches for kind "Gateway" in version "gateway.networking.k8s.io/v1"
+#   EXPECTED. Install the Gateway API CRDs + Istio (with Gateway API
+#   support enabled, which is the default since Istio 1.21):
+#     kubectl apply -f https://github.com/kubernetes-sigs/gateway-api/releases/download/v1.1.0/standard-install.yaml
+#
+# Two HTTPRoutes:
+#   - bookstore-platform-public — public paths, no JWT (the /static/* +
+#     /healthz + /favicon.ico set the legacy AuthorizationPolicy already
+#     covers — kept consistent here).
+#   - bookstore-platform-api    — /api/* requires JWT (paired with the
+#     existing auth/authorization-policy.yaml from ch.13.04).
+#
+# Apply (after Gateway API CRDs + Istio + ch.13.04's auth policies):
+#   kubectl apply -f examples/bookstore-platform/edge/gateway.yaml
+---
+apiVersion: gateway.networking.k8s.io/v1
+kind: GatewayClass
+metadata:
+  name: istio
+  labels:
+    app.kubernetes.io/part-of: bookstore-platform
+spec:
+  # Istio's Gateway API controller name (canonical).
+  controllerName: istio.io/gateway-controller
+---
+apiVersion: gateway.networking.k8s.io/v1
+kind: Gateway
+metadata:
+  name: bookstore-platform-edge
+  namespace: bookstore-platform
+  labels:
+    app.kubernetes.io/part-of: bookstore-platform
+    bookstore-platform.example.com/component: edge
+spec:
+  gatewayClassName: istio
+  listeners:
+    # HTTPS listener with TLS terminated here (the certificate is a
+    # cert-manager-issued one in production; on kind, a self-signed.)
+    - name: https
+      protocol: HTTPS
+      port: 443
+      tls:
+        mode: Terminate
+        certificateRefs:
+          - kind: Secret
+            name: bookstore-platform-edge-cert
+      allowedRoutes:
+        namespaces:
+          from: All
+    - name: http
+      protocol: HTTP
+      port: 80
+      # HTTP listener is for the redirect-to-HTTPS HTTPRoute below.
+      allowedRoutes:
+        namespaces:
+          from: All
+---
+# Public paths (no JWT required).
+apiVersion: gateway.networking.k8s.io/v1
+kind: HTTPRoute
+metadata:
+  name: bookstore-platform-public
+  namespace: bookstore-platform
+  labels:
+    app.kubernetes.io/part-of: bookstore-platform
+spec:
+  parentRefs:
+    - name: bookstore-platform-edge
+      sectionName: https
+  rules:
+    - matches:
+        - path:
+            type: PathPrefix
+            value: /static
+        - path:
+            type: Exact
+            value: /healthz
+        - path:
+            type: Exact
+            value: /favicon.ico
+      backendRefs:
+        - name: storefront
+          namespace: bookstore-platform-acme-books
+          port: 8080
+---
+# /api/* — JWT required (enforced by the AuthorizationPolicy in
+# ../auth/authorization-policy.yaml, scoped to the istio-system gateway).
+apiVersion: gateway.networking.k8s.io/v1
+kind: HTTPRoute
+metadata:
+  name: bookstore-platform-api
+  namespace: bookstore-platform
+  labels:
+    app.kubernetes.io/part-of: bookstore-platform
+spec:
+  parentRefs:
+    - name: bookstore-platform-edge
+      sectionName: https
+  rules:
+    - matches:
+        - path:
+            type: PathPrefix
+            value: /api/v2/search
+      backendRefs:
+        - name: search
+          namespace: bookstore-platform-acme-books
+          port: 8080
+    - matches:
+        - path:
+            type: PathPrefix
+            value: /api/v2/recommendations
+      backendRefs:
+        - name: recommendations
+          namespace: bookstore-platform-acme-books
+          port: 8080
+    - matches:
+        - path:
+            type: PathPrefix
+            value: /api/v2/payments
+      backendRefs:
+        - name: payments-gateway
+          namespace: bookstore-platform-payments
+          port: 8080
+    # Wildcard fallback to the v1 catalog/orders (which Phase 13b extends
+    # without rewriting) for /api/v1/*.
+    - matches:
+        - path:
+            type: PathPrefix
+            value: /api/v1
+      backendRefs:
+        - name: catalog
+          namespace: bookstore-platform-acme-books
+          port: 8080
+---
+# Stripe webhook receiver — public path, NO JWT (Stripe must reach it).
+# The Stripe-Signature header check + the AuthorizationPolicy in
+# ../payments/payments-webhook-receiver.yaml provide the trust boundary.
+apiVersion: gateway.networking.k8s.io/v1
+kind: HTTPRoute
+metadata:
+  name: bookstore-platform-stripe-webhook
+  namespace: bookstore-platform
+  labels:
+    app.kubernetes.io/part-of: bookstore-platform
+spec:
+  parentRefs:
+    - name: bookstore-platform-edge
+      sectionName: https
+  rules:
+    - matches:
+        - path:
+            type: Exact
+            value: /stripe/webhook
+          method: POST
+      backendRefs:
+        - name: payments-webhook-receiver
+          namespace: bookstore-platform-payments
+          port: 8080
+---
+# Placeholder TLS cert — REPLACE via cert-manager (or upload a real one).
+apiVersion: v1
+kind: Secret
+metadata:
+  name: bookstore-platform-edge-cert
+  namespace: bookstore-platform
+  labels:
+    app.kubernetes.io/part-of: bookstore-platform
+    bookstore-platform.example.com/placeholder: "true"
+type: kubernetes.io/tls
+stringData:
+  tls.crt: "REPLACE-ME-VIA-CERT-MANAGER-NOT-IN-SOURCE"
+  tls.key: "REPLACE-ME-VIA-CERT-MANAGER-NOT-IN-SOURCE"

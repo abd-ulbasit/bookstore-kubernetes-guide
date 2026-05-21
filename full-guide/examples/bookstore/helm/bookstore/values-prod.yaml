@@ -1,0 +1,74 @@
+# Bookstore — PRODUCTION environment overrides.
+#   helm upgrade --install bookstore ./examples/bookstore/helm/bookstore \
+#     -n bookstore -f examples/bookstore/helm/bookstore/values-prod.yaml \
+#     --atomic --timeout 5m
+#
+# Prod: higher replica counts + larger resource ceilings, full
+# reliability/observability/autoscaling surface, real registry images pinned by
+# an immutable tag (ideally a digest), and — critically — the demo Secret is
+# DISABLED. In production the db-credentials Secret is provided OUT OF BAND by
+# External Secrets Operator / Sealed Secrets / Vault (same NAME the chart
+# expects). NEVER ship a real password in a values file. See ch.01 Production
+# notes; this is the established Part 03 ch.02 / Part 05 ch.04 rule.
+
+# Pull real, immutably-tagged images from your registry (replace the registry).
+catalog:
+  replicaCount: 4
+  image:
+    repository: registry.example.com/bookstore/catalog
+    tag: "1.0.0" # prod: an immutable tag or, better, name@sha256:<digest>
+    pullPolicy: IfNotPresent
+  resources:
+    requests: { cpu: 100m, memory: 128Mi }
+    limits: { cpu: 500m, memory: 256Mi }
+storefront:
+  replicaCount: 3
+  image:
+    repository: registry.example.com/bookstore/storefront
+    tag: "1.0.0"
+orders:
+  replicaCount: 3
+  image:
+    repository: registry.example.com/bookstore/orders
+    tag: "1.0.0"
+paymentsWorker:
+  image:
+    repository: registry.example.com/bookstore/payments-worker
+    tag: "1.0.0"
+
+# Full production surface.
+hpa:
+  enabled: true
+  minReplicas: 4
+  maxReplicas: 12
+pdb:
+  enabled: true
+serviceMonitor:
+  enabled: true
+prometheusRule:
+  enabled: true
+# Event-driven scale-to-zero for the worker (needs KEDA installed in-cluster).
+keda:
+  enabled: true
+  minReplicaCount: 0
+  maxReplicaCount: 12
+
+# !!! Secret comes from External Secrets Operator / Sealed Secrets / Vault,
+# NOT from this file. The chart references a Secret named `db-credentials`;
+# provide it out of band with create=false.
+dbCredentials:
+  create: false
+
+postgres:
+  resources:
+    requests: { cpu: 250m, memory: 512Mi }
+    limits: { cpu: "1", memory: 1Gi }
+  persistence:
+    size: 20Gi
+
+ingress:
+  enabled: true
+  host: bookstore.example.com
+  tls:
+    enabled: true
+    secretName: bookstore-tls

@@ -1,0 +1,126 @@
+# Bookstore Platform v2 — Part 13 ch.10: PrometheusRule with per-tenant
+# cost recording rules. Pre-aggregates OpenCost's per-pod Allocation
+# data into per-tenant + per-region + per-workload-class rollups so
+# the Grafana dashboard panels are fast even on 30-day windows.
+#
+# v1 had no cost story; v2's per-tenant cost rollup is the foundation
+# of the showback dashboard + the budget alerts.
+#
+# !!! CRD-INTRINSIC DRY-RUN
+#   `PrometheusRule` is `monitoring.coreos.com/v1` — Prometheus
+#   Operator CRD. WITHOUT kube-prometheus-stack:
+#     no matches for kind "PrometheusRule" in version "monitoring.coreos.com/v1"
+#   EXPECTED.
+#
+# Apply:
+#   kubectl apply -f examples/bookstore-platform/cost/opencost-tenant-aggregations.yaml
+---
+apiVersion: monitoring.coreos.com/v1
+kind: PrometheusRule
+metadata:
+  name: bookstore-platform-cost-aggregations
+  namespace: prometheus-system
+  labels:
+    app.kubernetes.io/name: bookstore-platform-cost-aggregations
+    app.kubernetes.io/instance: bookstore-platform-cost-aggregations
+    app.kubernetes.io/part-of: bookstore-platform
+    app.kubernetes.io/component: cost-aggregations
+    app.kubernetes.io/version: "1.0.0"
+    # Picked up by kube-prometheus-stack.
+    release: kube-prometheus-stack
+spec:
+  groups:
+    # Recording rules — pre-aggregate cost by tenant, region, class.
+    - name: bookstore-platform.cost.recording
+      interval: 5m
+      rules:
+        # Cost per tenant per hour — joins OpenCost's per-namespace
+        # hourly cost (`opencost_namespace_total_hourly_cost`) with
+        # `kube_namespace_labels` (carries the tenant label stamped by
+        # Crossplane).
+        #
+        # Why `opencost_namespace_total_hourly_cost` (not a node-cost *
+        # pod-count product): OpenCost's namespace-level metric is
+        # already a USD/hour value summed over all pods in that
+        # namespace (CPU + memory + PV + load-balancer + network
+        # transfer). Multiplying node hourly cost by pod count would
+        # over-count (each pod on a 16-CPU node would carry the whole
+        # node's price). We trust OpenCost's allocation engine here.
+        - record: bookstore:cost_per_hour:by_tenant
+          expr: |
+            sum by (tenant) (
+              opencost_namespace_total_hourly_cost
+                * on(namespace) group_left(tenant)
+                  kube_namespace_labels{label_bookstore_platform_example_com_tenant!=""}
+            )
+        # Cost per region per hour — joins on the cluster_id label
+        # (set in the OpenCost helm values).
+        - record: bookstore:cost_per_hour:by_region
+          expr: |
+            sum by (region) (
+              opencost_cluster_total_hourly_cost
+                * on (cluster_id) group_left(region)
+                  bookstore_cluster_region_info
+            )
+        # Cost per workload-class — joins on the platform's class
+        # label (`bookstore-platform.example.com/class={app,ml,system}`).
+        - record: bookstore:cost_per_hour:by_class
+          expr: |
+            sum by (class) (
+              opencost_pod_total_hourly_cost
+                * on (namespace, pod) group_left(class)
+                  kube_pod_labels{label_bookstore_platform_example_com_class!=""}
+            )
+        # Cost per tenant — rolling 30-day total.
+        # Bucketed at 1-hour resolution so 30d * 24h = 720 samples;
+        # Prometheus can keep that in head.
+        - record: bookstore:cost_30d:by_tenant
+          expr: |
+            sum_over_time(bookstore:cost_per_hour:by_tenant[30d:1h])
+        # GPU vs CPU spend — the ML watchlist panel.
+        # Uses OpenCost's pod-level GPU cost metric, joined against
+        # pod labels then against namespace labels — pods carrying
+        # the platform's `class=ml` label on GPU nodes roll up to the
+        # tenant via their namespace's tenant label.
+        - record: bookstore:gpu_cost_per_hour:by_tenant
+          expr: |
+            sum by (tenant) (
+              opencost_pod_total_hourly_cost
+                * on (namespace, pod) group_left()
+                  kube_pod_labels{label_bookstore_platform_example_com_class="ml"}
+                * on(namespace) group_left(tenant)
+                  kube_namespace_labels{label_bookstore_platform_example_com_tenant!=""}
+            )
+        # Unallocated cost — anything OpenCost cannot attribute to a
+        # tenant. The "label hygiene" health metric.
+        - record: bookstore:cost_unallocated:by_region
+          expr: |
+            (
+              sum by (region) (opencost_cluster_total_hourly_cost)
+              -
+              sum by (region) (
+                bookstore:cost_per_hour:by_tenant
+                  * on() group_left(region) bookstore_cluster_region_info
+              )
+            )
+    # Cost-hygiene alerts: unallocated cost should be < 1% of total.
+    - name: bookstore-platform.cost.hygiene
+      interval: 5m
+      rules:
+        - alert: BookstoreUnallocatedCostHigh
+          expr: |
+            (
+              bookstore:cost_unallocated:by_region
+              /
+              sum by (region) (opencost_cluster_total_hourly_cost)
+            ) > 0.01
+          for: 30m
+          labels:
+            severity: warn
+          annotations:
+            summary: "Unallocated cost > 1% in {{ $labels.region }}"
+            description: |
+              More than 1% of compute cost cannot be attributed to a
+              tenant. Likely cause: a workload missing the
+              `bookstore-platform.example.com/tenant` label.
+              Diagnose: kubectl get pods -A -l '!bookstore-platform.example.com/tenant'

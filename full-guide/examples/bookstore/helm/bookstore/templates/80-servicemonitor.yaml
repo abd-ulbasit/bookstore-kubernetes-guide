@@ -1,0 +1,54 @@
+{{/*
+  ServiceMonitors for catalog + payments-worker (raw-manifests
+  80-servicemonitor.yaml). ServiceMonitor is a Prometheus Operator CRD
+  (monitoring.coreos.com/v1) — NOT built-in — so this is behind
+  serviceMonitor.enabled (default FALSE); a plain `helm install` does not
+  render it. The `release` label MUST match kube-prometheus-stack's
+  serviceMonitorSelector or the object is silently ignored (the #1 "my
+  ServiceMonitor does nothing" cause) — default value matches the Part 06
+  ch.01 install (release `kube-prometheus-stack`).
+*/}}
+{{- if .Values.serviceMonitor.enabled }}
+{{- $sm := .Values.serviceMonitor }}
+{{- if .Values.catalog.enabled }}
+apiVersion: monitoring.coreos.com/v1
+kind: ServiceMonitor
+metadata:
+  name: catalog
+  namespace: {{ include "bookstore.namespace" . }}
+  labels:
+    {{- include "bookstore.labels" (dict "ctx" . "app" "catalog" "extra" (dict "release" $sm.release)) | nindent 4 }}
+spec:
+  selector:
+    matchLabels:
+      app: catalog
+  namespaceSelector:
+    matchNames: ["{{ include "bookstore.namespace" . }}"]
+  endpoints:
+    - port: http
+      path: /metrics
+      interval: {{ $sm.interval }}
+      scheme: http
+{{- end }}
+{{- if .Values.paymentsWorker.enabled }}
+---
+apiVersion: monitoring.coreos.com/v1
+kind: ServiceMonitor
+metadata:
+  name: payments-worker
+  namespace: {{ include "bookstore.namespace" . }}
+  labels:
+    {{- include "bookstore.labels" (dict "ctx" . "app" "payments-worker" "extra" (dict "release" $sm.release)) | nindent 4 }}
+spec:
+  selector:
+    matchLabels:
+      app: payments-worker
+  namespaceSelector:
+    matchNames: ["{{ include "bookstore.namespace" . }}"]
+  endpoints:
+    - port: metrics
+      path: /metrics
+      interval: {{ $sm.interval }}
+      scheme: http
+{{- end }}
+{{- end }}

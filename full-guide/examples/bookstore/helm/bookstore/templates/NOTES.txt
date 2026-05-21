@@ -1,0 +1,56 @@
+{{- include "bookstore.validateEdge" . -}}
+Bookstore {{ .Chart.Version }} (app {{ .Chart.AppVersion }}) installed as
+release "{{ .Release.Name }}" into namespace "{{ include "bookstore.namespace" . }}".
+
+The namespace ENFORCES Pod Security Admission `restricted`. Every workload
+this chart renders is restricted-compliant, so all pods are admitted.
+
+What got created (with default values):
+  Workloads : catalog, storefront, orders, payments-worker (Deployments),
+              redis, rabbitmq (Deployments), postgres (StatefulSet + headless Svc)
+  Wiring    : Services, {{ if .Values.ingress.enabled }}Ingress ({{ .Values.ingress.className }}, host {{ .Values.ingress.host }}){{ else if .Values.gateway.enabled }}Gateway API ({{ .Values.gateway.className }}){{ else }}NO external edge (ingress & gateway both off){{ end }}
+  Schema    : the db-migrate Job runs as a post-install/post-upgrade HOOK
+              AFTER postgres (hook-weight {{ .Values.migrationJob.hookWeight }}); it is idempotent.
+
+Check it:
+  helm status {{ .Release.Name }} -n {{ include "bookstore.namespace" . }}
+  helm get manifest {{ .Release.Name }} -n {{ include "bookstore.namespace" . }} | less
+  kubectl get pods,svc -n {{ include "bookstore.namespace" . }}
+  kubectl get job db-migrate -n {{ include "bookstore.namespace" . }}   # the hook
+
+{{ if .Values.ingress.enabled -}}
+Reach the app (Ingress): you still need an ingress-nginx controller AND the
+TLS Secret `{{ .Values.ingress.tls.secretName }}` (this chart does NOT generate
+the cert). With *.localdev.me -> 127.0.0.1 and the controller exposed:
+  curl -k https://{{ .Values.ingress.host }}/                 # storefront UI
+  curl -k https://{{ .Values.ingress.host }}/api/books        # catalog
+{{ end -}}
+
+CRD-backed extras (OFF by default — turning one ON requires its operator/CRDs;
+a client dry-run with the toggle on will print "no matches for kind ..." until
+the CRDs are installed — same intrinsic behaviour the raw manifests document):
+{{- if not .Values.serviceMonitor.enabled }}
+  - serviceMonitor.enabled=false  → needs kube-prometheus-stack (Prometheus Operator)
+{{- end }}
+{{- if not .Values.prometheusRule.enabled }}
+  - prometheusRule.enabled=false  → needs the Prometheus Operator
+{{- end }}
+{{- if not .Values.keda.enabled }}
+  - keda.enabled=false            → `helm install keda kedacore/keda -n keda --create-namespace`
+{{- end }}
+{{- if not .Values.gateway.enabled }}
+  - gateway.enabled=false         → needs the Gateway API CRDs + a controller
+{{- end }}
+{{- if not .Values.kyverno.enabled }}
+  - kyverno.enabled=false         → needs Kyverno installed (Audit-only policy)
+{{- end }}
+{{- if not .Values.snapshot.enabled }}
+  - snapshot.enabled=false        → needs the snapshot CRDs + a snapshot-capable CSI driver
+{{- end }}
+
+{{ if .Values.dbCredentials.create -}}
+!!! DEMO SECRET !!!  This release shipped the `{{ .Values.dbCredentials.secretName }}`
+Secret from values.yaml. A Secret is base64, NOT encrypted. NEVER do this in
+production: set dbCredentials.create=false and provide the Secret via External
+Secrets Operator / Sealed Secrets / Vault. See Part 07 ch.01 Production notes.
+{{ end -}}

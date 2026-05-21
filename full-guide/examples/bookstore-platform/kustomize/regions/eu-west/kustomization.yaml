@@ -1,0 +1,21 @@
+# Bookstore Platform v2 — Part 13 ch.03: eu-west region overlay. Reader
+# region (CNPG standby; writes proxy to us-east). On us-east outage this is
+# the candidate promotion target.
+#
+# Render:
+#   kubectl kustomize examples/bookstore-platform/kustomize/regions/eu-west
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+
+resources:
+  - ../../base
+
+labels:
+  - includeSelectors: false
+    pairs:
+      bookstore-platform.example.com/region: eu-west
+      bookstore-platform.example.com/role: reader
+
+commonAnnotations:
+  bookstore-platform.example.com/cnpg-primary: "false"
+  bookstore-platform.example.com/dns-hostname: "eu-west.bookstore-platform.example.com"

@@ -1,0 +1,48 @@
+# Bookstore Kustomize COMPONENT — gateway (Gateway API, SWAPS the Ingress).
+#
+# 50-ingress (in base) and 51-gateway express the SAME external routing via
+# two DIFFERENT data planes; applying BOTH would bind the same hostname/paths
+# twice. This component therefore (a) DELETES the base Ingress with a
+# `$patch: delete`, and (b) adds the GatewayClass + Gateway + HTTPRoute
+# (vendored byte-identical from raw-manifests/51-). Net effect: the overlay
+# renders the Gateway-API stack INSTEAD of the Ingress — the exact analog of
+# the Helm chart's mutually-exclusive `ingress.enabled` / `gateway.enabled`
+# (the chart `fail`s if both are set; here the component removes the Ingress
+# so the same invariant holds structurally — there is never a double bind).
+#
+# !!! CRD PREREQUISITE. Gateway API (gateway.networking.k8s.io/v1) is NOT
+# built into Kubernetes — the Gateway/HTTPRoute CRDs + a controller (Envoy
+# Gateway, Cilium, Istio, the ingress-nginx Gateway impl., ...) must be
+# installed first. Without the CRDs, a client dry-run of an overlay including
+# this component prints `no matches for kind "Gateway"` / `"HTTPRoute"` /
+# `"GatewayClass"` — EXPECTED and correct (objects are schema-valid). Install
+# the standard channel CRDs, then a controller:
+#   kubectl apply -f https://github.com/kubernetes-sigs/gateway-api/releases/download/v1.1.0/standard-install.yaml
+# (pin a current version; see raw 51- header). The vendored GatewayClass
+# `controllerName: k8s.io/ingress-nginx` targets the ingress-nginx Gateway
+# implementation — swap it to match whatever controller you installed.
+#
+# Enable by adding to an overlay's `components:` list, e.g.:
+#   components:
+#     - ../../components/gateway
+apiVersion: kustomize.config.k8s.io/v1alpha1
+kind: Component
+
+resources:
+  - 51-gateway.yaml
+
+# Remove the base Ingress so only the Gateway-API stack remains (no double
+# hostname bind). The deletion patch matches the base object by GVK+name; the
+# `namespace:` transformer in the overlay is irrelevant to a delete.
+patches:
+  - target:
+      group: networking.k8s.io
+      version: v1
+      kind: Ingress
+      name: bookstore
+    patch: |
+      $patch: delete
+      apiVersion: networking.k8s.io/v1
+      kind: Ingress
+      metadata:
+        name: bookstore

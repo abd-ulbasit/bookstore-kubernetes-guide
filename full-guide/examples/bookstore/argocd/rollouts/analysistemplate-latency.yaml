@@ -1,0 +1,58 @@
+# Bookstore — Part 07 ch.05: AnalysisTemplate — catalog p95 latency gate.
+#
+# The Rollout's second canary GATE. Queries PROMETHEUS for catalog's p95
+# request latency from the SAME histogram Part 06 ch.01 made the catalog
+# binary export (app/catalog/main.go):
+#   http_request_duration_seconds_bucket{handler}   — a histogram (DefBuckets)
+#
+#   p95 = histogram_quantile(0.95, sum by (le) (rate(..._bucket[2m])))
+#
+# The canary stays only while p95 ≤ the threshold (default 0.5s); breach it
+# `failureLimit` times and the AnalysisRun fails → Argo Rollouts ABORTS and
+# AUTO-ROLLS-BACK to stable. This is the standard quantile pattern from Part 06
+# ch.01 §4 "Duration" — a quantile MUST be computed from the bucket
+# distribution (it cannot be averaged across pods), which is exactly why the
+# app exports a histogram, not a latency gauge.
+#
+# CRD-INTRINSIC NOTE: `AnalysisTemplate` = `argoproj.io/v1alpha1` (Argo
+# Rollouts CRD). Without the controller, a client dry-run prints `no matches
+# for kind "AnalysisTemplate"` — EXPECTED, schema-correct (same precedent as
+# raw 18-/51-/70-/80-/83-, Helm/Kustomize CRD extras, ch.04 Argo CD objects).
+apiVersion: argoproj.io/v1alpha1
+kind: AnalysisTemplate
+metadata:
+  name: catalog-latency-p95
+  namespace: bookstore
+  labels:
+    app: catalog
+    app.kubernetes.io/part-of: bookstore
+spec:
+  args:
+    - name: service-name
+    - name: namespace
+    - name: prometheus-port
+      value: "9090"
+    - name: p95-threshold-seconds
+      value: "0.5"                     # p95 must stay ≤ 500ms
+  metrics:
+    - name: catalog-latency-p95
+      interval: 20s
+      count: 5
+      # PASS while p95 ≤ threshold. `>= 0` keeps a quiet canary (no samples →
+      # histogram_quantile yields NaN; the `or vector(0)` guard makes it 0).
+      successCondition: result[0] <= {{args.p95-threshold-seconds}}
+      failureLimit: 3
+      provider:
+        prometheus:
+          address: "http://kube-prometheus-stack-prometheus.monitoring.svc.cluster.local:{{args.prometheus-port}}"
+          timeout: 30
+          # REAL PromQL — the Part 06 ch.01 §4 "Duration" quantile query over
+          # the books handler's duration histogram. handler="books" is the
+          # user-facing path (app/catalog/main.go instruments /books as
+          # handler "books"); /metrics is uninstrumented by design.
+          query: |
+            histogram_quantile(0.95,
+              sum by (le) (
+                rate(http_request_duration_seconds_bucket{handler="books",namespace="{{args.namespace}}"}[2m])
+              )
+            ) or vector(0)

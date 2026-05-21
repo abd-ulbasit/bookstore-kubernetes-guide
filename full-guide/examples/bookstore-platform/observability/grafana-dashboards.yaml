@@ -1,0 +1,209 @@
+# Bookstore Platform v2 — Part 13 ch.09: Grafana dashboards for the
+# platform overview (RED + USE per service, per-tenant variable).
+# Uses grafana-operator's GrafanaDashboard CRD so the JSON dashboard
+# definition is managed declaratively.
+#
+# v1's dashboard was a Grafana sidecar-discovered ConfigMap; v2's is
+# a typed GrafanaDashboard CR (CRD-backed) — same effect, GitOps-clean
+# lifecycle.
+#
+# !!! CRD-INTRINSIC DRY-RUN
+#   `GrafanaDashboard` is `grafana.integreatly.org/v1beta1` — installed
+#   by grafana-operator. WITHOUT grafana-operator:
+#     no matches for kind "GrafanaDashboard" in version "grafana.integreatly.org/v1beta1"
+#   EXPECTED.
+#
+# The dashboard JSON below is intentionally minimal — the per-tenant
+# variable, the RED panels for the v2 services, and the trace ID link
+# panel. Production uses a fuller dashboard set; this file is the
+# canonical reference.
+#
+# Apply:
+#   kubectl apply -f examples/bookstore-platform/observability/grafana-dashboards.yaml
+---
+apiVersion: grafana.integreatly.org/v1beta1
+kind: GrafanaDashboard
+metadata:
+  name: bookstore-platform-overview
+  namespace: prometheus-system
+  labels:
+    app.kubernetes.io/name: bookstore-platform-overview
+    app.kubernetes.io/instance: bookstore-platform-overview
+    app.kubernetes.io/part-of: bookstore-platform
+    app.kubernetes.io/component: observability-dashboard
+    app.kubernetes.io/version: "1.0.0"
+    grafana_dashboard: "1"
+spec:
+  instanceSelector:
+    matchLabels:
+      dashboards: bookstore-platform
+  resyncPeriod: 1m
+  # The JSON below is a minimal "Bookstore Platform Overview" dashboard.
+  # It defines:
+  #   - $tenant + $region variables (sourced from kube_namespace_labels)
+  #   - 6 RED panels (per service: catalog, orders, payments-gateway,
+  #     search, events, recommendations)
+  #   - 1 active-alerts table
+  #   - 1 active-traces table (Tempo)
+  # The full dashboard JSON is a 1500+ line artifact in production;
+  # this file ships the structural skeleton + the variable wiring.
+  json: |
+    {
+      "uid": "bookstore-platform-overview",
+      "title": "Bookstore Platform — Overview",
+      "tags": ["bookstore-platform", "overview", "red"],
+      "schemaVersion": 39,
+      "time": { "from": "now-1h", "to": "now" },
+      "templating": {
+        "list": [
+          {
+            "name": "tenant",
+            "type": "query",
+            "datasource": "Prometheus",
+            "query": "label_values(kube_namespace_labels{label_bookstore_platform_example_com_tenant!=\"\"}, label_bookstore_platform_example_com_tenant)",
+            "includeAll": true,
+            "multi": false,
+            "refresh": 2,
+            "label": "Tenant"
+          },
+          {
+            "name": "region",
+            "type": "query",
+            "datasource": "Prometheus",
+            "query": "label_values(kube_node_labels{label_topology_kubernetes_io_region!=\"\"}, label_topology_kubernetes_io_region)",
+            "includeAll": true,
+            "multi": false,
+            "refresh": 2,
+            "label": "Region"
+          },
+          {
+            "name": "service",
+            "type": "custom",
+            "query": "catalog,orders,payments-gateway,search,events,recommendations",
+            "includeAll": false,
+            "multi": false,
+            "current": { "text": "catalog", "value": "catalog" },
+            "label": "Service"
+          }
+        ]
+      },
+      "panels": [
+        {
+          "id": 1,
+          "type": "row",
+          "title": "RED — $service (tenant=$tenant region=$region)",
+          "collapsed": false,
+          "gridPos": { "h": 1, "w": 24, "x": 0, "y": 0 }
+        },
+        {
+          "id": 2,
+          "type": "timeseries",
+          "title": "Request rate (req/s)",
+          "datasource": "Prometheus",
+          "gridPos": { "h": 8, "w": 8, "x": 0, "y": 1 },
+          "targets": [
+            {
+              "expr": "sum by (service) (rate(http_requests_total{service=\"$service\",tenant=~\"$tenant\",region=~\"$region\"}[5m]))",
+              "legendFormat": "{{service}}",
+              "refId": "A"
+            }
+          ],
+          "fieldConfig": {
+            "defaults": {
+              "unit": "reqps",
+              "decimals": 2
+            }
+          }
+        },
+        {
+          "id": 3,
+          "type": "timeseries",
+          "title": "Error rate (5xx %)",
+          "datasource": "Prometheus",
+          "gridPos": { "h": 8, "w": 8, "x": 8, "y": 1 },
+          "targets": [
+            {
+              "expr": "sum by (service) (rate(http_requests_total{service=\"$service\",tenant=~\"$tenant\",region=~\"$region\",code=~\"5..\"}[5m])) / sum by (service) (rate(http_requests_total{service=\"$service\",tenant=~\"$tenant\",region=~\"$region\"}[5m]))",
+              "legendFormat": "{{service}}",
+              "refId": "A"
+            }
+          ],
+          "fieldConfig": {
+            "defaults": {
+              "unit": "percentunit",
+              "decimals": 2,
+              "thresholds": {
+                "mode": "absolute",
+                "steps": [
+                  { "color": "green",  "value": null },
+                  { "color": "orange", "value": 0.01 },
+                  { "color": "red",    "value": 0.05 }
+                ]
+              }
+            }
+          }
+        },
+        {
+          "id": 4,
+          "type": "timeseries",
+          "title": "Duration p95 (s)",
+          "datasource": "Prometheus",
+          "gridPos": { "h": 8, "w": 8, "x": 16, "y": 1 },
+          "targets": [
+            {
+              "expr": "histogram_quantile(0.95, sum by (le, service) (rate(http_request_duration_seconds_bucket{service=\"$service\",tenant=~\"$tenant\",region=~\"$region\"}[5m])))",
+              "legendFormat": "{{service}}",
+              "refId": "A"
+            }
+          ],
+          "fieldConfig": {
+            "defaults": {
+              "unit": "s",
+              "decimals": 2,
+              "thresholds": {
+                "mode": "absolute",
+                "steps": [
+                  { "color": "green",  "value": null },
+                  { "color": "orange", "value": 0.5 },
+                  { "color": "red",    "value": 1.0 }
+                ]
+              }
+            }
+          }
+        },
+        {
+          "id": 5,
+          "type": "table",
+          "title": "Active alerts (tenant=$tenant)",
+          "datasource": "Prometheus",
+          "gridPos": { "h": 8, "w": 24, "x": 0, "y": 9 },
+          "targets": [
+            {
+              "expr": "ALERTS{tenant=~\"$tenant\",alertstate=\"firing\"}",
+              "format": "table",
+              "refId": "A"
+            }
+          ],
+          "fieldConfig": {
+            "defaults": {
+              "unit": "short",
+              "decimals": 2
+            }
+          }
+        },
+        {
+          "id": 6,
+          "type": "traces",
+          "title": "Recent slow traces — $service",
+          "datasource": "Tempo",
+          "gridPos": { "h": 12, "w": 24, "x": 0, "y": 17 },
+          "targets": [
+            {
+              "query": "{ service.name = \"$service\" && duration > 500ms }",
+              "queryType": "traceql",
+              "refId": "A"
+            }
+          ]
+        }
+      ]
+    }

@@ -1,0 +1,64 @@
+# Bookstore — Part 07 ch.04 "GitOps with Argo CD": the App-of-Apps root.
+#
+# THE BOOTSTRAP. This single Application manages the THREE per-environment
+# Bookstore Applications (dev/staging/prod). Apply ONLY this (+ the AppProject)
+# and Argo CD pulls the `apps/` directory from Git and creates/owns the child
+# Applications — which in turn sync the real kustomize overlays. One root to
+# rule them; the App-of-Apps pattern (Argo CD Up & Running, ch.10).
+#
+#   apply 00-appproject + 01-app-of-apps
+#        └─► Argo syncs source.path = examples/bookstore/argocd/apps/
+#               ├─► Application bookstore-dev      → overlays/dev      (45 objs)
+#               ├─► Application bookstore-staging  → overlays/staging  (49 objs)
+#               └─► Application bookstore-prod     → overlays/prod     (48 objs)
+#
+# `directory.recurse: true` makes this Application a "directory" source that
+# applies every manifest under `apps/` — i.e. the three child Applications.
+# Each child is itself an `argoproj.io/v1alpha1` Application (see apps/*.yaml).
+#
+# ───────────────────────────────────────────────────────────────────────────
+# CRD-INTRINSIC NOTE (identical precedent to raw-manifests 18-/51-/70-/80-/83-
+# and the Helm CRD toggles / Kustomize components).
+#   `Application` is the Argo CD CRD `argoproj.io/v1alpha1`. WITHOUT Argo CD
+#   installed, `kubectl apply --dry-run=client -f 01-app-of-apps.yaml` prints
+#   `no matches for kind "Application" in version "argoproj.io/v1alpha1"` —
+#   EXPECTED, schema-correct; the Argo CD CRDs must exist first (ch.04 Hands-on
+#   step 1 installs Argo CD via Helm). Same for every apps/*.yaml.
+# ───────────────────────────────────────────────────────────────────────────
+#
+# PLACEHOLDER: `repoURL` is the generic placeholder
+# `https://github.com/your-org/bookstore` — replace `your-org`. The path
+# `examples/bookstore/argocd/apps` is real and exists in this repo.
+#
+# Apply (Argo CD installed, AppProject applied — ch.04 Hands-on):
+#   kubectl apply -n argocd -f examples/bookstore/argocd/01-app-of-apps.yaml
+apiVersion: argoproj.io/v1alpha1
+kind: Application
+metadata:
+  name: bookstore-root
+  namespace: argocd
+  finalizers:
+    # Cascade: deleting the root prunes the child Applications it owns
+    # (and, because the children prune, the workloads). Omit to keep children.
+    - resources-finalizer.argocd.argoproj.io
+spec:
+  project: bookstore
+  source:
+    repoURL: https://github.com/your-org/bookstore.git   # PLACEHOLDER — replace your-org
+    targetRevision: main
+    # The directory of child Application manifests (NOT a kustomize path).
+    path: examples/bookstore/argocd/apps
+    directory:
+      recurse: true        # apply every Application under apps/
+  destination:
+    server: https://kubernetes.default.svc
+    # The Applications themselves are created in the argocd namespace (that is
+    # where the controller watches them); the WORKLOADS they manage go to
+    # `bookstore` (set per-child in apps/*.yaml destination.namespace).
+    namespace: argocd
+  syncPolicy:
+    automated:
+      prune: true          # a child Application removed from Git is deleted
+      selfHeal: true       # manual edits to a child App are reverted
+    syncOptions:
+      - CreateNamespace=false   # argocd ns already exists (Argo CD installed there)

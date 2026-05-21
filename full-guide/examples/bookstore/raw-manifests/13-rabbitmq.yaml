@@ -1,0 +1,106 @@
+# Bookstore — Part 02 ch.02 "Services": rabbitmq as a Service/DNS target.
+#
+# NETWORKING SCAFFOLDING ONLY. The async path (orders publishes, payments-worker
+# consumes) needs a broker that exists as a real Deployment + ClusterIP Service
+# so DNS (`rabbitmq.bookstore.svc.cluster.local`), kube-proxy routing, and the
+# NetworkPolicy egress rule (orders -> rabbitmq, ch.06) have a concrete target.
+# Minimal: official `rabbitmq:3.13-management`, default guest/guest, no
+# persistence. Durable storage / clustering is Part 03; until then orders runs
+# with AMQP_URL UNSET and degrades gracefully (app/orders/main.go).
+#
+# Two ports: 5672 (AMQP, used by orders/payments-worker) and 15672 (the
+# management UI, handy for `kubectl port-forward` inspection in hands-on).
+#
+# Part 05 ch.02 (Pod Security) increment: the `bookstore` namespace enforces
+# the PSA `restricted` standard (00-namespace.yaml) for EVERY pod, rabbitmq
+# included. rabbitmq is the most demanding stock image here: it writes the
+# Mnesia DB + Erlang cookie under /var/lib/rabbitmq and generates config under
+# /etc/rabbitmq, and its entrypoint normally does root-level cookie-permission
+# setup. To make it BOTH restricted-valid AND bootable we run directly as the
+# non-root rabbitmq UID/GID 999, set fsGroup 999, and back /var/lib/rabbitmq
+# with an emptyDir the kubelet chowns to 999. We do NOT set
+# readOnlyRootFilesystem (rabbitmq writes outside that volume) — `restricted`
+# does not require one. drop ALL + no-privilege-escalation + runAsNonRoot +
+# seccomp RuntimeDefault = restricted. This is the honest "complex stateful
+# stock image, made restricted" case; contrast the purpose-built distroless
+# Go services which additionally get a read-only root FS.
+#
+# Requires:
+#   kubectl apply -f examples/bookstore/raw-manifests/00-namespace.yaml
+# Apply:
+#   kubectl apply -f examples/bookstore/raw-manifests/13-rabbitmq.yaml
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: rabbitmq
+  namespace: bookstore
+  labels:
+    app: rabbitmq
+    component: queue
+    app.kubernetes.io/part-of: bookstore
+spec:
+  replicas: 1                       # single broker for the guide
+  selector:
+    matchLabels:
+      app: rabbitmq
+  template:
+    metadata:
+      labels:
+        app: rabbitmq               # selected by the Service in 40-services.yaml
+        component: queue
+    spec:
+      # --- Part 05 ch.01: dedicated identity, no API token mounted (rabbitmq
+      # never calls kube-apiserver). No Bookstore Pod uses the `default` SA.
+      serviceAccountName: rabbitmq-sa
+      automountServiceAccountToken: false
+      # --- Part 05 ch.02: pod-level securityContext (PSA `restricted`). Run as
+      # the non-root rabbitmq UID/GID 999; fsGroup 999 owns the data emptyDir
+      # so Mnesia + the Erlang cookie are writable without the image's root step.
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 999
+        runAsGroup: 999
+        fsGroup: 999
+        fsGroupChangePolicy: OnRootMismatch
+        seccompProfile:
+          type: RuntimeDefault
+      containers:
+        - name: rabbitmq
+          image: rabbitmq:3.13-management   # official image; ships AMQP + mgmt UI
+          # --- Part 05 ch.02: container securityContext. drop ALL +
+          # no-privilege-escalation + (pod) runAsNonRoot + seccomp
+          # RuntimeDefault = restricted. NOT readOnlyRootFilesystem: rabbitmq
+          # writes generated config outside the data volume.
+          securityContext:
+            allowPrivilegeEscalation: false
+            capabilities:
+              drop: ["ALL"]
+          ports:
+            - name: amqp
+              containerPort: 5672
+            - name: management
+              containerPort: 15672
+          readinessProbe:
+            tcpSocket: { port: amqp }
+            initialDelaySeconds: 15
+            periodSeconds: 10
+          livenessProbe:
+            tcpSocket: { port: amqp }
+            initialDelaySeconds: 30
+            periodSeconds: 15
+          resources:
+            requests:
+              cpu: 100m
+              memory: 256Mi
+            limits:
+              cpu: 500m
+              memory: 512Mi
+          # --- Part 05 ch.02: Mnesia DB + Erlang cookie dir on an emptyDir
+          # (chowned to fsGroup 999). Ephemeral — matches "no persistence".
+          volumeMounts:
+            - name: data
+              mountPath: /var/lib/rabbitmq
+      volumes:
+        - name: data
+          emptyDir:
+            sizeLimit: 256Mi

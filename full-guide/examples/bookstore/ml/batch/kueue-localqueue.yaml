@@ -1,0 +1,25 @@
+# Bookstore — Part 12 ch.03 "Batch and gang scheduling": a Kueue LocalQueue =
+# the NAMESPACED HANDLE the ML team submits to. It points at the cluster-scoped
+# ClusterQueue, so RBAC and quota accounting are per-namespace. Jobs/JobSets
+# opt in with the label  kueue.x-k8s.io/queue-name: bookstore-ml-lq.
+#
+# !!! CRD-INTRINSIC DRY-RUN (identical precedent to raw-manifests/51-/70-/83-,
+#     argocd/, operators/, chaos/) !!!
+#   `LocalQueue` is a Kueue CRD (kueue.x-k8s.io/v1beta2). WITHOUT Kueue
+#   installed a client dry-run prints:
+#     no matches for kind "LocalQueue" in version "kueue.x-k8s.io/v1beta2"
+#   EXPECTED and SCHEMA-CORRECT — install Kueue first (Part 12 ch.03 Hands-on:
+#   pinned Helm, own namespace `kueue-system`). It references ClusterQueue
+#   `bookstore-ml-cq` (apply that first) and lives in the PSA-restricted
+#   `bookstore-ml` namespace (Part 12 ch.01). Schema verified against Kueue
+#   kueue.x-k8s.io/v1beta2 LocalQueue.
+apiVersion: kueue.x-k8s.io/v1beta2
+kind: LocalQueue
+metadata:
+  name: bookstore-ml-lq
+  namespace: bookstore-ml          # the PSA-restricted ML namespace (ch.01)
+  labels:
+    app.kubernetes.io/part-of: bookstore-ml
+spec:
+  clusterQueue: bookstore-ml-cq    # -> the quota/fair-share defined in
+                                   #    kueue-clusterqueue.yaml

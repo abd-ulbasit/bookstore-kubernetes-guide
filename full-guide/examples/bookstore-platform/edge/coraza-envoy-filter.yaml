@@ -1,0 +1,98 @@
+# Bookstore Platform v2 — Part 13 ch.07: Coraza WAF (ModSecurity-compatible)
+# loaded as a WASM filter on the Istio ingress gateway. The WAF inspects
+# every request BEFORE rate limiting and BEFORE JWT validation — defence
+# in depth ordering: WAF (block known-bad) -> rate limit (block too-many) ->
+# JWT (block unauthenticated).
+#
+# Coraza (https://coraza.io) is the Go-native ModSecurity replacement.
+# ModSecurity is in EOL maintenance; Coraza is the actively-maintained
+# successor that loads the same OWASP CRS rules. The Istio integration is
+# the `coraza-proxy-wasm` WASM filter, distributed as an OCI artifact.
+#
+# !!! CRD-INTRINSIC DRY-RUN
+#   `EnvoyFilter` is `networking.istio.io/v1alpha3`. WITHOUT Istio:
+#     no matches for kind "EnvoyFilter" in version "networking.istio.io/v1alpha3"
+#   EXPECTED. After Istio is installed this applies.
+#
+# Rule set: OWASP Core Rule Set (CRS) v4.0 — the canonical WAF rule bundle.
+# The chapter's Production notes section flags CRS tuning (it is noisy out
+# of the box; tune to your app or you will get false positives every minute).
+#
+# Apply:
+#   kubectl apply -f examples/bookstore-platform/edge/coraza-envoy-filter.yaml
+---
+apiVersion: networking.istio.io/v1alpha3
+kind: EnvoyFilter
+metadata:
+  name: coraza-waf
+  namespace: istio-system
+  labels:
+    app.kubernetes.io/part-of: bookstore-platform
+    bookstore-platform.example.com/component: edge-waf
+spec:
+  # Scope: every Pod in istio-system that carries the `istio: ingressgateway`
+  # label — i.e. every ingress-gateway Pod. The filter loads INSIDE the
+  # gateway Envoy process; no extra Pods.
+  workloadSelector:
+    labels:
+      istio: ingressgateway
+  configPatches:
+    - applyTo: HTTP_FILTER
+      match:
+        context: GATEWAY
+        listener:
+          filterChain:
+            filter:
+              name: envoy.filters.network.http_connection_manager
+              subFilter:
+                # Insert BEFORE the JWT verifier so a WAF block beats a JWT
+                # check (we don't want to verify JWTs on attack payloads).
+                name: envoy.filters.http.jwt_authn
+      patch:
+        operation: INSERT_BEFORE
+        value:
+          name: envoy.filters.http.wasm
+          typed_config:
+            "@type": type.googleapis.com/udpa.type.v1.TypedStruct
+            type_url: type.googleapis.com/envoy.extensions.filters.http.wasm.v3.Wasm
+            value:
+              config:
+                name: coraza-waf
+                root_id: coraza-waf
+                vm_config:
+                  runtime: envoy.wasm.runtime.v8
+                  code:
+                    # The WASM binary is distributed as an OCI artifact;
+                    # Envoy pulls it on first start and caches on the
+                    # gateway Pod. The OCI URL is pinned to a sha256
+                    # digest in production so a re-tag of the upstream
+                    # image cannot silently change behaviour. Look up
+                    # the current digest with:
+                    #   crane digest ghcr.io/corazawaf/coraza-proxy-wasm:v0.5.0
+                    # and substitute below. The placeholder is uppercase
+                    # so a grep catches an un-replaced value before apply.
+                    remote:
+                      http_uri:
+                        uri: oci://ghcr.io/corazawaf/coraza-proxy-wasm:v0.5.0@sha256:REPLACE-WITH-PINNED-DIGEST
+                        cluster: outbound|443||ghcr.io
+                        timeout: 30s
+                configuration:
+                  "@type": type.googleapis.com/google.protobuf.StringValue
+                  value: |
+                    {
+                      "directives_map": {
+                        "default": [
+                          "Include @recommended-conf",
+                          "Include @crs-setup-conf",
+                          "Include @owasp_crs/*.conf",
+                          "SecRuleEngine On",
+                          "SecRequestBodyAccess On",
+                          "SecAuditEngine RelevantOnly",
+                          "SecAuditLogParts ABIJDEFHZ",
+                          "SecAuditLog /tmp/coraza-audit.log",
+                          "SecAuditLogFormat JSON",
+                          "SecDefaultAction \"phase:2,deny,status:403,log,auditlog\""
+                        ]
+                      },
+                      "default_directives": "default"
+                    }

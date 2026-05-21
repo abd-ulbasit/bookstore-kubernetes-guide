@@ -1,0 +1,72 @@
+{{/*
+  rabbitmq Deployment (raw-manifests 13-rabbitmq.yaml). Stock
+  rabbitmq:3.13-management. The most demanding stock image: run directly as
+  the non-root rabbitmq UID/GID 999 with fsGroup 999 (uid999RW profile —
+  fsGroupChangePolicy OnRootMismatch) and back /var/lib/rabbitmq with an
+  emptyDir the kubelet chowns. NO read-only root FS (rabbitmq writes generated
+  config outside the data volume); `restricted` does not require one.
+*/}}
+{{- if .Values.rabbitmq.enabled }}
+{{- $q := .Values.rabbitmq }}
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: rabbitmq
+  namespace: {{ include "bookstore.namespace" . }}
+  labels:
+    {{- include "bookstore.labels" (dict "ctx" . "app" "rabbitmq" "component" "queue") | nindent 4 }}
+spec:
+  replicas: {{ $q.replicaCount }}
+  selector:
+    matchLabels:
+      app: rabbitmq
+  template:
+    metadata:
+      labels:
+        {{- include "bookstore.labels" (dict "ctx" . "app" "rabbitmq" "component" "queue") | nindent 8 }}
+    spec:
+      serviceAccountName: {{ $q.serviceAccountName }}
+      automountServiceAccountToken: false
+      securityContext:
+        {{- include "bookstore.podSecurityContext" (dict "ctx" . "profile" "uid999RW") | nindent 8 }}
+      {{- with $q.nodeSelector }}
+      nodeSelector:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with $q.tolerations }}
+      tolerations:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with $q.affinity }}
+      affinity:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      containers:
+        - name: rabbitmq
+          image: "{{ $q.image.repository }}:{{ $q.image.tag }}"
+          imagePullPolicy: {{ $q.image.pullPolicy }}
+          securityContext:
+            {{- include "bookstore.containerSecurityContext" (dict "ctx" . "profile" "uid999RW") | nindent 12 }}
+          ports:
+            - name: amqp
+              containerPort: 5672
+            - name: management
+              containerPort: 15672
+          readinessProbe:
+            tcpSocket: { port: amqp }
+            initialDelaySeconds: 15
+            periodSeconds: 10
+          livenessProbe:
+            tcpSocket: { port: amqp }
+            initialDelaySeconds: 30
+            periodSeconds: 15
+          resources:
+            {{- toYaml $q.resources | nindent 12 }}
+          volumeMounts:
+            - name: data
+              mountPath: /var/lib/rabbitmq
+      volumes:
+        - name: data
+          emptyDir:
+            sizeLimit: {{ $q.dataSizeLimit }}
+{{- end }}

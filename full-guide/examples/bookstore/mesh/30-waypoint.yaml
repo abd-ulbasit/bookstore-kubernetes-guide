@@ -1,0 +1,80 @@
+# Bookstore — Part 11 ch.04 "Service mesh": an L7 WAYPOINT for the `catalog`
+# Service (Istio ambient). Ambient's per-node ztunnel does L4 + mTLS; L7
+# features (weighted routing, retries, timeouts, L7 authz) need a WAYPOINT —
+# an Envoy proxy deployed PER-SERVICE/namespace, addressed as a Gateway with
+# the Istio waypoint class. The 20-/21- canary routes only take effect for
+# `catalog` once this waypoint exists AND `catalog` is enrolled to use it.
+#
+# CORRECT ISTIO AMBIENT WAYPOINT SCOPING (two parts — read this)
+#   (1) WHAT this waypoint can be used FOR is set by the
+#       `istio.io/waypoint-for` LABEL on this Gateway (NOT an annotation, and
+#       NOT `istio.io/service-account` — that key does not exist; Istio would
+#       silently ignore it and the scoping would NOT happen). Values:
+#       `service` (default — can be used by Services), `workload`, `all`,
+#       `none`. This waypoint is `service`-scoped.
+#   (2) WHICH workloads actually route through it is opt-in via the
+#       `istio.io/use-waypoint` label on the target — set it on the `catalog`
+#       SERVICE for service-scoped traffic (least blast radius: only catalog),
+#       or on a ServiceAccount/namespace for broader scope. The Bookstore
+#       enrolls ONLY the `catalog` Service (the chapter Hands-on labels it):
+#         kubectl label service catalog -n bookstore \
+#           istio.io/use-waypoint=catalog-waypoint
+#       (Un-enroll: `kubectl label service catalog -n bookstore istio.io/use-waypoint-`.)
+#   Without (2) the waypoint exists but NOTHING uses it — and 20-/21- have no
+#   L7 enforcement point. With it, ONLY catalog's L7 traffic is waypointed
+#   (least-blast-radius), not the whole namespace.
+#
+# THE PSA FOOTGUN, AMBIENT EDITION (read this — it is the chapter's core point)
+#   A waypoint is a real Deployment that Istio creates IN the `bookstore`
+#   namespace. `bookstore` is PSA `enforce: restricted`, so the waypoint Pod
+#   MUST be restricted-compliant or PSA rejects it and there is no L7. Istio's
+#   waypoint (`istio.io/v1` proxy) ships restricted-compliant by default
+#   (runAsNonRoot, non-root UID, drop ALL, seccomp RuntimeDefault) — UNLIKE a
+#   classic injected SIDECAR's init container, which historically needed
+#   NET_ADMIN and is the thing that breaks in a restricted namespace (see
+#   10-sidecar-mode-podtemplate.yaml). This is precisely WHY this guide picks
+#   AMBIENT for the PSA-restricted Bookstore: the data path (ztunnel +
+#   waypoint) is restricted-clean and lives OUTSIDE the app Pods, so enrolling
+#   the namespace never makes a single Bookstore Pod PSA-non-compliant.
+#   Verify after apply:
+#     kubectl get pod -n bookstore -l gateway.networking.k8s.io/gateway-name=catalog-waypoint \
+#       -o jsonpath='{.items[0].spec.containers[0].securityContext}'
+#
+# !!! CRD-INTRINSIC DRY-RUN (precedent: 51-gateway.yaml + 70-/83-/argocd) !!!
+#   `Gateway` is `gateway.networking.k8s.io/v1` (NOT built in). Without the
+#   Gateway API CRDs a client dry-run prints
+#     no matches for kind "Gateway" in version "gateway.networking.k8s.io/v1"
+#   EXPECTED, schema-correct (identical to Part 02 ch.05). The `istio-waypoint`
+#   GatewayClass additionally requires Istio's ambient profile installed.
+#   Schema verified against Gateway API v1 Gateway + the Istio waypoint class.
+#
+# Requires: Gateway API CRDs + Istio ambient profile installed; ns `bookstore`
+#   enrolled (00-ambient-enroll.yaml).
+# Apply:
+#   kubectl apply -f examples/bookstore/mesh/30-waypoint.yaml
+#   kubectl get gateway catalog-waypoint -n bookstore
+#   kubectl wait --for=condition=Programmed gateway/catalog-waypoint -n bookstore
+apiVersion: gateway.networking.k8s.io/v1
+kind: Gateway
+metadata:
+  name: catalog-waypoint
+  namespace: bookstore
+  labels:
+    app: catalog
+    app.kubernetes.io/part-of: bookstore
+    # CORRECT scoping: this LABEL declares the waypoint usable BY SERVICES
+    # (the default). The `catalog` Service then opts in with the
+    # `istio.io/use-waypoint: catalog-waypoint` label (chapter Hands-on),
+    # so ONLY catalog's L7 traffic is waypointed — least blast radius, and
+    # NOT the bogus `istio.io/service-account` annotation (which Istio
+    # ignores). See the header for the two-part scoping mechanism.
+    istio.io/waypoint-for: service
+spec:
+  gatewayClassName: istio-waypoint     # the Istio ambient waypoint class
+  listeners:
+    - name: mesh
+      port: 15008                      # Istio HBONE (ambient L7) port
+      protocol: HBONE
+      allowedRoutes:
+        namespaces:
+          from: Same                   # only same-ns HTTPRoutes attach

@@ -1,0 +1,17 @@
+apiVersion: v1
+kind: Service
+metadata:
+  name: search
+  namespace: bookstore-platform-acme-books
+  labels:
+    app: search
+    app.kubernetes.io/part-of: bookstore-platform
+    app.kubernetes.io/component: search-api
+    bookstore-platform.example.com/tenant: acme-books
+spec:
+  selector:
+    app: search
+  ports:
+    - name: http
+      port: 8080
+      targetPort: 8080

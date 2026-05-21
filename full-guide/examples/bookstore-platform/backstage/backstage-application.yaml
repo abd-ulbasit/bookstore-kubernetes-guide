@@ -1,0 +1,136 @@
+# Bookstore Platform v2 — Part 13 ch.11: an Argo CD Application that
+# installs Backstage (backstage/backstage chart) into the `backstage`
+# namespace. Backstage is the developer-portal frontend; this file
+# wires the chart, not the platform-customised image (the image is
+# built per-org from the Backstage app-cli template and pushed to
+# the org's registry).
+#
+# v1 had no Backstage; Part 11 ch.10 introduced it conceptually. v2
+# wires the install + the platform-customised image reference + the
+# Postgres backing store + the OIDC integration with Keycloak.
+#
+# !!! CRD-INTRINSIC DRY-RUN
+#   `Application` is `argoproj.io/v1alpha1` — Argo CD CRD. WITHOUT
+#   Argo CD:
+#     no matches for kind "Application" in version "argoproj.io/v1alpha1"
+#   EXPECTED.
+#
+# Apply (after Argo CD + Keycloak + a built backstage image):
+#   kubectl apply -f examples/bookstore-platform/backstage/backstage-application.yaml
+---
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: backstage
+  labels:
+    app.kubernetes.io/part-of: bookstore-platform
+    bookstore-platform.example.com/scope: developer-portal
+    pod-security.kubernetes.io/enforce: restricted
+    pod-security.kubernetes.io/enforce-version: latest
+    pod-security.kubernetes.io/audit: restricted
+    pod-security.kubernetes.io/audit-version: latest
+    pod-security.kubernetes.io/warn: restricted
+    pod-security.kubernetes.io/warn-version: latest
+---
+apiVersion: argoproj.io/v1alpha1
+kind: Application
+metadata:
+  name: backstage
+  namespace: argocd
+  labels:
+    app.kubernetes.io/name: backstage
+    app.kubernetes.io/instance: backstage
+    app.kubernetes.io/part-of: bookstore-platform
+    app.kubernetes.io/component: developer-portal
+    app.kubernetes.io/version: "2.6.0"
+  finalizers:
+    - resources-finalizer.argocd.argoproj.io
+spec:
+  project: default
+  source:
+    chart: backstage
+    repoURL: https://backstage.github.io/charts
+    # Pinned. Bump deliberately every quarter.
+    targetRevision: "2.6.0"
+    helm:
+      values: |
+        backstage:
+          image:
+            # The org's customised Backstage image — built from the
+            # backstage-cli `new app` scaffold, with the v2 plugins
+            # bundled (argocd, kubernetes, prometheus, pagerduty,
+            # crossplane). Pinned tag.
+            registry: ghcr.io
+            repository: your-org/bookstore-platform-backstage
+            tag: "1.31.0"
+            pullPolicy: IfNotPresent
+          # The app-config.production.yaml lives in a ConfigMap
+          # (app-config.yaml in this directory). Reference it here.
+          appConfig:
+            existingConfigMap: backstage-app-config
+            key: app-config.production.yaml
+          # Env vars sourced from ESO-materialised Secrets.
+          extraEnvVars:
+            - name: POSTGRES_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: backstage-postgresql
+                  key: password
+            - name: GITHUB_APP_PRIVATE_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: backstage-github-app
+                  key: private-key
+            - name: KEYCLOAK_CLIENT_SECRET
+              valueFrom:
+                secretKeyRef:
+                  name: backstage-keycloak
+                  key: client-secret
+          # PSA — restricted.
+          podSecurityContext:
+            runAsNonRoot: true
+            runAsUser: 65532
+            runAsGroup: 65532
+            fsGroup: 65532
+            seccompProfile:
+              type: RuntimeDefault
+          containerSecurityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities:
+              drop: ["ALL"]
+          resources:
+            requests:
+              cpu: 250m
+              memory: 512Mi
+            limits:
+              cpu: "1"
+              memory: 1Gi
+        # The chart's bundled Postgres — fine for kind / dev.
+        # Production points at the per-region CNPG cluster instead
+        # (set postgresql.enabled=false; set backstage.appConfig
+        # database.client to point at CNPG).
+        postgresql:
+          enabled: true
+          auth:
+            existingSecret: backstage-postgresql
+          primary:
+            podSecurityContext:
+              enabled: true
+              runAsNonRoot: true
+              runAsUser: 1001
+              fsGroup: 1001
+        service:
+          type: ClusterIP
+          ports:
+            backend: 7007
+  destination:
+    server: https://kubernetes.default.svc
+    namespace: backstage
+  syncPolicy:
+    automated:
+      prune: true
+      selfHeal: true
+    syncOptions:
+      - CreateNamespace=false
+      - ServerSideApply=true

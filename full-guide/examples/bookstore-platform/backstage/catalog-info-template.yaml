@@ -1,0 +1,91 @@
+# Bookstore Platform v2 — Part 13 ch.11: the per-service
+# catalog-info.yaml template. Every v2 service repo ships this file
+# at its root; Backstage's github-discovery scans the org and
+# registers each match as a Catalog entity.
+#
+# This file is the TEMPLATE — placeholder values like <SERVICE-NAME>,
+# <TEAM>, <SYSTEM>. Real services derive their own catalog-info.yaml
+# from this skeleton (the Backstage Scaffolder template in
+# scaffolder-template-new-service.yaml renders this template's
+# placeholders against the form input).
+#
+# v1 had no Backstage so no catalog-info.yaml; v2 makes this file the
+# discovery primitive — without it, the service is invisible.
+#
+# This is REGULAR Kubernetes-flavor YAML but the apiVersion is
+# Backstage's `backstage.io/v1alpha1`, not a Kubernetes API. It is
+# NOT applied via `kubectl apply`; Backstage reads it from GitHub.
+# (The file in this directory is the canonical source for the
+# scaffolder template + a documentation reference.)
+#
+# Apply: NEVER directly. The Scaffolder copies + renders it into
+# each new service repo.
+---
+apiVersion: backstage.io/v1alpha1
+kind: Component
+metadata:
+  name: <SERVICE-NAME>
+  description: <ONE-LINE-DESCRIPTION>
+  annotations:
+    github.com/project-slug: your-org/bookstore-platform-<SERVICE-NAME>
+    backstage.io/techdocs-ref: dir:.
+    # Argo CD plugin — the Application name in the
+    # bookstore-platform-applicationset.
+    argocd/app-name: bookstore-<SERVICE-NAME>-us-east
+    # Prometheus plugin — the rule group name from
+    # observability/prometheus-rules.yaml.
+    prometheus.io/rule: "bookstore-platform-red-slo"
+    # PagerDuty plugin — the service ID in PagerDuty (per-service
+    # rotation, optional).
+    pagerduty.com/service-id: <PXXXXX>
+    # Kubernetes plugin — the label that the kubernetes-plugin uses
+    # to find this service's resources across all clusters.
+    backstage.io/kubernetes-label-selector: "app.kubernetes.io/name=<SERVICE-NAME>"
+  tags:
+    - go
+    - bookstore-platform
+    - <COMPONENT-TYPE>   # e.g. api, worker, gateway
+  links:
+    - url: https://grafana.bookstore-platform.example.com/d/bookstore-overview?var-service=<SERVICE-NAME>
+      title: Grafana Overview
+      icon: dashboard
+    - url: https://github.com/your-org/bookstore-platform-<SERVICE-NAME>/blob/main/docs/runbook.md
+      title: Runbook
+      icon: docs
+spec:
+  type: service
+  lifecycle: production
+  owner: <TEAM>                     # e.g. team-payments, team-catalog
+  system: <SYSTEM>                  # e.g. bookstore-platform-storefront
+  providesApis:
+    - <SERVICE-NAME>-api
+  consumesApis:
+    - <DOWNSTREAM-API-1>
+    - <DOWNSTREAM-API-2>
+  dependsOn:
+    - resource:cnpg-postgres
+    - resource:kafka
+---
+apiVersion: backstage.io/v1alpha1
+kind: API
+metadata:
+  name: <SERVICE-NAME>-api
+  description: <SERVICE-NAME>'s HTTP/REST API
+  annotations:
+    backstage.io/definition-at-location: url:https://raw.githubusercontent.com/your-org/bookstore-platform-<SERVICE-NAME>/main/api/openapi.yaml
+spec:
+  type: openapi
+  lifecycle: production
+  owner: <TEAM>
+  system: <SYSTEM>
+  definition:
+    $text: ./api/openapi.yaml
+---
+apiVersion: backstage.io/v1alpha1
+kind: System
+metadata:
+  name: bookstore-platform
+  description: The Bookstore Platform v2 — the production e-commerce platform.
+spec:
+  owner: team-platform
+  domain: bookstore

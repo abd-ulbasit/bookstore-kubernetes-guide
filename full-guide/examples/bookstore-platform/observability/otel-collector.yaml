@@ -1,0 +1,249 @@
+# Bookstore Platform v2 — Part 13 ch.09: the OpenTelemetry Collector.
+# DaemonSet mode (one collector per node); receives OTLP from local pods
+# + scrapes Prometheus targets + tails container logs; fans out to
+# Tempo (traces), Loki (logs), Prometheus (metrics via remote_write).
+#
+# v1 had no collector — apps wrote `/metrics` and Prometheus scraped
+# them. v2's three pillars require a unifying point; the OTel
+# Collector is that point.
+#
+# !!! CRD-INTRINSIC DRY-RUN
+#   `OpenTelemetryCollector` is `opentelemetry.io/v1beta1` — installed
+#   by the OpenTelemetry Operator. WITHOUT the operator:
+#     no matches for kind "OpenTelemetryCollector" in version "opentelemetry.io/v1beta1"
+#   EXPECTED. The chapter installs the operator before applying this file.
+#
+# PSA — `opentelemetry-system` is `enforce: restricted`. The collector
+# pods run with the restricted set; the DaemonSet does NOT need host
+# access (we do NOT collect kernel-level traces or node-exporter
+# metrics here — those are scraped from kube-state-metrics +
+# node-exporter via the prometheus receiver below; no privileged
+# escalation).
+#
+# NOTE — No `filelog` receiver is configured intentionally. Tailing
+# `/var/log/pods/**/*.log` requires a `hostPath: /var/log/pods` volume
+# (and often `/var/lib/docker/containers`); both demand the privileged
+# `volumes: ["hostPath"]` allowance, which is INCOMPATIBLE with PSA
+# `restricted`. Production ships filelog via a separate node-level
+# DaemonSet (e.g., `opentelemetry-collector-contrib` configured as a
+# log collector) in a `privileged` namespace, with that namespace
+# under strict admission policy (Kyverno/OPA restricting which
+# containers may run). This example keeps the platform under a single
+# restricted profile; logs arrive via the OTLP push from each app's
+# SDK (the platform's golang services use the otel SDK with a
+# `loghttp` exporter at localhost:4318).
+#
+# Apply (after the OTel Operator):
+#   kubectl apply -f examples/bookstore-platform/observability/otel-collector.yaml
+---
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: opentelemetry-system
+  labels:
+    app.kubernetes.io/part-of: bookstore-platform
+    bookstore-platform.example.com/scope: observability
+    pod-security.kubernetes.io/enforce: restricted
+    pod-security.kubernetes.io/enforce-version: latest
+    pod-security.kubernetes.io/audit: restricted
+    pod-security.kubernetes.io/audit-version: latest
+    pod-security.kubernetes.io/warn: restricted
+    pod-security.kubernetes.io/warn-version: latest
+---
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: bookstore-platform-otel
+  namespace: opentelemetry-system
+  labels:
+    app.kubernetes.io/name: bookstore-platform-otel
+    app.kubernetes.io/instance: bookstore-platform-otel
+    app.kubernetes.io/part-of: bookstore-platform
+    app.kubernetes.io/component: observability-collector
+    app.kubernetes.io/version: "0.115.0"
+automountServiceAccountToken: true
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: bookstore-platform-otel
+  labels:
+    app.kubernetes.io/part-of: bookstore-platform
+    app.kubernetes.io/component: observability-collector
+rules:
+  # Minimum needed for the kubernetes receiver to enrich spans/logs
+  # with pod/namespace labels.
+  - apiGroups: [""]
+    resources: ["pods", "namespaces", "nodes", "services", "endpoints"]
+    verbs: ["get", "list", "watch"]
+  # For the prometheus receiver discovery.
+  - apiGroups: ["apps"]
+    resources: ["deployments", "statefulsets", "daemonsets"]
+    verbs: ["get", "list", "watch"]
+  - apiGroups: ["monitoring.coreos.com"]
+    resources: ["servicemonitors", "podmonitors"]
+    verbs: ["get", "list", "watch"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: bookstore-platform-otel
+  labels:
+    app.kubernetes.io/part-of: bookstore-platform
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: bookstore-platform-otel
+subjects:
+  - kind: ServiceAccount
+    name: bookstore-platform-otel
+    namespace: opentelemetry-system
+---
+apiVersion: opentelemetry.io/v1beta1
+kind: OpenTelemetryCollector
+metadata:
+  name: bookstore-platform-otel
+  namespace: opentelemetry-system
+  labels:
+    app.kubernetes.io/name: bookstore-platform-otel
+    app.kubernetes.io/instance: bookstore-platform-otel
+    app.kubernetes.io/part-of: bookstore-platform
+    app.kubernetes.io/component: observability-collector
+    app.kubernetes.io/version: "0.115.0"
+spec:
+  # DaemonSet mode — one collector per node. Apps export OTLP to the
+  # local collector (localhost:4317); the collector batches + processes
+  # + forwards.
+  mode: daemonset
+  serviceAccount: bookstore-platform-otel
+  image: otel/opentelemetry-collector-contrib:0.115.0
+  imagePullPolicy: IfNotPresent
+  # PSA — restricted.
+  # Container-level securityContext (applies to the collector container).
+  # `allowPrivilegeEscalation: false` + `capabilities.drop: [ALL]` are
+  # REQUIRED by PSA-restricted admission; without them the Pod is
+  # rejected with `violates PodSecurity "restricted:latest"`.
+  securityContext:
+    runAsNonRoot: true
+    runAsUser: 65532
+    runAsGroup: 65532
+    allowPrivilegeEscalation: false
+    readOnlyRootFilesystem: true
+    capabilities:
+      drop: ["ALL"]
+    seccompProfile:
+      type: RuntimeDefault
+  # Pod-level securityContext (applies to the pod spec).
+  podSecurityContext:
+    runAsNonRoot: true
+    runAsUser: 65532
+    runAsGroup: 65532
+    fsGroup: 65532
+    seccompProfile:
+      type: RuntimeDefault
+  resources:
+    requests:
+      cpu: 200m
+      memory: 512Mi
+    limits:
+      cpu: "1"
+      memory: 1Gi
+  # The Collector config — receivers, processors, exporters, pipelines.
+  # See https://opentelemetry.io/docs/collector/configuration/.
+  config:
+    receivers:
+      # OTLP — the standard inbound from apps via the SDK.
+      otlp:
+        protocols:
+          grpc:
+            endpoint: 0.0.0.0:4317
+          http:
+            endpoint: 0.0.0.0:4318
+      # Scrape the platform's existing /metrics endpoints — the v1
+      # Bookstore-style Prometheus metrics, plus kube-state-metrics +
+      # node-exporter (already running from kube-prometheus-stack).
+      prometheus:
+        config:
+          scrape_configs:
+            - job_name: kubernetes-pods
+              kubernetes_sd_configs:
+                - role: pod
+              relabel_configs:
+                - source_labels: [__meta_kubernetes_pod_annotation_prometheus_io_scrape]
+                  action: keep
+                  regex: "true"
+    processors:
+      # Buffer + protect the collector + add platform attributes.
+      batch:
+        send_batch_size: 1024
+        timeout: 1s
+      memory_limiter:
+        check_interval: 1s
+        limit_percentage: 80
+        spike_limit_percentage: 25
+      # Inject the platform's tenant + region attributes so every
+      # signal carries them — the cardinality story of ch.13.09.
+      resource:
+        attributes:
+          - key: deployment.environment
+            value: production
+            action: insert
+          - key: bookstore-platform.region
+            # The region label comes from the namespace label or a
+            # configmap mount; PRODUCTION sets it per-cluster.
+            value: us-east-1
+            action: insert
+      # Tail-based sampling — keep 100% of errors, 100% of slow,
+      # 1% of fast healthy. Reduces trace volume ~100x.
+      tail_sampling:
+        decision_wait: 30s
+        num_traces: 50000
+        expected_new_traces_per_sec: 100
+        policies:
+          - name: errors-first
+            type: status_code
+            status_code: { status_codes: [ERROR] }
+          - name: slow-first
+            type: latency
+            latency: { threshold_ms: 500 }
+          - name: probabilistic-background
+            type: probabilistic
+            probabilistic: { sampling_percentage: 1 }
+    exporters:
+      # Traces -> Tempo.
+      otlphttp/tempo:
+        endpoint: http://tempo.tempo-system.svc.cluster.local:4318
+        tls:
+          insecure: true
+      # Logs -> Loki.
+      otlphttp/loki:
+        endpoint: http://loki-gateway.loki-system.svc.cluster.local/otlp
+        tls:
+          insecure: true
+      # Metrics -> Prometheus (remote_write).
+      prometheusremotewrite:
+        endpoint: http://kube-prometheus-stack-prometheus.prometheus-system.svc.cluster.local:9090/api/v1/write
+        tls:
+          insecure: true
+        external_labels:
+          collector: bookstore-platform-otel
+    service:
+      pipelines:
+        traces:
+          receivers: [otlp]
+          processors: [memory_limiter, resource, tail_sampling, batch]
+          exporters: [otlphttp/tempo]
+        logs:
+          receivers: [otlp]
+          processors: [memory_limiter, resource, batch]
+          exporters: [otlphttp/loki]
+        metrics:
+          receivers: [otlp, prometheus]
+          processors: [memory_limiter, resource, batch]
+          exporters: [prometheusremotewrite]
+      telemetry:
+        logs:
+          level: info
+        metrics:
+          # Expose collector's own metrics for scraping by Prometheus.
+          address: 0.0.0.0:8888

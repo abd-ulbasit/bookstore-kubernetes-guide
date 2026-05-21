@@ -1,0 +1,183 @@
+# Bookstore — Part 11 ch.02 "Operator development": the BookstoreTenant CRD.
+#
+# Equivalent to `make manifests` (controller-gen crd) output; committed so the
+# tree is usable without controller-gen installed. Regenerate after editing
+# api/*/bookstoretenant_types.go with: make manifests
+#
+# !!! CRD-BACKED — intrinsic dry-run behavior (the SAME precedent as the guide's
+# other CRD-backed files: raw-manifests/51-gateway.yaml, 70-kyverno-policy.yaml,
+# 18-postgres-snapshot.yaml, the argocd/ tree, operators/cnpg-cluster.yaml,
+# cloud/karpenter-nodepool.yaml) !!!
+# This file IS the CustomResourceDefinition, so applying THIS file is what makes
+# the `BookstoreTenant` kind exist. The SAMPLE custom resource
+# (config/samples/bookstore_v1beta1_bookstoretenant.yaml) and the
+# Mutating/ValidatingWebhookConfiguration that reference the not-yet-deployed
+# operator Service therefore behave intrinsically:
+#   • `kubectl apply --dry-run=client -f config/samples/...` on a cluster
+#     WITHOUT this CRD installed prints:
+#       error: resource mapping not found ... no matches for kind
+#       "BookstoreTenant" in version "bookstore.example.com/v1beta1"
+#     That is EXPECTED and NOT a defect — identical to every other CRD-backed
+#     file in the guide. After `make install` (or applying this file), the
+#     sample dry-runs/applies cleanly.
+#   • The webhook configurations reference Service
+#     bookstore-operator-webhook-service; until the operator Deployment +
+#     Service + cert exist the apiserver cannot call the webhook (it is simply
+#     "not present"). The configs are schema-correct.
+# The CRD itself is a built-in apiextensions.k8s.io/v1 object, so THIS file
+# dry-runs/*applies* clean on any v1.30+ cluster.
+#
+# conversion.strategy: Webhook — v1beta1 is the storage+hub version; v1alpha1
+# is converted via the operator's /convert endpoint (see api/v1alpha1/
+# bookstoretenant_conversion.go). cert-manager injects the caBundle (the
+# cert-manager.io/inject-ca-from annotation is added by config/default in a
+# full kustomize deploy; shown unset here so this file stands alone).
+apiVersion: apiextensions.k8s.io/v1
+kind: CustomResourceDefinition
+metadata:
+  name: bookstoretenants.bookstore.example.com
+spec:
+  group: bookstore.example.com
+  names:
+    kind: BookstoreTenant
+    listKind: BookstoreTenantList
+    plural: bookstoretenants
+    singular: bookstoretenant
+    shortNames:
+      - btn
+  scope: Namespaced
+  conversion:
+    strategy: Webhook
+    webhook:
+      conversionReviewVersions: ["v1"]
+      clientConfig:
+        service:
+          name: bookstore-operator-webhook-service
+          namespace: bookstore-operator-system
+          path: /convert
+  versions:
+    - name: v1alpha1
+      served: true
+      storage: false
+      additionalPrinterColumns:
+        - name: Tenant
+          type: string
+          jsonPath: .spec.tenantName
+        - name: Phase
+          type: string
+          jsonPath: .status.phase
+        - name: Age
+          type: date
+          jsonPath: .metadata.creationTimestamp
+      schema:
+        openAPIV3Schema:
+          type: object
+          properties:
+            apiVersion: { type: string }
+            kind: { type: string }
+            metadata: { type: object }
+            spec:
+              type: object
+              required: ["tenantName"]
+              properties:
+                tenantName:
+                  type: string
+                  minLength: 1
+                  maxLength: 40
+                  pattern: ^[a-z0-9]([-a-z0-9]*[a-z0-9])?$
+                replicas:
+                  type: integer
+                  format: int32
+                  minimum: 0
+                  maximum: 5
+                  default: 1
+                size:
+                  type: string
+                  enum: ["s", "m", "l"]
+                  default: s
+            status:
+              type: object
+              properties:
+                observedGeneration: { type: integer, format: int64 }
+                namespace: { type: string }
+                phase: { type: string }
+                conditions:
+                  type: array
+                  items:
+                    type: object
+                    required: ["lastTransitionTime", "message", "reason", "status", "type"]
+                    properties:
+                      lastTransitionTime: { type: string, format: date-time }
+                      message: { type: string, maxLength: 32768 }
+                      observedGeneration: { type: integer, format: int64, minimum: 0 }
+                      reason: { type: string, maxLength: 1024, minLength: 1 }
+                      status: { type: string, enum: ["True", "False", "Unknown"] }
+                      type: { type: string, maxLength: 316 }
+                  x-kubernetes-list-map-keys: ["type"]
+                  x-kubernetes-list-type: map
+      subresources:
+        status: {}
+    - name: v1beta1
+      served: true
+      storage: true
+      additionalPrinterColumns:
+        - name: Tenant
+          type: string
+          jsonPath: .spec.tenantName
+        - name: Phase
+          type: string
+          jsonPath: .status.phase
+        - name: Namespace
+          type: string
+          jsonPath: .status.namespace
+        - name: Age
+          type: date
+          jsonPath: .metadata.creationTimestamp
+      schema:
+        openAPIV3Schema:
+          type: object
+          properties:
+            apiVersion: { type: string }
+            kind: { type: string }
+            metadata: { type: object }
+            spec:
+              type: object
+              required: ["tenantName"]
+              properties:
+                tenantName:
+                  type: string
+                  minLength: 1
+                  maxLength: 40
+                  pattern: ^[a-z0-9]([-a-z0-9]*[a-z0-9])?$
+                replicas:
+                  type: integer
+                  format: int32
+                  minimum: 0
+                  maximum: 5
+                  default: 1
+                tier:
+                  type: string
+                  enum: ["small", "medium", "large"]
+                  default: small
+            status:
+              type: object
+              properties:
+                observedGeneration: { type: integer, format: int64 }
+                namespace: { type: string }
+                phase: { type: string }
+                conditions:
+                  type: array
+                  items:
+                    type: object
+                    required: ["lastTransitionTime", "message", "reason", "status", "type"]
+                    properties:
+                      lastTransitionTime: { type: string, format: date-time }
+                      message: { type: string, maxLength: 32768 }
+                      observedGeneration: { type: integer, format: int64, minimum: 0 }
+                      reason: { type: string, maxLength: 1024, minLength: 1 }
+                      status: { type: string, enum: ["True", "False", "Unknown"] }
+                      type: { type: string, maxLength: 316 }
+                  x-kubernetes-list-map-keys: ["type"]
+                  x-kubernetes-list-type: map
+      subresources:
+        status: {}

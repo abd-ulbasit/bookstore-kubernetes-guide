@@ -1,0 +1,110 @@
+# Bookstore — Part 01 catalog Pod: logging SIDECAR (ch.01) + health probes &
+# graceful-shutdown lifecycle (ch.02). This single file accumulates the ch.01
+# and ch.02 increments on the same `catalog` object (the guide adds the probe
+# block to this file in ch.02; kept here so the manifest is self-consistent).
+#
+# Same `catalog` object as 01-catalog-pod.yaml (Part 00), evolved by ONE idea:
+# a second container co-located in the Pod. It is declared the MODERN way — a
+# NATIVE SIDECAR: an initContainer with `restartPolicy: Always` (GA in
+# Kubernetes 1.29+, target here is v1.30+). The kubelet then:
+#   * starts it BEFORE the app container,
+#   * keeps it running ALONGSIDE the app for the Pod's whole life,
+#   * stops it AFTER the app on shutdown,
+#   * does NOT let it block Job completion.
+#
+# The label `app: catalog` is UNCHANGED so Services/controllers in later
+# chapters still select this Pod. This file is a frozen snapshot of the
+# "add a sidecar" increment; 01-catalog-pod.yaml is kept as the seed.
+#
+# This Pod is fully runnable as-is:
+#   - the app container is the unmodified distroless image (logs JSON to stdout),
+#   - the sidecar is a public busybox image (no `kind load` needed) sharing the
+#     `varlog` emptyDir — exactly the shape a real log shipper (Fluent Bit /
+#     Vector) would take, just emitting a heartbeat instead of shipping.
+#
+# Apply (client-side validate, no cluster):
+#   kubectl apply --dry-run=client -f examples/bookstore/raw-manifests/02-catalog-pod-sidecar.yaml
+# Run for real (after `kind load docker-image bookstore/catalog:dev --name bookstore`):
+#   kubectl delete pod catalog --ignore-not-found
+#   kubectl apply -f examples/bookstore/raw-manifests/02-catalog-pod-sidecar.yaml
+apiVersion: v1
+kind: Pod
+metadata:
+  name: catalog                       # same identity as 01 — an evolution, not a new object
+  labels:
+    app: catalog                      # UNCHANGED — later selectors still match this Pod
+    component: backend
+spec:
+  # A NATIVE SIDECAR == initContainer with restartPolicy: Always.
+  initContainers:
+    - name: log-sidecar
+      image: busybox:1.36             # public image: pullable everywhere, no kind load
+      restartPolicy: Always           # <-- this line is what makes it a native sidecar
+      command: ["/bin/sh", "-c"]
+      args:
+        # Stand-in for a real log shipper: it owns the shared log dir and would
+        # tail/forward it. Here it just heartbeats so the demo is runnable.
+        - |
+          echo "log-sidecar: shipping from /var/log/app";
+          while true; do
+            echo "$(date -u +%FT%TZ) log-sidecar: tail/ship tick";
+            sleep 30;
+          done
+      volumeMounts:
+        - name: varlog
+          mountPath: /var/log/app
+  containers:
+    - name: catalog
+      image: bookstore/catalog:dev    # the image built in Part 00 ch.02
+      imagePullPolicy: IfNotPresent   # use the locally kind-loaded image (ch.07)
+      ports:
+        - name: http
+          containerPort: 8080
+      env:
+        - name: PORT                  # the Go app reads PORT (defaults to 8080)
+          value: "8080"
+        # App logs structured JSON to stdout (12-factor). `kubectl logs` reads
+        # that directly; the sidecar demonstrates the co-located-helper shape.
+
+      # --- Health probes (ch.02) -----------------------------------------
+      # The app already implements these exact routes:
+      #   GET /healthz -> always 200 {"status":"ok"}        (liveness)
+      #   GET /readyz  -> 503 if a configured DB/cache down  (readiness)
+      startupProbe:                   # gate: has it finished booting?
+        httpGet: { path: /healthz, port: http }
+        periodSeconds: 5
+        failureThreshold: 30          # up to 150s to start; then give up
+      livenessProbe:                  # wedged? -> kill+restart container
+        httpGet: { path: /healthz, port: http }
+        periodSeconds: 10
+        timeoutSeconds: 2
+        failureThreshold: 3
+        successThreshold: 1           # must be 1 for liveness
+      readinessProbe:                 # serve now? -> add/remove from endpoints
+        httpGet: { path: /readyz, port: http }
+        periodSeconds: 5
+        timeoutSeconds: 2
+        failureThreshold: 3
+        successThreshold: 1
+
+      # --- Lifecycle: graceful drain (ch.02) -----------------------------
+      lifecycle:
+        preStop:
+          # NATIVE sleep handler (Beta/on-by-default 1.30, GA 1.33). Runs
+          # BEFORE SIGTERM; bridges the endpoint-removal race so no new
+          # request arrives during the app's own in-flight drain. NOT `exec`:
+          # the catalog image is gcr.io/distroless/static:nonroot — no shell
+          # AND no coreutils, so `/bin/sh` and `/bin/sleep` are both absent;
+          # an exec preStop would fail and the grace delay be silently
+          # skipped. The native handler needs no in-image binary.
+          sleep:
+            seconds: 5
+      volumeMounts:
+        - name: varlog
+          mountPath: /var/log/app     # same volume the sidecar owns (shared)
+  # How long after SIGTERM before SIGKILL. Must exceed preStop(5s) + the app's
+  # own HTTP drain (the catalog drains in-flight for up to 15s).
+  terminationGracePeriodSeconds: 30
+  volumes:
+    - name: varlog
+      emptyDir: {}                    # shared scratch dir; lives & dies with the Pod

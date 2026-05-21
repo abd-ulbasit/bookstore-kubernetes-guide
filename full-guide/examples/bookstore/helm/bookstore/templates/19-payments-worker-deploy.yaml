@@ -1,0 +1,95 @@
+{{/*
+  payments-worker Deployment (raw-manifests 19-payments-worker-deploy.yaml).
+  Pure RabbitMQ consumer (no inbound API; serves /healthz + /metrics on :8080).
+  distroless goService restricted SC (UID 65532 + read-only root FS) + a
+  small /tmp emptyDir. Part 04: critical tier + topology spread with
+  ScheduleAnyway (NOT DoNotSchedule — an autoscaled consumer must never be
+  left Pending for spread) + preferred pod anti-affinity. replicas:1 is the
+  RESTING state; when keda.enabled the KEDA-managed HPA owns the replica count
+  (do not also hand-write an HPA for it).
+*/}}
+{{- if .Values.paymentsWorker.enabled }}
+{{- $p := .Values.paymentsWorker }}
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: payments-worker
+  namespace: {{ include "bookstore.namespace" . }}
+  labels:
+    {{- include "bookstore.labels" (dict "ctx" . "app" "payments-worker" "component" "worker") | nindent 4 }}
+spec:
+  replicas: {{ $p.replicaCount }}
+  revisionHistoryLimit: {{ $p.revisionHistoryLimit }}
+  selector:
+    matchLabels:
+      app: payments-worker
+  strategy:
+    type: RollingUpdate
+    rollingUpdate:
+      maxSurge: 1
+      maxUnavailable: 0
+  template:
+    metadata:
+      labels:
+        {{- include "bookstore.labels" (dict "ctx" . "app" "payments-worker" "component" "worker") | nindent 8 }}
+    spec:
+      serviceAccountName: {{ $p.serviceAccountName }}
+      automountServiceAccountToken: false
+      securityContext:
+        {{- include "bookstore.podSecurityContext" (dict "ctx" . "profile" "goService") | nindent 8 }}
+      priorityClassName: {{ $p.priorityClassName }}
+      {{- include "bookstore.topologySpread" (dict "w" $p "app" "payments-worker") | nindent 6 }}
+      {{- include "bookstore.affinity" (dict "w" $p "app" "payments-worker") | nindent 6 }}
+      {{- with $p.nodeSelector }}
+      nodeSelector:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with $p.tolerations }}
+      tolerations:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      containers:
+        - name: payments-worker
+          image: "{{ $p.image.repository }}:{{ $p.image.tag }}"
+          imagePullPolicy: {{ $p.image.pullPolicy }}
+          securityContext:
+            {{- include "bookstore.containerSecurityContext" (dict "ctx" . "profile" "goService") | nindent 12 }}
+          ports:
+            - name: metrics
+              containerPort: 8080
+          env:
+            - name: PORT
+              value: "8080"
+            - name: LOG_LEVEL
+              value: {{ $p.logLevel | quote }}
+            - name: AMQP_URL
+              value: {{ $p.amqpUrl | quote }}
+          startupProbe:
+            httpGet: { path: /healthz, port: metrics }
+            periodSeconds: 5
+            failureThreshold: 30
+          livenessProbe:
+            httpGet: { path: /healthz, port: metrics }
+            periodSeconds: 10
+            timeoutSeconds: 2
+            failureThreshold: 3
+          readinessProbe:
+            httpGet: { path: /healthz, port: metrics }
+            periodSeconds: 5
+            timeoutSeconds: 2
+            failureThreshold: 3
+          lifecycle:
+            preStop:
+              sleep:
+                seconds: {{ $p.preStopSleepSeconds }}
+          resources:
+            {{- toYaml $p.resources | nindent 12 }}
+          volumeMounts:
+            - name: tmp
+              mountPath: /tmp
+      volumes:
+        - name: tmp
+          emptyDir:
+            sizeLimit: 32Mi
+      terminationGracePeriodSeconds: {{ $p.terminationGracePeriodSeconds }}
+{{- end }}

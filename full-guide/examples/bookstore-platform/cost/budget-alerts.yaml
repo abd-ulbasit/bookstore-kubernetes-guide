@@ -1,0 +1,181 @@
+# Bookstore Platform v2 — Part 13 ch.10: budget breach alerts.
+# Warns at 80% of monthly budget per tenant; pages at 100%.
+#
+# v1 had no cost / budget story; v2's budget alerts are the FinOps
+# Inform-phase guardrail.
+#
+# BUDGET LIMIT MANAGEMENT — be honest about the UX:
+#
+#   In production, the FinOps team maintains tenant budgets in a CRD
+#   (e.g., `Tenant.bookstore-platform.example.com`) or a ConfigMap;
+#   a tiny `budget-exporter` Deployment reads that source and emits a
+#   Prometheus metric `bookstore_tenant_monthly_budget{tenant=...}`.
+#
+#   For kind reproducibility (and to keep this example self-contained
+#   without an extra exporter), we ship the budget as a static
+#   PrometheusRule recording rule below. To add a tenant, append a
+#   new line to `bookstore:tenant_monthly_budget`. Extend the rule
+#   for additional tenants; production code would replace the static
+#   rule with an exporter-driven metric.
+#
+# The tenant-budgets ConfigMap is still shipped (below) as the
+# canonical source of truth + audit trail — the recording rule mirrors
+# its values. PR review covers both.
+#
+# !!! CRD-INTRINSIC DRY-RUN
+#   `PrometheusRule` is `monitoring.coreos.com/v1`. WITHOUT
+#   kube-prometheus-stack:
+#     no matches for kind "PrometheusRule" in version "monitoring.coreos.com/v1"
+#   EXPECTED.
+#
+# Apply:
+#   kubectl apply -f examples/bookstore-platform/cost/budget-alerts.yaml
+---
+# The tenant-budgets ConfigMap. FinOps team owns it; updates via PR.
+# Source of truth + audit trail. The recording rule below mirrors
+# these values for the kind-reproducible no-exporter setup.
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: tenant-budgets
+  namespace: opencost
+  labels:
+    app.kubernetes.io/name: tenant-budgets
+    app.kubernetes.io/instance: tenant-budgets
+    app.kubernetes.io/part-of: bookstore-platform
+    app.kubernetes.io/component: cost-budgets
+    app.kubernetes.io/version: "1.0.0"
+data:
+  # USD per month, per tenant. Edit via PR.
+  acme-books-monthly-budget: "5000.00"
+  foo-books-monthly-budget:  "500.00"
+  default-monthly-budget:    "100.00"
+---
+apiVersion: monitoring.coreos.com/v1
+kind: PrometheusRule
+metadata:
+  name: bookstore-platform-budget-alerts
+  namespace: prometheus-system
+  labels:
+    app.kubernetes.io/name: bookstore-platform-budget-alerts
+    app.kubernetes.io/instance: bookstore-platform-budget-alerts
+    app.kubernetes.io/part-of: bookstore-platform
+    app.kubernetes.io/component: cost-budget-alerts
+    app.kubernetes.io/version: "1.0.0"
+    release: kube-prometheus-stack
+spec:
+  groups:
+    # Per-tenant monthly budget — static recording rule (kind-friendly).
+    # Mirror of the tenant-budgets ConfigMap above. Production replaces
+    # this with a budget-exporter scrape.
+    - name: bookstore-platform.budgets.limits
+      interval: 5m
+      rules:
+        - record: bookstore:tenant_monthly_budget
+          expr: vector(5000)
+          labels:
+            tenant: acme-books
+        - record: bookstore:tenant_monthly_budget
+          expr: vector(500)
+          labels:
+            tenant: foo-books
+        # Default tenant tier; extend the rule for additional tenants.
+        - record: bookstore:tenant_monthly_budget
+          expr: vector(100)
+          labels:
+            tenant: default
+    # Month-to-date spend per tenant + projected end-of-month spend.
+    - name: bookstore-platform.budgets.forecast
+      interval: 5m
+      rules:
+        # Month-to-date cost — sum the per-hour cost from the start of
+        # the calendar month until now.
+        #
+        # IDEAL EXPRESSION (not portable):
+        #   sum_over_time(bookstore:cost_per_hour:by_tenant[<day_of_month*24>h:1h])
+        # Prometheus does NOT accept a dynamic range vector, so we
+        # approximate with a fixed 31-day rolling window. This:
+        #   - over-counts by up to 1 month at the very start of a
+        #     calendar month (it includes the previous month's tail);
+        #   - under-counts by 0 in the steady-state mid-month case;
+        #   - is FinOps-correct enough for the day_of_month >= 5 window.
+        # Production replaces this with an OpenCost-served
+        # `opencost_namespace_total_monthly_cost` metric (resets at
+        # midnight UTC on the 1st of the month). See the dashboard's
+        # "Common false positives" section in
+        # runbooks/runbook-tenant-budget.md.
+        - record: bookstore:cost_mtd:by_tenant
+          expr: |
+            sum_over_time(bookstore:cost_per_hour:by_tenant[31d:1h])
+        # End-of-month projection — (MTD / current day-of-month) * days-in-month.
+        # `day_of_month()` returns 1..31 for "now".
+        # `days_in_month()` returns the number of days in the current calendar month.
+        # This is the FinOps-correct linear-extrapolation forecast.
+        - record: bookstore:projected_monthly_cost:by_tenant
+          expr: |
+            (
+              bookstore:cost_mtd:by_tenant
+              / scalar(day_of_month())
+            ) * scalar(days_in_month())
+    # The budget alerts themselves.
+    - name: bookstore-platform.budgets
+      interval: 5m
+      rules:
+        # Warn at 80% of budget — slack notification, not page.
+        - alert: BookstoreTenantBudgetWarn
+          expr: |
+            (
+              bookstore:cost_mtd:by_tenant
+              / on(tenant) bookstore:tenant_monthly_budget
+            ) > 0.8
+            and
+            (
+              bookstore:cost_mtd:by_tenant
+              / on(tenant) bookstore:tenant_monthly_budget
+            ) <= 1.0
+          for: 1h
+          labels:
+            severity: warn
+          annotations:
+            summary: "Tenant {{ $labels.tenant }} at >80% of monthly budget"
+            description: |
+              Tenant {{ $labels.tenant }} has consumed {{ $value | humanizePercentage }}
+              of its monthly budget (month-to-date).
+              Action: notify tenant + the platform FinOps team.
+            runbook_url: "https://docs.bookstore-platform.example.com/runbooks/runbook-tenant-budget"
+        # Breach at 100% — page.
+        - alert: BookstoreTenantBudgetBreach
+          expr: |
+            (
+              bookstore:cost_mtd:by_tenant
+              / on(tenant) bookstore:tenant_monthly_budget
+            ) > 1.0
+          for: 30m
+          labels:
+            severity: page
+          annotations:
+            summary: "Tenant {{ $labels.tenant }} EXCEEDED monthly budget"
+            description: |
+              Tenant {{ $labels.tenant }} has consumed {{ $value | humanizePercentage }}
+              of its monthly budget (over 100%).
+              Decision required: continue serving (chargeback) or
+              throttle (showback-only contract). FinOps team paged.
+            runbook_url: "https://docs.bookstore-platform.example.com/runbooks/runbook-tenant-budget"
+        # Forecast breach: projected to exceed budget by end of month.
+        # Warn early so the team can intervene before the actual breach.
+        - alert: BookstoreTenantBudgetForecastBreach
+          expr: |
+            (
+              bookstore:projected_monthly_cost:by_tenant
+              / on(tenant) bookstore:tenant_monthly_budget
+            ) > 1.2
+          for: 6h
+          labels:
+            severity: warn
+          annotations:
+            summary: "Tenant {{ $labels.tenant }} projected to exceed budget by >20%"
+            description: |
+              Linear extrapolation (MTD / day-of-month * days-in-month)
+              projects {{ $value | humanizePercentage }} of monthly
+              budget consumption. Intervene early.
+            runbook_url: "https://docs.bookstore-platform.example.com/runbooks/runbook-tenant-budget"

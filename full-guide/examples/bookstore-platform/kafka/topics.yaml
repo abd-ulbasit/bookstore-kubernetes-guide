@@ -1,0 +1,128 @@
+# Bookstore Platform v2 — Part 13 ch.05/06/08: the platform's Kafka topics
+# declared as KafkaTopic CRs. Strimzi's Topic Operator reconciles each into a
+# real Kafka topic with the requested partition + replication shape.
+#
+# !!! CRD-INTRINSIC DRY-RUN
+#   `KafkaTopic` is kafka.strimzi.io/v1beta2. WITHOUT Strimzi installed:
+#     no matches for kind "KafkaTopic" in version "kafka.strimzi.io/v1beta2"
+#   EXPECTED. After cluster.yaml applies, these topics materialise within
+#   ~30 s via the Topic Operator's reconcile loop.
+#
+# Six topics total, each chosen for a specific chapter:
+#   books.cdc            — Debezium Postgres CDC stream (ch.13.05).
+#   orders.placed        — outbox-published "an order was placed" event (ch.13.06).
+#   payments.completed   — Stripe webhook confirms payment (ch.13.06).
+#   payments.failed      — saga-compensation events (ch.13.06).
+#   ml.predictions       — recommender prediction stream (ch.13.08).
+#   ml.drift             — Alibi-Detect drift events (ch.13.08).
+#
+# Partitions: 3 (lets 3 consumers in a group parallelise; matches broker count).
+# Replication: 3 (matches `default.replication.factor` in the cluster).
+# Retention: 7 days — long enough to replay a week if a consumer fell behind.
+#
+# Apply (after cluster.yaml):
+#   kubectl apply -f examples/bookstore-platform/kafka/topics.yaml
+---
+apiVersion: kafka.strimzi.io/v1beta2
+kind: KafkaTopic
+metadata:
+  name: books.cdc
+  namespace: kafka-system
+  labels:
+    strimzi.io/cluster: bookstore-platform-kafka
+    app.kubernetes.io/part-of: bookstore-platform
+    bookstore-platform.example.com/component: search-cdc
+spec:
+  partitions: 3
+  replicas: 3
+  config:
+    retention.ms: "604800000"        # 7 days
+    cleanup.policy: delete
+    compression.type: "lz4"
+---
+apiVersion: kafka.strimzi.io/v1beta2
+kind: KafkaTopic
+metadata:
+  name: orders.placed
+  namespace: kafka-system
+  labels:
+    strimzi.io/cluster: bookstore-platform-kafka
+    app.kubernetes.io/part-of: bookstore-platform
+    bookstore-platform.example.com/component: orders
+spec:
+  partitions: 3
+  replicas: 3
+  config:
+    retention.ms: "604800000"
+    cleanup.policy: delete
+    compression.type: "lz4"
+    # Producer-side idempotence is enforced; the topic still benefits from
+    # min-in-sync-replicas at write time (configured at the broker level).
+---
+apiVersion: kafka.strimzi.io/v1beta2
+kind: KafkaTopic
+metadata:
+  name: payments.completed
+  namespace: kafka-system
+  labels:
+    strimzi.io/cluster: bookstore-platform-kafka
+    app.kubernetes.io/part-of: bookstore-platform
+    bookstore-platform.example.com/component: payments
+spec:
+  partitions: 3
+  replicas: 3
+  config:
+    retention.ms: "604800000"
+    cleanup.policy: delete
+    compression.type: "lz4"
+---
+apiVersion: kafka.strimzi.io/v1beta2
+kind: KafkaTopic
+metadata:
+  name: payments.failed
+  namespace: kafka-system
+  labels:
+    strimzi.io/cluster: bookstore-platform-kafka
+    app.kubernetes.io/part-of: bookstore-platform
+    bookstore-platform.example.com/component: payments-compensation
+spec:
+  partitions: 3
+  replicas: 3
+  config:
+    retention.ms: "604800000"
+    cleanup.policy: delete
+    compression.type: "lz4"
+---
+apiVersion: kafka.strimzi.io/v1beta2
+kind: KafkaTopic
+metadata:
+  name: ml.predictions
+  namespace: kafka-system
+  labels:
+    strimzi.io/cluster: bookstore-platform-kafka
+    app.kubernetes.io/part-of: bookstore-platform
+    bookstore-platform.example.com/component: ml-predictions
+spec:
+  partitions: 3
+  replicas: 3
+  config:
+    retention.ms: "604800000"
+    cleanup.policy: delete
+    compression.type: "lz4"
+---
+apiVersion: kafka.strimzi.io/v1beta2
+kind: KafkaTopic
+metadata:
+  name: ml.drift
+  namespace: kafka-system
+  labels:
+    strimzi.io/cluster: bookstore-platform-kafka
+    app.kubernetes.io/part-of: bookstore-platform
+    bookstore-platform.example.com/component: ml-drift
+spec:
+  partitions: 3
+  replicas: 3
+  config:
+    retention.ms: "604800000"
+    cleanup.policy: delete
+    compression.type: "lz4"

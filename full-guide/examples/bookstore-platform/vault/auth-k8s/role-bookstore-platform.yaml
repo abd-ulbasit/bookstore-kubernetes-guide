@@ -1,0 +1,93 @@
+# Bookstore Platform v2 — Part 15 ch.05: Vault `kubernetes` auth method role
+# binding tenant K8s ServiceAccounts to the tenant-scoped policy.
+#
+# THIS IS NOT A KUBERNETES MANIFEST. Like Part 11 ch.05's
+# `00-vault-policy-and-role.yaml`, this file is the `vault` CLI commands
+# encoded as YAML so they are reviewable, diffable, and reproducible. The
+# format matches the platform's own discipline: cluster-level config that
+# is NOT a kubectl object goes into a YAML that documents the commands.
+#
+# Why a role per tenant: Vault's `kubernetes` auth method matches a token
+# review against a role's `bound_service_account_names` +
+# `bound_service_account_namespaces` and returns a token bound to the
+# role's `policies` list. One role per tenant means one (SA, NS, policy)
+# triple — never a wildcard SA name, never a wildcard namespace.
+#
+# Apply (vault CLI; admin policy required from `policies/bookstore-platform-
+# admin.hcl`). Replace <TENANT> with the real tenant name (the Crossplane
+# Composition does this at onboarding):
+#
+#   TENANT=acme-books
+#   vault write auth/kubernetes/role/bookstore-platform-${TENANT} \
+#     bound_service_account_names=bookstore-platform-eso \
+#     bound_service_account_namespaces=bookstore-platform-${TENANT} \
+#     policies=bookstore-platform-app-${TENANT} \
+#     ttl=15m \
+#     max_ttl=1h \
+#     audience=https://vault.bookstore-platform.example.com
+#
+# Verify:
+#   vault read auth/kubernetes/role/bookstore-platform-acme-books
+
+apiVersion: vault.hashicorp.com/v1
+kind: KubernetesAuthRole   # CONCEPTUAL — see header. Vault has no CRD.
+metadata:
+  name: bookstore-platform-acme-books
+  # The (placeholder) tenant — replace `acme-books` with the real tenant
+  # at Crossplane Composition time. The Composition is the only producer
+  # of these roles in production; this file is the SHAPE the Composition
+  # writes via the Vault Terraform provider.
+spec:
+  # ── Identity bindings ──────────────────────────────────────────────────
+  # Only this exact SA in this exact namespace can authenticate as this
+  # role. Both fields are EXACT match (no wildcards in production).
+  boundServiceAccountNames:
+    - bookstore-platform-eso
+  boundServiceAccountNamespaces:
+    - bookstore-platform-acme-books
+
+  # ── Policies attached to the issued Vault token ────────────────────────
+  # Read-only, tenant-scoped (the policy in
+  # `policies/bookstore-platform-app.hcl` rendered with TENANT=acme-books).
+  policies:
+    - bookstore-platform-app-acme-books
+
+  # ── Token lifetime ─────────────────────────────────────────────────────
+  # Short TTL: 15 minutes. ESO renews opportunistically; an exfiltrated
+  # token is dead in 15m. max_ttl caps the absolute lifetime; the
+  # kubernetes auth method does NOT support renewals past max_ttl —
+  # after that, ESO MUST re-authenticate via SA token review, which
+  # re-validates the SA still exists with the bound name+ns.
+  ttl: 15m
+  maxTtl: 1h
+
+  # ── Token type ─────────────────────────────────────────────────────────
+  # Service tokens (vs batch tokens): service tokens carry their lease in
+  # Vault (renewable / revocable); batch tokens are short-lived and
+  # cheaper but not renewable. ESO wants renewable.
+  tokenType: service
+
+  # ── Audience binding (defense in depth) ────────────────────────────────
+  # If the K8s cluster's projected ServiceAccount tokens are issued with
+  # audience=https://vault.bookstore-platform.example.com, then a stolen
+  # token cannot be presented to any other API (e.g. the OIDC IdP) — the
+  # token review checks the audience claim. The audience is set on the
+  # `projected` volume in the ESO ServiceAccount; see the ESO
+  # ClusterSecretStore in `cluster-secret-store.yaml`. The Crossplane
+  # Composition wires the SA's projected volume to use this audience.
+  audience: https://vault.bookstore-platform.example.com
+
+  # ── Aliasing for audit ─────────────────────────────────────────────────
+  # Vault's audit log records the alias name; setting `alias_name_source`
+  # to `serviceaccount_uid` ensures a recreated SA (same name, new UID)
+  # appears as a NEW identity in audit, not the old one. This catches the
+  # "deleted SA, attacker recreated SA with the same name to inherit the
+  # old identity's trail" footgun.
+  aliasNameSource: serviceaccount_uid
+
+# !!! CRD-INTRINSIC DRY-RUN
+#   This file's `kind: KubernetesAuthRole` is NOT a real CRD; it documents
+#   the vault CLI shape. `kubectl apply --dry-run=client -f` will print:
+#     no matches for kind "KubernetesAuthRole"
+#   EXPECTED — this object lives in Vault, not Kubernetes. Apply via the
+#   `vault write auth/kubernetes/role/...` command in the header.

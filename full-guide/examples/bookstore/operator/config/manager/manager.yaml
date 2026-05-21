@@ -1,0 +1,91 @@
+# Bookstore operator controller-manager Deployment + its own Namespace.
+#
+# The operator runs in its OWN namespace `bookstore-operator-system` (the same
+# pattern as the guide's CloudNativePG/Velero/Kyverno controllers — Part 08
+# ch.05), NOT the PSA-`restricted` `bookstore` namespace. The system namespace
+# is itself labelled `restricted` here AND the Pod is fully restricted-
+# compliant (runAsNonRoot, UID 65532, drop ALL, seccomp RuntimeDefault,
+# read-only root FS) — a controller has no reason to need more, and this is the
+# same hardening the reconciled tenant workload gets.
+#
+# Built-in objects only (v1 / apps/v1): dry-run/apply clean. (The image
+# bookstore/operator:dev is built by THIS dir's Dockerfile; load it into kind
+# like the four app images. `make deploy` kustomize-sets this image ref.)
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: bookstore-operator-system
+  labels:
+    app.kubernetes.io/name: bookstore-operator
+    pod-security.kubernetes.io/enforce: restricted
+    pod-security.kubernetes.io/enforce-version: latest
+    pod-security.kubernetes.io/warn: restricted
+    pod-security.kubernetes.io/audit: restricted
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: bookstore-operator-controller-manager
+  namespace: bookstore-operator-system
+  labels:
+    app.kubernetes.io/name: bookstore-operator
+    control-plane: controller-manager
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      control-plane: controller-manager
+  template:
+    metadata:
+      labels:
+        control-plane: controller-manager
+    spec:
+      serviceAccountName: bookstore-operator-controller-manager
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 65532
+        seccompProfile:
+          type: RuntimeDefault
+      containers:
+        - name: manager
+          image: bookstore/operator:dev
+          imagePullPolicy: IfNotPresent
+          args:
+            - --leader-elect
+            - --health-probe-bind-address=:8081
+          ports:
+            - name: webhook
+              containerPort: 9443
+              protocol: TCP
+          livenessProbe:
+            httpGet: { path: /healthz, port: 8081 }
+            initialDelaySeconds: 15
+            periodSeconds: 20
+          readinessProbe:
+            httpGet: { path: /readyz, port: 8081 }
+            initialDelaySeconds: 5
+            periodSeconds: 10
+          resources:
+            requests: { cpu: 10m, memory: 64Mi }
+            limits: { cpu: 200m, memory: 128Mi }
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            runAsNonRoot: true
+            capabilities:
+              drop: ["ALL"]
+            seccompProfile:
+              type: RuntimeDefault
+          volumeMounts:
+            - name: webhook-certs
+              mountPath: /tmp/k8s-webhook-server/serving-certs
+              readOnly: true
+      volumes:
+        # cert-manager (or the documented self-signed flow) provides this
+        # Secret; the controller-runtime webhook server reads its TLS cert from
+        # the default path /tmp/k8s-webhook-server/serving-certs.
+        - name: webhook-certs
+          secret:
+            secretName: bookstore-operator-webhook-cert
+            optional: true
+      terminationGracePeriodSeconds: 10

@@ -1,0 +1,140 @@
+# Bookstore — Part 05 ch.03 "Supply chain security": admission-time image policy.
+#
+# !!! CRD DEPENDENCY (intrinsic, like 18-postgres-snapshot / 51-gateway) !!!
+# `ClusterPolicy` is a Kyverno CRD (apiGroup kyverno.io/v1). On a cluster
+# WITHOUT Kyverno installed, `kubectl apply -f` this file fails with:
+#   error: resource mapping not found for ... kind "ClusterPolicy" ...
+#   ensure CRDs are installed first   (no matches for kind "ClusterPolicy")
+# That is EXPECTED and documented (ch.03 / 07-delivery/02). VENDORED copy for
+# the `kyverno` Kustomize component — install Kyverno with its Helm chart
+# (NOT a releases/latest/download/<pinned-file>.yaml URL, which 404s when a
+# new Kyverno ships; this is the stable path the chapter + this component's
+# kustomization.yaml teach), then enable the component on an overlay:
+#   helm repo add kyverno https://kyverno.github.io/kyverno/ && helm repo update
+#   helm install kyverno kyverno/kyverno -n kyverno --create-namespace
+#   kubectl -n kyverno rollout status deploy/kyverno-admission-controller
+#   # then add `- ../../components/kyverno` to an overlay's components: list and
+#   # kubectl apply -k examples/bookstore/kustomize/overlays/<env>
+# A client dry-run of an overlay that includes this component on a cluster
+# WITHOUT Kyverno prints the "no matches for kind ClusterPolicy" line for THIS
+# object only and continues; every built-in object still validates. Schema
+# below verified against the Kyverno v1 ClusterPolicy API.
+#
+# !!! AUDIT MODE IS DELIBERATE — READ THIS !!!
+# validationFailureAction: Audit  → violations are REPORTED (PolicyReport +
+# logs), NOT blocked. It is set to Audit ON PURPOSE because two of these rules
+# would REJECT THE GUIDE'S OWN IMAGES if set to Enforce:
+#   • disallow-latest-tag / require-image-digest: the Bookstore images are
+#     `bookstore/<svc>:dev` (a mutable tag, no digest) — Enforce would block
+#     every catalog/orders/storefront/payments-worker Pod and blackhole the
+#     cluster you just built.
+#   • require-non-root only passes because Part 05 ch.02 already hardened every
+#     workload; it is included to show the supply-chain/runtime overlap.
+# The HONEST production path (ch.03 explains it): your CI builds an immutable
+# image, pushes it BY DIGEST, signs it (Cosign) and records it in the
+# transparency log; ONLY THEN do you flip this to `Enforce` (and add a real
+# `verifyImages` rule with your public key / keyless identity). Handing a
+# learner an Enforce policy that rejects their own dev images is an
+# anti-pattern this guide refuses to ship — hence Audit + this explanation.
+#
+# Requires: Kyverno installed (above). Scope: Pods in namespace `bookstore`.
+apiVersion: kyverno.io/v1
+kind: ClusterPolicy
+metadata:
+  name: bookstore-image-supply-chain
+  labels:
+    app.kubernetes.io/part-of: bookstore
+  annotations:
+    policies.kyverno.io/title: Bookstore image supply-chain (Audit)
+    policies.kyverno.io/category: Supply Chain Security
+    policies.kyverno.io/description: >-
+      Audit-only: flags Pods using an explicit :latest tag, images not pinned
+      by digest (this rule also covers bare/implicit-latest refs), or pods not
+      setting pod-level runAsNonRoot. Audit (not Enforce) so it cannot reject
+      the guide's own bookstore/<svc>:dev images — see the file
+      header and Part 05 ch.03 for the real Enforce-by-digest+signature path.
+spec:
+  # AUDIT, not Enforce — see the header. This is the single most important
+  # line in this file for the guide's "don't blackhole your own cluster" rule.
+  validationFailureAction: Audit
+  background: true                  # also report on already-existing Pods
+  rules:
+    # 1) Disallow an EXPLICIT mutable `:latest` tag. NOTE the limitation:
+    #    `!*:latest` does NOT match a bare/untagged ref (e.g. `nginx`, which
+    #    the runtime resolves to an implicit `:latest`) — there is no `:latest`
+    #    substring to negate. Rule 2 (require-image-digest) is what actually
+    #    covers bare/implicit-latest refs; a digest is unambiguous for EVERY
+    #    image. Keep both; digest pinning is the real control.
+    - name: disallow-latest-tag
+      match:
+        any:
+          - resources:
+              kinds: ["Pod"]
+              namespaces: ["bookstore"]
+      validate:
+        message: >-
+          Using a mutable image tag is not allowed. Pin an immutable tag or,
+          better, a digest (see Part 05 ch.03). [AUDIT — reported, not blocked]
+        pattern:
+          spec:
+            containers:
+              - image: "!*:latest"
+    # 2) Require an image digest (image ref must contain an @sha256: digest).
+    #    The bookstore/<svc>:dev images do NOT — so this WILL report in Audit;
+    #    that is the point (it shows exactly what Enforce would block until CI
+    #    builds by digest). Enforcing this is the real supply-chain control.
+    - name: require-image-digest
+      match:
+        any:
+          - resources:
+              kinds: ["Pod"]
+              namespaces: ["bookstore"]
+      validate:
+        message: >-
+          Images should be referenced by immutable digest (name@sha256:...),
+          not a tag. [AUDIT — expected to flag the guide's :dev images]
+        pattern:
+          spec:
+            containers:
+              - image: "*@sha256:*"
+    # 3) Require non-root. Passes today because Part 05 ch.02 set
+    #    runAsNonRoot at the POD level on every Bookstore workload — included
+    #    to show the runtime/supply-chain overlap and that the hardening holds.
+    #    LIMITATION: this pattern checks only spec.securityContext (pod-level).
+    #    A Pod may legitimately set runAsNonRoot per-CONTAINER instead; a
+    #    production policy should accept EITHER location (e.g. an anyPattern
+    #    matching pod-level OR every container's securityContext) so it does
+    #    not false-flag a correctly-hardened container-level Pod.
+    - name: require-run-as-non-root
+      match:
+        any:
+          - resources:
+              kinds: ["Pod"]
+              namespaces: ["bookstore"]
+      validate:
+        message: >-
+          Containers must run as non-root: set
+          spec.securityContext.runAsNonRoot=true (Part 05 ch.02).
+        pattern:
+          spec:
+            =(securityContext):
+              =(runAsNonRoot): true
+    # 4) Image-verification PLACEHOLDER (commented). With real Cosign signing
+    #    in CI (ch.03), this rule — switched to Enforce — is what actually
+    #    guarantees provenance. Left commented because the guide's :dev images
+    #    are unsigned and there is no key/identity to verify against locally.
+    # - name: verify-image-signature
+    #   match:
+    #     any:
+    #       - resources:
+    #           kinds: ["Pod"]
+    #           namespaces: ["bookstore"]
+    #   verifyImages:
+    #     - imageReferences: ["ghcr.io/your-org/bookstore-*"]
+    #       attestors:
+    #         - entries:
+    #             - keyless:
+    #                 subject: "https://github.com/your-org/*"
+    #                 issuer: "https://token.actions.githubusercontent.com"
+    #                 rekor:
+    #                   url: https://rekor.sigstore.dev

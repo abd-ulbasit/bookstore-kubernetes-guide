@@ -1,0 +1,678 @@
+# ===========================================================================
+# Bookstore Helm chart — DEFAULT VALUES
+# ---------------------------------------------------------------------------
+# Every value below is documented. The DEFAULTS reproduce the cumulative
+# raw-manifests app (Parts 00–06) EXACTLY: same images, replica counts,
+# tuned resources, the full restricted securityContext per image, the Part 04
+# scheduling layer (priorityClassName + topologySpread + affinity +
+# tolerations), and the byte-identical catalog/orders DB_DSN. A plain
+# `helm install` on a vanilla cluster works because every CRD-backed extra
+# (Ingress/Gateway, ServiceMonitor, PrometheusRule, KEDA, Kyverno,
+# VolumeSnapshot) is behind a toggle that defaults OFF where the CRD is not
+# built in (Ingress defaults ON: networking.k8s.io is built in).
+# ===========================================================================
+
+# ---------------------------------------------------------------------------
+# Global / naming
+# ---------------------------------------------------------------------------
+# nameOverride / fullnameOverride: keep object names exactly the raw-manifests
+# names (`catalog`, `postgres`, ...). The chart deliberately does NOT prefix
+# objects with the release name (see _helpers.tpl "bookstore.fullname"): the
+# Bookstore Services/DNS/DB_DSN are wired by FIXED names across Parts 02–06,
+# so the chart preserves them. Override only if you must run two copies.
+nameOverride: ""
+fullnameOverride: ""
+
+# ---------------------------------------------------------------------------
+# Namespace (raw-manifests 00-namespace.yaml)
+# ---------------------------------------------------------------------------
+# The bookstore namespace ENFORCES Pod Security Admission `restricted` (plus
+# audit+warn). `helm install --create-namespace` makes the bare namespace;
+# this chart also templates the Namespace object so the PSA labels +
+# ResourceQuota + LimitRange travel WITH the release. Set namespace.create
+# false if your platform pre-creates (and pre-labels) the namespace via GitOps.
+namespace:
+  create: true
+  name: bookstore
+  # Pod Security Admission — restricted in all three modes, version: latest
+  # (00-namespace.yaml). Every workload this chart renders is restricted-
+  # compliant, so enforce:restricted does not lock out our own pods.
+  psa:
+    enforce: restricted
+    enforceVersion: latest
+    audit: restricted
+    auditVersion: latest
+    warn: restricted
+    warnVersion: latest
+  # ResourceQuota — caps the namespace TOTAL (00-namespace.yaml).
+  resourceQuota:
+    enabled: true
+    hard:
+      requests.cpu: "2"
+      requests.memory: 2Gi
+      limits.cpu: "4"
+      limits.memory: 4Gi
+      pods: "30"
+  # LimitRange — per-container defaults + min/max (00-namespace.yaml).
+  limitRange:
+    enabled: true
+    default:
+      cpu: 500m
+      memory: 256Mi
+    defaultRequest:
+      cpu: 100m
+      memory: 128Mi
+    max:
+      cpu: "2"
+      memory: 1Gi
+    min:
+      cpu: 10m
+      memory: 16Mi
+
+# ---------------------------------------------------------------------------
+# ServiceAccounts + RBAC (raw-manifests 05-serviceaccounts-rbac.yaml)
+# ---------------------------------------------------------------------------
+# One SA per workload, all automountServiceAccountToken:false (no Bookstore
+# Pod uses the `default` SA). Only catalog-sa is bound to the tiny
+# resource-name-scoped Role (get the catalog-config ConfigMap by name).
+serviceAccounts:
+  create: true
+  # automount default for every Bookstore SA (and re-asserted on each podSpec).
+  automountServiceAccountToken: false
+# catalog's least-privilege Role/RoleBinding (the teaching example).
+rbac:
+  create: true
+
+# ---------------------------------------------------------------------------
+# ConfigMap (raw-manifests 15-catalog-config.yaml)
+# ---------------------------------------------------------------------------
+catalogConfig:
+  # immutable: prod flips this on (perf+safety) — a change then needs a NEW
+  # ConfigMap name + a Deployment rollout. Off here to match 15- as-shipped.
+  immutable: false
+  data:
+    LOG_LEVEL: "info"
+    REDIS_ADDR: "redis.bookstore.svc.cluster.local:6379"
+    # illustrative (not read by the demo binary; shows bulk envFrom)
+    CATALOG_FEATURE_RECOMMENDATIONS: "false"
+    CATALOG_CACHE_TTL_SECONDS: "30"
+
+# ---------------------------------------------------------------------------
+# DB credentials Secret (raw-manifests 16-db-credentials.yaml)
+# ---------------------------------------------------------------------------
+# !!! DEMO-ONLY !!! A Secret is base64, NOT encrypted. This is committed ONLY
+# because the guide is a throwaway local lab. In a real chart you NEVER ship
+# credentials in values.yaml — use External Secrets Operator / Sealed Secrets /
+# Vault, set dbCredentials.create=false, and reference an externally-managed
+# Secret of the same name. See ch.01 Production notes.
+dbCredentials:
+  create: true
+  secretName: db-credentials
+  # Consumed by postgres (envFrom) and by catalog/orders + the jobs (keyRef).
+  POSTGRES_USER: bookstore
+  POSTGRES_PASSWORD: "devpassword" # DEMO-ONLY — never a real/committed secret
+  POSTGRES_DB: bookstore
+
+# Postgres connection coordinates — used to assemble the SINGLE DB_DSN string
+# (templates/_helpers.tpl "bookstore.dbDsn") that catalog AND orders consume
+# byte-identically (raw-manifests 10-/14-). Change here = change in both.
+database:
+  host: postgres.bookstore.svc.cluster.local
+  port: 5432
+  sslmode: disable
+
+# ---------------------------------------------------------------------------
+# Priority ladder (raw-manifests 35-priorityclasses.yaml) — cluster-scoped
+# ---------------------------------------------------------------------------
+# PriorityClass is NOT namespaced and is shared cluster-wide. Behind a toggle
+# (create) AND given helm.sh/resource-policy: keep so a `helm uninstall` of one
+# release does not yank classes another release/workload still references.
+priorityClasses:
+  create: true
+  data:
+    bookstore-data:
+      value: 1000000
+      description: "Bookstore stateful data tier (postgres). Scheduled first, preempted last."
+    bookstore-critical:
+      value: 100000
+      description: "Bookstore user-facing services. Above batch, below the data tier."
+    bookstore-batch:
+      value: 1000
+      preemptionPolicy: Never
+      description: "Bookstore deferrable batch. Never preempts others; yields under pressure."
+
+# ---------------------------------------------------------------------------
+# Shared restricted securityContext building blocks
+# ---------------------------------------------------------------------------
+# These are the EXACT per-image restricted models from Part 05 ch.02. They are
+# referenced by each workload below; _helpers.tpl renders them verbatim so the
+# chart's restricted posture cannot drift from the raw manifests.
+#   goService  — distroless/static:nonroot, UID 65532, read-only root FS
+#                (catalog, orders, payments-worker, canary)
+#   storefront — purpose-built unprivileged nginx, UID 101, read-only root FS
+#   uid999RW   — stock postgres/rabbitmq image, UID/GID 999 + fsGroup 999,
+#                NO read-only root FS (writes outside the data volume)
+#   redis999   — stock redis, UID/GID 999 + fsGroup 999, read-only root FS
+#   batch999   — stock postgres image for the DB batch jobs, UID/GID 999
+#                + fsGroup 999, NO read-only root FS
+securityProfiles:
+  goService:
+    pod:
+      runAsNonRoot: true
+      runAsUser: 65532
+      runAsGroup: 65532
+      seccompProfile:
+        type: RuntimeDefault
+    container:
+      allowPrivilegeEscalation: false
+      readOnlyRootFilesystem: true
+      capabilities:
+        drop: ["ALL"]
+  storefront:
+    pod:
+      runAsNonRoot: true
+      runAsUser: 101
+      runAsGroup: 101
+      seccompProfile:
+        type: RuntimeDefault
+    container:
+      allowPrivilegeEscalation: false
+      readOnlyRootFilesystem: true
+      capabilities:
+        drop: ["ALL"]
+  redis999:
+    pod:
+      runAsNonRoot: true
+      runAsUser: 999
+      runAsGroup: 999
+      fsGroup: 999
+      seccompProfile:
+        type: RuntimeDefault
+    container:
+      allowPrivilegeEscalation: false
+      readOnlyRootFilesystem: true
+      capabilities:
+        drop: ["ALL"]
+  uid999RW:
+    pod:
+      runAsNonRoot: true
+      runAsUser: 999
+      runAsGroup: 999
+      fsGroup: 999
+      fsGroupChangePolicy: OnRootMismatch
+      seccompProfile:
+        type: RuntimeDefault
+    container:
+      allowPrivilegeEscalation: false
+      capabilities:
+        drop: ["ALL"]
+  batch999:
+    pod:
+      runAsNonRoot: true
+      runAsUser: 999
+      runAsGroup: 999
+      fsGroup: 999
+      seccompProfile:
+        type: RuntimeDefault
+    container:
+      allowPrivilegeEscalation: false
+      capabilities:
+        drop: ["ALL"]
+
+# Reusable scheduling fragments (Part 04). Per-workload `scheduling:` blocks
+# below select which of these apply; defaults reproduce the raw manifests.
+# (Defined here as anchors-by-convention; each workload re-states what it needs
+# so `--set` overrides stay simple and explicit.)
+
+# ---------------------------------------------------------------------------
+# WORKLOADS
+# ---------------------------------------------------------------------------
+
+# catalog — stateless Go REST API (raw-manifests 10-catalog-deploy.yaml)
+catalog:
+  enabled: true
+  replicaCount: 3
+  revisionHistoryLimit: 5
+  image:
+    repository: bookstore/catalog
+    tag: dev
+    pullPolicy: IfNotPresent
+  serviceAccountName: catalog-sa
+  priorityClassName: bookstore-critical
+  # Part 04 ch.02: hard topology spread + preferred pod anti-affinity.
+  topologySpread:
+    enabled: true
+    maxSkew: 1
+    topologyKey: kubernetes.io/hostname
+    whenUnsatisfiable: DoNotSchedule
+  podAntiAffinity:
+    enabled: true
+    weight: 100
+    topologyKey: kubernetes.io/hostname
+  nodeSelector: {}
+  tolerations: []
+  # Extra affinity merged on top of the generated podAntiAffinity (override).
+  affinity: {}
+  resources:
+    requests: { cpu: 50m, memory: 64Mi }
+    limits: { cpu: 250m, memory: 128Mi }
+  service:
+    port: 80
+    targetPort: http
+  terminationGracePeriodSeconds: 30
+  preStopSleepSeconds: 5
+
+# storefront — nginx static UI (raw-manifests 11-storefront-deploy.yaml)
+storefront:
+  enabled: true
+  replicaCount: 2
+  revisionHistoryLimit: 5
+  image:
+    repository: bookstore/storefront
+    tag: dev
+    pullPolicy: IfNotPresent
+  serviceAccountName: storefront-sa
+  priorityClassName: bookstore-critical
+  topologySpread:
+    enabled: true
+    maxSkew: 1
+    topologyKey: kubernetes.io/hostname
+    whenUnsatisfiable: DoNotSchedule
+  podAntiAffinity:
+    enabled: true
+    weight: 100
+    topologyKey: kubernetes.io/hostname
+  nodeSelector: {}
+  tolerations: []
+  affinity: {}
+  resources:
+    requests: { cpu: 25m, memory: 32Mi }
+    limits: { cpu: 100m, memory: 64Mi }
+  service:
+    port: 80
+    targetPort: http
+
+# orders — stateless Go REST API (raw-manifests 14-orders-deploy.yaml)
+orders:
+  enabled: true
+  replicaCount: 2
+  revisionHistoryLimit: 5
+  image:
+    repository: bookstore/orders
+    tag: dev
+    pullPolicy: IfNotPresent
+  serviceAccountName: orders-sa
+  priorityClassName: bookstore-critical
+  # 14- carries only the priority tier (no spread/anti-affinity) — kept faithful.
+  topologySpread:
+    enabled: false
+  podAntiAffinity:
+    enabled: false
+  nodeSelector: {}
+  tolerations: []
+  affinity: {}
+  resources:
+    requests: { cpu: 50m, memory: 64Mi }
+    limits: { cpu: 250m, memory: 128Mi }
+  service:
+    port: 80
+    targetPort: http
+  terminationGracePeriodSeconds: 30
+  preStopSleepSeconds: 5
+
+# payments-worker — Go RabbitMQ consumer (raw-manifests 19-...)
+paymentsWorker:
+  enabled: true
+  replicaCount: 1 # resting state; KEDA owns scaling when keda.enabled
+  revisionHistoryLimit: 5
+  image:
+    repository: bookstore/payments-worker
+    tag: dev
+    pullPolicy: IfNotPresent
+  serviceAccountName: payments-worker-sa
+  priorityClassName: bookstore-critical
+  # ScheduleAnyway (not DoNotSchedule): an autoscaled consumer must never be
+  # left Pending for spread (19- documents the deliberate difference).
+  topologySpread:
+    enabled: true
+    maxSkew: 1
+    topologyKey: kubernetes.io/hostname
+    whenUnsatisfiable: ScheduleAnyway
+  podAntiAffinity:
+    enabled: true
+    weight: 100
+    topologyKey: kubernetes.io/hostname
+  nodeSelector: {}
+  tolerations: []
+  affinity: {}
+  # DEMO-ONLY — never a real/committed credential. guest:guest is the stock
+  # rabbitmq default (13-rabbitmq.yaml runs no extra auth as Part-02
+  # scaffolding). In production the broker has real credentials and this URL
+  # comes from an external Secret (env from secretRef), not values.yaml.
+  amqpUrl: "amqp://guest:guest@rabbitmq.bookstore.svc.cluster.local:5672/"
+  logLevel: "info"
+  resources:
+    requests: { cpu: 50m, memory: 64Mi }
+    limits: { cpu: 250m, memory: 128Mi }
+  # headless metrics-only Service (40-): clusterIP None.
+  service:
+    port: 8080
+    targetPort: metrics
+  terminationGracePeriodSeconds: 30
+  preStopSleepSeconds: 5
+
+# redis — stock cache, in-memory only (raw-manifests 12-redis.yaml)
+redis:
+  enabled: true
+  replicaCount: 1
+  image:
+    repository: redis
+    tag: "7"
+    pullPolicy: IfNotPresent
+  serviceAccountName: redis-sa
+  args: ["--save", "", "--appendonly", "no"]
+  nodeSelector: {}
+  tolerations: []
+  affinity: {}
+  resources:
+    requests: { cpu: 25m, memory: 32Mi }
+    limits: { cpu: 200m, memory: 128Mi }
+  service:
+    port: 6379
+    targetPort: redis
+
+# rabbitmq — stock broker (raw-manifests 13-rabbitmq.yaml)
+rabbitmq:
+  enabled: true
+  replicaCount: 1
+  image:
+    repository: rabbitmq
+    tag: "3.13-management"
+    pullPolicy: IfNotPresent
+  serviceAccountName: rabbitmq-sa
+  nodeSelector: {}
+  tolerations: []
+  affinity: {}
+  resources:
+    requests: { cpu: 100m, memory: 256Mi }
+    limits: { cpu: 500m, memory: 512Mi }
+  service:
+    ports:
+      - { name: amqp, port: 5672, targetPort: amqp }
+      - { name: management, port: 15672, targetPort: management }
+  dataSizeLimit: 256Mi
+
+# postgres — stateful data tier (raw-manifests 20-postgres-statefulset.yaml)
+postgres:
+  enabled: true
+  replicaCount: 1
+  image:
+    repository: postgres
+    tag: "16"
+    pullPolicy: IfNotPresent
+  serviceAccountName: postgres-sa
+  priorityClassName: bookstore-data
+  pgData: /var/lib/postgresql/data/pgdata
+  # Part 04 ch.02: tolerate the dedicated-DB-node taint + prefer that node.
+  tolerations:
+    - key: dedicated
+      operator: Equal
+      value: database
+      effect: NoSchedule
+  nodeAffinity:
+    enabled: true
+    weight: 100
+    key: dedicated
+    values: ["database"]
+  nodeSelector: {}
+  affinity: {}
+  resources:
+    requests: { cpu: 100m, memory: 256Mi }
+    limits: { cpu: 500m, memory: 512Mi }
+  terminationGracePeriodSeconds: 30
+  persistence:
+    size: 1Gi
+    accessModes: ["ReadWriteOnce"]
+    # "" => the cluster default StorageClass (kind: standard, k3d: local-path).
+    # Set to "bookstore-local" to use the chart's optional StorageClass.
+    storageClassName: ""
+  # headless Service (serviceName) port.
+  service:
+    port: 5432
+
+# ---------------------------------------------------------------------------
+# Optional StorageClass (raw-manifests 17-storageclass.yaml) — OPT-IN, OFF
+# ---------------------------------------------------------------------------
+# DEFAULT create:false (matches raw 17- being "opt-in teaching scaffolding").
+# postgres uses the cluster DEFAULT class (postgres.persistence.storageClassName
+# ""), so this class would be created-but-unused if turned on without also
+# pointing the PVC at it. To actually use it: set create:true AND
+# postgres.persistence.storageClassName=bookstore-local. The StorageClass is
+# cluster-scoped and annotated helm.sh/resource-policy: keep (templates/17-),
+# so it survives `helm uninstall` (like the PriorityClasses).
+storageClass:
+  create: false
+  name: bookstore-local
+  provisioner: rancher.io/local-path
+  volumeBindingMode: WaitForFirstConsumer
+  reclaimPolicy: Delete
+  allowVolumeExpansion: true
+
+# ---------------------------------------------------------------------------
+# DB migration Job — Helm post-install/post-upgrade HOOK
+# (raw-manifests 21-db-migrate-job.yaml)
+# ---------------------------------------------------------------------------
+# Runs the idempotent schema AFTER postgres exists. It runs after the
+# release's normal objects because it is a post-install,post-upgrade HOOK
+# (Helm always applies post-* hooks AFTER all normal release resources, by
+# lifecycle EVENT) — NOT because of its weight. hook-weight only orders hooks
+# RELATIVE TO OTHER HOOKS OF THE SAME EVENT; with a single post-* hook the
+# value is behaviorally irrelevant. It is kept as a sane anchor so that if you
+# later add, say, a pre-migration check hook at weight "1", it would run
+# before this migration at weight "5".
+migrationJob:
+  enabled: true
+  image:
+    repository: postgres
+    tag: "16"
+    pullPolicy: IfNotPresent
+  serviceAccountName: migrate-sa
+  priorityClassName: bookstore-batch
+  # Orders this hook only against OTHER post-install/post-upgrade hooks (none
+  # today). Does NOT sequence it against the StatefulSet — that ordering is
+  # automatic for any post-* hook.
+  hookWeight: "5"
+  backoffLimit: 4
+  activeDeadlineSeconds: 120
+  ttlSecondsAfterFinished: 600
+  resources:
+    requests: { cpu: 50m, memory: 64Mi }
+    limits: { cpu: 200m, memory: 128Mi }
+
+# Cleanup CronJob (raw-manifests 22-cleanup-cronjob.yaml) — a normal release
+# object (NOT a hook): it runs nightly for the life of the release.
+cleanupCronJob:
+  enabled: true
+  image:
+    repository: postgres
+    tag: "16"
+    pullPolicy: IfNotPresent
+  serviceAccountName: migrate-sa
+  priorityClassName: bookstore-batch
+  schedule: "0 3 * * *"
+  timeZone: "Etc/UTC"
+  concurrencyPolicy: Forbid
+  startingDeadlineSeconds: 300
+  successfulJobsHistoryLimit: 3
+  failedJobsHistoryLimit: 1
+  backoffLimit: 2
+  activeDeadlineSeconds: 300
+  ttlSecondsAfterFinished: 600
+  resources:
+    requests: { cpu: 25m, memory: 32Mi }
+    limits: { cpu: 100m, memory: 64Mi }
+
+# ---------------------------------------------------------------------------
+# Manual canary teaching variant (raw-manifests 30-catalog-canary.yaml)
+# ---------------------------------------------------------------------------
+# OFF by default and MUTUALLY EXCLUSIVE with `catalog.enabled` (both define
+# app:catalog Pods + a `catalog` Service). _helpers warns if both are on.
+canary:
+  enabled: false
+  image:
+    repository: bookstore/catalog
+    tag: dev
+    pullPolicy: IfNotPresent
+  serviceAccountName: catalog-sa
+  stable:
+    replicaCount: 9
+  canary:
+    replicaCount: 1
+    logLevel: "debug" # stand-in marker for "this is v2"
+  resources:
+    requests: { cpu: 50m, memory: 64Mi }
+    limits: { cpu: 250m, memory: 128Mi }
+  service:
+    port: 80
+    targetPort: http
+
+# ---------------------------------------------------------------------------
+# Edge: Ingress XOR Gateway (raw-manifests 50-ingress.yaml / 51-gateway.yaml)
+# ---------------------------------------------------------------------------
+# networking.k8s.io is built in → ingress.enabled defaults TRUE (plain install
+# works). gateway.* needs the Gateway API CRDs + a controller → defaults FALSE.
+# They are MUTUALLY EXCLUSIVE; NOTES.txt + _helpers warn if both are enabled.
+ingress:
+  enabled: true
+  className: nginx
+  host: bookstore.localdev.me
+  tls:
+    enabled: true
+    secretName: bookstore-tls
+  annotations:
+    nginx.ingress.kubernetes.io/rewrite-target: /$2
+
+gateway:
+  enabled: false
+  # GatewayClass is normally infra-team/platform-owned; included so the stack
+  # is self-contained for the guide. createGatewayClass=false if pre-created.
+  createGatewayClass: true
+  className: bookstore-gtw
+  controllerName: k8s.io/ingress-nginx
+  host: bookstore.localdev.me
+  tls:
+    secretName: bookstore-tls
+
+# ---------------------------------------------------------------------------
+# NetworkPolicies (raw-manifests 60-networkpolicy.yaml) — all 10
+# ---------------------------------------------------------------------------
+# NetworkPolicy is a built-in kind, so this defaults ON (enforcement still
+# needs a policy CNI — kindnet is a silent no-op; see ch.06). Namespace names
+# are parameterized for portability.
+networkPolicy:
+  enabled: true
+  dnsNamespace: kube-system
+  ingressControllerNamespace: ingress-nginx
+  monitoringNamespace: monitoring
+
+# ---------------------------------------------------------------------------
+# Autoscaling — HPA (built-in) ON; KEDA (CRD) OFF
+# ---------------------------------------------------------------------------
+# HPA for catalog (raw-manifests 82-hpa-catalog.yaml). autoscaling/v2 is
+# built-in → defaults ON. The custom Pods metric still needs the Prometheus
+# Adapter to actually serve it (ch.04) — illustrative, documented in NOTES.
+hpa:
+  enabled: true
+  minReplicas: 2
+  maxReplicas: 6
+  cpuUtilization: 70
+  requestsPerSecond: "50" # custom Pods metric — needs Prometheus Adapter
+  behavior:
+    scaleUp:
+      stabilizationWindowSeconds: 60
+      percentValue: 100
+      podsValue: 2
+      periodSeconds: 60
+    scaleDown:
+      stabilizationWindowSeconds: 300
+      percentValue: 50
+      periodSeconds: 60
+
+# KEDA ScaledObject + TriggerAuthentication for payments-worker
+# (raw-manifests 83-keda-scaledobject.yaml). keda.sh/v1alpha1 is a CRD →
+# defaults OFF. When ON, install KEDA via Helm first (NOTES documents it).
+keda:
+  enabled: false
+  # The AMQP connection string the SCALER uses to query the queue (NOT
+  # db-credentials — the worker has no DB). DEMO-ONLY (same caveat as 16-): a
+  # Secret is base64, not encrypted; in production this comes from External
+  # Secrets / Sealed Secrets / Vault, never from values.yaml.
+  connectionSecretName: rabbitmq-conn
+  # DEMO-ONLY — never a real/committed credential (stock guest:guest).
+  amqpHost: "amqp://guest:guest@rabbitmq.bookstore.svc.cluster.local:5672/"
+  pollingInterval: 15
+  cooldownPeriod: 60
+  minReplicaCount: 0 # scale to zero when idle
+  maxReplicaCount: 10
+  queueName: orders
+  queueLength: "20"
+  activationValue: "1"
+
+# ---------------------------------------------------------------------------
+# Observability — Prometheus Operator CRDs → OFF by default
+# (raw-manifests 80-servicemonitor.yaml / 81-prometheusrule.yaml)
+# ---------------------------------------------------------------------------
+# `release` MUST match kube-prometheus-stack's serviceMonitorSelector/
+# ruleSelector or the objects are silently ignored (ch.01). Default matches
+# the Part 06 ch.01 install (release name `kube-prometheus-stack`).
+serviceMonitor:
+  enabled: false
+  release: kube-prometheus-stack
+  interval: 15s
+
+prometheusRule:
+  enabled: false
+  release: kube-prometheus-stack
+  catalog:
+    errorRatioThreshold: "0.05"
+    latencyP95Threshold: "0.5"
+    errorFor: 10m
+    latencyFor: 10m
+    absentFor: 5m
+
+# ---------------------------------------------------------------------------
+# PodDisruptionBudgets (raw-manifests 84-pdb.yaml) — built-in policy/v1 → ON
+# ---------------------------------------------------------------------------
+# payments-worker gets NO PDB on purpose (KEDA-scaled, may be at 0 replicas).
+pdb:
+  enabled: true
+  catalog:
+    minAvailable: 2
+  storefront:
+    minAvailable: 1
+  orders:
+    minAvailable: 1
+  unhealthyPodEvictionPolicy: AlwaysAllow
+
+# ---------------------------------------------------------------------------
+# Kyverno ClusterPolicy (raw-manifests 70-kyverno-policy.yaml) — CRD → OFF
+# ---------------------------------------------------------------------------
+# Audit (not Enforce) ON PURPOSE — Enforce would reject the guide's own
+# bookstore/<svc>:dev images. See ch.01 + the file header.
+kyverno:
+  enabled: false
+  validationFailureAction: Audit
+  background: true
+
+# ---------------------------------------------------------------------------
+# VolumeSnapshot + class (raw-manifests 18-postgres-snapshot.yaml) — CRD → OFF
+# ---------------------------------------------------------------------------
+# snapshot.storage.k8s.io is a CRD (external-snapshotter). kind's local-path
+# provisioner does NOT support snapshots — needs a snapshot-capable CSI driver.
+snapshot:
+  enabled: false
+  className: bookstore-csi-snapclass
+  driver: hostpath.csi.k8s.io
+  deletionPolicy: Delete
+  snapshotName: postgres-snap-0
+  sourcePvc: data-postgres-0

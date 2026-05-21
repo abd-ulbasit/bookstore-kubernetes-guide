@@ -1,0 +1,55 @@
+# Bookstore operator manager ClusterRole.
+#
+# Equivalent to `make manifests` (controller-gen rbac:roleName=manager-role)
+# output, derived from the +kubebuilder:rbac markers on the reconciler.
+# Regenerate with: make manifests
+#
+# LEAST PRIVILEGE: the operator can manage exactly the child kinds it creates
+# (namespaces it must create; configmaps/services/deployments inside them) plus
+# its own CR + status + finalizers + events. No secrets, no cluster-admin, no
+# wildcard — an operator is broad-by-default ONLY if you let it be (the Part 08
+# ch.05 "an operator is software you run, scope its RBAC" point, applied to a
+# controller you BUILT).
+#
+# Built-in object (rbac.authorization.k8s.io/v1): dry-runs/applies clean.
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: bookstore-operator-manager-role
+rules:
+  - apiGroups: ["bookstore.example.com"]
+    resources: ["bookstoretenants"]
+    verbs: ["get", "list", "watch", "create", "update", "patch", "delete"]
+  - apiGroups: ["bookstore.example.com"]
+    resources: ["bookstoretenants/status"]
+    verbs: ["get", "update", "patch"]
+  - apiGroups: ["bookstore.example.com"]
+    resources: ["bookstoretenants/finalizers"]
+    verbs: ["update"]
+  - apiGroups: [""]
+    resources: ["namespaces"]
+    verbs: ["get", "list", "watch", "create", "update", "patch", "delete"]
+  - apiGroups: [""]
+    resources: ["configmaps", "services"]
+    verbs: ["get", "list", "watch", "create", "update", "patch", "delete"]
+  - apiGroups: ["apps"]
+    resources: ["deployments"]
+    verbs: ["get", "list", "watch", "create", "update", "patch", "delete"]
+  - apiGroups: [""]
+    resources: ["events"]
+    verbs: ["create", "patch"]
+---
+# Leader-election lease (the controller uses a Lease so a multi-replica
+# Deployment runs exactly one active reconciler — Part 00 ch.04).
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: bookstore-operator-leader-election-role
+  namespace: bookstore-operator-system
+rules:
+  - apiGroups: ["coordination.k8s.io"]
+    resources: ["leases"]
+    verbs: ["get", "list", "watch", "create", "update", "patch", "delete"]
+  - apiGroups: [""]
+    resources: ["events"]
+    verbs: ["create", "patch"]

@@ -1,0 +1,64 @@
+# Bookstore — Part 12 ch.07 "ML pipelines and workflows": the nightly
+# retraining `CronWorkflow`. References the `recommender-pipeline`
+# WorkflowTemplate in this dir; CronWorkflow = "CronJob for Argo Workflows".
+#
+# !!! CRD-INTRINSIC DRY-RUN (identical precedent to recommender-workflow.yaml
+#     in this dir, raw-manifests/51-/70-/83-, argocd/, operators/, chaos/,
+#     ml/batch/, ml/serve/recommender-inferenceservice.yaml) !!!
+#   `CronWorkflow` is an Argo Workflows CRD (argoproj.io/v1alpha1). WITHOUT
+#   Argo Workflows installed a client dry-run prints:
+#     no matches for kind "CronWorkflow" in version "argoproj.io/v1alpha1"
+#   EXPECTED and SCHEMA-CORRECT — install Argo Workflows first (Part 12 ch.07
+#   Hands-on: pinned Helm `argo/argo-workflows --version 0.42.0` -> ns `argo`).
+#   Schema verified against argoproj.io/v1alpha1 (schedule / timezone /
+#   concurrencyPolicy / workflowSpec.workflowTemplateRef).
+#
+# WHAT IT DOES
+#   Runs the `recommender-pipeline` WorkflowTemplate nightly at 02:00 UTC.
+#   This is the canonical "scheduled retrain" — the Periodic Job pattern
+#   (Ibryam) applied to ML pipelines.
+#
+# WHY a CronWorkflow (and not a Kubernetes CronJob spawning `argo submit`)
+#   Both work; CronWorkflow is the Argo-native shape: same Workflow spec,
+#   same RBAC, same UI/CLI/observability as ad-hoc runs. The Kubernetes
+#   CronJob approach reintroduces "pipeline" as something a separate
+#   controller needs to know about — exactly the integration cost
+#   Workflows + CronWorkflow remove.
+#
+# Apply (after Argo Workflows is installed AND recommender-workflow.yaml is
+# applied; see pipeline/README.md):
+#   kubectl apply -f examples/bookstore/ml/pipeline/recommender-cronworkflow.yaml
+#   kubectl get cronworkflow -n bookstore-ml
+#   # Trigger one off-schedule for testing:
+#   argo cron list  -n bookstore-ml
+#   argo submit --from cronworkflow/recommender-nightly -n bookstore-ml
+apiVersion: argoproj.io/v1alpha1
+kind: CronWorkflow
+metadata:
+  name: recommender-nightly
+  namespace: bookstore-ml
+  labels:
+    app.kubernetes.io/part-of: bookstore-ml
+    app.kubernetes.io/component: ml-pipeline
+    ml.bookstore/path: argo-cronworkflow
+spec:
+  # 02:00 UTC nightly. Quoted explicitly so YAML doesn't reinterpret.
+  schedule: "0 2 * * *"
+  timezone: "UTC"
+  # Replace: never run two retrains at once (the next nightly waits for the
+  # previous to finish). For the Bookstore the runtime is < 1 min; in prod
+  # set this to `Forbid` if a too-long run should NOT be killed.
+  concurrencyPolicy: "Replace"
+  # Bound the time the controller waits to submit a missed schedule
+  # (e.g. after a controller restart). 10 minutes is sane for nightly.
+  startingDeadlineSeconds: 600
+  # Keep a few finished histories — Argo UI navigates these.
+  successfulJobsHistoryLimit: 3
+  failedJobsHistoryLimit: 1
+  workflowSpec:
+    # Reference the WorkflowTemplate by name; no spec duplication.
+    workflowTemplateRef:
+      name: recommender-pipeline
+    # All other workflow-level overrides (parameters, ttl, …) inherit from
+    # the WorkflowTemplate. Override `seed` per-run if you want
+    # non-deterministic retraining across nights — left at default here.

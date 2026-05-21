@@ -1,0 +1,3 @@
+// Bookstore operator — Part 11 ch.02 "Operator development".
+// Teaching code: a deliberately small Kubebuilder operator. Real and runnable
+// (go vet + docker build clean); not a production controller.

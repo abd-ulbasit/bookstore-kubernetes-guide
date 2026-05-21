@@ -1,0 +1,466 @@
+################################################################################
+# .github-workflows-catalog.yml — Bookstore Platform `catalog` service CI/CD.
+#
+# This is a TEMPLATE. Copy it to your own service repo as
+# `.github/workflows/catalog.yml` (GitHub Actions only runs workflows at that
+# physical path). It is kept here under `ci/` so the canonical wiring lives
+# beside the rest of the Bookstore Platform tree; it does not run from inside
+# the bookstore-platform examples tree itself.
+#
+# WHAT THIS WORKFLOW DOES (Part 15 ch.02 walks through it step-by-step):
+#
+#   1. `lint-test`           — golangci-lint + `go vet` + `go test ./...`
+#                              for `app/catalog/`. The fail-fast gate.
+#   2. `integration-test`    — `go test -tags=integration` with a Postgres
+#                              service container. Catalog's read paths hit a
+#                              real DB; the integration suite is the gate.
+#   3. `scan`                — Trivy filesystem scan (Go modules) + Trivy
+#                              image scan on the BUILT image. Fails on
+#                              HIGH/CRITICAL with `--exit-code 1` (Part 05
+#                              ch.03's contract; Part 07 ch.03's CI form).
+#   4. `build-sign-push`     — `docker/build-push-action` multi-arch (amd64 +
+#                              arm64 — Graviton-ready per Part 14 ch.09),
+#                              push BY DIGEST to ECR, cosign keyless sign
+#                              + SLSA provenance attestation + syft SBOM.
+#   5. `update-gitops-pr`    — Opens a PR against the deployment-config repo
+#                              that bumps `kustomize/overlays/dev` with the
+#                              freshly signed digest. Argo CD (Part 07 ch.04)
+#                              reconciles the merged PR. CI holds NO cluster
+#                              credential — its last act is a commit, not a
+#                              `kubectl apply`.
+#
+# PREREQUISITES (one-time, manual setup):
+#
+#   1. AWS OIDC identity provider configured in your account targeting
+#      token.actions.githubusercontent.com (audience: sts.amazonaws.com).
+#      The Phase 14-R `terraform.yml` workflow header documents this; the
+#      same provider serves application CI.
+#
+#   2. An IAM role (e.g. `github-actions-ecr-catalog`) with a trust policy
+#      scoped to your repo + main branch, and an inline policy granting
+#      ECR push (ecr:GetAuthorizationToken, ecr:BatchCheckLayerAvailability,
+#      ecr:InitiateLayerUpload, ecr:UploadLayerPart, ecr:CompleteLayerUpload,
+#      ecr:PutImage) for the `bookstore/catalog` repository only.
+#
+#   3. ECR repository `bookstore/catalog` pre-created with image-tag-
+#      immutability ENABLED and image scanning on push enabled (defence in
+#      depth on top of Trivy in this workflow).
+#
+#   4. Repository secrets:
+#        AWS_ROLE_ARN_ECR     — the role ARN from step 2
+#        GITOPS_PR_TOKEN      — a fine-grained PAT (or GitHub App token) for
+#                               the deployment-config repo (`contents: write`
+#                               + `pull-requests: write` on that repo ONLY).
+#                               NEVER a classic PAT with broad scope.
+#
+#   5. Repository variables:
+#        AWS_REGION           — e.g. `ap-south-1`. Phase 14-R baseline region.
+#        ECR_REGISTRY         — e.g. `AWS_ACCOUNT_ID.dkr.ecr.AWS_REGION.amazonaws.com`
+#        GITOPS_REPO          — `GITHUB_ORG/bookstore-gitops` (the deployment-
+#                               config repo, separate from the app repo).
+#
+# WHY THIS PATTERN (Part 15 ch.02 explains in prose):
+#
+#   - CI never holds a cluster credential. Its final step is a PR against
+#     a GitOps repo; Argo CD pulls. Push-CD's pain (CI ate my repo) is
+#     structurally absent.
+#   - Multi-arch buildx (amd64 + arm64) lets Part 14 ch.09's Graviton
+#     migration land as a tag-bump, not a code change.
+#   - cosign keyless OIDC means NO long-lived signing key — the runner mints
+#     a short-lived JWT, Sigstore Fulcio issues a 10-minute cert bound to
+#     this workflow's identity, the signature lands in Rekor's append-only
+#     log. Kyverno's `verifyImages` rule at admission (Part 15 ch.03 +
+#     Part 14 ch.12 conceptual) checks the identity matches THIS workflow.
+#   - Branch-environment separation: `main` → dev overlay (auto-merge);
+#     a `release/*` branch or tag would target staging/prod overlays with
+#     review. This template wires the dev path; Part 15 ch.04 (parallel
+#     phase 15b) shows the staging/prod promotion gates.
+################################################################################
+
+name: catalog-ci
+
+on:
+  pull_request:
+    paths:
+      - 'app/catalog/**'
+      - '.github/workflows/catalog.yml'
+  push:
+    branches:
+      - main
+    paths:
+      - 'app/catalog/**'
+      - '.github/workflows/catalog.yml'
+
+# OIDC for ECR push + cosign keyless requires id-token: write.
+# contents: read is the minimum for checkout.
+# packages: read is harmless and useful if the workflow ever pulls a
+# private GHCR base image.
+permissions:
+  id-token: write
+  contents: read
+  packages: read
+
+# One in-flight run per branch. A newer push cancels the older — saves
+# minutes and avoids racing two PRs that bump the same overlay file.
+concurrency:
+  group: catalog-ci-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  GO_VERSION: '1.23'
+  SERVICE: catalog
+  WORKING_DIR: app/catalog
+  # ECR_REGISTRY is set per-env in jobs that need it (from vars.ECR_REGISTRY).
+  # IMAGE_NAME is computed as ${ECR_REGISTRY}/bookstore/${SERVICE}.
+
+jobs:
+  ############################################################################
+  # 1. lint-test — the fail-fast gate. Runs on EVERY PR and EVERY push.
+  #    No cloud credentials, no registry access. Cheap, fast, parallel.
+  ############################################################################
+  lint-test:
+    name: lint + unit test
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: ${{ env.WORKING_DIR }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Go
+        uses: actions/setup-go@v5
+        with:
+          go-version: ${{ env.GO_VERSION }}
+          # Module + build cache keyed by go.sum. The cache lives across
+          # workflow runs (per-repo); a cache hit skips `go mod download`
+          # and reuses compiled packages. The difference between a 90s
+          # and a 4-minute pipeline.
+          cache: true
+          cache-dependency-path: ${{ env.WORKING_DIR }}/go.sum
+
+      - name: go mod download
+        run: go mod download
+
+      - name: go vet
+        run: go vet ./...
+
+      - name: golangci-lint
+        uses: golangci/golangci-lint-action@v6
+        with:
+          version: v1.61.0
+          working-directory: ${{ env.WORKING_DIR }}
+          args: --timeout=5m
+
+      - name: go test (unit)
+        # Race detector ON in CI — catches data races a single-goroutine
+        # local test never sees. -count=1 disables Go's test cache so we
+        # know the run is real, not a replay of a cached PASS.
+        run: go test -race -count=1 -coverprofile=coverage.out ./...
+
+      - name: Upload coverage artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: coverage-${{ env.SERVICE }}
+          path: ${{ env.WORKING_DIR }}/coverage.out
+          retention-days: 7
+
+  ############################################################################
+  # 2. integration-test — `go test -tags=integration` against a real
+  #    Postgres service container. Catalog's read paths hit a DB; mocking
+  #    in unit tests is fine, but the integration suite is what proves the
+  #    schema migration + the actual SQL paths work.
+  ############################################################################
+  integration-test:
+    name: integration test
+    runs-on: ubuntu-latest
+    needs: lint-test
+    services:
+      # GitHub Actions service containers are real Docker containers the
+      # runner brings up before the steps run. The host port is mapped;
+      # the Go test code reaches it at localhost:5432.
+      postgres:
+        image: postgres:16-alpine
+        env:
+          POSTGRES_USER: catalog
+          POSTGRES_PASSWORD: catalog
+          POSTGRES_DB: catalog
+        ports:
+          - 5432:5432
+        # health-cmd makes the runner WAIT until Postgres is accepting
+        # connections before running steps. Without this, the first test
+        # race with the container startup and flakes intermittently.
+        options: >-
+          --health-cmd "pg_isready -U catalog"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 10
+    defaults:
+      run:
+        working-directory: ${{ env.WORKING_DIR }}
+    env:
+      DB_DSN: postgres://catalog:catalog@localhost:5432/catalog?sslmode=disable
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Go
+        uses: actions/setup-go@v5
+        with:
+          go-version: ${{ env.GO_VERSION }}
+          cache: true
+          cache-dependency-path: ${{ env.WORKING_DIR }}/go.sum
+
+      - name: Run schema migration
+        # Catalog ships an idempotent CREATE TABLE IF NOT EXISTS migration
+        # (same one Part 09 ships in `21-db-migrate-job.yaml`); the
+        # integration suite needs it to have run first.
+        run: go run ./cmd/migrate
+
+      - name: go test (integration)
+        # Build-tag gates the integration suite so unit tests stay fast.
+        # The -timeout is the per-test timeout; CI runners are slower than
+        # laptops, so 5m is the conservative default.
+        run: go test -tags=integration -race -count=1 -timeout=5m ./...
+
+  ############################################################################
+  # 3. scan — Trivy filesystem scan + Trivy image scan. The GATE: HIGH or
+  #    CRITICAL findings fail the job and stop the pipeline before anything
+  #    is signed or pushed.
+  ############################################################################
+  scan:
+    name: trivy scan
+    runs-on: ubuntu-latest
+    needs: integration-test
+    defaults:
+      run:
+        working-directory: ${{ env.WORKING_DIR }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Trivy — filesystem (Go modules)
+        uses: aquasecurity/trivy-action@0.28.0
+        with:
+          scan-type: fs
+          scan-ref: ${{ env.WORKING_DIR }}
+          severity: HIGH,CRITICAL
+          exit-code: '1'
+          ignore-unfixed: true
+          # ignore-unfixed: true means "drop CVEs with no upstream fix".
+          # A rebuild can't remediate them; the mitigation is continuous
+          # re-scanning of published images (Part 05 ch.03's discipline).
+          # If you'd rather block on unfixed too, set this to false.
+          format: table
+
+      - name: Upload Trivy fs report
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: trivy-fs-${{ env.SERVICE }}
+          path: ${{ env.WORKING_DIR }}/trivy-fs.json
+          retention-days: 7
+          if-no-files-found: ignore
+
+  ############################################################################
+  # 4. build-sign-push — multi-arch buildx -> ECR push by digest -> cosign
+  #    keyless sign + SLSA provenance + syft SBOM. The artifact-producing
+  #    job. Only runs on a push to main (a merged PR) — never on fork PRs.
+  ############################################################################
+  build-sign-push:
+    name: build + sign + push
+    runs-on: ubuntu-latest
+    needs: scan
+    # The keyless-sign + ECR-push path is unsafe on fork PRs (no trusted
+    # OIDC identity, unreviewed code). Restrict to push events on main.
+    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+    outputs:
+      digest: ${{ steps.build.outputs.digest }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Configure AWS credentials via OIDC
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ secrets.AWS_ROLE_ARN_ECR }}
+          aws-region: ${{ vars.AWS_REGION || 'ap-south-1' }}
+          audience: sts.amazonaws.com
+
+      - name: Login to ECR
+        id: ecr-login
+        uses: aws-actions/amazon-ecr-login@v2
+
+      - name: Set up QEMU (multi-arch)
+        # QEMU lets the amd64 runner build arm64 images via emulation. Slow
+        # but reliable. For high-throughput builds, use a native arm64 runner
+        # (GitHub-hosted arm64 runners or self-hosted on Graviton).
+        uses: docker/setup-qemu-action@v3
+        with:
+          platforms: arm64
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Install cosign
+        uses: sigstore/cosign-installer@v3
+        with:
+          cosign-release: 'v2.4.1'
+
+      - name: Install syft
+        uses: anchore/sbom-action/download-syft@v0.17.7
+
+      - name: Build + push (multi-arch by digest)
+        id: build
+        uses: docker/build-push-action@v6
+        with:
+          context: ${{ env.WORKING_DIR }}
+          file: ${{ env.WORKING_DIR }}/Dockerfile
+          push: true
+          platforms: linux/amd64,linux/arm64
+          # Tag with both the commit SHA (for traceability) and `latest-main`
+          # (the moving pointer the dev overlay tracks). The DIGEST is what
+          # gets signed and pinned — tags are convenience.
+          tags: |
+            ${{ vars.ECR_REGISTRY }}/bookstore/${{ env.SERVICE }}:sha-${{ github.sha }}
+            ${{ vars.ECR_REGISTRY }}/bookstore/${{ env.SERVICE }}:latest-main
+          # provenance: true attaches a SLSA provenance attestation to the
+          # manifest (who/what/how built it). sbom: true attaches an SBOM.
+          # Both are belt-and-braces with the explicit cosign attest steps
+          # below — different consumers prefer different formats.
+          provenance: true
+          sbom: true
+          # GitHub Actions layer cache. type=gha keys by job + ref; re-runs
+          # on the same branch reuse layers, the difference between a
+          # 30-second and a 6-minute build.
+          cache-from: type=gha,scope=catalog
+          cache-to: type=gha,mode=max,scope=catalog
+
+      - name: Trivy — scan pushed image
+        uses: aquasecurity/trivy-action@0.28.0
+        with:
+          # Scan the EXACT pushed manifest by digest. This is what's deployed;
+          # scanning the tag would race a concurrent push.
+          image-ref: ${{ vars.ECR_REGISTRY }}/bookstore/${{ env.SERVICE }}@${{ steps.build.outputs.digest }}
+          severity: HIGH,CRITICAL
+          exit-code: '1'
+          ignore-unfixed: true
+
+      - name: Generate SBOM (syft → SPDX JSON)
+        run: |
+          syft "${{ vars.ECR_REGISTRY }}/bookstore/${{ env.SERVICE }}@${{ steps.build.outputs.digest }}" \
+            -o spdx-json > "${{ env.SERVICE }}.spdx.json"
+
+      - name: Cosign keyless sign
+        env:
+          # COSIGN_EXPERIMENTAL=1 is no longer required in cosign v2; left
+          # off deliberately. The keyless flow uses the workflow's OIDC
+          # token (id-token: write permission above) automatically.
+          COSIGN_YES: 'true'
+        run: |
+          cosign sign --yes \
+            "${{ vars.ECR_REGISTRY }}/bookstore/${{ env.SERVICE }}@${{ steps.build.outputs.digest }}"
+          # cosign v2 keyless: the runner mints a short-lived OIDC JWT;
+          # Sigstore Fulcio exchanges it for a ~10-minute X.509 cert bound
+          # to this workflow's identity (issuer, subject = the workflow
+          # ref + repo); cosign signs the digest; signature + cert go to
+          # Rekor (the public transparency log). NO long-lived key exists.
+
+      - name: Cosign attest SBOM
+        env:
+          COSIGN_YES: 'true'
+        run: |
+          cosign attest --yes --type spdxjson \
+            --predicate "${{ env.SERVICE }}.spdx.json" \
+            "${{ vars.ECR_REGISTRY }}/bookstore/${{ env.SERVICE }}@${{ steps.build.outputs.digest }}"
+          # The SBOM is now a cosign attestation bound to the image digest.
+          # A consumer can `cosign verify-attestation --type spdxjson` and
+          # be sure the SBOM came from THIS workflow signing THAT image.
+
+      - name: Upload digest artifact
+        # Per-job artifact for the next job (update-gitops-pr) to consume.
+        # Not a job-level `outputs:` because matrix outputs collapse to a
+        # single leg; if you later parallelise this across services, the
+        # artifact pattern survives (Part 07 ch.03's matrix-fan-in note).
+        run: |
+          echo "${{ steps.build.outputs.digest }}" > digest.txt
+      - uses: actions/upload-artifact@v4
+        with:
+          name: digest-${{ env.SERVICE }}
+          path: digest.txt
+          retention-days: 7
+          if-no-files-found: error
+
+  ############################################################################
+  # 5. update-gitops-pr — opens a PR against the GitOps repo bumping the
+  #    dev overlay's catalog image digest. THIS IS THE CI/CD SEAM.
+  #    CI never `kubectl apply`s. Argo CD reconciles the merged PR.
+  ############################################################################
+  update-gitops-pr:
+    name: open gitops PR
+    runs-on: ubuntu-latest
+    needs: build-sign-push
+    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+    steps:
+      - name: Checkout GitOps repo
+        uses: actions/checkout@v4
+        with:
+          repository: ${{ vars.GITOPS_REPO }}
+          token: ${{ secrets.GITOPS_PR_TOKEN }}
+          path: gitops
+
+      - name: Download digest artifact
+        uses: actions/download-artifact@v4
+        with:
+          name: digest-${{ env.SERVICE }}
+          path: .
+
+      - name: Install kustomize (PINNED, not the curl-master installer)
+        run: |
+          KUSTOMIZE_VERSION=v5.5.0
+          curl -fsSL -o /tmp/kustomize.tar.gz \
+            "https://github.com/kubernetes-sigs/kustomize/releases/download/kustomize/${KUSTOMIZE_VERSION}/kustomize_${KUSTOMIZE_VERSION}_linux_amd64.tar.gz"
+          tar -xzf /tmp/kustomize.tar.gz -C /usr/local/bin
+          kustomize version
+          # NEVER use install_kustomize.sh from master — the same anti-
+          # pattern Part 07 ch.03 calls out. A pinned binary release is
+          # the only reproducible install.
+
+      - name: Bump dev overlay digest
+        run: |
+          DIGEST="$(cat digest.txt)"
+          if [ -z "$DIGEST" ] || ! echo "$DIGEST" | grep -q '^sha256:'; then
+            echo "Refusing to write empty/invalid digest: '$DIGEST'"
+            exit 1
+          fi
+          cd gitops/kustomize/overlays/dev
+          kustomize edit set image \
+            "bookstore/${{ env.SERVICE }}=${{ vars.ECR_REGISTRY }}/bookstore/${{ env.SERVICE }}@${DIGEST}"
+          git -C "$(pwd)" diff kustomization.yaml
+
+      - name: Create PR
+        uses: peter-evans/create-pull-request@v7
+        with:
+          path: gitops
+          token: ${{ secrets.GITOPS_PR_TOKEN }}
+          branch: bump/catalog-${{ github.sha }}
+          base: main
+          title: 'bump: catalog → ${{ github.sha }}'
+          body: |
+            Bump `bookstore/catalog` to the freshly built + signed image.
+
+            - **commit**:  ${{ github.sha }}
+            - **workflow**: ${{ github.workflow }} (run ${{ github.run_id }})
+            - **image**:   `${{ vars.ECR_REGISTRY }}/bookstore/${{ env.SERVICE }}@<DIGEST>`
+
+            Argo CD (Part 07 ch.04) will reconcile this once merged.
+
+            Signed keyless via Sigstore Fulcio + Rekor — Kyverno
+            `verifyImages` will check the cert identity matches this
+            workflow on admission (Part 15 ch.03).
+          commit-message: 'bump(catalog): ${{ github.sha }}'
+          delete-branch: true
+          # auto-merge: deliberately NOT enabled here. The dev overlay PR
+          # may auto-merge in your repo's branch protection; staging/prod
+          # PRs should require human review (Part 15 ch.04, parallel
+          # phase 15b).

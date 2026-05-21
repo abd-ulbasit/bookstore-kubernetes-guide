@@ -1,0 +1,159 @@
+# Bookstore Platform v2 — Part 13 ch.07: per-tenant rate limiting via the
+# Envoy LOCAL rate limiter (in-process token bucket per envoy worker).
+# Two filters:
+#   1. The local rate limiter itself (envoy.filters.http.local_ratelimit).
+#   2. A small Lua filter that extracts the `tenant` claim from the JWT-
+#      validated header and sets a descriptor used by the rate limiter to
+#      key the bucket per tenant.
+#
+# Local vs global rate limiter:
+#   - Local  — each Envoy worker keeps its own bucket; sum across N workers
+#              is approximate. Fast (no extra hop); the right choice for
+#              per-tenant per-gateway-replica quotas.
+#   - Global — Envoy calls a separate rate-limit-service (RLS); exact
+#              cluster-wide budget; slower (one extra hop per request).
+# The platform v2 picks LOCAL for the edge (per-tenant cost in latency is
+# zero) and uses the GLOBAL pattern in a follow-up day-2 chapter if needed.
+#
+# Rate: 100 requests / 10 seconds / tenant — a starting point. Production
+# tunes per-tenant via the BookstoreTenant Composition's `quota` field
+# (ch.13.02). The chapter walks the tuning loop.
+#
+# !!! CRD-INTRINSIC DRY-RUN
+#   `EnvoyFilter` is `networking.istio.io/v1alpha3`. WITHOUT Istio:
+#     no matches for kind "EnvoyFilter" in version "networking.istio.io/v1alpha3"
+#   EXPECTED.
+#
+# Apply (after Istio + coraza-envoy-filter.yaml):
+#   kubectl apply -f examples/bookstore-platform/edge/rate-limit-envoy-filter.yaml
+---
+apiVersion: networking.istio.io/v1alpha3
+kind: EnvoyFilter
+metadata:
+  name: per-tenant-rate-limit
+  namespace: istio-system
+  labels:
+    app.kubernetes.io/part-of: bookstore-platform
+    bookstore-platform.example.com/component: edge-rate-limit
+spec:
+  workloadSelector:
+    labels:
+      istio: ingressgateway
+  configPatches:
+    - applyTo: HTTP_FILTER
+      match:
+        context: GATEWAY
+        listener:
+          filterChain:
+            filter:
+              name: envoy.filters.network.http_connection_manager
+              subFilter:
+                name: envoy.filters.http.router
+      patch:
+        operation: INSERT_BEFORE
+        value:
+          name: envoy.filters.http.local_ratelimit
+          typed_config:
+            "@type": type.googleapis.com/udpa.type.v1.TypedStruct
+            type_url: type.googleapis.com/envoy.extensions.filters.http.local_ratelimit.v3.LocalRateLimit
+            value:
+              stat_prefix: per_tenant_rl
+              # Default bucket — applies when no descriptor matches (an
+              # unauthenticated request that somehow got past the WAF +
+              # AuthZ; defence in depth).
+              token_bucket:
+                max_tokens: 100
+                tokens_per_fill: 100
+                fill_interval: 10s
+              filter_enabled:
+                runtime_key: per_tenant_rl_enabled
+                default_value:
+                  numerator: 100
+                  denominator: HUNDRED
+              filter_enforced:
+                runtime_key: per_tenant_rl_enforced
+                default_value:
+                  numerator: 100
+                  denominator: HUNDRED
+              # Per-tenant descriptors — the Lua filter below sets
+              # `descriptor_entry.tenant` from the JWT claim; this maps it
+              # to a bucket.
+              descriptors:
+                - entries:
+                    - key: tenant
+                      value: acme-books
+                  token_bucket:
+                    max_tokens: 100
+                    tokens_per_fill: 100
+                    fill_interval: 10s
+                - entries:
+                    - key: tenant
+                      value: contoso-books
+                  token_bucket:
+                    max_tokens: 100
+                    tokens_per_fill: 100
+                    fill_interval: 10s
+              # Response on rate-limit hit. 429 + Retry-After is the
+              # standard.
+              status:
+                code: TooManyRequests
+              response_headers_to_add:
+                - append: false
+                  header:
+                    key: x-rate-limit
+                    value: "per-tenant"
+                - append: false
+                  header:
+                    key: retry-after
+                    value: "10"
+    # The Lua filter extracts the `tenant` claim from the x-jwt-payload
+    # header that the RequestAuthentication writes (ch.13.04) and sets a
+    # descriptor entry the rate limiter keys on.
+    - applyTo: HTTP_FILTER
+      match:
+        context: GATEWAY
+        listener:
+          filterChain:
+            filter:
+              name: envoy.filters.network.http_connection_manager
+              subFilter:
+                name: envoy.filters.http.local_ratelimit
+      patch:
+        operation: INSERT_BEFORE
+        value:
+          name: envoy.filters.http.lua
+          typed_config:
+            "@type": type.googleapis.com/envoy.extensions.filters.http.lua.v3.Lua
+            inline_code: |
+              -- !!! THIS LUA FILTER IS DETECTION-ONLY !!!
+              -- Envoy's stock Lua does not include a base64 decoder; the
+              -- JWT-claim extraction below will silently fall back to the
+              -- default bucket (no per-tenant key set) on a real
+              -- base64-encoded payload. The regex match against the raw
+              -- (still base64-encoded) bytes will not find the `tenant`
+              -- claim. For FUNCTIONAL per-tenant rate limiting in
+              -- production, replace this Lua filter with a custom WASM
+              -- filter that does the decode + parse correctly (see
+              -- Production notes in ch.13.07). This filter is shipped
+              -- as the documented shape of the Lua-vs-WASM trade.
+              --
+              -- Read the base64-encoded x-jwt-payload (ch.13.04 sets this
+              -- via RequestAuthentication.outputPayloadToHeader); attempt
+              -- to extract `tenant` (will succeed only if Envoy's
+              -- RequestAuthentication is configured to output a decoded
+              -- header — some Istio versions do, most require WASM).
+              function envoy_on_request(request_handle)
+                local payload = request_handle:headers():get("x-jwt-payload")
+                if payload == nil or #payload == 0 then
+                  return
+                end
+                local decoded = payload  -- NOT actually decoded; see above
+                local tenant = string.match(decoded or "", '"tenant"%s*:%s*"([^"]+)"')
+                if tenant ~= nil and #tenant > 0 then
+                  request_handle:streamInfo():dynamicMetadata():set(
+                    "envoy.filters.http.local_ratelimit",
+                    "tenant",
+                    tenant
+                  )
+                end
+              end

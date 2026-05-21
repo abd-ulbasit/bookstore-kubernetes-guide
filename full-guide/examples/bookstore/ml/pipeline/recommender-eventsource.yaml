@@ -1,0 +1,55 @@
+# Bookstore — Part 12 ch.07 "ML pipelines and workflows": Argo Events
+# `EventSource` — a webhook listener that turns "a new training dataset is
+# available" (an HTTP POST from the dataset-publishing pipeline OR a
+# Git provider's webhook) into an event the `recommender-sensor.yaml`
+# `Sensor` translates into a Workflow run.
+#
+# !!! CRD-INTRINSIC DRY-RUN (identical precedent to recommender-workflow.yaml
+#     in this dir, raw-manifests/51-/70-/83-, argocd/, operators/, chaos/,
+#     ml/batch/, ml/serve/recommender-inferenceservice.yaml) !!!
+#   `EventSource` is an Argo Events CRD (argoproj.io/v1alpha1). WITHOUT Argo
+#   Events installed a client dry-run prints:
+#     no matches for kind "EventSource" in version "argoproj.io/v1alpha1"
+#   EXPECTED and SCHEMA-CORRECT — install Argo Events first (Part 12 ch.07
+#   Hands-on: pinned Helm `argo/argo-events --version 2.4.7` -> ns `argo-events`,
+#   plus the default `EventBus` from the same chart). Schema verified against
+#   argoproj.io/v1alpha1 (service + webhook event source endpoints).
+#
+# WHAT IT DOES
+#   Listens on `:12000` (the Argo Events default for webhook event sources)
+#   at the path `/recommender-dataset-ready`. An HTTP POST with a JSON body
+#   (e.g. `{"dataset_uri": "s3://bookstore/datasets/2026-05-19/"}`) becomes
+#   an event picked up by the Sensor in the next file.
+#
+# WHY illustrative (kept small)
+#   In prod the EventSource is a `git`/`gitlab`/`github`/`sqs`/`pubsub`
+#   event source; the webhook one is the smallest, most-portable, kind-
+#   testable shape (`curl http://recommender-dataset.../recommender-dataset-ready`
+#   from inside the cluster). Part 12 ch.07 calls out the prod replacements.
+#
+# PRODUCTION NEEDS AUTH — this webhook EventSource has none. In prod, put it
+# behind an Ingress with auth (OAuth2 Proxy, mTLS, token header check) OR use
+# a git/s3/pubsub EventSource where authentication is part of the source itself.
+apiVersion: argoproj.io/v1alpha1
+kind: EventSource
+metadata:
+  name: recommender-dataset
+  namespace: argo-events
+  labels:
+    app.kubernetes.io/part-of: bookstore-ml
+    app.kubernetes.io/component: ml-pipeline-events
+spec:
+  # Argo Events scales the EventSource as its own Pod(s) (`service.ports`
+  # creates a Service in front). One small Pod is plenty for nightly /
+  # on-commit events.
+  service:
+    ports:
+      - port: 12000
+        targetPort: 12000
+  webhook:
+    # The route name `dataset-ready` becomes the path `/recommender-dataset-ready`
+    # at the Pod's :12000.
+    dataset-ready:
+      port: "12000"
+      endpoint: /recommender-dataset-ready
+      method: POST

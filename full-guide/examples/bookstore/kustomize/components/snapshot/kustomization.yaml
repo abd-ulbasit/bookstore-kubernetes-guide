@@ -1,0 +1,29 @@
+# Bookstore Kustomize COMPONENT — snapshot (Postgres PVC VolumeSnapshot).
+#
+# Adds the VolumeSnapshotClass + a point-in-time VolumeSnapshot of the
+# postgres data PVC `data-postgres-0` (vendored byte-identical from
+# raw-manifests/18-). Exact analog of the Helm chart's `snapshot.enabled`
+# toggle.
+#
+# !!! CRD PREREQUISITE + CSI capability. `VolumeSnapshot` /
+# `VolumeSnapshotClass` are CRDs from the external-snapshotter project
+# (snapshot.storage.k8s.io), NOT built-in kinds, and need a snapshot-capable
+# CSI driver. `VolumeSnapshotClass` is CLUSTER-SCOPED (the overlay's
+# `namespace:` transformer correctly does not stamp it). Without the CRDs +
+# controller, a client dry-run of an overlay including this component prints
+# `no matches for kind "VolumeSnapshot"` / `"VolumeSnapshotClass"` — EXPECTED
+# and correct. kind's default `local-path` provisioner does NOT support
+# snapshots; install the snapshot CRDs + controller and a snapshot-capable CSI
+# driver (csi-hostpath-driver locally, or EBS/PD/Azure-Disk CSI in cloud):
+#   https://github.com/kubernetes-csi/external-snapshotter (deploy/)
+# The vendored VolumeSnapshotClass `driver:` is a placeholder — set it to your
+# environment's snapshot-capable CSI driver (see raw 18- header).
+#
+# Enable by adding to an overlay's `components:` list, e.g.:
+#   components:
+#     - ../../components/snapshot
+apiVersion: kustomize.config.k8s.io/v1alpha1
+kind: Component
+
+resources:
+  - 18-postgres-snapshot.yaml

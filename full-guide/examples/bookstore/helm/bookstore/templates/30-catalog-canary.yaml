@@ -1,0 +1,86 @@
+{{/*
+  Manual canary teaching variant of catalog (raw-manifests
+  30-catalog-canary.yaml). OFF by default and MUTUALLY EXCLUSIVE with
+  catalog.enabled — both define app:catalog Pods AND a `catalog` Service
+  (bookstore.validateEdge fails the render if both are on). When canary is
+  enabled, this also provides the `catalog` Service (so 40-services.yaml's is
+  suppressed — see that template). One Service selects app:catalog only (no
+  `track`) so it load-balances BOTH Deployments; traffic split == replica
+  ratio. Both pods take the IDENTICAL goService restricted hardening as 10-.
+*/}}
+{{- if .Values.canary.enabled }}
+{{- $cn := .Values.canary }}
+apiVersion: v1
+kind: Service
+metadata:
+  name: catalog
+  namespace: {{ include "bookstore.namespace" . }}
+  labels:
+    {{- include "bookstore.labels" (dict "ctx" . "app" "catalog") | nindent 4 }}
+spec:
+  selector:
+    app: catalog            # selects BOTH stable & canary (deliberately no `track`)
+  ports:
+    - name: http
+      port: {{ $cn.service.port }}
+      targetPort: {{ $cn.service.targetPort }}
+{{- range $track := list
+    (dict "name" "catalog-stable" "track" "stable" "replicas" $cn.stable.replicaCount "logLevel" "")
+    (dict "name" "catalog-canary" "track" "canary" "replicas" $cn.canary.replicaCount "logLevel" $cn.canary.logLevel) }}
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ $track.name }}
+  namespace: {{ include "bookstore.namespace" $ }}
+  labels:
+    {{- include "bookstore.labels" (dict "ctx" $ "app" "catalog" "extra" (dict "track" $track.track)) | nindent 4 }}
+spec:
+  replicas: {{ $track.replicas }}
+  revisionHistoryLimit: 5
+  selector:
+    matchLabels:
+      app: catalog
+      track: {{ $track.track }}     # owns ONLY its own Pods (no overlap)
+  template:
+    metadata:
+      labels:
+        {{- include "bookstore.labels" (dict "ctx" $ "app" "catalog" "component" "backend" "extra" (dict "track" $track.track)) | nindent 8 }}
+    spec:
+      serviceAccountName: {{ $cn.serviceAccountName }}
+      automountServiceAccountToken: false
+      securityContext:
+        {{- include "bookstore.podSecurityContext" (dict "ctx" $ "profile" "goService") | nindent 8 }}
+      containers:
+        - name: catalog
+          image: "{{ $cn.image.repository }}:{{ $cn.image.tag }}"
+          imagePullPolicy: {{ $cn.image.pullPolicy }}
+          securityContext:
+            {{- include "bookstore.containerSecurityContext" (dict "ctx" $ "profile" "goService") | nindent 12 }}
+          ports:
+            - name: http
+              containerPort: 8080
+          env:
+            - name: PORT
+              value: "8080"
+            {{- if $track.logLevel }}
+            - name: LOG_LEVEL
+              value: {{ $track.logLevel | quote }}
+            {{- end }}
+          readinessProbe:
+            httpGet: { path: /readyz, port: http }
+            periodSeconds: 5
+          livenessProbe:
+            httpGet: { path: /healthz, port: http }
+            periodSeconds: 10
+          resources:
+            {{- toYaml $cn.resources | nindent 12 }}
+          volumeMounts:
+            - name: scratch
+              mountPath: /tmp/cache
+      volumes:
+        - name: scratch
+          emptyDir:
+            sizeLimit: 64Mi
+{{- end }}
+{{- end }}

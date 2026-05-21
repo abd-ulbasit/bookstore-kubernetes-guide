@@ -1,0 +1,69 @@
+# Bookstore — Part 11 ch.03 "API Priority & Fairness": bound the BookstoreTenant
+# operator's apiserver traffic into its OWN PriorityLevel + FlowSchema so a
+# buggy reconcile (a hot-loop LIST/WATCH/UPDATE storm) cannot starve the
+# control plane for everyone else. This is the noisy-neighbor protection the
+# chapter builds.
+#
+# !!! NOT CRD-BACKED — FlowSchema and PriorityLevelConfiguration are BUILT-IN
+# (flowcontrol.apiserver.k8s.io/v1, GA since v1.29). So unlike the CRD/webhook
+# files this one dry-runs/applies CLEAN on any v1.30+ cluster with no operator,
+# no CRD, nothing installed:
+#   kubectl apply --dry-run=client -f config/apf/bookstore-operator-apf.yaml
+#   flowschema.../...  created (dry run)
+#   prioritylevelconfiguration.../... created (dry run)
+# (No CRD-intrinsic caveat — stated explicitly, the inverse of the CRD files.)
+#
+# Model: a request is matched by the HIGHEST-precedence FlowSchema whose rules
+# fit (subject + verb + resource); that names a PriorityLevelConfiguration,
+# which gives the request a concurrency share and a fair queue. A Limited level
+# that floods only drains ITS OWN queue — other levels (and the built-in
+# system / leader-election / workload-* levels) are unaffected.
+apiVersion: flowcontrol.apiserver.k8s.io/v1
+kind: PriorityLevelConfiguration
+metadata:
+  name: bookstore-operator
+spec:
+  type: Limited # bounded (NOT Exempt — Exempt = unthrottled, for system only)
+  limited:
+    # Share of the apiserver's total concurrency this level may use. Low on
+    # purpose: a teaching operator should never be able to crowd out workload
+    # controllers. Concurrency is shared proportionally to all levels' shares.
+    nominalConcurrencyShares: 10
+    # May lend up to half its unused concurrency to other levels when idle...
+    lendablePercent: 50
+    # ...and borrow up to 20% on top of its nominal share when others are idle.
+    borrowingLimitPercent: 20
+    limitResponse:
+      type: Queue # queue excess requests rather than 429 immediately
+      queuing:
+        queues: 16
+        handSize: 4 # shuffle-sharding: isolates a bad flow from good ones
+        queueLengthLimit: 25 # beyond this, requests get 429 (Too Many Requests)
+---
+apiVersion: flowcontrol.apiserver.k8s.io/v1
+kind: FlowSchema
+metadata:
+  name: bookstore-operator
+spec:
+  # Lower number = higher precedence. The default catch-all is 9000 and
+  # workload-leader-election is ~200; 500 places the operator's traffic into
+  # its bounded level BEFORE it falls through to the global catch-all (where a
+  # busy operator WOULD compete with every other unclassified client).
+  matchingPrecedence: 500
+  priorityLevelConfiguration:
+    name: bookstore-operator
+  distinguisherMethod:
+    # Fan out fairness per-namespace so one tenant namespace's churn does not
+    # starve another within the operator's own level.
+    type: ByNamespace
+  rules:
+    - subjects:
+        - kind: ServiceAccount
+          serviceAccount:
+            name: bookstore-operator-controller-manager
+            namespace: bookstore-operator-system
+      resourceRules:
+        - verbs: ["get", "list", "watch", "create", "update", "patch", "delete"]
+          apiGroups: ["bookstore.example.com", "", "apps"]
+          resources: ["bookstoretenants", "bookstoretenants/status", "namespaces", "configmaps", "services", "deployments"]
+          namespaces: ["*"]

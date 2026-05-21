@@ -1,0 +1,160 @@
+# Bookstore Platform v2 — Part 13 ch.09: PrometheusRule with per-tenant
+# recording rules + RED-method alert rules + burn-rate SLO alerts.
+#
+# v1 had a single PrometheusRule with catalog-error-rate + catalog-
+# latency-p95 alerts. v2 deepens it with:
+#   - per-tenant recording rules (label join via kube_namespace_labels)
+#   - multi-window burn-rate alerts (the Google SRE Workbook ch.5
+#     pattern — fast burn pages loudly, slow burn warns)
+#   - per-service RED alerts for the v2 services
+#
+# !!! CRD-INTRINSIC DRY-RUN
+#   `PrometheusRule` is `monitoring.coreos.com/v1` — installed by
+#   the Prometheus Operator (kube-prometheus-stack). WITHOUT it:
+#     no matches for kind "PrometheusRule" in version "monitoring.coreos.com/v1"
+#   EXPECTED. ch.13.09 installs kube-prometheus-stack first.
+#
+# Apply:
+#   kubectl apply -f examples/bookstore-platform/observability/prometheus-rules.yaml
+---
+apiVersion: monitoring.coreos.com/v1
+kind: PrometheusRule
+metadata:
+  name: bookstore-platform-red-slo
+  namespace: prometheus-system
+  labels:
+    app.kubernetes.io/name: bookstore-platform-red-slo
+    app.kubernetes.io/instance: bookstore-platform-red-slo
+    app.kubernetes.io/part-of: bookstore-platform
+    app.kubernetes.io/component: observability-rules
+    app.kubernetes.io/version: "1.0.0"
+    # Picked up by kube-prometheus-stack's PrometheusRule selector.
+    release: kube-prometheus-stack
+spec:
+  groups:
+    # -------------------------------------------------------------
+    # Recording rules — pre-aggregate per-tenant + per-service.
+    # Faster to query in dashboards + alerts than the raw histograms.
+    # -------------------------------------------------------------
+    - name: bookstore-platform.recording.tenant
+      interval: 30s
+      rules:
+        - record: bookstore:http_request_rate:by_tenant_service
+          expr: |
+            sum by (tenant, service, region) (
+              rate(http_requests_total[5m])
+            )
+        - record: bookstore:http_error_rate:by_tenant_service
+          expr: |
+            sum by (tenant, service, region) (
+              rate(http_requests_total{code=~"5.."}[5m])
+            )
+            /
+            sum by (tenant, service, region) (
+              rate(http_requests_total[5m])
+            )
+        - record: bookstore:http_latency_p95:by_tenant_service
+          expr: |
+            histogram_quantile(0.95,
+              sum by (le, tenant, service, region) (
+                rate(http_request_duration_seconds_bucket[5m])
+              )
+            )
+        - record: bookstore:http_latency_p99:by_tenant_service
+          expr: |
+            histogram_quantile(0.99,
+              sum by (le, tenant, service, region) (
+                rate(http_request_duration_seconds_bucket[5m])
+              )
+            )
+    # -------------------------------------------------------------
+    # Burn-rate SLO alerts — Google SRE Workbook ch.5 pattern.
+    # SLO target: 99.9% (error budget = 0.1% = 0.001).
+    # Multi-window: fast (1h * 14.4x burn) pages; slow (6h * 6x
+    # burn) warns. The combination catches both spikes + creeps.
+    # -------------------------------------------------------------
+    - name: bookstore-platform.burnrate
+      interval: 30s
+      rules:
+        - alert: BookstoreErrorBudgetBurnFast
+          expr: |
+            (
+              sum by (tenant, service, region) (rate(http_requests_total{code=~"5.."}[1h]))
+              /
+              sum by (tenant, service, region) (rate(http_requests_total[1h]))
+            ) > (14.4 * 0.001)
+            and
+            (
+              sum by (tenant, service, region) (rate(http_requests_total{code=~"5.."}[5m]))
+              /
+              sum by (tenant, service, region) (rate(http_requests_total[5m]))
+            ) > (14.4 * 0.001)
+          for: 2m
+          labels:
+            severity: page
+          annotations:
+            summary: "Fast burn of error budget for {{ $labels.service }} ({{ $labels.tenant }} {{ $labels.region }})"
+            description: |
+              5xx error rate is 14.4x the SLO budget over 1 hour. At
+              this rate, the entire 30-day budget burns in ~2 days.
+              Runbook: ../runbooks/runbook-api-latency-p99.md
+            runbook_url: "https://github.com/your-org/bookstore-platform/blob/main/runbooks/runbook-api-latency-p99.md"
+        - alert: BookstoreErrorBudgetBurnSlow
+          expr: |
+            (
+              sum by (tenant, service, region) (rate(http_requests_total{code=~"5.."}[6h]))
+              /
+              sum by (tenant, service, region) (rate(http_requests_total[6h]))
+            ) > (6 * 0.001)
+            and
+            (
+              sum by (tenant, service, region) (rate(http_requests_total{code=~"5.."}[30m]))
+              /
+              sum by (tenant, service, region) (rate(http_requests_total[30m]))
+            ) > (6 * 0.001)
+          for: 15m
+          labels:
+            severity: warn
+          annotations:
+            summary: "Slow burn of error budget for {{ $labels.service }} ({{ $labels.tenant }} {{ $labels.region }})"
+            description: |
+              5xx error rate is 6x the SLO budget over 6 hours. The
+              30-day budget burns in ~5 days.
+              Runbook: ../runbooks/runbook-api-latency-p99.md
+            runbook_url: "https://docs.bookstore-platform.example.com/runbooks/runbook-api-latency-p99"
+    # -------------------------------------------------------------
+    # Per-service RED alerts — the lagging indicators (kept for the
+    # cases where the burn-rate alerts miss something — e.g. a long
+    # tail of low-rate errors that does not move the budget but
+    # still warrants attention).
+    # -------------------------------------------------------------
+    - name: bookstore-platform.red
+      interval: 30s
+      rules:
+        - alert: BookstoreCatalogP99Latency
+          expr: |
+            bookstore:http_latency_p99:by_tenant_service{service="catalog"} > 0.5
+          for: 5m
+          labels:
+            severity: page
+          annotations:
+            summary: "Catalog p99 latency above 500ms ({{ $labels.tenant }} {{ $labels.region }})"
+            runbook_url: "https://github.com/your-org/bookstore-platform/blob/main/runbooks/runbook-api-latency-p99.md"
+        - alert: BookstorePaymentsFailureRate
+          expr: |
+            bookstore:http_error_rate:by_tenant_service{service="payments-gateway"} > 0.05
+          for: 5m
+          labels:
+            severity: page
+          annotations:
+            summary: "Payments failure rate above 5% ({{ $labels.tenant }} {{ $labels.region }})"
+            runbook_url: "https://github.com/your-org/bookstore-platform/blob/main/runbooks/runbook-payments-failure-rate.md"
+        - alert: BookstoreCNPGReplicationLag
+          expr: |
+            cnpg_pg_replication_lag > 30
+          for: 5m
+          labels:
+            severity: page
+          annotations:
+            summary: "CNPG replication lag above 30s ({{ $labels.cluster }})"
+            runbook_url: "https://github.com/your-org/bookstore-platform/blob/main/runbooks/runbook-database-replication-lag.md"

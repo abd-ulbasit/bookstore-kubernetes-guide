@@ -1,0 +1,107 @@
+# Bookstore — Part 12 ch.03 "Batch and gang scheduling": the recommendations
+# "training" modelled as a JobSet (a coordinated GROUP of Jobs) and gated by
+# Kueue as a GANG (all-or-nothing) via spec.suspend.
+#
+# !!! CRD-INTRINSIC DRY-RUN (identical precedent to raw-manifests/51-/70-/83-,
+#     argocd/, operators/, chaos/) !!!
+#   `JobSet` is a JobSet CRD (jobset.x-k8s.io/v1alpha2). WITHOUT the JobSet
+#   controller installed a client dry-run prints:
+#     no matches for kind "JobSet" in version "jobset.x-k8s.io/v1alpha2"
+#   EXPECTED and SCHEMA-CORRECT — install the JobSet controller AND Kueue first
+#   (Part 12 ch.03 Hands-on: pinned Helm
+#   `oci://registry.k8s.io/jobset/charts/jobset` -> ns `jobset-system`, and
+#   Kueue -> ns `kueue-system`). Also apply the Kueue ResourceFlavor/
+#   ClusterQueue/LocalQueue in this dir first. Schema verified against JobSet
+#   jobset.x-k8s.io/v1alpha2 (replicatedJobs / shared headless Service).
+#
+# CPU-ONLY, RUNS ON KIND — NO GPU. This is a deliberately tiny 2-worker gang
+# that just echoes/sleeps: a stand-in for the REAL CPU training in X3b
+# (ml/train/). Its purpose is to demonstrate GANG ADMISSION + the QUEUE +
+# QUOTA mechanics LOCALLY without a GPU. The GPU "scale-up" path is
+# ../gpu/recommender-train-gpu.yaml (ch.02). No GPU/training output is faked.
+#
+# GANG via Kueue: the label  kueue.x-k8s.io/queue-name: bookstore-ml-lq  makes
+# Kueue create this JobSet SUSPENDED, check the WHOLE job (2 workers) fits the
+# ClusterQueue quota, then flip suspend=false so ALL worker Pods start
+# together. It is NEVER partially placed (the deadlock ch.03 prevents).
+#
+# PSA: targets the PSA-restricted `bookstore-ml` namespace (ch.01). Every Pod
+# is restricted-COMPLIANT: runAsNonRoot + non-root UID +
+# allowPrivilegeEscalation:false + drop ALL caps + seccompProfile
+# RuntimeDefault + emptyDir-only volume. ML pods are NOT exempt from PSA.
+apiVersion: jobset.x-k8s.io/v1alpha2
+kind: JobSet
+metadata:
+  name: recommender-train
+  namespace: bookstore-ml
+  labels:
+    app.kubernetes.io/part-of: bookstore-ml
+    app.kubernetes.io/component: recommender-train
+    kueue.x-k8s.io/queue-name: bookstore-ml-lq   # -> Kueue gang admission
+spec:
+  # successPolicy: the whole JobSet succeeds when all replicatedJobs succeed
+  # (default is "All"); shown explicitly for teaching.
+  successPolicy:
+    operator: All
+  replicatedJobs:
+    - name: worker
+      replicas: 1                  # one Job template ...
+      template:                    # ... whose Job runs 2 parallel worker Pods
+        spec:
+          parallelism: 2           # the GANG size (2 workers, CPU-only)
+          completions: 2
+          backoffLimit: 2
+          activeDeadlineSeconds: 600
+          ttlSecondsAfterFinished: 600
+          template:
+            metadata:
+              labels:
+                app.kubernetes.io/part-of: bookstore-ml
+                app.kubernetes.io/component: recommender-train
+            spec:
+              restartPolicy: Never
+              automountServiceAccountToken: false
+              securityContext:        # pod-level — restricted-compliant
+                runAsNonRoot: true
+                runAsUser: 65532
+                runAsGroup: 65532
+                seccompProfile:
+                  type: RuntimeDefault
+              containers:
+                - name: train
+                  # Tiny public image with a shell; stands in for the real CPU
+                  # recommender training image (X3b). No GPU, no fabricated
+                  # training/nvidia output — it states what it represents.
+                  image: busybox:1.36
+                  command: ["/bin/sh", "-c"]
+                  args:
+                    - |
+                      set -e
+                      echo "[recommender-train] CPU gang worker starting."
+                      echo "Gang member ${JOB_COMPLETION_INDEX:-?} of the"
+                      echo "2-worker recommendations 'training' (CPU-only)."
+                      echo "Stands in for X3b real training: build the"
+                      echo "customer x book co-occurrence matrix + top-K."
+                      echo "Both workers were admitted TOGETHER by Kueue"
+                      echo "(gang via spec.suspend) — never 1-of-2 wedged."
+                      sleep 20
+                      echo "[recommender-train] worker complete."
+                  resources:
+                    requests:
+                      cpu: "250m"      # small enough that 2 fit the CQ quota
+                      memory: 64Mi
+                    limits:
+                      cpu: "500m"
+                      memory: 128Mi
+                  securityContext:     # container-level — restricted-compliant
+                    allowPrivilegeEscalation: false
+                    readOnlyRootFilesystem: true
+                    capabilities:
+                      drop: ["ALL"]
+                  volumeMounts:
+                    - name: scratch
+                      mountPath: /tmp
+              volumes:
+                - name: scratch        # restricted-allowed volume type
+                  emptyDir:
+                    sizeLimit: 64Mi

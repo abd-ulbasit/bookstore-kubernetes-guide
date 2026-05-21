@@ -1,0 +1,352 @@
+# Bookstore Platform v2 — Part 13 ch.02 "Tenancy model and onboarding via
+# Crossplane": the Composition that expands ONE BookstoreTenant XR
+# (xrd-bookstoretenant.yaml) into the full per-tenant stack.
+#
+# What it provisions (the kind-runnable cluster-only path — every object here
+# applies on kind without any cloud provider installed):
+#   1. Namespace bookstore-platform-<TENANT>   PSA enforce=restricted
+#   2. ResourceQuota                            (tier-aware via patch)
+#   3. LimitRange                               (sensible per-container defaults)
+#   4. RoleBinding -> bookstore-platform-tenant-admin (from platform-base/01-rbac.yaml)
+#   5. NetworkPolicy default-deny (ingress + egress; explicit-allow added by
+#      higher chapters — 13.04 adds the Istio gateway egress, 13.06 adds
+#      Postgres egress, etc.)
+#   6. Kueue LocalQueue -> bookstore-platform-ml-cq (from platform-base/03-)
+#
+# CLOUD-RESOURCE PATH (commented; needs the matching Crossplane providers):
+#   - CNPG `Database` for the per-tenant logical DB (cnpg.io provider)
+#   - S3 `Bucket` (provider-aws)
+#   - IAM `Role` + trust policy for IRSA (provider-aws)
+# These are documented + sketched as a Pipeline step but commented out so the
+# composition applies cleanly on kind. 13.02 walks the cloud-resource path
+# honestly.
+#
+# Function pipeline: mode: Pipeline + function-patch-and-transform — the
+# current Crossplane v2 idiom. Requires function-patch-and-transform installed
+# + Healthy before this Composition reconciles (see ../crossplane/README.md
+# install steps).
+#
+# Tier mapping (illustrative; tweak in your own platform):
+#   trial      requests.cpu=1   requests.memory=1Gi   limits.cpu=2   pods=20
+#   standard   requests.cpu=4   requests.memory=8Gi   limits.cpu=8   pods=100
+#   premium    requests.cpu=16  requests.memory=32Gi  limits.cpu=32  pods=400
+#
+# !!! CRD-INTRINSIC DRY-RUN
+#   `Composition` is `apiextensions.crossplane.io/v1` — a Crossplane CRD.
+#   WITHOUT Crossplane installed a client dry-run prints:
+#     no matches for kind "Composition" in version "apiextensions.crossplane.io/v1"
+#   EXPECTED. After Crossplane + function-patch-and-transform + provider-
+#   kubernetes are installed and Healthy, this applies and reconciles.
+#
+# Apply (after the XRD is Established — 13.02 §3):
+#   kubectl apply -f examples/bookstore-platform/crossplane/composition-bookstoretenant.yaml
+apiVersion: apiextensions.crossplane.io/v1
+kind: Composition
+metadata:
+  name: bookstore-tenant-cluster-only
+  labels:
+    app.kubernetes.io/part-of: bookstore-platform
+    bookstore-platform.example.com/composition-variant: cluster-only
+spec:
+  compositeTypeRef:
+    apiVersion: platform.bookstore.example.com/v1alpha1
+    kind: BookstoreTenant
+  mode: Pipeline
+  pipeline:
+    - step: render-tenant-stack
+      functionRef:
+        name: function-patch-and-transform
+      input:
+        apiVersion: pt.fn.crossplane.io/v1beta1
+        kind: Resources
+        resources:
+          # --- 1. Namespace bookstore-platform-<TENANT> (PSA restricted) ---
+          - name: namespace
+            base:
+              apiVersion: kubernetes.crossplane.io/v1alpha1
+              kind: Object
+              spec:
+                providerConfigRef: { name: default }
+                forProvider:
+                  manifest:
+                    apiVersion: v1
+                    kind: Namespace
+                    metadata:
+                      name: bookstore-platform-REPLACED
+                      labels:
+                        app.kubernetes.io/part-of: bookstore-platform
+                        bookstore-platform.example.com/scope: tenant
+                        bookstore-platform.example.com/tenant: REPLACED
+                        pod-security.kubernetes.io/enforce: restricted
+                        pod-security.kubernetes.io/enforce-version: latest
+                        pod-security.kubernetes.io/audit: restricted
+                        pod-security.kubernetes.io/audit-version: latest
+                        pod-security.kubernetes.io/warn: restricted
+                        pod-security.kubernetes.io/warn-version: latest
+            patches:
+              - type: FromCompositeFieldPath
+                fromFieldPath: spec.tenantName
+                toFieldPath: spec.forProvider.manifest.metadata.name
+                transforms:
+                  - type: string
+                    string: { fmt: "bookstore-platform-%s", type: Format }
+              - type: FromCompositeFieldPath
+                fromFieldPath: spec.tenantName
+                toFieldPath: spec.forProvider.manifest.metadata.labels[bookstore-platform.example.com/tenant]
+              - type: ToCompositeFieldPath
+                fromFieldPath: spec.forProvider.manifest.metadata.name
+                toFieldPath: status.namespace
+
+          # --- 2. ResourceQuota (tier-aware via transform) ---
+          - name: resourcequota
+            base:
+              apiVersion: kubernetes.crossplane.io/v1alpha1
+              kind: Object
+              spec:
+                providerConfigRef: { name: default }
+                forProvider:
+                  manifest:
+                    apiVersion: v1
+                    kind: ResourceQuota
+                    metadata:
+                      name: bookstore-tenant
+                      namespace: bookstore-platform-REPLACED
+                      labels:
+                        app.kubernetes.io/part-of: bookstore-platform
+                        bookstore-platform.example.com/tenant: REPLACED-BY-TENANT-NAME
+                    spec:
+                      hard:
+                        # 'trial' defaults below — premium/standard would
+                        # require a richer Composition (or per-tier
+                        # Compositions) — 13.02 calls this out.
+                        requests.cpu: "1"
+                        requests.memory: "1Gi"
+                        limits.cpu: "2"
+                        limits.memory: "2Gi"
+                        pods: "20"
+            patches:
+              - type: FromCompositeFieldPath
+                fromFieldPath: spec.tenantName
+                toFieldPath: spec.forProvider.manifest.metadata.namespace
+                transforms:
+                  - type: string
+                    string: { fmt: "bookstore-platform-%s", type: Format }
+              - type: FromCompositeFieldPath
+                fromFieldPath: spec.tenantName
+                toFieldPath: spec.forProvider.manifest.metadata.labels[bookstore-platform.example.com/tenant]
+
+          # --- 3. LimitRange (per-container defaults + min/max) ---
+          - name: limitrange
+            base:
+              apiVersion: kubernetes.crossplane.io/v1alpha1
+              kind: Object
+              spec:
+                providerConfigRef: { name: default }
+                forProvider:
+                  manifest:
+                    apiVersion: v1
+                    kind: LimitRange
+                    metadata:
+                      name: bookstore-tenant
+                      namespace: bookstore-platform-REPLACED
+                      labels:
+                        app.kubernetes.io/part-of: bookstore-platform
+                        bookstore-platform.example.com/tenant: REPLACED-BY-TENANT-NAME
+                    spec:
+                      limits:
+                        - type: Container
+                          default: { cpu: 250m, memory: 128Mi }
+                          defaultRequest: { cpu: 50m, memory: 64Mi }
+                          min: { cpu: 10m, memory: 16Mi }
+                          max: { cpu: "1", memory: 512Mi }
+            patches:
+              - type: FromCompositeFieldPath
+                fromFieldPath: spec.tenantName
+                toFieldPath: spec.forProvider.manifest.metadata.namespace
+                transforms:
+                  - type: string
+                    string: { fmt: "bookstore-platform-%s", type: Format }
+              - type: FromCompositeFieldPath
+                fromFieldPath: spec.tenantName
+                toFieldPath: spec.forProvider.manifest.metadata.labels[bookstore-platform.example.com/tenant]
+
+          # --- 4. RoleBinding -> bookstore-platform-tenant-admin ---
+          - name: rolebinding-tenant-admin
+            base:
+              apiVersion: kubernetes.crossplane.io/v1alpha1
+              kind: Object
+              spec:
+                providerConfigRef: { name: default }
+                forProvider:
+                  manifest:
+                    apiVersion: rbac.authorization.k8s.io/v1
+                    kind: RoleBinding
+                    metadata:
+                      name: bookstore-tenant-admin
+                      namespace: bookstore-platform-REPLACED
+                      labels:
+                        app.kubernetes.io/part-of: bookstore-platform
+                        bookstore-platform.example.com/tenant: REPLACED-BY-TENANT-NAME
+                    roleRef:
+                      apiGroup: rbac.authorization.k8s.io
+                      kind: ClusterRole
+                      name: bookstore-platform-tenant-admin
+                    subjects:
+                      # Bind to the Keycloak group `oidc:tenant-<TENANT>-admins`
+                      # — the real principal is patched in by tenantName.
+                      # Production wiring goes through the OIDC group claim
+                      # (13.04); this placeholder is the documented pattern.
+                      - kind: Group
+                        apiGroup: rbac.authorization.k8s.io
+                        name: oidc:tenant-REPLACED-admins
+            patches:
+              - type: FromCompositeFieldPath
+                fromFieldPath: spec.tenantName
+                toFieldPath: spec.forProvider.manifest.metadata.namespace
+                transforms:
+                  - type: string
+                    string: { fmt: "bookstore-platform-%s", type: Format }
+              - type: FromCompositeFieldPath
+                fromFieldPath: spec.tenantName
+                toFieldPath: spec.forProvider.manifest.subjects[0].name
+                transforms:
+                  - type: string
+                    string: { fmt: "oidc:tenant-%s-admins", type: Format }
+              - type: FromCompositeFieldPath
+                fromFieldPath: spec.tenantName
+                toFieldPath: spec.forProvider.manifest.metadata.labels[bookstore-platform.example.com/tenant]
+
+          # --- 5. NetworkPolicy default-deny (ingress + egress) ---
+          - name: networkpolicy-default-deny
+            base:
+              apiVersion: kubernetes.crossplane.io/v1alpha1
+              kind: Object
+              spec:
+                providerConfigRef: { name: default }
+                forProvider:
+                  manifest:
+                    apiVersion: networking.k8s.io/v1
+                    kind: NetworkPolicy
+                    metadata:
+                      name: default-deny
+                      namespace: bookstore-platform-REPLACED
+                      labels:
+                        app.kubernetes.io/part-of: bookstore-platform
+                        bookstore-platform.example.com/tenant: REPLACED-BY-TENANT-NAME
+                    spec:
+                      podSelector: {}
+                      policyTypes: ["Ingress", "Egress"]
+                      # Empty rules = deny-all. Explicit-allow overlays come
+                      # from 13.04 (gateway egress), 13.06 (Postgres / Kafka
+                      # egress) — Part 02 ch.06 layered-policy pattern.
+            patches:
+              - type: FromCompositeFieldPath
+                fromFieldPath: spec.tenantName
+                toFieldPath: spec.forProvider.manifest.metadata.namespace
+                transforms:
+                  - type: string
+                    string: { fmt: "bookstore-platform-%s", type: Format }
+              - type: FromCompositeFieldPath
+                fromFieldPath: spec.tenantName
+                toFieldPath: spec.forProvider.manifest.metadata.labels[bookstore-platform.example.com/tenant]
+
+          # --- 6. Kueue LocalQueue -> bookstore-platform-ml-cq ---
+          - name: kueue-localqueue
+            base:
+              apiVersion: kubernetes.crossplane.io/v1alpha1
+              kind: Object
+              spec:
+                providerConfigRef: { name: default }
+                forProvider:
+                  manifest:
+                    apiVersion: kueue.x-k8s.io/v1beta1
+                    kind: LocalQueue
+                    metadata:
+                      name: tenant-ml
+                      namespace: bookstore-platform-REPLACED
+                      labels:
+                        app.kubernetes.io/part-of: bookstore-platform
+                        bookstore-platform.example.com/tenant: REPLACED-BY-TENANT-NAME
+                    spec:
+                      clusterQueue: bookstore-platform-ml-cq
+            patches:
+              - type: FromCompositeFieldPath
+                fromFieldPath: spec.tenantName
+                toFieldPath: spec.forProvider.manifest.metadata.namespace
+                transforms:
+                  - type: string
+                    string: { fmt: "bookstore-platform-%s", type: Format }
+              - type: FromCompositeFieldPath
+                fromFieldPath: spec.tenantName
+                toFieldPath: spec.forProvider.manifest.metadata.labels[bookstore-platform.example.com/tenant]
+
+          # --- 7. (Per-tenant Kyverno Policy reference, commented — needs
+          #        Kyverno installed. Phase 13b installs Kyverno + the
+          #        platform's verify-image-signatures ClusterPolicy bundle;
+          #        the per-tenant Policy below activates that bundle on
+          #        the tenant namespace by reference. WITHOUT Kyverno
+          #        installed a client dry-run prints:
+          #          no matches for kind "Policy" in version "kyverno.io/v1"
+          #        EXPECTED, schema-correct — same CRD-intrinsic precedent
+          #        as the cloud-resources stub below.
+          #
+          # - name: kyverno-policy-tenant
+          #   base:
+          #     apiVersion: kubernetes.crossplane.io/v1alpha1
+          #     kind: Object
+          #     spec:
+          #       providerConfigRef: { name: default }
+          #       forProvider:
+          #         manifest:
+          #           apiVersion: kyverno.io/v1
+          #           kind: Policy
+          #           metadata:
+          #             name: verify-image-signatures-tenant
+          #             namespace: bookstore-platform-REPLACED
+          #             labels:
+          #               app.kubernetes.io/part-of: bookstore-platform
+          #               bookstore-platform.example.com/tenant: REPLACED-BY-TENANT-NAME
+          #             annotations:
+          #               # Points at the platform-wide ClusterPolicy installed
+          #               # in Phase 13b ("bookstore-platform-verify-images").
+          #               # This per-tenant Policy is the binding point;
+          #               # disabling per-tenant signature verification (e.g.
+          #               # during incident response) is a single Policy edit
+          #               # rather than a cluster-wide rollback.
+          #               bookstore-platform.example.com/clusterpolicy-ref: bookstore-platform-verify-images
+          #           spec:
+          #             validationFailureAction: Enforce
+          #             background: true
+          #             rules:
+          #               - name: tenant-policy-stub
+          #                 match:
+          #                   any:
+          #                     - resources: { kinds: [Pod] }
+          #                 # rule body installed in Phase 13b — this stub
+          #                 # ensures the Policy object exists so the
+          #                 # Composition's binding contract is durable.
+          #
+          # --- 8. (Cloud-resource path, commented — requires provider-aws +
+          #        provider-cnpg installed). The CNPG Database object below
+          #        runs in the platform's CNPG cluster (in bookstore-platform-
+          #        system) and creates a logical DB per tenant. Uncomment +
+          #        ensure the providers are installed first. 13.02 walks
+          #        through this honestly.
+          #
+          # - name: cnpg-database
+          #   base:
+          #     apiVersion: postgresql.cnpg.io/v1
+          #     kind: Database
+          #     spec:
+          #       cluster: { name: bookstore-platform-pg }
+          #       name: tenant_REPLACED
+          #   patches:
+          #     - type: FromCompositeFieldPath
+          #       fromFieldPath: spec.tenantName
+          #       toFieldPath: spec.name
+          #       transforms:
+          #         - type: string
+          #           string: { fmt: "tenant_%s", type: Format }
+          #
+          # - name: s3-bucket  (provider-aws Bucket)
+          # - name: iam-role   (provider-aws Role + trust policy for IRSA)

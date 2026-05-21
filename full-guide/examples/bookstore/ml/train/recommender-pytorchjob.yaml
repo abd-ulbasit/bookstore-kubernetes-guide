@@ -1,0 +1,157 @@
+# Bookstore — Part 12 ch.04 "Distributed training": the same recommender
+# training expressed as a Kubeflow Training Operator `PyTorchJob` — the
+# CRD-backed distributed-training primitive (master + N workers, rendezvous,
+# elastic, cleanPodPolicy).
+#
+# !!! CRD-INTRINSIC DRY-RUN (identical precedent to raw-manifests/51-/70-/83-,
+#     argocd/, operators/, chaos/, ml/batch/) !!!
+#   `PyTorchJob` is a Kubeflow Training Operator CRD
+#   (kubeflow.org/v1). WITHOUT the Training Operator installed a client
+#   dry-run prints:
+#     no matches for kind "PyTorchJob" in version "kubeflow.org/v1"
+#   EXPECTED and SCHEMA-CORRECT — install the Training Operator first
+#   (Part 12 ch.04 Hands-on, pinned-manifest install, own namespace
+#   `kubeflow`). Schema verified against kubeflow.org/v1 PyTorchJob
+#   (pytorchReplicaSpecs Master/Worker + cleanPodPolicy).
+#
+# HONEST SCOPE
+#   The recommendations model itself is CPU-trivial item-kNN/co-occurrence
+#   (see ../train/train.py — there is no PyTorch in it). This file is the
+#   distributed-training SHAPE: it models the training as master + 1 worker
+#   under the Training Operator's rendezvous/clean-up machinery. The container
+#   command runs the SAME train.py as a stand-in so the file is honest about
+#   what it does — it demonstrates the CRD shape and Kueue gang admission,
+#   not a real all-reduce. The kind-runnable, REAL artifact-producing path
+#   is the sibling `recommender-train-job.yaml` (plain batch/v1 Job).
+#
+# KUEUE — labelled onto bookstore-ml-lq. Kueue's PyTorchJob integration gates
+# the WHOLE training run in via spec.runPolicy.suspend (created suspended,
+# fitted against the ClusterQueue, then flipped). NEVER partially placed
+# (the deadlock Part 12 ch.03 prevents).
+#
+# PSA — `bookstore-ml` is `enforce: restricted` (Part 12 ch.01). Every Pod
+# in this PyTorchJob (master + worker) carries the full restricted shape.
+# Real PyTorch base images frequently default to root — that is the PSA
+# footgun this Part teaches. Here the image is `bookstore/recommender-train:dev`,
+# which bakes uid 65532 (PSA-compliant out of the box). For a real PyTorch
+# image, keep the same securityContext: PSA does not exempt PyTorchJobs.
+apiVersion: kubeflow.org/v1
+kind: PyTorchJob
+metadata:
+  name: recommender-train-pt
+  namespace: bookstore-ml
+  labels:
+    app.kubernetes.io/part-of: bookstore-ml
+    app.kubernetes.io/component: recommender-train
+    ml.bookstore/path: pytorchjob-distributed
+    # Kueue admission integration:
+    kueue.x-k8s.io/queue-name: bookstore-ml-lq
+spec:
+  # Garbage-collect Pods when the whole job ends (success or fail).
+  runPolicy:
+    cleanPodPolicy: All
+    activeDeadlineSeconds: 1800
+    ttlSecondsAfterFinished: 600
+  pytorchReplicaSpecs:
+    Master:
+      replicas: 1
+      restartPolicy: OnFailure
+      template:
+        metadata:
+          labels:
+            app.kubernetes.io/part-of: bookstore-ml
+            app.kubernetes.io/component: recommender-train
+            ml.bookstore/role: master
+        spec:
+          automountServiceAccountToken: false
+          securityContext:                 # pod-level — restricted
+            runAsNonRoot: true
+            runAsUser: 65532
+            runAsGroup: 65532
+            fsGroup: 65532
+            seccompProfile:
+              type: RuntimeDefault
+          containers:
+            - name: pytorch                # the operator expects this name
+              image: bookstore/recommender-train:dev
+              imagePullPolicy: IfNotPresent
+              # Stand-in: run the SAME train.py the plain Job runs. A real
+              # distributed PyTorch trainer would `torchrun` here; this file
+              # exists to demonstrate the PyTorchJob shape under Kueue, not
+              # to fake an all-reduce that isn't happening.
+              command: ["python", "/workspace/train.py"]
+              env:
+                - name: MODEL_DIR
+                  value: /workspace/model
+                - name: SEED
+                  value: "42"
+              resources:
+                requests:
+                  cpu: "250m"
+                  memory: 256Mi
+                limits:
+                  cpu: "1"
+                  memory: 512Mi
+              securityContext:             # container-level — restricted
+                allowPrivilegeEscalation: false
+                readOnlyRootFilesystem: true
+                capabilities:
+                  drop: ["ALL"]
+              volumeMounts:
+                - name: model
+                  mountPath: /workspace/model
+                - name: scratch
+                  mountPath: /tmp
+          volumes:
+            - name: model
+              persistentVolumeClaim:
+                claimName: recommender-model      # shared with serve/ (RWO)
+            - name: scratch
+              emptyDir:
+                sizeLimit: 64Mi
+    Worker:
+      replicas: 1
+      restartPolicy: OnFailure
+      template:
+        metadata:
+          labels:
+            app.kubernetes.io/part-of: bookstore-ml
+            app.kubernetes.io/component: recommender-train
+            ml.bookstore/role: worker
+        spec:
+          automountServiceAccountToken: false
+          securityContext:
+            runAsNonRoot: true
+            runAsUser: 65532
+            runAsGroup: 65532
+            seccompProfile:
+              type: RuntimeDefault
+          containers:
+            - name: pytorch
+              image: bookstore/recommender-train:dev
+              imagePullPolicy: IfNotPresent
+              command: ["python", "/workspace/train.py"]
+              env:
+                - name: MODEL_DIR
+                  value: /workspace/model
+                - name: SEED
+                  value: "42"
+              resources:
+                requests:
+                  cpu: "250m"
+                  memory: 256Mi
+                limits:
+                  cpu: "1"
+                  memory: 512Mi
+              securityContext:
+                allowPrivilegeEscalation: false
+                readOnlyRootFilesystem: true
+                capabilities:
+                  drop: ["ALL"]
+              volumeMounts:
+                - name: scratch
+                  mountPath: /tmp
+          volumes:
+            - name: scratch
+              emptyDir:
+                sizeLimit: 64Mi

@@ -1,0 +1,70 @@
+{{/*
+  PrometheusRule — the RED-method catalog SLO alerts (raw-manifests
+  81-prometheusrule.yaml). monitoring.coreos.com/v1 CRD — behind
+  prometheusRule.enabled (default FALSE). The `release` label MUST match
+  kube-prometheus-stack's ruleSelector (same as 80-). Thresholds are
+  illustrative teaching values, not a real SLO (ch.01/ch.05). PromQL is
+  preserved verbatim from the raw manifest; the {{ "{{ $value }}" }}-style
+  template tokens are Prometheus/Go-template, escaped here so Helm passes them
+  through untouched.
+*/}}
+{{- if .Values.prometheusRule.enabled }}
+{{- $pr := .Values.prometheusRule }}
+apiVersion: monitoring.coreos.com/v1
+kind: PrometheusRule
+metadata:
+  name: bookstore-catalog-rules
+  namespace: {{ include "bookstore.namespace" . }}
+  labels:
+    {{- include "bookstore.labels" (dict "ctx" . "app" "catalog" "extra" (dict "release" $pr.release)) | nindent 4 }}
+spec:
+  groups:
+    - name: bookstore-catalog.rules
+      rules:
+        - alert: CatalogHighErrorRate
+          expr: |
+            (
+              sum(rate(http_requests_total{handler!="metrics",code=~"5.."}[5m]))
+              /
+              sum(rate(http_requests_total{handler!="metrics"}[5m]))
+            ) > {{ $pr.catalog.errorRatioThreshold }}
+          for: {{ $pr.catalog.errorFor }}
+          labels:
+            severity: warning
+            service: catalog
+          annotations:
+            summary: "catalog 5xx error ratio above 5%"
+            description: >-
+              catalog has served >5% 5xx responses for 10m
+              (current: {{ "{{ $value | humanizePercentage }}" }}). Check recent
+              rollouts, Postgres/Redis health, and the catalog logs
+              (Part 06 ch.02).
+        - alert: CatalogHighLatencyP95
+          expr: |
+            histogram_quantile(
+              0.95,
+              sum by (le) (rate(http_request_duration_seconds_bucket{handler!="metrics"}[5m]))
+            ) > {{ $pr.catalog.latencyP95Threshold }}
+          for: {{ $pr.catalog.latencyFor }}
+          labels:
+            severity: warning
+            service: catalog
+          annotations:
+            summary: "catalog p95 latency above 500ms"
+            description: >-
+              catalog p95 request latency has exceeded 0.5s for 10m
+              (current: {{ "{{ $value | humanizeDuration }}" }}). Investigate DB/cache
+              latency, saturation, or noisy neighbours.
+        - alert: CatalogAbsent
+          expr: absent(up{job="catalog"} == 1)
+          for: {{ $pr.catalog.absentFor }}
+          labels:
+            severity: critical
+            service: catalog
+          annotations:
+            summary: "catalog has no healthy scrape target"
+            description: >-
+              Prometheus has not successfully scraped any catalog target for
+              5m. The Deployment may be down, or the ServiceMonitor /
+              NetworkPolicy is misconfigured (Part 06 ch.01).
+{{- end }}

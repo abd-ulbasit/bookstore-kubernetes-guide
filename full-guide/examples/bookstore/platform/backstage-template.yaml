@@ -1,0 +1,138 @@
+# Bookstore — Part 11 ch.10 "Platform engineering": the Backstage SOFTWARE
+# TEMPLATE (the developer's front door) + a catalog-info sketch. This turns
+# "I want a new Bookstore service on the golden path" into a FORM: parameters
+# in, a scaffolded repo + the golden-path manifests (the BookstoreEnvironment
+# claim + an Argo Application) out, as a PR. The developer fills a form; the
+# platform materialises the entire hardened paved road.
+#
+# !!! THIS IS A BACKSTAGE CATALOG OBJECT, NOT A KUBERNETES API OBJECT.
+#   `scaffolder.backstage.io/v1beta3` Template / `backstage.io/v1alpha1`
+#   Component are consumed by Backstage, NOT kube-apiserver, and are NEVER
+#   `kubectl apply`-ed. Repo validation for this file is "well-formed YAML"
+#   only:
+#     python3 -c 'import yaml; list(yaml.safe_load_all(open(
+#       "examples/bookstore/platform/backstage-template.yaml"))); print("ok")'
+#   (A `kubectl apply --dry-run=client -f` would error "no matches for kind
+#   Template in version scaffolder.backstage.io/v1beta3" — EXPECTED. This is a
+#   Backstage catalog object; the same honesty pattern as the ch.08 kind config
+#   and ch.09 kube-burner config CLI carriers. It is NOT a CRD-intrinsic case —
+#   no Kubernetes CRD ever makes it apply; it is consumed by a different system.)
+#
+# WHY ILLUSTRATIVE-PORTAL: the FULL Backstage portal is heavy (a Node app +
+# Postgres + auth + plugins). ch.10 marks the running portal illustrative and
+# gives the pinned-Helm install command; the VALUE here is the template/catalog
+# MODEL, shown in full and reviewable. The model is not faked — only the
+# running portal is substituted by its real structure + the pinned install,
+# exactly as the guide substitutes a real Git remote / real scale elsewhere.
+#
+# THE CONCEPTUAL FLOW (ch.10 §4): developer opens Backstage -> picks this
+# template -> fills name/owner/size -> Backstage scaffolds a repo with the
+# service skeleton + the BookstoreEnvironment claim + an Argo Application and
+# OPENS A PR (Backstage commits to GIT — it does NOT apply to the cluster) ->
+# merge -> Argo CD reconciles (Part 07 ch.04) and Crossplane provisions the
+# guarded namespace (ch.10 §3) -> the new component appears in the CATALOG.
+# Backstage = front door + inventory; the write path is still Git; the
+# expansion is still GitOps + Crossplane.
+#
+# ADDITIVE: NEW file; touches no canonical Bookstore manifest, Helm chart,
+# Kustomize overlay, the operator, the argocd/ or multicluster/ trees, or any
+# existing examples/bookstore/** file.
+---
+apiVersion: scaffolder.backstage.io/v1beta3
+kind: Template
+metadata:
+  name: bookstore-service-golden-path
+  title: Bookstore service (golden path)
+  description: >-
+    Scaffold a new Bookstore service ALREADY on the paved road: a service
+    skeleton + a BookstoreEnvironment claim (provisions the PSA-restricted,
+    RBAC-scoped, quota-bounded, NetworkPolicy-isolated namespace via Crossplane)
+    + an Argo CD Application (GitOps delivery). The developer never writes
+    securityContext / RBAC / quota / NetworkPolicy — guardrails by construction.
+  tags:
+    - bookstore
+    - golden-path
+    - recommended
+spec:
+  owner: platform-team
+  type: service
+  # ---- THE FORM the developer fills (JSON-schema-driven UI) ----
+  parameters:
+    - title: Service
+      required: [name, owner]
+      properties:
+        name:
+          title: Service name
+          type: string
+          description: lowercase DNS-style name (e.g. recommendations)
+          pattern: '^[a-z]([-a-z0-9]*[a-z0-9])?$'
+        owner:
+          title: Owner
+          type: string
+          description: the owning team/group (maps to catalog ownership + RBAC)
+          ui:field: OwnerPicker
+        size:
+          title: Environment size
+          type: string
+          enum: [small, medium, large]
+          default: small
+          description: t-shirt size; the platform maps it to the quota totals
+  # ---- The STEPS Backstage runs (scaffold -> PR; NEVER kubectl apply) ----
+  steps:
+    - id: fetch
+      name: Fetch the golden-path skeleton
+      action: fetch:template
+      input:
+        # the skeleton would carry: a distroless service Dockerfile (Part 05
+        # ch.03 pattern), the BookstoreEnvironment claim (this dir), and an
+        # Argo Application (Part 07 ch.04 shape) — all parameterised.
+        url: ./skeleton
+        values:
+          name: ${{ parameters.name }}
+          owner: ${{ parameters.owner }}
+          size: ${{ parameters.size }}
+    - id: publish
+      name: Open a PR (Git is the only write path — Part 07 ch.04)
+      action: publish:github:pull-request
+      input:
+        # PLACEHOLDER: generic repo, same convention as argocd/ + multicluster/
+        # (replace your-org with your fork). Backstage commits HERE; GitOps +
+        # Crossplane do the provisioning — Backstage never touches the cluster.
+        repoUrl: github.com?owner=your-org&repo=bookstore
+        branchName: golden-path-${{ parameters.name }}
+        title: 'feat: scaffold ${{ parameters.name }} on the Bookstore golden path'
+        description: >-
+          Adds the ${{ parameters.name }} service + its BookstoreEnvironment
+          claim + Argo Application. Merging provisions a guarded namespace via
+          Crossplane and reconciles the app via GitOps.
+    - id: register
+      name: Register in the software catalog
+      action: catalog:register
+      input:
+        repoContentsUrl: ${{ steps.publish.output.repoContentsUrl }}
+        catalogInfoPath: /catalog-info.yaml
+  output:
+    links:
+      - title: Open the PR
+        url: ${{ steps.publish.output.remoteUrl }}
+---
+# ---- catalog-info sketch: how the SCAFFOLDED service registers itself ----
+# (Backstage catalog Component — inventory + ownership graph; NOT a k8s object.
+#  This is what the skeleton's catalog-info.yaml would look like, rendered.)
+apiVersion: backstage.io/v1alpha1
+kind: Component
+metadata:
+  name: bookstore-EXAMPLE-service
+  description: A Bookstore service scaffolded on the golden path (sample).
+  annotations:
+    # links the catalog entry to its Argo app + source (plugins surface these)
+    argocd/app-name: bookstore-EXAMPLE-service
+    backstage.io/techdocs-ref: dir:.
+  tags:
+    - bookstore
+    - golden-path
+spec:
+  type: service
+  lifecycle: experimental
+  owner: platform-team
+  system: bookstore

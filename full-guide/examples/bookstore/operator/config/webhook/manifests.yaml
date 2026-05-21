@@ -1,0 +1,116 @@
+# Bookstore — Part 11 ch.01 "Admission webhooks": the Mutating + Validating
+# webhook configurations for core/v1 Pod, plus the webhook Service.
+#
+# Equivalent to `make manifests` (controller-gen webhook) output. Regenerate
+# with: make manifests
+#
+# !!! WEBHOOK-INTRINSIC dry-run behavior (the SAME class of note as the guide's
+# CRD-backed files) !!!
+# MutatingWebhookConfiguration / ValidatingWebhookConfiguration ARE built-in
+# admissionregistration.k8s.io/v1 kinds, so:
+#   • `kubectl apply --dry-run=client -f config/webhook/manifests.yaml` and a
+#     server dry-run are CLEAN — the OBJECTS are valid on any v1.30+ cluster.
+#   • BUT the webhook itself is "not present" until the operator Deployment +
+#     this Service + a serving cert (cert-manager, below) all exist: the
+#     apiserver can register the configuration but has nothing to CALL. With
+#     failurePolicy as set below, an unreachable webhook means: the MUTATING
+#     one (failurePolicy: Ignore) is skipped, the VALIDATING one
+#     (failurePolicy: Fail) REJECTS matching requests until the server is up.
+#     That asymmetry is deliberate and is taught in the chapter.
+# This is the exact analog of the CRD "schema-correct, needs the controller"
+# note used throughout the guide — stated for webhooks.
+#
+# DEADLOCK-AVOIDANCE (the chapter's headline footgun): both configs scope by
+# namespaceSelector to EXCLUDE kube-system AND the operator's OWN namespace
+# (bookstore-operator-system) and any namespace labelled
+# bookstore.example.com/webhook-exempt. A Pod-validating webhook that can
+# block Pods in its own namespace cannot be (re)scheduled if it ever goes
+# down — a self-inflicted cluster outage. The validating webhook is further
+# scoped to ONLY the `bookstore` namespace (objectSelector-free; the in-code
+# rule also early-returns for other namespaces — defense in depth).
+apiVersion: admissionregistration.k8s.io/v1
+kind: MutatingWebhookConfiguration
+metadata:
+  name: bookstore-operator-mutating-webhook-configuration
+  annotations:
+    # cert-manager injects the CA bundle from the Certificate below. Without
+    # cert-manager, replace this with a base64 caBundle (the self-signed flow
+    # the chapter documents).
+    cert-manager.io/inject-ca-from: bookstore-operator-system/bookstore-operator-serving-cert
+webhooks:
+  - name: mpod.bookstore.example.com
+    admissionReviewVersions: ["v1"]
+    sideEffects: None
+    failurePolicy: Ignore # mutation is a convenience default → fail-open
+    reinvocationPolicy: IfNeeded # re-run if a later webhook mutates the Pod
+    timeoutSeconds: 5
+    clientConfig:
+      service:
+        name: bookstore-operator-webhook-service
+        namespace: bookstore-operator-system
+        path: /mutate--v1-pod
+        port: 443
+    rules:
+      - apiGroups: [""]
+        apiVersions: ["v1"]
+        operations: ["CREATE", "UPDATE"]
+        resources: ["pods"]
+        scope: Namespaced
+    namespaceSelector:
+      matchExpressions:
+        - key: kubernetes.io/metadata.name
+          operator: NotIn
+          values: ["kube-system", "kube-node-lease", "bookstore-operator-system"]
+        - key: bookstore.example.com/webhook-exempt
+          operator: DoesNotExist
+---
+apiVersion: admissionregistration.k8s.io/v1
+kind: ValidatingWebhookConfiguration
+metadata:
+  name: bookstore-operator-validating-webhook-configuration
+  annotations:
+    cert-manager.io/inject-ca-from: bookstore-operator-system/bookstore-operator-serving-cert
+webhooks:
+  - name: vpod.bookstore.example.com
+    admissionReviewVersions: ["v1"]
+    sideEffects: None
+    failurePolicy: Fail # enforcement → fail-CLOSED (no bypass on outage)
+    timeoutSeconds: 5
+    clientConfig:
+      service:
+        name: bookstore-operator-webhook-service
+        namespace: bookstore-operator-system
+        path: /validate--v1-pod
+        port: 443
+    rules:
+      - apiGroups: [""]
+        apiVersions: ["v1"]
+        operations: ["CREATE", "UPDATE"]
+        resources: ["pods"]
+        scope: Namespaced
+    # CEL matchConditions (v1.30 GA on webhooks): cheap pre-filter so the
+    # webhook is only CALLED for Pods that are NOT already opted out — keeps
+    # the blast radius and latency tiny. (The namespaceSelector still does the
+    # coarse exclusion; matchConditions is the fine-grained, expression-based
+    # gate that runs after selectors.)
+    matchConditions:
+      - name: exclude-exempt-pods
+        expression: "!has(object.metadata.labels) || !('bookstore.example.com/webhook-exempt' in object.metadata.labels)"
+    namespaceSelector:
+      matchExpressions:
+        - key: kubernetes.io/metadata.name
+          operator: In
+          values: ["bookstore"] # ONLY the Bookstore app namespace
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: bookstore-operator-webhook-service
+  namespace: bookstore-operator-system
+spec:
+  selector:
+    control-plane: controller-manager
+  ports:
+    - port: 443
+      targetPort: 9443
+      protocol: TCP

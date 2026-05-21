@@ -1,0 +1,188 @@
+# Bookstore — Part 08 ch.04 "Multi-tenancy and namespaces": a SECOND tenant.
+#
+# The `bookstore` namespace already demonstrates the full soft-multi-tenancy
+# guardrail stack (ns + ResourceQuota + LimitRange + RBAC + NetworkPolicy +
+# PSA). This file is the worked "add another tenant" example the chapter walks:
+# a SEPARATE namespace `tenant-acme` with ITS OWN copy of every guardrail, so
+# the two tenants are isolated by the same mechanisms. It is DELIBERATELY
+# pod-free (only Namespace/ResourceQuota/LimitRange/ServiceAccount/Role/
+# RoleBinding/NetworkPolicy) so it dry-runs CLEAN against a vanilla cluster
+# (no CRDs, no PSA-admission concerns — there are no pods to admit) and is
+# purely ADDITIVE: it does NOT touch the `bookstore` ns or any canonical
+# manifest. It is the analog of "envs are Kustomize overlays in ONE ns; real
+# tenants are SEPARATE namespaces, one guardrail set EACH".
+#
+# NOT CRD-backed: every kind here is built-in (v1 / rbac.authorization.k8s.io/v1
+# / networking.k8s.io/v1), so unlike velero-/cnpg- this file has NO
+# CRD-intrinsic dry-run caveat — `kubectl apply --dry-run=client -f` is CLEAN.
+#
+# Apply (standalone — needs nothing else):
+#   kubectl apply -f examples/bookstore/operators/second-tenant.yaml
+#   kubectl get ns tenant-acme -o jsonpath='{.metadata.labels}' ; echo
+#   kubectl describe resourcequota,limitrange -n tenant-acme
+#   kubectl auth can-i --list \
+#     --as=system:serviceaccount:tenant-acme:acme-deployer -n tenant-acme
+# Remove:
+#   kubectl delete -f examples/bookstore/operators/second-tenant.yaml
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: tenant-acme
+  labels:
+    # tenant identity (cost attribution / selection — Part 06 ch.06)
+    tenant: acme
+    app.kubernetes.io/part-of: bookstore-platform
+    # SAME PSA posture as the bookstore ns: enforce restricted + audit + warn.
+    # Every tenant gets the hard pod-security gate, not just the first one.
+    pod-security.kubernetes.io/enforce: restricted
+    pod-security.kubernetes.io/enforce-version: latest
+    pod-security.kubernetes.io/audit: restricted
+    pod-security.kubernetes.io/audit-version: latest
+    pod-security.kubernetes.io/warn: restricted
+    pod-security.kubernetes.io/warn-version: latest
+---
+# Fairness: this tenant's TOTAL is capped independently of bookstore's quota.
+# One tenant exhausting its quota cannot starve the other (noisy-neighbour at
+# the namespace level — the cluster/etcd/apiserver level is API Priority &
+# Fairness, see the chapter).
+apiVersion: v1
+kind: ResourceQuota
+metadata:
+  name: tenant-acme-quota
+  namespace: tenant-acme
+spec:
+  hard:
+    requests.cpu: "1"
+    requests.memory: 1Gi
+    limits.cpu: "2"
+    limits.memory: 2Gi
+    pods: "15"
+    # also bound API-object sprawl per tenant (etcd is a shared resource):
+    services: "10"
+    secrets: "20"
+    configmaps: "20"
+    persistentvolumeclaims: "5"
+---
+# Per-container defaults + bounds for this tenant (mirrors bookstore-limits so
+# the quota requirement is ergonomic — a container omitting requests/limits
+# still gets sane values instead of a wall of rejections).
+apiVersion: v1
+kind: LimitRange
+metadata:
+  name: tenant-acme-limits
+  namespace: tenant-acme
+spec:
+  limits:
+    - type: Container
+      default:
+        cpu: 250m
+        memory: 256Mi
+      defaultRequest:
+        cpu: 50m
+        memory: 64Mi
+      max:
+        cpu: "1"
+        memory: 1Gi
+      min:
+        cpu: 10m
+        memory: 16Mi
+---
+# The tenant's own identity. A real platform binds the tenant's TEAM (an OIDC
+# group) to this Role; the ServiceAccount here is the in-namespace workload
+# identity (the bookstore precedent: dedicated SA, least privilege).
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: acme-deployer
+  namespace: tenant-acme
+automountServiceAccountToken: false   # no token unless the workload needs one
+---
+# RBAC scoped to ONE namespace: a namespaced Role (NOT a ClusterRole) so this
+# tenant can manage ONLY its own workloads in ONLY tenant-acme. This is the
+# core of soft multi-tenancy: the namespace is the boundary, RBAC enforces it.
+# Note: NO verbs on resourcequotas/limitranges/namespaces — capacity policy is
+# PLATFORM-managed; a tenant must not mint its own quota (the same stance as
+# the Bookstore AppProject's namespaceResourceBlacklist, Part 07 ch.04).
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: acme-tenant-admin
+  namespace: tenant-acme
+rules:
+  - apiGroups: ["apps"]
+    resources: ["deployments", "replicasets", "statefulsets"]
+    verbs: ["get", "list", "watch", "create", "update", "patch", "delete"]
+  - apiGroups: [""]
+    resources: ["pods", "services", "configmaps", "secrets",
+                "persistentvolumeclaims"]
+    verbs: ["get", "list", "watch", "create", "update", "patch", "delete"]
+  - apiGroups: [""]
+    resources: ["pods/log", "pods/exec", "pods/ephemeralcontainers"]
+    verbs: ["get", "create"]      # the tenant can debug its OWN pods (ch.03)
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: acme-tenant-admin
+  namespace: tenant-acme
+subjects:
+  # the tenant's workload identity …
+  - kind: ServiceAccount
+    name: acme-deployer
+    namespace: tenant-acme
+  # … and (illustrative) the tenant's human team via an OIDC group. A real
+  # platform maps the IdP group here; left as a documented example subject.
+  - kind: Group
+    name: acme-team            # e.g. an OIDC/SSO group claim (Part 05 ch.01)
+    apiGroup: rbac.authorization.k8s.io
+roleRef:
+  kind: Role                   # namespaced → effective ONLY in tenant-acme
+  name: acme-tenant-admin
+  apiGroup: rbac.authorization.k8s.io
+---
+# default-DENY ingress + egress for the tenant ns (same zero-trust baseline as
+# the bookstore ns's 60-networkpolicy.yaml). Cross-tenant traffic is denied by
+# default; the tenant adds its own intra-namespace allows on top.
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: default-deny-all
+  namespace: tenant-acme
+spec:
+  podSelector: {}
+  policyTypes: ["Ingress", "Egress"]
+---
+# Mandatory DNS egress (default-deny egress also blocks DNS — the single most
+# common policy outage; identical to the bookstore allow-dns-egress rule).
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: allow-dns-egress
+  namespace: tenant-acme
+spec:
+  podSelector: {}
+  policyTypes: ["Egress"]
+  egress:
+    - to:
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: kube-system
+      ports:
+        - { protocol: UDP, port: 53 }
+        - { protocol: TCP, port: 53 }
+---
+# Explicit cross-tenant ISOLATION: deny ingress from any pod NOT in this
+# namespace. (default-deny already does this; this rule states the intent
+# explicitly and is the documented "tenants cannot reach each other" guard the
+# chapter highlights for multi-tenant clusters.)
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: allow-same-namespace-only
+  namespace: tenant-acme
+spec:
+  podSelector: {}
+  policyTypes: ["Ingress"]
+  ingress:
+    - from:
+        - podSelector: {}        # same-namespace pods ONLY (no cross-tenant)

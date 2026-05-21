@@ -1,0 +1,249 @@
+# Bookstore — Part 07 ch.05 "Progressive delivery": catalog as an Argo Rollout.
+#
+# This REPLACES the catalog Deployment (raw-manifests 10-) with an Argo
+# Rollouts `Rollout` running a CANARY strategy: 10% → 25% → 50% → 100% with
+# pauses and an AnalysisTemplate GATE (success-rate + p95 latency, real PromQL
+# against the Part-06 catalog metrics). On a failed analysis Argo Rollouts
+# AUTOMATICALLY ROLLS BACK to the stable ReplicaSet — no human, no kubectl.
+#
+# ───────────────────────────────────────────────────────────────────────────
+# FAITHFUL PORT OF catalog 10-. A Rollout's `spec.template` IS a Pod template
+# (same schema as a Deployment's). Everything below is carried over from
+# raw-manifests/10-catalog-deploy.yaml UNCHANGED so the canary runs the EXACT
+# same hardened catalog:
+#   • PSA `restricted` pod SC: runAsNonRoot, runAsUser/Group 65532 (distroless
+#     "nonroot"), seccompProfile RuntimeDefault.
+#   • PSA `restricted` container SC: allowPrivilegeEscalation:false,
+#     readOnlyRootFilesystem:true, capabilities drop ALL.
+#   • Part 04 scheduling layer: priorityClassName bookstore-critical,
+#     topologySpreadConstraints (maxSkew 1, DoNotSchedule), podAntiAffinity.
+#   • Part 05 identity: serviceAccountName catalog-sa,
+#     automountServiceAccountToken:false.
+#   • ch.01/02/03 config: envFrom catalog-config, LOG_LEVEL configMapKeyRef,
+#     POSTGRES_* secretKeyRef, and DB_DSN — BYTE-IDENTICAL to orders' /the raw
+#     canonical string (host=postgres.bookstore.svc.cluster.local port=5432
+#     user=$(POSTGRES_USER) password=$(POSTGRES_PASSWORD)
+#     dbname=$(POSTGRES_DB) sslmode=disable).
+#   • Probes (startup/liveness on /healthz, readiness on /readyz), native
+#     preStop sleep (distroless-safe — NO exec), resources, scratch +
+#     downwardAPI volumes, terminationGracePeriodSeconds.
+# The `bookstore` namespace enforces PSA `restricted`; the canary AND stable
+# Pods this Rollout creates are admitted with ZERO PodSecurity warnings
+# because the template is the restricted 10- template verbatim.
+# ───────────────────────────────────────────────────────────────────────────
+#
+# CRD-INTRINSIC NOTE (precedent: raw 18-/51-/70-/80-/83-, Helm CRD toggles,
+# Kustomize components, ch.04 Argo CD Application/AppProject).
+#   `Rollout` is the Argo Rollouts CRD `argoproj.io/v1alpha1`. WITHOUT the
+#   Argo Rollouts controller installed:
+#     kubectl apply --dry-run=client -f catalog-rollout.yaml
+#     # error: ... no matches for kind "Rollout" in version
+#     #        "argoproj.io/v1alpha1"
+#   EXPECTED, schema-correct; install the controller first (ch.05 Hands-on
+#   step 1 — Helm, never releases/latest/download/<pinned-file>.yaml). Same
+#   for analysistemplate-*.yaml (`AnalysisTemplate`).
+#
+# CATALOG SERVICE / HPA INTERACTION (be correct — see ch.05):
+#   • The base `catalog` Service (40-) selects `app: catalog` ONLY. A Rollout's
+#     Pods carry the Deployment-equivalent labels, so this Service keeps
+#     load-balancing across the Rollout's Pods with NO change (a basic
+#     replica-based canary; no mesh/Ingress traffic split needed for the lab).
+#     The 30-catalog-canary teaching variant (manual replica-ratio) is the
+#     SAME idea done by hand; this is the automated, metric-gated form.
+#   • The catalog HPA (82-) targets a *Deployment*. A Rollout MANAGES replicas
+#     itself, so an HPA must EITHER target the Rollout via scaleTargetRef
+#     {apiVersion: argoproj.io/v1alpha1, kind: Rollout, name: catalog} OR be
+#     removed. Pointing the 82- HPA at a `Deployment/catalog` that no longer
+#     exists orphans the autoscaler (exactly the KEDA-owns-replicas / canary-
+#     orphans-HPA lesson, Part 06 ch.04 & ch.02). For this chapter the Rollout
+#     OWNS replicas and the HPA is OUT (do not apply 82- alongside this);
+#     ch.05 explains targeting the Rollout if you want autoscaling too.
+#
+# Requires (ch.05 Hands-on): a cluster + `kind load bookstore/catalog:dev`,
+# Argo Rollouts controller installed, and the catalog prereqs:
+#   kubectl apply -f examples/bookstore/raw-manifests/00-namespace.yaml
+#   kubectl apply -f examples/bookstore/raw-manifests/05-serviceaccounts-rbac.yaml
+#   kubectl apply -f examples/bookstore/raw-manifests/15-catalog-config.yaml
+#   kubectl apply -f examples/bookstore/raw-manifests/16-db-credentials.yaml
+#   kubectl apply -f examples/bookstore/raw-manifests/35-priorityclasses.yaml
+#   kubectl apply -f examples/bookstore/raw-manifests/40-services.yaml
+#   kubectl apply -f examples/bookstore/argocd/rollouts/analysistemplate-success-rate.yaml
+#   kubectl apply -f examples/bookstore/argocd/rollouts/analysistemplate-latency.yaml
+# Apply:
+#   kubectl apply -f examples/bookstore/argocd/rollouts/catalog-rollout.yaml
+#   kubectl argo rollouts get rollout catalog -n bookstore --watch
+apiVersion: argoproj.io/v1alpha1
+kind: Rollout
+metadata:
+  name: catalog
+  namespace: bookstore
+  labels:
+    app: catalog
+    app.kubernetes.io/part-of: bookstore
+spec:
+  replicas: 4                          # stable replica count (canary % of this)
+  revisionHistoryLimit: 5              # old ReplicaSets kept for rollback
+  selector:
+    matchLabels:
+      app: catalog                     # IMMUTABLE; equals template labels
+  strategy:
+    canary:
+      # Replica-based canary (no trafficRouting): Argo Rollouts scales a canary
+      # ReplicaSet to setWeight% of `replicas` and the shared `catalog` Service
+      # (40-) load-balances over stable+canary endpoints — traffic share ≈
+      # endpoint share. (With a mesh/Ingress you'd add trafficRouting +
+      # canary/stable Services for exact %; the lab stays mesh-free.)
+      maxSurge: "25%"
+      maxUnavailable: 0                # never drop below `replicas` Ready
+      # The AnalysisTemplate GATE runs as an inline step (below). It queries
+      # Prometheus for catalog success-rate + p95; failing it ABORTS the
+      # rollout and Argo Rollouts auto-rolls-back to the stable ReplicaSet.
+      steps:
+        - setWeight: 10               # 10% canary
+        - pause: { duration: 60s }    # soak (human can also pause indefinitely)
+        - setWeight: 25
+        - pause: { duration: 60s }
+        - analysis:                   # ← the metric GATE (auto-rollback on fail)
+            templates:
+              - templateName: catalog-success-rate
+              - templateName: catalog-latency-p95
+            args:
+              - name: service-name
+                value: catalog
+              - name: namespace
+                value: bookstore
+        - setWeight: 50
+        - pause: { duration: 60s }
+        - setWeight: 100              # full promotion (analysis already passed)
+  template:
+    metadata:
+      labels:
+        app: catalog                  # selected by this Rollout AND the Service (40-)
+        component: backend
+    spec:
+      # --- Part 05 ch.01: dedicated identity, NO API token (verbatim from 10-).
+      serviceAccountName: catalog-sa
+      automountServiceAccountToken: false
+      # --- Part 05 ch.02: pod-level securityContext, PSA `restricted`
+      # (verbatim from 10-: distroless "nonroot" UID/GID 65532, seccomp).
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 65532
+        runAsGroup: 65532
+        seccompProfile:
+          type: RuntimeDefault
+      # --- Part 04 ch.03: priority tier (35-) — user-facing (verbatim).
+      priorityClassName: bookstore-critical
+      # --- Part 04 ch.02: spread replicas across nodes (verbatim from 10-).
+      topologySpreadConstraints:
+        - maxSkew: 1
+          topologyKey: kubernetes.io/hostname
+          whenUnsatisfiable: DoNotSchedule
+          labelSelector:
+            matchLabels:
+              app: catalog
+      affinity:
+        podAntiAffinity:
+          preferredDuringSchedulingIgnoredDuringExecution:
+            - weight: 100
+              podAffinityTerm:
+                topologyKey: kubernetes.io/hostname
+                labelSelector:
+                  matchLabels:
+                    app: catalog
+      containers:
+        - name: catalog
+          image: bookstore/catalog:dev    # the canary "new image" is set by
+          imagePullPolicy: IfNotPresent   # `kubectl argo rollouts set image`
+          # --- Part 05 ch.02: container securityContext, PSA `restricted`
+          # (verbatim from 10-: read-only root FS + scratch emptyDir).
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities:
+              drop: ["ALL"]
+          ports:
+            - name: http
+              containerPort: 8080
+          # --- ch.01 ConfigMap: bulk envFrom (verbatim from 10-) ---
+          envFrom:
+            - configMapRef:
+                name: catalog-config
+          env:
+            - name: PORT
+              value: "8080"
+            # ch.01: LOG_LEVEL ALSO via configMapKeyRef (verbatim from 10-).
+            - name: LOG_LEVEL
+              valueFrom:
+                configMapKeyRef:
+                  name: catalog-config
+                  key: LOG_LEVEL
+            # --- ch.02 Secret: assemble DB_DSN (verbatim from 10-). $(VAR)
+            # needs the refs defined earlier in this list — order preserved.
+            - name: POSTGRES_USER
+              valueFrom:
+                secretKeyRef: { name: db-credentials, key: POSTGRES_USER }
+            - name: POSTGRES_PASSWORD
+              valueFrom:
+                secretKeyRef: { name: db-credentials, key: POSTGRES_PASSWORD }
+            - name: POSTGRES_DB
+              valueFrom:
+                secretKeyRef: { name: db-credentials, key: POSTGRES_DB }
+            # BYTE-IDENTICAL to orders (14-) and the raw canonical string.
+            - name: DB_DSN
+              value: "host=postgres.bookstore.svc.cluster.local port=5432 user=$(POSTGRES_USER) password=$(POSTGRES_PASSWORD) dbname=$(POSTGRES_DB) sslmode=disable"
+          # Health probes (verbatim from 10-) — routes the app implements.
+          startupProbe:
+            httpGet: { path: /healthz, port: http }
+            periodSeconds: 5
+            failureThreshold: 30
+          livenessProbe:
+            httpGet: { path: /healthz, port: http }
+            periodSeconds: 10
+            timeoutSeconds: 2
+            failureThreshold: 3
+            successThreshold: 1
+          readinessProbe:
+            httpGet: { path: /readyz, port: http }
+            periodSeconds: 5
+            timeoutSeconds: 2
+            failureThreshold: 3
+            successThreshold: 1
+          lifecycle:
+            preStop:
+              # Native sleep handler (verbatim from 10-). NOT exec: the
+              # distroless/static image has no shell/coreutils.
+              sleep:
+                seconds: 5
+          resources:
+            requests:
+              cpu: 50m
+              memory: 64Mi
+            limits:
+              cpu: 250m
+              memory: 128Mi
+          # --- ch.03 Volumes (verbatim from 10-) ---
+          volumeMounts:
+            - name: scratch
+              mountPath: /tmp/cache
+            - name: podinfo
+              mountPath: /etc/podinfo
+              readOnly: true
+      volumes:
+        - name: scratch
+          emptyDir:
+            sizeLimit: 64Mi
+        - name: podinfo
+          downwardAPI:
+            items:
+              - path: pod_name
+                fieldRef: { fieldPath: metadata.name }
+              - path: pod_namespace
+                fieldRef: { fieldPath: metadata.namespace }
+              - path: pod_labels
+                fieldRef: { fieldPath: metadata.labels }
+              - path: cpu_limit
+                resourceFieldRef:
+                  containerName: catalog
+                  resource: limits.cpu
+      terminationGracePeriodSeconds: 30

@@ -1,0 +1,32 @@
+# Bookstore Kustomize COMPONENT — kyverno (admission-time image policy).
+#
+# Adds the `bookstore-image-supply-chain` ClusterPolicy (vendored
+# byte-identical from raw-manifests/70-). Exact analog of the Helm chart's
+# `kyverno.enabled` toggle.
+#
+# !!! CRD PREREQUISITE. `ClusterPolicy` is a Kyverno CRD (kyverno.io/v1), NOT
+# a built-in kind — and it is CLUSTER-SCOPED, so the overlay's `namespace:`
+# transformer correctly does NOT stamp a namespace onto it (verified). Without
+# Kyverno installed, a client dry-run of an overlay including this component
+# prints `no matches for kind "ClusterPolicy"` — EXPECTED and correct. Install
+# Kyverno (its own Helm chart is the stable path) before enabling on a live
+# cluster:
+#   helm repo add kyverno https://kyverno.github.io/kyverno/
+#   helm repo update
+#   helm install kyverno kyverno/kyverno -n kyverno --create-namespace
+#
+# !!! THE POLICY IS DELIBERATELY `validationFailureAction: Audit` — NOT
+# Enforce. Two of its rules (disallow-latest-tag / require-image-digest) would
+# REJECT the guide's own `bookstore/<svc>:dev` images if Enforced and
+# blackhole the cluster. Audit reports violations without blocking. The real
+# Enforce-by-digest+signature path is Part 05 ch.03 (do not flip to Enforce
+# until CI builds immutable, signed images). See raw 70- header.
+#
+# Enable by adding to an overlay's `components:` list, e.g.:
+#   components:
+#     - ../../components/kyverno
+apiVersion: kustomize.config.k8s.io/v1alpha1
+kind: Component
+
+resources:
+  - 70-kyverno-policy.yaml

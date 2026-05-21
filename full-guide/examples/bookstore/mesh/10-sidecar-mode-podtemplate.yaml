@@ -1,0 +1,99 @@
+# Bookstore — Part 11 ch.04 "Service mesh": THE SIDECAR-INJECTION vs
+# PSA-RESTRICTED FOOTGUN, made concrete. This file is a TEACHING ARTIFACT — a
+# standalone Pod that shows the restricted-compliant shape an injected
+# istio-proxy SIDECAR must have to be admitted into the PSA-restricted
+# `bookstore` namespace. It is NOT part of the running Bookstore (the
+# Bookstore uses AMBIENT — 00-/30-; this is the contrast).
+#
+# THE FOOTGUN (the single most important thing in this chapter)
+#   In SIDECAR mode the mesh's MUTATING webhook rewrites every Pod to add an
+#   `istio-proxy` container (and historically an `istio-init` init container
+#   that programs iptables and needs NET_ADMIN/NET_RAW). `bookstore` is
+#   `pod-security.kubernetes.io/enforce: restricted`. PSA validates the FINAL,
+#   MUTATED Pod (Part 11 ch.01: mutate-before-validate). If the injected
+#   sidecar/init is NOT restricted-compliant, PSA REJECTS THE ENTIRE POD —
+#   the app container never runs. "I enabled the mesh and now nothing
+#   schedules in my hardened namespace" is a textbook production incident.
+#
+#   The fixes, in order of preference:
+#     1. AMBIENT mode (what the Bookstore does): no injected container at all,
+#        so nothing for PSA to reject. Strictly the cleanest answer for a
+#        restricted namespace — hence this guide's choice (00-/30-).
+#     2. Istio CNI plugin: removes the privileged istio-init container (the
+#        iptables setup moves to a node CNI), leaving only istio-proxy, which
+#        Istio CAN run restricted-compliant (the securityContext BELOW). This
+#        is the supported way to run SIDECAR mode in a restricted namespace.
+#     3. The injected sidecar MUST carry exactly the restricted securityContext
+#        shown below (runAsNonRoot, non-root UID, allowPrivilegeEscalation
+#        false, drop ALL, seccomp RuntimeDefault). Istio's injection template
+#        is configurable to emit this; verify it — do not assume.
+#
+# This Pod is restricted-compliant AS WRITTEN (both the "app" and the
+# stand-in "istio-proxy" container) — it is what a CORRECTLY injected Pod
+# looks like, and it WILL admit into `bookstore`. Remove any one restricted
+# field from the proxy container and PSA rejects the whole Pod — try it.
+#
+# Built-in kind (core/v1 Pod): a client dry-run is CLEAN with NO CRDs/mesh
+# installed (no intrinsic CRD note needed — there is no CRD here; the lesson
+# is the securityContext, not an operator).
+#
+# Apply (into the PSA-restricted ns — it admits BECAUSE it is compliant):
+#   kubectl apply -f examples/bookstore/mesh/10-sidecar-mode-podtemplate.yaml
+#   kubectl get pod mesh-sidecar-shape -n bookstore           # Running
+#   kubectl delete pod mesh-sidecar-shape -n bookstore
+apiVersion: v1
+kind: Pod
+metadata:
+  name: mesh-sidecar-shape
+  namespace: bookstore
+  labels:
+    app: catalog                       # a real Bookstore label (illustrative)
+    app.kubernetes.io/part-of: bookstore
+  annotations:
+    # In a real sidecar-mode mesh this is where injection is opted in
+    # (e.g. sidecar.istio.io/inject: "true"); shown for orientation only —
+    # this artifact hand-writes the *resulting* restricted-compliant shape.
+    sidecar.istio.io/inject: "false"
+spec:
+  # POD-LEVEL restricted baseline (PSA restricted requires these).
+  securityContext:
+    runAsNonRoot: true
+    runAsUser: 65532
+    seccompProfile:
+      type: RuntimeDefault
+  containers:
+    # ---- the application container (stand-in: pause) -----------------------
+    - name: app
+      image: registry.k8s.io/pause:3.9
+      securityContext:
+        allowPrivilegeEscalation: false
+        runAsNonRoot: true
+        capabilities:
+          drop: ["ALL"]
+        seccompProfile:
+          type: RuntimeDefault
+      resources:
+        requests: { cpu: "10m", memory: "16Mi" }
+        limits:   { cpu: "50m", memory: "32Mi" }
+    # ---- the INJECTED istio-proxy SIDECAR shape (this is the lesson) -------
+    # A real mesh injects this container. For PSA `restricted` to admit the
+    # Pod, the injected proxy MUST carry EXACTLY this securityContext. If your
+    # mesh's injection template omits any of these, PSA rejects every meshed
+    # Pod in `bookstore`. (Stand-in image; the securityContext is the point.)
+    - name: istio-proxy
+      image: registry.k8s.io/pause:3.9
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 1337                 # Istio's proxy UID — non-root (OK)
+        allowPrivilegeEscalation: false
+        readOnlyRootFilesystem: true
+        capabilities:
+          drop: ["ALL"]                 # NO NET_ADMIN here — that requires the
+                                        # Istio CNI plugin (fix #2 above) so the
+                                        # init container is gone; otherwise PSA
+                                        # rejects the Pod.
+        seccompProfile:
+          type: RuntimeDefault
+      resources:
+        requests: { cpu: "10m", memory: "40Mi" }
+        limits:   { cpu: "100m", memory: "128Mi" }

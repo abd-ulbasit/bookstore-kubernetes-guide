@@ -1,0 +1,59 @@
+{{/*
+  Ingress (raw-manifests 50-ingress.yaml) — the DEFAULT edge stack
+  (networking.k8s.io is a built-in API, so a plain `helm install` renders and
+  applies this with no extra CRDs). MUTUALLY EXCLUSIVE with the Gateway stack:
+  bookstore.validateEdge fails the render if both ingress.enabled and
+  gateway.enabled are true. Still needs an Ingress CONTROLLER (ingress-nginx)
+  installed to actually serve traffic, and the bookstore-tls Secret for TLS
+  (the chart does NOT generate the cert — see NOTES.txt / ch.01 hands-on).
+  The rewrite annotation is ingress-nginx-specific (a portability limit that
+  motivates the Gateway alternative).
+*/}}
+{{- include "bookstore.validateEdge" . -}}
+{{- if .Values.ingress.enabled }}
+{{- $i := .Values.ingress }}
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: bookstore
+  namespace: {{ include "bookstore.namespace" . }}
+  labels:
+    {{- include "bookstore.commonLabels" . | nindent 4 }}
+  {{- with $i.annotations }}
+  annotations:
+    {{- toYaml . | nindent 4 }}
+  {{- end }}
+spec:
+  ingressClassName: {{ $i.className }}
+  {{- if $i.tls.enabled }}
+  tls:
+    - hosts:
+        - {{ $i.host }}
+      secretName: {{ $i.tls.secretName }}
+  {{- end }}
+  rules:
+    - host: {{ $i.host }}
+      http:
+        paths:
+          - path: /api/books(/|$)(.*)
+            pathType: ImplementationSpecific
+            backend:
+              service:
+                name: catalog
+                port:
+                  number: {{ .Values.catalog.service.port }}
+          - path: /api/orders(/|$)(.*)
+            pathType: ImplementationSpecific
+            backend:
+              service:
+                name: orders
+                port:
+                  number: {{ .Values.orders.service.port }}
+          - path: /
+            pathType: Prefix
+            backend:
+              service:
+                name: storefront
+                port:
+                  number: {{ .Values.storefront.service.port }}
+{{- end }}

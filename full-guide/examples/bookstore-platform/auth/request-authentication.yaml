@@ -1,0 +1,65 @@
+# Bookstore Platform v2 — Part 13 ch.04 "Real auth: Keycloak OIDC + IRSA +
+# Istio JWT": the Istio RequestAuthentication that verifies a Keycloak JWT at
+# the gateway BEFORE downstream services see the request.
+#
+# In Istio ambient mode the waypoint enforces this. If running sidecar mode,
+# add a workload-specific RequestAuthentication via targetRef (Istio 1.22+) —
+# see Istio Security docs.
+#
+# One declaration here — the gateway-scope RequestAuthentication that covers
+# all edge traffic. All HTTP requests pass this verifier first; ambient
+# waypoints inherit the same posture downstream without an extra object.
+#
+# `jwtRules`:
+#   - issuer: MUST match the `iss` claim in the JWT exactly. Mismatch =>
+#     verification fails => Istio returns 401. The realm name is part of the
+#     issuer URL (Keycloak's `/realms/<NAME>` convention).
+#   - jwksUri: where Istio fetches the public keys (cached; refreshed by
+#     `jwksRefresh` defaults). On kind the URL is the in-cluster Keycloak
+#     Service DNS name; in production it is the public OIDC discovery URL.
+#   - audiences: MUST contain the `aud` claim. Two clients (storefront-web +
+#     admin-portal) are listed so either tenant-bound human token passes.
+#   - forwardOriginalToken: true so downstream services CAN look at the
+#     claims if they need to (without re-validating — that is the gateway's job).
+#
+# WHY NOT enforce here: RequestAuthentication ONLY VERIFIES. It does NOT
+# enforce that a JWT is present. The complementary AuthorizationPolicy
+# (authorization-policy.yaml) does the "require a valid JWT for /api/*"
+# enforcement. Splitting verification from enforcement is the Istio idiom
+# (13.04 §"How it works"); collapsing them is the #1 footgun.
+#
+# !!! CRD-INTRINSIC DRY-RUN
+#   `RequestAuthentication` is `security.istio.io/v1` — an Istio CRD.
+#   WITHOUT Istio installed (13.04 cross-refs Part 11 ch.04 for the pinned-
+#   Helm install + ambient enrolment), a client dry-run prints:
+#     no matches for kind "RequestAuthentication" in version "security.istio.io/v1"
+#   EXPECTED. After Istio is installed this applies cleanly.
+#
+# Apply (after Istio is installed; cross-ref Part 11 ch.04):
+#   kubectl apply -f examples/bookstore-platform/auth/request-authentication.yaml
+---
+apiVersion: security.istio.io/v1
+kind: RequestAuthentication
+metadata:
+  name: storefront-keycloak
+  namespace: istio-system
+  labels:
+    app.kubernetes.io/part-of: bookstore-platform
+spec:
+  # The Istio ingress gateway pods sit in istio-system and carry this label.
+  # All edge traffic flows through them — verify once, at the edge.
+  selector:
+    matchLabels:
+      istio: ingressgateway
+  jwtRules:
+    - issuer: "https://keycloak.bookstore-platform.example.com/realms/bookstore-platform"
+      # In-cluster JWKS URL — Istio pods reach Keycloak via Kubernetes DNS.
+      # The discovery doc also lives at /.well-known/openid-configuration.
+      jwksUri: "http://keycloak.keycloak.svc.cluster.local:8080/realms/bookstore-platform/protocol/openid-connect/certs"
+      audiences:
+        - storefront-web
+        - admin-portal
+      forwardOriginalToken: true
+      # outputPayloadToHeader: surfaces the verified claims as a base64 JSON
+      # header so downstream services can read them without re-validating.
+      outputPayloadToHeader: x-jwt-payload

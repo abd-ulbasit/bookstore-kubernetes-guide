@@ -1,0 +1,100 @@
+# Bookstore Platform v2 — Part 13 ch.06: the payments-gateway Deployment
+# (PAYMENTS_MODE=gateway). The webhook-receiver variant uses the SAME image
+# with PAYMENTS_MODE=webhook-receiver — see
+# ../../payments/payments-webhook-receiver.yaml.
+#
+# Apply:
+#   kubectl apply -f examples/bookstore-platform/app/payments-gateway/deployment.yaml
+---
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: payments-gateway
+  namespace: bookstore-platform-payments
+  labels:
+    app.kubernetes.io/part-of: bookstore-platform
+    app.kubernetes.io/component: payments-gateway
+automountServiceAccountToken: false
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: payments-gateway
+  namespace: bookstore-platform-payments
+  labels:
+    app: payments-gateway
+    app.kubernetes.io/part-of: bookstore-platform
+    app.kubernetes.io/component: payments-gateway
+spec:
+  replicas: 2
+  selector:
+    matchLabels:
+      app: payments-gateway
+  template:
+    metadata:
+      labels:
+        app: payments-gateway
+        app.kubernetes.io/part-of: bookstore-platform
+    spec:
+      serviceAccountName: payments-gateway
+      automountServiceAccountToken: false
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 65532
+        runAsGroup: 65532
+        fsGroup: 65532
+        seccompProfile:
+          type: RuntimeDefault
+      containers:
+        - name: payments-gateway
+          image: bookstore-platform/payments-gateway:dev
+          imagePullPolicy: IfNotPresent
+          env:
+            - { name: PAYMENTS_MODE, value: "gateway" }
+            - { name: PORT,          value: "8080" }
+            # STRIPE_API_BASE empty in production (real Stripe);
+            # set to http://stripe-mock:12111 on kind for sandbox tests.
+            - { name: STRIPE_API_BASE, value: "" }
+            - name: STRIPE_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: stripe-api-key
+                  key: api-key
+          ports:
+            - { containerPort: 8080, name: http }
+          resources:
+            requests:
+              cpu: 50m
+              memory: 64Mi
+            limits:
+              cpu: 250m
+              memory: 128Mi
+          livenessProbe:
+            httpGet: { path: /healthz, port: 8080 }
+            initialDelaySeconds: 5
+            periodSeconds: 10
+            failureThreshold: 3
+          readinessProbe:
+            httpGet: { path: /readyz, port: 8080 }
+            initialDelaySeconds: 5
+            periodSeconds: 10
+            failureThreshold: 3
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities:
+              drop: ["ALL"]
+---
+# Placeholder Secret — REPLACE via ESO + Vault
+# (../../payments/stripe-eso-externalsecret.yaml).
+apiVersion: v1
+kind: Secret
+metadata:
+  name: stripe-api-key
+  namespace: bookstore-platform-payments
+  labels:
+    app.kubernetes.io/part-of: bookstore-platform
+    bookstore-platform.example.com/placeholder: "true"
+type: Opaque
+stringData:
+  api-key: "sk_test_REPLACE-ME-VIA-ESO-NOT-IN-SOURCE"

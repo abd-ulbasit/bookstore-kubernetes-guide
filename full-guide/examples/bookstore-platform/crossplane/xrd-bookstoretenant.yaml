@@ -1,0 +1,147 @@
+# Bookstore Platform v2 — Part 13 ch.02 "Tenancy model and onboarding via
+# Crossplane": the CompositeResourceDefinition that declares the platform's
+# tenant-onboarding API.
+#
+# A `BookstoreTenant` is a NEW high-level Kubernetes API that the developer-
+# experience team (or Backstage scaffolder, 13.11) creates ONE OF to onboard
+# a customer-of-the-platform. The Composition
+# (composition-bookstoretenant.yaml) expands it into the full per-tenant
+# stack: namespace + RBAC + ResourceQuota + LimitRange + NetworkPolicy +
+# Kueue LocalQueue + (optionally) cloud resources (CNPG logical database, S3
+# bucket, IRSA role).
+#
+# scope: Cluster — this is a CLUSTER-SCOPED XR, deliberately. Two reasons:
+#   1. A namespaced XR cannot own a cluster-scoped resource (a Namespace).
+#      Cluster scope means we can attach an explicit finalizer + clean up the
+#      per-tenant namespace (and any cluster-scoped Crossplane resources like
+#      an S3 bucket) on tenant delete, sidestepping the namespace-leak
+#      footgun the v1 BookstoreEnvironment v2-namespaced design hit
+#      (Part 11 ch.02 + Part 11 ch.10 "How it works"). Documented in 13.02.
+#   2. Tenant lifecycle is platform-team-owned, not tenant-self-service —
+#      tenants don't create themselves; the platform team (or Backstage on
+#      their behalf) does. Cluster scope matches the policy.
+#
+# CONTRAST with `BookstoreEnvironment` (Part 11 ch.10): that demo was scope:
+# Namespaced because the focus was the v2 namespaced-XR model. Here we pick
+# scope: Cluster on purpose; 13.02 makes the trade explicit (and explains
+# when each scope wins).
+#
+# !!! CRD-INTRINSIC DRY-RUN (identical precedent to every prior CRD object)
+#   `CompositeResourceDefinition` is `apiextensions.crossplane.io/v2` — a
+#   Crossplane CRD. WITHOUT Crossplane installed (13.02 Hands-on §1, pinned
+#   Helm into crossplane-system), a client dry-run prints:
+#     no matches for kind "CompositeResourceDefinition" in version
+#     "apiextensions.crossplane.io/v2"
+#   EXPECTED, schema-correct. After Crossplane is installed the XRD applies
+#   cleanly and `bookstoretenants.platform.bookstore.example.com` becomes a
+#   served API endpoint.
+#
+# Apply (after Crossplane installed — 13.02 §1):
+#   kubectl apply -f examples/bookstore-platform/crossplane/xrd-bookstoretenant.yaml
+#   kubectl wait --for=condition=Established \
+#     crd/bookstoretenants.platform.bookstore.example.com --timeout=120s
+apiVersion: apiextensions.crossplane.io/v2
+kind: CompositeResourceDefinition
+metadata:
+  name: bookstoretenants.platform.bookstore.example.com
+  labels:
+    app.kubernetes.io/part-of: bookstore-platform
+spec:
+  scope: Cluster
+  group: platform.bookstore.example.com
+  names:
+    kind: BookstoreTenant
+    plural: bookstoretenants
+    categories: [platform]
+  versions:
+    - name: v1alpha1
+      served: true
+      referenceable: true
+      schema:
+        openAPIV3Schema:
+          type: object
+          properties:
+            spec:
+              type: object
+              # The full developer-experience surface for tenant onboarding.
+              # Every field has a default or is required; no field reveals a
+              # securityContext, RBAC, or NetworkPolicy detail — those are
+              # the Composition's job (guardrails by construction).
+              properties:
+                tenantName:
+                  type: string
+                  description: >-
+                    Tenant name. Drives the provisioned namespace
+                    (bookstore-platform-<TENANT>) and every per-tenant
+                    object's name prefix. Lowercase RFC 1123 label, 3-40 chars.
+                  pattern: '^[a-z]([-a-z0-9]*[a-z0-9])?$'
+                  minLength: 3
+                  maxLength: 40
+                displayName:
+                  type: string
+                  description: >-
+                    Human-readable name (shown in Backstage catalog, 13.11).
+                  maxLength: 100
+                tier:
+                  type: string
+                  description: >-
+                    Coarse t-shirt size; maps to per-tenant ResourceQuota and
+                    LimitRange totals.
+                  enum: [trial, standard, premium]
+                  default: trial
+                regions:
+                  type: array
+                  description: >-
+                    Regions this tenant is provisioned into. Default: all
+                    three. The ApplicationSet (13.03) cross-references this.
+                  items:
+                    type: string
+                    enum: [us-east, eu-west, ap-southeast]
+                  default: [us-east, eu-west, ap-southeast]
+                  minItems: 1
+                cloudResources:
+                  type: object
+                  description: >-
+                    Optional per-tenant cloud-resource flags. On kind these
+                    are no-ops (the providers aren't installed); on a real
+                    cluster with provider-aws + provider-cnpg installed the
+                    Composition wires them.
+                  properties:
+                    cnpgDatabase:
+                      type: boolean
+                      description: >-
+                        Provision a per-tenant logical database in the
+                        platform CNPG cluster.
+                      default: true
+                    s3Bucket:
+                      type: boolean
+                      description: >-
+                        Provision a per-tenant S3 bucket (for tenant assets +
+                        ML model snapshots).
+                      default: false
+                    irsaRole:
+                      type: boolean
+                      description: >-
+                        Provision an IRSA role bound to the tenant's
+                        catalog ServiceAccount (Part 10 ch.03).
+                      default: false
+              required: [tenantName]
+            status:
+              type: object
+              properties:
+                namespace:
+                  type: string
+                  description: The provisioned per-tenant namespace.
+                phase:
+                  type: string
+                  description: Aggregate readiness phase (Pending|Provisioning|Ready|Deleting).
+                conditions:
+                  type: array
+                  items:
+                    type: object
+                    properties:
+                      type: { type: string }
+                      status: { type: string }
+                      reason: { type: string }
+                      message: { type: string }
+                      lastTransitionTime: { type: string }

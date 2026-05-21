@@ -1,0 +1,140 @@
+# Bookstore — Part 01 ch.04 "ReplicaSets and Deployments".
+#
+# storefront (nginx serving the static UI) as a Deployment in the `bookstore`
+# namespace. This adds the UI tier alongside catalog; Part 02 (Services /
+# Ingress) wires them together.
+#
+# Part 04 SCHEDULING LAYER (ch.02 + ch.03 — additive only; the original spec
+# above is unchanged, only the three fields below were ADDED to template.spec):
+#  • ch.02 topologySpreadConstraints: spread the 2 storefront replicas across
+#    nodes (maxSkew 1) so a node/zone loss can't blank the whole UI tier.
+#  • ch.02 podAntiAffinity (preferred): bias the 2 replicas onto different
+#    nodes; "preferred" so a single-node kind cluster still schedules both.
+#  • ch.03 priorityClassName: bookstore-critical (35-) — user-facing tier.
+#
+# Part 05 SECURITY LAYER (ch.01 + ch.02 — additive only; only the fields below
+# were ADDED to template.spec):
+#  • ch.01 serviceAccountName: storefront-sa + automountServiceAccountToken:
+#    false — nginx never calls kube-apiserver; no token mounted (least priv).
+#  • ch.02 securityContext (PSA `restricted`): the image is
+#    nginx:1.27-alpine built to run as the unprivileged "nginx" user UID 101
+#    with EVERY temp/runtime path under /tmp (see app/storefront/nginx.conf:
+#    pid /tmp/nginx.pid, *_temp_path /tmp/*). So: runAsNonRoot/runAsUser 101,
+#    drop ALL, allowPrivilegeEscalation:false, seccomp RuntimeDefault,
+#    readOnlyRootFilesystem:true + an emptyDir mounted at /tmp (nginx's only
+#    writable need). It listens on 8080 (>1024) so it needs NO NET_BIND_SERVICE
+#    capability. Stock nginx (listens :80 as root) would NOT be restricted-
+#    compliant — this image was purpose-built unprivileged; that is why it is.
+#
+# Requires:
+#   kubectl apply -f examples/bookstore/raw-manifests/00-namespace.yaml
+#   kubectl apply -f examples/bookstore/raw-manifests/05-serviceaccounts-rbac.yaml  # ch.01
+#   kind load docker-image bookstore/storefront:dev --name bookstore
+# Apply:
+#   kubectl apply -f examples/bookstore/raw-manifests/11-storefront-deploy.yaml
+#   kubectl rollout status deployment/storefront -n bookstore
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: storefront
+  namespace: bookstore
+  labels:
+    app: storefront
+    app.kubernetes.io/part-of: bookstore
+spec:
+  replicas: 2
+  revisionHistoryLimit: 5
+  selector:
+    matchLabels:
+      app: storefront               # IMMUTABLE; equals template labels below
+  strategy:
+    type: RollingUpdate
+    rollingUpdate:
+      maxSurge: 1
+      maxUnavailable: 0
+  template:
+    metadata:
+      labels:
+        app: storefront             # selected by this RS AND by the Service (Part 02)
+        component: frontend
+    spec:
+      # --- Part 05 ch.01: dedicated identity, no API token mounted.
+      serviceAccountName: storefront-sa
+      automountServiceAccountToken: false
+      # --- Part 05 ch.02: pod-level securityContext. The custom nginx image
+      # runs as UID 101 ("nginx"); seccomp RuntimeDefault applies to all
+      # containers. Satisfies PSA `restricted` at the pod level.
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 101
+        runAsGroup: 101
+        seccompProfile:
+          type: RuntimeDefault
+      # --- Part 04 ch.03: same user-facing tier as catalog (35-).
+      priorityClassName: bookstore-critical
+      # --- Part 04 ch.02: spread the 2 replicas across nodes (HA). Hard rule;
+      # on a single-node kind cluster scale to 1 or use ch.02's multi-node kind
+      # config. labelSelector scopes the skew count to storefront Pods only.
+      topologySpreadConstraints:
+        - maxSkew: 1
+          topologyKey: kubernetes.io/hostname
+          whenUnsatisfiable: DoNotSchedule
+          labelSelector:
+            matchLabels:
+              app: storefront
+      affinity:
+        podAntiAffinity:
+          preferredDuringSchedulingIgnoredDuringExecution:
+            - weight: 100
+              podAffinityTerm:
+                topologyKey: kubernetes.io/hostname
+                labelSelector:
+                  matchLabels:
+                    app: storefront
+      containers:
+        - name: storefront
+          image: bookstore/storefront:dev   # built in Part 00 ch.02 (nginx + static UI)
+          imagePullPolicy: IfNotPresent     # locally kind-loaded image
+          # --- Part 05 ch.02: container securityContext (PSA `restricted`).
+          # nginx writes ONLY under /tmp (pid + *_temp_path, see nginx.conf),
+          # which the emptyDir below provides — so a read-only root FS holds.
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities:
+              drop: ["ALL"]
+          ports:
+            - name: http
+              containerPort: 8080
+          # No startupProbe by design: nginx serving static files is ready in
+          # <1s, so the liveness probe (no initialDelaySeconds needed) already
+          # covers boot; a startupProbe would only add latency. (catalog keeps
+          # one because it can wait on a DB/cache; storefront has no such boot.)
+          readinessProbe:
+            httpGet: { path: /healthz, port: http }
+            periodSeconds: 5
+          livenessProbe:
+            httpGet: { path: /healthz, port: http }
+            periodSeconds: 10
+          resources:
+            requests:
+              cpu: 25m
+              memory: 32Mi
+            limits:
+              cpu: 100m
+              memory: 64Mi
+          # --- Part 05 ch.02: the only writable path nginx needs with a
+          # read-only root FS — pid + client_body/proxy/fastcgi/uwsgi/scgi temp
+          # dirs all live under /tmp (app/storefront/nginx.conf + Dockerfile).
+          # The emptyDir mount over /tmp masks the Dockerfile-precreated dirs,
+          # but nginx's master process (running as UID 101) recreates each
+          # configured *_temp_path on startup since /tmp itself is writable —
+          # this is the canonical unprivileged-nginx + readOnlyRootFilesystem
+          # pattern, verified to start cleanly.
+          volumeMounts:
+            - name: tmp
+              mountPath: /tmp
+      volumes:
+        - name: tmp
+          emptyDir:
+            sizeLimit: 64Mi             # ephemeral; nginx scratch only

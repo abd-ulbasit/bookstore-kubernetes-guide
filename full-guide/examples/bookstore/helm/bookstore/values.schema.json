@@ -1,0 +1,139 @@
+{
+  "$schema": "https://json-schema.org/draft-07/schema#",
+  "title": "Bookstore chart values",
+  "description": "Schema for the Bookstore Helm chart. Validates the toggles and the per-service image blocks; intentionally permissive on the deep maps (resources/securityProfiles) so advanced overrides are not blocked.",
+  "type": "object",
+  "additionalProperties": true,
+  "definitions": {
+    "imageBlock": {
+      "type": "object",
+      "required": ["repository", "tag", "pullPolicy"],
+      "additionalProperties": true,
+      "properties": {
+        "repository": { "type": "string", "minLength": 1 },
+        "tag": { "type": "string", "minLength": 1 },
+        "pullPolicy": { "type": "string", "enum": ["Always", "IfNotPresent", "Never"] }
+      }
+    },
+    "serviceWorkload": {
+      "type": "object",
+      "additionalProperties": true,
+      "properties": {
+        "enabled": { "type": "boolean" },
+        "replicaCount": { "type": "integer", "minimum": 0 },
+        "image": { "$ref": "#/definitions/imageBlock" }
+      }
+    }
+  },
+  "properties": {
+    "nameOverride": { "type": "string" },
+    "fullnameOverride": { "type": "string" },
+    "namespace": {
+      "type": "object",
+      "additionalProperties": true,
+      "properties": {
+        "create": { "type": "boolean" },
+        "name": { "type": "string", "minLength": 1 },
+        "psa": {
+          "type": "object",
+          "additionalProperties": true,
+          "properties": {
+            "enforce": { "type": "string", "enum": ["privileged", "baseline", "restricted"] },
+            "audit": { "type": "string", "enum": ["privileged", "baseline", "restricted"] },
+            "warn": { "type": "string", "enum": ["privileged", "baseline", "restricted"] }
+          }
+        }
+      }
+    },
+    "catalog": { "$ref": "#/definitions/serviceWorkload" },
+    "storefront": { "$ref": "#/definitions/serviceWorkload" },
+    "orders": { "$ref": "#/definitions/serviceWorkload" },
+    "paymentsWorker": { "$ref": "#/definitions/serviceWorkload" },
+    "redis": { "$ref": "#/definitions/serviceWorkload" },
+    "rabbitmq": { "$ref": "#/definitions/serviceWorkload" },
+    "postgres": { "$ref": "#/definitions/serviceWorkload" },
+    "ingress": {
+      "type": "object",
+      "additionalProperties": true,
+      "properties": {
+        "enabled": { "type": "boolean" },
+        "className": { "type": "string" },
+        "host": { "type": "string", "minLength": 1 }
+      }
+    },
+    "gateway": {
+      "type": "object",
+      "additionalProperties": true,
+      "properties": {
+        "enabled": { "type": "boolean" },
+        "className": { "type": "string" }
+      }
+    },
+    "networkPolicy": {
+      "type": "object",
+      "additionalProperties": true,
+      "properties": { "enabled": { "type": "boolean" } }
+    },
+    "hpa": {
+      "type": "object",
+      "additionalProperties": true,
+      "properties": {
+        "enabled": { "type": "boolean" },
+        "minReplicas": { "type": "integer", "minimum": 1 },
+        "maxReplicas": { "type": "integer", "minimum": 1 }
+      }
+    },
+    "keda": {
+      "type": "object",
+      "additionalProperties": true,
+      "properties": {
+        "enabled": { "type": "boolean" },
+        "minReplicaCount": { "type": "integer", "minimum": 0 },
+        "maxReplicaCount": { "type": "integer", "minimum": 1 }
+      }
+    },
+    "serviceMonitor": {
+      "type": "object",
+      "additionalProperties": true,
+      "properties": { "enabled": { "type": "boolean" }, "release": { "type": "string" } }
+    },
+    "prometheusRule": {
+      "type": "object",
+      "additionalProperties": true,
+      "properties": { "enabled": { "type": "boolean" }, "release": { "type": "string" } }
+    },
+    "pdb": {
+      "type": "object",
+      "additionalProperties": true,
+      "properties": { "enabled": { "type": "boolean" } }
+    },
+    "kyverno": {
+      "type": "object",
+      "additionalProperties": true,
+      "properties": {
+        "enabled": { "type": "boolean" },
+        "validationFailureAction": { "type": "string", "enum": ["Audit", "Enforce"] }
+      }
+    },
+    "snapshot": {
+      "type": "object",
+      "additionalProperties": true,
+      "properties": { "enabled": { "type": "boolean" } }
+    },
+    "canary": {
+      "type": "object",
+      "additionalProperties": true,
+      "properties": { "enabled": { "type": "boolean" } }
+    },
+    "migrationJob": {
+      "type": "object",
+      "additionalProperties": true,
+      "properties": { "enabled": { "type": "boolean" } }
+    },
+    "priorityClasses": {
+      "type": "object",
+      "additionalProperties": true,
+      "properties": { "create": { "type": "boolean" } }
+    }
+  }
+}

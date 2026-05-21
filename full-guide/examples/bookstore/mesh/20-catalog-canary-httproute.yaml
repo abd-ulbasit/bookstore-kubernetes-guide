@@ -1,0 +1,73 @@
+# Bookstore — Part 11 ch.04 "Service mesh": a MESH-LAYER canary on `catalog`
+# expressed with Gateway API GAMMA (HTTPRoute whose parentRef is a SERVICE,
+# not a Gateway) — the portable, mesh-neutral way to split east-west traffic.
+#
+# WHAT THIS DOES vs. the Part 07 ch.05 Argo Rollouts canary
+#   Argo Rollouts (Part 07 ch.05) canaries by REPLICA RATIO + analysis: it
+#   creates a second ReplicaSet and shifts the *proportion of Pods*. A MESH
+#   canary shifts the *proportion of REQUESTS* between two stable backends
+#   regardless of replica counts — finer-grained (1% is 1% of requests, not
+#   "1 Pod out of 100"), header/weight-based, and applied without touching the
+#   Deployments. They COMPLEMENT: progressive delivery (Part 07 ch.05) can
+#   drive these weights; the mesh is the *traffic primitive* it actuates.
+#
+#   GAMMA = "Gateway API for Mesh Management and Administration": the same
+#   HTTPRoute kind used for NORTH-SOUTH ingress in Part 02 ch.05, but here
+#   `parentRefs` points at a Service (EAST-WEST / in-mesh) instead of a
+#   Gateway. North-south (Gateway) = traffic entering the cluster; east-west
+#   (this) = service-to-service inside it. One model, two attachment points.
+#
+# This route sends 90% of in-mesh calls to `catalog` (the stable v1 Service)
+# and 10% to `catalog-canary` (a v2 Service you create alongside) — illustrative
+# weights; production drives them progressively (Part 07 ch.05) and gates on
+# the catalog SLO (81-prometheusrule.yaml: CatalogHighErrorRate / P95).
+#
+# !!! CRD-INTRINSIC DRY-RUN (precedent: 51-gateway.yaml + 18-/70-/83-/argocd) !!!
+#   `HTTPRoute` is `gateway.networking.k8s.io/v1` — NOT built into Kubernetes.
+#   Without the Gateway API CRDs installed, a client dry-run prints
+#     no matches for kind "HTTPRoute" in version "gateway.networking.k8s.io/v1"
+#   EXPECTED and schema-correct — same intrinsic note as Part 02 ch.05's
+#   51-gateway.yaml. For MESH use the route also needs a mesh that implements
+#   GAMMA (Istio ambient: an L7 `waypoint` for the catalog Service — see
+#   30-waypoint.yaml; the chapter installs it). Schema verified against
+#   Gateway API v1 HTTPRoute.
+#
+# Requires: Gateway API CRDs + Istio ambient + a waypoint for `catalog`
+#   (30-waypoint.yaml); a `catalog-canary` Service selecting the v2 Pods.
+# Apply:
+#   kubectl apply -f examples/bookstore/mesh/20-catalog-canary-httproute.yaml
+#   kubectl get httproute -n bookstore
+apiVersion: gateway.networking.k8s.io/v1
+kind: HTTPRoute
+metadata:
+  name: catalog-mesh-canary
+  namespace: bookstore
+  labels:
+    app: catalog
+    app.kubernetes.io/part-of: bookstore
+spec:
+  parentRefs:
+    # EAST-WEST: the parent is the `catalog` SERVICE (GAMMA), not a Gateway.
+    # This is the only structural difference from the Part 02 ch.05 north-south
+    # HTTPRoute — same kind, attached to a Service so it governs in-mesh calls
+    # to catalog.bookstore.svc rather than ingress traffic.
+    - group: ""
+      kind: Service
+      name: catalog
+      port: 80
+  rules:
+    - backendRefs:
+        # Stable v1 — 90% of requests. `catalog` Service is the canonical one
+        # from raw-manifests/40-services.yaml (UNTOUCHED; this only routes to it).
+        - group: ""
+          kind: Service
+          name: catalog
+          port: 80
+          weight: 90
+        # Canary v2 — 10%. `catalog-canary` is an ADDITIVE Service you create
+        # for the v2 Pods (the canonical 40-services.yaml is not modified).
+        - group: ""
+          kind: Service
+          name: catalog-canary
+          port: 80
+          weight: 10

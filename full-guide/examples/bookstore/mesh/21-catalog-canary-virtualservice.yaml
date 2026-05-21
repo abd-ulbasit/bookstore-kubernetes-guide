@@ -1,0 +1,75 @@
+# Bookstore — Part 11 ch.04 "Service mesh": the SAME catalog canary as
+# 20-catalog-canary-httproute.yaml, expressed the Istio-native way
+# (VirtualService + DestinationRule). Shown as the ALTERNATIVE — apply ONE of
+# 20- (portable Gateway API GAMMA) or this (Istio-specific, richer knobs).
+# Running both would double-define catalog routing (same precedent as the
+# 50-ingress / 51-gateway "alternative, not addition" pairing in Part 02).
+#
+# WHY SHOW BOTH
+#   GAMMA/HTTPRoute (20-) is PORTABLE across any GAMMA-conformant mesh and is
+#   the forward-looking default. The Istio VirtualService is MESH-SPECIFIC but
+#   exposes mesh-native resilience knobs in one place — retries, timeouts,
+#   outlier detection (passive health / circuit breaking), connection-pool
+#   limits — which is the rest of L7 traffic management this chapter teaches.
+#   This file is where those knobs live (DestinationRule below).
+#
+# !!! CRD-INTRINSIC DRY-RUN (precedent: 51-/70-/83-/argocd) !!!
+#   `VirtualService` and `DestinationRule` are Istio CRDs
+#   (networking.istio.io/v1). Without Istio installed a client dry-run prints
+#     no matches for kind "VirtualService" in version "networking.istio.io/v1"
+#   (and the same for DestinationRule) — EXPECTED, schema-correct; the Istio
+#   control plane/CRDs must be installed first (chapter Hands-on step 1, pinned
+#   Helm). Whole-dir dry-run prints this for these files only and continues.
+#   Schema verified against Istio networking.istio.io/v1.
+#
+# Requires: Istio installed; `catalog` + `catalog-canary` Services; for ambient
+#   an L7 `waypoint` for catalog (30-waypoint.yaml). Sidecar mode needs no
+#   waypoint (the per-pod istio-proxy is the L7 enforcement point).
+# Apply (NOT alongside 20-):
+#   kubectl apply -f examples/bookstore/mesh/21-catalog-canary-virtualservice.yaml
+apiVersion: networking.istio.io/v1
+kind: VirtualService
+metadata:
+  name: catalog-mesh-canary
+  namespace: bookstore
+  labels:
+    app: catalog
+    app.kubernetes.io/part-of: bookstore
+spec:
+  hosts:
+    - catalog.bookstore.svc.cluster.local   # in-mesh callers of `catalog`
+  http:
+    - name: weighted-canary
+      route:
+        - destination:
+            host: catalog.bookstore.svc.cluster.local        # stable v1
+          weight: 90
+        - destination:
+            host: catalog-canary.bookstore.svc.cluster.local # canary v2
+          weight: 10
+      # L7 RESILIENCE — what a mesh adds with zero app code (Part 06 ties):
+      timeout: 2s                       # hard request timeout
+      retries:
+        attempts: 2                     # retry idempotent failures…
+        perTryTimeout: 1s
+        retryOn: 5xx,connect-failure,reset
+---
+apiVersion: networking.istio.io/v1
+kind: DestinationRule
+metadata:
+  name: catalog-resilience
+  namespace: bookstore
+  labels:
+    app: catalog
+    app.kubernetes.io/part-of: bookstore
+spec:
+  host: catalog.bookstore.svc.cluster.local
+  trafficPolicy:
+    connectionPool:                     # CIRCUIT-BREAKER inputs (bound load)
+      tcp: { maxConnections: 100 }
+      http: { http1MaxPendingRequests: 64, maxRequestsPerConnection: 0 }
+    outlierDetection:                   # PASSIVE health: eject failing Pods
+      consecutive5xxErrors: 5
+      interval: 10s
+      baseEjectionTime: 30s
+      maxEjectionPercent: 50            # never eject >50% (keep capacity)

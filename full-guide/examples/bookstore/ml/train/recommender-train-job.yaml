@@ -1,0 +1,132 @@
+# Bookstore — Part 12 ch.04 "Distributed training": the REAL CPU recommender
+# training, as a built-in batch/v1 Job. This is the KIND-RUNNABLE path:
+# producing the `model.joblib` artifact the serve/ tree loads (Part 12 ch.06).
+#
+# BUILT-IN OBJECTS ONLY (batch/v1 Job + v1 PVC). NO CRDs are involved here,
+# so `kubectl apply --dry-run=client -f …` succeeds cleanly anywhere. The
+# CRD-backed alternatives are the sibling files in this directory:
+#   - recommender-pytorchjob.yaml  (Kubeflow Training Operator)
+#   - recommender-rayjob.yaml      (KubeRay)
+# Both need their operators installed first; this Job is the one that just
+# works on kind.
+#
+# WHAT IT DOES
+#   Runs the train image (../train/, X3b) once. The image is the CPU-only
+#   item-kNN / co-occurrence recommender (see train.py). It writes
+#   `model.joblib` to /workspace/model (a PVC mounted at that path). The
+#   serving Deployment / InferenceService in ../serve/ mounts the SAME PVC at
+#   /workspace/model and loads the artifact.
+#
+# IMAGE
+#   bookstore/recommender-train:dev — the image built by
+#   `docker build examples/bookstore/ml/train` (and `kind load docker-image`
+#   into the kind cluster). The :dev tag matches the guide's existing dev-
+#   overlay convention (overlays/dev). Replace with a registry-pushed tag in
+#   prod.
+#
+# PSA — `bookstore-ml` is `enforce: restricted` (Part 12 ch.01). This Pod
+# carries the full restricted shape (runAsNonRoot, non-root UID 65532,
+# drop ALL caps, seccomp RuntimeDefault, allowPrivilegeEscalation:false,
+# readOnlyRootFilesystem + an emptyDir at /tmp for any sklearn temp work).
+# The image bakes uid 65532 too; the SC is documented even though redundant.
+#
+# KUEUE — labelled onto the bookstore-ml LocalQueue from Part 12 ch.03
+# (bookstore-ml-lq). Kueue gates this Job in via spec.suspend (created
+# suspended, admitted once it fits the ClusterQueue quota, then flipped to
+# suspend:false). With Kueue UNINSTALLED the label is inert and the Job runs
+# directly (great for "just kind", which is what this file is for).
+#
+# Apply (after creating bookstore-ml + the PVC below; see ../README.md):
+#   kubectl apply -f examples/bookstore/ml/train/recommender-train-job.yaml
+#   kubectl wait --for=condition=complete job/recommender-train -n bookstore-ml --timeout=300s
+#   kubectl logs -n bookstore-ml -l app.kubernetes.io/component=recommender-train --tail=50
+---
+# The model PVC — RWO is sufficient for the train Job; the serve Deployment
+# in ../serve/ uses ReadOnlyMany via a separate access mode (or RWO if both
+# pods schedule to the same node on kind). 64Mi is plenty for the joblib
+# artifact (typically a few hundred KB at the default N_BOOKS=200).
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: recommender-model
+  namespace: bookstore-ml
+  labels:
+    app.kubernetes.io/part-of: bookstore-ml
+    app.kubernetes.io/component: recommender-model
+spec:
+  accessModes: ["ReadWriteOnce"]
+  resources:
+    requests:
+      storage: 64Mi
+---
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: recommender-train
+  namespace: bookstore-ml
+  labels:
+    app.kubernetes.io/part-of: bookstore-ml
+    app.kubernetes.io/component: recommender-train
+    ml.bookstore/path: cpu-train
+    # Kueue admission (inert if Kueue is not installed):
+    kueue.x-k8s.io/queue-name: bookstore-ml-lq
+spec:
+  backoffLimit: 2                 # bounded retries (Part 01 ch.07)
+  activeDeadlineSeconds: 900      # hard wall-clock cap
+  ttlSecondsAfterFinished: 600    # GC the Job + Pod after success
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/part-of: bookstore-ml
+        app.kubernetes.io/component: recommender-train
+    spec:
+      restartPolicy: Never
+      automountServiceAccountToken: false
+      securityContext:                 # pod-level — restricted
+        runAsNonRoot: true
+        runAsUser: 65532
+        runAsGroup: 65532
+        fsGroup: 65532                 # so the PVC mount is writable
+        seccompProfile:
+          type: RuntimeDefault
+      containers:
+        - name: train
+          image: bookstore/recommender-train:dev   # built from ../train/Dockerfile
+          imagePullPolicy: IfNotPresent
+          env:
+            - name: MODEL_DIR
+              value: /workspace/model
+            - name: SEED
+              value: "42"
+            - name: N_BOOKS
+              value: "200"
+            - name: N_CUSTOMERS
+              value: "800"
+            - name: N_ORDERS
+              value: "5000"
+            - name: TOP_K
+              value: "10"
+          resources:
+            requests:
+              cpu: "250m"
+              memory: 256Mi
+            limits:
+              cpu: "1"
+              memory: 512Mi
+          securityContext:             # container-level — restricted
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities:
+              drop: ["ALL"]
+          volumeMounts:
+            - name: model
+              mountPath: /workspace/model
+            - name: scratch
+              mountPath: /tmp
+      volumes:
+        - name: model
+          persistentVolumeClaim:
+            claimName: recommender-model
+        - name: scratch                # restricted-allowed volume type
+          emptyDir:
+            sizeLimit: 64Mi

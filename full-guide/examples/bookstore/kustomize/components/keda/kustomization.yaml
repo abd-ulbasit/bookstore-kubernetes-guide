@@ -1,0 +1,31 @@
+# Bookstore Kustomize COMPONENT — keda (event-driven autoscaling).
+#
+# Adds the KEDA ScaledObject + TriggerAuthentication + the `rabbitmq-conn`
+# Secret (vendored byte-identical from raw-manifests/83-) so the
+# payments-worker scales on RabbitMQ queue depth and to zero when idle. Exact
+# analog of the Helm chart's `keda.enabled` toggle.
+#
+# !!! CRD PREREQUISITE — same intrinsic behaviour as raw 83- and the Helm
+# toggle. `ScaledObject`/`TriggerAuthentication` are KEDA CRDs
+# (keda.sh/v1alpha1), NOT built-in kinds. Without KEDA installed, a
+# client dry-run of an overlay including this component prints
+# `no matches for kind "ScaledObject"` (and TriggerAuthentication) — EXPECTED
+# and correct. Install KEDA via Helm (NOT a releases/latest/download pinned
+# URL — it 404s when a new KEDA ships) before enabling on a live cluster:
+#   helm repo add kedacore https://kedacore.github.io/charts
+#   helm repo update
+#   helm install keda kedacore/keda --namespace keda --create-namespace --wait
+#
+# NOTE — coexistence with the base catalog HPA: the base ships an HPA for
+# `catalog` (82-); KEDA here manages a DIFFERENT workload (payments-worker)
+# via its own managed HPA, so the two do not conflict (they target different
+# Deployments). KEDA does not replace 82-.
+#
+# Enable by adding to an overlay's `components:` list, e.g.:
+#   components:
+#     - ../../components/keda
+apiVersion: kustomize.config.k8s.io/v1alpha1
+kind: Component
+
+resources:
+  - 83-keda-scaledobject.yaml

@@ -1,0 +1,88 @@
+# Bookstore Platform v2 — Part 13 ch.08: the recommender InferenceService.
+# KServe pulls the model from MLflow Model Registry via the
+# `models://recommender/production` storageUri (the KServe standard MLflow
+# URI form). Canary rolls: change storageUri to point at `staging` after
+# the first deploy; KServe creates a second revision and routes
+# canaryTrafficPercent (10 %) to it.
+#
+# v1 (Part 12 ch.06) used `pvc://` to load model.joblib from a PVC. v2
+# uses MLflow as the registry; the storage initializer fetches the model
+# from S3 (where MLflow stores artifacts) using the URI MLflow returns
+# for the named alias.
+#
+# !!! CRD-INTRINSIC DRY-RUN
+#   `InferenceService` is `serving.kserve.io/v1beta1` — a KServe CRD.
+#   WITHOUT KServe (+ Knative Serving + cert-manager) installed:
+#     no matches for kind "InferenceService" in version "serving.kserve.io/v1beta1"
+#   EXPECTED. The chapter cross-refs Part 12 ch.06 for the KServe install.
+#
+# Two predictor slots (canary deploy):
+#   - production   — `models:/recommender/Production` (alias resolved to
+#                    a model version by MLflow at start).
+#   - canary       — `models:/recommender/Staging` (gets 10 % of traffic).
+# When the canary passes the metric gate, the promote workflow flips the
+# alias and the canary slot drops to 0 %.
+#
+# PSA — `bookstore-platform-ml` is `enforce: restricted`. PodSpec carries
+# the restricted set; KServe propagates it into the Knative Revision.
+#
+# Apply (after KServe + MLflow + ESO-injected S3 creds):
+#   kubectl apply -f examples/bookstore-platform/ml/inferenceservice.yaml
+---
+apiVersion: serving.kserve.io/v1beta1
+kind: InferenceService
+metadata:
+  name: recommender
+  namespace: bookstore-platform-ml
+  labels:
+    app.kubernetes.io/part-of: bookstore-platform
+    app.kubernetes.io/component: recommender-serve
+    bookstore-platform.example.com/serving: kserve
+  annotations:
+    # Scale-to-zero serverless.
+    autoscaling.knative.dev/min-scale: "0"
+    autoscaling.knative.dev/max-scale: "5"
+    autoscaling.knative.dev/target: "10"
+spec:
+  predictor:
+    minReplicas: 0
+    maxReplicas: 5
+    timeout: 30
+    automountServiceAccountToken: false
+    securityContext:
+      runAsNonRoot: true
+      runAsUser: 65532
+      runAsGroup: 65532
+      fsGroup: 65532
+      seccompProfile:
+        type: RuntimeDefault
+    # 90 % of traffic — Production alias.
+    model:
+      modelFormat:
+        name: sklearn
+      # MLflow storage URI — `models://<NAME>/<ALIAS>` is the KServe
+      # standard MLflow URI form. The MLflow storage initializer
+      # resolves the alias to a versioned S3 artifact path at start.
+      # Pinned to the `production` alias here; the canary roll points
+      # at `staging` (see canaryTrafficPercent below).
+      storageUri: "models://recommender/production"
+      resources:
+        requests:
+          cpu: 100m
+          memory: 256Mi
+        limits:
+          cpu: 500m
+          memory: 512Mi
+      securityContext:
+        allowPrivilegeEscalation: false
+        readOnlyRootFilesystem: true
+        capabilities:
+          drop: ["ALL"]
+  # KServe's `canaryTrafficPercent` is meaningful only on SUBSEQUENT rolls
+  # (changing `storageUri`). On first apply the InferenceService has one
+  # revision and 100 % of traffic goes there; this field is read on the
+  # next storageUri update. The promote loop: change the URI to point at
+  # the `staging` alias; KServe creates a second revision and routes 10 %
+  # of traffic to it. Promote on metric gate (the chapter's promote.py +
+  # a small Argo Workflow that watches Prometheus).
+  canaryTrafficPercent: 10

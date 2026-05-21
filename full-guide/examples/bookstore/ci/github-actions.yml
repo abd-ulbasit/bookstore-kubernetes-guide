@@ -1,0 +1,356 @@
+# Bookstore — Part 07 ch.03 "CI/CD pipeline".
+#
+# A COMPLETE, valid GitHub Actions workflow that builds, tests, scans, SBOMs,
+# signs (Cosign keyless / OIDC -> Rekor), and pushes the four Bookstore images
+# BY DIGEST, then bumps the GitOps source (the kustomize prod overlay's
+# `images:` newName/newDigest) and commits — so Argo CD (ch.04) reconciles the
+# new digest. "CI builds, CD deploys, Git is the trigger."
+#
+# WHERE THIS FILE LIVES vs WHERE IT RUNS. GitHub Actions only executes a
+# workflow that physically sits at `.github/workflows/<name>.yml` in the repo
+# root. This guide keeps every Bookstore artifact under `examples/bookstore/`,
+# so the canonical copy lives HERE; to actually run it, a real Bookstore repo
+# copies/symlinks it to `.github/workflows/ci.yml`. The chapter says this
+# explicitly — this path is the readable, version-controlled source of truth,
+# not the active workflow location.
+#
+# PLACEHOLDERS — read this. `ghcr.io/your-org/...`, the `your-org/bookstore`
+# repo slug, and the kustomize overlay edited by `bump-manifests` are GENERIC
+# PLACEHOLDERS. Replace `your-org` with your GitHub org/registry. Nothing here
+# is machine- or org-specific; the workflow is illustrative and DOES NOT run to
+# green without a registry the runner can push to and OIDC configured (the
+# chapter is honest about this — same precedent as the Cosign/Trivy honesty
+# notes in Part 05 ch.03).
+#
+# SUPPLY-CHAIN TIE-IN (Part 05 ch.03). That chapter shipped the Kyverno
+# `require-image-digest` / `verifyImages` policy in **Audit** because the
+# guide's own `bookstore/<svc>:dev` Pods are tag-based and unsigned. THIS
+# pipeline is exactly how you earn **Enforce**: it pushes by digest and signs
+# keyless, so a cluster can then require digest + verify the signature against
+# this workflow's OIDC identity. Audit -> Enforce is a pipeline milestone, not
+# a YAML flip.
+
+name: bookstore-ci
+
+# Build/test on every push & PR; the sign/push/bump path only runs on a push
+# to `main` (a merged PR) — never on a fork PR (no secrets/OIDC there anyway).
+on:
+  push:
+    branches: ["main"]
+  pull_request:
+    branches: ["main"]
+
+# Least-privilege default; jobs widen as needed (build-scan-sign-push needs
+# `id-token: write` for keyless Cosign OIDC and `packages: write` to push to
+# GHCR; bump-manifests needs `contents: write` to commit the digest bump).
+permissions:
+  contents: read
+
+# One in-flight run per branch; a newer push cancels the older (saves minutes,
+# avoids racing two digest bumps onto the same overlay).
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  # GENERIC PLACEHOLDER registry/owner — replace `your-org`.
+  REGISTRY: ghcr.io
+  IMAGE_OWNER: your-org
+  # Pinned tool versions (never `:latest` — this guide's own image policy, and
+  # a moving tool version makes CI non-reproducible).
+  GO_VERSION: "1.26"
+  TRIVY_VERSION: "0.51.0"
+
+jobs:
+  # ---------------------------------------------------------------------------
+  # JOB 1 — build-test: compile + vet + lint every service. The cheap, fast
+  # gate that must pass before anything is built into an image. A matrix over
+  # the four services runs them in parallel; `fail-fast: false` so one
+  # service's failure still reports the others.
+  # ---------------------------------------------------------------------------
+  build-test:
+    name: build-test (${{ matrix.service }})
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        # storefront is static nginx (no Go) — vetted by `docker build` in
+        # job 2; the three Go services get the full go toolchain gate here.
+        service: [catalog, orders, payments-worker]
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Go
+        uses: actions/setup-go@v5
+        with:
+          go-version: ${{ env.GO_VERSION }}
+          # Cache module + build cache keyed by the service's go.sum — a hit
+          # skips re-downloading deps on every run (the matrix/caching point).
+          cache-dependency-path: examples/bookstore/app/${{ matrix.service }}/go.sum
+
+      - name: go vet (static analysis)
+        working-directory: examples/bookstore/app/${{ matrix.service }}
+        # The Bookstore services ship NO `_test.go` files (deliberately tiny —
+        # they are a vehicle for Kubernetes, not app code). So the gate is
+        # `go build` + `go vet`; `go test ./...` is shown commented for when a
+        # real codebase has tests (it then becomes the actual gate).
+        run: |
+          go build ./...
+          go vet ./...
+          # go test ./... -race -count=1     # <- the gate once tests exist
+
+      - name: golangci-lint
+        uses: golangci/golangci-lint-action@v6
+        with:
+          # PINNED — `latest` would silently change the gate (new linters /
+          # rules) across releases, which contradicts this workflow's own
+          # reproducibility rule (and is non-deterministic CI). Bump this
+          # version DELIBERATELY, reviewing the changelog.
+          version: v1.62.2
+          working-directory: examples/bookstore/app/${{ matrix.service }}
+          # `|| true` is NOT used: a lint failure must fail the job. (Shown
+          # explicitly so nobody "softens" the gate later.)
+
+  # ---------------------------------------------------------------------------
+  # JOB 2 — build-scan-sign-push: the supply-chain core (Part 05 ch.03 made
+  # runnable in CI). Matrix over ALL FOUR images. For each: multi-stage
+  # `docker build` (the existing distroless Dockerfile), Trivy scan FAILING on
+  # HIGH/CRITICAL, syft SBOM, Cosign keyless sign (-> Rekor), push BY DIGEST.
+  # Emits the digest as a job output for `bump-manifests`.
+  # ---------------------------------------------------------------------------
+  build-scan-sign-push:
+    name: build-scan-sign-push (${{ matrix.service }})
+    needs: build-test
+    # Only on a push to main (a merged PR). Fork PRs have no OIDC token / no
+    # push creds, and we never sign/publish unreviewed code.
+    if: github.event_name == 'push'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: write          # push to ghcr.io/your-org/...
+      id-token: write          # Cosign KEYLESS: OIDC token -> Fulcio cert
+    strategy:
+      fail-fast: false
+      matrix:
+        service: [catalog, orders, payments-worker, storefront]
+    # NO job-level `outputs:` here ON PURPOSE. A matrix job's `outputs:` are
+    # NOT per-leg — they collapse to whatever the LAST-finishing matrix leg
+    # wrote, so 3 of the 4 service digests would arrive EMPTY in
+    # bump-manifests (→ `kustomize edit set image bookstore/x=reg/...@`, a
+    # broken kustomization). The correct cross-leg fan-in is an ARTIFACT per
+    # service (uploaded below, downloaded+merged in bump-manifests).
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Log in to the container registry
+        uses: docker/login-action@v3
+        with:
+          registry: ${{ env.REGISTRY }}
+          username: ${{ github.actor }}
+          # GITHUB_TOKEN is a short-lived, auto-injected token — NOT a
+          # long-lived PAT in a secret. Short-lived creds > static keys
+          # (Part 05 ch.03 "registry & pull-secret hygiene").
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Derive image ref
+        id: ref
+        run: |
+          echo "image=${REGISTRY}/${IMAGE_OWNER}/bookstore-${{ matrix.service }}" >> "$GITHUB_OUTPUT"
+
+      # Build + push in one step so the registry computes the manifest digest
+      # we then SIGN and PIN. `outputs` returns `<image>@sha256:...`.
+      - name: Build and push image
+        id: build
+        uses: docker/build-push-action@v6
+        with:
+          context: examples/bookstore/app/${{ matrix.service }}
+          file: examples/bookstore/app/${{ matrix.service }}/Dockerfile
+          push: true
+          # A mutable convenience tag AND the immutable digest. CD pins the
+          # DIGEST (below); the tag is only for humans/`docker pull`.
+          tags: |
+            ${{ steps.ref.outputs.image }}:${{ github.sha }}
+          # GitHub Actions cache backend for layer reuse across runs.
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+          provenance: true        # SLSA provenance attestation attached to the image
+          sbom: false             # we generate the SBOM explicitly below (syft)
+
+      - name: Trivy vulnerability scan (fail on HIGH/CRITICAL)
+        uses: aquasecurity/trivy-action@0.24.0
+        with:
+          image-ref: ${{ steps.ref.outputs.image }}@${{ steps.build.outputs.digest }}
+          format: table
+          # exit-code 1 = the CI GATE. Any HIGH/CRITICAL fails the job (Part 05
+          # ch.03's `trivy image --exit-code 1 --severity ...` contract). The
+          # distroless Go images carry almost nothing, so this is normally
+          # clean by construction — that is itself a supply-chain control.
+          exit-code: "1"
+          severity: HIGH,CRITICAL
+          # TRADEOFF (taught choice, not the only way): `ignore-unfixed: true`
+          # excludes CVEs with no upstream fix yet — a rebuild cannot
+          # remediate them, so gating on them would block every build for an
+          # un-actionable finding (false gate). The cost: those CVEs are still
+          # real exposure. Mitigation is to re-scan PUBLISHED images
+          # continuously (Part 05 ch.03) so an unfixed→fixed transition is
+          # caught even though the image did not change. Set this to `false`
+          # if your risk posture requires failing on unfixed too.
+          ignore-unfixed: true
+        env:
+          TRIVY_VERSION: ${{ env.TRIVY_VERSION }}
+
+      # PUSH-BEFORE-SCAN TRADEOFF (taught choice, consistent with Part 05
+      # ch.03's honesty about sequencing). We `push: true` THEN scan the
+      # pushed DIGEST: a CVE-failing run therefore leaves a pullable
+      # vulnerable image in the registry until it is cleaned up / overwritten.
+      # The upside is the scan + Cosign signature bind to the EXACT registry
+      # manifest digest (no "scanned a local image, pushed a different one"
+      # skew). The alternative is `push: false` (build to the local daemon),
+      # `trivy image` the LOCAL image, and push ONLY on a clean scan — no
+      # vulnerable image ever reaches the registry, at the cost of digest
+      # fidelity unless you re-pin from the push. Either is defensible; pick
+      # per your registry hygiene (untrusted-until-admitted — Part 05 ch.03 —
+      # means a briefly-present unsigned/failing digest is not deployable
+      # anyway once verifyImages is enforced).
+
+      - name: Generate SBOM (syft, SPDX JSON)
+        # Pinned to a specific patch (not the floating `@v0`) for supply-chain
+        # rigor — this IS a supply-chain step. The gold standard is pinning
+        # the action to its full commit SHA (`@<sha>`); a patch tag is the
+        # pragmatic middle ground. Bump deliberately.
+        uses: anchore/sbom-action@v0.17.7
+        with:
+          image: ${{ steps.ref.outputs.image }}@${{ steps.build.outputs.digest }}
+          format: spdx-json
+          artifact-name: ${{ matrix.service }}.spdx.json
+          output-file: ${{ matrix.service }}.spdx.json
+
+      - name: Install Cosign
+        uses: sigstore/cosign-installer@v3
+
+      - name: Cosign keyless sign + attest SBOM
+        env:
+          DIGEST: ${{ steps.build.outputs.digest }}
+          IMAGE: ${{ steps.ref.outputs.image }}
+        run: |
+          # KEYLESS: no private key. Cosign gets an OIDC token from the
+          # `id-token: write` permission, exchanges it at Fulcio for a
+          # short-lived cert bound to THIS workflow's identity, signs the
+          # DIGEST, and records the entry in the Rekor transparency log.
+          # Verifiers later check the cert identity == this workflow + issuer
+          # (Part 05 ch.03). Signing a tag would be meaningless — tags move.
+          cosign sign --yes "${IMAGE}@${DIGEST}"
+          # Bind the SBOM to the image identity (so "what's in this digest?"
+          # is answerable + provenance-checked after a future CVE drops).
+          cosign attest --yes --predicate "${{ matrix.service }}.spdx.json" \
+            --type spdxjson "${IMAGE}@${DIGEST}"
+
+      - name: Write this service's digest to an artifact
+        env:
+          DIGEST: ${{ steps.build.outputs.digest }}
+        run: |
+          # Each matrix leg writes ONLY its own file. Artifacts (unlike matrix
+          # job outputs) survive per-leg and are merged in bump-manifests —
+          # the reliable cross-matrix fan-in for "one value per service".
+          mkdir -p /tmp/digests
+          printf '%s' "${DIGEST}" > "/tmp/digests/${{ matrix.service }}.digest"
+
+      - name: Upload digest artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: digest-${{ matrix.service }}
+          path: /tmp/digests/${{ matrix.service }}.digest
+          retention-days: 7
+
+      - name: Upload SBOM artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: sbom-${{ matrix.service }}
+          path: ${{ matrix.service }}.spdx.json
+          retention-days: 90
+
+  # ---------------------------------------------------------------------------
+  # JOB 3 — bump-manifests: THE CI -> GitOps SEAM. CI does not `kubectl apply`.
+  # It writes the freshly-built, signed DIGESTS into the kustomize prod overlay
+  # `images:` block and commits to Git. Argo CD (ch.04) sees the commit and
+  # reconciles — the deploy is a Git commit, not a pipeline step.
+  # ---------------------------------------------------------------------------
+  bump-manifests:
+    name: bump-manifests (GitOps source -> Argo syncs)
+    needs: build-scan-sign-push
+    if: github.event_name == 'push'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write          # commit the digest bump back to the repo
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          # Need write access to push the commit back.
+          token: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Download all per-service digest artifacts
+        uses: actions/download-artifact@v4
+        with:
+          pattern: digest-*        # digest-catalog, digest-orders, …
+          merge-multiple: true     # flatten into one dir: <svc>.digest each
+          path: /tmp/digests
+
+      - name: Install kustomize (PINNED release binary)
+        env:
+          # Pinned, like TRIVY_VERSION above — NEVER the master `install_kustomize.sh`
+          # (latest, mutable ref): that is exactly the unpinned-tool /
+          # supply-chain anti-pattern this guide (and Part 05 ch.03) bans.
+          # Bump this DELIBERATELY (and review the release) when upgrading.
+          KUSTOMIZE_VERSION: "5.4.3"
+        run: |
+          curl -fsSL -o kustomize.tar.gz \
+            "https://github.com/kubernetes-sigs/kustomize/releases/download/kustomize%2Fv${KUSTOMIZE_VERSION}/kustomize_v${KUSTOMIZE_VERSION}_linux_amd64.tar.gz"
+          tar -xzf kustomize.tar.gz
+          sudo mv kustomize /usr/local/bin/
+          kustomize version
+
+      - name: Pin built digests into the prod overlay
+        working-directory: examples/bookstore/kustomize/overlays/prod
+        env:
+          REG: ${{ env.REGISTRY }}/${{ env.IMAGE_OWNER }}
+        run: |
+          # Read each service's REAL digest from its downloaded artifact
+          # (the artifact fan-in — see build-scan-sign-push: matrix job
+          # `outputs:` would have collapsed to one leg). Fail loudly if any
+          # is missing/empty rather than writing a broken `...@` ref.
+          set -euo pipefail
+          for svc in catalog orders payments-worker storefront; do
+            f="/tmp/digests/${svc}.digest"
+            [ -s "$f" ] || { echo "::error::missing/empty digest for ${svc} ($f)"; exit 1; }
+            digest="$(cat "$f")"
+            case "$digest" in
+              sha256:*) ;;
+              *) echo "::error::unexpected digest for ${svc}: ${digest}"; exit 1 ;;
+            esac
+            # `kustomize edit set image` rewrites the overlay's `images:` block
+            # to name@sha256:<digest> — an IMMUTABLE reference (Part 05 ch.03:
+            # digests are content, tags are mutable pointers). NO Deployment
+            # YAML is hand-edited; the transformer does it (ch.02 `images:`).
+            kustomize edit set image \
+              "bookstore/${svc}=${REG}/bookstore-${svc}@${digest}"
+          done
+
+      - name: Commit the digest bump (this is the deploy trigger)
+        run: |
+          git config user.name  "bookstore-ci[bot]"
+          git config user.email "bookstore-ci[bot]@users.noreply.github.com"
+          git add examples/bookstore/kustomize/overlays/prod/kustomization.yaml
+          if git diff --cached --quiet; then
+            echo "No image change — nothing to commit."
+            exit 0
+          fi
+          git commit -m "ci: bump prod images to ${GITHUB_SHA} (signed digests)"
+          # Pushing to `main` is the GitOps trigger: Argo CD detects the new
+          # commit on its tracked branch/path and syncs the prod Application.
+          # (A safer real-world pattern opens a PR to a release branch /
+          # separate config repo so a human approves prod — the chapter's
+          # "promotion dev->staging->prod" + Production-notes discuss this.)
+          git push origin HEAD:main

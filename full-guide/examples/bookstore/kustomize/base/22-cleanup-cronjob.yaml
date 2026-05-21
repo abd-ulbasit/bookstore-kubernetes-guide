@@ -1,0 +1,114 @@
+# Bookstore — Part 01 ch.07 "Jobs and CronJobs": nightly cleanup CronJob.
+#
+# A CronJob is "cron that creates Jobs": each tick it instantiates a Job from
+# jobTemplate; all run-to-completion semantics come from that Job. This one
+# prunes orders older than 90 days at 03:00 UTC daily, non-overlapping.
+#
+# RESOLVED in Part 05 ch.04: the plaintext PGPASSWORD stub is GONE — each
+# spawned Job's Pod sources PG* from the shared `db-credentials` Secret (16-)
+# via secretKeyRef, exactly like the db-migrate Job (21-) and 20-/10-/14-.
+#
+# Part 04 ch.03 SCHEDULING LAYER (additive only): each Job this CronJob spawns
+# runs at priorityClassName bookstore-batch (35-priorityclasses.yaml) — lowest
+# Bookstore tier, never preempts others, yields first under pressure.
+#
+# Part 05 SECURITY LAYER (ch.01 + ch.02 — additive only). The `bookstore`
+# namespace enforces pod-security.kubernetes.io/enforce: restricted
+# (00-namespace.yaml), so EVERY Job this CronJob spawns must comply. Same
+# postgres:16 pattern as 20-/21-:
+#  • ch.01 serviceAccountName: migrate-sa + automountServiceAccountToken: false
+#    (shared with 21-; never the `default` SA).
+#  • ch.02 pod SC runAsNonRoot/999 + fsGroup 999 + seccomp RuntimeDefault;
+#    container SC drop ALL + allowPrivilegeEscalation:false. NO
+#    readOnlyRootFilesystem (psql writes outside any data volume — same
+#    accurate reason as 20-/21-).
+#
+# Requires:
+#   kubectl apply -f examples/bookstore/raw-manifests/00-namespace.yaml
+#   kubectl apply -f examples/bookstore/raw-manifests/05-serviceaccounts-rbac.yaml  # ch.01
+#   kubectl apply -f examples/bookstore/raw-manifests/16-db-credentials.yaml        # ch.02 (the Secret)
+#   kubectl apply -f examples/bookstore/raw-manifests/20-postgres-statefulset.yaml
+# Apply:
+#   kubectl apply -f examples/bookstore/raw-manifests/22-cleanup-cronjob.yaml
+# Test now (don't wait for 03:00):
+#   kubectl create job -n bookstore cleanup-manual --from=cronjob/cleanup
+apiVersion: batch/v1
+kind: CronJob
+metadata:
+  name: cleanup
+  namespace: bookstore
+  labels:
+    app: cleanup
+    app.kubernetes.io/part-of: bookstore
+spec:
+  schedule: "0 3 * * *"             # 03:00 every day (cron: m h dom mon dow)
+  timeZone: "Etc/UTC"               # evaluate schedule in this TZ (k8s 1.27+ GA)
+  concurrencyPolicy: Forbid         # skip a tick if the previous run is still going
+  startingDeadlineSeconds: 300      # missed tick: only start within 5 min, else skip
+  successfulJobsHistoryLimit: 3     # keep last 3 successful Jobs
+  failedJobsHistoryLimit: 1         # keep last 1 failed Job (for debugging)
+  jobTemplate:
+    spec:
+      backoffLimit: 2
+      activeDeadlineSeconds: 300
+      ttlSecondsAfterFinished: 600
+      template:
+        metadata:
+          labels:
+            app: cleanup
+        spec:
+          restartPolicy: Never
+          priorityClassName: bookstore-batch   # Part 04 ch.03 (35-): lowest tier
+          # --- Part 05 ch.01: dedicated batch identity (shared with 21-),
+          # no API token mounted; never the `default` SA.
+          serviceAccountName: migrate-sa
+          automountServiceAccountToken: false
+          # --- Part 05 ch.02: pod-level securityContext (PSA `restricted`),
+          # same accurate postgres:16 pattern as 20-/21-.
+          securityContext:
+            runAsNonRoot: true
+            runAsUser: 999
+            runAsGroup: 999
+            fsGroup: 999
+            seccompProfile:
+              type: RuntimeDefault
+          containers:
+            - name: cleanup
+              image: postgres:16
+              # --- Part 05 ch.02: container securityContext (PSA `restricted`).
+              # NOT readOnlyRootFilesystem (psql writes outside any data
+              # volume — same accurate reason as 20-/21-).
+              securityContext:
+                allowPrivilegeEscalation: false
+                capabilities:
+                  drop: ["ALL"]
+              # --- Part 05 ch.04: credentials from the db-credentials Secret
+              # (16-) via secretKeyRef — NO plaintext password. PG* libpq names
+              # mapped from the Secret's POSTGRES_* keys (same as 21-).
+              env:
+                - name: PGHOST           # headless Svc — not a secret
+                  value: postgres.bookstore.svc.cluster.local
+                - name: PGUSER
+                  valueFrom:
+                    secretKeyRef: { name: db-credentials, key: POSTGRES_USER }
+                - name: PGPASSWORD
+                  valueFrom:
+                    secretKeyRef: { name: db-credentials, key: POSTGRES_PASSWORD }
+                - name: PGDATABASE
+                  valueFrom:
+                    secretKeyRef: { name: db-credentials, key: POSTGRES_DB }
+              command: ["/bin/sh", "-c"]
+              args:
+                - |
+                  set -e
+                  echo "pruning orders older than 90 days..."
+                  psql -v ON_ERROR_STOP=1 -c \
+                    "DELETE FROM orders WHERE created_at < now() - interval '90 days';"
+                  echo "cleanup complete"
+              resources:
+                requests:
+                  cpu: 25m
+                  memory: 32Mi
+                limits:
+                  cpu: 100m
+                  memory: 64Mi

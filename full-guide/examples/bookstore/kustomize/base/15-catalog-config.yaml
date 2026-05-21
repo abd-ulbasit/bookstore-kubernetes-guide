@@ -1,0 +1,42 @@
+# Bookstore — Part 03 ch.01 "ConfigMaps": externalized non-secret config.
+#
+# catalog's NON-SECRET configuration, lifted out of the Deployment so it can
+# change without editing/rebuilding the workload. NO credentials live here —
+# the DB password is a Secret (16-db-credentials.yaml, ch.02). A ConfigMap is
+# plain text, world-readable to anyone who can `get configmap` in the namespace.
+#
+# Keys the catalog binary ACTUALLY reads (see app/catalog/main.go):
+#   LOG_LEVEL   — slog level (debug|info|warn|error)
+#   REDIS_ADDR  — host:port of the cache; empty/unset disables caching
+# Illustrative forward-looking keys (NOT yet read by the tiny demo binary; here
+# to show bulk envFrom + a realistic config surface — documented as such so the
+# manifest never lies about what the app consumes):
+#   CATALOG_FEATURE_RECOMMENDATIONS — example feature flag
+#   CATALOG_CACHE_TTL_SECONDS       — example tunable (app hardcodes 30s today)
+#
+# 10-catalog-deploy.yaml consumes this: LOG_LEVEL via a single
+# configMapKeyRef, and the whole map via envFrom (bulk). ch.01 explains why a
+# mounted ConfigMap hot-updates but env vars do NOT.
+#
+# Requires:
+#   kubectl apply -f examples/bookstore/raw-manifests/00-namespace.yaml
+# Apply (BEFORE re-applying 10-catalog-deploy.yaml, which references it):
+#   kubectl apply -f examples/bookstore/raw-manifests/15-catalog-config.yaml
+#   kubectl get configmap catalog-config -n bookstore -o yaml
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: catalog-config
+  namespace: bookstore
+  labels:
+    app: catalog
+    app.kubernetes.io/part-of: bookstore
+# immutable: true  # ← see ch.01: flip on for prod (perf+safety); then a change
+#                   #   means a NEW ConfigMap name + a Deployment rollout.
+data:
+  # consumed by the app:
+  LOG_LEVEL: "info"
+  REDIS_ADDR: "redis.bookstore.svc.cluster.local:6379"
+  # illustrative (not read by the demo binary; bulk-loaded to show envFrom):
+  CATALOG_FEATURE_RECOMMENDATIONS: "false"
+  CATALOG_CACHE_TTL_SECONDS: "30"

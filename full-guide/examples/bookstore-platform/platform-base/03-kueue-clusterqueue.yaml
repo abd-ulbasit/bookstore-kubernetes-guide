@@ -1,0 +1,70 @@
+# Bookstore Platform v2 — Part 13 ch.01 / ch.08 (forward ref): platform-wide
+# Kueue ClusterQueue + ResourceFlavor for ML training jobs. Per-tenant
+# LocalQueues attach to this ClusterQueue (created by the Crossplane
+# Composition in 13.02), so the platform team enforces ONE fairness policy +
+# ONE quota envelope across every tenant's ML jobs.
+#
+# Kueue model (Part 12 ch.03 — gang scheduling): Workload -> LocalQueue ->
+# ClusterQueue -> ResourceFlavor. The ResourceFlavor names a *flavour* of node
+# capacity (`default-cpu` here on kind; in cloud, a GPU flavour pinned to a
+# Karpenter NodePool labelled `karpenter.k8s.aws/instance-gpu-count>0`). The
+# ClusterQueue enforces the cluster-wide quota envelope.
+#
+# !!! CRD-INTRINSIC DRY-RUN
+#   `ClusterQueue` and `ResourceFlavor` are `kueue.x-k8s.io/v1beta1` — CRDs.
+#   WITHOUT Kueue installed (Part 12 ch.03 install path, pinned Helm into
+#   `kueue-system`), a client dry-run prints:
+#     no matches for kind "ClusterQueue" in version "kueue.x-k8s.io/v1beta1"
+#     no matches for kind "ResourceFlavor" in version "kueue.x-k8s.io/v1beta1"
+#   EXPECTED, schema-correct — same precedent as every other CRD-backed
+#   manifest in the guide.
+#
+# Apply (after Kueue installed):
+#   kubectl apply -f examples/bookstore-platform/platform-base/03-kueue-clusterqueue.yaml
+#   kubectl get clusterqueue,resourceflavor
+---
+apiVersion: kueue.x-k8s.io/v1beta1
+kind: ResourceFlavor
+metadata:
+  name: default-cpu
+  labels:
+    app.kubernetes.io/part-of: bookstore-platform
+spec:
+  # Empty nodeLabels = match any node (the kind-runnable default). In cloud,
+  # tighten to e.g. `karpenter.sh/nodepool: ml-cpu` so ML batch only consumes
+  # the dedicated NodePool.
+  nodeLabels: {}
+---
+apiVersion: kueue.x-k8s.io/v1beta1
+kind: ClusterQueue
+metadata:
+  name: bookstore-platform-ml-cq
+  labels:
+    app.kubernetes.io/part-of: bookstore-platform
+spec:
+  # cohort lets you SHARE unused quota across ClusterQueues (e.g. ml-cq and
+  # batch-cq under the same cohort can lend each other capacity when idle).
+  cohort: bookstore-platform-cohort
+  # namespaceSelector = which tenant namespaces are allowed to submit. Use the
+  # platform label so any `bookstore-platform-<TENANT>` ns (and the shared
+  # bookstore-platform-ml ns for cross-tenant retrains) can submit.
+  namespaceSelector:
+    matchLabels:
+      app.kubernetes.io/part-of: bookstore-platform
+  # FIFO with priority — high-priority Workloads are admitted first; same-
+  # priority Workloads are admitted in arrival order.
+  queueingStrategy: BestEffortFIFO
+  resourceGroups:
+    - coveredResources: ["cpu", "memory"]
+      flavors:
+        - name: default-cpu
+          resources:
+            - name: cpu
+              nominalQuota: "8"      # platform-wide cap; kind-friendly default
+            - name: memory
+              nominalQuota: "16Gi"
+  # Preempt lower-priority Workloads within the same cohort if a higher-
+  # priority one is queued — but never across cohorts.
+  preemption:
+    reclaimWithinCohort: LowerPriority
+    withinClusterQueue: LowerPriority

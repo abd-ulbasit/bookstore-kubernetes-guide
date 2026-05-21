@@ -1,0 +1,104 @@
+# Bookstore Platform v2 — Part 13 ch.01: platform priority ladder. Same shape
+# as the v1 Bookstore ladder (examples/bookstore/raw-manifests/35-) but with
+# the v2 tier set: a `bookstore-platform-edge` rung above the v1 tiers, and a
+# `bookstore-platform-ml-batch` rung below them for ML training.
+#
+# Ladder (higher value = scheduled sooner, evicted/preempted later):
+#   bookstore-platform-data        1000000   CloudNativePG primary + replicas
+#   bookstore-platform-edge         800000   Istio gateway, WAF, auth (13.04/07)
+#   bookstore-platform-critical     100000   storefront/catalog/orders (v1 set)
+#   bookstore-platform-async         50000   payments-gateway / outbox / events
+#   bookstore-platform-ml-serving    10000   KServe InferenceServices (13.08)
+#   bookstore-platform-batch          1000   migration / cleanup jobs
+#   bookstore-platform-ml-batch        100   ML training (Argo Workflows; 13.08)
+#
+# Why edge above critical: a degraded storefront still hands a customer a
+# cached page; a degraded edge denies *every* customer. WAF + auth must
+# survive under pressure so the platform fails closed, not open.
+#
+# Why ml-batch is the lowest tier: nightly retrains are deferrable; an
+# in-flight customer request is not. ml-batch jobs preempt nothing; they wait.
+#
+# All values FAR below built-in `system-cluster-critical` (2000000000) and
+# `system-node-critical` (2000001000) — Bookstore Platform can never
+# out-prioritise the control plane / CNI / DNS.
+#
+# globalDefault is false everywhere. Pods that omit priorityClassName get the
+# cluster's existing default (typically 0) — below every platform tier, by
+# design.
+#
+# Apply (idempotent; cluster-scoped):
+#   kubectl apply -f examples/bookstore-platform/platform-base/02-priorityclasses.yaml
+#   kubectl get priorityclass | grep bookstore-platform
+---
+apiVersion: scheduling.k8s.io/v1
+kind: PriorityClass
+metadata:
+  name: bookstore-platform-data
+  labels:
+    app.kubernetes.io/part-of: bookstore-platform
+value: 1000000
+globalDefault: false
+description: "Bookstore Platform stateful data tier (CNPG). Scheduled first, preempted last."
+---
+apiVersion: scheduling.k8s.io/v1
+kind: PriorityClass
+metadata:
+  name: bookstore-platform-edge
+  labels:
+    app.kubernetes.io/part-of: bookstore-platform
+value: 800000
+globalDefault: false
+description: "Bookstore Platform edge (Istio gateway, WAF, auth). Must survive under pressure (fail closed)."
+---
+apiVersion: scheduling.k8s.io/v1
+kind: PriorityClass
+metadata:
+  name: bookstore-platform-critical
+  labels:
+    app.kubernetes.io/part-of: bookstore-platform
+value: 100000
+globalDefault: false
+description: "Bookstore Platform user-facing services (storefront/catalog/orders)."
+---
+apiVersion: scheduling.k8s.io/v1
+kind: PriorityClass
+metadata:
+  name: bookstore-platform-async
+  labels:
+    app.kubernetes.io/part-of: bookstore-platform
+value: 50000
+globalDefault: false
+description: "Bookstore Platform async path (payments-gateway, outbox publisher, events)."
+---
+apiVersion: scheduling.k8s.io/v1
+kind: PriorityClass
+metadata:
+  name: bookstore-platform-ml-serving
+  labels:
+    app.kubernetes.io/part-of: bookstore-platform
+value: 10000
+globalDefault: false
+description: "Bookstore Platform ML serving (KServe predictors). Above batch, below user-facing."
+---
+apiVersion: scheduling.k8s.io/v1
+kind: PriorityClass
+metadata:
+  name: bookstore-platform-batch
+  labels:
+    app.kubernetes.io/part-of: bookstore-platform
+value: 1000
+globalDefault: false
+preemptionPolicy: Never
+description: "Bookstore Platform deferrable batch (migration/cleanup). Never preempts; yields."
+---
+apiVersion: scheduling.k8s.io/v1
+kind: PriorityClass
+metadata:
+  name: bookstore-platform-ml-batch
+  labels:
+    app.kubernetes.io/part-of: bookstore-platform
+value: 100
+globalDefault: false
+preemptionPolicy: Never
+description: "Bookstore Platform ML training (Argo Workflows). Lowest tier; preempted first."

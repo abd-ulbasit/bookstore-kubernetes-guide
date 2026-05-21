@@ -1,0 +1,189 @@
+# Bookstore — Part 01 ch.05 "StatefulSets": Postgres data tier.
+#
+# Postgres as a StatefulSet (stable ordinal identity + per-Pod PVC + ordered
+# lifecycle) fronted by the REQUIRED headless Service for stable per-Pod DNS.
+# Official `postgres:16` image — pulled from the registry, so NO `kind load`
+# (unlike the Bookstore-built images).
+#
+# RESOLVED in Part 03 ch.02 (Secrets): the Phase-2 inline POSTGRES_PASSWORD
+# STUB is GONE. Credentials now come from the `db-credentials` Opaque Secret
+# (16-db-credentials.yaml) via envFrom.secretRef — that injects POSTGRES_USER /
+# POSTGRES_PASSWORD / POSTGRES_DB (exactly the env names the official postgres
+# image reads). catalog/orders build DB_DSN from the SAME Secret (10-/14-).
+# Only PGDATA (not a secret) stays inline. The DB SCHEMA is created by the
+# migration Job (ch.07, 21-db-migrate-job.yaml).
+#
+# Part 04 SCHEDULING LAYER (ch.02 + ch.03 — additive only; everything above is
+# unchanged, only the three fields below were ADDED to template.spec):
+#  • ch.02 tolerations: tolerate the `dedicated=database:NoSchedule` taint so
+#    postgres MAY land on a node reserved for the data tier (ch.02 documents
+#    tainting a kind worker `dedicated=database:NoSchedule` + labelling it
+#    `dedicated=database`). A toleration only PERMITS scheduling there; it does
+#    not ATTRACT — node affinity below does the attracting.
+#  • ch.02 nodeAffinity (preferred): PREFER the node labelled
+#    `dedicated=database`. "preferred" (not "required") so postgres still
+#    schedules on a default single-node kind cluster that has no such node.
+#  • ch.03 priorityClassName: bookstore-data (35-) — highest Bookstore tier:
+#    scheduled first, preempted last (losing it loses data).
+#
+# Part 05 SECURITY LAYER (ch.01 + ch.02 — additive only):
+#  • ch.01 serviceAccountName: postgres-sa + automountServiceAccountToken:
+#    false — postgres never calls kube-apiserver; dedicated identity, no token.
+#  • ch.02 securityContext to satisfy PSA `restricted`. The official postgres
+#    image is NOT restricted-compliant out of the box: its entrypoint expects
+#    to start as root and `gosu postgres` (UID 999) after chowning PGDATA. To
+#    make it BOTH restricted-valid AND actually start, we run it directly as
+#    the non-root postgres UID/GID 999 and set fsGroup: 999 so the PVC at
+#    /var/lib/postgresql/data is group-writable (the kubelet chowns the volume
+#    to the fsGroup). initdb then runs as 999 against a writable data dir — no
+#    root step needed. We do NOT set readOnlyRootFilesystem (postgres writes to
+#    several paths outside PGDATA: /run/postgresql sockets, /tmp, etc.) —
+#    `restricted` does NOT require a read-only root FS, only runAsNonRoot +
+#    drop ALL + no-privilege-escalation + seccomp RuntimeDefault, which we set.
+#    This is the accurate "stock stateful image, made restricted" pattern;
+#    contrast catalog/orders (purpose-built distroless) which also get a
+#    read-only root FS. fsGroupChangePolicy: OnRootMismatch avoids a full
+#    recursive chown of a large PGDATA on every restart.
+#
+# Requires:
+#   kubectl apply -f examples/bookstore/raw-manifests/00-namespace.yaml
+#   kubectl apply -f examples/bookstore/raw-manifests/05-serviceaccounts-rbac.yaml  # ch.01
+#   kubectl apply -f examples/bookstore/raw-manifests/16-db-credentials.yaml   # ch.02 — BEFORE this
+# Apply:
+#   kubectl apply -f examples/bookstore/raw-manifests/20-postgres-statefulset.yaml
+#   kubectl rollout status statefulset/postgres -n bookstore
+apiVersion: v1
+kind: Service
+metadata:
+  name: postgres                  # MUST equal StatefulSet.spec.serviceName below
+  namespace: bookstore
+  labels:
+    app: postgres
+spec:
+  clusterIP: None                 # HEADLESS → per-Pod DNS, no load-balanced VIP
+  selector:
+    app: postgres                 # selects this StatefulSet's Pods
+  ports:
+    - name: postgres
+      port: 5432
+      targetPort: 5432
+---
+apiVersion: apps/v1
+kind: StatefulSet
+metadata:
+  name: postgres
+  namespace: bookstore
+  labels:
+    app: postgres
+    app.kubernetes.io/part-of: bookstore
+spec:
+  serviceName: postgres           # ties to the headless Service (stable DNS)
+  replicas: 1                     # single instance for the guide; HA is Part 03/08
+  podManagementPolicy: OrderedReady
+  selector:
+    matchLabels:
+      app: postgres
+  updateStrategy:
+    type: RollingUpdate
+    rollingUpdate:
+      partition: 0                # ordinals >= partition update; 0 = update all
+  template:
+    metadata:
+      labels:
+        app: postgres
+    spec:
+      # --- Part 05 ch.01: dedicated identity, no API token mounted.
+      serviceAccountName: postgres-sa
+      automountServiceAccountToken: false
+      # --- Part 05 ch.02: pod-level securityContext to make the STOCK postgres
+      # image satisfy PSA `restricted` AND boot. Run directly as the non-root
+      # postgres UID/GID 999; fsGroup 999 makes the PVC group-writable so
+      # initdb (now running as 999) can create PGDATA without the image's
+      # root→gosu step. seccomp RuntimeDefault applies to every container.
+      # No readOnlyRootFilesystem here (postgres writes outside PGDATA);
+      # `restricted` does not require one.
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 999
+        runAsGroup: 999
+        fsGroup: 999
+        fsGroupChangePolicy: OnRootMismatch
+        seccompProfile:
+          type: RuntimeDefault
+      # --- Part 04 ch.03: highest Bookstore tier (35-priorityclasses.yaml).
+      priorityClassName: bookstore-data
+      # --- Part 04 ch.02: tolerate the dedicated-DB-node taint so postgres MAY
+      # be placed on a node tainted `dedicated=database:NoSchedule`. Matches the
+      # taint EXACTLY (key+value+effect); without this toleration the scheduler
+      # would never place postgres there. (Permission, not attraction.)
+      tolerations:
+        - key: dedicated
+          operator: Equal
+          value: database
+          effect: NoSchedule
+      affinity:
+        # --- Part 04 ch.02: PREFER the dedicated DB node (labelled
+        # dedicated=database). "preferred" so postgres still schedules on a
+        # plain single-node kind cluster with no such node/label.
+        nodeAffinity:
+          preferredDuringSchedulingIgnoredDuringExecution:
+            - weight: 100
+              preference:
+                matchExpressions:
+                  - key: dedicated
+                    operator: In
+                    values: ["database"]
+      terminationGracePeriodSeconds: 30
+      containers:
+        - name: postgres
+          image: postgres:16      # official image; pulled from registry (no kind load)
+          # --- Part 05 ch.02: container securityContext. drop ALL +
+          # no-privilege-escalation + (pod-level) runAsNonRoot + seccomp
+          # RuntimeDefault = PSA `restricted`. NOT readOnlyRootFilesystem:
+          # postgres writes sockets/locks outside PGDATA; restricted permits a
+          # writable root FS. (postgres needs no Linux capabilities at all.)
+          securityContext:
+            allowPrivilegeEscalation: false
+            capabilities:
+              drop: ["ALL"]
+          ports:
+            - name: postgres
+              containerPort: 5432
+          envFrom:
+            # POSTGRES_USER / POSTGRES_PASSWORD / POSTGRES_DB now come from the
+            # Secret (ch.02). The Phase-2 inline stub is fully removed; this is
+            # the single source of truth, shared with catalog/orders (10-/14-).
+            - secretRef:
+                name: db-credentials      # 16-db-credentials.yaml
+          env:
+            - name: PGDATA                # not a secret → stays inline
+              value: /var/lib/postgresql/data/pgdata
+          readinessProbe:
+            exec:
+              command: ["pg_isready", "-U", "bookstore", "-d", "bookstore"]
+            initialDelaySeconds: 10
+            periodSeconds: 5
+          livenessProbe:
+            exec:
+              command: ["pg_isready", "-U", "bookstore", "-d", "bookstore"]
+            initialDelaySeconds: 30
+            periodSeconds: 10
+          resources:
+            requests:
+              cpu: 100m
+              memory: 256Mi
+            limits:
+              cpu: 500m
+              memory: 512Mi
+          volumeMounts:
+            - name: data                  # MUST match the volumeClaimTemplate name
+              mountPath: /var/lib/postgresql/data
+  volumeClaimTemplates:                   # one PVC per Pod; retained across restarts
+    - metadata:
+        name: data
+      spec:
+        accessModes: ["ReadWriteOnce"]
+        resources:
+          requests:
+            storage: 1Gi
+        # storageClassName omitted → default class (kind: "standard", k3d: "local-path")

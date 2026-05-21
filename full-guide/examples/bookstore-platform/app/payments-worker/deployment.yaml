@@ -1,0 +1,80 @@
+# Bookstore Platform v2 — payments-worker Deployment (stub)
+# Referenced in Parts 13/14/15. PSA-restricted compliant.
+# No Service — this is a background worker with no inbound traffic.
+#
+# Apply:
+#   kubectl apply -f examples/bookstore-platform/app/payments-worker/deployment.yaml
+---
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: payments-worker
+  namespace: bookstore-platform-payments
+  labels:
+    app.kubernetes.io/name: payments-worker
+    app.kubernetes.io/part-of: bookstore-platform
+    app.kubernetes.io/component: payments-worker
+automountServiceAccountToken: false
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: payments-worker
+  namespace: bookstore-platform-payments
+  labels:
+    app: payments-worker
+    app.kubernetes.io/name: payments-worker
+    app.kubernetes.io/instance: payments-worker-dev
+    app.kubernetes.io/part-of: bookstore-platform
+    app.kubernetes.io/component: payments-worker
+    app.kubernetes.io/version: dev
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: payments-worker
+  template:
+    metadata:
+      labels:
+        app: payments-worker
+        app.kubernetes.io/name: payments-worker
+        app.kubernetes.io/part-of: bookstore-platform
+    spec:
+      serviceAccountName: payments-worker
+      automountServiceAccountToken: false
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 65532
+        runAsGroup: 65532
+        fsGroup: 65532
+        seccompProfile:
+          type: RuntimeDefault
+      containers:
+        - name: payments-worker
+          image: bookstore/payments-worker:dev
+          imagePullPolicy: IfNotPresent
+          env:
+            - { name: PORT, value: "8080" }
+          resources:
+            requests:
+              cpu: 25m
+              memory: 32Mi
+            limits:
+              cpu: 100m
+              memory: 64Mi
+          livenessProbe:
+            httpGet: { path: /healthz, port: 8080 }
+            initialDelaySeconds: 10
+            periodSeconds: 30
+            failureThreshold: 3
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities:
+              drop: ["ALL"]
+          volumeMounts:
+            - name: tmp
+              mountPath: /tmp
+      volumes:
+        - name: tmp
+          emptyDir: {}

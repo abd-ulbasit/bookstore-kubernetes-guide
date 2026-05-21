@@ -1,0 +1,68 @@
+{{/*
+  redis Deployment (raw-manifests 12-redis.yaml). Stock redis:7, in-memory
+  only (--save "" --appendonly no). Run directly as the non-root redis UID/GID
+  999 (the redis999 profile: UID 999 + fsGroup 999 + read-only root FS, since
+  it writes nothing) with a small `data` emptyDir for redis's working dir.
+*/}}
+{{- if .Values.redis.enabled }}
+{{- $r := .Values.redis }}
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: redis
+  namespace: {{ include "bookstore.namespace" . }}
+  labels:
+    {{- include "bookstore.labels" (dict "ctx" . "app" "redis" "component" "cache") | nindent 4 }}
+spec:
+  replicas: {{ $r.replicaCount }}
+  selector:
+    matchLabels:
+      app: redis
+  template:
+    metadata:
+      labels:
+        {{- include "bookstore.labels" (dict "ctx" . "app" "redis" "component" "cache") | nindent 8 }}
+    spec:
+      serviceAccountName: {{ $r.serviceAccountName }}
+      automountServiceAccountToken: false
+      securityContext:
+        {{- include "bookstore.podSecurityContext" (dict "ctx" . "profile" "redis999") | nindent 8 }}
+      {{- with $r.nodeSelector }}
+      nodeSelector:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with $r.tolerations }}
+      tolerations:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with $r.affinity }}
+      affinity:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      containers:
+        - name: redis
+          image: "{{ $r.image.repository }}:{{ $r.image.tag }}"
+          imagePullPolicy: {{ $r.image.pullPolicy }}
+          args:
+            {{- toYaml $r.args | nindent 12 }}
+          securityContext:
+            {{- include "bookstore.containerSecurityContext" (dict "ctx" . "profile" "redis999") | nindent 12 }}
+          ports:
+            - name: redis
+              containerPort: 6379
+          readinessProbe:
+            tcpSocket: { port: redis }
+            periodSeconds: 5
+          livenessProbe:
+            tcpSocket: { port: redis }
+            periodSeconds: 10
+          resources:
+            {{- toYaml $r.resources | nindent 12 }}
+          volumeMounts:
+            - name: data
+              mountPath: /data
+      volumes:
+        - name: data
+          emptyDir:
+            sizeLimit: 64Mi
+{{- end }}

@@ -1,0 +1,179 @@
+# Bookstore Platform v2 — Part 13 ch.12: the Chaos Mesh Workflow that
+# chains the 5 quarterly experiments (pod-kill, network-delay,
+# io-stress, region-loss, payments-failure). Run during the chaos
+# game-day against the staging cluster.
+#
+# v1 had a small set of chaos experiments (Part 11 ch.07). v2's are
+# tailored to the v2 services + the multi-region + the saga shape.
+#
+# !!! CRD-INTRINSIC DRY-RUN
+#   `Workflow`, `PodChaos`, `NetworkChaos`, `StressChaos`,
+#   `DNSChaos`, `HTTPChaos` are all `chaos-mesh.org/v1alpha1` —
+#   Chaos Mesh CRDs. WITHOUT Chaos Mesh installed:
+#     no matches for kind "Workflow" in version "chaos-mesh.org/v1alpha1"
+#   EXPECTED. ch.13.12 installs Chaos Mesh first.
+#
+# Apply (against the STAGING cluster only):
+#   kubectl --context kind-bookstore-platform-staging apply \
+#     -f examples/bookstore-platform/runbooks/chaos-experiments.yaml
+---
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: chaos-mesh-experiments
+  labels:
+    app.kubernetes.io/part-of: bookstore-platform
+    bookstore-platform.example.com/scope: chaos
+    pod-security.kubernetes.io/enforce: restricted
+    pod-security.kubernetes.io/enforce-version: latest
+    pod-security.kubernetes.io/audit: restricted
+    pod-security.kubernetes.io/audit-version: latest
+    pod-security.kubernetes.io/warn: restricted
+    pod-security.kubernetes.io/warn-version: latest
+---
+apiVersion: chaos-mesh.org/v1alpha1
+kind: Workflow
+metadata:
+  name: bookstore-platform-quarterly-gameday
+  namespace: chaos-mesh-experiments
+  labels:
+    app.kubernetes.io/name: bookstore-platform-quarterly-gameday
+    app.kubernetes.io/instance: bookstore-platform-quarterly-gameday
+    app.kubernetes.io/part-of: bookstore-platform
+    app.kubernetes.io/component: chaos-gameday
+    app.kubernetes.io/version: "1.0.0"
+spec:
+  entry: gameday-q
+  templates:
+    # The serial workflow: each experiment runs, then waits 10 min
+    # observation window, then the next runs.
+    - name: gameday-q
+      templateType: Serial
+      deadline: 4h
+      children:
+        - experiment-1-pod-kill-payments
+        - observation-1
+        - experiment-2-network-delay-catalog
+        - observation-2
+        - experiment-3-io-stress-cnpg
+        - observation-3
+        - experiment-4-region-dns-loss
+        - observation-4
+        - experiment-5-payments-failure
+        - observation-5
+    # ---------------------------------------------------------------
+    # Experiment 1: pod-kill (payments-gateway, mode: one)
+    # Hypothesis: PDB minAvailable: 2 holds; storefront stays up.
+    # ---------------------------------------------------------------
+    - name: experiment-1-pod-kill-payments
+      templateType: PodChaos
+      deadline: 5m
+      podChaos:
+        action: pod-kill
+        mode: one
+        selector:
+          namespaces: [bookstore-platform-acme-books]
+          labelSelectors:
+            app: payments-gateway
+    - name: observation-1
+      templateType: Suspend
+      deadline: 10m
+    # ---------------------------------------------------------------
+    # Experiment 2: network-delay (catalog -> orders, 200ms)
+    # Hypothesis: retries + timeouts keep p99 < 500ms.
+    # ---------------------------------------------------------------
+    - name: experiment-2-network-delay-catalog
+      templateType: NetworkChaos
+      deadline: 5m
+      networkChaos:
+        action: delay
+        mode: all
+        selector:
+          namespaces: [bookstore-platform-acme-books]
+          labelSelectors:
+            app: catalog
+        delay:
+          latency: "200ms"
+          correlation: "25"
+          jitter: "10ms"
+        target:
+          mode: all
+          selector:
+            namespaces: [bookstore-platform-acme-books]
+            labelSelectors:
+              app: orders
+        duration: "5m"
+    - name: observation-2
+      templateType: Suspend
+      deadline: 10m
+    # ---------------------------------------------------------------
+    # Experiment 3: io-stress (CNPG primary node)
+    # Hypothesis: replication lag bounded; reads still served.
+    # ---------------------------------------------------------------
+    - name: experiment-3-io-stress-cnpg
+      templateType: StressChaos
+      deadline: 5m
+      stressChaos:
+        mode: one
+        selector:
+          namespaces: [cnpg-system]
+          labelSelectors:
+            cnpg.io/cluster: bookstore-platform-cnpg
+            cnpg.io/instanceRole: primary
+        stressors:
+          io:
+            workers: 4
+        duration: "2m"
+    - name: observation-3
+      templateType: Suspend
+      deadline: 10m
+    # ---------------------------------------------------------------
+    # Experiment 4: region-DNS-loss (simulated cross-region outage)
+    # Hypothesis: DR runbook completes in < 30 min; cross-region
+    # service calls fail-fast on DNS error and the saga compensates.
+    # NOTE — the Chaos Mesh DNSChaos here is COMPLEMENTARY to the
+    # cordon-based simulation in dr-drill-script.sh: DNSChaos
+    # disrupts what the *application* sees of remote regions
+    # (resolution failure on `*.bookstore-platform.example.com`);
+    # the cordon-based script disrupts what the *cluster* sees of
+    # its own nodes. The quarterly game-day exercises both.
+    # ---------------------------------------------------------------
+    - name: experiment-4-region-dns-loss
+      templateType: DNSChaos
+      deadline: 5m
+      dnsChaos:
+        action: error
+        mode: all
+        selector:
+          labelSelectors:
+            app.kubernetes.io/part-of: bookstore-platform
+        patterns:
+          - "*.bookstore-platform.example.com"  # simulate cross-region DNS resolution failure
+    - name: observation-4
+      templateType: Suspend
+      deadline: 10m
+    # ---------------------------------------------------------------
+    # Experiment 5: payments-gateway-failure (Stripe 500)
+    # Hypothesis: saga compensation fires; no order stuck.
+    # Inject HTTP chaos returning 500 on 30% of webhook callbacks.
+    # ---------------------------------------------------------------
+    - name: experiment-5-payments-failure
+      templateType: HTTPChaos
+      deadline: 5m
+      httpChaos:
+        mode: all
+        selector:
+          namespaces: [bookstore-platform-acme-books]
+          labelSelectors:
+            app: payments-webhook-receiver
+        target: Response
+        port: 8080
+        path: /stripe/webhook
+        method: POST
+        percent: 30
+        replace:
+          code: 500
+        duration: "3m"
+    - name: observation-5
+      templateType: Suspend
+      deadline: 10m

@@ -1,0 +1,120 @@
+# Bookstore Platform v2 — Part 13 ch.10: an Argo CD Application that
+# installs OpenCost (opencost/opencost chart) into the `opencost`
+# namespace. OpenCost reuses the platform's existing Prometheus
+# (kube-prometheus-stack from ch.13.09) — no internal Prometheus.
+#
+# v1 (Bookstore) ran no OpenCost; Part 12 ch.08 introduced it as a
+# concept. v2 wires it as the per-tenant + per-region cost source of
+# truth. Per-tenant Allocation queries require the platform's
+# `bookstore-platform.example.com/tenant` labels which the Crossplane
+# Composition (ch.13.02) stamps on every workload.
+#
+# !!! CRD-INTRINSIC DRY-RUN
+#   `Application` is `argoproj.io/v1alpha1` — Argo CD CRD. WITHOUT
+#   Argo CD:
+#     no matches for kind "Application" in version "argoproj.io/v1alpha1"
+#   EXPECTED.
+#
+# Apply (after Argo CD + kube-prometheus-stack):
+#   kubectl apply -f examples/bookstore-platform/cost/opencost-application.yaml
+---
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: opencost
+  labels:
+    app.kubernetes.io/part-of: bookstore-platform
+    bookstore-platform.example.com/scope: cost
+    pod-security.kubernetes.io/enforce: restricted
+    pod-security.kubernetes.io/enforce-version: latest
+    pod-security.kubernetes.io/audit: restricted
+    pod-security.kubernetes.io/audit-version: latest
+    pod-security.kubernetes.io/warn: restricted
+    pod-security.kubernetes.io/warn-version: latest
+---
+apiVersion: argoproj.io/v1alpha1
+kind: Application
+metadata:
+  name: opencost
+  namespace: argocd
+  labels:
+    app.kubernetes.io/name: opencost
+    app.kubernetes.io/instance: opencost
+    app.kubernetes.io/part-of: bookstore-platform
+    app.kubernetes.io/component: cost-aggregator
+    app.kubernetes.io/version: "1.115.0"
+  finalizers:
+    - resources-finalizer.argocd.argoproj.io
+spec:
+  project: default
+  source:
+    chart: opencost
+    repoURL: https://opencost.github.io/opencost-helm-chart
+    # Pinned. Production cadence: bump deliberately every quarter.
+    targetRevision: "1.115.0"
+    helm:
+      values: |
+        opencost:
+          prometheus:
+            # Reuse kube-prometheus-stack's Prometheus — do not
+            # spin up an internal one.
+            internal:
+              enabled: false
+            external:
+              enabled: true
+              url: http://kube-prometheus-stack-prometheus.prometheus-system.svc.cluster.local:9090
+          exporter:
+            defaultClusterId: bookstore-platform-us-east
+            # Inject the platform's cluster + region labels onto every
+            # Allocation row so the per-region aggregation works.
+            extraEnv:
+              CLUSTER_ID: bookstore-platform-us-east
+              CLUSTER_REGION: us-east-1
+            # PSA — restricted.
+            securityContext:
+              allowPrivilegeEscalation: false
+              readOnlyRootFilesystem: true
+              capabilities:
+                drop: ["ALL"]
+            resources:
+              requests:
+                cpu: 100m
+                memory: 256Mi
+              limits:
+                cpu: 500m
+                memory: 1Gi
+          ui:
+            enabled: true
+            # Read-only; the source of truth is Grafana via the
+            # PrometheusRule + Grafana dashboard. The UI is for
+            # ad-hoc exploration only.
+            securityContext:
+              allowPrivilegeEscalation: false
+              readOnlyRootFilesystem: true
+              capabilities:
+                drop: ["ALL"]
+            resources:
+              requests:
+                cpu: 50m
+                memory: 64Mi
+              limits:
+                cpu: 200m
+                memory: 256Mi
+        # Pod-level security context — fsGroup, runAsNonRoot.
+        podSecurityContext:
+          runAsNonRoot: true
+          runAsUser: 65532
+          runAsGroup: 65532
+          fsGroup: 65532
+          seccompProfile:
+            type: RuntimeDefault
+  destination:
+    server: https://kubernetes.default.svc
+    namespace: opencost
+  syncPolicy:
+    automated:
+      prune: true
+      selfHeal: true
+    syncOptions:
+      - CreateNamespace=false
+      - ServerSideApply=true

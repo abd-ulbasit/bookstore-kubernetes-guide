@@ -1,0 +1,108 @@
+# Bookstore — Part 07 ch.04 "GitOps with Argo CD": the AppProject guardrail.
+#
+# An AppProject is the multi-tenant boundary EVERY Bookstore Application runs
+# inside. It answers "what is this tenant ALLOWED to deploy, from where, to
+# where?" — independent of any single Application. Scoped tight on purpose:
+#   * sourceRepos      : only the Bookstore repo (no arbitrary Git source)
+#   * destinations     : only the `bookstore` namespace on the in-cluster API
+#   * cluster-scoped   : ONLY PriorityClass (the base 35- objects) — nothing
+#                        else cluster-wide may be created by this project
+#   * namespaced       : a deny-list blocking a tenant from minting its own
+#                        ResourceQuota/LimitRange (the platform owns capacity)
+#
+# ───────────────────────────────────────────────────────────────────────────
+# CRD-INTRINSIC NOTE (identical precedent to raw-manifests 18-/51-/70-/80-/83-
+# and the Helm CRD toggles / Kustomize components).
+#   `AppProject` is the Argo CD CRD `argoproj.io/v1alpha1`. On a cluster that
+#   does NOT have Argo CD installed:
+#
+#     kubectl apply --dry-run=client -f 00-appproject.yaml
+#     # error: ... no matches for kind "AppProject" in version
+#     #        "argoproj.io/v1alpha1"
+#
+#   This is EXPECTED and not a defect — the manifest is schema-correct; the
+#   Argo CD CRDs must exist first (install Argo CD via Helm, ch.04 Hands-on
+#   step 1). After install, `kubectl apply`/dry-run validates and applies.
+#   The whole-dir dry-run note in ch.04 says the same.
+# ───────────────────────────────────────────────────────────────────────────
+#
+# Argo CD objects live in the ARGOCD namespace (the controller only watches
+# Applications/AppProjects there by default), NOT in `bookstore`.
+#
+# PLACEHOLDER: `repoURL` is a clearly-marked generic placeholder
+# `https://github.com/your-org/bookstore` — replace `your-org` with your org.
+# The PATHS (`examples/bookstore/kustomize/overlays/{dev,staging,prod}`) are
+# the REAL 6b overlays in THIS repo and are verified to exist.
+#
+# Apply (Argo CD must be installed first — ch.04 Hands-on):
+#   kubectl apply -n argocd -f examples/bookstore/argocd/00-appproject.yaml
+apiVersion: argoproj.io/v1alpha1
+kind: AppProject
+metadata:
+  name: bookstore
+  namespace: argocd
+  # Finalizer: the project is not deleted while any Application still
+  # references it (prevents orphaning the Bookstore Apps).
+  finalizers:
+    - resources-finalizer.argocd.argoproj.io
+spec:
+  description: Bookstore application — scoped GitOps tenant (Part 07).
+
+  # ── Allowed Git sources ──────────────────────────────────────────────────
+  # ONLY the Bookstore repo. An Application in this project pointing anywhere
+  # else is rejected by Argo CD — a tenant cannot pull arbitrary manifests.
+  sourceRepos:
+    - https://github.com/your-org/bookstore.git   # PLACEHOLDER — replace your-org
+
+  # ── Allowed deploy destinations ──────────────────────────────────────────
+  # ONLY the `bookstore` namespace, ONLY the cluster Argo CD itself runs in
+  # (the in-cluster API). No other namespace, no remote cluster.
+  destinations:
+    - namespace: bookstore
+      server: https://kubernetes.default.svc
+
+  # ── Cluster-scoped allow-list ────────────────────────────────────────────
+  # The base ships TWO kinds of cluster-scoped object: the `bookstore`
+  # Namespace (00-namespace.yaml — carries the PSA `restricted` labels) and
+  # THREE PriorityClasses (35-). Both MUST be whitelisted: with a
+  # `clusterResourceWhitelist` set, Argo CD REJECTS any cluster-scoped kind
+  # NOT listed here — so omitting Namespace would block every per-env
+  # Application from ever reaching Synced/Healthy. Everything else
+  # cluster-scoped (CRDs, ClusterRoles, …) stays denied to this tenant.
+  clusterResourceWhitelist:
+    - group: ""
+      kind: Namespace
+    - group: scheduling.k8s.io
+      kind: PriorityClass
+
+  # ── Namespaced deny-list ─────────────────────────────────────────────────
+  # The base's 00-namespace.yaml ALSO ships a ResourceQuota and a LimitRange
+  # in the `bookstore` namespace. For THIS guide's single-tenant lab the base
+  # OWNS them, so they are NOT denied here — denying them would make the
+  # per-env Application perpetually OutOfSync (Argo would be forbidden by its
+  # own project from applying objects the source declares). In a real
+  # MULTI-TENANT platform, capacity policy (Quota/LimitRange) is
+  # platform-managed and a tenant project would deny tenants from declaring
+  # their own — that production-only stance is the commented form below; flip
+  # it on (and remove Quota/LimitRange from the base) only when a platform
+  # team owns capacity. See ch.04 "How it works under the hood →
+  # `Application` vs `AppProject`" for the single-tenant-lab vs
+  # multi-tenant-platform guardrail tradeoff.
+  namespaceResourceBlacklist: []
+    # MULTI-TENANT PLATFORM stance (NOT used in this single-tenant lab —
+    # would block the base's own Quota/LimitRange; enable only when the
+    # platform, not the tenant, owns capacity policy):
+    # - group: ""
+    #   kind: ResourceQuota
+    # - group: ""
+    #   kind: LimitRange
+
+  # ── Project RBAC role (read-only) ────────────────────────────────────────
+  # A scoped role: read-only on this project's Applications. Bound to an OIDC
+  # group in real life (SSO, ch.04 Production notes). Shown to make the
+  # multi-tenant guardrail concrete; no jwtTokens are minted here.
+  roles:
+    - name: read-only
+      description: Read-only access to Bookstore Applications.
+      policies:
+        - p, proj:bookstore:read-only, applications, get, bookstore/*, allow

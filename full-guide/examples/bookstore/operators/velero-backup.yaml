@@ -1,0 +1,102 @@
+# Bookstore — Part 08 ch.02 "Backup and disaster recovery": a Velero on-demand
+# Backup of the `bookstore` namespace, INCLUDING the Postgres PV via CSI
+# VolumeSnapshot, with a pre-backup CONSISTENCY HOOK so the snapshot is taken
+# while Postgres is in a known-good state.
+#
+# !!! CRD-BACKED — intrinsic dry-run behavior (the SAME documented behavior as
+#     18-postgres-snapshot.yaml / 51-gateway.yaml / 70-kyverno-policy.yaml /
+#     80-servicemonitor.yaml / 83-keda-scaledobject.yaml / the argocd/ tree)
+#     !!!
+#   `Backup` is NOT a built-in Kubernetes kind. It is a CRD
+#   (velero.io/v1) installed by Velero (Helm chart vmware-tanzu/velero, or the
+#   `velero` CLI). Therefore on a cluster WITHOUT Velero installed:
+#       kubectl apply --dry-run=client -f examples/bookstore/operators/velero-backup.yaml
+#       error: resource mapping not found ... no matches for kind "Backup"
+#       in version "velero.io/v1" ... ensure CRDs are installed first
+#     That is EXPECTED and not a manifest defect — identical precedent to every
+#     CRD-backed object in this guide. Schema correctness here is verified by
+#     reading + the official Velero API reference, NOT by a client dry-run.
+#     After `velero install` / the Helm chart, the velero.io CRDs exist and
+#     `kubectl apply --dry-run=server -n velero -f` validates cleanly.
+#
+# !!! WHY THE HOOK !!!  A CSI VolumeSnapshot is CRASH-CONSISTENT (like pulling
+# the power — Postgres recovers via WAL on restore). That is correct but not
+# ideal: the pre-hook issues a Postgres CHECKPOINT so a maximally-flushed,
+# clean state is captured (and demonstrates the hook mechanism Velero uses for
+# DB consistency — a `pg_dump` to a sidecar-mounted volume, or `fsfreeze`, is
+# the same `hooks.resources[].pre[].exec` shape). The official postgres image
+# HAS a shell, so `/bin/sh -c 'psql ...'` is valid in this container (contrast
+# the distroless catalog/orders — ch.03).
+#
+# !!! LOCAL-OBJECT-STORE HONESTY !!!  Velero stores backup METADATA in an
+# object store (a BackupStorageLocation — S3/GCS/Azure Blob, or MinIO locally)
+# and PV data via CSI snapshots / its node-agent. A laptop kind cluster has no
+# cloud bucket; ch.02's Hands-on stands up a local MinIO (or uses
+# --use-volume-snapshots/fs-backup) so the loop is runnable, and is explicit
+# that a REAL object store + snapshot-capable CSI driver is needed for a
+# production restore. Same established honesty as the GitOps local-remote and
+# CNPG local notes — the mechanics are real, only the bucket is substituted.
+#
+# Requires (to actually apply, not just read):
+#   - Velero installed (Helm vmware-tanzu/velero OR `velero install`, pinned)
+#     into its own `velero` namespace, with a BackupStorageLocation (MinIO/S3)
+#   - the snapshot-capable CSI path (CSI plugin + VolumeSnapshotClass) OR
+#     defaultVolumesToFsBackup for the node-agent file path
+#   - the Bookstore deployed in `bookstore` (the standard prereq→workload chain)
+# Apply (Velero-installed cluster only):
+#   kubectl apply -f examples/bookstore/operators/velero-backup.yaml
+#   velero backup describe bookstore-now --details
+#   velero backup logs bookstore-now
+apiVersion: velero.io/v1
+kind: Backup
+metadata:
+  name: bookstore-now
+  namespace: velero                 # Velero's own namespace (NOT bookstore)
+  labels:
+    app.kubernetes.io/part-of: bookstore
+spec:
+  # Scope: ONLY the bookstore namespace (this is a namespaced app backup, not a
+  # whole-cluster backup; etcd snapshot is the cluster-state backup — see ch.02).
+  includedNamespaces:
+    - bookstore
+  # Snapshot the PVs (the Postgres data-postgres-0 PVC) via the cluster's CSI
+  # VolumeSnapshot path — ties directly to Part 03 ch.05 / 18-postgres-snapshot.
+  snapshotVolumes: true
+  # If the cluster has no snapshot-capable CSI driver, flip this to true to use
+  # Velero's node-agent filesystem backup instead (kind-friendly fallback):
+  defaultVolumesToFsBackup: false
+  # Keep this backup for 7 days, then Velero garbage-collects it.
+  ttl: 168h0m0s
+  storageLocation: default          # the BackupStorageLocation (MinIO/S3/GCS)
+  # --- DB CONSISTENCY HOOK: run BEFORE the snapshot, inside the postgres pod.
+  hooks:
+    resources:
+      - name: postgres-consistency
+        includedNamespaces:
+          - bookstore
+        # target the Postgres pod by the label the StatefulSet sets (20-).
+        labelSelector:
+          matchLabels:
+            app: postgres
+        pre:
+          # CHECKPOINT forces a clean flush so the crash-consistent snapshot is
+          # taken at a maximally-recovered point. Swap for a `pg_dump`-to-volume
+          # or `fsfreeze` here for a logical/quiesced backup — same hook shape.
+          - exec:
+              container: postgres
+              command:
+                - /bin/sh
+                - -c
+                - >
+                  PGPASSWORD="$POSTGRES_PASSWORD" psql -U "$POSTGRES_USER"
+                  -d "$POSTGRES_DB" -c 'CHECKPOINT;'
+              onError: Fail          # a failed consistency hook FAILS the backup
+              timeout: 2m0s
+        post:
+          # Optional symmetry: nothing to thaw after a CHECKPOINT; shown as the
+          # place an `fsfreeze -u` / "resume writes" step would go.
+          - exec:
+              container: postgres
+              command: ["/bin/sh", "-c", "true"]
+              onError: Continue
+              timeout: 30s

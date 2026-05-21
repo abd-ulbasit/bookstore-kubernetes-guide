@@ -1,0 +1,62 @@
+# Bookstore Platform v2 — Part 13 ch.05/06: the KafkaNodePool for the
+# Strimzi KRaft cluster. With `strimzi.io/node-pools: enabled` set on the
+# Kafka CR (cluster.yaml), Strimzi 0.40+ IGNORES `spec.kafka.replicas` and
+# requires a KafkaNodePool CR that owns the broker count, storage, and
+# resources. KRaft mode supports COMBINED nodes (broker + controller in
+# the same Pod) — that is what this pool declares.
+#
+# !!! CRD-INTRINSIC DRY-RUN
+#   `KafkaNodePool` is `kafka.strimzi.io/v1beta2` — Strimzi CRD.
+#   WITHOUT Strimzi installed a client dry-run prints:
+#     no matches for kind "KafkaNodePool" in version "kafka.strimzi.io/v1beta2"
+#   EXPECTED. Install Strimzi first (ch.13.05 Hands-on §1).
+#
+# Apply order — the Kafka cluster CR (cluster.yaml) MUST exist first;
+# Strimzi requires the cluster the pool references to be present.
+#
+# Apply (after Strimzi operator + kafka/cluster.yaml):
+#   kubectl apply -f examples/bookstore-platform/kafka/nodepool.yaml
+---
+apiVersion: kafka.strimzi.io/v1beta2
+kind: KafkaNodePool
+metadata:
+  name: bookstore-platform-kafka-pool
+  namespace: kafka-system
+  labels:
+    strimzi.io/cluster: bookstore-platform-kafka
+    app.kubernetes.io/part-of: bookstore-platform
+    bookstore-platform.example.com/component: event-bus
+spec:
+  # Combined node — both broker and controller roles in the same Pod.
+  # KRaft supports this; production with >3 brokers often splits them
+  # (separate controller-only pool + broker-only pool) for blast-radius
+  # isolation. 3 combined nodes is the smallest production-shape that
+  # survives one node loss without data loss.
+  roles:
+    - broker
+    - controller
+  replicas: 3
+  storage:
+    type: jbod
+    volumes:
+      - id: 0
+        type: persistent-claim
+        size: 10Gi
+        deleteClaim: false
+  resources:
+    requests:
+      cpu: 250m
+      memory: 1Gi
+    limits:
+      cpu: "1"
+      memory: 2Gi
+  # PSA restricted — runAsNonRoot + non-root UID; Strimzi 0.40+ defaults
+  # already comply, but we are explicit.
+  template:
+    pod:
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 1000
+        fsGroup: 1000
+        seccompProfile:
+          type: RuntimeDefault

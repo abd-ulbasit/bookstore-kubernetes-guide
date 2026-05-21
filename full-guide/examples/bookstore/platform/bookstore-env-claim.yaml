@@ -1,0 +1,49 @@
+# Bookstore — Part 11 ch.10 "Platform engineering": the CLAIM — the
+# developer-facing request. This is ALL a developer writes to get a full
+# hardened environment: a name + a size. Everything else (PSA-restricted
+# namespace, least-privilege RBAC, ResourceQuota/LimitRange, default-deny
+# NetworkPolicy) is expanded BY THE PLATFORM via the Composition
+# (crossplane-composition.yaml) — the developer cannot produce an un-guarded
+# environment. THIS is the paved road's interface.
+#
+# CROSSPLANE v2: this is a NAMESPACED Composite Resource (the XR itself —
+# crossplane-xrd.yaml has scope: Namespaced), created directly in a namespace.
+# There is no separate cluster-scoped XR + Claim pair: in v2 the "claim" IS
+# this namespaced XR (the v1 Claim term is legacy — ch.10 "How it works"). It
+# lives in `platform-tenants` (a developer-request namespace; the PROVISIONED
+# guarded namespace is the separate bookstore-tenant-<tenant>, created by the
+# Composition — system/request objects never land in the PSA-restricted
+# `bookstore` ns).
+#
+# !!! CRD-INTRINSIC DRY-RUN (identical precedent to argocd/ + operator/ +
+#     multicluster/ + 18-/51-/70-/83- + cnpg-/karpenter-)
+#   `BookstoreEnvironment` is the CRD created BY crossplane-xrd.yaml. WITHOUT
+#   Crossplane installed AND the XRD applied (ch.10 step 1-3), a client dry-run
+#   prints:
+#     no matches for kind "BookstoreEnvironment" in version
+#     "platform.bookstore.example.com/v1alpha1"
+#   EXPECTED, schema-correct — same precedent as the operator's sample CRs
+#   (ch.02) and the argocd/ tree. After the XRD is Established, this applies
+#   and Crossplane provisions the guarded namespace (ch.10 §3).
+#
+# ADDITIVE: NEW file; touches no canonical Bookstore manifest, Helm chart,
+# Kustomize overlay, the operator, the argocd/ or multicluster/ trees, or any
+# existing examples/bookstore/** file.
+#
+# Apply (after the XRD is Established — ch.10 step 3):
+#   kubectl create namespace platform-tenants   # the request namespace
+#   kubectl apply -f examples/bookstore/platform/bookstore-env-claim.yaml
+#   kubectl get bookstoreenvironment acme -n platform-tenants   # SYNCED/READY
+#   kubectl get ns,role,resourcequota,networkpolicy -n bookstore-tenant-acme
+apiVersion: platform.bookstore.example.com/v1alpha1
+kind: BookstoreEnvironment
+metadata:
+  name: acme
+  namespace: platform-tenants
+  labels:
+    app.kubernetes.io/part-of: bookstore
+spec:
+  # The ENTIRE developer input. No securityContext, RBAC, quota, or network
+  # config — the platform owns all of that (guardrails by construction).
+  tenant: acme
+  size: small

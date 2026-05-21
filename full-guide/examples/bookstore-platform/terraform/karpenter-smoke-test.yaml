@@ -1,0 +1,65 @@
+# Karpenter smoke test workload.
+#
+# WHAT IT DOES:
+#   6 × pause Pods, each requesting 500m CPU + 256Mi mem.
+#   Total CPU req = 3 CPU — too big to fit on the 2 × t3.medium system nodes
+#   (which are taint-protected with CriticalAddonsOnly:NoSchedule, and these
+#   Pods do not tolerate it). All 6 Pods stay Pending until Karpenter sees
+#   them and provisions worker capacity from the spot or general NodePool.
+#
+# COST: ~1 small Karpenter worker (e.g. c5.large spot, ~$0.04/hr in ap-south-1)
+#   for the ~5 minutes between apply and delete = under $0.01.
+#
+# CLEANUP: `kubectl delete -f karpenter-smoke-test.yaml`
+#   → Pods evicted → nodes empty → Karpenter consolidates after 30s.
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: karpenter-scale-test
+  namespace: default
+  labels:
+    app.kubernetes.io/name: karpenter-scale-test
+    bookstore-platform.example.com/test: karpenter-scale
+spec:
+  replicas: 6
+  selector:
+    matchLabels:
+      app: karpenter-scale-test
+  template:
+    metadata:
+      labels:
+        app: karpenter-scale-test
+    spec:
+      # Force spread across hostnames so Karpenter has a reason to provision
+      # multiple nodes (or pick a larger node) rather than densepack one.
+      topologySpreadConstraints:
+        - maxSkew: 1
+          topologyKey: kubernetes.io/hostname
+          whenUnsatisfiable: ScheduleAnyway
+          labelSelector:
+            matchLabels:
+              app: karpenter-scale-test
+      # Restricted PSA — these Pods are guaranteed to never land on a system
+      # node because they don't tolerate CriticalAddonsOnly:NoSchedule.
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 65532
+        runAsGroup: 65532
+        seccompProfile:
+          type: RuntimeDefault
+      containers:
+        - name: pause
+          image: registry.k8s.io/pause:3.10
+          resources:
+            requests:
+              cpu: 500m
+              memory: 256Mi
+            limits:
+              cpu: 1
+              memory: 512Mi
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities:
+              drop: ["ALL"]

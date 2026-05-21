@@ -1,0 +1,59 @@
+################################################################################
+# backend-s3.tf.example — opt-in S3 backend for remote state + native locking.
+#
+# WHY:
+#   - Local state (the default in this tree) is fine for a single operator
+#     on one machine. The moment a second person, a CI runner, or even just
+#     a second laptop touches this Terraform, local state breaks.
+#   - S3 backend gives you durable, versioned, encrypted state with shared
+#     access — and as of **Terraform 1.10+ / AWS provider >= 5.50** the
+#     `use_lockfile = true` option provides native locking via S3 conditional
+#     writes. **DynamoDB lock table is no longer required.**
+#
+# HOW TO USE:
+#   1. Run `./bootstrap-state.sh <YOUR-UNIQUE-BUCKET-NAME>` first — creates
+#      the S3 bucket with versioning + encryption + public-access-block.
+#   2. Copy this file: `cp backend-s3.tf.example backend-s3.tf`
+#   3. Edit `backend-s3.tf` and set the bucket + region to match.
+#   4. Run `terraform init -migrate-state` — Terraform copies the local
+#      `terraform.tfstate` into S3 and uses S3 for all future operations.
+#   5. (Optional) `rm terraform.tfstate terraform.tfstate.backup` once you
+#      confirm S3 state works.
+#
+# COST: S3 storage for the state file is < $0.01/month even for huge states.
+#   Versioning + 90-day lifecycle (set by bootstrap-state.sh) caps growth.
+#
+# TEARDOWN: Before `terraform destroy`, the state must be readable. The S3
+#   bucket should NOT be destroyed by this Terraform — keep it across
+#   apply/destroy cycles. Delete the bucket manually only after you're
+#   permanently done.
+################################################################################
+
+terraform {
+  backend "s3" {
+    # Replace with YOUR globally-unique bucket name. AWS S3 bucket names share
+    # a global namespace, so something like "tfstate-bookstore-<YOUR-INITIALS>"
+    # works. Must match the name you passed to bootstrap-state.sh.
+    bucket = "REPLACE-WITH-YOUR-BUCKET-NAME"
+
+    # Object key inside the bucket. Putting it under a project-named prefix
+    # makes it easy to reuse the same bucket for multiple Terraform trees.
+    key = "bookstore-platform/terraform.tfstate"
+
+    # Must match the bucket's region (S3 bucket regions are immutable once set).
+    region = "ap-south-1"
+
+    # Server-side encryption (SSE-S3 / AES256) for the state at rest.
+    # bootstrap-state.sh enables this on the bucket by default.
+    encrypt = true
+
+    # **NATIVE S3 STATE LOCKING — no DynamoDB table required.**
+    # Requires Terraform 1.10+ and AWS provider >= 5.50. The previous pattern of
+    # `dynamodb_table = "tf-locks"` is legacy and can be deleted.
+    use_lockfile = true
+
+    # OPTIONAL: SSE-KMS instead of SSE-S3. Useful when state contains
+    # secrets you want encrypted with a customer-managed CMK.
+    #   kms_key_id = "arn:aws:kms:ap-south-1:<ACCOUNT-ID>:key/<KEY-ID>"
+  }
+}

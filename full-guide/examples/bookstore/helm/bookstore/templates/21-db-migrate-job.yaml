@@ -1,0 +1,84 @@
+{{/*
+  DB migration Job (raw-manifests 21-db-migrate-job.yaml) — as a HELM HOOK.
+
+  In Part 01 ch.07 this was a plain Job applied by hand. As a chart, the
+  idempotent schema must run AFTER postgres is up on EVERY install/upgrade, so
+  it is a `helm.sh/hook: post-install,post-upgrade`:
+    * Being a post-install/post-upgrade hook is what sequences it: Helm
+      applies ALL normal release objects (incl. the postgres StatefulSet)
+      first, then runs post-* hooks — by lifecycle EVENT, not by weight. The
+      Job itself still `pg_isready`-waits for Postgres to actually ACCEPT
+      connections (hooks guarantee ordering, not readiness).
+    * hook-weight orders hooks ONLY relative to other hooks of the SAME event.
+      There is just one post-* hook here, so the value "5" is behaviorally
+      irrelevant today; it is a sane anchor so a future, e.g., pre-migration
+      check hook at weight "1" would run before this one at "5".
+    * hook-delete-policy: before-hook-creation ⇒ the previous run's Job object
+      is deleted just before the next upgrade recreates it (a Job's pod
+      template is immutable; without this an upgrade would fail to "change"
+      the Job). hook-succeeded keeps a failed Job around for debugging.
+  Same restricted batch999 pattern as postgres (UID 999 + fsGroup 999, NO
+  read-only root FS — psql writes outside any data volume). Creds from the
+  db-credentials Secret via secretKeyRef (PG* libpq names).
+*/}}
+{{- if .Values.migrationJob.enabled }}
+{{- $m := .Values.migrationJob }}
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: db-migrate
+  namespace: {{ include "bookstore.namespace" . }}
+  labels:
+    {{- include "bookstore.labels" (dict "ctx" . "app" "db-migrate") | nindent 4 }}
+  annotations:
+    "helm.sh/hook": post-install,post-upgrade
+    "helm.sh/hook-weight": {{ $m.hookWeight | quote }}
+    "helm.sh/hook-delete-policy": before-hook-creation,hook-succeeded
+spec:
+  backoffLimit: {{ $m.backoffLimit }}
+  activeDeadlineSeconds: {{ $m.activeDeadlineSeconds }}
+  ttlSecondsAfterFinished: {{ $m.ttlSecondsAfterFinished }}
+  template:
+    metadata:
+      labels:
+        {{- include "bookstore.labels" (dict "ctx" . "app" "db-migrate") | nindent 8 }}
+    spec:
+      restartPolicy: Never
+      priorityClassName: {{ $m.priorityClassName }}
+      serviceAccountName: {{ $m.serviceAccountName }}
+      automountServiceAccountToken: false
+      securityContext:
+        {{- include "bookstore.podSecurityContext" (dict "ctx" . "profile" "batch999") | nindent 8 }}
+      containers:
+        - name: migrate
+          image: "{{ $m.image.repository }}:{{ $m.image.tag }}"
+          imagePullPolicy: {{ $m.image.pullPolicy }}
+          securityContext:
+            {{- include "bookstore.containerSecurityContext" (dict "ctx" . "profile" "batch999") | nindent 12 }}
+          env:
+            - name: PGHOST
+              value: {{ .Values.database.host | quote }}
+            - name: PGUSER
+              valueFrom:
+                secretKeyRef: { name: {{ .Values.dbCredentials.secretName }}, key: POSTGRES_USER }
+            - name: PGPASSWORD
+              valueFrom:
+                secretKeyRef: { name: {{ .Values.dbCredentials.secretName }}, key: POSTGRES_PASSWORD }
+            - name: PGDATABASE
+              valueFrom:
+                secretKeyRef: { name: {{ .Values.dbCredentials.secretName }}, key: POSTGRES_DB }
+          command: ["/bin/sh", "-c"]
+          args:
+            - |
+              set -e
+              echo "waiting for postgres..."
+              until pg_isready -q; do sleep 2; done
+              echo "applying schema (idempotent)..."
+              psql -v ON_ERROR_STOP=1 <<'SQL'
+              CREATE TABLE IF NOT EXISTS books  (id SERIAL PRIMARY KEY, title TEXT, author TEXT, price NUMERIC);
+              CREATE TABLE IF NOT EXISTS orders (id SERIAL PRIMARY KEY, book_id INT, qty INT, created_at TIMESTAMPTZ);
+              SQL
+              echo "migration complete"
+          resources:
+            {{- toYaml $m.resources | nindent 12 }}
+{{- end }}

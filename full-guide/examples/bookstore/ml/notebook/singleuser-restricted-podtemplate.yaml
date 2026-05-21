@@ -1,0 +1,139 @@
+# Bookstore — Part 12 ch.05 "Notebooks and interactive": the restricted-
+# compliant `singleuser.podTemplate` to drop into a Zero-to-JupyterHub (z2jh)
+# Helm values file.
+#
+# ILLUSTRATIVE STAND-ALONE — NOT APPLIED DIRECTLY. z2jh consumes this shape
+# inside its `singleuser.podTemplate` values key; it is NOT a top-level
+# Kubernetes object. The chapter shows the surrounding values; this file is
+# the EXACT compliant PodTemplate so the shape is reviewable in isolation.
+#
+# The stock Jupyter `datascience-notebook` (and most Kubeflow Notebook images)
+# default to user `jovyan` (uid 1000) and need writable paths for the
+# notebook home, the conda/pip cache, /tmp, and `~/.jupyter`. Out of the box
+# they are REJECTED by PSA `restricted`. This template is the compliant shape
+# that still works:
+#   - runAsNonRoot + non-root UID/GID 1000 (the `jovyan` baked into the image)
+#   - allowPrivilegeEscalation: false
+#   - capabilities.drop: ["ALL"]
+#   - seccompProfile.type: RuntimeDefault
+#   - readOnlyRootFilesystem: true + emptyDir for /tmp + a per-user PVC
+#     mounted at /home/jovyan (the home Jupyter writes to)
+#   - automountServiceAccountToken: false (notebooks rarely need an API token)
+#
+# In a z2jh values.yaml this lives under:
+#
+#   singleuser:
+#     podSecurityContext:                 # pod-level
+#       runAsNonRoot: true
+#       runAsUser: 1000
+#       runAsGroup: 1000
+#       fsGroup: 1000
+#       seccompProfile: { type: RuntimeDefault }
+#     containerSecurityContext:           # container-level
+#       allowPrivilegeEscalation: false
+#       readOnlyRootFilesystem: true
+#       capabilities: { drop: ["ALL"] }
+#     storage:
+#       type: dynamic
+#       homeMountPath: /home/jovyan        # per-user PVC mounted here
+#       capacity: 2Gi
+#     extraEnv:
+#       JUPYTER_RUNTIME_DIR: /home/jovyan/.local/share/jupyter/runtime
+#       JUPYTER_DATA_DIR:    /home/jovyan/.local/share/jupyter
+#     extraVolumes: []                    # per-user PVC is added by z2jh
+#     extraVolumeMounts:
+#       - { name: tmp,        mountPath: /tmp }
+#       - { name: cache,      mountPath: /home/jovyan/.cache }
+#     extraTolerations: []
+#
+# The Pod below shows the equivalent shape as a stand-alone Pod (the same
+# securityContext / volumes / volumeMounts a z2jh-spawned singleuser pod
+# would have). It is restricted-PSA-compliant and is therefore valid as a
+# dry-run against the `bookstore-ml` namespace too.
+apiVersion: v1
+kind: Pod
+metadata:
+  name: jupyter-singleuser-illustrative
+  namespace: bookstore-ml
+  labels:
+    app.kubernetes.io/part-of: bookstore-ml
+    app.kubernetes.io/component: jupyter-singleuser-illustrative
+    hub.jupyter.org/network-access-hub: "true"
+spec:
+  automountServiceAccountToken: false
+  restartPolicy: OnFailure
+  securityContext:                   # pod-level — restricted
+    runAsNonRoot: true
+    runAsUser: 1000                  # jovyan baked into Jupyter images
+    runAsGroup: 1000
+    fsGroup: 1000
+    seccompProfile:
+      type: RuntimeDefault
+  containers:
+    - name: notebook
+      # The official z2jh-compatible singleuser image; pin the digest in
+      # production. This file is illustrative — z2jh assembles its own
+      # pod spec from `singleuser.image` + `singleuser.podTemplate`.
+      image: quay.io/jupyter/scipy-notebook:2024-08-12
+      imagePullPolicy: IfNotPresent
+      command: ["start-notebook.sh"]
+      args:
+        - "--ServerApp.ip=0.0.0.0"
+        - "--ServerApp.port=8888"
+        - "--ServerApp.allow_origin=*"
+        - "--ServerApp.root_dir=/home/jovyan"
+      ports:
+        - containerPort: 8888
+          name: http
+      env:
+        # Move every writable Jupyter path under /home/jovyan (the per-user
+        # PVC) so readOnlyRootFilesystem: true keeps holding.
+        - name: HOME
+          value: /home/jovyan
+        - name: JUPYTER_RUNTIME_DIR
+          value: /home/jovyan/.local/share/jupyter/runtime
+        - name: JUPYTER_DATA_DIR
+          value: /home/jovyan/.local/share/jupyter
+        - name: PIP_CACHE_DIR
+          value: /home/jovyan/.cache/pip
+      resources:
+        requests:
+          cpu: "250m"
+          memory: 512Mi
+        limits:
+          cpu: "2"
+          memory: 2Gi
+      readinessProbe:
+        httpGet: { path: /api, port: 8888 }
+        initialDelaySeconds: 10
+        periodSeconds: 5
+      livenessProbe:
+        httpGet: { path: /api, port: 8888 }
+        initialDelaySeconds: 30
+        periodSeconds: 30
+      securityContext:               # container-level — restricted
+        allowPrivilegeEscalation: false
+        readOnlyRootFilesystem: true
+        capabilities:
+          drop: ["ALL"]
+      volumeMounts:
+        - name: home                 # the per-user PVC (data gravity)
+          mountPath: /home/jovyan
+        - name: tmp                  # /tmp writable, ephemeral
+          mountPath: /tmp
+        - name: cache                # pip / conda caches, ephemeral
+          mountPath: /home/jovyan/.cache
+  volumes:
+    - name: home
+      # Illustrative: in z2jh this is replaced by the per-user dynamically
+      # provisioned PVC. The stand-alone Pod here is for shape review and
+      # for kubectl apply --dry-run validation; in real use, z2jh wires the
+      # PVC up by username.
+      persistentVolumeClaim:
+        claimName: jupyter-home-illustrative
+    - name: tmp
+      emptyDir:
+        sizeLimit: 256Mi
+    - name: cache
+      emptyDir:
+        sizeLimit: 512Mi

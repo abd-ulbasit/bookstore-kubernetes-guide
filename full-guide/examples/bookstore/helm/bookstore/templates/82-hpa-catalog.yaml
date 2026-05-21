@@ -1,0 +1,58 @@
+{{/*
+  HorizontalPodAutoscaler for catalog (raw-manifests 82-hpa-catalog.yaml).
+  autoscaling/v2 is a BUILT-IN API (GA since v1.23) — no CRD, so this defaults
+  ON and dry-runs cleanly. Scales catalog between min/max on TWO metrics (HPA
+  takes the max desired). Metric 1 (CPU) needs metrics-server. Metric 2 (the
+  custom Pods req/s metric) is ILLUSTRATIVE — it needs the Prometheus Adapter
+  to publish http_requests_per_second via custom.metrics.k8s.io (ch.04 + NOTES
+  are explicit). Disabled automatically when catalog is disabled.
+*/}}
+{{- if and .Values.hpa.enabled .Values.catalog.enabled (not .Values.canary.enabled) }}
+{{- $h := .Values.hpa }}
+apiVersion: autoscaling/v2
+kind: HorizontalPodAutoscaler
+metadata:
+  name: catalog
+  namespace: {{ include "bookstore.namespace" . }}
+  labels:
+    {{- include "bookstore.labels" (dict "ctx" . "app" "catalog") | nindent 4 }}
+spec:
+  scaleTargetRef:
+    apiVersion: apps/v1
+    kind: Deployment
+    name: catalog
+  minReplicas: {{ $h.minReplicas }}
+  maxReplicas: {{ $h.maxReplicas }}
+  metrics:
+    - type: Resource
+      resource:
+        name: cpu
+        target:
+          type: Utilization
+          averageUtilization: {{ $h.cpuUtilization }}
+    - type: Pods
+      pods:
+        metric:
+          name: http_requests_per_second
+        target:
+          type: AverageValue
+          averageValue: {{ $h.requestsPerSecond | quote }}
+  behavior:
+    scaleUp:
+      stabilizationWindowSeconds: {{ $h.behavior.scaleUp.stabilizationWindowSeconds }}
+      policies:
+        - type: Percent
+          value: {{ $h.behavior.scaleUp.percentValue }}
+          periodSeconds: {{ $h.behavior.scaleUp.periodSeconds }}
+        - type: Pods
+          value: {{ $h.behavior.scaleUp.podsValue }}
+          periodSeconds: {{ $h.behavior.scaleUp.periodSeconds }}
+      selectPolicy: Max
+    scaleDown:
+      stabilizationWindowSeconds: {{ $h.behavior.scaleDown.stabilizationWindowSeconds }}
+      policies:
+        - type: Percent
+          value: {{ $h.behavior.scaleDown.percentValue }}
+          periodSeconds: {{ $h.behavior.scaleDown.periodSeconds }}
+      selectPolicy: Max
+{{- end }}

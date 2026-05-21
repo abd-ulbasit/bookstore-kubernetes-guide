@@ -1,0 +1,156 @@
+# Bookstore — Part 02 ch.02 "Services": stable virtual IPs + DNS for every tier.
+#
+# A Pod IP is ephemeral; a Service is a STABLE name + ClusterIP that
+# load-balances across the current Ready Pods selected by label. One
+# ClusterIP Service per addressable tier. selectors are a SUBSET of each
+# workload's pod template labels (verified against 10-/11-/12-/13-/14-/19-):
+#   catalog         -> app: catalog         (10-catalog-deploy.yaml pods)
+#   storefront      -> app: storefront      (11-storefront-deploy.yaml pods)
+#   orders          -> app: orders          (14-orders-deploy.yaml pods)
+#   redis           -> app: redis           (12-redis.yaml pods)
+#   rabbitmq        -> app: rabbitmq        (13-rabbitmq.yaml pods)
+#   payments-worker -> app: payments-worker (19-payments-worker-deploy pods)
+#
+# Part 06 ch.04 increment: a HEADLESS (clusterIP: None) Service for
+# payments-worker. The worker has NO inbound request traffic — it is a queue
+# consumer — so this Service exists ONLY to give Prometheus a stable set of
+# scrape endpoints (the ServiceMonitor 80- selects it). clusterIP: None means
+# no virtual IP / no kube-proxy load-balancing (there is nothing to balance);
+# EndpointSlices still list every Ready Pod's IP, which is exactly what the
+# Prometheus Operator turns into per-Pod scrape targets.
+#
+# `port` is the Service's stable port; `targetPort` is the container port it
+# forwards to (here the NAMED port `http`/`redis`/`amqp`, so the container
+# can move ports without touching the Service). No `type:` => ClusterIP
+# (in-cluster only); external exposure is the Ingress (50-) / Gateway (51-).
+#
+# COEXISTENCE NOTE — the `catalog` Service:
+#   30-catalog-canary.yaml ALSO defines a Service named `catalog` (the manual
+#   canary teaching variant, Part 01 ch.08). This file defines the CANONICAL
+#   `catalog` Service for the canonical Deployment (10-catalog-deploy.yaml).
+#   Same name+namespace, and both select `app: catalog`, so they are
+#   compatible (last-applied wins on a whole-dir apply; selector identical).
+#   They pair with MUTUALLY EXCLUSIVE backends: run EITHER the canonical
+#   catalog (10- + this) OR the canary stack (30-), never both (Part 01 ch.08
+#   lineage note). A whole-dir dry-run is valid either way.
+#
+# Requires (the workloads these select):
+#   kubectl apply -f examples/bookstore/raw-manifests/00-namespace.yaml
+#   kubectl apply -f examples/bookstore/raw-manifests/10-catalog-deploy.yaml
+#   kubectl apply -f examples/bookstore/raw-manifests/11-storefront-deploy.yaml
+#   kubectl apply -f examples/bookstore/raw-manifests/12-redis.yaml
+#   kubectl apply -f examples/bookstore/raw-manifests/13-rabbitmq.yaml
+#   kubectl apply -f examples/bookstore/raw-manifests/14-orders-deploy.yaml
+# Apply:
+#   kubectl apply -f examples/bookstore/raw-manifests/40-services.yaml
+#   kubectl get svc,endpointslices -n bookstore
+apiVersion: v1
+kind: Service
+metadata:
+  name: catalog
+  namespace: bookstore
+  labels:
+    app: catalog
+    app.kubernetes.io/part-of: bookstore
+spec:
+  type: ClusterIP                   # default: in-cluster virtual IP only
+  selector:
+    app: catalog                    # subset of 10-catalog-deploy pod labels
+  ports:
+    - name: http
+      port: 80                      # stable Service port (catalog.bookstore:80)
+      targetPort: http              # -> container's named port 8080
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: storefront
+  namespace: bookstore
+  labels:
+    app: storefront
+    app.kubernetes.io/part-of: bookstore
+spec:
+  type: ClusterIP
+  selector:
+    app: storefront                 # subset of 11-storefront-deploy pod labels
+  ports:
+    - name: http
+      port: 80
+      targetPort: http              # -> container's named port 8080
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: orders
+  namespace: bookstore
+  labels:
+    app: orders
+    app.kubernetes.io/part-of: bookstore
+spec:
+  type: ClusterIP
+  selector:
+    app: orders                     # subset of 14-orders-deploy pod labels
+  ports:
+    - name: http
+      port: 80
+      targetPort: http              # -> container's named port 8080
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: redis
+  namespace: bookstore
+  labels:
+    app: redis
+    app.kubernetes.io/part-of: bookstore
+spec:
+  type: ClusterIP
+  selector:
+    app: redis                      # subset of 12-redis pod labels
+  ports:
+    - name: redis
+      port: 6379
+      targetPort: redis             # -> container's named port 6379
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: rabbitmq
+  namespace: bookstore
+  labels:
+    app: rabbitmq
+    app.kubernetes.io/part-of: bookstore
+spec:
+  type: ClusterIP
+  selector:
+    app: rabbitmq                   # subset of 13-rabbitmq pod labels
+  ports:
+    - name: amqp
+      port: 5672
+      targetPort: amqp              # -> container's named port 5672
+    - name: management
+      port: 15672
+      targetPort: management        # mgmt UI (port-forward target in hands-on)
+---
+# Part 06 ch.04: HEADLESS metrics-only Service for payments-worker (19-).
+# clusterIP: None — the worker is a RabbitMQ consumer with NO inbound request
+# traffic, so there is nothing to virtual-IP / load-balance. The Service
+# exists purely so the Prometheus Operator's ServiceMonitor (80-) has a
+# selectable Endpoints/EndpointSlice object listing each worker Pod's
+# :8080 /metrics. selector is a subset of 19-'s pod labels.
+apiVersion: v1
+kind: Service
+metadata:
+  name: payments-worker
+  namespace: bookstore
+  labels:
+    app: payments-worker
+    app.kubernetes.io/part-of: bookstore
+spec:
+  clusterIP: None                   # headless: no VIP, no kube-proxy LB
+  selector:
+    app: payments-worker            # subset of 19-payments-worker-deploy pod labels
+  ports:
+    - name: metrics
+      port: 8080
+      targetPort: metrics           # -> container's named port 8080 (/metrics)

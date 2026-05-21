@@ -1,0 +1,55 @@
+# Bookstore — Part 07 ch.01 "Packaging with Helm".
+#
+# The Bookstore application packaged as ONE idiomatic Helm chart. This renders
+# the SAME logical app as examples/bookstore/raw-manifests/ (Parts 00–06),
+# minus the 01-/02- bare-Pod teaching seeds and the apiserver-level
+# examples/bookstore/cluster/ files (encryption/audit config — not app
+# manifests). Every restricted securityContext, the scheduling layer, the
+# byte-identical catalog/orders DB_DSN, and the namespace PSA labels are
+# preserved exactly (see templates/_helpers.tpl + values.yaml).
+#
+# apiVersion v2 = Helm 3 (dependencies live here, not requirements.yaml).
+# type: application = it installs into a cluster (vs. type: library).
+apiVersion: v2
+name: bookstore
+description: >-
+  The Bookstore microservices application (storefront, catalog, orders,
+  payments-worker, postgres, redis, rabbitmq) — the cumulative Parts 00–06
+  manifests as one Helm chart, restricted-PSA compliant, with feature toggles
+  for the CRD-backed extras (Ingress/Gateway, ServiceMonitor, PrometheusRule,
+  KEDA, Kyverno, VolumeSnapshot).
+type: application
+
+# Chart version (SemVer) — the version of THIS packaging. Bump on any chart
+# change (templates/values), independent of the app. appVersion tracks the
+# Bookstore app image tag (the :dev tag the guide builds in Part 00 ch.02).
+version: 0.1.0
+appVersion: "dev"
+
+# The chart only renders objects available in Kubernetes v1.30+ (native
+# Sidecar/preStop sleep is GA-track at 1.30; the guide targets >=1.30).
+kubeVersion: ">=1.30.0-0"
+
+keywords:
+  - bookstore
+  - microservices
+  - example
+  - restricted-psa
+
+home: https://example.com/bookstore-guide
+sources:
+  - https://example.com/bookstore-guide
+
+maintainers:
+  - name: Bookstore Guide Authors
+    url: https://example.com/bookstore-guide
+
+annotations:
+  category: Application
+
+# No `dependencies:` on purpose. A real chart for stock Postgres/Redis/RabbitMQ
+# would normally pull the Bitnami subcharts (see ch.01 "How it works under the
+# hood" and Production notes). The guide deliberately ships its OWN templates
+# for those three so the exact restricted securityContext + scheduling layer +
+# the postgres-as-StatefulSet model taught in Parts 04–05 are preserved and
+# inspectable — a Bitnami subchart would hide them behind its own values API.

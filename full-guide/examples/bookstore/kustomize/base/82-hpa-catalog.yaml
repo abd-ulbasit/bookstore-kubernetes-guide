@@ -1,0 +1,99 @@
+# Bookstore — Part 06 ch.04 "Autoscaling": HorizontalPodAutoscaler for catalog.
+#
+# A BUILT-IN object (autoscaling/v2, GA since v1.23) — no CRD, so this DOES
+# dry-run cleanly (contrast the CRD-backed 80-/81-/83-). It scales the catalog
+# Deployment (10-) horizontally between 2 and 6 replicas on TWO metrics; the
+# HPA uses whichever yields the LARGER desired count (it computes a desired
+# replica count per metric and takes the max — never the sum).
+#
+#   1) Resource CPU — averageUtilization 70%. "Utilization" = the mean, across
+#      the Deployment's Pods, of (container CPU usage / container CPU REQUEST).
+#      catalog requests cpu: 50m (10-), so 70% ≈ 35m average. Needs
+#      metrics-server (ch.01) serving metrics.k8s.io — without it this metric
+#      reports <unknown> and the HPA cannot scale on it.
+#   2) Pods custom metric — http_requests_total as a per-pod req/s target
+#      (averageValue 50). This is the RED "Rate" signal driving capacity,
+#      and requires the Prometheus Adapter (or KEDA's metrics API) to expose
+#      `http_requests_per_second` through custom.metrics.k8s.io. ch.04 is
+#      explicit that this second metric is ILLUSTRATIVE unless you install
+#      that adapter — the CPU metric alone works with just metrics-server.
+#
+# The HPA algorithm (ch.04, verified against the HPA design):
+#   desiredReplicas = ceil[ currentReplicas * (currentMetricValue / targetMetricValue) ]
+# evaluated per metric; the max wins. `behavior` tunes the scale velocity and
+# the stabilization windows (anti-flapping). minReplicas: 2 keeps catalog HA
+# even at zero load (it is user-facing — never scale a front-line API to 1).
+#
+# !!! DO NOT also put a VPA in `Auto`/`Recreate` mode on catalog's CPU/memory:
+# an HPA scaling on CPU and a VPA rewriting CPU requests on the SAME signal
+# fight each other (ch.04 "VPA + HPA conflict"). VPA in `Off`/recommendation
+# mode is fine and is exactly how ch.06 right-sizes catalog.
+#
+# Requires:
+#   kubectl apply -f examples/bookstore/raw-manifests/00-namespace.yaml
+#   kubectl apply -f examples/bookstore/raw-manifests/05-serviceaccounts-rbac.yaml
+#   kubectl apply -f examples/bookstore/raw-manifests/15-catalog-config.yaml
+#   kubectl apply -f examples/bookstore/raw-manifests/16-db-credentials.yaml
+#   kubectl apply -f examples/bookstore/raw-manifests/35-priorityclasses.yaml
+#   kubectl apply -f examples/bookstore/raw-manifests/10-catalog-deploy.yaml
+#   # metrics-server installed (ch.04) for the CPU metric; the Pods metric
+#   # additionally needs the Prometheus Adapter (ch.04 documents this).
+# Apply:
+#   kubectl apply -f examples/bookstore/raw-manifests/82-hpa-catalog.yaml
+#   kubectl get hpa -n bookstore -w
+#   kubectl describe hpa catalog -n bookstore   # see per-metric current/target
+apiVersion: autoscaling/v2
+kind: HorizontalPodAutoscaler
+metadata:
+  name: catalog
+  namespace: bookstore
+  labels:
+    app: catalog
+    app.kubernetes.io/part-of: bookstore
+spec:
+  scaleTargetRef:
+    apiVersion: apps/v1
+    kind: Deployment
+    name: catalog                    # the real Deployment (10-catalog-deploy.yaml)
+  minReplicas: 2                     # never below 2: user-facing, stay HA
+  maxReplicas: 6                     # bounded by the namespace ResourceQuota (00-)
+  metrics:
+    # 1) Resource CPU utilization (needs metrics-server). Utilization is a
+    #    percentage of the container's CPU REQUEST (50m in 10-).
+    - type: Resource
+      resource:
+        name: cpu
+        target:
+          type: Utilization
+          averageUtilization: 70
+    # 2) Custom Pods metric: per-pod requests/second. ILLUSTRATIVE — needs the
+    #    Prometheus Adapter to publish `http_requests_per_second` via
+    #    custom.metrics.k8s.io. averageValue is a quantity-per-pod target.
+    - type: Pods
+      pods:
+        metric:
+          name: http_requests_per_second
+        target:
+          type: AverageValue
+          averageValue: "50"
+  behavior:
+    scaleUp:
+      # React fast to load but not instantly: 60s stabilization smooths spikes.
+      stabilizationWindowSeconds: 60
+      policies:
+        - type: Percent
+          value: 100                 # at most double the replicas …
+          periodSeconds: 60
+        - type: Pods
+          value: 2                   # … or +2 Pods, whichever is the larger step
+          periodSeconds: 60
+      selectPolicy: Max
+    scaleDown:
+      # Scale IN slowly: 300s window prevents thrashing when load is bursty
+      # (the single most common HPA misconfiguration is scaling down too fast).
+      stabilizationWindowSeconds: 300
+      policies:
+        - type: Percent
+          value: 50                  # remove at most half the replicas per minute
+          periodSeconds: 60
+      selectPolicy: Max

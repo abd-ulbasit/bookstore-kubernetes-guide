@@ -1,0 +1,81 @@
+# Bookstore Platform v2 — Part 13 ch.08: the recommendations API. Wraps
+# the KServe InferenceService that serves the model from MLflow. Reads the
+# tenant claim from the gateway-verified x-jwt-payload header (ch.13.04),
+# forwards to KServe, publishes the prediction to Kafka `ml.predictions`
+# so Alibi-Detect can compute drift.
+#
+# Lives in the tenant ns (per-tenant service); the KServe predictor lives
+# in `bookstore-platform-ml`.
+#
+# Apply:
+#   kubectl apply -f examples/bookstore-platform/app/recommendations/deployment.yaml
+---
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: recommendations
+  namespace: bookstore-platform-acme-books
+  labels:
+    app.kubernetes.io/part-of: bookstore-platform
+    app.kubernetes.io/component: recommendations-api
+    bookstore-platform.example.com/tenant: acme-books
+automountServiceAccountToken: false
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: recommendations
+  namespace: bookstore-platform-acme-books
+  labels:
+    app: recommendations
+    app.kubernetes.io/part-of: bookstore-platform
+    app.kubernetes.io/component: recommendations-api
+    bookstore-platform.example.com/tenant: acme-books
+spec:
+  replicas: 2
+  selector:
+    matchLabels:
+      app: recommendations
+  template:
+    metadata:
+      labels:
+        app: recommendations
+        app.kubernetes.io/part-of: bookstore-platform
+        bookstore-platform.example.com/tenant: acme-books
+    spec:
+      serviceAccountName: recommendations
+      automountServiceAccountToken: false
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 65532
+        runAsGroup: 65532
+        fsGroup: 65532
+        seccompProfile:
+          type: RuntimeDefault
+      containers:
+        - name: recommendations
+          image: bookstore-platform/recommendations:dev
+          imagePullPolicy: IfNotPresent
+          env:
+            - { name: PORT, value: "8080" }
+            - { name: KSERVE_PREDICT_URL, value: "http://recommender-predictor.bookstore-platform-ml.svc.cluster.local/v1/models/recommender:predict" }
+            - { name: KAFKA_BROKERS, value: "bookstore-platform-kafka-kafka-bootstrap.kafka-system.svc.cluster.local:9092" }
+            - { name: KAFKA_TOPIC_PREDICTIONS, value: "ml.predictions" }
+          ports:
+            - { containerPort: 8080, name: http }
+          resources:
+            requests:
+              cpu: 50m
+              memory: 64Mi
+            limits:
+              cpu: 250m
+              memory: 128Mi
+          livenessProbe:
+            httpGet: { path: /healthz, port: 8080 }
+          readinessProbe:
+            httpGet: { path: /readyz, port: 8080 }
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities:
+              drop: ["ALL"]

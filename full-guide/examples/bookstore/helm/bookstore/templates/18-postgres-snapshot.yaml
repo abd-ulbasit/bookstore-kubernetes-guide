@@ -1,0 +1,32 @@
+{{/*
+  VolumeSnapshot + VolumeSnapshotClass of the postgres data PVC (raw-manifests
+  18-postgres-snapshot.yaml). snapshot.storage.k8s.io is a CRD (the external
+  snapshot project) — NOT built-in — so this is behind snapshot.enabled
+  (default FALSE); a plain `helm install` does not render it. kind's default
+  local-path provisioner does NOT support snapshots — needs a snapshot-capable
+  CSI driver + the snapshot CRDs/controller. `driver` MUST equal the CSI driver
+  backing the PVC's StorageClass (placeholder default; override per env).
+*/}}
+{{- if .Values.snapshot.enabled }}
+{{- $s := .Values.snapshot }}
+apiVersion: snapshot.storage.k8s.io/v1
+kind: VolumeSnapshotClass
+metadata:
+  name: {{ $s.className }}
+  labels:
+    {{- include "bookstore.commonLabels" . | nindent 4 }}
+driver: {{ $s.driver }}
+deletionPolicy: {{ $s.deletionPolicy }}
+---
+apiVersion: snapshot.storage.k8s.io/v1
+kind: VolumeSnapshot
+metadata:
+  name: {{ $s.snapshotName }}
+  namespace: {{ include "bookstore.namespace" . }}
+  labels:
+    {{- include "bookstore.labels" (dict "ctx" . "app" "postgres") | nindent 4 }}
+spec:
+  volumeSnapshotClassName: {{ $s.className }}
+  source:
+    persistentVolumeClaimName: {{ $s.sourcePvc }}
+{{- end }}

@@ -1,0 +1,217 @@
+################################################################################
+# terraform.yml — sample GitHub Actions workflow for plan-on-PR + apply-on-main.
+#
+# This is a TEMPLATE. Copy it to your own repo's .github/workflows/ directory
+# and adjust paths/region/role-arn to match your environment. It is checked in
+# here so you can see the canonical wiring; it does not run from inside the
+# bookstore-platform examples repository.
+#
+# PREREQUISITES (one-time, manual setup):
+#
+#   1. Create an OIDC identity provider in your AWS account pointing at
+#      token.actions.githubusercontent.com. Console: IAM → Identity providers
+#      → Add provider → OpenID Connect.
+#         Provider URL:   https://token.actions.githubusercontent.com
+#         Audience:       sts.amazonaws.com
+#
+#   2. Create an IAM role (e.g. github-actions-terraform) with a trust policy
+#      scoped to your repository. Example trust policy (replace AWS_ACCOUNT and
+#      GITHUB_ORG/GITHUB_REPO):
+#
+#      {
+#        "Version": "2012-10-17",
+#        "Statement": [{
+#          "Effect": "Allow",
+#          "Principal": {
+#            "Federated": "arn:aws:iam::AWS_ACCOUNT:oidc-provider/token.actions.githubusercontent.com"
+#          },
+#          "Action": "sts:AssumeRoleWithWebIdentity",
+#          "Condition": {
+#            "StringEquals": {
+#              "token.actions.githubusercontent.com:aud": "sts.amazonaws.com",
+#              "token.actions.githubusercontent.com:sub": "repo:GITHUB_ORG/GITHUB_REPO:ref:refs/heads/main"
+#            }
+#          }
+#        }]
+#      }
+#
+#      The single `StringEquals` form above pins the role to ONE branch
+#      (main). For repos that deploy from multiple branches/environments,
+#      use a `ForAnyValue:StringEquals` list of exact refs, e.g.:
+#
+#         "ForAnyValue:StringEquals": {
+#           "token.actions.githubusercontent.com:sub": [
+#             "repo:GITHUB_ORG/GITHUB_REPO:ref:refs/heads/main",
+#             "repo:GITHUB_ORG/GITHUB_REPO:environment:production"
+#           ]
+#         }
+#
+#      Avoid the broader `StringLike` "repo:ORG/REPO:*" pattern in
+#      production — it lets any branch (including a PR branch a contributor
+#      opens against your repo) assume the role. Acceptable for an internal
+#      sandbox; not acceptable for a role with cluster-admin reach.
+#
+#      Attach an inline policy with AdministratorAccess (or the narrower set
+#      this Terraform tree actually needs — EKS, EC2, IAM, KMS, S3, Logs, SQS).
+#
+#   3. Set the repository secret AWS_ROLE_ARN to the role's ARN.
+#      (Settings → Secrets and variables → Actions → New repository secret.)
+#
+#   4. Set the repository variable AWS_REGION (defaults below to ap-south-1).
+#
+# Why OIDC instead of long-lived access keys: GitHub mints a short-lived JWT
+# per workflow run and STS exchanges it for credentials valid only for that
+# run. No secrets to rotate, no keys to leak.
+################################################################################
+
+name: terraform
+
+on:
+  pull_request:
+    paths:
+      - 'examples/bookstore-platform/terraform/**'
+  push:
+    branches:
+      - main
+    paths:
+      - 'examples/bookstore-platform/terraform/**'
+
+# OIDC requires id-token: write. contents: read is the minimum for checkout.
+permissions:
+  id-token: write
+  contents: read
+
+env:
+  TF_VERSION: '1.10.5'
+  WORKING_DIR: 'examples/bookstore-platform/terraform'
+
+jobs:
+  ################################################################################
+  # plan — runs on every PR. Posts the plan output as a comment (third-party
+  # action recommended: hashicorp/setup-terraform's stdout-capture or a custom
+  # action that calls `gh pr comment`).
+  ################################################################################
+  plan:
+    name: terraform plan
+    if: github.event_name == 'pull_request'
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: ${{ env.WORKING_DIR }}
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Setup Terraform
+        uses: hashicorp/setup-terraform@v3
+        with:
+          terraform_version: ${{ env.TF_VERSION }}
+
+      - name: Configure AWS credentials via OIDC
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ secrets.AWS_ROLE_ARN }}
+          aws-region: ${{ vars.AWS_REGION || 'ap-south-1' }}
+          audience: sts.amazonaws.com
+
+      - name: terraform fmt -check
+        run: terraform fmt -recursive -check
+
+      - name: terraform init
+        run: terraform init -input=false
+
+      - name: terraform validate
+        run: terraform validate -no-color
+
+      - name: terraform plan
+        # -out=tfplan creates a binary plan that's uploaded as an artifact.
+        # The apply job downloads this exact plan instead of re-planning, so
+        # what merges to main is byte-equivalent to what reviewers saw on the
+        # PR. Plan artifacts may contain sensitive values (tag literals,
+        # tfvar interpolations) — they're scoped to the workflow run + the
+        # artifact retention window only.
+        run: terraform plan -input=false -no-color -out=tfplan
+
+      - name: Upload plan artifact
+        # GitHub Actions artifacts default-retain for 90 days (configurable
+        # at the org/repo level). The apply job consumes this artifact below
+        # via download-artifact, so the apply re-uses the reviewed plan.
+        uses: actions/upload-artifact@v4
+        with:
+          name: tfplan-${{ github.event.pull_request.number }}
+          path: ${{ env.WORKING_DIR }}/tfplan
+          retention-days: 7
+          if-no-files-found: error
+
+  ################################################################################
+  # apply — runs on push to main. Downloads the plan artifact uploaded by the
+  # plan job and applies THAT exact plan, so what merges is what was reviewed.
+  # In a real repo you almost certainly want a manual approval step here
+  # (use environments with required reviewers — see commented `environment:`).
+  #
+  # Caveat: this workflow currently triggers on push to main, NOT on the PR
+  # itself, so the artifact has to be located by PR number. If your team
+  # squash-merges, the merge commit isn't directly tied to a PR number — in
+  # which case fall back to re-running plan here (the worse-but-functional
+  # option). The robust fix is to switch from push-on-main to PR's
+  # "merged: true" event, which exposes the PR number on the merge.
+  ################################################################################
+  apply:
+    name: terraform apply
+    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+    runs-on: ubuntu-latest
+    # environment: production  # uncomment + configure required reviewers
+    defaults:
+      run:
+        working-directory: ${{ env.WORKING_DIR }}
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Setup Terraform
+        uses: hashicorp/setup-terraform@v3
+        with:
+          terraform_version: ${{ env.TF_VERSION }}
+
+      - name: Configure AWS credentials via OIDC
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ secrets.AWS_ROLE_ARN }}
+          aws-region: ${{ vars.AWS_REGION || 'ap-south-1' }}
+          audience: sts.amazonaws.com
+
+      - name: terraform fmt -check
+        run: terraform fmt -recursive -check
+
+      - name: terraform init
+        run: terraform init -input=false
+
+      - name: terraform validate
+        run: terraform validate -no-color
+
+      # Download the plan artifact from the most recent successful PR plan.
+      # Requires the github-script (or actions/download-artifact@v4 with a
+      # workflow_run filter) to locate the right run. Simplified here to
+      # point at a known-good location; tighten in your own fork.
+      - name: Download plan artifact
+        uses: actions/download-artifact@v4
+        with:
+          # name omitted → downloads any matching workflow_run artifact.
+          # Pin to the exact name if you upload multiple per run.
+          path: ${{ env.WORKING_DIR }}
+          github-token: ${{ secrets.GITHUB_TOKEN }}
+          run-id: ${{ github.event.workflow_run.id }}
+        continue-on-error: true # falls through to re-plan if no artifact
+
+      - name: terraform apply (reviewed plan if present, else re-plan)
+        run: |
+          if [ -f tfplan ]; then
+            echo "Applying the reviewed plan from the PR."
+            terraform apply -input=false -auto-approve tfplan
+          else
+            echo "No reviewed plan artifact found — re-planning + applying."
+            echo "This means the apply may diverge from what was reviewed."
+            terraform apply -input=false -auto-approve
+          fi

@@ -1,0 +1,123 @@
+# Bookstore Platform v2 — Part 13 ch.09: Grafana DataSources for the
+# three-pillar stack (Prometheus / Tempo / Loki). Uses the
+# grafana-operator CRDs so the datasources are managed declaratively
+# alongside the rest of the platform GitOps state.
+#
+# v1 had a single Prometheus datasource configured via the
+# kube-prometheus-stack values file. v2 adds Tempo + Loki and switches
+# to grafana-operator-style CRDs so the same Argo CD Application can
+# manage them.
+#
+# !!! CRD-INTRINSIC DRY-RUN
+#   `GrafanaDatasource` is `grafana.integreatly.org/v1beta1` — installed
+#   by grafana-operator. WITHOUT grafana-operator:
+#     no matches for kind "GrafanaDatasource" in version "grafana.integreatly.org/v1beta1"
+#   EXPECTED. v2 installs grafana-operator (pinned-Helm) alongside
+#   kube-prometheus-stack; the chapter walks both.
+#
+# Apply (after grafana-operator):
+#   kubectl apply -f examples/bookstore-platform/observability/grafana-datasources.yaml
+---
+apiVersion: grafana.integreatly.org/v1beta1
+kind: GrafanaDatasource
+metadata:
+  name: bookstore-platform-prometheus
+  namespace: prometheus-system
+  labels:
+    app.kubernetes.io/name: bookstore-platform-prometheus
+    app.kubernetes.io/instance: bookstore-platform-prometheus
+    app.kubernetes.io/part-of: bookstore-platform
+    app.kubernetes.io/component: observability-datasource
+    app.kubernetes.io/version: "1.0.0"
+spec:
+  instanceSelector:
+    matchLabels:
+      dashboards: bookstore-platform
+  datasource:
+    name: Prometheus
+    type: prometheus
+    access: proxy
+    url: http://kube-prometheus-stack-prometheus.prometheus-system.svc.cluster.local:9090
+    isDefault: true
+    editable: false
+    jsonData:
+      timeInterval: 30s
+      httpMethod: POST
+      # Drill-down to Tempo: a span's traceID is rendered as a link.
+      exemplarTraceIdDestinations:
+        - name: traceID
+          datasourceUid: bookstore-platform-tempo
+---
+apiVersion: grafana.integreatly.org/v1beta1
+kind: GrafanaDatasource
+metadata:
+  name: bookstore-platform-tempo
+  namespace: prometheus-system
+  labels:
+    app.kubernetes.io/name: bookstore-platform-tempo
+    app.kubernetes.io/instance: bookstore-platform-tempo
+    app.kubernetes.io/part-of: bookstore-platform
+    app.kubernetes.io/component: observability-datasource
+    app.kubernetes.io/version: "1.0.0"
+spec:
+  instanceSelector:
+    matchLabels:
+      dashboards: bookstore-platform
+  datasource:
+    name: Tempo
+    type: tempo
+    access: proxy
+    url: http://tempo.tempo-system.svc.cluster.local:3100
+    uid: bookstore-platform-tempo
+    editable: false
+    jsonData:
+      tracesToLogsV2:
+        # Click "view logs" on a span -> Loki query for same traceId.
+        datasourceUid: bookstore-platform-loki
+        spanStartTimeShift: -30s
+        spanEndTimeShift: "30s"
+        tags:
+          - key: service.name
+            value: service
+        filterByTraceID: true
+        filterBySpanID: false
+      tracesToMetrics:
+        # Click "view metrics" on a span -> RED query for service.
+        datasourceUid: bookstore-platform-prometheus
+        spanStartTimeShift: -30s
+        spanEndTimeShift: "30s"
+      serviceMap:
+        datasourceUid: bookstore-platform-prometheus
+      nodeGraph:
+        enabled: true
+---
+apiVersion: grafana.integreatly.org/v1beta1
+kind: GrafanaDatasource
+metadata:
+  name: bookstore-platform-loki
+  namespace: prometheus-system
+  labels:
+    app.kubernetes.io/name: bookstore-platform-loki
+    app.kubernetes.io/instance: bookstore-platform-loki
+    app.kubernetes.io/part-of: bookstore-platform
+    app.kubernetes.io/component: observability-datasource
+    app.kubernetes.io/version: "1.0.0"
+spec:
+  instanceSelector:
+    matchLabels:
+      dashboards: bookstore-platform
+  datasource:
+    name: Loki
+    type: loki
+    access: proxy
+    url: http://loki-gateway.loki-system.svc.cluster.local
+    uid: bookstore-platform-loki
+    editable: false
+    jsonData:
+      maxLines: 1000
+      derivedFields:
+        # Render traceId in log lines as a clickable link to Tempo.
+        - name: traceID
+          matcherRegex: "traceID=(\\w+)"
+          url: "${__value.raw}"
+          datasourceUid: bookstore-platform-tempo

@@ -1,0 +1,25 @@
+# Bookstore Platform v2 — Part 13 ch.03: us-east region overlay. Inherits the
+# base (cluster-wide platform stack) and adds region-specific labels +
+# annotations. This is the WRITER region (CNPG primary lives here).
+#
+# Render:
+#   kubectl kustomize examples/bookstore-platform/kustomize/regions/us-east
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+
+resources:
+  - ../../base
+
+# Region label propagates to every object — used by the ApplicationSet
+# Cluster generator (13.03) to fan out the right overlay per cluster.
+labels:
+  - includeSelectors: false
+    pairs:
+      bookstore-platform.example.com/region: us-east
+      bookstore-platform.example.com/role: writer
+
+# Region-scoped annotation: surfaces the CNPG primary location to anything
+# reading platform metadata (the runbook in Phase 13c references this).
+commonAnnotations:
+  bookstore-platform.example.com/cnpg-primary: "true"
+  bookstore-platform.example.com/dns-hostname: "us-east.bookstore-platform.example.com"

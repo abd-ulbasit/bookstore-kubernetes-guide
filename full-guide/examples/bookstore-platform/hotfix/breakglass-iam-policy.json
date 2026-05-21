@@ -1,0 +1,183 @@
+{
+  "_comment_top": "Bookstore Platform — Part 15 ch.09 sample breakglass IAM policy. Attached to the `breakglass-emergency` IAM role. The role is assumable ONLY via Vault's AWS auth method with a 1-hour TTL; every API call is logged to CloudTrail; every assumption posts an alert to #bookstore-platform-audit. This is the FULL-ADMIN policy for ESCAPE HATCH use — invoked when a P0 incident exceeds what the standard platform-engineer role can do (e.g. an IAM lockout, a Vault outage, a need to delete a managed resource Crossplane refuses to delete). DO NOT use this as a daily-driver policy; the entire ch.15.09 'breakglass became normal' anti-pattern is what this file is trying to prevent.",
+  "_comment_audit_requirements": "Every assumption of this role MUST: (1) be preceded by a Slack declaration in #bookstore-platform-status with an approver, (2) generate a CloudTrail event automatically forwarded to #bookstore-platform-audit, (3) be followed within 24h by the cleanup-after-breakglass.md checklist (rotate, review, postmortem).",
+  "_comment_scope_warning": "This policy intentionally grants `*` on most services. The trade-off: the breakglass role is for SITUATIONS UNFORESEEN; a narrower policy that doesn't cover the unforeseen case defeats the purpose. The defence against abuse is not the policy scope; it's the auditing (CloudTrail + 24h cleanup) and the assumption gate (Vault AWS auth + Slack approval).",
+  "Version": "2012-10-17",
+  "Statement": [
+    {
+      "Sid": "BreakglassFullAdminEC2AndEKS",
+      "Effect": "Allow",
+      "Action": [
+        "ec2:*",
+        "eks:*",
+        "elasticloadbalancing:*",
+        "autoscaling:*"
+      ],
+      "Resource": "*",
+      "Condition": {
+        "StringEquals": {
+          "aws:RequestedRegion": [
+            "us-east-1",
+            "eu-west-1",
+            "ap-southeast-1"
+          ]
+        }
+      }
+    },
+    {
+      "Sid": "BreakglassIAMManagementLimited",
+      "Effect": "Allow",
+      "Action": [
+        "iam:GetRole",
+        "iam:GetRolePolicy",
+        "iam:ListRoles",
+        "iam:ListAttachedRolePolicies",
+        "iam:PassRole",
+        "iam:UpdateAssumeRolePolicy",
+        "iam:AttachRolePolicy",
+        "iam:DetachRolePolicy",
+        "iam:CreatePolicy",
+        "iam:DeletePolicy",
+        "iam:CreatePolicyVersion",
+        "iam:SetDefaultPolicyVersion",
+        "iam:GetUser",
+        "iam:GetUserPolicy",
+        "iam:ListUsers",
+        "iam:CreateAccessKey",
+        "iam:DeleteAccessKey",
+        "iam:UpdateAccessKey"
+      ],
+      "Resource": "*",
+      "Condition": {
+        "StringNotEquals": {
+          "aws:ResourceTag/critical": "true"
+        }
+      },
+      "_comment_iam_scope": "IAM ops are needed when the platform locked itself out (a Crossplane composition that broke its own IAM role, an IRSA misconfiguration). EXCLUDED via the condition: roles tagged `critical=true` cannot be modified (the root admin role, the audit role, the breakglass role ITSELF) — this defends against the role mutating its own assume-policy to remove the audit trail."
+    },
+    {
+      "Sid": "BreakglassS3FullAccess",
+      "Effect": "Allow",
+      "Action": [
+        "s3:*"
+      ],
+      "Resource": [
+        "arn:aws:s3:::bookstore-platform-*",
+        "arn:aws:s3:::bookstore-platform-*/*"
+      ]
+    },
+    {
+      "Sid": "BreakglassRDSAndCNPGBackups",
+      "Effect": "Allow",
+      "Action": [
+        "rds:*",
+        "backup:*"
+      ],
+      "Resource": "*"
+    },
+    {
+      "Sid": "BreakglassKMSManagement",
+      "Effect": "Allow",
+      "Action": [
+        "kms:Decrypt",
+        "kms:Encrypt",
+        "kms:GenerateDataKey",
+        "kms:DescribeKey",
+        "kms:ListKeys",
+        "kms:ListAliases",
+        "kms:CreateGrant",
+        "kms:RevokeGrant",
+        "kms:DisableKey",
+        "kms:EnableKey",
+        "kms:CancelKeyDeletion"
+      ],
+      "Resource": "*",
+      "_comment_kms_scope": "KMS access is needed for emergency decrypt of secrets stored in S3/RDS. NOT granted: kms:ScheduleKeyDeletion and kms:DeleteAlias (the breakglass role MUST NOT be able to permanently destroy keys; a P0 incident is not a justification for non-recoverable damage)."
+    },
+    {
+      "Sid": "BreakglassCloudWatchAndLogs",
+      "Effect": "Allow",
+      "Action": [
+        "logs:*",
+        "cloudwatch:*",
+        "events:*",
+        "ssm:*"
+      ],
+      "Resource": "*"
+    },
+    {
+      "Sid": "BreakglassRoute53AndACM",
+      "Effect": "Allow",
+      "Action": [
+        "route53:*",
+        "acm:*",
+        "acm-pca:*"
+      ],
+      "Resource": "*"
+    },
+    {
+      "Sid": "BreakglassSecretsManagerAndSSM",
+      "Effect": "Allow",
+      "Action": [
+        "secretsmanager:*",
+        "ssm:GetParameter*",
+        "ssm:PutParameter*",
+        "ssm:DeleteParameter*"
+      ],
+      "Resource": "*"
+    },
+    {
+      "Sid": "BreakglassReadCloudTrailForSelfAudit",
+      "Effect": "Allow",
+      "Action": [
+        "cloudtrail:LookupEvents",
+        "cloudtrail:DescribeTrails",
+        "cloudtrail:GetTrailStatus"
+      ],
+      "Resource": "*",
+      "_comment_trail_read_only": "READ ONLY on CloudTrail. The breakglass role MUST NOT be able to disable or delete the trail itself; tampering with the audit log is a security event by itself. The trail is managed by the org-level admin role (out of scope for breakglass)."
+    },
+    {
+      "Sid": "DenyCloudTrailManagement",
+      "Effect": "Deny",
+      "Action": [
+        "cloudtrail:DeleteTrail",
+        "cloudtrail:StopLogging",
+        "cloudtrail:UpdateTrail",
+        "cloudtrail:PutEventSelectors"
+      ],
+      "Resource": "*",
+      "_comment_explicit_deny": "Explicit Deny — defends against the implied Allow from a future wildcard policy that might be attached. The breakglass role is incomplete WITHOUT this Deny — auditability is a non-negotiable property."
+    },
+    {
+      "Sid": "DenyOrgAndBillingManagement",
+      "Effect": "Deny",
+      "Action": [
+        "organizations:*",
+        "aws-portal:*",
+        "account:*",
+        "billing:*"
+      ],
+      "Resource": "*",
+      "_comment_org_scope": "Breakglass does NOT extend to AWS Organizations / Billing — that is the parent-account admin role's scope. Locking out an organisation is a multi-day recovery; the breakglass role MUST NOT have that blast radius."
+    },
+    {
+      "Sid": "DenyDestroyAuditedResources",
+      "Effect": "Deny",
+      "Action": [
+        "s3:DeleteBucket",
+        "s3:PutBucketVersioning",
+        "s3:DeleteBucketReplication",
+        "s3:PutBucketReplicationConfiguration"
+      ],
+      "Resource": [
+        "arn:aws:s3:::bookstore-platform-audit-*",
+        "arn:aws:s3:::bookstore-platform-cnpg-backups",
+        "arn:aws:s3:::bookstore-platform-velero-backups"
+      ],
+      "_comment_audit_buckets": "The audit + backup buckets are off-limits even for breakglass. A P0 incident is not a justification for deleting backups or disabling replication on the audit log — the backup IS what makes recovery possible."
+    }
+  ],
+  "_comment_assume_role_policy_separately": "This is the PERMISSIONS POLICY. The TRUST POLICY (which principals can assume the role) lives in a separate document. The trust policy MUST require: (a) the Vault AWS auth method's IAM principal, (b) MFA on the requesting human (sts:MultiFactorAuthPresent), (c) a 1-hour DurationSeconds limit (3600). Both policies together make the breakglass role complete.",
+  "_comment_what_this_does_not_grant": "Intentionally not granted: organizations:*, aws-portal:*, billing:*, marketplace:*, cloudtrail:Delete*/Stop*/Update*. The breakglass role is for OPERATIONAL emergencies, not for organisational changes; the latter requires a different escalation path (the AWS Organizations root account with two-person rule)."
+}

@@ -1,0 +1,95 @@
+# Bookstore — Part 11 ch.07 "Chaos engineering": a Chaos Mesh WORKFLOW that
+# runs the three experiments in sequence as a repeatable GAME DAY / CI gate —
+# the discipline (hypothesis → inject → observe → learn), automated.
+#
+# WHY A WORKFLOW (not three ad-hoc applies)
+#   The chapter's point: chaos is a DISCIPLINE, not random breakage. A
+#   Workflow encodes the run as code — ordered, time-bounded, abortable,
+#   reproducible — so it can be a CI/CD GATE (Part 07): promote only if the
+#   Bookstore survived pod-kill + network latency + CPU stress with its SLO
+#   intact (raw-manifests/81-prometheusrule.yaml). Sequential (not parallel)
+#   keeps the blast radius one-experiment-at-a-time; each child has its own
+#   bounded duration and is the SAME spec as 10-/20-/30-.
+#
+# ABORT / SAFETY: deleting this Workflow object stops the run and reverts any
+# in-flight child experiment (Chaos Mesh tears down injected rules on
+# stop/expiry). In production you ALSO wire an abort condition (halt the game
+# day if the real error budget burns — Part 06 ch.05). Nothing here mutates
+# the Bookstore Pods; all children are restricted-safe (as 10-/20-/30-).
+#
+# !!! CRD-INTRINSIC DRY-RUN (identical precedent to 18-/51-/70-/83-/argocd) !!!
+#   `Workflow` is a Chaos Mesh CRD (chaos-mesh.org/v1alpha1). WITHOUT Chaos
+#   Mesh installed a client dry-run prints:
+#     no matches for kind "Workflow" in version "chaos-mesh.org/v1alpha1"
+#   EXPECTED, schema-correct — Chaos Mesh CRDs/controller must be installed
+#   first. Whole-dir dry-run prints this for CRD-backed files only and
+#   continues. Schema verified against Chaos Mesh chaos-mesh.org/v1alpha1
+#   Workflow (serial entry; embedded *Chaos templates).
+#
+# Requires: Chaos Mesh installed (own ns); the Bookstore running with PDB
+#   (84-), HPA (82-), metrics/SLO (80-/81-) so each step is observable.
+# Apply (the whole game day, then watch it in the Chaos Dashboard):
+#   kubectl apply -f examples/bookstore/chaos/40-workflow-gameday.yaml
+#   kubectl get workflow,workflownode -n bookstore
+#   kubectl delete -f examples/bookstore/chaos/40-workflow-gameday.yaml   # abort
+apiVersion: chaos-mesh.org/v1alpha1
+kind: Workflow
+metadata:
+  name: bookstore-gameday
+  namespace: bookstore
+  labels:
+    app.kubernetes.io/part-of: bookstore
+spec:
+  entry: gameday-sequence
+  templates:
+    # Run the three experiments IN ORDER (blast radius = one at a time).
+    - name: gameday-sequence
+      templateType: Serial
+      deadline: 600s                 # hard ceiling on the whole game day
+      children:
+        - kill-one-catalog
+        - catalog-postgres-latency
+        - catalog-cpu-stress
+
+    # --- step 1: pod-kill (same spec as 10-) ------------------------------
+    - name: kill-one-catalog
+      templateType: PodChaos
+      deadline: 60s
+      podChaos:
+        action: pod-kill
+        mode: one
+        selector:
+          namespaces: [bookstore]
+          labelSelectors: { app: catalog }
+
+    # --- step 2: network latency (same spec as 20-) -----------------------
+    - name: catalog-postgres-latency
+      templateType: NetworkChaos
+      deadline: 90s
+      networkChaos:
+        action: delay
+        mode: all
+        selector:
+          namespaces: [bookstore]
+          labelSelectors: { app: catalog }
+        direction: to
+        target:
+          mode: all
+          selector:
+            namespaces: [bookstore]
+            labelSelectors: { app: postgres }
+        delay: { latency: "200ms", jitter: "50ms", correlation: "50" }
+        duration: "60s"
+
+    # --- step 3: CPU stress (same spec as 30-) ----------------------------
+    - name: catalog-cpu-stress
+      templateType: StressChaos
+      deadline: 90s
+      stressChaos:
+        mode: one
+        selector:
+          namespaces: [bookstore]
+          labelSelectors: { app: catalog }
+        stressors:
+          cpu: { workers: 2, load: 100 }
+        duration: "60s"

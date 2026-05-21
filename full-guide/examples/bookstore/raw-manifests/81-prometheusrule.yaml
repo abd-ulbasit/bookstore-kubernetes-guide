@@ -1,0 +1,103 @@
+# Bookstore — Part 06 ch.01 "Observability: metrics": alerting rules as data.
+#
+# A PrometheusRule the Prometheus Operator loads into the bundled Prometheus
+# (and routes to Alertmanager). It encodes the RED method on the catalog
+# service from the metrics app/catalog/main.go already exposes:
+#   • CatalogHighErrorRate — error RATIO (5xx / all) over 5m exceeds 5% for
+#     10m. This is the canonical "symptom-based" SLO alert: it fires on
+#     user-visible failure, not on a proxy like CPU.
+#   • CatalogHighLatencyP95 — p95 request latency (from the
+#     http_request_duration_seconds histogram, via histogram_quantile) over
+#     5m exceeds 0.5s for 10m. The "Duration" of RED.
+#   • CatalogAbsent — no catalog metrics scraped for 5m (the target is down
+#     or every replica is gone) — the failure the two above cannot see
+#     because they need samples to evaluate.
+#
+# These thresholds are illustrative teaching values, NOT a real SLO — ch.01
+# and ch.05 (error budgets) explain deriving them from an actual objective.
+#
+# !!! CRD-BACKED — intrinsic dry-run behaviour (exactly like 18-/51-/70-/80-)
+# `PrometheusRule` is a Prometheus Operator CRD (monitoring.coreos.com/v1).
+# Without the Operator installed, a client dry-run prints
+#   no matches for kind "PrometheusRule" in version "monitoring.coreos.com/v1"
+# — EXPECTED, identical to 80-. Schema verified against the Operator
+# monitoring.coreos.com/v1 PrometheusRule API; PromQL verified against the
+# Prometheus query docs.
+#
+# !!! THE `release` LABEL MATTERS (same as 80-) !!!  kube-prometheus-stack's
+# Prometheus has `ruleSelector: matchLabels: {release: <helm release>}`. A
+# PrometheusRule lacking that label is loaded by NO Prometheus. Release name
+# here = `kube-prometheus-stack` (the ch.01 hands-on install).
+#
+# Requires:
+#   - kube-prometheus-stack installed (Operator + CRDs), `monitoring` ns
+#   - 80-servicemonitor.yaml applied (so the catalog series exist to alert on)
+# Apply (Operator-equipped cluster only):
+#   kubectl apply -f examples/bookstore/raw-manifests/81-prometheusrule.yaml
+#   kubectl get prometheusrule -n bookstore
+#   # Prometheus UI -> Alerts: the three rules appear (Inactive until tripped)
+apiVersion: monitoring.coreos.com/v1
+kind: PrometheusRule
+metadata:
+  name: bookstore-catalog-rules
+  namespace: bookstore
+  labels:
+    app: catalog
+    app.kubernetes.io/part-of: bookstore
+    release: kube-prometheus-stack   # MUST match the Prometheus ruleSelector
+spec:
+  groups:
+    - name: bookstore-catalog.rules
+      rules:
+        # RED — Errors. 5xx ratio over all requests, 5m windows. The handler
+        # label is excluded so this is the service-wide error rate. The
+        # `> 0` guard on the denominator avoids 0/0 = NaN when idle.
+        - alert: CatalogHighErrorRate
+          expr: |
+            (
+              sum(rate(http_requests_total{handler!="metrics",code=~"5.."}[5m]))
+              /
+              sum(rate(http_requests_total{handler!="metrics"}[5m]))
+            ) > 0.05
+          for: 10m
+          labels:
+            severity: warning
+            service: catalog
+          annotations:
+            summary: "catalog 5xx error ratio above 5%"
+            description: >-
+              catalog has served >5% 5xx responses for 10m
+              (current: {{ $value | humanizePercentage }}). Check recent
+              rollouts, Postgres/Redis health, and the catalog logs
+              (Part 06 ch.02).
+        # RED — Duration. p95 from the latency histogram. histogram_quantile
+        # over the per-le rate of the _bucket series is the standard pattern.
+        - alert: CatalogHighLatencyP95
+          expr: |
+            histogram_quantile(
+              0.95,
+              sum by (le) (rate(http_request_duration_seconds_bucket{handler!="metrics"}[5m]))
+            ) > 0.5
+          for: 10m
+          labels:
+            severity: warning
+            service: catalog
+          annotations:
+            summary: "catalog p95 latency above 500ms"
+            description: >-
+              catalog p95 request latency has exceeded 0.5s for 10m
+              (current: {{ $value | humanizeDuration }}). Investigate DB/cache
+              latency, saturation, or noisy neighbours.
+        # The failure the symptom alerts cannot observe: no series at all.
+        - alert: CatalogAbsent
+          expr: absent(up{job="catalog"} == 1)
+          for: 5m
+          labels:
+            severity: critical
+            service: catalog
+          annotations:
+            summary: "catalog has no healthy scrape target"
+            description: >-
+              Prometheus has not successfully scraped any catalog target for
+              5m. The Deployment may be down, or the ServiceMonitor /
+              NetworkPolicy is misconfigured (Part 06 ch.01).

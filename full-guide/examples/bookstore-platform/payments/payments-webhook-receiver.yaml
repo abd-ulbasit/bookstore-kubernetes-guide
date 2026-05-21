@@ -1,0 +1,141 @@
+# Bookstore Platform v2 — Part 13 ch.06: the Stripe webhook receiver. Stripe
+# POSTs `payment_intent.succeeded` / `payment_intent.payment_failed` /
+# `charge.refunded` events to a public URL we declare in the Stripe dashboard.
+# This service:
+#   1. Accepts the POST.
+#   2. Verifies the Stripe-Signature header (HMAC of the raw body + the
+#      webhook secret) — REJECTS if the signature does not match.
+#   3. Publishes the decoded event to Kafka (payments.completed on success;
+#      payments.failed on failure — saga compensation path).
+#   4. Returns 200 to Stripe (Stripe retries on non-200; idempotent path).
+#
+# Path is PUBLIC by intent — Stripe must reach it without our JWT. The
+# Istio AuthorizationPolicy that gates the public path lives in
+# `payments-webhook-authz.yaml` (split out so this file dry-runs cleanly
+# without Istio installed).
+#
+# Apply (after applying payments-webhook-authz.yaml when Istio is present):
+#   kubectl apply -f examples/bookstore-platform/payments/payments-webhook-receiver.yaml
+---
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: payments-webhook-receiver
+  namespace: bookstore-platform-payments
+  labels:
+    app.kubernetes.io/part-of: bookstore-platform
+    app.kubernetes.io/component: payments-webhook
+automountServiceAccountToken: false
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: payments-webhook-receiver
+  namespace: bookstore-platform-payments
+  labels:
+    app: payments-webhook-receiver
+    app.kubernetes.io/part-of: bookstore-platform
+    app.kubernetes.io/component: payments-webhook
+spec:
+  replicas: 2
+  selector:
+    matchLabels:
+      app: payments-webhook-receiver
+  template:
+    metadata:
+      labels:
+        app: payments-webhook-receiver
+        app.kubernetes.io/part-of: bookstore-platform
+    spec:
+      serviceAccountName: payments-webhook-receiver
+      automountServiceAccountToken: false
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 65532
+        runAsGroup: 65532
+        fsGroup: 65532
+        seccompProfile:
+          type: RuntimeDefault
+      containers:
+        - name: payments-gateway
+          image: bookstore-platform/payments-gateway:dev
+          imagePullPolicy: IfNotPresent
+          # Run the SAME payments-gateway binary in webhook-receiver mode.
+          # The binary chooses based on PAYMENTS_MODE; both the gateway
+          # path (POST /charge) and the webhook path (POST /stripe/webhook)
+          # live in one binary so there is one Stripe SDK initialisation
+          # and one set of metrics.
+          env:
+            - name: PAYMENTS_MODE
+              value: "webhook-receiver"
+            - name: KAFKA_BROKERS
+              value: "bookstore-platform-kafka-kafka-bootstrap.kafka-system.svc.cluster.local:9092"
+            - name: KAFKA_TOPIC_PAYMENTS_COMPLETED
+              value: "payments.completed"
+            - name: KAFKA_TOPIC_PAYMENTS_FAILED
+              value: "payments.failed"
+            - name: STRIPE_WEBHOOK_SECRET
+              valueFrom:
+                secretKeyRef:
+                  name: stripe-webhook-secret
+                  key: webhook-secret
+            - name: LOG_LEVEL
+              value: "info"
+            - name: PORT
+              value: "8080"
+          ports:
+            - containerPort: 8080
+              name: http
+          resources:
+            requests:
+              cpu: 100m
+              memory: 128Mi
+            limits:
+              cpu: 500m
+              memory: 256Mi
+          livenessProbe:
+            httpGet:
+              path: /healthz
+              port: 8080
+            initialDelaySeconds: 10
+            periodSeconds: 30
+          readinessProbe:
+            httpGet:
+              path: /readyz
+              port: 8080
+            initialDelaySeconds: 5
+            periodSeconds: 10
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities:
+              drop: ["ALL"]
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: payments-webhook-receiver
+  namespace: bookstore-platform-payments
+  labels:
+    app.kubernetes.io/part-of: bookstore-platform
+    app.kubernetes.io/component: payments-webhook
+spec:
+  selector:
+    app: payments-webhook-receiver
+  ports:
+    - name: http
+      port: 8080
+      targetPort: 8080
+---
+# Placeholder webhook secret — REPLACE via ESO + Vault.
+apiVersion: v1
+kind: Secret
+metadata:
+  name: stripe-webhook-secret
+  namespace: bookstore-platform-payments
+  labels:
+    app.kubernetes.io/part-of: bookstore-platform
+    bookstore-platform.example.com/placeholder: "true"
+type: Opaque
+stringData:
+  webhook-secret: "whsec_REPLACE-ME-VIA-ESO-NOT-IN-SOURCE"

@@ -1,0 +1,112 @@
+# Bookstore — Part 06 ch.04 "Autoscaling": KEDA event-driven scaling of the
+# payments-worker on RabbitMQ queue depth (the canonical scale-to-zero case).
+#
+# A KEDA ScaledObject does NOT replace the HPA — it MANAGES one. KEDA's
+# operator creates a hidden HPA whose scaleTargetRef is the payments-worker
+# Deployment (19-) and an external-metrics adapter feeding it the live
+# "orders" queue length. The HPA then runs the SAME algorithm as 82-:
+#   desiredReplicas = ceil[ currentReplicas * (queueLength / value) ]
+# Below `minReplicaCount` (here 0) KEDA, not the HPA, scales the Deployment to
+# zero when the trigger is inactive (queue ≤ activationValue for the cooldown),
+# and back up from zero the moment a message arrives — the thing a plain HPA
+# cannot do (an HPA never scales to/from 0).
+#
+# Flow: orders (14-) publishes -> RabbitMQ "orders" queue grows ->
+#   KEDA scaler reads the queue length -> drives the managed HPA ->
+#   payments-worker (19-) scales out -> consumers drain the queue ->
+#   queue empties -> KEDA scales back toward 0. (queue name "orders" is a
+#   const shared by app/orders/main.go and app/payments-worker/main.go.)
+#
+# !!! CRD-BACKED — intrinsic dry-run behaviour (exactly like 18-/51-/70-/80-)
+# `ScaledObject` and `TriggerAuthentication` are KEDA CRDs (keda.sh/v1alpha1),
+# NOT built-in kinds. Without KEDA installed, a client dry-run prints
+#   no matches for kind "ScaledObject" in version "keda.sh/v1alpha1"
+# (and the same for TriggerAuthentication) — EXPECTED, identical to 70-/80-.
+# A whole-dir client dry-run prints this for THIS file only and continues;
+# every built-in object (incl. 19-/82-) still validates. Schema below verified
+# against the KEDA keda.sh/v1alpha1 ScaledObject API and the KEDA RabbitMQ
+# scaler reference (metadata keys: protocol, queueName, mode, value,
+# activationValue, hostFromEnv).
+#
+# Requires (to actually apply, not just read):
+#   - KEDA installed (operator + CRDs + metrics adapter) via Helm — NOT a
+#     `releases/latest/download/keda-<ver>.yaml` URL (that 404s the moment a
+#     newer KEDA ships: `latest/` resolves to the newest tag but the filename
+#     is version-pinned). Helm, like every other Part 06 add-on:
+#       helm repo add kedacore https://kedacore.github.io/charts
+#       helm repo update
+#       helm install keda kedacore/keda \
+#         --namespace keda --create-namespace --wait
+#     (installs into the `keda` namespace — its own ns, NOT restricted; fine)
+#   - 13-rabbitmq.yaml + 19-payments-worker-deploy.yaml applied
+#   - the `rabbitmq-conn` Secret below (AMQP URL for the scaler to query the
+#     broker). It is NOT db-credentials (16-) — that holds Postgres creds; the
+#     worker has no DB. Created inline here so this file is self-contained.
+# Apply (KEDA-equipped cluster only):
+#   kubectl apply -f examples/bookstore/raw-manifests/83-keda-scaledobject.yaml
+#   kubectl get scaledobject,hpa -n bookstore   # KEDA created an HPA for you
+#   kubectl describe scaledobject payments-worker -n bookstore
+---
+# AMQP connection string for the KEDA scaler ONLY (it queries the broker for
+# the queue length). guest/guest matches 13-rabbitmq.yaml + 19-'s AMQP_URL.
+# Opaque Secret; stringData is base64-encoded by the API server on write.
+apiVersion: v1
+kind: Secret
+metadata:
+  name: rabbitmq-conn
+  namespace: bookstore
+  labels:
+    app: payments-worker
+    app.kubernetes.io/part-of: bookstore
+type: Opaque
+stringData:
+  # AMQP protocol endpoint (the RabbitMQ scaler with protocol: amqp reads the
+  # queue length over AMQP, no management plugin/HTTP needed).
+  host: "amqp://guest:guest@rabbitmq.bookstore.svc.cluster.local:5672/"
+---
+# TriggerAuthentication wires the Secret above into the trigger so the
+# connection string is never inlined in the ScaledObject (KEDA best practice).
+apiVersion: keda.sh/v1alpha1
+kind: TriggerAuthentication
+metadata:
+  name: rabbitmq-trigger-auth
+  namespace: bookstore
+  labels:
+    app: payments-worker
+    app.kubernetes.io/part-of: bookstore
+spec:
+  secretTargetRef:
+    - parameter: host                # the RabbitMQ scaler's `host` parameter
+      name: rabbitmq-conn            # <- the Secret above
+      key: host
+---
+apiVersion: keda.sh/v1alpha1
+kind: ScaledObject
+metadata:
+  name: payments-worker
+  namespace: bookstore
+  labels:
+    app: payments-worker
+    app.kubernetes.io/part-of: bookstore
+spec:
+  scaleTargetRef:
+    apiVersion: apps/v1
+    kind: Deployment
+    name: payments-worker            # the real Deployment (19-)
+  pollingInterval: 15                # how often KEDA checks the queue length (s)
+  cooldownPeriod: 60                 # wait 60s of inactivity before scaling to 0
+  minReplicaCount: 0                 # SCALE TO ZERO when the queue is idle
+  maxReplicaCount: 10                # bounded by the namespace ResourceQuota (00-)
+  # advanced.horizontalPodAutoscalerConfig.behavior would tune the MANAGED
+  # HPA's scale velocity (same knobs as 82-'s behavior); omitted = KEDA's
+  # sensible defaults, kept simple for the teaching example.
+  triggers:
+    - type: rabbitmq
+      metadata:
+        protocol: amqp               # query queue length over AMQP (5672)
+        queueName: orders            # the queue orders publishes / worker consumes
+        mode: QueueLength            # scale on number of messages (not rate)
+        value: "20"                  # target msgs/replica: desired = ceil(len/20)
+        activationValue: "1"         # scale 0 -> 1 as soon as ≥1 message waits
+      authenticationRef:
+        name: rabbitmq-trigger-auth  # the TriggerAuthentication above

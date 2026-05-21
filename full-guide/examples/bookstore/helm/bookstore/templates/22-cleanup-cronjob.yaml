@@ -1,0 +1,67 @@
+{{/*
+  Nightly cleanup CronJob (raw-manifests 22-cleanup-cronjob.yaml). A NORMAL
+  release object (NOT a hook): it must keep running on its schedule for the
+  life of the release. Each spawned Job runs at the batch priority tier with
+  the same restricted batch999 pattern and the db-credentials Secret.
+*/}}
+{{- if .Values.cleanupCronJob.enabled }}
+{{- $cj := .Values.cleanupCronJob }}
+apiVersion: batch/v1
+kind: CronJob
+metadata:
+  name: cleanup
+  namespace: {{ include "bookstore.namespace" . }}
+  labels:
+    {{- include "bookstore.labels" (dict "ctx" . "app" "cleanup") | nindent 4 }}
+spec:
+  schedule: {{ $cj.schedule | quote }}
+  timeZone: {{ $cj.timeZone | quote }}
+  concurrencyPolicy: {{ $cj.concurrencyPolicy }}
+  startingDeadlineSeconds: {{ $cj.startingDeadlineSeconds }}
+  successfulJobsHistoryLimit: {{ $cj.successfulJobsHistoryLimit }}
+  failedJobsHistoryLimit: {{ $cj.failedJobsHistoryLimit }}
+  jobTemplate:
+    spec:
+      backoffLimit: {{ $cj.backoffLimit }}
+      activeDeadlineSeconds: {{ $cj.activeDeadlineSeconds }}
+      ttlSecondsAfterFinished: {{ $cj.ttlSecondsAfterFinished }}
+      template:
+        metadata:
+          labels:
+            {{- include "bookstore.labels" (dict "ctx" . "app" "cleanup") | nindent 12 }}
+        spec:
+          restartPolicy: Never
+          priorityClassName: {{ $cj.priorityClassName }}
+          serviceAccountName: {{ $cj.serviceAccountName }}
+          automountServiceAccountToken: false
+          securityContext:
+            {{- include "bookstore.podSecurityContext" (dict "ctx" . "profile" "batch999") | nindent 12 }}
+          containers:
+            - name: cleanup
+              image: "{{ $cj.image.repository }}:{{ $cj.image.tag }}"
+              imagePullPolicy: {{ $cj.image.pullPolicy }}
+              securityContext:
+                {{- include "bookstore.containerSecurityContext" (dict "ctx" . "profile" "batch999") | nindent 16 }}
+              env:
+                - name: PGHOST
+                  value: {{ .Values.database.host | quote }}
+                - name: PGUSER
+                  valueFrom:
+                    secretKeyRef: { name: {{ .Values.dbCredentials.secretName }}, key: POSTGRES_USER }
+                - name: PGPASSWORD
+                  valueFrom:
+                    secretKeyRef: { name: {{ .Values.dbCredentials.secretName }}, key: POSTGRES_PASSWORD }
+                - name: PGDATABASE
+                  valueFrom:
+                    secretKeyRef: { name: {{ .Values.dbCredentials.secretName }}, key: POSTGRES_DB }
+              command: ["/bin/sh", "-c"]
+              args:
+                - |
+                  set -e
+                  echo "pruning orders older than 90 days..."
+                  psql -v ON_ERROR_STOP=1 -c \
+                    "DELETE FROM orders WHERE created_at < now() - interval '90 days';"
+                  echo "cleanup complete"
+              resources:
+                {{- toYaml $cj.resources | nindent 16 }}
+{{- end }}

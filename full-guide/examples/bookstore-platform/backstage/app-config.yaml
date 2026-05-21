@@ -1,0 +1,164 @@
+# Bookstore Platform v2 — Part 13 ch.11: the Backstage app-config
+# ConfigMap. Mounted into the Backstage pod as
+# `/app/app-config.production.yaml`. References env vars
+# (POSTGRES_PASSWORD, GITHUB_APP_PRIVATE_KEY, KEYCLOAK_CLIENT_SECRET)
+# materialised by ESO from the secret backend.
+#
+# v1 had no Backstage; v2's app-config wires:
+#   - Postgres backing store
+#   - GitHub App for code + scaffolder + tech-docs discovery
+#   - Keycloak OIDC for auth (humans only; ch.13.04)
+#   - Crossplane plugin for catalog discovery of BookstoreTenant XRs
+#   - Argo CD plugin server-side proxy
+#   - Prometheus plugin server-side proxy
+#   - PagerDuty plugin server-side proxy
+#   - TechDocs builder (external mode; CI builds, Backstage serves)
+#
+# Apply (after backstage-application.yaml):
+#   kubectl apply -f examples/bookstore-platform/backstage/app-config.yaml
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: backstage-app-config
+  namespace: backstage
+  labels:
+    app.kubernetes.io/name: backstage-app-config
+    app.kubernetes.io/instance: backstage-app-config
+    app.kubernetes.io/part-of: bookstore-platform
+    app.kubernetes.io/component: developer-portal-config
+    app.kubernetes.io/version: "1.0.0"
+data:
+  app-config.production.yaml: |
+    app:
+      title: Bookstore Platform
+      baseUrl: https://backstage.bookstore-platform.example.com
+
+    organization:
+      name: Bookstore Platform
+
+    backend:
+      baseUrl: https://backstage.bookstore-platform.example.com
+      listen:
+        port: 7007
+        host: 0.0.0.0
+      database:
+        client: pg
+        connection:
+          host: backstage-postgresql.backstage.svc.cluster.local
+          port: 5432
+          user: bn_backstage
+          password: ${POSTGRES_PASSWORD}
+          database: bn_backstage
+      cors:
+        origin: https://backstage.bookstore-platform.example.com
+        methods: [GET, HEAD, PATCH, POST, PUT, DELETE]
+        credentials: true
+
+    auth:
+      # Keycloak OIDC — ch.13.04's realm. Backstage's auth backend
+      # creates a session; the session is used by the permission
+      # framework.
+      providers:
+        oidc:
+          production:
+            metadataUrl: https://keycloak.bookstore-platform-system.svc.cluster.local/realms/bookstore-platform/.well-known/openid-configuration
+            clientId: backstage
+            clientSecret: ${KEYCLOAK_CLIENT_SECRET}
+            prompt: auto
+            sessionDuration: { hours: 8 }
+            signIn:
+              resolvers:
+                - resolver: emailMatchingUserEntityProfileEmail
+
+    integrations:
+      github:
+        - host: github.com
+          apps:
+            - appId: 123456
+              clientId: ${GITHUB_APP_CLIENT_ID}
+              clientSecret: ${GITHUB_APP_CLIENT_SECRET}
+              privateKey: ${GITHUB_APP_PRIVATE_KEY}
+              webhookSecret: ${GITHUB_APP_WEBHOOK_SECRET}
+
+    catalog:
+      orphanStrategy: delete
+      # Discovery — scan the platform org for any repo with
+      # catalog-info.yaml at root.
+      providers:
+        github:
+          providerId:
+            organization: your-org
+            catalogPath: /catalog-info.yaml
+            filters:
+              branch: main
+              repository: 'bookstore-platform-.*'
+        # Crossplane plugin discovery — BookstoreTenant XRs become
+        # Catalog entities of kind Resource.
+        crossplane:
+          provider:
+            schedule:
+              frequency: { minutes: 5 }
+              timeout: { minutes: 2 }
+      # Static locations — the platform's bootstrap entities.
+      locations:
+        - type: file
+          target: /app/catalog-info.yaml
+        - type: url
+          target: https://github.com/your-org/bookstore-platform/blob/main/catalog/all.yaml
+
+    techdocs:
+      builder: external
+      generator:
+        runIn: local
+      publisher:
+        type: awsS3
+        awsS3:
+          bucketName: bookstore-platform-techdocs
+
+    scaffolder:
+      defaultAuthor:
+        name: backstage
+        email: backstage@bookstore-platform.example.com
+      defaultCommitMessage: "chore: scaffolded by Backstage"
+
+    permission:
+      enabled: true
+
+    kubernetes:
+      serviceLocatorMethod: { type: multiTenant }
+      clusterLocatorMethods:
+        - type: config
+          clusters:
+            - name: bookstore-platform-us-east
+              url: https://kubernetes.default.svc
+              authProvider: serviceAccount
+              skipTLSVerify: false
+            - name: bookstore-platform-eu-west
+              url: https://eu-west.bookstore-platform.example.com
+              authProvider: serviceAccount
+              skipTLSVerify: false
+            - name: bookstore-platform-ap-southeast
+              url: https://ap-southeast.bookstore-platform.example.com
+              authProvider: serviceAccount
+              skipTLSVerify: false
+
+    proxy:
+      # Argo CD plugin proxy — Backstage backend forwards UI requests
+      # to the Argo CD API with the platform service-account token.
+      '/argocd/api':
+        target: https://argocd.bookstore-platform.example.com/api/v1
+        changeOrigin: true
+        headers:
+          Authorization: Bearer ${ARGOCD_AUTH_TOKEN}
+      # Prometheus plugin proxy.
+      '/prometheus/api':
+        target: http://kube-prometheus-stack-prometheus.prometheus-system.svc.cluster.local:9090/api
+        changeOrigin: true
+      # PagerDuty plugin proxy.
+      '/pagerduty':
+        target: https://api.pagerduty.com
+        changeOrigin: true
+        headers:
+          Authorization: Token token=${PAGERDUTY_TOKEN}
+          Accept: application/vnd.pagerduty+json;version=2

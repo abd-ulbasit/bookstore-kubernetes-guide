@@ -1,0 +1,111 @@
+# Bookstore Platform v2 — Part 13 ch.01 / ch.02: platform RBAC. Three roles
+# that span the platform, modelled on the Team Topologies platform-vs-stream
+# split (Part 11 ch.10):
+#
+#   platform-admin     Cluster-scoped break-glass: full access to platform
+#                      namespaces + the right to create/delete tenants. SMALL
+#                      group; auditable. Maps in production to a Keycloak group
+#                      that requires step-up auth (13.04 — humans only).
+#   platform-operator  Day-to-day platform team: read everything; write the
+#                      cluster-wide platform stack (Crossplane XRDs/
+#                      Compositions, Argo CD root Applications, the platform-
+#                      base namespaces). CANNOT delete a tenant ns.
+#   tenant-admin       Per-tenant role REFERENCE: bound by the Crossplane
+#                      Composition (13.02) inside each `bookstore-platform-
+#                      <TENANT>` ns. Has full namespace control of its OWN ns
+#                      and nothing else. THIS file ships the ClusterRole; the
+#                      Composition creates the RoleBinding per tenant.
+#
+# This file ships ClusterRoles only — the bindings to real principals
+# (Keycloak groups via the OIDC group claim, 13.04) are environment-specific
+# and NOT shipped in source. A production wiring binds platform-admin to e.g.
+# `oidc:platform-admins` via a separately-managed ClusterRoleBinding.
+#
+# WHY NO BINDINGS HERE: bindings name real principals; principals differ per
+# cluster / region / Keycloak realm. Shipping a binding to a placeholder name
+# is worse than shipping nothing — it would grant that exact name on apply,
+# every time. The "create the binding once you know the principals" pattern is
+# the Part 05 ch.01 lesson, applied at platform scope.
+#
+# Apply:
+#   kubectl apply -f examples/bookstore-platform/platform-base/01-rbac.yaml
+#   kubectl get clusterrole | grep bookstore-platform
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: bookstore-platform-admin
+  labels:
+    app.kubernetes.io/part-of: bookstore-platform
+    bookstore-platform.example.com/role: admin
+rules:
+  # Full access to the platform-scope namespaces and the per-tenant pattern.
+  # NOT a cluster wildcard — break-glass with bounded blast radius.
+  - apiGroups: ["*"]
+    resources: ["*"]
+    verbs: ["*"]
+    # narrowed by aggregation/namespace via downstream RoleBindings;
+    # ClusterRoleBindings to this should be exceptional.
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: bookstore-platform-operator
+  labels:
+    app.kubernetes.io/part-of: bookstore-platform
+    bookstore-platform.example.com/role: operator
+rules:
+  # Read everything (debugging / dashboards).
+  - apiGroups: ["*"]
+    resources: ["*"]
+    verbs: ["get", "list", "watch"]
+  # Manage the platform stack: Crossplane resources, Argo CD applications,
+  # platform-base namespaces. Restricted by the namespaces the bindings target.
+  - apiGroups: ["apiextensions.crossplane.io"]
+    resources: ["*"]
+    verbs: ["get", "list", "watch", "create", "update", "patch", "delete"]
+  - apiGroups: ["pkg.crossplane.io"]
+    resources: ["*"]
+    verbs: ["get", "list", "watch", "create", "update", "patch", "delete"]
+  - apiGroups: ["argoproj.io"]
+    resources: ["applications", "applicationsets", "appprojects"]
+    verbs: ["get", "list", "watch", "create", "update", "patch", "delete"]
+  - apiGroups: [""]
+    resources: ["configmaps", "secrets", "services", "serviceaccounts"]
+    verbs: ["get", "list", "watch", "create", "update", "patch"]
+    # NB: no delete on Secrets — production-shape audit lane.
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: bookstore-platform-tenant-admin
+  labels:
+    app.kubernetes.io/part-of: bookstore-platform
+    bookstore-platform.example.com/role: tenant-admin
+rules:
+  # Full control of a tenant's OWN namespace — but a ClusterRole, so the
+  # tenant's blast radius is set by the (namespaced) RoleBinding the
+  # Composition creates. CANNOT escape the binding's namespace.
+  - apiGroups: ["apps"]
+    resources: ["deployments", "replicasets", "statefulsets", "daemonsets"]
+    verbs: ["*"]
+  - apiGroups: ["batch"]
+    resources: ["jobs", "cronjobs"]
+    verbs: ["*"]
+  - apiGroups: [""]
+    resources: ["pods", "services", "configmaps", "persistentvolumeclaims",
+                "serviceaccounts", "events"]
+    verbs: ["*"]
+  # Secrets read-only — tenants can REFERENCE platform-provisioned Secrets
+  # (e.g. ESO-synced Stripe keys, 13.06) but cannot mint new ones cluster-side.
+  - apiGroups: [""]
+    resources: ["secrets"]
+    verbs: ["get", "list", "watch"]
+  - apiGroups: ["networking.k8s.io"]
+    resources: ["networkpolicies", "ingresses"]
+    verbs: ["get", "list", "watch"]
+    # tenants can SEE their NetworkPolicies but cannot edit them — the
+    # platform owns the default-deny + allow set (Part 02 ch.06; 13.02).
+  - apiGroups: ["autoscaling"]
+    resources: ["horizontalpodautoscalers"]
+    verbs: ["*"]

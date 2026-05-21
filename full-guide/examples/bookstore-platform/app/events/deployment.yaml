@@ -1,0 +1,79 @@
+# Bookstore Platform v2 — Part 13 ch.06: the events dispatcher Deployment
+# in `drift-relay` mode. (The outbox and payments-worker variants live at
+# ../../payments/outbox-publisher.yaml and ../../payments/payments-worker.yaml
+# — the SAME image, different EVENTS_MODE.)
+#
+# This Deployment is what ch.13.08 §Hands-on uses to demonstrate "drift
+# events visible end-to-end" — a small process that consumes ml.drift
+# and logs each event.
+#
+# Apply:
+#   kubectl apply -f examples/bookstore-platform/app/events/deployment.yaml
+---
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: events-drift-relay
+  namespace: bookstore-platform-ml
+  labels:
+    app.kubernetes.io/part-of: bookstore-platform
+    app.kubernetes.io/component: drift-relay
+automountServiceAccountToken: false
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: events-drift-relay
+  namespace: bookstore-platform-ml
+  labels:
+    app: events-drift-relay
+    app.kubernetes.io/part-of: bookstore-platform
+    app.kubernetes.io/component: drift-relay
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: events-drift-relay
+  template:
+    metadata:
+      labels:
+        app: events-drift-relay
+        app.kubernetes.io/part-of: bookstore-platform
+    spec:
+      serviceAccountName: events-drift-relay
+      automountServiceAccountToken: false
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 65532
+        runAsGroup: 65532
+        fsGroup: 65532
+        seccompProfile:
+          type: RuntimeDefault
+      containers:
+        - name: events
+          image: bookstore-platform/events:dev
+          imagePullPolicy: IfNotPresent
+          env:
+            - { name: EVENTS_MODE,       value: "drift-relay" }
+            - { name: PORT,              value: "8080" }
+            - { name: KAFKA_BROKERS,     value: "bookstore-platform-kafka-kafka-bootstrap.kafka-system.svc.cluster.local:9092" }
+            - { name: KAFKA_TOPIC_DRIFT, value: "ml.drift" }
+            - { name: KAFKA_CONSUMER_GROUP, value: "drift-relay" }
+          ports:
+            - { containerPort: 8080, name: http }
+          resources:
+            requests:
+              cpu: 50m
+              memory: 64Mi
+            limits:
+              cpu: 250m
+              memory: 128Mi
+          livenessProbe:
+            httpGet: { path: /healthz, port: 8080 }
+          readinessProbe:
+            httpGet: { path: /readyz, port: 8080 }
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities:
+              drop: ["ALL"]

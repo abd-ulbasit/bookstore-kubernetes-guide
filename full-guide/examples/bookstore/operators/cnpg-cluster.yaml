@@ -1,0 +1,158 @@
+# Bookstore — Part 08 ch.05 "Operators and CRDs": the Postgres data tier
+# RE-PLATFORMED onto the CloudNativePG operator.
+#
+# !!! THIS IS AN ALTERNATIVE / MIGRATION TARGET — NOT A DELETION OF
+#     20-postgres-statefulset.yaml !!!
+#   The canonical Bookstore Postgres is the DIY StatefulSet
+#   (raw-manifests/20-postgres-statefulset.yaml) — kept, unchanged, as the
+#   primitives-teaching data tier (identity, PVC, ordering, snapshots). This
+#   file is the OPERATOR alternative, exactly analogous to how 51-gateway.yaml
+#   is an alternative to 50-ingress.yaml: a NEW, additive manifest presented
+#   as "the production way", NOT an edit/removal of the StatefulSet. The two
+#   are mutually exclusive at RUNTIME (don't run both as `postgres`), but on
+#   DISK this is purely additive — Part 08 does not modify the canonical app.
+#
+# !!! CRD-BACKED — intrinsic dry-run behavior (the SAME documented behavior as
+#     velero-backup.yaml / 18-postgres-snapshot.yaml / 51-gateway.yaml /
+#     70-kyverno-policy.yaml / 80-servicemonitor.yaml / 83-keda-scaledobject /
+#     the argocd/ tree) !!!
+#   `Cluster` is NOT a built-in Kubernetes kind. It is a CRD
+#   (postgresql.cnpg.io/v1) installed by the CloudNativePG operator (Helm
+#   chart cnpg/cloudnative-pg, pinned). Therefore on a cluster WITHOUT CNPG:
+#       kubectl apply --dry-run=client -f examples/bookstore/operators/cnpg-cluster.yaml
+#       error: resource mapping not found ... no matches for kind "Cluster"
+#       in version "postgresql.cnpg.io/v1" ... ensure CRDs are installed first
+#     That is EXPECTED and not a manifest defect — identical precedent to every
+#     CRD-backed object in this guide. Schema correctness here is verified by
+#     reading + the official CloudNativePG API reference, NOT a client dry-run.
+#     After `helm install cnpg cnpg/cloudnative-pg`, the postgresql.cnpg.io
+#     CRDs exist and `kubectl apply --dry-run=server -f` validates cleanly.
+#
+# !!! THE DB_DSN REWIRE (documented; NO canonical manifest is mutated) !!!
+#   The DIY StatefulSet exposes the headless Service `postgres`
+#   (postgres.bookstore.svc.cluster.local). CloudNativePG instead creates, for
+#   a Cluster named `bookstore-db`, these Services automatically:
+#       bookstore-db-rw  → always the current PRIMARY (read/write)
+#       bookstore-db-ro  → hot standby REPLICAS (read-only)
+#       bookstore-db-r   → any instance (read, primary or replica)
+#   So to point the app at the operator-managed DB, catalog/orders' DB_DSN host
+#   changes from `postgres.bookstore.svc...` to
+#   `bookstore-db-rw.bookstore.svc.cluster.local`. This is done WITHOUT editing
+#   raw-manifests/10-/14-/16- — as a reversible `kubectl set env` (ch.05
+#   Hands-on) or a Kustomize overlay patch. The canonical DSN
+#   (host=postgres…, byte-identical catalog==orders) stays the source of truth
+#   on disk; the rewire is an operational/overlay concern, documented here and
+#   demonstrated reversibly in the chapter.
+#
+# !!! CREDENTIALS: a NEW basic-auth Secret, NOT the canonical db-credentials !!!
+#   The canonical `db-credentials` (16-) is an Opaque Secret with keys
+#   POSTGRES_USER / POSTGRES_PASSWORD / POSTGRES_DB (the names the official
+#   postgres image + catalog/orders DSN expect). CloudNativePG's
+#   bootstrap.initdb.secret expects a `kubernetes.io/basic-auth` Secret with
+#   keys `username` / `password`. Rather than MUTATE the canonical Secret
+#   (forbidden — Part 08 must not change the canonical app), this file ships an
+#   ADDITIVE `cnpg-app-credentials` basic-auth Secret holding the SAME
+#   demo user/password (bookstore / devpassword) so the operator-created DB has
+#   identical credentials and the rewired DSN keeps working. DEMO-ONLY value,
+#   same warning as 16-: NEVER commit a real secret; use Sealed Secrets /
+#   External Secrets / Vault + encryption-at-rest in production.
+#
+# !!! PSA NOTE !!!  The CNPG OPERATOR runs in its OWN namespace (cnpg-system) —
+#   not PSA-restricted, exactly like the Velero/Argo/monitoring controllers.
+#   The Cluster's POSTGRES pods, however, land in `bookstore` (PSA
+#   `restricted`). CloudNativePG's managed pods are designed to be
+#   restricted-compatible (non-root, no privilege escalation, seccomp
+#   RuntimeDefault, drop ALL) and CNPG officially supports the `restricted`
+#   Pod Security Standard, so they admit cleanly in the bookstore ns. The pod
+#   securityContext is OPERATOR-MANAGED (you don't hand-write it as with the
+#   StatefulSet) — that is part of what the operator encodes for you.
+#
+# Requires (to actually apply, not just read):
+#   - the CloudNativePG operator installed (Helm cnpg/cloudnative-pg, pinned)
+#     into its own `cnpg-system` namespace
+#   - the `bookstore` namespace existing (00-namespace.yaml) — the Cluster and
+#     its basic-auth Secret are namespaced to bookstore
+# Apply (CNPG-installed cluster only):
+#   kubectl apply -f examples/bookstore/operators/cnpg-cluster.yaml
+#   kubectl get cluster -n bookstore
+#   kubectl get pods,svc -n bookstore -l cnpg.io/cluster=bookstore-db
+---
+# ADDITIVE basic-auth Secret for CNPG (NOT a mutation of 16-db-credentials).
+# Same demo creds so the rewired DB_DSN (user/password) still authenticates.
+apiVersion: v1
+kind: Secret
+metadata:
+  name: cnpg-app-credentials
+  namespace: bookstore
+  labels:
+    app: postgres
+    app.kubernetes.io/part-of: bookstore
+type: kubernetes.io/basic-auth      # CNPG initdb.secret expects THIS type
+stringData:
+  username: bookstore               # == canonical POSTGRES_USER (16-)
+  password: "devpassword"           # == canonical POSTGRES_PASSWORD — DEMO-ONLY
+---
+apiVersion: postgresql.cnpg.io/v1
+kind: Cluster
+metadata:
+  name: bookstore-db                # → Services bookstore-db-rw / -ro / -r
+  namespace: bookstore
+  labels:
+    app: postgres
+    app.kubernetes.io/part-of: bookstore
+spec:
+  # THREE instances: 1 primary + 2 hot-standby replicas with streaming
+  # replication and AUTOMATED failover — the thing the single-replica DIY
+  # StatefulSet (20-, replicas: 1, a SPOF) structurally cannot do.
+  instances: 3
+
+  # Pin the Postgres major image (the operator manages minor upgrades — the
+  # DIY StatefulSet's `postgres:16` has NO managed upgrade path).
+  imageName: ghcr.io/cloudnative-pg/postgresql:16.4
+
+  # Rolling-update strategy for the PRIMARY during minor/image upgrades:
+  #  unsupervised = operator switches the primary automatically once replicas
+  #  are upgraded (the operator encodes the upgrade DBA logic).
+  primaryUpdateStrategy: unsupervised
+
+  # Bootstrap a fresh DB: create database `bookstore` owned by role
+  # `bookstore`, password taken from the ADDITIVE basic-auth Secret above.
+  # This reproduces what the DIY setup did via the postgres image envFrom +
+  # the migration Job — but declaratively, operator-managed.
+  bootstrap:
+    initdb:
+      database: bookstore           # == canonical POSTGRES_DB
+      owner: bookstore              # == canonical POSTGRES_USER
+      secret:
+        name: cnpg-app-credentials  # the basic-auth Secret (NOT 16-)
+
+  # Per-instance persistent storage (the operator creates one PVC per
+  # instance, like a volumeClaimTemplate but operator-lifecycle-managed).
+  storage:
+    size: 1Gi
+    # storageClassName omitted → default class (kind: "standard").
+
+  # Operator-managed observability: a PodMonitor for the Prometheus stack
+  # (ties to Part 06 ch.01 / 80-servicemonitor.yaml — same monitoring stack).
+  monitoring:
+    enablePodMonitor: true
+
+  # Continuous backup + WAL archiving to an object store → PITR (point-in-time
+  # recovery). This is the capability the DIY StatefulSet + a crash-consistent
+  # VolumeSnapshot CANNOT give (snapshots = crash-consistent point copies, NOT
+  # PITR — Part 03 ch.05 / Part 08 ch.02). Object-store creds are supplied out
+  # of band (a real bucket + Secret, like Velero's BSL — illustrative here;
+  # the local-object-store honesty note in ch.05 applies, same as Velero).
+  backup:
+    barmanObjectStore:
+      destinationPath: s3://bookstore-pg-backups/   # PLACEHOLDER bucket
+      s3Credentials:
+        accessKeyId:
+          name: cnpg-backup-creds   # supplied out of band (NOT committed)
+          key: ACCESS_KEY_ID
+        secretAccessKey:
+          name: cnpg-backup-creds
+          key: ACCESS_SECRET_KEY
+      wal:
+        compression: gzip           # WAL archiving → PITR window
+    retentionPolicy: "7d"

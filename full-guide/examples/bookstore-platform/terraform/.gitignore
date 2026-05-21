@@ -1,0 +1,42 @@
+# Terraform state and plan artifacts — never commit these.
+.terraform/
+.terraform.lock.hcl
+*.tfstate
+*.tfstate.*
+*.tfstate.backup
+tfplan
+tfplan.*
+tfplan.binary
+tfplan.json
+
+# tfvars frequently hold account-specific values and sometimes secrets.
+# example.tfvars is committed as a template; any concrete *.tfvars is ignored.
+*.tfvars
+!example.tfvars
+
+# Generated kubeconfig — contains a (short-lived) cluster CA + endpoint.
+kubeconfig.yaml
+
+# Crash log files emitted by Terraform on panics.
+crash.log
+crash.*.log
+
+# Smoke-test and apply/teardown logs. These contain account IDs, IAM
+# usernames, and host paths from whoever ran the smoke test — keep them
+# OUT of the repo. Generate them locally; gitignore them.
+*.log
+apply.log
+teardown.log
+
+# OS noise.
+.DS_Store
+
+# Local override files — convention from the Terraform docs.
+override.tf
+override.tf.json
+*_override.tf
+*_override.tf.json
+
+# CLI artifacts.
+.terraformrc
+terraform.rc

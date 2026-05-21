@@ -1,0 +1,95 @@
+{{/*
+  Gateway API stack (raw-manifests 51-gateway.yaml) — the role-oriented
+  ALTERNATIVE to the Ingress. CRD-backed: Gateway/HTTPRoute v1 are NOT built
+  into Kubernetes, so this is behind gateway.enabled (default FALSE) and a
+  plain `helm install` does not render it. When enabled you MUST install the
+  Gateway API CRDs + a controller first (ch.01 / ch.02 ch.05 document this);
+  a client dry-run without the CRDs prints the expected `no matches for kind`
+  for these objects only — same intrinsic behaviour as the raw manifest.
+  MUTUALLY EXCLUSIVE with the Ingress (bookstore.validateEdge enforces it).
+  URLRewrite is a typed PORTABLE core filter (the portability win vs Ingress).
+*/}}
+{{- include "bookstore.validateEdge" . -}}
+{{- if .Values.gateway.enabled }}
+{{- $g := .Values.gateway }}
+{{- if $g.createGatewayClass }}
+apiVersion: gateway.networking.k8s.io/v1
+kind: GatewayClass
+metadata:
+  name: {{ $g.className }}
+  labels:
+    {{- include "bookstore.commonLabels" . | nindent 4 }}
+spec:
+  controllerName: {{ $g.controllerName }}
+---
+{{- end }}
+apiVersion: gateway.networking.k8s.io/v1
+kind: Gateway
+metadata:
+  name: bookstore
+  namespace: {{ include "bookstore.namespace" . }}
+  labels:
+    {{- include "bookstore.commonLabels" . | nindent 4 }}
+spec:
+  gatewayClassName: {{ $g.className }}
+  listeners:
+    - name: https
+      protocol: HTTPS
+      port: 443
+      hostname: {{ $g.host }}
+      tls:
+        mode: Terminate
+        certificateRefs:
+          - kind: Secret
+            name: {{ $g.tls.secretName }}
+      allowedRoutes:
+        namespaces:
+          from: Same
+---
+apiVersion: gateway.networking.k8s.io/v1
+kind: HTTPRoute
+metadata:
+  name: bookstore
+  namespace: {{ include "bookstore.namespace" . }}
+  labels:
+    {{- include "bookstore.commonLabels" . | nindent 4 }}
+spec:
+  parentRefs:
+    - name: bookstore
+  hostnames:
+    - {{ $g.host }}
+  rules:
+    - matches:
+        - path:
+            type: PathPrefix
+            value: /api/books
+      filters:
+        - type: URLRewrite
+          urlRewrite:
+            path:
+              type: ReplacePrefixMatch
+              replacePrefixMatch: /books
+      backendRefs:
+        - name: catalog
+          port: {{ .Values.catalog.service.port }}
+    - matches:
+        - path:
+            type: PathPrefix
+            value: /api/orders
+      filters:
+        - type: URLRewrite
+          urlRewrite:
+            path:
+              type: ReplacePrefixMatch
+              replacePrefixMatch: /orders
+      backendRefs:
+        - name: orders
+          port: {{ .Values.orders.service.port }}
+    - matches:
+        - path:
+            type: PathPrefix
+            value: /
+      backendRefs:
+        - name: storefront
+          port: {{ .Values.storefront.service.port }}
+{{- end }}

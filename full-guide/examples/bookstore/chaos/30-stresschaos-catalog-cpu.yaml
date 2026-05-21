@@ -1,0 +1,60 @@
+# Bookstore — Part 11 ch.07 "Chaos engineering": EXPERIMENT 3 — burn CPU
+# inside catalog Pods for 60s and verify the HPA + resource limits keep the
+# SLO. Tests whether resource pressure triggers the designed reaction
+# (autoscale / throttle within limits) rather than a latency collapse.
+#
+# THE HYPOTHESIS THIS TESTS
+#   "Two CPU-burning workers inside catalog Pods for 60s drive CPU toward the
+#   catalog container limit (raw-manifests/10-catalog-deploy.yaml resources);
+#   the HPA (raw-manifests/82-hpa-catalog.yaml) scales catalog out and the
+#   catalog SLO (81-prometheusrule.yaml) is preserved — i.e. requests/limits
+#   + autoscaling absorb CPU pressure as designed (Part 01 ch.03 / Part 06
+#   ch.04), it does not become a user-visible outage."
+#
+# SELECTOR matches the REAL catalog pod label (app=catalog, ns bookstore;
+# verified against 10-catalog-deploy.yaml). `mode: one` keeps the blast
+# radius minimal (one Pod) — climb the blast-radius ladder (one → fixed →
+# all) only as confidence grows.
+#
+# BOUNDED & REVERSIBLE: `duration: 60s` auto-reverts; the stressor runs in a
+# Chaos-Mesh-managed process scoped to the target container's cgroup and is
+# killed when the experiment ends or the object is deleted. The catalog Pods
+# are NOT mutated (no injected container) and stay PSA-restricted-compliant;
+# the cpu limit is the natural ceiling on the damage. `kubectl delete -f`
+# aborts early.
+#
+# !!! CRD-INTRINSIC DRY-RUN (identical precedent to 18-/51-/70-/83-/argocd) !!!
+#   `StressChaos` is a Chaos Mesh CRD (chaos-mesh.org/v1alpha1). WITHOUT Chaos
+#   Mesh installed a client dry-run prints:
+#     no matches for kind "StressChaos" in version "chaos-mesh.org/v1alpha1"
+#   EXPECTED, schema-correct — Chaos Mesh CRDs/controller must be installed
+#   first. Whole-dir dry-run prints this for CRD-backed files only and
+#   continues. Schema verified against Chaos Mesh chaos-mesh.org/v1alpha1
+#   StressChaos.
+#
+# Requires: Chaos Mesh installed (own ns); the Bookstore running with the
+#   catalog HPA (82-) + metrics (80-/81-) so the reaction is observable.
+# Apply:
+#   kubectl apply -f examples/bookstore/chaos/30-stresschaos-catalog-cpu.yaml
+#   # observe: kubectl get hpa catalog -n bookstore -w   (replicas should rise)
+#   kubectl delete -f examples/bookstore/chaos/30-stresschaos-catalog-cpu.yaml
+apiVersion: chaos-mesh.org/v1alpha1
+kind: StressChaos
+metadata:
+  name: catalog-cpu-stress
+  namespace: bookstore
+  labels:
+    app.kubernetes.io/part-of: bookstore
+spec:
+  mode: one                       # SMALLEST blast radius: one catalog Pod
+  selector:
+    namespaces:
+      - bookstore
+    labelSelectors:
+      app: catalog                # REAL catalog pod label (10-)
+  stressors:
+    cpu:
+      workers: 2                  # 2 CPU-burn workers (bounded by the
+                                  # container cpu LIMIT — Part 01 ch.03)
+      load: 100
+  duration: "60s"                 # BOUNDED — auto-reverts after 60s

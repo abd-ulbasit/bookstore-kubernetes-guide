@@ -1,0 +1,240 @@
+{{/*
+  All 10 NetworkPolicies (raw-manifests 60-networkpolicy.yaml): flip the ns to
+  default-DENY then ALLOW only the edges the app needs. NetworkPolicy is a
+  built-in kind so this defaults ON (networkPolicy.enabled). ENFORCEMENT still
+  needs a policy CNI (kindnet is a SILENT no-op — Calico/Cilium enforce; see
+  ch.06). Namespace names (kube-system / ingress-nginx / monitoring) are
+  parameterized for portability.
+*/}}
+{{- if .Values.networkPolicy.enabled }}
+{{- $np := .Values.networkPolicy }}
+{{- $ns := include "bookstore.namespace" . }}
+# 1) Baseline default-deny: select ALL Pods, allow NOTHING either direction.
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: default-deny-all
+  namespace: {{ $ns }}
+  labels:
+    {{- include "bookstore.commonLabels" . | nindent 4 }}
+spec:
+  podSelector: {}
+  policyTypes: ["Ingress", "Egress"]
+---
+# 2) MANDATORY: allow every Pod egress to cluster DNS (CoreDNS). Without this,
+#    default-deny egress breaks ALL name resolution.
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: allow-dns-egress
+  namespace: {{ $ns }}
+  labels:
+    {{- include "bookstore.commonLabels" . | nindent 4 }}
+spec:
+  podSelector: {}
+  policyTypes: ["Egress"]
+  egress:
+    - to:
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: {{ $np.dnsNamespace }}
+          podSelector:
+            matchLabels:
+              k8s-app: kube-dns
+      ports:
+        - { protocol: UDP, port: 53 }
+        - { protocol: TCP, port: 53 }
+---
+# 3) ingress-nginx (or the Gateway controller) -> storefront/catalog/orders.
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: allow-ingress-to-http-tiers
+  namespace: {{ $ns }}
+  labels:
+    {{- include "bookstore.commonLabels" . | nindent 4 }}
+spec:
+  podSelector:
+    matchExpressions:
+      - key: app
+        operator: In
+        values: ["storefront", "catalog", "orders"]
+  policyTypes: ["Ingress"]
+  ingress:
+    - from:
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: {{ $np.ingressControllerNamespace }}
+      ports:
+        - { protocol: TCP, port: 8080 }
+---
+# 4) storefront -> catalog and storefront -> orders (the UI calls the APIs).
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: allow-storefront-to-apis
+  namespace: {{ $ns }}
+  labels:
+    {{- include "bookstore.commonLabels" . | nindent 4 }}
+spec:
+  podSelector:
+    matchExpressions:
+      - key: app
+        operator: In
+        values: ["catalog", "orders"]
+  policyTypes: ["Ingress"]
+  ingress:
+    - from:
+        - podSelector:
+            matchLabels:
+              app: storefront
+      ports:
+        - { protocol: TCP, port: 8080 }
+---
+# 5) catalog -> postgres (catalog reads the books table).
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: allow-catalog-to-postgres
+  namespace: {{ $ns }}
+  labels:
+    {{- include "bookstore.commonLabels" . | nindent 4 }}
+spec:
+  podSelector:
+    matchLabels:
+      app: postgres
+  policyTypes: ["Ingress"]
+  ingress:
+    - from:
+        - podSelector:
+            matchLabels:
+              app: catalog
+      ports:
+        - { protocol: TCP, port: 5432 }
+---
+# 6) orders -> rabbitmq (publishes) AND payments-worker -> rabbitmq (consumes).
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: allow-orders-to-rabbitmq
+  namespace: {{ $ns }}
+  labels:
+    {{- include "bookstore.commonLabels" . | nindent 4 }}
+spec:
+  podSelector:
+    matchLabels:
+      app: rabbitmq
+  policyTypes: ["Ingress"]
+  ingress:
+    - from:
+        - podSelector:
+            matchLabels:
+              app: orders
+        - podSelector:
+            matchLabels:
+              app: payments-worker
+      ports:
+        - { protocol: TCP, port: 5672 }
+---
+# 7) Egress side of the backend edges (catalog->postgres, orders->rabbitmq).
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: allow-backend-egress
+  namespace: {{ $ns }}
+  labels:
+    {{- include "bookstore.commonLabels" . | nindent 4 }}
+spec:
+  podSelector:
+    matchExpressions:
+      - key: app
+        operator: In
+        values: ["catalog", "orders"]
+  policyTypes: ["Egress"]
+  egress:
+    - to:
+        - podSelector:
+            matchLabels:
+              app: postgres
+      ports:
+        - { protocol: TCP, port: 5432 }
+    - to:
+        - podSelector:
+            matchLabels:
+              app: rabbitmq
+      ports:
+        - { protocol: TCP, port: 5672 }
+---
+# 8) Egress side of storefront -> catalog/orders.
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: allow-storefront-egress
+  namespace: {{ $ns }}
+  labels:
+    {{- include "bookstore.commonLabels" . | nindent 4 }}
+spec:
+  podSelector:
+    matchLabels:
+      app: storefront
+  policyTypes: ["Egress"]
+  egress:
+    - to:
+        - podSelector:
+            matchLabels:
+              app: catalog
+      ports:
+        - { protocol: TCP, port: 8080 }
+    - to:
+        - podSelector:
+            matchLabels:
+              app: orders
+      ports:
+        - { protocol: TCP, port: 8080 }
+---
+# 9) Egress side of payments-worker -> rabbitmq.
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: allow-payments-worker-egress
+  namespace: {{ $ns }}
+  labels:
+    {{- include "bookstore.commonLabels" . | nindent 4 }}
+spec:
+  podSelector:
+    matchLabels:
+      app: payments-worker
+  policyTypes: ["Egress"]
+  egress:
+    - to:
+        - podSelector:
+            matchLabels:
+              app: rabbitmq
+      ports:
+        - { protocol: TCP, port: 5672 }
+---
+# 10) allow the monitoring namespace to SCRAPE /metrics on the 3 metrics tiers.
+#     INTENTIONALLY ONE-SIDED: the source (Prometheus) is cross-namespace and
+#     not policy-restricted, so only this destination Ingress half exists.
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: allow-monitoring-scrape
+  namespace: {{ $ns }}
+  labels:
+    {{- include "bookstore.commonLabels" . | nindent 4 }}
+spec:
+  podSelector:
+    matchExpressions:
+      - key: app
+        operator: In
+        values: ["catalog", "orders", "payments-worker"]
+  policyTypes: ["Ingress"]
+  ingress:
+    - from:
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: {{ $np.monitoringNamespace }}
+      ports:
+        - { protocol: TCP, port: 8080 }
+{{- end }}

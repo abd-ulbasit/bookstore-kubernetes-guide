@@ -1,0 +1,93 @@
+# Bookstore Platform v2 — Part 13 ch.03: the root ApplicationSet that fans
+# the platform-base stack across all three regional clusters via the Cluster
+# generator. Run from the management cluster (us-east, by convention; the
+# Argo CD instance there has all three clusters registered via
+# `argocd cluster add`).
+#
+# How the Cluster generator works (Part 11 ch.06 deepened): it enumerates
+# every Cluster Secret in argocd's namespace and, for each matching the
+# label selector, instantiates a templated Application. The template below
+# selects clusters labelled `bookstore-platform.example.com/region` (set by
+# `argocd cluster add --label`); each generated Application points at the
+# matching region overlay.
+#
+# Generated Application names: `platform-base-<REGION>`. Server URLs come
+# from the cluster Secret automatically — never hard-coded.
+#
+# !!! CRD-INTRINSIC DRY-RUN
+#   `ApplicationSet` is `argoproj.io/v1alpha1` — an Argo CD CRD. WITHOUT
+#   Argo CD installed (cross-ref Part 07 ch.04 install path), a client
+#   dry-run prints:
+#     no matches for kind "ApplicationSet" in version "argoproj.io/v1alpha1"
+#   EXPECTED. After Argo CD is installed, this applies; the App-of-Apps + the
+#   per-cluster Applications are generated within seconds.
+#
+# Apply (after Argo CD installed + clusters added):
+#   argocd cluster add kind-bookstore-platform-us-east \
+#     --label bookstore-platform.example.com/region=us-east
+#   argocd cluster add kind-bookstore-platform-eu-west \
+#     --label bookstore-platform.example.com/region=eu-west
+#   argocd cluster add kind-bookstore-platform-ap-southeast \
+#     --label bookstore-platform.example.com/region=ap-southeast
+#   kubectl apply -f examples/bookstore-platform/argocd/applicationset-platform.yaml
+#   kubectl get applications -n argocd | grep platform-base
+apiVersion: argoproj.io/v1alpha1
+kind: ApplicationSet
+metadata:
+  name: platform-base
+  namespace: argocd
+  labels:
+    app.kubernetes.io/part-of: bookstore-platform
+spec:
+  generators:
+    - clusters:
+        selector:
+          # Match only clusters that carry the platform region label —
+          # excludes the in-cluster (management) Argo CD destination and
+          # any cluster Secret added without the platform region label.
+          # The previous matchLabels of `argocd.argoproj.io/secret-type:
+          # cluster` matched every registered cluster (too broad — it
+          # would have fanned the platform-base out to any Argo CD-
+          # registered cluster, regardless of whether it belongs to this
+          # platform).
+          matchExpressions:
+            - key: bookstore-platform.example.com/region
+              operator: Exists
+        values:
+          # surface the region label into the template
+          region: "{{ index .metadata.labels \"bookstore-platform.example.com/region\" }}"
+  template:
+    metadata:
+      name: "platform-base-{{ .values.region }}"
+      labels:
+        app.kubernetes.io/part-of: bookstore-platform
+        bookstore-platform.example.com/region: "{{ .values.region }}"
+    spec:
+      project: default
+      source:
+        # PLACEHOLDER: replace `https://github.com/<ORG>/<REPO>` with the real
+        # Git remote URL of the platform repo. The path tracks the region
+        # overlay; the chart-less Kustomize path matches `examples/bookstore-
+        # platform/kustomize/regions/<REGION>/`.
+        repoURL: "https://github.com/<ORG>/<REPO>"
+        targetRevision: main
+        path: "full-guide/examples/bookstore-platform/kustomize/regions/{{ .values.region }}"
+      destination:
+        # The Cluster generator filled in `name` automatically from the
+        # registered cluster Secret — no hard-coded URL.
+        name: "{{ .name }}"
+        # platform-base creates the bookstore-platform-* namespaces itself;
+        # Argo CD's syncPolicy CreateNamespace is OFF for that reason.
+      syncPolicy:
+        automated:
+          prune: true
+          selfHeal: true
+        syncOptions:
+          - PrunePropagationPolicy=foreground
+          - ApplyOutOfSyncOnly=true
+        retry:
+          limit: 5
+          backoff:
+            duration: 30s
+            factor: 2
+            maxDuration: 5m

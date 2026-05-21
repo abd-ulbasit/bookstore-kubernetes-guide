@@ -1,0 +1,71 @@
+# Bookstore — Part 11 ch.07 "Chaos engineering": EXPERIMENT 2 — inject 200ms
+# latency on catalog's traffic for 60s and observe the catalog SLO. Tests
+# whether the system degrades GRACEFULLY (slower, not down) when the
+# catalog→postgres path is impaired.
+#
+# THE HYPOTHESIS THIS TESTS
+#   "Adding 200ms±50ms network latency to catalog Pods for 60s degrades
+#   catalog p95 latency but does NOT push the 5xx error ratio over the SLO
+#   (raw-manifests/81-prometheusrule.yaml: CatalogHighErrorRate fires at >5%
+#   5xx for 10m; CatalogHighLatencyP95 at the p95 threshold). I.e. timeouts
+#   and pooling absorb a slow dependency rather than cascading to failure."
+#   Latency is the most common real-world degradation — far more than a clean
+#   Pod kill — so this is the higher-value experiment.
+#
+# SELECTOR matches the REAL catalog pod label (app=catalog, ns bookstore;
+# verified against raw-manifests/10-catalog-deploy.yaml). `direction: to` +
+# the postgres-side selector scope the impairment to the catalog→postgres
+# EDGE specifically (postgres app label = `postgres`, verified against
+# raw-manifests/20-postgres-statefulset.yaml / 40-services.yaml), not all of
+# catalog's traffic — a tighter blast radius.
+#
+# BOUNDED & REVERSIBLE: `duration: 60s` auto-reverts; Chaos Mesh removes the
+# tc/netem rule when the experiment ends or the object is deleted. The
+# injection is via the Chaos Mesh DAEMON (its own privileged DaemonSet in the
+# chaos-mesh namespace — NOT bookstore); the catalog Pods themselves are NOT
+# mutated and stay PSA-restricted-compliant. `kubectl delete -f` aborts early.
+#
+# !!! CRD-INTRINSIC DRY-RUN (identical precedent to 18-/51-/70-/83-/argocd) !!!
+#   `NetworkChaos` is a Chaos Mesh CRD (chaos-mesh.org/v1alpha1). WITHOUT
+#   Chaos Mesh installed a client dry-run prints:
+#     no matches for kind "NetworkChaos" in version "chaos-mesh.org/v1alpha1"
+#   EXPECTED, schema-correct — Chaos Mesh CRDs/controller must be installed
+#   first. Whole-dir dry-run prints this for CRD-backed files only and
+#   continues. Schema verified against Chaos Mesh chaos-mesh.org/v1alpha1
+#   NetworkChaos (action: delay).
+#
+# Requires: Chaos Mesh installed (own ns); the Bookstore running (catalog +
+#   postgres + 80-/81- so the SLO series exist to observe).
+# Apply:
+#   kubectl apply -f examples/bookstore/chaos/20-networkchaos-latency-catalog-postgres.yaml
+#   # observe: catalog p95 rises in the metrics; CatalogHighErrorRate should
+#   #          NOT fire if timeouts/pooling are correct (the hypothesis).
+#   kubectl delete -f examples/bookstore/chaos/20-networkchaos-latency-catalog-postgres.yaml
+apiVersion: chaos-mesh.org/v1alpha1
+kind: NetworkChaos
+metadata:
+  name: catalog-to-postgres-latency
+  namespace: bookstore
+  labels:
+    app.kubernetes.io/part-of: bookstore
+spec:
+  action: delay
+  mode: all                       # all catalog Pods (the edge under test)
+  selector:
+    namespaces:
+      - bookstore
+    labelSelectors:
+      app: catalog                # REAL catalog pod label (10-)
+  direction: to                   # impair catalog → <target> traffic…
+  target:                         # …specifically the postgres edge
+    mode: all
+    selector:
+      namespaces:
+        - bookstore
+      labelSelectors:
+        app: postgres             # REAL postgres pod label (20-)
+  delay:
+    latency: "200ms"
+    jitter: "50ms"
+    correlation: "50"
+  duration: "60s"                 # BOUNDED — auto-reverts after 60s

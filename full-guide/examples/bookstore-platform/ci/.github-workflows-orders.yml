@@ -1,0 +1,364 @@
+################################################################################
+# .github-workflows-orders.yml — Bookstore Platform `orders` service CI/CD.
+#
+# Parallel pattern to `.github-workflows-catalog.yml`. Same five jobs, same
+# OIDC + ECR + cosign keyless wiring, same GitOps PR seam. Differences
+# called out inline below:
+#
+#   - orders has TWO integration suites: against Postgres (the orders table)
+#     AND against a RabbitMQ/Redpanda broker (the publish-on-create path —
+#     payments-worker subscribes). The integration-test job brings up BOTH
+#     service containers.
+#
+#   - orders has higher unit-test coverage requirements (-coverpkg + a
+#     min-coverage gate at 70%). The catalog service is read-only and lean;
+#     orders carries the write path and its bugs cost money — coverage gates
+#     are a cheap belt-and-braces. The gate is informational on PRs and
+#     enforced on main (the typical pattern: PRs are fast, main is strict).
+#
+#   - orders uses a fan-in artifact pattern identical to catalog. The
+#     update-gitops-pr job opens a separate PR — the GitOps repo prefers
+#     one-PR-per-service for atomic rollback (`git revert` of a single PR
+#     undoes ONE service, not the whole sync).
+#
+# All other comments / prerequisites / branch-environment rules in the
+# catalog workflow apply verbatim. See ci/README.md.
+################################################################################
+
+name: orders-ci
+
+on:
+  pull_request:
+    paths:
+      - 'app/orders/**'
+      - '.github/workflows/orders.yml'
+  push:
+    branches:
+      - main
+    paths:
+      - 'app/orders/**'
+      - '.github/workflows/orders.yml'
+
+permissions:
+  id-token: write
+  contents: read
+  packages: read
+
+concurrency:
+  group: orders-ci-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  GO_VERSION: '1.23'
+  SERVICE: orders
+  WORKING_DIR: app/orders
+  COVERAGE_THRESHOLD: '70'
+
+jobs:
+  ############################################################################
+  # 1. lint-test — unit tests with COVERAGE GATE (orders writes orders;
+  #    a bug here costs real money — coverage is a cheap belt-and-braces).
+  ############################################################################
+  lint-test:
+    name: lint + unit test (coverage gated)
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: ${{ env.WORKING_DIR }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Go
+        uses: actions/setup-go@v5
+        with:
+          go-version: ${{ env.GO_VERSION }}
+          cache: true
+          cache-dependency-path: ${{ env.WORKING_DIR }}/go.sum
+
+      - name: go mod download
+        run: go mod download
+
+      - name: go vet
+        run: go vet ./...
+
+      - name: golangci-lint
+        uses: golangci/golangci-lint-action@v6
+        with:
+          version: v1.61.0
+          working-directory: ${{ env.WORKING_DIR }}
+          args: --timeout=5m
+
+      - name: go test (unit, coverpkg=all)
+        # -coverpkg=./... counts coverage across ALL packages, not just the
+        # one under test. The default scope (the test's own package) under-
+        # counts: an integration test in pkg/api reports 0% for pkg/db, even
+        # if every db function was exercised. orders cares about the whole
+        # surface.
+        run: |
+          go test -race -count=1 \
+            -coverpkg=./... \
+            -coverprofile=coverage.out \
+            ./...
+
+      - name: Enforce coverage gate (push to main only)
+        # PRs see the coverage as informational. main enforces — the
+        # asymmetry keeps PRs fast (fix locally, push, re-run cheap) while
+        # blocking a regression in the protected branch.
+        if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+        run: |
+          COVERAGE=$(go tool cover -func=coverage.out | awk '/^total:/ {gsub("%",""); print $3}')
+          echo "Coverage: ${COVERAGE}% (threshold: ${COVERAGE_THRESHOLD}%)"
+          # awk does the comparison in pure POSIX. bc/python avoided for
+          # portability and to keep the runner image lean.
+          awk -v c="$COVERAGE" -v t="$COVERAGE_THRESHOLD" \
+            'BEGIN { if (c+0 < t+0) { exit 1 } }'
+
+      - name: Upload coverage
+        uses: actions/upload-artifact@v4
+        with:
+          name: coverage-${{ env.SERVICE }}
+          path: ${{ env.WORKING_DIR }}/coverage.out
+          retention-days: 7
+
+  ############################################################################
+  # 2. integration-test — Postgres + RabbitMQ service containers. orders
+  #    writes a row AND publishes an event; both paths are integration-
+  #    tested against real brokers, not mocks.
+  ############################################################################
+  integration-test:
+    name: integration test (DB + broker)
+    runs-on: ubuntu-latest
+    needs: lint-test
+    services:
+      postgres:
+        image: postgres:16-alpine
+        env:
+          POSTGRES_USER: orders
+          POSTGRES_PASSWORD: orders
+          POSTGRES_DB: orders
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U orders"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 10
+      rabbitmq:
+        # Management image so the test can introspect queue depth via
+        # the HTTP API if needed (handy for assertions like "did we
+        # actually publish?").
+        image: rabbitmq:3.13-management-alpine
+        ports:
+          - 5672:5672
+          - 15672:15672
+        options: >-
+          --health-cmd "rabbitmq-diagnostics ping"
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 10
+    defaults:
+      run:
+        working-directory: ${{ env.WORKING_DIR }}
+    env:
+      DB_DSN: postgres://orders:orders@localhost:5432/orders?sslmode=disable
+      AMQP_URL: amqp://guest:guest@localhost:5672/
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Go
+        uses: actions/setup-go@v5
+        with:
+          go-version: ${{ env.GO_VERSION }}
+          cache: true
+          cache-dependency-path: ${{ env.WORKING_DIR }}/go.sum
+
+      - name: Run schema migration
+        run: go run ./cmd/migrate
+
+      - name: go test (integration)
+        run: go test -tags=integration -race -count=1 -timeout=8m ./...
+
+  ############################################################################
+  # 3. scan — Trivy fs scan. Same gate as catalog.
+  ############################################################################
+  scan:
+    name: trivy scan
+    runs-on: ubuntu-latest
+    needs: integration-test
+    defaults:
+      run:
+        working-directory: ${{ env.WORKING_DIR }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Trivy fs
+        uses: aquasecurity/trivy-action@0.28.0
+        with:
+          scan-type: fs
+          scan-ref: ${{ env.WORKING_DIR }}
+          severity: HIGH,CRITICAL
+          exit-code: '1'
+          ignore-unfixed: true
+          format: table
+
+  ############################################################################
+  # 4. build-sign-push — multi-arch, push by digest, cosign keyless +
+  #    SLSA provenance + syft SBOM. Identical mechanism to catalog.
+  ############################################################################
+  build-sign-push:
+    name: build + sign + push
+    runs-on: ubuntu-latest
+    needs: scan
+    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+    outputs:
+      digest: ${{ steps.build.outputs.digest }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Configure AWS credentials via OIDC
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ secrets.AWS_ROLE_ARN_ECR }}
+          aws-region: ${{ vars.AWS_REGION || 'ap-south-1' }}
+          audience: sts.amazonaws.com
+
+      - name: Login to ECR
+        uses: aws-actions/amazon-ecr-login@v2
+
+      - name: Set up QEMU
+        uses: docker/setup-qemu-action@v3
+        with:
+          platforms: arm64
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Install cosign
+        uses: sigstore/cosign-installer@v3
+        with:
+          cosign-release: 'v2.4.1'
+
+      - name: Install syft
+        uses: anchore/sbom-action/download-syft@v0.17.7
+
+      - name: Build + push
+        id: build
+        uses: docker/build-push-action@v6
+        with:
+          context: ${{ env.WORKING_DIR }}
+          file: ${{ env.WORKING_DIR }}/Dockerfile
+          push: true
+          platforms: linux/amd64,linux/arm64
+          tags: |
+            ${{ vars.ECR_REGISTRY }}/bookstore/${{ env.SERVICE }}:sha-${{ github.sha }}
+            ${{ vars.ECR_REGISTRY }}/bookstore/${{ env.SERVICE }}:latest-main
+          provenance: true
+          sbom: true
+          cache-from: type=gha,scope=orders
+          cache-to: type=gha,mode=max,scope=orders
+
+      - name: Trivy — scan pushed image
+        uses: aquasecurity/trivy-action@0.28.0
+        with:
+          image-ref: ${{ vars.ECR_REGISTRY }}/bookstore/${{ env.SERVICE }}@${{ steps.build.outputs.digest }}
+          severity: HIGH,CRITICAL
+          exit-code: '1'
+          ignore-unfixed: true
+
+      - name: Generate SBOM
+        run: |
+          syft "${{ vars.ECR_REGISTRY }}/bookstore/${{ env.SERVICE }}@${{ steps.build.outputs.digest }}" \
+            -o spdx-json > "${{ env.SERVICE }}.spdx.json"
+
+      - name: Cosign keyless sign
+        env:
+          COSIGN_YES: 'true'
+        run: |
+          cosign sign --yes \
+            "${{ vars.ECR_REGISTRY }}/bookstore/${{ env.SERVICE }}@${{ steps.build.outputs.digest }}"
+
+      - name: Cosign attest SBOM
+        env:
+          COSIGN_YES: 'true'
+        run: |
+          cosign attest --yes --type spdxjson \
+            --predicate "${{ env.SERVICE }}.spdx.json" \
+            "${{ vars.ECR_REGISTRY }}/bookstore/${{ env.SERVICE }}@${{ steps.build.outputs.digest }}"
+
+      - name: Upload digest artifact
+        run: echo "${{ steps.build.outputs.digest }}" > digest.txt
+      - uses: actions/upload-artifact@v4
+        with:
+          name: digest-${{ env.SERVICE }}
+          path: digest.txt
+          retention-days: 7
+          if-no-files-found: error
+
+  ############################################################################
+  # 5. update-gitops-pr — separate PR per service so a `git revert` rolls
+  #    back ONE service, not the whole sync. One-PR-per-service is the
+  #    atomic-rollback discipline; Part 15 ch.07 (parallel phase 15c)
+  #    explores the rollback playbook in depth.
+  ############################################################################
+  update-gitops-pr:
+    name: open gitops PR
+    runs-on: ubuntu-latest
+    needs: build-sign-push
+    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+    steps:
+      - name: Checkout GitOps repo
+        uses: actions/checkout@v4
+        with:
+          repository: ${{ vars.GITOPS_REPO }}
+          token: ${{ secrets.GITOPS_PR_TOKEN }}
+          path: gitops
+
+      - name: Download digest artifact
+        uses: actions/download-artifact@v4
+        with:
+          name: digest-${{ env.SERVICE }}
+          path: .
+
+      - name: Install kustomize
+        run: |
+          KUSTOMIZE_VERSION=v5.5.0
+          curl -fsSL -o /tmp/kustomize.tar.gz \
+            "https://github.com/kubernetes-sigs/kustomize/releases/download/kustomize/${KUSTOMIZE_VERSION}/kustomize_${KUSTOMIZE_VERSION}_linux_amd64.tar.gz"
+          tar -xzf /tmp/kustomize.tar.gz -C /usr/local/bin
+          kustomize version
+
+      - name: Bump dev overlay digest
+        run: |
+          DIGEST="$(cat digest.txt)"
+          if [ -z "$DIGEST" ] || ! echo "$DIGEST" | grep -q '^sha256:'; then
+            echo "Refusing to write empty/invalid digest: '$DIGEST'"
+            exit 1
+          fi
+          cd gitops/kustomize/overlays/dev
+          kustomize edit set image \
+            "bookstore/${{ env.SERVICE }}=${{ vars.ECR_REGISTRY }}/bookstore/${{ env.SERVICE }}@${DIGEST}"
+
+      - name: Create PR
+        uses: peter-evans/create-pull-request@v7
+        with:
+          path: gitops
+          token: ${{ secrets.GITOPS_PR_TOKEN }}
+          branch: bump/orders-${{ github.sha }}
+          base: main
+          title: 'bump: orders → ${{ github.sha }}'
+          body: |
+            Bump `bookstore/orders` to the freshly built + signed image.
+
+            - **commit**:  ${{ github.sha }}
+            - **workflow**: ${{ github.workflow }} (run ${{ github.run_id }})
+            - **coverage**: see workflow artifacts (gate enforced on main)
+
+            Argo CD (Part 07 ch.04) reconciles on merge.
+            Kyverno `verifyImages` (Part 15 ch.03) verifies the keyless
+            signature at admission.
+          commit-message: 'bump(orders): ${{ github.sha }}'
+          delete-branch: true

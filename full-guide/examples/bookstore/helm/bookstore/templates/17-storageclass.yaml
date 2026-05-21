@@ -1,0 +1,28 @@
+{{/*
+  Optional explicit StorageClass (raw-manifests 17-storageclass.yaml). Opt-in
+  teaching scaffolding, DEFAULT OFF (storageClass.create=false) — exactly like
+  raw 17- is "opt-in teaching scaffolding". postgres's volumeClaimTemplate uses
+  the cluster DEFAULT class (postgres.persistence.storageClassName=""), so this
+  class is only created if you opt in AND point the PVC at it. NOT annotated as
+  default (the cluster default stays whatever kind/k3d ships).
+  WaitForFirstConsumer = bind on Pod schedule (topology-aware).
+
+  Like the PriorityClasses (35-), a StorageClass is CLUSTER-SCOPED and may be
+  referenced by PVCs from other releases/workloads, so it is annotated
+  helm.sh/resource-policy: keep — `helm uninstall` of THIS release must not
+  delete a cluster object another PVC could still be bound to.
+*/}}
+{{- if .Values.storageClass.create }}
+apiVersion: storage.k8s.io/v1
+kind: StorageClass
+metadata:
+  name: {{ .Values.storageClass.name }}
+  labels:
+    {{- include "bookstore.commonLabels" . | nindent 4 }}
+  annotations:
+    helm.sh/resource-policy: keep
+provisioner: {{ .Values.storageClass.provisioner }}
+volumeBindingMode: {{ .Values.storageClass.volumeBindingMode }}
+reclaimPolicy: {{ .Values.storageClass.reclaimPolicy }}
+allowVolumeExpansion: {{ .Values.storageClass.allowVolumeExpansion }}
+{{- end }}

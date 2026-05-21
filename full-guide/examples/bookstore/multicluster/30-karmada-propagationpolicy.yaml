@@ -1,0 +1,75 @@
+# Bookstore — Part 11 ch.06 "Multi-cluster & fleet": a Karmada
+# PropagationPolicy — the ALTERNATIVE fleet model to Argo CD ApplicationSet
+# (10-/20-). Shown so the chapter contrasts the two fleet approaches; you use
+# EITHER GitOps-fans-out (ApplicationSet) OR a fleet control plane (Karmada),
+# not both for the same workloads.
+#
+# APPLICATIONSET vs KARMADA (the contrast this file teaches)
+#   ApplicationSet (10-/20-): Argo CD reconciles the SAME manifests into N
+#   member clusters from Git — pull-based GitOps per cluster, Argo is the
+#   single pane. Each member cluster has its own copy; differences via
+#   overlays.
+#   KARMADA: a dedicated FLEET control plane. You apply a workload + a
+#   PropagationPolicy to the Karmada APISERVER (not a member cluster); Karmada
+#   SCHEDULES/SPREADS it across member clusters per the policy (replica
+#   division, cluster affinity, weighting, failover). It is closer to "a
+#   scheduler for clusters" than "GitOps to N clusters". Cluster API /
+#   clusterctl is the orthogonal LIFECYCLE tool (create/upgrade the clusters
+#   themselves) — Karmada/Argo run workloads ON them.
+#
+# !!! CRD-INTRINSIC DRY-RUN (identical precedent to argocd/ + 18-/51-/70-/83-)
+#   `PropagationPolicy` is a Karmada CRD (policy.karmada.io/v1alpha1) and is
+#   applied to the KARMADA control-plane apiserver, not a normal cluster.
+#   WITHOUT Karmada installed, a client dry-run prints
+#     no matches for kind "PropagationPolicy" in version
+#       "policy.karmada.io/v1alpha1"
+#   EXPECTED, schema-correct — the Karmada control plane/CRDs must exist
+#   first (chapter notes the install is heavier than ApplicationSet; karmadactl
+#   / Helm, pinned). Whole-dir dry-run prints this for CRD-backed files only
+#   and continues. Schema verified against Karmada policy.karmada.io/v1alpha1
+#   PropagationPolicy.
+#
+# This propagates the Bookstore `catalog` Deployment + Service across two
+# member clusters with a weighted spread — illustrative; the real Bookstore
+# workloads are the canonical raw-manifests (UNTOUCHED — this references their
+# names/labels, it does not redefine them).
+#
+# Requires: a Karmada control plane + ≥2 member clusters joined
+#   (`karmadactl join`); applied to the Karmada apiserver context.
+# Apply (against the Karmada control plane, NOT a member cluster):
+#   kubectl --context karmada-apiserver apply \
+#     -f examples/bookstore/multicluster/30-karmada-propagationpolicy.yaml
+apiVersion: policy.karmada.io/v1alpha1
+kind: PropagationPolicy
+metadata:
+  name: bookstore-catalog-spread
+  namespace: bookstore
+  labels:
+    app.kubernetes.io/part-of: bookstore
+spec:
+  resourceSelectors:
+    # Select the canonical Bookstore catalog workload by GVK + name. Karmada
+    # propagates whatever object with this identity is applied to its
+    # apiserver — it does NOT modify raw-manifests/10-/40-.
+    - apiVersion: apps/v1
+      kind: Deployment
+      name: catalog
+      namespace: bookstore
+    - apiVersion: v1
+      kind: Service
+      name: catalog
+      namespace: bookstore
+  placement:
+    clusterAffinity:
+      clusterNames:
+        - member-east           # the two member clusters joined to Karmada
+        - member-west
+    replicaScheduling:
+      replicaSchedulingType: Divided     # SPLIT replicas across members…
+      replicaDivisionPreference: Weighted
+      weightPreference:
+        staticWeightList:
+          - targetCluster: { clusterNames: ["member-east"] }
+            weight: 2          # ~2/3 of catalog replicas to east…
+          - targetCluster: { clusterNames: ["member-west"] }
+            weight: 1          # …~1/3 to west (regional weighting / DR posture)

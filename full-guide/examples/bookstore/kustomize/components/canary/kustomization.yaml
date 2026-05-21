@@ -1,0 +1,64 @@
+# Bookstore Kustomize COMPONENT — canary (MANUAL canary of catalog, Part 01
+# ch.08). The analog of the Helm chart's catalog-XOR-canary toggle.
+#
+# This SWAPS the canonical single `catalog` Deployment (base 10-) for the
+# stable/canary PAIR: it (a) deletes the base `catalog` Deployment with a
+# `$patch: delete`, (b) deletes the base catalog HPA (82-) — its
+# scaleTargetRef points at the now-removed `catalog` Deployment, so leaving it
+# in would orphan it ("could not find resource"); the canary's replica ratio
+# is managed by `kubectl scale`, not an HPA — and (c) adds catalog-stable +
+# catalog-canary (catalog-canary.yaml). The base `catalog` Service (40-) is
+# REUSED unchanged — its `app: catalog` selector fronts BOTH tracks, which is
+# exactly the manual canary design (traffic split == the stable:canary replica
+# ratio; ramp/abort by `kubectl scale`). Stable+canary and the canonical
+# catalog are MUTUALLY EXCLUSIVE (both define `app: catalog` Pods) — this
+# component enforces that structurally by removing 10- AND its HPA, so
+# enabling the component can never leave an orphaned autoscaler. (To keep
+# autoscaling, add an HPA targeting `catalog-stable` in the overlay.)
+#
+# NO CRD prerequisite — every object is a built-in Deployment. (This is the
+# only component that needs no operator; it is purely a Deployment-topology
+# variant. Automated, metric-gated, weighted progressive delivery is Part 07
+# ch.05 — Argo Rollouts; this is the manual replica-ratio form.)
+#
+# Enable by adding to an overlay's `components:` list, e.g.:
+#   components:
+#     - ../../components/canary
+apiVersion: kustomize.config.k8s.io/v1alpha1
+kind: Component
+
+resources:
+  - catalog-canary.yaml
+
+# Remove the canonical catalog Deployment (base 10-) so the stable/canary
+# pair replaces it (mutually exclusive — never both), AND remove the catalog
+# HPA (base 82-) in the same component so enabling canary can never leave an
+# orphaned autoscaler whose scaleTargetRef points at a deleted Deployment.
+# This is now structural (the component does it), not advisory. NOTE: do NOT
+# also $patch:delete the HPA at the overlay level when this component is
+# enabled — kustomize errors if two patches delete the same resource id
+# (e.g. the dev overlay already deletes the HPA, so an overlay that enables
+# canary must NOT additionally have its own HPA-delete; see ../README.md).
+patches:
+  - target:
+      group: apps
+      version: v1
+      kind: Deployment
+      name: catalog
+    patch: |
+      $patch: delete
+      apiVersion: apps/v1
+      kind: Deployment
+      metadata:
+        name: catalog
+  - target:
+      group: autoscaling
+      version: v2
+      kind: HorizontalPodAutoscaler
+      name: catalog
+    patch: |
+      $patch: delete
+      apiVersion: autoscaling/v2
+      kind: HorizontalPodAutoscaler
+      metadata:
+        name: catalog

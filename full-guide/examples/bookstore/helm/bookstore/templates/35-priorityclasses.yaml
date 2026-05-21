@@ -1,0 +1,33 @@
+{{/*
+  The three cluster-scoped PriorityClasses (raw-manifests 35-priorityclasses
+  .yaml). PriorityClass is NOT namespaced and is shared across the whole
+  cluster, so:
+    * behind a toggle (priorityClasses.create) — a vanilla install can skip
+      them if the cluster already defines them;
+    * annotated helm.sh/resource-policy: keep so `helm uninstall` of THIS
+      release does not delete classes another release/workload still uses
+      (deleting a referenced PriorityClass would break future Pod admission).
+  All values are FAR below system-cluster-critical/system-node-critical so
+  Bookstore can never out-prioritise control-plane/node add-ons.
+*/}}
+{{- if .Values.priorityClasses.create }}
+{{- $ctx := . }}
+{{- range $name, $pc := .Values.priorityClasses.data }}
+---
+apiVersion: scheduling.k8s.io/v1
+kind: PriorityClass
+metadata:
+  name: {{ $name }}
+  labels:
+    {{- include "bookstore.commonLabels" $ctx | nindent 4 }}
+  annotations:
+    # Survive `helm uninstall`: a referenced PriorityClass must not vanish.
+    helm.sh/resource-policy: keep
+value: {{ $pc.value }}
+globalDefault: false
+{{- if $pc.preemptionPolicy }}
+preemptionPolicy: {{ $pc.preemptionPolicy }}
+{{- end }}
+description: {{ $pc.description | quote }}
+{{- end }}
+{{- end }}

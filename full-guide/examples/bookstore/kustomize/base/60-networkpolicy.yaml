@@ -1,0 +1,325 @@
+# Bookstore — Part 02 ch.06 "Network policies": zero-trust the namespace.
+#
+# By default every Pod can talk to every other Pod (default-ALLOW). These
+# policies flip the `bookstore` namespace to default-DENY and then ALLOW only
+# the edges the app actually needs. NetworkPolicy is ADDITIVE/whitelist: once
+# any policy selects a Pod for a direction, ONLY explicitly allowed traffic in
+# that direction is permitted.
+#
+# !!! CNI REQUIREMENT !!!  NetworkPolicy is enforced by the CNI, not the API
+# server. kind's default CNI (kindnet) does NOT enforce NetworkPolicy — these
+# objects apply cleanly but are a SILENT NO-OP there. To actually see
+# enforcement, run a policy-enforcing CNI (Calico or Cilium); ch.06 documents
+# installing Calico on kind. (Managed EKS/GKE/AKS: enable the policy plugin.)
+#
+# !!! DNS EGRESS !!!  default-deny egress also blocks DNS. Every Pod that
+# resolves a Service name needs egress to kube-dns/CoreDNS (UDP+TCP 53) or the
+# whole app breaks with name-resolution failures. The allow-dns-egress policy
+# below is mandatory; this is the single most common NetworkPolicy outage.
+#
+# !!! BOTH ENDS !!!  egress is ALSO default-denied, so every Pod-to-Pod edge
+# needs an allow on BOTH sides: an Ingress rule on the destination AND an
+# Egress rule on the source. storefront->catalog/orders therefore needs the
+# destination Ingress (rule 4) AND the source Egress (rule 8); the backend
+# callers catalog/orders likewise (rules 5/6 ingress + rule 7 egress).
+#
+# selectors verified against the real pod labels:
+#   storefront app: storefront (11-)  catalog         app: catalog        (10-)
+#   orders     app: orders     (14-)  postgres        app: postgres       (20-)
+#   rabbitmq   app: rabbitmq   (13-)  payments-worker app: payments-worker (19-)
+#   ingress-nginx + monitoring namespaces matched by ns label below
+#
+# Part 06 ch.04 increment (additive — all 8 prior policies are unchanged
+# except rule 6, which GAINS payments-worker as an allowed source; two new
+# policies are appended):
+#  • payments-worker -> rabbitmq (the worker consumes the "orders" queue,
+#    app/payments-worker/main.go). Like every backend edge this needs BOTH
+#    ends: rule 6's Ingress on rabbitmq now also admits app: payments-worker,
+#    and a new Egress policy (rule 9) lets payments-worker reach rabbitmq:5672.
+#  • Prometheus scrape (Part 06 ch.01): kube-prometheus-stack runs in the
+#    `monitoring` namespace and must reach the /metrics ports of catalog,
+#    orders and payments-worker (all :8080). default-deny Ingress (rule 1)
+#    blocks that, so a new Ingress policy (rule 10) admits the monitoring
+#    namespace to those three tiers on 8080. Without it every ServiceMonitor
+#    target shows "context deadline exceeded" once a policy CNI is enforcing.
+#
+# Requires (objects to enforce against):
+#   kubectl apply -f examples/bookstore/raw-manifests/00-namespace.yaml
+#   kubectl apply -f examples/bookstore/raw-manifests/{10,11,13,14,19,20}-*.yaml
+#   # a policy-enforcing CNI (Calico/Cilium) for ENFORCEMENT (ch.06)
+# Apply:
+#   kubectl apply -f examples/bookstore/raw-manifests/60-networkpolicy.yaml
+#   kubectl get networkpolicy -n bookstore
+---
+# 1) Baseline default-deny: select ALL Pods, allow NOTHING in either
+#    direction. Every allow below is added on top of this.
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: default-deny-all
+  namespace: bookstore
+  labels:
+    app.kubernetes.io/part-of: bookstore
+spec:
+  podSelector: {}                   # {} = every Pod in the namespace
+  policyTypes: ["Ingress", "Egress"]
+  # no ingress: / egress: rules => deny all of both
+---
+# 2) MANDATORY: allow every Pod egress to cluster DNS (CoreDNS in
+#    kube-system). Without this, default-deny egress breaks all name
+#    resolution. Matches the kube-system namespace + the kube-dns Service
+#    pods (label k8s-app=kube-dns, the upstream CoreDNS label).
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: allow-dns-egress
+  namespace: bookstore
+  labels:
+    app.kubernetes.io/part-of: bookstore
+spec:
+  podSelector: {}                   # applies to every Pod in the namespace
+  policyTypes: ["Egress"]
+  egress:
+    - to:
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: kube-system
+          podSelector:
+            matchLabels:
+              k8s-app: kube-dns
+      ports:
+        - { protocol: UDP, port: 53 }
+        - { protocol: TCP, port: 53 }
+---
+# 3) ingress-nginx (or the Gateway controller) -> storefront / catalog /
+#    orders. The controller lives in its own namespace; allow it to reach the
+#    three HTTP-fronted tiers on 8080. Namespace match uses the immutable
+#    kubernetes.io/metadata.name label (= the controller's namespace; adjust
+#    if you installed it elsewhere in ch.04/05).
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: allow-ingress-to-http-tiers
+  namespace: bookstore
+  labels:
+    app.kubernetes.io/part-of: bookstore
+spec:
+  podSelector:
+    matchExpressions:
+      - key: app
+        operator: In
+        values: ["storefront", "catalog", "orders"]
+  policyTypes: ["Ingress"]
+  ingress:
+    - from:
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: ingress-nginx
+      ports:
+        - { protocol: TCP, port: 8080 }
+---
+# 4) storefront -> catalog and storefront -> orders (the UI calls the APIs).
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: allow-storefront-to-apis
+  namespace: bookstore
+  labels:
+    app.kubernetes.io/part-of: bookstore
+spec:
+  podSelector:
+    matchExpressions:
+      - key: app
+        operator: In
+        values: ["catalog", "orders"]
+  policyTypes: ["Ingress"]
+  ingress:
+    - from:
+        - podSelector:
+            matchLabels:
+              app: storefront
+      ports:
+        - { protocol: TCP, port: 8080 }
+---
+# 5) catalog -> postgres (catalog reads the books table). Ingress rule ON
+#    postgres allowing catalog; the matching egress allowance for catalog is
+#    rule 7 (egress is also default-denied, so BOTH sides must permit it).
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: allow-catalog-to-postgres
+  namespace: bookstore
+  labels:
+    app.kubernetes.io/part-of: bookstore
+spec:
+  podSelector:
+    matchLabels:
+      app: postgres
+  policyTypes: ["Ingress"]
+  ingress:
+    - from:
+        - podSelector:
+            matchLabels:
+              app: catalog
+      ports:
+        - { protocol: TCP, port: 5432 }
+---
+# 6) orders -> rabbitmq (orders PUBLISHES order events) AND
+#    payments-worker -> rabbitmq (payments-worker CONSUMES them). Both speak
+#    AMQP 5672 to the same broker, so this single Ingress rule on rabbitmq
+#    admits BOTH source apps. The matching egress allowances are rule 7
+#    (orders, with catalog) and rule 9 (payments-worker).
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: allow-orders-to-rabbitmq
+  namespace: bookstore
+  labels:
+    app.kubernetes.io/part-of: bookstore
+spec:
+  podSelector:
+    matchLabels:
+      app: rabbitmq
+  policyTypes: ["Ingress"]
+  ingress:
+    - from:
+        - podSelector:
+            matchLabels:
+              app: orders
+        - podSelector:
+            matchLabels:
+              app: payments-worker      # Part 06 ch.04: the queue consumer
+      ports:
+        - { protocol: TCP, port: 5672 }
+---
+# 7) Egress side of the backend edges. default-deny egress (rule 1) also
+#    blocks catalog->postgres and orders->rabbitmq unless the SOURCE Pod is
+#    granted egress too. (DNS egress is rule 2; this adds the data-plane
+#    egress for the two backend callers.)
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: allow-backend-egress
+  namespace: bookstore
+  labels:
+    app.kubernetes.io/part-of: bookstore
+spec:
+  podSelector:
+    matchExpressions:
+      - key: app
+        operator: In
+        values: ["catalog", "orders"]
+  policyTypes: ["Egress"]
+  egress:
+    - to:
+        - podSelector:
+            matchLabels:
+              app: postgres
+      ports:
+        - { protocol: TCP, port: 5432 }
+    - to:
+        - podSelector:
+            matchLabels:
+              app: rabbitmq
+      ports:
+        - { protocol: TCP, port: 5672 }
+---
+# 8) Egress side of the storefront->catalog/orders edges. default-deny egress
+#    (rule 1) also blocks storefront's calls to the APIs unless storefront is
+#    granted egress too. Rule 4 is the matching INGRESS (on catalog/orders);
+#    this is the SOURCE egress that completes the both-ends requirement. Pair
+#    with the mandatory DNS egress (rule 2) so storefront can resolve the
+#    Service names first.
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: allow-storefront-egress
+  namespace: bookstore
+  labels:
+    app.kubernetes.io/part-of: bookstore
+spec:
+  podSelector:
+    matchLabels:
+      app: storefront
+  policyTypes: ["Egress"]
+  egress:
+    - to:
+        - podSelector:
+            matchLabels:
+              app: catalog
+      ports:
+        - { protocol: TCP, port: 8080 }
+    - to:
+        - podSelector:
+            matchLabels:
+              app: orders
+      ports:
+        - { protocol: TCP, port: 8080 }
+---
+# 9) Part 06 ch.04 — Egress side of payments-worker -> rabbitmq. default-deny
+#    egress (rule 1) also blocks the worker's AMQP connection unless the
+#    SOURCE Pod is granted egress. Rule 6 is the matching INGRESS (on
+#    rabbitmq, now admitting app: payments-worker); this is the SOURCE egress
+#    that completes the both-ends requirement. Pair with the mandatory DNS
+#    egress (rule 2, podSelector {} — already covers payments-worker) so the
+#    worker can resolve rabbitmq.bookstore.svc.cluster.local first.
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: allow-payments-worker-egress
+  namespace: bookstore
+  labels:
+    app.kubernetes.io/part-of: bookstore
+spec:
+  podSelector:
+    matchLabels:
+      app: payments-worker
+  policyTypes: ["Egress"]
+  egress:
+    - to:
+        - podSelector:
+            matchLabels:
+              app: rabbitmq
+      ports:
+        - { protocol: TCP, port: 5672 }
+---
+# 10) Part 06 ch.01 — allow the monitoring namespace (kube-prometheus-stack,
+#     installed in ch.01) to SCRAPE the /metrics endpoints of the three
+#     metrics-exposing tiers on :8080. default-deny Ingress (rule 1) blocks
+#     Prometheus otherwise and every ServiceMonitor (80-) / PodMonitor target
+#     reports a scrape timeout. Namespace match uses the immutable
+#     kubernetes.io/metadata.name label (= the namespace Prometheus runs in;
+#     adjust if you installed kube-prometheus-stack elsewhere). storefront is
+#     deliberately NOT here — the nginx UI exposes no Prometheus metrics.
+#
+#     INTENTIONALLY ONE-SIDED (contrast the "both-ends" rules 4-9). The
+#     intra-namespace backend edges need an egress half because BOTH endpoints
+#     live in this default-DENY namespace (rule 1 also denies egress). This
+#     edge is CROSS-namespace: the source (Prometheus) is in the `monitoring`
+#     namespace, which kube-prometheus-stack does NOT place under a
+#     default-deny NetworkPolicy — so Prometheus already has unrestricted
+#     egress and needs NO egress rule. NetworkPolicy is per-namespace; only
+#     the destination side (`bookstore`) is locked down, so this destination
+#     Ingress is the ONLY half there is to add. Not a missing half — the
+#     source side simply isn't policy-restricted.
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: allow-monitoring-scrape
+  namespace: bookstore
+  labels:
+    app.kubernetes.io/part-of: bookstore
+spec:
+  podSelector:
+    matchExpressions:
+      - key: app
+        operator: In
+        values: ["catalog", "orders", "payments-worker"]
+  policyTypes: ["Ingress"]
+  ingress:
+    - from:
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: monitoring
+      ports:
+        - { protocol: TCP, port: 8080 }

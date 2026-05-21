@@ -1,0 +1,77 @@
+# Bookstore Platform v2 — Part 13 ch.05/06: the Strimzi Kafka cluster the
+# platform's event-driven pieces ride on. ONE cluster per region; topics are
+# regional (no cross-region MirrorMaker in Phase 13b — that is a 13.12
+# day-2 follow-up).
+#
+# Strimzi (https://strimzi.io) is the Kafka operator. It defines:
+#   - Kafka            — the cluster CR (brokers + zookeeper/kraft + listeners)
+#   - KafkaTopic       — a topic as a Kubernetes resource (declarative)
+#   - KafkaConnect     — a Kafka Connect cluster (Debezium, sinks)
+#   - KafkaConnector   — an individual connector inside the Connect cluster
+#   - KafkaUser        — a SASL user with ACLs
+#
+# THIS FILE creates a 3-broker KRaft cluster (no separate ZooKeeper) — Strimzi
+# 0.40+ default. KRaft mode is the future; the chapter teaches KRaft to avoid
+# the ZK-deprecation footgun. 3 brokers + replication.factor 3 + min ISR 2 is
+# the smallest setup that survives one broker loss without data loss.
+#
+# !!! CRD-INTRINSIC DRY-RUN
+#   `Kafka` and `KafkaTopic` are Strimzi CRDs (kafka.strimzi.io/v1beta2).
+#   WITHOUT Strimzi installed a client dry-run prints:
+#     no matches for kind "Kafka" in version "kafka.strimzi.io/v1beta2"
+#   EXPECTED. Install Strimzi first (ch.13.05 Hands-on §1 — pinned-Helm
+#   `strimzi/strimzi-kafka-operator --version 0.40.0` into `kafka-system` ns).
+#
+# PSA — broker Pods land in `kafka-system` (PSA: restricted on this ns is
+# enforced by the platform-base namespace template; Strimzi 0.40+ ships a
+# restricted-compatible PodSpec by default).
+#
+# Apply (after Strimzi operator):
+#   kubectl apply -f examples/bookstore-platform/kafka/cluster.yaml
+---
+apiVersion: kafka.strimzi.io/v1beta2
+kind: Kafka
+metadata:
+  name: bookstore-platform-kafka
+  namespace: kafka-system
+  labels:
+    app.kubernetes.io/part-of: bookstore-platform
+    bookstore-platform.example.com/component: event-bus
+  annotations:
+    # Strimzi 0.40+ uses KRaft (no ZooKeeper) when this annotation is set.
+    strimzi.io/node-pools: enabled
+    strimzi.io/kraft: enabled
+spec:
+  kafka:
+    version: "3.7.0"
+    # With node-pools enabled (annotation above), `replicas`, `storage`,
+    # and `resources` are OWNED by the KafkaNodePool CR (nodepool.yaml).
+    # Strimzi ignores them here and would warn on apply. Cluster-level
+    # listener + config remain on the Kafka CR.
+    listeners:
+      # Plaintext + SASL inside the mesh; mTLS is enforced one layer up via
+      # Istio ambient (Part 11 ch.04). Production sets `tls: true` and a
+      # cert-manager-issued cert; on kind the in-cluster listener is enough.
+      - name: plain
+        port: 9092
+        type: internal
+        tls: false
+      - name: tls
+        port: 9093
+        type: internal
+        tls: true
+        authentication:
+          type: tls
+    config:
+      # Production-shape defaults (Confluent's recommendation, scaled to 3 brokers).
+      offsets.topic.replication.factor: 3
+      transaction.state.log.replication.factor: 3
+      transaction.state.log.min.isr: 2
+      default.replication.factor: 3
+      min.insync.replicas: 2
+      # KRaft + auto-create OFF (every topic is declared via KafkaTopic CR).
+      auto.create.topics.enable: false
+  # Entity operator manages KafkaTopic + KafkaUser CRs as actual Kafka resources.
+  entityOperator:
+    topicOperator: {}
+    userOperator: {}

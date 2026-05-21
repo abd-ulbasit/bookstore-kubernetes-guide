@@ -1,0 +1,199 @@
+# Bookstore Platform v2 — Part 13 ch.10: Grafana dashboard for the
+# per-tenant + per-region + per-workload-class cost story. Uses the
+# pre-aggregated recording rules in opencost-tenant-aggregations.yaml
+# so the panels are fast on a 30-day window.
+#
+# v1 had no cost dashboard; v2's is the showback UX for the FinOps
+# Inform phase (ch.13.10 mental model).
+#
+# !!! CRD-INTRINSIC DRY-RUN
+#   `GrafanaDashboard` is `grafana.integreatly.org/v1beta1` — installed
+#   by grafana-operator. WITHOUT grafana-operator:
+#     no matches for kind "GrafanaDashboard" in version "grafana.integreatly.org/v1beta1"
+#   EXPECTED.
+#
+# Apply:
+#   kubectl apply -f examples/bookstore-platform/cost/grafana-cost-dashboard.yaml
+---
+apiVersion: grafana.integreatly.org/v1beta1
+kind: GrafanaDashboard
+metadata:
+  name: bookstore-platform-cost
+  namespace: prometheus-system
+  labels:
+    app.kubernetes.io/name: bookstore-platform-cost
+    app.kubernetes.io/instance: bookstore-platform-cost
+    app.kubernetes.io/part-of: bookstore-platform
+    app.kubernetes.io/component: cost-dashboard
+    app.kubernetes.io/version: "1.0.0"
+    grafana_dashboard: "1"
+spec:
+  instanceSelector:
+    matchLabels:
+      dashboards: bookstore-platform
+  resyncPeriod: 1m
+  json: |
+    {
+      "uid": "bookstore-platform-cost",
+      "title": "Bookstore Platform — Cost",
+      "tags": ["bookstore-platform", "cost", "finops"],
+      "schemaVersion": 39,
+      "time": { "from": "now-30d", "to": "now" },
+      "templating": {
+        "list": [
+          {
+            "name": "tenant",
+            "type": "query",
+            "datasource": "Prometheus",
+            "query": "label_values(bookstore:cost_per_hour:by_tenant, tenant)",
+            "includeAll": true,
+            "multi": true,
+            "refresh": 2,
+            "label": "Tenant"
+          },
+          {
+            "name": "region",
+            "type": "query",
+            "datasource": "Prometheus",
+            "query": "label_values(bookstore:cost_per_hour:by_region, region)",
+            "includeAll": true,
+            "multi": true,
+            "refresh": 2,
+            "label": "Region"
+          }
+        ]
+      },
+      "panels": [
+        {
+          "id": 1,
+          "type": "stat",
+          "title": "Total cost — last 30 days (USD)",
+          "datasource": "Prometheus",
+          "gridPos": { "h": 6, "w": 6, "x": 0, "y": 0 },
+          "targets": [
+            {
+              "expr": "sum(bookstore:cost_30d:by_tenant{tenant=~\"$tenant\"})",
+              "refId": "A"
+            }
+          ],
+          "fieldConfig": {
+            "defaults": {
+              "unit": "currencyUSD",
+              "decimals": 2
+            }
+          }
+        },
+        {
+          "id": 2,
+          "type": "table",
+          "title": "Cost per tenant — last 30 days",
+          "datasource": "Prometheus",
+          "gridPos": { "h": 12, "w": 18, "x": 6, "y": 0 },
+          "targets": [
+            {
+              "expr": "topk(50, bookstore:cost_30d:by_tenant{tenant=~\"$tenant\"})",
+              "format": "table",
+              "refId": "A"
+            }
+          ],
+          "fieldConfig": {
+            "defaults": {
+              "unit": "currencyUSD",
+              "decimals": 2
+            }
+          }
+        },
+        {
+          "id": 3,
+          "type": "timeseries",
+          "title": "Cost per region (stacked, USD/hour)",
+          "datasource": "Prometheus",
+          "gridPos": { "h": 8, "w": 12, "x": 0, "y": 12 },
+          "targets": [
+            {
+              "expr": "bookstore:cost_per_hour:by_region{region=~\"$region\"}",
+              "legendFormat": "{{region}}",
+              "refId": "A"
+            }
+          ],
+          "fieldConfig": {
+            "defaults": {
+              "unit": "currencyUSD",
+              "decimals": 2
+            }
+          }
+        },
+        {
+          "id": 4,
+          "type": "piechart",
+          "title": "Cost per workload-class",
+          "datasource": "Prometheus",
+          "gridPos": { "h": 8, "w": 12, "x": 12, "y": 12 },
+          "targets": [
+            {
+              "expr": "bookstore:cost_per_hour:by_class",
+              "legendFormat": "{{class}}",
+              "refId": "A"
+            }
+          ],
+          "fieldConfig": {
+            "defaults": {
+              "unit": "currencyUSD",
+              "decimals": 2
+            }
+          }
+        },
+        {
+          "id": 5,
+          "type": "timeseries",
+          "title": "GPU vs CPU spend per tenant (USD/hour)",
+          "datasource": "Prometheus",
+          "gridPos": { "h": 8, "w": 12, "x": 0, "y": 20 },
+          "targets": [
+            {
+              "expr": "bookstore:gpu_cost_per_hour:by_tenant{tenant=~\"$tenant\"}",
+              "legendFormat": "GPU {{tenant}}",
+              "refId": "A"
+            },
+            {
+              "expr": "bookstore:cost_per_hour:by_tenant{tenant=~\"$tenant\"} - bookstore:gpu_cost_per_hour:by_tenant{tenant=~\"$tenant\"}",
+              "legendFormat": "CPU {{tenant}}",
+              "refId": "B"
+            }
+          ],
+          "fieldConfig": {
+            "defaults": {
+              "unit": "currencyUSD",
+              "decimals": 2
+            }
+          }
+        },
+        {
+          "id": 6,
+          "type": "gauge",
+          "title": "Unallocated cost % — should be < 1%",
+          "datasource": "Prometheus",
+          "gridPos": { "h": 8, "w": 12, "x": 12, "y": 20 },
+          "targets": [
+            {
+              "expr": "100 * (bookstore:cost_unallocated:by_region / sum by (region) (opencost_cluster_total_hourly_cost))",
+              "refId": "A"
+            }
+          ],
+          "fieldConfig": {
+            "defaults": {
+              "unit": "percent",
+              "decimals": 2,
+              "thresholds": {
+                "mode": "absolute",
+                "steps": [
+                  { "color": "green",  "value": null },
+                  { "color": "yellow", "value": 1 },
+                  { "color": "red",    "value": 5 }
+                ]
+              }
+            }
+          }
+        }
+      ]
+    }

@@ -1,0 +1,117 @@
+# Bookstore — Part 01 ch.07 "Jobs and CronJobs": DB schema migration.
+#
+# Runs the Bookstore schema EXACTLY ONCE against the Postgres StatefulSet
+# (ch.05). The ch.05 Postgres is an empty DB; catalog/orders need the books and
+# orders tables (the app's documented schema). Idempotent (CREATE TABLE IF NOT
+# EXISTS) so retries are safe. Uses the official postgres:16 image for `psql`
+# (public — no kind load).
+#
+# RESOLVED in Part 05 ch.04: the Phase-2 plaintext PGPASSWORD stub is GONE.
+# Credentials now come from the shared `db-credentials` Secret (16-) via
+# secretKeyRef — exactly how 20-/10-/14- consume it. The Secret's keys are
+# POSTGRES_USER/POSTGRES_PASSWORD/POSTGRES_DB; psql/libpq read PGUSER/PGPASSWORD/
+# PGDATABASE, so each PG* var is mapped from the matching Secret key (PGHOST is
+# the headless Service DNS, not a secret, so it stays inline). Idempotent
+# (CREATE TABLE IF NOT EXISTS) and still `kubectl wait`-able. In Part 07 this
+# becomes a Helm pre-install/pre-upgrade hook.
+#
+# Part 04 ch.03 SCHEDULING LAYER (additive only): priorityClassName
+# bookstore-batch (35-priorityclasses.yaml) — the lowest Bookstore tier, with
+# preemptionPolicy: Never (this Job never preempts others; it just waits for
+# capacity, and yields first if a higher tier needs room).
+#
+# Part 05 SECURITY LAYER (ch.01 + ch.02 — additive only). The `bookstore`
+# namespace enforces pod-security.kubernetes.io/enforce: restricted
+# (00-namespace.yaml), which gates this Job's Pod too. Same accurate pattern as
+# the postgres:16 StatefulSet (20-):
+#  • ch.01 serviceAccountName: migrate-sa + automountServiceAccountToken: false
+#    (shared with the cleanup CronJob 22-; never the `default` SA).
+#  • ch.02 pod SC runAsNonRoot/runAsUser/Group 999 + fsGroup 999 + seccomp
+#    RuntimeDefault; container SC drop ALL + allowPrivilegeEscalation:false.
+#    NO readOnlyRootFilesystem (the postgres image's psql tooling writes
+#    outside any data volume — identical reasoning to 20-; `restricted` does
+#    not require a read-only root FS).
+#
+# Requires:
+#   kubectl apply -f examples/bookstore/raw-manifests/00-namespace.yaml
+#   kubectl apply -f examples/bookstore/raw-manifests/05-serviceaccounts-rbac.yaml  # ch.01
+#   kubectl apply -f examples/bookstore/raw-manifests/16-db-credentials.yaml        # ch.02 (the Secret)
+#   kubectl apply -f examples/bookstore/raw-manifests/20-postgres-statefulset.yaml
+# Apply:
+#   kubectl apply -f examples/bookstore/raw-manifests/21-db-migrate-job.yaml
+#   kubectl get job db-migrate -n bookstore -w
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: db-migrate
+  namespace: bookstore
+  labels:
+    app: db-migrate
+    app.kubernetes.io/part-of: bookstore
+spec:
+  backoffLimit: 4                 # retry the Pod up to 4× before marking Failed
+  activeDeadlineSeconds: 120      # hard wall-clock cap for the whole Job
+  ttlSecondsAfterFinished: 600    # GC the Job + its Pod 10 min after it finishes
+  template:
+    metadata:
+      labels:
+        app: db-migrate
+    spec:
+      restartPolicy: Never        # Job Pods: Never or OnFailure (never Always)
+      priorityClassName: bookstore-batch   # Part 04 ch.03 (35-): lowest tier
+      # --- Part 05 ch.01: dedicated batch identity, no API token mounted.
+      serviceAccountName: migrate-sa
+      automountServiceAccountToken: false
+      # --- Part 05 ch.02: pod-level securityContext (PSA `restricted`), same
+      # accurate pattern as the postgres:16 StatefulSet (20-).
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 999
+        runAsGroup: 999
+        fsGroup: 999
+        seccompProfile:
+          type: RuntimeDefault
+      containers:
+        - name: migrate
+          image: postgres:16      # ships `psql`/`pg_isready`; public image
+          # --- Part 05 ch.02: container securityContext (PSA `restricted`).
+          # NOT readOnlyRootFilesystem: psql writes outside any data volume
+          # (same accurate reason as 20-); restricted does not require it.
+          securityContext:
+            allowPrivilegeEscalation: false
+            capabilities:
+              drop: ["ALL"]
+          # --- Part 05 ch.04: credentials from the db-credentials Secret (16-)
+          # via secretKeyRef — NO plaintext password in this file anymore.
+          # libpq env names (PG*) mapped from the Secret's POSTGRES_* keys.
+          env:
+            - name: PGHOST              # headless Svc (ch.05) — not a secret
+              value: postgres.bookstore.svc.cluster.local
+            - name: PGUSER
+              valueFrom:
+                secretKeyRef: { name: db-credentials, key: POSTGRES_USER }
+            - name: PGPASSWORD
+              valueFrom:
+                secretKeyRef: { name: db-credentials, key: POSTGRES_PASSWORD }
+            - name: PGDATABASE
+              valueFrom:
+                secretKeyRef: { name: db-credentials, key: POSTGRES_DB }
+          command: ["/bin/sh", "-c"]
+          args:
+            - |
+              set -e
+              echo "waiting for postgres..."
+              until pg_isready -q; do sleep 2; done
+              echo "applying schema (idempotent)..."
+              psql -v ON_ERROR_STOP=1 <<'SQL'
+              CREATE TABLE IF NOT EXISTS books  (id SERIAL PRIMARY KEY, title TEXT, author TEXT, price NUMERIC);
+              CREATE TABLE IF NOT EXISTS orders (id SERIAL PRIMARY KEY, book_id INT, qty INT, created_at TIMESTAMPTZ);
+              SQL
+              echo "migration complete"
+          resources:
+            requests:
+              cpu: 50m
+              memory: 64Mi
+            limits:
+              cpu: 200m
+              memory: 128Mi

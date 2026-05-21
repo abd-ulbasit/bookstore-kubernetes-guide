@@ -1,0 +1,20 @@
+# Bookstore Platform v2 — Part 13 ch.03: ap-southeast region overlay. Reader
+# region (CNPG standby; writes proxy to us-east).
+#
+# Render:
+#   kubectl kustomize examples/bookstore-platform/kustomize/regions/ap-southeast
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+
+resources:
+  - ../../base
+
+labels:
+  - includeSelectors: false
+    pairs:
+      bookstore-platform.example.com/region: ap-southeast
+      bookstore-platform.example.com/role: reader
+
+commonAnnotations:
+  bookstore-platform.example.com/cnpg-primary: "false"
+  bookstore-platform.example.com/dns-hostname: "ap-southeast.bookstore-platform.example.com"

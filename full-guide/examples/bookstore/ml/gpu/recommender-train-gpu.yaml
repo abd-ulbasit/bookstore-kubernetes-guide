@@ -1,0 +1,126 @@
+# Bookstore — Part 12 ch.02 "GPUs and accelerators": the "scale training up
+# onto a GPU" artifact for the recommendations model.
+#
+# !!! NEEDS A REAL GPU NODE — THE CPU PATH IS ch.03 / X3b !!!
+#   The Bookstore recommendations model (item co-occurrence; see
+#   ../README.md and ../dataset/README.md) is DELIBERATELY TINY and runs
+#   CPU-only. This manifest is the HONEST "now scale it onto a GPU" shape:
+#   it requests nvidia.com/gpu: 1, so it only SCHEDULES on a node that the
+#   NVIDIA device plugin has advertised a GPU on (Part 12 ch.02: install the
+#   NVIDIA GPU Operator via pinned Helm in its own namespace). On a GPU-less
+#   cluster (e.g. kind) it stays Pending with:
+#     0/1 nodes are available: 1 Insufficient nvidia.com/gpu
+#   That is the CORRECT, honest behaviour — NOT a bug. The end-to-end
+#   train->serve path does NOT need this file: ch.03 gang-schedules a
+#   2-worker CPU "training" and X3b does the real CPU train->serve.
+#
+# THIS IS A BUILT-IN Job (batch/v1) — NO CRD. It dry-runs cleanly anywhere:
+#   kubectl apply --dry-run=client -f examples/bookstore/ml/gpu/recommender-train-gpu.yaml
+#   kubectl apply --dry-run=server -n bookstore-ml \
+#     -f examples/bookstore/ml/gpu/recommender-train-gpu.yaml   # PSA proof
+# (Validating it needs no GPU; only SCHEDULING it does.)
+#
+# PSA: targets the PSA-restricted `bookstore-ml` namespace (Part 12 ch.01;
+# labelled exactly like `bookstore` per Part 05 ch.02). The base image is a
+# CUDA-class image that DEFAULTS TO ROOT — the canonical PSA footgun. This
+# spec is restricted-COMPLIANT anyway (runAsNonRoot + non-root UID +
+# allowPrivilegeEscalation:false + drop ALL caps + seccompProfile
+# RuntimeDefault + emptyDir-only volumes) and STILL gets the GPU. ML pods are
+# NOT exempt from Pod Security.
+#
+# GPU NODE FENCE (Part 04 ch.02 recipe, now protecting real $$$):
+#   tolerations  = PERMISSION past the GPU pool's NoSchedule taint
+#   nodeAffinity = ATTRACTION to GPU nodes (a toleration only removes the
+#                  fence; affinity pulls the Pod in). The label key
+#                  nvidia.com/gpu.present is applied by GPU Feature Discovery
+#                  (GFD), which extends Node Feature Discovery (NFD) — both
+#                  installed by the GPU Operator (Part 12 ch.02).
+#
+# The container command is a STUB ("scale-up" placeholder): the real training
+# code/image arrives in X3b (ml/train/). It echoes what it WOULD do on a GPU
+# so this file is a faithful, self-explaining scale-up example without
+# fabricating GPU/training output.
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: recommender-train-gpu
+  namespace: bookstore-ml
+  labels:
+    app.kubernetes.io/part-of: bookstore-ml
+    app.kubernetes.io/component: recommender-train
+    ml.bookstore/path: gpu-scale-up
+spec:
+  backoffLimit: 2                 # bounded retries (Part 01 ch.07)
+  activeDeadlineSeconds: 1800     # hard wall-clock cap for a training Job
+  ttlSecondsAfterFinished: 600    # GC the Job+Pod after it finishes
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/part-of: bookstore-ml
+        app.kubernetes.io/component: recommender-train
+    spec:
+      restartPolicy: Never        # Job pods: Never | OnFailure (never Always)
+      automountServiceAccountToken: false
+      tolerations:                # PERMISSION past the GPU pool taint
+        - key: nvidia.com/gpu
+          operator: Exists
+          effect: NoSchedule
+      affinity:
+        nodeAffinity:             # ATTRACTION to GPU nodes (GPU Operator label)
+          requiredDuringSchedulingIgnoredDuringExecution:
+            nodeSelectorTerms:
+              - matchExpressions:
+                  - key: nvidia.com/gpu.present
+                    operator: In
+                    values: ["true"]
+      securityContext:            # pod-level — restricted-compliant
+        runAsNonRoot: true
+        runAsUser: 65532
+        runAsGroup: 65532
+        seccompProfile:
+          type: RuntimeDefault
+      containers:
+        - name: train
+          # CUDA-class base image (defaults to root — the PSA footgun this
+          # spec defuses). Replace with the real recommender training image
+          # in X3b; the GPU request + restricted SC shape stay identical.
+          image: nvidia/cuda:12.4.1-base-ubuntu22.04
+          command: ["/bin/sh", "-c"]
+          args:
+            - |
+              set -e
+              echo "[recommender-train-gpu] GPU scale-up path."
+              echo "On a real GPU node this would:"
+              echo "  1) load the (synthetic, seeded) Bookstore orders dataset"
+              echo "  2) build the customer x book interaction matrix"
+              echo "  3) compute book x book similarity ON THE GPU and keep top-K"
+              echo "  4) write the model artifact for the serving API (X3b)"
+              echo "Detecting GPU (representative; real output is hardware-specific):"
+              command -v nvidia-smi >/dev/null 2>&1 && nvidia-smi || \
+                echo "  nvidia-smi not present in this base layer — the real"
+              echo "  X3b training image bundles the CUDA runtime + recommender."
+              echo "[recommender-train-gpu] stub complete (real code: X3b)."
+          resources:
+            requests:
+              cpu: "500m"
+              memory: 512Mi
+              # For extended resources, omit requests — Kubernetes mirrors
+              # limits -> requests; requests must equal limits (no overcommit,
+              # no fractional GPU). See the chapter's "Why limits == requests"
+              # paragraph and the Quick Reference skeleton.
+            limits:
+              cpu: "1"
+              memory: 1Gi
+              nvidia.com/gpu: "1"   # one whole GPU; auto-mirrored to requests
+          securityContext:          # container-level — restricted-compliant
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities:
+              drop: ["ALL"]
+          volumeMounts:
+            - name: scratch
+              mountPath: /tmp
+      volumes:
+        - name: scratch             # restricted-allowed volume type
+          emptyDir:
+            sizeLimit: 256Mi

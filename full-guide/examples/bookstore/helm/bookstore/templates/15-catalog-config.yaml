@@ -1,0 +1,20 @@
+{{/*
+  catalog's NON-SECRET config (raw-manifests 15-catalog-config.yaml). NO
+  credentials here — the DB password is the Secret (16/secret.yaml). A
+  ConfigMap is plain text, readable by anyone who can `get configmap` in the ns.
+  Consumed by catalog via bulk envFrom + a single configMapKeyRef for LOG_LEVEL.
+*/}}
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: catalog-config
+  namespace: {{ include "bookstore.namespace" . }}
+  labels:
+    {{- include "bookstore.labels" (dict "ctx" . "app" "catalog") | nindent 4 }}
+{{- if .Values.catalogConfig.immutable }}
+immutable: true
+{{- end }}
+data:
+  {{- range $k, $v := .Values.catalogConfig.data }}
+  {{ $k }}: {{ $v | quote }}
+  {{- end }}

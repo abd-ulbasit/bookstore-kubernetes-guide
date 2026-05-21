@@ -1,0 +1,117 @@
+# Bookstore — Part 12 ch.06 "Model serving and inference": the recommender
+# served as a PLAIN Deployment (built-in objects only). This is the
+# kind-runnable serving path — `docker build`, `kind load`, `kubectl apply`,
+# done. No KServe required.
+#
+# The CRD-backed equivalent (KServe `InferenceService`) is
+# `recommender-inferenceservice.yaml` in this directory; it ADDS scale-to-zero,
+# transformer/explainer wiring, and model versioning. Both consume the SAME
+# image (`bookstore/recommender-serve:dev`) and the SAME `model.joblib`
+# artifact from `../train/recommender-train-job.yaml`.
+#
+# BUILT-IN OBJECTS ONLY (apps/v1 Deployment + v1 Service in the sibling
+# `recommender-service.yaml`). `kubectl apply --dry-run=client/server` PASSES
+# cleanly anywhere.
+#
+# PSA — `bookstore-ml` is `enforce: restricted` (Part 12 ch.01). Pod carries
+# the full restricted shape (runAsNonRoot, non-root UID 65532, drop ALL caps,
+# seccomp RuntimeDefault, allowPrivilegeEscalation:false, readOnlyRootFilesystem
+# + an emptyDir at /tmp). Image bakes uid 65532 too.
+#
+# MODEL — mounted from the SAME PVC the train Job writes to
+# (`recommender-model`). On kind that's the simplest path. In production the
+# model is more commonly fetched from a model registry / object store at
+# startup or baked into the image — see the chapter's "Production notes".
+#
+# Apply (after `recommender-train-job.yaml` has completed and produced
+# `model.joblib` on the PVC):
+#   kubectl apply -f examples/bookstore/ml/serve/recommender-deployment.yaml
+#   kubectl apply -f examples/bookstore/ml/serve/recommender-service.yaml
+#   kubectl rollout status deploy/recommender -n bookstore-ml --timeout=120s
+#   kubectl port-forward -n bookstore-ml svc/recommender 8080:8080 &
+#   curl -s -X POST localhost:8080/v1/models/recommender:predict \
+#     -H 'content-type: application/json' \
+#     -d '{"instances":[{"book_id":1,"k":3}]}'
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: recommender
+  namespace: bookstore-ml
+  labels:
+    app.kubernetes.io/part-of: bookstore-ml
+    app.kubernetes.io/component: recommender-serve
+    ml.bookstore/path: deployment
+spec:
+  replicas: 1                          # HPA can scale this; see chapter
+  revisionHistoryLimit: 3
+  strategy:
+    type: RollingUpdate
+    rollingUpdate:
+      maxUnavailable: 0
+      maxSurge: 1
+  selector:
+    matchLabels:
+      app.kubernetes.io/part-of: bookstore-ml
+      app.kubernetes.io/component: recommender-serve
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/part-of: bookstore-ml
+        app.kubernetes.io/component: recommender-serve
+    spec:
+      automountServiceAccountToken: false
+      securityContext:                 # pod-level — restricted
+        runAsNonRoot: true
+        runAsUser: 65532
+        runAsGroup: 65532
+        fsGroup: 65532                 # PVC mount readable by uid 65532
+        seccompProfile:
+          type: RuntimeDefault
+      containers:
+        - name: recommender
+          image: bookstore/recommender-serve:dev
+          imagePullPolicy: IfNotPresent
+          ports:
+            - containerPort: 8080
+              name: http
+          env:
+            - name: MODEL_DIR
+              value: /workspace/model
+            - name: MODEL_NAME
+              value: recommender
+            - name: DEFAULT_K
+              value: "5"
+          resources:
+            requests:
+              cpu: "100m"
+              memory: 256Mi
+            limits:
+              cpu: "1"
+              memory: 512Mi
+          readinessProbe:
+            httpGet: { path: /ready, port: 8080 }
+            initialDelaySeconds: 2
+            periodSeconds: 5
+          livenessProbe:
+            httpGet: { path: /healthz, port: 8080 }
+            initialDelaySeconds: 10
+            periodSeconds: 20
+          securityContext:             # container-level — restricted
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities:
+              drop: ["ALL"]
+          volumeMounts:
+            - name: model
+              mountPath: /workspace/model
+              readOnly: true
+            - name: scratch
+              mountPath: /tmp
+      volumes:
+        - name: model                  # the same PVC the train Job wrote
+          persistentVolumeClaim:
+            claimName: recommender-model
+            readOnly: true             # serve never writes to the model
+        - name: scratch
+          emptyDir:
+            sizeLimit: 64Mi

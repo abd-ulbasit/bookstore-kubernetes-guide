@@ -1,0 +1,32 @@
+# Bookstore Kustomize COMPONENT — servicemonitor (Prometheus Operator).
+#
+# Adds the two ServiceMonitors (catalog + payments-worker) and the catalog
+# PrometheusRule — vendored byte-identical from raw-manifests/80- and 81-.
+# This is the exact analog of the Helm chart's `serviceMonitor.enabled` /
+# `prometheusRule.enabled` toggles: base stays vanilla-cluster-clean (no
+# `no matches for kind` on a plain cluster), and an env opts in.
+#
+# !!! CRD PREREQUISITE — same intrinsic behaviour as raw 80-/81- and the Helm
+# toggle. `ServiceMonitor`/`PrometheusRule` are Prometheus Operator CRDs
+# (monitoring.coreos.com/v1), NOT built-in kinds. Without the Operator
+# installed, `kubectl apply --dry-run=client` of an overlay that includes this
+# component prints `no matches for kind "ServiceMonitor"` /
+# `"PrometheusRule"` — EXPECTED and correct (the objects are schema-valid; the
+# CRDs must exist first). Install kube-prometheus-stack (Operator + CRDs) in
+# the `monitoring` namespace via Helm before enabling this on a live cluster:
+#   helm repo add prometheus-community https://prometheus-community.github.io/helm-charts
+#   helm repo update
+#   helm install kube-prometheus-stack prometheus-community/kube-prometheus-stack \
+#     -n monitoring --create-namespace
+# The vendored objects carry `release: kube-prometheus-stack`, which MUST match
+# the Prometheus serviceMonitorSelector/ruleSelector (see raw 80-/81- headers).
+#
+# Enable by adding to an overlay's `components:` list, e.g.:
+#   components:
+#     - ../../components/servicemonitor
+apiVersion: kustomize.config.k8s.io/v1alpha1
+kind: Component
+
+resources:
+  - 80-servicemonitor.yaml
+  - 81-prometheusrule.yaml

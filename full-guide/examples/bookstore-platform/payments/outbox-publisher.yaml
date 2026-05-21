@@ -1,0 +1,136 @@
+# Bookstore Platform v2 — Part 13 ch.06: the outbox publisher. Reads the
+# `outbox` table in Postgres, publishes each row to Kafka's `orders.placed`
+# topic, marks the row published. Together with the orders-service writing
+# (order_row, outbox_row) in ONE transaction this gives at-least-once
+# delivery without 2PC.
+#
+# A small Go service — `bookstore-platform/outbox-publisher:dev` — implements
+# the loop. The source lives at ../app/events/main.go (the `events` service
+# is the dispatcher that handles outbox publishing + payment-event consumption
+# in one process; this Deployment runs the same image with EVENTS_MODE=outbox).
+#
+# Production-shape details enforced here:
+#   - Three replicas. Each holds a distinct postgres advisory lock so only
+#     ONE publisher is active per topic at any time (the others stand by);
+#     this gives crash-failover without duplicate writes.
+#   - At-least-once delivery (acks=all); consumer dedupes on event_id.
+#     Every outbox row has a UUID `event_id` carried as the Kafka message
+#     key; the consumer's dedupe table is the source of truth.
+#   - PSA: restricted; non-root; distroless.
+#
+# Apply:
+#   kubectl apply -f examples/bookstore-platform/payments/outbox-publisher.yaml
+---
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: bookstore-platform-payments
+  labels:
+    app.kubernetes.io/part-of: bookstore-platform
+    bookstore-platform.example.com/scope: payments
+    pod-security.kubernetes.io/enforce: restricted
+    pod-security.kubernetes.io/enforce-version: latest
+    pod-security.kubernetes.io/audit: restricted
+    pod-security.kubernetes.io/audit-version: latest
+    pod-security.kubernetes.io/warn: restricted
+    pod-security.kubernetes.io/warn-version: latest
+---
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: outbox-publisher
+  namespace: bookstore-platform-payments
+  labels:
+    app.kubernetes.io/part-of: bookstore-platform
+    app.kubernetes.io/component: outbox-publisher
+automountServiceAccountToken: false
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: outbox-publisher
+  namespace: bookstore-platform-payments
+  labels:
+    app: outbox-publisher
+    app.kubernetes.io/part-of: bookstore-platform
+    app.kubernetes.io/component: outbox-publisher
+spec:
+  replicas: 3
+  selector:
+    matchLabels:
+      app: outbox-publisher
+  template:
+    metadata:
+      labels:
+        app: outbox-publisher
+        app.kubernetes.io/part-of: bookstore-platform
+    spec:
+      serviceAccountName: outbox-publisher
+      automountServiceAccountToken: false
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 65532
+        runAsGroup: 65532
+        fsGroup: 65532
+        seccompProfile:
+          type: RuntimeDefault
+      containers:
+        - name: events
+          image: bookstore-platform/events:dev
+          imagePullPolicy: IfNotPresent
+          env:
+            - name: EVENTS_MODE
+              value: "outbox"
+            - name: KAFKA_BROKERS
+              value: "bookstore-platform-kafka-kafka-bootstrap.kafka-system.svc.cluster.local:9092"
+            - name: KAFKA_TOPIC_ORDERS_PLACED
+              value: "orders.placed"
+            - name: DB_DSN
+              valueFrom:
+                secretKeyRef:
+                  name: outbox-publisher-db
+                  key: dsn
+            - name: LOG_LEVEL
+              value: "info"
+            - name: PORT
+              value: "8080"
+          ports:
+            - containerPort: 8080
+              name: http
+          resources:
+            requests:
+              cpu: 100m
+              memory: 128Mi
+            limits:
+              cpu: 500m
+              memory: 256Mi
+          livenessProbe:
+            httpGet:
+              path: /healthz
+              port: 8080
+            initialDelaySeconds: 10
+            periodSeconds: 30
+          readinessProbe:
+            httpGet:
+              path: /readyz
+              port: 8080
+            initialDelaySeconds: 5
+            periodSeconds: 10
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities:
+              drop: ["ALL"]
+---
+apiVersion: v1
+kind: Secret
+metadata:
+  name: outbox-publisher-db
+  namespace: bookstore-platform-payments
+  labels:
+    app.kubernetes.io/part-of: bookstore-platform
+    bookstore-platform.example.com/placeholder: "true"
+type: Opaque
+stringData:
+  # Placeholder; real wiring via ESO + Vault (Part 11 ch.05).
+  dsn: "postgres://outbox:REPLACE-ME-VIA-ESO-NOT-IN-SOURCE@bookstore-platform-cnpg-rw.cnpg-system.svc.cluster.local:5432/bookstore_platform?sslmode=require"

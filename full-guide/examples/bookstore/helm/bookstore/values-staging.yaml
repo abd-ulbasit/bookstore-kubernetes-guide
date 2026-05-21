@@ -1,0 +1,47 @@
+# Bookstore — STAGING environment overrides.
+#   helm install bookstore ./examples/bookstore/helm/bookstore \
+#     -n bookstore --create-namespace -f examples/bookstore/helm/bookstore/values-staging.yaml
+#
+# Staging mirrors prod shape at lower scale: production-like replica counts and
+# the full reliability/observability surface ON, but smaller resource ceilings
+# and a staging hostname. The demo Secret is STILL used here ONLY because this
+# is a guide; a real staging would also use External Secrets (see ch.01).
+
+catalog:
+  replicaCount: 2
+  resources:
+    requests: { cpu: 50m, memory: 64Mi }
+    limits: { cpu: 300m, memory: 192Mi }
+storefront:
+  replicaCount: 2
+orders:
+  replicaCount: 2
+
+# Production-like reliability + observability in staging so the wiring is
+# exercised before prod. ServiceMonitor/PrometheusRule need the Prometheus
+# Operator in the cluster (kube-prometheus-stack) — see chart README.
+hpa:
+  enabled: true
+  minReplicas: 2
+  maxReplicas: 4
+pdb:
+  enabled: true
+  # The chart default is pdb.catalog.minAvailable: 2, which is correct for the
+  # PROD/default catalog (3 replicas → ≤1 down). Staging runs catalog at 2
+  # replicas, so minAvailable MUST drop to 1 — otherwise minAvailable==replicas
+  # ⇒ ZERO voluntary disruptions ⇒ `kubectl drain` wedges forever in staging.
+  # storefront/orders run at 2 replicas with the default minAvailable 1 (≤1
+  # down), which is already safe — left at the defaults.
+  catalog:
+    minAvailable: 1
+serviceMonitor:
+  enabled: true
+prometheusRule:
+  enabled: true
+
+ingress:
+  enabled: true
+  host: bookstore.staging.example.com
+  tls:
+    enabled: true
+    secretName: bookstore-tls

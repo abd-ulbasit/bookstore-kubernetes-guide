@@ -1,0 +1,165 @@
+# Bookstore Platform v2 — Part 13 ch.09: Alertmanager routing tree.
+# Routes by severity + tenant + region. Uses AlertmanagerConfig (CRD
+# from kube-prometheus-stack) instead of editing the static
+# alertmanager.yaml — the GitOps-clean lifecycle.
+#
+# v1 used the single default route ("send everything to console").
+# v2 has three receivers (PagerDuty / Slack / digest) and a routing
+# tree that groups alerts the on-call's brain can handle.
+#
+# !!! CRD-INTRINSIC DRY-RUN
+#   `AlertmanagerConfig` is `monitoring.coreos.com/v1beta1` (or v1alpha1
+#   in older Prometheus Operators). WITHOUT kube-prometheus-stack:
+#     no matches for kind "AlertmanagerConfig" in version "monitoring.coreos.com/v1beta1"
+#   EXPECTED.
+#
+# Secret payloads (PagerDuty service key, Slack webhook URL) ARE NOT
+# inlined here — they are referenced via secretKeyRef and materialised
+# by ESO from the secret backend (Part 05 ch.04).
+#
+# Apply:
+#   kubectl apply -f examples/bookstore-platform/observability/alertmanager-routes.yaml
+---
+apiVersion: monitoring.coreos.com/v1beta1
+kind: AlertmanagerConfig
+metadata:
+  name: bookstore-platform-routes
+  namespace: prometheus-system
+  labels:
+    app.kubernetes.io/name: bookstore-platform-routes
+    app.kubernetes.io/instance: bookstore-platform-routes
+    app.kubernetes.io/part-of: bookstore-platform
+    app.kubernetes.io/component: observability-routes
+    app.kubernetes.io/version: "1.0.0"
+    # Picked up by kube-prometheus-stack's Alertmanager.
+    release: kube-prometheus-stack
+spec:
+  # The routing tree: all alerts enter at the top; matchers narrow
+  # to the right receiver. `continue: true` lets one alert hit
+  # multiple receivers (e.g. a page also goes to slack-warnings for
+  # team visibility).
+  route:
+    receiver: default
+    groupBy: [alertname, tenant, region, severity]
+    groupWait: 30s
+    groupInterval: 5m
+    repeatInterval: 4h
+    routes:
+      # P0/P1 — severity=page goes to PagerDuty.
+      - matchers:
+          - name: severity
+            value: page
+            matchType: "="
+        receiver: pagerduty
+        continue: true
+      # severity=warn goes to Slack warnings channel.
+      - matchers:
+          - name: severity
+            value: warn
+            matchType: "="
+        receiver: slack-warnings
+        continue: true
+      # Region-specific routing: eu-west alerts also go to the EU
+      # customer-success Slack channel (so the EU team is aware of
+      # outages affecting EU tenants).
+      - matchers:
+          - name: region
+            value: eu-west-1
+            matchType: "="
+          - name: severity
+            value: page
+            matchType: "="
+        receiver: slack-eu-customer-success
+        continue: false
+      # Per-tenant routing: a specific high-priority tenant
+      # (acme-books) has its own pager.
+      - matchers:
+          - name: tenant
+            value: acme-books
+            matchType: "="
+          - name: severity
+            value: page
+            matchType: "="
+        receiver: pagerduty-acme-books
+        continue: false
+  receivers:
+    # Default: console / log only.
+    - name: default
+    # PagerDuty page receiver.
+    - name: pagerduty
+      pagerdutyConfigs:
+        - serviceKey:
+            name: alertmanager-pagerduty
+            key: service-key
+          description: |
+            {{ .CommonAnnotations.summary }}
+            Tenant: {{ .CommonLabels.tenant }}
+            Region: {{ .CommonLabels.region }}
+            Runbook: {{ .CommonAnnotations.runbook_url }}
+    # PagerDuty for the dedicated acme-books on-call rotation.
+    - name: pagerduty-acme-books
+      pagerdutyConfigs:
+        - serviceKey:
+            name: alertmanager-pagerduty-acme-books
+            key: service-key
+          description: |
+            ACME BOOKS — {{ .CommonAnnotations.summary }}
+            Runbook: {{ .CommonAnnotations.runbook_url }}
+    # Slack warnings channel.
+    - name: slack-warnings
+      slackConfigs:
+        - apiURL:
+            name: alertmanager-slack
+            key: webhook-url
+          channel: "#bookstore-platform-warnings"
+          title: "{{ .Status | toUpper }}: {{ .CommonAnnotations.summary }}"
+          text: |
+            *Tenant:* {{ .CommonLabels.tenant }}
+            *Region:* {{ .CommonLabels.region }}
+            *Service:* {{ .CommonLabels.service }}
+            *Runbook:* {{ .CommonAnnotations.runbook_url }}
+    # Slack EU customer-success.
+    - name: slack-eu-customer-success
+      slackConfigs:
+        - apiURL:
+            name: alertmanager-slack
+            key: webhook-url-eu
+          channel: "#bookstore-platform-eu-cs"
+          title: "EU PAGE — {{ .CommonAnnotations.summary }}"
+          text: |
+            EU customers may be affected. Tenant: {{ .CommonLabels.tenant }}
+  # Inhibition rules — alert-storm prevention.
+  # When a node-level or region-level alert fires, suppress the dozens
+  # of per-pod / per-service / per-tenant downstream alerts that would
+  # otherwise flood the on-call. The on-call only needs to see the
+  # root-cause alert; the downstream alerts are noise.
+  #
+  # Inhibition matches on the `equal:` label set: source and target
+  # must share the same `region` for the inhibition to apply, so an
+  # outage in `us-east-1` does not silence alerts in `eu-west-1`.
+  inhibitRules:
+    # When a node goes NotReady in a region, suppress all `severity:
+    # page` alerts in the same region (catalog 5xx, payments 5xx,
+    # latency p99, etc. — all expected downstream effects).
+    - sourceMatchers:
+        - name: alertname
+          value: KubeNodeNotReady
+          matchType: "="
+      targetMatchers:
+        - name: severity
+          value: page
+          matchType: "="
+      equal: [region]
+    # When a whole region is declared down (`BookstoreRegionDown`),
+    # suppress every `severity: page` AND `severity: warn` alert in
+    # that region — the on-call is already executing the regional
+    # failover runbook; per-service alerts add no signal.
+    - sourceMatchers:
+        - name: alertname
+          value: BookstoreRegionDown
+          matchType: "="
+      targetMatchers:
+        - name: severity
+          matchType: "=~"
+          value: "page|warn"
+      equal: [region]

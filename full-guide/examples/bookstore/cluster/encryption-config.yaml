@@ -1,0 +1,74 @@
+# Bookstore — Part 05 ch.04 "Secrets and cluster hardening".
+#
+# !!! THIS IS NOT A `kubectl apply` OBJECT !!!
+# This is an apiserver-LEVEL config file. `EncryptionConfiguration` is consumed
+# by kube-apiserver via the flag `--encryption-provider-config=<this file>`; it
+# never goes through the API and `kubectl apply -f` it is meaningless (it has
+# no namespace/metadata.name the API understands). It is shown here so the
+# guide is concrete about HOW Secret encryption-at-rest is actually wired.
+# Validate it only as YAML (e.g. `ruby -ryaml -e 'YAML.load_file(ARGV[0])'`),
+# never as a cluster resource.
+#
+# WHERE IT LIVES / HOW IT IS WIRED (conceptual — you do not run this locally):
+#   • Place the file on every control-plane node, e.g.
+#     /etc/kubernetes/enc/encryption-config.yaml (root-only, 0600).
+#   • Add to the kube-apiserver manifest/flags:
+#       --encryption-provider-config=/etc/kubernetes/enc/encryption-config.yaml
+#       --encryption-provider-config-automatic-reload=true
+#   • kubeadm: drop the flag + a hostPath volume into
+#     /etc/kubernetes/manifests/kube-apiserver.yaml (static Pod). kind: the
+#     `kubeadmConfigPatches` / `extraMounts` in the kind cluster config.
+#   • Managed (EKS/GKE/AKS) you do NOT edit the apiserver — you tick the
+#     provider's KMS option instead (see ch.04 production notes).
+#
+# THREAT MODEL: by default Secrets are stored in etcd as base64 (reversible —
+# Part 03 ch.02 proved it). Anyone with etcd access OR an etcd backup file
+# reads every Secret. This config makes the apiserver ENCRYPT them before they
+# hit etcd. It does nothing about an attacker with `get secrets` RBAC or
+# `pods/exec` (different controls — ch.01) — it specifically defends
+# etcd-at-rest and etcd backups.
+#
+# PROVIDER ORDER MATTERS: for each resource, the FIRST provider listed is the
+# one used to ENCRYPT on write; on read, providers are tried in order until one
+# can DECRYPT. `identity` = no encryption (plaintext passthrough). So:
+#   • To ADOPT encryption on a cluster whose Secrets are currently plaintext:
+#     put the encrypting provider FIRST and `identity` LAST (old plaintext
+#     Secrets still readable via `identity`), then re-encrypt existing Secrets
+#     (`kubectl get secrets -A -o json | kubectl replace -f -`).
+#   • To DISABLE it again: put `identity` FIRST, keep the old provider in the
+#     list so existing ciphertext still decrypts, then rewrite Secrets.
+#
+# KEY ROTATION: add the NEW key as the first key of the FIRST provider, keep
+# the old key (still listed) so existing data still decrypts, restart/auto-
+# reload the apiserver, then re-encrypt everything:
+#   kubectl get secrets -A -o json | kubectl replace -f -
+# then the old key can be removed in a later rotation.
+apiVersion: apiserver.config.k8s.io/v1
+kind: EncryptionConfiguration
+resources:
+  - resources:
+      - secrets                     # encrypt Secret objects...
+      # - configmaps                # (optionally also configmaps, etc.)
+    providers:
+      # PREFERRED for real clusters: KMS v2 — ENVELOPE encryption. The data is
+      # encrypted with a local data-encryption key (DEK) which is itself
+      # wrapped by a key-encryption key held in an external KMS/HSM that the
+      # apiserver never sees in clear. Requires a KMS plugin socket on the node.
+      - kms:
+          apiVersion: v2
+          name: bookstore-kms
+          endpoint: unix:///var/run/kmsplugin/socket.sock
+          timeout: 3s
+      # FALLBACK / simpler: a locally-held AES-GCM key. Better than nothing
+      # (etcd + backups become ciphertext) BUT the key sits on the control
+      # plane, so it does NOT protect against a compromised control-plane node.
+      # `key1` is a base64-encoded 32-byte key — generate with:
+      #   head -c 32 /dev/urandom | base64
+      - aesgcm:
+          keys:
+            - name: key1
+              secret: REPLACE_WITH_BASE64_32_BYTE_KEY==
+      # MUST be last: lets the apiserver still READ any Secret written before
+      # encryption was enabled (and during migration). Remove only once every
+      # Secret has been re-encrypted.
+      - identity: {}

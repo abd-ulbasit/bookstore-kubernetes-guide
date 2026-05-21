@@ -1,0 +1,130 @@
+# Bookstore — Part 11 ch.09 "Performance & scalability": a SMALL kube-burner
+# workload config that creates/churns Bookstore-SHAPED objects and measures
+# apiserver request-latency + pod-startup PERCENTILES against the scalability
+# SLOs. It exercises the EXACT same request pipeline and percentile methodology
+# a real clusterloader2 run uses at 5,000 nodes — only N and the cluster differ
+# (a single kind node is ~3-4 orders of magnitude below the envelope; this is
+# the chapter's honest "method is transferable, the numbers are not" point).
+#
+# !!! THIS IS A KUBE-BURNER CONFIG, NOT A KUBERNETES API OBJECT.
+#   It is consumed by the `kube-burner` CLI, NOT kube-apiserver, and is NEVER
+#   `kubectl apply`-ed. Repo validation for this file is "well-formed YAML"
+#   only:
+#     python3 -c 'import yaml; list(yaml.safe_load_all(open(
+#       "examples/bookstore/platform/kube-burner-bookstore.yaml"))); print("ok")'
+#   (A `kubectl apply --dry-run=client -f` would error "no matches for kind
+#   Config in version kube-burner.../v1" — EXPECTED; it is a CLI config, the
+#   same honesty pattern as ha-kind-3cp.yaml (ch.08) and the apiserver-level
+#   cluster/ files. NOT a CRD-intrinsic case — no CRD ever makes it apply.)
+#
+# THE REAL ARTEFACT IS THE PINNED kube-burner COMMAND (run this — NOT kubectl):
+#   KUBE_BURNER_VERSION=1.13.2     # github.com/kube-burner/kube-burner (PIN —
+#                                  # never a releases/latest/ URL; the guide's
+#                                  # pinned-tool discipline, cf. TRIVY_VERSION)
+#   # (download the pinned release binary to /tmp/kube-burner — see ch.09 §3)
+#   kubectl create namespace bookstore-perf
+#   /tmp/kube-burner init -c examples/bookstore/platform/kube-burner-bookstore.yaml
+#   # -> prints PodLatencyQuantilesMeasurement (P50/P95/P99 for Ready/
+#   #    Initialized) + apiserver request-latency for the run window. Read the
+#   #    P99 rows, NOT averages (avg hides the cliff — ch.09 methodology).
+#   kubectl delete namespace bookstore-perf --wait=false
+#
+# OWN NAMESPACE, RESTRICTED-COMPLIANT: every object lands in `bookstore-perf`
+# (its OWN namespace — load/system tooling NEVER lands in the PSA-`restricted`
+# `bookstore` ns). The pod template is nonetheless FULLY restricted-compliant
+# (runAsNonRoot, UID 65532, allowPrivilegeEscalation:false, drop ALL, seccomp
+# RuntimeDefault, RO root FS) — Bookstore-shaped and PSA-clean either way, so
+# the same config is safe even if pointed at a restricted namespace.
+#
+# SMALL ON PURPOSE: jobIterations are intentionally tiny so this runs in
+# seconds on a laptop. At real scale you raise jobIterations/qps OR use
+# clusterloader2 (the project's standardised harness) on a cloud — same
+# pipeline, same percentile yardstick, real N.
+#
+# ADDITIVE: NEW file; touches no canonical Bookstore manifest, Helm chart,
+# Kustomize overlay, the operator, or any existing examples/bookstore/** file.
+---
+global:
+  measurements:
+    # The whole point: percentile measurements against the SLOs (ch.09 Diagram
+    # B). podLatency emits P50/P95/P99 for PodScheduled/Initialized/Ready;
+    # kube-burner also records apiserver request latency for the run window.
+    - name: podLatency
+metricsEndpoints: []          # local stdout summary only (no external TSDB
+                              # needed for the small laptop run)
+jobs:
+  # --- JOB 1: CREATE N Bookstore-shaped Deployments + their ConfigMaps ---
+  - name: bookstore-perf-create
+    jobType: create
+    jobIterations: 10         # SMALL (laptop, seconds). Raise for real scale.
+    qps: 5                    # client-side request rate (steady, not a spike)
+    burst: 10
+    namespacedIterations: false
+    namespace: bookstore-perf # OWN ns — never the PSA-restricted `bookstore`
+    waitWhenFinished: true    # wait for Ready so pod-startup latency is real
+    podWait: false
+    objects:
+      - objectTemplate: bookstore-perf-deploy.yml
+        replicas: 1
+      - objectTemplate: bookstore-perf-cm.yml
+        replicas: 1
+  # --- JOB 2: DELETE them (churn — the create+delete loop the pipeline sees) ---
+  - name: bookstore-perf-delete
+    jobType: delete
+    waitWhenFinished: true
+    objects:
+      - kind: Deployment
+        apiVersion: apps/v1
+        labelSelector: { bookstore.example.com/perf: "true" }
+      - kind: ConfigMap
+        apiVersion: v1
+        labelSelector: { bookstore.example.com/perf: "true" }
+
+# ── EMBEDDED OBJECT TEMPLATES ──────────────────────────────────────────────
+# kube-burner reads objectTemplate files; they are inlined here as documented
+# YAML so this single doc carrier is self-contained and reviewable. Split into
+# the named files (bookstore-perf-deploy.yml / bookstore-perf-cm.yml) beside
+# this config before running, OR keep them inline per your kube-burner version.
+#
+# --- bookstore-perf-deploy.yml (a Bookstore-shaped, RESTRICTED Deployment) ---
+#   apiVersion: apps/v1
+#   kind: Deployment
+#   metadata:
+#     name: bookstore-perf-{{.Iteration}}-{{.Replica}}
+#     labels: { bookstore.example.com/perf: "true", app.kubernetes.io/part-of: bookstore }
+#   spec:
+#     replicas: 1
+#     selector: { matchLabels: { app: bookstore-perf-{{.Iteration}}-{{.Replica}} } }
+#     template:
+#       metadata:
+#         labels: { app: bookstore-perf-{{.Iteration}}-{{.Replica}}, bookstore.example.com/perf: "true" }
+#       spec:
+#         # FULLY restricted-PSA-compliant (same posture as the app pods —
+#         # Part 05 ch.02): safe even in a restricted namespace.
+#         securityContext:
+#           runAsNonRoot: true
+#           runAsUser: 65532
+#           seccompProfile: { type: RuntimeDefault }
+#         containers:
+#           - name: app
+#             image: registry.k8s.io/pause:3.9   # PUBLIC; the PIPELINE is the
+#                                                # subject, not the payload
+#             resources:
+#               requests: { cpu: 5m, memory: 16Mi }
+#               limits:   { cpu: 10m, memory: 16Mi }
+#             securityContext:
+#               allowPrivilegeEscalation: false
+#               readOnlyRootFilesystem: true
+#               capabilities: { drop: ["ALL"] }
+#               runAsNonRoot: true
+#               seccompProfile: { type: RuntimeDefault }
+#
+# --- bookstore-perf-cm.yml (the paired ConfigMap — more object churn) ---
+#   apiVersion: v1
+#   kind: ConfigMap
+#   metadata:
+#     name: bookstore-perf-{{.Iteration}}-{{.Replica}}
+#     labels: { bookstore.example.com/perf: "true", app.kubernetes.io/part-of: bookstore }
+#   data:
+#     note: "kube-burner perf object — ch.09. Churned to exercise the apiserver
+#            + etcd write path and measure latency percentiles."

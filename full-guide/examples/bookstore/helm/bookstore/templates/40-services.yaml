@@ -1,0 +1,120 @@
+{{/*
+  Stable ClusterIP Services per addressable tier + the headless metrics-only
+  Service for payments-worker (raw-manifests 40-services.yaml). selectors are
+  a subset of each workload's pod-template labels. The `catalog` Service is
+  emitted here UNLESS canary.enabled (then 30-catalog-canary.yaml owns the
+  identically-named Service for the two-Deployment canary stack — mutually
+  exclusive, exactly like the raw-manifests coexistence note).
+*/}}
+{{- if and .Values.catalog.enabled (not .Values.canary.enabled) }}
+apiVersion: v1
+kind: Service
+metadata:
+  name: catalog
+  namespace: {{ include "bookstore.namespace" . }}
+  labels:
+    {{- include "bookstore.labels" (dict "ctx" . "app" "catalog") | nindent 4 }}
+spec:
+  type: ClusterIP
+  selector:
+    app: catalog
+  ports:
+    - name: http
+      port: {{ .Values.catalog.service.port }}
+      targetPort: {{ .Values.catalog.service.targetPort }}
+{{- end }}
+{{- if .Values.storefront.enabled }}
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: storefront
+  namespace: {{ include "bookstore.namespace" . }}
+  labels:
+    {{- include "bookstore.labels" (dict "ctx" . "app" "storefront") | nindent 4 }}
+spec:
+  type: ClusterIP
+  selector:
+    app: storefront
+  ports:
+    - name: http
+      port: {{ .Values.storefront.service.port }}
+      targetPort: {{ .Values.storefront.service.targetPort }}
+{{- end }}
+{{- if .Values.orders.enabled }}
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: orders
+  namespace: {{ include "bookstore.namespace" . }}
+  labels:
+    {{- include "bookstore.labels" (dict "ctx" . "app" "orders") | nindent 4 }}
+spec:
+  type: ClusterIP
+  selector:
+    app: orders
+  ports:
+    - name: http
+      port: {{ .Values.orders.service.port }}
+      targetPort: {{ .Values.orders.service.targetPort }}
+{{- end }}
+{{- if .Values.redis.enabled }}
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: redis
+  namespace: {{ include "bookstore.namespace" . }}
+  labels:
+    {{- include "bookstore.labels" (dict "ctx" . "app" "redis") | nindent 4 }}
+spec:
+  type: ClusterIP
+  selector:
+    app: redis
+  ports:
+    - name: redis
+      port: {{ .Values.redis.service.port }}
+      targetPort: {{ .Values.redis.service.targetPort }}
+{{- end }}
+{{- if .Values.rabbitmq.enabled }}
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: rabbitmq
+  namespace: {{ include "bookstore.namespace" . }}
+  labels:
+    {{- include "bookstore.labels" (dict "ctx" . "app" "rabbitmq") | nindent 4 }}
+spec:
+  type: ClusterIP
+  selector:
+    app: rabbitmq
+  ports:
+    {{- range .Values.rabbitmq.service.ports }}
+    - name: {{ .name }}
+      port: {{ .port }}
+      targetPort: {{ .targetPort }}
+    {{- end }}
+{{- end }}
+{{- if .Values.paymentsWorker.enabled }}
+---
+# HEADLESS metrics-only Service: the worker has NO inbound request traffic, so
+# clusterIP None (no VIP / no kube-proxy LB). Exists only to give Prometheus
+# stable scrape endpoints (the ServiceMonitor selects it).
+apiVersion: v1
+kind: Service
+metadata:
+  name: payments-worker
+  namespace: {{ include "bookstore.namespace" . }}
+  labels:
+    {{- include "bookstore.labels" (dict "ctx" . "app" "payments-worker") | nindent 4 }}
+spec:
+  clusterIP: None
+  selector:
+    app: payments-worker
+  ports:
+    - name: metrics
+      port: {{ .Values.paymentsWorker.service.port }}
+      targetPort: {{ .Values.paymentsWorker.service.targetPort }}
+{{- end }}

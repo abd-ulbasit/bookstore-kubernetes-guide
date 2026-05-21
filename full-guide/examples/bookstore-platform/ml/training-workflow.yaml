@@ -1,0 +1,205 @@
+# Bookstore Platform v2 — Part 13 ch.08: the recommender training Workflow.
+# Extends Part 12 ch.07's WorkflowTemplate (which used a ConfigMap-stamp
+# "registry") with REAL MLflow logging + auto-promote to the Staging stage.
+#
+# The pipeline:
+#   1. train     — runs `bookstore-platform/recommender-train:1.0.0`; loads
+#                  the latest interactions data; trains the model;
+#                  `mlflow log_artifact("model.joblib")`; logs metrics.
+#   2. eval      — loads the trained model; runs the sanity-signal check
+#                  (top-1 cosine similarity over the validation set must
+#                  exceed the threshold); logs eval metrics to MLflow.
+#   3. register  — POSTs `MLflow Model Registry register_model` with the
+#                  artifact URI from step 1; the result is a new model
+#                  version under name `recommender`.
+#   4. promote   — `mlflow.set_registered_model_alias(name="recommender",
+#                  alias="staging", version=<NEW>)`. STAGING ONLY — the
+#                  production promotion gate is a separate Workflow that
+#                  requires a human approval (a GitHub PR comment, or a
+#                  Backstage TechDoc approval; ch.13.08 §Production notes).
+#
+# !!! CRD-INTRINSIC DRY-RUN
+#   `WorkflowTemplate` is argoproj.io/v1alpha1. WITHOUT Argo Workflows:
+#     no matches for kind "WorkflowTemplate" in version "argoproj.io/v1alpha1"
+#   EXPECTED. The chapter installs Argo Workflows via pinned-Helm.
+#
+# PSA — workflow Pods land in `bookstore-platform-ml`; the PodSpecPatch
+# stamps the restricted securityContext.
+#
+# Submit a run:
+#   argo submit --from workflowtemplate/recommender-train -n bookstore-platform-ml
+---
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: recommender-train
+  namespace: bookstore-platform-ml
+  labels:
+    app.kubernetes.io/part-of: bookstore-platform
+    app.kubernetes.io/component: ml-train
+automountServiceAccountToken: false
+---
+apiVersion: argoproj.io/v1alpha1
+kind: WorkflowTemplate
+metadata:
+  name: recommender-train
+  namespace: bookstore-platform-ml
+  labels:
+    app.kubernetes.io/part-of: bookstore-platform
+    app.kubernetes.io/component: ml-train
+spec:
+  entrypoint: pipeline
+  serviceAccountName: recommender-train
+  arguments:
+    parameters:
+      - name: mlflow-tracking-uri
+        value: "http://mlflow.mlflow.svc.cluster.local:5000"
+      - name: experiment-name
+        value: "recommender"
+      - name: min-eval-score
+        value: "0.45"
+  templates:
+    - name: pipeline
+      dag:
+        tasks:
+          - name: train
+            template: train-step
+            arguments:
+              parameters:
+                - { name: mlflow-tracking-uri, value: "{{workflow.parameters.mlflow-tracking-uri}}" }
+                - { name: experiment-name,     value: "{{workflow.parameters.experiment-name}}" }
+          - name: eval
+            template: eval-step
+            depends: "train"
+            arguments:
+              parameters:
+                - { name: mlflow-tracking-uri, value: "{{workflow.parameters.mlflow-tracking-uri}}" }
+                - { name: run-id,              value: "{{tasks.train.outputs.parameters.run-id}}" }
+                - { name: min-eval-score,      value: "{{workflow.parameters.min-eval-score}}" }
+          - name: register
+            template: register-step
+            depends: "eval.Succeeded"
+            arguments:
+              parameters:
+                - { name: mlflow-tracking-uri, value: "{{workflow.parameters.mlflow-tracking-uri}}" }
+                - { name: run-id,              value: "{{tasks.train.outputs.parameters.run-id}}" }
+          - name: promote-staging
+            template: promote-step
+            depends: "register.Succeeded"
+            arguments:
+              parameters:
+                - { name: mlflow-tracking-uri, value: "{{workflow.parameters.mlflow-tracking-uri}}" }
+                - { name: version,             value: "{{tasks.register.outputs.parameters.version}}" }
+                - { name: alias,               value: "staging" }
+
+    - name: train-step
+      inputs:
+        parameters:
+          - { name: mlflow-tracking-uri }
+          - { name: experiment-name }
+      outputs:
+        parameters:
+          - name: run-id
+            valueFrom: { path: /tmp/run_id.txt }
+      container:
+        image: bookstore-platform/recommender-train:1.0.0
+        command: ["python", "-u", "/app/train.py"]
+        env:
+          - { name: MLFLOW_TRACKING_URI, value: "{{inputs.parameters.mlflow-tracking-uri}}" }
+          - { name: MLFLOW_EXPERIMENT,   value: "{{inputs.parameters.experiment-name}}" }
+        # The image's train.py writes the new MLflow run-id to /tmp/run_id.txt
+        # before exit.
+      podSpecPatch: |
+        securityContext:
+          runAsNonRoot: true
+          runAsUser: 65532
+          fsGroup: 65532
+          seccompProfile: { type: RuntimeDefault }
+        containers:
+          - name: main
+            securityContext:
+              allowPrivilegeEscalation: false
+              readOnlyRootFilesystem: true
+              capabilities: { drop: ["ALL"] }
+
+    - name: eval-step
+      inputs:
+        parameters:
+          - { name: mlflow-tracking-uri }
+          - { name: run-id }
+          - { name: min-eval-score }
+      container:
+        image: bookstore-platform/recommender-train:1.0.0
+        command: ["python", "-u", "/app/eval.py"]
+        env:
+          - { name: MLFLOW_TRACKING_URI, value: "{{inputs.parameters.mlflow-tracking-uri}}" }
+          - { name: MLFLOW_RUN_ID,       value: "{{inputs.parameters.run-id}}" }
+          - { name: MIN_EVAL_SCORE,      value: "{{inputs.parameters.min-eval-score}}" }
+      podSpecPatch: |
+        securityContext:
+          runAsNonRoot: true
+          runAsUser: 65532
+          fsGroup: 65532
+          seccompProfile: { type: RuntimeDefault }
+        containers:
+          - name: main
+            securityContext:
+              allowPrivilegeEscalation: false
+              readOnlyRootFilesystem: true
+              capabilities: { drop: ["ALL"] }
+
+    - name: register-step
+      inputs:
+        parameters:
+          - { name: mlflow-tracking-uri }
+          - { name: run-id }
+      outputs:
+        parameters:
+          - name: version
+            valueFrom: { path: /tmp/version.txt }
+      container:
+        image: bookstore-platform/recommender-train:1.0.0
+        command: ["python", "-u", "/app/register.py"]
+        env:
+          - { name: MLFLOW_TRACKING_URI, value: "{{inputs.parameters.mlflow-tracking-uri}}" }
+          - { name: MLFLOW_RUN_ID,       value: "{{inputs.parameters.run-id}}" }
+          - { name: MODEL_NAME,          value: "recommender" }
+      podSpecPatch: |
+        securityContext:
+          runAsNonRoot: true
+          runAsUser: 65532
+          fsGroup: 65532
+          seccompProfile: { type: RuntimeDefault }
+        containers:
+          - name: main
+            securityContext:
+              allowPrivilegeEscalation: false
+              readOnlyRootFilesystem: true
+              capabilities: { drop: ["ALL"] }
+
+    - name: promote-step
+      inputs:
+        parameters:
+          - { name: mlflow-tracking-uri }
+          - { name: version }
+          - { name: alias }
+      container:
+        image: bookstore-platform/recommender-train:1.0.0
+        command: ["python", "-u", "/app/promote.py"]
+        env:
+          - { name: MLFLOW_TRACKING_URI, value: "{{inputs.parameters.mlflow-tracking-uri}}" }
+          - { name: MODEL_NAME,          value: "recommender" }
+          - { name: MODEL_VERSION,       value: "{{inputs.parameters.version}}" }
+          - { name: MODEL_ALIAS,         value: "{{inputs.parameters.alias}}" }
+      podSpecPatch: |
+        securityContext:
+          runAsNonRoot: true
+          runAsUser: 65532
+          fsGroup: 65532
+          seccompProfile: { type: RuntimeDefault }
+        containers:
+          - name: main
+            securityContext:
+              allowPrivilegeEscalation: false
+              readOnlyRootFilesystem: true
+              capabilities: { drop: ["ALL"] }

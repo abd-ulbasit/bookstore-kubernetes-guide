@@ -1,0 +1,34 @@
+# Bookstore — Part 12 ch.03 "Batch and gang scheduling": a Kueue
+# ResourceFlavor = a NAMED KIND OF CAPACITY the ClusterQueue draws quota from.
+#
+# !!! CRD-INTRINSIC DRY-RUN (identical precedent to raw-manifests/51-/70-/83-,
+#     argocd/, operators/, chaos/) !!!
+#   `ResourceFlavor` is a Kueue CRD (kueue.x-k8s.io/v1beta2). WITHOUT Kueue
+#   installed a client dry-run prints:
+#     no matches for kind "ResourceFlavor" in version "kueue.x-k8s.io/v1beta2"
+#   EXPECTED and SCHEMA-CORRECT — install Kueue first (Part 12 ch.03 Hands-on:
+#   pinned Helm `oci://registry.k8s.io/kueue/charts/kueue`, own namespace
+#   `kueue-system`). A whole-dir dry-run prints this for CRD-backed files only
+#   and continues. Schema verified against Kueue kueue.x-k8s.io/v1beta2
+#   ResourceFlavor.
+#
+# This DEFAULT flavor has no nodeLabels, so it matches ANY node — that is what
+# lets the CPU-only recommendations "training" demo run on kind with no GPU.
+#
+# FOR A REAL GPU POOL you would add a SECOND flavor pinned to GPU nodes, e.g.:
+#   apiVersion: kueue.x-k8s.io/v1beta2
+#   kind: ResourceFlavor
+#   metadata: { name: bookstore-ml-gpu-flavor }
+#   spec:
+#     nodeLabels:
+#       nvidia.com/gpu.present: "true"   # GPU Operator / GFD label (ch.02)
+#   ...and reference it from the ClusterQueue's nvidia.com/gpu resourceGroup so
+#   GPU quota is accounted against GPU nodes specifically.
+apiVersion: kueue.x-k8s.io/v1beta2
+kind: ResourceFlavor
+metadata:
+  name: bookstore-ml-flavor
+  labels:
+    app.kubernetes.io/part-of: bookstore-ml
+# No spec.nodeLabels: matches any node (CPU-runnable on kind). The GPU-pinned
+# flavor variant is documented in the header comment above.

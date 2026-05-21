@@ -1,0 +1,166 @@
+# Bookstore Platform — Part 15 ch.08 "Feature flags & dark launches".
+#
+# Flagsmith — self-hosted feature-flag platform installed via the
+# upstream `flagsmith` Helm chart. Flagsmith is the OPENFLAG-shaped
+# reference implementation the Bookstore Platform uses for:
+#   • dark launches (deploy code dark; flip flag for subset → 100%);
+#   • per-tenant + per-user + per-percentage targeting;
+#   • kill switches (< 60s to disable a feature without redeploy);
+#   • A/B traffic split for recommendations.
+#
+# Three deployment options Bookstore covers in ch.15.08:
+#   1. Flagsmith self-hosted  -> THIS FILE (preferred for data-residency).
+#   2. LaunchDarkly SaaS      -> values not needed; SDK env vars only
+#                                 (see catalog-go-sdk-integration.md).
+#   3. Unleash self-hosted    -> alternative; SAME OpenFeature SDK shape;
+#                                 not bundled here (one self-host is enough).
+#
+# This file is the staging / prod baseline. The dev path can re-use the
+# same values with smaller resources.
+#
+# ─── INSTALL ───────────────────────────────────────────────────────────
+# helm repo add flagsmith https://flagsmith.github.io/flagsmith-charts/
+# helm repo update
+# helm upgrade --install flagsmith flagsmith/flagsmith \
+#   --version 0.39.1 \
+#   --namespace flagsmith \
+#   --create-namespace \
+#   --values examples/bookstore-platform/feature-flags/flagsmith-helm-values.yaml \
+#   --wait
+# kubectl -n flagsmith get pods
+# ───────────────────────────────────────────────────────────────────────
+#
+# Versioning: PIN the chart version (`--version 0.39.1`) AND each image
+# tag below. Floating `latest` is the same anti-pattern Part 14 ch.03
+# documents for EKS addons.
+
+# ── api: the Flagsmith control plane (the web UI + the REST API the
+#    SDKs poll). The replication target is 2; on EKS Fargate, this
+#    needs `nodeSelector` to land on Linux nodes (default in Bookstore).
+api:
+  image:
+    repository: flagsmith/flagsmith-api
+    # Pinned. Source: https://hub.docker.com/r/flagsmith/flagsmith-api/tags
+    tag: "2.166.0"
+    pullPolicy: IfNotPresent
+  replicaCount: 2
+  resources:
+    requests: { cpu: "100m", memory: "256Mi" }
+    limits:   { cpu: "1",    memory: "1Gi" }
+  # Postgres connection — points at the platform-base CNPG cluster's
+  # dedicated `flagsmith` database. Wire DJANGO_DB_* via env from a
+  # Vault-issued ExternalSecret (see vault/ ; ch.15.05).
+  env:
+    - name: DJANGO_SETTINGS_MODULE
+      value: "app.settings.production"
+    - name: ENABLE_TELEMETRY
+      value: "False"    # do NOT send analytics to the SaaS pulse endpoint
+    - name: USE_POSTGRES_FOR_ANALYTICS
+      value: "True"     # keep flag-evaluation telemetry in our own DB
+    - name: ALLOWED_HOSTS
+      value: "flagsmith.bookstore-platform.example.com,flagsmith-api.flagsmith.svc.cluster.local"
+    - name: DJANGO_ALLOWED_HOSTS
+      value: "flagsmith.bookstore-platform.example.com,flagsmith-api.flagsmith.svc.cluster.local"
+  envFromExistingSecret: flagsmith-api-secrets  # ExternalSecret target; ch.15.05
+  service:
+    type: ClusterIP
+    port: 8000
+  # PSA-restricted SC (matches the rest of the platform).
+  podSecurityContext:
+    runAsNonRoot: true
+    runAsUser: 1000
+    fsGroup: 1000
+    seccompProfile: { type: RuntimeDefault }
+  securityContext:
+    allowPrivilegeEscalation: false
+    readOnlyRootFilesystem: true
+    capabilities: { drop: [ALL] }
+  # Distroless containers need a writable cache dir somewhere.
+  extraVolumes:
+    - name: tmp-cache
+      emptyDir: {}
+  extraVolumeMounts:
+    - name: tmp-cache
+      mountPath: /tmp
+  # Topology-spread + anti-affinity match the platform's restricted-PSA
+  # default (Part 04 ch.scheduling).
+  topologySpreadConstraints:
+    - maxSkew: 1
+      topologyKey: kubernetes.io/hostname
+      whenUnsatisfiable: DoNotSchedule
+      labelSelector: { matchLabels: { app.kubernetes.io/name: flagsmith } }
+  podAnnotations:
+    # Enable Prometheus scrape; flag-evaluation latency is a SLO.
+    prometheus.io/scrape: "true"
+    prometheus.io/port:   "8000"
+    prometheus.io/path:   "/metrics"
+
+# ── frontend: the Flagsmith web UI. Static + lightweight.
+frontend:
+  image:
+    repository: flagsmith/flagsmith-frontend
+    tag: "2.166.0"
+    pullPolicy: IfNotPresent
+  replicaCount: 2
+  resources:
+    requests: { cpu: "50m",  memory: "64Mi" }
+    limits:   { cpu: "200m", memory: "256Mi" }
+  service:
+    type: ClusterIP
+    port: 8080
+
+# ── influxdb: OFF. We push flag-evaluation telemetry to the platform's
+#    Prometheus + Tempo + Loki stack instead (ch.13.09).
+influxdb:
+  enabled: false
+
+# ── postgresql: OFF. We use the platform-base CNPG cluster (see api.envFromExistingSecret).
+postgresql:
+  enabled: false
+
+# ── ingress: route /flagsmith via the platform Gateway. TLS is handled
+#    by the Istio Gateway + cert-manager Issuer (ch.13.07).
+ingress:
+  enabled: false   # Gateway API (Istio) handles ingress; not Ingress CR
+  # The HTTPRoute belongs in the platform-base/ingress/ tree:
+  #   kubectl -n flagsmith apply -f httproute-flagsmith.yaml
+
+# ── serviceAccount: enabled; IRSA-shaped on EKS for any S3 reads.
+serviceAccount:
+  create: true
+  name: flagsmith-api
+  # Filled in by overlay/region for EKS (ch.14.06):
+  # annotations:
+  #   eks.amazonaws.com/role-arn: arn:aws:iam::<ACCOUNT>:role/flagsmith-api
+
+# ── networkPolicy: locked down to (1) inbound from the platform Gateway
+#    + (2) outbound to CNPG + Prometheus only.
+networkPolicy:
+  enabled: true
+  ingress:
+    - from:
+        - namespaceSelector:
+            matchLabels: { kubernetes.io/metadata.name: istio-system }
+  egress:
+    - to:
+        - namespaceSelector:
+            matchLabels: { kubernetes.io/metadata.name: cnpg-system }
+      ports: [ { protocol: TCP, port: 5432 } ]
+    - to:
+        - namespaceSelector:
+            matchLabels: { kubernetes.io/metadata.name: prometheus-system }
+      ports: [ { protocol: TCP, port: 9090 } ]
+    - to:                       # DNS resolution
+        - namespaceSelector:
+            matchLabels: { kubernetes.io/metadata.name: kube-system }
+      ports: [ { protocol: UDP, port: 53 }, { protocol: TCP, port: 53 } ]
+
+# ── metrics: Prometheus annotations on the Pods do the scrape (see
+#    api.podAnnotations).
+metrics:
+  enabled: true
+
+# NOTE: this file omits some flagsmith chart fields where the default
+# is fine. Refer to `helm show values flagsmith/flagsmith --version
+# 0.39.1` for the exhaustive list. Pin the chart version BEFORE inheriting
+# new defaults — chart upgrades have shipped breaking values rewrites.

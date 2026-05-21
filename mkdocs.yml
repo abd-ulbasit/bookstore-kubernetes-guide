@@ -1,0 +1,90 @@
+site_name: "The Bookstore Guide — Kubernetes from Zero to Production"
+site_description: >-
+  A comprehensive, hands-on guide that takes you from container fundamentals to
+  running multi-region Kubernetes platforms in production, anchored on a single
+  evolving Bookstore example.
+site_url: https://abd-ulbasit.github.io/bookstore-kubernetes-guide/
+repo_url: https://github.com/abd-ulbasit/bookstore-kubernetes-guide
+repo_name: abd-ulbasit/bookstore-kubernetes-guide
+edit_uri: edit/main/full-guide/
+
+docs_dir: full-guide
+
+theme:
+  name: material
+  features:
+    - navigation.tabs
+    - navigation.sections
+    - navigation.expand
+    - navigation.top
+    - navigation.indexes
+    - navigation.footer
+    - search.suggest
+    - search.highlight
+    - search.share
+    - content.code.copy
+    - content.code.annotate
+    - content.tabs.link
+    - toc.integrate
+  palette:
+    - media: "(prefers-color-scheme: light)"
+      scheme: default
+      primary: indigo
+      accent: indigo
+      toggle:
+        icon: material/brightness-7
+        name: Switch to dark mode
+    - media: "(prefers-color-scheme: dark)"
+      scheme: slate
+      primary: indigo
+      accent: indigo
+      toggle:
+        icon: material/brightness-4
+        name: Switch to light mode
+  icon:
+    repo: fontawesome/brands/github
+
+plugins:
+  - search
+  - awesome-pages
+  - mermaid2:
+      version: 10.9.1
+  - git-revision-date-localized:
+      type: date
+      enable_creation_date: true
+      fallback_to_build_date: true
+
+markdown_extensions:
+  - admonition
+  - pymdownx.details
+  - pymdownx.superfences:
+      custom_fences:
+        - name: mermaid
+          class: mermaid
+          format: !!python/name:mermaid2.fence_mermaid_custom
+  - pymdownx.tabbed:
+      alternate_style: true
+  - pymdownx.tasklist:
+      custom_checkbox: true
+  - pymdownx.snippets
+  - attr_list
+  - md_in_html
+  - tables
+  - footnotes
+  - toc:
+      permalink: true
+      toc_depth: 3
+
+# Navigation is generated automatically by mkdocs-awesome-pages-plugin from the
+# file tree under `docs_dir` (full-guide/). Part directories are NN-named so
+# they sort in chapter order. Per-Part chapter ordering can be customized later
+# by adding `.pages` files to individual directories — for example:
+#
+#   # full-guide/00-foundations/.pages
+#   title: "Part 00 — Foundations"
+#   nav:
+#     - 01-why-kubernetes.md
+#     - 02-containers-and-images.md
+#     - ...
+#
+# The Home page is full-guide/README.md (auto-detected as the index).

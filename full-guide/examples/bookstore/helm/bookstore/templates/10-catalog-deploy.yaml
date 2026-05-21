@@ -1,0 +1,122 @@
+{{/*
+  catalog Deployment (raw-manifests 10-catalog-deploy.yaml). Stateless Go REST
+  API. Carries: ConfigMap envFrom + LOG_LEVEL keyRef (ch.01), the Secret-built
+  DB_DSN via the shared bookstore.dbEnv helper (ch.02 — BYTE-IDENTICAL to
+  orders), scratch emptyDir + downwardAPI volume (ch.03), the Part 04
+  scheduling layer, and the full PSA `restricted` goService securityContext
+  (UID 65532 + read-only root FS). preStop is the NATIVE sleep handler — the
+  distroless/static image has no shell, so an exec preStop would fail.
+*/}}
+{{- if .Values.catalog.enabled }}
+{{- $c := .Values.catalog }}
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: catalog
+  namespace: {{ include "bookstore.namespace" . }}
+  labels:
+    {{- include "bookstore.labels" (dict "ctx" . "app" "catalog") | nindent 4 }}
+spec:
+  replicas: {{ $c.replicaCount }}
+  revisionHistoryLimit: {{ $c.revisionHistoryLimit }}
+  selector:
+    matchLabels:
+      app: catalog                  # IMMUTABLE; equals template labels below
+  strategy:
+    type: RollingUpdate
+    rollingUpdate:
+      maxSurge: 1
+      maxUnavailable: 0             # never fewer than `replicas` Ready
+  template:
+    metadata:
+      labels:
+        {{- include "bookstore.labels" (dict "ctx" . "app" "catalog" "component" "backend") | nindent 8 }}
+      annotations:
+        # Roll the Deployment when the ConfigMap/Secret content changes
+        # (env vars do NOT hot-reload — Part 03 ch.01).
+        checksum/config: {{ include (print $.Template.BasePath "/15-catalog-config.yaml") . | sha256sum }}
+        checksum/secret: {{ include (print $.Template.BasePath "/16-db-credentials.yaml") . | sha256sum }}
+    spec:
+      serviceAccountName: {{ $c.serviceAccountName }}
+      automountServiceAccountToken: false
+      securityContext:
+        {{- include "bookstore.podSecurityContext" (dict "ctx" . "profile" "goService") | nindent 8 }}
+      priorityClassName: {{ $c.priorityClassName }}
+      {{- include "bookstore.topologySpread" (dict "w" $c "app" "catalog") | nindent 6 }}
+      {{- include "bookstore.affinity" (dict "w" $c "app" "catalog") | nindent 6 }}
+      {{- with $c.nodeSelector }}
+      nodeSelector:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with $c.tolerations }}
+      tolerations:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      containers:
+        - name: catalog
+          image: "{{ $c.image.repository }}:{{ $c.image.tag }}"
+          imagePullPolicy: {{ $c.image.pullPolicy }}
+          securityContext:
+            {{- include "bookstore.containerSecurityContext" (dict "ctx" . "profile" "goService") | nindent 12 }}
+          ports:
+            - name: http
+              containerPort: 8080
+          envFrom:
+            - configMapRef:
+                name: catalog-config
+          env:
+            - name: PORT
+              value: "8080"
+            - name: LOG_LEVEL
+              valueFrom:
+                configMapKeyRef:
+                  name: catalog-config
+                  key: LOG_LEVEL
+            {{- include "bookstore.dbEnv" . | nindent 12 }}
+          startupProbe:
+            httpGet: { path: /healthz, port: http }
+            periodSeconds: 5
+            failureThreshold: 30
+          livenessProbe:
+            httpGet: { path: /healthz, port: http }
+            periodSeconds: 10
+            timeoutSeconds: 2
+            failureThreshold: 3
+            successThreshold: 1
+          readinessProbe:
+            httpGet: { path: /readyz, port: http }
+            periodSeconds: 5
+            timeoutSeconds: 2
+            failureThreshold: 3
+            successThreshold: 1
+          lifecycle:
+            preStop:
+              sleep:
+                seconds: {{ $c.preStopSleepSeconds }}
+          resources:
+            {{- toYaml $c.resources | nindent 12 }}
+          volumeMounts:
+            - name: scratch
+              mountPath: /tmp/cache
+            - name: podinfo
+              mountPath: /etc/podinfo
+              readOnly: true
+      volumes:
+        - name: scratch
+          emptyDir:
+            sizeLimit: 64Mi
+        - name: podinfo
+          downwardAPI:
+            items:
+              - path: pod_name
+                fieldRef: { fieldPath: metadata.name }
+              - path: pod_namespace
+                fieldRef: { fieldPath: metadata.namespace }
+              - path: pod_labels
+                fieldRef: { fieldPath: metadata.labels }
+              - path: cpu_limit
+                resourceFieldRef:
+                  containerName: catalog
+                  resource: limits.cpu
+      terminationGracePeriodSeconds: {{ $c.terminationGracePeriodSeconds }}
+{{- end }}

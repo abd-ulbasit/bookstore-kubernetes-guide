@@ -1,0 +1,28 @@
+# Bookstore Platform v2 — Part 13 ch.03: kind cluster config for the
+# ap-southeast region. A READER region (CNPG standby; writes proxy to
+# us-east). Distinct apiServerPort (36445) so the three regions coexist.
+apiVersion: kind.x-k8s.io/v1alpha4
+kind: Cluster
+name: bookstore-platform-ap-southeast
+networking:
+  apiServerAddress: "127.0.0.1"
+  apiServerPort: 36445
+  kubeProxyMode: "iptables"
+  serviceSubnet: "10.98.0.0/16"
+  podSubnet: "10.246.0.0/16"
+nodes:
+  - role: control-plane
+    labels:
+      topology.kubernetes.io/region: ap-southeast
+      topology.kubernetes.io/zone: ap-southeast-a
+      bookstore-platform.example.com/role: reader
+  - role: worker
+    labels:
+      topology.kubernetes.io/region: ap-southeast
+      topology.kubernetes.io/zone: ap-southeast-a
+      bookstore-platform.example.com/role: reader
+  - role: worker
+    labels:
+      topology.kubernetes.io/region: ap-southeast
+      topology.kubernetes.io/zone: ap-southeast-b
+      bookstore-platform.example.com/role: reader

@@ -1,0 +1,71 @@
+# Bookstore — Part 07 ch.05: AnalysisTemplate — catalog success-rate gate.
+#
+# The Rollout (catalog-rollout.yaml) runs this as a canary GATE. It queries
+# PROMETHEUS for catalog's success rate using the SAME metrics Part 06 ch.01
+# made the catalog binary export (app/catalog/main.go):
+#   http_requests_total{handler,code}   — a counter, per handler + HTTP status
+#
+#   success-rate = 1 − ( rate(5xx) / rate(all non-/metrics requests) )
+#
+# successCondition keeps the canary only while success-rate ≥ 0.95. After
+# `failureLimit` consecutive failing measurements the AnalysisRun fails →
+# Argo Rollouts ABORTS the rollout and AUTO-ROLLS-BACK to the stable
+# ReplicaSet. The PromQL is REAL against the exported series (not illustrative);
+# what IS illustrative is whether the tiny demo binary emits 5xx on demand —
+# ch.05 gives an honest way to induce errors for the failure path.
+#
+# CRD-INTRINSIC NOTE: `AnalysisTemplate` is `argoproj.io/v1alpha1` (Argo
+# Rollouts CRD). Without the controller installed, a client dry-run prints
+# `no matches for kind "AnalysisTemplate"` — EXPECTED, schema-correct (same
+# precedent as raw 18-/51-/70-/80-/83-, the Helm/Kustomize CRD extras, and
+# ch.04's Argo CD Application/AppProject). Install Argo Rollouts first.
+#
+# Prometheus address: the Part 06 ch.01 kube-prometheus-stack Service in the
+# `monitoring` namespace. The catalog ServiceMonitor (80-) must be scraping
+# catalog (its `release: kube-prometheus-stack` label — Part 06 ch.01).
+apiVersion: argoproj.io/v1alpha1
+kind: AnalysisTemplate
+metadata:
+  name: catalog-success-rate
+  namespace: bookstore
+  labels:
+    app: catalog
+    app.kubernetes.io/part-of: bookstore
+spec:
+  # Args are passed by the Rollout's analysis step (service-name/namespace);
+  # prometheus-port has a default so it is optional.
+  args:
+    - name: service-name
+    - name: namespace
+    - name: prometheus-port
+      value: "9090"
+  metrics:
+    - name: catalog-success-rate
+      # Take a measurement every 20s, sample 5 times before the step proceeds.
+      interval: 20s
+      count: 5
+      # PASS while success-rate ≥ 0.95 (≤5% 5xx). result[0] = the scalar.
+      successCondition: result[0] >= 0.95
+      # After 3 consecutive failing samples the AnalysisRun FAILS → the
+      # Rollout aborts and auto-rolls-back to stable.
+      failureLimit: 3
+      provider:
+        prometheus:
+          # kube-prometheus-stack Prometheus Service (Part 06 ch.01),
+          # cross-namespace DNS. Replace if your Prometheus differs.
+          address: "http://kube-prometheus-stack-prometheus.monitoring.svc.cluster.local:{{args.prometheus-port}}"
+          timeout: 30
+          # REAL PromQL against the catalog metrics (Part 06 ch.01 §4 "Errors"
+          # query). handler!="metrics" excludes the uninstrumented /metrics
+          # endpoint (app/catalog/main.go does not instrument it). The
+          # `or vector(0)` guard: when there is NO traffic yet, the 5xx/all
+          # division yields no data; `or vector(0)` substitutes 0 for the
+          # fraction → 1-0 = 1.0 (100% success) so a quiet canary passes,
+          # not fails (avoids 0/0 → NaN failing an otherwise-healthy canary).
+          query: |
+            1 - (
+              sum(rate(http_requests_total{handler!="metrics",code=~"5..",namespace="{{args.namespace}}"}[2m]))
+              /
+              sum(rate(http_requests_total{handler!="metrics",namespace="{{args.namespace}}"}[2m]))
+              or vector(0)
+            )

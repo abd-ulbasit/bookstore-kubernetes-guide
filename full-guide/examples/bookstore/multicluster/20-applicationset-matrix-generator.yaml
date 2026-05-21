@@ -1,0 +1,86 @@
+# Bookstore — Part 11 ch.06 "Multi-cluster & fleet": an ApplicationSet with a
+# MATRIX generator — the Cartesian product of (clusters) × (git-directory
+# environments). This is the "every environment on every region cluster"
+# fleet topology in one object, and shows the matrix/git generators the
+# chapter discusses (a step beyond the single cluster generator in 10-).
+#
+# WHEN MATRIX vs the simple CLUSTER generator (10-)
+#   10- = ONE Application per cluster (cluster picks its overlay by label) —
+#         the per-region or per-env-cluster topology.
+#   THIS = clusters × environments — e.g. each REGION cluster runs dev AND
+#         staging AND prod (or a chosen subset). Use the matrix when the
+#         fleet axis and the environment axis are INDEPENDENT and you want
+#         their product without hand-writing every combination.
+#
+# The GIT generator child enumerates directories under
+# examples/bookstore/kustomize/overlays/ (dev, staging, prod) directly from
+# the repo — so adding an overlay directory automatically adds an Application
+# per cluster, no edit here (GitOps all the way down).
+#
+# !!! CRD-INTRINSIC DRY-RUN (identical precedent to argocd/ + 18-/51-/70-/83-)
+#   `ApplicationSet` is `argoproj.io/v1alpha1`. WITHOUT Argo CD + the
+#   ApplicationSet controller installed, a client dry-run prints
+#     no matches for kind "ApplicationSet" in version "argoproj.io/v1alpha1"
+#   EXPECTED, schema-correct (same precedent as examples/bookstore/argocd/).
+#   Whole-dir dry-run prints this for CRD-backed files only and continues.
+#   Schema verified against the Argo CD ApplicationSet matrix + git + clusters
+#   generators.
+#
+# PLACEHOLDER: `repoURL` https://github.com/your-org/bookstore — replace
+# `your-org` (same convention as examples/bookstore/argocd/). Paths are real.
+#
+# Requires: Argo CD installed; ≥1 fleet cluster registered+labelled (as 10-);
+#   the `bookstore` AppProject.
+# Apply (use EITHER 10- OR 20-, not both — they would both generate
+# Applications targeting the same clusters/namespace; pick one topology, the
+# same "alternative, not addition" rule as the Part 02 50-/51- pairing):
+#   kubectl apply -n argocd -f examples/bookstore/multicluster/20-applicationset-matrix-generator.yaml
+apiVersion: argoproj.io/v1alpha1
+kind: ApplicationSet
+metadata:
+  name: bookstore-fleet-matrix
+  namespace: argocd
+  labels:
+    app.kubernetes.io/part-of: bookstore
+spec:
+  goTemplate: true
+  goTemplateOptions: ["missingkey=error"]
+  generators:
+    - matrix:
+        generators:
+          # AXIS 1 — every fleet cluster (as in 10-).
+          - clusters:
+              selector:
+                matchLabels:
+                  bookstore.example.com/fleet: "true"
+          # AXIS 2 — every overlay DIRECTORY in the repo (dev/staging/prod),
+          # enumerated straight from Git. Adding overlays/<x>/ adds an
+          # Application per cluster automatically.
+          - git:
+              repoURL: https://github.com/your-org/bookstore.git   # PLACEHOLDER — replace your-org
+              revision: main
+              directories:
+                - path: examples/bookstore/kustomize/overlays/*
+  template:
+    metadata:
+      # bookstore-<cluster>-<overlay-dir-basename>, unique per matrix cell.
+      name: 'bookstore-{{.name}}-{{.path.basename}}'
+      labels:
+        app.kubernetes.io/part-of: bookstore
+    spec:
+      project: bookstore
+      source:
+        repoURL: https://github.com/your-org/bookstore.git         # PLACEHOLDER — replace your-org
+        targetRevision: main
+        path: '{{.path.path}}'             # the real overlay dir from the git axis
+      destination:
+        server: '{{.server}}'              # the cluster from the clusters axis
+        # Per-environment namespace so dev/staging/prod can co-reside on one
+        # cluster without colliding. The base ships `bookstore`; for the
+        # matrix topology you would parametrize the namespace transformer per
+        # overlay (out of scope to wire here — shown as the topology).
+        namespace: bookstore
+      syncPolicy:
+        automated: { prune: true, selfHeal: true }
+        syncOptions:
+          - CreateNamespace=false          # base owns the PSA ns (Part 07 ch.04)

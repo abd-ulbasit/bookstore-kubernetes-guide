@@ -1,0 +1,100 @@
+# Bookstore — Part 05 ch.04 "Secrets and cluster hardening".
+#
+# !!! THIS IS NOT A `kubectl apply` OBJECT !!!
+# An audit `Policy` (audit.k8s.io/v1) is read by kube-apiserver via
+# `--audit-policy-file=<this file>`; it never goes through the API. Validate it
+# as YAML only (`ruby -ryaml -e 'YAML.load_file(ARGV[0])'`), not as a resource.
+#
+# WHAT AUDIT LOGGING IS: the apiserver can emit a structured record for every
+# request that reaches it (who, what verb, which resource, decision, when).
+# This is the cluster's security flight-recorder — "who deleted the prod
+# Deployment / read that Secret / escalated RBAC". Off (or Metadata-only) by
+# default; you must opt in with this policy + a backend.
+#
+# STAGES (each request passes through these; a rule's `omitStages` can drop
+# noisy ones):
+#   RequestReceived   — as soon as the handler gets it
+#   ResponseStarted   — headers sent (long-running, e.g. watch)
+#   ResponseComplete  — response finished (the usual one to keep)
+#   Panic             — request panicked
+#
+# LEVELS (increasing verbosity / cost):
+#   None            — do not log these at all
+#   Metadata        — request metadata (user, verb, resource, decision) — NO
+#                     request/response bodies. Cheap; the safe default.
+#   Request         — metadata + the request body (e.g. the object submitted)
+#   RequestResponse — metadata + request AND response bodies (heaviest)
+#
+# RULE ORDERING IS FIRST-MATCH: the apiserver walks `rules` top-to-bottom and
+# applies the FIRST that matches a request. Put specific high-value/low-noise
+# rules FIRST and a broad catch-all LAST. A too-broad RequestResponse rule
+# early on will bury you in (and pay to store) gigabytes of noise.
+#
+# WIRING (conceptual; you do not run this on the local kind lab):
+#   --audit-policy-file=/etc/kubernetes/audit/audit-policy.yaml
+#   --audit-log-path=/var/log/kubernetes/audit.log   (log backend)  OR
+#   --audit-webhook-config-file=...                  (webhook backend → SIEM)
+#   --audit-log-maxage / --audit-log-maxbackup / --audit-log-maxsize (rotation)
+# kubeadm: add the flags + hostPath mounts to the kube-apiserver static Pod;
+# managed clusters expose audit as a provider feature (EKS control-plane logs,
+# GKE Cloud Audit Logs, AKS diagnostic settings) — see ch.04 production notes.
+apiVersion: audit.k8s.io/v1
+kind: Policy
+# Drop the RequestReceived stage globally — it doubles event volume for little
+# value (ResponseComplete already has the outcome).
+omitStages:
+  - "RequestReceived"
+rules:
+  # 1) Secrets / configmaps: record WHO touched them but NEVER log the body
+  #    (logging a Secret's contents would defeat the purpose). Metadata only.
+  - level: Metadata
+    resources:
+      - group: ""
+        resources: ["secrets", "configmaps"]
+    # the bookstore namespace is the crown jewel here; audit it explicitly
+    namespaces: ["bookstore", "kube-system"]
+
+  # 2) RBAC changes anywhere are high-value security events — capture the full
+  #    object so you can see exactly what permission was granted/changed.
+  - level: RequestResponse
+    resources:
+      - group: "rbac.authorization.k8s.io"
+        resources: ["roles", "clusterroles", "rolebindings", "clusterrolebindings"]
+
+  # 3) exec / attach / portforward into Pods = a direct data-exfil / break-glass
+  #    path (Part 03 ch.02 / ch.01). Always record these.
+  - level: Request
+    resources:
+      - group: ""
+        resources: ["pods/exec", "pods/attach", "pods/portforward"]
+
+  # 4) Mutating writes (create/update/patch/delete) to core workloads in the
+  #    app namespace — the audit trail for "what changed in prod".
+  - level: Metadata
+    verbs: ["create", "update", "patch", "delete"]
+    resources:
+      - group: ""
+        resources: ["pods", "services"]
+      - group: "apps"
+        resources: ["deployments", "statefulsets", "daemonsets"]
+    namespaces: ["bookstore"]
+
+  # 5) NOISE CONTROL: drop the chatty read-only / system traffic that would
+  #    otherwise dominate the log and cost storage with no security value.
+  - level: None
+    users: ["system:kube-scheduler", "system:kube-proxy", "system:apiserver"]
+  - level: None
+    userGroups: ["system:nodes"]               # kubelet heartbeats etc.
+  - level: None
+    verbs: ["get", "list", "watch"]            # read-only chatter
+    resources:
+      - group: ""
+        resources: ["events", "endpoints"]
+      - group: "coordination.k8s.io"
+        resources: ["leases"]                  # leader-election renewals
+
+  # 6) Catch-all LAST: everything not matched above is recorded at Metadata
+  #    (cheap) so nothing is silently invisible. Tighten/loosen per appetite.
+  - level: Metadata
+    omitStages:
+      - "RequestReceived"

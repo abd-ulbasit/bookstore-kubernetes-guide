@@ -1,0 +1,148 @@
+# Bookstore — Part 02 ch.04 "Ingress": the orders API as a Deployment.
+#
+# The async path's HTTP front. catalog (10-) and storefront (11-) already
+# exist; the Ingress (50-ingress.yaml) routes /api/orders here and the
+# NetworkPolicy (60-networkpolicy.yaml) allows orders -> rabbitmq, so orders
+# must exist as a real Deployment with the same label scheme as catalog.
+#
+# Same shape as 10-catalog-deploy.yaml (probes from Part 01 ch.02, resources
+# from ch.03, native preStop sleep — the image is distroless/static, no shell).
+#
+# Part 03 ch.02 (Secrets) increment: DB_DSN is now BUILT from the shared
+# `db-credentials` Secret (16-) exactly like catalog (10-), so orders persists
+# to Postgres (app/orders/main.go: DB_DSN set ⇒ pgxpool INSERT). AMQP_URL stays
+# UNSET — rabbitmq (13-) runs with no auth as Part-02 networking scaffolding;
+# orders still degrades gracefully (publish is best-effort, logs on absence).
+#
+# Part 04 ch.03 SCHEDULING LAYER (additive only): priorityClassName
+# bookstore-critical (35-priorityclasses.yaml) — same user-facing tier as
+# catalog/storefront, above batch and below the data tier. (Topology spread /
+# anti-affinity is demonstrated on catalog & storefront in ch.02; orders takes
+# only the priority tier here to keep the scheduling layer focused.)
+#
+# Part 05 SECURITY LAYER (ch.01 + ch.02 — additive only):
+#  • ch.01 serviceAccountName: orders-sa + automountServiceAccountToken: false
+#    — orders never calls kube-apiserver; dedicated identity, no token mounted.
+#  • ch.02 securityContext (PSA `restricted`, same as catalog 10-): distroless/
+#    static:nonroot, UID 65532, drop ALL, allowPrivilegeEscalation:false,
+#    seccomp RuntimeDefault, readOnlyRootFilesystem:true. A small `tmp`
+#    emptyDir is added so the read-only root FS still has a writable /tmp
+#    (Go's default scratch dir) — catalog already had `scratch`; orders gains
+#    the equivalent here.
+#
+# Requires:
+#   kubectl apply -f examples/bookstore/raw-manifests/00-namespace.yaml
+#   kubectl apply -f examples/bookstore/raw-manifests/05-serviceaccounts-rbac.yaml  # ch.01
+#   kubectl apply -f examples/bookstore/raw-manifests/16-db-credentials.yaml   # ch.02
+#   kind load docker-image bookstore/orders:dev --name bookstore
+# Apply:
+#   kubectl apply -f examples/bookstore/raw-manifests/14-orders-deploy.yaml
+#   kubectl rollout status deployment/orders -n bookstore
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: orders
+  namespace: bookstore
+  labels:
+    app: orders
+    app.kubernetes.io/part-of: bookstore
+spec:
+  replicas: 2
+  revisionHistoryLimit: 5
+  selector:
+    matchLabels:
+      app: orders                   # IMMUTABLE; equals template labels below
+  strategy:
+    type: RollingUpdate
+    rollingUpdate:
+      maxSurge: 1
+      maxUnavailable: 0
+  template:
+    metadata:
+      labels:
+        app: orders                 # selected by this RS AND by the Service (40-)
+        component: backend
+    spec:
+      # --- Part 05 ch.01: dedicated identity, no API token mounted.
+      serviceAccountName: orders-sa
+      automountServiceAccountToken: false
+      # --- Part 05 ch.02: pod-level securityContext (PSA `restricted`).
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 65532
+        runAsGroup: 65532
+        seccompProfile:
+          type: RuntimeDefault
+      # --- Part 04 ch.03: user-facing tier (35-priorityclasses.yaml), same as
+      # catalog/storefront. ch.02's spread/anti-affinity is demonstrated on
+      # catalog & storefront; orders carries the priority tier only.
+      priorityClassName: bookstore-critical
+      containers:
+        - name: orders
+          image: bookstore/orders:dev      # built in Part 00 ch.02
+          imagePullPolicy: IfNotPresent     # locally kind-loaded image
+          # --- Part 05 ch.02: container securityContext (PSA `restricted`).
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities:
+              drop: ["ALL"]
+          ports:
+            - name: http
+              containerPort: 8080
+          env:
+            - name: PORT
+              value: "8080"
+            # --- ch.02 Secret: assemble DB_DSN from db-credentials (same
+            # pattern as 10-catalog-deploy.yaml). $(VAR) needs the refs defined
+            # earlier in this list, so pull the keys first then compose.
+            - name: POSTGRES_USER
+              valueFrom:
+                secretKeyRef: { name: db-credentials, key: POSTGRES_USER }
+            - name: POSTGRES_PASSWORD
+              valueFrom:
+                secretKeyRef: { name: db-credentials, key: POSTGRES_PASSWORD }
+            - name: POSTGRES_DB
+              valueFrom:
+                secretKeyRef: { name: db-credentials, key: POSTGRES_DB }
+            - name: DB_DSN                  # libpq keyword/value DSN (pgx accepts it)
+              value: "host=postgres.bookstore.svc.cluster.local port=5432 user=$(POSTGRES_USER) password=$(POSTGRES_PASSWORD) dbname=$(POSTGRES_DB) sslmode=disable"
+            # AMQP_URL still unset: rabbitmq has no auth (Part-02 scaffolding);
+            # orders publish is best-effort and logs when AMQP_URL is absent.
+          startupProbe:
+            httpGet: { path: /healthz, port: http }
+            periodSeconds: 5
+            failureThreshold: 30
+          livenessProbe:
+            httpGet: { path: /healthz, port: http }
+            periodSeconds: 10
+            timeoutSeconds: 2
+            failureThreshold: 3
+          readinessProbe:
+            httpGet: { path: /readyz, port: http }
+            periodSeconds: 5
+            timeoutSeconds: 2
+            failureThreshold: 3
+          lifecycle:
+            preStop:
+              # Native sleep handler (beta & default-on at 1.30, GA 1.33 —
+              # works on any 1.30+ cluster). NOT exec: the distroless/static
+              # image has no shell/coreutils, so an exec /bin/sleep would fail.
+              sleep:
+                seconds: 5
+          resources:
+            requests:
+              cpu: 50m
+              memory: 64Mi
+            limits:
+              cpu: 250m
+              memory: 128Mi
+          # --- Part 05 ch.02: writable /tmp for the read-only root FS.
+          volumeMounts:
+            - name: tmp
+              mountPath: /tmp
+      volumes:
+        - name: tmp
+          emptyDir:
+            sizeLimit: 64Mi             # ephemeral scratch only
+      terminationGracePeriodSeconds: 30

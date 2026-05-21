@@ -1,0 +1,60 @@
+{{/*
+  Namespace + ResourceQuota + LimitRange (raw-manifests 00-namespace.yaml).
+  Templated so the PSA `restricted` labels and the governance objects travel
+  WITH the release. `helm install --create-namespace` makes the bare ns;
+  Helm applies this object too and reconciles the labels onto it. Set
+  namespace.create=false if a platform/GitOps pre-creates + pre-labels it.
+*/}}
+{{- if .Values.namespace.create }}
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: {{ include "bookstore.namespace" . }}
+  labels:
+    {{- include "bookstore.commonLabels" . | nindent 4 }}
+    # Part 05 ch.02 — Pod Security Admission: enforce restricted, plus
+    # audit+warn at the same level (defense in depth). Every workload this
+    # chart renders is restricted-compliant, so enforce does not lock us out.
+    pod-security.kubernetes.io/enforce: {{ .Values.namespace.psa.enforce }}
+    pod-security.kubernetes.io/enforce-version: {{ .Values.namespace.psa.enforceVersion }}
+    pod-security.kubernetes.io/audit: {{ .Values.namespace.psa.audit }}
+    pod-security.kubernetes.io/audit-version: {{ .Values.namespace.psa.auditVersion }}
+    pod-security.kubernetes.io/warn: {{ .Values.namespace.psa.warn }}
+    pod-security.kubernetes.io/warn-version: {{ .Values.namespace.psa.warnVersion }}
+{{- end }}
+{{- if and .Values.namespace.create .Values.namespace.resourceQuota.enabled }}
+---
+# Caps the SUM of requests/limits across all Pods in the namespace.
+apiVersion: v1
+kind: ResourceQuota
+metadata:
+  name: bookstore-quota
+  namespace: {{ include "bookstore.namespace" . }}
+  labels:
+    {{- include "bookstore.commonLabels" . | nindent 4 }}
+spec:
+  hard:
+    {{- toYaml .Values.namespace.resourceQuota.hard | nindent 4 }}
+{{- end }}
+{{- if and .Values.namespace.create .Values.namespace.limitRange.enabled }}
+---
+# Per-CONTAINER defaults + min/max (makes the ResourceQuota ergonomic).
+apiVersion: v1
+kind: LimitRange
+metadata:
+  name: bookstore-limits
+  namespace: {{ include "bookstore.namespace" . }}
+  labels:
+    {{- include "bookstore.commonLabels" . | nindent 4 }}
+spec:
+  limits:
+    - type: Container
+      default:
+        {{- toYaml .Values.namespace.limitRange.default | nindent 8 }}
+      defaultRequest:
+        {{- toYaml .Values.namespace.limitRange.defaultRequest | nindent 8 }}
+      max:
+        {{- toYaml .Values.namespace.limitRange.max | nindent 8 }}
+      min:
+        {{- toYaml .Values.namespace.limitRange.min | nindent 8 }}
+{{- end }}

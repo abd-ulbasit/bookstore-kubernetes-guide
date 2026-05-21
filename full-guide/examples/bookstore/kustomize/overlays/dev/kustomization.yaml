@@ -1,0 +1,185 @@
+# Bookstore — DEV overlay.
+#
+#   kubectl kustomize examples/bookstore/kustomize/overlays/dev
+#   kubectl apply  -k examples/bookstore/kustomize/overlays/dev
+#
+# Dev = smallest footprint for a single-node kind cluster: ONE replica per
+# stateless tier, debug logging + dev feature flags, NO autoscaler, NO
+# disruption budgets (fewer moving parts while iterating), ingress host
+# bookstore.dev.local. Mirrors helm values-dev.yaml.
+#
+# It changes ONLY safe knobs (replicas, env config, ingress host, dropping
+# the optional HPA/PDB). It does NOT weaken any securityContext and does NOT
+# touch scheduling (priorityClassName / topologySpread / affinity / tolerations
+# stay exactly as base renders them) or any spec.selector — so a `kubectl
+# apply` upgrade from any other overlay never hits an immutable-field error.
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+
+# Namespace stays `bookstore` across all envs (DB_DSN / AMQP_URL / headless
+# Service DNS / NetworkPolicy namespaceSelectors hardcode it). See ../README.md.
+resources:
+  - ../../base
+
+# Per-env metadata label via the modern `labels:` transformer.
+# includeSelectors:false / includeTemplates:false → this NEVER lands in
+# spec.selector or the pod template, so selectors are byte-identical to base
+# (the commonLabels immutability footgun is avoided — see the chapter).
+labels:
+  - pairs:
+      app.kubernetes.io/environment: dev
+    includeSelectors: false
+    includeTemplates: false
+
+# Counts via the `replicas:` transformer (NOT a hand-edited spec.replicas).
+# Single-node kind: one replica per stateless tier.
+replicas:
+  - name: catalog
+    count: 1
+  - name: storefront
+    count: 1
+  - name: orders
+    count: 1
+
+patches:
+  # Dev config: debug logging + dev feature flags on the catalog ConfigMap.
+  # Strategic-merge: only the listed data keys change; the rest of the
+  # ConfigMap (and every other object) is untouched.
+  - target:
+      kind: ConfigMap
+      name: catalog-config
+    patch: |
+      apiVersion: v1
+      kind: ConfigMap
+      metadata:
+        name: catalog-config
+      data:
+        LOG_LEVEL: "debug"
+        CATALOG_FEATURE_RECOMMENDATIONS: "true"
+        CATALOG_CACHE_TTL_SECONDS: "10"
+
+  # payments-worker debug logging. STRATEGIC-MERGE (not JSON6902) on purpose:
+  # the env list is a strategic-merge list keyed by `name`, so kustomize
+  # MERGES this single `LOG_LEVEL` entry onto the existing list BY NAME and
+  # leaves PORT/AMQP_URL (and everything else) untouched — order-INDEPENDENT.
+  # A JSON6902 `/spec/.../env/1/value` would be INDEX-based: JSON Pointer has
+  # no by-name list addressing, so inserting any env var before LOG_LEVEL in
+  # 19-payments-worker-deploy.yaml would silently patch the WRONG variable.
+  # JSON6902 is the right tool for true index / whole-element ops (and for
+  # scalar fields, e.g. the HPA bounds in the staging/prod overlays); env-by-
+  # name is a strategic-merge job. (See the SMP-vs-JSON6902 callout in the
+  # chapter, "Diff overlays, read the typed knobs".)
+  - target:
+      group: apps
+      version: v1
+      kind: Deployment
+      name: payments-worker
+    patch: |
+      apiVersion: apps/v1
+      kind: Deployment
+      metadata:
+        name: payments-worker
+      spec:
+        template:
+          spec:
+            containers:
+              - name: payments-worker
+                env:
+                  - name: LOG_LEVEL
+                    value: "debug"
+
+  # Dev ingress host. Strategic-merge replaces the rules host + the tls host;
+  # ingressClassName / annotations / backends are inherited from base.
+  - target:
+      group: networking.k8s.io
+      version: v1
+      kind: Ingress
+      name: bookstore
+    patch: |
+      apiVersion: networking.k8s.io/v1
+      kind: Ingress
+      metadata:
+        name: bookstore
+      spec:
+        tls:
+          - hosts:
+              - bookstore.dev.local
+            secretName: bookstore-tls
+        rules:
+          - host: bookstore.dev.local
+            http:
+              paths:
+                - path: /api/books(/|$)(.*)
+                  pathType: ImplementationSpecific
+                  backend:
+                    service:
+                      name: catalog
+                      port:
+                        number: 80
+                - path: /api/orders(/|$)(.*)
+                  pathType: ImplementationSpecific
+                  backend:
+                    service:
+                      name: orders
+                      port:
+                        number: 80
+                - path: /
+                  pathType: Prefix
+                  backend:
+                    service:
+                      name: storefront
+                      port:
+                        number: 80
+
+  # Iterate fast: no autoscaler / disruption budgets in dev (helm hpa.enabled
+  # =false / pdb.enabled=false). `$patch: delete` removes these optional base
+  # objects from the dev render — the core 49-set minus HPA(1)+PDB(3) = 45.
+  - target:
+      kind: HorizontalPodAutoscaler
+      name: catalog
+    patch: |
+      $patch: delete
+      apiVersion: autoscaling/v2
+      kind: HorizontalPodAutoscaler
+      metadata:
+        name: catalog
+  - target:
+      kind: PodDisruptionBudget
+      name: catalog
+    patch: |
+      $patch: delete
+      apiVersion: policy/v1
+      kind: PodDisruptionBudget
+      metadata:
+        name: catalog
+  - target:
+      kind: PodDisruptionBudget
+      name: storefront
+    patch: |
+      $patch: delete
+      apiVersion: policy/v1
+      kind: PodDisruptionBudget
+      metadata:
+        name: storefront
+  - target:
+      kind: PodDisruptionBudget
+      name: orders
+    patch: |
+      $patch: delete
+      apiVersion: policy/v1
+      kind: PodDisruptionBudget
+      metadata:
+        name: orders
+
+# Image tags are env-controlled HERE (base default is :dev). Dev keeps :dev
+# but pins it explicitly so the overlay documents what it ships; bump these to
+# a CI-built tag/digest without editing any Deployment.
+images:
+  - name: bookstore/catalog
+    newTag: dev
+  - name: bookstore/storefront
+    newTag: dev
+  - name: bookstore/orders
+    newTag: dev
+  - name: bookstore/payments-worker
+    newTag: dev

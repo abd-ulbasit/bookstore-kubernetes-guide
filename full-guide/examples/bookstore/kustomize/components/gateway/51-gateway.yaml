@@ -1,0 +1,121 @@
+# Bookstore — Part 02 ch.05 "Gateway API": the 50-ingress.yaml routing,
+# re-expressed with Gateway API (the role-oriented successor to Ingress).
+#
+# ===========================================================================
+#  ALTERNATIVE TO 50-ingress.yaml — DO NOT APPLY BOTH.
+#  50- (Ingress) and this file (Gateway API) express the SAME external
+#  routing for the Bookstore via two DIFFERENT, independent data planes.
+#  Applying both binds the same hostname/paths twice. Pick ONE stack:
+#    * Ingress stack    : 40-services.yaml + 50-ingress.yaml
+#    * Gateway API stack : 40-services.yaml + 51-gateway.yaml
+#  Both are dry-run valid in isolation and as part of a whole-dir dry-run
+#  (dry-run does not detect the runtime hostname overlap — see ch.05).
+# ===========================================================================
+#
+# Gateway API is CRD-installed, NOT built into Kubernetes. The Gateway/
+# HTTPRoute v1 CRDs + a controller (e.g. the ingress-nginx Gateway
+# implementation, Envoy Gateway, Cilium, Istio) must be installed first
+# (ch.05 documents the public install). A client-side dry-run only needs the
+# CRDs registered; --validate=false (used in the whole-dir dry-run report)
+# tolerates their absence.
+#
+# Role-oriented split (ch.05): GatewayClass + Gateway are INFRA-team owned
+# (the listener, TLS, the L4/L7 entrypoint); HTTPRoute is APP-team owned (how
+# my service's paths map) and merely ATTACHES to the Gateway.
+#
+# Requires:
+#   kubectl apply -f examples/bookstore/raw-manifests/40-services.yaml
+#   # Gateway API CRDs + a controller installed (ch.05)
+#   # TLS Secret bookstore-tls in this namespace (same as 50-, see ch.04/05)
+# Apply (Gateway-API stack only):
+#   kubectl apply -f examples/bookstore/raw-manifests/51-gateway.yaml
+#   kubectl get gateway,httproute -n bookstore
+---
+# INFRA-owned: the class of controller that implements Gateways. Normally
+# pre-created by the platform team / installed by the controller; included
+# here so the stack is self-contained for the guide. controllerName is
+# implementation-specific (this value targets the ingress-nginx Gateway
+# implementation; swap to match whatever controller you installed in ch.05).
+apiVersion: gateway.networking.k8s.io/v1
+kind: GatewayClass
+metadata:
+  name: bookstore-gtw
+  labels:
+    app.kubernetes.io/part-of: bookstore
+spec:
+  controllerName: k8s.io/ingress-nginx
+---
+# INFRA-owned: the actual entrypoint + listeners + TLS termination.
+apiVersion: gateway.networking.k8s.io/v1
+kind: Gateway
+metadata:
+  name: bookstore
+  namespace: bookstore
+  labels:
+    app.kubernetes.io/part-of: bookstore
+spec:
+  gatewayClassName: bookstore-gtw
+  listeners:
+    - name: https
+      protocol: HTTPS
+      port: 443
+      hostname: bookstore.localdev.me
+      tls:
+        mode: Terminate                 # TLS terminated at the Gateway
+        certificateRefs:
+          - kind: Secret
+            name: bookstore-tls         # same cert Secret as the Ingress stack
+      allowedRoutes:
+        namespaces:
+          from: Same                    # only HTTPRoutes in this ns may attach
+---
+# APP-owned: how the Bookstore's paths map onto backends. Same routing as
+# 50-ingress.yaml: /api/books -> catalog, /api/orders -> orders, / -> UI.
+# URLRewrite is a typed, PORTABLE core filter (no controller-specific
+# annotation — the portability win ch.05 highlights vs. Ingress).
+apiVersion: gateway.networking.k8s.io/v1
+kind: HTTPRoute
+metadata:
+  name: bookstore
+  namespace: bookstore
+  labels:
+    app.kubernetes.io/part-of: bookstore
+spec:
+  parentRefs:
+    - name: bookstore                   # attaches to the Gateway above
+  hostnames:
+    - bookstore.localdev.me
+  rules:
+    - matches:
+        - path:
+            type: PathPrefix
+            value: /api/books
+      filters:
+        - type: URLRewrite
+          urlRewrite:
+            path:
+              type: ReplacePrefixMatch
+              replacePrefixMatch: /books    # catalog serves /books
+      backendRefs:
+        - name: catalog
+          port: 80
+    - matches:
+        - path:
+            type: PathPrefix
+            value: /api/orders
+      filters:
+        - type: URLRewrite
+          urlRewrite:
+            path:
+              type: ReplacePrefixMatch
+              replacePrefixMatch: /orders   # orders serves /orders
+      backendRefs:
+        - name: orders
+          port: 80
+    - matches:
+        - path:
+            type: PathPrefix
+            value: /                       # everything else -> the UI
+      backendRefs:
+        - name: storefront
+          port: 80

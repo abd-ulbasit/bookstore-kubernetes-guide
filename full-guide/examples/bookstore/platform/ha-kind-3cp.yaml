@@ -1,0 +1,50 @@
+# Bookstore — Part 11 ch.08 "HA control plane & etcd": a 3-CONTROL-PLANE +
+# 2-worker `kind` cluster config. With >=2 control-plane nodes, kind stands up
+# a REAL stacked-etcd cluster (a genuine 3-member Raft quorum) and an internal
+# HAProxy load balancer in front of the 3 apiservers (active-active) — a
+# faithful, laptop-sized HA control plane the chapter operates against.
+#
+# !!! THIS IS A KIND CONFIG, NOT A KUBERNETES API OBJECT.
+#   `kind: Cluster` / apiVersion `kind.x-k8s.io/v1alpha4` is consumed by the
+#   `kind` CLI, NOT by kube-apiserver. It is NEVER `kubectl apply`-ed. The repo
+#   validation for this file is "well-formed YAML" only:
+#     python3 -c 'import yaml; list(yaml.safe_load_all(open(
+#       "examples/bookstore/platform/ha-kind-3cp.yaml"))); print("valid")'
+#   (A `kubectl apply --dry-run=client -f` would error with "no matches for
+#   kind Cluster in version kind.x-k8s.io/v1alpha4" — EXPECTED and correct;
+#   this is a CLI config, the same honesty pattern as the guide's apiserver-
+#   level cluster/ files and multicluster/00-two-cluster-topology.yaml. It is
+#   NOT a CRD-intrinsic case — there is no CRD that would ever make it apply.)
+#
+# THE REAL ARTEFACT IS THE CREATE COMMAND (run this — NOT kubectl):
+#   kind delete cluster --name bookstore-ha 2>/dev/null || true
+#   kind create cluster --name bookstore-ha \
+#     --config examples/bookstore/platform/ha-kind-3cp.yaml
+#   kubectl get nodes -o wide          # 3x control-plane + 2x worker
+#   kubectl -n kube-system get pods -l component=etcd          # 3 etcd members
+#   kubectl -n kube-system get pods -l component=kube-apiserver # 3 apiservers
+#
+# WHY 3 (not 2, not 4): etcd quorum = floor(n/2)+1. 3 members -> quorum 2 ->
+# tolerate 1 loss (the chapter demonstrates: lose 1 of 3, quorum HOLDS, the
+# Bookstore stays up). An EVEN count never raises tolerance (4 still tolerates
+# only 1) while adding a failure point + slowing every write — always ODD,
+# 3 the default. The Bookstore workloads run on the 2 WORKERS; its DATA is in
+# the Postgres StatefulSet PVC, NOT etcd (cluster STATE != app DATA — the whole
+# point of the chapter's failure demos and the Part 08 ch.02 three-layer model).
+#
+# ADDITIVE: this file is NEW and touches no canonical Bookstore manifest, Helm
+# chart, Kustomize overlay, the operator, or any existing examples/bookstore/**
+# file (the Gateway-vs-Ingress / CNPG / multicluster precedent).
+kind: Cluster
+apiVersion: kind.x-k8s.io/v1alpha4
+name: bookstore-ha
+nodes:
+  # --- 3 control-plane nodes -> a real 3-member stacked etcd (quorum 2) ---
+  # kind automatically adds an HAProxy LB container in front of the apiservers
+  # when there is more than one control-plane node (active-active front).
+  - role: control-plane
+  - role: control-plane
+  - role: control-plane
+  # --- 2 worker nodes: the Bookstore (and its Postgres PVC) runs HERE ---
+  - role: worker
+  - role: worker

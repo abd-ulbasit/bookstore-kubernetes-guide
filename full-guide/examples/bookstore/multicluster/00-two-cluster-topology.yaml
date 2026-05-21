@@ -1,0 +1,83 @@
+# Bookstore — Part 11 ch.06 "Multi-cluster & fleet": the TWO-CLUSTER lab
+# topology. Multi-cluster GENUINELY needs more than one cluster — there is no
+# single-cluster shortcut for "deliver to a fleet". This file is the honest,
+# reproducible 2-kind-cluster setup the chapter Hands-on uses, plus the kind
+# configs, as a NOT-APPLIED doc carrier (the real artifacts are the `kind` /
+# `argocd cluster add` commands in the header — same honesty pattern as the
+# guide's apiserver-level cluster/ files).
+#
+# WHY TWO CLUSTERS (the chapter's "when/why multi-cluster")
+#   blast radius (a cluster-wide failure / bad upgrade is contained to one),
+#   region/latency (run close to users), hard tenancy/regulatory isolation,
+#   and per-environment separation. The cost: cross-cluster service discovery,
+#   data gravity (stateful systems can't trivially span clusters — Postgres),
+#   fleet observability/policy, and operational multiplication. One BIG
+#   cluster (namespaces + RBAC + quotas, Part 08 ch.04) is simpler and right
+#   until one of those forcing functions applies — the chapter argues this.
+#
+# ── THE TWO-CLUSTER LAB (run these — NOT kubectl) ──────────────────────────
+#   # 1. Hub cluster (runs Argo CD; the single pane of glass):
+#   kind create cluster --name bookstore-hub --config /tmp/kind-hub.yaml
+#   # 2. A second, "remote" member cluster (a fleet member):
+#   kind create cluster --name bookstore-east --config /tmp/kind-east.yaml
+#
+#   # 3. Install Argo CD on the HUB (pinned Helm — Part 07 ch.04 step 1):
+#   kubectl config use-context kind-bookstore-hub
+#   helm repo add argo https://argoproj.github.io/argo-helm && helm repo update
+#   kubectl create namespace argocd
+#   helm install argocd argo/argo-cd -n argocd --version 7.7.11 --wait   # PINNED (same as ch.06 / Part 07 ch.04)
+#
+#   # 4. Register BOTH clusters with Argo CD and LABEL them so the
+#   #    ApplicationSet cluster generator (10-) selects them and the `env`
+#   #    label picks each cluster's overlay:
+#   argocd cluster add kind-bookstore-hub  --name hub
+#   argocd cluster add kind-bookstore-east --name east
+#   # label the stored cluster Secrets (argocd ns) — generator selector keys:
+#   kubectl -n argocd label secret <hub-cluster-secret> \
+#     bookstore.example.com/fleet=true env=dev
+#   kubectl -n argocd label secret <east-cluster-secret> \
+#     bookstore.example.com/fleet=true env=staging
+#   #  ^ now hub gets overlays/dev, east gets overlays/staging — a PER-CLUSTER
+#   #    overlay value, chosen by a cluster label, from ONE ApplicationSet.
+#
+#   # 5. The bookstore AppProject + the ApplicationSet (one object → a fleet):
+#   kubectl apply -n argocd -f examples/bookstore/argocd/00-appproject.yaml
+#   kubectl apply -n argocd -f examples/bookstore/multicluster/10-applicationset-cluster-generator.yaml
+#   kubectl get applications -n argocd          # bookstore-hub + bookstore-east
+#
+#   NON-LOCALLY-TRIVIAL BIT (called out, not faked): cross-cluster SERVICE
+#   discovery/networking (a Service in cluster A reachable from B) needs a
+#   multi-cluster mesh / Submariner / the MCS API — NOT shown end-to-end on
+#   kind here (it needs non-overlapping pod CIDRs + a tunnel). The chapter
+#   explains it conceptually; the runnable lab is fleet DELIVERY (above),
+#   which is fully reproducible with two kind clusters.
+#
+# ── kind configs the commands reference ────────────────────────────────────
+#   # /tmp/kind-hub.yaml
+#   kind: Cluster
+#   apiVersion: kind.x-k8s.io/v1alpha4
+#   name: bookstore-hub
+#   # /tmp/kind-east.yaml  (distinct podSubnet — required if you LATER add
+#   # cross-cluster networking; harmless otherwise)
+#   kind: Cluster
+#   apiVersion: kind.x-k8s.io/v1alpha4
+#   name: bookstore-east
+#   networking:
+#     podSubnet: "10.245.0.0/16"
+#     serviceSubnet: "10.97.0.0/16"
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: bookstore-multicluster-topology-NOT-APPLIED
+  namespace: bookstore
+  labels:
+    app.kubernetes.io/part-of: bookstore
+  annotations:
+    note: >-
+      DOC CARRIER ONLY — deliberately NOT part of any apply flow. The real
+      artifacts are the `kind create cluster` / `argocd cluster add` commands
+      in the header (a reproducible two-kind-cluster fleet). Wrapped in a
+      never-applied ConfigMap so the file is YAML-valid for the repo's
+      dry-run sweep without implying it is a resource to create.
+data:
+  README: "See the header — the 2-cluster lab is `kind`/`argocd` CLI, not kubectl apply."

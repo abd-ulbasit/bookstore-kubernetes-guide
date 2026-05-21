@@ -1,0 +1,41 @@
+# Bookstore — Part 11 ch.01: the webhook serving certificate.
+#
+# A self-signed cert-manager Issuer + a Certificate whose Secret
+# (bookstore-operator-webhook-cert) the manager mounts at the controller-
+# runtime default path. The webhook configs' cert-manager.io/inject-ca-from
+# annotation makes cert-manager stamp the matching caBundle into them — so the
+# apiserver trusts the webhook and the cert auto-rotates. cert-manager is
+# installed via its PINNED Helm chart (NEVER a releases/latest/download URL) —
+# the chapter shows that and the self-signed-caBundle alternative.
+#
+# !!! CRD-BACKED — intrinsic dry-run behavior !!!
+# Issuer / Certificate are cert-manager CRDs (cert-manager.io/v1). On a cluster
+# WITHOUT cert-manager, `kubectl apply --dry-run=client -f` prints:
+#   error: ... no matches for kind "Issuer" in version "cert-manager.io/v1"
+#   error: ... no matches for kind "Certificate" in version "cert-manager.io/v1"
+# EXPECTED and NOT a defect — identical to every other CRD-backed file in the
+# guide (cnpg/karpenter/kyverno/...). Install cert-manager (pinned Helm chart)
+# first; then this dry-runs/applies clean.
+apiVersion: cert-manager.io/v1
+kind: Issuer
+metadata:
+  name: bookstore-operator-selfsigned-issuer
+  namespace: bookstore-operator-system
+spec:
+  selfSigned: {}
+---
+apiVersion: cert-manager.io/v1
+kind: Certificate
+metadata:
+  name: bookstore-operator-serving-cert
+  namespace: bookstore-operator-system
+spec:
+  secretName: bookstore-operator-webhook-cert
+  dnsNames:
+    - bookstore-operator-webhook-service.bookstore-operator-system.svc
+    - bookstore-operator-webhook-service.bookstore-operator-system.svc.cluster.local
+  issuerRef:
+    kind: Issuer
+    name: bookstore-operator-selfsigned-issuer
+  duration: 8760h # 1 year
+  renewBefore: 720h # rotate 30 days before expiry

@@ -1,0 +1,9 @@
+# Keep the build context minimal and deterministic.
+bin/
+config/
+hack/
+*.md
+.git
+.gitignore
+testbin/
+cover.out

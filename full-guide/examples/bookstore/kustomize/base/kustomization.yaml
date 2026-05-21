@@ -1,0 +1,96 @@
+# Bookstore — Kustomize BASE.
+#
+# This is the deployable Bookstore (Parts 00-06), the SAME app the raw
+# manifests and the Helm chart deploy. Rendering it (`kubectl kustomize
+# examples/bookstore/kustomize/base`) yields the canonical 49-object set:
+#   1 Namespace + ResourceQuota + LimitRange
+#   8 ServiceAccounts (+ catalog Role/RoleBinding)
+#   6 Deployments (catalog/storefront/redis/rabbitmq/orders/payments-worker)
+#   1 StatefulSet + its headless Service (postgres)
+#   1 ConfigMap + 1 demo Secret
+#   1 db-migrate Job + 1 cleanup CronJob
+#   3 cluster-scoped PriorityClasses
+#   6 ClusterIP Services (40-) + 1 Ingress
+#   10 NetworkPolicies
+#   1 HPA (catalog) + 3 PDBs
+# = 49 objects, logically equivalent to the Helm DEFAULT render.
+#
+# The resource files below are VENDORED byte-identical copies of the in-scope
+# raw-manifests/*.yaml (verified with `cmp`). They are NOT referenced as
+# ../../raw-manifests/<f>.yaml on purpose: kustomize's default load-restrictor
+# (RootOnly) forbids `resources:` outside the kustomization root, and
+# `kubectl apply -k` does not expose `--load-restrictor`. Vendoring keeps the
+# tree self-contained, flag-free for `kubectl apply -k`, and consumable by
+# Argo CD / Flux (which also default to the restricted loader). See ../README.md.
+#
+# DELIBERATELY EXCLUDED from base (kept vanilla-cluster-clean — zero
+# `no matches for kind` on a plain cluster):
+#   - teaching pods 01-/02- (live in `default`, frozen object-model snapshots)
+#   - 17-storageclass (opt-in; postgres binds the cluster default class)
+#   - the CRD-backed / variant extras 18- 30- 51- 70- 80- 81- 83- — these are
+#     Kustomize COMPONENTS under ../components/, opted into per overlay exactly
+#     like the Helm chart's value toggles (each documents its CRD prereq).
+#   - the apiserver-level examples/bookstore/cluster/ files (not Kustomize-able)
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+
+# Every namespaced object lands in `bookstore`. This transformer does NOT
+# stamp a namespace onto cluster-scoped kinds — the three PriorityClasses
+# (35-) render namespace-free (verified). The namespace is kept `bookstore`
+# across ALL overlays on purpose: DB_DSN / AMQP_URL / the postgres headless
+# Service DNS / the NetworkPolicy namespaceSelectors all hardcode `bookstore`;
+# renaming the namespace would silently break those cross-resource refs unless
+# every one were rewritten coherently. (See ../README.md "Namespace decision".)
+namespace: bookstore
+
+resources:
+  - 00-namespace.yaml
+  - 05-serviceaccounts-rbac.yaml
+  - 10-catalog-deploy.yaml
+  - 11-storefront-deploy.yaml
+  - 12-redis.yaml
+  - 13-rabbitmq.yaml
+  - 14-orders-deploy.yaml
+  - 15-catalog-config.yaml
+  - 16-db-credentials.yaml
+  - 19-payments-worker-deploy.yaml
+  - 20-postgres-statefulset.yaml
+  - 21-db-migrate-job.yaml
+  - 22-cleanup-cronjob.yaml
+  - 35-priorityclasses.yaml
+  - 40-services.yaml
+  - 50-ingress.yaml
+  - 60-networkpolicy.yaml
+  - 82-hpa-catalog.yaml
+  - 84-pdb.yaml
+
+# Additive metadata label, the MODERN `labels:` transformer (NOT the legacy
+# `commonLabels`). `includeSelectors: false` is the whole point: it adds the
+# label to every object's metadata.labels but DOES NOT touch
+# spec.selector.matchLabels, the pod template labels, or Service selectors.
+# `commonLabels` would inject the label into those immutable selector fields,
+# so the first `kubectl apply` of an upgrade would FAIL
+# ("field is immutable"). `includeTemplates: false` keeps pod templates
+# (and therefore the `app:`/`component:` selector labels) byte-stable, so the
+# rendered .spec.selector is IDENTICAL in base and in every overlay. This
+# footgun is taught explicitly in 07-delivery/02-packaging-kustomize.md.
+labels:
+  - pairs:
+      app.kubernetes.io/managed-by: kustomize
+    includeSelectors: false
+    includeTemplates: false
+
+# Tag/registry indirection lives HERE, not hand-edited into each Deployment's
+# image string. Base pins the four first-party images at `:dev` (their
+# raw-manifests value); overlays override `newTag`/`newName` via their own
+# `images:` block. postgres:16 / redis:7 / rabbitmq:3.13-management are stock
+# upstream images and are intentionally NOT remapped here.
+images:
+  - name: bookstore/catalog
+    newTag: dev
+  - name: bookstore/storefront
+    newTag: dev
+  - name: bookstore/orders
+    newTag: dev
+  - name: bookstore/payments-worker
+    newTag: dev

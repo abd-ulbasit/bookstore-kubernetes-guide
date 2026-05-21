@@ -1,0 +1,36 @@
+# Bookstore — Part 03 ch.04 "Persistent storage": an explicit StorageClass.
+#
+# 20-postgres-statefulset.yaml's volumeClaimTemplate omits storageClassName, so
+# it binds via the cluster DEFAULT class. This file makes the class EXPLICIT so
+# ch.04 can teach provisioner / volumeBindingMode / reclaimPolicy /
+# allowVolumeExpansion concretely. It is OPTIONAL teaching scaffolding — the
+# StatefulSet still works on the default class without it.
+#
+# kind ships the `rancher.io/local-path` provisioner and a default
+# StorageClass named `standard` (k3d: `local-path`). This defines a SECOND,
+# explicitly-configured class you could point the PVC at via
+# `storageClassName: bookstore-local`.
+#
+# WaitForFirstConsumer (ch.04): do NOT provision/bind the PV until a Pod that
+# uses the PVC is scheduled — so the volume is created in the SAME
+# node/zone the Pod lands on (critical for zonal cloud disks; harmless and
+# correct locally).
+#
+# Requires: a kind/k3d cluster (local-path provisioner present).
+# Apply:
+#   kubectl apply -f examples/bookstore/raw-manifests/17-storageclass.yaml
+#   kubectl get storageclass
+#   # to USE it: set storageClassName: bookstore-local on a PVC/volumeClaimTemplate
+apiVersion: storage.k8s.io/v1
+kind: StorageClass
+metadata:
+  name: bookstore-local
+  labels:
+    app.kubernetes.io/part-of: bookstore
+  # NOT annotated as default — `standard` (kind) stays the cluster default;
+  # this is an opt-in class to demonstrate the knobs.
+provisioner: rancher.io/local-path        # kind/k3d built-in — a legacy external provisioner (NOT CSI)
+volumeBindingMode: WaitForFirstConsumer   # bind on Pod schedule (topology-aware)
+reclaimPolicy: Delete                     # delete the PV when its PVC is deleted
+                                          #   (Retain = keep data for manual recovery)
+allowVolumeExpansion: true                # PVCs may be grown later (backend permitting)

@@ -1,0 +1,70 @@
+# Bookstore — Part 07 ch.04: the DEV environment Application.
+#
+# A child of the App-of-Apps root (../01-app-of-apps.yaml). It points Argo CD
+# at the REAL 6b dev kustomize overlay and reconciles it into `bookstore`.
+# Argo CD natively renders a kustomize path (it runs `kustomize build`
+# server-side — exactly the ch.02 pipeline; the overlay's RootOnly-safe
+# vendored base is why this works without loader flags).
+#
+# overlays/dev → 45 objects (base 49 − HPA − 3 PDB; the documented dev knobs).
+#
+# CRD-INTRINSIC NOTE: `Application` is `argoproj.io/v1alpha1` (Argo CD CRD).
+# Without Argo CD installed a client dry-run prints `no matches for kind
+# "Application"` — EXPECTED, schema-correct (same precedent as 18-/51-/70-/
+# 80-/83- and the Helm/Kustomize CRD extras). See ../00-appproject.yaml.
+#
+# PLACEHOLDER `repoURL`: generic `https://github.com/your-org/bookstore` —
+# replace `your-org`. The path is the real, verified 6b overlay in this repo.
+apiVersion: argoproj.io/v1alpha1
+kind: Application
+metadata:
+  name: bookstore-dev
+  namespace: argocd
+  finalizers:
+    - resources-finalizer.argocd.argoproj.io
+spec:
+  # MUST be a project that allows this repo + the bookstore namespace.
+  project: bookstore
+  source:
+    repoURL: https://github.com/your-org/bookstore.git   # PLACEHOLDER — replace your-org
+    targetRevision: main                                 # dev tracks main (latest)
+    # The REAL 6b dev overlay. Argo CD detects kustomization.yaml and runs
+    # `kustomize build` on it (ch.02). Verified to exist in this repo.
+    path: examples/bookstore/kustomize/overlays/dev
+  destination:
+    server: https://kubernetes.default.svc
+    # The overlay's `namespace: bookstore` transformer already stamps every
+    # namespaced object; this MUST match (Argo CD compares). The base also
+    # SHIPS the Namespace object (00-namespace.yaml) with PSA-restricted
+    # labels — so CreateNamespace is intentionally false (below).
+    namespace: bookstore
+  syncPolicy:
+    automated:
+      prune: true        # an object removed from Git is deleted from the cluster
+      selfHeal: true     # a manual `kubectl edit` is reverted to Git (demo §5)
+    syncOptions:
+      # FALSE on purpose: the kustomize BASE owns the Namespace object
+      # (00-namespace.yaml — it carries the PSA `restricted` labels +
+      # ResourceQuota + LimitRange). Letting Argo create a bare namespace
+      # instead would drop those labels and PSA would not enforce. The
+      # Namespace travels WITH the synced manifests, exactly like
+      # `kubectl apply -k` (ch.02 — there is no `--create-namespace`).
+      - CreateNamespace=false
+      - ApplyOutOfSyncOnly=true   # only re-apply objects that actually drifted
+    retry:
+      limit: 5
+      backoff:
+        duration: 5s
+        factor: 2
+        maxDuration: 3m
+  # Argo CD owns replica COUNTS via the overlay; but if anything ever layered
+  # an HPA on a synced workload, the live `.spec.replicas` would differ from
+  # Git every scale event → permanent "OutOfSync"/self-heal fight. dev has NO
+  # HPA (the overlay $patch:deletes it), so none is needed here; the
+  # ignoreDifferences pattern is shown (commented) and is REQUIRED in
+  # staging/prod where the HPA is on — see those files and ch.05's
+  # HPA↔workload-owner discussion.
+  # ignoreDifferences:
+  #   - group: apps
+  #     kind: Deployment
+  #     jsonPointers: ["/spec/replicas"]

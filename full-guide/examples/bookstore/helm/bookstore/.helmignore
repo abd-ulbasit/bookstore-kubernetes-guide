@@ -1,0 +1,17 @@
+# Patterns to exclude when packaging the chart with `helm package`
+# (https://helm.sh/docs/topics/charts/#the-helmignore-file).
+.DS_Store
+.git/
+.gitignore
+.idea/
+.vscode/
+*.swp
+*.bak
+*.tmp
+*.orig
+*~
+# CI / test scaffolding (not part of the shipped chart)
+.github/
+ci/
+tests/
+*.tgz

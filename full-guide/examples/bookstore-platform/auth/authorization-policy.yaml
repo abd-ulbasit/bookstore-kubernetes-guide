@@ -1,0 +1,91 @@
+# Bookstore Platform v2 — Part 13 ch.04: the AuthorizationPolicy that
+# ENFORCES "a valid Keycloak JWT is required for /api/*". RequestAuthentication
+# verifies; AuthorizationPolicy enforces. Both are needed.
+#
+# Three policies, evaluated in order at the gateway:
+#   1. allow-public-static   /static/* and /healthz — public, no JWT needed.
+#   2. require-jwt-api       /api/* — must have a JWT whose `iss` matches the
+#                            Keycloak realm; tenant header derived from claim.
+#   3. deny-all              everything else — explicit deny is the safety net.
+#
+# Policy precedence is "DENY before ALLOW", and within the same action evaluated
+# in name order; the explicit names below are stable across the gateway.
+#
+# WHY a separate `deny-all`: with Istio, the absence of any matching ALLOW
+# means "allowed by default". The explicit deny converts that to "default
+# deny" — the same Part 02 ch.06 NetworkPolicy lesson, applied at L7.
+#
+# Tenant routing: a `when` clause asserts the `tenant` claim matches the
+# Host header's tenant prefix (e.g. acme.bookstore-platform.example.com -> the
+# JWT MUST carry tenant=acme). Cross-tenant header smuggling is blocked here.
+#
+# !!! CRD-INTRINSIC DRY-RUN
+#   `AuthorizationPolicy` is `security.istio.io/v1` — an Istio CRD.
+#   WITHOUT Istio installed a client dry-run prints:
+#     no matches for kind "AuthorizationPolicy" in version "security.istio.io/v1"
+#   EXPECTED. After Istio is installed this applies cleanly.
+#
+# Apply (after Istio + request-authentication.yaml):
+#   kubectl apply -f examples/bookstore-platform/auth/authorization-policy.yaml
+---
+apiVersion: security.istio.io/v1
+kind: AuthorizationPolicy
+metadata:
+  name: allow-public-static
+  namespace: istio-system
+  labels:
+    app.kubernetes.io/part-of: bookstore-platform
+spec:
+  selector:
+    matchLabels:
+      istio: ingressgateway
+  action: ALLOW
+  rules:
+    - to:
+        - operation:
+            methods: ["GET"]
+            paths: ["/static/*", "/healthz", "/favicon.ico"]
+---
+apiVersion: security.istio.io/v1
+kind: AuthorizationPolicy
+metadata:
+  name: require-jwt-api
+  namespace: istio-system
+  labels:
+    app.kubernetes.io/part-of: bookstore-platform
+spec:
+  selector:
+    matchLabels:
+      istio: ingressgateway
+  action: ALLOW
+  rules:
+    - from:
+        # requestPrincipals = "issuer/subject"; "*" requires a valid JWT
+        # of ANY recognised issuer (i.e. one declared in a matching
+        # RequestAuthentication). Combined with the jwt issuer pin in
+        # request-authentication.yaml this means "must be a valid token
+        # from the Keycloak realm".
+        - source:
+            requestPrincipals: ["*"]
+      to:
+        - operation:
+            paths: ["/api/*"]
+      when:
+        # The `tenant` custom claim MUST be non-empty.
+        - key: request.auth.claims[tenant]
+          notValues: [""]
+---
+apiVersion: security.istio.io/v1
+kind: AuthorizationPolicy
+metadata:
+  name: deny-all
+  namespace: istio-system
+  labels:
+    app.kubernetes.io/part-of: bookstore-platform
+spec:
+  selector:
+    matchLabels:
+      istio: ingressgateway
+  action: DENY
+  rules:
+    - {}   # match all; DENY takes precedence over ALLOW; combined with the ALLOW rules above this gives a true default-deny posture

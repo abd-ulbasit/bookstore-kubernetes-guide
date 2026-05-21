@@ -1,0 +1,145 @@
+# Bookstore — STAGING overlay.
+#
+#   kubectl kustomize examples/bookstore/kustomize/overlays/staging
+#   kubectl apply  -k examples/bookstore/kustomize/overlays/staging
+#
+# Staging mirrors PROD's shape at lower scale: production-like replica counts
+# (2) and the full reliability surface ON (HPA + PDBs), but smaller resource
+# ceilings and a staging hostname. The demo Secret is STILL used here (this is
+# a guide); a real staging would also use External Secrets. Mirrors helm
+# values-staging.yaml.
+#
+# Changes ONLY safe knobs (replicas, resources, HPA bounds, the catalog PDB
+# floor, ingress host/TLS). securityContext and the scheduling layer
+# (priorityClassName / topologySpread / affinity / tolerations) are inherited
+# from base UNCHANGED; no selector is mutated.
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+
+resources:
+  - ../../base
+
+labels:
+  - pairs:
+      app.kubernetes.io/environment: staging
+    includeSelectors: false
+    includeTemplates: false
+
+replicas:
+  - name: catalog
+    count: 2
+  - name: storefront
+    count: 2
+  - name: orders
+    count: 2
+
+patches:
+  # Moderate resource ceilings for catalog (still well inside the namespace
+  # ResourceQuota). Strategic-merge: only resources change; probes, env,
+  # securityContext, volumes, scheduling all stay exactly as base.
+  - target:
+      group: apps
+      version: v1
+      kind: Deployment
+      name: catalog
+    patch: |
+      apiVersion: apps/v1
+      kind: Deployment
+      metadata:
+        name: catalog
+      spec:
+        template:
+          spec:
+            containers:
+              - name: catalog
+                resources:
+                  requests:
+                    cpu: 50m
+                    memory: 64Mi
+                  limits:
+                    cpu: 300m
+                    memory: 192Mi
+
+  # Staging HPA bounds (helm: minReplicas 2 / maxReplicas 4). JSON6902
+  # replaces only the two numeric fields; the metrics + behavior blocks (the
+  # interesting, hard-won parts) are inherited from base 82- untouched.
+  - target:
+      group: autoscaling
+      version: v2
+      kind: HorizontalPodAutoscaler
+      name: catalog
+    patch: |
+      - op: replace
+        path: /spec/minReplicas
+        value: 2
+      - op: replace
+        path: /spec/maxReplicas
+        value: 4
+
+  # catalog runs at 2 replicas here, so its PDB minAvailable MUST drop to 1 —
+  # otherwise minAvailable==replicas ⇒ ZERO voluntary disruptions ⇒
+  # `kubectl drain` wedges forever (the exact footgun helm values-staging.yaml
+  # documents). storefront/orders run at 2 with the base minAvailable:1
+  # (≤1 down), already safe — left at the base defaults.
+  - target:
+      kind: PodDisruptionBudget
+      name: catalog
+    patch: |
+      - op: replace
+        path: /spec/minAvailable
+        value: 1
+
+  # Staging ingress host + TLS.
+  - target:
+      group: networking.k8s.io
+      version: v1
+      kind: Ingress
+      name: bookstore
+    patch: |
+      apiVersion: networking.k8s.io/v1
+      kind: Ingress
+      metadata:
+        name: bookstore
+      spec:
+        tls:
+          - hosts:
+              - bookstore.staging.example.com
+            secretName: bookstore-tls
+        rules:
+          - host: bookstore.staging.example.com
+            http:
+              paths:
+                - path: /api/books(/|$)(.*)
+                  pathType: ImplementationSpecific
+                  backend:
+                    service:
+                      name: catalog
+                      port:
+                        number: 80
+                - path: /api/orders(/|$)(.*)
+                  pathType: ImplementationSpecific
+                  backend:
+                    service:
+                      name: orders
+                      port:
+                        number: 80
+                - path: /
+                  pathType: Prefix
+                  backend:
+                    service:
+                      name: storefront
+                      port:
+                        number: 80
+
+# Staging would pull a release candidate tag from the registry. Kept as :dev
+# here so the guide stays runnable on a local kind cluster with the
+# kind-loaded images; in a real pipeline these become the RC tag/digest.
+images:
+  - name: bookstore/catalog
+    newTag: dev
+  - name: bookstore/storefront
+    newTag: dev
+  - name: bookstore/orders
+    newTag: dev
+  - name: bookstore/payments-worker
+    newTag: dev

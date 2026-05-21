@@ -1,0 +1,55 @@
+# MkDocs build output
+/site/
+
+# Pre-build personal study notes (kept locally; not part of the published guide)
+/old/
+
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.venv/
+venv/
+env/
+
+# Terraform
+**/.terraform/
+**/terraform.tfstate
+**/terraform.tfstate.backup
+**/.terraform.lock.hcl
+**/tfplan
+**/tfplan.binary
+**/tfplan.json
+**/*.tfvars
+!**/example.tfvars
+**/apply.log
+**/teardown.log
+**/kubeconfig.yaml
+
+# Compiled Go service binaries (each service's binary = the dir name).
+# Canonical bookstore (Parts 02-08):
+full-guide/examples/bookstore/app/catalog/catalog
+full-guide/examples/bookstore/app/orders/orders
+full-guide/examples/bookstore/app/payments-worker/payments-worker
+# Bookstore Platform v2 (Parts 12-13):
+full-guide/examples/bookstore-platform/app/catalog/catalog
+full-guide/examples/bookstore-platform/app/orders/orders
+full-guide/examples/bookstore-platform/app/payments-worker/payments-worker
+full-guide/examples/bookstore-platform/app/payments-gateway/payments-gateway
+full-guide/examples/bookstore-platform/app/events/events
+full-guide/examples/bookstore-platform/app/recommendations/recommendations
+full-guide/examples/bookstore-platform/app/search/search
+
+# Obsidian local config (local editor state, not part of the guide)
+.obsidian/
+
+# OS
+.DS_Store
+Thumbs.db
+**/.DS_Store
+
+# Editors
+.vscode/
+.idea/
+*.swp
+*.swo

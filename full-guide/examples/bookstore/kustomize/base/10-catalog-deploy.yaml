@@ -1,0 +1,222 @@
+# Bookstore — Part 01 ch.04 "ReplicaSets and Deployments".
+# Extended in Part 03: ch.01 (ConfigMap), ch.02 (Secret-built DB_DSN),
+# ch.03 (emptyDir scratch + downwardAPI volume). One cumulative file.
+#
+# catalog GRADUATES from a bare Pod (01/02, in `default`) to a self-healing
+# Deployment in the `bookstore` namespace (ch.03). It carries forward the ch.02
+# health probes + graceful-shutdown lifecycle and the ch.03 requests/limits.
+# The bare-Pod files are kept as frozen teaching seeds and are NOT edited; this
+# is their successor — from here on, this IS the catalog.
+#
+# Part 03 increments (each explained in-narrative in its chapter):
+#  • ch.01 ConfigMap: non-secret config (LOG_LEVEL, REDIS_ADDR, demo flags)
+#    pulled from `catalog-config` (15-) — bulk via envFrom + LOG_LEVEL also via
+#    an explicit configMapKeyRef (showing both consumption modes).
+#  • ch.02 Secret: DB_DSN is BUILT from the `db-credentials` Secret (16-) via
+#    secretKeyRef + $(VAR) interpolation — no plaintext creds in this file.
+#    catalog now reads Postgres (app/catalog/main.go: DB_DSN set ⇒ pgxpool).
+#  • ch.03 Volumes: an emptyDir scratch + a downwardAPI volume exposing pod
+#    identity (read from an EPHEMERAL public-image pod — catalog is distroless).
+#
+# Part 04 SCHEDULING LAYER (ch.02 + ch.03 — additive only; nothing above is
+# changed, only the three fields below are ADDED to template.spec):
+#  • ch.02 topologySpreadConstraints: spread the 3 catalog replicas across
+#    nodes (maxSkew 1) so one node/zone failure cannot take the whole tier.
+#  • ch.02 podAntiAffinity (preferred): bias replicas onto DIFFERENT nodes —
+#    "preferred", so a single-node kind cluster still schedules all 3.
+#  • ch.03 priorityClassName: bookstore-critical (35-) — user-facing tier,
+#    above batch, below the data tier (postgres).
+#
+# Part 05 SECURITY LAYER (ch.01 + ch.02 — additive only; only the fields below
+# were ADDED to template.spec, nothing above was changed):
+#  • ch.01 serviceAccountName: catalog-sa (05-serviceaccounts-rbac.yaml) +
+#    automountServiceAccountToken: false — the Go app never calls kube-apiserver,
+#    so it gets a dedicated identity with NO mounted token (least privilege).
+#  • ch.02 securityContext (pod + container): full PSA `restricted` set —
+#    runAsNonRoot/runAsUser 65532 (the distroless "nonroot" UID), drop ALL
+#    capabilities, allowPrivilegeEscalation:false, seccompProfile RuntimeDefault,
+#    readOnlyRootFilesystem:true. The existing `scratch` emptyDir at /tmp/cache
+#    already provides the only writable path the binary needs, so a read-only
+#    root FS works unchanged. The `bookstore` namespace is labelled
+#    pod-security.kubernetes.io/enforce: restricted (00-namespace.yaml).
+#
+# Requires:
+#   kubectl apply -f examples/bookstore/raw-manifests/00-namespace.yaml
+#   kubectl apply -f examples/bookstore/raw-manifests/05-serviceaccounts-rbac.yaml  # ch.01
+#   kubectl apply -f examples/bookstore/raw-manifests/15-catalog-config.yaml   # ch.01
+#   kubectl apply -f examples/bookstore/raw-manifests/16-db-credentials.yaml   # ch.02
+#   kind load docker-image bookstore/catalog:dev --name bookstore
+# Apply:
+#   kubectl apply -f examples/bookstore/raw-manifests/10-catalog-deploy.yaml
+#   kubectl rollout status deployment/catalog -n bookstore
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: catalog
+  namespace: bookstore
+  labels:
+    app: catalog
+    app.kubernetes.io/part-of: bookstore
+spec:
+  replicas: 3                       # desired Pod count; ReplicaSet self-heals to it
+  revisionHistoryLimit: 5           # keep 5 old ReplicaSets as rollback targets
+  selector:
+    matchLabels:
+      app: catalog                  # IMMUTABLE; must equal template labels below
+  strategy:
+    type: RollingUpdate
+    rollingUpdate:
+      maxSurge: 1                   # at most replicas+1 Pods during a rollout
+      maxUnavailable: 0             # never fewer than `replicas` Ready (safest UX)
+  template:
+    metadata:
+      labels:
+        app: catalog                # selected by this RS AND by the Service (Part 02)
+        component: backend
+    spec:
+      # --- Part 05 ch.01: dedicated identity, NO API token mounted.
+      # catalog never calls kube-apiserver (app/catalog/main.go), so the least
+      # privilege is its own SA with the projected token suppressed here too
+      # (belt-and-braces with the SA's own automountServiceAccountToken:false).
+      serviceAccountName: catalog-sa
+      automountServiceAccountToken: false
+      # --- Part 05 ch.02: pod-level securityContext. runAsNonRoot + the
+      # distroless "nonroot" UID/GID 65532; seccomp RuntimeDefault here applies
+      # to every container. These satisfy PSA `restricted` at the pod level.
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 65532
+        runAsGroup: 65532
+        seccompProfile:
+          type: RuntimeDefault
+      # --- Part 04 ch.03: priority/preemption tier (35-priorityclasses.yaml).
+      # User-facing service: above bookstore-batch, below bookstore-data.
+      priorityClassName: bookstore-critical
+      # --- Part 04 ch.02: spread replicas across nodes for HA. maxSkew 1 means
+      # the replica counts on any two nodes differ by at most 1. DoNotSchedule
+      # makes it a HARD rule; on a 1-node kind cluster scale to 1 OR see ch.02's
+      # multi-node kind config. labelSelector matches THIS Deployment's Pods.
+      topologySpreadConstraints:
+        - maxSkew: 1
+          topologyKey: kubernetes.io/hostname     # one "domain" per node
+          whenUnsatisfiable: DoNotSchedule
+          labelSelector:
+            matchLabels:
+              app: catalog
+      affinity:
+        # Soft anti-affinity: PREFER scheduling each replica on a node that does
+        # not already run a catalog Pod. "preferred" (not "required") so a
+        # single-node learning cluster still schedules all 3 replicas.
+        podAntiAffinity:
+          preferredDuringSchedulingIgnoredDuringExecution:
+            - weight: 100
+              podAffinityTerm:
+                topologyKey: kubernetes.io/hostname
+                labelSelector:
+                  matchLabels:
+                    app: catalog
+      containers:
+        - name: catalog
+          image: bookstore/catalog:dev      # built in Part 00 ch.02
+          imagePullPolicy: IfNotPresent     # locally kind-loaded image
+          # --- Part 05 ch.02: container-level securityContext. Together with
+          # the pod-level block above this is the full PSA `restricted` set.
+          # The image is a static Go binary on distroless/static:nonroot, so it
+          # needs no extra capabilities and tolerates a read-only root FS (the
+          # `scratch` emptyDir below is its only writable path).
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities:
+              drop: ["ALL"]
+          ports:
+            - name: http
+              containerPort: 8080
+          # --- ch.01 ConfigMap: bulk-load every catalog-config key as env ---
+          envFrom:
+            - configMapRef:
+                name: catalog-config        # 15- : LOG_LEVEL, REDIS_ADDR, demo flags
+          env:
+            - name: PORT
+              value: "8080"
+            # ch.01: LOG_LEVEL ALSO pulled explicitly (single-key mode). envFrom
+            # already sets it; this shows configMapKeyRef and (being later in
+            # the list) is the effective value — identical here, on purpose.
+            - name: LOG_LEVEL
+              valueFrom:
+                configMapKeyRef:
+                  name: catalog-config
+                  key: LOG_LEVEL
+            # --- ch.02 Secret: assemble DB_DSN from db-credentials ----------
+            # $(VAR) interpolation requires the referenced vars to be defined
+            # EARLIER in this same container's env list (kubelet substitutes in
+            # order). So pull the three Secret keys first, then compose the DSN.
+            - name: POSTGRES_USER
+              valueFrom:
+                secretKeyRef: { name: db-credentials, key: POSTGRES_USER }
+            - name: POSTGRES_PASSWORD
+              valueFrom:
+                secretKeyRef: { name: db-credentials, key: POSTGRES_PASSWORD }
+            - name: POSTGRES_DB
+              valueFrom:
+                secretKeyRef: { name: db-credentials, key: POSTGRES_DB }
+            - name: DB_DSN                  # libpq keyword/value DSN (pgx accepts it)
+              value: "host=postgres.bookstore.svc.cluster.local port=5432 user=$(POSTGRES_USER) password=$(POSTGRES_PASSWORD) dbname=$(POSTGRES_DB) sslmode=disable"
+          # Health probes (ch.02) — routes the app actually implements.
+          startupProbe:
+            httpGet: { path: /healthz, port: http }
+            periodSeconds: 5
+            failureThreshold: 30
+          livenessProbe:
+            httpGet: { path: /healthz, port: http }
+            periodSeconds: 10
+            timeoutSeconds: 2
+            failureThreshold: 3
+            successThreshold: 1
+          readinessProbe:
+            httpGet: { path: /readyz, port: http }
+            periodSeconds: 5
+            timeoutSeconds: 2
+            failureThreshold: 3
+            successThreshold: 1
+          lifecycle:
+            preStop:
+              # Native sleep handler (beta & default-on at 1.30, GA 1.33 —
+              # works on any 1.30+ cluster). NOT exec: distroless/static image
+              # has no shell or coreutils, so /bin/sleep is absent and an exec
+              # preStop would fail (grace delay silently skipped).
+              sleep:
+                seconds: 5
+          # Resources (Part 01 ch.03): Burstable (requests+limits, not equal).
+          resources:
+            requests:
+              cpu: 50m
+              memory: 64Mi
+            limits:
+              cpu: 250m
+              memory: 128Mi
+          # --- ch.03 Volumes -------------------------------------------------
+          volumeMounts:
+            - name: scratch               # emptyDir: ephemeral per-Pod scratch
+              mountPath: /tmp/cache        # dies with the Pod (NOT persistence)
+            - name: podinfo               # downwardAPI: pod identity as files
+              mountPath: /etc/podinfo
+              readOnly: true
+      volumes:
+        - name: scratch
+          emptyDir:
+            sizeLimit: 64Mi               # capped (ch.03: medium:Memory counts vs RAM)
+        - name: podinfo
+          downwardAPI:                    # expose pod metadata to the container
+            items:
+              - path: pod_name
+                fieldRef: { fieldPath: metadata.name }
+              - path: pod_namespace
+                fieldRef: { fieldPath: metadata.namespace }
+              - path: pod_labels
+                fieldRef: { fieldPath: metadata.labels }
+              - path: cpu_limit
+                resourceFieldRef:
+                  containerName: catalog
+                  resource: limits.cpu
+      terminationGracePeriodSeconds: 30

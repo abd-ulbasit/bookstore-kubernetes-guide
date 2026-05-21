@@ -1,0 +1,118 @@
+# Bookstore Platform v2 — Part 13 ch.06: the payments-worker. Consumes
+# the `orders.placed` Kafka topic, calls Stripe via the `payments-gateway`
+# service (which holds the Stripe SDK + idempotency-key handling), writes
+# the result back to Postgres.
+#
+# v1 ran a payments-worker that read from RabbitMQ. v2 reads from Kafka via
+# Strimzi — at-least-once delivery + idempotent processing (the worker
+# deduplicates on Stripe's `idempotency_key` + the message's `event_id`).
+# Re-delivery of an already-processed message is a no-op; the worker
+# acknowledges the offset only after the DB write succeeds.
+#
+# Why a separate `payments-worker` Deployment (vs collapsing into events/):
+#   - Different scale shape: payments are slow (Stripe API call); the worker
+#     benefits from a higher replica count and a different HPA target.
+#   - Different security boundary: payments-worker talks to payments-gateway
+#     (which holds the Stripe key); events/ does not.
+#   - Different SLO: payments must complete with low p99; events/ is best-
+#     effort dispatch.
+#
+# PSA: restricted; non-root; distroless. The image
+# `bookstore-platform/events:dev` runs the same binary as outbox-publisher;
+# EVENTS_MODE=payments-worker selects the payments consumer loop.
+#
+# Apply:
+#   kubectl apply -f examples/bookstore-platform/payments/payments-worker.yaml
+---
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: payments-worker
+  namespace: bookstore-platform-payments
+  labels:
+    app.kubernetes.io/part-of: bookstore-platform
+    app.kubernetes.io/component: payments-worker
+automountServiceAccountToken: false
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: payments-worker
+  namespace: bookstore-platform-payments
+  labels:
+    app: payments-worker
+    app.kubernetes.io/part-of: bookstore-platform
+    app.kubernetes.io/component: payments-worker
+spec:
+  replicas: 3
+  selector:
+    matchLabels:
+      app: payments-worker
+  template:
+    metadata:
+      labels:
+        app: payments-worker
+        app.kubernetes.io/part-of: bookstore-platform
+    spec:
+      serviceAccountName: payments-worker
+      automountServiceAccountToken: false
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 65532
+        runAsGroup: 65532
+        fsGroup: 65532
+        seccompProfile:
+          type: RuntimeDefault
+      containers:
+        - name: events
+          image: bookstore-platform/events:dev
+          imagePullPolicy: IfNotPresent
+          env:
+            - name: EVENTS_MODE
+              value: "payments-worker"
+            - name: KAFKA_BROKERS
+              value: "bookstore-platform-kafka-kafka-bootstrap.kafka-system.svc.cluster.local:9092"
+            - name: KAFKA_TOPIC_ORDERS_PLACED
+              value: "orders.placed"
+            - name: KAFKA_TOPIC_PAYMENTS_COMPLETED
+              value: "payments.completed"
+            - name: KAFKA_CONSUMER_GROUP
+              value: "payments-worker"
+            - name: PAYMENTS_GATEWAY_URL
+              value: "http://payments-gateway.bookstore-platform-payments.svc.cluster.local:8080"
+            - name: DB_DSN
+              valueFrom:
+                secretKeyRef:
+                  name: outbox-publisher-db
+                  key: dsn
+            - name: LOG_LEVEL
+              value: "info"
+            - name: PORT
+              value: "8080"
+          ports:
+            - containerPort: 8080
+              name: http
+          resources:
+            requests:
+              cpu: 100m
+              memory: 128Mi
+            limits:
+              cpu: 500m
+              memory: 256Mi
+          livenessProbe:
+            httpGet:
+              path: /healthz
+              port: 8080
+            initialDelaySeconds: 10
+            periodSeconds: 30
+          readinessProbe:
+            httpGet:
+              path: /readyz
+              port: 8080
+            initialDelaySeconds: 5
+            periodSeconds: 10
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities:
+              drop: ["ALL"]

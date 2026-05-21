@@ -1,0 +1,345 @@
+# ---------------------------------------------------------------------------
+# Alertmanager configuration — PagerDuty routing for the Bookstore Platform
+#
+# What this file does:
+#   - Routes every alert that carries a `severity` label to the right
+#     PagerDuty service + escalation policy (defined in incident/severity-
+#     matrix.md).
+#   - Suppresses duplicate pages via `group_by` + `group_wait` /
+#     `group_interval`.
+#   - Splits P0 / P1 / P2 / P3 onto separate PagerDuty receivers so the
+#     escalation policy can differ per severity.
+#   - Inhibits lower-sev pages while higher-sev pages for the same
+#     `service` are firing (the "we already woke you up for the cluster
+#     outage; don't ALSO page for the latency alert that the outage
+#     caused").
+#
+# !!! CRD-INTRINSIC DRY-RUN
+#   `AlertmanagerConfig` is `monitoring.coreos.com/v1beta1` (promoted
+#   from v1alpha1 in Prometheus Operator >= 0.65). WITHOUT
+#   kube-prometheus-stack installed you will see:
+#     no matches for kind "AlertmanagerConfig" in version "monitoring.coreos.com/v1beta1"
+#   EXPECTED — the CRD ships with kube-prometheus-stack, not with the
+#   cluster itself.
+#
+# Apply with:
+#   kubectl apply -n monitoring -f pagerduty-integration.yaml
+# (assumes kube-prometheus-stack installed; targets the Alertmanager CR.)
+#
+# Production note:
+#   The PagerDuty routing keys below are deliberately placeholders. Real
+#   keys live in a SealedSecret / ExternalSecret (see Part 15 ch.05).
+#   The keys are scoped per-service in PagerDuty so a key leak is
+#   contained to one severity-channel. Rotate quarterly.
+# ---------------------------------------------------------------------------
+apiVersion: monitoring.coreos.com/v1beta1
+kind: AlertmanagerConfig
+metadata:
+  name: bookstore-pagerduty
+  namespace: monitoring
+  labels:
+    app.kubernetes.io/name: alertmanager
+    app.kubernetes.io/part-of: bookstore-platform
+spec:
+  # ------------------------------------------------------------------------
+  # ROUTE TREE
+  # ------------------------------------------------------------------------
+  # Every alert flows through this tree top-down. The first matching
+  # `routes` entry wins (continue: false by default — alerts route to one
+  # receiver only).
+  # ------------------------------------------------------------------------
+  route:
+    receiver: slack-default-hygiene
+    groupBy: [alertname, namespace, severity]
+    groupWait: 30s
+    groupInterval: 5m
+    repeatInterval: 4h
+
+    # ----- per-severity routes (see severity-matrix.md) -----
+    routes:
+      # P0 — production down; pages the high-urgency rotation; never
+      # suppressed; the 5-minute ack SLA flows from PagerDuty's own
+      # escalation policy.
+      - matchers:
+          - name: severity
+            value: P0
+        receiver: pagerduty-p0
+        groupWait: 0s             # P0 alerts fire instantly; no batching.
+        groupInterval: 1m
+        repeatInterval: 30m       # Re-page every 30m until acked.
+        continue: false
+
+      # P1 — degraded; pages but with the 15-minute ack SLA.
+      - matchers:
+          - name: severity
+            value: P1
+        receiver: pagerduty-p1
+        groupWait: 30s
+        groupInterval: 5m
+        repeatInterval: 1h
+        continue: false
+
+      # P2 — single-tenant or workaround-exists; low-urgency PagerDuty.
+      # Quiet hours (22:00-06:00 local) suppression is configured on the
+      # PagerDuty service itself, not here — Alertmanager doesn't know
+      # the responder's time zone.
+      - matchers:
+          - name: severity
+            value: P2
+        receiver: pagerduty-p2
+        groupWait: 1m
+        groupInterval: 30m
+        repeatInterval: 12h
+        continue: false
+
+      # P3 — Slack only. No PagerDuty page; the alert appears in the
+      # `#bookstore-alerts` channel for the on-call to triage at leisure.
+      - matchers:
+          - name: severity
+            value: P3
+        receiver: slack-low-priority
+        groupWait: 5m
+        groupInterval: 1h
+        repeatInterval: 24h
+        continue: false
+
+  # ------------------------------------------------------------------------
+  # INHIBITION RULES
+  # ------------------------------------------------------------------------
+  # Suppress lower-sev alerts when a higher-sev alert for the same service
+  # is already firing. The classic example: a P0 cluster-down also trips
+  # the P1 latency alerts for every service in the cluster — page the
+  # cluster-down, not the latency cascade.
+  # ------------------------------------------------------------------------
+  inhibitRules:
+    # If a P0 fires for a (service, region), suppress P1 + P2 + P3 for the
+    # same (service, region) until the P0 resolves.
+    - sourceMatchers:
+        - name: severity
+          value: P0
+          matchType: "="
+      targetMatchers:
+        - name: severity
+          value: P1
+          matchType: "="
+      equal: [service, region]
+
+    - sourceMatchers:
+        - name: severity
+          value: P0
+          matchType: "="
+      targetMatchers:
+        - name: severity
+          value: P2
+          matchType: "="
+      equal: [service, region]
+
+    # If a region-down fires (P1), suppress per-service P1+P2 in that
+    # region — we already know the region is down; the cascade is noise.
+    - sourceMatchers:
+        - name: alertname
+          value: BookstoreRegionDown
+          matchType: "="
+      targetMatchers:
+        - name: severity
+          value: P1
+          matchType: "="
+      equal: [region]
+
+    - sourceMatchers:
+        - name: alertname
+          value: BookstoreRegionDown
+          matchType: "="
+      targetMatchers:
+        - name: severity
+          value: P2
+          matchType: "="
+      equal: [region]
+
+  # ------------------------------------------------------------------------
+  # RECEIVERS
+  # ------------------------------------------------------------------------
+  # Each receiver maps to a PagerDuty service. PagerDuty services in turn
+  # carry the escalation policy (primary -> secondary -> platform lead ->
+  # CTO) defined in PagerDuty's own UI / Terraform.
+  #
+  # routingKey -> a Secret reference, NOT a literal string. The secret
+  # itself is managed by ExternalSecrets in production (see ch.15.05).
+  # ------------------------------------------------------------------------
+  receivers:
+    # ----- P0 receiver -----
+    - name: pagerduty-p0
+      pagerdutyConfigs:
+        - routingKey:
+            name: pagerduty-keys
+            key: p0-routing-key
+          severity: critical
+          # Alert metadata that PagerDuty surfaces in the incident UI +
+          # mobile app. The on-call's first 5 minutes is reading these
+          # fields — make them dense.
+          description: |
+            [P0] {{ .CommonLabels.alertname }} — {{ .CommonAnnotations.summary }}
+          # Custom details carry the runbook URL + dashboard URL + the
+          # affected tenants/regions. EVERY alert must have a `runbook_url`
+          # annotation — alerts without one fail the alert-hygiene review.
+          details:
+            severity:   '{{ .CommonLabels.severity }}'
+            alertname:  '{{ .CommonLabels.alertname }}'
+            service:    '{{ .CommonLabels.service }}'
+            region:     '{{ .CommonLabels.region }}'
+            tenant:     '{{ .CommonLabels.tenant }}'
+            runbook:    '{{ .CommonAnnotations.runbook_url }}'
+            dashboard:  '{{ .CommonAnnotations.dashboard_url }}'
+            summary:    '{{ .CommonAnnotations.summary }}'
+            description: '{{ .CommonAnnotations.description }}'
+          # PagerDuty class/group/component drive auto-triage in the
+          # PagerDuty UI; the bookstore-platform service is the class,
+          # the region is the group, the service is the component.
+          class: bookstore-platform
+          group: '{{ .CommonLabels.region }}'
+          component: '{{ .CommonLabels.service }}'
+          # links in the PagerDuty incident UI — the on-call's first
+          # click goes to the runbook; the second to the dashboard.
+          links:
+            - href: '{{ .CommonAnnotations.runbook_url }}'
+              text: Runbook
+            - href: '{{ .CommonAnnotations.dashboard_url }}'
+              text: Grafana dashboard
+            - href: 'https://github.com/your-org/bookstore-platform/blob/main/examples/bookstore-platform/incident/postmortem-template.md'
+              text: Postmortem template
+
+    # ----- P1 receiver -----
+    - name: pagerduty-p1
+      pagerdutyConfigs:
+        - routingKey:
+            name: pagerduty-keys
+            key: p1-routing-key
+          severity: error
+          description: |
+            [P1] {{ .CommonLabels.alertname }} — {{ .CommonAnnotations.summary }}
+          details:
+            severity:   '{{ .CommonLabels.severity }}'
+            alertname:  '{{ .CommonLabels.alertname }}'
+            service:    '{{ .CommonLabels.service }}'
+            region:     '{{ .CommonLabels.region }}'
+            tenant:     '{{ .CommonLabels.tenant }}'
+            runbook:    '{{ .CommonAnnotations.runbook_url }}'
+            dashboard:  '{{ .CommonAnnotations.dashboard_url }}'
+          class: bookstore-platform
+          group: '{{ .CommonLabels.region }}'
+          component: '{{ .CommonLabels.service }}'
+          links:
+            - href: '{{ .CommonAnnotations.runbook_url }}'
+              text: Runbook
+            - href: '{{ .CommonAnnotations.dashboard_url }}'
+              text: Grafana dashboard
+
+    # ----- P2 receiver — low-urgency PagerDuty -----
+    - name: pagerduty-p2
+      pagerdutyConfigs:
+        - routingKey:
+            name: pagerduty-keys
+            key: p2-routing-key
+          severity: warning           # 'warning' = low-urgency in PD.
+          description: |
+            [P2] {{ .CommonLabels.alertname }} — {{ .CommonAnnotations.summary }}
+          details:
+            severity:   '{{ .CommonLabels.severity }}'
+            alertname:  '{{ .CommonLabels.alertname }}'
+            tenant:     '{{ .CommonLabels.tenant }}'
+            runbook:    '{{ .CommonAnnotations.runbook_url }}'
+            dashboard:  '{{ .CommonAnnotations.dashboard_url }}'
+
+    # ----- Slack-only receiver for P3 -----
+    - name: slack-low-priority
+      slackConfigs:
+        - apiURL:
+            name: slack-webhooks
+            key: bookstore-alerts-webhook
+          channel: '#bookstore-alerts'
+          username: alertmanager
+          title: '[P3] {{ .CommonLabels.alertname }}'
+          titleLink: '{{ .CommonAnnotations.dashboard_url }}'
+          text: |
+            {{ .CommonAnnotations.summary }}
+            Runbook: {{ .CommonAnnotations.runbook_url }}
+            Service: {{ .CommonLabels.service }} | Region: {{ .CommonLabels.region }}
+          sendResolved: true
+
+    # ----- Default receiver — for any alert missing a severity label -----
+    # This receiver should never fire in steady state. If it does, the
+    # alert has no severity label = it failed alert-hygiene review and
+    # should be tagged + fixed.
+    # (Named slack-default-hygiene because the channel is Slack, not PD.)
+    - name: slack-default-hygiene
+      slackConfigs:
+        - apiURL:
+            name: slack-webhooks
+            key: bookstore-alerts-webhook
+          channel: '#bookstore-alerts-hygiene'
+          title: '[UNTAGGED-ALERT] {{ .CommonLabels.alertname }}'
+          text: |
+            Alert fired without a severity label. Fix in the PrometheusRule
+            and add a severity (P0/P1/P2/P3) per incident/severity-matrix.md.
+
+---
+# ---------------------------------------------------------------------------
+# Secret skeleton — the actual routing keys
+# ---------------------------------------------------------------------------
+# In production this Secret is created by ExternalSecrets from Vault
+# (see ch.15.05). The skeleton below is the schema, NOT the credentials.
+# Do NOT commit literal routing keys; the keys below are obviously fake.
+# ---------------------------------------------------------------------------
+apiVersion: v1
+kind: Secret
+metadata:
+  name: pagerduty-keys
+  namespace: monitoring
+type: Opaque
+stringData:
+  # Each key is a 32-character routing key from PagerDuty's Events API V2.
+  # Generate one per service in PagerDuty UI; rotate quarterly.
+  p0-routing-key: REPLACE_ME_FROM_VAULT_PAGERDUTY_P0
+  p1-routing-key: REPLACE_ME_FROM_VAULT_PAGERDUTY_P1
+  p2-routing-key: REPLACE_ME_FROM_VAULT_PAGERDUTY_P2
+
+---
+# ---------------------------------------------------------------------------
+# Sample PrometheusRule — shows the SHAPE every alert must have to route
+# correctly through the tree above. Note the four mandatory labels +
+# the two mandatory annotations.
+# ---------------------------------------------------------------------------
+apiVersion: monitoring.coreos.com/v1
+kind: PrometheusRule
+metadata:
+  name: bookstore-sample-alerts
+  namespace: monitoring
+spec:
+  groups:
+    - name: bookstore-platform-sample
+      interval: 30s
+      rules:
+        - alert: BookstoreCheckoutErrorRateHigh
+          expr: |
+            (
+              sum(rate(http_requests_total{service="checkout",code=~"5.."}[5m]))
+              /
+              sum(rate(http_requests_total{service="checkout"}[5m]))
+            ) > 0.05
+          for: 5m
+          labels:
+            # ----- mandatory labels (Alertmanager routes on these) -----
+            severity: P0                       # routes to pagerduty-p0
+            service: checkout                  # auto-fills component
+            region: '{{ $labels.region }}'     # auto-fills group
+            tenant: '{{ $labels.tenant }}'     # surfaced in PD details
+          annotations:
+            # ----- mandatory annotations (PagerDuty surfaces these) -----
+            summary: "Checkout error rate >5 % for 5 minutes"
+            description: |
+              Checkout requests returning 5xx for tenant {{ $labels.tenant }}
+              in region {{ $labels.region }} above the 5% SLO budget.
+            # Every alert MUST have a runbook_url. Alerts without one
+            # fail alert-hygiene review and get deleted.
+            runbook_url: "https://github.com/your-org/bookstore-platform/blob/main/examples/bookstore-platform/runbooks/runbook-payments-failure-rate.md"
+            dashboard_url: "https://grafana.bookstore-platform.example.com/d/bookstore-checkout"

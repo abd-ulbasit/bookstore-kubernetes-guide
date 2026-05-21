@@ -1,0 +1,42 @@
+# Bookstore Platform v2 — Part 13 ch.03: kind cluster config for the us-east
+# region. The WRITER region: CNPG primary lives here; the other two regions
+# stream from it.
+#
+# 1 control-plane + 2 workers — enough to run the platform's edge + a couple
+# of tenants on a 16 GB laptop without swap. apiServerPort and the
+# kubeProxyMode are pinned so this coexists cleanly with eu-west + ap-southeast
+# (each picks a different apiServerPort).
+#
+# Labels added to nodes:
+#   topology.kubernetes.io/region=us-east       (standard well-known label)
+#   bookstore-platform.example.com/role=writer  (the platform-specific marker)
+# Pod affinity / topology spread (13.03) reads `topology.kubernetes.io/region`;
+# the writer marker pins the CNPG primary placement to this region only.
+#
+# Apply: invoked via clusters/kind-3-region.sh, not directly.
+apiVersion: kind.x-k8s.io/v1alpha4
+kind: Cluster
+name: bookstore-platform-us-east
+networking:
+  # NodePort range scoped so the three regions never collide.
+  apiServerAddress: "127.0.0.1"
+  apiServerPort: 36443
+  kubeProxyMode: "iptables"
+  serviceSubnet: "10.96.0.0/16"
+  podSubnet: "10.244.0.0/16"
+nodes:
+  - role: control-plane
+    labels:
+      topology.kubernetes.io/region: us-east
+      topology.kubernetes.io/zone: us-east-a
+      bookstore-platform.example.com/role: writer
+  - role: worker
+    labels:
+      topology.kubernetes.io/region: us-east
+      topology.kubernetes.io/zone: us-east-a
+      bookstore-platform.example.com/role: writer
+  - role: worker
+    labels:
+      topology.kubernetes.io/region: us-east
+      topology.kubernetes.io/zone: us-east-b
+      bookstore-platform.example.com/role: writer

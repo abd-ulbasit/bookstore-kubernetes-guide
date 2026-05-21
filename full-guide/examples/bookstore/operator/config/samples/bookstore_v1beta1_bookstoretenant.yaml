@@ -1,0 +1,36 @@
+# Bookstore — Part 11 ch.02: a sample BookstoreTenant (v1beta1, the hub).
+#
+# !!! CRD-BACKED — intrinsic dry-run behavior (SAME precedent as the guide's
+# raw-manifests/18-/51-/70-, argocd/, operators/cnpg-, cloud/karpenter-) !!!
+# `BookstoreTenant` is a CRD from THIS operator. On a cluster WITHOUT the CRD
+# installed:
+#   kubectl apply --dry-run=client -f config/samples/bookstore_v1beta1_bookstoretenant.yaml
+#   error: resource mapping not found ... no matches for kind "BookstoreTenant"
+#   in version "bookstore.example.com/v1beta1" ... ensure CRDs are installed first
+# That is EXPECTED and NOT a manifest defect. Install the CRD (`make install`,
+# or kubectl apply config/crd/...) and run the operator; then this applies and
+# the controller reconciles it into namespace `bookstore-tenant-acme`.
+apiVersion: bookstore.example.com/v1beta1
+kind: BookstoreTenant
+metadata:
+  name: acme
+  namespace: default
+spec:
+  tenantName: acme
+  replicas: 1
+  tier: small
+---
+# The SAME tenant expressed in the deprecated v1alpha1 spoke. Applying this
+# goes through the conversion webhook (size:"s" -> tier:"small") and is stored
+# as v1beta1. `kubectl get bookstoretenant acme -o yaml` always returns the
+# v1beta1 (storage) shape regardless of which version you applied — the
+# conversion webhook in action.
+apiVersion: bookstore.example.com/v1alpha1
+kind: BookstoreTenant
+metadata:
+  name: acme-legacy
+  namespace: default
+spec:
+  tenantName: acme-legacy
+  replicas: 2
+  size: m

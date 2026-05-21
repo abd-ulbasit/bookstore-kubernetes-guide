@@ -1,0 +1,14 @@
+# Bookstore recommendations — serving image deps (Part 12 ch.06).
+# Pinned. FastAPI + uvicorn is the smallest credible HTTP wrapper around a
+# scikit-learn artifact (works equally inside a plain Deployment OR inside a
+# KServe custom predictor / a sklearn ServingRuntime container). joblib +
+# scikit-learn + numpy match the train image so the model.joblib produced by
+# ../train/train.py loads cleanly here.
+# Versions current as of the v1.30+ Kubernetes era; bump deliberately.
+fastapi==0.112.2
+uvicorn[standard]==0.30.6
+pydantic==2.8.2
+joblib==1.4.2
+numpy==1.26.4
+scipy==1.13.1
+scikit-learn==1.5.1

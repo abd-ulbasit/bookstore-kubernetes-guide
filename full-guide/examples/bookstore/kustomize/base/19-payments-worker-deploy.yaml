@@ -1,0 +1,211 @@
+# Bookstore — Part 06 ch.04 "Autoscaling": the payments-worker Deployment.
+#
+# The async path's CONSUMER. orders (14-) publishes an order event to the
+# RabbitMQ "orders" queue; payments-worker drains that queue and "processes"
+# each payment (app/payments-worker/main.go). It has NO inbound HTTP API — it
+# is a pure background consumer — but it DOES serve /healthz and Prometheus
+# /metrics on :8080 (payments_processed_total + Go runtime metrics), so it gets
+# a HEADLESS metrics-only Service in 40-services.yaml that the ServiceMonitor
+# (80-) scrapes. It is the workload KEDA scales on queue depth (83-).
+#
+# Numbered 19- so a whole-dir apply creates it AFTER its dependencies
+# (00-namespace, 05-SAs, 13-rabbitmq) and before the autoscaling/observability
+# objects (80-/83-) that target it. There is no DB_DSN here: the worker never
+# touches Postgres (contrast catalog 10- / orders 14-).
+#
+# WHY replicas: 1 and not an HPA-style number — KEDA owns the replica count.
+# The KEDA ScaledObject (83-keda-scaledobject.yaml) creates and manages an HPA
+# whose scaleTargetRef is THIS Deployment; it scales 19- between minReplicaCount
+# and maxReplicaCount by RabbitMQ queue length (and to zero when idle). So this
+# file just declares one replica as the resting state; do not also hand-write
+# an HPA for it (two controllers fighting over .spec.replicas — see ch.04).
+#
+# Part 04 SCHEDULING LAYER (additive, consistent with the siblings):
+#  • priorityClassName: bookstore-critical (35-) — the worker is on the
+#    checkout path (a stuck queue = unprocessed payments), same user-facing
+#    tier as catalog/orders/storefront, above batch and below the data tier.
+#  • topologySpreadConstraints + preferred podAntiAffinity on app:
+#    payments-worker — when KEDA scales it out, spread the replicas across
+#    nodes (maxSkew 1) so one node loss can't drop the whole consumer pool.
+#    whenUnsatisfiable: ScheduleAnyway (NOT DoNotSchedule): a scaled-up replica
+#    must never be left Pending just because spread is momentarily uneven —
+#    draining the queue matters more than perfect spread, and KEDA scaling on a
+#    single-node kind cluster must still place every replica. (catalog/
+#    storefront use DoNotSchedule because their replica count is fixed and
+#    HA-critical; an autoscaled consumer prefers availability over strict
+#    spread — a deliberate, documented difference.)
+#
+# Part 05 SECURITY LAYER (PSA `restricted`, identical shape to catalog 10-):
+#  • serviceAccountName: payments-worker-sa (added to 05-) +
+#    automountServiceAccountToken: false — the worker never calls
+#    kube-apiserver (it speaks AMQP to rabbitmq and serves /metrics), so it
+#    gets its own identity with NO token mounted (least privilege).
+#  • pod SC: runAsNonRoot + runAsUser/Group 65532 (the distroless "nonroot"
+#    UID — see app/payments-worker/Dockerfile `USER 65532:65532`) + seccomp
+#    RuntimeDefault.
+#  • container SC: allowPrivilegeEscalation:false, drop ALL capabilities,
+#    readOnlyRootFilesystem:true. The binary is a static Go binary on
+#    gcr.io/distroless/static:nonroot and writes nothing to disk in steady
+#    state; a single small `tmp` emptyDir at /tmp covers Go's default
+#    os.TempDir() so the read-only root FS holds (same pattern as orders 14-).
+# The `bookstore` namespace is labelled pod-security.kubernetes.io/enforce:
+# restricted (00-namespace.yaml); this Pod satisfies it (proven by a server
+# dry-run in Part 06 ch.04, the same way ch.02 proved catalog/orders).
+#
+# AMQP_URL points at the rabbitmq Service DNS with the default guest/guest
+# credentials — 13-rabbitmq.yaml runs `rabbitmq:3.13-management` with the
+# stock guest user and no extra auth config (it documents this), and orders
+# (14-) speaks to the same broker. Identical broker, identical "orders" queue
+# (the queue name is a const in BOTH app/orders/main.go and
+# app/payments-worker/main.go), so publisher and consumer agree.
+#
+# Probes — the worker only implements GET /healthz (NO /readyz: a queue
+# consumer has no "ready to receive traffic" notion — nothing routes to it).
+# So liveness AND readiness both hit /healthz: the health server being up is a
+# faithful proxy for "the process is alive and its consume loop is running"
+# (app/payments-worker/main.go runs the worker loop and the health server in
+# the same process; if the process wedged, /healthz stops answering and
+# liveness restarts it). A readiness probe is still useful: it gates the
+# /metrics endpoint behind the metrics Service and keeps a just-starting Pod
+# out of rotation until the HTTP server is listening.
+#
+# Requires:
+#   kubectl apply -f examples/bookstore/raw-manifests/00-namespace.yaml
+#   kubectl apply -f examples/bookstore/raw-manifests/05-serviceaccounts-rbac.yaml
+#   kubectl apply -f examples/bookstore/raw-manifests/13-rabbitmq.yaml
+#   kubectl apply -f examples/bookstore/raw-manifests/35-priorityclasses.yaml
+#   kind load docker-image bookstore/payments-worker:dev --name bookstore
+# Apply:
+#   kubectl apply -f examples/bookstore/raw-manifests/19-payments-worker-deploy.yaml
+#   kubectl rollout status deployment/payments-worker -n bookstore
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: payments-worker
+  namespace: bookstore
+  labels:
+    app: payments-worker
+    component: worker
+    app.kubernetes.io/part-of: bookstore
+spec:
+  replicas: 1                       # resting state; KEDA (83-) owns scaling
+  revisionHistoryLimit: 5
+  selector:
+    matchLabels:
+      app: payments-worker          # IMMUTABLE; equals template labels below
+  strategy:
+    type: RollingUpdate
+    rollingUpdate:
+      maxSurge: 1
+      maxUnavailable: 0
+  template:
+    metadata:
+      labels:
+        app: payments-worker        # selected by the headless Service (40-) +
+        component: worker           # the KEDA-managed HPA's scaleTargetRef
+    spec:
+      # --- Part 05 ch.01: dedicated identity, no API token mounted.
+      serviceAccountName: payments-worker-sa
+      automountServiceAccountToken: false
+      # --- Part 05 ch.02: pod-level securityContext (PSA `restricted`).
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 65532
+        runAsGroup: 65532
+        seccompProfile:
+          type: RuntimeDefault
+      # --- Part 04 ch.03: user-facing tier (same as catalog/orders): a stuck
+      # payment queue is a user-visible failure, so above batch.
+      priorityClassName: bookstore-critical
+      # --- Part 04 ch.02: spread KEDA-scaled replicas across nodes. NOTE
+      # ScheduleAnyway (not DoNotSchedule): an autoscaled consumer must never
+      # be left Pending for spread; draining the queue wins. labelSelector
+      # scopes the skew to payments-worker Pods only.
+      topologySpreadConstraints:
+        - maxSkew: 1
+          topologyKey: kubernetes.io/hostname
+          whenUnsatisfiable: ScheduleAnyway
+          labelSelector:
+            matchLabels:
+              app: payments-worker
+      affinity:
+        podAntiAffinity:
+          preferredDuringSchedulingIgnoredDuringExecution:
+            - weight: 100
+              podAffinityTerm:
+                topologyKey: kubernetes.io/hostname
+                labelSelector:
+                  matchLabels:
+                    app: payments-worker
+      containers:
+        - name: payments-worker
+          image: bookstore/payments-worker:dev   # built in Part 00 ch.02
+          imagePullPolicy: IfNotPresent           # locally kind-loaded image
+          # --- Part 05 ch.02: container securityContext (PSA `restricted`).
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities:
+              drop: ["ALL"]
+          ports:
+            - name: metrics
+              containerPort: 8080    # /healthz + Prometheus /metrics
+          env:
+            - name: PORT
+              value: "8080"
+            - name: LOG_LEVEL
+              value: "info"
+            # The async edge: consume the same broker + "orders" queue that
+            # orders (14-) publishes to. guest/guest matches 13-rabbitmq.yaml
+            # (stock rabbitmq, default user, no extra auth). Service DNS form
+            # <svc>.<ns>.svc.cluster.local resolves via CoreDNS (NetworkPolicy
+            # 60- allows the DNS egress + the payments-worker->rabbitmq edge).
+            - name: AMQP_URL
+              value: "amqp://guest:guest@rabbitmq.bookstore.svc.cluster.local:5672/"
+          # Only /healthz exists (no /readyz — a consumer has no inbound
+          # traffic to gate). Both probes hit /healthz: it answers iff the
+          # process is alive and its HTTP/worker goroutines are running.
+          startupProbe:
+            httpGet: { path: /healthz, port: metrics }
+            periodSeconds: 5
+            failureThreshold: 30
+          livenessProbe:
+            httpGet: { path: /healthz, port: metrics }
+            periodSeconds: 10
+            timeoutSeconds: 2
+            failureThreshold: 3
+          readinessProbe:
+            httpGet: { path: /healthz, port: metrics }
+            periodSeconds: 5
+            timeoutSeconds: 2
+            failureThreshold: 3
+          lifecycle:
+            preStop:
+              # Native sleep handler (beta & default-on at 1.30, GA 1.33 —
+              # works on any 1.30+ cluster). NOT exec: the distroless/static
+              # image has no shell/coreutils, so an exec /bin/sleep would fail.
+              # Gives the in-flight AMQP delivery time to ack before SIGTERM
+              # cancels the consume context (app/payments-worker/main.go drains
+              # on ctx.Done within terminationGracePeriodSeconds).
+              sleep:
+                seconds: 5
+          # Resources (Part 01 ch.03): Burstable. CPU request sized so the
+          # KEDA-created HPA has a meaningful per-replica CPU baseline; memory
+          # request==limit-ish low (the worker is tiny and mostly idle).
+          resources:
+            requests:
+              cpu: 50m
+              memory: 64Mi
+            limits:
+              cpu: 250m
+              memory: 128Mi
+          # --- Part 05 ch.02: writable /tmp for the read-only root FS (Go's
+          # os.TempDir()); the worker writes nothing else to disk.
+          volumeMounts:
+            - name: tmp
+              mountPath: /tmp
+      volumes:
+        - name: tmp
+          emptyDir:
+            sizeLimit: 32Mi          # ephemeral scratch only
+      terminationGracePeriodSeconds: 30

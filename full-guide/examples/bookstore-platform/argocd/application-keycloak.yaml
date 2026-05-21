@@ -1,0 +1,89 @@
+# Bookstore Platform v2 — Part 13 ch.04: Argo CD Application that installs
+# Keycloak via the pinned Bitnami Helm chart into the `keycloak` namespace,
+# with the realm-import ConfigMap mounted at startup.
+#
+# Why a chart-based Application and not raw YAML: Keycloak's StatefulSet, HA
+# Infinispan clustering, JVM tuning, and storage wiring are an established
+# pattern in the chart. Forking it into raw YAML for this repo would be
+# strictly worse — same Part 07 ch.01 / ch.04 "use the upstream chart,
+# pinned" lesson.
+#
+# Pinned chart version: 21.x (Bitnami Keycloak; Keycloak server 24.x). The
+# version is in source — bump deliberately, not silently.
+#
+# !!! CRD-INTRINSIC DRY-RUN
+#   `Application` is `argoproj.io/v1alpha1` — an Argo CD CRD. WITHOUT Argo
+#   CD installed, a client dry-run prints:
+#     no matches for kind "Application" in version "argoproj.io/v1alpha1"
+#   EXPECTED.
+#
+# Apply (after Argo CD installed; before applying request-authentication /
+# authorization-policy):
+#   kubectl apply -f examples/bookstore-platform/argocd/application-keycloak.yaml
+apiVersion: argoproj.io/v1alpha1
+kind: Application
+metadata:
+  name: keycloak
+  namespace: argocd
+  labels:
+    app.kubernetes.io/part-of: bookstore-platform
+  finalizers:
+    # Cascade Application delete -> chart resources on uninstall (Part 07 ch.04).
+    - resources-finalizer.argocd.argoproj.io
+spec:
+  project: default
+  source:
+    repoURL: "https://charts.bitnami.com/bitnami"
+    chart: keycloak
+    # Pinned. Bump deliberately; never `latest`.
+    targetRevision: "21.4.4"
+    helm:
+      releaseName: keycloak
+      values: |
+        # Mount the realm-import ConfigMap (auth/keycloak-realm-import.cm.yaml).
+        # The Keycloak chart accepts realm JSON via this exact volume mount path.
+        extraStartupArgs: "--import-realm"
+        extraVolumes:
+          - name: realm-import
+            configMap:
+              name: keycloak-realm-bookstore-platform
+        extraVolumeMounts:
+          - name: realm-import
+            mountPath: /opt/bitnami/keycloak/data/import
+            readOnly: true
+        # Two replicas + Infinispan distributed cache = realm/session HA.
+        # On kind this works with 2; in production 3+ + a dedicated DB.
+        replicaCount: 2
+        # Use the bundled postgres for the kind path; in production point at
+        # an external DB (CNPG, RDS) via externalDatabase.* — 13.04 calls
+        # this out + 13.06 wires the platform CNPG cluster here.
+        postgresql:
+          enabled: true
+          auth:
+            postgresPassword: "REPLACE-ME-VIA-ESO-NOT-IN-SOURCE"
+        # PSA-restricted container security context (the chart's defaults
+        # are usually compliant; spell it out so a chart change doesn't break
+        # admission silently).
+        containerSecurityContext:
+          enabled: true
+          runAsNonRoot: true
+          runAsUser: 1001
+          allowPrivilegeEscalation: false
+          readOnlyRootFilesystem: false  # Keycloak needs writable /tmp; the chart mounts an emptyDir
+          capabilities:
+            drop: ["ALL"]
+          seccompProfile:
+            type: RuntimeDefault
+        # Keycloak HTTPS is terminated at Istio in production; the chart
+        # serves HTTP in-cluster and Istio adds mTLS via ambient mode.
+        proxy: edge
+  destination:
+    server: https://kubernetes.default.svc
+    namespace: keycloak
+  syncPolicy:
+    automated:
+      prune: false      # never prune Keycloak data accidentally
+      selfHeal: true
+    syncOptions:
+      - CreateNamespace=true
+      - ServerSideApply=true

@@ -1,0 +1,62 @@
+# Bookstore — Part 03 ch.05 "Stateful data patterns": Postgres PVC snapshot.
+#
+# A point-in-time VolumeSnapshot of the postgres data PVC
+# (`data-postgres-0`, from 20-'s volumeClaimTemplate), plus the
+# VolumeSnapshotClass that drives it. ch.05 documents the restore drill
+# (create a new PVC from `dataSource: this snapshot`, then point a fresh
+# postgres at it) and why a CSI snapshot is crash-consistent, not a logical
+# `pg_dump` backup.
+#
+# !!! CRD-BACKED — intrinsic dry-run behavior (like the Gateway API objects in
+# 51-gateway.yaml) !!!  VolumeSnapshot / VolumeSnapshotClass are NOT built-in
+# Kubernetes kinds. They are CRDs from the external snapshot project
+# (snapshot.storage.k8s.io), installed together with the snapshot-controller
+# and a CSI driver that supports snapshots. Therefore:
+#   • `kubectl apply --dry-run=client -f` (or a whole-dir client dry-run) on a
+#     cluster WITHOUT those CRDs prints:
+#       error: resource mapping not found ... no matches for kind
+#       "VolumeSnapshot" in version "snapshot.storage.k8s.io/v1"
+#     That is EXPECTED and not a manifest defect — identical to the Gateway API
+#     situation. Schema correctness here is verified by reading + the official
+#     API reference, not by a client dry-run.
+#   • kind's default `local-path` provisioner does NOT support snapshots. To
+#     actually run this, use a snapshot-capable CSI driver (e.g. the
+#     csi-hostpath-driver for local testing, or EBS/PD/Azure-Disk CSI in
+#     cloud) and install the snapshot CRDs + controller:
+#       https://github.com/kubernetes-csi/external-snapshotter (deploy/)
+#
+# Requires (to actually apply, not just read):
+#   - snapshot CRDs + snapshot-controller installed
+#   - a snapshot-capable CSI driver as the PVC's provisioner
+#   - 20-postgres-statefulset.yaml applied (so PVC data-postgres-0 exists)
+# Apply (snapshot-capable cluster only):
+#   kubectl apply -f examples/bookstore/raw-manifests/18-postgres-snapshot.yaml
+#   kubectl get volumesnapshot -n bookstore
+#   kubectl get volumesnapshot postgres-snap-0 -n bookstore \
+#     -o jsonpath='{.status.readyToUse}'
+apiVersion: snapshot.storage.k8s.io/v1
+kind: VolumeSnapshotClass
+metadata:
+  name: bookstore-csi-snapclass
+  labels:
+    app.kubernetes.io/part-of: bookstore
+# driver MUST equal the CSI driver backing the PVC's StorageClass. Placeholder
+# below — replace with your environment's snapshot-capable driver, e.g.:
+#   ebs.csi.aws.com | pd.csi.storage.gke.io | disk.csi.azure.com |
+#   hostpath.csi.k8s.io (local csi-hostpath-driver testing)
+driver: hostpath.csi.k8s.io
+deletionPolicy: Delete                    # delete the underlying snapshot with the object
+                                          #   (Retain = keep it for manual restore)
+---
+apiVersion: snapshot.storage.k8s.io/v1
+kind: VolumeSnapshot
+metadata:
+  name: postgres-snap-0
+  namespace: bookstore
+  labels:
+    app: postgres
+    app.kubernetes.io/part-of: bookstore
+spec:
+  volumeSnapshotClassName: bookstore-csi-snapclass
+  source:
+    persistentVolumeClaimName: data-postgres-0   # 20-'s volumeClaimTemplate PVC (ordinal 0)

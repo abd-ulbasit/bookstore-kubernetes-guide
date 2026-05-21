@@ -1,0 +1,8 @@
+# Bookstore recommendations — training image deps (Part 12 ch.04).
+# Pinned. The model is item-kNN/co-occurrence (sklearn + numpy + scipy), CPU.
+# joblib is the artifact format the serve/predictor.py loads.
+# Versions: current as of the v1.30+ Kubernetes era; bump deliberately.
+numpy==1.26.4
+scipy==1.13.1
+scikit-learn==1.5.1
+joblib==1.4.2

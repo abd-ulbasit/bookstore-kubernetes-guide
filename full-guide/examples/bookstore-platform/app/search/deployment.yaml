@@ -1,0 +1,91 @@
+# Bookstore Platform v2 — Part 13 ch.05: the v2 `search` service Deployment.
+# Wraps Meilisearch. Tenant per-request derived from the verified
+# x-jwt-payload header (Istio writes; ch.13.04 §How it works under the hood).
+#
+# Tenant namespace pattern: this Deployment lands in a per-tenant namespace
+# (`bookstore-platform-<TENANT>`). The example below uses `acme-books`;
+# the BookstoreTenant Composition (ch.13.02) stamps the equivalent for each
+# new tenant via the same template.
+#
+# Apply (after the tenant ns + Meilisearch):
+#   kubectl apply -f examples/bookstore-platform/app/search/deployment.yaml
+---
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: search
+  namespace: bookstore-platform-acme-books
+  labels:
+    app.kubernetes.io/part-of: bookstore-platform
+    app.kubernetes.io/component: search-api
+    bookstore-platform.example.com/tenant: acme-books
+automountServiceAccountToken: false
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: search
+  namespace: bookstore-platform-acme-books
+  labels:
+    app: search
+    app.kubernetes.io/part-of: bookstore-platform
+    app.kubernetes.io/component: search-api
+    bookstore-platform.example.com/tenant: acme-books
+spec:
+  replicas: 2
+  selector:
+    matchLabels:
+      app: search
+  template:
+    metadata:
+      labels:
+        app: search
+        app.kubernetes.io/part-of: bookstore-platform
+        bookstore-platform.example.com/tenant: acme-books
+    spec:
+      serviceAccountName: search
+      automountServiceAccountToken: false
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 65532
+        runAsGroup: 65532
+        fsGroup: 65532
+        seccompProfile:
+          type: RuntimeDefault
+      containers:
+        - name: search
+          image: bookstore-platform/search:dev
+          imagePullPolicy: IfNotPresent
+          env:
+            - { name: PORT,         value: "8080" }
+            - { name: MEILI_URL,    value: "http://meilisearch.bookstore-platform-search.svc.cluster.local:7700" }
+            - { name: INDEX_PREFIX, value: "books-" }
+            - name: MEILI_MASTER_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: meilisearch-master-key
+                  key: master-key
+          ports:
+            - { containerPort: 8080, name: http }
+          resources:
+            requests:
+              cpu: 50m
+              memory: 64Mi
+            limits:
+              cpu: 250m
+              memory: 128Mi
+          livenessProbe:
+            httpGet: { path: /healthz, port: 8080 }
+            initialDelaySeconds: 5
+            periodSeconds: 10
+            failureThreshold: 3
+          readinessProbe:
+            httpGet: { path: /readyz, port: 8080 }
+            initialDelaySeconds: 5
+            periodSeconds: 10
+            failureThreshold: 3
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities:
+              drop: ["ALL"]

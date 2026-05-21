@@ -1,0 +1,28 @@
+# Bookstore — Part 12 ch.06 "Model serving and inference": ClusterIP Service
+# in front of the plain `recommender` Deployment. Built-in v1 Service; dry-runs
+# cleanly anywhere.
+#
+# Consumers: the Bookstore `catalog` / `storefront` services (Part 01
+# ch.04+ch.06, ch.06 narrative) can call this Service across namespaces via
+# its DNS name:
+#   http://recommender.bookstore-ml.svc.cluster.local:8080
+# This file does NOT mutate the canonical app; the integration is described
+# in chapter prose and shown via curl (port-forward / in-cluster).
+apiVersion: v1
+kind: Service
+metadata:
+  name: recommender
+  namespace: bookstore-ml
+  labels:
+    app.kubernetes.io/part-of: bookstore-ml
+    app.kubernetes.io/component: recommender-serve
+spec:
+  type: ClusterIP
+  selector:
+    app.kubernetes.io/part-of: bookstore-ml
+    app.kubernetes.io/component: recommender-serve
+  ports:
+    - name: http
+      port: 8080
+      targetPort: http
+      protocol: TCP

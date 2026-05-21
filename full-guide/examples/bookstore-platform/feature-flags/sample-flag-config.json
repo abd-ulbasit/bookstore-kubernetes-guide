@@ -1,0 +1,121 @@
+{
+  "_comment": "Bookstore Platform — Part 15 ch.08 sample Flagsmith flag configuration. Exported from Flagsmith's API (POST /api/v1/projects/{id}/environments/{env}/featurestates/) — the canonical shape of a flag for restore-from-config, IaC, or PR-reviewable diffs. Source of truth: Flagsmith UI; this file is the export the team commits to git for audit + replay. Each flag has: name, type, default value, segment overrides, identity overrides.",
+  "schema_version": "flagsmith-2.166.0",
+  "project": "bookstore-platform",
+  "environment": "production",
+  "exported_at": "2026-05-20T14:00:00Z",
+  "exported_by": "platform-team@bookstore-platform.example.com",
+  "flags": [
+    {
+      "name": "catalog_v2_search_engine",
+      "type": "MULTIVARIATE",
+      "_doc": "Dark-launch flag for the new Meilisearch-backed search engine in catalog. Default OFF; flipped to ON for a subset of tenants in May 2026; full rollout planned for June 2026. The kill switch case: if Meilisearch suffers an outage, flip default_enabled to false to revert all tenants to the legacy Postgres ILIKE search path inside catalog — no redeploy.",
+      "default_enabled": false,
+      "default_value": "legacy_postgres_ilike",
+      "multivariate_options": [
+        { "option": "legacy_postgres_ilike", "weight": 100, "_note": "the fallback path; matched in catalog's hexagonal port" },
+        { "option": "meilisearch_v1",       "weight": 0,   "_note": "the new path; pulled in from search/" }
+      ],
+      "segment_overrides": [
+        {
+          "segment": "internal_users",
+          "enabled": true,
+          "value": "meilisearch_v1",
+          "_note": "dogfooding: bookstore internal users get the new engine first"
+        },
+        {
+          "segment": "beta_tenants",
+          "enabled": true,
+          "value": "meilisearch_v1",
+          "_note": "tenants who opted in: acme-books-staging, foo-books-staging"
+        }
+      ],
+      "identity_overrides": []
+    },
+    {
+      "name": "checkout_stripe_payment_intents_v2024_11",
+      "type": "STANDARD",
+      "_doc": "Migration flag: Stripe API version 2024-11 with new PaymentIntents schema. Default OFF; flipped to ON for 10% of tenants for one week (canary period), then 50%, then 100%. Once full-rollout is stable for 30 days, the flag is REMOVED — see stale-flag policy in feature-flags/README.md.",
+      "default_enabled": false,
+      "default_value": null,
+      "segment_overrides": [
+        {
+          "segment": "percentage_split_10",
+          "enabled": true,
+          "_note": "10% of identities via Flagsmith's hash-based percentage operator; week 1 of canary"
+        }
+      ],
+      "identity_overrides": []
+    },
+    {
+      "name": "recommendations_ab_test_model_v3",
+      "type": "MULTIVARIATE",
+      "_doc": "A/B test for the new recommendations model (KServe-served v3). Split 33/33/33 across the live model (v2), the new model (v3), and a control (no recommendations). Measure conversion in Grafana + offline analytics. Time-boxed: experiment runs 2026-05-20 → 2026-06-15; remove the flag after analysis.",
+      "default_enabled": true,
+      "default_value": "v2",
+      "multivariate_options": [
+        { "option": "v2",      "weight": 34 },
+        { "option": "v3",      "weight": 33 },
+        { "option": "control", "weight": 33 }
+      ],
+      "segment_overrides": [],
+      "identity_overrides": []
+    },
+    {
+      "name": "kill_switch_checkout",
+      "type": "STANDARD",
+      "_doc": "EMERGENCY kill switch for the entire checkout flow. Default ON (checkout works). If flipped OFF, the storefront shows a maintenance page for checkout and returns 503 for the /checkout endpoint. Use case: Stripe outage, payments-gateway corrupted state, regulatory hold. The flag is INVERSE (OFF = disabled) to make the default-safe behaviour clear.",
+      "default_enabled": true,
+      "default_value": null,
+      "segment_overrides": [],
+      "identity_overrides": [],
+      "_owners": ["platform-team", "payments-team"],
+      "_audit_required": "every flip is announced in #bookstore-platform-status within 5 min"
+    },
+    {
+      "name": "kill_switch_recommendations",
+      "type": "STANDARD",
+      "_doc": "Kill switch for recommendations (the panel above the search results). Default ON. Flip OFF if the model misbehaves (showing inappropriate items, scoring is wrong, latency spike). The storefront degrades gracefully — the panel disappears; everything else works.",
+      "default_enabled": true,
+      "default_value": null,
+      "segment_overrides": [],
+      "identity_overrides": []
+    },
+    {
+      "name": "catalog_per_tenant_pagination_size",
+      "type": "STANDARD",
+      "_doc": "Configuration flag (not a feature toggle). The per-tenant pagination size for catalog search results. Most tenants: 20. The 'enterprise_tier' segment: 100. This is a FLAG vs CONFIG borderline case — kept as a flag because (a) per-tenant override needed, (b) we want to roll changes out gradually. See ch.15.08 'flags vs config' for the decision rule.",
+      "default_enabled": true,
+      "default_value": "20",
+      "segment_overrides": [
+        { "segment": "enterprise_tier", "enabled": true, "value": "100" }
+      ]
+    }
+  ],
+  "segments": [
+    {
+      "name": "internal_users",
+      "rules": [
+        { "trait": "email", "operator": "REGEX", "value": ".*@bookstore-platform\\.example\\.com$" }
+      ]
+    },
+    {
+      "name": "beta_tenants",
+      "rules": [
+        { "trait": "tenant", "operator": "IN", "value": "acme-books-staging,foo-books-staging" }
+      ]
+    },
+    {
+      "name": "percentage_split_10",
+      "rules": [
+        { "trait": "user_id", "operator": "PERCENTAGE_SPLIT", "value": 10 }
+      ]
+    },
+    {
+      "name": "enterprise_tier",
+      "rules": [
+        { "trait": "tier", "operator": "EQUAL", "value": "enterprise" }
+      ]
+    }
+  ]
+}

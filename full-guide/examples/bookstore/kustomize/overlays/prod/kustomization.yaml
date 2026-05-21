@@ -1,0 +1,190 @@
+# Bookstore — PRODUCTION overlay.
+#
+#   kubectl kustomize examples/bookstore/kustomize/overlays/prod
+#   kubectl apply  -k examples/bookstore/kustomize/overlays/prod
+#
+# Prod: higher replica counts, larger resource ceilings, real registry images
+# pinned by an immutable tag (ideally a digest), the full HPA/PDB surface, and
+# — critically — the demo Secret is REMOVED. In production `db-credentials` is
+# provided OUT OF BAND by External Secrets Operator / Sealed Secrets / Vault
+# (same NAME the workloads expect). NEVER ship a real password in Git. Mirrors
+# helm values-prod.yaml (dbCredentials.create=false).
+#
+# Changes ONLY safe knobs (replicas, resources, image registry/tag, HPA
+# bounds, dropping the in-repo demo Secret). securityContext and the full
+# scheduling layer are inherited from base UNCHANGED; no selector is mutated;
+# DB_DSN stays byte-identical (the env-built DSN is in the Deployments, not
+# the Secret — the Secret only supplies POSTGRES_* values at runtime).
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+
+# Namespace stays `bookstore` in prod too — see ../README.md "Namespace
+# decision" (cross-resource DNS / NetworkPolicy coherence).
+resources:
+  - ../../base
+
+labels:
+  - pairs:
+      app.kubernetes.io/environment: prod
+    includeSelectors: false
+    includeTemplates: false
+
+replicas:
+  - name: catalog
+    count: 4
+  - name: storefront
+    count: 3
+  - name: orders
+    count: 3
+
+patches:
+  # Tuned catalog resources for prod load.
+  - target:
+      group: apps
+      version: v1
+      kind: Deployment
+      name: catalog
+    patch: |
+      apiVersion: apps/v1
+      kind: Deployment
+      metadata:
+        name: catalog
+      spec:
+        template:
+          spec:
+            containers:
+              - name: catalog
+                resources:
+                  requests:
+                    cpu: 100m
+                    memory: 128Mi
+                  limits:
+                    cpu: 500m
+                    memory: 256Mi
+
+  # Larger postgres resources for prod (helm values-prod.yaml). Only the
+  # container resources change; the StatefulSet's volumeClaimTemplate,
+  # securityContext, scheduling (priorityClassName bookstore-data,
+  # tolerations, nodeAffinity) are all inherited from base 20- untouched.
+  - target:
+      group: apps
+      version: v1
+      kind: StatefulSet
+      name: postgres
+    patch: |
+      apiVersion: apps/v1
+      kind: StatefulSet
+      metadata:
+        name: postgres
+      spec:
+        template:
+          spec:
+            containers:
+              - name: postgres
+                resources:
+                  requests:
+                    cpu: 250m
+                    memory: 512Mi
+                  limits:
+                    cpu: "1"
+                    memory: 1Gi
+
+  # Prod HPA bounds (helm: minReplicas 4 / maxReplicas 12). JSON6902 patches
+  # only the bounds; metrics + behavior inherited from base 82-.
+  - target:
+      group: autoscaling
+      version: v2
+      kind: HorizontalPodAutoscaler
+      name: catalog
+    patch: |
+      - op: replace
+        path: /spec/minReplicas
+        value: 4
+      - op: replace
+        path: /spec/maxReplicas
+        value: 12
+
+  # catalog runs at 4 replicas in prod; base PDB minAvailable:2 (≤2 down) is
+  # already correct (minAvailable < replicas). storefront/orders run at 3 with
+  # base minAvailable:1 — also safe. PDBs are kept ON in prod (NOT deleted, in
+  # contrast to dev) and left at the base values; no patch needed.
+
+  # Prod ingress host + TLS (cert-manager/ACME-provisioned bookstore-tls).
+  - target:
+      group: networking.k8s.io
+      version: v1
+      kind: Ingress
+      name: bookstore
+    patch: |
+      apiVersion: networking.k8s.io/v1
+      kind: Ingress
+      metadata:
+        name: bookstore
+      spec:
+        tls:
+          - hosts:
+              - bookstore.example.com
+            secretName: bookstore-tls
+        rules:
+          - host: bookstore.example.com
+            http:
+              paths:
+                - path: /api/books(/|$)(.*)
+                  pathType: ImplementationSpecific
+                  backend:
+                    service:
+                      name: catalog
+                      port:
+                        number: 80
+                - path: /api/orders(/|$)(.*)
+                  pathType: ImplementationSpecific
+                  backend:
+                    service:
+                      name: orders
+                      port:
+                        number: 80
+                - path: /
+                  pathType: Prefix
+                  backend:
+                    service:
+                      name: storefront
+                      port:
+                        number: 80
+
+  # PRODUCTION SECRET HANDLING. The in-repo demo Secret `db-credentials`
+  # (16-, base64 != encryption, demo-only) is DELETED from the prod render.
+  # In prod a Secret of the SAME NAME is created out of band by External
+  # Secrets Operator / Sealed Secrets / Vault; the workloads' secretKeyRef /
+  # envFrom resolve it at runtime exactly the same way. `$patch: delete`
+  # removes it from the kustomize output so Git never carries the value and a
+  # `kubectl apply -k overlays/prod` will NOT overwrite the externally-managed
+  # Secret. (The catalog/orders DB_DSN is built in the Deployment env from
+  # POSTGRES_* — unchanged and still byte-identical; only the SOURCE of those
+  # values moves out of Git.)
+  - target:
+      version: v1
+      kind: Secret
+      name: db-credentials
+    patch: |
+      $patch: delete
+      apiVersion: v1
+      kind: Secret
+      metadata:
+        name: db-credentials
+
+# Pull real, immutably-tagged images from the registry (replace the registry
+# host for your environment). `images:` rewrites BOTH the name and the tag —
+# no Deployment YAML is hand-edited. In prod prefer name@sha256:<digest>.
+images:
+  - name: bookstore/catalog
+    newName: registry.example.com/bookstore/catalog
+    newTag: "1.0.0"
+  - name: bookstore/storefront
+    newName: registry.example.com/bookstore/storefront
+    newTag: "1.0.0"
+  - name: bookstore/orders
+    newName: registry.example.com/bookstore/orders
+    newTag: "1.0.0"
+  - name: bookstore/payments-worker
+    newName: registry.example.com/bookstore/payments-worker
+    newTag: "1.0.0"

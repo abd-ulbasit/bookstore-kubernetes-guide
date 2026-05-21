@@ -1,0 +1,167 @@
+# Bookstore Kustomize COMPONENT resources — MANUAL canary of catalog
+# (Part 01 ch.08), adapted from raw-manifests/30-catalog-canary.yaml for
+# Kustomize composition.
+#
+# DIVERGENCE FROM raw 30- (and WHY): raw-manifests/30-catalog-canary.yaml also
+# defines a Service named `catalog`. The base already contributes a `catalog`
+# Service (40-services.yaml) with the IDENTICAL `app: catalog` selector.
+# Kustomize forbids two resources with the same GVK+namespace+name at
+# resource-accumulation time (it errors BEFORE any patch can run), so this
+# component CANNOT re-declare that Service. It is simply OMITTED: the base
+# `catalog` Service already selects `app: catalog`, which matches BOTH the
+# stable and canary Pods below — exactly the routing 30- intended (one Service
+# fronting both tracks; the split is the replica ratio). The two Deployments
+# below are byte-faithful to 30-'s Deployments (same restricted
+# securityContext, same labels/selectors, same scratch emptyDir). The
+# component's kustomization.yaml deletes the base canonical `catalog`
+# Deployment (10-) so this stable/canary PAIR replaces it — they are mutually
+# exclusive (both define `app: catalog` Pods), exactly as the raw 30- header
+# and the Helm chart's catalog-XOR-canary `fail` guard enforce.
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: catalog-stable
+  namespace: bookstore
+  labels:
+    app: catalog
+    track: stable
+spec:
+  replicas: 9               # ~90% of traffic (9 of 10 Ready endpoints)
+  revisionHistoryLimit: 5
+  selector:
+    matchLabels:
+      app: catalog
+      track: stable         # owns ONLY stable Pods (no overlap with canary)
+  template:
+    metadata:
+      labels:
+        app: catalog        # selected by the shared base `catalog` Service
+        track: stable       # distinguishes this Deployment's Pods
+        component: backend
+    spec:
+      # --- Part 05 ch.01: same dedicated identity as 10- (no API token).
+      serviceAccountName: catalog-sa
+      automountServiceAccountToken: false
+      # --- Part 05 ch.02: pod-level securityContext (PSA `restricted`),
+      # identical to 10-catalog-deploy.yaml (same distroless image, UID 65532).
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 65532
+        runAsGroup: 65532
+        seccompProfile:
+          type: RuntimeDefault
+      containers:
+        - name: catalog
+          image: bookstore/catalog:dev      # current "stable" image
+          imagePullPolicy: IfNotPresent
+          # --- Part 05 ch.02: container securityContext (PSA `restricted`).
+          # The `scratch` emptyDir below is the only writable path the static
+          # binary needs, so a read-only root FS holds (same as 10-).
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities:
+              drop: ["ALL"]
+          ports:
+            - name: http
+              containerPort: 8080
+          env:
+            - name: PORT
+              value: "8080"
+          readinessProbe:
+            httpGet: { path: /readyz, port: http }
+            periodSeconds: 5
+          livenessProbe:
+            httpGet: { path: /healthz, port: http }
+            periodSeconds: 10
+          resources:
+            requests:
+              cpu: 50m
+              memory: 64Mi
+            limits:
+              cpu: 250m
+              memory: 128Mi
+          # --- Part 05 ch.02: writable scratch for the read-only root FS
+          # (catalog uses /tmp/cache; mirrors 10-catalog-deploy.yaml).
+          volumeMounts:
+            - name: scratch
+              mountPath: /tmp/cache
+      volumes:
+        - name: scratch
+          emptyDir:
+            sizeLimit: 64Mi
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: catalog-canary
+  namespace: bookstore
+  labels:
+    app: catalog
+    track: canary
+spec:
+  replicas: 1               # ~10% of traffic (1 of 10 Ready endpoints)
+  revisionHistoryLimit: 5
+  selector:
+    matchLabels:
+      app: catalog
+      track: canary         # owns ONLY canary Pods
+  template:
+    metadata:
+      labels:
+        app: catalog        # ALSO selected by the SAME base `catalog` Service
+        track: canary       # but independently scalable / observable
+        component: backend
+    spec:
+      # --- Part 05 ch.01: same dedicated identity as 10- (no API token).
+      serviceAccountName: catalog-sa
+      automountServiceAccountToken: false
+      # --- Part 05 ch.02: pod-level securityContext (PSA `restricted`),
+      # identical to 10-catalog-deploy.yaml (same distroless image, UID 65532).
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 65532
+        runAsGroup: 65532
+        seccompProfile:
+          type: RuntimeDefault
+      containers:
+        - name: catalog
+          image: bookstore/catalog:dev      # in real life: the NEW candidate image
+          imagePullPolicy: IfNotPresent
+          # --- Part 05 ch.02: container securityContext (PSA `restricted`).
+          # Same as stable / 10-: read-only root FS + the scratch emptyDir.
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities:
+              drop: ["ALL"]
+          ports:
+            - name: http
+              containerPort: 8080
+          env:
+            - name: PORT
+              value: "8080"
+            - name: LOG_LEVEL
+              value: "debug"                # stand-in marker for "this is v2"
+          readinessProbe:
+            httpGet: { path: /readyz, port: http }
+            periodSeconds: 5
+          livenessProbe:
+            httpGet: { path: /healthz, port: http }
+            periodSeconds: 10
+          resources:
+            requests:
+              cpu: 50m
+              memory: 64Mi
+            limits:
+              cpu: 250m
+              memory: 128Mi
+          # --- Part 05 ch.02: writable scratch for the read-only root FS
+          # (catalog uses /tmp/cache; mirrors 10-catalog-deploy.yaml).
+          volumeMounts:
+            - name: scratch
+              mountPath: /tmp/cache
+      volumes:
+        - name: scratch
+          emptyDir:
+            sizeLimit: 64Mi

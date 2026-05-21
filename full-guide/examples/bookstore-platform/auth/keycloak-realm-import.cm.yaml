@@ -1,0 +1,148 @@
+# Bookstore Platform v2 — Part 13 ch.04: a Keycloak realm-import ConfigMap.
+# Mounted into the Keycloak pod at startup via the chart's
+# `extraStartupArgs: ["--import-realm"]` + a volume mount; on first boot
+# Keycloak imports the realm, creates the two clients, defines the tenant
+# role, and seeds a test user. Idempotent on subsequent restarts.
+#
+# What this realm declares:
+#   realm:        bookstore-platform
+#   clients:      storefront-web    (public, PKCE; browser-side OAuth2;
+#                                    directAccessGrants=false — production-shape)
+#                 admin-portal      (confidential; server-side, client_secret;
+#                                    directAccessGrants=true so the 13.04 curl
+#                                    demo can exchange password->JWT in one
+#                                    line. Direct grants on a confidential
+#                                    server-side client are a DEV-only knob;
+#                                    production uses the auth-code flow even
+#                                    for admin tools.)
+#   roles:        tenant-admin      (assigned via groups in production)
+#                 tenant-member
+#   users:        demo-user         (illustrative; password: demo-password —
+#                                    DEV ONLY; production seeds via ESO +
+#                                    Vault, 13.06 cross-ref Part 11 ch.05)
+#   groups:       tenant-acme-books-admins, tenant-acme-books-members
+#
+# WHY a ConfigMap and not a Secret: the realm definition itself is non-
+# secret (it is the SHAPE of the auth surface). The ONE secret here — the
+# admin-portal client_secret — is intentionally a placeholder; production
+# overrides it via a separate Secret + the chart's `extraEnvVars`, never
+# bakes a real secret in source. The comment below calls that out.
+#
+# This is intentionally MINIMAL: enough to make the curl tests in 13.04's
+# Hands-on pass; not a production realm (production adds password policy,
+# brute-force protection, identity provider federation, group-claim mapping
+# tweaks, and a richer client set — 13.04 Production notes list those).
+#
+# Apply:
+#   kubectl create namespace keycloak  # if not already
+#   kubectl apply -f examples/bookstore-platform/auth/keycloak-realm-import.cm.yaml
+#   # then helm install the chart with the volume mount — see 13.04 Hands-on.
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: keycloak-realm-bookstore-platform
+  namespace: keycloak
+  labels:
+    app.kubernetes.io/part-of: bookstore-platform
+data:
+  realm-bookstore-platform.json: |
+    {
+      "realm": "bookstore-platform",
+      "enabled": true,
+      "sslRequired": "external",
+      "registrationAllowed": false,
+      "loginWithEmailAllowed": true,
+      "resetPasswordAllowed": true,
+      "accessTokenLifespan": 900,
+      "accessCodeLifespanLogin": 600,
+      "ssoSessionIdleTimeout": 1800,
+      "ssoSessionMaxLifespan": 36000,
+      "clients": [
+        {
+          "clientId": "storefront-web",
+          "name": "Storefront (browser)",
+          "enabled": true,
+          "publicClient": true,
+          "protocol": "openid-connect",
+          "standardFlowEnabled": true,
+          "implicitFlowEnabled": false,
+          "directAccessGrantsEnabled": false,
+          "rootUrl": "https://bookstore-platform.example.com",
+          "redirectUris": [
+            "https://bookstore-platform.example.com/*",
+            "https://*.bookstore-platform.example.com/*"
+          ],
+          "webOrigins": ["+"],
+          "attributes": {
+            "pkce.code.challenge.method": "S256"
+          }
+        },
+        {
+          "clientId": "admin-portal",
+          "name": "Admin Portal (server-side)",
+          "enabled": true,
+          "publicClient": false,
+          "protocol": "openid-connect",
+          "standardFlowEnabled": true,
+          "implicitFlowEnabled": false,
+          "directAccessGrantsEnabled": true,
+          "secret": "REPLACE-ME-VIA-ESO-NOT-IN-SOURCE",
+          "rootUrl": "https://admin.bookstore-platform.example.com",
+          "redirectUris": [
+            "https://admin.bookstore-platform.example.com/*"
+          ],
+          "webOrigins": ["+"]
+        }
+      ],
+      "roles": {
+        "realm": [
+          { "name": "tenant-admin",  "description": "Full control of a tenant's namespace." },
+          { "name": "tenant-member", "description": "Read/use a tenant's namespace." }
+        ]
+      },
+      "groups": [
+        {
+          "name": "tenant-acme-books-admins",
+          "realmRoles": ["tenant-admin"],
+          "attributes": { "tenant": ["acme-books"] }
+        },
+        {
+          "name": "tenant-acme-books-members",
+          "realmRoles": ["tenant-member"],
+          "attributes": { "tenant": ["acme-books"] }
+        }
+      ],
+      "users": [
+        {
+          "username": "demo-user",
+          "email": "demo@bookstore-platform.example.com",
+          "firstName": "Demo",
+          "lastName": "User",
+          "enabled": true,
+          "emailVerified": true,
+          "credentials": [
+            {
+              "type": "password",
+              "value": "demo-password",
+              "temporary": false
+            }
+          ],
+          "groups": ["tenant-acme-books-admins"]
+        }
+      ],
+      "protocolMappers": [
+        {
+          "name": "tenant-claim",
+          "protocol": "openid-connect",
+          "protocolMapper": "oidc-usermodel-attribute-mapper",
+          "config": {
+            "user.attribute": "tenant",
+            "claim.name": "tenant",
+            "jsonType.label": "String",
+            "id.token.claim": "true",
+            "access.token.claim": "true",
+            "userinfo.token.claim": "true"
+          }
+        }
+      ]
+    }

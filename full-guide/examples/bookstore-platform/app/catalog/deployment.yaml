@@ -1,0 +1,86 @@
+# Bookstore Platform v2 — catalog service Deployment (stub)
+# Referenced in Parts 13/14/15. PSA-restricted compliant.
+#
+# Apply:
+#   kubectl apply -f examples/bookstore-platform/app/catalog/deployment.yaml
+---
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: catalog
+  namespace: bookstore-platform-catalog
+  labels:
+    app.kubernetes.io/name: catalog
+    app.kubernetes.io/part-of: bookstore-platform
+    app.kubernetes.io/component: catalog
+automountServiceAccountToken: false
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: catalog
+  namespace: bookstore-platform-catalog
+  labels:
+    app: catalog
+    app.kubernetes.io/name: catalog
+    app.kubernetes.io/instance: catalog-dev
+    app.kubernetes.io/part-of: bookstore-platform
+    app.kubernetes.io/component: catalog
+    app.kubernetes.io/version: dev
+spec:
+  replicas: 2
+  selector:
+    matchLabels:
+      app: catalog
+  template:
+    metadata:
+      labels:
+        app: catalog
+        app.kubernetes.io/name: catalog
+        app.kubernetes.io/part-of: bookstore-platform
+    spec:
+      serviceAccountName: catalog
+      automountServiceAccountToken: false
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 65532
+        runAsGroup: 65532
+        fsGroup: 65532
+        seccompProfile:
+          type: RuntimeDefault
+      containers:
+        - name: catalog
+          image: bookstore/catalog:dev
+          imagePullPolicy: IfNotPresent
+          env:
+            - { name: PORT, value: "8080" }
+          ports:
+            - { containerPort: 8080, name: http }
+          resources:
+            requests:
+              cpu: 25m
+              memory: 32Mi
+            limits:
+              cpu: 100m
+              memory: 64Mi
+          livenessProbe:
+            httpGet: { path: /healthz, port: 8080 }
+            initialDelaySeconds: 5
+            periodSeconds: 10
+            failureThreshold: 3
+          readinessProbe:
+            httpGet: { path: /healthz, port: 8080 }
+            initialDelaySeconds: 5
+            periodSeconds: 10
+            failureThreshold: 3
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities:
+              drop: ["ALL"]
+          volumeMounts:
+            - name: tmp
+              mountPath: /tmp
+      volumes:
+        - name: tmp
+          emptyDir: {}

@@ -1,0 +1,79 @@
+# Bookstore Platform v2 — Part 13 ch.01 / ch.02 "Tenancy model": the platform
+# namespace skeleton. Three CLUSTER-WIDE namespaces (always present, in every
+# region) plus the per-tenant namespace pattern (created by the Crossplane
+# Composition in 13.02, NOT by this static file).
+#
+# CLUSTER-WIDE NAMESPACES (created here):
+#   bookstore-platform           Platform-shared workloads (Istio gateway, edge
+#                                config, anything cross-tenant). PSA restricted.
+#   bookstore-platform-system    Platform operators that DO NOT install into
+#                                their own root ns (Argo CD root ApplicationSet,
+#                                cluster-wide controllers). PSA restricted.
+#   bookstore-platform-ml        Platform-wide ML training/serving (KServe
+#                                InferenceServices, MLflow registry — wired in
+#                                13.08). PSA restricted.
+#
+# PER-TENANT NAMESPACES (NOT in this file): one `bookstore-platform-<TENANT>`
+# per onboarded tenant, created by the BookstoreTenant Crossplane Composition
+# (../crossplane/composition-bookstoretenant.yaml). The Composition stamps the
+# SAME three PSA-restricted labels; nothing else in the cluster is allowed to
+# create one (least-privilege Composition RBAC).
+#
+# SYSTEM-OPERATOR NAMESPACES (NOT in this file): Crossplane installs into
+# `crossplane-system`, Keycloak into `keycloak`, cert-manager into
+# `cert-manager`, Istio into `istio-system` — each by pinned-Helm into its
+# OWN ns, per the guide's invariant (never sharing ns with platform workloads).
+#
+# Why three platform namespaces and not one: blast radius. Killing the
+# bookstore-platform-ml ns must NOT take out the edge gateway in
+# bookstore-platform. PSA enforce=restricted is uniform across all three; the
+# split is operational, not security.
+#
+# Apply (idempotent; re-apply after any kind delete/create):
+#   kubectl apply -f examples/bookstore-platform/platform-base/00-namespaces.yaml
+#   kubectl get ns -l app.kubernetes.io/part-of=bookstore-platform
+---
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: bookstore-platform
+  labels:
+    app.kubernetes.io/part-of: bookstore-platform
+    bookstore-platform.example.com/scope: shared
+    # --- PSA: every platform ns enforces restricted (Part 05 ch.02 + Part 13
+    # ch.01 — production-shape carries this everywhere). audit+warn at the
+    # same level surface any future regression immediately.
+    pod-security.kubernetes.io/enforce: restricted
+    pod-security.kubernetes.io/enforce-version: latest
+    pod-security.kubernetes.io/audit: restricted
+    pod-security.kubernetes.io/audit-version: latest
+    pod-security.kubernetes.io/warn: restricted
+    pod-security.kubernetes.io/warn-version: latest
+---
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: bookstore-platform-system
+  labels:
+    app.kubernetes.io/part-of: bookstore-platform
+    bookstore-platform.example.com/scope: system
+    pod-security.kubernetes.io/enforce: restricted
+    pod-security.kubernetes.io/enforce-version: latest
+    pod-security.kubernetes.io/audit: restricted
+    pod-security.kubernetes.io/audit-version: latest
+    pod-security.kubernetes.io/warn: restricted
+    pod-security.kubernetes.io/warn-version: latest
+---
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: bookstore-platform-ml
+  labels:
+    app.kubernetes.io/part-of: bookstore-platform
+    bookstore-platform.example.com/scope: ml
+    pod-security.kubernetes.io/enforce: restricted
+    pod-security.kubernetes.io/enforce-version: latest
+    pod-security.kubernetes.io/audit: restricted
+    pod-security.kubernetes.io/audit-version: latest
+    pod-security.kubernetes.io/warn: restricted
+    pod-security.kubernetes.io/warn-version: latest

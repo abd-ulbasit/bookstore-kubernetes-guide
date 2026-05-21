@@ -1,0 +1,49 @@
+# Bookstore — Part 12 ch.03 "Batch and gang scheduling": a Kueue ClusterQueue
+# = the QUOTA + admission policy for the Bookstore ML batch workloads. Jobs/
+# JobSets labelled onto a LocalQueue that points here are admitted (via
+# spec.suspend) only when the WHOLE job fits this quota.
+#
+# !!! CRD-INTRINSIC DRY-RUN (identical precedent to raw-manifests/51-/70-/83-,
+#     argocd/, operators/, chaos/) !!!
+#   `ClusterQueue` is a Kueue CRD (kueue.x-k8s.io/v1beta2). WITHOUT Kueue
+#   installed a client dry-run prints:
+#     no matches for kind "ClusterQueue" in version "kueue.x-k8s.io/v1beta2"
+#   EXPECTED and SCHEMA-CORRECT — install Kueue first (Part 12 ch.03 Hands-on:
+#   pinned Helm, own namespace `kueue-system`). It also references the
+#   `bookstore-ml-flavor` ResourceFlavor (apply that first). Schema verified
+#   against Kueue kueue.x-k8s.io/v1beta2 ClusterQueue.
+#
+# QUOTA SHAPE:
+#   cpu/memory  -> small, so the CPU-only 2-worker recommender "training"
+#                  (recommender-jobset.yaml) actually runs on kind.
+#   nvidia.com/gpu nominalQuota -> the MULTI-TENANT GPU FAIR-SHARE fence. On a
+#                  GPU-less cluster this simply QUEUES any GPU-requesting job
+#                  (no GPUs to admit against) — it does not error. On a GPU
+#                  cluster it is the per-cohort fair-share budget; pair it with
+#                  a HARD per-namespace ResourceQuota on requests.nvidia.com/gpu
+#                  (Part 08 ch.04) as the inviolable ceiling (ch.03 Hands-on §4).
+#
+# Single-tenant here for the worked example. For real multi-tenant fair-share:
+# give each team its own LocalQueue->ClusterQueue and group the ClusterQueues
+# in a shared `cohort:` so idle quota is borrowable but reclaimable (Kueue
+# preemption, built on the Part 04 ch.03 priority/preemption model).
+apiVersion: kueue.x-k8s.io/v1beta2
+kind: ClusterQueue
+metadata:
+  name: bookstore-ml-cq
+  labels:
+    app.kubernetes.io/part-of: bookstore-ml
+spec:
+  namespaceSelector: {}            # which namespaces may use it ({} = all;
+                                   # the LocalQueue scopes it to bookstore-ml)
+  resourceGroups:
+    - coveredResources: ["cpu", "memory", "nvidia.com/gpu"]
+      flavors:
+        - name: bookstore-ml-flavor
+          resources:
+            - name: "cpu"
+              nominalQuota: "4"        # small: CPU demo fits on kind
+            - name: "memory"
+              nominalQuota: 8Gi
+            - name: "nvidia.com/gpu"
+              nominalQuota: "4"        # GPU fair-share budget (queues if no GPUs)

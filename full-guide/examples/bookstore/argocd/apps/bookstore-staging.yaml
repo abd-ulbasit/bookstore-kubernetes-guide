@@ -1,0 +1,57 @@
+# Bookstore — Part 07 ch.04: the STAGING environment Application.
+#
+# Child of the App-of-Apps root. Points Argo CD at the REAL 6b staging
+# kustomize overlay (prod shape, half scale, HPA + PDBs ON).
+#
+# overlays/staging → 49 objects (the same set as the Helm default render /
+# kustomize base; the documented staging knobs are resource ceilings + host).
+#
+# CRD-INTRINSIC NOTE: `Application` = `argoproj.io/v1alpha1` (Argo CD CRD).
+# Without Argo CD installed, a client dry-run prints `no matches for kind
+# "Application"` — EXPECTED, schema-correct (same precedent as the raw
+# 18-/51-/70-/80-/83- and the Helm/Kustomize CRD extras).
+#
+# PLACEHOLDER `repoURL`: generic `https://github.com/your-org/bookstore`.
+apiVersion: argoproj.io/v1alpha1
+kind: Application
+metadata:
+  name: bookstore-staging
+  namespace: argocd
+  finalizers:
+    - resources-finalizer.argocd.argoproj.io
+spec:
+  project: bookstore
+  source:
+    repoURL: https://github.com/your-org/bookstore.git   # PLACEHOLDER — replace your-org
+    # Real promotion gates a TAG/branch, not bare `main` — staging tracks a
+    # release candidate ref (CI bumps it; ch.03's promotion flow). Shown as a
+    # branch placeholder; a real setup uses a tag or a `release-*` branch.
+    targetRevision: main
+    path: examples/bookstore/kustomize/overlays/staging   # real, verified 6b overlay
+  destination:
+    server: https://kubernetes.default.svc
+    namespace: bookstore
+  syncPolicy:
+    automated:
+      prune: true
+      selfHeal: true
+    syncOptions:
+      - CreateNamespace=false      # base owns the PSA-restricted Namespace
+      - ApplyOutOfSyncOnly=true
+    retry:
+      limit: 5
+      backoff: { duration: 5s, factor: 2, maxDuration: 3m }
+  # REQUIRED here: the staging overlay KEEPS the catalog HPA (82-) ON. The HPA
+  # controller writes `.spec.replicas` on the catalog Deployment at runtime;
+  # Git says (via the `replicas:` transformer) a fixed count. Without this,
+  # every autoscale event makes Argo see catalog as OutOfSync and (with
+  # selfHeal) fight the HPA back to the Git count — a reconcile/scale war.
+  # ignoreDifferences tells Argo to NOT diff that field, so the HPA owns
+  # replicas and Argo owns everything else. (Same lesson as ch.04's "who owns
+  # this field" and the KEDA-owns-replicas note in Part 06 ch.04 / ch.05.)
+  ignoreDifferences:
+    - group: apps
+      kind: Deployment
+      name: catalog
+      jsonPointers:
+        - /spec/replicas

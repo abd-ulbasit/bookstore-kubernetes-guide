@@ -1,0 +1,152 @@
+# Bookstore — Part 11 ch.04 "Service mesh": the v2 `catalog` workload the
+# mesh-layer canary (20-/21-) splits traffic to. ADDITIVE — a second
+# Deployment + the `catalog-canary` Service; the canonical
+# raw-manifests/10-catalog-deploy.yaml and 40-services.yaml are UNTOUCHED.
+#
+# WHY THIS FILE EXISTS (and is restricted-compliant — the chapter's own lesson)
+#   `bookstore` is `pod-security.kubernetes.io/enforce: restricted`
+#   (raw-manifests/00-namespace.yaml). A bare `kubectl create deployment` emits
+#   NO securityContext, so its Pods would be REJECTED by PSA — the exact
+#   sidecar/PSA footgun this chapter is about, just self-inflicted by the demo.
+#   So the canary v2 Deployment carries the SAME restricted securityContext as
+#   the canonical catalog (10-catalog-deploy.yaml: pod runAsNonRoot/UID 65532/
+#   seccomp RuntimeDefault; container allowPrivilegeEscalation:false /
+#   readOnlyRootFilesystem / drop ALL + the `scratch` emptyDir its read-only
+#   root FS needs). It is PSA-`restricted`-admissible by construction.
+#
+# Image `bookstore/catalog:dev` is the SAME image the bootstrap already
+# `kind load`s for the four services (Part 00 ch.02 / every chapter's step 0)
+# — no extra registry/load step; `imagePullPolicy: IfNotPresent` uses the
+# kind-loaded image. It is labelled `version: v2` so 20-/21- can target it via
+# the `catalog-canary` Service while the canonical catalog stays v1.
+#
+# Built-in kinds (apps/v1 Deployment + core/v1 Service): a client dry-run is
+# CLEAN with no CRDs/mesh installed — no CRD-intrinsic note needed (these are
+# core kinds, valid on any v1.30+ cluster). It MUST also be PSA-`restricted`-
+# admissible (it is, by the securityContext above).
+#
+# Requires: kubectl apply -f examples/bookstore/raw-manifests/00-namespace.yaml
+#   and the catalog image kind-loaded (bootstrap step 0).
+# Apply (the mesh-canary Hands-on step 3):
+#   kubectl apply -f examples/bookstore/mesh/05-catalog-v2-deploy.yaml
+#   kubectl rollout status deployment/catalog-v2 -n bookstore
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: catalog-v2
+  namespace: bookstore
+  labels:
+    app: catalog
+    version: v2
+    app.kubernetes.io/part-of: bookstore
+spec:
+  replicas: 1
+  revisionHistoryLimit: 3
+  selector:
+    matchLabels:
+      app: catalog
+      version: v2
+  template:
+    metadata:
+      labels:
+        app: catalog                  # same app label; `version` distinguishes v2
+        version: v2
+        component: backend
+    spec:
+      serviceAccountName: catalog-sa            # reuse catalog's dedicated SA (Part 05 ch.01)
+      automountServiceAccountToken: false
+      # --- PSA `restricted` pod-level securityContext (copied from
+      # raw-manifests/10-catalog-deploy.yaml — the canonical catalog). Without
+      # this the bookstore ns rejects the Pod: this chapter's own footgun.
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 65532
+        runAsGroup: 65532
+        seccompProfile:
+          type: RuntimeDefault
+      containers:
+        - name: catalog
+          image: bookstore/catalog:dev          # SAME image the bootstrap kind-loads
+          imagePullPolicy: IfNotPresent         # use the kind-loaded image
+          # --- PSA `restricted` container-level securityContext (from 10-).
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities:
+              drop: ["ALL"]
+          ports:
+            - name: http
+              containerPort: 8080
+          envFrom:
+            - configMapRef:
+                name: catalog-config            # 15- (same config as canonical catalog)
+          env:
+            - name: PORT
+              value: "8080"
+            - name: POSTGRES_USER
+              valueFrom:
+                secretKeyRef: { name: db-credentials, key: POSTGRES_USER }
+            - name: POSTGRES_PASSWORD
+              valueFrom:
+                secretKeyRef: { name: db-credentials, key: POSTGRES_PASSWORD }
+            - name: POSTGRES_DB
+              valueFrom:
+                secretKeyRef: { name: db-credentials, key: POSTGRES_DB }
+            - name: DB_DSN
+              value: "host=postgres.bookstore.svc.cluster.local port=5432 user=$(POSTGRES_USER) password=$(POSTGRES_PASSWORD) dbname=$(POSTGRES_DB) sslmode=disable"
+          startupProbe:
+            httpGet: { path: /healthz, port: http }
+            periodSeconds: 5
+            failureThreshold: 30
+          livenessProbe:
+            httpGet: { path: /healthz, port: http }
+            periodSeconds: 10
+            timeoutSeconds: 2
+            failureThreshold: 3
+          readinessProbe:
+            httpGet: { path: /readyz, port: http }
+            periodSeconds: 5
+            timeoutSeconds: 2
+            failureThreshold: 3
+          lifecycle:
+            preStop:
+              sleep:
+                seconds: 5
+          resources:
+            requests:
+              cpu: 50m
+              memory: 64Mi
+            limits:
+              cpu: 250m
+              memory: 128Mi
+          volumeMounts:
+            - name: scratch                     # read-only root FS needs a writable path
+              mountPath: /tmp/cache
+      volumes:
+        - name: scratch
+          emptyDir:
+            sizeLimit: 64Mi
+---
+# The canary v2 Service the GAMMA HTTPRoute (20-) / VirtualService (21-)
+# route a weighted fraction of in-mesh `catalog` traffic to. Selects ONLY the
+# v2 Pods (app: catalog + version: v2). The canonical `catalog` Service
+# (raw-manifests/40-services.yaml) is UNTOUCHED and still selects all
+# `app: catalog` Pods for the stable path.
+apiVersion: v1
+kind: Service
+metadata:
+  name: catalog-canary
+  namespace: bookstore
+  labels:
+    app: catalog
+    version: v2
+    app.kubernetes.io/part-of: bookstore
+spec:
+  type: ClusterIP
+  selector:
+    app: catalog
+    version: v2                                 # ONLY the v2 Deployment's Pods
+  ports:
+    - name: http
+      port: 80
+      targetPort: http                          # -> container's named port 8080

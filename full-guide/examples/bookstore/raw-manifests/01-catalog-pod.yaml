@@ -1,0 +1,29 @@
+# Bookstore — first manifest (Part 00, ch.06 "The declarative API model").
+#
+# catalog as a single BARE Pod. This is intentionally minimal: it demonstrates
+# the spec/status object model and gives Part 00 ch.07 something to run on a
+# local kind cluster. A bare Pod has no controller restoring it if it dies — it
+# graduates to a Deployment in Part 01 (04-replicasets-and-deployments.md).
+#
+# Apply (client-side validate, no cluster needed):
+#   kubectl apply --dry-run=client -f examples/bookstore/raw-manifests/01-catalog-pod.yaml
+# Run for real (after `kind load docker-image bookstore/catalog:dev`):
+#   kubectl apply -f examples/bookstore/raw-manifests/01-catalog-pod.yaml
+apiVersion: v1                 # core API group, version v1
+kind: Pod                      # GVK = (core, v1, Pod)
+metadata:
+  name: catalog                # unique within (namespace, kind)
+  labels:                      # identifying — what selectors will match later
+    app: catalog               # the canonical label other objects will select on
+    component: backend
+spec:                          # DESIRED state (you write this; status is observed)
+  containers:
+    - name: catalog            # container name (unique within the Pod)
+      image: bookstore/catalog:dev   # the image built in ch.02
+      imagePullPolicy: IfNotPresent  # use the locally loaded image (ch.07 kind load)
+      ports:
+        - name: http
+          containerPort: 8080  # the port the Go app listens on
+      env:
+        - name: PORT           # the app reads PORT (defaults to 8080)
+          value: "8080"

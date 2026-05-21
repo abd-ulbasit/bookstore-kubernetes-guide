@@ -1,0 +1,40 @@
+# Bookstore Platform v2 — Part 13 ch.02: sample BookstoreTenant for the
+# fictional customer "Acme Books". Everything in this file is what a tenant-
+# onboarding ticket (or Backstage scaffolder form, 13.11) eventually becomes.
+#
+# Under Crossplane v2, with the XRD's scope: Cluster, this is the XR itself
+# (no separate Claim object). Apply it; Crossplane reconciles the Composition;
+# a minute or so later the per-tenant stack exists.
+#
+# !!! CRD-INTRINSIC DRY-RUN
+#   `BookstoreTenant` is the CRD declared by xrd-bookstoretenant.yaml. WITHOUT
+#   the XRD applied (13.02 §3), a client dry-run prints:
+#     no matches for kind "BookstoreTenant" in version
+#     "platform.bookstore.example.com/v1alpha1"
+#   EXPECTED. After the XRD is Established this applies and the per-tenant
+#   stack is reconciled within a minute or two on kind.
+#
+# Apply (after the XRD + Composition exist — 13.02 §3):
+#   kubectl apply -f examples/bookstore-platform/crossplane/sample-claim-acme-books.yaml
+#   kubectl get bookstoretenant acme-books
+#   kubectl get ns,resourcequota,networkpolicy,localqueue -n bookstore-platform-acme-books
+apiVersion: platform.bookstore.example.com/v1alpha1
+kind: BookstoreTenant
+metadata:
+  name: acme-books
+  labels:
+    app.kubernetes.io/part-of: bookstore-platform
+    bookstore-platform.example.com/tenant: acme-books
+spec:
+  tenantName: acme-books
+  displayName: "Acme Books"
+  tier: trial
+  regions:
+    - us-east
+    - eu-west
+    - ap-southeast
+  cloudResources:
+    # kind defaults — true booleans flip on cloud where the providers exist.
+    cnpgDatabase: false
+    s3Bucket: false
+    irsaRole: false
