@@ -1,0 +1,54 @@
+/* ============================================================================
+ * code-overflow.css — make horizontal scroll affordances visible on mobile.
+ *
+ * Problem:
+ *   The guide uses wide ASCII diagrams inside ```text code blocks. MkDocs
+ *   Material puts every code block in a horizontally scrollable <pre> with
+ *   the DEFAULT browser scrollbar, which on phone-class viewports is
+ *   completely invisible until you actually scroll. The result: on a
+ *   Samsung / Android Chrome / Firefox-mobile screen, a 90-column ASCII
+ *   diagram looks truncated, with no visual hint that swiping horizontally
+ *   reveals the missing right half (reported by the user, screenshot of
+ *   "Containers vs. VMs" diagram cut off at "Contair"/"Host"/"Hos").
+ *
+ * Fix:
+ *   Style the scrollbar to be permanently visible (but thin) on narrow
+ *   viewports only. The @media query gates it to mobile widths so desktop
+ *   Safari / Chrome / Firefox keep their existing rendering exactly.
+ *
+ * Coverage:
+ *   - Android Chrome / Samsung Internet / Firefox-mobile: works (these
+ *     respect ::-webkit-scrollbar and scrollbar-width).
+ *   - Desktop browsers: untouched (gated by @media max-width).
+ *   - iOS Safari at any width: scrollbar styling is disallowed by the OS,
+ *     so this is a no-op there. iOS users still get touch-swipe to scroll,
+ *     just no visible hint — accepted trade-off for not also adding a
+ *     CSS-gradient overlay that would interact with syntax highlighting.
+ *
+ * Safety:
+ *   - Purely additive. Adds rules, removes none.
+ *   - Scoped to (max-width: 768px) so desktop is unaffected.
+ *   - The scrollbar color uses an rgba grey that matches both light and
+ *     dark Material themes without referencing theme-specific variables.
+ * ============================================================================ */
+
+@media (max-width: 768px) {
+  /* Firefox + Firefox-mobile */
+  .md-typeset pre {
+    scrollbar-width: thin;
+    scrollbar-color: rgba(127, 127, 127, 0.5) transparent;
+  }
+
+  /* WebKit / Blink (Chrome, Edge, Samsung Internet, Android Chrome) */
+  .md-typeset pre::-webkit-scrollbar {
+    height: 6px;
+    -webkit-appearance: none;
+  }
+  .md-typeset pre::-webkit-scrollbar-thumb {
+    background-color: rgba(127, 127, 127, 0.5);
+    border-radius: 3px;
+  }
+  .md-typeset pre::-webkit-scrollbar-track {
+    background-color: transparent;
+  }
+}

@@ -10,6 +10,11 @@ edit_uri: edit/main/full-guide/
 
 docs_dir: full-guide
 
+# Extra stylesheets layered AFTER the Material theme. Paths are relative to
+# docs_dir (full-guide/).
+extra_css:
+  - stylesheets/code-overflow.css
+
 theme:
   name: material
   features:
