@@ -115,7 +115,7 @@ sequenceDiagram
     Op->>CP: kubeadm upgrade apply v1.NEXT
     CP->>CP: apiserver upgraded FIRST
     CP->>CP: then controller-manager + scheduler
-    CP->>CP: then etcd if coupled; certs rotated
+    CP->>CP: then etcd if coupled — certs rotated
     Op->>CP: kubectl/kubelet on the CP node upgraded + restarted
 
     Note over Op,N: 2. Nodes, ONE at a time (skew now apiserver=NEW, kubelet=OLD — legal: n-3)
@@ -124,7 +124,7 @@ sequenceDiagram
         N-->>W: evict Pods (eviction API HONORS the PDB → may block/retry)
         Op->>N: upgrade kubelet + kube-proxy, restart kubelet
         Op->>N: kubectl uncordon node
-        W-->>N: scheduler places Pods back; node now on NEW version
+        W-->>N: scheduler places Pods back — node now on NEW version
     end
 
     Note over Op,N: Never: kubelet ahead of apiserver. Never: skip a minor.

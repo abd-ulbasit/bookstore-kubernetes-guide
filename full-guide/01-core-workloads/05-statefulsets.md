@@ -71,9 +71,9 @@ flowchart TB
     SS --> P1
     SS --> P2
     SS -. requires .-> HS
-    HS -. DNS: postgres-0.postgres .-> P0
-    HS -. DNS: postgres-1.postgres .-> P1
-    HS -. DNS: postgres-2.postgres .-> P2
+    HS -.->|"DNS: postgres-0.postgres"| P0
+    HS -.->|"DNS: postgres-1.postgres"| P1
+    HS -.->|"DNS: postgres-2.postgres"| P2
     P0 -- mounts (sticky) --> V0
     P1 -- mounts (sticky) --> V1
     P2 -- mounts (sticky) --> V2

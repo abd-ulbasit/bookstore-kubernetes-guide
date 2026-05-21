@@ -53,18 +53,18 @@ Three quick decisions:
 
 ```mermaid
 flowchart LR
-    inc["P0 incident\nopen"]
-    decision{"flag/rollback\nfirst?"}
-    flag["FLIP FLAG\n(60s)"]
-    rb["ROLLBACK\n(2-5m)"]
-    hf["HOTFIX LANE\n(below)"]
+    inc["P0 incident<br/>open"]
+    decision{"flag/rollback<br/>first?"}
+    flag["FLIP FLAG<br/>(60s)"]
+    rb["ROLLBACK<br/>(2-5m)"]
+    hf["HOTFIX LANE<br/>(below)"]
 
     inc --> decision
     decision -->|"flag covers it"| flag
     decision -->|"rollback fixes it"| rb
     decision -->|"forward-only fix needed"| hf
 
-    flag --> done["mitigated\n(then postmortem)"]
+    flag --> done["mitigated<br/>(then postmortem)"]
     rb   --> done
     hf   --> done
 ```

@@ -134,17 +134,17 @@ sequenceDiagram
     participant OIDC as Cluster OIDC issuer<br/>(public JWKS)
     participant OBJ as Object store<br/>(S3/GCS/Blob bucket)
 
-    Note over K,P: SA annotated with the cloud role; admission webhook<br/>projects an audience-bound token into the Pod
+    Note over K,P: SA annotated with the cloud role — admission webhook<br/>projects an audience-bound token into the Pod
     K->>P: project SA JWT (aud=cloud STS, sub=system:serviceaccount:bookstore:catalog-sa,<br/>short TTL, auto-rotated) at /var/run/secrets/.../token
     P->>SDK: app calls e.g. s3:GetObject (no keys configured)
     SDK->>SDK: read projected token off disk
     SDK->>STS: AssumeRoleWithWebIdentity / token-exchange (presents the JWT)
-    STS->>OIDC: validate signature via JWKS; check iss + aud + sub
+    STS->>OIDC: validate signature via JWKS, check iss + aud + sub
     OIDC-->>STS: token valid (signed by this trusted cluster)
     STS-->>SDK: TEMPORARY creds for the SCOPED role (expire ~1h, auto-refresh)
     SDK->>OBJ: GetObject with the temporary creds
     OBJ-->>SDK: object bytes (only what the role's least-priv policy allows)
-    Note over STS,OBJ: No static key anywhere. Scope = catalog-sa's role ONLY;<br/>orders-sa would get a DIFFERENT role.
+    Note over STS,OBJ: No static key anywhere. Scope = catalog-sa's role ONLY —<br/>orders-sa would get a DIFFERENT role.
 ```
 
 ### Diagram B — IRSA vs Pod Identity vs GKE WI vs AKS WI (ASCII)

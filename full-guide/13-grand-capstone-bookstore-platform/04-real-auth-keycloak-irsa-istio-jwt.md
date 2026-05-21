@@ -158,7 +158,7 @@ flowchart LR
     sdk -->|exchange projected token| sts
     sts -->|verify against cluster OIDC provider| iam
     iam -->|trust policy allows| sts
-    sts -->|temporary scoped creds (15-60 min)| sdk
+    sts -->|"temporary scoped creds (15-60 min)"| sdk
     sdk -->|signed request| s3
 
     note["NO long-lived AWS key in Pod, source, or Secret.<br/>Credentials auto-refresh before expiry. Audit trail in CloudTrail."]

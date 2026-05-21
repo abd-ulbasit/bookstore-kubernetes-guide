@@ -99,7 +99,7 @@ sequenceDiagram
     CNI->>IPAM: allocate an IP from this node's Pod CIDR
     IPAM-->>CNI: 10.244.2.9/24 (+ gateway, routes)
     CNI->>K: create veth pair: eth0 (in Pod netns) ↔ vethXX (in host netns)
-    CNI->>K: assign 10.244.2.9 to eth0; add default route in the Pod
+    CNI->>K: assign 10.244.2.9 to eth0, add default route in the Pod
     CNI->>K: attach vethXX to the node bridge / program node routes
     CNI-->>CRI: result {IP, MAC, routes}
     CRI-->>KUB: sandbox ready (Pod now has its identity on the flat LAN)

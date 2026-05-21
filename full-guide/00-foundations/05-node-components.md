@@ -196,13 +196,13 @@ sequenceDiagram
     CRI->>CRI: start pause container → creates net+IPC namespaces
     CRI->>CNI: ADD: set up Pod network
     CNI-->>CRI: veth created, Pod IP assigned, routes programmed
-    KUB->>CRI: PullImage (per imagePullPolicy; layers cached — ch.02)
+    KUB->>CRI: PullImage (per imagePullPolicy, layers cached — ch.02)
     CRI-->>KUB: image present
     KUB->>CRI: CreateContainer + StartContainer (init, then app containers)
     CRI->>CRI: runc: clone() namespaces (join sandbox) + cgroups (limits)
     CRI-->>KUB: container(s) running
     KUB->>KUB: run startup→readiness→liveness probes
-    KUB->>API: update Pod status (ContainerCreating→Running; Ready when readiness passes)
+    KUB->>API: update Pod status (ContainerCreating→Running — Ready when readiness passes)
     Note over API: EndpointSlice controller adds the ready Pod IP →<br/>kube-proxy programs routing → traffic reaches the Pod
 ```
 

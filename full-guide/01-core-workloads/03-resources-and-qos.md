@@ -62,7 +62,7 @@ means "choose how the system treats this workload when things go wrong".
 flowchart TD
     start([For a Pod, look at every container]) --> q1{Does EVERY container set<br/>BOTH cpu+memory<br/>requests AND limits?}
     q1 -- no --> q2{Does ANY container set<br/>any request OR limit?}
-    q1 -- yes --> q3{For every container,<br/>requests == limits<br/>(cpu AND memory)?}
+    q1 -- yes --> q3{"For every container,<br/>requests == limits<br/>(cpu AND memory)?"}
     q3 -- yes --> g[QoS = Guaranteed<br/>evicted LAST · most stable]
     q3 -- no --> b
     q2 -- yes --> b[QoS = Burstable<br/>evicted after BestEffort,<br/>esp. if above requests]

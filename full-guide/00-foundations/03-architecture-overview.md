@@ -191,7 +191,7 @@ sequenceDiagram
     U->>API: POST/PATCH Pod (desired state)
     API->>API: authN → authZ (RBAC) → admission → validate
     API->>ETCD: persist Pod object (spec set, nodeName empty, status=Pending)
-    API-->>U: 201 Created (object accepted; NOT yet running)
+    API-->>U: 201 Created (object accepted — NOT yet running)
 
     Note over SCH,API: scheduler is watching for Pods with no node
     SCH->>API: sees unscheduled Pod
@@ -201,9 +201,9 @@ sequenceDiagram
 
     Note over KUB,API: kubelet on Node N is watching for its Pods
     KUB->>API: sees Pod now bound to Node N
-    KUB->>CRI: create Pod sandbox; pull image; start container(s)
+    KUB->>CRI: create Pod sandbox, pull image, start container(s)
     CRI-->>KUB: containers running
-    KUB->>API: update Pod status (ContainerCreating → Running; readiness)
+    KUB->>API: update Pod status (ContainerCreating → Running — readiness)
     API->>ETCD: persist observed status
 
     Note over API: a controller updates EndpointSlices →<br/>kube-proxy programs routing → Pod receives traffic

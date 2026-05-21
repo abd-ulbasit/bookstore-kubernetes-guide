@@ -151,13 +151,13 @@ felt wrong.
 ```mermaid
 flowchart TD
     p0["P0 INCIDENT FIRES"]
-    g1{"Could a feature-flag\nflip mitigate?\n(ch.08)"}
-    g2{"Could a rollback\nmitigate? (ch.07)"}
-    g3{"Is the fix\nsmall + KNOWN?"}
-    flag["FLAG FLIP\n(60s)"]
-    rb["ROLLBACK\n(2-5m)"]
-    hotfix["HOTFIX LANE\n(5-15m)"]
-    diag["DIAGNOSE PHASE;\nopen alert runbook"]
+    g1{"Could a feature-flag<br/>flip mitigate?<br/>(ch.08)"}
+    g2{"Could a rollback<br/>mitigate? (ch.07)"}
+    g3{"Is the fix<br/>small + KNOWN?"}
+    flag["FLAG FLIP<br/>(60s)"]
+    rb["ROLLBACK<br/>(2-5m)"]
+    hotfix["HOTFIX LANE<br/>(5-15m)"]
+    diag["DIAGNOSE PHASE;<br/>open alert runbook"]
 
     p0 --> g1
     g1 -->|"yes"| flag
@@ -169,7 +169,7 @@ flowchart TD
 
     flag -.->|"postmortem in 48h"| pm["Postmortem"]
     rb   -.->|"postmortem in 48h"| pm
-    hotfix -.->|"cleanup in 24h;\npostmortem in 48h"| pm
+    hotfix -.->|"cleanup in 24h;<br/>postmortem in 48h"| pm
 ```
 
 ### Diagram B — the hotfix CI fast-path vs normal flow (ASCII)
@@ -200,14 +200,14 @@ RE-RUN on the cleanup PR (within 24h):
 
 ```mermaid
 flowchart LR
-    p0["P0: standard role\ninsufficient"]
-    declare["Declare in Slack:\napprover named;\ncleanup-owner named"]
-    assume["Vault AWS auth:\n1-hour TTL;\nMFA required"]
-    work["Responder works\nthe incident;\nside-channel log\nin Slack thread"]
-    expire["TTL expires;\ncredentials auto-rotate"]
-    cleanup["Cleanup (24h):\nverify expiry;\nCloudTrail audit;\nrotate secrets;\nTerraform drift check"]
-    pm["Postmortem (48h):\nincludes breakglass\nsections"]
-    fix["Action item:\nTerraform PR to extend\nstandard role"]
+    p0["P0: standard role<br/>insufficient"]
+    declare["Declare in Slack:<br/>approver named;<br/>cleanup-owner named"]
+    assume["Vault AWS auth:<br/>1-hour TTL;<br/>MFA required"]
+    work["Responder works<br/>the incident;<br/>side-channel log<br/>in Slack thread"]
+    expire["TTL expires;<br/>credentials auto-rotate"]
+    cleanup["Cleanup (24h):<br/>verify expiry;<br/>CloudTrail audit;<br/>rotate secrets;<br/>Terraform drift check"]
+    pm["Postmortem (48h):<br/>includes breakglass<br/>sections"]
+    fix["Action item:<br/>Terraform PR to extend<br/>standard role"]
 
     p0 --> declare --> assume --> work --> expire --> cleanup --> pm --> fix
 ```

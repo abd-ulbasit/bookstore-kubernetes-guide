@@ -61,7 +61,7 @@ sequenceDiagram
     participant C as container (catalog)
     participant EP as EndpointSlice controller / Service
 
-    Note over K,C: startup probe runs FIRST; liveness+readiness suspended until it passes
+    Note over K,C: startup probe runs FIRST — liveness and readiness suspended until it passes
     K->>C: GET /healthz  (startup)
     C-->>K: 200  ⇒ startup OK, enable liveness+readiness
 
@@ -93,7 +93,7 @@ sequenceDiagram
     participant EP as EndpointSlice ctrl
     participant App as app process (PID 1)
 
-    API->>K: Pod deletion (deletionTimestamp set; grace clock starts)
+    API->>K: Pod deletion (deletionTimestamp set — grace clock starts)
     par drain path (concurrent!)
         API->>EP: Pod terminating ⇒ remove from endpoints
         EP-->>EP: Services stop sending NEW traffic

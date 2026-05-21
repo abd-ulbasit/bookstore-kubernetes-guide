@@ -202,11 +202,11 @@ LIFETIME RULE:
 ```mermaid
 flowchart TD
     sym["Customer-visible regression"]
-    flag{"Is the regression behind\na flag-gated path?"}
-    flag_flip["FLAG FLIP\n(< 60s; no PR)\nThe fastest mitigation"]
-    rb{"Did a deploy land\nin the last 30 min?"}
-    rb_yes["ROLLBACK\n(see ch.07)\nThe surgical mitigation"]
-    investigate["Open the alert runbook;\nthis is not a release-time event"]
+    flag{"Is the regression behind<br/>a flag-gated path?"}
+    flag_flip["FLAG FLIP<br/>(< 60s; no PR)<br/>The fastest mitigation"]
+    rb{"Did a deploy land<br/>in the last 30 min?"}
+    rb_yes["ROLLBACK<br/>(see ch.07)<br/>The surgical mitigation"]
+    investigate["Open the alert runbook;<br/>this is not a release-time event"]
 
     sym --> flag
     flag -->|"yes — flip"| flag_flip
@@ -214,7 +214,7 @@ flowchart TD
     rb -->|"yes — rollback"| rb_yes
     rb -->|"no"| investigate
 
-    flag_flip -.->|"follow-up: forward fix"| forward["Forward fix\nin next sprint"]
+    flag_flip -.->|"follow-up: forward fix"| forward["Forward fix<br/>in next sprint"]
     rb_yes -.->|"follow-up: forward fix"| forward
 ```
 

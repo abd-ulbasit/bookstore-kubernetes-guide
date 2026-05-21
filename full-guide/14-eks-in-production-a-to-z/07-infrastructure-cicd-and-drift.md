@@ -194,7 +194,7 @@ sequenceDiagram
     AWS-->>TF: state
     TF-->>Run: plan output
     Run->>GH: Post plan as PR comment<br/>+ upload tfplan artifact
-    Dev->>GH: Review plan; approve PR
+    Dev->>GH: Review plan, approve PR
     GH->>Run: Trigger apply on merge
     Run->>OIDC: New OIDC token
     OIDC-->>Run: Short-lived JWT
