@@ -30,6 +30,24 @@ jobs:
       - uses: actions/checkout@v4
         with:
           fetch-depth: 0
+
+      # Validate every ```mermaid block actually parses under the same parser
+      # version production renders with (10.9.1). mkdocs build does NOT catch
+      # mermaid syntax errors — they only show up in the reader's browser as
+      # "Syntax error in text". Failing fast here keeps broken diagrams from
+      # ever being deployed.
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+      - name: Validate mermaid diagrams
+        # ESM bare-import resolution walks UP from the script file, so
+        # node_modules must live somewhere above the script. Installing at
+        # repo root is the simplest portable layout. node_modules/ is
+        # gitignored so this never pollutes commits.
+        run: |
+          npm install --silent --no-save mermaid@10.9.1 jsdom
+          node .github/scripts/validate-mermaid.mjs full-guide
+
       - uses: actions/setup-python@v5
         with:
           python-version: '3.12'

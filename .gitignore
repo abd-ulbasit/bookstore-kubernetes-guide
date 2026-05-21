@@ -1,6 +1,10 @@
 # MkDocs build output
 /site/
 
+# Node modules (only ever installed locally / in CI for the mermaid validator)
+node_modules/
+package-lock.json
+
 # Pre-build personal study notes (kept locally; not part of the published guide)
 /old/
 
