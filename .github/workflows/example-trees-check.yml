@@ -78,6 +78,9 @@ jobs:
   go-services:
     runs-on: ubuntu-latest
     strategy:
+      # One placeholder service shouldn't cancel the rest of the matrix — we
+      # want to see every service's result on the same run.
+      fail-fast: false
       matrix:
         service:
           - catalog
@@ -94,7 +97,13 @@ jobs:
         with: { go-version: '1.22' }
       - run: |
           DIR="full-guide/examples/bookstore-platform/app/${{ matrix.service }}"
-          if [ ! -d "$DIR" ]; then echo "SKIP — $DIR does not exist (yet)"; exit 0; fi
+          # SKIP when the directory doesn't exist OR exists as a placeholder
+          # (no go.mod) — `auth/` is currently the latter, a documented
+          # stub that the Bookstore Platform v2 spec marks for later.
+          if [ ! -d "$DIR" ] || [ ! -f "$DIR/go.mod" ]; then
+            echo "SKIP — $DIR has no go.mod yet (placeholder)"
+            exit 0
+          fi
           cd "$DIR"
           go vet ./...
           go build ./...
