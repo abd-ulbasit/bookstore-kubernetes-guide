@@ -1,0 +1,90 @@
+{
+  "name": "Bookstore Kubernetes Guide",
+  "image": "mcr.microsoft.com/devcontainers/base:ubuntu-22.04",
+
+  // The whole point of this dev container is that someone (or future-you)
+  // can land on the repo, click "Open in Codespaces," and within ~2 minutes
+  // be running `helm install` against a real kind cluster in their browser
+  // with zero local setup. The tool versions below match the guide's text
+  // exactly so hands-on examples reproduce 1:1.
+  "features": {
+    // Docker-in-Docker so kind can spin up its own Kubernetes nodes
+    // (kind nodes are Docker containers) without privileged access to the
+    // host Codespace runtime.
+    "ghcr.io/devcontainers/features/docker-in-docker:2": {
+      "version": "latest",
+      "moby": true
+    },
+    // kubectl + helm pinned to the versions the guide cites and the CI
+    // workflows use. minikube isn't needed — we use kind via the script
+    // below since the guide standardises on kind/k3d.
+    "ghcr.io/devcontainers/features/kubectl-helm-minikube:1": {
+      "version": "1.35.0",
+      "helm": "3.16.0",
+      "minikube": "none"
+    },
+    "ghcr.io/devcontainers/features/terraform:1": {
+      "version": "1.10.5",
+      "tflint": "latest",
+      "terragrunt": "none"
+    },
+    "ghcr.io/devcontainers/features/go:1": {
+      "version": "1.22"
+    },
+    "ghcr.io/devcontainers/features/python:1": {
+      "version": "3.12",
+      "installTools": true
+    },
+    // Stops `aws s3 ls` failing with "no command found" the moment a reader
+    // tries the Part 14 (EKS) hands-on. Even read-only commands need the CLI.
+    "ghcr.io/devcontainers/features/aws-cli:1": {
+      "version": "latest"
+    },
+    "ghcr.io/devcontainers/features/node:1": {
+      "version": "20"
+    }
+  },
+
+  // kind + k3d + kustomize + yq aren't in the features registry — install
+  // them after the container boots. See .devcontainer/postCreateCommand.sh.
+  "postCreateCommand": "bash .devcontainer/postCreateCommand.sh",
+
+  "customizations": {
+    "vscode": {
+      "extensions": [
+        "ms-kubernetes-tools.vscode-kubernetes-tools",
+        "redhat.vscode-yaml",
+        "hashicorp.terraform",
+        "golang.go",
+        "ms-azuretools.vscode-docker",
+        "bierner.markdown-mermaid",
+        "yzhang.markdown-all-in-one",
+        "DavidAnson.vscode-markdownlint"
+      ],
+      "settings": {
+        "files.eol": "\n",
+        "terminal.integrated.defaultProfile.linux": "bash"
+      }
+    }
+  },
+
+  // MkDocs serves on :8000; auto-forward so the readers can preview their
+  // edits live. Codespaces presents a clickable URL in the PORTS panel.
+  "forwardPorts": [8000],
+  "portsAttributes": {
+    "8000": {
+      "label": "MkDocs preview",
+      "onAutoForward": "openPreview"
+    }
+  },
+
+  // Bigger machine type so a kind cluster + Karpenter simulation + mkdocs
+  // serve can all run together without thrashing.
+  "hostRequirements": {
+    "cpus": 4,
+    "memory": "8gb",
+    "storage": "32gb"
+  },
+
+  "remoteUser": "vscode"
+}

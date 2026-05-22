@@ -11,6 +11,17 @@ every chapter's hands-on section advances the *same* app.
 This README is for anyone who lands on the repo on GitHub. The reading
 experience is the live site above; everything below is just orientation.
 
+## Try the hands-on, zero setup
+
+[![Open in GitHub Codespaces](https://github.com/codespaces/badge.svg)](https://codespaces.new/abd-ulbasit/bookstore-kubernetes-guide?devcontainer_path=.devcontainer%2Fdevcontainer.json)
+
+Clicking the badge spins up a browser-based dev environment with everything
+the guide uses pinned to the versions the chapters cite — `kubectl 1.35.0`,
+`helm 3.16.0`, `terraform 1.10.5`, `kind 0.27.0`, `k3d 5.8.3`, `go 1.22`,
+`python 3.12`, `aws-cli`, plus the MkDocs Material toolchain. About 90 seconds
+from click to a shell where `kind create cluster` and `helm install bookstore`
+both just work. Config: [`.devcontainer/`](.devcontainer/).
+
 ## What's inside
 
 | Path | Contents |
@@ -21,6 +32,8 @@ experience is the live site above; everything below is just orientation.
 | `full-guide/examples/bookstore-platform/` | Platform v2 — multi-tenant, GitOps, Keycloak + IRSA + Istio (Parts 12–13) |
 | `full-guide/examples/bookstore-platform/terraform/` | EKS infrastructure as Terraform — **live-smoke-tested** on AWS EKS 1.35 in `ap-south-1` (Part 14) |
 | `full-guide/examples/bookstore-platform/terraform-account-baseline/` | AWS-account-wide guardrails (CloudTrail, Security Hub, GuardDuty, IAM Access Analyzer) |
+| [`docs/adr/`](docs/adr/) | Architecture Decision Records — the load-bearing technical decisions, why they were made, and the trade-offs |
+| [`docs/lessons-from-smoke-test.md`](docs/lessons-from-smoke-test.md) | Post-mortem of running this guide's Terraform against real EKS — what broke, why, and the five fixes that became Tier-1 defaults |
 | `docs/superpowers/{specs,plans}/` | The design + implementation methodology used to build this guide |
 | `.github/workflows/` | `docs` (builds + deploys the site, validates every mermaid block) + `example-trees-check` (Helm/Kustomize counts, Terraform fmt+validate, leak-scan) + `link-check` (external URL rot) |
 
