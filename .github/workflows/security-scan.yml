@@ -1,0 +1,108 @@
+name: security-scan
+
+# Runs every security scanner against the repo + uploads SARIF results to
+# the GitHub Security tab so findings surface as Code Scanning alerts.
+# Also writes a human-readable Markdown summary to the workflow run.
+#
+# Triggers: every push to main, every PR touching scannable files, and
+# weekly on Mondays at 06:00 UTC (catches new CVEs against pinned tools).
+
+on:
+  schedule:
+    - cron: '0 6 * * 1'        # Mondays 06:00 UTC
+  workflow_dispatch: {}
+  push:
+    branches: [main]
+    paths:
+      - 'full-guide/examples/**'
+      - '.github/workflows/security-scan.yml'
+  pull_request:
+    paths:
+      - 'full-guide/examples/**'
+
+permissions:
+  contents: read
+  security-events: write       # required to upload SARIF
+  actions: read
+
+jobs:
+  # ---- Filesystem + Dockerfile + secret scan ----
+  trivy:
+    name: trivy (vuln + secret + misconfig)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Trivy filesystem scan (vulnerabilities)
+        uses: aquasecurity/trivy-action@0.28.0
+        with:
+          scan-type: 'fs'
+          scan-ref: '.'
+          format: 'sarif'
+          output: 'trivy-vuln.sarif'
+          severity: 'CRITICAL,HIGH'
+          # Don't fail the build on findings — surface them; severity
+          # judgement happens in review.
+          exit-code: '0'
+          scanners: 'vuln,secret,misconfig'
+          # The .terraform/ provider blobs would dominate the report; they
+          # are gitignored anyway, so skip explicitly here too.
+          skip-dirs: 'node_modules,.terraform,site'
+
+      - name: Upload Trivy SARIF to GitHub Security
+        uses: github/codeql-action/upload-sarif@v3
+        if: always()
+        with:
+          sarif_file: 'trivy-vuln.sarif'
+          category: trivy
+
+  # ---- Terraform-specific scanning ----
+  tfsec:
+    name: tfsec (Terraform misconfig)
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        tree:
+          - full-guide/examples/bookstore-platform/terraform
+          - full-guide/examples/bookstore-platform/terraform-account-baseline
+    steps:
+      - uses: actions/checkout@v4
+      - uses: aquasecurity/tfsec-sarif-action@v0.1.4
+        with:
+          working_directory: ${{ matrix.tree }}
+          sarif_file: tfsec-${{ strategy.job-index }}.sarif
+      - uses: github/codeql-action/upload-sarif@v3
+        if: always()
+        with:
+          sarif_file: tfsec-${{ strategy.job-index }}.sarif
+          category: tfsec-${{ strategy.job-index }}
+
+  # ---- Go vulnerability scan (per service) ----
+  govulncheck:
+    name: govulncheck (Go module vulns)
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        service:
+          - catalog
+          - orders
+          - payments-worker
+          - events
+          - payments-gateway
+          - recommendations
+          - search
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with: { go-version: '1.22' }
+      - run: |
+          DIR="full-guide/examples/bookstore-platform/app/${{ matrix.service }}"
+          if [ ! -f "$DIR/go.mod" ]; then
+            echo "SKIP — $DIR has no go.mod yet"
+            exit 0
+          fi
+          go install golang.org/x/vuln/cmd/govulncheck@latest
+          cd "$DIR"
+          $(go env GOPATH)/bin/govulncheck ./...

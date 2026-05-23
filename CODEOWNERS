@@ -1,0 +1,36 @@
+# CODEOWNERS — automatic reviewer assignment for PRs.
+# Format: <path-pattern>  <owner-1> [<owner-2> ...]
+# Owners are GitHub usernames or @org/team handles.
+
+# Default owner for everything not covered below.
+*                                @abd-ulbasit
+
+# Guide content — review pass focuses on technical accuracy + the
+# "deepen, don't duplicate" discipline.
+/full-guide/                     @abd-ulbasit
+
+# Example trees — review pass focuses on runnability + the invariants
+# (Helm 49 / Kustomize 45-49-48 / Terraform fmt+validate).
+/full-guide/examples/            @abd-ulbasit
+
+# CI workflows + scripts — review pass focuses on what runs when, and
+# whether a change is going to start (or stop) being a gate on every push.
+/.github/                        @abd-ulbasit
+
+# Design records — review pass treats these as load-bearing. A change to
+# an Accepted ADR is itself a decision and needs an issue first.
+/docs/adr/                       @abd-ulbasit
+/docs/superpowers/               @abd-ulbasit
+
+# Build + dev environment.
+/.devcontainer/                  @abd-ulbasit
+/mkdocs.yml                      @abd-ulbasit
+/requirements.txt                @abd-ulbasit
+/Makefile                        @abd-ulbasit
+
+# Repo policy / hygiene.
+/LICENSE                         @abd-ulbasit
+/SECURITY.md                     @abd-ulbasit
+/CONTRIBUTING.md                 @abd-ulbasit
+/CHANGELOG.md                    @abd-ulbasit
+/CODEOWNERS                      @abd-ulbasit

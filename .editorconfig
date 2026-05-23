@@ -1,0 +1,39 @@
+# EditorConfig — https://editorconfig.org
+# Single source of truth for whitespace conventions across this repo.
+
+root = true
+
+[*]
+charset = utf-8
+end_of_line = lf
+insert_final_newline = true
+trim_trailing_whitespace = true
+indent_style = space
+indent_size = 2
+
+[*.md]
+# Trailing whitespace in markdown is significant (two spaces = hard line
+# break). Don't trim it.
+trim_trailing_whitespace = false
+# 80 isn't enforced (prose flows freely) but the guide aims for ~80 in code
+# blocks and ~100 in prose.
+max_line_length = off
+
+[*.go]
+indent_style = tab
+indent_size = 4
+
+[Makefile]
+indent_style = tab
+
+[*.{yaml,yml,json,toml}]
+indent_size = 2
+
+[*.{tf,tfvars}]
+indent_size = 2
+
+[*.{sh,bash}]
+indent_size = 2
+
+[Dockerfile*]
+indent_size = 2
