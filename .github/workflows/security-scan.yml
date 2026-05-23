@@ -96,7 +96,7 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-go@v5
-        with: { go-version: '1.22' }
+        with: { go-version: '1.25' }
       - run: |
           DIR="full-guide/examples/bookstore-platform/app/${{ matrix.service }}"
           if [ ! -f "$DIR/go.mod" ]; then
