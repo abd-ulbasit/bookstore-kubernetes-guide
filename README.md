@@ -1,5 +1,13 @@
 # The Bookstore Guide — Kubernetes from Zero to Production
 
+[![docs](https://github.com/abd-ulbasit/bookstore-kubernetes-guide/actions/workflows/docs.yml/badge.svg?branch=main)](https://github.com/abd-ulbasit/bookstore-kubernetes-guide/actions/workflows/docs.yml)
+[![example-trees-check](https://github.com/abd-ulbasit/bookstore-kubernetes-guide/actions/workflows/example-trees-check.yml/badge.svg?branch=main&event=schedule)](https://github.com/abd-ulbasit/bookstore-kubernetes-guide/actions/workflows/example-trees-check.yml)
+[![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
+[![Kubernetes](https://img.shields.io/badge/kubernetes-1.35-326CE5?logo=kubernetes&logoColor=white)](https://kubernetes.io)
+[![Terraform](https://img.shields.io/badge/terraform-1.10-7B42BC?logo=terraform&logoColor=white)](https://www.terraform.io)
+[![Helm](https://img.shields.io/badge/helm-3.16-0F1689?logo=helm&logoColor=white)](https://helm.sh)
+[![GitHub last commit](https://img.shields.io/github/last-commit/abd-ulbasit/bookstore-kubernetes-guide?logo=github)](https://github.com/abd-ulbasit/bookstore-kubernetes-guide/commits/main)
+
 **Live site:** **<https://abd-ulbasit.github.io/bookstore-kubernetes-guide/>**
 
 A standalone, hands-on Kubernetes learning guide that takes you from container
@@ -37,6 +45,36 @@ both just work. Config: [`.devcontainer/`](.devcontainer/).
 | `docs/superpowers/{specs,plans}/` | The design + implementation methodology used to build this guide |
 | `.github/workflows/` | `docs` (builds + deploys the site, validates every mermaid block) + `example-trees-check` (Helm/Kustomize counts, Terraform fmt+validate, leak-scan) + `link-check` (external URL rot) |
 
+## Reading paths by role
+
+The full 16-Part arc is the recommended path. If you're short on time and
+want to read the chapters most relevant to a specific role first:
+
+- **Backend developer joining a Kubernetes team** → Parts 00 (foundations) ·
+  01 (core workloads) · 02.01–02.03 (networking basics) · 03 (config &
+  storage) · 06.01–06.03 (production-readiness) · 07.01–07.02 (Helm &
+  Kustomize). ~30 chapters; gets you "I can ship a service to a cluster
+  and understand what's happening."
+- **Platform / DevOps engineer** → all of Backend above, then 04
+  (scheduling) · 07 (delivery) · 08 (Day-2 ops) · 10 (cloud-managed K8s)
+  · 14 (EKS-in-production A-Z). ~60 chapters; gets you the operator's
+  view end to end.
+- **SRE / on-call engineer** → 01.02 (probes & lifecycle) · 06 entirely
+  (production-readiness) · 08 (Day-2 ops) · 14.13 (runtime defense) ·
+  14.14 (Velero backups) · all of 15 (day-to-day production ops:
+  rollback, feature flags, hotfix, incident response, breakglass).
+  ~30 chapters; the chapters that matter at 3 AM.
+- **Security engineer** → 05 (security) entirely · 10.03 (cloud identity:
+  IRSA / Pod Identity / Workload Identity) · 13.04 (Keycloak + IRSA +
+  Istio JWT) · 14.12 (supply chain) · 14.13 (runtime defense / Falco) ·
+  14-R Terraform additions (CloudTrail / Security Hub / GuardDuty). ~20
+  chapters.
+- **Manager evaluating "should our team learn this"** → README.md (this
+  file) · [`docs/lessons-from-smoke-test.md`](docs/lessons-from-smoke-test.md)
+  · [`docs/adr/`](docs/adr/) · the Part 14.17 capstone. ~6 reads, ~90
+  minutes; gives you the depth signal and the operator-grade detail
+  without committing to the full arc.
+
 ## How to read it
 
 - **Online (recommended):** <https://abd-ulbasit.github.io/bookstore-kubernetes-guide/>
@@ -62,6 +100,18 @@ Every commit to `main` runs:
   before the site deploys (using the same parser version production renders with)
 - Helm/Kustomize/Terraform shape checks + leak-scan (nightly + on PR)
 - External link-check (weekly)
+
+## Contributing
+
+See [`CONTRIBUTING.md`](CONTRIBUTING.md). Bug reports and content
+corrections welcome via [issues](https://github.com/abd-ulbasit/bookstore-kubernetes-guide/issues);
+open-ended questions belong in [Discussions](https://github.com/abd-ulbasit/bookstore-kubernetes-guide/discussions).
+For security findings, see [`SECURITY.md`](SECURITY.md) — please don't
+open a public issue.
+
+## Changelog
+
+Versioned per [SemVer](https://semver.org/); see [`CHANGELOG.md`](CHANGELOG.md).
 
 ## License
 

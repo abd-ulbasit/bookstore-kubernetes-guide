@@ -1,0 +1,8 @@
+blank_issues_enabled: false
+contact_links:
+  - name: Security issue (real secrets, vulnerable patterns documented as best practice, CI privilege issues)
+    url: https://github.com/abd-ulbasit/bookstore-kubernetes-guide/security/advisories/new
+    about: Please use private vulnerability reporting — do not open a public issue.
+  - name: Question about the guide
+    url: https://github.com/abd-ulbasit/bookstore-kubernetes-guide/discussions
+    about: GitHub Discussions is the right place for questions — issues are for tracked work.
