@@ -119,14 +119,21 @@ scan-tfsec: ## tfsec across all Terraform trees.
 	tfsec full-guide/examples/bookstore-platform/terraform-account-baseline
 
 .PHONY: scan-go
-scan-go: ## govulncheck across every Go service.
+scan-go: ## govulncheck across every Go module under full-guide/examples/.
+# Modules are discovered, not listed. The previous version walked a hardcoded
+# service list under bookstore-platform/app/ only, so the canonical
+# examples/bookstore/ tree was never scanned locally either — the same blind
+# spot the CI job had. Discovery keeps `make scan-go` honest as services move
+# or get added, and keeps it equivalent to the CI job it stands in for.
 	@command -v govulncheck >/dev/null || (echo "govulncheck not found; go install golang.org/x/vuln/cmd/govulncheck@latest" && exit 1)
-	@for svc in catalog orders payments-worker events payments-gateway recommendations search auth; do \
-		DIR="full-guide/examples/bookstore-platform/app/$$svc"; \
-		[ -f "$$DIR/go.mod" ] || continue; \
-		echo "== $$svc =="; \
-		(cd "$$DIR" && govulncheck ./...); \
-	done
+	@rc=0; \
+	for dir in $$(find full-guide/examples -name go.mod \
+	              -not -path '*/vendor/*' -not -path '*/.terraform/*' \
+	              -exec dirname {} \; | sort); do \
+		echo "== $$dir =="; \
+		(cd "$$dir" && govulncheck ./...) || rc=1; \
+	done; \
+	exit $$rc
 
 ##@ Bookstore (local cluster)
 

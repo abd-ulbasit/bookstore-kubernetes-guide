@@ -78,31 +78,124 @@ jobs:
           sarif_file: tfsec-${{ strategy.job-index }}.sarif
           category: tfsec-${{ strategy.job-index }}
 
-  # ---- Go vulnerability scan (per service) ----
+  # ---- Go vulnerability scan (every module under examples/) ----
+  #
+  # The module list is DISCOVERED, not hardcoded. It used to be a hardcoded
+  # service-name matrix joined to a fixed path prefix
+  # (bookstore-platform/app/<service>), which silently scanned only the
+  # Platform v2 tree. The canonical reader-facing tree — examples/bookstore/,
+  # the one Parts 02-08 tell readers to run — was never scanned at all, and
+  # drifted onto a pgx release with a known SQL-injection advisory
+  # (GO-2026-5004) while the workflow reported green.
+  #
+  # Discovery means a new service or example module is covered the moment its
+  # go.mod lands, with no list to remember to update.
+  discover-go-modules:
+    name: discover Go modules
+    runs-on: ubuntu-latest
+    outputs:
+      modules: ${{ steps.find.outputs.modules }}
+    steps:
+      - uses: actions/checkout@v4
+      - id: find
+        run: |
+          set -euo pipefail
+          dirs=$(find full-guide/examples -name go.mod \
+            -not -path '*/vendor/*' -not -path '*/.terraform/*' \
+            -exec dirname {} \; | sort)
+          count=$(printf '%s\n' "$dirs" | grep -c . || true)
+          if [ "$count" -eq 0 ]; then
+            echo "FAIL — discovered zero Go modules. Either the examples tree"
+            echo "moved or the find expression is wrong. Refusing to report a"
+            echo "green scan over an empty matrix."
+            exit 1
+          fi
+          echo "discovered $count Go module(s):"
+          printf '%s\n' "$dirs" | sed 's/^/  /'
+          modules=$(printf '%s\n' "$dirs" \
+            | jq -R -s -c 'split("\n") | map(select(length > 0))')
+          echo "modules=$modules" >> "$GITHUB_OUTPUT"
+
   govulncheck:
-    name: govulncheck (Go module vulns)
+    name: govulncheck (${{ matrix.module }})
+    needs: discover-go-modules
     runs-on: ubuntu-latest
     strategy:
       fail-fast: false
       matrix:
-        service:
-          - catalog
-          - orders
-          - payments-worker
-          - events
-          - payments-gateway
-          - recommendations
-          - search
+        module: ${{ fromJSON(needs.discover-go-modules.outputs.modules) }}
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-go@v5
-        with: { go-version: '1.26.5' }
-      - run: |
-          DIR="full-guide/examples/bookstore-platform/app/${{ matrix.service }}"
-          if [ ! -f "$DIR/go.mod" ]; then
-            echo "SKIP — $DIR has no go.mod yet"
-            exit 0
-          fi
-          go install golang.org/x/vuln/cmd/govulncheck@latest
-          cd "$DIR"
-          $(go env GOPATH)/bin/govulncheck ./...
+        with:
+          go-version: '1.26.5'
+          cache-dependency-path: ${{ matrix.module }}/go.sum
+      - run: go install golang.org/x/vuln/cmd/govulncheck@latest
+      - name: govulncheck
+        working-directory: ${{ matrix.module }}
+        run: $(go env GOPATH)/bin/govulncheck ./...
+
+  # ---- Executable form of the SECURITY-SCAN.md acceptance list ----
+  #
+  # SECURITY-SCAN.md §1.3 accepts exactly two `KSV-0012` findings, on the two
+  # frozen Part 00/01 teaching seeds. Written only as prose, that acceptance
+  # rots silently the first time a third unhardened manifest lands. This job
+  # makes the list executable and fails in BOTH directions — a new unhardened
+  # Pod spec, or an allowlist entry that no longer applies.
+  runasnonroot-acceptance:
+    name: runAsNonRoot acceptance list
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: azure/setup-helm@v4
+        with: { version: 'v3.16.0' }
+      - uses: azure/setup-kubectl@v4
+        with: { version: 'v1.35.0' }
+      - uses: actions/setup-python@v5
+        with: { python-version: '3.12' }
+      - run: pip install pyyaml
+      - run: python .github/scripts/check-runasnonroot.py
+
+  # ---- Coverage summary ----
+  #
+  # The header of this workflow claims it "writes a human-readable Markdown
+  # summary to the workflow run". Until now it wrote none. This job makes that
+  # true, and deliberately reports WHAT WAS SCANNED rather than a finding
+  # count: the failure this repo actually suffered was a scanner that looked
+  # green because it was pointed at the wrong directory. Coverage is the thing
+  # worth being able to eyeball on every run.
+  scan-summary:
+    name: scan coverage summary
+    needs: [trivy, tfsec, govulncheck, discover-go-modules, runasnonroot-acceptance]
+    if: always()
+    runs-on: ubuntu-latest
+    steps:
+      - name: Write summary
+        env:
+          MODULES: ${{ needs.discover-go-modules.outputs.modules }}
+          TRIVY_RESULT: ${{ needs.trivy.result }}
+          TFSEC_RESULT: ${{ needs.tfsec.result }}
+          GOVULN_RESULT: ${{ needs.govulncheck.result }}
+          NONROOT_RESULT: ${{ needs.runasnonroot-acceptance.result }}
+        run: |
+          set -euo pipefail
+          {
+            echo "## Security scan coverage"
+            echo
+            echo "| Scanner | Scope | Result |"
+            echo "|---|---|---|"
+            echo "| trivy (vuln+secret+misconfig) | whole repo (\`fs\`, \`.\`) | \`${TRIVY_RESULT}\` |"
+            echo "| tfsec | both Terraform trees (recursive) | \`${TFSEC_RESULT}\` |"
+            echo "| govulncheck | every discovered Go module | \`${GOVULN_RESULT}\` |"
+            echo "| runAsNonRoot acceptance | raw manifests + rendered Helm + Kustomize overlays | \`${NONROOT_RESULT}\` |"
+            echo
+            echo "### Go modules scanned"
+            echo
+            printf '%s' "${MODULES:-[]}" | jq -r '.[] | "- `\(.)`"'
+            echo
+            echo "Findings land in the [Security tab]"
+            echo "(https://github.com/${GITHUB_REPOSITORY}/security/code-scanning),"
+            echo "which is the live source of truth. \`SECURITY-SCAN.md\` is the"
+            echo "hand-written triage of which findings are accepted and why —"
+            echo "it is not auto-generated, and does not carry live counts."
+          } >> "$GITHUB_STEP_SUMMARY"
