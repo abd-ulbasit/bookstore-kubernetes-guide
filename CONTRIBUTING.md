@@ -11,8 +11,7 @@ arbiter of truth.
   then the [live site](https://abd-ulbasit.github.io/bookstore-kubernetes-guide/)
   for the actual reading experience.
 - **Where the design rationale lives:** [`docs/adr/`](docs/adr/) for the
-  load-bearing decisions, [`docs/superpowers/specs/`](docs/superpowers/specs/)
-  for the longer-form design docs.
+  load-bearing decisions.
 - **Where the CI is wired:** [`.github/workflows/`](.github/workflows/).
 
 ## Open in Codespaces

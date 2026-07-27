@@ -31,6 +31,5 @@ re-deriving the trade-offs.
 
 ## References
 
-* Link to the longer spec under `docs/superpowers/specs/` if one exists.
 * Link to the relevant chapter(s) in `full-guide/`.
 * Any external docs (RFCs, upstream issues) that informed the call.

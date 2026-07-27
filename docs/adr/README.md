@@ -26,9 +26,9 @@ point at.
 
 Each ADR is short on purpose — long enough to ground a future decision,
 short enough that a senior engineer reads all of them in 15 minutes. See
-[`_template.md`](_template.md) for the boilerplate. The longer-form
-design rationale lives in [`../superpowers/specs/`](../superpowers/specs/);
-ADRs reference those when more detail is needed.
+[`_template.md`](_template.md) for the boilerplate. ADRs are the
+authoritative record of design rationale in this repo — where more detail
+is needed, it belongs in the ADR itself.
 
 ## Cross-reference
 

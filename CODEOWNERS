@@ -20,7 +20,6 @@
 # Design records — review pass treats these as load-bearing. A change to
 # an Accepted ADR is itself a decision and needs an issue first.
 /docs/adr/                       @abd-ulbasit
-/docs/superpowers/               @abd-ulbasit
 
 # Build + dev environment.
 /.devcontainer/                  @abd-ulbasit

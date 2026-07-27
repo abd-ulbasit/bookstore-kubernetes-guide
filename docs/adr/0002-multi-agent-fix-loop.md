@@ -32,9 +32,10 @@ build, with strict role separation:
 * **Fix-loop** — implementer addresses reviewer findings; reviewers
   re-review until both approve.
 
-Specs live under `docs/superpowers/specs/`, plans under
-`docs/superpowers/plans/`. Every Part of the guide was produced by one
-or more dispatches of this pipeline.
+Every Part of the guide was produced by one or more dispatches of this
+pipeline. The specs and plans that drove it were authoring inputs rather
+than reader-facing documentation, and are no longer carried in the tree;
+they remain in the git history.
 
 ## Consequences
 
@@ -42,8 +43,8 @@ or more dispatches of this pipeline.
   Quality at ch.100 mirrors quality at ch.1.
 * **Good:** Subagents are stateless per-task, so failures or drifts don't
   cross-contaminate. The pipeline is observable and rerunnable.
-* **Good:** The spec/plan trail is itself useful documentation — a
-  hiring or contributing reader can see *how* the artifact was built.
+* **Good:** The pipeline leaves an auditable trail. This ADR records how
+  the artifact was built, and the spec/plan history backs it up.
 * **Bad:** Higher token + time cost than a single-agent build. The
   trade is structural quality vs. raw throughput.
 * **Bad:** Spec quality is the bottleneck. A weak spec produces weak
@@ -62,5 +63,6 @@ or more dispatches of this pipeline.
 
 ## References
 
-* `docs/superpowers/specs/` — every Part has a spec doc.
-* `docs/superpowers/plans/` — paired implementation plans.
+* Every Part had a spec doc and a paired implementation plan. Both were
+  removed from the tree once the guide was written; `git log --diff-filter=D
+  -- docs/superpowers/` locates them in the history.

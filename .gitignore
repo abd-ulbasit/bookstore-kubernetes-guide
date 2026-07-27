@@ -8,6 +8,13 @@ package-lock.json
 # Pre-build personal study notes (kept locally; not part of the published guide)
 /old/
 
+# Authoring specs + plans for the generation pipeline. Kept locally as working
+# notes; not part of the published guide. The methodology itself is documented
+# and disclosed in docs/adr/0002-multi-agent-fix-loop.md — this rule only stops
+# the raw generation inputs from being shipped as if they were reader-facing
+# documentation.
+/docs/superpowers/
+
 # Python
 __pycache__/
 *.py[cod]

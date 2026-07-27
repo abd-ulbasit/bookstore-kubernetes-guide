@@ -56,5 +56,4 @@ zero-to-multi-region-production arc.
 
 ## References
 
-* `docs/superpowers/specs/2026-05-19-kubernetes-comprehensive-guide-design.md`
 * `full-guide/README.md` — the guide's home page describes this through-line.
