@@ -18,8 +18,8 @@ jobs:
   helm-lint:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
-      - uses: azure/setup-helm@v4
+      - uses: actions/checkout@v7
+      - uses: azure/setup-helm@v5
         with: { version: 'v3.16.0' }
       - run: |
           helm lint full-guide/examples/bookstore/helm/bookstore
@@ -33,10 +33,10 @@ jobs:
   helm-template-count:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
-      - uses: azure/setup-helm@v4
+      - uses: actions/checkout@v7
+      - uses: azure/setup-helm@v5
         with: { version: 'v3.16.0' }
-      - uses: azure/setup-kubectl@v4
+      - uses: azure/setup-kubectl@v5
         with: { version: 'v1.35.0' }
       - run: |
           COUNT=$(helm template bookstore full-guide/examples/bookstore/helm/bookstore | grep -c '^kind:')
@@ -46,8 +46,8 @@ jobs:
   kustomize-counts:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
-      - uses: azure/setup-kubectl@v4
+      - uses: actions/checkout@v7
+      - uses: azure/setup-kubectl@v5
         with: { version: 'v1.35.0' }
       - run: |
           set -e
@@ -68,8 +68,8 @@ jobs:
           - full-guide/examples/bookstore-platform/terraform-account-baseline
           - full-guide/examples/bookstore-platform/terraform/multi-region
     steps:
-      - uses: actions/checkout@v4
-      - uses: hashicorp/setup-terraform@v3
+      - uses: actions/checkout@v7
+      - uses: hashicorp/setup-terraform@v4
         with: { terraform_version: '1.10.5' }
       - run: terraform -chdir=${{ matrix.tree }} fmt -recursive -check
       - run: terraform -chdir=${{ matrix.tree }} init -backend=false -input=false
@@ -92,8 +92,8 @@ jobs:
           - recommendations
           - search
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-go@v5
+      - uses: actions/checkout@v7
+      - uses: actions/setup-go@v7
         with: { go-version: '1.25' }
       - run: |
           DIR="full-guide/examples/bookstore-platform/app/${{ matrix.service }}"
@@ -111,8 +111,8 @@ jobs:
   link-check:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-python@v5
+      - uses: actions/checkout@v7
+      - uses: actions/setup-python@v7
         with: { python-version: '3.12' }
       - run: |
           python3 - <<'PY'
@@ -142,7 +142,7 @@ jobs:
   leak-scan:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
       - run: |
           set -e
           HITS=$(grep -rniE '/Users/[a-z]|\.colima|on this machine|developers@eliteitteam|@anthropic' full-guide \
@@ -156,8 +156,8 @@ jobs:
     if: failure() && github.event_name == 'schedule'
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/github-script@v7
+      - uses: actions/checkout@v7
+      - uses: actions/github-script@v9
         with:
           script: |
             const { owner, repo } = context.repo;

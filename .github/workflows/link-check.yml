@@ -25,11 +25,11 @@ jobs:
   lychee:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
 
       - name: Cache lychee results
         # Cache between runs so unchanged URLs aren't re-fetched every week.
-        uses: actions/cache@v4
+        uses: actions/cache@v6
         with:
           path: .lycheecache
           key: lychee-${{ github.run_id }}
@@ -59,7 +59,7 @@ jobs:
 
       - name: Open or update rolling issue
         if: env.lychee_exit_code != '0'
-        uses: peter-evans/create-issue-from-file@v5
+        uses: peter-evans/create-issue-from-file@v6
         with:
           title: '[link-check] Broken external links detected'
           content-filepath: ./lychee-report.md

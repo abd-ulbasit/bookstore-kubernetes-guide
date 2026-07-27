@@ -39,7 +39,7 @@ jobs:
   build:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
         with:
           fetch-depth: 0
 
@@ -48,7 +48,7 @@ jobs:
       # mermaid syntax errors — they only show up in the reader's browser as
       # "Syntax error in text". Failing fast here keeps broken diagrams from
       # ever being deployed.
-      - uses: actions/setup-node@v4
+      - uses: actions/setup-node@v7
         with:
           node-version: '20'
       - name: Validate mermaid diagrams
@@ -60,13 +60,13 @@ jobs:
           npm install --silent --no-save mermaid@10.9.1 jsdom
           node .github/scripts/validate-mermaid.mjs full-guide
 
-      - uses: actions/setup-python@v5
+      - uses: actions/setup-python@v7
         with:
           python-version: '3.12'
           cache: 'pip'
       - run: pip install -r requirements.txt
       - run: mkdocs build --strict
-      - uses: actions/upload-pages-artifact@v3
+      - uses: actions/upload-pages-artifact@v5
         if: github.ref == 'refs/heads/main'
         with:
           path: site
@@ -80,7 +80,7 @@ jobs:
       url: ${{ steps.deployment.outputs.page_url }}
     steps:
       - id: deployment
-        uses: actions/deploy-pages@v4
+        uses: actions/deploy-pages@v5
 
   # Rolling failure issue — same pattern as example-trees-check.yml, with one
   # deliberate difference: it fires on push-to-main as well as on schedule,
@@ -97,7 +97,7 @@ jobs:
       contents: read
       issues: write
     steps:
-      - uses: actions/github-script@v7
+      - uses: actions/github-script@v9
         with:
           script: |
             const { owner, repo } = context.repo;
