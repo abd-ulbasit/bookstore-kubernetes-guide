@@ -139,7 +139,7 @@ common causes are:
 
 * The Go benchmarks above re-run on every push to `main` as part of the
   catalog-service test job (see
-  [`.github/workflows/example-trees-check.yml`](../../../../../.github/workflows/example-trees-check.yml)),
+  [`.github/workflows/example-trees-check.yml`](https://github.com/abd-ulbasit/bookstore-kubernetes-guide/blob/main/.github/workflows/example-trees-check.yml)),
   with a `benchstat`-driven comparison to catch regressions ≥10%.
 * The k6 run is *not* part of CI by default — load tests on shared
   runners are noisy and produce false positives. Run it manually before

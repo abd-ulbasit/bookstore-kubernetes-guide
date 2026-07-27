@@ -127,7 +127,8 @@ catalog/
     buckets tuned to 1ms–5s.
   * Plus the standard `go_*` and `process_*` collectors.
 * **Traces** — not yet emitted; OpenTelemetry instrumentation is the
-  next planned change (see the project [CHANGELOG.md](../../../../../CHANGELOG.md)).
+  next planned change (see the project
+  [CHANGELOG.md](https://github.com/abd-ulbasit/bookstore-kubernetes-guide/blob/main/CHANGELOG.md)).
 
 ## Tests + coverage
 
