@@ -199,3 +199,53 @@ jobs:
             echo "hand-written triage of which findings are accepted and why —"
             echo "it is not auto-generated, and does not carry live counts."
           } >> "$GITHUB_STEP_SUMMARY"
+
+  # Rolling failure issue. This workflow already ran weekly, but a weekly job
+  # whose failure nobody is told about is a job that fails quietly: the
+  # 2026-07-20 and 2026-07-27 scheduled runs both went red and neither
+  # produced any signal outside the Actions tab. Same pattern as
+  # example-trees-check.yml; fires on push-to-main as well as on schedule,
+  # since a scan can start failing on either.
+  rolling-failure-issue:
+    needs: [trivy, tfsec, discover-go-modules, govulncheck, runasnonroot-acceptance]
+    if: failure() && github.event_name != 'pull_request'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      issues: write
+    steps:
+      - uses: actions/github-script@v7
+        with:
+          script: |
+            const { owner, repo } = context.repo;
+            const label = 'security-scan-failure';
+            const url = `https://github.com/${owner}/${repo}/actions/runs/${context.runId}`;
+            const body = [
+              `The \`security-scan\` workflow failed (${context.eventName}) in run ${context.runId}.`,
+              ``,
+              `A failing govulncheck matrix job names the affected module in its`,
+              `job title. Triage goes in \`SECURITY-SCAN.md\` — and note that`,
+              `"accepted" there requires a written reason, not a deferral.`,
+              ``,
+              `Run: ${url}`,
+              ``,
+              `Reproduce locally:`,
+              '```',
+              `make scan-go        # govulncheck, every discovered module`,
+              `make scan-trivy     # filesystem vuln + secret + misconfig`,
+              `make scan-tfsec     # Terraform`,
+              '```',
+            ].join('\n');
+            const existing = await github.rest.issues.listForRepo({
+              owner, repo, state: 'open', labels: label,
+            });
+            if (existing.data.length > 0) {
+              await github.rest.issues.createComment({
+                owner, repo, issue_number: existing.data[0].number, body,
+              });
+            } else {
+              await github.rest.issues.create({
+                owner, repo, title: 'security-scan failing',
+                body, labels: [label],
+              });
+            }

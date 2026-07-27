@@ -1,6 +1,17 @@
 name: docs
 
+# The schedule below is not about catching content changes — those arrive on
+# push. It exists because this workflow can break WITHOUT a push: a new
+# mkdocs/Material release, a plugin bump, or an external link going stale can
+# turn `--strict` red on a tree nobody touched. Between 2026-05-23 and
+# 2026-07-27 the build failed on two links and, because `deploy` is
+# `needs: build`, the site silently stopped redeploying for 65 days. Nothing
+# was watching. Now a weekly run plus a rolling failure issue is.
+
 on:
+  schedule:
+    - cron: '0 5 * * 1'    # Mondays 05:00 UTC
+  workflow_dispatch: {}
   push:
     branches: [main]
     paths:
@@ -18,6 +29,7 @@ permissions:
   contents: read
   pages: write
   id-token: write
+  issues: write        # to open / update the rolling failure issue
 
 concurrency:
   group: pages
@@ -69,3 +81,55 @@ jobs:
     steps:
       - id: deployment
         uses: actions/deploy-pages@v4
+
+  # Rolling failure issue — same pattern as example-trees-check.yml, with one
+  # deliberate difference: it fires on push-to-main as well as on schedule,
+  # not on schedule alone. The 65-day outage arrived on a PUSH. Notifying only
+  # on the weekly run would have caught it in at most 7 days instead of 65,
+  # which is better but still lets a dead deploy sit through a working week.
+  # Pull requests are excluded — a failing PR is already visible in its checks,
+  # and filing issues for them would be noise.
+  rolling-failure-issue:
+    needs: [build, deploy]
+    if: failure() && github.event_name != 'pull_request'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      issues: write
+    steps:
+      - uses: actions/github-script@v7
+        with:
+          script: |
+            const { owner, repo } = context.repo;
+            const label = 'docs-build-failure';
+            const url = `https://github.com/${owner}/${repo}/actions/runs/${context.runId}`;
+            const body = [
+              `The \`docs\` workflow failed (${context.eventName}) in run ${context.runId}.`,
+              ``,
+              `**The site does not redeploy while this is failing.** \`deploy\``,
+              `is \`needs: build\`, so a red build silently freezes`,
+              `https://abd-ulbasit.github.io/bookstore-kubernetes-guide/ at whatever`,
+              `was last published — it does not serve a stale-but-warned page, it`,
+              `just stops updating.`,
+              ``,
+              `Run: ${url}`,
+              ``,
+              `Reproduce locally:`,
+              '```',
+              `pip install -r requirements.txt`,
+              `mkdocs build --strict`,
+              '```',
+            ].join('\n');
+            const existing = await github.rest.issues.listForRepo({
+              owner, repo, state: 'open', labels: label,
+            });
+            if (existing.data.length > 0) {
+              await github.rest.issues.createComment({
+                owner, repo, issue_number: existing.data[0].number, body,
+              });
+            } else {
+              await github.rest.issues.create({
+                owner, repo, title: 'docs build failing — site is not redeploying',
+                body, labels: [label],
+              });
+            }
