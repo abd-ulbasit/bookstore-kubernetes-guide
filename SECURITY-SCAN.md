@@ -77,7 +77,17 @@ patched `x/net` requires it.
 `govulncheck ./...` now reports **zero module-level vulnerabilities across
 all 11 Go modules**. Remaining govulncheck output on a developer laptop is
 standard-library findings against whatever local toolchain is installed;
-CI pins Go 1.26.5, which is at or above every current stdlib fix version.
+CI pins Go 1.26.6, which is at or above every current stdlib fix version.
+
+That pin is a maintenance obligation, not a one-time fix. Go 1.26.6 shipped
+fixes for GO-2026-6218 (`net/url`), GO-2026-6090 (`crypto/tls`),
+GO-2026-6089 (`net/http`), GO-2026-6088 (`encoding/xml`), GO-2026-5972
+(`encoding/asn1`) and GO-2026-5026 (`net/http`); on 1.26.5 those six were
+*called* code in the example modules, so all 11 govulncheck jobs exited 3.
+When a future stdlib advisory lands, the fix is to raise this pin — and the
+matching one in `example-trees-check.yml` — to the patch release named in
+govulncheck's `Fixed in:` line. The module `go` directives do not need to
+move with it: they are a floor, and the toolchain supplies the stdlib.
 
 ### 1.2) Secrets — 0
 
