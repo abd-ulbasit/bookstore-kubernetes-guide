@@ -1,0 +1,17 @@
+# Copy to terraform.tfvars and fill in. terraform.tfvars is gitignored.
+
+project_id = "REPLACE-with-a-dedicated-lab-project"
+
+# asia-south1 (Mumbai) is the closest GCP region to Pakistan.
+region = "asia-south1"
+zone   = "asia-south1-a"
+
+cluster_name = "bookstore-lab"
+node_count   = 2
+machine_type = "e2-standard-2"
+use_spot     = true
+
+# Optional: creates a budget ALERT (not a cap). Find it with:
+#   gcloud billing accounts list
+billing_account_id = ""
+budget_amount_usd  = 25
