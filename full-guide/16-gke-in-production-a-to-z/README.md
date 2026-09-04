@@ -1,24 +1,26 @@
 # Part 16 — GKE in production, A to Z
 
-The GCP counterpart to [Part 14 (EKS)](../14-eks-in-production-a-to-z/), which is 17 chapters
-and 94,241 words.
+The GCP counterpart to [Part 14 (EKS)](../14-eks-in-production-a-to-z/), which
+is 17 chapters and 94,241 words.
 
 ## The rule for this Part, which is different from every other Part
 
-> **No chapter in Part 16 is written before its lab has been run against a real cluster,
-> and every command in it is pasted from a terminal that executed it.**
+> **No chapter in Part 16 is written before its lab has been run against a
+> real cluster, and every command in it is pasted from a terminal that
+> executed it.**
 
-Parts 00 to 15 were researched and drafted, then reviewed. That produced a good artifact and it
-produced one specific weakness: nothing in it was executed. Part 16 inverts the order. The lab
-comes first, the chapter is the write-up, and anything that could not be run does not get
-claimed.
+Parts 00 to 15 were researched and drafted, then reviewed. That produced a
+good artifact and it produced one specific weakness: nothing in it was
+executed. Part 16 inverts the order. The lab comes first, the chapter is the
+write-up, and anything that could not be run does not get claimed.
 
-Practically this means Part 16 grows one chapter per lab session and is **incomplete on purpose**
-until the labs are done. A short Part that was executed is worth more than a long one that was
-not, and the difference is checkable by anyone who reads the commands.
+Practically this means Part 16 grows one chapter per lab session and is
+**incomplete on purpose** until the labs are done. A short Part that was
+executed is worth more than a long one that was not, and the difference is
+checkable by anyone who reads the commands.
 
-Each chapter carries a header stating what was run, when, on what cluster version, and what it
-cost:
+Each chapter carries a header stating what was run, when, on what cluster
+version, and what it cost:
 
 ```
 **Executed:** 2026-09-14 · GKE 1.34.x REGULAR · asia-south1-a · 2 x e2-standard-2 spot
@@ -30,20 +32,23 @@ That last line is the one that makes the Part worth reading.
 
 ## Infrastructure
 
-[`examples/gke/terraform/`](../examples/gke/terraform/) — a zonal GKE Standard cluster, spot
-nodes, Workload Identity on, `deletion_protection = false` so teardown actually works, and an
-optional budget alert. `make up`, `make status`, `make down`.
+[`examples/gke/terraform/`](../examples/gke/terraform/) — a zonal GKE Standard
+cluster, spot nodes, Workload Identity on, `deletion_protection = false` so
+teardown actually works, and an optional budget alert. `make up`, `make
+status`, `make down`.
 
-**Applied, verified and destroyed on 2026-09-03** against GKE 1.35.7-gke.1027000 in `asia-south1-a`,
-using `hashicorp/google v6.50.0` and Terraform 1.14.8. Nine of ten checks passed on the first run
-and both failures were defects in this repo, now fixed. See
+**Applied, verified and destroyed on 2026-09-03** against GKE
+1.35.7-gke.1027000 in `asia-south1-a`, using `hashicorp/google v6.50.0` and
+Terraform 1.14.8. Nine of ten checks passed on the first run and both failures
+were defects in this repo, now fixed. See
 [`examples/gke/README.md`](../examples/gke/README.md) for what broke.
 
 ## Chapter plan, mapped to Part 14
 
-Fourteen chapters mirror an EKS chapter. Four have no EKS counterpart because they are the parts
-of GKE that are genuinely different, and those four are the ones worth the most in an interview,
-because they are where "I know Kubernetes" stops being portable.
+Fourteen chapters mirror an EKS chapter. Four have no EKS counterpart because
+they are the parts of GKE that are genuinely different, and those four are the
+ones worth the most in an interview, because they are where "I know
+Kubernetes" stops being portable.
 
 | # | Chapter | Part 14 counterpart | The GCP-specific thing |
 |---|---|---|---|
@@ -65,28 +70,31 @@ because they are where "I know Kubernetes" stops being portable.
 | 16 | Security posture and runtime | 13 | Workload vulnerability scanning, the posture dashboard |
 | 17 | Multi-cluster and DR | 11, 17 | Fleets, Multi Cluster Ingress, Config Sync |
 
-**Chapters 03, 04, 10 and 14 first.** They carry the most interview weight and the least overlap
-with what a single-node k3s already teaches.
+**Chapters 03, 04, 10 and 14 first.** They carry the most interview weight and
+the least overlap with what a single-node k3s already teaches.
 
 ## What this Part buys that the ThinkPad cannot
 
-The k3s box is single-node. Everything below needs more than one node or a cloud control plane,
-which is exactly the gap `18-kubernetes.md` names as unbuyable at home:
+The k3s box is single-node. Everything below needs more than one node or a
+cloud control plane, which is exactly the gap `18-kubernetes.md` names as
+unbuyable at home:
 
 - Cordon, drain, and watch pods reschedule somewhere real
 - A node genuinely disappearing (spot preemption, 30 seconds notice)
 - Zone topology, anti-affinity that can actually be satisfied
 - A managed control plane you do not own and cannot SSH into
-- Cloud IAM meeting Kubernetes RBAC, which is where most real cluster access bugs live
+- Cloud IAM meeting Kubernetes RBAC, which is where most real cluster access
+  bugs live
 - A bill, which is its own lesson
 
 ## The lab order
 
-Four sessions before the chapters get written, roughly three hours each, each ending in `make down`
-and a project verified empty.
+Four sessions before the chapters get written, roughly three hours each, each
+ending in `make down` and a project verified empty.
 
-**L1 is done.** Executed 2026-09-03: apply, verify with `verify.sh`, destroy, confirm nothing left.
-Nine of ten checks passed and both failures were defects in this repo, now fixed. See
+**L1 is done.** Executed 2026-09-03: apply, verify with `verify.sh`, destroy,
+confirm nothing left. Nine of ten checks passed and both failures were defects
+in this repo, now fixed. See
 [`examples/gke/README.md`](../examples/gke/README.md) for what broke.
 
 | Session | What | The thing it teaches that a single-node k3s cannot |
@@ -95,5 +103,6 @@ Nine of ten checks passed and both failures were defects in this repo, now fixed
 | **L3** | Workload Identity end to end: bind a KSA to a GSA, read a GCS bucket with no key on disk | Cloud IAM meeting Kubernetes RBAC, where most real cluster-access bugs live |
 | **L4** | Delete a spot node under a running workload, or wait for a real preemption | A node genuinely disappearing. A homelab node never leaves |
 
-Then [Part 17](../17-ml-platform-on-gke/) picks up with the GPU labs, which need the same cluster
-plus the node pool in [`gpu.tf`](../examples/gke/terraform/gpu.tf).
+Then [Part 17](../17-ml-platform-on-gke/) picks up with the GPU labs, which
+need the same cluster plus the node pool in
+[`gpu.tf`](../examples/gke/terraform/gpu.tf).
