@@ -79,3 +79,21 @@ which is exactly the gap `18-kubernetes.md` names as unbuyable at home:
 - A managed control plane you do not own and cannot SSH into
 - Cloud IAM meeting Kubernetes RBAC, which is where most real cluster access bugs live
 - A bill, which is its own lesson
+
+## The lab order
+
+Four sessions before the chapters get written, roughly three hours each, each ending in `make down`
+and a project verified empty.
+
+**L1 is done.** Executed 2026-09-03: apply, verify with `verify.sh`, destroy, confirm nothing left.
+Nine of ten checks passed and both failures were defects in this repo, now fixed. See
+[`examples/gke/README.md`](../examples/gke/README.md) for what broke.
+
+| Session | What | The thing it teaches that a single-node k3s cannot |
+|---|---|---|
+| **L2** | Deploy the bookstore. Cordon a node, drain it, watch pods reschedule under real load | Drain and reschedule with traffic on it. L1's smoke test had no load |
+| **L3** | Workload Identity end to end: bind a KSA to a GSA, read a GCS bucket with no key on disk | Cloud IAM meeting Kubernetes RBAC, where most real cluster-access bugs live |
+| **L4** | Delete a spot node under a running workload, or wait for a real preemption | A node genuinely disappearing. A homelab node never leaves |
+
+Then [Part 17](../17-ml-platform-on-gke/) picks up with the GPU labs, which need the same cluster
+plus the node pool in [`gpu.tf`](../examples/gke/terraform/gpu.tf).

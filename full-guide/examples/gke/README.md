@@ -105,3 +105,26 @@ label, a 4-replica Deployment spreading across both nodes, the Workload Identity
 answering as `<PROJECT_ID>.svc.id.goog` rather than exposing the node service account,
 PD CSI provisioning with a real read-write round trip, and cordon plus drain rescheduling every
 pod off a node with all 4 replicas staying Ready.
+
+## The GPU pool
+
+[`terraform/gpu.tf`](terraform/gpu.tf) adds a separate GPU node pool for the
+[Part 17](../../17-ml-platform-on-gke/) ML platform labs. It is **off by default**
+(`enable_gpu_pool = false`) and **autoscales from zero**, so the pool can exist permanently and
+cost nothing until a GPU workload lands.
+
+`g2-standard-4` carries one NVIDIA L4 (24 GB), which is the cheapest GCP GPU that serves a 7B
+model at fp16 with room for a KV cache. **L4 does not support MIG**, so the GPU-sharing lab uses
+time-slicing rather than partitioning; A100 and H100 are the MIG-capable parts.
+
+Two things before you enable it. **Check your GPU quota first**, because it caps what can actually
+schedule:
+
+```sh
+gcloud compute regions describe asia-south1 --format="value(quotas)" | tr ';' '\n' | grep -i L4
+```
+
+A brand-new project is often zero; an established one frequently has 1. `gpu_max_nodes` defaults to
+1 to match that, and raising it above quota produces Pending nodes rather than more GPUs. Second, an
+L4 node costs an order of magnitude more than the `e2-standard-2` nodes above, so verify the pool
+scaled back to zero after every session rather than assuming it did.
