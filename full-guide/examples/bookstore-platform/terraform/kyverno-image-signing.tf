@@ -3,9 +3,19 @@
 # verifies images are cosign-signed.
 #
 # Default OFF. Enable with:
-#   enable_image_signing         = true
-#   image_signing_keyless_issuer = "https://token.actions.githubusercontent.com"
-#   image_signing_keyless_subject = "https://github.com/your-org/.+"
+#   enable_image_signing          = true
+#   image_signing_keyless_issuer  = "https://token.actions.githubusercontent.com"
+#   image_signing_keyless_subject = "https://github.com/<ORG>/<REPO>/.github/workflows/<WORKFLOW>.yml@refs/heads/main"
+#   image_signing_image_references = ["ghcr.io/<ORG>/*"]   # your images only
+#
+# The subject is REQUIRED (variable validation fails without it). It is the
+# whole point of keyless verification. The issuer alone says "signed by
+# some GitHub Actions workflow", and anyone can run one of those: an
+# attacker's own repo produces a signature that passes an issuer-only check.
+# Pin the exact workflow file AND ref that builds your images. Kyverno
+# matches `subject` literally (with * and ? wildcards), not as a regex.
+# Even a correct wildcard like https://github.com/<ORG>/* trusts every
+# workflow on every branch of every repo in the org, PR branches included.
 #
 # Why bother:
 #   - Without image signing, your cluster will pull and run ANY image whose
@@ -14,12 +24,15 @@
 #   - With keyless cosign signatures, only images signed by an OIDC identity
 #     matching the configured issuer + subject can run.
 #
-# Default validationFailureAction: Audit. This is deliberate:
+# Default validationFailureAction: Audit. This is deliberate, and it means
+# this policy BLOCKS NOTHING until you change it:
 #   - "Audit" warns in the Kyverno policy-report CRD but DOES NOT BLOCK Pod
 #     creation. Use this until your CI is reliably signing images and you've
 #     verified zero policy-report warnings.
-#   - Flip to "Enforce" later by editing the manifest below (or via Argo CD
-#     if you've moved the policy out of Terraform).
+#   - Flip to "Enforce" with image_signing_validation_failure_action =
+#     "Enforce" (or via Argo CD if you've moved the policy out of
+#     Terraform). Narrow image_signing_image_references first, or every
+#     third-party image in a non-excluded namespace is rejected.
 #
 # Excluded namespaces (kube-system, kyverno, falco, velero, bookstore-
 # platform-system) are skipped because their images aren't signed by you.
@@ -184,7 +197,7 @@ resource "kubectl_manifest" "require_signed_images_policy" {
       }
     }
     spec = {
-      validationFailureAction = "Audit"
+      validationFailureAction = var.image_signing_validation_failure_action
       background              = true
       webhookTimeoutSeconds   = 30
 
@@ -224,25 +237,23 @@ resource "kubectl_manifest" "require_signed_images_policy" {
 
           verifyImages = [
             {
-              imageReferences = ["*"]
+              imageReferences = var.image_signing_image_references
               attestors = [
                 {
                   entries = [
                     {
-                      keyless = merge(
-                        {
-                          issuer = var.image_signing_keyless_issuer
-                        },
-                        trimspace(var.image_signing_keyless_subject) != "" ? {
-                          subject = var.image_signing_keyless_subject
-                        } : {},
-                      )
+                      # Issuer AND subject, always. The variable validation
+                      # guarantees a non-empty subject when this policy exists.
+                      keyless = {
+                        issuer  = var.image_signing_keyless_issuer
+                        subject = var.image_signing_keyless_subject
+                      }
                     },
                   ]
                 },
               ]
-              # Audit mode: a missing signature surfaces as a policy-report
-              # warning instead of a Pod creation rejection.
+              # In Audit mode a missing or mismatched signature surfaces as a
+              # policy-report warning instead of a Pod creation rejection.
               mutateDigest = true
               required     = true
               verifyDigest = true

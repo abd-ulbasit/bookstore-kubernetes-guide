@@ -324,12 +324,13 @@ Installs Falco `4.13.x` with the modern eBPF driver. **PSA exception:** Falco's 
 ### Kyverno image-signing policy
 
 ```hcl
-enable_image_signing          = true
-image_signing_keyless_issuer  = "https://token.actions.githubusercontent.com"
-image_signing_keyless_subject = "https://github.com/your-org/.+"
+enable_image_signing           = true
+image_signing_keyless_issuer   = "https://token.actions.githubusercontent.com"
+image_signing_keyless_subject  = "https://github.com/<ORG>/<REPO>/.github/workflows/<WORKFLOW>.yml@refs/heads/main"
+image_signing_image_references = ["ghcr.io/<ORG>/*"]
 ```
 
-Installs Kyverno `3.3.x` + a `ClusterPolicy` named `require-signed-images` that uses cosign keyless verification. **Default `validationFailureAction: Audit`** — warns in PolicyReports but does NOT block Pod creation. Run for 2-4 weeks, fix every flagged image, THEN flip to `Enforce`. Excluded namespaces: `kube-system`, `kyverno`, `falco`, `velero`, `argocd`, `bookstore-platform-system`.
+Installs Kyverno `3.3.x` + a `ClusterPolicy` named `require-signed-images` that uses cosign keyless verification. **The subject is required** (a variable validation fails without it). With only the issuer, any GitHub Actions workflow in any repository, an attacker's included, produces a passing signature. It is matched literally with `*`/`?` wildcards, **not** as a regex: an earlier example here, `https://github.com/your-org/.+`, could never match. **Default `validationFailureAction: Audit`** (`image_signing_validation_failure_action`) — warns in PolicyReports but does NOT block Pod creation, so until you switch it this policy gates nothing. Run for 2-4 weeks, fix every flagged image, narrow `image_signing_image_references` to your own registry, THEN set it to `Enforce`. Excluded namespaces: `kube-system`, `kyverno`, `falco`, `velero`, `argocd`, `bookstore-platform-system`.
 
 ### Vault + ESO for production secrets
 

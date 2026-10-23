@@ -90,10 +90,10 @@ admission, or trust none.**
      `https://github.com/GITHUB_ORG/REPO/.github/workflows/<NAME>.yml@refs/heads/main`,
      and the issuer is `https://token.actions.githubusercontent.com`.
      (Kyverno's `verifyImages.attestors.entries.keyless.{issuer,subject}`
-     fields encode this.)
+     fields encode this; `subjectRegExp` when you need a pattern.)
   Skipping any link makes the whole chain ornamental. **Verifying digest
   but not identity** lets an attacker who push-by-digest to ECR pass;
-  verifying identity but trusting `subject: ".*"` lets *any* GitHub
+  verifying identity but trusting a match-anything subject lets *any* GitHub
   Actions workflow pass.
 
 - **Keyless means "no long-lived signing key", not "no
@@ -144,15 +144,16 @@ admission, or trust none.**
   `bookstore` namespace (where every image is signed via the new
   workflow) while remaining audit in `kube-system`, `monitoring`, and
   other namespaces with vendor images (Prometheus, KEDA) that may not
-  be signed in a way your `subject:` regexp matches. (c) **full
+  be signed in a way your `subjectRegExp` matches. (c) **full
   enforce** — extend the rule's match expression to all namespaces
   once every image in every namespace either is signed by you or
   matches a separate, vendor-specific verifyImages rule. The chapter
   ships the audit-mode rule and the partial-enforce variant; full
   enforce is a per-cluster judgement call.
 
-The trap to keep in view: **the rule is only as strict as its `subject:`
-regexp**. A regexp of `.*` matches any cosign keyless signature from any
+The trap to keep in view: **the rule is only as strict as its
+`subjectRegExp`** (and a regex placed in the literal `subject` field
+is not strict, it is broken: it matches nothing). A regexp of `.*` matches any cosign keyless signature from any
 workflow — useless. A regexp scoped to your org but not the specific
 workflow lets a malicious *other* workflow in your org sign. A regexp
 scoped to the workflow file but not the branch lets a malicious branch
@@ -354,8 +355,12 @@ spec:
                     # Use a regexp to pin to the specific workflow file
                     # name pattern, the specific repo, AND main. A loose
                     # regexp here is the single biggest verifyImages
-                    # foot-gun.
-                    subject: 'https://github.com/GITHUB_ORG/bookstore/.github/workflows/.+\.yml@refs/heads/main'
+                    # foot-gun. The field matters: `subject` is matched
+                    # LITERALLY (only * and ? wildcards), so a regex in
+                    # `subject` never matches and every image fails.
+                    # Regexes go in `subjectRegExp` (Kyverno 1.13+,
+                    # chart 3.3.x), anchored with ^...$.
+                    subjectRegExp: '^https://github\.com/GITHUB_ORG/bookstore/\.github/workflows/[^/]+\.yml@refs/heads/main$'
                     rekor:
                       # Pin to the public Sigstore Rekor; for a private
                       # Sigstore deployment, point at your instance.
@@ -372,7 +377,7 @@ spec:
           #       - entries:
           #           - keyless:
           #               issuer: 'https://token.actions.githubusercontent.com'
-          #               subject: 'https://github.com/GITHUB_ORG/bookstore/.github/workflows/.+\.yml@refs/heads/main'
+          #               subjectRegExp: '^https://github\.com/GITHUB_ORG/bookstore/\.github/workflows/[^/]+\.yml@refs/heads/main$'
 ```
 
 Read carefully:
@@ -569,13 +574,16 @@ enforce shape and is not necessary for stage 2 to ship.
 
 ## Production notes
 
-> **In production: pin `subject:` regexp to the workflow file pattern
-> + main branch, never `.*`.** A `subject: ".*"` matches any cosign
+> **In production: pin `subjectRegExp` to the workflow file pattern
+> + main branch, never `.*`.** A `subjectRegExp: ".*"` matches any cosign
 > keyless signature on Earth — including a hostile developer who signed
 > a backdoored image with their personal Sigstore identity, then
-> pushed it to your ECR. The Bookstore rule's subject:
-> `https://github.com/GITHUB_ORG/bookstore/\.github/workflows/.+\.yml@refs/heads/main`
-> is the narrowest useful match. Tighter (one workflow file each, no
+> pushed it to your ECR. The Bookstore rule's `subjectRegExp`:
+> `^https://github\.com/GITHUB_ORG/bookstore/\.github/workflows/[^/]+\.yml@refs/heads/main$`
+> is the narrowest useful pattern (anchored, one repo, any workflow file
+> directly under `.github/workflows/`, `main` only). An earlier version
+> of this chapter put that regex in the literal `subject` field, where
+> Kyverno would have rejected every image. Tighter (one workflow file each, no
 > wildcard) is fine; loose is dangerous.
 
 > **In production: run a Rekor monitor.** Subscribing to your Rekor
@@ -678,7 +686,7 @@ spec:
             - entries:
                 - keyless:
                     issuer: 'https://token.actions.githubusercontent.com'
-                    subject: 'https://github.com/GITHUB_ORG/bookstore/\.github/workflows/.+\.yml@refs/heads/main'
+                    subjectRegExp: '^https://github\.com/GITHUB_ORG/bookstore/\.github/workflows/[^/]+\.yml@refs/heads/main$'
                     rekor: { url: 'https://rekor.sigstore.dev' }
           # attestations:                              # stage-3 provenance
           #   - type: 'https://slsa.dev/provenance/v0.2'
@@ -694,7 +702,7 @@ Checklist:
       with `cosign attest --type spdxjson` — SBOM is signed and bound
       to the digest
 - [ ] Kyverno `ClusterPolicy` matches `imageReferences:` to the
-      Bookstore ECR path AND `subject:` to the specific workflow
+      Bookstore ECR path AND `subjectRegExp` to the specific workflow
       file pattern on `main`
 - [ ] `mutateDigest: true` + `verifyDigest: true` + `required: true`
       — tag references get pinned and verified at admission

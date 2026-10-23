@@ -537,8 +537,11 @@ The following checks were performed on each of these signatures:
 ```
 
 The `Subject` is the **OIDC identity** that signed — the specific
-workflow file in your repo. Kyverno verifies against this exact
-subject (or a regex matching your workflow naming convention).
+workflow file and ref in your repo. Kyverno's `subject` field matches
+it literally, with `*` and `?` wildcards; it is **not** a regex (Kyverno
+has a separate `subjectRegExp` field for that). Without a subject, the
+issuer check alone accepts a signature from *any* GitHub Actions
+workflow in *any* repository, including one an attacker controls.
 
 ### 5. Enable + inspect the Kyverno verifyImages policy
 
@@ -549,9 +552,11 @@ Read it end-to-end before running anything.
 In `terraform.tfvars`:
 
 ```hcl
-enable_image_signing          = true
-image_signing_keyless_issuer  = "https://token.actions.githubusercontent.com"
-image_signing_keyless_subject = "https://github.com/<ORG>/<REPO>/.+"  # regex
+enable_image_signing           = true
+image_signing_keyless_issuer   = "https://token.actions.githubusercontent.com"
+# Exact identity; not a regex. Required: validation fails without it.
+image_signing_keyless_subject  = "https://github.com/<ORG>/<REPO>/.github/workflows/build.yml@refs/heads/main"
+image_signing_image_references = ["<REGISTRY>/<ORG>/*"]   # images your CI signs
 ```
 
 Apply:
@@ -606,9 +611,10 @@ kubectl patch clusterpolicy require-signed-images \
   -p '{"spec":{"validationFailureAction":"Enforce"}}'
 ```
 
-Or — better — edit it in Terraform (
-[`kyverno-image-signing.tf`](../examples/bookstore-platform/terraform/kyverno-image-signing.tf)
-line 187) and `terraform apply`. From this point on, any Pod whose
+Or — better — set `image_signing_validation_failure_action = "Enforce"`
+in your tfvars (it feeds
+[`kyverno-image-signing.tf`](../examples/bookstore-platform/terraform/kyverno-image-signing.tf))
+and `terraform apply`, so the next apply does not revert a live patch. From this point on, any Pod whose
 image isn't validly cosign-signed fails admission:
 
 ```text
@@ -903,12 +909,13 @@ spec:
           - resources:
               namespaces: [kube-system, kube-public, kube-node-lease, kyverno, falco, velero, argocd, bookstore-platform-system]
       verifyImages:
-        - imageReferences: ["*"]
+        - imageReferences: ["<REGISTRY>/<ORG>/*"]
           attestors:
             - entries:
                 - keyless:
                     issuer: "https://token.actions.githubusercontent.com"
-                    subject: "https://github.com/<ORG>/.+"
+                    # Exact signer: workflow file + ref. Not a regex.
+                    subject: "https://github.com/<ORG>/<REPO>/.github/workflows/build.yml@refs/heads/main"
           mutateDigest: true
           required: true
           verifyDigest: true

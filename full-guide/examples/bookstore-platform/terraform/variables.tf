@@ -349,9 +349,35 @@ variable "image_signing_keyless_issuer" {
 }
 
 variable "image_signing_keyless_subject" {
-  description = "OIDC subject pattern that must match the signing identity (e.g. https://github.com/your-org/your-repo/.github/workflows/release.yml@refs/heads/main). Empty string disables the subject check (NOT recommended)."
+  description = "The exact signing identity (certificate subject) a signature must carry, e.g. https://github.com/<ORG>/<REPO>/.github/workflows/<WORKFLOW>.yml@refs/heads/main. Required when enable_image_signing = true. NOT a regular expression: Kyverno matches it literally (with * and ? wildcards), so a value like https://github.com/<ORG>/.+ never matches anything. Without a subject, the issuer check alone accepts a signature from ANY GitHub Actions workflow in ANY repository."
   type        = string
   default     = ""
+
+  validation {
+    condition = !var.enable_image_signing || (
+      trimspace(var.image_signing_keyless_subject) != "" &&
+      trimspace(var.image_signing_keyless_subject) != "*" &&
+      !strcontains(var.image_signing_keyless_subject, ".+")
+    )
+    error_message = "enable_image_signing = true requires image_signing_keyless_subject: the exact signing identity, e.g. https://github.com/<ORG>/<REPO>/.github/workflows/<WORKFLOW>.yml@refs/heads/main. It may not be empty or \"*\", and it is not a regex (\".+\" would never match)."
+  }
+}
+
+variable "image_signing_image_references" {
+  description = "Image reference patterns the signature check applies to (Kyverno imageReferences, * and ? wildcards). Default [\"*\"] checks every image in non-excluded namespaces, including third-party images your CI never signed. Narrow it to your registry (e.g. [\"ghcr.io/<ORG>/*\"]) before switching to Enforce, or those images will be rejected."
+  type        = list(string)
+  default     = ["*"]
+}
+
+variable "image_signing_validation_failure_action" {
+  description = "Kyverno validationFailureAction for the signature policy. Audit (default) records failures in PolicyReports and admits the Pod; Enforce rejects it. Audit gates nothing, so plan the switch: run Audit until reports are clean, then set Enforce here rather than patching the live policy."
+  type        = string
+  default     = "Audit"
+
+  validation {
+    condition     = contains(["Audit", "Enforce"], var.image_signing_validation_failure_action)
+    error_message = "image_signing_validation_failure_action must be \"Audit\" or \"Enforce\"."
+  }
 }
 
 variable "kyverno_chart_version" {

@@ -243,7 +243,7 @@ cat examples/bookstore-platform/kustomize/regions/us-east/kustomization.yaml \
 # Stage 3 — what CI proved about THAT digest: Rekor log + Cosign cert
 # (read-only public log; works without any cluster access):
 cosign verify \
-  --certificate-identity-regexp 'https://github.com/GITHUB_ORG/.+/.github/workflows/.+\.yml@.*' \
+  --certificate-identity-regexp '^https://github\.com/GITHUB_ORG/bookstore/\.github/workflows/[^/]+\.yml@refs/heads/main$' \
   --certificate-oidc-issuer 'https://token.actions.githubusercontent.com' \
   AWS_ACCOUNT_ID.dkr.ecr.AWS_REGION.amazonaws.com/bookstore/catalog@sha256:DIGEST-HEX
 # -> the cert identity is the workflow that signed this. THIS is Kyverno's
