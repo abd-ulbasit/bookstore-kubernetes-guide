@@ -44,20 +44,27 @@
 #
 #   3. Two GitHub environments in the repo (Settings -> Environments):
 #
-#        terraform-plan   Used by plan-pr and plan-main. Holds variable
-#                         AWS_ROLE_ARN = the read-only PLAN role.
-#                         Optionally add required reviewers: with them, a
-#                         maintainer approves before any PR's code runs
-#                         with cloud credentials (see "PR plans run PR
-#                         code" below).
-#        production       Used by apply only. Holds variable AWS_ROLE_ARN
-#                         = the APPLY role. Configure: required reviewers,
-#                         deployment branches = main only, and "prevent
-#                         self-review".
+#        terraform-plan   Used by plan-pr and plan-main. Optionally add
+#                         required reviewers: with them, a maintainer
+#                         approves before any PR's code runs with cloud
+#                         credentials (see "PR plans run PR code" below).
+#        production       Used by apply only. Configure: required
+#                         reviewers, deployment branches = main only, and
+#                         "prevent self-review".
 #
-#      Role ARNs are environment variables, not secrets: they are not
-#      sensitive, and scoping them to an environment means the apply role's
-#      ARN is only visible to the job that runs in `production`.
+#      And two REPOSITORY variables (Settings -> Secrets and variables ->
+#      Actions -> Variables). Each is both the role a job assumes and a
+#      Terraform input (see 5):
+#
+#        TF_PLAN_ROLE_ARN    the read-only PLAN role
+#        TF_APPLY_ROLE_ARN   the APPLY role
+#
+#      Role ARNs are not secrets, and these are repository-wide on purpose:
+#      plan-main has to know the apply role's ARN, because eks.tf grants
+#      that ARN cluster-admin and the plan computed there is the one that
+#      is applied. What protects a role is its trust policy (4), which
+#      accepts only a token minted for one environment, plus that
+#      environment's rules. Knowing the ARN gets nobody past either.
 #
 #   4. Two IAM roles, each trusting exactly one environment. When a job
 #      declares `environment:`, GitHub's OIDC `sub` claim names the
@@ -97,8 +104,8 @@
 #      Plan role permissions: read-only AWS access (start from the managed
 #      ReadOnlyAccess policy and remove data-plane reads you do not need),
 #      s3:GetObject + s3:ListBucket on the state bucket/key, and an EKS
-#      access entry with AmazonEKSAdminViewPolicy. Set
-#      `terraform_plan_role_arn` and eks.tf creates that entry. The Helm
+#      access entry with AmazonEKSAdminViewPolicy, which eks.tf creates
+#      from `terraform_plan_role_arn` (set below, see 5). The Helm
 #      provider refreshes releases by reading their Secrets, so the plan
 #      role needs that view. No write anywhere. The plans run with
 #      -lock=false so the role does not even need to write the .tflock
@@ -111,9 +118,28 @@
 #      policy-generation from CloudTrail. Do not leave AdministratorAccess
 #      on it. Note that this tree installs Helm charts and CRDs through
 #      the kubernetes/helm/kubectl providers, so the identity that applies
-#      it is necessarily cluster-admin (eks.tf's creator access entry). That
-#      makes the apply role's trust policy and the production environment's
-#      reviewers the controls that matter most here.
+#      it is necessarily cluster-admin (eks.tf's terraform-apply access
+#      entry, see 5). That makes the apply role's trust policy and the
+#      production environment's reviewers the controls that matter most
+#      here.
+#
+#   5. eks.tf in CI mode. The env block below sets, for every job:
+#
+#        enable_cluster_creator_admin_permissions = false
+#        terraform_apply_role_arn = TF_APPLY_ROLE_ARN  (cluster-admin access
+#                                                      entry; KMS key admin)
+#        terraform_plan_role_arn  = TF_PLAN_ROLE_ARN   (view-only entry)
+#
+#      Do not turn the creator entry back on here. The EKS module does not
+#      record the cluster's creator once: it re-derives "the creator" from
+#      whoever runs each plan. Under this workflow that is the read-only
+#      plan role, so every plan-main would propose replacing the admin
+#      entry with one for the plan role and making the plan role the
+#      administrator of the cluster's KMS key, and approving it would do
+#      exactly that. variables.tf refuses that combination. A cluster the
+#      apply role already created in laptop mode needs its creator entry
+#      renamed in state before the switch (platform README, "GitHub
+#      Actions workflow").
 #
 # PR PLANS RUN PR CODE. `terraform plan` executes provider plugins, data
 # sources (including `external` and `http`) and module code from the PR
@@ -154,6 +180,11 @@ env:
   TF_VERSION: '1.10.5'
   WORKING_DIR: 'full-guide/examples/bookstore-platform/terraform'
   AWS_REGION: ${{ vars.AWS_REGION || 'ap-south-1' }}
+  # eks.tf CI mode (PREREQUISITES 5). Every job plans or applies the same
+  # configuration, so every job gets the same inputs.
+  TF_VAR_enable_cluster_creator_admin_permissions: 'false'
+  TF_VAR_terraform_apply_role_arn: ${{ vars.TF_APPLY_ROLE_ARN }}
+  TF_VAR_terraform_plan_role_arn: ${{ vars.TF_PLAN_ROLE_ARN }}
 
 jobs:
   ##############################################################################
@@ -193,7 +224,7 @@ jobs:
       - name: Configure AWS credentials (read-only plan role)
         uses: aws-actions/configure-aws-credentials@e1253824e5c10ff9df46874f81ed3ec929e19cfd # v6.3.0
         with:
-          role-to-assume: ${{ vars.AWS_ROLE_ARN }}
+          role-to-assume: ${{ vars.TF_PLAN_ROLE_ARN }}
           aws-region: ${{ env.AWS_REGION }}
           audience: sts.amazonaws.com
 
@@ -258,7 +289,7 @@ jobs:
       - name: Configure AWS credentials (read-only plan role)
         uses: aws-actions/configure-aws-credentials@e1253824e5c10ff9df46874f81ed3ec929e19cfd # v6.3.0
         with:
-          role-to-assume: ${{ vars.AWS_ROLE_ARN }}
+          role-to-assume: ${{ vars.TF_PLAN_ROLE_ARN }}
           aws-region: ${{ env.AWS_REGION }}
           audience: sts.amazonaws.com
 
@@ -335,7 +366,7 @@ jobs:
       - name: Configure AWS credentials (apply role)
         uses: aws-actions/configure-aws-credentials@e1253824e5c10ff9df46874f81ed3ec929e19cfd # v6.3.0
         with:
-          role-to-assume: ${{ vars.AWS_ROLE_ARN }}
+          role-to-assume: ${{ vars.TF_APPLY_ROLE_ARN }}
           aws-region: ${{ env.AWS_REGION }}
           audience: sts.amazonaws.com
 

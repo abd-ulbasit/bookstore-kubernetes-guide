@@ -81,13 +81,40 @@ variable "cluster_endpoint_public_access_cidrs" {
 }
 
 variable "enable_cluster_creator_admin_permissions" {
-  description = "Give the identity that runs `terraform apply` a permanent cluster-admin EKS access entry. True by default so a laptop apply can kubectl into the cluster. Under CI the creator is the CI apply role, which this tree needs as cluster-admin anyway (it installs Helm charts and CRDs). Set false only if that role is granted cluster access some other way."
+  description = "Laptop mode. The EKS module gives whoever runs Terraform a cluster-admin access entry and makes them administrator of the cluster's secrets-encryption KMS key. It re-reads that identity on EVERY plan, so this is only stable when one identity runs both plan and apply. True by default for a laptop. CI, where plan and apply run as different roles, must set this false and set terraform_apply_role_arn (see eks.tf)."
   type        = bool
   default     = true
 }
 
+variable "terraform_apply_role_arn" {
+  description = "CI mode. ARN of the IAM role CI uses for `terraform apply` (see .github/workflows/terraform.yml). When set, it gets an explicit, cluster-scoped AmazonEKSClusterAdminPolicy access entry and is always an administrator of the cluster's KMS key, so neither depends on who ran the plan. Requires enable_cluster_creator_admin_permissions = false. Empty = no entry (laptop mode)."
+  type        = string
+  default     = ""
+
+  validation {
+    condition     = var.terraform_apply_role_arn == "" || can(regex("^arn:aws[a-z-]*:iam::[0-9]{12}:role/.+$", var.terraform_apply_role_arn))
+    error_message = "terraform_apply_role_arn must be empty or an IAM role ARN (arn:aws:iam::<12-digit account>:role/<name>)."
+  }
+
+  # With both, the module's creator entry and this one can name the same
+  # principal, and EKS allows one access entry per principal.
+  validation {
+    condition     = var.terraform_apply_role_arn == "" || !var.enable_cluster_creator_admin_permissions
+    error_message = "terraform_apply_role_arn requires enable_cluster_creator_admin_permissions = false. The creator entry follows whoever runs Terraform; the apply-role entry replaces it."
+  }
+
+  # This tree installs Helm charts and CRDs, so whoever applies it must be
+  # cluster-admin. With the creator entry off, the apply-role entry is the
+  # only path this tree provides. (Checked here, not on the creator
+  # variable: two variables validating each other is a dependency cycle.)
+  validation {
+    condition     = var.enable_cluster_creator_admin_permissions || var.terraform_apply_role_arn != ""
+    error_message = "enable_cluster_creator_admin_permissions = false needs terraform_apply_role_arn: the identity that applies this tree must be cluster-admin, and with the creator entry off nothing else grants it."
+  }
+}
+
 variable "terraform_plan_role_arn" {
-  description = "ARN of the read-only IAM role CI uses for `terraform plan` (see .github/workflows/terraform.yml). When set, it gets a cluster-scoped AmazonEKSAdminViewPolicy access entry: plan must read Helm release Secrets to refresh, and nothing more. Empty = no entry."
+  description = "CI mode. ARN of the read-only IAM role CI uses for `terraform plan` (see .github/workflows/terraform.yml). When set, it gets a cluster-scoped AmazonEKSAdminViewPolicy access entry: plan must read Helm release Secrets to refresh, and nothing more. Requires CI mode (creator entry off, terraform_apply_role_arn set). Empty = no entry."
   type        = string
   default     = ""
 
@@ -95,6 +122,26 @@ variable "terraform_plan_role_arn" {
     condition     = var.terraform_plan_role_arn == "" || can(regex("^arn:aws[a-z-]*:iam::[0-9]{12}:role/.+$", var.terraform_plan_role_arn))
     error_message = "terraform_plan_role_arn must be empty or an IAM role ARN (arn:aws:iam::<12-digit account>:role/<name>)."
   }
+
+  # A separate plan role with the creator entry still on is the dangerous
+  # mix: every plan would propose making the plan role the cluster creator
+  # (cluster-admin and KMS key administrator), and an approved apply of
+  # that plan would do it.
+  validation {
+    condition     = var.terraform_plan_role_arn == "" || (!var.enable_cluster_creator_admin_permissions && var.terraform_apply_role_arn != "")
+    error_message = "terraform_plan_role_arn is for CI, where plan and apply run as different roles. Also set enable_cluster_creator_admin_permissions = false and terraform_apply_role_arn; otherwise every plan proposes the plan role as cluster creator."
+  }
+
+  validation {
+    condition     = var.terraform_plan_role_arn == "" || var.terraform_plan_role_arn != var.terraform_apply_role_arn
+    error_message = "terraform_plan_role_arn and terraform_apply_role_arn must be different roles. The plan role runs pull-request code and must stay read-only."
+  }
+}
+
+variable "kms_key_administrators" {
+  description = "Extra IAM principal ARNs to administer the cluster's secrets-encryption KMS key, for example a break-glass role. terraform_apply_role_arn, when set, is always added. If the combined list is empty (laptop mode), the EKS module uses whoever runs Terraform. The key policy also keeps the account-root statement, so IAM policies in this account can still grant key access."
+  type        = list(string)
+  default     = []
 }
 
 variable "system_node_instance_types" {

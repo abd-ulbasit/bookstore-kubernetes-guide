@@ -20,26 +20,54 @@ module "eks" {
   cluster_endpoint_public_access_cidrs = var.cluster_endpoint_public_access_cidrs
   cluster_endpoint_private_access      = true
 
-  # The principal that runs `terraform apply` becomes a cluster-admin. Without
-  # this, the deployer can create the cluster but cannot kubectl into it,
-  # because EKS access entries are now the only auth path (no aws-auth CM).
+  # Who is cluster-admin. This tree installs Helm charts and CRDs through
+  # the kubernetes/helm/kubectl providers, so the identity that APPLIES it
+  # must be cluster-admin (EKS access entries are the only auth path; there
+  # is no aws-auth ConfigMap). Two modes:
   #
-  # This is permanent and follows the identity, not the person: when CI
-  # applies this tree, the CI apply role is the creator, so the CI role is a
-  # standing cluster-admin. This tree needs that (it installs Helm charts
-  # and CRDs through the kubernetes/helm/kubectl providers), which is why
-  # the apply role must be locked to one GitHub environment with required
-  # reviewers. See .github/workflows/terraform.yml.
+  # Laptop (default): enable_cluster_creator_admin_permissions = true. The
+  # module gives a cluster-admin access entry to the identity running
+  # Terraform and makes it administrator of the secrets-encryption KMS key
+  # below. It reads that identity (aws_iam_session_context) on EVERY plan,
+  # not once at creation: whoever runs the next plan is the proposed
+  # creator. That is stable only when one identity runs both plan and apply.
+  #
+  # CI: plan and apply run as different roles. With the creator entry on,
+  # every plan would propose replacing the admin entry with one for the
+  # read-only plan role, handing that role the KMS key, and adding a second
+  # entry for a principal that already has one (EKS rejects that). So CI
+  # sets enable_cluster_creator_admin_permissions = false and
+  # terraform_apply_role_arn: the apply role gets the fixed entry below and
+  # is named as KMS key administrator, whoever runs the plan. The
+  # validations in variables.tf refuse the mixed setups.
+  #
+  # Moving an existing cluster from laptop to CI mode: if the apply role
+  # was already the creator, rename its entry in state first, or the plan
+  # destroys and re-creates the same principal's entry and the create can
+  # race the destroy (README "GitHub Actions workflow").
   enable_cluster_creator_admin_permissions = var.enable_cluster_creator_admin_permissions
 
-  # Optional read-only access for the CI plan role. `terraform plan`
-  # refreshes the Helm releases and Kubernetes objects this tree manages,
-  # and Helm stores release state in Secrets, so the plan role needs a
-  # view-everything policy (AmazonEKSAdminViewPolicy, which includes
-  # Secrets) and nothing more. Anyone who can push a branch can exercise
-  # this role through a PR plan; that is why it gets view, not edit.
   access_entries = {
     for k, v in {
+      # CI apply role: cluster-admin, by ARN, independent of the caller.
+      # The production environment's reviewers and this role's trust
+      # policy are what protect it.
+      terraform-apply = {
+        principal_arn = var.terraform_apply_role_arn
+        policy_associations = {
+          admin = {
+            policy_arn   = "arn:${data.aws_partition.current.partition}:eks::aws:cluster-access-policy/AmazonEKSClusterAdminPolicy"
+            access_scope = { type = "cluster" }
+          }
+        }
+      }
+
+      # CI plan role: read-only. `terraform plan` refreshes the Helm
+      # releases and Kubernetes objects this tree manages, and Helm stores
+      # release state in Secrets, so the plan role needs a view-everything
+      # policy (AmazonEKSAdminViewPolicy, which includes Secrets) and
+      # nothing more. Anyone who can push a branch can exercise this role
+      # through a PR plan; that is why it gets view, not edit.
       terraform-plan = {
         principal_arn = var.terraform_plan_role_arn
         policy_associations = {
@@ -49,8 +77,12 @@ module "eks" {
           }
         }
       }
-    } : k => v if var.terraform_plan_role_arn != ""
+    } : k => v if v.principal_arn != ""
   }
+
+  # Name the KMS key administrators explicitly in CI mode. Left empty, the
+  # module falls back to the caller identity on every plan (see above).
+  kms_key_administrators = distinct(compact(concat([var.terraform_apply_role_arn], var.kms_key_administrators)))
 
   # IRSA = IAM Roles for Service Accounts. Auto-creates the OIDC provider
   # (no separate aws_iam_openid_connect_provider needed).

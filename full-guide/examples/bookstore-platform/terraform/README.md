@@ -89,7 +89,7 @@ CI runs `terraform init -lockfile=readonly`, so a constraint change that is not 
 
 ## 4. Prerequisites
 
-- An AWS account with permission to create VPCs, EKS clusters, IAM roles, KMS keys, SQS queues, and EC2 instances. The principal you run Terraform as becomes the cluster admin, so make it your real working identity, not a throwaway service role.
+- An AWS account with permission to create VPCs, EKS clusters, IAM roles, KMS keys, SQS queues, and EC2 instances. Run from a laptop, the principal you run Terraform as becomes the cluster admin, so make it your real working identity, not a throwaway service role. (CI uses an explicit apply role instead; see "GitHub Actions workflow" in §11.)
 - AWS CLI v2 configured: `aws sts get-caller-identity` must return the expected account.
 - Terraform `>= 1.9.0, < 2.0.0` — `.terraform-version` pins `1.10.5` for `tfenv` / `asdf` users.
 - `kubectl` (any version within ±1 minor of `1.35`).
@@ -381,7 +381,20 @@ Installs HashiCorp Vault `0.30.x` (app version 1.18.x) as a 3-replica Raft clust
 
 ### GitHub Actions workflow
 
-`.github/workflows/terraform.yml` is a template: copy it to your real repo, commit a remote backend first (the workflow refuses to run against local state), and create two GitHub environments, `terraform-plan` and `production`, each with an `AWS_ROLE_ARN` variable. Uses OIDC (no long-lived access keys) with two roles: a read-only plan role for PRs, and an apply role trusted only from `production`. PRs get a speculative plan. On push to `main` it plans again, waits for a `production` reviewer, then applies that saved plan with no re-plan and no `-auto-approve`. Set `terraform_plan_role_arn` so the plan role gets a view-only EKS access entry. Read the header before using it.
+`.github/workflows/terraform.yml` is a template: copy it to your real repo, commit a remote backend first (the workflow refuses to run against local state), create two GitHub environments, `terraform-plan` and `production`, and set two repository variables, `TF_PLAN_ROLE_ARN` and `TF_APPLY_ROLE_ARN`. Uses OIDC (no long-lived access keys) with two roles: a read-only plan role for PRs, and an apply role trusted only from `production`. PRs get a speculative plan. On push to `main` it plans again, waits for a `production` reviewer, then applies that saved plan with no re-plan and no `-auto-approve`. Read the header before using it.
+
+**Laptop mode vs CI mode (`eks.tf`).** By default (`enable_cluster_creator_admin_permissions = true`) the EKS module makes whoever runs Terraform a cluster-admin and the administrator of the cluster's secrets-encryption KMS key. It re-reads that identity on every plan, which is fine when one person plans and applies. Under the workflow, plans run as the read-only plan role, so the workflow sets CI mode for every job: `enable_cluster_creator_admin_permissions = false`, `terraform_apply_role_arn` (an explicit cluster-admin access entry for the apply role, which is also the KMS key administrator) and `terraform_plan_role_arn` (a view-only entry). Add a break-glass role with `kms_key_administrators` if you want one named in the key policy. `variables.tf` refuses the combinations that would hand the plan role cluster-admin.
+
+Switching an existing cluster to CI mode: if it was created in laptop mode by the same apply role, rename the creator's access entry in state first, so the plan sees an unchanged entry instead of deleting and re-creating one for the same principal (EKS allows one entry per principal, and the create can run before the delete):
+
+```bash
+terraform state mv 'module.eks.aws_eks_access_entry.this["cluster_creator"]' \
+                   'module.eks.aws_eks_access_entry.this["terraform-apply"]'
+terraform state mv 'module.eks.aws_eks_access_policy_association.this["cluster_creator_admin"]' \
+                   'module.eks.aws_eks_access_policy_association.this["terraform-apply_admin"]'
+```
+
+If a person created the cluster from a laptop, the first CI apply removes that person's admin entry and KMS administration. Name them in `kms_key_administrators`, and give them an access entry, before switching if they need to keep either.
 
 ### Nightly drift detection
 

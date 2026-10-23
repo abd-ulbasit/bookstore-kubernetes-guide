@@ -327,9 +327,10 @@ aws iam create-role --role-name github-actions-terraform-apply \
   --assume-role-policy-document file://trust-production.json
 
 # Plan role: read-only. Also give it s3:GetObject/ListBucket on the state
-# bucket (plans run with -lock=false, so no lock-file writes), and pass
-# its ARN as terraform_plan_role_arn so eks.tf grants it a view-only EKS
-# access entry (Helm refresh reads release Secrets).
+# bucket (plans run with -lock=false, so no lock-file writes). The
+# workflow passes its ARN to Terraform as terraform_plan_role_arn, and
+# eks.tf grants it a view-only EKS access entry (Helm refresh reads
+# release Secrets).
 aws iam attach-role-policy --role-name github-actions-terraform-plan \
   --policy-arn arn:aws:iam::aws:policy/ReadOnlyAccess
 
@@ -344,32 +345,61 @@ aws iam attach-role-policy --role-name github-actions-terraform-apply \
 
 Two things make the apply role worth this ceremony. First, this tree
 installs Helm charts and CRDs, so the identity that applies it is
-necessarily cluster-admin. `enable_cluster_creator_admin_permissions`
-in `eks.tf` makes the *creator* (under CI, the apply role) a permanent
-cluster-admin access entry. Second, an AWS-admin role that is also
+necessarily cluster-admin. Second, an AWS-admin role that is also
 cluster-admin is the most valuable credential in the account. Its only
 protections are the exact `sub` pin and the environment's reviewers.
 **Avoid** `StringLike "repo:ORG/REPO:*"` on either role: it lets any
 branch, PR or environment assume it.
 
+How the apply role becomes cluster-admin matters too. On a laptop,
+`eks.tf` leaves `enable_cluster_creator_admin_permissions = true` and
+the EKS module grants cluster-admin, plus administration of the
+cluster's secrets-encryption KMS key, to "the creator". The module does
+not record the creator once. It re-reads the caller's identity on
+**every plan**. With two roles, the caller at plan time is the
+read-only plan role, so every post-merge plan would propose replacing
+the admin entry with one for the plan role and making the plan role the
+KMS key's administrator. An approver who approved that plan would hand
+cluster-admin to a role that anyone who can push a branch can use. The
+workflow therefore runs `eks.tf` in **CI mode**:
+`enable_cluster_creator_admin_permissions = false`, and
+`terraform_apply_role_arn` set to the apply role, which gets a fixed
+cluster-admin access entry and is named as the KMS key's administrator,
+whoever runs the plan. `variables.tf` refuses the mixed setups (a plan
+role with the creator entry still on, or the creator entry off with no
+apply role).
+
 ### 3. Configure the GitHub repo
 
 Create two environments in **Settings → Environments**:
 
-| Environment | Protection rules | Variable `AWS_ROLE_ARN` |
-|---|---|---|
-| `terraform-plan` | optional required reviewers (add them if people outside your team can push branches) | the plan role's ARN |
-| `production` | **required reviewers**, deployment branches = `main` only, prevent self-review | the apply role's ARN |
+| Environment | Protection rules |
+|---|---|
+| `terraform-plan` | optional required reviewers (add them if people outside your team can push branches) |
+| `production` | **required reviewers**, deployment branches = `main` only, prevent self-review |
+
+Then two repository variables. Each is the role a job assumes *and* a
+Terraform input: the workflow's `env:` block passes both ARNs to
+`eks.tf` (as `terraform_plan_role_arn` and `terraform_apply_role_arn`)
+together with `enable_cluster_creator_admin_permissions = false`.
 
 ```bash
-# Environment-scoped variables: the apply role's ARN is only visible to the
-# job that runs in `production`. Role ARNs are not secrets.
-gh variable set AWS_ROLE_ARN --env terraform-plan \
+# Repository-wide on purpose: plan-main must know the apply role's ARN,
+# because eks.tf grants that ARN cluster-admin and plan-main's plan is the
+# one that gets applied. Role ARNs are not secrets; the trust policies
+# (one environment each) are what protect the roles.
+gh variable set TF_PLAN_ROLE_ARN \
   -b "arn:aws:iam::<AWS_ACCOUNT_ID>:role/github-actions-terraform-plan"
-gh variable set AWS_ROLE_ARN --env production \
+gh variable set TF_APPLY_ROLE_ARN \
   -b "arn:aws:iam::<AWS_ACCOUNT_ID>:role/github-actions-terraform-apply"
 gh variable set AWS_REGION -b "<REGION>"
 ```
+
+If the cluster already exists and was applied in laptop mode *by the
+apply role*, rename its creator access entry in state before the first
+CI run (platform README, "GitHub Actions workflow"). Otherwise the plan
+deletes and re-creates an access entry for the same principal, and EKS
+can reject the create while the old entry still exists.
 
 The workflow also refuses to run against local state: its "Require a
 remote backend" step fails unless a `backend "s3"` block is committed
@@ -788,10 +818,11 @@ aws iam create-role --role-name github-actions-terraform-apply \
   --assume-role-policy-document file://trust-production.json
 # (sandbox: AdministratorAccess; real accounts: a policy scoped to what the tree creates)
 
-# Environment-scoped variables (create the environments in Settings first;
+# Repository variables (create the environments in Settings first;
 # `production` needs required reviewers + main-only deployment branches).
-gh variable set AWS_ROLE_ARN --env terraform-plan -b "arn:aws:iam::<AWS_ACCOUNT_ID>:role/github-actions-terraform-plan"
-gh variable set AWS_ROLE_ARN --env production     -b "arn:aws:iam::<AWS_ACCOUNT_ID>:role/github-actions-terraform-apply"
+# The workflow assumes these roles and passes both ARNs to eks.tf.
+gh variable set TF_PLAN_ROLE_ARN  -b "arn:aws:iam::<AWS_ACCOUNT_ID>:role/github-actions-terraform-plan"
+gh variable set TF_APPLY_ROLE_ARN -b "arn:aws:iam::<AWS_ACCOUNT_ID>:role/github-actions-terraform-apply"
 gh variable set AWS_REGION -b "<REGION>"
 
 # Trigger the drift check manually.
@@ -812,6 +843,10 @@ Minimal skeleton: the approval-gated apply half of the workflow
 ```yaml
 # .github/workflows/terraform.yml — excerpt
 permissions: {}                      # nothing at workflow level
+env:                                 # eks.tf CI mode, same for every job
+  TF_VAR_enable_cluster_creator_admin_permissions: 'false'
+  TF_VAR_terraform_apply_role_arn: ${{ vars.TF_APPLY_ROLE_ARN }}
+  TF_VAR_terraform_plan_role_arn: ${{ vars.TF_PLAN_ROLE_ARN }}
 
 jobs:
   plan-main:                         # read-only role, saved plan
@@ -821,7 +856,7 @@ jobs:
     outputs: { has_changes: '${{ steps.plan.outputs.has_changes }}' }
     steps:
       # checkout, setup-terraform, configure-aws-credentials
-      #   (role-to-assume: ${{ vars.AWS_ROLE_ARN }}), init -lockfile=readonly
+      #   (role-to-assume: ${{ vars.TF_PLAN_ROLE_ARN }}), init -lockfile=readonly
       - id: plan
         run: |                      # exit 2 = changes; plan text -> job summary
           terraform plan -lock=false -detailed-exitcode -out=tfplan ...
@@ -834,7 +869,8 @@ jobs:
     permissions: { contents: read, id-token: write }
     steps:
       - uses: actions/download-artifact@<SHA>  # same run: no lookup to miss
-      # configure-aws-credentials with the APPLY role, init
+      # configure-aws-credentials with the APPLY role
+      #   (vars.TF_APPLY_ROLE_ARN), init
       - run: terraform apply -input=false tfplan   # no -auto-approve, no re-plan
 ```
 
@@ -842,7 +878,9 @@ CI/CD-readiness checklist (production-shape when all seven are yes):
 
 - [ ] AWS OIDC identity provider created; two roles (read-only plan,
       apply), each trust policy pinned with `StringEquals` to exactly
-      one environment; no `StringLike` wildcards.
+      one environment; no `StringLike` wildcards. `eks.tf` runs in CI
+      mode: creator entry off, the apply role named as cluster-admin and
+      KMS key administrator.
 - [ ] A remote backend is committed, and CI refuses to run without
       one; `.terraform.lock.hcl` is committed and CI inits with
       `-lockfile=readonly`.

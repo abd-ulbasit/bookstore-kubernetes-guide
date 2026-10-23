@@ -28,10 +28,10 @@
 # same command (see DRIFT.md). For the same reason the plan is written to a
 # file and not echoed to the (also public) job log.
 #
-# Credentials: the READ-ONLY plan role, through a third environment,
-# `terraform-drift` (deployment branches: main only; no reviewers, because
-# nobody is awake at 03:00 to approve). Add its sub to the plan role's
-# trust policy:
+# Credentials: the READ-ONLY plan role (repository variable
+# TF_PLAN_ROLE_ARN), through a third environment, `terraform-drift`
+# (deployment branches: main only; no reviewers, because nobody is awake
+# at 03:00 to approve). Add its sub to the plan role's trust policy:
 #   "token.actions.githubusercontent.com:sub": [
 #     "repo:GITHUB_ORG/GITHUB_REPO:environment:terraform-plan",
 #     "repo:GITHUB_ORG/GITHUB_REPO:environment:terraform-drift"
@@ -59,6 +59,11 @@ env:
   TF_VERSION: '1.10.5'
   WORKING_DIR: 'full-guide/examples/bookstore-platform/terraform'
   AWS_REGION: ${{ vars.AWS_REGION || 'ap-south-1' }}
+  # Same eks.tf inputs as terraform.yml (its PREREQUISITES 5), so the
+  # drift check evaluates the configuration CI applies.
+  TF_VAR_enable_cluster_creator_admin_permissions: 'false'
+  TF_VAR_terraform_apply_role_arn: ${{ vars.TF_APPLY_ROLE_ARN }}
+  TF_VAR_terraform_plan_role_arn: ${{ vars.TF_PLAN_ROLE_ARN }}
 
 jobs:
   drift-check:
@@ -97,7 +102,7 @@ jobs:
       - name: Configure AWS credentials (read-only plan role)
         uses: aws-actions/configure-aws-credentials@e1253824e5c10ff9df46874f81ed3ec929e19cfd # v6.3.0
         with:
-          role-to-assume: ${{ vars.AWS_ROLE_ARN }}
+          role-to-assume: ${{ vars.TF_PLAN_ROLE_ARN }}
           aws-region: ${{ env.AWS_REGION }}
           audience: sts.amazonaws.com
 
