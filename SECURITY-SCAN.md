@@ -74,10 +74,39 @@ floor) and were **not** touched; only the vulnerable `golang.org/x/*`
 transitives moved. Its `go` directive rose `1.23.0` → `1.25.0` because the
 patched `x/net` requires it.
 
-`govulncheck ./...` now reports **zero module-level vulnerabilities across
-all 11 Go modules**. Remaining govulncheck output on a developer laptop is
-standard-library findings against whatever local toolchain is installed;
-CI pins Go 1.26.5, which is at or above every current stdlib fix version.
+**Fixed 2026-10-24.** The weekly scan had been red since at least
+2026-10-19: new advisories against modules bumped above, plus
+standard-library fixes in Go 1.26.6 to 1.26.9. Each module moved to the
+*minimum* fixed version, not to latest:
+
+| Advisory | Package | Where | Status |
+|---|---|---|---|
+| GO-2026-6372, -6491, -6492, -6494, -6496, -6498, -6500, -6502, -6503, -6700 | `github.com/rabbitmq/amqp091-go` | `examples/bookstore/app/orders`, `examples/bookstore/app/payments-worker` | **Fixed** — `v1.10.0` → `v1.14.0`. GO-2026-6700 appeared while this pass was in progress and is why the target is v1.14.0, not v1.13.0. |
+| GO-2026-6603, -6610, -6611, -6612, -6617 | `golang.org/x/net` | `examples/bookstore/operator` | **Fixed** — `v0.56.0` → `v0.60.0`. The operator's `go` directive rose `1.25.0` → `1.26.0`, required by that `x/net`. |
+| GO-2026-6629 | `golang.org/x/text` | `examples/bookstore/app/catalog`, `examples/bookstore/app/orders`, `examples/bookstore-platform/app/events` | **Fixed** — `v0.39.0` → `v0.41.0` (the operator gets `v0.42.0` via `x/net`). |
+| Standard library (net/http, crypto/tls, encoding/asn1, net/url, …) | Go toolchain | every module | **Fixed** — CI and every Dockerfile builder `1.26.5` → `1.26.10`. |
+
+`govulncheck ./...` (v1.9.0, Go 1.26.10) reports **no reachable
+vulnerabilities in any of the 11 Go modules** as of 2026-10-24. Remaining
+govulncheck output on a developer laptop is standard-library findings
+against whatever local toolchain is installed.
+
+**What the standard-library verdict actually describes.** govulncheck's
+stdlib result is a statement about the toolchain it ran with, because the
+Go standard library is compiled into each binary. It only describes the
+images readers build if their builder stage uses the same patch release.
+Until 2026-10-24 it did not: CI scanned with Go 1.26.5 while the platform
+`orders` and `payments-worker` images built on `golang:1.22-alpine`
+(end-of-life) and `catalog` on `golang:1.25-alpine`. The old sentence here
+("CI pins Go 1.26.5, which is at or above every current stdlib fix
+version") was wrong on both counts. 1.26.5 was already behind the stdlib
+fixes in 1.26.6 to 1.26.9, and it was not the toolchain that built the
+shipped binaries. Now CI (`GO_VERSION` in `security-scan.yml`) and every
+Dockerfile builder are `1.26.10`, and the `go-toolchain-matches-scan` job
+fails if they drift apart. Trivy's `fs` scan cannot catch this class: it
+reads `go.mod`, not the toolchain inside a builder image. Only a `trivy
+image` scan of the built image (which reads the Go version embedded in the
+binary) would have seen it; see §6.
 
 ### 1.2) Secrets — 0
 

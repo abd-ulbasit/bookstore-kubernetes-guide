@@ -3,7 +3,7 @@
 # Built and referenced by chapters as: bookstore/operator:dev
 # Same pattern as examples/bookstore/app/catalog/Dockerfile.
 
-FROM golang:1.26-alpine AS build
+FROM golang:1.26.10-alpine AS build
 WORKDIR /src
 
 # Cache module downloads separately from source for faster rebuilds.

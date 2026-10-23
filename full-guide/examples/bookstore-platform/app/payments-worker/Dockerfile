@@ -4,7 +4,7 @@
 # No EXPOSE: this is a background worker with no customer-facing HTTP port
 # (the /healthz endpoint binds on PORT but is cluster-internal only).
 
-FROM golang:1.22-alpine AS build
+FROM golang:1.26.10-alpine AS build
 WORKDIR /src
 
 COPY go.mod ./

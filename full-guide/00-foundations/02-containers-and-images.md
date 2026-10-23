@@ -223,7 +223,7 @@ This is the **actual** file at
 # Multi-stage build -> single static binary on distroless (nonroot).
 # Built and referenced by chapters as: bookstore/catalog:dev
 
-FROM golang:1.26-alpine AS build
+FROM golang:1.26.10-alpine AS build
 WORKDIR /src
 
 # Cache module downloads separately from source for faster rebuilds.
@@ -248,9 +248,12 @@ What each line does and *why it is written this way*:
 - **`# syntax=docker/dockerfile:1`** — selects the current BuildKit Dockerfile
   frontend (stable v1 line), enabling modern build features regardless of the
   local Docker version.
-- **`FROM golang:1.26-alpine AS build`** — stage 1, named `build`. A full Go
+- **`FROM golang:1.26.10-alpine AS build`** — stage 1, named `build`. A full Go
   toolchain (on small Alpine) used *only to compile*. Nothing in this stage
-  ships.
+  ships. The tag names an exact patch release, not `1.26`: the Go standard
+  library is compiled *into* the binary, so the toolchain patch decides
+  which stdlib CVEs ship. It is the same version CI's `govulncheck` scans
+  with, and CI fails if the two drift apart.
 - **`WORKDIR /src`** — sets/creates the working directory for subsequent
   commands in this stage.
 - **`COPY go.mod go.sum* ./` then `RUN go mod download`** — copy *only* the

@@ -2,7 +2,7 @@
 # Multi-stage build -> single static binary on distroless (nonroot).
 # Built and referenced as: bookstore-platform/recommendations:dev
 
-FROM golang:1.26-alpine AS build
+FROM golang:1.26.10-alpine AS build
 WORKDIR /src
 
 COPY go.mod go.sum* ./

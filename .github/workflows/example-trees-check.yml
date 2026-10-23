@@ -107,7 +107,8 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
-      # 1.26.5, matching security-scan.yml and the highest `go` directive in
+      # 1.26.10, matching security-scan.yml (GO_VERSION), every Go builder
+      # image in the example Dockerfiles, and the highest `go` directive in
       # the example modules (events, payments-gateway, recommendations and
       # search have required `go 1.26` since the initial commit).
       #
@@ -119,7 +120,7 @@ jobs:
       # need is the honest fix; forcing GOTOOLCHAIN=auto would just restore a
       # pin that does not pin.
       - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
-        with: { go-version: '1.26.5' }
+        with: { go-version: '1.26.10' }
       - run: |
           DIR="full-guide/examples/bookstore-platform/app/${{ matrix.service }}"
           # SKIP when the directory doesn't exist OR exists as a placeholder
