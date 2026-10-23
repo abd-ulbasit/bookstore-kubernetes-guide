@@ -22,8 +22,8 @@
 # rules, none of those files produce a finding, so none of them are
 # allowlisted. The first two entries below are the only findings the
 # pre-audit history produced on 2026-10-24 (30 commits), and both are false
-# positives. The third pins one false positive in a single audit-branch
-# commit (prose, since reworded).
+# positives. The third covers one prose false positive introduced and then
+# reworded on the 2026-10 audit branch.
 
 [extend]
 useDefault = true
@@ -52,11 +52,11 @@ regexes = ['''curl .*-u "\$[A-Z][A-Z0-9_]*:"''']
 description = """Prose in the platform README's "What is in state" table \
 ("...KMS key ARNs, VPC/subnet/SG IDs..."), which the generic-api-key rule \
 reads as key=<value>. Introduced in one commit of the 2026-10 audit branch \
-and reworded in the next, so the entry is pinned to that single commit as \
-well as the rule, file and line shape."""
+and reworded in the next. Pinned to the rule, the file and the exact phrase \
+(no longer present in the tree), not to the commit SHA, so a rebase of the \
+branch does not resurrect the finding."""
 targetRules = ["generic-api-key"]
 condition = "AND"
-commits = ["c2b30c2c20d7e7e615ff44232f5a62e281be3206"]
 paths = ['''^full-guide/examples/bookstore-platform/terraform/README\.md$''']
 regexTarget = "line"
 regexes = ['''KMS key ARNs, VPC/subnet/SG IDs''']

@@ -116,9 +116,10 @@ Trivy's secret scanner.
 The second, independent scanner is **gitleaks**
 ([`secret-scan.yml`](.github/workflows/secret-scan.yml)), which runs on
 every PR and nightly over the **full git history**, not just the tip. On
-2026-10-24 it scanned all 30 commits and found two hits, both false
-positives, each allowlisted in [`.gitleaks.toml`](.gitleaks.toml) and
-pinned to one rule, one file and one line shape. The DEMO-ONLY demo
+2026-10-24 it scanned the 30 pre-audit commits and found two hits, both
+false positives (a third, in prose added during the audit, was reworded),
+each allowlisted in [`.gitleaks.toml`](.gitleaks.toml) and pinned to one
+rule, one file and one line shape. The DEMO-ONLY demo
 passwords and the Stripe-shaped `REPLACE` placeholders produce no finding
 with the default rules, so they are not allowlisted. Local equivalent:
 `make scan-secrets`.
