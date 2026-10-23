@@ -206,10 +206,19 @@ done
 Any extra policy → detach, OR commit it to Terraform if it's now
 permanent.
 
+The loop above is a persistence review, not only tidying up. On the
+platform's own roles the breakglass policy still allows
+`AttachRolePolicy` with any managed policy except the three admin
+equivalents it denies, and an attached policy survives the 1-hour TTL.
+Treat every `AttachRolePolicy` event as a finding until it is matched
+to the incident.
+
 Then review every **trust-policy** change. The breakglass policy can
 still `UpdateAssumeRolePolicy` on the platform's own roles (that is how
 an IRSA lockout gets fixed), and a trust policy that names an outside
-principal is persistence that survives the 1-hour TTL:
+principal is persistence that survives the 1-hour TTL. The two together
+are the worst case: a broad policy attached to a role that an outside
+principal can assume.
 
 ```sh
 jq -r '.Events[] | select(.EventName == "UpdateAssumeRolePolicy") | .Resources[]? | select(.ResourceType=="AWS::IAM::Role") | .ResourceName' \
