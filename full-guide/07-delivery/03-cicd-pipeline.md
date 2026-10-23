@@ -110,15 +110,15 @@ flowchart TD
     sbom["syft SBOM<br/>(SPDX JSON)"]
     sign["Cosign keyless sign<br/>OIDC -&gt; Fulcio cert<br/>-&gt; Rekor log + attest SBOM"]
     pushimg["push image<br/>BY DIGEST to registry"]
-    bump["bump-manifests<br/>kustomize edit set image<br/>name@sha256:digest -&gt; git commit"]
+    bump["bump-manifests<br/>kustomize edit set image<br/>name@sha256:digest -&gt; promotion PR"]
     fail["FAIL the pipeline<br/>(fix dep / base image,<br/>re-run) — nothing signed"]
-    git[("Git repo<br/>kustomize/overlays/prod<br/>(new digest committed)")]
+    git[("Git repo<br/>kustomize/overlays/prod<br/>(PR merged by a human)")]
     argo["Argo CD in-cluster<br/>detects commit -&gt; diff<br/>-&gt; sync -&gt; reconcile"]
 
     push --> bt --> bld --> scan
     scan -- "clean" --> sbom --> sign --> pushimg --> bump --> git
     scan -- "vuln over threshold" --> fail
-    git -. "CI/CD seam: CI commits, CD pulls" .-> argo
+    git -. "CI/CD seam: CI proposes, human merges, CD pulls" .-> argo
 ```
 
 ### Tag-vs-digest and env promotion (ASCII)
@@ -251,7 +251,8 @@ four** services. Per service:
    `…/bookstore-orders@`-with-no-digest → a broken kustomization). An
    artifact-per-leg is the correct cross-matrix fan-in.
 
-**Job `bump-manifests`** — `needs: build-scan-sign-push`, `contents: write`.
+**Job `bump-manifests`** — `needs: build-scan-sign-push`, `contents: write` +
+`pull-requests: write`.
 **This is the CI/CD seam.** It does **not** `kubectl apply`. It
 `download-artifact`s every `digest-*` (`merge-multiple: true`) so it has all
 four real digests, installs a **pinned** kustomize release binary (never the
@@ -263,11 +264,15 @@ Deployment YAML is hand-edited**; it fails loudly if any digest is
 missing/empty rather than writing a broken ref), writing the freshly built,
 **signed digests** into
 [`examples/bookstore/kustomize/overlays/prod/kustomization.yaml`](../examples/bookstore/kustomize/overlays/prod/kustomization.yaml),
-then `git commit` + `git push origin HEAD:main`. **That commit is the deploy
-trigger**: [ch.04](04-gitops-argocd.md)'s in-cluster Argo CD detects the new
-commit on its tracked path and reconciles the prod Application. (A safer
-real-world variant opens a PR to a release branch / separate config repo so a
-human approves prod — see Production notes; the principle is identical.)
+then opens a **pull request** with that one-file change
+(`peter-evans/create-pull-request`). **Merging that PR is the deploy
+trigger**: [ch.04](04-gitops-argocd.md)'s in-cluster Argo CD detects the merge
+commit on its tracked path and reconciles the prod Application. An earlier
+version of this workflow ran `git push origin HEAD:main` instead, so every
+merge reached prod with no reviewer and no staging step, against this
+chapter's own Production notes. The PR makes the human approval real; it
+needs branch protection requiring a review, and the repo setting that lets
+`GITHUB_TOKEN` open PRs (the workflow header lists both).
 
 ### 2. Trace the seam yourself (local approximation)
 
@@ -438,19 +443,21 @@ jobs:
     # NO job-level outputs: (matrix outputs collapse to one leg). Each leg
     # docker build -> trivy(exit-code 1) -> syft -> cosign sign <img>@<DIGEST>
     # -> upload-artifact digest-<SERVICE> (the per-leg fan-in)
-  bump-manifests:                   # THE SEAM: write digest to kustomize, commit (NOT kubectl apply)
+  bump-manifests:                   # THE SEAM: write digest to kustomize, open a PR (NOT kubectl apply)
     needs: build-scan-sign-push
-    permissions: { contents: write }
+    permissions: { contents: write, pull-requests: write }
     # download-artifact pattern: digest-* (merge-multiple) -> PINNED kustomize
-    # -> per-svc: kustomize edit set image <NAME>@sha256:<DIGEST> -> git commit/push -> Argo syncs
+    # -> per-svc: kustomize edit set image <NAME>@sha256:<DIGEST>
+    # -> create-pull-request -> human review + merge -> Argo syncs
 ```
 
 Checklist:
 
 - [ ] CI gates in order: build → vet/lint → image build → **Trivy (exit-code
       1 on HIGH/CRITICAL)** → SBOM → **Cosign keyless** → push **by digest**
-- [ ] CI holds **no cluster credential**; its final step is a **commit** that
-      bumps the kustomize `images:` digest (not `kubectl apply`)
+- [ ] CI holds **no cluster credential**; its final step is a **pull request**
+      that bumps the kustomize `images:` digest (not `kubectl apply`, and not
+      a direct push to `main`)
 - [ ] Images **pinned by digest** in the deployed overlay → Part 05 ch.03
       Kyverno `require-digest`/`verifyImages` becomes **Enforce**-able
 - [ ] Keyless OIDC (`id-token: write`), no long-lived keys; publish path

@@ -3,8 +3,9 @@
 # A COMPLETE, valid GitHub Actions workflow that builds, tests, scans, SBOMs,
 # signs (Cosign keyless / OIDC -> Rekor), and pushes the four Bookstore images
 # BY DIGEST, then bumps the GitOps source (the kustomize prod overlay's
-# `images:` newName/newDigest) and commits — so Argo CD (ch.04) reconciles the
-# new digest. "CI builds, CD deploys, Git is the trigger."
+# `images:` newName/newDigest) in a pull request. A human merges it, and
+# Argo CD (ch.04) reconciles the new digest. "CI builds, CD deploys, Git is
+# the trigger", and for prod the trigger is a reviewed merge.
 #
 # WHERE THIS FILE LIVES vs WHERE IT RUNS. GitHub Actions only executes a
 # workflow that physically sits at `.github/workflows/<name>.yml` in the repo
@@ -42,7 +43,8 @@ on:
 
 # Least-privilege default; jobs widen as needed (build-scan-sign-push needs
 # `id-token: write` for keyless Cosign OIDC and `packages: write` to push to
-# GHCR; bump-manifests needs `contents: write` to commit the digest bump).
+# GHCR; bump-manifests needs `contents: write` + `pull-requests: write` to
+# open the promotion PR).
 permissions:
   contents: read
 
@@ -275,8 +277,21 @@ jobs:
   # ---------------------------------------------------------------------------
   # JOB 3 — bump-manifests: THE CI -> GitOps SEAM. CI does not `kubectl apply`.
   # It writes the freshly-built, signed DIGESTS into the kustomize prod overlay
-  # `images:` block and commits to Git. Argo CD (ch.04) sees the commit and
-  # reconciles — the deploy is a Git commit, not a pipeline step.
+  # `images:` block and opens a PULL REQUEST with that change. Merging the PR
+  # is the deploy; Argo CD (ch.04) sees the merge commit and reconciles.
+  #
+  # Why a PR and not `git push origin HEAD:main` (what this job used to do):
+  # a direct push let every merge to main reach prod with no reviewer and no
+  # staging step, and rollback depended on someone noticing and running
+  # `git revert`. With a PR, a human approves each prod promotion, you can
+  # promote staging first by pointing an earlier job at overlays/staging,
+  # and the PR is the audit record. Three things to set up in YOUR repo:
+  #   - Branch protection / a ruleset on main requiring an approving review,
+  #     so the promotion PR cannot be merged by the bot itself.
+  #   - "Allow GitHub Actions to create and approve pull requests"
+  #     (Settings -> Actions -> General) for the GITHUB_TOKEN to open PRs.
+  #   - PRs opened with GITHUB_TOKEN do not trigger other workflows. If the
+  #     promotion PR must run CI checks, open it with a GitHub App token.
   # ---------------------------------------------------------------------------
   bump-manifests:
     name: bump-manifests (GitOps source -> Argo syncs)
@@ -284,12 +299,10 @@ jobs:
     if: github.event_name == 'push'
     runs-on: ubuntu-latest
     permissions:
-      contents: write          # commit the digest bump back to the repo
+      contents: write          # push the promotion branch
+      pull-requests: write     # open the promotion PR
     steps:
       - uses: actions/checkout@v4
-        with:
-          # Need write access to push the commit back.
-          token: ${{ secrets.GITHUB_TOKEN }}
 
       - name: Download all per-service digest artifacts
         uses: actions/download-artifact@v4
@@ -338,19 +351,24 @@ jobs:
               "bookstore/${svc}=${REG}/bookstore-${svc}@${digest}"
           done
 
-      - name: Commit the digest bump (this is the deploy trigger)
-        run: |
-          git config user.name  "bookstore-ci[bot]"
-          git config user.email "bookstore-ci[bot]@users.noreply.github.com"
-          git add examples/bookstore/kustomize/overlays/prod/kustomization.yaml
-          if git diff --cached --quiet; then
-            echo "No image change — nothing to commit."
-            exit 0
-          fi
-          git commit -m "ci: bump prod images to ${GITHUB_SHA} (signed digests)"
-          # Pushing to `main` is the GitOps trigger: Argo CD detects the new
-          # commit on its tracked branch/path and syncs the prod Application.
-          # (A safer real-world pattern opens a PR to a release branch /
-          # separate config repo so a human approves prod — the chapter's
-          # "promotion dev->staging->prod" + Production-notes discuss this.)
-          git push origin HEAD:main
+      - name: Open the promotion PR (merging it is the deploy trigger)
+        # Creates or updates branch ci/bump-prod-images with the overlay
+        # change and opens (or refreshes) one PR. No change -> no PR.
+        # Pin to a commit SHA in a real repo (Part 15 ch.02).
+        uses: peter-evans/create-pull-request@v8
+        with:
+          branch: ci/bump-prod-images
+          delete-branch: true
+          add-paths: examples/bookstore/kustomize/overlays/prod/kustomization.yaml
+          commit-message: "ci: bump prod images to ${{ github.sha }} (signed digests)"
+          committer: "bookstore-ci[bot] <bookstore-ci[bot]@users.noreply.github.com>"
+          author: "bookstore-ci[bot] <bookstore-ci[bot]@users.noreply.github.com>"
+          title: "Promote ${{ github.sha }} to prod (signed digests)"
+          body: |
+            Pins every Bookstore image in `overlays/prod` to the digest CI just
+            built, scanned (Trivy gate), SBOM-attested and keyless-signed.
+
+            Merging this PR is the production deploy: Argo CD syncs the merge
+            commit. Review the digests, check staging, then merge. To roll
+            back, revert the merge commit.
+          labels: promotion
