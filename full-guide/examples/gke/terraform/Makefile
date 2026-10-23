@@ -14,13 +14,17 @@ init:
 	terraform init -input=false
 
 plan: init
-	terraform plan -input=false -var-file=$(TFVARS)
+	terraform plan -input=false -var-file=$(TFVARS) -out=tfplan
 
+# Applies the SAVED plan that `make plan` just printed, so what you typed
+# "yes" to is exactly what gets created. The old target ran a second,
+# unsaved `apply -auto-approve`, which re-planned after you had approved.
 up: plan
 	@echo ""
 	@echo ">>> This creates billable resources. Nodes bill per second."
-	@read -p ">>> Type 'yes' to apply: " ok && [ "$$ok" = "yes" ]
-	terraform apply -input=false -auto-approve -var-file=$(TFVARS)
+	@read -p ">>> Type 'yes' to apply the plan above: " ok && [ "$$ok" = "yes" ]
+	terraform apply -input=false tfplan
+	@rm -f tfplan
 	@$(MAKE) creds
 
 creds:

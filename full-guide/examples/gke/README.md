@@ -6,7 +6,7 @@ it down.
 ```sh
 cd terraform
 cp terraform.tfvars.example terraform.tfvars   # fill in project_id
-make up        # plan, confirm, create, and point kubectl at it
+make up        # plan, confirm, apply THAT saved plan, point kubectl at it
 ../verify.sh   # prove it actually works
 make down      # destroy. do this every time you stop
 make status    # what exists right now (run this after down, too)
@@ -14,9 +14,9 @@ make status    # what exists right now (run this after down, too)
 
 ## What it creates
 
-Five resources: a VPC, a subnet with secondary ranges for pods and services, a
-zonal GKE Standard cluster, a node pool of spot VMs, and an optional budget
-alert.
+A VPC, a subnet with secondary ranges for pods and services, a zonal GKE
+Standard cluster, a node pool of spot VMs, a dedicated node service account
+with two project role bindings, and an optional budget alert.
 
 ## Decisions that are load-bearing
 
@@ -37,6 +37,25 @@ are node changes.
 
 **Spot nodes.** Much cheaper, reclaimable on 30 seconds notice. Handling
 preemption is a lab.
+
+**A dedicated node service account.** Nodes run as `<cluster_name>-nodes`.
+It holds only `roles/container.defaultNodeServiceAccount` (logs, metrics,
+metadata) and `roles/artifactregistry.reader`, not the Compute Engine
+default service account, which in most projects holds Editor on the whole
+project. The `cloud-platform` OAuth scope stays: scopes are a legacy
+filter, and Google's guidance is a broad scope plus a minimal IAM account.
+Workloads get their own permissions through Workload Identity. Applying
+this needs permission to create service accounts and grant project roles
+(Owner has both), and the IAM API enabled (`gcloud services enable
+iam.googleapis.com`). On an existing lab it replaces the node pools, which
+is a `make down`/`make up` anyway. *This was added after the 2026-09-03
+run below and has not been applied yet; the earlier code ran on the
+default compute SA while its comment said "least privilege".*
+
+**`make up` applies the plan it showed you.** `make plan` saves the plan to
+`tfplan`, and `make up` applies that file after you type `yes`. It used to
+run a second, unsaved `apply -auto-approve`, which planned again after you
+had approved the first plan.
 
 **Logging and monitoring trimmed to `SYSTEM_COMPONENTS`.** The default also
 ships `WORKLOADS`, and Cloud Logging bills per GiB ingested. A chatty lab

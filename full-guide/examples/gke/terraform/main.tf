@@ -14,6 +14,9 @@
 #  4. Logging/monitoring trimmed to SYSTEM_COMPONENTS. The default also ships
 #     WORKLOADS, and Cloud Logging ingestion is billed per GiB; a chatty lab
 #     cluster can out-spend its own nodes.
+#  5. Nodes run as a DEDICATED service account with only the node roles, not
+#     as the Compute Engine default service account (which has Editor on the
+#     project unless your org disabled that grant).
 
 locals {
   labels = {
@@ -47,12 +50,39 @@ resource "google_compute_subnetwork" "lab" {
   }
 }
 
+# Node identity. Every node, and any pod that can reach the metadata server
+# without Workload Identity, acts as this account. The Compute Engine
+# default SA usually holds roles/editor on the whole project, so a node on
+# it is one container escape away from project-wide write. This account
+# gets the minimum a GKE node needs (logs, metrics, metadata:
+# roles/container.defaultNodeServiceAccount) plus read-only image pulls
+# from Artifact Registry in this project. Workloads that need more get it
+# through Workload Identity, never through the node.
+resource "google_service_account" "nodes" {
+  account_id   = "${var.cluster_name}-nodes"
+  display_name = "GKE nodes for ${var.cluster_name} (least privilege)"
+}
+
+resource "google_project_iam_member" "nodes" {
+  for_each = toset([
+    "roles/container.defaultNodeServiceAccount",
+    "roles/artifactregistry.reader",
+  ])
+
+  project = var.project_id
+  role    = each.value
+  member  = "serviceAccount:${google_service_account.nodes.email}"
+}
+
 resource "google_container_cluster" "lab" {
   name     = var.cluster_name
   location = var.zone
 
   # Terraform manages the node pool separately, so the cluster is created with a
-  # throwaway default pool that is immediately removed.
+  # throwaway default pool that is immediately removed. That short-lived pool
+  # runs as the Compute Engine default SA; setting node_config here to change
+  # it would force a cluster replacement on existing labs, for a pool that
+  # exists for a few minutes.
   remove_default_node_pool = true
   initial_node_count       = 1
 
@@ -114,8 +144,12 @@ resource "google_container_node_pool" "primary" {
     # Handling that is a lab exercise, not a problem.
     spot = var.use_spot
 
-    # Least privilege: the node SA gets only what the kubelet needs. Anything a
-    # workload needs comes through Workload Identity instead.
+    # Least privilege comes from the SERVICE ACCOUNT, not the scope. Access
+    # scopes are a legacy, coarse filter; Google's guidance is the broad
+    # cloud-platform scope plus a minimal-IAM service account, which is what
+    # this is. (An earlier comment said "least privilege" here while the
+    # pool ran as the default compute SA, which is the opposite.)
+    service_account = google_service_account.nodes.email
     oauth_scopes = [
       "https://www.googleapis.com/auth/cloud-platform",
     ]
@@ -135,4 +169,7 @@ resource "google_container_node_pool" "primary" {
     auto_repair  = true
     auto_upgrade = true
   }
+
+  # Nodes must not boot before their account can write logs and pull images.
+  depends_on = [google_project_iam_member.nodes]
 }

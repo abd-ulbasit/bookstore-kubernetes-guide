@@ -20,8 +20,14 @@ variable "zone" {
 }
 
 variable "cluster_name" {
-  type    = string
-  default = "bookstore-lab"
+  description = "Cluster name; also the prefix of the node service account id (<cluster_name>-nodes), which GCP limits to 30 characters."
+  type        = string
+  default     = "bookstore-lab"
+
+  validation {
+    condition     = can(regex("^[a-z][a-z0-9-]{1,22}[a-z0-9]$", var.cluster_name))
+    error_message = "cluster_name must be 3-24 characters of lowercase letters, digits and hyphens, starting with a letter and not ending with a hyphen (the node service account id <cluster_name>-nodes must fit in 30)."
+  }
 }
 
 variable "node_count" {

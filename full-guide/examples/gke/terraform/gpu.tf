@@ -67,6 +67,8 @@ resource "google_container_node_pool" "gpu" {
       }
     }
 
+    # Same dedicated node service account as the CPU pool (main.tf).
+    service_account = google_service_account.nodes.email
     oauth_scopes = [
       "https://www.googleapis.com/auth/cloud-platform",
     ]
@@ -97,6 +99,8 @@ resource "google_container_node_pool" "gpu" {
     auto_repair  = true
     auto_upgrade = true
   }
+
+  depends_on = [google_project_iam_member.nodes]
 
   timeouts {
     create = "30m"
