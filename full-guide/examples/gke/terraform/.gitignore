@@ -1,5 +1,5 @@
 .terraform/
-.terraform.lock.hcl
+# .terraform.lock.hcl is committed on purpose (provider versions + hashes).
 terraform.tfvars
 *.tfstate
 *.tfstate.*

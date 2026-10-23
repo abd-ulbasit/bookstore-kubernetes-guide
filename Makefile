@@ -78,14 +78,11 @@ validate-kustomize: ## Asserts dev=45 staging=49 prod=48 manifest counts on the 
 	done
 
 .PHONY: validate-terraform
-validate-terraform: ## terraform fmt -check + validate across every tree.
-	@for tree in \
-		full-guide/examples/bookstore-platform/terraform \
-		full-guide/examples/bookstore-platform/terraform-account-baseline \
-		full-guide/examples/bookstore-platform/terraform/multi-region; do \
+validate-terraform: ## terraform fmt -check + validate across every Terraform root (TF_ROOTS).
+	@for tree in $(TF_ROOTS); do \
 		echo "== $$tree =="; \
 		$(TERRAFORM) -chdir=$$tree fmt -recursive -check; \
-		$(TERRAFORM) -chdir=$$tree init -backend=false -input=false >/dev/null; \
+		$(TERRAFORM) -chdir=$$tree init -backend=false -input=false -lockfile=readonly >/dev/null; \
 		$(TERRAFORM) -chdir=$$tree validate; \
 	done
 

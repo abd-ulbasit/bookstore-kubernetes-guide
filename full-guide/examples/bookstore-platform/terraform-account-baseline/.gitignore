@@ -1,6 +1,6 @@
 # Terraform state and plan artifacts — never commit these.
 .terraform/
-.terraform.lock.hcl
+# .terraform.lock.hcl is committed on purpose (provider versions + hashes).
 *.tfstate
 *.tfstate.*
 *.tfstate.backup

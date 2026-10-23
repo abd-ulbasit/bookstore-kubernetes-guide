@@ -68,6 +68,23 @@ aws eks describe-cluster-versions \
 
 Do not skip versions. EKS only supports N → N+1 upgrades.
 
+### Provider versions and the lock file
+
+`versions.tf` uses range constraints (`~> 5.95`, and `>= 1.19.0, < 2.0.0` for the third-party `gavinbunney/kubectl` provider). A range says what is *allowed*; `.terraform.lock.hcl` records what was *chosen*, together with the registry's hashes for every platform. That file is committed in all four Terraform roots (this tree, `multi-region/`, `../terraform-account-baseline/` and `../../gke/terraform/`).
+
+Why it matters: without the lock file, every `terraform init` resolves the newest version inside the range. Two CI runs a month apart can install different provider builds, and nothing checks the download against a hash anyone reviewed. That matters most for a third-party provider like `gavinbunney/kubectl`, which runs with your AWS credentials and cluster-admin token.
+
+How to bump a provider deliberately:
+
+```bash
+terraform init -upgrade                     # resolve new versions inside the ranges
+terraform providers lock \
+  -platform=linux_amd64 -platform=darwin_arm64   # record hashes for CI and Apple-silicon laptops
+git diff .terraform.lock.hcl                # review exactly what moved
+```
+
+CI runs `terraform init -lockfile=readonly`, so a constraint change that is not matched by a regenerated lock file fails the build instead of resolving silently. On another platform (Intel Mac, Windows, arm64 Linux), `init` checks the registry's `zh:` hashes in the lock file and may add an `h1:` line for your platform; commit it.
+
 ---
 
 ## 4. Prerequisites

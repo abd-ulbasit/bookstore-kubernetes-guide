@@ -26,10 +26,14 @@ venv/
 env/
 
 # Terraform
+# .terraform.lock.hcl is deliberately NOT ignored: it records the exact
+# provider versions and their hashes, so every `terraform init` (laptop or
+# CI) installs the provider builds that were reviewed. See the "Provider
+# versions and the lock file" note in
+# full-guide/examples/bookstore-platform/terraform/README.md section 3.
 **/.terraform/
 **/terraform.tfstate
 **/terraform.tfstate.backup
-**/.terraform.lock.hcl
 **/tfplan
 **/tfplan.binary
 **/tfplan.json

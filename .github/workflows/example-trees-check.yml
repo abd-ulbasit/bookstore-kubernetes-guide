@@ -72,6 +72,7 @@ jobs:
           - full-guide/examples/bookstore-platform/terraform
           - full-guide/examples/bookstore-platform/terraform-account-baseline
           - full-guide/examples/bookstore-platform/terraform/multi-region
+          - full-guide/examples/gke/terraform
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -79,7 +80,11 @@ jobs:
       - uses: hashicorp/setup-terraform@dfe3c3f87815947d99a8997f908cb6525fc44e9e # v4.0.1
         with: { terraform_version: '1.10.5' }
       - run: terraform -chdir=${{ matrix.tree }} fmt -recursive -check
-      - run: terraform -chdir=${{ matrix.tree }} init -backend=false -input=false
+      # -lockfile=readonly: each root commits its .terraform.lock.hcl, and init
+      # must install exactly those provider versions and hashes. If a provider
+      # constraint changes without the lock being regenerated, this fails
+      # instead of silently resolving something new.
+      - run: terraform -chdir=${{ matrix.tree }} init -backend=false -input=false -lockfile=readonly
       - run: terraform -chdir=${{ matrix.tree }} validate
 
   go-services:
