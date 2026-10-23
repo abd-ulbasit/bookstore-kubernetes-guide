@@ -1,0 +1,12 @@
+{
+  "name": "bookstore-guide-ci-scripts",
+  "private": true,
+  "description": "Exact, lockfile-pinned dependencies for validate-mermaid.mjs. mermaid must match the version mkdocs.yml renders with.",
+  "engines": {
+    "node": ">=24"
+  },
+  "dependencies": {
+    "jsdom": "30.1.3",
+    "mermaid": "10.9.1"
+  }
+}

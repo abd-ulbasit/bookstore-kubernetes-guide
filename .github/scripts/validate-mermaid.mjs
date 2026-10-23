@@ -6,11 +6,12 @@
 // browser at view-time, so invalid blocks slip through the build and only
 // surface as "Syntax error in text" to the reader).
 //
-// Run locally:
-//   npm install --no-save mermaid@10.9.1 jsdom
+// Run locally (or `make validate-mermaid`):
+//   npm ci --ignore-scripts --prefix .github/scripts
 //   node .github/scripts/validate-mermaid.mjs full-guide
 //
-// In CI: docs.yml installs mermaid + jsdom in a temp dir and invokes this.
+// In CI: docs.yml does the same. Versions come from package-lock.json next
+// to this file; mermaid there must match the version mkdocs.yml renders with.
 
 import fs from "node:fs";
 import path from "node:path";

@@ -19,11 +19,15 @@ on:
       - 'mkdocs.yml'
       - 'requirements.txt'
       - '.github/workflows/docs.yml'
+      - '.github/scripts/**'
   pull_request:
     branches: [main]
     paths:
       - 'full-guide/**'
       - 'mkdocs.yml'
+      - 'requirements.txt'
+      - '.github/workflows/docs.yml'
+      - '.github/scripts/**'
 
 # Workflow-level default is read-only. Each job is granted only what it
 # needs: `build` runs PR content (markdown, mkdocs plugins, the mermaid
@@ -53,16 +57,20 @@ jobs:
       # mermaid syntax errors — they only show up in the reader's browser as
       # "Syntax error in text". Failing fast here keeps broken diagrams from
       # ever being deployed.
+      # Node 24 LTS. Node 20 reached end-of-life on 2026-04-30.
       - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
         with:
-          node-version: '20'
+          node-version: '24'
       - name: Validate mermaid diagrams
-        # ESM bare-import resolution walks UP from the script file, so
-        # node_modules must live somewhere above the script. Installing at
-        # repo root is the simplest portable layout. node_modules/ is
-        # gitignored so this never pollutes commits.
+        # Dependencies come from .github/scripts/package-lock.json, not from
+        # whatever `npm install jsdom` resolves on the day: `npm ci` installs
+        # exactly the locked tree and fails if package.json and the lock
+        # disagree. --ignore-scripts because this job runs PR content and
+        # no package in the tree needs an install script. ESM bare-import
+        # resolution walks up from the script file, so node_modules next to
+        # the script is found first.
         run: |
-          npm install --silent --no-save mermaid@10.9.1 jsdom
+          npm ci --ignore-scripts --no-audit --no-fund --prefix .github/scripts
           node .github/scripts/validate-mermaid.mjs full-guide
 
       - uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0 # v7.1.0

@@ -48,7 +48,7 @@ build: ## Build the static site into ./site (mkdocs --strict — fails on any wa
 
 .PHONY: clean
 clean: ## Remove build outputs and node_modules.
-	rm -rf site/ node_modules/ /tmp/mkdocs-venv
+	rm -rf site/ node_modules/ .github/scripts/node_modules/ /tmp/mkdocs-venv
 
 ##@ Validation
 
@@ -57,8 +57,8 @@ validate: validate-mermaid validate-helm validate-kustomize validate-terraform v
 
 .PHONY: validate-mermaid
 validate-mermaid: ## Validate every ```mermaid block against the production parser.
-	@command -v $(NODE) >/dev/null || (echo "node not found; install Node 20+" && exit 1)
-	@test -d node_modules/mermaid || $(NPM) install --silent --no-save mermaid@10.9.1 jsdom
+	@command -v $(NODE) >/dev/null || (echo "node not found; install Node 24+" && exit 1)
+	@test -d .github/scripts/node_modules/mermaid || $(NPM) ci --ignore-scripts --no-audit --no-fund --prefix .github/scripts
 	$(NODE) .github/scripts/validate-mermaid.mjs full-guide
 
 .PHONY: validate-helm

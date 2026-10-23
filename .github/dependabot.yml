@@ -22,3 +22,19 @@ updates:
         patterns: ['*']
     commit-message:
       prefix: ci
+
+  # The mermaid validator's lockfile (.github/scripts/package-lock.json).
+  # mermaid itself is held: it must match the version mkdocs.yml renders
+  # with, so it is bumped by hand together with mkdocs.yml.
+  - package-ecosystem: npm
+    directory: /.github/scripts
+    schedule:
+      interval: weekly
+      day: monday
+    ignore:
+      - dependency-name: mermaid
+    groups:
+      validator:
+        patterns: ['*']
+    commit-message:
+      prefix: ci

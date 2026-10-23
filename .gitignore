@@ -4,6 +4,8 @@
 # Node modules (only ever installed locally / in CI for the mermaid validator)
 node_modules/
 package-lock.json
+# ...except the validator's own lockfile, which is what makes `npm ci` exact.
+!.github/scripts/package-lock.json
 
 # Pre-build personal study notes (kept locally; not part of the published guide)
 /old/
