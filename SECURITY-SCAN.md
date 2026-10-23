@@ -1,6 +1,6 @@
 # Security Scan Baseline
 
-**Last hand-verified:** 2026-07-27
+**Last hand-verified:** 2026-10-24 (sections 1.1, 1.2, 2 header, 6); 2026-07-27 (the rest)
 **Scanned by:** [`.github/workflows/security-scan.yml`](.github/workflows/security-scan.yml) (runs weekly + on push to `main`)
 **Local-equivalent commands:** `make scan-trivy scan-terraform scan-go`
 
@@ -266,3 +266,22 @@ each scan:
 * **Future-me** — when the next scanner version surfaces a new finding,
   this page is the place to triage it (real fix vs. add to acceptance
   table).
+
+---
+
+## 6) What each scanner does *not* see
+
+A green scan only covers what the scanner can see. Each control here has a
+blind spot, and the blind spots are where this repo has actually been
+wrong before.
+
+| Control | Gates? | Does not see |
+|---|---|---|
+| **Trivy `fs`** (vuln + secret + misconfig) | No (`exit-code: 0`, report-only) | Anything inside a built image: base-image OS packages, and the Go toolchain compiled into a binary. It reads `go.mod`, not the builder image, so it could not have caught the `golang:1.22` builders (§1.1). It also omits npm/yarn/pnpm devDependencies unless run with `--include-dev-deps`. It reports *any* vulnerable module, reachable or not, which is why it does not gate (on 2026-10-24 it listed dozens of HIGH module CVEs that govulncheck shows are unreachable). |
+| **Trivy `image`** + CycloneDX SBOM | No (report-only) | Only what the example Dockerfiles build. Images readers pull from elsewhere (Helm chart dependencies, operators, the `bitnami/kubectl` steps in the ML pipeline) are not scanned. |
+| **Trivy misconfig on Terraform** | No | Your `*.tfvars` (never committed), so it judges the *defaults*. That is why the DEV defaults in §2.1 fire. Findings on the EKS/VPC trees are raised against upstream `terraform-aws-modules` source, not this repo's files. It also cannot tell whether a control is *correctly scoped*: it does not know whether an IAM statement is too broad for its purpose. |
+| **govulncheck** | **Yes** (the only vulnerability gate) | Non-Go code (Python ML images, nginx, npm). Its standard-library verdict is about `GO_VERSION` only; `go-toolchain-matches-scan` is what ties that to the shipped images. |
+| **gitleaks** (`secret-scan.yml`) | **Yes** | Credentials that match no rule (a plain-word demo password is invisible to it), anything outside git (issues, PR comments, Actions logs, artifacts). It reads history but cannot unpublish it. A file deleted in a later commit, such as the generation specs removed in `d21571d`, is still in history and still public ([ADR 0002](docs/adr/0002-multi-agent-fix-loop.md)). |
+| **host-path-scan** | Yes | Not a secret scanner. It catches workstation traces in prose and nothing else. |
+| **runAsNonRoot acceptance** | Yes | Only `runAsNonRoot`. Other restricted-PSA fields are left to PSA admission at apply time and to Trivy's report-only misconfig scan. |
+| **`terraform validate`** + lock files | Yes | Whether a plan would succeed against a real account. Validation runs with `-backend=false` and no credentials. |
