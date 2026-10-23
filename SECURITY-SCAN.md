@@ -2,7 +2,7 @@
 
 **Last hand-verified:** 2026-07-27
 **Scanned by:** [`.github/workflows/security-scan.yml`](.github/workflows/security-scan.yml) (runs weekly + on push to `main`)
-**Local-equivalent commands:** `make scan-trivy scan-tfsec scan-go`
+**Local-equivalent commands:** `make scan-trivy scan-terraform scan-go`
 
 This document is the **hand-written triage** of the findings the security
 scanners produce against the repo: which are real, which are accepted, and
@@ -99,9 +99,15 @@ control plane*, not a workload. The categories:
 
 ---
 
-## 2) Terraform — tfsec 1.28.14
+## 2) Terraform — measured with tfsec 1.28.14, now scanned by Trivy
 
-Scanner: `tfsec --no-color --soft-fail` on each tree.
+Scanner at the time of this measurement: `tfsec --no-color --soft-fail` on
+two trees. **CI no longer runs tfsec.** The trivy job's `misconfig` scanner
+already evaluates every Terraform root with the same `AVD-*` checks, and
+covers the two roots tfsec never saw (`terraform/multi-region` and
+`examples/gke/terraform`). Per-tree local equivalent: `make scan-terraform`.
+The table below is the 2026-07-27 tfsec measurement, kept because the triage
+under it is still correct; the rule IDs are the same in Trivy.
 
 | Tree | CRITICAL | HIGH | MEDIUM | LOW |
 |---|---:|---:|---:|---:|
@@ -137,7 +143,7 @@ Scanner: `tfsec --no-color --soft-fail` on each tree.
 Zero findings at all severity levels. The baseline tree is the account-wide
 guardrail layer (CloudTrail, GuardDuty, Security Hub, IAM Access Analyzer);
 it provisions controls, not workloads, so the surface for misconfig
-findings is much smaller. Worth noting: tfsec doesn't validate that the
+findings is much smaller. Worth noting: no misconfig scanner validates that the
 *controls themselves* are correctly scoped — that's a separate review pass.
 
 ---

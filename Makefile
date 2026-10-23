@@ -105,18 +105,31 @@ validate-links: ## mkdocs build --strict (validates every internal link in the g
 ##@ Security
 
 .PHONY: scan
-scan: scan-trivy scan-tfsec scan-go ## Run every security scanner; populates SECURITY-SCAN.md material.
+scan: scan-trivy scan-terraform scan-go ## Run every security scanner; populates SECURITY-SCAN.md material.
 
 .PHONY: scan-trivy
 scan-trivy: ## Trivy filesystem scan (vulnerabilities + secrets + misconfigs).
 	@command -v trivy >/dev/null || (echo "trivy not found; brew install trivy" && exit 1)
-	trivy fs --severity HIGH,CRITICAL --scanners vuln,secret,misconfig .
+	trivy fs --severity HIGH,CRITICAL --scanners vuln,secret,misconfig --skip-dirs '**/.terraform' .
 
-.PHONY: scan-tfsec
-scan-tfsec: ## tfsec across all Terraform trees.
-	@command -v tfsec >/dev/null || (echo "tfsec not found; brew install tfsec" && exit 1)
-	tfsec full-guide/examples/bookstore-platform/terraform
-	tfsec full-guide/examples/bookstore-platform/terraform-account-baseline
+# The four Terraform roots, one report each. CI does not run this separately:
+# `scan-trivy` (and the CI trivy job) already evaluates every root as part of
+# the whole-repo misconfig scan. This target exists so a per-tree report is
+# one command away when you are working on one tree. It replaced a tfsec
+# target that only covered two of the four roots.
+TF_ROOTS := \
+	full-guide/examples/bookstore-platform/terraform \
+	full-guide/examples/bookstore-platform/terraform-account-baseline \
+	full-guide/examples/bookstore-platform/terraform/multi-region \
+	full-guide/examples/gke/terraform
+
+.PHONY: scan-terraform
+scan-terraform: ## Trivy misconfig scan of each Terraform root separately.
+	@command -v trivy >/dev/null || (echo "trivy not found; brew install trivy" && exit 1)
+	@for tree in $(TF_ROOTS); do \
+		echo "== $$tree =="; \
+		trivy config --severity HIGH,CRITICAL --skip-dirs '**/.terraform' "$$tree"; \
+	done
 
 .PHONY: scan-go
 scan-go: ## govulncheck across every Go module under full-guide/examples/.

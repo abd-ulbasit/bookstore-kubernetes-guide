@@ -56,27 +56,17 @@ jobs:
           sarif_file: 'trivy-vuln.sarif'
           category: trivy
 
-  # ---- Terraform-specific scanning ----
-  tfsec:
-    name: tfsec (Terraform misconfig)
-    runs-on: ubuntu-latest
-    strategy:
-      fail-fast: false
-      matrix:
-        tree:
-          - full-guide/examples/bookstore-platform/terraform
-          - full-guide/examples/bookstore-platform/terraform-account-baseline
-    steps:
-      - uses: actions/checkout@v7
-      - uses: aquasecurity/tfsec-sarif-action@v0.1.4
-        with:
-          working_directory: ${{ matrix.tree }}
-          sarif_file: tfsec-${{ strategy.job-index }}.sarif
-      - uses: github/codeql-action/upload-sarif@v4
-        if: always()
-        with:
-          sarif_file: tfsec-${{ strategy.job-index }}.sarif
-          category: tfsec-${{ strategy.job-index }}
+  # ---- Terraform ----
+  #
+  # There is deliberately no separate Terraform scanner job. The `trivy` job
+  # above runs the `misconfig` scanner over the whole repo, which evaluates
+  # every Terraform root (EKS platform, account baseline, multi-region, GKE)
+  # with the same AVD-AWS-*/AVD-GCP-* checks tfsec used to run. tfsec's
+  # checks were folded into Trivy, and tfsec has had no release since
+  # v1.28.14 (May 2025).
+  # The tfsec job this replaced covered only two of the four roots, and its
+  # action installed tfsec `latest` inside an unpinned Dockerfile, so even a
+  # SHA-pinned action would not have pinned the scanner.
 
   # ---- Go vulnerability scan (every module under examples/) ----
   #
@@ -166,7 +156,7 @@ jobs:
   # worth being able to eyeball on every run.
   scan-summary:
     name: scan coverage summary
-    needs: [trivy, tfsec, govulncheck, discover-go-modules, runasnonroot-acceptance]
+    needs: [trivy, govulncheck, discover-go-modules, runasnonroot-acceptance]
     if: always()
     runs-on: ubuntu-latest
     steps:
@@ -174,7 +164,6 @@ jobs:
         env:
           MODULES: ${{ needs.discover-go-modules.outputs.modules }}
           TRIVY_RESULT: ${{ needs.trivy.result }}
-          TFSEC_RESULT: ${{ needs.tfsec.result }}
           GOVULN_RESULT: ${{ needs.govulncheck.result }}
           NONROOT_RESULT: ${{ needs.runasnonroot-acceptance.result }}
         run: |
@@ -184,8 +173,7 @@ jobs:
             echo
             echo "| Scanner | Scope | Result |"
             echo "|---|---|---|"
-            echo "| trivy (vuln+secret+misconfig) | whole repo (\`fs\`, \`.\`) | \`${TRIVY_RESULT}\` |"
-            echo "| tfsec | both Terraform trees (recursive) | \`${TFSEC_RESULT}\` |"
+            echo "| trivy (vuln+secret+misconfig) | whole repo (\`fs\`, \`.\`), incl. all four Terraform roots | \`${TRIVY_RESULT}\` |"
             echo "| govulncheck | every discovered Go module | \`${GOVULN_RESULT}\` |"
             echo "| runAsNonRoot acceptance | raw manifests + rendered Helm + Kustomize overlays | \`${NONROOT_RESULT}\` |"
             echo
@@ -207,7 +195,7 @@ jobs:
   # example-trees-check.yml; fires on push-to-main as well as on schedule,
   # since a scan can start failing on either.
   rolling-failure-issue:
-    needs: [trivy, tfsec, discover-go-modules, govulncheck, runasnonroot-acceptance]
+    needs: [trivy, discover-go-modules, govulncheck, runasnonroot-acceptance]
     if: failure() && github.event_name != 'pull_request'
     runs-on: ubuntu-latest
     permissions:
@@ -233,7 +221,7 @@ jobs:
               '```',
               `make scan-go        # govulncheck, every discovered module`,
               `make scan-trivy     # filesystem vuln + secret + misconfig`,
-              `make scan-tfsec     # Terraform`,
+              `make scan-terraform # Terraform roots, one at a time`,
               '```',
             ].join('\n');
             const existing = await github.rest.issues.listForRepo({
