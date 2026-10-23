@@ -6,10 +6,11 @@
 #                      namespaces + the right to create/delete tenants. SMALL
 #                      group; auditable. Maps in production to a Keycloak group
 #                      that requires step-up auth (13.04 — humans only).
-#   platform-operator  Day-to-day platform team: read everything; write the
-#                      cluster-wide platform stack (Crossplane XRDs/
-#                      Compositions, Argo CD root Applications, the platform-
-#                      base namespaces). CANNOT delete a tenant ns.
+#   platform-operator  Day-to-day platform team: read everything (Secrets
+#                      included, see the rule); write the cluster-wide
+#                      platform stack (Crossplane XRDs/Compositions, Argo CD
+#                      root Applications, the platform-base namespaces).
+#                      CANNOT delete a tenant ns.
 #   tenant-admin       Per-tenant role REFERENCE: bound by the Crossplane
 #                      Composition (13.02) inside each `bookstore-platform-
 #                      <TENANT>` ns. Has full namespace control of its OWN ns
@@ -39,13 +40,23 @@ metadata:
     app.kubernetes.io/part-of: bookstore-platform
     bookstore-platform.example.com/role: admin
 rules:
-  # Full access to the platform-scope namespaces and the per-tenant pattern.
-  # NOT a cluster wildcard — break-glass with bounded blast radius.
+  # This rule IS a cluster wildcard: every verb on every resource in every
+  # API group. It is exactly as powerful as the built-in `cluster-admin`.
+  # (An earlier comment here said "NOT a cluster wildcard"; the rule never
+  # matched that claim.) A ClusterRole cannot limit its own scope. The
+  # binding decides how far these rules reach:
+  #   - RoleBinding in namespace X       -> full control of X only.
+  #   - ClusterRoleBinding               -> full control of the whole
+  #                                         cluster, including creating and
+  #                                         deleting tenant namespaces, which
+  #                                         are cluster-scoped and need it.
+  # So the "bounded blast radius" of break-glass comes from the binding and
+  # the gate in front of it (13.04: humans only, step-up auth, audited), not
+  # from this rule. Treat every ClusterRoleBinding to this role as a
+  # cluster-admin grant.
   - apiGroups: ["*"]
     resources: ["*"]
     verbs: ["*"]
-    # narrowed by aggregation/namespace via downstream RoleBindings;
-    # ClusterRoleBindings to this should be exceptional.
 ---
 apiVersion: rbac.authorization.k8s.io/v1
 kind: ClusterRole
@@ -55,7 +66,13 @@ metadata:
     app.kubernetes.io/part-of: bookstore-platform
     bookstore-platform.example.com/role: operator
 rules:
-  # Read everything (debugging / dashboards).
+  # Read everything (debugging / dashboards). "Everything" includes Secrets
+  # in every namespace the binding reaches: a wildcard cannot exclude one
+  # resource, and the core API group is part of "*". Bound with a
+  # ClusterRoleBinding, this role reads every tenant's Secrets. If the
+  # platform team should not, replace this rule with an explicit list of
+  # resources (or bind the built-in `view` ClusterRole, which omits
+  # Secrets) and grant Secret reads per namespace.
   - apiGroups: ["*"]
     resources: ["*"]
     verbs: ["get", "list", "watch"]
@@ -73,7 +90,9 @@ rules:
   - apiGroups: [""]
     resources: ["configmaps", "secrets", "services", "serviceaccounts"]
     verbs: ["get", "list", "watch", "create", "update", "patch"]
-    # NB: no delete on Secrets — production-shape audit lane.
+    # No delete on these four, Secrets included. That stops casual
+    # deletion. It is not a confidentiality control: the read rule above
+    # already exposes every Secret, and `update` can overwrite one.
 ---
 apiVersion: rbac.authorization.k8s.io/v1
 kind: ClusterRole
