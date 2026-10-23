@@ -1,6 +1,6 @@
 # Drift Runbook
 
-You got an alert from the nightly drift check. **`terraform plan` shows changes you didn't apply.** What now?
+You got an alert from the nightly drift check. **`terraform plan -refresh-only` shows that real resources no longer match state.** What now?
 
 This runbook walks through the triage. Total time when things are quiet: 5 minutes. Total time when a junior cleared out something important from the console: 30-60 minutes.
 
@@ -8,21 +8,32 @@ This runbook walks through the triage. Total time when things are quiet: 5 minut
 
 ## Step 1 — Read the diff
 
+The drift issue lists resource **addresses** only. Plan output is never
+posted to the issue, because attribute values do not belong in a public
+issue. Reproduce the detail locally, with the read-only plan role:
+
 ```bash
 cd examples/bookstore-platform/terraform
-terraform plan -detailed-exitcode
+terraform plan -refresh-only -detailed-exitcode
 ```
 
 Exit codes:
-- `0` — no changes. (The alert is stale; close the issue.)
+- `0` — no drift. (The alert is stale; close the issue.)
 - `1` — plan errored. (Provider auth, network, syntax. Different problem.)
-- `2` — changes detected. (This runbook.)
+- `2` — drift detected. (This runbook.)
 
-Look at the **resource addresses** in the diff. Group them by:
+`-refresh-only` compares **state** with **the real cloud** and ignores the
+`.tf` files. That is what makes exit code `2` mean drift and not "someone
+merged code that has not been applied yet". A plain `terraform plan` mixes
+both. Run it only after you understand the drift (Step 3), to see what
+reconciling would do.
 
-1. **Things being created** — something exists in `.tf` that's not in AWS.
-2. **Things being destroyed** — something exists in AWS that's not in `.tf`.
-3. **Things being modified** — attribute drift on an existing resource.
+Look at the **resource addresses** in the diff ("Objects have changed
+outside of Terraform"). Group them by:
+
+1. **Deleted outside Terraform** — in state, gone from AWS. A normal plan would re-create it.
+2. **Unmanaged** — exists in AWS but not in state or `.tf`. `-refresh-only` cannot see these; that is `driftctl`'s job (Part 14 ch.07).
+3. **Modified** — attribute drift on an existing resource.
 
 Each group has a different remediation.
 
@@ -64,6 +75,7 @@ Most common. Someone opened a port in the console because the docs were stale; n
 1. Edit the `.tf` file to express the desired state (the way it is now in AWS).
 2. `terraform plan` — should show zero diff.
 3. Commit + open a PR. CI re-runs the plan; merge when green.
+4. Record the accepted values in state: `terraform apply -refresh-only`, with the apply role. Since the code already matches, the post-merge plan has no changes and the apply job does not run, so state keeps the old values and the nightly `-refresh-only` check would keep reporting the same drift.
 
 ### 3b — The change is bad. Roll it back via Terraform.
 
@@ -106,7 +118,7 @@ After the import, `terraform plan` should show zero diff (or only attribute drif
 
 After remediation:
 
-1. Re-run `terraform plan -detailed-exitcode`. Confirm exit code 0.
+1. Re-run `terraform plan -refresh-only -detailed-exitcode`. Confirm exit code 0.
 2. Update the nightly drift alert's GitHub issue with the root cause + the fix.
 3. **If the drift was caused by a human console action**, decide:
     - Is the console action documented anywhere? If not, document it.

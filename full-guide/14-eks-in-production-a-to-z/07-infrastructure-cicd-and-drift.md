@@ -3,14 +3,14 @@
 > **Plan-on-PR, apply-on-merge** via GitHub Actions with **OIDC trust**
 > (no long-lived AWS access keys) is the production CI/CD shape every
 > EKS Terraform tree should reach within its first month; the nightly
-> `terraform plan -detailed-exitcode` drift check + the "someone
+> `terraform plan -refresh-only -detailed-exitcode` drift check + the "someone
 > changed it in the console" reconciliation runbook are what keep
 > the state in code matching the state in cloud.
 
 **Estimated time:** ~30 min read · ~90 min hands-on
 **Prerequisites:** [Part 14 ch.01](./01-terraform-state-in-production.md) — remote state with locking required for CI · [Part 14 ch.02](./02-eks-cluster-lifecycle.md) — upgrade flow that CI must drive · [Part 12 ch.01](../07-delivery/04-gitops-argocd.md) — plan-on-PR pattern from app delivery
 
-**You'll know after this:** • configure GitHub Actions with OIDC trust to AWS (no long-lived access keys) · • implement the plan-on-PR, apply-on-merge shape every EKS Terraform tree should reach within its first month · • run nightly `terraform plan -detailed-exitcode` drift checks and act on exit code 2 · • follow the reconciliation runbook when "someone changed it in the console" · • debug a stuck CI apply by inspecting the S3 lock and recovering safely
+**You'll know after this:** • configure GitHub Actions with OIDC trust to AWS (no long-lived access keys) · • implement the plan-on-PR, apply-on-merge shape every EKS Terraform tree should reach within its first month · • run nightly `terraform plan -refresh-only -detailed-exitcode` drift checks and act on exit code 2 · • follow the reconciliation runbook when "someone changed it in the console" · • debug a stuck CI apply by inspecting the S3 lock and recovering safely
 
 <!-- tags: terraform, ci-cd, gitops, drift, cloud -->
 
@@ -55,8 +55,9 @@ to assume one of two IAM roles, a read-only plan role or an apply
 role, each trusted only from its own GitHub environment. No AWS
 access keys are ever stored in GitHub Secrets. Drift detection ships under
 [`drift-check/`](../examples/bookstore-platform/terraform/drift-check/):
-a nightly workflow runs `terraform plan -detailed-exitcode` and opens
-a deduplicated GitHub issue on any non-zero diff.
+a nightly workflow runs `terraform plan -refresh-only -detailed-exitcode`
+with the read-only role and opens a deduplicated GitHub issue listing
+the drifted resource addresses (never the plan output).
 
 This chapter walks the **why and the wiring**: why OIDC instead of
 long-lived keys, the five-pattern landscape (laptop / Jenkins /
@@ -175,11 +176,11 @@ token actually carries.)
 
 | Pattern | Tool | When |
 |---|---|---|
-| Scheduled `terraform plan -detailed-exitcode` | GitHub Actions cron / Jenkins | The simplest and most universal; the Bookstore Platform's `drift-check/nightly-drift.yml` ships this. |
+| Scheduled `terraform plan -refresh-only -detailed-exitcode` | GitHub Actions cron / Jenkins | The simplest and most universal; the Bookstore Platform's `drift-check/nightly-drift.yml` ships this. |
 | `driftctl` | OSS CLI, ex-CloudSkiff | Stronger because it scans the cloud for resources Terraform doesn't manage at all — catches the "someone created a resource by hand" case. |
 | AWS Config + custom rules | AWS Config service | Cloud-native; useful when the org already uses Config for compliance; aligns drift with the compliance posture. |
 
-Each catches a different drift class: `plan -detailed-exitcode`
+Each catches a different drift class: `plan -refresh-only`
 catches *attribute drift on managed resources*; `driftctl` catches
 *unmanaged resources*; AWS Config catches *compliance violations
 on either*. A mature platform runs all three.
@@ -235,11 +236,11 @@ sequenceDiagram
 ```text
 DRIFT SOURCE                    EXAMPLES                                   CAUGHT BY
 ──────────────────────────────  ─────────────────────────────────────────  ──────────────────────────────
-Console edit (human)            SG rule opened to "fix prod"               plan -detailed-exitcode (next run)
+Console edit (human)            SG rule opened to "fix prod"               plan -refresh-only (next run)
                                                                             CloudTrail (who + when)
-AWS auto-update                 EKS addon auto-upgrade                     plan -detailed-exitcode
+AWS auto-update                 EKS addon auto-upgrade                     plan -refresh-only
                                                                             (lifecycle ignore_changes is the fix)
-Tool side-effect                Karpenter desired_capacity on ASG          plan -detailed-exitcode
+Tool side-effect                Karpenter desired_capacity on ASG          plan -refresh-only
                                                                             (lifecycle ignore_changes)
 Unmanaged resource              IAM user created by an old script          driftctl scan
                                                                             (terraform won't see it)
@@ -249,7 +250,7 @@ Out-of-band Terraform apply     Someone applies from a different branch    State
 ──────────────────────────────  ─────────────────────────────────────────  ──────────────────────────────
 Order of defense:
   1. Lock state (Part 14 ch.01) — prevents simultaneous out-of-band applies.
-  2. plan -detailed-exitcode nightly — catches attribute drift in 24h.
+  2. plan -refresh-only nightly — catches attribute drift in 24h.
   3. driftctl weekly — catches unmanaged-resource drift in 7d.
   4. AWS Config rules continuously — catches compliance drift immediately.
 ```
@@ -465,23 +466,30 @@ cp examples/bookstore-platform/terraform/drift-check/nightly-drift.yml \
 The workflow runs at **03:00 UTC daily** (configurable cron); the
 trigger logic:
 
-- `terraform plan -detailed-exitcode` returns:
+- `terraform plan -refresh-only -detailed-exitcode` (read-only plan
+  role, through a `terraform-drift` environment restricted to `main`)
+  returns:
   - `0` — no drift; the workflow exits cleanly.
   - `1` — plan errored (auth, syntax, network) — different problem;
     workflow fails so on-call notices.
   - `2` — drift detected; the workflow proceeds.
 
-On exit code 2, the workflow uses `actions/github-script@v7` to
-either:
+On exit code 2, a second job, which holds `issues: write` and no
+cloud credentials, uses `actions/github-script` to either:
 
 - **Open** a new GitHub issue labeled `drift-detected`, OR
 - **Append** a dated comment to an existing open issue with that
   label (deduplication — keeps the issue list signal-to-noise high).
 
-The issue body includes the truncated plan output (60 KB cap to fit
-in a GitHub issue body) and a link to
+The issue body lists the drifted resource **addresses** and their
+change types, the run link, and a pointer to
 [`drift-check/DRIFT.md`](../examples/bookstore-platform/terraform/drift-check/DRIFT.md)
-— the runbook for what to do next.
+— the runbook for what to do next. It deliberately does **not** include
+plan output. Plan text carries attribute values (IPs, ARNs, tags,
+policy documents), and an issue on a public repository is
+world-readable. For the same reason the workflow writes the plan to a
+file rather than the job log. The on-call engineer reproduces the
+detail locally with the same command.
 
 ### 7. Simulate drift and walk the runbook
 
@@ -494,11 +502,11 @@ in a GitHub issue body) and a link to
 
 # Next morning, the nightly-drift workflow runs and creates an issue:
 # Title: "Drift detected on 2026-05-22"
-# Body: includes the plan output showing the tag drift.
+# Body: lists the drifted address (the cluster security group).
 
 # Investigate per DRIFT.md Step 1-2.
 cd examples/bookstore-platform/terraform
-terraform plan -detailed-exitcode
+terraform plan -refresh-only -detailed-exitcode
 # Exit code: 2 (drift)
 
 # Look at the diff. The tag change is in the plan output.
@@ -511,6 +519,8 @@ aws cloudtrail lookup-events \
 # Edit vpc.tf to add the tag to the security_group_tags block.
 # terraform plan now shows zero diff.
 # Commit + open PR + merge through CI as normal.
+# Then `terraform apply -refresh-only` (apply role) so state records the
+# accepted tag; otherwise tomorrow's -refresh-only check reports it again.
 ```
 
 The runbook's full Step 1-4 (the four flavors of reconciliation) is
@@ -541,7 +551,7 @@ cluster it manages) earns its keep only at scale.
 
 ### 9. (Optional) Run `driftctl` weekly
 
-`driftctl` catches a class `plan -detailed-exitcode` misses:
+`driftctl` catches a class `plan -refresh-only` misses:
 *resources in the cloud that Terraform doesn't manage at all*. The
 classic example: an IAM user created by an old console script, an
 S3 bucket spun up "temporarily" two years ago. Terraform's plan
@@ -648,22 +658,27 @@ Actions artifacts, and on a public repo that is everyone. Keep this
 workflow in a private repository or encrypt the artifact, and keep
 retention short (the template uses 1 day).
 
-**`terraform plan -detailed-exitcode` semantics.** Three exit codes:
+**`-detailed-exitcode` semantics, and why the drift check adds
+`-refresh-only`.** Three exit codes:
 
-- `0` — no changes (the plan would be a no-op).
+- `0` — no changes.
 - `1` — error (auth failure, syntax error, network issue).
-- `2` — changes present (Terraform would make changes).
+- `2` — changes present.
 
-The drift-check workflow uses exit code 2 as the drift signal. Note
-that "would make changes" is the union of:
+For a *normal* plan, "changes present" is the union of two very
+different things:
 
-- Changes you intended (someone pushed a tf change that's not
-  applied yet — usually this means the apply job failed previously).
-- Drift from the cloud-side (someone edited via console).
+- Changes you intended (code merged to `main` but not applied yet,
+  usually because an apply failed or is awaiting approval).
+- Drift from the cloud side (someone edited via console).
 
-The drift workflow doesn't distinguish; both cases warrant
-investigation. Reading the actual plan output (in the issue body)
-clarifies which.
+A drift alarm that fires on the first is noise, and noise gets muted.
+`terraform plan -refresh-only` compares state with the real cloud and
+ignores the configuration, so its exit code 2 means only the second:
+real drift. Unapplied code is the apply workflow's business. The
+price: `-refresh-only` cannot see resources that were never in state
+(that is `driftctl`), and accepting drift into code also needs a
+`terraform apply -refresh-only` to update state (DRIFT.md Step 3a).
 
 **Atlantis vs GitHub Actions — the architectural difference.**
 Atlantis is a **stateful** webhook server — it maintains its own
@@ -783,8 +798,8 @@ gh variable set AWS_REGION -b "<REGION>"
 gh workflow run terraform-drift-check
 
 # Run terraform plan locally with the drift exit codes.
-terraform plan -detailed-exitcode
-# Exit 0=no diff, 1=error, 2=drift detected.
+terraform plan -refresh-only -detailed-exitcode
+# Exit 0=no drift, 1=error, 2=drift detected.
 
 # driftctl scan against remote state.
 driftctl scan \
@@ -836,8 +851,9 @@ CI/CD-readiness checklist (production-shape when all seven are yes):
 - [ ] Apply uses the saved plan from the same run's `plan-main` (never
       a re-plan, never `-auto-approve`), behind a `production`
       environment with required reviewers.
-- [ ] Nightly drift workflow runs `terraform plan -detailed-exitcode`
-      and opens/dedups a GitHub issue on exit code 2.
+- [ ] Nightly drift workflow runs `terraform plan -refresh-only
+      -detailed-exitcode` with the read-only role and opens/dedups a
+      GitHub issue listing addresses (no plan output) on exit code 2.
 - [ ] Weekly `driftctl` scan catches unmanaged-resource drift.
 - [ ] DRIFT.md runbook linked from the drift issue body; on-call has
       practiced the four reconciliation flavors.
@@ -853,7 +869,7 @@ CI/CD-readiness checklist (production-shape when all seven are yes):
 
    </details>
 
-2. **A nightly drift check fires: 2 resources have drifted. The issue body shows that someone widened the EKS API server CIDR in the AWS console at 14:30 yesterday. What are the four reconciliation flavors the chapter teaches and which do you pick here?**
+2. **A nightly drift check fires: 2 resources have drifted. The issue lists the drifted addresses, and CloudTrail shows that someone widened the EKS API server CIDR in the AWS console at 14:30 yesterday. What are the four reconciliation flavors the chapter teaches and which do you pick here?**
    <details><summary>Show answer</summary>
 
    The four flavors: (1) **Revert in cloud** — undo the console change to match code; (2) **Codify in Terraform** — accept the change and PR it into `.tf`; (3) **Document the exception** — accept the divergence with explicit reasoning (rare); (4) **Both/neither** — case-by-case. For this incident: ask why it happened. If it was an emergency response to a P0 (the operator widened CIDR to debug from a new IP), codify it in a PR with the runbook reference. If it was someone exploring the console without context, revert immediately and rotate the IAM role's permissions to remove console-write where it's not needed.
@@ -867,10 +883,10 @@ CI/CD-readiness checklist (production-shape when all seven are yes):
 
    </details>
 
-4. **Hands-on extension — manually create an S3 bucket in the AWS console outside Terraform, then run `terraform plan -detailed-exitcode` vs `driftctl scan`. Compare what each finds.**
+4. **Hands-on extension — manually create an S3 bucket in the AWS console outside Terraform, then run `terraform plan -refresh-only -detailed-exitcode` vs `driftctl scan`. Compare what each finds.**
    <details><summary>What you should see</summary>
 
-   `terraform plan -detailed-exitcode` returns 0 (no drift) — it only checks resources Terraform *manages*; an unmanaged bucket is invisible. `driftctl scan` returns a list including the unmanaged bucket because it scans the cloud for everything in scope and compares to state. This is why the chapter recommends both: plan catches attribute drift on managed resources, driftctl catches unmanaged-resource drift. Either alone leaves a class of "someone made it in the console" hidden.
+   `terraform plan -refresh-only -detailed-exitcode` returns 0 (no drift) — it only checks resources Terraform *manages*; an unmanaged bucket is invisible. `driftctl scan` returns a list including the unmanaged bucket because it scans the cloud for everything in scope and compares to state. This is why the chapter recommends both: plan catches attribute drift on managed resources, driftctl catches unmanaged-resource drift. Either alone leaves a class of "someone made it in the console" hidden.
 
    </details>
 
@@ -890,7 +906,7 @@ CI/CD-readiness checklist (production-shape when all seven are yes):
   Pattern 3 for teams with N Terraform projects.
 - **driftctl**
   <https://github.com/snyk/driftctl>; the unmanaged-resource scanner;
-  the complement to `terraform plan -detailed-exitcode` that catches
+  the complement to `terraform plan -refresh-only` that catches
   drift the plan can't see.
 - **HashiCorp — Terraform Cloud**
   <https://developer.hashicorp.com/terraform/cloud-docs>; the SaaS

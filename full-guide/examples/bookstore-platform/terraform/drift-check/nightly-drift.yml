@@ -2,14 +2,42 @@
 # nightly-drift.yml — sample GitHub Actions workflow for nightly drift
 # detection on the bookstore-platform Terraform tree.
 #
-# Copy this to .github/workflows/ in YOUR repository. Adjust paths, region,
-# role ARN to match your setup.
+# Copy this to .github/workflows/ in YOUR repository. Adjust WORKING_DIR and
+# the region to match your setup. It reuses the read-only plan role from
+# ../.github/workflows/terraform.yml; read that header first.
 #
 # What it does:
 #   - Runs every night at 03:00 UTC (cron '0 3 * * *').
-#   - Runs `terraform plan -detailed-exitcode`.
+#   - Runs `terraform plan -refresh-only -detailed-exitcode`.
 #   - Exit code 0 = no drift. Exit code 2 = drift detected.
-#   - On exit code 2, opens a GitHub issue with the plan output.
+#   - On drift, opens (or comments on) one GitHub issue that lists the
+#     drifted resource ADDRESSES and links the run. It never posts plan
+#     output.
+#
+# Why -refresh-only, not a full plan: a full plan reports the union of
+# "the cloud changed under us" (drift) and "main has code nobody applied
+# yet" (a pending change), and cannot tell them apart. -refresh-only
+# compares state with the real cloud and ignores the configuration, so
+# exit code 2 means real drift. Unapplied code is the apply workflow's job,
+# not an incident.
+#
+# Why no plan output in the issue: plan text carries attribute values (IPs,
+# ARNs, tags, policy documents, anything not marked sensitive), and on a
+# public repository an issue is world-readable. The issue gets resource
+# addresses and a link; the operator reproduces the detail locally with the
+# same command (see DRIFT.md). For the same reason the plan is written to a
+# file and not echoed to the (also public) job log.
+#
+# Credentials: the READ-ONLY plan role, through a third environment,
+# `terraform-drift` (deployment branches: main only; no reviewers, because
+# nobody is awake at 03:00 to approve). Add its sub to the plan role's
+# trust policy:
+#   "token.actions.githubusercontent.com:sub": [
+#     "repo:GITHUB_ORG/GITHUB_REPO:environment:terraform-plan",
+#     "repo:GITHUB_ORG/GITHUB_REPO:environment:terraform-drift"
+#   ]
+# (StringEquals with a list matches any one of the values.) Drift detection
+# never needs write access, so it must never use the apply role.
 #
 # Why nightly? Drift accumulates from console actions, out-of-band Terraform
 # runs, IAM-policy auto-rotation, EBS auto-grow, ASG re-creations after
@@ -25,85 +53,128 @@ on:
   workflow_dispatch:
     # Allow manual triggering via the Actions tab.
 
-permissions:
-  id-token: write
-  contents: read
-  issues: write
+permissions: {}
 
 env:
   TF_VERSION: '1.10.5'
-  WORKING_DIR: 'examples/bookstore-platform/terraform'
+  WORKING_DIR: 'full-guide/examples/bookstore-platform/terraform'
+  AWS_REGION: ${{ vars.AWS_REGION || 'ap-south-1' }}
 
 jobs:
   drift-check:
-    name: terraform plan (drift check)
+    name: terraform plan -refresh-only (drift check)
     runs-on: ubuntu-latest
+    environment: terraform-drift
+    permissions:
+      contents: read
+      id-token: write          # OIDC token for the read-only plan role
+    outputs:
+      drift: ${{ steps.plan.outputs.drift }}
+      addresses: ${{ steps.plan.outputs.addresses }}
     defaults:
       run:
         working-directory: ${{ env.WORKING_DIR }}
 
     steps:
       - name: Checkout repository
-        uses: actions/checkout@v4
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
 
       - name: Setup Terraform
-        uses: hashicorp/setup-terraform@v3
+        uses: hashicorp/setup-terraform@dfe3c3f87815947d99a8997f908cb6525fc44e9e # v4.0.1
         with:
           terraform_version: ${{ env.TF_VERSION }}
+          terraform_wrapper: false
 
-      - name: Configure AWS credentials via OIDC
-        uses: aws-actions/configure-aws-credentials@v4
+      - name: Require a remote backend
+        run: |
+          if ! grep -qE '^[[:space:]]*backend[[:space:]]+"s3"' ./*.tf; then
+            echo "::error::No backend \"s3\" block in ${WORKING_DIR}/*.tf. A drift check against local state checks nothing."
+            exit 1
+          fi
+
+      - name: Configure AWS credentials (read-only plan role)
+        uses: aws-actions/configure-aws-credentials@e1253824e5c10ff9df46874f81ed3ec929e19cfd # v6.3.0
         with:
-          role-to-assume: ${{ secrets.AWS_ROLE_ARN }}
-          aws-region: ${{ vars.AWS_REGION || 'ap-south-1' }}
+          role-to-assume: ${{ vars.AWS_ROLE_ARN }}
+          aws-region: ${{ env.AWS_REGION }}
           audience: sts.amazonaws.com
 
       - name: terraform init
-        run: terraform init -input=false
+        run: terraform init -input=false -lockfile=readonly
 
-      - name: terraform plan -detailed-exitcode
+      - name: terraform plan -refresh-only -detailed-exitcode
         id: plan
         run: |
           set +e
-          terraform plan -input=false -detailed-exitcode -no-color -out=drift.tfplan > plan_output.txt 2>&1
-          echo "exit_code=$?" >> $GITHUB_OUTPUT
-          cat plan_output.txt
-        continue-on-error: true
+          # Output goes to a file, not the log: see the header.
+          terraform plan -refresh-only -input=false -lock=false -no-color \
+            -detailed-exitcode -out=drift.tfplan > plan_output.txt 2>&1
+          rc=$?
+          set -e
+          case "$rc" in
+            0)
+              echo "drift=false" >> "$GITHUB_OUTPUT"
+              echo "No drift." ;;
+            2)
+              echo "drift=true" >> "$GITHUB_OUTPUT"
+              # Addresses and change types only, never attribute values.
+              addresses=$(terraform show -json drift.tfplan \
+                | jq -c '[.resource_drift[]? | "\(.address) (\(.change.actions | join(",")))"]')
+              echo "addresses=${addresses}" >> "$GITHUB_OUTPUT"
+              {
+                echo '## Drift detected'
+                echo
+                printf '%s' "$addresses" | jq -r '.[] | "- `\(.)`"'
+              } >> "$GITHUB_STEP_SUMMARY" ;;
+            *)
+              echo "::error::terraform plan failed (exit $rc). The error is in"
+              echo "plan_output.txt on the runner; re-run locally to see it."
+              # Error text is shown: it is diagnostics, not resource values.
+              tail -20 plan_output.txt
+              exit "$rc" ;;
+          esac
 
+  open-or-update-issue:
+    name: open or update the drift issue
+    needs: drift-check
+    if: needs.drift-check.outputs.drift == 'true'
+    runs-on: ubuntu-latest
+    permissions:
+      issues: write            # this job holds no cloud credentials
+    steps:
       - name: Open or update drift issue (dedup by label)
-        if: steps.plan.outputs.exit_code == '2'
-        uses: actions/github-script@v7
+        uses: actions/github-script@3a2844b7e9c422d3c10d287c895573f7108da1b3 # v9.0.0
+        env:
+          ADDRESSES: ${{ needs.drift-check.outputs.addresses }}
         with:
           script: |
-            const fs = require('fs');
-            const planOutput = fs.readFileSync('${{ env.WORKING_DIR }}/plan_output.txt', 'utf8');
-            const trimmed = planOutput.length > 60000
-              ? planOutput.slice(0, 60000) + '\n\n[...truncated...]'
-              : planOutput;
-
+            const addresses = JSON.parse(process.env.ADDRESSES || '[]');
+            const runUrl = `${context.serverUrl}/${context.repo.owner}/${context.repo.repo}/actions/runs/${context.runId}`;
             const today = new Date().toISOString().slice(0, 10);
             const body = [
               '## Terraform drift detected',
               '',
-              `Detection run: ${today}`,
+              `Detection run: ${today} (${runUrl})`,
               '',
-              'The nightly drift check found differences between the configured',
-              'state (`*.tf` files) and the actual AWS resources.',
+              '`terraform plan -refresh-only` found resources whose real',
+              'configuration no longer matches state. Drifted addresses:',
               '',
-              'See `DRIFT.md` for the runbook.',
+              ...addresses.map((a) => `- \`${a}\``),
               '',
-              '<details><summary>terraform plan output</summary>',
+              'Plan output is deliberately not posted here (issues are public on',
+              'a public repo). Reproduce locally with the read-only role:',
               '',
-              '```hcl',
-              trimmed,
+              '```bash',
+              'terraform plan -refresh-only -detailed-exitcode',
               '```',
               '',
-              '</details>',
+              'Then follow `drift-check/DRIFT.md`.',
             ].join('\n');
 
-            // Dedup: look for an existing open issue with the `drift-detected`
-            // label. If one exists, append a dated comment instead of opening
-            // a new issue (keeps the issue list signal-to-noise high).
+            // Dedup: one open issue labelled `drift-detected`; append a
+            // dated comment instead of opening a new issue each night.
             const existing = await github.paginate(
               github.rest.issues.listForRepo,
               {
@@ -135,14 +206,7 @@ jobs:
               });
             }
 
-      - name: Fail the job on drift
-        if: steps.plan.outputs.exit_code == '2'
+      - name: Fail the run on drift
         run: |
-          echo "Drift detected. Issue opened."
-          exit 1
-
-      - name: Fail the job on plan error
-        if: steps.plan.outputs.exit_code != '0' && steps.plan.outputs.exit_code != '2'
-        run: |
-          echo "terraform plan failed (exit code ${{ steps.plan.outputs.exit_code }})."
+          echo "Drift detected. Issue opened or updated."
           exit 1
