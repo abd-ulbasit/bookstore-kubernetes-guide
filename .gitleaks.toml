@@ -1,8 +1,8 @@
 # Gitleaks configuration: the default ruleset plus a deliberately narrow
 # allowlist.
 #
-# CI runs `gitleaks git` over the full history on every PR and nightly
-# (example-trees-check.yml, job `gitleaks`). Local equivalent:
+# CI runs `gitleaks git` over the full history on every PR, every push to
+# main and nightly (secret-scan.yml, job `gitleaks`). Local equivalent:
 #   make scan-secrets
 #
 # How to add an entry. Each allowlist below names the rule it silences
@@ -21,9 +21,10 @@
 # payments-webhook-receiver.yaml). With gitleaks v8.30.1 and the default
 # rules, none of those files produce a finding, so none of them are
 # allowlisted. The first two entries below are the only findings the
-# pre-audit history produced on 2026-10-24 (30 commits), and both are false
-# positives. The third covers one prose false positive introduced and then
-# reworded on the 2026-10 audit branch.
+# pre-audit history produced on 2026-10-24 (25 commits on main), and both
+# are false positives. The third covers one prose false positive introduced
+# and then reworded on the 2026-10 audit branch; see its description for
+# when it can be deleted.
 
 [extend]
 useDefault = true
@@ -52,9 +53,14 @@ regexes = ['''curl .*-u "\$[A-Z][A-Z0-9_]*:"''']
 description = """Prose in the platform README's "What is in state" table \
 ("...KMS key ARNs, VPC/subnet/SG IDs..."), which the generic-api-key rule \
 reads as key=<value>. Introduced in one commit of the 2026-10 audit branch \
-and reworded in the next. Pinned to the rule, the file and the exact phrase \
-(no longer present in the tree), not to the commit SHA, so a rebase of the \
-branch does not resurrect the finding."""
+(c2b30c2) and reworded in a later one (6263cfe). The branch history was not \
+rewritten, so the full-history scan of that branch reads the phrase. Pinned \
+to the rule, the file and the exact phrase (no longer present in the tree), \
+not to the commit SHA, so a rebase does not resurrect the finding. This entry \
+can be DELETED only when no ref contains c2b30c2 (or a rebased copy of \
+it): the branch was squash-merged AND then deleted (`gitleaks git` scans every ref, and CI's \
+fetch-depth: 0 checkout fetches every branch). After a merge commit or a \
+rebase-merge the commit is in main's history, and the entry stays."""
 targetRules = ["generic-api-key"]
 condition = "AND"
 paths = ['''^full-guide/examples/bookstore-platform/terraform/README\.md$''']

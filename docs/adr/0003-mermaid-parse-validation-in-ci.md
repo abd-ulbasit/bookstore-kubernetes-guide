@@ -69,6 +69,10 @@ as the text "\n", not a line break — well-known foot-gun).
 * **2026-10-24.** Production and the validator moved together from
   10.9.1 to 10.9.8, a security patch release on the same line. 10.9.1
   was affected by GHSA-m4gq-x24j-jpmf (high, prototype pollution in the
-  bundled DOMPurify) and by seven medium or low advisories fixed in
-  10.9.3 to 10.9.8. The validator's versions now come from
-  `.github/scripts/package-lock.json`, so the two cannot drift silently.
+  bundled DOMPurify, fixed in 10.9.3) and by eight more advisories
+  (seven medium, one low) fixed in 10.9.4 to 10.9.8: GHSA-7rqq-prvp-x9jh,
+  GHSA-87f9-hvmw-gh4p, GHSA-6m6c-36f7-fhxh, GHSA-ghcm-xqfw-q4vr,
+  GHSA-xcj9-5m2h-648r, GHSA-2v8p-3f2j-5mp7, GHSA-6x64-9x62-f2gx and
+  GHSA-c4c3-pg64-4m4v (GitHub advisory database, 2026-10-24). The validator's
+  versions now come from `.github/scripts/package-lock.json`, so the two
+  cannot drift silently.
