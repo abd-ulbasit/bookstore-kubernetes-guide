@@ -87,13 +87,23 @@ resource "aws_iam_role_policy_attachment" "vpc_cni_managed" {
 ############################
 # AWS Load Balancer Controller IRSA role
 #
-# Policy JSON is fetched from the upstream repo at the pinned controller
-# tag (v2.13.0). data.http evaluates at plan time, so any drift in the
-# upstream file would surface in the plan diff. If you fork-and-vendor the
-# policy, swap data.http for a local file() call.
+# The policy JSON is VENDORED: policies/aws-load-balancer-controller-v2.13.0.json
+# is upstream docs/install/iam_policy.json at tag v2.13.0 (commit
+# 73980cf11d1c79c310f4f14a089554f58b165d7d, sha256
+# 16f232c9d9f79366fe949c4550ad517a202380058a9e48d45a4e215044a20a6a).
+#
+# It used to be fetched with data.http from a raw.githubusercontent.com URL
+# on every plan. A tag is a mutable pointer, so whatever that URL returned on
+# the day became an IAM policy without anyone reviewing it, and every plan
+# depended on GitHub being reachable. Vendoring makes a policy change a diff
+# in a PR. When you bump lb_controller_chart_version, replace the file with
+# the matching tag's iam_policy.json and review the diff.
+#
+# lb_controller_iam_policy_url is kept as an explicit override (default
+# empty = use the vendored file) for anyone who prefers the old behaviour.
 ############################
 data "http" "lb_controller_policy" {
-  count = var.enable_lb_controller ? 1 : 0
+  count = var.enable_lb_controller && var.lb_controller_iam_policy_url != "" ? 1 : 0
   url   = var.lb_controller_iam_policy_url
 
   request_headers = {
@@ -105,8 +115,11 @@ resource "aws_iam_policy" "lb_controller" {
   count       = var.enable_lb_controller ? 1 : 0
   name        = "${local.name_prefix}-lb-controller"
   description = "IAM policy for the AWS Load Balancer Controller (Bookstore Platform). Source: kubernetes-sigs/aws-load-balancer-controller v2.13.0"
-  policy      = data.http.lb_controller_policy[0].response_body
-  tags        = local.common_tags
+  policy = (var.lb_controller_iam_policy_url != ""
+    ? data.http.lb_controller_policy[0].response_body
+    : file("${path.module}/policies/aws-load-balancer-controller-v2.13.0.json")
+  )
+  tags = local.common_tags
 }
 
 data "aws_iam_policy_document" "lb_controller_assume" {

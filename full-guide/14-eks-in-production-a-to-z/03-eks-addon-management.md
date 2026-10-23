@@ -113,9 +113,9 @@ When to pick which:
 - **Self-managed wins when:**
   - The addon isn't in the EKS catalog (most things).
   - You need a custom build, custom values, custom controllers (the
-    LB Controller's IAM policy is fetched from the upstream repo at
-    a pinned tag — that's per-team customization beyond what the
-    EKS catalog supports).
+    LB Controller's IAM policy is vendored from the upstream repo at
+    a pinned tag and reviewed as a diff — that's per-team customization
+    beyond what the EKS catalog supports).
   - You want lockstep with the upstream release calendar (Karpenter
     1.6.0 ships; you want 1.6.0 in production tomorrow; you don't
     want to wait for AWS to certify it as an EKS addon).

@@ -14,7 +14,7 @@ A single-region EKS cluster, ready for a multi-tenant platform:
 - **EKS cluster** — Kubernetes `1.35`, the control plane logs to CloudWatch, secrets are envelope-encrypted with a customer-managed KMS key. The principal that runs `terraform apply` is granted cluster-admin via an EKS access entry — no `aws-auth` ConfigMap.
 - **One small managed node group ("system")** — 2 × `t3.medium` On-Demand, tainted `CriticalAddonsOnly=true:NoSchedule`. Hosts Karpenter, the AWS Load Balancer Controller, CoreDNS, the EBS-CSI controller, metrics-server. Nothing else.
 - **Karpenter `1.6.0`** — running in `kube-system`. Two `NodePool` resources: `general` (On-Demand, `c/m/r` families, generation > 4) and `spot` (prefers Spot, falls back to On-Demand, higher `weight` so Karpenter reaches for it first). Consolidation is `WhenEmptyOrUnderutilized` with a 30-second timer. One `EC2NodeClass` (`default`) using the EKS-optimized `al2023@latest` AMI alias.
-- **AWS Load Balancer Controller `1.13.0`** — the bridge from `Service type=LoadBalancer` and `Ingress` to ALBs / NLBs. IRSA-scoped to the IAM policy fetched from the upstream `v2.13.0` tag at plan time.
+- **AWS Load Balancer Controller `1.13.0`** — the bridge from `Service type=LoadBalancer` and `Ingress` to ALBs / NLBs. IRSA-scoped to the upstream `v2.13.0` IAM policy, vendored and reviewed in `policies/` (it used to be fetched over HTTP at plan time).
 - **EBS-CSI driver, vpc-cni, kube-proxy, CoreDNS** — installed as EKS-managed addons. Versions are pinned implicitly by EKS to the 1.35 default; we override only `configuration_values` (system-pool placement, replica count).
 - **metrics-server `3.13.0`** — for `kubectl top` and HPA. Karpenter does not require it.
 

@@ -145,9 +145,9 @@ variable "lb_controller_chart_version" {
 }
 
 variable "lb_controller_iam_policy_url" {
-  description = "URL to the LB controller IAM policy JSON, pinned to the v2.13.0 tag. Used by data.http to fetch the policy document at plan/apply."
+  description = "Optional override: fetch the LB controller IAM policy from this URL at plan time instead of using the vendored, reviewed copy in policies/ (the default, empty). Fetching makes an unreviewed remote file an IAM policy and makes every plan depend on the network; see iam.tf."
   type        = string
-  default     = "https://raw.githubusercontent.com/kubernetes-sigs/aws-load-balancer-controller/v2.13.0/docs/install/iam_policy.json"
+  default     = ""
 }
 
 variable "enable_metrics_server" {
