@@ -17,6 +17,10 @@
 # whether a change is going to start (or stop) being a gate on every push.
 /.github/                        @abd-ulbasit
 
+# Secret-scanner allowlist. An entry here silences gitleaks for a rule, so
+# it gets the same review as a workflow change.
+/.gitleaks.toml                  @abd-ulbasit
+
 # Design records — review pass treats these as load-bearing. A change to
 # an Accepted ADR is itself a decision and needs an issue first.
 /docs/adr/                       @abd-ulbasit

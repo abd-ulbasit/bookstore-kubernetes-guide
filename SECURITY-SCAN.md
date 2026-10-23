@@ -81,9 +81,24 @@ CI pins Go 1.26.5, which is at or above every current stdlib fix version.
 
 ### 1.2) Secrets — 0
 
-No real credentials, account IDs, or private keys detected in the working
-tree. This is also enforced by the [`leak-scan`](.github/workflows/example-trees-check.yml)
-CI job with a separate regex pass, so two independent scanners agree.
+No real credentials or private keys detected in the working tree by
+Trivy's secret scanner.
+
+The second, independent scanner is **gitleaks**
+([`secret-scan.yml`](.github/workflows/secret-scan.yml)), which runs on
+every PR and nightly over the **full git history**, not just the tip. On
+2026-10-24 it scanned all 30 commits and found two hits, both false
+positives, each allowlisted in [`.gitleaks.toml`](.gitleaks.toml) and
+pinned to one rule, one file and one line shape. The DEMO-ONLY demo
+passwords and the Stripe-shaped `REPLACE` placeholders produce no finding
+with the default rules, so they are not allowlisted. Local equivalent:
+`make scan-secrets`.
+
+> **Correction (2026-10-24).** This section used to say a CI `leak-scan` job
+> was a second secret scanner. It was a grep for five fixed strings in
+> `full-guide/` (one of them the author's own email domain) and recognised no
+> credential format. It is now `host-path-scan`, an authoring-hygiene check,
+> and makes no secret-scanning claim.
 
 ### 1.3) Misconfigurations — triaged by category
 

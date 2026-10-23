@@ -35,12 +35,11 @@ shape across the guide and every example tree:
 * `<REGISTRY-URL>` not `myregistry.example.com`
 * `<KEYCLOAK-CLIENT-SECRET>` not `s3cr3t`
 
-The leak-scan job in CI greps for any value matching `[a-z]\.[a-z]`
-domains, real account-ID-shaped 12-digit numbers, and known-real
-emails/usernames in `full-guide/` content. **Real HTML tags** (lowercase
-like `<br/>`, `<details>`) and **heredoc markers** (`<<EOF`, `<<-EOF`)
-are explicitly exempted — they're the legitimate language-level uses of
-the same character.
+Nothing in CI enforces the convention mechanically (see *Corrections*
+below); it is a review-time rule. **Real HTML tags** (lowercase like
+`<br/>`, `<details>`) and **heredoc markers** (`<<EOF`, `<<-EOF`) are the
+legitimate language-level uses of the same character and are not
+placeholders.
 
 ## Consequences
 
@@ -54,7 +53,7 @@ the same character.
   on unresolved `<…>` instead of "this looks like a placeholder."
   Worth it.
 * **Bad:** Two exemptions (real lowercase HTML, `<<EOF`) need to be
-  remembered when reviewing diffs. The leak-scan regex handles both.
+  remembered when reviewing diffs.
 * **Follow-up:** A pre-commit hook that catches accidental real-value
   leaks (e.g. an actual 12-digit account ID slipping in) would be a
   worthwhile next step.
@@ -70,4 +69,15 @@ the same character.
 ## References
 
 * `full-guide/appendix/B-glossary.md` — the placeholder convention.
-* `.github/workflows/example-trees-check.yml` — `leak-scan` job.
+* `.github/workflows/secret-scan.yml` — gitleaks over the full history.
+* `.github/workflows/example-trees-check.yml` — `host-path-scan` job.
+
+## Corrections
+
+* **2026-10-24.** This ADR used to say the CI `leak-scan` job grepped for
+  domain-shaped values, 12-digit account IDs and known-real emails. It
+  never did: it grepped `full-guide/` for five fixed strings (a home
+  directory prefix, a container-runtime path, two identifiers and a
+  phrase). That job is now `host-path-scan` (workstation traces only) and
+  real secret scanning is gitleaks in `secret-scan.yml`. Neither checks
+  account-ID-shaped numbers; the pre-commit follow-up above still stands.

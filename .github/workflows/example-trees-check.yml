@@ -161,22 +161,36 @@ jobs:
   # production renders with (10.9.1) and fails the build on any block that
   # doesn't actually parse. See .github/scripts/validate-mermaid.mjs.
 
-  leak-scan:
+  # Authoring hygiene, NOT secret scanning. Secret scanning is gitleaks, in
+  # secret-scan.yml, over every file and the full history. This job only
+  # catches traces of the author's workstation in published prose: a home
+  # directory path, a local container-runtime path, "on this machine".
+  # It used to be called `leak-scan` and also searched for the author's own
+  # email domain, which put that identifier in a public workflow; generic
+  # patterns only now.
+  host-path-scan:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
       - run: |
-          set -e
-          HITS=$(grep -rniE '/Users/[a-z]|\.colima|on this machine|developers@eliteitteam|@anthropic' full-guide \
-            --include='*.md' --include='*.yaml' --include='*.py' --include='*.go' --include='*.sh' \
-            --exclude-dir='.terraform' 2>/dev/null | wc -l | tr -d ' ')
-          echo "leak hits = $HITS"
-          [ "$HITS" -eq 0 ] || { echo "FAIL — found leaks"; grep -rniE '/Users/[a-z]|\.colima|on this machine' full-guide --include='*.md' | head -20; exit 1; }
+          set -eu
+          PATTERN='/Users/[a-z]|\.colima|on this machine|@anthropic'
+          HITS=$(grep -rniE "$PATTERN" full-guide \
+            --include='*.md' --include='*.yaml' --include='*.yml' --include='*.py' \
+            --include='*.go' --include='*.sh' --include='*.tf' --include='*.json' \
+            --exclude-dir='.terraform' 2>/dev/null || true)
+          COUNT=$(printf '%s' "$HITS" | grep -c . || true)
+          echo "host-path hits = $COUNT"
+          if [ "$COUNT" -ne 0 ]; then
+            echo "FAIL: workstation-specific text in published files:"
+            printf '%s\n' "$HITS" | head -20
+            exit 1
+          fi
 
   rolling-failure-issue:
-    needs: [helm-lint, helm-template-count, kustomize-counts, terraform-fmt-validate, go-services, link-check, leak-scan]
+    needs: [helm-lint, helm-template-count, kustomize-counts, terraform-fmt-validate, go-services, link-check, host-path-scan]
     if: failure() && github.event_name == 'schedule'
     runs-on: ubuntu-latest
     permissions:

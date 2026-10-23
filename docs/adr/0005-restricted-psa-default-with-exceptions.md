@@ -49,8 +49,9 @@ elevation.
   don't have to remember to opt-in to `restricted` — they're already
   in it.
 * **Good:** The list of privileged namespaces is auditable from a
-  single `grep` (the leak-scan job in
-  `.github/workflows/example-trees-check.yml` partially enforces this).
+  single `grep -rn privileged` over the PSA labels. Nothing in CI enforces that
+  list today. An earlier version of this ADR said the `leak-scan` job
+  partially did; it never looked at PSA labels.
 * **Good:** Each elevation is justified at the source, not in an
   outdated wiki.
 * **Bad:** Adding a new privileged workload is a deliberate ceremony

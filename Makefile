@@ -105,7 +105,12 @@ validate-links: ## mkdocs build --strict (validates every internal link in the g
 ##@ Security
 
 .PHONY: scan
-scan: scan-trivy scan-terraform scan-go ## Run every security scanner; populates SECURITY-SCAN.md material.
+scan: scan-trivy scan-terraform scan-go scan-secrets ## Run every security scanner; populates SECURITY-SCAN.md material.
+
+.PHONY: scan-secrets
+scan-secrets: ## gitleaks over the full git history, with the repo's allowlist (same as CI).
+	@command -v gitleaks >/dev/null || (echo "gitleaks not found; brew install gitleaks (CI pins v8.30.1)" && exit 1)
+	gitleaks git --config .gitleaks.toml --redact --exit-code 1 .
 
 .PHONY: scan-trivy
 scan-trivy: ## Trivy filesystem scan (vulnerabilities + secrets + misconfigs).

@@ -1,0 +1,47 @@
+# Gitleaks configuration: the default ruleset plus a deliberately narrow
+# allowlist.
+#
+# CI runs `gitleaks git` over the full history on every PR and nightly
+# (example-trees-check.yml, job `gitleaks`). Local equivalent:
+#   make scan-secrets
+#
+# How to add an entry. Each allowlist below names the rule it silences
+# (targetRules), the file it applies to (paths) and the line shape
+# (regexes), and uses condition = "AND" so all three must match. Never
+# allowlist a whole rule, a whole directory or a value on its own: an entry
+# that matches "any generic-api-key anywhere" turns the scanner off. Never
+# put a real credential in here; if a real one was committed, rotate it
+# first, then deal with history (removing the file does not unpublish it).
+#
+# DEMO-ONLY values. The guide ships a handful of demo credentials as
+# literal Secret stringData, each labelled DEMO-ONLY (bookstore Helm
+# values.yaml, raw-manifests/16-db-credentials.yaml,
+# operators/cnpg-cluster.yaml), and Stripe-shaped placeholders that contain
+# REPLACE/placeholder text (payments-gateway/deployment.yaml,
+# payments-webhook-receiver.yaml). With gitleaks v8.30.1 and the default
+# rules, none of those files produce a finding, so none of them are
+# allowlisted. The two entries below are the only findings the full history
+# produced on 2026-10-24 (30 commits), and both are false positives.
+
+[extend]
+useDefault = true
+
+[[allowlists]]
+description = """Part 03 ch.02 decodes the DEMO-ONLY db-credentials Secret on \
+screen to prove base64 is not encryption. The value shown is the demo \
+password, base64-encoded, in a shell comment."""
+targetRules = ["generic-api-key"]
+condition = "AND"
+paths = ['''^full-guide/03-config-and-storage/02-secrets\.md$''']
+regexTarget = "line"
+regexes = ['''(?m)^#\s+POSTGRES_PASSWORD: [A-Za-z0-9+/=]+(\s.*)?$''']
+
+[[allowlists]]
+description = """Runbook curl call that expands an environment variable \
+(-u "$STRIPE_API_KEY:"). The credential is resolved at run time inside the \
+Pod; nothing is embedded in the file."""
+targetRules = ["curl-auth-user"]
+condition = "AND"
+paths = ['''^full-guide/examples/bookstore-platform/runbooks/runbook-payments-failure-rate\.md$''']
+regexTarget = "line"
+regexes = ['''curl .*-u "\$[A-Z][A-Z0-9_]*:"''']

@@ -42,7 +42,7 @@ both just work. Config: [`.devcontainer/`](.devcontainer/).
 | `full-guide/examples/bookstore-platform/terraform-account-baseline/` | AWS-account-wide guardrails (CloudTrail, Security Hub, GuardDuty, IAM Access Analyzer) |
 | [`docs/adr/`](docs/adr/) | Architecture Decision Records — the load-bearing technical decisions, why they were made, and the trade-offs |
 | [`docs/lessons-from-smoke-test.md`](docs/lessons-from-smoke-test.md) | Post-mortem of running this guide's Terraform against real EKS — what broke, why, and the five fixes that became Tier-1 defaults |
-| `.github/workflows/` | `docs` (builds + deploys the site, validates every mermaid block) + `example-trees-check` (Helm/Kustomize counts, Terraform fmt+validate, leak-scan) + `link-check` (external URL rot) + `security-scan` (Trivy incl. every Terraform root, govulncheck over every discovered Go module — triage in [`SECURITY-SCAN.md`](SECURITY-SCAN.md)) |
+| `.github/workflows/` | `docs` (builds + deploys the site, validates every mermaid block) + `example-trees-check` (Helm/Kustomize counts, Terraform fmt+validate, host-path hygiene) + `secret-scan` (gitleaks over the full history, every PR) + `link-check` (external URL rot) + `security-scan` (Trivy incl. every Terraform root, govulncheck over every discovered Go module — triage in [`SECURITY-SCAN.md`](SECURITY-SCAN.md)) |
 
 ## Reading paths by role
 
@@ -97,7 +97,8 @@ Every commit to `main` runs:
 - `mkdocs build --strict` — no broken internal links, no missing nav refs
 - **`mermaid.parse()` against every diagram** — catches "Syntax error in text"
   before the site deploys (using the same parser version production renders with)
-- Helm/Kustomize/Terraform shape checks + leak-scan (nightly + on PR)
+- Helm/Kustomize/Terraform shape checks (nightly + on PR)
+- gitleaks secret scan over the full git history (every PR + nightly)
 - External link-check (weekly)
 
 ## Contributing
