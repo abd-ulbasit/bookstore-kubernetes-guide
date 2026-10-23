@@ -10,11 +10,13 @@
 #
 # THE SHAPE, AND WHY
 #
-#   pull_request ──► plan-pr      read-only role, speculative plan, text in
-#                                 the job summary. Nothing from it is applied.
+#   pull_request ──► plan-pr      read-only role, speculative plan in the
+#                                 job summary. Nothing from it is applied.
 #   push to main ──► plan-main    read-only role, saved binary plan uploaded
-#                                 as an artifact of THIS run, text in the
+#                                 as an artifact of THIS run, plan in the
 #                                 job summary for the approver to read.
+#                                 (Full text on a private repo only; see
+#                                 "PLAN TEXT IS AS PUBLIC AS THE REPOSITORY".)
 #                └─► apply        `environment: production` (required
 #                                 reviewers). Applies the saved plan from
 #                                 plan-main in the same run, or fails.

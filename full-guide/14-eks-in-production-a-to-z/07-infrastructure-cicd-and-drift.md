@@ -46,8 +46,8 @@ durable failures:
 
 Phase 14-R shipped the production shape:
 [`.github/workflows/terraform.yml`](../examples/bookstore-platform/terraform/.github/workflows/terraform.yml)
-runs a speculative `terraform plan` on every PR (plan text in the
-job summary, for code review). On every merge to `main` it plans
+runs a speculative `terraform plan` on every PR (the plan in the
+job summary, for code review; full text only on a private repo). On every merge to `main` it plans
 again, waits for a human to approve the `production` environment,
 and applies **that saved plan**. The
 workflow uses [GitHub OIDC trust](../examples/bookstore-platform/terraform/.github/workflows/terraform.yml)
