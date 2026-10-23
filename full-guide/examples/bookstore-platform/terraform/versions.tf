@@ -60,7 +60,7 @@ terraform {
 ################################################################################
 # Provider configuration. AWS region is the only required input; everything
 # else flows from there. The kubernetes/helm/kubectl providers all connect via
-# the EKS module's cluster outputs + a short-lived token from the AWS provider.
+# the EKS module's cluster outputs and an `aws eks get-token` exec plugin.
 ################################################################################
 
 provider "aws" {
@@ -71,35 +71,55 @@ provider "aws" {
   }
 }
 
-# Short-lived bearer token for the EKS cluster, refreshed every plan/apply.
-# This is the same token `aws eks get-token` returns.
+# Cluster authentication: an exec plugin, not a token in configuration.
 #
-# Data source results are persisted in STATE, so this token is in
-# terraform.tfstate in cleartext (marked sensitive, which only hides it
-# from CLI output). It is valid for about 15 minutes and carries the
-# applying identity's access, which is cluster-admin. That is the most
-# sensitive value in this tree's state; see README "What is in state".
-data "aws_eks_cluster_auth" "this" {
-  name = module.eks.cluster_name
-}
-
+# Each provider runs `aws eks get-token` itself, at the moment it connects,
+# with whatever AWS credentials the current run holds: the plan identity
+# during plan, the apply identity during apply. Nothing is stored.
+#
+# This used to be `token = data.aws_eks_cluster_auth.this.token`. A data
+# source is read once at plan time, and both state and a saved plan carry
+# its value: a cleartext bearer token in terraform.tfstate and in the
+# tfplan artifact. Worse, `terraform apply tfplan` does not re-read data
+# sources, so the CI apply job (which runs after a human approves, often
+# more than the token's ~15 minutes later) would connect with the PLAN
+# role's token: view-only, and usually expired. Every Helm, kubectl or
+# Kubernetes change would fail with 401 or 403.
+#
+# Requires the AWS CLI v2 on PATH (already a README prerequisite; GitHub's
+# ubuntu runners include it).
 provider "kubernetes" {
   host                   = module.eks.cluster_endpoint
   cluster_ca_certificate = base64decode(module.eks.cluster_certificate_authority_data)
-  token                  = data.aws_eks_cluster_auth.this.token
+
+  exec {
+    api_version = "client.authentication.k8s.io/v1beta1"
+    command     = "aws"
+    args        = ["eks", "get-token", "--cluster-name", module.eks.cluster_name, "--region", var.region]
+  }
 }
 
 provider "helm" {
   kubernetes {
     host                   = module.eks.cluster_endpoint
     cluster_ca_certificate = base64decode(module.eks.cluster_certificate_authority_data)
-    token                  = data.aws_eks_cluster_auth.this.token
+
+    exec {
+      api_version = "client.authentication.k8s.io/v1beta1"
+      command     = "aws"
+      args        = ["eks", "get-token", "--cluster-name", module.eks.cluster_name, "--region", var.region]
+    }
   }
 }
 
 provider "kubectl" {
   host                   = module.eks.cluster_endpoint
   cluster_ca_certificate = base64decode(module.eks.cluster_certificate_authority_data)
-  token                  = data.aws_eks_cluster_auth.this.token
   load_config_file       = false
+
+  exec {
+    api_version = "client.authentication.k8s.io/v1beta1"
+    command     = "aws"
+    args        = ["eks", "get-token", "--cluster-name", module.eks.cluster_name, "--region", var.region]
+  }
 }

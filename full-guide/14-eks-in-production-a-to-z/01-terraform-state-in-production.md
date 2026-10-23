@@ -513,8 +513,9 @@ never be able to take down the other.
 > contains literal secrets — provider credentials inline (don't, but
 > some patterns force this), RDS master passwords stored as Terraform
 > outputs (don't, use secrets manager), API tokens in `tfvars` files.
-> This tree's state also holds a short-lived cluster-admin bearer
-> token (`data.aws_eks_cluster_auth`; inventory in the platform README,
+> This tree's state holds no cluster token (its Kubernetes providers
+> use the `aws eks get-token` exec plugin), but it does hold IAM
+> policy documents and Helm values (inventory in the platform README,
 > "What is in state"). `bootstrap-state.sh` takes a KMS key ARN as its
 > third argument to set SSE-KMS as the bucket default, and it always
 > adds a bucket policy that denies non-TLS requests.

@@ -238,12 +238,11 @@ Terraform state holds every attribute of every resource and data source in this 
 
 | In state | Why it matters |
 |---|---|
-| `data.aws_eks_cluster_auth.this` token | A bearer token for the cluster, as the identity that ran plan/apply (cluster-admin). Valid ~15 minutes, refreshed on every run. The most sensitive value here. |
 | Helm release values (Karpenter, LB controller, Vault, ESO, Argo CD, Velero, Falco, Kyverno) | Configuration only: no passwords or tokens are passed through `values`/`set` in this tree. Keep it that way. Anything passed to `helm_release` lands in state. |
 | IAM role and policy documents; the ARNs of KMS keys; VPC, subnet and security-group IDs; endpoints; the OIDC provider | Not credentials, but a complete map of the account for anyone planning an attack. |
 | `local_file.kubeconfig` | The CA and endpoint only. It authenticates with the `aws eks get-token` exec plugin, so no token is written to disk or state. |
 
-Not in state: the Argo CD initial admin password (generated in-cluster and read by hand; see `argocd-bootstrap.tf`) and any Vault root token (initialised out-of-band; see `vault.tf`).
+Not in state: a cluster bearer token. The kubernetes, helm and kubectl providers authenticate with the `aws eks get-token` exec plugin (`versions.tf`), which mints a token when each provider connects, under that run's own identity, and stores it nowhere. (This tree used to read one through `data.aws_eks_cluster_auth`, which put a cleartext cluster-admin token in state and in every saved plan.) Also not in state: the Argo CD initial admin password (generated in-cluster and read by hand; see `argocd-bootstrap.tf`) and any Vault root token (initialised out-of-band; see `vault.tf`).
 
 What protects it: the state bucket from `bootstrap-state.sh` has versioning, a public-access-block on all four settings, and a bucket policy that denies non-TLS requests. Encryption is SSE-S3, or SSE-KMS if you pass a key ARN. With SSE-S3, anyone with `s3:GetObject` on the bucket can read state. With SSE-KMS, they also need `kms:Decrypt` under your key policy, and each read shows up in CloudTrail. Earlier versions of this tree marked the cluster CA and a KMS key ARN as `sensitive`. Both are non-secrets, so the flag was removed, with a comment in `outputs.tf` explaining why.
 
