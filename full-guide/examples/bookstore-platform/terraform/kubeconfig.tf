@@ -7,6 +7,12 @@
 # same one `aws eks update-kubeconfig` writes). This requires the AWS CLI to
 # be on the operator's PATH when they `kubectl` against the cluster — which
 # they need anyway to install the cluster.
+#
+# Laptop only. var.write_kubeconfig (default true) gates it; CI and the
+# drift check set it false. The file lives in the working directory of
+# whoever applied, so on a fresh CI runner it is always missing: refresh
+# then drops it from state, every plan re-creates it (no plan is ever
+# empty), and `plan -refresh-only` reports it as drift every night.
 ################################################################################
 
 locals {
@@ -53,6 +59,8 @@ locals {
 }
 
 resource "local_file" "kubeconfig" {
+  count = var.write_kubeconfig ? 1 : 0
+
   content              = local.kubeconfig_yaml
   filename             = "${path.module}/kubeconfig.yaml"
   file_permission      = "0600"

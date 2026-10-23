@@ -502,7 +502,10 @@ trigger logic:
   - `0` — no drift; the workflow exits cleanly.
   - `1` — plan errored (auth, syntax, network) — different problem;
     workflow fails so on-call notices.
-  - `2` — drift detected; the workflow proceeds.
+  - `2` — refresh found a difference between state and the real
+    resources; the workflow proceeds. (Both workflows set
+    `write_kubeconfig = false`, so the runner-local `kubeconfig.yaml`
+    is not one of them. See *How it works under the hood*.)
 
 On exit code 2, a second job, which holds `issues: write` and no
 cloud credentials, uses `actions/github-script` to either:
@@ -704,11 +707,21 @@ different things:
 
 A drift alarm that fires on the first is noise, and noise gets muted.
 `terraform plan -refresh-only` compares state with the real cloud and
-ignores the configuration, so its exit code 2 means only the second:
-real drift. Unapplied code is the apply workflow's business. The
-price: `-refresh-only` cannot see resources that were never in state
-(that is `driftctl`), and accepting drift into code also needs a
-`terraform apply -refresh-only` to update state (DRIFT.md Step 3a).
+ignores the configuration, so unapplied code never trips it: its exit
+code 2 means something outside Terraform changed. Usually a person,
+sometimes AWS (an EKS platform-version bump, a managed add-on update),
+which DRIFT.md Step 2 triages. Unapplied code is the apply workflow's
+business. The price: `-refresh-only` cannot see resources that were
+never in state (that is `driftctl`), and accepting drift into code also
+needs a `terraform apply -refresh-only` to update state (DRIFT.md
+Step 3a).
+
+One trap specific to CI: a resource that lives on the machine that ran
+the last apply always looks deleted to a fresh runner. This tree has
+one, `local_file.kubeconfig` (the `./kubeconfig.yaml` the cleanup
+scripts use). Left on, it would make the nightly check fail every night
+and give every `plan-main` a change to approve. Both workflows set
+`write_kubeconfig = false`.
 
 **Atlantis vs GitHub Actions — the architectural difference.**
 Atlantis is a **stateful** webhook server — it maintains its own

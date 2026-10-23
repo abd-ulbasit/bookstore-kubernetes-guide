@@ -49,8 +49,8 @@ output "kubeconfig_command" {
 }
 
 output "kubeconfig_path" {
-  description = "Path to the kubeconfig.yaml written by Terraform. Use with KUBECONFIG=./kubeconfig.yaml kubectl get nodes."
-  value       = local_file.kubeconfig.filename
+  description = "Path to the kubeconfig.yaml written by Terraform. Use with KUBECONFIG=./kubeconfig.yaml kubectl get nodes. Null when var.write_kubeconfig = false (CI)."
+  value       = var.write_kubeconfig ? local_file.kubeconfig[0].filename : null
 }
 
 output "karpenter_node_iam_role_arn" {

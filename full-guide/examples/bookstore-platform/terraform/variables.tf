@@ -144,6 +144,12 @@ variable "kms_key_administrators" {
   default     = []
 }
 
+variable "write_kubeconfig" {
+  description = "Write ./kubeconfig.yaml (used by the cleanup scripts) on apply. True for laptop use. CI and drift checks must set false: the file lives on the runner, so the next run always finds it missing, every plan re-creates it, and `plan -refresh-only` reports it as drift."
+  type        = bool
+  default     = true
+}
+
 variable "system_node_instance_types" {
   description = "Instance types for the small EKS-managed 'system' node group that hosts cluster-critical add-ons (Karpenter, LB controller, CoreDNS, metrics-server). Karpenter scales the rest."
   type        = list(string)

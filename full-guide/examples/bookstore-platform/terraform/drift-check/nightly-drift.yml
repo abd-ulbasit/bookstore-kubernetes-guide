@@ -9,7 +9,8 @@
 # What it does:
 #   - Runs every night at 03:00 UTC (cron '0 3 * * *').
 #   - Runs `terraform plan -refresh-only -detailed-exitcode`.
-#   - Exit code 0 = no drift. Exit code 2 = drift detected.
+#   - Exit code 0 = state matches the real resources. Exit code 2 = refresh
+#     found a difference (see "What exit code 2 means" below).
 #   - On drift, opens (or comments on) one GitHub issue that lists the
 #     drifted resource ADDRESSES and links the run. It never posts plan
 #     output.
@@ -18,8 +19,19 @@
 # "the cloud changed under us" (drift) and "main has code nobody applied
 # yet" (a pending change), and cannot tell them apart. -refresh-only
 # compares state with the real cloud and ignores the configuration, so
-# exit code 2 means real drift. Unapplied code is the apply workflow's job,
-# not an incident.
+# unapplied code never trips it. Unapplied code is the apply workflow's
+# job, not an incident.
+#
+# What exit code 2 means: some resource in state no longer matches what
+# refresh reads back. That is drift, but not always a problem: an AWS-side
+# update (an EKS platform-version bump, a managed add-on update) counts
+# too, and DRIFT.md Step 2 is how to tell them apart. It is NOT a reliable
+# signal for anything that lives on the machine that ran the last apply,
+# because a fresh runner never has it. In this tree that is
+# local_file.kubeconfig, which is why TF_VAR_write_kubeconfig is false
+# below and in terraform.yml. (A state written by a laptop apply still
+# holds that file; the first CI apply removes it from state. Until then
+# this check reports `local_file.kubeconfig[0]` as deleted.)
 #
 # Why no plan output in the issue: plan text carries attribute values (IPs,
 # ARNs, tags, policy documents, anything not marked sensitive), and on a
@@ -59,11 +71,14 @@ env:
   TF_VERSION: '1.10.5'
   WORKING_DIR: 'full-guide/examples/bookstore-platform/terraform'
   AWS_REGION: ${{ vars.AWS_REGION || 'ap-south-1' }}
-  # Same eks.tf inputs as terraform.yml (its PREREQUISITES 5), so the
+  # Same CI-mode inputs as terraform.yml (its PREREQUISITES 5), so the
   # drift check evaluates the configuration CI applies.
   TF_VAR_enable_cluster_creator_admin_permissions: 'false'
   TF_VAR_terraform_apply_role_arn: ${{ vars.TF_APPLY_ROLE_ARN }}
   TF_VAR_terraform_plan_role_arn: ${{ vars.TF_PLAN_ROLE_ARN }}
+  # No kubeconfig.yaml on a runner: it would be missing on every later run
+  # and show up as a change in every plan (kubeconfig.tf).
+  TF_VAR_write_kubeconfig: 'false'
 
 jobs:
   drift-check:

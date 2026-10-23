@@ -28,6 +28,19 @@ merged code that has not been applied yet". A plain `terraform plan` mixes
 both. Run it only after you understand the drift (Step 3), to see what
 reconciling would do.
 
+Two kinds of exit `2` are not a person changing something:
+
+- **AWS-side updates.** An EKS platform-version bump or a managed add-on
+  update shows up too. Step 2 covers telling them apart.
+- **Runner-local files.** `local_file.kubeconfig` writes
+  `./kubeconfig.yaml` next to whoever applied. A fresh CI runner never
+  has it, so refresh always reports it deleted. CI and the nightly check
+  set `write_kubeconfig = false` for that reason. If you see
+  `local_file.kubeconfig[0]` in the issue, state was last written by a
+  laptop apply; the next CI apply removes it from state. Locally, with
+  the default `write_kubeconfig = true`, the same entry just means you
+  deleted the file.
+
 Look at the **resource addresses** in the diff ("Objects have changed
 outside of Terraform"). Group them by:
 

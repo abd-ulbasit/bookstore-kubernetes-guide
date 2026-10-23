@@ -240,7 +240,7 @@ Terraform state holds every attribute of every resource and data source in this 
 |---|---|
 | Helm release values (Karpenter, LB controller, Vault, ESO, Argo CD, Velero, Falco, Kyverno) | Configuration only: no passwords or tokens are passed through `values`/`set` in this tree. Keep it that way. Anything passed to `helm_release` lands in state. |
 | IAM role and policy documents; the ARNs of KMS keys; VPC, subnet and security-group IDs; endpoints; the OIDC provider | Not credentials, but a complete map of the account for anyone planning an attack. |
-| `local_file.kubeconfig` | The CA and endpoint only. It authenticates with the `aws eks get-token` exec plugin, so no token is written to disk or state. |
+| `local_file.kubeconfig` (only when `write_kubeconfig = true`, the laptop default) | The CA and endpoint only. It authenticates with the `aws eks get-token` exec plugin, so no token is written to disk or state. |
 
 Not in state: a cluster bearer token. The kubernetes, helm and kubectl providers authenticate with the `aws eks get-token` exec plugin (`versions.tf`), which mints a token when each provider connects, under that run's own identity, and stores it nowhere. (This tree used to read one through `data.aws_eks_cluster_auth`, which put a cleartext cluster-admin token in state and in every saved plan.) Also not in state: the Argo CD initial admin password (generated in-cluster and read by hand; see `argocd-bootstrap.tf`) and any Vault root token (initialised out-of-band; see `vault.tf`).
 
@@ -397,7 +397,7 @@ If a person created the cluster from a laptop, the first CI apply removes that p
 
 ### Nightly drift detection
 
-`drift-check/nightly-drift.yml` runs `terraform plan -refresh-only -detailed-exitcode` at 03:00 UTC with the read-only plan role. Exit code 2 means real drift (not merged-but-unapplied code). It opens an issue that lists the drifted resource addresses and never posts plan output. Companion `drift-check/atlantis.yaml.example` for Atlantis users. `drift-check/DRIFT.md` is the runbook for "I got a drift alert, what do I do?".
+`drift-check/nightly-drift.yml` runs `terraform plan -refresh-only -detailed-exitcode` at 03:00 UTC with the read-only plan role. Exit code 2 means refresh found resources that no longer match state: drift, never merged-but-unapplied code, though not always a person (AWS-side updates count; see DRIFT.md Step 1). CI sets `write_kubeconfig = false`, because a runner-local `kubeconfig.yaml` would look deleted on every run. It opens an issue that lists the drifted resource addresses and never posts plan output. Companion `drift-check/atlantis.yaml.example` for Atlantis users. `drift-check/DRIFT.md` is the runbook for "I got a drift alert, what do I do?".
 
 ### Multi-region scaffolding
 

@@ -123,12 +123,16 @@
 #      production environment's reviewers the controls that matter most
 #      here.
 #
-#   5. eks.tf in CI mode. The env block below sets, for every job:
+#   5. CI-mode inputs (eks.tf, kubeconfig.tf). The env block below sets,
+#      for every job:
 #
 #        enable_cluster_creator_admin_permissions = false
 #        terraform_apply_role_arn = TF_APPLY_ROLE_ARN  (cluster-admin access
 #                                                      entry; KMS key admin)
 #        terraform_plan_role_arn  = TF_PLAN_ROLE_ARN   (view-only entry)
+#        write_kubeconfig = false    (no runner-local kubeconfig.yaml, which
+#                                     every later run would see as deleted;
+#                                     kubeconfig.tf)
 #
 #      Do not turn the creator entry back on here. The EKS module does not
 #      record the cluster's creator once: it re-derives "the creator" from
@@ -180,11 +184,14 @@ env:
   TF_VERSION: '1.10.5'
   WORKING_DIR: 'full-guide/examples/bookstore-platform/terraform'
   AWS_REGION: ${{ vars.AWS_REGION || 'ap-south-1' }}
-  # eks.tf CI mode (PREREQUISITES 5). Every job plans or applies the same
+  # CI-mode inputs (PREREQUISITES 5). Every job plans or applies the same
   # configuration, so every job gets the same inputs.
   TF_VAR_enable_cluster_creator_admin_permissions: 'false'
   TF_VAR_terraform_apply_role_arn: ${{ vars.TF_APPLY_ROLE_ARN }}
   TF_VAR_terraform_plan_role_arn: ${{ vars.TF_PLAN_ROLE_ARN }}
+  # No kubeconfig.yaml on a runner: it would be missing on every later run
+  # and show up as a change in every plan (kubeconfig.tf).
+  TF_VAR_write_kubeconfig: 'false'
 
 jobs:
   ##############################################################################
