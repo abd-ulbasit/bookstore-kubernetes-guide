@@ -1,5 +1,5 @@
 // Validate every ```mermaid block in full-guide/*.md against the same parser
-// version production uses (mermaid 10.9.1, configured in mkdocs.yml). Uses
+// version production uses (mermaid 10.9.8, configured in mkdocs.yml). Uses
 // mermaid.parse() inside a jsdom shim — no Chromium needed, runs in seconds.
 //
 // Catches syntax errors that mkdocs build does NOT catch (mermaid runs in the

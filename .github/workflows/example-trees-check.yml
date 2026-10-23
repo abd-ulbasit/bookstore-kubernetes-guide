@@ -164,7 +164,7 @@ jobs:
   # The mermaid-validity job that used to live here was a weak header-and-
   # keyword regex check. It has been superseded by the real mermaid.parse()
   # validation step in docs.yml, which loads the same parser version
-  # production renders with (10.9.1) and fails the build on any block that
+  # production renders with (10.9.8) and fails the build on any block that
   # doesn't actually parse. See .github/scripts/validate-mermaid.mjs.
 
   # Authoring hygiene, NOT secret scanning. Secret scanning is gitleaks, in

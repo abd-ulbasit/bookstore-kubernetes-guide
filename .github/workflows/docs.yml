@@ -53,7 +53,7 @@ jobs:
           fetch-depth: 0
 
       # Validate every ```mermaid block actually parses under the same parser
-      # version production renders with (10.9.1). mkdocs build does NOT catch
+      # version production renders with (10.9.8). mkdocs build does NOT catch
       # mermaid syntax errors — they only show up in the reader's browser as
       # "Syntax error in text". Failing fast here keeps broken diagrams from
       # ever being deployed.
@@ -68,8 +68,16 @@ jobs:
         # disagree. --ignore-scripts because this job runs PR content and
         # no package in the tree needs an install script. ESM bare-import
         # resolution walks up from the script file, so node_modules next to
-        # the script is found first.
+        # the script is found first. The first check fails the build if the
+        # locked mermaid and the one mkdocs.yml serves to readers differ;
+        # validating against a different parser would prove nothing.
         run: |
+          site=$(awk '/mermaid2:/{f=1} f && /version:/{print $2; exit}' mkdocs.yml)
+          locked=$(jq -r '.packages["node_modules/mermaid"].version' .github/scripts/package-lock.json)
+          if [ "$site" != "$locked" ]; then
+            echo "::error::mkdocs.yml serves mermaid $site but the validator is locked to $locked"
+            exit 1
+          fi
           npm ci --ignore-scripts --no-audit --no-fund --prefix .github/scripts
           node .github/scripts/validate-mermaid.mjs full-guide
 

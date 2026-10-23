@@ -53,7 +53,7 @@ plugins:
   - search
   - awesome-pages
   - mermaid2:
-      version: 10.9.1
+      version: 10.9.8
   - git-revision-date-localized:
       type: date
       enable_creation_date: true

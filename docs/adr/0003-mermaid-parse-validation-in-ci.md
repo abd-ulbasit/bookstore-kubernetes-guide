@@ -23,8 +23,8 @@ unquoted edge label, and `.` inside a dotted-edge label.
 
 We will validate every `\`\`\`mermaid` block in `full-guide/` by feeding
 it to **Mermaid's own parser** (`mermaid.parse()` from the
-`mermaid@10.9.1` npm package — the same version production renders
-with), inside a jsdom shim so it runs headless in CI in seconds. The
+`mermaid` npm package at the same version production renders
+with; 10.9.1 when this was written, 10.9.8 since 2026-10-24), inside a jsdom shim so it runs headless in CI in seconds. The
 script lives at `.github/scripts/validate-mermaid.mjs` and runs as a
 required step in `.github/workflows/docs.yml` **before** `mkdocs
 build`. A literal `\n` in a Mermaid block also hard-fails (it renders
@@ -62,4 +62,13 @@ as the text "\n", not a line break — well-known foot-gun).
 
 * `.github/scripts/validate-mermaid.mjs` — the validator.
 * `.github/workflows/docs.yml` — the CI wiring.
-* Mermaid 10.9.1 release notes for syntax quirks.
+* Mermaid 10.9.x release notes for syntax quirks.
+
+## Updates
+
+* **2026-10-24.** Production and the validator moved together from
+  10.9.1 to 10.9.8, a security patch release on the same line. 10.9.1
+  was affected by GHSA-m4gq-x24j-jpmf (high, prototype pollution in the
+  bundled DOMPurify) and by seven medium or low advisories fixed in
+  10.9.3 to 10.9.8. The validator's versions now come from
+  `.github/scripts/package-lock.json`, so the two cannot drift silently.
