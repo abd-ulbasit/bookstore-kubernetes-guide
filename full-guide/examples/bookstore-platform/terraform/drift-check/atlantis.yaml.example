@@ -29,6 +29,11 @@ projects:
         - '**/*.tf'
         - '*.tfvars'
     workflow: drift-aware
+    # Without this, anyone who can comment `atlantis apply` on a PR applies
+    # it. Require an approving review and a mergeable PR first. (Atlantis
+    # applies the plan file from the plan step, so -auto-approve below only
+    # suppresses a prompt; these requirements are the actual gate.)
+    apply_requirements: [approved, mergeable]
 
 # Workflow = the recipe of plan/apply steps.
 workflows:
@@ -38,8 +43,9 @@ workflows:
         - init:
             extra_args: ['-input=false']
         - plan:
+            # No -detailed-exitcode here: Atlantis treats any non-zero exit
+            # as a failed plan, and exit 2 just means "there are changes".
             extra_args:
-              - '-detailed-exitcode'
               - '-input=false'
               - '-no-color'
 
@@ -48,15 +54,17 @@ workflows:
         - apply:
             extra_args: ['-input=false', '-auto-approve']
 
-# How to invoke from an external cron:
+# How to invoke from an external cron: Atlantis's API (requires the server
+# to be started with an API secret). It plans the given ref and returns the
+# result as JSON; it does not post anywhere by itself, so the cron job must
+# file the issue. Note that this runs a FULL plan, which mixes drift with
+# merged-but-unapplied code. nightly-drift.yml uses -refresh-only to
+# separate them.
 #
-#   curl -XPOST https://atlantis.your-org.com/events \
-#     -H 'X-Github-Event: workflow_dispatch' \
-#     -H 'Authorization: Bearer <atlantis-secret>' \
-#     -d '{"action":"plan","project":"bookstore-platform"}'
-#
-# Atlantis runs the plan. If exit code is 2 (drift), it posts a comment to
-# the most recent PR — or, if you wire it that way, files a new issue.
+#   curl -X POST https://atlantis.your-org.com/api/plan \
+#     -H 'X-Atlantis-Token: <ATLANTIS-API-SECRET>' \
+#     -d '{"Repository":"<ORG>/<REPO>","Ref":"main","Type":"Github",
+#          "Paths":[{"Directory":"examples/bookstore-platform/terraform","Workspace":"default"}]}'
 #
 # Atlantis is one option. The GitHub Actions cron approach in nightly-drift.yml
 # is the simpler one for most teams. Pick whichever you're already using.
