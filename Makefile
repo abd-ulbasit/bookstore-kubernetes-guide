@@ -138,7 +138,7 @@ scan-go: ## govulncheck across every Go module under full-guide/examples/.
 # examples/bookstore/ tree was never scanned locally either — the same blind
 # spot the CI job had. Discovery keeps `make scan-go` honest as services move
 # or get added, and keeps it equivalent to the CI job it stands in for.
-	@command -v govulncheck >/dev/null || (echo "govulncheck not found; go install golang.org/x/vuln/cmd/govulncheck@latest" && exit 1)
+	@command -v govulncheck >/dev/null || (echo "govulncheck not found; go install golang.org/x/vuln/cmd/govulncheck@v1.9.0 (the version CI pins)" && exit 1)
 	@rc=0; \
 	for dir in $$(find full-guide/examples -name go.mod \
 	              -not -path '*/vendor/*' -not -path '*/.terraform/*' \

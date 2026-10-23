@@ -1,0 +1,24 @@
+# Dependabot keeps the SHA pins in .github/workflows/ current.
+#
+# Pinning every action to a commit SHA (see the header of security-scan.yml)
+# trades tag drift for staleness: a SHA never moves, so it also never picks up
+# a fix. Dependabot closes that gap. It rewrites both the SHA and the trailing
+# `# vX.Y.Z` comment, and each bump arrives as a reviewable PR instead of a
+# silent tag move.
+#
+# Scope is deliberately narrow: only the live workflows. The example trees
+# under full-guide/examples/ are quoted verbatim in chapter prose, so a bot
+# bump there would make the code and the chapter disagree. Those are bumped
+# by hand, together with the chapter text.
+version: 2
+updates:
+  - package-ecosystem: github-actions
+    directory: /
+    schedule:
+      interval: weekly
+      day: monday
+    groups:
+      actions:
+        patterns: ['*']
+    commit-message:
+      prefix: ci

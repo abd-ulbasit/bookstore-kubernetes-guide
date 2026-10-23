@@ -6,6 +6,15 @@ name: security-scan
 #
 # Triggers: every push to main, every PR touching scannable files, and
 # weekly on Mondays at 06:00 UTC (catches new CVEs against pinned tools).
+#
+# "Pinned" means pinned: every action is referenced by full commit SHA (the
+# trailing comment names the release), and every scanner by exact version:
+# Trivy v0.70.0 via trivy-action, govulncheck v1.9.0, Go via setup-go. A
+# moving tag on a scanner is a supply-chain hole in the job that holds
+# security-events: write. trivy-action itself had its version tags
+# force-pushed to malicious commits on 2026-03-19 (Aqua advisory
+# GHSA-cxm3-wv7p-598c); only the immutable v0.35.0 release survived. The SHA
+# below is v0.36.0, published 2026-04-22 as an immutable release.
 
 on:
   schedule:
@@ -31,11 +40,14 @@ jobs:
     name: trivy (vuln + secret + misconfig)
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v7
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 
       - name: Trivy filesystem scan (vulnerabilities)
-        uses: aquasecurity/trivy-action@v0.36.0
+        uses: aquasecurity/trivy-action@ed142fd0673e97e23eac54620cfb913e5ce36c25 # v0.36.0
         with:
+          # Pin the scanner, not just the action. v0.70.0 is also the action's
+          # default at this SHA; stating it means a bump is a visible diff.
+          version: 'v0.70.0'
           scan-type: 'fs'
           scan-ref: '.'
           format: 'sarif'
@@ -50,7 +62,7 @@ jobs:
           skip-dirs: 'node_modules,.terraform,site'
 
       - name: Upload Trivy SARIF to GitHub Security
-        uses: github/codeql-action/upload-sarif@v4
+        uses: github/codeql-action/upload-sarif@9b3254085494b55a0f7c4c2b3d2d52cc712ce370 # v4.39.1
         if: always()
         with:
           sarif_file: 'trivy-vuln.sarif'
@@ -86,7 +98,7 @@ jobs:
     outputs:
       modules: ${{ steps.find.outputs.modules }}
     steps:
-      - uses: actions/checkout@v7
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - id: find
         run: |
           set -euo pipefail
@@ -115,12 +127,15 @@ jobs:
       matrix:
         module: ${{ fromJSON(needs.discover-go-modules.outputs.modules) }}
     steps:
-      - uses: actions/checkout@v7
-      - uses: actions/setup-go@v7
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
         with:
           go-version: '1.26.5'
           cache-dependency-path: ${{ matrix.module }}/go.sum
-      - run: go install golang.org/x/vuln/cmd/govulncheck@latest
+      # Pinned version, not @latest. The Go module proxy plus the checksum
+      # database (sum.golang.org) make a version pin a content pin: the same
+      # version can never resolve to different source.
+      - run: go install golang.org/x/vuln/cmd/govulncheck@v1.9.0
       - name: govulncheck
         working-directory: ${{ matrix.module }}
         run: $(go env GOPATH)/bin/govulncheck ./...
@@ -136,12 +151,12 @@ jobs:
     name: runAsNonRoot acceptance list
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v7
-      - uses: azure/setup-helm@v5
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: azure/setup-helm@9bc31f4ebc9c6b171d7bfbaa5d006ae7abdb4310 # v5.0.1
         with: { version: 'v3.16.0' }
-      - uses: azure/setup-kubectl@v5
+      - uses: azure/setup-kubectl@bda439f5f36b99b262ebdcd3613869bddb064c8e # v5.2.0
         with: { version: 'v1.35.0' }
-      - uses: actions/setup-python@v7
+      - uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0 # v7.1.0
         with: { python-version: '3.12' }
       - run: pip install pyyaml
       - run: python .github/scripts/check-runasnonroot.py
@@ -202,7 +217,7 @@ jobs:
       contents: read
       issues: write
     steps:
-      - uses: actions/github-script@v9
+      - uses: actions/github-script@3a2844b7e9c422d3c10d287c895573f7108da1b3 # v9.0.0
         with:
           script: |
             const { owner, repo } = context.repo;
