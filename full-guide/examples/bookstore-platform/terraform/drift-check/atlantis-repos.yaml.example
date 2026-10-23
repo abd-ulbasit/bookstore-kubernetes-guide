@@ -1,0 +1,65 @@
+# atlantis-repos.yaml.example — sample SERVER-side Atlantis repo config.
+#
+# Pass it to the server: `atlantis server --repo-config=/etc/atlantis/repos.yaml`
+# (or ATLANTIS_REPO_CONFIG). It lives with the Atlantis deployment, NOT in
+# the Terraform repository, so a pull request cannot change it. That is the
+# point: Atlantis reads the repo-level atlantis.yaml from the PR's own
+# branch, so any gate written there can be deleted by the PR it is meant to
+# gate. The repo-level file (atlantis.yaml.example) only lists projects.
+#
+# PLANS RUN PR CODE WITH THE SERVER'S CREDENTIALS. Atlantis plans and
+# applies with one identity, the server's. `terraform plan` executes the
+# PR's provider plugins, data sources and module code, so anyone who can
+# open a PR that autoplans can act with that identity. The GitHub Actions
+# template avoids this with a separate read-only plan role. With Atlantis,
+# limit who can trigger plans (for example the server's --gh-team-allowlist,
+# or --disable-autoplan so that a maintainer comments `atlantis plan`), and
+# keep the server's IAM role as narrow as the tree allows.
+#
+# Because one identity both plans and applies, eks.tf's default "laptop
+# mode" creator entry is stable under Atlantis. Naming the server's role
+# explicitly is still clearer: set enable_cluster_creator_admin_permissions
+# = false and terraform_apply_role_arn = <server role ARN> in a tfvars file.
+
+repos:
+  - id: github.com/GITHUB_ORG/GITHUB_REPO
+
+    # THE GATE. An approving review, a PR GitHub would let you merge (so
+    # branch protection's required reviews and checks apply), and a branch
+    # that is up to date with main, before anyone can `atlantis apply`.
+    apply_requirements: [approved, mergeable, undiverged]
+    import_requirements: [approved, mergeable, undiverged]
+
+    # The workflow below runs for this repo. The repo-level atlantis.yaml
+    # may override nothing: not the requirements, not the workflow.
+    workflow: bookstore-platform
+    allowed_overrides: []
+
+    # Repo-defined workflows are arbitrary commands (`run:` steps) that the
+    # server executes with its cloud credentials. A PR could add one. Off.
+    allow_custom_workflows: false
+
+workflows:
+  bookstore-platform:
+    plan:
+      steps:
+        - init:
+            # Install exactly the committed provider versions and hashes.
+            extra_args: ['-input=false', '-lockfile=readonly']
+        - plan:
+            # No -detailed-exitcode: Atlantis treats any non-zero exit as a
+            # failed plan, and exit 2 just means "there are changes".
+            # write_kubeconfig=false: the working directory is a fresh
+            # clone each time, so a local kubeconfig.yaml would show up as
+            # a change in every plan (kubeconfig.tf).
+            extra_args:
+              - '-input=false'
+              - '-no-color'
+              - '-var=write_kubeconfig=false'
+    apply:
+      steps:
+        # Atlantis applies the plan file from the plan step. A saved plan
+        # applies without a prompt, so there is no -auto-approve; the
+        # apply_requirements above are the approval.
+        - apply:
+            extra_args: ['-input=false']

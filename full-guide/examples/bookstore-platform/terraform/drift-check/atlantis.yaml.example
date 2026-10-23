@@ -1,26 +1,36 @@
-# atlantis.yaml.example — sample Atlantis configuration with drift detection.
+# atlantis.yaml.example — sample REPO-level Atlantis configuration.
 #
 # Atlantis is a self-hosted Terraform automation server. It listens to GitHub
 # / GitLab webhooks and runs `terraform plan` / `terraform apply` per pull
-# request, with comment-driven flow ("/atlantis plan", "/atlantis apply").
-#
-# For drift detection, the recommended pattern is a cron-driven plan run that
-# files an issue if the plan produces a non-empty diff. Atlantis itself does
-# not run cron jobs — you wire it via an external scheduler (a Kubernetes
-# CronJob, a GitHub Actions cron workflow, or AWS EventBridge).
-#
-# This file is just the Atlantis side of the wiring: the project config + the
-# workflow that the cron-triggered call invokes.
+# request, with comment-driven flow ("atlantis plan", "atlantis apply").
 #
 # Copy this to atlantis.yaml at the repo root (NOT in this subdirectory).
+# It is half of the setup. The other half, which holds the apply gate and
+# the plan/apply steps, is SERVER-side: atlantis-repos.yaml.example.
+#
+# WHY THE GATE IS NOT IN THIS FILE. Atlantis reads atlantis.yaml from the
+# pull request's own branch. Anything here, the PR author can edit in the
+# same PR. An `apply_requirements: [approved, mergeable]` line in this file
+# is one they can delete before commenting `atlantis apply`. (A default
+# Atlantis server also rejects repo-level apply_requirements, and a
+# repo-level `workflows:` block, unless its server config allows them.)
+# So this file only says WHERE the Terraform is. The rules about WHEN it
+# may be applied, and HOW plan and apply run, live in the server's repo
+# config, which a PR cannot touch.
+#
+# For drift detection, Atlantis itself does not run cron jobs. Use
+# nightly-drift.yml (GitHub Actions), or call the Atlantis API from an
+# external scheduler (see the end of this file).
 
 version: 3
 
 # Project = one Terraform working directory + one state file.
 projects:
   - name: bookstore-platform
-    dir: examples/bookstore-platform/terraform
+    dir: full-guide/examples/bookstore-platform/terraform
     workspace: default
+    # Allowed at repo level without any server override. Keep it equal to
+    # TF_VERSION in the GitHub Actions templates.
     terraform_version: v1.10.5
     autoplan:
       enabled: true
@@ -28,43 +38,22 @@ projects:
         - '*.tf'
         - '**/*.tf'
         - '*.tfvars'
-    workflow: drift-aware
-    # Without this, anyone who can comment `atlantis apply` on a PR applies
-    # it. Require an approving review and a mergeable PR first. (Atlantis
-    # applies the plan file from the plan step, so -auto-approve below only
-    # suppresses a prompt; these requirements are the actual gate.)
-    apply_requirements: [approved, mergeable]
+        - '.terraform.lock.hcl'
+    # No `workflow:` and no `apply_requirements:` here. The server config
+    # sets both for this repository and does not let this file override
+    # them (allowed_overrides: []).
 
-# Workflow = the recipe of plan/apply steps.
-workflows:
-  drift-aware:
-    plan:
-      steps:
-        - init:
-            extra_args: ['-input=false']
-        - plan:
-            # No -detailed-exitcode here: Atlantis treats any non-zero exit
-            # as a failed plan, and exit 2 just means "there are changes".
-            extra_args:
-              - '-input=false'
-              - '-no-color'
-
-    apply:
-      steps:
-        - apply:
-            extra_args: ['-input=false', '-auto-approve']
-
-# How to invoke from an external cron: Atlantis's API (requires the server
-# to be started with an API secret). It plans the given ref and returns the
-# result as JSON; it does not post anywhere by itself, so the cron job must
-# file the issue. Note that this runs a FULL plan, which mixes drift with
-# merged-but-unapplied code. nightly-drift.yml uses -refresh-only to
-# separate them.
+# How to invoke a plan from an external cron: Atlantis's API (requires the
+# server to be started with an API secret). It plans the given ref and
+# returns the result as JSON; it does not post anywhere by itself, so the
+# cron job must file the issue. Note that this runs a FULL plan, which mixes
+# drift with merged-but-unapplied code. nightly-drift.yml uses -refresh-only
+# to separate them.
 #
 #   curl -X POST https://atlantis.your-org.com/api/plan \
 #     -H 'X-Atlantis-Token: <ATLANTIS-API-SECRET>' \
 #     -d '{"Repository":"<ORG>/<REPO>","Ref":"main","Type":"Github",
-#          "Paths":[{"Directory":"examples/bookstore-platform/terraform","Workspace":"default"}]}'
+#          "Paths":[{"Directory":"full-guide/examples/bookstore-platform/terraform","Workspace":"default"}]}'
 #
 # Atlantis is one option. The GitHub Actions cron approach in nightly-drift.yml
 # is the simpler one for most teams. Pick whichever you're already using.

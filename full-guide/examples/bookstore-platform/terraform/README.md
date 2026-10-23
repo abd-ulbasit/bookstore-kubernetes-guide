@@ -397,7 +397,7 @@ If a person created the cluster from a laptop, the first CI apply removes that p
 
 ### Nightly drift detection
 
-`drift-check/nightly-drift.yml` runs `terraform plan -refresh-only -detailed-exitcode` at 03:00 UTC with the read-only plan role. Exit code 2 means refresh found resources that no longer match state: drift, never merged-but-unapplied code, though not always a person (AWS-side updates count; see DRIFT.md Step 1). CI sets `write_kubeconfig = false`, because a runner-local `kubeconfig.yaml` would look deleted on every run. It opens an issue that lists the drifted resource addresses and never posts plan output. Companion `drift-check/atlantis.yaml.example` for Atlantis users. `drift-check/DRIFT.md` is the runbook for "I got a drift alert, what do I do?".
+`drift-check/nightly-drift.yml` runs `terraform plan -refresh-only -detailed-exitcode` at 03:00 UTC with the read-only plan role. Exit code 2 means refresh found resources that no longer match state: drift, never merged-but-unapplied code, though not always a person (AWS-side updates count; see DRIFT.md Step 1). CI sets `write_kubeconfig = false`, because a runner-local `kubeconfig.yaml` would look deleted on every run. It opens an issue that lists the drifted resource addresses and never posts plan output. Atlantis users: `drift-check/atlantis.yaml.example` (repo side, projects only) and `drift-check/atlantis-repos.yaml.example` (server side, where the apply gate must live, because Atlantis reads the repo file from the PR's own branch). `drift-check/DRIFT.md` is the runbook for "I got a drift alert, what do I do?".
 
 ### Multi-region scaffolding
 

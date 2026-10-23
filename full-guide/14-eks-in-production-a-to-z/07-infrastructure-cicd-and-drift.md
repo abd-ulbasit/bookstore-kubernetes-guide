@@ -118,10 +118,12 @@ The five-pattern landscape:
 - **Pattern 4 — Atlantis.** Self-hosted Terraform-aware webhook
   server. The flow is comment-driven (`atlantis plan`, `atlantis
   apply` posted in the PR). The killer feature: per-project workflow
-  configuration via `atlantis.yaml` — different terraform versions,
-  different roles, different require-approval policies per
-  subdirectory. Use for: monorepos with N Terraform projects each
-  needing different governance.
+  configuration — different terraform versions, different roles,
+  different require-approval policies per subdirectory. (Approval
+  policies belong in the server's repo config: the repo's
+  `atlantis.yaml` is read from the PR branch, so a PR can edit it; see
+  step 8.) Use for: monorepos with N Terraform projects each needing
+  different governance.
 - **Pattern 5 — Spacelift / Env0 / Terraform Cloud.** Managed
   Terraform-as-a-Service. Policy-as-code, drift detection, run
   history, state management — all included. **Most polished** but
@@ -564,7 +566,9 @@ runbook + the team are wired together.
 
 The bookstore-platform ships an
 [`atlantis.yaml.example`](../examples/bookstore-platform/terraform/drift-check/atlantis.yaml.example)
-showing the same drift pattern via Atlantis. The two workflows are
+(repo side) and
+[`atlantis-repos.yaml.example`](../examples/bookstore-platform/terraform/drift-check/atlantis-repos.yaml.example)
+(server side) showing the same pattern via Atlantis. The two workflows are
 mutually exclusive in practice — pick one. The reasons to add
 Atlantis:
 
@@ -576,6 +580,17 @@ Atlantis:
   GitHub-Actions-status-check pattern.
 - You already run Atlantis for application Terraform; adding the
   bookstore tree is incremental.
+
+If you do, the apply gate goes in the **server-side** repo config
+([`atlantis-repos.yaml.example`](../examples/bookstore-platform/terraform/drift-check/atlantis-repos.yaml.example)),
+not in the repo's `atlantis.yaml`. Atlantis reads `atlantis.yaml` from
+the pull request's own branch, so an `apply_requirements` line there is
+one the PR author can delete in the same PR before commenting `atlantis
+apply`. The server config sets `apply_requirements: [approved, mergeable,
+undiverged]`, the workflow, `allowed_overrides: []` and
+`allow_custom_workflows: false`; the repo file lists projects only. Note
+also that Atlantis plans PR code with the same credentials it applies
+with, which the two-role GitHub Actions setup avoids.
 
 If GitHub Actions + OIDC is meeting your needs, **don't add
 Atlantis**. The extra moving piece (you now run Atlantis itself —
