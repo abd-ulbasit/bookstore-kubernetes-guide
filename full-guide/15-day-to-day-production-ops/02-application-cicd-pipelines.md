@@ -553,7 +553,8 @@ makes the safe pattern *enforceable at admission* via Kyverno
 > `reviewdog/action-setup`) had its tags repointed to code that dumped
 > runner secrets into build logs. In March 2026 the version tags of
 > `aquasecurity/trivy-action` were force-pushed to malicious commits; only
-> its immutable v0.35.0 release survived. That is a security scanner,
+> its immutable `0.35.0` release survived
+> (GHSA-69fq-xp46-6x23, CVE-2026-33634). That is a security scanner,
 > running in the job that holds `security-events: write`. This repo's
 > own live workflows (`.github/workflows/` at the repo root) are
 > SHA-pinned, with Dependabot proposing the bumps as reviewable PRs.

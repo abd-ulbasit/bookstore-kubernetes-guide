@@ -12,9 +12,11 @@ name: security-scan
 # Trivy v0.70.0 via trivy-action, govulncheck v1.9.0, Go via setup-go. A
 # moving tag on a scanner is a supply-chain hole in the job that holds
 # security-events: write. trivy-action itself had its version tags
-# force-pushed to malicious commits on 2026-03-19 (Aqua advisory
-# GHSA-cxm3-wv7p-598c); only the immutable v0.35.0 release survived. The SHA
-# below is v0.36.0, published 2026-04-22 as an immutable release.
+# force-pushed to malicious commits on 2026-03-19 (GHSA-69fq-xp46-6x23,
+# CVE-2026-33634, which also covers setup-trivy and one Trivy release);
+# only the immutable 0.35.0 release survived. (A `v0.35.0` tag on the same
+# commit was created the next day.) The SHA below is v0.36.0, published
+# 2026-04-22 as an immutable release.
 
 on:
   schedule:
