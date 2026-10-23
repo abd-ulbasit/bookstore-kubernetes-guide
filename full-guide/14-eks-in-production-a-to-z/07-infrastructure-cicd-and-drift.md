@@ -336,14 +336,30 @@ aws iam create-role --role-name github-actions-terraform-apply \
 aws iam attach-role-policy --role-name github-actions-terraform-plan \
   --policy-arn arn:aws:iam::aws:policy/ReadOnlyAccess
 
+# SSE-KMS state bucket (Part 14 ch.01)? ReadOnlyAccess has no kms:Decrypt,
+# and every state read needs it. Grant it on the state key only.
+aws iam put-role-policy --role-name github-actions-terraform-plan \
+  --policy-name tfstate-kms-read --policy-document '{
+    "Version": "2012-10-17",
+    "Statement": [{"Effect": "Allow", "Action": "kms:Decrypt",
+                   "Resource": "<STATE_KMS_KEY_ARN>"}]}'
+
 # Apply role: in a THROWAWAY SANDBOX ACCOUNT ONLY, AdministratorAccess
 # gets the lab running. Before anything real, replace it with what this
 # tree creates (EKS, EC2/VPC, IAM roles+policies, KMS, S3, SQS, Logs, plus
-# state read/write and .tflock put/delete). IAM Access Analyzer can
-# generate that policy from the CloudTrail of a sandbox apply.
+# state read/write and .tflock put/delete, and, for an SSE-KMS state
+# bucket, kms:Decrypt + kms:GenerateDataKey on the state key, because
+# writing state and the .tflock object encrypts them). IAM Access Analyzer
+# can generate that policy from the CloudTrail of a sandbox apply.
 aws iam attach-role-policy --role-name github-actions-terraform-apply \
   --policy-arn arn:aws:iam::aws:policy/AdministratorAccess
 ```
+
+With SSE-KMS, the state key's **key policy** has to allow both roles as
+well: name them in it, or keep the default statement that lets IAM
+policies in the account grant use of the key. Without that, plans fail
+reading state and applies fail writing state and the lock object, with
+an `AccessDenied` from KMS rather than S3.
 
 Two things make the apply role worth this ceremony. First, this tree
 installs Helm charts and CRDs, so the identity that applies it is

@@ -111,9 +111,19 @@
 #      -lock=false so the role does not even need to write the .tflock
 #      object.
 #
+#      If the state bucket uses SSE-KMS (bootstrap-state.sh with a key
+#      ARN, `kms_key_id` in backend-s3.tf), every state read also needs
+#      kms:Decrypt on that key, and ReadOnlyAccess does not include it.
+#      Grant the plan role kms:Decrypt on the state key ARN only.
+#
 #      Apply role permissions: what this tree creates (EKS, EC2/VPC, IAM
 #      roles and policies, KMS, S3, SQS, CloudWatch Logs) plus state
-#      read/write and lock-file put/delete. Start from a broad policy in a
+#      read/write and lock-file put/delete. With an SSE-KMS state bucket
+#      that also means kms:Decrypt and kms:GenerateDataKey on the state
+#      key: writing the state and the .tflock object encrypts them with
+#      it. The key policy must allow both roles too: name them in it, or
+#      keep the default statement that lets IAM policies in the account
+#      grant use of the key. Start from a broad policy in a
 #      sandbox, then narrow it with IAM Access Analyzer's
 #      policy-generation from CloudTrail. Do not leave AdministratorAccess
 #      on it. Note that this tree installs Helm charts and CRDs through

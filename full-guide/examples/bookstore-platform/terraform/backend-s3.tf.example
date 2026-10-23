@@ -63,7 +63,10 @@ terraform {
     # SSE-S3, s3:GetObject on the bucket is enough to read state, and state
     # holds every attribute Terraform manages (README: "What is in state").
     # With a CMK, reading state also needs kms:Decrypt under a key policy you
-    # control, and every decrypt is in CloudTrail.
+    # control, and every decrypt is in CloudTrail. Whoever reads state then
+    # needs kms:Decrypt on the key; whoever writes state or the .tflock
+    # object also needs kms:GenerateDataKey (and the key policy must allow
+    # both). The CI roles are listed in .github/workflows/terraform.yml.
     #   kms_key_id = "arn:aws:kms:ap-south-1:<ACCOUNT-ID>:key/<KEY-ID>"
   }
 }
