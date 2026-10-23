@@ -28,7 +28,7 @@ variable "kubernetes_version" {
 }
 
 variable "az_count" {
-  description = "Number of Availability Zones to spread subnets across. EKS requires >=2; 3 is recommended for production."
+  description = "Number of Availability Zones to spread subnets across. EKS requires >=2; 3 is recommended for production. The subnet plan scales with it (locals.tf); changing it on an existing cluster re-addresses, and so replaces, the private and intra subnets."
   type        = number
   default     = 3
 
@@ -39,9 +39,14 @@ variable "az_count" {
 }
 
 variable "vpc_cidr" {
-  description = "Top-level VPC CIDR. Default 10.0.0.0/16 gives ~65k addresses across public/private/intra subnets."
+  description = "Top-level VPC CIDR. Default 10.0.0.0/16 gives ~65k addresses. Every subnet is derived from it (locals.tf): public and private get 1/16 of the VPC each per AZ, intra 1/64. Must be /16 to /20: a /20 VPC already gives /24 private subnets, which VPC-CNI pod IPs exhaust quickly."
   type        = string
   default     = "10.0.0.0/16"
+
+  validation {
+    condition     = can(cidrhost(var.vpc_cidr, 0)) && can(regex("^[0-9.]+/(1[6-9]|20)$", var.vpc_cidr))
+    error_message = "vpc_cidr must be an IPv4 CIDR with a prefix length from /16 to /20 (e.g. 10.0.0.0/16)."
+  }
 }
 
 variable "single_nat_gateway" {
