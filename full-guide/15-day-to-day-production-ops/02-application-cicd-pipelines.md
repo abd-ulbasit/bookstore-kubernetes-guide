@@ -542,13 +542,21 @@ makes the safe pattern *enforceable at admission* via Kyverno
 ## Production notes
 
 > **In production: pin every action to a commit SHA, not a tag.** The
-> workflows here pin to major versions (`actions/checkout@v4`) for
-> teaching readability. Production hardening pins to commit SHAs
-> (`actions/checkout@b4ffde65f46336ab88eb53be808477a3936bae11`) so a
-> malicious release of an action cannot affect already-merged
-> workflows. The tooling (`tj-actions/eslint-changed-files` 2024
-> compromise) made this a live attack vector. Dependabot can keep SHA
-> pins fresh.
+> workflow templates here pin to major versions (`actions/checkout@v4`)
+> for teaching readability. Production hardening pins to commit SHAs
+> with the version in a comment
+> (`actions/checkout@b4ffde65f46336ab88eb53be808477a3936bae11 # v4.1.1`),
+> because a tag is a mutable pointer: whoever controls the action's
+> repository can move it, and every workflow using it runs the new code
+> on its next run. This has happened twice at scale. In March 2025
+> `tj-actions/changed-files` (CVE-2025-30066, via a compromised
+> `reviewdog/action-setup`) had its tags repointed to code that dumped
+> runner secrets into build logs. In March 2026 the version tags of
+> `aquasecurity/trivy-action` were force-pushed to malicious commits; only
+> its immutable v0.35.0 release survived. That is a security scanner,
+> running in the job that holds `security-events: write`. This repo's
+> own live workflows (`.github/workflows/` at the repo root) are
+> SHA-pinned, with Dependabot proposing the bumps as reviewable PRs.
 
 > **In production: scope GitHub Actions secrets by environment.** Use
 > GitHub Environments (Settings → Environments) with required reviewers
@@ -556,8 +564,9 @@ makes the safe pattern *enforceable at admission* via Kyverno
 > declares `environment: production`, the action waits for a reviewer
 > approval before running, and the production-only secrets (e.g. a
 > prod-only OIDC role ARN) live in that environment. The dev workflow
-> sees only dev secrets. This is the GitHub Actions form of the
-> Terraform `environment:` pattern Phase 14b's drift workflow uses.
+> sees only dev secrets. This is the same `environment:` pattern the Terraform apply
+> workflow uses (ch.14.07): the apply role is trusted only from the
+> `production` environment.
 
 > **In production: alert on workflow *infrastructure* failures, not
 > just test failures.** A workflow that fails at "Configure AWS
