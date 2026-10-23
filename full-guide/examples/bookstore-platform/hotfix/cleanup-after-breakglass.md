@@ -43,7 +43,7 @@ Slack thread in #bookstore-platform-status:
   HH:MM  assumed breakglass; approver @alice; cleanup-owner @bob
   HH:MM  ran: aws ec2 describe-instances --filter "..."
   HH:MM  ran: aws ec2 terminate-instances --instance-ids i-0abc...
-  HH:MM  ran: aws iam create-policy --policy-name <NAME> --policy-document file://emergency.json
+  HH:MM  ran: aws iam update-assume-role-policy --role-name bookstore-platform-ebs-csi --policy-document file://fixed-trust.json
   HH:MM  ran: kubectl --kubeconfig /tmp/k.cfg get pods -A
   HH:MM  applied <PATH>/<FILE>.yaml
   HH:MM  session expiring; cleanup runbook starts
@@ -143,7 +143,10 @@ argocd app list -o json \
 ### 3d. Secrets inventory
 
 If the breakglass session created credentials (a new IAM user, a new
-RDS password, a new Vault token):
+RDS password, a new Vault token). The breakglass policy's
+`DenyIAMPersistence` statement forbids new IAM users, access keys,
+login profiles and roles, so finding one here means the deny was
+bypassed or edited. Treat that as a security event, not tidy-up:
 
 ```sh
 # List IAM users created in the window.
@@ -203,6 +206,21 @@ done
 Any extra policy → detach, OR commit it to Terraform if it's now
 permanent.
 
+Then review every **trust-policy** change. The breakglass policy can
+still `UpdateAssumeRolePolicy` on the platform's own roles (that is how
+an IRSA lockout gets fixed), and a trust policy that names an outside
+principal is persistence that survives the 1-hour TTL:
+
+```sh
+jq -r '.Events[] | select(.EventName == "UpdateAssumeRolePolicy") | .Resources[]? | select(.ResourceType=="AWS::IAM::Role") | .ResourceName' \
+  /tmp/INC-2026-05-20-001-cloudtrail.json | sort -u | while read -r role; do
+  echo "Role: $role"
+  aws iam get-role --role-name "$role" --query Role.AssumeRolePolicyDocument
+done
+# Every Principal must be one Terraform declares for that role. Anything
+# else: restore the Terraform version (terraform apply) and escalate.
+```
+
 ## Step 6 — Write the postmortem (hour 4-24)
 
 Open `../runbooks/postmortem-template.md`. Mandatory hotfix +
@@ -245,7 +263,9 @@ even if the responder claims "I didn't touch Stripe".
 
 ### "I created a temporary IAM user and left it"
 
-Step 3d catches this. The temporary user persists across the session
+The breakglass policy now denies `iam:CreateUser` and
+`iam:CreateAccessKey`, so this should be impossible. If it happened
+anyway, the deny was removed or bypassed: escalate. Step 3d catches it. The temporary user persists across the session
 expiry (the user is NOT tied to the role's TTL). Always delete
 temporary users in cleanup; if you forget, an auditor finds it 6
 months later and the postmortem-debt is much heavier.

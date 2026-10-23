@@ -526,8 +526,11 @@ policies define the breakglass role:
 
 - **Permissions policy** (`examples/bookstore-platform/hotfix/
   breakglass-iam-policy.json`): what the role can DO. Full admin
-  on most services; explicit Deny on CloudTrail-tampering and
-  Organizations / Billing.
+  on most services in the platform's regions; IAM limited to
+  repairing the platform's own roles; explicit Deny on
+  CloudTrail-tampering, Organizations / Billing, and on creating any
+  credential or principal (users, access keys, roles, managed-policy
+  versions) that would outlive the 1-hour session.
 - **Trust policy** (separate document, in Terraform): who can
   ASSUME the role. The Vault AWS auth method's IAM user is the
   only allowed principal; MFA is required at the STS layer
@@ -539,9 +542,11 @@ DurationSeconds (3600). Defense in depth: if Vault's lease tracking
 fails, the underlying IAM credentials still expire.
 
 **Cleanup vs forgetting — the half-life of orphaned resources.** A
-breakglass session that creates an IAM user, a temporary EC2
-instance, an S3 bucket — those resources have **no built-in
-expiration**. The cleanup checklist
+breakglass session that creates a temporary EC2 instance, an S3
+bucket, a snapshot — those resources have **no built-in
+expiration**. (IAM users, access keys and roles are the worst kind of
+ghost, because they are credentials. The breakglass policy denies
+creating them outright; the cleanup checklist still checks.) The cleanup checklist
 (`examples/bookstore-platform/hotfix/cleanup-after-breakglass.md`)
 is the **only** thing that removes them. A team that skips cleanup
 accumulates "ghost resources" — unattributable IAM users from 6

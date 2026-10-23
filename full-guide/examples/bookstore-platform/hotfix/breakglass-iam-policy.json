@@ -1,5 +1,5 @@
 {
-  "_comment_top": "Bookstore Platform — Part 15 ch.09 sample breakglass IAM policy. Attached to the `breakglass-emergency` IAM role. The role is assumable ONLY via Vault's AWS auth method with a 1-hour TTL; every API call is logged to CloudTrail; every assumption posts an alert to #bookstore-platform-audit. This is the FULL-ADMIN policy for ESCAPE HATCH use — invoked when a P0 incident exceeds what the standard platform-engineer role can do (e.g. an IAM lockout, a Vault outage, a need to delete a managed resource Crossplane refuses to delete). DO NOT use this as a daily-driver policy; the entire ch.15.09 'breakglass became normal' anti-pattern is what this file is trying to prevent.",
+  "_comment_top": "Bookstore Platform — Part 15 ch.09 sample breakglass IAM policy. Attached to the `breakglass-emergency` IAM role. The role is assumable ONLY via Vault's AWS auth method with a 1-hour TTL; every API call is logged to CloudTrail; every assumption posts an alert to #bookstore-platform-audit. This is the FULL-ADMIN policy for ESCAPE HATCH use — invoked when a P0 incident exceeds what the standard platform-engineer role can do (e.g. an IAM lockout, a Vault outage, a need to delete a managed resource Crossplane refuses to delete). DO NOT use this as a daily-driver policy; the entire ch.15.09 'breakglass became normal' anti-pattern is what this file is trying to prevent. IAM policy grammar has no comment element, so strip the _comment keys before attaching this document: jq 'walk(if type == \"object\" then with_entries(select(.key | startswith(\"_comment\") | not)) else . end)' breakglass-iam-policy.json > policy.json",
   "_comment_audit_requirements": "Every assumption of this role MUST: (1) be preceded by a Slack declaration in #bookstore-platform-status with an approver, (2) generate a CloudTrail event automatically forwarded to #bookstore-platform-audit, (3) be followed within 24h by the cleanup-after-breakglass.md checklist (rotate, review, postmortem).",
   "_comment_scope_warning": "This policy intentionally grants `*` on most services. The trade-off: the breakglass role is for SITUATIONS UNFORESEEN; a narrower policy that doesn't cover the unforeseen case defeats the purpose. The defence against abuse is not the policy scope; it's the auditing (CloudTrail + 24h cleanup) and the assumption gate (Vault AWS auth + Slack approval).",
   "Version": "2012-10-17",
@@ -17,43 +17,59 @@
       "Condition": {
         "StringEquals": {
           "aws:RequestedRegion": [
+            "ap-south-1",
             "us-east-1",
             "eu-west-1",
             "ap-southeast-1"
           ]
         }
-      }
+      },
+      "_comment_regions": "ap-south-1 is the platform stack's default region (terraform/variables.tf). It was missing from this list, so the escape hatch could not touch the default deployment. Keep this list equal to the regions you actually run in."
     },
     {
-      "Sid": "BreakglassIAMManagementLimited",
+      "Sid": "BreakglassIAMRead",
       "Effect": "Allow",
       "Action": [
         "iam:GetRole",
         "iam:GetRolePolicy",
         "iam:ListRoles",
         "iam:ListAttachedRolePolicies",
-        "iam:PassRole",
-        "iam:UpdateAssumeRolePolicy",
-        "iam:AttachRolePolicy",
-        "iam:DetachRolePolicy",
-        "iam:CreatePolicy",
-        "iam:DeletePolicy",
-        "iam:CreatePolicyVersion",
-        "iam:SetDefaultPolicyVersion",
+        "iam:ListRolePolicies",
+        "iam:GetPolicy",
+        "iam:GetPolicyVersion",
         "iam:GetUser",
         "iam:GetUserPolicy",
         "iam:ListUsers",
-        "iam:CreateAccessKey",
-        "iam:DeleteAccessKey",
-        "iam:UpdateAccessKey"
+        "iam:ListAccessKeys"
       ],
-      "Resource": "*",
+      "Resource": "*"
+    },
+    {
+      "Sid": "BreakglassIAMRepairPlatformRoles",
+      "Effect": "Allow",
+      "Action": [
+        "iam:PassRole",
+        "iam:UpdateAssumeRolePolicy",
+        "iam:AttachRolePolicy",
+        "iam:DetachRolePolicy"
+      ],
+      "Resource": "arn:aws:iam::*:role/bookstore-platform-*",
       "Condition": {
         "StringNotEquals": {
           "aws:ResourceTag/critical": "true"
         }
       },
-      "_comment_iam_scope": "IAM ops are needed when the platform locked itself out (a Crossplane composition that broke its own IAM role, an IRSA misconfiguration). EXCLUDED via the condition: roles tagged `critical=true` cannot be modified (the root admin role, the audit role, the breakglass role ITSELF) — this defends against the role mutating its own assume-policy to remove the audit trail."
+      "_comment_iam_scope": "IAM repair is for when the platform locked itself out (a Crossplane composition that broke its own role, an IRSA trust policy pointing at the wrong OIDC provider). It is limited to the platform's own roles (every role the stack creates is named <cluster_name>-..., default bookstore-platform-) and excludes roles tagged critical=true. That tag condition only protects roles that HAVE the tag: StringNotEquals is true when the key is absent, so tag the root admin, audit and breakglass roles. Residual risk, reviewed in cleanup-after-breakglass.md: a trust-policy edit on a platform role can still grant an outside principal that role's permissions, so every UpdateAssumeRolePolicy event from a breakglass session must be reviewed."
+    },
+    {
+      "Sid": "BreakglassContainLeakedKeys",
+      "Effect": "Allow",
+      "Action": [
+        "iam:UpdateAccessKey",
+        "iam:DeleteAccessKey"
+      ],
+      "Resource": "*",
+      "_comment_keys": "Deactivating or deleting a leaked access key is incident CONTAINMENT. Creating keys is not, and is denied below."
     },
     {
       "Sid": "BreakglassS3FullAccess",
@@ -176,8 +192,52 @@
         "arn:aws:s3:::bookstore-platform-velero-backups"
       ],
       "_comment_audit_buckets": "The audit + backup buckets are off-limits even for breakglass. A P0 incident is not a justification for deleting backups or disabling replication on the audit log — the backup IS what makes recovery possible."
+    },
+    {
+      "Sid": "DenyIAMPersistence",
+      "Effect": "Deny",
+      "Action": [
+        "iam:CreateUser",
+        "iam:CreateAccessKey",
+        "iam:CreateLoginProfile",
+        "iam:UpdateLoginProfile",
+        "iam:CreateServiceSpecificCredential",
+        "iam:UploadSSHPublicKey",
+        "iam:UploadSigningCertificate",
+        "iam:CreateRole",
+        "iam:PutRolePolicy",
+        "iam:PutUserPolicy",
+        "iam:AttachUserPolicy",
+        "iam:AddUserToGroup",
+        "iam:CreatePolicy",
+        "iam:CreatePolicyVersion",
+        "iam:SetDefaultPolicyVersion",
+        "iam:CreateOpenIDConnectProvider",
+        "iam:UpdateOpenIDConnectProviderThumbprint",
+        "iam:CreateSAMLProvider",
+        "iam:TagRole",
+        "iam:UntagRole"
+      ],
+      "Resource": "*",
+      "_comment_persistence": "The 1-hour TTL is the breakglass role's main safety property, and each action here defeats it: a new user, access key, login profile or role, or a rewritten managed policy, outlives the session. An earlier version ALLOWED iam:CreateAccessKey, CreatePolicy, CreatePolicyVersion, SetDefaultPolicyVersion, AttachRolePolicy and UpdateAssumeRolePolicy on every untagged role, which is a one-step path to permanent admin. Explicit Deny, like DenyCloudTrailManagement, so a future wildcard attachment cannot re-open it. TagRole/UntagRole are denied so the session cannot strip critical=true from a protected role."
+    },
+    {
+      "Sid": "DenyAttachingAdminEquivalentPolicies",
+      "Effect": "Deny",
+      "Action": "iam:AttachRolePolicy",
+      "Resource": "*",
+      "Condition": {
+        "ArnLike": {
+          "iam:PolicyARN": [
+            "arn:aws:iam::aws:policy/AdministratorAccess",
+            "arn:aws:iam::aws:policy/IAMFullAccess",
+            "arn:aws:iam::aws:policy/PowerUserAccess"
+          ]
+        }
+      },
+      "_comment_admin_attach": "Repairing a platform role never needs AdministratorAccess; attaching it would turn a scoped IRSA role into a standing admin."
     }
   ],
   "_comment_assume_role_policy_separately": "This is the PERMISSIONS POLICY. The TRUST POLICY (which principals can assume the role) lives in a separate document. The trust policy MUST require: (a) the Vault AWS auth method's IAM principal, (b) MFA on the requesting human (sts:MultiFactorAuthPresent), (c) a 1-hour DurationSeconds limit (3600). Both policies together make the breakglass role complete.",
-  "_comment_what_this_does_not_grant": "Intentionally not granted: organizations:*, aws-portal:*, billing:*, marketplace:*, cloudtrail:Delete*/Stop*/Update*. The breakglass role is for OPERATIONAL emergencies, not for organisational changes; the latter requires a different escalation path (the AWS Organizations root account with two-person rule)."
+  "_comment_what_this_does_not_grant": "Intentionally not granted: organizations:*, aws-portal:*, billing:*, marketplace:*, cloudtrail:Delete*/Stop*/Update*, and any action that creates a credential or principal that outlives the 1-hour session (see DenyIAMPersistence). The breakglass role is for OPERATIONAL emergencies, not for organisational changes; the latter requires a different escalation path (the AWS Organizations root account with two-person rule)."
 }
