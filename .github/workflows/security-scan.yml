@@ -9,7 +9,7 @@ name: security-scan
 #
 # "Pinned" means pinned: every action is referenced by full commit SHA (the
 # trailing comment names the release), and every scanner by exact version:
-# Trivy v0.70.0 via trivy-action, govulncheck v1.9.0, Go via setup-go. A
+# Trivy v0.76.1 via trivy-action, govulncheck v1.9.0, Go via setup-go. A
 # moving tag on a scanner is a supply-chain hole in the job that holds
 # security-events: write. trivy-action itself had its version tags
 # force-pushed to malicious commits on 2026-03-19 (GHSA-69fq-xp46-6x23,
@@ -59,9 +59,15 @@ jobs:
       - name: Trivy filesystem scan (vulnerabilities)
         uses: aquasecurity/trivy-action@ed142fd0673e97e23eac54620cfb913e5ce36c25 # v0.36.0
         with:
-          # Pin the scanner, not just the action. v0.70.0 is also the action's
-          # default at this SHA; stating it means a bump is a visible diff.
-          version: 'v0.70.0'
+          # Pin the scanner, not just the action. The action's default at this
+          # SHA is v0.70.0, which is inside the affected ranges of
+          # GHSA-mcj4-mphf-j9ff (high, fixed 0.71.1), GHSA-q3fv-x8vg-qqm4
+          # (high, fixed 0.71.0) and GHSA-8rc5-4fr6-64pw (medium, fixed
+          # 0.72.0). v0.76.1 (2026-10-21, immutable release) is outside all
+          # three, and no advisory listed it on 2026-10-24.
+          # Dependabot bumps the action SHA but never this input: bump it by
+          # hand, in all three steps, and check the advisories when you do.
+          version: 'v0.76.1'
           scan-type: 'fs'
           scan-ref: '.'
           format: 'sarif'
@@ -144,7 +150,7 @@ jobs:
       - name: Trivy image scan
         uses: aquasecurity/trivy-action@ed142fd0673e97e23eac54620cfb913e5ce36c25 # v0.36.0
         with:
-          version: 'v0.70.0'
+          version: 'v0.76.1'   # same as the fs step above
           scan-type: 'image'
           image-ref: scan/${{ steps.name.outputs.name }}:ci
           format: 'sarif'
@@ -154,7 +160,7 @@ jobs:
       - name: SBOM (CycloneDX)
         uses: aquasecurity/trivy-action@ed142fd0673e97e23eac54620cfb913e5ce36c25 # v0.36.0
         with:
-          version: 'v0.70.0'
+          version: 'v0.76.1'   # same as the fs step above
           scan-type: 'image'
           image-ref: scan/${{ steps.name.outputs.name }}:ci
           format: 'cyclonedx'

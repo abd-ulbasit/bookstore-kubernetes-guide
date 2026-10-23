@@ -3,6 +3,7 @@
 **Last hand-verified:** 2026-10-24 (sections 1.1, 1.2, 2 header, 6); 2026-07-27 (the rest)
 **Scanned by:** [`.github/workflows/security-scan.yml`](.github/workflows/security-scan.yml) (runs weekly + on push to `main`)
 **Local-equivalent commands:** `make scan-trivy scan-terraform scan-go scan-secrets`
+**Scanner versions in CI:** Trivy v0.76.1 (trivy-action's `version:` input; Dependabot bumps the action's SHA but not this input, so it is bumped by hand), govulncheck v1.9.0, gitleaks v8.30.1. The `make` targets use whatever is installed locally; for Trivy, use v0.76.1 or later (v0.70.0, the action's own default, is affected by GHSA-mcj4-mphf-j9ff and GHSA-q3fv-x8vg-qqm4).
 
 This document is the **hand-written triage** of the findings the security
 scanners produce against the repo: which are real, which are accepted, and

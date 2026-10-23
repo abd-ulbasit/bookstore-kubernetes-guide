@@ -10,6 +10,9 @@
 # under full-guide/examples/ are quoted verbatim in chapter prose, so a bot
 # bump there would make the code and the chapter disagree. Those are bumped
 # by hand, together with the chapter text.
+#
+# Dependabot also never touches an action's INPUTS. The Trivy version that
+# trivy-action installs (`version:` in security-scan.yml) is bumped by hand.
 version: 2
 updates:
   - package-ecosystem: github-actions
