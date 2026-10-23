@@ -368,7 +368,7 @@ Installs HashiCorp Vault `0.30.x` (app version 1.18.x) as a 3-replica Raft clust
 
 ### Nightly drift detection
 
-`drift-check/nightly-drift.yml` runs `terraform plan -detailed-exitcode` at 03:00 UTC. Exit code 2 (drift) → opens an issue. Companion `drift-check/atlantis.yaml.example` for Atlantis users. `drift-check/DRIFT.md` is the runbook for "I got a drift alert, what do I do?".
+`drift-check/nightly-drift.yml` runs `terraform plan -refresh-only -detailed-exitcode` at 03:00 UTC with the read-only plan role. Exit code 2 means real drift (not merged-but-unapplied code). It opens an issue that lists the drifted resource addresses and never posts plan output. Companion `drift-check/atlantis.yaml.example` for Atlantis users. `drift-check/DRIFT.md` is the runbook for "I got a drift alert, what do I do?".
 
 ### Multi-region scaffolding
 
