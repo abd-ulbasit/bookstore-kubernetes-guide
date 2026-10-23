@@ -3,14 +3,14 @@
 > Why local Terraform state is a one-laptop fiction and every team running
 > EKS hits the wall the moment a second human or a CI runner shows up; the
 > S3 backend with **`use_lockfile = true`** (native S3 locking, Terraform
-> 1.10+, **no DynamoDB**); bucket bootstrap via `bootstrap-state.sh`; the
+> 1.11+, experimental in 1.10, **no DynamoDB**); bucket bootstrap via `bootstrap-state.sh`; the
 > four `terraform state` commands every operator needs; and the
 > blast-radius rule that decides how many state files you actually want.
 
 **Estimated time:** ~30 min read · ~60 min hands-on
 **Prerequisites:** [Part 13 ch.01](../13-grand-capstone-bookstore-platform/01-bookstore-2-from-toy-to-platform.md) — Bookstore Platform Terraform tree you'll move to remote state · [Part 10 ch.01](../10-cloud-and-managed-kubernetes/01-managed-kubernetes-model.md) — why cloud K8s requires shared state from day one
 
-**You'll know after this:** • understand why local Terraform state breaks the moment a second operator or CI runner appears · • configure an S3 backend with `use_lockfile = true` (Terraform 1.10+, no DynamoDB) · • bootstrap the state bucket with `bootstrap-state.sh` without a chicken-and-egg loop · • run the four `terraform state` commands (`list`, `show`, `mv`, `rm`) safely · • choose blast-radius boundaries that decide how many state files your tree actually wants
+**You'll know after this:** • understand why local Terraform state breaks the moment a second operator or CI runner appears · • configure an S3 backend with `use_lockfile = true` (GA in Terraform 1.11, no DynamoDB) · • bootstrap the state bucket with `bootstrap-state.sh` without a chicken-and-egg loop · • run the four `terraform state` commands (`list`, `show`, `mv`, `rm`) safely · • choose blast-radius boundaries that decide how many state files your tree actually wants
 
 <!-- tags: terraform, cloud, day-2, finops, foundations -->
 
@@ -92,7 +92,7 @@ The four dimensions and how the S3-with-lockfile backend addresses each:
   pre-apply state, both writing back their own post-apply states, the
   second clobbering the first. Locking serializes them: the first apply
   takes the lock, the second waits (or fails fast with `-lock-timeout=0`).
-  Terraform 1.10+ writes a `.tflock` object to the state bucket using
+  Terraform 1.11+ (1.10 experimentally) writes a `.tflock` object to the state bucket using
   S3's `If-None-Match` conditional-write semantics; if the object
   already exists, the second writer is rejected. When the apply
   completes the lock object is deleted.
@@ -111,8 +111,9 @@ The four dimensions and how the S3-with-lockfile backend addresses each:
   the most common misconfiguration (an accidentally public state
   bucket leaking everything).
 
-Terraform 1.10 (October 2024) made `use_lockfile = true` GA on the S3
-backend, **deprecating the long-standing DynamoDB lock-table pattern**.
+Terraform 1.10 (late 2024) introduced `use_lockfile = true` on the S3
+backend as an experimental feature, and Terraform 1.11 made it GA,
+**deprecating the long-standing DynamoDB lock-table pattern**.
 The legacy pattern needed a separate DynamoDB table (one more resource,
 one more IAM policy, one more capacity-mode decision); the new pattern
 needs only the S3 bucket itself. Teams that still have
@@ -172,7 +173,7 @@ Spacelift             built-in               built-in       high             $$$
 ────────────────────  ─────────────────────  ─────────────  ───────────────  ─────────────  ───────────────────────────
 THE BOOKSTORE PLATFORM CHOICE: S3 + use_lockfile.
   Reasons: AWS-native (one less vendor relationship), free at our scale,
-  HCL-standard backend block (no proprietary syntax), Terraform 1.10+
+  HCL-standard backend block (no proprietary syntax), Terraform 1.11+
   native locking removes the last reason to add DynamoDB.
 ```
 
@@ -182,8 +183,9 @@ THE BOOKSTORE PLATFORM CHOICE: S3 + use_lockfile.
 
 - AWS CLI v2 configured: `aws sts get-caller-identity` returns the
   account you expect to own the state bucket.
-- Terraform `>= 1.10.0` (verifiable via `terraform version`). Versions
-  earlier than 1.10 do not support `use_lockfile`.
+- Terraform `>= 1.11` (verifiable via `terraform version`), where
+  `use_lockfile` is GA. 1.10 has it as an experimental feature; earlier
+  versions do not support it.
 - The bookstore-platform Terraform tree applied or partially-applied
   to local state. If you've never run `terraform apply` against it,
   the migration step below is a no-op (Terraform just writes an empty
@@ -384,7 +386,7 @@ force-unlocking a live apply is the path to state corruption.
 
 ## How it works under the hood
 
-**The `use_lockfile = true` mechanism.** Terraform 1.10's S3 backend
+**The `use_lockfile = true` mechanism.** Terraform 1.10+'s S3 backend
 writes a small JSON `.tflock` object to the state bucket using S3's
 `PutObject` API with an `If-None-Match: *` header. S3 honors that
 header as a conditional write: the put succeeds only if no object
@@ -511,6 +513,11 @@ never be able to take down the other.
 > contains literal secrets — provider credentials inline (don't, but
 > some patterns force this), RDS master passwords stored as Terraform
 > outputs (don't, use secrets manager), API tokens in `tfvars` files.
+> This tree's state also holds a short-lived cluster-admin bearer
+> token (`data.aws_eks_cluster_auth`; inventory in the platform README,
+> "What is in state"). `bootstrap-state.sh` takes a KMS key ARN as its
+> third argument to set SSE-KMS as the bucket default, and it always
+> adds a bucket policy that denies non-TLS requests.
 > The `backend "s3"` block accepts `kms_key_id = "arn:..."`. Cost: KMS
 > charges per-request (\$0.03 per 10k requests) plus \$1/month per CMK.
 > For typical Terraform usage (tens of applies/day), KMS adds pennies
@@ -598,7 +605,7 @@ State-backend checklist (the migration is done when all six are yes):
 1. **Why does the chapter say `use_lockfile = true` replaces the DynamoDB lock table, and what changed in S3 that made this possible?**
    <details><summary>Show answer</summary>
 
-   S3 added strong read-after-write consistency plus conditional writes (If-None-Match), which lets the backend create a `<key>.tflock` object atomically and refuse to overwrite it while another apply holds it. Terraform 1.10+ implements its lock protocol against that primitive, so the DynamoDB table — which used to provide the locking — is no longer needed.
+   S3 added strong read-after-write consistency plus conditional writes (If-None-Match), which lets the backend create a `<key>.tflock` object atomically and refuse to overwrite it while another apply holds it. Terraform 1.10+ implements (GA from 1.11) its lock protocol against that primitive, so the DynamoDB table — which used to provide the locking — is no longer needed.
 
    </details>
 
