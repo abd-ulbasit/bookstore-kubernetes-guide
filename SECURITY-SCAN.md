@@ -173,7 +173,7 @@ under it is still correct; the rule IDs are the same in Trivy.
 | Rule | File:Line | Status | Why |
 |---|---|---|---|
 | `AVD-AWS-0040` Public cluster access enabled | `main.tf:70` | **Accepted (DEV default; production override documented)** | `cluster_endpoint_public_access = true` is the default *for the DEV example* so a reader can `kubectl` from their laptop without setting up a bastion. The variable is gated; the chapter explicitly teaches `cluster_endpoint_public_access = false` for production. |
-| `AVD-AWS-0041` Cluster public CIDR `0.0.0.0/0` | `main.tf:71` | **Accepted (DEV default; production override documented)** | Paired with AVD-0040. `cluster_endpoint_public_access_cidrs` defaults to `["0.0.0.0/0"]` for the DEV example. Production: scope to the operator egress CIDR. Same gating + chapter discussion as above. |
+| `AVD-AWS-0041` Cluster public CIDR `0.0.0.0/0` | `main.tf:71` | **Accepted (DEV default; production override documented)** | Paired with AVD-0040. `cluster_endpoint_public_access_cidrs` defaults to `["0.0.0.0/0"]` for the DEV example. Production: scope to the operator egress CIDR. Same gating + chapter discussion as above. Since 2026-10-24 a variable validation refuses this open default when `tags.Environment` is `prod`/`production`, so the production override is enforced at plan time, not only taught. |
 | `AVD-AWS-0104` Security group egress to internet | `node_groups.tf:247` | **Accepted** | Worker nodes egress to the internet for ECR image pulls + EKS addon delivery. The alternative is a fully private cluster with VPC endpoints for ECR-API + ECR-DKR + S3 — covered in ch.14.08 (`var.enable_vpc_endpoints = true`). |
 
 ### 2.2) Medium finding — tracked

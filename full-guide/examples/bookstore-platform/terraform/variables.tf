@@ -62,9 +62,22 @@ variable "cluster_endpoint_public_access" {
 }
 
 variable "cluster_endpoint_public_access_cidrs" {
-  description = "CIDRs allowed to reach the public EKS API endpoint. 0.0.0.0/0 is wide-open and only acceptable for dev. Lock down to your office/VPN egress range for production."
+  description = "CIDRs allowed to reach the public EKS API endpoint. 0.0.0.0/0 is wide-open and only acceptable for dev. Lock down to your office/VPN egress range for production. A validation refuses 0.0.0.0/0 on a public endpoint when tags.Environment is prod or production."
   type        = list(string)
   default     = ["0.0.0.0/0"]
+
+  # The open default is a DEV convenience (SECURITY-SCAN.md 2.1 accepts it
+  # as such). This turns "the chapter teaches the production override" into
+  # something the plan enforces: tag the stack as prod and the open
+  # endpoint stops planning.
+  validation {
+    condition = !(
+      var.cluster_endpoint_public_access &&
+      contains(var.cluster_endpoint_public_access_cidrs, "0.0.0.0/0") &&
+      contains(["prod", "production"], lower(lookup(var.tags, "Environment", "")))
+    )
+    error_message = "tags.Environment is prod/production but the public EKS endpoint is open to 0.0.0.0/0. Set cluster_endpoint_public_access = false, or narrow cluster_endpoint_public_access_cidrs to your VPN/office egress ranges."
+  }
 }
 
 variable "enable_cluster_creator_admin_permissions" {

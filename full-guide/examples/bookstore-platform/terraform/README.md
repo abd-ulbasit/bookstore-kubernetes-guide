@@ -221,7 +221,7 @@ When in doubt, re-run `make verify-cleanup`. It enumerates every check.
 This deploy is dev-grade. To move it to production, walk this list:
 
 - **NAT gateway** — `single_nat_gateway = false`. Multi-AZ NAT removes a single-zone failure mode (and costs ~$66/month extra).
-- **API endpoint** — `cluster_endpoint_public_access = false`, or lock `cluster_endpoint_public_access_cidrs` to your office/VPN egress range. Public + `0.0.0.0/0` is a footgun; if your IAM ever leaks, the attacker can directly hit the API server.
+- **API endpoint** — `cluster_endpoint_public_access = false`, or lock `cluster_endpoint_public_access_cidrs` to your office/VPN egress range. Public + `0.0.0.0/0` is a footgun; if your IAM ever leaks, the attacker can directly hit the API server. Tag the stack `Environment = "prod"` and the plan refuses the open default.
 - **System node group sizing** — `t3.medium` is enough for the controllers we host. If you add more cluster-critical workloads (Prometheus, Fluent Bit, OPA Gatekeeper, …), bump to `m6i.large` or larger.
 - **EKS audit logs** — already on. Set a CloudWatch retention policy: `aws logs put-retention-policy --log-group-name /aws/eks/<CLUSTER>/cluster --retention-in-days 90`.
 - **KMS key rotation** — the EKS module enables automatic rotation on the cluster encryption key by default. Confirm with `aws kms describe-key --key-id <KEY> --query 'KeyMetadata.KeyRotationStatus'`.
