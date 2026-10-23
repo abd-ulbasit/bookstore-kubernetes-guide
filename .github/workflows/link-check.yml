@@ -18,14 +18,18 @@ on:
       - 'README.md'
 
 permissions:
-  contents: read
-  issues: write    # to open/update the rolling drift issue
+  contents: read   # write scopes are granted per job, below
 
 jobs:
   lychee:
     runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      issues: write    # to open/update the rolling link-rot issue
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
 
       - name: Cache lychee results
         # Cache between runs so unchanged URLs aren't re-fetched every week.

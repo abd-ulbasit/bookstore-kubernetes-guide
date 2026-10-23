@@ -25,11 +25,13 @@ on:
       - 'full-guide/**'
       - 'mkdocs.yml'
 
+# Workflow-level default is read-only. Each job is granted only what it
+# needs: `build` runs PR content (markdown, mkdocs plugins, the mermaid
+# validator's npm dependencies) and gets no write scope at all; only
+# `deploy`, which runs on main and never checks out code, can write Pages
+# and mint an OIDC token; only `rolling-failure-issue` can write issues.
 permissions:
   contents: read
-  pages: write
-  id-token: write
-  issues: write        # to open / update the rolling failure issue
 
 concurrency:
   group: pages
@@ -38,9 +40,12 @@ concurrency:
 jobs:
   build:
     runs-on: ubuntu-latest
+    permissions:
+      contents: read
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
+          persist-credentials: false
           fetch-depth: 0
 
       # Validate every ```mermaid block actually parses under the same parser
@@ -75,6 +80,9 @@ jobs:
     if: github.ref == 'refs/heads/main'
     needs: build
     runs-on: ubuntu-latest
+    permissions:
+      pages: write       # publish the Pages artifact
+      id-token: write    # deploy-pages proves its identity to Pages via OIDC
     environment:
       name: github-pages
       url: ${{ steps.deployment.outputs.page_url }}
