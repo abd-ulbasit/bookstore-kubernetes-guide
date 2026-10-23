@@ -46,11 +46,14 @@ durable failures:
 
 Phase 14-R shipped the production shape:
 [`.github/workflows/terraform.yml`](../examples/bookstore-platform/terraform/.github/workflows/terraform.yml)
-runs `terraform plan` on every PR (with the plan output posted as a
-PR comment) and `terraform apply` on every merge to `main`. The
+runs a speculative `terraform plan` on every PR (plan text in the
+job summary, for code review). On every merge to `main` it plans
+again, waits for a human to approve the `production` environment,
+and applies **that saved plan**. The
 workflow uses [GitHub OIDC trust](../examples/bookstore-platform/terraform/.github/workflows/terraform.yml)
-to assume an IAM role — no AWS access keys are ever stored in
-GitHub Secrets. Drift detection ships under
+to assume one of two IAM roles, a read-only plan role or an apply
+role, each trusted only from its own GitHub environment. No AWS
+access keys are ever stored in GitHub Secrets. Drift detection ships under
 [`drift-check/`](../examples/bookstore-platform/terraform/drift-check/):
 a nightly workflow runs `terraform plan -detailed-exitcode` and opens
 a deduplicated GitHub issue on any non-zero diff.
@@ -76,8 +79,9 @@ and how drift is policed.
 > minute) JWT per workflow run; STS exchanges it for credentials
 > that exist only for that run. No secrets to rotate, no keys to
 > leak. The bookstore-platform's `.github/workflows/terraform.yml`
-> uses this from line 111-116 (the `aws-actions/configure-aws-
-> credentials@v4` step).
+> uses this in every job (the `aws-actions/configure-aws-credentials`
+> steps, SHA-pinned), each job assuming the role trusted for its own
+> environment.
 
 ## Mental model
 
@@ -146,6 +150,27 @@ returns temporary credentials (default 1 hour). The credentials
 exist only inside the workflow's environment; no human ever sees
 them; nothing is stored.
 
+**Which `sub` claim a run presents is the whole game.** The `sub`
+claim is what a trust policy pins, and it depends on the trigger:
+
+| Run | `sub` claim |
+|---|---|
+| push to `main`, job without `environment:` | `repo:<ORG>/<REPO>:ref:refs/heads/main` |
+| `pull_request` run, job without `environment:` | `repo:<ORG>/<REPO>:pull_request` |
+| any job with `environment: production` | `repo:<ORG>/<REPO>:environment:production` |
+
+A role whose trust pins `ref:refs/heads/main` therefore **cannot** be
+assumed by a PR plan. The usual "fix" is to loosen the trust to
+`repo:<ORG>/<REPO>:*`, which hands the role to every branch. The
+right fix is **two roles**. A PR plan runs the PR's code: provider
+plugins, `external` and `http` data sources, module code, all with
+the job's credentials. So the plan role must be one you are willing to
+give anyone who can push a branch, which means read-only. Fork PRs get
+no OIDC token at all. (Repositories created, renamed or transferred
+after 2026-07-15 present an immutable form,
+`repo:<OWNER>@<OWNER_ID>/<REPO>@<REPO_ID>:...`. Pin whatever your
+token actually carries.)
+
 **Drift detection — the three patterns:**
 
 | Pattern | Tool | When |
@@ -179,31 +204,30 @@ sequenceDiagram
     participant Run as GitHub Actions runner
     participant OIDC as token.actions.githubusercontent.com
     participant STS as AWS STS
-    participant TF as terraform
     participant AWS as AWS API
+    participant Rev as Approver
 
     Dev->>GH: Open PR with .tf changes
-    GH->>Run: Trigger plan workflow
-    Run->>OIDC: Request OIDC token<br/>(aud: sts.amazonaws.com)
-    OIDC-->>Run: Short-lived JWT<br/>(claims: repo, ref, sha)
+    GH->>Run: plan-pr job (environment terraform-plan)
+    Run->>OIDC: Request OIDC token<br/>(aud sts.amazonaws.com)
+    OIDC-->>Run: Short-lived JWT<br/>(sub names environment terraform-plan)
     Run->>STS: AssumeRoleWithWebIdentity(jwt)
-    STS->>STS: Verify JWT signature<br/>+ check trust policy claims
-    STS-->>Run: Temporary credentials<br/>(60 min default)
-    Run->>TF: terraform plan
-    TF->>AWS: read-only API calls
-    AWS-->>TF: state
-    TF-->>Run: plan output
-    Run->>GH: Post plan as PR comment<br/>+ upload tfplan artifact
-    Dev->>GH: Review plan, approve PR
-    GH->>Run: Trigger apply on merge
+    STS->>STS: Verify JWT signature<br/>+ exact sub match in trust policy
+    STS-->>Run: READ-ONLY plan role credentials
+    Run->>AWS: terraform plan (read-only calls)
+    Run->>GH: Speculative plan in job summary
+    Dev->>GH: Review code + plan, merge PR
+    GH->>Run: plan-main job on push to main (plan role)
+    Run->>AWS: terraform plan -out=tfplan
+    Run->>GH: Plan text in summary + tfplan artifact (this run)
+    GH->>Rev: apply job waits on environment production
+    Rev->>GH: Approve after reading plan-main
+    GH->>Run: apply job (environment production)
     Run->>OIDC: New OIDC token
-    OIDC-->>Run: Short-lived JWT
+    OIDC-->>Run: JWT (sub names environment production)
     Run->>STS: AssumeRoleWithWebIdentity(jwt)
-    STS-->>Run: Temporary credentials
-    Run->>TF: terraform apply tfplan
-    TF->>AWS: write API calls
-    AWS-->>TF: applied state
-    TF-->>Run: apply output
+    STS-->>Run: Apply role credentials
+    Run->>AWS: terraform apply tfplan (write calls)
 ```
 
 ### Diagram B — drift sources + detection (ASCII)
@@ -236,8 +260,8 @@ Order of defense:
 
 - A GitHub repository containing the bookstore-platform tree (or a
   fork).
-- AWS account access; you can create an IAM identity provider + role.
-- Repository admin permissions to set repository secrets + variables.
+- AWS account access; you can create an IAM identity provider and two roles.
+- Repository admin permissions to create environments and variables.
 
 ### 1. Create the OIDC identity provider in AWS
 
@@ -259,12 +283,24 @@ URL is known. The value above is the documented one (rotates
 infrequently); if AWS errors out, fetch the current thumbprint from
 the AWS GitHub OIDC docs.
 
-### 2. Create the IAM role + trust policy
+### 2. Create the two IAM roles
+
+Two roles, because a PR plan runs the PR's code (see *Mental model*):
+
+- **`github-actions-terraform-plan`**: read-only, trusted only from the
+  `terraform-plan` GitHub environment. Both the PR plan and the
+  post-merge plan use it.
+- **`github-actions-terraform-apply`**: can change the account, trusted
+  only from the `production` environment, which has required reviewers.
 
 ```bash
-# Trust policy — only allows the role to be assumed from the main
-# branch of your specific repo.
-cat <<EOF > trust-policy.json
+# One trust policy per role, each pinned to ONE environment with
+# StringEquals. A job that declares `environment: X` presents
+# sub = repo:<ORG>/<REPO>:environment:X. Check what your repo's token
+# actually carries: repos created/renamed/transferred after 2026-07-15
+# use repo:<OWNER>@<OWNER_ID>/<REPO>@<REPO_ID>:environment:X.
+for env in terraform-plan production; do
+cat <<EOF > "trust-${env}.json"
 {
   "Version": "2012-10-17",
   "Statement": [{
@@ -276,54 +312,72 @@ cat <<EOF > trust-policy.json
     "Condition": {
       "StringEquals": {
         "token.actions.githubusercontent.com:aud": "sts.amazonaws.com",
-        "token.actions.githubusercontent.com:sub": "repo:<GITHUB_ORG>/<GITHUB_REPO>:ref:refs/heads/main"
+        "token.actions.githubusercontent.com:sub": "repo:<GITHUB_ORG>/<GITHUB_REPO>:environment:${env}"
       }
     }
   }]
 }
 EOF
+done
 
-# Create the role.
-aws iam create-role \
-  --role-name github-actions-terraform \
-  --assume-role-policy-document file://trust-policy.json
+aws iam create-role --role-name github-actions-terraform-plan \
+  --assume-role-policy-document file://trust-terraform-plan.json
+aws iam create-role --role-name github-actions-terraform-apply \
+  --assume-role-policy-document file://trust-production.json
 
-# Attach AdministratorAccess (broad — narrow for production).
-aws iam attach-role-policy \
-  --role-name github-actions-terraform \
+# Plan role: read-only. Also give it s3:GetObject/ListBucket on the state
+# bucket (plans run with -lock=false, so no lock-file writes), and pass
+# its ARN as terraform_plan_role_arn so eks.tf grants it a view-only EKS
+# access entry (Helm refresh reads release Secrets).
+aws iam attach-role-policy --role-name github-actions-terraform-plan \
+  --policy-arn arn:aws:iam::aws:policy/ReadOnlyAccess
+
+# Apply role: in a THROWAWAY SANDBOX ACCOUNT ONLY, AdministratorAccess
+# gets the lab running. Before anything real, replace it with what this
+# tree creates (EKS, EC2/VPC, IAM roles+policies, KMS, S3, SQS, Logs, plus
+# state read/write and .tflock put/delete). IAM Access Analyzer can
+# generate that policy from the CloudTrail of a sandbox apply.
+aws iam attach-role-policy --role-name github-actions-terraform-apply \
   --policy-arn arn:aws:iam::aws:policy/AdministratorAccess
-
-# Output the role ARN.
-aws iam get-role --role-name github-actions-terraform \
-  --query 'Role.Arn' --output text
 ```
 
-The trust-policy condition above pins to **one branch** (`main`) of
-**one repo**. Production teams that deploy from multiple environments
-use `ForAnyValue:StringEquals` with a list of exact refs — see the
-header comments in
-[`.github/workflows/terraform.yml`](../examples/bookstore-platform/terraform/.github/workflows/terraform.yml)
-for the canonical pattern. **Avoid** the broad `StringLike
-"repo:ORG/REPO:*"` pattern in any role with cluster-admin reach — it
-lets any branch (including PR branches that external contributors
-can open) assume the role.
+Two things make the apply role worth this ceremony. First, this tree
+installs Helm charts and CRDs, so the identity that applies it is
+necessarily cluster-admin. `enable_cluster_creator_admin_permissions`
+in `eks.tf` makes the *creator* (under CI, the apply role) a permanent
+cluster-admin access entry. Second, an AWS-admin role that is also
+cluster-admin is the most valuable credential in the account. Its only
+protections are the exact `sub` pin and the environment's reviewers.
+**Avoid** `StringLike "repo:ORG/REPO:*"` on either role: it lets any
+branch, PR or environment assume it.
 
 ### 3. Configure the GitHub repo
 
-```bash
-# Set the secret (the role ARN you just printed).
-gh secret set AWS_ROLE_ARN -b "arn:aws:iam::<AWS_ACCOUNT_ID>:role/github-actions-terraform"
+Create two environments in **Settings → Environments**:
 
-# Set the variable (region).
-gh variable set AWS_REGION -b "us-east-1"
+| Environment | Protection rules | Variable `AWS_ROLE_ARN` |
+|---|---|---|
+| `terraform-plan` | optional required reviewers (add them if people outside your team can push branches) | the plan role's ARN |
+| `production` | **required reviewers**, deployment branches = `main` only, prevent self-review | the apply role's ARN |
+
+```bash
+# Environment-scoped variables: the apply role's ARN is only visible to the
+# job that runs in `production`. Role ARNs are not secrets.
+gh variable set AWS_ROLE_ARN --env terraform-plan \
+  -b "arn:aws:iam::<AWS_ACCOUNT_ID>:role/github-actions-terraform-plan"
+gh variable set AWS_ROLE_ARN --env production \
+  -b "arn:aws:iam::<AWS_ACCOUNT_ID>:role/github-actions-terraform-apply"
+gh variable set AWS_REGION -b "<REGION>"
 ```
 
-The workflow at
-[`.github/workflows/terraform.yml`](../examples/bookstore-platform/terraform/.github/workflows/terraform.yml)
-already references `secrets.AWS_ROLE_ARN` and `vars.AWS_REGION`. Once
-both are set, the workflow runs.
+The workflow also refuses to run against local state: its "Require a
+remote backend" step fails unless a `backend "s3"` block is committed
+(Part 14 ch.01; `backend-s3.tf.example` + `bootstrap-state.sh`). Without
+that guard, a CI apply would write `terraform.tfstate` to a throwaway
+runner and lose it, and the next run would try to create the whole
+stack again.
 
-### 4. Trigger the plan job
+### 4. Trigger the PR plan
 
 ```bash
 # Make a trivial change to the Terraform tree.
@@ -340,40 +394,57 @@ git push origin test/cicd-wiring
 gh pr create --title "test cicd wiring" --body "smoke test"
 ```
 
-In the GitHub Actions tab, the `plan` job runs. Inside the job:
+In the GitHub Actions tab, the `plan-pr` job runs in the
+`terraform-plan` environment. Inside the job:
 
-- `Configure AWS credentials via OIDC` exchanges the GitHub OIDC token
-  for STS credentials.
-- `terraform plan` runs against the actual cloud.
-- The plan is uploaded as a workflow artifact.
-- (Optional, with an extra step like `infracost comment`) the plan
-  output is posted as a PR comment.
+- `Configure AWS credentials (read-only plan role)` exchanges the OIDC
+  token, which carries `sub=...:environment:terraform-plan`, for STS
+  credentials on the plan role.
+- `terraform init -lockfile=readonly` installs exactly the committed
+  provider versions and hashes.
+- `terraform plan -lock=false` runs against the actual cloud, and the
+  plan text lands in the job summary.
 
-The PR's "Checks" tab shows the plan green or red. **A reviewer
-reads the plan before approving** — that is the entire point.
+This plan is **speculative**. **A reviewer reads it before approving
+the PR**; that is the point of it. It is never applied: it was computed
+against the PR's base as it was when the PR ran.
 
-### 5. Merge the PR, watch the apply
+### 5. Merge the PR, approve, watch the apply
 
 After approval and merge:
 
 ```bash
-# The apply job runs on push to main. Watch it.
+# plan-main runs on the push to main, then apply waits for approval.
 gh run watch
 ```
 
-The `apply` job:
+1. **`plan-main`** (read-only role) plans the merged `main`, writes the
+   plan text to the job summary and uploads the binary `tfplan` as an
+   artifact of *this run* (1-day retention; a saved plan holds
+   cleartext values, so keep this workflow in a private repo or encrypt
+   the artifact). With no changes, the run stops here.
+2. **`apply`** declares `environment: production`, so it pauses until
+   a required reviewer approves. The approver reads `plan-main`'s
+   summary: what they read is what will be applied.
+3. After approval, `apply` assumes the apply role, downloads the
+   artifact from the same run, and runs `terraform apply tfplan`. A
+   saved plan applies without a prompt, so there is no
+   `-auto-approve`; the environment approval is the prompt.
 
-- Configures AWS credentials via OIDC (same dance as plan).
-- Downloads the plan artifact from the merge commit's predecessor PR.
-- Runs `terraform apply tfplan` against that exact reviewed plan.
+The key safety invariant: **what is applied is what was approved**.
+If anything moved state between `plan-main` and `apply`, Terraform
+rejects the saved plan as stale and the job fails. Nothing re-plans
+behind your back. Re-run the workflow to plan again.
 
-The key safety invariant: **what merges is what was reviewed**. The
-plan binary uploaded during the PR is the same plan applied at
-merge time; no re-planning, no opportunity for the cloud to have
-drifted between review and apply. (Read the `apply` job's caveat
-comments in the workflow file — squash-merge breaks the artifact-
-lookup-by-PR-number trick, in which case the workflow falls back
-to re-planning, which is the worse-but-functional option.)
+> An earlier version of this template applied on push with
+> `-auto-approve`, tried to download the PR's plan using
+> `github.event.workflow_run.id`, and fell back to re-planning when
+> the artifact was missing. That ID is empty on a `push` event, so the
+> artifact was *always* missing and every apply silently re-planned. Its
+> `environment: production` line was commented out, so no human
+> approved anything. The comment above it said "apply the reviewed
+> plan". Treat a comment that claims a safety property as a claim to
+> verify, not a fact.
 
 ### 6. Configure the nightly drift check
 
@@ -546,29 +617,36 @@ outside the workflow's in-memory environment. The runner is
 ephemeral; the credentials expire in an hour; if a workflow is
 compromised, the damage is bounded to that workflow's session.
 
-**The plan-artifact handoff between jobs.** The PR's plan job
-serializes the binary plan (`terraform plan -out=tfplan`) and
-uploads it to GitHub's artifact storage (`actions/upload-artifact@v4`).
-On merge, the apply job downloads the artifact (`actions/download-
-artifact@v4`) and applies it directly: `terraform apply -input=false
--auto-approve tfplan`. This achieves **exact-plan-as-reviewed**
-semantics: the cloud state that the reviewer saw cannot drift
-between review and apply.
+**The plan-artifact handoff between jobs.** `plan-main` serializes
+the binary plan (`terraform plan -out=tfplan`) and uploads it as an
+artifact of the *same workflow run*. The `apply` job, after the
+environment approval, downloads it with no `run-id` (same run, so no
+lookup can miss) and runs `terraform apply -input=false tfplan`. This
+gives **exact-plan-as-approved** semantics. A saved plan also records
+the state serial it was computed against, so if anything changed state
+in between, `apply` refuses it as stale instead of applying something
+nobody read.
 
-The catch (called out in the workflow's apply-job comments):
-`actions/download-artifact` needs to know *which workflow run*
-produced the artifact. The simple "match by name and most recent"
-fails for squash-merged PRs (the merge commit isn't directly
-linked to the PR). Three options:
+Why not apply the *PR's* plan? Because there is no reliable way to get
+it, and it would be the wrong plan anyway:
 
-- Use **merge** commits (not squash) — preserves the PR number on the
-  merge SHA.
-- Use the **pull_request `closed: merged: true`** event instead of
-  `push: branches: [main]` — exposes the PR number on the apply
-  trigger.
-- Fall back to **re-plan on apply** — the workflow's current
-  behavior if the artifact isn't found. Functional but loses the
-  exact-plan-as-reviewed guarantee.
+- On a `push` event, `github.event.workflow_run.id` is empty, so a
+  "download the PR run's artifact" step finds nothing. Looking the run
+  up by PR number breaks on squash-merges, whose merge commit is not
+  linked to the PR's runs.
+- Even when you can find it, the PR plan was computed against the PR's
+  base and the state as they were when the PR last ran. Other merges
+  and applies since then make it stale.
+
+Hence the split: the PR plan is for *code review*; the plan computed
+on `main` is the one a human *approves* and the apply job applies.
+
+**A saved plan is a secret.** `tfplan` contains every attribute
+value in cleartext, including ones marked `sensitive` (that flag only
+redacts CLI output). Anyone who can read the repository can download
+Actions artifacts, and on a public repo that is everyone. Keep this
+workflow in a private repository or encrypt the artifact, and keep
+retention short (the template uses 1 day).
 
 **`terraform plan -detailed-exitcode` semantics.** Three exit codes:
 
@@ -613,32 +691,32 @@ engineering time saved.
 
 ## Production notes
 
-> **In production:** Pin the trust-policy `sub` claim to exact
-> branch refs, never `StringLike` wildcards on a role with
-> cluster-admin reach. The header comments in
+> **In production:** Pin each role's trust-policy `sub` claim to
+> exactly one environment with `StringEquals`, never `StringLike`
+> wildcards on a role with cluster-admin reach. The header comments in
 > [`.github/workflows/terraform.yml`](../examples/bookstore-platform/terraform/.github/workflows/terraform.yml)
-> spell out the `ForAnyValue:StringEquals` pattern for multi-
-> environment trust. A `StringLike "repo:ORG/REPO:*"` lets any
-> branch — including a PR branch a contributor opens against your
-> repo — assume the role. The blast radius is the role's IAM
+> spell out both trust policies. A `StringLike "repo:ORG/REPO:*"` lets
+> any branch, including a PR branch a contributor opens against your
+> repo, assume the role. The blast radius is the role's IAM
 > permissions; for an Administrator-level role, the radius is
 > the entire account.
 
-> **In production:** Use environments + required reviewers for the
-> apply step. The workflow's apply job has a commented-out
-> `environment: production` line. Uncomment it, configure required
-> reviewers in the repo's environment settings, and an apply
-> requires explicit human approval after merge. The default
-> apply-on-merge is fine for sandboxes; production-blast-radius
-> applies need the second human eye.
+> **In production:** The `production` environment *is* the approval
+> gate, so configure it: required reviewers, deployment branches =
+> `main` only, prevent self-review. Until those rules exist in repo
+> settings, `environment: production` in the workflow gates nothing.
+> It still matters for trust, because the apply role's `sub` pins
+> the environment name.
 
-> **In production:** The squash-merge / artifact-lookup interaction
-> bites. The workflow's apply step tries to download the plan
-> artifact via PR number; squash-merge doesn't preserve the PR
-> number on the merge SHA. The fix is either (a) use merge commits
-> not squash, or (b) re-plan on apply (the current fallback,
-> functional but loses the exact-plan-as-reviewed property). The
-> work continues — open question, the current code uses (b).
+> **In production:** Give the plan role read and nothing else, and
+> treat it as shared with everyone who can push a branch. A PR plan
+> executes the PR's provider plugins, `external`/`http` data sources
+> and module code with the job's credentials. For this tree that
+> means read-only AWS plus a view-only EKS access entry (Helm reads
+> release Secrets during refresh, so "view" here includes Secrets).
+> If people outside your team can push branches, add required
+> reviewers to the `terraform-plan` environment too. Credentials are
+> then minted for PR code only after a maintainer approves.
 
 > **In production:** Don't put long-lived credentials in GitHub
 > Secrets, period. The number of leaks where a `AWS_ACCESS_KEY_ID`
@@ -686,14 +764,20 @@ aws iam create-open-id-connect-provider \
   --client-id-list sts.amazonaws.com \
   --thumbprint-list 6938fd4d98bab03faadb97b34396831e3780aea1
 
-aws iam create-role --role-name github-actions-terraform \
-  --assume-role-policy-document file://trust-policy.json
-aws iam attach-role-policy --role-name github-actions-terraform \
-  --policy-arn arn:aws:iam::aws:policy/AdministratorAccess
+# Two roles, each trusting ONE environment (sub = ...:environment:<NAME>).
+aws iam create-role --role-name github-actions-terraform-plan \
+  --assume-role-policy-document file://trust-terraform-plan.json
+aws iam attach-role-policy --role-name github-actions-terraform-plan \
+  --policy-arn arn:aws:iam::aws:policy/ReadOnlyAccess
+aws iam create-role --role-name github-actions-terraform-apply \
+  --assume-role-policy-document file://trust-production.json
+# (sandbox: AdministratorAccess; real accounts: a policy scoped to what the tree creates)
 
-# Repo secrets + variables.
-gh secret set AWS_ROLE_ARN -b "arn:aws:iam::<AWS_ACCOUNT_ID>:role/github-actions-terraform"
-gh variable set AWS_REGION -b "us-east-1"
+# Environment-scoped variables (create the environments in Settings first;
+# `production` needs required reviewers + main-only deployment branches).
+gh variable set AWS_ROLE_ARN --env terraform-plan -b "arn:aws:iam::<AWS_ACCOUNT_ID>:role/github-actions-terraform-plan"
+gh variable set AWS_ROLE_ARN --env production     -b "arn:aws:iam::<AWS_ACCOUNT_ID>:role/github-actions-terraform-apply"
+gh variable set AWS_REGION -b "<REGION>"
 
 # Trigger the drift check manually.
 gh workflow run terraform-drift-check
@@ -707,45 +791,51 @@ driftctl scan \
   --from tfstate+s3://<TFSTATE_BUCKET_NAME>/bookstore-platform/terraform.tfstate
 ```
 
-Minimal skeleton — the GitHub Actions plan-on-PR job:
+Minimal skeleton: the approval-gated apply half of the workflow
+(action SHAs abbreviated here; the template pins full SHAs):
 
 ```yaml
 # .github/workflows/terraform.yml — excerpt
-name: terraform
-on:
-  pull_request:
-    paths: ['examples/bookstore-platform/terraform/**']
-permissions:
-  id-token: write     # required for OIDC
-  contents: read
+permissions: {}                      # nothing at workflow level
 
 jobs:
-  plan:
-    if: github.event_name == 'pull_request'
-    runs-on: ubuntu-latest
+  plan-main:                         # read-only role, saved plan
+    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+    environment: terraform-plan      # sub = ...:environment:terraform-plan
+    permissions: { contents: read, id-token: write }
+    outputs: { has_changes: '${{ steps.plan.outputs.has_changes }}' }
     steps:
-      - uses: actions/checkout@v4
-      - uses: hashicorp/setup-terraform@v3
-        with: { terraform_version: '<TF_VERSION>' }
-      - uses: aws-actions/configure-aws-credentials@v4
-        with:
-          role-to-assume: ${{ secrets.AWS_ROLE_ARN }}
-          aws-region:    ${{ vars.AWS_REGION }}
-          audience:      sts.amazonaws.com
-      - run: terraform init -input=false
-      - run: terraform plan -input=false -no-color -out=tfplan
-      - uses: actions/upload-artifact@v4
-        with: { name: tfplan, path: tfplan, retention-days: 7 }
+      # checkout, setup-terraform, configure-aws-credentials
+      #   (role-to-assume: ${{ vars.AWS_ROLE_ARN }}), init -lockfile=readonly
+      - id: plan
+        run: |                      # exit 2 = changes; plan text -> job summary
+          terraform plan -lock=false -detailed-exitcode -out=tfplan ...
+      - uses: actions/upload-artifact@<SHA>   # this run only, retention 1 day
+
+  apply:
+    needs: plan-main
+    if: needs.plan-main.outputs.has_changes == 'true'
+    environment: production          # required reviewers = the approval
+    permissions: { contents: read, id-token: write }
+    steps:
+      - uses: actions/download-artifact@<SHA>  # same run: no lookup to miss
+      # configure-aws-credentials with the APPLY role, init
+      - run: terraform apply -input=false tfplan   # no -auto-approve, no re-plan
 ```
 
-CI/CD-readiness checklist (production-shape when all six are yes):
+CI/CD-readiness checklist (production-shape when all seven are yes):
 
-- [ ] AWS OIDC identity provider created; trust policy pinned to
-      exact branch refs; no `StringLike` wildcards on admin roles.
-- [ ] Plan-on-PR workflow posts plan output as a PR comment;
-      reviewers can read it before approving.
-- [ ] Apply-on-merge workflow uses the reviewed plan artifact (not
-      re-plan), with a required-reviewer environment gate.
+- [ ] AWS OIDC identity provider created; two roles (read-only plan,
+      apply), each trust policy pinned with `StringEquals` to exactly
+      one environment; no `StringLike` wildcards.
+- [ ] A remote backend is committed, and CI refuses to run without
+      one; `.terraform.lock.hcl` is committed and CI inits with
+      `-lockfile=readonly`.
+- [ ] PR plans run with the read-only role and their output is
+      readable by reviewers before they approve.
+- [ ] Apply uses the saved plan from the same run's `plan-main` (never
+      a re-plan, never `-auto-approve`), behind a `production`
+      environment with required reviewers.
 - [ ] Nightly drift workflow runs `terraform plan -detailed-exitcode`
       and opens/dedups a GitHub issue on exit code 2.
 - [ ] Weekly `driftctl` scan catches unmanaged-resource drift.
@@ -759,7 +849,7 @@ CI/CD-readiness checklist (production-shape when all six are yes):
 1. **Why does the chapter argue OIDC trust replaces (rather than improves) long-lived AWS access keys in CI?**
    <details><summary>Show answer</summary>
 
-   Long-lived access keys are a credential that exists *outside the run* — stored in GitHub Secrets, copied to dev laptops, sometimes screenshot accidentally. Rotation is post-hoc: by the time you rotate, the leaked key might already have been used. OIDC trust mints a short-lived JWT *per workflow run*, exchanged for STS credentials that live ~1 hour and only inside the runner's environment. There's nothing static to rotate, nothing to leak. The IAM role's trust policy uses `StringEquals` against the GitHub `sub` claim (repo + branch), so even if a fork tries to assume the role, the trust policy rejects it.
+   Long-lived access keys are a credential that exists *outside the run* — stored in GitHub Secrets, copied to dev laptops, sometimes screenshot accidentally. Rotation is post-hoc: by the time you rotate, the leaked key might already have been used. OIDC trust mints a short-lived JWT *per workflow run*, exchanged for STS credentials that live ~1 hour and only inside the runner's environment. There's nothing static to rotate, nothing to leak. The IAM role's trust policy uses `StringEquals` against the GitHub `sub` claim (repo + environment, or repo + branch), so a token minted for any other repo, branch or environment is rejected; fork PRs do not get an OIDC token at all.
 
    </details>
 
@@ -773,7 +863,7 @@ CI/CD-readiness checklist (production-shape when all six are yes):
 3. **You inherit a Terraform tree where `apply` runs from a Jenkins server that holds AWS access keys in Jenkins credentials. The org wants to migrate to GitHub Actions + OIDC. What's the safe migration order?**
    <details><summary>Show answer</summary>
 
-   (1) Create the OIDC identity provider + trust policy in AWS, pinned to specific branches; (2) Add the new GitHub Actions plan workflow running alongside Jenkins (plan only, no apply); (3) Validate the plan output matches Jenkins's plan for a few PRs; (4) Cutover apply: disable Jenkins apply, enable GHA apply on merge; (5) Wait a week of stable applies; (6) Delete the IAM user holding Jenkins access keys + delete the keys themselves. Skipping step 5 is how teams discover edge cases (a workflow that needs a permission the Jenkins user had but the OIDC role doesn't); keeping Jenkins's keys around "just in case" defeats the migration's security gain.
+   (1) Create the OIDC identity provider and the roles in AWS, each trust policy pinned to one environment (a read-only plan role and an apply role); (2) Add the new GitHub Actions plan workflow running alongside Jenkins (plan only, no apply); (3) Validate the plan output matches Jenkins's plan for a few PRs; (4) Cutover apply: disable Jenkins apply, enable GHA apply on merge; (5) Wait a week of stable applies; (6) Delete the IAM user holding Jenkins access keys + delete the keys themselves. Skipping step 5 is how teams discover edge cases (a workflow that needs a permission the Jenkins user had but the OIDC role doesn't); keeping Jenkins's keys around "just in case" defeats the migration's security gain.
 
    </details>
 

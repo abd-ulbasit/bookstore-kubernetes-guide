@@ -241,12 +241,15 @@ Most production teams realistically land at **SLSA 2-3**:
   organizations like Google for their internal builds; rare in
   general industry.
 
-The bookstore platform targets SLSA 2-3; the
-[GitHub Actions workflow][gha-workflow-link] in `examples/bookstore-platform/terraform/.github/workflows/`
-includes cosign sign + an optional `slsa-github-generator` step
-that gets you to SLSA 3.
+The bookstore platform targets SLSA 2-3. The per-service
+[CI workflow templates][gha-workflow-link] in `examples/bookstore-platform/ci/`
+cosign-sign every image and attach buildx's SLSA provenance
+attestation (`provenance: true`). `slsa-github-generator` is *not*
+shipped; adding it (an isolated, reusable builder workflow) is the
+step that gets you to SLSA 3. An earlier version of this paragraph
+pointed at the Terraform workflow, which does neither.
 
-[gha-workflow-link]: ../examples/bookstore-platform/terraform/.github/workflows/terraform.yml
+[gha-workflow-link]: ../examples/bookstore-platform/ci/.github-workflows-catalog.yml
 
 The trap to keep in view: **signing is provenance, NOT safety**. A
 cosign signature proves "the image was signed by this CI identity";
@@ -337,8 +340,8 @@ SLSA LADDER:
   SLSA 1  Scripted, documented build    [yes] We have a Dockerfile + CI script.
   SLSA 2  Hosted CI, signed build,      [yes] GitHub Actions OIDC -> Fulcio ->
           OIDC identity                       Rekor; cosign sign on every image.
-  SLSA 3  Source + build integrity,     [partial] slsa-github-generator step
-          provenance attestations              available; teams enable per repo.
+  SLSA 3  Source + build integrity,     [partial] buildx provenance attested;
+          provenance attestations              slsa-github-generator not shipped.
   SLSA 4  Hermetic, reproducible,       [no] Not pursued; cost vs. value gap.
           two-party review
 

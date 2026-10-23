@@ -364,7 +364,7 @@ Installs HashiCorp Vault `0.30.x` (app version 1.18.x) as a 3-replica Raft clust
 
 ### GitHub Actions workflow
 
-`.github/workflows/terraform.yml` is a template: copy to your real repo, set `secrets.AWS_ROLE_ARN` and `vars.AWS_REGION`. Uses OIDC (no long-lived access keys). Plans on PR; applies on push-to-main.
+`.github/workflows/terraform.yml` is a template: copy it to your real repo, commit a remote backend first (the workflow refuses to run against local state), and create two GitHub environments, `terraform-plan` and `production`, each with an `AWS_ROLE_ARN` variable. Uses OIDC (no long-lived access keys) with two roles: a read-only plan role for PRs, and an apply role trusted only from `production`. PRs get a speculative plan. On push to `main` it plans again, waits for a `production` reviewer, then applies that saved plan with no re-plan and no `-auto-approve`. Set `terraform_plan_role_arn` so the plan role gets a view-only EKS access entry. Read the header before using it.
 
 ### Nightly drift detection
 

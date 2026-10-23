@@ -62,6 +62,23 @@ variable "cluster_endpoint_public_access_cidrs" {
   default     = ["0.0.0.0/0"]
 }
 
+variable "enable_cluster_creator_admin_permissions" {
+  description = "Give the identity that runs `terraform apply` a permanent cluster-admin EKS access entry. True by default so a laptop apply can kubectl into the cluster. Under CI the creator is the CI apply role, which this tree needs as cluster-admin anyway (it installs Helm charts and CRDs). Set false only if that role is granted cluster access some other way."
+  type        = bool
+  default     = true
+}
+
+variable "terraform_plan_role_arn" {
+  description = "ARN of the read-only IAM role CI uses for `terraform plan` (see .github/workflows/terraform.yml). When set, it gets a cluster-scoped AmazonEKSAdminViewPolicy access entry: plan must read Helm release Secrets to refresh, and nothing more. Empty = no entry."
+  type        = string
+  default     = ""
+
+  validation {
+    condition     = var.terraform_plan_role_arn == "" || can(regex("^arn:aws[a-z-]*:iam::[0-9]{12}:role/.+$", var.terraform_plan_role_arn))
+    error_message = "terraform_plan_role_arn must be empty or an IAM role ARN (arn:aws:iam::<12-digit account>:role/<name>)."
+  }
+}
+
 variable "system_node_instance_types" {
   description = "Instance types for the small EKS-managed 'system' node group that hosts cluster-critical add-ons (Karpenter, LB controller, CoreDNS, metrics-server). Karpenter scales the rest."
   type        = list(string)

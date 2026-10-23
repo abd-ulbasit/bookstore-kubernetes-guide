@@ -23,7 +23,34 @@ module "eks" {
   # The principal that runs `terraform apply` becomes a cluster-admin. Without
   # this, the deployer can create the cluster but cannot kubectl into it,
   # because EKS access entries are now the only auth path (no aws-auth CM).
-  enable_cluster_creator_admin_permissions = true
+  #
+  # This is permanent and follows the identity, not the person: when CI
+  # applies this tree, the CI apply role is the creator, so the CI role is a
+  # standing cluster-admin. This tree needs that (it installs Helm charts
+  # and CRDs through the kubernetes/helm/kubectl providers), which is why
+  # the apply role must be locked to one GitHub environment with required
+  # reviewers. See .github/workflows/terraform.yml.
+  enable_cluster_creator_admin_permissions = var.enable_cluster_creator_admin_permissions
+
+  # Optional read-only access for the CI plan role. `terraform plan`
+  # refreshes the Helm releases and Kubernetes objects this tree manages,
+  # and Helm stores release state in Secrets, so the plan role needs a
+  # view-everything policy (AmazonEKSAdminViewPolicy, which includes
+  # Secrets) and nothing more. Anyone who can push a branch can exercise
+  # this role through a PR plan; that is why it gets view, not edit.
+  access_entries = {
+    for k, v in {
+      terraform-plan = {
+        principal_arn = var.terraform_plan_role_arn
+        policy_associations = {
+          view = {
+            policy_arn   = "arn:${data.aws_partition.current.partition}:eks::aws:cluster-access-policy/AmazonEKSAdminViewPolicy"
+            access_scope = { type = "cluster" }
+          }
+        }
+      }
+    } : k => v if var.terraform_plan_role_arn != ""
+  }
 
   # IRSA = IAM Roles for Service Accounts. Auto-creates the OIDC provider
   # (no separate aws_iam_openid_connect_provider needed).

@@ -1,21 +1,72 @@
 ################################################################################
-# terraform.yml — sample GitHub Actions workflow for plan-on-PR + apply-on-main.
+# terraform.yml — sample GitHub Actions workflow: speculative plan on every
+# PR, then plan -> human approval -> apply THAT saved plan on main.
 #
-# This is a TEMPLATE. Copy it to your own repo's .github/workflows/ directory
-# and adjust paths/region/role-arn to match your environment. It is checked in
-# here so you can see the canonical wiring; it does not run from inside the
-# bookstore-platform examples repository.
+# This is a TEMPLATE. It does not run from inside this guide's repository
+# (GitHub only executes workflows under the repo-root .github/workflows/).
+# Copy it to your own repo's .github/workflows/ and adjust WORKING_DIR and
+# the trigger paths to wherever the Terraform tree lives in YOUR repo. The
+# values below match this guide's layout.
 #
-# PREREQUISITES (one-time, manual setup):
+# THE SHAPE, AND WHY
 #
-#   1. Create an OIDC identity provider in your AWS account pointing at
-#      token.actions.githubusercontent.com. Console: IAM → Identity providers
-#      → Add provider → OpenID Connect.
-#         Provider URL:   https://token.actions.githubusercontent.com
-#         Audience:       sts.amazonaws.com
+#   pull_request ──► plan-pr      read-only role, speculative plan, text in
+#                                 the job summary. Nothing from it is applied.
+#   push to main ──► plan-main    read-only role, saved binary plan uploaded
+#                                 as an artifact of THIS run, text in the
+#                                 job summary for the approver to read.
+#                └─► apply        `environment: production` (required
+#                                 reviewers). Applies the saved plan from
+#                                 plan-main in the same run, or fails.
 #
-#   2. Create an IAM role (e.g. github-actions-terraform) with a trust policy
-#      scoped to your repository. Example trust policy (replace AWS_ACCOUNT and
+# What gets applied is what the approver read. A PR plan cannot be that
+# thing: it was computed against the PR's base and state as they were
+# hours or days before the merge, and squash-merges do not carry the PR's
+# artifacts to the push run. So the PR plan is for code review, and the
+# plan that is applied is computed on main and approved there. If state
+# moves between plan-main and apply, `terraform apply tfplan` refuses the
+# stale plan; it does not silently re-plan. There is no fallback re-plan
+# and no -auto-approve anywhere. A saved plan applies without a prompt,
+# and the environment approval is the prompt.
+#
+# PREREQUISITES (one-time, manual):
+#
+#   1. Remote state. This tree defaults to LOCAL state. A CI apply against
+#      local state would write the state file to a throwaway runner and
+#      lose it, and the next run would try to create everything again. Set
+#      up the S3 backend first (backend-s3.tf.example + bootstrap-state.sh)
+#      and commit backend-s3.tf. The "require a remote backend" step below
+#      fails the run if there is no backend block.
+#
+#   2. GitHub OIDC provider in the AWS account:
+#         Provider URL: https://token.actions.githubusercontent.com
+#         Audience:     sts.amazonaws.com
+#
+#   3. Two GitHub environments in the repo (Settings -> Environments):
+#
+#        terraform-plan   Used by plan-pr and plan-main. Holds variable
+#                         AWS_ROLE_ARN = the read-only PLAN role.
+#                         Optionally add required reviewers: with them, a
+#                         maintainer approves before any PR's code runs
+#                         with cloud credentials (see "PR plans run PR
+#                         code" below).
+#        production       Used by apply only. Holds variable AWS_ROLE_ARN
+#                         = the APPLY role. Configure: required reviewers,
+#                         deployment branches = main only, and "prevent
+#                         self-review".
+#
+#      Role ARNs are environment variables, not secrets: they are not
+#      sensitive, and scoping them to an environment means the apply role's
+#      ARN is only visible to the job that runs in `production`.
+#
+#   4. Two IAM roles, each trusting exactly one environment. When a job
+#      declares `environment:`, GitHub's OIDC `sub` claim names the
+#      environment, not the branch:
+#
+#        plan role   sub = repo:GITHUB_ORG/GITHUB_REPO:environment:terraform-plan
+#        apply role  sub = repo:GITHUB_ORG/GITHUB_REPO:environment:production
+#
+#      Example trust policy for the apply role (replace AWS_ACCOUNT,
 #      GITHUB_ORG/GITHUB_REPO):
 #
 #      {
@@ -29,39 +80,54 @@
 #          "Condition": {
 #            "StringEquals": {
 #              "token.actions.githubusercontent.com:aud": "sts.amazonaws.com",
-#              "token.actions.githubusercontent.com:sub": "repo:GITHUB_ORG/GITHUB_REPO:ref:refs/heads/main"
+#              "token.actions.githubusercontent.com:sub": "repo:GITHUB_ORG/GITHUB_REPO:environment:production"
 #            }
 #          }
 #        }]
 #      }
 #
-#      The single `StringEquals` form above pins the role to ONE branch
-#      (main). For repos that deploy from multiple branches/environments,
-#      use a `ForAnyValue:StringEquals` list of exact refs, e.g.:
+#      Check the `sub` your repo actually presents before you trust it.
+#      Repositories created, renamed or transferred after 2026-07-15 get the
+#      immutable form repo:OWNER@OWNER_ID/REPO@REPO_ID:environment:...;
+#      older ones keep repo:OWNER/REPO:... . Pin whichever your token
+#      carries, exactly, with StringEquals. Never use StringLike
+#      "repo:ORG/REPO:*", which lets any branch, environment or PR assume
+#      the role.
 #
-#         "ForAnyValue:StringEquals": {
-#           "token.actions.githubusercontent.com:sub": [
-#             "repo:GITHUB_ORG/GITHUB_REPO:ref:refs/heads/main",
-#             "repo:GITHUB_ORG/GITHUB_REPO:environment:production"
-#           ]
-#         }
+#      Plan role permissions: read-only AWS access (start from the managed
+#      ReadOnlyAccess policy and remove data-plane reads you do not need),
+#      s3:GetObject + s3:ListBucket on the state bucket/key, and an EKS
+#      access entry with AmazonEKSAdminViewPolicy. Set
+#      `terraform_plan_role_arn` and eks.tf creates that entry. The Helm
+#      provider refreshes releases by reading their Secrets, so the plan
+#      role needs that view. No write anywhere. The plans run with
+#      -lock=false so the role does not even need to write the .tflock
+#      object.
 #
-#      Avoid the broader `StringLike` "repo:ORG/REPO:*" pattern in
-#      production — it lets any branch (including a PR branch a contributor
-#      opens against your repo) assume the role. Acceptable for an internal
-#      sandbox; not acceptable for a role with cluster-admin reach.
+#      Apply role permissions: what this tree creates (EKS, EC2/VPC, IAM
+#      roles and policies, KMS, S3, SQS, CloudWatch Logs) plus state
+#      read/write and lock-file put/delete. Start from a broad policy in a
+#      sandbox, then narrow it with IAM Access Analyzer's
+#      policy-generation from CloudTrail. Do not leave AdministratorAccess
+#      on it. Note that this tree installs Helm charts and CRDs through
+#      the kubernetes/helm/kubectl providers, so the identity that applies
+#      it is necessarily cluster-admin (eks.tf's creator access entry). That
+#      makes the apply role's trust policy and the production environment's
+#      reviewers the controls that matter most here.
 #
-#      Attach an inline policy with AdministratorAccess (or the narrower set
-#      this Terraform tree actually needs — EKS, EC2, IAM, KMS, S3, Logs, SQS).
+# PR PLANS RUN PR CODE. `terraform plan` executes provider plugins, data
+# sources (including `external` and `http`) and module code from the PR
+# branch, with whatever credentials the job holds. Whoever can push a branch
+# can therefore use the plan role. That is why it is read-only and why it
+# is a different role from apply. Pull requests from forks do not receive an
+# OIDC token at all, so plan-pr cannot assume the role for them. It fails
+# at the credentials step, which is the safe outcome.
 #
-#   3. Set the repository secret AWS_ROLE_ARN to the role's ARN.
-#      (Settings → Secrets and variables → Actions → New repository secret.)
-#
-#   4. Set the repository variable AWS_REGION (defaults below to ap-south-1).
-#
-# Why OIDC instead of long-lived access keys: GitHub mints a short-lived JWT
-# per workflow run and STS exchanges it for credentials valid only for that
-# run. No secrets to rotate, no keys to leak.
+# PLAN ARTIFACTS CONTAIN SECRETS. A saved plan holds every attribute value
+# in cleartext, sensitive ones included. Artifacts are readable by anyone
+# who can read the repository, and on a public repo that is everyone. Run
+# this in a private repository, or encrypt tfplan before upload. Retention
+# is 1 day either way.
 ################################################################################
 
 name: terraform
@@ -69,149 +135,216 @@ name: terraform
 on:
   pull_request:
     paths:
-      - 'examples/bookstore-platform/terraform/**'
+      - 'full-guide/examples/bookstore-platform/terraform/**'
   push:
     branches:
       - main
     paths:
-      - 'examples/bookstore-platform/terraform/**'
+      - 'full-guide/examples/bookstore-platform/terraform/**'
 
-# OIDC requires id-token: write. contents: read is the minimum for checkout.
-permissions:
-  id-token: write
-  contents: read
+# Nothing at workflow level. Each job asks for exactly what it uses.
+permissions: {}
+
+# One Terraform run per ref at a time; never cancel an apply mid-flight.
+concurrency:
+  group: terraform-${{ github.ref }}
+  cancel-in-progress: false
 
 env:
   TF_VERSION: '1.10.5'
-  WORKING_DIR: 'examples/bookstore-platform/terraform'
+  WORKING_DIR: 'full-guide/examples/bookstore-platform/terraform'
+  AWS_REGION: ${{ vars.AWS_REGION || 'ap-south-1' }}
 
 jobs:
-  ################################################################################
-  # plan — runs on every PR. Posts the plan output as a comment (third-party
-  # action recommended: hashicorp/setup-terraform's stdout-capture or a custom
-  # action that calls `gh pr comment`).
-  ################################################################################
-  plan:
-    name: terraform plan
+  ##############################################################################
+  # plan-pr — speculative plan for code review. Never applied.
+  ##############################################################################
+  plan-pr:
+    name: terraform plan (PR, speculative)
     if: github.event_name == 'pull_request'
     runs-on: ubuntu-latest
+    environment: terraform-plan
+    permissions:
+      contents: read
+      id-token: write          # OIDC token for the read-only plan role
     defaults:
       run:
         working-directory: ${{ env.WORKING_DIR }}
-
     steps:
-      - name: Checkout repository
-        uses: actions/checkout@v4
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
 
-      - name: Setup Terraform
-        uses: hashicorp/setup-terraform@v3
+      - uses: hashicorp/setup-terraform@dfe3c3f87815947d99a8997f908cb6525fc44e9e # v4.0.1
         with:
           terraform_version: ${{ env.TF_VERSION }}
+          terraform_wrapper: false
 
-      - name: Configure AWS credentials via OIDC
-        uses: aws-actions/configure-aws-credentials@v4
-        with:
-          role-to-assume: ${{ secrets.AWS_ROLE_ARN }}
-          aws-region: ${{ vars.AWS_REGION || 'ap-south-1' }}
-          audience: sts.amazonaws.com
+      - name: Require a remote backend
+        run: |
+          if ! grep -qE '^[[:space:]]*backend[[:space:]]+"s3"' ./*.tf; then
+            echo "::error::No backend \"s3\" block in ${WORKING_DIR}/*.tf. CI must never run against local state. See backend-s3.tf.example."
+            exit 1
+          fi
 
       - name: terraform fmt -check
         run: terraform fmt -recursive -check
 
+      - name: Configure AWS credentials (read-only plan role)
+        uses: aws-actions/configure-aws-credentials@e1253824e5c10ff9df46874f81ed3ec929e19cfd # v6.3.0
+        with:
+          role-to-assume: ${{ vars.AWS_ROLE_ARN }}
+          aws-region: ${{ env.AWS_REGION }}
+          audience: sts.amazonaws.com
+
       - name: terraform init
-        run: terraform init -input=false
+        # -lockfile=readonly: install exactly the committed provider versions
+        # and hashes (.terraform.lock.hcl), or fail.
+        run: terraform init -input=false -lockfile=readonly
 
       - name: terraform validate
         run: terraform validate -no-color
 
       - name: terraform plan
-        # -out=tfplan creates a binary plan that's uploaded as an artifact.
-        # The apply job downloads this exact plan instead of re-planning, so
-        # what merges to main is byte-equivalent to what reviewers saw on the
-        # PR. Plan artifacts may contain sensitive values (tag literals,
-        # tfvar interpolations) — they're scoped to the workflow run + the
-        # artifact retention window only.
-        run: terraform plan -input=false -no-color -out=tfplan
+        # -lock=false keeps the plan role read-only on the state bucket. A
+        # speculative plan that reads state mid-apply sees either the old or
+        # the new object (S3 writes are atomic); nothing is applied from it.
+        run: |
+          terraform plan -input=false -no-color -lock=false -out=tfplan
+          {
+            echo '## terraform plan (speculative, PR)'
+            echo
+            echo 'This plan is for review only and is never applied. The plan that'
+            echo 'gets applied is recomputed on `main` after merge and approved there.'
+            echo
+            echo '```'
+            terraform show -no-color tfplan
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"
 
-      - name: Upload plan artifact
-        # GitHub Actions artifacts default-retain for 90 days (configurable
-        # at the org/repo level). The apply job consumes this artifact below
-        # via download-artifact, so the apply re-uses the reviewed plan.
-        uses: actions/upload-artifact@v4
-        with:
-          name: tfplan-${{ github.event.pull_request.number }}
-          path: ${{ env.WORKING_DIR }}/tfplan
-          retention-days: 7
-          if-no-files-found: error
-
-  ################################################################################
-  # apply — runs on push to main. Downloads the plan artifact uploaded by the
-  # plan job and applies THAT exact plan, so what merges is what was reviewed.
-  # In a real repo you almost certainly want a manual approval step here
-  # (use environments with required reviewers — see commented `environment:`).
-  #
-  # Caveat: this workflow currently triggers on push to main, NOT on the PR
-  # itself, so the artifact has to be located by PR number. If your team
-  # squash-merges, the merge commit isn't directly tied to a PR number — in
-  # which case fall back to re-running plan here (the worse-but-functional
-  # option). The robust fix is to switch from push-on-main to PR's
-  # "merged: true" event, which exposes the PR number on the merge.
-  ################################################################################
-  apply:
-    name: terraform apply
+  ##############################################################################
+  # plan-main — the plan that will be applied, computed on main after merge.
+  ##############################################################################
+  plan-main:
+    name: terraform plan (main, to apply)
     if: github.event_name == 'push' && github.ref == 'refs/heads/main'
     runs-on: ubuntu-latest
-    # environment: production  # uncomment + configure required reviewers
+    environment: terraform-plan
+    permissions:
+      contents: read
+      id-token: write
+    outputs:
+      has_changes: ${{ steps.plan.outputs.has_changes }}
     defaults:
       run:
         working-directory: ${{ env.WORKING_DIR }}
-
     steps:
-      - name: Checkout repository
-        uses: actions/checkout@v4
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
 
-      - name: Setup Terraform
-        uses: hashicorp/setup-terraform@v3
+      - uses: hashicorp/setup-terraform@dfe3c3f87815947d99a8997f908cb6525fc44e9e # v4.0.1
         with:
           terraform_version: ${{ env.TF_VERSION }}
+          terraform_wrapper: false
 
-      - name: Configure AWS credentials via OIDC
-        uses: aws-actions/configure-aws-credentials@v4
+      - name: Require a remote backend
+        run: |
+          if ! grep -qE '^[[:space:]]*backend[[:space:]]+"s3"' ./*.tf; then
+            echo "::error::No backend \"s3\" block in ${WORKING_DIR}/*.tf. CI must never run against local state. See backend-s3.tf.example."
+            exit 1
+          fi
+
+      - name: Configure AWS credentials (read-only plan role)
+        uses: aws-actions/configure-aws-credentials@e1253824e5c10ff9df46874f81ed3ec929e19cfd # v6.3.0
         with:
-          role-to-assume: ${{ secrets.AWS_ROLE_ARN }}
-          aws-region: ${{ vars.AWS_REGION || 'ap-south-1' }}
+          role-to-assume: ${{ vars.AWS_ROLE_ARN }}
+          aws-region: ${{ env.AWS_REGION }}
           audience: sts.amazonaws.com
 
-      - name: terraform fmt -check
-        run: terraform fmt -recursive -check
+      - name: terraform init
+        run: terraform init -input=false -lockfile=readonly
+
+      - name: terraform plan
+        id: plan
+        run: |
+          set +e
+          terraform plan -input=false -no-color -lock=false -detailed-exitcode -out=tfplan
+          rc=$?
+          set -e
+          case "$rc" in
+            0) echo "has_changes=false" >> "$GITHUB_OUTPUT" ;;
+            2) echo "has_changes=true"  >> "$GITHUB_OUTPUT" ;;
+            *) echo "::error::terraform plan failed (exit $rc)"; exit "$rc" ;;
+          esac
+          {
+            echo '## terraform plan (main): this is what `apply` will do'
+            echo
+            echo "Commit: \`${GITHUB_SHA}\`. Approving the \`production\` deployment applies exactly this plan."
+            echo
+            echo '```'
+            terraform show -no-color tfplan
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Upload the saved plan (this run only)
+        if: steps.plan.outputs.has_changes == 'true'
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: tfplan-main-${{ github.run_id }}
+          path: ${{ env.WORKING_DIR }}/tfplan
+          retention-days: 1          # cleartext values; keep it short-lived
+          if-no-files-found: error
+
+  ##############################################################################
+  # apply — gated by the `production` environment, applies the saved plan.
+  ##############################################################################
+  apply:
+    name: terraform apply (approved plan)
+    needs: plan-main
+    if: needs.plan-main.outputs.has_changes == 'true'
+    runs-on: ubuntu-latest
+    # Required reviewers + "main only" are configured on the environment in
+    # repo settings. Until they are, this line gates nothing; see header.
+    environment: production
+    permissions:
+      contents: read
+      id-token: write          # OIDC token for the apply role
+    defaults:
+      run:
+        working-directory: ${{ env.WORKING_DIR }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - uses: hashicorp/setup-terraform@dfe3c3f87815947d99a8997f908cb6525fc44e9e # v4.0.1
+        with:
+          terraform_version: ${{ env.TF_VERSION }}
+          terraform_wrapper: false
+
+      - name: Download the saved plan from plan-main (same run)
+        # No run-id: the artifact comes from this workflow run, i.e. from the
+        # plan-main job whose output the approver just read. If it is
+        # missing, the step fails and nothing is applied.
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          name: tfplan-main-${{ github.run_id }}
+          path: ${{ env.WORKING_DIR }}
+
+      - name: Configure AWS credentials (apply role)
+        uses: aws-actions/configure-aws-credentials@e1253824e5c10ff9df46874f81ed3ec929e19cfd # v6.3.0
+        with:
+          role-to-assume: ${{ vars.AWS_ROLE_ARN }}
+          aws-region: ${{ env.AWS_REGION }}
+          audience: sts.amazonaws.com
 
       - name: terraform init
-        run: terraform init -input=false
+        run: terraform init -input=false -lockfile=readonly
 
-      - name: terraform validate
-        run: terraform validate -no-color
-
-      # Download the plan artifact from the most recent successful PR plan.
-      # Requires the github-script (or actions/download-artifact@v4 with a
-      # workflow_run filter) to locate the right run. Simplified here to
-      # point at a known-good location; tighten in your own fork.
-      - name: Download plan artifact
-        uses: actions/download-artifact@v4
-        with:
-          # name omitted → downloads any matching workflow_run artifact.
-          # Pin to the exact name if you upload multiple per run.
-          path: ${{ env.WORKING_DIR }}
-          github-token: ${{ secrets.GITHUB_TOKEN }}
-          run-id: ${{ github.event.workflow_run.id }}
-        continue-on-error: true # falls through to re-plan if no artifact
-
-      - name: terraform apply (reviewed plan if present, else re-plan)
-        run: |
-          if [ -f tfplan ]; then
-            echo "Applying the reviewed plan from the PR."
-            terraform apply -input=false -auto-approve tfplan
-          else
-            echo "No reviewed plan artifact found — re-planning + applying."
-            echo "This means the apply may diverge from what was reviewed."
-            terraform apply -input=false -auto-approve
-          fi
+      - name: terraform apply tfplan
+        # A saved plan applies without prompting, so there is no
+        # -auto-approve. The human approval was the environment gate. If
+        # state changed after plan-main, Terraform rejects the stale plan
+        # and this job fails. Re-run the workflow to plan again.
+        run: terraform apply -input=false tfplan

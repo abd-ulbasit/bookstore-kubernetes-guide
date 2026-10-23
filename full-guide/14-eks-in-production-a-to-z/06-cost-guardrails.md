@@ -104,8 +104,9 @@ The four-horizon framework:
   $/month delta. A PR that adds a $3,500/month OpenSearch cluster
   shows up as a cost change in the PR description. The
   bookstore-platform's `make plan-cost` (Phase 14-R) runs this
-  locally; the `.github/workflows/terraform.yml` (Phase 14-R) wires
-  it into CI. **Prevents** the "we didn't know it would cost that
+  locally. The `.github/workflows/terraform.yml` template does *not*
+  run it; to wire it into CI, add an `infracost diff` step to its
+  `plan-pr` job. **Prevents** the "we didn't know it would cost that
   much" incident.
 - **Horizon 1 — Spend-time.** OpenCost (already wired in Part 13
   ch.10) shows the per-namespace, per-tenant cost in near-real-time
@@ -627,9 +628,10 @@ a baseline cluster, before any architecture changes.
 > spend) is a reasonable bar to require a "cost-approved" PR label;
 > hard-blocking under that threshold creates friction with no
 > value. The bookstore-platform's `.github/workflows/terraform.yml`
-> (Phase 14-R) posts the cost diff as a PR comment but does not
-> block merges — a separate `cost-gate.yml` workflow can enforce
-> the >$50/month policy if your org's discipline requires it.
+> template does not run infracost yet. If you add it to `plan-pr`,
+> post the cost diff without blocking merges; a separate
+> `cost-gate.yml` workflow can enforce the >$50/month policy if your
+> org's discipline requires it.
 
 > **In production:** The cost-alarm runbook lives in the on-call
 > rotation. A 3am email reading "you breached 80%" without a
