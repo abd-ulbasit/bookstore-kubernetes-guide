@@ -147,7 +147,7 @@ flowchart TB
     writest["PutObject terraform.tfstate<br/>(new version; old version retained)"]
     dellock["DeleteObject .tflock"]
 
-    s3[("S3 bucket<br/>versioning ON<br/>SSE-S3 encryption<br/>public-access-block ON<br/>90-day noncurrent lifecycle")]
+    s3[("S3 bucket<br/>versioning ON<br/>SSE-S3 or SSE-KMS<br/>public-access-block ON<br/>TLS-only bucket policy<br/>90-day noncurrent lifecycle")]
 
     op --> tf --> lock1
     lock1 -- "no" --> putlock
@@ -196,8 +196,11 @@ THE BOOKSTORE PLATFORM CHOICE: S3 + use_lockfile.
 Phase 14-R put two artifacts in the tree:
 
 - [`../examples/bookstore-platform/terraform/bootstrap-state.sh`](../examples/bookstore-platform/terraform/bootstrap-state.sh)
-  — idempotent script that creates the bucket with versioning + SSE-S3
-  + public-access-block + 90-day lifecycle.
+  — idempotent script that creates the bucket with versioning, default
+  encryption (SSE-S3, or SSE-KMS with the customer-managed key you pass
+  as its third argument), public-access-block, a bucket policy that
+  denies any request not made over TLS, and a 90-day noncurrent-version
+  lifecycle.
 - [`../examples/bookstore-platform/terraform/backend-s3.tf.example`](../examples/bookstore-platform/terraform/backend-s3.tf.example)
   — the backend block to copy + edit.
 
@@ -239,10 +242,13 @@ Bootstrap S3 state backend
 [ok] Bucket created
 [..] Enabling versioning
 [ok] Versioning enabled
-[..] Enabling default encryption (SSE-S3)
+[..] Enabling default encryption (SSE-S3). Pass a KMS key ARN as the
+     third argument to use SSE-KMS instead (recommended beyond a lab).
 [ok] SSE-S3 enabled
 [..] Blocking public access
 [ok] Public access blocked
+[..] Applying TLS-only bucket policy
+[ok] TLS-only policy applied
 [..] Setting lifecycle rule (expire noncurrent versions @ 90 days)
 [ok] Lifecycle rule set
 ```
