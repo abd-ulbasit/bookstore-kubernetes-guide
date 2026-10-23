@@ -6,13 +6,16 @@
 #     on one machine. The moment a second person, a CI runner, or even just
 #     a second laptop touches this Terraform, local state breaks.
 #   - S3 backend gives you durable, versioned, encrypted state with shared
-#     access — and as of **Terraform 1.10+ / AWS provider >= 5.50** the
-#     `use_lockfile = true` option provides native locking via S3 conditional
-#     writes. **DynamoDB lock table is no longer required.**
+#     access — and the `use_lockfile = true` option provides native locking
+#     via S3 conditional writes (GA in **Terraform 1.11**, experimental in
+#     1.10). **DynamoDB lock table is no longer required** (and DynamoDB
+#     locking is deprecated). The S3 backend is built into Terraform itself;
+#     the hashicorp/aws provider version does not matter here.
 #
 # HOW TO USE:
-#   1. Run `./bootstrap-state.sh <YOUR-UNIQUE-BUCKET-NAME>` first — creates
-#      the S3 bucket with versioning + encryption + public-access-block.
+#   1. Run `./bootstrap-state.sh <YOUR-UNIQUE-BUCKET-NAME> [REGION] [KMS-KEY-ARN]`
+#      first — creates the S3 bucket with versioning, encryption (SSE-KMS
+#      when you pass a key ARN), public-access-block and a TLS-only policy.
 #   2. Copy this file: `cp backend-s3.tf.example backend-s3.tf`
 #   3. Edit `backend-s3.tf` and set the bucket + region to match.
 #   4. Run `terraform init -migrate-state` — Terraform copies the local
@@ -43,17 +46,24 @@ terraform {
     # Must match the bucket's region (S3 bucket regions are immutable once set).
     region = "ap-south-1"
 
-    # Server-side encryption (SSE-S3 / AES256) for the state at rest.
-    # bootstrap-state.sh enables this on the bucket by default.
+    # Server-side encryption for the state at rest. bootstrap-state.sh sets
+    # the bucket default (SSE-S3, or SSE-KMS when given a key ARN).
     encrypt = true
 
     # **NATIVE S3 STATE LOCKING — no DynamoDB table required.**
-    # Requires Terraform 1.10+ and AWS provider >= 5.50. The previous pattern of
-    # `dynamodb_table = "tf-locks"` is legacy and can be deleted.
+    # GA in Terraform 1.11 (experimental in 1.10). The previous pattern of
+    # `dynamodb_table = "tf-locks"` is deprecated and can be deleted.
+    # The lock is the object <key>.tflock: whoever plans/applies with a lock
+    # needs s3:GetObject, s3:PutObject and s3:DeleteObject on it. A run killed
+    # mid-apply leaves it behind; after confirming nothing is running,
+    # `terraform force-unlock <LOCK_ID>` removes it.
     use_lockfile = true
 
-    # OPTIONAL: SSE-KMS instead of SSE-S3. Useful when state contains
-    # secrets you want encrypted with a customer-managed CMK.
+    # RECOMMENDED beyond a lab: SSE-KMS with a customer-managed key. With
+    # SSE-S3, s3:GetObject on the bucket is enough to read state, and state
+    # holds every attribute Terraform manages (README: "What is in state").
+    # With a CMK, reading state also needs kms:Decrypt under a key policy you
+    # control, and every decrypt is in CloudTrail.
     #   kms_key_id = "arn:aws:kms:ap-south-1:<ACCOUNT-ID>:key/<KEY-ID>"
   }
 }

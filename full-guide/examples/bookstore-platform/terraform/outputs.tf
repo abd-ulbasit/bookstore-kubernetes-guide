@@ -23,10 +23,14 @@ output "cluster_version" {
   value       = module.eks.cluster_version
 }
 
+# Not `sensitive`: a cluster CA certificate is public by design (every
+# kubeconfig carries it). `sensitive = true` only hides a value from CLI and
+# plan output. It does not encrypt or omit it from state, so marking
+# non-secrets sensitive protects nothing and teaches the wrong model. See
+# README "What is in state" for the values that do matter.
 output "cluster_certificate_authority_data" {
-  description = "Base64-encoded CA certificate for the cluster API server."
+  description = "Base64-encoded CA certificate for the cluster API server (public; every kubeconfig contains it)."
   value       = module.eks.cluster_certificate_authority_data
-  sensitive   = true
 }
 
 output "cluster_oidc_provider_arn" {
@@ -116,7 +120,8 @@ output "vault_namespace" {
 output "vault_kms_key_arn" {
   description = "ARN of the customer-managed KMS CMK used for Vault auto-unseal. Document this in your DR runbook — losing the key = losing the cluster. Null when enable_vault = false."
   value       = var.enable_vault ? aws_kms_key.vault_unseal[0].arn : null
-  sensitive   = true
+  # Not `sensitive`: an ARN is an identifier, not a credential. Access to the
+  # key is controlled by its key policy, which is what to protect.
 }
 
 output "external_secrets_namespace" {

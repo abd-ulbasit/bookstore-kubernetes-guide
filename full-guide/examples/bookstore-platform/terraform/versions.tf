@@ -73,6 +73,12 @@ provider "aws" {
 
 # Short-lived bearer token for the EKS cluster, refreshed every plan/apply.
 # This is the same token `aws eks get-token` returns.
+#
+# Data source results are persisted in STATE, so this token is in
+# terraform.tfstate in cleartext (marked sensitive, which only hides it
+# from CLI output). It is valid for about 15 minutes and carries the
+# applying identity's access, which is cluster-admin. That is the most
+# sensitive value in this tree's state; see README "What is in state".
 data "aws_eks_cluster_auth" "this" {
   name = module.eks.cluster_name
 }

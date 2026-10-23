@@ -230,6 +230,22 @@ This deploy is dev-grade. To move it to production, walk this list:
 - **Container image scanning** — turn on ECR image scanning on push (`aws ecr put-image-scanning-configuration --repository-name <REPO> --image-scanning-configuration scanOnPush=true`).
 - **Pod Security** — apply the `restricted` Pod Security Standard at the namespace level for everything except `kube-system`.
 - **Backup / DR** — Velero or AWS Backup for EBS-backed PVCs; etcd snapshots come "free" with EKS (managed automatically).
+- **State** — move to the S3 backend (`backend-s3.tf.example`), and pass a customer-managed KMS key to `bootstrap-state.sh` so that reading state needs `kms:Decrypt` as well as `s3:GetObject`. See below for why.
+
+### What is in state, and who can read it
+
+Terraform state holds every attribute of every resource and data source in this tree, in cleartext. `sensitive = true` changes none of that; it only hides a value from CLI and plan output. Inventory for this tree (checked 2026-10-24):
+
+| In state | Why it matters |
+|---|---|
+| `data.aws_eks_cluster_auth.this` token | A bearer token for the cluster, as the identity that ran plan/apply (cluster-admin). Valid ~15 minutes, refreshed on every run. The most sensitive value here. |
+| Helm release values (Karpenter, LB controller, Vault, ESO, Argo CD, Velero, Falco, Kyverno) | Configuration only: no passwords or tokens are passed through `values`/`set` in this tree. Keep it that way. Anything passed to `helm_release` lands in state. |
+| IAM role/policy documents, KMS key ARNs, VPC/subnet/SG IDs, endpoints, OIDC provider | Not credentials, but a complete map of the account for anyone planning an attack. |
+| `local_file.kubeconfig` | The CA and endpoint only. It authenticates with the `aws eks get-token` exec plugin, so no token is written to disk or state. |
+
+Not in state: the Argo CD initial admin password (generated in-cluster and read by hand; see `argocd-bootstrap.tf`) and any Vault root token (initialised out-of-band; see `vault.tf`).
+
+What protects it: the state bucket from `bootstrap-state.sh` has versioning, a public-access-block on all four settings, and a bucket policy that denies non-TLS requests. Encryption is SSE-S3, or SSE-KMS if you pass a key ARN. With SSE-S3, anyone with `s3:GetObject` on the bucket can read state. With SSE-KMS, they also need `kms:Decrypt` under your key policy, and each read shows up in CloudTrail. Earlier versions of this tree marked the cluster CA and a KMS key ARN as `sensitive`. Both are non-secrets, so the flag was removed, with a comment in `outputs.tf` explaining why.
 
 ---
 
