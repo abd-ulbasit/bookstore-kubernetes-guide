@@ -181,7 +181,7 @@ concurrency:
   cancel-in-progress: false
 
 env:
-  TF_VERSION: '1.10.5'
+  TF_VERSION: '1.14.8'
   WORKING_DIR: 'full-guide/examples/bookstore-platform/terraform'
   AWS_REGION: ${{ vars.AWS_REGION || 'ap-south-1' }}
   # CI-mode inputs (PREREQUISITES 5). Every job plans or applies the same

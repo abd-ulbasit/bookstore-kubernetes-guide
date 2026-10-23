@@ -82,7 +82,7 @@ Versions installed:
   kubectl     1.35.0
   helm        3.16.0
   kustomize   5.5.0
-  terraform   1.10.5
+  terraform   1.14.8
   kind        0.27.0
   k3d         5.8.3
   go          1.26.10

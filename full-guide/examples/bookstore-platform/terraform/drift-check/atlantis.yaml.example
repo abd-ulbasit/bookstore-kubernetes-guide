@@ -31,7 +31,7 @@ projects:
     workspace: default
     # Allowed at repo level without any server override. Keep it equal to
     # TF_VERSION in the GitHub Actions templates.
-    terraform_version: v1.10.5
+    terraform_version: v1.14.8
     autoplan:
       enabled: true
       when_modified:

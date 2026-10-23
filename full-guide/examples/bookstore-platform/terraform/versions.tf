@@ -4,7 +4,10 @@
 ################################################################################
 
 terraform {
-  required_version = ">= 1.10.0, < 2.0.0"
+  # 1.11 is where the S3 backend's use_lockfile (backend-s3.tf.example) is
+  # GA; 1.10 has it as an experiment. CI, the devcontainer and
+  # .terraform-version run 1.14.8, the version the lock file was made with.
+  required_version = ">= 1.11.0, < 2.0.0"
 
   required_providers {
     aws = {

@@ -26,7 +26,7 @@
       "minikube": "none"
     },
     "ghcr.io/devcontainers/features/terraform:1": {
-      "version": "1.10.5",
+      "version": "1.14.8",
       "tflint": "0.65.0",
       "terragrunt": "none"
     },

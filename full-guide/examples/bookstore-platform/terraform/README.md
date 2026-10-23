@@ -91,7 +91,7 @@ CI runs `terraform init -lockfile=readonly`, so a constraint change that is not 
 
 - An AWS account with permission to create VPCs, EKS clusters, IAM roles, KMS keys, SQS queues, and EC2 instances. Run from a laptop, the principal you run Terraform as becomes the cluster admin, so make it your real working identity, not a throwaway service role. (CI uses an explicit apply role instead; see "GitHub Actions workflow" in §11.)
 - AWS CLI v2 configured: `aws sts get-caller-identity` must return the expected account.
-- Terraform `>= 1.9.0, < 2.0.0` — `.terraform-version` pins `1.10.5` for `tfenv` / `asdf` users.
+- Terraform `>= 1.11.0, < 2.0.0` (1.11 is where the S3 backend's `use_lockfile` is GA). `.terraform-version` pins `1.14.8` for `tfenv` / `asdf` users: the version CI and the devcontainer run, and the one the lock file was generated with.
 - `kubectl` (any version within ±1 minor of `1.35`).
 - `helm` `>= 3.13`.
 - `jq` — the cleanup scripts use it heavily.

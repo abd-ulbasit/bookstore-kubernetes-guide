@@ -68,7 +68,7 @@ on:
 permissions: {}
 
 env:
-  TF_VERSION: '1.10.5'
+  TF_VERSION: '1.14.8'
   WORKING_DIR: 'full-guide/examples/bookstore-platform/terraform'
   AWS_REGION: ${{ vars.AWS_REGION || 'ap-south-1' }}
   # Same CI-mode inputs as terraform.yml (its PREREQUISITES 5), so the
