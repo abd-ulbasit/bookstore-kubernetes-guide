@@ -2,6 +2,8 @@
 
 This sub-tree instantiates the Bookstore Platform substrate (VPC + EKS + addons + Karpenter + LB controller) in N regions from a single `terraform apply`. It is **opt-in** — the main `terraform/` tree is single-region by default; you only need this if you're standing up an active-active or active-passive multi-region topology.
 
+> **Known limitation: every region shares ONE state.** One `terraform apply`, one state file and one lock cover all N regions, so a bad plan, a provider bug or a stuck lock hits every region at once. That is the shared failure domain multi-region exists to avoid. The fix (one state per region, with a migration path) is written up in [ADR 0008](https://github.com/abd-ulbasit/bookstore-kubernetes-guide/blob/main/docs/adr/0008-state-per-environment-and-region.md) and not yet implemented. Treat this tree as scaffolding for a lab, not as the production layout.
+
 ---
 
 ## What this does

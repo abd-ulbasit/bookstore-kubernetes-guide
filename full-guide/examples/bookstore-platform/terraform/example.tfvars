@@ -5,11 +5,17 @@
 #   terraform plan  -var-file=my.tfvars
 #   terraform apply -var-file=my.tfvars
 #
-# Or just edit variables.tf defaults if you only have one environment.
+# One file per environment (dev.tfvars, prod.tfvars, ...), each paired with
+# its OWN state (a separate backend key, and for prod ideally a separate
+# bucket in a separate account). Editing variables.tf defaults instead
+# would make every environment share one state. See
+# docs/adr/0008-state-per-environment-and-region.md for the layout.
 ################################################################################
 
-# REQUIRED: pick an AWS region close to your users.
-region = "us-east-1"
+# REQUIRED: pick an AWS region close to your users. ap-south-1 matches the
+# variable default, backend-s3.tf.example and the breakglass policy's region
+# allowlist; if you change it here, change it there too.
+region = "ap-south-1"
 
 # Cluster name doubles as the Karpenter discovery tag and the IAM role prefix.
 # Must be unique per AWS account+region.
