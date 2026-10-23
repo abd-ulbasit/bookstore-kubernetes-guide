@@ -240,7 +240,7 @@ Terraform state holds every attribute of every resource and data source in this 
 |---|---|
 | `data.aws_eks_cluster_auth.this` token | A bearer token for the cluster, as the identity that ran plan/apply (cluster-admin). Valid ~15 minutes, refreshed on every run. The most sensitive value here. |
 | Helm release values (Karpenter, LB controller, Vault, ESO, Argo CD, Velero, Falco, Kyverno) | Configuration only: no passwords or tokens are passed through `values`/`set` in this tree. Keep it that way. Anything passed to `helm_release` lands in state. |
-| IAM role/policy documents, KMS key ARNs, VPC/subnet/SG IDs, endpoints, OIDC provider | Not credentials, but a complete map of the account for anyone planning an attack. |
+| IAM role and policy documents; the ARNs of KMS keys; VPC, subnet and security-group IDs; endpoints; the OIDC provider | Not credentials, but a complete map of the account for anyone planning an attack. |
 | `local_file.kubeconfig` | The CA and endpoint only. It authenticates with the `aws eks get-token` exec plugin, so no token is written to disk or state. |
 
 Not in state: the Argo CD initial admin password (generated in-cluster and read by hand; see `argocd-bootstrap.tf`) and any Vault root token (initialised out-of-band; see `vault.tf`).

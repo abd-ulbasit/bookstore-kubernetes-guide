@@ -20,8 +20,10 @@
 # REPLACE/placeholder text (payments-gateway/deployment.yaml,
 # payments-webhook-receiver.yaml). With gitleaks v8.30.1 and the default
 # rules, none of those files produce a finding, so none of them are
-# allowlisted. The two entries below are the only findings the full history
-# produced on 2026-10-24 (30 commits), and both are false positives.
+# allowlisted. The first two entries below are the only findings the
+# pre-audit history produced on 2026-10-24 (30 commits), and both are false
+# positives. The third pins one false positive in a single audit-branch
+# commit (prose, since reworded).
 
 [extend]
 useDefault = true
@@ -45,3 +47,16 @@ condition = "AND"
 paths = ['''^full-guide/examples/bookstore-platform/runbooks/runbook-payments-failure-rate\.md$''']
 regexTarget = "line"
 regexes = ['''curl .*-u "\$[A-Z][A-Z0-9_]*:"''']
+
+[[allowlists]]
+description = """Prose in the platform README's "What is in state" table \
+("...KMS key ARNs, VPC/subnet/SG IDs..."), which the generic-api-key rule \
+reads as key=<value>. Introduced in one commit of the 2026-10 audit branch \
+and reworded in the next, so the entry is pinned to that single commit as \
+well as the rule, file and line shape."""
+targetRules = ["generic-api-key"]
+condition = "AND"
+commits = ["c2b30c2c20d7e7e615ff44232f5a62e281be3206"]
+paths = ['''^full-guide/examples/bookstore-platform/terraform/README\.md$''']
+regexTarget = "line"
+regexes = ['''KMS key ARNs, VPC/subnet/SG IDs''']
