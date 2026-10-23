@@ -8,7 +8,7 @@ If you run multiple EKS clusters in the same AWS account, you should run this Te
 
 ## What's in here
 
-Five gated capabilities; each off by default. Toggle per your compliance posture.
+Six gated capabilities. Five are off by default; toggle them per your compliance posture. The **budget alarm is on by default**, because a billing alarm is a day-one requirement for any account. It lives here, not in the cluster tree, because destroying a cluster must not destroy the alarm, and an account with no cluster can still run up a bill.
 
 | Variable | Service | Cost (est, small account) | Why |
 |---|---|---|---|
@@ -17,6 +17,7 @@ Five gated capabilities; each off by default. Toggle per your compliance posture
 | `enable_config` | AWS Config recorder + S3 bucket | $15-50/month | Resource configuration history + EKS conformance pack |
 | `enable_cloudtrail` | Multi-region CloudTrail trail + S3 bucket | Free for management events; data events extra | Forensic API log |
 | `enable_iam_access_analyzer` | IAM Access Analyzer (account scope) | Free | Finds resources accessible outside the account |
+| `enable_budget_alarm` (**default `true`**, needs `budget_alarm_email`) | AWS Budgets monthly cost budget, email at 80% forecast / 100% actual | Free (first 2 budgets) | Bill shock is the first incident most new AWS accounts have |
 
 **All enabled, all month:** ~$30-100/month. The big number is Config; the others combined are <$10.
 
@@ -37,6 +38,10 @@ Five gated capabilities; each off by default. Toggle per your compliance posture
 cat > my.tfvars <<EOF
 region                     = "us-east-1"
 account_prefix             = "bookstore-platform"
+
+# On by default; the plan fails until you give it somewhere to send alerts.
+budget_alarm_email         = "<PLATFORM_TEAM_EMAIL>"
+monthly_budget_usd         = 50
 
 enable_guardduty           = true
 enable_securityhub         = true

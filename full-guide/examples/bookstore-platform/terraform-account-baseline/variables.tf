@@ -1,7 +1,7 @@
 ################################################################################
 # variables.tf — knobs for the account-baseline tree. Everything is OFF by
-# default. Turn on what your compliance posture needs; the README documents
-# the cost + value of each.
+# default except the budget alarm (see budget.tf). Turn on what your
+# compliance posture needs; the README documents the cost + value of each.
 ################################################################################
 
 variable "region" {
@@ -93,4 +93,36 @@ variable "tags" {
   description = "Tags merged into local.common_tags and applied to every resource."
   type        = map(string)
   default     = {}
+}
+
+################################################################################
+# Budget — the account's monthly cost alarm. The one capability that is ON by
+# default (see budget.tf for why it lives here).
+################################################################################
+variable "enable_budget_alarm" {
+  description = "Create the account-wide monthly AWS Budget with email alerts at 80% forecast and 100% actual. ON by default: a billing alarm is a day-one requirement. Set false only on purpose (for example, if the organization's management account already budgets this account)."
+  type        = bool
+  default     = true
+}
+
+variable "monthly_budget_usd" {
+  description = "Monthly cost cap for the whole account, in USD. Alerts only; AWS does not stop spending at the cap."
+  type        = number
+  default     = 50
+
+  validation {
+    condition     = var.monthly_budget_usd > 0
+    error_message = "monthly_budget_usd must be greater than 0."
+  }
+}
+
+variable "budget_alarm_email" {
+  description = "Email address that receives the budget alerts. Required while enable_budget_alarm = true."
+  type        = string
+  default     = ""
+
+  validation {
+    condition     = !var.enable_budget_alarm || can(regex("^[^@[:space:]]+@[^@[:space:]]+\\.[^@[:space:]]+$", var.budget_alarm_email))
+    error_message = "enable_budget_alarm = true (the default) requires budget_alarm_email to be a valid email address. Set it, or set enable_budget_alarm = false on purpose."
+  }
 }

@@ -46,3 +46,8 @@ output "region" {
   description = "Region for regional services."
   value       = var.region
 }
+
+output "account_budget_name" {
+  description = "Name of the account-wide monthly AWS Budget. Null when enable_budget_alarm = false."
+  value       = var.enable_budget_alarm ? aws_budgets_budget.account_monthly[0].name : null
+}

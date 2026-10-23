@@ -8,11 +8,16 @@
 #
 # What you get:
 #   - One aws_budgets_budget that fires at 80% (forecast) and 100% (actual).
-#   - One SNS topic (KMS-encrypted with an aws/sns alias key).
+#   - One SNS topic, encrypted with a customer-managed KMS key whose policy
+#     lets AWS Budgets and CloudWatch publish to it.
 #   - One email subscription. AWS sends a confirmation link the user MUST
 #     click before email starts flowing.
 #
-# Cost: free. AWS Budgets allows 2 budgets per account at no charge.
+# This is the CLUSTER's budget, and it is destroyed with the cluster. The
+# account-wide alarm that must survive teardown lives in
+# ../terraform-account-baseline/budget.tf and is on by default there.
+#
+# Cost: the budget is free (2 per account). The KMS key is ~$1/month.
 ################################################################################
 
 # Precondition gate: enable_budget_alarm = true requires budget_alarm_email.
@@ -30,14 +35,66 @@ resource "terraform_data" "budget_alarm_precondition" {
 }
 
 ################################################################################
-# SNS topic for budget alarm notifications. KMS-encrypted using the AWS-managed
-# aws/sns alias key (no extra KMS resource needed; AWS-managed = free).
+# SNS topic for budget alarm notifications, encrypted with a customer-managed
+# key.
+#
+# It used to use the AWS-managed alias/aws/sns key. That looks equivalent,
+# but an AWS-managed key's policy cannot be edited, and AWS Budgets (and
+# CloudWatch alarms, which ch.14.05 points at this topic) can only publish to
+# an encrypted topic if the key policy lets their service principal use the
+# key. With alias/aws/sns the topic accepted the subscription and then never
+# delivered a single alarm, and nothing reported the failure.
 ################################################################################
+data "aws_iam_policy_document" "budget_alarms_key" {
+  count = var.enable_budget_alarm ? 1 : 0
+
+  statement {
+    sid       = "AccountAdministersKey"
+    effect    = "Allow"
+    actions   = ["kms:*"]
+    resources = ["*"]
+
+    principals {
+      type        = "AWS"
+      identifiers = ["arn:${data.aws_partition.current.partition}:iam::${data.aws_caller_identity.current.account_id}:root"]
+    }
+  }
+
+  statement {
+    sid       = "AlarmServicesPublishEncrypted"
+    effect    = "Allow"
+    actions   = ["kms:GenerateDataKey*", "kms:Decrypt"]
+    resources = ["*"]
+
+    principals {
+      type        = "Service"
+      identifiers = ["budgets.amazonaws.com", "cloudwatch.amazonaws.com"]
+    }
+
+    condition {
+      test     = "StringEquals"
+      variable = "aws:SourceAccount"
+      values   = [data.aws_caller_identity.current.account_id]
+    }
+  }
+}
+
+resource "aws_kms_key" "budget_alarms" {
+  count = var.enable_budget_alarm ? 1 : 0
+
+  description             = "${local.name_prefix} budget/alarm SNS topic encryption"
+  enable_key_rotation     = true
+  deletion_window_in_days = 7
+  policy                  = data.aws_iam_policy_document.budget_alarms_key[0].json
+
+  tags = local.common_tags
+}
+
 resource "aws_sns_topic" "budget_alarms" {
   count = var.enable_budget_alarm ? 1 : 0
 
   name              = "${local.name_prefix}-budget-alarms"
-  kms_master_key_id = "alias/aws/sns"
+  kms_master_key_id = aws_kms_key.budget_alarms[0].arn
 
   tags = local.common_tags
 }
@@ -57,6 +114,27 @@ data "aws_iam_policy_document" "budget_alarms_topic_policy" {
     principals {
       type        = "Service"
       identifiers = ["budgets.amazonaws.com"]
+    }
+
+    condition {
+      test     = "StringEquals"
+      variable = "aws:SourceAccount"
+      values   = [data.aws_caller_identity.current.account_id]
+    }
+  }
+
+  # ch.14.05 attaches a CloudWatch log-volume alarm to this topic.
+  statement {
+    sid     = "AllowCloudWatchAlarmsToPublish"
+    effect  = "Allow"
+    actions = ["SNS:Publish"]
+    resources = [
+      aws_sns_topic.budget_alarms[0].arn,
+    ]
+
+    principals {
+      type        = "Service"
+      identifiers = ["cloudwatch.amazonaws.com"]
     }
 
     condition {

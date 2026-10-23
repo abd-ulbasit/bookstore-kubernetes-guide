@@ -225,7 +225,7 @@ This deploy is dev-grade. To move it to production, walk this list:
 - **System node group sizing** — `t3.medium` is enough for the controllers we host. If you add more cluster-critical workloads (Prometheus, Fluent Bit, OPA Gatekeeper, …), bump to `m6i.large` or larger.
 - **EKS audit logs** — already on. Set a CloudWatch retention policy: `aws logs put-retention-policy --log-group-name /aws/eks/<CLUSTER>/cluster --retention-in-days 90`.
 - **KMS key rotation** — the EKS module enables automatic rotation on the cluster encryption key by default. Confirm with `aws kms describe-key --key-id <KEY> --query 'KeyMetadata.KeyRotationStatus'`.
-- **Budget alarms** — `aws budgets create-budget --account-id <ID> --budget '{"BudgetName":"bookstore-platform","BudgetType":"COST","BudgetLimit":{"Amount":"500","Unit":"USD"},"TimeUnit":"MONTHLY"}'`.
+- **Budget alarms** — apply `../terraform-account-baseline/` (its account-wide budget is on by default), and optionally `enable_budget_alarm = true` here for a cluster-scoped one.
 - **Karpenter sanity bounds** — `karpenter_general_cpu_limit` / `karpenter_general_memory_limit` in variables.tf. Don't trust your HPAs not to runaway.
 - **Container image scanning** — turn on ECR image scanning on push (`aws ecr put-image-scanning-configuration --repository-name <REPO> --image-scanning-configuration scanOnPush=true`).
 - **Pod Security** — apply the `restricted` Pod Security Standard at the namespace level for everything except `kube-system`.
@@ -257,7 +257,7 @@ Every feature below is **var-gated and OFF by default**. The base deploy doesn't
 
 The tree uses two different KMS strategies depending on the artifact's blast radius and lifetime:
 
-- **AWS-managed keys (`alias/aws/sns`, `alias/aws/s3`)** for short-lived signal queues — Budget alert SNS topics, Falco alert SNS topics. The data is ephemeral (alert payload, immediately consumed), the blast radius if the key were compromised is low (an attacker could decrypt a notification they could already get from the source). AWS-managed keys are free, get automatic rotation, and require zero key-policy maintenance from you.
+- **AWS-managed keys (`alias/aws/sns`, `alias/aws/s3`)** for short-lived signal queues whose publisher is an IAM principal in this account, e.g. the Falco alert SNS topic (published by Falco's IRSA role). The data is ephemeral (alert payload, immediately consumed), the blast radius if the key were compromised is low. AWS-managed keys are free, get automatic rotation, and require zero key-policy maintenance from you. **Exception:** a topic that an AWS *service* publishes to (AWS Budgets, CloudWatch alarms) needs a customer-managed key, because the service principal must be allowed in the key policy and an AWS-managed key's policy cannot be edited. The budget topic used `alias/aws/sns` until 2026-10-24 and silently delivered nothing; it now has its own CMK (`cost-budgets.tf`).
 - **Customer-managed CMKs** for long-lived data buckets — CloudTrail logs, AWS Config history, Velero backups, EKS Secrets envelope encryption. The data is forensically valuable years after creation; the key policy is the chokepoint that controls who can read it. A CMK gives you an explicit allow-list of principals, custom rotation schedules, and the ability to deny decrypt by removing yourself from the key policy in an incident.
 
 Tier 1+ feature additions that create new resources should follow this rule: if it's a signal/notification path, AWS-managed key is fine; if it's audit/backup/secrets, create a CMK + alias.
@@ -275,7 +275,7 @@ monthly_budget_usd  = 100
 budget_alarm_email  = "platform-team@example.com"
 ```
 
-Creates an `aws_budgets_budget` + KMS-encrypted SNS topic + email subscription. Fires at 80% forecast and 100% actual. AWS Budgets is free for the first 2 budgets per account. **Caveat:** AWS sends a confirmation link to the email; nothing flows until the subscriber clicks it.
+Creates an `aws_budgets_budget` + an SNS topic encrypted with its own CMK (~$1/month; Budgets cannot publish to an `alias/aws/sns` topic) + email subscription. Fires at 80% forecast and 100% actual. AWS Budgets is free for the first 2 budgets per account. **Caveat:** AWS sends a confirmation link to the email; nothing flows until the subscriber clicks it. This is the *cluster's* budget and is destroyed with the cluster. The account-wide alarm, which is **on by default** and survives teardown, is `../terraform-account-baseline/budget.tf`. Apply that first.
 
 ### VPC endpoints
 

@@ -128,3 +128,8 @@ output "external_secrets_namespace" {
   description = "Kubernetes namespace where the External Secrets Operator runs. Null when enable_external_secrets = false. Apps reference this when wiring ClusterSecretStore / ExternalSecret CRs (see Part 15 ch.15.05)."
   value       = var.enable_external_secrets ? kubernetes_namespace.external_secrets[0].metadata[0].name : null
 }
+
+output "budget_alarm_sns_topic_arn" {
+  description = "ARN of the cluster budget alarm SNS topic (KMS-encrypted with a key Budgets and CloudWatch may use). Part 14 ch.05 attaches a CloudWatch log-volume alarm to it. Null when enable_budget_alarm = false."
+  value       = var.enable_budget_alarm ? aws_sns_topic.budget_alarms[0].arn : null
+}

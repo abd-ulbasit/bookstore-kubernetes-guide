@@ -79,10 +79,13 @@ chapter is the **EKS production guardrails** layer — the AWS Budgets
 "visibility" into "alarms that fire before the bill arrives."
 
 > **In production:** Every account running EKS gets at least one AWS
-> budget within the first day. The bookstore-platform tree's
-> `enable_budget_alarm = true` flips the alarm on, sends a single
-> email when the monthly burn rate projects beyond 80% of the cap,
-> and costs nothing (the first 2 budgets per account are free). The
+> budget within the first day. Put it in the **account baseline**
+> (`terraform-account-baseline/budget.tf`, on by default), not in the
+> cluster tree, so destroying a cluster cannot destroy the alarm. The
+> cluster tree's own `enable_budget_alarm = true` adds a cluster-scoped
+> budget on top; it sends a single
+> email when the monthly burn rate projects beyond 80% of the cap.
+> The budgets themselves are free (the first 2 per account). The
 > teams that learn this lesson the hard way are the ones whose first
 > AWS bill at $11,000 arrives in the company CFO's inbox before the
 > platform team has dashboards built.
@@ -256,8 +259,12 @@ The apply creates:
 
 - `aws_budgets_budget.monthly_cost` — the $200/month cap with two
   notifications (80% forecast, 100% actual).
-- `aws_sns_topic.budget_alarms` — KMS-encrypted SNS topic for the
-  notifications.
+- `aws_kms_key.budget_alarms` + `aws_sns_topic.budget_alarms` — the
+  notification topic, encrypted with its own customer-managed key whose
+  policy lets `budgets.amazonaws.com` and `cloudwatch.amazonaws.com` use
+  it. (With the AWS-managed `alias/aws/sns` key, which this tree used
+  until 2026-10-24, Budgets cannot publish at all: the subscription
+  confirms and no alarm ever arrives.)
 - `aws_sns_topic_subscription.budget_alarm_email` — email subscription
   to the address in `budget_alarm_email`.
 
