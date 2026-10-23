@@ -222,7 +222,7 @@ sequenceDiagram
     Dev->>GH: Review code + plan, merge PR
     GH->>Run: plan-main job on push to main (plan role)
     Run->>AWS: terraform plan -out=tfplan
-    Run->>GH: Plan text in summary + tfplan artifact (this run)
+    Run->>GH: Plan in summary + tfplan artifact (this run)
     GH->>Rev: apply job waits on environment production
     Rev->>GH: Approve after reading plan-main
     GH->>Run: apply job (environment production)
@@ -451,8 +451,10 @@ In the GitHub Actions tab, the `plan-pr` job runs in the
   credentials on the plan role.
 - `terraform init -lockfile=readonly` installs exactly the committed
   provider versions and hashes.
-- `terraform plan -lock=false` runs against the actual cloud, and the
-  plan text lands in the job summary.
+- `terraform plan -lock=false` runs against the actual cloud. The plan
+  text goes to a file, not the job log. On a private repository the
+  job summary shows the full plan; on a public one it lists resource
+  addresses and actions only (see *A saved plan is a secret*).
 
 This plan is **speculative**. **A reviewer reads it before approving
 the PR**; that is the point of it. It is never applied: it was computed
@@ -468,7 +470,9 @@ gh run watch
 ```
 
 1. **`plan-main`** (read-only role) plans the merged `main`, writes the
-   plan text to the job summary and uploads the binary `tfplan` as an
+   plan to the job summary (full text on a private repository,
+   addresses and actions on a public one) and uploads the binary
+   `tfplan` as an
    artifact of *this run* (1-day retention; a saved plan holds
    cleartext values, so keep this workflow in a private repo or encrypt
    the artifact). With no changes, the run stops here.
@@ -722,6 +726,17 @@ Actions artifacts, and on a public repo that is everyone. Keep this
 workflow in a private repository or encrypt the artifact, and keep
 retention short (the template uses 1 day).
 
+The same goes for plan *text*. Job logs and job summaries are as
+readable as the repository, and plan text carries attribute values
+(IPs, ARNs, tags, IAM policy documents) that are a map of the account
+even when none of them is a credential. That is why the drift check
+never posts plan output to its issue, and the plan jobs follow the same
+rule: plan output goes to a file, never the log, and the summary shows
+the full `terraform show` text only when
+`github.event.repository.private` is true. On a public repository it
+lists addresses and actions, and the approver reads the detail by
+running the same plan locally with the read-only role.
+
 **`-detailed-exitcode` semantics, and why the drift check adds
 `-refresh-only`.** Three exit codes:
 
@@ -902,7 +917,7 @@ jobs:
       # checkout, setup-terraform, configure-aws-credentials
       #   (role-to-assume: ${{ vars.TF_PLAN_ROLE_ARN }}), init -lockfile=readonly
       - id: plan
-        run: |                      # exit 2 = changes; plan text -> job summary
+        run: |                      # exit 2 = changes; plan -> file, summary
           terraform plan -lock=false -detailed-exitcode -out=tfplan ...
       - uses: actions/upload-artifact@<SHA>   # this run only, retention 1 day
 

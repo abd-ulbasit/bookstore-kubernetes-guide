@@ -168,6 +168,18 @@
 # who can read the repository, and on a public repo that is everyone. Run
 # this in a private repository, or encrypt tfplan before upload. Retention
 # is 1 day either way.
+#
+# PLAN TEXT IS AS PUBLIC AS THE REPOSITORY. The job log and the job summary
+# are readable by the same people as the artifact. Plan text carries
+# attribute values that are not credentials but are a map of the account
+# (IPs, ARNs, tags, IAM policy documents), the same reason the drift check
+# keeps plan output out of its issue. So the plan jobs never print the
+# plan to the log (it goes to a file), and the summary depends on the
+# repository's visibility: the full `terraform show` text on a private
+# repository, resource addresses and actions only on a public one. On a
+# public repository the approver therefore reads the detail by running the
+# same plan locally with the read-only role. That is one more reason to
+# run this workflow in a private repository.
 ################################################################################
 
 name: terraform
@@ -257,17 +269,37 @@ jobs:
         # -lock=false keeps the plan role read-only on the state bucket. A
         # speculative plan that reads state mid-apply sees either the old or
         # the new object (S3 writes are atomic); nothing is applied from it.
+        env:
+          REPO_PRIVATE: ${{ github.event.repository.private }}
         run: |
-          terraform plan -input=false -no-color -lock=false -out=tfplan
+          # Plan text goes to a file, never the log ("PLAN TEXT IS AS PUBLIC
+          # AS THE REPOSITORY" in the header).
+          set +e
+          terraform plan -input=false -no-color -lock=false -out=tfplan > plan.log 2>&1
+          rc=$?
+          set -e
+          if [ "$rc" -ne 0 ]; then
+            echo "::error::terraform plan failed (exit $rc). Last lines:"
+            tail -20 plan.log    # diagnostics, not resource values
+            exit "$rc"
+          fi
           {
             echo '## terraform plan (speculative, PR)'
             echo
             echo 'This plan is for review only and is never applied. The plan that'
             echo 'gets applied is recomputed on `main` after merge and approved there.'
             echo
-            echo '```'
-            terraform show -no-color tfplan
-            echo '```'
+            if [ "$REPO_PRIVATE" = "true" ]; then
+              echo '```'
+              terraform show -no-color tfplan
+              echo '```'
+            else
+              echo 'Public repository: addresses and actions only (see the workflow header).'
+              echo
+              terraform show -json tfplan \
+                | jq -r '.resource_changes[]? | select(.change.actions != ["no-op"])
+                         | "- `\(.address)`: \(.change.actions | join(", "))"'
+            fi
           } >> "$GITHUB_STEP_SUMMARY"
 
   ##############################################################################
@@ -315,24 +347,39 @@ jobs:
 
       - name: terraform plan
         id: plan
+        env:
+          REPO_PRIVATE: ${{ github.event.repository.private }}
         run: |
+          # Plan text goes to a file, never the log (see the header).
           set +e
-          terraform plan -input=false -no-color -lock=false -detailed-exitcode -out=tfplan
+          terraform plan -input=false -no-color -lock=false -detailed-exitcode -out=tfplan > plan.log 2>&1
           rc=$?
           set -e
           case "$rc" in
             0) echo "has_changes=false" >> "$GITHUB_OUTPUT" ;;
             2) echo "has_changes=true"  >> "$GITHUB_OUTPUT" ;;
-            *) echo "::error::terraform plan failed (exit $rc)"; exit "$rc" ;;
+            *) echo "::error::terraform plan failed (exit $rc). Last lines:"
+               tail -20 plan.log    # diagnostics, not resource values
+               exit "$rc" ;;
           esac
           {
             echo '## terraform plan (main): this is what `apply` will do'
             echo
             echo "Commit: \`${GITHUB_SHA}\`. Approving the \`production\` deployment applies exactly this plan."
             echo
-            echo '```'
-            terraform show -no-color tfplan
-            echo '```'
+            if [ "$REPO_PRIVATE" = "true" ]; then
+              echo '```'
+              terraform show -no-color tfplan
+              echo '```'
+            else
+              echo 'Public repository: addresses and actions only. Before approving,'
+              echo 'run the same plan locally with the read-only role to read the'
+              echo 'attribute-level diff (see the workflow header).'
+              echo
+              terraform show -json tfplan \
+                | jq -r '.resource_changes[]? | select(.change.actions != ["no-op"])
+                         | "- `\(.address)`: \(.change.actions | join(", "))"'
+            fi
           } >> "$GITHUB_STEP_SUMMARY"
 
       - name: Upload the saved plan (this run only)
