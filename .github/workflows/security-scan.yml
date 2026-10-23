@@ -80,6 +80,96 @@ jobs:
           sarif_file: 'trivy-vuln.sarif'
           category: trivy
 
+  # ---- Built images: what actually ships ----
+  #
+  # `trivy fs` reads go.mod, lockfiles and Dockerfiles as text. It never sees
+  # the OS packages in a base image or the Go toolchain compiled into a
+  # binary, which are what a reader actually runs. Every Dockerfile under
+  # full-guide/examples is therefore BUILT here (locally on the runner, never
+  # pushed), scanned with `trivy image`, and given a CycloneDX SBOM.
+  #
+  # Report-only, like the fs scan: findings go to the Security tab and the
+  # SBOMs are run artifacts. A Dockerfile that no longer builds fails the
+  # job, which is a real defect worth surfacing. Discovery is the same
+  # pattern as the Go modules below, so a new Dockerfile is covered when it
+  # lands.
+  discover-images:
+    name: discover Dockerfiles
+    runs-on: ubuntu-latest
+    outputs:
+      dirs: ${{ steps.find.outputs.dirs }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - id: find
+        run: |
+          set -euo pipefail
+          dirs=$(find full-guide/examples -name Dockerfile -not -path '*/.terraform/*' \
+            -exec dirname {} \; | sort)
+          if [ -z "$dirs" ]; then
+            echo "FAIL: discovered zero Dockerfiles; refusing an empty matrix."
+            exit 1
+          fi
+          printf '%s\n' "$dirs" | sed 's/^/  /'
+          echo "dirs=$(printf '%s\n' "$dirs" | jq -R -s -c 'split("\n") | map(select(length > 0))')" >> "$GITHUB_OUTPUT"
+
+  image-scan:
+    name: image (${{ matrix.dir }})
+    needs: discover-images
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      security-events: write   # upload SARIF
+      actions: read
+    strategy:
+      fail-fast: false
+      matrix:
+        dir: ${{ fromJSON(needs.discover-images.outputs.dirs) }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - id: name
+        env:
+          DIR: ${{ matrix.dir }}
+        run: echo "name=$(printf '%s' "${DIR#full-guide/examples/}" | tr '/' '-')" >> "$GITHUB_OUTPUT"
+      - name: Build (local only, never pushed)
+        env:
+          DIR: ${{ matrix.dir }}
+          NAME: ${{ steps.name.outputs.name }}
+        run: docker build --pull -t "scan/${NAME}:ci" "${DIR}"
+      - name: Trivy image scan
+        uses: aquasecurity/trivy-action@ed142fd0673e97e23eac54620cfb913e5ce36c25 # v0.36.0
+        with:
+          version: 'v0.70.0'
+          scan-type: 'image'
+          image-ref: scan/${{ steps.name.outputs.name }}:ci
+          format: 'sarif'
+          output: 'image.sarif'
+          severity: 'CRITICAL,HIGH'
+          exit-code: '0'
+      - name: SBOM (CycloneDX)
+        uses: aquasecurity/trivy-action@ed142fd0673e97e23eac54620cfb913e5ce36c25 # v0.36.0
+        with:
+          version: 'v0.70.0'
+          scan-type: 'image'
+          image-ref: scan/${{ steps.name.outputs.name }}:ci
+          format: 'cyclonedx'
+          output: 'sbom.cdx.json'
+          skip-setup-trivy: true   # installed by the previous step
+      - uses: github/codeql-action/upload-sarif@9b3254085494b55a0f7c4c2b3d2d52cc712ce370 # v4.39.1
+        if: always()
+        with:
+          sarif_file: 'image.sarif'
+          category: image-${{ steps.name.outputs.name }}
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: sbom-${{ steps.name.outputs.name }}
+          path: sbom.cdx.json
+          retention-days: 30
+          if-no-files-found: error
+
   # ---- Terraform ----
   #
   # There is deliberately no separate Terraform scanner job. The `trivy` job
@@ -224,7 +314,7 @@ jobs:
   # worth being able to eyeball on every run.
   scan-summary:
     name: scan coverage summary
-    needs: [trivy, govulncheck, discover-go-modules, go-toolchain-matches-scan, runasnonroot-acceptance]
+    needs: [trivy, image-scan, discover-images, govulncheck, discover-go-modules, go-toolchain-matches-scan, runasnonroot-acceptance]
     if: always()
     runs-on: ubuntu-latest
     steps:
@@ -232,6 +322,7 @@ jobs:
         env:
           MODULES: ${{ needs.discover-go-modules.outputs.modules }}
           TRIVY_RESULT: ${{ needs.trivy.result }}
+          IMAGE_RESULT: ${{ needs.image-scan.result }}
           GOVULN_RESULT: ${{ needs.govulncheck.result }}
           TOOLCHAIN_RESULT: ${{ needs.go-toolchain-matches-scan.result }}
           NONROOT_RESULT: ${{ needs.runasnonroot-acceptance.result }}
@@ -243,6 +334,7 @@ jobs:
             echo "| Scanner | Scope | Result |"
             echo "|---|---|---|"
             echo "| trivy (vuln+secret+misconfig) | whole repo (\`fs\`, \`.\`), incl. all four Terraform roots | \`${TRIVY_RESULT}\` |"
+            echo "| trivy image + CycloneDX SBOM | every Dockerfile under full-guide/examples, built on the runner | \`${IMAGE_RESULT}\` |"
             echo "| govulncheck (Go ${GO_VERSION}) | every discovered Go module | \`${GOVULN_RESULT}\` |"
             echo "| Go builder images == scan toolchain | every Dockerfile under full-guide/examples | \`${TOOLCHAIN_RESULT}\` |"
             echo "| runAsNonRoot acceptance | raw manifests + rendered Helm + Kustomize overlays | \`${NONROOT_RESULT}\` |"
@@ -265,7 +357,7 @@ jobs:
   # example-trees-check.yml; fires on push-to-main as well as on schedule,
   # since a scan can start failing on either.
   rolling-failure-issue:
-    needs: [trivy, discover-go-modules, govulncheck, go-toolchain-matches-scan, runasnonroot-acceptance]
+    needs: [trivy, discover-images, image-scan, discover-go-modules, govulncheck, go-toolchain-matches-scan, runasnonroot-acceptance]
     if: failure() && github.event_name != 'pull_request'
     runs-on: ubuntu-latest
     permissions:
