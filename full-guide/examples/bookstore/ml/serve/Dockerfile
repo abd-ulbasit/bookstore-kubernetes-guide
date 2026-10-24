@@ -38,6 +38,12 @@ COPY requirements.txt /tmp/requirements.txt
 RUN pip install --upgrade pip \
  && pip install -r /tmp/requirements.txt
 
+# The venv is copied into the runtime image as-is, and nothing there ever
+# installs a package. Shipping pip would only ship the libraries it vendors
+# (urllib3, msgpack, setuptools' pkg_resources), which trivy reports as HIGH
+# even in the newest pip, so pip leaves the venv here.
+RUN pip uninstall --yes pip
+
 # ---- Stage 2: runtime ----------------------------------------------------
 FROM python:3.12-slim AS runtime
 
@@ -48,11 +54,14 @@ ENV PYTHONDONTWRITEBYTECODE=1 \
     MODEL_NAME="recommender" \
     PORT="8080"
 
+# The base image's own pip goes too, for the same reason as in the builder.
+# /usr/local/bin/python is named explicitly because PATH lists the venv first.
 RUN groupadd --system --gid 65532 nonroot \
  && useradd  --system --uid 65532 --gid 65532 --no-create-home \
         --home-dir /workspace --shell /sbin/nologin nonroot \
  && mkdir -p /workspace/model \
- && chown -R 65532:65532 /workspace
+ && chown -R 65532:65532 /workspace \
+ && /usr/local/bin/python -m pip uninstall --yes pip
 
 COPY --from=builder /opt/venv /opt/venv
 WORKDIR /workspace
