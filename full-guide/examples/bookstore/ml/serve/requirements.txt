@@ -5,9 +5,17 @@
 # scikit-learn + numpy match the train image so the model.joblib produced by
 # ../train/train.py loads cleanly here.
 # Versions current as of the v1.30+ Kubernetes era; bump deliberately.
-fastapi==0.112.2
+#
+# starlette is pinned on its own line because FastAPI no longer caps it
+# (fastapi 0.141.1 asks only for starlette>=0.46.0), so leaving it out would
+# install whatever Starlette is newest on build day. It is the package that
+# parses requests, so it carries the HTTP advisories: anything below 1.3.1
+# is affected by CVE-2026-54283 (form limits ignored) and below 1.1.0 by
+# CVE-2026-48818. Bump fastapi and starlette together.
+fastapi==0.141.1
+starlette==1.7.0
 uvicorn[standard]==0.30.6
-pydantic==2.8.2
+pydantic==2.13.5
 joblib==1.4.2
 numpy==1.26.4
 scipy==1.13.1

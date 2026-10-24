@@ -10,7 +10,7 @@ endpoint.
 | File | What it is | Runs on kind? |
 |---|---|---|
 | `predictor.py` | tiny FastAPI app: `/v1/models/recommender:predict` + `/recommend` + health | yes (no cluster) |
-| `requirements.txt` | pinned Python deps (FastAPI/uvicorn + joblib + sklearn) | — |
+| `requirements.txt` | pinned Python deps (FastAPI/Starlette/uvicorn + joblib + sklearn) | — |
 | `Dockerfile` | multi-stage slim Python image, non-root UID 65532 | yes |
 | `Makefile` | `compile` / `build` / `train-and-run` / `test` targets | yes |
 | `recommender-deployment.yaml` | **built-in** Deployment of the predictor (PSA-restricted) | **yes — kind-runnable** |
@@ -35,6 +35,10 @@ endpoint.
 The `:predict` envelope follows the v1 prediction protocol used by KServe's
 built-in runtimes — the same image works behind an `InferenceService` and a
 plain Deployment.
+
+Send the `:predict` body with `content-type: application/json`, as every
+example here does. FastAPI checks the header (since 0.132) and answers a
+POST without it with `422`, rather than parsing the body as JSON anyway.
 
 ## Run it locally (no cluster)
 
