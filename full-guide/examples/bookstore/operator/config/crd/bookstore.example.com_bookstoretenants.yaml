@@ -27,6 +27,12 @@
 # The CRD itself is a built-in apiextensions.k8s.io/v1 object, so THIS file
 # dry-runs/*applies* clean on any v1.30+ cluster.
 #
+# scope: Cluster. BookstoreTenant is cluster-scoped so it can own the
+# cluster-scoped tenant Namespace and the children inside it (a namespaced
+# owner cannot). spec.scope is IMMUTABLE once the CRD is established: an
+# install of the earlier Namespaced CRD must be deleted (which deletes every
+# BookstoreTenant) and recreated from this file, not re-applied over.
+#
 # conversion.strategy: Webhook — v1beta1 is the storage+hub version; v1alpha1
 # is converted via the operator's /convert endpoint (see api/v1alpha1/
 # bookstoretenant_conversion.go). cert-manager injects the caBundle (the
@@ -45,7 +51,7 @@ spec:
     singular: bookstoretenant
     shortNames:
       - btn
-  scope: Namespaced
+  scope: Cluster
   conversion:
     strategy: Webhook
     webhook:

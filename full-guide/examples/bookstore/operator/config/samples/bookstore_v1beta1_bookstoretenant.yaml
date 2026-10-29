@@ -10,11 +10,12 @@
 # That is EXPECTED and NOT a manifest defect. Install the CRD (`make install`,
 # or kubectl apply config/crd/...) and run the operator; then this applies and
 # the controller reconciles it into namespace `bookstore-tenant-acme`.
+# BookstoreTenant is cluster-scoped, so these samples carry no metadata.namespace
+# and kubectl needs no -n.
 apiVersion: bookstore.example.com/v1beta1
 kind: BookstoreTenant
 metadata:
   name: acme
-  namespace: default
 spec:
   tenantName: acme
   replicas: 1
@@ -29,7 +30,6 @@ apiVersion: bookstore.example.com/v1alpha1
 kind: BookstoreTenant
 metadata:
   name: acme-legacy
-  namespace: default
 spec:
   tenantName: acme-legacy
   replicas: 2

@@ -30,7 +30,7 @@ func TestConvertTo_SizeToTier(t *testing.T) {
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
 			src := &BookstoreTenant{
-				ObjectMeta: metav1.ObjectMeta{Name: "acme", Namespace: "default"},
+				ObjectMeta: metav1.ObjectMeta{Name: "acme"},
 				Spec:       BookstoreTenantSpec{TenantName: "acme", Replicas: 2, Size: tc.size},
 			}
 			var dst v1beta1.BookstoreTenant
@@ -43,8 +43,8 @@ func TestConvertTo_SizeToTier(t *testing.T) {
 			if dst.Spec.TenantName != "acme" || dst.Spec.Replicas != 2 {
 				t.Errorf("identical fields not copied: %+v", dst.Spec)
 			}
-			if dst.Name != "acme" || dst.Namespace != "default" {
-				t.Errorf("ObjectMeta not copied: %s/%s", dst.Namespace, dst.Name)
+			if dst.Name != "acme" {
+				t.Errorf("ObjectMeta not copied: name %q", dst.Name)
 			}
 		})
 	}
@@ -65,7 +65,7 @@ func TestConvertFrom_TierToSize(t *testing.T) {
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
 			src := &v1beta1.BookstoreTenant{
-				ObjectMeta: metav1.ObjectMeta{Name: "acme", Namespace: "default"},
+				ObjectMeta: metav1.ObjectMeta{Name: "acme"},
 				Spec:       v1beta1.BookstoreTenantSpec{TenantName: "acme", Replicas: 3, Tier: tc.tier},
 			}
 			var dst BookstoreTenant
@@ -87,7 +87,7 @@ func TestConvertFrom_TierToSize(t *testing.T) {
 func TestRoundTrip(t *testing.T) {
 	for _, size := range []string{"s", "m", "l"} {
 		src := &BookstoreTenant{
-			ObjectMeta: metav1.ObjectMeta{Name: "rt", Namespace: "ns"},
+			ObjectMeta: metav1.ObjectMeta{Name: "rt"},
 			Spec:       BookstoreTenantSpec{TenantName: "rt", Replicas: 1, Size: size},
 		}
 		var hub v1beta1.BookstoreTenant

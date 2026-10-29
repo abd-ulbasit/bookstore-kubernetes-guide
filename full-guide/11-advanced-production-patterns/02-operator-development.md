@@ -4,9 +4,9 @@
 > operator (CloudNativePG's `Cluster`); this chapter **builds one** with
 > **Kubebuilder** — a real `BookstoreTenant` CRD
 > (`bookstore.example.com`, `v1alpha1` spoke + `v1beta1` hub for the conversion
-> story, namespaced) whose controller reconciles a minimal **restricted-PSA**
-> slice (Namespace + Deployment + Service + ConfigMap) into a per-tenant
-> namespace: the full Kubebuilder layout (`PROJECT`, `api/`,
+> story, cluster-scoped) whose controller reconciles a minimal
+> **restricted-PSA** slice (Namespace + Deployment + Service + ConfigMap) into
+> a per-tenant namespace: the full Kubebuilder layout (`PROJECT`, `api/`,
 > `internal/controller/`, `config/`, `Makefile`), `make manifests generate`,
 > the **reconcile loop** (level-triggered, idempotent, owner references for GC,
 > `CreateOrUpdate`), **finalizers** (clean state GC can't), **status
@@ -76,7 +76,8 @@ watches, caching, work-queues, leader election, and the webhook server.**
   markers → `make manifests`), **you write `Reconcile`**, and **you own the
   versioning**.
 - **`Reconcile(ctx, req)` is the whole controller.** controller-runtime hands
-  you a namespaced name; you `Get` the CR, drive the world toward `.spec`
+  you a `NamespacedName` (namespace empty for this cluster-scoped CR); you
+  `Get` the CR, drive the world toward `.spec`
   (idempotently, via `CreateOrUpdate`), write `.status`, and return
   `(Result, error)`. A returned error → exponential-backoff requeue;
   `Result{RequeueAfter: d}` → time-based requeue. The loop is **level-triggered**
@@ -89,8 +90,12 @@ watches, caching, work-queues, leader election, and the webhook server.**
   ch.06](../00-foundations/06-declarative-api-model.md) `ownerReferences`). A
   **finalizer** is a string on `.metadata.finalizers` that *blocks* actual
   deletion (the apiserver only sets `deletionTimestamp`) until your controller
-  does pre-delete work GC cannot express — release an external resource, a
-  cluster-scoped object, a billing record — then removes the finalizer.
+  does pre-delete work GC cannot express, such as releasing an external
+  resource or a billing record, then removes the finalizer. Owner scope
+  matters: a namespaced owner can only own objects in its own namespace, while
+  a cluster-scoped owner can own cluster-scoped objects and namespaced ones in
+  any namespace. `BookstoreTenant` is cluster-scoped for that reason, since it
+  owns a Namespace and the objects inside it.
 - **`.status` is observed state, and `observedGeneration` is the freshness
   bit.** The controller writes `.status` (via the **status subresource**, so it
   never fights a user editing `.spec`): `Conditions` (`Ready`/`Degraded` via
@@ -126,7 +131,7 @@ without a distracting domain.
 flowchart TB
     subgraph api["kube-apiserver (serves BookstoreTenant like a built-in)"]
       crd["CustomResourceDefinition<br/>bookstore.example.com<br/>v1alpha1 (spoke) + v1beta1 (hub/storage)<br/>OpenAPI schema + status subresource"]
-      cr[("BookstoreTenant/acme<br/>.spec = desired (tenantName, replicas, tier)<br/>.status = observed (operator writes)")]
+      cr[("BookstoreTenant/acme (cluster-scoped)<br/>.spec = desired (tenantName, replicas, tier)<br/>.status = observed (operator writes)")]
       conv["/convert webhook<br/>v1alpha1 &lt;-&gt; v1beta1 hub"]
       crd --> cr
       cr -. non-storage version r/w .-> conv
@@ -145,7 +150,7 @@ flowchart TB
       le -.-> rec
     end
 
-    subgraph world["bookstore-tenant-acme namespace (PSA restricted, operator-created)"]
+    subgraph world["bookstore-tenant-acme namespace (PSA restricted, operator-created, ownerRef -> CR)"]
       cm["ConfigMap tenant-config<br/>(ownerRef -> CR; GC'd on delete)"]
       svc["Service tenant"]
       dep["Deployment tenant<br/>(restricted SC: runAsNonRoot,<br/>UID 65532, drop ALL, RO root FS)"]
@@ -181,7 +186,7 @@ flowchart TB
  │   │   └── bookstoretenant_controller_test.go   behavioural tests
  │   └── webhook/v1/         (ch.01) mutating + validating Pod webhooks
  └── config/
-     ├── crd/                the CRD (conversion.strategy: Webhook, v1beta1 storage)
+     ├── crd/                the CRD (scope: Cluster, conversion: Webhook, v1beta1 storage)
      ├── rbac/               LEAST-PRIVILEGE manager Role/Binding/SA (from markers)
      ├── manager/            restricted-compliant manager Deployment + own ns
      ├── webhook/            (ch.01) Mutating/ValidatingWebhookConfiguration
@@ -242,7 +247,7 @@ and code-gen:
 ```go
 // +kubebuilder:object:root=true
 // +kubebuilder:subresource:status                 // the status SUBRESOURCE
-// +kubebuilder:resource:scope=Namespaced,shortName=btn
+// +kubebuilder:resource:scope=Cluster,shortName=btn
 // +kubebuilder:storageversion                      // v1beta1 = etcd storage version
 type BookstoreTenant struct { ... Spec ...; Status ... }
 
@@ -255,6 +260,17 @@ request an unbounded workload), `spec.tier` (`Enum=small;medium;large`).
 [`api/v1alpha1`](../examples/bookstore/operator/api/v1alpha1/bookstoretenant_types.go)
 is the **spoke** — same shape but `size: s|m|l` (renamed+remapped vs `tier`) so
 the conversion has real work.
+
+**`scope=Cluster` is deliberate.** The controller creates a cluster-scoped
+tenant Namespace and namespaced children inside it, and Kubernetes only lets a
+*cluster-scoped* owner own both ([Owners and
+Dependents](https://kubernetes.io/docs/concepts/overview/working-with-objects/owners-dependents/)).
+A namespaced `BookstoreTenant` cannot own the Namespace, nor children in a
+namespace other than its own, so every reconcile would fail with
+`cross-namespace owner references are disallowed`. Scope is a property of the
+whole CRD (both versions), is **immutable** once the CRD is established, and
+means tenants are created with cluster-level RBAC, which fits an object that
+provisions a Namespace.
 
 `make manifests generate` runs `controller-gen` to (re)produce the CRD/RBAC/
 webhook YAML from the markers and the `zz_generated.deepcopy.go`:
@@ -293,7 +309,7 @@ is the loop. Its shape (read the file alongside this):
 func (r *BookstoreTenantReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.Result, error) {
     var tenant bookstorev1beta1.BookstoreTenant
     if err := r.Get(ctx, req.NamespacedName, &tenant); err != nil {
-        return ctrl.Result{}, client.IgnoreNotFound(err)          // CR gone -> children GC'd; done
+        return ctrl.Result{}, client.IgnoreNotFound(err)          // CR gone -> its Namespace + children GC'd; done
     }
     if !tenant.DeletionTimestamp.IsZero() {                        // being deleted:
         if controllerutil.ContainsFinalizer(&tenant, tenantFinalizer) {
@@ -307,7 +323,8 @@ func (r *BookstoreTenantReconciler) Reconcile(ctx context.Context, req ctrl.Requ
         controllerutil.AddFinalizer(&tenant, tenantFinalizer)      // register BEFORE creating children
         return ctrl.Result{}, r.Update(ctx, &tenant)               // its watch event re-enqueues
     }
-    // ACT — each child via CreateOrUpdate (idempotent) + SetControllerReference (GC)
+    // ACT: Namespace, then its children, each via CreateOrUpdate (idempotent)
+    // + SetControllerReference (GC)
     nsName := "bookstore-tenant-" + tenant.Spec.TenantName
     // ... reconcileNamespace / ConfigMap / Service / Deployment (restricted SC) ...
     // STATUS — observed state back
@@ -340,10 +357,12 @@ make test     # wraps: setup-envtest (PINNED) downloads apiserver+etcd;
 ```
 
 [`bookstoretenant_controller_test.go`](../examples/bookstore/operator/internal/controller/bookstoretenant_controller_test.go)
-asserts the load-bearing properties: a CR produces an **owner-referenced,
-restricted** child Deployment; the loop is **idempotent** (a second reconcile
-changes nothing — child `generation` unchanged); `.status` carries
-`observedGeneration` + a `Ready` condition.
+asserts the load-bearing properties: a CR produces an **owner-referenced**
+tenant Namespace and an **owner-referenced, restricted** child Deployment
+(envtest runs no garbage collector, so it checks the `ownerReferences`, not
+the cascade); the loop is **idempotent** (a second reconcile changes nothing,
+child `generation` unchanged); `.status` carries `observedGeneration` + a
+`Ready` condition.
 
 > **envtest needs its binaries; absent them the suite *skips*, it does not
 > fail.** `make test` provisions them via the pinned `setup-envtest`. On a
@@ -377,8 +396,15 @@ kubectl get bookstoretenant acme -o wide
 #   acme   acme     Ready   bookstore-tenant-acme    10s
 kubectl get ns bookstore-tenant-acme --show-labels    # pod-security.kubernetes.io/enforce=restricted
 kubectl get deploy,svc,cm -n bookstore-tenant-acme     # the reconciled, restricted slice
+kubectl get ns bookstore-tenant-acme -o jsonpath='{.metadata.ownerReferences[0].kind}'               # BookstoreTenant
 kubectl get deploy tenant -n bookstore-tenant-acme -o jsonpath='{.metadata.ownerReferences[0].kind}'   # BookstoreTenant
 ```
+
+> **Installed an earlier, namespaced revision of this CRD?** `spec.scope` is
+> immutable, so `make install` over it fails. Delete the old CRD first
+> (`kubectl delete crd bookstoretenants.bookstore.example.com`, which deletes
+> every `BookstoreTenant`), then install; see the [operator
+> README](../examples/bookstore/operator/README.md).
 
 **Status + Events** (observed state + the narration `kubectl describe` shows):
 
@@ -409,31 +435,25 @@ kubectl get bookstoretenant acme -o jsonpath='{.metadata.generation} {.status.ob
 kubectl get deploy tenant -n bookstore-tenant-acme -o jsonpath='{.spec.replicas}'; echo   # 3
 ```
 
-**Finalizer — and the namespace it deliberately leaks.** Delete the CR; the
-apiserver only sets `deletionTimestamp` until the controller runs
-`finalizeTenant` and removes the finalizer. Owner-ref GC then removes the
-**owner-referenced** children (ConfigMap/Service/Deployment). But the tenant
-**Namespace is cluster-scoped — it cannot carry an `ownerReference` to a
-namespaced CR**, so GC does *not* delete it. This minimal reference operator's
-`finalizeTenant` deliberately only emits a terminal Event and does **not**
-`r.Delete` the namespace — so the tenant namespace **leaks**. That omission is
-*exactly* the finalizer footgun the Production notes warn about (a real
-operator deletes it in the finalizer):
+**Delete: the finalizer runs, then GC takes the namespace.** Delete the CR;
+the apiserver only sets `deletionTimestamp` until the controller runs
+`finalizeTenant` and removes the finalizer. Once the CR is gone, the garbage
+collector deletes everything that carries an `ownerReference` to it: the
+tenant **Namespace** (a cluster-scoped CR can own a cluster-scoped Namespace;
+a namespaced one could not) and, with it, the ConfigMap, Service and
+Deployment. This operator's `finalizeTenant` has no cluster work left to do
+because GC covers it all, so it only emits a terminal Event; it stays as the
+hook where teardown GC cannot reach (an external system) would go:
 
 ```sh
 kubectl delete bookstoretenant acme &              # blocks on the finalizer
 kubectl get bookstoretenant acme -o jsonpath='{.metadata.deletionTimestamp} {.metadata.finalizers}'; echo
 #   2026-...Z [bookstore.example.com/tenant-finalizer]   ← object kept until finalizer cleared
-wait
-kubectl describe bookstoretenant acme 2>/dev/null | grep Finalized || echo "finalizer ran; CR gone"
-kubectl get deploy,svc,cm -n bookstore-tenant-acme 2>/dev/null   # GONE — owner-referenced -> GC'd
-kubectl get ns bookstore-tenant-acme   # STILL EXISTS — it cannot be owner-referenced
-# A namespaced CR cannot own a cluster-scoped Namespace, so GC does NOT remove it.
-# This minimal demo's finalizeTenant() does NOT delete it (it only emits an
-# Event) — so the tenant namespace LEAKS. A production finalizeTenant() would
-# `r.Delete(ctx, ns)` here; that deliberate omission is precisely the finalizer
-# footgun the Production notes call out. Clean it up by hand for now:
-kubectl delete ns bookstore-tenant-acme --ignore-not-found
+wait                                               # finalizer ran; CR gone
+kubectl wait --for=delete ns/bookstore-tenant-acme --timeout=120s   # GC removes the namespace...
+kubectl get deploy,svc,cm -n bookstore-tenant-acme                  # ...and everything in it
+# No `kubectl delete ns` needed: the Namespace's ownerReference to the
+# BookstoreTenant is what makes GC delete it.
 ```
 
 ### 4. The conversion webhook — v1alpha1 ⇄ v1beta1 hub
@@ -461,7 +481,7 @@ the operator's `/convert` endpoint (cert-manager-served, [ch.01](01-admission-we
 kubectl apply -f - <<'EOF'
 apiVersion: bookstore.example.com/v1alpha1
 kind: BookstoreTenant
-metadata: { name: acme-legacy, namespace: default }
+metadata: { name: acme-legacy }
 spec: { tenantName: acme-legacy, replicas: 2, size: m }     # v1alpha1: size=m
 EOF
 kubectl get bookstoretenant.v1beta1.bookstore.example.com acme-legacy -o jsonpath='{.spec.tier}'; echo
@@ -548,20 +568,20 @@ kind delete cluster --name bookstore
   `SetControllerReference(cr, child, scheme)` writes an `ownerReference`
   (`controller: true`) so the apiserver's **garbage collector** deletes the
   child when the CR is deleted — automatic, but only for *Kubernetes objects
-  the CR owns*, and only **same-scope** (a namespaced CR cannot own a
-  cluster-scoped Namespace — cross-scope owner refs are rejected). So the
-  ConfigMap/Service/Deployment are GC'd, but the tenant **Namespace is not**:
-  it must be deleted by the finalizer instead. A **finalizer** blocks the CR's
-  actual deletion (apiserver sets `deletionTimestamp`, GC waits) so the
-  controller can do cleanup GC *can't*: external systems,
-  cross-scope/cluster-scoped objects, ordered teardown. It **must be
-  idempotent** (it can run more than once) and **must be removed** or the
-  object is stuck `Terminating` forever (a classic operator bug). **This
-  chapter's reference operator deliberately leaves its `finalizeTenant` a
-  no-op (Event only) — so the tenant Namespace intentionally LEAKS** (the
-  Hands-on shows the ns still present after CR deletion); a production operator
-  `r.Delete`s the namespace there. The minimal omission is *kept on purpose* to
-  make the footgun visible — see the Production note below.
+  the CR owns*, and only where **owner scope allows it**: a namespaced CR can
+  own objects in its own namespace only (not a cluster-scoped Namespace, not
+  another namespace), while a **cluster-scoped** CR can own both. That is why
+  `BookstoreTenant` is cluster-scoped: the controller sets the reference on
+  the tenant **Namespace** and on the ConfigMap/Service/Deployment inside it,
+  so deleting the CR GC's the Namespace and everything in it. A **finalizer**
+  blocks the CR's actual deletion (apiserver sets `deletionTimestamp`, GC
+  waits) so the controller can do cleanup GC *can't*: external systems,
+  ordered teardown. It **must be idempotent** (it can run more than once) and
+  **must be removed** or the object is stuck `Terminating` forever (a classic
+  operator bug). **This chapter's reference operator has no state outside the
+  cluster, so its `finalizeTenant` only emits an Event**: it is the hook where
+  such teardown would go, and an operator with nothing to tear down should
+  drop the finalizer (see the Production note below).
 - **The status subresource keeps spec and status from fighting.**
   `+kubebuilder:subresource:status` makes `.status` a separate endpoint with
   its own RBAC; `r.Status().Update()` writes only status and does **not** bump
@@ -616,19 +636,20 @@ kind delete cluster --name bookstore
 > migration, not a code edit.
 
 > **In production: finalizers are correctness-critical and a top operator
-> footgun — and this reference operator intentionally demonstrates the
-> failure.** Its `finalizeTenant` is deliberately a no-op (it only emits an
-> Event), so the cluster-scoped tenant **Namespace is never deleted and
-> leaks** — kept minimal *on purpose* to make the footgun concrete (the
-> Hands-on shows the ns surviving CR deletion; clean it up by hand there). A
-> real operator's finalizer **must `r.Delete(ctx, ns)` the tenant namespace**
-> (it cannot be owner-referenced) plus any external state. Conversely, a
-> finalizer that errors forever, or that the controller forgets to remove,
-> leaves every CR stuck `Terminating` and **blocks namespace deletion**. Make
+> footgun.** This reference operator's `finalizeTenant` only emits an Event,
+> because owner-reference GC already covers everything it creates: the
+> cluster-scoped `BookstoreTenant` owns the tenant **Namespace** and the
+> objects inside it. A finalizer earns its place only for state GC cannot
+> reach (an external system, a billing record, a cloud IAM user); with none,
+> drop it, since it makes every CR deletion wait on your controller being up.
+> A finalizer that errors forever, or that the controller forgets to remove,
+> leaves every CR stuck `Terminating`, and GC only removes the tenant
+> Namespace once the CR is actually gone, so it **stays too**. Make
 > finalizer logic **idempotent**, **time-bounded**, and **fail-loud** (status
 > `Degraded` + Event), have an operational escape (documented manual finalizer
 > removal) for when the external system it cleans up is itself down, and
-> **test the delete path in envtest**, not just the create path.
+> **test the delete path in envtest**, not just the create path (envtest runs
+> no garbage collector, so assert the `ownerReferences` GC acts on).
 
 > **In production: package and distribute it like any platform component.**
 > Ship CRDs separately from the controller (CRDs are cluster-scoped, shared,
@@ -665,7 +686,7 @@ make test                                                # envtest (real apiserv
 make -C examples/bookstore/operator install              # kustomize build config/crd | kubectl apply
 kubectl apply -k examples/bookstore/operator/config/default
 kubectl apply -f examples/bookstore/operator/config/samples/bookstore_v1beta1_bookstoretenant.yaml
-kubectl get bookstoretenant -A -o wide                   # PHASE / NAMESPACE
+kubectl get bookstoretenant -o wide                      # PHASE / NAMESPACE (cluster-scoped: no -n)
 kubectl get bookstoretenant acme -o jsonpath='{.metadata.generation} {.status.observedGeneration}'
 kubectl describe bookstoretenant acme                    # conditions + Events (the "why")
 kubectl explain bookstoretenant.spec --api-version=bookstore.example.com/v1beta1   # your CRD's schema
@@ -681,9 +702,9 @@ func (r *R) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.Result, error
     }
     if !cr.DeletionTimestamp.IsZero() {                              // finalizer path
         if controllerutil.ContainsFinalizer(&cr, fin) {
-            // finalizeTenant(ctx, &cr) does cleanup GC CAN'T: r.Delete the
-            // cluster-scoped tenant Namespace (no ownerRef possible) + any
-            // external state. Wrap errors with %w (consistent with the loop).
+            // finalizeTenant(ctx, &cr) does cleanup GC CAN'T: external state
+            // only (the Namespace and children are owner-referenced, so GC
+            // deletes them). Wrap errors with %w (consistent with the loop).
             if err := r.finalizeTenant(ctx, &cr); err != nil { return ctrl.Result{}, fmt.Errorf("finalize: %w", err) }
             controllerutil.RemoveFinalizer(&cr, fin)
             if err := r.Update(ctx, &cr); err != nil { return ctrl.Result{}, fmt.Errorf("remove finalizer: %w", err) }
@@ -713,7 +734,8 @@ Checklist:
       mature operator; you *build* one only for your **own** domain logic
 - [ ] `Reconcile` is **level-triggered + idempotent** (`CreateOrUpdate`); a
       second pass and a missed event are both no-ops (envtest asserts it)
-- [ ] Children carry **owner references** (GC); a **finalizer** does the
+- [ ] The tenant Namespace and its children carry **owner references** (GC,
+      which needs a **cluster-scoped** owner here); a **finalizer** does the
       cleanup GC can't, is **idempotent**, and is always **removed**
 - [ ] `.status` via the **subresource**: `Conditions` +
       **`observedGeneration` == `generation`** + **Events** for the "why"
@@ -739,7 +761,7 @@ Checklist:
 2. **You delete a `BookstoreTenant` and the namespace stays around. What probably happened, and how do finalizers fix it?**
    <details><summary>Show answer</summary>
 
-   The namespace was created with an owner reference pointing at the BookstoreTenant — when the tenant is deleted, the garbage collector should cascade-delete the namespace. But if your controller created external state (an S3 bucket, a cloud DNS record, a database) that the GC cannot reach, you need a *finalizer*. The finalizer is a string on the object's `metadata.finalizers`; the API marks the object `DeletionTimestamp` and blocks actual deletion until your controller has cleaned up the external state and removed its finalizer string. Without finalizers, the K8s GC deletes the resource but the external state leaks.
+   The namespace probably has no owner reference the garbage collector can follow. If the controller never set one, nothing cascades. If the `BookstoreTenant` CRD is *namespaced*, the controller cannot set a valid one: a namespaced owner cannot own a cluster-scoped Namespace, so the reference is rejected or ignored. The fix is a **cluster-scoped** `BookstoreTenant` whose controller calls `SetControllerReference` on the Namespace; when the tenant is deleted, the garbage collector then cascade-deletes the namespace and everything in it. Finalizers cover what the GC cannot reach: if your controller created external state (an S3 bucket, a cloud DNS record, a database), you need a *finalizer*. The finalizer is a string on the object's `metadata.finalizers`; the API marks the object `DeletionTimestamp` and blocks actual deletion until your controller has cleaned up the external state and removed its finalizer string. Without finalizers, the K8s GC deletes the resource but the external state leaks.
 
    </details>
 
@@ -760,7 +782,7 @@ Checklist:
 5. **Hands-on: write a minimal `BookstoreTenant` CRD + controller that creates a Namespace named `tenant-<spec.name>`. Apply two `BookstoreTenant` CRs simultaneously. Now delete one. What guarantees do owner references give you?**
    <details><summary>What you should see</summary>
 
-   The Namespace's `ownerReferences` points at the BookstoreTenant CR. When the CR is deleted, the K8s garbage collector cascades the deletion to the Namespace, and from there to everything in the namespace (RoleBindings, Deployments, Services). If `ownerReferences` was missing, the Namespace becomes an orphan that must be deleted by name. Owner references give you cascade-delete for free *within the cluster* — external state still needs finalizers.
+   With a **cluster-scoped** CRD, the Namespace's `ownerReferences` points at the BookstoreTenant CR. When the CR is deleted, the K8s garbage collector cascades the deletion to the Namespace, and from there to everything in the namespace (RoleBindings, Deployments, Services). If `ownerReferences` was missing, the Namespace becomes an orphan that must be deleted by name. Owner references give you cascade-delete for free *within the cluster*. External state still needs finalizers.
 
    </details>
 

@@ -63,12 +63,13 @@ type BookstoreTenantStatus struct {
 
 // +kubebuilder:object:root=true
 // +kubebuilder:subresource:status
-// +kubebuilder:resource:scope=Namespaced,shortName=btn
+// +kubebuilder:resource:scope=Cluster,shortName=btn
 // +kubebuilder:printcolumn:name="Tenant",type=string,JSONPath=`.spec.tenantName`
 // +kubebuilder:printcolumn:name="Phase",type=string,JSONPath=`.status.phase`
 // +kubebuilder:printcolumn:name="Age",type=date,JSONPath=`.metadata.creationTimestamp`
 
 // BookstoreTenant is the v1alpha1 (spoke) schema for the bookstoretenants API.
+// Cluster-scoped, like the v1beta1 hub (scope is a property of the whole CRD).
 type BookstoreTenant struct {
 	metav1.TypeMeta   `json:",inline"`
 	metav1.ObjectMeta `json:"metadata,omitempty"`

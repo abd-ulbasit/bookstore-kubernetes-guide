@@ -17,13 +17,16 @@ import (
 )
 
 // envtest-backed behavioural tests for the reconcile loop. They assert the
-// load-bearing properties: a CR produces an owner-referenced, restricted child
-// Deployment; the loop is idempotent; status carries observedGeneration + a
+// load-bearing properties: a cluster-scoped CR produces an owner-referenced
+// tenant Namespace and an owner-referenced, restricted child Deployment (envtest
+// runs no garbage collector, so the test asserts the ownerReferences, not the
+// cascade); the loop is idempotent; status carries observedGeneration + a
 // Ready condition. (Skipped automatically when envtest binaries are absent —
 // see suite_test.go.)
 var _ = Describe("BookstoreTenant controller", func() {
 	const tenantName = "acme"
-	crKey := types.NamespacedName{Name: "tenant-sample", Namespace: "default"}
+	// BookstoreTenant is cluster-scoped: the key is a bare name, no namespace.
+	crKey := types.NamespacedName{Name: "tenant-sample"}
 
 	reconcileOnce := func(r *BookstoreTenantReconciler) {
 		_, err := r.Reconcile(ctx, reconcile.Request{NamespacedName: crKey})
@@ -38,7 +41,7 @@ var _ = Describe("BookstoreTenant controller", func() {
 		r := &BookstoreTenantReconciler{Client: k8sClient, Scheme: k8sClient.Scheme(), Recorder: recorder}
 
 		cr := &bookstorev1beta1.BookstoreTenant{
-			ObjectMeta: metav1.ObjectMeta{Name: crKey.Name, Namespace: crKey.Namespace},
+			ObjectMeta: metav1.ObjectMeta{Name: crKey.Name},
 			Spec:       bookstorev1beta1.BookstoreTenantSpec{TenantName: tenantName, Replicas: 2, Tier: "medium"},
 		}
 		Expect(k8sClient.Create(ctx, cr)).To(Succeed())
@@ -58,6 +61,14 @@ var _ = Describe("BookstoreTenant controller", func() {
 		}, 10*time.Second, 250*time.Millisecond).Should(Succeed())
 
 		nsName := "bookstore-tenant-" + tenantName
+
+		By("owning the tenant Namespace so deleting the CR garbage-collects it")
+		var ns corev1.Namespace
+		Expect(k8sClient.Get(ctx, types.NamespacedName{Name: nsName}, &ns)).To(Succeed())
+		Expect(ns.OwnerReferences).To(HaveLen(1))
+		Expect(ns.OwnerReferences[0].Kind).To(Equal("BookstoreTenant"))
+		Expect(ns.OwnerReferences[0].Name).To(Equal(crKey.Name))
+		Expect(ns.OwnerReferences[0].Controller).To(HaveValue(BeTrue()))
 
 		By("creating a restricted-compliant Deployment owned by the CR")
 		var dep appsv1.Deployment

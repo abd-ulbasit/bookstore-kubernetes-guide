@@ -37,23 +37,23 @@ import (
 
 // tenantFinalizer is the finalizer key. While present on the CR, the apiserver
 // will NOT actually delete the object — it sets .metadata.deletionTimestamp and
-// blocks until every finalizer is removed. That is the window the controller
+// blocks until every finalizer is removed. That is the window a controller
 // uses to tear down anything that owner-reference GC would NOT clean up.
 //
-// What GC DOES clean up: the ConfigMap, Service, and Deployment carry an
-// ownerReference to the CR (SetControllerReference), so the apiserver's garbage
-// collector deletes them automatically when the CR is deleted.
+// BookstoreTenant is CLUSTER-scoped, so it can own both the cluster-scoped
+// tenant Namespace and the namespaced ConfigMap, Service and Deployment
+// inside it (a namespaced CR could own none of them: Kubernetes disallows
+// cross-namespace and namespaced-to-cluster owner references). Every one of
+// them carries a controller ownerReference to the CR (SetControllerReference),
+// so deleting the CR makes the apiserver's garbage collector delete the
+// Namespace, and the namespace controller then removes everything inside it.
 //
-// What GC does NOT clean up — and what the finalizer is FOR: the tenant
-// **Namespace is cluster-scoped and CANNOT carry an ownerReference to a
-// namespaced CR** (cross-scope owner refs are rejected by the apiserver — see
-// reconcileNamespace). So nothing GC-collects the tenant namespace; a
-// production finalizeTenant() must `r.Delete(ctx, ns)` it explicitly (plus any
-// external state, e.g. de-provisioning a tenant in a billing system). **This
-// minimal teaching demo deliberately does NOT delete the namespace** (its
-// finalizeTenant only emits a terminal Event) — so the tenant namespace
-// intentionally LEAKS here. That is precisely the finalizer footgun the
-// chapter's Production notes warn about; a real operator deletes it.
+// That leaves this finalizer with no cluster work to do: GC covers it all.
+// It is kept as the hook for what GC CANNOT reach: IRREVERSIBLE / EXTERNAL
+// state such as revoking a tenant API key or dropping a billing record. Here
+// it only emits a terminal Event. A real operator with no external state
+// should drop the finalizer: it makes CR deletion wait on the controller being
+// up, and leaves the CR stuck Terminating if the operator is removed first.
 const tenantFinalizer = "bookstore.example.com/tenant-finalizer"
 
 // resourceProfiles maps the spec.tier to a (request,limit) CPU/memory pair.
@@ -81,6 +81,13 @@ type BookstoreTenantReconciler struct {
 // kinds it creates, plus its own CR + status + finalizers. Nothing cluster-wide
 // beyond namespaces (it must create the tenant namespace).
 //
+// Two verbs exist for clusters that enable the OwnerReferencesPermissionEnforcement
+// admission plugin. `update` on bookstoretenants/finalizers lets the operator
+// set blockOwnerDeletion on the ownerReferences it writes. `delete` on
+// namespaces lets it change ownerReferences on an EXISTING namespace (for
+// example one an earlier operator version created without an owner); the
+// reconcile path never deletes a namespace itself, the garbage collector does.
+//
 // +kubebuilder:rbac:groups=bookstore.example.com,resources=bookstoretenants,verbs=get;list;watch;create;update;patch;delete
 // +kubebuilder:rbac:groups=bookstore.example.com,resources=bookstoretenants/status,verbs=get;update;patch
 // +kubebuilder:rbac:groups=bookstore.example.com,resources=bookstoretenants/finalizers,verbs=update
@@ -97,7 +104,9 @@ func (r *BookstoreTenantReconciler) Reconcile(ctx context.Context, req ctrl.Requ
 	logger := log.FromContext(ctx)
 
 	// 1. OBSERVE — read desired state. NotFound => the CR is gone (and its
-	//    owner-referenced children were GC'd); nothing to do.
+	//    owner-referenced Namespace and children are being GC'd); nothing to
+	//    do. BookstoreTenant is cluster-scoped, so req.Namespace is empty and
+	//    req.NamespacedName addresses it by name alone.
 	var tenant bookstorev1beta1.BookstoreTenant
 	if err := r.Get(ctx, req.NamespacedName, &tenant); err != nil {
 		return ctrl.Result{}, client.IgnoreNotFound(err)
@@ -185,36 +194,26 @@ func (r *BookstoreTenantReconciler) failed(ctx context.Context, t *bookstorev1be
 	return ctrl.Result{}, cause
 }
 
-// finalizeTenant is the pre-delete hook. Owner-reference GC already removes the
-// owner-referenced child objects (ConfigMap/Service/Deployment); this is where
-// teardown that GC CANNOT express goes:
+// finalizeTenant is the pre-delete hook. Owner-reference GC removes everything
+// the CR owns in the cluster (the tenant Namespace, and with it the ConfigMap,
+// Service and Deployment), so no cluster object needs deleting here. This is
+// where teardown that GC CANNOT express goes: IRREVERSIBLE / EXTERNAL state
+// (revoke a tenant API key, drop a billing record), i.e. anything outside the
+// cluster that GC knows nothing about.
 //
-//   - The tenant **Namespace** — cluster-scoped, so it carries NO ownerRef to
-//     the namespaced CR (see reconcileNamespace) and GC never deletes it. A
-//     production finalizer MUST delete it explicitly, e.g.:
+// This MINIMAL teaching demo has no such state, so it only emits a terminal
+// Event to make the pattern observable.
 //
-//     ns := &corev1.Namespace{ObjectMeta: metav1.ObjectMeta{Name: "bookstore-tenant-" + t.Spec.TenantName}}
-//     if err := r.Delete(ctx, ns); err != nil && !apierrors.IsNotFound(err) { return err }
-//
-//   - IRREVERSIBLE / EXTERNAL state (revoke a tenant API key, drop a billing
-//     record) — anything outside the cluster GC knows nothing about.
-//
-// This MINIMAL teaching demo deliberately does NEITHER (it only emits a
-// terminal Event so the pattern is observable) — so the tenant namespace
-// intentionally LEAKS. That omission IS the finalizer footgun the chapter's
-// Production notes call out; a real operator does the r.Delete above.
-//
-// It takes ctx and threads it into every API call (real cleanup — an external
-// revoke, the r.Delete above — needs cancellation/deadline propagation). It
-// MUST be idempotent — the finalizer can run more than once.
+// It takes ctx and threads it into every API call (real cleanup, such as an
+// external revoke, needs cancellation/deadline propagation). It MUST be
+// idempotent because the finalizer can run more than once.
 func (r *BookstoreTenantReconciler) finalizeTenant(ctx context.Context, t *bookstorev1beta1.BookstoreTenant) error {
-	// (ctx is threaded here so real teardown — e.g. r.Delete(ctx, ns) or an
-	// external API call honouring ctx — is cancellation-aware. The minimal
-	// body below does no API work, but models the signature a real one needs.)
+	// (ctx is threaded here so real teardown, e.g. an external API call
+	// honouring ctx, is cancellation-aware. The minimal body below does no
+	// API work, but models the signature a real one needs.)
 	_ = ctx
 	r.Recorder.Eventf(t, nil, corev1.EventTypeNormal, "Finalized", "Finalize",
-		"external state for tenant %q released "+
-			"(note: this demo does NOT delete namespace bookstore-tenant-%s — it leaks; a real operator r.Delete()s it here)",
+		"tenant %q finalized; namespace bookstore-tenant-%s is garbage-collected through its ownerReference",
 		t.Spec.TenantName, t.Spec.TenantName)
 	return nil
 }
@@ -234,15 +233,12 @@ func (r *BookstoreTenantReconciler) reconcileNamespace(ctx context.Context, t *b
 		ns.Labels["pod-security.kubernetes.io/audit"] = "restricted"
 		ns.Labels["app.kubernetes.io/managed-by"] = "bookstore-operator"
 		ns.Labels["bookstore.example.com/tenant"] = t.Spec.TenantName
-		// A Namespace is cluster-scoped: it CANNOT carry an owner reference to
-		// a namespaced CR (cross-scope owner refs are rejected by the
-		// apiserver). So GC does NOT delete this namespace when the CR is
-		// deleted — only the owner-referenced objects INSIDE it (ConfigMap/
-		// Service/Deployment) are GC'd. A production finalizeTenant() must
-		// `r.Delete` this namespace explicitly; this minimal demo deliberately
-		// does NOT (the tenant ns intentionally leaks — see finalizeTenant and
-		// the chapter's Production notes).
-		return nil
+		// A Namespace is cluster-scoped, so only a cluster-scoped owner can
+		// own it. BookstoreTenant is cluster-scoped for exactly this reason.
+		// With the controller ownerReference in place, deleting the CR makes
+		// GC delete this namespace (and everything inside it). It also
+		// refuses to adopt a namespace that another controller already owns.
+		return controllerutil.SetControllerReference(t, ns, r.Scheme)
 	})
 	return err
 }
@@ -326,7 +322,9 @@ func (r *BookstoreTenantReconciler) reconcileDeployment(ctx context.Context, t *
 
 // SetupWithManager wires the controller: watch BookstoreTenant, and Owns() the
 // child kinds so a change to (or deletion of) a controller-created object
-// re-enqueues its owner — the standard owner-ref + watch pattern.
+// re-enqueues its owner (the standard owner-ref + watch pattern). The tenant
+// Namespace is owned too but not watched: reconcileNamespace restores its
+// labels on every pass, and nothing here needs to react to a namespace event.
 func (r *BookstoreTenantReconciler) SetupWithManager(mgr ctrl.Manager) error {
 	return ctrl.NewControllerManagedBy(mgr).
 		For(&bookstorev1beta1.BookstoreTenant{}).

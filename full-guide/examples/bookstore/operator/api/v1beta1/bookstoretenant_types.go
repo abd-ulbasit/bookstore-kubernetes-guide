@@ -80,7 +80,7 @@ type BookstoreTenantStatus struct {
 
 // +kubebuilder:object:root=true
 // +kubebuilder:subresource:status
-// +kubebuilder:resource:scope=Namespaced,shortName=btn
+// +kubebuilder:resource:scope=Cluster,shortName=btn
 // +kubebuilder:storageversion
 // +kubebuilder:printcolumn:name="Tenant",type=string,JSONPath=`.spec.tenantName`
 // +kubebuilder:printcolumn:name="Phase",type=string,JSONPath=`.status.phase`
@@ -89,6 +89,12 @@ type BookstoreTenantStatus struct {
 
 // BookstoreTenant is the Schema for the bookstoretenants API.
 // It is the HUB (and storage) version.
+//
+// It is CLUSTER-scoped on purpose. The controller owns a cluster-scoped
+// Namespace plus namespaced children inside it, and Kubernetes only lets a
+// cluster-scoped owner do that: a namespaced owner cannot own objects in
+// another namespace or any cluster-scoped object. With a cluster-scoped
+// owner, deleting a tenant garbage-collects its Namespace and everything in it.
 type BookstoreTenant struct {
 	metav1.TypeMeta   `json:",inline"`
 	metav1.ObjectMeta `json:"metadata,omitempty"`
