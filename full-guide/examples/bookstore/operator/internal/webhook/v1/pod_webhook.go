@@ -3,15 +3,15 @@
 // top of: an HTTPS server the apiserver calls during the admission pipeline
 // (Part 00 ch.04). Two webhooks on core/v1 Pods:
 //
-//   - MUTATING (CustomDefaulter): stamps the recommended
+//   - MUTATING (Defaulter): stamps the recommended
 //     app.kubernetes.io/managed-by label and fills in a default restricted
 //     securityContext when one is absent. Runs BEFORE schema + validation, so
 //     a later validating webhook (or PodSecurity) sees the mutated object.
-//   - VALIDATING (CustomValidator): in the `bookstore` namespace, REJECTS Pods
+//   - VALIDATING (Validator): in the `bookstore` namespace, REJECTS Pods
 //     that are not restricted-PodSecurity-compliant — reinforcing PSA at the
 //     app layer (defense in depth; PSA is the floor, this adds a project rule).
 //
-// controller-runtime turns CustomDefaulter/CustomValidator into the
+// controller-runtime turns the typed Defaulter/Validator into the
 // /mutate-... and /validate-... HTTP handlers and serves them on the manager's
 // webhook server (TLS). The MutatingWebhookConfiguration /
 // ValidatingWebhookConfiguration objects (config/webhook) point the apiserver
@@ -23,10 +23,8 @@ import (
 	"fmt"
 
 	corev1 "k8s.io/api/core/v1"
-	"k8s.io/apimachinery/pkg/runtime"
 	ctrl "sigs.k8s.io/controller-runtime"
 	logf "sigs.k8s.io/controller-runtime/pkg/log"
-	"sigs.k8s.io/controller-runtime/pkg/webhook"
 	"sigs.k8s.io/controller-runtime/pkg/webhook/admission"
 )
 
@@ -35,8 +33,7 @@ var podlog = logf.Log.WithName("pod-webhook")
 // SetupPodWebhookWithManager registers BOTH webhooks for core/v1 Pod on the
 // manager's (shared, TLS) webhook server.
 func SetupPodWebhookWithManager(mgr ctrl.Manager) error {
-	return ctrl.NewWebhookManagedBy(mgr).
-		For(&corev1.Pod{}).
+	return ctrl.NewWebhookManagedBy(mgr, &corev1.Pod{}).
 		WithDefaulter(&PodDefaulter{}).
 		WithValidator(&PodValidator{}).
 		Complete()
@@ -47,21 +44,18 @@ func SetupPodWebhookWithManager(mgr ctrl.Manager) error {
 
 // --- MUTATING ---------------------------------------------------------------
 
-// PodDefaulter implements admission.CustomDefaulter — the mutating webhook.
+// PodDefaulter implements admission.Defaulter[*corev1.Pod] — the mutating
+// webhook.
 type PodDefaulter struct{}
 
-var _ webhook.CustomDefaulter = &PodDefaulter{}
+var _ admission.Defaulter[*corev1.Pod] = &PodDefaulter{}
 
 const managedByLabel = "app.kubernetes.io/managed-by"
 
 // Default mutates an incoming Pod. It MUST be idempotent: admission can call it
 // more than once (e.g. reinvocationPolicy), and re-running it must not keep
 // changing the object.
-func (d *PodDefaulter) Default(_ context.Context, obj runtime.Object) error {
-	pod, ok := obj.(*corev1.Pod)
-	if !ok {
-		return fmt.Errorf("expected a Pod but got a %T", obj)
-	}
+func (d *PodDefaulter) Default(_ context.Context, pod *corev1.Pod) error {
 	podlog.V(1).Info("mutating pod", "name", pod.GetName(), "ns", pod.GetNamespace())
 
 	// 1. Stamp the recommended label if missing (idempotent: set-if-absent).
@@ -91,11 +85,12 @@ func (d *PodDefaulter) Default(_ context.Context, obj runtime.Object) error {
 
 // --- VALIDATING -------------------------------------------------------------
 
-// PodValidator implements admission.CustomValidator — the validating webhook.
-// It does NOT mutate (validation must be side-effect-free w.r.t. the object).
+// PodValidator implements admission.Validator[*corev1.Pod] — the validating
+// webhook. It does NOT mutate (validation must be side-effect-free w.r.t. the
+// object).
 type PodValidator struct{}
 
-var _ webhook.CustomValidator = &PodValidator{}
+var _ admission.Validator[*corev1.Pod] = &PodValidator{}
 
 // guardedNamespace is the namespace this project rule applies to. The webhook
 // configuration ALSO scopes by namespaceSelector so kube-system and the
@@ -104,15 +99,15 @@ var _ webhook.CustomValidator = &PodValidator{}
 // app-layer rule itself.
 const guardedNamespace = "bookstore"
 
-func (v *PodValidator) ValidateCreate(_ context.Context, obj runtime.Object) (admission.Warnings, error) {
-	return v.validate(obj)
+func (v *PodValidator) ValidateCreate(_ context.Context, pod *corev1.Pod) (admission.Warnings, error) {
+	return v.validate(pod)
 }
 
-func (v *PodValidator) ValidateUpdate(_ context.Context, _ runtime.Object, newObj runtime.Object) (admission.Warnings, error) {
-	return v.validate(newObj)
+func (v *PodValidator) ValidateUpdate(_ context.Context, _ *corev1.Pod, newPod *corev1.Pod) (admission.Warnings, error) {
+	return v.validate(newPod)
 }
 
-func (v *PodValidator) ValidateDelete(_ context.Context, _ runtime.Object) (admission.Warnings, error) {
+func (v *PodValidator) ValidateDelete(_ context.Context, _ *corev1.Pod) (admission.Warnings, error) {
 	// Nothing to validate on delete.
 	return nil, nil
 }
@@ -120,11 +115,7 @@ func (v *PodValidator) ValidateDelete(_ context.Context, _ runtime.Object) (admi
 // validate enforces the restricted-compliance project rule for Pods in the
 // guarded namespace. Returning a non-nil error makes the apiserver REJECT the
 // request with that message.
-func (v *PodValidator) validate(obj runtime.Object) (admission.Warnings, error) {
-	pod, ok := obj.(*corev1.Pod)
-	if !ok {
-		return nil, fmt.Errorf("expected a Pod but got a %T", obj)
-	}
+func (v *PodValidator) validate(pod *corev1.Pod) (admission.Warnings, error) {
 	if pod.Namespace != guardedNamespace {
 		return nil, nil // out of scope; allow
 	}

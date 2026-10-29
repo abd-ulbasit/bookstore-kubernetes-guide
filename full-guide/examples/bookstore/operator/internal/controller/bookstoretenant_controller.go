@@ -25,7 +25,7 @@ import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/util/intstr"
-	"k8s.io/client-go/tools/record"
+	"k8s.io/client-go/tools/events"
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/controller/controllerutil"
@@ -73,7 +73,7 @@ const tenantImage = "registry.k8s.io/pause:3.9"
 type BookstoreTenantReconciler struct {
 	client.Client
 	Scheme   *runtime.Scheme
-	Recorder record.EventRecorder
+	Recorder events.EventRecorder
 }
 
 // RBAC markers — `make manifests` turns these into config/rbac/role.yaml. They
@@ -87,7 +87,7 @@ type BookstoreTenantReconciler struct {
 // +kubebuilder:rbac:groups=core,resources=namespaces,verbs=get;list;watch;create;update;patch;delete
 // +kubebuilder:rbac:groups=core,resources=configmaps;services,verbs=get;list;watch;create;update;patch;delete
 // +kubebuilder:rbac:groups=apps,resources=deployments,verbs=get;list;watch;create;update;patch;delete
-// +kubebuilder:rbac:groups=core,resources=events,verbs=create;patch
+// +kubebuilder:rbac:groups=events.k8s.io,resources=events,verbs=create;patch
 
 // Reconcile is the level-triggered loop. It is idempotent: calling it on an
 // already-correct tenant is a no-op (CreateOrUpdate diffs and only patches
@@ -125,8 +125,10 @@ func (r *BookstoreTenantReconciler) Reconcile(ctx context.Context, req ctrl.Requ
 		if err := r.Update(ctx, &tenant); err != nil {
 			return ctrl.Result{}, fmt.Errorf("add finalizer: %w", err)
 		}
-		// Update changed the object; requeue to reconcile the fresh version.
-		return ctrl.Result{Requeue: true}, nil
+		// The Update is itself a watch event, so the fresh version is
+		// re-enqueued without asking for a requeue (Result.Requeue is
+		// deprecated in controller-runtime v0.21+).
+		return ctrl.Result{}, nil
 	}
 
 	// 4. ACT — drive the world toward desired. Each step is CreateOrUpdate so
@@ -160,8 +162,8 @@ func (r *BookstoreTenantReconciler) Reconcile(ctx context.Context, req ctrl.Requ
 	if err := r.Status().Update(ctx, &tenant); err != nil {
 		return ctrl.Result{}, fmt.Errorf("update status: %w", err)
 	}
-	r.Recorder.Event(&tenant, corev1.EventTypeNormal, "Reconciled",
-		fmt.Sprintf("tenant %q reconciled into namespace %q", tenant.Spec.TenantName, nsName))
+	r.Recorder.Eventf(&tenant, nil, corev1.EventTypeNormal, "Reconciled", "Reconcile",
+		"tenant %q reconciled into namespace %q", tenant.Spec.TenantName, nsName)
 	return ctrl.Result{}, nil
 }
 
@@ -179,7 +181,7 @@ func (r *BookstoreTenantReconciler) failed(ctx context.Context, t *bookstorev1be
 	})
 	// Best-effort status write; the returned error drives the requeue.
 	_ = r.Status().Update(ctx, t)
-	r.Recorder.Event(t, corev1.EventTypeWarning, reason, cause.Error())
+	r.Recorder.Eventf(t, nil, corev1.EventTypeWarning, reason, "Reconcile", "%s", cause.Error())
 	return ctrl.Result{}, cause
 }
 
@@ -210,10 +212,10 @@ func (r *BookstoreTenantReconciler) finalizeTenant(ctx context.Context, t *books
 	// external API call honouring ctx — is cancellation-aware. The minimal
 	// body below does no API work, but models the signature a real one needs.)
 	_ = ctx
-	r.Recorder.Event(t, corev1.EventTypeNormal, "Finalized",
-		fmt.Sprintf("external state for tenant %q released "+
+	r.Recorder.Eventf(t, nil, corev1.EventTypeNormal, "Finalized", "Finalize",
+		"external state for tenant %q released "+
 			"(note: this demo does NOT delete namespace bookstore-tenant-%s — it leaks; a real operator r.Delete()s it here)",
-			t.Spec.TenantName, t.Spec.TenantName))
+		t.Spec.TenantName, t.Spec.TenantName)
 	return nil
 }
 

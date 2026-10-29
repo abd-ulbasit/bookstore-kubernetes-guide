@@ -7,10 +7,10 @@ IMG ?= bookstore/operator:dev
 CONTAINER_TOOL ?= docker
 
 # Pinned tool versions.
-CONTROLLER_TOOLS_VERSION ?= v0.16.4
-KUSTOMIZE_VERSION ?= v5.4.3
-ENVTEST_VERSION ?= release-0.19
-ENVTEST_K8S_VERSION ?= 1.31.0
+CONTROLLER_TOOLS_VERSION ?= v0.22.0
+KUSTOMIZE_VERSION ?= v5.8.1
+ENVTEST_VERSION ?= release-0.25
+ENVTEST_K8S_VERSION ?= 1.37.0
 
 LOCALBIN ?= $(shell pwd)/bin
 CONTROLLER_GEN ?= $(LOCALBIN)/controller-gen

@@ -35,7 +35,9 @@ rules:
   - apiGroups: ["apps"]
     resources: ["deployments"]
     verbs: ["get", "list", "watch", "create", "update", "patch", "delete"]
-  - apiGroups: [""]
+  # The reconciler records through mgr.GetEventRecorder, which writes
+  # events.k8s.io/v1 Events (controller-runtime v0.23+), not core/v1 ones.
+  - apiGroups: ["events.k8s.io"]
     resources: ["events"]
     verbs: ["create", "patch"]
 ---

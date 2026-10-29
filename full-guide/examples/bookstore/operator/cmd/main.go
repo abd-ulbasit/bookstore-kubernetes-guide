@@ -62,7 +62,15 @@ func main() {
 	// TLS 1.2 floor for the webhook server.
 	tlsOpts := []func(*tls.Config){func(c *tls.Config) { c.MinVersion = tls.VersionTLS12 }}
 
-	mgr, err := ctrl.NewManager(ctrl.GetConfigOrDie(), ctrl.Options{
+	// controller-runtime v0.21+ hands back a rest.Config with client-side rate
+	// limiting OFF (it leans on API Priority and Fairness alone). Restore the
+	// earlier 20 QPS / 30 burst so the operator is polite on its own and the
+	// APF objects in config/apf/ stay the backstop, not the only control.
+	restCfg := ctrl.GetConfigOrDie()
+	restCfg.QPS = 20
+	restCfg.Burst = 30
+
+	mgr, err := ctrl.NewManager(restCfg, ctrl.Options{
 		Scheme:                 scheme,
 		Metrics:                metricsserver.Options{BindAddress: metricsAddr},
 		WebhookServer:          webhook.NewServer(webhook.Options{Port: 9443, TLSOpts: tlsOpts}),
@@ -78,7 +86,7 @@ func main() {
 	if err = (&controller.BookstoreTenantReconciler{
 		Client:   mgr.GetClient(),
 		Scheme:   mgr.GetScheme(),
-		Recorder: mgr.GetEventRecorderFor("bookstoretenant-controller"),
+		Recorder: mgr.GetEventRecorder("bookstoretenant-controller"),
 	}).SetupWithManager(mgr); err != nil {
 		setupLog.Error(err, "unable to create controller", "controller", "BookstoreTenant")
 		os.Exit(1)

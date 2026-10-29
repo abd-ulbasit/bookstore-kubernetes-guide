@@ -26,7 +26,7 @@ operator/
 ├── PROJECT                    Kubebuilder project metadata
 ├── Makefile                   manifests / generate / vet / test / docker-build / deploy
 ├── Dockerfile                 distroless static nonroot (== app/catalog pattern)
-├── go.mod / go.sum            controller-runtime v0.19 + k8s.io v0.31 (K8s v1.30+)
+├── go.mod / go.sum            controller-runtime v0.25 + k8s.io v0.37 (K8s v1.37)
 ├── cmd/main.go                manager: controller + webhooks + leader election
 ├── api/
 │   ├── v1alpha1/              SPOKE: types + conversion (ConvertTo/From) + deepcopy
@@ -51,7 +51,7 @@ operator/
 ```sh
 cd examples/bookstore/operator
 go vet ./...                       # passes clean
-docker build -t bookstore/operator:dev .   # distroless image, ~56 MB
+docker build -t bookstore/operator:dev .   # distroless image, ~51 MB
 make manifests generate            # regenerate CRD/RBAC/webhook + deepcopy
 make test                          # envtest (downloads apiserver+etcd) + unit
 ```
@@ -63,10 +63,12 @@ so `go vet`/`docker build` are green even without those tools installed.
 
 ## Dry-run behavior (intrinsic — documented per file)
 
-- **Built-in, dry-run CLEAN on any v1.30+ cluster**: `config/apf/*`
+- **Built-in, dry-run CLEAN**: `config/apf/*`
   (`FlowSchema`/`PriorityLevelConfiguration`), the `CustomResourceDefinition`
   itself, the manager `Namespace`/`Deployment`/`Service`/RBAC, the
-  `Mutating`/`ValidatingWebhookConfiguration` objects.
+  `Mutating`/`ValidatingWebhookConfiguration` objects. The operator's CRD
+  (`config/crd/`) was server-side dry-run clean on a Kubernetes v1.37.0 kind
+  cluster (kind v0.33.0) on 2026-10-29.
 - **CRD/webhook-intrinsic** (the same precedent as the guide's
   `raw-manifests/18-/51-/70-`, `argocd/`, `operators/cnpg-`,
   `cloud/karpenter-`): the **sample CR** prints `no matches for kind
