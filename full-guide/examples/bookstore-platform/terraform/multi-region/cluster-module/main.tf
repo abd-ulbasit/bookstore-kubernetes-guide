@@ -51,7 +51,7 @@ variable "cluster_name" {
 variable "kubernetes_version" {
   description = "EKS Kubernetes minor version."
   type        = string
-  default     = "1.35"
+  default     = "1.37"
 }
 
 variable "vpc_cidr" {

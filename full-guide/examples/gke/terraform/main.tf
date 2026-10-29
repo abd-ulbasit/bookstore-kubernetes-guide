@@ -109,6 +109,16 @@ resource "google_container_cluster" "lab" {
     channel = "REGULAR"
   }
 
+  # A floor, not a pin. On 2026-10-26 GKE added 1.37.1-gke.1552000 to the
+  # Regular channel but kept 1.36.4 as its default for new clusters, so
+  # without this a new lab gets 1.36. The provider documents the field as
+  # the minimum master version: the channel still auto-upgrades the control
+  # plane past it, and the node pool too (auto_upgrade = true). Read
+  # master_version for what is running. The exact string avoids the
+  # spurious diffs the provider warns about for fuzzy versions; it must be
+  # a version the channel still offers (gcloud container get-server-config).
+  min_master_version = "1.37.1-gke.1552000"
+
   logging_config {
     enable_components = ["SYSTEM_COMPONENTS"]
   }

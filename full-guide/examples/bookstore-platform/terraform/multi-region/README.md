@@ -1,6 +1,6 @@
 # Multi-Region Scaffolding
 
-This sub-tree instantiates the Bookstore Platform substrate (VPC + EKS + addons + Karpenter + LB controller) in N regions from a single `terraform apply`. It is **opt-in** — the main `terraform/` tree is single-region by default; you only need this if you're standing up an active-active or active-passive multi-region topology.
+This sub-tree instantiates the Bookstore Platform substrate (VPC + EKS + the EKS-managed addons) in N regions from a single `terraform apply`. It is **opt-in** — the main `terraform/` tree is single-region by default; you only need this if you're standing up an active-active or active-passive multi-region topology.
 
 > **Known limitation: every region shares ONE state.** One `terraform apply`, one state file and one lock cover all N regions, so a bad plan, a provider bug or a stuck lock hits every region at once. That is the shared failure domain multi-region exists to avoid. The fix (one state per region, with a migration path) is written up in [ADR 0008](https://github.com/abd-ulbasit/bookstore-kubernetes-guide/blob/main/docs/adr/0008-state-per-environment-and-region.md) and not yet implemented. Treat this tree as scaffolding for a lab, not as the production layout.
 
@@ -11,14 +11,15 @@ This sub-tree instantiates the Bookstore Platform substrate (VPC + EKS + addons 
 For every region listed in `var.regions`, this stack creates:
 
 - A new VPC (non-overlapping CIDR, see `vpc_cidrs_by_region` defaults).
-- An EKS 1.35 cluster with one small managed node group (`system`).
+- An EKS 1.37 cluster with one small managed node group (`system`).
 - The full addon set: `vpc-cni` (with `before_compute = true`), `kube-proxy`, `coredns`, `aws-ebs-csi-driver`.
-- Karpenter + the `default` EC2NodeClass (matching the main tree).
-- The AWS Load Balancer Controller, IRSA-wired.
+- `karpenter.sh/discovery` tags on the VPC, the private subnets and the cluster and node security groups, so a Karpenter you install later can find them.
 - A KMS key for secret envelope encryption (one per region — KMS keys are regional).
 - CloudWatch log retention pinned to 30 days.
 
-Identical configuration across regions; identical pinned versions. If you bump a version in the main tree, mirror it in `module.tf` here.
+It does **not** install Karpenter, an EC2NodeClass or the AWS Load Balancer Controller. `cluster-module/main.tf` leaves them out on purpose: whether to install them per region or from a control cluster is your call, and installing them here would mean declaring the Helm and kubectl providers once per region.
+
+Identical configuration across regions; identical pinned versions. If you bump a version in the main tree, mirror it in `cluster-module/main.tf` here.
 
 ---
 
@@ -57,7 +58,7 @@ If you want to flip this off post-apply: delete the EKS access entry the module 
 regions = ["us-east-1", "eu-west-1", "ap-southeast-1"]
 
 cluster_name       = "bookstore-platform"
-kubernetes_version = "1.35"
+kubernetes_version = "1.37"
 
 vpc_cidrs_by_region = {
   "us-east-1"      = "10.10.0.0/16"
@@ -77,6 +78,13 @@ terraform apply -var-file=regions.tfvars
 ```
 
 First apply takes **~22 minutes × N regions**, but they run **in parallel** by default — three regions finish in roughly the time of one. Watch the AWS console for control-plane creation progress per region.
+
+**Existing stacks on 1.35.** A stack applied before the 1.37 bump runs Kubernetes 1.35 in every region. EKS upgrades one minor version at a time, so it needs two applies, in this order (put `-var` after `-var-file`; the last value wins):
+
+1. `terraform apply -var-file=regions.tfvars -var kubernetes_version=1.36`.
+2. Set `kubernetes_version = "1.37"` in `regions.tfvars`, then `terraform apply -var-file=regions.tfvars`.
+
+`kubernetes_version` is shared, so every region steps together. If Karpenter runs on these clusters, upgrade it first, as §3 of the parent [README](../README.md) describes for the single-region tree. Read the EKS notes for both 1.36 and 1.37 before you start.
 
 ### 3. Configure kubectl
 
@@ -105,7 +113,7 @@ If you want a region we don't list (e.g. `us-west-2`, `ap-south-1`), add a fourt
 
 A 3-region active-active cluster costs roughly **3× the main tree's $180/month** — call it ~$540/month at idle, plus per-region NAT data and the cross-region replication transit. CloudFront in front of the ALB pulls the DNS-routed traffic in cheaper, but transit between regions is still $0.02-0.09/GB depending on path.
 
-The cheapest multi-region topology is **active-standby**: one region with the full workload, others with the cluster substrate up but workload replicas at zero. Karpenter consolidates the standby cluster's nodes to nothing within 30 seconds when there are no pods; you pay only for the control plane + system MNG + NAT.
+The cheapest multi-region topology is **active-standby**: one region with the full workload, others with the cluster substrate up but workload replicas at zero. If Karpenter runs on these clusters, it consolidates the standby cluster's nodes to nothing within 30 seconds when there are no pods; you pay only for the control plane + system MNG + NAT.
 
 ---
 

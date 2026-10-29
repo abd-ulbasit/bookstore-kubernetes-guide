@@ -21,9 +21,9 @@ region = "ap-south-1"
 # Must be unique per AWS account+region.
 cluster_name = "bookstore-platform"
 
-# Pinned Kubernetes version. The standard-support window for 1.35 ends
-# 2027-03-27 — see README §3 for the bump procedure.
-kubernetes_version = "1.35"
+# Pinned Kubernetes version. The standard-support window for 1.37 ends
+# 2027-12-01; see README §3 for the bump procedure.
+kubernetes_version = "1.37"
 
 # Network sizing. 3 AZ + /16 VPC is overkill for dev but matches production.
 az_count = 3

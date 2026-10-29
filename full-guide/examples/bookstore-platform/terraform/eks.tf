@@ -126,7 +126,7 @@ module "eks" {
   # been observed to race in fresh-cluster bootstraps.
   cluster_addons = {
     vpc-cni = {
-      addon_version               = null # EKS picks the default for K8s 1.35
+      addon_version               = null # the module's aws_eks_addon_version lookup picks the default
       resolve_conflicts_on_update = "OVERWRITE"
       resolve_conflicts_on_create = "OVERWRITE"
       service_account_role_arn    = aws_iam_role.vpc_cni.arn

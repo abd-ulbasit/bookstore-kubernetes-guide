@@ -11,11 +11,11 @@ You opt in to costs. The user — not this Makefile — runs `make up`. Read all
 A single-region EKS cluster, ready for a multi-tenant platform:
 
 - **VPC** — `10.0.0.0/16` across three Availability Zones, with public (`/20`), private (`/20`), and intra (`/22`) subnets per AZ. The intra subnets host EKS control-plane ENIs; they have no NAT egress.
-- **EKS cluster** — Kubernetes `1.35`, the control plane logs to CloudWatch, secrets are envelope-encrypted with a customer-managed KMS key. The principal that runs `terraform apply` is granted cluster-admin via an EKS access entry — no `aws-auth` ConfigMap.
+- **EKS cluster** — Kubernetes `1.37`, the control plane logs to CloudWatch, secrets are envelope-encrypted with a customer-managed KMS key. The principal that runs `terraform apply` is granted cluster-admin via an EKS access entry — no `aws-auth` ConfigMap.
 - **One small managed node group ("system")** — 2 × `t3.medium` On-Demand, tainted `CriticalAddonsOnly=true:NoSchedule`. Hosts Karpenter, the AWS Load Balancer Controller, CoreDNS, the EBS-CSI controller, metrics-server. Nothing else.
-- **Karpenter `1.6.0`** — running in `kube-system`. Two `NodePool` resources: `general` (On-Demand, `c/m/r` families, generation > 4) and `spot` (prefers Spot, falls back to On-Demand, higher `weight` so Karpenter reaches for it first). Consolidation is `WhenEmptyOrUnderutilized` with a 30-second timer. One `EC2NodeClass` (`default`) using the EKS-optimized `al2023@latest` AMI alias.
+- **Karpenter `1.15.1`** — running in `kube-system`, with its CRDs in a separate `karpenter-crd` release (§7). Two `NodePool` resources: `general` (On-Demand, `c/m/r` families, generation > 4) and `spot` (prefers Spot, falls back to On-Demand, higher `weight` so Karpenter reaches for it first). Consolidation is `WhenEmptyOrUnderutilized` with a 30-second timer. One `EC2NodeClass` (`default`) using the EKS-optimized `al2023@latest` AMI alias.
 - **AWS Load Balancer Controller `1.13.0`** — the bridge from `Service type=LoadBalancer` and `Ingress` to ALBs / NLBs. IRSA-scoped to the upstream `v2.13.0` IAM policy, vendored and reviewed in `policies/` (it used to be fetched over HTTP at plan time).
-- **EBS-CSI driver, vpc-cni, kube-proxy, CoreDNS** — installed as EKS-managed addons. Versions are pinned implicitly by EKS to the 1.35 default; we override only `configuration_values` (system-pool placement, replica count).
+- **EBS-CSI driver, vpc-cni, kube-proxy, CoreDNS** — installed as EKS-managed addons. Each `addon_version` is EKS's default build for the cluster's Kubernetes version: `addons.tf` looks it up with an `aws_eks_addon_version` data source (`most_recent = false`) keyed on `module.eks.cluster_version`, and the EKS module runs the same lookup for vpc-cni, so a version bump moves every add-on whose default build changed (kube-proxy always) in the same plan. Beyond the version, we set `configuration_values` for CoreDNS and EBS-CSI (system-pool placement, replica count).
 - **metrics-server `3.13.0`** — for `kubectl top` and HPA. Karpenter does not require it.
 
 The Bookstore Platform application workloads (auth, payments, search, ML, observability, …) are **not** installed here. Argo CD bootstraps those after the cluster is up — see `../argocd/`.
@@ -47,7 +47,7 @@ The numbers below are list-price `us-east-1` as of 2026-05; cross-check your reg
 
 ## 3. Version policy
 
-Kubernetes `1.35` is the pinned target. AWS marked it standard support on 2026-04-18; standard support ends **2027-03-27**. Past that date the cluster shifts to extended support, which carries an additional $0.50/hr surcharge per cluster. Don't get caught.
+Kubernetes `1.37` is the pinned target. EKS released it on 2026-10-01; standard support ends **2027-12-01**. Past that date the cluster shifts to extended support (until 2028-12-01), which carries an additional $0.50/hr surcharge per cluster. Don't get caught.
 
 **Check current support windows:**
 
@@ -57,16 +57,24 @@ aws eks describe-cluster-versions \
   --output table
 ```
 
-**Bump procedure (when 1.36 hits standard support):**
+**Bump procedure (when 1.38 hits standard support):**
 
-1. Read the upstream Kubernetes 1.36 changelog and the EKS release notes for any deprecations that affect the cluster's add-ons or your workloads.
-2. Set `kubernetes_version = "1.36"` in `variables.tf` (or via `-var`).
-3. `terraform plan` — you should see a single in-place change on `module.eks.aws_eks_cluster.this`. No node-group destroy/create.
+1. Read the upstream Kubernetes 1.38 changelog and the EKS release notes for any deprecations that affect the cluster's add-ons or your workloads. Check Karpenter's [compatibility matrix](https://karpenter.sh/docs/upgrading/compatibility/) too: if the pinned `karpenter_chart_version` does not support the new minor, bump Karpenter in its own apply first (§7 "Upgrading Karpenter").
+2. Set `kubernetes_version = "1.38"` in `variables.tf` (or via `-var`).
+3. `terraform plan` — you should see in-place changes on `module.eks.aws_eks_cluster.this` (the version), the `system` node group (its version) and the add-ons: `aws_eks_addon.kube_proxy` always, `aws_eks_addon.coredns` and `aws_eks_addon.aws_ebs_csi_driver` only if EKS's default build for 1.38 differs, and `module.eks.aws_eks_addon.before_compute["vpc-cni"]` with `addon_version` `(known after apply)`. The one replacement is `module.eks.time_sleep.this[0]`, the module's 30-second wait before the node groups, whose `triggers` include the cluster version; it is a harmless timer that touches no AWS resource. If anything else is destroyed, stop and investigate. No node-group destroy/create.
 4. `terraform apply`. EKS performs a rolling control-plane upgrade in place (≈20 minutes).
 5. For the managed `system` node group, `terraform apply` triggers a rolling AMI bump — the module replaces nodes one at a time, respecting PDBs. Karpenter-provisioned nodes will be replaced naturally as `expireAfter: 720h` fires (or you can `kubectl delete nodes -l karpenter.sh/nodepool` to force it).
 6. Re-run `make plan` to confirm zero diff; commit.
 
 Do not skip versions. EKS only supports N → N+1 upgrades.
+
+**Existing clusters on 1.35.** A cluster applied before the 1.37 bump runs Kubernetes 1.35 and Karpenter 1.6.0, and needs three applies, in this order (with a tfvars file, put `-var` after `-var-file`; the last value wins):
+
+1. `terraform apply -var kubernetes_version=1.35`: Karpenter 1.15.1, its CRDs and its IAM changes, with the control plane still on 1.35. Karpenter 1.6.0 supports neither 1.36 nor 1.37 (compatibility matrix), and in one combined apply the control plane would upgrade before the Helm release does, because the release depends on `module.eks`. Adopt the CRDs first (§7 "Upgrading Karpenter").
+2. `terraform apply -var kubernetes_version=1.36`.
+3. `terraform apply` (the `1.37` default).
+
+Read the EKS notes for both 1.36 and 1.37 before you start.
 
 ### Provider versions and the lock file
 
@@ -92,8 +100,8 @@ CI runs `terraform init -lockfile=readonly`, so a constraint change that is not 
 - An AWS account with permission to create VPCs, EKS clusters, IAM roles, KMS keys, SQS queues, and EC2 instances. Run from a laptop, the principal you run Terraform as becomes the cluster admin, so make it your real working identity, not a throwaway service role. (CI uses an explicit apply role instead; see "GitHub Actions workflow" in §11.)
 - AWS CLI v2 configured: `aws sts get-caller-identity` must return the expected account.
 - Terraform `>= 1.11.0, < 2.0.0` (1.11 is where the S3 backend's `use_lockfile` is GA). `.terraform-version` pins `1.14.8` for `tfenv` / `asdf` users: the version CI and the devcontainer run, and the one the lock file was generated with.
-- `kubectl` (any version within ±1 minor of `1.35`).
-- `helm` `>= 3.13`.
+- `kubectl` (any version within ±1 minor of `1.37`).
+- `helm` `3.22.x` (or `4.3.x`): the releases whose version-skew range covers Kubernetes 1.37.
 - `jq` — the cleanup scripts use it heavily.
 - Outbound network egress for `terraform init` (HashiCorp registry + GitHub Releases for module sources).
 
@@ -178,6 +186,22 @@ watch kubectl get nodes -l karpenter.sh/nodepool
 ```
 
 **Inspecting decisions.** `kubectl logs -n kube-system -l app.kubernetes.io/name=karpenter` is your friend. Karpenter's structured logs name every node it provisions, why, and what cost band it picked.
+
+**Upgrading Karpenter.** Read Karpenter's [upgrade guide](https://karpenter.sh/docs/upgrading/upgrade-guide/) for every minor between the old and the new version, then bump `karpenter_chart_version`. Three things in this tree move with it:
+
+- **CRDs.** They come from the `karpenter-crd` chart (`helm_release.karpenter_crd`), because Helm never upgrades the CRDs it installed from the controller chart's `crds/` directory. A cluster first applied with Karpenter 1.6.0 has three CRDs without Helm ownership metadata, so the first apply after the bump fails with `invalid ownership metadata`. Label and annotate them first, as Karpenter's troubleshooting guide describes:
+
+  ```bash
+  kubectl label crd ec2nodeclasses.karpenter.k8s.aws nodepools.karpenter.sh nodeclaims.karpenter.sh \
+    app.kubernetes.io/managed-by=Helm --overwrite
+  kubectl annotate crd ec2nodeclasses.karpenter.k8s.aws nodepools.karpenter.sh nodeclaims.karpenter.sh \
+    meta.helm.sh/release-name=karpenter-crd meta.helm.sh/release-namespace=kube-system --overwrite
+  ```
+
+- **Controller IAM.** `karpenter.tf` turns on the sub-module's v1 policy (`enable_v1_permissions`) and adds `iam:ListInstanceProfiles` (required since 1.7.0) and `ec2:DescribeInstanceStatus` (required since 1.12.0), which the v20 sub-module does not grant. Check the upgrade guide's IAM notes against that list on every bump.
+- **Drift.** Since 1.12.0 Karpenter includes the CA bundle in its drift hash, and the upgrade guide warns that this marks existing nodes as drifted. Expect Karpenter to replace its nodes after the 1.6.0 to 1.15.1 upgrade.
+
+The other notes from 1.7 to 1.15 need no change here: the chart values this tree sets are unchanged (the `webhook` block it used to set had been ignored since 1.1.0), the `default` EC2NodeClass sets no `spec.kubelet` (whose validation 1.15.0 tightened), and nothing in the repo queries the metrics those releases renamed or relabelled.
 
 ---
 

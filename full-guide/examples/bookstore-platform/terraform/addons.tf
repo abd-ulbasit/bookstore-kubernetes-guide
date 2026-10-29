@@ -1,25 +1,47 @@
 ################################################################################
-# addons.tf — EKS-managed addons. We let EKS pick the version compatible with
-# the cluster's Kubernetes version (1.35) by leaving addon_version null.
-# IRSA roles are attached for the ones that need AWS API access.
+# addons.tf — EKS-managed addons. Each addon_version is the build EKS marks
+# as the default for the cluster's Kubernetes version (1.37), looked up by
+# the aws_eks_addon_version data source below. IRSA roles are attached for
+# the ones that need AWS API access.
+#
+# Why not addon_version = null: the provider treats addon_version as
+# optional and computed, so null only lets EKS choose at create time. After
+# that, a null plans no change, and a cluster upgrade would leave each addon
+# on the build it got for the old version. The lookup is keyed on
+# module.eks.cluster_version, so bumping kubernetes_version moves the addons
+# in the same plan.
 #
 # vpc-cni lives inside module.eks.cluster_addons (see eks.tf) with
 # before_compute = true, so it's installed before the managed node group
-# launches its EC2 instances. The `moved` block migrates existing state from
-# the old aws_eks_addon.vpc_cni resource (pre-Phase 14) into the module path
-# without forcing a recreate. New users won't notice; existing users get a
-# zero-diff plan.
+# launches its EC2 instances; the module does the same default-build lookup
+# for it. The module keeps before_compute addons in
+# aws_eks_addon.before_compute, not aws_eks_addon.this. The `moved` block
+# migrates existing state from the old aws_eks_addon.vpc_cni resource
+# (pre-Phase 14) to that address, so the addon is never destroyed and
+# re-created. New users won't notice. Existing users get no replacement; if
+# their installed vpc-cni build is not the default for the cluster's
+# version, the plan also shows an in-place addon_version change.
 ################################################################################
 
 moved {
   from = aws_eks_addon.vpc_cni
-  to   = module.eks.aws_eks_addon.this["vpc-cni"]
+  to   = module.eks.aws_eks_addon.before_compute["vpc-cni"]
+}
+
+# most_recent = false returns the build EKS marks as the default for that
+# Kubernetes version; true would return the newest build instead.
+data "aws_eks_addon_version" "default" {
+  for_each = toset(["kube-proxy", "coredns", "aws-ebs-csi-driver"])
+
+  addon_name         = each.key
+  kubernetes_version = module.eks.cluster_version
+  most_recent        = false
 }
 
 resource "aws_eks_addon" "kube_proxy" {
   cluster_name                = module.eks.cluster_name
   addon_name                  = "kube-proxy"
-  addon_version               = null
+  addon_version               = data.aws_eks_addon_version.default["kube-proxy"].version
   resolve_conflicts_on_update = "OVERWRITE"
   resolve_conflicts_on_create = "OVERWRITE"
   # On destroy, remove the addon — don't leave dangling state. The default
@@ -33,7 +55,7 @@ resource "aws_eks_addon" "kube_proxy" {
 resource "aws_eks_addon" "coredns" {
   cluster_name                = module.eks.cluster_name
   addon_name                  = "coredns"
-  addon_version               = null
+  addon_version               = data.aws_eks_addon_version.default["coredns"].version
   resolve_conflicts_on_update = "OVERWRITE"
   resolve_conflicts_on_create = "OVERWRITE"
   preserve                    = false
@@ -63,7 +85,7 @@ resource "aws_eks_addon" "coredns" {
 resource "aws_eks_addon" "aws_ebs_csi_driver" {
   cluster_name                = module.eks.cluster_name
   addon_name                  = "aws-ebs-csi-driver"
-  addon_version               = null
+  addon_version               = data.aws_eks_addon_version.default["aws-ebs-csi-driver"].version
   resolve_conflicts_on_update = "OVERWRITE"
   resolve_conflicts_on_create = "OVERWRITE"
   service_account_role_arn    = aws_iam_role.ebs_csi.arn

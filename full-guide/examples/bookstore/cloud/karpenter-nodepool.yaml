@@ -49,7 +49,7 @@
 # AMI ~monthly with NO review — convenient for LEARNING but it contradicts the
 # guide's repeatedly-taught "pin everything / never :latest" rule (Part 05 ch.03,
 # Part 07, Part 10 ch.02). For prod, pin a specific alias version (e.g.
-# al2023@v20240807) or an AMI ID and review before rolling. Kept as `@latest`
+# al2023@v20261026) or an AMI ID and review before rolling. Kept as `@latest`
 # here ON PURPOSE for the lab, flagged like every other "demo-only" choice.
 # Apply (Karpenter-enabled EKS only):
 #   kubectl apply -f examples/bookstore/cloud/karpenter-nodepool.yaml
@@ -128,7 +128,7 @@ spec:
   amiFamily: AL2023                           # the node OS image family
   amiSelectorTerms:
     # al2023@latest tracks the LATEST EKS AL2023 AMI — fine for LEARNING; in
-    # prod pin a specific alias version (e.g. al2023@v20240807) or an AMI ID
+    # prod pin a specific alias version (e.g. al2023@v20261026) or an AMI ID
     # and review before rolling, per the guide's pin-everything rule (Part 07 /
     # Part 10 ch.02). See the AMI-TRACKING FOOTGUN note in the header above.
     - alias: al2023@latest                    # tracks latest (see footgun note)

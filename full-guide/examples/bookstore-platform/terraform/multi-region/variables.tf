@@ -3,7 +3,7 @@
 ################################################################################
 
 variable "regions" {
-  description = "List of AWS regions to instantiate the cluster in. Each must support EKS 1.35 and the AL2023 EKS-optimized AMI. Default mirrors a common 3-region active-active footprint. Only regions with provider aliases declared in main.tf are accepted — to add more, extend main.tf AND the validation list below."
+  description = "List of AWS regions to instantiate the cluster in. Each must support EKS 1.37 and the AL2023 EKS-optimized AMI. Default mirrors a common 3-region active-active footprint. Only regions with provider aliases declared in main.tf are accepted — to add more, extend main.tf AND the validation list below."
   type        = list(string)
   default     = ["us-east-1", "eu-west-1", "ap-southeast-1"]
 
@@ -48,7 +48,7 @@ variable "cluster_name" {
 variable "kubernetes_version" {
   description = "EKS Kubernetes minor version. Same across all regions; bump in lockstep."
   type        = string
-  default     = "1.35"
+  default     = "1.37"
 }
 
 variable "vpc_cidrs_by_region" {

@@ -57,6 +57,12 @@ default compute SA while its comment said "least privilege".*
 run a second, unsaved `apply -auto-approve`, which planned again after you
 had approved the first plan.
 
+**Regular channel with a 1.37 floor.** On 2026-10-26 GKE added
+1.37.1-gke.1552000 to the Regular channel but kept 1.36.4 as the default for
+new clusters. `min_master_version` asks for 1.37 anyway. It is a minimum,
+not a pin: the channel still auto-upgrades the cluster past it. *Added after
+the 2026-09-03 run below and not applied yet.*
+
 **Logging and monitoring trimmed to `SYSTEM_COMPONENTS`.** The default also
 ships `WORKLOADS`, and Cloud Logging bills per GiB ingested. A chatty lab
 cluster can out-spend its own nodes.

@@ -5,7 +5,7 @@
 ################################################################################
 
 variable "region" {
-  description = "AWS region for the EKS cluster. Default ap-south-1 (Mumbai) — change to your nearest region if needed. EKS 1.35 is GA + default in this region (verified 2026-05-20)."
+  description = "AWS region for the EKS cluster. Default ap-south-1 (Mumbai) — change to your nearest region if needed. EKS 1.37 is GA + default in this region, with an AL2023 AMI (verified 2026-10-29 with aws eks describe-cluster-versions)."
   type        = string
   default     = "ap-south-1"
 }
@@ -22,9 +22,9 @@ variable "cluster_name" {
 }
 
 variable "kubernetes_version" {
-  description = "EKS Kubernetes minor version. Pinned to 1.35 — the latest standard-support version on 2026-05-20. Standard support for 1.35 ends 2027-03-27. Do not auto-upgrade; see README §3 'Version Policy' for the bump procedure."
+  description = "EKS Kubernetes minor version. Pinned to 1.37, the latest standard-support version on 2026-10-29 (EKS release 2026-10-01). Standard support for 1.37 ends 2027-12-01, extended support 2028-12-01. EKS upgrades one minor at a time, so a 1.35 cluster goes through 1.36 first. Do not auto-upgrade; see README §3 'Version Policy' for the bump procedure."
   type        = string
-  default     = "1.35"
+  default     = "1.37"
 }
 
 variable "az_count" {
@@ -187,9 +187,9 @@ variable "karpenter_namespace" {
 }
 
 variable "karpenter_chart_version" {
-  description = "Karpenter Helm chart version. Pinned to 1.6.0 — matches the AWS provider's IAM policies for Karpenter v1."
+  description = "Karpenter Helm chart version, used for both the karpenter and karpenter-crd charts. Pinned to 1.15.1: Karpenter's compatibility matrix requires 1.15.x for Kubernetes 1.37. The controller IAM permissions that the eks/karpenter v20 sub-module lacks are added in karpenter.tf; re-check them against Karpenter's upgrade guide on every bump."
   type        = string
-  default     = "1.6.0"
+  default     = "1.15.1"
 }
 
 variable "enable_spot_pool" {
