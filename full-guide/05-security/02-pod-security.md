@@ -350,13 +350,25 @@ kubectl run psa-bad -n bookstore --image=busybox:1.36 --restart=Never \
 - **AppArmor** confines a process to a Linux Security Module profile (file/
   capability/network rules). It is now a first-class field —
   `securityContext.appArmorProfile.type: RuntimeDefault|Localhost|Unconfined`
-  (**GA in v1.30**) — preferred over the **legacy annotation**
+  (**GA in v1.31**) — preferred over the **legacy annotation**
   `container.apparmor.security.beta.kubernetes.io/<CONTAINER>: runtime/default`
   (still honoured for back-compat; the field wins where both are set). On a
   cluster/distro without AppArmor it's a no-op. **SELinux** is the analogous
   LSM on RHEL-family hosts: `securityContext.seLinuxOptions`
   (user/role/type/level) labels the process; `restricted` allows only the
   default/permitted types.
+- **SELinux volume labelling changed in 1.37.** `SELinuxMount` is now GA and
+  on by default. On SELinux nodes, instead of the runtime recursively
+  relabelling every file, the kubelet mounts an eligible volume (a PVC whose
+  CSI driver sets `seLinuxMount: true`, used by a Pod with `seLinuxOptions`)
+  with `-o context=<label>`. That is much faster, but every Pod using that
+  volume on the same node must then share one label: a Pod with a different
+  label stays in `ContainerCreating` with a "conflicting SELinux labels"
+  error. Pods that must share a volume across labels (a privileged `spc_t`
+  agent beside an app, say) opt out with
+  `spec.securityContext.seLinuxChangePolicy: Recursive`. Before upgrading,
+  run `kubectl get csidriver` and check each driver's `spec.seLinuxMount`.
+  Nodes without SELinux are unaffected.
 - **PSA is built-in validating admission with a *fixed* policy.** Unlike
   Kyverno/Gatekeeper ([ch.03](03-supply-chain.md)) you don't author rules — you
   select `privileged|baseline|restricted` via the **namespace labels**
@@ -366,7 +378,7 @@ kubectl run psa-bad -n bookstore --image=busybox:1.36 --restart=Never \
   Pod). `audit` annotates the audit log ([ch.04](04-secrets-and-cluster-hardening.md));
   `warn` returns a `Warning:` header (what you see in `kubectl`). The
   **`-version`** label pins the ruleset to a Kubernetes minor (`latest` =
-  newest, the usual choice; pin to e.g. `v1.30` to freeze behaviour across
+  newest, the usual choice; pin to e.g. `v1.37` to freeze behaviour across
   upgrades). Cluster-wide **exemptions** (by username, RuntimeClass, or
   namespace) are configured in the API server's `AdmissionConfiguration`, not
   per-namespace — used sparingly for system namespaces.
@@ -388,7 +400,7 @@ kubectl run psa-bad -n bookstore --image=busybox:1.36 --restart=Never \
 > A namespace at `privileged` is an unlocked door; `baseline` is a minimum, not
 > a goal.
 
-> **In production:** pin the **`-version`** label (e.g. `v1.30`) on regulated
+> **In production:** pin the **`-version`** label (e.g. `v1.37`) on regulated
 > clusters so a Kubernetes upgrade can't silently change what `restricted`
 > means under you; bump it deliberately. `latest` is fine for fast-moving
 > environments that test upgrades.

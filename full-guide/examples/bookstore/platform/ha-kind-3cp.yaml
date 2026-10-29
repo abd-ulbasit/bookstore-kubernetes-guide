@@ -1,7 +1,7 @@
 # Bookstore — Part 11 ch.08 "HA control plane & etcd": a 3-CONTROL-PLANE +
 # 2-worker `kind` cluster config. With >=2 control-plane nodes, kind stands up
 # a REAL stacked-etcd cluster (a genuine 3-member Raft quorum) and an internal
-# HAProxy load balancer in front of the 3 apiservers (active-active) — a
+# Envoy load balancer in front of the 3 apiservers (active-active) — a
 # faithful, laptop-sized HA control plane the chapter operates against.
 #
 # !!! THIS IS A KIND CONFIG, NOT A KUBERNETES API OBJECT.
@@ -40,7 +40,7 @@ apiVersion: kind.x-k8s.io/v1alpha4
 name: bookstore-ha
 nodes:
   # --- 3 control-plane nodes -> a real 3-member stacked etcd (quorum 2) ---
-  # kind automatically adds an HAProxy LB container in front of the apiservers
+  # kind automatically adds an Envoy LB container in front of the apiservers
   # when there is more than one control-plane node (active-active front).
   - role: control-plane
   - role: control-plane

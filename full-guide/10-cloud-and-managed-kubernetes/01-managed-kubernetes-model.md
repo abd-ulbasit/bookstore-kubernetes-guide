@@ -87,8 +87,10 @@ seam.**
   apply`; you **request** a control-plane upgrade (the provider performs the
   apiserver→cm/sched→etcd dance behind its SLA) and then **you** roll the node
   pools. The provider also imposes a **supported-version window** (a minor
-  leaves support in ~12–14 months) and **maintenance windows** — drift onto an
-  end-of-support minor and you get a *forced* upgrade.
+  gets 12 to 14 months of standard support: AKS 12, EKS and GKE 14; paid
+  extended support or LTS stretches that to 24 to 26 months) and
+  **maintenance windows** — drift onto an end-of-support minor and you get a
+  *forced* upgrade.
 - **Region / AZ topology is now a first-class design input.** A cloud region
   is several **Availability Zones** (independent failure domains). The control
   plane can be **zonal** (cheaper, one AZ — an AZ outage can take the API
@@ -168,8 +170,9 @@ flowchart TB
   cost                   flat CP fee + nodes        nodes only (no CP fee)
                                                      — but you pay in OPS toil
   version freedom        provider-supported window  any version you can run
-                         (~12-14 mo/minor; forced   (you own EOL risk)
-                         upgrade if you drift)
+                         (12-14 mo standard/minor,  (you own EOL risk)
+                         24-26 mo w/ paid extended
+                         or LTS; then forced upgrade)
   air-gapped / on-prem   no (cloud only)*           yes (kubeadm/CAPI on prem)
   team to run it         small (no CP on-call)      a real cluster-ops team
 
@@ -308,8 +311,13 @@ and Layers 2 (Git) + 3 (the Postgres PVC, via Velero/CSI snapshot) stay
   channel — opt in deliberately, and keep manifests on **GA APIs** so an
   auto-upgrade is a non-event (the property the Bookstore already has).
 - **The supported-version window is a hard constraint, not advice.** Each
-  provider patches a minor for ~12–14 months, then **force-upgrades** you
-  (with notice) to keep the fleet supportable. A cluster you "never touch"
+  provider gives a minor 12 to 14 months of standard support (AKS 12, EKS
+  and GKE 14). Paid extended support stretches that: EKS extended support
+  (on by default, billed) to 26 months, the GKE Extended channel to 24, and
+  AKS LTS (opt-in, Premium tier) to about 24. When the last window closes
+  the provider **force-upgrades** you to keep the fleet supportable; EKS
+  says that can happen any time after the end-of-extended-support date,
+  with no notification before the update. A cluster you "never touch"
   therefore *still* moves — which is why the [Part 08
   ch.01](../08-day-2-operations/01-cluster-lifecycle.md) deprecated-API audit
   (`pluto`/`kubent`, `apiserver_requested_deprecated_apis`) is *more*
@@ -369,8 +377,9 @@ and Layers 2 (Git) + 3 (the Postgres PVC, via Velero/CSI snapshot) stay
 > "We're on EKS" is not a reliability strategy.
 
 > **In production: plan the upgrade cadence — the version window is shorter
-> than you think.** A minor leaves provider support in ~12–14 months and you
-> *will* be force-upgraded if you drift. Run the
+> than you think.** A minor leaves standard provider support in 12 to 14
+> months (later only if you pay for extended support or LTS), and you *will*
+> be force-upgraded if you drift. Run the
 > [Part 08 ch.01](../08-day-2-operations/01-cluster-lifecycle.md) deprecated-API
 > audit on a schedule, keep manifests/charts/GitOps on GA APIs (the Bookstore
 > does), stagger control-plane then node-pool upgrades within a maintenance
@@ -415,9 +424,11 @@ kubectl get nodes -o wide                          # YOUR nodes (kubelet ver, AZ
 kubectl get nodes -L topology.kubernetes.io/zone   # node AZ spread (yours to ensure)
 
 # Provider control-plane ops you TRIGGER (provider performs CP; you roll nodes):
-eksctl upgrade cluster --name $CLUSTER_NAME --version 1.31     # AWS EKS
-gcloud container clusters upgrade $CLUSTER_NAME --master       # Google GKE (control plane)
-az aks upgrade -g $RG -n $CLUSTER_NAME --kubernetes-version 1.31  # Azure AKS
+# One minor per step (Part 08 ch.01); here 1.36 -> 1.37:
+eksctl upgrade cluster --name $CLUSTER_NAME --version 1.37     # AWS EKS
+gcloud container clusters upgrade $CLUSTER_NAME --master \
+  --cluster-version 1.37.1-gke.1552000   # Google GKE (CP); no version = default
+az aks upgrade -g $RG -n $CLUSTER_NAME --kubernetes-version 1.37  # Azure AKS
 # then upgrade each NODE POOL (surge/rolling, honors PDBs) — provider-specific (ch.02)
 
 # The audit that is STILL yours on managed (Part 08 ch.01):
@@ -466,10 +477,20 @@ Checklist:
 
    </details>
 
-2. **The provider just auto-upgraded the control plane from 1.30 to 1.31 overnight. Your nodes are still on 1.30, and one of your Deployments uses `autoscaling/v2beta2`. What do you check and in what order?**
+2. **The provider just auto-upgraded the control plane from 1.36 to 1.37
+   overnight. Your nodes are still on 1.36, and a manifest in Git still uses
+   `autoscaling/v2beta2`. What do you check and in what order?**
    <details><summary>Show answer</summary>
 
-   First, `kubectl version` to confirm the skew (server 1.31, nodes 1.30 is supported — kubelet may lag the apiserver by up to 3 minors, but not lead). Second, run `pluto detect-files` or `kubent` against your manifests/cluster — `autoscaling/v2beta2` was removed in 1.26 and would silently disappear from the server, leaving the resource unreachable. Third, plan a node-pool surge upgrade to align kubelet with the new minor before the skew widens further. The control plane upgrade is the provider's; the deprecated-API audit and node roll are yours.
+   First, `kubectl version` to confirm the skew (server 1.37, nodes 1.36 is
+   supported: a 1.37 apiserver accepts kubelets 1.34 to 1.37, and a kubelet
+   may never be newer). Second, run `pluto detect-files` or `kubent` against
+   your manifests/cluster: `autoscaling/v2beta2` was removed in 1.26, so the
+   next sync or `kubectl apply` of that manifest fails until it moves to
+   `autoscaling/v2`. Third, plan a node-pool surge upgrade to align kubelet
+   with the new minor before the skew widens further. The control plane
+   upgrade is the provider's; the deprecated-API audit and node roll are
+   yours.
 
    </details>
 

@@ -722,8 +722,9 @@ delete Argo CD itself.
 
 **Server-side apply (`SSA`).** The `syncOptions: ["ServerSideApply=true"]`
 flag tells Argo CD to use **server-side apply** instead of `kubectl
-apply`'s legacy client-side strategic merge. Server-Side Apply (SSA) went GA in Kubernetes 1.22 and became the
-`kubectl apply` default in 1.27+. SSA cleanly tracks field ownership,
+apply`'s legacy client-side strategic merge. Server-Side Apply (SSA)
+went GA in Kubernetes 1.22; `kubectl apply` still uses client-side
+apply unless you pass `--server-side`. SSA cleanly tracks field ownership,
 avoiding "last-write-wins" conflicts when multiple controllers
 touch the same object. The bookstore tree uses SSA on every
 Application for the cleaner ownership model; legacy controllers

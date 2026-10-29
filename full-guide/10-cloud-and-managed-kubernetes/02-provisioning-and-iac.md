@@ -190,7 +190,7 @@ kind: ClusterConfig
 metadata:
   name: bookstore                 # $CLUSTER_NAME
   region: us-east-1
-  version: "1.31"                 # a provider-supported minor (ch.01 window)
+  version: "1.37"                 # a provider-supported minor (ch.01 window)
 availabilityZones: [us-east-1a, us-east-1b, us-east-1c]   # multi-AZ (ch.01)
 iam:
   withOIDC: true                  # REQUIRED for IRSA (ch.03) — set at create
@@ -219,6 +219,8 @@ kubectl get nodes -L topology.kubernetes.io/zone   # 3 nodes, AZ-spread
 gcloud container clusters create $CLUSTER_NAME \
   --region us-central1 \
   --release-channel regular \
+  --cluster-version 1.37.1-gke.1552000 \
+  `# without it, Regular gives its default (1.36.4-gke.2046003 in Oct 2026)` \
   --num-nodes 1 \
   `# --num-nodes is PER ZONE: a REGIONAL cluster (3 zones) => 3 nodes total,` \
   `# not 1. (--min/--max-nodes below are also per-zone-per-nodepool.)` \
@@ -233,7 +235,7 @@ gcloud container clusters get-credentials $CLUSTER_NAME --region us-central1
 ```sh
 az group create -n $RG -l eastus
 az aks create -g $RG -n $CLUSTER_NAME \
-  --kubernetes-version 1.31 \
+  --kubernetes-version 1.37 \
   --node-count 3 --node-vm-size Standard_D4s_v5 \
   --enable-cluster-autoscaler --min-count 2 --max-count 6 \
   --zones 1 2 3 \
@@ -264,12 +266,13 @@ module "eks" {
   source          = "terraform-aws-modules/eks/aws"   # pin the version in real use
   version         = "~> 20.0"
   cluster_name    = var.cluster_name
-  cluster_version = "1.31"
+  cluster_version = "1.37"
   vpc_id          = var.vpc_id
   subnet_ids      = var.private_subnet_ids            # multi-AZ subnets
   enable_irsa     = true                              # OIDC provider for ch.03
   eks_managed_node_groups = {
     stateless = {
+      ami_type       = "AL2023_x86_64_STANDARD"       # no AL2 AMIs after 1.32
       instance_types = ["m6i.large"]
       min_size       = 2
       max_size       = 6                              # autoscaling-group bounds
@@ -302,9 +305,10 @@ a declarative version bump" becomes literal here.
 # On the MANAGEMENT cluster — initialise CAPI + the AWS infra provider (CAPA):
 clusterctl init --infrastructure aws       # installs Cluster/MD/KCP CRDs + ctrls
 
-# Generate a WORKLOAD cluster manifest and apply it like any object:
+# Generate a WORKLOAD cluster manifest and apply it like any object
+# (a v1.37 workload cluster needs Cluster API >= v1.13.6 or >= v1.14.1):
 clusterctl generate cluster bookstore \
-  --kubernetes-version v1.31.0 \
+  --kubernetes-version v1.37.2 \
   --control-plane-machine-count 3 \
   --worker-machine-count 3 > workload-cluster.yaml
 kubectl apply -f workload-cluster.yaml      # controllers reconcile -> a real cluster
@@ -492,7 +496,8 @@ kubectl delete cluster bookstore        # CAPI controllers tear down the cloud i
 ```sh
 # Provider CLI (fastest; eksctl config = semi-IaC)
 eksctl create cluster -f cluster-eks.yaml          # AWS (declarative YAML)
-gcloud container clusters create $CLUSTER_NAME --region <R> --release-channel regular
+gcloud container clusters create $CLUSTER_NAME --region <R> \
+  --release-channel regular --cluster-version 1.37.1-gke.1552000
 az aks create -g $RG -n $CLUSTER_NAME --zones 1 2 3 --enable-cluster-autoscaler
 
 # Terraform (declarative, stateful, multi-cloud workflow)
@@ -502,7 +507,8 @@ terraform destroy                                  # exact, state-driven teardow
 
 # Cluster API (clusters AS Kubernetes objects)
 clusterctl init --infrastructure aws|gcp|azure
-clusterctl generate cluster $CLUSTER_NAME --kubernetes-version v1.31.0 | kubectl apply -f -
+clusterctl generate cluster $CLUSTER_NAME --kubernetes-version v1.37.2 \
+  | kubectl apply -f -
 clusterctl describe cluster $CLUSTER_NAME ; kubectl delete cluster $CLUSTER_NAME
 
 # Deploy the UNCHANGED Bookstore (identical on any of the above)
@@ -515,7 +521,7 @@ Minimal IaC skeletons (the shape — pin versions in real use):
 # eksctl ClusterConfig (versionable)
 apiVersion: eksctl.io/v1alpha5
 kind: ClusterConfig
-metadata: { name: bookstore, region: us-east-1, version: "1.31" }
+metadata: { name: bookstore, region: us-east-1, version: "1.37" }
 iam: { withOIDC: true }                 # REQUIRED for IRSA (ch.03)
 managedNodeGroups:
   - { name: ng1, instanceType: m6i.large, minSize: 2, maxSize: 6, desiredCapacity: 3 }
@@ -526,8 +532,9 @@ managedNodeGroups:
 terraform { backend "s3" { bucket = "your-org-tf-state"
   key = "bookstore/eks.tfstate" region = "us-east-1" dynamodb_table = "tf-locks" } }
 module "eks" { source = "terraform-aws-modules/eks/aws" version = "~> 20.0"
-  cluster_name = var.cluster_name  cluster_version = "1.31"  enable_irsa = true
-  eks_managed_node_groups = { stateless = { min_size = 2, max_size = 6, desired_size = 3 } } }
+  cluster_name = var.cluster_name  cluster_version = "1.37"  enable_irsa = true
+  eks_managed_node_groups = { stateless = { min_size = 2, max_size = 6,
+    desired_size = 3, ami_type = "AL2023_x86_64_STANDARD" } } }   # no AL2 AMI
 ```
 
 Checklist:

@@ -322,7 +322,7 @@ static-Pod / bootstrap case, not for application manifests.
   ready. Only when the gate list is empty does normal scheduling begin. This is
   "don't even try to place me yet", distinct from "tried and couldn't"
   (unschedulableQ). Pod scheduling readiness **graduated to GA in v1.30**
-  (the guide's target) and is enabled by default.
+  (well below the guide's v1.37 target) and is enabled by default.
 - **`nodeName` is the scheduler bypass.** A Pod created with `spec.nodeName`
   already set is, by definition, "already scheduled" — the scheduler skips it
   entirely; the kubelet on that node just runs it. No Filter (so no resource,

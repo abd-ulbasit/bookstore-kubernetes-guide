@@ -210,11 +210,11 @@ spec:
 > purpose**: it is KEDA-scaled and may legitimately be at **0** replicas
 > ([ch.04](04-autoscaling.md)), so a `minAvailable` PDB would be meaningless
 > and could even wedge a drain — autoscaled/scale-to-zero consumers are the
-> documented exception. `unhealthyPodEvictionPolicy: AlwaysAllow` (Beta, k8s
-> 1.27+; ignored, not rejected, on older clusters) lets the eviction API
-> remove **not-Ready** Pods even at the budget floor — without it, a budget
-> at its limit *plus* a crashed Pod can **deadlock** a drain forever (the
-> broken Pod can't be evicted, so the node never drains).
+> documented exception. `unhealthyPodEvictionPolicy: AlwaysAllow` (GA since
+> 1.31, Beta from 1.27; ignored, not rejected, on older clusters) lets the
+> eviction API remove **not-Ready** Pods even at the budget floor — without
+> it, a budget at its limit *plus* a crashed Pod can **deadlock** a drain
+> forever (the broken Pod can't be evicted, so the node never drains).
 
 ```sh
 kubectl apply -f examples/bookstore/raw-manifests/84-pdb.yaml
@@ -316,10 +316,10 @@ dropped connections**. See
   (`IfHealthyBudget`) only counts evicting a *Ready* Pod against the budget,
   but also won't evict an *unready* Pod once the budget is exhausted — so a
   crashing Pod on a node you must drain can never be evicted and the drain
-  **hangs indefinitely**. `unhealthyPodEvictionPolicy: AlwaysAllow` (Beta
-  1.27+) permits evicting not-Ready Pods regardless of the budget, breaking
-  the deadlock; it is the recommended setting for almost all PDBs (and is on
-  every Bookstore PDB).
+  **hangs indefinitely**. `unhealthyPodEvictionPolicy: AlwaysAllow` (GA
+  since 1.31) permits evicting not-Ready Pods regardless of the budget,
+  breaking the deadlock; it is the recommended setting for almost all PDBs
+  (and is on every Bookstore PDB).
 - **PDBs don't reschedule; controllers do.** The PDB is purely an
   *admission gate on eviction*. Recreating the Pod is the Deployment/
   ReplicaSet's job; the scheduler places it

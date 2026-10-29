@@ -482,8 +482,9 @@ kubectl apply -f examples/bookstore/ml/train/recommender-pytorchjob.yaml
 kubectl apply -f examples/bookstore/ml/train/recommender-rayjob.yaml
 
 # Observe Kueue admission of the gang
-kubectl get workloads,pytorchjobs,rayjobs -n bookstore-ml
-kubectl describe workload -n bookstore-ml <NAME>   # why pending: QuotaReserved/Admitted
+kubectl get workloads.kueue.x-k8s.io,pytorchjobs,rayjobs -n bookstore-ml
+# why pending: QuotaReserved/Admitted
+kubectl describe workloads.kueue.x-k8s.io -n bookstore-ml <NAME>
 ```
 
 Minimal skeletons:

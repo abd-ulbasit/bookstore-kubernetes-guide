@@ -238,8 +238,8 @@ selects one via `spec.ingressClassName: nginx`. An Ingress with **no class**
 is handled only if a controller is marked the **default**
 (`ingressclass.kubernetes.io/is-default-class: "true"`), else it's **ignored**
 — another classic "Ingress does nothing". (The deprecated
-`kubernetes.io/ingress.class` annotation predates IngressClass; on **v1.30+**
-use `ingressClassName`.)
+`kubernetes.io/ingress.class` annotation predates IngressClass; on every
+supported version (this guide: **v1.37**) use `ingressClassName`.)
 
 ### host/path rules and `pathType`
 

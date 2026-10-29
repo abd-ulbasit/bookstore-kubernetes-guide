@@ -293,7 +293,8 @@ DNS + CNPG cross-region details from [ch.14.11](./11-multi-region-active-active-
 - [ch.14.11](./11-multi-region-active-active-cloud.md) walked the
   cloud-shaped multi-region setup; the kind simulation here is a
   scaled-down analogue.
-- `kind` ≥ 0.23, `kubectl` ≥ 1.30, `velero` CLI ≥ 1.14 installed.
+- `kind` ≥ v0.33.0 (its default node image is Kubernetes v1.37.0),
+  `kubectl` 1.36-1.38, `velero` CLI ≥ 1.14 installed.
 - The `bookstore-platform/runbooks/` tree from
   [Part 13 ch.12](../13-grand-capstone-bookstore-platform/12-day-2-runbook-on-call-dr-chaos.md)
   is in place; this chapter adds **one new runbook file** to it:

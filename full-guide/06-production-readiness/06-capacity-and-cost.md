@@ -322,7 +322,8 @@ managed cluster.
   `lowerBound`, `upperBound`. In `Off` it only writes these to the VPA
   status; in `Auto`/`Recreate` the updater evicts out-of-bounds Pods and the
   admission webhook rewrites requests on recreation (the classic VPA
-  restart-to-resize; in-place Pod resize is maturing but not the default).
+  restart-to-resize; in-place Pod resize has been GA since v1.35, but these
+  classic VPA modes still evict).
 - **Why throttling appears at low average CPU.** A CPU *limit* is a CFS
   quota per ~100ms period; a bursty handler can exhaust the quota *within* a
   period and be descheduled until the next one — p99 latency spikes while the

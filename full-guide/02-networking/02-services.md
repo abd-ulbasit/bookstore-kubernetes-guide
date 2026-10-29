@@ -3,13 +3,13 @@
 > A Service is a **stable name + virtual IP** in front of a churning set of Pod
 > IPs. The four types (ClusterIP/NodePort/LoadBalancer/ExternalName),
 > Endpoints vs. EndpointSlices, how kube-proxy turns a ClusterIP into a real
-> DNAT (iptables vs. IPVS vs. eBPF), headless Services, session affinity, and
-> `externalTrafficPolicy` — applied by wiring every Bookstore tier with
+> DNAT (iptables vs. nftables vs. eBPF), headless Services, session affinity,
+> and `externalTrafficPolicy` — applied by wiring every Bookstore tier with
 > ClusterIP Services.
 
 **Estimated time:** ~15 min read · ~30 min hands-on
 **Prerequisites:** [Part 02 ch.01](01-networking-model.md) — the IP-per-Pod fabric · [Part 01 ch.04](../01-core-workloads/04-replicasets-and-deployments.md) — the Pods Services front
-**You'll know after this:** • choose between ClusterIP, NodePort, LoadBalancer, and ExternalName · • read EndpointSlices and explain how kube-proxy programs DNAT (iptables / IPVS / eBPF) · • configure a headless Service for direct Pod IPs · • use `sessionAffinity` and `externalTrafficPolicy` correctly · • wire every Bookstore tier behind a stable ClusterIP
+**You'll know after this:** • choose between ClusterIP, NodePort, LoadBalancer, and ExternalName · • read EndpointSlices and explain how kube-proxy programs DNAT (iptables / nftables / eBPF) · • configure a headless Service for direct Pod IPs · • use `sessionAffinity` and `externalTrafficPolicy` correctly · • wire every Bookstore tier behind a stable ClusterIP
 
 <!-- tags: networking, services, clusterip, endpointslices, kube-proxy -->
 
@@ -47,7 +47,7 @@ A Service is **a stable front door with an always-current address book**.
   the doorman on every node: it programs the kernel so a packet *to the front
   door* is rewritten (**DNAT**) to *one of the current address-book entries*.
   It is **not** a proxy process in the data path for ClusterIP — it configures
-  iptables/IPVS/eBPF and the kernel does the forwarding.
+  iptables/nftables/eBPF and the kernel does the forwarding.
 
 So: you talk to a name that never moves; Kubernetes keeps the name pointing at
 exactly the healthy Pods, and rewrites your packets to land on one. The Service
@@ -61,7 +61,7 @@ exactly the healthy Pods, and rewrites your packets to land on one. The Service
 flowchart LR
     cli["storefront Pod<br/>opens conn to<br/>catalog ClusterIP:80"]
     subgraph node["client's node (Linux kernel dataplane)"]
-        kp["kube-proxy-programmed rules<br/>(iptables / IPVS / eBPF)<br/>match dst = catalog ClusterIP:80"]
+        kp["kube-proxy-programmed rules<br/>(iptables / nftables / eBPF)<br/>match dst = catalog ClusterIP:80"]
         ct["conntrack<br/>(remembers the chosen<br/>backend for this flow)"]
     end
     es["EndpointSlice: catalog<br/>Ready Pod IPs:<br/>10.244.2.9:8080<br/>10.244.1.4:8080<br/>10.244.3.6:8080"]
@@ -259,15 +259,18 @@ single **Endpoints** object per Service — one object listing *every* endpoint.
 At scale that object is huge and **every Pod change rewrites and re-pushes the
 whole thing to every node's kube-proxy** — an O(N) churn storm.
 
-**EndpointSlices** (default and the norm on **v1.30+**) shard that list into
-small slices (≤100 endpoints each by default). A Pod change rewrites only its
-*slice*, dramatically less churn and watch traffic; slices also carry richer
-per-endpoint info (topology zone, per-endpoint conditions
-`ready`/`serving`/`terminating`) enabling **topology-aware routing**. The
-legacy `Endpoints` object still exists for compatibility but EndpointSlices are
+**EndpointSlices** (the default and the norm on every supported version; the
+v1 `Endpoints` API has been deprecated since v1.33 and is not expected to be
+removed, though conformance may stop requiring the Endpoints controller,
+KEP-4974) shard that list into small slices (≤100 endpoints each by default).
+A Pod change rewrites only its *slice*, dramatically less churn and watch
+traffic; slices also carry richer per-endpoint info (topology zone,
+per-endpoint conditions `ready`/`serving`/`terminating`) enabling
+**topology-aware routing**. The legacy `Endpoints` object still exists for
+compatibility but EndpointSlices are
 the real mechanism — `kubectl get endpointslices -n <NS> -l kubernetes.io/service-name=<SVC>` is the truth.
 
-### kube-proxy modes: iptables vs. IPVS vs. eBPF
+### kube-proxy modes: iptables vs. nftables vs. eBPF
 
 kube-proxy ([Part 00 ch.05](../00-foundations/05-node-components.md)) watches
 Services + EndpointSlices and programs the node so the ClusterIP works. It is
@@ -280,9 +283,16 @@ forwards:
   (so every packet of one connection goes to the same Pod). Simple, ubiquitous;
   rule evaluation is ~linear, so very large Services (tens of thousands of
   endpoints) get slower to *program* and match.
-- **IPVS.** Uses the kernel's L4 load balancer (hash tables, O(1) lookup) with
-  real algorithms (round-robin, least-conn, etc.). Scales to many thousands of
-  Services far better; still conntrack-backed.
+- **nftables (GA since v1.33).** The same DNAT-plus-conntrack model, written
+  through nftables, the kernel's successor to the iptables API (needs kernel
+  5.13+). It applies endpoint changes faster than iptables and matches packets
+  more efficiently at very large scale, and upstream plans to make it the
+  default. On 1.37 kube-proxy warns when no mode is set, so set
+  `mode: nftables` (or `iptables`) explicitly in its config.
+- **IPVS (deprecated since v1.35).** Uses the kernel's L4 load balancer (hash
+  tables) and was once *the* answer to iptables scaling, but it never covered
+  every Service edge case. Upstream expects to disable it by default by v1.40
+  and remove it by v1.43; move IPVS clusters to nftables.
 - **eBPF (CNI replacement).** Cilium (or Calico eBPF) **replaces kube-proxy
   entirely**: an eBPF program does the Service load-balancing/DNAT in the
   kernel fast path — best performance and integrates with policy/observability.
@@ -355,10 +365,12 @@ only here and in [Part 07 ch.05](../07-delivery/05-progressive-delivery.md)).
 > traffic to a Pod that can't serve; a missing one routes to Pods during
 > startup. The probe *is* the in/out switch.
 
-> **In production:** choose the kube-proxy mode for scale. **iptables** is fine
-> for most clusters; at **thousands of Services/endpoints** move to **IPVS**
-> or an **eBPF** dataplane (Cilium) — iptables rule programming/matching
-> becomes a measurable latency and control-plane cost
+> **In production:** choose the kube-proxy mode for scale, and set it
+> explicitly. **iptables** is fine for most clusters; at **thousands of
+> Services/endpoints** move to **nftables** (GA since v1.33) or an **eBPF**
+> dataplane (Cilium) — iptables rule programming/matching becomes a
+> measurable latency and control-plane cost. Don't choose **IPVS** for a new
+> cluster: it has been deprecated since v1.35
 > ([Part 00 ch.05](../00-foundations/05-node-components.md)).
 
 > **In production:** `externalTrafficPolicy: Local` when you **need the real
@@ -376,9 +388,11 @@ only here and in [Part 07 ch.05](../07-delivery/05-progressive-delivery.md)).
 > provider-specific. Bare `kind` has **no** cloud LB (stays `<pending>`).
 
 > **In production:** for in-cluster traffic, **topology-aware routing**
-> (EndpointSlice hints, v1.30+) and `internalTrafficPolicy: Local` keep traffic
-> **in-zone** to cut cross-AZ latency and **cross-AZ data-transfer cost** — but
-> validate it doesn't create hot spots when a zone is light on replicas.
+> (EndpointSlice hints: `spec.trafficDistribution: PreferSameZone`, GA since
+> v1.35, or the older `service.kubernetes.io/topology-mode: Auto` annotation)
+> and `internalTrafficPolicy: Local` keep traffic **in-zone** to cut cross-AZ
+> latency and **cross-AZ data-transfer cost** — but validate it doesn't create
+> hot spots when a zone is light on replicas.
 
 ## Quick Reference
 
@@ -421,7 +435,8 @@ Checklist:
 - [ ] Type chosen deliberately (ClusterIP default; LB only via Ingress at edge)
 - [ ] Headless **iff** you need per-Pod DNS / client-side LB (StatefulSets)
 - [ ] `externalTrafficPolicy: Local` only with even Pod spread; know the IP/SNAT trade-off
-- [ ] kube-proxy mode (iptables/IPVS/eBPF) fits the cluster's Service scale
+- [ ] kube-proxy mode (iptables/nftables/eBPF) fits the cluster's Service scale
+- [ ] kube-proxy mode set explicitly, and not the deprecated IPVS
 
 ## Test your understanding
 
@@ -430,14 +445,14 @@ Checklist:
 1. **A teammate believes kube-proxy is "the load balancer" in the data path for ClusterIP traffic. Why is this wrong, and what's actually doing the forwarding?**
    <details><summary>Show answer</summary>
 
-   kube-proxy is a *controller* that programs iptables/IPVS/eBPF rules on each node based on Services and EndpointSlices; the **kernel** does the per-packet DNAT and forwarding. For a ClusterIP, no userspace proxy sits in the data path — a packet to `ClusterIP:port` hits the kernel rule, gets DNAT'd to a chosen endpoint IP:port, and conntrack pins the flow. This is why ClusterIP has near-zero per-hop overhead (see §Mental model and §kube-proxy modes).
+   kube-proxy is a *controller* that programs iptables/nftables/eBPF rules on each node based on Services and EndpointSlices; the **kernel** does the per-packet DNAT and forwarding. For a ClusterIP, no userspace proxy sits in the data path — a packet to `ClusterIP:port` hits the kernel rule, gets DNAT'd to a chosen endpoint IP:port, and conntrack pins the flow. This is why ClusterIP has near-zero per-hop overhead (see §Mental model and §kube-proxy modes).
 
    </details>
 
 2. **You scale `catalog` from 3 to 10 replicas. Within ~1 second, traffic spreads across all 10. Walk through which controllers and components made this happen.**
    <details><summary>Show answer</summary>
 
-   (1) Deployment controller creates 7 new Pods. (2) kubelet starts them; readiness probe passes (they're Ready). (3) EndpointSlice controller, watching Pods matching the Service's selector, adds the 7 new Pod IPs to the EndpointSlice(s). (4) Every node's kube-proxy is watching EndpointSlices, sees the updated set, and rewrites the iptables/IPVS/eBPF rules. (5) The kernel's DNAT now includes the new endpoints, so load balances across all 10. The Service VIP never changed; the address book did (see §Mental model and §How it works under the hood, EndpointSlices).
+   (1) Deployment controller creates 7 new Pods. (2) kubelet starts them; readiness probe passes (they're Ready). (3) EndpointSlice controller, watching Pods matching the Service's selector, adds the 7 new Pod IPs to the EndpointSlice(s). (4) Every node's kube-proxy is watching EndpointSlices, sees the updated set, and rewrites the iptables/nftables/eBPF rules. (5) The kernel's DNAT now includes the new endpoints, so load balances across all 10. The Service VIP never changed; the address book did (see §Mental model and §How it works under the hood, EndpointSlices).
 
    </details>
 

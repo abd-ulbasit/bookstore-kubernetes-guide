@@ -72,8 +72,8 @@ a stack of typed, declarative patches, rendered by a fixed pipeline.**
   one multi-document YAML stream, identical inputs → identical output (no
   `now`/random, so it is safe for GitOps reconcilation).
 - **`kubectl apply -k overlays/dev`** = *render that overlay, then apply the
-  result* — Kustomize is **built into `kubectl`** (here: `kubectl` v1.35,
-  embedded Kustomize v5.7). `kubectl kustomize <DIR>` renders only;
+  result* — Kustomize is **built into `kubectl`** (here: `kubectl` v1.37.2,
+  embedded Kustomize v5.8.1). `kubectl kustomize <DIR>` renders only;
   `kustomize build <DIR>` is the standalone binary's equivalent (mind version
   skew — the embedded copy lags the standalone release).
 - **Transformers, not text.** Each knob is a *typed operation on parsed
@@ -657,7 +657,7 @@ chart to — the packaging changed; the deployed app did not.
 > version the GitOps controller uses (`kustomize version` /
 > `kubectl version`), or a render mismatch between laptop, CI, and Argo CD will
 > manifest as phantom drift. This guide targets the Kustomize embedded in
-> `kubectl` v1.30+ (here v1.35 / Kustomize v5.7).
+> `kubectl` v1.30+ (here v1.37.2 / Kustomize v5.8.1).
 
 ## Helm vs Kustomize (and both)
 

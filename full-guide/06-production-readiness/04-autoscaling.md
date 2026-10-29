@@ -450,7 +450,8 @@ the scaler, then reverts.)
   **admission** webhook rewrites requests on (re)creation. Modes: `Off`
   (recommend only — *the sizing tool*, [ch.06](06-capacity-and-cost.md)),
   `Initial` (set on create only), `Auto`/`Recreate` (evict to resize — note:
-  in-place resize is maturing but VPA classically restarts the Pod).
+  in-place Pod resize has been GA since v1.35, but these classic VPA modes
+  still evict and recreate the Pod).
 - **Why HPA + VPA on the same metric conflict.** HPA scales replicas on, say,
   CPU utilization; VPA in `Auto` rewrites the CPU **request**. But
   utilization *is* usage ÷ request — VPA changing the request moves the very
@@ -467,7 +468,10 @@ the scaler, then reverts.)
   **activation**: while the trigger is inactive (`≤ activationValue` for
   `cooldownPeriod`) KEDA scales the Deployment to `minReplicaCount` (which can
   be **0**) and removes the HPA's lower bound; the first event reactivates it.
-  An HPA alone can never reach or leave 0 — that 0↔1 edge is exactly KEDA's
+  Until v1.37 a stock HPA could not reach or leave 0. Since 1.37 the
+  beta, on-by-default `HPAScaleToZero` feature lets an HPA on an Object or
+  External metric set `minReplicas: 0`, but something must still serve that
+  metric. KEDA ships that adapter and owns the 0↔1 activation, which is its
   added value, and why a queue consumer (idle most of the night) is its
   canonical use case.
 - **Node autoscaling closes the loop.** HPA/KEDA create Pods; if no node has
@@ -583,7 +587,7 @@ Checklist:
 3. **Payments-worker reads from a RabbitMQ queue. At 3am the queue is empty. Why is HPA on CPU the wrong scaler, and what does KEDA do differently?**
    <details><summary>Show answer</summary>
 
-   An idle consumer at 3am uses ~0 CPU regardless of queue depth — HPA on CPU sees "low utilization" and could scale all the way down to `minReplicas: 1`, but cannot scale **to zero** (HPA's minimum is 1). KEDA exposes the queue depth as an external metric *and* manages the HPA, including the scale-from-zero / scale-to-zero transitions (which HPA alone cannot do). KEDA is the right tool for queue/event-driven work; HPA on CPU is the wrong scaler for the wrong signal.
+   An idle consumer at 3am uses ~0 CPU regardless of queue depth — HPA on CPU sees "low utilization" and could scale all the way down to `minReplicas: 1`, but cannot scale **to zero**, because CPU is only measured on running Pods. (Since v1.37 the `HPAScaleToZero` feature is beta and on by default, so an HPA on an Object or External metric may set `minReplicas: 0`; you would still need a metrics adapter to feed it the queue depth.) KEDA exposes the queue depth as an external metric *and* manages the HPA, including the scale-from-zero / scale-to-zero transitions (which an HPA on CPU cannot do). KEDA is the right tool for queue/event-driven work; HPA on CPU is the wrong scaler for the wrong signal.
 
    </details>
 

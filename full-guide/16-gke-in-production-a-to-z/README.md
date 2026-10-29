@@ -23,12 +23,17 @@ Each chapter carries a header stating what was run, when, on what cluster
 version, and what it cost:
 
 ```
-**Executed:** 2026-09-14 · GKE 1.34.x REGULAR · asia-south1-a · 2 x e2-standard-2 spot
+**Executed:** YYYY-MM-DD · GKE 1.37.x REGULAR · asia-south1-a · 2 x e2-standard-2 spot
 **Session cost:** $X.XX over 2h14m (from the billing export, not an estimate)
 **What did not work first time:**
 ```
 
 That last line is the one that makes the Part worth reading.
+
+Record the version the cluster actually ran. Since 2026-10-26 the
+Regular channel creates new clusters on 1.36.4-gke.2046003 by default;
+1.37.1-gke.1552000 is available in Regular, but a cluster only gets it
+if the Terraform asks for that version.
 
 ## Infrastructure
 

@@ -558,6 +558,10 @@ gateway:
   # is self-contained for the guide. createGatewayClass=false if pre-created.
   createGatewayClass: true
   className: bookstore-gtw
+  # controllerName is a PLACEHOLDER that no controller claims (ingress-nginx
+  # does not implement Gateway API). Set it to the controller name of the
+  # Gateway implementation you install, e.g. Envoy Gateway's
+  # gateway.envoyproxy.io/gatewayclass-controller.
   controllerName: k8s.io/ingress-nginx
   host: bookstore.localdev.me
   tls:

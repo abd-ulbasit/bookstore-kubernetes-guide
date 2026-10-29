@@ -111,13 +111,14 @@ kubectl version --client      # confirm it runs (server check comes after cluste
 ### 2. Install a cluster tool and create a cluster
 
 ```sh
-# kind
-brew install kind                                            # or `go install sigs.k8s.io/kind@latest`
+# kind v0.33.0: its default node image is Kubernetes v1.37.0
+go install sigs.k8s.io/kind@v0.33.0     # or `brew install kind`, then check:
+kind version                            # expect v0.33.0
 kind create cluster --name bookstore                          # ~30s; nodes are Docker containers
 
-# k3d equivalent (if you chose k3d)
+# k3d equivalent (if you chose k3d); --image pins Kubernetes 1.37
 # brew install k3d
-# k3d cluster create bookstore
+# k3d cluster create bookstore --image rancher/k3s:v1.37.1-k3s1
 ```
 
 `kind create cluster` also **merges a context into your kubeconfig and switches
@@ -332,7 +333,8 @@ kind delete cluster --name bookstore       # k3d: k3d cluster delete bookstore
 
 ```sh
 # cluster lifecycle (local)
-kind create cluster --name bookstore        # k3d: k3d cluster create bookstore
+kind create cluster --name bookstore
+#   k3d: k3d cluster create bookstore --image rancher/k3s:v1.37.1-k3s1
 kind delete cluster --name bookstore        # k3d: k3d cluster delete bookstore
 kind load docker-image <img> --name bookstore   # k3d: k3d image import <img> -c bookstore
 

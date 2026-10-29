@@ -156,7 +156,7 @@ spec:
             timeoutSeconds: 2
             failureThreshold: 3
           lifecycle:
-            # Native sleep handler (beta & default-on at 1.30, GA 1.33); the
+            # Native sleep handler (beta & default-on at 1.30, GA 1.34); the
             # distroless/static image has no shell/coreutils, so an `exec`
             # /bin/sleep preStop would fail.
             preStop: { sleep: { seconds: 5 } }

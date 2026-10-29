@@ -324,7 +324,9 @@ spec:
     # ConfigMap into bookstore-ml stamping (model URI, score, timestamp,
     # workflow name). In PROD this is an MLflow `log_artifact` call or a
     # KFP Model Registry record — see Part 12 ch.07 + ch.08 for the swap.
-    # Uses the official kubectl image; the SA created above has create
+    # Uses Chainguard's minimal kubectl image with a shell (latest-dev),
+    # pinned by digest because the free tier publishes only latest tags;
+    # this digest carries kubectl v1.37.2. The SA created above has create
     # rights on configmaps in this namespace ONLY.
     # ───────────────────────────────────────────────────────────────────────
     - name: register-step
@@ -332,7 +334,7 @@ spec:
         parameters:
           - name: score
       script:
-        image: bitnami/kubectl:1.31.1
+        image: cgr.dev/chainguard/kubectl:latest-dev@sha256:ee760c803cc3856d99f13dfd989bce461d2b324ae49e70b72c717f3bfaba9cbb
         imagePullPolicy: IfNotPresent
         command: ["/bin/sh"]
         source: |
@@ -377,7 +379,7 @@ spec:
     # ───────────────────────────────────────────────────────────────────────
     - name: promote-step
       script:
-        image: bitnami/kubectl:1.31.1
+        image: cgr.dev/chainguard/kubectl:latest-dev@sha256:ee760c803cc3856d99f13dfd989bce461d2b324ae49e70b72c717f3bfaba9cbb
         imagePullPolicy: IfNotPresent
         command: ["/bin/sh"]
         source: |

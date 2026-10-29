@@ -52,9 +52,9 @@ Scalability fails in production in specific, measurable ways:
 2. **The "list everything" anti-pattern at scale.** A controller or dashboard
    does `LIST secrets`/`LIST pods` **cluster-wide, unpaginated, repeatedly**.
    On a 50-object lab it's invisible; on a 50,000-object cluster each call
-   serialises hundreds of MB through the apiserver and etcd, evicts the watch
-   cache, and spikes apiserver memory — the single most common
-   self-inflicted scalability incident.
+   serialises hundreds of MB through the apiserver, evicts the watch cache,
+   and spikes apiserver memory — the single most common self-inflicted
+   scalability incident.
 3. **Hitting an undocumented wall.** A team scales toward 8,000 nodes or
    200,000 pods and the cluster degrades — because they never read that
    Kubernetes **publishes** scalability thresholds (≈5,000 nodes, 150,000 pods,
@@ -101,10 +101,12 @@ state — never averages, never one run.**
   ([ch.08](08-ha-control-plane-and-etcd.md)) — no apiserver tuning beats a slow
   etcd disk; that is *the* number to protect (`etcd_disk_wal_fsync_duration_
   seconds` p99). Reads mostly avoid etcd via the apiserver's **watch cache**
-  (it serves list/watch from RAM) — *unless* you force a quorum read or do huge
-  uncached LISTs, which is exactly why the "list everything" pattern is so
-  destructive: it bypasses the cache, hammers etcd, and balloons apiserver
-  memory.
+  (it serves list/watch from RAM, consistent LISTs included: on by default
+  since 1.31, GA in 1.34, gate removed in 1.37). That does not make the
+  "list everything" pattern cheap: every call still copies, converts and
+  encodes the whole result set in apiserver memory, and APF charges it seats
+  in proportion to the objects returned, so it balloons apiserver memory and
+  crowds out the rest of its priority level.
 - **The big knobs, by component.** *apiserver*: `--max-requests-inflight` /
   `--max-mutating-requests-inflight` cap **total** concurrency that **APF then
   subdivides** ([ch.03](03-api-priority-and-fairness.md) — APF is the *unit of
@@ -172,9 +174,9 @@ flowchart TB
     c --> cl --> q --> au --> ad --> ser
     ser -->|"reads: cached list/watch"| wc
     wc --> resp
-    ser -->|"writes + non-cached / quorum reads"| etcd
+    ser -->|"writes + non-cached reads (e.g. consistent GET)"| etcd
     etcd --> resp
-    note["'list secrets/pods CLUSTER-WIDE unpaginated, repeatedly' BYPASSES the<br/>watch cache -> hammers etcd + balloons apiserver RAM: the #1 self-inflicted<br/>scalability incident. Fix: paginate (limit+continue), WATCH not poll-LIST,<br/>scope to a namespace, bound the controller (ch.03)."]
+    note["'list secrets/pods CLUSTER-WIDE unpaginated, repeatedly': served from the<br/>watch cache (default since 1.31), but each call re-encodes EVERY object<br/>-> balloons apiserver RAM + eats APF seats: the #1 self-inflicted<br/>scalability incident. Fix: paginate (limit+continue), WATCH not poll-LIST,<br/>scope to a namespace, bound the controller (ch.03)."]
     ser -.-> note
 ```
 
@@ -288,8 +290,11 @@ kubectl get --raw='/metrics' | grep -E '^etcd_disk_backend_commit_duration_secon
 # APF wait time — how long requests QUEUED before dispatch (ch.03, referenced):
 kubectl get --raw='/metrics' | grep '^apiserver_flowcontrol_request_wait_duration_seconds_bucket' | grep 'priority_level' | head -3
 
-# watch-cache effectiveness — cached reads vs etcd reads:
-kubectl get --raw='/metrics' | grep -E '^apiserver_cache_list_total|^etcd_request_duration_seconds_count' | head
+# watch-cache effectiveness: LISTs served from the cache vs from etcd. 1.37
+# no longer exposes apiserver_cache_list_*; the unified metric's storage
+# label says which layer served each LIST:
+kubectl get --raw='/metrics' | grep '^apiserver_storage_list_total' \
+  | grep 'resource="pods"'       # one row per storage="watchcache"/"etcd"
 ```
 
 The discipline: read these as **percentiles** (compute from buckets / via
@@ -395,9 +400,10 @@ The most common self-inflicted scalability incident, shown on the Bookstore
 
 ```sh
 # ANTI-PATTERN: cluster-wide, UNPAGINATED list (a bad dashboard/controller).
-# Each call serialises EVERY object through apiserver+etcd, bypassing the
-# watch cache's benefit and spiking apiserver RAM at scale:
-time kubectl get pods -A -o json >/dev/null            # all pods, no limit
+# The watch cache serves it (not etcd; default since 1.31), but each call still
+# encodes EVERY object into one response, spiking apiserver RAM at scale.
+# kubectl pages by default (--chunk-size=500); 0 forces the bad shape:
+time kubectl get pods -A -o json --chunk-size=0 >/dev/null  # all pods, no limit
 
 # BETTER: paginate (limit + continue) — bounded memory per call. This is what
 # a well-written client/controller does (client-go's pager, informers):
@@ -437,12 +443,16 @@ kind delete cluster --name bookstore
   write latency; a slow/jittery etcd disk slows *every* write and no apiserver
   setting compensates. Reads are kept off etcd by the apiserver's **watch
   cache** (it materialises objects from a watch stream and serves
-  list/watch from memory at a recent resourceVersion). A cluster-wide,
-  unpaginated `LIST` (especially one demanding quorum consistency, or of a kind
-  the cache can't fully serve) **bypasses** that — going to etcd and
-  allocating the whole result set in the apiserver — which is why it both
-  spikes apiserver RAM and loads etcd: it defeats the one mechanism that makes
-  reads cheap.
+  list/watch from memory at a recent resourceVersion). That now covers
+  consistent (quorum) LISTs too: the apiserver asks etcd for its current
+  revision, waits for the cache to catch up, then answers from memory (on by
+  default since 1.31, GA in 1.34; 1.37 removed the `ConsistentListFromCache`
+  gate), and continuation pages come from cache snapshots
+  (`ListFromCacheSnapshot`, on by default since 1.34). So a cluster-wide,
+  unpaginated `LIST` no longer hammers etcd by default. Its cost moves to the
+  apiserver, which allocates, converts and encodes the whole result set on
+  every call, and to APF, which charges it seats in proportion to the objects
+  it returns: it spikes apiserver RAM and starves its priority level.
 - **`--max-*-inflight` vs APF, and where each bites.** `--max-requests-inflight`
   / `--max-mutating-requests-inflight` cap the apiserver's **total** concurrent
   requests; **APF subdivides that total into fair, isolated shares**
@@ -505,7 +515,7 @@ kind delete cluster --name bookstore
 > dominant scale incidents are workload-shaped: **paginate** every large LIST
 > (`limit`+`continue`), **watch (informers) not poll-LIST**, **scope LISTs to a
 > namespace**, and **never `LIST secrets`/`pods` cluster-wide on a loop**
-> (quadratic apiserver+etcd load, and a security problem). Give every
+> (quadratic apiserver load, and a security problem). Give every
 > first-party controller its **own bounded APF level** so a regression is
 > contained, not cluster-wide ([ch.03](03-api-priority-and-fairness.md)); keep
 > **audit policy lean** (verbose audit is per-request latency + I/O). Tuning
@@ -615,7 +625,7 @@ Checklist:
 2. **A teammate writes `kubectl get pods --all-namespaces` from a script every 10s. The cluster has 50,000 Pods. What is the impact on the control plane and what's the fix?**
    <details><summary>Show answer</summary>
 
-   Each unpaginated LIST returns the full 50k Pods (~50MB of JSON), holds the watch-cache lock, and forces a full keyspace scan. With many such clients, the apiserver's RAM balloons (`--target-ram-mb`), GC churns, and `apiserver_request_duration_seconds` p99 spikes. Fix: use `--limit=500 --continue=<token>` pagination (LIST with chunked continuation), or use a watch with a resourceVersion to receive only deltas. Better: use a SharedInformer / client-go cache — never pull a full snapshot in a loop. This anti-pattern is the #1 cause of large-cluster apiserver pressure.
+   Each call reads the full 50k Pods (~50MB of JSON). The watch cache serves it (not an etcd keyspace scan; the default since 1.31), and kubectl already pages it in chunks of 500 (`--chunk-size`), but the apiserver still converts and encodes every object every 10s, and APF charges each LIST seats in proportion to the objects it returns. With many such clients, the apiserver's RAM balloons (`--target-ram-mb`), GC churns, and `apiserver_request_duration_seconds` p99 spikes. Pagination (`limit` + `continue`) only bounds each response; the fix is a watch with a resourceVersion to receive only deltas. Better: use a SharedInformer / client-go cache — never pull a full snapshot in a loop. This anti-pattern is the #1 cause of large-cluster apiserver pressure.
 
    </details>
 

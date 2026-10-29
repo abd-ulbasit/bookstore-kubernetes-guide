@@ -15,7 +15,8 @@
 > `matchConditions` CEL, `namespaceSelector`/`objectSelector`,
 > `reinvocationPolicy`, `timeoutSeconds`, ordering, idempotency, the
 > own-namespace **deadlock footgun**); and the in-tree
-> **ValidatingAdmissionPolicy + CEL** (v1.30 GA) as the webhook-less modern
+> **ValidatingAdmissionPolicy + CEL** (v1.30 GA), with its mutating sibling
+> **MutatingAdmissionPolicy** (v1.36 GA), as the webhook-less modern
 > alternative — applied by shipping a real distroless webhook server in
 > [`examples/bookstore/operator/`](../examples/bookstore/operator/README.md).
 
@@ -36,8 +37,8 @@ black boxes ("write a policy, it gets enforced"). This chapter opens the box:
 **Kyverno, Gatekeeper, and PSA are all consumers of one extension point — the
 admission webhook — and sometimes you need to build that primitive yourself.**
 
-You reach for a hand-written webhook (or its in-tree successor,
-ValidatingAdmissionPolicy) when:
+You reach for a hand-written webhook (or its in-tree successors,
+ValidatingAdmissionPolicy and, since v1.36, MutatingAdmissionPolicy) when:
 
 1. **The rule is real code, not a policy expression.** "Default a Pod's
    `securityContext` from a per-team profile looked up in a ConfigMap", "inject
@@ -86,9 +87,9 @@ may only judge.**
 - **The contract is `AdmissionReview` in, `AdmissionReview` out.** Allow:
   `{allowed: true}`. Deny: `{allowed: false, status: {message: "..."}}` — that
   message is what the user sees. Mutate: `{allowed: true, patch: <base64
-  JSONPatch>, patchType: JSONPatch}`. controller-runtime's
-  `CustomDefaulter`/`CustomValidator` hide the wire format — you mutate a typed
-  Go object or return an `error`.
+  JSONPatch>, patchType: JSONPatch}`. controller-runtime's generic
+  `admission.Defaulter[T]`/`admission.Validator[T]` hide the wire format: you
+  mutate a typed Go object or return an `error`.
 - **`failurePolicy` is the single most consequential setting.** It decides what
   happens when the webhook is **unreachable/timeout/erroring**: `Fail` =
   *fail-closed* (reject the request — safe for security enforcement, but a
@@ -113,7 +114,10 @@ may only judge.**
   validation *inside the apiserver* — no server to run, no TLS, no
   `failurePolicy`-as-outage, no network hop. It cannot mutate and CEL is not
   general code, but for "deny if <EXPRESSION>" it is now the **default
-  choice**; a webhook is for mutation or logic CEL can't express.
+  choice**. For CEL-expressible mutation, use its sibling
+  **MutatingAdmissionPolicy** (`admissionregistration.k8s.io/v1`, GA and on
+  by default since v1.36). A webhook is for logic CEL can't express
+  (external I/O, lookups).
 
 The trap to keep in view: **a webhook is privileged, on the hot path of every
 matching API write, and a new failure domain for the control plane.** "Just add
@@ -160,9 +164,14 @@ sequenceDiagram
  ADMISSION ENFORCEMENT — pick the lowest-power tool that fits ──────────────
 
   Need to MUTATE the object (inject label/sidecar/default SC)?
-    YES ───────────────────────────────► MUTATING WEBHOOK (only option)
-           (controller-runtime CustomDefaulter; failurePolicy: Ignore;
-            idempotent set-if-absent; reinvocationPolicy: IfNeeded)
+    YES → is general code / external I/O / cross-object lookup needed?
+            NO  ──────────────────────► MutatingAdmissionPolicy (CEL)
+                  in-tree (GA v1.36): set-if-absent label, default a
+                  field; NO server, NO TLS, NO network hop.
+            YES ──────────────────────► MUTATING WEBHOOK
+                  (ConfigMap profile lookup, external I/O; controller-
+                   runtime admission.Defaulter[T]; failurePolicy: Ignore;
+                   idempotent set-if-absent; reinvocationPolicy: IfNeeded)
     NO  → it is a pure ALLOW/DENY rule → next question
 
   Can the rule be expressed as a CEL boolean over the object/oldObject?
@@ -215,22 +224,27 @@ the **exact** pattern of
 ```sh
 cd examples/bookstore/operator
 go vet ./...                                  # passes clean
-docker build -t bookstore/operator:dev .      # distroless static nonroot (~56 MB)
+docker build -t bookstore/operator:dev .      # distroless static nonroot (~51 MB)
 cd ../../..
 ```
 
-`internal/webhook/v1/pod_webhook.go` implements two controller-runtime
-interfaces on `core/v1` Pod:
+`internal/webhook/v1/pod_webhook.go` implements two generic controller-runtime
+interfaces on `core/v1` Pod and registers both through
+`ctrl.NewWebhookManagedBy(mgr, &corev1.Pod{})` with `.WithDefaulter(...)`
+and `.WithValidator(...)`. In controller-runtime v0.25.2 (the version this
+tree pins) the older `CustomDefaulter`/`CustomValidator` names are
+deprecated aliases for the `runtime.Object` forms of these interfaces.
 
-- `PodDefaulter` (`CustomDefaulter`) — the **mutating** webhook. Sets
-  `app.kubernetes.io/managed-by` **if absent** (idempotent) and fills a default
-  restricted pod-level `securityContext` (`runAsNonRoot`,
-  `seccompProfile: RuntimeDefault`) **only when unset**. It is a *convenience
-  default*, not the enforcement.
-- `PodValidator` (`CustomValidator`) — the **validating** webhook. For Pods in
-  the `bookstore` namespace it rejects any that are not restricted-compliant
-  (`runAsNonRoot`, per-container `allowPrivilegeEscalation: false`, `drop:
-  ["ALL"]`) with a precise message. It never mutates.
+- `PodDefaulter` (`admission.Defaulter[*corev1.Pod]`): the **mutating**
+  webhook. `Default(ctx, pod)` sets `app.kubernetes.io/managed-by` **if
+  absent** (idempotent) and fills a default restricted pod-level
+  `securityContext` (`runAsNonRoot`, `seccompProfile: RuntimeDefault`) **only
+  when unset**. It is a *convenience default*, not the enforcement.
+- `PodValidator` (`admission.Validator[*corev1.Pod]`): the **validating**
+  webhook. `ValidateCreate`/`ValidateUpdate` reject any Pod in the
+  `bookstore` namespace that is not restricted-compliant (`runAsNonRoot`,
+  per-container `allowPrivilegeEscalation: false`, `drop: ["ALL"]`) with a
+  precise message; `ValidateDelete` allows. It never mutates.
 
 ### 1. Read the two configurations — and the deadlock-avoidance scoping
 
@@ -418,10 +432,12 @@ EOF
 # validatingadmissionpolicybinding.../bookstore-restricted-pods created (dry run)
 ```
 
-Same effect as the validating webhook, **none** of its operational cost. Use
-the **webhook** only for what VAP can't do: **mutation** (the `PodDefaulter`
-above — VAP cannot patch) or validation needing general code/external I/O. That
-decision is Diagram B; clean up:
+Same effect as the validating webhook, **none** of its operational cost. VAP
+cannot patch, but since v1.36 **MutatingAdmissionPolicy** can (CEL, via an
+apply configuration or a JSON patch), in-tree and on by default. Keep a
+**webhook** for mutation or validation that needs general code or external
+I/O; the `PodDefaulter` above stays a webhook here to teach the mechanics.
+That decision is Diagram B; clean up:
 
 ```sh
 kubectl delete -k examples/bookstore/operator/config/default --ignore-not-found
@@ -438,10 +454,10 @@ kind delete cluster --name bookstore
   endpoint and waits up to `timeoutSeconds`. The reply is an `AdmissionReview`
   with `response.allowed` and optionally `response.patch` (base64 JSONPatch,
   mutating only) or `response.status.message` (deny text). controller-runtime's
-  `webhook.Server` decodes/encodes this; `CustomDefaulter.Default` mutates the
-  typed object (the framework diffs it into a JSONPatch) and
-  `CustomValidator.Validate*` returns `(warnings, error)` — a non-nil error
-  becomes a deny with that message.
+  `webhook.Server` decodes/encodes this; `Defaulter[T].Default(ctx, obj)`
+  mutates the typed object (the framework diffs it into a JSONPatch) and
+  `Validator[T].Validate*` returns `(admission.Warnings, error)`; a non-nil
+  error becomes a deny with that message.
 - **Mutate-before-validate is structural, and mutation order is config order
   then reinvocation.** All mutating webhooks run first (the apiserver applies
   each one's patch, feeding the result to the next), *then* schema/built-in
@@ -491,10 +507,12 @@ kind delete cluster --name bookstore
 
 > **In production: prefer ValidatingAdmissionPolicy, then Kyverno/Gatekeeper,
 > then a hand-written webhook — in that order.** Reach for a webhook only when
-> you must **mutate** or run logic CEL can't. Every webhook you run is a new
-> control-plane failure domain on the write hot path; VAP (in-tree, v1.30 GA)
-> removes the server, the TLS, and the `failurePolicy`-as-outage entirely for
-> the common "deny if X" case. Fewer webhooks is more uptime.
+> you must run logic CEL can't; CEL-expressible mutation now belongs in
+> **MutatingAdmissionPolicy** (GA v1.36), the same way pure deny belongs in
+> VAP. Every webhook you run is a new control-plane failure domain on the
+> write hot path; VAP (in-tree, v1.30 GA) removes the server, the TLS, and the
+> `failurePolicy`-as-outage entirely for the common "deny if X" case. Fewer
+> webhooks is more uptime.
 
 > **In production: choose `failurePolicy` per webhook with the outage in mind,
 > and roll out Ignore → observe → Fail.** Security enforcement is `Fail`
@@ -588,8 +606,9 @@ spec:
 
 Checklist:
 
-- [ ] Use **VAP** for pure deny; webhook only for **mutation** or logic CEL
-      can't express; Kyverno/Gatekeeper for policy-as-data at fleet scale
+- [ ] Use **VAP** for pure deny and **MutatingAdmissionPolicy** (GA v1.36)
+      for CEL-expressible defaulting; webhook only for logic CEL can't
+      express; Kyverno/Gatekeeper for policy-as-data at fleet scale
 - [ ] `sideEffects: None`; mutating webhook **idempotent** (set-if-absent);
       small `timeoutSeconds`; `admissionReviewVersions: ["v1"]`
 - [ ] `failurePolicy`: `Ignore` for defaulting, `Fail` for enforcement —
@@ -649,5 +668,7 @@ Checklist:
   <https://kubernetes.io/docs/reference/access-authn-authz/extensible-admission-controllers/>,
   ValidatingAdmissionPolicy (CEL, GA v1.30)
   <https://kubernetes.io/docs/reference/access-authn-authz/validating-admission-policy/>,
+  MutatingAdmissionPolicy (CEL, GA v1.36)
+  <https://kubernetes.io/docs/reference/access-authn-authz/mutating-admission-policy/>,
   and the admission webhook good-practices / `matchConditions`
   <https://kubernetes.io/docs/reference/access-authn-authz/admission-webhooks-good-practices/>.

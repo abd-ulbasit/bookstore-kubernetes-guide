@@ -158,9 +158,9 @@ Data plane (per worker node):
   Pulls images and creates/starts/stops the actual containers (via `runc`,
   using the namespaces/cgroups from [ch.02](02-containers-and-images.md)). Deep
   dive: [ch.05](05-node-components.md).
-- **kube-proxy** — programs each node's networking (iptables/IPVS, or replaced
-  by a CNI's own dataplane like eBPF) so that a Service's stable virtual IP
-  load-balances to the current healthy Pod IPs. Deep dive:
+- **kube-proxy** — programs each node's networking (iptables/nftables, or
+  replaced by a CNI's own dataplane like eBPF) so that a Service's stable
+  virtual IP load-balances to the current healthy Pod IPs. Deep dive:
   [ch.05](05-node-components.md); [Part 02](../02-networking/02-services.md).
 - **CNI plugin** — (Calico, Cilium, kindnet…) gives each Pod its own routable
   IP and connects Pod networks across nodes. The networking model is

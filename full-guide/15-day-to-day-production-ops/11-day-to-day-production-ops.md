@@ -707,8 +707,9 @@ running "just in case"; it isn't earning its operational cost.
 > - We're single-region; the business growth means single-region
 >   is no longer acceptable. Plan multi-region rollout (Part 14
 >   ch.11).
-> - We're on Kubernetes 1.29; standard support ends in 4 months.
->   Plan the upgrade.
+> - We're on Kubernetes 1.35; EKS standard support for it ends
+>   2027-03-27, about five months out. Plan the upgrade (1.36, then
+>   1.37).
 >
 > The 90-day check-in is the strategic moment; the weekly /
 > biweekly / monthly cadences are the tactical moments. Both are

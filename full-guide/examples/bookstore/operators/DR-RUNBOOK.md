@@ -151,7 +151,7 @@ resurrect the *same* self-managed control plane rather than a fresh one.
    #     NetworkPolicies, the StatefulSet, … everything declarative.
    ```
    *(Alternative for a self-managed control plane: restore the etcd snapshot —
-   `etcdctl snapshot restore` into a fresh data-dir, repoint the new
+   `etcdutl snapshot restore` into a fresh data-dir, repoint the new
    apiserver. This resurrects the OLD cluster's full state; the Git path
    rebuilds a CLEAN one and is preferred unless you specifically need the prior
    cluster-scoped state. Managed clusters: etcd is the provider's — use the Git

@@ -84,7 +84,7 @@ CRD/operator below or the API server rejects it with `no matches for kind ...`
 |---|---|---|
 | `serviceMonitor.enabled` / `prometheusRule.enabled` | Prometheus Operator CRDs | `helm install kube-prometheus-stack prometheus-community/kube-prometheus-stack -n monitoring --create-namespace` |
 | `keda.enabled` | KEDA CRDs + operator | `helm install keda kedacore/keda -n keda --create-namespace` |
-| `gateway.enabled` | Gateway API CRDs + a controller | Gateway API CRDs + e.g. the ingress-nginx Gateway impl |
+| `gateway.enabled` | Gateway API CRDs + a controller | Gateway API CRDs + a Gateway implementation (set `gateway.controllerName` to its controller name) |
 | `kyverno.enabled` | Kyverno | `helm install kyverno kyverno/kyverno -n kyverno --create-namespace` |
 | `snapshot.enabled` | external-snapshotter CRDs + controller + a snapshot-capable CSI driver | (cloud disk CSI / csi-hostpath-driver) |
 

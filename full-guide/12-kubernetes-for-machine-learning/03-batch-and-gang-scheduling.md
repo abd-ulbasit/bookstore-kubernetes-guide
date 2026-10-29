@@ -241,7 +241,7 @@ kubectl apply -f examples/bookstore/ml/batch/recommender-jobset.yaml
 # Kueue created it SUSPENDED, checked the whole gang fits the ClusterQueue
 # quota, then flipped suspend=false and ALL workers started together:
 kubectl get jobset -n bookstore-ml
-kubectl get workloads -n bookstore-ml          # the Kueue Workload (Admitted)
+kubectl get workloads.kueue.x-k8s.io -n bookstore-ml  # Kueue Workload: Admitted
 kubectl get pods -n bookstore-ml -l app.kubernetes.io/component=recommender-train -o wide
 #   2 worker pods, created TOGETHER (gang) once admitted — never 1-of-2 wedged
 
@@ -259,7 +259,7 @@ kubectl delete jobset recommender-train -n bookstore-ml
 kubectl patch clusterqueue bookstore-ml-cq --type=json \
   -p '[{"op":"replace","path":"/spec/resourceGroups/0/flavors/0/resources/0/nominalQuota","value":"0"}]'
 kubectl apply -f examples/bookstore/ml/batch/recommender-jobset.yaml
-kubectl get workloads -n bookstore-ml          # Workload: QuotaReserved=false / pending
+kubectl get workloads.kueue.x-k8s.io -n bookstore-ml  # QuotaReserved=false
 kubectl get pods -n bookstore-ml -l app.kubernetes.io/component=recommender-train
 #   No Pods — the WHOLE job waits for quota (gang/all-or-nothing). Restore:
 kubectl patch clusterqueue bookstore-ml-cq --type=json \
@@ -346,6 +346,15 @@ priority/preemption model rather than re-implementing it.
   operator, some HPC) standardised on it. They can coexist but you generally
   lead with one; this guide leads with Kueue and treats Volcano as the
   scheduler-level alternative.
+- **Core workload-aware scheduling (1.37 beta, off by default).** Kubernetes
+  is growing its own gang primitive: 1.37 promoted the core `Workload` and
+  `PodGroup` types to `scheduling.k8s.io/v1beta1`, and kube-scheduler's gang
+  support is switched on with the `GenericWorkload` feature gate. Both that
+  API version and the gate are off by default in 1.37, so the default
+  scheduler still places Pods independently unless a cluster admin enables
+  them, and this chapter's Kueue path is unchanged. The core `Workload` shares
+  its name with Kueue's, which is why this chapter's commands spell Kueue's
+  as `workloads.kueue.x-k8s.io`.
 - **How this layers on Part 04 ch.03.** Priority/preemption
   ([Part 04 ch.03](../04-scheduling/03-priority-and-preemption.md)) still
   applies *within* this: Kueue can **preempt** lower-priority admitted
@@ -421,9 +430,10 @@ kubectl apply -f examples/bookstore/ml/batch/kueue-localqueue.yaml
 kubectl apply -f examples/bookstore/ml/batch/recommender-jobset.yaml
 
 # Observe gang admission via suspend
-kubectl get jobset,workloads -n bookstore-ml
+kubectl get jobset,workloads.kueue.x-k8s.io -n bookstore-ml
 kubectl get clusterqueue bookstore-ml-cq -o wide
-kubectl get workload -n bookstore-ml -o yaml | grep -A3 'conditions:'   # why pending
+kubectl get workloads.kueue.x-k8s.io -n bookstore-ml -o yaml \
+  | grep -A3 'conditions:'                               # why pending
 kubectl create -n bookstore-ml quota gpu-quota --hard=requests.nvidia.com/gpu=4
 ```
 

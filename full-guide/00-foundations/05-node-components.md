@@ -6,7 +6,7 @@
 
 **Estimated time:** ~15 min read · (no hands-on)
 **Prerequisites:** [Part 00 ch.03](03-architecture-overview.md) — control plane vs. node plane · [Part 00 ch.04](04-control-plane-deep-dive.md) — what the control plane decided
-**You'll know after this:** • explain what the kubelet does step-by-step when a Pod is bound to a node · • describe the CRI boundary and how containerd executes containers · • understand the role of the pause/sandbox container and shared namespaces · • describe what kube-proxy programs (iptables / IPVS / eBPF) · • read the full sequence of a Pod starting on a node and locate failures within it
+**You'll know after this:** • explain what the kubelet does step-by-step when a Pod is bound to a node · • describe the CRI boundary and how containerd executes containers · • understand the role of the pause/sandbox container and shared namespaces · • describe what kube-proxy programs (iptables / nftables / eBPF) · • read the full sequence of a Pod starting on a node and locate failures within it
 
 <!-- tags: foundations, node-plane, kubelet, cri, containerd, kube-proxy -->
 
@@ -55,7 +55,7 @@ node's reality; the brain only ever *asked*.
 │     ├── app container(s)         ── your image(s), joined to the sandbox        │
 │     └── (CNI plugin invoked)     ── gives the Pod its IP, wires veth → node     │
 │                                                                                 │
-│  kube-proxy  ── programs iptables/IPVS (or eBPF via CNI) so Service VIPs        │
+│  kube-proxy  ── programs iptables/nftables (or eBPF via CNI) so Service VIPs    │
 │                 load-balance to current healthy Pod IPs                         │
 │                                                                                 │
 │  cgroups + namespaces (Linux kernel)  ── the actual isolation & limits          │
@@ -162,9 +162,11 @@ component that makes that virtual IP actually route:
   current set of *ready* backing Pod IPs, kept fresh by the EndpointSlice
   controller from [ch.04](04-control-plane-deep-dive.md)).
 - It programs the node's packet path so traffic to a Service's ClusterIP:port
-  is DNAT-load-balanced across those ready Pod IPs — via **iptables** (default)
-  or **IPVS** (better at large scale), or it's *replaced entirely* by a CNI's
-  own dataplane (e.g. Cilium's eBPF kube-proxy replacement).
+  is DNAT-load-balanced across those ready Pod IPs — via **iptables** (still
+  the default), **nftables** (GA since v1.33, faster at large scale, and the
+  planned future default) or the deprecated **IPVS** mode, or it's *replaced
+  entirely* by a CNI's own dataplane (e.g. Cilium's eBPF kube-proxy
+  replacement).
 
 kube-proxy does **not** sit in the data path as a proxy process for normal
 ClusterIP traffic — it *configures the kernel* to do the forwarding. (DNS-based
@@ -264,8 +266,9 @@ call once you add them in [Part 01](../01-core-workloads/02-health-and-lifecycle
   PodSpec runs on kind, on EKS, or on bare metal with totally different
   plugins underneath. Portability is an architectural property of these seams.
 - **kube-proxy programs the kernel; it is not a per-packet proxy** for
-  ClusterIP traffic. The forwarding/NAT is done by iptables/IPVS/eBPF in the
-  data path; kube-proxy just keeps those rules in sync with EndpointSlices.
+  ClusterIP traffic. The forwarding/NAT is done by iptables/nftables/eBPF in
+  the data path; kube-proxy just keeps those rules in sync with
+  EndpointSlices.
 
 ## Production notes
 
@@ -282,9 +285,12 @@ call once you add them in [Part 01](../01-core-workloads/02-health-and-lifecycle
 > escape vector ([supply chain](../05-security/03-supply-chain.md)).
 
 > **In production:** choose the kube-proxy mode (or replacement) deliberately.
-> **iptables** is fine for most; **IPVS** scales better with thousands of
-> Services; an **eBPF** dataplane (Cilium) replaces kube-proxy for performance
-> and richer policy. This is a cluster-build decision
+> **iptables** is fine for most; **nftables** (GA since v1.33, kernel 5.13+)
+> scales better with thousands of Services; **IPVS** has been deprecated since
+> v1.35 (1.37 logs a warning), so don't pick it for a new cluster; an **eBPF**
+> dataplane (Cilium) replaces kube-proxy for performance and richer policy. Set
+> the mode explicitly: 1.37's kube-proxy warns when it is unset, because the
+> default will move from iptables to nftables. This is a cluster-build decision
 > ([Part 02 ch.01](../02-networking/01-networking-model.md)).
 
 > **In production:** the **pause container image** must be reachable (it has
@@ -323,7 +329,7 @@ kubelet (watches apiserver → reconciles PodSpec, runs probes, reports status)
   └─CRI→ containerd → runc      : pause sandbox first, then app containers join it
         └─CNI: Pod gets its IP (once per Pod, at sandbox creation)
         └─CSI: volumes mounted before dependent containers start
-kube-proxy (watches Services/EndpointSlices → programs iptables/IPVS/eBPF)
+kube-proxy (watches Services/EndpointSlices → programs iptables/nftables/eBPF)
 ```
 
 Node checklist:
@@ -356,7 +362,7 @@ Node checklist:
 3. **You add a Service that selects `app=catalog` but traffic to its ClusterIP returns connection refused. The Pod itself is `Running 1/1`. Which node component is responsible for making the ClusterIP route, and what does it watch to know about new endpoints?**
    <details><summary>Show answer</summary>
 
-   kube-proxy on each node programs iptables/IPVS/eBPF rules from the EndpointSlices that the EndpointSlice controller maintains for each Service. If the Pod isn't yet in an EndpointSlice for the Service, kube-proxy has nothing to route to. Check `kubectl get endpointslices -l kubernetes.io/service-name=<svc>` — if empty, the Service selector likely doesn't match the Pod's labels (see §kube-proxy — making Service IPs work).
+   kube-proxy on each node programs iptables/nftables/eBPF rules from the EndpointSlices that the EndpointSlice controller maintains for each Service. If the Pod isn't yet in an EndpointSlice for the Service, kube-proxy has nothing to route to. Check `kubectl get endpointslices -l kubernetes.io/service-name=<svc>` — if empty, the Service selector likely doesn't match the Pod's labels (see §kube-proxy — making Service IPs work).
 
    </details>
 

@@ -230,13 +230,16 @@ Per the guide's hard rule — **pinned Helm, never
 used for KEDA/kube-prometheus-stack/Velero):
 
 ```sh
-# Karpenter via its OCI Helm chart, PINNED. The controller needs IRSA/Pod
-# Identity (ch.03) to call EC2 with NO static key; the node IAM role and the
-# karpenter.sh/discovery subnet/SG tags must pre-exist (ch.02 cluster IaC).
-helm registry login public.ecr.aws
+# Karpenter via its OCI Helm chart, PINNED: 1.15.x is the only line its
+# compatibility matrix lists for Kubernetes 1.37. The controller needs IRSA/Pod
+# Identity (ch.03) to call EC2 with NO static key; the node IAM role, the
+# karpenter.sh/discovery subnet/SG tags and the SQS interruption queue (spot
+# notices) must pre-exist (ch.02 cluster IaC).
+helm registry logout public.ecr.aws    # anonymous pull, as Karpenter's docs do
 helm upgrade --install karpenter oci://public.ecr.aws/karpenter/karpenter \
-  --version 1.0.6 -n karpenter --create-namespace \
+  --version 1.15.1 -n karpenter --create-namespace \
   --set "settings.clusterName=$CLUSTER_NAME" \
+  --set "settings.interruptionQueue=$CLUSTER_NAME" \
   --set "serviceAccount.annotations.eks\.amazonaws\.com/role-arn=arn:aws:iam::123456789012:role/KarpenterController" \
   --wait
 kubectl -n karpenter rollout status deploy/karpenter
@@ -512,7 +515,7 @@ the CRDs must exist first (step 2). Its header documents this exactly.
 ```sh
 # Install Karpenter (pinned Helm; never releases/latest/download/<PINNED>.yaml)
 helm upgrade --install karpenter oci://public.ecr.aws/karpenter/karpenter \
-  --version 1.0.6 -n karpenter --create-namespace \
+  --version 1.15.1 -n karpenter --create-namespace \
   --set settings.clusterName=$CLUSTER_NAME ...           # IRSA SA (ch.03), no key
 kubectl apply -f examples/bookstore/cloud/karpenter-nodepool.yaml   # Karpenter-EKS only
 

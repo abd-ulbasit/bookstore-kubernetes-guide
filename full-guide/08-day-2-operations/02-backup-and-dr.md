@@ -1,10 +1,11 @@
 # 02 — Backup and disaster recovery
 
 > The three things you actually back up and why they differ: **etcd** (cluster
-> state — `etcdctl snapshot save/restore`, where the certs/endpoints live on a
-> kubeadm node, the stop-apiserver→restore→repoint-data-dir sequence; managed =
-> the provider's, you *can't* `etcdctl` it); **PV data** (app state — the
-> Postgres PVC, via CSI VolumeSnapshot, ties to [Part 03
+> state — `etcdctl snapshot save` / `etcdutl snapshot restore`, where the
+> certs/endpoints live on a kubeadm node, the
+> stop-apiserver→restore→repoint-data-dir sequence; managed = the provider's,
+> you *can't* `etcdctl` it); **PV data** (app state — the Postgres PVC, via
+> CSI VolumeSnapshot, ties to [Part 03
 > ch.05](../03-config-and-storage/05-stateful-data-patterns.md)); **Git**
 > (desired state — the *easiest* restore, [Part 07
 > ch.04](../07-delivery/04-gitops-argocd.md)). **Velero**'s architecture
@@ -16,7 +17,7 @@
 
 **Estimated time:** ~30 min read · ~90 min hands-on
 **Prerequisites:** [Part 03 ch.05](../03-config-and-storage/05-stateful-data-patterns.md) — storage durability ≠ data safety · [Part 03 ch.04](../03-config-and-storage/04-persistent-storage.md) — CSI VolumeSnapshot is the PV backup primitive · [Part 07 ch.04](../07-delivery/04-gitops-argocd.md) — Git holds the desired state Velero doesn't need to re-back-up
-**You'll know after this:** • distinguish the three things to back up: etcd, PV data and Git · • run `etcdctl snapshot save / restore` and the stop-apiserver → repoint sequence on kubeadm · • configure Velero with object storage and the CSI-snapshot or node-agent path · • use Postgres pre-backup consistency hooks and reason about RPO/RTO · • execute the Bookstore DR runbook for namespace, cluster and region loss
+**You'll know after this:** • distinguish the three things to back up: etcd, PV data and Git · • run `etcdctl snapshot save` / `etcdutl snapshot restore` and the stop-apiserver → repoint sequence on kubeadm · • configure Velero with object storage and the CSI-snapshot or node-agent path · • use Postgres pre-backup consistency hooks and reason about RPO/RTO · • execute the Bookstore DR runbook for namespace, cluster and region loss
 
 <!-- tags: day-2, backup, dr, velero, stateful -->
 
@@ -238,12 +239,15 @@ ETCDCTL_API=3 etcdctl \
   --cert=/etc/kubernetes/pki/etcd/server.crt \
   --key=/etc/kubernetes/pki/etcd/server.key \
   snapshot save /var/backups/etcd-$(date +%F).db
-ETCDCTL_API=3 etcdctl --write-out=table snapshot status /var/backups/etcd-*.db
+# etcd v3.6 removed `etcdctl snapshot status/restore`; they live in etcdutl,
+# shipped in the same etcd release tarball. kubeadm 1.34+ deploys etcd 3.6+
+# by default; kubeadm 1.37 still accepts an external etcd from 3.5.24.
+etcdutl snapshot status /var/backups/etcd-$(date +%F).db -w table
 
 # RESTORE (control-plane outage) — the exact ordered sequence:
 #   1. STOP the apiserver + etcd static Pods (move their manifests out of
 #      /etc/kubernetes/manifests/ so the kubelet stops them).
-#   2. etcdctl snapshot restore /var/backups/etcd-<DATE>.db \
+#   2. etcdutl snapshot restore /var/backups/etcd-<DATE>.db \
 #        --data-dir /var/lib/etcd-restored
 #   3. repoint etcd's static-Pod manifest at the NEW data-dir
 #      (/var/lib/etcd-restored), move the manifests back → kubelet restarts
@@ -448,11 +452,12 @@ kind delete cluster --name bookstore
   consistent dump of the entire MVCC keyspace (every Kubernetes object lives
   there as a protobuf value under a registry key —
   [Part 00 ch.04](../00-foundations/04-control-plane-deep-dive.md)). Restore
-  rebuilds an etcd data-dir from that file; you then **must** stop the old
-  apiserver + etcd, restore into a *new* data-dir, and repoint etcd at it —
-  restoring "live" under a running apiserver corrupts state. It captures
-  *objects*, never the contents of any external PV those objects reference —
-  which is the entire reason Layer 3 (Velero/CSI) exists separately.
+  (`etcdutl snapshot restore` since etcd v3.6) rebuilds an etcd data-dir from
+  that file; you then **must** stop the old apiserver + etcd, restore into a
+  *new* data-dir, and repoint etcd at it — restoring "live" under a running
+  apiserver corrupts state. It captures *objects*, never the contents of any
+  external PV those objects reference — which is the entire reason Layer 3
+  (Velero/CSI) exists separately.
 - **Why managed clusters can't be `etcdctl`'d.** On EKS/GKE/AKS the control
   plane (etcd included) is the provider's; there is no etcd endpoint, no
   `/etc/kubernetes/pki/etcd/`, no static-Pod manifest you can move. The
@@ -546,7 +551,8 @@ ETCDCTL_API=3 etcdctl --endpoints=https://127.0.0.1:2379 \
   --cacert=/etc/kubernetes/pki/etcd/ca.crt \
   --cert=/etc/kubernetes/pki/etcd/server.crt \
   --key=/etc/kubernetes/pki/etcd/server.key snapshot save snap.db
-etcdctl snapshot status snap.db ; etcdctl snapshot restore snap.db --data-dir <NEW>
+etcdutl snapshot status snap.db -w table   # etcd v3.6+: etcdutl, not etcdctl
+etcdutl snapshot restore snap.db --data-dir <NEW>
 
 # Layer 3 — Velero (Helm/pinned; never releases/latest/download/<PINNED>.yaml)
 helm install velero vmware-tanzu/velero -n velero --version <PINNED> ...

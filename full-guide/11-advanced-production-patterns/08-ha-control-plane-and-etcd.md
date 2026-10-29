@@ -2,7 +2,8 @@
 
 > [Part 00 ch.04](../00-foundations/04-control-plane-deep-dive.md) sketched the
 > HA topology and the quorum table; [Part 08
-> ch.02](../08-day-2-operations/02-backup-and-dr.md) did `etcdctl snapshot save/restore` basics.
+> ch.02](../08-day-2-operations/02-backup-and-dr.md) did the snapshot basics
+> (`etcdctl snapshot save`, `etcdutl snapshot restore`).
 > This chapter goes to **operations depth**: stacked vs
 > external etcd and **why ≥3 control-plane nodes behind an API LB**
 > (apiserver stateless/active-active vs etcd the consensus core); **etcd Raft &
@@ -290,8 +291,9 @@ narrated where real HW is needed.
 
 [`platform/ha-kind-3cp.yaml`](../examples/bookstore/platform/ha-kind-3cp.yaml)
 declares 3 control-plane + 2 worker nodes. kind, given ≥2 control-plane nodes,
-**stands up a real stacked-etcd cluster** (and an internal HAProxy as the API
-front) — a faithful, laptop-sized HA control plane:
+**stands up a real stacked-etcd cluster** (and an internal Envoy load balancer
+as the API front; kind v0.32.0 replaced HAProxy with Envoy) — a faithful,
+laptop-sized HA control plane:
 
 ```sh
 # It is a KIND config, not a k8s object — validate it's well-formed YAML,
@@ -342,13 +344,15 @@ kubectl exec -n bookstore postgres-0 -- psql -U bookstore -d bookstore -c \
 ### 1. Talk to etcd — member list / endpoint status / endpoint health
 
 kind runs etcd as a **static Pod** in `kube-system` with its client certs
-mounted at `/etc/kubernetes/pki/etcd/`. **The etcd image has a shell** (it is
-*not* distroless like the Bookstore app images — [Part 05
-ch.03](../05-security/03-supply-chain.md)), so `kubectl exec … etcdctl …` works
-directly here; you would *never* do this with the distroless `catalog`/`orders`
-Pods (those are debugged via `kubectl debug --profile=restricted`, [Part 08
-ch.03](../08-day-2-operations/03-troubleshooting-playbook.md)). Define a helper
-that runs `etcdctl` inside the first etcd Pod over its mTLS:
+mounted at `/etc/kubernetes/pki/etcd/`. **The etcd image ships `etcdctl`**:
+kubeadm 1.37's default `registry.k8s.io/etcd:3.7.0-0` is distroless (no
+shell, like the Bookstore app images — [Part 05
+ch.03](../05-security/03-supply-chain.md)) but bundles `etcd`, `etcdctl` and
+`etcdutl`, so `kubectl exec … etcdctl …` runs that binary directly here. You
+would *never* do this with the distroless `catalog`/`orders` Pods, which ship
+no such tool (those are debugged via `kubectl debug --profile=restricted`,
+[Part 08 ch.03](../08-day-2-operations/03-troubleshooting-playbook.md)).
+Define a helper that runs `etcdctl` inside the first etcd Pod over its mTLS:
 
 ```sh
 E0=$(kubectl -n kube-system get pod -l component=etcd \
@@ -369,9 +373,9 @@ etcd member list -w table
 
 etcd endpoint status --cluster -w table
 #   ENDPOINT  ID  VERSION  DB SIZE  IS LEADER  IS LEARNER  RAFT TERM  RAFT INDEX ...
-#   ...:2379  ..b  3.5.x   ~3.5 MB  true       false       ...        ...   <- LEADER
-#   ...:2379  ..a  3.5.x   ~3.5 MB  false      false
-#   ...:2379  ..c  3.5.x   ~3.5 MB  false      false        (DB SIZE = backend file)
+#   ...:2379  ..b  3.7.0   ~3.5 MB  true       false       ...        ...   <- LEADER
+#   ...:2379  ..a  3.7.0   ~3.5 MB  false      false
+#   ...:2379  ..c  3.7.0   ~3.5 MB  false      false        (DB SIZE = backend file)
 
 etcd endpoint health --cluster -w table
 #   ENDPOINT   HEALTH   TOOK    ERROR
@@ -556,8 +560,9 @@ etcd member list -w table        # 3 'started' again; quorum restored. NO snapsh
 #   ONLY here do you restore a snapshot — and it builds a NEW LOGICAL CLUSTER:
 #   1. stop ALL apiservers + etcd (move static-Pod manifests out — Part 08 ch.02).
 #   2. on EACH intended member, restore the SAME snapshot into a FRESH data-dir
-#      with that member's identity baked in:
-ETCDCTL_API=3 etcdctl snapshot restore /backups/etcd-<DATE>.db \
+#      with that member's identity baked in (etcdutl: etcd v3.6 removed
+#      `etcdctl snapshot restore`):
+etcdutl snapshot restore /backups/etcd-<DATE>.db \
   --name <MEMBER-NAME> \
   --initial-cluster <M1>=https://<IP1>:2380,<M2>=https://<IP2>:2380,<M3>=https://<IP3>:2380 \
   --initial-cluster-token <NEW-UNIQUE-TOKEN> \
@@ -728,8 +733,8 @@ kind delete cluster --name bookstore-ha
 # 3-control-plane kind cluster (real multi-member etcd quorum on a laptop)
 kind create cluster --name bookstore-ha --config examples/bookstore/platform/ha-kind-3cp.yaml
 
-# etcdctl into kind's etcd static Pod (etcd image HAS a shell — unlike the
-# distroless app pods, which use `kubectl debug --profile=restricted`)
+# etcdctl into kind's etcd static Pod (the distroless etcd image still SHIPS
+# etcdctl; the app pods don't, so they use `kubectl debug --profile=restricted`)
 E0=$(kubectl -n kube-system get pod -l component=etcd -o jsonpath='{.items[0].metadata.name}')
 ETCD="kubectl -n kube-system exec $E0 -- etcdctl --endpoints=https://127.0.0.1:2379 \
   --cacert=/etc/kubernetes/pki/etcd/ca.crt --cert=/etc/kubernetes/pki/etcd/server.crt \
@@ -747,8 +752,10 @@ ETCDCTL_API=3 etcdctl --endpoints=https://127.0.0.1:2379 \
   --key=/etc/kubernetes/pki/etcd/server.key snapshot save snap.db
 # single dead member, quorum held: member remove -> wipe data-dir -> member add
 #   -> start etcd --initial-cluster-state=existing      (NO snapshot)
-# total loss only: snapshot restore --data-dir <FRESH> --initial-cluster <ALL>
-#   --initial-cluster-token <NEW>  (a NEW logical cluster; repoint apiservers)
+# total loss only: etcdutl snapshot restore --data-dir <FRESH>
+#   --name <MEMBER> --initial-advertise-peer-urls https://<IP>:2380
+#   --initial-cluster <ALL> --initial-cluster-token <NEW>
+#   (a NEW logical cluster; repoint apiservers)
 
 # Component leader election (why running 3 ctrl-mgr/scheduler is safe)
 kubectl -n kube-system get lease kube-scheduler kube-controller-manager
@@ -825,7 +832,7 @@ Checklist:
 5. **Distinguish "single member replace" from "full cluster restore" — when does each apply?**
    <details><summary>Show answer</summary>
 
-   **Single member replace**: one member's disk is corrupted/lost, but the cluster still has quorum (e.g. 2 of 3 healthy). Procedure: `etcdctl member remove` the bad one, wipe its data-dir, `etcdctl member add` it back with the same name, start with `--initial-cluster-state=existing`. The new member learns the keyspace from the leader via Raft. **No snapshot is used** — the cluster's live state is the source. **Full cluster restore**: you lost quorum (all members or majority gone). Procedure: use the most recent snapshot, `etcdctl snapshot restore` it to a fresh data-dir on each member with `--initial-cluster-state=new`, start the cluster — **this creates a NEW logical cluster** (new cluster ID), so all controllers/operators must reauthenticate, and any in-flight writes after the snapshot are lost. The two are entirely different runbooks; confusing them is a recovery incident on top of an outage.
+   **Single member replace**: one member's disk is corrupted/lost, but the cluster still has quorum (e.g. 2 of 3 healthy). Procedure: `etcdctl member remove` the bad one, wipe its data-dir, `etcdctl member add` it back with the same name, start with `--initial-cluster-state=existing`. The new member learns the keyspace from the leader via Raft. **No snapshot is used** — the cluster's live state is the source. **Full cluster restore**: you lost quorum (all members or majority gone). Procedure: use the most recent snapshot, `etcdutl snapshot restore` it to a fresh data-dir on each member (with that member's `--name` and `--initial-advertise-peer-urls https://<THIS-IP>:2380`, the full `--initial-cluster` and a new `--initial-cluster-token`; left out, the peer URL defaults to `http://localhost:2380`, which does not match that member's `--initial-cluster` entry, so the restore is rejected), then start every member on its restored data-dir as a new cluster (`--initial-cluster-state=new`, etcd's default; it is a flag of `etcd` itself, not of the restore) — **this creates a NEW logical cluster** (new cluster ID), so all controllers/operators must reauthenticate, and any in-flight writes after the snapshot are lost. The two are entirely different runbooks; confusing them is a recovery incident on top of an outage.
 
    </details>
 

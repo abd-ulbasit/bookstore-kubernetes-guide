@@ -69,10 +69,14 @@ rules:
   # Read everything (debugging / dashboards). "Everything" includes Secrets
   # in every namespace the binding reaches: a wildcard cannot exclude one
   # resource, and the core API group is part of "*". Bound with a
-  # ClusterRoleBinding, this role reads every tenant's Secrets. If the
-  # platform team should not, replace this rule with an explicit list of
-  # resources (or bind the built-in `view` ClusterRole, which omits
-  # Secrets) and grant Secret reads per namespace.
+  # ClusterRoleBinding, this role reads every tenant's Secrets. "*" also
+  # matches subresources, including nodes/log and nodes/proxy (kubelet
+  # logs and the kubelet API); from Kubernetes 1.37 the kubelet logs its
+  # effective configuration at startup, so those reads expose node config
+  # too. If the platform team should not have this, replace this rule with
+  # an explicit list of resources (or bind the built-in `view` ClusterRole,
+  # which omits Secrets and node subresources) and grant Secret reads per
+  # namespace.
   - apiGroups: ["*"]
     resources: ["*"]
     verbs: ["get", "list", "watch"]

@@ -12,15 +12,16 @@
 #
 # !!! CRD PREREQUISITE. Gateway API (gateway.networking.k8s.io/v1) is NOT
 # built into Kubernetes — the Gateway/HTTPRoute CRDs + a controller (Envoy
-# Gateway, Cilium, Istio, the ingress-nginx Gateway impl., ...) must be
+# Gateway, Cilium, Istio, ...; not ingress-nginx) must be
 # installed first. Without the CRDs, a client dry-run of an overlay including
 # this component prints `no matches for kind "Gateway"` / `"HTTPRoute"` /
 # `"GatewayClass"` — EXPECTED and correct (objects are schema-valid). Install
 # the standard channel CRDs, then a controller:
 #   kubectl apply -f https://github.com/kubernetes-sigs/gateway-api/releases/download/v1.1.0/standard-install.yaml
 # (pin a current version; see raw 51- header). The vendored GatewayClass
-# `controllerName: k8s.io/ingress-nginx` targets the ingress-nginx Gateway
-# implementation — swap it to match whatever controller you installed.
+# `controllerName: k8s.io/ingress-nginx` is a PLACEHOLDER that no controller
+# claims (ingress-nginx does not implement Gateway API); swap it to match
+# whatever controller you installed.
 #
 # Enable by adding to an overlay's `components:` list, e.g.:
 #   components:

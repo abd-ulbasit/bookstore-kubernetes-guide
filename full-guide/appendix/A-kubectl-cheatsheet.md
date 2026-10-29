@@ -1,8 +1,8 @@
 # Appendix A — `kubectl` cheatsheet
 
 > A task-organized `kubectl` reference for this guide, current for Kubernetes
-> **v1.30+** (verified against `kubectl` v1.35 / embedded Kustomize v5.7).
-> Every command here is one this guide actually uses; the conventions
+> **v1.30+** (flags checked against `kubectl` v1.37.2 / embedded Kustomize
+> v5.8.1). Every command here is one this guide actually uses; the conventions
 > (distroless `kubectl debug`, the PSA-`restricted` `bookstore` namespace,
 > Helm-pinned operator installs, the bootstrap order, server-side apply) are the
 > guide's hard-won ones — they are called out where they matter, not invented
@@ -111,7 +111,7 @@ kubectl set resources deploy/catalog -n bookstore \
 kubectl set serviceaccount deploy/catalog catalog-sa -n bookstore
 kubectl scale deploy/catalog --replicas=4 -n bookstore
 kubectl scale deploy/catalog --replicas=4 --current-replicas=3 -n bookstore   # guarded
-kubectl autoscale deploy/catalog --min=2 --max=10 --cpu-percent=70 -n bookstore
+kubectl autoscale deploy/catalog --min=2 --max=10 --cpu=70% -n bookstore
 kubectl label   pod <POD> tier=backend -n bookstore [--overwrite]
 kubectl annotate deploy/catalog kubernetes.io/change-cause="bump to 1.4" -n bookstore
 kubectl patch deploy/catalog -n bookstore --type=json \

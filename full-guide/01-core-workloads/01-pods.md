@@ -146,7 +146,7 @@ metadata:
     app: catalog                # UNCHANGED: selectors in later chapters still match
     component: backend
 spec:
-  # initContainers with restartPolicy: Always == a "native sidecar" (GA in 1.29+).
+  # initContainers with restartPolicy: Always == a "native sidecar" (GA 1.33).
   # It starts BEFORE the app, stays running ALONGSIDE it, and is guaranteed to
   # be shut down AFTER the app — exactly the sidecar lifecycle you want for a
   # log shipper, without the legacy pitfalls (see "under the hood").
@@ -276,7 +276,7 @@ legitimate uses:
 | **Adapter** | Normalizes the main container's output to a standard the outside expects | exposing app metrics in Prometheus format if the app spoke a different one |
 | **Ambassador** | Proxies the main container's *outbound* connections to the outside world | a local proxy so `catalog` connects to `localhost:6379` while the ambassador handles real Redis discovery/TLS |
 
-### Sidecars: legacy vs. native (1.29+ GA)
+### Sidecars: legacy vs. native (GA since 1.33)
 
 Historically a sidecar was just an extra entry in `containers:`. That had two
 real defects:
@@ -287,9 +287,11 @@ real defects:
    `SIGTERM` together, so a sidecar could die while the app still needed it; and
    in a Job a never-exiting sidecar kept the Job from ever completing.
 
-The fix, **GA in Kubernetes 1.29+** (target here is **v1.30+**): declare the
-sidecar as an **init container with `restartPolicy: Always`** — a *native
-sidecar*. The kubelet then gives it sidecar lifecycle semantics:
+The fix, on by default since Kubernetes 1.29 and **GA since 1.33** (target
+here is **v1.37**, where the `SidecarContainers` feature gate is removed
+because the feature can no longer be turned off): declare the sidecar as an
+**init container with `restartPolicy: Always`** — a *native sidecar*. The
+kubelet then gives it sidecar lifecycle semantics:
 
 - It **starts and becomes ready before** the regular `containers[]` start.
 - It **runs concurrently** with them for the Pod's life (unlike a normal init
@@ -439,7 +441,7 @@ Checklist:
 2. **What's the difference between adding a sidecar in `containers:` versus as an `initContainers` entry with `restartPolicy: Always`, and which two bugs does the native sidecar form fix?**
    <details><summary>Show answer</summary>
 
-   Native sidecars (initContainer + `restartPolicy: Always`, GA 1.29) start *before* and shut down *after* the app, and don't block Job completion. The legacy form starts in parallel (app may serve before the proxy is ready) and gets SIGTERM together with the app (the sidecar can die mid-drain). In Jobs, a never-exiting legacy sidecar prevents the Job from ever completing (see §Sidecars: legacy vs. native).
+   Native sidecars (initContainer + `restartPolicy: Always`, on by default since 1.29, GA 1.33) start *before* and shut down *after* the app, and don't block Job completion. The legacy form starts in parallel (app may serve before the proxy is ready) and gets SIGTERM together with the app (the sidecar can die mid-drain). In Jobs, a never-exiting legacy sidecar prevents the Job from ever completing (see §Sidecars: legacy vs. native).
 
    </details>
 

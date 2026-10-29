@@ -97,7 +97,8 @@ watches, caching, work-queues, leader election, and the webhook server.**
   `meta.SetStatusCondition`), a coarse `phase`, and
   `.status.observedGeneration = .metadata.generation` so a client can tell
   "the controller has processed *this* spec" from a stale status. **Events**
-  (`Recorder.Event`) narrate *why* for `kubectl describe`.
+  (`Recorder.Eventf(obj, related, type, reason, action, note)`, the
+  `events.k8s.io` recorder) narrate *why* for `kubectl describe`.
 - **Multiple API versions need conversion; hub-and-spoke makes it O(N).**
   Ship `v1alpha1` and `v1beta1`? Pick one **hub** (the storage version;
   here **`v1beta1`**); every other version is a **spoke** implementing
@@ -159,7 +160,7 @@ flowchart TB
  ├── Makefile                manifests / generate / vet / test / docker-build / deploy
  │                           (pins controller-gen, kustomize, setup-envtest)
  ├── Dockerfile              distroless static nonroot  (== app/catalog pattern)
- ├── go.mod / go.sum         controller-runtime v0.19 + k8s.io v0.31  (K8s v1.30+)
+ ├── go.mod / go.sum         controller-runtime v0.25 + k8s.io v0.37 (K8s v1.37)
  ├── cmd/
  │   └── main.go             manager: scheme + controller + webhooks + leader-elect
  ├── api/
@@ -282,7 +283,7 @@ The controller is real controller-runtime Go, built distroless exactly like
 ```sh
 cd examples/bookstore/operator
 go vet ./...                                   # passes clean
-docker build -t bookstore/operator:dev .       # distroless static nonroot (~56 MB manager)
+docker build -t bookstore/operator:dev .       # distroless static nonroot (~51 MB manager)
 ```
 
 [`internal/controller/bookstoretenant_controller.go`](../examples/bookstore/operator/internal/controller/bookstoretenant_controller.go)
@@ -304,7 +305,7 @@ func (r *BookstoreTenantReconciler) Reconcile(ctx context.Context, req ctrl.Requ
     }
     if !controllerutil.ContainsFinalizer(&tenant, tenantFinalizer) {
         controllerutil.AddFinalizer(&tenant, tenantFinalizer)      // register BEFORE creating children
-        return ctrl.Result{Requeue: true}, r.Update(ctx, &tenant)
+        return ctrl.Result{}, r.Update(ctx, &tenant)               // its watch event re-enqueues
     }
     // ACT — each child via CreateOrUpdate (idempotent) + SetControllerReference (GC)
     nsName := "bookstore-tenant-" + tenant.Spec.TenantName
@@ -692,7 +693,7 @@ func (r *R) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.Result, error
     if !controllerutil.ContainsFinalizer(&cr, fin) {
         controllerutil.AddFinalizer(&cr, fin)
         if err := r.Update(ctx, &cr); err != nil { return ctrl.Result{}, fmt.Errorf("add finalizer: %w", err) }
-        return ctrl.Result{Requeue: true}, nil
+        return ctrl.Result{}, nil                                    // the Update re-enqueues it
     }
     // CreateOrUpdate children + SetControllerReference (ownerRef -> GC); restricted SC
     cr.Status.ObservedGeneration = cr.Generation

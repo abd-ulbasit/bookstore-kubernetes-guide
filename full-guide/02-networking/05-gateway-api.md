@@ -61,7 +61,7 @@ Kubernetes** — so the CRDs + a controller must be present first.
 ```mermaid
 flowchart TB
     subgraph infra["INFRA / platform team owns"]
-        gc["GatewayClass: bookstore-gtw<br/>controllerName: k8s.io/ingress-nginx<br/>(cluster-scoped)"]
+        gc["GatewayClass: bookstore-gtw<br/>controllerName: k8s.io/ingress-nginx (placeholder)<br/>(cluster-scoped)"]
         gw["Gateway: bookstore (ns bookstore)<br/>listener HTTPS:443<br/>hostname bookstore.localdev.me<br/>TLS Terminate ← Secret bookstore-tls<br/>allowedRoutes: Same namespace"]
     end
     subgraph app["APP team owns"]
@@ -120,8 +120,8 @@ in `bookstore` (created in [ch.04](04-ingress.md) step 2 — reused as-is).
 
 Gateway API is **not** in core Kubernetes — install the **v1 (GA) CRDs**
 (pin a release; check the project for the current tag), then a controller that
-implements them (ingress-nginx ships a Gateway implementation; Envoy Gateway,
-Cilium, Istio are alternatives — match `controllerName` in `51-gateway.yaml` to
+implements them (ingress-nginx does not implement Gateway API; Envoy Gateway,
+Cilium, Istio are options — match `controllerName` in `51-gateway.yaml` to
 whatever you install):
 
 ```sh
@@ -133,8 +133,8 @@ kubectl get crd | grep gateway.networking.k8s.io
 #   registers (standard channel, v1.1.0):
 #     gatewayclasses, gateways, httproutes, grpcroutes, referencegrants
 #   (TLSRoute/TCPRoute/UDPRoute are NOT here — they're the experimental channel)
-# + install a Gateway controller per its docs (e.g. ingress-nginx's Gateway
-#   implementation, or Envoy Gateway). The controllerName in 51-gateway.yaml's
+# + install a Gateway controller per its docs (e.g. Envoy Gateway, Cilium
+#   or Istio). The controllerName in 51-gateway.yaml's
 #   GatewayClass must equal the one your chosen controller advertises.
 ```
 
@@ -149,7 +149,7 @@ a controller annotation:
 apiVersion: gateway.networking.k8s.io/v1
 kind: GatewayClass                         # INFRA: which controller implements Gateways
 metadata: { name: bookstore-gtw }
-spec: { controllerName: k8s.io/ingress-nginx }   # match YOUR installed controller
+spec: { controllerName: k8s.io/ingress-nginx }   # PLACEHOLDER: see below
 ---
 apiVersion: gateway.networking.k8s.io/v1
 kind: Gateway                              # PLATFORM: the entrypoint + TLS
@@ -186,6 +186,15 @@ spec:
     - matches: [ { path: { type: PathPrefix, value: / } } ]
       backendRefs: [ { name: storefront, port: 80 } ]
 ```
+
+> **`controllerName` is a placeholder here.** It must equal the name your
+> installed controller advertises; otherwise nothing reconciles the
+> GatewayClass or its Gateways, and their status never reaches
+> `Accepted=True`. The guide's value, `k8s.io/ingress-nginx`, is one that no
+> Gateway API controller claims (ingress-nginx does not implement Gateway
+> API), so set your own. Envoy Gateway, for example, advertises
+> `gateway.envoyproxy.io/gatewayclass-controller` (the value in its
+> quickstart's GatewayClass); use the name from your controller's docs.
 
 Apply the **Gateway-API stack only** and verify via **status conditions** (a
 Gateway-API improvement over Ingress — the object tells you if it's healthy):

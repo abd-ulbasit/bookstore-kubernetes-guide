@@ -132,7 +132,9 @@ networking:
 EOF
 kind delete cluster --name bookstore
 kind create cluster --name bookstore --config /tmp/kind-calico.yaml
-kubectl apply -f https://raw.githubusercontent.com/projectcalico/calico/v3.28.0/manifests/calico.yaml
+# Calico v3.33 is tested on Kubernetes 1.35-1.37
+CALICO=https://raw.githubusercontent.com/projectcalico/calico/v3.33.0
+kubectl apply -f "$CALICO/manifests/calico.yaml"
 kubectl -n kube-system rollout status ds/calico-node --timeout=180s
 # (reload the bookstore/*:dev images and re-apply 00-,10-,11-,13-,14-,20-,40-.)
 ```

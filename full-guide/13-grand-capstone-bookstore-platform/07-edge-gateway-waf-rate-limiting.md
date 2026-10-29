@@ -39,7 +39,8 @@ than a self-hosted stack.
 The chapter ships:
 
 - **Gateway API** at the entry — the standardised replacement for
-  Ingress, GA since Kubernetes 1.30. Replaces the
+  Ingress, GA since Gateway API v1.0 (October 2023); it ships as CRDs
+  you install separately, not tied to a Kubernetes minor. Replaces the
   `kubernetes.io/ingress.class: nginx` annotation soup with a typed
   `Gateway` + `HTTPRoute` resource pair.
 - **Coraza** — the Go-native ModSecurity successor, loaded as an Envoy

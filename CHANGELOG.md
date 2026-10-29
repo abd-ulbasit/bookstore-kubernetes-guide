@@ -11,6 +11,31 @@ versions follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   tested, benchmarked) — promotion from the Phase 16 stub.
 - `BENCHMARKS.md` with k6 latency results against `catalog/`.
 
+### Changed
+- **Kubernetes 1.37 is now the target version** (was 1.35, which reaches
+  end of life on 2027-02-28). Toolchain pins move with it: kubectl
+  1.37.2, Helm 3.22.1, kind v0.33.0 (default node image
+  `kindest/node:v1.37.0`, pinned by digest in the binary), k3d v5.9.0
+  with `rancher/k3s:v1.37.1-k3s1`, and standalone kustomize v5.8.1.
+- EKS Terraform defaults to 1.37 with Karpenter 1.15.1 (the only line
+  its compatibility matrix allows on 1.37) and the extra controller IAM
+  it needs. Not yet re-run on AWS; the 1.35 smoke test stands as
+  history. GKE pins 1.37.1 on the Regular channel.
+- The example operator moves to client-go v0.37.2, controller-runtime
+  v0.25.2, controller-gen v0.22.0 and envtest 1.37.0.
+- Chapter text updated for what 1.36 and 1.37 changed: etcd 3.6+
+  (`etcdutl` for snapshot status and restore), IPVS deprecated in favour
+  of nftables, native sidecars, SELinuxMount, HPAScaleToZero, removed
+  metrics and feature gates, and support windows.
+
+### Fixed
+- Standalone EKS add-ons (kube-proxy, CoreDNS, EBS CSI) now follow
+  cluster upgrades through an `aws_eks_addon_version` lookup; with
+  `addon_version = null` they stayed on their create-time build.
+- The vpc-cni `moved` block now targets `before_compute["vpc-cni"]`.
+- The ML pipeline's kubectl image (`bitnami/kubectl:1.31.1`, no longer
+  published) is replaced by Chainguard's kubectl image, pinned by digest.
+
 ## [1.0.0] — 2026-05-23
 
 First stable cut. The guide, the four example trees, and the build

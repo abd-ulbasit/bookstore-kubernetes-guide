@@ -28,12 +28,12 @@
 Every chapter so far assumed *a cluster exists* and stayed at v-whatever. In
 production a cluster is not a fixed thing: it was **provisioned** by something
 (kubeadm, eksctl, Terraform, Cluster API), it runs a **specific Kubernetes
-version**, and roughly every three months upstream ships a new minor that
-**deprecates and eventually removes API versions** and that you are expected to
-adopt before your current one leaves support (upstream supports the **latest
-three minors**; managed providers add a few months but not forever). A cluster
-you never upgrade is a cluster accumulating CVEs and drifting toward a forced,
-high-risk jump.
+version**, and roughly every four months (three minors a year) upstream ships
+a new minor that **deprecates and eventually removes API versions** and that
+you are expected to adopt before your current one leaves support (upstream
+supports the **latest three minors**; managed providers add a few months but
+not forever). A cluster you never upgrade is a cluster accumulating CVEs and
+drifting toward a forced, high-risk jump.
 
 Two failure modes make this a day-2 chapter rather than a footnote:
 
@@ -73,8 +73,8 @@ it within a bounded window.**
   controller-manager/scheduler may be **one minor behind** the apiserver;
   **kubelet up to three minors behind** (n-3, since 1.28; was n-2); `kubectl`
   within **±1**. Crucially you **never** run a component *ahead* of the
-  apiserver, and you **never skip a minor** on the way up (1.30 → 1.31 → 1.32,
-  not 1.30 → 1.32).
+  apiserver, and you **never skip a minor** on the way up (1.35 → 1.36 → 1.37,
+  not 1.35 → 1.37).
 - **Upgrade is control-plane-first, then nodes one at a time.** Bump the
   control plane in place (apiserver → controller-manager/scheduler), then walk
   the nodes: **drain → upgrade kubelet/kube-proxy → uncordon**, respecting
@@ -135,26 +135,26 @@ sequenceDiagram
 ```
  VERSION SKEW — the API server is the reference; others trail, never lead ────
 
-   Suppose kube-apiserver = v1.32   (you ALWAYS upgrade this component first)
+   Suppose kube-apiserver = v1.37   (you ALWAYS upgrade this component first)
 
      component                       allowed window         note
      ───────────────────────────────────────────────────────────────────────
-     kube-apiserver        v1.32     == reference            upgrade FIRST
-     kube-controller-mgr   v1.31..32 apiserver, n-1          never ahead
-     kube-scheduler        v1.31..32 apiserver, n-1          never ahead
-     kubelet               v1.29..32 apiserver .. n-3        NEVER ahead;
+     kube-apiserver        v1.37     == reference            upgrade FIRST
+     kube-controller-mgr   v1.36..37 apiserver, n-1          never ahead
+     kube-scheduler        v1.36..37 apiserver, n-1          never ahead
+     kubelet               v1.34..37 apiserver .. n-3        NEVER ahead;
                                                              n-3 since v1.28
-     kube-proxy            v1.29..32 tracks kubelet/node      per node
-     kubectl (client)      v1.31..33 apiserver ±1            client only
+     kube-proxy            v1.34..37 tracks kubelet/node      per node
+     kubectl (client)      v1.36..38 apiserver ±1            client only
 
    Legal mid-upgrade state (this is WHY control-plane-first works):
-     apiserver = v1.32 (NEW)   kubelet on not-yet-done nodes = v1.31 (OLD)
+     apiserver = v1.37 (NEW)   kubelet on not-yet-done nodes = v1.36 (OLD)
        → kubelet is 1 behind  ≤ n-3  → LEGAL, app keeps running while you
          drain/upgrade nodes one by one.
 
    Illegal (forced, high-risk):
-     apiserver v1.30 ──upgrade──▶ v1.32   (SKIPPED v1.31)        ✗ never skip
-     kubelet v1.33 with apiserver v1.32   (kubelet AHEAD)        ✗ never lead
+     apiserver v1.35 ──upgrade──▶ v1.37   (SKIPPED v1.36)        ✗ never skip
+     kubelet v1.37 with apiserver v1.36   (kubelet AHEAD)        ✗ never lead
 
    Upgrade order, every time:
      [audit removed APIs] → apiserver → ctrl-mgr/sched → (etcd) →
@@ -185,13 +185,18 @@ on. Everything is self-bootstrapping and reverts to a clean known-good app.
 
 ### 0. Prerequisites — fresh cluster + the four images (self-bootstrapping)
 
-Identical self-bootstrap to every prior chapter. The four `bookstore/*:dev`
-images are `kind load`ed; `postgres:16`/`redis:7`/`rabbitmq:3.13-management`
-pull from the registry.
+The same self-bootstrap as every prior chapter, except that the node image is
+pinned one minor below the target. The four `bookstore/*:dev` images are
+`kind load`ed; `postgres:16`/`redis:7`/`rabbitmq:3.13-management` pull from
+the registry.
 
 ```sh
 kind delete cluster --name bookstore 2>/dev/null || true
-kind create cluster --name bookstore          # pins SOME default node image
+# Start ONE MINOR BELOW the target so step 4 has a newer minor to move to.
+# kind v0.33.0 defaults to v1.37.0; its release notes also list v1.36.4.
+# Pin by digest, as those notes require:
+kind create cluster --name bookstore \
+  --image kindest/node:v1.36.4@sha256:099e049362a1526b2db71494e1947aae99bd16290d7c895f2b7ea312e3cbfaed
 kubectl cluster-info
 
 cd examples/bookstore/app
@@ -326,12 +331,15 @@ runs the control plane.
 kind's real "upgrade" is recreate-at-a-newer-node-image. This **is** runnable:
 
 ```sh
-# Pick a NEWER pinned kind node image (kind publishes kindest/node:vX.Y.Z per
-# release — see github.com/kubernetes-sigs/kind/releases for the exact tags
-# your kind binary supports; choose the next minor up from step 1's Server).
+# Pick a NEWER pinned kind node image. Each kind release lists the exact
+# kindest/node:vX.Y.Z@sha256:<digest> images built for it (not always a .0
+# patch: kind v0.33.0 lists v1.37.0, v1.36.4, v1.35.8 and v1.34.11) at
+# github.com/kubernetes-sigs/kind/releases. Choose the next minor up from
+# step 1's Server and pin its digest:
 kind delete cluster --name bookstore
-kind create cluster --name bookstore --image kindest/node:v1.NEXT.0
-kubectl version                              # Server Version: now v1.NEXT.x
+kind create cluster --name bookstore \
+  --image kindest/node:v1.37.0@sha256:a1ed56cfb0e7b93589bdf97c8cd566405a265939e3620fc4f5de89adff580ae5
+kubectl version                              # Server Version: now v1.37.0
 kubectl get nodes -o wide                    # kubelet VERSION = the new minor
 
 # Re-bootstrap (fresh cluster — re-load images, re-apply the chain from step 0/1)
@@ -401,12 +409,14 @@ kind delete cluster --name bookstore
   version on read, but **your source manifests / Helm charts / GitOps repo**
   pinned to a removed version stop applying the instant it's gone.
 - **etcd is coupled to the Kubernetes version.** Each Kubernetes minor declares
-  a supported etcd version (all 3.x for modern Kubernetes); `kubeadm upgrade`
-  may bump the bundled etcd as part of the control-plane step. etcd has its
-  **own** upgrade rules (one minor at a time, quorum maintained — never lose
-  more than (n-1)/2 members at once); on managed clusters etcd is the
-  provider's and you neither see nor upgrade it (which is also why you can't
-  `etcdctl snapshot` a managed cluster — [ch.02](02-backup-and-dr.md)).
+  a supported etcd version (all 3.x for modern Kubernetes; kubeadm 1.36+ no
+  longer supports etcd below v3.6.0, and 1.37 defaults to v3.7.0);
+  `kubeadm upgrade` may bump the bundled etcd as part of the control-plane
+  step. etcd has its **own** upgrade rules (one minor at a time, quorum
+  maintained — never lose more than (n-1)/2 members at once); on managed
+  clusters etcd is the provider's and you neither see nor upgrade it (which is
+  also why you can't `etcdctl snapshot` a managed cluster —
+  [ch.02](02-backup-and-dr.md)).
 - **kind has no kubeadm-upgrade because a node is an image.** A kind "node" is
   a container from a *pinned* `kindest/node:vX.Y.Z` image (a pre-baked
   kubeadm-initialised node at that exact version). There is no supported path
@@ -428,7 +438,7 @@ kind delete cluster --name bookstore
 
 > **In production: never skip a minor, never let kubelet lead, audit removed
 > APIs before every upgrade.** Upgrade strictly **one minor at a time**
-> (1.30→1.31→1.32). The API server moves **first**; controller-manager/
+> (1.35→1.36→1.37). The API server moves **first**; controller-manager/
 > scheduler within n-1; kubelet trails within n-3 and **never ahead**;
 > `kubectl` within ±1. Run `pluto`/`kubent` (and watch
 > `apiserver_requested_deprecated_apis`) **before** every upgrade and migrate
@@ -496,7 +506,8 @@ kubectl drain <NODE> --ignore-daemonsets --delete-emptydir-data   # honors PDB
 kubeadm upgrade node ; systemctl restart kubelet ; kubectl uncordon <NODE>
 
 # kind "version move" (no kubeadm upgrade path — recreate at a newer image)
-kind create cluster --name bookstore --image kindest/node:v1.NEXT.0
+kind create cluster --name bookstore \
+  --image kindest/node:v1.37.0@sha256:a1ed56cfb0e7b93589bdf97c8cd566405a265939e3620fc4f5de89adff580ae5
 ```
 
 Minimal skeleton — pin the node image (kind) / declare the version (Cluster API):
@@ -507,12 +518,13 @@ kind: Cluster
 apiVersion: kind.x-k8s.io/v1alpha4
 nodes:
   - role: control-plane
-    image: kindest/node:v1.30.0      # bump = new cluster, re-deploy (honest)
+    # bump = new cluster, re-deploy (honest); pin the digest kind lists
+    image: kindest/node:v1.37.0@sha256:a1ed56cfb0e7b93589bdf97c8cd566405a265939e3620fc4f5de89adff580ae5
 ---
 # Cluster API: an upgrade is a declarative version bump (controllers roll it)
-apiVersion: controlplane.cluster.x-k8s.io/v1beta1
+apiVersion: controlplane.cluster.x-k8s.io/v1beta2
 kind: KubeadmControlPlane
-spec: { version: v1.31.0 }            # change → rolling control-plane upgrade
+spec: { version: v1.37.2 }            # change → rolling control-plane upgrade
 ```
 
 Checklist:
@@ -538,24 +550,24 @@ Checklist:
 
 > Try each before opening the answer drawer. The act of trying is the exercise; the answer is the check.
 
-1. **`kubectl version` shows Server v1.31, but `kubectl get nodes -o wide` shows one node still on kubelet v1.27. Is this safe, and what's the rule?**
+1. **`kubectl version` shows Server v1.37, but `kubectl get nodes -o wide` shows one node still on kubelet v1.34. Is this safe, and what's the rule?**
    <details><summary>Show answer</summary>
 
-   Marginal — the **version-skew policy** allows kubelet **up to n-3** behind the API server (since 1.28). So v1.31 apiserver with v1.27 kubelet is exactly at the boundary; v1.27 still works but you must upgrade that node before the next minor (or the skew becomes n-4 and violates policy). The hard rule: **never run a component ahead of the apiserver**, and **never skip a minor** on the way up. See §Mental model.
+   Marginal — the **version-skew policy** allows kubelet **up to n-3** behind the API server (since 1.28). So v1.37 apiserver with v1.34 kubelet is exactly at the boundary; v1.34 still works but you must upgrade that node before the next minor (or the skew becomes n-4 and violates policy). The hard rule: **never run a component ahead of the apiserver**, and **never skip a minor** on the way up. See §Mental model.
 
    </details>
 
-2. **You start an upgrade and accidentally `apt install kubelet=1.32.0` on a worker *before* upgrading the v1.30 apiserver. The kubelet won't register; the node goes NotReady. Why?**
+2. **You start an upgrade and accidentally `apt install kubelet=1.37.2` on a worker *before* upgrading the v1.35 apiserver. The kubelet won't register; the node goes NotReady. Why?**
    <details><summary>Show answer</summary>
 
-   You violated the rule "never run a component ahead of the apiserver". A v1.32 kubelet speaks API features the v1.30 apiserver doesn't understand; the kubelet's heartbeat/registration fails or behaves unpredictably. Recovery: downgrade the kubelet back to ≤ v1.30 (or upgrade the apiserver to v1.32 first). The upgrade order — **apiserver → controllers → kubelet** — is correctness, not advice.
+   You violated the rule "never run a component ahead of the apiserver". A v1.37 kubelet speaks API features the v1.35 apiserver doesn't understand; the kubelet's heartbeat/registration fails or behaves unpredictably. Recovery: downgrade the kubelet back to ≤ v1.35 (or first upgrade the apiserver one minor at a time, v1.35 → v1.36 → v1.37). The upgrade order — **apiserver → controllers → kubelet** — is correctness, not advice.
 
    </details>
 
-3. **A new engineer wants to upgrade from v1.28 directly to v1.31 because "we're behind anyway." Talk them through why this is wrong and what the right path is.**
+3. **A new engineer wants to upgrade from v1.34 directly to v1.37 because "we're behind anyway." Talk them through why this is wrong and what the right path is.**
    <details><summary>Show answer</summary>
 
-   Kubernetes only supports skew of **one minor at a time** in upgrades: v1.28 → v1.29 → v1.30 → v1.31, applying one step, validating, and proceeding. Skipping minors risks crossing API deprecation/removal boundaries silently (e.g. a v1.29 → v1.30 step removes APIs that worked in v1.29), and the kubelet's allowed skew breaks. Each step's deprecated-API audit (pluto/kubent) runs separately. The right path is one minor at a time, validated by the Bookstore reconciling after each step.
+   Kubernetes only supports skew of **one minor at a time** in upgrades: v1.34 → v1.35 → v1.36 → v1.37, applying one step, validating, and proceeding. Skipping minors risks crossing API deprecation/removal boundaries silently (e.g. the v1.31 → v1.32 step stopped serving `flowcontrol.apiserver.k8s.io/v1beta3`, which worked in v1.31), and the kubelet's allowed skew breaks. Each step's deprecated-API audit (pluto/kubent) runs separately. The right path is one minor at a time, validated by the Bookstore reconciling after each step.
 
    </details>
 

@@ -257,8 +257,12 @@ and the `recommender-model` PVC ([ch.04](04-distributed-training.md)).
 > this chapter is the recipe. The Workflow's `train` step uses
 > `bookstore/recommender-train:dev`; the `eval` step reuses the same image
 > as a tiny Python `script` (sklearn + joblib are already baked); the
-> `register` step uses `bitnami/kubectl`; the `promote` step uses the same.
-> No new images to build for this chapter.
+> `register` step uses Chainguard's `kubectl` image,
+> `cgr.dev/chainguard/kubectl:latest-dev`, pinned by digest because the
+> free tier publishes only `latest` tags (that digest carries kubectl
+> v1.37.2, and the `-dev` variant has the `/bin/sh` the step's script runs
+> under); the `promote` step uses the same. No new images to build for
+> this chapter.
 
 ### 1. Install Argo Workflows (pinned; own namespace)
 

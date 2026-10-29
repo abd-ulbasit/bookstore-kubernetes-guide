@@ -4,8 +4,9 @@
 > that assigns Pods real VPC IPs via ENI secondary addresses.
 > VPC-CNI is solid, AWS-native, and the right call for many
 > clusters. But it has a ceiling: NetworkPolicy is L3/L4-only
-> (port + IP), service routing goes through `kube-proxy` (iptables
-> or IPVS — both have scaling ceilings on large clusters), and
+> (port + IP), service routing goes through `kube-proxy` (iptables,
+> nftables, or the deprecated IPVS; iptables mode has scaling
+> ceilings on large clusters), and
 > there's no flow-level observability beyond VPC Flow Logs (which
 > see ENI traffic but lose the Pod-level identity once Pods are
 > behind a Service).** Cilium is the eBPF-native CNI that breaks
@@ -66,8 +67,9 @@ VPC-CNI's ceilings are also real:
   ~50k iptables rules. The `iptables-restore` invocation that
   applies a Service-update reload takes 100ms-2s on large clusters
   — every kube-proxy across the cluster pauses momentarily on every
-  Service change. The `ipvs` mode is faster (O(1) lookup vs
-  iptables O(n)) but still has overhead. Cilium's
+  Service change. The `nftables` mode (GA since 1.33) is faster
+  (near-O(1) lookup via verdict maps vs iptables O(n)) but still has
+  overhead; the `ipvs` mode is deprecated. Cilium's
   kube-proxy-replacement does service routing in eBPF — O(1)
   lookups, no iptables rules at all, zero per-Service-change
   cluster-wide pause.
@@ -356,8 +358,12 @@ For a learning-only run, the recommendation is **greenfield** — boot
 a fresh cluster from `eks.tf` without the `vpc-cni` addon, then
 install Cilium from boot. The hands-on below documents both paths.
 
-- A test cluster (either fresh or expendable) running EKS 1.30+ on
-  AL2023-based nodes (kernel 6.x required for modern eBPF).
+- A test cluster (either fresh or expendable) running EKS 1.37 (the
+  bookstore tree's default) on AL2023-based nodes (kernel 6.x
+  required for modern eBPF). Cilium 1.20, installed below, is
+  e2e-tested on Kubernetes 1.33-1.36. No stable Cilium release lists
+  1.37 yet (main and the latest v1.21 pre-releases do), so on 1.37 you
+  are relying on Kubernetes' backward compatibility.
 - `kubectl` configured.
 - `helm` 3.x.
 - `cilium` CLI installed (`brew install cilium-cli` or grab a release
@@ -427,7 +433,7 @@ For an existing cluster, the sequence is:
    K8S_HOST=$(aws eks describe-cluster --name <CLUSTER-NAME> \
      --query 'cluster.endpoint' --output text | sed 's|https://||')
 
-   helm install cilium cilium/cilium --version 1.16.4 \
+   helm install cilium cilium/cilium --version 1.20.4 \
      --namespace kube-system \
      --set kubeProxyReplacement=true \
      --set k8sServiceHost="$K8S_HOST" \
@@ -859,7 +865,7 @@ A future refinement is to split: agents stay in `kube-system`
 
 ```bash
 # Install Cilium on a fresh cluster (kube-proxy-replacement).
-helm install cilium cilium/cilium --version 1.16.4 \
+helm install cilium cilium/cilium --version 1.20.4 \
   --namespace kube-system \
   --set kubeProxyReplacement=true \
   --set k8sServiceHost="<API-ENDPOINT>" \

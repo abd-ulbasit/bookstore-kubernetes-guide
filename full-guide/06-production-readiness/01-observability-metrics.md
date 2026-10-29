@@ -141,7 +141,8 @@ existing `/metrics`; (4) query it with PromQL; (5) add a **PrometheusRule**.
 
 ```sh
 # A cluster (single-node kind is fine for this chapter).
-kind create cluster --name bookstore        # or: k3d cluster create bookstore
+kind create cluster --name bookstore
+#   or: k3d cluster create bookstore --image rancher/k3s:v1.37.1-k3s1
 
 # Build + load the Bookstore images (full instructions in
 # examples/bookstore/app/README.md):

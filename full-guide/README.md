@@ -152,12 +152,15 @@ No cloud account is required for any hands-on.
 Install a local-cluster tool (pick one):
 
 ```sh
-# kind (Kubernetes IN Docker)
-go install sigs.k8s.io/kind@latest
-#   or: brew install kind   |   curl -Lo kind https://kind.sigs.k8s.io/dl/latest/kind-$(uname)-amd64 && chmod +x kind
+# kind (Kubernetes IN Docker); v0.33.0 defaults to Kubernetes v1.37.0
+go install sigs.k8s.io/kind@v0.33.0
+#   or: brew install kind, then check that `kind version` says v0.33.0
+#   or: curl -Lo kind https://kind.sigs.k8s.io/dl/v0.33.0/kind-$(uname)-amd64
+#       chmod +x kind
 
 # k3d (k3s in Docker)
-curl -s https://raw.githubusercontent.com/k3d-io/k3d/main/install.sh | bash
+curl -s https://raw.githubusercontent.com/k3d-io/k3d/main/install.sh \
+  | TAG=v5.9.0 bash
 #   or: brew install k3d
 ```
 
@@ -167,8 +170,8 @@ Create a cluster:
 # kind
 kind create cluster --name bookstore
 
-# k3d (equivalent)
-k3d cluster create bookstore
+# k3d (equivalent); --image pins Kubernetes 1.37
+k3d cluster create bookstore --image rancher/k3s:v1.37.1-k3s1
 
 kubectl cluster-info
 kubectl get nodes

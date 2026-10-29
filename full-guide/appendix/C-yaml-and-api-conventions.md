@@ -5,9 +5,9 @@
 > (GVK/GVR, `spec`/`status`, labels vs annotations, the immutable-`selector`
 > rule, optimistic concurrency, finalizers/ownerReferences, the
 > alpha/beta/stable + deprecation policy, Server-Side Apply, and CRDs). Current
-> for Kubernetes **v1.30+**. This is reference material — it does **not** follow
-> the nine-section chapter anatomy; it cross-links the chapter that *teaches*
-> each topic in depth.
+> for Kubernetes **v1.30+**, up to this guide's **v1.37** target. This is
+> reference material — it does **not** follow the nine-section chapter
+> anatomy; it cross-links the chapter that *teaches* each topic in depth.
 
 ---
 
@@ -306,7 +306,7 @@ kubectl convert -f old.yaml --output-version apps/v1   # `kubectl convert` plugi
 ```
 
 > **In production:** **pin and migrate deliberately.** On regulated clusters pin
-> the PSA `-version` label (e.g. `v1.30`) so a Kubernetes upgrade can't silently
+> the PSA `-version` label (e.g. `v1.37`) so a Kubernetes upgrade can't silently
 > change what `restricted` means. Before any control-plane upgrade, scan for
 > deprecated API usage (the apiserver metric above, or tools like `pluto`/
 > `kubent`) and bump manifests/charts to the current GVK *first*

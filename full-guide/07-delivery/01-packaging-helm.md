@@ -173,12 +173,18 @@ behaviour.
 ([helm.sh/docs/intro/install](https://helm.sh/docs/intro/install/)):
 
 ```sh
-# pick one:
-brew install helm
-#  or: curl -fsSL https://raw.githubusercontent.com/helm/helm/main/scripts/get-helm-3 | bash
-#  or: go install helm.sh/helm/v3/cmd/helm@latest
-helm version        # this guide targets Helm 3 (v3.12+); these core commands are also v4-compatible
+# pick one (this guide pins Helm v3.22.1):
+curl -fsSL https://raw.githubusercontent.com/helm/helm/main/scripts/get-helm-3 \
+  | DESIRED_VERSION=v3.22.1 bash
+#  or: go install helm.sh/helm/v3/cmd/helm@v3.22.1
+#  or: brew install helm        # note: Homebrew now installs Helm 4
+helm version
 ```
+
+> **Which Helm?** This guide targets **Helm v3.22.1**, the Helm 3 release
+> whose version-skew range covers Kubernetes 1.34-1.37. Helm 3 gets security
+> fixes only until 2027-02-10, so plan the move to Helm 4 (4.3.x also covers
+> 1.37); the core commands in this chapter are also v4-compatible.
 
 A clean local cluster + the four Bookstore images loaded (the same
 self-bootstrap as every prior chapter; the chart pulls `postgres:16`,

@@ -162,7 +162,7 @@ unchanged). The probe-and-lifecycle block is added to the `catalog` container of
       # --- Lifecycle: graceful drain on shutdown -------------------------
       lifecycle:
         preStop:
-          # NATIVE sleep handler (Beta/on-by-default in 1.30, GA in 1.33).
+          # NATIVE sleep handler (Beta/on-by-default in 1.30, GA in 1.34).
           # Runs BEFORE SIGTERM. Gives the EndpointSlice controller time to
           # pull this Pod from Services so no NEW request arrives during the
           # app's own in-flight drain. We do NOT use `exec` here: the catalog
@@ -292,7 +292,7 @@ The three probe **kinds** use the same fields but mean different things:
 > fails, and Kubernetes then proceeds straight to `SIGTERM` — the grace delay
 > is **silently skipped**, quietly defeating the very drain this hook exists
 > for. The native **`lifecycle.preStop.sleep`** handler (Beta and on by
-> default in 1.30, **GA in 1.33** — well within this guide's v1.30+ target)
+> default in 1.30, **GA in 1.34**, well before this guide's v1.37 target)
 > is implemented by the kubelet itself and needs **no in-image binary**, so
 > it works on distroless. Always prefer it for the "pause before SIGTERM"
 > pattern.
@@ -395,7 +395,7 @@ containers:
     livenessProbe:  { httpGet: { path: /healthz, port: http }, periodSeconds: 10, failureThreshold: 3 }
     readinessProbe: { httpGet: { path: /readyz,  port: http }, periodSeconds: 5,  failureThreshold: 3 }
     lifecycle:
-      preStop: { sleep: { seconds: 5 } }   # native handler (beta & default-on at 1.30, GA 1.33); works on distroless
+      preStop: { sleep: { seconds: 5 } }   # native handler (beta & default-on at 1.30, GA 1.34); works on distroless
 # Pod level:
 terminationGracePeriodSeconds: 30
 ```
@@ -431,7 +431,7 @@ Checklist:
 3. **The catalog image is `gcr.io/distroless/static:nonroot`. Why does `lifecycle.preStop.exec: { command: ["/bin/sleep","5"] }` *silently* fail (no grace delay) on it, and what's the right replacement?**
    <details><summary>Show answer</summary>
 
-   Distroless static has no shell *and no coreutils* — there is no `/bin/sleep`. An `exec` preStop pointing at a missing binary fails, Kubernetes proceeds directly to SIGTERM, and the grace delay is silently skipped. Use the native `lifecycle.preStop.sleep: { seconds: 5 }` handler (beta default-on in 1.30, GA 1.33) implemented by the kubelet itself — no in-image binary required (see §Why the native `sleep` handler).
+   Distroless static has no shell *and no coreutils* — there is no `/bin/sleep`. An `exec` preStop pointing at a missing binary fails, Kubernetes proceeds directly to SIGTERM, and the grace delay is silently skipped. Use the native `lifecycle.preStop.sleep: { seconds: 5 }` handler (beta default-on in 1.30, GA 1.34) implemented by the kubelet itself — no in-image binary required (see §Why the native `sleep` handler).
 
    </details>
 

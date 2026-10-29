@@ -248,7 +248,7 @@ kubectl logs -n bookstore job/cleanup-manual       # "cleanup complete"
 | `activeDeadlineSeconds` | hard wall-clock cap for the *whole* Job; exceeded ⇒ Job (and Pods) terminated, Failed |
 | `ttlSecondsAfterFinished` | auto-delete the Job (and its Pods) this many seconds after it finishes — **the standard cleanup mechanism** |
 | `podFailurePolicy` | **GA 1.31** — act on a Pod failure by exit code / Pod condition (e.g. fail fast on a non-retriable error, or ignore an infra-evicted Pod) |
-| `backoffLimitPerIndex` | **GA 1.33** (Alpha 1.29, Beta 1.30) — a per-index retry budget for **Indexed** Jobs, so one bad index doesn't fail the whole Job |
+| `backoffLimitPerIndex` | **GA 1.33** (Alpha 1.28, Beta 1.29) — a per-index retry budget for **Indexed** Jobs, so one bad index doesn't fail the whole Job |
 | `restartPolicy` | `OnFailure` (restart the container in place) or `Never` (a failed Pod stays Failed, Job makes a new Pod) — **never `Always`** |
 
 The three shapes: **one-shot** (`completions=1`, `parallelism=1` — the

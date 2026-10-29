@@ -30,7 +30,8 @@ CoreDNS). Four of those are different from the rest:
    the CNI assigns them a Pod IP for the node-local infrastructure
    pods.
 2. **kube-proxy** — implements `Service` IP routing on each node
-   (iptables, IPVS, or nftables rules). Without it, ClusterIP
+   (iptables or nftables rules; its IPVS mode has been deprecated
+   since v1.35, KEP-5495). Without it, ClusterIP
    Services don't work and the cluster's internal east-west
    networking is broken.
 3. **CoreDNS** — the cluster DNS server. Without it, Pod-to-Pod
@@ -62,23 +63,25 @@ this chapter explains why.
 
 [Part 10 ch.01](../10-cloud-and-managed-kubernetes/01-managed-kubernetes-model.md)
 introduced the managed-cluster ownership boundary; this chapter
-operationalizes one slice of it (the addons that AWS keeps patched).
+operationalizes one slice of it (the addons AWS builds and certifies).
 [Part 02 ch.01](../02-networking/01-networking-model.md) covered
 CNI plugins in the abstract; this chapter is the EKS-specific
 production discipline for the four addons every cluster needs.
 
 > **In production:** EKS-managed addons are the right default for the
-> four essentials. AWS keeps them patched against upstream security
-> advisories, certifies them against each K8s minor, and provides the
-> `addon_version = null` "pick what works for this cluster's K8s
-> version" knob. Self-managing vpc-cni is possible (`helm install
-> aws-vpc-cni`) but you take on every CVE-tracking and version-
-> compatibility task AWS does for free.
+> four essentials. AWS ships builds patched against upstream security
+> advisories, certifies them against each K8s minor, and marks one
+> build per minor as the default: the "what works for this cluster's
+> K8s version" answer an `aws_eks_addon_version` lookup returns. (A
+> bare `addon_version = null` gets that default only once, at create
+> time; EKS does not update an add-on by itself.) Self-managing vpc-cni
+> is possible (`helm install aws-vpc-cni`) but you take on every
+> CVE-tracking and version-compatibility task AWS does for free.
 
 ## Mental model
 
 **Two paradigms — EKS-managed addons and self-managed releases — split
-the platform stack along the "what AWS keeps patched" line. For the
+the platform stack along the "what AWS builds and certifies" line. For the
 four essentials (vpc-cni, kube-proxy, CoreDNS, EBS-CSI), EKS-managed
 is the default; for everything else, self-managed (Helm/Argo CD)
 wins. The `before_compute = true` flag on the vpc-cni addon enforces
@@ -92,9 +95,10 @@ The two paradigms:
   it's compatible with, which container images to pull, what IRSA
   service account it expects. Terraform's `aws_eks_addon` resource
   (or the `terraform-aws-modules/eks/aws` module's `cluster_addons`
-  map) is the only thing you write; AWS does the install, the upgrade,
-  the patching. The catalog (`aws eks describe-addon-versions`) is
-  authoritative.
+  map) is the only thing you write; AWS does the install, and each
+  upgrade or patch once you change `addon_version` (it does not move
+  an add-on by itself). The catalog (`aws eks describe-addon-versions`)
+  is authoritative.
 - **Self-managed releases** are plain Helm or Kustomize. You own the
   chart version, the image tag, the security patches, the
   compatibility-with-K8s-version checks. Karpenter is self-managed
@@ -209,12 +213,22 @@ predated wide Pod Identity adoption; a green-field cluster in 2026
 could pick either.
 
 The trap to keep in view: **the conformance window**. Each addon
-version supports a *range* of K8s minors (e.g., vpc-cni v1.20.x
-supports K8s 1.30-1.36). When you bump K8s, the next-default addon
-version may differ; when you pin `addon_version`, you're responsible
-for tracking the window. `addon_version = null` lets EKS pick the
-default, which is always within the conformance window for the
-current K8s minor.
+version supports a *range* of K8s minors (e.g., vpc-cni
+v1.23.2-eksbuild.8 supports K8s 1.31-1.37). When you bump K8s, the
+next-default addon version may differ; when you pin `addon_version`,
+you're responsible for tracking the window. The bookstore tree's
+`aws_eks_addon_version` lookup (keyed on `module.eks.cluster_version`,
+`most_recent = false`) returns EKS's default build for the current
+minor, which is always inside that minor's window. A bare
+`addon_version = null` on a standalone `aws_eks_addon` is not the
+same: EKS installs its default at create time, Terraform then plans
+no change, and after a control-plane upgrade the add-on stays on the
+build it got for the old minor (AWS documents that EKS does not
+update an add-on after a cluster upgrade). kube-proxy shows it most
+plainly: EKS versions its kube-proxy builds per minor
+(`v1.<minor>`), and upstream's skew policy lets kube-proxy trail
+kube-apiserver by at most three minors, so after three upgrades a
+frozen one has to move before the control plane can go any further.
 
 ## Diagrams
 
@@ -316,7 +330,7 @@ Output:
 ```text
 {
   "name": "vpc-cni",
-  "ver": "v1.20.0-eksbuild.1",
+  "ver": "v1.22.4-eksbuild.8",
   "status": "ACTIVE",
   "role": "arn:aws:iam::<ACCOUNT-ID>:role/bookstore-platform-vpc-cni"
 }
@@ -345,31 +359,36 @@ the Pod; the AWS SDK in vpc-cni uses that token to assume the role.
 ```bash
 aws eks describe-addon-versions \
   --addon-name vpc-cni \
-  --kubernetes-version 1.35 \
   --query 'addons[0].addonVersions[*].{ver:addonVersion,default:compatibilities[?defaultVersion==`true`].clusterVersion | [0],status:compatibilities[*].clusterVersion}' \
   --output table
 ```
 
-Output (truncated):
+Output (two rows from us-east-1 on 2026-10-29, condensed; the CLI
+prints each `status` list as a nested table):
 
 ```text
------------------------------------------------------------------
-|                  DescribeAddonVersions                         |
-+-----------------+----------+------------------------------------+
-|       ver       | default  |             status                |
-+-----------------+----------+------------------------------------+
-| v1.20.0         | 1.35     | ["1.30","1.31","1.32","1.33",     |
-|                 |          |  "1.34","1.35","1.36"]            |
-| v1.19.5         | None     | ["1.29","1.30","1.31","1.32",     |
-|                 |          |  "1.33","1.34","1.35"]            |
-+-----------------+----------+------------------------------------+
+-----------------------------------------------------------------------
+|                        DescribeAddonVersions                        |
++---------------------+----------+------------------------------------+
+|         ver         | default  |               status               |
++---------------------+----------+------------------------------------+
+| v1.23.2-eksbuild.8  | None     | ["1.37","1.36","1.35","1.34",      |
+|                     |          |  "1.33","1.32","1.31"]             |
+| v1.22.4-eksbuild.8  | 1.37     | ["1.37","1.36","1.35","1.34",      |
+|                     |          |  "1.33","1.32","1.31","1.30"]      |
++---------------------+----------+------------------------------------+
 ```
 
 This is the **conformance window** in action: each addon version is
 compatible with a range of K8s minors. The `default` column shows
-which version EKS picks when `addon_version = null` in Terraform.
+which build is EKS's default for a minor: the one EKS installs when
+an add-on is created with `addon_version = null`, and the one an
+`aws_eks_addon_version` lookup with `most_recent = false` returns on
+every plan. Note that the newest build is not the default. Adding
+`--kubernetes-version 1.37` lists only the builds offered on 1.37,
+and the `status` column then shows just that minor.
 
-### 4. Bump an addon to a specific version (optional — `null` usually wins)
+### 4. Bump an addon to a specific version (optional — tracking usually wins)
 
 In `addons.tf`, change:
 
@@ -377,7 +396,7 @@ In `addons.tf`, change:
 resource "aws_eks_addon" "coredns" {
   cluster_name                = module.eks.cluster_name
   addon_name                  = "coredns"
-  addon_version               = "v1.11.4-eksbuild.2"  # pinned, was null
+  addon_version               = "v1.14.7-eksbuild.22"  # pinned, was the lookup
   # ...
 }
 ```
@@ -441,14 +460,27 @@ rm coredns-backup.yaml
 
 EKS's catalog has additional addons beyond the four essentials —
 ADOT collector, CloudWatch Container Insights, Pod Identity Agent.
-To add Pod Identity Agent:
+To add Pod Identity Agent, give it the same default-build lookup as
+the other standalone add-ons (a bare `null` would install today's
+default and then never follow a cluster upgrade):
 
 ```hcl
+# addons.tf: the existing lookup, with one more name in its set
+data "aws_eks_addon_version" "default" {
+  for_each = toset([
+    "kube-proxy", "coredns", "aws-ebs-csi-driver", "eks-pod-identity-agent",
+  ])
+
+  addon_name         = each.key
+  kubernetes_version = module.eks.cluster_version
+  most_recent        = false
+}
+
 # addons.tf — add this block
 resource "aws_eks_addon" "pod_identity_agent" {
   cluster_name                = module.eks.cluster_name
   addon_name                  = "eks-pod-identity-agent"
-  addon_version               = null
+  addon_version               = data.aws_eks_addon_version.default["eks-pod-identity-agent"].version
   resolve_conflicts_on_update = "OVERWRITE"
   resolve_conflicts_on_create = "OVERWRITE"
   preserve                    = false
@@ -511,10 +543,13 @@ described by a `compatibilities` list — pairs of `(clusterVersion,
 defaultVersion: bool)`. EKS uses this to answer two questions: "which
 addon versions can I install on this K8s minor?" (filter by minor in
 the list) and "which one is the default?" (find the entry where
-`defaultVersion` is true). When `addon_version = null` in Terraform,
-the EKS API returns the default for the current cluster minor; when
-you pin a version, EKS validates it's in the window and rejects with
-a clear error if not.
+`defaultVersion` is true). When Terraform creates an add-on with
+`addon_version = null`, EKS installs the default for the cluster's
+minor at that moment, and a standalone `aws_eks_addon` keeps that
+build from then on; the `aws_eks_addon_version` data source asks the
+"which one is the default?" question again on every plan, which is
+how the tree's add-ons follow upgrades. When you pin a version, EKS
+validates it's in the window and rejects with a clear error if not.
 
 **Pod Identity Agent vs IRSA — the migration.** IRSA's trust policy
 references the cluster's OIDC issuer URL — a string like
@@ -533,17 +568,24 @@ new cluster, Pod Identity is the simpler default.
 ## Production notes
 
 > **In production:** Pin `addon_version` for staging and production;
-> leave `null` for dev. The dev cluster benefits from "latest works"
-> (you see new addon behavior early); staging and production benefit
-> from "the version we tested" (no surprise bump when EKS rotates
-> defaults during an unrelated upgrade). **When `addon_version = null`,
-> a Kubernetes control-plane upgrade via `terraform apply` ALSO updates
-> every addon to the new K8s-minor default — silently, in the same
-> apply. You only discover the new addon versions in the plan output.
-> Mitigation: pin `addon_version` in staging and production so addon
-> bumps are explicit commits.** The bookstore-platform tree uses `null`
-> throughout because it's a teaching artifact; flip to pinned in your
-> fork.
+> track the default for dev. The dev cluster benefits from "latest
+> works" (you see new addon behavior early); staging and production
+> benefit from "the version we tested" (no surprise bump when EKS
+> rotates defaults during an unrelated upgrade). **When `addon_version`
+> tracks the default (an `aws_eks_addon_version` lookup, or `null`
+> inside the EKS module's `cluster_addons`), a Kubernetes control-plane
+> upgrade via `terraform apply` ALSO moves every addon whose default
+> build differs on the new K8s minor (kube-proxy always does) — in the
+> same apply, with no commit of its own. The plan shows the new builds
+> for the standalone lookups, but a module-managed addon such as
+> vpc-cni shows only `(known after apply)`, because the module's
+> lookup reads the cluster version that is changing; you see its new
+> build only during the apply. Mitigation: pin `addon_version` in
+> staging and production so addon bumps are explicit commits.** The
+> bookstore-platform tree tracks the default throughout because it's
+> a teaching artifact; flip to pinned in your fork. (A bare `null` on
+> a standalone `aws_eks_addon` is not tracking: the provider keeps
+> the installed build, see [ch.02](02-eks-cluster-lifecycle.md).)
 
 > **In production:** `resolve_conflicts_on_update = "PRESERVE"` is
 > the right choice for any addon you've customized via
@@ -564,10 +606,13 @@ new cluster, Pod Identity is the simpler default.
 > IRSA (or Pod Identity); if it doesn't, leave the field empty.
 
 > **In production:** Conformance windows matter at upgrade time, not
-> install time. A `null` `addon_version` is always within the window
-> for the current K8s minor (EKS guarantees this). The risk is the
-> *next* K8s upgrade — the addon version compatible with K8s 1.35
-> may not exist for 1.36. The pre-flight in
+> install time. A tracked `addon_version` (the tree's lookup, or
+> `null` inside the module's `cluster_addons`) is always within the
+> window for the current K8s minor, because it is EKS's default for
+> that minor. A bare `null` on a standalone `aws_eks_addon` is only
+> guaranteed to be inside it for the minor the cluster ran at create
+> time. The risk is the *next* K8s upgrade — the addon version
+> compatible with K8s 1.36 may not exist for 1.37. The pre-flight in
 > [ch.02](02-eks-cluster-lifecycle.md) §3 is the discipline that
 > catches this: `aws eks describe-addon-versions --kubernetes-version
 > <N+1>` returns what's available for the target.
@@ -602,15 +647,16 @@ aws eks list-addons --cluster-name "$CLUSTER" --region "$REGION"
 aws eks describe-addon --cluster-name "$CLUSTER" --region "$REGION" \
   --addon-name vpc-cni
 
-# Query the catalog — which versions are compatible with K8s 1.36?
+# Query the catalog — which versions are compatible with K8s 1.37?
 aws eks describe-addon-versions \
-  --addon-name vpc-cni --kubernetes-version 1.36
+  --addon-name vpc-cni --kubernetes-version 1.37
 
 # Pin a version (in addons.tf).
-addon_version = "v1.20.0-eksbuild.1"
+addon_version = "v1.23.2-eksbuild.8"
 
-# Leave it floating (EKS picks the default for the cluster's K8s minor).
-addon_version = null
+# Track EKS's default build for the cluster's K8s minor (addons.tf does
+# this; a bare null on a standalone aws_eks_addon never moves after create).
+addon_version = data.aws_eks_addon_version.default["coredns"].version
 
 # IRSA wire-up on an addon.
 service_account_role_arn = aws_iam_role.vpc_cni.arn
@@ -622,12 +668,14 @@ configuration_values = jsonencode({
 })
 ```
 
-Minimal `cluster_addons` skeleton (inside the EKS module call):
+Minimal `cluster_addons` skeleton (inside the EKS module call, where a
+`null` falls through to the module's own default-build lookup and so
+follows cluster upgrades):
 
 ```hcl
 cluster_addons = {
   vpc-cni = {
-    addon_version               = null
+    addon_version               = null # module looks up EKS's default
     resolve_conflicts_on_create = "OVERWRITE"
     resolve_conflicts_on_update = "OVERWRITE"
     service_account_role_arn    = aws_iam_role.vpc_cni.arn
@@ -637,13 +685,23 @@ cluster_addons = {
 }
 ```
 
-Minimal standalone `aws_eks_addon` skeleton:
+Minimal standalone `aws_eks_addon` skeleton (no module lookup here, so
+the data source does that job; a bare `null` would freeze the add-on
+on its create-time default):
 
 ```hcl
+data "aws_eks_addon_version" "default" {
+  for_each = toset(["kube-proxy"])
+
+  addon_name         = each.key
+  kubernetes_version = module.eks.cluster_version
+  most_recent        = false
+}
+
 resource "aws_eks_addon" "kube_proxy" {
   cluster_name                = module.eks.cluster_name
   addon_name                  = "kube-proxy"
-  addon_version               = null
+  addon_version               = data.aws_eks_addon_version.default["kube-proxy"].version
   resolve_conflicts_on_create = "OVERWRITE"
   resolve_conflicts_on_update = "OVERWRITE"
   preserve                    = false
@@ -661,8 +719,9 @@ Addon-management checklist (the cluster is healthy when all five are yes):
       lists all four essentials).
 - [ ] `resolve_conflicts_on_update` policy set deliberately
       (OVERWRITE for dev, PRESERVE for staging/prod when customized).
-- [ ] Addon versions are pinned in staging/prod (not `null`) so
-      AWS-side default rotations don't surprise the team.
+- [ ] Addon versions are pinned in staging/prod (not tracking EKS's
+      default via a lookup or a module `null`) so AWS-side default
+      rotations don't surprise the team.
 
 ## Test your understanding
 
@@ -675,10 +734,10 @@ Addon-management checklist (the cluster is healthy when all five are yes):
 
    </details>
 
-2. **You run `terraform apply` to bump K8s from 1.35 to 1.36 with `addon_version = null` for every addon. Mid-apply, the LB Controller starts crashlooping. What's happening and how do you avoid this in prod?**
+2. **You run `terraform apply` to bump K8s from 1.36 to 1.37 with every addon tracking EKS's default build (as the bookstore tree does). Mid-apply, the LB Controller starts crashlooping. What's happening and how do you avoid this in prod?**
    <details><summary>Show answer</summary>
 
-   `addon_version = null` lets EKS auto-bump every managed addon to its new default version at the same time as the cluster upgrade. One of those default bumps changed an API the LB Controller (a self-managed Helm release) depended on. The chapter's discipline: pin `addon_version` to specific certified strings in staging/prod (not `null`), stage each addon bump as its own PR in a separate apply, and let dev clusters use `null` to find these surprises before prod hits them.
+   Tracking the default (`addon_version` from an `aws_eks_addon_version` lookup keyed on the cluster's version) moves kube-proxy, and every other managed addon whose default build differs on the new minor, in the same apply as the cluster upgrade. One of those default bumps changed an API the LB Controller (a self-managed Helm release) depended on. The chapter's discipline: pin `addon_version` to specific certified strings in staging/prod (not a tracking lookup), stage each addon bump as its own PR in a separate apply, and let dev clusters track the default to find these surprises before prod hits them.
 
    </details>
 
