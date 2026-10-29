@@ -21,8 +21,8 @@
     // workflows use. minikube isn't needed — we use kind via the script
     // below since the guide standardises on kind/k3d.
     "ghcr.io/devcontainers/features/kubectl-helm-minikube:1": {
-      "version": "1.35.0",
-      "helm": "3.16.0",
+      "version": "1.37.2",
+      "helm": "3.22.1",
       "minikube": "none"
     },
     "ghcr.io/devcontainers/features/terraform:1": {

@@ -3,9 +3,9 @@
 [![docs](https://github.com/abd-ulbasit/bookstore-kubernetes-guide/actions/workflows/docs.yml/badge.svg?branch=main)](https://github.com/abd-ulbasit/bookstore-kubernetes-guide/actions/workflows/docs.yml)
 [![example-trees-check](https://github.com/abd-ulbasit/bookstore-kubernetes-guide/actions/workflows/example-trees-check.yml/badge.svg?branch=main&event=schedule)](https://github.com/abd-ulbasit/bookstore-kubernetes-guide/actions/workflows/example-trees-check.yml)
 [![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
-[![Kubernetes](https://img.shields.io/badge/kubernetes-1.35-326CE5?logo=kubernetes&logoColor=white)](https://kubernetes.io)
+[![Kubernetes](https://img.shields.io/badge/kubernetes-1.37-326CE5?logo=kubernetes&logoColor=white)](https://kubernetes.io)
 [![Terraform](https://img.shields.io/badge/terraform-1.10-7B42BC?logo=terraform&logoColor=white)](https://www.terraform.io)
-[![Helm](https://img.shields.io/badge/helm-3.16-0F1689?logo=helm&logoColor=white)](https://helm.sh)
+[![Helm](https://img.shields.io/badge/helm-3.22-0F1689?logo=helm&logoColor=white)](https://helm.sh)
 [![GitHub last commit](https://img.shields.io/github/last-commit/abd-ulbasit/bookstore-kubernetes-guide?logo=github)](https://github.com/abd-ulbasit/bookstore-kubernetes-guide/commits/main)
 
 **Live site:** **<https://abd-ulbasit.github.io/bookstore-kubernetes-guide/>**
@@ -24,8 +24,8 @@ experience is the live site above; everything below is just orientation.
 [![Open in GitHub Codespaces](https://github.com/codespaces/badge.svg)](https://codespaces.new/abd-ulbasit/bookstore-kubernetes-guide?devcontainer_path=.devcontainer%2Fdevcontainer.json)
 
 Clicking the badge spins up a browser-based dev environment with everything
-the guide uses pinned to the versions the chapters cite — `kubectl 1.35.0`,
-`helm 3.16.0`, `terraform 1.14.8`, `kind 0.27.0`, `k3d 5.8.3`, `go 1.26.10`,
+the guide uses pinned to the versions the chapters cite — `kubectl 1.37.2`,
+`helm 3.22.1`, `terraform 1.14.8`, `kind 0.33.0`, `k3d 5.9.0`, `go 1.26.10`,
 `python 3.12`, `aws-cli`, plus the MkDocs Material toolchain. About 90 seconds
 from click to a shell where `kind create cluster` and `helm install bookstore`
 both just work. Config: [`.devcontainer/`](.devcontainer/).
@@ -38,7 +38,7 @@ both just work. Config: [`.devcontainer/`](.devcontainer/).
 | `full-guide/appendix/` | A–F: glossary, cheat sheets, reading paths, **concept map + tag index** |
 | `full-guide/examples/bookstore/` | Canonical example tree — runs on **kind/k3d** locally, no cloud needed (Parts 02–08) |
 | `full-guide/examples/bookstore-platform/` | Platform v2 — multi-tenant, GitOps, Keycloak + IRSA + Istio (Parts 12–13) |
-| `full-guide/examples/bookstore-platform/terraform/` | EKS infrastructure as Terraform — **live-smoke-tested** on AWS EKS 1.35 in `ap-south-1` (Part 14) |
+| `full-guide/examples/bookstore-platform/terraform/` | EKS infrastructure as Terraform — **live-smoke-tested** on AWS EKS 1.35 in `ap-south-1` on 2026-05-20; now defaults to EKS 1.37 with Karpenter 1.15.1, smoke test not yet re-run (Part 14) |
 | `full-guide/examples/bookstore-platform/terraform-account-baseline/` | AWS-account-wide guardrails (CloudTrail, Security Hub, GuardDuty, IAM Access Analyzer) |
 | [`docs/adr/`](docs/adr/) | Architecture Decision Records — the load-bearing technical decisions, why they were made, and the trade-offs |
 | [`docs/lessons-from-smoke-test.md`](docs/lessons-from-smoke-test.md) | Post-mortem of running this guide's Terraform against real EKS — what broke, why, and the five fixes that became Tier-1 defaults |
@@ -85,7 +85,8 @@ want to read the chapters most relevant to a specific role first:
 Each chapter's hands-on section gives the exact commands. The two starting
 points:
 
-- **Local cluster (Parts 00–11):** `kind create cluster` or `k3d cluster create`
+- **Local cluster (Parts 00–11):** `kind create cluster` or
+  `k3d cluster create --image rancher/k3s:v1.37.1-k3s1`
 - **Live AWS (Part 14):** `cd full-guide/examples/bookstore-platform/terraform && terraform init && terraform apply`
   (costs **~$0.20/hour**, every dollar-bearing variable defaults to off; full
   teardown documented in `terraform/cleanup-pre-destroy.sh`)

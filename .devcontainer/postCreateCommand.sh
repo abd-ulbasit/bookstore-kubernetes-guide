@@ -17,8 +17,10 @@ log() { printf '\033[1;34m==>\033[0m %s\n' "$*"; }
 # install fail if the bytes ever change. Bump both together.
 verify() { echo "$1  $2" | sha256sum -c - >/dev/null || { echo "checksum mismatch: $2" >&2; exit 1; }; }
 
-KIND_VERSION="v0.27.0"
-KIND_SHA256="a6875aaea358acf0ac07786b1a6755d08fd640f4c79b7a2e46681cc13f49a04b"
+# v0.33.0 defaults to kindest/node:v1.37.0, pinned by digest inside the
+# binary, so a plain `kind create cluster` runs Kubernetes 1.37.
+KIND_VERSION="v0.33.0"
+KIND_SHA256="aee6151561422756b764a4ae28e7f44cda5af5a9eead3cc9985112b1de8d8e0d"
 log "installing kind ${KIND_VERSION}"
 curl -fsSL "https://kind.sigs.k8s.io/dl/${KIND_VERSION}/kind-linux-amd64" \
   -o /tmp/kind
@@ -31,8 +33,12 @@ rm /tmp/kind
 # Release binary + checksum. This used to pipe install.sh from the k3d repo's
 # MAIN branch into bash: whatever that script said on the day ran as this
 # user, regardless of the TAG pin it was given.
-K3D_VERSION="v5.8.3"
-K3D_SHA256="dbaa79a76ace7f4ca230a1ff41dc7d8a5036a8ad0309e9c54f9bf3836dbe853e"
+#
+# k3d bakes its default k3s image in at build time, and v5.9.0's default is
+# k3s v1.35.5, so create clusters with `--image rancher/k3s:v1.37.1-k3s1`
+# to get Kubernetes 1.37.
+K3D_VERSION="v5.9.0"
+K3D_SHA256="06d8f25bc3a971c4eb29e0ff08429b180402db0f4dec838c9eac427e296800a0"
 log "installing k3d ${K3D_VERSION}"
 curl -fsSL "https://github.com/k3d-io/k3d/releases/download/${K3D_VERSION}/k3d-linux-amd64" \
   -o /tmp/k3d
@@ -41,10 +47,11 @@ sudo install /tmp/k3d /usr/local/bin/k3d
 rm /tmp/k3d
 
 # --- kustomize (standalone) ---------------------------------------------
-# kubectl ships an older bundled kustomize; the standalone binary tracks
-# the latest features (e.g. components, the `helmCharts` field).
-KUSTOMIZE_VERSION="v5.5.0"
-KUSTOMIZE_SHA256="6703a3a70a0c47cf0b37694030b54f1175a9dfeb17b3818b623ed58b9dbc2a77"
+# kubectl 1.37.2 embeds kustomize v5.8.1, but `kubectl kustomize` is only
+# the build command. The standalone binary adds `kustomize edit` and
+# friends, and is pinned to the same release so both render identically.
+KUSTOMIZE_VERSION="v5.8.1"
+KUSTOMIZE_SHA256="029a7f0f4e1932c52a0476cf02a0fd855c0bb85694b82c338fc648dcb53a819d"
 log "installing kustomize ${KUSTOMIZE_VERSION}"
 curl -fsSL "https://github.com/kubernetes-sigs/kustomize/releases/download/kustomize/${KUSTOMIZE_VERSION}/kustomize_${KUSTOMIZE_VERSION}_linux_amd64.tar.gz" \
   -o /tmp/kustomize.tar.gz
@@ -79,12 +86,12 @@ cat <<'EOF'
 ╰──────────────────────────────────────────────────────────────────────╯
 
 Versions installed:
-  kubectl     1.35.0
-  helm        3.16.0
-  kustomize   5.5.0
+  kubectl     1.37.2
+  helm        3.22.1
+  kustomize   5.8.1
   terraform   1.14.8
-  kind        0.27.0
-  k3d         5.8.3
+  kind        0.33.0
+  k3d         5.9.0
   go          1.26.10
   python      3.12
   aws-cli     2.38.5
