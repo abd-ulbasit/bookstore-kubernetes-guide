@@ -326,7 +326,8 @@ page lists what each level requires.
 **Assumed working directory: the guide repo root (`full-guide/`).** All paths
 are relative to it. Have a cluster from
 [Part 00 ch.07](../00-foundations/07-local-cluster-setup.md)
-(`kind create cluster --name bookstore`) and the catalog image loaded.
+(`kind create cluster --name bookstore`), the namespace, ServiceAccount and
+catalog Pod that [ch.07 step 6](../00-foundations/07-local-cluster-setup.md#6-create-the-namespace-load-the-image-and-deploy-the-first-bookstore-pod) creates, and the catalog image loaded.
 
 We continue the manifest from
 [Part 00 ch.06](../00-foundations/06-declarative-api-model.md)
@@ -345,50 +346,37 @@ enforces it. The captured output comes from a kind cluster running
 Kubernetes v1.37.0, recorded in
 [`evidence/01-01.txt`](../examples/security-lab/evidence/01-01.txt).
 
-### 1. A namespace that enforces `restricted` {#restricted-namespace}
+### 1. Check the restricted namespace and ServiceAccount {#restricted-namespace}
 
 The [namespace labels](#baseline-namespace) decide what the API server
-accepts. Create `bookstore` with `enforce` and `warn` at `restricted`, plus
-the `catalog-sa` ServiceAccount from the
-[baseline](#baseline-service-account). Then make `bookstore` the default
-namespace of your kubectl context, so the commands below need no `-n`:
+accepts. [Part 00 ch.07](../00-foundations/07-local-cluster-setup.md) created
+the `bookstore` namespace, with `enforce` and `warn` at `restricted`, and the
+`catalog-sa` ServiceAccount from the
+[baseline](#baseline-service-account). Check both. Then make `bookstore` the
+default namespace of your kubectl context, so the commands below need no `-n`:
 
 ```sh
-kubectl apply -f - <<'EOF'
-apiVersion: v1
-kind: Namespace
-metadata:
-  name: bookstore
-  labels:
-    app.kubernetes.io/part-of: bookstore
-    pod-security.kubernetes.io/enforce: restricted
-    pod-security.kubernetes.io/warn: restricted
----
-apiVersion: v1
-kind: ServiceAccount
-metadata:
-  name: catalog-sa
-  namespace: bookstore
-  labels:
-    app: catalog
-    app.kubernetes.io/part-of: bookstore
-automountServiceAccountToken: false
-EOF
+kubectl get namespace bookstore --show-labels
 ```
 
 <!-- gate: output -->
 ```text
-namespace/bookstore created
-serviceaccount/catalog-sa created
+NAME            STATUS   AGE   LABELS
+# ...
+```
+
+```sh
+kubectl get serviceaccount catalog-sa -n bookstore
+```
+
+<!-- gate: output -->
+```text
+NAME         AGE
+catalog-sa   59s
 ```
 
 ```sh
 kubectl config set-context --current --namespace=bookstore
-```
-
-<!-- gate: output -->
-```text
-Context "kind-bookstore" modified.
 ```
 
 [Ch.03](03-resources-and-qos.md) later applies `00-namespace.yaml`, which adds
@@ -397,12 +385,11 @@ a quota and default limits to this same namespace.
 ### 2. Run the bare Pod (recap)
 
 [Part 00](../00-foundations/07-local-cluster-setup.md) ended with `catalog` as
-a bare Pod, and the seed now carries the baseline. If you still have the old
-one in `default`, remove it with
-`kubectl delete pod catalog -n default --ignore-not-found`. Apply the seed
-into `bookstore` and wait for `Ready`. The wait is the runtime check. A
-manifest can pass every admission policy and still crash on its first write
-to a read-only root filesystem, and only a running Pod tells you.
+a bare Pod in `bookstore`, and the seed now carries the baseline. It is the
+same file, so re-applying it reports `unchanged`. The wait is still the
+runtime check. A manifest can pass every admission policy and still crash on
+its first write to a read-only root filesystem, and only a running Pod tells
+you.
 
 ```sh
 kubectl apply -f examples/bookstore/raw-manifests/01-catalog-pod.yaml &&
@@ -411,7 +398,7 @@ kubectl apply -f examples/bookstore/raw-manifests/01-catalog-pod.yaml &&
 
 <!-- gate: output -->
 ```text
-pod/catalog created
+pod/catalog unchanged
 pod/catalog condition met
 ```
 
@@ -422,7 +409,7 @@ kubectl get pod catalog
 <!-- gate: output -->
 ```text
 NAME      READY   STATUS    RESTARTS   AGE
-catalog   1/1     Running   0          2s
+catalog   1/1     Running   0          60s
 ```
 
 ```sh

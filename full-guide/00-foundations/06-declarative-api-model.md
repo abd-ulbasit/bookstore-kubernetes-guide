@@ -47,7 +47,7 @@ follow from that:
 | Threat | Control taught here | Goes deeper |
 |---|---|---|
 | A spec nobody reviewed reaches the cluster as easily as one somebody did. | Keep manifests in Git and apply the reviewed file. Admission checks the rules it is given, not whether a change is a good idea. | [05.01](../05-security/01-authn-authz-rbac.md) |
-| A live edit drifts from the declared state, and the next apply may undo it without warning. | Apply from files, run `kubectl diff` before each apply, and never `kubectl edit` an object that Git owns. | [07.04](../07-delivery/04-gitops-argocd.md) |
+| A live edit drifts from the declared state, and the next apply of the file puts the file's values back without a warning. | Apply from files, and run [`kubectl diff`](https://kubernetes.io/docs/reference/kubectl/generated/kubectl_diff/) before each apply. It compares the live object with the result of the apply. Never `kubectl edit` an object that Git owns. | [07.04](../07-delivery/04-gitops-argocd.md) |
 | A client-side dry run checks the file on your machine and does not run admission, so it can pass a spec the cluster refuses. | Run `--dry-run=server` in the namespace that enforces Pod Security. The hands-on shows both outcomes. | [05.02](../05-security/02-pod-security.md) |
 
 ## The reconciliation principle (level-triggered)

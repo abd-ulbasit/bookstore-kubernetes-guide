@@ -1,23 +1,32 @@
 # Transcript for 01-core-workloads/01-pods.md, hands-on steps 1 to 7.
 # Tier A: a kind cluster, Kubernetes v1.37.0 node, kubectl v1.37.2.
-# Recorded by running the chapter's commands in order from full-guide/ on a
-# fresh `bookstore` namespace. The cluster name is shown as `bookstore`.
-## step 1
-$ kubectl apply -f - <<'EOF'   # Namespace bookstore and ServiceAccount catalog-sa
-namespace/bookstore created
-serviceaccount/catalog-sa created
-
-$ kubectl config set-context --current --namespace=bookstore
-Context "kind-bookstore" modified.
+# Steps 1 and 2 were re-run on 2026-10-31 on the shared kind cluster sf-pilot,
+# in namespace p00-bookstore, on top of the objects Part 00 ch.07 step 6 creates
+# (the same namespace, ServiceAccount and Pod, from the same manifests). The
+# chapter's bookstore namespace ran as p00-bookstore, because sf-pilot is shared,
+# and the kubectl context is kind-sf-pilot. Steps 1 and 2 no longer create the
+# namespace, the ServiceAccount or the Pod, so they report unchanged.
+# Steps 3 to 7 are from the earlier run, which started from a fresh bookstore
+# namespace and reached the same state before step 3: one catalog Pod from
+# raw-manifests/01-catalog-pod.yaml, Running. Their output is carried over.
+## step 1: check the namespace and ServiceAccount from Part 00 ch.07
+$ kubectl get namespace p00-bookstore --show-labels
+NAME            STATUS   AGE   LABELS
+p00-bookstore   Active   61s   app.kubernetes.io/part-of=bookstore,kubernetes.io/metadata.name=p00-bookstore,pod-security.kubernetes.io/enforce=restricted,pod-security.kubernetes.io/warn=restricted
+$ kubectl get serviceaccount catalog-sa -n p00-bookstore
+NAME         AGE
+catalog-sa   59s
+$ kubectl config set-context --current --namespace=p00-bookstore
+Context "kind-sf-pilot" modified.
 
 ## step 2
 $ kubectl apply -f examples/bookstore/raw-manifests/01-catalog-pod.yaml && kubectl wait --for=condition=Ready pod/catalog --timeout=90s
-pod/catalog created
+pod/catalog unchanged
 pod/catalog condition met
 
 $ kubectl get pod catalog
 NAME      READY   STATUS    RESTARTS   AGE
-catalog   1/1     Running   0          2s
+catalog   1/1     Running   0          60s
 
 $ kubectl get pod catalog -o jsonpath='{range .status.conditions[*]}{.type}={.status}{"\n"}{end}'
 PodReadyToStartContainers=True

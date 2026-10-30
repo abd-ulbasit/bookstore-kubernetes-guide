@@ -74,7 +74,7 @@ appear here. The system threats each have their own chapter.
 |---|---|---|
 | A threat model written once and never updated describes a cluster that no longer exists. | The model is a file in the repository. A change to a workload changes the model in the same pull request. | `examples/bookstore/THREAT-MODEL.md`, and 05.00 <!-- link-later: 05.00 --> |
 | An insecure example copied into a real namespace. | Insecure blocks appear only in Part 05 labs and the capstone overlay. The gates fail any other placement, in both directions. | 05.00 <!-- link-later: 05.00 --> |
-| A control listed in the model that nothing enforces. | Each row states a status: `baseline`, `cluster` or `open`. The baseline fields are the ones admission and the static gate test. | Section "The baseline answers specific threats" |
+| A control listed in the model that nothing enforces. | Each row states a status: `baseline`, `review`, `cluster` or `open`. A `baseline` field is one that admission or the static gate tests. A `review` field is one that only a reader checks. The table under "The baseline answers specific threats" names the enforcer of each field. | Section "The baseline answers specific threats" |
 | An exception with no reason and no expiry lives forever. | One registry. Each entry records a reason, the chapter that explains it, and an expiry within 12 months. | 05.09 <!-- link-later: 05.09 --> |
 
 ## What the bookstore protects
@@ -95,13 +95,14 @@ a Gateway. Each row below is an asset the model protects.
 | A7 | Storefront availability | An outage is the product being unavailable. |
 | A8 | Audit records of API requests | Without them, nobody can say who changed what. |
 
-Six actors can reach these assets. An anonymous client reaches the Gateway
-and the public routes behind it, and nothing else. An operator with a kubeconfig reaches the API server with
-whatever RBAC grants. CI reaches the API server, the registry and Git. Code
-inside a Pod, after a dependency is compromised, reaches the Pod's filesystem,
-its network and, if a token is mounted, the API. Someone with root on a worker
-node reaches the kubelet, the runtime socket and every Pod on that node. A
-supplier of an upstream image reaches every cluster that pulls it.
+Six actors can reach these assets. An anonymous client (R1) reaches the
+Gateway and the public routes behind it, and nothing else. An operator with a
+kubeconfig (R2) reaches the API server with whatever RBAC grants. CI (R3)
+reaches the API server, the registry and Git. Code inside a Pod, after a
+dependency is compromised (R4), reaches the Pod's filesystem, its network and,
+if a token is mounted, the API. Someone with root on a worker node (R5) reaches
+the kubelet, the runtime socket and every Pod on that node. A supplier of an
+upstream image (R6) reaches every cluster that pulls it.
 
 ## Entry points
 
@@ -114,10 +115,25 @@ lists each one and says what stands in front of it.
 | EP2 | kube-apiserver on port 6443 | Authentication, RBAC, admission. |
 | EP3 | kubelet API on port 10250 | Anonymous auth off, webhook authorization (I3, E5). |
 | EP4 | Container runtime socket, when a Pod mounts it | Refused by Pod Security `restricted` (E4). |
-| EP5 | Image pulls from a registry | Digest pins (T2). |
+| EP5 | Image pulls from a registry | Digest pins, checked by review (T2). |
 | EP6 | Git push and CI apply | Review and `kubectl diff` before apply (T3). |
 | EP7 | kubeconfig on a workstation or CI runner | Short-lived credentials (S2). |
 | EP8 | Pod-to-Pod traffic | Default-deny NetworkPolicy, added in 02.06 (S3). |
+
+The trust boundaries are the lines the arrows cross in the diagram above. The
+IDs match `THREAT-MODEL.md`, which holds the full model.
+
+| ID | Trust boundary | Crossed by |
+|----|----------------|------------|
+| TB1 | Internet to the Gateway | R1 |
+| TB2 | Gateway to a Pod in the `bookstore` namespace | R1, after TB1 |
+| TB3 | Pod to the API server | R4 with a mounted token, R2 |
+| TB4 | Container to the node kernel | R4 |
+| TB5 | API server to the kubelet | R2 for exec and logs, R5 |
+| TB6 | API server to etcd | R5 on a control-plane node |
+| TB7 | CI and workstations to the cluster | R2, R3 |
+| TB8 | Registry to the node | R6 |
+| TB9 | Namespace to namespace | R4 |
 
 ## STRIDE pass
 
@@ -129,11 +145,11 @@ full list, with IDs, is in `THREAT-MODEL.md`.
 
 | Letter | Category | Bookstore example | Control | Status |
 |---|---|---|---|---|
-| S | Spoofing | A Pod calls the API as another identity (S1) | Its own ServiceAccount, `automountServiceAccountToken: false` | baseline |
+| S | Spoofing | A Pod calls the API as another identity (S1) | Its own ServiceAccount, `automountServiceAccountToken: false` | review |
 | T | Tampering | A process rewrites its own image (T1) | `readOnlyRootFilesystem: true`, writable `emptyDir` for `/tmp` | baseline |
-| R | Repudiation | An apply leaves no record of who made it (R-1) | API server audit policy | open until 05.08 <!-- link-later: 05.08 --> |
+| R | Repudiation | An apply leaves no record of who made it (RP1) | API server audit policy | open until 05.08 <!-- link-later: 05.08 --> |
 | I | Information disclosure | A Secret read straight from etcd (I1) | Encryption at rest, and only the API server reaches etcd | cluster |
-| D | Denial of service | One Pod exhausts a node's memory (D1) | Requests and a memory limit | baseline |
+| D | Denial of service | One Pod exhausts a node's memory (D1) | Requests and a memory limit | review |
 | E | Elevation of privilege | A root process reaches host resources (E1) | `runAsNonRoot: true`, UID 65532 | baseline |
 
 The Denial of service row for traffic floods (D2) has no control yet, and the
@@ -141,11 +157,11 @@ model says so.
 
 ## The Kubernetes threat matrix as a map of attacker goals
 
-The threat matrix for Kubernetes began as Microsoft's ATT&CK-style map of
-container attacks in 2020. It grew into the MITRE ATT&CK for Containers
-matrix, a joint effort with MITRE. Its tactics run from left to right, from
-getting in to causing impact. Read them as a set of goals, not a checklist of
-techniques. Each goal tells you what an attacker wants, and the model tells
+Microsoft published a threat matrix for Kubernetes in 2020, which its post
+calls an ATT&CK-like matrix. MITRE's ATT&CK for Containers covers similar
+ground, and the tactic names below come from it. Its tactics run from left to
+right, from getting in to causing impact. Read them as a set of goals, not a
+checklist of techniques. Each goal tells you what an attacker wants, and the model tells
 you which row answers it.
 
 | Goal (tactic) | How it could show up in the bookstore | Threats |
@@ -154,7 +170,7 @@ you which row answers it.
 | Execution | A new workload or a shell started in a Pod (T1610, Deploy Container) | T1, E3 |
 | Persistence | A dropped binary, or a changed spec that survives a restart | T1, T3 |
 | Privilege Escalation | Root in a container, a setuid binary, a capability, a privileged Pod, or escape to the host (T1611, Escape to Host) | E1 to E5 |
-| Stealth | A change that leaves no audit record or avoids review | R-1, T3 |
+| Stealth | A change that leaves no audit record or avoids review | RP1, T3 |
 | Defense Impairment | A policy, gate or NetworkPolicy switched off | T3, S3, E4 |
 | Credential Access | A Secret, a mounted token or etcd read directly | I1, I2, I4, S2 |
 | Discovery | Listing Pods or reaching the kubelet from inside | I3, S1 |
@@ -162,26 +178,28 @@ you which row answers it.
 | Impact | Corrupted or deleted records, exhausted resources | A1, D1, D2 |
 
 Sources: [the MITRE ATT&CK for Containers matrix](https://attack.mitre.org/matrices/enterprise/containers/),
-and [Microsoft's 2020 threat matrix for Kubernetes](https://www.microsoft.com/en-us/security/blog/2020/04/02/attack-matrix-kubernetes/),
-where the matrix began.
+and [Microsoft's 2020 threat matrix for Kubernetes](https://www.microsoft.com/en-us/security/blog/2020/04/02/attack-matrix-kubernetes/).
 
 ## The baseline answers specific threats
 
 Every workload in the guide carries the same baseline, field by field, from
 01.01 onward. Each field answers one or more threats from the model. The
-table pairs them. Each link goes to the field's own explanation in 01.01.
+table pairs each field with its threat and with the control that checks it.
+Each link goes to the field's own explanation in 01.01.
 
-| Baseline field | Threat it answers | Explained at |
-|---|---|---|
-| `runAsNonRoot: true`, `runAsUser: 65532` | E1: root reaches host resources | [01.01](../01-core-workloads/01-pods.md#baseline-run-as) |
-| `allowPrivilegeEscalation: false` | E2: a setuid binary gains privileges | [01.01](../01-core-workloads/01-pods.md#baseline-privilege-escalation) |
-| `capabilities.drop: ["ALL"]` | E3: a capability reaches the kernel | [01.01](../01-core-workloads/01-pods.md#baseline-capabilities) |
-| `seccompProfile: RuntimeDefault` | E3: a syscall reaches the kernel | [01.01](../01-core-workloads/01-pods.md#baseline-seccomp) |
-| `readOnlyRootFilesystem: true` with an `emptyDir` | T1: a process rewrites its image | [01.01](../01-core-workloads/01-pods.md#baseline-read-only-root) |
-| Image pinned by digest | T2: an image is replaced under the same tag | [01.01](../01-core-workloads/01-pods.md#baseline-image-digest) |
-| `automountServiceAccountToken: false` and a ServiceAccount of its own | S1, I4: a token speaks for the Pod | [01.01](../01-core-workloads/01-pods.md#baseline-service-account) |
-| Requests and a memory limit | D1: one Pod exhausts a node | [01.01](../01-core-workloads/01-pods.md#baseline-resources) |
-| `restricted` labels on the namespace | E4: privileged mode, host namespaces or `hostPath` | [01.01](../01-core-workloads/01-pods.md#baseline-namespace) |
+| Baseline field | Threat it answers | Enforced by | Explained at |
+|---|---|---|---|
+| `runAsNonRoot: true`, `runAsUser: 65532` | E1: root reaches host resources | Admission (`restricted`) and the static gate (KSV-0012, plus a parsed-YAML check) | [01.01](../01-core-workloads/01-pods.md#baseline-run-as) |
+| `runAsGroup: 65532` | E1: a root group reaches host resources | Review only | [01.01](../01-core-workloads/01-pods.md#baseline-run-as) |
+| `allowPrivilegeEscalation: false` | E2: a setuid binary gains privileges | Admission (`restricted`) and the static gate (KSV-0001) | [01.01](../01-core-workloads/01-pods.md#baseline-privilege-escalation) |
+| `capabilities.drop: ["ALL"]` | E3: a capability reaches the kernel | Admission (`restricted`) and the static gate (KSV-0003) | [01.01](../01-core-workloads/01-pods.md#baseline-capabilities) |
+| `seccompProfile: RuntimeDefault` | E3: a syscall reaches the kernel | Admission (`restricted`) and the static gate (KSV-0030) | [01.01](../01-core-workloads/01-pods.md#baseline-seccomp) |
+| `readOnlyRootFilesystem: true` | T1: a process rewrites its image | The static gate (KSV-0014). Admission does not check it | [01.01](../01-core-workloads/01-pods.md#baseline-read-only-root) |
+| `emptyDir` for each writable path | T1: a process writes to its image | Review only | [01.01](../01-core-workloads/01-pods.md#baseline-read-only-root) |
+| Third-party images pinned by digest | T2: an image is replaced under the same tag | Review only. The locally built catalog image keeps its build tag, as 00.07 loads it | [01.01](../01-core-workloads/01-pods.md#baseline-image-digest) |
+| `automountServiceAccountToken: false` and a ServiceAccount of its own | S1, I4: a token speaks for the Pod | Review only | [01.01](../01-core-workloads/01-pods.md#baseline-service-account) |
+| Requests and a memory limit | D1: one Pod exhausts a node | Review only | [01.01](../01-core-workloads/01-pods.md#baseline-resources) |
+| `restricted` labels on the namespace | E4: privileged mode, host namespaces or `hostPath` | Admission, once the namespace carries the label | [01.01](../01-core-workloads/01-pods.md#baseline-namespace) |
 
 The namespace label is a control the API server enforces for every Pod in the
 namespace, whatever its author intended. Pod Security Admission at the
@@ -196,10 +214,13 @@ namespace, whatever its author intended. Pod Security Admission at the
 - every volume is one of a short list of types, such as `emptyDir`,
   `configMap` and `secret`.
 
-`readOnlyRootFilesystem` and `automountServiceAccountToken` are not part of
-the `restricted` level. Admission does not refuse a Pod that omits them. The
-baseline sets them anyway, because T1 and S1 need them, and the static gate
-checks `readOnlyRootFilesystem` among its five core checks. Knowing which
+`readOnlyRootFilesystem` is not part of the `restricted` level, so admission
+never refuses a Pod that omits it. The static gate checks it, as KSV-0014,
+among its five core checks. The gate reads only those five checks and any
+HIGH or CRITICAL finding. A missing memory limit (KSV-0018, LOW) or a Pod
+that sets `automountServiceAccountToken: true` (KSV-0036, MEDIUM) does not
+fail it. The other baseline fields, the `emptyDir`, the digest pin and the
+ServiceAccount are set by the manifest and checked by review. Knowing which
 control enforces which field is what keeps a baseline from being a wish list.
 
 ## How the guide marks insecure examples and registers exceptions
@@ -319,7 +340,9 @@ sed '/allowPrivilegeEscalation: false/d' \
   | kubectl apply -n threat-demo -f -
 ```
 
-The server refuses the Pod. The field is the one that answers E2.
+The server refuses the Pod. The field is the one that answers E2. Chapter 06
+shows a different denial, for a privileged Pod. This one names a single
+field.
 
 <!-- gate: output -->
 ```text
@@ -332,55 +355,12 @@ kubelet ever saw it, and no container started.
 ### 5. Apply the baseline Pod
 
 Now apply the Pod the guide ships. The file is
-`examples/bookstore/raw-manifests/01-catalog-pod.yaml`, and this is its full
-content, with each guard annotated by the threat it answers. Nothing is
-omitted: every field the baseline needs is here.
-
-```yaml
-apiVersion: v1
-kind: Pod
-metadata:
-  name: catalog
-  labels:
-    app: catalog
-    component: backend
-spec:
-  serviceAccountName: catalog-sa          # its own identity (S1)
-  automountServiceAccountToken: false     # no token mounted (S1, I4)
-  securityContext:
-    runAsNonRoot: true                    # refuses to start as root (E1)
-    runAsUser: 65532                      # the UID the image declares (E1)
-    runAsGroup: 65532
-    seccompProfile:
-      type: RuntimeDefault                # syscall filter (E3)
-  containers:
-    - name: catalog
-      image: bookstore/catalog:dev
-      imagePullPolicy: IfNotPresent       # the image loaded in 00.07
-      ports:
-        - name: http
-          containerPort: 8080
-      env:
-        - name: PORT
-          value: "8080"
-      securityContext:
-        allowPrivilegeEscalation: false   # no setuid gain (E2)
-        readOnlyRootFilesystem: true      # the image cannot be rewritten (T1)
-        capabilities:
-          drop: ["ALL"]                   # no capabilities (E3)
-      resources:
-        requests:
-          cpu: 50m
-          memory: 64Mi
-        limits:
-          memory: 128Mi                   # bounded memory (D1)
-      volumeMounts:
-        - name: tmp
-          mountPath: /tmp                 # the only writable path (T1)
-  volumes:
-    - name: tmp
-      emptyDir: {}
-```
+`examples/bookstore/raw-manifests/01-catalog-pod.yaml`. [Chapter
+06](06-declarative-api-model.md#hands-on-with-the-bookstore-the-first-real-manifest)
+lists it in full and walks through each field, so this chapter does not
+reprint it. Each
+guard in it answers a threat in the table under "The baseline answers specific
+threats" above.
 
 ```sh
 kubectl apply -n threat-demo -f examples/bookstore/raw-manifests/01-catalog-pod.yaml
@@ -405,8 +385,10 @@ catalog   1/1     Running   0          43s
 ```
 
 The Pod is admitted. The namespace refused the broken copy only because a
-guard was missing. With every guard present, the same admission check passes,
-and the rest of the baseline is the set of checks that let the Pod through.
+guard was missing. With every guard present, the same admission check passes.
+The Pod passes the `restricted` checks. The other baseline fields are not
+checked by admission. The static gate checks `readOnlyRootFilesystem`, and the
+rest are set by the manifest and checked by review, as the table above says.
 
 ### 6. Clean up
 
@@ -419,9 +401,10 @@ kubectl delete namespace threat-demo
 ## How it works under the hood
 
 Every request to the API server passes through the same steps in order:
-authentication, authorization, admission (mutating then validating), schema
-validation, and storage. Pod Security Admission is a validating admission
-plugin. It reads the namespace labels when the request arrives and evaluates
+authentication, authorization, mutating admission, schema validation,
+validating admission, and storage. Pod Security Admission is a validating
+admission plugin, so it runs after schema validation. Chapter 00.04 gives the
+same order. It reads the namespace labels when the request arrives and evaluates
 the Pod against the level and version in those labels. A refused request is
 never stored. That is why the Pod in step 4 never existed as an object, and
 why no kubelet saw it.
@@ -519,8 +502,10 @@ Setup checklist:
 
    The static gate checks it among its five core checks, as KSV-0014. The
    field answers T1: a process rewrites its image or drops a binary. The
-   baseline sets it, and `restricted` does not require it, so the gate is the
-   control that keeps it set.
+   baseline sets it, and `restricted` does not require it. The gate protects
+   the guide's own manifests: it fails a chapter whose YAML omits the field.
+   It does not stop a reader's cluster from running a Pod without it. On your
+   own cluster, the field is a review item.
 
    </details>
 
@@ -555,8 +540,8 @@ Setup checklist:
 - Kubernetes, [Pod Security Standards](https://kubernetes.io/docs/concepts/security/pod-security-standards/):
   the `restricted` controls and their required settings.
 - MITRE, [ATT&CK for Containers](https://attack.mitre.org/matrices/enterprise/containers/):
-  the matrix behind the attacker-goal table.
+  the matrix that the tactic names in the attacker-goal table come from.
 - Microsoft, [Threat matrix for Kubernetes](https://www.microsoft.com/en-us/security/blog/2020/04/02/attack-matrix-kubernetes/)
-  (2020): where the matrix began.
+  (2020): an ATT&CK-like matrix for Kubernetes, published before MITRE's.
 - Adam Shostack, *Threat Modeling: Designing for Security* (Wiley, 2014): the
   source of the STRIDE questions.

@@ -488,12 +488,26 @@ command terminated with exit code 1
 ```
 
 A plugin that ignored the policy would have printed the same JSON as before, so
-the timeout is the evidence. Remove the policy and the same request works again.
-Then remove the probe:
+the timeout is the evidence. Remove the policy:
 
 ```sh
 kubectl delete networkpolicy default-deny-ingress -n bookstore
+```
+
+Now the same request works again:
+
+```sh
 kubectl exec -n bookstore probe -- wget -qO- -T 3 "http://$CATALOG_IP:8080/healthz"
+```
+
+<!-- gate: output -->
+```text
+{"status":"ok"}
+```
+
+Then remove the probe:
+
+```sh
 kubectl delete pod probe -n bookstore
 ```
 

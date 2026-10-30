@@ -441,10 +441,11 @@ runc 1.4.3 is later than 1.1.12, the first release with the fix for
 CVE-2024-21626, so this node includes that fix. Check each runtime component
 against its own advisories, not only this one.
 
-### Which sandbox the app container joined
+### Which sandbox a container belongs to
 
-`crictl pods` and `crictl ps` show the pause sandbox and the container that
-joined it. The container's POD ID is the sandbox's ID:
+`crictl pods` and `crictl ps` show the pause sandbox and the containers that
+belong to it. Each container's POD ID matches its sandbox's ID. The output
+below is from kube-proxy, not the catalog app, and it claims only that match:
 
 ```sh
 docker exec bookstore-control-plane crictl pods --name kube-proxy
@@ -463,8 +464,10 @@ CONTAINER           IMAGE               CREATED             STATE               
 b660e38fe6302       d6a28daf3e6b0       8 hours ago         Running             kube-proxy          0                   a47e149f809eb       kube-proxy-pb9p9    kube-system
 ```
 
-The app container joined the namespaces that the sandbox holds. That join is
-the pause container's job, described above.
+The two outputs show the same POD ID, `a47e149f809eb`. They do not show which
+namespaces the container uses. kube-proxy runs with host networking, so its
+network namespace is the node's own, not the sandbox's. Sharing namespaces is
+the pause container's job, described above, but this output does not show it.
 
 ## How it works under the hood
 
