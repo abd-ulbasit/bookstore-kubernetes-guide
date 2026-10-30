@@ -82,7 +82,15 @@ jobs:
           # fixture is broken on purpose (07.03): a vulnerable dependency, a
           # privileged Pod, fake tokens. bookstore-pipeline-check.yml proves
           # the scanners still catch it, so the Security tab need not list it.
-          skip-dirs: 'node_modules,.terraform,site,full-guide/examples/bookstore/ci/fixtures'
+          # The gates' own control fixtures (.github/scripts/gates/fixtures)
+          # are skipped for the same reason: they are Deployments that break
+          # every core check on purpose. Skipping them does not blind the
+          # gate. static_gate.py scans them before it trusts any other result
+          # and exits 2 unless Trivy flags each one, and security-gates.yml
+          # runs that on every pull request. Listed here, they showed up as
+          # new HIGH alerts (KSV-0014, KSV-0118) and failed the PR's Trivy
+          # check for findings that are the whole point of the files.
+          skip-dirs: 'node_modules,.terraform,site,full-guide/examples/bookstore/ci/fixtures,.github/scripts/gates/fixtures'
 
       - name: Upload Trivy SARIF to GitHub Security
         uses: github/codeql-action/upload-sarif@9b3254085494b55a0f7c4c2b3d2d52cc712ce370 # v4.39.1
