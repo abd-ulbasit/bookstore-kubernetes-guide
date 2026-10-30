@@ -24,6 +24,8 @@ on:
       - 'full-guide/examples/bookstore/ci/**'
       - '.github/workflows/bookstore-pipeline.yml'
       - '.github/workflows/bookstore-pipeline-check.yml'
+      - '.github/workflows/bookstore-release.yml'
+      - '.github/workflows/security-gates.yml'
   workflow_dispatch: {}
 
 permissions: {}
@@ -61,7 +63,7 @@ jobs:
       dast: ${{ matrix.service != 'payments-worker' }}
       # The whole-repo stages run once, on one leg.
       repo-wide: ${{ matrix.service == 'catalog' }}
-      workflow-files: .github/workflows/bookstore-pipeline.yml .github/workflows/bookstore-pipeline-check.yml
+      workflow-files: .github/workflows/bookstore-pipeline.yml .github/workflows/bookstore-pipeline-check.yml .github/workflows/bookstore-release.yml .github/workflows/security-gates.yml
 
   controls:
     name: control (${{ matrix.tool }})

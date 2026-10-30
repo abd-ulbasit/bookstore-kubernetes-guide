@@ -1,0 +1,432 @@
+name: security-gates
+
+# The security-first gates (docs/security-first-authoring.md, section 8), run
+# on real GitHub runners so no number in the guide rests on one laptop.
+#
+#   gates-test  the gate scripts' own unit tests
+#   static      G1+G2: Trivy's five core checks on every manifest in the guide
+#   admission   G1+G3: a server-side dry run into a `restricted` namespace, on
+#               a kind v0.33.0 cluster
+#   chapters    reads the two reports above and decides the verdict (below)
+#   registry    G5: the exceptions registry, both ways
+#   evidence    G7: every chapter that has a lab transcript
+#   images      builds the four Bookstore images for the runtime gate
+#   runtime     G4: deploys the Bookstore five ways into `restricted`
+#               namespaces on kind and waits for every workload
+#
+# REPORT MODE. Most of the guide is not rewritten yet, so most chapters still
+# fail G2 and G3. A chapter that fails is listed in the run summary and does
+# not fail the job, unless it is named in .github/security-gates-enforced.txt.
+# An enforced chapter that fails any gate, or that no gate reports on, fails
+# the job. A gate that cannot trust itself (exit 2) always fails it. Add a
+# chapter to the enforced list in the pull request that finishes it.
+#
+# Only the chapter gates are in report mode. The unit tests, the registry,
+# the evidence check and the runtime gate always fail the job: they judge
+# things that are already finished.
+#
+# Trivy is installed from its release tarball, checked against the SHA-256
+# below. Resolve a new version's checksum from the release's checksums file,
+# and bump the version, the checksum and security-scan.yml together.
+#
+# Every action is pinned to a commit SHA; the trailing comment names the
+# release. Permissions start empty and each job asks for what it needs.
+
+on:
+  pull_request:
+    paths:
+      - 'full-guide/**'
+      - '.github/scripts/gates/**'
+      - '.github/security-gates-enforced.txt'
+      - '.github/workflows/security-gates.yml'
+      - '.trivyignore.yaml'
+      - 'security/**'
+      - 'Makefile'
+  push:
+    branches: [main]
+    paths:
+      - 'full-guide/**'
+      - '.github/scripts/gates/**'
+      - '.github/security-gates-enforced.txt'
+      - '.github/workflows/security-gates.yml'
+      - '.trivyignore.yaml'
+      - 'security/**'
+      - 'Makefile'
+  workflow_dispatch: {}
+
+permissions: {}
+
+concurrency:
+  group: security-gates-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  TRIVY_VERSION: '0.76.1'
+  # sha256 of trivy_0.76.1_Linux-64bit.tar.gz, from the release's checksums file.
+  TRIVY_SHA256: 'c7cbe3137fb8a48a17574bede3dd6beb16742d1e9772929940fc90082c39d9c0'
+  PYYAML_VERSION: '6.0.3'
+  # The kind node image kind v0.33.0 publishes for Kubernetes 1.37.0, by digest.
+  KIND_NODE_IMAGE: 'kindest/node:v1.37.0@sha256:a1ed56cfb0e7b93589bdf97c8cd566405a265939e3620fc4f5de89adff580ae5'
+  BOOKSTORE: full-guide/examples/bookstore
+
+jobs:
+  gates-test:
+    name: gates-test
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    permissions:
+      contents: read
+    steps:
+      - uses: step-security/harden-runner@dc2769abcc0fcfbadfc1df54081c1608579ef6b2 # v2.22.2
+        with:
+          egress-policy: audit
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0 # v7.1.0
+        with:
+          python-version: '3.12'
+      - run: pip install "pyyaml==${PYYAML_VERSION}"
+      - uses: azure/setup-helm@9bc31f4ebc9c6b171d7bfbaa5d006ae7abdb4310 # v5.0.1
+        with:
+          version: 'v3.22.1'
+      - uses: azure/setup-kubectl@bda439f5f36b99b262ebdcd3613869bddb064c8e # v5.2.0
+        with:
+          version: 'v1.37.2'
+      - name: Install Trivy, checked against its pinned SHA-256
+        run: |
+          set -euo pipefail
+          curl --fail --silent --show-error --location --output trivy.tar.gz \
+            "https://github.com/aquasecurity/trivy/releases/download/v${TRIVY_VERSION}/trivy_${TRIVY_VERSION}_Linux-64bit.tar.gz"
+          echo "${TRIVY_SHA256}  trivy.tar.gz" | sha256sum --check --strict
+          sudo tar --extract --gzip --file trivy.tar.gz --directory /usr/local/bin trivy
+          rm trivy.tar.gz
+          trivy --version
+      - name: Gate unit tests (Trivy, Helm and kubectl present, so none may skip)
+        run: make gates-test PY=python
+
+  static:
+    name: G1+G2 static, whole guide
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    permissions:
+      contents: read
+    outputs:
+      exit: ${{ steps.gate.outputs.exit }}
+    steps:
+      - uses: step-security/harden-runner@dc2769abcc0fcfbadfc1df54081c1608579ef6b2 # v2.22.2
+        with:
+          egress-policy: audit
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0 # v7.1.0
+        with:
+          python-version: '3.12'
+      - run: pip install "pyyaml==${PYYAML_VERSION}"
+      - uses: azure/setup-helm@9bc31f4ebc9c6b171d7bfbaa5d006ae7abdb4310 # v5.0.1
+        with:
+          version: 'v3.22.1'
+      - uses: azure/setup-kubectl@bda439f5f36b99b262ebdcd3613869bddb064c8e # v5.2.0
+        with:
+          version: 'v1.37.2'
+      - name: Install Trivy, checked against its pinned SHA-256
+        run: |
+          set -euo pipefail
+          curl --fail --silent --show-error --location --output trivy.tar.gz \
+            "https://github.com/aquasecurity/trivy/releases/download/v${TRIVY_VERSION}/trivy_${TRIVY_VERSION}_Linux-64bit.tar.gz"
+          echo "${TRIVY_SHA256}  trivy.tar.gz" | sha256sum --check --strict
+          sudo tar --extract --gzip --file trivy.tar.gz --directory /usr/local/bin trivy
+          rm trivy.tar.gz
+      # The scripts run directly, not through make: GNU Make turns the gate's
+      # exit 1 (a chapter failed) and exit 2 (the gate aborted) into the same 2.
+      - name: G1+G2, the whole guide and the example trees
+        id: gate
+        run: |
+          set -euo pipefail
+          blocks="$(mktemp -d)"
+          mkdir -p reports
+          python .github/scripts/gates/extract_blocks.py --root full-guide --out "$blocks"
+          code=0
+          python .github/scripts/gates/static_gate.py \
+            --manifest "$blocks/manifest.json" \
+            --also full-guide/examples \
+            --allow .github/scripts/gates/not-evaluated.allow \
+            --report reports/static.json || code=$?
+          echo "static gate exit code: $code"
+          echo "exit=$code" >> "$GITHUB_OUTPUT"
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        if: always()
+        with:
+          name: gate-report-static
+          path: reports/static.json
+          retention-days: 14
+          if-no-files-found: warn
+
+  admission:
+    name: G1+G3 admission, whole guide (kind)
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    permissions:
+      contents: read
+    outputs:
+      exit: ${{ steps.gate.outputs.exit }}
+    steps:
+      - uses: step-security/harden-runner@dc2769abcc0fcfbadfc1df54081c1608579ef6b2 # v2.22.2
+        with:
+          egress-policy: audit
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0 # v7.1.0
+        with:
+          python-version: '3.12'
+      - run: pip install "pyyaml==${PYYAML_VERSION}"
+      - uses: azure/setup-kubectl@bda439f5f36b99b262ebdcd3613869bddb064c8e # v5.2.0
+        with:
+          version: 'v1.37.2'
+      - uses: helm/kind-action@1544676c07bb3570fcb70166beaa07c4528fd4aa # v1.15.1
+        with:
+          version: v0.33.0
+          node_image: ${{ env.KIND_NODE_IMAGE }}
+          cluster_name: gates
+      - name: G1+G3, every manifest against a restricted namespace
+        id: gate
+        run: |
+          set -euo pipefail
+          blocks="$(mktemp -d)"
+          mkdir -p reports
+          kubectl version
+          python .github/scripts/gates/extract_blocks.py --root full-guide --out "$blocks"
+          code=0
+          python .github/scripts/gates/admission_gate.py \
+            --manifest "$blocks/manifest.json" \
+            --kubectl kubectl \
+            --allow .github/scripts/gates/not-evaluated.allow \
+            --report reports/admission.json || code=$?
+          echo "admission gate exit code: $code"
+          echo "exit=$code" >> "$GITHUB_OUTPUT"
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        if: always()
+        with:
+          name: gate-report-admission
+          path: reports/admission.json
+          retention-days: 14
+          if-no-files-found: warn
+
+  chapters:
+    name: chapters (enforced list, report mode for the rest)
+    needs: [static, admission]
+    if: always() && !cancelled()
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      contents: read
+    steps:
+      - uses: step-security/harden-runner@dc2769abcc0fcfbadfc1df54081c1608579ef6b2 # v2.22.2
+        with:
+          egress-policy: audit
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0 # v7.1.0
+        with:
+          python-version: '3.12'
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          pattern: gate-report-*
+          path: reports
+      - name: Verdict
+        env:
+          STATIC_RESULT: ${{ needs.static.result }}
+          STATIC_EXIT: ${{ needs.static.outputs.exit }}
+          ADMISSION_RESULT: ${{ needs.admission.result }}
+          ADMISSION_EXIT: ${{ needs.admission.outputs.exit }}
+        run: |
+          set -euo pipefail
+          if [ "$STATIC_RESULT" != success ] || [ "$ADMISSION_RESULT" != success ]; then
+            echo "::error::a gate job did not finish (static: ${STATIC_RESULT}, admission: ${ADMISSION_RESULT}), so there is nothing to judge"
+            exit 1
+          fi
+          python .github/scripts/gates/chapter_summary.py \
+            --gate "G2:static:reports/gate-report-static/static.json:${STATIC_EXIT}" \
+            --gate "G3:admission:reports/gate-report-admission/admission.json:${ADMISSION_EXIT}" \
+            --enforced .github/security-gates-enforced.txt \
+            --out chapter-summary.md
+          cat chapter-summary.md >> "$GITHUB_STEP_SUMMARY"
+
+  registry:
+    name: G5 exceptions registry
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    permissions:
+      contents: read
+    steps:
+      - uses: step-security/harden-runner@dc2769abcc0fcfbadfc1df54081c1608579ef6b2 # v2.22.2
+        with:
+          egress-policy: audit
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0 # v7.1.0
+        with:
+          python-version: '3.12'
+      - run: pip install "pyyaml==${PYYAML_VERSION}"
+      - uses: azure/setup-helm@9bc31f4ebc9c6b171d7bfbaa5d006ae7abdb4310 # v5.0.1
+        with:
+          version: 'v3.22.1'
+      - uses: azure/setup-kubectl@bda439f5f36b99b262ebdcd3613869bddb064c8e # v5.2.0
+        with:
+          version: 'v1.37.2'
+      - name: Install Trivy, checked against its pinned SHA-256
+        run: |
+          set -euo pipefail
+          curl --fail --silent --show-error --location --output trivy.tar.gz \
+            "https://github.com/aquasecurity/trivy/releases/download/v${TRIVY_VERSION}/trivy_${TRIVY_VERSION}_Linux-64bit.tar.gz"
+          echo "${TRIVY_SHA256}  trivy.tar.gz" | sha256sum --check --strict
+          sudo tar --extract --gzip --file trivy.tar.gz --directory /usr/local/bin trivy
+          rm trivy.tar.gz
+      - name: G5, both registries against the tree
+        run: make gates-registry PY=python
+
+  evidence:
+    name: G7 lab evidence
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      contents: read
+    steps:
+      - uses: step-security/harden-runner@dc2769abcc0fcfbadfc1df54081c1608579ef6b2 # v2.22.2
+        with:
+          egress-policy: audit
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0 # v7.1.0
+        with:
+          python-version: '3.12'
+      - run: pip install "pyyaml==${PYYAML_VERSION}"
+      # A transcript is named PART-CHAPTER.txt, for example 05-02.txt for
+      # 05-security/02-pod-security.md. A transcript means the chapter's lab
+      # has run, so its output blocks must match it, with no report mode.
+      - name: Every chapter that has a transcript
+        run: |
+          set -euo pipefail
+          shopt -s nullglob
+          checked=0
+          failed=0
+          for transcript in full-guide/examples/security-lab/evidence/*.txt; do
+            base="$(basename "$transcript" .txt)"
+            chapters=(full-guide/"${base%%-*}"-*/"${base#*-}"-*.md)
+            if [ "${#chapters[@]}" -ne 1 ]; then
+              echo "::error::${transcript} names ${#chapters[@]} chapters (${chapters[*]:-none}); it must name exactly one"
+              failed=$((failed + 1))
+              continue
+            fi
+            echo "== ${chapters[0]}"
+            python .github/scripts/gates/evidence_gate.py --chapter "${chapters[0]}" --transcript "$transcript" || failed=$((failed + 1))
+            checked=$((checked + 1))
+          done
+          echo "chapters checked: ${checked}, failed: ${failed}"
+          [ "$checked" -gt 0 ] || { echo "::error::no transcript found, so nothing was checked"; exit 1; }
+          [ "$failed" -eq 0 ]
+
+  # ---------------------------------------------------------------------------
+  # G4, the runtime gate. The images are built once here and loaded into each
+  # kind cluster, so what runs is what the Dockerfiles build. Nothing is
+  # pushed anywhere.
+  # ---------------------------------------------------------------------------
+  images:
+    name: image (${{ matrix.service }})
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    permissions:
+      contents: read
+    strategy:
+      fail-fast: false
+      matrix:
+        service: [catalog, orders, payments-worker, storefront]
+    steps:
+      - uses: step-security/harden-runner@dc2769abcc0fcfbadfc1df54081c1608579ef6b2 # v2.22.2
+        with:
+          egress-policy: audit
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - run: mkdir -p image-out
+      - uses: docker/setup-buildx-action@f87e5991a6d7451dcb8d9637bfbc97413f497069 # v4.4.1
+      - name: Build the image as a tar, with the tag the manifests use
+        uses: docker/build-push-action@c3c9e263c25d99ce0380d002d59b67737d91b0dc # v7.4.0
+        with:
+          context: ${{ env.BOOKSTORE }}/app/${{ matrix.service }}
+          push: false
+          tags: bookstore/${{ matrix.service }}:dev
+          outputs: type=docker,dest=image-out/${{ matrix.service }}.tar
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: runtime-image-${{ matrix.service }}
+          path: image-out/${{ matrix.service }}.tar
+          retention-days: 1
+          if-no-files-found: error
+
+  runtime:
+    name: G4 runtime (${{ matrix.variant }})
+    needs: images
+    runs-on: ubuntu-latest
+    timeout-minutes: 40
+    permissions:
+      contents: read
+    strategy:
+      fail-fast: false
+      matrix:
+        variant: [raw, helm, kustomize-dev, kustomize-staging, kustomize-prod]
+    steps:
+      - uses: step-security/harden-runner@dc2769abcc0fcfbadfc1df54081c1608579ef6b2 # v2.22.2
+        with:
+          egress-policy: audit
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0 # v7.1.0
+        with:
+          python-version: '3.12'
+      - run: pip install "pyyaml==${PYYAML_VERSION}"
+      - uses: azure/setup-helm@9bc31f4ebc9c6b171d7bfbaa5d006ae7abdb4310 # v5.0.1
+        with:
+          version: 'v3.22.1'
+      - uses: azure/setup-kubectl@bda439f5f36b99b262ebdcd3613869bddb064c8e # v5.2.0
+        with:
+          version: 'v1.37.2'
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          pattern: runtime-image-*
+          merge-multiple: true
+          path: image-in
+      - uses: helm/kind-action@1544676c07bb3570fcb70166beaa07c4528fd4aa # v1.15.1
+        with:
+          version: v0.33.0
+          node_image: ${{ env.KIND_NODE_IMAGE }}
+          cluster_name: runtime
+      - name: Load the four images into the cluster
+        run: |
+          set -euo pipefail
+          for service in catalog orders payments-worker storefront; do
+            kind load image-archive "image-in/${service}.tar" --name runtime
+          done
+      - name: G4, deploy and wait for every workload
+        env:
+          VARIANT: ${{ matrix.variant }}
+        run: |
+          mkdir -p reports
+          python .github/scripts/gates/runtime_gate.py \
+            --variant "$VARIANT" \
+            --tree "$BOOKSTORE" \
+            --timeout 900 \
+            --report "reports/runtime-${VARIANT}.json"
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        if: always()
+        with:
+          name: gate-report-runtime-${{ matrix.variant }}
+          path: reports/
+          retention-days: 14
+          if-no-files-found: warn
