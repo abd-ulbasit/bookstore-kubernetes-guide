@@ -1,0 +1,38 @@
+# Gate control fixture. It carries the full baseline, so it must pass every
+# gate: all five core checks and a `restricted` Pod Security namespace.
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: gate-control-hardened
+  namespace: gate-restricted
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: gate-control-hardened
+  template:
+    metadata:
+      labels:
+        app: gate-control-hardened
+    spec:
+      automountServiceAccountToken: false
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 65532
+        runAsGroup: 65532
+        seccompProfile:
+          type: RuntimeDefault
+      containers:
+        - name: app
+          image: registry.k8s.io/pause:3.10
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities:
+              drop: ["ALL"]
+          resources:
+            requests:
+              cpu: 10m
+              memory: 16Mi
+            limits:
+              memory: 16Mi

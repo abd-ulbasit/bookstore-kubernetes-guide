@@ -1,0 +1,20 @@
+# Gate control fixture. It deliberately breaks the baseline so each gate can
+# prove it still sees a violation before it trusts a pass. Not for clusters.
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: gate-control-violating
+  namespace: gate-restricted
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: gate-control-violating
+  template:
+    metadata:
+      labels:
+        app: gate-control-violating
+    spec:
+      containers:
+        - name: app
+          image: registry.k8s.io/pause:3.10

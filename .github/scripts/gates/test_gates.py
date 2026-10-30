@@ -11,13 +11,20 @@ temporary directories only and never touch the repository's chapters.
 
 from __future__ import annotations
 
+import contextlib
+import io
 import json
+import shutil
 import tempfile
 import textwrap
 import unittest
 from pathlib import Path
 
 import extract_blocks as eb
+import static_gate as sg
+
+FIXTURES = Path(__file__).resolve().parent / "fixtures"
+HAVE_TRIVY = shutil.which("trivy") is not None
 
 POD = textwrap.dedent(
     """\
@@ -184,6 +191,271 @@ class ExtractTests(unittest.TestCase):
         self.assertEqual(manifest[0]["kinds"], ["Pod"])
         loaded = eb.load_manifest(self.out / "manifest.json")
         self.assertEqual(loaded, [block])
+
+
+def blk(kinds, klass="applyable", chapter="01-a/01-x.md", path="unused.yaml"):
+    return eb.Block(chapter, 1, 1, klass, list(kinds), path)
+
+
+POD_BLOCK = blk(["Pod"])
+MARKED_POD = blk(["Pod"], klass="insecure")
+ROLLOUT_BLOCK = blk(["Rollout"])
+
+
+class VerdictTests(unittest.TestCase):
+    def test_workload_missing_a_core_check_fails(self):
+        status, ids = sg.verdict(POD_BLOCK, {"KSV-0014"}, set())
+        self.assertEqual((status, ids), ("fail", ["KSV-0014"]))
+
+    def test_workload_failing_every_core_check_lists_them_in_core_order(self):
+        _, ids = sg.verdict(POD_BLOCK, set(sg.CORE), set())
+        self.assertEqual(ids, list(sg.CORE))
+
+    def test_clean_workload_passes(self):
+        self.assertEqual(sg.verdict(POD_BLOCK, set(), set()), ("pass", []))
+
+    def test_noncore_low_finding_does_not_fail_a_workload(self):
+        self.assertEqual(sg.verdict(POD_BLOCK, {"KSV-0011"}, set())[0], "pass")
+
+    def test_workload_with_noncore_high_finding_fails(self):
+        status, ids = sg.verdict(POD_BLOCK, {"KSV-0017"}, {"KSV-0017"})
+        self.assertEqual((status, ids), ("fail", ["KSV-0017"]))
+
+    def test_marked_block_failing_a_core_check_passes(self):
+        self.assertEqual(sg.verdict(MARKED_POD, {"KSV-0012"}, {"KSV-0012"})[0], "pass")
+
+    def test_marked_block_failing_only_a_core_check_passes(self):
+        self.assertEqual(sg.verdict(MARKED_POD, {"KSV-0014"}, set())[0], "pass")
+
+    def test_marked_block_passing_everything_is_stale(self):
+        self.assertEqual(sg.verdict(MARKED_POD, set(), set())[0], "stale-marker")
+
+    def test_marked_block_with_only_a_low_noncore_finding_is_stale(self):
+        self.assertEqual(sg.verdict(MARKED_POD, {"KSV-0011"}, set())[0], "stale-marker")
+
+    def test_crd_only_block_is_not_evaluated(self):
+        status, ids = sg.verdict(ROLLOUT_BLOCK, set(), set())
+        self.assertEqual((status, ids), ("not-evaluated", ["Rollout"]))
+
+    def test_marked_crd_block_is_not_evaluated_not_stale(self):
+        self.assertEqual(sg.verdict(blk(["Rollout"], klass="insecure"), set(), set())[0], "not-evaluated")
+
+    def test_workload_plus_crd_with_no_findings_is_not_a_pass(self):
+        # The Rollout carries a pod template the scanner never read.
+        self.assertEqual(sg.verdict(blk(["Service", "Rollout"]), set(), set())[0], "not-evaluated")
+
+    def test_findings_outrank_not_evaluated(self):
+        self.assertEqual(sg.verdict(blk(["Pod", "Rollout"]), {"KSV-0001"}, set())[0], "fail")
+
+    def test_role_plus_pod_is_judged_as_workload(self):
+        mixed = blk(["Role", "Pod"])
+        self.assertEqual(sg.verdict(mixed, {"KSV-0030"}, set()), ("fail", ["KSV-0030"]))
+        self.assertEqual(sg.verdict(blk(["Pod", "Role"]), {"KSV-0030"}, set())[0], "fail")
+        self.assertEqual(sg.verdict(mixed, set(), set())[0], "pass")
+
+    def test_non_workload_with_high_finding_fails(self):
+        status, ids = sg.verdict(blk(["Role"]), {"KSV-0045"}, {"KSV-0045"})
+        self.assertEqual((status, ids), ("fail", ["KSV-0045"]))
+
+    def test_core_ids_do_not_apply_to_non_workloads(self):
+        self.assertEqual(sg.verdict(blk(["Role"]), {"KSV-0014"}, set())[0], "pass")
+
+    def test_inert_builtin_kind_passes(self):
+        self.assertEqual(sg.verdict(blk(["NetworkPolicy"]), set(), set())[0], "pass")
+
+    def test_unparseable_in_scope_fails(self):
+        status, ids = sg.verdict(blk(["Pod"], klass="unparseable"), set(), set())
+        self.assertEqual((status, ids), ("fail", ["unparseable"]))
+
+
+class BannerTests(unittest.TestCase):
+    def test_banner_first_line_passes(self):
+        body = "# INSECURE ON PURPOSE: a privileged pod. Lab cluster only.\n" + POD
+        self.assertTrue(sg.banner_ok(body))
+
+    def test_wrapped_banner_passes(self):
+        body = "# INSECURE ON PURPOSE: a privileged pod that\n# mounts the node. Lab cluster only.\n" + POD
+        self.assertTrue(sg.banner_ok(body))
+
+    def test_missing_or_wrong_banner_fails(self):
+        self.assertFalse(sg.banner_ok(POD))
+        self.assertFalse(sg.banner_ok("# INSECURE ON PURPOSE: x.\n" + POD))
+        self.assertFalse(sg.banner_ok("# note\n# INSECURE ON PURPOSE: x. Lab cluster only.\n" + POD))
+
+
+DEPLOY = textwrap.dedent(
+    """\
+    apiVersion: apps/v1
+    kind: Deployment
+    metadata:
+      name: demo
+    spec:
+      template:
+        spec:
+          containers:
+            - name: app
+              image: busybox
+    """
+)
+
+
+class CompletenessTests(unittest.TestCase):
+    """Trivy reports a clean file for a document it cannot read, so check first."""
+
+    def test_complete_workload_has_no_gaps(self):
+        self.assertEqual(sg.incomplete_documents(DEPLOY), [])
+
+    def test_workload_without_containers_is_a_gap(self):
+        body = DEPLOY.split("      containers:")[0] + "      priorityClassName: p\n"
+        self.assertEqual(sg.incomplete_documents(body), ["Deployment: no containers"])
+
+    def test_second_document_without_containers_is_a_gap(self):
+        body = ROLE + "---\n" + DEPLOY.replace("containers:", "initContainers:")
+        self.assertEqual(sg.incomplete_documents(body), ["Deployment: no containers"])
+
+    def test_missing_api_version_or_metadata_is_a_gap(self):
+        self.assertEqual(sg.incomplete_documents(DEPLOY.replace("apiVersion: apps/v1\n", "")), ["Deployment: no apiVersion"])
+        no_meta = DEPLOY.replace("metadata:\n  name: demo\n", "")
+        self.assertEqual(sg.incomplete_documents(no_meta), ["Deployment: no metadata"])
+
+    def test_cronjob_pod_spec_is_found_under_job_template(self):
+        cron = (
+            "apiVersion: batch/v1\nkind: CronJob\nmetadata:\n  name: c\nspec:\n  schedule: '* * * * *'\n"
+            "  jobTemplate:\n    spec:\n      template:\n        spec:\n          containers:\n"
+            "            - name: a\n              image: busybox\n"
+        )
+        self.assertEqual(sg.incomplete_documents(cron), [])
+
+    def test_bare_pod_spec_is_found_at_the_top(self):
+        self.assertEqual(sg.incomplete_documents(POD), [])
+
+    def test_unchecked_kinds_are_not_inspected(self):
+        self.assertEqual(sg.incomplete_documents("kind: Rollout\nspec: {}\n"), [])
+
+    def test_judge_turns_a_clean_but_incomplete_block_into_not_evaluated(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "b.yaml"
+            path.write_text(DEPLOY.replace("containers:", "initContainers:"), encoding="utf-8")
+            block = blk(["Deployment"], path=str(path))
+            clean = sg.Scan(set(), set(), True)
+            self.assertEqual(sg.judge(block, clean), ("not-evaluated", ["Deployment: no containers"]))
+            # A real finding still wins over the gap.
+            failing = sg.Scan({"KSV-0014"}, set(), True)
+            self.assertEqual(sg.judge(block, failing)[0], "fail")
+            # So does a silent scanner, reported as its own reason.
+            silent = sg.Scan(set(), set(), False)
+            self.assertEqual(sg.judge(block, silent)[0], "not-evaluated")
+
+
+class ScopeTests(unittest.TestCase):
+    BLOCKS = [blk(["Pod"], chapter="01-a/01-x.md"), blk(["Pod"], chapter="05-s/02-y.md")]
+
+    def test_no_scope_puts_everything_in_scope(self):
+        self.assertEqual(sg.in_scope(self.BLOCKS[0].chapter, []), True)
+
+    def test_exact_chapter_and_directory_prefix(self):
+        self.assertTrue(sg.in_scope("01-a/01-x.md", ["01-a/01-x.md"]))
+        self.assertTrue(sg.in_scope("01-a/01-x.md", ["01-a"]))
+        self.assertTrue(sg.in_scope("01-a/01-x.md", ["01-a/"]))
+        self.assertFalse(sg.in_scope("01-a/01-x.md", ["01-"]))
+        self.assertFalse(sg.in_scope("05-s/02-y.md", ["01-a/01-x.md"]))
+
+    def test_scope_matching_no_block_is_a_control_failure(self):
+        with self.assertRaises(sg.ControlError):
+            sg.check_scopes(self.BLOCKS, ["01-a/01-typo.md"])
+        sg.check_scopes(self.BLOCKS, ["01-a/01-x.md"])
+
+
+class ControlTests(unittest.TestCase):
+    ALL = {id_: "HIGH" for id_ in sg.CORE}
+
+    def scan(self, violating, hardened=()):
+        def entry(ids):
+            return sg.Scan(failed=set(ids), high_crit=set(), seen=True)
+
+        return {
+            sg.CONTROL_VIOLATING: entry(violating),
+            sg.CONTROL_HARDENED: entry(hardened),
+        }
+
+    def test_control_with_all_core_ids_is_accepted(self):
+        sg.check_control(self.scan(sg.CORE))
+
+    def test_renamed_check_id_aborts(self):
+        renamed = [i for i in sg.CORE if i != "KSV-0030"] + ["KSV-9999"]
+        with self.assertRaisesRegex(sg.ControlError, "KSV-0030"):
+            sg.check_control(self.scan(renamed))
+
+    def test_empty_results_abort(self):
+        with self.assertRaises(sg.ControlError):
+            sg.check_control({})
+
+    def test_hardened_control_that_fails_aborts(self):
+        with self.assertRaisesRegex(sg.ControlError, "hardened"):
+            sg.check_control(self.scan(sg.CORE, hardened=["KSV-0014"]))
+
+
+@unittest.skipUnless(HAVE_TRIVY, "trivy is not on PATH")
+class RealTrivyTests(unittest.TestCase):
+    def test_real_trivy_flags_violating_and_clears_hardened(self):
+        results = sg.trivy_scan(FIXTURES)
+        violating = results["violating-deployment.yaml"]
+        hardened = results["hardened-deployment.yaml"]
+        self.assertTrue(set(sg.CORE) <= violating.failed, violating.failed)
+        self.assertEqual(set(sg.CORE) & hardened.failed, set())
+        self.assertEqual(hardened.high_crit, set())
+
+    def test_scan_files_runs_the_control_beside_every_scan(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            target = Path(tmp) / "pod.yaml"
+            target.write_text(POD, encoding="utf-8")
+            results = sg.scan_files([target])
+        self.assertTrue(set(sg.CORE) <= results[target].failed)
+        self.assertNotIn(sg.CONTROL_VIOLATING, [p.name for p in results])
+
+
+@unittest.skipUnless(HAVE_TRIVY, "trivy is not on PATH")
+class StaticGateCliTests(unittest.TestCase):
+    def setUp(self):
+        self._tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self._tmp.cleanup)
+        self.tmp = Path(self._tmp.name)
+
+    def manifest(self, entries):
+        blocks = []
+        for i, (chapter, fixture, kinds) in enumerate(entries):
+            path = self.tmp / f"b{i}.yaml"
+            shutil.copy(FIXTURES / fixture, path)
+            blocks.append(eb.Block(chapter, 1, 1, "applyable", kinds, str(path)))
+        manifest = self.tmp / "manifest.json"
+        manifest.write_text(json.dumps([vars(b) for b in blocks]), encoding="utf-8")
+        return manifest
+
+    def run_gate(self, manifest, *args):
+        report = self.tmp / "report.json"
+        with contextlib.redirect_stdout(io.StringIO()), contextlib.redirect_stderr(io.StringIO()):
+            rc = sg.main(["--manifest", str(manifest), "--report", str(report), *args])
+        return rc, json.loads(report.read_text(encoding="utf-8")) if report.exists() else None
+
+    def test_exit_codes_follow_scope(self):
+        manifest = self.manifest([
+            ("a/good.md", "hardened-deployment.yaml", ["Deployment"]),
+            ("b/bad.md", "violating-deployment.yaml", ["Deployment"]),
+        ])
+        rc, report = self.run_gate(manifest, "--scope", "a/good.md")
+        self.assertEqual(rc, 0)
+        rc, report = self.run_gate(manifest, "--scope", "b/bad.md")
+        self.assertEqual(rc, 1)
+        by_chapter = {b["chapter"]: b for b in report["blocks"]}
+        self.assertEqual(by_chapter["b/bad.md"]["status"], "fail")
+        self.assertTrue(by_chapter["b/bad.md"]["in_scope"])
+        self.assertFalse(by_chapter["a/good.md"]["in_scope"])
+        # No scope means everything is in scope, so the bad block fails the run.
+        self.assertEqual(self.run_gate(manifest)[0], 1)
+
+    def test_scope_typo_exits_two(self):
+        manifest = self.manifest([("a/good.md", "hardened-deployment.yaml", ["Deployment"])])
+        self.assertEqual(self.run_gate(manifest, "--scope", "a/god.md")[0], 2)
 
 
 if __name__ == "__main__":
