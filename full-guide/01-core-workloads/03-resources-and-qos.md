@@ -1,58 +1,93 @@
 # 03 — Resources and QoS
 
-> `requests` vs `limits`; why CPU is compressible (throttled) and memory is
-> incompressible (OOMKilled); the three QoS classes and the node eviction
-> order; `LimitRange` and `ResourceQuota` — applied by giving every Bookstore
-> service a resource footprint and introducing the `bookstore` namespace.
+> Limits as a denial-of-service control. `requests` vs `limits`; why a memory
+> limit confines a runaway process to its own container and a CPU limit is a
+> trade-off; the three QoS classes and the eviction order; `LimitRange` and
+> `ResourceQuota` as the namespace-level bounds, applied to the `bookstore`
+> namespace and proved with Pods that are refused or killed.
 
 **Estimated time:** ~15 min read · ~30 min hands-on
-**Prerequisites:** [Part 01 ch.01](01-pods.md) — the PodSpec where requests/limits live · [Part 00 ch.05](../00-foundations/05-node-components.md) — kubelet enforces them
-**You'll know after this:** • distinguish `requests` (scheduling) from `limits` (enforcement) for CPU and memory · • explain why CPU is throttled and memory triggers OOMKill · • map a workload to its QoS class (Guaranteed/Burstable/BestEffort) and predict eviction order · • apply `LimitRange` defaults and `ResourceQuota` caps at the namespace level · • size every Bookstore service with appropriate requests and limits
+**Prerequisites:** [Part 01 ch.01](01-pods.md#baseline-resources) — the memory request and limit the baseline sets · [Part 00 ch.05](../00-foundations/05-node-components.md) — the kubelet that enforces them
+**You'll know after this:** • explain how a memory limit contains a runaway process, and why a CPU limit is a trade-off • name the control that stops one namespace taking the cluster's capacity, and the one that stops a single oversized container • map a workload to its QoS class and predict the eviction order • show a `LimitRange` filling in defaults and a `ResourceQuota` refusing a Pod • size the Bookstore services so that none can starve the others
 
-<!-- tags: core-objects, resources, requests-limits, qos, limitrange, resourcequota -->
+<!-- tags: core-objects, resources, requests-limits, qos, limitrange, resourcequota, denial-of-service -->
 
 ## Why this exists
 
-So far the catalog Pod declares *no* resources. On a one-Pod laptop cluster that
-is invisible; in production it is a time bomb. The scheduler
-([Part 00 ch.04](../00-foundations/04-control-plane-deep-dive.md)) decides which
-node a Pod fits on **using its declared requests** — a Pod with no requests is
-treated as needing ~nothing and can be packed onto a node that then has no real
-capacity for it. The kubelet enforces **limits** — a container with no memory
-limit can consume the whole node and take its neighbors down with it. And when
-a node runs out of memory, Kubernetes must choose *which* Pods to kill first;
-that decision is driven entirely by the requests/limits you set (your **QoS
-class**).
+[01.01](01-pods.md#baseline-resources) gave the catalog a memory request and a
+memory limit. This chapter explains what that limit protects, what it cannot
+protect, and how the same idea scales from one container to a whole namespace.
 
-In short: requests/limits are how you state a workload's needs so the system
-can place it safely, isolate it from noisy neighbors, and make principled
-choices under pressure. This is the [Predictable Demands](#further-reading)
-pattern — declare what you need rather than hope. It also forces the first
-**multi-tenancy boundary**: a `Namespace` with a `ResourceQuota` and
-`LimitRange`, which is where the Bookstore stops being one loose Pod and becomes
-a bounded application.
+The threat here needs no attacker. A leak, an unbounded cache or a request
+that costs far more than usual all look the same to a node: one process takes
+memory or CPU that its neighbours need. Without a limit, the kernel reclaims
+memory from whichever process it picks, and a service next to the leak fails
+its health checks, restarts or is evicted through no fault of its own. The
+leak does not have to be malicious to deny service to the Pods beside it.
+
+Two more problems come from the same missing numbers. The scheduler places a
+Pod by its requests, so a Pod with none is packed onto a node that has no room
+for it. And when a node runs short of memory anyway, the kubelet decides what
+to evict from the requests and limits you set. That decision is the QoS class.
+
+Limits therefore say how much a workload may take. Two namespace objects make
+the rule hold for a whole tenant: a `ResourceQuota` caps what the namespace may
+request, and a `LimitRange` bounds each container and fills in what a container
+leaves out. Together they are the first multi-tenancy boundary, and the point
+where the Bookstore stops being loose Pods and becomes a bounded application.
 
 ## Mental model
 
-Two numbers per resource, per container, with very different jobs:
+Two numbers per resource, per container, with different jobs:
 
-- **`requests`** = *scheduling* and *guarantee*. "Reserve at least this much."
-  The scheduler sums requests to decide if a Pod fits a node; the Pod is
-  guaranteed this amount.
-- **`limits`** = *enforcement ceiling*. "You may never exceed this." How a
-  ceiling is enforced depends on whether the resource is **compressible**:
-  - **CPU is compressible** → exceeding the CPU limit doesn't kill anything; the
-    kernel **throttles** the container (it just runs slower). Annoying, not
-    fatal.
-  - **Memory is incompressible** → you can't "use memory more slowly". Exceed
-    the memory limit and the kernel **OOM-kills** the container (`OOMKilled`,
-    then restart per `restartPolicy`). Fatal.
+- **`requests`** are for scheduling and fairness. The scheduler sums them to
+  decide whether a Pod fits a node. Under CPU contention the kernel shares the
+  CPU in proportion to requests, so a container keeps its share even when a
+  neighbour spins.
+- **`limits`** are the ceiling. How the ceiling is enforced depends on whether
+  the resource can be given back:
+  - **CPU is compressible.** Exceeding the CPU limit slows the container down
+    and kills nothing. The kernel throttles it.
+  - **Memory is not.** A process cannot use memory more slowly. Exceed the
+    memory limit and the kernel OOM-kills the container, and only that
+    container. It is fatal, but it stays inside its own box.
 
-From the gap between requests and limits, Kubernetes derives a **QoS class** per
-Pod (`Guaranteed` > `Burstable` > `BestEffort`) that decides **eviction order**
-when a node is under resource pressure: BestEffort dies first, then Burstable
-exceeding its requests, Guaranteed last. So "set good requests/limits" really
-means "choose how the system treats this workload when things go wrong".
+That difference decides which limits are denial-of-service controls. The
+memory limit is the essential one: it is the only per-container bound on
+memory, so it is the one that stops a leak from taking memory the neighbours
+hold. The CPU limit is optional. Without it, a spinning container uses idle
+CPU and gives it back when a neighbour needs it, because its request keeps its
+share. A CPU limit buys a fixed ceiling at the cost of throttling, and the
+Production notes weigh that cost.
+
+From the gap between requests and limits Kubernetes derives a QoS class for
+each Pod: `Guaranteed`, `Burstable` or `BestEffort`. The class decides the
+eviction order under node pressure, as the diagrams and the internals below
+show.
+
+## Threats and controls
+
+Each row is a control the Bookstore sets or proves in this chapter. The last
+column says where the topic goes deeper.
+
+| Threat | Control taught here | Goes deeper |
+|---|---|---|
+| A leak or loop takes the node's memory and OOM-kills its neighbours | [A memory limit](01-pods.md#baseline-resources) on every container, which confines the kill to that container | [06.01](../06-production-readiness/01-observability-metrics.md) |
+| One namespace takes the cluster's CPU and memory | [`ResourceQuota`](#1-create-the-namespace-quota-and-limit-range) on requests and limits | [08.04](../08-day-2-operations/04-multi-tenancy-and-namespaces.md) |
+| A controller bug creates Pods without end | `pods` in the same `ResourceQuota` | [08.04](../08-day-2-operations/04-multi-tenancy-and-namespaces.md) |
+| One container asks for more than any node should give, or for nothing | [`LimitRange`](#1-create-the-namespace-quota-and-limit-range) `max`, `min` and defaults | [08.04](../08-day-2-operations/04-multi-tenancy-and-namespaces.md) |
+| A process fills the node's disk through a scratch volume | `sizeLimit` on an `emptyDir` | [03.03](../03-config-and-storage/03-volumes.md) |
+| A CPU loop slows its neighbours | A CPU request, which sets their shares; a CPU limit only if you accept throttling | [06.01](../06-production-readiness/01-observability-metrics.md) for throttling metrics |
+
+Two threats sit outside the controls of this chapter. A process that forks
+without end is held back by a PID limit, a kubelet setting
+(`--pod-max-pids`, or `PodPidsLimit` in the kubelet configuration file). The
+kind cluster configuration in this guide does not set one. The
+[PID limiting page](https://kubernetes.io/docs/concepts/policy/pid-limiting/)
+explains why it matters. The `sizeLimit` caps the volume, but the
+[volumes page](https://kubernetes.io/docs/concepts/storage/volumes/#emptydir)
+notes that the storage comes from the node's ephemeral storage, so the volume
+can run out of room first if the disk fills from another source.
 
 ## Diagrams
 
@@ -60,9 +95,9 @@ means "choose how the system treats this workload when things go wrong".
 
 ```mermaid
 flowchart TD
-    start([For a Pod, look at every container]) --> q1{Does EVERY container set<br/>BOTH cpu+memory<br/>requests AND limits?}
+    start([For a Pod, look at every container]) --> q1{Does EVERY container set<br/>a CPU limit AND a memory limit?}
     q1 -- no --> q2{Does ANY container set<br/>any request OR limit?}
-    q1 -- yes --> q3{"For every container,<br/>requests == limits<br/>(cpu AND memory)?"}
+    q1 -- yes --> q3{"For every container, each request<br/>equals its limit? (an unset request<br/>takes the limit, so it counts as equal)"}
     q3 -- yes --> g[QoS = Guaranteed<br/>evicted LAST · most stable]
     q3 -- no --> b
     q2 -- yes --> b[QoS = Burstable<br/>evicted after BestEffort,<br/>esp. if above requests]
@@ -91,19 +126,24 @@ Node capacity            = what the machine physically has
 
 ## Hands-on with the Bookstore
 
-**Assumed working directory: the guide repo root (`full-guide/`).**
+**Assumed working directory: the guide repo root (`full-guide/`).** All paths
+are relative to it. Have the cluster from
+[Part 00 ch.07](../00-foundations/07-local-cluster-setup.md), and the
+`bookstore` namespace and ServiceAccount `catalog-sa` from
+[01.01](01-pods.md#restricted-namespace).
 
-This chapter makes two cumulative changes:
+The steps first add the namespace's boundary, then prove each control with a
+Pod that the control acts on. Two steps fail on purpose, and each is labelled.
 
-1. **Introduce the `bookstore` Namespace** with a `ResourceQuota` and
-   `LimitRange` — the application's resource boundary.
-2. Give the catalog Pod **requests and limits** (and define footprints for the
-   other services for when they arrive in later chapters).
+### 1. Create the namespace, quota and limit range
 
-### 1. Create the namespace, quota, and limit range
-
-New file
-[`examples/bookstore/raw-manifests/00-namespace.yaml`](../examples/bookstore/raw-manifests/00-namespace.yaml):
+[`examples/bookstore/raw-manifests/00-namespace.yaml`](../examples/bookstore/raw-manifests/00-namespace.yaml)
+holds this namespace with its quota and limits. The block below is that file
+without its comments. Keep the Pod Security labels in it. `kubectl apply`
+removes a label that the last apply set and the new file leaves out, so a copy
+without them would switch `restricted` off for the namespace. The `audit`
+labels are new here. They record violations in the API server's audit log, a
+mode that 01.01 leaves out.
 
 ```yaml
 apiVersion: v1
@@ -112,220 +152,393 @@ metadata:
   name: bookstore
   labels:
     app.kubernetes.io/part-of: bookstore
+    pod-security.kubernetes.io/enforce: restricted
+    pod-security.kubernetes.io/enforce-version: latest
+    pod-security.kubernetes.io/audit: restricted
+    pod-security.kubernetes.io/audit-version: latest
+    pod-security.kubernetes.io/warn: restricted
+    pod-security.kubernetes.io/warn-version: latest
 ---
 apiVersion: v1
-kind: ResourceQuota                 # caps TOTAL requests/limits in the namespace
+kind: ResourceQuota
 metadata:
   name: bookstore-quota
   namespace: bookstore
 spec:
   hard:
-    requests.cpu: "2"               # sum of all container cpu requests ≤ 2 cores
+    requests.cpu: "2"
     requests.memory: 2Gi
     limits.cpu: "4"
     limits.memory: 4Gi
     pods: "30"
 ---
 apiVersion: v1
-kind: LimitRange                    # per-CONTAINER defaults + bounds
+kind: LimitRange
 metadata:
   name: bookstore-limits
   namespace: bookstore
 spec:
   limits:
     - type: Container
-      default:                      # applied as `limits` if a container omits them
+      default:
         cpu: 500m
         memory: 256Mi
-      defaultRequest:               # applied as `requests` if omitted
+      defaultRequest:
         cpu: 100m
         memory: 128Mi
-      max: { cpu: "2", memory: 1Gi }      # a container may not exceed these
-      min: { cpu: 10m, memory: 16Mi }     # nor request less than these
+      max:
+        cpu: "2"
+        memory: 1Gi
+      min:
+        cpu: 10m
+        memory: 16Mi
 ```
 
-`ResourceQuota` bounds the **namespace total**; `LimitRange` bounds **each
-container** and supplies defaults so a container that forgets requests/limits
-doesn't become `BestEffort` by accident. (Note: with a `requests.*`/`limits.*`
-quota in force, the API server *requires* every container to have the
-corresponding request/limit — the `LimitRange` defaults are what make that
-ergonomic instead of a wall of rejections.)
+The `ResourceQuota` caps the namespace's totals. The `requests.*` and
+`limits.*` keys are sums across every container, and `pods` counts Pods. The
+`LimitRange` works per container. `default` becomes a container's limit when it
+omits one, `defaultRequest` becomes its request, and `max` and `min` bound what
+a container may ask for. With a `requests.*` or `limits.*` quota in force, the
+API server also requires every container to set the matching field, because it
+cannot count a container it cannot see. The defaults are what let a container
+omit them without a refusal.
 
 ```sh
-# from the repo root (full-guide/)
 kubectl apply -f examples/bookstore/raw-manifests/00-namespace.yaml
 kubectl describe resourcequota bookstore-quota -n bookstore
-kubectl describe limitrange    bookstore-limits -n bookstore
+kubectl describe limitrange bookstore-limits -n bookstore
 ```
 
-> **Namespace note (read this once).** The Bookstore lives in the
-> **`bookstore`** namespace, which [ch.01](01-pods.md#restricted-namespace)
-> already created with Pod Security `restricted` enforced. The Part 00 / ch.01 /
-> ch.02 single Pod files (`01-catalog-pod.yaml`, `02-catalog-pod-sidecar.yaml`)
-> carry no `namespace:` field on purpose, so they run in whichever namespace
-> your kubectl context points at, which ch.01 set to `bookstore`. They are
-> **kept** as the teaching snapshots of the Pod increments and carry the
-> security baseline from ch.01. Starting with
-> [ch.04](04-replicasets-and-deployments.md) the catalog/storefront manifests
-> are **born in `bookstore`** as Deployments. So the lineage is: *bare Pod →
-> Pod+sidecar+probes → **Deployment** with all those settings carried
-> forward*. Nothing is deleted; each file shows one step. This chapter's
-> `00-namespace.yaml` re-applies the same namespace and adds the quota and
-> default limits.
+The single-Pod files from Part 00 and 01.01 carry no `namespace:` field, so
+they run in whichever namespace your context points at, `bookstore`. From
+[01.04](04-replicasets-and-deployments.md) the catalog and storefront are
+Deployments born in `bookstore`. Nothing here is deleted. This file re-applies
+the namespace and adds the quota and the limits.
 
-### 2. Add requests and limits to the catalog container
+### 2. A runaway process reaches its memory limit (deliberate failure)
 
-The increment this chapter adds to the catalog container (the namespaced form
-lands in ch.04's Deployment; here we show the block and reason about QoS):
+The next manifest holds two Pods, and both are deliberate. `memhog` writes
+400 MiB into a memory-backed volume with a 128 MiB limit, so the kernel kills
+it. `cpu-fill` requests 1.5 cores and sleeps, so that half a core is left in
+the namespace for anything else. Both carry the baseline and share one
+dedicated ServiceAccount.
 
-```yaml
-    - name: catalog
-      image: bookstore/catalog:dev
-      # ... ports / env / probes from ch.02 ...
-      resources:
-        requests:                   # scheduler reserves this; guaranteed
-          cpu: 50m                  # 0.05 core: the Go API is light at rest
-          memory: 64Mi
-        limits:                     # hard ceiling
-          cpu: 250m                 # may burst to 0.25 core, then THROTTLED
-          memory: 128Mi             # exceed → OOMKilled (incompressible)
-```
-
-This makes the catalog Pod **Burstable** (requests set, limits set, but
-`requests != limits`). To make it **Guaranteed** instead you would set
-`requests == limits` for both cpu and memory — maximum stability, zero burst
-headroom, lowest packing density. The Bookstore deliberately uses Burstable for
-stateless APIs (cheap, can absorb spikes) and we will make **Postgres**
-([ch.05](05-statefulsets.md)) closer to Guaranteed (stateful, must not be
-evicted casually).
-
-### 3. Observe QoS and quota accounting
+The `emptyDir` with `medium: Memory` is a tmpfs. Files written to it count
+against the memory limit of the container that wrote them, so `memhog`'s
+write is a memory write, not a disk write.
 
 ```sh
-# Once the Deployment in ch.04 is applied into the namespace:
-kubectl get pod -n bookstore -l app=catalog \
-  -o jsonpath='{.items[0].status.qosClass}{"\n"}'        # Burstable
-kubectl describe resourcequota bookstore-quota -n bookstore
-#   Used vs Hard: requests.cpu / requests.memory climb as Pods are admitted;
-#   a Pod that would push the total over Hard is REJECTED at admission time.
+kubectl apply -f - <<'EOF'
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: demo-sa
+  namespace: bookstore
+automountServiceAccountToken: false
+---
+apiVersion: v1
+kind: Pod
+metadata:
+  name: memhog
+  namespace: bookstore
+  labels:
+    app: memhog
+spec:
+  serviceAccountName: demo-sa
+  automountServiceAccountToken: false
+  restartPolicy: Never              # keep the terminated state to read
+  securityContext:
+    runAsNonRoot: true
+    runAsUser: 65534
+    runAsGroup: 65534
+    seccompProfile:
+      type: RuntimeDefault
+  containers:
+    - name: hog                     # DELIBERATE: writes past its memory limit
+      image: busybox@sha256:73aaf090f3d85aa34ee199857f03fa3a95c8ede2ffd4cc2cdb5b94e566b11662
+      command: ["sh", "-c", "dd if=/dev/zero of=/scratch/fill bs=1M count=400; echo written; sleep 3600"]
+      securityContext:
+        allowPrivilegeEscalation: false
+        readOnlyRootFilesystem: true
+        capabilities:
+          drop: ["ALL"]
+      resources:
+        requests: { cpu: 50m, memory: 64Mi }
+        limits: { cpu: 250m, memory: 128Mi }
+      volumeMounts:
+        - name: scratch
+          mountPath: /scratch
+  volumes:
+    - name: scratch
+      emptyDir:
+        medium: Memory              # tmpfs: its files count against the memory limit
+---
+apiVersion: v1
+kind: Pod
+metadata:
+  name: cpu-fill
+  namespace: bookstore
+  labels:
+    app: cpu-fill
+spec:
+  serviceAccountName: demo-sa
+  automountServiceAccountToken: false
+  securityContext:
+    runAsNonRoot: true
+    runAsUser: 65534
+    runAsGroup: 65534
+    seccompProfile:
+      type: RuntimeDefault
+  containers:
+    - name: fill
+      image: busybox@sha256:73aaf090f3d85aa34ee199857f03fa3a95c8ede2ffd4cc2cdb5b94e566b11662
+      command: ["sleep", "3600"]
+      securityContext:
+        allowPrivilegeEscalation: false
+        readOnlyRootFilesystem: true
+        capabilities:
+          drop: ["ALL"]
+      resources:
+        requests: { cpu: 1500m, memory: 64Mi }
+        limits: { cpu: 1500m, memory: 128Mi }
+EOF
 ```
 
-You can also *see* the kernel enforcement model: a container that allocates past
-its **memory** limit shows `reason: OOMKilled` in
-`kubectl describe pod`; one that exceeds its **CPU** limit never gets killed —
-it just accrues CPU throttling (visible in metrics in
-[Part 06 ch.01](../06-production-readiness/01-observability-metrics.md)).
+Wait for the kill, then read what the kernel and the quota recorded:
+
+```sh
+kubectl wait -n bookstore --for=jsonpath='{.status.containerStatuses[0].state.terminated.reason}'=OOMKilled pod/memhog --timeout=120s
+kubectl get pod memhog cpu-fill -n bookstore
+kubectl get pod memhog -n bookstore -o jsonpath='{.status.qosClass}{"\n"}'
+kubectl get pod memhog -n bookstore -o jsonpath='{.status.containerStatuses[0].state.terminated.exitCode}{"\n"}'
+kubectl describe resourcequota bookstore-quota -n bookstore
+```
+
+`memhog` ends as `OOMKilled` with exit code 137, the code of a process the
+kernel killed with SIGKILL. The kill took only `memhog`'s container: `cpu-fill`,
+in the same namespace, kept running. `memhog` is `Burstable`, because its
+requests and limits differ.
+The quota now counts 1500m of `requests.cpu` for `cpu-fill`, which is
+running, or pending on a small machine. Either way the quota counts it.
+
+A container that omits `resources` is not refused. It gets the `LimitRange`
+defaults instead: in this namespace, a 256Mi memory limit and a 128Mi request.
+The baseline still sets the numbers in every manifest, so the defaults are a
+backstop and not the plan.
+
+### 3. Admission refuses what the namespace cannot hold (deliberate failure)
+
+Both Pods in the next dry-run are deliberate refusals. Dry-run runs admission
+without creating anything.
+
+```sh
+kubectl apply --dry-run=server -f - <<'EOF'
+apiVersion: v1
+kind: Pod
+metadata:
+  name: too-big
+  namespace: bookstore
+spec:
+  serviceAccountName: demo-sa
+  automountServiceAccountToken: false
+  securityContext:
+    runAsNonRoot: true
+    runAsUser: 65534
+    runAsGroup: 65534
+    seccompProfile:
+      type: RuntimeDefault
+  containers:
+    - name: c                       # DELIBERATE: above the 1Gi max
+      image: busybox@sha256:73aaf090f3d85aa34ee199857f03fa3a95c8ede2ffd4cc2cdb5b94e566b11662
+      command: ["sleep", "3600"]
+      securityContext:
+        allowPrivilegeEscalation: false
+        readOnlyRootFilesystem: true
+        capabilities:
+          drop: ["ALL"]
+      resources:
+        requests: { cpu: 50m, memory: 1536Mi }
+        limits: { cpu: 250m, memory: 1536Mi }
+---
+apiVersion: v1
+kind: Pod
+metadata:
+  name: too-much
+  namespace: bookstore
+spec:
+  serviceAccountName: demo-sa
+  automountServiceAccountToken: false
+  securityContext:
+    runAsNonRoot: true
+    runAsUser: 65534
+    runAsGroup: 65534
+    seccompProfile:
+      type: RuntimeDefault
+  containers:
+    - name: c                       # DELIBERATE: pushes the namespace past 2 cores
+      image: busybox@sha256:73aaf090f3d85aa34ee199857f03fa3a95c8ede2ffd4cc2cdb5b94e566b11662
+      command: ["sleep", "3600"]
+      securityContext:
+        allowPrivilegeEscalation: false
+        readOnlyRootFilesystem: true
+        capabilities:
+          drop: ["ALL"]
+      resources:
+        requests: { cpu: 800m, memory: 64Mi }
+        limits: { cpu: 800m, memory: 128Mi }
+EOF
+```
+
+The first Pod fails the `LimitRange`: its memory limit is above the 1Gi `max`,
+and the message says `maximum memory usage per Container is 1Gi, but limit is
+1536Mi`. That refusal does not depend on quota room, because the check is per
+container. The second Pod fits the `LimitRange` on its own. It fails the quota
+because `cpu-fill` already holds 1500m of the namespace's 2 cores, and the
+message names the quota, the amount requested and the amount in use.
+
+Clean up the two Pods. The quota and the limits stay, and the rest of the guide
+runs under them.
+
+```sh
+kubectl delete pod memhog cpu-fill -n bookstore --now
+```
 
 ## How it works under the hood
 
 - **`requests` drive scheduling; `limits` drive cgroups.** The scheduler's
   `NodeResourcesFit` predicate admits a Pod only if `Σ requests` on the node
   (plus the new Pod's) ≤ the node's **Allocatable** (capacity minus
-  kube/system reserved). It **never sums limits** — limits may intentionally
-  oversubscribe a node. The kubelet then writes the container's `limits` into
-  its **cgroup** (`cpu.max` / `memory.max` on cgroup v2): the *kernel*, not
-  Kubernetes, enforces them at runtime.
-- **CPU = CFS bandwidth throttling.** A CPU limit becomes a CFS quota/period.
-  Exceed it within a period and the kernel **deschedules** the container until
-  the next period — pure slowdown, no kill. CPU `requests` become cgroup CPU
-  **shares** (relative weight) so under contention each container gets at least
-  its proportional share. This is why CPU is "compressible".
-- **Memory = hard cgroup cap → OOM killer.** A memory limit is a hard cgroup
-  bound. The kernel cannot make a process "use less memory gradually", so on
-  breach the cgroup OOM killer terminates the process; the kubelet records
-  `OOMKilled` and restarts per `restartPolicy`. "Incompressible".
+  kube/system reserved). It **never sums limits**, because limits may
+  intentionally oversubscribe a node. The kubelet writes the container's limits
+  into its **cgroup** (`cpu.max` and `memory.max` on cgroup v2), so the
+  *kernel*, not Kubernetes, enforces them at runtime.
+- **CPU is CFS bandwidth throttling.** A CPU limit becomes a CFS quota and
+  period. Exceed it within a period and the kernel **deschedules** the
+  container until the next period: a slowdown, never a kill. CPU `requests`
+  become a cgroup CPU weight (shares on cgroup v1), so under contention each
+  container gets at least its proportional share. This is why CPU is
+  compressible.
+- **Memory is a hard cgroup cap, and then the OOM killer.** A memory limit is a
+  hard cgroup bound. The kernel cannot make a process use less memory
+  gradually, so on breach the cgroup OOM killer terminates a process. The
+  kubelet records `OOMKilled` and restarts the container per `restartPolicy`.
 - **QoS is computed, not declared.** The kubelet derives the class from the
-  request/limit pattern: **Guaranteed** (every container has cpu+mem and
-  request==limit), **Burstable** (at least one request/limit, not all equal),
-  **BestEffort** (none at all). Under **node memory pressure** the kubelet
-  evicts in order: BestEffort first → then Burstable Pods *most over their
-  requests* (ranked by usage above request) → Guaranteed last (and even then
-  only if it must). The kernel OOM score is also skewed by QoS, so even raw OOM
-  kills prefer lower-QoS containers.
-- **`LimitRange` is a mutating + validating admission step.** When a Pod is
-  created in the namespace, the LimitRange admission plugin **injects**
-  `default`/`defaultRequest` for any missing field and **rejects** Pods
-  violating `min`/`max`. **`ResourceQuota`** is a validating admission step that
-  rejects creation if it would push the namespace's tracked totals over `hard`
-  (and requires the relevant request/limit to be set so it can be counted).
+  requests and limits. **Guaranteed** means every container has a CPU limit and
+  a memory limit, and each request equals its limit, where an unset request
+  takes the limit. **Burstable** means some request or limit is set and the
+  pattern is not Guaranteed. **BestEffort** means none is set.
+- **Eviction order under node memory pressure.** The kubelet ranks Pods by
+  three parameters, in order: whether usage exceeds requests, then Pod
+  priority, then usage relative to requests. So BestEffort and Burstable Pods
+  whose usage exceeds their requests go first, and Guaranteed Pods, and
+  Burstable Pods within their requests, go last. The kernel's OOM score is also
+  skewed by QoS, so even a raw OOM kill prefers lower-QoS containers.
+- **`LimitRange` is a mutating and validating admission step.** When a Pod is
+  created in the namespace, the LimitRange admission plugin injects `default` and
+  `defaultRequest` for any missing field, and rejects Pods that violate `min` or
+  `max`. **`ResourceQuota`** is a validating admission step that rejects a
+  creation which would push the namespace's tracked totals over `hard`, and it
+  requires the relevant request or limit so that it can count the container.
   Both run in the API server admission pipeline from
   [Part 00 ch.04](../00-foundations/04-control-plane-deep-dive.md).
 
 ## Production notes
 
-> **In production:** **always set memory `requests` and `limits`** on every
-> container, and set memory `request == limit` for anything you cannot tolerate
-> being OOM-killed under contention. An unbounded-memory container is the single
-> most common cause of a node-wide cascading failure (it OOMs neighbors, not
-> just itself).
+> **In production:** set memory `requests` and `limits` on every container, and
+> set memory `request == limit` for anything you cannot tolerate being
+> OOM-killed under contention. A container with no memory limit can take the
+> node's memory from its neighbours, which turns one leak into a node-wide
+> failure.
 
-> **In production:** be cautious with **CPU limits**. CPU `requests` guarantee a
-> share; tight CPU *limits* cause CFS throttling that shows up as mysterious
-> p99 latency even when average CPU looks low. A common pattern is: set CPU
-> `requests` accurately, set memory `requests==limits`, and set the CPU `limit`
-> generously or omit it (rely on requests + autoscaling). Measure throttling
-> before tightening.
+> **In production:** be deliberate with CPU limits. A CPU request sets a
+> container's share under contention, so an accurate request is what protects
+> its neighbours. A tight CPU limit adds CFS throttling, which shows up as p99
+> latency while average CPU looks low. Measure throttling before you tighten a
+> limit. `container_cpu_cfs_throttled_periods_total` counts the periods in
+> which a container was throttled, and divided by
+> `container_cpu_cfs_periods_total` it gives the share of periods hit.
 
 > **In production:** never run important workloads as **BestEffort**. They are
-> the first thing killed under pressure and the scheduler assumes they need
+> the first to be evicted under pressure, and the scheduler assumes they need
 > nothing, so it overpacks their node. BestEffort is acceptable only for truly
 > sacrificial batch work.
 
-> **In production:** put a **`ResourceQuota` + `LimitRange` on every tenant
-> namespace** ([Part 08 ch.04](../08-day-2-operations/04-multi-tenancy-and-namespaces.md)).
-> Quota prevents one team exhausting the cluster; LimitRange guarantees no
-> container is accidentally BestEffort or absurdly large. On EKS/GKE/AKS this
-> also bounds **cost**, since cluster-autoscaler provisions nodes to satisfy
-> requests — sloppy requests directly inflate the bill
-> ([Part 06 ch.06](../06-production-readiness/06-capacity-and-cost.md)).
+> **In production:** put a `ResourceQuota` and a `LimitRange` on every tenant
+> namespace ([Part 08 ch.04](../08-day-2-operations/04-multi-tenancy-and-namespaces.md)).
+> The quota stops one team using the cluster's capacity, including through a
+> controller that creates Pods without end. The `LimitRange` guarantees that no
+> container is accidentally BestEffort or absurdly large. On managed clusters
+> the cluster autoscaler adds nodes for pending requests, so sloppy requests
+> raise the bill ([Part 06 ch.06](../06-production-readiness/06-capacity-and-cost.md)).
 
-> **In production:** right-size from real data, don't guess. The
+> **In production:** the Postgres StatefulSet in [01.05](05-statefulsets.md)
+> keeps the Burstable shape of the other manifests: a 256Mi memory request and a
+> 512Mi memory limit. For a stateful store, a memory request equal to its limit
+> is the stronger choice, because it makes the Pod Guaranteed and so evicted
+> last. The cost is the headroom that Burstable gives.
+
+> **In production:** right-size from real data, not guesses. The
 > **VerticalPodAutoscaler** in recommendation mode and historical metrics give
 > requests grounded in actual usage
 > ([Part 06 ch.04](../06-production-readiness/04-autoscaling.md)). Over-requesting
-> wastes money; under-requesting causes evictions and throttling.
+> wastes money, and under-requesting causes evictions and throttling.
 
 ## Quick Reference
 
 ```sh
-kubectl get pod <P> -o jsonpath='{.status.qosClass}'        # Guaranteed/Burstable/BestEffort
+kubectl get pod <P> -o jsonpath='{.status.qosClass}'                        # Guaranteed/Burstable/BestEffort
+kubectl get pod <P> -o jsonpath='{.status.containerStatuses[0].state.terminated.reason}'  # OOMKilled?
 kubectl describe node <NODE> | sed -n '/Allocated resources/,/Events/p'
-kubectl describe resourcequota -n <NS>                       # Used vs Hard
-kubectl describe limitrange   -n <NS>                        # defaults + min/max
-kubectl top pod  -n <NS>                                     # live usage (needs metrics-server)
-kubectl get pod <P> -o jsonpath='{.status.containerStatuses[*].lastState}'  # OOMKilled?
+kubectl describe resourcequota -n <NS>                                      # Used vs Hard
+kubectl describe limitrange   -n <NS>                                       # defaults + min/max
+kubectl top pod  -n <NS>                                                    # live usage (needs metrics-server)
 ```
 
-Minimal resources block + namespace governance:
+Minimal resources block, per container (a fragment, applied inside a Pod):
 
 ```yaml
-# per container
 resources:
-  requests: { cpu: 50m,  memory: 64Mi }   # scheduling + guarantee
-  limits:   { cpu: 250m, memory: 128Mi }  # ceiling (cpu→throttle, mem→OOMKill)
----
+  requests: { cpu: 50m,  memory: 64Mi }    # scheduling + guarantee
+  limits:   { cpu: 250m, memory: 128Mi }   # ceiling (cpu throttles, memory OOM-kills)
+```
+
+Namespace governance for a tenant:
+
+```yaml
 apiVersion: v1
 kind: ResourceQuota
-metadata: { name: q, namespace: <NS> }
-spec: { hard: { requests.cpu: "2", requests.memory: 2Gi, limits.cpu: "4", limits.memory: 4Gi } }
+metadata: { name: tenant-quota, namespace: <NS> }
+spec:
+  hard:
+    requests.cpu: "2"
+    requests.memory: 2Gi
+    limits.cpu: "4"
+    limits.memory: 4Gi
+    pods: "30"
 ---
 apiVersion: v1
 kind: LimitRange
-metadata: { name: lr, namespace: <NS> }
+metadata: { name: tenant-limits, namespace: <NS> }
 spec:
   limits:
     - type: Container
       default:        { cpu: 500m, memory: 256Mi }
       defaultRequest: { cpu: 100m, memory: 128Mi }
+      max:            { cpu: "2", memory: 1Gi }
+      min:            { cpu: 10m, memory: 16Mi }
 ```
 
 Checklist:
 
-- [ ] Every container sets memory `requests` **and** `limits`
-- [ ] CPU `requests` set accurately; CPU `limits` deliberate (throttling-aware)
-- [ ] Intended QoS chosen (Guaranteed for must-not-evict, Burstable for APIs)
-- [ ] No accidental BestEffort for anything that matters
-- [ ] Tenant namespace has a `ResourceQuota` and a `LimitRange`
+- [ ] Every container sets a memory `request` and a memory `limit`
+- [ ] Every container sets a CPU `request`; a CPU `limit` only when
+  throttling is measured and accepted
+- [ ] Intended QoS chosen: `Guaranteed` for what must not be evicted,
+  `Burstable` for stateless APIs
+- [ ] No accidental `BestEffort` for anything that matters
+- [ ] Tenant namespace has a `ResourceQuota` (requests, limits and `pods`)
+  and a `LimitRange`
+- [ ] Every writable `emptyDir` has a `sizeLimit`
 - [ ] Requests derived from measured usage, not guessed
 
 ## Test your understanding
@@ -339,31 +552,38 @@ Checklist:
 
    </details>
 
-2. **You see a service with healthy average CPU at 40% suddenly developing p99 latency spikes. Memory is fine. What's the prime suspect, and where do you look?**
+2. **A service with healthy average CPU at 40% develops p99 latency spikes. Memory is fine. What is the prime suspect, and where do you look?**
    <details><summary>Show answer</summary>
 
-   CPU CFS throttling: the CPU `limit` is being hit in short bursts, so the kernel deschedules the container until the next period — average looks low while p99 craters. Check `container_cpu_cfs_throttled_seconds_total` / `_periods_total` (Prometheus). The common fix is to widen or remove the CPU limit (keep CPU `requests` accurate for scheduling) — see §Production notes, "be cautious with CPU limits".
+   CPU CFS throttling: the CPU `limit` is hit in short bursts, so the kernel deschedules the container until the next period. The average looks low while p99 suffers. Compare `container_cpu_cfs_throttled_periods_total` with `container_cpu_cfs_periods_total` in Prometheus. The usual fix is to widen or remove the CPU limit and keep the CPU `request` accurate for scheduling (see §Production notes, "be deliberate with CPU limits").
 
    </details>
 
-3. **A teammate sets `requests: { memory: 256Mi }` and `limits: { memory: 256Mi }` on a critical Pod "for stability". What QoS class does that produce, and what's the trade-off compared with `requests: 128Mi, limits: 256Mi`?**
+3. **A teammate sets `requests` equal to `limits` for memory only, and leaves CPU unset, on a critical Pod. What QoS class does that produce? What do they gain by setting CPU as well?**
    <details><summary>Show answer</summary>
 
-   `requests == limits` for both cpu and memory produces **Guaranteed** QoS — evicted last under node pressure, maximum stability. The trade-off is lower packing density: the scheduler reserves the full 256Mi (rather than 128Mi), so fewer Pods fit per node and you pay for unused headroom. Burstable (128/256) is cheaper but evicted sooner if it goes above its 128Mi request (see §QoS-class decision tree and §How it works under the hood).
+   **Burstable.** Guaranteed needs a CPU and a memory limit on every container, with each request equal to its limit. Memory alone is not enough. Setting CPU as well, with requests equal to limits for both, makes the Pod Guaranteed, so it is evicted last under node pressure. The trade-off is packing density: the scheduler reserves the full amount, so fewer Pods fit per node and the headroom goes unused (see §QoS-class decision tree and §How it works under the hood).
 
    </details>
 
-4. **A namespace has a `ResourceQuota` with `requests.cpu: "2"` but no `LimitRange`. A teammate's Pod with no resource requests is rejected. Why, and how does adding a `LimitRange` fix it without weakening the cap?**
+4. **A namespace has a `ResourceQuota` with `requests.cpu: "2"` but no `LimitRange`. A teammate's Pod with no CPU request is rejected. Why, and how does adding a `LimitRange` fix it without weakening the cap?**
    <details><summary>Show answer</summary>
 
-   When a `requests.cpu` quota exists, the API server requires every container to *have* a CPU request (otherwise the quota can't count it). A Pod missing requests is rejected at admission. A `LimitRange` with `defaultRequest.cpu` injects sensible defaults at admission so the Pod gets a request without forcing every author to set one — the quota still caps the namespace total (see §1. Create the namespace, quota, and limit range).
+   When a `requests.cpu` quota exists, the API server requires every container to *have* a CPU request, because otherwise the quota cannot count it. A Pod without one is rejected at admission. A `LimitRange` with `defaultRequest.cpu` injects a default at admission, so the Pod gets a request without every author setting one. The quota still caps the namespace total (see §1. Create the namespace, quota and limit range).
 
    </details>
 
-5. **Hands-on extension: in the `bookstore` namespace, deploy a Pod that requests 1.5Gi memory when the quota is 2Gi `requests.memory` and 1Gi container `max`. What's rejected and what is the error message you should expect?**
+5. **Hands-on extension: in `bookstore`, with the quota and `LimitRange` from step 1, a Pod asks for a 1536Mi memory limit. Which control refuses it, what is the message, and does room in the quota matter?**
    <details><summary>What you should see</summary>
 
-   The Pod is rejected at admission with `forbidden: maximum memory usage per Container is 1Gi, but request is 1536Mi` — the `LimitRange` `max` is enforced *before* the quota even gets to count it. If you instead requested 800Mi but the namespace already had 1.5Gi reserved (cumulative), the quota would reject with `exceeded quota: bookstore-quota, requested: requests.memory=800Mi, used: requests.memory=1.5Gi, limited: requests.memory=2Gi`. Both are admission-time, before any Pod exists (see §How it works under the hood, "LimitRange is mutating + validating admission").
+   The `LimitRange` refuses it: `maximum memory usage per Container is 1Gi, but limit is 1536Mi`. The refusal does not depend on quota room, because the check is per container and it refuses even when the namespace has room to spare. A request of 800m CPU against 1500m already in use in a 2-core namespace is refused by the quota instead, with the message `exceeded quota`, as step 3 shows.
+
+   </details>
+
+6. **A teammate removes the memory limit from a Deployment because it was OOM-killing in staging. What changes on the node if the process leaks, and why was the limit the control that mattered?**
+   <details><summary>Show answer</summary>
+
+   The leak now takes memory that the neighbours need. The kernel and the kubelet decide which processes die, and the leaking container may not be the one killed. The memory limit confined the damage to its own container. The right move is to keep the limit, measure the working set, and raise the limit deliberately, or fix the leak. Removing the limit makes the leak a node-wide problem.
 
    </details>
 
@@ -375,8 +595,8 @@ Checklist:
   why declaring explicit resource needs is foundational to scheduling, density,
   and reliability.
 - Official:
-  <https://kubernetes.io/docs/concepts/configuration/manage-resources-containers/>
-  and
+  <https://kubernetes.io/docs/concepts/configuration/manage-resources-containers/>,
   <https://kubernetes.io/docs/tasks/configure-pod-container/quality-service-pod/>
-  (QoS) and
-  <https://kubernetes.io/docs/concepts/policy/resource-quotas/>.
+  (QoS),
+  <https://kubernetes.io/docs/concepts/policy/resource-quotas/>, and
+  <https://kubernetes.io/docs/concepts/policy/pid-limiting/> (PID limits).
