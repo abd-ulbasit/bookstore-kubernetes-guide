@@ -42,6 +42,12 @@ judged instead. Each Kustomize overlay is built with `kubectl kustomize` and
 judged as built. A chart or overlay that fails to render is a failure, and a
 missing helm or kubectl aborts the run rather than skipping what it renders.
 
+Accepted findings live in `.trivyignore.yaml` (see scanner_registry.py). The
+gate drops a finding only for a sound, unexpired entry whose paths cover the
+file, and says how many it dropped. The control fixtures are checked on the
+raw scan, so no entry can blind the gate. An inline `trivy:ignore` comment in
+a block is a failure: the registry is the only place to accept a finding.
+
 Exit codes: 0 every in-scope block passes, or is not evaluated and holds no
 pod template. 1 an in-scope block fails, has a stale marker, or is not
 evaluated while holding a pod template that is not on the allowlist. 2 the
@@ -56,7 +62,8 @@ the block printed (a kind such as Rollout, or `no-scanner-result`), or `*`.
 
 Usage:
     static_gate.py --manifest M --scope CHAPTER [--scope ...]
-                   [--also PATH ...] [--allow FILE ...] [--report OUT.json]
+                   [--also PATH ...] [--allow FILE ...] [--registry FILE]
+                   [--report OUT.json]
 """
 
 from __future__ import annotations
@@ -64,18 +71,22 @@ from __future__ import annotations
 import argparse
 import atexit
 import json
+import os
+import re
 import shutil
 import subprocess
 import sys
 import tempfile
 from collections import Counter
-from dataclasses import dataclass
+from dataclasses import dataclass, field
+from datetime import date
 from pathlib import Path
 
 import yaml
 
 import extract_blocks as eb
 import gate_render as gr
+import scanner_registry as sr
 
 CORE = ("KSV-0012", "KSV-0014", "KSV-0001", "KSV-0003", "KSV-0030")
 
@@ -130,6 +141,7 @@ POD_KEYS = ("containers", "initContainers", "ephemeralContainers")
 # Only Part 05 teaches attacks, so only its chapters may carry the marker. The
 # capstone overlay is an examples tree that --also scans, never a chapter block.
 MARKER_CHAPTERS = ("05-security/",)
+GUIDE_ROOT = "full-guide"
 SHARED_NAMESPACES = frozenset({"bookstore", "default"})
 
 SEVERITIES = "LOW,MEDIUM,HIGH,CRITICAL"
@@ -148,6 +160,7 @@ BASELINE_CONTROLS = {
 # Block.source of a block rendered from a chart or an overlay.
 HELM, KUSTOMIZE = "helm", "kustomize"
 RENDERED_SOURCES = (HELM, KUSTOMIZE)
+INLINE_IGNORE = re.compile(r"#\s*trivy:ignore")
 
 PASS, FAIL, STALE, NOT_EVALUATED = "pass", "fail", "stale-marker", "not-evaluated"
 JUDGED = (PASS, FAIL, STALE)
@@ -162,6 +175,7 @@ class Scan:
     failed: set[str]  # every check ID that failed, LOW to CRITICAL
     high_crit: set[str]  # the failed IDs of HIGH or CRITICAL severity
     seen: bool  # Trivy returned a result entry for this file
+    suppressed: set[str] = field(default_factory=set)  # IDs the registry accepted for this file
 
 
 def verdict(block: eb.Block, failed: set[str], high_crit: set[str]) -> tuple[str, list[str]]:
@@ -349,6 +363,50 @@ def effective_scan(block: eb.Block, scan: Scan) -> Scan:
         return scan
     failed, notes = baseline_failures(Path(block.path).read_text(encoding="utf-8"))
     return Scan(scan.failed | failed, scan.high_crit | notes, scan.seen)
+
+
+def _repo_path(path: str) -> str:
+    """Return path as the registry writes it: relative to the working directory when under it."""
+    text = path.replace("\\", "/")
+    if os.path.isabs(text):
+        relative = os.path.relpath(text)
+        if not relative.startswith(".."):
+            text = relative
+    while text.startswith("./"):
+        text = text[2:]
+    return text
+
+
+def registry_target(block: eb.Block, guide_root: str = GUIDE_ROOT) -> str:
+    """Return the path a registry entry uses to name block's findings.
+
+    A chapter block is named by its chapter file under the guide root. A file
+    from --also is named by its path; a rendered chart or overlay by the
+    directory it was rendered from.
+    """
+    if block.index:
+        return f"{guide_root.rstrip('/')}/{block.chapter}"
+    return _repo_path(block.chapter.split(" [", 1)[0])
+
+
+def apply_registry(
+    registry: sr.Registry | None, block: eb.Block, scan: Scan, guide_root: str = GUIDE_ROOT
+) -> Scan:
+    """Return scan without the findings an honoured registry entry accepts for block."""
+    if registry is None or not registry.entries or not scan.seen:
+        return scan
+    within = block.source in RENDERED_SOURCES
+    dropped = registry.covered(scan.failed, registry_target(block, guide_root), within)
+    if not dropped:
+        return scan
+    return Scan(scan.failed - dropped, scan.high_crit - dropped, scan.seen, scan.suppressed | dropped)
+
+
+def final_scan(
+    block: eb.Block, scan: Scan, registry: sr.Registry | None = None, guide_root: str = GUIDE_ROOT
+) -> Scan:
+    """The scan the verdict is read from: cross-check added, accepted findings dropped."""
+    return apply_registry(registry, block, effective_scan(block, scan), guide_root)
 
 
 def marker_problems(block: eb.Block, body: str) -> list[str]:
@@ -584,18 +642,22 @@ def _also_blocks(
     return blocks
 
 
-def judge(block: eb.Block, scan: Scan) -> tuple[str, list[str]]:
+def judge(
+    block: eb.Block, scan: Scan, registry: sr.Registry | None = None, guide_root: str = GUIDE_ROOT
+) -> tuple[str, list[str]]:
     """Verdict plus the guards that need the file: marker policy and a silent scanner."""
     if block.klass == eb.UNPARSEABLE:
         return verdict(block, scan.failed, scan.high_crit)
     body = Path(block.path).read_text(encoding="utf-8")
+    if INLINE_IGNORE.search(body):
+        return FAIL, ["inline-trivy-ignore"]
     if block.klass == eb.INSECURE:
         early = ([] if banner_ok(body) else ["missing-banner"]) + marker_problems(block, body)
         if early:
             return FAIL, early
     if not scan.seen:
         return NOT_EVALUATED, ["no-scanner-result"]
-    scan = effective_scan(block, scan)
+    scan = final_scan(block, scan, registry, guide_root)
     status, ids = verdict(block, scan.failed, scan.high_crit)
     if status in (PASS, STALE) and not ids:
         gaps = incomplete_documents(body)
@@ -616,12 +678,35 @@ def chapter_stats(rows: list[dict]) -> dict[str, int]:
     }
 
 
+def _load_registry(given: Path | None) -> sr.Registry:
+    """Read the scanner registry; the default file may be absent, a named one may not."""
+    try:
+        if given is None:
+            registry = sr.load(sr.DEFAULT_PATH, date.today(), missing_ok=True)
+        else:
+            registry = sr.load(given, date.today())
+    except sr.RegistryError as exc:
+        raise ControlError(str(exc)) from exc
+    if registry.problems:
+        raise ControlError(f"{registry.path}: " + "; ".join(registry.problems))
+    for entry in registry.entries:
+        if not entry.honoured:
+            print(
+                f"registry: {registry.path}: {entry.section} {entry.id or '(no id)'} is not honoured: "
+                + "; ".join(entry.problems),
+                file=sys.stderr,
+            )
+    return registry
+
+
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description=__doc__.split("\n\n")[0])
     parser.add_argument("--manifest", required=True, type=Path)
     parser.add_argument("--scope", action="append", default=[], metavar="CHAPTER")
     parser.add_argument("--also", action="extend", nargs="+", default=[], metavar="PATH")
     parser.add_argument("--allow", action="append", default=[], type=Path, metavar="FILE")
+    parser.add_argument("--registry", type=Path, metavar="FILE", help="scanner exceptions (default .trivyignore.yaml, if present)")
+    parser.add_argument("--guide-root", default=GUIDE_ROOT, help="how registry paths name the chapters (default full-guide)")
     parser.add_argument("--helm", default="helm")
     parser.add_argument("--kubectl", default="kubectl")
     parser.add_argument("--report", type=Path)
@@ -639,6 +724,7 @@ def run(args: argparse.Namespace, render_dir: Path) -> int:
         check_scopes(blocks, args.scope)
         also = _also_blocks(args.also, render_dir, args.helm, args.kubectl)
         allow = load_allowlist(args.allow)
+        registry = _load_registry(args.registry)
         scans = scan_files([Path(b.path) for b in blocks + also])
     except ControlError as exc:
         print(f"static gate aborted: {exc}", file=sys.stderr)
@@ -647,7 +733,8 @@ def run(args: argparse.Namespace, render_dir: Path) -> int:
     rows = []
     for block, explicit in [(b, False) for b in blocks] + [(b, True) for b in also]:
         scan = scans[Path(block.path)]
-        status, ids = judge(block, scan)
+        status, ids = judge(block, scan, registry, args.guide_root)
+        final = final_scan(block, scan, registry, args.guide_root)
         unjudged = status == NOT_EVALUATED
         pod_template = unjudged and holds_pod_template(Path(block.path).read_text(encoding="utf-8"))
         rows.append(
@@ -660,7 +747,8 @@ def run(args: argparse.Namespace, render_dir: Path) -> int:
                 "kinds": block.kinds,
                 "status": status,
                 "ids": ids,
-                "core_failed": [i for i in CORE if i in effective_scan(block, scan).failed],
+                "core_failed": [i for i in CORE if i in final.failed],
+                "suppressed": sorted(final.suppressed),
                 "pod_template": pod_template,
                 "allowed": pod_template and is_allowed(block.chapter, ids, allow),
                 "in_scope": explicit or in_scope(block.chapter, args.scope),
@@ -672,6 +760,7 @@ def run(args: argparse.Namespace, render_dir: Path) -> int:
     scoped_counts = Counter(r["status"] for r in scoped)
     judged = sum(scoped_counts[s] for s in JUDGED)
     unlisted = [r for r in scoped if r["pod_template"] and not r["allowed"]]
+    suppressed = sum(len(r["suppressed"]) for r in scoped)
     summary = {
         "blocks": len(rows),
         "by_status": dict(counts),
@@ -679,6 +768,7 @@ def run(args: argparse.Namespace, render_dir: Path) -> int:
         "in_scope_by_status": dict(scoped_counts),
         "in_scope_judged": judged,
         "unlisted_pod_templates": len(unlisted),
+        "suppressed": suppressed,
         **chapter_stats(rows),
     }
     for row in scoped:
@@ -690,6 +780,8 @@ def run(args: argparse.Namespace, render_dir: Path) -> int:
         "static gate: " + ", ".join(f"{counts[s]} {s}" for s in (PASS, FAIL, STALE, NOT_EVALUATED))
         + f" ({len(scoped)} of {len(rows)} blocks in scope)"
     )  # fmt: skip
+    if suppressed:
+        print(f"{suppressed} findings suppressed by the registry ({registry.path})")
     print(
         f"chapters with a workload: {summary['chapters_with_workload']}, "
         f"failing all five core checks: {summary['chapters_failing_all_core']}"

@@ -1,0 +1,35 @@
+# The scanner half of the exceptions registry (docs/design/2026-10-29-security-first-rewrite.md,
+# section 5.4). The namespace half is security/namespace-exceptions.yaml.
+#
+# One entry per scanner finding the guide accepts, grouped by section:
+# misconfigurations, vulnerabilities, secrets, licenses. Each entry has:
+#
+#   id          the check or advisory ID, for example KSV-0017 or CVE-2026-12345
+#   paths       the files it covers, as globs relative to the repository root
+#               (`*` stays in one directory, `**` crosses them). A chapter block
+#               is named full-guide/<chapter>. A rendered Helm chart or Kustomize
+#               overlay is named by its directory.
+#   statement   why the finding is accepted, with an upstream citation where
+#               the upstream project demands the privilege
+#   expired_at  YYYY-MM-DD; still ahead, and no more than 12 months out
+#
+# Example:
+#
+#   misconfigurations:
+#     - id: KSV-0017
+#       paths:
+#         - full-guide/examples/bookstore-platform/node-agent/**
+#       statement: the agent reads host files by design; see the chapter and upstream docs
+#       expired_at: 2027-06-30
+#
+# Trivy v0.76.1 does not load this file on its own and marks the feature
+# experimental, so the gates read it themselves:
+#
+#   make gates-static     drops a finding only for a sound, unexpired entry
+#   make gates-registry   fails on an entry that is unsound, expired, more than
+#                         12 months out, or that matches no finding any more
+#
+# An unsound entry grants nothing. Inline `trivy:ignore` comments and other
+# Trivy ignore files are failures: this file is the only place to accept a finding.
+
+misconfigurations: []
