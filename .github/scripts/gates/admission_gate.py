@@ -242,9 +242,44 @@ def ensure_namespace(kubectl: str) -> None:
         raise ControlError(f"cannot create namespace {NAMESPACE}: {out.strip()[:300]}")
 
 
+def referenced_service_accounts(docs: list[dict]) -> set[str]:
+    """Names of the non-default ServiceAccounts a block's Pod specs refer to."""
+    names: set[str] = set()
+    for doc in docs:
+        spec = doc.get("spec")
+        if not isinstance(spec, dict):
+            continue
+        template = spec.get("template") or {}
+        job = (spec.get("jobTemplate") or {}).get("spec") or {}
+        for pod_spec in (spec, template.get("spec") or {}, (job.get("template") or {}).get("spec") or {}):
+            name = pod_spec.get("serviceAccountName") if isinstance(pod_spec, dict) else None
+            if name and name != "default":
+                names.add(name)
+    return names
+
+
+def ensure_service_accounts(kubectl: str, names: set[str]) -> None:
+    """Create named ServiceAccounts in the gate namespace.
+
+    A server dry-run creates nothing, so a Pod naming a dedicated ServiceAccount
+    would otherwise be refused for a reason that has nothing to do with Pod
+    Security, even when the same block defines that ServiceAccount.
+    """
+    for name in sorted(names):
+        manifest = {
+            "apiVersion": "v1",
+            "kind": "ServiceAccount",
+            "metadata": {"name": name, "namespace": NAMESPACE},
+        }
+        rc, out = kubectl_run(kubectl, ["apply", "-f", "-"], yaml.safe_dump(manifest))
+        if rc != 0:
+            raise ControlError(f"cannot create ServiceAccount {name}: {out.strip()[:300]}")
+
+
 def dry_run(kubectl: str, body: str, cluster: Cluster) -> tuple[str, str]:
     """Server-side dry-run a block body in the gate namespace; return (status, output)."""
     docs = [d for d in yaml.safe_load_all(body) if isinstance(d, dict)]
+    ensure_service_accounts(kubectl, referenced_service_accounts(docs))
     payload = yaml.safe_dump_all(retarget(docs, NAMESPACE, cluster.scoped), sort_keys=False)
     rc, out = kubectl_run(
         kubectl, ["apply", "--dry-run=server", "--validate=strict", "-f", "-"], payload

@@ -1071,6 +1071,29 @@ else:
 """
 
 
+class ReferencedServiceAccountTests(unittest.TestCase):
+    """A server dry-run creates nothing, so a named ServiceAccount must already exist."""
+
+    def _names(self, body):
+        docs = [d for d in yaml.safe_load_all(body) if isinstance(d, dict)]
+        return ag.referenced_service_accounts(docs)
+
+    def test_bare_pod_names_its_service_account(self):
+        self.assertEqual(self._names("kind: Pod\nspec: {serviceAccountName: catalog-sa}"), {"catalog-sa"})
+
+    def test_workload_and_cronjob_templates_are_read(self):
+        dep = "kind: Deployment\nspec: {template: {spec: {serviceAccountName: a}}}"
+        cron = "kind: CronJob\nspec: {jobTemplate: {spec: {template: {spec: {serviceAccountName: b}}}}}"
+        self.assertEqual(self._names(dep + "\n---\n" + cron), {"a", "b"})
+
+    def test_default_and_absent_names_are_ignored(self):
+        self.assertEqual(self._names("kind: Pod\nspec: {serviceAccountName: default}"), set())
+        self.assertEqual(self._names("kind: Pod\nspec: {containers: []}"), set())
+
+    def test_non_mapping_spec_does_not_crash(self):
+        self.assertEqual(self._names("kind: Foo\nspec: 3"), set())
+
+
 class AdmissionCliTests(unittest.TestCase):
     def setUp(self):
         self._tmp = tempfile.TemporaryDirectory()
