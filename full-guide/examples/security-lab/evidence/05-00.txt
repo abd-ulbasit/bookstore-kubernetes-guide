@@ -1,0 +1,243 @@
+# Transcript for 05-security/00-the-attackers-view.md, lab steps 0 to 19.
+# Tier A: a kind cluster, Kubernetes v1.37.0 node, kubectl v1.37.2 client.
+# Node runtime: containerd v2.3.4, node kernel 7.0.0 on a Linux lab host.
+# Images: curlimages/curl:8.22.0 and busybox:1.36, both pinned by digest.
+# Recorded by running examples/security-lab/labs/05-00.sh from full-guide/.
+# kubectl ran from a macOS workstation over a tunnel to the API server.
+#
+# What did not work the first time: the first full run showed BusyBox
+# nslookup returning NXDOMAIN for a short name, because the image's nslookup
+# does not apply the search path, and a Services list whose message grep
+# matched nothing. The lab now asks for full names and prints the whole
+# message. Both fixes were made before this run.
+## step 0: the cluster this run used
+$ kubectl version --client
+kubectl get nodes -o custom-columns=NAME:.metadata.name,KUBELET:.status.nodeInfo.kubeletVersion,RUNTIME:.status.nodeInfo.containerRuntimeVersion,KERNEL:.status.nodeInfo.kernelVersion
+Client Version: v1.37.2
+Kustomize Version: v5.8.1
+NAME                     KUBELET   RUNTIME              KERNEL
+sf-pilot-control-plane   v1.37.0   containerd://2.3.4   7.0.0-38-generic
+
+## step 1: three namespaces: the target, a neighbour, and the compromised app
+$ kubectl create ns p05-target
+kubectl label ns p05-target pod-security.kubernetes.io/enforce=restricted pod-security.kubernetes.io/warn=restricted
+kubectl create ns p05-neighbour
+kubectl label ns p05-neighbour pod-security.kubernetes.io/enforce=restricted pod-security.kubernetes.io/warn=restricted
+kubectl create ns p05-recon-app
+kubectl label ns p05-recon-app pod-security.kubernetes.io/enforce=baseline pod-security.kubernetes.io/warn=restricted
+namespace/p05-target created
+namespace/p05-target labeled
+namespace/p05-neighbour created
+namespace/p05-neighbour labeled
+namespace/p05-recon-app created
+namespace/p05-recon-app labeled
+
+## step 2: the ledger service and a neighbour, both hardened
+$ kubectl apply -f ledger.yaml
+kubectl wait -n p05-target --for=condition=Ready pod/ledger --timeout=180s
+kubectl apply -f neighbour.yaml
+kubectl wait -n p05-neighbour --for=condition=Ready pod/neighbour --timeout=180s
+serviceaccount/ledger-sa created
+pod/ledger created
+service/ledger created
+pod/ledger condition met
+serviceaccount/neighbour-sa created
+pod/neighbour created
+pod/neighbour condition met
+
+## step 3: the weak app: a Service, then a root Pod that names no ServiceAccount
+$ kubectl apply -f checkout-service.yaml
+kubectl apply -f checkout-weak.yaml
+kubectl wait -n p05-recon-app --for=condition=Ready pod/checkout --timeout=180s
+service/checkout created
+Warning: would violate PodSecurity "restricted:latest": allowPrivilegeEscalation != false (container "app" must set securityContext.allowPrivilegeEscalation=false), unrestricted capabilities (container "app" must set securityContext.capabilities.drop=["ALL"]), runAsNonRoot != true (pod or container "app" must set securityContext.runAsNonRoot=true), runAsUser=0 (container "app" must not set runAsUser=0), seccompProfile (pod or container "app" must set securityContext.seccompProfile.type to "RuntimeDefault" or "Localhost")
+pod/checkout created
+pod/checkout condition met
+
+## step 4: who the compromised Pod is, and the token it carries
+$ kubectl exec -n p05-recon-app checkout -- sh -c '
+  id
+  ls /var/run/secrets/kubernetes.io/serviceaccount
+  T=$(cat /var/run/secrets/kubernetes.io/serviceaccount/token)
+  P=$(echo "$T" | cut -d. -f2 | tr "_-" "/+")
+  while [ $(( ${#P} % 4 )) -ne 0 ]; do P="$P="; done
+  J=$(echo "$P" | base64 -d)
+  echo "$J" | tr "," "\n" | grep -E "\"(sub|namespace|name)\""
+  iat=$(echo "$J" | grep -o "\"iat\":[0-9]*" | cut -d: -f2)
+  exp=$(echo "$J" | grep -o "\"exp\":[0-9]*" | cut -d: -f2)
+  echo "token lifetime: $((exp - iat)) seconds"'
+uid=0(root) gid=0(root) groups=0(root),1(bin),2(daemon),3(sys),4(adm),6(disk),10(wheel),11(floppy),20(dialout),26(tape),27(video)
+ca.crt
+namespace
+token
+"kubernetes.io":{"namespace":"p05-recon-app"
+"node":{"name":"sf-pilot-control-plane"
+"pod":{"name":"checkout"
+"serviceaccount":{"name":"default"
+"sub":"system:serviceaccount:p05-recon-app:default"}
+token lifetime: 31536000 seconds
+
+## step 5: the environment: one variable per Service in the namespace
+$ kubectl exec -n p05-recon-app checkout -- sh -c 'env | grep -E "_SERVICE_(HOST|PORT)=" | sort'
+CHECKOUT_SERVICE_HOST=10.96.196.105
+CHECKOUT_SERVICE_PORT=8080
+KUBERNETES_SERVICE_HOST=10.96.0.1
+KUBERNETES_SERVICE_PORT=443
+
+## step 6: DNS: the search path, a name that exists, and a guessed name
+$ kubectl exec -n p05-recon-app checkout -- sh -c 'grep "^search" /etc/resolv.conf | cut -d" " -f1-4; grep "^nameserver" /etc/resolv.conf; nslookup ledger.p05-target.svc.cluster.local; nslookup payments.p05-target.svc.cluster.local; echo "payments.p05-target.svc.cluster.local: exit $?"'
+search p05-recon-app.svc.cluster.local svc.cluster.local cluster.local
+nameserver 10.96.0.10
+Server:     10.96.0.10
+Address:    10.96.0.10:53
+
+Name:   ledger.p05-target.svc.cluster.local
+Address: 10.96.190.243
+
+
+Server:     10.96.0.10
+Address:    10.96.0.10:53
+
+** server can't find payments.p05-target.svc.cluster.local: NXDOMAIN
+
+** server can't find payments.p05-target.svc.cluster.local: NXDOMAIN
+
+payments.p05-target.svc.cluster.local: exit 1
+
+## step 7: API discovery and the default identity, from inside the Pod
+$ kubectl exec -n p05-recon-app checkout -- sh -c '
+  T=$(cat /var/run/secrets/kubernetes.io/serviceaccount/token)
+  CA=/var/run/secrets/kubernetes.io/serviceaccount/ca.crt
+  curl -s -o /dev/null -w "discovery: %{http_code}\n" --cacert $CA -H "Authorization: Bearer $T" https://kubernetes.default.svc/apis
+  printf "API groups: %s\n" "$(curl -s --cacert $CA -H "Authorization: Bearer $T" https://kubernetes.default.svc/apis | tr "," "\n" | grep -c "\"preferredVersion\"")"
+  curl -s -o /dev/null -w "services in p05-target: %{http_code}\n" --cacert $CA -H "Authorization: Bearer $T" https://kubernetes.default.svc/api/v1/namespaces/p05-target/services
+  curl -s --cacert $CA -H "Authorization: Bearer $T" https://kubernetes.default.svc/api/v1/namespaces/p05-target/services | tr "," "\n" | grep "\"message\""'
+discovery: 200
+API groups: 21
+services in p05-target: 403
+  "message": "services is forbidden: User \"system:serviceaccount:p05-recon-app:default\" cannot list resource \"services\" in API group \"\" in the namespace \"p05-target\""
+
+## step 8: the kubelet, on the node behind the Pod default gateway
+$ kubectl exec -n p05-recon-app checkout -- sh -c '
+  T=$(cat /var/run/secrets/kubernetes.io/serviceaccount/token)
+  GW=$(netstat -rn | grep "^0.0.0.0" | tr -s " " | cut -d" " -f2)
+  echo "default gateway: $GW"
+  curl -sk -o /dev/null -w "anonymous: %{http_code}\n" --max-time 5 https://$GW:10250/pods
+  curl -sk -w "\nwith token: %{http_code}\n" --max-time 5 -H "Authorization: Bearer $T" https://$GW:10250/pods'
+default gateway: 10.244.0.1
+anonymous: 401
+Forbidden (user=system:serviceaccount:p05-recon-app:default, verb=get, resource=nodes, subresource(s)=[pods proxy])
+
+with token: 403
+
+## step 9: the cloud metadata address, on kind
+$ kubectl exec -n p05-recon-app checkout -- sh -c 'curl -s -o /dev/null --max-time 5 http://169.254.169.254/latest/meta-data/; echo "metadata: exit $?"'
+metadata: exit 28
+
+## step 10: the flat network: a Pod in another namespace reaches the ledger
+$ kubectl exec -n p05-recon-app checkout -- sh -c 'curl -s --max-time 5 http://ledger.p05-target:8080/'
+kubectl exec -n p05-neighbour neighbour -- sh -c 'curl -s --max-time 5 http://ledger.p05-target:8080/'
+ledger-ok
+ledger-ok
+
+## step 11: from the network, with the stolen token: a workstation with the token and the cluster CA
+$ kubectl exec -n p05-recon-app checkout -- cat /var/run/secrets/kubernetes.io/serviceaccount/token > token.txt
+kubectl exec -n p05-recon-app checkout -- cat /var/run/secrets/kubernetes.io/serviceaccount/ca.crt > ca.crt
+kubectl config set-cluster lab --server="$server" --certificate-authority=ca.crt --embed-certs=true --kubeconfig=stolen.kubeconfig
+kubectl config set-credentials stolen --token="$(cat token.txt)" --kubeconfig=stolen.kubeconfig
+kubectl config set-context lab --cluster=lab --user=stolen --kubeconfig=stolen.kubeconfig
+kubectl config use-context lab --kubeconfig=stolen.kubeconfig
+Cluster "lab" set.
+User "stolen" set.
+Context "lab" created.
+Switched to context "lab".
+
+$ kubectl --kubeconfig=stolen.kubeconfig auth can-i --list -n p05-target
+kubectl --kubeconfig=stolen.kubeconfig get services -n p05-target
+Resources                                       Non-Resource URLs                      Resource Names   Verbs
+selfsubjectreviews.authentication.k8s.io        []                                     []               [create]
+selfsubjectaccessreviews.authorization.k8s.io   []                                     []               [create]
+selfsubjectrulesreviews.authorization.k8s.io    []                                     []               [create]
+clustertrustbundles.certificates.k8s.io         []                                     []               [get list watch]
+                                                [/.well-known/openid-configuration/]   []               [get]
+                                                [/.well-known/openid-configuration]    []               [get]
+                                                [/api/*]                               []               [get]
+                                                [/api]                                 []               [get]
+                                                [/apis/*]                              []               [get]
+                                                [/apis]                                []               [get]
+                                                [/healthz]                             []               [get]
+                                                [/healthz]                             []               [get]
+                                                [/livez]                               []               [get]
+                                                [/livez]                               []               [get]
+                                                [/openapi/*]                           []               [get]
+                                                [/openapi]                             []               [get]
+                                                [/openid/v1/jwks/]                     []               [get]
+                                                [/openid/v1/jwks]                      []               [get]
+                                                [/readyz]                              []               [get]
+                                                [/readyz]                              []               [get]
+                                                [/version/]                            []               [get]
+                                                [/version/]                            []               [get]
+                                                [/version]                             []               [get]
+                                                [/version]                             []               [get]
+Error from server (Forbidden): services is forbidden: User "system:serviceaccount:p05-recon-app:default" cannot list resource "services" in API group "" in the namespace "p05-target"
+
+## step 12: harden: delete the weak Pod, enforce restricted, and watch the weak manifest be refused
+$ kubectl delete pod checkout -n p05-recon-app --wait=true
+kubectl label ns p05-recon-app pod-security.kubernetes.io/enforce=restricted --overwrite
+kubectl apply --dry-run=server -f checkout-weak.yaml
+pod "checkout" deleted from p05-recon-app namespace
+namespace/p05-recon-app labeled
+Error from server (Forbidden): error when creating "checkout-weak.yaml": pods "checkout" is forbidden: violates PodSecurity "restricted:latest": allowPrivilegeEscalation != false (container "app" must set securityContext.allowPrivilegeEscalation=false), unrestricted capabilities (container "app" must set securityContext.capabilities.drop=["ALL"]), runAsNonRoot != true (pod or container "app" must set securityContext.runAsNonRoot=true), runAsUser=0 (container "app" must not set runAsUser=0), seccompProfile (pod or container "app" must set securityContext.seccompProfile.type to "RuntimeDefault" or "Localhost")
+
+## step 13: harden: NetworkPolicies, a ServiceAccount of its own, and the hardened Pod
+$ kubectl apply -f policies.yaml
+kubectl apply -f checkout-hardened.yaml
+kubectl wait -n p05-recon-app --for=condition=Ready pod/checkout --timeout=180s
+networkpolicy.networking.k8s.io/default-deny created
+networkpolicy.networking.k8s.io/checkout-egress created
+networkpolicy.networking.k8s.io/default-deny created
+networkpolicy.networking.k8s.io/ledger-from-checkout created
+serviceaccount/checkout-sa created
+pod/checkout created
+pod/checkout condition met
+
+## step 14: re-attack: identity, token and environment
+$ kubectl exec -n p05-recon-app checkout -- sh -c 'id; test -e /var/run/secrets/kubernetes.io/serviceaccount/token && echo "token: present" || echo "token: absent"; env | grep -E "_SERVICE_(HOST|PORT)=" || echo "service variables: none"'
+uid=100(curl_user) gid=101(curl_group) groups=101(curl_group)
+token: absent
+KUBERNETES_SERVICE_PORT=443
+KUBERNETES_SERVICE_HOST=10.96.0.1
+
+## step 15: re-attack: DNS still resolves, because the allowed path needs it
+$ kubectl exec -n p05-recon-app checkout -- sh -c 'nslookup ledger.p05-target.svc.cluster.local; echo "dns: exit $?"'
+Server:     10.96.0.10
+Address:    10.96.0.10:53
+
+Name:   ledger.p05-target.svc.cluster.local
+Address: 10.96.190.243
+
+
+dns: exit 0
+
+## step 16: re-attack: the kubelet and the API server, with the egress policy in place
+$ kubectl exec -n p05-recon-app checkout -- sh -c 'GW=$(netstat -rn | grep "^0.0.0.0" | tr -s " " | cut -d" " -f2); curl -sk -o /dev/null --max-time 5 https://$GW:10250/pods; echo "kubelet: exit $?"; curl -s -o /dev/null --max-time 5 https://kubernetes.default.svc/version; echo "api: exit $?"'
+kubelet: exit 28
+api: exit 28
+
+## step 17: re-attack: the allowed path works, and a neighbour is refused
+$ kubectl exec -n p05-recon-app checkout -- sh -c 'curl -s --max-time 5 http://ledger.p05-target:8080/; echo "ledger from checkout: exit $?"'
+kubectl exec -n p05-neighbour neighbour -- sh -c 'curl -s --max-time 5 http://ledger.p05-target:8080/; echo "ledger from neighbour: exit $?"'
+ledger-ok
+ledger from checkout: exit 0
+ledger from neighbour: exit 28
+
+## step 18: re-attack: the token stolen in step 11, a minute after its Pod was deleted
+$ sleep 65
+kubectl --kubeconfig=stolen.kubeconfig auth can-i --list -n p05-target
+error: You must be logged in to the server (Unauthorized)
+
+## step 19: cleanup
+$ kubectl delete ns p05-recon-app p05-target p05-neighbour --wait=true
+namespace "p05-recon-app" deleted
+namespace "p05-target" deleted
+namespace "p05-neighbour" deleted
