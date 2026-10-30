@@ -1,0 +1,188 @@
+# Transcript for full-guide/01-core-workloads/07-jobs-and-cronjobs.md.
+# Tier A: a kind cluster with a Kubernetes v1.37.0 node, kubectl v1.37.2.
+# The lab cluster is shared, so the lab runs in the namespace p01-07-bookstore.
+# The chapter names the namespace bookstore. Each manifest copy here changes
+# only the namespace lines shown in the sed expression of its step, and the
+# PostgreSQL host name that uses it. The 20- StatefulSet was applied from the
+# working tree as it stood at apply time, which held a startupProbe that the
+# committed file does not have (see the note at the end of this header).
+# Prerequisites from 01.03 to 01.05 are applied first, in chapter order.
+# The 35- PriorityClasses are cluster-scoped and carry no namespace.
+# Lines that name the namespace are elided with # ... in the chapter.
+# Note added after the run. The StatefulSet's recorded last-applied
+# configuration shows a startupProbe (failureThreshold 60, periodSeconds 5)
+# that the committed 20- file does not have. Without a startup probe, the
+# liveness probe can kill Postgres during a slow first initdb. An earlier
+# attempt in this namespace showed that restart, and it is not part of this
+# record. Two earlier attempts in this namespace were stopped and the namespace
+# deleted before this run. A run in the shared namespace p01-bookstore was also
+# stopped, because another agent was using that name.
+# Teardown: the namespace stayed Terminating after the timed-out wait in the
+# last step. The commands after "# end of transcript" were run after the run
+# to confirm the namespace was gone.
+
+$ kubectl version
+Client Version: v1.37.2
+Kustomize Version: v5.8.1
+Server Version: v1.37.0
+
+## prerequisites from 01.03 to 01.05
+
+$ kubectl apply -f examples/bookstore/raw-manifests/35-priorityclasses.yaml
+priorityclass.scheduling.k8s.io/bookstore-data configured
+priorityclass.scheduling.k8s.io/bookstore-critical configured
+priorityclass.scheduling.k8s.io/bookstore-batch configured
+
+$ sed -e 's/namespace: bookstore$/namespace: p01-07-bookstore/; s/^  name: bookstore$/  name: p01-07-bookstore/; s/postgres\.bookstore\.svc/postgres.p01-07-bookstore.svc/' examples/bookstore/raw-manifests/00-namespace.yaml | kubectl apply -f -
+namespace/p01-07-bookstore created
+resourcequota/bookstore-quota created
+limitrange/bookstore-limits created
+
+$ sed -e 's/namespace: bookstore$/namespace: p01-07-bookstore/; s/^  name: bookstore$/  name: p01-07-bookstore/; s/postgres\.bookstore\.svc/postgres.p01-07-bookstore.svc/' examples/bookstore/raw-manifests/05-serviceaccounts-rbac.yaml | kubectl apply -f -
+serviceaccount/catalog-sa created
+serviceaccount/storefront-sa created
+serviceaccount/orders-sa created
+serviceaccount/payments-worker-sa created
+serviceaccount/postgres-sa created
+serviceaccount/redis-sa created
+serviceaccount/rabbitmq-sa created
+serviceaccount/migrate-sa created
+role.rbac.authorization.k8s.io/catalog-config-reader created
+rolebinding.rbac.authorization.k8s.io/catalog-config-reader-binding created
+
+$ sed -e 's/namespace: bookstore$/namespace: p01-07-bookstore/; s/^  name: bookstore$/  name: p01-07-bookstore/; s/postgres\.bookstore\.svc/postgres.p01-07-bookstore.svc/' examples/bookstore/raw-manifests/16-db-credentials.yaml | kubectl apply -f -
+secret/db-credentials created
+
+$ sed -e 's/namespace: bookstore$/namespace: p01-07-bookstore/; s/^  name: bookstore$/  name: p01-07-bookstore/; s/postgres\.bookstore\.svc/postgres.p01-07-bookstore.svc/' examples/bookstore/raw-manifests/20-postgres-statefulset.yaml | kubectl apply -f -
+service/postgres created
+statefulset.apps/postgres created
+
+$ kubectl rollout status statefulset/postgres -n p01-07-bookstore --timeout=600s
+Waiting for statefulset spec update to be observed...
+Waiting for 1 pods to be ready...
+Waiting for 1 pods to be ready...
+partitioned roll out complete: 1 new pods have been updated...
+
+$ kubectl get pod postgres-0 -n p01-07-bookstore -o jsonpath='{.status.containerStatuses[0].restartCount}'; echo
+0
+
+## step 1: the batch identity has no token and no rights
+
+$ kubectl get serviceaccount migrate-sa -n p01-07-bookstore -o jsonpath='{.automountServiceAccountToken}'; echo
+false
+
+$ kubectl auth can-i list secrets -n p01-07-bookstore --as=system:serviceaccount:p01-07-bookstore:migrate-sa
+no
+
+$ kubectl auth can-i create jobs -n p01-07-bookstore --as=system:serviceaccount:p01-07-bookstore:migrate-sa
+no
+
+## step 2: the schema migration Job
+
+$ sed -e 's/namespace: bookstore$/namespace: p01-07-bookstore/; s/^  name: bookstore$/  name: p01-07-bookstore/; s/postgres\.bookstore\.svc/postgres.p01-07-bookstore.svc/' examples/bookstore/raw-manifests/21-db-migrate-job.yaml | kubectl apply -f -
+job.batch/db-migrate created
+
+$ kubectl wait --for=condition=complete job/db-migrate -n p01-07-bookstore --timeout=120s
+job.batch/db-migrate condition met
+
+$ kubectl get job db-migrate -n p01-07-bookstore
+NAME         STATUS     COMPLETIONS   DURATION   AGE
+db-migrate   Complete   1/1           31s        38s
+
+$ kubectl logs -n p01-07-bookstore job/db-migrate
+waiting for postgres...
+applying schema (idempotent)...
+CREATE TABLE
+CREATE TABLE
+migration complete
+
+$ kubectl get pod -n p01-07-bookstore -l app=db-migrate -o jsonpath='{.items[0].spec.serviceAccountName} {.items[0].spec.automountServiceAccountToken} {.items[0].spec.securityContext.runAsUser} {.items[0].status.phase}'; echo
+migrate-sa false 999 Succeeded
+
+$ kubectl exec -n p01-07-bookstore postgres-0 -- psql -U bookstore -d bookstore -c '\dt'
+          List of relations
+ Schema |  Name  | Type  |   Owner   
+--------+--------+-------+-----------
+ public | books  | table | bookstore
+ public | orders | table | bookstore
+(2 rows)
+
+
+## step 2b: deliberate refusal, a Job without the baseline is refused at the Pod
+
+$ kubectl create job -n p01-07-bookstore unrestricted-probe --image=postgres:16
+Warning: would violate PodSecurity "restricted:latest": allowPrivilegeEscalation != false (container "unrestricted-probe" must set securityContext.allowPrivilegeEscalation=false), unrestricted capabilities (container "unrestricted-probe" must set securityContext.capabilities.drop=["ALL"]), runAsNonRoot != true (pod or container "unrestricted-probe" must set securityContext.runAsNonRoot=true), seccompProfile (pod or container "unrestricted-probe" must set securityContext.seccompProfile.type to "RuntimeDefault" or "Localhost")
+job.batch/unrestricted-probe created
+
+$ sleep 15; kubectl get events -n p01-07-bookstore --field-selector reason=FailedCreate
+LAST SEEN   TYPE      REASON         OBJECT                   MESSAGE
+16s         Warning   FailedCreate   job/unrestricted-probe   Error creating: pods "unrestricted-probe-x7799" is forbidden: violates PodSecurity "restricted:latest": allowPrivilegeEscalation != false (container "unrestricted-probe" must set securityContext.allowPrivilegeEscalation=false), unrestricted capabilities (container "unrestricted-probe" must set securityContext.capabilities.drop=["ALL"]), runAsNonRoot != true (pod or container "unrestricted-probe" must set securityContext.runAsNonRoot=true), seccompProfile (pod or container "unrestricted-probe" must set securityContext.seccompProfile.type to "RuntimeDefault" or "Localhost")
+14s         Warning   FailedCreate   job/unrestricted-probe   Error creating: pods "unrestricted-probe-r9pzx" is forbidden: violates PodSecurity "restricted:latest": allowPrivilegeEscalation != false (container "unrestricted-probe" must set securityContext.allowPrivilegeEscalation=false), unrestricted capabilities (container "unrestricted-probe" must set securityContext.capabilities.drop=["ALL"]), runAsNonRoot != true (pod or container "unrestricted-probe" must set securityContext.runAsNonRoot=true), seccompProfile (pod or container "unrestricted-probe" must set securityContext.seccompProfile.type to "RuntimeDefault" or "Localhost")
+12s         Warning   FailedCreate   job/unrestricted-probe   Error creating: pods "unrestricted-probe-ssbqs" is forbidden: violates PodSecurity "restricted:latest": allowPrivilegeEscalation != false (container "unrestricted-probe" must set securityContext.allowPrivilegeEscalation=false), unrestricted capabilities (container "unrestricted-probe" must set securityContext.capabilities.drop=["ALL"]), runAsNonRoot != true (pod or container "unrestricted-probe" must set securityContext.runAsNonRoot=true), seccompProfile (pod or container "unrestricted-probe" must set securityContext.seccompProfile.type to "RuntimeDefault" or "Localhost")
+8s          Warning   FailedCreate   job/unrestricted-probe   Error creating: pods "unrestricted-probe-ldnn2" is forbidden: violates PodSecurity "restricted:latest": allowPrivilegeEscalation != false (container "unrestricted-probe" must set securityContext.allowPrivilegeEscalation=false), unrestricted capabilities (container "unrestricted-probe" must set securityContext.capabilities.drop=["ALL"]), runAsNonRoot != true (pod or container "unrestricted-probe" must set securityContext.runAsNonRoot=true), seccompProfile (pod or container "unrestricted-probe" must set securityContext.seccompProfile.type to "RuntimeDefault" or "Localhost")
+
+$ kubectl delete job -n p01-07-bookstore unrestricted-probe
+job.batch "unrestricted-probe" deleted from p01-07-bookstore namespace
+
+## step 2c: deliberate failure, a token that is not mounted
+
+$ kubectl exec -n p01-07-bookstore postgres-0 -- ls /var/run/secrets/kubernetes.io/serviceaccount
+ls: cannot access '/var/run/secrets/kubernetes.io/serviceaccount': No such file or directory
+command terminated with exit code 2
+
+## step 3: the nightly cleanup CronJob
+
+$ sed -e 's/namespace: bookstore$/namespace: p01-07-bookstore/; s/^  name: bookstore$/  name: p01-07-bookstore/; s/postgres\.bookstore\.svc/postgres.p01-07-bookstore.svc/' examples/bookstore/raw-manifests/22-cleanup-cronjob.yaml | kubectl apply -f -
+cronjob.batch/cleanup created
+
+$ kubectl get cronjob cleanup -n p01-07-bookstore
+NAME      SCHEDULE    TIMEZONE   SUSPEND   ACTIVE   LAST SCHEDULE   AGE
+cleanup   0 3 * * *   Etc/UTC    False     0        <none>          3s
+
+$ kubectl get cronjob cleanup -n p01-07-bookstore -o jsonpath='{.spec.concurrencyPolicy} {.spec.timeZone} {.spec.jobTemplate.spec.ttlSecondsAfterFinished}'; echo
+Forbid Etc/UTC 600
+
+$ kubectl create job -n p01-07-bookstore cleanup-manual --from=cronjob/cleanup
+job.batch/cleanup-manual created
+
+$ kubectl wait --for=condition=complete job/cleanup-manual -n p01-07-bookstore --timeout=120s
+job.batch/cleanup-manual condition met
+
+$ kubectl logs -n p01-07-bookstore job/cleanup-manual
+pruning orders older than 90 days...
+DELETE 0
+cleanup complete
+
+## step 4: the TTL removes the finished Job
+
+$ kubectl get job db-migrate -n p01-07-bookstore -o jsonpath='{.spec.ttlSecondsAfterFinished}'; echo
+600
+# waiting 571 seconds: the TTL runs 600 seconds after completion
+
+$ kubectl get job db-migrate -n p01-07-bookstore
+Error from server (NotFound): jobs.batch "db-migrate" not found
+
+$ kubectl get pods -n p01-07-bookstore -l app=db-migrate -o name
+
+## teardown
+
+$ kubectl delete namespace p01-07-bookstore --wait=true --timeout=180s
+namespace "p01-07-bookstore" deleted
+error: timed out waiting for the condition on namespaces/p01-07-bookstore
+
+# end of transcript
+
+## after the run: teardown check
+
+$ kubectl get namespace p01-07-bookstore
+NAME               STATUS        AGE
+p01-07-bookstore   Terminating   19m
+
+$ kubectl get pvc data-postgres-0 -n p01-07-bookstore -o jsonpath='finalizers={.metadata.finalizers} deletion={.metadata.deletionTimestamp}{"\n"}'
+finalizers=["kubernetes.io/pvc-protection"] deletion=
+
+$ kubectl delete pvc data-postgres-0 -n p01-07-bookstore --wait=false
+Error from server (NotFound): persistentvolumeclaims "data-postgres-0" not found
+
+$ kubectl get namespace p01-07-bookstore
+Error from server (NotFound): namespaces "p01-07-bookstore" not found
