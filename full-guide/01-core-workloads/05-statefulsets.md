@@ -7,14 +7,14 @@
 > Bookstore.
 
 **Estimated time:** ~15 min read · ~60 min hands-on
-**Prerequisites:** [Part 01 ch.04](04-replicasets-and-deployments.md) — the contrast with stateless workloads · [Part 01 ch.01](01-pods.md) — Pod identity basics
-**You'll know after this:** • explain why some Pods need stable identity (name, DNS, volume) · • configure the headless Service required by every StatefulSet · • use `volumeClaimTemplates` to give each replica its own PVC · • choose between `OrderedReady` and `Parallel` pod-management policies · • decide when a StatefulSet is the right answer vs. a Deployment
+**Prerequisites:** [01.04](04-replicasets-and-deployments.md): the contrast with stateless workloads · [01.01](01-pods.md): Pod identity and the security baseline
+**You'll know after this:** • explain why some Pods need stable identity (name, DNS, volume) · • configure the headless Service required by every StatefulSet · • use `volumeClaimTemplates` to give each replica its own PVC · • choose between `OrderedReady` and `Parallel` pod-management policies · • decide when a StatefulSet is the right answer vs. a Deployment · • keep a database's writable paths to its data and a few emptyDirs under a read-only root · • say which data outlives a Pod, a StatefulSet or a claim
 
 <!-- tags: core-objects, statefulsets, stateful, headless-service, volumeclaimtemplates -->
 
 ## Why this exists
 
-A Deployment ([ch.04](04-replicasets-and-deployments.md)) treats its Pods as
+A Deployment ([01.04](04-replicasets-and-deployments.md)) treats its Pods as
 **interchangeable, anonymous, disposable** — any replica is as good as any
 other, names are random, all share (or have none of) the same storage. That is
 exactly right for stateless services like catalog. It is exactly *wrong* for a
@@ -24,7 +24,7 @@ volume; a replica must keep *its own* data across restarts; cluster members
 must find each other by *stable* addresses, and often start/stop in a defined
 **order** (initialize the primary before replicas join).
 
-The Bookstore now needs durable storage for the catalog and orders data — a
+The Bookstore now needs durable storage for the catalog and orders data: a
 real Postgres. Running it as a Deployment would be a data-loss bug: replicas
 would share or lose volumes, identities would churn, and there'd be no ordered
 bring-up. The **StatefulSet** is the controller for "Pods that are pets, not
@@ -51,6 +51,19 @@ disk**". For a StatefulSet named `postgres` with `replicas: 3`:
 
 So identity, storage, and order are the three guarantees a Deployment cannot
 give and a stateful system needs.
+
+## Threats and controls
+
+A StatefulSet keeps data across Pod restarts, so its threats are about that
+data and the credentials that open it. The threats to the Pod itself are
+covered by the [baseline](01-pods.md#baseline) and are not repeated here.
+
+| Threat | Control taught here | Goes deeper |
+|---|---|---|
+| A replacement Pod or a scale-down leaves data behind, or a deleted claim takes it with it | One PVC per ordinal from `volumeClaimTemplates`, kept when the Pod or the StatefulSet is deleted. The StorageClass reclaim policy decides what deleting the claim does to the volume | [03.04](../03-config-and-storage/04-persistent-storage.md) |
+| A compromised container changes state that survives its restart | Only the data path is writable: the PVC for `PGDATA`, emptyDirs for the rest, under a read-only root | [05.02](../05-security/02-pod-security.md) |
+| The database password sits in the manifest, where anyone who can read the StatefulSet sees it | `envFrom` a Secret by name, so the StatefulSet holds a reference and not the value | [03.02](../03-config-and-storage/02-secrets.md) |
+| Any Pod in the cluster can open a connection to port 5432 | None in this chapter. The headless Service gives names, not restrictions | [02.06](../02-networking/06-network-policies.md) |
 
 ## Diagrams
 
@@ -94,138 +107,390 @@ flowchart TB
                       no per-Pod stable disk, no ordering)
 ```
 
+## Why state is the hard case
+
+The baseline assumes a read-only root and scratch space that dies with the
+Pod. A stateless service loses nothing when that happens. A database loses
+its data, so it needs one path that persists, and that path must be writable.
+For each path the question is who writes it and whether it must survive a
+restart.
+
+| Path in the container | Volume | Survives a restart | Why it is writable |
+|---|---|---|---|
+| `/var/lib/postgresql/data`, where the database lives in `pgdata` | PVC `data` | Yes | The database files. This is the state. |
+| `/var/run/postgresql` | emptyDir `run` | No | The socket and lock file, recreated at start |
+| `/tmp` | emptyDir `tmp` | No | Scratch space, as in every chapter |
+| Everything else | The image, read-only | Not applicable | Binaries and config stay as the image built them |
+
+Writing the data path needs a matching UID or group. The official image runs
+`postgres` as UID and GID 999. The manifest starts the container as that user,
+so the image never needs root to change ownership of the data directory.
+Its entrypoint still tries to chmod the socket directory, and the log shows
+`Operation not permitted` on the lab host before startup carries on.
+`fsGroup: 999` sets the group of a volume to 999 and grants group write, so
+the user can create files in it. `fsGroupChangePolicy: OnRootMismatch` limits
+that work: the kubelet checks the top-level directory first and skips the
+recursive change when it already matches. A restart on a large data directory
+does not walk every file. The [baseline](01-pods.md#baseline-fsgroup) explains
+`fsGroup`. On this kind cluster the emptyDirs show the group change, and the
+PVC root, already mode 777, was not re-owned.
+
+The last row is the hard one. A read-only root protects the image, which is
+what an attacker most wants to change. It cannot protect the data, because the
+data is the job. Anything a compromised database writes to `PGDATA` stays
+there across restarts, and a restart does not clean it up. The stateless
+answer, throw away the Pod and its scratch space, does not work when the claim
+outlives the Pod. The controls that do apply sit around the data: who can
+`exec` into `postgres-0` or read its volume, what the database account is
+allowed to do,
+and backups that let you restore to a point before the damage.
+
 ## Hands-on with the Bookstore
 
-**Assumed working directory: the guide repo root (`full-guide/`).** Requires
-the `bookstore` namespace ([ch.03](03-resources-and-qos.md)). Uses the
-**official `postgres:16`** image (public — pulled from the registry, so **no
-`kind load`** is needed, unlike the Bookstore-built images).
+**Assumed working directory: the guide repo root (`full-guide/`).** The steps
+need the `bookstore` namespace from [01.01](01-pods.md#restricted-namespace)
+and [01.03](03-resources-and-qos.md). They also need three objects that
+[01.04](04-replicasets-and-deployments.md) applies: the `postgres-sa`
+ServiceAccount from `05-serviceaccounts-rbac.yaml`, the `db-credentials`
+Secret from `16-db-credentials.yaml`, and the `bookstore-data` PriorityClass
+from `35-priorityclasses.yaml`. The official `postgres:16` image comes from
+the registry, so no `kind load` is needed. It is pinned by digest, as the
+[baseline](01-pods.md#baseline-image-digest) asks, with the tag in a comment.
 
-> **Forward reference — credentials.** A real Postgres needs a password. Secrets
-> are [Part 03 ch.02](../03-config-and-storage/02-secrets.md); we are not there
-> yet. So this chapter uses **inline env *stubs*** (plain values) purely so the
-> manifest is runnable now, with a `# TODO(Phase 3)` marker. In
-> [Part 03 ch.02](../03-config-and-storage/02-secrets.md) these become
-> `secretKeyRef`s and the catalog/orders `DB_DSN` is wired to this StatefulSet.
-> The stub values are throwaway local-only and **must not** be used anywhere
-> real.
+> **Credentials come from a Secret.** `POSTGRES_USER`, `POSTGRES_PASSWORD` and
+> `POSTGRES_DB` come from `db-credentials` through `envFrom`. The StatefulSet
+> names the Secret and never holds the password.
+> [03.02](../03-config-and-storage/02-secrets.md) explains what a Secret does
+> and does not protect. The password in this repo is a demo value. Its account
+> is a superuser, which step 5 shows. Catalog and orders connect with the same
+> account, and this guide does not call that least privilege.
 
-New file
-[`examples/bookstore/raw-manifests/20-postgres-statefulset.yaml`](../examples/bookstore/raw-manifests/20-postgres-statefulset.yaml):
+The repo file is the complete manifest: a headless Service, then the
+StatefulSet. Apply the file rather than copying it. The fragment below shows
+the parts this chapter is about. The file also has three Part 04 scheduling
+fields (`tolerations`, `affinity` and `priorityClassName`), explained in
+[04.02](../04-scheduling/02-affinity-taints-topology.md) and
+[04.03](../04-scheduling/03-priority-and-preemption.md). They change nothing
+here.
 
 ```yaml
-apiVersion: v1
-kind: Service                       # REQUIRED headless Service for stable DNS
-metadata:
-  name: postgres                    # MUST equal StatefulSet.spec.serviceName
-  namespace: bookstore
-  labels: { app: postgres }
 spec:
-  clusterIP: None                   # headless → DNS per Pod, no load-balanced VIP
-  selector: { app: postgres }       # selects the StatefulSet's Pods
-  ports:
-    - name: postgres
-      port: 5432
-      targetPort: 5432
----
-apiVersion: apps/v1
-kind: StatefulSet
-metadata:
-  name: postgres
-  namespace: bookstore
-  labels: { app: postgres, app.kubernetes.io/part-of: bookstore }
-spec:
-  serviceName: postgres             # ties to the headless Service above (stable DNS)
-  replicas: 1                       # single instance for the guide (HA is Part 03/08)
-  podManagementPolicy: OrderedReady # 0→1→2 in order (Parallel = all at once)
-  selector:
-    matchLabels: { app: postgres }
-  updateStrategy:
-    type: RollingUpdate
-    rollingUpdate:
-      partition: 0                  # ordinals >= partition update; 0 = update all
+  serviceName: postgres
+  replicas: 1
+  podManagementPolicy: OrderedReady
   template:
-    metadata:
-      labels: { app: postgres }
     spec:
-      terminationGracePeriodSeconds: 30
+      serviceAccountName: postgres-sa
+      automountServiceAccountToken: false
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 999                # the UID the postgres image declares
+        runAsGroup: 999
+        fsGroup: 999                  # the data volume is writable by this group
+        fsGroupChangePolicy: OnRootMismatch
+        seccompProfile:
+          type: RuntimeDefault
       containers:
         - name: postgres
-          image: postgres:16        # official image, pulled from registry (no kind load)
-          ports:
-            - name: postgres
-              containerPort: 5432
+          image: postgres@sha256:1beaa3084eee2676f20a9cd9928f0bf2c5bf674f8e49f81017912183d377c61c  # postgres:16
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities:
+              drop: ["ALL"]
+          envFrom:
+            - secretRef:
+                name: db-credentials
           env:
-            # --- TODO(Phase 3): replace with Secret secretKeyRef ----------
-            - name: POSTGRES_DB
-              value: bookstore
-            - name: POSTGRES_USER
-              value: bookstore
-            - name: POSTGRES_PASSWORD
-              value: "devpassword"          # STUB ONLY — never a real secret
             - name: PGDATA
               value: /var/lib/postgresql/data/pgdata
+          startupProbe:
+            exec:
+              command: ["pg_isready", "-U", "bookstore", "-d", "bookstore"]
+            periodSeconds: 5
+            failureThreshold: 60      # up to 5 minutes to start
           readinessProbe:
-            exec: { command: ["pg_isready", "-U", "bookstore", "-d", "bookstore"] }
+            exec:
+              command: ["pg_isready", "-U", "bookstore", "-d", "bookstore"]
             initialDelaySeconds: 10
             periodSeconds: 5
           livenessProbe:
-            exec: { command: ["pg_isready", "-U", "bookstore", "-d", "bookstore"] }
+            exec:
+              command: ["pg_isready", "-U", "bookstore", "-d", "bookstore"]
             initialDelaySeconds: 30
             periodSeconds: 10
+            failureThreshold: 12      # about two minutes of stall
           resources:
             requests: { cpu: 100m, memory: 256Mi }
-            limits:   { cpu: 500m, memory: 512Mi }
+            limits: { cpu: 500m, memory: 512Mi }
           volumeMounts:
-            - name: data                    # MATCHES the volumeClaimTemplate name
+            - name: data
               mountPath: /var/lib/postgresql/data
-  volumeClaimTemplates:                     # one PVC per Pod, created & retained
+            - name: run
+              mountPath: /var/run/postgresql
+            - name: tmp
+              mountPath: /tmp
+      volumes:
+        - name: run
+          emptyDir: { sizeLimit: 8Mi }
+        - name: tmp
+          emptyDir: { sizeLimit: 32Mi }
+  volumeClaimTemplates:
     - metadata:
         name: data
       spec:
         accessModes: ["ReadWriteOnce"]
         resources:
-          requests:
-            storage: 1Gi
-        # storageClassName omitted → uses the cluster default (kind: local-path)
+          requests: { storage: 1Gi }
 ```
 
-Apply and watch the differences from a Deployment:
+`startupProbe` is the one probe this chapter adds to the file. It holds the
+liveness probe back until the first `pg_isready` succeeds, so `initdb` and
+crash recovery are not taken for a hang. The longer liveness window covers a
+disk that stalls for tens of seconds. [01.02](02-health-and-lifecycle.md)
+explains the probe types.
+
+### Apply, and wait for a query rather than a probe
+
+Apply the file and wait for the rollout. The first start is slow on some
+disks. The lab host took several minutes, mostly in `fsync` during `initdb`.
+A Pod can report `Ready` a few seconds before the `bookstore` database answers
+a query, so the last command in this block waits for the query, not the probe.
 
 ```sh
-# from the repo root (full-guide/)
 kubectl apply -f examples/bookstore/raw-manifests/20-postgres-statefulset.yaml
-kubectl get statefulset,pod,pvc -n bookstore -l app=postgres
-#   Pod name is `postgres-0` (ordinal, NOT a random hash)
-#   PVC `data-postgres-0` was auto-created from the volumeClaimTemplate
-
-# Stable identity + DNS (resolve from another Pod in the namespace).
-# ns bookstore is PSA `restricted`, so the ad-hoc pod MUST be restricted-shaped
-# via --overrides (runAsNonRoot + drop ALL + seccomp RuntimeDefault) or PSA
-# rejects it; the command goes IN the override (args after `--` are dropped
-# once --overrides sets command):
-kubectl run -n bookstore dnstest --image=busybox:1.36 --restart=Never -i --rm \
-  --overrides='{"apiVersion":"v1","spec":{"securityContext":{"runAsNonRoot":true,"runAsUser":65532,"seccompProfile":{"type":"RuntimeDefault"}},"containers":[{"name":"dnstest","image":"busybox:1.36","securityContext":{"allowPrivilegeEscalation":false,"capabilities":{"drop":["ALL"]}},"command":["nslookup","postgres-0.postgres.bookstore.svc.cluster.local"]}]}}'
-
-# Data survives Pod deletion: write, kill the Pod, read back.
-kubectl exec -n bookstore postgres-0 -- \
-  psql -U bookstore -d bookstore -c 'CREATE TABLE t(x int); INSERT INTO t VALUES (42);'
-kubectl delete pod -n bookstore postgres-0           # StatefulSet recreates postgres-0
-kubectl wait -n bookstore --for=condition=Ready pod/postgres-0 --timeout=120s
-kubectl exec -n bookstore postgres-0 -- psql -U bookstore -d bookstore -c 'SELECT * FROM t;'
-#   → 42 : the SAME PVC was re-attached to the SAME ordinal. Data persisted.
+kubectl rollout status statefulset/postgres -n bookstore --timeout=600s
+kubectl exec -n bookstore postgres-0 -- sh -c 'until psql -U bookstore -d bookstore -tAc "select 1" >/dev/null 2>&1; do sleep 2; done; echo database bookstore is ready'
 ```
 
-Contrast with ch.04: a Deployment Pod comes back with a **new** name and (with
-`emptyDir`) **no** data. The StatefulSet keeps both.
+<!-- gate: output -->
+```text
+service/postgres created
+statefulset.apps/postgres created
+```
 
-> **Lineage / forward refs.** This adds the data tier. The DB **schema** is
-> created by a migration **Job** in [ch.07](07-jobs-and-cronjobs.md)
-> (`21-db-migrate-job.yaml`). The `POSTGRES_PASSWORD` stub becomes a real
-> `Secret` and catalog/orders get `DB_DSN` pointing at
-> `postgres.bookstore.svc.cluster.local:5432` in
-> [Part 03 ch.02](../03-config-and-storage/02-secrets.md). Production HA Postgres
-> (replication, an operator) is [Part 03 ch.05](../03-config-and-storage/05-stateful-data-patterns.md).
+<!-- gate: output -->
+```text
+Waiting for statefulset spec update to be observed...
+Waiting for 1 pods to be ready...
+Waiting for 1 pods to be ready...
+partitioned roll out complete: 1 new pods have been updated...
+```
+
+<!-- gate: output -->
+```text
+database bookstore is ready
+```
+
+Compare this with a Deployment. The Pod is `postgres-0`, not a hash, and its
+claim, `data-postgres-0`, came from the template. The claim carries
+`app=postgres`, so the same label filter finds the claim too.
+
+```sh
+kubectl get statefulset,pod,pvc -n bookstore -l app=postgres
+```
+
+<!-- gate: output -->
+```text
+NAME                        READY   AGE
+statefulset.apps/postgres   1/1     5m17s
+
+NAME             READY   STATUS    RESTARTS   AGE
+pod/postgres-0   1/1     Running   0          5m17s
+
+NAME                                    STATUS   VOLUME                                     CAPACITY   ACCESS MODES   STORAGECLASS   VOLUMEATTRIBUTESCLASS   AGE
+persistentvolumeclaim/data-postgres-0   Bound    pvc-2eb0f1fa-584a-41e9-882c-e2302b84dcd9   1Gi        RWO            standard       <unset>                 5m18s
+```
+
+### Writable paths under a read-only root
+
+The baseline holds for a database too. The process runs as UID 999, and the
+root filesystem is read-only. The third command below fails on purpose, to
+show the read-only root working. The other commands show the paths that the
+table above names as writable.
+
+```sh
+kubectl exec -n bookstore postgres-0 -- id
+kubectl exec -n bookstore postgres-0 -- ls -ld /var/lib/postgresql/data /var/lib/postgresql/data/pgdata /var/run/postgresql /tmp
+```
+
+<!-- gate: output -->
+```text
+uid=999(postgres) gid=999(postgres) groups=999(postgres),101(ssl-cert)
+```
+
+<!-- gate: output -->
+```text
+drwxrwsrwx  2 root     postgres    6 Oct 30 22:44 /tmp
+drwxrwxrwx  3 root     root       20 Oct 30 22:45 /var/lib/postgresql/data
+drwx------ 19 postgres postgres 4096 Oct 30 22:47 /var/lib/postgresql/data/pgdata
+drwxrwsrwx  2 root     postgres   53 Oct 30 22:47 /var/run/postgresql
+```
+
+```sh
+# A deliberate failure: the image's own files are read-only.
+kubectl exec -n bookstore postgres-0 -- sh -c 'touch /usr/local/bin/planted; echo exit=$?'
+kubectl exec -n bookstore postgres-0 -- sh -c 'touch /tmp/scratch /var/run/postgresql/scratch && echo emptyDir paths are writable'
+kubectl exec -n bookstore postgres-0 -- sh -c 'touch /var/lib/postgresql/data/probe && echo PVC path is writable; rm -f /var/lib/postgresql/data/probe'
+```
+
+<!-- gate: output -->
+```text
+touch: cannot touch '/usr/local/bin/planted': Read-only file system
+exit=1
+```
+
+<!-- gate: output -->
+```text
+emptyDir paths are writable
+```
+
+<!-- gate: output -->
+```text
+PVC path is writable
+```
+
+The `ls` output shows the two emptyDirs in group `postgres`, which is the
+effect of `fsGroup`. The PVC root is already mode 777 on this kind volume, and
+its owner did not change. `pgdata` is private to UID 999, because `initdb`
+creates it with mode 700.
+
+### Data survives a restart
+
+Write a row, delete the Pod, and read the row back. The `wait` for `create`
+comes first. The replacement Pod does not exist until the old one is gone, and
+a `Ready` wait that runs before then finds nothing and fails with `NotFound`.
+
+```sh
+kubectl exec -n bookstore postgres-0 -- psql -U bookstore -d bookstore -c 'CREATE TABLE t(x int); INSERT INTO t VALUES (42);'
+kubectl delete pod -n bookstore postgres-0
+kubectl wait -n bookstore --for=create pod/postgres-0 --timeout=120s
+kubectl wait -n bookstore --for=condition=Ready pod/postgres-0 --timeout=600s
+kubectl exec -n bookstore postgres-0 -- psql -U bookstore -d bookstore -c 'SELECT * FROM t;'
+```
+
+<!-- gate: output -->
+```text
+CREATE TABLE
+INSERT 0 1
+```
+
+<!-- gate: output -->
+```text
+ x  
+----
+ 42
+(1 row)
+```
+
+### Credentials stay out of the StatefulSet
+
+The first command prints the Secret reference the container gets. The second
+counts the lines in the StatefulSet that mention the demo password. `grep -c`
+exits 1 when it finds none, which is why the line ends in `; true`. The third
+command checks the account.
+
+```sh
+kubectl get statefulset postgres -n bookstore -o jsonpath='{.spec.template.spec.containers[0].envFrom}'; echo
+kubectl get statefulset postgres -n bookstore -o yaml | grep -c devpassword; true
+kubectl exec -n bookstore postgres-0 -- psql -U bookstore -d bookstore -tAc 'SELECT rolsuper FROM pg_roles WHERE rolname = current_user;'
+```
+
+<!-- gate: output -->
+```text
+[{"secretRef":{"name":"db-credentials"}}]
+```
+
+<!-- gate: output -->
+```text
+0
+```
+
+<!-- gate: output -->
+```text
+t
+```
+
+The count is 0, so the object holds no password. The check prints `t`: the
+account that the Bookstore apps use is a superuser, and this guide does not
+call that least privilege.
+
+### Stable per-Pod DNS
+
+```sh
+kubectl exec -n bookstore postgres-0 -- getent hosts postgres-0.postgres.bookstore.svc.cluster.local | awk '{print $1}'
+kubectl get pod -n bookstore postgres-0 -o jsonpath='{.status.podIP}'; echo
+```
+
+<!-- gate: output -->
+```text
+10.244.0.51
+```
+
+<!-- gate: output -->
+```text
+10.244.0.51
+```
+
+The name resolves to the Pod's own IP. The lookup ran from inside
+`postgres-0`, and any Pod in the cluster resolves the same name.
+[02.03](../02-networking/03-dns-and-discovery.md) covers the DNS path.
+
+### The claim outlives the StatefulSet
+
+Deleting the StatefulSet keeps the claim. Applying the file again brings the
+StatefulSet back, the same claim goes to the same ordinal, and the row is
+still there. The default `standard` class has reclaim policy `Delete`, so deleting a
+claim also deletes its volume. A claim may be the only copy of the data, so
+delete one only with a backup in hand.
+
+```sh
+kubectl get storageclass standard -o jsonpath='{.reclaimPolicy}'; echo
+kubectl delete statefulset postgres -n bookstore
+kubectl wait -n bookstore --for=delete pod/postgres-0 --timeout=120s
+kubectl get pvc -n bookstore
+kubectl apply -f examples/bookstore/raw-manifests/20-postgres-statefulset.yaml
+kubectl wait -n bookstore --for=create pod/postgres-0 --timeout=120s
+kubectl wait -n bookstore --for=condition=Ready pod/postgres-0 --timeout=600s
+kubectl exec -n bookstore postgres-0 -- psql -U bookstore -d bookstore -tAc 'SELECT x FROM t;'
+kubectl get pvc -n bookstore
+```
+
+<!-- gate: output -->
+```text
+Delete
+```
+
+<!-- gate: output -->
+```text
+NAME              STATUS   VOLUME                                     CAPACITY   ACCESS MODES   STORAGECLASS   VOLUMEATTRIBUTESCLASS   AGE
+data-postgres-0   Bound    pvc-2eb0f1fa-584a-41e9-882c-e2302b84dcd9   1Gi        RWO            standard       <unset>                 8m10s
+```
+
+<!-- gate: output -->
+```text
+service/postgres unchanged
+statefulset.apps/postgres created
+```
+
+<!-- gate: output -->
+```text
+42
+```
+
+<!-- gate: output -->
+```text
+NAME              STATUS   VOLUME                                     CAPACITY   ACCESS MODES   STORAGECLASS   VOLUMEATTRIBUTESCLASS   AGE
+data-postgres-0   Bound    pvc-2eb0f1fa-584a-41e9-882c-e2302b84dcd9   1Gi        RWO            standard       <unset>                 9m16s
+```
+
+> **Lineage / forward refs.** This adds the data tier. The schema comes from
+> the migration Job in [01.07](07-jobs-and-cronjobs.md)
+> (`21-db-migrate-job.yaml`).
+> `catalog` and `orders` read `DB_DSN` from the same Secret, as
+> [03.02](../03-config-and-storage/02-secrets.md) explains. Production HA
+> Postgres (replication, an operator) is
+> [03.05](../03-config-and-storage/05-stateful-data-patterns.md).
 
 ## How it works under the hood
 
@@ -237,13 +502,13 @@ Contrast with ch.04: a Deployment Pod comes back with a **new** name and (with
 - **Stable DNS needs the headless Service.** `spec.serviceName` must name a
   Service with `clusterIP: None`. A headless Service creates **per-Pod DNS A
   records** (`<POD>.<SVC>.<NS>.svc.cluster.local`) instead of one VIP. (DNS
-  internals: [Part 02 ch.03](../02-networking/03-dns-and-discovery.md).) Omit
+  internals: [02.03](../02-networking/03-dns-and-discovery.md).) Omit
   or mismatch `serviceName` and you lose stable per-Pod addressing — a classic
   StatefulSet misconfiguration.
 - **`volumeClaimTemplates` ≠ a volume; it's a PVC factory.** For each Pod the
   controller instantiates a PVC named `<TEMPLATE>-<NAME>-<ORDINAL>` (e.g.
   `data-postgres-0`), which the dynamic provisioner
-  ([Part 03 ch.04](../03-config-and-storage/04-persistent-storage.md)) binds to
+  ([03.04](../03-config-and-storage/04-persistent-storage.md)) binds to
   a PV. Crucially these PVCs are **owned by the StatefulSet but not deleted with
   Pods**: deleting/rescheduling `postgres-0` re-binds it to the *same*
   `data-postgres-0`. (Deleting the StatefulSet itself does **not** delete the
@@ -290,8 +555,8 @@ talking to an *external* managed DB is still a Deployment.
 > can; if you must self-host, use a **mature operator**
 > (CloudNativePG, Zalando, Crunchy, Strimzi for Kafka) rather than a raw
 > StatefulSet — the operator encodes the failover/backup logic a bare
-> StatefulSet does not ([Part 03 ch.05](../03-config-and-storage/05-stateful-data-patterns.md),
-> [Part 08 ch.05](../08-day-2-operations/05-operators-and-crds.md)).
+> StatefulSet does not ([03.05](../03-config-and-storage/05-stateful-data-patterns.md),
+> [08.05](../08-day-2-operations/05-operators-and-crds.md)).
 
 > **In production:** a StatefulSet gives stable identity and storage, **not
 > high availability by itself**. One Postgres Pod is a single point of failure
@@ -304,15 +569,16 @@ talking to an *external* managed DB is still a Deployment.
 > means deleting/recreating a StatefulSet can leave orphaned volumes (cost) or
 > unexpectedly **re-attach old data**. Manage lifecycle explicitly with
 > `persistentVolumeClaimRetentionPolicy` and document the teardown runbook
-> ([Part 08 ch.02](../08-day-2-operations/02-backup-and-dr.md)).
+> ([08.02](../08-day-2-operations/02-backup-and-dr.md)).
 
 > **In production:** on EKS/GKE/AKS, `volumeClaimTemplates` bind to **cloud
 > block storage** (EBS/PD/Azure Disk) — typically **zonal**. A Pod and its
 > disk are then pinned to one AZ; on node loss the Pod can only reschedule in
 > the same zone. Plan topology (zonal vs. regional disks, anti-affinity across
-> zones) deliberately ([Part 04](../04-scheduling/02-affinity-taints-topology.md)).
-> On bare `kind` the default `local-path` provisioner is node-local and **not**
-> highly available — fine for learning, never for prod data.
+> zones) deliberately ([04.02](../04-scheduling/02-affinity-taints-topology.md)).
+> On kind the default class, `standard`, uses the local-path provisioner. It
+> is node-local and not highly available: fine for learning, never for prod
+> data.
 
 > **In production:** use `OrderedReady` for systems where members must join in
 > sequence; `Parallel` only when truly independent. Use `partition` to canary
@@ -324,7 +590,7 @@ talking to an *external* managed DB is still a Deployment.
 ```sh
 kubectl get statefulset,pod,pvc -n <NS> -l app=<A>     # ordinals + per-Pod PVCs
 kubectl get pod <NAME>-0 -n <NS> -o wide               # stable ordinal name
-nslookup <NAME>-0.<SVC>.<NS>.svc.cluster.local         # stable per-Pod DNS
+kubectl exec -n <NS> <NAME>-0 -- getent hosts <NAME>-0.<SVC>.<NS>.svc.cluster.local
 kubectl rollout status statefulset/<NAME> -n <NS>
 kubectl rollout restart statefulset/<NAME> -n <NS>
 kubectl scale statefulset/<NAME> -n <NS> --replicas=N  # ordered up/down
@@ -334,45 +600,21 @@ kubectl patch statefulset/<NAME> -n <NS> --type='json' \
   -p='[{"op":"replace","path":"/spec/updateStrategy/rollingUpdate/partition","value":1}]'
 ```
 
-Minimal StatefulSet skeleton (headless Service is mandatory):
-
-```yaml
-apiVersion: v1
-kind: Service
-metadata: { name: <SVC>, namespace: <NS> }
-spec: { clusterIP: None, selector: { app: <APP> }, ports: [ { port: <P> } ] }
----
-apiVersion: apps/v1
-kind: StatefulSet
-metadata: { name: <APP>, namespace: <NS> }
-spec:
-  serviceName: <SVC>            # == headless Service name
-  replicas: 3
-  podManagementPolicy: OrderedReady
-  selector: { matchLabels: { app: <APP> } }
-  template:
-    metadata: { labels: { app: <APP> } }
-    spec:
-      containers:
-        - name: <APP>
-          image: <img>
-          volumeMounts: [ { name: data, mountPath: /data } ]
-  volumeClaimTemplates:
-    - metadata: { name: data }
-      spec:
-        accessModes: ["ReadWriteOnce"]
-        resources: { requests: { storage: 1Gi } }
-```
+For a new StatefulSet, start from the file in the Hands-on section. The
+baseline fields stay as they are. Change the names, the image and the sizes.
 
 Checklist:
 
-- [ ] Genuinely need identity/storage/order (else use a Deployment)
+- [ ] Genuinely need identity, storage or order (else use a Deployment)
 - [ ] Headless Service exists; `serviceName` matches it exactly
 - [ ] `volumeClaimTemplates` name matches the container `volumeMounts` name
-- [ ] `podManagementPolicy` chosen (OrderedReady vs Parallel) deliberately
-- [ ] PVC retention/teardown understood (volumes outlive the StatefulSet)
-- [ ] HA comes from the workload/operator, not the StatefulSet alone
-- [ ] Secrets (not stub env) used for credentials in real deployments
+- [ ] The baseline on the pod template; `fsGroup` only where a volume needs it
+- [ ] Each writable path is an emptyDir or a claim; no other path is writable
+- [ ] Credentials come from a Secret by `secretRef`, never inline
+- [ ] A startup probe covers initdb and crash recovery before liveness runs
+- [ ] `podManagementPolicy` chosen deliberately (OrderedReady vs Parallel)
+- [ ] Claim retention and teardown understood (claims outlive the StatefulSet)
+- [ ] HA comes from the workload or operator, not the StatefulSet alone
 
 ## Test your understanding
 
@@ -413,14 +655,34 @@ Checklist:
 
    </details>
 
+6. **A teammate sets `readOnlyRootFilesystem: false` on the postgres container
+   "so it can write its logs". What does that open up, and what would you
+   check first?**
+   <details><summary>Show answer</summary>
+
+   It makes the image's own files writable. A compromised process can then
+   change the binaries and config that every restart reuses, and nothing in
+   the spec stops it. The official image writes its log to stderr, which
+   `kubectl logs` reads, so logs need no writable root. Before changing the
+   field, find the path the process really writes to, with `kubectl exec` and
+   `ls -l`. If a path needs writes, give it its own emptyDir, as the table in
+   this chapter does (see the section on the hard case).
+
+   </details>
+
 ## Further reading
 
-- **Lukša, _Kubernetes in Action_ 2e, ch.15 — "Deploying stateful workloads
-  with StatefulSets"** — ordinals, headless Services, `volumeClaimTemplates`,
-  ordered operations, and update strategies.
-- **Ibryam & Huß, _Kubernetes Patterns_ 2e — *Stateful Service* (ch.12)** —
+- **Lukša, _Kubernetes in Action_ 2e**: the chapter on deploying stateful
+  workloads with StatefulSets: ordinals, headless Services,
+  `volumeClaimTemplates`, ordered operations and update strategies.
+- **Ibryam & Huß, _Kubernetes Patterns_ 2e**: the *Stateful Service* pattern:
   the requirements (stable identity, storage, networking, ordinality) that
-  define when a StatefulSet is the right tool.
+  make a StatefulSet the right tool.
 - Official:
   <https://kubernetes.io/docs/concepts/workloads/controllers/statefulset/> and
   <https://kubernetes.io/docs/tutorials/stateful-application/basic-stateful-set/>.
+- Official, for the data path: the security-context task
+  <https://kubernetes.io/docs/tasks/configure-pod-container/security-context/>
+  (`fsGroup` and `fsGroupChangePolicy`) and the persistent volumes page
+  <https://kubernetes.io/docs/concepts/storage/persistent-volumes/> (reclaim
+  policy).

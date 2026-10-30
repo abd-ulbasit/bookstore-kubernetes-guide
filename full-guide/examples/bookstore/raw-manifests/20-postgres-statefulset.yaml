@@ -157,23 +157,29 @@ spec:
           env:
             - name: PGDATA                # not a secret → stays inline
               value: /var/lib/postgresql/data/pgdata
-          # initdb on a slow disk can outlast liveness. The startup probe holds
-          # liveness off for up to 5 minutes (60 checks, 5s apart).
+          # Startup probe: initdb and crash recovery can take longer than the
+          # liveness window below. Until this passes, liveness does not run, so
+          # a slow first start is not killed. Without it, a liveness restart
+          # during the first initdb was seen on the lab cluster.
           startupProbe:
             exec:
               command: ["pg_isready", "-U", "bookstore", "-d", "bookstore"]
             periodSeconds: 5
-            failureThreshold: 60
+            failureThreshold: 60      # up to 5 minutes to start
           readinessProbe:
             exec:
               command: ["pg_isready", "-U", "bookstore", "-d", "bookstore"]
             initialDelaySeconds: 10
             periodSeconds: 5
+          # Liveness tolerates a stall of about two minutes. On the lab host an
+          # fsync took 40 s during a first start, and the default three-failure
+          # window restarted the container into a slower recovery.
           livenessProbe:
             exec:
               command: ["pg_isready", "-U", "bookstore", "-d", "bookstore"]
             initialDelaySeconds: 30
             periodSeconds: 10
+            failureThreshold: 12
           resources:
             requests:
               cpu: 100m
