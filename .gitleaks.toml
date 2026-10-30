@@ -80,3 +80,10 @@ condition = "AND"
 paths = ['''^full-guide/examples/bookstore/ci/fixtures/vulnerable/config\.env$''']
 regexTarget = "line"
 regexes = ['''(?m)^(GITLEAKS|TRUFFLEHOG)_PLANT=ghp_(NOTAREALTOKENNOTAREALTOKENNOTAREALTOKE|FAKEFAKEFAKEFAKEFAKEFAKEFAKEFAKEFAKE)$''']
+
+[[allowlists]]
+description = """The evidence gate's unit test (.github/scripts/gates/test_gates.py) \
+asserts that a transcript holding an AWS-shaped access key is reported as a \
+leak. The key is a made-up test string, never a credential."""
+targetRules = ["aws-access-token"]
+paths = ['''^\.github/scripts/gates/test_gates\.py$''']
