@@ -6,7 +6,7 @@
 
 **Estimated time:** ~15 min read · ~60 min hands-on
 **Prerequisites:** [Part 00 ch.02](02-containers-and-images.md) — container/image basics · [Part 00 ch.06](06-declarative-api-model.md) — the manifest you'll apply
-**You'll know after this:** • install `kubectl` and bring up a local kind cluster · • understand `kubeconfig`, contexts, and namespaces · • use the everyday `kubectl` verbs (get, describe, logs, apply, exec, port-forward) · • apply the Bookstore Pod and watch reconciliation move it · • troubleshoot a Pod that fails to start on a real cluster
+**You'll know after this:** • install `kubectl` and bring up a local kind cluster · • understand `kubeconfig`, contexts, and namespaces · • use the everyday `kubectl` verbs (get, describe, logs, apply, exec, port-forward) · • apply the Bookstore Pod and watch reconciliation move it · • prove a NetworkPolicy is enforced with a connection that is denied · • troubleshoot a Pod that fails to start on a real cluster
 
 <!-- tags: foundations, kubectl, kind, kubeconfig, local-cluster -->
 
@@ -33,6 +33,18 @@ plane inside it. The objects, the API server pipeline
 purely the substrate (no cloud load balancers, local image loading, single
 node) — flagged by `> **In production:**` callouts. `kubectl` is just a REST
 client; **kubeconfig** is the file telling it *which* API server and *as whom*.
+
+## Threats and controls
+
+| Threat | Control taught here | Goes deeper in |
+|---|---|---|
+| A NetworkPolicy the API server accepts but the network plugin does not enforce, so traffic still flows | Prove enforcement with a request that is denied, in the NetworkPolicy step below | [02.06](../02-networking/06-network-policies.md) |
+| A kubeconfig holds a client key or a token, so whoever reads the file acts as you | Keep the file private and out of version control | [05.01](../05-security/01-authn-authz-rbac.md) |
+| A change reaches the wrong cluster because the current context is not the one you meant | Read `kubectl config current-context` before each change | [05.01](../05-security/01-authn-authz-rbac.md) |
+
+These are the only threats this chapter owns. The Pod's own threats come with
+the Pod in [01.01](../01-core-workloads/01-pods.md#baseline). The threat model
+for the whole Bookstore is in Part 00 ch.08 <!-- link-later: 00.08 -->.
 
 ## Tooling diagram
 
@@ -66,28 +78,13 @@ A "node" here is a container; a multi-node kind cluster is just multiple
 containers on the same Docker engine. That's the only illusion — the
 Kubernetes inside is real.
 
-## kind vs. k3d vs. minikube
+## Why kind
 
-All three give a conformant local cluster; pick one and move on (this guide
-uses **kind** in examples; **k3d** is a first-class equivalent — every kind
-command has a k3d twin shown where it matters).
-
-| | **kind** | **k3d** | **minikube** |
-|---|---|---|---|
-| What it runs | Upstream Kubernetes, nodes = Docker containers | k3s (lightweight CNCF Kubernetes) in Docker | Kubernetes in a VM or container (multi-driver) |
-| Start time | Fast | Fastest (k3s is lean) | Moderate |
-| Multi-node | Yes (declared in config) | Yes | Yes (limited) |
-| Closest to upstream | **Yes** (used by k8s' own CI) | k3s (a few defaults differ) | Yes |
-| Load local image | `kind load docker-image` | `k3d image import` | `minikube image load` |
-| Built-in addons | Minimal (you add what you need) | Minimal; bundled Traefik (can disable) | Many addons (`minikube addons`) |
-| Best for | This guide; matching real clusters; CI | Very fast inner loop, many clusters | All-in-one local dev with batteries |
-
-Why **kind** as the default: it is upstream Kubernetes (what runs in
-production), nodes-as-containers makes the [ch.05](05-node-components.md)
-internals directly inspectable (`docker exec` into a node), and it's what the
-Kubernetes project itself tests with. **k3d** is excellent and faster for a
-tight loop — its commands are noted alongside. **minikube** is great if you want
-bundled addons; its driver model just adds a variable this guide doesn't need.
+kind is the one local cluster this guide verifies. It runs upstream
+Kubernetes, so the API server, scheduler and kubelet are the real components,
+and each node is a container you can inspect with `docker exec` (see
+[ch.05](05-node-components.md)). Other distributions exist, k3d and minikube
+among them. This guide does not test them, and nothing later depends on them.
 
 ## Hands-on with the Bookstore
 
@@ -98,11 +95,20 @@ This is the payoff of Part 00: a running cluster and the first Bookstore Pod.
 ```sh
 # macOS (Homebrew)
 brew install kubectl
-# Linux (direct binary)
-curl -LO "https://dl.k8s.io/release/$(curl -L -s https://dl.k8s.io/release/stable.txt)/bin/linux/amd64/kubectl"
+# Linux: the release this guide ran against, checked against the checksum
+# file that dl.k8s.io publishes for it
+curl -LO "https://dl.k8s.io/release/v1.37.2/bin/linux/amd64/kubectl"
+curl -LO "https://dl.k8s.io/release/v1.37.2/bin/linux/amd64/kubectl.sha256"
+echo "$(cat kubectl.sha256)  kubectl" | sha256sum --check
 sudo install -m 0755 kubectl /usr/local/bin/kubectl
 
 kubectl version --client      # confirm it runs (server check comes after cluster up)
+```
+
+<!-- gate: output -->
+```text
+Client Version: v1.37.2
+Kustomize Version: v5.8.1
 ```
 
 > Keep `kubectl` within one minor version of the cluster (the supported skew is
@@ -111,15 +117,17 @@ kubectl version --client      # confirm it runs (server check comes after cluste
 ### 2. Install a cluster tool and create a cluster
 
 ```sh
-# kind v0.33.0: its default node image is Kubernetes v1.37.0
+# kind v0.33.0 uses Kubernetes v1.37.0 as its default node image. The --image
+# flag pins that image by digest, so every reader gets the same node.
 go install sigs.k8s.io/kind@v0.33.0     # or `brew install kind`, then check:
 kind version                            # expect v0.33.0
-kind create cluster --name bookstore                          # ~30s; nodes are Docker containers
-
-# k3d equivalent (if you chose k3d); --image pins Kubernetes 1.37
-# brew install k3d
-# k3d cluster create bookstore --image rancher/k3s:v1.37.1-k3s1
+kind create cluster --name bookstore \
+  --image kindest/node:v1.37.0@sha256:a1ed56cfb0e7b93589bdf97c8cd566405a265939e3620fc4f5de89adff580ae5
 ```
+
+The digest is the default node image that kind v0.33.0 names in its own
+[source](https://github.com/kubernetes-sigs/kind/blob/v0.33.0/pkg/apis/config/defaults/image.go).
+Pinning it makes every reader's node the same.
 
 `kind create cluster` also **merges a context into your kubeconfig and switches
 to it** — so `kubectl` immediately points at the new cluster.
@@ -169,12 +177,23 @@ kubectl config use-context kind-bookstore         # switch the active context
 kubectl config set-context --current --namespace=default   # set default ns for this context
 ```
 
-> **In production:** one kubeconfig typically holds *many* contexts
-> (dev/staging/prod, multiple clusters/clouds). The single riskiest mistake
-> is running a command against the wrong context — *always* confirm
-> `kubectl config current-context` before mutating anything. Third-party tools
-> like `kubectx`/`kubens` (<https://github.com/ahmetb/kubectx>) or a shell
-> prompt that shows the context prevent "I applied that to **prod**".
+The kubeconfig is a credential. It holds the client certificate and key, or
+the token, that identify you to the API server. The
+[kubeconfig docs](https://kubernetes.io/docs/concepts/configuration/organize-cluster-access-kubeconfig/)
+list both forms. Anyone who can read the file acts as you, so keep it private
+(`chmod 600 ~/.kube/config`) and out of version control. A managed cluster can
+issue a short-lived token through an exec plugin, such as `aws eks get-token`,
+rather than a static key.
+
+The context is the other half of the risk. Before a command that changes state,
+run `kubectl config current-context` and read the answer. A shell prompt, or a
+tool such as [kubectx](https://github.com/ahmetb/kubectx), shows the context on
+every line, so the check does not depend on memory.
+
+> **In production:** one kubeconfig typically holds *many* contexts (dev,
+> staging, prod, several clouds), so the check matters more with each one.
+> [Part 07](../07-delivery/04-gitops-argocd.md) replaces hand-run `apply` with
+> changes reviewed in Git.
 
 ### 5. `kubectl` basics (the everyday verbs)
 
@@ -184,7 +203,7 @@ These are ~90% of daily use; you'll repeat them in every later chapter:
 kubectl get <KIND> [name] [-o wide|yaml|json]   # list/show (spec+status)
 kubectl describe <KIND> <NAME>                  # human view + Events (debug start here)
 kubectl logs <POD> [-c <CTR>] [-f] [--previous] # stdout/stderr (--previous = crashed ctr)
-kubectl exec -it <POD> [-c <CTR>] -- sh         # shell into a container
+kubectl exec -it <POD> [-c <CTR>] -- sh         # needs a shell in the image
 kubectl apply -f <file|dir>                     # declarative create/update (ch.06)
 kubectl delete -f <FILE>                        # delete what a manifest declared
 kubectl port-forward <pod|svc> <LOCAL>:<REMOTE> # tunnel to a Pod/Service from your laptop
@@ -192,67 +211,161 @@ kubectl get events --sort-by=.lastTimestamp     # the reconciliation loop, narra
 kubectl explain <KIND>.spec                     # authoritative schema (ch.06)
 ```
 
+The catalog image has no shell, so `exec -- sh` fails on it. It is built on a
+[distroless](https://github.com/GoogleContainerTools/distroless) base, which ships
+no shell by default. The probe Pod in step 7 is where you run commands from
+inside the cluster.
+
 `describe` + `logs` + `events` are the troubleshooting trident — internalize
 them now ([Part 08 ch.03](../08-day-2-operations/03-troubleshooting-playbook.md)
 goes deep).
 
-### 6. Load the image and deploy the first Bookstore Pod
+### 6. Create the namespace, load the image, and deploy the first Bookstore Pod
+
+The Pod needs two things the cluster does not have yet. The first is a
+`bookstore` namespace that enforces Pod Security `restricted`, so the API
+server refuses a Pod that drops the baseline. The second is the `catalog-sa`
+ServiceAccount the Pod runs as. Create both first. This step runs from the
+`full-guide/` directory, which the paths below assume.
+
+```sh
+kubectl apply -f - <<'EOF'
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: bookstore
+  labels:
+    app.kubernetes.io/part-of: bookstore
+    pod-security.kubernetes.io/enforce: restricted
+    pod-security.kubernetes.io/warn: restricted
+---
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: catalog-sa
+  namespace: bookstore
+  labels:
+    app: catalog
+    app.kubernetes.io/part-of: bookstore
+automountServiceAccountToken: false
+EOF
+```
+
+<!-- gate: output -->
+```text
+# ...
+serviceaccount/catalog-sa created
+```
+
+- **`pod-security.kubernetes.io/enforce: restricted`** makes the API server
+  refuse any Pod in the namespace that lacks the fields `restricted` requires.
+  `warn` prints the same findings to the client. The
+  [namespace control](../01-core-workloads/01-pods.md#baseline-namespace)
+  explains the levels.
+- **`automountServiceAccountToken: false`** keeps the API token out of the Pod,
+  so a compromised process has no token to present to the API server. The
+  [ServiceAccount baseline](../01-core-workloads/01-pods.md#baseline-service-account)
+  has the rest of the reasoning.
+- **The Pod's `securityContext`, `resources` and `emptyDir` fields** complete
+  the baseline. [01.01](../01-core-workloads/01-pods.md#baseline) explains each
+  one against the threat it answers.
 
 The Pod manifest was written and validated in
 [ch.06](06-declarative-api-model.md):
 [`raw-manifests/01-catalog-pod.yaml`](../examples/bookstore/raw-manifests/01-catalog-pod.yaml).
-It uses `image: bookstore/catalog:dev` with `imagePullPolicy: IfNotPresent` —
-that image lives only on your laptop ([ch.02](02-containers-and-images.md)), not
-in any registry, so you must **load it into the kind node** or the kubelet will
-`ImagePullBackOff`:
+It uses `image: bookstore/catalog:dev` with `imagePullPolicy: IfNotPresent`.
+That image lives only on your laptop ([ch.02](02-containers-and-images.md)),
+not in any registry, so you must **load it into the kind node**. Without it,
+the kubelet fails with `ImagePullBackOff`.
 
 ```sh
-# Build the image if you haven't (ch.02). Start at the repo root, build, then
-# return to the repo root so the kubectl paths below resolve.
-cd full-guide/examples/bookstore/app
-docker build -t bookstore/catalog:dev ./catalog
-cd - >/dev/null            # back to where you were (the repo root)
+# Build the image if you haven't (ch.02).
+docker build -t bookstore/catalog:dev examples/bookstore/app/catalog
 
 # Make the image available INSIDE the kind node container.
 kind load docker-image bookstore/catalog:dev --name bookstore
-#   k3d:     k3d image import bookstore/catalog:dev -c bookstore
-#   minikube: minikube image load bookstore/catalog:dev
+docker exec bookstore-control-plane crictl images | grep bookstore/catalog
 
-# All paths below are relative to the repo root (full-guide/).
 # (Optional) re-validate the manifest client-side before applying (ch.06)
-kubectl apply --dry-run=client -f \
-  examples/bookstore/raw-manifests/01-catalog-pod.yaml
+kubectl apply --dry-run=client -n bookstore \
+  -f examples/bookstore/raw-manifests/01-catalog-pod.yaml
 
 # Declare the desired state for real → triggers the ch.03/ch.05 lifecycle
-kubectl apply -f examples/bookstore/raw-manifests/01-catalog-pod.yaml
+kubectl apply -n bookstore -f examples/bookstore/raw-manifests/01-catalog-pod.yaml
 
 # Watch the reconciliation loop converge: Pending → ContainerCreating → Running
-kubectl get pod catalog -w
+kubectl get pod catalog -n bookstore -w
+```
+
+The node lists the image. The `dev` line is the one you need:
+
+<!-- gate: output -->
+```text
+# ...
+docker.io/bookstore/catalog                     dev                  1fd7038d36fd7       7MB
+```
+
+Once the Pod shows `Running`, it reports the state below:
+
+<!-- gate: output -->
+```text
+NAME      READY   STATUS    RESTARTS   AGE
+catalog   1/1     Running   0          26s
 ```
 
 When `STATUS` is `Running` and `READY` is `1/1`, reach the app the way you did
-with plain `docker run` in [ch.02](02-containers-and-images.md) — but now it's a
+with plain `docker run` in [ch.02](02-containers-and-images.md), but now it is a
 real Pod scheduled by Kubernetes:
 
 ```sh
 # Tunnel local :8080 → the Pod's container :8080
-kubectl port-forward pod/catalog 8080:8080
-# in another terminal:
-curl -s localhost:8080/healthz ; echo     # {"status":"ok"}
-curl -s localhost:8080/readyz  ; echo     # {"status":"ready"} (no DB/Redis yet)
-curl -s localhost:8080/books   | head     # in-memory sample catalog
+kubectl port-forward -n bookstore pod/catalog 8080:8080
+```
+
+In another terminal, ask the app for its health:
+
+```sh
+curl -s localhost:8080/healthz ; echo
+```
+
+<!-- gate: output -->
+```text
+{"status":"ok"}
+```
+
+```sh
+curl -s localhost:8080/readyz ; echo
+```
+
+<!-- gate: output -->
+```text
+{"status":"ready"}
+```
+
+`/readyz` reports ready because `DB_DSN` is unset. The app then serves an
+in-memory catalog and has no database to ping, as its log says in the next
+block. The `/books` endpoint returns that catalog:
+
+```sh
+curl -s localhost:8080/books | head -c 160; echo
 ```
 
 Now connect it to the internals you learned:
 
 ```sh
-kubectl get pod catalog -o wide           # which node (kubelet, ch.05) runs it
-kubectl describe pod catalog              # Events: scheduled → pulled → created → started
-kubectl logs catalog                      # the Go app's JSON logs ("catalog listening")
+kubectl get pod catalog -n bookstore -o wide    # which node (kubelet, ch.05) runs it
+kubectl describe pod catalog -n bookstore       # Events: scheduled → pulled → created → started
+kubectl logs catalog -n bookstore | head -2     # the first lines of the Go app's JSON logs
 
-# Peek at the data plane directly — kind nodes ARE containers (ch.05):
+# Peek at the data plane directly: kind nodes ARE containers (ch.05)
 docker exec -it bookstore-control-plane crictl pods   # the catalog Pod + its pause sandbox
 docker exec -it bookstore-control-plane crictl ps     # the running app container
+```
+
+<!-- gate: output -->
+```text
+{"time":"2026-10-30T22:12:29.402356908Z","level":"INFO","msg":"DB_DSN unset; serving in-memory sample books"}
+{"time":"2026-10-30T22:12:29.404990035Z","level":"INFO","msg":"catalog listening","addr":":8080"}
 ```
 
 You've now executed the *entire Part 00 arc against a real cluster*:
@@ -262,13 +375,135 @@ declarative `spec` ([ch.06](06-declarative-api-model.md)) → API server pipelin
 ([ch.05](05-node-components.md)) → status reported → traffic served. Everything
 after this *adds* to this Pod.
 
-### 7. Tear down (and reset any time)
+### 7. Prove a NetworkPolicy is enforced
+
+The API server stores a NetworkPolicy without checking that anything enforces
+it. The [Kubernetes docs](https://kubernetes.io/docs/concepts/services-networking/network-policies/)
+say a policy has no effect unless a controller implements it. A cluster whose
+network plugin ignores policies therefore fails open: the object exists, and
+traffic flows anyway. The reliable check is a connection, so this step makes
+one before the policy, under it, and after it is removed.
+
+kind v0.33.0 enforces NetworkPolicy out of the box. Its default CNI, kindnetd,
+has carried that support since
+[kind v0.24.0](https://github.com/kubernetes-sigs/kind/releases/tag/v0.24.0),
+so this cluster needs no plugin swap. Allow rules and the default-deny pattern
+are the subject of [02.06](../02-networking/06-network-policies.md).
+
+First, a probe: a second Pod with its own ServiceAccount and the same baseline
+as the catalog. Its image is pinned by digest, with the tag in the comment. The
+image declares no user, so the baseline sets UID 65534 explicitly.
+
+```sh
+kubectl apply -f - <<'EOF'
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: probe-sa
+  namespace: bookstore
+automountServiceAccountToken: false
+---
+apiVersion: v1
+kind: Pod
+metadata:
+  name: probe
+  namespace: bookstore
+  labels:
+    app: probe
+spec:
+  serviceAccountName: probe-sa
+  automountServiceAccountToken: false
+  securityContext:
+    runAsNonRoot: true
+    runAsUser: 65534
+    runAsGroup: 65534
+    seccompProfile:
+      type: RuntimeDefault
+  containers:
+    - name: probe
+      image: busybox@sha256:a7dbc319b1438115a207e11930dc4bb3e643dcb3ec0bdd694bb36cd8fad289ec  # busybox:1.37
+      command: ["sleep", "3600"]
+      securityContext:
+        allowPrivilegeEscalation: false
+        readOnlyRootFilesystem: true
+        capabilities:
+          drop: ["ALL"]
+      resources:
+        requests:
+          cpu: 10m
+          memory: 16Mi
+        limits:
+          memory: 32Mi
+      volumeMounts:
+        - name: tmp
+          mountPath: /tmp
+  volumes:
+    - name: tmp
+      emptyDir: {}
+EOF
+kubectl wait --for=condition=Ready pod/probe -n bookstore --timeout=120s
+CATALOG_IP=$(kubectl get pod catalog -n bookstore -o jsonpath='{.status.podIP}')
+kubectl exec -n bookstore probe -- wget -qO- -T 3 "http://$CATALOG_IP:8080/healthz"
+```
+
+Without a policy, the request succeeds:
+
+<!-- gate: output -->
+```text
+{"status":"ok"}
+```
+
+Next, a default-deny policy. It selects every Pod in the namespace and allows
+no ingress to any of them:
+
+```sh
+kubectl apply -f - <<'EOF'
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: default-deny-ingress
+  namespace: bookstore
+spec:
+  podSelector: {}
+  policyTypes: ["Ingress"]
+EOF
+```
+
+<!-- gate: output -->
+```text
+networkpolicy.networking.k8s.io/default-deny-ingress created
+```
+
+Now repeat the request. This failure is deliberate: the policy is meant to deny
+it.
+
+```sh
+kubectl exec -n bookstore probe -- wget -qO- -T 3 "http://$CATALOG_IP:8080/healthz"
+```
+
+<!-- gate: output -->
+```text
+wget: download timed out
+command terminated with exit code 1
+```
+
+A plugin that ignored the policy would have printed the same JSON as before, so
+the timeout is the evidence. Remove the policy and the same request works again.
+Then remove the probe:
+
+```sh
+kubectl delete networkpolicy default-deny-ingress -n bookstore
+kubectl exec -n bookstore probe -- wget -qO- -T 3 "http://$CATALOG_IP:8080/healthz"
+kubectl delete pod probe -n bookstore
+```
+
+### 8. Tear down (and reset any time)
 
 A local cluster is disposable — deleting and recreating is the normal way to
 get a clean slate:
 
 ```sh
-kind delete cluster --name bookstore       # k3d: k3d cluster delete bookstore
+kind delete cluster --name bookstore
 ```
 
 (Deleting the cluster also removes its kubeconfig context.)
@@ -302,14 +537,9 @@ kind delete cluster --name bookstore       # k3d: k3d cluster delete bookstore
 > **In production:** you do **not** run `kind`. The cluster is provisioned by a
 > managed service (EKS/GKE/AKS) or a tool like kubeadm/Cluster API on real
 > machines ([Part 08 ch.01](../08-day-2-operations/01-cluster-lifecycle.md)).
-> kind/k3d are for *local dev and CI* (kind is excellent in CI — ephemeral
-> clusters per pipeline run). The **API and objects are identical**; only
+> kind is for *local dev and CI*: it is excellent in CI, with ephemeral
+> clusters per pipeline run. The **API and objects are identical**; only
 > provisioning and substrate differ.
-
-> **In production:** kubeconfig credentials are typically **short-lived, via an
-> auth exec plugin** (`aws eks get-token`, `gke-gcloud-auth-plugin`, OIDC), not
-> a static cert in a file. Never commit kubeconfig or long-lived tokens; treat
-> the file as a secret.
 
 > **In production:** `Service` type `LoadBalancer` and dynamic `PersistentVolume`
 > provisioning **don't work on bare kind** (no
@@ -317,11 +547,6 @@ kind delete cluster --name bookstore       # k3d: k3d cluster delete bookstore
 > use `port-forward`/NodePort and local-path storage locally; the cloud
 > provides real LBs and disks. Every chapter's `In production:` callouts flag
 > these substrate gaps — the manifests themselves stay the same.
-
-> **In production:** the riskiest everyday operation is **acting on the wrong
-> context**. Enforce a context indicator (prompt segment, `kubectx`), and
-> prefer GitOps so changes go through a reviewed repo rather than ad-hoc
-> `kubectl apply` against prod ([Part 07](../07-delivery/04-gitops-argocd.md)).
 
 > **In production:** a bare Pod like this one is **not** what you deploy — it
 > isn't rescheduled on node loss or recreated on permanent crash. It's a Part
@@ -333,10 +558,10 @@ kind delete cluster --name bookstore       # k3d: k3d cluster delete bookstore
 
 ```sh
 # cluster lifecycle (local)
-kind create cluster --name bookstore
-#   k3d: k3d cluster create bookstore --image rancher/k3s:v1.37.1-k3s1
-kind delete cluster --name bookstore        # k3d: k3d cluster delete bookstore
-kind load docker-image <img> --name bookstore   # k3d: k3d image import <img> -c bookstore
+kind create cluster --name bookstore \
+  --image kindest/node:v1.37.0@sha256:a1ed56cfb0e7b93589bdf97c8cd566405a265939e3620fc4f5de89adff580ae5
+kind delete cluster --name bookstore
+kind load docker-image <img> --name bookstore
 
 # context / kubeconfig
 kubectl config get-contexts                  # list contexts (* = current)
@@ -356,13 +581,15 @@ kubectl port-forward pod/<P> 8080:8080 ; kubectl delete -f <F>
 Smallest end-to-end loop (the thing to remember):
 
 ```
-# run from the repo root (full-guide/)
+# run from the guide directory (full-guide/)
 docker build -t bookstore/catalog:dev examples/bookstore/app/catalog   # ch.02 image
-kind create cluster --name bookstore                    # real local cluster
+kind create cluster --name bookstore \
+  --image kindest/node:v1.37.0@sha256:a1ed56cfb0e7b93589bdf97c8cd566405a265939e3620fc4f5de89adff580ae5
 kind load docker-image bookstore/catalog:dev --name bookstore   # no registry locally
-kubectl apply -f examples/bookstore/raw-manifests/01-catalog-pod.yaml   # declare (ch.06)
-kubectl get pod catalog -w                               # watch the loop converge
-kubectl port-forward pod/catalog 8080:8080 && curl localhost:8080/healthz
+# step 6: create the bookstore namespace and catalog-sa first (heredoc)
+kubectl apply -n bookstore -f examples/bookstore/raw-manifests/01-catalog-pod.yaml   # declare (ch.06)
+kubectl get pod catalog -n bookstore -w                  # watch the loop converge
+kubectl port-forward -n bookstore pod/catalog 8080:8080 && curl localhost:8080/healthz
 ```
 
 Setup checklist:
@@ -371,8 +598,11 @@ Setup checklist:
 - [ ] Docker/Colima engine running before `kind create cluster`
 - [ ] Cluster up; all nodes `Ready`; kube-system Pods running
 - [ ] You confirm `current-context` before any mutating command
+- [ ] Namespace `bookstore` enforces `restricted`; `catalog-sa` exists
 - [ ] Local image `kind load`ed (matches `imagePullPolicy: IfNotPresent`)
 - [ ] `catalog` Pod `Running 1/1`; `/healthz` returns `{"status":"ok"}`
+- [ ] A probe's request was denied under the default-deny policy, and
+  worked again once the policy was deleted
 - [ ] You can tear down and recreate from scratch (cluster is disposable)
 
 ## Test your understanding
@@ -400,17 +630,30 @@ Setup checklist:
 
    </details>
 
-4. **You `kubectl apply` the catalog Pod, but `kubectl get pod` stays `Pending` with no events about scheduling. What's the most likely cause on a fresh kind cluster, and where do you look?**
+4. **A teammate says, "We applied a NetworkPolicy, so the Pods are isolated." The API server accepted it without complaint. What do you check before you believe them?**
    <details><summary>Show answer</summary>
 
-   Most likely the image isn't loaded — but a `Pending` (not `ContainerCreating`) suggests the scheduler hasn't bound the Pod yet, which on a single-node kind cluster usually means the Pod is failing admission (e.g., a request exceeds node allocatable) or no Ready node exists. `kubectl describe pod` events name the rejection. `kubectl get nodes` should show `Ready`; if not, check `kubectl -n kube-system get pods` for control-plane health (see §Verify the control plane and nodes).
+   The API server stores a NetworkPolicy whether or not the cluster's network
+   plugin enforces it, so acceptance proves nothing. The Kubernetes docs say a
+   policy has no effect without a controller that implements it. Check with a
+   connection, as step 7 does: a probe's request should succeed before the
+   policy and be denied under it. A request that still succeeds under the
+   policy means the plugin ignores the policy, and the cluster fails open (see
+   §Threats and controls).
 
    </details>
 
-5. **Hands-on extension: bring up the cluster, deploy the catalog Pod, then `kind delete cluster --name bookstore` and `kind create cluster --name bookstore` again. Re-`kubectl get pod`. What's gone, and what's the point of this exercise?**
+5. **Hands-on extension: bring up the cluster, deploy the catalog Pod, then `kind delete cluster --name bookstore` and `kind create cluster --name bookstore` again. Re-run `kubectl get pod catalog -n bookstore`. What's gone, and what's the point of this exercise?**
    <details><summary>What you should see</summary>
 
-   Nothing — `no resources found` — the cluster (etcd, everything) was disposable. The point: local clusters are cattle, not pets. Treating "reset to clean" as a one-command operation is a deliberate workflow that mirrors how production clusters should be reproducible from manifests in Git, not by accumulated hand-applied state (see §Tear down (and reset any time), §Production notes).
+   Everything the cluster held is gone: the catalog Pod, the namespace, the
+   ServiceAccount, and the etcd data behind them. `kubectl get pod catalog -n
+   bookstore` returns `NotFound`, because the namespace no longer exists. The
+   point: local clusters are cattle, not pets. Treating "reset to clean" as a
+   one-command operation is a deliberate workflow that mirrors how production
+   clusters should be reproducible from manifests in Git, not by accumulated
+   hand-applied state (see §Tear down (and reset any time), §Production
+   notes).
 
    </details>
 
@@ -421,7 +664,9 @@ Setup checklist:
 - **Lukša, _Kubernetes in Action_ 2e, ch.3 — "Deploying your first
   application"** — kubeconfig/contexts, the core `kubectl` verbs, and watching
   the first workload come up.
-- Official: kind <https://kind.sigs.k8s.io/docs/user/quick-start/>, k3d
-  <https://k3d.io/>, `kubectl` install
-  <https://kubernetes.io/docs/tasks/tools/>, and the kubectl cheatsheet
-  <https://kubernetes.io/docs/reference/kubectl/cheatsheet/>.
+- Official: kind <https://kind.sigs.k8s.io/docs/user/quick-start/>,
+  `kubectl` install <https://kubernetes.io/docs/tasks/tools/>, and the kubectl
+  cheatsheet <https://kubernetes.io/docs/reference/kubectl/cheatsheet/>.
+- NetworkPolicy: the kind v0.24.0 release notes for out-of-the-box support
+  <https://github.com/kubernetes-sigs/kind/releases/tag/v0.24.0>, and the
+  Kubernetes docs <https://kubernetes.io/docs/concepts/services-networking/network-policies/>.
