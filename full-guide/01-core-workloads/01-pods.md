@@ -489,7 +489,7 @@ spec:
       resources:
         requests:
           cpu: 10m
-          memory: 8Mi
+          memory: 16Mi                # the namespace LimitRange minimum
         limits:
           memory: 32Mi
       volumeMounts:
@@ -992,7 +992,7 @@ spec:
         capabilities:
           drop: ["ALL"]
       resources:
-        requests: { cpu: 10m, memory: 8Mi }
+        requests: { cpu: 10m, memory: 16Mi }
         limits: { memory: 32Mi }
       volumeMounts: [ { name: shared, mountPath: /shared } ]
   containers:
