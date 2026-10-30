@@ -19,6 +19,31 @@ every chapter's hands-on section advances the *same* app.
 This README is for anyone who lands on the repo on GitHub. The reading
 experience is the live site above; everything below is just orientation.
 
+## Status: being rewritten security-first
+
+The guide is being rewritten so that every manifest it shows is secure from
+the first one: a non-root user, a read-only root filesystem, no privilege
+escalation, no capabilities and a seccomp profile, in a namespace that
+enforces the `restricted` Pod Security level. The reader never learns a
+habit that a later chapter reverses. The reasoning is in
+[ADR 0009](docs/adr/0009-security-first-guide-and-gates.md), the rules every
+chapter follows are in [`docs/security-first-authoring.md`](docs/security-first-authoring.md),
+and the targets are Kubernetes 1.37 and kind v0.33.0.
+
+**Done so far.** No Part is finished yet. Three pilot chapters are rewritten,
+and CI fails a pull request that breaks any of them:
+
+- [01.01 Pods](full-guide/01-core-workloads/01-pods.md), the baseline from the first manifest;
+- [05.02 Pod security](full-guide/05-security/02-pod-security.md), with the attacks run on a lab cluster;
+- [07.03 The CI/CD pipeline](full-guide/07-delivery/03-cicd-pipeline.md), the pipeline the example services use.
+
+**Everything else** is still the earlier text. Its manifests do not all pass
+the new gates yet, and the run summary of the `security-gates` workflow
+lists which chapters fail and why. A chapter joins the enforced list in
+[`.github/security-gates-enforced.txt`](.github/security-gates-enforced.txt)
+in the pull request that finishes it. Until a Part is rewritten, treat its
+manifests as teaching sketches and read them against the baseline in 01.01.
+
 ## Try the hands-on, zero setup
 
 [![Open in GitHub Codespaces](https://github.com/codespaces/badge.svg)](https://codespaces.new/abd-ulbasit/bookstore-kubernetes-guide?devcontainer_path=.devcontainer%2Fdevcontainer.json)
@@ -101,6 +126,10 @@ Every commit to `main` runs:
 - Helm/Kustomize/Terraform shape checks (nightly + on PR)
 - gitleaks secret scan over the full git history (every PR + nightly)
 - External link-check (weekly)
+- The security-first gates (`security-gates` workflow): Trivy's core checks on
+  every manifest, a dry run into a `restricted` namespace on kind, and a
+  runtime check that deploys the Bookstore five ways and waits for every
+  workload. See [ADR 0009](docs/adr/0009-security-first-guide-and-gates.md).
 
 ## Contributing
 
