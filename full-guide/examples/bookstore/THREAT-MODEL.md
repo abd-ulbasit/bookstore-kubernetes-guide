@@ -76,14 +76,16 @@ stable.
 ## STRIDE pass
 
 Each row names a threat, the control that answers it, and its status.
-Status values: `baseline` (a field of the Part 00 baseline), `cluster` (a
-cluster-level control), `open` (no control in the guide yet).
+Status values: `baseline` (a field that admission or the static gate
+enforces), `review` (a baseline field that neither enforces, so a reviewer
+checks it), `cluster` (a cluster-level control), `open` (no control in the
+guide yet). Part 00 ch.08 names the enforcer of each baseline field.
 
 ### Spoofing
 
 | ID | Threat | Control | Status | Explained in |
 |----|--------|---------|--------|--------------|
-| S1 | A Pod calls the API as another identity | Its own ServiceAccount, with `automountServiceAccountToken: false` | baseline | 01.01, `#baseline-service-account` |
+| S1 | A Pod calls the API as another identity | Its own ServiceAccount, with `automountServiceAccountToken: false` | review | 01.01, `#baseline-service-account` |
 | S2 | A stolen kubeconfig acts as an operator | Authentication at the API server, RBAC, short-lived credentials | cluster | 05.01 |
 | S3 | A Pod impersonates another Pod on the network | Default-deny NetworkPolicy, then explicit allows | cluster | 02.06 |
 
@@ -92,7 +94,7 @@ cluster-level control), `open` (no control in the guide yet).
 | ID | Threat | Control | Status | Explained in |
 |----|--------|---------|--------|--------------|
 | T1 | A process rewrites its image or drops a binary | `readOnlyRootFilesystem: true`, with an `emptyDir` at `/tmp` | baseline | 01.01, `#baseline-read-only-root` |
-| T2 | An image is replaced under the same tag | Digest pins for third-party images; signing and provenance | baseline (pins), later (signing) | 01.01, `#baseline-image-digest`; 05.03 |
+| T2 | An image is replaced under the same tag | Digest pins for third-party images; signing and provenance | review (pins), later (signing) | 01.01, `#baseline-image-digest`; 05.03 |
 | T3 | A spec changes outside review | Apply reviewed files from Git, `kubectl diff`, GitOps | cluster | 00.06; 07.04 |
 | T4 | Objects in etcd change without the API server | Only the API server holds etcd credentials | cluster | 00.04; 05.04 |
 
@@ -100,7 +102,7 @@ cluster-level control), `open` (no control in the guide yet).
 
 | ID | Threat | Control | Status | Explained in |
 |----|--------|---------|--------|--------------|
-| R-1 | An apply leaves no record of who made it | API server audit policy, `cluster/audit-policy.yaml` | open until 05.08 | 05.08 <!-- link-later: 05.08 --> |
+| RP1 | An apply leaves no record of who made it | API server audit policy, `cluster/audit-policy.yaml` | open until 05.08 | 05.08 <!-- link-later: 05.08 --> |
 
 ### Information disclosure
 
@@ -109,13 +111,13 @@ cluster-level control), `open` (no control in the guide yet).
 | I1 | Secrets are read from etcd, which skips RBAC | Encryption at rest, `cluster/encryption-config.yaml`; etcd reached only by the API server | cluster | 03.02; 05.04 |
 | I2 | A broad RBAC grant reads Secrets | One ServiceAccount and one narrow Role per workload | cluster | 05.01 |
 | I3 | A caller reads Pod specs or runs commands through the kubelet | Anonymous kubelet auth off, webhook authorization | cluster | 05.06 <!-- link-later: 05.06 --> |
-| I4 | Application code reads a mounted ServiceAccount token | `automountServiceAccountToken: false` | baseline | 01.01, `#baseline-service-account` |
+| I4 | Application code reads a mounted ServiceAccount token | `automountServiceAccountToken: false` | review | 01.01, `#baseline-service-account` |
 
 ### Denial of service
 
 | ID | Threat | Control | Status | Explained in |
 |----|--------|---------|--------|--------------|
-| D1 | One Pod exhausts node memory and evicts its neighbours | Requests and a memory limit on every container | baseline | 01.01, `#baseline-resources`; 01.03 |
+| D1 | One Pod exhausts node memory and evicts its neighbours | Requests and a memory limit on every container | review | 01.01, `#baseline-resources`; 01.03 |
 | D2 | A flood of traffic overwhelms the storefront | None in the baseline | open | none yet |
 
 ### Elevation of privilege
@@ -140,7 +142,7 @@ guide uses it as a map of goals, not as a checklist of techniques.
 | Execution | A new workload or a shell started in a Pod (deploy-container, T1610) | T1, E3 |
 | Persistence | A dropped binary, or a changed spec that survives a restart | T1, T3 |
 | Privilege Escalation | Root in a container, a setuid binary, a capability, a privileged Pod, or escape to the host (escape-to-host, T1611) | E1 to E5 |
-| Stealth | A change that leaves no audit record or avoids review | R-1, T3 |
+| Stealth | A change that leaves no audit record or avoids review | RP1, T3 |
 | Defense Impairment | A policy, gate or NetworkPolicy switched off | T3, S3, E4 |
 | Credential Access | A Secret, a mounted token or etcd read directly | I1, I2, I4, S2 |
 | Discovery | Listing Pods or reaching the kubelet from inside the cluster | I3, S1 |
@@ -166,5 +168,5 @@ guide uses it as a map of goals, not as a checklist of techniques.
 ## Open items
 
 - D2: no edge rate limiting in the baseline.
-- R-1: audit records wait for 05.08.
+- RP1: audit records wait for 05.08.
 - The registry file and its gate are not built yet.

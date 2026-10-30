@@ -8,9 +8,10 @@
 # explained, against the threat it answers, in 01-core-workloads/01-pods.md.
 #
 # Needs the `bookstore` namespace (Pod Security `restricted`) and the
-# `catalog-sa` ServiceAccount, both created in Part 01 ch.01:
+# `catalog-sa` ServiceAccount, both created in Part 00 ch.07 step 6:
 #   kubectl apply -n bookstore -f examples/bookstore/raw-manifests/01-catalog-pod.yaml
-# Client-side validate, no cluster needed:
+# Both dry runs need a reachable cluster, because kubectl reads the API
+# discovery first. Part 00 ch.06 shows the server-side and client-side forms:
 #   kubectl apply --dry-run=client -n bookstore -f examples/bookstore/raw-manifests/01-catalog-pod.yaml
 # The image must be on the node first: `kind load docker-image bookstore/catalog:dev`.
 apiVersion: v1                 # core API group, version v1

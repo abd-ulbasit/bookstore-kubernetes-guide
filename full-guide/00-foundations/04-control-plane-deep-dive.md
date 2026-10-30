@@ -109,9 +109,12 @@ Stage by stage:
    a default storage class, stamp labels.
 5. **Schema & object validation.** The object is decoded and validated against
    the resource's schema and built-in validation (required fields, value
-   constraints). Malformed objects are rejected here — this is exactly the
-   stage `kubectl apply --dry-run=server` exercises, and the *client*-side
-   variant you'll run in [ch.07](07-local-cluster-setup.md).
+   constraints). Malformed objects are rejected here. A server-side dry run
+   (`kubectl apply --dry-run=server`) runs every stage up to validating
+   admission and stores nothing, so it also runs Pod Security admission. A
+   client-side dry run checks only the file on your machine, which is why it
+   can pass a Pod the cluster refuses. [ch.06](06-declarative-api-model.md)
+   shows both outcomes.
 6. **Validating admission.** **Validating webhooks** and policy engines
    (e.g. ValidatingAdmissionPolicy/CEL, Kyverno, Gatekeeper) get a final
    allow/deny — *no* further mutation, just enforcement (e.g. "deny privileged
