@@ -50,7 +50,7 @@ spec:
       {{- end }}
       containers:
         - name: payments-worker
-          image: "{{ $p.image.repository }}:{{ $p.image.tag }}"
+          image: "{{ include "bookstore.image" $p.image }}"
           imagePullPolicy: {{ $p.image.pullPolicy }}
           securityContext:
             {{- include "bookstore.containerSecurityContext" (dict "ctx" . "profile" "goService") | nindent 12 }}

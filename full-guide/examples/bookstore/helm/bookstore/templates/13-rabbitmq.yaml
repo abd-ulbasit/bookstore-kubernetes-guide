@@ -44,7 +44,7 @@ spec:
       {{- end }}
       containers:
         - name: rabbitmq
-          image: "{{ $q.image.repository }}:{{ $q.image.tag }}"
+          image: "{{ include "bookstore.image" $q.image }}"
           imagePullPolicy: {{ $q.image.pullPolicy }}
           securityContext:
             {{- include "bookstore.containerSecurityContext" (dict "ctx" . "profile" "uid999RW") | nindent 12 }}

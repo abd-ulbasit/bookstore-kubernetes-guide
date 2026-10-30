@@ -51,7 +51,7 @@ spec:
         {{- include "bookstore.podSecurityContext" (dict "ctx" . "profile" "batch999") | nindent 8 }}
       containers:
         - name: migrate
-          image: "{{ $m.image.repository }}:{{ $m.image.tag }}"
+          image: "{{ include "bookstore.image" $m.image }}"
           imagePullPolicy: {{ $m.image.pullPolicy }}
           securityContext:
             {{- include "bookstore.containerSecurityContext" (dict "ctx" . "profile" "batch999") | nindent 12 }}

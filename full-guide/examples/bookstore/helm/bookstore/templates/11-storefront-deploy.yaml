@@ -48,7 +48,7 @@ spec:
       {{- end }}
       containers:
         - name: storefront
-          image: "{{ $s.image.repository }}:{{ $s.image.tag }}"
+          image: "{{ include "bookstore.image" $s.image }}"
           imagePullPolicy: {{ $s.image.pullPolicy }}
           securityContext:
             {{- include "bookstore.containerSecurityContext" (dict "ctx" . "profile" "storefront") | nindent 12 }}

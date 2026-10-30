@@ -38,7 +38,7 @@ spec:
             {{- include "bookstore.podSecurityContext" (dict "ctx" . "profile" "batch999") | nindent 12 }}
           containers:
             - name: cleanup
-              image: "{{ $cj.image.repository }}:{{ $cj.image.tag }}"
+              image: "{{ include "bookstore.image" $cj.image }}"
               imagePullPolicy: {{ $cj.image.pullPolicy }}
               securityContext:
                 {{- include "bookstore.containerSecurityContext" (dict "ctx" . "profile" "batch999") | nindent 16 }}

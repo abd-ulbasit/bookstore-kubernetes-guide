@@ -48,6 +48,7 @@ the toggles and image blocks. Highlights:
 |---|---|---|
 | `namespace.create` / `namespace.psa` | `true` / `restricted` | Templates the ns with PSA `restricted` (+ audit/warn) + ResourceQuota + LimitRange |
 | `<SVC>.image.{repository,tag,pullPolicy}` | `bookstore/<SVC>` `:dev` `IfNotPresent` | Per-service image |
+| `<SVC>.image.digest` | set on redis, rabbitmq and postgres only | Pins a third-party image by digest; it takes precedence over `tag` |
 | `<SVC>.replicaCount` / `.resources` | matches raw manifests | Per-service scale + tuned requests/limits |
 | `<SVC>.{topologySpread,podAntiAffinity,nodeSelector,tolerations,affinity}` | the raw-manifests scheduling layer | Overridable scheduling |
 | `securityProfiles.*` | exact per-image restricted SC | The restricted model (rarely override) |

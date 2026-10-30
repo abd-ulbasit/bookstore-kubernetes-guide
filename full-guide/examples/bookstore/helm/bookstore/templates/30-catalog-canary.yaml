@@ -53,7 +53,7 @@ spec:
         {{- include "bookstore.podSecurityContext" (dict "ctx" $ "profile" "goService") | nindent 8 }}
       containers:
         - name: catalog
-          image: "{{ $cn.image.repository }}:{{ $cn.image.tag }}"
+          image: "{{ include "bookstore.image" $cn.image }}"
           imagePullPolicy: {{ $cn.image.pullPolicy }}
           securityContext:
             {{- include "bookstore.containerSecurityContext" (dict "ctx" $ "profile" "goService") | nindent 12 }}

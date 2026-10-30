@@ -67,7 +67,7 @@ spec:
       terminationGracePeriodSeconds: {{ $pg.terminationGracePeriodSeconds }}
       containers:
         - name: postgres
-          image: "{{ $pg.image.repository }}:{{ $pg.image.tag }}"
+          image: "{{ include "bookstore.image" $pg.image }}"
           imagePullPolicy: {{ $pg.image.pullPolicy }}
           securityContext:
             {{- include "bookstore.containerSecurityContext" (dict "ctx" . "profile" "uid999RW") | nindent 12 }}

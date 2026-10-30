@@ -41,7 +41,7 @@ spec:
       {{- end }}
       containers:
         - name: redis
-          image: "{{ $r.image.repository }}:{{ $r.image.tag }}"
+          image: "{{ include "bookstore.image" $r.image }}"
           imagePullPolicy: {{ $r.image.pullPolicy }}
           args:
             {{- toYaml $r.args | nindent 12 }}

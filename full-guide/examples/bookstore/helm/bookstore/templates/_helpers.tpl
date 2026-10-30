@@ -107,6 +107,21 @@ Usage: include "bookstore.containerSecurityContext" (dict "ctx" $ "profile" "goS
 {{- toYaml $p.container -}}
 {{- end -}}
 
+{{/*
+bookstore.image — the image reference for an image block. A block with a digest
+renders repository@digest, the form the raw manifests use, and the tag is kept
+in values.yaml for reference. A block without one renders repository:tag, which
+is how the bookstore/* images built locally are referenced.
+Usage: include "bookstore.image" $c.image
+*/}}
+{{- define "bookstore.image" -}}
+{{- if .digest -}}
+{{- printf "%s@%s" .repository .digest -}}
+{{- else -}}
+{{- printf "%s:%v" .repository .tag -}}
+{{- end -}}
+{{- end -}}
+
 {{/* ----------------------------------------------------------------------- */}}
 {{/* DB_DSN — the SINGLE source of the catalog/orders Postgres DSN            */}}
 {{/* ----------------------------------------------------------------------- */}}
