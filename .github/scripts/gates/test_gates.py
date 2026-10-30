@@ -14,12 +14,16 @@ from __future__ import annotations
 import contextlib
 import io
 import json
+import os
 import shutil
+import stat
+import sys
 import tempfile
 import textwrap
 import unittest
 from pathlib import Path
 
+import admission_gate as ag
 import extract_blocks as eb
 import static_gate as sg
 
@@ -456,6 +460,167 @@ class StaticGateCliTests(unittest.TestCase):
     def test_scope_typo_exits_two(self):
         manifest = self.manifest([("a/good.md", "hardened-deployment.yaml", ["Deployment"])])
         self.assertEqual(self.run_gate(manifest, "--scope", "a/god.md")[0], 2)
+
+
+WARN_OUT = (
+    'Warning: would violate PodSecurity "restricted:latest": allowPrivilegeEscalation != false '
+    '(container "app" must set securityContext.allowPrivilegeEscalation=false)\n'
+    "deployment.apps/x created (server dry run)\n"
+)
+FORBIDDEN_OUT = (
+    'Error from server (Forbidden): error when creating "STDIN": pods "x" is forbidden: '
+    'violates PodSecurity "restricted:latest": allowPrivilegeEscalation != false\n'
+)
+NO_CRD_OUT = (
+    'error: resource mapping not found for name: "x" namespace: "gate-restricted" from "STDIN": '
+    'no matches for kind "Rollout" in version "argoproj.io/v1alpha1"\n'
+    "ensure CRDs are installed first\n"
+)
+
+
+class ClassifyOutputTests(unittest.TestCase):
+    def test_warning_with_exit_zero_is_a_violation(self):
+        self.assertEqual(ag.classify_output(0, WARN_OUT), "violation")
+
+    def test_forbidden_pod_is_a_violation(self):
+        self.assertEqual(ag.classify_output(1, FORBIDDEN_OUT), "violation")
+
+    def test_no_matches_for_kind_is_missing_crd(self):
+        self.assertEqual(ag.classify_output(1, NO_CRD_OUT), "missing-crd")
+
+    def test_clean_dry_run_passes(self):
+        self.assertEqual(ag.classify_output(0, "deployment.apps/x created (server dry run)\n"), "pass")
+
+    def test_unrelated_warning_with_exit_zero_still_passes(self):
+        out = "Warning: v1 Endpoints is deprecated in v1.33+\nservice/x created (server dry run)\n"
+        self.assertEqual(ag.classify_output(0, out), "pass")
+
+    def test_other_nonzero_exit_is_error(self):
+        self.assertEqual(ag.classify_output(1, 'Error from server (Invalid): spec.replicas: Invalid value: -1\n'), "error")
+        self.assertEqual(ag.classify_output(1, ""), "error")
+
+    def test_violation_outranks_a_missing_crd_in_the_same_block(self):
+        self.assertEqual(ag.classify_output(1, WARN_OUT + NO_CRD_OUT), "violation")
+
+
+class RetargetTests(unittest.TestCase):
+    def test_retarget_overrides_namespace_and_skips_cluster_scoped(self):
+        docs = [
+            {"kind": "Pod", "metadata": {"name": "a", "namespace": "bookstore"}},
+            {"kind": "Service", "metadata": {"name": "b"}},
+            {"kind": "Namespace", "metadata": {"name": "bookstore"}},
+            {"kind": "ClusterRole", "metadata": {"name": "c"}},
+        ]
+        original = json.loads(json.dumps(docs))
+        out = ag.retarget(docs, "gate-restricted", {"Namespace", "ClusterRole"})
+        self.assertEqual(out[0]["metadata"]["namespace"], "gate-restricted")
+        self.assertEqual(out[1]["metadata"]["namespace"], "gate-restricted")
+        self.assertNotIn("namespace", out[2]["metadata"])
+        self.assertNotIn("namespace", out[3]["metadata"])
+        self.assertEqual(docs, original, "the input must not be modified")
+
+    def test_retarget_adds_metadata_when_missing(self):
+        (doc,) = ag.retarget([{"kind": "Pod"}], "ns", set())
+        self.assertEqual(doc["metadata"]["namespace"], "ns")
+
+
+FAKE_KUBECTL = """#!{python}
+import os, sys
+args = sys.argv[1:]
+if "api-resources" in args:
+    print("namespaces   ns   v1   false   Namespace")
+    print("clusterroles      rbac.authorization.k8s.io/v1   false   ClusterRole")
+    sys.exit(0)
+body = sys.stdin.read()
+if "--dry-run=server" not in args:
+    sys.exit(0)  # creating the gate namespace
+if "gate-control-violating" in body and not os.environ.get("FAKE_BLIND"):
+    sys.stderr.write({warn!r})
+    print("deployment.apps/gate-control-violating created (server dry run)")
+elif "VIOLATE" in body:
+    sys.stderr.write({warn!r})
+    print("deployment.apps/x created (server dry run)")
+elif "Rollout" in body:
+    sys.stderr.write({nocrd!r})
+    sys.exit(1)
+elif "BOOM" in body:
+    sys.stderr.write("Error from server (Invalid): boom\\n")
+    sys.exit(1)
+else:
+    print("object created (server dry run)")
+"""
+
+
+class AdmissionCliTests(unittest.TestCase):
+    def setUp(self):
+        self._tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self._tmp.cleanup)
+        self.tmp = Path(self._tmp.name)
+        self.kubectl = self.tmp / "kubectl"
+        self.kubectl.write_text(
+            FAKE_KUBECTL.format(python=sys.executable, warn=WARN_OUT, nocrd=NO_CRD_OUT),
+            encoding="utf-8",
+        )
+        self.kubectl.chmod(self.kubectl.stat().st_mode | stat.S_IEXEC)
+
+    def manifest(self, entries):
+        blocks = []
+        for i, (chapter, klass, kind, extra) in enumerate(entries):
+            path = self.tmp / f"b{i}.yaml"
+            path.write_text(
+                f"apiVersion: v1\nkind: {kind}\nmetadata:\n  name: n{i}\n  namespace: bookstore\n{extra}",
+                encoding="utf-8",
+            )
+            blocks.append(eb.Block(chapter, 1, 1, klass, [kind], str(path)))
+        manifest = self.tmp / "manifest.json"
+        manifest.write_text(json.dumps([vars(b) for b in blocks]), encoding="utf-8")
+        return manifest
+
+    def run_gate(self, manifest, *args):
+        report = self.tmp / "report.json"
+        argv = ["--manifest", str(manifest), "--kubectl", str(self.kubectl), "--report", str(report), *args]
+        with contextlib.redirect_stdout(io.StringIO()), contextlib.redirect_stderr(io.StringIO()):
+            rc = ag.main(argv)
+        return rc, (json.loads(report.read_text(encoding="utf-8")) if report.exists() else None)
+
+    def statuses(self, report):
+        return {(b["chapter"]): b["status"] for b in report["blocks"]}
+
+    def test_each_outcome_gets_its_own_status_and_exit_code(self):
+        manifest = self.manifest([
+            ("a.md", "applyable", "ConfigMap", ""),
+            ("b.md", "applyable", "ConfigMap", "data:\n  x: VIOLATE\n"),
+            ("c.md", "applyable", "Rollout", ""),
+            ("d.md", "applyable", "ConfigMap", "data:\n  x: BOOM\n"),
+            ("e.md", "insecure", "ConfigMap", "data:\n  x: VIOLATE\n"),
+            ("f.md", "unparseable", "ConfigMap", ""),
+        ])
+        rc, report = self.run_gate(manifest, "--scope", "a.md")
+        self.assertEqual(rc, 0)
+        self.assertEqual(
+            self.statuses(report),
+            {"a.md": "pass", "b.md": "violation", "c.md": "missing-crd", "d.md": "error",
+             "e.md": "skipped-insecure", "f.md": "unparseable"},
+        )
+        for chapter, expected in (("b.md", 1), ("c.md", 0), ("d.md", 1), ("e.md", 0), ("f.md", 1)):
+            self.assertEqual(self.run_gate(manifest, "--scope", chapter)[0], expected, chapter)
+
+    def test_blind_cluster_aborts_with_exit_two(self):
+        manifest = self.manifest([("a.md", "applyable", "ConfigMap", "")])
+        os.environ["FAKE_BLIND"] = "1"
+        self.addCleanup(os.environ.pop, "FAKE_BLIND", None)
+        rc, report = self.run_gate(manifest)
+        self.assertEqual(rc, 2)
+        self.assertIsNone(report, "no result may be written when the control failed")
+
+    def test_scope_typo_exits_two(self):
+        manifest = self.manifest([("a.md", "applyable", "ConfigMap", "")])
+        self.assertEqual(self.run_gate(manifest, "--scope", "z.md")[0], 2)
+
+    def test_missing_kubectl_exits_two(self):
+        manifest = self.manifest([("a.md", "applyable", "ConfigMap", "")])
+        self.kubectl.unlink()
+        self.assertEqual(self.run_gate(manifest)[0], 2)
 
 
 if __name__ == "__main__":
