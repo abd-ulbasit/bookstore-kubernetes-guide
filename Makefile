@@ -150,6 +150,34 @@ scan-go: ## govulncheck across every Go module under full-guide/examples/.
 	done; \
 	exit $$rc
 
+##@ Gates
+
+# The security-first gates (docs/security-first-authoring.md, section 8). Each
+# target extracts the chapter YAML into a throwaway directory first. SCOPE is a
+# space-separated list of chapters or chapter directories relative to
+# full-guide/, for example SCOPE=01-core-workloads/01-pods.md. With no SCOPE
+# every chapter is in scope. Pick the interpreter with PY=, for example a
+# Python 3.12 virtualenv that has PyYAML.
+GATES_DIR := .github/scripts/gates
+GATES_SCOPE := $(foreach s,$(SCOPE),--scope $(s))
+
+.PHONY: gates-test
+gates-test: ## Run the unit tests of the gate scripts.
+	$(PY) -m unittest discover -s $(GATES_DIR)
+
+.PHONY: gates-static
+gates-static: ## G1+G2: Trivy core checks on chapter YAML (SCOPE=chapter.md ...).
+	@command -v trivy >/dev/null || (echo "trivy not found; brew install trivy" && exit 1)
+	@out=$$(mktemp -d); trap 'rm -rf "$$out"' EXIT; \
+	$(PY) $(GATES_DIR)/extract_blocks.py --root full-guide --out "$$out" && \
+	$(PY) $(GATES_DIR)/static_gate.py --manifest "$$out/manifest.json" $(GATES_SCOPE)
+
+.PHONY: gates-admission
+gates-admission: ## G1+G3: restricted-namespace dry-run of chapter YAML (SCOPE=chapter.md ...). Needs a cluster.
+	@out=$$(mktemp -d); trap 'rm -rf "$$out"' EXIT; \
+	$(PY) $(GATES_DIR)/extract_blocks.py --root full-guide --out "$$out" && \
+	$(PY) $(GATES_DIR)/admission_gate.py --manifest "$$out/manifest.json" --kubectl $(KUBECTL) $(GATES_SCOPE)
+
 ##@ Bookstore (local cluster)
 
 .PHONY: kind-up

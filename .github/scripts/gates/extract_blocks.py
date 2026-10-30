@@ -107,22 +107,23 @@ def _dedent(lines: list[str], indent: str) -> list[str]:
     return out
 
 
-def _marked(lines: list[str], fence_at: int) -> bool:
-    """True if the nearest non-blank line above the fence is exactly the marker."""
+def _previous_line(lines: list[str], fence_at: int) -> str:
+    """Return the nearest non-blank line above the fence, stripped, or ''."""
     for j in range(fence_at - 1, -1, -1):
         if lines[j].strip():
-            return lines[j].strip() == MARKER
-    return False
+            return lines[j].strip()
+    return ""
 
 
-def yaml_fences(text: str):
-    """Yield (index, line, marked, body) for every yaml fence in a Markdown file.
+def fences(text: str):
+    """Yield (language, line, previous, body) for every fenced block.
 
-    Every fence kind is tracked, so a yaml fence nested inside a longer fence
-    of another language is never mistaken for a chapter manifest.
+    `line` is the 1-based line of the opening fence and `previous` the
+    nearest non-blank line above it, where the gate markers live. Every fence
+    kind is tracked, so a yaml fence nested inside a longer fence of another
+    language is never mistaken for a chapter manifest.
     """
     lines = text.split("\n")
-    index = 0
     i = 0
     while i < len(lines):
         opening = _FENCE.match(lines[i])
@@ -131,7 +132,6 @@ def yaml_fences(text: str):
             continue
         char = opening.group("fence")[0]
         length = len(opening.group("fence"))
-        language = _info_language(opening.group("info"))
         start = i
         j = i + 1
         while j < len(lines):
@@ -144,11 +144,18 @@ def yaml_fences(text: str):
             ):
                 break
             j += 1
+        body = "\n".join(_dedent(lines[start + 1 : j], opening.group("indent"))) + "\n"
+        yield _info_language(opening.group("info")), start + 1, _previous_line(lines, start), body
+        i = j + 1
+
+
+def yaml_fences(text: str):
+    """Yield (index, line, marked, body) for every yaml fence in a Markdown file."""
+    index = 0
+    for language, line, previous, body in fences(text):
         if language in YAML_LANGS:
             index += 1
-            body = "\n".join(_dedent(lines[start + 1 : j], opening.group("indent"))) + "\n"
-            yield index, start + 1, _marked(lines, start), body
-        i = j + 1
+            yield index, line, previous == MARKER, body
 
 
 def chapter_files(root: Path):

@@ -24,6 +24,7 @@ import unittest
 from pathlib import Path
 
 import admission_gate as ag
+import evidence_gate as ev
 import extract_blocks as eb
 import static_gate as sg
 
@@ -621,6 +622,151 @@ class AdmissionCliTests(unittest.TestCase):
         manifest = self.manifest([("a.md", "applyable", "ConfigMap", "")])
         self.kubectl.unlink()
         self.assertEqual(self.run_gate(manifest)[0], 2)
+
+
+OUTPUT = "<!-- gate: output -->"
+
+TRANSCRIPT = textwrap.dedent(
+    """\
+    $ kubectl get pods -n lab
+    NAME    READY   STATUS    RESTARTS   AGE
+    web-0   1/1     Running   0          12s
+    web-1   1/1     Running   0          9s
+    $ kubectl get svc -n lab
+    NAME   TYPE        CLUSTER-IP     PORT(S)
+    web    ClusterIP   10.96.12.40    80/TCP
+    """
+)
+
+
+class OutputBlockTests(unittest.TestCase):
+    def test_only_fences_marked_as_output_are_returned(self):
+        md = (
+            "Run it:\n\n```bash\nkubectl get pods\n```\n\n"
+            + OUTPUT + "\n\n```text\nNAME  READY\nweb-0 1/1\n```\n\n"
+            "```text\nunmarked output\n```\n"
+        )
+        self.assertEqual(ev.output_blocks(md), ["NAME  READY\nweb-0 1/1"])
+
+    def test_marker_must_be_the_nearest_nonblank_line(self):
+        md = OUTPUT + "\n\nprose in between\n\n```text\nx\n```\n"
+        self.assertEqual(ev.output_blocks(md), [])
+
+    def test_indented_output_fence_is_dedented(self):
+        md = "1. Check:\n\n   " + OUTPUT + "\n\n   ```text\n   a\n   b\n   ```\n"
+        self.assertEqual(ev.output_blocks(md), ["a\nb"])
+
+
+class MissingLinesTests(unittest.TestCase):
+    def test_output_present_in_order_passes(self):
+        block = "NAME    READY   STATUS    RESTARTS   AGE\nweb-0   1/1     Running   0          12s"
+        self.assertEqual(ev.missing_lines(block, TRANSCRIPT), [])
+
+    def test_output_lines_out_of_order_are_missing(self):
+        block = "web-0   1/1     Running   0          12s\nNAME    READY   STATUS    RESTARTS   AGE"
+        self.assertEqual(ev.missing_lines(block, TRANSCRIPT), ["NAME    READY   STATUS    RESTARTS   AGE"])
+
+    def test_invented_line_is_missing(self):
+        block = "web-0   1/1     Running   0          12s\nweb-9   1/1     Running   0          1s"
+        self.assertEqual(ev.missing_lines(block, TRANSCRIPT), ["web-9   1/1     Running   0          1s"])
+
+    def test_elision_line_is_allowed(self):
+        block = "NAME    READY   STATUS    RESTARTS   AGE\n# ...\nweb-1   1/1     Running   0          9s"
+        self.assertEqual(ev.missing_lines(block, TRANSCRIPT), [])
+
+    def test_omitting_a_line_without_an_elision_is_missing(self):
+        block = "NAME    READY   STATUS    RESTARTS   AGE\nweb-1   1/1     Running   0          9s"
+        self.assertEqual(ev.missing_lines(block, TRANSCRIPT), ["web-1   1/1     Running   0          9s"])
+
+    def test_elision_matches_nothing_in_the_transcript(self):
+        self.assertEqual(ev.missing_lines("# ...", TRANSCRIPT), [])
+
+    def test_trailing_whitespace_and_crlf_do_not_matter(self):
+        block = "NAME    READY   STATUS    RESTARTS   AGE   \nweb-0   1/1     Running   0          12s"
+        self.assertEqual(ev.missing_lines(block, TRANSCRIPT.replace("\n", "\r\n")), [])
+
+    def test_a_line_cannot_be_matched_twice(self):
+        block = "web-0   1/1     Running   0          12s\n# ...\nweb-0   1/1     Running   0          12s"
+        self.assertEqual(ev.missing_lines(block, TRANSCRIPT), ["web-0   1/1     Running   0          12s"])
+
+    def test_one_miss_does_not_cascade(self):
+        block = "invented\nweb-0   1/1     Running   0          12s\nweb-1   1/1     Running   0          9s"
+        self.assertEqual(ev.missing_lines(block, TRANSCRIPT), ["invented"])
+
+
+class LeakTests(unittest.TestCase):
+    def test_public_ip_home_path_and_email_leak(self):
+        text = "node 8.8.4.4 ready\ncd /Users/jane/work\nssh /home/jane/.ssh\nowner jane@corp.io\n"
+        self.assertEqual(ev.leaks(text), ["8.8.4.4", "/Users/jane", "/home/jane", "jane@corp.io"])
+
+    def test_private_ips_and_metadata_endpoint_do_not_leak(self):
+        for ip in ("10.244.0.5", "172.18.0.2", "127.0.0.1", "169.254.169.254", "192.168.1.5", "0.0.0.0"):
+            self.assertEqual(ev.leaks(f"addr {ip} ok"), [], ip)
+
+    def test_tailnet_address_leaks(self):
+        self.assertEqual(ev.leaks("peer 100.64.1.9"), ["100.64.1.9"])
+
+    def test_container_home_directories_do_not_leak(self):
+        self.assertEqual(ev.leaks("HOME=/home/nonroot and /home/node/app"), [])
+
+    def test_version_numbers_and_digests_do_not_leak(self):
+        self.assertEqual(ev.leaks("kubectl v1.37.2 image@sha256:abc123 chart 3.1.0"), [])
+
+    def test_aws_account_and_key_ids_leak(self):
+        text = "role arn:aws:iam::123456789012:role/x key AKIAABCDEFGHIJKLMNOP"
+        self.assertEqual(ev.leaks(text), ["arn:aws:iam::123456789012:", "AKIAABCDEFGHIJKLMNOP"])
+
+    def test_duplicates_are_reported_once(self):
+        self.assertEqual(ev.leaks("8.8.4.4 and again 8.8.4.4"), ["8.8.4.4"])
+
+    def test_invalid_octets_are_not_addresses(self):
+        self.assertEqual(ev.leaks("999.300.1.1"), [])
+
+
+class EvidenceCliTests(unittest.TestCase):
+    def setUp(self):
+        self._tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self._tmp.cleanup)
+        self.tmp = Path(self._tmp.name)
+        self.transcript = self.tmp / "05-02.txt"
+        self.transcript.write_text(TRANSCRIPT, encoding="utf-8")
+
+    def run_gate(self, chapter_text, transcript=None):
+        chapter = self.tmp / "ch.md"
+        chapter.write_text(chapter_text, encoding="utf-8")
+        argv = ["--chapter", str(chapter), "--transcript", str(transcript or self.transcript)]
+        out = io.StringIO()
+        with contextlib.redirect_stdout(out), contextlib.redirect_stderr(out):
+            return ev.main(argv), out.getvalue()
+
+    def chapter(self, body):
+        return f"# Lab\n\n{OUTPUT}\n\n```text\n{body}\n```\n"
+
+    def test_matching_output_passes(self):
+        rc, _ = self.run_gate(self.chapter("web-0   1/1     Running   0          12s"))
+        self.assertEqual(rc, 0)
+
+    def test_invented_output_fails_and_names_the_line(self):
+        rc, out = self.run_gate(self.chapter("web-7   1/1     Running   0          12s"))
+        self.assertEqual(rc, 1)
+        self.assertIn("web-7", out)
+
+    def test_leak_in_the_transcript_fails(self):
+        leaky = self.tmp / "leaky.txt"
+        leaky.write_text(TRANSCRIPT + "connected to 8.8.4.4\n", encoding="utf-8")
+        rc, out = self.run_gate(self.chapter("web-0   1/1     Running   0          12s"), leaky)
+        self.assertEqual(rc, 1)
+        self.assertIn("8.8.4.4", out)
+
+    def test_chapter_without_output_blocks_aborts(self):
+        rc, _ = self.run_gate("# Lab\n\n```text\nnothing marked\n```\n")
+        self.assertEqual(rc, 2)
+
+    def test_empty_or_missing_transcript_aborts(self):
+        empty = self.tmp / "empty.txt"
+        empty.write_text("\n", encoding="utf-8")
+        self.assertEqual(self.run_gate(self.chapter("x"), empty)[0], 2)
+        self.assertEqual(self.run_gate(self.chapter("x"), self.tmp / "nope.txt")[0], 2)
 
 
 if __name__ == "__main__":

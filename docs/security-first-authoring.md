@@ -1,0 +1,187 @@
+# Security-first authoring spec
+
+Every chapter worker reads this file. The reasoning is in the
+[design](design/2026-10-29-security-first-rewrite.md); this page holds only
+the rules. A chapter, rewritten or new, is done when it meets section 2 and
+the gates in section 8 pass.
+
+## 1. The baseline
+
+Every workload carries this in full, from 01.01 onward. 01.01 explains each
+field against the threat it answers. Later chapters link back to it and do
+not re-explain.
+
+```yaml
+spec:
+  automountServiceAccountToken: false # true only with a dedicated SA
+  securityContext:
+    runAsNonRoot: true
+    runAsUser: <the numeric UID the image declares>
+    runAsGroup: <its GID>
+    fsGroup: <its GID>                # only when a volume needs it
+    seccompProfile:
+      type: RuntimeDefault
+  containers:
+    - name: app
+      image: <image>
+      securityContext:
+        allowPrivilegeEscalation: false
+        readOnlyRootFilesystem: true
+        capabilities:
+          drop: ["ALL"]
+      resources: {}                   # requests and a memory limit, per 01.03
+      volumeMounts:
+        - name: tmp
+          mountPath: /tmp             # writable paths come from emptyDir
+  volumes:
+    - name: tmp
+      emptyDir: {}
+```
+
+- **Images.** Third-party images are pinned by digest from their first
+  appearance, with the tag in a comment. The guide's own locally built
+  images use the tag the build produced.
+- **ServiceAccount.** A workload that calls the API gets its own
+  ServiceAccount with least-privilege RBAC. Nothing uses `default`.
+- **Namespace.** Pod Security labels at `restricted`. From 02.06 on, a
+  default-deny NetworkPolicy plus explicit allows.
+- **User namespaces.** `hostUsers: false` joins the baseline only once it is
+  verified on kind on Linux and macOS hosts. Until then 05.02 teaches it.
+- **Cluster.** 00.07 builds a cluster that enforces NetworkPolicy and sets
+  `restricted` as the cluster-wide default. The default lands last, after
+  every Part complies.
+
+## 2. The chapter contract
+
+- [ ] Every manifest the reader applies is complete and carries the
+  baseline. Nothing is "omitted for brevity". A block showing a few fields
+  has no `kind:` and reads clearly as a fragment.
+- [ ] `## Threats and controls` follows `## Mental model`: a short table of
+  the threat, the control this chapter teaches, and where the topic goes
+  deeper. Only threats specific to the subject. If there are none, say so in
+  one sentence.
+- [ ] A hardening field is explained where it first appears.
+- [ ] Hands-on uses only the secure form. Where the chapter teaches a
+  control, it shows the control working, for example a request that is
+  denied. A step that shows a failure is labelled as a deliberate action.
+- [ ] Security items sit in the body, not in a Production notes afterthought.
+- [ ] The Quick Reference shows secure forms only.
+- [ ] Test your understanding has at least one question on the chapter's
+  security dimension.
+- [ ] Every security claim is demonstrated with output captured in the
+  chapter, or cited to an upstream source: Kubernetes docs, the project's
+  docs, a CVE or an advisory.
+- [ ] Every third-party install labels its namespace first, at the lowest
+  Pod Security level the component works under, and sets the chart's
+  security values where it exposes them. If privilege is needed only for an
+  optional feature, turn the feature off. Any exception goes in the one
+  exceptions registry with its reason, its chapter and an expiry within 12
+  months.
+
+## 3. Markers
+
+Tools read three HTML comments. Spell them exactly.
+
+**Insecure on purpose.** Only in Part 05 labs and the capstone overlay, and
+never in namespace `bookstore` or `default`. The lab creates and labels its
+own namespace for the privilege it needs.
+
+````markdown
+<!-- gate: insecure-on-purpose -->
+
+```yaml
+# INSECURE ON PURPOSE: <what it shows>. Lab cluster only.
+apiVersion: v1
+kind: Pod
+```
+````
+
+The marker must be the nearest non-blank line above the fence. The check
+runs both ways: a marked block that stops failing (a stale marker) breaks
+CI, and so does an unmarked block that fails.
+
+**Output.** `<!-- gate: output -->` above a fence of captured output. Every
+line must appear in the lab transcript, in order and consecutively. Mark
+lines you left out with a line equal to `# ...`.
+
+**Link later.** A chapter that does not exist yet is named in plain text
+with `<!-- link-later: 05.05 -->` beside it, never linked. The strict build
+passes and a later pass can grep for them.
+
+## 4. Part 05 and the boundary rule
+
+Part 05 teaches the mechanism and proves it on a lab cluster. Parts 10, 11,
+13, 14 and 15 teach running it in production on a cloud. Where both touch a
+topic, Part 05 owns the concept and the attack, the later chapter owns the
+operations, and each links to the other.
+
+| Part 05 | Production counterpart |
+|---|---|
+| 05.01 | 10.03, 13.04 |
+| 05.03 | 14.12, 15.03 |
+| 05.04 | 11.05, 15.05 |
+| 05.07 | 11.01 |
+| 05.08 | 14.13, 15.10 |
+
+## 5. Lab evidence
+
+- **Lab first.** No lab chapter is written before its lab has run. Every
+  command in it comes from a terminal that executed it.
+- **Tier.** Tier A is kind on the reader's machine. Tier B is kubeadm on
+  Compute Engine, for what kind cannot show truthfully. Each lab chapter
+  states its tier at the top and says to run it only against clusters you
+  own. Only the declared tier counts as evidence.
+- **Header.** What ran, on which tier and versions. For tier B, the cost
+  from the billing export, not an estimate. What did not work the first time.
+- **Transcripts.** Runs are scripted and recorded. The redacted transcript is
+  committed under `full-guide/examples/security-lab/evidence/`, with no
+  public IPs, home paths, emails or cloud identifiers.
+
+## 6. DevSecOps in the projects
+
+- **One default tool per job**, implemented in the project. Alternatives get
+  a line on when to pick them instead. If two tools share a job on purpose,
+  say why.
+- **Controls arrive with their concepts.** A tool is first run locally in
+  the chapter that introduces it. 07.03 assembles the pipeline, and every
+  later chapter adds its stage to that pipeline, not a side example.
+- **The pipeline is a reusable workflow** that the guide's own CI runs
+  against the example services, so a stage that stops working fails the
+  build.
+
+## 7. Style
+
+- Wrap prose at about 78 columns, never above 80.
+- No new em dashes. Existing chapter filenames keep their URLs.
+- Never invent a version, digest, CVE or number. Take it from captured
+  output or an upstream source.
+- This is a public repo: no project IDs, billing accounts, public IPs, home
+  paths or personal setup details.
+- The guide never presents itself as preparation for any test. No test-prep
+  framing and no course-outline language.
+- Add no example or demo files unless a chapter needs them.
+
+## 8. Gate commands
+
+Run from the repository root with Python 3.12 and PyYAML. `PY=` picks the
+interpreter. `SCOPE=` takes chapters or chapter directories relative to
+`full-guide/`, for example `SCOPE=01-core-workloads/01-pods.md`.
+
+| Command | Checks | Needs |
+|---|---|---|
+| `make gates-test` | the gate scripts' unit tests | |
+| `make gates-static SCOPE=...` | G1, G2: five core checks | Trivy 0.76.1 |
+| `make gates-admission SCOPE=...` | G1, G3: `restricted` dry-run | kind v0.33.0 cluster, kubectl v1.37.2 |
+| `python .github/scripts/gates/evidence_gate.py --chapter C --transcript T` | G7 | the lab transcript |
+| `python .github/scripts/check-runasnonroot.py` | existing check | |
+| `mkdocs build --strict` | existing check | |
+
+The five core checks are KSV-0012, KSV-0014, KSV-0001, KSV-0003 and
+KSV-0030. Exit 0 means pass, 1 means an in-scope failure, and 2 means the
+gate could not trust itself: its control failed, the scope matched nothing,
+or there was nothing to check.
+
+A block no scanner could judge is never a pass. `not-evaluated` (static) is a
+kind Trivy has no check for, such as a Rollout, or a document it would skip.
+`missing-crd` (admission) is a kind the cluster lacks. Both are listed, and
+the PR must say how that block was checked instead.
