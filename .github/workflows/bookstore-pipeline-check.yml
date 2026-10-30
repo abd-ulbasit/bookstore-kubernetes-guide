@@ -1,0 +1,197 @@
+name: bookstore-pipeline-check
+
+# G9: the guide's CI runs the Bookstore pipeline (bookstore-pipeline.yml) on
+# every change to the services, so a stage that stops working fails the
+# build. Two jobs do it:
+#
+#   pipeline  the real pipeline, once per service, as a Bookstore repo would
+#             call it. Nothing is published from here.
+#   controls  every scanner against ci/fixtures/vulnerable, which is broken
+#             on purpose. A control passes only when the scanner flags the
+#             fixture AND names the planted issue. A scanner that went quiet,
+#             crashed or renamed its rule IDs fails here instead of passing
+#             the real services by saying nothing.
+#
+# The services are not published from this repo, so `sign` does not run; the
+# publish path is exercised in a Bookstore repo that sets `publish: true`.
+
+on:
+  pull_request:
+    paths:
+      - 'full-guide/examples/bookstore/app/**'
+      - 'full-guide/examples/bookstore/ci/**'
+      - '.github/workflows/bookstore-pipeline.yml'
+      - '.github/workflows/bookstore-pipeline-check.yml'
+  workflow_dispatch: {}
+
+permissions: {}
+
+concurrency:
+  group: bookstore-pipeline-check-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  pipeline:
+    name: pipeline (${{ matrix.service }})
+    strategy:
+      fail-fast: false
+      matrix:
+        service: [catalog, orders, payments-worker, storefront]
+    # The ceiling for the called workflow. GitHub checks it when the workflow
+    # is parsed, even for jobs that are skipped (sign is, with publish off), so
+    # it must cover every job. Each job in the called workflow asks for less.
+    permissions:
+      contents: read
+      actions: read
+      packages: write
+      id-token: write
+      attestations: write
+    # GitHub now accepts `uses: $/.github/...` for a file in this repository, and
+    # zizmor prefers it. actionlint 1.7.12 rejects that form, so the older
+    # `./` form stays until actionlint learns it.
+    uses: ./.github/workflows/bookstore-pipeline.yml # zizmor: ignore[self-repository]
+    with:
+      service: ${{ matrix.service }}
+      bookstore-dir: full-guide/examples/bookstore
+      publish: false
+      # payments-worker serves health and metrics only, so a web scanner has
+      # nothing to read.
+      dast: ${{ matrix.service != 'payments-worker' }}
+      # The whole-repo stages run once, on one leg.
+      repo-wide: ${{ matrix.service == 'catalog' }}
+      workflow-files: .github/workflows/bookstore-pipeline.yml .github/workflows/bookstore-pipeline-check.yml
+
+  controls:
+    name: control (${{ matrix.tool }})
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    env:
+      FIXTURE: full-guide/examples/bookstore/ci/fixtures/vulnerable
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - { tool: gitleaks,     file: "",                    expect: github-pat }
+          - { tool: trufflehog,   file: "",                    expect: Github }
+          - { tool: semgrep,      file: "",                    expect: bookstore-sql-string-concat }
+          - { tool: gosec,        file: "",                    expect: G202 }
+          - { tool: govulncheck,  file: "",                    expect: GO-2021-0113 }
+          - { tool: trivy-fs,     file: "",                    expect: CVE-2021-38561 }
+          - { tool: hadolint,     file: vulnerable.Dockerfile, expect: DL3002 }
+          - { tool: trivy-config, file: deployment.json,       expect: KSV-0017 }
+          - { tool: kube-linter,  file: deployment.json,       expect: privileged-container }
+          - { tool: kubesec,      file: deployment.json,       expect: Privileged }
+          - { tool: zizmor,       file: bad-workflow.yml,      expect: template-injection }
+          - { tool: actionlint,   file: bad-workflow.yml,      expect: potentially untrusted }
+    steps:
+      - uses: step-security/harden-runner@dc2769abcc0fcfbadfc1df54081c1608579ef6b2 # v2.22.2
+        with:
+          egress-policy: audit
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: The scanner must report the planted issue
+        env:
+          TOOL: ${{ matrix.tool }}
+          FILE: ${{ matrix.file }}
+          EXPECT: ${{ matrix.expect }}
+        run: |
+          full-guide/examples/bookstore/ci/scan.sh --expect "$EXPECT" "$TOOL" "${FIXTURE}${FILE:+/$FILE}"
+
+  fixture-image:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - uses: step-security/harden-runner@dc2769abcc0fcfbadfc1df54081c1608579ef6b2 # v2.22.2
+        with:
+          egress-policy: audit
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - run: mkdir -p scan-out
+      - uses: docker/setup-buildx-action@f87e5991a6d7451dcb8d9637bfbc97413f497069 # v4.4.1
+      - name: Build the vulnerable image
+        uses: docker/build-push-action@c3c9e263c25d99ce0380d002d59b67737d91b0dc # v7.4.0
+        with:
+          context: full-guide/examples/bookstore/ci/fixtures/vulnerable
+          file: full-guide/examples/bookstore/ci/fixtures/vulnerable/vulnerable.Dockerfile
+          push: false
+          tags: bookstore/vulnerable:fixture
+          outputs: type=docker,dest=scan-out/vulnerable.tar
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: fixture-image
+          path: scan-out/vulnerable.tar
+          retention-days: 1
+
+  controls-image:
+    name: control (${{ matrix.tool }})
+    needs: fixture-image
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - { tool: dockle,       expect: CIS-DI-0001 }
+          - { tool: trivy-image,  expect: CVE-2022-37434 }
+          - { tool: grype,        expect: CVE-2021-38561 }
+          - { tool: trivy-sbom,   expect: CVE-2021-38561 }
+    steps:
+      - uses: step-security/harden-runner@dc2769abcc0fcfbadfc1df54081c1608579ef6b2 # v2.22.2
+        with:
+          egress-policy: audit
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          name: fixture-image
+          path: scan-out
+      - name: The scanner must report the planted issue
+        env:
+          TOOL: ${{ matrix.tool }}
+          EXPECT: ${{ matrix.expect }}
+        run: |
+          scan=full-guide/examples/bookstore/ci/scan.sh
+          case "$TOOL" in
+            grype|trivy-sbom)
+              "$scan" syft scan-out/vulnerable.tar
+              "$scan" --expect "$EXPECT" "$TOOL" scan-reports/sbom.cdx.json ;;
+            *)
+              "$scan" --expect "$EXPECT" "$TOOL" scan-out/vulnerable.tar ;;
+          esac
+
+  # The ZAP baseline control: the fixture serves a page with none of the
+  # security headers a browser expects, so a passive scan must warn.
+  control-zap:
+    name: control (zap)
+    needs: fixture-image
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - uses: step-security/harden-runner@dc2769abcc0fcfbadfc1df54081c1608579ef6b2 # v2.22.2
+        with:
+          egress-policy: audit
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          name: fixture-image
+          path: scan-out
+      - name: The scanner must report the planted issue
+        run: |
+          set -euo pipefail
+          docker load --input scan-out/vulnerable.tar
+          docker run --detach --name fixture --publish 127.0.0.1:8080:8080 bookstore/vulnerable:fixture
+          for i in $(seq 1 30); do
+            curl --silent --fail --output /dev/null http://127.0.0.1:8080/books && break
+            [ "$i" -lt 30 ] || { echo "::error::the fixture never answered"; exit 1; }
+            sleep 1
+          done
+          full-guide/examples/bookstore/ci/scan.sh --expect 10010 zap http://127.0.0.1:8080/books

@@ -1,0 +1,43 @@
+# Pre-commit checks for the Bookstore repo (Part 07 ch.03). They run on your
+# machine before a commit exists, so a leaked token or an unpinned Dockerfile
+# never reaches the pipeline, and never reaches history. Install once:
+#
+#   pip install pre-commit && pre-commit install
+#
+# Three checks, chosen because they are fast and have almost no false
+# positives. The slower scanners (Semgrep, CodeQL, the image scanners) stay in
+# the pipeline, where the same ci/scan.sh runs them.
+#
+# Two hooks run the scanners' own images, pinned by digest, so the hook and
+# the pipeline cannot drift apart. gosec is built from its pinned version.
+
+# The scanner fixture is broken on purpose and exists only in the guide.
+exclude: ^ci/fixtures/
+
+repos:
+  - repo: local
+    hooks:
+      # Secrets. Scans what is staged, so a token is caught before the commit
+      # exists. The same gitleaks image as ci/scan.sh (v8.30.1).
+      - id: gitleaks
+        name: gitleaks
+        language: docker_image
+        entry: ghcr.io/gitleaks/gitleaks@sha256:c00b6bd0aeb3071cbcb79009cb16a60dd9e0a7c60e2be9ab65d25e6bc8abbb7f git --pre-commit --redact --staged --verbose --no-banner
+        pass_filenames: false
+
+      # Dockerfile lint, from the same hadolint image as ci/scan.sh (v2.15.1).
+      - id: hadolint
+        name: hadolint
+        language: docker_image
+        entry: ghcr.io/hadolint/hadolint@sha256:32dac94127fd60b7b7e3fbfc65e1383b9b5e25c9bfd7b8536de7a539fe68a12d hadolint --failure-threshold warning
+        files: ^app/[^/]+/Dockerfile$     # the four service images
+        types: [dockerfile]
+
+      # Go security lint. Each service is its own module, so run gosec in each.
+      - id: gosec
+        name: gosec
+        language: golang
+        additional_dependencies: ['github.com/securego/gosec/v2/cmd/gosec@v2.30.0']
+        entry: bash -c 'rc=0; for m in app/*/go.mod; do (cd "$(dirname "$m")" && gosec -quiet ./...) || rc=1; done; exit $rc'
+        pass_filenames: false
+        types: [go]

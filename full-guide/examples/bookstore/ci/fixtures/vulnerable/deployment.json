@@ -1,0 +1,30 @@
+{
+  "apiVersion": "apps/v1",
+  "kind": "Deployment",
+  "metadata": {
+    "name": "vulnerable-fixture",
+    "namespace": "g9-fixture",
+    "annotations": {
+      "fixture": "INSECURE ON PURPOSE: a scanner fixture. Never apply it. Lab cluster only."
+    }
+  },
+  "spec": {
+    "replicas": 1,
+    "selector": { "matchLabels": { "app": "vulnerable-fixture" } },
+    "template": {
+      "metadata": { "labels": { "app": "vulnerable-fixture" } },
+      "spec": {
+        "hostPID": true,
+        "containers": [
+          {
+            "name": "app",
+            "image": "bookstore/vulnerable:latest",
+            "securityContext": { "privileged": true, "runAsUser": 0 },
+            "volumeMounts": [{ "name": "host", "mountPath": "/host" }]
+          }
+        ],
+        "volumes": [{ "name": "host", "hostPath": { "path": "/" } }]
+      }
+    }
+  }
+}

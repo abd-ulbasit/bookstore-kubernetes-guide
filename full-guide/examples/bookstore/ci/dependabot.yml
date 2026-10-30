@@ -1,0 +1,53 @@
+# Dependabot for a Bookstore repo (Part 07 ch.03). The update bot is the other
+# half of the dependency scan: govulncheck and Trivy say a dependency is
+# vulnerable, and this opens the pull request that moves it. The pipeline then
+# runs on that PR, so a bump that breaks the build or adds a new finding is
+# stopped before a human reads it.
+#
+# Dependabot reads only .github/dependabot.yml at the repository root. Copy
+# this file there. The guide's own .github/dependabot.yml does not use it:
+# the example trees are quoted verbatim in chapter prose, so a bot bump there
+# would make the code and the chapter disagree.
+#
+# Why Dependabot and not Renovate: it is built into GitHub, needs no extra
+# app or token, and covers all three ecosystems below. Pick Renovate when you
+# need grouping rules, a schedule per package or a monorepo of many languages.
+version: 2
+updates:
+  # The Go services. One entry per module, since each is its own go.mod.
+  - package-ecosystem: gomod
+    directories:
+      - /app/catalog
+      - /app/orders
+      - /app/payments-worker
+    schedule:
+      interval: weekly
+    groups:
+      go-dependencies:
+        patterns: ['*']
+    commit-message:
+      prefix: deps
+
+  # Base images in the four Dockerfiles. Dependabot rewrites the tag and, when
+  # the line carries one, the digest next to it.
+  - package-ecosystem: docker
+    directories:
+      - /app/catalog
+      - /app/orders
+      - /app/payments-worker
+      - /app/storefront
+    schedule:
+      interval: weekly
+    commit-message:
+      prefix: deps
+
+  # The SHA pins in the workflows, and the comment that names the release.
+  - package-ecosystem: github-actions
+    directory: /
+    schedule:
+      interval: weekly
+    groups:
+      actions:
+        patterns: ['*']
+    commit-message:
+      prefix: ci

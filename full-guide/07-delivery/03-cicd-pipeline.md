@@ -1,525 +1,923 @@
 # 03 — CI/CD pipeline
 
 > The **CI vs CD split** (CI proves an artifact good; CD makes the cluster
-> match Git); the pipeline stages — build → unit-test → `go vet`/lint → image
-> build (the existing multi-stage distroless Dockerfiles) → scan (Trivy, fail
-> on HIGH/CRITICAL) → SBOM (syft) → sign (Cosign keyless OIDC + Rekor) → push
-> **by digest** → **bump the deployment source** (the GitOps image-pin); image
-> **tags vs immutable digests** and why CD pins digests (the Part 05 ch.03
-> Kyverno `require-digest`/`verifyImages` becomes *enforceable* once CI does
-> this); promotion dev→staging→prod; SLSA provenance/attestations; secrets in
-> CI (keyless OIDC > long-lived keys); caching/matrix — applied by a complete
-> **GitHub Actions** workflow for the Bookstore that ends by committing the
-> built digests into the kustomize overlay so Argo CD ([ch.04](04-gitops-argocd.md))
-> deploys them. "**CI builds, CD deploys, Git is the trigger.**"
+> match Git) and the ten stages that do the proving: secrets, SAST,
+> dependency scan, image lint, image scan, SBOM, signing, manifest analysis,
+> workflow hardening and DAST. One reusable GitHub Actions workflow runs them
+> for each Bookstore service, a deliberately vulnerable fixture proves every
+> scanner can still fail, and a last job commits the signed digests into the
+> kustomize overlay so Argo CD ([ch.04](04-gitops-argocd.md)) deploys them.
+> "**CI builds, CD deploys, Git is the trigger.**"
 
-**Estimated time:** ~30 min read · ~90 min hands-on
-**Prerequisites:** [Part 05 ch.03](../05-security/03-supply-chain.md) — scan, sign, verify; CI is where these get enforced · [Part 07 ch.02](02-packaging-kustomize.md) — the overlays CI bumps digests in · [Part 00 ch.02](../00-foundations/02-containers-and-images.md) — tags vs immutable digests
-**You'll know after this:** • split CI (proves the artifact good) from CD (makes the cluster match Git) · • chain build → test → image → scan → SBOM → sign → push-by-digest · • configure Cosign keyless OIDC and Rekor for short-lived, no-long-key signing · • bump kustomize overlay image digests from a workflow and trigger Argo CD · • promote a Bookstore release dev → staging → prod with SLSA provenance
+**Estimated time:** ~40 min read · ~120 min hands-on
+**Prerequisites:** [Part 01 ch.01](../01-core-workloads/01-pods.md#baseline): the baseline the DAST stage runs under · [Part 05 ch.03](../05-security/03-supply-chain.md): scan, sign, verify; CI is where these get enforced · [Part 07 ch.02](02-packaging-kustomize.md): the overlays CI bumps digests in · [Part 00 ch.02](../00-foundations/02-containers-and-images.md): tags vs immutable digests
+**You'll know after this:** • split CI (proves the artifact good) from CD (makes the cluster match Git) · • run the ten pipeline stages in order and say what each one catches and misses · • prove a scanner can still fail, so a clean result means something · • sign an image keyless, with the SBOM and provenance attached to its digest · • protect the pipeline itself: pinned actions, scoped tokens, a workflow linter · • bump kustomize overlay digests from a workflow and let Argo CD deploy them
 
-<!-- tags: ci-cd, gitops, supply-chain, platform-engineering -->
+<!-- tags: ci-cd, gitops, supply-chain, platform-engineering, security, devsecops -->
 
 ## Why this exists
 
 [ch.01](01-packaging-helm.md) and [ch.02](02-packaging-kustomize.md) made the
-Bookstore **packageable** — one Helm chart, one Kustomize base+overlays, each
-rendering the same 49-object app. [Part 05 ch.03](../05-security/03-supply-chain.md)
-made an image **trustworthy** — Trivy scan, syft SBOM, Cosign keyless
-signature, and a Kyverno policy that *would* require a digest and a verified
-signature… shipped in **Audit** because the guide's own `bookstore/<SVC>:dev`
-images are tag-based and unsigned, so Enforce would blackhole the cluster.
+Bookstore **packageable**. [Part 05 ch.03](../05-security/03-supply-chain.md)
+made an image **trustworthy**: a scan, an SBOM, a keyless signature, and a
+Kyverno policy that would require a digest and a verified signature. That
+policy ships in **Audit**, because the guide's own `bookstore/<SVC>:dev`
+images are tag-based and unsigned, and Enforce would blackhole the cluster.
 
-Two gaps remain, and they are the whole subject of this chapter:
+Two gaps remain:
 
-1. **Who actually runs build → scan → sign → push, reproducibly, on every
-   change?** Doing it by hand on a laptop is the "works on my machine" the
-   guide has avoided since Part 00 — unpinned tools, no record, secrets in
-   shell history. That is **CI** (Continuous Integration): an automated,
-   audited pipeline that takes source and **proves an artifact is good** (it
-   compiles, vets, has no HIGH/CRITICAL CVEs, is signed, is addressable by an
-   immutable digest).
-2. **How does a good artifact become a running Pod, without a human typing
-   `kubectl apply`?** The Helm/Kustomize Production notes already gave the
-   answer's *shape* ("GitOps reconciles; humans rarely run `helm install` /
-   `kubectl apply -k`"). That is **CD** (Continuous Delivery): the cluster is
-   continuously made to match Git. This chapter builds the **seam** between CI
-   and CD — CI's last act is not a deploy, it is a **commit that bumps the
-   deployment source** (the kustomize `images:` digest); [ch.04](04-gitops-argocd.md)'s
-   Argo CD reconciles that commit.
+1. **Who runs build, scan, sign and push, the same way every time?** By hand
+   on a laptop that is "works on my machine": unpinned tools, no record,
+   secrets in shell history. **CI** is an automated, audited pipeline that
+   takes source and **proves an artifact good**.
+2. **How does a good artifact become a running Pod without a human typing
+   `kubectl apply`?** That is **CD**: the cluster is continuously made to
+   match Git. The **seam** between them is a **commit**: CI's last act bumps
+   the deployment source, and [ch.04](04-gitops-argocd.md)'s Argo CD
+   reconciles it.
 
-This split is the load-bearing idea: **CI builds and proves; CD (GitOps)
-deploys; Git is the trigger between them.** It is also exactly how Part 05's
-Audit policy graduates to **Enforce** — once CI pushes by digest and signs
-keyless, a cluster can *require* a digest and *verify* the signature against
-the pipeline's identity. Audit → Enforce is a pipeline milestone, not a YAML
-flip. This is the example-app delivery shape from *Bootstrapping
-Microservices*.
+CI is also the most privileged thing near your code. It reads the source,
+holds a registry token, mints signing identities and decides what ships;
+whoever owns the pipeline owns every image it produces. So the pipeline here
+is something to **defend** as well as something that defends: it scans the
+code, the images and the manifests, and it scans the workflow files that run
+it. Audit to Enforce is then a pipeline milestone, not a YAML flip.
 
 ## Mental model
 
 **CI and CD are two machines joined by Git, not one script.**
 
-- **CI = "is this artifact good?"** Triggered by a push/PR. Inputs: source.
-  Outputs: an **immutable, signed image referenced by digest** plus evidence
-  (test results, scan report, SBOM, signature in Rekor). CI **never touches
-  the cluster** — it has no kubeconfig, no cluster credentials. Its final
-  successful step writes the new digest into the **deployment source in Git**.
-- **CD = "does the cluster match Git?"** A controller *in the cluster*
-  ([ch.04](04-gitops-argocd.md)'s Argo CD) watches the Git repo/path, renders
-  the Kustomize overlay, diffs desired-vs-live, and reconciles. The deploy is
-  triggered by **the commit CI made**, not by CI reaching into the cluster.
+- **CI = "is this artifact good?"** Input: source. Output: an **immutable,
+  signed image referenced by digest** plus evidence (scan reports, SBOM,
+  signature in Rekor). CI **never touches the cluster**; its last step writes
+  the new digest into **Git**.
+- **CD = "does the cluster match Git?"** An in-cluster controller
+  ([ch.04](04-gitops-argocd.md)'s Argo CD) renders the overlay, diffs and
+  reconciles, triggered by **the commit CI made**.
 - **The artifact is pinned by content, not by name.** `bookstore/catalog:dev`
-  is a *mutable pointer* — anyone with push access can move `:dev` to a
-  different image. `…@sha256:<HASH>` **is** the content (the registry/kubelet
-  verifies the bytes hash to exactly that). CI signs the *digest*; CD deploys
-  the *digest*. This is the single highest-leverage control and the reason
-  Part 05's Kyverno `require-image-digest` exists.
-- **The pipeline is a DAG of gates.** build-test → build-scan-sign-push →
-  bump-manifests. Each gate must pass before the next runs; a HIGH/CRITICAL
-  CVE or a failed `go vet` stops the line *before* anything is signed or
-  deployed. Matrix legs (the four services) run in parallel; caches make
-  re-runs fast.
-- **Secrets: prefer no long-lived secret at all.** Cosign **keyless** uses a
-  short-lived OIDC token the CI platform mints for the workflow run (exchanged
-  at Sigstore Fulcio for a 10-minute cert) — there is no signing key to leak.
-  The registry push uses the run's auto-injected, short-lived token, not a
-  static PAT. Never `echo` a secret; never sign on a fork PR (no trusted
-  identity, unreviewed code).
+  is a *mutable pointer*; `…@sha256:<HASH>` **is** the content, because the
+  registry and the kubelet verify the bytes hash to exactly that. CI signs the
+  *digest*; CD deploys the *digest*.
+- **The pipeline is a set of gates that fail closed, and a gate that finds
+  nothing is not a gate that works.** A scanner with renamed rules, a database
+  that failed to load or a target path that moved reports "clean" just as
+  happily. So each scanner also runs against a deliberately vulnerable
+  [fixture](../examples/bookstore/ci/fixtures/vulnerable/README.md) and must
+  report what was planted there.
+- **Prefer no long-lived secret.** Cosign **keyless** trades a short-lived
+  OIDC token for a certificate that lives minutes; the registry push uses the
+  run's own token, not a stored PAT. A fork PR gets neither.
 
-The trap to keep in view: a pipeline that *deploys by reaching into the
-cluster* (a `kubectl apply` step with a long-lived kubeconfig secret) couples
-CI to CD, makes the cluster's state un-auditable ("what did that job apply?"),
-and hands every CI job cluster-admin-shaped credentials. The discipline is
-**push-to-Git, let the cluster pull** — which is [ch.04](04-gitops-argocd.md).
+The trap: a pipeline that *deploys by reaching into the cluster* (a
+`kubectl apply` with a long-lived kubeconfig secret) couples CI to CD, makes
+cluster state un-auditable and hands every job cluster-admin-shaped
+credentials. **Push to Git, let the cluster pull**, as in
+[ch.04](04-gitops-argocd.md).
+
+## Threats and controls
+
+A pipeline turns source into a running workload, so each stage answers a way
+that step can go wrong. The last three rows are about the pipeline itself.
+
+| Threat | Control taught here | Goes deeper |
+|---|---|---|
+| A credential is committed and lives in history | Gitleaks in pre-commit and CI; TruffleHog verified mode as the gate; keyless OIDC, so there is little to leak | [03.02](../03-config-and-storage/02-secrets.md), [15.05](../15-day-to-day-production-ops/05-production-secrets-vault-eso.md) |
+| Your own code carries an injection or a weak primitive | Semgrep with the Bookstore's rules, gosec, CodeQL | [15.02](../15-day-to-day-production-ops/02-application-cicd-pipelines.md) |
+| A dependency you ship or call is vulnerable | govulncheck (what you call), Trivy (what you ship), Dependabot (the fix) | [05.03](../05-security/03-supply-chain.md) |
+| The image runs as root, hides a secret or sits on an end-of-life base | hadolint, Dockle, Trivy on the image | [05.03](../05-security/03-supply-chain.md), [00.02](../00-foundations/02-containers-and-images.md) |
+| Nobody can say what is inside an image when a CVE lands | A Syft SBOM, scanned by Grype and Trivy | [05.03](../05-security/03-supply-chain.md) |
+| The image in the registry is not the one CI built | Push once, sign the digest keyless, attach SLSA provenance | [15.03](../15-day-to-day-production-ops/03-image-signing-and-provenance.md) |
+| A manifest asks for more than the baseline allows | KubeLinter, kubesec and Trivy config on the rendered overlay | [01.01](../01-core-workloads/01-pods.md#baseline), policy as code in 05.07 <!-- link-later: 05.07 --> |
+| The running service leaks through its responses | ZAP baseline against it on a throwaway kind cluster | [15.02](../15-day-to-day-production-ops/02-application-cicd-pipelines.md) |
+| The pipeline is the attack: an injectable expression, a tag that moves, a token that can do too much | SHA-pinned actions, per-job `permissions`, zizmor, actionlint, Harden-Runner, Scorecard | [15.02](../15-day-to-day-production-ops/02-application-cicd-pipelines.md) |
+| A scanner goes quiet and every build passes | A control per scanner against the vulnerable fixture | this chapter |
+| CI holds a cluster credential | CI proposes a PR; the in-cluster controller applies it | [07.04](04-gitops-argocd.md) |
+
+Verifying these signatures at admission (Kyverno `verifyImages`) is the other
+half of the signing row. It arrives with 05.07 <!-- link-later: 05.07 -->;
+until then the Audit policy from 05.03 is the only reader.
 
 ## Diagrams
 
-### Pipeline DAG: build → test → scan → sign → push → bump → (Argo syncs) (Mermaid)
+### The pipeline for one service, then the seam (Mermaid)
 
-The Bookstore's actual workflow
-([`examples/bookstore/ci/github-actions.yml`](../examples/bookstore/ci/github-actions.yml)).
-The dashed boundary is the CI/CD seam: CI ends at a **commit**; the cluster's
-Argo CD ([ch.04](04-gitops-argocd.md)) pulls from there.
+The reusable workflow `.github/workflows/bookstore-pipeline.yml` runs the
+stages below for one service, plus a `build-test` job (`go build`, `go vet`,
+`go test`) that is not a security stage. `manifests`, `workflow-hardening`
+and `dast` run beside the chain. The dashed boundary is the CI/CD seam: CI
+ends at a **commit**, and the cluster's Argo CD
+([ch.04](04-gitops-argocd.md)) pulls from there.
 
 ```mermaid
 flowchart TD
-    push["git push / merged PR<br/>(the trigger)"]
-    bt["build-test<br/>go build + go vet + golangci-lint<br/>(matrix x3 Go services)"]
-    bld["docker build<br/>multi-stage -&gt; distroless<br/>(matrix x4 services)"]
-    scan{"Trivy scan<br/>HIGH/CRITICAL?<br/>exit-code 1 = gate"}
-    sbom["syft SBOM<br/>(SPDX JSON)"]
-    sign["Cosign keyless sign<br/>OIDC -&gt; Fulcio cert<br/>-&gt; Rekor log + attest SBOM"]
-    pushimg["push image<br/>BY DIGEST to registry"]
-    bump["bump-manifests<br/>kustomize edit set image<br/>name@sha256:digest -&gt; promotion PR"]
-    fail["FAIL the pipeline<br/>(fix dep / base image,<br/>re-run) — nothing signed"]
+    push["git push / pull request<br/>(the trigger)"]
+    bt["build-test<br/>go build, vet, test"]
+    secrets["secrets<br/>Gitleaks + TruffleHog verified"]
+    sast["sast<br/>Semgrep, gosec, CodeQL"]
+    sca["sca<br/>govulncheck, Trivy"]
+    lint["image-lint<br/>hadolint, build once, Dockle"]
+    scan["image-scan<br/>Trivy on the tar"]
+    sbom["sbom<br/>Syft -&gt; Grype + Trivy"]
+    side["manifests, workflow-hardening, dast<br/>KubeLinter, zizmor, ZAP on kind"]
+    sign["sign (push to main only)<br/>push, cosign keyless,<br/>SBOM + SLSA provenance"]
+    fail["FAIL the build<br/>nothing pushed, nothing signed"]
+    bump["bump-manifests<br/>kustomize edit set image<br/>-&gt; promotion PR"]
     git[("Git repo<br/>kustomize/overlays/prod<br/>(PR merged by a human)")]
     argo["Argo CD in-cluster<br/>detects commit -&gt; diff<br/>-&gt; sync -&gt; reconcile"]
 
-    push --> bt --> bld --> scan
-    scan -- "clean" --> sbom --> sign --> pushimg --> bump --> git
-    scan -- "vuln over threshold" --> fail
+    push --> bt & secrets & sast & sca & lint & side
+    lint --> scan & sbom
+    scan -- "clean" --> sign
+    sbom -- "clean" --> sign
+    scan -- "finding" --> fail
+    sign --> bump --> git
     git -. "CI/CD seam: CI proposes, human merges, CD pulls" .-> argo
 ```
 
-### Tag-vs-digest and env promotion (ASCII)
+### Environment promotion (ASCII)
 
 ```
- TAG vs DIGEST ──────────────────────────────────────────────────────────────
-   bookstore/catalog:dev         a NAME in the registry; can be re-pointed at
-                                 ANY image later (incl. by an attacker)  → CI
-   …catalog@sha256:9f3c…1a       the CONTENT itself; bytes are verified to
-                                 hash to exactly this                    → CD
-   CI signs the DIGEST. CD deploys the DIGEST. Part-05 Kyverno
-   require-image-digest + verifyImages can only be ENFORCED once this is true.
-
- ENVIRONMENT PROMOTION (folder/overlay strategy — this guide) ────────────────
-   build once  ──►  ONE signed digest  ──►  promoted, never rebuilt
-        │
-        ├─ overlays/dev      :dev / latest main digest   (auto-sync, ch.04)
-        ├─ overlays/staging  same digest, prod shape ½ scale
-        └─ overlays/prod     SAME digest, pinned by `kustomize edit set image`
-                             (CI writes it here → Argo prod App syncs)
-   Promotion = a reviewed COMMIT moving a digest between overlays — NOT a
-   rebuild (a rebuild is a different artifact; you'd be shipping untested bits).
-   Alt strategy: branch/folder per env (a config repo with env branches);
-   same principle — the artifact is immutable, only the pointer moves.
+ build once  ──►  ONE signed digest  ──►  promoted, never rebuilt
+      ├─ overlays/dev      latest main digest   (auto-sync, ch.04)
+      ├─ overlays/staging  same digest, prod shape at half scale
+      └─ overlays/prod     SAME digest, written by `kustomize edit set
+                           image` in a PR (a human merges it)
+ Promotion = a reviewed COMMIT moving a digest between overlays, not a
+ rebuild: a rebuild is a different artifact, bits you never tested.
 ```
 
 ## Hands-on with the Bookstore
 
-**Assumed working directory: the guide repo root (`full-guide/`).** This
-chapter adds **no Kubernetes objects** — it adds the pipeline that *produces*
-what [ch.04](04-gitops-argocd.md) deploys. The workflow file is
-[`examples/bookstore/ci/github-actions.yml`](../examples/bookstore/ci/github-actions.yml).
+**Assumed working directory: the guide repo root (`full-guide/`).** You need
+Docker; the last stage also needs a kind cluster and the image from
+[Part 00 ch.02](../00-foundations/02-containers-and-images.md). The output
+below was recorded on one Linux machine and is committed as
+[`evidence/07-03.txt`](../examples/security-lab/evidence/07-03.txt).
+Vulnerability counts drift as the databases move; the verdict lines do not.
 
-> **Honesty note (same precedent as Part 05 ch.03's Cosign/Trivy notes).** The
-> push, keyless-sign, and manifest-bump steps need a **container registry the
-> runner can push to** and **OIDC configured** — infrastructure *you* supply.
-> The workflow is therefore **illustrative end-to-end**: every step you can run
-> locally without those is shown runnable below; the rest is explained
-> job-by-job and is real, valid GitHub Actions YAML (validated in this phase),
-> not pseudo-code. `ghcr.io/your-org/...` and `your-org/bookstore` are **clearly
-> labelled generic placeholders** — replace `your-org`.
+The pipeline is two workflow files and one script:
 
-### 0. What you can run locally right now (no registry, no OIDC)
+- `.github/workflows/bookstore-pipeline.yml` is the reusable workflow: one
+  job per stage, for one service. The stage names below are its job names.
+- [`ci/github-actions.yml`](../examples/bookstore/ci/github-actions.yml) is
+  the thin caller a Bookstore repo copies. It fans out over the four services
+  and adds `bump-manifests`. GitHub only runs workflows from
+  `.github/workflows/`, so a real repo copies both files there.
+- [`ci/scan.sh`](../examples/bookstore/ci/scan.sh) runs one scanner from a
+  container image **pinned by digest**. The workflow calls it and so do you,
+  so the command on your laptop is the command in CI.
 
-Everything CI does *before* push is reproducible on your machine with the same
-tools Part 05 ch.03 introduced. From the repo root:
+> **Honesty note.** Push, keyless signing, CodeQL and the promotion PR need a
+> registry, GitHub's OIDC and GitHub's runners. They are real, valid steps
+> that this chapter **reads, not runs**; every other stage runs below.
+> `<OWNER>` stands for your GitHub user or organization.
+
+### 0. The scanner runner
 
 ```sh
-# 1) The build-test gate (the Bookstore Go services ship NO _test.go — tiny by
-#    design — so the gate is build + vet; `go test ./...` becomes the gate the
-#    moment a real codebase has tests).
-for s in catalog orders payments-worker; do
-  ( cd examples/bookstore/app/$s && go build ./... && go vet ./... )
-done
-# storefront is static nginx — no Go; it is exercised by `docker build` next.
-
-# 2) The image build — the EXISTING multi-stage distroless Dockerfile
-#    (Part 00 ch.02; gcr.io/distroless/static:nonroot, USER 65532; storefront
-#    is nginx UID 101). CI builds these byte-for-byte the same way.
-for s in catalog orders payments-worker storefront; do
-  docker build -t bookstore/$s:dev examples/bookstore/app/$s
-done
-
-# 3) The scan GATE (Part 05 ch.03's CI contract, run locally):
-trivy image --severity HIGH,CRITICAL bookstore/catalog:dev
-trivy image --exit-code 1 --severity HIGH,CRITICAL bookstore/catalog:dev
-#   exit-code 1 ⇒ "fail the pipeline on any HIGH/CRITICAL". The distroless Go
-#   images carry almost no packages, so this is typically clean by
-#   construction — that minimal base IS a supply-chain control.
-
-# 4) The SBOM (syft; Trivy can also emit one — Part 05 ch.03):
-syft bookstore/catalog:dev -o spdx-json > catalog.spdx.json
-#   or: trivy image --format spdx-json -o catalog.spdx.json bookstore/catalog:dev
-
-# 5) Cosign — show the keyless flow without authenticating (honest, like
-#    Part 05 ch.03's `cosign --help` note): signing a real image needs a
-#    registry + an OIDC identity, which CI provides via `id-token: write`.
-cosign version
-cosign sign --help    # keyless: no private key; OIDC token -> Fulcio -> Rekor
+scan=examples/bookstore/ci/scan.sh
+mkdir -p scan-out
 ```
 
-These five are exactly job 1 and the first half of job 2 — provably runnable.
-The rest (push by digest, keyless sign against the workflow's OIDC identity,
-commit the digest into the overlay) is what the runner does with credentials
-you supply; it is read, not run, here.
+Every stage is `$scan TOOL TARGET`. Exit 0 means clean and the script prints
+one line saying so; the scanner's own output lands in `scan-reports/`.
+`$scan --expect ID TOOL TARGET` is a **control**: it passes only if the
+scanner flags the target *and* its report contains `ID`. Each stage ends with
+a control against the
+[`vulnerable` fixture](../examples/bookstore/ci/fixtures/vulnerable/README.md),
+a service that is broken on purpose. Those steps are labelled **deliberate**.
 
-### 1. The workflow, job by job
+### 1. Pre-commit: the cheapest gate, on your machine
 
-Open [`examples/bookstore/ci/github-actions.yml`](../examples/bookstore/ci/github-actions.yml).
-It physically lives under `examples/bookstore/` (this guide keeps every
-Bookstore artifact there); GitHub only executes a workflow at
-`.github/workflows/<NAME>.yml`, so a real Bookstore repo copies/symlinks it
-there — the file header says this. Three jobs, wired as a DAG by `needs:`:
+The first reader of a change is your own laptop. Three hooks (Gitleaks,
+hadolint, gosec) in
+`examples/bookstore/.pre-commit-config.yaml`
+run before a commit exists, so a leaked token never reaches history, which a
+force-push cannot fully clean. Two hooks run the pinned scanner images; gosec
+builds at its pinned version.
 
-**Job `build-test`** — `runs-on: ubuntu-latest`, a `matrix` over the three Go
-services with `fail-fast: false` (one service failing still reports the
-others). Per service: `actions/setup-go` with **module/build caching keyed by
-that service's `go.sum`** (a cache hit skips re-downloading deps — the
-caching/matrix point), then `go build ./... && go vet ./...`, then
-`golangci-lint`. `go test ./...` is shown commented because there are no tests
-yet; it *becomes* the gate when a codebase has them. This job has **no
-registry and no cluster access** — it only proves the code.
+```sh
+pip install -q pre-commit==4.7.0
+cp -R examples/bookstore /tmp/bookstore && rm -rf /tmp/bookstore/ci/fixtures   # stands in for your repo
+cd /tmp/bookstore && git init -q && git add -A
+pre-commit run --all-files
+```
 
-**Job `build-scan-sign-push`** — `needs: build-test`, and `if: github.event_name
-== 'push'` so it runs only on a merged PR to `main`, **never on a fork PR**
-(no OIDC/secrets there, and unreviewed code must not be signed/published). It
-declares the minimal extra permissions: `packages: write` (push to GHCR) and
-`id-token: write` (the OIDC token for **keyless** Cosign). Matrix over **all
-four** services. Per service:
+<!-- gate: output -->
 
-1. `docker/build-push-action` builds the **existing distroless Dockerfile**
-   and pushes; the registry returns the **manifest digest** as
-   `steps.build.outputs.digest`. `provenance: true` attaches a **SLSA
-   provenance attestation** (who/what/how built it) to the image.
-2. `trivy-action` scans `…@<DIGEST>` with `exit-code: "1"` and
-   `severity: HIGH,CRITICAL` — **the gate**. A finding fails the job *before*
-   anything is signed (Part 05 ch.03's `--exit-code 1` contract, in CI).
-3. `anchore/sbom-action` (**syft**) emits an SPDX-JSON SBOM.
-4. `cosign sign --yes "<IMAGE>@<DIGEST>"` then `cosign attest … --type
-   spdxjson` — **keyless**: no private key; the `id-token` is exchanged at
-   Fulcio for a short-lived cert bound to *this workflow's identity*, the
-   signature goes to the **Rekor** transparency log, and the SBOM is bound to
-   the image (Part 05 ch.03's signing model, automated). Signing a *tag* would
-   be meaningless — tags move; the digest is signed.
-5. The per-service **digest is written to a file and uploaded as a
-   per-service artifact** (`digest-<SERVICE>`). This is deliberately **not** a
-   matrix job `outputs:` — a matrix job's outputs are not per-leg; they
-   collapse to whatever the *last-finishing* leg wrote, so three of the four
-   digests would arrive **empty** in the next job (a silent
-   `…/bookstore-orders@`-with-no-digest → a broken kustomization). An
-   artifact-per-leg is the correct cross-matrix fan-in.
+```text
+gitleaks.................................................................Passed
+hadolint.................................................................Passed
+gosec....................................................................Passed
+```
 
-**Job `bump-manifests`** — `needs: build-scan-sign-push`, `contents: write` +
-`pull-requests: write`.
-**This is the CI/CD seam.** It does **not** `kubectl apply`. It
-`download-artifact`s every `digest-*` (`merge-multiple: true`) so it has all
-four real digests, installs a **pinned** kustomize release binary (never the
-mutable `master` `install_kustomize.sh` — the same anti-pattern this guide
-bans elsewhere), then loops the four services running
-`kustomize edit set image bookstore/<SVC>=<REG>/bookstore-<SVC>@<DIGEST>`
-(the `images:` transformer from [ch.02](02-packaging-kustomize.md) — **no
-Deployment YAML is hand-edited**; it fails loudly if any digest is
-missing/empty rather than writing a broken ref), writing the freshly built,
-**signed digests** into
-[`examples/bookstore/kustomize/overlays/prod/kustomization.yaml`](../examples/bookstore/kustomize/overlays/prod/kustomization.yaml),
-then opens a **pull request** with that one-file change
-(`peter-evans/create-pull-request`). **Merging that PR is the deploy
-trigger**: [ch.04](04-gitops-argocd.md)'s in-cluster Argo CD detects the merge
-commit on its tracked path and reconciles the prod Application. An earlier
-version of this workflow ran `git push origin HEAD:main` instead, so every
-merge reached prod with no reviewer and no staging step, against this
-chapter's own Production notes. The PR makes the human approval real; it
-needs branch protection requiring a review, and the repo setting that lets
-`GITHUB_TOKEN` open PRs (the workflow header lists both).
+**Deliberate.** Stage a file that holds a token-shaped string, built at
+run time so this page holds no token. The hook fails, and installed as a
+commit hook it would stop the commit:
 
-### 2. Trace the seam yourself (local approximation)
+```sh
+printf 'GITHUB_TOKEN=ghp_%s\n' "$(printf 'NOTAREALTOKEN%.0s' 1 2 3)" > .env
+git add .env && pre-commit run gitleaks
+```
 
-You can run *exactly* what `bump-manifests` does, against a placeholder
-digest, to see the GitOps source change without any registry:
+<!-- gate: output -->
+
+```text
+gitleaks.................................................................Failed
+- hook id: gitleaks
+- exit code: 1
+# ...
+RuleID:      github-pat
+# ...
+File:        .env
+```
+
+### 2. `secrets`: Gitleaks and TruffleHog
+
+A secret in Git is a secret in every clone, and deleting the file does not
+unpublish it ([Part 03 ch.02](../03-config-and-storage/02-secrets.md)). Two
+scanners, because they fail differently. **Gitleaks** matches the *shape* of a
+credential, so it catches a token the day it is committed, live or not.
+**TruffleHog's verified mode** asks the issuing service whether the
+credential still works and reports only live ones, so it can fail a build
+with almost no false positives. It stays quiet about a key already revoked.
+
+```sh
+$scan gitleaks examples/bookstore/app
+$scan trufflehog examples/bookstore/app
+```
+
+<!-- gate: output -->
+
+```text
+scan.sh: gitleaks clean on examples/bookstore/app
+scan.sh: trufflehog clean on examples/bookstore/app
+```
+
+**Deliberate.** The fixture holds two fake tokens. Without the repo's
+allowlist Gitleaks refuses it. TruffleHog in verified mode does not, because a
+fake token never verifies:
+
+```sh
+$scan gitleaks examples/bookstore/ci/fixtures/vulnerable; echo "exit $?"
+jq -r '.[] | "\(.RuleID) \(.File)"' scan-reports/gitleaks.json
+$scan trufflehog examples/bookstore/ci/fixtures/vulnerable
+```
+
+<!-- gate: output -->
+
+```text
+scan.sh: gitleaks flagged examples/bookstore/ci/fixtures/vulnerable (exit 1, report scan-reports/gitleaks.json)
+exit 1
+github-pat examples/bookstore/ci/fixtures/vulnerable/config.env
+scan.sh: trufflehog clean on examples/bookstore/ci/fixtures/vulnerable
+```
+
+So the TruffleHog control turns verification off, to show the detectors still
+match:
+
+```sh
+$scan --expect github-pat gitleaks examples/bookstore/ci/fixtures/vulnerable
+$scan --expect Github trufflehog examples/bookstore/ci/fixtures/vulnerable
+```
+
+<!-- gate: output -->
+
+```text
+scan.sh: control ok, gitleaks reported github-pat on examples/bookstore/ci/fixtures/vulnerable
+scan.sh: control ok, trufflehog reported Github on examples/bookstore/ci/fixtures/vulnerable
+```
+
+### 3. `sast`: Semgrep, gosec and CodeQL
+
+Static analysis reads source for patterns that become bugs. **Semgrep** runs
+the Bookstore's own rules,
+[`ci/semgrep/bookstore.yml`](../examples/bookstore/ci/semgrep/bookstore.yml),
+local files that need no network or account. **gosec** knows Go's pitfalls
+(weak hashes, shell calls, missing server timeouts). **CodeQL** follows data
+across functions, which the other two cannot; it runs only on GitHub's
+runners, and the job counts its SARIF so a fork PR still gets the gate.
+
+```sh
+$scan semgrep examples/bookstore/app
+$scan gosec examples/bookstore/app/catalog
+```
+
+<!-- gate: output -->
+
+```text
+scan.sh: semgrep clean on examples/bookstore/app
+scan.sh: gosec clean on examples/bookstore/app/catalog
+```
+
+**Deliberate.** Both must flag the fixture, and name the planted rule:
+
+```sh
+$scan --expect bookstore-sql-string-concat semgrep examples/bookstore/ci/fixtures/vulnerable
+$scan --expect G202 gosec examples/bookstore/ci/fixtures/vulnerable
+jq -r '.Issues[] | "\(.rule_id) \(.details)"' scan-reports/gosec.json | sort -u
+```
+
+<!-- gate: output -->
+
+```text
+scan.sh: control ok, semgrep reported bookstore-sql-string-concat on examples/bookstore/ci/fixtures/vulnerable
+scan.sh: control ok, gosec reported G202 on examples/bookstore/ci/fixtures/vulnerable
+# ...
+G202 SQL string concatenation
+G204 Subprocess launched with a potential tainted input or cmd arguments
+G401 Use of weak cryptographic primitive
+```
+
+### 4. `sca`: govulncheck and Trivy
+
+A dependency is a stranger's code you ship. **govulncheck** reports only
+vulnerabilities your code can reach ("do I call it?"). **Trivy** lists every
+vulnerable module in `go.mod` ("do I ship it?"). Dependabot
+([`ci/dependabot.yml`](../examples/bookstore/ci/dependabot.yml)) opens the
+pull request that moves the version, and the pipeline runs on that PR.
+
+```sh
+$scan govulncheck examples/bookstore/app/catalog
+$scan trivy-fs examples/bookstore/app/catalog
+```
+
+<!-- gate: output -->
+
+```text
+scan.sh: govulncheck clean on examples/bookstore/app/catalog
+scan.sh: trivy-fs clean on examples/bookstore/app/catalog
+```
+
+**Deliberate.** The fixture pins `x/text` v0.3.6 and calls into it. The
+control also shows what *reachable* means: govulncheck names the call.
+
+```sh
+$scan --expect GO-2021-0113 govulncheck examples/bookstore/ci/fixtures/vulnerable
+grep -E 'GO-2021-0113|calls language' scan-reports/govulncheck.txt | head -4
+$scan --expect CVE-2021-38561 trivy-fs examples/bookstore/ci/fixtures/vulnerable
+```
+
+<!-- gate: output -->
+
+```text
+scan.sh: control ok, govulncheck reported GO-2021-0113 on examples/bookstore/ci/fixtures/vulnerable
+      #1: main.go:21:45: vulnerable.main calls language.ParseAcceptLanguage
+Vulnerability #2: GO-2021-0113
+  More info: https://pkg.go.dev/vuln/GO-2021-0113
+      #1: main.go:21:45: vulnerable.main calls language.ParseAcceptLanguage
+scan.sh: control ok, trivy-fs reported CVE-2021-38561 on examples/bookstore/ci/fixtures/vulnerable
+```
+
+### 5. `image-lint`: hadolint, then Dockle
+
+**hadolint** reads the Dockerfile before anything is built. Then the image is
+built **once, as a tar**, and every later stage reads that tar, so the image
+you scan is the image you sign. **Dockle** reads the built image: the user it
+runs as, credential-looking names in its environment, setuid files.
+
+```sh
+docker build -q -t bookstore/catalog:dev examples/bookstore/app/catalog >/dev/null
+docker save -o scan-out/catalog.tar bookstore/catalog:dev
+$scan hadolint examples/bookstore/app/catalog/Dockerfile
+$scan dockle scan-out/catalog.tar
+```
+
+<!-- gate: output -->
+
+```text
+scan.sh: hadolint clean on examples/bookstore/app/catalog/Dockerfile
+scan.sh: dockle clean on scan-out/catalog.tar
+```
+
+**Deliberate.** Build the fixture image the same way and let both flag it:
+
+```sh
+docker build -q -t bookstore/vulnerable:fixture -f examples/bookstore/ci/fixtures/vulnerable/vulnerable.Dockerfile examples/bookstore/ci/fixtures/vulnerable >/dev/null
+docker save -o scan-out/vulnerable.tar bookstore/vulnerable:fixture
+$scan --expect DL3002 hadolint examples/bookstore/ci/fixtures/vulnerable/vulnerable.Dockerfile
+$scan --expect CIS-DI-0001 dockle scan-out/vulnerable.tar
+```
+
+<!-- gate: output -->
+
+```text
+scan.sh: control ok, hadolint reported DL3002 on examples/bookstore/ci/fixtures/vulnerable/vulnerable.Dockerfile
+scan.sh: control ok, dockle reported CIS-DI-0001 on scan-out/vulnerable.tar
+```
+
+### 6. `image-scan`: Trivy on the image
+
+The distroless Go images carry almost no packages, so the scan is normally
+clean by construction. That minimal base **is** a supply-chain control: what
+is not in the image cannot be vulnerable. `ignore-unfixed` is on, for the
+reason under [How it works](#how-it-works-under-the-hood).
+
+```sh
+$scan trivy-image scan-out/catalog.tar
+```
+
+<!-- gate: output -->
+
+```text
+scan.sh: trivy-image clean on scan-out/catalog.tar
+```
+
+**Deliberate.** The fixture's base is an end-of-life Alpine:
+
+```sh
+$scan --expect CVE-2022-37434 trivy-image scan-out/vulnerable.tar
+```
+
+<!-- gate: output -->
+
+```text
+scan.sh: control ok, trivy-image reported CVE-2022-37434 on scan-out/vulnerable.tar
+```
+
+### 7. `sbom`: Syft, then Grype and Trivy
+
+An SBOM answers "what is inside this digest?" long after the build, the
+question you get the day a new CVE lands. **Syft** writes a CycloneDX
+inventory; **Grype** and **Trivy** each scan it. Two scanners on purpose: they
+read different vulnerability data, and where they disagree is worth a look.
+
+```sh
+$scan syft scan-out/catalog.tar
+$scan grype scan-reports/sbom.cdx.json
+$scan trivy-sbom scan-reports/sbom.cdx.json
+```
+
+<!-- gate: output -->
+
+```text
+scan.sh: syft clean on scan-out/catalog.tar
+scan.sh: grype clean on scan-reports/sbom.cdx.json
+scan.sh: trivy-sbom clean on scan-reports/sbom.cdx.json
+```
+
+**Deliberate.** The fixture's inventory, scanned by both:
+
+```sh
+$scan syft scan-out/vulnerable.tar
+$scan --expect CVE-2021-38561 grype scan-reports/sbom.cdx.json
+$scan --expect CVE-2021-38561 trivy-sbom scan-reports/sbom.cdx.json
+```
+
+<!-- gate: output -->
+
+```text
+scan.sh: syft clean on scan-out/vulnerable.tar
+scan.sh: control ok, grype reported CVE-2021-38561 on scan-reports/sbom.cdx.json
+scan.sh: control ok, trivy-sbom reported CVE-2021-38561 on scan-reports/sbom.cdx.json
+```
+
+### 8. `sign`: push, keyless signature, SBOM, provenance (read, not run)
+
+This job runs only on a push to `main`, after `image-scan` and `sbom` passed.
+It loads the tar, pushes it, **reads the digest the registry computed** and
+signs that digest. `actions/attest-build-provenance` then adds a **SLSA
+provenance** statement for the same digest.
+
+```sh
+cosign sign --yes "$REF"                                       # REF = image@sha256:<DIGEST>
+cosign attest --yes --type cyclonedx --predicate sbom.cdx.json "$REF"
+```
+
+The job alone asks for `id-token: write`. What a *consumer* runs, and what
+05.07 <!-- link-later: 05.07 --> turns into an admission rule, checks the
+identity, not just the signature:
+
+```sh
+cosign verify \
+  --certificate-identity-regexp '^https://github.com/<OWNER>/<REPO>/\.github/workflows/bookstore-pipeline\.yml@' \
+  --certificate-oidc-issuer https://token.actions.githubusercontent.com \
+  ghcr.io/<OWNER>/bookstore-catalog@sha256:<DIGEST>
+```
+
+This is the one stage with no run here; its first proof is the first CI run
+on a repo with a registry. The identity names the reusable workflow's file
+because that job requests the token.
+
+### 9. `manifests`: KubeLinter, kubesec, Trivy config
+
+Three readers of the **rendered** production overlay, because that is what
+Argo CD applies. They overlap on purpose: KubeLinter checks shape, kubesec
+scores Pod specs, and Trivy config checks its misconfiguration library, whose
+five core checks are the baseline from
+[Part 01 ch.01](../01-core-workloads/01-pods.md#baseline). Conftest policies
+join them with 05.07 <!-- link-later: 05.07 -->.
+
+```sh
+kubectl kustomize examples/bookstore/kustomize/overlays/prod > scan-reports/prod-overlay.yaml
+$scan kube-linter scan-reports/prod-overlay.yaml
+$scan kubesec scan-reports/prod-overlay.yaml
+$scan trivy-config scan-reports/prod-overlay.yaml
+```
+
+<!-- gate: output -->
+
+```text
+scan.sh: kube-linter clean on scan-reports/prod-overlay.yaml
+scan.sh: kubesec clean on scan-reports/prod-overlay.yaml
+scan.sh: trivy-config clean on scan-reports/prod-overlay.yaml
+```
+
+**Deliberate.** A privileged Pod with a host mount and a `latest` tag:
+
+```sh
+$scan --expect KSV-0017 trivy-config examples/bookstore/ci/fixtures/vulnerable/deployment.json
+$scan --expect privileged-container kube-linter examples/bookstore/ci/fixtures/vulnerable/deployment.json
+$scan --expect Privileged kubesec examples/bookstore/ci/fixtures/vulnerable/deployment.json
+```
+
+<!-- gate: output -->
+
+```text
+scan.sh: control ok, trivy-config reported KSV-0017 on examples/bookstore/ci/fixtures/vulnerable/deployment.json
+scan.sh: control ok, kube-linter reported privileged-container on examples/bookstore/ci/fixtures/vulnerable/deployment.json
+scan.sh: control ok, kubesec reported Privileged on examples/bookstore/ci/fixtures/vulnerable/deployment.json
+```
+
+### 10. `workflow-hardening`: zizmor, actionlint, Harden-Runner, Scorecard
+
+The pipeline holds a registry token and a signing identity, so its own YAML
+is a target. **zizmor** finds injectable `${{ }}` expressions, unpinned
+actions and over-broad permissions; **actionlint** finds mistakes that make a
+workflow misbehave. Both run from the repository root, above `full-guide/`.
+**Harden-Runner** is the first step of every job and records the runner's
+outbound calls. **Scorecard** grades the repository's habits, on the default
+branch only.
+
+```sh
+cd ..
+scan=full-guide/examples/bookstore/ci/scan.sh
+$scan zizmor ".github/workflows/bookstore-pipeline.yml .github/workflows/bookstore-pipeline-check.yml"
+$scan actionlint ".github/workflows/bookstore-pipeline.yml .github/workflows/bookstore-pipeline-check.yml"
+```
+
+<!-- gate: output -->
+
+```text
+scan.sh: zizmor clean on .github/workflows/bookstore-pipeline.yml .github/workflows/bookstore-pipeline-check.yml
+scan.sh: actionlint clean on .github/workflows/bookstore-pipeline.yml .github/workflows/bookstore-pipeline-check.yml
+```
+
+**Deliberate.** The fixture's workflow pastes a PR title into a shell script
+on a privileged trigger:
+
+```sh
+$scan --expect template-injection zizmor full-guide/examples/bookstore/ci/fixtures/vulnerable/bad-workflow.yml
+$scan --expect 'potentially untrusted' actionlint full-guide/examples/bookstore/ci/fixtures/vulnerable/bad-workflow.yml
+```
+
+<!-- gate: output -->
+
+```text
+scan.sh: control ok, zizmor reported template-injection on full-guide/examples/bookstore/ci/fixtures/vulnerable/bad-workflow.yml
+scan.sh: control ok, actionlint reported potentially untrusted on full-guide/examples/bookstore/ci/fixtures/vulnerable/bad-workflow.yml
+```
+
+Go back into `full-guide/` (`cd full-guide`) for the last stage.
+
+### 11. `dast`: the ZAP baseline on a throwaway cluster
+
+Everything so far read files. **DAST** reads a running service. The ZAP
+*baseline* crawls the URL and reads the responses for missing or leaky
+headers; it sends no attack traffic, so it is safe on every PR. The pipeline
+starts the image on a kind cluster, in a namespace that enforces Pod Security
+`restricted`, with the baseline from
+[Part 01 ch.01](../01-core-workloads/01-pods.md#baseline). Do the same with
+the catalog Pod from that chapter:
+
+```sh
+kubectl create namespace dast
+kubectl label namespace dast pod-security.kubernetes.io/enforce=restricted pod-security.kubernetes.io/warn=restricted
+kubectl create serviceaccount catalog-sa --namespace dast
+kind load docker-image bookstore/catalog:dev --name bookstore
+kubectl apply --namespace dast -f examples/bookstore/raw-manifests/01-catalog-pod.yaml
+kubectl wait --namespace dast --for=condition=Ready pod/catalog --timeout=90s
+```
+
+<!-- gate: output -->
+
+```text
+namespace/dast created
+namespace/dast labeled
+serviceaccount/catalog-sa created
+Image: "bookstore/catalog:dev" with ID "sha256:5c8f78461c5a94db0589f347ba76121dc185f0417025110c555a7f2b56f2d220" not yet present on node "bookstore-control-plane", loading...
+pod/catalog created
+pod/catalog condition met
+```
+
+Scan it through a port-forward. The run is clean, yet the report is not
+empty: the baseline raised three rules on the catalog, and
+[`ci/zap/baseline.conf`](../examples/bookstore/ci/zap/baseline.conf) lists
+each as INFO with a reason and a revisit date (see the table below). Any rule
+not listed still fails the build.
+
+```sh
+kubectl --namespace dast port-forward pod/catalog 8080:8080 >/dev/null &
+sleep 2
+$scan zap http://127.0.0.1:8080/books
+grep -E '^(FAIL-NEW|WARN-NEW|INFO)' scan-reports/zap.log
+```
+
+<!-- gate: output -->
+
+```text
+scan.sh: zap clean on http://127.0.0.1:8080/books
+INFO: X-Content-Type-Options Header Missing [10021] x 1 
+INFO: Storable and Cacheable Content [10049] x 4 
+INFO: Cross-Origin-Resource-Policy Header Missing or Invalid [90004] x 1 
+FAIL-NEW: 0     FAIL-INPROG: 0  WARN-NEW: 0     WARN-INPROG: 0  INFO: 3 IGNORE: 0       PASS: 65
+```
+
+**Deliberate.** The fixture serves a session cookie without `HttpOnly`. Run
+it and point the same scan at it:
+
+```sh
+docker run -d --name fixture -p 127.0.0.1:18080:8080 bookstore/vulnerable:fixture >/dev/null
+sleep 2
+$scan --expect 10010 zap http://127.0.0.1:18080/books
+grep -E '^(FAIL-NEW|WARN-NEW|INFO)' scan-reports/zap.log
+docker rm -f fixture >/dev/null
+```
+
+<!-- gate: output -->
+
+```text
+scan.sh: control ok, zap reported 10010 on http://127.0.0.1:18080/books
+INFO: Missing Anti-clickjacking Header [10020] x 1 
+INFO: X-Content-Type-Options Header Missing [10021] x 1 
+INFO: Content Security Policy (CSP) Header Not Set [10038] x 1 
+INFO: Storable and Cacheable Content [10049] x 4 
+INFO: Permissions Policy Header Not Set [10063] x 1 
+INFO: Cross-Origin-Embedder-Policy Header Missing or Invalid [90004] x 3 
+WARN-NEW: Cookie No HttpOnly Flag [10010] x 1 
+WARN-NEW: Cookie without SameSite Attribute [10054] x 1 
+WARN-NEW: Session Management Response Identified [10112] x 1 
+FAIL-NEW: 0     FAIL-INPROG: 0  WARN-NEW: 3     WARN-INPROG: 0  INFO: 6 IGNORE: 0       PASS: 59
+```
+
+### 12. The seam: from signed digest to Git (local approximation)
+
+`bump-manifests` is the only job that writes to Git, and it writes a **pull
+request**, not a push. You can run what it does against a placeholder digest
+(it needs the standalone `kustomize` binary):
 
 ```sh
 cd examples/bookstore/kustomize/overlays/prod
-# Same command CI runs (kustomize is built into recent kubectl; or the
-# standalone binary). A digest is content-addressable & immutable:
 kustomize edit set image \
-  bookstore/catalog=ghcr.io/your-org/bookstore-catalog@sha256:0000000000000000000000000000000000000000000000000000000000000000
-grep -A2 '^images:' kustomization.yaml      # the pinned digest is now in Git-tracked YAML
-git diff kustomization.yaml                  # THIS diff is what Argo CD would sync
-git checkout -- kustomization.yaml           # revert the demo edit
-cd ../../../../..                            # back to the guide repo root
+  bookstore/catalog=ghcr.io/<OWNER>/bookstore-catalog@sha256:0000000000000000000000000000000000000000000000000000000000000000
+git diff kustomization.yaml     # THIS diff is what Argo CD would sync
+git checkout -- kustomization.yaml
+cd ../../../../..               # back to full-guide/
 ```
 
-That one-line edit + a commit is the entire "deploy" in a GitOps world — no
-cluster credentials in CI, the change is reviewable, and the cluster pulls it
-([ch.04](04-gitops-argocd.md)). Promotion dev→staging→prod is the *same* move
-applied to a different overlay (the env-promotion ASCII above): build the
-artifact **once**, move its **immutable digest** between overlays by a
-reviewed commit — never rebuild (a rebuild is a *different* artifact, i.e.
-shipping bits you never tested).
+That edit and a merge are the whole "deploy". CI holds no cluster
+credential. The job installs kustomize from a pinned release **and checks its
+sha256**, then opens the PR with `peter-evans/create-pull-request`. Require a
+review by branch protection, or the bot can merge its own promotion.
+
+### 13. What the first run found
+
+A pipeline that is green on day one has usually been tuned to be. This one was
+run first and then dispositioned. Each decision is a file with a reason and a
+date:
+
+| Stage | First-run finding | Disposition |
+|---|---|---|
+| `image-scan`, `sbom` | The storefront's `nginx:1.27-alpine` base carried many fixable HIGH and CRITICAL CVEs | **Fixed**: base moved to `nginx:1.30-alpine`, pinned by digest |
+| `image-scan`, `sbom` | `nginx:1.30-alpine` still shipped curl and libcurl, and Grype listed several curl CVEs that Trivy did not | **Fixed**: the Dockerfile removes both, since nothing depends on them |
+| `image-scan`, `sbom` | A CRITICAL in brotli-libs, fixed by Alpine but not yet in the nginx image | Accepted until 2026-11-30 in `ci/trivyignore.yaml` and `ci/grype.yaml`; Trivy fails again on that date |
+| `image-lint` | Dockle read `KEY_SHA512` in nginx's build script as a secret | Accepted in `scan.sh`: it is the checksum of nginx's public key |
+| `manifests` | KubeLinter: `no-anti-affinity` on orders, `job-ttl-seconds-after-finished` on the cleanup CronJob | Excluded in `ci/kube-linter.yaml`: availability and operations, not the baseline |
+| `dast` | Nine ZAP rules across catalog, orders and storefront | Accepted as INFO in `ci/zap/baseline.conf` |
+
+Every dated entry lapses on its date, and any rule not listed still fails the
+build.
+
+### 14. How the guide's CI runs it
+
+`.github/workflows/bookstore-pipeline-check.yml` calls the reusable workflow
+on every PR that touches the services, the `ci/` directory or the pipeline
+itself, once per service. Beside it, a matrix of **controls** runs every
+scanner above through `scan.sh --expect` against the fixture. Both halves
+matter: the first says the services are clean, the second says "clean" can
+still be believed.
 
 ## How it works under the hood
 
 - **CI's job is evidence, not deployment.** Each stage emits a verifiable
-  fact: exit codes (build/vet/lint pass), a Trivy report (no HIGH/CRITICAL),
-  an SBOM artifact, a **Rekor** entry (the signature is in an append-only
-  public log), and a **SLSA provenance** attestation (the build's
-  who/what/how). Together these let a *consumer* (the admission policy)
-  decide trust independently — the pipeline doesn't ask to be trusted, it
-  produces proof. The cluster never sees CI; it sees the registry + Git.
-- **The image digest is computed by the registry, not chosen.** `docker
-  build` + push uploads layers and a manifest; the registry returns
-  `sha256:<hash over the manifest>`. That hash changes iff the bytes change,
-  so it is the only reference that means "exactly these bytes". `cosign sign`
-  signs *that string*; `kubelet` pulling `name@sha256:…` re-verifies the
-  pulled bytes hash to it. A tag is just a mutable label row pointing at a
-  digest — which is why Part 05 ch.03's policy requires the digest form and
-  why CD pins it.
-- **Push-before-scan and `ignore-unfixed` are taught tradeoffs, not the only
-  way** (consistent with Part 05 ch.03's honesty about sequencing). This
-  workflow does `push: true` *then* scans the **pushed digest**: the scan and
-  the Cosign signature therefore bind to the *exact registry manifest* (no
-  "scanned a local image, pushed a different one" skew) — but a CVE-failing
-  run leaves a pullable vulnerable image until it is overwritten/cleaned (and
-  it is undeployable anyway once `verifyImages` Enforce is on — Part 05 ch.03's
-  untrusted-until-admitted). The alternative is `push: false`, scan the
-  *local* image, push only if clean — no vulnerable image ever reaches the
-  registry, at the cost of digest fidelity. Likewise `ignore-unfixed: true`
-  drops CVEs with no upstream fix: a rebuild can't remediate them, so gating
-  on them is a *false gate* — the mitigation is **continuous re-scanning of
-  published images** (Part 05 ch.03), which catches an unfixed→fixed
-  transition even though the image never changed. Both knobs are defensible;
-  the workflow comments state the choice so a reader tunes it to their risk
-  posture rather than inheriting it blindly.
-- **Keyless signing has no key.** Sigstore: the CI platform mints a
-  short-lived **OIDC** token describing the workflow identity (repo,
-  workflow, ref, issuer). Cosign sends it to **Fulcio**, which issues a
-  ~10-minute X.509 cert binding a freshly generated key to that identity;
-  Cosign signs the digest and uploads the signature + cert to **Rekor**
-  (transparency log). Verification later checks: signature valid **and** cert
-  identity == the *specific* expected workflow/issuer **and** the entry is in
-  Rekor. There is no long-lived secret to steal — the entire reason CI uses
-  `id-token: write` instead of a stored key. (A fork PR can't get a usable
-  token for the upstream identity — hence the `if: push`/no-fork-sign rule.)
-- **Matrix + cache = fast and parallel.** The four services build
-  independently (separate Go modules, separate Dockerfiles), so a `matrix`
-  fans them out across runners. `actions/setup-go` caching keyed by `go.sum`
-  and Buildx `cache-from/to: type=gha` make re-runs reuse module downloads
-  and image layers — the difference between a 90-second and a 10-minute
-  pipeline, and why the gates can run on *every* push without pain.
-- **The CI/CD decoupling is a security property, not just hygiene.** If CI
-  deployed directly it would need a long-lived, broadly-scoped kubeconfig in
-  a secret — a credential as dangerous as Helm 2's Tiller
-  ([ch.01](01-packaging-helm.md)). Push-to-Git/pull-by-controller means CI
-  holds **no cluster credential at all**; the only thing it can do to
-  production is *propose a commit*. The cluster's agent ([ch.04](04-gitops-argocd.md))
-  is the only thing with apply rights, scoped by an `AppProject`.
-- **In-cluster builds exist but are out of scope here.** Kaniko / BuildKit /
-  Buildpacks build images *inside* the cluster (no Docker daemon on the
-  runner) — the *Image Builder* pattern. The trade-offs (build isolation,
-  cache, credential surface) are real but orthogonal to the CI→CD seam this
-  chapter teaches; the Bookstore uses runner-side `docker build` for
-  clarity. Mentioned for completeness, deliberately not built.
+  fact: an exit code, a scan report, an SBOM, a **Rekor** entry (the signature
+  in an append-only public log) and a **SLSA provenance** statement (who built
+  it, from what, how). An admission policy can then decide trust on its own.
+  The cluster never sees CI; it sees the registry and Git.
+- **The registry computes the digest.** A push uploads layers and a manifest,
+  and the registry returns `sha256:<hash over the manifest>`. It changes only
+  if the bytes change. Cosign signs *that string*, and a kubelet pulling
+  `name@sha256:…` re-verifies the bytes against it.
+- **Scan first, push after.** The image is built once as a tar and every
+  stage reads that tar. Only `sign` pushes, and only after `image-scan` and
+  `sbom` passed, so a vulnerable image never reaches the registry. The earlier
+  version of this workflow pushed first and scanned the pushed digest, which
+  left a pullable vulnerable image behind on every failed run. The price: the
+  digest exists only after the push, so signature and SBOM bind to the
+  registry's manifest of the *same layers and config* that were scanned, not
+  to bytes scanned one for one.
+- **`ignore-unfixed` is a taught tradeoff.** It drops CVEs with no upstream
+  fix. A rebuild cannot remediate those, so gating on them blocks every build
+  for nothing. The cost is real exposure; the mitigation is to **rescan
+  published images on a schedule**, which catches the day a fix appears even
+  though the image never changed. Set it to `false` for the stricter gate.
+- **Keyless signing has no key.** The platform mints a short-lived **OIDC**
+  token naming the workflow identity. Cosign sends it to **Fulcio**, which
+  issues a certificate that lives about ten minutes for a fresh key, then the
+  key is discarded. Cosign signs the digest and records signature and
+  certificate in **Rekor**. Verification checks the signature, the certificate
+  identity against the *expected* workflow and issuer, and the Rekor entry.
+  A fork PR cannot get a usable token, hence `publish` runs only on a push to
+  `main`.
+- **An action tag is a pointer anyone with write access can move.** In March
+  2026 the version tags of a widely used scanner action were force-pushed to
+  malicious commits (GHSA-69fq-xp46-6x23); only a commit SHA was safe. Every
+  `uses:` here is a full SHA with the release in a comment, and Dependabot,
+  not a human, moves the pin. GitHub's hardening guide gives the same advice.
+- **Permissions are narrowed twice.** The reusable workflow starts from
+  `permissions: {}` and each job asks for what it needs; the caller's job sets
+  the ceiling, and GitHub checks it even for skipped jobs. `id-token: write`
+  therefore exists only on `sign`.
+- **No layer cache in the publishing workflow.** A cache restored from an
+  earlier run is input no reviewer saw, and zizmor's `cache-poisoning` audit
+  warns about cache reads in release workflows. The build starts cold and is
+  a minute or two slower.
 
 ## Production notes
 
-> **In production: CI must never hold cluster credentials.** The single most
-> common anti-pattern is a `kubectl apply` / `helm upgrade` step with a
-> long-lived kubeconfig secret. It couples CI to CD, makes cluster state
-> un-auditable, and gives every pipeline run apply rights. CI's last step is a
-> **commit**; a pull-based controller ([ch.04](04-gitops-argocd.md)) is the
-> only thing with apply rights. If you must push (no GitOps yet), use a
-> short-lived, namespace-scoped, OIDC-federated credential — never a static
+> **In production: CI must never hold cluster credentials.** The common
+> anti-pattern is a `kubectl apply` or `helm upgrade` step with a long-lived
+> kubeconfig secret. CI's last step is a **commit**; a pull-based controller
+> ([ch.04](04-gitops-argocd.md)) alone applies. If you must push, use a
+> short-lived, namespace-scoped, OIDC-federated credential, never a static
 > admin kubeconfig.
 
-> **In production: pin digests, sign keyless, then flip Part 05's policy to
-> Enforce.** This pipeline makes the Part 05 ch.03 Kyverno
-> `require-image-digest` + a real `verifyImages` (Cosign keyless, matched to
-> *this workflow's* identity + issuer) **safe to Enforce** — because the
-> deployed manifests now carry digests and the digests are signed. Sequence it
-> exactly so: Audit while only some images comply → Enforce once CI is the only
-> path to prod. Re-scan published images continuously (a clean image today is
-> not clean at tomorrow's CVE).
-
-> **In production: promote the artifact, never rebuild it.** dev→staging→prod
-> is one immutable digest moving between overlays (or env branches/folders) by
-> reviewed commits. Rebuilding per environment ships *different bits* than you
-> tested. Gate prod promotion behind a PR/approval (and, for regulated
-> environments, a separate config repo the app repo cannot push to directly).
-
-> **In production: keyless > keys; least-privilege the workflow.** Use the CI
-> platform's OIDC (`id-token: write`) for Cosign and for cloud/registry auth;
-> avoid long-lived PATs/keys in secrets entirely. Scope each job's
-> `permissions:` to the minimum, never run the publish path on fork PRs, and
-> never `echo`/log a secret. Protect `main`/release branches and require the
-> pipeline as a merge check.
-
-> **In production: the supply chain is a graph of attestations.** Beyond the
-> signature, attach **SLSA provenance** and the **SBOM** as signed
-> attestations (`cosign attest`) so a consumer can verify *how* an image was
-> built and *what* is in it — and admission can require provenance from a
-> trusted builder, not just any signature (Part 05 ch.03's
-> "provenance ≠ safety": you still scan).
-
-> **In production (managed — EKS/GKE/AKS):** the model is identical; only the
-> registry and OIDC plumbing change — push to ECR/Artifact Registry/ACR via
-> the cloud's workload-identity federation (no static keys), use the provider's
-> image scanning *in addition to* Trivy, and let Argo CD/Flux do the deploy.
-> GitHub Actions ↔ GitLab CI ↔ cloud-build differ in syntax, not in the
-> build-prove-commit-then-GitOps-pulls shape.
+> **In production: move Harden-Runner from `audit` to `block`.** The workflows
+> ship with `egress-policy: audit`, which records every outbound call. After a
+> few green runs, list the recorded endpoints under `allowed-endpoints` and
+> switch to `block`, so a compromised step cannot send your token anywhere
+> new. Branch protection on `main` (required review, required checks) is one
+> of the things Scorecard checks.
 
 ## Quick Reference
 
 ```sh
-# The locally-runnable half of the pipeline (no registry / OIDC needed):
-( cd examples/bookstore/app/catalog && go build ./... && go vet ./... )      # build-test
-docker build -t bookstore/catalog:dev examples/bookstore/app/catalog          # image build
-trivy image --exit-code 1 --severity HIGH,CRITICAL bookstore/catalog:dev      # scan GATE
-syft bookstore/catalog:dev -o spdx-json > catalog.spdx.json                   # SBOM
-cosign sign --help                                                            # keyless (needs registry+OIDC)
+scan=examples/bookstore/ci/scan.sh       # from full-guide/; pinned images, Docker only
+mkdir -p scan-out
+$scan gitleaks examples/bookstore/app    # secrets (trufflehog: same arguments)
+$scan semgrep  examples/bookstore/app    # SAST (gosec, govulncheck: per Go module)
+$scan trivy-fs examples/bookstore/app/catalog                 # dependencies
+docker build -t bookstore/catalog:dev examples/bookstore/app/catalog
+docker save -o scan-out/catalog.tar bookstore/catalog:dev
+$scan dockle scan-out/catalog.tar        # image lint (hadolint: the Dockerfile)
+$scan trivy-image scan-out/catalog.tar   # image scan, exit 1 on HIGH/CRITICAL
+$scan syft scan-out/catalog.tar && $scan grype scan-reports/sbom.cdx.json
+# $scan --expect ID TOOL TARGET runs a control: it must flag the target AND name ID
+```
 
-# The CI -> GitOps seam (what `bump-manifests` does — runnable locally):
+The CI to GitOps seam, as `bump-manifests` runs it (placeholder digest):
+
+```sh
 cd examples/bookstore/kustomize/overlays/prod
-kustomize edit set image bookstore/catalog=ghcr.io/your-org/bookstore-catalog@sha256:<DIGEST>
+kustomize edit set image bookstore/catalog=ghcr.io/<OWNER>/bookstore-catalog@sha256:<DIGEST>
 git add kustomization.yaml && git commit -m "ci: bump catalog digest"   # Argo CD (ch.04) syncs this
 ```
 
-Minimal pipeline skeleton (the shape; full workflow in `examples/bookstore/ci/`):
+The shape of a Bookstore repo's caller (full file:
+[`ci/github-actions.yml`](../examples/bookstore/ci/github-actions.yml)):
 
 ```yaml
-name: ci
+name: bookstore-ci
 on: { push: { branches: [main] }, pull_request: { branches: [main] } }
-permissions: { contents: read }
+permissions: {}
 jobs:
-  build-test:                       # compile + vet + lint (matrix x services)
-    strategy: { matrix: { service: [catalog, orders, payments-worker] } }
-    steps: [ {uses: actions/checkout@v4}, {run: "go build ./... && go vet ./..."} ]
-  build-scan-sign-push:             # build->scan(gate)->SBOM->keyless sign->push BY DIGEST
-    needs: build-test
-    if: github.event_name == 'push'                 # never on fork PRs
-    permissions: { contents: read, packages: write, id-token: write }   # id-token = keyless
+  pipeline:                       # the stages, once per service
     strategy: { matrix: { service: [catalog, orders, payments-worker, storefront] } }
-    # NO job-level outputs: (matrix outputs collapse to one leg). Each leg
-    # docker build -> trivy(exit-code 1) -> syft -> cosign sign <img>@<DIGEST>
-    # -> upload-artifact digest-<SERVICE> (the per-leg fan-in)
-  bump-manifests:                   # THE SEAM: write digest to kustomize, open a PR (NOT kubectl apply)
-    needs: build-scan-sign-push
+    permissions: { contents: read, actions: read, packages: write, id-token: write, attestations: write }
+    uses: ./.github/workflows/bookstore-pipeline.yml
+    with: { service: "${{ matrix.service }}", publish: "${{ github.event_name == 'push' }}" }
+  bump-manifests:                 # THE SEAM: digests into the overlay, as a PR
+    needs: pipeline
+    if: github.event_name == 'push'
     permissions: { contents: write, pull-requests: write }
-    # download-artifact pattern: digest-* (merge-multiple) -> PINNED kustomize
-    # -> per-svc: kustomize edit set image <NAME>@sha256:<DIGEST>
-    # -> create-pull-request -> human review + merge -> Argo syncs
+    # download digest-* -> pinned, checksum-verified kustomize -> edit set image -> PR
 ```
 
 Checklist:
 
-- [ ] CI gates in order: build → vet/lint → image build → **Trivy (exit-code
-      1 on HIGH/CRITICAL)** → SBOM → **Cosign keyless** → push **by digest**
-- [ ] CI holds **no cluster credential**; its final step is a **pull request**
-      that bumps the kustomize `images:` digest (not `kubectl apply`, and not
-      a direct push to `main`)
-- [ ] Images **pinned by digest** in the deployed overlay → Part 05 ch.03
-      Kyverno `require-digest`/`verifyImages` becomes **Enforce**-able
-- [ ] Keyless OIDC (`id-token: write`), no long-lived keys; publish path
-      **skipped on fork PRs**; no secret ever echoed
-- [ ] Matrix over the four services + module/layer caching (fast, parallel)
-- [ ] Promotion = the **same digest** moved overlay→overlay by reviewed
-      commit; **never a rebuild**; prod behind a PR/approval
-- [ ] SLSA provenance + SBOM attached as attestations (`cosign attest`)
+- [ ] Every stage fails the build, and each scanner has a **control** that
+      fails if it stops finding the planted issue
+- [ ] Scan the built tar first; **push by digest** only after both scans pass
+- [ ] **Cosign keyless** signature, SBOM and provenance on the pushed digest;
+      no long-lived key or stored PAT; publish skipped on fork PRs
+- [ ] Every `uses:` is a **commit SHA**; `permissions: {}` at the top, scoped
+      per job; zizmor and actionlint clean; Harden-Runner on every job
+- [ ] CI holds **no cluster credential**; its last step is a **pull request**
+      that bumps the kustomize `images:` digest
+- [ ] Promotion = the **same digest** moved overlay to overlay by reviewed
+      commit; **never a rebuild**
 
 ## Test your understanding
 
 > Try each before opening the answer drawer. The act of trying is the exercise; the answer is the check.
 
-1. **The chapter insists "CI builds, CD deploys, Git is the trigger." Restate that as three concrete actions the CI pipeline does and three actions it does *not* do.**
+1. **The chapter insists "CI builds, CD deploys, Git is the trigger." Restate
+   that as three actions the CI pipeline does and three it does *not* do.**
    <details><summary>Show answer</summary>
 
-   **CI does**: (1) build + test the source, (2) build/scan/sign/push the image *by digest*, (3) commit the new digest into the GitOps source (e.g. `kustomize edit set image`). **CI does not**: (1) hold a kubeconfig or cluster credentials, (2) run `kubectl apply` or `helm upgrade` against any cluster, (3) decide when to deploy — that's CD's job, triggered by the commit. The whole trust boundary moves from "every CI job has prod's keys" to "CI holds a Git PAT; CD runs in-cluster." See §Mental model.
+   **CI does**: (1) build and test the source, (2) scan, sign and push the
+   image *by digest*, (3) commit the new digest into the GitOps source
+   (`kustomize edit set image`). **CI does not**: (1) hold a kubeconfig or any
+   cluster credential, (2) run `kubectl apply` or `helm upgrade`, (3) decide
+   when to deploy; the commit triggers CD. The boundary moves from "every CI
+   job has prod's keys" to "CI can open a PR; the in-cluster controller
+   applies it".
 
    </details>
 
-2. **A PR comes in to "deploy a hotfix straight from CI by running `kubectl apply`". What three things break, and what's the right path for an emergency fix?**
+2. **A junior engineer asks "where is the private key?" about the keyless
+   signature. Give the one-sentence answer, and say what you verify instead.**
    <details><summary>Show answer</summary>
 
-   Breaks: (1) CI now needs a long-lived kubeconfig — the credential leak surface (2) the cluster's "truth" is no longer Git, drift returns (3) rollback is back to improvised re-apply history. The right emergency path is the *same* path: open a PR that bumps the digest (or a config), get it reviewed and merged; Argo CD reconciles in under a minute. If you can't afford a minute, your incident-response SLO needs a faster CD loop, not a credentialed CI.
+   There is none: Fulcio issues a certificate that lives about ten minutes for
+   a key that exists only for that run, and signature, certificate and
+   identity go into the Rekor log. You verify the *identity*: the certificate
+   must name this repository's pipeline workflow and the GitHub OIDC issuer
+   (`cosign verify --certificate-identity-regexp … --certificate-oidc-issuer
+   https://token.actions.githubusercontent.com`). A valid signature from any
+   other identity is not trusted.
 
    </details>
 
-3. **CI uses Cosign with keyless OIDC. A junior engineer asks "where's the private key?" Give the one-sentence answer that explains why this is more secure than a long-lived key.**
-   <details><summary>Show answer</summary>
-
-   There **is** no long-lived private key — Cosign keyless uses Sigstore's Fulcio CA to mint a short-lived (~10 min) signing certificate bound to the GitHub Actions OIDC identity (`https://token.actions.githubusercontent.com`), signs the digest, records the signature + cert + identity in the Rekor transparency log, and the cert expires. There's nothing to leak, rotate, or revoke; the identity is auditable in Rekor forever.
-
-   </details>
-
-4. **Hands-on extension — see the digest discipline. Run `docker pull bookstore/catalog:dev` (a tag), then `docker pull bookstore/catalog@sha256:<DIGEST>` (the digest the CI commit references). Now `docker images --digests` and observe. What's the operational difference?**
+3. **Hands-on extension: run `$scan trufflehog` on the fixture directory, then
+   `$scan --expect Github trufflehog` on it. Why does the first pass while the
+   second reports a secret, and which result tells you the scanner works?**
    <details><summary>What you should see</summary>
 
-   Both pull the same bytes today, but the **tag could be repointed** at any time by anyone with push access (or by a registry compromise) — your next deploy by tag would pull *different* bytes. A digest is content-addressable: the registry will refuse to serve different bytes for the same `@sha256:`. This is the whole reason Part 05 ch.03's Kyverno `require-digest` policy was written in Audit waiting for CI to commit digest references — once CI pushes by digest, the policy becomes Enforce-able and tag-based deploys are forbidden.
+   Verified mode asks GitHub whether each token is live. The fixture's tokens
+   are fake, so none verifies and the first run is clean, exactly as on a real
+   repo whose old tokens are revoked. The control turns verification off, so
+   the detectors report the pattern. Only the control shows the scanner still
+   *sees*; a clean verified run cannot tell "nothing live" from "scanner
+   broken", which is why the pipeline runs both.
 
    </details>
 
-5. **Promotion from staging to prod is described as "moving the same digest between overlays, never a rebuild." Why is rebuilding for prod a bad pattern?**
+4. **A scan job has been green for months. Name two ways it could be green
+   because the scanner is blind, and the check this chapter uses against
+   both.**
    <details><summary>Show answer</summary>
 
-   A rebuild produces a *different* image (different layers' timestamps, dependency hashes if your build isn't perfectly reproducible) — staging's tests ran against image A, prod runs image B. You no longer have evidence that the bits in prod passed your scan/sign/test gates. The right model is **build once, scan once, sign once, promote the artefact**; prod's PR is a single line `images: [{ newDigest: <SAME-AS-STAGING> }]`. Promote bits, not source.
+   A renamed or removed rule ID (the scanner reports other findings, or none),
+   and a target that moved or is empty (it reads nothing and reports clean).
+   The check is the control: run the scanner on the vulnerable fixture and
+   require a non-zero exit *and* the planted rule ID in the report. `scan.sh
+   --expect ID` does this, so a quiet, crashed or renamed scanner fails the
+   control instead of passing the real services by saying nothing.
+
+   </details>
+
+5. **Promotion from staging to prod is "moving the same digest between
+   overlays, never a rebuild." Why is rebuilding for prod a bad pattern?**
+   <details><summary>Show answer</summary>
+
+   A rebuild produces a *different* image (layer timestamps, dependency
+   resolution if the build is not perfectly reproducible). Staging's tests and
+   every scan ran against image A, and prod would run image B, so you have no
+   evidence that prod's bits passed your gates or carry your signature.
+   **Build once, scan once, sign once, promote the artifact.**
 
    </details>
 
 ## Further reading
 
 - **Davis, _Bootstrapping Microservices with Docker, Kubernetes, and
-  Terraform_ (Manning, 2021), ch.7–8 — automated testing & the continuous
-  delivery pipeline** (building a real example-app CI/CD pipeline:
-  build→test→package→publish→deploy and the rationale for automating the path
-  from commit to running service — the narrative this chapter's pipeline
-  follows).
-- **Rosso et al., _Production Kubernetes_, ch.15 — Software Supply Chain**
-  (build/scan/sign/admit as a production pipeline; how the CI artifact and the
-  admission policy meet — the Audit→Enforce graduation this chapter completes).
-- Official / project docs: GitHub Actions
-  <https://docs.github.com/en/actions>, Sigstore Cosign keyless
+  Terraform_ (Manning, 2021), ch.7–8, automated testing and the continuous
+  delivery pipeline.** The narrative this chapter's pipeline follows, from
+  commit to running service.
+- **Rosso et al., _Production Kubernetes_, ch.15, Software Supply Chain.**
+  Build, scan, sign and admit as a production pipeline, and where the CI
+  artifact meets the admission policy.
+- Official and project docs: GitHub Actions security hardening
+  <https://docs.github.com/en/actions/security-for-github-actions/security-guides/security-hardening-for-github-actions>,
+  Sigstore Cosign keyless
   <https://docs.sigstore.dev/cosign/signing/overview/>, SLSA provenance
-  <https://slsa.dev/spec/v1.0/provenance>, and the Kubernetes image
-  reference (digests vs tags, pull policy)
+  <https://slsa.dev/spec/v1.0/provenance>, TruffleHog
+  <https://github.com/trufflesecurity/trufflehog>, govulncheck
+  <https://go.dev/doc/security/vuln/>, the ZAP baseline scan
+  <https://www.zaproxy.org/docs/docker/baseline-scan/>, zizmor
+  <https://docs.zizmor.sh/>, StepSecurity Harden-Runner
+  <https://docs.stepsecurity.io/harden-runner>, OpenSSF Scorecard
+  <https://github.com/ossf/scorecard>, and the Kubernetes image reference
+  (digests vs tags, pull policy)
   <https://kubernetes.io/docs/concepts/containers/images/>.

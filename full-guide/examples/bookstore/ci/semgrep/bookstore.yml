@@ -1,0 +1,23 @@
+# Semgrep rules for the Bookstore Go services. Local rules, so a scan needs no
+# network and no registry account.
+rules:
+  - id: bookstore-sql-string-concat
+    languages: [go]
+    severity: ERROR
+    message: >-
+      A SQL statement built by joining strings. Pass values as placeholders
+      ($1) to Query, QueryRow or Exec instead.
+    pattern-either:
+      - pattern: $DB.Query($Q + ..., ...)
+      - pattern: $DB.QueryRow($Q + ..., ...)
+      - pattern: $DB.Exec($Q + ..., ...)
+      - pattern: $DB.QueryContext($CTX, $Q + ..., ...)
+  - id: bookstore-shell-from-request
+    languages: [go]
+    severity: ERROR
+    message: >-
+      A request value reaches a shell. Run a fixed binary with fixed
+      arguments, or validate the value against an allow list first.
+    patterns:
+      - pattern: exec.Command("sh", "-c", $X)
+      - pattern-not: exec.Command("sh", "-c", "...")

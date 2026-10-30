@@ -1,0 +1,14 @@
+# KubeLinter settings for the Bookstore pipeline (Part 07 ch.03). Everything
+# the default set checks stays on except the two checks below. Each exclusion
+# is a decision: it says why, and the date it must be revisited (never more
+# than 12 months out). The first run on 2026-10-30 raised exactly these two on
+# the production overlay.
+checks:
+  exclude:
+    # orders runs 3 replicas with no pod anti-affinity. That is a statement
+    # about availability, not about the security baseline. Revisit by 2027-04-30.
+    - no-anti-affinity
+    # The cleanup CronJob sets ttlSecondsAfterFinished beside the CronJob's own
+    # history limits, and the two interact. Operations, not security. Revisit
+    # by 2027-04-30.
+    - job-ttl-seconds-after-finished

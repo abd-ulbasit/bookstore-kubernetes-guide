@@ -66,3 +66,17 @@ condition = "AND"
 paths = ['''^full-guide/examples/bookstore-platform/terraform/README\.md$''']
 regexTarget = "line"
 regexes = ['''KMS key ARNs, VPC/subnet/SG IDs''']
+
+[[allowlists]]
+description = """The pipeline's scanner fixture (Part 07 ch.03) carries two \
+obviously fake GitHub-token-shaped strings so the secret scanners have \
+something to find. They belong to no account. The control job in \
+bookstore-pipeline-check.yml runs gitleaks on that directory WITHOUT this \
+allowlist and fails unless the rule still fires, so this entry cannot hide a \
+scanner that has gone quiet. Pinned to the rule, the one file and the two \
+exact lines."""
+targetRules = ["github-pat"]
+condition = "AND"
+paths = ['''^full-guide/examples/bookstore/ci/fixtures/vulnerable/config\.env$''']
+regexTarget = "line"
+regexes = ['''(?m)^(GITLEAKS|TRUFFLEHOG)_PLANT=ghp_(NOTAREALTOKENNOTAREALTOKENNOTAREALTOKE|FAKEFAKEFAKEFAKEFAKEFAKEFAKEFAKEFAKE)$''']

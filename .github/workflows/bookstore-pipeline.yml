@@ -1,0 +1,608 @@
+name: bookstore-pipeline
+
+# The Bookstore delivery pipeline for ONE service (Part 07 ch.03). A caller
+# runs it once per service. Every stage is a job, in this order:
+#
+#   build-test, secrets, sast, sca -> image-lint -> image-scan + sbom -> sign
+#   manifests, workflow-hardening and dast run beside them.
+#
+# The scanner commands live in full-guide/examples/bookstore/ci/scan.sh, each
+# in a container pinned by digest, so a reader runs the same command on a
+# laptop. The guide's own check (bookstore-pipeline-check.yml) calls this file
+# on every PR that touches the services and also runs each scanner against a
+# deliberately vulnerable fixture, so a scanner that goes quiet fails the build.
+#
+# Every action is pinned to a commit SHA; the trailing comment names the
+# release. Dependabot bumps both together (.github/dependabot.yml).
+#
+# Permissions start empty. Each job asks for what it needs, and the caller's
+# job must grant at least that much.
+
+on:
+  workflow_call:
+    inputs:
+      service:
+        description: The service to run, a directory under app/.
+        type: string
+        required: true
+      bookstore-dir:
+        description: Where app/, ci/ and kustomize/ live, relative to the repository root.
+        type: string
+        default: .
+      publish:
+        description: Push the image, sign it and attest its provenance. Needs a registry and OIDC.
+        type: boolean
+        default: false
+      dast:
+        description: Run the ZAP baseline against the service on a kind cluster.
+        type: boolean
+        default: true
+      repo-wide:
+        description: Also run the stages that look at the whole repository, not one service.
+        type: boolean
+        default: true
+      workflow-files:
+        description: Workflow files for zizmor and actionlint, separated by spaces.
+        type: string
+        default: .github/workflows
+    outputs:
+      digest:
+        description: The digest of the pushed image. Empty unless publish is true.
+        value: ${{ jobs.sign.outputs.digest }}
+
+permissions: {}
+
+env:
+  BOOKSTORE: ${{ inputs.bookstore-dir }}
+  SERVICE: ${{ inputs.service }}
+  # The Go toolchain for the build and CodeQL steps. It must match the builder
+  # stage in the Dockerfiles; security-scan.yml enforces that for the guide.
+  GO_VERSION: '1.26.10'
+
+jobs:
+  # ---------------------------------------------------------------------------
+  # build-test: the cheap gate. The code compiles, `go vet` is quiet and the
+  # tests pass. (The Bookstore services ship no _test.go files, deliberately;
+  # `go test` then reports "no test files" and becomes the gate when a real
+  # codebase has tests.) No registry, no cluster, no secrets.
+  # ---------------------------------------------------------------------------
+  build-test:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - uses: step-security/harden-runner@dc2769abcc0fcfbadfc1df54081c1608579ef6b2 # v2.22.2
+        with:
+          egress-policy: audit
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Which language is this service?
+        id: lang
+        run: |
+          if [ -f "$BOOKSTORE/app/$SERVICE/go.mod" ]; then echo "go=true" >> "$GITHUB_OUTPUT"; fi
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        if: steps.lang.outputs.go == 'true'
+        with:
+          go-version: ${{ env.GO_VERSION }}
+          cache: false
+      - name: go build, go vet, go test
+        if: steps.lang.outputs.go == 'true'
+        working-directory: ${{ inputs.bookstore-dir }}/app/${{ inputs.service }}
+        run: |
+          go build ./...
+          go vet ./...
+          go test ./...
+
+  # ---------------------------------------------------------------------------
+  # secrets: two scanners for one job. Gitleaks matches patterns and catches
+  # a secret that is already dead; TruffleHog's verified mode reports only
+  # credentials that still work, so it can fail the build with almost no
+  # false positives.
+  # ---------------------------------------------------------------------------
+  secrets:
+    if: inputs.repo-wide
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - uses: step-security/harden-runner@dc2769abcc0fcfbadfc1df54081c1608579ef6b2 # v2.22.2
+        with:
+          egress-policy: audit
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Gitleaks
+        run: |
+          "$BOOKSTORE/ci/scan.sh" gitleaks .
+      - name: TruffleHog, verified credentials only
+        run: |
+          "$BOOKSTORE/ci/scan.sh" trufflehog .
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        if: always()
+        with:
+          name: reports-secrets
+          path: scan-reports/
+          retention-days: 14
+
+  # ---------------------------------------------------------------------------
+  # sast: Semgrep with the Bookstore's own rules, gosec for Go, CodeQL for
+  # data flow across functions. CodeQL runs with upload off and its SARIF is
+  # counted here, so a fork PR (no security-events token) still gets the gate.
+  # ---------------------------------------------------------------------------
+  sast:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - uses: step-security/harden-runner@dc2769abcc0fcfbadfc1df54081c1608579ef6b2 # v2.22.2
+        with:
+          egress-policy: audit
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Which language is this service?
+        id: lang
+        run: |
+          if [ -f "$BOOKSTORE/app/$SERVICE/go.mod" ]; then echo "go=true" >> "$GITHUB_OUTPUT"; fi
+      - name: Semgrep
+        run: |
+          "$BOOKSTORE/ci/scan.sh" semgrep "$BOOKSTORE/app/$SERVICE"
+      - name: gosec
+        if: steps.lang.outputs.go == 'true'
+        run: |
+          "$BOOKSTORE/ci/scan.sh" gosec "$BOOKSTORE/app/$SERVICE"
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        if: steps.lang.outputs.go == 'true'
+        with:
+          go-version: ${{ env.GO_VERSION }}
+          cache: false
+      - uses: github/codeql-action/init@9b3254085494b55a0f7c4c2b3d2d52cc712ce370 # v4.39.1
+        if: steps.lang.outputs.go == 'true'
+        with:
+          languages: go
+          build-mode: manual
+      - name: Build for CodeQL
+        if: steps.lang.outputs.go == 'true'
+        working-directory: ${{ inputs.bookstore-dir }}/app/${{ inputs.service }}
+        run: go build ./...
+      - uses: github/codeql-action/analyze@9b3254085494b55a0f7c4c2b3d2d52cc712ce370 # v4.39.1
+        if: steps.lang.outputs.go == 'true'
+        with:
+          category: /language:go/service:${{ inputs.service }}
+          upload: never
+          output: codeql-results
+      - name: Fail on CodeQL results
+        if: steps.lang.outputs.go == 'true'
+        run: |
+          n=$(jq '[.runs[].results[]] | length' codeql-results/go.sarif)
+          echo "CodeQL results: $n"
+          [ "$n" -eq 0 ]
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        if: always()
+        with:
+          name: reports-sast-${{ inputs.service }}
+          path: |
+            scan-reports/
+            codeql-results/
+          retention-days: 14
+
+  # ---------------------------------------------------------------------------
+  # sca: govulncheck reports only vulnerable code the program can reach, so
+  # it answers "do I call it?". Trivy lists every vulnerable dependency, so it
+  # answers "do I ship it?". Dependabot (ci/dependabot.yml) opens the fixes.
+  # ---------------------------------------------------------------------------
+  sca:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - uses: step-security/harden-runner@dc2769abcc0fcfbadfc1df54081c1608579ef6b2 # v2.22.2
+        with:
+          egress-policy: audit
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: govulncheck
+        run: |
+          if [ -f "$BOOKSTORE/app/$SERVICE/go.mod" ]; then
+            "$BOOKSTORE/ci/scan.sh" govulncheck "$BOOKSTORE/app/$SERVICE"
+          else
+            echo "$SERVICE has no Go module, so govulncheck has nothing to read."
+          fi
+      - name: Trivy, dependencies
+        run: |
+          "$BOOKSTORE/ci/scan.sh" trivy-fs "$BOOKSTORE/app/$SERVICE"
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        if: always()
+        with:
+          name: reports-sca-${{ inputs.service }}
+          path: scan-reports/
+          retention-days: 14
+
+  # ---------------------------------------------------------------------------
+  # image-lint: hadolint reads the Dockerfile before anything is built, then
+  # the image is built ONCE as a tar and Dockle reads it. Every later stage
+  # scans this same tar, so the image that is scanned is the image that is
+  # signed. (This stage builds because the image has to exist before it can
+  # be linted.)
+  # ---------------------------------------------------------------------------
+  image-lint:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - uses: step-security/harden-runner@dc2769abcc0fcfbadfc1df54081c1608579ef6b2 # v2.22.2
+        with:
+          egress-policy: audit
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: hadolint
+        run: |
+          "$BOOKSTORE/ci/scan.sh" hadolint "$BOOKSTORE/app/$SERVICE/Dockerfile"
+      - run: mkdir -p scan-out
+      - uses: docker/setup-buildx-action@f87e5991a6d7451dcb8d9637bfbc97413f497069 # v4.4.1
+      - name: Build the image once, as a tar
+        uses: docker/build-push-action@c3c9e263c25d99ce0380d002d59b67737d91b0dc # v7.4.0
+        with:
+          context: ${{ inputs.bookstore-dir }}/app/${{ inputs.service }}
+          push: false
+          tags: bookstore/${{ inputs.service }}:ci
+          outputs: type=docker,dest=scan-out/image.tar
+      - name: Dockle
+        run: |
+          "$BOOKSTORE/ci/scan.sh" dockle scan-out/image.tar
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: image-${{ inputs.service }}
+          path: scan-out/image.tar
+          retention-days: 1
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        if: always()
+        with:
+          name: reports-image-lint-${{ inputs.service }}
+          path: scan-reports/
+          retention-days: 14
+
+  # ---------------------------------------------------------------------------
+  # image-scan: Trivy on the tar. ignore-unfixed is on: a rebuild cannot fix
+  # a CVE nobody has patched, so gating on it blocks every build for nothing.
+  # The weekly rescan of published images catches the day a fix lands.
+  # ---------------------------------------------------------------------------
+  image-scan:
+    needs: image-lint
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - uses: step-security/harden-runner@dc2769abcc0fcfbadfc1df54081c1608579ef6b2 # v2.22.2
+        with:
+          egress-policy: audit
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          name: image-${{ inputs.service }}
+          path: scan-out
+      - name: Trivy, image
+        run: |
+          "$BOOKSTORE/ci/scan.sh" trivy-image scan-out/image.tar
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        if: always()
+        with:
+          name: reports-image-scan-${{ inputs.service }}
+          path: scan-reports/
+          retention-days: 14
+
+  # ---------------------------------------------------------------------------
+  # sbom: Syft writes a CycloneDX inventory of the image. Grype and Trivy
+  # each scan that inventory. Two scanners on purpose: they use different
+  # vulnerability data, so where they disagree is worth a look.
+  # ---------------------------------------------------------------------------
+  sbom:
+    needs: image-lint
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - uses: step-security/harden-runner@dc2769abcc0fcfbadfc1df54081c1608579ef6b2 # v2.22.2
+        with:
+          egress-policy: audit
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          name: image-${{ inputs.service }}
+          path: scan-out
+      - name: Syft, write the SBOM
+        run: |
+          "$BOOKSTORE/ci/scan.sh" syft scan-out/image.tar
+      - name: Grype, scan the SBOM
+        run: |
+          "$BOOKSTORE/ci/scan.sh" grype scan-reports/sbom.cdx.json
+      - name: Trivy, scan the SBOM
+        run: |
+          "$BOOKSTORE/ci/scan.sh" trivy-sbom scan-reports/sbom.cdx.json
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        if: always()
+        with:
+          name: sbom-${{ inputs.service }}
+          path: scan-reports/
+          retention-days: 90
+
+  # ---------------------------------------------------------------------------
+  # sign: only when the caller asks to publish, and only after both scans
+  # passed. The registry computes the digest on push. Cosign signs that
+  # digest keylessly: the job's OIDC token buys a certificate that lives
+  # minutes, bound to THIS workflow's identity, and the signature goes to the
+  # Rekor log. The SBOM and a SLSA provenance statement are attached to the
+  # same digest. Nothing here is a stored key.
+  # ---------------------------------------------------------------------------
+  sign:
+    if: inputs.publish
+    needs: [image-scan, sbom]
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: write
+      id-token: write
+      attestations: write
+    outputs:
+      digest: ${{ steps.push.outputs.digest }}
+    steps:
+      - uses: step-security/harden-runner@dc2769abcc0fcfbadfc1df54081c1608579ef6b2 # v2.22.2
+        with:
+          egress-policy: audit
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          name: image-${{ inputs.service }}
+          path: scan-out
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          name: sbom-${{ inputs.service }}
+          path: sbom
+      - uses: docker/login-action@81c6f93d4bc991e510b342a00b419b3bb4efc5c6 # v4.7.0
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+      - name: Push, and read the digest the registry computed
+        id: push
+        env:
+          OWNER: ${{ github.repository_owner }}
+        run: |
+          set -euo pipefail
+          image="ghcr.io/${OWNER,,}/bookstore-${SERVICE}"
+          docker load --input scan-out/image.tar
+          docker tag "bookstore/${SERVICE}:ci" "${image}:${GITHUB_SHA}"
+          docker push "${image}:${GITHUB_SHA}"
+          digest=$(docker image inspect "${image}:${GITHUB_SHA}" --format '{{index .RepoDigests 0}}')
+          digest="${digest#*@}"
+          case "$digest" in sha256:*) ;; *) echo "::error::no digest from the registry"; exit 1 ;; esac
+          echo "image=${image}" >> "$GITHUB_OUTPUT"
+          echo "digest=${digest}" >> "$GITHUB_OUTPUT"
+          mkdir -p digests
+          printf '%s' "$digest" > "digests/${SERVICE}.digest"
+      - uses: sigstore/cosign-installer@6f9f17788090df1f26f669e9d70d6ae9567deba6 # v4.1.2
+      - name: Cosign, sign the digest and attach the SBOM
+        env:
+          REF: ${{ steps.push.outputs.image }}@${{ steps.push.outputs.digest }}
+        run: |
+          cosign sign --yes "$REF"
+          cosign attest --yes --type cyclonedx --predicate sbom/sbom.cdx.json "$REF"
+      - uses: actions/attest-build-provenance@4d101475d8b20a2381f78447822ac1eab6504dd8 # v4.2.2
+        with:
+          subject-name: ${{ steps.push.outputs.image }}
+          subject-digest: ${{ steps.push.outputs.digest }}
+          push-to-registry: true
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: digest-${{ inputs.service }}
+          path: digests/${{ inputs.service }}.digest
+          retention-days: 7
+
+  # ---------------------------------------------------------------------------
+  # manifests: three readers of the rendered production overlay. KubeLinter
+  # checks the shape, kubesec scores the Pod specs, Trivy config checks them
+  # against its policy library. They overlap on purpose; each has a blind spot
+  # the others cover.
+  # ---------------------------------------------------------------------------
+  manifests:
+    if: inputs.repo-wide
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - uses: step-security/harden-runner@dc2769abcc0fcfbadfc1df54081c1608579ef6b2 # v2.22.2
+        with:
+          egress-policy: audit
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: azure/setup-kubectl@bda439f5f36b99b262ebdcd3613869bddb064c8e # v5.2.0
+        with:
+          version: 'v1.37.2'
+      - name: Render the production overlay
+        run: |
+          mkdir -p scan-reports
+          kubectl kustomize "$BOOKSTORE/kustomize/overlays/prod" > scan-reports/prod-overlay.yaml
+      - name: KubeLinter
+        run: |
+          "$BOOKSTORE/ci/scan.sh" kube-linter scan-reports/prod-overlay.yaml
+      - name: kubesec
+        run: |
+          "$BOOKSTORE/ci/scan.sh" kubesec scan-reports/prod-overlay.yaml
+      - name: Trivy, config
+        run: |
+          "$BOOKSTORE/ci/scan.sh" trivy-config scan-reports/prod-overlay.yaml
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        if: always()
+        with:
+          name: reports-manifests
+          path: scan-reports/
+          retention-days: 14
+
+  # ---------------------------------------------------------------------------
+  # workflow-hardening: the pipeline is code that holds credentials, so it is
+  # scanned too. zizmor finds injectable expressions, unpinned actions and
+  # over-broad permissions; actionlint finds the mistakes that make a
+  # workflow misbehave. Harden-Runner (first step of every job above) watches
+  # the runner's network. Scorecard grades the repository's own habits (branch
+  # protection, pinned dependencies, token permissions); it reports a score
+  # rather than gating, and it only runs on the default branch.
+  # ---------------------------------------------------------------------------
+  workflow-hardening:
+    if: inputs.repo-wide
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      actions: read
+    steps:
+      - uses: step-security/harden-runner@dc2769abcc0fcfbadfc1df54081c1608579ef6b2 # v2.22.2
+        with:
+          egress-policy: audit
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: zizmor
+        env:
+          WORKFLOWS: ${{ inputs.workflow-files }}
+        run: |
+          "$BOOKSTORE/ci/scan.sh" zizmor "$WORKFLOWS"
+      - name: actionlint
+        env:
+          WORKFLOWS: ${{ inputs.workflow-files }}
+        run: |
+          "$BOOKSTORE/ci/scan.sh" actionlint "$WORKFLOWS"
+      - name: OpenSSF Scorecard (default branch only)
+        if: github.event_name == 'push' && github.ref == format('refs/heads/{0}', github.event.repository.default_branch)
+        uses: ossf/scorecard-action@fa7117db83c52d787ae5a89f350999701505d78e # v2.5.0
+        with:
+          results_file: scan-reports/scorecard.sarif
+          results_format: sarif
+          publish_results: false
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        if: always()
+        with:
+          name: reports-workflow-hardening
+          path: scan-reports/
+          retention-days: 14
+
+  # ---------------------------------------------------------------------------
+  # dast: the ZAP baseline is passive. It crawls the running service and reads
+  # its responses; it sends no attack traffic, so it is safe on every PR. The
+  # service runs on a throwaway kind cluster, in a namespace that enforces
+  # Pod Security "restricted", with the baseline securityContext.
+  # ---------------------------------------------------------------------------
+  dast:
+    if: inputs.dast
+    needs: image-lint
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - uses: step-security/harden-runner@dc2769abcc0fcfbadfc1df54081c1608579ef6b2 # v2.22.2
+        with:
+          egress-policy: audit
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          name: image-${{ inputs.service }}
+          path: scan-out
+      - uses: helm/kind-action@1544676c07bb3570fcb70166beaa07c4528fd4aa # v1.15.1
+        with:
+          version: v0.33.0
+          node_image: kindest/node:v1.37.0@sha256:a1ed56cfb0e7b93589bdf97c8cd566405a265939e3620fc4f5de89adff580ae5
+          cluster_name: dast
+      - name: Start the service under the baseline
+        run: |
+          set -euo pipefail
+          docker load --input scan-out/image.tar
+          # The numeric user the image declares, as the baseline requires.
+          user=$(docker image inspect "bookstore/${SERVICE}:ci" --format '{{.Config.User}}')
+          RUN_UID="${user%%:*}"
+          RUN_GID="${user##*:}"
+          case "$RUN_UID" in ''|*[!0-9]*) echo "::error::the image must declare a numeric user, got '$user'"; exit 1 ;; esac
+          kind load docker-image "bookstore/${SERVICE}:ci" --name dast
+          kubectl apply -f - <<EOF
+          apiVersion: v1
+          kind: Namespace
+          metadata:
+            name: dast
+            labels:
+              pod-security.kubernetes.io/enforce: restricted
+              pod-security.kubernetes.io/warn: restricted
+          ---
+          apiVersion: v1
+          kind: ServiceAccount
+          metadata:
+            name: app
+            namespace: dast
+          automountServiceAccountToken: false
+          ---
+          apiVersion: v1
+          kind: Pod
+          metadata:
+            name: app
+            namespace: dast
+          spec:
+            serviceAccountName: app
+            automountServiceAccountToken: false
+            securityContext:
+              runAsNonRoot: true
+              runAsUser: ${RUN_UID}
+              runAsGroup: ${RUN_GID}
+              seccompProfile:
+                type: RuntimeDefault
+            containers:
+              - name: app
+                image: bookstore/${SERVICE}:ci
+                imagePullPolicy: Never
+                ports:
+                  - containerPort: 8080
+                securityContext:
+                  allowPrivilegeEscalation: false
+                  readOnlyRootFilesystem: true
+                  capabilities:
+                    drop: ["ALL"]
+                resources:
+                  requests:
+                    cpu: 50m
+                    memory: 64Mi
+                  limits:
+                    memory: 128Mi
+                volumeMounts:
+                  - name: tmp
+                    mountPath: /tmp
+            volumes:
+              - name: tmp
+                emptyDir: {}
+          EOF
+          kubectl --namespace dast wait --for=condition=Ready pod/app --timeout=120s
+      - name: ZAP baseline
+        run: |
+          set -euo pipefail
+          case "$SERVICE" in
+            storefront) path=/ ;;
+            orders) path=/healthz ;;
+            *) path=/books ;;
+          esac
+          kubectl --namespace dast port-forward pod/app 8080:8080 >/dev/null 2>&1 &
+          # The forward can accept a connection before it reaches the Pod.
+          for i in $(seq 1 30); do
+            curl --silent --fail --output /dev/null "http://127.0.0.1:8080${path}" && break
+            [ "$i" -lt 30 ] || { echo "::error::the service never answered on ${path}"; exit 1; }
+            sleep 1
+          done
+          "$BOOKSTORE/ci/scan.sh" zap "http://127.0.0.1:8080${path}"
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        if: always()
+        with:
+          name: reports-dast-${{ inputs.service }}
+          path: scan-reports/
+          retention-days: 14

@@ -1,0 +1,17 @@
+# INSECURE ON PURPOSE: a scanner fixture. It sits outside .github/workflows, so
+# GitHub never runs it. zizmor and actionlint must report what is planted here.
+name: fixture
+on:
+  pull_request_target:
+    types: [opened]
+permissions: write-all
+jobs:
+  triage:
+    runs-on: ubuntu-latest
+    steps:
+      # Unpinned action, and the PR's own code checked out in a privileged run.
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.pull_request.head.sha }}
+      # Template injection: the PR title becomes part of the shell script.
+      - run: echo "Triaging ${{ github.event.pull_request.title }}"

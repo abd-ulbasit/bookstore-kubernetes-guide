@@ -1,0 +1,6 @@
+# Grype ignore list for the Bookstore pipeline (Part 07 ch.03). The same finding
+# as trivyignore.yaml, with the same reason. Grype has no expiry date on an
+# ignore rule, so Trivy's expired_at is the one that brings the gate back.
+# Delete both files' entries together.
+ignore:
+  - vulnerability: CVE-2026-111497

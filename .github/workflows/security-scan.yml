@@ -78,8 +78,11 @@ jobs:
           exit-code: '0'
           scanners: 'vuln,secret,misconfig'
           # The .terraform/ provider blobs would dominate the report; they
-          # are gitignored anyway, so skip explicitly here too.
-          skip-dirs: 'node_modules,.terraform,site'
+          # are gitignored anyway, so skip explicitly here too. The pipeline
+          # fixture is broken on purpose (07.03): a vulnerable dependency, a
+          # privileged Pod, fake tokens. bookstore-pipeline-check.yml proves
+          # the scanners still catch it, so the Security tab need not list it.
+          skip-dirs: 'node_modules,.terraform,site,full-guide/examples/bookstore/ci/fixtures'
 
       - name: Upload Trivy SARIF to GitHub Security
         uses: github/codeql-action/upload-sarif@9b3254085494b55a0f7c4c2b3d2d52cc712ce370 # v4.39.1
@@ -214,8 +217,11 @@ jobs:
       - id: find
         run: |
           set -euo pipefail
+          # ci/fixtures holds the pipeline's deliberately vulnerable module
+          # (07.03); govulncheck is meant to fail on it, in its own control.
           dirs=$(find full-guide/examples -name go.mod \
             -not -path '*/vendor/*' -not -path '*/.terraform/*' \
+            -not -path '*/ci/fixtures/*' \
             -exec dirname {} \; | sort)
           count=$(printf '%s\n' "$dirs" | grep -c . || true)
           if [ "$count" -eq 0 ]; then

@@ -1,0 +1,15 @@
+# Trivy ignore list for the Bookstore pipeline (Part 07 ch.03). Trivy stops
+# honoring an entry on its expired_at date, so the gate fails again until
+# someone fixes the finding or renews the entry on purpose.
+#
+# The first run on 2026-10-30 flagged the storefront image. Its base is
+# nginx:1.30-alpine on Alpine 3.24.3 (tag last updated 2026-10-29), and
+# Alpine had released a fix the nginx image did not carry yet. brotli-libs is
+# there as a dependency of freetype; the storefront serves static files and
+# never decodes Brotli. (The Dockerfile already removes curl and libcurl, which
+# had the same problem.) Re-run after the next nginx-alpine build and delete
+# this entry.
+vulnerabilities:
+  - id: CVE-2026-111497
+    statement: "CRITICAL in brotli-libs 1.2.0-r1, fixed in 1.2.1-r0 (Alpine), not yet in nginx:1.30-alpine."
+    expired_at: 2026-11-30

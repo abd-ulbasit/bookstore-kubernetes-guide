@@ -1,0 +1,202 @@
+# Transcript for 07-delivery/03-cicd-pipeline.md, hands-on steps 1 to 11.
+# Tier A: scanner images pinned by digest in ci/scan.sh, a kind cluster with a
+# Kubernetes v1.37.0 node, kubectl client v1.35.5 (the host's own). One Linux
+# machine.
+# Recorded by running the chapter's commands in order from full-guide/. The
+# cluster and node names are shown as `bookstore`, terminal colour codes are
+# removed and tabs are expanded to spaces. Nothing else is edited.
+## step 1
+$ pip install -q pre-commit==4.7.0
+$ cp -R examples/bookstore /tmp/bookstore && rm -rf /tmp/bookstore/ci/fixtures   # stands in for your repo
+$ cd /tmp/bookstore && git init -q && git add -A
+$ pre-commit run --all-files
+gitleaks.................................................................Passed
+hadolint.................................................................Passed
+gosec....................................................................Passed
+
+$ cd /tmp/bookstore
+$ printf 'GITHUB_TOKEN=ghp_%s\n' "$(printf 'NOTAREALTOKEN%.0s' 1 2 3)" > .env
+$ git add .env && pre-commit run gitleaks
+gitleaks.................................................................Failed
+- hook id: gitleaks
+- exit code: 1
+
+Finding:     GITHUB_TOKEN=REDACTEDKEN
+Secret:      REDACTED
+RuleID:      github-pat
+Entropy:     3.290468
+File:        .env
+Line:        1
+Fingerprint: .env:github-pat:1
+
+7:52PM INF 0 commits scanned.
+7:52PM INF scanned ~1010463 bytes (1.01 MB) in 1.46s
+7:52PM WRN leaks found: 1
+
+
+$ rm -rf /tmp/bookstore
+
+## step 2
+$ $scan gitleaks examples/bookstore/app
+$ $scan trufflehog examples/bookstore/app
+scan.sh: gitleaks clean on examples/bookstore/app
+scan.sh: trufflehog clean on examples/bookstore/app
+
+$ $scan gitleaks examples/bookstore/ci/fixtures/vulnerable; echo "exit $?"
+$ jq -r '.[] | "\(.RuleID) \(.File)"' scan-reports/gitleaks.json
+$ $scan trufflehog examples/bookstore/ci/fixtures/vulnerable
+scan.sh: gitleaks flagged examples/bookstore/ci/fixtures/vulnerable (exit 1, report scan-reports/gitleaks.json)
+exit 1
+github-pat examples/bookstore/ci/fixtures/vulnerable/config.env
+scan.sh: trufflehog clean on examples/bookstore/ci/fixtures/vulnerable
+
+$ $scan --expect github-pat gitleaks examples/bookstore/ci/fixtures/vulnerable
+$ $scan --expect Github trufflehog examples/bookstore/ci/fixtures/vulnerable
+scan.sh: control ok, gitleaks reported github-pat on examples/bookstore/ci/fixtures/vulnerable
+scan.sh: control ok, trufflehog reported Github on examples/bookstore/ci/fixtures/vulnerable
+
+## step 3
+$ $scan semgrep examples/bookstore/app
+$ $scan gosec examples/bookstore/app/catalog
+scan.sh: semgrep clean on examples/bookstore/app
+scan.sh: gosec clean on examples/bookstore/app/catalog
+
+$ $scan --expect bookstore-sql-string-concat semgrep examples/bookstore/ci/fixtures/vulnerable
+$ $scan --expect G202 gosec examples/bookstore/ci/fixtures/vulnerable
+$ jq -r '.Issues[] | "\(.rule_id) \(.details)"' scan-reports/gosec.json | sort -u
+scan.sh: control ok, semgrep reported bookstore-sql-string-concat on examples/bookstore/ci/fixtures/vulnerable
+scan.sh: control ok, gosec reported G202 on examples/bookstore/ci/fixtures/vulnerable
+G104 Errors unhandled
+G114 Use of net/http serve function that has no support for setting timeouts
+G124 http.Cookie missing or has insecure Secure, HttpOnly, or SameSite attribute
+G202 SQL string concatenation
+G204 Subprocess launched with a potential tainted input or cmd arguments
+G401 Use of weak cryptographic primitive
+G501 Blocklisted import crypto/md5: weak cryptographic primitive
+G701 SQL injection via taint analysis: (*database/sql.DB).Query
+G702 Command injection via taint analysis: os/exec.Command
+G705 XSS via taint analysis: fmt.Fprintf
+
+## step 4
+$ $scan govulncheck examples/bookstore/app/catalog
+$ $scan trivy-fs examples/bookstore/app/catalog
+scan.sh: govulncheck clean on examples/bookstore/app/catalog
+scan.sh: trivy-fs clean on examples/bookstore/app/catalog
+
+$ $scan --expect GO-2021-0113 govulncheck examples/bookstore/ci/fixtures/vulnerable
+$ grep -E 'GO-2021-0113|calls language' scan-reports/govulncheck.txt | head -4
+$ $scan --expect CVE-2021-38561 trivy-fs examples/bookstore/ci/fixtures/vulnerable
+scan.sh: control ok, govulncheck reported GO-2021-0113 on examples/bookstore/ci/fixtures/vulnerable
+      #1: main.go:21:45: vulnerable.main calls language.ParseAcceptLanguage
+Vulnerability #2: GO-2021-0113
+  More info: https://pkg.go.dev/vuln/GO-2021-0113
+      #1: main.go:21:45: vulnerable.main calls language.ParseAcceptLanguage
+scan.sh: control ok, trivy-fs reported CVE-2021-38561 on examples/bookstore/ci/fixtures/vulnerable
+
+## step 5
+$ docker build -q -t bookstore/catalog:dev examples/bookstore/app/catalog >/dev/null
+$ docker save -o scan-out/catalog.tar bookstore/catalog:dev
+$ $scan hadolint examples/bookstore/app/catalog/Dockerfile
+$ $scan dockle scan-out/catalog.tar
+scan.sh: hadolint clean on examples/bookstore/app/catalog/Dockerfile
+scan.sh: dockle clean on scan-out/catalog.tar
+
+$ docker build -q -t bookstore/vulnerable:fixture -f examples/bookstore/ci/fixtures/vulnerable/vulnerable.Dockerfile examples/bookstore/ci/fixtures/vulnerable >/dev/null
+$ docker save -o scan-out/vulnerable.tar bookstore/vulnerable:fixture
+$ $scan --expect DL3002 hadolint examples/bookstore/ci/fixtures/vulnerable/vulnerable.Dockerfile
+$ $scan --expect CIS-DI-0001 dockle scan-out/vulnerable.tar
+scan.sh: control ok, hadolint reported DL3002 on examples/bookstore/ci/fixtures/vulnerable/vulnerable.Dockerfile
+scan.sh: control ok, dockle reported CIS-DI-0001 on scan-out/vulnerable.tar
+
+## step 6
+$ $scan trivy-image scan-out/catalog.tar
+scan.sh: trivy-image clean on scan-out/catalog.tar
+
+$ $scan --expect CVE-2022-37434 trivy-image scan-out/vulnerable.tar
+scan.sh: control ok, trivy-image reported CVE-2022-37434 on scan-out/vulnerable.tar
+
+## step 7
+$ $scan syft scan-out/catalog.tar
+$ $scan grype scan-reports/sbom.cdx.json
+$ $scan trivy-sbom scan-reports/sbom.cdx.json
+scan.sh: syft clean on scan-out/catalog.tar
+scan.sh: grype clean on scan-reports/sbom.cdx.json
+scan.sh: trivy-sbom clean on scan-reports/sbom.cdx.json
+
+$ $scan syft scan-out/vulnerable.tar
+$ $scan --expect CVE-2021-38561 grype scan-reports/sbom.cdx.json
+$ $scan --expect CVE-2021-38561 trivy-sbom scan-reports/sbom.cdx.json
+scan.sh: syft clean on scan-out/vulnerable.tar
+scan.sh: control ok, grype reported CVE-2021-38561 on scan-reports/sbom.cdx.json
+scan.sh: control ok, trivy-sbom reported CVE-2021-38561 on scan-reports/sbom.cdx.json
+
+## step 9
+$ kubectl kustomize examples/bookstore/kustomize/overlays/prod > scan-reports/prod-overlay.yaml
+$ $scan kube-linter scan-reports/prod-overlay.yaml
+$ $scan kubesec scan-reports/prod-overlay.yaml
+$ $scan trivy-config scan-reports/prod-overlay.yaml
+scan.sh: kube-linter clean on scan-reports/prod-overlay.yaml
+scan.sh: kubesec clean on scan-reports/prod-overlay.yaml
+scan.sh: trivy-config clean on scan-reports/prod-overlay.yaml
+
+$ $scan --expect KSV-0017 trivy-config examples/bookstore/ci/fixtures/vulnerable/deployment.json
+$ $scan --expect privileged-container kube-linter examples/bookstore/ci/fixtures/vulnerable/deployment.json
+$ $scan --expect Privileged kubesec examples/bookstore/ci/fixtures/vulnerable/deployment.json
+scan.sh: control ok, trivy-config reported KSV-0017 on examples/bookstore/ci/fixtures/vulnerable/deployment.json
+scan.sh: control ok, kube-linter reported privileged-container on examples/bookstore/ci/fixtures/vulnerable/deployment.json
+scan.sh: control ok, kubesec reported Privileged on examples/bookstore/ci/fixtures/vulnerable/deployment.json
+
+## step 10
+$ cd ..
+$ scan=full-guide/examples/bookstore/ci/scan.sh
+$ $scan zizmor ".github/workflows/bookstore-pipeline.yml .github/workflows/bookstore-pipeline-check.yml"
+$ $scan actionlint ".github/workflows/bookstore-pipeline.yml .github/workflows/bookstore-pipeline-check.yml"
+scan.sh: zizmor clean on .github/workflows/bookstore-pipeline.yml .github/workflows/bookstore-pipeline-check.yml
+scan.sh: actionlint clean on .github/workflows/bookstore-pipeline.yml .github/workflows/bookstore-pipeline-check.yml
+
+$ $scan --expect template-injection zizmor full-guide/examples/bookstore/ci/fixtures/vulnerable/bad-workflow.yml
+$ $scan --expect 'potentially untrusted' actionlint full-guide/examples/bookstore/ci/fixtures/vulnerable/bad-workflow.yml
+scan.sh: control ok, zizmor reported template-injection on full-guide/examples/bookstore/ci/fixtures/vulnerable/bad-workflow.yml
+scan.sh: control ok, actionlint reported potentially untrusted on full-guide/examples/bookstore/ci/fixtures/vulnerable/bad-workflow.yml
+
+## step 11
+$ kubectl create namespace dast
+$ kubectl label namespace dast pod-security.kubernetes.io/enforce=restricted pod-security.kubernetes.io/warn=restricted
+$ kubectl create serviceaccount catalog-sa --namespace dast
+$ kind load docker-image bookstore/catalog:dev --name bookstore
+$ kubectl apply --namespace dast -f examples/bookstore/raw-manifests/01-catalog-pod.yaml
+$ kubectl wait --namespace dast --for=condition=Ready pod/catalog --timeout=90s
+namespace/dast created
+namespace/dast labeled
+serviceaccount/catalog-sa created
+Image: "bookstore/catalog:dev" with ID "sha256:5c8f78461c5a94db0589f347ba76121dc185f0417025110c555a7f2b56f2d220" not yet present on node "bookstore-control-plane", loading...
+pod/catalog created
+pod/catalog condition met
+
+$ kubectl --namespace dast port-forward pod/catalog 8080:8080 >/dev/null &
+$ sleep 2
+$ $scan zap http://127.0.0.1:8080/books
+$ grep -E '^(FAIL-NEW|WARN-NEW|INFO)' scan-reports/zap.log
+scan.sh: zap clean on http://127.0.0.1:8080/books
+INFO: X-Content-Type-Options Header Missing [10021] x 1 
+INFO: Storable and Cacheable Content [10049] x 4 
+INFO: Cross-Origin-Resource-Policy Header Missing or Invalid [90004] x 1 
+FAIL-NEW: 0     FAIL-INPROG: 0  WARN-NEW: 0     WARN-INPROG: 0  INFO: 3 IGNORE: 0       PASS: 65
+
+$ docker run -d --name fixture -p 127.0.0.1:18080:8080 bookstore/vulnerable:fixture >/dev/null
+$ sleep 2
+$ $scan --expect 10010 zap http://127.0.0.1:18080/books
+$ grep -E '^(FAIL-NEW|WARN-NEW|INFO)' scan-reports/zap.log
+$ docker rm -f fixture >/dev/null
+scan.sh: control ok, zap reported 10010 on http://127.0.0.1:18080/books
+INFO: Missing Anti-clickjacking Header [10020] x 1 
+INFO: X-Content-Type-Options Header Missing [10021] x 1 
+INFO: Content Security Policy (CSP) Header Not Set [10038] x 1 
+INFO: Storable and Cacheable Content [10049] x 4 
+INFO: Permissions Policy Header Not Set [10063] x 1 
+INFO: Cross-Origin-Embedder-Policy Header Missing or Invalid [90004] x 3 
+WARN-NEW: Cookie No HttpOnly Flag [10010] x 1 
+WARN-NEW: Cookie without SameSite Attribute [10054] x 1 
+WARN-NEW: Session Management Response Identified [10112] x 1 
+FAIL-NEW: 0     FAIL-INPROG: 0  WARN-NEW: 3     WARN-INPROG: 0  INFO: 6 IGNORE: 0       PASS: 59
+
