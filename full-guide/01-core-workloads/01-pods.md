@@ -59,8 +59,8 @@ teaching device, not a deployment unit.
 A Pod is where an attacker's code ends up running, so the threats that
 belong to it are about what a compromised process can reach from inside one
 container. Each control below is a field in the Pod spec. The
-[baseline section](#baseline) explains the fields one by one, and every
-manifest in this guide carries them.
+[baseline section](#baseline) explains the fields one by one. Write every
+manifest of your own with them.
 
 | Threat | Control taught here | Goes deeper |
 |---|---|---|
@@ -75,10 +75,11 @@ manifest in this guide carries them.
 | A helper or debug container becomes a way in to the app | [One concern per Pod, and a debug container carries the baseline too](#debug-containers) | [05.01](../05-security/01-authn-authz-rbac.md) |
 
 The Pod, not the container, is the trust boundary. Containers in one Pod
-share a network namespace and every volume the Pod declares (see the
-[mental model](#mental-model)), so a compromised sidecar sees what the app
-sees over `localhost` and on the shared volume. Add a second container only
-when it earns its place, and give it the same baseline as the app.
+share a network namespace and any volume that more than one of them mounts
+(see the [mental model](#mental-model)), so a compromised sidecar sees what
+the app sees over `localhost` and on a shared volume. A volume only the app
+mounts stays out of its reach. Add a second container only when it earns its
+place, and give it the same baseline as the app.
 
 ## Diagrams
 
@@ -129,10 +130,10 @@ stateDiagram-v2
 
 ## The security baseline, field by field {#baseline}
 
-Every workload in this guide carries the fields below from this chapter on.
-Later chapters link here and do not explain them again. The values are the
-Bookstore's: the catalog image declares user and group 65532, the `nonroot`
-user of its distroless base image.
+Write every workload with the fields below. As later chapters adopt them they
+link here and do not explain them again. The values are the Bookstore's: the
+catalog image declares user and group 65532, the `nonroot` user of its
+distroless base image.
 
 ```yaml
 spec:
@@ -185,10 +186,12 @@ container can see. The baseline never runs as root.
 - `runAsNonRoot: true` makes the kubelet refuse to start a container that
   would run as UID 0. It is a check, not a setting, and it does not change
   the user. [Step 6](#refusals) shows it stopping an image that runs as root.
-- Set both. `runAsUser` makes the Pod start as the intended user.
-  `runAsNonRoot` fails loudly if a later edit sets that user to 0, or points
-  the Pod at an image that runs as root. The busybox sidecar declares no user
-  and would run as root, so the Pod-level `runAsUser` is what lets it start.
+- Set both. `runAsUser` makes the Pod start as the intended user, whatever
+  user the image declares. With it set, the kubelet checks that number and
+  does not consult the image. `runAsNonRoot` fails loudly if a later edit
+  sets `runAsUser` to 0 or removes it, and then the image's own user decides.
+  The busybox sidecar declares no user and would run as root, so the
+  Pod-level `runAsUser` is what lets it start.
 
 User namespaces (`hostUsers: false`) go a step further by remapping UID 0.
 They are not in the baseline yet: [05.02](../05-security/02-pod-security.md)
@@ -288,8 +291,13 @@ your machine and loaded into kind, so it uses the tag the build produced.
 ### Requests and a memory limit {#baseline-resources}
 
 `requests` are what the scheduler reserves for the container. The memory
-`limit` is a ceiling: a container that goes over it is killed instead of
-taking the node's memory from its neighbours. The baseline sets requests and
+`limit` is a ceiling the kernel enforces with out-of-memory kills: a
+container that uses more than its limit may be terminated, but only once the
+kernel detects memory pressure, so the limit is enforced reactively. The
+Kubernetes docs on
+[requests and limits](https://kubernetes.io/docs/concepts/configuration/manage-resources-containers/#requests-and-limits)
+state this. Without a limit nothing bounds how much of the node's memory a
+runaway process can take from its neighbours. The baseline sets requests and
 a memory limit, and [01.03](03-resources-and-qos.md) explains how to choose
 the numbers.
 
@@ -436,20 +444,17 @@ are the truth the Service (next Part) and controllers actually gate on.
 
 ### 3. Add a logging sidecar, the modern way (native sidecar)
 
-Create
-[`examples/bookstore/raw-manifests/02-catalog-pod-sidecar.yaml`](../examples/bookstore/raw-manifests/02-catalog-pod-sidecar.yaml).
-The listing is this chapter's increment. The file in the repo also holds the
-probes and shutdown hook that [ch.02](02-health-and-lifecycle.md) explains,
-and they change nothing about the baseline.
+The file
+[`examples/bookstore/raw-manifests/02-catalog-pod-sidecar.yaml`](../examples/bookstore/raw-manifests/02-catalog-pod-sidecar.yaml)
+is already in the repo. It is the same Pod as the seed, still named `catalog`
+and labelled `app: catalog`, so selectors in later chapters still match. The
+listing below is a fragment of its `spec` and shows this chapter's increment,
+the second container and the volume it shares. The file also holds the probes
+and shutdown hook that [ch.02](02-health-and-lifecycle.md) explains, and they
+change nothing about the baseline. The command after the listing applies the
+file from the repo, not the fragment.
 
 ```yaml
-apiVersion: v1
-kind: Pod
-metadata:
-  name: catalog                 # same object identity as 01 — this is an evolution
-  labels:
-    app: catalog                # UNCHANGED: selectors in later chapters still match
-    component: backend
 spec:
   serviceAccountName: catalog-sa
   automountServiceAccountToken: false
@@ -512,6 +517,7 @@ spec:
           memory: 64Mi
         limits:
           memory: 128Mi
+      # (probes and a preStop hook: ch.02; they are in the repo file)
       volumeMounts:
         - name: tmp
           mountPath: /tmp
@@ -622,8 +628,8 @@ Digest: sha256:73aaf090f3d85aa34ee199857f03fa3a95c8ede2ffd4cc2cdb5b94e566b11662
 export BUSYBOX=busybox@sha256:73aaf090f3d85aa34ee199857f03fa3a95c8ede2ffd4cc2cdb5b94e566b11662
 ```
 
-**Deliberate failure.** The default debug profile adds privileges that
-`restricted` forbids, so the API server refuses it. Only the start of the
+**Deliberate failure.** The default debug profile does not set the fields
+`restricted` requires, so the API server refuses it. Only the start of the
 error is kept here:
 
 ```sh
@@ -637,9 +643,12 @@ kubectl debug catalog --image=$BUSYBOX --target=catalog --container=probe \
 pods "catalog" is forbidden: violates PodSecurity "restricted:latest"
 ```
 
-Ask for the `restricted` profile instead. `--target=catalog` shares that
-container's process namespace, so the app is PID 1 in the debug container's
-view and `/proc/1/root` is the app's own filesystem:
+Ask for the `restricted` profile instead, the one the debugging guide's
+[profiles section](https://kubernetes.io/docs/tasks/debug/debug-application/debug-running-pod/#debugging-profiles)
+lists as compatible with the `restricted` Pod Security Standard.
+`--target=catalog` shares that container's process namespace, so the app is
+PID 1 in the debug container's view and `/proc/1/root` is the app's own
+filesystem:
 
 ```sh
 kubectl debug catalog --image=$BUSYBOX --target=catalog \
@@ -704,9 +713,12 @@ Read it top to bottom:
 - The last line, `x`, is the file the sidecar wrote in step 4: one volume,
   two containers.
 
-Ephemeral containers are never restarted, cannot have probes, ports or
-resources, and vanish from intent when you stop them. They exist purely for
-live debugging of an existing Pod. Creating one needs RBAC on the
+Ephemeral containers are never restarted and cannot have probes, ports or
+resources. You also cannot change or remove one once it is added, as the
+[ephemeral containers](https://kubernetes.io/docs/concepts/workloads/pods/ephemeral-containers/)
+page states. The `inspect` container stays in `spec.ephemeralContainers`
+until the Pod is deleted, and step 7 does that. They exist purely for live
+debugging of an existing Pod. Creating one needs RBAC on the
 `pods/ephemeralcontainers` subresource, as the
 [debugging guide](https://kubernetes.io/docs/tasks/debug/debug-application/debug-running-pod/)
 describes, so grant it as carefully as `pods/exec`.
@@ -940,7 +952,8 @@ that waits for Postgres is a common companion).
 
 > **In production:** distroless/static images (like the Bookstore services)
 > have **no shell** — `kubectl exec … -- sh` fails. Standardize on
-> `kubectl debug --image=…` with a debug toolbox image; bake this into the
+> `kubectl debug --profile=restricted --image=<digest-pinned toolbox> …`
+> with a debug toolbox image; bake this into the
 > troubleshooting runbook ([Part 08 ch.03](../08-day-2-operations/03-troubleshooting-playbook.md)).
 
 ## Quick Reference
@@ -1050,7 +1063,7 @@ Checklist:
 4. **A teammate's distroless app Pod won't let them `kubectl exec -it … -- sh` to debug a misbehaving request. What's the right approach, and what RBAC/PSA caveat should they expect?**
    <details><summary>Show answer</summary>
 
-   Use `kubectl debug -it <pod> --image=<digest-pinned image> --target=<container> --profile=restricted -- sh`. This injects an ephemeral container sharing the target's namespaces. They need RBAC for `pods/ephemeralcontainers`, and in a `restricted` namespace the default profile is refused by Pod Security admission because it adds privileges, so `--profile=restricted` is required (see step 5 of the hands-on and §Production notes).
+   Use `kubectl debug -it <pod> --image=<digest-pinned image> --target=<container> --profile=restricted -- sh`. This injects an ephemeral container sharing the target's namespaces. They need RBAC for `pods/ephemeralcontainers`, and in a `restricted` namespace the default profile is refused by Pod Security admission because it does not set the fields `restricted` requires, so `--profile=restricted` is required (see step 5 of the hands-on and §Production notes).
 
    </details>
 
@@ -1071,7 +1084,7 @@ Checklist:
 7. **The `log-sidecar` is compromised. What can the attacker reach from it that they could not reach if it ran in a separate Pod, and which baseline fields still limit the damage?**
    <details><summary>Show answer</summary>
 
-   Containers in one Pod share a network namespace and every volume the Pod declares, so the attacker can call the app on `localhost:8080` and read or write the shared `varlog` volume (see §Threats and controls). The Pod is the trust boundary. The sidecar carries the same baseline as the app, so it still runs as 65532 with no capabilities, no privilege escalation, a read-only root and no ServiceAccount token, and it mounts only the volume it needs. Give a helper container the same baseline, a minimal image and only the volumes it needs.
+   Co-location adds three things: any port an app binds only to loopback, which no other Pod could reach, the Pod's IPC namespace, and the contents of the volumes the sidecar mounts, here `varlog`. It does not add reach to the app on `:8080`. The catalog listens on all interfaces, so a separate Pod could call it by Pod IP or through a Service until the default-deny NetworkPolicy of [02.06](../02-networking/06-network-policies.md). The Pod is the trust boundary (see §Threats and controls). The sidecar carries the same baseline as the app, so it still runs as 65532 with no capabilities, no privilege escalation, a read-only root and no ServiceAccount token, and it mounts only the volume it needs: `varlog`, not `tmp`. Give a helper container the same baseline, a minimal image and only the volumes it needs.
 
    </details>
 
