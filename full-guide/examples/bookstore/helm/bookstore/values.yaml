@@ -154,7 +154,7 @@ priorityClasses:
 #                read-only root FS; the writable paths outside the data
 #                volume are emptyDirs (postgres: /var/run/postgresql, /tmp)
 #   redis999   — stock redis, UID/GID 999 + fsGroup 999, read-only root FS
-#   batch999   — stock postgres image for the DB batch jobs, UID/GID 999,
+#   batch999   stock postgres image for the DB batch jobs, UID/GID 999,
 #                no fsGroup (no volume needs one), read-only root FS with a
 #                /tmp emptyDir
 securityProfiles:

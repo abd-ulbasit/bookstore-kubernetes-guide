@@ -108,7 +108,7 @@ Usage: include "bookstore.containerSecurityContext" (dict "ctx" $ "profile" "goS
 {{- end -}}
 
 {{/*
-bookstore.image — the image reference for an image block. A block with a digest
+bookstore.image: the image reference for an image block. A block with a digest
 renders repository@digest, the form the raw manifests use, and the tag is kept
 in values.yaml for reference. A block without one renders repository:tag, which
 is how the bookstore/* images built locally are referenced.
