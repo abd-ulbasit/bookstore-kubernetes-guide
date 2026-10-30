@@ -4,9 +4,9 @@
 > single source of truth, what the scheduler and controllers actually decide,
 > and how the control plane is made highly available.
 
-**Estimated time:** ~15 min read · (no hands-on)
-**Prerequisites:** [Part 00 ch.03](03-architecture-overview.md) — what the control plane is at a glance
-**You'll know after this:** • describe the API server request pipeline (auth, admission, validation, storage) · • explain why etcd is the single source of truth and what its quorum requires · • articulate what the scheduler and controllers actually decide · • understand how the control plane is made highly available (replicated API servers, etcd quorum, leader election) · • predict failure modes when a control-plane component goes down
+**Estimated time:** ~15 min read · ~15 min hands-on (after ch.07)
+**Prerequisites:** [Part 00 ch.03](03-architecture-overview.md): what the control plane is at a glance. For the hands-on, a kind cluster from [ch.07](07-local-cluster-setup.md).
+**You'll know after this:** • describe the API server request pipeline (auth, admission, validation, storage) · • explain why etcd is the single source of truth and what its quorum requires · • read a Secret's value back out of etcd and say why that matters · • articulate what the scheduler and controllers actually decide · • understand how the control plane is made highly available (replicated API servers, etcd quorum, leader election) · • predict failure modes when a control-plane component goes down
 
 <!-- tags: foundations, control-plane, api-server, etcd, scheduler, ha -->
 
@@ -47,12 +47,27 @@ notebook, watched by a room of single-minded clerks.**
 
 Make those concrete and the control plane is no longer mysterious.
 
+## Threats and controls
+
+Only threats specific to the control plane are listed. Node and Pod threats
+belong to [ch.05](05-node-components.md) and
+[Part 01](../01-core-workloads/01-pods.md).
+
+| Threat | Control taught here | Deeper |
+|---|---|---|
+| A caller with no trusted identity reaches the API server | Authentication: every request carries a user and groups, or gets `401` | [Part 05 ch.01](../05-security/01-authn-authz-rbac.md) |
+| An identity does more than its job needs | Authorization: RBAC denies by default and grants are the only allows; a denied request is shown below | [Part 05 ch.01](../05-security/01-authn-authz-rbac.md) |
+| An allowed request creates an unsafe object | Admission: mutating webhooks, then validating checks such as Pod Security `restricted` | [Part 05 ch.02](../05-security/02-pod-security.md) |
+| Someone reads Secrets straight from etcd, skipping RBAC | Encryption at rest, and etcd client credentials held only by the API server | [Part 03 ch.02](../03-config-and-storage/02-secrets.md), [Part 05 ch.04](../05-security/04-secrets-and-cluster-hardening.md) |
+
 ## kube-apiserver — the only door
 
 The API server is a (horizontally scalable, otherwise **stateless**) REST
-server. It is the single component that talks to etcd, and therefore the single
-place every policy is enforced. Every `kubectl`, controller, kubelet, and
-custom client request runs the same gauntlet:
+server. In a default cluster it is the only control-plane component that holds
+etcd client credentials, so the policies that guard a write run in its
+pipeline.
+Every `kubectl`, controller, kubelet, and custom client request runs the same
+gauntlet:
 
 ```mermaid
 flowchart LR
@@ -91,8 +106,7 @@ Stage by stage:
    [Part 05 ch.01](../05-security/01-authn-authz-rbac.md).
 4. **Mutating admission.** Pluggable controllers and **mutating webhooks** may
    *modify* the object before it's stored — inject defaults, add a sidecar, set
-   a default storage class, stamp labels. (Defaulting also happens here/around
-   here.)
+   a default storage class, stamp labels.
 5. **Schema & object validation.** The object is decoded and validated against
    the resource's schema and built-in validation (required fields, value
    constraints). Malformed objects are rejected here — this is exactly the
@@ -103,17 +117,22 @@ Stage by stage:
    allow/deny — *no* further mutation, just enforcement (e.g. "deny privileged
    Pods", "image must come from our registry"). Backbone of
    [Pod security](../05-security/02-pod-security.md) and
-   [supply chain](../05-security/03-supply-chain.md).
+   [supply chain](../05-security/03-supply-chain.md). Treat this stage as a
+   primary security surface: it runs before anything reaches etcd or a node,
+   so it is the cheapest, earliest place to say no.
 7. **Versioning/conversion & persist.** The object is converted to the
    canonical *storage version* and written to etcd. The response returns.
 
-Two facts to carry: **the API server is the only etcd client** (so it is the
-only place to enforce anything, and the only thing that needs etcd
-credentials), and **mutate-before-validate** is the fixed order (a mutating
-webhook can't sneak past validation; a validating webhook sees the final
-object). The API server also serves **watches** — long-lived streams that push
-object changes to controllers/kubelets; this is the transport that makes the
-whole reconciliation architecture work without polling.
+Two facts to carry. First, **the API server holds the etcd client
+credentials**, so writes pass through its pipeline. The Hands-on checks that
+the scheduler and controller-manager carry no etcd flags on a default kind
+cluster. Second, **mutate-before-validate** is the fixed order. The
+[admission docs](https://kubernetes.io/docs/reference/access-authn-authz/extensible-admission-controllers/)
+say mutating webhooks run first. A mutating webhook can't sneak past
+validation, and a validating webhook sees the final object. The API server
+also serves **watches**: long-lived streams that push object changes to
+controllers/kubelets; this is the transport that makes the whole
+reconciliation architecture work without polling.
 
 ## etcd — the single source of truth
 
@@ -146,11 +165,23 @@ Consequences you must operate around:
   cluster's entire desired state is gone — Pods may keep running, but you can
   never reconstruct or change anything. **Back up etcd** (snapshots) and
   **test restore** — [Part 08 ch.02](../08-day-2-operations/02-backup-and-dr.md).
-- **Encrypt sensitive data at rest.** By default `Secret` objects are stored in
-  etcd base64-encoded, *not encrypted*. Enable
-  [encryption at rest](../05-security/04-secrets-and-cluster-hardening.md);
-  guard etcd access tightly (it bypasses RBAC entirely — raw access to etcd is
-  raw access to *everything*).
+  A snapshot holds the same plain-text Secrets, so store it with the same care
+  as etcd itself.
+- **Secrets are plain text in etcd by default.** The API server writes a
+  `Secret` to etcd with no at-rest encryption. The base64 in
+  `kubectl get secret -o yaml` is an encoding for JSON transport, not
+  protection. The Hands-on reads a Secret's value straight out of etcd. Anyone
+  who can read etcd reads every Secret, and that path skips RBAC entirely.
+  Encryption at rest is set with an `EncryptionConfiguration` passed to the
+  API server. Its first provider encrypts what is written, and the default
+  `identity` provider does not encrypt
+  ([upstream guide](https://kubernetes.io/docs/tasks/administer-cluster/encrypt-data/)).
+  The setup is in
+  [cluster hardening](../05-security/04-secrets-and-cluster-hardening.md).
+- **Guard etcd access.** On the kind cluster, etcd runs with
+  `--client-cert-auth=true` and `--peer-client-cert-auth=true`, so a client
+  without a certificate its CA signed is refused. Raw access to etcd is raw
+  access to *everything*.
 - **etcd is latency-sensitive.** It wants fast, low-jitter disks (SSD) and a
   low-latency network between members. Slow etcd disks are a classic cause of a
   sluggish or flapping control plane.
@@ -305,34 +336,256 @@ election so redundancy is safe.
 
 ## Hands-on with the Bookstore
 
-This chapter is internals — there is no new Bookstore manifest (the first one
-is written in [ch.06](06-declarative-api-model.md)). But you can *watch the
-control plane think*. On any cluster (you'll have one in
-[ch.07](07-local-cluster-setup.md)):
+This chapter is internals, and the first Bookstore manifest arrives in
+[ch.06](06-declarative-api-model.md). But you can *watch the control plane
+think*. The steps need a cluster, so run them after
+[ch.07](07-local-cluster-setup.md) builds one. They show a denied request, and
+a Secret read back out of etcd.
+
+The workload is a stand-in: the pause image that holds a Pod's network
+namespace. It is pinned by digest, with the tag in a comment, and it runs under
+the baseline. Save this as `demo.yaml`:
+
+```yaml
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: control-plane-lab
+  labels:
+    pod-security.kubernetes.io/enforce: restricted
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: demo
+  namespace: control-plane-lab
+spec:
+  replicas: 3
+  selector:
+    matchLabels:
+      app: demo
+  template:
+    metadata:
+      labels:
+        app: demo
+    spec:
+      automountServiceAccountToken: false
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 65535
+        runAsGroup: 65535
+        seccompProfile:
+          type: RuntimeDefault
+      containers:
+        - name: pause
+          # registry.k8s.io/pause:3.9
+          image: registry.k8s.io/pause@sha256:7031c1b283388d2c2e09b57badb803c05ebed362dc88d84b480cc47f72a21097
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities:
+              drop: ["ALL"]
+          resources: {}              # requests and a memory limit, per 01.03
+          volumeMounts:
+            - name: tmp
+              mountPath: /tmp
+      volumes:
+        - name: tmp
+          emptyDir: {}
+```
+
+The namespace label asks Pod Security Admission to reject any Pod that breaks
+the `restricted` profile. The baseline fields stop the Pod from running as root
+or with extra privileges, keep its filesystem read-only except `/tmp`, leave
+out the default ServiceAccount token, and pin the image so its bytes cannot
+change under a tag. [01.01](../01-core-workloads/01-pods.md#baseline) explains
+each field against its threat.
+
+Apply it and watch the ReplicaSet controller converge actual Pods to desired:
+
+```sh
+kubectl apply -f demo.yaml
+kubectl -n control-plane-lab rollout status deployment/demo --timeout=120s
+kubectl -n control-plane-lab get pods -l app=demo
+```
+
+<!-- gate: output -->
+```text
+# ...
+deployment.apps/demo created
+```
+
+<!-- gate: output -->
+```text
+# ...
+deployment "demo" successfully rolled out
+```
+
+<!-- gate: output -->
+```text
+NAME                   READY   STATUS    RESTARTS   AGE
+demo-7df4fc77b-5rdkz   1/1     Running   0          19s
+demo-7df4fc77b-7fj4s   1/1     Running   0          19s
+demo-7df4fc77b-r8w7t   1/1     Running   0          19s
+```
+
+Delete one Pod. The ReplicaSet controller sees the count is short and creates a
+replacement, so the deleted name is gone and a new one has taken its place.
+
+```sh
+POD=$(kubectl -n control-plane-lab get pods -l app=demo -o jsonpath='{.items[0].metadata.name}')
+kubectl -n control-plane-lab delete pod "$POD" --wait=true
+kubectl -n control-plane-lab rollout status deployment/demo --timeout=120s
+kubectl -n control-plane-lab get pods -l app=demo
+```
+
+<!-- gate: output -->
+```text
+NAME                   READY   STATUS    RESTARTS   AGE
+demo-7df4fc77b-4m92x   1/1     Running   0          4s
+demo-7df4fc77b-7fj4s   1/1     Running   0          24s
+demo-7df4fc77b-r8w7t   1/1     Running   0          24s
+```
+
+Now the control plane itself: its health gates, its components, and the
+leases that name the active controller-manager and scheduler.
 
 ```sh
 # The API server's own health gates (the pipeline's readiness)
-kubectl get --raw='/readyz?verbose'
+kubectl get --raw='/readyz?verbose' | tail -1
 
 # Control-plane components (on kind they run as Pods in kube-system)
-kubectl -n kube-system get pods -l tier=control-plane -o wide
+kubectl -n kube-system get pods -l tier=control-plane
 
 # Who is the active (leader-elected) controller-manager / scheduler?
 kubectl -n kube-system get lease
+```
 
-# Watch a controller reconcile: create a Deployment, watch the ReplicaSet
-# controller converge actual Pods to desired (foreshadows Part 01).
-# Use a tiny PUBLIC image so it actually pulls here — the Bookstore image isn't
-# loaded into the cluster until ch.07 (a private/unloaded image would just
-# ImagePullBackOff and obscure the lesson).
-kubectl create deployment demo --image=registry.k8s.io/pause:3.9 --replicas=3
-kubectl get pods -w           # ReplicaSet controller creating Pods to reach 3
-kubectl delete pod -l app=demo --wait=false   # delete one...
-kubectl get pods -w           # ...controller immediately recreates it (self-healing)
-kubectl delete deployment demo
+<!-- gate: output -->
+```text
+readyz check passed
+```
 
-# Authorization stage, directly: ask the API server if an identity may act
-kubectl auth can-i create pods --namespace bookstore
+<!-- gate: output -->
+```text
+NAME                                             READY   STATUS    RESTARTS        AGE
+etcd-sf-pilot-control-plane                      1/1     Running   0               7h37m
+kube-apiserver-sf-pilot-control-plane            1/1     Running   1 (5h5m ago)    7h37m
+kube-controller-manager-sf-pilot-control-plane   1/1     Running   6 (3h25m ago)   7h37m
+kube-scheduler-sf-pilot-control-plane            1/1     Running   6 (3h25m ago)   7h37m
+```
+
+<!-- gate: output -->
+```text
+NAME                                   HOLDER                                                                      AGE
+# ...
+kube-controller-manager                sf-pilot-control-plane_b5a00ad8-06da-4094-a599-e461bab9a65c                 7h37m
+kube-scheduler                         sf-pilot-control-plane_fb017537-65ec-41da-88d1-019b83654780                 7h37m
+```
+
+Next, authorization, with one request that should pass and one that is denied
+on purpose.
+
+```sh
+# Allowed: the admin identity can create Pods here
+kubectl auth can-i create pods --namespace control-plane-lab
+
+# Deliberate denial: the reader identity has no RoleBinding, so the
+# authorization stage answers no
+kubectl auth can-i get secrets --namespace control-plane-lab \
+  --as=system:serviceaccount:control-plane-lab:reader
+```
+
+<!-- gate: output -->
+```text
+yes
+```
+
+<!-- gate: output -->
+```text
+no
+```
+
+Which control-plane components hold etcd client credentials? Only the API
+server carries the flags, so the other two can read state only through it.
+
+```sh
+for c in kube-apiserver kube-controller-manager kube-scheduler; do echo "$c: $(kubectl -n kube-system get pod -l component=$c -o jsonpath='{.items[0].spec.containers[0].command}' | grep -o -- '--etcd-[a-z]*' | sort -u | tr '\n' ' ')"; done
+```
+
+<!-- gate: output -->
+```text
+kube-apiserver: --etcd-cafile --etcd-certfile --etcd-keyfile --etcd-servers 
+kube-controller-manager: 
+kube-scheduler: 
+```
+
+A zero below means the API server has no `--encryption-provider-config` flag,
+so no encryption at rest is configured on this cluster.
+
+```sh
+kubectl -n kube-system get pod -l component=kube-apiserver -o jsonpath='{.items[0].spec.containers[0].command}' | grep -c encryption-provider-config
+```
+
+<!-- gate: output -->
+```text
+0
+```
+
+etcd itself is set to refuse clients without a certificate it trusts:
+
+```sh
+kubectl -n kube-system get pod -l component=etcd -o jsonpath='{.items[0].spec.containers[0].command}' | grep -o -- '[a-z-]*client-cert-auth=[a-z]*'
+```
+
+<!-- gate: output -->
+```text
+--client-cert-auth=true
+--peer-client-cert-auth=true
+```
+
+Now a Secret. Create it, read it back through the API, then read the same
+object from etcd. The etcd read goes around the API server, so run it only on a
+cluster you own.
+
+```sh
+kubectl -n control-plane-lab create secret generic demo-token --from-literal=token=demo-not-a-credential-7731
+kubectl -n control-plane-lab get secret demo-token -o jsonpath='{.data.token}' | base64 -d; echo
+```
+
+<!-- gate: output -->
+```text
+secret/demo-token created
+```
+
+<!-- gate: output -->
+```text
+demo-not-a-credential-7731
+```
+
+The API returned the value base64-encoded, and `base64 -d` undid that. base64
+is a transport encoding, not protection. The etcd pod has a certificate signed
+by etcd's CA, which etcd accepts from clients, so the next read runs there:
+
+```sh
+ETCD=$(kubectl -n kube-system get pod -l component=etcd -o name)
+kubectl -n kube-system exec "$ETCD" -- etcdctl --endpoints=https://127.0.0.1:2379 --cacert=/etc/kubernetes/pki/etcd/ca.crt --cert=/etc/kubernetes/pki/etcd/server.crt --key=/etc/kubernetes/pki/etcd/server.key get /registry/secrets/control-plane-lab/demo-token --print-value-only | grep -a -o 'demo-not-a-credential-[0-9]*'
+```
+
+<!-- gate: output -->
+```text
+demo-not-a-credential-7731
+```
+
+The value is in plain text in etcd. The grep prints only the match from the raw
+bytes. Anyone with this access reads every Secret in the cluster, and RBAC never
+gets a say. Encryption at rest makes the same read return ciphertext instead;
+setting it up is in [Part 05 ch.04](../05-security/04-secrets-and-cluster-hardening.md).
+
+Clean up. Deleting the namespace removes the Deployment, its Pods and the Secret.
+
+```sh
+kubectl delete namespace control-plane-lab --wait=true
 ```
 
 Mapping back to the Bookstore: when you later `kubectl apply` the `catalog`
@@ -344,8 +597,10 @@ replica count. The deep model here is what makes those later chapters
 
 ## How it works under the hood
 
-- **The API server is the policy enforcement point precisely because it is the
-  sole etcd client.** There is no "back door" to state; bypassing the pipeline
+- **The API server is the policy enforcement point because it holds the etcd
+  client credentials** in a default cluster (the Hands-on checks the other
+  control-plane components). There is no "back door" to state; bypassing the
+  pipeline
   means having raw etcd access, which is why etcd access ≈ cluster admin and is
   guarded as tightly as the API server itself.
 - **`resourceVersion` + optimistic concurrency.** Every object carries a
@@ -374,21 +629,11 @@ replica count. The deep model here is what makes those later chapters
 > [Part 08 ch.02](../08-day-2-operations/02-backup-and-dr.md). Put etcd on
 > fast, low-latency SSDs; slow etcd disks degrade the entire cluster.
 
-> **In production:** enable **encryption at rest** for `Secret`s (etcd holds
-> them only base64-encoded by default) and lock down etcd peer/client TLS —
-> raw etcd access bypasses RBAC entirely
-> ([cluster hardening](../05-security/04-secrets-and-cluster-hardening.md)).
-
 > **In production (managed — EKS/GKE/AKS):** the provider runs and scales the
 > API server + etcd, handles control-plane HA, upgrades, and etcd backups —
 > you usually only get an endpoint and an SLA. You still own worker nodes,
 > RBAC, admission policy, and your workloads. Know the boundary so you don't
 > assume the provider covers what it doesn't.
-
-> **In production:** treat **admission control** as a primary security
-> surface. Validating policies (Pod Security Standards, image provenance,
-> resource governance) are enforced *here*, before anything reaches etcd or a
-> node — the cheapest, earliest place to say "no".
 
 ## Quick Reference
 
@@ -400,9 +645,18 @@ kubectl -n kube-system get lease                    # leader election holders
 kubectl get apiservices                             # served API groups / aggregation
 kubectl auth can-i <VERB> <RESOURCE> [-n ns]        # exercise the authZ stage
 kubectl api-versions                                # GroupVersions the apiserver serves
-# etcd (where you have direct access; usually via the control-plane node):
-ETCDCTL_API=3 etcdctl snapshot save snap.db         # back up etcd
-ETCDCTL_API=3 etcdctl endpoint status --write-out=table   # member/leader health
+# etcd, on a control-plane node. kubeadm certificate paths, as the kind lab
+# uses them. etcd refuses clients without a certificate it trusts.
+ETCDCTL_API=3 etcdctl --endpoints=https://127.0.0.1:2379 \
+  --cacert=/etc/kubernetes/pki/etcd/ca.crt \
+  --cert=/etc/kubernetes/pki/etcd/server.crt \
+  --key=/etc/kubernetes/pki/etcd/server.key \
+  snapshot save snap.db                             # back up etcd (plain-text Secrets)
+ETCDCTL_API=3 etcdctl --endpoints=https://127.0.0.1:2379 \
+  --cacert=/etc/kubernetes/pki/etcd/ca.crt \
+  --cert=/etc/kubernetes/pki/etcd/server.crt \
+  --key=/etc/kubernetes/pki/etcd/server.key \
+  endpoint status --write-out=table                 # member/leader health
 ```
 
 Minimal HA control-plane shape (the thing to provision):
@@ -459,6 +713,13 @@ Control-plane checklist:
    <details><summary>What you should see</summary>
 
    The lease's `holderIdentity` flips to a standby replica within a few seconds (the lease duration / renewal window), and that replica resumes reconciliation. If you have only one controller-manager replica (single control-plane node like kind), the lease stays held by the new Pod the same Deployment recreates — no failover, just restart. This is leader election as plain Kubernetes objects (see §How it works under the hood, leader election).
+
+   </details>
+
+6. **A teammate runs `etcdctl get` against the etcd pod and reads a Secret's value. RBAC never ran. Why is that possible, and which two controls limit it?**
+   <details><summary>Show answer</summary>
+
+   RBAC is enforced in the API server's authorization stage. A read straight from etcd never enters the request pipeline, so anyone holding etcd client credentials sees every object. Two controls limit this. Encryption at rest, set with `--encryption-provider-config`, makes the stored bytes ciphertext, so the read returns nothing useful without the key. Keeping etcd client credentials on the API server, with etcd requiring client certificates, keeps the read out of most hands. The Hands-on shows the gap: on a cluster with no encryption provider, the value is readable in plain text.
 
    </details>
 
