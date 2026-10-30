@@ -3,14 +3,16 @@
 
 Why this exists
 ---------------
-SECURITY-SCAN.md accepts exactly two Trivy `KSV-0012` ("Runs as root user")
-findings, on the two frozen Part 00/01 teaching seeds. An acceptance list in
-prose rots the moment someone adds a third manifest: the finding count goes
-up, nobody notices, and the document quietly becomes a lie. That is the same
+SECURITY-SCAN.md used to accept two Trivy `KSV-0012` ("Runs as root user")
+findings, on the two Part 00/01 teaching seeds. Those seeds now carry the
+security baseline, so the acceptance list is empty. An acceptance list in
+prose rots the moment someone adds a manifest: the finding count goes up,
+nobody notices, and the document quietly becomes a lie. That is the same
 class of failure that let a hardcoded scanner path hide a reachable SQL
 injection for months.
 
-So the acceptance list is executable. This script fails if:
+So the acceptance list stays executable, and stays empty until someone
+argues for an entry. This script fails if:
 
   * any Pod-bearing workload outside the allowlist omits `runAsNonRoot: true`
     (a new unhardened manifest landed), OR
@@ -34,14 +36,10 @@ import yaml
 
 REPO_PREFIX = "full-guide/examples/bookstore"
 
-# The two Part 00/01 teaching seeds, documented in SECURITY-SCAN.md §1.3.
-# They live in `default`, are reproduced verbatim in chapter prose that walks
-# them field by field, and Part 01 ch.03 tells the reader they are frozen.
-# Hardening is taught as a deliberate increment in Part 05 ch.02.
-ALLOWLIST = {
-    f"{REPO_PREFIX}/raw-manifests/01-catalog-pod.yaml",
-    f"{REPO_PREFIX}/raw-manifests/02-catalog-pod-sidecar.yaml",
-}
+# Empty on purpose. The two Part 00/01 teaching seeds used to be listed here;
+# they carry the baseline since Part 01 ch.01. An entry needs a reason in
+# SECURITY-SCAN.md §1.3.
+ALLOWLIST: set[str] = set()
 
 WORKLOAD_KINDS = {
     "Deployment",
@@ -191,10 +189,12 @@ def main() -> int:
         print("stale. Drop them from ALLOWLIST and update the doc.")
 
     if ok:
-        print(
-            f"OK — every Pod spec declares runAsNonRoot except the "
-            f"{len(ALLOWLIST)} documented teaching seed(s)."
+        exempt = (
+            f" except the {len(ALLOWLIST)} documented exemption(s)"
+            if ALLOWLIST
+            else ""
         )
+        print(f"OK: every Pod spec declares runAsNonRoot{exempt}.")
 
     return 0 if ok else 1
 

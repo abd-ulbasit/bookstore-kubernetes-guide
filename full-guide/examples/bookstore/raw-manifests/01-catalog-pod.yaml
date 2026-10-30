@@ -1,14 +1,18 @@
-# Bookstore — first manifest (Part 00, ch.06 "The declarative API model").
+# Bookstore: first manifest (Part 00, ch.06 "The declarative API model"),
+# carrying the security baseline from Part 01 ch.01.
 #
-# catalog as a single BARE Pod. This is intentionally minimal: it demonstrates
-# the spec/status object model and gives Part 00 ch.07 something to run on a
-# local kind cluster. A bare Pod has no controller restoring it if it dies — it
-# graduates to a Deployment in Part 01 (04-replicasets-and-deployments.md).
+# catalog as a single BARE Pod. A bare Pod has no controller restoring it if it
+# dies, so it graduates to a Deployment in Part 01
+# (04-replicasets-and-deployments.md). What it does have from the first
+# manifest on is the baseline every Bookstore workload carries; each field is
+# explained, against the threat it answers, in 01-core-workloads/01-pods.md.
 #
-# Apply (client-side validate, no cluster needed):
-#   kubectl apply --dry-run=client -f examples/bookstore/raw-manifests/01-catalog-pod.yaml
-# Run for real (after `kind load docker-image bookstore/catalog:dev`):
-#   kubectl apply -f examples/bookstore/raw-manifests/01-catalog-pod.yaml
+# Needs the `bookstore` namespace (Pod Security `restricted`) and the
+# `catalog-sa` ServiceAccount, both created in Part 01 ch.01:
+#   kubectl apply -n bookstore -f examples/bookstore/raw-manifests/01-catalog-pod.yaml
+# Client-side validate, no cluster needed:
+#   kubectl apply --dry-run=client -n bookstore -f examples/bookstore/raw-manifests/01-catalog-pod.yaml
+# The image must be on the node first: `kind load docker-image bookstore/catalog:dev`.
 apiVersion: v1                 # core API group, version v1
 kind: Pod                      # GVK = (core, v1, Pod)
 metadata:
@@ -17,6 +21,14 @@ metadata:
     app: catalog               # the canonical label other objects will select on
     component: backend
 spec:                          # DESIRED state (you write this; status is observed)
+  serviceAccountName: catalog-sa          # its own identity, never `default`
+  automountServiceAccountToken: false     # the app never calls the API: no token
+  securityContext:             # Pod level: applies to every container
+    runAsNonRoot: true
+    runAsUser: 65532           # the UID the image declares (distroless nonroot)
+    runAsGroup: 65532
+    seccompProfile:
+      type: RuntimeDefault
   containers:
     - name: catalog            # container name (unique within the Pod)
       image: bookstore/catalog:dev   # the image built in ch.02
@@ -27,3 +39,20 @@ spec:                          # DESIRED state (you write this; status is observ
       env:
         - name: PORT           # the app reads PORT (defaults to 8080)
           value: "8080"
+      securityContext:         # container level
+        allowPrivilegeEscalation: false
+        readOnlyRootFilesystem: true
+        capabilities:
+          drop: ["ALL"]
+      resources:               # sized per Part 01 ch.03
+        requests:
+          cpu: 50m
+          memory: 64Mi
+        limits:
+          memory: 128Mi
+      volumeMounts:
+        - name: tmp
+          mountPath: /tmp      # writable paths come from emptyDir
+  volumes:
+    - name: tmp
+      emptyDir: {}

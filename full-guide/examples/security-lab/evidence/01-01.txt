@@ -1,0 +1,129 @@
+# Transcript for 01-core-workloads/01-pods.md, hands-on steps 1 to 7.
+# Tier A: a kind cluster, Kubernetes v1.37.0 node, kubectl v1.37.2.
+# Recorded by running the chapter's commands in order from full-guide/ on a
+# fresh `bookstore` namespace. The cluster name is shown as `bookstore`.
+## step 1
+$ kubectl apply -f - <<'EOF'   # Namespace bookstore and ServiceAccount catalog-sa
+namespace/bookstore created
+serviceaccount/catalog-sa created
+
+$ kubectl config set-context --current --namespace=bookstore
+Context "kind-bookstore" modified.
+
+## step 2
+$ kubectl apply -f examples/bookstore/raw-manifests/01-catalog-pod.yaml && kubectl wait --for=condition=Ready pod/catalog --timeout=90s
+pod/catalog created
+pod/catalog condition met
+
+$ kubectl get pod catalog
+NAME      READY   STATUS    RESTARTS   AGE
+catalog   1/1     Running   0          2s
+
+$ kubectl get pod catalog -o jsonpath='{range .status.conditions[*]}{.type}={.status}{"\n"}{end}'
+PodReadyToStartContainers=True
+Initialized=True
+Ready=True
+ContainersReady=True
+PodScheduled=True
+
+## step 3
+$ kubectl delete pod catalog --ignore-not-found && kubectl apply -f examples/bookstore/raw-manifests/02-catalog-pod-sidecar.yaml && kubectl wait --for=condition=Ready pod/catalog --timeout=120s
+pod "catalog" deleted from bookstore namespace
+pod/catalog created
+pod/catalog condition met
+
+$ kubectl get pod catalog
+NAME      READY   STATUS    RESTARTS   AGE
+catalog   2/2     Running   0          7s
+
+$ kubectl get pod catalog -o jsonpath='{.spec.containers[*].name} | INIT(sidecar): {.spec.initContainers[*].name}{"\n"}'
+catalog | INIT(sidecar): log-sidecar
+
+$ kubectl logs catalog -c catalog --tail=3
+{"time":"2026-10-30T16:01:14.894333139Z","level":"INFO","msg":"DB_DSN unset; serving in-memory sample books"}
+{"time":"2026-10-30T16:01:14.894806826Z","level":"INFO","msg":"catalog listening","addr":":8080"}
+
+$ kubectl logs catalog -c log-sidecar --tail=3
+log-sidecar: shipping from /var/log/app
+2026-10-30T16:01:14Z log-sidecar: tail/ship tick
+
+## step 4
+$ kubectl exec catalog -c log-sidecar -- wget -qO- http://localhost:8080/healthz ; echo
+{"status":"ok"}
+
+
+$ kubectl exec catalog -c log-sidecar -- sh -c 'echo hi > /var/log/app/x; ls -l /var/log/app; ls -ld /var/log/app'
+total 4
+-rw-r--r--    1 65532    65532            3 Oct 30 16:01 x
+drwxrwxrwx    2 root     root            15 Oct 30 16:01 /var/log/app
+
+## step 5
+$ docker pull busybox:1.36 | grep Digest
+Digest: sha256:73aaf090f3d85aa34ee199857f03fa3a95c8ede2ffd4cc2cdb5b94e566b11662
+
+$ export BUSYBOX=busybox@sha256:73aaf090f3d85aa34ee199857f03fa3a95c8ede2ffd4cc2cdb5b94e566b11662
+
+$ kubectl debug catalog --image=$BUSYBOX --target=catalog --container=probe --attach=false -- sleep 3600 2>&1 | grep -o 'pods "catalog" is forbidden: violates PodSecurity "restricted:latest"'
+pods "catalog" is forbidden: violates PodSecurity "restricted:latest"
+
+$ kubectl debug catalog --image=$BUSYBOX --target=catalog --profile=restricted --container=inspect --attach=false -- sleep 3600 && kubectl wait pod/catalog --for=jsonpath='{.status.ephemeralContainerStatuses[?(@.name=="inspect")].state.running.startedAt}' --timeout=30s
+Targeting container "catalog". If you don't see processes from this container it may be because the container runtime doesn't support this feature.
+pod/catalog condition met
+
+$ kubectl exec catalog -c inspect -- sh -c '
+exec 2>&1
+id
+ps -o pid,user,comm
+grep -E "NoNewPrivs|Seccomp:|CapEff|CapBnd" /proc/1/status | tr -s "\t" " "
+ls /proc/1/root/var/run/secrets/kubernetes.io/serviceaccount
+touch /proc/1/root/etc/x
+ls /proc/1/root/var/log/app'
+uid=65532 gid=65532 groups=65532
+PID   USER     COMMAND
+    1 65532    catalog
+   21 65532    sleep
+   34 65532    sh
+   42 65532    ps
+CapEff: 0000000000000000
+CapBnd: 0000000000000000
+NoNewPrivs: 1
+Seccomp: 2
+ls: /proc/1/root/var/run/secrets/kubernetes.io/serviceaccount: No such file or directory
+touch: /proc/1/root/etc/x: Read-only file system
+x
+
+## step 6
+$ kubectl run probe --image=$BUSYBOX --dry-run=server -- sleep 1
+Error from server (Forbidden): pods "probe" is forbidden: violates PodSecurity "restricted:latest": allowPrivilegeEscalation != false (container "probe" must set securityContext.allowPrivilegeEscalation=false), unrestricted capabilities (container "probe" must set securityContext.capabilities.drop=["ALL"]), runAsNonRoot != true (pod or container "probe" must set securityContext.runAsNonRoot=true), seccompProfile (pod or container "probe" must set securityContext.seccompProfile.type to "RuntimeDefault" or "Localhost")
+
+$ kubectl run rootcheck --image=$BUSYBOX --restart=Never --overrides='{
+  "spec": {
+    "securityContext": {"runAsNonRoot": true, "seccompProfile": {"type": "RuntimeDefault"}},
+    "containers": [{
+      "name": "rootcheck", "image": "'"$BUSYBOX"'", "command": ["sleep", "60"],
+      "securityContext": {"allowPrivilegeEscalation": false, "capabilities": {"drop": ["ALL"]}}
+    }]
+  }
+}' && kubectl wait pod/rootcheck --for=jsonpath='{.status.containerStatuses[0].state.waiting.reason}'=CreateContainerConfigError --timeout=60s
+pod/rootcheck created
+pod/rootcheck condition met
+
+$ kubectl get pod rootcheck
+NAME        READY   STATUS                       RESTARTS   AGE
+rootcheck   0/1     CreateContainerConfigError   0          1s
+
+$ kubectl get pod rootcheck -o jsonpath='{.status.containerStatuses[0].state.waiting.message}' | sed 's/ (pod:.*//'
+container has runAsNonRoot and image will run as root
+
+$ kubectl delete pod rootcheck --now
+pod "rootcheck" deleted from bookstore namespace
+
+## step 7
+$ kubectl delete pod catalog && kubectl get pod catalog
+pod "catalog" deleted from bookstore namespace
+Error from server (NotFound): pods "catalog" not found
+
+$ kubectl apply -f examples/bookstore/raw-manifests/02-catalog-pod-sidecar.yaml && kubectl wait --for=condition=Ready pod/catalog --timeout=120s
+pod/catalog created
+pod/catalog condition met
+

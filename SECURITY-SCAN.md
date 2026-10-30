@@ -143,7 +143,7 @@ control plane*, not a workload. The categories:
 |---|---:|---|---|
 | **Platform RBAC roles** under `platform-base/01-rbac.yaml` | ~70 | **Accepted, with the risk stated** | `bookstore-platform-admin` is the break-glass role: `*/*/*`, equivalent to `cluster-admin`. Its blast radius is set by the binding (RoleBinding = one namespace; ClusterRoleBinding = the whole cluster) and by the human gate in 13.04, not by the rule. `bookstore-platform-operator` is **also** a wildcard for reads (`*/*` get/list/watch), which includes every Secret it is bound over. The neighbouring `tenant-admin` role is the only non-wildcard one. (Corrected 2026-10-24: this row used to name a non-existent `bookstore-platform-developer` role and a non-existent chapter file, and the YAML comment called the admin rule "NOT a cluster wildcard". The roles are introduced in [13.01](full-guide/13-grand-capstone-bookstore-platform/01-bookstore-2-from-toy-to-platform.md).) |
 | **Backstage ConfigMap with secrets** (`KSV-0109`) | 1 | **Accepted (educational)** | The Backstage `app-config.yaml` snippet in `13-grand-capstone/03-backstage-on-day-one.md` includes `${GITHUB_TOKEN}` placeholder + an inline OIDC client secret. The chapter explicitly teaches "this is what the file looks like; in production these come from Vault via ESO and the ConfigMap holds only the `${ENV_VAR}` references." The example file is the teaching artifact. |
-| **`runAsNonRoot`** missing (`KSV-0012`) | 2 | **Accepted (frozen teaching seeds)** | Not cronjobs — the earlier text here was wrong on both the count and the location. The only two Pod specs in the repo without `runAsNonRoot` are [`raw-manifests/01-catalog-pod.yaml`](full-guide/examples/bookstore/raw-manifests/01-catalog-pod.yaml) (Part 00 ch.06, the minimal spec/status object-model seed) and [`raw-manifests/02-catalog-pod-sidecar.yaml`](full-guide/examples/bookstore/raw-manifests/02-catalog-pod-sidecar.yaml) (Part 01 ch.01–02). Both live in `default`, both are explicitly frozen — Part 01 ch.03 tells the reader they are *"frozen teaching snapshots; don't edit them"* — and both are reproduced verbatim in chapter prose that walks them field by field. Hardening is taught as a deliberate later increment in [Part 05 ch.02](full-guide/05-security/02-pod-security.md); every Pod that can land in the `bookstore` namespace **is** `restricted`-valid — enforced on every run by [`check-runasnonroot.py`](.github/scripts/check-runasnonroot.py), which currently checks 49 Pod specs across the raw manifests, the rendered Helm chart, and all three Kustomize overlays, and fails if this exemption list grows *or* stops applying. Note the app container is non-root at runtime regardless: `app/catalog/Dockerfile` sets `USER 65532:65532` on `gcr.io/distroless/static:nonroot`. The finding is that the *manifest* does not assert it, which is true and intended at that point in the arc. |
+| **`runAsNonRoot`** missing (`KSV-0012`) | 0 | **Fixed (was 2, accepted)** | The only two Pod specs in the repo without `runAsNonRoot` were the Part 00/01 teaching seeds, [`raw-manifests/01-catalog-pod.yaml`](full-guide/examples/bookstore/raw-manifests/01-catalog-pod.yaml) and [`raw-manifests/02-catalog-pod-sidecar.yaml`](full-guide/examples/bookstore/raw-manifests/02-catalog-pod-sidecar.yaml). Both now carry the full security baseline, explained field by field in [Part 01 ch.01](full-guide/01-core-workloads/01-pods.md#baseline): a non-root user by number, `allowPrivilegeEscalation: false`, all capabilities dropped, a read-only root filesystem, a `RuntimeDefault` seccomp profile, no ServiceAccount token, and the busybox sidecar image pinned by digest. They run in the `bookstore` namespace, which enforces Pod Security `restricted`. The allowlist in [`check-runasnonroot.py`](.github/scripts/check-runasnonroot.py) is empty, and the script, which currently checks 49 Pod specs across the raw manifests, the rendered Helm chart and all three Kustomize overlays, fails if an unhardened Pod spec appears or if an entry is added without a reason here. |
 
 ---
 
@@ -251,11 +251,11 @@ each scan:
    say so in the chapter and be listed explicitly here.
 
 4. **Acceptances are executable where they can be.** The `runAsNonRoot`
-   acceptance in §1.3 is enforced by
+   check in §1.3 is enforced by
    [`.github/scripts/check-runasnonroot.py`](.github/scripts/check-runasnonroot.py),
    which fails CI both when a new unhardened Pod spec appears *and* when an
-   allowlisted file no longer needs its exemption. An acceptance list that
-   can only silently grow is not a control.
+   allowlisted file no longer needs its exemption. Its allowlist is empty
+   today. An acceptance list that can only silently grow is not a control.
 
 ---
 

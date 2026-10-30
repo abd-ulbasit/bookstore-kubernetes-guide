@@ -158,16 +158,20 @@ kubectl describe resourcequota bookstore-quota -n bookstore
 kubectl describe limitrange    bookstore-limits -n bookstore
 ```
 
-> **Namespace migration (read this once).** From here on the Bookstore lives in
-> the **`bookstore`** namespace. The Part 00 / ch.01 / ch.02 single Pod files
-> (`01-catalog-pod.yaml`, `02-catalog-pod-sidecar.yaml`) intentionally have **no
-> namespace** — they were teaching the object model in `default`. They are
-> **kept as-is** (they are frozen teaching snapshots; don't edit them). Starting
-> with [ch.04](04-replicasets-and-deployments.md) the catalog/storefront
-> manifests are **born in `bookstore`** as Deployments. So the lineage is:
-> *bare Pod (default) → Pod+sidecar+probes (default) → **Deployment in
-> `bookstore`** with all those settings carried forward*. Nothing is deleted;
-> each file shows one step.
+> **Namespace note (read this once).** The Bookstore lives in the
+> **`bookstore`** namespace, which [ch.01](01-pods.md#restricted-namespace)
+> already created with Pod Security `restricted` enforced. The Part 00 / ch.01 /
+> ch.02 single Pod files (`01-catalog-pod.yaml`, `02-catalog-pod-sidecar.yaml`)
+> carry no `namespace:` field on purpose, so they run in whichever namespace
+> your kubectl context points at, which ch.01 set to `bookstore`. They are
+> **kept** as the teaching snapshots of the Pod increments and carry the
+> security baseline from ch.01. Starting with
+> [ch.04](04-replicasets-and-deployments.md) the catalog/storefront manifests
+> are **born in `bookstore`** as Deployments. So the lineage is: *bare Pod →
+> Pod+sidecar+probes → **Deployment** with all those settings carried
+> forward*. Nothing is deleted; each file shows one step. This chapter's
+> `00-namespace.yaml` re-applies the same namespace and adds the quota and
+> default limits.
 
 ### 2. Add requests and limits to the catalog container
 
