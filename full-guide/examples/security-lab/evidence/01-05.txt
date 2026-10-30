@@ -1,0 +1,177 @@
+# Transcript for 01-core-workloads/05-statefulsets.md, hands-on steps 1 to 7.
+# Tier A: a kind cluster named sf-pilot on one Linux lab host, with a
+# Kubernetes v1.37.0 node and a kubectl v1.37.2 client. The cluster is shared
+# with other workers, so this run used its own namespace, p01-05-bookstore,
+# where the chapter prints bookstore. No other namespace was used.
+# Recorded by running the chapter's commands in order from full-guide/.
+# `ren FILE` is a shell helper, not a command: it runs sed to rename
+# `namespace: bookstore` and the Namespace name in FILE, then pipes the result
+# to kubectl apply. The repo manifests were not edited by the run. Every other
+# `-n bookstore` and `.bookstore.svc` name became `p01-05-bookstore`.
+# The one line that printed a local path shows `kubectl` where the helper
+# printed its full path. No other line is edited.
+# PriorityClass bookstore-data is cluster-scoped and already existed, so the
+# run neither applied nor deleted it.
+# The first start of postgres on this host took several minutes, mostly in
+# fsync. The database appeared after the Pod reported Ready, so step 1 waits
+# for a query to succeed. Attempts before the probe changes in
+# 20-postgres-statefulset.yaml were restarted by the liveness probe during the
+# first start. Those attempts are not in this transcript.
+# An earlier attempt that waited for Ready right after deleting the Pod failed
+# with NotFound, so step 4 waits for the replacement to be created first.
+# The namespace was deleted at the end. Its PersistentVolume stayed Released
+# for a short time, then the Delete reclaim policy removed it. The last two
+# lines of the cleanup section are a separate check, run after the first one.
+# context: kind-sf-pilot
+# server: v1.37.0
+## setup: objects that 01.01, 01.03 and 01.04 create
+$ kubectl wait --for=delete namespace/p01-05-bookstore --timeout=600s 2>&1; true
+namespace/p01-05-bookstore condition met
+
+$ ren examples/bookstore/raw-manifests/00-namespace.yaml | kubectl apply -f -
+namespace/p01-05-bookstore created
+resourcequota/bookstore-quota created
+limitrange/bookstore-limits created
+
+$ ren examples/bookstore/raw-manifests/05-serviceaccounts-rbac.yaml | kubectl apply -f -
+serviceaccount/catalog-sa created
+serviceaccount/storefront-sa created
+serviceaccount/orders-sa created
+serviceaccount/payments-worker-sa created
+serviceaccount/postgres-sa created
+serviceaccount/redis-sa created
+serviceaccount/rabbitmq-sa created
+serviceaccount/migrate-sa created
+role.rbac.authorization.k8s.io/catalog-config-reader created
+rolebinding.rbac.authorization.k8s.io/catalog-config-reader-binding created
+
+$ ren examples/bookstore/raw-manifests/16-db-credentials.yaml | kubectl apply -f -
+secret/db-credentials created
+
+# bookstore-data already exists (shared, cluster-scoped): not re-applied
+
+## 1. Apply the StatefulSet
+$ ren examples/bookstore/raw-manifests/20-postgres-statefulset.yaml | kubectl apply -f -
+service/postgres created
+statefulset.apps/postgres created
+
+$ kubectl rollout status statefulset/postgres -n p01-05-bookstore --timeout=600s
+Waiting for statefulset spec update to be observed...
+Waiting for 1 pods to be ready...
+Waiting for 1 pods to be ready...
+partitioned roll out complete: 1 new pods have been updated...
+
+$ kubectl exec -n p01-05-bookstore postgres-0 -- sh -c 'until psql -U bookstore -d bookstore -tAc "select 1" >/dev/null 2>&1; do sleep 2; done; echo database bookstore is ready'
+database bookstore is ready
+
+## 2. Ordinal names and one PVC per Pod
+$ kubectl get statefulset,pod,pvc -n p01-05-bookstore -l app=postgres
+NAME                        READY   AGE
+statefulset.apps/postgres   1/1     5m17s
+
+NAME             READY   STATUS    RESTARTS   AGE
+pod/postgres-0   1/1     Running   0          5m17s
+
+NAME                                    STATUS   VOLUME                                     CAPACITY   ACCESS MODES   STORAGECLASS   VOLUMEATTRIBUTESCLASS   AGE
+persistentvolumeclaim/data-postgres-0   Bound    pvc-2eb0f1fa-584a-41e9-882c-e2302b84dcd9   1Gi        RWO            standard       <unset>                 5m18s
+
+## 3. Writable paths under a read-only root
+$ kubectl exec -n p01-05-bookstore postgres-0 -- id
+uid=999(postgres) gid=999(postgres) groups=999(postgres),101(ssl-cert)
+
+$ kubectl exec -n p01-05-bookstore postgres-0 -- ls -ld /var/lib/postgresql/data /var/lib/postgresql/data/pgdata /var/run/postgresql /tmp
+drwxrwsrwx  2 root     postgres    6 Oct 30 22:44 /tmp
+drwxrwxrwx  3 root     root       20 Oct 30 22:45 /var/lib/postgresql/data
+drwx------ 19 postgres postgres 4096 Oct 30 22:47 /var/lib/postgresql/data/pgdata
+drwxrwsrwx  2 root     postgres   53 Oct 30 22:47 /var/run/postgresql
+
+$ kubectl exec -n p01-05-bookstore postgres-0 -- sh -c 'touch /usr/local/bin/planted; echo exit=$?'
+touch: cannot touch '/usr/local/bin/planted': Read-only file system
+exit=1
+
+$ kubectl exec -n p01-05-bookstore postgres-0 -- sh -c 'touch /tmp/scratch /var/run/postgresql/scratch && echo emptyDir paths are writable'
+emptyDir paths are writable
+
+$ kubectl exec -n p01-05-bookstore postgres-0 -- sh -c 'touch /var/lib/postgresql/data/probe && echo PVC path is writable; rm -f /var/lib/postgresql/data/probe'
+PVC path is writable
+
+## 4. Data survives a Pod restart
+$ kubectl exec -n p01-05-bookstore postgres-0 -- psql -U bookstore -d bookstore -c 'CREATE TABLE t(x int); INSERT INTO t VALUES (42);'
+CREATE TABLE
+INSERT 0 1
+
+$ kubectl delete pod -n p01-05-bookstore postgres-0
+pod "postgres-0" deleted from p01-05-bookstore namespace
+
+$ kubectl wait -n p01-05-bookstore --for=create pod/postgres-0 --timeout=120s
+pod/postgres-0 condition met
+
+$ kubectl wait -n p01-05-bookstore --for=condition=Ready pod/postgres-0 --timeout=600s
+pod/postgres-0 condition met
+
+$ kubectl exec -n p01-05-bookstore postgres-0 -- psql -U bookstore -d bookstore -c 'SELECT * FROM t;'
+ x  
+----
+ 42
+(1 row)
+
+
+## 5. Credentials come from the Secret, and POSTGRES_USER is a superuser
+$ kubectl get statefulset postgres -n p01-05-bookstore -o jsonpath='{.spec.template.spec.containers[0].envFrom}'; echo
+[{"secretRef":{"name":"db-credentials"}}]
+
+$ kubectl get statefulset postgres -n p01-05-bookstore -o yaml | grep -c devpassword; true
+0
+
+$ kubectl exec -n p01-05-bookstore postgres-0 -- psql -U bookstore -d bookstore -tAc 'SELECT rolsuper FROM pg_roles WHERE rolname = current_user;'
+t
+
+## 6. Stable per-Pod DNS
+$ kubectl exec -n p01-05-bookstore postgres-0 -- getent hosts postgres-0.postgres.p01-05-bookstore.svc.cluster.local | awk '{print $1}'
+10.244.0.51
+
+$ kubectl get pod -n p01-05-bookstore postgres-0 -o jsonpath='{.status.podIP}'; echo
+10.244.0.51
+
+## 7. The claim outlives the StatefulSet
+$ kubectl get storageclass standard -o jsonpath='{.reclaimPolicy}'; echo
+Delete
+
+$ kubectl delete statefulset postgres -n p01-05-bookstore
+statefulset.apps "postgres" deleted from p01-05-bookstore namespace
+
+$ kubectl wait -n p01-05-bookstore --for=delete pod/postgres-0 --timeout=120s
+pod/postgres-0 condition met
+
+$ kubectl get pvc -n p01-05-bookstore
+NAME              STATUS   VOLUME                                     CAPACITY   ACCESS MODES   STORAGECLASS   VOLUMEATTRIBUTESCLASS   AGE
+data-postgres-0   Bound    pvc-2eb0f1fa-584a-41e9-882c-e2302b84dcd9   1Gi        RWO            standard       <unset>                 8m10s
+
+$ ren examples/bookstore/raw-manifests/20-postgres-statefulset.yaml | kubectl apply -f -
+service/postgres unchanged
+statefulset.apps/postgres created
+
+$ kubectl wait -n p01-05-bookstore --for=create pod/postgres-0 --timeout=120s
+pod/postgres-0 condition met
+
+$ kubectl wait -n p01-05-bookstore --for=condition=Ready pod/postgres-0 --timeout=600s
+pod/postgres-0 condition met
+
+$ kubectl exec -n p01-05-bookstore postgres-0 -- psql -U bookstore -d bookstore -tAc 'SELECT x FROM t;'
+42
+
+$ kubectl get pvc -n p01-05-bookstore
+NAME              STATUS   VOLUME                                     CAPACITY   ACCESS MODES   STORAGECLASS   VOLUMEATTRIBUTESCLASS   AGE
+data-postgres-0   Bound    pvc-2eb0f1fa-584a-41e9-882c-e2302b84dcd9   1Gi        RWO            standard       <unset>                 9m16s
+
+## cleanup (not in the chapter)
+$ kubectl delete namespace p01-05-bookstore --wait=true --timeout=600s
+namespace "p01-05-bookstore" deleted
+
+$ kubectl get pv pvc-2eb0f1fa-584a-41e9-882c-e2302b84dcd9 2>&1 | tail -1
+pvc-2eb0f1fa-584a-41e9-882c-e2302b84dcd9   1Gi        RWO            Delete           Released   p01-05-bookstore/data-postgres-0   standard       <unset>                          10m
+
+
+## cleanup (continued, a separate check)
+$ kubectl get pv pvc-2eb0f1fa-584a-41e9-882c-e2302b84dcd9 2>&1 | tail -1
+Error from server (NotFound): persistentvolumes "pvc-2eb0f1fa-584a-41e9-882c-e2302b84dcd9" not found
