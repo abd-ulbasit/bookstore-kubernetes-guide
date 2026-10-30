@@ -17,8 +17,8 @@
       is deleted just before the next upgrade recreates it (a Job's pod
       template is immutable; without this an upgrade would fail to "change"
       the Job). hook-succeeded keeps a failed Job around for debugging.
-  Same restricted batch999 pattern as postgres (UID 999 + fsGroup 999, NO
-  read-only root FS — psql writes outside any data volume). Creds from the
+  Same restricted batch999 pattern as postgres (UID 999 + fsGroup 999, read-only
+  root FS, with /tmp as an emptyDir for psql scratch). Creds from the
   db-credentials Secret via secretKeyRef (PG* libpq names).
 */}}
 {{- if .Values.migrationJob.enabled }}
@@ -81,4 +81,11 @@ spec:
               echo "migration complete"
           resources:
             {{- toYaml $m.resources | nindent 12 }}
+          volumeMounts:
+            - name: tmp
+              mountPath: /tmp
+      volumes:
+        - name: tmp
+          emptyDir:
+            sizeLimit: 32Mi
 {{- end }}

@@ -151,10 +151,11 @@ priorityClasses:
 #                (catalog, orders, payments-worker, canary)
 #   storefront — purpose-built unprivileged nginx, UID 101, read-only root FS
 #   uid999RW   — stock postgres/rabbitmq image, UID/GID 999 + fsGroup 999,
-#                NO read-only root FS (writes outside the data volume)
+#                read-only root FS; the writable paths outside the data
+#                volume are emptyDirs (postgres: /var/run/postgresql, /tmp)
 #   redis999   — stock redis, UID/GID 999 + fsGroup 999, read-only root FS
 #   batch999   — stock postgres image for the DB batch jobs, UID/GID 999
-#                + fsGroup 999, NO read-only root FS
+#                + fsGroup 999, read-only root FS with a /tmp emptyDir
 securityProfiles:
   goService:
     pod:
@@ -204,6 +205,7 @@ securityProfiles:
         type: RuntimeDefault
     container:
       allowPrivilegeEscalation: false
+      readOnlyRootFilesystem: true
       capabilities:
         drop: ["ALL"]
   batch999:
@@ -216,6 +218,7 @@ securityProfiles:
         type: RuntimeDefault
     container:
       allowPrivilegeEscalation: false
+      readOnlyRootFilesystem: true
       capabilities:
         drop: ["ALL"]
 

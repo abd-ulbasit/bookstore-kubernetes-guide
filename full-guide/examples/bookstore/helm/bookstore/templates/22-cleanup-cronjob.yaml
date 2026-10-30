@@ -64,4 +64,11 @@ spec:
                   echo "cleanup complete"
               resources:
                 {{- toYaml $cj.resources | nindent 16 }}
+              volumeMounts:
+                - name: tmp
+                  mountPath: /tmp
+          volumes:
+            - name: tmp
+              emptyDir:
+                sizeLimit: 32Mi
 {{- end }}

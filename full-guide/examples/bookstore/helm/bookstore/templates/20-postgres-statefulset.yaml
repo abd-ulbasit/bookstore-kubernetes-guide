@@ -2,8 +2,10 @@
   postgres: the REQUIRED headless Service + the StatefulSet (raw-manifests
   20-postgres-statefulset.yaml). Stock postgres:16 made `restricted` AND
   bootable: run directly as non-root UID/GID 999 with fsGroup 999 so initdb
-  can write PGDATA without the image's root→gosu step (uid999RW profile, NO
-  read-only root FS — postgres writes sockets/locks outside PGDATA).
+  can write PGDATA without the image's root→gosu step (uid999RW profile). The
+  root FS is read-only; postgres writes its socket and lock under
+  /var/run/postgresql, so that path and /tmp are emptyDirs, as in the raw
+  manifest.
   Credentials via envFrom the db-credentials Secret. Part 04: data tier
   priority + tolerate the dedicated-DB-node taint + prefer that node.
 */}}
@@ -93,6 +95,17 @@ spec:
           volumeMounts:
             - name: data
               mountPath: /var/lib/postgresql/data
+            - name: run
+              mountPath: /var/run/postgresql
+            - name: tmp
+              mountPath: /tmp
+      volumes:
+        - name: run
+          emptyDir:
+            sizeLimit: 8Mi
+        - name: tmp
+          emptyDir:
+            sizeLimit: 32Mi
   volumeClaimTemplates:
     - metadata:
         name: data

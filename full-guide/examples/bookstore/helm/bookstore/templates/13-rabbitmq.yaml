@@ -3,8 +3,9 @@
   rabbitmq:3.13-management. The most demanding stock image: run directly as
   the non-root rabbitmq UID/GID 999 with fsGroup 999 (uid999RW profile —
   fsGroupChangePolicy OnRootMismatch) and back /var/lib/rabbitmq with an
-  emptyDir the kubelet chowns. NO read-only root FS (rabbitmq writes generated
-  config outside the data volume); `restricted` does not require one.
+  emptyDir the kubelet chowns. The root FS is read-only (uid999RW profile);
+  the broker writes only to the data emptyDir and to /tmp, as the raw
+  manifest does.
 */}}
 {{- if .Values.rabbitmq.enabled }}
 {{- $q := .Values.rabbitmq }}
@@ -65,8 +66,13 @@ spec:
           volumeMounts:
             - name: data
               mountPath: /var/lib/rabbitmq
+            - name: tmp
+              mountPath: /tmp
       volumes:
         - name: data
           emptyDir:
             sizeLimit: {{ $q.dataSizeLimit }}
+        - name: tmp
+          emptyDir:
+            sizeLimit: 32Mi
 {{- end }}
