@@ -1,0 +1,91 @@
+# Transcript for 00-foundations/06-declarative-api-model.md, hands-on steps.
+# Tier A: kind cluster, Kubernetes v1.37.0 node, kubectl v1.37.2.
+# The chapter names the namespace model-demo. This run used p00-06 in its
+# place, because the shared lab cluster keeps its namespaces under the p00-
+# prefix. Only the namespace name differs. Commands run from full-guide/.
+# A line [exit N] is the exit status of the command above it, recorded by the
+# runner. Three steps exit 1, each on purpose: the client dry run with no
+# reachable cluster (it stops before it checks the file), the server dry run
+# that rejects the deliberate typo, and the server dry run that denies the
+# deliberate privileged Pod under restricted.
+
+$ kubectl version --client
+Client Version: v1.37.2
+Kustomize Version: v5.8.1
+[exit 0]
+
+$ KUBECONFIG=/nonexistent/kubeconfig kubectl apply --dry-run=client -f examples/bookstore/raw-manifests/01-catalog-pod.yaml
+error: error validating "examples/bookstore/raw-manifests/01-catalog-pod.yaml": error validating data: failed to download openapi: Get "http://localhost:8080/openapi/v2?timeout=32s": dial tcp [::1]:8080: connect: connection refused; if you choose to ignore these errors, turn validation off with --validate=false
+[exit 1]
+
+$ kubectl create namespace p00-06
+namespace/p00-06 created
+[exit 0]
+
+$ kubectl label namespace p00-06 pod-security.kubernetes.io/enforce=restricted
+namespace/p00-06 labeled
+[exit 0]
+
+$ kubectl create serviceaccount catalog-sa -n p00-06
+serviceaccount/catalog-sa created
+[exit 0]
+
+$ kubectl apply --dry-run=client -f examples/bookstore/raw-manifests/01-catalog-pod.yaml
+pod/catalog created (dry run)
+[exit 0]
+
+$ kubectl apply --dry-run=server -n p00-06 -f examples/bookstore/raw-manifests/01-catalog-pod.yaml
+pod/catalog created (server dry run)
+[exit 0]
+
+$ sed 's/automountServiceAccountToken/automountServiceAcount/' \
+  examples/bookstore/raw-manifests/01-catalog-pod.yaml |
+  kubectl apply --dry-run=client -f -
+pod/catalog created (dry run)
+[exit 0]
+
+$ sed 's/automountServiceAccountToken/automountServiceAcount/' \
+  examples/bookstore/raw-manifests/01-catalog-pod.yaml |
+  kubectl apply --dry-run=server -n p00-06 -f -
+Error from server (BadRequest): error when creating "STDIN": Pod in version "v1" cannot be handled as a Pod: strict decoding error: unknown field "spec.automountServiceAcount"
+[exit 1]
+
+$ kubectl run unsafe --image=bookstore/catalog:dev --privileged --dry-run=client
+pod/unsafe created (dry run)
+[exit 0]
+
+$ kubectl run unsafe --image=bookstore/catalog:dev --privileged --dry-run=server -n p00-06 2>&1 | tr ',' '\n'
+Error from server (Forbidden): pods "unsafe" is forbidden: violates PodSecurity "restricted:latest": privileged (container "unsafe" must not set securityContext.privileged=true)
+ allowPrivilegeEscalation != false (container "unsafe" must set securityContext.allowPrivilegeEscalation=false)
+ unrestricted capabilities (container "unsafe" must set securityContext.capabilities.drop=["ALL"])
+ runAsNonRoot != true (pod or container "unsafe" must set securityContext.runAsNonRoot=true)
+ seccompProfile (pod or container "unsafe" must set securityContext.seccompProfile.type to "RuntimeDefault" or "Localhost")
+[exit 1]
+
+$ kubectl apply -n p00-06 -f examples/bookstore/raw-manifests/01-catalog-pod.yaml
+pod/catalog created
+[exit 0]
+
+$ kubectl wait --for=condition=Ready pod/catalog -n p00-06 --timeout=90s
+pod/catalog condition met
+[exit 0]
+
+$ kubectl get pod catalog -n p00-06
+NAME      READY   STATUS    RESTARTS   AGE
+catalog   1/1     Running   0          2s
+[exit 0]
+
+$ kubectl get pod catalog -n p00-06 -o jsonpath='{.spec.serviceAccountName}{"\n"}{.spec.automountServiceAccountToken}{"\n"}{.spec.securityContext}{"\n"}{.spec.containers[0].securityContext}{"\n"}'
+catalog-sa
+false
+{"runAsGroup":65532,"runAsNonRoot":true,"runAsUser":65532,"seccompProfile":{"type":"RuntimeDefault"}}
+{"allowPrivilegeEscalation":false,"capabilities":{"drop":["ALL"]},"readOnlyRootFilesystem":true}
+[exit 0]
+
+$ kubectl delete pod catalog -n p00-06
+pod "catalog" deleted from p00-06 namespace
+[exit 0]
+
+$ kubectl delete namespace p00-06
+namespace "p00-06" deleted
+[exit 0]
