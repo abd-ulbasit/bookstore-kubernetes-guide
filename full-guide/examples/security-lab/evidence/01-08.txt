@@ -1,0 +1,433 @@
+# Transcript for full-guide/01-core-workloads/08-deployment-strategies.md.
+# Tier A: a kind cluster with one Kubernetes v1.37.0 node, kubectl v1.37.2.
+# The cluster is shared, so the lab runs in the namespace p01-08-canary-lab.
+# The chapter names the namespace bookstore. Each command here differs from
+# the chapter only in the namespace lines that sed rewrites.
+# Probe Pods and the canary are applied from the chapter's manifests.
+# The probe after the label copy reached the 180 second wait limit on the
+# shared node. The counters after it show all 200 requests were served.
+
+$ kubectl version
+Client Version: v1.37.2
+Kustomize Version: v5.8.1
+Server Version: v1.37.0
+$ sed -e 's/namespace: bookstore$/namespace: p01-08-canary-lab/' -e 's/^  name: bookstore$/  name: p01-08-canary-lab/' -e 's/postgres\.bookstore\.svc/postgres.p01-08-canary-lab.svc/' examples/bookstore/raw-manifests/00-namespace.yaml | kubectl apply -f -
+namespace/p01-08-canary-lab created
+resourcequota/bookstore-quota created
+limitrange/bookstore-limits created
+$ sed -e 's/namespace: bookstore$/namespace: p01-08-canary-lab/' examples/bookstore/raw-manifests/05-serviceaccounts-rbac.yaml | kubectl apply -f -
+serviceaccount/catalog-sa created
+serviceaccount/storefront-sa created
+serviceaccount/orders-sa created
+serviceaccount/payments-worker-sa created
+serviceaccount/postgres-sa created
+serviceaccount/redis-sa created
+serviceaccount/rabbitmq-sa created
+serviceaccount/migrate-sa created
+role.rbac.authorization.k8s.io/catalog-config-reader created
+rolebinding.rbac.authorization.k8s.io/catalog-config-reader-binding created
+$ kubectl delete deployment/catalog -n p01-08-canary-lab --ignore-not-found
+$ sed -e 's/namespace: bookstore$/namespace: p01-08-canary-lab/' examples/bookstore/raw-manifests/30-catalog-canary.yaml | kubectl apply -f -
+service/catalog created
+deployment.apps/catalog-stable created
+deployment.apps/catalog-canary created
+$ kubectl rollout status deployment/catalog-stable -n p01-08-canary-lab --timeout=180s
+Waiting for deployment "catalog-stable" rollout to finish: 0 out of 9 new replicas have been updated...
+Waiting for deployment "catalog-stable" rollout to finish: 0 of 9 updated replicas are available...
+Waiting for deployment "catalog-stable" rollout to finish: 1 of 9 updated replicas are available...
+Waiting for deployment "catalog-stable" rollout to finish: 2 of 9 updated replicas are available...
+Waiting for deployment "catalog-stable" rollout to finish: 3 of 9 updated replicas are available...
+Waiting for deployment "catalog-stable" rollout to finish: 4 of 9 updated replicas are available...
+Waiting for deployment "catalog-stable" rollout to finish: 5 of 9 updated replicas are available...
+Waiting for deployment "catalog-stable" rollout to finish: 6 of 9 updated replicas are available...
+Waiting for deployment "catalog-stable" rollout to finish: 7 of 9 updated replicas are available...
+Waiting for deployment "catalog-stable" rollout to finish: 8 of 9 updated replicas are available...
+deployment "catalog-stable" successfully rolled out
+$ kubectl rollout status deployment/catalog-canary -n p01-08-canary-lab --timeout=180s
+deployment "catalog-canary" successfully rolled out
+$ kubectl get endpointslices -n p01-08-canary-lab -l kubernetes.io/service-name=catalog -o jsonpath='{range .items[*].endpoints[*]}{.conditions.ready}{"\n"}{end}' | sort | uniq -c
+  10 true
+$ kubectl get pods -n p01-08-canary-lab -l app=catalog -L track
+NAME                              READY   STATUS    RESTARTS   AGE   TRACK
+catalog-canary-7bd4cf6bc5-6rclj   1/1     Running   0          77s   canary
+catalog-stable-5cc48c67c7-4jznq   1/1     Running   0          77s   stable
+catalog-stable-5cc48c67c7-6nj6d   1/1     Running   0          78s   stable
+catalog-stable-5cc48c67c7-8xfvx   1/1     Running   0          71s   stable
+catalog-stable-5cc48c67c7-j96g7   1/1     Running   0          78s   stable
+catalog-stable-5cc48c67c7-kpkqq   1/1     Running   0          77s   stable
+catalog-stable-5cc48c67c7-svxtp   1/1     Running   0          77s   stable
+catalog-stable-5cc48c67c7-t46sr   1/1     Running   0          79s   stable
+catalog-stable-5cc48c67c7-wwq7g   1/1     Running   0          77s   stable
+catalog-stable-5cc48c67c7-xv684   1/1     Running   0          71s   stable
+$ served
+canary 0
+stable 0
+$ kubectl apply -f - <<'EOF'
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: probe-sa
+  namespace: p01-08-canary-lab
+automountServiceAccountToken: false
+---
+apiVersion: v1
+kind: Pod
+metadata:
+  name: curlbox
+  namespace: p01-08-canary-lab
+  labels:
+    component: probe
+spec:
+  serviceAccountName: probe-sa
+  automountServiceAccountToken: false
+  restartPolicy: Never
+  securityContext:
+    runAsNonRoot: true
+    runAsUser: 65534
+    runAsGroup: 65534
+    seccompProfile:
+      type: RuntimeDefault
+  containers:
+    - name: curlbox
+      image: busybox@sha256:73aaf090f3d85aa34ee199857f03fa3a95c8ede2ffd4cc2cdb5b94e566b11662  # busybox:1.36
+      command:
+        - sh
+        - -c
+        - for i in $(seq 1 200); do wget -qO- http://catalog/books >/dev/null; done
+      securityContext:
+        allowPrivilegeEscalation: false
+        readOnlyRootFilesystem: true
+        capabilities:
+          drop: ["ALL"]
+      resources:
+        requests: { cpu: 10m, memory: 16Mi }
+        limits: { cpu: 100m, memory: 64Mi }
+      volumeMounts:
+        - name: tmp
+          mountPath: /tmp
+  volumes:
+    - name: tmp
+      emptyDir: {}
+EOF
+serviceaccount/probe-sa created
+pod/curlbox created
+$ kubectl wait --for=jsonpath='{.status.phase}'=Succeeded pod/curlbox -n p01-08-canary-lab --timeout=180s
+pod/curlbox condition met
+$ served
+canary 16
+stable 184
+$ kubectl delete pod curlbox -n p01-08-canary-lab --ignore-not-found
+pod "curlbox" deleted from p01-08-canary-lab namespace
+$ kubectl scale deploy/catalog-canary -n p01-08-canary-lab --replicas=3
+deployment.apps/catalog-canary scaled
+$ kubectl scale deploy/catalog-stable -n p01-08-canary-lab --replicas=7
+deployment.apps/catalog-stable scaled
+$ kubectl rollout status deployment/catalog-stable -n p01-08-canary-lab --timeout=180s
+deployment "catalog-stable" successfully rolled out
+$ kubectl rollout status deployment/catalog-canary -n p01-08-canary-lab --timeout=180s
+Waiting for deployment "catalog-canary" rollout to finish: 1 out of 3 new replicas have been updated...
+Waiting for deployment "catalog-canary" rollout to finish: 1 of 3 updated replicas are available...
+Waiting for deployment "catalog-canary" rollout to finish: 2 of 3 updated replicas are available...
+deployment "catalog-canary" successfully rolled out
+$ kubectl get pods -n p01-08-canary-lab -l app=catalog -L track
+NAME                              READY   STATUS    RESTARTS   AGE     TRACK
+catalog-canary-7bd4cf6bc5-6rclj   1/1     Running   0          3m51s   canary
+catalog-canary-7bd4cf6bc5-7xwwn   1/1     Running   0          26s     canary
+catalog-canary-7bd4cf6bc5-nm8dr   1/1     Running   0          28s     canary
+catalog-stable-5cc48c67c7-6nj6d   1/1     Running   0          3m52s   stable
+catalog-stable-5cc48c67c7-8xfvx   1/1     Running   0          3m45s   stable
+catalog-stable-5cc48c67c7-j96g7   1/1     Running   0          3m52s   stable
+catalog-stable-5cc48c67c7-kpkqq   1/1     Running   0          3m51s   stable
+catalog-stable-5cc48c67c7-svxtp   1/1     Running   0          3m51s   stable
+catalog-stable-5cc48c67c7-wwq7g   1/1     Running   0          3m51s   stable
+catalog-stable-5cc48c67c7-xv684   1/1     Running   0          3m45s   stable
+$ served
+canary 16
+stable 140
+$ kubectl apply -f - <<'EOF'
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: probe-sa
+  namespace: p01-08-canary-lab
+automountServiceAccountToken: false
+---
+apiVersion: v1
+kind: Pod
+metadata:
+  name: curlbox
+  namespace: p01-08-canary-lab
+  labels:
+    component: probe
+spec:
+  serviceAccountName: probe-sa
+  automountServiceAccountToken: false
+  restartPolicy: Never
+  securityContext:
+    runAsNonRoot: true
+    runAsUser: 65534
+    runAsGroup: 65534
+    seccompProfile:
+      type: RuntimeDefault
+  containers:
+    - name: curlbox
+      image: busybox@sha256:73aaf090f3d85aa34ee199857f03fa3a95c8ede2ffd4cc2cdb5b94e566b11662  # busybox:1.36
+      command:
+        - sh
+        - -c
+        - for i in $(seq 1 200); do wget -qO- http://catalog/books >/dev/null; done
+      securityContext:
+        allowPrivilegeEscalation: false
+        readOnlyRootFilesystem: true
+        capabilities:
+          drop: ["ALL"]
+      resources:
+        requests: { cpu: 10m, memory: 16Mi }
+        limits: { cpu: 100m, memory: 64Mi }
+      volumeMounts:
+        - name: tmp
+          mountPath: /tmp
+  volumes:
+    - name: tmp
+      emptyDir: {}
+EOF
+serviceaccount/probe-sa unchanged
+pod/curlbox created
+$ kubectl wait --for=jsonpath='{.status.phase}'=Succeeded pod/curlbox -n p01-08-canary-lab --timeout=180s
+pod/curlbox condition met
+$ served
+canary 91
+stable 265
+$ kubectl delete pod curlbox -n p01-08-canary-lab --ignore-not-found
+pod "curlbox" deleted from p01-08-canary-lab namespace
+$ kubectl scale deploy/catalog-canary -n p01-08-canary-lab --replicas=0
+deployment.apps/catalog-canary scaled
+$ kubectl scale deploy/catalog-stable -n p01-08-canary-lab --replicas=9
+deployment.apps/catalog-stable scaled
+$ kubectl rollout status deployment/catalog-stable -n p01-08-canary-lab --timeout=180s
+Waiting for deployment "catalog-stable" rollout to finish: 7 out of 9 new replicas have been updated...
+Waiting for deployment "catalog-stable" rollout to finish: 7 out of 9 new replicas have been updated...
+Waiting for deployment "catalog-stable" rollout to finish: 7 of 9 updated replicas are available...
+Waiting for deployment "catalog-stable" rollout to finish: 8 of 9 updated replicas are available...
+deployment "catalog-stable" successfully rolled out
+$ kubectl get pods -n p01-08-canary-lab -l app=catalog -L track
+NAME                              READY   STATUS    RESTARTS   AGE     TRACK
+catalog-stable-5cc48c67c7-6fzzl   1/1     Running   0          28s     stable
+catalog-stable-5cc48c67c7-6nj6d   1/1     Running   0          4m58s   stable
+catalog-stable-5cc48c67c7-8xfvx   1/1     Running   0          4m51s   stable
+catalog-stable-5cc48c67c7-j96g7   1/1     Running   0          4m58s   stable
+catalog-stable-5cc48c67c7-kpkqq   1/1     Running   0          4m57s   stable
+catalog-stable-5cc48c67c7-pzrr9   1/1     Running   0          27s     stable
+catalog-stable-5cc48c67c7-svxtp   1/1     Running   0          4m57s   stable
+catalog-stable-5cc48c67c7-wwq7g   1/1     Running   0          4m57s   stable
+catalog-stable-5cc48c67c7-xv684   1/1     Running   0          4m51s   stable
+$ ready_counts
+   9 true
+$ kubectl apply -f - <<'EOF'
+apiVersion: v1
+kind: Pod
+metadata:
+  name: catalog-copy
+  namespace: p01-08-canary-lab
+  labels:
+    app: catalog
+spec:
+  serviceAccountName: catalog-sa
+  automountServiceAccountToken: false
+  securityContext:
+    runAsNonRoot: true
+    runAsUser: 65532
+    runAsGroup: 65532
+    seccompProfile:
+      type: RuntimeDefault
+  containers:
+    - name: catalog
+      image: bookstore/catalog:dev
+      imagePullPolicy: IfNotPresent
+      ports:
+        - name: http
+          containerPort: 8080
+      readinessProbe:
+        httpGet: { path: /readyz, port: http }
+        periodSeconds: 5
+      securityContext:
+        allowPrivilegeEscalation: false
+        readOnlyRootFilesystem: true
+        capabilities:
+          drop: ["ALL"]
+      resources:
+        requests: { cpu: 50m, memory: 64Mi }
+        limits: { cpu: 250m, memory: 128Mi }
+      volumeMounts:
+        - name: scratch
+          mountPath: /tmp/cache
+  volumes:
+    - name: scratch
+      emptyDir:
+        sizeLimit: 64Mi
+EOF
+pod/catalog-copy created
+$ kubectl wait --for=condition=Ready pod/catalog-copy -n p01-08-canary-lab --timeout=120s
+pod/catalog-copy condition met
+$ kubectl get pods -n p01-08-canary-lab -l app=catalog -L track
+NAME                              READY   STATUS    RESTARTS   AGE     TRACK
+catalog-copy                      1/1     Running   0          15s     
+catalog-stable-5cc48c67c7-6fzzl   1/1     Running   0          44s     stable
+catalog-stable-5cc48c67c7-6nj6d   1/1     Running   0          5m14s   stable
+catalog-stable-5cc48c67c7-8xfvx   1/1     Running   0          5m7s    stable
+catalog-stable-5cc48c67c7-j96g7   1/1     Running   0          5m14s   stable
+catalog-stable-5cc48c67c7-kpkqq   1/1     Running   0          5m13s   stable
+catalog-stable-5cc48c67c7-pzrr9   1/1     Running   0          43s     stable
+catalog-stable-5cc48c67c7-svxtp   1/1     Running   0          5m13s   stable
+catalog-stable-5cc48c67c7-wwq7g   1/1     Running   0          5m13s   stable
+catalog-stable-5cc48c67c7-xv684   1/1     Running   0          5m7s    stable
+$ served
+<none> 0
+stable 265
+$ kubectl apply -f - <<'EOF'
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: probe-sa
+  namespace: p01-08-canary-lab
+automountServiceAccountToken: false
+---
+apiVersion: v1
+kind: Pod
+metadata:
+  name: curlbox
+  namespace: p01-08-canary-lab
+  labels:
+    component: probe
+spec:
+  serviceAccountName: probe-sa
+  automountServiceAccountToken: false
+  restartPolicy: Never
+  securityContext:
+    runAsNonRoot: true
+    runAsUser: 65534
+    runAsGroup: 65534
+    seccompProfile:
+      type: RuntimeDefault
+  containers:
+    - name: curlbox
+      image: busybox@sha256:73aaf090f3d85aa34ee199857f03fa3a95c8ede2ffd4cc2cdb5b94e566b11662  # busybox:1.36
+      command:
+        - sh
+        - -c
+        - for i in $(seq 1 200); do wget -qO- http://catalog/books >/dev/null; done
+      securityContext:
+        allowPrivilegeEscalation: false
+        readOnlyRootFilesystem: true
+        capabilities:
+          drop: ["ALL"]
+      resources:
+        requests: { cpu: 10m, memory: 16Mi }
+        limits: { cpu: 100m, memory: 64Mi }
+      volumeMounts:
+        - name: tmp
+          mountPath: /tmp
+  volumes:
+    - name: tmp
+      emptyDir: {}
+EOF
+serviceaccount/probe-sa unchanged
+pod/curlbox created
+$ kubectl wait --for=jsonpath='{.status.phase}'=Succeeded pod/curlbox -n p01-08-canary-lab --timeout=180s
+error: timed out waiting for the condition on pods/curlbox
+$ served
+<none> 28
+stable 437
+$ kubectl delete pod curlbox -n p01-08-canary-lab --ignore-not-found
+pod "curlbox" deleted from p01-08-canary-lab namespace
+$ kubectl delete pod catalog-copy -n p01-08-canary-lab --ignore-not-found
+pod "catalog-copy" deleted from p01-08-canary-lab namespace
+$ kubectl set image deploy/catalog-stable -n p01-08-canary-lab catalog=bookstore/catalog:candidate-404
+deployment.apps/catalog-stable image updated
+$ kubectl rollout status deployment/catalog-stable -n p01-08-canary-lab --timeout=60s
+Waiting for deployment spec update to be observed...
+Waiting for deployment spec update to be observed...
+Waiting for deployment "catalog-stable" rollout to finish: 0 out of 9 new replicas have been updated...
+Waiting for deployment "catalog-stable" rollout to finish: 0 out of 9 new replicas have been updated...
+Waiting for deployment "catalog-stable" rollout to finish: 0 out of 9 new replicas have been updated...
+Waiting for deployment "catalog-stable" rollout to finish: 3 out of 9 new replicas have been updated...
+Waiting for deployment "catalog-stable" rollout to finish: 5 out of 9 new replicas have been updated...
+Waiting for deployment "catalog-stable" rollout to finish: 5 out of 9 new replicas have been updated...
+error: timed out waiting for the condition
+$ kubectl get pods -n p01-08-canary-lab -l app=catalog -L track
+NAME                              READY   STATUS              RESTARTS   AGE     TRACK
+catalog-stable-5cc48c67c7-6nj6d   1/1     Running             0          10m     stable
+catalog-stable-5cc48c67c7-8xfvx   1/1     Running             0          10m     stable
+catalog-stable-5cc48c67c7-j96g7   1/1     Running             0          10m     stable
+catalog-stable-5cc48c67c7-kpkqq   1/1     Running             0          10m     stable
+catalog-stable-5cc48c67c7-pzrr9   0/1     Completed           0          5m38s   stable
+catalog-stable-5cc48c67c7-svxtp   1/1     Running             0          10m     stable
+catalog-stable-5cc48c67c7-wwq7g   1/1     Running             0          10m     stable
+catalog-stable-5cc48c67c7-xv684   1/1     Running             0          10m     stable
+catalog-stable-64d4dc76b6-bbh7q   0/1     ContainerCreating   0          70s     stable
+catalog-stable-64d4dc76b6-cvp64   0/1     ContainerCreating   0          68s     stable
+catalog-stable-64d4dc76b6-gglrl   0/1     Pending             0          57s     stable
+catalog-stable-64d4dc76b6-mqvrh   0/1     ContainerCreating   0          68s     stable
+catalog-stable-64d4dc76b6-xhhjb   0/1     Pending             0          59s     stable
+$ ready_counts
+   7 true
+$ kubectl rollout undo deploy/catalog-stable -n p01-08-canary-lab
+Warning: resource deployments/catalog-stable was previously managed with 'kubectl apply'. Rolling back will not update the kubectl.kubernetes.io/last-applied-configuration annotation, which may cause unexpected behavior on future 'kubectl apply' operations. Consider using 'kubectl apply' with your previous configuration file instead.
+deployment.apps/catalog-stable rolled back
+$ kubectl rollout status deployment/catalog-stable -n p01-08-canary-lab --timeout=180s
+Waiting for deployment spec update to be observed...
+Waiting for deployment spec update to be observed...
+Waiting for deployment "catalog-stable" rollout to finish: 7 out of 9 new replicas have been updated...
+Waiting for deployment "catalog-stable" rollout to finish: 7 out of 9 new replicas have been updated...
+Waiting for deployment "catalog-stable" rollout to finish: 7 out of 9 new replicas have been updated...
+Waiting for deployment "catalog-stable" rollout to finish: 7 of 9 updated replicas are available...
+Waiting for deployment "catalog-stable" rollout to finish: 7 of 9 updated replicas are available...
+Waiting for deployment "catalog-stable" rollout to finish: 7 of 9 updated replicas are available...
+Waiting for deployment "catalog-stable" rollout to finish: 7 of 9 updated replicas are available...
+Waiting for deployment "catalog-stable" rollout to finish: 7 of 9 updated replicas are available...
+Waiting for deployment "catalog-stable" rollout to finish: 7 of 9 updated replicas are available...
+Waiting for deployment "catalog-stable" rollout to finish: 8 of 9 updated replicas are available...
+deployment "catalog-stable" successfully rolled out
+$ kubectl get deploy catalog-stable -n p01-08-canary-lab -o jsonpath='{.spec.template.spec.containers[0].image}{"\n"}'
+bookstore/catalog:dev
+$ kubectl rollout history deploy/catalog-stable -n p01-08-canary-lab
+deployment.apps/catalog-stable 
+REVISION  CHANGE-CAUSE
+2         <none>
+3         <none>
+
+$ kubectl get pods -n p01-08-canary-lab -l app=catalog -L track
+NAME                              READY   STATUS    RESTARTS   AGE   TRACK
+catalog-stable-5cc48c67c7-5fjn7   1/1     Running   0          25s   stable
+catalog-stable-5cc48c67c7-6nj6d   1/1     Running   0          11m   stable
+catalog-stable-5cc48c67c7-8xfvx   1/1     Running   0          10m   stable
+catalog-stable-5cc48c67c7-htwtl   1/1     Running   0          26s   stable
+catalog-stable-5cc48c67c7-j96g7   1/1     Running   0          11m   stable
+catalog-stable-5cc48c67c7-kpkqq   1/1     Running   0          11m   stable
+catalog-stable-5cc48c67c7-svxtp   1/1     Running   0          11m   stable
+catalog-stable-5cc48c67c7-wwq7g   1/1     Running   0          11m   stable
+catalog-stable-5cc48c67c7-xv684   1/1     Running   0          10m   stable
+$ ready_counts
+   9 true
+$ kubectl get rs -n p01-08-canary-lab -l app=catalog,track=stable
+NAME                        DESIRED   CURRENT   READY   AGE
+catalog-stable-5cc48c67c7   9         9         9       11m
+catalog-stable-64d4dc76b6   0         0         0       2m6s
+$ kubectl run canary-probe --image=bookstore/catalog:dev -n p01-08-canary-lab --dry-run=server -- /catalog
+Error from server (Forbidden): pods "canary-probe" is forbidden: violates PodSecurity "restricted:latest": allowPrivilegeEscalation != false (container "canary-probe" must set securityContext.allowPrivilegeEscalation=false), unrestricted capabilities (container "canary-probe" must set securityContext.capabilities.drop=["ALL"]), runAsNonRoot != true (pod or container "canary-probe" must set securityContext.runAsNonRoot=true), seccompProfile (pod or container "canary-probe" must set securityContext.seccompProfile.type to "RuntimeDefault" or "Localhost")
+$ kubectl create deployment canary-nobase --image=bookstore/catalog:dev -n p01-08-canary-lab
+Warning: would violate PodSecurity "restricted:latest": allowPrivilegeEscalation != false (container "catalog" must set securityContext.allowPrivilegeEscalation=false), unrestricted capabilities (container "catalog" must set securityContext.capabilities.drop=["ALL"]), runAsNonRoot != true (pod or container "catalog" must set securityContext.runAsNonRoot=true), seccompProfile (pod or container "catalog" must set securityContext.seccompProfile.type to "RuntimeDefault" or "Localhost")
+deployment.apps/canary-nobase created
+$ kubectl get deployment canary-nobase -n p01-08-canary-lab
+NAME            READY   UP-TO-DATE   AVAILABLE   AGE
+canary-nobase   0/1     0            0           16s
+$ kubectl get deployment canary-nobase -n p01-08-canary-lab -o jsonpath='{.status.conditions[?(@.type=="ReplicaFailure")].message}{"\n"}'
+pods "canary-nobase-88f8db48c-8n4ms" is forbidden: violates PodSecurity "restricted:latest": allowPrivilegeEscalation != false (container "catalog" must set securityContext.allowPrivilegeEscalation=false), unrestricted capabilities (container "catalog" must set securityContext.capabilities.drop=["ALL"]), runAsNonRoot != true (pod or container "catalog" must set securityContext.runAsNonRoot=true), seccompProfile (pod or container "catalog" must set securityContext.seccompProfile.type to "RuntimeDefault" or "Localhost")
+$ kubectl get rs -n p01-08-canary-lab -l app=canary-nobase
+NAME                      DESIRED   CURRENT   READY   AGE
+canary-nobase-88f8db48c   1         0         0       18s
+$ kubectl delete deployment canary-nobase -n p01-08-canary-lab
+deployment.apps "canary-nobase" deleted from p01-08-canary-lab namespace
+$ kubectl delete namespace p01-08-canary-lab --timeout=300s
+namespace "p01-08-canary-lab" deleted
+# end of transcript
