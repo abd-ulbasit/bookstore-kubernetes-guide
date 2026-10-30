@@ -1,0 +1,140 @@
+name: bookstore-release
+
+# Publishes ONE Bookstore service for real: the reusable pipeline
+# (bookstore-pipeline.yml) with publish on. Run it by hand from the Actions
+# tab, or with `gh workflow run bookstore-release.yml -f service=catalog`.
+#
+# Why a separate workflow. The guide's own check (bookstore-pipeline-check.yml)
+# runs the pipeline on every pull request with publish off, so the signing path
+# never ran there. This workflow is where it runs. On the default branch, with
+# a registry token and an OIDC token, one dispatch proves:
+#
+#   - the image is pushed to ghcr.io and the registry computes its digest;
+#   - cosign signs that digest keylessly, bound to THIS workflow's identity,
+#     and attaches the CycloneDX SBOM as an attestation;
+#   - actions/attest-build-provenance records a SLSA provenance statement;
+#   - the promotion job opens a pull request that pins the digest in the prod
+#     overlay. Merging that PR is the deploy; this workflow never deploys.
+#
+# It refuses to run anywhere but the default branch: a signature made from a
+# pull-request branch would carry that branch's identity, and the point of the
+# identity is that only reviewed code can earn it.
+#
+# Set up once in the repository (Settings, Actions, General): allow GitHub
+# Actions to create pull requests. Without it the promotion job fails after
+# the signing has succeeded, which is the right order to fail in.
+
+on:
+  workflow_dispatch:
+    inputs:
+      service:
+        description: The service to build, scan, sign and publish.
+        type: choice
+        required: true
+        options:
+          - catalog
+          - orders
+          - payments-worker
+          - storefront
+
+permissions: {}
+
+concurrency:
+  group: bookstore-release-${{ inputs.service }}
+  cancel-in-progress: false
+
+env:
+  BOOKSTORE: full-guide/examples/bookstore
+
+jobs:
+  release:
+    name: release (${{ inputs.service }})
+    if: github.ref == format('refs/heads/{0}', github.event.repository.default_branch)
+    # The ceiling for the called workflow; each job in it asks for less.
+    permissions:
+      contents: read
+      actions: read
+      packages: write
+      id-token: write
+      attestations: write
+    # See bookstore-pipeline-check.yml for why this is `./` and not `$/`.
+    uses: ./.github/workflows/bookstore-pipeline.yml # zizmor: ignore[self-repository]
+    with:
+      service: ${{ inputs.service }}
+      bookstore-dir: full-guide/examples/bookstore
+      publish: true
+      # payments-worker serves health and metrics only, so a web scanner has
+      # nothing to read.
+      dast: ${{ inputs.service != 'payments-worker' }}
+      repo-wide: true
+      workflow-files: .github/workflows/bookstore-pipeline.yml .github/workflows/bookstore-pipeline-check.yml .github/workflows/bookstore-release.yml .github/workflows/security-gates.yml
+
+  promote:
+    name: promote (${{ inputs.service }})
+    needs: release
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+      pull-requests: write
+    steps:
+      - uses: step-security/harden-runner@dc2769abcc0fcfbadfc1df54081c1608579ef6b2 # v2.22.2
+        with:
+          egress-policy: audit
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: The digest the pipeline pushed
+        env:
+          DIGEST: ${{ needs.release.outputs.digest }}
+        run: |
+          set -euo pipefail
+          case "$DIGEST" in
+            sha256:????????????????????????????????????????????????????????????????) ;;
+            *) echo "::error::the pipeline returned no digest (got '${DIGEST}'), so there is nothing to promote"; exit 1 ;;
+          esac
+      - name: Install kustomize (pinned release, checksum-verified)
+        env:
+          KUSTOMIZE_VERSION: "5.8.3"
+          # sha256 of kustomize_v5.8.3_linux_amd64.tar.gz, from the release's
+          # checksums.txt and GitHub's own asset digest (they agree).
+          KUSTOMIZE_SHA256: cb9e31198d3f63b44848bd0afc4c8efc56e6cfef9c93a4a39a211940e6decd61
+        run: |
+          set -euo pipefail
+          curl -fsSL -o kustomize.tar.gz \
+            "https://github.com/kubernetes-sigs/kustomize/releases/download/kustomize%2Fv${KUSTOMIZE_VERSION}/kustomize_v${KUSTOMIZE_VERSION}_linux_amd64.tar.gz"
+          echo "${KUSTOMIZE_SHA256}  kustomize.tar.gz" | sha256sum -c -
+          tar -xzf kustomize.tar.gz kustomize
+          sudo install -m 0755 kustomize /usr/local/bin/kustomize
+          rm -f kustomize kustomize.tar.gz
+      - name: Pin the digest into the prod overlay
+        env:
+          OWNER: ${{ github.repository_owner }}
+          SERVICE: ${{ inputs.service }}
+          DIGEST: ${{ needs.release.outputs.digest }}
+        run: |
+          set -euo pipefail
+          cd "$BOOKSTORE/kustomize/overlays/prod"
+          kustomize edit set image "bookstore/${SERVICE}=ghcr.io/${OWNER,,}/bookstore-${SERVICE}@${DIGEST}"
+          git diff --stat
+      - name: Open the promotion PR (merging it is the deploy trigger)
+        uses: peter-evans/create-pull-request@5f6978faf089d4d20b00c7766989d076bb2fc7f1 # v8.1.1
+        with:
+          branch: ci/promote-${{ inputs.service }}
+          delete-branch: true
+          add-paths: full-guide/examples/bookstore/kustomize/overlays/prod/kustomization.yaml
+          commit-message: "ci: promote ${{ inputs.service }} to prod (signed digest)"
+          committer: "bookstore-ci[bot] <bookstore-ci[bot]@users.noreply.github.com>"
+          author: "bookstore-ci[bot] <bookstore-ci[bot]@users.noreply.github.com>"
+          title: "Promote ${{ inputs.service }} to prod (signed digest)"
+          body: |
+            Pins `bookstore/${{ inputs.service }}` in `overlays/prod` to the digest the
+            release workflow just built, scanned, signed and attested.
+
+            Verify the signature before merging:
+
+                cosign verify ghcr.io/OWNER/bookstore-${{ inputs.service }}@DIGEST \
+                  --certificate-identity-regexp 'https://github.com/OWNER/REPO/.github/workflows/bookstore-pipeline.yml@.*' \
+                  --certificate-oidc-issuer https://token.actions.githubusercontent.com
+
+            Merging this PR is the production deploy. To roll back, revert it.
+          labels: promotion
