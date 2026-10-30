@@ -1,0 +1,38 @@
+# Transcript for 00-foundations/08-security-foundations.md, the hands-on steps.
+# Tier A: kind cluster sf-pilot, a shared cluster. Server Kubernetes v1.37.0,
+# kubectl v1.37.2, Pod Security Admission pinned to v1.37 by the namespace label.
+# Substitutions: the namespace the chapter calls threat-demo ran as
+# p00-threat-demo, because sf-pilot is shared. The chapter's commands ran as
+# written otherwise. The file examples/bookstore/raw-manifests/01-catalog-pod.yaml
+# was not modified. The namespace was deleted at the end, and no kind create or
+# kind delete ran on sf-pilot.
+# Lines in parentheses after a command are labels the runner added, not part of
+# the chapter's text.
+# What did not work the first time: a first run captured the Pod as Pending one
+# second after create, which is a normal early state. A later run found the
+# namespace still Terminating from that delete, so its steps were refused with
+# "being terminated". Neither run is used here. This transcript is the clean
+# run: it waits for the Pod to reach Ready before reading its status.
+$ kubectl config current-context
+kind-sf-pilot
+$ kubectl version
+Client Version: v1.37.2
+Server Version: v1.37.0
+$ kubectl apply -f -   (Namespace, labelled restricted)
+namespace/p00-threat-demo created
+$ kubectl apply -n threat-demo -f -   (ServiceAccount)
+serviceaccount/catalog-sa created
+$ sed ... 01-catalog-pod.yaml | kubectl apply -n threat-demo -f -   (deliberate: one guard line removed)
+Error from server (Forbidden): error when creating "STDIN": pods "catalog" is forbidden: violates PodSecurity "restricted:v1.37": allowPrivilegeEscalation != false (container "catalog" must set securityContext.allowPrivilegeEscalation=false)
+exit=1
+$ kubectl apply -n threat-demo -f examples/bookstore/raw-manifests/01-catalog-pod.yaml
+pod/catalog created
+exit=0
+$ kubectl wait --for=condition=Ready pod/catalog -n threat-demo --timeout=90s
+pod/catalog condition met
+exit=0
+$ kubectl get pod catalog -n threat-demo
+NAME      READY   STATUS    RESTARTS   AGE
+catalog   1/1     Running   0          43s
+$ kubectl delete namespace threat-demo
+namespace "p00-threat-demo" deleted

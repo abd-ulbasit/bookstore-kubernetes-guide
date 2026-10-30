@@ -1,0 +1,170 @@
+# Bookstore threat model
+
+This file is the living threat model for the Bookstore example in this
+directory. Chapter 00.08, Security foundations, teaches how to read it and
+how to change it. Part 05 chapter 05.00 reads it too, so keep the headings
+stable.
+
+- **Scope:** the four services under `app/` (storefront, catalog, orders,
+  payments-worker), the manifests under `raw-manifests/`, and the cluster
+  the guide builds on.
+- **Out of scope for now:** cloud accounts, managed control planes and
+  identity providers. The cloud parts (Part 10 onward) add their own rows.
+- **Last reviewed:** 2026-10-31.
+
+## How to change this file
+
+- A change to a workload, a namespace label above `restricted`, or a
+  suppressed scanner finding changes this file in the same pull request.
+- Every threat keeps its ID. To retire a threat, mark it `retired` and give
+  the reason. Do not delete the row.
+- Each control names the field, RBAC rule or chapter that enforces it, and
+  its status says whether the baseline, the cluster or a later chapter
+  provides it. A status of `open` means no control exists yet.
+
+## Assets
+
+| ID | Asset | Where it lives |
+|----|-------|----------------|
+| A1 | Order and customer records | Postgres, `raw-manifests/20-postgres-statefulset.yaml` |
+| A2 | Database credentials | Secret, `raw-manifests/16-db-credentials.yaml` |
+| A3 | Credentials the payments worker uses to reach its provider | A Secret, not the image |
+| A4 | Cluster credentials: kubeconfigs and ServiceAccount tokens | Workstations, CI runners, Pods that mount a token |
+| A5 | Declared state: the manifests in Git | This repository |
+| A6 | Container images and their digests | The registry, then each node after a pull |
+| A7 | Storefront availability | Gateway and storefront Pods |
+| A8 | Audit records of API requests | API server audit log, `cluster/audit-policy.yaml` |
+
+## Actors
+
+| ID | Actor | Can reach |
+|----|-------|-----------|
+| R1 | Anonymous internet client | The Gateway and the public routes behind it |
+| R2 | Operator holding a kubeconfig | The API server, and whatever its RBAC allows |
+| R3 | CI pipeline | The API server with its own credentials, the registry and Git |
+| R4 | Code running in a Pod after a dependency is compromised | The Pod's filesystem, the network it can reach, and the API if a token is mounted |
+| R5 | Someone with root on a worker node | The kubelet, the runtime socket and every Pod on that node |
+| R6 | Supplier of an upstream image or dependency | Any image pulled into the cluster |
+
+## Trust boundaries
+
+| ID | Boundary | Crossed by |
+|----|----------|------------|
+| TB1 | Internet to the Gateway | R1 |
+| TB2 | Gateway to a Pod in the `bookstore` namespace | R1, after TB1 |
+| TB3 | Pod to the API server | R4 with a mounted token, R2 |
+| TB4 | Container to the node kernel | R4 |
+| TB5 | API server to the kubelet | R2 for exec and logs, R5 |
+| TB6 | API server to etcd | R5 on a control-plane node |
+| TB7 | CI and workstations to the cluster | R2, R3 |
+| TB8 | Registry to the node | R6 |
+| TB9 | Namespace to namespace | R4 |
+
+## Entry points
+
+| ID | Entry point | Baseline or control |
+|----|-------------|---------------------|
+| EP1 | Gateway HTTP and HTTPS, `raw-manifests/50-ingress.yaml` and `51-gateway.yaml` | Edge controls: open, see D2 |
+| EP2 | kube-apiserver, port 6443 | Authentication, RBAC, admission |
+| EP3 | Kubelet API, port 10250 | Anonymous auth off, webhook authorization (E5, I3) |
+| EP4 | Container runtime socket, only when a Pod mounts it | Refused by `restricted` (E4) |
+| EP5 | Image pulls from the registry | Digest pins (T2) |
+| EP6 | Git push and CI apply | Review and diff before apply (T3) |
+| EP7 | kubeconfig on a workstation or CI runner | Short-lived credentials (S2) |
+| EP8 | Pod-to-Pod network, until `raw-manifests/60-networkpolicy.yaml` applies | Default deny (S3) |
+
+## STRIDE pass
+
+Each row names a threat, the control that answers it, and its status.
+Status values: `baseline` (a field of the Part 00 baseline), `cluster` (a
+cluster-level control), `open` (no control in the guide yet).
+
+### Spoofing
+
+| ID | Threat | Control | Status | Explained in |
+|----|--------|---------|--------|--------------|
+| S1 | A Pod calls the API as another identity | Its own ServiceAccount, with `automountServiceAccountToken: false` | baseline | 01.01, `#baseline-service-account` |
+| S2 | A stolen kubeconfig acts as an operator | Authentication at the API server, RBAC, short-lived credentials | cluster | 05.01 |
+| S3 | A Pod impersonates another Pod on the network | Default-deny NetworkPolicy, then explicit allows | cluster | 02.06 |
+
+### Tampering
+
+| ID | Threat | Control | Status | Explained in |
+|----|--------|---------|--------|--------------|
+| T1 | A process rewrites its image or drops a binary | `readOnlyRootFilesystem: true`, with an `emptyDir` at `/tmp` | baseline | 01.01, `#baseline-read-only-root` |
+| T2 | An image is replaced under the same tag | Digest pins for third-party images; signing and provenance | baseline (pins), later (signing) | 01.01, `#baseline-image-digest`; 05.03 |
+| T3 | A spec changes outside review | Apply reviewed files from Git, `kubectl diff`, GitOps | cluster | 00.06; 07.04 |
+| T4 | Objects in etcd change without the API server | Only the API server holds etcd credentials | cluster | 00.04; 05.04 |
+
+### Repudiation
+
+| ID | Threat | Control | Status | Explained in |
+|----|--------|---------|--------|--------------|
+| R-1 | An apply leaves no record of who made it | API server audit policy, `cluster/audit-policy.yaml` | open until 05.08 | 05.08 <!-- link-later: 05.08 --> |
+
+### Information disclosure
+
+| ID | Threat | Control | Status | Explained in |
+|----|--------|---------|--------|--------------|
+| I1 | Secrets are read from etcd, which skips RBAC | Encryption at rest, `cluster/encryption-config.yaml`; etcd reached only by the API server | cluster | 03.02; 05.04 |
+| I2 | A broad RBAC grant reads Secrets | One ServiceAccount and one narrow Role per workload | cluster | 05.01 |
+| I3 | A caller reads Pod specs or runs commands through the kubelet | Anonymous kubelet auth off, webhook authorization | cluster | 05.06 <!-- link-later: 05.06 --> |
+| I4 | Application code reads a mounted ServiceAccount token | `automountServiceAccountToken: false` | baseline | 01.01, `#baseline-service-account` |
+
+### Denial of service
+
+| ID | Threat | Control | Status | Explained in |
+|----|--------|---------|--------|--------------|
+| D1 | One Pod exhausts node memory and evicts its neighbours | Requests and a memory limit on every container | baseline | 01.01, `#baseline-resources`; 01.03 |
+| D2 | A flood of traffic overwhelms the storefront | None in the baseline | open | none yet |
+
+### Elevation of privilege
+
+| ID | Threat | Control | Status | Explained in |
+|----|--------|---------|--------|--------------|
+| E1 | A process runs as root and reaches host resources | `runAsNonRoot: true`, UID 65532 in the catalog image | baseline | 01.01, `#baseline-run-as` |
+| E2 | A setuid binary gains privileges | `allowPrivilegeEscalation: false` | baseline | 01.01, `#baseline-privilege-escalation` |
+| E3 | A capability or syscall reaches the kernel | `capabilities.drop: ["ALL"]`, `seccompProfile: RuntimeDefault` | baseline | 01.01, `#baseline-capabilities`, `#baseline-seccomp` |
+| E4 | A Pod asks for host namespaces, privileged mode or a `hostPath` | Pod Security Admission at `restricted` on the namespace | baseline | 01.01, `#baseline-namespace`; 05.02 |
+| E5 | An unpatched runtime lets a container escape, as with CVE-2024-21626 | A patched containerd and runc on every node | cluster | 05.06 <!-- link-later: 05.06 --> |
+| E6 | An RBAC grant lets a workload create a privileged Pod | Narrow RBAC, and `restricted` on the namespace | cluster | 05.01; 05.02 |
+
+## Attacker goals
+
+The rows follow the tactics of the MITRE ATT&CK for Containers matrix. The
+guide uses it as a map of goals, not as a checklist of techniques.
+
+| Goal (tactic) | How it could show up in the Bookstore | Threats |
+|---------------|----------------------------------------|---------|
+| Initial Access | A route exposed at the Gateway, or a vulnerable dependency in an image | EP1, R6, T2 |
+| Execution | A new workload or a shell started in a Pod (deploy-container, T1610) | T1, E3 |
+| Persistence | A dropped binary, or a changed spec that survives a restart | T1, T3 |
+| Privilege Escalation | Root in a container, a setuid binary, a capability, a privileged Pod, or escape to the host (escape-to-host, T1611) | E1 to E5 |
+| Stealth | A change that leaves no audit record or avoids review | R-1, T3 |
+| Defense Impairment | A policy, gate or NetworkPolicy switched off | T3, S3, E4 |
+| Credential Access | A Secret, a mounted token or etcd read directly | I1, I2, I4, S2 |
+| Discovery | Listing Pods or reaching the kubelet from inside the cluster | I3, S1 |
+| Lateral Movement | Pod to Pod, or namespace to namespace | S3, TB9 |
+| Impact | Corrupted or deleted records, exhausted resources | A1, D1, D2 |
+
+## Insecure examples and exceptions
+
+- **Insecure on purpose.** None in this file. The guide's rule: insecure
+  examples appear only in Part 05 labs and the capstone overlay, and never
+  in the `bookstore` or `default` namespace. The gates enforce it.
+- **Exceptions.** None registered yet. A namespace above `restricted`, or a
+  suppressed scanner finding, needs an entry in the single exceptions
+  registry before it merges. The registry file is not in the repository
+  yet. Its first entry arrives with the first exception, in the same pull
+  request. Each entry records what is excepted, the reason with an upstream
+  citation, the chapter that explains it, and an expiry no more than 12
+  months out.
+- **Not an exception.** `.github/scripts/gates/not-evaluated.allow` lists
+  manifests that no scanner could judge. It records gate blind spots. It
+  does not grant policy exceptions.
+
+## Open items
+
+- D2: no edge rate limiting in the baseline.
+- R-1: audit records wait for 05.08.
+- The registry file and its gate are not built yet.
