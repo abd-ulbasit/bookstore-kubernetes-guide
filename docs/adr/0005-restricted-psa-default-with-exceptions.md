@@ -3,6 +3,8 @@
 * **Status:** Accepted
 * **Date:** 2026-05-19
 * **Deciders:** abd-ulbasit
+* **Extended by:** [0009](0009-security-first-guide-and-gates.md), which applies this
+  rule to every namespace the guide creates and keeps the list in one registry
 
 ## Context
 

@@ -22,6 +22,7 @@ point at.
 | [0006](0006-uppercase-placeholder-convention.md) | `<UPPERCASE>` for every configurable value | Accepted |
 | [0007](0007-helm-kustomize-render-counts-as-invariants.md) | Helm 49 / Kustomize 45-49-48 as hard CI invariants | Accepted |
 | [0008](0008-state-per-environment-and-region.md) | One Terraform state per environment and per region | Proposed |
+| [0009](0009-security-first-guide-and-gates.md) | Security-first guide, no unlearning, one exceptions registry, gates in CI | Accepted |
 
 ## Format
 
