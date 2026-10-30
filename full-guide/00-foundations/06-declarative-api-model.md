@@ -7,7 +7,7 @@
 
 **Estimated time:** ~15 min read · ~30 min hands-on
 **Prerequisites:** [Part 00 ch.03](03-architecture-overview.md) — the components that reconcile · [Part 00 ch.04](04-control-plane-deep-dive.md) — how reconciliation actually runs
-**You'll know after this:** • distinguish `spec` (desired) from `status` (observed) · • explain what `kubectl apply` does and how server-side apply merges fields · • use labels and selectors as the universal glue between objects · • write a minimal valid Kubernetes manifest by hand · • predict what a controller will do when you change a `spec`
+**You'll know after this:** • distinguish `spec` (desired) from `status` (observed) · • explain what `kubectl apply` does and how server-side apply merges fields · • use labels and selectors as the universal glue between objects · • write a minimal valid Kubernetes manifest by hand · • predict what a controller will do when you change a `spec` · • say why `--dry-run=server` catches what `--dry-run=client` misses
 
 <!-- tags: foundations, declarative, spec-status, apply, labels-selectors -->
 
@@ -38,6 +38,17 @@ A controller's entire job is a loop: read `spec`, observe reality, compute the
 difference, act to shrink it, write `status`, repeat — **forever**. You changed
 a number in a file; the system continuously bends reality to match. That's it.
 Pods, Deployments, Services, Secrets, your own CRDs — all the same shape.
+
+## Threats and controls
+
+Declaring state moves the risk to whoever can write the spec. Three threats
+follow from that:
+
+| Threat | Control taught here | Goes deeper |
+|---|---|---|
+| A spec nobody reviewed reaches the cluster as easily as one somebody did. | Keep manifests in Git and apply the reviewed file. Admission checks the rules it is given, not whether a change is a good idea. | [05.01](../05-security/01-authn-authz-rbac.md) |
+| A live edit drifts from the declared state, and the next apply may undo it without warning. | Apply from files, run `kubectl diff` before each apply, and never `kubectl edit` an object that Git owns. | [07.04](../07-delivery/04-gitops-argocd.md) |
+| A client-side dry run checks the file on your machine and does not run admission, so it can pass a spec the cluster refuses. | Run `--dry-run=server` in the namespace that enforces Pod Security. The hands-on shows both outcomes. | [05.02](../05-security/02-pod-security.md) |
 
 ## The reconciliation principle (level-triggered)
 
@@ -210,14 +221,14 @@ label/selector mismatch.
 
 ## Hands-on with the Bookstore: the first real manifest
 
-Time to *declare* something. We write the **first Bookstore manifest**:
-`catalog` as a single bare **Pod**. (A bare Pod is not how you'd run it in
+Here is the **first Bookstore manifest**: `catalog` as a single bare **Pod**.
+Read it as a declaration. (A bare Pod is not how you'd run it in
 production — it isn't self-healed by a controller; that's the whole point of
 Deployments in [Part 01](../01-core-workloads/04-replicasets-and-deployments.md).
-Here it's the minimal object that demonstrates the declarative model and gives
-you something to run in [ch.07](07-local-cluster-setup.md).)
+Here it's the smallest object that shows the declarative model, and something
+to run in [ch.07](07-local-cluster-setup.md).)
 
-This file is created at
+It lives at
 [`examples/bookstore/raw-manifests/01-catalog-pod.yaml`](../examples/bookstore/raw-manifests/01-catalog-pod.yaml):
 
 ```yaml
@@ -225,10 +236,18 @@ apiVersion: v1                 # core API group, version v1
 kind: Pod                      # GVK = (core, v1, Pod)
 metadata:
   name: catalog                # unique within (namespace, kind)
-  labels:                      # identifying — what selectors will match later
-    app: catalog               #   the canonical label other objects will select on
+  labels:                      # identifying: what selectors will match later
+    app: catalog               # the canonical label other objects will select on
     component: backend
-spec:                          # DESIRED state (you write this)
+spec:                          # DESIRED state (you write this; status is observed)
+  serviceAccountName: catalog-sa          # its own identity, never `default`
+  automountServiceAccountToken: false     # the app never calls the API: no token
+  securityContext:             # Pod level: applies to every container
+    runAsNonRoot: true
+    runAsUser: 65532           # the UID the image declares (distroless nonroot)
+    runAsGroup: 65532
+    seccompProfile:
+      type: RuntimeDefault
   containers:
     - name: catalog            # container name (unique within the Pod)
       image: bookstore/catalog:dev   # the image built in ch.02
@@ -239,7 +258,23 @@ spec:                          # DESIRED state (you write this)
       env:
         - name: PORT           # the app reads PORT (defaults to 8080)
           value: "8080"
-# (no status: here — the kubelet/controllers write status, never you)
+      securityContext:         # container level
+        allowPrivilegeEscalation: false
+        readOnlyRootFilesystem: true
+        capabilities:
+          drop: ["ALL"]
+      resources:               # sized per Part 01 ch.03
+        requests:
+          cpu: 50m
+          memory: 64Mi
+        limits:
+          memory: 128Mi
+      volumeMounts:
+        - name: tmp
+          mountPath: /tmp      # writable paths come from emptyDir
+  volumes:
+    - name: tmp
+      emptyDir: {}
 ```
 
 Every field, and *why it is exactly this*:
@@ -262,9 +297,9 @@ Every field, and *why it is exactly this*:
 - **`spec.containers[0].name: catalog`** — names the container (used in logs,
   `kubectl exec -c`, probes). Unique within the Pod.
 - **`image: bookstore/catalog:dev`** — the exact image built in
-  [ch.02](02-containers-and-images.md). (`:dev` is a mutable tag — fine for
-  local learning; production pins by digest, per
-  [ch.02](02-containers-and-images.md) production notes.)
+  [ch.02](02-containers-and-images.md). (`:dev` is a mutable tag, which is fine
+  for an image you build yourself. A third-party image is pinned by digest, as
+  [ch.02](02-containers-and-images.md) covers.)
 - **`imagePullPolicy: IfNotPresent`** — *critical for the local workflow*:
   pull only if the image isn't already on the node. In
   [ch.07](07-local-cluster-setup.md) you `kind load` the image onto the node,
@@ -282,29 +317,139 @@ Every field, and *why it is exactly this*:
   Demands](../01-core-workloads/03-resources-and-qos.md) idea: declare what the
   workload needs rather than rely on implicit defaults.
 
-This Pod is minimal **on purpose**: no replicas (a bare Pod has no controller
-restoring it — covered in [Part
-01](../01-core-workloads/04-replicasets-and-deployments.md)), no probes yet
-([Part 01 ch.02](../01-core-workloads/02-health-and-lifecycle.md)), no resource
-requests yet ([Part 01 ch.03](../01-core-workloads/03-resources-and-qos.md)).
+The rest of the file is the security baseline: the ServiceAccount, the Pod and
+container `securityContext`, the `resources`, and an `emptyDir` for `/tmp`.
+This chapter does not explain each field. [Part 01
+ch.01](../01-core-workloads/01-pods.md#baseline) explains each one against the
+threat it answers, and the first Pod you write is the time to read it. By
+family, in one sentence each:
+
+- **Identity:** `serviceAccountName` gives the Pod its own ServiceAccount, and
+  `automountServiceAccountToken: false` keeps an API token out of the container.
+- **Pod `securityContext`:** the process runs as the non-root UID and GID the
+  image declares, under the runtime's default seccomp profile.
+- **Container `securityContext`:** privilege escalation is off, the root
+  filesystem is read-only, and every Linux capability is dropped.
+- **Resources and `/tmp`:** the container requests CPU and memory, caps its
+  memory, and gets one writable path, an `emptyDir` mounted at `/tmp`.
+
+This Pod is bare **on purpose**: no replicas (a bare Pod has no controller
+restoring it, covered in [Part
+01](../01-core-workloads/04-replicasets-and-deployments.md)) and no probes yet
+([Part 01 ch.02](../01-core-workloads/02-health-and-lifecycle.md)).
 Each later chapter *adds* a field to a Bookstore manifest and explains it; this
 is the seed. You apply it to a real cluster in
 [ch.07](07-local-cluster-setup.md).
 
-Validate the manifest *now* (client-side — no cluster required), so the file is
-known-good before [ch.07](07-local-cluster-setup.md):
+These steps check the manifest against a cluster you own, before
+[ch.07](07-local-cluster-setup.md) applies it. A kind cluster is enough. The
+steps need one: `kubectl` reads the cluster's API discovery and schema before
+it checks a file, even for a dry run, and without a reachable cluster it stops
+with an error. [ch.07](07-local-cluster-setup.md) builds one. Until then, read
+the captured output.
+
+The steps use a namespace called `model-demo`, labelled so that Pod Security
+admission enforces `restricted`. The Pod names the ServiceAccount, so create
+that too. Run from the repo root (`full-guide/`):
 
 ```sh
-# from the repo root (full-guide/)
-kubectl apply --dry-run=client -f \
-  examples/bookstore/raw-manifests/01-catalog-pod.yaml
-# → pod/catalog created (dry run)
+kubectl create namespace model-demo
+kubectl label namespace model-demo pod-security.kubernetes.io/enforce=restricted
+kubectl create serviceaccount catalog-sa -n model-demo
 ```
 
-(`--dry-run=client` parses and locally validates the object without contacting
-a cluster; `--dry-run=server` would additionally run the API server's
-admission/validation pipeline from [ch.04](04-control-plane-deep-dive.md) — same
-gauntlet, no persistence.)
+The client-side dry run checks the file on your machine and stores nothing:
+
+```sh
+kubectl apply --dry-run=client -f examples/bookstore/raw-manifests/01-catalog-pod.yaml
+```
+
+<!-- gate: output -->
+```text
+pod/catalog created (dry run)
+```
+
+The server-side dry run is the one that applies policy. The API server runs
+the pipeline from [ch.04](04-control-plane-deep-dive.md): authentication,
+authorization, admission and validation. It stores nothing, and Pod Security
+admission applies `restricted` to the namespace:
+
+```sh
+kubectl apply --dry-run=server -n model-demo -f examples/bookstore/raw-manifests/01-catalog-pod.yaml
+```
+
+<!-- gate: output -->
+```text
+pod/catalog created (server dry run)
+```
+
+**Deliberate typo.** This copy misspells `automountServiceAccountToken`. The
+client-side check accepts it:
+
+```sh
+sed 's/automountServiceAccountToken/automountServiceAcount/' \
+  examples/bookstore/raw-manifests/01-catalog-pod.yaml |
+  kubectl apply --dry-run=client -f -
+```
+
+<!-- gate: output -->
+```text
+pod/catalog created (dry run)
+```
+
+The server-side check rejects it. The API server decodes the Pod strictly, and
+an unknown field is an error:
+
+```sh
+sed 's/automountServiceAccountToken/automountServiceAcount/' \
+  examples/bookstore/raw-manifests/01-catalog-pod.yaml |
+  kubectl apply --dry-run=server -n model-demo -f -
+```
+
+<!-- gate: output -->
+```text
+Error from server (BadRequest): error when creating "STDIN": Pod in version "v1" cannot be handled as a Pod: strict decoding error: unknown field "spec.automountServiceAcount"
+```
+
+**Deliberate privilege.** `--privileged` is the one insecure setting in this
+chapter, shown only to see a denial. The client-side check accepts the Pod:
+
+```sh
+kubectl run unsafe --image=bookstore/catalog:dev --privileged --dry-run=client
+```
+
+<!-- gate: output -->
+```text
+pod/unsafe created (dry run)
+```
+
+The server-side check denies it in the `model-demo` namespace. The `tr`
+command splits the one-line error at its commas, so each reason sits on its
+own line:
+
+```sh
+kubectl run unsafe --image=bookstore/catalog:dev --privileged --dry-run=server -n model-demo 2>&1 | tr ',' '\n'
+```
+
+<!-- gate: output -->
+```text
+Error from server (Forbidden): pods "unsafe" is forbidden: violates PodSecurity "restricted:latest": privileged (container "unsafe" must not set securityContext.privileged=true)
+ allowPrivilegeEscalation != false (container "unsafe" must set securityContext.allowPrivilegeEscalation=false)
+ unrestricted capabilities (container "unsafe" must set securityContext.capabilities.drop=["ALL"])
+ runAsNonRoot != true (pod or container "unsafe" must set securityContext.runAsNonRoot=true)
+ seccompProfile (pod or container "unsafe" must set securityContext.seccompProfile.type to "RuntimeDefault" or "Localhost")
+```
+
+Each reason names a control the baseline sets: no privilege, no escalation,
+every capability dropped, a non-root user, and a seccomp profile.
+[Part 01 ch.01](../01-core-workloads/01-pods.md#baseline) explains them.
+
+Remove the namespace when you are done. That also removes the ServiceAccount
+and any Pod in it:
+
+```sh
+kubectl delete namespace model-demo
+```
 
 ## How it works under the hood
 
@@ -358,8 +503,9 @@ gauntlet, no persistence.)
 ```sh
 kubectl explain <KIND>                     # schema of a kind (authoritative)
 kubectl explain <KIND>.spec.<FIELD> --recursive   # drill into spec fields
-kubectl apply --dry-run=client -f f.yaml   # local parse + validate (no cluster)
-kubectl apply --dry-run=server -f f.yaml   # run apiserver admission/validation
+kubectl apply --dry-run=client -f f.yaml   # check locally, store nothing (needs a cluster)
+kubectl apply --dry-run=server -n <NS> -f f.yaml   # apiserver admission, incl. Pod Security
+kubectl label namespace <NS> pod-security.kubernetes.io/enforce=restricted
 kubectl apply -f f.yaml                     # declarative create/update (3-way merge)
 kubectl apply --server-side -f f.yaml      # Server-Side Apply (field ownership)
 kubectl get <KIND> <NAME> -o yaml          # see spec AND controller-written status
@@ -368,18 +514,8 @@ kubectl get pods --show-labels             # inspect labels
 kubectl diff -f f.yaml                       # what apply *would* change
 ```
 
-Universal object skeleton (every kind you'll ever write fits this):
-
-```yaml
-apiVersion: <GROUP>/<VERSION>   # GVK (core group => just a version, e.g. v1)
-kind: <Kind>
-metadata:
-  name: <NAME>                  # identity within (namespace, kind)
-  labels: { app: <NAME> }       # identifying → what other objects select on
-  annotations: { }              # non-identifying metadata (not selectable)
-spec: { }                       # DESIRED state — you author this
-# status is OBSERVED — written by the owning controller/kubelet, never by you
-```
+The object skeleton is the tree in the Anatomy section above. You write `spec`,
+and the controller writes `status`.
 
 Declarative-model checklist:
 
@@ -388,6 +524,7 @@ Declarative-model checklist:
 - [ ] Consistent, intentional labels; cross-object wiring is by selector
 - [ ] `imagePullPolicy` correct for how the image reaches the node
 - [ ] Manifests in Git, validated in CI, applied declaratively (GitOps in prod)
+- [ ] Dry runs that matter go to the server, in a Pod Security namespace
 - [ ] Real workloads run under a controller — bare Pods only for learning
 
 ## Test your understanding
@@ -422,10 +559,10 @@ Declarative-model checklist:
 
    </details>
 
-5. **Hands-on extension: take the `01-catalog-pod.yaml` from this chapter and run `kubectl apply --dry-run=server -f` against a kind cluster. Then change `imagePullPolicy` to `Always` and re-run. What does each invocation tell you that `--dry-run=client` would not?**
-   <details><summary>What you should see</summary>
+5. **A teammate says, "I dry-run-validated the Pod, so it's safe to apply." The dry run was `--dry-run=client`, and the namespace enforces `restricted`. What did their check prove, what did it miss, and which command catches a privileged container?**
+   <details><summary>Show answer</summary>
 
-   `--dry-run=server` runs the full API server pipeline — authN, authZ, admission webhooks, schema and field validation — without persisting. You'll see policy rejects, defaulting (e.g., a `Never`/`Always` value getting normalized), and conflicts with admission webhooks if any. `--dry-run=client` only parses YAML locally and won't catch admission-time policy or schema rules added by webhooks (see §Hands-on with the Bookstore, dry-run discussion).
+   The client-side check parsed the file and accepted it. It did not run admission, so it said nothing about Pod Security. The API server applies the `restricted` profile during admission, and `--dry-run=server -n <namespace>` runs that step. The hands-on section shows the same split: a `--privileged` Pod passes the client dry run and is denied by the server dry run in a restricted namespace (see §Hands-on with the Bookstore).
 
    </details>
 
