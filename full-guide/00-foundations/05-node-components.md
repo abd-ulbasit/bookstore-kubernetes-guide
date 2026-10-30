@@ -6,7 +6,7 @@
 
 **Estimated time:** ~15 min read · (no hands-on)
 **Prerequisites:** [Part 00 ch.03](03-architecture-overview.md) — control plane vs. node plane · [Part 00 ch.04](04-control-plane-deep-dive.md) — what the control plane decided
-**You'll know after this:** • explain what the kubelet does step-by-step when a Pod is bound to a node · • describe the CRI boundary and how containerd executes containers · • understand the role of the pause/sandbox container and shared namespaces · • describe what kube-proxy programs (iptables / nftables / eBPF) · • read the full sequence of a Pod starting on a node and locate failures within it
+**You'll know after this:** • explain what the kubelet does step-by-step when a Pod is bound to a node · • describe the CRI boundary and how containerd executes containers · • understand the role of the pause/sandbox container and shared namespaces · • describe what kube-proxy programs (iptables / nftables / eBPF) · • name the kubelet API and the runtime socket as attack surfaces, and the control for each · • read the full sequence of a Pod starting on a node and locate failures within it
 
 <!-- tags: foundations, node-plane, kubelet, cri, containerd, kube-proxy -->
 
@@ -38,6 +38,19 @@ what's actually true. It does not lay bricks itself — it directs:
 while **kube-proxy** runs alongside as a separate crew that programs the node's
 networking so Service virtual IPs reach the right Pods. The foreman owns the
 node's reality; the brain only ever *asked*.
+
+## Threats and controls
+
+The node components hold the most power in the cluster. The kubelet can run
+any container on its node, and the container runtime can start a container
+with any mount. Three threats follow. Each row names the control this chapter
+teaches, and the body explains it.
+
+| Threat | Control taught here | Deeper |
+|---|---|---|
+| A caller who reaches the kubelet API on port 10250 reads Pod specs and runs commands in containers | Anonymous auth off and Webhook authorization, so every caller is identified and checked. The Hands-on shows a refused anonymous request | Kubelet hardening in 05.06 <!-- link-later: 05.06 --> |
+| A process that can write to the runtime socket starts a container with any mount, which is root on the node | The socket stays root-owned and out of Pods. The `restricted` level refuses the `hostPath` a Pod needs to reach it | [Pod security](../05-security/02-pod-security.md), and 05.02 |
+| An unpatched runtime lets a container escape, as with runc CVE-2024-21626 | containerd and runc at releases that carry the fix, checked on every node | Node patching in 05.06 <!-- link-later: 05.06 --> |
 
 ## The node, in boxes
 
@@ -103,6 +116,33 @@ Two internals worth naming:
   drives actual container state toward the PodSpec, re-asserting on every sync —
   the same loop as the controllers, just realized in Linux instead of in etcd.
 
+### The kubelet API on port 10250
+
+The kubelet serves its own HTTPS API on port 10250. People do not call it
+directly. The API server calls it for `kubectl logs` and `kubectl exec`, and
+its `/pods` endpoint lists the Pod specs bound to the node. A caller that
+reaches the port and gets past its authentication can read those specs and
+run commands in any container on the node. The port therefore has to refuse
+every caller it cannot identify.
+
+The kubelet's command-line flags default to the open choice: anonymous
+requests are allowed, and authenticated requests are allowed without a check
+([kubelet authentication and authorization](https://kubernetes.io/docs/reference/access-authn-authz/kubelet-authn-authz/)).
+The kubelet configuration file defaults to the closed choice: anonymous
+authentication is off, and authorization is `Webhook`, which asks the API
+server with a SubjectAccessReview whether each request may proceed. The
+read-only port, 10255, defaults to `0`, which disables it
+([KubeletConfiguration reference](https://kubernetes.io/docs/reference/config-api/kubelet-config.v1beta1/)).
+Read each node's configuration rather than assume the closed choice. The
+Hands-on does.
+
+RBAC also reaches this API, through the API server, and that grant is easy to
+over-give. `nodes/proxy` gives access to every kubelet endpoint. The upstream
+page warns that `get` on it is not a read-only permission, because the
+websocket endpoints that run commands in containers authorize under `get`.
+Treat `nodes/proxy` as a permission to run commands on the node. RBAC is in
+[05.01](../05-security/01-authn-authz-rbac.md).
+
 ## CRI and containerd
 
 The kubelet does **not** know how to talk to containerd (or CRI-O, or any
@@ -130,6 +170,47 @@ OS-level container creation to a low-level runtime, **runc**, which performs the
 for `runc` when stronger isolation is required —
 [Pod security](../05-security/02-pod-security.md).)
 
+### The runtime socket is a root handle
+
+The kubelet reaches containerd through the socket
+`/run/containerd/containerd.sock`. Root owns it, and only root and its group
+can open it. Whoever can write to it can ask containerd to start a container
+with any mount, including the host's root filesystem. A process that does this
+as root, or as group 0, is root on the node. The kubelet is trusted with the
+socket. A Pod must never be handed it.
+
+The control that matters is admission. The Baseline and Restricted levels both
+forbid `hostPath`. Baseline lists it as forbidden. Restricted allows only the
+volume types `configMap`, `csi`, `downwardAPI`, `emptyDir`, `ephemeral`,
+`persistentVolumeClaim`, `projected` and `secret`
+([Pod Security Standards](https://kubernetes.io/docs/concepts/security/pod-security-standards/)).
+A Pod that asks for the socket is refused in a namespace labelled `restricted`,
+and [01.01](../01-core-workloads/01-pods.md#baseline-namespace) sets that label
+on the reader's namespaces. Container escape is covered in
+[05.02](../05-security/02-pod-security.md).
+
+### Keep the runtime patched
+
+runc creates each container's namespaces and cgroups, so a flaw in runc is an
+escape route. CVE-2024-21626 is one. A leaked internal file descriptor in runc
+from v1.0.0-rc93 through 1.1.11 could leave a container process with its
+working directory in the host's mount namespace, which gives the process the
+host's filesystem. runc 1.1.12 has the fix
+([advisory](https://github.com/opencontainers/runc/security/advisories/GHSA-xr7r-f8xq-vfvv)).
+Even on managed clusters, the runtime on the worker nodes is yours to patch.
+Runtime CVEs are a real escape vector, so see also the
+[supply chain](../05-security/03-supply-chain.md) chapter. Node patching and
+upgrades are in 05.06 <!-- link-later: 05.06 -->. The Hands-on checks the runc
+version on this node.
+
+### A stronger boundary: sandboxed runtimes
+
+Containers share the host kernel, so a kernel flaw is reachable from every
+container on the node. For Pods that run code you do not trust, select a
+sandboxed runtime such as gVisor (`runsc`) or Kata Containers with a
+RuntimeClass. The CRI seam makes that a per-Pod choice. The kernel controls
+are in 05.05 <!-- link-later: 05.05 -->.
+
 ## The pause (sandbox) container
 
 A Pod is a *group of containers sharing one network and IPC namespace and a
@@ -148,6 +229,11 @@ extra, invisible container per Pod: the **pause** (a.k.a. **sandbox** or
   precisely why a `CrashLoopBackOff` Pod keeps the same IP, and why CNI is
   invoked once per Pod (at sandbox creation), not once per container.
 
+The namespaces the pause container holds are the Pod's trust boundary. Every
+container in the Pod shares its network and IPC namespaces, sidecars included.
+[01.01](../01-core-workloads/01-pods.md#baseline) explains what that sharing
+means for each baseline field, and this chapter does not repeat it.
+
 You'll see it as a `pause`/`sandbox` entry in `crictl pods` even though it never
 appears in your manifest — it's infrastructure the kubelet manages for you.
 
@@ -162,9 +248,10 @@ component that makes that virtual IP actually route:
   current set of *ready* backing Pod IPs, kept fresh by the EndpointSlice
   controller from [ch.04](04-control-plane-deep-dive.md)).
 - It programs the node's packet path so traffic to a Service's ClusterIP:port
-  is DNAT-load-balanced across those ready Pod IPs — via **iptables** (still
-  the default), **nftables** (GA since v1.33, faster at large scale, and the
-  planned future default) or the deprecated **IPVS** mode, or it's *replaced
+  is DNAT-load-balanced across those ready Pod IPs, via **iptables** (the
+  default in 1.37), **nftables** (the mode upstream names as the future
+  default), or **IPVS**, which is deprecated since v1.35 and scheduled for
+  removal in v1.43, or it's *replaced
   entirely* by a CNI's own dataplane (e.g. Cilium's eBPF kube-proxy
   replacement).
 
@@ -250,6 +337,135 @@ the Go process and triggers graceful shutdown; its `/healthz` and `/readyz`
 endpoints are exactly what the kubelet's **liveness/readiness** probes will
 call once you add them in [Part 01](../01-core-workloads/02-health-and-lifecycle.md).
 
+The rest of the Hands-on reads the node's security settings. Every check below
+is read-only.
+
+### Refused: an anonymous request to the kubelet
+
+**Deliberate action.** This request should fail. It asks the kubelet for its
+Pod list with no credentials, which is what a caller sends after finding port
+10250 open. `-k` skips checking the kubelet's serving certificate. That is
+harmless here, because the answer is a refusal. Never use `-k` in a script
+that sends credentials.
+
+```sh
+docker exec bookstore-control-plane \
+  curl -sk -w '\n%{http_code}\n' https://127.0.0.1:10250/pods
+```
+
+<!-- gate: output -->
+```
+Unauthorized
+401
+```
+
+The kubelet refused the caller before it read anything. Its configuration on
+the node shows why:
+
+```sh
+docker exec bookstore-control-plane sed -n '1,12p' /var/lib/kubelet/config.yaml
+```
+
+<!-- gate: output -->
+```
+apiVersion: kubelet.config.k8s.io/v1beta1
+authentication:
+  anonymous:
+    enabled: false
+  webhook:
+    cacheTTL: 0s
+    enabled: true
+  x509:
+    clientCAFile: /etc/kubernetes/pki/ca.crt
+authorization:
+  mode: Webhook
+  webhook:
+```
+
+`anonymous: enabled: false` refuses a caller that presents no credentials, and
+`mode: Webhook` sends each authenticated caller to the API server for a
+SubjectAccessReview. Check the same two settings on every node you run.
+
+### The read-only port is closed
+
+The read-only port, 10255, served Pod data without authentication when it was
+enabled. Its default is `0`, which disables it. A `000` status means curl made
+no connection, so nothing listens there:
+
+```sh
+docker exec bookstore-control-plane curl -s -o /dev/null -w '%{http_code}\n' http://127.0.0.1:10255/pods
+```
+
+<!-- gate: output -->
+```
+000
+```
+
+### The runtime socket and the versions behind it
+
+The socket is the runtime's control channel. Only its owner, root, and root's
+group can open it:
+
+```sh
+docker exec bookstore-control-plane ls -l /run/containerd/containerd.sock
+```
+
+<!-- gate: output -->
+```
+srw-rw---- 1 root root 0 Oct 30 14:28 /run/containerd/containerd.sock
+```
+
+A Pod in a namespace labelled `restricted` cannot mount this path, because the
+level refuses `hostPath`. Next, the versions the node runs:
+
+```sh
+kubectl get node -o custom-columns=RUNTIME:.status.nodeInfo.containerRuntimeVersion,KUBELET:.status.nodeInfo.kubeletVersion
+```
+
+<!-- gate: output -->
+```
+RUNTIME              KUBELET
+containerd://2.3.4   v1.37.0
+```
+
+```sh
+docker exec bookstore-control-plane runc --version | head -n 1
+```
+
+<!-- gate: output -->
+```
+runc version 1.4.3
+```
+
+runc 1.4.3 is later than 1.1.12, the first release with the fix for
+CVE-2024-21626, so this node includes that fix. Check each runtime component
+against its own advisories, not only this one.
+
+### Which sandbox the app container joined
+
+`crictl pods` and `crictl ps` show the pause sandbox and the container that
+joined it. The container's POD ID is the sandbox's ID:
+
+```sh
+docker exec bookstore-control-plane crictl pods --name kube-proxy
+docker exec bookstore-control-plane crictl ps --name kube-proxy
+```
+
+<!-- gate: output -->
+```
+POD ID              CREATED             STATE               NAME                NAMESPACE           ATTEMPT             RUNTIME
+a47e149f809eb       8 hours ago         Ready               kube-proxy-pb9p9    kube-system         0                   (default)
+```
+
+<!-- gate: output -->
+```
+CONTAINER           IMAGE               CREATED             STATE               NAME                ATTEMPT             POD ID              POD                 NAMESPACE
+b660e38fe6302       d6a28daf3e6b0       8 hours ago         Running             kube-proxy          0                   a47e149f809eb       kube-proxy-pb9p9    kube-system
+```
+
+The app container joined the namespaces that the sandbox holds. That join is
+the pause container's job, described above.
+
 ## How it works under the hood
 
 - **The kubelet is authoritative for the node, not the control plane.** The
@@ -279,18 +495,13 @@ call once you add them in [Part 01](../01-core-workloads/02-health-and-lifecycle
 > "Node NotReady" / "PLEG is not healthy" almost always means disk or memory
 > pressure or a sick runtime.
 
-> **In production:** the **container runtime is yours to operate even on
-> managed clusters** — it's containerd on the *worker* nodes (which you patch
-> on EKS/GKE/AKS). Keep it and the node OS patched; runtime CVEs are a real
-> escape vector ([supply chain](../05-security/03-supply-chain.md)).
-
 > **In production:** choose the kube-proxy mode (or replacement) deliberately.
-> **iptables** is fine for most; **nftables** (GA since v1.33, kernel 5.13+)
-> scales better with thousands of Services; **IPVS** has been deprecated since
-> v1.35 (1.37 logs a warning), so don't pick it for a new cluster; an **eBPF**
-> dataplane (Cilium) replaces kube-proxy for performance and richer policy. Set
-> the mode explicitly: 1.37's kube-proxy warns when it is unset, because the
-> default will move from iptables to nftables. This is a cluster-build decision
+> The default in 1.37 is **iptables**, and upstream says a future version will
+> change the default to **nftables**. Upstream advises an explicit mode, so an
+> upgrade does not change the backend without warning. **IPVS** is deprecated
+> since v1.35 and scheduled for removal in v1.43, so do not pick it for a new
+> cluster. An **eBPF** dataplane (Cilium) can replace kube-proxy for
+> performance and richer policy. This is a cluster-build decision
 > ([Part 02 ch.01](../02-networking/01-networking-model.md)).
 
 > **In production:** the **pause container image** must be reachable (it has
@@ -298,11 +509,6 @@ call once you add them in [Part 01](../01-core-workloads/02-health-and-lifecycle
 > air-gapped/private environments, failing to mirror the pause image breaks
 > *every* Pod with `RunPodSandbox` errors — a classic, baffling-until-you-know
 > outage.
-
-> **In production:** for stronger workload isolation than a shared kernel
-> gives, run sensitive Pods under a sandboxed runtime (gVisor/Kata) via
-> **RuntimeClass** — the CRI seam makes this a per-Pod choice
-> ([Pod security](../05-security/02-pod-security.md)).
 
 ## Quick Reference
 
@@ -314,12 +520,15 @@ kubectl describe node <N>                 # capacity/allocatable, conditions, ev
 kubectl -n kube-system get pods -l k8s-app=kube-proxy   # kube-proxy DaemonSet
 kubectl get endpointslices                # ready Pod IPs kube-proxy routes to
 kubectl logs <P> --previous               # previous container (debug CrashLoopBackOff)
+kubectl get node -o custom-columns=RUNTIME:.status.nodeInfo.containerRuntimeVersion   # runtime version per node
 
 # On the node itself (e.g. `docker exec` into a kind node container):
 crictl pods                               # Pods incl. the pause/sandbox container
 crictl ps                                 # running containers (CRI view)
 crictl images                             # images/layers containerd holds
 journalctl -u kubelet                     # kubelet logs (systemd-managed nodes)
+sed -n '1,12p' /var/lib/kubelet/config.yaml   # kubelet authn/authz: anonymous off, Webhook
+runc --version | head -n 1                    # runc release, checked against its advisories
 ```
 
 The node, minimally:
@@ -340,6 +549,10 @@ Node checklist:
 - [ ] Pause/sandbox image mirrored for air-gapped/private registries
 - [ ] Probes defined (startup/readiness/liveness) so the kubelet gates correctly
 - [ ] Sensitive workloads on a sandboxed RuntimeClass where required
+- [ ] Kubelet anonymous auth off, `mode: Webhook`, and `readOnlyPort: 0`
+- [ ] No Pod mounts the runtime socket, and `restricted` refuses `hostPath`
+- [ ] runc and containerd at releases that carry their advisories' fixes
+- [ ] `nodes/proxy` granted only where command execution on nodes is needed
 
 ## Test your understanding
 
@@ -380,6 +593,13 @@ Node checklist:
 
    </details>
 
+6. **A teammate wants a monitoring agent to list the containers on its node by mounting `/run/containerd/containerd.sock` into its Pod. Name the threat, the control that refuses the mount, and what you would give the agent instead.**
+   <details><summary>Show answer</summary>
+
+   The socket is the runtime's control channel. A process that can write to it, as root or group 0, can start a privileged container with the host filesystem mounted, which is root on the node. The `restricted` Pod Security level refuses the `hostPath` volume the mount needs, because `hostPath` is not on its allowed volume list. Give the agent a ServiceAccount with a narrow RBAC role that reads the Pod and container status it needs from the API server, as [05.01](../05-security/01-authn-authz-rbac.md) teaches (see §The runtime socket is a root handle).
+
+   </details>
+
 ## Further reading
 
 - **Lukša, _Kubernetes in Action_ 2e, ch.2 & ch.3** — containers and the node
@@ -392,3 +612,6 @@ Node checklist:
   <https://kubernetes.io/docs/concepts/architecture/cri/> (CRI), and
   <https://kubernetes.io/docs/reference/networking/virtual-ips/> (kube-proxy /
   Service virtual IPs).
+- Kubernetes, [Kubelet authentication and authorization](https://kubernetes.io/docs/reference/access-authn-authz/kubelet-authn-authz/).
+- Kubernetes, [Pod Security Standards](https://kubernetes.io/docs/concepts/security/pod-security-standards/), for the `hostPath` rule and the Restricted volume list.
+- runc, [GHSA-xr7r-f8xq-vfvv](https://github.com/opencontainers/runc/security/advisories/GHSA-xr7r-f8xq-vfvv), for CVE-2024-21626.
