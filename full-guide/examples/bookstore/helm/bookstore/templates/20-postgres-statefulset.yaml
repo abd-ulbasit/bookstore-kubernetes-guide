@@ -80,6 +80,13 @@ spec:
           env:
             - name: PGDATA
               value: {{ $pg.pgData | quote }}
+          # initdb on a slow disk can outlast liveness. The startup probe holds
+          # liveness off for up to 5 minutes (60 checks, 5s apart).
+          startupProbe:
+            exec:
+              command: ["pg_isready", "-U", {{ .Values.dbCredentials.POSTGRES_USER | quote }}, "-d", {{ .Values.dbCredentials.POSTGRES_DB | quote }}]
+            periodSeconds: 5
+            failureThreshold: 60
           readinessProbe:
             exec:
               command: ["pg_isready", "-U", {{ .Values.dbCredentials.POSTGRES_USER | quote }}, "-d", {{ .Values.dbCredentials.POSTGRES_DB | quote }}]

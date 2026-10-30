@@ -53,6 +53,13 @@ spec:
               containerPort: 5672
             - name: management
               containerPort: 15672
+          # A broker boots in tens of seconds on a slow disk, and liveness must
+          # not kill it before it listens. The startup probe holds liveness off
+          # for up to 5 minutes (60 checks, 5s apart).
+          startupProbe:
+            tcpSocket: { port: amqp }
+            periodSeconds: 5
+            failureThreshold: 60
           readinessProbe:
             tcpSocket: { port: amqp }
             initialDelaySeconds: 15

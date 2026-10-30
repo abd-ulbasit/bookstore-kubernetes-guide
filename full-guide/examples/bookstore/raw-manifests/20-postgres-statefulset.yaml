@@ -157,6 +157,13 @@ spec:
           env:
             - name: PGDATA                # not a secret → stays inline
               value: /var/lib/postgresql/data/pgdata
+          # initdb on a slow disk can outlast liveness. The startup probe holds
+          # liveness off for up to 5 minutes (60 checks, 5s apart).
+          startupProbe:
+            exec:
+              command: ["pg_isready", "-U", "bookstore", "-d", "bookstore"]
+            periodSeconds: 5
+            failureThreshold: 60
           readinessProbe:
             exec:
               command: ["pg_isready", "-U", "bookstore", "-d", "bookstore"]
