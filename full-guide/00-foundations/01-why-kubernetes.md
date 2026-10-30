@@ -50,6 +50,31 @@ moving work off failed nodes. You stop *operating servers* and start
 *declaring intent*; the cluster becomes the operator. Everything else in this
 guide is a specific desired-state object and the controller that reconciles it.
 
+## Threats and controls
+
+A cluster is a security boundary worth thinking about before the first
+workload lands on it. One API server and one pool of nodes serve every
+workload in it, so the defaults decide how far one workload can reach into
+another, and those defaults favor a working cluster over an isolated one. A
+Pod that no NetworkPolicy selects accepts connections from any source and may
+open connections to any destination ([NetworkPolicy docs][k8s-netpol]). A
+Pod that names no ServiceAccount runs as its namespace's `default` one, and
+the kubelet mounts that account's API credentials into the Pod, unless the
+Pod sets `automountServiceAccountToken: false` to stop the mount
+([ServiceAccount docs][k8s-sa]). Kubernetes has no first-class tenant object,
+so namespaces are the unit you segment a shared cluster with
+([multi-tenancy docs][k8s-tenancy]).
+
+This chapter names no threat specific to its subject. The platform supplies
+the controls, but it does not secure the workload for you, and
+<!-- link-later: 00.08 -->00.08 maps each threat to the control that answers
+it.
+
+[k8s-netpol]: https://kubernetes.io/docs/concepts/services-networking/network-policies/
+[k8s-sa]: https://kubernetes.io/docs/tasks/configure-pod-container/configure-service-account/
+[k8s-tenancy]: https://kubernetes.io/docs/concepts/security/multi-tenancy/
+[k8s-securing]: https://kubernetes.io/docs/tasks/administer-cluster/securing-a-cluster/
+
 ## The road here: metal → VMs → containers → orchestration
 
 Each step solved the previous step's biggest pain and exposed the next one.
@@ -272,9 +297,10 @@ Note the deliberate shapes you'll exploit later: `catalog` is a *read-heavy
 stateless API* (a clean autoscaling story); `orders` *writes then publishes*
 (introduces async decoupling); `payments-worker` *has no HTTP traffic at all*
 (scales on queue depth, not requests); `postgres` is the one piece that *must
-not* be treated as cattle (it owns the data). The source for every service is
-real and the images build — see
-[`examples/bookstore/app/`](../examples/bookstore/app/README.md). In
+not* be treated as cattle (it owns the data). The four services the guide
+builds have real source and a Dockerfile each, in
+[`examples/bookstore/app/`](../examples/bookstore/app/README.md). Postgres,
+redis and rabbitmq run from third-party images. In
 [chapter 02](02-containers-and-images.md) you'll containerize `catalog`; in
 [chapter 06](06-declarative-api-model.md) you'll write its first manifest; in
 [chapter 07](07-local-cluster-setup.md) you'll run it on a real cluster.
@@ -284,9 +310,12 @@ real and the images build — see
 Even at this altitude, three structural facts explain everything that follows:
 
 1. **There is a single source of truth.** The cluster's desired *and* observed
-   state lives in a consistent key-value store (etcd), reachable only through
-   one gateway, the API server. You never edit machines directly; you change
-   the desired state in that store, and controllers do the rest. (Internals:
+   state lives in a consistent key-value store (etcd). The API server is the one
+   gateway meant to reach it, and nothing else should. Upstream is blunt about
+   why: write access to etcd is "equivalent to gaining root on the entire
+   cluster" ([securing a cluster][k8s-securing]). You never edit machines
+   directly; you change the desired state through the API server, and
+   controllers do the rest. (Internals:
    [chapter 04](04-control-plane-deep-dive.md).)
 2. **The system is a set of independent controllers, not one big program.**
    Each controller watches the part of the desired state it owns and reconciles
@@ -343,6 +372,11 @@ This chapter is conceptual — no commands yet. The takeaways to carry forward:
 - **Cattle, not pets.** Workloads are interchangeable, disposable replicas.
 - **Declarative, not imperative.** Describe the *what*; the cluster owns the
   *how* and keeps it true.
+- **Shared boundary, open defaults.** Every workload shares one API server
+  and node pool. A new Pod accepts traffic and mounts its ServiceAccount token
+  until a NetworkPolicy and `automountServiceAccountToken: false` say
+  otherwise. The baseline is in
+  [01.01](../01-core-workloads/01-pods.md#baseline).
 - **Maybe don't:** few stateless services / static sites / no platform
   capacity → a simpler PaaS or single VM is the right call.
 
@@ -384,6 +418,22 @@ Readiness checklist before adopting Kubernetes for real:
    <details><summary>What you should see</summary>
 
    You should arrive at: `payments-worker` has no HTTP traffic and no readiness from a probe in the usual sense — it scales on *queue depth*, not on requests. That motivates a different autoscaler (KEDA), a different graceful-shutdown story (drain in-flight messages, not requests), and Jobs-style thinking. If your sketch only says "it's a background process", you've missed the point — Hint: re-read the Bookstore table in §Hands-on with the Bookstore.
+
+   </details>
+
+5. **A new namespace runs a Pod that has no NetworkPolicy and sets no security
+   fields. Name two ways that Pod is open by default, and the chapter that
+   teaches the control for each.**
+   <details><summary>Show answer</summary>
+
+   It accepts traffic from any source and may open connections to any
+   destination, because no NetworkPolicy selects it. It also gets its
+   namespace's `default` ServiceAccount token mounted into it, unless the Pod
+   sets `automountServiceAccountToken: false`. The NetworkPolicy control is
+   taught in [chapter 02.06](../02-networking/06-network-policies.md), and the
+   security baseline that sets the token field is in
+   [01.01](../01-core-workloads/01-pods.md#baseline) (see §Threats and
+   controls).
 
    </details>
 
