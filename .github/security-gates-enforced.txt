@@ -1,0 +1,16 @@
+# Chapters the security gates enforce (.github/workflows/security-gates.yml).
+#
+# The guide is being rewritten security-first, Part by Part. Until a chapter
+# is rewritten it still fails the gates, and a pull request cannot stay red
+# for months. So the gates run in report mode: a chapter that fails is listed
+# in the run summary and does not fail the job. A chapter named here is
+# different. If it fails any gate, or no gate reports on it, the job fails.
+#
+# Add a chapter in the pull request that finishes it, so the chapter can
+# never regress after that. One path per line, relative to full-guide/. A
+# directory enforces everything under it, example trees included.
+# Remove a line only if the chapter is deleted or renamed.
+
+01-core-workloads/01-pods.md
+05-security/02-pod-security.md
+07-delivery/03-cicd-pipeline.md

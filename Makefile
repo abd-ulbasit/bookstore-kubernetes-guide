@@ -162,6 +162,8 @@ scan-go: ## govulncheck across every Go module under full-guide/examples/.
 # ALSO lists the example trees G2 scans as well. A whole-guide run (no SCOPE)
 # scans full-guide/examples; a scoped run scans none unless ALSO= names them.
 # ALLOW_CONTEXT= names a kubectl context other than kind-* that G3 may write to.
+# REPORT= makes G2 and G3 write their per-block verdicts there as JSON, which
+# .github/scripts/gates/chapter_summary.py reads.
 # The allowlist file records the not-evaluated blocks someone checked by hand.
 GATES_DIR := .github/scripts/gates
 GATES_SCOPE := $(foreach s,$(SCOPE),--scope $(s))
@@ -169,6 +171,7 @@ ALSO ?= $(if $(SCOPE),,full-guide/examples)
 GATES_ALSO := $(foreach p,$(ALSO),--also $(p))
 GATES_ALLOW := --allow $(GATES_DIR)/not-evaluated.allow
 GATES_CONTEXT := $(foreach c,$(ALLOW_CONTEXT),--allow-context $(c))
+GATES_REPORT := $(if $(REPORT),--report $(REPORT))
 
 .PHONY: gates-test
 gates-test: ## Run the unit tests of the gate scripts. Needs Trivy, Helm and kubectl: their tests may not be skipped.
@@ -182,7 +185,7 @@ gates-static: ## G1+G2: Trivy core checks on chapter YAML (SCOPE=chapter.md ... 
 	@command -v trivy >/dev/null || (echo "trivy not found; brew install trivy" && exit 1)
 	@out=$$(mktemp -d); trap 'rm -rf "$$out"' EXIT; \
 	$(PY) $(GATES_DIR)/extract_blocks.py --root full-guide --out "$$out" && \
-	$(PY) $(GATES_DIR)/static_gate.py --manifest "$$out/manifest.json" $(GATES_SCOPE) $(GATES_ALSO) $(GATES_ALLOW)
+	$(PY) $(GATES_DIR)/static_gate.py --manifest "$$out/manifest.json" --helm $(HELM) --kubectl $(KUBECTL) $(GATES_SCOPE) $(GATES_ALSO) $(GATES_ALLOW) $(GATES_REPORT)
 
 # G5, the registry half. It always reads the whole guide (SCOPE does not apply)
 # and the example trees in ALSO, or full-guide/examples. The two registries are
@@ -198,7 +201,7 @@ gates-registry: ## G5: exceptions registered, unexpired (<= 12 months) and still
 gates-admission: ## G1+G3: restricted-namespace dry-run of chapter YAML (SCOPE=chapter.md ...). Needs a kind cluster.
 	@out=$$(mktemp -d); trap 'rm -rf "$$out"' EXIT; \
 	$(PY) $(GATES_DIR)/extract_blocks.py --root full-guide --out "$$out" && \
-	$(PY) $(GATES_DIR)/admission_gate.py --manifest "$$out/manifest.json" --kubectl $(KUBECTL) $(GATES_SCOPE) $(GATES_ALLOW) $(GATES_CONTEXT)
+	$(PY) $(GATES_DIR)/admission_gate.py --manifest "$$out/manifest.json" --kubectl $(KUBECTL) $(GATES_SCOPE) $(GATES_ALLOW) $(GATES_CONTEXT) $(GATES_REPORT)
 
 ##@ Bookstore (local cluster)
 
