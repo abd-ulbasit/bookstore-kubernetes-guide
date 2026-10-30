@@ -1,0 +1,14 @@
+# kind cluster for the Part 05 security labs (tier A). Create it with:
+#
+#   kind create cluster --config cluster.yaml
+#
+# Run the labs only against a cluster you own: they create and delete their
+# own namespaces and run deliberately insecure Pods. The node image is pinned
+# by digest to the Kubernetes 1.37.0 image kind v0.33.0 publishes; the digest
+# below is the one this guide's lab ran against.
+kind: Cluster
+apiVersion: kind.x-k8s.io/v1alpha4
+name: security-lab
+nodes:
+  - role: control-plane
+    image: kindest/node:v1.37.0@sha256:a1ed56cfb0e7b93589bdf97c8cd566405a265939e3620fc4f5de89adff580ae5

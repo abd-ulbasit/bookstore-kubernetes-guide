@@ -1,0 +1,108 @@
+# Transcript for 05-security/02-pod-security.md, hands-on steps 1 to 10.
+# Tier A: a kind cluster, Kubernetes v1.37.0 node, kubectl v1.37.2.
+# Node runtime: containerd v2.3.4, runc 1.4.3, crictl 1.36.0.
+# Recorded by running examples/security-lab/labs/05-02.sh from full-guide/.
+# The cluster name is shown as `security-lab`.
+#
+# What did not work the first time: user-namespace Pods (hostUsers: false)
+# never start on a default kind cluster. The kube-apiserver accepts the field,
+# but the kubelet cannot create the sandbox because the kind node is itself a
+# container and the nested read-only sysfs mount is denied. That is why 01.01
+# keeps hostUsers out of the baseline until it is verified, and why this lab
+# shows what the field would do rather than claiming it runs here.
+## step 1 — one namespace that permits everything, one that enforces restricted
+$ kubectl create ns psa-lab && kubectl label ns psa-lab pod-security.kubernetes.io/enforce=privileged
+namespace/psa-lab labeled
+
+$ kubectl create ns psa-restricted && kubectl label ns psa-restricted pod-security.kubernetes.io/enforce=restricted pod-security.kubernetes.io/warn=restricted
+namespace/psa-restricted labeled
+
+## step 2 — privileged: full capabilities over the node kernel
+$ kubectl apply -f esc-privileged.yaml && kubectl wait -n psa-lab --for=condition=Ready pod/escape-privileged --timeout=90s
+pod/escape-privileged created
+pod/escape-privileged condition met
+
+$ kubectl exec -n psa-lab escape-privileged -- grep -E "^Cap(Eff|Bnd)" /proc/self/status | sed "s/\\t/ /"
+CapEff: 000001ffffffffff
+CapBnd: 000001ffffffffff
+
+## step 3 — hostPath / : read every file on the node, including the cluster CA key
+$ kubectl apply -f esc-hostpath.yaml && kubectl wait -n psa-lab --for=condition=Ready pod/escape-hostpath --timeout=90s
+pod/escape-hostpath created
+pod/escape-hostpath condition met
+
+$ kubectl exec -n psa-lab escape-hostpath -- sh -c "cat /host/etc/hostname; ls /host/etc/kubernetes/pki/ca.key"
+security-lab-control-plane
+/host/etc/kubernetes/pki/ca.key
+
+## step 4 — hostPID: see and signal every process on the node
+$ kubectl apply -f esc-hostpid.yaml && kubectl wait -n psa-lab --for=condition=Ready pod/escape-hostpid --timeout=90s
+pod/escape-hostpid created
+pod/escape-hostpid condition met
+
+$ kubectl exec -n psa-lab escape-hostpid -- sh -c "ps -o pid,comm | grep -E \"kubelet|containerd\$\"" | awk "{\$1=\$1;print}"
+137 containerd
+748 kubelet
+
+## step 5 — a mounted runtime socket is root over every pod on the node
+$ kubectl apply -f esc-socket.yaml && kubectl wait -n psa-lab --for=condition=Ready pod/escape-socket --timeout=90s
+pod/escape-socket created
+pod/escape-socket condition met
+
+$ kubectl exec -n psa-lab escape-socket -- sh -c "R=unix:///run/containerd/containerd.sock; echo containers visible: $(crictl -r $R ps -q | wc -l); crictl -r $R ps --name kube-apiserver -o table | grep -o kube-apiserver-[a-z0-9-]*"
+containers visible: 13
+kube-apiserver-security-lab-control-plane
+
+## step 6 — no read-only rootfs: drop a binary into the running container
+$ kubectl apply -f esc-mutable.yaml && kubectl wait -n psa-lab --for=condition=Ready pod/escape-mutable --timeout=90s
+pod/escape-mutable created
+pod/escape-mutable condition met
+
+$ kubectl exec -n psa-lab escape-mutable -- sh -c "printf %s\\\\n \"#!/bin/sh\" \"echo INJECTED\" > /usr/bin/backdoor; chmod +x /usr/bin/backdoor; /usr/bin/backdoor"
+INJECTED
+
+## step 7 — user namespaces: what they would do, and why default kind cannot
+$ kubectl apply -f userns-off.yaml && kubectl wait -n psa-lab --for=condition=Ready pod/userns-off --timeout=90s
+pod/userns-off created
+pod/userns-off condition met
+
+$ kubectl exec -n psa-lab userns-off -- cat /proc/self/uid_map | awk "{\$1=\$1;print}"
+0 0 4294967295
+
+$ kubectl apply -f userns-on.yaml && kubectl wait -n psa-lab --for=condition=Ready pod/userns-on --timeout=30s
+pod/userns-on created
+error: timed out waiting for the condition on pods/userns-on
+
+$ kubectl get pod -n psa-lab userns-on
+NAME        READY   STATUS              RESTARTS   AGE
+userns-on   0/1     ContainerCreating   0          30s
+
+$ kubectl get events -n psa-lab --field-selector reason=FailedCreatePodSandBox -o jsonpath="{range .items[*]}{.message}{end}"
+Failed to create pod sandbox: rpc error: code = Unknown desc = failed to start sandbox: failed to create containerd task: failed to create shim task: OCI runtime create failed: runc create failed: unable to start container process: error during container init: error mounting "sysfs" to rootfs at "/sys": mount src=sysfs, dst=/sys, dstFd=/proc/thread-self/fd/11, flags=MS_RDONLY|MS_NOSUID|MS_NODEV|MS_NOEXEC: operation not permitted
+
+## step 8 — re-attack a restricted namespace: admission refuses every one
+$ for a in privileged hostpath hostpid socket; do echo "== $a =="; sed "s/psa-lab/psa-restricted/" esc-$a.yaml | kubectl apply --dry-run=server -f - 2>&1 | sed -n "1p"; done
+== privileged ==
+Error from server (Forbidden): error when creating "STDIN": pods "escape-privileged" is forbidden: violates PodSecurity "restricted:latest": privileged (container "esc" must not set securityContext.privileged=true), allowPrivilegeEscalation != false (container "esc" must set securityContext.allowPrivilegeEscalation=false), unrestricted capabilities (container "esc" must set securityContext.capabilities.drop=["ALL"]), runAsNonRoot != true (pod or container "esc" must set securityContext.runAsNonRoot=true), seccompProfile (pod or container "esc" must set securityContext.seccompProfile.type to "RuntimeDefault" or "Localhost")
+== hostpath ==
+Error from server (Forbidden): error when creating "STDIN": pods "escape-hostpath" is forbidden: violates PodSecurity "restricted:latest": allowPrivilegeEscalation != false (container "esc" must set securityContext.allowPrivilegeEscalation=false), unrestricted capabilities (container "esc" must set securityContext.capabilities.drop=["ALL"]), restricted volume types (volume "nodefs" uses restricted volume type "hostPath"), runAsNonRoot != true (pod or container "esc" must set securityContext.runAsNonRoot=true), seccompProfile (pod or container "esc" must set securityContext.seccompProfile.type to "RuntimeDefault" or "Localhost")
+== hostpid ==
+Error from server (Forbidden): error when creating "STDIN": pods "escape-hostpid" is forbidden: violates PodSecurity "restricted:latest": host namespaces (hostPID=true), allowPrivilegeEscalation != false (container "esc" must set securityContext.allowPrivilegeEscalation=false), unrestricted capabilities (container "esc" must set securityContext.capabilities.drop=["ALL"]), runAsNonRoot != true (pod or container "esc" must set securityContext.runAsNonRoot=true), seccompProfile (pod or container "esc" must set securityContext.seccompProfile.type to "RuntimeDefault" or "Localhost")
+== socket ==
+Error from server (Forbidden): error when creating "STDIN": pods "escape-socket" is forbidden: violates PodSecurity "restricted:latest": allowPrivilegeEscalation != false (container "esc" must set securityContext.allowPrivilegeEscalation=false), unrestricted capabilities (container "esc" must set securityContext.capabilities.drop=["ALL"]), restricted volume types (volumes "sock", "crictl" use restricted volume type "hostPath"), runAsNonRoot != true (pod or container "esc" must set securityContext.runAsNonRoot=true), seccompProfile (pod or container "esc" must set securityContext.seccompProfile.type to "RuntimeDefault" or "Localhost")
+
+## step 9 — the hardened form carries the baseline and is admitted
+$ kubectl apply -f hardened.yaml && kubectl wait -n psa-restricted --for=condition=Ready pod/hardened --timeout=90s
+pod/hardened created
+pod/hardened condition met
+
+$ kubectl exec -n psa-restricted hardened -- sh -c "exec 2>&1; id; grep ^CapEff /proc/self/status | sed \"s/\\t/ /\"; printf x > /usr/bin/backdoor || true"
+uid=65532 gid=65532 groups=65532
+CapEff: 0000000000000000
+sh: can't create /usr/bin/backdoor: Read-only file system
+
+## step 10 — tear down the lab namespaces
+$ kubectl delete ns psa-lab psa-restricted --wait=true
+namespace "psa-lab" deleted
+namespace "psa-restricted" deleted
+
