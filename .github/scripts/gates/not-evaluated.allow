@@ -1,0 +1,21 @@
+# Blocks the gates could not judge, which someone checked another way.
+#
+# G2 marks a block `not-evaluated` when Trivy has no check for its kind (a
+# Rollout, a PyTorchJob, a List), or returned nothing for the file. G3 marks a
+# block `missing-crd` when the cluster lacks its custom resource definition.
+# Neither is a pass. If such a block holds a pod template, the gate exits 1
+# unless the block is listed here, because the pod template went unread.
+#
+# One entry per line:
+#
+#     chapter | what | reason
+#
+# chapter  the path under full-guide/, for example 05-security/02-pod-security.md
+# what     what the gate printed for the block: a kind such as Rollout, or
+#          no-scanner-result. A block with several is allowed only when all
+#          of them are listed. `*` allows every one in that chapter.
+# reason   how the block was checked instead, for example "rendered with
+#          the chart and run through Trivy in the pull request". Required.
+#
+# The pull request that adds a line must also say how the block was checked.
+# Remove the line when the chapter stops needing it.

@@ -84,7 +84,9 @@ Tools read three HTML comments. Spell them exactly.
 
 **Insecure on purpose.** Only in Part 05 labs and the capstone overlay, and
 never in namespace `bookstore` or `default`. The lab creates and labels its
-own namespace for the privilege it needs.
+own namespace for the privilege it needs. The gates enforce the chapter half
+of this: a marked block outside the `05-security/` chapters fails, and so
+does a marked workload in namespace `bookstore`, `default` or none.
 
 ````markdown
 <!-- gate: insecure-on-purpose -->
@@ -102,7 +104,9 @@ CI, and so does an unmarked block that fails.
 
 **Output.** `<!-- gate: output -->` above a fence of captured output. Every
 line must appear in the lab transcript, in order and consecutively. Mark
-lines you left out with a line equal to `# ...`.
+lines you left out with a line equal to `# ...`. A block must keep at least
+one real line. Any other comment that starts `<!-- gate:` fails, so a
+misspelt marker cannot leave output unchecked.
 
 **Link later.** A chapter that does not exist yet is named in plain text
 with `<!-- link-later: 05.05 -->` beside it, never linked. The strict build
@@ -169,19 +173,66 @@ interpreter. `SCOPE=` takes chapters or chapter directories relative to
 
 | Command | Checks | Needs |
 |---|---|---|
-| `make gates-test` | the gate scripts' unit tests | |
+| `make gates-test` | the gate scripts' unit tests | Trivy, so its tests cannot skip |
 | `make gates-static SCOPE=...` | G1, G2: five core checks | Trivy 0.76.1 |
 | `make gates-admission SCOPE=...` | G1, G3: `restricted` dry-run | kind v0.33.0 cluster, kubectl v1.37.2 |
 | `python .github/scripts/gates/evidence_gate.py --chapter C --transcript T` | G7 | the lab transcript |
 | `python .github/scripts/check-runasnonroot.py` | existing check | |
 | `mkdocs build --strict` | existing check | |
 
+**What G1 extracts.** Every manifest a reader applies: a `yaml` or `yml`
+fence (block, flow or JSON style), the body of each shell heredoc, and a
+fence such as `json` that is a manifest as a whole. A fence of another
+language that still shows a bare `kind:` outside a heredoc, for example a
+here-string, is a manifest nobody gated, so it fails. Captured output that
+shows a manifest goes under `<!-- gate: output -->`, which exempts it.
+
+**What G2 adds to Trivy.** Trivy reads a null `securityContext` as clean and
+takes a pod-level `runAsNonRoot: true` at face value. The gate therefore
+also checks the parsed YAML: a null or non-mapping `securityContext`, a
+container that sets `runAsNonRoot: false`, and `runAsUser: 0` all fail. Three
+control fixtures prove that check still sees each of them. G2 also scans
+`full-guide/examples` in a whole-guide run (no `SCOPE`). A scoped run scans
+none unless `ALSO=` names them. An `--also` path that is missing, or holds no
+YAML manifest, aborts the run.
+
+**What G3 refuses.** G3 creates the `gate-restricted` namespace, so it runs
+only against a kubectl context that starts with `kind-`. Any other context
+needs `ALLOW_CONTEXT=NAME`. It prints the context before it writes.
+
 The five core checks are KSV-0012, KSV-0014, KSV-0001, KSV-0003 and
-KSV-0030. Exit 0 means pass, 1 means an in-scope failure, and 2 means the
-gate could not trust itself: its control failed, the scope matched nothing,
-or there was nothing to check.
+KSV-0030.
+
+### Exit codes
+
+Each script exits 0 for a pass, 1 for an in-scope failure and 2 when it
+could not trust itself. The 1 and 2 split holds only when you run the
+scripts directly. `make` cannot carry it: GNU Make exits 2 for any failed
+recipe, whatever the script returned, and shows the script's own code only
+in its `Error 1` or `Error 2` line. Read that line, or run the script
+yourself, to tell a failure from an abort.
+
+Exit 2 means "there was nothing to check, or the check cannot be trusted":
+
+- a control fixture was not seen, or the cluster does not enforce Pod
+  Security;
+- a `SCOPE` or an `--also` path matched nothing, or the guide held no
+  manifest at all (the extractor itself exits 2);
+- no in-scope block was judged: every one was `not-evaluated` (G2), or
+  skipped or `missing-crd` (G3);
+- G3 was pointed at a context that is not a kind cluster.
+
+Exit 1 means an in-scope block fails, has a stale marker, breaks the marker
+rules in section 3, or is one no scanner could judge yet holds a pod
+template and is not on the allowlist.
 
 A block no scanner could judge is never a pass. `not-evaluated` (static) is a
-kind Trivy has no check for, such as a Rollout, or a document it would skip.
-`missing-crd` (admission) is a kind the cluster lacks. Both are listed, and
-the PR must say how that block was checked instead.
+kind Trivy has no check for, such as a Rollout, a PyTorchJob, a `List` or a
+`PodTemplate`, or a file Trivy returned nothing for. `missing-crd` (admission)
+is a custom resource the cluster lacks. A removed or wrong `apiVersion` on a
+built-in kind, or on a group the cluster serves, is an `error` instead. Both
+are listed. When such a block holds a pod template, the pod template went
+unread, so the run fails unless the block is on the allowlist,
+`.github/scripts/gates/not-evaluated.allow`. Each line there reads
+`chapter | what | reason`, and the PR must say how the block was checked
+instead.

@@ -1,0 +1,31 @@
+# Gate control fixture. Both securityContext keys are present but null, so the
+# workload declares no hardening at all. Trivy reads a null securityContext as
+# clean, so only the parsed-YAML cross-check and the admission dry-run see it.
+# Not for clusters.
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: gate-control-violating-nullsc
+  namespace: gate-restricted
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: gate-control-violating-nullsc
+  template:
+    metadata:
+      labels:
+        app: gate-control-violating-nullsc
+    spec:
+      automountServiceAccountToken: false
+      securityContext:
+      containers:
+        - name: app
+          image: registry.k8s.io/pause:3.10
+          securityContext:
+          resources:
+            requests:
+              cpu: 10m
+              memory: 16Mi
+            limits:
+              memory: 16Mi

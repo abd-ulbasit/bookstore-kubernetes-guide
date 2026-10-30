@@ -1,0 +1,39 @@
+# Gate control fixture. runAsNonRoot is true, but runAsUser is 0, so the
+# container would run as root. Trivy checks runAsNonRoot alone. Everything else
+# is hardened. Not for clusters.
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: gate-control-violating-uidzero
+  namespace: gate-restricted
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: gate-control-violating-uidzero
+  template:
+    metadata:
+      labels:
+        app: gate-control-violating-uidzero
+    spec:
+      automountServiceAccountToken: false
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 0
+        runAsGroup: 65532
+        seccompProfile:
+          type: RuntimeDefault
+      containers:
+        - name: app
+          image: registry.k8s.io/pause:3.10
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities:
+              drop: ["ALL"]
+          resources:
+            requests:
+              cpu: 10m
+              memory: 16Mi
+            limits:
+              memory: 16Mi

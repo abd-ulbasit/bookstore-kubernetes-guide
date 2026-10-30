@@ -99,7 +99,9 @@ def test_examples_and_part_18_are_excluded(self):
   `examples/` and `18-*`. The marker counts only on the nearest non-blank
   line above the fence.
 - [ ] **Step 4:** Re-run. Expected: PASS. Then run the CLI on `full-guide`:
-  expected about 135 blocks (the count measured on `28ece01`).
+  expected 167 blocks (the count measured on `28ece01`): 134 from yaml
+  fences, 32 from shell heredocs and 1 here-string that fails as an
+  unextracted manifest.
 - [ ] **Step 5:** Commit.
 
 ### Task 2: G2 and the marker half of G5, static gate
@@ -147,9 +149,15 @@ def test_real_trivy_flags_violating_and_clears_hardened(self):
   renamed check or empty result can never read as a pass. Workload kinds:
   Pod, Deployment, StatefulSet, DaemonSet, Job, CronJob, ReplicaSet.
 - [ ] **Step 4:** Re-run. Expected: PASS.
-- [ ] **Step 5:** Run over all of `full-guide` with no scope. Expected: about
-  17 of 20 workload files failing all five core checks, matching §1 of the
-  spec. A very different number means the gate is wrong; fix it first.
+- [ ] **Step 5:** Run over all of `full-guide` with no scope. Expected, as
+  measured on `28ece01` and on HEAD once G1 reads heredocs and flow-style
+  YAML: 39 pass, 33 fail and 95 not-evaluated. G2 sees a workload in 17
+  chapters, and 11 of them fail all five core checks (20 of the 26 workload
+  blocks do). The "17 of 20" in the design was an ad hoc count that neither
+  tree reproduces. Chapters with a `containers:` list that G2 does not count
+  are pod-spec fragments with no `kind:` (4, by design) and custom resources
+  such as a PyTorchJob or a Rollout (5, listed as not-evaluated). A very
+  different number means the gate is wrong; fix it first.
 - [ ] **Step 6:** Commit.
 
 ### Task 3: G3, admission gate

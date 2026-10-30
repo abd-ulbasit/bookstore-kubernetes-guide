@@ -1,0 +1,40 @@
+# Gate control fixture. The pod says runAsNonRoot: true, but the container
+# overrides it to false, and the container's value wins. Trivy takes the pod
+# level value at face value. Everything else is hardened. Not for clusters.
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: gate-control-violating-override
+  namespace: gate-restricted
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: gate-control-violating-override
+  template:
+    metadata:
+      labels:
+        app: gate-control-violating-override
+    spec:
+      automountServiceAccountToken: false
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 65532
+        runAsGroup: 65532
+        seccompProfile:
+          type: RuntimeDefault
+      containers:
+        - name: app
+          image: registry.k8s.io/pause:3.10
+          securityContext:
+            runAsNonRoot: false
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities:
+              drop: ["ALL"]
+          resources:
+            requests:
+              cpu: 10m
+              memory: 16Mi
+            limits:
+              memory: 16Mi
