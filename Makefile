@@ -171,8 +171,10 @@ GATES_ALLOW := --allow $(GATES_DIR)/not-evaluated.allow
 GATES_CONTEXT := $(foreach c,$(ALLOW_CONTEXT),--allow-context $(c))
 
 .PHONY: gates-test
-gates-test: ## Run the unit tests of the gate scripts. Needs Trivy: its tests may not be skipped.
+gates-test: ## Run the unit tests of the gate scripts. Needs Trivy, Helm and kubectl: their tests may not be skipped.
 	@command -v trivy >/dev/null || (echo "trivy not found; the real-Trivy tests would be skipped. brew install trivy" && exit 1)
+	@command -v $(HELM) >/dev/null || (echo "helm not found; the chart-rendering tests would be skipped" && exit 1)
+	@command -v $(KUBECTL) >/dev/null || (echo "kubectl not found; the overlay-rendering tests would be skipped" && exit 1)
 	REQUIRE_TRIVY=1 $(PY) -m unittest discover -s $(GATES_DIR)
 
 .PHONY: gates-static

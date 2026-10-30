@@ -118,13 +118,30 @@ def is_manifest(body: str) -> bool:
     return bool(top_level_kinds(body)) or is_parsed_manifest(body)
 
 
-def classify(body: str, marked: bool) -> tuple[str, list[str]]:
+def parse_error(body: str) -> str | None:
+    """Return a one-line reason body does not parse as YAML, or None if it does."""
+    try:
+        list(yaml.safe_load_all(body))
+    except yaml.YAMLError as exc:
+        problem = getattr(exc, "problem", None) or (str(exc).splitlines() or ["invalid YAML"])[0]
+        mark = getattr(exc, "problem_mark", None)
+        return f"line {mark.line + 1}: {problem}" if mark is not None else str(problem)
+    except (ValueError, RecursionError) as exc:
+        return (str(exc).splitlines() or [type(exc).__name__])[0][:200]
+    return None
+
+
+def classify(body: str, marked: bool, reject_templates: bool = True) -> tuple[str, list[str]]:
     """Return (class, kinds) for one block body.
 
     Template syntax and YAML errors come first: a block that cannot be parsed
-    cannot be judged, marked or not.
+    cannot be judged, marked or not. A chapter block that shows `{{` is Helm
+    template text, so it is unparseable whether or not YAML could read it.
+    A file in an example tree is judged by its YAML alone (`reject_templates`
+    False): Argo, Prometheus and Backstage manifests carry `{{ }}` inside
+    strings and are real manifests.
     """
-    if _TEMPLATE.search(body):
+    if reject_templates and _TEMPLATE.search(body):
         return UNPARSEABLE, top_level_kinds(body)
     docs = load_documents(body)
     if docs is None:

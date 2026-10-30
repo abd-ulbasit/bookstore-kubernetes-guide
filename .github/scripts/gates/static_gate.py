@@ -33,6 +33,15 @@ fixtures prove that cross-check still sees each of them.
 An insecure-on-purpose marker is allowed only in the Part 05 chapters, and
 never on a workload in namespace `bookstore`, `default` or none.
 
+Example trees (--also) are judged as the manifests a reader would apply. A
+file is unparseable only if YAML itself cannot read it, so `{{ }}` inside a
+string (Argo, Prometheus, Backstage) is fine. Raw files under a Helm chart's
+`templates/` are skipped; the chart is rendered with `helm template`, once
+with its default values and once per `values-*.yaml`, and the output is
+judged instead. Each Kustomize overlay is built with `kubectl kustomize` and
+judged as built. A chart or overlay that fails to render is a failure, and a
+missing helm or kubectl aborts the run rather than skipping what it renders.
+
 Exit codes: 0 every in-scope block passes, or is not evaluated and holds no
 pod template. 1 an in-scope block fails, has a stale marker, or is not
 evaluated while holding a pod template that is not on the allowlist. 2 the
@@ -53,6 +62,7 @@ Usage:
 from __future__ import annotations
 
 import argparse
+import atexit
 import json
 import shutil
 import subprocess
@@ -65,6 +75,7 @@ from pathlib import Path
 import yaml
 
 import extract_blocks as eb
+import gate_render as gr
 
 CORE = ("KSV-0012", "KSV-0014", "KSV-0001", "KSV-0003", "KSV-0030")
 
@@ -133,6 +144,10 @@ BASELINE_CONTROLS = {
     "violating-runasnonroot-override.yaml": ({"KSV-0012"}, set()),
     "violating-runasuser-zero.yaml": ({"KSV-0012"}, set()),
 }
+
+# Block.source of a block rendered from a chart or an overlay.
+HELM, KUSTOMIZE = "helm", "kustomize"
+RENDERED_SOURCES = (HELM, KUSTOMIZE)
 
 PASS, FAIL, STALE, NOT_EVALUATED = "pass", "fail", "stale-marker", "not-evaluated"
 JUDGED = (PASS, FAIL, STALE)
@@ -479,13 +494,49 @@ def scan_files(files: list[Path], trivy: str = "trivy") -> dict[Path, Scan]:
     return {path: scans.get(name, Scan(set(), set(), False)) for path, name in names.items()}
 
 
-def _also_blocks(paths: list[str]) -> list[eb.Block]:
+def _rendered_block(rendered: gr.Rendered, workdir: Path, number: int) -> eb.Block:
+    """Write a rendered chart or overlay to workdir and wrap it in a block.
+
+    A render that failed, or produced no manifest, becomes an unparseable block
+    carrying the reason, so it fails the run instead of passing unread.
+    """
+    chapter = f"{rendered.origin.as_posix()} [{rendered.label}]"
+    source = HELM if rendered.tool == "helm" else KUSTOMIZE
+    note = ""
+    if not rendered.ok:
+        klass, kinds, note = eb.UNPARSEABLE, [], f"{rendered.failure_note}: {rendered.text}"
+    elif not eb.is_manifest(rendered.text):
+        klass, kinds, note = eb.UNPARSEABLE, [], rendered.empty_note
+    else:
+        klass, kinds = eb.classify(rendered.text, False, reject_templates=False)
+        if klass == eb.UNPARSEABLE:
+            note = "yaml-error: " + (eb.parse_error(rendered.text) or "unparseable")
+    path = workdir / f"{number:05d}__{rendered.tool}.{'txt' if klass == eb.UNPARSEABLE else 'yaml'}"
+    path.write_text(rendered.text if klass != eb.UNPARSEABLE else note + "\n", encoding="utf-8")
+    return eb.Block(chapter, 0, 1, klass, kinds, str(path), source, note)
+
+
+def _also_blocks(
+    paths: list[str], workdir: Path | None = None, helm: str = "helm", kubectl: str = "kubectl"
+) -> list[eb.Block]:
     """Turn the files under --also paths into blocks that count as in scope.
 
     A path that does not exist, or that holds no manifest, would scan nothing
-    and read as a pass, so it aborts the run.
+    and read as a pass, so it aborts the run. Raw files under a chart's
+    `templates/` are skipped and the chart is rendered instead; each Kustomize
+    overlay is built. The rendered text is written under workdir.
     """
-    blocks = []
+    blocks: list[eb.Block] = []
+    rendered_dir: list[Path] = []
+
+    def work() -> Path:
+        if workdir is not None:
+            return workdir
+        if not rendered_dir:
+            rendered_dir.append(Path(tempfile.mkdtemp(prefix="static-gate-render-")))
+            atexit.register(shutil.rmtree, rendered_dir[0], ignore_errors=True)
+        return rendered_dir[0]
+
     for given in paths:
         root = Path(given)
         if not root.exists():
@@ -493,18 +544,42 @@ def _also_blocks(paths: list[str]) -> list[eb.Block]:
         files = [root] if root.is_file() else sorted(
             p for p in root.rglob("*") if p.is_file() and p.suffix.lower() in (".yaml", ".yml")
         )  # fmt: skip
-        found = 0
+        found = skipped = 0
         for path in files:
+            if gr.is_chart_template(path):
+                skipped += 1
+                continue
+            if gr.is_chart_input(path):
+                continue
             try:
                 body = path.read_text(encoding="utf-8")
             except (OSError, UnicodeDecodeError) as exc:
                 raise ControlError(f"cannot read {path}: {exc}") from exc
             if not eb.is_manifest(body):
                 continue
-            klass, kinds = eb.classify(body, False)
-            blocks.append(eb.Block(path.as_posix(), 0, 1, klass, kinds, str(path.resolve())))
+            klass, kinds = eb.classify(body, False, reject_templates=False)
+            note = ""
+            if klass == eb.UNPARSEABLE and (reason := eb.parse_error(body)):
+                note = f"yaml-error: {reason}"
+            blocks.append(eb.Block(path.as_posix(), 0, 1, klass, kinds, str(path.resolve()), note=note))
+            found += 1
+        renders = []
+        try:
+            if root.is_dir():
+                for chart in gr.find_charts(root):
+                    renders += [gr.render_chart(chart, v, helm) for v in (None, *gr.values_files(chart))]
+                renders += [gr.render_overlay(overlay, kubectl) for overlay in gr.find_overlays(root)]
+        except gr.RenderUnavailable as exc:
+            raise ControlError(str(exc)) from exc
+        for rendered in renders:
+            blocks.append(_rendered_block(rendered, work(), len(blocks)))
             found += 1
         if not found:
+            if skipped:
+                raise ControlError(
+                    f"--also path {given!r} holds only raw Helm templates ({skipped} files under a "
+                    "chart's templates/); give the chart directory so the chart is rendered"
+                )
             raise ControlError(f"--also path {given!r} holds no YAML manifest (.yaml or .yml)")
     return blocks
 
@@ -547,15 +622,22 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--scope", action="append", default=[], metavar="CHAPTER")
     parser.add_argument("--also", action="extend", nargs="+", default=[], metavar="PATH")
     parser.add_argument("--allow", action="append", default=[], type=Path, metavar="FILE")
+    parser.add_argument("--helm", default="helm")
+    parser.add_argument("--kubectl", default="kubectl")
     parser.add_argument("--report", type=Path)
     args = parser.parse_args(argv)
 
+    with tempfile.TemporaryDirectory(prefix="static-gate-render-") as render_dir:
+        return run(args, Path(render_dir))
+
+
+def run(args: argparse.Namespace, render_dir: Path) -> int:
     blocks = eb.load_manifest(args.manifest)
     try:
         if not blocks:
             raise ControlError("the manifest holds no blocks, so there is nothing to check")
         check_scopes(blocks, args.scope)
-        also = _also_blocks(args.also)
+        also = _also_blocks(args.also, render_dir, args.helm, args.kubectl)
         allow = load_allowlist(args.allow)
         scans = scan_files([Path(b.path) for b in blocks + also])
     except ControlError as exc:

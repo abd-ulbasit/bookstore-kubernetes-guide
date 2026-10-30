@@ -173,8 +173,8 @@ interpreter. `SCOPE=` takes chapters or chapter directories relative to
 
 | Command | Checks | Needs |
 |---|---|---|
-| `make gates-test` | the gate scripts' unit tests | Trivy, so its tests cannot skip |
-| `make gates-static SCOPE=...` | G1, G2: five core checks | Trivy 0.76.1 |
+| `make gates-test` | the gate scripts' unit tests | Trivy, Helm and kubectl, so their tests cannot skip |
+| `make gates-static SCOPE=...` | G1, G2: five core checks | Trivy 0.76.1; Helm and kubectl for a whole-guide run |
 | `make gates-admission SCOPE=...` | G1, G3: `restricted` dry-run | kind v0.33.0 cluster, kubectl v1.37.2 |
 | `python .github/scripts/gates/evidence_gate.py --chapter C --transcript T` | G7 | the lab transcript |
 | `python .github/scripts/check-runasnonroot.py` | existing check | |
@@ -195,6 +195,17 @@ control fixtures prove that check still sees each of them. G2 also scans
 `full-guide/examples` in a whole-guide run (no `SCOPE`). A scoped run scans
 none unless `ALSO=` names them. An `--also` path that is missing, or holds no
 YAML manifest, aborts the run.
+
+**How G2 reads the example trees.** A file is unparseable only if YAML itself
+cannot read it, so `{{ }}` inside a string (Argo, Prometheus, Backstage) is
+fine and the failure names the line. Raw files under a Helm chart's
+`templates/` are not YAML until rendered, so G2 skips them and scans the
+chart as `helm template` renders it, once with the default values and once
+for each `values-*.yaml`. It builds each Kustomize overlay with
+`kubectl kustomize` (a base or a component is covered through the overlays
+that use it) and judges the result. A chart or overlay that fails to render is
+a failure, and a missing `helm` or `kubectl` aborts the run, because skipping
+what it renders would let it pass unread.
 
 **What G3 refuses.** G3 creates the `gate-restricted` namespace, so it runs
 only against a kubectl context that starts with `kind-`. Any other context
