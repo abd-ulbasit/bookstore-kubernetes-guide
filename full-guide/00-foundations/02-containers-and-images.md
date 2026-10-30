@@ -40,6 +40,22 @@ containers. That immutability + identicality is exactly what makes the
 "cattle" model and reproducible rollouts of
 [chapter 01](01-why-kubernetes.md) possible.
 
+## Threats and controls
+
+This chapter owns the image-level threats below. Each row names the control
+the chapter teaches and where the topic goes deeper. The Pod field that
+enforces a non-root user, `runAsNonRoot`, is taught in
+[01.01](../01-core-workloads/01-pods.md#baseline).
+
+| Threat | Control taught here | Goes deeper |
+|---|---|---|
+| Every container on a node shares one host kernel | Named only. The hardening flags in the hands-on narrow what a process can reach | [Pod security](../05-security/02-pod-security.md) |
+| A bloated image gives an attacker a shell, a package manager and tools | Multi-stage build on a distroless static base, which has no shell | [Pod security](../05-security/02-pod-security.md) |
+| The process runs as root | The image declares `USER 65532:65532` | [Pod security](../05-security/02-pod-security.md) |
+| A secret ends up in a layer, where a later delete does not remove it | No secrets in build arguments or copied files; check `docker history` and scan | [Supply chain](../05-security/03-supply-chain.md) |
+| A mutable tag changes what runs without any manifest change | Digest pin on third-party base images; the local build keeps its build tag | [Supply chain](../05-security/03-supply-chain.md) |
+| A known CVE ships in a dependency the image contains | The first Trivy scan, read as a finding with its fixed version | [Supply chain](../05-security/03-supply-chain.md) |
+
 ## Containers vs. VMs
 
 ```
@@ -234,7 +250,7 @@ COPY . .
 # CGO disabled => fully static binary that runs on scratch/distroless-static.
 RUN CGO_ENABLED=0 GOOS=linux go build -trimpath -ldflags="-s -w" -o /out/catalog .
 
-FROM gcr.io/distroless/static:nonroot
+FROM gcr.io/distroless/static:nonroot@sha256:18f4cc26c9ffa7f20a359298be7deadac5c607c8e03a02b8119f1a5fc2f82c99
 WORKDIR /
 COPY --from=build /out/catalog /catalog
 # 65532 is the "nonroot" UID/GID in distroless images.
@@ -253,7 +269,9 @@ What each line does and *why it is written this way*:
   ships. The tag names an exact patch release, not `1.26`: the Go standard
   library is compiled *into* the binary, so the toolchain patch decides
   which stdlib CVEs ship. It is the same version CI's `govulncheck` scans
-  with, and CI fails if the two drift apart.
+  with, and CI fails if the two drift apart. The build stage carries only its
+  tag: CI's check matches this exact line, so a digest there needs that check
+  changed first. That gap is open; the shipped base below is pinned.
 - **`WORKDIR /src`** — sets/creates the working directory for subsequent
   commands in this stage.
 - **`COPY go.mod go.sum* ./` then `RUN go mod download`** — copy *only* the
@@ -270,16 +288,21 @@ What each line does and *why it is written this way*:
   `GOOS=linux` targets the container OS. `-trimpath` strips local filesystem
   paths (reproducibility/privacy). `-ldflags="-s -w"` drops the symbol table
   and DWARF debug info (smaller binary). Output goes to `/out/catalog`.
-- **`FROM gcr.io/distroless/static:nonroot`** — stage 2 starts a brand-new,
-  tiny final image: distroless static (just CA certs + the minimum to run a
-  static binary), `nonroot` variant (a built-in unprivileged user, UID 65532).
+- **`FROM gcr.io/distroless/static:nonroot@sha256:…`** — stage 2 starts a
+  brand-new, tiny final image: distroless static (just CA certs + the minimum
+  to run a static binary), `nonroot` variant (a built-in unprivileged user,
+  UID 65532). The digest pins the exact base bytes, so a new push under the
+  same tag cannot change what this image is built on. The tag before it names
+  the variant for a reader.
 - **`WORKDIR /`** — final image working directory.
 - **`COPY --from=build /out/catalog /catalog`** — copy *only* the compiled
   binary out of the `build` stage. The toolchain, source, and module cache are
   all left behind. The shipped image is essentially `{CA certs} + {one binary}`.
 - **`USER 65532:65532`** — run as the non-root `nonroot` UID/GID. The
   container does not run as root even before Kubernetes adds its own
-  [security context](../05-security/02-pod-security.md).
+  [security context](../05-security/02-pod-security.md). The baseline's
+  `runAsUser` and `runAsGroup` repeat these numbers
+  ([01.01](../01-core-workloads/01-pods.md#baseline)).
 - **`EXPOSE 8080`** — documents the listening port (metadata; does not publish
   anything by itself). Matches the app's default `PORT`.
 - **`ENTRYPOINT ["/catalog"]`** — exec form: PID 1 in the container *is* the Go
@@ -298,6 +321,43 @@ for Kubernetes.
 > default `/var/run/docker.sock`, point Docker at its socket via `DOCKER_HOST`
 > (see your engine's docs for the socket path).
 
+The steps below run in the order the chapter's evidence transcript records
+them. The transcript was captured on a remote engine: where you see
+`ssh thinkpad`, your run uses the local engine directly.
+
+### Lint the Dockerfile first
+
+Lint before the build, the way a pipeline does. Hadolint v2.15.1 runs from
+its image, pinned by digest. A clean run prints nothing, so the control
+below shows the linter reading its input.
+
+```sh
+# hadolint v2.15.1, pinned by digest
+docker run --rm -i ghcr.io/hadolint/hadolint@sha256:32dac94127fd60b7b7e3fbfc65e1383b9b5e25c9bfd7b8536de7a539fe68a12d < catalog/Dockerfile
+```
+
+The lint of `catalog/Dockerfile` prints nothing and exits zero. A silent
+linter proves nothing by itself, so run it on a Dockerfile with known problems:
+
+```sh
+printf 'FROM alpine:latest\nRUN apk add curl\nUSER root\n' | docker run --rm -i ghcr.io/hadolint/hadolint@sha256:32dac94127fd60b7b7e3fbfc65e1383b9b5e25c9bfd7b8536de7a539fe68a12d /bin/hadolint --no-color -
+```
+
+<!-- gate: output -->
+```text
+-:1 DL3007 warning: Using latest is prone to errors if the image will ever update. Pin the version explicitly to a release tag
+-:2 DL3019 info: Use the `--no-cache` switch to avoid the need to use `--update` and remove `/var/cache/apk/*` when done installing packages
+-:2 DL3018 warning: Pin versions in apk add. Instead of `apk add <package>` use `apk add <package>=<version>`
+-:3 DL3002 warning: Last USER should not be root
+-:3 DL3066 info: Non-numeric user-id may not be resolvable by host system
+```
+
+Each finding prints the line, the rule, and the message. The control has five
+findings: an unpinned `latest` tag, apk packages installed without pinned
+versions or a cache cleanup, a final `USER root`, and a non-numeric user ID.
+
+### Build the image
+
 ```sh
 # from the repo root
 cd full-guide/examples/bookstore/app
@@ -305,72 +365,266 @@ cd full-guide/examples/bookstore/app
 # Build the image (tag it exactly as later chapters expect)
 docker build -t bookstore/catalog:dev ./catalog
 
-# How small is it? (distroless + static binary → tens of MB)
+# How small is it?
 docker image ls bookstore/catalog:dev
-
-# Run it as a plain container, publish container :8080 to host :8080,
-# pass the PORT env the app reads (default is already 8080; shown for clarity)
-docker run --rm -p 8080:8080 -e PORT=8080 --name catalog bookstore/catalog:dev
 ```
 
-In another terminal, exercise the same endpoints Kubernetes will later use as
-health probes:
+<!-- gate: output -->
+```text
+IMAGE                   ID             DISK USAGE   CONTENT SIZE   EXTRA
+bookstore/catalog:dev   13d7f0b70505       29.1MB         6.86MB   U    
+```
+
+Most of the layers come from the distroless base: CA certificates, the passwd
+and group files, time zone data and a few system files. The catalog adds one
+layer, the binary.
+
+The image's baked-in metadata matches the spec:
 
 ```sh
-curl -s localhost:8080/healthz   ; echo   # {"status":"ok"}
-curl -s localhost:8080/readyz    ; echo   # {"status":"ready"} (no DB/Redis configured)
-curl -s localhost:8080/books     | head   # the in-memory sample catalog (JSON array)
+docker image inspect bookstore/catalog:dev --format 'Entrypoint={{.Config.Entrypoint}} User={{.Config.User}} Exposed={{.Config.ExposedPorts}}'
 ```
 
-Stop it. From the foreground terminal `Ctrl-C` sends **SIGINT**; from another
-terminal `docker stop catalog` sends **SIGTERM** (then **SIGKILL** if the
-process hasn't exited within the grace period). The key point: because
-`ENTRYPOINT` is exec-form, the Go binary is **PID 1** and receives *either*
-signal **directly** (no shell to swallow it), so it runs its handler and you'll
-see it log `shutdown signal received` then `shutdown complete`. This matters
-for Kubernetes specifically: on Pod termination the kubelet sends **SIGTERM**
-to PID 1 (then SIGKILL after `terminationGracePeriodSeconds`), so exec-form
-`ENTRYPOINT` is exactly what makes graceful shutdown — and clean rollouts —
-work ([health & lifecycle](../01-core-workloads/02-health-and-lifecycle.md)).
-Inspect the image's baked-in metadata to connect it back to the spec:
+<!-- gate: output -->
+```text
+Entrypoint=[/catalog] User=65532:65532 Exposed=map[8080/tcp:{}]
+```
+
+### Check the image before it ships
+
+The history and the scan each run on the built image. Each check gets a
+control, so a clean result means the tool read its input.
+
+**Read the layers for secrets.** A secret passed as a build argument, or copied
+into a layer and deleted later, stays in the image history. Read the history,
+then grep it for secret-looking words:
 
 ```sh
-docker image inspect bookstore/catalog:dev \
-  --format 'Entrypoint={{.Config.Entrypoint}} User={{.Config.User}} Exposed={{.Config.ExposedPorts}}'
-# Entrypoint=[/catalog] User=65532:65532 Exposed=map[8080/tcp:{}]
+docker history --no-trunc --format '{{.CreatedBy}}' bookstore/catalog:dev
+docker history --no-trunc --format '{{.CreatedBy}}' bookstore/catalog:dev | grep -c -i -E 'secret|token|password|api.?key'
 ```
 
-You now have `bookstore/catalog:dev` — the exact image
-[chapter 06](06-declarative-api-model.md) writes a Pod manifest for and
-[chapter 07](07-local-cluster-setup.md) loads into a kind cluster.
+<!-- gate: output -->
+```text
+ENTRYPOINT ["/catalog"]
+EXPOSE [8080/tcp]
+USER 65532:65532
+COPY /out/catalog /catalog # buildkit
+WORKDIR /
+# ...
+bazel build @trixie//base-files/amd64:data_statusd
+```
+
+<!-- gate: output -->
+```text
+0
+```
+
+The history shows the catalog's own steps at the top, then the base layers.
+Nothing in the build instructions matches a secret word.
+
+**Scan the image** with Trivy 0.76.1, the version this guide's CI pins. Save the
+image to a tar file first, so Trivy reads the same bytes whether the engine is
+local or remote:
+
+```sh
+docker save bookstore/catalog:dev > catalog-dev.tar
+trivy image --input catalog-dev.tar
+```
+
+<!-- gate: output -->
+```text
+# ...
+Report Summary
+
+┌───────────────────────────────┬──────────┬─────────────────┬─────────┐
+│            Target             │   Type   │ Vulnerabilities │ Secrets │
+├───────────────────────────────┼──────────┼─────────────────┼─────────┤
+│ catalog-dev.tar (debian 13.7) │  debian  │        0        │    -    │
+├───────────────────────────────┼──────────┼─────────────────┼─────────┤
+│ catalog                       │ gobinary │        1        │    -    │
+└───────────────────────────────┴──────────┴─────────────────┴─────────┘
+Legend:
+- '-': Not scanned
+- '0': Clean (no security findings detected)
+
+
+catalog (gobinary)
+==================
+Total: 1 (UNKNOWN: 1, LOW: 0, MEDIUM: 0, HIGH: 0, CRITICAL: 0)
+
+┌──────────────────┬────────────────┬──────────┬────────┬───────────────────┬───────────────┬────────────────────────────────────────────────────┐
+│     Library      │ Vulnerability  │ Severity │ Status │ Installed Version │ Fixed Version │                       Title                        │
+├──────────────────┼────────────────┼──────────┼────────┼───────────────────┼───────────────┼────────────────────────────────────────────────────┤
+│ golang.org/x/sys │ CVE-2026-39824 │ UNKNOWN  │ fixed  │ v0.34.0           │ 0.44.0        │ Invoking integer overflow in NewNTUnicodeString in │
+│                  │                │          │        │                   │               │ golang.org/x/sys/windows                           │
+│                  │                │          │        │                   │               │ https://avd.aquasec.com/nvd/cve-2026-39824         │
+└──────────────────┴────────────────┴──────────┴────────┴───────────────────┴───────────────┴────────────────────────────────────────────────────┘
+```
+
+The OS packages have no findings. The one finding is in `golang.org/x/sys`
+v0.34.0, a module compiled into the Go binary, and Trivy lists 0.44.0 as
+the fixed version. Trivy matches module versions, so it cannot tell whether the
+binary calls the affected Windows code. govulncheck, which this guide's CI runs,
+checks reachability. The fix is to raise that module in `go.mod` and rebuild.
+This chapter leaves the example at its current version, so the scan here matches
+what the guide ships.
+
+Trivy's secret scanner reads file contents, and the scan above printed no secret
+section. In a Trivy report, a `-` under Secrets means not scanned, so read the
+detail sections for findings.
+
+### Run it with the hardening flags
+
+Run the image in the foreground. Each of the three hardening flags first appears
+here, and each maps to a field in the
+[security baseline](../01-core-workloads/01-pods.md#baseline), which sets the
+same control on a Pod:
+
+```sh
+docker run --rm --name catalog -p 8080:8080 -e PORT=8080 --read-only --cap-drop=ALL --security-opt=no-new-privileges bookstore/catalog:dev
+```
+
+- **`--read-only`** mounts the root filesystem read-only. The baseline's
+  `readOnlyRootFilesystem: true` does the same, and writable paths come from
+  an `emptyDir`.
+- **`--cap-drop=ALL`** removes every Linux capability. A Go server on port 8080
+  needs none. The baseline's `capabilities: drop: ["ALL"]` does the same.
+- **`--security-opt=no-new-privileges`** stops a process from gaining privileges
+  through a setuid binary or file capabilities. The baseline's
+  `allowPrivilegeEscalation: false` sets the same flag.
+
+Call the endpoints Kubernetes uses as probes from a second terminal. The
+captured run reached the same port through an ssh session to the engine host.
+
+```sh
+curl -s localhost:8080/healthz
+```
+
+<!-- gate: output -->
+```text
+{"status":"ok"}
+```
+
+```sh
+curl -s localhost:8080/readyz
+```
+
+<!-- gate: output -->
+```text
+{"status":"ready"}
+```
+
+```sh
+curl -s localhost:8080/books | head -c 110; echo
+```
+
+<!-- gate: output -->
+```text
+[{"id":1,"title":"The Go Programming Language","author":"Donovan \u0026 Kernighan","price":39.99},{"id":2,"tit
+```
+
+Read the settings back from the running container:
+
+```sh
+docker top catalog -o uid,pid,args
+docker inspect --format 'ReadonlyRootfs={{.HostConfig.ReadonlyRootfs}} CapDrop={{.HostConfig.CapDrop}} SecurityOpt={{.HostConfig.SecurityOpt}} User={{.Config.User}}' catalog
+```
+
+<!-- gate: output -->
+```text
+UID                 PID                 COMMAND
+65532               3531486             /catalog
+```
+
+<!-- gate: output -->
+```text
+ReadonlyRootfs=true CapDrop=[ALL] SecurityOpt=[no-new-privileges] User=65532:65532
+```
+
+The process runs as UID 65532, the user the image declares. The flags are
+applied as written.
+
+Stop the container from the second terminal with `docker stop catalog`. That
+sends SIGTERM, then SIGKILL if the process has not exited within the grace
+period. Ctrl-C in the foreground terminal sends SIGINT instead. The entrypoint
+is exec form, so the Go binary is PID 1 and receives the signal itself. The
+handler logs the shutdown:
+
+```sh
+docker stop catalog
+```
+
+<!-- gate: output -->
+```text
+{"time":"2026-10-30T23:16:27.289502108Z","level":"INFO","msg":"DB_DSN unset; serving in-memory sample books"}
+{"time":"2026-10-30T23:16:27.289953855Z","level":"INFO","msg":"catalog listening","addr":":8080"}
+{"time":"2026-10-30T23:16:30.261914713Z","level":"INFO","msg":"shutdown signal received","signal":"terminated"}
+{"time":"2026-10-30T23:16:30.262030119Z","level":"INFO","msg":"shutdown complete"}
+```
+
+### Deliberate failures
+
+The next two runs fail on purpose. Each one shows a control working.
+
+**No shell.** Override the entrypoint with a shell. The image has none, so the
+container never starts. This is the no-shell property from the threats table:
+
+```sh
+docker run --rm --entrypoint sh bookstore/catalog:dev -c 'echo hi'
+```
+
+<!-- gate: output -->
+```text
+docker: Error response from daemon: failed to create task for container: failed to create shim task: OCI runtime create failed: runc create failed: unable to start container process: error during container init: exec: "sh": executable file not found in $PATH
+```
+
+**Read-only root and dropped capabilities.** The catalog image has no shell to
+run a write, so this check uses busybox, a small image that has one. The
+digest is the busybox 1.36 image. The `tr` only replaces tabs in the output
+with spaces, so the lines read as plain text.
+
+```sh
+# busybox:1.36, pinned by digest
+docker run --rm busybox@sha256:73aaf090f3d85aa34ee199857f03fa3a95c8ede2ffd4cc2cdb5b94e566b11662 sh -c 'touch /probe && echo wrote-probe; grep -E "CapEff|NoNewPrivs" /proc/self/status' | tr '\t' ' '
+```
+
+<!-- gate: output -->
+```text
+wrote-probe
+CapEff: 00000000a80425fb
+NoNewPrivs: 0
+```
+
+Without the flags the write succeeds, the capability set is full, and
+`no-new-privileges` is off. Now the same command with the three flags:
+
+```sh
+# busybox:1.36, pinned by digest
+docker run --rm --read-only --cap-drop=ALL --security-opt=no-new-privileges busybox@sha256:73aaf090f3d85aa34ee199857f03fa3a95c8ede2ffd4cc2cdb5b94e566b11662 sh -c 'touch /probe && echo wrote-probe; grep -E "CapEff|NoNewPrivs" /proc/self/status' | tr '\t' ' '
+```
+
+<!-- gate: output -->
+```text
+touch: /probe: Read-only file system
+CapEff: 0000000000000000
+NoNewPrivs: 1
+```
+
+The write is denied, the capability set is empty, and `NoNewPrivs` is 1.
 
 ## Production notes
 
-> **In production:** keep images **minimal and non-root**. Multi-stage +
-> distroless/scratch (as `catalog` does) means fewer CVEs, faster pulls, no
-> shell for an attacker, and a smaller blast radius. A "fat" image with a full
-> distro and a root user is an anti-pattern carried straight into the cluster.
-
-> **In production:** **pin by digest** (`image@sha256:…`) or immutable,
-> never-reused tags; forbid `:latest`. Reproducible rollouts and exact
-> rollbacks depend on the image name meaning *one* set of bytes.
-
-> **In production:** build images in **CI**, not on a laptop, and **scan** them
-> (Trivy/Grype) and ideally **sign** them (Cosign) with provenance, so what
-> runs is traceable to a commit. Kubernetes runs whatever image you give it; it
-> will not vet it for you ([supply chain](../05-security/03-supply-chain.md),
-> [CI/CD](../07-delivery/03-cicd-pipeline.md)).
+> **In production:** build images in **CI**, not on a laptop, so what runs
+> traces back to a commit. The scan from this chapter belongs in that pipeline,
+> and Kubernetes will not vet an image for you. Signing and provenance are in
+> [supply chain](../05-security/03-supply-chain.md) and
+> [CI/CD](../07-delivery/03-cicd-pipeline.md).
 
 > **In production:** match the image **architecture** to your nodes (e.g.
 > `arm64` vs `amd64`) or publish a multi-arch manifest list — a frequent cause
 > of `exec format error` `CrashLoopBackOff` when a laptop-built `arm64` image
 > lands on `amd64` nodes.
-
-> **In production:** the host kernel is **shared** across all containers on a
-> node — container isolation is *not* a security boundary as strong as a VM's.
-> Defense in depth (drop capabilities, non-root, read-only rootfs, seccomp;
-> stronger sandboxes where needed) is covered in
-> [Pod security](../05-security/02-pod-security.md).
 
 ## Quick Reference
 
@@ -380,9 +634,12 @@ Core image/container commands (Docker; `nerdctl`/`podman` are near-identical):
 docker build -t name:tag ./context        # build an image from a Dockerfile
 docker image ls                            # list local images (+ sizes)
 docker image inspect name:tag              # entrypoint, user, env, layers, digest
-docker history name:tag                    # see the layers and what created each
-docker run --rm -p 8080:8080 name:tag      # run a container, publish a port
-docker run --rm -e PORT=8080 name:tag      # pass an env var the app reads
+docker history --no-trunc name:tag        # layers and the instruction behind each
+docker run --rm -p 8080:8080 -e PORT=8080 --read-only --cap-drop=ALL --security-opt=no-new-privileges name:tag
+docker top <name> -o uid,pid,args          # processes and their UID inside
+docker save name:tag > name.tar            # write the image to a tar for a scanner
+trivy image --input name.tar               # scan the image for CVEs and secrets
+docker run --rm -i <hadolint-digest> < Dockerfile   # lint a Dockerfile
 docker ps                                  # running containers
 docker stop <ID> / docker rm <ID>          # stop / remove (sends SIGTERM then SIGKILL)
 docker pull / docker push name:tag         # registry round-trip
@@ -403,7 +660,7 @@ RUN <FETCH-DEPS>
 COPY . .
 RUN <build -> /out/app>          # produce a single, ideally static, artifact
 
-FROM gcr.io/distroless/static:nonroot   # tiny, no shell, built-in nonroot user
+FROM gcr.io/distroless/static:nonroot@sha256:<DIGEST>   # tiny, no shell, nonroot user
 COPY --from=build /out/app /app          # ship ONLY the artifact
 USER 65532:65532
 EXPOSE 8080
@@ -414,10 +671,13 @@ Image checklist before it goes near a cluster:
 
 - [ ] Multi-stage: no compiler/source/secrets in the final image
 - [ ] Minimal base (distroless/scratch) where feasible
-- [ ] Runs as a non-root user; no unnecessary capabilities
+- [ ] Runs as a non-root user; no unnecessary capabilities; run with
+      `--read-only`, `--cap-drop=ALL` and `--security-opt=no-new-privileges`
 - [ ] `ENTRYPOINT` in exec form (PID 1 gets signals → graceful shutdown)
 - [ ] Tagged immutably / referenced by digest in deployment manifests
 - [ ] Correct target architecture (or multi-arch manifest)
+- [ ] Linted with hadolint, scanned with Trivy, and no secrets in
+      `docker history`
 - [ ] Built in CI, scanned, and ideally signed
 
 ## Test your understanding
@@ -445,22 +705,29 @@ Image checklist before it goes near a cluster:
 
    </details>
 
-4. **Hands-on extension: rebuild the `catalog` image with `ENTRYPOINT ["sh", "-c", "/catalog"]` instead of exec form, then `docker stop catalog` and watch the logs. What changes, and why does this matter for Kubernetes Pod termination?**
-   <details><summary>What you should see</summary>
+4. **The catalog image has no shell. What does `docker run --entrypoint sh bookstore/catalog:dev` show, and why does that matter if an attacker gets code execution in the process?**
+   <details><summary>Show answer</summary>
 
-   `sh -c` becomes PID 1; the Go binary becomes a child process. When Docker sends SIGTERM, the shell receives it and does *not* forward to the child, so you'll see no `shutdown signal received` log and Docker will SIGKILL after the grace period. In Kubernetes the kubelet sends SIGTERM to PID 1, so a Pod with shell-wrapped entrypoint cannot drain gracefully — rollouts cut connections mid-flight (see §Hands-on: stop it, §ENTRYPOINT exec form discussion).
+   The run fails with `executable file not found in $PATH`, the deliberate failure in the hands-on. An attacker who gets code execution in the process still has to bring every tool with them. The read-only root refuses writes except to volumes you mount, so the foothold is much harder to use (see §Hands-on: Deliberate failures and §Threats and controls).
 
    </details>
 
 ## Further reading
 
-- **Poulton, _The Kubernetes Book_, ch.3** — containers and images as the unit
+- **Poulton, _The Kubernetes Book_** — containers and images as the unit
   Kubernetes schedules; building and running them.
-- **Lukša, _Kubernetes in Action_ 2e, ch.2** — "Understanding containers":
-  Linux namespaces & cgroups, images and layers, the OCI model, from first
+- **Lukša, _Kubernetes in Action_, 2nd edition** — "Understanding containers":
+  Linux namespaces and cgroups, images and layers, the OCI model, from first
   principles.
-- **Ibryam & Huß, _Kubernetes Patterns_ 2e, ch.30 — "Image Builder"** — image
-  build strategies and in-cluster builds (the supply-chain side of images).
-- Official: <https://kubernetes.io/docs/concepts/containers/images/> — images,
-  tags, digests, and pull policy as Kubernetes consumes them. OCI specs:
-  <https://github.com/opencontainers/image-spec>.
+- **Ibryam & Huß, _Kubernetes Patterns_, 2nd edition** — the "Image Builder"
+  pattern: image build strategies and in-cluster builds.
+- Official: <https://kubernetes.io/docs/concepts/containers/images/> covers
+  images, tags, digests, and pull policy as Kubernetes consumes them. OCI
+  specs: <https://github.com/opencontainers/image-spec>.
+- Docker: <https://docs.docker.com/reference/cli/docker/container/run/> lists
+  `--read-only`, `--cap-drop` and `--security-opt`, including
+  `no-new-privileges`.
+- Distroless: <https://github.com/GoogleContainerTools/distroless> describes
+  the static base and its `:debug` variants, which add a shell.
+- Hadolint: <https://github.com/hadolint/hadolint> documents the linter and
+  the stdin form used in this chapter.

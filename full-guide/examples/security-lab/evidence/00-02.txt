@@ -1,0 +1,275 @@
+# Evidence for chapter 00.02, containers and images.
+# Tier A. The Docker engine is a remote Linux host reached over ssh.
+# Where the chapter says localhost for a published port, this run
+# curls localhost on the engine host with ssh, which is the same port.
+# The image build ran on the engine host from a copy of the catalog
+# directory, because the streamed build client stalled on a shared engine.
+
+$ docker version --format '{{.Server.Version}} {{.Server.Os}}/{{.Server.Arch}}'
+29.8.2 linux/amd64
+exit=0
+
+$ trivy --version | head -1
+Version: 0.76.1
+exit=0
+# Step 1. Lint the Dockerfile, then prove the linter reads its input.
+
+$ ssh thinkpad 'docker run --rm -i ghcr.io/hadolint/hadolint@sha256:32dac94127fd60b7b7e3fbfc65e1383b9b5e25c9bfd7b8536de7a539fe68a12d' < catalog/Dockerfile
+exit=0
+# Step 1, control. A Dockerfile with known problems must print warnings.
+
+$ printf 'FROM alpine:latest\nRUN apk add curl\nUSER root\n' | ssh thinkpad 'docker run --rm -i ghcr.io/hadolint/hadolint@sha256:32dac94127fd60b7b7e3fbfc65e1383b9b5e25c9bfd7b8536de7a539fe68a12d /bin/hadolint --no-color -'
+-:1 DL3007 warning: Using latest is prone to errors if the image will ever update. Pin the version explicitly to a release tag
+-:2 DL3019 info: Use the `--no-cache` switch to avoid the need to use `--update` and remove `/var/cache/apk/*` when done installing packages
+-:2 DL3018 warning: Pin versions in apk add. Instead of `apk add <package>` use `apk add <package>=<version>`
+-:3 DL3002 warning: Last USER should not be root
+-:3 DL3066 info: Non-numeric user-id may not be resolvable by host system
+exit=1
+# Step 2. Build the catalog image.
+
+$ ssh thinkpad 'cd /tmp/catalog-build-0002 && docker build -t bookstore/catalog:dev .'
+#0 building with "default" instance using docker driver
+
+#1 [internal] load build definition from Dockerfile
+#1 transferring dockerfile:
+#1 transferring dockerfile: 801B done
+#1 DONE 0.4s
+
+#2 resolve image config for docker-image://docker.io/docker/dockerfile:1
+#2 DONE 3.4s
+
+#3 docker-image://docker.io/docker/dockerfile:1@sha256:4edf897a3ffa55b89f906fc8cc78afdb3f1834cc9c7083565e611a8a7d5fe99e
+#3 resolve docker.io/docker/dockerfile:1@sha256:4edf897a3ffa55b89f906fc8cc78afdb3f1834cc9c7083565e611a8a7d5fe99e
+#3 resolve docker.io/docker/dockerfile:1@sha256:4edf897a3ffa55b89f906fc8cc78afdb3f1834cc9c7083565e611a8a7d5fe99e 1.1s done
+#3 CACHED
+
+#4 [internal] load metadata for docker.io/library/golang:1.26.10-alpine
+#4 ...
+
+#5 [internal] load metadata for gcr.io/distroless/static:nonroot@sha256:18f4cc26c9ffa7f20a359298be7deadac5c607c8e03a02b8119f1a5fc2f82c99
+#5 DONE 3.6s
+
+#4 [internal] load metadata for docker.io/library/golang:1.26.10-alpine
+#4 DONE 3.7s
+
+#6 [internal] load .dockerignore
+#6 transferring context:
+#6 transferring context: 2B done
+#6 DONE 0.2s
+
+#7 [build 1/6] FROM docker.io/library/golang:1.26.10-alpine@sha256:a2012b4a1d1f9f7e9f44e0d39b805a901e856b1dd80b4e6ee4338db547050308
+#7 ...
+
+#8 [internal] load build context
+#8 DONE 0.0s
+
+#7 [build 1/6] FROM docker.io/library/golang:1.26.10-alpine@sha256:a2012b4a1d1f9f7e9f44e0d39b805a901e856b1dd80b4e6ee4338db547050308
+#7 resolve docker.io/library/golang:1.26.10-alpine@sha256:a2012b4a1d1f9f7e9f44e0d39b805a901e856b1dd80b4e6ee4338db547050308
+#7 resolve docker.io/library/golang:1.26.10-alpine@sha256:a2012b4a1d1f9f7e9f44e0d39b805a901e856b1dd80b4e6ee4338db547050308 1.0s done
+#7 DONE 1.1s
+
+#9 [stage-1 1/3] FROM gcr.io/distroless/static:nonroot@sha256:18f4cc26c9ffa7f20a359298be7deadac5c607c8e03a02b8119f1a5fc2f82c99
+#9 resolve gcr.io/distroless/static:nonroot@sha256:18f4cc26c9ffa7f20a359298be7deadac5c607c8e03a02b8119f1a5fc2f82c99
+#9 resolve gcr.io/distroless/static:nonroot@sha256:18f4cc26c9ffa7f20a359298be7deadac5c607c8e03a02b8119f1a5fc2f82c99 1.1s done
+#9 DONE 1.3s
+
+#8 [internal] load build context
+#8 transferring context: 111B done
+#8 DONE 0.6s
+
+#10 [build 3/6] COPY go.mod go.sum* ./
+#10 CACHED
+
+#11 [build 4/6] RUN go mod download
+#11 CACHED
+
+#12 [build 5/6] COPY . .
+#12 CACHED
+
+#13 [build 6/6] RUN CGO_ENABLED=0 GOOS=linux go build -trimpath -ldflags="-s -w" -o /out/catalog .
+#13 CACHED
+
+#14 [build 2/6] WORKDIR /src
+#14 CACHED
+
+#15 [stage-1 2/3] COPY --from=build /out/catalog /catalog
+#15 CACHED
+
+#16 exporting to image
+#16 exporting layers done
+#16 exporting manifest sha256:0874c9b2a5c21a42e0a114dab56ec765148acde815595129a0c9661337d29c54 0.1s done
+#16 exporting config sha256:20c903d82d310ae4721d6defacdf004c66faf769b478f8361504a699abc6618f
+#16 exporting config sha256:20c903d82d310ae4721d6defacdf004c66faf769b478f8361504a699abc6618f 0.1s done
+#16 exporting attestation manifest sha256:5689d92d1580637c229c67382383d5d1419a8c7cb427088a0165e11536cbcb2f
+#16 exporting attestation manifest sha256:5689d92d1580637c229c67382383d5d1419a8c7cb427088a0165e11536cbcb2f 1.2s done
+#16 exporting manifest list sha256:13d7f0b70505966aebe2476d56374a8fb39fd0cb580561e21ebe337900c977ca
+#16 exporting manifest list sha256:13d7f0b70505966aebe2476d56374a8fb39fd0cb580561e21ebe337900c977ca 0.7s done
+#16 naming to docker.io/bookstore/catalog:dev
+#16 naming to docker.io/bookstore/catalog:dev 0.1s done
+#16 unpacking to docker.io/bookstore/catalog:dev
+#16 unpacking to docker.io/bookstore/catalog:dev 0.3s done
+#16 DONE 3.1s
+exit=0
+
+$ docker image ls bookstore/catalog:dev
+WARNING: This output is designed for human readability. For machine-readable output, please use --format.
+IMAGE                   ID             DISK USAGE   CONTENT SIZE   EXTRA
+bookstore/catalog:dev   13d7f0b70505       29.1MB         6.86MB   U    
+exit=0
+
+$ docker image inspect bookstore/catalog:dev --format 'Entrypoint={{.Config.Entrypoint}} User={{.Config.User}} Exposed={{.Config.ExposedPorts}}'
+Entrypoint=[/catalog] User=65532:65532 Exposed=map[8080/tcp:{}]
+exit=0
+# Step 3. Check the layers for secrets, then scan the image.
+
+$ docker history --no-trunc --format '{{.CreatedBy}}' bookstore/catalog:dev
+ENTRYPOINT ["/catalog"]
+EXPOSE [8080/tcp]
+USER 65532:65532
+COPY /out/catalog /catalog # buildkit
+WORKDIR /
+bazel build //common:cacerts_debian13_amd64_tar
+bazel build //common:os_release_debian13
+bazel build //static:nsswitch
+bazel build //common:tmp
+bazel build //common:group
+bazel build //common:home
+bazel build //common:passwd
+bazel build //common:rootfs
+bazel build @trixie//media-types/amd64:data_statusd
+bazel build @trixie//tzdata-legacy/amd64:data_statusd
+bazel build @trixie//tzdata/amd64:data_statusd
+bazel build @trixie//netbase/amd64:data_statusd
+bazel build @trixie//base-files/amd64:data_statusd
+exit=0
+
+$ docker history --no-trunc --format '{{.CreatedBy}}' bookstore/catalog:dev | grep -c -i -E 'secret|token|password|api.?key'
+0
+exit=1
+
+$ ssh thinkpad 'docker save bookstore/catalog:dev' > catalog-dev.tar
+exit=0
+
+$ ls -l catalog-dev.tar | awk '{print $5}'
+6882816
+exit=0
+
+$ trivy image --input catalog-dev.tar
+2026-10-31T04:16:24+05:00	INFO	[vuln] Vulnerability scanning is enabled
+2026-10-31T04:16:24+05:00	INFO	[secret] Secret scanning is enabled
+2026-10-31T04:16:24+05:00	INFO	[secret] If your scanning is slow, please try '--scanners vuln' to disable secret scanning
+2026-10-31T04:16:24+05:00	INFO	[secret] Please see https://trivy.dev/docs/v0.76/guide/scanner/secret#recommendation for faster secret detection
+2026-10-31T04:16:24+05:00	INFO	Detected OS	family="debian" version="13.7"
+2026-10-31T04:16:24+05:00	INFO	[debian] Detecting vulnerabilities...	os_version="13" pkg_num=6
+2026-10-31T04:16:24+05:00	INFO	Number of language-specific files	num=1
+2026-10-31T04:16:24+05:00	INFO	[gobinary] Detecting vulnerabilities...
+2026-10-31T04:16:24+05:00	WARN	Using severities from other vendors for some vulnerabilities. Read https://trivy.dev/docs/v0.76/guide/scanner/vulnerability#severity-selection for details.
+
+Report Summary
+
+┌───────────────────────────────┬──────────┬─────────────────┬─────────┐
+│            Target             │   Type   │ Vulnerabilities │ Secrets │
+├───────────────────────────────┼──────────┼─────────────────┼─────────┤
+│ catalog-dev.tar (debian 13.7) │  debian  │        0        │    -    │
+├───────────────────────────────┼──────────┼─────────────────┼─────────┤
+│ catalog                       │ gobinary │        1        │    -    │
+└───────────────────────────────┴──────────┴─────────────────┴─────────┘
+Legend:
+- '-': Not scanned
+- '0': Clean (no security findings detected)
+
+
+catalog (gobinary)
+==================
+Total: 1 (UNKNOWN: 1, LOW: 0, MEDIUM: 0, HIGH: 0, CRITICAL: 0)
+
+┌──────────────────┬────────────────┬──────────┬────────┬───────────────────┬───────────────┬────────────────────────────────────────────────────┐
+│     Library      │ Vulnerability  │ Severity │ Status │ Installed Version │ Fixed Version │                       Title                        │
+├──────────────────┼────────────────┼──────────┼────────┼───────────────────┼───────────────┼────────────────────────────────────────────────────┤
+│ golang.org/x/sys │ CVE-2026-39824 │ UNKNOWN  │ fixed  │ v0.34.0           │ 0.44.0        │ Invoking integer overflow in NewNTUnicodeString in │
+│                  │                │          │        │                   │               │ golang.org/x/sys/windows                           │
+│                  │                │          │        │                   │               │ https://avd.aquasec.com/nvd/cve-2026-39824         │
+└──────────────────┴────────────────┴──────────┴────────┴───────────────────┴───────────────┴────────────────────────────────────────────────────┘
+exit=0
+
+$ trivy image --input catalog-dev.tar --scanners secret --report summary
+2026-10-31T04:16:24+05:00	INFO	[secret] Secret scanning is enabled
+2026-10-31T04:16:24+05:00	INFO	[secret] Please see https://trivy.dev/docs/v0.76/guide/scanner/secret#recommendation for faster secret detection
+2026-10-31T04:16:24+05:00	INFO	Detected OS	family="debian" version="13.7"
+2026-10-31T04:16:24+05:00	INFO	Number of language-specific files	num=1
+
+Report Summary
+
+┌───────────────────────────────┬──────────┬─────────┐
+│            Target             │   Type   │ Secrets │
+├───────────────────────────────┼──────────┼─────────┤
+│ catalog-dev.tar (debian 13.7) │  debian  │    -    │
+├───────────────────────────────┼──────────┼─────────┤
+│ catalog                       │ gobinary │    -    │
+└───────────────────────────────┴──────────┴─────────┘
+Legend:
+- '-': Not scanned
+- '0': Clean (no security findings detected)
+
+exit=0
+# Step 4. Run the image with the hardening flags, then stop it.
+$ docker run --rm --name catalog -p 8080:8080 -e PORT=8080 --read-only --cap-drop=ALL --security-opt=no-new-privileges bookstore/catalog:dev   (background; log saved)
+
+$ ssh thinkpad 'curl -s localhost:8080/healthz'
+{"status":"ok"}
+exit=0
+
+$ ssh thinkpad 'curl -s localhost:8080/readyz'
+{"status":"ready"}
+exit=0
+
+$ ssh thinkpad 'curl -s localhost:8080/books' | head -c 110; echo
+[{"id":1,"title":"The Go Programming Language","author":"Donovan \u0026 Kernighan","price":39.99},{"id":2,"tit
+exit=0
+
+$ docker top catalog -o uid,pid,args
+UID                 PID                 COMMAND
+65532               3531486             /catalog
+exit=0
+
+$ docker inspect --format 'ReadonlyRootfs={{.HostConfig.ReadonlyRootfs}} CapDrop={{.HostConfig.CapDrop}} SecurityOpt={{.HostConfig.SecurityOpt}} User={{.Config.User}}' catalog
+ReadonlyRootfs=true CapDrop=[ALL] SecurityOpt=[no-new-privileges] User=65532:65532
+exit=0
+
+$ docker stop catalog
+catalog
+exit=0
+exit=0
+$ cat catalog-run.log   (what the foreground terminal shows)
+{"time":"2026-10-30T23:16:27.289502108Z","level":"INFO","msg":"DB_DSN unset; serving in-memory sample books"}
+{"time":"2026-10-30T23:16:27.289953855Z","level":"INFO","msg":"catalog listening","addr":":8080"}
+{"time":"2026-10-30T23:16:30.261914713Z","level":"INFO","msg":"shutdown signal received","signal":"terminated"}
+{"time":"2026-10-30T23:16:30.262030119Z","level":"INFO","msg":"shutdown complete"}
+# Step 5. Deliberate: override the entrypoint with a shell.
+
+$ docker run --rm --entrypoint sh bookstore/catalog:dev -c 'echo hi'
+docker: Error response from daemon: failed to create task for container: failed to create shim task: OCI runtime create failed: runc create failed: unable to start container process: error during container init: exec: "sh": executable file not found in $PATH
+
+Run 'docker run --help' for more information
+exit=127
+# Step 6. Deliberate: a write to a read-only root is denied.
+
+$ docker run --rm busybox@sha256:73aaf090f3d85aa34ee199857f03fa3a95c8ede2ffd4cc2cdb5b94e566b11662 sh -c 'touch /probe && echo wrote-probe; grep -E "CapEff|NoNewPrivs" /proc/self/status' | tr '\t' ' '
+wrote-probe
+CapEff: 00000000a80425fb
+NoNewPrivs: 0
+exit=0
+
+$ docker run --rm --read-only --cap-drop=ALL --security-opt=no-new-privileges busybox@sha256:73aaf090f3d85aa34ee199857f03fa3a95c8ede2ffd4cc2cdb5b94e566b11662 sh -c 'touch /probe && echo wrote-probe; grep -E "CapEff|NoNewPrivs" /proc/self/status' | tr '\t' ' '
+touch: /probe: Read-only file system
+CapEff: 0000000000000000
+NoNewPrivs: 1
+exit=0
+# Step 7. Clean up and check nothing is left running.
+
+$ ssh thinkpad 'rm -rf /tmp/catalog-build-0002'
+exit=0
+
+$ docker ps -a --filter name=catalog --format '{{.Names}} {{.Status}}'
+exit=0
+# done
