@@ -32,4 +32,71 @@
 # An unsound entry grants nothing. Inline `trivy:ignore` comments and other
 # Trivy ignore files are failures: this file is the only place to accept a finding.
 
-misconfigurations: []
+misconfigurations:
+  # Break-glass platform RBAC, accepted by design: chapter 13.01 and
+  # SECURITY-SCAN.md section 1.3. The regions overlays build on platform-base.
+  - id: KSV-0041
+    paths:
+      - full-guide/examples/bookstore-platform/platform-base/01-rbac.yaml
+      - full-guide/examples/bookstore-platform/kustomize/regions/ap-southeast
+      - full-guide/examples/bookstore-platform/kustomize/regions/eu-west
+      - full-guide/examples/bookstore-platform/kustomize/regions/us-east
+    statement: "Platform roles that can manage Secrets, accepted by design (chapter 13.01, SECURITY-SCAN.md section 1.3). bookstore-platform-operator reads and writes Secrets for platform work, and bookstore-platform-tenant-admin reads them only in its own namespace, because the Composition binds it per tenant. The file ships ClusterRoles only, so the blast radius is set by each binding and by the human gate in 13.04."
+    expired_at: 2027-06-30
+  - id: KSV-0044
+    paths:
+      - full-guide/examples/bookstore-platform/platform-base/01-rbac.yaml
+      - full-guide/examples/bookstore-platform/kustomize/regions/ap-southeast
+      - full-guide/examples/bookstore-platform/kustomize/regions/eu-west
+      - full-guide/examples/bookstore-platform/kustomize/regions/us-east
+    statement: "Break-glass platform RBAC, accepted by design (chapter 13.01, SECURITY-SCAN.md section 1.3). bookstore-platform-admin is a cluster wildcard as strong as cluster-admin. The file ships ClusterRoles only, so the blast radius is set by each binding and by the human gate in 13.04."
+    expired_at: 2027-06-30
+  - id: KSV-0045
+    paths:
+      - full-guide/examples/bookstore-platform/platform-base/01-rbac.yaml
+      - full-guide/examples/bookstore-platform/kustomize/regions/ap-southeast
+      - full-guide/examples/bookstore-platform/kustomize/regions/eu-west
+      - full-guide/examples/bookstore-platform/kustomize/regions/us-east
+    statement: "Break-glass platform RBAC, accepted by design (chapter 13.01, SECURITY-SCAN.md section 1.3). bookstore-platform-tenant-admin grants wildcard verbs on workloads and Services, and the Composition binds it only inside each tenant namespace. The file ships ClusterRoles only, so the blast radius is set by each binding and by the human gate in 13.04."
+    expired_at: 2027-06-30
+  - id: KSV-0046
+    paths:
+      - full-guide/examples/bookstore-platform/platform-base/01-rbac.yaml
+      - full-guide/examples/bookstore-platform/kustomize/regions/ap-southeast
+      - full-guide/examples/bookstore-platform/kustomize/regions/eu-west
+      - full-guide/examples/bookstore-platform/kustomize/regions/us-east
+    statement: "Break-glass platform RBAC, accepted by design (chapter 13.01, SECURITY-SCAN.md section 1.3). bookstore-platform-admin manages all resources, as a break-glass role must, and bookstore-platform-operator reads every resource and manages the Crossplane API groups. The file ships ClusterRoles only, so the blast radius is set by each binding and by the human gate in 13.04."
+    expired_at: 2027-06-30
+  - id: KSV-0056
+    paths:
+      - full-guide/examples/bookstore-platform/platform-base/01-rbac.yaml
+      - full-guide/examples/bookstore-platform/kustomize/regions/ap-southeast
+      - full-guide/examples/bookstore-platform/kustomize/regions/eu-west
+      - full-guide/examples/bookstore-platform/kustomize/regions/us-east
+    statement: "Break-glass platform RBAC, accepted by design (chapter 13.01, SECURITY-SCAN.md section 1.3). bookstore-platform-operator writes Services, and bookstore-platform-tenant-admin manages Services inside its own tenant namespace. The file ships ClusterRoles only, so the blast radius is set by each binding and by the human gate in 13.04."
+    expired_at: 2027-06-30
+  # The operator manager role creates the Services of each tenant it reconciles,
+  # so it writes services. It holds no secrets rule (see the file header).
+  - id: KSV-0056
+    paths:
+      - full-guide/examples/bookstore/operator/config/rbac/role.yaml
+      - full-guide/examples/bookstore/operator/config/default
+    statement: "The operator manager ClusterRole writes Services because it creates the child kinds of each BookstoreTenant, Services among them (header of operator/config/rbac/role.yaml, Part 08 ch.05). It grants no Secrets and no wildcards, so the finding is the reconciler's own scope, accepted by design."
+    expired_at: 2027-06-30
+  # The second-tenant example is a worked tenant Role, namespaced to tenant-acme.
+  - id: KSV-0053
+    paths:
+      - full-guide/examples/bookstore/operators/second-tenant.yaml
+    statement: "The tenant admin Role grants pods/exec and pods/ephemeralcontainers so the tenant can debug its own pods (chapter 08.04). The Role is namespaced to tenant-acme and bound only to that tenant's own identities, so the exec reach stops at its own namespace."
+    expired_at: 2027-06-30
+  - id: KSV-0056
+    paths:
+      - full-guide/examples/bookstore/operators/second-tenant.yaml
+    statement: "The tenant admin Role manages its own Services alongside its workloads (chapter 08.04). The Role is namespaced to tenant-acme and bound only to that tenant's own identities, so the networking reach stops at its own namespace."
+    expired_at: 2027-06-30
+  # The Backstage ConfigMap holds only ${ENV} references; ESO supplies the values.
+  - id: KSV-0109
+    paths:
+      - full-guide/examples/bookstore-platform/backstage/app-config.yaml
+    statement: "The ConfigMap names secret keys (Keycloak, GitHub App, Argo CD and PagerDuty tokens) but holds only ${ENV_VAR} references. External Secrets materialises the values at runtime, so no credential is committed (chapter 13.11, SECURITY-SCAN.md section 1.3)."
+    expired_at: 2027-06-30
