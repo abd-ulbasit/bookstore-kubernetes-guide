@@ -1,0 +1,47 @@
+# The namespace half of the exceptions registry (docs/design/2026-10-29-security-first-rewrite.md,
+# section 5.4). The scanner half is .trivyignore.yaml at the repository root.
+#
+# Every namespace the guide labels above `restricted` (baseline or privileged, in
+# any of enforce, audit or warn) has one entry here, and every entry must still
+# be in use: `make gates-registry` checks both directions. Each entry has:
+#
+#   namespace  the namespace name
+#   level      baseline or privileged: the most permissive level the guide sets on it
+#   reason     why the component or lab cannot run under restricted
+#   upstream   the upstream document that demands the privilege, or the Pod
+#              Security Standards page for a lab that shows it on purpose
+#   chapter    the chapter that explains the exception, relative to full-guide/
+#   expires    YYYY-MM-DD; still ahead, and no more than 12 months out
+
+exceptions:
+  - namespace: falco
+    level: privileged
+    reason: >-
+      The Falco DaemonSet needs CAP_BPF, CAP_PERFMON and CAP_SYS_ADMIN to attach
+      its modern eBPF driver (the chapter lists them), and falco.tf notes host PID
+      and network access too. The restricted profile lets a container add back
+      only NET_BIND_SERVICE. The chapter calls it the only privileged namespace
+      in the bookstore-platform tree.
+    upstream: https://falco.org/docs/setup/container/
+    chapter: 14-eks-in-production-a-to-z/13-runtime-defense-and-container-security.md
+    expires: 2027-06-30
+
+  - namespace: psa-lab
+    level: privileged
+    reason: >-
+      The Part 05 Pod Security lab runs deliberately insecure Pods in a throwaway
+      kind namespace to show what the privileged profile allows. The lab script
+      creates the namespace, labels it and deletes it at the end.
+    upstream: https://kubernetes.io/docs/concepts/security/pod-security-standards/
+    chapter: 05-security/02-pod-security.md
+    expires: 2027-06-30
+
+  - namespace: runtime-test
+    level: baseline
+    reason: >-
+      The Falco test Pod runs a busybox image as root with no securityContext,
+      which restricted rejects and baseline admits. It only reads /etc/shadow to
+      trigger a Falco rule. The namespace is throwaway and the chapter deletes it.
+    upstream: https://kubernetes.io/docs/concepts/security/pod-security-standards/
+    chapter: 14-eks-in-production-a-to-z/13-runtime-defense-and-container-security.md
+    expires: 2027-06-30

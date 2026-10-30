@@ -175,6 +175,7 @@ interpreter. `SCOPE=` takes chapters or chapter directories relative to
 |---|---|---|
 | `make gates-test` | the gate scripts' unit tests | Trivy, Helm and kubectl, so their tests cannot skip |
 | `make gates-static SCOPE=...` | G1, G2: five core checks | Trivy 0.76.1; Helm and kubectl for a whole-guide run |
+| `make gates-registry` | G5: the exceptions registry, both ways | Helm and kubectl; Trivy once a scanner entry exists |
 | `make gates-admission SCOPE=...` | G1, G3: `restricted` dry-run | kind v0.33.0 cluster, kubectl v1.37.2 |
 | `python .github/scripts/gates/evidence_gate.py --chapter C --transcript T` | G7 | the lab transcript |
 | `python .github/scripts/check-runasnonroot.py` | existing check | |
@@ -206,6 +207,24 @@ for each `values-*.yaml`. It builds each Kustomize overlay with
 that use it) and judges the result. A chart or overlay that fails to render is
 a failure, and a missing `helm` or `kubectl` aborts the run, because skipping
 what it renders would let it pass unread.
+
+**What G5 checks.** Two files hold every exception, and `make gates-registry`
+checks each against the tree in both directions. `.trivyignore.yaml` holds
+scanner findings: `id`, `paths`, `statement` and `expired_at`.
+`security/namespace-exceptions.yaml` holds namespaces above `restricted`:
+`namespace`, `level`, `reason`, `upstream`, `chapter` and `expires`. An entry
+needs a reason and a date that is still ahead and no more than 12 months out.
+Every `pod-security.kubernetes.io/{enforce,audit,warn}` label set to
+`baseline` or `privileged`, in a chapter or an example tree, needs an entry
+at that level, and every entry must still be in use. A scanner entry must
+still match a finding when Trivy runs without the ignore file. Trivy v0.76.1
+does not load `.trivyignore.yaml` on its own, so `make gates-static` reads it
+and drops a finding only for a sound, unexpired entry; an unsound entry
+grants nothing. An inline `trivy:ignore` comment, or any other Trivy ignore
+file, is a failure: the registry is the only place to accept a finding. The
+control fixtures are checked before any entry applies, so no entry can blind
+the gate. Write a label where the gate can attach it to a namespace: in a
+Namespace manifest, a `kubectl label` command or a Terraform namespace.
 
 **What G3 refuses.** G3 creates the `gate-restricted` namespace, so it runs
 only against a kubectl context that starts with `kind-`. Any other context

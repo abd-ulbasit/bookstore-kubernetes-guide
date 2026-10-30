@@ -184,6 +184,16 @@ gates-static: ## G1+G2: Trivy core checks on chapter YAML (SCOPE=chapter.md ... 
 	$(PY) $(GATES_DIR)/extract_blocks.py --root full-guide --out "$$out" && \
 	$(PY) $(GATES_DIR)/static_gate.py --manifest "$$out/manifest.json" $(GATES_SCOPE) $(GATES_ALSO) $(GATES_ALLOW)
 
+# G5, the registry half. It always reads the whole guide (SCOPE does not apply)
+# and the example trees in ALSO, or full-guide/examples. The two registries are
+# .trivyignore.yaml (scanner findings) and security/namespace-exceptions.yaml
+# (namespaces above restricted). Trivy is run only if a scanner entry exists.
+GATES_REGISTRY_ALSO := $(foreach p,$(or $(ALSO),full-guide/examples),--also $(p))
+
+.PHONY: gates-registry
+gates-registry: ## G5: exceptions registered, unexpired (<= 12 months) and still matching (ALSO=examples dir ...).
+	$(PY) $(GATES_DIR)/registry_gate.py --root full-guide $(GATES_REGISTRY_ALSO) --helm $(HELM) --kubectl $(KUBECTL)
+
 .PHONY: gates-admission
 gates-admission: ## G1+G3: restricted-namespace dry-run of chapter YAML (SCOPE=chapter.md ...). Needs a kind cluster.
 	@out=$$(mktemp -d); trap 'rm -rf "$$out"' EXIT; \
