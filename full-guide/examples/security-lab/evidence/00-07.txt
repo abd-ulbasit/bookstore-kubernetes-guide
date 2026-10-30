@@ -1,0 +1,119 @@
+# Transcript for 00-foundations/07-local-cluster-setup.md, the hands-on steps.
+# Tier A: kind v0.33.0 with a Kubernetes v1.37.0 node, kubectl v1.37.2.
+# The shared cluster sf-pilot stood in for the reader's bookstore cluster. Its
+# kind node container is sf-pilot-control-plane; the chapter names the node
+# bookstore-control-plane.
+# Substitutions: every namespace the chapter calls bookstore ran as
+# p00-bookstore, because sf-pilot is shared. kind create and kind delete were
+# not run on sf-pilot. docker build and kind load were not run: the image was
+# already on the node, and the crictl check below shows it. The namespace was
+# deleted at the end in place of kind delete. The kind binary ran on the lab
+# host; kubectl ran from a workstation. Another worker's p00-threat-demo
+# namespace shares the cluster; this run did not touch it.
+# What did not work the first time: the first apply ran from the repository
+# root and failed with 'path does not exist'. The commands below were rerun
+# from full-guide/, which is where the chapter's paths start.
+$ kind version
+kind v0.33.0 go1.26.7 linux/amd64
+--- kubectl
+$ kubectl version --client=true
+Client Version: v1.37.2
+Kustomize Version: v5.8.1
+$ kubectl get nodes
+NAME                     STATUS   ROLES           AGE     VERSION
+sf-pilot-control-plane   Ready    control-plane   7h42m   v1.37.0
+$ kubectl -n kube-system get pods
+NAME                                             READY   STATUS    RESTARTS        AGE
+coredns-559f6c778d-77g29                         1/1     Running   0               7h41m
+coredns-559f6c778d-xmmqq                         1/1     Running   0               7h41m
+etcd-sf-pilot-control-plane                      1/1     Running   0               7h42m
+kindnet-8659k                                    1/1     Running   0               7h41m
+kube-apiserver-sf-pilot-control-plane            1/1     Running   1 (5h9m ago)    7h42m
+kube-controller-manager-sf-pilot-control-plane   1/1     Running   6 (3h29m ago)   7h42m
+kube-proxy-pb9p9                                 1/1     Running   0               7h41m
+kube-scheduler-sf-pilot-control-plane            1/1     Running   6 (3h29m ago)   7h42m
+$ kubectl config current-context
+kind-sf-pilot
+## step 1: namespace and ServiceAccount
+$ kubectl apply -f - <<'EOF'   # Namespace bookstore and ServiceAccount catalog-sa
+namespace/p00-bookstore created
+serviceaccount/catalog-sa created
+$ kubectl get namespace p00-bookstore --show-labels
+NAME            STATUS   AGE   LABELS
+p00-bookstore   Active   14s   app.kubernetes.io/part-of=bookstore,kubernetes.io/metadata.name=p00-bookstore,pod-security.kubernetes.io/enforce=restricted,pod-security.kubernetes.io/warn=restricted
+## step 2: the catalog image, already on the node
+$ docker exec sf-pilot-control-plane crictl images | grep bookstore/catalog
+docker.io/bookstore/catalog                     ci                   1fd7038d36fd7       7MB
+docker.io/bookstore/catalog                     dev                  1fd7038d36fd7       7MB
+## step 3: validate client-side, then apply
+$ kubectl apply --dry-run=client -n p00-bookstore -f examples/bookstore/raw-manifests/01-catalog-pod.yaml
+error: the path "examples/bookstore/raw-manifests/01-catalog-pod.yaml" does not exist
+$ kubectl apply -n p00-bookstore -f examples/bookstore/raw-manifests/01-catalog-pod.yaml
+error: the path "examples/bookstore/raw-manifests/01-catalog-pod.yaml" does not exist
+$ kubectl wait --for=condition=Ready pod/catalog -n p00-bookstore --timeout=90s
+Error from server (NotFound): pods "catalog" not found
+$ kubectl get pod catalog -n p00-bookstore
+Error from server (NotFound): pods "catalog" not found
+$ cd full-guide   # the chapter runs its paths from the guide directory
+$ kubectl apply --dry-run=client -n p00-bookstore -f examples/bookstore/raw-manifests/01-catalog-pod.yaml
+pod/catalog created (dry run)
+$ kubectl apply -n p00-bookstore -f examples/bookstore/raw-manifests/01-catalog-pod.yaml
+pod/catalog created
+$ kubectl wait --for=condition=Ready pod/catalog -n p00-bookstore --timeout=90s
+pod/catalog condition met
+$ kubectl get pod catalog -n p00-bookstore
+NAME      READY   STATUS    RESTARTS   AGE
+catalog   1/1     Running   0          26s
+## step 4: reach the app through the API server tunnel
+$ kubectl port-forward -n p00-bookstore pod/catalog 8080:8080   # in the background
+Forwarding from 127.0.0.1:8080 -> 8080
+Forwarding from [::1]:8080 -> 8080
+Handling connection for 8080
+$ curl -s localhost:8080/healthz ; echo
+{"status":"ok"}
+
+$ curl -s localhost:8080/readyz  ; echo
+{"status":"ready"}
+
+$ curl -s localhost:8080/books | head -c 160; echo
+[{"id":1,"title":"The Go Programming Language","author":"Donovan \u0026 Kernighan","price":39.99},{"id":2,"title":"Kubernetes in Action","author":"Marko Lukša"
+$ kubectl logs catalog -n p00-bookstore | head -2
+{"time":"2026-10-30T22:12:29.402356908Z","level":"INFO","msg":"DB_DSN unset; serving in-memory sample books"}
+{"time":"2026-10-30T22:12:29.404990035Z","level":"INFO","msg":"catalog listening","addr":":8080"}
+## step 5: prove a NetworkPolicy is enforced
+$ kubectl apply -f - <<'EOF'   # probe ServiceAccount and Pod, same baseline as catalog
+serviceaccount/probe-sa created
+pod/probe created
+$ kubectl wait --for=condition=Ready pod/probe -n p00-bookstore --timeout=120s
+pod/probe condition met
+$ CATALOG_IP=$(kubectl get pod catalog -n p00-bookstore -o jsonpath="{.status.podIP}")
+$ echo $CATALOG_IP
+10.244.0.122
+$ kubectl exec -n p00-bookstore probe -- wget -qO- -T 3 "http://$CATALOG_IP:8080/healthz"
+{"status":"ok"}
+$ kubectl apply -f - <<'EOF'   # default-deny ingress for the namespace
+networkpolicy.networking.k8s.io/default-deny-ingress created
+# Deliberate failure: the same request, now under the policy. Expect it to time out.
+$ kubectl exec -n p00-bookstore probe -- wget -qO- -T 3 "http://$CATALOG_IP:8080/healthz"
+wget: download timed out
+command terminated with exit code 1
+## step 6: remove the policy, then check the catalog image has no shell
+$ kubectl delete networkpolicy default-deny-ingress -n p00-bookstore
+networkpolicy.networking.k8s.io "default-deny-ingress" deleted from p00-bookstore namespace
+$ kubectl exec -n p00-bookstore probe -- wget -qO- -T 3 "http://$CATALOG_IP:8080/healthz"
+{"status":"ok"}
+$ kubectl exec -n p00-bookstore catalog -- sh
+error: Internal error occurred: Internal error occurred: error executing command in container: failed to exec in container: failed to start exec "be3d60decb6917216aefbb037e6d4052d4b87613601e55f3164bfeee4e2be73c": OCI runtime exec failed: exec failed: unable to start container process: exec: "sh": executable file not found in $PATH
+$ kubectl delete pod probe -n p00-bookstore
+pod "probe" deleted from p00-bookstore namespace
+## step 7: tear down what this run created (kind delete is not run on the shared cluster)
+$ kubectl delete namespace p00-bookstore
+namespace "p00-bookstore" deleted
+$ kubectl get namespaces | grep p00- || echo "no p00- namespaces left"
+p00-threat-demo      Terminating   95s
+$ kubectl get namespace p00-bookstore
+Error from server (NotFound): namespaces "p00-bookstore" not found
+# Another worker left p00-threat-demo on the shared cluster; this run did not touch it.
+$ kubectl version --client
+Client Version: v1.37.2
+Kustomize Version: v5.8.1
