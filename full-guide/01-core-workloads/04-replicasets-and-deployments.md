@@ -3,20 +3,20 @@
 > ReplicaSets keep N identical Pods alive via a label selector; Deployments
 > manage ReplicaSets to give you rolling updates, rollback, and revision
 > history. The surge math, `recreate` vs `rollingUpdate`, ownerReferences and
-> cascading delete — applied by graduating catalog and storefront from bare
-> Pods to Deployments in the `bookstore` namespace.
+> cascading delete, applied by turning catalog from a bare Pod into a
+> Deployment and adding storefront as one, in the `bookstore` namespace.
 
 **Estimated time:** ~15 min read · ~60 min hands-on
-**Prerequisites:** [Part 01 ch.01](01-pods.md) — what's being replicated · [Part 00 ch.06](../00-foundations/06-declarative-api-model.md) — selectors and labels
-**You'll know after this:** • understand how a ReplicaSet keeps N Pods alive via label selector · • use a Deployment to roll out a new image and roll it back · • compute `maxSurge` and `maxUnavailable` for a rolling update · • choose between `Recreate` and `RollingUpdate` strategies · • trace `ownerReferences` and predict cascading-delete behavior
+**Prerequisites:** [01.01](01-pods.md), what is being replicated, with its baseline · [01.02](02-health-and-lifecycle.md), the probes · [01.03](03-resources-and-qos.md), the namespace and its quota · [00.06](../00-foundations/06-declarative-api-model.md), selectors and labels
+**You'll know after this:** • understand how a ReplicaSet keeps N Pods alive via label selector · • use a Deployment to roll out a new image and roll it back · • compute `maxSurge` and `maxUnavailable` for a rolling update · • choose between `Recreate` and `RollingUpdate` strategies · • trace `ownerReferences` and predict cascading-delete behavior · • explain why a Deployment that breaks `restricted` applies and runs no Pods
 
 <!-- tags: core-objects, deployments, replicasets, rolling-update, rollback -->
 
 ## Why this exists
 
-[ch.01](01-pods.md) ended on the cliff-edge: a bare Pod is *not recreated* if
+[01.01](01-pods.md) ended on the cliff-edge: a bare Pod is *not recreated* if
 it dies and *not rescheduled* if its node fails — there is no controller
-watching it. [Part 00 ch.06](../00-foundations/06-declarative-api-model.md)
+watching it. [00.06](../00-foundations/06-declarative-api-model.md)
 taught the principle that fixes this: a controller that continuously reconciles
 desired vs. actual. Apply that principle to "I want N copies of this Pod
 running" and you get the **ReplicaSet**. Apply it again to "I want to *change*
@@ -49,6 +49,23 @@ So a rolling update is just: *Deployment scales new-RS up and old-RS down, a
 few Pods at a time, gated by readiness*, until new-RS = desired and old-RS = 0.
 "Rollback" is the same machinery aimed at a previous RS. Ownership is recorded
 in `ownerReferences`, which is also what makes deletion cascade correctly.
+
+The template is the Pod spec from [01.01](01-pods.md#baseline), baseline
+included. A rollback does not rebuild anything. It points the Deployment back
+at a template that was already applied, so a revision runs the same image and
+settings it ran the first time. That is why the image of every revision
+matters, as the threats below explain.
+
+## Threats and controls
+
+A Deployment owns no security control of its own. Every control sits in the
+Pod template it wraps, so the threats here are the ones a rollout creates: a
+template that changes, and a revision that comes back.
+
+| Threat | Control taught here | Goes deeper |
+|---|---|---|
+| A rollback reinstates a revision whose image has since been found vulnerable | Each revision keeps its own template, and a rollback runs exactly that template. Pin third-party images by digest in every revision, and check a revision before you roll back to it. `revisionHistoryLimit` bounds how many revisions stay as targets. | [05.03](../05-security/03-supply-chain.md) |
+| A Deployment that breaks `restricted` applies without error and runs no Pods, so the change looks shipped | The namespace label applies to the Pods the ReplicaSet creates, not to the Deployment. After an apply, read the ReplicaSet and its events, not only the apply output | [05.02](../05-security/02-pod-security.md) |
 
 ## Diagrams
 
@@ -89,58 +106,129 @@ flowchart TD
 
 ## Hands-on with the Bookstore
 
-**Assumed working directory: the guide repo root (`full-guide/`).** Requires
-the `bookstore` namespace from [ch.03](03-resources-and-qos.md)
-(`kubectl apply -f examples/bookstore/raw-manifests/00-namespace.yaml`) and the
-`bookstore/catalog:dev` + `bookstore/storefront:dev` images loaded into the
-cluster (`kind load docker-image bookstore/catalog:dev --name bookstore`, and
-the same for `storefront`).
+**Assumed working directory: the guide repo root (`full-guide/`).** Work in
+the `bookstore` namespace from
+[01.01 step 1](01-pods.md#restricted-namespace), where `catalog-sa` exists.
+Load the images into the cluster first: `kind load docker-image
+bookstore/catalog:dev --name bookstore`, and the same for
+`bookstore/storefront:dev`.
 
-We now **graduate** catalog from a bare Pod to a self-healing Deployment in the
-`bookstore` namespace, carrying forward the probes (ch.02) and resources
-(ch.03), and add the **storefront** Deployment so the app has its UI tier.
+We now **graduate** catalog from a bare Pod to a self-healing Deployment,
+carrying forward the probes ([01.02](02-health-and-lifecycle.md)) and the
+resources ([01.03](03-resources-and-qos.md)). We also add the **storefront**
+Deployment so the app has its UI tier. Both Deployments already exist in the
+repo. The listings below are copies with the comments removed. The YAML is
+otherwise identical, so apply the files, not the listings.
+
+catalog's Deployment also carries fields from Parts 02 to 04: settings from a
+ConfigMap and a Secret, a downward API volume, and scheduling fields. Those
+belong to [03.01](../03-config-and-storage/01-configmaps.md),
+[03.02](../03-config-and-storage/02-secrets.md),
+[03.03](../03-config-and-storage/03-volumes.md),
+[04.02](../04-scheduling/02-affinity-taints-topology.md) and
+[04.03](../04-scheduling/03-priority-and-preemption.md). This chapter applies
+them and does not teach them.
+
+Readiness depends on more than Postgres. The app's
+[`/readyz`](../examples/bookstore/app/catalog/main.go) pings the cache whenever
+`REDIS_ADDR` is set, and [`15-catalog-config.yaml`](../examples/bookstore/raw-manifests/15-catalog-config.yaml)
+sets it. Until the cache answers, every catalog Pod stays unready and the
+rollout waits. Readiness checks the connections, not the schema. The migration
+Job creates the tables, and the app does not check for them. So the chain
+below starts the cache too.
+
 
 ### 1. catalog as a Deployment
 
-New file
-[`examples/bookstore/raw-manifests/10-catalog-deploy.yaml`](../examples/bookstore/raw-manifests/10-catalog-deploy.yaml):
+The file is
+[`examples/bookstore/raw-manifests/10-catalog-deploy.yaml`](../examples/bookstore/raw-manifests/10-catalog-deploy.yaml).
+Its listing, with the comments removed:
 
 ```yaml
 apiVersion: apps/v1
 kind: Deployment
 metadata:
   name: catalog
-  namespace: bookstore                 # the app now lives here (ch.03)
+  namespace: bookstore
   labels:
     app: catalog
     app.kubernetes.io/part-of: bookstore
 spec:
-  replicas: 3                          # desired Pod count (self-healed to this)
-  revisionHistoryLimit: 5              # keep 5 old ReplicaSets for rollback
+  replicas: 3
+  revisionHistoryLimit: 5
   selector:
     matchLabels:
-      app: catalog                     # MUST match template labels exactly
+      app: catalog
   strategy:
     type: RollingUpdate
     rollingUpdate:
-      maxSurge: 1                      # at most replicas+1 during a rollout
-      maxUnavailable: 0                # never drop below `replicas` Ready (safest)
+      maxSurge: 1
+      maxUnavailable: 0
   template:
     metadata:
       labels:
-        app: catalog                   # selected by the RS above AND by the Service later
+        app: catalog
         component: backend
     spec:
+      serviceAccountName: catalog-sa
+      automountServiceAccountToken: false
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 65532
+        runAsGroup: 65532
+        seccompProfile:
+          type: RuntimeDefault
+      priorityClassName: bookstore-critical
+      topologySpreadConstraints:
+        - maxSkew: 1
+          topologyKey: kubernetes.io/hostname
+          whenUnsatisfiable: DoNotSchedule
+          labelSelector:
+            matchLabels:
+              app: catalog
+      affinity:
+        podAntiAffinity:
+          preferredDuringSchedulingIgnoredDuringExecution:
+            - weight: 100
+              podAffinityTerm:
+                topologyKey: kubernetes.io/hostname
+                labelSelector:
+                  matchLabels:
+                    app: catalog
       containers:
         - name: catalog
           image: bookstore/catalog:dev
           imagePullPolicy: IfNotPresent
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities:
+              drop: ["ALL"]
           ports:
             - name: http
               containerPort: 8080
+          envFrom:
+            - configMapRef:
+                name: catalog-config
           env:
             - name: PORT
               value: "8080"
+            - name: LOG_LEVEL
+              valueFrom:
+                configMapKeyRef:
+                  name: catalog-config
+                  key: LOG_LEVEL
+            - name: POSTGRES_USER
+              valueFrom:
+                secretKeyRef: { name: db-credentials, key: POSTGRES_USER }
+            - name: POSTGRES_PASSWORD
+              valueFrom:
+                secretKeyRef: { name: db-credentials, key: POSTGRES_PASSWORD }
+            - name: POSTGRES_DB
+              valueFrom:
+                secretKeyRef: { name: db-credentials, key: POSTGRES_DB }
+            - name: DB_DSN
+              value: "host=postgres.bookstore.svc.cluster.local port=5432 user=$(POSTGRES_USER) password=$(POSTGRES_PASSWORD) dbname=$(POSTGRES_DB) sslmode=disable"
           startupProbe:
             httpGet: { path: /healthz, port: http }
             periodSeconds: 5
@@ -150,26 +238,68 @@ spec:
             periodSeconds: 10
             timeoutSeconds: 2
             failureThreshold: 3
+            successThreshold: 1
           readinessProbe:
             httpGet: { path: /readyz, port: http }
             periodSeconds: 5
             timeoutSeconds: 2
             failureThreshold: 3
+            successThreshold: 1
           lifecycle:
-            # Native sleep handler (beta & default-on at 1.30, GA 1.34); the
-            # distroless/static image has no shell/coreutils, so an `exec`
-            # /bin/sleep preStop would fail.
-            preStop: { sleep: { seconds: 5 } }
+            preStop:
+              sleep:
+                seconds: 5
           resources:
-            requests: { cpu: 50m,  memory: 64Mi }
-            limits:   { cpu: 250m, memory: 128Mi }
+            requests:
+              cpu: 50m
+              memory: 64Mi
+            limits:
+              cpu: 250m
+              memory: 128Mi
+          volumeMounts:
+            - name: scratch
+              mountPath: /tmp/cache
+            - name: podinfo
+              mountPath: /etc/podinfo
+              readOnly: true
+      volumes:
+        - name: scratch
+          emptyDir:
+            sizeLimit: 64Mi
+        - name: podinfo
+          downwardAPI:
+            items:
+              - path: pod_name
+                fieldRef: { fieldPath: metadata.name }
+              - path: pod_namespace
+                fieldRef: { fieldPath: metadata.namespace }
+              - path: pod_labels
+                fieldRef: { fieldPath: metadata.labels }
+              - path: cpu_limit
+                resourceFieldRef:
+                  containerName: catalog
+                  resource: limits.cpu
       terminationGracePeriodSeconds: 30
 ```
 
+Read the listing against the baseline. The pod and container security fields
+are the [baseline](01-pods.md#baseline) from 01.01, unchanged. The three probes
+and the `preStop` sleep are the ones [01.02](02-health-and-lifecycle.md)
+explains. The `maxSurge` and `maxUnavailable` values are the surge math in the
+sections below.
+
+catalog's only writable path is its `scratch` volume, mounted at `/tmp/cache`,
+not at the `/tmp` the baseline shows. The app source in this repo writes no
+files, so the path is a named scratch directory the manifest provides. The code
+does not use it yet. Storefront mounts `/tmp` instead, because nginx writes its
+temporary files there, as its
+[`nginx.conf`](../examples/bookstore/app/storefront/nginx.conf) sets them.
+
 ### 2. storefront as a Deployment
 
-New file
-[`examples/bookstore/raw-manifests/11-storefront-deploy.yaml`](../examples/bookstore/raw-manifests/11-storefront-deploy.yaml):
+The file is
+[`examples/bookstore/raw-manifests/11-storefront-deploy.yaml`](../examples/bookstore/raw-manifests/11-storefront-deploy.yaml).
+Its listing, with the comments removed:
 
 ```yaml
 apiVersion: apps/v1
@@ -188,24 +318,52 @@ spec:
       app: storefront
   strategy:
     type: RollingUpdate
-    rollingUpdate: { maxSurge: 1, maxUnavailable: 0 }
+    rollingUpdate:
+      maxSurge: 1
+      maxUnavailable: 0
   template:
     metadata:
       labels:
         app: storefront
         component: frontend
     spec:
+      serviceAccountName: storefront-sa
+      automountServiceAccountToken: false
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 101
+        runAsGroup: 101
+        seccompProfile:
+          type: RuntimeDefault
+      priorityClassName: bookstore-critical
+      topologySpreadConstraints:
+        - maxSkew: 1
+          topologyKey: kubernetes.io/hostname
+          whenUnsatisfiable: DoNotSchedule
+          labelSelector:
+            matchLabels:
+              app: storefront
+      affinity:
+        podAntiAffinity:
+          preferredDuringSchedulingIgnoredDuringExecution:
+            - weight: 100
+              podAffinityTerm:
+                topologyKey: kubernetes.io/hostname
+                labelSelector:
+                  matchLabels:
+                    app: storefront
       containers:
         - name: storefront
-          image: bookstore/storefront:dev      # nginx serving static UI
+          image: bookstore/storefront:dev
           imagePullPolicy: IfNotPresent
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities:
+              drop: ["ALL"]
           ports:
             - name: http
               containerPort: 8080
-          # No startupProbe by design: nginx serving static files is ready in
-          # <1s, so liveness (no initialDelay needed) already covers boot —
-          # a startupProbe would add latency with no benefit. (catalog, which
-          # can connect to a DB/cache, keeps one; storefront has no such boot.)
           readinessProbe:
             httpGet: { path: /healthz, port: http }
             periodSeconds: 5
@@ -213,43 +371,133 @@ spec:
             httpGet: { path: /healthz, port: http }
             periodSeconds: 10
           resources:
-            requests: { cpu: 25m, memory: 32Mi }
-            limits:   { cpu: 100m, memory: 64Mi }
+            requests:
+              cpu: 25m
+              memory: 32Mi
+            limits:
+              cpu: 100m
+              memory: 64Mi
+          volumeMounts:
+            - name: tmp
+              mountPath: /tmp
+      volumes:
+        - name: tmp
+          emptyDir:
+            sizeLimit: 64Mi
 ```
 
-Apply and watch the controllers work:
+The image runs as UID 101, which its Dockerfile declares with `USER 101`, so
+`runAsUser` names that number. Storefront has no `startupProbe`. It has no slow
+boot to wait for, so its liveness probe runs from the start. catalog keeps one
+because it waits on Postgres.
+
+Apply the chain in order, from the repo root (`full-guide/`). Each step waits
+for what the next one needs.
 
 ```sh
-# from the repo root (full-guide/)
-# The canonical 10-catalog-deploy.yaml wires DB_DSN + envFrom db-credentials
-# (the real shape; the DB/Secret mechanics are Part 03 ch.01/ch.02's topic).
-# So bring up the prerequisite chain FIRST — harmless to apply now; each piece
-# is explained in the chapter noted. catalog's /readyz pings Postgres, so it
-# only goes Ready once the schema Job has completed; gate on that.
 kubectl apply -f examples/bookstore/raw-manifests/00-namespace.yaml
 kubectl apply -f examples/bookstore/raw-manifests/05-serviceaccounts-rbac.yaml
 kubectl apply -f examples/bookstore/raw-manifests/15-catalog-config.yaml
 kubectl apply -f examples/bookstore/raw-manifests/16-db-credentials.yaml
 kubectl apply -f examples/bookstore/raw-manifests/35-priorityclasses.yaml
 kubectl apply -f examples/bookstore/raw-manifests/20-postgres-statefulset.yaml
-kubectl rollout status statefulset/postgres -n bookstore
+kubectl rollout status statefulset/postgres -n bookstore --timeout=300s
 kubectl apply -f examples/bookstore/raw-manifests/21-db-migrate-job.yaml   # schema
-kubectl wait --for=condition=complete job/db-migrate -n bookstore --timeout=120s
+kubectl wait --for=condition=complete job/db-migrate -n bookstore --timeout=180s
+kubectl apply -f examples/bookstore/raw-manifests/12-redis.yaml
+kubectl rollout status deployment/redis -n bookstore --timeout=240s
+```
 
+`40-services.yaml` holds the Services for the whole app. Part 01 applies only
+the cache's Service, so that catalog can reach the cache. The rest of that file
+belongs to later chapters.
+
+```sh
+kubectl apply -f - <<'EOF2'
+apiVersion: v1
+kind: Service
+metadata:
+  name: redis
+  namespace: bookstore
+  labels:
+    app: redis
+    app.kubernetes.io/part-of: bookstore
+spec:
+  type: ClusterIP
+  selector:
+    app: redis
+  ports:
+    - name: redis
+      port: 6379
+      targetPort: redis
+EOF2
+```
+
+Then the two Deployments:
+
+```sh
 kubectl apply -f examples/bookstore/raw-manifests/10-catalog-deploy.yaml
 kubectl apply -f examples/bookstore/raw-manifests/11-storefront-deploy.yaml
-
+kubectl rollout status deployment/catalog -n bookstore --timeout=300s
+kubectl rollout status deployment/storefront -n bookstore --timeout=300s
 kubectl get deploy,rs,pod -n bookstore -l app=catalog   # Deployment→RS→3 Pods
-kubectl rollout status deployment/catalog -n bookstore  # waits until complete
+kubectl get pod -n bookstore -l app=catalog -o custom-columns=NAME:.metadata.name,OWNER-KIND:.metadata.ownerReferences[0].kind,OWNER:.metadata.ownerReferences[0].name
 ```
+
+<!-- gate: output -->
+```text
+NAME                      READY   UP-TO-DATE   AVAILABLE   AGE
+deployment.apps/catalog   3/3     3            3           119s
+
+NAME                                 DESIRED   CURRENT   READY   AGE
+replicaset.apps/catalog-69df46d8f5   3         3         3       118s
+
+NAME                           READY   STATUS    RESTARTS   AGE
+pod/catalog-69df46d8f5-9lfxm   1/1     Running   0          117s
+pod/catalog-69df46d8f5-lcpt8   1/1     Running   0          118s
+pod/catalog-69df46d8f5-xbf8b   1/1     Running   0          117s
+```
+
+<!-- gate: output -->
+```text
+NAME                       OWNER-KIND   OWNER
+catalog-69df46d8f5-9lfxm   ReplicaSet   catalog-69df46d8f5
+catalog-69df46d8f5-lcpt8   ReplicaSet   catalog-69df46d8f5
+catalog-69df46d8f5-xbf8b   ReplicaSet   catalog-69df46d8f5
+```
+
+Each catalog Pod names a ReplicaSet as its owner, and that ReplicaSet names the
+Deployment. The chain of owners is what the self-healing below depends on.
+
+If the catalog rollout does not finish, the Pods show why. A Pod that is
+`Running` but `0/1` is waiting on a readiness probe. Its logs name the
+dependency it cannot reach: `kubectl logs -n bookstore -l app=catalog`.
 
 ### 3. Self-healing (the whole point of a controller)
 
 ```sh
-kubectl delete pod -n bookstore -l app=catalog --wait=false   # kill the Pods
-kubectl get pod -n bookstore -l app=catalog -w
+kubectl delete pod -n bookstore -l app=catalog --wait=false -o name   # kill the Pods
+sleep 15; kubectl get pod -n bookstore -l app=catalog                 # a few seconds later
 #   the ReplicaSet immediately creates replacements: observed<desired ⇒ act.
-#   Contrast ch.01: deleting the BARE Pod left nothing. THIS is why Deployments.
+#   Add -w to watch them arrive. Contrast 01.01: deleting the BARE Pod left
+#   nothing. THIS is why Deployments.
+```
+
+<!-- gate: output -->
+```text
+pod/catalog-69df46d8f5-9lfxm
+pod/catalog-69df46d8f5-lcpt8
+pod/catalog-69df46d8f5-xbf8b
+```
+
+<!-- gate: output -->
+```text
+NAME                       READY   STATUS              RESTARTS   AGE
+catalog-69df46d8f5-dsqrr   0/1     ContainerCreating   0          17s
+catalog-69df46d8f5-lcpt8   0/1     Completed           0          2m16s
+catalog-69df46d8f5-qgw2d   0/1     ContainerCreating   0          15s
+catalog-69df46d8f5-r95s8   0/1     ContainerCreating   0          16s
+catalog-69df46d8f5-xbf8b   1/1     Terminating         0          2m15s
 ```
 
 ### 4. Scale, roll, and roll back
@@ -257,30 +505,158 @@ kubectl get pod -n bookstore -l app=catalog -w
 ```sh
 # Scale: just change the desired number (declaratively or imperatively).
 kubectl scale deployment/catalog -n bookstore --replicas=5
+kubectl rollout status deployment/catalog -n bookstore --timeout=300s
 kubectl get rs -n bookstore -l app=catalog          # same RS, now 5 Pods
-
-# Roll out a change. We force a new ReplicaSet by changing the template
-# (here: an annotation; in real life: a new image tag/digest).
-kubectl set env deployment/catalog -n bookstore LOG_LEVEL=debug
-kubectl rollout status deployment/catalog -n bookstore
-kubectl get rs -n bookstore -l app=catalog          # NEW rs up, OLD rs scaled to 0
-kubectl rollout history deployment/catalog -n bookstore
-
-# Roll back to the previous revision (re-points to the old ReplicaSet).
-kubectl rollout undo deployment/catalog -n bookstore
-kubectl rollout status deployment/catalog -n bookstore
-
-# Reset for later chapters.
-kubectl scale deployment/catalog -n bookstore --replicas=3
 ```
 
+<!-- gate: output -->
+```text
+NAME                 DESIRED   CURRENT   READY   AGE
+catalog-69df46d8f5   5         5         5       2m52s
+```
+
+```sh
+# Roll out a change. A change to the Pod template makes a new ReplicaSet.
+# Here it is an environment variable; in production it is a new image digest.
+kubectl set env deployment/catalog -n bookstore LOG_LEVEL=debug
+kubectl rollout status deployment/catalog -n bookstore --timeout=300s
+kubectl get rs -n bookstore -l app=catalog          # NEW rs up, OLD rs scaled to 0
+kubectl rollout history deployment/catalog -n bookstore
+```
+
+<!-- gate: output -->
+```text
+NAME                 DESIRED   CURRENT   READY   AGE
+catalog-5864b48955   5         5         5       5m
+catalog-69df46d8f5   0         0         0       7m53s
+```
+
+<!-- gate: output -->
+```text
+deployment.apps/catalog 
+REVISION  CHANGE-CAUSE
+1         <none>
+2         <none>
+```
+
+Roll back to the previous revision. `rollout undo` re-points the Deployment at
+the old ReplicaSet:
+
+```sh
+kubectl rollout undo deployment/catalog -n bookstore
+```
+
+<!-- gate: output -->
+```text
+Warning: resource deployments/catalog was previously managed with 'kubectl apply'. Rolling back will not update the kubectl.kubernetes.io/last-applied-configuration annotation, which may cause unexpected behavior on future 'kubectl apply' operations. Consider using 'kubectl apply' with your previous configuration file instead.
+deployment.apps/catalog rolled back
+```
+
+The undo prints a warning. This Deployment was created with `kubectl apply`,
+and a rollback does not update the `last-applied-configuration` annotation that
+a later apply reads. A team that applies from files should roll back by
+changing the files.
+
+```sh
+kubectl rollout status deployment/catalog -n bookstore --timeout=300s
+kubectl get rs -n bookstore -l app=catalog -o custom-columns=NAME:.metadata.name,REPLICAS:.spec.replicas,RUNASNONROOT:.spec.template.spec.securityContext.runAsNonRoot,IMAGE:.spec.template.spec.containers[0].image
+```
+
+<!-- gate: output -->
+```text
+NAME                 REPLICAS   RUNASNONROOT   IMAGE
+catalog-5864b48955   0          true           bookstore/catalog:dev
+catalog-69df46d8f5   5          true           bookstore/catalog:dev
+```
+
+After the undo, the ReplicaSet of revision 1 is the active one again, with
+five Pods. Its template is unchanged, so the image and `runAsNonRoot: true` are
+the ones revision 1 applied. The rollback reuses that ReplicaSet and gives it
+the next revision number, so revision 3 in the history is revision 1 again.
+
+```sh
+kubectl rollout history deployment/catalog -n bookstore
+
+# Reset the count for the next section.
+kubectl scale deployment/catalog -n bookstore --replicas=3
+kubectl rollout status deployment/catalog -n bookstore --timeout=300s
+```
+
+<!-- gate: output -->
+```text
+deployment.apps/catalog 
+REVISION  CHANGE-CAUSE
+2         <none>
+3         <none>
+```
+
+### 5. A Deployment that breaks `restricted` (deliberate action)
+
+This step is deliberate. It shows what the namespace label does to a
+Deployment whose template has no security fields. The namespace enforces
+`restricted` from [01.01](01-pods.md#baseline-namespace), so the command below
+draws a warning that readers often miss.
+
+```sh
+kubectl create deployment noctx-demo -n bookstore --image=busybox@sha256:73aaf090f3d85aa34ee199857f03fa3a95c8ede2ffd4cc2cdb5b94e566b11662 -- sleep 3600
+```
+
+<!-- gate: output -->
+```text
+Warning: would violate PodSecurity "restricted:latest": allowPrivilegeEscalation != false (container "busybox" must set securityContext.allowPrivilegeEscalation=false), unrestricted capabilities (container "busybox" must set securityContext.capabilities.drop=["ALL"]), runAsNonRoot != true (pod or container "busybox" must set securityContext.runAsNonRoot=true), seccompProfile (pod or container "busybox" must set securityContext.seccompProfile.type to "RuntimeDefault" or "Localhost")
+deployment.apps/noctx-demo created
+```
+
+The apply succeeds with a warning. `warn` mode checks a workload's template and
+prints what it would refuse, but it accepts the Deployment. The ReplicaSet then
+tries to create a Pod, and the namespace refuses it. Wait a few seconds, then
+read the ReplicaSet and its events:
+
+```sh
+sleep 20; kubectl get deploy,rs -n bookstore -l app=noctx-demo
+kubectl get events -n bookstore --field-selector reason=FailedCreate --sort-by=.lastTimestamp
+```
+
+<!-- gate: output -->
+```text
+NAME                         READY   UP-TO-DATE   AVAILABLE   AGE
+deployment.apps/noctx-demo   0/1     0            0           21s
+
+NAME                                    DESIRED   CURRENT   READY   AGE
+replicaset.apps/noctx-demo-5c8766f869   1         0         0       20s
+```
+
+<!-- gate: output -->
+```text
+LAST SEEN   TYPE      REASON         OBJECT                             MESSAGE
+4m39s       Warning   FailedCreate   replicaset/noctx-demo-5c8766f869   Error creating: pods "noctx-demo-5c8766f869-jjfd2" is forbidden: violates PodSecurity "restricted:latest": allowPrivilegeEscalation != false (container "busybox" must set securityContext.allowPrivilegeEscalation=false), unrestricted capabilities (container "busybox" must set securityContext.capabilities.drop=["ALL"]), runAsNonRoot != true (pod or container "busybox" must set securityContext.runAsNonRoot=true), seccompProfile (pod or container "busybox" must set securityContext.seccompProfile.type to "RuntimeDefault" or "Localhost")
+# ...
+9s          Warning   FailedCreate   replicaset/noctx-demo-5c8766f869   (combined from similar events): Error creating: pods "noctx-demo-5c8766f869-jwtrx" is forbidden: violates PodSecurity "restricted:latest": allowPrivilegeEscalation != false (container "busybox" must set securityContext.allowPrivilegeEscalation=false), unrestricted capabilities (container "busybox" must set securityContext.capabilities.drop=["ALL"]), runAsNonRoot != true (pod or container "busybox" must set securityContext.runAsNonRoot=true), seccompProfile (pod or container "busybox" must set securityContext.seccompProfile.type to "RuntimeDefault" or "Localhost")
+```
+
+The Deployment reads `0/1`, and its ReplicaSet wants one Pod and has none. The
+events name each rule the Pod broke. Delete the demo:
+
+```sh
+kubectl delete deployment noctx-demo -n bookstore
+```
+
+The same rule guards a real rollout. If an edit to `catalog`'s template dropped
+`runAsNonRoot`, its new Pods would be refused in the same way. A rollout waits
+for each new Pod to be Ready before it removes an old one, and with
+`maxUnavailable: 0` the old Pods keep running, so the rollout would stall at
+the new Pods rather than replace good Pods with refused ones. A Deployment that
+applies is not a Deployment that runs.
+
 > **Lineage note.** `01-catalog-pod.yaml` and `02-catalog-pod-sidecar.yaml`
-> (bare Pods in `default`) remain as the teaching seeds and are **not** edited.
-> `10-catalog-deploy.yaml` is their successor: the same container settings
-> (probes from ch.02, resources from ch.03) now under a Deployment in
-> `bookstore`. If you applied the old bare Pod, delete it
-> (`kubectl delete -f examples/bookstore/raw-manifests/02-catalog-pod-sidecar.yaml`)
-> so you don't run two catalogs. From here the Deployment is the catalog.
+> are the bare-Pod seeds from [01.01](01-pods.md) and
+> [01.02](02-health-and-lifecycle.md). They carry no namespace, so you apply
+> them into `bookstore`, and they are not edited. `10-catalog-deploy.yaml` is
+> their successor: the same container settings under a Deployment. If the bare
+> Pod is still running, delete it before you rely on the Deployment, so that
+> you do not run two catalogs:
+> `kubectl delete pod catalog -n bookstore --ignore-not-found`.
+
 
 ## How it works under the hood
 
@@ -298,7 +674,7 @@ kubectl scale deployment/catalog -n bookstore --replicas=3
   honoring `maxSurge` (how many *extra* Pods over `replicas` may exist:
   ceil if %) and `maxUnavailable` (how many *below* `replicas` may be
   unavailable: floor if %). Each step waits for new Pods to become **Ready**
-  (the readiness probe from [ch.02](02-health-and-lifecycle.md)) before
+  (the readiness probe from [01.02](02-health-and-lifecycle.md)) before
   proceeding — readiness is what makes the rollout safe. The surge math, with
   `replicas=R`: at any instant `total Pods ≤ R + maxSurge` and
   `available Pods ≥ R − maxUnavailable`; you cannot set *both* to 0.
@@ -308,7 +684,14 @@ kubectl scale deployment/catalog -n bookstore --replicas=3
 - **`revisionHistoryLimit`** caps how many old (scaled-to-0) ReplicaSets are
   retained. Each retained RS *is* a rollback target;
   `kubectl rollout undo --to-revision=N` simply scales that RS back up and the
-  current one down. History beyond the limit is garbage-collected.
+  current one down. History beyond the limit is garbage-collected, so the limit
+  also bounds how far back a rollback can go.
+- **A rollback runs the image that revision named.** The template in each
+  retained RS names one image, and a rollback runs that image again. A tag
+  re-pushed since then is a different image under the same name, so pin
+  third-party images by digest in every template. Then a revision names one
+  image for good. The guide's local `:dev` tags are the exception that the
+  [baseline](01-pods.md#baseline-image-digest) allows.
 - **`ownerReferences` + garbage collection.** Each Pod has an
   `ownerReference` → its RS; each RS → its Deployment. Deleting the Deployment
   triggers **cascading deletion**: by default *background* (object deleted,
@@ -316,12 +699,18 @@ kubectl scale deployment/catalog -n bookstore --replicas=3
   `--cascade=orphan` deletes only the Deployment and leaves RS/Pods running
   (their `ownerReferences` are cleared). This GC graph is the same mechanism
   behind every "delete parent ⇒ children go away" in Kubernetes.
+- **Admission runs on Pods, not on the Deployment.** The API server accepts a
+  Deployment and its ReplicaSet as written. Pod Security admission checks each
+  Pod the ReplicaSet tries to create, and in `warn` mode it also reports the
+  findings on the workload object at apply time. That is why step 5 applies
+  with a warning and runs nothing. The numbers to check are the Pods that exist
+  against `replicas`, and the events that say why a Pod was refused.
 - **Rollout progress is tracked in `status`.** `progressDeadlineSeconds`
   bounds how long a rollout may make no progress before it is marked
   `ProgressDeadlineExceeded` (it does **not** auto-rollback by default —
   surfacing failure is the controller's job; reverting is a delivery-pipeline
-  decision, [ch.08](08-deployment-strategies.md) /
-  [Part 07](../07-delivery/05-progressive-delivery.md)).
+  decision, [01.08](08-deployment-strategies.md) /
+  [07.05](../07-delivery/05-progressive-delivery.md)).
 
 ## Production notes
 
@@ -332,26 +721,20 @@ kubectl scale deployment/catalog -n bookstore --replicas=3
 > `maxUnavailable` is fine and rolls faster/cheaper.
 
 > **In production:** rollout safety **is** readiness-probe quality
-> ([ch.02](02-health-and-lifecycle.md)). If readiness lies (returns 200 before
+> ([01.02](02-health-and-lifecycle.md)). If readiness lies (returns 200 before
 > the app can serve), a rolling update happily replaces every good Pod with
 > broken ones "successfully". The probe is the gate; treat it as
 > release-critical.
 
-> **In production:** pin images by **digest**, not a moving tag. A Deployment
-> only rolls when the **template changes** — re-pushing `:dev`/`:latest` to the
-> same tag does *not* trigger a rollout (the spec is byte-identical), and you
-> can't reason about "which revision is which". Digests make rollouts and
-> rollbacks deterministic ([Part 00 ch.02](../00-foundations/02-containers-and-images.md)).
-
 > **In production:** never `kubectl edit`/`scale` a Deployment that GitOps owns
-> — it drifts and gets reverted ([Part 00 ch.06](../00-foundations/06-declarative-api-model.md)).
+> — it drifts and gets reverted ([00.06](../00-foundations/06-declarative-api-model.md)).
 > Scaling is legitimately owned by an **HPA**
-> ([Part 06 ch.04](../06-production-readiness/04-autoscaling.md)); when an HPA
+> ([06.04](../06-production-readiness/04-autoscaling.md)); when an HPA
 > manages `replicas`, omit `replicas` from the manifest so you don't fight it.
 
 > **In production:** for graceful rollouts also need a **PodDisruptionBudget**
 > so voluntary disruptions (node drains, autoscaler) don't take too many
-> replicas at once ([Part 06 ch.05](../06-production-readiness/05-reliability-and-disruptions.md)).
+> replicas at once ([06.05](../06-production-readiness/05-reliability-and-disruptions.md)).
 > A Deployment alone protects against involuntary loss, not against an operator
 > draining three nodes simultaneously.
 
@@ -368,12 +751,10 @@ kubectl delete deployment/<D> -n <NS> [--cascade=orphan]
 kubectl rollout restart deployment/<D> -n <NS>        # roll Pods with no spec change
 ```
 
-Minimal Deployment skeleton:
+Deployment skeleton, the `spec` only. The Pod template is the one from
+[01.01](01-pods.md#baseline), so every revision carries the baseline:
 
 ```yaml
-apiVersion: apps/v1
-kind: Deployment
-metadata: { name: <APP>, namespace: <NS>, labels: { app: <APP> } }
 spec:
   replicas: 3
   revisionHistoryLimit: 5
@@ -384,12 +765,25 @@ spec:
   template:
     metadata: { labels: { app: <APP> } }
     spec:
+      serviceAccountName: <APP>-sa
+      automountServiceAccountToken: false
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: <UID>                        # the number the image declares
+        runAsGroup: <GID>
+        seccompProfile: { type: RuntimeDefault }
       containers:
         - name: <APP>
-          image: <REGISTRY>/<APP>@sha256:...     # digest in prod
+          image: <REGISTRY>/<APP>@sha256:<DIGEST>   # third-party: pin by digest
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities: { drop: ["ALL"] }
           ports: [ { name: http, containerPort: 8080 } ]
           readinessProbe: { httpGet: { path: /readyz, port: http } }
-          resources: { requests: { cpu: 50m, memory: 64Mi }, limits: { cpu: 250m, memory: 128Mi } }
+          resources: { requests: { cpu: 50m, memory: 64Mi }, limits: { memory: 128Mi } }
+          volumeMounts: [ { name: tmp, mountPath: /tmp } ]
+      volumes: [ { name: tmp, emptyDir: {} } ]
 ```
 
 Checklist:
@@ -398,8 +792,9 @@ Checklist:
 - [ ] Strategy chosen deliberately (RollingUpdate vs Recreate)
 - [ ] `maxUnavailable`/`maxSurge` sized for the tier (0 unavailable for UX)
 - [ ] Readiness probe trustworthy (it gates every rollout step)
-- [ ] Image pinned by digest in production
+- [ ] Third-party images pinned by digest in every revision
 - [ ] `revisionHistoryLimit` set so rollback targets exist (but bounded)
+- [ ] After an apply, the ReplicaSet has its Pods and no admission events
 - [ ] `replicas` omitted if an HPA owns it; PDB added for disruptions
 
 ## Test your understanding
@@ -420,17 +815,39 @@ Checklist:
 
    </details>
 
-3. **You set `maxSurge: 0` and `maxUnavailable: 0` and try to roll out. What does Kubernetes do, and why?**
+3. **A teammate applies a Deployment to `bookstore`. The apply prints a
+   `would violate PodSecurity "restricted:latest"` warning and reports
+   `created`, but no Pod appears. Why did the apply succeed, where does the
+   refusal show, and what should the teammate check before saying the change
+   shipped?**
    <details><summary>Show answer</summary>
 
-   The API server rejects the manifest — you cannot set both to 0 simultaneously, because that means "you can't create new Pods until old ones are gone AND can't terminate old ones until new ones exist," which is a deadlock. At least one must be non-zero to bootstrap the rollout (see §How it works under the hood, surge math).
+   The namespace label is enforced on Pods. The Deployment is an object the API
+   server accepts, and `warn` mode only prints the findings. The ReplicaSet
+   tries to create the Pod, admission refuses it, and the refusal is recorded as
+   a `FailedCreate` event on the ReplicaSet. The ReplicaSet's desired count
+   stays above its current count. Before calling the change shipped, the
+   teammate should check the ReplicaSet, its events and the Ready count against
+   `replicas`, as step 5 does (see §Threats and controls and §How it works
+   under the hood).
 
    </details>
 
-4. **A Deployment is at 3 replicas, you set the image to `:dev` (same tag content as currently running), and `kubectl get rs` shows no new RS. Why doesn't `kubectl set image` to the same tag trigger a rollout, and what's the production fix?**
+4. **A CVE is published for the image in revision 3 of `catalog`. The current
+   revision is clean, and someone runs `kubectl rollout undo --to-revision=3`.
+   What runs next, and what in this chapter decides whether that step is safe?**
    <details><summary>Show answer</summary>
 
-   A rollout only happens when the *Pod template* changes. Re-pushing the same tag doesn't change the template spec (the image *name* is identical), and the controller has no way to know the bytes behind that tag are different — it only sees the spec. Production fix: pin by **digest** (`image@sha256:...`); each build gets a different digest and any rebuild forces a new template hash, hence a new RS (see §Production notes, "pin images by digest").
+   Revision 3's template comes back, so new Pods run the image that revision
+   named. If that image was pinned by digest, the vulnerable image returns
+   exactly, because the digest names one set of bytes and a rollback runs that
+   set again. A rollback restores a template. It does not repair an image. The
+   controls in this chapter give you the record: each revision keeps its
+   template up to `revisionHistoryLimit`, and the digest says which image it
+   ran. The decision belongs to the pipeline. Check a revision's digest against
+   the advisory before you roll back to it, and block a known-bad digest at
+   admission. [05.03](../05-security/03-supply-chain.md) covers supply-chain
+   controls for images.
 
    </details>
 
@@ -443,12 +860,13 @@ Checklist:
 
 ## Further reading
 
-- **Lukša, _Kubernetes in Action_ 2e, ch.13 — "Replicating Pods with
-  ReplicaSets"** and **ch.14 — "Managing Pods with Deployments"** — selectors,
-  rolling update mechanics, rollback, ownership.
-- **Ibryam & Huß, _Kubernetes Patterns_ 2e — *Declarative Deployment*
-  (ch.3)** — rolling/recreate/blue-green/canary as declarative strategies and
-  why the controller, not a script, should drive them.
+- Lukša, _Kubernetes in Action_, 2nd edition: the chapters on ReplicaSets
+  and on Deployments. Selectors, rolling update mechanics, rollback, ownership.
+- Ibryam & Huß, _Kubernetes Patterns_, 2nd edition: *Declarative Deployment*,
+  which treats rolling, recreate, blue-green and canary as declarative
+  strategies that a controller drives.
 - Official:
   <https://kubernetes.io/docs/concepts/workloads/controllers/deployment/> and
   <https://kubernetes.io/docs/concepts/workloads/controllers/replicaset/>.
+- Pod Security admission and its modes:
+  <https://kubernetes.io/docs/concepts/security/pod-security-admission/>.

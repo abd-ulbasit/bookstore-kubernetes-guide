@@ -1,0 +1,368 @@
+# Transcript for 01-core-workloads/04-replicasets-and-deployments.md.
+# Tier A: a kind cluster with one node on a lab host, Kubernetes v1.37.0,
+# kubectl v1.37.2. The cluster is shared with other lab workers, so every
+# namespace here is p01-bookstore, and the commands name it in place of
+# bookstore. The manifests were copied with that name substituted; the repo
+# files are unchanged.
+# 20-postgres-statefulset.yaml is the working-tree copy, with the startup probe
+# and the wider liveness window that chapter 01.05 adds. That change was not
+# committed when this ran. The cache (12-redis.yaml and its Service) joins the
+# chain because catalog's readiness pings it.
+# What did not work the first time: without the cache, catalog stayed unready
+# and the rollout waited. On the loaded node, postgres restarted under its
+# liveness probe during crash recovery until the startup probe was added. Those
+# attempts are not in this transcript.
+# Steps 0 to 6 are the run. Step 7 reads the refusal events with a reason
+# filter. Step 8 repeats step 5 in the order the chapter shows it, and its
+# output is the one the chapter quotes.
+# No operator or chart was installed, so the heavy-install lock was not taken.
+# The namespace is deleted after the run. The bookstore-* PriorityClass objects
+# from 35-priorityclasses.yaml are cluster-scoped and stay on the cluster.
+
+## step 0: cluster and namespace state before the run
+$ kubectl version 2>/dev/null | grep -E 'Server Version|Client Version'
+Client Version: v1.37.2
+Server Version: v1.37.0
+$ kubectl get ns p01-bookstore 2>&1 | tail -1
+Error from server (NotFound): namespaces "p01-bookstore" not found
+
+## step 1: prerequisite chain (namespace, ServiceAccounts, config, Secret, priorities, postgres, schema job, cache)
+$ kubectl apply -f 00-namespace.yaml
+namespace/p01-bookstore created
+resourcequota/bookstore-quota created
+limitrange/bookstore-limits created
+$ kubectl apply -f 05-serviceaccounts-rbac.yaml
+serviceaccount/catalog-sa created
+serviceaccount/storefront-sa created
+serviceaccount/orders-sa created
+serviceaccount/payments-worker-sa created
+serviceaccount/postgres-sa created
+serviceaccount/redis-sa created
+serviceaccount/rabbitmq-sa created
+serviceaccount/migrate-sa created
+role.rbac.authorization.k8s.io/catalog-config-reader created
+rolebinding.rbac.authorization.k8s.io/catalog-config-reader-binding created
+$ kubectl apply -f 15-catalog-config.yaml
+configmap/catalog-config created
+$ kubectl apply -f 16-db-credentials.yaml
+secret/db-credentials created
+$ kubectl apply -f 35-priorityclasses.yaml
+priorityclass.scheduling.k8s.io/bookstore-data configured
+priorityclass.scheduling.k8s.io/bookstore-critical configured
+priorityclass.scheduling.k8s.io/bookstore-batch configured
+$ kubectl apply -f 20-postgres-statefulset.yaml
+service/postgres created
+statefulset.apps/postgres created
+$ kubectl rollout status statefulset/postgres -n p01-bookstore --timeout=300s
+Waiting for statefulset spec update to be observed...
+Waiting for 1 pods to be ready...
+Waiting for 1 pods to be ready...
+partitioned roll out complete: 1 new pods have been updated...
+$ kubectl apply -f 21-db-migrate-job.yaml
+job.batch/db-migrate created
+$ kubectl wait --for=condition=complete job/db-migrate -n p01-bookstore --timeout=180s
+job.batch/db-migrate condition met
+$ kubectl apply -f 12-redis.yaml
+deployment.apps/redis created
+$ kubectl rollout status deployment/redis -n p01-bookstore --timeout=240s
+Waiting for deployment spec update to be observed...
+Waiting for deployment "redis" rollout to finish: 0 out of 1 new replicas have been updated...
+Waiting for deployment "redis" rollout to finish: 0 of 1 updated replicas are available...
+deployment "redis" successfully rolled out
+$ kubectl apply -f - <<'EOF2'
+apiVersion: v1
+kind: Service
+metadata:
+  name: redis
+  namespace: p01-bookstore
+  labels:
+    app: redis
+    app.kubernetes.io/part-of: bookstore
+spec:
+  type: ClusterIP
+  selector:
+    app: redis
+  ports:
+    - name: redis
+      port: 6379
+      targetPort: redis
+EOF2
+service/redis created
+
+## step 2: catalog and storefront as Deployments
+$ kubectl apply -f 10-catalog-deploy.yaml
+deployment.apps/catalog created
+$ kubectl apply -f 11-storefront-deploy.yaml
+deployment.apps/storefront created
+$ kubectl rollout status deployment/catalog -n p01-bookstore --timeout=300s
+Waiting for deployment "catalog" rollout to finish: 0 out of 3 new replicas have been updated...
+Waiting for deployment "catalog" rollout to finish: 0 of 3 updated replicas are available...
+Waiting for deployment "catalog" rollout to finish: 1 of 3 updated replicas are available...
+Waiting for deployment "catalog" rollout to finish: 2 of 3 updated replicas are available...
+deployment "catalog" successfully rolled out
+$ kubectl rollout status deployment/storefront -n p01-bookstore --timeout=300s
+deployment "storefront" successfully rolled out
+$ kubectl get deploy,rs,pod -n p01-bookstore -l app=catalog
+NAME                      READY   UP-TO-DATE   AVAILABLE   AGE
+deployment.apps/catalog   3/3     3            3           119s
+
+NAME                                 DESIRED   CURRENT   READY   AGE
+replicaset.apps/catalog-69df46d8f5   3         3         3       118s
+
+NAME                           READY   STATUS    RESTARTS   AGE
+pod/catalog-69df46d8f5-9lfxm   1/1     Running   0          117s
+pod/catalog-69df46d8f5-lcpt8   1/1     Running   0          118s
+pod/catalog-69df46d8f5-xbf8b   1/1     Running   0          117s
+$ kubectl get pod -n p01-bookstore -l app=catalog -o custom-columns=NAME:.metadata.name,OWNER-KIND:.metadata.ownerReferences[0].kind,OWNER:.metadata.ownerReferences[0].name
+NAME                       OWNER-KIND   OWNER
+catalog-69df46d8f5-9lfxm   ReplicaSet   catalog-69df46d8f5
+catalog-69df46d8f5-lcpt8   ReplicaSet   catalog-69df46d8f5
+catalog-69df46d8f5-xbf8b   ReplicaSet   catalog-69df46d8f5
+$ kubectl get deploy -n p01-bookstore storefront
+NAME         READY   UP-TO-DATE   AVAILABLE   AGE
+storefront   2/2     2            2           118s
+
+## step 3: self-healing
+$ kubectl get pod -n p01-bookstore -l app=catalog
+NAME                       READY   STATUS    RESTARTS   AGE
+catalog-69df46d8f5-9lfxm   1/1     Running   0          118s
+catalog-69df46d8f5-lcpt8   1/1     Running   0          119s
+catalog-69df46d8f5-xbf8b   1/1     Running   0          118s
+$ kubectl delete pod -n p01-bookstore -l app=catalog --wait=false -o name
+pod/catalog-69df46d8f5-9lfxm
+pod/catalog-69df46d8f5-lcpt8
+pod/catalog-69df46d8f5-xbf8b
+$ sleep 15; kubectl get pod -n p01-bookstore -l app=catalog
+NAME                       READY   STATUS              RESTARTS   AGE
+catalog-69df46d8f5-dsqrr   0/1     ContainerCreating   0          17s
+catalog-69df46d8f5-lcpt8   0/1     Completed           0          2m16s
+catalog-69df46d8f5-qgw2d   0/1     ContainerCreating   0          15s
+catalog-69df46d8f5-r95s8   0/1     ContainerCreating   0          16s
+catalog-69df46d8f5-xbf8b   1/1     Terminating         0          2m15s
+$ kubectl rollout status deployment/catalog -n p01-bookstore --timeout=300s
+Waiting for deployment "catalog" rollout to finish: 0 of 3 updated replicas are available...
+Waiting for deployment "catalog" rollout to finish: 0 of 3 updated replicas are available...
+Waiting for deployment "catalog" rollout to finish: 1 of 3 updated replicas are available...
+Waiting for deployment "catalog" rollout to finish: 2 of 3 updated replicas are available...
+deployment "catalog" successfully rolled out
+
+## step 4: scale, roll, roll back
+$ kubectl scale deployment/catalog -n p01-bookstore --replicas=5
+deployment.apps/catalog scaled
+$ kubectl rollout status deployment/catalog -n p01-bookstore --timeout=300s
+Waiting for deployment "catalog" rollout to finish: 3 out of 5 new replicas have been updated...
+Waiting for deployment "catalog" rollout to finish: 3 out of 5 new replicas have been updated...
+Waiting for deployment "catalog" rollout to finish: 3 of 5 updated replicas are available...
+Waiting for deployment "catalog" rollout to finish: 4 of 5 updated replicas are available...
+deployment "catalog" successfully rolled out
+$ kubectl get rs -n p01-bookstore -l app=catalog
+NAME                 DESIRED   CURRENT   READY   AGE
+catalog-69df46d8f5   5         5         5       2m52s
+$ kubectl set env deployment/catalog -n p01-bookstore LOG_LEVEL=debug
+deployment.apps/catalog env updated
+$ kubectl rollout status deployment/catalog -n p01-bookstore --timeout=300s
+Waiting for deployment spec update to be observed...
+Waiting for deployment "catalog" rollout to finish: 0 out of 5 new replicas have been updated...
+Waiting for deployment "catalog" rollout to finish: 1 out of 5 new replicas have been updated...
+Waiting for deployment "catalog" rollout to finish: 1 out of 5 new replicas have been updated...
+Waiting for deployment "catalog" rollout to finish: 1 out of 5 new replicas have been updated...
+Waiting for deployment "catalog" rollout to finish: 2 out of 5 new replicas have been updated...
+Waiting for deployment "catalog" rollout to finish: 2 out of 5 new replicas have been updated...
+Waiting for deployment "catalog" rollout to finish: 2 out of 5 new replicas have been updated...
+Waiting for deployment "catalog" rollout to finish: 2 out of 5 new replicas have been updated...
+Waiting for deployment "catalog" rollout to finish: 3 out of 5 new replicas have been updated...
+Waiting for deployment "catalog" rollout to finish: 3 out of 5 new replicas have been updated...
+Waiting for deployment "catalog" rollout to finish: 3 out of 5 new replicas have been updated...
+Waiting for deployment "catalog" rollout to finish: 3 out of 5 new replicas have been updated...
+Waiting for deployment "catalog" rollout to finish: 4 out of 5 new replicas have been updated...
+Waiting for deployment "catalog" rollout to finish: 4 out of 5 new replicas have been updated...
+Waiting for deployment "catalog" rollout to finish: 4 out of 5 new replicas have been updated...
+Waiting for deployment "catalog" rollout to finish: 4 out of 5 new replicas have been updated...
+Waiting for deployment "catalog" rollout to finish: 1 old replicas are pending termination...
+Waiting for deployment "catalog" rollout to finish: 1 old replicas are pending termination...
+Waiting for deployment "catalog" rollout to finish: 1 old replicas are pending termination...
+deployment "catalog" successfully rolled out
+$ kubectl get rs -n p01-bookstore -l app=catalog
+NAME                 DESIRED   CURRENT   READY   AGE
+catalog-5864b48955   5         5         5       5m
+catalog-69df46d8f5   0         0         0       7m53s
+$ kubectl rollout history deployment/catalog -n p01-bookstore
+deployment.apps/catalog 
+REVISION  CHANGE-CAUSE
+1         <none>
+2         <none>
+
+$ kubectl rollout undo deployment/catalog -n p01-bookstore
+Warning: resource deployments/catalog was previously managed with 'kubectl apply'. Rolling back will not update the kubectl.kubernetes.io/last-applied-configuration annotation, which may cause unexpected behavior on future 'kubectl apply' operations. Consider using 'kubectl apply' with your previous configuration file instead.
+deployment.apps/catalog rolled back
+$ kubectl rollout status deployment/catalog -n p01-bookstore --timeout=300s
+Waiting for deployment spec update to be observed...
+Waiting for deployment spec update to be observed...
+Waiting for deployment "catalog" rollout to finish: 0 out of 5 new replicas have been updated...
+Waiting for deployment "catalog" rollout to finish: 1 out of 5 new replicas have been updated...
+Waiting for deployment "catalog" rollout to finish: 1 out of 5 new replicas have been updated...
+Waiting for deployment "catalog" rollout to finish: 1 out of 5 new replicas have been updated...
+Waiting for deployment "catalog" rollout to finish: 2 out of 5 new replicas have been updated...
+Waiting for deployment "catalog" rollout to finish: 2 out of 5 new replicas have been updated...
+Waiting for deployment "catalog" rollout to finish: 2 out of 5 new replicas have been updated...
+Waiting for deployment "catalog" rollout to finish: 2 out of 5 new replicas have been updated...
+Waiting for deployment "catalog" rollout to finish: 3 out of 5 new replicas have been updated...
+Waiting for deployment "catalog" rollout to finish: 3 out of 5 new replicas have been updated...
+Waiting for deployment "catalog" rollout to finish: 3 out of 5 new replicas have been updated...
+Waiting for deployment "catalog" rollout to finish: 3 out of 5 new replicas have been updated...
+Waiting for deployment "catalog" rollout to finish: 4 out of 5 new replicas have been updated...
+Waiting for deployment "catalog" rollout to finish: 4 out of 5 new replicas have been updated...
+Waiting for deployment "catalog" rollout to finish: 4 out of 5 new replicas have been updated...
+Waiting for deployment "catalog" rollout to finish: 4 out of 5 new replicas have been updated...
+Waiting for deployment "catalog" rollout to finish: 1 old replicas are pending termination...
+Waiting for deployment "catalog" rollout to finish: 1 old replicas are pending termination...
+Waiting for deployment "catalog" rollout to finish: 1 old replicas are pending termination...
+deployment "catalog" successfully rolled out
+$ kubectl get rs -n p01-bookstore -l app=catalog -o custom-columns=NAME:.metadata.name,REPLICAS:.spec.replicas,RUNASNONROOT:.spec.template.spec.securityContext.runAsNonRoot,IMAGE:.spec.template.spec.containers[0].image
+NAME                 REPLICAS   RUNASNONROOT   IMAGE
+catalog-5864b48955   0          true           bookstore/catalog:dev
+catalog-69df46d8f5   5          true           bookstore/catalog:dev
+$ kubectl rollout history deployment/catalog -n p01-bookstore
+deployment.apps/catalog 
+REVISION  CHANGE-CAUSE
+2         <none>
+3         <none>
+
+$ kubectl scale deployment/catalog -n p01-bookstore --replicas=3
+deployment.apps/catalog scaled
+$ kubectl rollout status deployment/catalog -n p01-bookstore --timeout=300s
+Waiting for deployment spec update to be observed...
+deployment "catalog" successfully rolled out
+
+## step 5: a Deployment whose template breaks restricted (deliberate action)
+$ kubectl create deployment noctx-demo -n p01-bookstore --image=busybox@sha256:73aaf090f3d85aa34ee199857f03fa3a95c8ede2ffd4cc2cdb5b94e566b11662 -- sleep 3600
+Warning: would violate PodSecurity "restricted:latest": allowPrivilegeEscalation != false (container "busybox" must set securityContext.allowPrivilegeEscalation=false), unrestricted capabilities (container "busybox" must set securityContext.capabilities.drop=["ALL"]), runAsNonRoot != true (pod or container "busybox" must set securityContext.runAsNonRoot=true), seccompProfile (pod or container "busybox" must set securityContext.seccompProfile.type to "RuntimeDefault" or "Localhost")
+deployment.apps/noctx-demo created
+$ sleep 20; kubectl get deploy,rs -n p01-bookstore -l app=noctx-demo
+NAME                         READY   UP-TO-DATE   AVAILABLE   AGE
+deployment.apps/noctx-demo   0/1     0            0           21s
+
+NAME                                    DESIRED   CURRENT   READY   AGE
+replicaset.apps/noctx-demo-5c8766f869   1         0         0       22s
+$ kubectl get pods -n p01-bookstore -l app=noctx-demo --no-headers | wc -l
+No resources found in p01-bookstore namespace.
+       0
+$ kubectl get events -n p01-bookstore --field-selector involvedObject.kind=ReplicaSet --sort-by=.lastTimestamp
+LAST SEEN   TYPE      REASON             OBJECT                             MESSAGE
+12m         Normal    SuccessfulCreate   replicaset/redis-574bb544f         Created pod: redis-574bb544f-lt5nf
+11m         Normal    SuccessfulCreate   replicaset/catalog-69df46d8f5      Created pod: catalog-69df46d8f5-lcpt8
+11m         Normal    SuccessfulCreate   replicaset/catalog-69df46d8f5      Created pod: catalog-69df46d8f5-9lfxm
+11m         Normal    SuccessfulCreate   replicaset/catalog-69df46d8f5      Created pod: catalog-69df46d8f5-xbf8b
+11m         Normal    SuccessfulCreate   replicaset/storefront-76cbb89847   Created pod: storefront-76cbb89847-dzsfc
+11m         Normal    SuccessfulCreate   replicaset/storefront-76cbb89847   Created pod: storefront-76cbb89847-jpld6
+9m26s       Normal    SuccessfulCreate   replicaset/catalog-69df46d8f5      Created pod: catalog-69df46d8f5-dsqrr
+9m25s       Normal    SuccessfulCreate   replicaset/catalog-69df46d8f5      Created pod: catalog-69df46d8f5-r95s8
+9m23s       Normal    SuccessfulCreate   replicaset/catalog-69df46d8f5      Created pod: catalog-69df46d8f5-qgw2d
+8m53s       Normal    SuccessfulCreate   replicaset/catalog-69df46d8f5      Created pod: catalog-69df46d8f5-vv65x
+8m52s       Normal    SuccessfulCreate   replicaset/catalog-69df46d8f5      Created pod: catalog-69df46d8f5-5pxgx
+8m31s       Normal    SuccessfulCreate   replicaset/catalog-5864b48955      Created pod: catalog-5864b48955-9q8j5
+8m13s       Normal    SuccessfulDelete   replicaset/catalog-69df46d8f5      Deleted pod: catalog-69df46d8f5-vv65x
+8m11s       Normal    SuccessfulCreate   replicaset/catalog-5864b48955      Created pod: catalog-5864b48955-lkl2x
+7m47s       Normal    SuccessfulDelete   replicaset/catalog-69df46d8f5      Deleted pod: catalog-69df46d8f5-5pxgx
+7m45s       Normal    SuccessfulCreate   replicaset/catalog-5864b48955      Created pod: catalog-5864b48955-88mg5
+7m27s       Normal    SuccessfulDelete   replicaset/catalog-69df46d8f5      Deleted pod: catalog-69df46d8f5-dsqrr
+7m26s       Normal    SuccessfulCreate   replicaset/catalog-5864b48955      Created pod: catalog-5864b48955-p5n26
+4m43s       Normal    SuccessfulDelete   replicaset/catalog-69df46d8f5      Deleted pod: catalog-69df46d8f5-qgw2d
+4m38s       Normal    SuccessfulCreate   replicaset/catalog-5864b48955      Created pod: catalog-5864b48955-cwkgr
+3m38s       Normal    SuccessfulDelete   replicaset/catalog-69df46d8f5      Deleted pod: catalog-69df46d8f5-r95s8
+3m24s       Normal    SuccessfulCreate   replicaset/catalog-69df46d8f5      Created pod: catalog-69df46d8f5-tp7rt
+2m7s        Normal    SuccessfulCreate   replicaset/catalog-69df46d8f5      Created pod: catalog-69df46d8f5-2k6t5
+2m7s        Normal    SuccessfulDelete   replicaset/catalog-5864b48955      Deleted pod: catalog-5864b48955-cwkgr
+100s        Normal    SuccessfulDelete   replicaset/catalog-5864b48955      Deleted pod: catalog-5864b48955-p5n26
+99s         Normal    SuccessfulCreate   replicaset/catalog-69df46d8f5      Created pod: catalog-69df46d8f5-pkv8c
+84s         Normal    SuccessfulDelete   replicaset/catalog-5864b48955      Deleted pod: catalog-5864b48955-lkl2x
+83s         Normal    SuccessfulCreate   replicaset/catalog-69df46d8f5      Created pod: catalog-69df46d8f5-sz5nx
+45s         Normal    SuccessfulDelete   replicaset/catalog-5864b48955      Deleted pod: catalog-5864b48955-9q8j5
+44s         Normal    SuccessfulCreate   replicaset/catalog-69df46d8f5      Created pod: catalog-69df46d8f5-hff69
+30s         Normal    SuccessfulDelete   replicaset/catalog-5864b48955      Deleted pod: catalog-5864b48955-88mg5
+26s         Normal    SuccessfulDelete   replicaset/catalog-69df46d8f5      Deleted pod: catalog-69df46d8f5-hff69
+26s         Warning   FailedCreate       replicaset/noctx-demo-5c8766f869   Error creating: pods "noctx-demo-5c8766f869-jjfd2" is forbidden: violates PodSecurity "restricted:latest": allowPrivilegeEscalation != false (container "busybox" must set securityContext.allowPrivilegeEscalation=false), unrestricted capabilities (container "busybox" must set securityContext.capabilities.drop=["ALL"]), runAsNonRoot != true (pod or container "busybox" must set securityContext.runAsNonRoot=true), seccompProfile (pod or container "busybox" must set securityContext.seccompProfile.type to "RuntimeDefault" or "Localhost")
+26s         Normal    SuccessfulDelete   replicaset/catalog-69df46d8f5      Deleted pod: catalog-69df46d8f5-pkv8c
+25s         Warning   FailedCreate       replicaset/noctx-demo-5c8766f869   Error creating: pods "noctx-demo-5c8766f869-qnfp9" is forbidden: violates PodSecurity "restricted:latest": allowPrivilegeEscalation != false (container "busybox" must set securityContext.allowPrivilegeEscalation=false), unrestricted capabilities (container "busybox" must set securityContext.capabilities.drop=["ALL"]), runAsNonRoot != true (pod or container "busybox" must set securityContext.runAsNonRoot=true), seccompProfile (pod or container "busybox" must set securityContext.seccompProfile.type to "RuntimeDefault" or "Localhost")
+25s         Warning   FailedCreate       replicaset/noctx-demo-5c8766f869   Error creating: pods "noctx-demo-5c8766f869-zjgjm" is forbidden: violates PodSecurity "restricted:latest": allowPrivilegeEscalation != false (container "busybox" must set securityContext.allowPrivilegeEscalation=false), unrestricted capabilities (container "busybox" must set securityContext.capabilities.drop=["ALL"]), runAsNonRoot != true (pod or container "busybox" must set securityContext.runAsNonRoot=true), seccompProfile (pod or container "busybox" must set securityContext.seccompProfile.type to "RuntimeDefault" or "Localhost")
+25s         Warning   FailedCreate       replicaset/noctx-demo-5c8766f869   Error creating: pods "noctx-demo-5c8766f869-vtk9z" is forbidden: violates PodSecurity "restricted:latest": allowPrivilegeEscalation != false (container "busybox" must set securityContext.allowPrivilegeEscalation=false), unrestricted capabilities (container "busybox" must set securityContext.capabilities.drop=["ALL"]), runAsNonRoot != true (pod or container "busybox" must set securityContext.runAsNonRoot=true), seccompProfile (pod or container "busybox" must set securityContext.seccompProfile.type to "RuntimeDefault" or "Localhost")
+25s         Warning   FailedCreate       replicaset/noctx-demo-5c8766f869   Error creating: pods "noctx-demo-5c8766f869-qmtsr" is forbidden: violates PodSecurity "restricted:latest": allowPrivilegeEscalation != false (container "busybox" must set securityContext.allowPrivilegeEscalation=false), unrestricted capabilities (container "busybox" must set securityContext.capabilities.drop=["ALL"]), runAsNonRoot != true (pod or container "busybox" must set securityContext.runAsNonRoot=true), seccompProfile (pod or container "busybox" must set securityContext.seccompProfile.type to "RuntimeDefault" or "Localhost")
+25s         Warning   FailedCreate       replicaset/noctx-demo-5c8766f869   Error creating: pods "noctx-demo-5c8766f869-j8vl8" is forbidden: violates PodSecurity "restricted:latest": allowPrivilegeEscalation != false (container "busybox" must set securityContext.allowPrivilegeEscalation=false), unrestricted capabilities (container "busybox" must set securityContext.capabilities.drop=["ALL"]), runAsNonRoot != true (pod or container "busybox" must set securityContext.runAsNonRoot=true), seccompProfile (pod or container "busybox" must set securityContext.seccompProfile.type to "RuntimeDefault" or "Localhost")
+25s         Warning   FailedCreate       replicaset/noctx-demo-5c8766f869   Error creating: pods "noctx-demo-5c8766f869-tzjfg" is forbidden: violates PodSecurity "restricted:latest": allowPrivilegeEscalation != false (container "busybox" must set securityContext.allowPrivilegeEscalation=false), unrestricted capabilities (container "busybox" must set securityContext.capabilities.drop=["ALL"]), runAsNonRoot != true (pod or container "busybox" must set securityContext.runAsNonRoot=true), seccompProfile (pod or container "busybox" must set securityContext.seccompProfile.type to "RuntimeDefault" or "Localhost")
+25s         Warning   FailedCreate       replicaset/noctx-demo-5c8766f869   Error creating: pods "noctx-demo-5c8766f869-ljrst" is forbidden: violates PodSecurity "restricted:latest": allowPrivilegeEscalation != false (container "busybox" must set securityContext.allowPrivilegeEscalation=false), unrestricted capabilities (container "busybox" must set securityContext.capabilities.drop=["ALL"]), runAsNonRoot != true (pod or container "busybox" must set securityContext.runAsNonRoot=true), seccompProfile (pod or container "busybox" must set securityContext.seccompProfile.type to "RuntimeDefault" or "Localhost")
+24s         Warning   FailedCreate       replicaset/noctx-demo-5c8766f869   Error creating: pods "noctx-demo-5c8766f869-92v7s" is forbidden: violates PodSecurity "restricted:latest": allowPrivilegeEscalation != false (container "busybox" must set securityContext.allowPrivilegeEscalation=false), unrestricted capabilities (container "busybox" must set securityContext.capabilities.drop=["ALL"]), runAsNonRoot != true (pod or container "busybox" must set securityContext.runAsNonRoot=true), seccompProfile (pod or container "busybox" must set securityContext.seccompProfile.type to "RuntimeDefault" or "Localhost")
+5s          Warning   FailedCreate       replicaset/noctx-demo-5c8766f869   (combined from similar events): Error creating: pods "noctx-demo-5c8766f869-ch6zx" is forbidden: violates PodSecurity "restricted:latest": allowPrivilegeEscalation != false (container "busybox" must set securityContext.allowPrivilegeEscalation=false), unrestricted capabilities (container "busybox" must set securityContext.capabilities.drop=["ALL"]), runAsNonRoot != true (pod or container "busybox" must set securityContext.runAsNonRoot=true), seccompProfile (pod or container "busybox" must set securityContext.seccompProfile.type to "RuntimeDefault" or "Localhost")
+$ kubectl delete deployment noctx-demo -n p01-bookstore
+deployment.apps "noctx-demo" deleted from p01-bookstore namespace
+
+## step 6: final state
+$ kubectl get deploy,rs,pod -n p01-bookstore
+NAME                         READY   UP-TO-DATE   AVAILABLE   AGE
+deployment.apps/catalog      3/3     3            3           11m
+deployment.apps/redis        1/1     1            1           12m
+deployment.apps/storefront   2/2     2            2           11m
+
+NAME                                    DESIRED   CURRENT   READY   AGE
+replicaset.apps/catalog-5864b48955      0         0         0       8m34s
+replicaset.apps/catalog-69df46d8f5      3         3         3       11m
+replicaset.apps/redis-574bb544f         1         1         1       12m
+replicaset.apps/storefront-76cbb89847   2         2         2       11m
+
+NAME                              READY   STATUS    RESTARTS   AGE
+pod/catalog-69df46d8f5-2k6t5      1/1     Running   0          2m9s
+pod/catalog-69df46d8f5-sz5nx      1/1     Running   0          86s
+pod/catalog-69df46d8f5-tp7rt      1/1     Running   0          3m29s
+pod/postgres-0                    1/1     Running   0          15m
+pod/redis-574bb544f-lt5nf         1/1     Running   0          12m
+pod/storefront-76cbb89847-dzsfc   1/1     Running   0          11m
+pod/storefront-76cbb89847-jpld6   1/1     Running   0          11m
+done
+
+## step 7: the refusal events, filtered by reason (run after step 5; noctx-demo already deleted, its events remain)
+$ kubectl get events -n p01-bookstore --field-selector reason=FailedCreate --sort-by=.lastTimestamp
+LAST SEEN   TYPE      REASON         OBJECT                             MESSAGE
+4m          Warning   FailedCreate   replicaset/noctx-demo-5c8766f869   Error creating: pods "noctx-demo-5c8766f869-jjfd2" is forbidden: violates PodSecurity "restricted:latest": allowPrivilegeEscalation != false (container "busybox" must set securityContext.allowPrivilegeEscalation=false), unrestricted capabilities (container "busybox" must set securityContext.capabilities.drop=["ALL"]), runAsNonRoot != true (pod or container "busybox" must set securityContext.runAsNonRoot=true), seccompProfile (pod or container "busybox" must set securityContext.seccompProfile.type to "RuntimeDefault" or "Localhost")
+3m59s       Warning   FailedCreate   replicaset/noctx-demo-5c8766f869   Error creating: pods "noctx-demo-5c8766f869-ljrst" is forbidden: violates PodSecurity "restricted:latest": allowPrivilegeEscalation != false (container "busybox" must set securityContext.allowPrivilegeEscalation=false), unrestricted capabilities (container "busybox" must set securityContext.capabilities.drop=["ALL"]), runAsNonRoot != true (pod or container "busybox" must set securityContext.runAsNonRoot=true), seccompProfile (pod or container "busybox" must set securityContext.seccompProfile.type to "RuntimeDefault" or "Localhost")
+3m59s       Warning   FailedCreate   replicaset/noctx-demo-5c8766f869   Error creating: pods "noctx-demo-5c8766f869-qnfp9" is forbidden: violates PodSecurity "restricted:latest": allowPrivilegeEscalation != false (container "busybox" must set securityContext.allowPrivilegeEscalation=false), unrestricted capabilities (container "busybox" must set securityContext.capabilities.drop=["ALL"]), runAsNonRoot != true (pod or container "busybox" must set securityContext.runAsNonRoot=true), seccompProfile (pod or container "busybox" must set securityContext.seccompProfile.type to "RuntimeDefault" or "Localhost")
+3m59s       Warning   FailedCreate   replicaset/noctx-demo-5c8766f869   Error creating: pods "noctx-demo-5c8766f869-zjgjm" is forbidden: violates PodSecurity "restricted:latest": allowPrivilegeEscalation != false (container "busybox" must set securityContext.allowPrivilegeEscalation=false), unrestricted capabilities (container "busybox" must set securityContext.capabilities.drop=["ALL"]), runAsNonRoot != true (pod or container "busybox" must set securityContext.runAsNonRoot=true), seccompProfile (pod or container "busybox" must set securityContext.seccompProfile.type to "RuntimeDefault" or "Localhost")
+3m59s       Warning   FailedCreate   replicaset/noctx-demo-5c8766f869   Error creating: pods "noctx-demo-5c8766f869-vtk9z" is forbidden: violates PodSecurity "restricted:latest": allowPrivilegeEscalation != false (container "busybox" must set securityContext.allowPrivilegeEscalation=false), unrestricted capabilities (container "busybox" must set securityContext.capabilities.drop=["ALL"]), runAsNonRoot != true (pod or container "busybox" must set securityContext.runAsNonRoot=true), seccompProfile (pod or container "busybox" must set securityContext.seccompProfile.type to "RuntimeDefault" or "Localhost")
+3m59s       Warning   FailedCreate   replicaset/noctx-demo-5c8766f869   Error creating: pods "noctx-demo-5c8766f869-qmtsr" is forbidden: violates PodSecurity "restricted:latest": allowPrivilegeEscalation != false (container "busybox" must set securityContext.allowPrivilegeEscalation=false), unrestricted capabilities (container "busybox" must set securityContext.capabilities.drop=["ALL"]), runAsNonRoot != true (pod or container "busybox" must set securityContext.runAsNonRoot=true), seccompProfile (pod or container "busybox" must set securityContext.seccompProfile.type to "RuntimeDefault" or "Localhost")
+3m59s       Warning   FailedCreate   replicaset/noctx-demo-5c8766f869   Error creating: pods "noctx-demo-5c8766f869-j8vl8" is forbidden: violates PodSecurity "restricted:latest": allowPrivilegeEscalation != false (container "busybox" must set securityContext.allowPrivilegeEscalation=false), unrestricted capabilities (container "busybox" must set securityContext.capabilities.drop=["ALL"]), runAsNonRoot != true (pod or container "busybox" must set securityContext.runAsNonRoot=true), seccompProfile (pod or container "busybox" must set securityContext.seccompProfile.type to "RuntimeDefault" or "Localhost")
+3m59s       Warning   FailedCreate   replicaset/noctx-demo-5c8766f869   Error creating: pods "noctx-demo-5c8766f869-tzjfg" is forbidden: violates PodSecurity "restricted:latest": allowPrivilegeEscalation != false (container "busybox" must set securityContext.allowPrivilegeEscalation=false), unrestricted capabilities (container "busybox" must set securityContext.capabilities.drop=["ALL"]), runAsNonRoot != true (pod or container "busybox" must set securityContext.runAsNonRoot=true), seccompProfile (pod or container "busybox" must set securityContext.seccompProfile.type to "RuntimeDefault" or "Localhost")
+3m58s       Warning   FailedCreate   replicaset/noctx-demo-5c8766f869   Error creating: pods "noctx-demo-5c8766f869-92v7s" is forbidden: violates PodSecurity "restricted:latest": allowPrivilegeEscalation != false (container "busybox" must set securityContext.allowPrivilegeEscalation=false), unrestricted capabilities (container "busybox" must set securityContext.capabilities.drop=["ALL"]), runAsNonRoot != true (pod or container "busybox" must set securityContext.runAsNonRoot=true), seccompProfile (pod or container "busybox" must set securityContext.seccompProfile.type to "RuntimeDefault" or "Localhost")
+3m39s       Warning   FailedCreate   replicaset/noctx-demo-5c8766f869   (combined from similar events): Error creating: pods "noctx-demo-5c8766f869-ch6zx" is forbidden: violates PodSecurity "restricted:latest": allowPrivilegeEscalation != false (container "busybox" must set securityContext.allowPrivilegeEscalation=false), unrestricted capabilities (container "busybox" must set securityContext.capabilities.drop=["ALL"]), runAsNonRoot != true (pod or container "busybox" must set securityContext.runAsNonRoot=true), seccompProfile (pod or container "busybox" must set securityContext.seccompProfile.type to "RuntimeDefault" or "Localhost")
+
+## step 8: the refusal sequence in the order the chapter shows it (repeats step 5 with the filtered events)
+$ kubectl create deployment noctx-demo -n p01-bookstore --image=busybox@sha256:73aaf090f3d85aa34ee199857f03fa3a95c8ede2ffd4cc2cdb5b94e566b11662 -- sleep 3600
+Warning: would violate PodSecurity "restricted:latest": allowPrivilegeEscalation != false (container "busybox" must set securityContext.allowPrivilegeEscalation=false), unrestricted capabilities (container "busybox" must set securityContext.capabilities.drop=["ALL"]), runAsNonRoot != true (pod or container "busybox" must set securityContext.runAsNonRoot=true), seccompProfile (pod or container "busybox" must set securityContext.seccompProfile.type to "RuntimeDefault" or "Localhost")
+deployment.apps/noctx-demo created
+$ sleep 20; kubectl get deploy,rs -n p01-bookstore -l app=noctx-demo
+NAME                         READY   UP-TO-DATE   AVAILABLE   AGE
+deployment.apps/noctx-demo   0/1     0            0           21s
+
+NAME                                    DESIRED   CURRENT   READY   AGE
+replicaset.apps/noctx-demo-5c8766f869   1         0         0       20s
+$ kubectl get events -n p01-bookstore --field-selector reason=FailedCreate --sort-by=.lastTimestamp
+LAST SEEN   TYPE      REASON         OBJECT                             MESSAGE
+4m39s       Warning   FailedCreate   replicaset/noctx-demo-5c8766f869   Error creating: pods "noctx-demo-5c8766f869-jjfd2" is forbidden: violates PodSecurity "restricted:latest": allowPrivilegeEscalation != false (container "busybox" must set securityContext.allowPrivilegeEscalation=false), unrestricted capabilities (container "busybox" must set securityContext.capabilities.drop=["ALL"]), runAsNonRoot != true (pod or container "busybox" must set securityContext.runAsNonRoot=true), seccompProfile (pod or container "busybox" must set securityContext.seccompProfile.type to "RuntimeDefault" or "Localhost")
+4m38s       Warning   FailedCreate   replicaset/noctx-demo-5c8766f869   Error creating: pods "noctx-demo-5c8766f869-ljrst" is forbidden: violates PodSecurity "restricted:latest": allowPrivilegeEscalation != false (container "busybox" must set securityContext.allowPrivilegeEscalation=false), unrestricted capabilities (container "busybox" must set securityContext.capabilities.drop=["ALL"]), runAsNonRoot != true (pod or container "busybox" must set securityContext.runAsNonRoot=true), seccompProfile (pod or container "busybox" must set securityContext.seccompProfile.type to "RuntimeDefault" or "Localhost")
+4m38s       Warning   FailedCreate   replicaset/noctx-demo-5c8766f869   Error creating: pods "noctx-demo-5c8766f869-qnfp9" is forbidden: violates PodSecurity "restricted:latest": allowPrivilegeEscalation != false (container "busybox" must set securityContext.allowPrivilegeEscalation=false), unrestricted capabilities (container "busybox" must set securityContext.capabilities.drop=["ALL"]), runAsNonRoot != true (pod or container "busybox" must set securityContext.runAsNonRoot=true), seccompProfile (pod or container "busybox" must set securityContext.seccompProfile.type to "RuntimeDefault" or "Localhost")
+4m38s       Warning   FailedCreate   replicaset/noctx-demo-5c8766f869   Error creating: pods "noctx-demo-5c8766f869-zjgjm" is forbidden: violates PodSecurity "restricted:latest": allowPrivilegeEscalation != false (container "busybox" must set securityContext.allowPrivilegeEscalation=false), unrestricted capabilities (container "busybox" must set securityContext.capabilities.drop=["ALL"]), runAsNonRoot != true (pod or container "busybox" must set securityContext.runAsNonRoot=true), seccompProfile (pod or container "busybox" must set securityContext.seccompProfile.type to "RuntimeDefault" or "Localhost")
+4m38s       Warning   FailedCreate   replicaset/noctx-demo-5c8766f869   Error creating: pods "noctx-demo-5c8766f869-vtk9z" is forbidden: violates PodSecurity "restricted:latest": allowPrivilegeEscalation != false (container "busybox" must set securityContext.allowPrivilegeEscalation=false), unrestricted capabilities (container "busybox" must set securityContext.capabilities.drop=["ALL"]), runAsNonRoot != true (pod or container "busybox" must set securityContext.runAsNonRoot=true), seccompProfile (pod or container "busybox" must set securityContext.seccompProfile.type to "RuntimeDefault" or "Localhost")
+4m38s       Warning   FailedCreate   replicaset/noctx-demo-5c8766f869   Error creating: pods "noctx-demo-5c8766f869-qmtsr" is forbidden: violates PodSecurity "restricted:latest": allowPrivilegeEscalation != false (container "busybox" must set securityContext.allowPrivilegeEscalation=false), unrestricted capabilities (container "busybox" must set securityContext.capabilities.drop=["ALL"]), runAsNonRoot != true (pod or container "busybox" must set securityContext.runAsNonRoot=true), seccompProfile (pod or container "busybox" must set securityContext.seccompProfile.type to "RuntimeDefault" or "Localhost")
+4m38s       Warning   FailedCreate   replicaset/noctx-demo-5c8766f869   Error creating: pods "noctx-demo-5c8766f869-j8vl8" is forbidden: violates PodSecurity "restricted:latest": allowPrivilegeEscalation != false (container "busybox" must set securityContext.allowPrivilegeEscalation=false), unrestricted capabilities (container "busybox" must set securityContext.capabilities.drop=["ALL"]), runAsNonRoot != true (pod or container "busybox" must set securityContext.runAsNonRoot=true), seccompProfile (pod or container "busybox" must set securityContext.seccompProfile.type to "RuntimeDefault" or "Localhost")
+4m38s       Warning   FailedCreate   replicaset/noctx-demo-5c8766f869   Error creating: pods "noctx-demo-5c8766f869-tzjfg" is forbidden: violates PodSecurity "restricted:latest": allowPrivilegeEscalation != false (container "busybox" must set securityContext.allowPrivilegeEscalation=false), unrestricted capabilities (container "busybox" must set securityContext.capabilities.drop=["ALL"]), runAsNonRoot != true (pod or container "busybox" must set securityContext.runAsNonRoot=true), seccompProfile (pod or container "busybox" must set securityContext.seccompProfile.type to "RuntimeDefault" or "Localhost")
+4m37s       Warning   FailedCreate   replicaset/noctx-demo-5c8766f869   Error creating: pods "noctx-demo-5c8766f869-92v7s" is forbidden: violates PodSecurity "restricted:latest": allowPrivilegeEscalation != false (container "busybox" must set securityContext.allowPrivilegeEscalation=false), unrestricted capabilities (container "busybox" must set securityContext.capabilities.drop=["ALL"]), runAsNonRoot != true (pod or container "busybox" must set securityContext.runAsNonRoot=true), seccompProfile (pod or container "busybox" must set securityContext.seccompProfile.type to "RuntimeDefault" or "Localhost")
+4m18s       Warning   FailedCreate   replicaset/noctx-demo-5c8766f869   (combined from similar events): Error creating: pods "noctx-demo-5c8766f869-ch6zx" is forbidden: violates PodSecurity "restricted:latest": allowPrivilegeEscalation != false (container "busybox" must set securityContext.allowPrivilegeEscalation=false), unrestricted capabilities (container "busybox" must set securityContext.capabilities.drop=["ALL"]), runAsNonRoot != true (pod or container "busybox" must set securityContext.runAsNonRoot=true), seccompProfile (pod or container "busybox" must set securityContext.seccompProfile.type to "RuntimeDefault" or "Localhost")
+20s         Warning   FailedCreate   replicaset/noctx-demo-5c8766f869   Error creating: pods "noctx-demo-5c8766f869-sjb96" is forbidden: violates PodSecurity "restricted:latest": allowPrivilegeEscalation != false (container "busybox" must set securityContext.allowPrivilegeEscalation=false), unrestricted capabilities (container "busybox" must set securityContext.capabilities.drop=["ALL"]), runAsNonRoot != true (pod or container "busybox" must set securityContext.runAsNonRoot=true), seccompProfile (pod or container "busybox" must set securityContext.seccompProfile.type to "RuntimeDefault" or "Localhost")
+19s         Warning   FailedCreate   replicaset/noctx-demo-5c8766f869   Error creating: pods "noctx-demo-5c8766f869-7pcct" is forbidden: violates PodSecurity "restricted:latest": allowPrivilegeEscalation != false (container "busybox" must set securityContext.allowPrivilegeEscalation=false), unrestricted capabilities (container "busybox" must set securityContext.capabilities.drop=["ALL"]), runAsNonRoot != true (pod or container "busybox" must set securityContext.runAsNonRoot=true), seccompProfile (pod or container "busybox" must set securityContext.seccompProfile.type to "RuntimeDefault" or "Localhost")
+19s         Warning   FailedCreate   replicaset/noctx-demo-5c8766f869   Error creating: pods "noctx-demo-5c8766f869-5s7q4" is forbidden: violates PodSecurity "restricted:latest": allowPrivilegeEscalation != false (container "busybox" must set securityContext.allowPrivilegeEscalation=false), unrestricted capabilities (container "busybox" must set securityContext.capabilities.drop=["ALL"]), runAsNonRoot != true (pod or container "busybox" must set securityContext.runAsNonRoot=true), seccompProfile (pod or container "busybox" must set securityContext.seccompProfile.type to "RuntimeDefault" or "Localhost")
+19s         Warning   FailedCreate   replicaset/noctx-demo-5c8766f869   Error creating: pods "noctx-demo-5c8766f869-s4mz9" is forbidden: violates PodSecurity "restricted:latest": allowPrivilegeEscalation != false (container "busybox" must set securityContext.allowPrivilegeEscalation=false), unrestricted capabilities (container "busybox" must set securityContext.capabilities.drop=["ALL"]), runAsNonRoot != true (pod or container "busybox" must set securityContext.runAsNonRoot=true), seccompProfile (pod or container "busybox" must set securityContext.seccompProfile.type to "RuntimeDefault" or "Localhost")
+19s         Warning   FailedCreate   replicaset/noctx-demo-5c8766f869   Error creating: pods "noctx-demo-5c8766f869-6n2jz" is forbidden: violates PodSecurity "restricted:latest": allowPrivilegeEscalation != false (container "busybox" must set securityContext.allowPrivilegeEscalation=false), unrestricted capabilities (container "busybox" must set securityContext.capabilities.drop=["ALL"]), runAsNonRoot != true (pod or container "busybox" must set securityContext.runAsNonRoot=true), seccompProfile (pod or container "busybox" must set securityContext.seccompProfile.type to "RuntimeDefault" or "Localhost")
+19s         Warning   FailedCreate   replicaset/noctx-demo-5c8766f869   Error creating: pods "noctx-demo-5c8766f869-ts852" is forbidden: violates PodSecurity "restricted:latest": allowPrivilegeEscalation != false (container "busybox" must set securityContext.allowPrivilegeEscalation=false), unrestricted capabilities (container "busybox" must set securityContext.capabilities.drop=["ALL"]), runAsNonRoot != true (pod or container "busybox" must set securityContext.runAsNonRoot=true), seccompProfile (pod or container "busybox" must set securityContext.seccompProfile.type to "RuntimeDefault" or "Localhost")
+19s         Warning   FailedCreate   replicaset/noctx-demo-5c8766f869   Error creating: pods "noctx-demo-5c8766f869-c7h4l" is forbidden: violates PodSecurity "restricted:latest": allowPrivilegeEscalation != false (container "busybox" must set securityContext.allowPrivilegeEscalation=false), unrestricted capabilities (container "busybox" must set securityContext.capabilities.drop=["ALL"]), runAsNonRoot != true (pod or container "busybox" must set securityContext.runAsNonRoot=true), seccompProfile (pod or container "busybox" must set securityContext.seccompProfile.type to "RuntimeDefault" or "Localhost")
+18s         Warning   FailedCreate   replicaset/noctx-demo-5c8766f869   Error creating: pods "noctx-demo-5c8766f869-wkwh7" is forbidden: violates PodSecurity "restricted:latest": allowPrivilegeEscalation != false (container "busybox" must set securityContext.allowPrivilegeEscalation=false), unrestricted capabilities (container "busybox" must set securityContext.capabilities.drop=["ALL"]), runAsNonRoot != true (pod or container "busybox" must set securityContext.runAsNonRoot=true), seccompProfile (pod or container "busybox" must set securityContext.seccompProfile.type to "RuntimeDefault" or "Localhost")
+18s         Warning   FailedCreate   replicaset/noctx-demo-5c8766f869   Error creating: pods "noctx-demo-5c8766f869-zhxzf" is forbidden: violates PodSecurity "restricted:latest": allowPrivilegeEscalation != false (container "busybox" must set securityContext.allowPrivilegeEscalation=false), unrestricted capabilities (container "busybox" must set securityContext.capabilities.drop=["ALL"]), runAsNonRoot != true (pod or container "busybox" must set securityContext.runAsNonRoot=true), seccompProfile (pod or container "busybox" must set securityContext.seccompProfile.type to "RuntimeDefault" or "Localhost")
+9s          Warning   FailedCreate   replicaset/noctx-demo-5c8766f869   (combined from similar events): Error creating: pods "noctx-demo-5c8766f869-jwtrx" is forbidden: violates PodSecurity "restricted:latest": allowPrivilegeEscalation != false (container "busybox" must set securityContext.allowPrivilegeEscalation=false), unrestricted capabilities (container "busybox" must set securityContext.capabilities.drop=["ALL"]), runAsNonRoot != true (pod or container "busybox" must set securityContext.runAsNonRoot=true), seccompProfile (pod or container "busybox" must set securityContext.seccompProfile.type to "RuntimeDefault" or "Localhost")
+$ kubectl delete deployment noctx-demo -n p01-bookstore
+deployment.apps "noctx-demo" deleted from p01-bookstore namespace
