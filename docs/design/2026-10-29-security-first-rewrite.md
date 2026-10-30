@@ -536,23 +536,15 @@ Part 05's labs follow the rule Parts 16 and 17 already state.
 
 * **Tier A: kind on the reader's machine.** Configs live in
   `examples/security-lab/kind/`.
-* **Tier B: kubeadm on Compute Engine.** One control-plane VM and one
-  worker, built by Terraform in `examples/security-lab/terraform/`. It
-  uses the guardrails `examples/gke` already has:
-  * a budget alert;
-  * a scripted teardown;
-  * gitignored tfvars;
-  * a verify script.
-
-  Tier B is for what kind cannot show truthfully:
-  * a host kernel with AppArmor;
-  * a sandboxed runtime installed on the node;
-  * a real kubelet and control plane for kube-bench;
-  * a kubeadm upgrade.
-* **Falco runs on tier B.** Falco's docs say Docker Desktop for Mac
-  does not work, and modern eBPF inside kind is only likely, not
-  documented, on Linux. If the builder verifies Falco on kind on both
-  Linux and macOS, the Falco part moves to tier A.
+* **Tier B: not run during this rewrite.** The owner ruled out clusters
+  on AWS or GCP for now. kind is built with kubeadm and its nodes share
+  the Linux host's kernel, so kube-bench, audit logs, encryption at rest,
+  AppArmor and Falco are tried on tier A first. What kind cannot show
+  truthfully (a real `kubeadm upgrade`, a sandboxed runtime it will not
+  run) is cited to upstream and labelled as not run. A chapter never
+  implies it ran. A kubeadm lab on cloud VMs can be added later.
+* **Falco runs on a Linux host.** Falco's docs say Docker Desktop for Mac
+  does not work, so the lab states that it needs a Linux Docker host.
 * **Encryption at rest on kind has no documented recipe.** The builder
   proves one in the lab before 05.04 teaches it.
 * **Every lab chapter** states its tier at the top.
@@ -775,9 +767,11 @@ which Parts are done.
 
 ### 7.5 Token discipline
 
-* **Narrow context.** Each worker gets four things: the spec, its
-  chapter, the example files it touches, and its gate output. Never the
-  whole guide.
+* **Narrow context.** Each worker gets five things: the spec, its
+  module's one-page brief, its chapter, the example files it touches, and
+  its gate output. Never the whole guide. Cost grows with calls times
+  context size, so one long agent across a module costs more than one
+  short agent per chapter, and cannot hold the module in context anyway.
 * **Edit, don't regenerate.** Full rewrites are only for the
   restructured Part 05 chapters.
 * **Scripts before models.** Scripts run G1 to G7 before any model
@@ -831,11 +825,13 @@ which Parts are done.
   change;
 * DevSecOps practices taught and implemented in the example projects,
   with the pipeline proven in CI (§5.12, G9);
-* lab infrastructure: the builder creates and destroys the Compute
-  Engine VMs on the owner's GCP project. A $25 monthly budget alert
-  applies, the same guardrail as `examples/gke`. Every lab is torn down
-  after its run, and the builder confirms no VMs, disks or load
-  balancers are left.
+* lab infrastructure: no clusters on AWS or GCP during this rewrite.
+  Local clusters and CI runners are the lab. Parts 10, 13, 14 and 15 are
+  validated and cited rather than run, and the labs in Parts 16 and 17
+  wait;
+* the writing setup, chosen after a blind three-way trial on 05.02: Haiku
+  writes and fixes, Sonnet reviews, one reviewer per 3 or 4 chapters, and
+  each module gets a one-page brief its chapter writers read (§7.5).
 
 **Calls made in this document, open to the owner's veto:**
 
