@@ -7,16 +7,15 @@
 # removed and tabs are expanded to spaces. Nothing else is edited.
 ## step 1
 $ pip install -q pre-commit==4.7.0
+$ rm -rf /tmp/bookstore
 $ cp -R examples/bookstore /tmp/bookstore && rm -rf /tmp/bookstore/ci/fixtures   # stands in for your repo
-$ cd /tmp/bookstore && git init -q && git add -A
-$ pre-commit run --all-files
+$ (cd /tmp/bookstore && git init -q && git add -A && pre-commit run --all-files)
 gitleaks.................................................................Passed
 hadolint.................................................................Passed
 gosec....................................................................Passed
 
-$ cd /tmp/bookstore
-$ printf 'GITHUB_TOKEN=ghp_%s\n' "$(printf 'NOTAREALTOKEN%.0s' 1 2 3)" > .env
-$ git add .env && pre-commit run gitleaks
+$ (cd /tmp/bookstore && printf 'GITHUB_TOKEN=ghp_%s\n' "$(printf 'NOTAREALTOKEN%.0s' 1 2 3)" > .env && git add .env && pre-commit run gitleaks)
+$ rm -rf /tmp/bookstore
 gitleaks.................................................................Failed
 - hook id: gitleaks
 - exit code: 1
@@ -29,12 +28,10 @@ File:        .env
 Line:        1
 Fingerprint: .env:github-pat:1
 
-7:52PM INF 0 commits scanned.
-7:52PM INF scanned ~1010463 bytes (1.01 MB) in 1.46s
-7:52PM WRN leaks found: 1
+9:00PM INF 0 commits scanned.
+9:00PM INF scanned ~758617 bytes (758.62 KB) in 565ms
+9:00PM WRN leaks found: 1
 
-
-$ rm -rf /tmp/bookstore
 
 ## step 2
 $ $scan gitleaks examples/bookstore/app
@@ -54,6 +51,20 @@ $ $scan --expect github-pat gitleaks examples/bookstore/ci/fixtures/vulnerable
 $ $scan --expect Github trufflehog examples/bookstore/ci/fixtures/vulnerable
 scan.sh: control ok, gitleaks reported github-pat on examples/bookstore/ci/fixtures/vulnerable
 scan.sh: control ok, trufflehog reported Github on examples/bookstore/ci/fixtures/vulnerable
+
+$ examples/bookstore/ci/fixtures/make-history.sh scan-out/history
+$ $scan gitleaks scan-out/history
+$ $scan gitleaks-history scan-out/history; echo "exit $?"
+scan.sh: gitleaks clean on scan-out/history
+scan.sh: gitleaks-history flagged scan-out/history (exit 1, report scan-reports/gitleaks-history.json)
+exit 1
+
+$ $scan trufflehog-history scan-out/history
+$ $scan --expect github-pat gitleaks-history scan-out/history
+$ $scan --expect Github trufflehog-history scan-out/history
+scan.sh: trufflehog-history clean on scan-out/history
+scan.sh: control ok, gitleaks-history reported github-pat on scan-out/history
+scan.sh: control ok, trufflehog-history reported Github on scan-out/history
 
 ## step 3
 $ $scan semgrep examples/bookstore/app
@@ -151,30 +162,41 @@ $ cd ..
 $ scan=full-guide/examples/bookstore/ci/scan.sh
 $ $scan zizmor ".github/workflows/bookstore-pipeline.yml .github/workflows/bookstore-pipeline-check.yml"
 $ $scan actionlint ".github/workflows/bookstore-pipeline.yml .github/workflows/bookstore-pipeline-check.yml"
+$ $scan expiry "full-guide/examples/bookstore/ci/zap/baseline.conf full-guide/examples/bookstore/ci/kube-linter.yaml"
 scan.sh: zizmor clean on .github/workflows/bookstore-pipeline.yml .github/workflows/bookstore-pipeline-check.yml
 scan.sh: actionlint clean on .github/workflows/bookstore-pipeline.yml .github/workflows/bookstore-pipeline-check.yml
+scan.sh: expiry clean on full-guide/examples/bookstore/ci/zap/baseline.conf full-guide/examples/bookstore/ci/kube-linter.yaml
 
 $ $scan --expect template-injection zizmor full-guide/examples/bookstore/ci/fixtures/vulnerable/bad-workflow.yml
 $ $scan --expect 'potentially untrusted' actionlint full-guide/examples/bookstore/ci/fixtures/vulnerable/bad-workflow.yml
+$ $scan --expect 'lapsed on 2020-01-01' expiry full-guide/examples/bookstore/ci/fixtures/vulnerable/exceptions.conf
+$ $scan --expect 'no Revisit by DATE' expiry full-guide/examples/bookstore/ci/fixtures/vulnerable/exceptions.conf
 scan.sh: control ok, zizmor reported template-injection on full-guide/examples/bookstore/ci/fixtures/vulnerable/bad-workflow.yml
 scan.sh: control ok, actionlint reported potentially untrusted on full-guide/examples/bookstore/ci/fixtures/vulnerable/bad-workflow.yml
+scan.sh: control ok, expiry reported lapsed on 2020-01-01 on full-guide/examples/bookstore/ci/fixtures/vulnerable/exceptions.conf
+scan.sh: control ok, expiry reported no Revisit by DATE on full-guide/examples/bookstore/ci/fixtures/vulnerable/exceptions.conf
+
+$ cd full-guide
+$ scan=examples/bookstore/ci/scan.sh
 
 ## step 11
 $ kubectl create namespace dast
 $ kubectl label namespace dast pod-security.kubernetes.io/enforce=restricted pod-security.kubernetes.io/warn=restricted
+$ kubectl apply --namespace dast -f - <<'EOF'   # the default-deny NetworkPolicy from the chapter
 $ kubectl create serviceaccount catalog-sa --namespace dast
 $ kind load docker-image bookstore/catalog:dev --name bookstore
 $ kubectl apply --namespace dast -f examples/bookstore/raw-manifests/01-catalog-pod.yaml
 $ kubectl wait --namespace dast --for=condition=Ready pod/catalog --timeout=90s
 namespace/dast created
 namespace/dast labeled
+networkpolicy.networking.k8s.io/default-deny created
 serviceaccount/catalog-sa created
-Image: "bookstore/catalog:dev" with ID "sha256:5c8f78461c5a94db0589f347ba76121dc185f0417025110c555a7f2b56f2d220" not yet present on node "bookstore-control-plane", loading...
+Image: "bookstore/catalog:dev" with ID "sha256:ed20b252119884dbb2d045629c2333e6c2d48c9660d98b0ed2ea5518cec66be2" not yet present on node "bookstore-control-plane", loading...
 pod/catalog created
 pod/catalog condition met
 
 $ kubectl --namespace dast port-forward pod/catalog 8080:8080 >/dev/null &
-$ sleep 2
+$ curl --silent --fail --retry 15 --retry-delay 1 --retry-all-errors --output /dev/null http://127.0.0.1:8080/books
 $ $scan zap http://127.0.0.1:8080/books
 $ grep -E '^(FAIL-NEW|WARN-NEW|INFO)' scan-reports/zap.log
 scan.sh: zap clean on http://127.0.0.1:8080/books
@@ -184,7 +206,7 @@ INFO: Cross-Origin-Resource-Policy Header Missing or Invalid [90004] x 1
 FAIL-NEW: 0     FAIL-INPROG: 0  WARN-NEW: 0     WARN-INPROG: 0  INFO: 3 IGNORE: 0       PASS: 65
 
 $ docker run -d --name fixture -p 127.0.0.1:18080:8080 bookstore/vulnerable:fixture >/dev/null
-$ sleep 2
+$ curl --silent --fail --retry 15 --retry-delay 1 --retry-all-errors --output /dev/null http://127.0.0.1:18080/books
 $ $scan --expect 10010 zap http://127.0.0.1:18080/books
 $ grep -E '^(FAIL-NEW|WARN-NEW|INFO)' scan-reports/zap.log
 $ docker rm -f fixture >/dev/null
@@ -192,7 +214,7 @@ scan.sh: control ok, zap reported 10010 on http://127.0.0.1:18080/books
 INFO: Missing Anti-clickjacking Header [10020] x 1 
 INFO: X-Content-Type-Options Header Missing [10021] x 1 
 INFO: Content Security Policy (CSP) Header Not Set [10038] x 1 
-INFO: Storable and Cacheable Content [10049] x 4 
+INFO: Storable and Cacheable Content [10049] x 3 
 INFO: Permissions Policy Header Not Set [10063] x 1 
 INFO: Cross-Origin-Embedder-Policy Header Missing or Invalid [90004] x 3 
 WARN-NEW: Cookie No HttpOnly Flag [10010] x 1 

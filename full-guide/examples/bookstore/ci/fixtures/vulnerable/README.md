@@ -16,6 +16,7 @@ quiet, crashes, or renames its rules, the control fails.
 |---|---|---|
 | Gitleaks | a token-shaped string in `config.env` | `github-pat` |
 | TruffleHog | a second one, run without verification | `Github` |
+| Gitleaks, TruffleHog (history) | two tokens committed and then deleted, in a throwaway repository that `../make-history.sh` builds at run time | `github-pat`, `Github` |
 | Semgrep | SQL built by joining strings (`main.go`) | `bookstore-sql-string-concat` |
 | gosec | the same query, and a shell fed by a request | `G202` |
 | govulncheck | a reachable call into `x/text` v0.3.6 | `GO-2021-0113` |
@@ -29,6 +30,7 @@ quiet, crashes, or renames its rules, the control fails.
 | kubesec | the same Pod | `Privileged` |
 | zizmor | a PR title pasted into a shell (`bad-workflow.yml`) | `template-injection` |
 | actionlint | the same line | `potentially untrusted` |
+| expiry check | an exception list (`exceptions.conf`) with a lapsed date and an undated entry | `lapsed on 2020-01-01`, `no Revisit by DATE` |
 | ZAP baseline | a session cookie without `HttpOnly` (and an HTML page with no security headers) | `10010` |
 
 The manifest is JSON on purpose. The guide's own YAML gates read every `.yaml`

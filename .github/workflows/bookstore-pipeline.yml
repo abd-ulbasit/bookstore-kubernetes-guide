@@ -6,6 +6,12 @@ name: bookstore-pipeline
 #   build-test, secrets, sast, sca -> image-lint -> image-scan + sbom -> sign
 #   manifests, workflow-hardening and dast run beside them.
 #
+# sign waits for ALL of them. A signature on a digest therefore says that this
+# workflow built it and that every gate above passed or was skipped on purpose
+# (secrets, manifests and workflow-hardening look at the whole repository, so
+# only the caller's repo-wide leg runs them; dast can be switched off for a
+# service with no web surface). Nothing else is pushed or signed.
+#
 # The scanner commands live in full-guide/examples/bookstore/ci/scan.sh, each
 # in a container pinned by digest, so a reader runs the same command on a
 # laptop. The guide's own check (bookstore-pipeline-check.yml) calls this file
@@ -95,9 +101,12 @@ jobs:
           go test ./...
 
   # ---------------------------------------------------------------------------
-  # secrets: two scanners for one job. Gitleaks matches patterns and catches
-  # a secret that is already dead; TruffleHog's verified mode reports only
-  # credentials that still work, so it can fail the build with almost no
+  # secrets: two scanners for one job, each reading EVERY commit. A token that
+  # one commit adds and the next deletes is gone from the files and still in
+  # every clone, so a scan of the checked-out files would pass it; this job
+  # checks out the full history and scans that. Gitleaks matches patterns and
+  # catches a secret that is already dead; TruffleHog's verified mode reports
+  # only credentials that still work, so it can fail the build with almost no
   # false positives.
   # ---------------------------------------------------------------------------
   secrets:
@@ -112,12 +121,13 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
-      - name: Gitleaks
+          fetch-depth: 0
+      - name: Gitleaks, every commit
         run: |
-          "$BOOKSTORE/ci/scan.sh" gitleaks .
-      - name: TruffleHog, verified credentials only
+          "$BOOKSTORE/ci/scan.sh" gitleaks-history .
+      - name: TruffleHog, every commit, verified credentials only
         run: |
-          "$BOOKSTORE/ci/scan.sh" trufflehog .
+          "$BOOKSTORE/ci/scan.sh" trufflehog-history .
       - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         if: always()
         with:
@@ -268,7 +278,8 @@ jobs:
   # ---------------------------------------------------------------------------
   # image-scan: Trivy on the tar. ignore-unfixed is on: a rebuild cannot fix
   # a CVE nobody has patched, so gating on it blocks every build for nothing.
-  # The weekly rescan of published images catches the day a fix lands.
+  # The cost is that this scan runs when an image is built. Nothing in this
+  # workflow looks at a published image again.
   # ---------------------------------------------------------------------------
   image-scan:
     needs: image-lint
@@ -334,16 +345,35 @@ jobs:
           retention-days: 90
 
   # ---------------------------------------------------------------------------
-  # sign: only when the caller asks to publish, and only after both scans
+  # sign: only when the caller asks to publish, and only when every other job
   # passed. The registry computes the digest on push. Cosign signs that
   # digest keylessly: the job's OIDC token buys a certificate that lives
   # minutes, bound to THIS workflow's identity, and the signature goes to the
   # Rekor log. The SBOM and a SLSA provenance statement are attached to the
   # same digest. Nothing here is a stored key.
+  #
+  # Why always(): a job that needs a skipped job is skipped too, and three of
+  # the jobs below are skipped on purpose (secrets, manifests and
+  # workflow-hardening when repo-wide is off, dast when dast is off). always()
+  # makes this job evaluate its own condition instead. The condition then asks
+  # for success from every job that must run, and accepts success or skipped
+  # from the four that may be skipped. A job that failed, was cancelled, or was
+  # skipped because something upstream failed (image-lint) all fail it.
   # ---------------------------------------------------------------------------
   sign:
-    if: inputs.publish
-    needs: [image-scan, sbom]
+    needs: [build-test, secrets, sast, sca, image-lint, image-scan, sbom, manifests, workflow-hardening, dast]
+    if: >-
+      always() && !cancelled() && inputs.publish
+      && needs.build-test.result == 'success'
+      && needs.sast.result == 'success'
+      && needs.sca.result == 'success'
+      && needs.image-lint.result == 'success'
+      && needs.image-scan.result == 'success'
+      && needs.sbom.result == 'success'
+      && contains(fromJSON('["success", "skipped"]'), needs.secrets.result)
+      && contains(fromJSON('["success", "skipped"]'), needs.manifests.result)
+      && contains(fromJSON('["success", "skipped"]'), needs.workflow-hardening.result)
+      && contains(fromJSON('["success", "skipped"]'), needs.dast.result)
     runs-on: ubuntu-latest
     permissions:
       contents: read
@@ -449,8 +479,10 @@ jobs:
   # workflow-hardening: the pipeline is code that holds credentials, so it is
   # scanned too. zizmor finds injectable expressions, unpinned actions and
   # over-broad permissions; actionlint finds the mistakes that make a
-  # workflow misbehave. Harden-Runner (first step of every job above) watches
-  # the runner's network. Scorecard grades the repository's own habits (branch
+  # workflow misbehave. The expiry check fails when an accepted exception in
+  # the pipeline's own config has passed its date. Harden-Runner (first step
+  # of every job) is in audit mode: it LOGS the runner's outbound calls and
+  # does not block them. Scorecard grades the repository's own habits (branch
   # protection, pinned dependencies, token permissions); it reports a score
   # rather than gating, and it only runs on the default branch.
   # ---------------------------------------------------------------------------
@@ -477,6 +509,9 @@ jobs:
           WORKFLOWS: ${{ inputs.workflow-files }}
         run: |
           "$BOOKSTORE/ci/scan.sh" actionlint "$WORKFLOWS"
+      - name: Exceptions that have lapsed
+        run: |
+          "$BOOKSTORE/ci/scan.sh" expiry "$BOOKSTORE/ci/zap/baseline.conf $BOOKSTORE/ci/kube-linter.yaml"
       - name: OpenSSF Scorecard (default branch only)
         if: github.event_name == 'push' && github.ref == format('refs/heads/{0}', github.event.repository.default_branch)
         uses: ossf/scorecard-action@fa7117db83c52d787ae5a89f350999701505d78e # v2.5.0
@@ -495,7 +530,9 @@ jobs:
   # dast: the ZAP baseline is passive. It crawls the running service and reads
   # its responses; it sends no attack traffic, so it is safe on every PR. The
   # service runs on a throwaway kind cluster, in a namespace that enforces
-  # Pod Security "restricted", with the baseline securityContext.
+  # Pod Security "restricted" and denies all traffic by default, with the
+  # baseline securityContext. The scan reaches the Pod through a port-forward,
+  # which a NetworkPolicy does not carry, so it needs no allow rule.
   # ---------------------------------------------------------------------------
   dast:
     if: inputs.dast
@@ -537,6 +574,15 @@ jobs:
             labels:
               pod-security.kubernetes.io/enforce: restricted
               pod-security.kubernetes.io/warn: restricted
+          ---
+          apiVersion: networking.k8s.io/v1
+          kind: NetworkPolicy
+          metadata:
+            name: default-deny
+            namespace: dast
+          spec:
+            podSelector: {}
+            policyTypes: [Ingress, Egress]
           ---
           apiVersion: v1
           kind: ServiceAccount

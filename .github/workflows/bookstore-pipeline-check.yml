@@ -14,6 +14,8 @@ name: bookstore-pipeline-check
 #
 # The services are not published from this repo, so `sign` does not run; the
 # publish path is exercised in a Bookstore repo that sets `publish: true`.
+# Its condition (every gate passed or was skipped on purpose) is checked by
+# reading it, not by running it.
 
 on:
   pull_request:
@@ -84,6 +86,8 @@ jobs:
           - { tool: kubesec,      file: deployment.json,       expect: Privileged }
           - { tool: zizmor,       file: bad-workflow.yml,      expect: template-injection }
           - { tool: actionlint,   file: bad-workflow.yml,      expect: potentially untrusted }
+          - { tool: expiry,       file: exceptions.conf,       expect: "lapsed on 2020-01-01" }
+          - { tool: expiry,       file: exceptions.conf,       expect: "no Revisit by DATE" }
     steps:
       - uses: step-security/harden-runner@dc2769abcc0fcfbadfc1df54081c1608579ef6b2 # v2.22.2
         with:
@@ -98,6 +102,39 @@ jobs:
           EXPECT: ${{ matrix.expect }}
         run: |
           full-guide/examples/bookstore/ci/scan.sh --expect "$EXPECT" "$TOOL" "${FIXTURE}${FILE:+/$FILE}"
+
+  # The history controls. A scan of the files on disk passes a repository whose
+  # last commit deleted a token; the history scanners must still find it. The
+  # repository is built here, at run time, so no file in the guide holds a
+  # token-shaped string.
+  controls-history:
+    name: control (${{ matrix.tool }})
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - { tool: gitleaks-history,   expect: github-pat }
+          - { tool: trufflehog-history, expect: Github }
+    steps:
+      - uses: step-security/harden-runner@dc2769abcc0fcfbadfc1df54081c1608579ef6b2 # v2.22.2
+        with:
+          egress-policy: audit
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: The files are clean and the history is not
+        env:
+          TOOL: ${{ matrix.tool }}
+          EXPECT: ${{ matrix.expect }}
+        run: |
+          set -euo pipefail
+          ci=full-guide/examples/bookstore/ci
+          "$ci/fixtures/make-history.sh" scan-out/history
+          "$ci/scan.sh" gitleaks scan-out/history
+          "$ci/scan.sh" --expect "$EXPECT" "$TOOL" scan-out/history
 
   fixture-image:
     runs-on: ubuntu-latest

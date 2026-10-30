@@ -62,6 +62,10 @@ jobs:
       service: ${{ matrix.service }}
       publish: ${{ github.event_name == 'push' }}
       dast: ${{ matrix.service != 'payments-worker' }}
+      # The whole-repository stages (secrets, manifests, workflow-hardening)
+      # run on one leg. The other legs' sign jobs do not wait for them, but
+      # bump-manifests needs every leg, so a red repository-wide job still
+      # stops the promotion PR.
       repo-wide: ${{ matrix.service == 'catalog' }}
 
   # ---------------------------------------------------------------------------

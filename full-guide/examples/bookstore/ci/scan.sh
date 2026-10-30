@@ -11,11 +11,14 @@
 # Only the control mode relaxes the scanner, and only where the planted
 # secrets must be found (see the notes on gitleaks and trufflehog).
 #
-# TOOL is one of: gitleaks trufflehog semgrep gosec govulncheck trivy-fs
-# trivy-config trivy-image trivy-sbom hadolint dockle syft grype kube-linter
-# kubesec zizmor actionlint zap. TARGET defaults to "." and is a path under the
-# repository root; for the image tools it is the path of a `docker save` tar,
-# and for zap it is the URL of a service already running on this host.
+# TOOL is one of: gitleaks gitleaks-history trufflehog trufflehog-history
+# semgrep gosec govulncheck trivy-fs trivy-config trivy-image trivy-sbom
+# hadolint dockle syft grype kube-linter kubesec zizmor actionlint expiry zap.
+# TARGET defaults to "." and is a path under the repository root. For the image
+# tools it is the path of a `docker save` tar. For the two -history tools it is
+# a git repository: they read every commit, not only the files on disk. For
+# expiry it is a space-separated list of exception files, and for zap it is the
+# URL of a service already running on this host.
 #
 # Reports land in $REPORT_DIR (default scan-reports/). Every image below is
 # pinned by digest; the tag in the comment is the release it was resolved
@@ -58,6 +61,10 @@ out="$(cd "$REPORT_DIR" && pwd)"
 # named volumes, so a second run on the same machine does not fetch them again.
 cache=(-v scan-cache-trivy:/root/.cache)
 gocache=(-v scan-cache-go:/gocache -e GOCACHE=/gocache/build -e GOPATH=/gocache/path)
+# The repository is mounted read-only and owned by someone else, so git would
+# refuse to read it ("dubious ownership"). This trusts /src for one container
+# without writing a git config.
+gitenv=(-e GIT_CONFIG_COUNT=1 -e GIT_CONFIG_KEY_0=safe.directory -e GIT_CONFIG_VALUE_0=/src)
 
 # Run a container with the repository read-only at /src and the reports
 # writable at /out. Extra docker flags come before the image.
@@ -77,7 +84,7 @@ gorun() {
 }
 
 case "$TOOL" in
-  gitleaks|trufflehog|semgrep|gosec|govulncheck|trivy-fs|trivy-config|trivy-image|trivy-sbom|hadolint|dockle|syft|grype|kube-linter|kubesec|zizmor|actionlint|zap) ;;
+  gitleaks|gitleaks-history|trufflehog|trufflehog-history|semgrep|gosec|govulncheck|trivy-fs|trivy-config|trivy-image|trivy-sbom|hadolint|dockle|syft|grype|kube-linter|kubesec|zizmor|actionlint|expiry|zap) ;;
   *) echo "scan.sh: unknown tool '$TOOL'" >&2; exit 64 ;;
 esac
 
@@ -106,6 +113,25 @@ case "$TOOL" in
     REPORT="$out/trufflehog.json"
     run "$TRUFFLEHOG" filesystem "/src/$TARGET" --no-update --fail --json "${mode[@]}" \
       >"$REPORT" 2>"$out/trufflehog.log" || rc=$?
+    ;;
+  gitleaks-history)
+    # The same rules over every commit, so a token that was committed and then
+    # deleted still fails. The tree scan cannot see it. As for the tree scan,
+    # the repo's allowlist applies to real scans only.
+    cfg=()
+    if [ -z "$EXPECT" ] && [ -f "$root/.gitleaks.toml" ]; then cfg=(--config /src/.gitleaks.toml); fi
+    REPORT="$out/gitleaks-history.json"
+    run -w /src "${gitenv[@]}" "$GITLEAKS" git --no-banner --redact --exit-code 1 "${cfg[@]}" \
+      --report-format json --report-path /out/gitleaks-history.json "$TARGET" || rc=$?
+    ;;
+  trufflehog-history)
+    # Verified mode over every commit: a live credential anywhere in history
+    # fails the build. The control turns verification off, as for the tree scan.
+    mode=(--results=verified)
+    if [ -n "$EXPECT" ]; then mode=(--no-verification --results=unverified,unknown); fi
+    REPORT="$out/trufflehog-history.json"
+    run "${gitenv[@]}" "$TRUFFLEHOG" git "file:///src/$TARGET" --no-update --fail --json "${mode[@]}" \
+      >"$REPORT" 2>"$out/trufflehog-history.log" || rc=$?
     ;;
   semgrep)
     REPORT="$out/semgrep.json"
@@ -138,8 +164,8 @@ case "$TOOL" in
     ;;
   trivy-image)
     # ignore-unfixed: a rebuild cannot remediate a CVE with no fix, so gating
-    # on it blocks every build for nothing. The weekly rescan catches the day
-    # a fix lands.
+    # on it blocks every build for nothing. The cost: this scan runs when an
+    # image is built, and nothing here looks at a published image again.
     REPORT="$out/trivy-image.json"
     run -v "$here:/ci:ro" "${cache[@]}" "$TRIVY" image --input "/src/$TARGET" --severity HIGH,CRITICAL --ignore-unfixed \
       --ignorefile /ci/trivyignore.yaml --exit-code 1 --quiet --format json --output /out/trivy-image.json || rc=$?
@@ -195,6 +221,42 @@ case "$TOOL" in
     read -ra paths <<<"$TARGET"
     REPORT="$out/actionlint.txt"
     run -w /src "$ACTIONLINT" "${paths[@]}" >"$REPORT" 2>&1 || rc=$?
+    ;;
+  expiry)
+    # Every exception in the pipeline's own config carries a "Revisit by DATE".
+    # Only Trivy enforces its dates (expired_at). The ZAP and KubeLinter lists
+    # and Grype's ignore have no expiry of their own, so this check supplies
+    # one. An entry is a line that is neither a comment nor a YAML key. Its date
+    # is on the line or in the comment block directly above it. The check fails
+    # on a date that has passed, on an entry with no date, and on a file with no
+    # entries at all (a check that read nothing). It compares dates and needs
+    # no container.
+    REPORT="$out/expiry.txt"
+    : >"$REPORT"
+    today="$(date -u +%Y-%m-%d)"
+    read -ra paths <<<"$TARGET"
+    for f in "${paths[@]}"; do
+      if [ ! -f "$root/$f" ]; then echo "$f: no such file" >>"$REPORT"; rc=1; continue; fi
+      LC_ALL=C awk -v today="$today" -v name="$f" '
+        /^[[:space:]]*#/ { t = $0; sub(/^[[:space:]]*#+[[:space:]]*/, "", t); c = c " " t; next }
+        /^[[:space:]]*$/ { next }
+        /:[[:space:]]*$/ { c = ""; next }
+        {
+          entries++
+          text = c " " $0
+          c = ""
+          if (match(text, /Revisit by [0-9][0-9][0-9][0-9]-[0-9][0-9]-[0-9][0-9]/)) {
+            d = substr(text, RSTART + 11, 10)
+            if ((d "") < (today "")) { print name ":" NR ": lapsed on " d " (today is " today "): " $0; bad = 1 }
+          } else {
+            print name ":" NR ": no Revisit by DATE: " $0; bad = 1
+          }
+        }
+        END {
+          if (entries == 0) { print name ": no entries found, so nothing was checked"; bad = 1 }
+          exit bad
+        }' "$root/$f" >>"$REPORT" || rc=1
+    done
     ;;
   zap)
     # The baseline is passive: it crawls the URL and reads the responses, and

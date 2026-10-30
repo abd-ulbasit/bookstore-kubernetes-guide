@@ -41,7 +41,10 @@ holds a registry token, mints signing identities and decides what ships;
 whoever owns the pipeline owns every image it produces. So the pipeline here
 is something to **defend** as well as something that defends: it scans the
 code, the images and the manifests, and it scans the workflow files that run
-it. Audit to Enforce is then a pipeline milestone, not a YAML flip.
+it. What it hands the cluster is a digest, a signature, an SBOM and a
+provenance statement, which is what an Enforce policy needs to check. Turning
+Enforce on is a separate decision, taken where the policy lives (05.07
+<!-- link-later: 05.07 -->).
 
 ## Mental model
 
@@ -63,7 +66,9 @@ it. Audit to Enforce is then a pipeline milestone, not a YAML flip.
   that failed to load or a target path that moved reports "clean" just as
   happily. So each scanner also runs against a deliberately vulnerable
   [fixture](../examples/bookstore/ci/fixtures/vulnerable/README.md) and must
-  report what was planted there.
+  report what was planted there. The signing job waits for every other job,
+  so a signed digest is one whose whole run was green. Two jobs only report:
+  Harden-Runner in audit mode and Scorecard stop nothing.
 - **Prefer no long-lived secret.** Cosign **keyless** trades a short-lived
   OIDC token for a certificate that lives minutes; the registry push uses the
   run's own token, not a stored PAT. A fork PR gets neither.
@@ -77,25 +82,30 @@ credentials. **Push to Git, let the cluster pull**, as in
 ## Threats and controls
 
 A pipeline turns source into a running workload, so each stage answers a way
-that step can go wrong. The last three rows are about the pipeline itself.
+that step can go wrong. The last four rows are about the pipeline itself.
 
 | Threat | Control taught here | Goes deeper |
 |---|---|---|
-| A credential is committed and lives in history | Gitleaks in pre-commit and CI; TruffleHog verified mode as the gate; keyless OIDC, so there is little to leak | [03.02](../03-config-and-storage/02-secrets.md), [15.05](../15-day-to-day-production-ops/05-production-secrets-vault-eso.md) |
+| A credential is committed and lives in history | Gitleaks and TruffleHog verified mode read every commit in CI, and Gitleaks also runs in pre-commit; keyless OIDC, so there is little to leak | [03.02](../03-config-and-storage/02-secrets.md), [15.05](../15-day-to-day-production-ops/05-production-secrets-vault-eso.md) |
 | Your own code carries an injection or a weak primitive | Semgrep with the Bookstore's rules, gosec, CodeQL | [15.02](../15-day-to-day-production-ops/02-application-cicd-pipelines.md) |
 | A dependency you ship or call is vulnerable | govulncheck (what you call), Trivy (what you ship), Dependabot (the fix) | [05.03](../05-security/03-supply-chain.md) |
 | The image runs as root, hides a secret or sits on an end-of-life base | hadolint, Dockle, Trivy on the image | [05.03](../05-security/03-supply-chain.md), [00.02](../00-foundations/02-containers-and-images.md) |
 | Nobody can say what is inside an image when a CVE lands | A Syft SBOM, scanned by Grype and Trivy | [05.03](../05-security/03-supply-chain.md) |
-| The image in the registry is not the one CI built | Push once, sign the digest keyless, attach SLSA provenance | [15.03](../15-day-to-day-production-ops/03-image-signing-and-provenance.md) |
+| The image in the registry is not the one CI built, or is one that failed a gate | Push once, and only after every other job passed; sign the digest keyless; attach SLSA provenance | [15.03](../15-day-to-day-production-ops/03-image-signing-and-provenance.md) |
 | A manifest asks for more than the baseline allows | KubeLinter, kubesec and Trivy config on the rendered overlay | [01.01](../01-core-workloads/01-pods.md#baseline), policy as code in 05.07 <!-- link-later: 05.07 --> |
 | The running service leaks through its responses | ZAP baseline against it on a throwaway kind cluster | [15.02](../15-day-to-day-production-ops/02-application-cicd-pipelines.md) |
-| The pipeline is the attack: an injectable expression, a tag that moves, a token that can do too much | SHA-pinned actions, per-job `permissions`, zizmor, actionlint, Harden-Runner, Scorecard | [15.02](../15-day-to-day-production-ops/02-application-cicd-pipelines.md) |
+| The pipeline is the attack: an injectable expression, a tag that moves, a token that can do too much | SHA-pinned actions, per-job `permissions`, zizmor and actionlint fail the build. Harden-Runner (audit mode) and Scorecard only report | [15.02](../15-day-to-day-production-ops/02-application-cicd-pipelines.md) |
 | A scanner goes quiet and every build passes | A control per scanner against the vulnerable fixture | this chapter |
+| An accepted exception outlives its reason | Every exception carries a date; Trivy enforces its own, and an expiry check enforces the rest | this chapter |
 | CI holds a cluster credential | CI proposes a PR; the in-cluster controller applies it | [07.04](04-gitops-argocd.md) |
 
-Verifying these signatures at admission (Kyverno `verifyImages`) is the other
-half of the signing row. It arrives with 05.07 <!-- link-later: 05.07 -->;
-until then the Audit policy from 05.03 is the only reader.
+This chapter makes the signatures and the evidence. It does not make the
+cluster ask for them: checking a signature at admission (Kyverno
+`verifyImages`, with the identity from step 8) is a separate control that
+arrives with 05.07 <!-- link-later: 05.07 -->. The Audit policy from 05.03
+reports a Pod whose image is unsigned and blocks nothing. So what you can rely
+on after this chapter is that a signed digest came from this workflow with
+every gate green. It is not a guarantee that an unsigned image cannot run.
 
 ## Diagrams
 
@@ -104,22 +114,23 @@ until then the Audit policy from 05.03 is the only reader.
 The reusable workflow `.github/workflows/bookstore-pipeline.yml` runs the
 stages below for one service, plus a `build-test` job (`go build`, `go vet`,
 `go test`) that is not a security stage. `manifests`, `workflow-hardening`
-and `dast` run beside the chain. The dashed boundary is the CI/CD seam: CI
-ends at a **commit**, and the cluster's Argo CD
+and `dast` run beside the chain. `sign` waits for all of them, so one red job
+anywhere means nothing is pushed and nothing is signed. The dashed boundary is
+the CI/CD seam: CI ends at a **commit**, and the cluster's Argo CD
 ([ch.04](04-gitops-argocd.md)) pulls from there.
 
 ```mermaid
 flowchart TD
     push["git push / pull request<br/>(the trigger)"]
     bt["build-test<br/>go build, vet, test"]
-    secrets["secrets<br/>Gitleaks + TruffleHog verified"]
+    secrets["secrets<br/>Gitleaks + TruffleHog verified,<br/>every commit"]
     sast["sast<br/>Semgrep, gosec, CodeQL"]
     sca["sca<br/>govulncheck, Trivy"]
     lint["image-lint<br/>hadolint, build once, Dockle"]
     scan["image-scan<br/>Trivy on the tar"]
     sbom["sbom<br/>Syft -&gt; Grype + Trivy"]
-    side["manifests, workflow-hardening, dast<br/>KubeLinter, zizmor, ZAP on kind"]
-    sign["sign (push to main only)<br/>push, cosign keyless,<br/>SBOM + SLSA provenance"]
+    side["manifests, workflow-hardening, dast<br/>KubeLinter, zizmor, expiry, ZAP on kind"]
+    sign["sign (push to main only)<br/>needs every job above green<br/>push, cosign keyless,<br/>SBOM + SLSA provenance"]
     fail["FAIL the build<br/>nothing pushed, nothing signed"]
     bump["bump-manifests<br/>kustomize edit set image<br/>-&gt; promotion PR"]
     git[("Git repo<br/>kustomize/overlays/prod<br/>(PR merged by a human)")]
@@ -127,9 +138,8 @@ flowchart TD
 
     push --> bt & secrets & sast & sca & lint & side
     lint --> scan & sbom
-    scan -- "clean" --> sign
-    sbom -- "clean" --> sign
-    scan -- "finding" --> fail
+    bt & secrets & sast & sca & scan & sbom & side -- "all pass, or skipped on purpose" --> sign
+    bt & secrets & sast & sca & scan & sbom & side -- "any finding" --> fail
     sign --> bump --> git
     git -. "CI/CD seam: CI proposes, human merges, CD pulls" .-> argo
 ```
@@ -153,7 +163,8 @@ Docker; the last stage also needs a kind cluster and the image from
 [Part 00 ch.02](../00-foundations/02-containers-and-images.md). The output
 below was recorded on one Linux machine and is committed as
 [`evidence/07-03.txt`](../examples/security-lab/evidence/07-03.txt).
-Vulnerability counts drift as the databases move; the verdict lines do not.
+Vulnerability counts drift as the databases move, and ZAP's crawl can see a
+response one time more or less; the verdict lines do not.
 
 The pipeline is two workflow files and one script:
 
@@ -167,10 +178,12 @@ The pipeline is two workflow files and one script:
   container image **pinned by digest**. The workflow calls it and so do you,
   so the command on your laptop is the command in CI.
 
-> **Honesty note.** Push, keyless signing, CodeQL and the promotion PR need a
-> registry, GitHub's OIDC and GitHub's runners. They are real, valid steps
-> that this chapter **reads, not runs**; every other stage runs below.
-> `<OWNER>` stands for your GitHub user or organization.
+> **Honesty note.** Push, keyless signing, CodeQL, the promotion PR,
+> Dependabot, Harden-Runner and Scorecard need a registry, GitHub's OIDC,
+> GitHub's API or GitHub's runners. They are real, valid steps that this
+> chapter **reads, not runs**, and the `if:` that lets `sign` run is read the
+> same way. Every other stage runs below. `<OWNER>` stands for your GitHub
+> user or organization.
 
 ### 0. The scanner runner
 
@@ -198,9 +211,9 @@ builds at its pinned version.
 
 ```sh
 pip install -q pre-commit==4.7.0
+rm -rf /tmp/bookstore
 cp -R examples/bookstore /tmp/bookstore && rm -rf /tmp/bookstore/ci/fixtures   # stands in for your repo
-cd /tmp/bookstore && git init -q && git add -A
-pre-commit run --all-files
+(cd /tmp/bookstore && git init -q && git add -A && pre-commit run --all-files)
 ```
 
 <!-- gate: output -->
@@ -216,8 +229,10 @@ run time so this page holds no token. The hook fails, and installed as a
 commit hook it would stop the commit:
 
 ```sh
-printf 'GITHUB_TOKEN=ghp_%s\n' "$(printf 'NOTAREALTOKEN%.0s' 1 2 3)" > .env
-git add .env && pre-commit run gitleaks
+(cd /tmp/bookstore \
+  && printf 'GITHUB_TOKEN=ghp_%s\n' "$(printf 'NOTAREALTOKEN%.0s' 1 2 3)" > .env \
+  && git add .env && pre-commit run gitleaks)
+rm -rf /tmp/bookstore
 ```
 
 <!-- gate: output -->
@@ -232,6 +247,11 @@ RuleID:      github-pat
 File:        .env
 ```
 
+A hook is a convenience, not a gate. It does nothing until someone runs
+`pre-commit install`, and `git commit --no-verify` skips it. The gate is the
+`secrets` job in the next step, which runs on the server and not on the
+author's machine.
+
 ### 2. `secrets`: Gitleaks and TruffleHog
 
 A secret in Git is a secret in every clone, and deleting the file does not
@@ -241,6 +261,9 @@ credential, so it catches a token the day it is committed, live or not.
 **TruffleHog's verified mode** asks the issuing service whether the
 credential still works and reports only live ones, so it can fail a build
 with almost no false positives. It stays quiet about a key already revoked.
+
+Each runs in two modes. The first reads the **files on disk**, which suits the
+code in front of you:
 
 ```sh
 $scan gitleaks examples/bookstore/app
@@ -286,6 +309,47 @@ $scan --expect Github trufflehog examples/bookstore/ci/fixtures/vulnerable
 ```text
 scan.sh: control ok, gitleaks reported github-pat on examples/bookstore/ci/fixtures/vulnerable
 scan.sh: control ok, trufflehog reported Github on examples/bookstore/ci/fixtures/vulnerable
+```
+
+The second mode, `gitleaks-history` and `trufflehog-history`, reads **every
+commit**. The files on disk cannot show a token that one commit added and the
+next deleted, and that token is still in every clone. The pipeline's `secrets`
+job checks out with `fetch-depth: 0` so there is a history to read, and runs
+only these two. Here is the case they exist for. `make-history.sh` builds a
+throwaway repository whose first commit holds two fake tokens, assembled at
+run time, and whose second commit deletes them:
+
+```sh
+examples/bookstore/ci/fixtures/make-history.sh scan-out/history
+$scan gitleaks scan-out/history
+$scan gitleaks-history scan-out/history; echo "exit $?"
+```
+
+<!-- gate: output -->
+
+```text
+scan.sh: gitleaks clean on scan-out/history
+scan.sh: gitleaks-history flagged scan-out/history (exit 1, report scan-reports/gitleaks-history.json)
+exit 1
+```
+
+**Deliberate.** `gitleaks` passed and `gitleaks-history` failed on the same
+repository: that gap is the point. TruffleHog's history mode is quiet here for
+the reason it was quiet above, since a fake token never verifies, so its
+control turns verification off:
+
+```sh
+$scan trufflehog-history scan-out/history
+$scan --expect github-pat gitleaks-history scan-out/history
+$scan --expect Github trufflehog-history scan-out/history
+```
+
+<!-- gate: output -->
+
+```text
+scan.sh: trufflehog-history clean on scan-out/history
+scan.sh: control ok, gitleaks-history reported github-pat on scan-out/history
+scan.sh: control ok, trufflehog-history reported Github on scan-out/history
 ```
 
 ### 3. `sast`: Semgrep, gosec and CodeQL
@@ -334,8 +398,11 @@ G401 Use of weak cryptographic primitive
 A dependency is a stranger's code you ship. **govulncheck** reports only
 vulnerabilities your code can reach ("do I call it?"). **Trivy** lists every
 vulnerable module in `go.mod` ("do I ship it?"). Dependabot
-([`ci/dependabot.yml`](../examples/bookstore/ci/dependabot.yml)) opens the
-pull request that moves the version, and the pipeline runs on that PR.
+([`ci/dependabot.yml`](../examples/bookstore/ci/dependabot.yml); how it works:
+the
+[GitHub docs](https://docs.github.com/en/code-security/dependabot/dependabot-version-updates/about-dependabot-version-updates))
+opens the pull request that moves the version, and the pipeline runs on that
+PR. This chapter does not run it.
 
 ```sh
 $scan govulncheck examples/bookstore/app/catalog
@@ -474,10 +541,31 @@ scan.sh: control ok, trivy-sbom reported CVE-2021-38561 on scan-reports/sbom.cdx
 
 ### 8. `sign`: push, keyless signature, SBOM, provenance (read, not run)
 
-This job runs only on a push to `main`, after `image-scan` and `sbom` passed.
-It loads the tar, pushes it, **reads the digest the registry computed** and
-signs that digest. `actions/attest-build-provenance` then adds a **SLSA
+This job runs only on a push to `main`, and only when **every other job**
+passed. It loads the tar, pushes it, **reads the digest the registry computed**
+and signs that digest. `actions/attest-build-provenance` then adds a **SLSA
 provenance** statement for the same digest.
+
+"Every other job" is the whole `needs` list: `build-test`, `secrets`, `sast`,
+`sca`, `image-lint`, `image-scan`, `sbom`, `manifests`, `workflow-hardening`
+and `dast`. GitHub skips a job whose `needs` include a skipped job unless its
+`if` says otherwise
+([`needs`](https://docs.github.com/en/actions/reference/workflows-and-actions/workflow-syntax#jobsjob_idneeds)),
+and four of these are skipped on purpose: `secrets`, `manifests` and
+`workflow-hardening` look at the whole repository, so only one leg of the
+matrix runs them, and `dast` is off for `payments-worker`, which has no web
+surface. So `sign` opens with `always()` and then asks for the result itself:
+`success` from the six jobs that always run, and `success` or `skipped` from
+those four. A failed job, a cancelled one, or one skipped because `image-lint`
+failed all leave the image unpushed and unsigned. An earlier version waited
+for the two image scans only, so a build that failed Gitleaks, Semgrep or the
+ZAP baseline was still pushed and signed.
+
+One boundary remains. The repository-wide jobs run on the `catalog` leg, and
+the other legs' `sign` jobs do not wait for them. If one of those jobs fails,
+the other services' digests can still be signed, but the `pipeline` run is red
+and `bump-manifests`, which needs every leg, opens no promotion PR. A signature
+says that service's own gates passed. The promotion PR says all of them did.
 
 ```sh
 cosign sign --yes "$REF"                                       # REF = image@sha256:<DIGEST>
@@ -486,18 +574,27 @@ cosign attest --yes --type cyclonedx --predicate sbom.cdx.json "$REF"
 
 The job alone asks for `id-token: write`. What a *consumer* runs, and what
 05.07 <!-- link-later: 05.07 --> turns into an admission rule, checks the
-identity, not just the signature:
+identity, not just the signature
+([`cosign verify`](https://docs.sigstore.dev/cosign/verifying/verify/)):
 
 ```sh
 cosign verify \
-  --certificate-identity-regexp '^https://github.com/<OWNER>/<REPO>/\.github/workflows/bookstore-pipeline\.yml@' \
+  --certificate-identity 'https://github.com/<OWNER>/<REPO>/.github/workflows/bookstore-pipeline.yml@refs/heads/main' \
   --certificate-oidc-issuer https://token.actions.githubusercontent.com \
   ghcr.io/<OWNER>/bookstore-catalog@sha256:<DIGEST>
 ```
 
+The identity is the whole string, branch included, and it is matched exactly
+rather than as a pattern. The branch matters because the `if:` that guards
+`sign` lives in the workflow file: anyone who can push a branch can add a
+caller that passes `publish: true`, and its signature would name
+`@refs/heads/<their-branch>`. A match that stops at the file name accepts it.
+This one does not. It is also only as strong as who can write to `main`; see
+the Production notes. The identity names the reusable workflow's file because
+that job requests the token.
+
 This is the one stage with no run here; its first proof is the first CI run
-on a repo with a registry. The identity names the reusable workflow's file
-because that job requests the token.
+on a repo with a registry.
 
 ### 9. `manifests`: KubeLinter, kubesec, Trivy config
 
@@ -539,21 +636,23 @@ scan.sh: control ok, kube-linter reported privileged-container on examples/books
 scan.sh: control ok, kubesec reported Privileged on examples/bookstore/ci/fixtures/vulnerable/deployment.json
 ```
 
-### 10. `workflow-hardening`: zizmor, actionlint, Harden-Runner, Scorecard
+### 10. `workflow-hardening`: zizmor, actionlint, expiry, Harden-Runner, Scorecard
 
 The pipeline holds a registry token and a signing identity, so its own YAML
 is a target. **zizmor** finds injectable `${{ }}` expressions, unpinned
 actions and over-broad permissions; **actionlint** finds mistakes that make a
-workflow misbehave. Both run from the repository root, above `full-guide/`.
-**Harden-Runner** is the first step of every job and records the runner's
-outbound calls. **Scorecard** grades the repository's habits, on the default
-branch only.
+workflow misbehave. The third check reads the pipeline's own exception lists:
+every accepted finding carries a `Revisit by` date, and the check fails when a
+date has passed, when an entry has none, or when it finds no entries at all.
+Step 13 says why it is needed. All three run from the repository root, above
+`full-guide/`.
 
 ```sh
 cd ..
 scan=full-guide/examples/bookstore/ci/scan.sh
 $scan zizmor ".github/workflows/bookstore-pipeline.yml .github/workflows/bookstore-pipeline-check.yml"
 $scan actionlint ".github/workflows/bookstore-pipeline.yml .github/workflows/bookstore-pipeline-check.yml"
+$scan expiry "full-guide/examples/bookstore/ci/zap/baseline.conf full-guide/examples/bookstore/ci/kube-linter.yaml"
 ```
 
 <!-- gate: output -->
@@ -561,14 +660,18 @@ $scan actionlint ".github/workflows/bookstore-pipeline.yml .github/workflows/boo
 ```text
 scan.sh: zizmor clean on .github/workflows/bookstore-pipeline.yml .github/workflows/bookstore-pipeline-check.yml
 scan.sh: actionlint clean on .github/workflows/bookstore-pipeline.yml .github/workflows/bookstore-pipeline-check.yml
+scan.sh: expiry clean on full-guide/examples/bookstore/ci/zap/baseline.conf full-guide/examples/bookstore/ci/kube-linter.yaml
 ```
 
 **Deliberate.** The fixture's workflow pastes a PR title into a shell script
-on a privileged trigger:
+on a privileged trigger, and its exception list has one entry whose date
+passed in 2020 and one with no date:
 
 ```sh
 $scan --expect template-injection zizmor full-guide/examples/bookstore/ci/fixtures/vulnerable/bad-workflow.yml
 $scan --expect 'potentially untrusted' actionlint full-guide/examples/bookstore/ci/fixtures/vulnerable/bad-workflow.yml
+$scan --expect 'lapsed on 2020-01-01' expiry full-guide/examples/bookstore/ci/fixtures/vulnerable/exceptions.conf
+$scan --expect 'no Revisit by DATE' expiry full-guide/examples/bookstore/ci/fixtures/vulnerable/exceptions.conf
 ```
 
 <!-- gate: output -->
@@ -576,9 +679,45 @@ $scan --expect 'potentially untrusted' actionlint full-guide/examples/bookstore/
 ```text
 scan.sh: control ok, zizmor reported template-injection on full-guide/examples/bookstore/ci/fixtures/vulnerable/bad-workflow.yml
 scan.sh: control ok, actionlint reported potentially untrusted on full-guide/examples/bookstore/ci/fixtures/vulnerable/bad-workflow.yml
+scan.sh: control ok, expiry reported lapsed on 2020-01-01 on full-guide/examples/bookstore/ci/fixtures/vulnerable/exceptions.conf
+scan.sh: control ok, expiry reported no Revisit by DATE on full-guide/examples/bookstore/ci/fixtures/vulnerable/exceptions.conf
 ```
 
-Go back into `full-guide/` (`cd full-guide`) for the last stage.
+Two more tools sit in the pipeline's jobs, and neither gates the build. This
+chapter does not run them either; what is said about them here comes from
+their documentation.
+
+- **Harden-Runner** is the first step of every job, in `egress-policy: audit`.
+  Per its [documentation](https://docs.stepsecurity.io/harden-runner), audit
+  mode logs outbound traffic without blocking it, and each job links to the
+  resulting insights. The one thing it blocks in audit mode is StepSecurity's
+  list of domains tied to active supply-chain attacks. So a compromised step
+  that sends the job's token to any other host gets through, and you find out
+  afterwards, if you look. What limits the damage a stolen token can do is
+  the narrow `permissions` and the SHA pins, not this. Its `block` mode
+  refuses every host that is not in `allowed-endpoints`, and that list has to
+  come from recorded runs of your own jobs. This chapter has none to take it
+  from, so it ships in `audit`; once you have a few green runs, the switch is:
+
+  ```yaml
+  - uses: step-security/harden-runner@<SHA> # <release>
+    with:
+      egress-policy: block
+      allowed-endpoints: >
+        <each host:port the audit runs recorded>
+  ```
+
+- **Scorecard** grades the repository's habits (branch protection, pinned
+  dependencies, token permissions; the list of
+  [checks](https://github.com/ossf/scorecard#scorecard-checks)) and runs on
+  the default branch only. It produces a score and fails nothing.
+
+Go back into `full-guide/` and reset the variable for the last stage:
+
+```sh
+cd full-guide
+scan=examples/bookstore/ci/scan.sh
+```
 
 ### 11. `dast`: the ZAP baseline on a throwaway cluster
 
@@ -586,13 +725,24 @@ Everything so far read files. **DAST** reads a running service. The ZAP
 *baseline* crawls the URL and reads the responses for missing or leaky
 headers; it sends no attack traffic, so it is safe on every PR. The pipeline
 starts the image on a kind cluster, in a namespace that enforces Pod Security
-`restricted`, with the baseline from
+`restricted` and denies all traffic by default, with the baseline from
 [Part 01 ch.01](../01-core-workloads/01-pods.md#baseline). Do the same with
-the catalog Pod from that chapter:
+the catalog Pod from that chapter. The scan needs no allow rule, because a
+port-forward is carried by the kubelet into the Pod, not across the Pod
+network, so the default-deny policy leaves it alone:
 
 ```sh
 kubectl create namespace dast
 kubectl label namespace dast pod-security.kubernetes.io/enforce=restricted pod-security.kubernetes.io/warn=restricted
+kubectl apply --namespace dast -f - <<'EOF'
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: default-deny
+spec:
+  podSelector: {}
+  policyTypes: [Ingress, Egress]
+EOF
 kubectl create serviceaccount catalog-sa --namespace dast
 kind load docker-image bookstore/catalog:dev --name bookstore
 kubectl apply --namespace dast -f examples/bookstore/raw-manifests/01-catalog-pod.yaml
@@ -604,13 +754,15 @@ kubectl wait --namespace dast --for=condition=Ready pod/catalog --timeout=90s
 ```text
 namespace/dast created
 namespace/dast labeled
+networkpolicy.networking.k8s.io/default-deny created
 serviceaccount/catalog-sa created
-Image: "bookstore/catalog:dev" with ID "sha256:5c8f78461c5a94db0589f347ba76121dc185f0417025110c555a7f2b56f2d220" not yet present on node "bookstore-control-plane", loading...
+Image: "bookstore/catalog:dev" with ID "sha256:ed20b252119884dbb2d045629c2333e6c2d48c9660d98b0ed2ea5518cec66be2" not yet present on node "bookstore-control-plane", loading...
 pod/catalog created
 pod/catalog condition met
 ```
 
-Scan it through a port-forward. The run is clean, yet the report is not
+Scan it through a port-forward, which takes a moment to start answering, so
+`curl` retries until it does. The run is clean, yet the report is not
 empty: the baseline raised three rules on the catalog, and
 [`ci/zap/baseline.conf`](../examples/bookstore/ci/zap/baseline.conf) lists
 each as INFO with a reason and a revisit date (see the table below). Any rule
@@ -618,7 +770,7 @@ not listed still fails the build.
 
 ```sh
 kubectl --namespace dast port-forward pod/catalog 8080:8080 >/dev/null &
-sleep 2
+curl --silent --fail --retry 15 --retry-delay 1 --retry-all-errors --output /dev/null http://127.0.0.1:8080/books
 $scan zap http://127.0.0.1:8080/books
 grep -E '^(FAIL-NEW|WARN-NEW|INFO)' scan-reports/zap.log
 ```
@@ -638,7 +790,7 @@ it and point the same scan at it:
 
 ```sh
 docker run -d --name fixture -p 127.0.0.1:18080:8080 bookstore/vulnerable:fixture >/dev/null
-sleep 2
+curl --silent --fail --retry 15 --retry-delay 1 --retry-all-errors --output /dev/null http://127.0.0.1:18080/books
 $scan --expect 10010 zap http://127.0.0.1:18080/books
 grep -E '^(FAIL-NEW|WARN-NEW|INFO)' scan-reports/zap.log
 docker rm -f fixture >/dev/null
@@ -651,7 +803,7 @@ scan.sh: control ok, zap reported 10010 on http://127.0.0.1:18080/books
 INFO: Missing Anti-clickjacking Header [10020] x 1 
 INFO: X-Content-Type-Options Header Missing [10021] x 1 
 INFO: Content Security Policy (CSP) Header Not Set [10038] x 1 
-INFO: Storable and Cacheable Content [10049] x 4 
+INFO: Storable and Cacheable Content [10049] x 3 
 INFO: Permissions Policy Header Not Set [10063] x 1 
 INFO: Cross-Origin-Embedder-Policy Header Missing or Invalid [90004] x 3 
 WARN-NEW: Cookie No HttpOnly Flag [10010] x 1 
@@ -683,8 +835,8 @@ review by branch protection, or the bot can merge its own promotion.
 ### 13. What the first run found
 
 A pipeline that is green on day one has usually been tuned to be. This one was
-run first and then dispositioned. Each decision is a file with a reason and a
-date:
+run first and then dispositioned. Each decision is written down with its
+reason, and each one that accepts a risk carries a date:
 
 | Stage | First-run finding | Disposition |
 |---|---|---|
@@ -695,8 +847,14 @@ date:
 | `manifests` | KubeLinter: `no-anti-affinity` on orders, `job-ttl-seconds-after-finished` on the cleanup CronJob | Excluded in `ci/kube-linter.yaml`: availability and operations, not the baseline |
 | `dast` | Nine ZAP rules across catalog, orders and storefront | Accepted as INFO in `ci/zap/baseline.conf` |
 
-Every dated entry lapses on its date, and any rule not listed still fails the
-build.
+Dates are enforced in two ways, and only two. Trivy honors `expired_at` itself,
+so the brotli-libs entry stops applying on its date and the build goes red
+again. The ZAP list and the KubeLinter exclusions have no expiry of their own,
+and a bare `Revisit by` comment would let an INFO rule stay INFO for ever. So
+the `expiry` check from step 10 reads those dates and fails the build the day
+after one passes, and it fails an entry that has no date. Grype's ignore rule
+has no date either; it is the same finding as Trivy's, and both files say to
+delete the two entries together. Any rule not listed still fails the build.
 
 ### 14. How the guide's CI runs it
 
@@ -719,18 +877,26 @@ still be believed.
   if the bytes change. Cosign signs *that string*, and a kubelet pulling
   `name@sha256:…` re-verifies the bytes against it.
 - **Scan first, push after.** The image is built once as a tar and every
-  stage reads that tar. Only `sign` pushes, and only after `image-scan` and
-  `sbom` passed, so a vulnerable image never reaches the registry. The earlier
+  stage reads that tar. Only `sign` pushes, and `sign` waits for every other
+  job, so an image that fails any gate (the secret, SAST, dependency, manifest
+  and DAST jobs as well as the two image scans) is never pushed. The earlier
   version of this workflow pushed first and scanned the pushed digest, which
   left a pullable vulnerable image behind on every failed run. The price: the
   digest exists only after the push, so signature and SBOM bind to the
   registry's manifest of the *same layers and config* that were scanned, not
   to bytes scanned one for one.
-- **`ignore-unfixed` is a taught tradeoff.** It drops CVEs with no upstream
-  fix. A rebuild cannot remediate those, so gating on them blocks every build
-  for nothing. The cost is real exposure; the mitigation is to **rescan
-  published images on a schedule**, which catches the day a fix appears even
-  though the image never changed. Set it to `false` for the stricter gate.
+- **`ignore-unfixed` is a taught tradeoff, and its cost is not paid by
+  anything here.** It drops CVEs with no upstream fix. A rebuild cannot
+  remediate those, so gating on them blocks every build for nothing. But the
+  scan runs when an image is built, and **this pipeline never looks at a
+  published image again**: a fix that lands after the push does not flag the
+  digest already in `overlays/prod`. Two things narrow the gap. Dependabot
+  checks each base image weekly and opens a pull request when it moves, and
+  the pipeline runs on that PR. And the SBOM that `sbom` keeps for 90 days answers "is this digest
+  affected?" on the day a CVE lands. Rescanning what is deployed, on a
+  schedule, belongs with vulnerability management (05.09
+  <!-- link-later: 05.09 -->). Set `ignore-unfixed` to `false` for the
+  stricter gate.
 - **Keyless signing has no key.** The platform mints a short-lived **OIDC**
   token naming the workflow identity. Cosign sends it to **Fulcio**, which
   issues a certificate that lives about ten minutes for a fresh key, then the
@@ -762,19 +928,19 @@ still be believed.
 > short-lived, namespace-scoped, OIDC-federated credential, never a static
 > admin kubeconfig.
 
-> **In production: move Harden-Runner from `audit` to `block`.** The workflows
-> ship with `egress-policy: audit`, which records every outbound call. After a
-> few green runs, list the recorded endpoints under `allowed-endpoints` and
-> switch to `block`, so a compromised step cannot send your token anywhere
-> new. Branch protection on `main` (required review, required checks) is one
-> of the things Scorecard checks.
+> **In production: protect `main`.** The signing identity in step 8 ends in
+> `@refs/heads/main`, so whoever can push to `main` can sign, and whoever can
+> merge the promotion PR can deploy. Require a review and the pipeline's
+> checks with a ruleset on `main`, and keep the number of people who can bypass
+> it small. Scorecard reports whether you have.
 
 ## Quick Reference
 
 ```sh
 scan=examples/bookstore/ci/scan.sh       # from full-guide/; pinned images, Docker only
 mkdir -p scan-out
-$scan gitleaks examples/bookstore/app    # secrets (trufflehog: same arguments)
+$scan gitleaks examples/bookstore/app    # secrets in the files (trufflehog: same arguments)
+$scan gitleaks-history .                 # secrets in EVERY commit; run at a git repo root (trufflehog-history: same)
 $scan semgrep  examples/bookstore/app    # SAST (gosec, govulncheck: per Go module)
 $scan trivy-fs examples/bookstore/app/catalog                 # dependencies
 docker build -t bookstore/catalog:dev examples/bookstore/app/catalog
@@ -815,13 +981,22 @@ jobs:
 
 Checklist:
 
-- [ ] Every stage fails the build, and each scanner has a **control** that
-      fails if it stops finding the planted issue
-- [ ] Scan the built tar first; **push by digest** only after both scans pass
+- [ ] Every gating stage fails the build, and each scanner has a **control**
+      that fails if it stops finding the planted issue; Harden-Runner in
+      audit mode and Scorecard only report
+- [ ] The secret scanners read **every commit** (`fetch-depth: 0`), not only
+      the files on disk
+- [ ] `sign` **waits for every other job**, with `always()` and an explicit
+      check of each result, so a skipped job on purpose is not a failure
+- [ ] Scan the built tar first; **push by digest** only after every gate passes
 - [ ] **Cosign keyless** signature, SBOM and provenance on the pushed digest;
       no long-lived key or stored PAT; publish skipped on fork PRs
 - [ ] Every `uses:` is a **commit SHA**; `permissions: {}` at the top, scoped
-      per job; zizmor and actionlint clean; Harden-Runner on every job
+      per job; zizmor and actionlint clean; Harden-Runner on every job,
+      moved from `audit` to `block` once its allowlist is recorded
+- [ ] Every accepted exception has a **date that something enforces**
+      (Trivy's `expired_at`, or the `expiry` check)
+- [ ] `cosign verify` names the **exact identity, branch included**
 - [ ] CI holds **no cluster credential**; its last step is a **pull request**
       that bumps the kustomize `images:` digest
 - [ ] Promotion = the **same digest** moved overlay to overlay by reviewed
@@ -852,10 +1027,11 @@ Checklist:
    There is none: Fulcio issues a certificate that lives about ten minutes for
    a key that exists only for that run, and signature, certificate and
    identity go into the Rekor log. You verify the *identity*: the certificate
-   must name this repository's pipeline workflow and the GitHub OIDC issuer
-   (`cosign verify --certificate-identity-regexp … --certificate-oidc-issuer
+   must name this repository's pipeline workflow on `main` and the GitHub OIDC
+   issuer (`cosign verify --certificate-identity … --certificate-oidc-issuer
    https://token.actions.githubusercontent.com`). A valid signature from any
-   other identity is not trusted.
+   other identity, or from the same workflow on another branch, is not
+   trusted.
 
    </details>
 
@@ -899,6 +1075,38 @@ Checklist:
 
    </details>
 
+6. **A pull request adds a token in its first commit and deletes it in its
+   second. A scan of the checked-out files is green. Which job fails, what
+   does that do to the image, and what must still be done about the token?**
+   <details><summary>Show answer</summary>
+
+   The `secrets` job fails, because it checks out the full history
+   (`fetch-depth: 0`) and runs `gitleaks-history` and `trufflehog-history`,
+   which read every commit; the files on disk no longer hold the token, but
+   the first commit does. Since `sign` waits for every other job, a red
+   `secrets` job means nothing is pushed or signed from that run. The scan
+   does not undo the exposure: the token is in every clone of the branch, so
+   revoke it first. Deleting it from the tree does not unpublish it.
+
+   </details>
+
+7. **`sign` lists ten jobs under `needs` and begins its `if:` with
+   `always()`. Without `always()`, which builds would never be signed, and
+   which failure would `always()` alone let through if the explicit result
+   checks were left out?**
+   <details><summary>Show answer</summary>
+
+   Without `always()`, `sign` is skipped whenever any needed job is skipped.
+   `secrets`, `manifests` and `workflow-hardening` are skipped on every leg but
+   one, and `dast` is skipped for `payments-worker`, so those services would
+   never be signed. With `always()` and no result checks, `sign` would run
+   after a failed `sast` or `dast` job too, which is the original bug: a build
+   that failed a gate would still be pushed and signed. The explicit checks ask
+   for `success` from the jobs that always run and `success` or `skipped` from
+   the four that may be skipped.
+
+   </details>
+
 ## Further reading
 
 - **Davis, _Bootstrapping Microservices with Docker, Kubernetes, and
@@ -918,6 +1126,10 @@ Checklist:
   <https://www.zaproxy.org/docs/docker/baseline-scan/>, zizmor
   <https://docs.zizmor.sh/>, StepSecurity Harden-Runner
   <https://docs.stepsecurity.io/harden-runner>, OpenSSF Scorecard
-  <https://github.com/ossf/scorecard>, and the Kubernetes image reference
+  <https://github.com/ossf/scorecard>, GitHub's `needs` reference for jobs
+  that depend on skipped jobs
+  <https://docs.github.com/en/actions/reference/workflows-and-actions/workflow-syntax#jobsjob_idneeds>,
+  `cosign verify` <https://docs.sigstore.dev/cosign/verifying/verify/>, and
+  the Kubernetes image reference
   (digests vs tags, pull policy)
   <https://kubernetes.io/docs/concepts/containers/images/>.
