@@ -1,0 +1,105 @@
+# Transcript 00.03: architecture overview, question 4 workload
+#
+# Tier A: kind on a lab host. Control-plane node Kubernetes v1.37.0,
+# kubectl v1.37.2 client. Commands ran in the order shown. Output is
+# unedited except for the two redactions below.
+#
+# Substitution for the shared lab cluster: the namespace and the
+# Deployment named "demo" in the chapter ran as "p00-demo". Labels, the
+# pause image digest, the ServiceAccount and every security field match
+# the chapter exactly.
+#
+# Redactions: the lab cluster name is shown as "lab", and the path of the
+# scratch manifest is shown as demo-run.yaml.
+#
+# Result: all three objects were admitted under restricted and the Pods
+# carry the baseline fields. Deleting a Pod made the Deployment create a
+# new one. Deleting the Deployment removed its Pods.
+#
+$ kubectl version --client
+Client Version: v1.37.2
+Kustomize Version: v5.8.1
+exit=0
+$ kubectl config current-context
+kind-lab
+exit=0
+$ kubectl get nodes
+NAME                     STATUS   ROLES           AGE     VERSION
+lab-control-plane   Ready    control-plane   7h41m   v1.37.0
+exit=0
+$ kubectl apply -f demo-run.yaml   # the chapter's manifest, namespace renamed p00-demo
+$ kubectl apply -f demo-run.yaml
+namespace/p00-demo created
+serviceaccount/demo-sa created
+deployment.apps/p00-demo created
+exit=0
+$ kubectl -n p00-demo rollout status deployment/p00-demo --timeout=240s
+Waiting for deployment spec update to be observed...
+Waiting for deployment "p00-demo" rollout to finish: 0 out of 3 new replicas have been updated...
+Waiting for deployment "p00-demo" rollout to finish: 0 of 3 updated replicas are available...
+Waiting for deployment "p00-demo" rollout to finish: 1 of 3 updated replicas are available...
+Waiting for deployment "p00-demo" rollout to finish: 2 of 3 updated replicas are available...
+deployment "p00-demo" successfully rolled out
+exit=0
+$ kubectl get namespace p00-demo --show-labels
+NAME       STATUS   AGE   LABELS
+p00-demo   Active   32s   kubernetes.io/metadata.name=p00-demo,pod-security.kubernetes.io/enforce=restricted,pod-security.kubernetes.io/warn=restricted
+exit=0
+$ kubectl -n p00-demo get pods -l app=demo
+NAME                        READY   STATUS    RESTARTS   AGE
+p00-demo-769bc68ff8-hgxw2   1/1     Running   0          31s
+p00-demo-769bc68ff8-qwpk5   1/1     Running   0          31s
+p00-demo-769bc68ff8-wnm8t   1/1     Running   0          31s
+exit=0
+$ kubectl -n p00-demo get pod -l app=demo -o jsonpath={.items[0].spec.securityContext}{"
+"}{.items[0].spec.containers[0].securityContext}{"
+"}{.items[0].spec.automountServiceAccountToken}{"
+"}{.items[0].spec.containers[0].image}{"
+"}
+{"runAsGroup":65535,"runAsNonRoot":true,"runAsUser":65535,"seccompProfile":{"type":"RuntimeDefault"}}
+{"allowPrivilegeEscalation":false,"capabilities":{"drop":["ALL"]},"readOnlyRootFilesystem":true}
+false
+registry.k8s.io/pause@sha256:7031c1b283388d2c2e09b57badb803c05ebed362dc88d84b480cc47f72a21097
+exit=0
+$ kubectl -n p00-demo get serviceaccount demo-sa -o jsonpath={.automountServiceAccountToken}{"
+"}
+false
+exit=0
+# Question 4: delete one Pod
+$ kubectl -n p00-demo get pods -l app=demo
+NAME                        READY   STATUS    RESTARTS   AGE
+p00-demo-769bc68ff8-hgxw2   1/1     Running   0          34s
+p00-demo-769bc68ff8-qwpk5   1/1     Running   0          34s
+p00-demo-769bc68ff8-wnm8t   1/1     Running   0          34s
+exit=0
+$ kubectl -n p00-demo delete pod -l app=demo --wait=false
+pod "p00-demo-769bc68ff8-hgxw2" deleted from p00-demo namespace
+pod "p00-demo-769bc68ff8-qwpk5" deleted from p00-demo namespace
+pod "p00-demo-769bc68ff8-wnm8t" deleted from p00-demo namespace
+exit=0
+$ kubectl -n p00-demo rollout status deployment/p00-demo --timeout=240s
+Waiting for deployment "p00-demo" rollout to finish: 2 out of 3 new replicas have been updated...
+Waiting for deployment "p00-demo" rollout to finish: 2 out of 3 new replicas have been updated...
+Waiting for deployment "p00-demo" rollout to finish: 0 of 3 updated replicas are available...
+deployment "p00-demo" successfully rolled out
+exit=0
+$ kubectl -n p00-demo get pods -l app=demo
+NAME                        READY   STATUS    RESTARTS   AGE
+p00-demo-769bc68ff8-l9p5r   1/1     Running   0          119s
+p00-demo-769bc68ff8-vwh48   1/1     Running   0          2m2s
+p00-demo-769bc68ff8-zl49f   1/1     Running   0          117s
+exit=0
+# Question 4: delete the Deployment instead
+$ kubectl -n p00-demo delete deployment p00-demo --cascade=foreground
+deployment.apps "p00-demo" deleted from p00-demo namespace
+exit=0
+$ kubectl -n p00-demo get pods -l app=demo
+No resources found in p00-demo namespace.
+exit=0
+# Cleanup
+$ kubectl delete namespace p00-demo
+namespace "p00-demo" deleted
+exit=0
+$ kubectl get namespace p00-demo
+Error from server (NotFound): namespaces "p00-demo" not found
+exit=1

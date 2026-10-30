@@ -4,9 +4,9 @@
 > component and what it owns, and the journey of a single `kubectl apply` from
 > your terminal to a running container.
 
-**Estimated time:** ~15 min read · (no hands-on)
+**Estimated time:** ~15 min read · one short exercise (question 4)
 **Prerequisites:** [Part 00 ch.01](01-why-kubernetes.md) — control-loop premise · [Part 00 ch.02](02-containers-and-images.md) — what a container is
-**You'll know after this:** • name every control-plane and node-plane component and what it owns · • trace a `kubectl apply` from CLI through API server, etcd, scheduler, controller, kubelet, runtime · • distinguish control plane vs. data plane responsibilities · • explain the role of `etcd` as the single source of truth · • spot which component is at fault when something is broken
+**You'll know after this:** • name every control-plane and node-plane component and what it owns · • trace a `kubectl apply` from CLI through API server, etcd, scheduler, controller, kubelet, runtime · • distinguish control plane vs. data plane responsibilities · • explain the role of `etcd` as the single source of truth · • spot which component is at fault when something is broken · • name the trust boundaries of a cluster and what crosses each one
 
 <!-- tags: foundations, architecture, control-plane, api-server, etcd -->
 
@@ -40,6 +40,52 @@ it; the brain's deciders turn intent into instructions; the hands carry them
 out and write back what actually happened. This is the
 [reconciliation loop](01-why-kubernetes.md#the-reconciliation-loop-the-one-idea-to-keep)
 realized as concrete processes.
+
+Every arrow on this map is also a place an attacker can push. The section
+below marks where those arrows cross a trust boundary.
+
+## Threats and controls
+
+This chapter teaches no controls. It maps where an attacker can push on the
+cluster, and each row names the chapter that teaches the answer.
+
+| Threat | Control taught here | Goes deeper |
+|---|---|---|
+| A stolen kubeconfig or token sends the API server writes as that user, and those writes decide what runs | None. The map only. | [ch.04](04-control-plane-deep-dive.md), [ch.07](07-local-cluster-setup.md), [05.01](../05-security/01-authn-authz-rbac.md) |
+| Reading etcd reads every Secret, and RBAC does not run there | None. | [ch.04](04-control-plane-deep-dive.md), [05.04](../05-security/04-secrets-and-cluster-hardening.md) |
+| A caller reaches a node's kubelet API directly and skips the front door | None. | [ch.05](05-node-components.md) |
+| Write access to the container runtime's socket starts a container with host access | None. | [ch.05](05-node-components.md) |
+| Code in a Pod calls the API server with the ServiceAccount token mounted into it | None here. | [01.01](../01-core-workloads/01-pods.md#baseline-service-account), [05.01](../05-security/01-authn-authz-rbac.md) |
+
+The numbers on the arrows below match the rows of the table, one to five.
+
+```mermaid
+flowchart LR
+    subgraph outside["Outside the cluster"]
+        people["you, CI, a kubeconfig holder"]
+    end
+    subgraph cp["Control plane zone"]
+        api["kube-apiserver<br/>the front door"]
+        etcd[("etcd<br/>all state, Secrets included")]
+    end
+    subgraph workers["Worker node zone"]
+        kubelet["kubelet<br/>node API"]
+        rt["container runtime<br/>local socket"]
+        pod["Pod<br/>containers"]
+    end
+    people -->|"1 authN, then authZ"| api
+    api -->|"2 only the API server"| etcd
+    api -->|"3 logs, exec, port-forward"| kubelet
+    people -.->|"3 direct calls, if reachable"| kubelet
+    kubelet -->|"4 local socket"| rt
+    rt --> pod
+    pod -.->|"5 ServiceAccount token"| api
+```
+
+Two components carry most of the risk. The API server takes every request
+from a user or a controller, and etcd holds the state those requests change.
+Most cluster hardening targets these two. Ch.08 turns these rows into a threat
+model for the Bookstore. <!-- link-later: 00.08 -->
 
 ## The cluster, on one page
 
@@ -126,44 +172,68 @@ Control plane:
   read/write of every object passes through it; it performs authentication,
   authorization (RBAC), admission control, validation, and is the *only*
   process that reads/writes etcd. Horizontally scalable (run several behind a
-  load balancer). Deep dive: [ch.04](04-control-plane-deep-dive.md).
+  load balancer). **Attack surface:** its HTTPS port, 6443 by default, which
+  every client uses. Anything that can reach that port can send it a request,
+  so the checks run on each request decide what gets through. Deep dive:
+  [ch.04](04-control-plane-deep-dive.md).
 - **etcd** — a distributed, strongly-consistent key-value store (Raft
   consensus). It holds the entire cluster state: every object's spec *and*
-  status. **Lose etcd without a backup → lose the cluster.** Deep dive:
-  [ch.04](04-control-plane-deep-dive.md).
+  status. **Lose etcd without a backup → lose the cluster.**
+  **Attack surface:** its client port, 2379 by default. Only the API server
+  should reach it. Reading etcd reads every object, Secrets included, and RBAC
+  is not applied there. Deep dive: [ch.04](04-control-plane-deep-dive.md).
 - **kube-scheduler** — watches for Pods with no node assigned and, for each,
   picks the best node (filters by feasibility: resources, taints, affinity;
   then scores). It only *writes the choice* (a binding) back via the API
-  server — it does not start anything. Deep dive:
-  [ch.04](04-control-plane-deep-dive.md);
+  server; it does not start anything.
+  **Attack surface:** its API client credentials, and its HTTPS port (10259 by
+  default). Its RBAC role limits what a compromised scheduler could change.
+  Deep dive: [ch.04](04-control-plane-deep-dive.md);
   [Part 04](../04-scheduling/01-scheduler-and-nodes.md).
 - **kube-controller-manager** — one process running *many* independent control
   loops: the Node controller (notices dead nodes), ReplicaSet controller
   (keeps replica counts), Deployment controller (drives rollouts), Job, EndpointSlice,
-  ServiceAccount controllers, and more. Each is a reconciliation loop. Deep
-  dive: [ch.04](04-control-plane-deep-dive.md).
+  ServiceAccount controllers, and more. Each is a reconciliation loop.
+  **Attack surface:** the API client credentials its loops use, and its HTTPS
+  port (10257 by default). The loops write many kinds of object, so their RBAC
+  decides how far a compromise could reach.
+  Deep dive: [ch.04](04-control-plane-deep-dive.md).
 - **cloud-controller-manager** — present on managed/cloud clusters; the loops
   that integrate with the cloud provider: provision a real load balancer for a
   `Service` type `LoadBalancer`, attach cloud disks, manage node lifecycle and
   routes. Absent (or a no-op) on a local kind cluster.
+  **Attack surface:** the cloud account it holds. A compromised one can create
+  load balancers, disks and routes outside the cluster.
 
 Data plane (per worker node):
 
 - **kubelet** — the node agent. Watches the API server for Pods bound to *its*
   node, instructs the container runtime to make them real, runs liveness/
   readiness/startup probes, and continuously reports Pod and node status back.
-  It is the bridge between the cluster's desired state and Linux. Deep dive:
-  [ch.05](05-node-components.md).
+  It is the bridge between the cluster's desired state and Linux.
+  **Attack surface:** its own HTTPS API on each node, 10250 by default. The API
+  server calls it for `logs`, `exec` and `port-forward`. A caller that reaches
+  it directly skips the API server, so only the kubelet's own checks apply.
+  Deep dive: [ch.05](05-node-components.md).
 - **container runtime** — containerd (or CRI-O), spoken to via the **CRI**.
   Pulls images and creates/starts/stops the actual containers (via `runc`,
-  using the namespaces/cgroups from [ch.02](02-containers-and-images.md)). Deep
-  dive: [ch.05](05-node-components.md).
+  using the namespaces/cgroups from [ch.02](02-containers-and-images.md)).
+  **Attack surface:** its local socket, which the kubelet uses. Anyone who can
+  write to that socket can start a container with any settings, host access
+  included.
+  Deep dive: [ch.05](05-node-components.md).
 - **kube-proxy** — programs each node's networking (iptables/nftables, or
   replaced by a CNI's own dataplane like eBPF) so that a Service's stable
-  virtual IP load-balances to the current healthy Pod IPs. Deep dive:
-  [ch.05](05-node-components.md); [Part 02](../02-networking/02-services.md).
+  virtual IP load-balances to the current healthy Pod IPs.
+  **Attack surface:** little of its own. It turns Service and EndpointSlice
+  objects into node rules, so whoever can write those objects can steer
+  traffic.
+  Deep dive: [ch.05](05-node-components.md);
+  [Part 02](../02-networking/02-services.md).
 - **CNI plugin** — (Calico, Cilium, kindnet…) gives each Pod its own routable
-  IP and connects Pod networks across nodes. The networking model is
+  IP and connects Pod networks across nodes. **Attack surface:** the network
+  paths between Pods. A NetworkPolicy limits them only where the CNI enforces
+  it, as [ch.07](07-local-cluster-setup.md) shows. The networking model is
   [Part 02](../02-networking/01-networking-model.md).
 
 Add-ons that run *as Pods* on the cluster (not core binaries) but you'll meet
@@ -220,9 +290,9 @@ from *converge* is the entire architecture in one sentence.
 
 ## Hands-on with the Bookstore
 
-No new manifests this chapter — it is conceptual scaffolding. But fix where the
-Bookstore will live on this map, so later chapters land in a frame you already
-hold:
+No Bookstore manifests this chapter. It is conceptual scaffolding, but fix
+where the Bookstore will live on this map, so later chapters land in a frame
+you already hold:
 
 - `catalog`, `orders`, `storefront`, `payments-worker` → ordinary **Pods on
   worker nodes**, managed by controllers (first a bare Pod in
@@ -241,6 +311,118 @@ hold:
 The first time you run `kubectl apply -f .../01-catalog-pod.yaml` in
 [ch.07](07-local-cluster-setup.md), you will be triggering exactly the sequence
 diagram above against a real (local) cluster.
+
+### A workload with the baseline
+
+Question 4 in the exercises below needs a workload for a controller to manage.
+Create it from this manifest, not with `kubectl create deployment`, which would
+leave the Pod without the baseline. The image is `pause`, the Kubernetes
+project's container that does nothing but wait, so anything you see comes from
+the controller and not from an app.
+
+```sh
+kubectl apply -f - <<'EOF'
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: demo
+  labels:
+    pod-security.kubernetes.io/enforce: restricted
+    pod-security.kubernetes.io/warn: restricted
+---
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: demo-sa
+  namespace: demo
+automountServiceAccountToken: false
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: demo
+  namespace: demo
+  labels:
+    app: demo
+spec:
+  replicas: 3
+  selector:
+    matchLabels:
+      app: demo
+  template:
+    metadata:
+      labels:
+        app: demo
+    spec:
+      serviceAccountName: demo-sa
+      automountServiceAccountToken: false
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 65535                # the image declares 65535:65535
+        runAsGroup: 65535
+        seccompProfile:
+          type: RuntimeDefault
+      containers:
+        - name: pause
+          # registry.k8s.io/pause:3.9
+          image: registry.k8s.io/pause@sha256:7031c1b283388d2c2e09b57badb803c05ebed362dc88d84b480cc47f72a21097
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities:
+              drop: ["ALL"]
+          resources:
+            requests: { cpu: 10m, memory: 16Mi }
+            limits: { memory: 32Mi }
+          volumeMounts:
+            - name: tmp
+              mountPath: /tmp
+      volumes:
+        - name: tmp
+          emptyDir: {}
+EOF
+```
+
+The digest names the `registry.k8s.io/pause:3.9` image index, which lists
+amd64 and arm64 among other platforms, so the same line pulls on either. Each
+field answers one threat. The list below gives one sentence per field and links
+the [baseline](../01-core-workloads/01-pods.md#baseline) entry that explains it
+in full:
+
+- **Non-root, by number:** a root process can rewrite any file its container
+  sees, so the Pod names a numeric UID and GID, and the kubelet refuses UID 0.
+  See [run as a non-root user][bl-run-as].
+- **seccomp:** `RuntimeDefault` blocks a set of kernel calls that ordinary
+  software does not use, which shrinks what an attacker can try against the
+  kernel. See [seccomp][bl-seccomp].
+- **Privilege:** `allowPrivilegeEscalation: false` stops a process from
+  gaining rights after it starts, and `capabilities.drop` removes Linux powers
+  the app does not need. See [privilege][bl-privilege] and
+  [capabilities][bl-capabilities].
+- **Write surface:** `readOnlyRootFilesystem` stops an attacker changing the
+  image's own files, and the `/tmp` mount gives the app scratch space. See
+  [read-only root][bl-read-only-root].
+- **ServiceAccount token:** `automountServiceAccountToken: false` keeps an API
+  credential out of a container that never calls the API. See
+  [service account][bl-service-account].
+- **Image digest:** the digest names one exact image, so a moved tag cannot
+  change what runs. See [digest][bl-image-digest].
+- **Resources:** the requests and the memory limit stop one container from
+  taking the node's memory from its neighbours. See
+  [resources][bl-resources].
+- **Namespace labels:** `enforce: restricted` makes the API server refuse Pods
+  that fall short of the `restricted` level, which asks for a subset of the
+  baseline. See [the namespace labels][bl-namespace].
+
+Remove the namespace when you are done with `kubectl delete namespace demo`.
+
+[bl-run-as]: ../01-core-workloads/01-pods.md#baseline-run-as
+[bl-seccomp]: ../01-core-workloads/01-pods.md#baseline-seccomp
+[bl-read-only-root]: ../01-core-workloads/01-pods.md#baseline-read-only-root
+[bl-service-account]: ../01-core-workloads/01-pods.md#baseline-service-account
+[bl-image-digest]: ../01-core-workloads/01-pods.md#baseline-image-digest
+[bl-resources]: ../01-core-workloads/01-pods.md#baseline-resources
+[bl-namespace]: ../01-core-workloads/01-pods.md#baseline-namespace
 
 ## How it works under the hood
 
@@ -280,12 +462,9 @@ A few structural facts that the deep-dive chapters build on:
 > real cloud LB and `PersistentVolumeClaim`s to real cloud disks — exactly the
 > parts that *don't* exist on your local kind cluster.
 
-> **In production:** protect the two crown jewels. **etcd** must be backed up
-> (and encrypted) — its loss is cluster loss; backup/DR is
-> [Part 08 ch.02](../08-day-2-operations/02-backup-and-dr.md). The **API
-> server** is the only door — locking down authn/authz/admission is the core of
-> [Part 05](../05-security/01-authn-authz-rbac.md). Most "secure the cluster"
-> work targets these two.
+> **In production:** back up **etcd** and test the restore. Its loss is cluster
+> loss. Backup and DR are covered in
+> [Part 08 ch.02](../08-day-2-operations/02-backup-and-dr.md).
 
 > **In production:** beware the anti-pattern of treating the control plane as
 > "set and forget". Version skew between control plane and kubelets, etcd disk
@@ -301,7 +480,7 @@ Commands to *see* this architecture on any cluster (used hands-on in
 ```sh
 kubectl cluster-info                       # API server (and core add-on) endpoints
 kubectl get nodes -o wide                  # the data plane: worker (+CP) nodes
-kubectl get componentstatuses              # deprecated since v1.19, unreliable on v1.30+
+kubectl get componentstatuses              # deprecated since v1.19; the two lines below replace it
 # reliable control-plane health instead → use these two:
 kubectl get --raw='/readyz?verbose'        # API server self health checks
 kubectl -n kube-system get pods -l tier=control-plane   # CP component Pods (kind)
@@ -358,10 +537,10 @@ Architecture checklist:
 
    </details>
 
-4. **Hands-on extension: on a kind cluster, `kubectl create deployment demo --image=registry.k8s.io/pause:3.9 --replicas=3`, then `kubectl delete pod -l app=demo --wait=false`. What happens and which controller is responsible? What if you deleted the Deployment instead?**
+4. **Hands-on extension: on a kind cluster, apply the workload in [A workload with the baseline](#a-workload-with-the-baseline), then run `kubectl -n demo delete pod -l app=demo --wait=false`. What happens and which controller is responsible? What if you deleted the Deployment instead?**
    <details><summary>What you should see</summary>
 
-   The ReplicaSet controller immediately recreates Pods to restore count=3 — the deletion makes actual < desired and the level-triggered loop closes the gap. Deleting the Deployment removes the desired state object; `ownerReferences` then cause cascading deletion of its ReplicaSet and Pods, and nothing recreates them (see §Component map, kube-controller-manager).
+   The ReplicaSet controller immediately recreates Pods to restore count=3: the deletion makes actual < desired and the level-triggered loop closes the gap. The new Pods carry the same baseline, because the template lives in the Deployment and not in the Pod you deleted. Deleting the Deployment removes the desired state object; `ownerReferences` then cause cascading deletion of its ReplicaSet and Pods, and nothing recreates them (see §Component map, kube-controller-manager).
 
    </details>
 
