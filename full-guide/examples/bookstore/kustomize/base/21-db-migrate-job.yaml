@@ -4,7 +4,7 @@
 # (ch.05). The ch.05 Postgres is an empty DB; catalog/orders need the books and
 # orders tables (the app's documented schema). Idempotent (CREATE TABLE IF NOT
 # EXISTS) so retries are safe. Uses the official postgres:16 image for `psql`
-# (public — no kind load).
+# (public, no kind load), pinned by digest as the baseline requires.
 #
 # RESOLVED in Part 05 ch.04: the Phase-2 plaintext PGPASSWORD stub is GONE.
 # Credentials now come from the shared `db-credentials` Secret (16-) via
@@ -26,11 +26,9 @@
 # the postgres:16 StatefulSet (20-):
 #  • ch.01 serviceAccountName: migrate-sa + automountServiceAccountToken: false
 #    (shared with the cleanup CronJob 22-; never the `default` SA).
-#  • ch.02 pod SC runAsNonRoot/runAsUser/Group 999 + fsGroup 999 + seccomp
-#    RuntimeDefault; container SC drop ALL + allowPrivilegeEscalation:false.
-#    NO readOnlyRootFilesystem (the postgres image's psql tooling writes
-#    outside any data volume — identical reasoning to 20-; `restricted` does
-#    not require a read-only root FS).
+#  • ch.02 pod SC runAsNonRoot/runAsUser/Group 999 + seccomp RuntimeDefault;
+#    container SC drop ALL + allowPrivilegeEscalation:false + a read-only root
+#    FS, with an emptyDir at /tmp for scratch. No volume needs fsGroup.
 #
 # Requires:
 #   kubectl apply -f examples/bookstore/raw-manifests/00-namespace.yaml
@@ -68,17 +66,17 @@ spec:
         runAsNonRoot: true
         runAsUser: 999
         runAsGroup: 999
-        fsGroup: 999
         seccompProfile:
           type: RuntimeDefault
       containers:
         - name: migrate
-          image: postgres:16      # ships `psql`/`pg_isready`; public image
-          # --- Part 05 ch.02: container securityContext (PSA `restricted`).
-          # NOT readOnlyRootFilesystem: psql writes outside any data volume
-          # (same accurate reason as 20-); restricted does not require it.
+          # Ships `psql`/`pg_isready`; public image.
+          image: postgres@sha256:1beaa3084eee2676f20a9cd9928f0bf2c5bf674f8e49f81017912183d377c61c  # postgres:16
+          # --- Part 05 ch.02: container securityContext (PSA `restricted`),
+          # plus the baseline's read-only root FS.
           securityContext:
             allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
             capabilities:
               drop: ["ALL"]
           # --- Part 05 ch.04: credentials from the db-credentials Secret (16-)
@@ -115,3 +113,10 @@ spec:
             limits:
               cpu: 200m
               memory: 128Mi
+          volumeMounts:
+            - name: tmp
+              mountPath: /tmp
+      volumes:
+        - name: tmp
+          emptyDir:
+            sizeLimit: 32Mi

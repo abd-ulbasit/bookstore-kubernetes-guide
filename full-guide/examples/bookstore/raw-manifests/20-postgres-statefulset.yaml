@@ -36,14 +36,13 @@
 #    the non-root postgres UID/GID 999 and set fsGroup: 999 so the PVC at
 #    /var/lib/postgresql/data is group-writable (the kubelet chowns the volume
 #    to the fsGroup). initdb then runs as 999 against a writable data dir — no
-#    root step needed. We do NOT set readOnlyRootFilesystem (postgres writes to
-#    several paths outside PGDATA: /run/postgresql sockets, /tmp, etc.) —
-#    `restricted` does NOT require a read-only root FS, only runAsNonRoot +
-#    drop ALL + no-privilege-escalation + seccomp RuntimeDefault, which we set.
-#    This is the accurate "stock stateful image, made restricted" pattern;
-#    contrast catalog/orders (purpose-built distroless) which also get a
-#    read-only root FS. fsGroupChangePolicy: OnRootMismatch avoids a full
-#    recursive chown of a large PGDATA on every restart.
+#    root step needed. `restricted` asks for runAsNonRoot + drop ALL +
+#    no-privilege-escalation + seccomp RuntimeDefault, which we set. The Part 01
+#    ch.01 baseline goes further and we meet it: the image is pinned by digest
+#    and the root FS is read-only. Outside PGDATA postgres writes its socket and
+#    lock under /var/run/postgresql, so that path and /tmp get emptyDirs.
+#    fsGroupChangePolicy: OnRootMismatch avoids a full recursive chown of a
+#    large PGDATA on every restart.
 #
 # Requires:
 #   kubectl apply -f examples/bookstore/raw-manifests/00-namespace.yaml
@@ -100,8 +99,6 @@ spec:
       # postgres UID/GID 999; fsGroup 999 makes the PVC group-writable so
       # initdb (now running as 999) can create PGDATA without the image's
       # root→gosu step. seccomp RuntimeDefault applies to every container.
-      # No readOnlyRootFilesystem here (postgres writes outside PGDATA);
-      # `restricted` does not require one.
       securityContext:
         runAsNonRoot: true
         runAsUser: 999
@@ -136,14 +133,16 @@ spec:
       terminationGracePeriodSeconds: 30
       containers:
         - name: postgres
-          image: postgres:16      # official image; pulled from registry (no kind load)
+          # Official image; pulled from the registry (no kind load).
+          image: postgres@sha256:1beaa3084eee2676f20a9cd9928f0bf2c5bf674f8e49f81017912183d377c61c  # postgres:16
           # --- Part 05 ch.02: container securityContext. drop ALL +
           # no-privilege-escalation + (pod-level) runAsNonRoot + seccomp
-          # RuntimeDefault = PSA `restricted`. NOT readOnlyRootFilesystem:
-          # postgres writes sockets/locks outside PGDATA; restricted permits a
-          # writable root FS. (postgres needs no Linux capabilities at all.)
+          # RuntimeDefault = PSA `restricted`. The read-only root FS is the
+          # baseline: writes go to the PVC and the emptyDirs mounted below.
+          # (postgres needs no Linux capabilities at all.)
           securityContext:
             allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
             capabilities:
               drop: ["ALL"]
           ports:
@@ -178,6 +177,18 @@ spec:
           volumeMounts:
             - name: data                  # MUST match the volumeClaimTemplate name
               mountPath: /var/lib/postgresql/data
+            # --- Part 05 ch.02: the two paths postgres writes outside PGDATA.
+            - name: run
+              mountPath: /var/run/postgresql
+            - name: tmp
+              mountPath: /tmp
+      volumes:
+        - name: run
+          emptyDir:
+            sizeLimit: 8Mi
+        - name: tmp
+          emptyDir:
+            sizeLimit: 32Mi
   volumeClaimTemplates:                   # one PVC per Pod; retained across restarts
     - metadata:
         name: data

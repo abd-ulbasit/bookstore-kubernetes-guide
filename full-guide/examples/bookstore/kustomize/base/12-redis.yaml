@@ -16,6 +16,8 @@
 # only (--save "" --appendonly no — it writes nothing), add a small `data`
 # emptyDir for redis's working dir + a read-only root FS. drop ALL +
 # no-privilege-escalation + runAsNonRoot + seccomp RuntimeDefault = restricted.
+# The image is pinned by digest, as the Part 01 ch.01 baseline requires of every
+# third-party image; the tag stays in a comment beside it.
 #
 # Requires:
 #   kubectl apply -f examples/bookstore/raw-manifests/00-namespace.yaml
@@ -56,7 +58,8 @@ spec:
           type: RuntimeDefault
       containers:
         - name: redis
-          image: redis:7            # official image, pulled from registry (no kind load)
+          # Official image, pulled from the registry (no kind load).
+          image: redis@sha256:b6b6e3dc0c0952737748e55d5d885272840c7e42ba41ab1d5489f693419882f5  # redis:7
           args: ["--save", "", "--appendonly", "no"]   # in-memory only (no persistence yet)
           # --- Part 05 ch.02: container securityContext (PSA `restricted`).
           # In-memory redis writes nothing; a read-only root FS holds (the
@@ -87,7 +90,12 @@ spec:
           volumeMounts:
             - name: data
               mountPath: /data
+            - name: tmp
+              mountPath: /tmp
       volumes:
         - name: data
           emptyDir:
             sizeLimit: 64Mi
+        - name: tmp
+          emptyDir:
+            sizeLimit: 32Mi

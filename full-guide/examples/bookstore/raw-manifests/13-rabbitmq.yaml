@@ -14,16 +14,14 @@
 # Part 05 ch.02 (Pod Security) increment: the `bookstore` namespace enforces
 # the PSA `restricted` standard (00-namespace.yaml) for EVERY pod, rabbitmq
 # included. rabbitmq is the most demanding stock image here: it writes the
-# Mnesia DB + Erlang cookie under /var/lib/rabbitmq and generates config under
-# /etc/rabbitmq, and its entrypoint normally does root-level cookie-permission
-# setup. To make it BOTH restricted-valid AND bootable we run directly as the
-# non-root rabbitmq UID/GID 999, set fsGroup 999, and back /var/lib/rabbitmq
-# with an emptyDir the kubelet chowns to 999. We do NOT set
-# readOnlyRootFilesystem (rabbitmq writes outside that volume) — `restricted`
-# does not require one. drop ALL + no-privilege-escalation + runAsNonRoot +
-# seccomp RuntimeDefault = restricted. This is the honest "complex stateful
-# stock image, made restricted" case; contrast the purpose-built distroless
-# Go services which additionally get a read-only root FS.
+# Mnesia DB + Erlang cookie under /var/lib/rabbitmq, and its entrypoint normally
+# does root-level cookie-permission setup. To make it BOTH restricted-valid AND
+# bootable we run directly as the non-root rabbitmq UID/GID 999, set fsGroup
+# 999, and back /var/lib/rabbitmq with an emptyDir the kubelet chowns to 999.
+# drop ALL + no-privilege-escalation + runAsNonRoot + seccomp RuntimeDefault =
+# restricted. The rest of the Part 01 ch.01 baseline holds too: the image is
+# pinned by digest and the root FS is read-only. `restricted` asks for neither,
+# and labs/05-02.sh in examples/security-lab shows the broker booting this way.
 #
 # Requires:
 #   kubectl apply -f examples/bookstore/raw-manifests/00-namespace.yaml
@@ -66,13 +64,15 @@ spec:
           type: RuntimeDefault
       containers:
         - name: rabbitmq
-          image: rabbitmq:3.13-management   # official image; ships AMQP + mgmt UI
+          # Official image; ships AMQP + mgmt UI.
+          image: rabbitmq@sha256:e582c0bc7766f3342496d8485efb5a1df782b5ce3886ad017e2eaae442311f69  # rabbitmq:3.13-management
           # --- Part 05 ch.02: container securityContext. drop ALL +
           # no-privilege-escalation + (pod) runAsNonRoot + seccomp
-          # RuntimeDefault = restricted. NOT readOnlyRootFilesystem: rabbitmq
-          # writes generated config outside the data volume.
+          # RuntimeDefault = restricted. The read-only root FS is the baseline:
+          # the broker writes only to the emptyDirs mounted below.
           securityContext:
             allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
             capabilities:
               drop: ["ALL"]
           ports:
@@ -100,7 +100,12 @@ spec:
           volumeMounts:
             - name: data
               mountPath: /var/lib/rabbitmq
+            - name: tmp
+              mountPath: /tmp
       volumes:
         - name: data
           emptyDir:
             sizeLimit: 256Mi
+        - name: tmp
+          emptyDir:
+            sizeLimit: 32Mi

@@ -1,75 +1,145 @@
-# Transcript for 05-security/02-pod-security.md, hands-on steps 1 to 10.
+# Transcript for 05-security/02-pod-security.md, lab steps 1 to 12.
 # Tier A: a kind cluster, Kubernetes v1.37.0 node, kubectl v1.37.2.
 # Node runtime: containerd v2.3.4, runc 1.4.3, crictl 1.36.0.
+# Host: Linux, Ubuntu 26.04, kernel 7.0.0, Docker 29.8.2. Not run on macOS.
 # Recorded by running examples/security-lab/labs/05-02.sh from full-guide/.
 # The cluster name is shown as `security-lab`.
 #
-# What did not work the first time: user-namespace Pods (hostUsers: false)
-# never start on a default kind cluster. The kube-apiserver accepts the field,
-# but the kubelet cannot create the sandbox because the kind node is itself a
-# container and the nested read-only sysfs mount is denied. That is why 01.01
-# keeps hostUsers out of the baseline until it is verified, and why this lab
-# shows what the field would do rather than claiming it runs here.
-## step 1 — one namespace that permits everything, one that enforces restricted
-$ kubectl create ns psa-lab && kubectl label ns psa-lab pod-security.kubernetes.io/enforce=privileged
+# What did not work the first time: the user-namespace Pod (hostUsers: false,
+# step 7) did not start on this host. The kube-apiserver accepted the field and
+# the kubelet failed to create the sandbox, with runc refused a sysfs mount. The
+# cause was not traced further. 01.01 keeps hostUsers out of the baseline until
+# it is verified on kind on both Linux and macOS hosts.
+#
+# Also: a Pod applied straight after `kubectl create ns` can be refused until
+# the controller has created the namespace's default ServiceAccount, so the
+# script waits for it.
+#
+# Step 3 reads ca.key but prints only its first ten bytes, the PEM armour.
+## step 1: one namespace that permits everything, one that enforces restricted
+$ kubectl create ns psa-lab
+kubectl label ns psa-lab pod-security.kubernetes.io/enforce=privileged
+namespace/psa-lab created
 namespace/psa-lab labeled
 
-$ kubectl create ns psa-restricted && kubectl label ns psa-restricted pod-security.kubernetes.io/enforce=restricted pod-security.kubernetes.io/warn=restricted
+$ kubectl create ns psa-restricted
+kubectl label ns psa-restricted \
+  pod-security.kubernetes.io/enforce=restricted \
+  pod-security.kubernetes.io/audit=restricted \
+  pod-security.kubernetes.io/warn=restricted
+namespace/psa-restricted created
 namespace/psa-restricted labeled
 
-## step 2 — privileged: full capabilities over the node kernel
-$ kubectl apply -f esc-privileged.yaml && kubectl wait -n psa-lab --for=condition=Ready pod/escape-privileged --timeout=90s
+## step 2: privileged, compared with a plain Pod
+$ kubectl apply -f esc-privileged.yaml -f plain.yaml
+kubectl wait -n psa-lab --for=condition=Ready --timeout=90s pod/escape-privileged pod/plain
 pod/escape-privileged created
+pod/plain created
 pod/escape-privileged condition met
+pod/plain condition met
 
-$ kubectl exec -n psa-lab escape-privileged -- grep -E "^Cap(Eff|Bnd)" /proc/self/status | sed "s/\\t/ /"
+$ kubectl exec -n psa-lab escape-privileged -- sh -c '
+  grep -E "^Cap(Eff|Bnd)" /proc/self/status | tr -s "\t" " "
+  cat /proc/sys/kernel/cap_last_cap'
 CapEff: 000001ffffffffff
 CapBnd: 000001ffffffffff
+40
 
-## step 3 — hostPath / : read every file on the node, including the cluster CA key
-$ kubectl apply -f esc-hostpath.yaml && kubectl wait -n psa-lab --for=condition=Ready pod/escape-hostpath --timeout=90s
+$ for p in escape-privileged plain; do
+  echo "== $p =="
+  kubectl exec -n psa-lab "$p" -- sh -c '
+    echo "entries in /dev: $(ls /dev | wc -l)"
+    mount -t tmpfs tmpfs /tmp && echo "mount: allowed" || true'
+done
+== escape-privileged ==
+entries in /dev: 229
+mount: allowed
+== plain ==
+entries in /dev: 16
+mount: permission denied (are you root?)
+
+## step 3: hostPath /, read the cluster CA key, and what root has to do with it
+$ kubectl apply -f esc-hostpath.yaml -f esc-hostpath-nocaps.yaml -f esc-hostpath-nonroot.yaml
+kubectl wait -n psa-lab --for=condition=Ready --timeout=90s \
+  pod/escape-hostpath pod/escape-hostpath-nocaps pod/escape-hostpath-nonroot
 pod/escape-hostpath created
+pod/escape-hostpath-nocaps created
+pod/escape-hostpath-nonroot created
 pod/escape-hostpath condition met
+pod/escape-hostpath-nocaps condition met
+pod/escape-hostpath-nonroot condition met
 
-$ kubectl exec -n psa-lab escape-hostpath -- sh -c "cat /host/etc/hostname; ls /host/etc/kubernetes/pki/ca.key"
+$ kubectl exec -n psa-lab escape-hostpath -- sh -c '
+  cat /host/etc/hostname
+  stat -c "%a %U %n" /host/etc/kubernetes/pki/ca.key
+  head -c 10 /host/etc/kubernetes/pki/ca.key; echo'
 security-lab-control-plane
-/host/etc/kubernetes/pki/ca.key
+600 root /host/etc/kubernetes/pki/ca.key
+-----BEGIN
 
-## step 4 — hostPID: see and signal every process on the node
-$ kubectl apply -f esc-hostpid.yaml && kubectl wait -n psa-lab --for=condition=Ready pod/escape-hostpid --timeout=90s
+$ for p in escape-hostpath-nocaps escape-hostpath-nonroot; do
+  echo "== $p =="
+  kubectl exec -n psa-lab "$p" -- sh -c '
+    id -u
+    grep ^CapEff /proc/self/status | tr -s "\t" " "
+    cat /host/etc/hostname
+    head -c 10 /host/etc/kubernetes/pki/ca.key; echo'
+done
+== escape-hostpath-nocaps ==
+0
+CapEff: 0000000000000000
+security-lab-control-plane
+-----BEGIN
+== escape-hostpath-nonroot ==
+65532
+CapEff: 0000000000000000
+security-lab-control-plane
+head: /host/etc/kubernetes/pki/ca.key: Permission denied
+
+
+## step 4: hostPID, see and signal every process on the node
+$ kubectl apply -f esc-hostpid.yaml
+kubectl wait -n psa-lab --for=condition=Ready --timeout=90s pod/escape-hostpid
 pod/escape-hostpid created
 pod/escape-hostpid condition met
 
-$ kubectl exec -n psa-lab escape-hostpid -- sh -c "ps -o pid,comm | grep -E \"kubelet|containerd\$\"" | awk "{\$1=\$1;print}"
+$ kubectl exec -n psa-lab escape-hostpid -- sh -c '
+  ps -o pid,comm | grep -E "kubelet|containerd$" | sed "s/^ *//"
+  K=$(pidof kubelet)
+  kill -0 "$K" && echo "kill -0 kubelet: allowed"
+  tr "\0" " " < "/proc/$K/cmdline" | cut -c1-40'
 137 containerd
 748 kubelet
+kill -0 kubelet: allowed
+/usr/bin/kubelet --bootstrap-kubeconfig=
 
-## step 5 — a mounted runtime socket is root over every pod on the node
-$ kubectl apply -f esc-socket.yaml && kubectl wait -n psa-lab --for=condition=Ready pod/escape-socket --timeout=90s
+## step 5: a mounted runtime socket reaches every container on the node
+$ kubectl apply -f esc-socket.yaml
+kubectl wait -n psa-lab --for=condition=Ready --timeout=90s pod/escape-socket
 pod/escape-socket created
 pod/escape-socket condition met
 
-$ kubectl exec -n psa-lab escape-socket -- sh -c "R=unix:///run/containerd/containerd.sock; echo containers visible: $(crictl -r $R ps -q | wc -l); crictl -r $R ps --name kube-apiserver -o table | grep -o kube-apiserver-[a-z0-9-]*"
-containers visible: 13
+$ kubectl exec -n psa-lab escape-socket -- sh -c '
+  R=unix:///run/containerd/containerd.sock
+  echo "containers visible: $(crictl -r $R ps -q 2>/dev/null | wc -l)"
+  crictl -r $R ps --name kube-apiserver -o table 2>/dev/null |
+    grep -o "kube-apiserver-[a-z0-9-]*"'
+containers visible: 16
 kube-apiserver-security-lab-control-plane
 
-## step 6 — no read-only rootfs: drop a binary into the running container
-$ kubectl apply -f esc-mutable.yaml && kubectl wait -n psa-lab --for=condition=Ready pod/escape-mutable --timeout=90s
-pod/escape-mutable created
-pod/escape-mutable condition met
-
-$ kubectl exec -n psa-lab escape-mutable -- sh -c "printf %s\\\\n \"#!/bin/sh\" \"echo INJECTED\" > /usr/bin/backdoor; chmod +x /usr/bin/backdoor; /usr/bin/backdoor"
+## step 6: no read-only root filesystem, drop a binary into the running container
+$ kubectl exec -n psa-lab plain -- sh -c '
+  printf "%s\n" "#!/bin/sh" "echo INJECTED" > /usr/bin/backdoor
+  chmod +x /usr/bin/backdoor
+  /usr/bin/backdoor'
 INJECTED
 
-## step 7 — user namespaces: what they would do, and why default kind cannot
-$ kubectl apply -f userns-off.yaml && kubectl wait -n psa-lab --for=condition=Ready pod/userns-off --timeout=90s
-pod/userns-off created
-pod/userns-off condition met
-
-$ kubectl exec -n psa-lab userns-off -- cat /proc/self/uid_map | awk "{\$1=\$1;print}"
+## step 7: user namespaces, and what happened on this host
+$ kubectl exec -n psa-lab plain -- cat /proc/self/uid_map | awk '{$1=$1;print}'
 0 0 4294967295
 
-$ kubectl apply -f userns-on.yaml && kubectl wait -n psa-lab --for=condition=Ready pod/userns-on --timeout=30s
+$ kubectl apply -f userns-on.yaml
+kubectl wait -n psa-lab --for=condition=Ready --timeout=30s pod/userns-on
 pod/userns-on created
 error: timed out waiting for the condition on pods/userns-on
 
@@ -77,11 +147,20 @@ $ kubectl get pod -n psa-lab userns-on
 NAME        READY   STATUS              RESTARTS   AGE
 userns-on   0/1     ContainerCreating   0          30s
 
-$ kubectl get events -n psa-lab --field-selector reason=FailedCreatePodSandBox -o jsonpath="{range .items[*]}{.message}{end}"
+$ kubectl get node -o jsonpath='{.items[0].status.nodeInfo.kernelVersion}{"\n"}'
+7.0.0-38-generic
+
+$ kubectl get events -n psa-lab --field-selector reason=FailedCreatePodSandBox \
+  -o jsonpath='{range .items[*]}{.message}{"\n"}{end}' |
+  sed 's/sandbox "[0-9a-f]*"/sandbox/' | tail -1
 Failed to create pod sandbox: rpc error: code = Unknown desc = failed to start sandbox: failed to create containerd task: failed to create shim task: OCI runtime create failed: runc create failed: unable to start container process: error during container init: error mounting "sysfs" to rootfs at "/sys": mount src=sysfs, dst=/sys, dstFd=/proc/thread-self/fd/11, flags=MS_RDONLY|MS_NOSUID|MS_NODEV|MS_NOEXEC: operation not permitted
 
-## step 8 — re-attack a restricted namespace: admission refuses every one
-$ for a in privileged hostpath hostpid socket; do echo "== $a =="; sed "s/psa-lab/psa-restricted/" esc-$a.yaml | kubectl apply --dry-run=server -f - 2>&1 | sed -n "1p"; done
+## step 8: re-attack a restricted namespace, admission refuses every one
+$ for a in privileged hostpath hostpid socket; do
+  echo "== $a =="
+  sed "s/psa-lab/psa-restricted/" "esc-$a.yaml" |
+    kubectl apply --dry-run=server -f - 2>&1 | sed -n 1p
+done
 == privileged ==
 Error from server (Forbidden): error when creating "STDIN": pods "escape-privileged" is forbidden: violates PodSecurity "restricted:latest": privileged (container "esc" must not set securityContext.privileged=true), allowPrivilegeEscalation != false (container "esc" must set securityContext.allowPrivilegeEscalation=false), unrestricted capabilities (container "esc" must set securityContext.capabilities.drop=["ALL"]), runAsNonRoot != true (pod or container "esc" must set securityContext.runAsNonRoot=true), seccompProfile (pod or container "esc" must set securityContext.seccompProfile.type to "RuntimeDefault" or "Localhost")
 == hostpath ==
@@ -91,18 +170,118 @@ Error from server (Forbidden): error when creating "STDIN": pods "escape-hostpid
 == socket ==
 Error from server (Forbidden): error when creating "STDIN": pods "escape-socket" is forbidden: violates PodSecurity "restricted:latest": allowPrivilegeEscalation != false (container "esc" must set securityContext.allowPrivilegeEscalation=false), unrestricted capabilities (container "esc" must set securityContext.capabilities.drop=["ALL"]), restricted volume types (volumes "sock", "crictl" use restricted volume type "hostPath"), runAsNonRoot != true (pod or container "esc" must set securityContext.runAsNonRoot=true), seccompProfile (pod or container "esc" must set securityContext.seccompProfile.type to "RuntimeDefault" or "Localhost")
 
-## step 9 — the hardened form carries the baseline and is admitted
-$ kubectl apply -f hardened.yaml && kubectl wait -n psa-restricted --for=condition=Ready pod/hardened --timeout=90s
+## step 9: the hardened form carries the baseline and is admitted
+$ kubectl apply -f hardened.yaml
+kubectl wait -n psa-restricted --for=condition=Ready --timeout=90s pod/hardened
+serviceaccount/hardened-sa created
 pod/hardened created
 pod/hardened condition met
 
-$ kubectl exec -n psa-restricted hardened -- sh -c "exec 2>&1; id; grep ^CapEff /proc/self/status | sed \"s/\\t/ /\"; printf x > /usr/bin/backdoor || true"
+$ kubectl exec -n psa-restricted hardened -- sh -c '
+  exec 2>&1
+  id
+  grep -E "^(CapEff|NoNewPrivs|Seccomp):" /proc/self/status | tr -s "\t" " "
+  printf x > /usr/bin/backdoor || true'
 uid=65532 gid=65532 groups=65532
 CapEff: 0000000000000000
+NoNewPrivs: 1
+Seccomp: 2
 sh: can't create /usr/bin/backdoor: Read-only file system
 
-## step 10 — tear down the lab namespaces
+## step 10: every Bookstore workload manifest, server dry-run against restricted
+$ kubectl apply -f examples/bookstore/raw-manifests/00-namespace.yaml
+kubectl apply -f examples/bookstore/raw-manifests/05-serviceaccounts-rbac.yaml
+namespace/bookstore created
+resourcequota/bookstore-quota created
+limitrange/bookstore-limits created
+serviceaccount/catalog-sa created
+serviceaccount/storefront-sa created
+serviceaccount/orders-sa created
+serviceaccount/payments-worker-sa created
+serviceaccount/postgres-sa created
+serviceaccount/redis-sa created
+serviceaccount/rabbitmq-sa created
+serviceaccount/migrate-sa created
+role.rbac.authorization.k8s.io/catalog-config-reader created
+rolebinding.rbac.authorization.k8s.io/catalog-config-reader-binding created
+
+$ for f in $(grep -lE '^  namespace: bookstore' examples/bookstore/raw-manifests/*.yaml); do
+  grep -qE '^kind: (Pod|Deployment|StatefulSet|DaemonSet|Job|CronJob)( |$)' "$f" &&
+    kubectl apply --dry-run=server -f "$f"
+done
+deployment.apps/catalog created (server dry run)
+deployment.apps/storefront created (server dry run)
+deployment.apps/redis created (server dry run)
+deployment.apps/rabbitmq created (server dry run)
+deployment.apps/orders created (server dry run)
+deployment.apps/payments-worker created (server dry run)
+service/postgres created (server dry run)
+statefulset.apps/postgres created (server dry run)
+job.batch/db-migrate created (server dry run)
+cronjob.batch/cleanup created (server dry run)
+service/catalog created (server dry run)
+deployment.apps/catalog-stable created (server dry run)
+deployment.apps/catalog-canary created (server dry run)
+
+## step 11: the data tier boots with a read-only root filesystem
+$ M=examples/bookstore/raw-manifests
+kubectl apply -f $M/16-db-credentials.yaml -f $M/35-priorityclasses.yaml
+kubectl apply -f $M/12-redis.yaml -f $M/13-rabbitmq.yaml -f $M/20-postgres-statefulset.yaml
+kubectl rollout status -n bookstore deployment/redis --timeout=300s
+kubectl rollout status -n bookstore deployment/rabbitmq --timeout=300s
+kubectl rollout status -n bookstore statefulset/postgres --timeout=300s
+secret/db-credentials created
+priorityclass.scheduling.k8s.io/bookstore-data created
+priorityclass.scheduling.k8s.io/bookstore-critical created
+priorityclass.scheduling.k8s.io/bookstore-batch created
+deployment.apps/redis created
+deployment.apps/rabbitmq created
+service/postgres created
+statefulset.apps/postgres created
+Waiting for deployment "redis" rollout to finish: 0 of 1 updated replicas are available...
+deployment "redis" successfully rolled out
+Waiting for deployment "rabbitmq" rollout to finish: 0 of 1 updated replicas are available...
+deployment "rabbitmq" successfully rolled out
+partitioned roll out complete: 1 new pods have been updated...
+
+$ M=examples/bookstore/raw-manifests
+kubectl apply -f $M/21-db-migrate-job.yaml -f $M/22-cleanup-cronjob.yaml
+kubectl wait -n bookstore --for=condition=complete --timeout=110s job/db-migrate
+kubectl create job -n bookstore cleanup-lab --from=cronjob/cleanup
+kubectl wait -n bookstore --for=condition=complete --timeout=110s job/cleanup-lab
+kubectl logs -n bookstore job/db-migrate --tail=1
+kubectl logs -n bookstore job/cleanup-lab --tail=1
+job.batch/db-migrate created
+cronjob.batch/cleanup created
+job.batch/db-migrate condition met
+job.batch/cleanup-lab created
+job.batch/cleanup-lab condition met
+migration complete
+cleanup complete
+
+$ for w in deployment/redis deployment/rabbitmq statefulset/postgres; do
+  echo "== $w =="
+  kubectl exec -n bookstore "$w" -- sh -c 'id; touch /usr/bin/backdoor || true'
+done
+== deployment/redis ==
+uid=999(redis) gid=999(redis) groups=999(redis)
+touch: cannot touch '/usr/bin/backdoor': Read-only file system
+== deployment/rabbitmq ==
+uid=999(rabbitmq) gid=999(rabbitmq) groups=999(rabbitmq)
+touch: cannot touch '/usr/bin/backdoor': Read-only file system
+== statefulset/postgres ==
+uid=999(postgres) gid=999(postgres) groups=999(postgres),101(ssl-cert)
+touch: cannot touch '/usr/bin/backdoor': Read-only file system
+
+## step 12: tear down what the lab created
 $ kubectl delete ns psa-lab psa-restricted --wait=true
 namespace "psa-lab" deleted
 namespace "psa-restricted" deleted
+
+$ kubectl delete ns bookstore --wait=true
+kubectl delete -f examples/bookstore/raw-manifests/35-priorityclasses.yaml
+namespace "bookstore" deleted
+priorityclass.scheduling.k8s.io "bookstore-data" deleted
+priorityclass.scheduling.k8s.io "bookstore-critical" deleted
+priorityclass.scheduling.k8s.io "bookstore-batch" deleted
 

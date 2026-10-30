@@ -18,10 +18,10 @@
 # postgres:16 pattern as 20-/21-:
 #  • ch.01 serviceAccountName: migrate-sa + automountServiceAccountToken: false
 #    (shared with 21-; never the `default` SA).
-#  • ch.02 pod SC runAsNonRoot/999 + fsGroup 999 + seccomp RuntimeDefault;
-#    container SC drop ALL + allowPrivilegeEscalation:false. NO
-#    readOnlyRootFilesystem (psql writes outside any data volume — same
-#    accurate reason as 20-/21-).
+#  • ch.02 pod SC runAsNonRoot/999 + seccomp RuntimeDefault; container SC drop
+#    ALL + allowPrivilegeEscalation:false + a read-only root FS, with an
+#    emptyDir at /tmp for scratch. No volume needs fsGroup. The image is pinned
+#    by digest, same as 20-/21-.
 #
 # Requires:
 #   kubectl apply -f examples/bookstore/raw-manifests/00-namespace.yaml
@@ -69,17 +69,16 @@ spec:
             runAsNonRoot: true
             runAsUser: 999
             runAsGroup: 999
-            fsGroup: 999
             seccompProfile:
               type: RuntimeDefault
           containers:
             - name: cleanup
-              image: postgres:16
-              # --- Part 05 ch.02: container securityContext (PSA `restricted`).
-              # NOT readOnlyRootFilesystem (psql writes outside any data
-              # volume — same accurate reason as 20-/21-).
+              image: postgres@sha256:1beaa3084eee2676f20a9cd9928f0bf2c5bf674f8e49f81017912183d377c61c  # postgres:16
+              # --- Part 05 ch.02: container securityContext (PSA `restricted`),
+              # plus the baseline's read-only root FS.
               securityContext:
                 allowPrivilegeEscalation: false
+                readOnlyRootFilesystem: true
                 capabilities:
                   drop: ["ALL"]
               # --- Part 05 ch.04: credentials from the db-credentials Secret
@@ -112,3 +111,10 @@ spec:
                 limits:
                   cpu: 100m
                   memory: 64Mi
+              volumeMounts:
+                - name: tmp
+                  mountPath: /tmp
+          volumes:
+            - name: tmp
+              emptyDir:
+                sizeLimit: 32Mi
