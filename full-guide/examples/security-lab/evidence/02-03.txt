@@ -1,0 +1,350 @@
+# Transcript for 02-networking/03-dns-and-discovery.md.
+# Tier A: a kind cluster (sf-pilot), Kubernetes v1.37.0 node, kubectl v1.37.2.
+# Captured runs use namespace p02-bookstore, from a scratch copy of the
+# examples/bookstore raw manifests with the namespace rewritten from bookstore
+# to p02-bookstore. The chapter text uses the name bookstore.
+# Namespaces p02-bookstore and p02-other are deleted after the run.
+# Redacted in this transcript: the lab host's own search domains (shown as
+# <redacted-domain>) and one public address in an external answer (shown as
+# <public-address-redacted>). The kubectl path in command echoes is shown as kubectl.
+# Tab characters in the output are expanded to four-column stops.
+## step 0: Bookstore namespace, Services and workloads in p02-bookstore
+$ kubectl apply -f 00-namespace.yaml
+namespace/p02-bookstore created
+resourcequota/bookstore-quota created
+limitrange/bookstore-limits created
+$ kubectl apply -f 05-serviceaccounts-rbac.yaml
+serviceaccount/catalog-sa created
+serviceaccount/storefront-sa created
+serviceaccount/orders-sa created
+serviceaccount/payments-worker-sa created
+serviceaccount/postgres-sa created
+serviceaccount/redis-sa created
+serviceaccount/rabbitmq-sa created
+serviceaccount/migrate-sa created
+role.rbac.authorization.k8s.io/catalog-config-reader created
+rolebinding.rbac.authorization.k8s.io/catalog-config-reader-binding created
+$ kubectl apply -f 16-db-credentials.yaml
+secret/db-credentials created
+$ kubectl apply -f 15-catalog-config.yaml
+configmap/catalog-config created
+$ kubectl apply -f 20-postgres-statefulset.yaml
+service/postgres created
+statefulset.apps/postgres created
+$ kubectl apply -f 10-catalog-deploy.yaml
+deployment.apps/catalog created
+$ kubectl apply -f 40-services.yaml
+service/catalog created
+service/storefront created
+service/orders created
+service/redis created
+service/rabbitmq created
+service/payments-worker created
+## step 0: probe Pod in p02-bookstore
+# The first apply of dns-probe was preempted by the scheduler on the shared
+# node and was re-applied. The search line of the probe's resolv.conf carries
+# the host's own search domains; they are redacted in this transcript.
+$ kubectl -n p02-bookstore delete pod dns-probe --ignore-not-found --wait=true
+pod "dns-probe" deleted from p02-bookstore namespace
+$ kubectl apply -n p02-bookstore -f parts/probe.yaml
+pod/dns-probe created
+$ kubectl -n p02-bookstore wait --for=condition=Ready pod/dns-probe --timeout=300s
+pod/dns-probe condition met
+## step 1: records from the probe
+$ kubectl -n p02-bookstore exec dns-probe -- nslookup catalog.p02-bookstore.svc.cluster.local
+;; Got recursion not available from 10.96.0.10
+;; Got recursion not available from 10.96.0.10
+;; Got recursion not available from 10.96.0.10
+;; Got recursion not available from 10.96.0.10
+Server:     10.96.0.10
+Address:    10.96.0.10#53
+
+Name:   catalog.p02-bookstore.svc.cluster.local
+Address: 10.96.185.51
+;; Got recursion not available from 10.96.0.10
+
+$ kubectl -n p02-bookstore exec dns-probe -- nslookup postgres.p02-bookstore.svc.cluster.local
+;; Got recursion not available from 10.96.0.10
+;; Got recursion not available from 10.96.0.10
+;; Got recursion not available from 10.96.0.10
+;; Got recursion not available from 10.96.0.10
+Server:     10.96.0.10
+Address:    10.96.0.10#53
+
+Name:   postgres.p02-bookstore.svc.cluster.local
+Address: 10.244.0.167
+;; Got recursion not available from 10.96.0.10
+
+$ kubectl -n p02-bookstore exec dns-probe -- nslookup postgres-0.postgres.p02-bookstore.svc.cluster.local
+;; Got recursion not available from 10.96.0.10
+Server:     10.96.0.10
+Address:    10.96.0.10#53
+
+Name:   postgres-0.postgres.p02-bookstore.svc.cluster.local
+Address: 10.244.0.167
+;; Got recursion not available from 10.96.0.10
+
+$ kubectl -n p02-bookstore exec dns-probe -- nslookup -type=SRV _http._tcp.catalog.p02-bookstore.svc.cluster.local
+;; Got recursion not available from 10.96.0.10
+Server:     10.96.0.10
+Address:    10.96.0.10#53
+
+_http._tcp.catalog.p02-bookstore.svc.cluster.local  service = 0 100 80 catalog.p02-bookstore.svc.cluster.local.
+
+## step 2: short names and the second namespace
+$ kubectl -n p02-bookstore exec dns-probe -- cat /etc/resolv.conf
+search p02-bookstore.svc.cluster.local svc.cluster.local cluster.local <host search domains redacted>
+nameserver 10.96.0.10
+options ndots:5
+$ kubectl -n p02-bookstore exec dns-probe -- nslookup catalog
+;; Got recursion not available from 10.96.0.10
+Server:     10.96.0.10
+Address:    10.96.0.10#53
+
+Name:   catalog.p02-bookstore.svc.cluster.local
+Address: 10.96.185.51
+;; Got recursion not available from 10.96.0.10
+
+$ kubectl create namespace p02-other
+namespace/p02-other created
+$ kubectl label namespace p02-other pod-security.kubernetes.io/enforce=restricted
+namespace/p02-other labeled
+$ kubectl apply -n p02-other -f parts/probe.yaml
+pod/dns-probe created
+$ kubectl -n p02-other wait --for=condition=Ready pod/dns-probe --timeout=300s
+pod/dns-probe condition met
+$ kubectl -n p02-other exec dns-probe -- nslookup catalog
+;; Got recursion not available from 10.96.0.10
+;; Got recursion not available from 10.96.0.10
+;; Got recursion not available from 10.96.0.10
+;; Got SERVFAIL reply from 10.96.0.10
+Server:     10.96.0.10
+Address:    10.96.0.10#53
+
+** server can't find catalog: SERVFAIL
+
+command terminated with exit code 1
+$ kubectl -n p02-other exec dns-probe -- nslookup catalog.p02-bookstore
+;; Got recursion not available from 10.96.0.10
+;; Got recursion not available from 10.96.0.10
+Server:     10.96.0.10
+Address:    10.96.0.10#53
+
+Name:   catalog.p02-bookstore.svc.cluster.local
+Address: 10.96.185.51
+;; Got recursion not available from 10.96.0.10
+
+## step 3: ndots
+$ kubectl -n p02-bookstore exec dns-probe -- dig +search +showsearch api.github.com
+
+; <<>> DiG 9.20.23 <<>> +search +showsearch api.github.com
+;; global options: +cmd
+;; Got answer:
+;; WARNING: .local is reserved for Multicast DNS
+;; You are currently testing what happens when an mDNS query is leaked to DNS
+;; ->>HEADER<<- opcode: QUERY, status: NXDOMAIN, id: 64694
+;; flags: qr aa rd; QUERY: 1, ANSWER: 0, AUTHORITY: 1, ADDITIONAL: 1
+;; WARNING: recursion requested but not available
+
+;; OPT PSEUDOSECTION:
+; EDNS: version: 0, flags:; udp: 1232
+; COOKIE: 09c64793cb23c9ef (echoed)
+;; QUESTION SECTION:
+;api.github.com.p02-bookstore.svc.cluster.local.    IN A
+
+;; AUTHORITY SECTION:
+cluster.local.      30  IN  SOA ns.dns.cluster.local. hostmaster.cluster.local. 1793404668 7200 1800 86400 30
+
+;; Query time: 1 msec
+;; SERVER: 10.96.0.10#53(10.96.0.10) (UDP)
+;; WHEN: Fri Oct 30 23:59:42 UTC 2026
+;; MSG SIZE  rcvd: 180
+
+
+; <<>> DiG 9.20.23 <<>> +search +showsearch api.github.com
+;; global options: +cmd
+;; Got answer:
+;; WARNING: .local is reserved for Multicast DNS
+;; You are currently testing what happens when an mDNS query is leaked to DNS
+;; ->>HEADER<<- opcode: QUERY, status: NXDOMAIN, id: 13206
+;; flags: qr aa rd; QUERY: 1, ANSWER: 0, AUTHORITY: 1, ADDITIONAL: 1
+;; WARNING: recursion requested but not available
+
+;; OPT PSEUDOSECTION:
+; EDNS: version: 0, flags:; udp: 1232
+; COOKIE: 09c64793cb23c9ef (echoed)
+;; QUESTION SECTION:
+;api.github.com.svc.cluster.local. IN   A
+
+;; AUTHORITY SECTION:
+cluster.local.      30  IN  SOA ns.dns.cluster.local. hostmaster.cluster.local. 1793404668 7200 1800 86400 30
+
+;; Query time: 1 msec
+;; SERVER: 10.96.0.10#53(10.96.0.10) (UDP)
+;; WHEN: Fri Oct 30 23:59:42 UTC 2026
+;; MSG SIZE  rcvd: 166
+
+
+; <<>> DiG 9.20.23 <<>> +search +showsearch api.github.com
+;; global options: +cmd
+;; Got answer:
+;; WARNING: .local is reserved for Multicast DNS
+;; You are currently testing what happens when an mDNS query is leaked to DNS
+;; ->>HEADER<<- opcode: QUERY, status: NXDOMAIN, id: 51825
+;; flags: qr aa rd; QUERY: 1, ANSWER: 0, AUTHORITY: 1, ADDITIONAL: 1
+;; WARNING: recursion requested but not available
+
+;; OPT PSEUDOSECTION:
+; EDNS: version: 0, flags:; udp: 1232
+; COOKIE: 09c64793cb23c9ef (echoed)
+;; QUESTION SECTION:
+;api.github.com.cluster.local.  IN  A
+
+;; AUTHORITY SECTION:
+cluster.local.      30  IN  SOA ns.dns.cluster.local. hostmaster.cluster.local. 1793404668 7200 1800 86400 30
+
+;; Query time: 1 msec
+;; SERVER: 10.96.0.10#53(10.96.0.10) (UDP)
+;; WHEN: Fri Oct 30 23:59:42 UTC 2026
+;; MSG SIZE  rcvd: 162
+
+
+; <<>> DiG 9.20.23 <<>> +search +showsearch api.github.com
+;; global options: +cmd
+;; Got answer:
+;; ->>HEADER<<- opcode: QUERY, status: NXDOMAIN, id: 31443
+;; flags: qr rd ra; QUERY: 1, ANSWER: 0, AUTHORITY: 1, ADDITIONAL: 1
+
+;; OPT PSEUDOSECTION:
+; EDNS: version: 0, flags:; udp: 1232
+; COOKIE: 09c64793cb23c9ef (echoed)
+;; QUESTION SECTION:
+;api.github.com.<redacted-domain>. IN   A
+
+;; AUTHORITY SECTION:
+<redacted-domain>.  10  IN  SOA <redacted-domain>. <redacted-domain>. 1793404782 10 10 10 10
+
+;; Query time: 3 msec
+;; SERVER: 10.96.0.10#53(10.96.0.10) (UDP)
+;; WHEN: Fri Oct 30 23:59:42 UTC 2026
+;; MSG SIZE  rcvd: 160
+
+
+; <<>> DiG 9.20.23 <<>> +search +showsearch api.github.com
+;; global options: +cmd
+;; Got answer:
+;; ->>HEADER<<- opcode: QUERY, status: NXDOMAIN, id: 31542
+;; flags: qr rd ra; QUERY: 1, ANSWER: 0, AUTHORITY: 1, ADDITIONAL: 1
+
+;; OPT PSEUDOSECTION:
+; EDNS: version: 0, flags:; udp: 1232
+; COOKIE: 09c64793cb23c9ef (echoed)
+;; QUESTION SECTION:
+;api.github.com.<redacted-domain>.      IN  A
+
+;; AUTHORITY SECTION:
+.           30  IN  SOA a.root-servers.net. nstld.verisign-grs.com. 2026103001 1800 900 604800 86400
+
+;; Query time: 220 msec
+;; SERVER: 10.96.0.10#53(10.96.0.10) (UDP)
+;; WHEN: Fri Oct 30 23:59:42 UTC 2026
+;; MSG SIZE  rcvd: 135
+
+
+; <<>> DiG 9.20.23 <<>> +search +showsearch api.github.com
+;; global options: +cmd
+;; Got answer:
+;; ->>HEADER<<- opcode: QUERY, status: NOERROR, id: 14219
+;; flags: qr rd ra; QUERY: 1, ANSWER: 1, AUTHORITY: 0, ADDITIONAL: 1
+
+;; OPT PSEUDOSECTION:
+; EDNS: version: 0, flags:; udp: 1232
+; COOKIE: 09c64793cb23c9ef (echoed)
+;; QUESTION SECTION:
+;api.github.com.            IN  A
+
+;; ANSWER SECTION:
+api.github.com.     30  IN  A   <public-address-redacted>
+
+;; Query time: 52 msec
+;; SERVER: 10.96.0.10#53(10.96.0.10) (UDP)
+;; WHEN: Fri Oct 30 23:59:42 UTC 2026
+;; MSG SIZE  rcvd: 85
+
+$ kubectl -n p02-bookstore exec dns-probe -- dig +noall +answer +stats api.github.com.
+api.github.com.     27  IN  A   <public-address-redacted>
+;; Query time: 2 msec
+;; SERVER: 10.96.0.10#53(10.96.0.10) (UDP)
+;; WHEN: Fri Oct 30 23:59:55 UTC 2026
+;; MSG SIZE  rcvd: 85
+
+## step 4: what a lookup reveals to another namespace
+$ kubectl -n p02-other exec dns-probe -- nslookup catalog.p02-bookstore.svc.cluster.local
+;; Got recursion not available from 10.96.0.10
+;; Got recursion not available from 10.96.0.10
+;; Got recursion not available from 10.96.0.10
+;; Got recursion not available from 10.96.0.10
+Server:     10.96.0.10
+Address:    10.96.0.10#53
+
+Name:   catalog.p02-bookstore.svc.cluster.local
+Address: 10.96.185.51
+;; Got recursion not available from 10.96.0.10
+
+$ kubectl -n p02-other exec dns-probe -- nslookup -type=SRV _http._tcp.catalog.p02-bookstore.svc.cluster.local
+;; Got recursion not available from 10.96.0.10
+Server:     10.96.0.10
+Address:    10.96.0.10#53
+
+_http._tcp.catalog.p02-bookstore.svc.cluster.local  service = 0 100 80 catalog.p02-bookstore.svc.cluster.local.
+
+$ kubectl -n p02-other exec dns-probe -- nslookup billing-admin.p02-bookstore.svc.cluster.local
+;; Got recursion not available from 10.96.0.10
+;; Got recursion not available from 10.96.0.10
+;; Got recursion not available from 10.96.0.10
+;; Got recursion not available from 10.96.0.10
+Server:     10.96.0.10
+Address:    10.96.0.10#53
+
+** server can't find billing-admin.p02-bookstore.svc.cluster.local: NXDOMAIN
+
+command terminated with exit code 1
+## step 6: the Corefile on the lab cluster (read only)
+$ kubectl -n kube-system get configmap coredns -o jsonpath='{.data.Corefile}'
+.:53 {
+    errors
+    health {
+       lameduck 5s
+    }
+    ready
+    kubernetes cluster.local in-addr.arpa ip6.arpa {
+       pods insecure
+       fallthrough in-addr.arpa ip6.arpa
+       ttl 30
+    }
+    prometheus :9153
+    forward . /etc/resolv.conf {
+       max_concurrent 1000
+    }
+    cache 30 {
+       disable success cluster.local
+       disable denial cluster.local
+    }
+    loop
+    reload
+    loadbalance
+}
+## step 5: clean up the probes and the namespaces (lab only)
+# A silent delete of dns-probe in p02-bookstore ran just before the next line,
+# so the pod was already gone when this command ran.
+$ kubectl -n p02-bookstore delete pod dns-probe
+Error from server (NotFound): pods "dns-probe" not found
+$ kubectl delete namespace p02-other
+namespace "p02-other" deleted
+$ kubectl delete namespace p02-bookstore
+namespace "p02-bookstore" deleted
+# The namespace p02-other stayed Terminating while its probe Pod was still
+# running on the shared node, so the Pod was force-deleted in its namespace.
+$ kubectl -n p02-other delete pod dns-probe --force --grace-period=0
+pod "dns-probe" force deleted from p02-other namespace
+# kubectl get ns then reported p02-other and p02-bookstore gone.
