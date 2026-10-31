@@ -625,18 +625,13 @@ hpa:
 # defaults OFF. When ON, install KEDA via Helm first (NOTES documents it).
 keda:
   enabled: false
-  # The AMQP connection string the SCALER uses to query the queue (NOT
-  # db-credentials — the worker has no DB). DEMO-ONLY (same caveat as 16-): a
-  # Secret is base64, not encrypted; in production this comes from External
-  # Secrets / Sealed Secrets / Vault, never from values.yaml.
-  connectionSecretName: rabbitmq-conn
-  # create: true renders the demo Secret above. Set create: false in production
-  # and supply a Secret of the SAME NAME out of band (External Secrets, Sealed
-  # Secrets or Vault), exactly as dbCredentials.create does for db-credentials.
-  connectionSecret:
-    create: true
-  # DEMO-ONLY — never a real/committed credential (stock guest:guest).
-  amqpHost: "amqp://guest:guest@rabbitmq.bookstore.svc.cluster.local:5672/"
+  # The scaler reads the queue length over AMQP, so it needs the broker URL,
+  # which holds a credential. The chart renders no Secret for it and carries
+  # no default. Create a Secret in the release namespace with the key `host`
+  # (the AMQP URL), from External Secrets, Sealed Secrets, Vault or
+  # `kubectl create secret`, and name it here. keda.enabled=true with this
+  # left empty fails the render.
+  connectionSecretName: ""
   pollingInterval: 15
   cooldownPeriod: 60
   minReplicaCount: 0 # scale to zero when idle

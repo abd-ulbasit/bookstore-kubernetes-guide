@@ -38,7 +38,7 @@ spec:
       validate:
         message: >-
           Using a mutable image tag is not allowed. Pin an immutable tag or,
-          better, a digest (Part 05 ch.03). [AUDIT — reported, not blocked]
+          better, a digest (see Part 05 ch.03). [AUDIT — reported, not blocked]
         pattern:
           spec:
             containers:

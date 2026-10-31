@@ -7,24 +7,16 @@
   releases/latest/download/keda-<ver>.yaml URL; NOTES documents the Helm
   install). A client dry-run without KEDA prints the expected
   `no matches for kind "ScaledObject"/"TriggerAuthentication"` for these only.
-  The rabbitmq-conn Secret is the SCALER's AMQP string (NOT db-credentials —
-  the worker has no DB); demo-only, same caveat as 16-.
+
+  The scaler's AMQP connection string is a credential, so the chart holds none
+  and renders no Secret for it. The operator creates a Secret in the release
+  namespace (key `host`, the AMQP URL) and names it in
+  keda.connectionSecretName. `required` stops the render when the name is
+  missing, so there is no default credential to fall back to.
 */}}
 {{- if .Values.keda.enabled }}
 {{- $k := .Values.keda }}
-{{- if $k.connectionSecret.create }}
-apiVersion: v1
-kind: Secret
-metadata:
-  name: {{ $k.connectionSecretName }}
-  namespace: {{ include "bookstore.namespace" . }}
-  labels:
-    {{- include "bookstore.labels" (dict "ctx" . "app" "payments-worker") | nindent 4 }}
-type: Opaque
-stringData:
-  host: {{ $k.amqpHost | quote }}
-{{- end }}
----
+{{- $secretName := required "keda.enabled=true needs keda.connectionSecretName: the name of an existing Secret, created by the operator, whose key `host` holds the RabbitMQ AMQP URL. The chart renders no connection Secret and carries no default credential." $k.connectionSecretName }}
 apiVersion: keda.sh/v1alpha1
 kind: TriggerAuthentication
 metadata:
@@ -35,7 +27,7 @@ metadata:
 spec:
   secretTargetRef:
     - parameter: host
-      name: {{ $k.connectionSecretName }}
+      name: {{ $secretName }}
       key: host
 ---
 apiVersion: keda.sh/v1alpha1

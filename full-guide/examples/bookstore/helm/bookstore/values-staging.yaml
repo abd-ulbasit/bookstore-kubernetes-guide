@@ -1,6 +1,8 @@
 # Bookstore — STAGING environment overrides.
+#   kubectl create namespace bookstore   # label it first: Part 07 ch.01 step 2
 #   helm install bookstore ./examples/bookstore/helm/bookstore \
-#     -n bookstore --create-namespace -f examples/bookstore/helm/bookstore/values-staging.yaml
+#     -n bookstore --set namespace.create=false \
+#     -f examples/bookstore/helm/bookstore/values-staging.yaml
 #
 # Staging mirrors prod shape at lower scale: production-like replica counts and
 # the full reliability/observability surface ON, but smaller resource ceilings
