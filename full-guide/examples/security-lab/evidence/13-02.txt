@@ -11,8 +11,11 @@
 # fixes the name through a DeploymentRuntimeConfig and the policy matches that
 # one identity, so the sections below were recorded again.
 #
-# Stand-ins. Crossplane is not installed in the lab: the cluster has no
-# Crossplane CRDs and this run installs no cluster-wide controller.
+# Stand-ins. This run installs no Crossplane and creates no cluster-wide
+# controller. The lab cluster does hold a Crossplane v2.4.3 that another run
+# installed in namespace p11-10-crossplane. Section 7 uses its CRDs for server
+# dry runs and reads three things from it; that is also why the count of
+# Crossplane CRDs in section 1 is not zero. Nothing of that install is changed.
 # - The provider ServiceAccount does not exist. The run impersonates the name
 #   the chapter's DeploymentRuntimeConfig gives it,
 #   system:serviceaccount:crossplane-system:provider-kubernetes. The API server
@@ -39,12 +42,11 @@
 # recorded lines.
 #
 # Not run:
-# - Crossplane, the provider package and the DeploymentRuntimeConfig on a
-#   cluster. Section 7 shows the server dry run refusing both kinds for want of
-#   their CRDs, then a local schema check against the CRDs at Crossplane tag
-#   v2.4.3. That check proves the two manifests match the schema. It does not
-#   show the provider pod running as ServiceAccount provider-kubernetes; the
-#   chapter cites the upstream source for that.
+# - The chapter's own DeploymentRuntimeConfig and Provider were server-dry-run
+#   in section 7 under stand-in names but not installed, so no pod ran as the
+#   ServiceAccount provider-kubernetes. The same mechanism was observed on the
+#   other run's install, whose DeploymentRuntimeConfig names its ServiceAccount
+#   through serviceAccountTemplate and whose provider pod runs under that name.
 # - The Composition, and a tenant coming up through it.
 #
 # Recorded by running scripted commands in order. Section 10 deletes every
@@ -59,7 +61,7 @@ kind-sf-pilot
 $ kubectl get nodes -o name
 node/sf-pilot-control-plane
 $ kubectl get crd -o name | grep -ci crossplane
-0
+30
 
 ## 2. Namespace labels and the Crossplane pod template
 $ kubectl create namespace crossplane-system
@@ -136,17 +138,26 @@ rolebinding.rbac.authorization.k8s.io/bookstore-tenant-admin created (server dry
 $ kubectl delete clusterrolebinding p13-finish-lookalike
 clusterrolebinding.rbac.authorization.k8s.io "p13-finish-lookalike" deleted
 
-## 7. DeploymentRuntimeConfig and Provider: a local schema check, not a server dry run
-$ kubectl apply --dry-run=server -f provider-runtime.yaml
-resource mapping not found for name: "provider-kubernetes" namespace: "" from "provider-runtime.yaml": no matches for kind "DeploymentRuntimeConfig" in version "pkg.crossplane.io/v1beta1"
-ensure CRDs are installed first
-resource mapping not found for name: "provider-kubernetes" namespace: "" from "provider-runtime.yaml": no matches for kind "Provider" in version "pkg.crossplane.io/v1"
-ensure CRDs are installed first
+## 7. DeploymentRuntimeConfig and Provider against the CRDs the lab cluster has
+# Another run installed Crossplane v2.4.3 in namespace p11-10-crossplane. This run installs nothing and
+# changes none of its objects: it uses the CRDs for server dry runs and reads three things from that install.
+$ kubectl get crd deploymentruntimeconfigs.pkg.crossplane.io providers.pkg.crossplane.io -o name
+customresourcedefinition.apiextensions.k8s.io/deploymentruntimeconfigs.pkg.crossplane.io
+customresourcedefinition.apiextensions.k8s.io/providers.pkg.crossplane.io
+$ sed 's/name: provider-kubernetes/name: p13-finish-provider-kubernetes/' provider-runtime.yaml | kubectl apply --dry-run=server -f -
+deploymentruntimeconfig.pkg.crossplane.io/p13-finish-provider-kubernetes created (server dry run)
+provider.pkg.crossplane.io/p13-finish-provider-kubernetes created (server dry run)
 $ python schema_check.py deploymentruntimeconfigs.yaml providers.yaml provider-runtime.yaml
 DeploymentRuntimeConfig pkg.crossplane.io/v1beta1: served=True, 0 schema errors, 0 unknown fields
 Provider pkg.crossplane.io/v1: served=True, 0 schema errors, 0 unknown fields
 control, misspelt serviceAccountTemplates: 1 unknown field: spec.serviceAccountTemplates
 control, name given as a number: 1 schema error
+$ kubectl get provider.pkg.crossplane.io provider-kubernetes -o jsonpath='{.spec.runtimeConfigRef}{"\n"}'
+{"apiVersion":"pkg.crossplane.io/v1beta1","kind":"DeploymentRuntimeConfig","name":"bookstore-paved-road"}
+$ kubectl get deploymentruntimeconfig bookstore-paved-road -o jsonpath='{.spec.serviceAccountTemplate}{"\n"}'
+{"metadata":{"name":"bookstore-paved-road"}}
+$ kubectl -n p11-10-crossplane get pods -l pkg.crossplane.io/provider=provider-kubernetes -o jsonpath='{.items[0].spec.serviceAccountName}{"\n"}'
+bookstore-paved-road
 
 ## 8. Reserved tenant names on the BookstoreTenant API
 $ kubectl apply -f stand-in-crd.yaml
