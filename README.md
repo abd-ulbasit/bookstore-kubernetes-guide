@@ -30,13 +30,14 @@ habit that a later chapter reverses. The reasoning is in
 chapter follows are in [`docs/security-first-authoring.md`](docs/security-first-authoring.md),
 and the targets are Kubernetes 1.37 and kind v0.33.0.
 
-**Done so far.** Part 00 Foundations, Part 01 Core workloads, Part 03
-Configuration and storage, and Part 10 Cloud and managed Kubernetes are
-rewritten, twenty-seven chapters in all, and two chapters from other Parts are
-too. CI fails a pull request that breaks any of them:
+**Done so far.** Part 00 Foundations, Part 01 Core workloads, Part 02
+Networking, Part 03 Configuration and storage, and Part 10 Cloud and managed
+Kubernetes are rewritten, thirty-three chapters in all, and two chapters from
+other Parts are too. CI fails a pull request that breaks any of them:
 
 - [00.01 Why Kubernetes](full-guide/00-foundations/01-why-kubernetes.md) through [00.08 Security foundations](full-guide/00-foundations/08-security-foundations.md), with the living threat model in [`examples/bookstore/THREAT-MODEL.md`](full-guide/examples/bookstore/THREAT-MODEL.md) that 00.08 teaches;
 - [01.01 Pods](full-guide/01-core-workloads/01-pods.md) through [01.08 Deployment strategies](full-guide/01-core-workloads/08-deployment-strategies.md), the baseline from the first manifest in 01.01;
+- [02.01 The networking model](full-guide/02-networking/01-networking-model.md) through [02.06 Network policies](full-guide/02-networking/06-network-policies.md), with the lab output captured on kind clusters;
 - [03.01 ConfigMaps](full-guide/03-config-and-storage/01-configmaps.md) through [03.05 Stateful data patterns](full-guide/03-config-and-storage/05-stateful-data-patterns.md), with the lab output captured on a kind cluster;
 - [05.02 Pod security](full-guide/05-security/02-pod-security.md), with the attacks run on a lab cluster;
 - [07.03 The CI/CD pipeline](full-guide/07-delivery/03-cicd-pipeline.md), the pipeline the example services use;

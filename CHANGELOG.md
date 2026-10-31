@@ -123,6 +123,9 @@ versions follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 - Part 00 Foundations (00.01 to 00.08) is rewritten security-first, with 00.08
   Security foundations and the threat model in `examples/bookstore/THREAT-MODEL.md`;
   `00-foundations/` joins the enforced list.
+- Part 02 Networking (02.01 to 02.06) is rewritten security-first, with the
+  Ingress and Gateway API chapters on Traefik and `02-networking/` joins the
+  enforced list.
 
 ### Fixed
 - Standalone EKS add-ons (kube-proxy, CoreDNS, EBS CSI) now follow
