@@ -1,0 +1,87 @@
+# Transcript for 12-kubernetes-for-machine-learning/07-ml-pipelines-and-workflows.md,
+# lab steps 0 to 8. Recorded by running examples/security-lab/labs/12-07.sh
+# from full-guide/ against the kind cluster sf-pilot (Tier A).
+# The chapter names the bookstore-ml and argo-events namespaces. The lab used
+# p12-07-bookstore-ml and p12-07-argo-events, and applied the same files with
+# only the namespace names replaced. Lines that name the lab namespaces are
+# kept as captured.
+# No Argo component is installed: the install is heavy, so the chapter cites
+# it. Step 7 renders the chart and reads the result; it installs nothing.
+
+## step 0: versions and the cluster
+$ kubectl version
+Client Version: v1.37.2
+Server Version: v1.37.0
+$ kubectl config current-context
+kind-sf-pilot
+
+## step 1: two namespaces labelled restricted
+$ kubectl create namespace p12-07-bookstore-ml
+namespace/p12-07-bookstore-ml created
+$ kubectl create namespace p12-07-argo-events
+namespace/p12-07-argo-events created
+$ kubectl label namespace p12-07-bookstore-ml (restricted: enforce, audit, warn)
+namespace/p12-07-bookstore-ml labeled
+$ kubectl label namespace p12-07-argo-events (restricted: enforce, audit, warn)
+namespace/p12-07-argo-events labeled
+$ kubectl get namespace p12-07-bookstore-ml p12-07-argo-events --show-labels
+NAME                  STATUS   AGE   LABELS
+p12-07-bookstore-ml   Active   1s    kubernetes.io/metadata.name=p12-07-bookstore-ml,pod-security.kubernetes.io/audit-version=latest,pod-security.kubernetes.io/audit=restricted,pod-security.kubernetes.io/enforce-version=latest,pod-security.kubernetes.io/enforce=restricted,pod-security.kubernetes.io/warn-version=latest,pod-security.kubernetes.io/warn=restricted
+p12-07-argo-events    Active   1s    kubernetes.io/metadata.name=p12-07-argo-events,pod-security.kubernetes.io/audit-version=latest,pod-security.kubernetes.io/audit=restricted,pod-security.kubernetes.io/enforce-version=latest,pod-security.kubernetes.io/enforce=restricted,pod-security.kubernetes.io/warn-version=latest,pod-security.kubernetes.io/warn=restricted
+
+## step 2: the pipeline's identities (from recommender-workflow.yaml and recommender-sensor.yaml)
+$ kubectl apply -f recommender-workflow.yaml (ServiceAccounts, Roles, RoleBindings; no WorkflowTemplate)
+serviceaccount/argo-workflow created
+serviceaccount/recommender-register created
+serviceaccount/recommender-promote created
+role.rbac.authorization.k8s.io/pipeline-executor created
+rolebinding.rbac.authorization.k8s.io/pipeline-executor created
+role.rbac.authorization.k8s.io/recommender-register created
+rolebinding.rbac.authorization.k8s.io/recommender-register created
+role.rbac.authorization.k8s.io/recommender-promote created
+rolebinding.rbac.authorization.k8s.io/recommender-promote created
+$ kubectl apply -f recommender-sensor.yaml (the Sensor's ServiceAccount, Role and RoleBinding; no Sensor)
+serviceaccount/recommender-sensor created
+role.rbac.authorization.k8s.io/recommender-sensor created
+rolebinding.rbac.authorization.k8s.io/recommender-sensor created
+$ kubectl apply -f recommender-dataset-curl.yaml (ServiceAccount only; no Pod)
+serviceaccount/recommender-dataset-curl created
+
+## step 3: what each identity may do (RBAC answers)
+$ kubectl auth can-i patch deployments/recommender --as=system:serviceaccount:p12-07-bookstore-ml:recommender-promote
+yes
+$ kubectl auth can-i patch deployments/another --as=system:serviceaccount:p12-07-bookstore-ml:recommender-promote
+no
+$ kubectl auth can-i get secrets --as=system:serviceaccount:p12-07-bookstore-ml:recommender-register
+no
+$ kubectl auth can-i create configmaps --as=system:serviceaccount:p12-07-bookstore-ml:recommender-register
+yes
+$ kubectl auth can-i create configmaps --as=system:serviceaccount:p12-07-argo-events:recommender-sensor
+no
+
+## step 4: the baseline Pod, server dry-run under restricted
+$ kubectl apply --dry-run=server -f recommender-dataset-curl.yaml (the Pod)
+pod/recommender-dataset-curl created (server dry run)
+
+## step 5: a deliberate refusal: the same Pod with runAsUser 0
+$ kubectl apply --dry-run=server -f (the Pod with runAsUser: 0, a deliberate refusal)
+Error from server (Forbidden): error when creating "STDIN": pods "recommender-dataset-curl" is forbidden: violates PodSecurity "restricted:latest": runAsUser=0 (pod must not set runAsUser=0)
+
+## step 6: the Argo Events objects need their CRDs (the expected error)
+$ kubectl apply --dry-run=server -f recommender-eventsource.yaml (EventSource; CRD not installed)
+error: resource mapping not found for name: "recommender-dataset" namespace: "p12-07-argo-events" from "STDIN": no matches for kind "EventSource" in version "argoproj.io/v1alpha1"
+ensure CRDs are installed first
+
+## step 7: the chart renders the restricted settings (helm template; nothing installed)
+$ helm repo add argo https://argoproj.github.io/argo-helm
+$ helm template argo-workflows argo/argo-workflows --version 2.0.15 -n argo -f argo-workflows-values.yaml | grep (nonroot executor, seccomp, UID)
+42:        seccompProfile:
+433:        seccompProfile:
+444:          - "quay.io/argoproj/argoexec:v4.1.6-nonroot"
+604:            runAsUser: 8737
+605:            seccompProfile:
+
+## step 8: cleanup
+$ kubectl delete namespace p12-07-bookstore-ml p12-07-argo-events --wait=false
+namespace "p12-07-bookstore-ml" deleted
+namespace "p12-07-argo-events" deleted

@@ -1,0 +1,64 @@
+# Bookstore, Part 12 ch.07 "ML pipelines and workflows": the EventBus the
+# Argo Events controller runs for namespace argo-events. The EventSource and
+# the Sensor in this directory pass events through it.
+#
+# !!! CRD-INTRINSIC DRY-RUN (same precedent as recommender-workflow.yaml) !!!
+#   `EventBus` is an Argo Events CRD (argoproj.io/v1alpha1). Without Argo
+#   Events installed, a client dry-run prints:
+#     no matches for kind "EventBus" in version "argoproj.io/v1alpha1"
+#   That is expected. Install the chart first (argo-events-values.yaml).
+#
+# The version must be one the chart lists under configs.jetstream.versions
+# (chart 2.4.27 lists 2.10.29, which maps to the image nats:2.10.29). Bump it
+# with the chart, never to "latest". The controller pulls the NATS image by
+# tag from that list; pin it by digest in the chart's values if your policy
+# needs digests for every image.
+#
+# The NATS image declares no USER, so the pods set a numeric UID (65532).
+apiVersion: argoproj.io/v1alpha1
+kind: EventBus
+metadata:
+  name: default
+  namespace: argo-events
+  labels:
+    app.kubernetes.io/part-of: bookstore-ml
+    app.kubernetes.io/component: ml-pipeline-events
+spec:
+  jetstream:
+    version: "2.10.29"
+    # Pod-level settings for the NATS pods.
+    securityContext:
+      runAsNonRoot: true
+      runAsUser: 65532
+      runAsGroup: 65532
+      seccompProfile:
+        type: RuntimeDefault
+    # The NATS server, the config reloader and the metrics exporter each get
+    # the same container-level settings.
+    containerTemplate:
+      resources:
+        requests: { cpu: "100m", memory: "128Mi" }
+        limits:   { cpu: "500m", memory: "256Mi" }
+      securityContext:
+        allowPrivilegeEscalation: false
+        readOnlyRootFilesystem: true
+        capabilities:
+          drop: ["ALL"]
+    reloaderContainerTemplate:
+      resources:
+        requests: { cpu: "20m", memory: "32Mi" }
+        limits:   { cpu: "100m", memory: "64Mi" }
+      securityContext:
+        allowPrivilegeEscalation: false
+        readOnlyRootFilesystem: true
+        capabilities:
+          drop: ["ALL"]
+    metricsContainerTemplate:
+      resources:
+        requests: { cpu: "20m", memory: "32Mi" }
+        limits:   { cpu: "100m", memory: "64Mi" }
+      securityContext:
+        allowPrivilegeEscalation: false
+        readOnlyRootFilesystem: true
+        capabilities:
+          drop: ["ALL"]

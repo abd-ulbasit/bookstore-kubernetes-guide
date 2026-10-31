@@ -1,0 +1,34 @@
+# Bookstore, Part 12 ch.07 "ML pipelines and workflows": the two namespaces
+# the pipeline's controllers run in. Create them BEFORE installing either
+# chart, so the Pod Security labels are in place when the controllers start.
+# The Helm charts do not label namespaces for you.
+#
+#   argo         the Argo Workflows controller (owned by the platform team)
+#   argo-events  the Argo Events controller, EventBus, EventSource and Sensor
+#
+# bookstore-ml (where the pipeline's step Pods run) is created by ch.01.
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: argo
+  labels:
+    app.kubernetes.io/part-of: bookstore-ml
+    pod-security.kubernetes.io/enforce: restricted
+    pod-security.kubernetes.io/enforce-version: latest
+    pod-security.kubernetes.io/audit: restricted
+    pod-security.kubernetes.io/audit-version: latest
+    pod-security.kubernetes.io/warn: restricted
+    pod-security.kubernetes.io/warn-version: latest
+---
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: argo-events
+  labels:
+    app.kubernetes.io/part-of: bookstore-ml
+    pod-security.kubernetes.io/enforce: restricted
+    pod-security.kubernetes.io/enforce-version: latest
+    pod-security.kubernetes.io/audit: restricted
+    pod-security.kubernetes.io/audit-version: latest
+    pod-security.kubernetes.io/warn: restricted
+    pod-security.kubernetes.io/warn-version: latest

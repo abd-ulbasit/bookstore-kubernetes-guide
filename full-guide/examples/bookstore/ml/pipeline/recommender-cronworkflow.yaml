@@ -1,4 +1,4 @@
-# Bookstore — Part 12 ch.07 "ML pipelines and workflows": the nightly
+# Bookstore, Part 12 ch.07 "ML pipelines and workflows": the nightly
 # retraining `CronWorkflow`. References the `recommender-pipeline`
 # WorkflowTemplate in this dir; CronWorkflow = "CronJob for Argo Workflows".
 #
@@ -8,21 +8,22 @@
 #   `CronWorkflow` is an Argo Workflows CRD (argoproj.io/v1alpha1). WITHOUT
 #   Argo Workflows installed a client dry-run prints:
 #     no matches for kind "CronWorkflow" in version "argoproj.io/v1alpha1"
-#   EXPECTED and SCHEMA-CORRECT — install Argo Workflows first (Part 12 ch.07
-#   Hands-on: pinned Helm `argo/argo-workflows --version 0.42.0` -> ns `argo`).
+#   EXPECTED and SCHEMA-CORRECT, install Argo Workflows first (Part 12 ch.07
+#   Hands-on: pinned Helm `argo/argo-workflows --version 2.0.15` -> ns `argo`,
+#   with argo-workflows-values.yaml).
 #   Schema verified against argoproj.io/v1alpha1 (schedule / timezone /
 #   concurrencyPolicy / workflowSpec.workflowTemplateRef).
 #
 # WHAT IT DOES
 #   Runs the `recommender-pipeline` WorkflowTemplate nightly at 02:00 UTC.
-#   This is the canonical "scheduled retrain" — the Periodic Job pattern
+#   This is the canonical "scheduled retrain", the Periodic Job pattern
 #   (Ibryam) applied to ML pipelines.
 #
 # WHY a CronWorkflow (and not a Kubernetes CronJob spawning `argo submit`)
 #   Both work; CronWorkflow is the Argo-native shape: same Workflow spec,
 #   same RBAC, same UI/CLI/observability as ad-hoc runs. The Kubernetes
 #   CronJob approach reintroduces "pipeline" as something a separate
-#   controller needs to know about — exactly the integration cost
+#   controller needs to know about, exactly the integration cost
 #   Workflows + CronWorkflow remove.
 #
 # Apply (after Argo Workflows is installed AND recommender-workflow.yaml is
@@ -52,7 +53,7 @@ spec:
   # Bound the time the controller waits to submit a missed schedule
   # (e.g. after a controller restart). 10 minutes is sane for nightly.
   startingDeadlineSeconds: 600
-  # Keep a few finished histories — Argo UI navigates these.
+  # Keep a few finished histories, Argo UI navigates these.
   successfulJobsHistoryLimit: 3
   failedJobsHistoryLimit: 1
   workflowSpec:
@@ -61,4 +62,4 @@ spec:
       name: recommender-pipeline
     # All other workflow-level overrides (parameters, ttl, …) inherit from
     # the WorkflowTemplate. Override `seed` per-run if you want
-    # non-deterministic retraining across nights — left at default here.
+    # non-deterministic retraining across nights, left at default here.

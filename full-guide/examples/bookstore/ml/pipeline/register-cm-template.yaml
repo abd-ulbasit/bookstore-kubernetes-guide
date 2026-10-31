@@ -1,4 +1,4 @@
-# Bookstore — Part 12 ch.07 "ML pipelines and workflows": the ConfigMap
+# Bookstore, Part 12 ch.07 "ML pipelines and workflows": the ConfigMap
 # the WorkflowTemplate's `register` step would create at runtime.
 #
 # THIS FILE IS ILLUSTRATIVE / DOCUMENTATION. The real registry stamp is
@@ -6,8 +6,8 @@
 # (via `kubectl create configmap … --dry-run=client -o yaml | kubectl
 # apply -f -`); the runtime name is `recommender-model-registry-<workflow>`
 # so each pipeline run produces its OWN stamp without overwriting prior
-# ones. This file is the *template shape* — the keys + label schema the
-# register step writes — so a reader can `kubectl apply -f` it to see one
+# ones. This file is the *template shape*, the keys + label schema the
+# register step writes, so a reader can `kubectl apply -f` it to see one
 # example object without running the pipeline. The placeholder values are
 # clearly marked.
 #
@@ -17,7 +17,7 @@
 #
 # HONESTLY: a ConfigMap is the KIND-RUNNABLE PROXY for a real model
 # registry. In prod the `register` step posts to MLflow / KFP Model
-# Registry / an OCI artifact registry — see Part 12 ch.07 + ch.08.
+# Registry / an OCI artifact registry, see Part 12 ch.07 + ch.08.
 apiVersion: v1
 kind: ConfigMap
 metadata:
@@ -35,10 +35,14 @@ data:
   # `recommender-model`; in prod swap for s3://, gs://, oci://, or an
   # MLflow `models:/<name>/<version>` URI.
   model_uri: "pvc://recommender-model/model.joblib"
-  # The eval step's score (the gate metric — avg top-1 cosine over the
+  # The eval step's score (the gate metric, avg top-1 cosine over the
   # synthetic dataset). In prod replace with whatever offline metric the
   # promotion policy cares about (NDCG@k, CTR uplift on shadow traffic, …).
   score: "0.412"
+  # The SHA-256 of the exact model.joblib bytes the eval step read. Serving
+  # verifies this digest before it loads the model (Part 12 ch.06). The
+  # placeholder is not a digest.
+  model_sha256: "<digest>"
   # When the model was registered. ISO 8601 UTC. Populated by the step.
   registered_at: "2026-05-19T02:00:00Z"
   # The Argo Workflows run that produced this stamp. Click-through to
@@ -49,6 +53,6 @@ data:
   # in prod this is an s3://, gs://, or `dvc://` URI to a versioned dataset.
   dataset_uri: "pvc://recommender-model/dataset/"
   # Lineage: the image SHA of the train step (= the pinned code SHA). The
-  # placeholder is the dev tag — in prod pin to `@sha256:<digest>` from your
+  # placeholder is the dev tag, in prod pin to `@sha256:<digest>` from your
   # registry; the Workflow parameter `image-sha` propagates this stamp.
   image_sha: "bookstore/recommender-train:dev"

@@ -29,7 +29,7 @@
 
 **Estimated time:** ~60 min read · half-day hands-on
 **Prerequisites:** [Part 12 ch.04](04-distributed-training.md) — training step the pipeline orchestrates · [Part 12 ch.06](06-model-serving-and-inference.md) — serving step the pipeline promotes to · [Part 07 ch.04](../07-delivery/04-gitops-argocd.md) — Argo CD contrasted with Argo Workflows
-**You'll know after this:** • author an Argo `WorkflowTemplate` with DAG, parameters, and artifact passing · • compare Argo Workflows / Kubeflow Pipelines / Tekton / Airflow / Prefect for ML · • wire Argo Events `EventSource` -> `Sensor` -> `Workflow` for drift-triggered retraining · • capture artifact + metadata lineage (dataset + code SHA + hyperparameters → model) · • schedule retraining via `CronWorkflow` and parameter sweeps via `withItems` / Katib
+**You'll know after this:** • author an Argo `WorkflowTemplate` with DAG, parameters, and artifact passing · • compare Argo Workflows / Kubeflow Pipelines / Tekton / Airflow / Prefect for ML · • wire Argo Events `EventSource` -> `Sensor` -> `Workflow` for drift-triggered retraining · • capture artifact + metadata lineage (dataset + code SHA + hyperparameters → model) · • schedule retraining via `CronWorkflow` and parameter sweeps via `withItems` / Katib · • give each pipeline step its own identity, narrowed to the verbs it uses
 
 <!-- tags: ml, batch, argo-workflows, gitops, mlops -->
 
@@ -160,6 +160,25 @@ runs pipelines), [Part 01 ch.07](../01-core-workloads/07-jobs-and-cronjobs.md)
 (Job/CronJob — pipelines are DAGs of those), and [ch.04](04-distributed-training.md)
 (the train step we orchestrate). It does not re-teach any of them.
 
+## Threats and controls
+
+A pipeline runs code that reads data, writes models and changes what serves
+traffic, so it needs more rights than any single step. These are the threats
+specific to pipelines. The baseline, Pod Security and admission are already
+covered in [01.01](../01-core-workloads/01-pods.md#baseline),
+[05.02](../05-security/02-pod-security.md) and earlier chapters.
+
+| Threat | Control in this chapter | Goes deeper |
+|---|---|---|
+| The controller holds cluster-wide rights: it can create, update and delete Pods and create `pods/exec` in every namespace it runs Workflows in. A compromised controller is a cluster compromise. | Install it by the platform team, in its own restricted namespace, with a pinned image. Use the chart's `singleNamespace` mode (a namespaced Role instead of a ClusterRole) when one team owns the install. | [05.01](../05-security/01-authn-authz-rbac.md), [08.05](../08-day-2-operations/05-operators-and-crds.md) |
+| A step's token lets the step act as its ServiceAccount. | Each step has its own identity. Train and eval get no token. Register and promote get only the verbs they use, and promote is limited to one named Deployment. | [05.01](../05-security/01-authn-authz-rbac.md) |
+| Whoever can submit a Workflow can name any ServiceAccount in its namespace, because Kubernetes checks that a ServiceAccount exists, not who may use it. A submitter can therefore run as `recommender-promote`. | Grant `create` on `workflows` in `bookstore-ml` only to the Sensor's ServiceAccount and to the release pipeline, not to people. A person who must run the pipeline by hand gets a short-lived grant. A compromised Sensor is the residual risk: keep its token narrow and admit only its Workflows with an admission policy. | [05.01](../05-security/01-authn-authz-rbac.md) |
+| A `create` verb cannot be narrowed by name. RBAC ignores `resourceNames` on create. | Say so in the Role, keep secrets out of ConfigMaps, and move the registry to its own namespace once it is real ([ch.08](08-ml-platform-cost-and-mlops.md)). | [08.04](../08-day-2-operations/04-multi-tenancy-and-namespaces.md) |
+| A model file is a pickle. Loading one runs code, and a file swapped on the PVC runs under the serving Pod. | Eval records the SHA-256 of the exact bytes it evaluated, and register stamps it. Serving verifies the digest before it loads ([ch.06](06-model-serving-and-inference.md)). Sign the model the way you sign an image. | [05.03](../05-security/03-supply-chain.md) |
+| A webhook trigger lets any pod in the cluster start a training run, and spend GPU hours doing it. | A bearer token (`authSecret`) on the EventSource, a NetworkPolicy that admits one label, and TLS in production. | [02.06](../02-networking/06-network-policies.md), [11.04](../11-advanced-production-patterns/04-service-mesh.md) |
+| A promotion reports success when nothing changed. | Promote fails when the Deployment is missing. In production, promotion is a reviewed commit that Argo CD applies. | [07.04](../07-delivery/04-gitops-argocd.md) |
+| An image tag moves under the pipeline. | Third-party images are pinned by digest. The train image is built by this guide and carries its tag. | [05.03](../05-security/03-supply-chain.md) |
+
 ## Diagrams
 
 ### The recommendations DAG — train -> eval -> register -> promote, with artifacts + parameters flowing (Mermaid)
@@ -171,9 +190,9 @@ flowchart TB
     ws["bookstore-ml namespace<br/>(PSA enforce: restricted)"]
 
     train["train<br/>image: bookstore/recommender-train:dev<br/>writes model.joblib to PVC"]
-    pvc[("PVC recommender-model<br/>model.joblib<br/>metrics.json")]
-    eval["eval<br/>same image; loads model.joblib<br/>writes metrics.json<br/>emits 'score' parameter"]
-    reg["register<br/>kubectl create configmap<br/>(model_uri + score + workflow + ts)"]
+    pvc[("PVC recommender-model<br/>model.joblib")]
+    eval["eval<br/>same image; reads model.joblib read-only<br/>emits 'score' and 'model-sha256'"]
+    reg["register<br/>kubectl create configmap<br/>(model_uri + score + sha256 + workflow + ts)"]
     cm[("ConfigMap recommender-<br/>model-registry-&lt;workflow&gt;<br/>(registry stamp proxy)")]
     promote["promote<br/>kubectl annotate + rollout restart<br/>deploy/recommender"]
     serve[("Deployment recommender<br/>(reads PVC on start)")]
@@ -233,14 +252,17 @@ flowchart TB
                         upstream data orchestration). The skill is choosing
                         the right one per job.
 
- OUR BOOKSTORE TREE
-   examples/bookstore/ml/pipeline/recommender-workflow.yaml       (Argo
-                                                                   Workflow)
-   examples/bookstore/ml/pipeline/recommender-cronworkflow.yaml   (Argo
-                                                                   schedule)
-   examples/bookstore/ml/pipeline/recommender-eventsource.yaml
-   examples/bookstore/ml/pipeline/recommender-sensor.yaml         (Argo
-                                                                   Events)
+ OUR BOOKSTORE TREE (examples/bookstore/ml/pipeline/)
+   namespaces.yaml                       argo and argo-events, restricted
+   argo-workflows-values.yaml            chart values, restricted executor
+   argo-events-values.yaml               chart values, restricted pods
+   recommender-workflow.yaml             WorkflowTemplate + per-step RBAC
+   recommender-cronworkflow.yaml         nightly schedule
+   recommender-eventbus.yaml             EventBus (Argo Events)
+   recommender-eventsource.yaml          webhook with bearer token
+   recommender-eventsource-allow.yaml    NetworkPolicy for the webhook
+   recommender-sensor.yaml               event -> Workflow, its own RBAC
+   recommender-dataset-curl.yaml         one-shot test Pod (refused, then sent)
 ```
 
 ## Hands-on with the Bookstore
@@ -252,26 +274,54 @@ the PSA-`restricted` `bookstore-ml` namespace
 [`../examples/bookstore/ml/train/Dockerfile`](../examples/bookstore/ml/train/Dockerfile)),
 and the `recommender-model` PVC ([ch.04](04-distributed-training.md)).
 
+Output blocks are either **captured** or **illustrative**. A captured block
+was copied from a lab run, and its transcript is
+[`examples/security-lab/evidence/12-07.txt`](../examples/security-lab/evidence/12-07.txt).
+An illustrative block shows the shape to expect and was not captured, so a line
+that differs on your cluster does not by itself mean this text is wrong.
+
+Captured output came from a lab kind cluster whose node has a different name
+from the one on your cluster. The lab ran in namespaces prefixed `p12-07-`
+(where this chapter says `bookstore-ml` and `argo-events`), and applied the
+same files with only the namespace names replaced. Captured lines keep the
+names the lab printed. The lab installed no Argo component, because that
+install is heavy. The Argo parts of this chapter are cited and shown rendered,
+not run.
+
+Each manifest the reader applies is a file in `examples/bookstore/ml/pipeline/`,
+or is shown here in full.
+
 > **The pipeline reuses the same images as ch.04 and ch.06.** This is the
 > through-line of Part 12: every chapter has produced a real ingredient;
 > this chapter is the recipe. The Workflow's `train` step uses
 > `bookstore/recommender-train:dev`; the `eval` step reuses the same image
 > as a tiny Python `script` (sklearn + joblib are already baked); the
 > `register` step uses Chainguard's `kubectl` image,
-> `cgr.dev/chainguard/kubectl:latest-dev`, pinned by digest because the
-> free tier publishes only `latest` tags (that digest carries kubectl
-> v1.37.2, and the `-dev` variant has the `/bin/sh` the step's script runs
-> under); the `promote` step uses the same. No new images to build for
-> this chapter.
+> `cgr.dev/chainguard/kubectl:latest-dev`, pinned by its image index digest
+> because a tag moves. That digest's kubectl client is v1.37.2, as
+> `kubectl version --client` reports when run from the image. The `-dev`
+> variant has the `/bin/sh` the step's script
+> runs under, and its declared user is UID 65532, which the pipeline's
+> `podSpecPatch` matches. The `promote` step uses the same image. No new
+> images to build for this chapter.
 
-### 1. Install Argo Workflows (pinned; own namespace)
+### 1. Create the namespaces and install Argo Workflows (pinned)
+
+Create both namespaces first. Their Pod Security labels must be in place
+before the controllers start, and the charts do not add them.
+
+```sh
+kubectl apply -f examples/bookstore/ml/pipeline/namespaces.yaml
+```
+
+Then install the chart with its values file:
 
 ```sh
 helm repo add argo https://argoproj.github.io/argo-helm
-ARGO_WORKFLOWS_VERSION="0.42.0"   # bump deliberately; chart version != app version
+ARGO_WORKFLOWS_VERSION="2.0.15"   # packages Argo Workflows v4.1.6
 helm install argo-workflows argo/argo-workflows \
   --version "$ARGO_WORKFLOWS_VERSION" \
-  -n argo --create-namespace --wait
+  -n argo -f examples/bookstore/ml/pipeline/argo-workflows-values.yaml --wait
 
 # CRDs come with the chart. Confirm:
 kubectl api-resources | grep argoproj
@@ -280,17 +330,42 @@ kubectl api-resources | grep argoproj
 #   clusterworkflowtemplates cwftmpl       argoproj.io/v1alpha1            false    ClusterWorkflowTemplate
 #   cronworkflows            cwf           argoproj.io/v1alpha1            true     CronWorkflow
 
-# The Argo CLI (optional but recommended; the chapter uses it).
+# The Argo CLI (optional but recommended; the chapter uses it). Match the
+# app version the chart packages, v4.1.6.
 # macOS:  brew install argo
-# Linux:  curl -sSL -o argo
-#           https://github.com/argoproj/argo-workflows/releases/download/v3.5.13/argo-linux-amd64.gz
+# Linux:  curl -sSL -o argo \
+#           https://github.com/argoproj/argo-workflows/releases/download/v4.1.6/argo-linux-amd64.gz
 #         (pin a tag; never `latest`)
 ```
 
-> **Pinned, never `latest`.** Bump these deliberately when a new release
-> ships. The Argo Helm chart's `--version` is the CHART version
-> (`0.42.0` here), which packages a specific WORKFLOW CONTROLLER version
-> (the chart README documents the mapping). Both are pinned.
+> **Pinned, never `latest`.** The chart's `--version` (`2.0.15`) is the CHART
+> version, not the app version. The chart packages Argo Workflows v4.1.6, and
+> the CLI matches that. Check the mapping with
+> `helm show chart argo/argo-workflows --version 2.0.15`.
+
+The values file changes three chart defaults that matter here. The chart's
+controller pod sets no seccomp profile, and restricted requires one. The wait
+sidecar image runs as root unless you pick the `-nonroot` variant. The chart
+would also add its own workflow Role, which this pipeline replaces with the
+Roles in `recommender-workflow.yaml`. The UI server is off, because the
+pipeline uses the CLI and kubectl.
+
+Rendering the chart with those values, without installing it, shows the
+settings in place (captured):
+
+```sh
+helm template argo-workflows argo/argo-workflows --version 2.0.15 -n argo \
+  -f examples/bookstore/ml/pipeline/argo-workflows-values.yaml \
+  | grep -n -e '-nonroot' -e 'seccompProfile' -e 'runAsUser: 8737'
+```
+
+<!-- gate: output -->
+```
+444:          - "quay.io/argoproj/argoexec:v4.1.6-nonroot"
+# ...
+604:            runAsUser: 8737
+605:            seccompProfile:
+```
 
 ### 2. The pipeline: train -> eval -> register -> promote
 
@@ -358,7 +433,30 @@ argo get  -n bookstore-ml @latest
 argo logs -n bookstore-ml @latest --follow
 ```
 
-Successful run prints, abbreviated:
+Before the first run, check what each identity may do. The answers come from
+RBAC alone, so no pipeline run is needed. Expect yes for the one Deployment
+promote may patch. The other two answers are deliberate refusals: promote may
+not patch another Deployment, and register may not read Secrets.
+
+```sh
+kubectl auth can-i patch deployments/recommender -n bookstore-ml \
+  --as=system:serviceaccount:bookstore-ml:recommender-promote
+kubectl auth can-i patch deployments/another -n bookstore-ml \
+  --as=system:serviceaccount:bookstore-ml:recommender-promote
+kubectl auth can-i get secrets -n bookstore-ml \
+  --as=system:serviceaccount:bookstore-ml:recommender-register
+```
+
+<!-- gate: output -->
+```
+yes
+# ...
+no
+# ...
+no
+```
+
+Illustrative output of a successful run, abbreviated:
 
 ```
 [train]    config=Config(model_dir='/workspace/model', seed=42, ...)
@@ -366,7 +464,7 @@ Successful run prints, abbreviated:
 [eval]     {"kind":"item-knn-cooccurrence","n_books":200, ...,
             "avg_top1_cosine":0.412..., "min_score_gate":0.05,"passed":true}
 [register] stamped recommender-model-registry-recommender-pipeline-abc12
-           uri=pvc://recommender-model/model.joblib score=0.412... at=...
+           uri=pvc://recommender-model/model.joblib sha256=<digest> score=0.412... at=...
 [promote]  recommender restarted with new model
            (workflow recommender-pipeline-abc12)
 ```
@@ -382,9 +480,12 @@ kubectl describe configmap -n bookstore-ml \
       -o jsonpath='{.items[-1:].metadata.name}')
 #   Data:
 #     model_uri:      pvc://recommender-model/model.joblib
+#     model_sha256:   <digest of the bytes eval evaluated>
 #     score:          0.412345
 #     registered_at:  2026-05-19T02:00:00Z
 #     workflow:       recommender-pipeline-abc12
+#     dataset_uri:    pvc://recommender-model/dataset/
+#     image_sha:      bookstore/recommender-train:dev
 ```
 
 The illustrative-template-shape of that ConfigMap (so you can `kubectl
@@ -424,39 +525,155 @@ schedule recovery window if the controller is restarted.
 ### 4. Event-driven retraining (Argo Events)
 
 [`pipeline/recommender-eventsource.yaml`](../examples/bookstore/ml/pipeline/recommender-eventsource.yaml)
-listens for a webhook (POST `/recommender-dataset-ready` on `:12000`).
-[`pipeline/recommender-sensor.yaml`](../examples/bookstore/ml/pipeline/recommender-sensor.yaml)
-turns a matching event into a `Workflow` from the template:
+listens for a webhook (POST `/recommender-dataset-ready` on `:12000`). The
+endpoint accepts a request only with a bearer token. A POST without one is
+refused, which is the control working. [`pipeline/recommender-sensor.yaml`](../examples/bookstore/ml/pipeline/recommender-sensor.yaml)
+turns an accepted event into a `Workflow` from the template.
+
+Install Argo Events into its restricted namespace, with its values file. The
+chart's defaults leave every securityContext empty, so the values set them.
 
 ```sh
-# Argo Events controller + EventBus.
-ARGO_EVENTS_VERSION="2.4.7"
+ARGO_EVENTS_VERSION="2.4.27"   # packages Argo Events v1.9.11
 helm install argo-events argo/argo-events \
   --version "$ARGO_EVENTS_VERSION" \
-  -n argo-events --create-namespace --wait
+  -n argo-events -f examples/bookstore/ml/pipeline/argo-events-values.yaml --wait
+```
 
-# Default EventBus for the namespace.
-kubectl apply -n argo-events -f - <<'EOF'
-apiVersion: argoproj.io/v1alpha1
-kind: EventBus
-metadata: { name: default }
-spec:
-  # pinned NATS JetStream version (controller-managed image, not a Helm chart)
-  # — bump together with the Argo Events chart version
-  jetstream: { version: "2.10.11" }
-EOF
+Create the EventBus, the bearer token and the EventSource. The token is random
+and lives only in the Secret. Nothing in the repository holds it.
 
+```sh
+kubectl apply -f examples/bookstore/ml/pipeline/recommender-eventbus.yaml
+kubectl -n argo-events create secret generic recommender-dataset-token \
+  --from-literal=token="$(openssl rand -hex 32)"
 kubectl apply -f examples/bookstore/ml/pipeline/recommender-eventsource.yaml
+kubectl apply -f examples/bookstore/ml/pipeline/recommender-eventsource-allow.yaml
 kubectl apply -f examples/bookstore/ml/pipeline/recommender-sensor.yaml
+```
 
-# Fire an event from inside the cluster:
-kubectl run -n argo-events curl-once --rm -it --restart=Never \
-  --image=curlimages/curl:8.10.1 --command -- \
-  curl -X POST -H 'content-type: application/json' \
-    -d '{"dataset_uri":"pvc://recommender-model/"}' \
-    http://recommender-dataset-eventsource-svc:12000/recommender-dataset-ready
+Test it from inside the cluster with a one-shot Pod. It sends the event
+twice: first without the token, which the endpoint refuses on purpose, then
+with it. The Pod's label admits it through the NetworkPolicy.
 
-# The Sensor creates a new Workflow in bookstore-ml.
+```sh
+kubectl apply -f examples/bookstore/ml/pipeline/recommender-dataset-curl.yaml
+kubectl wait --for=jsonpath='{.status.phase}'=Succeeded \
+  pod/recommender-dataset-curl -n argo-events --timeout=120s
+kubectl logs pod/recommender-dataset-curl -n argo-events
+kubectl delete pod/recommender-dataset-curl -n argo-events
+```
+
+The test Pod is written out below in full. Its ServiceAccount has no API
+token, and it runs as UID 100 (the `curl_user` the pinned image declares).
+
+```yaml
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: recommender-dataset-curl
+  namespace: argo-events
+  labels:
+    app.kubernetes.io/part-of: bookstore-ml
+    app.kubernetes.io/component: ml-pipeline-events
+automountServiceAccountToken: false
+---
+apiVersion: v1
+kind: Pod
+metadata:
+  name: recommender-dataset-curl
+  namespace: argo-events
+  labels:
+    app.kubernetes.io/part-of: bookstore-ml
+    app.kubernetes.io/component: ml-pipeline-events
+    ml.bookstore/role: dataset-publisher
+spec:
+  serviceAccountName: recommender-dataset-curl
+  automountServiceAccountToken: false
+  restartPolicy: Never
+  securityContext:
+    runAsNonRoot: true
+    runAsUser: 100
+    runAsGroup: 101
+    seccompProfile:
+      type: RuntimeDefault
+  containers:
+    - name: curl
+      image: curlimages/curl:8.10.1@sha256:d9b4541e214bcd85196d6e92e2753ac6d0ea699f0af5741f8c6cccbfcf00ef4b
+      command: ["/bin/sh", "-c"]
+      args:
+        - |
+          URL=http://recommender-dataset-eventsource-svc:12000/recommender-dataset-ready
+          BODY='{"dataset_uri":"pvc://recommender-model/"}'
+          # Deliberate refusal: no Authorization header.
+          curl -sS -o /dev/null -w 'without token: HTTP %{http_code}\n' \
+            -X POST -H 'content-type: application/json' -d "$BODY" "$URL" || true
+          curl -sS -o /dev/null -w 'with token: HTTP %{http_code}\n' \
+            -X POST -H 'content-type: application/json' \
+            -H "authorization: Bearer $TOKEN" -d "$BODY" "$URL"
+      env:
+        - name: TOKEN
+          valueFrom:
+            secretKeyRef:
+              name: recommender-dataset-token
+              key: token
+      resources:
+        requests: { cpu: "10m",  memory: "16Mi" }
+        limits:   { cpu: "100m", memory: "64Mi" }
+      securityContext:
+        allowPrivilegeEscalation: false
+        readOnlyRootFilesystem: true
+        capabilities:
+          drop: ["ALL"]
+      volumeMounts:
+        - name: tmp
+          mountPath: /tmp
+  volumes:
+    - name: tmp
+      emptyDir: {}
+```
+
+Before any run, the server dry-run admits the baseline Pod under the restricted
+level. The same Pod with `runAsUser: 0` is refused. That refusal is deliberate
+and is captured from the lab:
+
+```sh
+# The Pod document alone. The ServiceAccount document applies first, as above.
+POD=examples/bookstore/ml/pipeline/recommender-dataset-curl.yaml
+sed '/^kind: ServiceAccount/,/^---$/d' "$POD" \
+  | kubectl apply --dry-run=server -f -
+# The same Pod with runAsUser set to 0: a deliberate refusal.
+sed '/^kind: ServiceAccount/,/^---$/d' "$POD" \
+  | sed 's/runAsUser: 100$/runAsUser: 0/' \
+  | kubectl apply --dry-run=server -f -
+```
+
+<!-- gate: output -->
+```
+pod/recommender-dataset-curl created (server dry run)
+# ...
+Error from server (Forbidden): error when creating "STDIN": pods "recommender-dataset-curl" is forbidden: violates PodSecurity "restricted:latest": runAsUser=0 (pod must not set runAsUser=0)
+```
+
+The EventSource cannot be dry-run until its CRD exists. Until then the server
+answers with the expected error (captured):
+
+<!-- gate: output -->
+```
+error: resource mapping not found for name: "recommender-dataset" namespace: "p12-07-argo-events" from "STDIN": no matches for kind "EventSource" in version "argoproj.io/v1alpha1"
+ensure CRDs are installed first
+```
+
+Illustrative output of the test Pod's log, from the two requests:
+
+```
+without token: HTTP 401
+with token: HTTP 200
+```
+
+The Sensor has now created a Workflow in bookstore-ml:
+
+```sh
 argo list -n bookstore-ml
 ```
 
@@ -566,14 +783,16 @@ tomorrow.
   the model PVC; **Forbid** for runs where overlap is acceptable but you
   never want them to multiply.
 - **Argo Events: EventSource -> EventBus -> Sensor -> trigger.** The
-  EventSource is a long-running Pod that *produces* events from its
-  configured upstream (webhook, Git provider, S3, …). It writes events to
-  the **EventBus** (a NATS JetStream cluster the chart installs in
-  `argo-events`). A **Sensor** subscribes to the EventBus, applies a
-  `dependencies:` filter, and on match fires its `triggers[]` — for ML
-  that is the `k8s` trigger creating a `Workflow`. The Sensor's own SC is
-  PSA-`restricted` (the chart sets it; the manifest in this dir overrides
-  it explicitly for the trigger workflow's `serviceAccountName`).
+  EventSource is a long-running Pod that *produces* events from its configured
+  upstream (webhook, Git provider, S3, …). It writes events to the
+  **EventBus** (a NATS JetStream cluster that the controller starts from the
+  `EventBus` object in `argo-events`). A **Sensor** subscribes to the
+  EventBus, applies a `dependencies:` filter, and on match fires its
+  `triggers[]` — for ML that is the `k8s` trigger creating a `Workflow`. The
+  chart does not set a restricted securityContext on the EventSource or Sensor
+  Pods, so each manifest sets its own. The Sensor's Pod calls the API with its
+  own ServiceAccount, which lives in `argo-events`. Its Role lives in
+  `bookstore-ml` and allows only `create` on Workflows there.
 - **Kubeflow Pipelines underneath.** KFP v1 *compiled* Python pipelines
   to Argo Workflow YAML and submitted them — so most of what you read
   here applies. KFP v2 introduced an IR (a domain-specific format
@@ -598,19 +817,32 @@ tomorrow.
     [Part 07 ch.02](../07-delivery/02-packaging-kustomize.md)),
   - the **hyperparameters** are
     `workflow.spec.arguments.parameters`,
+  - the **model digest** is the SHA-256 of the exact `model.joblib` bytes
+    that eval read. Eval emits it as an output parameter, and register
+    stamps it, so the record names one file, not a path that can change,
   - the **outputs** are an artifact (`model.joblib`) + a parameter
     (`score`) + a registry stamp (the ConfigMap, or an MLflow record).
   Argo Workflows itself does not own the metadata DB; KFP v2 / MLflow
   /Weights & Biases do. The pipeline is the *producer* of lineage data;
   the registry/metadata store is its *consumer*.
-- **PSA on every workflow Pod.** The
+- **PSA on every workflow Pod, including the wait sidecar.** The
   [`WorkflowTemplate`](../examples/bookstore/ml/pipeline/recommender-workflow.yaml)'s
-  `podSpecPatch` applies `runAsNonRoot: true`, non-root UID,
-  `seccompProfile: RuntimeDefault` to every step Pod's PodSpec; each
-  step's container `securityContext` adds `allowPrivilegeEscalation:
-  false`, `readOnlyRootFilesystem: true`, `capabilities.drop: ["ALL"]`.
-  The same shape every Bookstore ML pod uses — pipeline Pods are **not**
-  exempt from PSA.
+  `podSpecPatch` sets `runAsNonRoot: true`, UID and GID 65532, and
+  `seccompProfile: RuntimeDefault` on every step Pod. Each step container
+  adds `allowPrivilegeEscalation: false`, `readOnlyRootFilesystem: true` and
+  `capabilities.drop: ["ALL"]`. The wait sidecar is injected by the
+  controller, so the chart's `executor` values set its own securityContext,
+  and the `-nonroot` executor image keeps it off UID 0. Pipeline Pods are
+  **not** exempt from PSA.
+- **Identity per step.** Argo runs each step under the template's
+  `serviceAccountName`. The `automountServiceAccountToken: false` on the
+  template gives the step container no token. The wait sidecar gets the
+  executor ServiceAccount's token through `executor.serviceAccountName`,
+  which the executor Role in `recommender-workflow.yaml` allows to write
+  `workflowtaskresults` and nothing more. A step that calls the API sets
+  `automountServiceAccountToken: true` and names its own ServiceAccount. Its
+  wait sidecar then uses that same token, so that ServiceAccount is bound to
+  the executor Role too.
 
 ## Production notes
 
@@ -659,7 +891,12 @@ tomorrow.
 > S3 `Object Created` event, a Kafka topic message — all become an Argo
 > Events `EventSource`. The Sensor maps them to a Workflow trigger; no
 > external scheduler. The pattern is **_Daemon Service_** + **_Periodic
-> Job_** (Ibryam): one listener, one pipeline. The webhook EventSource in this tree has no authentication. In production, put it behind an Ingress with auth (OAuth2 Proxy, mTLS, or a token header check); or use a git/s3/pubsub EventSource where authentication is part of the event source itself.
+> Job_** (Ibryam): one listener, one pipeline. The webhook EventSource in
+> this tree checks a bearer token and nothing else, and its traffic is plain
+> HTTP. In production, add TLS (`serverCertSecret` and `serverKeySecret`),
+> and put the webhook behind an Ingress with mTLS or OAuth2 Proxy. Or use a
+> git, S3 or Pub/Sub EventSource, where authentication is part of the
+> source.
 
 > **In production:** **retry-safety is per-step, not pipeline-wide.**
 > `train` is retry-safe: PyTorch/numpy/sklearn workloads idempotently
@@ -722,59 +959,50 @@ tomorrow.
 ## Quick Reference
 
 ```sh
-# Install Argo Workflows + Argo Events (pinned; own namespaces)
-ARGO_WORKFLOWS_VERSION="0.42.0"
-ARGO_EVENTS_VERSION="2.4.7"
-
+# Namespaces, then Argo Workflows and Argo Events (pinned; own namespaces)
+kubectl apply -f examples/bookstore/ml/pipeline/namespaces.yaml
 helm repo add argo https://argoproj.github.io/argo-helm
-helm install argo-workflows argo/argo-workflows \
-  --version "$ARGO_WORKFLOWS_VERSION" -n argo --create-namespace --wait
-helm install argo-events    argo/argo-events    \
-  --version "$ARGO_EVENTS_VERSION"    -n argo-events --create-namespace --wait
+helm install argo-workflows argo/argo-workflows --version 2.0.15 \
+  -n argo -f examples/bookstore/ml/pipeline/argo-workflows-values.yaml --wait
+helm install argo-events argo/argo-events --version 2.4.27 \
+  -n argo-events -f examples/bookstore/ml/pipeline/argo-events-values.yaml --wait
 
-# Default EventBus (Argo Events needs one):
-kubectl apply -n argo-events -f - <<'EOF'
-apiVersion: argoproj.io/v1alpha1
-kind: EventBus
-metadata: { name: default }
-# pinned NATS JetStream version (controller-managed image, not a Helm chart)
-# — bump together with the Argo Events chart version
-spec: { jetstream: { version: "2.10.11" } }
-EOF
-
-# Apply the recommender pipeline + cron + event trigger
+# The pipeline: identities, template, schedule, event path
 kubectl apply -f examples/bookstore/ml/pipeline/recommender-workflow.yaml
 kubectl apply -f examples/bookstore/ml/pipeline/recommender-cronworkflow.yaml
+kubectl apply -f examples/bookstore/ml/pipeline/recommender-eventbus.yaml
 kubectl apply -f examples/bookstore/ml/pipeline/recommender-eventsource.yaml
+kubectl apply -f examples/bookstore/ml/pipeline/recommender-eventsource-allow.yaml
 kubectl apply -f examples/bookstore/ml/pipeline/recommender-sensor.yaml
 
-# Run the pipeline once
+# Run the pipeline once, then read it
 argo submit --from workflowtemplate/recommender-pipeline -n bookstore-ml --watch
 argo list -n bookstore-ml
-argo get  -n bookstore-ml @latest
 argo logs -n bookstore-ml @latest
 
-# Schedule + event-trigger
-kubectl get cronworkflow -n bookstore-ml
-kubectl get eventsource,sensor -n argo-events
+# Who may do what (answers from RBAC alone)
+kubectl auth can-i patch deployments/recommender -n bookstore-ml \
+  --as=system:serviceaccount:bookstore-ml:recommender-promote
 ```
 
-Minimal skeleton (Argo Workflows `WorkflowTemplate`, DAG, PSA-restricted
-step):
+The skeleton below is the secure form of a `WorkflowTemplate` spec. It is a
+fragment: it has no `kind:`, so it is not a manifest on its own. Copy it into
+the full object in `recommender-workflow.yaml`, which has the metadata and
+the identities.
 
 ```yaml
-apiVersion: argoproj.io/v1alpha1
-kind: WorkflowTemplate
-metadata:
-  name: my-pipeline
-  namespace: my-namespace
+# spec of a WorkflowTemplate (a fragment)
 spec:
-  serviceAccountName: my-workflow-sa     # not the default SA!
   entrypoint: main
+  serviceAccountName: my-step-sa         # never default
+  automountServiceAccountToken: false    # on for a step that calls the API
+  executor:
+    serviceAccountName: my-executor-sa   # carries the wait sidecar's token
   podSpecPatch: |
     securityContext:
       runAsNonRoot: true
       runAsUser: 65532
+      runAsGroup: 65532
       seccompProfile: { type: RuntimeDefault }
   templates:
     - name: main
@@ -784,29 +1012,51 @@ spec:
           - { name: step-b, template: b, depends: "step-a.Succeeded" }
     - name: a
       container:
-        image: <YOUR-IMAGE>
+        image: <YOUR-IMAGE@sha256-digest>
+        resources:
+          requests: { cpu: "100m", memory: "128Mi" }
+          limits:   { cpu: "500m", memory: "256Mi" }
         securityContext:
           allowPrivilegeEscalation: false
           readOnlyRootFilesystem: true
           capabilities: { drop: ["ALL"] }
+        volumeMounts:
+          - { name: tmp, mountPath: /tmp }
     - name: b
       container:
-        image: <YOUR-IMAGE>
+        image: <YOUR-IMAGE@sha256-digest>
+        resources:
+          requests: { cpu: "100m", memory: "128Mi" }
+          limits:   { cpu: "500m", memory: "256Mi" }
         securityContext:
           allowPrivilegeEscalation: false
           readOnlyRootFilesystem: true
           capabilities: { drop: ["ALL"] }
+        volumeMounts:
+          - { name: tmp, mountPath: /tmp }
+  volumes:
+    - name: tmp
+      emptyDir: {}
 ```
 
 Checklist:
 
-- [ ] Argo Workflows installed via **pinned** Helm in **own namespace** (`argo`)
-- [ ] Pipeline encoded as a **`WorkflowTemplate`** (re-usable) — not a one-shot `Workflow`
-- [ ] **`CronWorkflow`** for scheduled retraining; **Argo Events** for data-driven retraining
-- [ ] Per-pipeline **`ServiceAccount` + namespace-scoped RBAC** (not the default SA, no cluster-wide rights)
-- [ ] **PSA-`restricted`** SC on every workflow Pod (`podSpecPatch` + container SC)
-- [ ] **Lineage step records dataset + code + model SHA** (dataset URI + image SHA + hyperparameters as Workflow parameters; outputs in a registry + metadata store)
-- [ ] **Promote** is a **GitOps commit** in prod (PR -> Argo CD -> KServe), not an in-pipeline `kubectl rollout restart`
+- [ ] Argo Workflows and Argo Events installed by pinned chart version, each
+  in its own namespace, labelled `restricted`, with the values files
+- [ ] The executor image is the `-nonroot` variant, and the controller pod
+  sets a seccomp profile
+- [ ] Pipeline encoded as a **`WorkflowTemplate`** (re-usable), with
+  **`CronWorkflow`** for scheduled retraining and **Argo Events** for
+  data-driven retraining
+- [ ] One ServiceAccount per step that calls the API. Train and eval get no
+  token. Promote is limited by `resourceNames` to one Deployment
+- [ ] **PSA-`restricted`** on every workflow Pod, the wait sidecar included
+- [ ] The model's SHA-256 is recorded with the score and the dataset URI, and
+  serving verifies it before it loads the model
+- [ ] The webhook requires a bearer token, a NetworkPolicy admits only the
+  publishers' label, and TLS is on in production
+- [ ] **Promote** fails when its target is missing, and in production it is a
+  **GitOps commit** (Argo CD, then KServe), not an in-pipeline restart
 
 ## Test your understanding
 
@@ -840,6 +1090,27 @@ Checklist:
 
    </details>
 
+5. **Your promote identity may patch only the `recommender` Deployment. A
+   colleague with `create` on Workflows in `bookstore-ml` submits a Workflow
+   whose only step names `serviceAccountName: recommender-promote`. What
+   happens, and what would stop it?**
+   <details><summary>Show answer</summary>
+
+   The step runs. Kubernetes checks that a ServiceAccount exists in the
+   namespace, not whether the submitter may use it. The controller creates the
+   Pod under `recommender-promote`, so the Pod has that identity's patch right
+   on `recommender`, whoever wrote the Workflow. The Role's `resourceNames` only
+   limit what the identity may do once it has it. What stops this is the
+   right to submit: take `create` on `workflows` away from people, grant it to
+   the Sensor's ServiceAccount and to the release pipeline, and give a person
+   a short-lived grant when they must run the pipeline by hand. The residual
+   case is a compromised Sensor, which can create any Workflow in its
+   namespace. Keep its token narrow, and add an admission policy that admits
+   only the Workflows this pipeline builds. Writing that policy is a
+   prerequisite for calling the step identities a control.
+
+   </details>
+
 ## Further reading
 
 - **Ibryam & Huß, _Kubernetes Patterns_ 2e — *Periodic Job* (ch.7)** and
@@ -862,3 +1133,12 @@ Checklist:
   `Trial`, `Suggestion`, Bayesian/TPE/grid samplers); **Tekton
   Pipelines** docs <https://tekton.dev/docs/pipelines/> for the CI-shaped
   alternative.
+- **Kubernetes RBAC** <https://kubernetes.io/docs/reference/access-authn-authz/rbac/>
+  for `resourceNames` (which RBAC does not apply to `create`) and for the
+  verbs each Role in this chapter grants.
+- **Argo Workflows v4.1.6 and Argo Events v1.9.11 API specs** (the OpenAPI
+  files in each repository): `ExecutorConfig.serviceAccountName`,
+  `automountServiceAccountToken` on a workflow and a template, and
+  `WebhookEventSource.authSecret`. The chart values the chapter sets are in
+  `helm show values argo/argo-workflows --version 2.0.15` and
+  `helm show values argo/argo-events --version 2.4.27`.
