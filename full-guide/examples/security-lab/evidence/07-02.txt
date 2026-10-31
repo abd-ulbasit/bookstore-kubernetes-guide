@@ -1,0 +1,179 @@
+# Transcript for 07-delivery/02-packaging-kustomize.md, hands-on steps 1 to 9.
+# Tier A: a kind cluster with a Kubernetes v1.37.0 node, on a lab host reached
+# through a tunnel. kubectl v1.37.2 (Kustomize v5.8.1 embedded) and Trivy
+# v0.76.1 ran on a client machine. Only the commands below were run.
+# Recorded by running the chapter's commands in order from full-guide/. Output is
+# verbatim. The chapter prints the throwaway namespace as bs-verify; this capture
+# used p07-02-verify, which was deleted at the end. The cluster has a different
+# name from the chapter's bookstore cluster. Terminal colour codes are removed.
+# Along the way: a first server dry run failed on the client's OpenAPI download
+# under lab load and was repeated; the first awk filter did not drop the Namespace
+# and PriorityClass documents and was corrected; cluster access was interrupted for
+# part of the session, and the steps were rerun in order.
+## step 1: render the base and the overlays, and count the objects
+$ kubectl kustomize examples/bookstore/kustomize/base | grep -c "^kind:"
+49
+$ for o in base overlays/dev overlays/staging overlays/prod; do echo "$o $(kubectl kustomize examples/bookstore/kustomize/$o | grep -c "^kind:")"; done
+base 49
+overlays/dev 45
+overlays/staging 49
+overlays/prod 48
+## step 4: server dry run of each overlay in a namespace that enforces restricted
+$ S=$(mktemp -d)
+$ kubectl create namespace p07-02-verify
+namespace/p07-02-verify created
+$ kubectl label namespace p07-02-verify pod-security.kubernetes.io/enforce=restricted pod-security.kubernetes.io/enforce-version=latest pod-security.kubernetes.io/warn=restricted
+namespace/p07-02-verify labeled
+$ for o in dev staging prod; do kubectl kustomize examples/bookstore/kustomize/overlays/$o | awk 'BEGIN{RS="\n---\n";ORS="\n---\n"} !/(^|\n)kind: (Namespace|PriorityClass)(\n|$)/' | sed '/^  namespace: bookstore$/d' | kubectl apply --dry-run=server -n p07-02-verify -f - > "$S/$o-dry.txt" 2>&1; echo "$o $(grep -c 'created (server dry run)' "$S/$o-dry.txt") created, $(grep -ci warning "$S/$o-dry.txt") warnings"; done
+dev 41 created, 0 warnings
+staging 45 created, 0 warnings
+prod 44 created, 0 warnings
+$ kubectl run bad --image=busybox -n p07-02-verify --dry-run=server --restart=Never --overrides='{"spec":{"containers":[{"name":"bad","image":"busybox","securityContext":{"privileged":true}}]}}' 2>&1 | head -1
+Error from server (Forbidden): pods "bad" is forbidden: violates PodSecurity "restricted:latest": privileged (container "bad" must not set securityContext.privileged=true), allowPrivilegeEscalation != false (container "bad" must set securityContext.allowPrivilegeEscalation=false), unrestricted capabilities (container "bad" must set securityContext.capabilities.drop=["ALL"]), runAsNonRoot != true (pod or container "bad" must set securityContext.runAsNonRoot=true), seccompProfile (pod or container "bad" must set securityContext.seccompProfile.type to "RuntimeDefault" or "Localhost")
+## step 5: a patch that strips the baseline (deliberate: a scratch copy, not the repo)
+$ cp -R examples/bookstore/kustomize "$S/kz"
+$ mkdir -p "$S/kz/overlays/bad"
+$ cat > "$S/kz/overlays/bad/kustomization.yaml" <<'EOF'
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+resources:
+  - ../dev
+patches:
+  - target:
+      kind: Deployment
+      name: catalog
+    patch: |
+      - op: remove
+        path: /spec/template/spec/containers/0/securityContext/readOnlyRootFilesystem
+EOF
+$ kubectl kustomize "$S/kz/overlays/bad" > "$S/bad.yaml" && grep -c "^kind:" "$S/bad.yaml"
+45
+$ kubectl kustomize examples/bookstore/kustomize/overlays/dev > "$S/dev.yaml"
+$ diff "$S/dev.yaml" "$S/bad.yaml"
+500d499
+<           readOnlyRootFilesystem: true
+$ kubectl kustomize "$S/kz/overlays/bad" | awk 'BEGIN{RS="\n---\n";ORS="\n---\n"} !/(^|\n)kind: (Namespace|PriorityClass)(\n|$)/' | sed '/^  namespace: bookstore$/d' | kubectl apply --dry-run=server -n p07-02-verify -f - > "$S/bad-dry.txt" 2>&1; echo "bad $(grep -c 'created (server dry run)' "$S/bad-dry.txt") created, $(grep -ci warning "$S/bad-dry.txt") warnings"
+bad 41 created, 0 warnings
+$ mkdir -p "$S/scan-dev" "$S/scan-bad" && cp "$S/dev.yaml" "$S/scan-dev/" && cp "$S/bad.yaml" "$S/scan-bad/"
+$ cd "$S/scan-dev" && trivy config --quiet --severity HIGH,CRITICAL .
+
+Report Summary
+
+┌──────────┬────────────┬───────────────────┐
+│  Target  │    Type    │ Misconfigurations │
+├──────────┼────────────┼───────────────────┤
+│ dev.yaml │ kubernetes │         0         │
+└──────────┴────────────┴───────────────────┘
+Legend:
+- '-': Not scanned
+- '0': Clean (no security findings detected)
+
+$ cd "$S/scan-bad" && trivy config --quiet --severity HIGH,CRITICAL .
+
+Report Summary
+
+┌──────────┬────────────┬───────────────────┐
+│  Target  │    Type    │ Misconfigurations │
+├──────────┼────────────┼───────────────────┤
+│ bad.yaml │ kubernetes │         1         │
+└──────────┴────────────┴───────────────────┘
+Legend:
+- '-': Not scanned
+- '0': Clean (no security findings detected)
+
+
+bad.yaml (kubernetes)
+=====================
+Tests: 34 (SUCCESSES: 33, FAILURES: 1)
+Failures: 1 (HIGH: 1, CRITICAL: 0)
+
+KSV-0014 (HIGH): Container 'catalog' of Deployment 'catalog' should set 'securityContext.readOnlyRootFilesystem' to true
+════════════════════════════════════════
+An immutable root file system prevents applications from writing to their local disk. This can limit intrusions, as attackers will not be able to tamper with the file system or write foreign executables to disk.
+
+See https://avd.aquasec.com/misconfig/ksv-0014
+────────────────────────────────────────
+ bad.yaml:433-511
+────────────────────────────────────────
+ 433 ┌       - env:
+ 434 │         - name: PORT
+ 435 │           value: "8080"
+ 436 │         - name: LOG_LEVEL
+ 437 │           valueFrom:
+ 438 │             configMapKeyRef:
+ 439 │               key: LOG_LEVEL
+ 440 │               name: catalog-config
+ 441 └         - name: POSTGRES_USER
+ ...   
+────────────────────────────────────────
+
+
+## step 6: a generated Secret puts its value in the render (deliberate: a scratch directory)
+$ mkdir -p "$S/gen"
+$ cat > "$S/gen/kustomization.yaml" <<'EOF'
+secretGenerator:
+- name: demo-db
+  literals:
+  - password=demo-only-value
+EOF
+$ kubectl kustomize "$S/gen"
+apiVersion: v1
+data:
+  password: ZGVtby1vbmx5LXZhbHVl
+kind: Secret
+metadata:
+  name: demo-db-766bk9t44g
+type: Opaque
+$ kubectl kustomize "$S/gen" | grep "password:" | awk "{print \$2}" | base64 -d; echo
+demo-only-value
+$ mkdir -p "$S/scan-gen" && kubectl kustomize "$S/gen" > "$S/scan-gen/gen.yaml" && cd "$S/scan-gen" && trivy fs --quiet --scanners secret .
+
+Report Summary
+
+┌────────┬──────┬─────────┐
+│ Target │ Type │ Secrets │
+├────────┼──────┼─────────┤
+│   -    │  -   │    -    │
+└────────┴──────┴─────────┘
+Legend:
+- '-': Not scanned
+- '0': Clean (no security findings detected)
+
+## step 7: a remote base pinned to a commit
+$ kubectl kustomize "https://github.com/abd-ulbasit/bookstore-kubernetes-guide//full-guide/examples/bookstore/kustomize/base?ref=23c3aa3175a2a2774eaed59a3469bda35d4d260f" | grep -c "^kind:"
+49
+## step 8: promote one image pin (a placeholder digest, in the scratch copy only)
+$ sed "s/sha256:eaa26ada0a2e1575026a5e71e74572ed0bfdde80f50012e91a7be28f0de16ced/sha256:0000000000000000000000000000000000000000000000000000000000000000/" "$S/kz/overlays/prod/images/kustomization.yaml" > "$S/new-pins.yaml" && mv "$S/new-pins.yaml" "$S/kz/overlays/prod/images/kustomization.yaml"
+$ diff examples/bookstore/kustomize/overlays/prod/images/kustomization.yaml "$S/kz/overlays/prod/images/kustomization.yaml"
+26c26
+< - digest: sha256:eaa26ada0a2e1575026a5e71e74572ed0bfdde80f50012e91a7be28f0de16ced
+---
+> - digest: sha256:0000000000000000000000000000000000000000000000000000000000000000
+$ diff <(kubectl kustomize examples/bookstore/kustomize/overlays/prod) <(kubectl kustomize "$S/kz/overlays/prod")
+446c446
+<         image: ghcr.io/abd-ulbasit/bookstore-catalog@sha256:eaa26ada0a2e1575026a5e71e74572ed0bfdde80f50012e91a7be28f0de16ced
+---
+>         image: ghcr.io/abd-ulbasit/bookstore-catalog@sha256:0000000000000000000000000000000000000000000000000000000000000000
+## step 9: optional components, counted and dry-run against a cluster without their CRDs
+$ mkdir -p "$S/kz/overlays/devc"
+$ cat > "$S/kz/overlays/devc/kustomization.yaml" <<'EOF'
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+resources:
+  - ../dev
+components:
+  - ../../components/servicemonitor
+  - ../../components/keda
+EOF
+$ kubectl kustomize "$S/kz/overlays/devc" > "$S/devc.yaml" && grep -c "^kind:" "$S/devc.yaml"
+51
+$ kubectl kustomize "$S/kz/overlays/devc" | kubectl apply --dry-run=client -f - 2>&1 | grep -E 'ScaledObject|ServiceMonitor|PrometheusRule|TriggerAuth'
+resource mapping not found for name: "payments-worker" namespace: "bookstore" from "STDIN": no matches for kind "ScaledObject" in version "keda.sh/v1alpha1"
+resource mapping not found for name: "rabbitmq-trigger-auth" namespace: "bookstore" from "STDIN": no matches for kind "TriggerAuthentication" in version "keda.sh/v1alpha1"
+resource mapping not found for name: "bookstore-catalog-rules" namespace: "bookstore" from "STDIN": no matches for kind "PrometheusRule" in version "monitoring.coreos.com/v1"
+resource mapping not found for name: "catalog" namespace: "bookstore" from "STDIN": no matches for kind "ServiceMonitor" in version "monitoring.coreos.com/v1"
+resource mapping not found for name: "payments-worker" namespace: "bookstore" from "STDIN": no matches for kind "ServiceMonitor" in version "monitoring.coreos.com/v1"
+$ kubectl delete namespace p07-02-verify
+namespace "p07-02-verify" deleted
+E1031 08:24:12.436594   91404 reflector.go:227] "Failed to watch" err="namespaces \"p07-02-verify\" is forbidden: User \"kubernetes-admin\" cannot watch resource \"namespaces\" in API group \"\" at the cluster scope - error from a previous attempt: EOF" reflector="k8s.io/client-go/tools/watch/informerwatcher.go:162" type="*unstructured.Unstructured"
+$ rm -rf "$S"
