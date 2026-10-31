@@ -332,17 +332,22 @@ spec:
         imagePullPolicy: IfNotPresent
         command: ["python"]
         source: |
-          import hashlib, json, os, statistics, sys
+          import hashlib, io, json, os, statistics, sys
           import joblib
 
           model_dir = os.environ.get("MODEL_DIR", "/workspace/model")
           min_score = float(os.environ["MIN_SCORE"])
           model_path = os.path.join(model_dir, "model.joblib")
+          # Read the bytes once, hash exactly those bytes, and load the same
+          # bytes. Hashing a second read could describe a different file.
+          with open(model_path, "rb") as f:
+              data = f.read()
+          digest = hashlib.sha256(data).hexdigest()
           # joblib is pickle: loading runs code. This load is safe only while
           # the file is written by this pipeline's own train step. Any other
-          # writer to the PVC makes it unsafe. Part 12 ch.06 covers verifying
-          # the digest before a serving Pod loads a model.
-          artifact = joblib.load(model_path)
+          # writer to the PVC makes it unsafe. The serving predictor does not
+          # check this digest yet; see Part 12 ch.06 for the gap.
+          artifact = joblib.load(io.BytesIO(data))
           neigh = artifact["neighbours"]
           # Average top-1 cosine similarity across all books with at least
           # one neighbour. This proves the model learnt SOMETHING above
@@ -364,8 +369,6 @@ spec:
           with open("/tmp/score", "w") as f:
               f.write(f"{score:.6f}")
           # Lineage: the digest of the exact bytes this run evaluated.
-          with open(model_path, "rb") as f:
-              digest = hashlib.sha256(f.read()).hexdigest()
           with open("/tmp/model-sha256", "w") as f:
               f.write(digest)
           print(json.dumps(metrics, indent=2), flush=True)

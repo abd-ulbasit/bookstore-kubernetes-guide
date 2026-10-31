@@ -1,5 +1,5 @@
 """
-Bookstore recommendations — CPU serving predictor (Part 12 ch.06, X3b).
+Bookstore recommendations — CPU serving predictor (Part 12 ch.06).
 
 A tiny FastAPI app that loads the `model.joblib` produced by
 `../train/train.py` and serves recommendations over HTTP. The training and
@@ -18,7 +18,9 @@ Every endpoint except /healthz and /ready requires
 `Authorization: Bearer <token>`. The token is read from the file named by
 AUTH_TOKEN_FILE at startup. If that variable is unset or the token is shorter
 than 32 characters, the process refuses to start (fail closed). The probes stay
-open so the kubelet can check the Pod without holding the token.
+open so the kubelet can check the Pod without holding the token. The OpenAPI
+document and the Swagger and ReDoc pages are switched off, so no route other
+than the probes is reachable without the token.
 
 The :predict body follows the v1 prediction protocol used by KServe-style
 runtimes (sklearn, pytorch, tensorflow, huggingface) — a small JSON envelope
@@ -148,7 +150,16 @@ async def lifespan(app: FastAPI):
     yield
 
 
-app = FastAPI(title="bookstore-recommender", version="1", lifespan=lifespan)
+# The interactive docs and the schema are off: FastAPI would otherwise serve
+# /docs, /redoc and /openapi.json without the bearer check.
+app = FastAPI(
+    title="bookstore-recommender",
+    version="1",
+    lifespan=lifespan,
+    docs_url=None,
+    redoc_url=None,
+    openapi_url=None,
+)
 
 
 class PredictInstance(BaseModel):

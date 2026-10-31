@@ -14,7 +14,25 @@
 # see ch.07 "Threats and controls".
 singleNamespace: false
 
+# Images are pinned by index digest. The chart's image blocks take a tag, and
+# the tag field can carry `tag@sha256:digest`, which renders as a digest
+# reference. The digests were read from quay.io with
+# `docker buildx imagetools inspect` on the release tags.
+crds:
+  upgradeJob:
+    image:
+      tag: "v4.1.6@sha256:b9be70ef3f4a0709d771e9c098a99fd2d97be1b095c1b160c668a2fde61dc237"
+
 controller:
+  image:
+    tag: "v4.1.6@sha256:a012a639ead374a4a9306093d6b29dfdc7e6c4c1a85c684582cb961a6cc8bcf3"
+  # Default: {}. The controller pod had no requests and no memory limit.
+  resources:
+    requests:
+      cpu: 100m
+      memory: 128Mi
+    limits:
+      memory: 256Mi
   # Only bookstore-ml gets the per-namespace RBAC the chart generates. The
   # default is the `default` namespace, where no pipeline runs.
   workflowNamespaces:
@@ -27,10 +45,13 @@ controller:
 
 # The wait sidecar (argoexec) runs in every workflow Pod. Its default image
 # tag runs as root (USER 0). The -nonroot variant runs as UID 8737, which is
-# what lets workflow Pods keep runAsNonRoot: true.
+# what lets workflow Pods keep runAsNonRoot: true. The chart appends
+# `-nonroot` to the tag when nonroot is true, so the tag is written out here
+# with the suffix and the digest, and nonroot is false.
 executor:
   image:
-    nonroot: true
+    nonroot: false
+    tag: "v4.1.6-nonroot@sha256:07118f5964bf07320ab10bfbeb231143264c0787ca1bc333039ad7c02817130e"
   # Default: {}. Applied to the wait container.
   securityContext:
     runAsNonRoot: true

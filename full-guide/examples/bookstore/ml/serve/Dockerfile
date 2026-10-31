@@ -1,4 +1,4 @@
-# Bookstore recommendations — SERVE image (Part 12 ch.06, X3b).
+# Bookstore recommendations — SERVE image (Part 12 ch.06).
 #
 # Multi-stage: `builder` installs wheels into a venv; the final image is a
 # small Python runtime that COPIES the venv in. Final image runs as non-root

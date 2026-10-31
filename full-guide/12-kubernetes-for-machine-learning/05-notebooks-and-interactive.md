@@ -149,7 +149,7 @@ flowchart TB
     sus["Singleuser Pod (per user)<br/>PSA-restricted SC<br/>uid 1000 + drop ALL<br/>readOnlyRootFilesystem"]
     pvc["per-user PVC at /home/jovyan<br/>(dynamic, RWO, ~5-20 GiB)"]
     gpu["nvidia.com/gpu: 1 (opt-in)<br/>fenced to GPU node pool"]
-    quota["ResourceQuota + LimitRange<br/>(per-namespace ceiling)<br/>Kueue LocalQueue (cohort fair-share)"]
+    quota["ResourceQuota + LimitRange<br/>(per-namespace ceiling)"]
 
     user --> ing --> proxy
     proxy --> hub
@@ -245,7 +245,8 @@ $ kubectl apply -f - <<'EOF'   # Namespace jupyter, labelled restricted
 namespace/p12-05-jupyter created
 ```
 
-The demo login is one generated password, held in a Secret. The chart reads
+The demo login is one user, `lab`, and one generated password, held in a
+Secret. The chart reads
 `values.yaml` from the Secret named by `hub.existingSecret` and merges it into
 the hub's configuration, so the password never sits in a values file or in
 Git. The lab's authenticator, `shared-password`, is for a lab only (see
@@ -283,7 +284,18 @@ hub:
   config:
     JupyterHub:
       authenticator_class: shared-password  # demo login; production uses an IdP
+    Authenticator:
+      # The base Authenticator admits nobody unless allow_all is set or a user
+      # list is given. The demo login admits only the user named here.
+      allowed_users:
+        - lab
   existingSecret: jupyterhub-hub-secrets    # holds the shared password
+  resources:                                # the chart default is {}
+    requests:
+      cpu: 100m
+      memory: 256Mi
+    limits:
+      memory: 512Mi
   image:
     name: quay.io/jupyterhub/k8s-hub
     tag: "4.4.4@sha256:bbce7a924eac0dfe10d738ff2d966cb306a40973519005a160282415561a774b"
@@ -317,6 +329,12 @@ proxy:
   service:
     type: ClusterIP                         # no public LoadBalancer; use an Ingress
   chp:
+    resources:                              # the chart default is {}
+      requests:
+        cpu: 50m
+        memory: 64Mi
+      limits:
+        memory: 128Mi
     image:
       name: quay.io/jupyterhub/configurable-http-proxy
       tag: "5.2.0@sha256:522738d5285e4be758da5023194cbc95249efdadaa62a0998c8ed1aa2890b2da"
@@ -652,10 +670,39 @@ $ kubectl get daemonset kindnet -n kube-system -o name
 daemonset.apps/kindnet
 ```
 
-The lab cluster runs kindnet. kindnet accepts NetworkPolicy objects and does
-not enforce them, so the lab could not show a blocked connection. Enforcement
-is the setup in [Part 02 ch.06](../02-networking/06-network-policies.md). Use
-an enforcing plugin before you rely on the egress rules above.
+The lab cluster runs kindnet, and kindnet enforces NetworkPolicy here. Step 11
+of the lab applies the chart's `singleuser` policy and captures the result: a
+notebook-labelled Pod cannot reach the API server, while an unlabelled Pod in
+the same namespace reaches it. Enforcement depends on the cluster's plugin, so
+check yours before you rely on the egress rules above
+([Part 02 ch.06](../02-networking/06-network-policies.md)).
+
+The capture below is step 11 of the lab. The notebook-labelled Pod carries the
+policy's three selector labels, so the policy applies to it. Its DNS lookup
+works, because the policy allows port 53, and its connection to the API server
+fails. The unlabelled control reaches the API server. The endpoint address is
+read into a variable and not printed.
+
+<!-- gate: output -->
+```text
+$ kubectl apply -f netpol.yaml -n p12-05-jupyter
+networkpolicy.networking.k8s.io/singleuser created
+$ kubectl get endpoints kubernetes -n default (the address is read into a variable and not printed)
+$ kubectl apply -f notebook-probe.yaml (labels: component: singleuser-server
+app: jupyterhub
+release: jupyterhub)
+pod/notebook-probe created
+pod/notebook-probe condition met
+$ kubectl apply -f control.yaml (labels: app: control)
+pod/control created
+pod/control condition met
+$ kubectl exec -i notebook-probe -- python -I - < probe.py
+dns kubernetes.default.svc: 10.96.0.1
+https GET /version on the API server: failed: URLError
+$ kubectl exec -i control -- python -I - < probe.py
+dns kubernetes.default.svc: 10.96.0.1
+https GET /version on the API server: HTTP 200
+```
 
 Clean up the lab namespace when you are done:
 
@@ -732,9 +779,9 @@ Notebooks are the *front of the loop*, not a separate thing.
   profile adds `extra_resource_limits.nvidia.com/gpu: 1` + the GPU
   toleration + nodeAffinity. Because a GPU is *whole-device*, an idle
   GPU notebook holds the GPU even when the user is asleep — **the culler
-  is mandatory**, not optional. Pair the culler with the ch.03 Kueue
-  ClusterQueue's GPU `nominalQuota` so a *training* PyTorchJob can
-  preempt an idle GPU notebook and reclaim the device. This is the
+  is mandatory**, not optional. The culler is the only control on an idle GPU
+  notebook. Kueue does not queue or preempt notebook Pods: its namespace
+  selector matches only `bookstore-ml`, and notebooks run in `jupyter`. This is the
   ch.02 "keep the expensive GPU busy" loop applied to notebooks: idle
   notebooks must not hoard GPUs. The profile changes no security setting:
   the GPU Pod gets the same context as the CPU Pod, and nothing in it asks
@@ -788,8 +835,9 @@ Notebooks are the *front of the loop*, not a separate thing.
 > hour of idle, not a day). Idle CPU notebooks waste memory; idle GPU
 > notebooks waste *real money*. Pair with a **namespace `ResourceQuota`**
 > ([Part 08 ch.04](../08-day-2-operations/04-multi-tenancy-and-namespaces.md))
-> and, for GPUs, the **Kueue ClusterQueue** ([ch.03](03-batch-and-gang-scheduling.md))
-> so training can preempt idle GPU notebooks.
+> and, for GPUs, the **culler**: Kueue does not preempt notebook Pods, so
+> nothing else reclaims an idle GPU ([ch.03](03-batch-and-gang-scheduling.md)
+> covers what Kueue does manage).
 
 > **In production:** the data scientist's exit from the notebook is
 > **commit to Git**, not "the kernel still has it in memory". The

@@ -18,7 +18,7 @@
 # What did not work the first time: the first run printed a local temporary
 # directory in the quota denial line. The script now runs from its own work
 # directory, and this transcript is the second run.
-$ /private/tmp/claude-501/-Users-basit-projects-abd-ulbasit/f7ab4f3e-ba11-49c8-a9ec-0eeba9d1be7f/scratchpad/bin/kubectl version --client
+$ kubectl version --client
 Client Version: v1.37.2
 $ helm version --short
 v4.1.4+g05fa379
@@ -30,7 +30,7 @@ sha256:4cdd173253e5abba048dfe2cfa968707a5b59d774157d5356940d0d923a6c281$ docker 
 sha256:65dca449aef1fd8fdacca5988ffdbdea015663d3f710a4c3f3af30abb3630fe1$ docker buildx imagetools inspect ghcr.io/mlflow/mlflow:v3.3.2 (digest)
 sha256:b166428a3ab479e396f14d671987a70b27741a8d9b22f9d69a559c1fbf09d551$ docker buildx imagetools inspect docker.io/bitnami/mlflow:3.3.2-debian-12-r0
 ERROR: docker.io/bitnami/mlflow:3.3.2-debian-12-r0: not found
-$ /private/tmp/claude-501/-Users-basit-projects-abd-ulbasit/f7ab4f3e-ba11-49c8-a9ec-0eeba9d1be7f/scratchpad/bin/kubectl apply -f opencost-namespace.yaml  (one namespace per chapter block; all three here)
+$ kubectl apply -f opencost-namespace.yaml  (one namespace per chapter block; all three here)
 namespace/p12-08-opencost created
 namespace/p12-08-ml created
 namespace/p12-08-mlflow created
@@ -75,3 +75,47 @@ $ kubectl delete namespace p12-08-opencost p12-08-ml p12-08-mlflow --wait=false
 namespace "p12-08-opencost" deleted
 namespace "p12-08-ml" deleted
 namespace "p12-08-mlflow" deleted
+
+## step 12: the MLflow tracker with basic authentication, started once
+$ kubectl create namespace p12-08-ml (stands in for bookstore-ml) and p12-08-store (outside the allow-list)
+namespace/p12-08-ml created
+namespace/p12-08-store created
+$ python: write the manifest with the lab namespace names (the Namespace object, the policy's namespace and the allowed namespace)
+wrote 7 documents
+$ kubectl apply -f mlflow.yaml (the namespace, the policies, the Service and the Deployment)
+namespace/p12-08-mlflow created
+serviceaccount/mlflow created
+networkpolicy.networking.k8s.io/default-deny created
+networkpolicy.networking.k8s.io/allow-p12-08-ml created
+networkpolicy.networking.k8s.io/allow-tracker-egress created
+service/mlflow created
+deployment.apps/mlflow created
+$ kubectl create secret generic mlflow-auth -n p12-08-mlflow (basic_auth.ini, backend-store-uri and the Flask key, generated; none printed)
+secret/mlflow-auth created
+$ kubectl rollout status deployment/mlflow -n p12-08-mlflow --timeout=300s
+Waiting for deployment "mlflow" rollout to finish: 0 of 1 updated replicas are available...
+deployment "mlflow" successfully rolled out
+$ kubectl apply -f caller.yaml (in p12-08-ml)
+pod/caller created
+pod/caller condition met
+$ kubectl exec -i -n p12-08-ml caller -- python -I - < probe.py
+experiments/search without credentials: HTTP 500
+$ kubectl apply -f stranger.yaml (in p12-08-store)
+pod/stranger created
+pod/stranger condition met
+$ kubectl exec -i -n p12-08-store stranger -- python -I - < probe.py
+$ kubectl logs deployment/mlflow -n p12-08-mlflow --tail=4
+  File "/usr/local/lib/python3.10/site-packages/uvicorn/middleware/asgi2.py", line 14, in __call__
+    instance = self.app(scope)
+TypeError: Flask.__call__() missing 1 required positional argument: 'start_response'
+INFO:     10.244.0.90:37156 - "GET /api/2.0/mlflow/experiments/search HTTP/1.1" 500 Internal Server Error
+
+## step 13: cleanup of the MLflow step
+$ kubectl delete namespace p12-08-mlflow p12-08-ml p12-08-store --wait=false
+namespace "p12-08-mlflow" deleted
+namespace "p12-08-ml" deleted
+namespace "p12-08-store" deleted
+
+## step 14: the probe from outside the allow-list, run by hand after step 12 (the scripted exec hung)
+$ kubectl exec -n p12-08-store stranger -- python -I -c "<the probe: urlopen of the experiments/search path, timeout 5>"
+failed: URLError

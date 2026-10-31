@@ -1,5 +1,5 @@
 # Transcript for 12-kubernetes-for-machine-learning/07-ml-pipelines-and-workflows.md,
-# lab steps 0 to 8. Recorded by running examples/security-lab/labs/12-07.sh
+# lab steps 0 to 10. Recorded by running examples/security-lab/labs/12-07.sh
 # from full-guide/ against the kind cluster sf-pilot (Tier A).
 # The chapter names the bookstore-ml and argo-events namespaces. The lab used
 # p12-07-bookstore-ml and p12-07-argo-events, and applied the same files with
@@ -7,6 +7,8 @@
 # kept as captured.
 # No Argo component is installed: the install is heavy, so the chapter cites
 # it. Step 7 renders the chart and reads the result; it installs nothing.
+# Steps 8 and 9 read image facts with docker run and test the step Pods' egress
+# in a namespace of their own, with a test default-deny for egress.
 
 ## step 0: versions and the cluster
 $ kubectl version
@@ -72,16 +74,72 @@ $ kubectl apply --dry-run=server -f recommender-eventsource.yaml (EventSource; C
 error: resource mapping not found for name: "recommender-dataset" namespace: "p12-07-argo-events" from "STDIN": no matches for kind "EventSource" in version "argoproj.io/v1alpha1"
 ensure CRDs are installed first
 
-## step 7: the chart renders the restricted settings (helm template; nothing installed)
+## step 7: the chart renders the pinned settings (helm template; nothing installed)
 $ helm repo add argo https://argoproj.github.io/argo-helm
-$ helm template argo-workflows argo/argo-workflows --version 2.0.15 -n argo -f argo-workflows-values.yaml | grep (nonroot executor, seccomp, UID)
+$ helm template argo-workflows argo/argo-workflows --version 2.0.15 -n argo -f argo-workflows-values.yaml > argo-workflows.yaml
+$ grep -n -e 'argoexec:' -e 'workflow-controller:' -e 'crdinstaller:' argo-workflows.yaml
+437:          image: "quay.io/argoproj/workflow-controller:v4.1.6@sha256:a012a639ead374a4a9306093d6b29dfdc7e6c4c1a85c684582cb961a6cc8bcf3"
+444:          - "quay.io/argoproj/argoexec:v4.1.6-nonroot@sha256:07118f5964bf07320ab10bfbeb231143264c0787ca1bc333039ad7c02817130e"
+598:          image: "quay.io/argoproj/argo-workflows-crdinstaller:v4.1.6@sha256:b9be70ef3f4a0709d771e9c098a99fd2d97be1b095c1b160c668a2fde61dc237"
+$ sed -n '/^  config: |/,/^    nodeEvents:/p' argo-workflows.yaml
+  config: |
+    executor:
+      imagePullPolicy: Always
+      securityContext:
+        allowPrivilegeEscalation: false
+        capabilities:
+          drop:
+          - ALL
+        readOnlyRootFilesystem: true
+        runAsNonRoot: true
+        seccompProfile:
+          type: RuntimeDefault
+    nodeEvents:
+$ grep -n -B2 -A1 'seccompProfile' argo-workflows.yaml
+40-        readOnlyRootFilesystem: true
+41-        runAsNonRoot: true
 42:        seccompProfile:
+43-          type: RuntimeDefault
+--
+431-      serviceAccountName: argo-workflows-workflow-controller
+432-      securityContext:
 433:        seccompProfile:
-444:          - "quay.io/argoproj/argoexec:v4.1.6-nonroot"
-604:            runAsUser: 8737
-605:            seccompProfile:
+434-          type: RuntimeDefault
+--
+607-            runAsNonRoot: true
+608-            runAsUser: 8737
+609:            seccompProfile:
+610-              type: RuntimeDefault
 
-## step 8: cleanup
+## step 8: the image facts the chapter cites (docker run on the remote engine)
+$ docker run --rm --entrypoint /bin/sh cgr.dev/chainguard/kubectl:latest-dev@sha256:ee760c803cc3856d99f13dfd989bce461d2b324ae49e70b72c717f3bfaba9cbb -c 'id; kubectl version --client'
+uid=65532(nonroot) gid=65532(nonroot) groups=65532(nonroot)
+Client Version: v1.37.2
+Kustomize Version: v5.8.1
+$ docker run --rm --entrypoint /bin/sh curlimages/curl:8.10.1@sha256:d9b4541e214bcd85196d6e92e2753ac6d0ea699f0af5741f8c6cccbfcf00ef4b -c 'id'
+uid=100(curl_user) gid=101(curl_group) groups=101(curl_group),101(curl_group)
+
+## step 9: a step Pod's egress: default-deny, then the Workflow Pod allow
+$ kubectl get endpoints kubernetes -n default (the API server address is read into a variable and not printed)
+endpoint read: ok
+$ kubectl apply -f default-deny-egress (test policy: egress only, every Pod in p12-07-bookstore-ml)
+networkpolicy.networking.k8s.io/default-deny-egress created
+$ kubectl apply -f workflow-egress.yaml (the chapter's file, namespace replaced, the documentation address replaced with the endpoint)
+networkpolicy.networking.k8s.io/recommender-workflow-egress created
+$ kubectl apply -f workflow-probe.yaml (the Pod's labels: workflows.argoproj.io/workflow: p12-07-probe)
+pod/workflow-probe created
+pod/workflow-probe condition met
+$ kubectl apply -f stranger.yaml (the Pod's labels: app: stranger)
+pod/stranger created
+pod/stranger condition met
+$ kubectl exec -i workflow-probe -- python -I - < probe.py (labelled as a Workflow Pod)
+dns kubernetes.default.svc: 10.96.0.1
+https GET /version on the API server: HTTP 200
+$ kubectl exec -i stranger -- python -I - < probe.py (no Workflow label)
+dns kubernetes.default.svc: failed: gaierror
+https GET /version on the API server: failed: URLError
+
+## step 10: cleanup
 $ kubectl delete namespace p12-07-bookstore-ml p12-07-argo-events --wait=false
 namespace "p12-07-bookstore-ml" deleted
 namespace "p12-07-argo-events" deleted

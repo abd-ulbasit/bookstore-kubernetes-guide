@@ -1,4 +1,4 @@
-# Bookstore recommendations — SERVE image Makefile (Part 12 ch.06, X3b).
+# Bookstore recommendations — SERVE image Makefile (Part 12 ch.06).
 IMAGE ?= bookstore/recommender-serve:dev
 TRAIN_IMAGE ?= bookstore/recommender-train:dev
 PYTHON ?= python3

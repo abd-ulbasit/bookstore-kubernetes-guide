@@ -311,7 +311,8 @@ networkpolicy.networking.k8s.io/default-deny created
 
 The lab cluster's CNI is kindnet, the one that comes with kind. This lab checks
 that the policy is accepted and stored. It sends no traffic, so it does not
-show enforcement.
+show enforcement here; [ch.05](05-notebooks-and-interactive.md) applies a
+policy on the same cluster and captures a connection it blocks.
 [Part 02 ch.06](../02-networking/06-network-policies.md) covers enforcement,
 which needs a CNI that enforces the policy.
 

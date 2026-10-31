@@ -1,0 +1,183 @@
+# Bookstore, Part 12 ch.08 "ML platform, cost, and MLOps": the MLflow tracker
+# with basic authentication. The image is built from ./Dockerfile
+# (bookstore/mlflow-auth:dev in the lab). The Secret that the Deployment reads
+# is created at apply time from three generated or external inputs; see the
+# chapter. Nothing secret is in this file.
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: mlflow
+  labels:
+    app.kubernetes.io/part-of: mlflow
+    pod-security.kubernetes.io/enforce: restricted
+    pod-security.kubernetes.io/enforce-version: latest
+    pod-security.kubernetes.io/audit: restricted
+    pod-security.kubernetes.io/audit-version: latest
+    pod-security.kubernetes.io/warn: restricted
+    pod-security.kubernetes.io/warn-version: latest
+---
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: mlflow
+  namespace: mlflow
+automountServiceAccountToken: false
+---
+# Ingress is denied by default. Only the bookstore-ml namespace may reach the
+# tracker, selected by its name (the part-of label is shared by other
+# namespaces in this guide, so it does not identify bookstore-ml alone).
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: default-deny
+  namespace: mlflow
+spec:
+  podSelector: {}
+  policyTypes: ["Ingress", "Egress"]
+---
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: allow-bookstore-ml
+  namespace: mlflow
+spec:
+  podSelector:
+    matchLabels:
+      app.kubernetes.io/name: mlflow
+  policyTypes: ["Ingress"]
+  ingress:
+    - from:
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: bookstore-ml
+      ports:
+        - protocol: TCP
+          port: 5000
+---
+# Egress: DNS, then the database and the artifact bucket. Both are open on
+# their ports to any address here. Before production, replace the two port
+# rules with ipBlock rules for the database and bucket addresses.
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: allow-tracker-egress
+  namespace: mlflow
+spec:
+  podSelector:
+    matchLabels:
+      app.kubernetes.io/name: mlflow
+  policyTypes: ["Egress"]
+  egress:
+    - to:
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: kube-system
+          podSelector:
+            matchLabels:
+              k8s-app: kube-dns
+      ports:
+        - protocol: UDP
+          port: 53
+        - protocol: TCP
+          port: 53
+    - ports:
+        - protocol: TCP
+          port: 5432
+        - protocol: TCP
+          port: 443
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: mlflow
+  namespace: mlflow
+spec:
+  type: ClusterIP
+  selector:
+    app.kubernetes.io/name: mlflow
+  ports:
+    - name: http
+      port: 5000
+      targetPort: http
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: mlflow
+  namespace: mlflow
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: mlflow
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: mlflow
+    spec:
+      serviceAccountName: mlflow
+      automountServiceAccountToken: false
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 65532        # the image's own user; set here as well
+        runAsGroup: 65532
+        seccompProfile:
+          type: RuntimeDefault
+      containers:
+        - name: mlflow
+          image: bookstore/mlflow-auth:dev   # built from ./Dockerfile; pin by digest in production
+          command: ["/bin/sh", "-c"]
+          args:
+            - >-
+              exec mlflow server --host 0.0.0.0 --port 5000
+              --app-name basic-auth
+              --backend-store-uri "$(cat /etc/mlflow-auth/backend-store-uri)"
+              --artifacts-destination "$ARTIFACT_ROOT"
+          env:
+            - name: MLFLOW_AUTH_CONFIG_PATH
+              value: /etc/mlflow-auth/basic_auth.ini
+            - name: MLFLOW_FLASK_SERVER_SECRET_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: mlflow-auth
+                  key: flask-secret-key
+            - name: ARTIFACT_ROOT
+              value: s3://example-bucket/mlflow   # placeholder: your bucket
+          ports:
+            - name: http
+              containerPort: 5000
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities:
+              drop: ["ALL"]
+          resources:
+            requests:
+              cpu: 250m
+              memory: 512Mi
+            limits:
+              memory: 1Gi
+          volumeMounts:
+            - name: tmp
+              mountPath: /tmp
+            - name: auth
+              mountPath: /etc/mlflow-auth
+              readOnly: true
+            - name: db
+              mountPath: /var/lib/mlflow-db
+      volumes:
+        - name: tmp
+          emptyDir: {}
+        # Lab only: the lab has no PostgreSQL, so its first start keeps a SQLite
+        # file here. With the external database URI in the Secret this volume
+        # is not needed and should be removed.
+        - name: db
+          emptyDir: {}
+        - name: auth
+          secret:
+            secretName: mlflow-auth
+            items:
+              - key: basic_auth.ini
+                path: basic_auth.ini
+              - key: backend-store-uri
+                path: backend-store-uri
