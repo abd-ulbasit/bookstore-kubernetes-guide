@@ -1,0 +1,64 @@
+# Bookstore Platform v2 — Part 13 ch.02: the provider's reach, narrowed by a
+# ValidatingAdmissionPolicy. The provider ClusterRole (13.02 section 1) is
+# bound cluster-wide, so on its own it lets the provider create a RoleBinding
+# to bookstore-platform-tenant-admin in ANY namespace, kube-system included,
+# and then read Secrets there. This policy adds the missing scope:
+#
+#   - RoleBindings may be created or changed only in a tenant namespace (one
+#     carrying the bookstore-platform.example.com/tenant label, which the
+#     Composition stamps), and only to reference bookstore-platform-tenant-admin.
+#   - Namespaces may be updated or deleted by the provider only when they are
+#     tenant namespaces.
+#
+# The match is on the provider's identity: any ServiceAccount whose name starts
+# with provider-kubernetes, in any namespace. Humans and the Argo CD
+# ServiceAccount are not matched, so their rights are unchanged.
+#
+# Apply (after the provider ClusterRole and binding from 13.02 section 1):
+#   kubectl apply -f examples/bookstore-platform/crossplane/provider-scope-policy.yaml
+apiVersion: admissionregistration.k8s.io/v1
+kind: ValidatingAdmissionPolicy
+metadata:
+  name: bookstore-platform-provider-scope
+  labels:
+    app.kubernetes.io/part-of: bookstore-platform
+spec:
+  failurePolicy: Fail
+  matchConstraints:
+    resourceRules:
+      - apiGroups: ["rbac.authorization.k8s.io"]
+        apiVersions: ["v1"]
+        operations: ["CREATE", "UPDATE"]
+        resources: ["rolebindings"]
+      - apiGroups: [""]
+        apiVersions: ["v1"]
+        operations: ["UPDATE", "DELETE"]
+        resources: ["namespaces"]
+  matchConditions:
+    - name: provider-identity
+      expression: "request.userInfo.username.matches('^system:serviceaccount:[^:]+:provider-kubernetes')"
+  validations:
+    - expression: >-
+        request.resource.resource != 'rolebindings' ||
+        (has(namespaceObject.metadata.labels) &&
+         'bookstore-platform.example.com/tenant' in namespaceObject.metadata.labels)
+      message: "The provider may bind roles only in a tenant namespace."
+    - expression: >-
+        request.resource.resource != 'rolebindings' ||
+        object.roleRef.name == 'bookstore-platform-tenant-admin'
+      message: "The provider may reference only bookstore-platform-tenant-admin."
+    - expression: >-
+        request.resource.resource != 'namespaces' ||
+        (has(oldObject.metadata.labels) &&
+         'bookstore-platform.example.com/tenant' in oldObject.metadata.labels)
+      message: "The provider may update or delete only tenant namespaces."
+---
+apiVersion: admissionregistration.k8s.io/v1
+kind: ValidatingAdmissionPolicyBinding
+metadata:
+  name: bookstore-platform-provider-scope
+  labels:
+    app.kubernetes.io/part-of: bookstore-platform
+spec:
+  policyName: bookstore-platform-provider-scope
+  validationActions: ["Deny"]

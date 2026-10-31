@@ -1,13 +1,14 @@
 # `platform-base/` — the cluster-wide foundation
 
 Cluster-scoped objects that every region applies before any tenant or
-application workload lands. Applied by the root ApplicationSet
-(`../argocd/applicationset-platform.yaml`) into each region.
+application workload lands. Argo CD syncs the root ApplicationSet
+(`../argocd/applicationset-platform.yaml`) into each region, except
+`01-rbac.yaml`, which a person applies by hand (13.03 step 3).
 
 | File | Kind(s) | Purpose |
 |------|---------|---------|
 | `00-namespaces.yaml` | `Namespace` × 3 | `bookstore-platform`, `bookstore-platform-system`, `bookstore-platform-ml`. All PSA `enforce: restricted`. |
-| `01-rbac.yaml` | `ClusterRole` × 3 | `bookstore-platform-admin` (break-glass) · `bookstore-platform-operator` (platform team daily) · `bookstore-platform-tenant-admin` (bound per-tenant by the Composition). |
+| `01-rbac.yaml` (not synced by Argo CD) | `ClusterRole` × 3 | `bookstore-platform-admin` (break-glass) · `bookstore-platform-operator` (platform team daily) · `bookstore-platform-tenant-admin` (bound per-tenant by the Composition). |
 | `02-priorityclasses.yaml` | `PriorityClass` × 7 | Platform priority ladder (data > edge > critical > async > ml-serving > batch > ml-batch). |
 | `03-kueue-clusterqueue.yaml` | `ClusterQueue`, `ResourceFlavor` | Cluster-wide Kueue fairness envelope for ML training (Part 12 ch.03 deepened in 13.08). |
 

@@ -8,7 +8,9 @@
 # 0.29.1 (operator 1.30.1).
 # The chapter's SA and token Secret apply runs as a server dry run here.
 # Nothing is installed on the shared cluster: charts are rendered with helm
-# template and dry-run on the server. Chapter CR manifests are checked offline
+# template and dry-run on the server. Step 10 is the one exception: it creates
+# a ServiceAccount, token Secret, ClusterRole and ClusterRoleBinding for real
+# to test their reach, then deletes them and its namespace in the same step. Chapter CR manifests are checked offline
 # against the chart CRD schemas. Namespaces are deleted at the end.
 
 ## step 1: namespaces with Pod Security labels
@@ -241,3 +243,48 @@ Cluster standby-ap-southeast: ok
 $ python3 check-crd-schema (applicationset-platform.yaml against the Argo CD CRD)
 ApplicationSet platform-base: ok
 
+## step 10: Argo CD ServiceAccount reach, and the platform-base RBAC refusal
+$ kubectl create namespace p13-03-platform-system
+Error from server (AlreadyExists): namespaces "p13-03-platform-system" already exists
+$ kubectl apply -f - <<'YAML'   (ServiceAccount, token Secret, ClusterRole and ClusterRoleBinding for Argo CD)
+serviceaccount/argocd-platform-sync created
+secret/argocd-platform-sync-token created
+clusterrole.rbac.authorization.k8s.io/argocd-platform-sync created
+clusterrolebinding.rbac.authorization.k8s.io/argocd-platform-sync created
+$ for check in ...; do kubectl auth can-i <check> --as=<argocd-platform-sync>; done
+create namespaces                                              yes
+create PriorityClasses                                         yes
+create ClusterRoles                                            no
+create ClusterRoleBindings                                     no
+escalate ClusterRoles                                          no
+create RoleBindings in a tenant namespace                      no
+get Secrets in a tenant namespace                              no
+get Secrets in the platform system namespace                   no
+create Pods in a tenant namespace                              no
+create Argo CD Applications in argocd                          no
+$ kubectl create -f - (SubjectAccessReview for Kueue; Kueue is not installed on this cluster, so can-i cannot resolve it)
+create ClusterQueues                                           true
+create ResourceFlavors                                         true
+delete ClusterQueues                                           false
+create LocalQueues in a tenant namespace                       false
+$ kubectl apply --dry-run=server -f platform-base/02-priorityclasses.yaml --as=<argocd-platform-sync>
+priorityclass.scheduling.k8s.io/bookstore-platform-ml-serving created (server dry run)
+priorityclass.scheduling.k8s.io/bookstore-platform-batch created (server dry run)
+priorityclass.scheduling.k8s.io/bookstore-platform-ml-batch created (server dry run)
+$ kubectl apply --dry-run=server -f platform-base/01-rbac.yaml --as=<argocd-platform-sync>
+Error from server (Forbidden): error when retrieving current configuration of:
+Resource: "rbac.authorization.k8s.io/v1, Resource=clusterroles", GroupVersionKind: "rbac.authorization.k8s.io/v1, Kind=ClusterRole"
+Name: "bookstore-platform-admin", Namespace: ""
+from server for: "full-guide/examples/bookstore-platform/platform-base/01-rbac.yaml": clusterroles.rbac.authorization.k8s.io "bookstore-platform-admin" is forbidden: User "system:serviceaccount:p13-03-platform-system:argocd-platform-sync" cannot get resource "clusterroles" in API group "rbac.authorization.k8s.io" at the cluster scope
+Error from server (Forbidden): error when retrieving current configuration of:
+Resource: "rbac.authorization.k8s.io/v1, Resource=clusterroles", GroupVersionKind: "rbac.authorization.k8s.io/v1, Kind=ClusterRole"
+Name: "bookstore-platform-operator", Namespace: ""
+from server for: "full-guide/examples/bookstore-platform/platform-base/01-rbac.yaml": clusterroles.rbac.authorization.k8s.io "bookstore-platform-operator" is forbidden: User "system:serviceaccount:p13-03-platform-system:argocd-platform-sync" cannot get resource "clusterroles" in API group "rbac.authorization.k8s.io" at the cluster scope
+Error from server (Forbidden): error when retrieving current configuration of:
+Resource: "rbac.authorization.k8s.io/v1, Resource=clusterroles", GroupVersionKind: "rbac.authorization.k8s.io/v1, Kind=ClusterRole"
+Name: "bookstore-platform-tenant-admin", Namespace: ""
+from server for: "full-guide/examples/bookstore-platform/platform-base/01-rbac.yaml": clusterroles.rbac.authorization.k8s.io "bookstore-platform-tenant-admin" is forbidden: User "system:serviceaccount:p13-03-platform-system:argocd-platform-sync" cannot get resource "clusterroles" in API group "rbac.authorization.k8s.io" at the cluster scope
+$ kubectl delete clusterrolebinding argocd-platform-sync; kubectl delete clusterrole argocd-platform-sync; kubectl delete namespace p13-03-platform-system
+clusterrolebinding.rbac.authorization.k8s.io "argocd-platform-sync" deleted
+clusterrole.rbac.authorization.k8s.io "argocd-platform-sync" deleted
+namespace "p13-03-platform-system" deleted

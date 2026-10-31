@@ -6,6 +6,9 @@
 # Versions: kubectl v1.37.2 against a Kubernetes 1.37 cluster, helm v4.1.4,
 # bitnami/keycloak 25.2.0 (Keycloak 26.3.3), istio charts 1.30.7.
 # Server dry runs only. No Keycloak, Istio control plane or workload ran.
+# Section 7 creates a stand-in namespace for istio-system, p13-04-istio-check, labelled
+# restricted, dry-runs the istiod Deployment in it and deletes it. The chapter
+# names it istio-system; the transcript records the substitution.
 # The Istio CRDs were not installed, so the RequestAuthentication and
 # AuthorizationPolicy manifests were not dry-run here.
 
@@ -60,3 +63,14 @@ $ helm template ztunnel istio/ztunnel --version 1.30.7 -n istio-node | kubectl a
 serviceaccount/ztunnel created (server dry run)
 Warning: would violate PodSecurity "restricted:latest": allowPrivilegeEscalation != false (container "istio-proxy" must set securityContext.allowPrivilegeEscalation=false), unrestricted capabilities (container "istio-proxy" must not include "NET_ADMIN", "NET_RAW", "SYS_ADMIN" in securityContext.capabilities.add), restricted volume types (volume "cni-ztunnel-sock-dir" uses restricted volume type "hostPath"), runAsNonRoot != true (container "istio-proxy" must not set securityContext.runAsNonRoot=false), runAsUser=0 (container "istio-proxy" must not set runAsUser=0), seccompProfile (pod or container "istio-proxy" must set securityContext.seccompProfile.type to "RuntimeDefault" or "Localhost")
 daemonset.apps/ztunnel created (server dry run)
+
+## 7. istiod under restricted, with the seccomp and ztunnel-namespace values
+$ kubectl create namespace istiod-check; kubectl label namespace istiod-check pod-security.kubernetes.io/enforce=restricted
+namespace/p13-04-istio-check created
+namespace/p13-04-istio-check labeled
+$ helm template istiod istio/istiod --version 1.30.7 -n istiod-check --set profile=ambient --set trustedZtunnelNamespace=istio-node --set pilot.seccompProfile.type=RuntimeDefault --show-only templates/deployment.yaml > istiod-deploy.yaml
+rendered: 1 Deployment
+$ kubectl apply --dry-run=server -n istiod-check -f istiod-deploy.yaml
+deployment.apps/istiod created (server dry run)
+$ kubectl delete namespace istiod-check
+namespace "p13-04-istio-check" deleted
