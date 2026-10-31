@@ -1,0 +1,77 @@
+# Transcript for 10-cloud-and-managed-kubernetes/06-node-autoscaling-cost-multicloud.md
+# Tier A: a kind v0.33.0 cluster named sf-pilot, one control-plane node named
+# sf-pilot-control-plane, Kubernetes v1.37.0. kubectl client v1.37.2, helm
+# v4.1.4. Karpenter chart and karpenter-crd chart at 1.15.1 (chart digest
+# sha256:5cbfa7669966457b42de2d52f7c4b743324603275af0d9343369cfd7da7c769b).
+# Nothing on AWS or GCP was used. Cloud behaviour in the chapter is cited, not run.
+# Recorded by running the chapter's commands from full-guide/ with the lab's own
+# namespaces: the chapter prints bookstore; this run used p10-06-scale and
+# p10-06-karpenter. The overflow manifest was applied with that namespace
+# substituted. Nothing else is edited.
+# Not run: the karpenter-crd install and the Karpenter controller install. The
+# cluster's heavy-install lock was held by another run, so the CRDs were not
+# installed. The controller was checked by a server dry-run of its rendered
+# manifests only, and the two kube-system objects were read, not applied.
+# The account number in the IRSA role ARN is redacted to <account-id>; nothing
+# else in this transcript is edited.
+# "# exit status" lines record the exit code of the command above them.
+## step 1: the overflow demo
+$ kubectl create namespace p10-06-scale
+namespace/p10-06-scale created
+$ kubectl label namespace p10-06-scale pod-security.kubernetes.io/enforce=restricted pod-security.kubernetes.io/audit=restricted pod-security.kubernetes.io/warn=restricted
+namespace/p10-06-scale labeled
+$ sed 's/namespace: bookstore/namespace: p10-06-scale/' overflow-demo.yaml | kubectl apply -f -
+serviceaccount/overflow-demo created
+deployment.apps/overflow-demo created
+$ kubectl -n p10-06-scale describe pod -l app=overflow-demo | sed -n '/^Events:/,$p'
+Events:
+  Type     Reason            Age   From               Message
+  ----     ------            ----  ----               -------
+  Warning  FailedScheduling  1s    default-scheduler  0/1 nodes are available: 1 Insufficient cpu. preemption: 0/1 nodes are available: 1 Preemption is not helpful for scheduling.
+$ kubectl -n p10-06-scale get pods
+NAME                             READY   STATUS    RESTARTS   AGE
+overflow-demo-5cc95fb7fc-v7crw   0/1     Pending   0          11s
+$ kubectl get nodes
+NAME                     STATUS   ROLES           AGE   VERSION
+sf-pilot-control-plane   Ready    control-plane   10h   v1.37.0
+$ kubectl version --client
+Client Version: v1.37.2
+Kustomize Version: v5.8.1
+## step 2: the controller chart, rendered and dry-run only
+$ kubectl create namespace p10-06-karpenter
+namespace/p10-06-karpenter created
+$ kubectl label namespace p10-06-karpenter pod-security.kubernetes.io/enforce=restricted pod-security.kubernetes.io/audit=restricted pod-security.kubernetes.io/warn=restricted
+namespace/p10-06-karpenter labeled
+$ helm template karpenter oci://public.ecr.aws/karpenter/karpenter --version 1.15.1 --namespace p10-06-karpenter --set settings.clusterName=sf-pilot --set settings.interruptionQueue=sf-pilot --set "serviceAccount.annotations.eks\.amazonaws\.com/role-arn=arn:aws:iam::<account-id>:role/KarpenterController" > rendered.yaml
+Pulled: public.ecr.aws/karpenter/karpenter:1.15.1
+Digest: sha256:5cbfa7669966457b42de2d52f7c4b743324603275af0d9343369cfd7da7c769b
+$ kubectl apply --dry-run=server -n p10-06-karpenter -f rendered.yaml
+poddisruptionbudget.policy/karpenter created (server dry run)
+serviceaccount/karpenter created (server dry run)
+clusterrole.rbac.authorization.k8s.io/karpenter-admin created (server dry run)
+clusterrole.rbac.authorization.k8s.io/karpenter-core created (server dry run)
+clusterrole.rbac.authorization.k8s.io/karpenter created (server dry run)
+clusterrolebinding.rbac.authorization.k8s.io/karpenter-core created (server dry run)
+clusterrolebinding.rbac.authorization.k8s.io/karpenter created (server dry run)
+role.rbac.authorization.k8s.io/karpenter created (server dry run)
+rolebinding.rbac.authorization.k8s.io/karpenter created (server dry run)
+service/karpenter created (server dry run)
+deployment.apps/karpenter created (server dry run)
+the namespace from the provided object "kube-system" does not match the namespace "p10-06-karpenter". You must pass '--namespace=kube-system' to perform this operation.
+the namespace from the provided object "kube-system" does not match the namespace "p10-06-karpenter". You must pass '--namespace=kube-system' to perform this operation.
+# exit status 1 (the two kube-system objects were refused by kubectl, not applied)
+$ kubectl get crd | grep -i karpenter
+# exit status 1 (no Karpenter CRD is installed on the cluster)
+## step 3: the NodePool and EC2NodeClass file, client dry-run
+$ cd full-guide && kubectl apply --dry-run=client -f examples/bookstore/cloud/karpenter-nodepool.yaml
+resource mapping not found for name: "bookstore-stateless" namespace: "" from "examples/bookstore/cloud/karpenter-nodepool.yaml": no matches for kind "NodePool" in version "karpenter.sh/v1"
+ensure CRDs are installed first
+resource mapping not found for name: "bookstore-data" namespace: "" from "examples/bookstore/cloud/karpenter-nodepool.yaml": no matches for kind "NodePool" in version "karpenter.sh/v1"
+ensure CRDs are installed first
+resource mapping not found for name: "bookstore-default" namespace: "" from "examples/bookstore/cloud/karpenter-nodepool.yaml": no matches for kind "EC2NodeClass" in version "karpenter.k8s.aws/v1"
+ensure CRDs are installed first
+# exit status 1
+## step 4: cleanup of the lab namespaces
+$ kubectl delete namespace p10-06-scale p10-06-karpenter
+namespace "p10-06-scale" deleted
+namespace "p10-06-karpenter" deleted
