@@ -128,7 +128,7 @@ PR — Part 15 ch.07's pattern).
 | A bad release passes analysis, or missing data reads as healthy | Queries scoped to the canary's pods, and `len(result) > 0` in every `successCondition`, so an empty result fails the gate | [06.01](../06-production-readiness/01-observability-metrics.md) |
 | Someone who should not move the rollout pauses, promotes or aborts it | A Role that binds pause, promote and abort to the release group only (Hands-on step 6) | [05.01](../05-security/01-authn-authz-rbac.md) |
 | The rollout changes outside Git, so the reviewed spec is not what runs | The Rollout changes only by pull request, and Argo CD reverts drift | [15.01](01-pr-to-production-lifecycle.md) |
-| A client sets `x-canary-cohort` to force the canary or to skip it | The edge drops any value a client sent (`edge/cohort-header-strip.yaml`), and the storefront sets the header from the verified session | [Part 11 ch.04](../11-advanced-production-patterns/04-service-mesh.md) |
+| A client sets `x-canary-cohort` to force the canary or to skip it | The edge drops any value a client sent, on every route (`edge/gateway.yaml` and `edge/cohort-header-strip.yaml`), and the storefront sets the header from the verified session | [Part 11 ch.04](../11-advanced-production-patterns/04-service-mesh.md) |
 
 ## Diagrams
 
@@ -655,8 +655,9 @@ so a client that sent `x-canary-cohort: internal` would reach the unreviewed
 canary, and one that sent `enterprise` would skip it. The route in
 `examples/bookstore-platform/edge/cohort-header-strip.yaml` removes the
 header with a `RequestHeaderModifier` filter before any hop sees it. Only
-the storefront sets it afterwards. Any other route that reaches the catalog
-needs the same filter.
+the storefront sets it afterwards. Every route in `edge/gateway.yaml` carries
+the same filter, because `/api/v1` also reaches the catalog, and a new route
+needs it too.
 
 ## Production notes
 

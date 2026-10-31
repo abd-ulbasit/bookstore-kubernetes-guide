@@ -1,8 +1,8 @@
 # Bookstore Platform, Part 15 ch.06: the edge drops any x-canary-cohort header
 # a client sent. The storefront sets the header from the verified session, so
-# the cohort is never the client's choice. The catch-all path gets this route;
-# the /static, /healthz and /api routes keep their own rules. Any other route
-# that reaches the catalog needs the same filter.
+# the cohort is never the client's choice. This route is the catch-all path;
+# every route in gateway.yaml carries the same filter, and a new route needs it
+# too. An unfiltered route would let a client pick its own canary cohort.
 apiVersion: gateway.networking.k8s.io/v1
 kind: HTTPRoute
 metadata:

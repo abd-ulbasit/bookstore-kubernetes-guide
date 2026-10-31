@@ -96,14 +96,15 @@ path "sys/leases/lookup/database/creds/bookstore-platform-*" {
   capabilities = ["list"]
 }
 
-# Revoke one lease by ID (the revoke subcommand). Vault ACLs cannot limit this
-# to a prefix, so it reaches any lease. Prefer revoke-prefix above.
-path "sys/leases/revoke" {
-  capabilities = ["update"]
-}
-
+# Revoke leases for this platform's database roles, including one lease by its
+# full ID, which is a prefix of itself. Vault requires sudo on this endpoint, and
+# the path keeps that sudo to this subtree.
+#
+# Do NOT grant sys/leases/revoke here. That endpoint takes the lease ID in the
+# request body, and the body wins over the path, so a path-scoped grant on it
+# still reaches any lease in Vault.
 path "sys/leases/revoke-prefix/database/creds/bookstore-platform-*" {
-  capabilities = ["update"]
+  capabilities = ["update", "sudo"]
 }
 
 # ── DENY (documentation of intent) ───────────────────────────────────────

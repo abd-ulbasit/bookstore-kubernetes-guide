@@ -72,6 +72,10 @@ spec:
         namespaces:
           from: All
 ---
+# Every rule below drops x-canary-cohort. The storefront sets that header from
+# the verified session, and the catalog's VirtualService routes on it, so a
+# client must not be able to choose its own cohort on any route. A new route
+# needs the same filter (see cohort-header-strip.yaml for the catch-all).
 # Public paths (no JWT required).
 apiVersion: gateway.networking.k8s.io/v1
 kind: HTTPRoute
@@ -95,6 +99,11 @@ spec:
         - path:
             type: Exact
             value: /favicon.ico
+      filters:
+        - type: RequestHeaderModifier
+          requestHeaderModifier:
+            remove:
+              - x-canary-cohort
       backendRefs:
         - name: storefront
           namespace: bookstore-platform-acme-books
@@ -118,6 +127,11 @@ spec:
         - path:
             type: PathPrefix
             value: /api/v2/search
+      filters:
+        - type: RequestHeaderModifier
+          requestHeaderModifier:
+            remove:
+              - x-canary-cohort
       backendRefs:
         - name: search
           namespace: bookstore-platform-acme-books
@@ -126,6 +140,11 @@ spec:
         - path:
             type: PathPrefix
             value: /api/v2/recommendations
+      filters:
+        - type: RequestHeaderModifier
+          requestHeaderModifier:
+            remove:
+              - x-canary-cohort
       backendRefs:
         - name: recommendations
           namespace: bookstore-platform-acme-books
@@ -134,6 +153,11 @@ spec:
         - path:
             type: PathPrefix
             value: /api/v2/payments
+      filters:
+        - type: RequestHeaderModifier
+          requestHeaderModifier:
+            remove:
+              - x-canary-cohort
       backendRefs:
         - name: payments-gateway
           namespace: bookstore-platform-payments
@@ -144,6 +168,11 @@ spec:
         - path:
             type: PathPrefix
             value: /api/v1
+      filters:
+        - type: RequestHeaderModifier
+          requestHeaderModifier:
+            remove:
+              - x-canary-cohort
       backendRefs:
         - name: catalog
           namespace: bookstore-platform-acme-books
@@ -169,6 +198,11 @@ spec:
             type: Exact
             value: /stripe/webhook
           method: POST
+      filters:
+        - type: RequestHeaderModifier
+          requestHeaderModifier:
+            remove:
+              - x-canary-cohort
       backendRefs:
         - name: payments-webhook-receiver
           namespace: bookstore-platform-payments
