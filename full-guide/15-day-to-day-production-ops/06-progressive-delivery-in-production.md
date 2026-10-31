@@ -569,7 +569,7 @@ Deployment's. The controller creates a ReplicaSet per template-hash
 (also like a Deployment) but adds the canary/blue-green orchestration:
 which RS is "stable", which is "canary", how to set their replica
 counts to match the step weight. The traffic routing (Istio
-VirtualService, Nginx Ingress, ALB) is what shifts the actual traffic
+VirtualService, a Gateway API HTTPRoute, ALB) is what shifts the actual traffic
 percentages — Argo Rollouts patches the routing object as part of each
 step. Without traffic routing, the percentage IS the replica ratio
 (works on kind; works in production at low scale; not good at high
