@@ -48,6 +48,7 @@ versions follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   and Part 05 contents lists and the Appendix F tag index include the new
   chapters, and `.gitattributes` no longer union-merges
   `security/namespace-exceptions.yaml`.
+- The Part 16 README names no private lab host.
 - A second audit sweep made the chapters say what they run. 05.01 runs
   anonymous requests and a Pod certificate with a lab signer on kind. 05.08
   runs the audit policy on a throwaway kind cluster and reads the log, as a

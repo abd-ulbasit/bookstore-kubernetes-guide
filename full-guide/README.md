@@ -120,12 +120,12 @@ Every chapter follows the same ten-section anatomy, in order:
 2. **Why this exists** — the problem it solves (motivation before mechanism)
 3. **Mental model** — a one-paragraph intuition
 4. **Threats and controls**: a table of the threats specific to the subject, the control the chapter teaches, and where the topic goes deeper
-5. **Diagram(s)** — Mermaid for flow/architecture/lifecycle, ASCII for inline structure
-6. **Hands-on with the Bookstore** — runnable, copy-pasteable, builds on the previous chapter
-7. **How it works under the hood** — internals depth, not just usage
-8. **Production notes** — HA, cloud differences, pitfalls/anti-patterns (`> **In production:**` callouts)
-9. **Quick Reference** — key `kubectl` commands + a minimal manifest skeleton + a short checklist
-10. **Further reading** — a specific book citation + the official docs URL
+5. **Diagram(s)**: Mermaid for flow/architecture/lifecycle, ASCII for inline structure
+6. **Hands-on with the Bookstore**: runnable, copy-pasteable, builds on the previous chapter
+7. **How it works under the hood**: internals depth, not just usage
+8. **Production notes**: HA, cloud differences, pitfalls/anti-patterns (`> **In production:**` callouts)
+9. **Quick Reference**: key `kubectl` commands + a minimal manifest skeleton + a short checklist
+10. **Further reading**: a specific book citation + the official docs URL
 
 A **Test your understanding** section, with at least one question on the
 chapter's security dimension, sits before Further reading.
@@ -134,7 +134,7 @@ chapter's security dimension, sits before Further reading.
 
 > **In production:** Throughout the guide, a block quote that begins with
 > **`In production:`** flags how something differs in a real production / managed
-> cloud environment versus the local kind setup — HA topology, cloud
+> cloud environment versus the local kind setup: HA topology, cloud
 > provider behavior, scale considerations, and anti-patterns to avoid. When you
 > are only learning locally you can skip these; when you go to production, they
 > are the important part.
@@ -144,7 +144,7 @@ chapter's security dimension, sits before Further reading.
 ## Prerequisites
 
 - Comfort with a Unix-like command line and basic Linux/HTTP concepts.
-- **Docker** (or another OCI runtime) — kind runs the cluster in containers.
+- **Docker** (or another OCI runtime): kind runs the cluster in containers.
 - **kubectl** — the Kubernetes CLI (install in [Part 00 ch.07](00-foundations/07-local-cluster-setup.md)).
 - **kind** for the local cluster.
 - ~4 GB RAM free for the local cluster + Bookstore.

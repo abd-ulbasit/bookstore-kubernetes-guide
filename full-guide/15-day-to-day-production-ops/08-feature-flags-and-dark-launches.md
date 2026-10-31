@@ -12,7 +12,7 @@
 > kill-switch use case as the most-valuable flag.
 
 **Estimated time:** ~30 min read · ~60 min hands-on
-**Prerequisites:** [Part 15 ch.07](./07-rollback-playbook.md) — rollback is the alternative this chapter decouples deploy from · [Part 15 ch.06](./06-progressive-delivery-in-production.md) — canary that flags complement, not replace · [Part 11 ch.10](../11-advanced-production-patterns/10-platform-engineering.md) — platform as a product
+**Prerequisites:** [Part 15 ch.07](./07-rollback-playbook.md): rollback is the alternative this chapter decouples deploy from · [Part 15 ch.06](./06-progressive-delivery-in-production.md): canary that flags complement, not replace · [Part 11 ch.10](../11-advanced-production-patterns/10-platform-engineering.md): platform as a product
 
 **You'll know after this:** • understand why decoupling deploy from release unlocks the four flag use-cases: dark launch, canary by cohort, A/B experiment, kill switch · • choose between Flagsmith (self-hosted, this chapter's default), LaunchDarkly (SaaS, data-residency cost), Unleash (self-hosted alt), OpenFeature (SDK abstraction) · • implement a <60-second kill switch as the most-valuable flag use case · • avoid stale-flag accumulation through a flag-cleanup cadence · • distinguish a flag from a config and keep each in the right system
 
