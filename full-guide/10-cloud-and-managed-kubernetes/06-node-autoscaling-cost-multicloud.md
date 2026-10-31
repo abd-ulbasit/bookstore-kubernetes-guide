@@ -65,7 +65,8 @@ Kubernetes* (Autoscaling / Multitenancy) and the Karpenter docs.
 > keeps that name, and `examples/security-lab/evidence/10-06.txt` records the
 > namespace substitution. The Karpenter objects were checked against the CRD
 > schema of the pinned chart. The controller was checked by a server dry-run
-> of its rendered manifests, because the CRDs are not installed on the lab.
+> of its rendered manifests. The CRDs were not installed, because the lab's
+> heavy-install lock was held by another run (section 6).
 
 ## Mental model
 
@@ -141,10 +142,10 @@ committed-use discounts. Out of order, you optimise air.
 
 | Threat | Control taught here | Goes deeper in |
 |---|---|---|
-| A node provisioner that can pass any role launches nodes under a role it should not hold | Scope `iam:PassRole` to the one node role ARN, and keep that node role minimal | [ch.03](03-cloud-identity.md) |
-| A scale-up as a cost attack: a flood of requests, or a runaway HPA, buys nodes | Bound the pool (`limits`) and the Pods (namespace ResourceQuota) | [Part 06 ch.04](../06-production-readiness/04-autoscaling.md) |
+| A node provisioner that can pass any role launches nodes under a role it should not hold | Scope `iam:PassRole` to the one node role ARN, with `iam:PassedToService` (the statement below) | The node role itself: [ch.03](03-cloud-identity.md) |
+| A scale-up as a cost attack: a flood of requests, or a runaway HPA, buys nodes | Bound the pool (`limits`, which Karpenter checks eventually, so it can overrun) and the Pods (namespace ResourceQuota) | [Part 06 ch.04](../06-production-readiness/04-autoscaling.md) |
 | `alias: al2023@latest` moves every node to a new image with no review | Pin a reviewed AMI alias release, and roll it on purpose | [Part 08 ch.01](../08-day-2-operations/01-cluster-lifecycle.md) |
-| Spot capacity under the data tier | An on-demand pool, tainted, that Postgres requires | [ch.05](05-cloud-storage-and-data.md) |
+| Spot capacity under the data tier | An on-demand pool, tainted, and a required node-affinity term in the Postgres overlay (section 4) | [ch.05](05-cloud-storage-and-data.md) |
 
 The controller is the most privileged piece in this chapter, and its scope is
 set in two places. Its IAM role must pass the node role and nothing else. AWS
@@ -152,6 +153,24 @@ describes `iam:PassRole` as the permission that lets a principal hand a role to
 a service, and it advises limiting that permission with the `Resource` element,
 not a tag condition, because tag conditions on PassRole do not give reliable
 results ([AWS IAM, checked 2026-10-31](https://docs.aws.amazon.com/IAM/latest/UserGuide/id_roles_use_passrole.html)).
+
+The scoped statement goes on the Karpenter controller's role. It names the one
+node role, and it passes that role only to EC2, using the `iam:PassedToService`
+condition key that the same AWS page documents. This is a fragment of the
+controller's policy, cited and not run. The node role name is the placeholder
+from `karpenter-nodepool.yaml`.
+
+```json
+{
+  "Effect": "Allow",
+  "Action": "iam:PassRole",
+  "Resource": "arn:aws:iam::123456789012:role/KarpenterNodeRole-bookstore",
+  "Condition": {
+    "StringEquals": { "iam:PassedToService": "ec2.amazonaws.com" }
+  }
+}
+```
+
 Its in-cluster RBAC is wide as well. The chart's `karpenter-core` ClusterRole
 can create `pods/eviction`, delete Pods in every namespace, and patch or delete
 Nodes. Its only namespaced grant in `kube-system` is `get` on the `kube-dns` Service. Keep the
@@ -251,8 +270,30 @@ Pod autoscaling actually deliver capacity.
 
 You can reproduce the overflow on the lab cluster. This step is deliberate: the
 manifest below is a complete workload with the baseline, and its one container
-asks for 64 CPUs, more than the lab node has (4), so the scheduler cannot place
-it. Delete it as soon as you have seen the result. On a cloud cluster the same
+asks for 64 CPUs. Check the lab node's allocatable CPU first:
+
+```sh
+kubectl get nodes -o jsonpath='{.items[*].status.allocatable.cpu}{"\n"}'
+```
+
+<!-- gate: output -->
+```
+4
+```
+
+So the scheduler cannot place a 64-CPU Pod. Run the demo in a throwaway
+namespace, not `bookstore`. The Bookstore namespace carries a ResourceQuota
+(`requests.cpu: "2"`) and a LimitRange (container maximum of 2 CPUs), so the
+ReplicaSet cannot create a 64-CPU Pod at all, and no `Pending` Pod appears.
+Create a quota-free namespace with restricted labels:
+
+```sh
+kubectl create namespace overflow-lab
+kubectl label namespace overflow-lab pod-security.kubernetes.io/enforce=restricted \
+  pod-security.kubernetes.io/audit=restricted pod-security.kubernetes.io/warn=restricted
+```
+
+Delete the demo as soon as you have seen the result. On a cloud cluster the same
 `Pending` Pod makes Karpenter buy a node.
 
 ```yaml
@@ -260,14 +301,14 @@ apiVersion: v1
 kind: ServiceAccount
 metadata:
   name: overflow-demo
-  namespace: bookstore
+  namespace: overflow-lab
 automountServiceAccountToken: false
 ---
 apiVersion: apps/v1
 kind: Deployment
 metadata:
   name: overflow-demo
-  namespace: bookstore
+  namespace: overflow-lab
 spec:
   replicas: 1
   selector:
@@ -310,8 +351,8 @@ spec:
 
 ```sh
 kubectl apply -f overflow-demo.yaml
-kubectl -n bookstore describe pod -l app=overflow-demo | sed -n '/^Events:/,$p'
-kubectl -n bookstore get pods
+kubectl -n overflow-lab describe pod -l app=overflow-demo | sed -n '/^Events:/,$p'
+kubectl -n overflow-lab get pods
 ```
 
 <!-- gate: output -->
@@ -334,8 +375,11 @@ Bookstore NodePool (illustrative, not captured), Karpenter reads the same
 `Pending` Pod and launches a node that fits it, if the requirements and
 `limits` allow an instance that large. One request buys one large node. That
 is the cost attack in miniature. The `limits` block caps the pool's total, so a
-runaway scale-up stops at the cap, not at the price. Remove the demo with
-`kubectl -n bookstore delete deploy/overflow-demo sa/overflow-demo`.
+runaway scale-up stops at the cap, not at the price. Karpenter checks `limits`
+eventually, so a rapid scale-out can overrun the cap, and its docs say so
+([Karpenter NodePools](https://karpenter.sh/docs/concepts/nodepools/), checked
+2026-10-31, cited not run). Remove the demo with
+`kubectl delete namespace overflow-lab`.
 
 ### 2. Install Karpenter (pinned Helm) — the lead path on EKS
 
@@ -420,9 +464,9 @@ kubectl get nodepool,ec2nodeclass
 # consolidate when load drops:
 kubectl get nodeclaims -w        # Karpenter creating/removing nodes
 kubectl get nodes -L karpenter.sh/capacity-type -L topology.kubernetes.io/zone
-#   stateless Pods land on SPOT nodes, AZ-spread. Postgres moves to the data
-#   pool only after its owner change (section 4); until then it can land on any
-#   node its tolerations allow, spot included.
+#   stateless Pods land on SPOT nodes, AZ-spread. Postgres stays on the data
+#   pool only with the section 4 overlay; without it, it can land on any node
+#   its tolerations allow, spot included.
 ```
 
 ### 4. The spot + PDB story for the stateless tiers (no app change)
@@ -451,33 +495,36 @@ The Bookstore is **already built for spot** — no manifest change needed:
   least the longest `preStop` plus grace period these tiers rely on, or the
   drain cuts them short.
 
-The **data tier stays off spot**, and this is the one change the chapter asks
-for outside the Karpenter file. The `bookstore-data` pool is on-demand only and
-tainted `dedicated=database:NoSchedule`, so only Pods that tolerate that taint
-can land on it. The canonical Postgres manifest tolerates the taint, but it
-only *prefers* the `dedicated=database` label. Until the owner makes that label
-a requirement, Postgres can land on a spot node in the stateless pool.
+The **data tier stays off spot**, and the cloud overlay below is part of that
+control. The `bookstore-data` pool is on-demand only and tainted
+`dedicated=database:NoSchedule`, so only Pods that tolerate that taint can land
+on it. The canonical Postgres manifest tolerates the taint, but it only
+*prefers* the `dedicated=database` label, and a preference alone lets Postgres
+land on a spot node in the stateless pool.
 [`20-postgres-statefulset.yaml`](../examples/bookstore/raw-manifests/20-postgres-statefulset.yaml)
-is canonical, so this chapter does not edit it. The owner adds a required term
-beside the preferred one, in the cloud overlay (not the base), because the lab's
-single-node kind cluster has no such node and would leave Postgres `Pending`:
+is canonical, so this chapter does not edit it. The cloud overlay adds a
+required term beside the preferred one:
 
 ```yaml
-# Owner change to 20-postgres-statefulset.yaml, under affinity.nodeAffinity,
-# beside the existing preferred term. A fragment, so it has no kind.
-requiredDuringSchedulingIgnoredDuringExecution:
-  nodeSelectorTerms:
-    - matchExpressions:
-        - key: dedicated
-          operator: In
-          values: ["database"]
+# illustrative overlay fragment: a Kustomize patch on the Postgres StatefulSet
+# (20-postgres-statefulset.yaml). It has no kind of its own.
+spec:
+  template:
+    spec:
+      affinity:
+        nodeAffinity:
+          requiredDuringSchedulingIgnoredDuringExecution:
+            nodeSelectorTerms:
+              - matchExpressions:
+                  - key: dedicated
+                    operator: In
+                    values: ["database"]
 ```
 
-With that term in place, Postgres can land only on the data pool, which is
-on-demand only. Until then, "the data tier stays off spot" is a gap. It is the
-[Part 06 ch.06](../06-production-readiness/06-capacity-and-cost.md) rule (spot
-the stateless, never the data), realised by Karpenter config plus one owner
-change. Postgres's zonal disk still pins it to one zone
+With the overlay applied, Postgres can land only on the data pool, which is
+on-demand only. The lab's single-node kind cluster has no node with that label,
+so the overlay is cited and not applied there: the Pod would stay `Pending`.
+The data pool's zonal disk still pins Postgres to one zone
 ([ch.05](05-cloud-storage-and-data.md)).
 
 ### 5. Cost & FinOps on the Bookstore (the loop, cloud-priced)

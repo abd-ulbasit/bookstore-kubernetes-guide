@@ -257,20 +257,47 @@ never `kubectl apply -f .../releases/latest/download/<PINNED-FILE>.yaml`**
 (that 404s the moment a newer release ships; the same rule Part 06/07/08 used
 for KEDA, kube-prometheus-stack, Velero):
 
+Each add-on gets a namespace of its own, labelled `restricted`, the strictest
+Pod Security level. Neither goes into `kube-system`, the namespace the
+cluster's own components use. The LB controller chart leaves its
+`securityContext` capabilities commented out and sets no seccomp profile, so
+the flags below set both. They also pin the image by digest. The ExternalDNS
+chart's defaults already meet `restricted`, so its install needs only the
+namespace label and the digest pin. Both digests are the multi-arch index
+digests that the registries returned for the pinned tags on 2026-10-31.
+
 ```sh
 # Chart versions are the current releases from `helm show chart`, checked
 # 2026-10-31. Run `helm show chart` again before you copy them.
 
+kubectl create namespace aws-load-balancer-controller
+kubectl label namespace aws-load-balancer-controller \
+  pod-security.kubernetes.io/enforce=restricted
+
 # AWS Load Balancer Controller (lead path). It needs an IRSA role (ch.03) so
-# the controller Pod can call ELB APIs with NO static key:
+# the controller Pod can call ELB APIs with NO static key. The role's trust
+# policy must name this namespace and ServiceAccount in its `sub` condition:
+# system:serviceaccount:aws-load-balancer-controller:aws-load-balancer-controller
 helm repo add eks https://aws.github.io/eks-charts && helm repo update
 helm install aws-load-balancer-controller eks/aws-load-balancer-controller \
-  -n kube-system --version 3.6.2 \
+  -n aws-load-balancer-controller --version 3.6.2 \
   --set clusterName=$CLUSTER_NAME \
+  --set region=$AWS_REGION \
+  --set vpcId=$VPC_ID \
+  --set image.tag="v3.6.2@sha256:fd51f0ec82f8d357837aa57fdfaa4fca7137b75f25a09b421d95c425c9dc2d94" \
+  --set podSecurityContext.seccompProfile.type=RuntimeDefault \
+  --set 'securityContext.capabilities.drop[0]=ALL' \
+  --set securityContext.runAsUser=65532 \
+  --set resources.requests.cpu=100m \
+  --set resources.requests.memory=128Mi \
+  --set resources.limits.memory=128Mi \
   --set serviceAccount.create=true \
   --set serviceAccount.annotations."eks\.amazonaws\.com/role-arn"=arn:aws:iam::123456789012:role/aws-lb-controller
 # (the role's policy is AWS's published least-priv LB-controller policy; the
-#  SA→role trust is IRSA from ch.03 — zero static keys, same pattern.)
+#  SA→role trust is IRSA from ch.03, so there are zero static keys.)
+
+kubectl create namespace external-dns
+kubectl label namespace external-dns pod-security.kubernetes.io/enforce=restricted
 
 # ExternalDNS (writes Route53 records from Ingress/Service hosts), also IRSA:
 helm repo add external-dns https://kubernetes-sigs.github.io/external-dns/ && helm repo update
@@ -278,20 +305,31 @@ helm repo add external-dns https://kubernetes-sigs.github.io/external-dns/ && he
 # when more than one ExternalDNS shares a zone, and it lets policy=sync delete
 # only the records this instance created. The chart requires policy and gives
 # it no default, so it is set explicitly.
-helm install external-dns external-dns/external-dns -n kube-system --version 1.23.0 \
+helm install external-dns external-dns/external-dns -n external-dns --version 1.23.0 \
   --set provider=aws \
   --set "domainFilters[0]=your-org.com" \
   --set policy=sync \
   --set "txtOwnerId=$CLUSTER_NAME" \
+  --set image.tag="v0.23.0@sha256:1854499e2b08cee47c40a08e356bff20dcb192dbcfde8378fc3f900f12cad5a3" \
   --set serviceAccount.annotations."eks\.amazonaws\.com/role-arn"=arn:aws:iam::123456789012:role/external-dns
 ```
+
+`region` and `vpcId` are set because the controller otherwise reads them from
+the instance metadata service. ch.03 sets the node's hop limit to 1, and a Pod
+adds a network hop beyond the node, so a Pod's metadata request does not
+return. The AWS installation page says the controller needs a hop limit of 2 or
+higher for that introspection, or the region and VPC passed as flags
+([AWS LB Controller installation][aws-lb-install]). This chapter passes the
+flags and keeps ch.03's hop limit of 1, so the node stays closed. Pass
+`vpcTags` in place of `vpcId` if your VPC is found by tags; the chart lists the
+two as alternatives.
 
 GKE/AKS equivalents: GKE's Ingress/Gateway controllers are built in (no
 controller to install; annotate the object); AKS uses the **App Gateway
 Ingress Controller (AGIC)** add-on or ingress-nginx; ExternalDNS installs the
 same way with `provider=google` or `provider=azure`.
 
-### 3. The unchanged Bookstore objects + cloud annotations (as an overlay)
+### 3. The Bookstore objects, unedited, with cloud overlays
 
 The Bookstore's edge is already
 [`50-ingress.yaml`](../examples/bookstore/raw-manifests/50-ingress.yaml) (or
@@ -303,21 +341,31 @@ prod Kustomize overlay patch or a Helm value would inject):
 
 ```yaml
 # illustrative overlay fragment: a Kustomize patch or a Helm value merges it
-# into the EXISTING Ingress from 50-ingress.yaml. The base file is not
-# modified. The fragment has no kind of its own, so nothing applies it alone.
+# into the EXISTING Ingress from 50-ingress.yaml. The base file is not edited.
+# The fragment has no kind of its own, so nothing applies it alone.
 metadata:
   annotations:
     alb.ingress.kubernetes.io/scheme: internet-facing   # a choice: the default is internal
     alb.ingress.kubernetes.io/target-type: ip           # direct to Pod (VPC CNI)
     alb.ingress.kubernetes.io/certificate-arn: arn:aws:acm:us-east-1:123456789012:certificate/abcd
     alb.ingress.kubernetes.io/listen-ports: '[{"HTTPS":443}]'
-    # 0.0.0.0/0 and ::/0 are the defaults, and they fit a public storefront.
-    # Narrow them for an Ingress that only admins should reach.
+    # IPv4 defaults to 0.0.0.0/0, and dualstack to both ranges. Set them on purpose.
     alb.ingress.kubernetes.io/inbound-cidrs: '0.0.0.0/0,::/0'
+    # The base paths are ingress-nginx regex paths, so the ALB matches them as regex.
+    alb.ingress.kubernetes.io/use-regex-path-match: "true"
+    # The controller does not read ingress-nginx's rewrite-target. A url-rewrite
+    # transform strips the /api/<svc> prefix instead. The name after
+    # "transforms." is the backing Service's name.
+    alb.ingress.kubernetes.io/transforms.catalog: '[{"type":"url-rewrite","urlRewriteConfig":{"rewrites":[{"regex":"^/api/books(/|$)(.*)$","replace":"/$2"}]}}]'
+    alb.ingress.kubernetes.io/transforms.orders: '[{"type":"url-rewrite","urlRewriteConfig":{"rewrites":[{"regex":"^/api/orders(/|$)(.*)$","replace":"/$2"}]}}]'
     external-dns.alpha.kubernetes.io/hostname: bookstore.your-org.com   # ExternalDNS
 spec:
   ingressClassName: alb                  # the cloud controller (NOT nginx) owns it
-  # routing rules: unchanged from 50-ingress.yaml (same hosts and paths)
+  # spec.tls is removed: ACM terminates TLS, and the bookstore-tls Secret belongs
+  # to ingress-nginx.
+  rules:
+    - host: bookstore.your-org.com       # the host ExternalDNS publishes
+      # http paths: the same regex paths as 50-ingress.yaml
 ```
 
 ```sh
@@ -327,8 +375,19 @@ spec:
 kubectl get ingress bookstore -n bookstore     # ADDRESS = the ALB DNS name
 kubectl describe ingress bookstore -n bookstore  # events: ALB provisioned/programmed
 # ExternalDNS log shows the Route53 upsert; then:
-curl https://bookstore.your-org.com/api/books   # internet -> ALB -> catalog
+curl https://bookstore.your-org.com/api/books   # internet -> ALB (transform strips the prefix) -> catalog
 ```
+
+Three changes make the base Ingress work on the ALB. The host becomes the DNS
+name ExternalDNS publishes, because the ALB matches the Ingress host and
+`bookstore.localdev.me` is a kind name. The path regexes need
+`use-regex-path-match`, which AWS documents as off by default and as applying
+only to `pathType: ImplementationSpecific`, the type the base paths use
+([AWS LB Controller Ingress annotations][aws-lb-ing]). The `/api/<svc>` strip
+moves into a `transforms` annotation per backend. The AWS page gives the
+`url-rewrite` shape with a `$1` capture reference. The `$2` form above has the
+same shape, but this chapter has not run it on an ALB, so check it in the cloud
+before you rely on it.
 
 For a pure L4 exposure of just `storefront` (no L7 routing), the Service
 `type: LoadBalancer` form is the alternative. It gets one cloud load balancer
@@ -348,6 +407,7 @@ metadata:
     service.beta.kubernetes.io/aws-load-balancer-type: external
     service.beta.kubernetes.io/aws-load-balancer-nlb-target-type: ip
     service.beta.kubernetes.io/aws-load-balancer-scheme: internal
+    service.beta.kubernetes.io/aws-load-balancer-target-group-attributes: preserve_client_ip.enabled=true
     service.beta.kubernetes.io/load-balancer-source-ranges: 10.0.0.0/16
 spec:
   type: LoadBalancer
@@ -371,16 +431,22 @@ spec:
   source ranges.
 - `loadBalancerSourceRanges` is the Kubernetes field for the client CIDRs
   allowed through, and the AWS annotation sets the same control. The AWS
-  default is `0.0.0.0/0`, so setting it is what narrows access. On AKS the
-  check runs before traffic is rewritten, so the rule sees the client address
-  ([AKS network policies][aks-netpol]).
+  Service annotations page says that annotation "will be ignored in case
+  preserve client IP is not enabled", and that preservation is disabled by
+  default for IP targets ([AWS Service annotations][aws-lb-svc]). The manifest
+  therefore turns preservation on with
+  `aws-load-balancer-target-group-attributes`. With it on, the Pods see client
+  addresses inside the VPC, and the NetworkPolicy overlay below admits them. The
+  range is enforced by the controller on AWS, which is cited here and not run.
+  On AKS the check runs before traffic is rewritten, so the rule sees the client
+  address ([AKS network policies][aks-netpol]).
 - `allocateLoadBalancerNodePorts: false` stops Kubernetes from opening a
   NodePort on every node for each Service port. By default it does. Turn it
   off only when the load balancer sends traffic straight to Pods, as
   `target-type: ip` does ([Kubernetes Services][k8s-svc]).
 
 The output below was captured on the lab cluster, a kind cluster with a
-different name, in a throwaway namespace named `p10-04-expose`. The commands
+different name, in a throwaway namespace of its own. The commands
 here use `bookstore`. kind has no cloud controller, so nothing provisions a
 load balancer. The run shows that the API stores the source range and the
 missing NodePort, and that the Service stays `<pending>`.
@@ -393,14 +459,40 @@ kubectl get svc storefront-lb -n bookstore -o jsonpath='{.spec.loadBalancerSourc
 
 <!-- gate: output -->
 ```
-NAME            TYPE           CLUSTER-IP      EXTERNAL-IP   PORT(S)   AGE   SELECTOR
-storefront-lb   LoadBalancer   10.96.114.109   <pending>     80/TCP    6s    app=storefront
+NAME            TYPE           CLUSTER-IP     EXTERNAL-IP   PORT(S)   AGE   SELECTOR
+storefront-lb   LoadBalancer   10.96.163.11   <pending>     80/TCP    3s    app=storefront
 ```
 
 <!-- gate: output -->
 ```
 ["10.0.0.0/16"]
 false
+```
+
+The load balancer's traffic reaches the Pods from VPC addresses, not from the
+`ingress-nginx` namespace. Without an overlay, the canonical policy drops it
+once the CNI enforces policy, and the targets fail their health checks. The
+fragment below replaces `spec.ingress` of `allow-ingress-to-http-tiers` in
+[`60-networkpolicy.yaml`](../examples/bookstore/raw-manifests/60-networkpolicy.yaml).
+That policy has one ingress rule, so the fragment supplies the whole list and
+repeats the `ingress-nginx` entry. The ALB in IP mode needs the same `ipBlock`.
+The `ipBlock` admits every address in the VPC CIDR, which includes other
+workloads in the VPC, so narrow it to the load balancers' subnets for
+production.
+
+```yaml
+# illustrative overlay fragment: replaces spec.ingress of allow-ingress-to-http-tiers
+# in 60-networkpolicy.yaml. It has no kind of its own.
+spec:
+  ingress:
+    - from:
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: ingress-nginx
+        - ipBlock:
+            cidr: 10.0.0.0/16              # the VPC CIDR; narrow it to the LB subnets
+      ports:
+        - { protocol: TCP, port: 8080 }
 ```
 
 ### 4. Prove the Bookstore objects are unchanged (RUNNABLE on kind now)
@@ -414,7 +506,7 @@ that dry-run cleanly with no cloud:
 kubectl apply --dry-run=client -f examples/bookstore/raw-manifests/40-services.yaml
 kubectl apply --dry-run=client -f examples/bookstore/raw-manifests/50-ingress.yaml
 kubectl apply --dry-run=client -f examples/bookstore/raw-manifests/60-networkpolicy.yaml
-#   all: "<OBJ> created (dry run)" — built-in kinds, ZERO cloud-specific fields
+#   all: "<OBJ> created (dry run)" — built-in kinds, no cloud-provider fields
 #   in the canonical files. The cloud annotations/IngressClass in step 3 are an
 #   OVERLAY (a prod Kustomize patch / Helm value), never baked into the base.
 # (51-gateway.yaml is CRD-backed — `no matches for kind "Gateway"` until the
@@ -611,11 +703,22 @@ kubectl apply --dry-run=client -f examples/bookstore/raw-manifests/60-networkpol
 ## Quick Reference
 
 ```sh
-# Add-ons via Helm, PINNED (never releases/latest/download/<PINNED>.yaml):
+# Add-ons via Helm, PINNED (never releases/latest/download/<PINNED>.yaml).
+# Each add-on has its own namespace labelled restricted. Step 2 has the full flags.
+kubectl create namespace aws-load-balancer-controller
+kubectl label namespace aws-load-balancer-controller pod-security.kubernetes.io/enforce=restricted
 helm install aws-load-balancer-controller eks/aws-load-balancer-controller \
-  -n kube-system --version 3.6.2 --set clusterName=$CLUSTER_NAME ...   # IRSA SA (ch.03)
-helm install external-dns external-dns/external-dns -n kube-system --version 1.23.0 \
-  --set provider=aws --set "domainFilters[0]=your-org.com" --set policy=sync ...
+  -n aws-load-balancer-controller --version 3.6.2 --set clusterName=$CLUSTER_NAME \
+  --set region=$AWS_REGION --set vpcId=$VPC_ID \
+  --set image.tag="v3.6.2@sha256:fd51f0ec82f8d357837aa57fdfaa4fca7137b75f25a09b421d95c425c9dc2d94" \
+  --set podSecurityContext.seccompProfile.type=RuntimeDefault \
+  --set 'securityContext.capabilities.drop[0]=ALL' --set securityContext.runAsUser=65532 ...   # IRSA SA (ch.03)
+kubectl create namespace external-dns
+kubectl label namespace external-dns pod-security.kubernetes.io/enforce=restricted
+helm install external-dns external-dns/external-dns -n external-dns --version 1.23.0 \
+  --set provider=aws --set "domainFilters[0]=your-org.com" --set policy=sync \
+  --set "txtOwnerId=$CLUSTER_NAME" \
+  --set image.tag="v0.23.0@sha256:1854499e2b08cee47c40a08e356bff20dcb192dbcfde8378fc3f900f12cad5a3" ...
 
 # Inspect the cloud edge (managed cluster):
 kubectl get ingress -n <NS>                 # ADDRESS = the cloud LB DNS name
@@ -631,8 +734,8 @@ kubectl get pods -n kube-system | grep -Ei 'aws-node|calico|cilium|azure-cni'
 kubectl apply --dry-run=client -f examples/bookstore/raw-manifests/50-ingress.yaml
 ```
 
-Minimal cloud-edge overlay fragment (annotations on the **unchanged** object,
-with no kind):
+Minimal cloud-edge overlay fragment (annotations and a host patch on the base
+Ingress, with no kind; step 3 adds the transforms):
 
 ```yaml
 metadata:
@@ -643,7 +746,8 @@ metadata:
     external-dns.alpha.kubernetes.io/hostname: <HOST>       # ExternalDNS
 spec:
   ingressClassName: alb                    # the CLOUD controller (not nginx)
-  # routing rules: unchanged from the base Ingress
+  rules:
+    - host: <HOST>                 # the host patch; paths as in 50-ingress.yaml
 ```
 
 Checklist:
@@ -659,6 +763,8 @@ Checklist:
       **workload identity** ([ch.03](03-cloud-identity.md)) — no static key
 - [ ] **VPC CIDRs / Pod density planned** (prefix delegation; subnet sizing) —
       no `Pending`-for-no-IP at scale
+- [ ] **Load balancer traffic admitted:** a `60-` overlay `ipBlock` for the LB
+      subnets, because LB traffic matches no namespace selector
 - [ ] Managed CNI **actually enforces** `60-networkpolicy.yaml` (VPC CNI
       1.21.0 or later, Dataplane V2, or an AKS `--network-policy` engine),
       proven by a refused connection in CI
@@ -765,6 +871,7 @@ Checklist:
 [aks-netpol]: https://learn.microsoft.com/en-us/azure/aks/use-network-policies
 [aws-lb-svc]: https://kubernetes-sigs.github.io/aws-load-balancer-controller/latest/guide/service/annotations/
 [aws-lb-ing]: https://kubernetes-sigs.github.io/aws-load-balancer-controller/latest/guide/ingress/annotations/
+[aws-lb-install]: https://kubernetes-sigs.github.io/aws-load-balancer-controller/latest/deploy/installation/
 [external-dns-flags]: https://kubernetes-sigs.github.io/external-dns/latest/docs/flags/
 [k8s-svc]: https://kubernetes.io/docs/concepts/services-networking/service/
 [k8s-lb-svc]: https://kubernetes.io/docs/tasks/access-application-cluster/create-external-load-balancer/
