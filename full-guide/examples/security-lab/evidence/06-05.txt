@@ -11,8 +11,8 @@
 # Namespace substitution: the chapter's namespace `bookstore` ran as
 # p06-finish-pdb in every command. The ServiceAccounts and the budgets are the
 # example tree's 05-serviceaccounts-rbac.yaml and 84-pdb.yaml, copied with the
-# namespace renamed. The nodes are named sf-sched-control-plane,
-# sf-sched-worker and sf-sched-worker2.
+# namespace renamed. The shared cluster's node names are replaced here with
+# lab-control-plane, lab-worker and lab-worker2.
 #
 # Differences from the chapter's cluster:
 # - Two workers, not three. The chapter's kind-multinode.yaml has three, and
@@ -53,9 +53,9 @@
 ## step 0: the cluster, and a wait until both workers are free of taints and cordons
 $ kubectl get nodes
 NAME                     STATUS   ROLES           AGE    VERSION
-sf-sched-control-plane   Ready    control-plane   133m   v1.37.0
-sf-sched-worker          Ready    <none>          132m   v1.37.0
-sf-sched-worker2         Ready    <none>          132m   v1.37.0
+lab-control-plane   Ready    control-plane   133m   v1.37.0
+lab-worker          Ready    <none>          132m   v1.37.0
+lab-worker2         Ready    <none>          132m   v1.37.0
 
 ## step 1: the namespace, the ServiceAccounts and three stand-in workloads
 $ kubectl apply -f ns.yaml
@@ -78,13 +78,13 @@ deployment.apps/storefront condition met
 
 $ kubectl get pods -n p06-finish-pdb -o wide --sort-by=.metadata.name
 NAME                          READY   STATUS    RESTARTS   AGE   IP            NODE               NOMINATED NODE   READINESS GATES
-catalog-59cfcf98bc-7spns      1/1     Running   0          56s   10.244.1.33   sf-sched-worker    <none>           <none>
-catalog-59cfcf98bc-kmg64      1/1     Running   0          56s   10.244.1.34   sf-sched-worker    <none>           <none>
-catalog-59cfcf98bc-x7l4c      1/1     Running   0          56s   10.244.2.57   sf-sched-worker2   <none>           <none>
-orders-775657dddc-8jzqw       1/1     Running   0          56s   10.244.1.36   sf-sched-worker    <none>           <none>
-orders-775657dddc-9ftct       1/1     Running   0          56s   10.244.2.59   sf-sched-worker2   <none>           <none>
-storefront-67f7fbd969-cqcnt   1/1     Running   0          56s   10.244.1.35   sf-sched-worker    <none>           <none>
-storefront-67f7fbd969-mmw6x   1/1     Running   0          56s   10.244.2.58   sf-sched-worker2   <none>           <none>
+catalog-59cfcf98bc-7spns      1/1     Running   0          56s   10.244.1.33   lab-worker    <none>           <none>
+catalog-59cfcf98bc-kmg64      1/1     Running   0          56s   10.244.1.34   lab-worker    <none>           <none>
+catalog-59cfcf98bc-x7l4c      1/1     Running   0          56s   10.244.2.57   lab-worker2   <none>           <none>
+orders-775657dddc-8jzqw       1/1     Running   0          56s   10.244.1.36   lab-worker    <none>           <none>
+orders-775657dddc-9ftct       1/1     Running   0          56s   10.244.2.59   lab-worker2   <none>           <none>
+storefront-67f7fbd969-cqcnt   1/1     Running   0          56s   10.244.1.35   lab-worker    <none>           <none>
+storefront-67f7fbd969-mmw6x   1/1     Running   0          56s   10.244.2.58   lab-worker2   <none>           <none>
 
 ## step 2: add the PodDisruptionBudgets (the chapter step 1)
 $ kubectl apply -f pdb.yaml
@@ -158,22 +158,22 @@ catalog   2               N/A               1                     35s
 ## step 4: drain the worker that holds the most catalog Pods
 $ kubectl get pods -n p06-finish-pdb -o wide --sort-by=.spec.nodeName | awk '{print $1, $2, $3, $7}'
 NAME READY STATUS NODE
-catalog-59cfcf98bc-kmg64 1/1 Running sf-sched-worker
-catalog-59cfcf98bc-ld59l 1/1 Running sf-sched-worker
-orders-775657dddc-8jzqw 1/1 Running sf-sched-worker
-storefront-67f7fbd969-cqcnt 1/1 Running sf-sched-worker
-catalog-59cfcf98bc-x7l4c 1/1 Running sf-sched-worker2
-orders-775657dddc-9ftct 1/1 Running sf-sched-worker2
-storefront-67f7fbd969-mmw6x 1/1 Running sf-sched-worker2
+catalog-59cfcf98bc-kmg64 1/1 Running lab-worker
+catalog-59cfcf98bc-ld59l 1/1 Running lab-worker
+orders-775657dddc-8jzqw 1/1 Running lab-worker
+storefront-67f7fbd969-cqcnt 1/1 Running lab-worker
+catalog-59cfcf98bc-x7l4c 1/1 Running lab-worker2
+orders-775657dddc-9ftct 1/1 Running lab-worker2
+storefront-67f7fbd969-mmw6x 1/1 Running lab-worker2
 
-$ echo "draining sf-sched-worker"
-draining sf-sched-worker
+$ echo "draining lab-worker"
+draining lab-worker
 
 $ ( trap 'exit 0' TERM; while :; do kubectl get pdb catalog -n p06-finish-pdb --no-headers | awk '{print $1, $2, $4}'; sleep 2; done ) > pdb-poll.txt 2>&1 &
 POLL=$!
-kubectl drain "sf-sched-worker" --ignore-daemonsets --delete-emptydir-data --timeout=240s
+kubectl drain "lab-worker" --ignore-daemonsets --delete-emptydir-data --timeout=240s
 kill $POLL; wait $POLL
-node/sf-sched-worker cordoned
+node/lab-worker cordoned
 Warning: ignoring DaemonSet-managed Pods: kube-system/kindnet-rm62x, kube-system/kube-proxy-pfxbz
 evicting pod p06-finish-pdb/storefront-67f7fbd969-cqcnt
 evicting pod p06-finish-pdb/catalog-59cfcf98bc-kmg64
@@ -197,7 +197,7 @@ evicting pod p06-finish-pdb/catalog-59cfcf98bc-ld59l
 error when evicting pods/"catalog-59cfcf98bc-ld59l" -n "p06-finish-pdb" (will retry after 5s): Cannot evict pod as it would violate the pod's disruption budget.
 evicting pod p06-finish-pdb/catalog-59cfcf98bc-ld59l
 pod/catalog-59cfcf98bc-ld59l evicted
-node/sf-sched-worker drained
+node/lab-worker drained
 
 ## step 4b: the budget as the drain moved through it (distinct values, in order)
 $ uniq pdb-poll.txt
@@ -208,13 +208,13 @@ catalog 2 0
 
 $ kubectl get pods -n p06-finish-pdb -o wide --sort-by=.spec.nodeName | awk '{print $1, $2, $3, $7}'
 NAME READY STATUS NODE
-catalog-59cfcf98bc-565kd 0/1 Running sf-sched-worker2
-catalog-59cfcf98bc-hjmdc 1/1 Running sf-sched-worker2
-catalog-59cfcf98bc-x7l4c 1/1 Running sf-sched-worker2
-orders-775657dddc-9ftct 1/1 Running sf-sched-worker2
-orders-775657dddc-hqblr 1/1 Running sf-sched-worker2
-storefront-67f7fbd969-mmw6x 1/1 Running sf-sched-worker2
-storefront-67f7fbd969-rkvlz 1/1 Running sf-sched-worker2
+catalog-59cfcf98bc-565kd 0/1 Running lab-worker2
+catalog-59cfcf98bc-hjmdc 1/1 Running lab-worker2
+catalog-59cfcf98bc-x7l4c 1/1 Running lab-worker2
+orders-775657dddc-9ftct 1/1 Running lab-worker2
+orders-775657dddc-hqblr 1/1 Running lab-worker2
+storefront-67f7fbd969-mmw6x 1/1 Running lab-worker2
+storefront-67f7fbd969-rkvlz 1/1 Running lab-worker2
 
 $ kubectl get pdb -n p06-finish-pdb
 NAME         MIN AVAILABLE   MAX UNAVAILABLE   ALLOWED DISRUPTIONS   AGE
@@ -224,18 +224,18 @@ storefront   1               N/A               1                     2m6s
 
 $ kubectl get nodes
 NAME                     STATUS                     ROLES           AGE    VERSION
-sf-sched-control-plane   Ready                      control-plane   136m   v1.37.0
-sf-sched-worker          Ready,SchedulingDisabled   <none>          136m   v1.37.0
-sf-sched-worker2         Ready                      <none>          136m   v1.37.0
+lab-control-plane   Ready                      control-plane   136m   v1.37.0
+lab-worker          Ready,SchedulingDisabled   <none>          136m   v1.37.0
+lab-worker2         Ready                      <none>          136m   v1.37.0
 
-$ kubectl uncordon "sf-sched-worker"
-node/sf-sched-worker uncordoned
+$ kubectl uncordon "lab-worker"
+node/lab-worker uncordoned
 
 $ kubectl get nodes
 NAME                     STATUS   ROLES           AGE    VERSION
-sf-sched-control-plane   Ready    control-plane   136m   v1.37.0
-sf-sched-worker          Ready    <none>          136m   v1.37.0
-sf-sched-worker2         Ready    <none>          136m   v1.37.0
+lab-control-plane   Ready    control-plane   136m   v1.37.0
+lab-worker          Ready    <none>          136m   v1.37.0
+lab-worker2         Ready    <none>          136m   v1.37.0
 
 ## step 5: clean up
 $ kubectl delete ns p06-finish-pdb --wait=true
