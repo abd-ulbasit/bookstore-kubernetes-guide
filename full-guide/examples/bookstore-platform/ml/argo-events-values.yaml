@@ -1,0 +1,24 @@
+# Bookstore Platform v2 - Part 13 ch.08: values for the Argo Events chart.
+#
+#   helm install argo-events argo/argo-events --version 2.4.0 \
+#     -n argo-events -f examples/bookstore-platform/ml/argo-events-values.yaml
+#
+# Chart 2.4.0 runs Argo Events v1.8.0. The EventSource and Sensor pods are
+# created from the templates in argo-events-drift-trigger.yaml, which carry
+# their own pod and container hardening. This file sets the controller's and
+# the webhook's hardening, which the chart applies from `global`.
+
+global:
+  securityContext:
+    runAsNonRoot: true
+    seccompProfile:
+      type: RuntimeDefault
+
+controller:
+  # The controller container's own context; `global` covers the pod.
+  containerSecurityContext:
+    allowPrivilegeEscalation: false
+    readOnlyRootFilesystem: true
+    capabilities:
+      drop:
+        - ALL

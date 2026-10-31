@@ -1,29 +1,33 @@
-# Bookstore Platform v2 — Part 13 ch.08: an Argo CD Application that installs
-# MLflow (community-charts/mlflow) as the v2 model registry. MLflow replaces
-# the X3c-era "ConfigMap stamp" registry (the recommender-cm template in
-# ../bookstore/ml/pipeline/register-cm-template.yaml) with the real thing:
-# tracking server + model registry + artifact store.
+# Bookstore Platform v2 - Part 13 ch.08: an Argo CD Application that installs
+# MLflow (community-charts/mlflow 0.10.0, MLflow 2.19.0) as the v2 model
+# registry: tracking server, model registry and artifact store.
+#
+# The chart's image is a third-party image (burakince/mlflow), so it is pinned
+# by digest with the tag in front of it. The digest was read from the registry
+# with `docker buildx imagetools inspect burakince/mlflow:2.19.0`.
+#
+# Credentials. The chart needs the Postgres password and the admin password as
+# values, and it copies them into Secrets it owns. ESO cannot fill those two
+# values, so they stay empty here and a secret-aware Argo CD plugin supplies
+# them at sync. The chapter's Helm path reads them from the ESO-managed Secret
+# instead (ch.13.08 hands-on). S3 uses IRSA: no static access key appears here.
 #
 # !!! CRD-INTRINSIC DRY-RUN
-#   `Application` is `argoproj.io/v1alpha1` — an Argo CD CRD. WITHOUT Argo CD:
+#   `Application` is `argoproj.io/v1alpha1` - an Argo CD CRD. WITHOUT Argo CD:
 #     no matches for kind "Application" in version "argoproj.io/v1alpha1"
 #   EXPECTED. ch.13.03 installs Argo CD; this file applies after.
 #
 # Why community-charts/mlflow vs bitnami/mlflow:
-#   - community-charts/mlflow is the actively-maintained Helm chart for the
-#     OSS MLflow tracking server; it ships current chart values (Postgres
-#     backing, S3 artifact store, OIDC auth) and follows MLflow upstream.
-#   - bitnami/mlflow is a packaged variant; works but lags upstream and adds
-#     the Bitnami-shape conventions. Pick community-charts if you want the
-#     upstream-aligned shape; pick bitnami if your org standardises on
-#     Bitnami charts cluster-wide. The chapter picks community-charts and
-#     calls out the trade.
+#   - community-charts/mlflow follows MLflow upstream and ships the Postgres,
+#     S3 and basic-auth values this file uses.
+#   - bitnami/mlflow is a packaged variant; pick it if your org standardises on
+#     Bitnami charts cluster-wide.
 #
 # Backing services:
 #   - Tracking DB: the per-region CNPG cluster + a `mlflow` logical DB.
-#   - Artifact store: per-region S3 bucket; ESO-injected creds.
+#   - Artifact store: per-region S3 bucket, read and written through IRSA.
 #
-# Apply (after Argo CD + CNPG + S3-credentials ESO):
+# Apply (after Argo CD, CNPG and the S3 IAM role):
 #   kubectl apply -f examples/bookstore-platform/ml/mlflow-application.yaml
 ---
 apiVersion: argoproj.io/v1alpha1
@@ -45,37 +49,40 @@ spec:
     targetRevision: "0.10.0"
     helm:
       values: |
+        image:
+          repository: burakince/mlflow
+          # Tag, then digest: the chart renders "<repo>:<tag>" as-is.
+          tag: "2.19.0@sha256:1ff57f23e2d2db86ea5cf094696f9fd4edb6888985158de29a1a0c3a0c9fc8af"
         backendStore:
           # Tracking metadata: per-region CNPG `mlflow` logical DB.
-          # Production credentials via ESO; here a placeholder DSN.
           postgres:
             enabled: true
             host: bookstore-platform-cnpg-rw.cnpg-system.svc.cluster.local
             port: 5432
             database: mlflow
             user: mlflow
-            password: REPLACE-ME-VIA-ESO-NOT-IN-SOURCE
+            password: ""   # supplied at sync; see the header
         artifactRoot:
-          # Per-region S3 bucket. Bucket creation lives in the Crossplane
-          # platform stack (provider-aws), not here.
           s3:
             enabled: true
             bucket: bookstore-platform-mlflow-us-east
             path: ""
-            awsAccessKeyId: REPLACE-ME-VIA-ESO-NOT-IN-SOURCE
-            awsSecretAccessKey: REPLACE-ME-VIA-ESO-NOT-IN-SOURCE
-        serviceMonitor:
+            awsAccessKeyId: ""      # IRSA: no static keys
+            awsSecretAccessKey: ""
+        auth:
           enabled: true
-        resources:
-          requests:
-            cpu: 100m
-            memory: 256Mi
-          limits:
-            cpu: 500m
-            memory: 512Mi
+          adminUsername: mlflow-admin
+          adminPassword: ""         # supplied at sync; see the header
+        serviceAccount:
+          create: true
+          # Only the MLflow server calls S3, and it uses IRSA, not the token.
+          automount: false
+          annotations:
+            eks.amazonaws.com/role-arn: "arn:aws:iam::REPLACE-ACCOUNT:role/bookstore-platform-mlflow"
         podSecurityContext:
           runAsNonRoot: true
           runAsUser: 65532
+          runAsGroup: 65532
           fsGroup: 65532
           seccompProfile:
             type: RuntimeDefault
@@ -84,6 +91,20 @@ spec:
           readOnlyRootFilesystem: true
           capabilities:
             drop: ["ALL"]
+        extraVolumes:
+          - name: tmp
+            emptyDir: {}
+        extraVolumeMounts:
+          - name: tmp
+            mountPath: /tmp
+        serviceMonitor:
+          enabled: true
+        resources:
+          requests:
+            cpu: 100m
+            memory: 256Mi
+          limits:
+            memory: 512Mi
   destination:
     server: https://kubernetes.default.svc
     namespace: mlflow
@@ -94,3 +115,7 @@ spec:
     syncOptions:
       - CreateNamespace=true
       - ServerSideApply=true
+    managedNamespaceMetadata:
+      labels:
+        pod-security.kubernetes.io/enforce: restricted
+        pod-security.kubernetes.io/enforce-version: latest

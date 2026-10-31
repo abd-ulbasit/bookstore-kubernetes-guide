@@ -1,6 +1,6 @@
-# Bookstore Platform v2 — Part 13 ch.08: Alibi-Detect drift detector.
+# Bookstore Platform v2 - Part 13 ch.08: Alibi-Detect drift detector.
 # Consumes a sliding window of recommender predictions (predictions topic
-# is `ml.predictions` — written by the recommender wrapper service), runs
+# is `ml.predictions` - written by the recommender wrapper service), runs
 # a Kolmogorov-Smirnov test against a reference window, publishes a
 # `ml.drift` event when the KS statistic exceeds the threshold.
 #
@@ -9,15 +9,15 @@
 #
 # Alibi-Detect (https://github.com/SeldonIO/alibi-detect) is the Seldon-
 # maintained Python library; the most-used drift detectors are:
-#   - KSDrift          — Kolmogorov-Smirnov; univariate, fast, what we use.
-#   - MMDDrift         — Maximum Mean Discrepancy; multivariate, more
+#   - KSDrift          - Kolmogorov-Smirnov; univariate, fast, what we use.
+#   - MMDDrift         - Maximum Mean Discrepancy; multivariate, more
 #                        accurate, slower.
-#   - ClassifierDrift  — train a classifier to distinguish reference vs
+#   - ClassifierDrift  - train a classifier to distinguish reference vs
 #                        production data; signal = its accuracy.
 # The chapter walks all three; the manifest ships KSDrift for simplicity.
 #
 # Reference window: the chapter walks "the training data's feature
-# distribution snapshot, stored alongside the MLflow run" — fetched at
+# distribution snapshot, stored alongside the MLflow run" - fetched at
 # detector startup. Sliding window: the last 1000 predictions
 # (configurable). p-value threshold: 0.05 (tunable).
 #
@@ -71,7 +71,13 @@ spec:
           # `ml.predictions`; sliding window of 1000 records; KSDrift over
           # the feature columns; on detection, publish to `ml.drift`.
           env:
-            - { name: KAFKA_BROKERS, value: "bookstore-platform-kafka-kafka-bootstrap.kafka-system.svc.cluster.local:9092" }
+            # The TLS listener (9093) only. The KafkaUser certificate comes
+            # from the alibi-detect-kafka Secret mounted below.
+            - { name: KAFKA_BROKERS, value: "bookstore-platform-kafka-kafka-bootstrap.kafka-system.svc.cluster.local:9093" }
+            - { name: KAFKA_SECURITY_PROTOCOL, value: "SSL" }
+            - { name: KAFKA_CA_FILE,   value: "/etc/kafka-tls/ca.crt" }
+            - { name: KAFKA_CERT_FILE, value: "/etc/kafka-tls/user.crt" }
+            - { name: KAFKA_KEY_FILE,  value: "/etc/kafka-tls/user.key" }
             - { name: KAFKA_TOPIC_PREDICTIONS, value: "ml.predictions" }
             - { name: KAFKA_TOPIC_DRIFT,       value: "ml.drift" }
             - { name: KAFKA_CONSUMER_GROUP,    value: "alibi-detect" }
@@ -82,6 +88,10 @@ spec:
             - { name: SLIDING_WINDOW_SIZE,     value: "1000" }
             - { name: LOG_LEVEL,               value: "info" }
             - { name: PORT,                    value: "8080" }
+          # MLflow reader credentials (basic auth), from the ESO Secret below.
+          envFrom:
+            - secretRef:
+                name: alibi-detect-mlflow
           ports:
             - containerPort: 8080
               name: http
@@ -107,9 +117,14 @@ spec:
               drop: ["ALL"]
           volumeMounts:
             - { name: tmp, mountPath: /tmp }
+            - { name: kafka-tls, mountPath: /etc/kafka-tls, readOnly: true }
       volumes:
         - name: tmp
           emptyDir: {}
+        - name: kafka-tls
+          secret:
+            secretName: alibi-detect-kafka
+            defaultMode: 0440
 ---
 apiVersion: v1
 kind: Service

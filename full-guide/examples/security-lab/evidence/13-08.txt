@@ -1,0 +1,85 @@
+# Transcript for 13-grand-capstone-bookstore-platform/08-real-ml-loop-training-registry-serving-drift.md
+# Lab: one kind cluster (server v1.37.0, kubectl v1.37.2). The cluster's name
+# differs from the chapter's kind context, and the chapter's
+# bookstore-platform-ml namespace is p13-08-ml in the server dry run.
+# Substitution is recorded here and nowhere else in the transcript.
+# Versions: argo-workflows chart 0.42.0 (Argo Workflows v3.5.10), argo-events
+# chart 2.4.0 (Argo Events v1.8.0), community-charts/mlflow chart 0.10.0 (MLflow
+# 2.19.0), Trivy 0.76.1, helm v4.1.4.
+# Nothing is installed on the shared cluster. Charts are rendered with helm
+# template and checked with a server dry run in a namespace this run creates
+# and deletes. No Argo, MLflow, KServe, Strimzi or ESO controller runs here.
+## section 1: chart versions and the MLflow image digest
+$ for c in argo/argo-workflows:0.42.0 argo/argo-events:2.4.0; do helm show chart ${c%%:*} --version ${c##*:} | grep -E '^(appVersion|version):'; done
+appVersion: v3.5.10
+version: 0.42.0
+appVersion: v1.8.0
+version: 2.4.0
+
+$ helm show chart community-charts/mlflow --version 0.10.0 | grep -E '^(appVersion|version):'
+appVersion: 2.19.0
+version: 0.10.0
+
+$ docker buildx imagetools inspect burakince/mlflow:2.19.0 --format '{{.Manifest.Digest}}'
+sha256:1ff57f23e2d2db86ea5cf094696f9fd4edb6888985158de29a1a0c3a0c9fc8af
+## section 2: the charts rendered with the values files
+$ helm template argo-workflows argo/argo-workflows --version 0.42.0 -n argo -f full-guide/examples/bookstore-platform/ml/argo-workflows-values.yaml > $WORKTMP/argo-wf-final.yaml && grep -c 'name: recommender-train' $WORKTMP/argo-wf-final.yaml ; sed -n '/^    executor:/,/seccompProfile/p' $WORKTMP/argo-wf-final.yaml | head -14
+0
+    executor:
+      imagePullPolicy: Always
+      securityContext:
+        allowPrivilegeEscalation: false
+        capabilities:
+          drop:
+          - ALL
+        readOnlyRootFilesystem: true
+        runAsNonRoot: true
+        runAsUser: 65532
+        seccompProfile:
+
+$ helm template argo-events argo/argo-events --version 2.4.0 -n argo-events -f full-guide/examples/bookstore-platform/ml/argo-events-values.yaml > $WORKTMP/argo-ev-final.yaml && grep -n -B2 -A3 'seccompProfile' $WORKTMP/argo-ev-final.yaml | head -10
+354-      securityContext:
+355-        runAsNonRoot: true
+356:        seccompProfile:
+357-          type: RuntimeDefault
+358-      containers:
+359-      - name: controller-manager
+
+$ helm template mlflow community-charts/mlflow --version 0.10.0 -n mlflow -f full-guide/examples/bookstore-platform/ml/mlflow-values.yaml --set-string backendStore.postgres.password=render-check --set-string auth.adminPassword=render-check > $WORKTMP/mlflow-final.yaml && grep -n -E 'image: |runAsNonRoot|automountServiceAccountToken' $WORKTMP/mlflow-final.yaml
+17:automountServiceAccountToken: false
+130:        runAsNonRoot: true
+142:          image: "burakince/mlflow:2.19.0@sha256:1ff57f23e2d2db86ea5cf094696f9fd4edb6888985158de29a1a0c3a0c9fc8af"
+
+## section 3: server dry run in a restricted namespace
+$ kubectl create namespace p13-08-ml
+namespace/p13-08-ml created
+
+$ kubectl label namespace p13-08-ml pod-security.kubernetes.io/enforce=restricted pod-security.kubernetes.io/enforce-version=latest
+namespace/p13-08-ml labeled
+
+$ sed 's/bookstore-platform-ml/p13-08-ml/g' full-guide/examples/bookstore-platform/ml/alibi-detect-drift.yaml | kubectl apply --dry-run=server -f -
+serviceaccount/alibi-detect created (server dry run)
+deployment.apps/alibi-detect created (server dry run)
+service/alibi-detect created (server dry run)
+
+$ sed 's/bookstore-platform-ml/p13-08-ml/g' full-guide/examples/bookstore-platform/ml/training-rbac.yaml | kubectl apply --dry-run=server -f -
+rolebinding.rbac.authorization.k8s.io/recommender-train-executor created (server dry run)
+
+$ sed 's/bookstore-platform-ml/p13-08-ml/g' full-guide/examples/bookstore-platform/ml/training-workflow.yaml | kubectl apply --dry-run=server -f - 2>&1 | head -8
+serviceaccount/recommender-train created (server dry run)
+error: resource mapping not found for name: "recommender-train" namespace: "p13-08-ml" from "STDIN": no matches for kind "WorkflowTemplate" in version "argoproj.io/v1alpha1"
+ensure CRDs are installed first
+
+## section 4: the WorkflowTemplate rendered to Pods, scanned with Trivy
+$ $PY $WORKTMP/wf-scan.py $WORKTMP/wf-pods-run
+templates rendered to pods: 4
+eval-step.yaml non-core findings: KSV-0011, KSV-0036, KSV-0125
+promote-step.yaml non-core findings: KSV-0011, KSV-0036, KSV-0125
+register-step.yaml non-core findings: KSV-0011, KSV-0036, KSV-0125
+train-step.yaml non-core findings: KSV-0011, KSV-0036, KSV-0125
+core checks failing (KSV-0012, KSV-0014, KSV-0001, KSV-0003, KSV-0030): none
+
+## section 5: cleanup
+$ kubectl delete namespace p13-08-ml
+namespace "p13-08-ml" deleted
+

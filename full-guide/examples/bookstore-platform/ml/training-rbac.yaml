@@ -1,0 +1,28 @@
+# Bookstore Platform v2 - Part 13 ch.08: lets the training ServiceAccount use
+# the Argo executor Role in bookstore-platform-ml, and nowhere else.
+#
+# The argo-workflows chart creates the Role `argo-workflows-workflow` in each
+# namespace in controller.workflowNamespaces (argo-workflows-values.yaml). It
+# also binds that Role in the release namespace, so the chart's own binding
+# would reach `recommender-train` in `argo` too. This RoleBinding names the
+# namespace it lives in, and the ServiceAccount is the only subject.
+#
+# Apply after the chart is installed (the Role must exist):
+#   kubectl apply -f examples/bookstore-platform/ml/training-rbac.yaml
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: recommender-train-executor
+  namespace: bookstore-platform-ml
+  labels:
+    app.kubernetes.io/part-of: bookstore-platform
+    app.kubernetes.io/component: ml-train
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: Role
+  name: argo-workflows-workflow
+subjects:
+  - kind: ServiceAccount
+    name: recommender-train
+    namespace: bookstore-platform-ml
