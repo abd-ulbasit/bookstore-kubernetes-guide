@@ -1,4 +1,4 @@
-# Bookstore — Part 08 ch.04 "Multi-tenancy and namespaces": a SECOND tenant.
+# Bookstore: Part 08 ch.04 "Multi-tenancy and namespaces": a SECOND tenant.
 #
 # The `bookstore` namespace already demonstrates the full soft-multi-tenancy
 # guardrail stack (ns + ResourceQuota + LimitRange + RBAC + NetworkPolicy +
@@ -7,16 +7,16 @@
 # the two tenants are isolated by the same mechanisms. It is DELIBERATELY
 # pod-free (only Namespace/ResourceQuota/LimitRange/ServiceAccount/Role/
 # RoleBinding/NetworkPolicy) so it dry-runs CLEAN against a vanilla cluster
-# (no CRDs, no PSA-admission concerns — there are no pods to admit) and is
+# (no CRDs, no PSA-admission concerns: there are no pods to admit) and is
 # purely ADDITIVE: it does NOT touch the `bookstore` ns or any canonical
 # manifest. It is the analog of "envs are Kustomize overlays in ONE ns; real
 # tenants are SEPARATE namespaces, one guardrail set EACH".
 #
 # NOT CRD-backed: every kind here is built-in (v1 / rbac.authorization.k8s.io/v1
 # / networking.k8s.io/v1), so unlike velero-/cnpg- this file has NO
-# CRD-intrinsic dry-run caveat — `kubectl apply --dry-run=client -f` is CLEAN.
+# CRD-intrinsic dry-run caveat: `kubectl apply --dry-run=client -f` is CLEAN.
 #
-# Apply (standalone — needs nothing else):
+# Apply (standalone, needs nothing else):
 #   kubectl apply -f examples/bookstore/operators/second-tenant.yaml
 #   kubectl get ns tenant-acme -o jsonpath='{.metadata.labels}' ; echo
 #   kubectl describe resourcequota,limitrange -n tenant-acme
@@ -29,7 +29,7 @@ kind: Namespace
 metadata:
   name: tenant-acme
   labels:
-    # tenant identity (cost attribution / selection — Part 06 ch.06)
+    # tenant identity (cost attribution / selection: Part 06 ch.06)
     tenant: acme
     app.kubernetes.io/part-of: bookstore-platform
     # SAME PSA posture as the bookstore ns: enforce restricted + audit + warn.
@@ -43,7 +43,7 @@ metadata:
 ---
 # Fairness: this tenant's TOTAL is capped independently of bookstore's quota.
 # One tenant exhausting its quota cannot starve the other (noisy-neighbour at
-# the namespace level — the cluster/etcd/apiserver level is API Priority &
+# the namespace level: the cluster/etcd/apiserver level is API Priority &
 # Fairness, see the chapter).
 apiVersion: v1
 kind: ResourceQuota
@@ -64,7 +64,7 @@ spec:
     persistentvolumeclaims: "5"
 ---
 # Per-container defaults + bounds for this tenant (mirrors bookstore-limits so
-# the quota requirement is ergonomic — a container omitting requests/limits
+# the quota requirement is ergonomic: a container omitting requests/limits
 # still gets sane values instead of a wall of rejections).
 apiVersion: v1
 kind: LimitRange
@@ -100,8 +100,8 @@ automountServiceAccountToken: false   # no token unless the workload needs one
 # RBAC scoped to ONE namespace: a namespaced Role (NOT a ClusterRole) so this
 # tenant can manage ONLY its own workloads in ONLY tenant-acme. This is the
 # core of soft multi-tenancy: the namespace is the boundary, RBAC enforces it.
-# Note: NO verbs on resourcequotas/limitranges/namespaces — capacity policy is
-# PLATFORM-managed; a tenant must not mint its own quota (the same stance as
+# Note: NO verbs on resourcequotas, limitranges or namespaces. Capacity policy
+# is PLATFORM-managed; a tenant must not mint its own quota (the same stance as
 # the Bookstore AppProject's namespaceResourceBlacklist, Part 07 ch.04).
 apiVersion: rbac.authorization.k8s.io/v1
 kind: Role
@@ -113,12 +113,17 @@ rules:
     resources: ["deployments", "replicasets", "statefulsets"]
     verbs: ["get", "list", "watch", "create", "update", "patch", "delete"]
   - apiGroups: [""]
-    resources: ["pods", "services", "configmaps", "secrets",
-                "persistentvolumeclaims"]
+    resources: ["pods", "configmaps", "secrets", "persistentvolumeclaims"]
     verbs: ["get", "list", "watch", "create", "update", "patch", "delete"]
   - apiGroups: [""]
-    resources: ["pods/log", "pods/exec", "pods/ephemeralcontainers"]
-    verbs: ["get", "create"]      # the tenant can debug its OWN pods (ch.03)
+    # a tenant exposes its own workloads; the registry records why (KSV-0056)
+    resources: ["services"]
+    verbs: ["get", "list", "watch", "create", "update", "patch", "delete"]
+  - apiGroups: [""]
+    # logs only. pods/exec reads what a container can read, mounted Secrets
+    # included, so it is not granted (chapter 08.03 covers debugging)
+    resources: ["pods/log"]
+    verbs: ["get"]
 ---
 apiVersion: rbac.authorization.k8s.io/v1
 kind: RoleBinding
@@ -152,7 +157,7 @@ spec:
   podSelector: {}
   policyTypes: ["Ingress", "Egress"]
 ---
-# Mandatory DNS egress (default-deny egress also blocks DNS — the single most
+# Mandatory DNS egress (default-deny egress also blocks DNS: the single most
 # common policy outage; identical to the bookstore allow-dns-egress rule).
 apiVersion: networking.k8s.io/v1
 kind: NetworkPolicy

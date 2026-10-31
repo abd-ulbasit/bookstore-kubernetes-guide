@@ -1,0 +1,137 @@
+# Transcript for 08-day-2-operations/04-multi-tenancy-and-namespaces.md.
+# Tier A: a kind cluster that the lab owns, shared with other lab runs. The
+# Kubernetes server is v1.37.0 and kubectl is v1.37.2.
+# Recorded on 2026-10-31 by running examples/security-lab/labs/08-04.sh from
+# full-guide/.
+# The lab used two namespaces, p08-04-bookstore and p08-04-acme. The chapter
+# prints bookstore and tenant-acme and applies the same files. The script
+# changes only the namespace fields of each file (its rename step), so object
+# names are the chapter's own. Lines that name the lab namespaces are kept as
+# captured. The chapter's output blocks show only lines without a namespace
+# name, and the commands in the chapter use the reader's names.
+# Section 1 applied the Bookstore namespace's guardrail objects (the namespace
+# with its Pod Security labels, the quota and limits, the ServiceAccounts and
+# RBAC, and the NetworkPolicies). It did not apply the Bookstore workloads, to
+# keep the shared cluster small. The default ServiceAccount in the listing is
+# the one every namespace gets.
+# Section 2 applied second-tenant.yaml with its namespace renamed.
+# The cleanup step deleted both namespaces and the script ended with its last
+# line.
+
+== Section 1: the Bookstore namespace's guardrails
+$ kubectl apply -f 00-namespace.yaml (namespace p08-04-bookstore)
+namespace/p08-04-bookstore created
+resourcequota/bookstore-quota created
+limitrange/bookstore-limits created
+$ kubectl apply -f 05-serviceaccounts-rbac.yaml (namespace p08-04-bookstore)
+serviceaccount/catalog-sa created
+serviceaccount/storefront-sa created
+serviceaccount/orders-sa created
+serviceaccount/payments-worker-sa created
+serviceaccount/postgres-sa created
+serviceaccount/redis-sa created
+serviceaccount/rabbitmq-sa created
+serviceaccount/migrate-sa created
+role.rbac.authorization.k8s.io/catalog-config-reader created
+rolebinding.rbac.authorization.k8s.io/catalog-config-reader-binding created
+$ kubectl apply -f 60-networkpolicy.yaml (namespace p08-04-bookstore)
+networkpolicy.networking.k8s.io/default-deny-all created
+networkpolicy.networking.k8s.io/allow-dns-egress created
+networkpolicy.networking.k8s.io/allow-ingress-to-http-tiers created
+networkpolicy.networking.k8s.io/allow-storefront-to-apis created
+networkpolicy.networking.k8s.io/allow-data-tier-ingress created
+networkpolicy.networking.k8s.io/allow-orders-to-rabbitmq created
+networkpolicy.networking.k8s.io/allow-backend-egress created
+networkpolicy.networking.k8s.io/allow-storefront-egress created
+networkpolicy.networking.k8s.io/allow-payments-worker-egress created
+networkpolicy.networking.k8s.io/allow-monitoring-scrape created
+$ kubectl get resourcequota,limitrange -n p08-04-bookstore
+NAME                            REQUEST                                                 LIMIT                                   AGE
+resourcequota/bookstore-quota   pods: 0/30, requests.cpu: 0/2, requests.memory: 0/2Gi   limits.cpu: 0/4, limits.memory: 0/4Gi   2s
+
+NAME                          CREATED AT
+limitrange/bookstore-limits   2026-10-31T04:16:43Z
+$ kubectl get serviceaccounts -n p08-04-bookstore
+NAME                 AGE
+catalog-sa           2s
+default              2s
+migrate-sa           1s
+orders-sa            2s
+payments-worker-sa   2s
+postgres-sa          2s
+rabbitmq-sa          1s
+redis-sa             1s
+storefront-sa        2s
+$ kubectl get networkpolicy -n p08-04-bookstore
+NAME                           POD-SELECTOR                                 AGE
+allow-backend-egress           app in (catalog,cleanup,db-migrate,orders)   1s
+allow-data-tier-ingress        app in (postgres,redis)                      1s
+allow-dns-egress               <none>                                       1s
+allow-ingress-to-http-tiers    app in (catalog,orders,storefront)           1s
+allow-monitoring-scrape        app in (catalog,orders,payments-worker)      1s
+allow-orders-to-rabbitmq       app=rabbitmq                                 1s
+allow-payments-worker-egress   app=payments-worker                          1s
+allow-storefront-egress        app=storefront                               1s
+allow-storefront-to-apis       app in (catalog,orders)                      1s
+default-deny-all               <none>                                       1s
+$ kubectl get networkpolicy default-deny-all -n p08-04-bookstore -o jsonpath='{.spec.policyTypes}'
+["Ingress","Egress"]
+$ kubectl get ns p08-04-bookstore -o jsonpath='{.metadata.labels.pod-security\.kubernetes\.io/enforce}'
+restricted
+
+== Section 2: the second tenant, with its own full stack
+$ kubectl apply -f second-tenant.yaml (namespace p08-04-acme)
+namespace/p08-04-acme created
+resourcequota/tenant-acme-quota created
+limitrange/tenant-acme-limits created
+serviceaccount/acme-deployer created
+role.rbac.authorization.k8s.io/acme-tenant-admin created
+rolebinding.rbac.authorization.k8s.io/acme-tenant-admin created
+networkpolicy.networking.k8s.io/default-deny-all created
+networkpolicy.networking.k8s.io/allow-dns-egress created
+networkpolicy.networking.k8s.io/allow-same-namespace-only created
+$ kubectl get ns p08-04-acme -o jsonpath='{.metadata.labels.tenant}'
+acme
+$ kubectl get resourcequota,limitrange -n p08-04-acme
+NAME                              REQUEST                                                                                                                               LIMIT                                   AGE
+resourcequota/tenant-acme-quota   configmaps: 1/20, persistentvolumeclaims: 0/5, pods: 0/15, requests.cpu: 0/1, requests.memory: 0/1Gi, secrets: 0/20, services: 0/10   limits.cpu: 0/2, limits.memory: 0/2Gi   1s
+
+NAME                            CREATED AT
+limitrange/tenant-acme-limits   2026-10-31T04:16:45Z
+$ kubectl get networkpolicy -n p08-04-acme
+NAME                        POD-SELECTOR   AGE
+allow-dns-egress            <none>         0s
+allow-same-namespace-only   <none>         0s
+default-deny-all            <none>         0s
+
+== Section 3: what the stack lets the tenant do, and what it refuses
+$ kubectl auth can-i create deployments --as=system:serviceaccount:p08-04-acme:acme-deployer -n p08-04-acme
+yes
+$ kubectl auth can-i create deployments --as=system:serviceaccount:p08-04-acme:acme-deployer -n p08-04-bookstore
+no
+$ kubectl auth can-i create resourcequotas --as=system:serviceaccount:p08-04-acme:acme-deployer -n p08-04-acme
+no
+$ kubectl auth can-i create networkpolicies --as=system:serviceaccount:p08-04-acme:acme-deployer -n p08-04-acme
+no
+$ kubectl auth can-i create pods --subresource=exec --as=system:serviceaccount:p08-04-acme:acme-deployer -n p08-04-acme
+no
+$ kubectl auth can-i get pods --subresource=log --as=system:serviceaccount:p08-04-acme:acme-deployer -n p08-04-acme
+yes
+$ kubectl auth can-i get secrets --as=system:serviceaccount:p08-04-acme:acme-deployer -n p08-04-bookstore
+no
+
+== Section 3: a deliberate failure, refused by restricted
+$ kubectl run escape-probe -n p08-04-acme --image=bookstore/catalog:dev --restart=Never --privileged --dry-run=server
+Error from server (Forbidden): pods "escape-probe" is forbidden: violates PodSecurity "restricted:latest": privileged (container "escape-probe" must not set securityContext.privileged=true), allowPrivilegeEscalation != false (container "escape-probe" must set securityContext.allowPrivilegeEscalation=false), unrestricted capabilities (container "escape-probe" must set securityContext.capabilities.drop=["ALL"]), runAsNonRoot != true (pod or container "escape-probe" must set securityContext.runAsNonRoot=true), seccompProfile (pod or container "escape-probe" must set securityContext.seccompProfile.type to "RuntimeDefault" or "Localhost")
+
+== Section 4: environments are overlays of one namespace, not tenants
+$ kubectl kustomize examples/bookstore/kustomize/overlays/dev | grep -m1 'namespace:'
+  namespace: bookstore
+$ kubectl kustomize examples/bookstore/kustomize/overlays/prod | grep -m1 'namespace:'
+  namespace: bookstore
+
+== Cleanup
+$ kubectl delete namespace p08-04-acme p08-04-bookstore --wait=true
+namespace "p08-04-acme" deleted
+namespace "p08-04-bookstore" deleted
+lab 08.04 done
