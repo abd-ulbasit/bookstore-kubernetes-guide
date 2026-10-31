@@ -1,0 +1,189 @@
+# Transcript for 13-grand-capstone-bookstore-platform/06-payments-and-event-sourcing.md, the lab steps that ran (see the header note).
+# Tier A: one kind cluster (sf-pilot), kubectl v1.37.2 on the client.
+# Recorded by running the commands in order from full-guide/. The chapter's
+# namespace bookstore-platform-payments runs as p13-06-payments on this cluster,
+# and kind-sf-pilot is the context used. The cluster is a shared lab cluster with a different name from the chapter's example.
+# Not run here: Strimzi (KafkaUser), ESO (ExternalSecret), Istio (AuthorizationPolicy), CNPG and the outbox schema.
+# Paths to the lab's scratch directory are shown as <lab-certs>. Test values stand in for ESO: a test Stripe key, a test webhook secret and a self-signed test certificate for the receiver's Kafka user.
+
+## step 0 the gateway image
+$ docker build -t bookstore-platform/payments-gateway:dev .
+(run more than once: the module proxy stalled on the first attempts, and the build was retried until it exited 0; the build log is not kept in this transcript)
+$ kind load docker-image bookstore-platform/payments-gateway:dev --name sf-pilot
+Image: "bookstore-platform/payments-gateway:dev" with ID "sha256:2d643cd34f2d3a4df79420b2b292fda346b56e53ea1187b66dc10d6d8b4e0735" not yet present on node "sf-pilot-control-plane", loading...
+$ kubectl version --client
+Client Version: v1.37.2
+Kustomize Version: v5.8.1
+$ kubectl config current-context
+kind-sf-pilot
+## step 1 namespace with the restricted labels from outbox-publisher.yaml
+$ sed 's/bookstore-platform-payments/p13-06-payments/g' examples/bookstore-platform/payments/outbox-publisher.yaml | awk 'BEGIN{n=0} /^---$/{n++; next} n==1' | kubectl apply -f -
+namespace/p13-06-payments created
+$ kubectl get namespace p13-06-payments --show-labels
+NAME              STATUS   AGE   LABELS
+p13-06-payments   Active   1s    app.kubernetes.io/part-of=bookstore-platform,bookstore-platform.example.com/scope=payments,kubernetes.io/metadata.name=p13-06-payments,pod-security.kubernetes.io/audit-version=latest,pod-security.kubernetes.io/audit=restricted,pod-security.kubernetes.io/enforce-version=latest,pod-security.kubernetes.io/enforce=restricted,pod-security.kubernetes.io/warn-version=latest,pod-security.kubernetes.io/warn=restricted
+## step 2 test values in place of ESO (no Vault on this cluster)
+$ printf '%s' 'sk_test_lab_only_not_a_key' | kubectl -n p13-06-payments create secret generic stripe-api-key --from-file=api-key=/dev/stdin
+secret/stripe-api-key created
+$ printf '%s' 'whsec_lab_only_test_value' | kubectl -n p13-06-payments create secret generic stripe-webhook-secret --from-file=webhook-secret=/dev/stdin
+secret/stripe-webhook-secret created
+$ kubectl -n p13-06-payments create secret generic payments-webhook-receiver-kafka --from-file=ca.crt=<lab-certs>/ca.crt --from-file=user.crt=<lab-certs>/user.crt --from-file=user.key=<lab-certs>/user.key
+secret/payments-webhook-receiver-kafka created
+$ kubectl -n p13-06-payments get secrets
+NAME                              TYPE     DATA   AGE
+payments-webhook-receiver-kafka   Opaque   3      0s
+stripe-api-key                    Opaque   1      0s
+stripe-webhook-secret             Opaque   1      0s
+## step 3 stripe-mock, the gateway and the webhook receiver
+  name: payments-gateway
+$ sed s/bookstore-platform-payments/p13-06-payments/g examples/bookstore-platform/payments/stripe-mock.yaml | kubectl apply -f -
+serviceaccount/stripe-mock created
+deployment.apps/stripe-mock created
+service/stripe-mock created
+$ kubectl -n p13-06-payments rollout status deployment/stripe-mock --timeout=180s
+Waiting for deployment "stripe-mock" rollout to finish: 0 of 1 updated replicas are available...
+deployment "stripe-mock" successfully rolled out
+$ sed s/bookstore-platform-payments/p13-06-payments/g examples/bookstore-platform/app/payments-gateway/deployment.yaml | kubectl apply -f -
+serviceaccount/payments-gateway created
+deployment.apps/payments-gateway created
+$ sed s/bookstore-platform-payments/p13-06-payments/g examples/bookstore-platform/app/payments-gateway/service.yaml | kubectl apply -f -
+service/payments-gateway created
+$ kubectl -n p13-06-payments set env deployment/payments-gateway STRIPE_API_BASE="http://stripe-mock:12111"
+deployment.apps/payments-gateway env updated
+$ kubectl -n p13-06-payments rollout status deployment/payments-gateway --timeout=180s
+Waiting for deployment "payments-gateway" rollout to finish: 1 out of 2 new replicas have been updated...
+Waiting for deployment "payments-gateway" rollout to finish: 1 out of 2 new replicas have been updated...
+Waiting for deployment "payments-gateway" rollout to finish: 1 out of 2 new replicas have been updated...
+Waiting for deployment "payments-gateway" rollout to finish: 1 out of 2 new replicas have been updated...
+Waiting for deployment "payments-gateway" rollout to finish: 1 out of 2 new replicas have been updated...
+Waiting for deployment "payments-gateway" rollout to finish: 1 old replicas are pending termination...
+Waiting for deployment "payments-gateway" rollout to finish: 1 old replicas are pending termination...
+error: timed out waiting for the condition
+$ sed s/bookstore-platform-payments/p13-06-payments/g examples/bookstore-platform/payments/payments-webhook-receiver.yaml | kubectl apply -f -
+serviceaccount/payments-webhook-receiver created
+deployment.apps/payments-webhook-receiver created
+service/payments-webhook-receiver created
+$ kubectl -n p13-06-payments rollout status deployment/payments-webhook-receiver --timeout=180s
+Waiting for deployment "payments-webhook-receiver" rollout to finish: 0 of 2 updated replicas are available...
+error: timed out waiting for the condition
+$ sed s/bookstore-platform-payments/p13-06-payments/g examples/bookstore-platform/payments/webhook-probe.yaml | kubectl apply -f -
+error: error validating "STDIN": error validating data: failed to download openapi: unknown; if you choose to ignore these errors, turn validation off with --validate=false
+$ kubectl -n p13-06-payments wait --for=condition=Ready pod/webhook-probe --timeout=180s
+Error from server (NotFound): pods "webhook-probe" not found
+$ kubectl -n p13-06-payments get pods -o wide
+NAME                                         READY   STATUS    RESTARTS   AGE     IP             NODE                     NOMINATED NODE   READINESS GATES
+payments-gateway-58c96b4c4b-7xmvd            1/1     Running   0          5m4s    10.244.0.207   sf-pilot-control-plane   <none>           <none>
+payments-gateway-58c96b4c4b-krdjx            1/1     Running   0          6m24s   10.244.0.205   sf-pilot-control-plane   <none>           <none>
+payments-gateway-85ff75fdb6-w9flc            1/1     Running   0          6m24s   10.244.0.202   sf-pilot-control-plane   <none>           <none>
+payments-webhook-receiver-584bcdfc46-ntdxv   1/1     Running   0          3m23s   10.244.0.209   sf-pilot-control-plane   <none>           <none>
+payments-webhook-receiver-584bcdfc46-tsdcz   1/1     Running   0          3m23s   10.244.0.208   sf-pilot-control-plane   <none>           <none>
+stripe-mock-59db88959d-4jvlv                 1/1     Running   0          7m      10.244.0.201   sf-pilot-control-plane   <none>           <none>
+$ kubectl -n p13-06-payments rollout status deployment/payments-gateway --timeout=240s
+deployment "payments-gateway" successfully rolled out
+$ kubectl -n p13-06-payments rollout status deployment/payments-webhook-receiver --timeout=240s
+deployment "payments-webhook-receiver" successfully rolled out
+$ sed s/bookstore-platform-payments/p13-06-payments/g examples/bookstore-platform/payments/webhook-probe.yaml | kubectl apply -f -
+serviceaccount/webhook-probe created
+pod/webhook-probe created
+$ kubectl -n p13-06-payments wait --for=condition=Ready pod/webhook-probe --timeout=240s
+pod/webhook-probe condition met
+$ kubectl -n p13-06-payments get deploy,pods
+NAME                                        READY   UP-TO-DATE   AVAILABLE   AGE
+deployment.apps/payments-gateway            2/2     2            2           7m11s
+deployment.apps/payments-webhook-receiver   2/2     2            2           4m11s
+deployment.apps/stripe-mock                 1/1     1            1           7m47s
+
+NAME                                             READY   STATUS    RESTARTS   AGE
+pod/payments-gateway-58c96b4c4b-7xmvd            1/1     Running   0          5m51s
+pod/payments-gateway-58c96b4c4b-krdjx            1/1     Running   0          7m11s
+pod/payments-webhook-receiver-584bcdfc46-ntdxv   1/1     Running   0          4m10s
+pod/payments-webhook-receiver-584bcdfc46-tsdcz   1/1     Running   0          4m10s
+pod/stripe-mock-59db88959d-4jvlv                 1/1     Running   0          7m47s
+pod/webhook-probe                                1/1     Running   0          36s
+## step 6 the webhook refusals and a signed event, then a charge through the gateway
+$ kubectl -n p13-06-payments exec webhook-probe -- curl -s -w ' status=%{http_code}\n' -X POST -H 'Content-Type: application/json' -d '{"id":"evt_fake","type":"payment_intent.succeeded","data":{"object":{"id":"pi_fake"}}}' http://payments-webhook-receiver:8080/stripe/webhook
+{"error":"missing stripe-signature header"}
+ status=400
+$ kubectl -n p13-06-payments exec webhook-probe -- curl -s -w ' status=%{http_code}\n' -X POST -H 'Content-Type: application/json' -H 'Stripe-Signature: t=1793418553,v1=deadbeef' -d '{"id":"evt_fake","type":"payment_intent.succeeded","data":{"object":{"id":"pi_fake"}}}' http://payments-webhook-receiver:8080/stripe/webhook
+{"error":"invalid signature"}
+ status=401
+$ kubectl -n p13-06-payments exec webhook-probe -- curl -s -w ' status=%{http_code}\n' -X POST -H 'Content-Type: application/json' -H 'Stripe-Signature: t=1793418553,v1=5570d1209b5d9b87c194f16de383dcd0306997258b3fceb5ee685ae61862ec46' -d '{"id":"evt_lab_1","object":"event","type":"payment_intent.succeeded","data":{"object":{"id":"pi_lab_1","metadata":{"order_id":"order-001"}}}}' http://payments-webhook-receiver:8080/stripe/webhook
+{"error":"invalid signature"}
+ status=401
+$ kubectl -n p13-06-payments logs deploy/payments-webhook-receiver -c payments-gateway --tail=4
+Found 2 pods, using pod/payments-webhook-receiver-584bcdfc46-tsdcz
+{"time":"2026-10-31T03:47:13.455261006Z","level":"INFO","msg":"payments-gateway listening","addr":":8080","mode":"webhook-receiver"}
+{"time":"2026-10-31T03:49:14.305605847Z","level":"WARN","msg":"webhook signature verification failed","err":"Received event with API version , but stripe-go 76.25.0 expects API version 2023-10-16. We recommend that you create a WebhookEndpoint with this API version. Otherwise, you can disable this error by using `ConstructEventWithOptions(..., ConstructEventOptions{..., ignoreAPIVersionMismatch: true})`  but be wary that objects may be incorrectly deserialized."}
+$ kubectl -n p13-06-payments exec webhook-probe -- curl -s -w ' status=%{http_code}\n' -X POST -H 'Content-Type: application/json' -d '{"event_id":"11111111-1111-1111-1111-111111111111","order_id":"order-001","amount_cents":4999,"currency":"usd","customer_id":"cus_demo"}' http://payments-gateway:8080/charge
+{"error":"stripe call failed"}
+ status=502
+$ kubectl -n p13-06-payments logs deploy/payments-gateway --tail=3
+Found 2 pods, using pod/payments-gateway-58c96b4c4b-krdjx
+{"time":"2026-10-31T03:42:55.171998422Z","level":"INFO","msg":"payments-gateway listening","addr":":8080","mode":"gateway"}
+[ERROR] Request error from Stripe (status 401): {"status":401,"message":"Please authenticate by specifying an `Authorization` header with any valid looking testmode secret API key. For example, `Authorization: Bearer sk_test_123`. Authorization was 'Bearer sk_test_lab_only_not_a_key'.","type":"invalid_request_error"}
+{"time":"2026-10-31T03:49:15.918999279Z","level":"ERROR","msg":"stripe call failed","err":"{\"status\":401,\"message\":\"Please authenticate by specifying an `Authorization` header with any valid looking testmode secret API key. For example, `Authorization: Bearer sk_test_123`. Authorization was 'Bearer sk_test_lab_only_not_a_key'.\",\"type\":\"invalid_request_error\"}","event_id":"11111111-1111-1111-1111-111111111111"}
+## step 7 the same checks with a test key stripe-mock accepts and the API version the SDK pins
+$ kubectl -n p13-06-payments delete secret stripe-api-key
+secret "stripe-api-key" deleted from p13-06-payments namespace
+$ printf '%s' 'sk_test_labonly123' | kubectl -n p13-06-payments create secret generic stripe-api-key --from-file=api-key=/dev/stdin
+secret/stripe-api-key created
+$ kubectl -n p13-06-payments rollout restart deployment/payments-gateway
+deployment.apps/payments-gateway restarted
+$ kubectl -n p13-06-payments rollout status deployment/payments-gateway --timeout=300s
+Waiting for deployment "payments-gateway" rollout to finish: 1 out of 2 new replicas have been updated...
+Waiting for deployment "payments-gateway" rollout to finish: 1 out of 2 new replicas have been updated...
+Waiting for deployment "payments-gateway" rollout to finish: 2 old replicas are pending termination...
+Waiting for deployment "payments-gateway" rollout to finish: 1 old replicas are pending termination...
+Waiting for deployment "payments-gateway" rollout to finish: 1 old replicas are pending termination...
+Waiting for deployment "payments-gateway" rollout to finish: 1 old replicas are pending termination...
+deployment "payments-gateway" successfully rolled out
+$ kubectl -n p13-06-payments exec webhook-probe -- curl -s -w ' status=%{http_code}\n' -X POST -H 'Content-Type: application/json' -d '{"event_id":"11111111-1111-1111-1111-111111111111","order_id":"order-001","amount_cents":4999,"currency":"usd","customer_id":"cus_demo"}' http://payments-gateway:8080/charge
+{"payment_intent_id":"pi_Rcm0BCFQUxtqMF2","status":"requires_payment_method"}
+ status=200
+$ kubectl -n p13-06-payments logs deploy/payments-gateway --tail=2
+Found 3 pods, using pod/payments-gateway-58c96b4c4b-krdjx
+{"time":"2026-10-31T03:49:15.918999279Z","level":"ERROR","msg":"stripe call failed","err":"{\"status\":401,\"message\":\"Please authenticate by specifying an `Authorization` header with any valid looking testmode secret API key. For example, `Authorization: Bearer sk_test_123`. Authorization was 'Bearer sk_test_lab_only_not_a_key'.\",\"type\":\"invalid_request_error\"}","event_id":"11111111-1111-1111-1111-111111111111"}
+{"time":"2026-10-31T03:50:08.019509658Z","level":"INFO","msg":"shutdown signal received"}
+$ kubectl -n p13-06-payments exec webhook-probe -- curl -s -w ' status=%{http_code}\n' -X POST -H 'Content-Type: application/json' -H 'Stripe-Signature: t=1793418615,v1=5d52b1624c39dd4e8f9b6ee375353062cfe2ee35926de529017707d506c8c580' -d '{"id":"evt_lab_1","object":"event","api_version":"2023-10-16","type":"payment_intent.succeeded","data":{"object":{"id":"pi_lab_1","metadata":{"order_id":"order-001"}}}}' http://payments-webhook-receiver:8080/stripe/webhook
+{"error":"kafka publish failed"}
+ status=500
+$ kubectl -n p13-06-payments logs deploy/payments-webhook-receiver -c payments-gateway --tail=2
+Found 2 pods, using pod/payments-webhook-receiver-584bcdfc46-tsdcz
+{"time":"2026-10-31T03:47:13.455261006Z","level":"INFO","msg":"payments-gateway listening","addr":":8080","mode":"webhook-receiver"}
+{"time":"2026-10-31T03:49:14.305605847Z","level":"WARN","msg":"webhook signature verification failed","err":"Received event with API version , but stripe-go 76.25.0 expects API version 2023-10-16. We recommend that you create a WebhookEndpoint with this API version. Otherwise, you can disable this error by using `ConstructEventWithOptions(..., ConstructEventOptions{..., ignoreAPIVersionMismatch: true})`  but be wary that objects may be incorrectly deserialized."}
+## step 8 the receiver logs and a server dry run of the workers under restricted
+$ kubectl -n p13-06-payments logs -l app=payments-webhook-receiver -c payments-gateway --tail=3 --prefix
+[pod/payments-webhook-receiver-584bcdfc46-ntdxv/payments-gateway] {"time":"2026-10-31T03:47:15.549465425Z","level":"INFO","msg":"payments-gateway listening","addr":":8080","mode":"webhook-receiver"}
+[pod/payments-webhook-receiver-584bcdfc46-ntdxv/payments-gateway] {"time":"2026-10-31T03:49:13.850806248Z","level":"WARN","msg":"webhook signature verification failed","err":"webhook had no valid signature"}
+[pod/payments-webhook-receiver-584bcdfc46-ntdxv/payments-gateway] {"time":"2026-10-31T03:50:21.93393479Z","level":"ERROR","msg":"kafka publish failed","err":"dial tcp: lookup bookstore-platform-kafka-kafka-bootstrap.kafka-system.svc.cluster.local on 10.96.0.10:53: no such host","event_id":"evt_lab_1","type":"payment_intent.succeeded"}
+[pod/payments-webhook-receiver-584bcdfc46-tsdcz/payments-gateway] {"time":"2026-10-31T03:47:13.455261006Z","level":"INFO","msg":"payments-gateway listening","addr":":8080","mode":"webhook-receiver"}
+[pod/payments-webhook-receiver-584bcdfc46-tsdcz/payments-gateway] {"time":"2026-10-31T03:49:14.305605847Z","level":"WARN","msg":"webhook signature verification failed","err":"Received event with API version , but stripe-go 76.25.0 expects API version 2023-10-16. We recommend that you create a WebhookEndpoint with this API version. Otherwise, you can disable this error by using `ConstructEventWithOptions(..., ConstructEventOptions{..., ignoreAPIVersionMismatch: true})`  but be wary that objects may be incorrectly deserialized."}
+$ sed s/bookstore-platform-payments/p13-06-payments/g examples/bookstore-platform/payments/outbox-publisher.yaml | awk 'BEGIN{n=0} /^---$/{n++; next} n>=1' | kubectl apply --dry-run=server -f -
+Error from server (BadRequest): error when creating "STDIN": Deployment in version "v1" cannot be handled as a Deployment: strict decoding error: unknown field "automountServiceAccountToken"
+$ sed s/bookstore-platform-payments/p13-06-payments/g examples/bookstore-platform/payments/payments-worker.yaml | awk 'BEGIN{n=0} /^---$/{n++; next} n>=1' | kubectl apply --dry-run=server -f -
+Error from server (BadRequest): error when creating "STDIN": Deployment in version "v1" cannot be handled as a Deployment: strict decoding error: unknown field "automountServiceAccountToken"
+## step 9 cleanup
+$ kubectl -n p13-06-payments delete pod webhook-probe
+pod "webhook-probe" deleted from p13-06-payments namespace
+$ kubectl delete namespace p13-06-payments --timeout=240s
+namespace "p13-06-payments" deleted
+$ kubectl get namespace p13-06-payments
+Error from server (NotFound): namespaces "p13-06-payments" not found
+[test keys removed]
+## step 10 the namespace again, then the server dry runs (the first attempt merged the documents: a pipeline error, fixed here)
+$ sed s/bookstore-platform-payments/p13-06-payments/g examples/bookstore-platform/payments/outbox-publisher.yaml | awk '/^---/{n++; next} n==1' | kubectl apply -f -
+namespace/p13-06-payments created
+$ sed s/bookstore-platform-payments/p13-06-payments/g examples/bookstore-platform/payments/outbox-publisher.yaml | awk '/^---/{n++} n>=2' | kubectl apply --dry-run=server -f -
+serviceaccount/outbox-publisher created (server dry run)
+deployment.apps/outbox-publisher created (server dry run)
+$ sed s/bookstore-platform-payments/p13-06-payments/g examples/bookstore-platform/payments/payments-worker.yaml | awk '/^---/{n++} n>=2' | kubectl apply --dry-run=server -f -
+deployment.apps/payments-worker created (server dry run)
+$ kubectl -n p13-06-payments get deploy,pods
+No resources found in p13-06-payments namespace.
+$ kubectl delete namespace p13-06-payments --timeout=240s
+namespace "p13-06-payments" deleted
+## step 11 versions of the cluster and the images under test
+$ kubectl version
+Server Version: v1.37.0
+$ kubectl get nodes -o wide --no-headers
+sf-pilot-control-plane Ready v1.37.0

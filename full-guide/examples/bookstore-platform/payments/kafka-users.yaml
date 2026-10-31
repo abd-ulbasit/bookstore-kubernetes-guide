@@ -1,0 +1,122 @@
+# Bookstore Platform v2 : Part 13 ch.06: the Kafka identities of the payments
+# path, and the ACLs that limit each one to the topics it uses. Each user is a
+# TLS client certificate (authentication: tls on the cluster's TLS listener),
+# and the simple authorizer checks every produce and consume against these
+# rules. A principal with no rule gets no access.
+#
+# Strimzi's User Operator writes each user's secret (ca.crt, user.crt,
+# user.key) into kafka-system, beside the cluster. The payments namespace
+# cannot mount it, so the Role below lets the payments ESO reader copy only
+# these three secrets (stripe-eso-externalsecret.yaml).
+#
+# Prerequisites: the Kafka CR sets spec.kafka.authorization to type simple
+# (kafka/cluster.yaml, ch.13.05). Without it these ACLs are not enforced.
+#
+# !!! CRD-INTRINSIC DRY-RUN
+#   KafkaUser is kafka.strimzi.io/v1beta2 (served in Strimzi 0.40.0, the pinned
+#   chart). Without Strimzi a dry-run prints:
+#     no matches for kind "KafkaUser" in version "kafka.strimzi.io/v1beta2"
+#   EXPECTED.
+#
+# Apply:
+#   kubectl apply -f examples/bookstore-platform/payments/kafka-users.yaml
+---
+apiVersion: kafka.strimzi.io/v1beta2
+kind: KafkaUser
+metadata:
+  name: outbox-publisher
+  namespace: kafka-system
+  labels:
+    strimzi.io/cluster: bookstore-platform-kafka
+    app.kubernetes.io/part-of: bookstore-platform
+    app.kubernetes.io/component: outbox-publisher
+spec:
+  authentication:
+    type: tls
+  authorization:
+    type: simple
+    acls:
+      - resource: { type: topic, name: orders.placed, patternType: literal }
+        operations: [Describe, Write]
+        type: allow
+---
+apiVersion: kafka.strimzi.io/v1beta2
+kind: KafkaUser
+metadata:
+  name: payments-worker
+  namespace: kafka-system
+  labels:
+    strimzi.io/cluster: bookstore-platform-kafka
+    app.kubernetes.io/part-of: bookstore-platform
+    app.kubernetes.io/component: payments-worker
+spec:
+  authentication:
+    type: tls
+  authorization:
+    type: simple
+    acls:
+      - resource: { type: topic, name: orders.placed, patternType: literal }
+        operations: [Describe, Read]
+        type: allow
+      - resource: { type: group, name: payments-worker, patternType: literal }
+        operations: [Read]
+        type: allow
+      - resource: { type: topic, name: payments.completed, patternType: literal }
+        operations: [Describe, Write]
+        type: allow
+      - resource: { type: topic, name: payments.failed, patternType: literal }
+        operations: [Describe, Write]
+        type: allow
+---
+apiVersion: kafka.strimzi.io/v1beta2
+kind: KafkaUser
+metadata:
+  name: payments-webhook-receiver
+  namespace: kafka-system
+  labels:
+    strimzi.io/cluster: bookstore-platform-kafka
+    app.kubernetes.io/part-of: bookstore-platform
+    app.kubernetes.io/component: payments-webhook
+spec:
+  authentication:
+    type: tls
+  authorization:
+    type: simple
+    acls:
+      - resource: { type: topic, name: payments.completed, patternType: literal }
+        operations: [Describe, Write]
+        type: allow
+      - resource: { type: topic, name: payments.failed, patternType: literal }
+        operations: [Describe, Write]
+        type: allow
+---
+# The payments ESO reader may read these three user secrets in kafka-system and
+# nothing else there.
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: payments-kafka-secrets-reader
+  namespace: kafka-system
+  labels:
+    app.kubernetes.io/part-of: bookstore-platform
+rules:
+  - apiGroups: [""]
+    resources: ["secrets"]
+    resourceNames: ["outbox-publisher", "payments-worker", "payments-webhook-receiver"]
+    verbs: ["get"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: payments-kafka-secrets-reader
+  namespace: kafka-system
+  labels:
+    app.kubernetes.io/part-of: bookstore-platform
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: Role
+  name: payments-kafka-secrets-reader
+subjects:
+  - kind: ServiceAccount
+    name: payments-kafka-reader
+    namespace: bookstore-platform-payments

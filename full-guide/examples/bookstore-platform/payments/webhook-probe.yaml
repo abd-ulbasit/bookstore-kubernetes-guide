@@ -1,0 +1,60 @@
+# Bookstore Platform v2 : Part 13 ch.06: a throwaway curl Pod for the webhook
+# tests in the chapter. It runs inside the namespace, so the tests reach the
+# receiver's Service the way Stripe's traffic would reach it through the
+# gateway, without a port-forward. Delete it when you are done.
+#
+# The image is pinned by digest (curlimages/curl tag 8.16.0). The Pod meets the
+# restricted profile like every workload in this namespace.
+#
+# Apply:
+#   kubectl apply -f examples/bookstore-platform/payments/webhook-probe.yaml
+---
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: webhook-probe
+  namespace: bookstore-platform-payments
+  labels:
+    app.kubernetes.io/part-of: bookstore-platform
+    app.kubernetes.io/component: webhook-probe
+automountServiceAccountToken: false
+---
+apiVersion: v1
+kind: Pod
+metadata:
+  name: webhook-probe
+  namespace: bookstore-platform-payments
+  labels:
+    app.kubernetes.io/part-of: bookstore-platform
+    app.kubernetes.io/component: webhook-probe
+spec:
+  serviceAccountName: webhook-probe
+  automountServiceAccountToken: false
+  securityContext:
+    runAsNonRoot: true
+    runAsUser: 65532
+    runAsGroup: 65532
+    seccompProfile:
+      type: RuntimeDefault
+  containers:
+    - name: curl
+      # tag 8.16.0 (curlimages/curl on Docker Hub)
+      image: curlimages/curl@sha256:463eaf6072688fe96ac64fa623fe73e1dbe25d8ad6c34404a669ad3ce1f104b6
+      command: ["sleep", "3600"]
+      resources:
+        requests:
+          cpu: 10m
+          memory: 16Mi
+        limits:
+          memory: 32Mi
+      securityContext:
+        allowPrivilegeEscalation: false
+        readOnlyRootFilesystem: true
+        capabilities:
+          drop: ["ALL"]
+      volumeMounts:
+        - name: tmp
+          mountPath: /tmp
+  volumes:
+    - name: tmp
+      emptyDir: {}

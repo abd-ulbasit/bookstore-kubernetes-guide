@@ -1,17 +1,17 @@
-# `app/payments-gateway/` — v2 payments gateway (Stripe SDK + webhook)
+# `app/payments-gateway/`: v2 payments gateway (Stripe SDK + webhook)
 
 A small Go service introduced in ch.13.06. One binary, two modes:
 
-- `PAYMENTS_MODE=gateway` — POST `/charge` calls Stripe PaymentIntents
+- `PAYMENTS_MODE=gateway`: POST `/charge` calls Stripe PaymentIntents
   with an idempotency key derived from the order's `event_id`.
-- `PAYMENTS_MODE=webhook-receiver` — POST `/stripe/webhook` verifies the
+- `PAYMENTS_MODE=webhook-receiver`: POST `/stripe/webhook` verifies the
   Stripe-Signature header and publishes `payments.completed` to Kafka.
 
 ## Why one binary for two roles
 
 The two roles share initialisation: the Stripe SDK, the JSON encoder
 defaults, the metrics, the health probes. Splitting them in two binaries
-duplicates that — and means a Stripe SDK upgrade requires updating two
+duplicates that: and means a Stripe SDK upgrade requires updating two
 services. One binary, two `PAYMENTS_MODE`-selected paths is the minimum-
 maintenance shape; the chapter's "Production notes" calls out the trade.
 
@@ -46,8 +46,8 @@ docker build -t bookstore-platform/payments-gateway:dev .
 
 ## Cross-references
 
-- Ch.13.06 — the chapter that introduces this service.
-- `../../payments/` — the surrounding deployment manifests
+- Ch.13.06: the chapter that introduces this service.
+- `../../payments/`: the surrounding deployment manifests
   (outbox-publisher, payments-worker, payments-webhook-receiver).
-- `../events/` — the dispatcher that consumes Kafka topics and POSTs to
+- `../events/`: the dispatcher that consumes Kafka topics and POSTs to
   this gateway's `/charge` endpoint.
