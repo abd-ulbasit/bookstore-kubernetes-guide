@@ -44,8 +44,11 @@ name: bookstore-release
 #   security-gates.yml        the rendered overlay passes G2 and G3 and deploys
 #                             under restricted Pod Security (G4)
 #
-# Their runs are attached to the PR's head commit, so they show up as its
-# checks. `checks` has `actions: write` and nothing else, in a job of its own
+# Their runs are attached to the PR's head commit, so they are on the commit,
+# on the branch's runs page and in this job's step summary. They are not in the
+# PR's own Checks tab: for the third release (orders) that tab read 0, and
+# `gh pr checks` said no checks were reported, while both runs had passed.
+# `checks` has `actions: write` and nothing else, in a job of its own
 # with no checkout: the REST endpoint that creates a dispatch event needs the
 # Actions permission at write level
 # (https://docs.github.com/en/rest/authentication/permissions-required-for-github-apps),
@@ -57,9 +60,11 @@ name: bookstore-release
 # run. It can still start a run on demand, which is why the list is fixed in
 # this file. secret-scan is left out: its failure job files a rolling issue on
 # any non-PR event.
-# If the checks are missing (the dispatch failed, or you want the PR event),
-# close the PR and reopen it. That was tested: a person's reopen made all five
-# pull_request workflows run, and they passed.
+# For checks on the PR itself (or if the dispatch failed), close the PR and
+# reopen it. That was tested: a person's reopen made all five pull_request
+# workflows run, and they passed. A push by a person does the same: main moved
+# before the orders promotion was merged, the branch was updated from the API
+# (a rebase), and the five ran on the new head and passed.
 #
 # Set up once in the repository (Settings, Actions, General): allow GitHub
 # Actions to create pull requests. Without it the promotion job fails after
@@ -190,6 +195,9 @@ jobs:
           # refs/heads/<default branch>, the identity the signature carries.
           SIGNER_REF: ${{ github.ref }}
           RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+          # The runs of the branch the promotion PR is opened from (see the
+          # `branch:` input of create-pull-request below).
+          BRANCH_RUNS_URL: ${{ github.server_url }}/${{ github.repository }}/actions?query=branch%3Aci%2Fpromote-${{ inputs.service }}
         run: |
           set -euo pipefail
           image="ghcr.io/${OWNER,,}/bookstore-${SERVICE}@${DIGEST}"
@@ -219,9 +227,10 @@ jobs:
           This PR changes one file. A pull request opened with GITHUB_TOKEN gets no
           checks of its own: the pull_request runs GitHub creates for it never start
           a job. The \`checks\` job therefore dispatched the overlay render check and
-          the security gates on this branch, and they appear below. If they are
-          missing, close and reopen this PR, which runs the pull_request workflows
-          normally.
+          the security gates on this branch. Their results are on the branch's
+          [runs page](${BRANCH_RUNS_URL}), not in this PR's Checks tab, which stays
+          empty. For checks on the PR itself, push to the branch as a person or
+          close and reopen this PR: either runs the pull_request workflows normally.
 
           Merging this PR is the production deploy. To roll back, revert it.
           EOF

@@ -87,6 +87,16 @@ versions follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   repository. The workflow header and the PR body now say what GitHub did with
   the bot-opened PR's `pull_request` runs: created them with no jobs and left
   them at `action_required`.
+- The prod overlay pins `catalog` and `orders` to the signed digests that
+  `bookstore-release.yml` pushed (promotion PRs 10 and 12). `payments-worker`
+  and `storefront` still name the placeholder registry.
+- The promotion PR body no longer says the dispatched checks "appear below".
+  The third release run (`orders`) showed they run and pass on the PR's
+  branch but stay out of the PR's own Checks tab. The body now links the
+  branch's runs page and says so. The reworded text has not run in Actions.
+  Chapter 07.03 and `evidence/07-03.txt` add that run, correct the step 13
+  table and the Honesty note to match what each run found, and say what is
+  still unproven, including that `main` requires no review or check.
 - Part 01 Core workloads (01.02 to 01.08) is rewritten security-first on the
   01.01 baseline, with threats and controls in each chapter and lab evidence
   checked by the evidence gate. The admission gate judges a registered

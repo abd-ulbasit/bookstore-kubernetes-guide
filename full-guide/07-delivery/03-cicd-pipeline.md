@@ -191,13 +191,21 @@ checks on it (steps 8 and 12).
 > below. Push, keyless signing, the SBOM attestation, provenance, the
 > promotion PR and Scorecard need a registry, GitHub's OIDC token or the
 > default branch, so a pull request cannot run them. The release workflow
-> `bookstore-release.yml` does, and it was dispatched on `main` twice. The
-> first run signed correctly and found five defects in the workflows around
-> the signing; the second run is the one that worked. Steps 8, 10 and 12
-> quote what the runs showed, in blocks the evidence check reads like the
-> rest, and the end of step 12 lists what is still unproven. Those runs are
-> the guide repository's own, so the output there names it; the commands use
-> `<OWNER>` and `<REPO>`. Dependabot is not run. Every other stage runs below.
+> `bookstore-release.yml` does, and it was dispatched on `main` three times:
+> for `catalog`, for `catalog` again, then for `orders`. The first run signed
+> correctly and found five defects in the workflows around the signing. The
+> second ran clean, but reading the promotion PR it opened found a sixth: the
+> `gh attestation verify` in its body pinned only the repository. The third
+> was the first run of the corrected body, whose commands exit 0 when pasted,
+> and it found a seventh: the checks the workflow dispatches never appear in
+> the PR's own Checks tab. One more defect, in the runtime gate, was found by
+> reading before any run could hit it. The paragraph of the PR body that
+> describes the checks was reworded after the third run and has not run since.
+> Steps 8, 10 and 12 quote what the runs showed, in blocks the evidence check
+> reads like the rest, and the end of step 12 lists what is still unproven.
+> Those runs are the guide repository's own, so the output there names it; the
+> commands use `<OWNER>` and `<REPO>`. Dependabot is not run. Every other stage
+> runs below.
 
 ### 0. The scanner runner
 
@@ -650,9 +658,10 @@ RUN=<RUN_ID>
 gh run view $RUN --repo $REPO --json event,headBranch,conclusion,jobs --jq '"\(.event) on \(.headBranch): \(.conclusion)", (.jobs[] | "  \(.name): \(.conclusion)")'
 ```
 
-It was dispatched twice. The first run proved the signing and found defects in
-the promotion that follows it (step 12). This is the second, and every job in
-it passed, `sign` among them:
+It has been dispatched three times. The first run proved the signing and found
+defects in the promotion that follows it (step 12). The second, for `catalog`
+again, is the one quoted next, and every job in it passed, `sign` among them.
+The third, for `orders`, is at the end of this step:
 
 <!-- gate: output -->
 
@@ -807,6 +816,78 @@ What that shows: one workflow, on `main`, pushed this digest, signed it with
 its own identity, and attached an SBOM and a provenance statement that a
 consumer checks with public tools and no login. What it does not show is in the
 list at the end of step 12.
+
+**The same for a second service.** The third dispatch was for `orders`, from
+`main`, after the promotion template had been corrected. Every job passed
+again, `sign` among them, and the digest, the Rekor entry and the attestation
+are new ones:
+
+```sh
+gh workflow run bookstore-release.yml --ref main -f service=orders
+RUN=<RUN_ID>
+gh run view $RUN --repo $REPO --json event,headBranch,conclusion,jobs --jq '"\(.event) on \(.headBranch): \(.conclusion)", (.jobs[] | "  \(.name): \(.conclusion)")'
+```
+
+<!-- gate: output -->
+
+```text
+workflow_dispatch on main: success
+  release (orders) / sast: success
+  release (orders) / build-test: success
+  release (orders) / manifests: success
+  release (orders) / image-lint: success
+  release (orders) / secrets: success
+  release (orders) / sca: success
+  release (orders) / workflow-hardening: success
+  release (orders) / sbom: success
+  release (orders) / dast: success
+  release (orders) / image-scan: success
+  release (orders) / sign: success
+  promote (orders): success
+  checks on the promotion PR (orders): success
+```
+
+```sh
+SIGN=<ID of the "release (orders) / sign" job>
+gh api repos/$REPO/actions/jobs/$SIGN/logs | sed -E 's/^[0-9T:.-]+Z //' | grep -E -A1 'Attestation (signature uploaded|uploaded to repository)'
+D=$(gh api repos/$REPO/actions/jobs/$SIGN/logs | grep -oE 'digest: sha256:[0-9a-f]{64}' | head -1 | cut -d' ' -f2)
+echo $D
+```
+
+<!-- gate: output -->
+
+```text
+Attestation signature uploaded to Rekor transparency log
+https://search.sigstore.dev?logIndex=3607767425
+Attestation uploaded to repository
+https://github.com/abd-ulbasit/bookstore-kubernetes-guide/attestations/62011300
+```
+
+<!-- gate: output -->
+
+```text
+sha256:78ad1a65b9647607b5903035685a864882f8f38f85a45c21d86089f4f7371caf
+```
+
+The SBOM attestation on that digest, verified, decoded and counted the same way:
+
+```sh
+IMAGE=ghcr.io/<OWNER>/bookstore-orders@$D
+cosign verify-attestation --type cyclonedx --certificate-identity "$ID" --certificate-oidc-issuer https://token.actions.githubusercontent.com "$IMAGE" 2>/dev/null | jq -r .payload | base64 -d | jq '{bomFormat: .predicate.bomFormat, specVersion: .predicate.specVersion, components: (.predicate.components | length)}'
+```
+
+<!-- gate: output -->
+
+```text
+{
+  "bomFormat": "CycloneDX",
+  "specVersion": "1.7",
+  "components": 971
+}
+```
+
+The `cosign verify` and `gh attestation verify` of this digest are the two
+commands its promotion PR carried. Step 12 runs them as pasted.
 
 ### 9. `manifests`: KubeLinter, kubesec, Trivy config
 
@@ -1236,7 +1317,8 @@ cd ../../../../../..            # back to full-guide/
 That edit and a merge are the whole "deploy". CI holds no cluster credential.
 The job installs kustomize from a pinned release **and checks its sha256**,
 then opens the PR with `peter-evans/create-pull-request`. Require a review by
-branch protection, or the bot can merge its own promotion.
+branch protection, or nothing asks for one: neither promotion here had a
+review (end of this step).
 
 #### The first promotion could not be reviewed
 
@@ -1329,17 +1411,20 @@ The fixes are in `bookstore-release.yml` and the tree:
   still 48 objects. The promote job fails before it opens the PR if its edit
   touches any other file or changes more than 8 lines.
 - **The body is written from the run's own values**: owner, repository,
-  digest, a link to the run, a `cosign verify` with the exact identity and a
-  `gh attestation verify --cert-identity` with the same one.
-- **The PR gets checks.** A separate `checks` job, with `actions: write` and no
-  other permission, dispatches `example-trees-check.yml` (the prod overlay still
-  renders 48 objects) and `security-gates.yml` (the gates, including the
-  runtime gate that deploys the prod overlay) on the PR's branch. A dispatch is
-  exempt from the `GITHUB_TOKEN` rule, and creating one needs the Actions
-  permission at write level
+  digest, a link to the run and a `cosign verify` with the exact identity. The
+  second promotion's body also carried a `gh attestation verify`, and that one
+  pinned only the repository; the third promotion shows how it was corrected.
+- **The checks run, on the PR's branch.** A separate `checks` job, with
+  `actions: write` and no other permission, dispatches `example-trees-check.yml`
+  (the prod overlay still renders 48 objects) and `security-gates.yml` (the
+  gates, including the runtime gate that deploys the prod overlay) on the PR's
+  branch. A dispatch is exempt from the `GITHUB_TOKEN` rule, and creating one
+  needs the Actions permission at write level
   ([permissions](https://docs.github.com/en/rest/authentication/permissions-required-for-github-apps)).
-  If the checks are missing, closing and reopening the PR as a person runs the
-  `pull_request` workflows normally; the second PR was reopened to test that.
+  This fix was written to give the PR checks of its own. It does not: the third
+  promotion shows the runs pass but stay out of the PR's Checks tab. Closing and
+  reopening the PR as a person runs the `pull_request` workflows normally; the
+  second PR was reopened to test that.
 
 #### The second promotion
 
@@ -1469,8 +1554,8 @@ security-scan by abd-ulbasit: success
 security-scan by github-actions[bot]: failure
 ```
 
-Merging it was the deploy. On `main`, the prod overlay still renders 48 objects
-and pins the promoted digest:
+Merging it was the deploy. Right after that merge, `main` rendered the prod
+overlay as 48 objects with the promoted digest:
 
 ```sh
 git log -1 --format=%s
@@ -1496,21 +1581,315 @@ ci: promote catalog to prod (signed digest)
         image: ghcr.io/abd-ulbasit/bookstore-catalog@sha256:eaa26ada0a2e1575026a5e71e74572ed0bfdde80f50012e91a7be28f0de16ced
 ```
 
+Reading that PR's body afterwards found two things wrong in it. Both are still
+there, because the PR is merged:
+
+```sh
+gh pr view 10 --repo $REPO --json body --jq .body | grep -E 'attestation verify|triggers no workflows'
+```
+
+<!-- gate: output -->
+
+```text
+    gh attestation verify oci://ghcr.io/abd-ulbasit/bookstore-catalog@sha256:eaa26ada0a2e1575026a5e71e74572ed0bfdde80f50012e91a7be28f0de16ced --repo abd-ulbasit/bookstore-kubernetes-guide
+because a pull request opened with GITHUB_TOKEN triggers no workflows. If
+```
+
+The first line pins the repository and nothing else. As step 8 shows, that
+accepts any workflow and any branch in the repository, which the `cosign verify`
+in the same body does not. The second says a PR opened this way triggers no
+workflows, and the run list above shows what GitHub did: it created the five
+runs and held them at `action_required`. The workflow was corrected after this
+run. Nothing had run the corrected body yet.
+
+#### The third promotion
+
+The `orders` dispatch (step 8) is the first run of the corrected template. Its
+promote job logged the same guard, one file and 6 changed lines:
+
+```sh
+PROMOTE=<ID of the "promote (orders)" job>
+gh api repos/$REPO/actions/jobs/$PROMOTE/logs | sed -E 's/^[0-9T:.-]+Z //' | grep -B2 '^changed lines:'
+```
+
+<!-- gate: output -->
+
+```text
+ .../bookstore/kustomize/overlays/prod/images/kustomization.yaml     | 6 +++---
+ 1 file changed, 3 insertions(+), 3 deletions(-)
+changed lines: 6
+```
+
+The body now pins the identity in both commands. PR 10 has no `--cert-identity`
+and PR 12, the `orders` promotion, has one, next to the `cosign verify`'s
+`--certificate-identity`:
+
+```sh
+gh pr view 10 --repo $REPO --json body --jq .body | grep -c -e '--cert-identity'
+gh pr view 12 --repo $REPO --json body --jq .body | grep -c -e '--cert-identity'
+gh pr view 12 --repo $REPO --json body --jq .body | grep -E -e '--(certificate|cert)-identity'
+```
+
+<!-- gate: output -->
+
+```text
+0
+```
+
+<!-- gate: output -->
+
+```text
+1
+```
+
+<!-- gate: output -->
+
+```text
+      --certificate-identity 'https://github.com/abd-ulbasit/bookstore-kubernetes-guide/.github/workflows/bookstore-pipeline.yml@refs/heads/main' \
+      --cert-identity 'https://github.com/abd-ulbasit/bookstore-kubernetes-guide/.github/workflows/bookstore-pipeline.yml@refs/heads/main'
+```
+
+A command in a PR body is only worth anything if it runs when pasted. These
+lines cut the two commands out of the body as they are written there, and run
+them with the empty credential store:
+
+```sh
+gh pr view 12 --repo $REPO --json body --jq .body | awk '/^    cosign verify/,/^$/' | sed 's/^    //' > pasted-cosign.sh
+gh pr view 12 --repo $REPO --json body --jq .body | awk '/^    gh attestation verify/,/^$/' | sed 's/^    //' > pasted-attest.sh
+bash pasted-cosign.sh >/dev/null 2>&1; echo "cosign verify, as pasted: exit $?"
+bash pasted-attest.sh >/dev/null 2>&1; echo "gh attestation verify, as pasted: exit $?"
+GH_FORCE_TTY=100 bash pasted-attest.sh 2>&1 | grep -E "Subject Alternative Name|Verification succeeded|Signer workflow"
+```
+
+<!-- gate: output -->
+
+```text
+cosign verify, as pasted: exit 0
+```
+
+<!-- gate: output -->
+
+```text
+gh attestation verify, as pasted: exit 0
+```
+
+<!-- gate: output -->
+
+```text
+- Subject Alternative Name must match:... https://github.com/abd-ulbasit/bookstore-kubernetes-guide/.github/workflows/bookstore-pipeline.yml@refs/heads/main
+✓ Verification succeeded!
+  - Signer workflow: .github/workflows/bookstore-pipeline.yml@refs/heads/main
+```
+
+The `checks` job dispatched both workflows again, and they ran on the PR's
+branch:
+
+```sh
+CHECKS=<ID of the "checks on the promotion PR (orders)" job>
+gh api repos/$REPO/actions/jobs/$CHECKS/logs | sed -E 's/^[0-9T:.-]+Z //' | grep '^dispatched'
+gh run list --repo $REPO --branch ci/promote-orders --limit 10 --json databaseId,workflowName,status,conclusion,event,headSha --jq '.[]|[.databaseId,.workflowName,.status,.conclusion,.event,.headSha[0:7]]|@tsv'
+```
+
+<!-- gate: output -->
+
+```text
+dispatched example-trees-check.yml on ci/promote-orders
+dispatched security-gates.yml on ci/promote-orders
+```
+
+<!-- gate: output -->
+
+```text
+41159148867     security-gates  completed       success workflow_dispatch       64708d1
+41159146728     example-trees-check     completed       success workflow_dispatch       64708d1
+41159130086     docs    completed       action_required pull_request    64708d1
+41159130026     security-gates  completed       action_required pull_request    64708d1
+41159130033     secret-scan     completed       action_required pull_request    64708d1
+41159130122     example-trees-check     completed       action_required pull_request    64708d1
+41159130013     security-scan   completed       action_required pull_request    64708d1
+```
+
+Both dispatched runs passed. The PR itself did not show them. The head commit
+has the check runs, and the PR reports none:
+
+```sh
+SHA=$(gh pr view 12 --repo $REPO --json headRefOid --jq .headRefOid)
+gh api --paginate repos/$REPO/commits/$SHA/check-runs --jq '.check_runs[].conclusion' | sort | uniq -c
+gh pr view 12 --repo $REPO --json statusCheckRollup --jq '.statusCheckRollup | length'
+gh pr checks 12 --repo $REPO; echo "exit status: $?"
+```
+
+<!-- gate: output -->
+
+```text
+   1 skipped
+  32 success
+```
+
+<!-- gate: output -->
+
+```text
+0
+```
+
+<!-- gate: output -->
+
+```text
+no checks reported on the 'ci/promote-orders' branch
+exit status: 1
+```
+
+The skipped one is `rolling-failure-issue` in `example-trees-check`, which only
+runs when a scheduled run fails. The PR's page read `Checks 0`. The body had said
+the dispatched runs "appear below", and that was wrong: a dispatch attaches its
+runs to the commit and to the branch's run list, not to the PR. This is the
+seventh defect. The workflow's body now links the branch's runs page and says
+the PR's Checks tab stays empty. That text has not run.
+
+While PR 12 was open, another change landed on `main`, so its one commit was no
+longer a fast-forward of it. The branch was brought up to date with the API's
+rebase update, which leaves that single commit on top of `main`:
+
+```sh
+gh api -X PUT repos/$REPO/pulls/12/update-branch -f update_method=rebase
+```
+
+That was a push made with a person's token, and GitHub ran the five
+`pull_request` workflows on the new head, as it had for the person's reopen of
+the second PR. The bot's five, on the old head, are still at `action_required`:
+
+```sh
+gh api "repos/$REPO/actions/runs?branch=ci/promote-orders&per_page=50" --jq '.workflow_runs[] | select(.event == "pull_request") | "\(.name) \(.head_sha[0:7]) by \(.triggering_actor.login): \(.conclusion)"' | sort
+```
+
+<!-- gate: output -->
+
+```text
+docs 64708d1 by github-actions[bot]: action_required
+docs a7f1148 by abd-ulbasit: success
+example-trees-check 64708d1 by github-actions[bot]: action_required
+example-trees-check a7f1148 by abd-ulbasit: success
+secret-scan 64708d1 by github-actions[bot]: action_required
+secret-scan a7f1148 by abd-ulbasit: success
+security-gates 64708d1 by github-actions[bot]: action_required
+security-gates a7f1148 by abd-ulbasit: success
+security-scan 64708d1 by github-actions[bot]: action_required
+security-scan a7f1148 by abd-ulbasit: success
+```
+
+With those green, the PR was merged by fast-forward: a push of its head to
+`main`, so the merge commit is the head:
+
+```sh
+gh pr view 12 --repo $REPO --json state,headRefOid,mergeCommit --jq '"PR 12 (\(.state)): merge commit is the head: \(.mergeCommit.oid == .headRefOid)"'
+```
+
+<!-- gate: output -->
+
+```text
+PR 12 (MERGED): merge commit is the head: true
+```
+
+`main` now renders the prod overlay as 48 objects, with the catalog and orders
+pins both on digests:
+
+```sh
+git log -2 --format=%s -- examples/bookstore/kustomize/overlays/prod/images
+kubectl kustomize examples/bookstore/kustomize/overlays/prod | grep -c '^kind:'
+kubectl kustomize examples/bookstore/kustomize/overlays/prod | grep -E 'image:.*(catalog|orders)'
+```
+
+<!-- gate: output -->
+
+```text
+ci: promote orders to prod (signed digest)
+ci: promote catalog to prod (signed digest)
+```
+
+<!-- gate: output -->
+
+```text
+48
+```
+
+<!-- gate: output -->
+
+```text
+        image: ghcr.io/abd-ulbasit/bookstore-catalog@sha256:eaa26ada0a2e1575026a5e71e74572ed0bfdde80f50012e91a7be28f0de16ced
+        image: ghcr.io/abd-ulbasit/bookstore-orders@sha256:78ad1a65b9647607b5903035685a864882f8f38f85a45c21d86089f4f7371caf
+```
+
+Merging left both promotion branches behind. Each was at its merged PR's head,
+so both were deleted:
+
+```sh
+gh api repos/$REPO/branches --paginate --jq '.[].name | select(startswith("ci/"))'
+gh api repos/$REPO/branches/ci/promote-catalog --jq .commit.sha[0:7]
+gh pr view 10 --repo $REPO --json state,headRefOid --jq '"PR 10 (\(.state)): head \(.headRefOid[0:7])"'
+gh api repos/$REPO/branches/ci/promote-orders --jq .commit.sha[0:7]
+gh pr view 12 --repo $REPO --json state,headRefOid --jq '"PR 12 (\(.state)): head \(.headRefOid[0:7])"'
+gh api -X DELETE repos/$REPO/git/refs/heads/ci/promote-catalog
+gh api -X DELETE repos/$REPO/git/refs/heads/ci/promote-orders
+gh api repos/$REPO/branches --paginate --jq '[.[].name | select(startswith("ci/"))] | length'
+```
+
+<!-- gate: output -->
+
+```text
+ci/promote-catalog
+ci/promote-orders
+```
+
+<!-- gate: output -->
+
+```text
+0a137b8
+```
+
+<!-- gate: output -->
+
+```text
+PR 10 (MERGED): head 0a137b8
+```
+
+<!-- gate: output -->
+
+```text
+a7f1148
+```
+
+<!-- gate: output -->
+
+```text
+PR 12 (MERGED): head a7f1148
+```
+
+<!-- gate: output -->
+
+```text
+0
+```
+
 #### What is still unproven
 
-- **A failing gate on a publishing run.** Both dispatches passed every gate.
-  That a failed gate leaves nothing pushed and nothing signed rests on the `if:`
-  of `sign`, which is read here, not run.
-- **A cluster that pulls the digest.** The merge changed what `overlays/prod`
-  names. No Argo CD synced it and no cluster pulled the image from ghcr.io, and
-  nothing at admission checks the signature (05.07 does that). The runtime gate
-  runs images it builds itself from the same Dockerfiles, not the pushed digest.
-- **The other three services.** Only `catalog` was released. The `orders`,
+- **A failing gate on a publishing run.** All three dispatches passed every
+  gate. That a failed gate leaves nothing pushed and nothing signed rests on the
+  `if:` of `sign`, which is read here, not run.
+- **A cluster that pulls the digest.** The two merges changed what
+  `overlays/prod` names. No Argo CD synced it and no cluster pulled either image
+  from ghcr.io, and nothing at admission checks the signature (05.07 does that).
+  The runtime gate runs images it builds itself from the same Dockerfiles, not
+  the pushed digests.
+- **The other two services.** Only `catalog` and `orders` were released. The
   `payments-worker` and `storefront` pins still name the placeholder registry.
+- **The reworded checks paragraph.** The PR body's text about the dispatched
+  checks was changed after the third run. It was rendered locally from the
+  workflow's own step with that run's values, and it has not run in Actions.
 - **Block mode and trend.** Harden-Runner has only run in audit mode, and the
   Scorecard result is a single reading.
 
-And one gap that is a setting, not a test. The ruleset on `main` here is:
+And one gap that is a setting, not a test: **nothing on `main` requires a
+review or a check.** The ruleset on `main` here is:
 
 ```sh
 gh api repos/$REPO/rulesets/<ID> --jq '[.name, .enforcement, (.rules | map(.type) | join(", "))] | join(": ")'
@@ -1522,36 +1901,78 @@ gh api repos/$REPO/rulesets/<ID> --jq '[.name, .enforcement, (.rules | map(.type
 protect main: active: deletion, non_fast_forward
 ```
 
-It blocks deleting `main` and force pushes, and requires no pull request, no
-review and no check. The promotion was merged by pushing its commit, and
-nothing in the repository's settings asked for a second person or a passing
-check first. The setting that lets Actions open pull requests is one switch for
-two powers: it also lets a workflow approve one. Pair it with a ruleset that
-requires a human review, as the Production notes say.
+It is the only ruleset, and the rules in force on `main` are the same two:
 
-### 13. What the first run found
+```sh
+gh api repos/$REPO/rules/branches/main --jq '[.[].type] | join(", ")'
+gh api repos/$REPO/rulesets --jq 'length'
+```
+
+<!-- gate: output -->
+
+```text
+deletion, non_fast_forward
+```
+
+<!-- gate: output -->
+
+```text
+1
+```
+
+It blocks deleting `main` and force pushes, and requires no pull request, no
+review and no check. Both promotions were merged by a person pushing the PR's
+head, and neither had a review:
+
+```sh
+gh pr view 12 --repo $REPO --json reviews,mergedBy --jq '"PR 12: \(.reviews | length) reviews, merged by \(.mergedBy.login)"'
+gh pr view 10 --repo $REPO --json reviews,mergedBy --jq '"PR 10: \(.reviews | length) reviews, merged by \(.mergedBy.login)"'
+```
+
+<!-- gate: output -->
+
+```text
+PR 12: 0 reviews, merged by abd-ulbasit
+# ...
+PR 10: 0 reviews, merged by abd-ulbasit
+```
+
+The checks were waited for by hand. Nothing in the repository's settings asked
+for a second person or a passing check first. Whether the workflow could
+approve and merge its own PR has not been tried. The setting that lets Actions
+open pull requests is one switch for two powers: it also lets a workflow
+approve one. Pair it with a ruleset that requires a human review, as the
+Production notes say.
+
+### 13. What the runs found
 
 A pipeline that is green on day one has usually been tuned to be. This one was
 run first and then dispositioned. Each decision is written down with its
 reason, and each one that accepts a risk carries a date:
 
-| Stage | First-run finding | Disposition |
-|---|---|---|
-| `image-scan`, `sbom` | The storefront's `nginx:1.27-alpine` base carried many fixable HIGH and CRITICAL CVEs | **Fixed**: base moved to `nginx:1.30-alpine`, pinned by digest |
-| `image-scan`, `sbom` | `nginx:1.30-alpine` still shipped curl and libcurl, and Grype listed several curl CVEs that Trivy did not | **Fixed**: the Dockerfile removes both, since nothing depends on them |
-| `image-scan`, `sbom` | A CRITICAL in brotli-libs, fixed by Alpine but not yet in the nginx image | Accepted until 2026-11-30 in `ci/trivyignore.yaml` and `ci/grype.yaml`; Trivy fails again on that date |
-| `image-lint` | Dockle read `KEY_SHA512` in nginx's build script as a secret | Accepted in `scan.sh`: it is the checksum of nginx's public key |
-| `manifests` | KubeLinter: `no-anti-affinity` on orders, `job-ttl-seconds-after-finished` on the cleanup CronJob | Excluded in `ci/kube-linter.yaml`: availability and operations, not the baseline |
-| `dast` | Nine ZAP rules across catalog, orders and storefront | Accepted as INFO in `ci/zap/baseline.conf` |
-| `promote` | `kustomize edit set image` rewrote the whole prod overlay: 143 lines added and 145 removed for one pin | **Fixed**: the pins live in `overlays/prod/images/`, and the job fails on any other file or more than 8 changed lines |
-| `promote` | The PR body kept `OWNER`, `REPO` and `DIGEST`, and its `cosign verify` accepted a signature from any branch | **Fixed**: written from the run's values, with the exact identity |
-| `promote` | The PR showed no checks, because the `pull_request` runs GitHub created for it never started | **Fixed**: a `checks` job dispatches the overlay check and the gates on the PR's branch |
-| `workflow-hardening` | Scorecard was skipped: its condition said `push` and a release is a dispatch | **Fixed**: it runs on a dispatch from the default branch; the result is in step 10 |
-| `sast` | The CodeQL database upload retried for nearly two minutes and left an error annotation on a green job | **Fixed**: `upload-database: false`, because the job counts the SARIF itself |
-| G4, `kustomize-prod` | A digest pin leaves no tag for the gate to retag the local image to | **Fixed** before it failed: found by reading, not by a run |
+| Stage | Finding | Found by | Disposition |
+|---|---|---|---|
+| `image-scan`, `sbom` | The storefront's `nginx:1.27-alpine` base carried many fixable HIGH and CRITICAL CVEs | the pipeline's first run | **Fixed**: base moved to `nginx:1.30-alpine`, pinned by digest |
+| `image-scan`, `sbom` | `nginx:1.30-alpine` still shipped curl and libcurl, and Grype listed several curl CVEs that Trivy did not | the pipeline's first run | **Fixed**: the Dockerfile removes both, since nothing depends on them |
+| `image-scan`, `sbom` | A CRITICAL in brotli-libs, fixed by Alpine but not yet in the nginx image | the pipeline's first run | Accepted until 2026-11-30 in `ci/trivyignore.yaml` and `ci/grype.yaml`; Trivy fails again on that date |
+| `image-lint` | Dockle read `KEY_SHA512` in nginx's build script as a secret | the pipeline's first run | Accepted in `scan.sh`: it is the checksum of nginx's public key |
+| `manifests` | KubeLinter: `no-anti-affinity` on orders, `job-ttl-seconds-after-finished` on the cleanup CronJob | the pipeline's first run | Excluded in `ci/kube-linter.yaml`: availability and operations, not the baseline |
+| `dast` | Nine ZAP rules across catalog, orders and storefront | the pipeline's first run | Accepted as INFO in `ci/zap/baseline.conf` |
+| `promote` | `kustomize edit set image` rewrote the whole prod overlay: 143 lines added and 145 removed for one pin | release run 1 | **Fixed**: the pins live in `overlays/prod/images/`, and the job fails on any other file or more than 8 changed lines |
+| `promote` | The PR body kept `OWNER`, `REPO` and `DIGEST`, and its `cosign verify` accepted a signature from any branch | release run 1 | **Fixed**: written from the run's values, with the exact identity |
+| `promote` | The PR showed no checks, because the `pull_request` runs GitHub created for it never started | release run 1 | **Partly fixed**: a `checks` job dispatches the overlay check and the gates on the PR's branch. They run and pass, but they do not show on the PR (the last `promote` row) |
+| `workflow-hardening` | Scorecard was skipped: its condition said `push` and a release is a dispatch | release run 1 | **Fixed**: it runs on a dispatch from the default branch; the result is in step 10 |
+| `sast` | The CodeQL database upload retried for nearly two minutes and left an error annotation on a green job | release run 1 | **Fixed**: `upload-database: false`, because the job counts the SARIF itself |
+| `promote` | The body's `gh attestation verify` pinned only the repository, so any workflow or branch in it passed, and the body said a PR opened with `GITHUB_TOKEN` triggers no workflows | reading the PR that release run 2 opened | **Fixed**: `--cert-identity` with the exact identity, and the explanation reworded. Run 3 is its first run |
+| `promote` | The body said the dispatched checks "appear below", but the PR's Checks tab read 0 while both had passed | release run 3 | **Fixed in the text, not yet run**: the body links the branch's runs page and says the tab stays empty. A person's push or reopen gives the PR real checks |
+| G4, `kustomize-prod` | A digest pin leaves no tag for the gate to retag the local image to | reading the gate | **Fixed** before it failed: found by reading, not by a run |
 
-The last six rows came from the release workflow's first run, which exercised
-what no pull request can.
+The first six rows came from the pipeline's own first run. The next seven came
+from the release workflow, which exercises what no pull request can: five from
+release run 1, one from reading the promotion PR that run 2 opened, and one from
+run 3. The last row was found by reading the gate before any run could break it,
+which is why it is the only one that no run produced. The Honesty note above
+counts the same ones.
 
 Dates are enforced in two ways, and only two. Trivy honors `expired_at` itself,
 so the brotli-libs entry stops applying on its date and the build goes red

@@ -227,13 +227,15 @@ FAIL-NEW: 0     FAIL-INPROG: 0  WARN-NEW: 3     WARN-INPROG: 0  INFO: 6 IGNORE: 
 # run from a Mac with gh 2.90.0, cosign v3.1.4, jq 1.8.1 and kubectl v1.37.2
 # (embedded Kustomize v5.8.1), against the public image and the repository's
 # own Actions runs: run 41154561661 (the second dispatch of
-# bookstore-release.yml, which is the one that worked) and, where a step says
-# so, run 41151540459 (the first, which found the defects). Every section ran
-# with DOCKER_CONFIG pointing at an empty directory, so no stored registry
-# login could help a command. Job logs were fetched with `gh api` and the
-# leading timestamps removed with sed. As above, terminal colour codes are
-# removed and tabs are expanded to spaces. The recorded names are the guide
-# repository's real ones, because the runs are.
+# bookstore-release.yml, service catalog, which is the one that worked), run
+# 41158667785 (the third dispatch, service orders, the first to run the
+# corrected promotion template; its sections are at the end of this file) and,
+# where a step says so, run 41151540459 (the first, which found the defects).
+# Every section ran with DOCKER_CONFIG pointing at an empty directory, so no
+# stored registry login could help a command. Job logs were fetched with
+# `gh api` and the leading timestamps removed with sed. As above, terminal
+# colour codes are removed and tabs are expanded to spaces. The recorded names
+# are the guide repository's real ones, because the runs are.
 ## step 8, the release run (run 41154561661, service catalog)
 $ REPO=abd-ulbasit/bookstore-kubernetes-guide
 $ RUN=41154561661
@@ -497,3 +499,173 @@ $ REPO=abd-ulbasit/bookstore-kubernetes-guide
 $ gh api repos/$REPO/rulesets/25746874 --jq '[.name, .enforcement, (.rules | map(.type) | join(", "))] | join(": ")'
 protect main: active: deletion, non_fast_forward
 
+
+# The third release run, service orders, run 41158667785. These sections were
+# recorded later on the same day as those above, with the same tools. The
+# first two (step 8, then step 12 before the merge) ran in one shell, in order,
+# while PR 12 was open and before main moved. The rest ran after PR 12's
+# branch was updated from main and PR 12 was merged.
+## step 8, the third release run (run 41158667785, service orders)
+$ REPO=abd-ulbasit/bookstore-kubernetes-guide
+$ RUN=41158667785
+$ gh run view $RUN --repo $REPO --json event,headBranch,conclusion,jobs --jq '"\(.event) on \(.headBranch): \(.conclusion)", (.jobs[] | "  \(.name): \(.conclusion)")'
+workflow_dispatch on main: success
+  release (orders) / sast: success
+  release (orders) / build-test: success
+  release (orders) / manifests: success
+  release (orders) / image-lint: success
+  release (orders) / secrets: success
+  release (orders) / sca: success
+  release (orders) / workflow-hardening: success
+  release (orders) / sbom: success
+  release (orders) / dast: success
+  release (orders) / image-scan: success
+  release (orders) / sign: success
+  promote (orders): success
+  checks on the promotion PR (orders): success
+$ SIGN=$(gh run view $RUN --repo $REPO --json jobs --jq '.jobs[] | select(.name == "release (orders) / sign") | .databaseId')
+$ gh api repos/$REPO/actions/jobs/$SIGN --jq '.steps[] | select(.name | test("Push|Cosign|attest")) | "\(.name): \(.conclusion)"'
+Push, and read the digest the registry computed: success
+Cosign, sign the digest and attach the SBOM: success
+Run actions/attest-build-provenance@4d101475d8b20a2381f78447822ac1eab6504dd8: success
+$ gh api repos/$REPO/actions/jobs/$SIGN/logs | sed -E 's/^[0-9T:.-]+Z //' | grep -E -A1 'Attestation (signature uploaded|uploaded to repository)'
+Attestation signature uploaded to Rekor transparency log
+https://search.sigstore.dev?logIndex=3607767425
+Attestation uploaded to repository
+https://github.com/abd-ulbasit/bookstore-kubernetes-guide/attestations/62011300
+$ D=$(gh api repos/$REPO/actions/jobs/$SIGN/logs | grep -oE 'digest: sha256:[0-9a-f]{64}' | head -1 | cut -d' ' -f2)
+$ echo $D
+sha256:78ad1a65b9647607b5903035685a864882f8f38f85a45c21d86089f4f7371caf
+$ IMAGE=ghcr.io/abd-ulbasit/bookstore-orders@$D
+$ ID="https://github.com/$REPO/.github/workflows/bookstore-pipeline.yml@refs/heads/main"
+$ cosign verify-attestation --type cyclonedx --certificate-identity "$ID" --certificate-oidc-issuer https://token.actions.githubusercontent.com "$IMAGE" 2>/dev/null | jq -r .payload | base64 -d | jq '{bomFormat: .predicate.bomFormat, specVersion: .predicate.specVersion, components: (.predicate.components | length)}'
+{
+  "bomFormat": "CycloneDX",
+  "specVersion": "1.7",
+  "components": 971
+}
+
+## step 12, the promotion PR of the third run (PR 12, orders), read before it was merged
+$ REPO=abd-ulbasit/bookstore-kubernetes-guide
+$ RUN=41158667785
+$ PROMOTE=$(gh run view $RUN --repo $REPO --json jobs --jq '.jobs[] | select(.name == "promote (orders)") | .databaseId')
+$ gh api repos/$REPO/actions/jobs/$PROMOTE/logs | sed -E 's/^[0-9T:.-]+Z //' | grep -B2 '^changed lines:'
+ .../bookstore/kustomize/overlays/prod/images/kustomization.yaml     | 6 +++---
+ 1 file changed, 3 insertions(+), 3 deletions(-)
+changed lines: 6
+$ gh pr view 12 --repo $REPO --json state,changedFiles,additions,deletions --jq '"PR 12 (\(.state)): \(.changedFiles) file, +\(.additions) -\(.deletions)"'
+PR 12 (OPEN): 1 file, +3 -3
+$ gh pr view 12 --repo $REPO --json body --jq .body | grep -c -E 'OWNER|REPO|DIGEST'
+0
+$ gh pr view 10 --repo $REPO --json body --jq .body | grep -c -e '--cert-identity'
+0
+$ gh pr view 12 --repo $REPO --json body --jq .body | grep -c -e '--cert-identity'
+1
+$ gh pr view 12 --repo $REPO --json body --jq .body | grep -E -e '--(certificate|cert)-identity'
+      --certificate-identity 'https://github.com/abd-ulbasit/bookstore-kubernetes-guide/.github/workflows/bookstore-pipeline.yml@refs/heads/main' \
+      --cert-identity 'https://github.com/abd-ulbasit/bookstore-kubernetes-guide/.github/workflows/bookstore-pipeline.yml@refs/heads/main'
+$ gh pr view 12 --repo $REPO --json body --jq .body | awk '/^    cosign verify/,/^$/' | sed 's/^    //' > pasted-cosign.sh
+$ gh pr view 12 --repo $REPO --json body --jq .body | awk '/^    gh attestation verify/,/^$/' | sed 's/^    //' > pasted-attest.sh
+$ bash pasted-cosign.sh >/dev/null 2>&1; echo "cosign verify, as pasted: exit $?"
+cosign verify, as pasted: exit 0
+$ bash pasted-attest.sh >/dev/null 2>&1; echo "gh attestation verify, as pasted: exit $?"
+gh attestation verify, as pasted: exit 0
+$ GH_FORCE_TTY=100 bash pasted-attest.sh 2>&1 | grep -E "Subject Alternative Name|Verification succeeded|Signer workflow"
+- Subject Alternative Name must match:... https://github.com/abd-ulbasit/bookstore-kubernetes-guide/.github/workflows/bookstore-pipeline.yml@refs/heads/main
+✓ Verification succeeded!
+  - Signer workflow: .github/workflows/bookstore-pipeline.yml@refs/heads/main
+$ CHECKS=$(gh run view $RUN --repo $REPO --json jobs --jq '.jobs[] | select(.name | startswith("checks on")) | .databaseId')
+$ gh api repos/$REPO/actions/jobs/$CHECKS/logs | sed -E 's/^[0-9T:.-]+Z //' | grep '^dispatched'
+dispatched example-trees-check.yml on ci/promote-orders
+dispatched security-gates.yml on ci/promote-orders
+$ gh run list --repo $REPO --branch ci/promote-orders --limit 10 --json databaseId,workflowName,status,conclusion,event,headSha --jq '.[]|[.databaseId,.workflowName,.status,.conclusion,.event,.headSha[0:7]]|@tsv'
+41159148867     security-gates  completed       success workflow_dispatch       64708d1
+41159146728     example-trees-check     completed       success workflow_dispatch       64708d1
+41159130086     docs    completed       action_required pull_request    64708d1
+41159130026     security-gates  completed       action_required pull_request    64708d1
+41159130033     secret-scan     completed       action_required pull_request    64708d1
+41159130122     example-trees-check     completed       action_required pull_request    64708d1
+41159130013     security-scan   completed       action_required pull_request    64708d1
+$ SHA=$(gh pr view 12 --repo $REPO --json headRefOid --jq .headRefOid)
+$ gh api --paginate repos/$REPO/commits/$SHA/check-runs --jq '.check_runs[].conclusion' | sort | uniq -c
+   1 skipped
+  32 success
+$ gh pr view 12 --repo $REPO --json statusCheckRollup --jq '.statusCheckRollup | length'
+0
+$ gh pr checks 12 --repo $REPO; echo "exit status: $?"
+no checks reported on the 'ci/promote-orders' branch
+exit status: 1
+
+## step 12, what the catalog PR's body said (PR 10, opened by the second run)
+$ REPO=abd-ulbasit/bookstore-kubernetes-guide
+$ gh pr view 10 --repo $REPO --json body --jq .body | grep -E 'attestation verify|triggers no workflows'
+    gh attestation verify oci://ghcr.io/abd-ulbasit/bookstore-catalog@sha256:eaa26ada0a2e1575026a5e71e74572ed0bfdde80f50012e91a7be28f0de16ced --repo abd-ulbasit/bookstore-kubernetes-guide
+because a pull request opened with GITHUB_TOKEN triggers no workflows. If
+
+## step 12, the orders promotion PR after main moved, and its merge
+$ REPO=abd-ulbasit/bookstore-kubernetes-guide
+$ gh run list --repo $REPO --branch ci/promote-orders --limit 12 --json databaseId,workflowName,status,conclusion,event,headSha --jq '.[]|[.databaseId,.workflowName,.status,.conclusion,.event,.headSha[0:7]]|@tsv'
+41160015467     secret-scan     completed       success pull_request    a7f1148
+41160015446     docs    completed       success pull_request    a7f1148
+41160015520     example-trees-check     completed       success pull_request    a7f1148
+41160015527     security-scan   completed       success pull_request    a7f1148
+41160015439     security-gates  completed       success pull_request    a7f1148
+41159148867     security-gates  completed       success workflow_dispatch       64708d1
+41159146728     example-trees-check     completed       success workflow_dispatch       64708d1
+41159130086     docs    completed       action_required pull_request    64708d1
+41159130026     security-gates  completed       action_required pull_request    64708d1
+41159130033     secret-scan     completed       action_required pull_request    64708d1
+41159130122     example-trees-check     completed       action_required pull_request    64708d1
+41159130013     security-scan   completed       action_required pull_request    64708d1
+$ gh pr view 12 --repo $REPO --json state,headRefOid,mergeCommit --jq '"PR 12 (\(.state)): merge commit is the head: \(.mergeCommit.oid == .headRefOid)"'
+PR 12 (MERGED): merge commit is the head: true
+$ git log -2 --format=%s -- examples/bookstore/kustomize/overlays/prod/images
+ci: promote orders to prod (signed digest)
+ci: promote catalog to prod (signed digest)
+$ kubectl kustomize examples/bookstore/kustomize/overlays/prod | grep -c '^kind:'
+48
+$ kubectl kustomize examples/bookstore/kustomize/overlays/prod | grep -E 'image:.*(catalog|orders)'
+        image: ghcr.io/abd-ulbasit/bookstore-catalog@sha256:eaa26ada0a2e1575026a5e71e74572ed0bfdde80f50012e91a7be28f0de16ced
+        image: ghcr.io/abd-ulbasit/bookstore-orders@sha256:78ad1a65b9647607b5903035685a864882f8f38f85a45c21d86089f4f7371caf
+
+## step 12, the merged promotion branches, before and after deleting them
+$ gh api repos/$REPO/branches --paginate --jq '.[].name | select(startswith("ci/"))'
+ci/promote-catalog
+ci/promote-orders
+$ gh api repos/$REPO/branches/ci/promote-catalog --jq .commit.sha[0:7]
+0a137b8
+$ gh pr view 10 --repo $REPO --json state,headRefOid --jq '"PR 10 (\(.state)): head \(.headRefOid[0:7])"'
+PR 10 (MERGED): head 0a137b8
+$ gh api repos/$REPO/branches/ci/promote-orders --jq .commit.sha[0:7]
+a7f1148
+$ gh pr view 12 --repo $REPO --json state,headRefOid --jq '"PR 12 (\(.state)): head \(.headRefOid[0:7])"'
+PR 12 (MERGED): head a7f1148
+$ gh api -X DELETE repos/$REPO/git/refs/heads/ci/promote-catalog
+$ gh api -X DELETE repos/$REPO/git/refs/heads/ci/promote-orders
+$ gh api repos/$REPO/branches --paginate --jq '[.[].name | select(startswith("ci/"))] | length'
+0
+
+## step 12, who could merge it
+$ REPO=abd-ulbasit/bookstore-kubernetes-guide
+$ gh api repos/$REPO/rules/branches/main --jq '[.[].type] | join(", ")'
+deletion, non_fast_forward
+$ gh api repos/$REPO/rulesets --jq 'length'
+1
+$ gh pr view 12 --repo $REPO --json reviews,mergedBy --jq '"PR 12: \(.reviews | length) reviews, merged by \(.mergedBy.login)"'
+PR 12: 0 reviews, merged by abd-ulbasit
+$ gh pr view 10 --repo $REPO --json reviews,mergedBy --jq '"PR 10: \(.reviews | length) reviews, merged by \(.mergedBy.login)"'
+PR 10: 0 reviews, merged by abd-ulbasit
+
+## step 12, who started the orders PR's pull_request runs
+$ REPO=abd-ulbasit/bookstore-kubernetes-guide
+$ gh api "repos/$REPO/actions/runs?branch=ci/promote-orders&per_page=50" --jq '.workflow_runs[] | select(.event == "pull_request") | "\(.name) \(.head_sha[0:7]) by \(.triggering_actor.login): \(.conclusion)"' | sort
+docs 64708d1 by github-actions[bot]: action_required
+docs a7f1148 by abd-ulbasit: success
+example-trees-check 64708d1 by github-actions[bot]: action_required
+example-trees-check a7f1148 by abd-ulbasit: success
+secret-scan 64708d1 by github-actions[bot]: action_required
+secret-scan a7f1148 by abd-ulbasit: success
+security-gates 64708d1 by github-actions[bot]: action_required
+security-gates a7f1148 by abd-ulbasit: success
+security-scan 64708d1 by github-actions[bot]: action_required
+security-scan a7f1148 by abd-ulbasit: success
