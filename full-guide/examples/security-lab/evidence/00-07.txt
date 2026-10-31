@@ -1,5 +1,411 @@
 # Transcript for 00-foundations/07-local-cluster-setup.md, the hands-on steps.
 # Tier A: kind v0.33.0 with a Kubernetes v1.37.0 node, kubectl v1.37.2.
+#
+# Two recordings follow.
+#
+# Recording 1 ran on a fresh kind cluster built from the config the chapter
+# gives the reader, examples/security-lab/kind/cluster-restricted-default.yaml,
+# so Pod Security `restricted` is the cluster-wide default. The lab host ran a
+# copy of that file with settings for its own network and disk speed added;
+# none of them touches Pod Security. The cluster was named p00-default, so its
+# node container is p00-default-control-plane where the chapter says
+# bookstore-control-plane. labs/00-07-default.sh produced the middle section.
+# The Bookstore images were built from this tree and loaded into the node, and
+# the last sections ran the runtime gate (G4) on the same cluster, in its raw,
+# helm and kustomize-dev variants. The cluster was deleted afterwards. What did
+# not work the first time: the first run of the raw variant timed out, because
+# the node was still pulling the postgres image over a slow link. The pull
+# finished, the namespace was deleted, and the second run is the one below.
+#
+# Recording 2 is the earlier run of the chapter's steps on a shared lab cluster
+# with a stock Pod Security default. Its header follows.
+#
+## Recording 1: a fresh cluster with restricted as the cluster-wide default
+## the cluster
+$ kind create cluster --name p00-default --config lab-config.yaml --wait 10m
+Creating cluster "p00-default" ...
+ • Ensuring node image (kindest/node:v1.37.0) 🖼️  ...
+ ✓ Ensuring node image (kindest/node:v1.37.0) 🖼️
+ • Preparing nodes 📦   ...
+ ✓ Preparing nodes 📦 
+ • Writing configuration 📜  ...
+ ✓ Writing configuration 📜
+ • Starting control-plane 🕹️  ...
+ ✓ Starting control-plane 🕹️
+ • Installing CNI 🔌  ...
+ ✓ Installing CNI 🔌
+ • Installing StorageClass 💾  ...
+ ✓ Installing StorageClass 💾
+ • Waiting ≤ 10m0s for control-plane = Ready ⏳  ...
+ ✓ Waiting ≤ 10m0s for control-plane = Ready ⏳
+ • Ready after 17s 💚
+Set kubectl context to "kind-p00-default"
+You can now use your cluster with:
+
+kubectl cluster-info --context kind-p00-default
+
+Have a question, bug, or feature request? Let us know! https://kind.sigs.k8s.io/#community 🙂
+## Cluster-wide default: a fresh kind cluster built from cluster-restricted-default.yaml
+# Recorded by running labs/00-07-default.sh. Node v1.37.0.
+## the cluster, and the flag the API server runs with
+$ kubectl get nodes
+NAME                        STATUS   ROLES           AGE   VERSION
+p00-default-control-plane   Ready    control-plane   64m   v1.37.0
+$ kubectl -n kube-system get pod -l component=kube-apiserver -o jsonpath='{range .items[0].spec.containers[0].command[*]}{@}{"\n"}{end}' | grep admission-control
+--admission-control-config-file=/etc/kubernetes/policies/pod-security-admission.yaml
+## step 1: an unlabelled namespace takes the default
+$ BUSYBOX=busybox@sha256:a7dbc319b1438115a207e11930dc4bb3e643dcb3ec0bdd694bb36cd8fad289ec  # busybox:1.37
+$ kubectl create namespace default-check
+namespace/default-check created
+$ until kubectl -n default-check get serviceaccount default >/dev/null 2>&1; do sleep 1; done
+$ kubectl get namespace default-check --show-labels
+NAME            STATUS   AGE   LABELS
+default-check   Active   0s    kubernetes.io/metadata.name=default-check
+# Deliberate failure: a privileged Pod in the unlabelled namespace. Expect it to be refused.
+$ kubectl run privileged-probe -n default-check --image="$BUSYBOX" --restart=Never --privileged -- sleep 3600
+Error from server (Forbidden): pods "privileged-probe" is forbidden: violates PodSecurity "restricted:latest": privileged (container "privileged-probe" must not set securityContext.privileged=true), allowPrivilegeEscalation != false (container "privileged-probe" must set securityContext.allowPrivilegeEscalation=false), unrestricted capabilities (container "privileged-probe" must set securityContext.capabilities.drop=["ALL"]), runAsNonRoot != true (pod or container "privileged-probe" must set securityContext.runAsNonRoot=true), seccompProfile (pod or container "privileged-probe" must set securityContext.seccompProfile.type to "RuntimeDefault" or "Localhost")
+$ kubectl get pods -n default-check
+No resources found in default-check namespace.
+## step 2: the same namespace admits a Pod that carries the baseline, and the storage provisioner still binds a claim
+$ kubectl apply -f - <<'EOF'   # check-sa, a claim named data, and a Pod with the baseline that mounts it
+serviceaccount/check-sa created
+persistentvolumeclaim/data created
+pod/baseline-check created
+$ kubectl get pvc data -n default-check
+NAME   STATUS    VOLUME   CAPACITY   ACCESS MODES   STORAGECLASS   VOLUMEATTRIBUTESCLASS   AGE
+data   Pending                                      standard       <unset>                 1s
+$ kubectl wait --for=condition=Ready pod/baseline-check -n default-check --timeout=120s
+pod/baseline-check condition met
+$ kubectl get pvc data -n default-check
+NAME   STATUS   VOLUME                                     CAPACITY   ACCESS MODES   STORAGECLASS   VOLUMEATTRIBUTESCLASS   AGE
+data   Bound    pvc-59587be9-5cec-45fd-a067-cb7cab60febe   64Mi       RWO            standard       <unset>                 9s
+$ kubectl get pod baseline-check -n default-check
+NAME             READY   STATUS    RESTARTS   AGE
+baseline-check   1/1     Running   0          9s
+$ kubectl exec -n default-check baseline-check -- sh -c 'echo stored > /data/check && cat /data/check'
+stored
+$ VOLUME=$(kubectl get pvc data -n default-check -o jsonpath='{.spec.volumeName}')
+$ kubectl -n local-path-storage logs deploy/local-path-provisioner | grep -o "create the helper pod helper-pod-create-$VOLUME into local-path-storage"
+create the helper pod helper-pod-create-pvc-59587be9-5cec-45fd-a067-cb7cab60febe into local-path-storage
+## step 3: CoreDNS still runs, and the Pod resolves a Service name
+$ kubectl -n kube-system get pods -l k8s-app=kube-dns
+NAME                       READY   STATUS    RESTARTS   AGE
+coredns-559f6c778d-78zvt   1/1     Running   0          64m
+coredns-559f6c778d-hh8js   1/1     Running   0          64m
+$ kubectl exec -n default-check baseline-check -- nslookup kubernetes.default.svc.cluster.local | tr '\t' ' '
+Server:  10.96.0.10
+Address: 10.96.0.10:53
+
+
+Name: kubernetes.default.svc.cluster.local
+Address: 10.96.0.1
+
+## step 4: a namespace labelled privileged admits the same privileged Pod
+$ kubectl create namespace privileged-check
+namespace/privileged-check created
+$ until kubectl -n privileged-check get serviceaccount default >/dev/null 2>&1; do sleep 1; done
+$ kubectl label namespace privileged-check pod-security.kubernetes.io/enforce=privileged pod-security.kubernetes.io/audit=restricted pod-security.kubernetes.io/warn=restricted
+namespace/privileged-check labeled
+$ kubectl run privileged-probe -n privileged-check --image="$BUSYBOX" --restart=Never --privileged -- sleep 3600
+Warning: would violate PodSecurity "restricted:latest": privileged (container "privileged-probe" must not set securityContext.privileged=true), allowPrivilegeEscalation != false (container "privileged-probe" must set securityContext.allowPrivilegeEscalation=false), unrestricted capabilities (container "privileged-probe" must set securityContext.capabilities.drop=["ALL"]), runAsNonRoot != true (pod or container "privileged-probe" must set securityContext.runAsNonRoot=true), seccompProfile (pod or container "privileged-probe" must set securityContext.seccompProfile.type to "RuntimeDefault" or "Localhost")
+pod/privileged-probe created
+$ kubectl get pod privileged-probe -n privileged-check -o jsonpath='{.metadata.name} privileged={.spec.containers[0].securityContext.privileged}{"\n"}'
+privileged-probe privileged=true
+## also recorded for 05-security/02-pod-security.md: a Deployment in the unlabelled namespace
+$ kubectl create deployment unhardened --image="$BUSYBOX" --dry-run=server -n default-check -- sleep 3600
+Warning: would violate PodSecurity "restricted:latest": allowPrivilegeEscalation != false (container "busybox" must set securityContext.allowPrivilegeEscalation=false), unrestricted capabilities (container "busybox" must set securityContext.capabilities.drop=["ALL"]), runAsNonRoot != true (pod or container "busybox" must set securityContext.runAsNonRoot=true), seccompProfile (pod or container "busybox" must set securityContext.seccompProfile.type to "RuntimeDefault" or "Localhost")
+deployment.apps/unhardened created (server dry run)
+## step 5: remove what the checks created
+$ kubectl delete namespace default-check privileged-check --wait=true --timeout=180s
+namespace "default-check" deleted
+namespace "privileged-check" deleted
+## step 6: the first Bookstore Pod and the NetworkPolicy check, on this cluster
+$ kubectl apply -f - <<'EOF'   # Namespace bookstore and ServiceAccount catalog-sa
+namespace/bookstore created
+serviceaccount/catalog-sa created
+$ kubectl apply -n bookstore -f examples/bookstore/raw-manifests/01-catalog-pod.yaml
+pod/catalog created
+$ kubectl wait --for=condition=Ready pod/catalog -n bookstore --timeout=120s
+pod/catalog condition met
+$ kubectl get pod catalog -n bookstore
+NAME      READY   STATUS    RESTARTS   AGE
+catalog   1/1     Running   0          2s
+$ kubectl logs catalog -n bookstore | head -2
+{"time":"2026-10-31T16:43:34.382626643Z","level":"INFO","msg":"DB_DSN unset; serving in-memory sample books"}
+{"time":"2026-10-31T16:43:34.385510982Z","level":"INFO","msg":"catalog listening","addr":":8080"}
+$ kubectl apply -f - <<'EOF'   # probe ServiceAccount and Pod, same baseline as catalog
+serviceaccount/probe-sa created
+pod/probe created
+$ kubectl wait --for=condition=Ready pod/probe -n bookstore --timeout=120s
+pod/probe condition met
+$ CATALOG_IP=$(kubectl get pod catalog -n bookstore -o jsonpath='{.status.podIP}')
+$ kubectl exec -n bookstore probe -- wget -qO- -T 3 "http://$CATALOG_IP:8080/healthz"
+{"status":"ok"}
+$ kubectl apply -f - <<'EOF'   # default-deny ingress for the namespace
+networkpolicy.networking.k8s.io/default-deny-ingress created
+# Deliberate failure: the same request, now under the policy. Expect it to time out.
+$ kubectl exec -n bookstore probe -- wget -qO- -T 3 "http://$CATALOG_IP:8080/healthz"
+wget: download timed out
+command terminated with exit code 1
+$ kubectl delete networkpolicy default-deny-ingress -n bookstore
+networkpolicy.networking.k8s.io "default-deny-ingress" deleted from bookstore namespace
+$ kubectl exec -n bookstore probe -- wget -qO- -T 3 "http://$CATALOG_IP:8080/healthz"
+{"status":"ok"}
+$ kubectl delete namespace bookstore --wait=true --timeout=180s
+namespace "bookstore" deleted
+## step 7: the Bookstore raw core on this cluster (the runtime gate, variant raw)
+$ python .github/scripts/gates/runtime_gate.py --variant raw --tree full-guide/examples/bookstore --timeout 900
+runtime gate: raw on kubectl context kind-p00-default
+skipped (no such CRD on a plain kind cluster, no pod template): ClusterPolicy bookstore-image-supply-chain
+skipped (no such CRD on a plain kind cluster, no pod template): Gateway bookstore
+skipped (no such CRD on a plain kind cluster, no pod template): GatewayClass bookstore-gtw
+skipped (no such CRD on a plain kind cluster, no pod template): HTTPRoute bookstore
+skipped (no such CRD on a plain kind cluster, no pod template): Middleware rewrite-api-prefix
+skipped (no such CRD on a plain kind cluster, no pod template): PrometheusRule bookstore-catalog-rules
+skipped (no such CRD on a plain kind cluster, no pod template): ScaledObject payments-worker
+skipped (no such CRD on a plain kind cluster, no pod template): ServiceMonitor catalog, payments-worker
+skipped (no such CRD on a plain kind cluster, no pod template): TriggerAuthentication rabbitmq-trigger-auth
+skipped (no such CRD on a plain kind cluster, no pod template): VolumeSnapshot postgres-snap-0
+skipped (no such CRD on a plain kind cluster, no pod template): VolumeSnapshotClass bookstore-csi-snapclass
+namespace/bookstore created
+resourcequota/bookstore-quota created
+limitrange/bookstore-limits created
+serviceaccount/catalog-sa created
+serviceaccount/storefront-sa created
+serviceaccount/orders-sa created
+serviceaccount/payments-worker-sa created
+serviceaccount/postgres-sa created
+serviceaccount/redis-sa created
+serviceaccount/rabbitmq-sa created
+serviceaccount/migrate-sa created
+storageclass.storage.k8s.io/bookstore-local created
+priorityclass.scheduling.k8s.io/bookstore-data created
+priorityclass.scheduling.k8s.io/bookstore-critical created
+priorityclass.scheduling.k8s.io/bookstore-batch created
+snapshot Pod 01-catalog-pod.yaml: apply alone, wait for Ready, delete
+pod/catalog created
+  Pod/catalog: waiting: Pending
+snapshot Pod 02-catalog-pod-sidecar.yaml: apply alone, wait for Ready, delete
+pod/catalog created
+  Pod/catalog: waiting: Pending
+  Pod/catalog: waiting: Running
+role.rbac.authorization.k8s.io/catalog-config-reader created
+rolebinding.rbac.authorization.k8s.io/catalog-config-reader-binding created
+deployment.apps/catalog created
+deployment.apps/storefront created
+deployment.apps/redis created
+deployment.apps/rabbitmq created
+deployment.apps/orders created
+configmap/catalog-config created
+secret/db-credentials created
+deployment.apps/payments-worker created
+service/postgres created
+statefulset.apps/postgres created
+job.batch/db-migrate created
+cronjob.batch/cleanup created
+service/catalog created
+service/storefront created
+service/orders created
+service/redis created
+service/rabbitmq created
+service/payments-worker created
+ingress.networking.k8s.io/bookstore created
+ingress.networking.k8s.io/bookstore configured
+networkpolicy.networking.k8s.io/default-deny-all created
+networkpolicy.networking.k8s.io/allow-dns-egress created
+networkpolicy.networking.k8s.io/allow-ingress-to-http-tiers created
+networkpolicy.networking.k8s.io/allow-storefront-to-apis created
+networkpolicy.networking.k8s.io/allow-data-tier-ingress created
+networkpolicy.networking.k8s.io/allow-orders-to-rabbitmq created
+networkpolicy.networking.k8s.io/allow-backend-egress created
+networkpolicy.networking.k8s.io/allow-storefront-egress created
+networkpolicy.networking.k8s.io/allow-payments-worker-egress created
+networkpolicy.networking.k8s.io/allow-monitoring-scrape created
+networkpolicy.networking.k8s.io/allow-span-egress created
+horizontalpodautoscaler.autoscaling/catalog created
+poddisruptionbudget.policy/catalog created
+poddisruptionbudget.policy/storefront created
+poddisruptionbudget.policy/orders created
+  Deployment/catalog: waiting: 0/3 ready
+  Deployment/orders: waiting: 0/2 ready
+  Deployment/payments-worker: waiting: 0/1 ready
+  Deployment/rabbitmq: waiting: 0/1 ready
+  Deployment/redis: waiting: 0/1 ready
+  Deployment/storefront: waiting: 0/2 ready
+  Job/db-migrate: waiting: 0/1 complete
+  StatefulSet/postgres: waiting: 0/1 ready
+  Deployment/catalog: waiting: 0/3 ready
+  Deployment/orders: waiting: 0/2 ready
+  Deployment/rabbitmq: waiting: 0/1 ready
+  Job/db-migrate: waiting: 0/1 complete
+  StatefulSet/postgres: waiting: 0/1 ready
+  Deployment/catalog: waiting: 0/3 ready
+  Deployment/orders: waiting: 0/2 ready
+  Deployment/rabbitmq: waiting: 0/1 ready
+  Job/db-migrate: waiting: 0/1 complete
+  Deployment/catalog: waiting: 1/3 ready
+  Deployment/orders: waiting: 1/2 ready
+  Deployment/rabbitmq: waiting: 0/1 ready
+  Deployment/rabbitmq: waiting: 0/1 ready
+  CronJob/cleanup: ran once as Job/gate-cleanup, complete
+variant 30-catalog-canary.yaml: delete every workload, apply it alone, wait for it
+service/catalog configured
+deployment.apps/catalog-stable created
+deployment.apps/catalog-canary created
+  Deployment/catalog-canary: waiting: spec not observed yet
+  Deployment/catalog-stable: waiting: 0/9 ready
+  Deployment/catalog-canary: waiting: 0/1 ready
+  Deployment/catalog-stable: waiting: 0/9 ready
+  Deployment/catalog-canary: waiting: 0/1 ready
+  Deployment/catalog-stable: waiting: 5/9 ready
+runtime gate: raw: 13 workloads Ready or Complete in 177.6s
+## step 8: the Bookstore chart on this cluster (the runtime gate, variant helm)
+$ python .github/scripts/gates/runtime_gate.py --variant helm --tree full-guide/examples/bookstore --timeout 900
+runtime gate: helm on kubectl context kind-p00-default
+priorityclass.scheduling.k8s.io/bookstore-batch created
+priorityclass.scheduling.k8s.io/bookstore-critical created
+priorityclass.scheduling.k8s.io/bookstore-data created
+namespace/bookstore created
+resourcequota/bookstore-quota created
+limitrange/bookstore-limits created
+serviceaccount/catalog-sa created
+serviceaccount/storefront-sa created
+serviceaccount/orders-sa created
+serviceaccount/payments-worker-sa created
+serviceaccount/postgres-sa created
+serviceaccount/redis-sa created
+serviceaccount/rabbitmq-sa created
+serviceaccount/migrate-sa created
+networkpolicy.networking.k8s.io/default-deny-all created
+networkpolicy.networking.k8s.io/allow-dns-egress created
+networkpolicy.networking.k8s.io/allow-ingress-to-http-tiers created
+networkpolicy.networking.k8s.io/allow-storefront-to-apis created
+networkpolicy.networking.k8s.io/allow-data-tier-ingress created
+networkpolicy.networking.k8s.io/allow-orders-to-rabbitmq created
+networkpolicy.networking.k8s.io/allow-backend-egress created
+networkpolicy.networking.k8s.io/allow-storefront-egress created
+networkpolicy.networking.k8s.io/allow-payments-worker-egress created
+networkpolicy.networking.k8s.io/allow-monitoring-scrape created
+poddisruptionbudget.policy/catalog created
+poddisruptionbudget.policy/storefront created
+poddisruptionbudget.policy/orders created
+secret/db-credentials created
+configmap/catalog-config created
+role.rbac.authorization.k8s.io/catalog-config-reader created
+rolebinding.rbac.authorization.k8s.io/catalog-config-reader-binding created
+service/postgres created
+service/catalog created
+service/storefront created
+service/orders created
+service/redis created
+service/rabbitmq created
+service/payments-worker created
+deployment.apps/catalog created
+deployment.apps/storefront created
+deployment.apps/redis created
+deployment.apps/rabbitmq created
+deployment.apps/orders created
+deployment.apps/payments-worker created
+horizontalpodautoscaler.autoscaling/catalog created
+statefulset.apps/postgres created
+cronjob.batch/cleanup created
+ingress.networking.k8s.io/bookstore created
+job.batch/db-migrate created
+  Deployment/catalog: waiting: 0/3 ready
+  Deployment/orders: waiting: 0/2 ready
+  Deployment/payments-worker: waiting: 0/1 ready
+  Deployment/rabbitmq: waiting: 0/1 ready
+  Deployment/redis: waiting: 0/1 ready
+  Deployment/storefront: waiting: 0/2 ready
+  Job/db-migrate: waiting: 0/1 complete
+  StatefulSet/postgres: waiting: 0/1 ready
+  Deployment/catalog: waiting: 0/3 ready
+  Deployment/orders: waiting: 0/2 ready
+  Deployment/rabbitmq: waiting: 0/1 ready
+  Job/db-migrate: waiting: 0/1 complete
+  StatefulSet/postgres: waiting: 0/1 ready
+  Deployment/catalog: waiting: 0/3 ready
+  Deployment/rabbitmq: waiting: 0/1 ready
+  Job/db-migrate: waiting: 0/1 complete
+  CronJob/cleanup: ran once as Job/gate-cleanup, complete
+runtime gate: helm: 9 workloads Ready or Complete in 80.0s
+## step 9: the Bookstore dev overlay on this cluster (the runtime gate, variant kustomize-dev)
+$ python .github/scripts/gates/runtime_gate.py --variant kustomize-dev --tree full-guide/examples/bookstore --timeout 900
+runtime gate: kustomize-dev on kubectl context kind-p00-default
+namespace/bookstore created
+resourcequota/bookstore-quota created
+serviceaccount/catalog-sa created
+serviceaccount/migrate-sa created
+serviceaccount/orders-sa created
+serviceaccount/payments-worker-sa created
+serviceaccount/postgres-sa created
+serviceaccount/rabbitmq-sa created
+serviceaccount/redis-sa created
+serviceaccount/storefront-sa created
+limitrange/bookstore-limits created
+priorityclass.scheduling.k8s.io/bookstore-batch created
+priorityclass.scheduling.k8s.io/bookstore-critical created
+priorityclass.scheduling.k8s.io/bookstore-data created
+role.rbac.authorization.k8s.io/catalog-config-reader created
+rolebinding.rbac.authorization.k8s.io/catalog-config-reader-binding created
+configmap/catalog-config created
+secret/db-credentials created
+service/catalog created
+service/orders created
+service/payments-worker created
+service/postgres created
+service/rabbitmq created
+service/redis created
+service/storefront created
+deployment.apps/catalog created
+deployment.apps/orders created
+deployment.apps/payments-worker created
+deployment.apps/rabbitmq created
+deployment.apps/redis created
+deployment.apps/storefront created
+statefulset.apps/postgres created
+cronjob.batch/cleanup created
+job.batch/db-migrate created
+ingress.networking.k8s.io/bookstore created
+networkpolicy.networking.k8s.io/allow-backend-egress created
+networkpolicy.networking.k8s.io/allow-data-tier-ingress created
+networkpolicy.networking.k8s.io/allow-dns-egress created
+networkpolicy.networking.k8s.io/allow-ingress-to-http-tiers created
+networkpolicy.networking.k8s.io/allow-monitoring-scrape created
+networkpolicy.networking.k8s.io/allow-orders-to-rabbitmq created
+networkpolicy.networking.k8s.io/allow-payments-worker-egress created
+networkpolicy.networking.k8s.io/allow-storefront-egress created
+networkpolicy.networking.k8s.io/allow-storefront-to-apis created
+networkpolicy.networking.k8s.io/default-deny-all created
+  Deployment/catalog: waiting: 0/1 ready
+  Deployment/orders: waiting: 0/1 ready
+  Deployment/payments-worker: waiting: 0/1 ready
+  Deployment/rabbitmq: waiting: 0/1 ready
+  Deployment/redis: waiting: 0/1 ready
+  Deployment/storefront: waiting: 0/1 ready
+  Job/db-migrate: waiting: 0/1 complete
+  StatefulSet/postgres: waiting: 0/1 ready
+  Deployment/catalog: waiting: 0/1 ready
+  Deployment/orders: waiting: 0/1 ready
+  Deployment/rabbitmq: waiting: 0/1 ready
+  Deployment/storefront: waiting: 0/1 ready
+  Job/db-migrate: waiting: 0/1 complete
+  StatefulSet/postgres: waiting: 0/1 ready
+  Deployment/catalog: waiting: 0/1 ready
+  Deployment/orders: waiting: 0/1 ready
+  Deployment/rabbitmq: waiting: 0/1 ready
+  Job/db-migrate: waiting: 0/1 complete
+  StatefulSet/postgres: waiting: 0/1 ready
+  Deployment/catalog: waiting: 0/1 ready
+  Deployment/orders: waiting: 0/1 ready
+  Deployment/rabbitmq: waiting: 0/1 ready
+  Job/db-migrate: waiting: 0/1 complete
+  Deployment/catalog: waiting: 0/1 ready
+  CronJob/cleanup: ran once as Job/gate-cleanup, complete
+runtime gate: kustomize-dev: 9 workloads Ready or Complete in 70.1s
+
+## Recording 2: the chapter's steps on a shared cluster with a stock default
+# Tier A: kind v0.33.0 with a Kubernetes v1.37.0 node, kubectl v1.37.2.
 # The shared cluster sf-pilot stood in for the reader's bookstore cluster. Its
 # kind node container is sf-pilot-control-plane; the chapter names the node
 # bookstore-control-plane.

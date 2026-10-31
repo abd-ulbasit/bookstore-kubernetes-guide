@@ -6,7 +6,7 @@
 
 **Estimated time:** ~15 min read · ~60 min hands-on
 **Prerequisites:** [Part 00 ch.02](02-containers-and-images.md) — container/image basics · [Part 00 ch.06](06-declarative-api-model.md) — the manifest you'll apply
-**You'll know after this:** • install `kubectl` and bring up a local kind cluster · • understand `kubeconfig`, contexts, and namespaces · • use the everyday `kubectl` verbs (get, describe, logs, apply, exec, port-forward) · • apply the Bookstore Pod and watch reconciliation move it · • prove a NetworkPolicy is enforced with a connection that is denied · • troubleshoot a Pod that fails to start on a real cluster
+**You'll know after this:** • install `kubectl` and bring up a local kind cluster whose default Pod Security level is `restricted` · • show that a namespace nobody labelled refuses a privileged Pod · • understand `kubeconfig`, contexts, and namespaces · • use the everyday `kubectl` verbs (get, describe, logs, apply, exec, port-forward) · • apply the Bookstore Pod and watch reconciliation move it · • prove a NetworkPolicy is enforced with a connection that is denied · • troubleshoot a Pod that fails to start on a real cluster
 
 <!-- tags: foundations, kubectl, kind, kubeconfig, local-cluster -->
 
@@ -38,6 +38,7 @@ client; **kubeconfig** is the file telling it *which* API server and *as whom*.
 
 | Threat | Control taught here | Goes deeper in |
 |---|---|---|
+| A namespace nobody labelled admits any Pod, privileged ones included, because Pod Security Admission falls back to `privileged` | `restricted` as the cluster-wide default, set in the API server's admission configuration; the step that proves it creates an unlabelled namespace and asks for a privileged Pod | [05.02](../05-security/02-pod-security.md) for the per-namespace labels, [05.07](../05-security/07-admission-control-and-policy-as-code.md) for rules beyond the standards |
 | A NetworkPolicy the API server accepts but the network plugin does not enforce, so traffic still flows | Prove enforcement with a request that is denied, in the NetworkPolicy step below | [02.06](../02-networking/06-network-policies.md) |
 | A kubeconfig holds a client key or a token, so whoever reads the file acts as you | Keep the file private and out of version control | [05.01](../05-security/01-authn-authz-rbac.md) |
 | A change reaches the wrong cluster because the current context is not the one you meant | Read `kubectl config current-context` before each change | [05.01](../05-security/01-authn-authz-rbac.md) |
@@ -86,6 +87,64 @@ and each node is a container you can inspect with `docker exec` (see
 [ch.05](05-node-components.md)). Other distributions exist, k3d and minikube
 among them. This guide does not test them, and nothing later depends on them.
 
+## Why `restricted` is the cluster default
+
+Pod Security Admission judges a Pod by the labels on its namespace. A
+namespace with no labels is judged by the cluster's default, and out of the
+box that default is `privileged`, which admits every Pod. The
+[admission controller page](https://kubernetes.io/docs/tasks/configure-pod-container/enforce-standards-admission-controller/)
+lists `privileged` as the default level. A namespace nobody labelled
+therefore has no Pod Security at all.
+
+Every namespace in this guide carries its own labels, and they stay. They are
+the first line of defence: they say what each namespace is for, and they
+travel with the manifests to a cluster that has no default. The cluster-wide
+default is the last line. It catches the namespace the labels missed: one
+created with `kubectl create namespace` and never labelled, one a Helm chart
+created with `--create-namespace` (the flag cannot set labels), or one an
+operator created on its own. On this cluster, a namespace like that refuses a
+Pod that lacks the baseline on the first apply, instead of admitting it
+without a word.
+
+The API server reads the default from a file. This one sets all three modes
+to `restricted` and exempts the four namespaces kind itself needs:
+
+```yaml
+apiVersion: apiserver.config.k8s.io/v1
+kind: AdmissionConfiguration
+plugins:
+  - name: PodSecurity
+    configuration:
+      apiVersion: pod-security.admission.config.k8s.io/v1
+      kind: PodSecurityConfiguration
+      defaults:
+        enforce: restricted
+        enforce-version: latest
+        audit: restricted
+        audit-version: latest
+        warn: restricted
+        warn-version: latest
+      exemptions:
+        usernames: []
+        runtimeClasses: []
+        namespaces:
+          - kube-system
+          - kube-public
+          - kube-node-lease
+          - local-path-storage
+```
+
+The fields follow the Kubernetes page on
+[applying Pod Security Standards at the cluster level](https://kubernetes.io/docs/tutorials/security/cluster-level-pss/).
+`enforce` refuses a Pod, `audit` records a violation in the audit log, and
+`warn` prints it to the client. A label on a namespace overrides the default
+for the mode it names, and for that mode only. The exemptions skip Pod
+Security entirely, so the list is short and fixed: `kube-system` holds the
+control plane, the CNI and CoreDNS, `kube-public` and `kube-node-lease` hold
+no workloads, and `local-path-storage` holds kind's storage provisioner,
+whose Pods carry no `securityContext`. Every other namespace, `default`
+included, is judged at `restricted`.
+
 ## Hands-on with the Bookstore
 
 This is the payoff of Part 00: a running cluster and the first Bookstore Pod.
@@ -116,18 +175,56 @@ Kustomize Version: v5.8.1
 
 ### 2. Install a cluster tool and create a cluster
 
+Run this step, and every later command in the chapter, from the `full-guide/`
+directory of the repository. The config's mount path is relative to it.
+
 ```sh
-# kind v0.33.0 uses Kubernetes v1.37.0 as its default node image. The --image
-# flag pins that image by digest, so every reader gets the same node.
 go install sigs.k8s.io/kind@v0.33.0     # or `brew install kind`, then check:
 kind version                            # expect v0.33.0
 kind create cluster --name bookstore \
-  --image kindest/node:v1.37.0@sha256:a1ed56cfb0e7b93589bdf97c8cd566405a265939e3620fc4f5de89adff580ae5
+  --config examples/security-lab/kind/cluster-restricted-default.yaml
 ```
 
-The digest is the default node image that kind v0.33.0 names in its own
+The [config](../examples/security-lab/kind/cluster-restricted-default.yaml)
+does three things. It pins the node image by digest, so every reader's node is
+the same. That digest is the default node image that kind v0.33.0 names in its
+own
 [source](https://github.com/kubernetes-sigs/kind/blob/v0.33.0/pkg/apis/config/defaults/image.go).
-Pinning it makes every reader's node the same.
+It mounts the file from the last section,
+[`pod-security-admission.yaml`](../examples/security-lab/kind/pod-security-admission.yaml),
+into the control-plane node. And it tells kubeadm to start the API server with
+`--admission-control-config-file` pointing at the mounted file:
+
+```yaml
+    extraMounts:
+      - hostPath: examples/security-lab/kind/pod-security-admission.yaml
+        containerPath: /etc/kubernetes/policies/pod-security-admission.yaml
+        readOnly: true
+    kubeadmConfigPatches:
+      - |
+        apiVersion: kubeadm.k8s.io/v1beta4
+        kind: ClusterConfiguration
+        apiServer:
+          extraArgs:
+            - name: admission-control-config-file
+              value: /etc/kubernetes/policies/pod-security-admission.yaml
+          extraVolumes:
+            - name: pod-security-config
+              hostPath: /etc/kubernetes/policies
+              mountPath: /etc/kubernetes/policies
+              readOnly: true
+              pathType: DirectoryOrCreate
+```
+
+kubeadm is at `v1beta4` on Kubernetes 1.37, where `extraArgs` is a list of
+`name` and `value` pairs. The API server runs as a container on the node, so
+`extraVolumes` is what makes the mounted directory visible inside it.
+
+A later chapter that starts its own cluster with a plain
+`kind create cluster --name bookstore` gets kind's stock default, `privileged`.
+Add the same `--config` line to keep the default there. The labs of those
+chapters ran on stock clusters unless a chapter says otherwise, and every
+namespace in them carries its own labels.
 
 `kind create cluster` also **merges a context into your kubeconfig and switches
 to it** — so `kubectl` immediately points at the new cluster.
@@ -153,7 +250,225 @@ kubectl get --raw='/readyz?verbose'        # API server health gates (ch.04 pipe
 `kubectl get nodes` showing `Ready` means the kubelet ([ch.05](05-node-components.md))
 in the node container has registered and is healthy.
 
-### 4. kubeconfig & contexts
+### 4. Prove that `restricted` is the default
+
+A default nobody has tested is a hope. First confirm that the API server
+started with the flag:
+
+```sh
+kubectl -n kube-system get pod -l component=kube-apiserver \
+  -o jsonpath='{range .items[0].spec.containers[0].command[*]}{@}{"\n"}{end}' \
+  | grep admission-control
+```
+
+<!-- gate: output -->
+```text
+--admission-control-config-file=/etc/kubernetes/policies/pod-security-admission.yaml
+```
+
+Then make a namespace and label nothing. A new namespace gets its `default`
+ServiceAccount a moment after it exists, and the API server refuses a Pod
+before then, so the loop waits for it:
+
+```sh
+kubectl create namespace default-check
+until kubectl -n default-check get serviceaccount default >/dev/null 2>&1; do sleep 1; done
+kubectl get namespace default-check --show-labels
+```
+
+<!-- gate: output -->
+```text
+namespace/default-check created
+# ...
+NAME            STATUS   AGE   LABELS
+default-check   Active   0s    kubernetes.io/metadata.name=default-check
+```
+
+The only label is the one Kubernetes adds itself. Now ask the namespace for a
+privileged Pod. This failure is deliberate: the default is meant to refuse it.
+
+```sh
+BUSYBOX=busybox@sha256:a7dbc319b1438115a207e11930dc4bb3e643dcb3ec0bdd694bb36cd8fad289ec  # busybox:1.37
+kubectl run privileged-probe -n default-check --image="$BUSYBOX" \
+  --restart=Never --privileged -- sleep 3600
+```
+
+<!-- gate: output -->
+```text
+Error from server (Forbidden): pods "privileged-probe" is forbidden: violates PodSecurity "restricted:latest": privileged (container "privileged-probe" must not set securityContext.privileged=true), allowPrivilegeEscalation != false (container "privileged-probe" must set securityContext.allowPrivilegeEscalation=false), unrestricted capabilities (container "privileged-probe" must set securityContext.capabilities.drop=["ALL"]), runAsNonRoot != true (pod or container "privileged-probe" must set securityContext.runAsNonRoot=true), seccompProfile (pod or container "privileged-probe" must set securityContext.seccompProfile.type to "RuntimeDefault" or "Localhost")
+```
+
+The API server names every field that broke `restricted`, and it created
+nothing. A Pod that carries the baseline is admitted in the same namespace.
+This manifest adds a ServiceAccount, a 64Mi claim and a Pod that mounts the
+claim. The claim also tests kind's storage provisioner, which sits in an
+exempt namespace:
+
+```sh
+kubectl apply -f - <<'EOF'
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: check-sa
+  namespace: default-check
+automountServiceAccountToken: false
+---
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: data
+  namespace: default-check
+spec:
+  accessModes: ["ReadWriteOnce"]
+  resources:
+    requests:
+      storage: 64Mi
+---
+apiVersion: v1
+kind: Pod
+metadata:
+  name: baseline-check
+  namespace: default-check
+  labels:
+    app: baseline-check
+spec:
+  serviceAccountName: check-sa
+  automountServiceAccountToken: false
+  securityContext:
+    runAsNonRoot: true
+    runAsUser: 65534
+    runAsGroup: 65534
+    seccompProfile:
+      type: RuntimeDefault
+  containers:
+    - name: check
+      image: busybox@sha256:a7dbc319b1438115a207e11930dc4bb3e643dcb3ec0bdd694bb36cd8fad289ec  # busybox:1.37
+      command: ["sleep", "3600"]
+      securityContext:
+        allowPrivilegeEscalation: false
+        readOnlyRootFilesystem: true
+        capabilities:
+          drop: ["ALL"]
+      resources:
+        requests:
+          cpu: 10m
+          memory: 16Mi
+        limits:
+          memory: 32Mi
+      volumeMounts:
+        - name: tmp
+          mountPath: /tmp
+        - name: data
+          mountPath: /data
+  volumes:
+    - name: tmp
+      emptyDir: {}
+    - name: data
+      persistentVolumeClaim:
+        claimName: data
+EOF
+kubectl wait --for=condition=Ready pod/baseline-check -n default-check --timeout=120s
+```
+
+<!-- gate: output -->
+```text
+serviceaccount/check-sa created
+persistentvolumeclaim/data created
+pod/baseline-check created
+# ...
+pod/baseline-check condition met
+```
+
+The claim stays `Pending` until a Pod uses it, because the `standard`
+StorageClass binds a volume on first use. Then the provisioner creates the
+volume through a helper Pod, and the claim is `Bound`:
+
+```sh
+kubectl get pvc data -n default-check
+kubectl get pod baseline-check -n default-check
+kubectl exec -n default-check baseline-check -- sh -c 'echo stored > /data/check && cat /data/check'
+VOLUME=$(kubectl get pvc data -n default-check -o jsonpath='{.spec.volumeName}')
+kubectl -n local-path-storage logs deploy/local-path-provisioner | grep -o "create the helper pod helper-pod-create-$VOLUME into local-path-storage"
+```
+
+<!-- gate: output -->
+```text
+NAME   STATUS   VOLUME                                     CAPACITY   ACCESS MODES   STORAGECLASS   VOLUMEATTRIBUTESCLASS   AGE
+data   Bound    pvc-59587be9-5cec-45fd-a067-cb7cab60febe   64Mi       RWO            standard       <unset>                 9s
+# ...
+NAME             READY   STATUS    RESTARTS   AGE
+baseline-check   1/1     Running   0          9s
+# ...
+stored
+# ...
+create the helper pod helper-pod-create-pvc-59587be9-5cec-45fd-a067-cb7cab60febe into local-path-storage
+```
+
+The helper Pod has no `securityContext`, so the default would refuse it in
+any namespace but an exempt one. That is why `local-path-storage` is on the
+exemption list. CoreDNS lives in `kube-system`, which is exempt too. Check
+that it runs and that the Pod resolves a Service name through it. The `tr`
+turns the tabs that busybox prints into spaces:
+
+```sh
+kubectl -n kube-system get pods -l k8s-app=kube-dns
+kubectl exec -n default-check baseline-check -- nslookup kubernetes.default.svc.cluster.local | tr '\t' ' '
+```
+
+<!-- gate: output -->
+```text
+NAME                       READY   STATUS    RESTARTS   AGE
+coredns-559f6c778d-78zvt   1/1     Running   0          64m
+coredns-559f6c778d-hh8js   1/1     Running   0          64m
+# ...
+Server:  10.96.0.10
+Address: 10.96.0.10:53
+# ...
+Name: kubernetes.default.svc.cluster.local
+Address: 10.96.0.1
+```
+
+An exception is a label. The next namespace asks for `privileged` on purpose,
+and it keeps `audit` and `warn` at `restricted` so that the gap stays visible.
+The same privileged Pod that the unlabelled namespace refused is now admitted:
+
+```sh
+kubectl create namespace privileged-check
+until kubectl -n privileged-check get serviceaccount default >/dev/null 2>&1; do sleep 1; done
+kubectl label namespace privileged-check \
+  pod-security.kubernetes.io/enforce=privileged \
+  pod-security.kubernetes.io/audit=restricted \
+  pod-security.kubernetes.io/warn=restricted
+kubectl run privileged-probe -n privileged-check --image="$BUSYBOX" \
+  --restart=Never --privileged -- sleep 3600
+```
+
+<!-- gate: output -->
+```text
+namespace/privileged-check labeled
+# ...
+Warning: would violate PodSecurity "restricted:latest": privileged (container "privileged-probe" must not set securityContext.privileged=true), allowPrivilegeEscalation != false (container "privileged-probe" must set securityContext.allowPrivilegeEscalation=false), unrestricted capabilities (container "privileged-probe" must set securityContext.capabilities.drop=["ALL"]), runAsNonRoot != true (pod or container "privileged-probe" must set securityContext.runAsNonRoot=true), seccompProfile (pod or container "privileged-probe" must set securityContext.seccompProfile.type to "RuntimeDefault" or "Localhost")
+pod/privileged-probe created
+```
+
+The label overrode the default for `enforce` and nothing else, so `warn` still
+prints the `restricted` findings while the Pod is admitted. A label above
+`restricted` is an exception, and this guide records every one in
+`security/namespace-exceptions.yaml`, at the root of the repository, with a
+reason, the chapter that explains it and an expiry date.
+[Part 00 ch.08](08-security-foundations.md) says how the registry works.
+`privileged-check` has its entry, and CI checks the entries against the
+labels in both directions. Remove the two check namespaces:
+
+```sh
+kubectl delete namespace default-check privileged-check
+```
+
+The `bookstore` namespace in step 7 still carries its own `restricted`
+label, although the default would give the same answer. The label says what
+you meant, and a cluster without the default honours it too.
+
+### 5. kubeconfig & contexts
 
 `kubectl` itself is stateless; **kubeconfig** (`~/.kube/config`, or
 `$KUBECONFIG`) tells it where and as whom to connect. Three lists plus a
@@ -195,7 +510,7 @@ every line, so the check does not depend on memory.
 > [Part 07](../07-delivery/04-gitops-argocd.md) replaces hand-run `apply` with
 > changes reviewed in Git.
 
-### 5. `kubectl` basics (the everyday verbs)
+### 6. `kubectl` basics (the everyday verbs)
 
 These are ~90% of daily use; you'll repeat them in every later chapter:
 
@@ -213,14 +528,14 @@ kubectl explain <KIND>.spec                     # authoritative schema (ch.06)
 
 The catalog image has no shell, so `exec -- sh` fails on it. It is built on a
 [distroless](https://github.com/GoogleContainerTools/distroless) base, which ships
-no shell by default. The probe Pod in step 7 is where you run commands from
+no shell by default. The probe Pod in step 8 is where you run commands from
 inside the cluster.
 
 `describe` + `logs` + `events` are the troubleshooting trident — internalize
 them now ([Part 08 ch.03](../08-day-2-operations/03-troubleshooting-playbook.md)
 goes deep).
 
-### 6. Create the namespace, load the image, and deploy the first Bookstore Pod
+### 7. Create the namespace, load the image, and deploy the first Bookstore Pod
 
 The Pod needs two things the cluster does not have yet. The first is a
 `bookstore` namespace that enforces Pod Security `restricted`, so the API
@@ -375,7 +690,7 @@ declarative `spec` ([ch.06](06-declarative-api-model.md)) → API server pipelin
 ([ch.05](05-node-components.md)) → status reported → traffic served. Everything
 after this *adds* to this Pod.
 
-### 7. Prove a NetworkPolicy is enforced
+### 8. Prove a NetworkPolicy is enforced
 
 The API server stores a NetworkPolicy without checking that anything enforces
 it. The [Kubernetes docs](https://kubernetes.io/docs/concepts/services-networking/network-policies/)
@@ -511,7 +826,7 @@ Then remove the probe:
 kubectl delete pod probe -n bookstore
 ```
 
-### 8. Tear down (and reset any time)
+### 9. Tear down (and reset any time)
 
 A local cluster is disposable — deleting and recreating is the normal way to
 get a clean slate:
@@ -555,6 +870,14 @@ kind delete cluster --name bookstore
 > clusters per pipeline run. The **API and objects are identical**; only
 > provisioning and substrate differ.
 
+> **In production:** a managed control plane may not let you set the API
+> server's flags, so there may be no admission file to edit. The equivalent is a
+> Pod Security label on every namespace, applied by automation, and a policy
+> that refuses a namespace with no `enforce` label.
+> [05.09](../05-security/09-running-security-on-a-platform-team.md) builds a
+> rule of that kind. The cluster-wide default is a setting for kind and for
+> clusters you run yourself. The labels are what travels everywhere.
+
 > **In production:** `Service` type `LoadBalancer` and dynamic `PersistentVolume`
 > provisioning **don't work on bare kind** (no
 > [cloud-controller-manager](04-control-plane-deep-dive.md), no cloud CSI). You
@@ -571,9 +894,9 @@ kind delete cluster --name bookstore
 ## Quick Reference
 
 ```sh
-# cluster lifecycle (local)
+# cluster lifecycle (local; run from full-guide/)
 kind create cluster --name bookstore \
-  --image kindest/node:v1.37.0@sha256:a1ed56cfb0e7b93589bdf97c8cd566405a265939e3620fc4f5de89adff580ae5
+  --config examples/security-lab/kind/cluster-restricted-default.yaml
 kind delete cluster --name bookstore
 kind load docker-image <img> --name bookstore
 
@@ -598,9 +921,9 @@ Smallest end-to-end loop (the thing to remember):
 # run from the guide directory (full-guide/)
 docker build -t bookstore/catalog:dev examples/bookstore/app/catalog   # ch.02 image
 kind create cluster --name bookstore \
-  --image kindest/node:v1.37.0@sha256:a1ed56cfb0e7b93589bdf97c8cd566405a265939e3620fc4f5de89adff580ae5
+  --config examples/security-lab/kind/cluster-restricted-default.yaml
 kind load docker-image bookstore/catalog:dev --name bookstore   # no registry locally
-# step 6: create the bookstore namespace and catalog-sa first (heredoc)
+# step 7: create the bookstore namespace and catalog-sa first (heredoc)
 kubectl apply -n bookstore -f examples/bookstore/raw-manifests/01-catalog-pod.yaml   # declare (ch.06)
 kubectl get pod catalog -n bookstore -w                  # watch the loop converge
 kubectl port-forward -n bookstore pod/catalog 8080:8080 && curl localhost:8080/healthz
@@ -610,7 +933,10 @@ Setup checklist:
 
 - [ ] `kubectl` installed, within ±1 minor of the cluster
 - [ ] Docker/Colima engine running before `kind create cluster`
-- [ ] Cluster up; all nodes `Ready`; kube-system Pods running
+- [ ] Cluster up from `cluster-restricted-default.yaml`; all nodes `Ready`;
+  kube-system Pods running
+- [ ] An unlabelled namespace refused a privileged Pod, admitted a Pod with
+  the baseline, and bound a claim through the storage provisioner
 - [ ] You confirm `current-context` before any mutating command
 - [ ] Namespace `bookstore` enforces `restricted`; `catalog-sa` exists
 - [ ] Local image `kind load`ed (matches `imagePullPolicy: IfNotPresent`)
@@ -626,7 +952,7 @@ Setup checklist:
 1. **Why does the `catalog` manifest use `imagePullPolicy: IfNotPresent` for local kind use, and what would go wrong with `Always`?**
    <details><summary>Show answer</summary>
 
-   `bookstore/catalog:dev` only exists in your laptop's Docker engine and `kind load` copies it into the node container's containerd image store. With `Always`, the kubelet would contact a registry every time — but there is none for `bookstore/catalog:dev`, so it fails `ImagePullBackOff`. `IfNotPresent` makes the kubelet use the loaded local copy and skip the registry round-trip (see §Hands-on step 6, and §How it works under the hood, `kind load`).
+   `bookstore/catalog:dev` only exists in your laptop's Docker engine and `kind load` copies it into the node container's containerd image store. With `Always`, the kubelet would contact a registry every time — but there is none for `bookstore/catalog:dev`, so it fails `ImagePullBackOff`. `IfNotPresent` makes the kubelet use the loaded local copy and skip the registry round-trip (see §Hands-on step 7, and §How it works under the hood, `kind load`).
 
    </details>
 
@@ -650,7 +976,7 @@ Setup checklist:
    The API server stores a NetworkPolicy whether or not the cluster's network
    plugin enforces it, so acceptance proves nothing. The Kubernetes docs say a
    policy has no effect without a controller that implements it. Check with a
-   connection, as step 7 does: a probe's request should succeed before the
+   connection, as step 8 does: a probe's request should succeed before the
    policy and be denied under it. A request that still succeeds under the
    policy means the plugin ignores the policy, and the cluster fails open (see
    §Threats and controls).
@@ -668,6 +994,21 @@ Setup checklist:
    clusters should be reproducible from manifests in Git, not by accumulated
    hand-applied state (see §Tear down (and reset any time), §Production
    notes).
+
+   </details>
+
+6. **A teammate runs `kubectl create namespace tools` and applies a vendor's Pod that runs as root. What happens on this chapter's cluster, what happens on a stock kind cluster, and why do the guide's own namespaces still carry labels?**
+   <details><summary>Show answer</summary>
+
+   On this cluster the new namespace has no labels, so it takes the
+   `restricted` default, and the API server refuses the Pod and names the
+   fields that broke the level (step 4). On a stock kind cluster the default
+   is `privileged`, so the Pod is admitted without a word. The labels stay
+   because they are the first line of defence: they say what each namespace is
+   for, they travel with the manifests to a cluster that has no default, and
+   an exception is a label that the registry records. The default is the last
+   line, for the namespace nobody labelled (see §Why `restricted` is the
+   cluster default).
 
    </details>
 

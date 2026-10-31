@@ -156,9 +156,17 @@ installs Gatekeeper beside it to show that the rule ports, then removes it.
   the first install, with four Kyverno controllers, never became ready. The
   chapter keeps these failures instead of the one clean run, because they are
   what an engine costs a small cluster.
-- **Namespaces.** `open` enforces nothing and holds the attacks. The shared run
-  creates it, labels it for the policies, and deletes it at the end. Step 12b
-  creates `kyverno-demo` for two dry runs and deletes it. The full mode
+- **Namespaces.** `open` holds the attacks. It enforces `baseline`, the lowest
+  level that admits a Pod with no `securityContext`. The recorded runs left it
+  unlabelled, because their clusters had no cluster-wide Pod Security default.
+  The chapter labels it so that the steps also run on a cluster whose default
+  is `restricted`, as
+  [00.07](../00-foundations/07-local-cluster-setup.md) builds. The last section
+  of the transcript reruns the two attack Pods on such a cluster: each is
+  refused in a namespace with no label and admitted in the labelled one. The
+  shared run creates `open`, labels it for the policies, and deletes it at the
+  end. Step 12b creates `kyverno-demo` for two dry runs and deletes it. The
+  full mode
   creates `kyverno-demo`, `signed`, `kyverno` and `gatekeeper-system`. The two
   engine namespaces carry the `restricted` Pod Security label, and the charts
   ran under it without an exception.
@@ -191,7 +199,22 @@ Terraform v1.14.8
 
 ### Recon: the open namespace
 
-The attacks run in a namespace with no Pod Security labels and no policy.
+The attacks run in a namespace with no policy. The Pod in the second attack
+leaves out the baseline on purpose, so the namespace has to admit it. It
+enforces `baseline`, which admits a Pod with no `securityContext`, and it
+audits and warns at `baseline` too, so that the attack stays quiet. The label
+is explicit because a cluster whose default is `restricted`, such as the one
+[00.07](../00-foundations/07-local-cluster-setup.md) builds, refuses that Pod
+in an unlabelled namespace. The registry holds an entry for it.
+
+```sh
+kubectl create namespace open
+kubectl label namespace open \
+  pod-security.kubernetes.io/enforce=baseline \
+  pod-security.kubernetes.io/audit=baseline \
+  pod-security.kubernetes.io/warn=baseline
+```
+
 Start with the Service. A Service with an `externalIPs` entry answers for that
 address on every node, so a tenant who may create Services can take traffic
 meant for another address. The [Service
@@ -872,11 +895,20 @@ spec:
 ```
 
 The API server checks the pair before admission runs. The shared run used
-busybox for the image, because a server dry run does not pull it, and it used
-a namespace with no Pod Security label:
+busybox for the image, because a server dry run does not pull it. The recorded
+run used a namespace with no Pod Security label, because its cluster had no
+cluster-wide default. The commands below label the namespace `privileged`
+instead, in all three modes so that the demonstration stays quiet. A cluster
+whose default is `restricted` would refuse the second dry run in an unlabelled
+namespace, and the label is what lets it run. The namespace holds this one
+Pod, which never starts, and the registry holds an entry for it:
 
 ```sh
 kubectl create namespace kyverno-demo
+kubectl label namespace kyverno-demo \
+  pod-security.kubernetes.io/enforce=privileged \
+  pod-security.kubernetes.io/audit=privileged \
+  pod-security.kubernetes.io/warn=privileged
 kubectl apply --dry-run=server -f escape-conflict.yaml; echo "server dry-run exit=$?"
 kubectl apply --dry-run=server -f escape-node-dryrun.yaml; echo "server dry-run exit=$?"
 ```

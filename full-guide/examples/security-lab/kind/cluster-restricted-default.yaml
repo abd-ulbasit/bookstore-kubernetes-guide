@@ -1,0 +1,36 @@
+# kind cluster for the guide, with Pod Security `restricted` as the
+# cluster-wide default (chapter 00.07). Create it from the full-guide/
+# directory, because the mount path below is relative to it:
+#
+#   kind create cluster --name bookstore \
+#     --config examples/security-lab/kind/cluster-restricted-default.yaml
+#
+# The API server loads the PodSecurity configuration in
+# pod-security-admission.yaml, so a namespace with no Pod Security label
+# enforces, audits and warns at `restricted`. The node image is the
+# Kubernetes 1.37.0 image kind v0.33.0 publishes, pinned by digest. kubeadm is
+# v1beta4 on 1.37, where extraArgs is a list of name and value pairs.
+kind: Cluster
+apiVersion: kind.x-k8s.io/v1alpha4
+name: bookstore
+nodes:
+  - role: control-plane
+    image: kindest/node:v1.37.0@sha256:a1ed56cfb0e7b93589bdf97c8cd566405a265939e3620fc4f5de89adff580ae5
+    extraMounts:
+      - hostPath: examples/security-lab/kind/pod-security-admission.yaml
+        containerPath: /etc/kubernetes/policies/pod-security-admission.yaml
+        readOnly: true
+    kubeadmConfigPatches:
+      - |
+        apiVersion: kubeadm.k8s.io/v1beta4
+        kind: ClusterConfiguration
+        apiServer:
+          extraArgs:
+            - name: admission-control-config-file
+              value: /etc/kubernetes/policies/pod-security-admission.yaml
+          extraVolumes:
+            - name: pod-security-config
+              hostPath: /etc/kubernetes/policies
+              mountPath: /etc/kubernetes/policies
+              readOnly: true
+              pathType: DirectoryOrCreate

@@ -355,6 +355,10 @@ second release into it, setting the name:
 
 ```sh
 kubectl create namespace p02-traefik2
+kubectl label namespace p02-traefik2 \
+  pod-security.kubernetes.io/enforce=restricted \
+  pod-security.kubernetes.io/audit=restricted \
+  pod-security.kubernetes.io/warn=restricted
 helm install second traefik/traefik --version 42.2.0 --namespace p02-traefik2 \
   --set ingressClass.name=traefik --wait --timeout 90s
 ```
