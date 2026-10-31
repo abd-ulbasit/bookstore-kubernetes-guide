@@ -1,0 +1,236 @@
+# Transcript for 12-kubernetes-for-machine-learning/06-model-serving-and-inference.md
+# Tier A: a kind cluster that the lab owns. Kubernetes v1.37.0 server and
+# kubectl v1.37.2, recorded below in step 0.
+# Recorded by running examples/security-lab/labs/12-06.sh from full-guide/.
+# The lab used namespaces p12-06-ml, p12-06-store and p12-06-other. The chapter
+# names bookstore-ml and bookstore and applies the same files. The cluster's
+# only node is named sf-pilot-control-plane; the node name is kept as captured.
+# The bearer token is written to a Secret by openssl and is never printed.
+
+## step 0: versions and a clean start
+$ kubectl version
+Client Version: v1.37.2
+Server Version: v1.37.0
+$ kubectl get nodes -o custom-columns=NAME:.metadata.name,RUNTIME:.status.nodeInfo.containerRuntimeVersion
+NAME                     RUNTIME
+sf-pilot-control-plane   containerd://2.3.4
+$ kubectl get namespace p12-06-ml p12-06-store p12-06-other
+Error from server (NotFound): namespaces "p12-06-ml" not found
+Error from server (NotFound): namespaces "p12-06-store" not found
+Error from server (NotFound): namespaces "p12-06-other" not found
+$ kubectl get apiservice v1beta1.metrics.k8s.io
+Error from server (NotFound): apiservices.apiregistration.k8s.io "v1beta1.metrics.k8s.io" not found
+$ kubectl get crd -o name | grep -c serving.kserve.io
+0
+
+## step 1: three namespaces, restricted where workloads run, and default-deny
+$ kubectl create namespace p12-06-ml
+namespace/p12-06-ml created
+$ kubectl label namespace p12-06-ml pod-security.kubernetes.io/enforce=restricted pod-security.kubernetes.io/audit=restricted pod-security.kubernetes.io/warn=restricted
+namespace/p12-06-ml labeled
+$ kubectl create namespace p12-06-store
+namespace/p12-06-store created
+$ kubectl label namespace p12-06-store pod-security.kubernetes.io/enforce=restricted pod-security.kubernetes.io/audit=restricted pod-security.kubernetes.io/warn=restricted
+namespace/p12-06-store labeled
+$ kubectl create namespace p12-06-other
+namespace/p12-06-other created
+$ kubectl label namespace p12-06-other pod-security.kubernetes.io/enforce=restricted pod-security.kubernetes.io/audit=restricted pod-security.kubernetes.io/warn=restricted
+namespace/p12-06-other labeled
+$ kubectl apply -f - (default-deny ingress, the policy ch.01 applies)
+networkpolicy.networking.k8s.io/default-deny-ingress created
+$ sed (namespaces replaced; the allow-list selects the p12-06-store namespace) recommender-security.yaml | kubectl apply -f -
+serviceaccount/recommender-sa created
+networkpolicy.networking.k8s.io/recommender-allow-callers created
+resourcequota/recommender-quota created
+
+## step 2: train the recommender (the ch.04 Job), which writes model.joblib
+$ sed 's/namespace: bookstore-ml/namespace: p12-06-ml/' examples/bookstore/ml/train/recommender-train-job.yaml | kubectl apply -f -
+serviceaccount/recommender-train created
+persistentvolumeclaim/recommender-model created
+job.batch/recommender-train created
+$ kubectl wait --for=condition=complete job/recommender-train -n p12-06-ml --timeout=600s
+job.batch/recommender-train condition met
+$ kubectl logs job/recommender-train -n p12-06-ml --tail=3
+[train] computing item-item cosine similarity, top_k=10
+[train] wrote /workspace/model/model.joblib (size=11138 bytes)
+[train] sample: neighbours(book_id=1) top-3 = [[2, 0.5475654006004333], [3, 0.45379704236984253], [4, 0.41209733486175537]]
+
+## step 3: joblib.load is pickle, and pickle runs the code it reads
+$ python: pickletools.dis on the file (disassembles the opcodes; runs nothing)
+    0: c    GLOBAL     'builtins exec'
+   15: (    MARK
+   16: S        STRING     'print("payload ran as uid", __import__("os").getuid()); open("/workspace/pwned.txt", "w")'
+  109: t        TUPLE      (MARK at 15)
+  110: R    REDUCE
+  111: .    STOP
+highest protocol among opcodes = 0
+$ kubectl create configmap poisoned-model -n p12-06-ml --from-file=poisoned-model.joblib=<the file above>
+configmap/poisoned-model created
+$ sed 's/namespace: bookstore-ml/namespace: p12-06-ml/' examples/bookstore/ml/serve/pickle-check.yaml | kubectl apply -f -
+pod/pickle-check created
+$ kubectl wait --for=jsonpath='{.status.phase}'=Failed pod/pickle-check -n p12-06-ml --timeout=180s
+pod/pickle-check condition met
+$ kubectl logs pod/pickle-check -n p12-06-ml
+payload ran as uid 65532
+Traceback (most recent call last):
+  File "<string>", line 1, in <module>
+  File "/opt/venv/lib/python3.12/site-packages/joblib/numpy_pickle.py", line 658, in load
+    obj = _unpickle(fobj, filename, mmap_mode)
+          ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/opt/venv/lib/python3.12/site-packages/joblib/numpy_pickle.py", line 577, in _unpickle
+    obj = unpickler.load()
+          ^^^^^^^^^^^^^^^^
+  File "/usr/local/lib/python3.12/pickle.py", line 1256, in load
+    dispatch[key[0]](self)
+  File "/usr/local/lib/python3.12/pickle.py", line 1632, in load_reduce
+    stack[-1] = func(*args)
+                ^^^^^^^^^^^
+  File "<string>", line 1, in <module>
+OSError: [Errno 30] Read-only file system: '/workspace/pwned.txt'
+$ kubectl get pod pickle-check -n p12-06-ml -o jsonpath='{.status.containerStatuses[0].state.terminated.exitCode}'
+1
+
+## step 4: the caller token, the identity, the allow-list and the quota, then the Deployment
+$ kubectl create secret generic recommender-caller-token -n p12-06-ml --from-literal=token="$(openssl rand -hex 32)"
+secret/recommender-caller-token created
+$ sed 's/namespace: bookstore-ml/namespace: p12-06-ml/' examples/bookstore/ml/serve/recommender-deployment.yaml | kubectl apply -f -
+deployment.apps/recommender created
+$ sed 's/namespace: bookstore-ml/namespace: p12-06-ml/' examples/bookstore/ml/serve/recommender-service.yaml | kubectl apply -f -
+service/recommender created
+$ kubectl rollout status deploy/recommender -n p12-06-ml --timeout=180s
+Waiting for deployment "recommender" rollout to finish: 0 of 1 updated replicas are available...
+deployment "recommender" successfully rolled out
+$ kubectl get deploy recommender -n p12-06-ml -o jsonpath='{.spec.template.spec.serviceAccountName} automount={.spec.template.spec.automountServiceAccountToken}'
+recommender-sa automount=false
+
+## step 5: call the endpoint from outside the Pod (port-forward is the reader's path)
+$ curl -s -w ' %{http_code}\n' http://127.0.0.1:18080/ready
+{"status":"ready"} 200
+$ curl -s -w ' %{http_code}\n' 'http://127.0.0.1:18080/recommend?book_id=1&k=3'   (no token: denied)
+{"detail":"missing or invalid bearer token"} 401
+$ curl -s -w ' %{http_code}\n' -H "Authorization: Bearer $TOKEN" 'http://127.0.0.1:18080/recommend?book_id=1&k=3'
+{"book_id":1,"k":3,"recommendations":[{"book_id":2,"score":0.5475654006004333,"title":"Book 0002","author":"Author 031"},{"book_id":3,"score":0.45379704236984253,"title":"Book 0003","author":"Author 004"},{"book_id":4,"score":0.41209733486175537,"title":"Book 0004","author":"Author 028"}]} 200
+$ curl -s -o /dev/null -w '%{http_code}\n' -H "Authorization: Bearer $TOKEN" -X POST -d '<51 instances>' .../v1/models/recommender:predict   (over the cap)
+422
+$ curl -s -w ' %{http_code}\n' -H "Authorization: Bearer $TOKEN" -H 'content-type: application/json' -X POST -d '{"instances":[{"book_id":1,"k":3},{"book_id":2,"k":2}]}' .../v1/models/recommender:predict
+{"predictions":[{"book_id":1,"k":3,"recommendations":[{"book_id":2,"score":0.5475654006004333,"title":"Book 0002","author":"Author 031"},{"book_id":3,"score":0.45379704236984253,"title":"Book 0003","author":"Author 004"},{"book_id":4,"score":0.41209733486175537,"title":"Book 0004","author":"Author 028"}]},{"book_id":2,"k":2,"recommendations":[{"book_id":1,"score":0.5475654006004333,"title":"Book 0001","author":"Author 004"},{"book_id":3,"score":0.3439466953277588,"title":"Book 0003","author":"Author 004"}]}]} 200
+
+## step 6: the allow-list in place, and the two callers that were not admitted
+$ kubectl get networkpolicy -n p12-06-ml
+NAME                        POD-SELECTOR                                    AGE
+default-deny-ingress        <none>                                          68s
+recommender-allow-callers   app.kubernetes.io/component=recommender-serve   68s
+$ kubectl apply -f - (a client Pod in p12-06-store, label app=catalog)
+pod/catalog-client created
+$ kubectl get pod catalog-client -n p12-06-store -o jsonpath='{.status.phase}'
+Succeeded
+$ kubectl logs pod/catalog-client -n p12-06-store
+401
+$ kubectl apply -f - (a client Pod in p12-06-other, label app=none)
+pod/stranger created
+$ kubectl get pod stranger -n p12-06-other -o jsonpath='{.status.phase}'
+Failed
+$ kubectl logs pod/stranger -n p12-06-other
+Traceback (most recent call last):
+  File "/usr/local/lib/python3.12/urllib/request.py", line 1357, in do_open
+    h.request(req.get_method(), req.selector, req.data, headers,
+  File "/usr/local/lib/python3.12/http/client.py", line 1386, in request
+    self._send_request(method, url, body, headers, encode_chunked)
+  File "/usr/local/lib/python3.12/http/client.py", line 1432, in _send_request
+    self.endheaders(body, encode_chunked=encode_chunked)
+  File "/usr/local/lib/python3.12/http/client.py", line 1381, in endheaders
+    self._send_output(message_body, encode_chunked=encode_chunked)
+  File "/usr/local/lib/python3.12/http/client.py", line 1141, in _send_output
+    self.send(msg)
+  File "/usr/local/lib/python3.12/http/client.py", line 1085, in send
+    self.connect()
+  File "/usr/local/lib/python3.12/http/client.py", line 1051, in connect
+    self.sock = self._create_connection(
+                ^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/usr/local/lib/python3.12/socket.py", line 865, in create_connection
+    raise exceptions[0]
+  File "/usr/local/lib/python3.12/socket.py", line 850, in create_connection
+    sock.connect(sa)
+TimeoutError: timed out
+
+During handling of the above exception, another exception occurred:
+
+Traceback (most recent call last):
+  File "<string>", line 3, in <module>
+  File "/usr/local/lib/python3.12/urllib/request.py", line 215, in urlopen
+    return opener.open(url, data, timeout)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/usr/local/lib/python3.12/urllib/request.py", line 515, in open
+    response = self._open(req, data)
+               ^^^^^^^^^^^^^^^^^^^^^
+  File "/usr/local/lib/python3.12/urllib/request.py", line 532, in _open
+    result = self._call_chain(self.handle_open, protocol, protocol +
+             ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/usr/local/lib/python3.12/urllib/request.py", line 492, in _call_chain
+    result = func(*args)
+             ^^^^^^^^^^^
+  File "/usr/local/lib/python3.12/urllib/request.py", line 1386, in http_open
+    return self.do_open(http.client.HTTPConnection, req)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/usr/local/lib/python3.12/urllib/request.py", line 1360, in do_open
+    raise URLError(err)
+urllib.error.URLError: <urlopen error timed out>
+
+## step 7: the cost ceiling: a quota, and a scale-up past it
+$ kubectl get resourcequota recommender-quota -n p12-06-ml
+NAME                REQUEST                   LIMIT                         AGE
+recommender-quota   requests.cpu: 100m/500m   limits.memory: 512Mi/2560Mi   98s
+$ kubectl scale deploy/recommender -n p12-06-ml --replicas=10
+deployment.apps/recommender scaled
+$ kubectl get deploy recommender -n p12-06-ml
+NAME          READY   UP-TO-DATE   AVAILABLE   AGE
+recommender   1/10    5            1           55s
+$ kubectl get events -n p12-06-ml --field-selector reason=FailedCreate
+LAST SEEN   TYPE      REASON         OBJECT                              MESSAGE
+3s          Warning   FailedCreate   replicaset/recommender-669bb9fd47   Error creating: pods "recommender-669bb9fd47-rdskt" is forbidden: exceeded quota: recommender-quota, requested: limits.memory=512Mi,requests.cpu=100m, used: limits.memory=2560Mi,requests.cpu=500m, limited: limits.memory=2560Mi,requests.cpu=500m
+3s          Warning   FailedCreate   replicaset/recommender-669bb9fd47   Error creating: pods "recommender-669bb9fd47-7nq9c" is forbidden: exceeded quota: recommender-quota, requested: limits.memory=512Mi,requests.cpu=100m, used: limits.memory=2560Mi,requests.cpu=500m, limited: limits.memory=2560Mi,requests.cpu=500m
+3s          Warning   FailedCreate   replicaset/recommender-669bb9fd47   Error creating: pods "recommender-669bb9fd47-bhzgd" is forbidden: exceeded quota: recommender-quota, requested: limits.memory=512Mi,requests.cpu=100m, used: limits.memory=2560Mi,requests.cpu=500m, limited: limits.memory=2560Mi,requests.cpu=500m
+3s          Warning   FailedCreate   replicaset/recommender-669bb9fd47   Error creating: pods "recommender-669bb9fd47-dkd8j" is forbidden: exceeded quota: recommender-quota, requested: limits.memory=512Mi,requests.cpu=100m, used: limits.memory=2560Mi,requests.cpu=500m, limited: limits.memory=2560Mi,requests.cpu=500m
+3s          Warning   FailedCreate   replicaset/recommender-669bb9fd47   Error creating: pods "recommender-669bb9fd47-zgqrb" is forbidden: exceeded quota: recommender-quota, requested: limits.memory=512Mi,requests.cpu=100m, used: limits.memory=2560Mi,requests.cpu=500m, limited: limits.memory=2560Mi,requests.cpu=500m
+3s          Warning   FailedCreate   replicaset/recommender-669bb9fd47   Error creating: pods "recommender-669bb9fd47-bfckh" is forbidden: exceeded quota: recommender-quota, requested: limits.memory=512Mi,requests.cpu=100m, used: limits.memory=2560Mi,requests.cpu=500m, limited: limits.memory=2560Mi,requests.cpu=500m
+3s          Warning   FailedCreate   replicaset/recommender-669bb9fd47   Error creating: pods "recommender-669bb9fd47-rmjx8" is forbidden: exceeded quota: recommender-quota, requested: limits.memory=512Mi,requests.cpu=100m, used: limits.memory=2560Mi,requests.cpu=500m, limited: limits.memory=2560Mi,requests.cpu=500m
+3s          Warning   FailedCreate   replicaset/recommender-669bb9fd47   Error creating: pods "recommender-669bb9fd47-x6gzx" is forbidden: exceeded quota: recommender-quota, requested: limits.memory=512Mi,requests.cpu=100m, used: limits.memory=2560Mi,requests.cpu=500m, limited: limits.memory=2560Mi,requests.cpu=500m
+3s          Warning   FailedCreate   replicaset/recommender-669bb9fd47   Error creating: pods "recommender-669bb9fd47-mxctk" is forbidden: exceeded quota: recommender-quota, requested: limits.memory=512Mi,requests.cpu=100m, used: limits.memory=2560Mi,requests.cpu=500m, limited: limits.memory=2560Mi,requests.cpu=500m
+0s          Warning   FailedCreate   replicaset/recommender-669bb9fd47   (combined from similar events): Error creating: pods "recommender-669bb9fd47-j6tdn" is forbidden: exceeded quota: recommender-quota, requested: limits.memory=512Mi,requests.cpu=100m, used: limits.memory=2560Mi,requests.cpu=500m, limited: limits.memory=2560Mi,requests.cpu=500m
+$ kubectl describe resourcequota recommender-quota -n p12-06-ml
+Name:          recommender-quota
+Namespace:     p12-06-ml
+Resource       Used    Hard
+--------       ----    ----
+limits.memory  2560Mi  2560Mi
+requests.cpu   500m    500m
+$ kubectl scale deploy/recommender -n p12-06-ml --replicas=1
+deployment.apps/recommender scaled
+
+## step 8: the InferenceService: its schema from the release's CRD chart
+$ helm template kserve-crd oci://ghcr.io/kserve/charts/kserve-crd --version v0.21.0 | check the v1beta1 predictor fields
+predictor.serviceAccountName: present
+predictor.automountServiceAccountToken: present
+predictor.securityContext: present
+predictor.containers: present
+predictor.volumes: present
+predictor.minReplicas: present
+predictor.maxReplicas: present
+predictor.timeout: present
+predictor.canaryTrafficPercent: present
+predictor.scaleTarget: present
+predictor.scaleMetric: present
+$ sed 's/namespace: bookstore-ml/namespace: p12-06-ml/' examples/bookstore/ml/serve/recommender-inferenceservice.yaml | kubectl apply --dry-run=server -f -
+error: resource mapping not found for name: "recommender" namespace: "p12-06-ml" from "STDIN": no matches for kind "InferenceService" in version "serving.kserve.io/v1beta1"
+ensure CRDs are installed first
+
+## step 9: delete what the lab created
+$ kubectl delete namespace p12-06-ml p12-06-store p12-06-other --wait=true --timeout=300s
+namespace "p12-06-ml" deleted
+namespace "p12-06-store" deleted
+namespace "p12-06-other" deleted
+$ kubectl get namespace p12-06-ml p12-06-store p12-06-other
+Error from server (NotFound): namespaces "p12-06-ml" not found
+Error from server (NotFound): namespaces "p12-06-store" not found
+Error from server (NotFound): namespaces "p12-06-other" not found
+# end of lab 12.06

@@ -23,8 +23,16 @@
 # model is more commonly fetched from a model registry / object store at
 # startup or baked into the image — see the chapter's "Production notes".
 #
+# AUTH — every endpoint except the probes needs `Authorization: Bearer <token>`.
+# The token lives in the Secret `recommender-caller-token`, which is created
+# at apply time (never written into this file) and mounted read-only at
+# /workspace/auth. The app refuses to start without it (fail closed).
+#
 # Apply (after `recommender-train-job.yaml` has completed and produced
-# `model.joblib` on the PVC):
+# `model.joblib` on the PVC; the Secret comes first):
+#   kubectl create secret generic recommender-caller-token -n bookstore-ml \
+#     --from-literal=token="$(openssl rand -hex 32)"
+#   kubectl apply -f examples/bookstore/ml/serve/recommender-security.yaml
 #   kubectl apply -f examples/bookstore/ml/serve/recommender-deployment.yaml
 #   kubectl apply -f examples/bookstore/ml/serve/recommender-service.yaml
 #   kubectl rollout status deploy/recommender -n bookstore-ml --timeout=120s
@@ -59,12 +67,13 @@ spec:
         app.kubernetes.io/part-of: bookstore-ml
         app.kubernetes.io/component: recommender-serve
     spec:
+      serviceAccountName: recommender-sa   # its own SA, from recommender-security.yaml
       automountServiceAccountToken: false
-      securityContext:                 # pod-level — restricted
+      securityContext:                 # pod-level, restricted
         runAsNonRoot: true
         runAsUser: 65532
         runAsGroup: 65532
-        fsGroup: 65532                 # PVC mount readable by uid 65532
+        fsGroup: 65532                 # PVC and token mounts readable by uid 65532
         seccompProfile:
           type: RuntimeDefault
       containers:
@@ -81,6 +90,8 @@ spec:
               value: recommender
             - name: DEFAULT_K
               value: "5"
+            - name: AUTH_TOKEN_FILE
+              value: /workspace/auth/token
           resources:
             requests:
               cpu: "100m"
@@ -96,7 +107,7 @@ spec:
             httpGet: { path: /healthz, port: 8080 }
             initialDelaySeconds: 10
             periodSeconds: 20
-          securityContext:             # container-level — restricted
+          securityContext:             # container-level, restricted
             allowPrivilegeEscalation: false
             readOnlyRootFilesystem: true
             capabilities:
@@ -105,6 +116,9 @@ spec:
             - name: model
               mountPath: /workspace/model
               readOnly: true
+            - name: caller-token
+              mountPath: /workspace/auth
+              readOnly: true
             - name: scratch
               mountPath: /tmp
       volumes:
@@ -112,6 +126,10 @@ spec:
           persistentVolumeClaim:
             claimName: recommender-model
             readOnly: true             # serve never writes to the model
+        - name: caller-token
+          secret:
+            secretName: recommender-caller-token
+            defaultMode: 0440          # group-readable for fsGroup 65532
         - name: scratch
           emptyDir:
             sizeLimit: 64Mi

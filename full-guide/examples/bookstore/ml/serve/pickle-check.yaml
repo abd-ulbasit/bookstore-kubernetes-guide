@@ -1,0 +1,65 @@
+# Bookstore, Part 12 ch.06 "Model serving and inference": a one-shot Pod that
+# loads a model file the way predictor.py does (joblib.load, which is pickle),
+# under the serving Pod's restrictions. The file is a harmless demonstration:
+# it prints one line, then tries to write under the read-only root filesystem.
+#
+# Create the ConfigMap that holds the file first (the chapter shows how the
+# file is made and why it is not run on the Mac):
+#   kubectl create configmap poisoned-model -n bookstore-ml \
+#     --from-file=poisoned-model.joblib=<path-to-file>
+#   kubectl apply -f examples/bookstore/ml/serve/pickle-check.yaml
+#
+# The Pod carries the full baseline. Its exit code is the result: the payload
+# runs, the write is refused, joblib.load raises and the container exits 1.
+apiVersion: v1
+kind: Pod
+metadata:
+  name: pickle-check
+  namespace: bookstore-ml
+  labels:
+    # Not the recommender-serve component: the Service selects that label, and
+    # this Pod must never receive traffic.
+    app.kubernetes.io/part-of: bookstore-ml
+    app.kubernetes.io/component: model-check
+spec:
+  restartPolicy: Never
+  serviceAccountName: recommender-sa
+  automountServiceAccountToken: false
+  securityContext:
+    runAsNonRoot: true
+    runAsUser: 65532
+    runAsGroup: 65532
+    seccompProfile:
+      type: RuntimeDefault
+  containers:
+    - name: load
+      image: bookstore/recommender-serve:dev
+      imagePullPolicy: IfNotPresent
+      command:
+        - python
+        - -c
+        - "import joblib; joblib.load('/artifacts/poisoned-model.joblib'); print('loaded')"
+      resources:
+        requests:
+          cpu: "50m"
+          memory: 128Mi
+        limits:
+          memory: 256Mi
+      securityContext:
+        allowPrivilegeEscalation: false
+        readOnlyRootFilesystem: true
+        capabilities:
+          drop: ["ALL"]
+      volumeMounts:
+        - name: artifacts
+          mountPath: /artifacts
+          readOnly: true
+        - name: scratch
+          mountPath: /tmp
+  volumes:
+    - name: artifacts
+      configMap:
+        name: poisoned-model
+    - name: scratch
+      emptyDir:
+        sizeLimit: 16Mi
