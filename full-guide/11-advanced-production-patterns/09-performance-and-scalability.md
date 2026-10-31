@@ -12,7 +12,7 @@
 > `--election-timeout`, keyspace size, #objects/watchers); **kubelet/node**
 > (`--max-pods`, image GC, PLEG, cgroup v2); **scheduler throughput**
 > (`percentageOfNodesToScore`); the official **Kubernetes scalability
-> thresholds & SLOs** (≤5000 nodes / ≤150k pods / ≤300k containers; API
+> thresholds & SLOs** (≤5000 nodes / ≤150k pods; API
 > LIST/WATCH/mutating-latency SLOs) and *why* they exist; **profiling**
 > (`/debug/pprof` on apiserver/controller-manager/scheduler,
 > `kubectl get --raw`, flamegraphs); **load/scale testing** (kube-burner & clusterloader2 —
@@ -25,7 +25,7 @@
 
 **Estimated time:** ~60 min read · ~120 min hands-on
 **Prerequisites:** [Part 11 ch.03](03-api-priority-and-fairness.md) — APF in the request path · [Part 11 ch.08](08-ha-control-plane-and-etcd.md) — etcd fsync latency as the floor · [Part 06 ch.01](../06-production-readiness/01-observability-metrics.md) — metrics scraping for apiserver+etcd
-**You'll know after this:** • trace a request through client qps/burst → APF → apiserver → etcd · • tune apiserver inflight limits, watch-cache, and audit cost · • read the official Kubernetes scalability thresholds + SLOs (≤5000 nodes / ≤150k pods) · • profile apiserver / scheduler via `/debug/pprof` and flamegraphs · • run a small kube-burner load test and read percentile latencies correctly
+**You'll know after this:** • trace a request through client qps/burst → APF → apiserver → etcd · • tune apiserver inflight limits, watch-cache, and audit cost · • read the official Kubernetes scalability thresholds + SLOs (≤5000 nodes / ≤150k pods) · • profile the apiserver from its control-plane node with a read-only token · • bound one tenant's object count and LIST cost · • run a small kube-burner load test and read percentile latencies correctly
 
 <!-- tags: day-2, observability, platform-engineering, slo -->
 
@@ -52,13 +52,14 @@ Scalability fails in production in specific, measurable ways:
 2. **The "list everything" anti-pattern at scale.** A controller or dashboard
    does `LIST secrets`/`LIST pods` **cluster-wide, unpaginated, repeatedly**.
    On a 50-object lab it's invisible; on a 50,000-object cluster each call
-   serialises hundreds of MB through the apiserver, evicts the watch cache,
-   and spikes apiserver memory — the single most common self-inflicted
-   scalability incident.
+   serialises every object through the apiserver and spikes its memory: the
+   most common self-inflicted scalability incident. It is also a security
+   problem, because a cluster-wide `LIST secrets` returns every Secret's
+   bytes to whichever identity holds the grant (threat I2, below).
 3. **Hitting an undocumented wall.** A team scales toward 8,000 nodes or
    200,000 pods and the cluster degrades — because they never read that
-   Kubernetes **publishes** scalability thresholds (≈5,000 nodes, 150,000 pods,
-   300,000 containers) and **SLOs** (API call latency, pod-startup) that define
+   Kubernetes **publishes** scalability thresholds (≈5,000 nodes and 150,000
+   pods) and **SLOs** (API call latency, pod-startup) that define
    *the envelope it is engineered and tested for*. Past the envelope you are in
    unsupported territory and need to shard into more clusters
    ([ch.06](06-multi-cluster-and-fleet.md)).
@@ -100,9 +101,12 @@ state — never averages, never one run.**
   Every write blocks on a majority of etcd members fsync'ing to disk
   ([ch.08](08-ha-control-plane-and-etcd.md)) — no apiserver tuning beats a slow
   etcd disk; that is *the* number to protect (`etcd_disk_wal_fsync_duration_
-  seconds` p99). Reads mostly avoid etcd via the apiserver's **watch cache**
-  (it serves list/watch from RAM, consistent LISTs included: on by default
-  since 1.31, GA in 1.34, gate removed in 1.37). That does not make the
+  seconds` p99, read from etcd's own metrics listener). Reads mostly avoid
+  etcd via the apiserver's **watch cache** (it serves list/watch from RAM. On
+  1.37, consistent LISTs come from the cache too, because the
+  `ConsistentListFromCache` gate is gone, and continuation pages use cache
+  snapshots behind `ListFromCacheSnapshot`, a beta gate that is on by
+  default). That does not make the
   "list everything" pattern cheap: every call still copies, converts and
   encodes the whole result set in apiserver memory, and APF charges it seats
   in proportion to the objects returned, so it balloons apiserver memory and
@@ -110,9 +114,10 @@ state — never averages, never one run.**
 - **The big knobs, by component.** *apiserver*: `--max-requests-inflight` /
   `--max-mutating-requests-inflight` cap **total** concurrency that **APF then
   subdivides** ([ch.03](03-api-priority-and-fairness.md) — APF is the *unit of
-  isolation*, these are the global ceiling); watch-cache sizing & `--target-ram-
-  mb`/memory; **audit** logging cost (a verbose policy is real per-request
-  latency); **pagination** (`limit` + `continue`). *etcd*: SSD/fsync,
+  isolation*, these are the global ceiling); watch-cache sizing
+  (`--watch-cache-sizes`); **audit** logging cost (a verbose policy is real
+  per-request latency); **pagination** (`limit` + `continue`). *etcd*:
+  SSD/fsync,
   `--heartbeat-interval`/`--election-timeout` vs inter-member RTT, keyspace
   size, # objects & watchers ([ch.08](08-ha-control-plane-and-etcd.md)).
   *kubelet/node*: `--max-pods`, image GC, **PLEG** (pod lifecycle event
@@ -120,17 +125,20 @@ state — never averages, never one run.**
   (score fewer nodes per pod → higher throughput, slightly worse spread).
 - **The envelope is published — design inside it.** Kubernetes is engineered
   and continuously tested against explicit **scalability thresholds**
-  (per-cluster, *roughly*: **≤5,000 nodes**, **≤150,000 pods**, **≤300,000
-  containers**, ≤100 pods/node) and **SLOs** that hold *within* that envelope:
-  mutating API-call p99 **≤1 s**, read-only (per single object / per namespace
-  scope) p99 **≤1 s** (≤30 s for cluster-wide LISTs of many objects),
-  watch-propagation p99 ≤5 s, and pod-startup (image already present) p99
-  ≤5 s. These are *guarantees of the test envelope*, not hard caps — but past
-  them you are unsupported and the answer is **more clusters**
-  ([ch.06](06-multi-cluster-and-fleet.md)), not a bigger one.
+  (per-cluster, *roughly*: **≤5,000 nodes**, **≤150,000 pods**, and at most
+  min(110, 10 × cores) pods per node) and **SLOs** that hold *within* that
+  envelope: mutating API-call p99 **≤1 s**, read-only single-object or
+  resource-scope p99 **≤1 s**, namespace- or cluster-scope reads p99 **≤30 s**,
+  and pod-startup p99 **≤5 s** (image already present). Watch propagation is a
+  work-in-progress measure with no threshold yet. These are *guarantees of
+  the test envelope*, not hard caps — but past them you are unsupported and
+  the answer is **more clusters** ([ch.06](06-multi-cluster-and-fleet.md)),
+  not a bigger one.
 - **Profiling localises; load testing proves.** The apiserver,
   controller-manager and scheduler expose **`/debug/pprof`** (CPU, heap, goroutines)
-  — pull it with `kubectl get --raw` and read a flame graph to find *where the
+  — on kubeadm, the scheduler and controller-manager listen only on
+  localhost, so pull a profile from the control-plane node with a read-only
+  token (section 2) and read a flame graph to find *where the
   time/RAM goes*. **kube-burner** / **clusterloader2** *generate* controlled
   load (create/churn N objects, drive M namespaces) and **measure** the
   pipeline (API latency percentiles, pod-startup, error rate) against the
@@ -150,6 +158,28 @@ fix is almost never "tune the apiserver harder"; it is *remove the work*
 controller [ch.03](03-api-priority-and-fairness.md)) and *protect the floor*
 (fast etcd disk [ch.08](08-ha-control-plane-and-etcd.md)). Tuning knobs help at
 the margin; the order of magnitude is in the workload.
+
+## Threats and controls
+
+This chapter adds no threat rows. The Bookstore threat model
+(`examples/bookstore/THREAT-MODEL.md`) already names the threats it teaches
+against, D3 and I2. Each row below gives the control this chapter teaches:
+
+| Threat | Control taught here | Deeper |
+|---|---|---|
+| D3: one client starves the apiserver with a bulk `LIST` or a hot loop | Paginated and watch-based reads, scoped to one namespace | [11.03](03-api-priority-and-fairness.md), APF |
+| D3, object count: one tenant fills a namespace until every LIST slows | A `ResourceQuota` with `count/` keys | [08.04](../08-day-2-operations/04-multi-tenancy-and-namespaces.md) |
+| I2: a broad grant lets one identity `LIST` every Secret | A namespaced Role, so a cluster-wide `LIST secrets` is refused | [05.01](../05-security/01-authn-authz-rbac.md) |
+
+APF bounds how fast one client can use the apiserver. It does not bound how
+many objects that client leaves behind. Every object stays in etcd and counts
+toward every LIST of its kind, so object count needs its own control. The
+threat model names APF as the control for D3. The quota is the second control
+on that row: it bounds the total, where APF bounds the rate.
+
+A Namespace is cluster-scoped, and no namespace's quota counts it, so who may
+create Namespaces is an RBAC decision. Policy checks on that belong to policy
+as code (05.07) <!-- link-later: 05.07 -->.
 
 ## Diagrams
 
@@ -176,7 +206,7 @@ flowchart TB
     wc --> resp
     ser -->|"writes + non-cached reads (e.g. consistent GET)"| etcd
     etcd --> resp
-    note["'list secrets/pods CLUSTER-WIDE unpaginated, repeatedly': served from the<br/>watch cache (default since 1.31), but each call re-encodes EVERY object<br/>-> balloons apiserver RAM + eats APF seats: the #1 self-inflicted<br/>scalability incident. Fix: paginate (limit+continue), WATCH not poll-LIST,<br/>scope to a namespace, bound the controller (ch.03)."]
+    note["'list secrets/pods CLUSTER-WIDE unpaginated, repeatedly': served from the<br/>watch cache, but each call re-encodes EVERY object<br/>-> balloons apiserver RAM + eats APF seats: the #1 self-inflicted<br/>scalability incident. Fix: paginate (limit+continue), WATCH not poll-LIST,<br/>scope to a namespace, bound the controller (ch.03)."]
     ser -.-> note
 ```
 
@@ -188,17 +218,16 @@ flowchart TB
   PER-CLUSTER THRESHOLDS (roughly; the official scalability-SIG numbers)
     nodes            <= 5,000
     pods             <= 150,000        (total)
-    containers       <= 300,000
-    pods per node    <= 110  (commonly run <= ~100; default --max-pods 110)
+    pods per node    min(110, 10 x cores)   (kubelet --max-pods default 110)
     services/eps     bounded (large headless / huge EndpointSlices hurt)
   -> WITHIN this envelope the SLOs below hold. PAST it = UNSUPPORTED:
      sub-divide into MORE clusters (ch.06 fleet), not a bigger one.
 
   SLOs (steady state, within the envelope; p99)
     mutating API call (create/update/delete, per resource)   <= 1 s
-    read-only API call, single object OR namespaced scope     <= 1 s
-    read-only API call, cluster-wide LIST of many objects     <= 30 s
-    watch propagation (change visible to watchers)            <= 5 s
+    read-only API call, single object or resource scope       <= 1 s
+    read-only API call, namespace or cluster scope            <= 30 s
+    watch propagation (change visible to watchers)            no SLO yet (WIP)
     pod startup (image already present, excl. image pull)     <= 5 s
 
   THE LATENCY FLOOR & THE BIG KNOBS (where the time actually goes)
@@ -266,7 +295,7 @@ creates *in* `bookstore` is restricted-compliant — §3.)
 
 ### 1. Scrape the apiserver & etcd latency metrics (the request path, measured)
 
-The apiserver and etcd expose Prometheus metrics at `/metrics` (the same
+The apiserver exposes Prometheus metrics at `/metrics` (the same
 endpoint [Part 06 ch.01](../06-production-readiness/01-observability-metrics.md)
 scrapes). Read the **request path** directly with `kubectl get --raw`:
 
@@ -280,12 +309,15 @@ kubectl get --raw='/metrics' | grep '^apiserver_request_duration_seconds_bucket'
 #     (Prometheus: histogram_quantile(0.99, sum by (le,verb,resource)
 #      (rate(apiserver_request_duration_seconds_bucket[5m]))) — Part 06 ch.01.)
 
-# etcd disk WAL fsync — THE FLOOR (ch.08). If this p99 is high, NOTHING the
-# apiserver does makes writes fast. The single most important perf metric:
-kubectl get --raw='/metrics' | grep '^etcd_disk_wal_fsync_duration_seconds_bucket' | tail -5
-kubectl get --raw='/metrics' | grep -E '^etcd_disk_backend_commit_duration_seconds_bucket' | tail -3
-#   wal_fsync p99 healthy << 10ms on SSD; tens-of-ms = a slow disk = a slow
-#   cluster regardless of any apiserver knob (ch.08's "etcd disk is the floor").
+# etcd disk WAL fsync: THE FLOOR (ch.08). If this is slow, NOTHING the
+# apiserver does makes writes fast. etcd serves its own metrics on a localhost
+# listener (127.0.0.1:2381 on kubeadm and kind), not on the apiserver's
+# /metrics. Run this on the control-plane node:
+curl -s http://127.0.0.1:2381/metrics | grep -E '^etcd_disk_wal_fsync_duration_seconds_(count|sum)'
+#   The mean fsync time is sum / count. The p99 comes from the _bucket series,
+#   read with histogram_quantile. A healthy SSD is well under 10 ms per fsync;
+#   tens of milliseconds means a slow disk, and a slow cluster whatever the
+#   apiserver is set to (ch.08).
 
 # APF wait time — how long requests QUEUED before dispatch (ch.03, referenced):
 kubectl get --raw='/metrics' | grep '^apiserver_flowcontrol_request_wait_duration_seconds_bucket' | grep 'priority_level' | head -3
@@ -294,106 +326,339 @@ kubectl get --raw='/metrics' | grep '^apiserver_flowcontrol_request_wait_duratio
 # no longer exposes apiserver_cache_list_*; the unified metric's storage
 # label says which layer served each LIST:
 kubectl get --raw='/metrics' | grep '^apiserver_storage_list_total' \
-  | grep 'resource="pods"'       # one row per storage="watchcache"/"etcd"
+  | head -4                       # one row per resource and storage layer
+```
+
+On the lab node, the etcd command returned the two lines below. The lab
+cluster is named `sf-pilot`, not `bookstore`, and its host was under heavy
+load, so the mean here is not a benchmark:
+
+<!-- gate: output -->
+```text
+etcd_disk_wal_fsync_duration_seconds_sum 0.633285448
+etcd_disk_wal_fsync_duration_seconds_count 2
+```
+
+The watch-cache query returned its first four rows. The watch cache served
+the `configmaps` and `endpoints` lists, and etcd served the other two:
+
+<!-- gate: output -->
+```text
+apiserver_storage_list_total{group="",index="",resource="apiServerIPInfo",storage="etcd"} 32
+apiserver_storage_list_total{group="",index="",resource="configmaps",storage="watchcache"} 40
+apiserver_storage_list_total{group="",index="",resource="endpoints",storage="watchcache"} 40
+apiserver_storage_list_total{group="",index="",resource="events",storage="etcd"} 82
 ```
 
 The discipline: read these as **percentiles** (compute from buckets / via
 Prometheus `histogram_quantile`), at **steady state**, and **compare** before
 vs after a change — never eyeball a single average.
 
-### 2. Profile the scheduler — `/debug/pprof` and a flame graph
+### 2. Profile the apiserver from the control-plane node
 
-The apiserver, **controller-manager**, and **scheduler** serve Go `pprof` at
-`/debug/pprof`. Pull a CPU profile of the **scheduler** via the apiserver proxy
-and read where it spends time (the scheduler's hot path is filtering/scoring;
-`percentageOfNodesToScore` is the knob it exposes):
+Every control-plane component serves Go `pprof` at `/debug/pprof`: CPU, heap
+and goroutine profiles, read with `go tool pprof`. A profile also shows
+internals such as goroutine stacks, so treat it as a privileged read, and give
+the profiling identity one grant: `get` on the debug paths.
 
-```sh
-# The scheduler runs as a static Pod in kube-system; reach its /debug/pprof
-# through the apiserver pod proxy (no extra exposure needed):
-SCHED=$(kubectl -n kube-system get pod -l component=kube-scheduler \
-  -o jsonpath='{.items[0].metadata.name}')
-# 15s CPU profile (the scheduler's secure port is 10259; the pod proxy tunnels):
-kubectl get --raw="/api/v1/namespaces/kube-system/pods/https:${SCHED}:10259/proxy/debug/pprof/profile?seconds=15" \
-  > /tmp/sched-cpu.pprof
-go tool pprof -top -nodecount=15 /tmp/sched-cpu.pprof        # text: hottest funcs
-# go tool pprof -http=:0 /tmp/sched-cpu.pprof                # interactive flame graph
-kubectl get --raw="/api/v1/namespaces/kube-system/pods/https:${SCHED}:10259/proxy/debug/pprof/heap" \
-  > /tmp/sched-heap.pprof                                    # heap (RAM) profile
-go tool pprof -top -nodecount=10 /tmp/sched-heap.pprof
+Create the namespace for the tooling first. It is labelled `restricted` like
+every namespace in this guide, and the tooling never runs in `bookstore`:
+
+```yaml
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: bookstore-perf
+  labels:
+    pod-security.kubernetes.io/enforce: restricted
+    pod-security.kubernetes.io/audit: restricted
+    pod-security.kubernetes.io/warn: restricted
 ```
 
-> **Honest note on a quiet cluster.** On an idle kind cluster the scheduler is
-> nearly idle, so the CPU profile is mostly runtime/wait — *that is correct*,
-> not a failure. The transferable skill is the **mechanism**
-> (`kubectl get --raw … /debug/pprof/{profile,heap,goroutine}` → `go tool pprof`); the
-> profile becomes informative under the kube-burner load in §3 (run §2 *during*
-> a burst) or, at real scale, when scheduling thousands of pods.
-> `go tool pprof` needs the **Go toolchain** installed (or the standalone
-> `github.com/google/pprof` binary) — the only step here that does. The same
-> `…/proxy/debug/pprof/…` path works for the **controller-manager**
-> (`https:<CTRL-MGR-POD>:10257`) and the **apiserver**
-> (`https:<APISERVER-POD>:6443`) — but scraping the *apiserver's own*
-> `/debug/pprof` via the pod proxy additionally needs RBAC granting the
-> `nonResourceURLs: ['/debug/pprof/*']` (works on kind as `system:masters`;
-> a lesser identity gets `403`).
+Two obvious routes fail on a kubeadm cluster, and the failures show why. The
+scheduler's secure port refuses the apiserver's pod-proxy route, because kubeadm
+binds it to `127.0.0.1`. The proxied request for the apiserver's own profile
+reaches it as `system:anonymous`, and RBAC refuses that:
 
-### 3. A tiny pinned kube-burner run — create/churn Bookstore-like objects, read percentiles
-
-**kube-burner** creates a controlled number of objects, churns them, and
-**measures** apiserver latency + pod-startup percentiles against thresholds.
-Install it **pinned** (a released binary at a fixed version — the guide's
-pinned-tool discipline, e.g. `TRIVY_VERSION`/`KUSTOMIZE_VERSION`; **never** a
-`releases/latest/` URL):
-
-```sh
-KUBE_BURNER_VERSION=1.13.2          # github.com/kube-burner/kube-burner release (PIN)
-OS=$(uname | tr '[:upper:]' '[:lower:]'); ARCH=$(uname -m | sed 's/x86_64/amd64/;s/aarch64/arm64/')
-curl -sSL "https://github.com/kube-burner/kube-burner/releases/download/v${KUBE_BURNER_VERSION}/kube-burner-V${KUBE_BURNER_VERSION}-${OS}-${ARCH}.tar.gz" \
-  | tar -xz -C /tmp kube-burner
-/tmp/kube-burner version          # == ${KUBE_BURNER_VERSION} (pinned, reproducible)
+<!-- gate: output -->
+```text
+Error from server (Forbidden): forbidden: User "system:anonymous" cannot get path "/debug/pprof/heap"
 ```
 
-[`platform/kube-burner-bookstore.yaml`](../examples/bookstore/platform/kube-burner-bookstore.yaml)
-is the workload config: it creates a small number of throwaway, **restricted-
-compliant** Deployments+ConfigMaps (Bookstore-shaped: a `pause` container with
-the same restricted `securityContext` as the app pods) into a dedicated
-`bookstore-perf` namespace (its **own** namespace — *not* the PSA-`restricted`
-`bookstore`; system/load tooling never lands there), then deletes them, while
-measuring API latency:
+Because those components listen on localhost, take the profile on the
+control-plane node, with a token from a ServiceAccount that can read only the
+debug paths. The three objects below are the whole grant. `nonResourceURLs`
+can only be granted through a ClusterRole, so the ClusterRole is cluster-scoped.
+It names no resource, no Secret and no `pods/proxy`:
 
-```sh
-kubectl create namespace bookstore-perf 2>/dev/null || true
-# SMALL on purpose (a laptop is ~3-4 orders below the envelope — honest §0):
-/tmp/kube-burner init -c examples/bookstore/platform/kube-burner-bookstore.yaml \
-  --log-level=info
-#   churns the configured N objects; at the end prints latency QUANTILES:
-#   ... PodLatencyQuantilesMeasurement  P50/P95/P99 for Ready/Initialized ...
-#   ... apiserver request latency p99 for the run window ...
-kubectl delete namespace bookstore-perf --wait=false      # tidy the perf ns
+```yaml
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: pprof-reader
+  namespace: bookstore-perf
+automountServiceAccountToken: false
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: pprof-reader
+rules:
+  - nonResourceURLs: ["/debug/pprof/*"]
+    verbs: ["get"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: pprof-reader
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: pprof-reader
+subjects:
+  - kind: ServiceAccount
+    name: pprof-reader
+    namespace: bookstore-perf
 ```
 
-Read the **P99** rows, not the averages — and note this is the *exact* metric
-and methodology a real clusterloader2 run uses at 5,000 nodes; only **N** and
-the cluster differ. Re-run with one variable changed (control vs treatment) to
-see a delta. (For a *standardised* large-scale test the upstream tool is
-**clusterloader2** — same idea, the project's own scalability test harness;
-it needs real scale and is the right tool for "is this cluster within the SLOs
-at size".)
+```sh
+kubectl apply -f pprof-reader.yaml
+TOKEN=$(kubectl -n bookstore-perf create token pprof-reader --duration=600s)
+```
 
-### 4. The scalability SLOs as the yardstick
+On the control-plane node, with `TOKEN` set in that shell (copy it across, do
+not write it to a file), pull a heap profile and read it:
 
-The numbers you just measured only mean something against the **published
-envelope** (Diagram B). On *this* tiny cluster every percentile will be far
-inside the SLOs (1 node, dozens of objects) — that is expected and not proof
-of anything at scale. The SLOs matter as the **pass/fail line for a real
-scale test**: a clusterloader2 run at the target size is "green" iff mutating
-API p99 ≤1 s, namespaced read p99 ≤1 s, watch propagation p99 ≤5 s, pod-startup
-p99 ≤5 s — *and* node/pod/container counts are inside ≈5,000 / 150,000 /
-300,000. Past the envelope the engineering answer is **shard into more
-clusters** ([ch.06](06-multi-cluster-and-fleet.md)), not push one further.
+```sh
+curl -s --cacert /etc/kubernetes/pki/ca.crt \
+  -H "Authorization: Bearer ${TOKEN}" \
+  https://127.0.0.1:6443/debug/pprof/heap > apiserver-heap.pprof
+go tool pprof -top -nodecount=10 apiserver-heap.pprof
+```
 
-### 5. The "list everything" anti-pattern, concretely
+The same URL answers differently with and without the token. Without it, the
+apiserver refuses the request as `system:anonymous`:
+
+```sh
+curl -s -o /dev/null -w '%{http_code}\n' --cacert /etc/kubernetes/pki/ca.crt \
+  https://127.0.0.1:6443/debug/pprof/heap
+```
+
+<!-- gate: output -->
+```text
+403
+```
+
+With the token, the same URL answers `200`:
+
+```sh
+curl -s -o /dev/null -w '%{http_code}\n' --cacert /etc/kubernetes/pki/ca.crt \
+  -H "Authorization: Bearer ${TOKEN}" https://127.0.0.1:6443/debug/pprof/heap
+```
+
+<!-- gate: output -->
+```text
+200
+```
+
+The top entries of the lab apiserver's heap profile, from `go tool pprof -top`
+(the header lines are elided). Most of the top rows are CustomResourceDefinition
+schema code, memory the apiserver spends on CRDs:
+
+<!-- gate: output -->
+```text
+# ...
+Showing nodes accounting for 105.95MB, 33.61% of 315.24MB total
+Dropped 637 nodes (cum <= 1.58MB)
+Showing top 10 nodes out of 437
+      flat  flat%   sum%        cum   cum%
+   13.51MB  4.28%  4.28%    14.51MB  4.60%  k8s.io/apiextensions-apiserver/pkg/apiserver/schema.(*Structural).ToKubeOpenAPI
+   12.71MB  4.03%  8.32%    16.21MB  5.14%  encoding/json.Marshal
+   12.51MB  3.97% 12.28%    12.51MB  3.97%  k8s.io/apiextensions-apiserver/pkg/apis/apiextensions/v1.autoConvert_apiextensions_JSONSchemaProps_To_v1_JSONSchemaProps
+   11.50MB  3.65% 15.93%    13.01MB  4.13%  k8s.io/apiextensions-apiserver/pkg/apis/apiextensions/v1.(*JSONSchemaProps).Unmarshal
+   11.03MB  3.50% 19.43%    11.03MB  3.50%  bytes.Clone
+   10.01MB  3.17% 22.61%    12.01MB  3.81%  k8s.io/apiextensions-apiserver/pkg/apiserver/validation.convertMapOfJSONSchemaProps
+   10.01MB  3.17% 25.78%    10.01MB  3.17%  reflect.mapassign0
+    9.67MB  3.07% 28.85%     9.67MB  3.07%  bytes.growSlice
+```
+
+`--cacert` makes curl check the apiserver's serving certificate against the
+cluster CA, so the token is never sent to another process that happens to
+answer on the port. The scheduler and controller-manager listen on localhost
+too, on ports 10259 and 10257. This chapter profiles only the apiserver. A
+profile shows where the time and memory go, and the next section makes the load
+that makes it useful.
+
+### 3. Bound the object count, and what one identity can read
+
+Two controls keep one tenant from taking the shared apiserver, and they answer
+different questions. APF limits how fast a client can send requests
+([ch.03](03-api-priority-and-fairness.md)). A `ResourceQuota` limits how many
+objects of each kind a namespace may hold. `count/<resource>` names a kind in
+the core API group, and `count/<resource>.<group>` names one elsewhere, as the
+[quota reference](https://kubernetes.io/docs/concepts/policy/resource-quotas/#quota-on-object-count)
+lists them. This quota caps the perf namespace:
+
+```yaml
+apiVersion: v1
+kind: ResourceQuota
+metadata:
+  name: object-cap
+  namespace: bookstore-perf
+spec:
+  hard:
+    count/configmaps: "20"
+    count/deployments.apps: "12"
+    count/pods: "20"
+```
+
+```sh
+kubectl apply -f object-cap.yaml
+kubectl -n bookstore-perf get resourcequota object-cap
+```
+
+Once the quota is in place, a create that would take a count past its `hard`
+value is refused. The quota covers only its own namespace, and a Namespace is
+cluster-scoped, so the quota cannot limit how many namespaces a tenant creates.
+That is an RBAC decision.
+
+The second control is what one identity may read. A broad grant turns one
+`LIST` into a read of every Secret, which is threat I2. This Role lets one
+ServiceAccount read ConfigMaps in its own namespace and nothing else:
+
+```yaml
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: perf-reader
+  namespace: bookstore-perf
+automountServiceAccountToken: false
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: configmap-reader
+  namespace: bookstore-perf
+rules:
+  - apiGroups: [""]
+    resources: ["configmaps"]
+    verbs: ["get", "list"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: perf-reader
+  namespace: bookstore-perf
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: Role
+  name: configmap-reader
+subjects:
+  - kind: ServiceAccount
+    name: perf-reader
+    namespace: bookstore-perf
+```
+
+Ask the apiserver what that identity may do, with `--as`:
+
+```sh
+kubectl apply -f perf-reader.yaml
+kubectl get secrets -A --as=system:serviceaccount:bookstore-perf:perf-reader
+kubectl auth can-i list secrets -n bookstore-perf --as=system:serviceaccount:bookstore-perf:perf-reader
+kubectl auth can-i list configmaps -n bookstore-perf --as=system:serviceaccount:bookstore-perf:perf-reader
+```
+
+The captured lines below come from the lab run, whose namespace was
+`p11-09-perf`, so that name appears in the first one. The cluster-wide `LIST` is
+refused, and the namespaced reads are allowed:
+
+<!-- gate: output -->
+```text
+Error from server (Forbidden): secrets is forbidden: User "system:serviceaccount:p11-09-perf:perf-reader" cannot list resource "secrets" in API group "" at the cluster scope
+```
+
+`auth can-i list secrets` in that namespace:
+
+<!-- gate: output -->
+```text
+no
+```
+
+`auth can-i list configmaps` in that namespace:
+
+<!-- gate: output -->
+```text
+yes
+```
+
+### 4. A tiny pinned kube-burner run: create and churn, then read percentiles
+
+kube-burner creates a controlled number of objects, churns them, and reports
+API and pod-startup percentiles. Install one pinned release, and check it
+against the release's published checksums before you run it. Never use a
+`releases/latest/` URL: the binary you verify must be the binary you run.
+
+```sh
+KUBE_BURNER_VERSION=2.8.7
+OS=$(uname | tr '[:upper:]' '[:lower:]')
+ARCH=$(uname -m | sed 's/aarch64/arm64/')
+ASSET="kube-burner-V${KUBE_BURNER_VERSION}-${OS}-${ARCH}.tar.gz"
+BASE="https://github.com/kube-burner/kube-burner/releases/download/v${KUBE_BURNER_VERSION}"
+curl -sSLO "${BASE}/${ASSET}"
+curl -sSLO "${BASE}/kube-burner-checksums.txt"
+grep -F "${ASSET}" kube-burner-checksums.txt | shasum -a 256 -c -
+tar -xzf "${ASSET}" -C /tmp kube-burner
+/tmp/kube-burner version
+```
+
+On the lab Mac, the checksum check passed, and the version command printed:
+
+<!-- gate: output -->
+```text
+kube-burner-V2.8.7-darwin-arm64.tar.gz: OK
+```
+
+<!-- gate: output -->
+```text
+Version: 2.8.7
+Git Commit: 397b2a9fa4d289ac4a630cf0beb6de44299c80b8
+Build Date: 2026-10-26T17:14:50Z
+Go Version: go1.25.14
+```
+
+The workload config and its two templates live in `examples/bookstore/platform`.
+Run from there, so the template paths resolve. Apply the namespace from
+section 2 first, then run and clean up:
+
+```sh
+cd examples/bookstore/platform
+/tmp/kube-burner init -c kube-burner-bookstore.yaml --log-level=info
+kubectl delete namespace bookstore-perf --ignore-not-found
+```
+
+Read the P99 rows of the pod-latency summary that the run prints, not the
+averages. The `podLatency` measurement uses the same percentile method a
+clusterloader2 run uses at scale; only the object count and the cluster change.
+Repeat the run with one variable changed, control against treatment, before you
+read a difference as real. The pods carry the baseline, and the pause image is
+pinned by digest, so every run creates the same pods.
+
+### 5. The scalability SLOs as the yardstick
+
+The numbers you measure only mean something against the published envelope
+(Diagram B). On this one-node cluster every percentile sits far inside the
+SLOs, which is expected and proves nothing at scale. The SLOs are the pass/fail
+line for a real scale test. A clusterloader2 run at the target size is green
+only when mutating API calls and single-resource reads are within 1 s at p99,
+namespace-scoped and cluster-scoped reads are within 30 s, pod startup without
+an image pull is within 5 s, and node and pod counts stay inside the thresholds.
+Watch propagation has no threshold yet, so measure it and report it without a
+pass mark. Past the envelope, the engineering answer is to shard into more
+clusters ([ch.06](06-multi-cluster-and-fleet.md)), not to push one further. The
+[SLO document](https://github.com/kubernetes/community/blob/master/sig-scalability/slos/slos.md)
+defines the measurement windows.
+
+### 6. The "list everything" anti-pattern, concretely
 
 The most common self-inflicted scalability incident, shown on the Bookstore
 (small here — imagine the object count ×10,000):
@@ -445,10 +710,11 @@ kind delete cluster --name bookstore
   cache** (it materialises objects from a watch stream and serves
   list/watch from memory at a recent resourceVersion). That now covers
   consistent (quorum) LISTs too: the apiserver asks etcd for its current
-  revision, waits for the cache to catch up, then answers from memory (on by
-  default since 1.31, GA in 1.34; 1.37 removed the `ConsistentListFromCache`
-  gate), and continuation pages come from cache snapshots
-  (`ListFromCacheSnapshot`, on by default since 1.34). So a cluster-wide,
+  revision, waits for the cache to catch up, then answers from memory (the
+  `ConsistentListFromCache` gate no longer exists in 1.37, so this is the
+  default path), and continuation pages come from cache snapshots
+  (`ListFromCacheSnapshot`, a beta gate that is on by default). So a
+  cluster-wide,
   unpaginated `LIST` no longer hammers etcd by default. Its cost moves to the
   apiserver, which allocates, converts and encodes the whole result set on
   every call, and to APF, which charges it seats in proportion to the objects
@@ -459,7 +725,7 @@ kind delete cluster --name bookstore
   ([ch.03](03-api-priority-and-fairness.md) is the *isolation* layer, these are
   the *global ceiling*). Raising the inflight limits without faster etcd just
   moves the bottleneck onto etcd (more concurrent writes → more fsync
-  contention). `--target-ram-mb` (and watch-cache sizing) bounds apiserver
+  contention). Watch-cache sizing (`--watch-cache-sizes`) bounds apiserver
   memory — undersized, the cache evicts and reads fall through to etcd;
   oversized, the apiserver OOMs under big LISTs. Verbose **audit** policy is
   per-request synchronous work (every request serialised to the audit sink) —
@@ -515,7 +781,7 @@ kind delete cluster --name bookstore
 > dominant scale incidents are workload-shaped: **paginate** every large LIST
 > (`limit`+`continue`), **watch (informers) not poll-LIST**, **scope LISTs to a
 > namespace**, and **never `LIST secrets`/`pods` cluster-wide on a loop**
-> (quadratic apiserver load, and a security problem). Give every
+> (quadratic apiserver load, and an access problem: see I2 above). Give every
 > first-party controller its **own bounded APF level** so a regression is
 > contained, not cluster-wide ([ch.03](03-api-priority-and-fairness.md)); keep
 > **audit policy lean** (verbose audit is per-request latency + I/O). Tuning
@@ -523,7 +789,7 @@ kind delete cluster --name bookstore
 > in the workload.
 
 > **In production: design inside the published envelope; shard, don't
-> super-size.** Treat ≈**5,000 nodes / 150,000 pods / 300,000 containers** and
+> super-size.** Treat ≈**5,000 nodes / 150,000 pods** and
 > the API/pod-startup **SLOs** as the engineered, tested envelope. As you
 > approach it, the supported answer is **more clusters** ([ch.06](06-multi-cluster-and-fleet.md)'s
 > fleet), *not* one bigger cluster — past the envelope you are unsupported and
@@ -559,21 +825,28 @@ kind delete cluster --name bookstore
 
 ```sh
 # The request path, measured (compute PERCENTILES from buckets — Part 06 ch.01)
-kubectl get --raw='/metrics' | grep '^apiserver_request_duration_seconds_bucket'        # API latency
-kubectl get --raw='/metrics' | grep '^etcd_disk_wal_fsync_duration_seconds_bucket'      # THE FLOOR (ch.08)
-kubectl get --raw='/metrics' | grep '^apiserver_flowcontrol_request_wait_duration_seconds_bucket'  # APF wait (ch.03)
+kubectl get --raw='/metrics' | grep '^apiserver_request_duration_seconds_bucket'
+kubectl get --raw='/metrics' | grep '^apiserver_flowcontrol_request_wait_duration_seconds_bucket'
+kubectl get --raw='/metrics' | grep '^apiserver_storage_list_total'        # watchcache vs etcd
+kubectl get --raw='/metrics' | grep '^apiserver_resource_objects'          # object count per resource
 # Prometheus: histogram_quantile(0.99, sum by (le,verb,resource)
 #   (rate(apiserver_request_duration_seconds_bucket[5m])))   # p99, not avg
 
-# Profile the control plane (apiserver :6443 / ctrl-mgr :10257 / scheduler :10259)
-P=$(kubectl -n kube-system get pod -l component=kube-scheduler -o jsonpath='{.items[0].metadata.name}')
-kubectl get --raw="/api/v1/namespaces/kube-system/pods/https:${P}:10259/proxy/debug/pprof/profile?seconds=15" > cpu.pprof
-go tool pprof -top -nodecount=15 cpu.pprof          # or: go tool pprof -http=:0 cpu.pprof (flame)
+# THE FLOOR: etcd's own listener, on the control-plane node (ch.08)
+curl -s http://127.0.0.1:2381/metrics | grep '^etcd_disk_wal_fsync_duration_seconds_bucket'
 
-# Load/scale test — kube-burner PINNED (never releases/latest/), small on kind
-KUBE_BURNER_VERSION=1.13.2
-/tmp/kube-burner init -c examples/bookstore/platform/kube-burner-bookstore.yaml   # reads P50/P95/P99
+# Profile the apiserver from the control-plane node, with a read-only token
+kubectl -n bookstore-perf create token pprof-reader --duration=600s   # on the workstation
+curl -s --cacert /etc/kubernetes/pki/ca.crt -H "Authorization: Bearer ${TOKEN}" \
+  https://127.0.0.1:6443/debug/pprof/heap > heap.pprof                # on the node
+go tool pprof -top -nodecount=15 heap.pprof     # or: go tool pprof -http=:0 heap.pprof
+
+# Load test: kube-burner 2.8.7, pinned, small on kind; run from examples/bookstore/platform
+/tmp/kube-burner init -c kube-burner-bookstore.yaml --log-level=info
 # real scale / standardised: clusterloader2 (the project's own harness) on a cloud
+
+# Bound the object count per tenant: count/ keys in a ResourceQuota (08.04)
+#   hard: count/configmaps: "20", count/deployments.apps: "12", count/pods: "20"
 
 # Scheduler throughput knob (lower => more throughput, slightly worse spread)
 #   KubeSchedulerConfiguration: percentageOfNodesToScore: <N>
@@ -582,9 +855,10 @@ KUBE_BURNER_VERSION=1.13.2
 Scalability envelope + SLO yardstick (the numbers to design inside):
 
 ```
-THRESHOLDS  nodes<=5000  pods<=150000  containers<=300000  pods/node<=~110
-SLOs (p99)  mutating API <=1s   namespaced read <=1s   cluster LIST <=30s
-            watch propagation <=5s   pod startup (no pull) <=5s
+THRESHOLDS  nodes<=5000  pods<=150000  pods/node<=min(110, 10*cores)
+SLOs (p99)  mutating API <=1s   resource-scoped read <=1s
+            namespace/cluster-scoped read <=30s   pod startup (no pull) <=5s
+            watch propagation: work in progress, no threshold yet
 PAST IT  -> shard into MORE clusters (ch.06), NOT a bigger one (unsupported)
 MEASURE  -> percentiles @ steady state, control vs treatment; pprof localises,
             kube-burner/clusterloader2 proves & gates regressions
@@ -598,14 +872,18 @@ Checklist:
 - [ ] Workload off the hot path: **paginate** big LISTs, **watch not
       poll-LIST**, **namespace-scope**, never cluster-wide `LIST secrets/pods`
       on a loop; bounded controllers ([ch.03](03-api-priority-and-fairness.md))
+- [ ] Object count bounded per tenant with `count/` keys in a `ResourceQuota`
+      ([08.04](../08-day-2-operations/04-multi-tenancy-and-namespaces.md)), and
+      RBAC that decides who may create Namespaces
 - [ ] apiserver `--max-*-inflight` understood as the **total ceiling APF
-      subdivides** ([ch.03](03-api-priority-and-fairness.md)); watch-cache/
-      `--target-ram-mb` sized; **audit policy lean**
-- [ ] Design **inside ≈5000/150000/300000** + the API/pod-startup **SLOs**;
-      past the envelope **shard** ([ch.06](06-multi-cluster-and-fleet.md)), not
-      super-size
-- [ ] Profile with **`/debug/pprof`** (apiserver/ctrl-mgr/scheduler) to
-      localise; `percentageOfNodesToScore` for scheduler throughput
+      subdivides** ([ch.03](03-api-priority-and-fairness.md)); watch cache sized
+      with `--watch-cache-sizes`; **audit policy lean**
+- [ ] Design **inside ≈5000 nodes / 150000 pods**, plus the API and
+      pod-startup **SLOs**; past the envelope **shard**
+      ([ch.06](06-multi-cluster-and-fleet.md)), not super-size
+- [ ] Profile with **`/debug/pprof`** from the control-plane node, with a
+      read-only token, to localise; `percentageOfNodesToScore` for scheduler
+      throughput
 - [ ] Load-test with **kube-burner/clusterloader2** (pinned) at target scale
       **before** production grows, and as a **regression gate**
 - [ ] Measure **percentiles at steady state, control vs treatment** — never
@@ -625,21 +903,36 @@ Checklist:
 2. **A teammate writes `kubectl get pods --all-namespaces` from a script every 10s. The cluster has 50,000 Pods. What is the impact on the control plane and what's the fix?**
    <details><summary>Show answer</summary>
 
-   Each call reads the full 50k Pods (~50MB of JSON). The watch cache serves it (not an etcd keyspace scan; the default since 1.31), and kubectl already pages it in chunks of 500 (`--chunk-size`), but the apiserver still converts and encodes every object every 10s, and APF charges each LIST seats in proportion to the objects it returns. With many such clients, the apiserver's RAM balloons (`--target-ram-mb`), GC churns, and `apiserver_request_duration_seconds` p99 spikes. Pagination (`limit` + `continue`) only bounds each response; the fix is a watch with a resourceVersion to receive only deltas. Better: use a SharedInformer / client-go cache — never pull a full snapshot in a loop. This anti-pattern is the #1 cause of large-cluster apiserver pressure.
+   Each call reads the full 50k Pods (a large JSON response). The watch cache serves it (not an etcd keyspace scan), and kubectl already pages it in chunks of 500 (`--chunk-size`), but the apiserver still converts and encodes every object every 10s, and APF charges each LIST seats in proportion to the objects it returns. With many such clients, the apiserver's RAM balloons (`--target-ram-mb`), GC churns, and `apiserver_request_duration_seconds` p99 spikes. Pagination (`limit` + `continue`) only bounds each response; the fix is a watch with a resourceVersion to receive only deltas. Better: use a SharedInformer / client-go cache — never pull a full snapshot in a loop. This anti-pattern is the #1 cause of large-cluster apiserver pressure.
 
    </details>
 
 3. **You bump `--max-requests-inflight=400` and `--max-mutating-requests-inflight=200`, but apiserver still tail-latency spikes. What did you miss?**
    <details><summary>Show answer</summary>
 
-   APF is the active limiter — the inflight flags are coarse fallback bounds. Tuning the legacy flags higher just raises the ceiling; APF still partitions traffic per priority level and queues. The real diagnostic is `apiserver_flowcontrol_request_concurrency_limit` per level vs `_current_inqueue_requests` — see [ch.03](03-api-priority-and-fairness.md). Likely the bottleneck is a slow admission webhook, a watch-cache miss path, audit logging, or etcd write pressure. Always profile (`/debug/pprof`) before tuning concurrency.
+   APF is the active limiter; the inflight flags set the total it divides. Tuning the legacy flags higher just raises the ceiling; APF still partitions traffic per priority level and queues. The real diagnostic is `apiserver_flowcontrol_nominal_limit_seats` per level vs `apiserver_flowcontrol_current_inqueue_requests` — see [ch.03](03-api-priority-and-fairness.md). Likely the bottleneck is a slow admission webhook, a watch-cache miss path, audit logging, or etcd write pressure. Always profile (`/debug/pprof`) before tuning concurrency.
 
    </details>
 
 4. **Hands-on: with `kube-burner` or `clusterloader2`, ramp up 1000 namespaces × 10 Deployments × 3 replicas. What do you watch on the control plane?**
    <details><summary>What you should see</summary>
 
-   `apiserver_request_duration_seconds` per verb (POST/PATCH for create, LIST for the bootstrap, WATCH for the long-poll). `etcd_disk_backend_commit_duration_seconds` and `etcd_disk_wal_fsync_duration_seconds`. `apiserver_flowcontrol_rejected_requests_total` for APF pressure. `apiserver_storage_objects` by resource — Pods will be 30k, Endpoints will be 10k, ReplicaSets 10k. Scheduler `scheduler_scheduling_attempt_duration_seconds`. Run two passes — once at baseline, once with the change — and compare *percentiles*, not means. If anything degrades 2x at the percentile, you've found your regression.
+   `apiserver_request_duration_seconds` per verb (POST/PATCH for create, LIST for the bootstrap, WATCH for the long-poll). `etcd_disk_backend_commit_duration_seconds` and `etcd_disk_wal_fsync_duration_seconds`. `apiserver_flowcontrol_current_inqueue_requests` for APF queueing. `apiserver_resource_objects` by resource — Pods will be 30k, Endpoints will be 10k, ReplicaSets 10k. Scheduler `scheduler_scheduling_attempt_duration_seconds`. Run two passes — once at baseline, once with the change — and compare *percentiles*, not means. If anything degrades 2x at the percentile, you've found your regression.
+
+   </details>
+
+5. **A tenant's controller creates ConfigMaps in a loop, at 5 requests per second, inside its own APF level. What does APF stop, what does it leave open, and what closes the gap?**
+   <details><summary>Show answer</summary>
+
+   APF stops the controller from taking more than its share of apiserver
+   concurrency, so other clients keep their seats. It does not limit the total.
+   Each ConfigMap it creates stays in etcd and counts toward the namespace's
+   object total, and every LIST of ConfigMaps in that namespace grows with it.
+   A `ResourceQuota` with `count/configmaps` caps the total in that namespace,
+   and later creates are refused with an `exceeded quota` error. No namespace's
+   quota counts Namespace objects, so who may create Namespaces is an RBAC
+   question. See [08.04](../08-day-2-operations/04-multi-tenancy-and-namespaces.md)
+   for the quota, and the threat table above for the controls.
 
    </details>
 

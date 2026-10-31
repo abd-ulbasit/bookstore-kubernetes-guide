@@ -1,0 +1,258 @@
+# Transcript for full-guide/11-advanced-production-patterns/09-performance-and-scalability.md
+# Tier A: kind cluster sf-pilot, Kubernetes v1.37.0 server, kubectl v1.37.2.
+# Substitution: the chapter prints bookstore-perf and the cluster name bookstore;
+# the lab cluster is sf-pilot, and the output below came from it verbatim.
+# The sf-pilot apiserver stopped answering part way through this session (readyz
+# returned no response from the node, and its logs had not advanced). Probes
+# marked EARLIER were run and captured before that; their lines are copied from
+# the saved output of those commands. Probes marked LIVE ran after it stopped
+# answering and used the node's own etcd and containerd, not the apiserver.
+# Later the apiserver answered again (readyz 200). The resumed pass ran the
+# namespace, RBAC and node pprof steps on p11-09-perf and p11-09-pprof-reader.
+# Not captured: the ResourceQuota denial, because kube-controller-manager was
+# crash-looping on sf-pilot (its quota status stayed empty and all 21 ConfigMap
+# creates were accepted); and the kube-burner pod-latency run, which needs the
+# ReplicaSet controller to create pods.
+
+## EARLIER: apiserver metrics (saved output of the same grep)
+$ kubectl get --raw='/metrics' | grep '^apiserver_storage_list_total' | head -4
+apiserver_storage_list_total{group="",index="",resource="apiServerIPInfo",storage="etcd"} 32
+apiserver_storage_list_total{group="",index="",resource="configmaps",storage="watchcache"} 40
+apiserver_storage_list_total{group="",index="",resource="endpoints",storage="watchcache"} 40
+apiserver_storage_list_total{group="",index="",resource="events",storage="etcd"} 82
+[exit 0]
+
+$ kubectl get --raw='/metrics' | grep -c '^etcd_disk_wal_fsync'
+0
+[exit 0]
+
+$ kubectl get --raw='/metrics' | grep -c '^apiserver_cache_list'
+0
+[exit 0]
+
+$ kubectl get --raw='/metrics' | grep '^apiserver_resource_objects' | head -3
+apiserver_resource_objects{group="",resource="configmaps"} 24
+apiserver_resource_objects{group="",resource="endpoints"} 4
+apiserver_resource_objects{group="",resource="events"} 121
+[exit 0]
+
+## EARLIER: apiserver feature gates, from kube-apiserver -h in the 1.37 pod
+$ kubectl -n kube-system exec kube-apiserver-sf-pilot-control-plane -- kube-apiserver -h | grep -E "ConsistentListFromCache|ListFromCacheSnapshot"
+                                                           kube:ConsistentListFromCacheSkipTimeoutFallback=true|false (ALPHA - default=false)
+                                                           kube:ListFromCacheSnapshot=true|false (BETA - default=true)
+[exit 0]
+
+## EARLIER: flag presence
+$ kubectl -n kube-system exec kube-apiserver-sf-pilot-control-plane -- kube-apiserver -h | grep -c target-ram
+0
+[exit 0]
+
+## EARLIER: debug endpoints through the apiserver pod proxy
+$ kubectl get --raw="/api/v1/namespaces/kube-system/pods/https:kube-scheduler-sf-pilot-control-plane:10259/proxy/debug/pprof/heap"
+Error from server (ServiceUnavailable): error trying to reach service: dial tcp 172.18.0.2:10259: connect: connection refused
+[exit 1]
+$ kubectl get --raw="/api/v1/namespaces/kube-system/pods/https:kube-apiserver-sf-pilot-control-plane:6443/proxy/debug/pprof/heap"
+Error from server (Forbidden): forbidden: User "system:anonymous" cannot get path "/debug/pprof/heap"
+[exit 1]
+
+## LIVE: etcd metrics on its own listener, read from the control-plane node
+$ docker exec sf-pilot-control-plane sh -c curl -s -m 5 http://127.0.0.1:2381/metrics | grep fsync (count and sum)
+etcd_disk_wal_fsync_duration_seconds_sum 0.633285448
+etcd_disk_wal_fsync_duration_seconds_count 2
+[exit 0]
+
+## LIVE: pause 3.9 registry digest on the node
+$ crictl inspecti registry.k8s.io/pause:3.9 (repoDigests)
+      "registry.k8s.io/pause@sha256:7031c1b283388d2c2e09b57badb803c05ebed362dc88d84b480cc47f72a21097"
+[exit 0]
+
+## LIVE: kubectl default list chunk size (offline help)
+$ kubectl get --help | grep chunk-size
+    --chunk-size=500:
+[exit 0]
+
+## ATTEMPTED: namespace and quota (sf-pilot apiserver not answering)
+$ kubectl get --raw=/readyz
+Unable to connect to the server: EOF
+[exit 1]
+
+## LIVE: kube-burner release checksum and version (pinned 2.8.7, darwin arm64)
+$ grep -F "${ASSET}" kube-burner-checksums.txt | shasum -a 256 -c -
+kube-burner-V2.8.7-darwin-arm64.tar.gz: OK
+$ ./kube-burner version (from the release tarball)
+Version: 2.8.7
+Git Commit: 397b2a9fa4d289ac4a630cf0beb6de44299c80b8
+Build Date: 2026-10-26T17:14:50Z
+Go Version: go1.25.14
+[exit 0]
+
+## LIVE: apiserver serving certificate verified against the cluster CA (node)
+$ openssl verify -CAfile /etc/kubernetes/pki/ca.crt /etc/kubernetes/pki/apiserver.crt
+/etc/kubernetes/pki/apiserver.crt: OK
+
+## step 1: namespace with restricted labels, then the object-count quota
+$ kubectl apply -f ns.yaml
+error: error when retrieving current configuration of:
+Resource: "/v1, Resource=namespaces", GroupVersionKind: "/v1, Kind=Namespace"
+Name: "p11-09-perf", Namespace: ""
+from server for: "ns.yaml": Get "https://127.0.0.1:36011/api/v1/namespaces/p11-09-perf": EOF
+[exit 1]
+$ kubectl apply -f quota.yaml
+error: error validating "quota.yaml": error validating data: failed to download openapi: Get "https://127.0.0.1:36011/openapi/v2?timeout=32s": dial tcp 127.0.0.1:36011: connect: connection refused; if you choose to ignore these errors, turn validation off with --validate=false
+[exit 1]
+$ kubectl -n p11-09-perf get resourcequota object-cap
+The connection to the server 127.0.0.1:36011 was refused - did you specify the right host or port?
+[exit 1]
+
+## resumed: step 2 object-count quota, deliberate over-cap creates
+$ kubectl apply -f object-cap.yaml
+Error from server (NotFound): error when creating "object-cap.yaml": namespaces "p11-09-perf" not found
+[exit 1]
+$ kubectl -n p11-09-perf get resourcequota object-cap
+Error from server (NotFound): namespaces "p11-09-perf" not found
+[exit 1]
+$ for i in $(seq 1 21); do kubectl -n p11-09-perf create configmap cm-$i --from-literal=k=v 2>&1 | tail -1; done
+error: failed to create configmap: namespaces "p11-09-perf" not found
+error: failed to create configmap: namespaces "p11-09-perf" not found
+error: failed to create configmap: namespaces "p11-09-perf" not found
+error: failed to create configmap: namespaces "p11-09-perf" not found
+error: failed to create configmap: namespaces "p11-09-perf" not found
+error: failed to create configmap: namespaces "p11-09-perf" not found
+error: failed to create configmap: namespaces "p11-09-perf" not found
+error: failed to create configmap: namespaces "p11-09-perf" not found
+error: failed to create configmap: namespaces "p11-09-perf" not found
+error: failed to create configmap: namespaces "p11-09-perf" not found
+error: failed to create configmap: namespaces "p11-09-perf" not found
+error: failed to create configmap: namespaces "p11-09-perf" not found
+error: failed to create configmap: namespaces "p11-09-perf" not found
+error: failed to create configmap: namespaces "p11-09-perf" not found
+error: failed to create configmap: namespaces "p11-09-perf" not found
+error: failed to create configmap: namespaces "p11-09-perf" not found
+error: failed to create configmap: namespaces "p11-09-perf" not found
+error: failed to create configmap: namespaces "p11-09-perf" not found
+error: failed to create configmap: namespaces "p11-09-perf" not found
+error: failed to create configmap: namespaces "p11-09-perf" not found
+error: failed to create configmap: namespaces "p11-09-perf" not found
+[exit 0]
+$ kubectl -n p11-09-perf get resourcequota object-cap -o jsonpath='{.status.used}'
+Error from server (NotFound): namespaces "p11-09-perf" not found
+[exit 1]
+$ kubectl -n p11-09-perf delete configmap -l '!nonexist' --ignore-not-found >/dev/null; for i in $(seq 1 20); do kubectl -n p11-09-perf delete configmap cm-$i --ignore-not-found; done | tail -1
+[exit 0]
+
+## resumed: step 3 RBAC: one identity may read ConfigMaps in its namespace only
+$ kubectl apply -f perf-reader.yaml
+Error from server (NotFound): error when creating "perf-reader.yaml": namespaces "p11-09-perf" not found
+Error from server (NotFound): error when creating "perf-reader.yaml": namespaces "p11-09-perf" not found
+Error from server (NotFound): error when creating "perf-reader.yaml": namespaces "p11-09-perf" not found
+[exit 1]
+$ kubectl get secrets -A --as=system:serviceaccount:p11-09-perf:perf-reader 2>&1 | tail -1
+Error from server (Forbidden): secrets is forbidden: User "system:serviceaccount:p11-09-perf:perf-reader" cannot list resource "secrets" in API group "" at the cluster scope
+[exit 0]
+$ kubectl -n p11-09-perf get configmaps --as=system:serviceaccount:p11-09-perf:perf-reader --no-headers 2>&1 | tail -1
+Error from server (Forbidden): configmaps is forbidden: User "system:serviceaccount:p11-09-perf:perf-reader" cannot list resource "configmaps" in API group "" in the namespace "p11-09-perf"
+[exit 0]
+
+## resumed pass: the apiserver answered again; the earlier attempt above ran before the namespace existed
+$ kubectl apply -f ns.yaml
+namespace/p11-09-perf created
+[exit 0]
+$ kubectl get namespace p11-09-perf -L pod-security.kubernetes.io/enforce
+NAME          STATUS   AGE   ENFORCE
+p11-09-perf   Active   0s    restricted
+[exit 0]
+$ kubectl apply -f object-cap.yaml
+resourcequota/object-cap created
+[exit 0]
+$ kubectl -n p11-09-perf get resourcequota object-cap
+NAME         REQUEST   LIMIT   AGE
+object-cap                     0s
+[exit 0]
+$ for i in $(seq 1 21); do kubectl -n p11-09-perf create configmap cm-$i --from-literal=k=v 2>&1 | tail -1; done
+configmap/cm-1 created
+configmap/cm-2 created
+configmap/cm-3 created
+configmap/cm-4 created
+configmap/cm-5 created
+configmap/cm-6 created
+configmap/cm-7 created
+configmap/cm-8 created
+configmap/cm-9 created
+configmap/cm-10 created
+configmap/cm-11 created
+configmap/cm-12 created
+configmap/cm-13 created
+configmap/cm-14 created
+configmap/cm-15 created
+configmap/cm-16 created
+configmap/cm-17 created
+configmap/cm-18 created
+configmap/cm-19 created
+configmap/cm-20 created
+configmap/cm-21 created
+[exit 0]
+$ kubectl -n p11-09-perf get resourcequota object-cap -o jsonpath='{.status.used.count/configmaps}{"\n"}'
+
+[exit 0]
+$ for i in $(seq 1 20); do kubectl -n p11-09-perf delete configmap cm-$i --ignore-not-found; done | tail -1
+configmap "cm-20" deleted from p11-09-perf namespace
+[exit 0]
+$ kubectl apply -f perf-reader.yaml
+serviceaccount/perf-reader created
+role.rbac.authorization.k8s.io/configmap-reader created
+rolebinding.rbac.authorization.k8s.io/perf-reader created
+[exit 0]
+$ kubectl get secrets -A --as=system:serviceaccount:p11-09-perf:perf-reader 2>&1 | tail -1
+Error from server (Forbidden): secrets is forbidden: User "system:serviceaccount:p11-09-perf:perf-reader" cannot list resource "secrets" in API group "" at the cluster scope
+[exit 0]
+$ kubectl -n p11-09-perf get configmaps --as=system:serviceaccount:p11-09-perf:perf-reader --no-headers 2>&1 | tail -1
+cm-21   1     4s
+[exit 0]
+$ kubectl auth can-i list secrets -n p11-09-perf --as=system:serviceaccount:p11-09-perf:perf-reader
+no
+[exit 1]
+$ kubectl auth can-i list configmaps -n p11-09-perf --as=system:serviceaccount:p11-09-perf:perf-reader
+yes
+[exit 0]
+
+## resumed pass: section 2 pprof from the control-plane node, read-only token (cluster-scoped names carry p11-09-)
+$ kubectl apply -f pprof-reader.yaml
+serviceaccount/pprof-reader created
+clusterrole.rbac.authorization.k8s.io/p11-09-pprof-reader created
+clusterrolebinding.rbac.authorization.k8s.io/p11-09-pprof-reader created
+[exit 0]
+$ docker exec sf-pilot-control-plane sh -c 'curl -s -o /dev/null -w "%{http_code}\n" --cacert /etc/kubernetes/pki/ca.crt https://127.0.0.1:6443/debug/pprof/heap'
+403
+[exit 0]
+$ TOKEN=$(kubectl -n p11-09-perf create token pprof-reader --duration=600s)   # value not recorded
+[exit 0]
+$ docker exec -e TOKEN sf-pilot-control-plane sh -c 'curl -s -o /dev/null -w "%{http_code}\n" --cacert /etc/kubernetes/pki/ca.crt -H "Authorization: Bearer $TOKEN" https://127.0.0.1:6443/debug/pprof/heap'
+403
+[exit 0]
+$ docker exec -e TOKEN sf-pilot-control-plane sh -c "curl -s --cacert ... -H \"Authorization: Bearer \$TOKEN\" https://127.0.0.1:6443/debug/pprof/heap" > heap.pprof
+[exit 0] bytes=  298513 err=       0
+$ go tool pprof -top -nodecount=10 /private/tmp/claude-501/-Users-basit-projects-abd-ulbasit/f7ab4f3e-ba11-49c8-a9ec-0eeba9d1be7f/scratchpad/tmp/lab-11-09/heap.pprof 2>&1 | head -16
+File: kube-apiserver
+Build ID: 8c7e6e19a75dcdba1fefb20fc03cf40ce75d5b41
+Type: inuse_space
+Time: 2026-10-31 09:58:27 PKT
+Showing nodes accounting for 105.95MB, 33.61% of 315.24MB total
+Dropped 637 nodes (cum <= 1.58MB)
+Showing top 10 nodes out of 437
+      flat  flat%   sum%        cum   cum%
+   13.51MB  4.28%  4.28%    14.51MB  4.60%  k8s.io/apiextensions-apiserver/pkg/apiserver/schema.(*Structural).ToKubeOpenAPI
+   12.71MB  4.03%  8.32%    16.21MB  5.14%  encoding/json.Marshal
+   12.51MB  3.97% 12.28%    12.51MB  3.97%  k8s.io/apiextensions-apiserver/pkg/apis/apiextensions/v1.autoConvert_apiextensions_JSONSchemaProps_To_v1_JSONSchemaProps
+   11.50MB  3.65% 15.93%    13.01MB  4.13%  k8s.io/apiextensions-apiserver/pkg/apis/apiextensions/v1.(*JSONSchemaProps).Unmarshal
+   11.03MB  3.50% 19.43%    11.03MB  3.50%  bytes.Clone
+   10.01MB  3.17% 22.61%    12.01MB  3.81%  k8s.io/apiextensions-apiserver/pkg/apiserver/validation.convertMapOfJSONSchemaProps
+   10.01MB  3.17% 25.78%    10.01MB  3.17%  reflect.mapassign0
+    9.67MB  3.07% 28.85%     9.67MB  3.07%  bytes.growSlice
+[exit 0]
+
+## resumed pass: the status check above did not export TOKEN, so that request carried no token (403 is the anonymous result); rerun with the variable passed explicitly
+$ TOKEN=$(kubectl -n p11-09-perf create token pprof-reader --duration=600s)   # value not recorded
+[exit 0]
+$ docker exec -e TOKEN="$TOKEN" sf-pilot-control-plane sh -c 'curl -s -o /dev/null -w "%{http_code}\n" --cacert /etc/kubernetes/pki/ca.crt -H "Authorization: Bearer $TOKEN" https://127.0.0.1:6443/debug/pprof/heap'
+200
+[exit 0]

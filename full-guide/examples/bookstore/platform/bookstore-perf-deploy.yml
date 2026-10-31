@@ -1,0 +1,47 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: bookstore-perf-{{.Iteration}}-{{.Replica}}
+  labels:
+    app.kubernetes.io/part-of: bookstore
+    bookstore.example.com/perf: "true"
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: bookstore-perf-{{.Iteration}}-{{.Replica}}
+  template:
+    metadata:
+      labels:
+        app: bookstore-perf-{{.Iteration}}-{{.Replica}}
+        bookstore.example.com/perf: "true"
+    spec:
+      automountServiceAccountToken: false
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 65535
+        runAsGroup: 65535
+        seccompProfile:
+          type: RuntimeDefault
+      containers:
+        - name: app
+          # registry.k8s.io/pause:3.9, pinned by digest
+          image: registry.k8s.io/pause@sha256:7031c1b283388d2c2e09b57badb803c05ebed362dc88d84b480cc47f72a21097
+          resources:
+            requests:
+              cpu: 5m
+              memory: 16Mi
+            limits:
+              cpu: 10m
+              memory: 16Mi
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities:
+              drop: ["ALL"]
+          volumeMounts:
+            - name: tmp
+              mountPath: /tmp
+      volumes:
+        - name: tmp
+          emptyDir: {}
