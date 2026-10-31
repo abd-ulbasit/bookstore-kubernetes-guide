@@ -597,9 +597,10 @@ kubelet refuses a Pod that does not tolerate the taint.
 
 A ValidatingAdmissionPolicy is built into the API server, so it needs no
 install. This one refuses Pod creation that sets `nodeName` in any namespace
-labelled `tier: sensitive`. This step labels the `bookstore` namespace, so the rule covers
-all of it until the cleanup below removes the label. The policy is cluster-scoped, so it is
-a manifest of its own, holding the policy and its binding:
+labelled `tier: sensitive`. This step labels the `bookstore` namespace, so the
+rule covers all of it until the cleanup below removes the label. The policy is
+cluster-scoped, so it is a manifest of its own, holding the policy and its
+binding:
 
 ```yaml
 apiVersion: admissionregistration.k8s.io/v1
@@ -669,9 +670,10 @@ sched-demo-66b54dfc97-cjw6w   0/1     ContainerCreating   0          46s   <none
 ```
 
 The policy checks a Pod when it is created. It does not evict a Pod that
-already exists: the `sched-demo` Pod below was created before the label. The denial names the policy and the binding, so it can be traced.
-The policy holds only while RBAC keeps users from editing the policy, its
-binding or the namespace labels. Check those verbs with `kubectl auth can-i`
+already exists: the `sched-demo` Pod below was created before the label. The
+denial names the policy and the binding, so it can be traced. The policy holds
+only while RBAC keeps users from editing the policy, its binding or the
+namespace labels. Check those verbs with `kubectl auth can-i`
 for every user who can create Pods.
 
 The label that stops a kubelet from setting the pool key is shown in
@@ -753,8 +755,14 @@ kubectl taint nodes bookstore-worker2 dedicated=database:NoSchedule-
   fail (steps 5b and 5c). It does not check `NoSchedule` taints, so a
   `NoSchedule` taint does not keep a `nodeName` Pod off a node (step 5). It does
   refuse a Pod that does not tolerate a `NoExecute` taint on its node (step 5d).
-  Static Pods (kubelet-managed,
-  e.g. control-plane components on kubeadm) are created this way.
+  Static Pods (kubelet-managed, e.g. control-plane components on kubeadm) are
+  created this way, and the kubelet exempts them from even that check. The
+  rule is in the kubelet's admission predicate: it checks taints "except for
+  static pods" and looks only at `NoExecute`
+  ([source](https://github.com/kubernetes/kubernetes/blob/v1.37.0/pkg/kubelet/lifecycle/predicate.go)).
+  The [taints page](https://kubernetes.io/docs/concepts/scheduling-eviction/taint-and-toleration/)
+  says the same of a `nodeName` Pod: with a `NoExecute` taint, the kubelet
+  ejects it unless it tolerates the taint.
 
 ## Production notes
 
@@ -787,9 +795,9 @@ kubectl taint nodes bookstore-worker2 dedicated=database:NoSchedule-
 > **In production:** steer placement with `nodeSelector`, required node
 > affinity or a scheduler profile, never `spec.nodeName`. `nodeName` skips the
 > scheduler's taint and affinity filters and its spreading, so the
-> kubelet's own resource, selector and `NoExecute` checks are what remain. Reserve it for static and
-> bootstrap Pods, and deny it in sensitive namespaces with an admission policy,
-> as step 6 does.
+> kubelet's own resource, selector and `NoExecute` checks are what remain.
+> Reserve it for static and bootstrap Pods, and deny it in sensitive namespaces
+> with an admission policy, as step 6 does.
 
 > **In production:** use **`schedulingGates`** when a Pod must not be placed
 > until an external precondition holds (quota granted, dependency provisioned,
@@ -848,7 +856,8 @@ Checklist:
 - [ ] Distinguished Filter-failure (`Insufficient …`) vs. binding-failure (`unbound PVC`)
 - [ ] No application manifest uses `spec.nodeName` (use `nodeSelector`/affinity)
 - [ ] Sensitive namespaces refuse `spec.nodeName` with an admission policy
-- [ ] Pool labels use the `node-restriction.kubernetes.io/` prefix, and an administrator sets them
+- [ ] Pool labels use the `node-restriction.kubernetes.io/` prefix, and an
+  administrator sets them
 - [ ] Requests compared against node **allocatable**, not raw capacity
 - [ ] `schedulingGates` used (not init-container hacks) for external preconditions
 
@@ -870,7 +879,10 @@ Checklist:
 
    </details>
 
-3. **A teammate sets `spec.nodeName: bookstore-worker2` on an application Pod in `bookstore`, "to make sure it runs there". List what the scheduler skips, what the kubelet still checks, and what stops this in a sensitive namespace.**
+3. **A teammate sets `spec.nodeName: bookstore-worker2` on an application Pod
+   in `bookstore`, "to make sure it runs there". List what the scheduler
+   skips, what the kubelet still checks, and what stops this in a sensitive
+   namespace.**
    <details><summary>Show answer</summary>
 
    The scheduler skips its Filter and Score for the Pod, so taints, required affinity and spreading do not apply. The kubelet still refuses a Pod whose requests do not fit the node's allocatable (`OutOfcpu`) or whose selector or affinity does not match (`NodeAffinity`). It does not check `NoSchedule` taints, and it refuses a Pod that does not
@@ -885,14 +897,18 @@ tolerate a `NoExecute` taint (step 5d). In a namespace labelled `tier: sensitive
 
    </details>
 
-5. **Hands-on extension: edit the `cpu` request in `sched-demo.yaml` until no node can fit it, and read the Events. Then lower the request. What happens to the Pending Pod, and what makes the scheduler place its replacement?**
+5. **Hands-on extension: edit the `cpu` request in `sched-demo.yaml` until no
+   node can fit it, and read the Events. Then lower the request. What happens
+   to the Pending Pod, and what makes the scheduler place its replacement?**
    <details><summary>What you should see</summary>
 
    The Pending Pod keeps its original request, so it stays in the unschedulable queue and is not retried on a timer. When the Deployment template changes, the Deployment creates a new Pod from it and removes the Pending one. The new Pod enters the scheduling queue as a new Pod, so the scheduler evaluates it from the start and binds it to a node with room (step 3 shows the result).
 
    </details>
 
-6. **Why does the NodeRestriction admission plugin stop a kubelet from labelling its own Node `node-restriction.kubernetes.io/pool=database`, and what does it leave open?**
+6. **Why does the NodeRestriction admission plugin stop a kubelet from
+   labelling its own Node `node-restriction.kubernetes.io/pool=database`, and
+   what does it leave open?**
    <details><summary>Show answer</summary>
 
    NodeRestriction refuses a kubelet's changes to labels under `node-restriction.kubernetes.io/` and `node-role.kubernetes.io/`. Upstream reserves the first prefix for administrators to isolate workloads, so only an administrator can place a node in that pool. It leaves open the keys upstream does not name: a kubelet identity can set an unprefixed `dedicated=database` label, which [ch.02](02-affinity-taints-topology.md) shows in a server dry run. Use the prefix for any placement that matters.
