@@ -408,7 +408,7 @@ variable "falco_chart_version" {
 ################################################################################
 
 variable "enable_image_signing" {
-  description = "Install Kyverno + a ClusterPolicy that verifies images are cosign-signed. Default validationFailureAction is Audit (warn, don't block) — flip to Enforce once your CI is reliably signing images."
+  description = "Install Kyverno + a ClusterPolicy that verifies images are cosign-signed. Default failureAction is Audit (warn, don't block) — flip to Enforce once your CI is reliably signing images."
   type        = bool
   default     = false
 }
@@ -441,7 +441,7 @@ variable "image_signing_image_references" {
 }
 
 variable "image_signing_validation_failure_action" {
-  description = "Kyverno validationFailureAction for the signature policy. Audit (default) records failures in PolicyReports and admits the Pod; Enforce rejects it. Audit gates nothing, so plan the switch: run Audit until reports are clean, then set Enforce here rather than patching the live policy."
+  description = "Kyverno failureAction for the signature rule (set on its verifyImages entry). Audit (default) records failures in PolicyReports and admits the Pod; Enforce rejects it. Audit gates nothing, so plan the switch: run Audit until reports are clean, then set Enforce here rather than patching the live policy."
   type        = string
   default     = "Audit"
 
