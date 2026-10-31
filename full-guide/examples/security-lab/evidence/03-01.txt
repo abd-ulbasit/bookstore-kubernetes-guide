@@ -1,0 +1,151 @@
+# Transcript for 03-config-and-storage/01-configmaps.md, hands-on steps 1 to 6.
+# Tier A: a kind cluster on a lab machine, Kubernetes v1.37.0 node, kubectl v1.37.2.
+# Recorded by running the chapter's commands in order. The lab cluster is shared,
+# so the run used the scratch namespace p03-01-cfg where the chapter says bookstore:
+# the copies of the example files were rewritten to that namespace, and nothing else.
+# The postgres and catalog rollouts in step 2 timed out on the shared node. Their
+# output is kept as recorded; the later steps ran against the Deployment's spec.
+
+## Setup: the earlier chapters' Bookstore objects in a scratch namespace
+$ kubectl get nodes
+NAME                     STATUS   ROLES           AGE   VERSION
+sf-pilot-control-plane   Ready    control-plane   9h    v1.37.0
+$ kubectl apply -f 00-namespace.yaml
+namespace/p03-01-cfg created
+resourcequota/bookstore-quota created
+limitrange/bookstore-limits created
+$ kubectl apply -f 05-serviceaccounts-rbac.yaml
+serviceaccount/catalog-sa created
+serviceaccount/storefront-sa created
+serviceaccount/orders-sa created
+serviceaccount/payments-worker-sa created
+serviceaccount/postgres-sa created
+serviceaccount/redis-sa created
+serviceaccount/rabbitmq-sa created
+serviceaccount/migrate-sa created
+role.rbac.authorization.k8s.io/catalog-config-reader created
+rolebinding.rbac.authorization.k8s.io/catalog-config-reader-binding created
+$ kubectl apply -f 12-redis.yaml
+deployment.apps/redis created
+$ kubectl rollout status deployment/redis -n p03-01-cfg --timeout=180s
+Waiting for deployment spec update to be observed...
+Waiting for deployment "redis" rollout to finish: 0 out of 1 new replicas have been updated...
+Waiting for deployment "redis" rollout to finish: 0 of 1 updated replicas are available...
+deployment "redis" successfully rolled out
+
+## Step 1: externalize catalog's non-secret config
+$ kubectl apply -f 15-catalog-config.yaml
+configmap/catalog-config created
+$ kubectl get configmap catalog-config -n p03-01-cfg -o jsonpath='{.data}'
+{"CATALOG_CACHE_TTL_SECONDS":"30","CATALOG_FEATURE_RECOMMENDATIONS":"false","LOG_LEVEL":"info","REDIS_ADDR":"redis.p03-01-cfg.svc.cluster.local:6379"}
+## Step 2: wire the Deployment (DB chain first)
+$ kubectl apply -f 16-db-credentials.yaml
+secret/db-credentials created
+$ kubectl apply -f 20-postgres-statefulset.yaml
+service/postgres created
+statefulset.apps/postgres created
+$ kubectl rollout status statefulset/postgres -n p03-01-cfg --timeout=240s
+Waiting for statefulset spec update to be observed...
+Waiting for 1 pods to be ready...
+Waiting for 1 pods to be ready...
+error: timed out waiting for the condition
+$ kubectl apply -f 21-db-migrate-job.yaml
+job.batch/db-migrate created
+$ kubectl wait --for=condition=complete job/db-migrate -n p03-01-cfg --timeout=180s
+job.batch/db-migrate condition met
+$ kubectl apply -f 10-catalog-deploy.yaml
+deployment.apps/catalog created
+$ kubectl rollout status deployment/catalog -n p03-01-cfg --timeout=240s
+Waiting for deployment spec update to be observed...
+Waiting for deployment spec update to be observed...
+Waiting for deployment "catalog" rollout to finish: 0 out of 3 new replicas have been updated...
+Waiting for deployment "catalog" rollout to finish: 0 of 3 updated replicas are available...
+error: timed out waiting for the condition
+$ kubectl get pod -n p03-01-cfg -l app=catalog -o jsonpath='{.items[0].spec.containers[0].envFrom[0].configMapRef.name}{"\n"}'
+catalog-config
+$ kubectl set env deployment/catalog -n p03-01-cfg --list | grep -i log_level
+# LOG_LEVEL from configmap catalog-config, key LOG_LEVEL
+
+## Step 3: who can read the ConfigMap
+$ kubectl auth can-i get configmaps -n p03-01-cfg --as=system:serviceaccount:p03-01-cfg:catalog-sa
+no
+$ kubectl auth can-i get secrets -n p03-01-cfg --as=system:serviceaccount:p03-01-cfg:catalog-sa
+no
+$ kubectl auth can-i list configmaps -n p03-01-cfg --as=system:serviceaccount:p03-01-cfg:catalog-sa
+no
+$ kubectl auth can-i get configmap/catalog-config -n p03-01-cfg --as=system:serviceaccount:p03-01-cfg:catalog-sa
+yes
+$ kubectl auth can-i get configmap/catalog-config-v1 -n p03-01-cfg --as=system:serviceaccount:p03-01-cfg:catalog-sa
+no
+$ kubectl describe clusterrole view | grep -E 'configmaps|secrets'
+  configmaps                                   []                 []              [get list watch]
+$ kubectl describe clusterrole edit | grep -E 'configmaps|secrets'
+  configmaps                                   []                 []              [create delete deletecollection patch update get list watch]
+  secrets                                      []                 []              [get list watch create delete deletecollection patch update]
+$ kubectl create rolebinding cfg-auditor -n p03-01-cfg --clusterrole=view --user=auditor
+rolebinding.rbac.authorization.k8s.io/cfg-auditor created
+$ kubectl auth can-i get configmaps -n p03-01-cfg --as=auditor
+yes
+$ kubectl auth can-i get secrets -n p03-01-cfg --as=auditor
+no
+$ kubectl auth can-i patch configmaps -n p03-01-cfg --as=auditor
+no
+$ kubectl create rolebinding cfg-deployer -n p03-01-cfg --clusterrole=edit --user=deployer
+rolebinding.rbac.authorization.k8s.io/cfg-deployer created
+$ kubectl auth can-i patch configmaps -n p03-01-cfg --as=deployer
+yes
+$ kubectl delete rolebinding cfg-auditor cfg-deployer -n p03-01-cfg
+rolebinding.rbac.authorization.k8s.io "cfg-auditor" deleted from p03-01-cfg namespace
+rolebinding.rbac.authorization.k8s.io "cfg-deployer" deleted from p03-01-cfg namespace
+
+## Step 4: project the ConfigMap as files and watch it update
+$ kubectl apply -f cfg-peek.yaml
+pod/cfg-peek created
+$ kubectl wait --for=condition=Ready pod/cfg-peek -n p03-01-cfg --timeout=120s
+pod/cfg-peek condition met
+$ kubectl logs cfg-peek -n p03-01-cfg --tail=2
+info
+$ kubectl exec cfg-peek -n p03-01-cfg -- ls -l /etc/cfg
+total 0
+lrwxrwxrwx    1 root     root            32 Oct 31 00:02 CATALOG_CACHE_TTL_SECONDS -> ..data/CATALOG_CACHE_TTL_SECONDS
+lrwxrwxrwx    1 root     root            38 Oct 31 00:02 CATALOG_FEATURE_RECOMMENDATIONS -> ..data/CATALOG_FEATURE_RECOMMENDATIONS
+lrwxrwxrwx    1 root     root            16 Oct 31 00:02 LOG_LEVEL -> ..data/LOG_LEVEL
+lrwxrwxrwx    1 root     root            17 Oct 31 00:02 REDIS_ADDR -> ..data/REDIS_ADDR
+$ kubectl get rs -n p03-01-cfg -l app=catalog
+NAME                 DESIRED   CURRENT   READY   AGE
+catalog-56f9649677   3         3         0       4m50s
+$ kubectl patch configmap catalog-config -n p03-01-cfg --type merge -p '{"data":{"LOG_LEVEL":"debug"}}'
+configmap/catalog-config patched
+# cfg-peek first printed debug 70 s after the patch (poll every 5 s)
+$ kubectl logs cfg-peek -n p03-01-cfg --tail=2
+info
+debug
+$ kubectl get rs -n p03-01-cfg -l app=catalog
+NAME                 DESIRED   CURRENT   READY   AGE
+catalog-56f9649677   3         3         0       6m1s
+$ kubectl exec cfg-peek -n p03-01-cfg -- sh -c 'cat /etc/cfg/LOG_LEVEL; echo; tr "\0" "\n" < /proc/1/environ | grep LOG_LEVEL'
+debug
+LOG_LEVEL=info
+
+## Step 5: restore the value
+$ kubectl patch configmap catalog-config -n p03-01-cfg --type merge -p '{"data":{"LOG_LEVEL":"info"}}'
+configmap/catalog-config patched
+
+## Step 6: immutable ConfigMaps
+$ kubectl apply -f catalog-config-v1.yaml
+configmap/catalog-config-v1 created
+$ kubectl patch configmap catalog-config-v1 -n p03-01-cfg --type merge -p '{"data":{"LOG_LEVEL":"debug"}}'
+The ConfigMap "catalog-config-v1" is invalid: data: Forbidden: field is immutable when `immutable` is set
+$ kubectl get configmap -n p03-01-cfg
+NAME                DATA   AGE
+catalog-config      4      11m
+catalog-config-v1   1      0s
+kube-root-ca.crt    1      13m
+
+## Cleanup
+$ kubectl delete namespace p03-01-cfg --wait=true --timeout=300s
+namespace "p03-01-cfg" deleted
+error: timed out waiting for the condition on namespaces/p03-01-cfg
+$ kubectl get namespace p03-01-cfg
+NAME         STATUS        AGE
+p03-01-cfg   Terminating   18m
