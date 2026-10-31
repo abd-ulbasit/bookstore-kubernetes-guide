@@ -390,10 +390,10 @@ spec:
   volumes: [{name: tmp, emptyDir: {}}]
 ```
 
-**Not run here.** This Pod needs the throwaway cluster `supply-chain`, which this
-revision did not create, so the lab skipped it and printed that it did. The
-kubelet's pull policies are defined on the
-[Kubernetes container images page](https://kubernetes.io/docs/concepts/containers/images/#image-pull-policy).
+**Not run here.** This Pod needs the throwaway cluster `supply-chain`, which
+this revision did not create, so the lab skipped it and printed that it did.
+The kubelet's pull policies are defined on the [Kubernetes container images
+page](https://kubernetes.io/docs/concepts/containers/images/#image-pull-policy).
 There, `Always` means the kubelet asks the runtime to pull the image each time
 it launches the container. An unset policy is chosen from the image reference
 when the Pod is created: a digest, or a tag other than `:latest`, gives
