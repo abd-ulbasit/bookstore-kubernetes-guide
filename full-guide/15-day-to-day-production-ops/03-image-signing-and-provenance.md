@@ -37,9 +37,11 @@ them with Kyverno". Each says it for a different reader:
 - **Part 14 ch.12** puts Kyverno on EKS, with a `verifyImages` policy and the
   cloud wiring around it.
 
-This chapter is the bridge. Its policy pins the identity that the 07.03
-workflow signs with, and it shows how to move from audit to enforce without
-breaking workloads that already run.
+This chapter is the bridge. Its policy pins the identities of the three
+workflows in Part 15 ch.02 that sign the Bookstore images in ECR. Part 07 ch.03
+signs its GHCR images with its own workflow, which this policy does not match.
+The chapter shows how to move from audit to enforce without breaking workloads
+that already run.
 
 The chapter keeps two kinds of trust apart:
 
@@ -49,8 +51,10 @@ The chapter keeps two kinds of trust apart:
 
 2. **Provenance trust**: "this image was built by that workflow from these
    inputs" (the SLSA statement from `actions/attest-build-provenance`). It
-   catches a build step that signs bytes it did not build from the source it
-   claims. The policy here requires only the signature.
+   records which workflow, commit and ref built the image. It does not prove
+   the build job was honest: a job that holds the workflow's token can attest
+   anything under the same identity. The policy here requires only the
+   signature; the verification commands in section 0 also check attestations.
 
 ## Mental model
 
@@ -79,16 +83,9 @@ admission, or trust none.**
   Actions workflow pass.
 
 - **Keyless means "no long-lived signing key", not "no
-  cryptography".** cosign keyless uses Sigstore's PKI: the runner's
-  OIDC token authenticates to **Fulcio** (Sigstore's CA), which issues a
-  ~10-minute X.509 cert with the workflow identity in the SAN; cosign
-  signs the digest with the *ephemeral* private key, uploads the
-  signature + cert to **Rekor** (an append-only transparency log), and
-  the ephemeral key is discarded. To verify later, cosign retrieves the
-  signature + cert stored with the image in the registry, and checks the
-  chain against Sigstore's root and Rekor.
-  **No key ever exists to leak.** The cost: trust in Sigstore's CA + the
-  Rekor log's append-only property.
+  cryptography".** cosign gets a short-lived certificate for the workflow's
+  identity and records the signature in a public transparency log. The
+  mechanics, Fulcio and Rekor, are in *How it works under the hood*.
 
 - **An SBOM is data; a *signed* SBOM is evidence.** `syft <IMAGE> -o
   cyclonedx-json` writes a CycloneDX inventory as a file. `cosign attest
@@ -100,14 +97,13 @@ admission, or trust none.**
   the auditable form.
 
 - **Provenance is the same shape, with a build record as the payload.**
-  `actions/attest-build-provenance` (pinned by commit SHA in 07.03's sign job)
-  writes a SLSA provenance statement for the digest. The statement names the
-  repository, the ref and the workflow that built the image, and it is signed
-  with the workflow's identity. The guide's workflow sets
-  `push-to-registry: true`, which also writes the statement to the registry.
-  This chapter's rule requires only the signature. Adding an `attestations:`
-  entry is the next step; check the predicate type on a real image before you
-  write it.
+  The build-sign-push job in [Part 15 ch.02](02-application-cicd-pipelines.md)
+  runs `actions/attest-build-provenance`, pinned by commit SHA, the same pin
+  07.03 uses. It writes a SLSA provenance statement for the digest, signed
+  with the workflow's identity, to GitHub's attestation store. The statement
+  names the repository, the ref and the workflow that built the image, and
+  `gh attestation verify` reads it. This chapter's Kyverno rule requires only
+  the signature, so a provenance gap does not block admission.
 
 - **Kyverno `verifyImages` is admission-time, not runtime.** The rule
   fires when a Pod is created/updated; it fetches the signature, verifies
@@ -118,36 +114,34 @@ admission, or trust none.**
   affects *new* admissions; running pods are untouched.
 
 - **The audit → enforce migration has three real stages.** Not "flip
-  enforce one day"; rather: (a) **audit** — log violations but admit
-  all images. Collect data. (b) **partial enforce** — enforce in the
-  `bookstore` namespace (where every image is signed via the new
-  workflow) while remaining audit in `kube-system`, `monitoring`, and
-  other namespaces with vendor images (Prometheus, KEDA) that may not
-  be signed in a way your `subjectRegExp` matches. (c) **full
-  enforce** — extend the rule's match expression to all namespaces
-  once every image in every namespace either is signed by you or
-  matches a separate, vendor-specific verifyImages rule. The chapter
-  ships the audit-mode rule and the partial-enforce variant; full
-  enforce is a per-cluster judgement call.
+  enforce one day"; rather: (a) **audit**: log violations but admit
+  all images, and collect data. (b) **partial enforce**: enforce in the
+  `bookstore` namespace, where the Bookstore workloads run and every image
+  is signed by a 02 workflow, and keep the rule in audit in any other
+  namespace where a Bookstore image might run. (c) **full enforce**: remove
+  the namespace scope once every Bookstore image that any namespace can pull
+  is signed. The rule matches only images under the Bookstore ECR path, so
+  vendor images (Prometheus, KEDA, the Vault CSI provider) are outside it at
+  every stage. Each needs its own rule with its vendor's identity, which this
+  chapter does not cover. The chapter ships the audit-mode rule and the
+  partial-enforce variant; full enforce is a per-cluster judgement call.
 
-The trap to keep in view: **the rule is only as strict as its
-`subjectRegExp`.** A regular expression belongs in `subjectRegExp`; the
-`subject` field takes one identity string. A regexp of `.*` matches any cosign
-keyless signature from any workflow, which makes the rule useless. A regexp
-scoped to your org but not to the specific workflow lets a malicious *other*
-workflow in your org sign. A regexp scoped to the workflow file but not to the
-branch lets a malicious branch sign. The rule below pins the issuer to GitHub
-Actions and the subject to *one workflow file on `main`*, the narrowest useful
-match. The sign job in 07.03 runs only on `main`, so only `main`-signed images
-carry an identity this rule accepts.
+The trap to keep in view: **the rule is only as strict as its identities.**
+A `subjectRegExp` of `.*` matches any cosign keyless signature from any
+workflow, which makes the rule useless. A pattern scoped to your org but not
+to a workflow lets another workflow in your org sign. A pattern scoped to the
+workflow file but not to the branch lets a branch build sign. The rule below
+pins the issuer to GitHub Actions and lists the exact subject of each of the
+three 02 workflows, on `main`. Each sign job runs only on `main`, so only
+`main`-signed images carry an identity this rule accepts.
 
 ## Threats and controls
 
 | Threat | Control in this chapter | Deeper |
 |---|---|---|
-| An image signed by something other than the release workflow (a branch, a fork, a laptop, another workflow in the org) passes admission | Keyless signing bound to the signing workflow file on `main`; a `verifyImages` rule with the issuer and an anchored `subjectRegExp` | [Part 05 ch.03](../05-security/03-supply-chain.md) for the concepts; [Part 14 ch.12](../14-eks-in-production-a-to-z/12-supply-chain-security.md) for EKS |
+| An image signed by something other than the release workflow (a branch, a fork, a laptop, another workflow in the org) passes admission | Keyless signing bound to each 02 signing workflow file on `main`; a `verifyImages` rule with the issuer and one exact `subject` per workflow | [Part 05 ch.03](../05-security/03-supply-chain.md) for the concepts; [Part 14 ch.12](../14-eks-in-production-a-to-z/12-supply-chain-security.md) for EKS |
 | A tag is moved to bytes nobody reviewed | `mutateDigest` and `verifyDigest` pin each reference to a digest that must verify; `required: true` | [Part 15 ch.04](04-multi-environment-promotion.md) for promotion by digest |
-| A build step signs bytes its source did not produce | A provenance statement that records the build, a public Rekor entry for every signature, and a monitor watching them | [Part 15 ch.10](10-incident-response-and-on-call.md) for the response |
+| A build job, or a step inside it, signs bytes its source did not produce | Not stopped by signing or provenance from the same workflow identity, because the attacker holds that identity. A public Rekor entry for every signature and a monitor (production notes) make such a signature visible | [Part 15 ch.10](10-incident-response-and-on-call.md) for the response |
 
 ## Diagrams
 
@@ -165,12 +159,12 @@ flowchart TD
     ecr["ECR<br/>image + signature + attestations"]
     syft["syft<br/>CycloneDX SBOM"]
     apiserver["kube-apiserver"]
-    kyverno{"Kyverno<br/>ClusterPolicy verifyImages<br/>issuer + subject regexp"}
+    kyverno{"Kyverno<br/>ClusterPolicy verifyImages<br/>issuer + exact subjects"}
     pod["Pod admitted<br/>(verified)"]
     reject["Pod REJECTED<br/>(audit: logged only<br/>enforce: request denied)"]
 
     push --> runner
-    runner -.->|"OIDC JWT (15min)"| fulcio
+    runner -.->|"OIDC JWT"| fulcio
     fulcio -.->|"X.509 cert (10min)"| runner
     runner -->|"image push by digest"| ecr
     runner -.->|"cosign sign DIGEST + cert"| rekor
@@ -193,9 +187,9 @@ flowchart TD
  0. baseline   no policy            nobody                       none
  1. audit      failureAction:       log every violation;         install
                Audit                admit everything             kyverno
- 2. partial    Enforce on           bookstore: REJECT if         every Bookstore
+ 2. partial    Enforce in           bookstore: REJECT if         every Bookstore
     enforce    bookstore; Audit     unsigned; other namespaces:  image signed by
-               elsewhere            audit only                   the signing workflow
+               elsewhere            audit only                   a 02 workflow
  3. full       one Enforce rule,    every namespace REJECTS      every namespace has
     enforce    no namespace scope   if unsigned                  signed images
  ────────────────────────────────────────────────────────────────────────────────
@@ -229,14 +223,17 @@ the binaries.
 
 ### 0. Verify the identity, as a consumer does
 
-Set the identity to the signing workflow's exact name, and the image to the
-digest your pipeline pushed. [Part 07 ch.03](../07-delivery/03-cicd-pipeline.md)
-(step 8) runs these checks against the guide's catalog image. Its captured
-transcript is [`07-03.txt`](../examples/security-lab/evidence/07-03.txt), and
-this chapter links to it rather than copying it.
+Set the identity to the exact name of the signing workflow, and the image to
+the digest your pipeline pushed. Here that is the `catalog` workflow from
+[Part 15 ch.02](02-application-cicd-pipelines.md), which pushes
+`bookstore/catalog` to ECR. [Part 07 ch.03](../07-delivery/03-cicd-pipeline.md)
+runs the same checks against a GHCR image that its own workflow,
+`bookstore-pipeline.yml`, signed. Its captured transcript is
+[`07-03.txt`](../examples/security-lab/evidence/07-03.txt), and this chapter
+links to it rather than copying it.
 
 ```sh
-ID="https://github.com/<OWNER>/<REPO>/.github/workflows/bookstore-pipeline.yml@refs/heads/main"
+ID="https://github.com/<OWNER>/<REPO>/.github/workflows/catalog.yml@refs/heads/main"
 IMAGE='<REGISTRY>/bookstore/catalog@sha256:<DIGEST>'
 cosign verify --certificate-identity "$ID" \
   --certificate-oidc-issuer https://token.actions.githubusercontent.com "$IMAGE" >/dev/null \
@@ -287,11 +284,89 @@ metadata:
     pod-security.kubernetes.io/warn: restricted
 ```
 
+The `restricted` label admits Kyverno's pods, but it does not restrict the
+network. Save this as `kyverno-networkpolicy.yaml` and apply it before the
+install. It sets a default deny in both directions and then opens the three
+flows Kyverno needs: the API server calls the admission webhook on port 9443
+(the chart 3.9.1 container port), and Kyverno calls the API server and reads
+signatures, Rekor and TUF data over HTTPS. The `ipBlock` is a placeholder:
+replace it with your node network. The 443 egress is broad on purpose for a
+first install; tighten it to your registry and Sigstore addresses where your
+platform allows. If Prometheus scrapes Kyverno, add an ingress rule for the
+metrics port from the monitoring namespace.
+
+```yaml
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: default-deny-all
+  namespace: kyverno
+spec:
+  podSelector: {}
+  policyTypes: ["Ingress", "Egress"]
+---
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: kyverno-admission-webhook
+  namespace: kyverno
+spec:
+  podSelector:
+    matchLabels:
+      app.kubernetes.io/component: admission-controller
+  policyTypes: ["Ingress"]
+  ingress:
+    - from:
+        - ipBlock:
+            cidr: 10.0.0.0/8              # placeholder: your node network
+      ports:
+        - protocol: TCP
+          port: 9443
+---
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: kyverno-egress
+  namespace: kyverno
+spec:
+  podSelector: {}
+  policyTypes: ["Egress"]
+  egress:
+    - to:
+        - namespaceSelector: {}
+          podSelector:
+            matchLabels:
+              k8s-app: kube-dns
+      ports:
+        - protocol: UDP
+          port: 53
+        - protocol: TCP
+          port: 53
+    - ports:
+        - protocol: TCP
+          port: 443
+        - protocol: TCP
+          port: 6443
+```
+
+Apply the namespace, then the network policy, then the chart, in that order, so
+the webhook's first calls are not blocked:
+
 ```sh
 kubectl apply -f kyverno-namespace.yaml
+kubectl apply -f kyverno-networkpolicy.yaml
 helm repo add kyverno https://kyverno.github.io/kyverno/
 helm install kyverno kyverno/kyverno --version 3.9.1 -n kyverno --wait
 ```
+
+> **Currency.** The policy in this section uses the `ClusterPolicy` type.
+> Kyverno's [policy-types overview](https://kyverno.io/docs/policy-types/overview/)
+> marks that type deprecated in v1.19, which chart 3.9.1 installs (appVersion
+> v1.19.1), and removed in v1.20, estimated for November 2026. The supported
+> type for this check is `ImageValidatingPolicy`, stable since v1.18. The
+> overview links the migration guide. This chapter keeps `ClusterPolicy` so
+> the walk-through and its stage-2 manifest match the installed version. Plan
+> the move before any upgrade to v1.20.
 
 Save the policy below as `kyverno-verifyimages.yaml`. In production it lives in
 Git, and Argo CD applies it
@@ -326,28 +401,36 @@ spec:
           required: true
           attestors:
             - entries:
+                # One entry per signing workflow from Part 15 ch.02, on main.
+                # Entries are alternatives: a signature from any one matches.
                 - keyless:
                     issuer: 'https://token.actions.githubusercontent.com'
-                    # One signing workflow file, on main. This is the file name
-                    # 07.03 uses (bookstore-pipeline.yml); use your own.
-                    subjectRegExp: '^https://github\.com/GITHUB_ORG/GITHUB_REPO/\.github/workflows/bookstore-pipeline\.yml@refs/heads/main$'
+                    subject: 'https://github.com/GITHUB_ORG/GITHUB_REPO/.github/workflows/catalog.yml@refs/heads/main'
+                    rekor:
+                      url: 'https://rekor.sigstore.dev'
+                - keyless:
+                    issuer: 'https://token.actions.githubusercontent.com'
+                    subject: 'https://github.com/GITHUB_ORG/GITHUB_REPO/.github/workflows/orders.yml@refs/heads/main'
+                    rekor:
+                      url: 'https://rekor.sigstore.dev'
+                - keyless:
+                    issuer: 'https://token.actions.githubusercontent.com'
+                    subject: 'https://github.com/GITHUB_ORG/GITHUB_REPO/.github/workflows/payments-worker.yml@refs/heads/main'
                     rekor:
                       url: 'https://rekor.sigstore.dev'
 ```
 
 Read carefully:
 
-- `issuer` is fixed. `subjectRegExp` is anchored and names one workflow file
-  on `main`, the same identity that `--certificate-identity` pins in section
-  0. A pattern over the whole `.github/workflows/` directory would accept every
-  other workflow in it.
+- `issuer` is fixed. Each `subject` is an exact string that names one workflow
+  file on `main`, the same identity that `--certificate-identity` pins in
+  section 0. A pattern over the whole `.github/workflows/` directory would
+  accept every other workflow in it, so the rule lists the files one by one.
 - `mutateDigest: true` lets a Deployment reference a tag: the admitted Pod runs
   the digest the rule verified, not whatever the tag points at later.
-- `failurePolicy: Ignore` means a Kyverno outage cannot block Pods while the
-  policy only reports. The change to `Fail` comes at stage 2, after Kyverno's
-  availability is proven.
-  [Part 11 ch.01](../11-advanced-production-patterns/01-admission-webhooks.md)
-  covers the trade-off.
+- `failurePolicy: Ignore` is the stage-1 setting, so a Kyverno outage cannot
+  block Pods while the policy only reports. Stage 2 changes it to `Fail`. The
+  trade-off is explained under *How it works under the hood*.
 
 ### 2. Walk the migration on a kind cluster
 
@@ -357,6 +440,12 @@ deployed. In production, each stage is one pull request to the GitOps
 repository. The lab applies the files directly, and Git stays the only path to
 the cluster ([Part 15 ch.01](01-pr-to-production-lifecycle.md)). Nothing in
 this section was run in the chapter, so the results shown are illustrative.
+
+Kyverno reads signatures and digests from the registry with its own pod
+credentials. On EKS, give the Kyverno service account read access to the
+Bookstore ECR repositories through IRSA or EKS Pod Identity. The kind lab has
+no such access, so the walk-through below is illustrative: read the
+PolicyReports as shown, or point the lab at a registry the cluster can reach.
 
 Stage 1 is the policy above in audit. Apply it, then confirm the report CRD
 exists, because audit results are written there:
@@ -368,7 +457,8 @@ kubectl get crd policyreports.wgpolicyk8s.io
 
 Next, a deliberately unsigned image in the `bookstore` namespace. The baseline
 is there so that Pod Security admits the Pod and only the policy decides.
-`65532` is the UID the catalog image declares (`USER 65532:65532`).
+`65532` is the UID the catalog image declares (`USER 65532:65532`). Save this
+as `unsigned-probe.yaml`:
 
 ```yaml
 apiVersion: v1
@@ -420,12 +510,94 @@ names it:
 unsigned-probe
 ```
 
-Stage 2 turns the one rule into two, in Git. The first rule matches only the
-`bookstore` namespace and keeps the stage-1 `verifyImages` block with
-`failureAction: Enforce`. The second matches every namespace except
-`bookstore`, through `exclude`, and keeps `failureAction: Audit`. Set
-`webhookConfiguration.failurePolicy` to `Fail` in the same change, and only
-when the go/no-go check in the diagram above has passed.
+Stage 2 turns the one rule into two, in Git, and the manifest below replaces
+the stage-1 file. The first rule matches only the `bookstore` namespace and
+enforces. The second matches every namespace except `bookstore`, through
+`exclude`, and only audits. It also sets `webhookConfiguration.failurePolicy`
+to `Fail`. Change the file only when the go/no-go check in the diagram above
+has passed. The attestors are the same in both rules, so an identity change
+means editing both.
+
+```yaml
+apiVersion: kyverno.io/v1
+kind: ClusterPolicy
+metadata:
+  name: verify-bookstore-images
+  annotations:
+    policies.kyverno.io/title: Verify Bookstore image signatures
+    policies.kyverno.io/category: Supply Chain
+    policies.kyverno.io/subject: Pod
+spec:
+  webhookConfiguration:
+    failurePolicy: Fail                  # stage 2: Ignore -> Fail
+  rules:
+    - name: enforce-bookstore-keyless
+      match:
+        any:
+          - resources:
+              kinds: [Pod]
+              namespaces: [bookstore]
+      verifyImages:
+        - imageReferences:
+            - 'AWS_ACCOUNT_ID.dkr.ecr.AWS_REGION.amazonaws.com/bookstore/*'
+          failureAction: Enforce
+          mutateDigest: true
+          verifyDigest: true
+          required: true
+          attestors:
+            - entries:
+                - keyless:
+                    issuer: 'https://token.actions.githubusercontent.com'
+                    subject: 'https://github.com/GITHUB_ORG/GITHUB_REPO/.github/workflows/catalog.yml@refs/heads/main'
+                    rekor:
+                      url: 'https://rekor.sigstore.dev'
+                - keyless:
+                    issuer: 'https://token.actions.githubusercontent.com'
+                    subject: 'https://github.com/GITHUB_ORG/GITHUB_REPO/.github/workflows/orders.yml@refs/heads/main'
+                    rekor:
+                      url: 'https://rekor.sigstore.dev'
+                - keyless:
+                    issuer: 'https://token.actions.githubusercontent.com'
+                    subject: 'https://github.com/GITHUB_ORG/GITHUB_REPO/.github/workflows/payments-worker.yml@refs/heads/main'
+                    rekor:
+                      url: 'https://rekor.sigstore.dev'
+    - name: audit-bookstore-keyless
+      match:
+        any:
+          - resources:
+              kinds: [Pod]
+      exclude:
+        any:
+          - resources:
+              namespaces: [bookstore]
+      verifyImages:
+        - imageReferences:
+            - 'AWS_ACCOUNT_ID.dkr.ecr.AWS_REGION.amazonaws.com/bookstore/*'
+          failureAction: Audit
+          mutateDigest: true
+          verifyDigest: true
+          required: true
+          attestors:
+            - entries:
+                - keyless:
+                    issuer: 'https://token.actions.githubusercontent.com'
+                    subject: 'https://github.com/GITHUB_ORG/GITHUB_REPO/.github/workflows/catalog.yml@refs/heads/main'
+                    rekor:
+                      url: 'https://rekor.sigstore.dev'
+                - keyless:
+                    issuer: 'https://token.actions.githubusercontent.com'
+                    subject: 'https://github.com/GITHUB_ORG/GITHUB_REPO/.github/workflows/orders.yml@refs/heads/main'
+                    rekor:
+                      url: 'https://rekor.sigstore.dev'
+                - keyless:
+                    issuer: 'https://token.actions.githubusercontent.com'
+                    subject: 'https://github.com/GITHUB_ORG/GITHUB_REPO/.github/workflows/payments-worker.yml@refs/heads/main'
+                    rekor:
+                      url: 'https://rekor.sigstore.dev'
+```
+
+Stage-2 changes ship in Git, not as `kubectl patch`, so the rule and its
+history stay in the same review trail.
 
 Deliberate failure, illustrative output, not captured. Once the rule enforces,
 the stage-1 probe is refused in `bookstore`:
@@ -438,9 +610,8 @@ kubectl apply -f unsigned-probe.yaml
 Error from server: error when creating "unsigned-probe.yaml": admission webhook ... denied the request: ...
 ```
 
-The same Pod in a namespace that is still in audit is admitted and reported.
-That is what stage 2 leaves in place for vendor namespaces, and why each step
-waits for its check.
+The same Pod in any other namespace is admitted and reported, because the
+audit rule still covers it.
 
 Stage 3 removes the namespace scope from the Enforce rule, after the go/no-go
 check has held cluster-wide for 14 days. It is the production endgame and a
@@ -517,15 +688,14 @@ Bookstore path; a vendor image needs its own rule with that vendor's identity.
 
 ## Production notes
 
-> **In production: pin `subjectRegExp` to one signing workflow file on
-> `main`, never `.*`.** A `subjectRegExp: ".*"` matches any cosign keyless
-> signature on Earth, including a hostile developer who signed a backdoored
-> image with a personal Sigstore identity and pushed it to your ECR. The rule
-> above names one file:
-> `^https://github\.com/GITHUB_ORG/GITHUB_REPO/\.github/workflows/bookstore-pipeline\.yml@refs/heads/main$`.
-> That is the identity 07.03 checks with `--certificate-identity`. A pattern
-> over the whole directory accepts every workflow in it, so keep the file name
-> exact.
+> **In production: pin each `subject` to one signing workflow file on
+> `main`, never a pattern.** A `subjectRegExp` of `.*` accepts any workflow in
+> any GitHub repository that signs through Sigstore. The issuer pin does not
+> narrow that to your organization, so a backdoored image signed from another
+> repository would pass and reach your ECR path. The rule above names three
+> exact subjects, the same identities the verification commands in section 0
+> pin. Keep them exact: a pattern over the directory accepts every workflow in
+> it.
 
 > **In production: run a Rekor monitor.** Subscribing to your Rekor
 > namespace with a monitor catches rogue signatures within minutes. A
@@ -545,7 +715,7 @@ Bookstore path; a vendor image needs its own rule with that vendor's identity.
 > they're safe to flip.
 
 > **In production: keep `mutateDigest: true` ON.** A developer who
-> writes `image: nginx:1.27` in a manifest gets it pinned to the
+> writes `image: <ECR>/bookstore/catalog:latest-main` in a manifest gets it pinned to the
 > digest cosign verified, automatically. Without this, the manifest
 > would be rejected for tag-use (or admitted with an unverified
 > reference, depending on `verifyDigest`). The user experience is
@@ -566,8 +736,8 @@ Bookstore path; a vendor image needs its own rule with that vendor's identity.
 > signature stays verifiable forever. What changes is *what subjects
 > you trust*: if your workflow file is renamed, signatures from the
 > old name still verify but no longer match your Kyverno rule (the
-> subject regexp moved). Renaming a workflow file is a *coordinated*
-> change: rename the file, update the policy's subject regexp, re-sign
+> subject moved). Renaming a workflow file is a *coordinated*
+> change: rename the file, update the policy's subjects, re-sign
 > images. Part 15 ch.11 covers the day-to-day ops
 > cadence of these coordinated changes.
 
@@ -575,7 +745,7 @@ Bookstore path; a vendor image needs its own rule with that vendor's identity.
 
 ```sh
 # Verify the identity from outside the cluster: the production rule's check
-ID="https://github.com/<OWNER>/<REPO>/.github/workflows/bookstore-pipeline.yml@refs/heads/main"
+ID="https://github.com/<OWNER>/<REPO>/.github/workflows/catalog.yml@refs/heads/main"
 cosign verify --certificate-identity "$ID" \
   --certificate-oidc-issuer https://token.actions.githubusercontent.com \
   '<IMAGE>@sha256:<DIGEST>'
@@ -593,9 +763,9 @@ kubectl get policyreport -A -o json | \
   jq -r '.items[].results[] | select(.result=="fail") | .resources[0].name'
 ```
 
-Stages 2 and 3 are Git changes, not `kubectl patch`: split the rule by namespace
-(section 2) and set `webhookConfiguration.failurePolicy: Fail` in the
-same change.
+The stage-2 change is a Git change, not `kubectl patch`: split the rule by
+namespace and set `webhookConfiguration.failurePolicy: Fail` in the same
+change, as section 2 shows.
 
 Checklist:
 
@@ -604,7 +774,7 @@ Checklist:
 - [ ] CI attests a CycloneDX SBOM with `cosign attest --type cyclonedx`, and
       records provenance with `actions/attest-build-provenance`
 - [ ] Kyverno `ClusterPolicy` matches `imageReferences:` to the Bookstore ECR
-      path AND `subjectRegExp` to the one signing workflow file on `main`
+      path AND a `subject` for each 02 signing workflow, on `main`
 - [ ] `mutateDigest: true` + `verifyDigest: true` + `required: true`: tag
       references get pinned and verified at admission
 - [ ] Audit → enforce uses one rule per mode with `failureAction`, scoped by
@@ -627,17 +797,17 @@ Checklist:
 
    </details>
 
-2. **A team flips Kyverno's verifyImages ClusterPolicy to Enforce cluster-wide on Monday. Half the cluster's vendor pods (Prometheus, KEDA, vault-csi-provider) immediately enter `ImagePullBackOff: signature verification failed`. What was missed and what's the recovery?**
+2. **A team copies the rule with `imageReferences: ['*']`, sets it to Enforce and applies it cluster-wide on Monday. Vendor Pods (Prometheus, KEDA, the Vault CSI provider) are denied at create time. What was missed, what does the operator see, and what is the recovery?**
    <details><summary>Show answer</summary>
 
-   Vendor images aren't signed by *your* workflow's OIDC identity; they're signed (if at all) by the upstream vendor's keys or not at all. A cluster-wide enforce policy with the bookstore's subject regexp matches none of them. The chapter's discipline: enforce per-namespace, not cluster-wide. Enforce in `bookstore` (where every image is signed via the platform workflow) while staying Audit in `kube-system`, `monitoring`, and any namespace with vendor images. Recovery from the Monday incident: flip enforce back to audit on the affected namespaces, document the per-namespace migration plan, only flip enforce per-namespace after confirming every image in that namespace is signed in a way the policy's subject regexp matches.
+   Vendor images aren't signed by *your* workflows' OIDC identities. They are signed, if at all, with the vendor's own keys, so every one fails the subject check. The operator sees no `ImagePullBackOff`. The admission webhook refuses the Pod at create time, and the ReplicaSet or DaemonSet records a `FailedCreate` event that carries the webhook's message. The chapter's rule avoids this by matching only the Bookstore ECR path and by moving enforcement one namespace at a time. Recovery: remove the `*` reference, return the rule to Audit, and leave running Pods alone, since admission does not re-check them. Then add a separate rule with each vendor's identity before that vendor's namespace goes to Enforce.
 
    </details>
 
 3. **What does a provenance statement from `actions/attest-build-provenance` prove that a plain `cosign sign` signature does not?**
    <details><summary>Show answer</summary>
 
-   Plain `cosign sign` proves "this image was signed by *our* CI workflow's OIDC identity". That is useful, but it doesn't constrain *what* the workflow did. A provenance statement captures *who built it, with what source ref, on what builder, with what inputs*. Its predicate is a structured record of the build. Kyverno's `verifyImages` with `attestations:` requires both the signature and the named provenance, raising the bar from "signed by us" to "built by us with these inputs." This catches a compromised CI scenario where an attacker steals OIDC tokens but not the source code; they can sign arbitrary bits, but they can't produce a provenance attestation that matches the actual source-ref claim.
+   Plain `cosign sign` proves "this image was signed by *our* CI workflow's OIDC identity". That is useful, but it doesn't constrain *what* the workflow did. A provenance statement captures *who built it, with what source ref, on what builder, with what inputs*. Its predicate is a structured record of the build. Kyverno's `verifyImages` with `attestations:` requires both the signature and the named provenance, raising the bar from "signed by us" to "built by us with these inputs." It does not catch a compromised build job. An attacker who runs code inside the workflow holds the same identity, so can sign and attest arbitrary bytes with a plausible source ref. Provenance tells a reader which workflow and commit built an image. A reusable builder with its own identity would be a stronger record; this chapter does not build one.
 
    </details>
 

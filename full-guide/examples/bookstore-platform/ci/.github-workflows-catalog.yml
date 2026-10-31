@@ -46,12 +46,16 @@
 #      immutability ENABLED and image scanning on push enabled (defence in
 #      depth on top of Trivy in this workflow).
 #
-#   4. Repository secrets:
+#   4. Environment `bookstore-publish` (Settings > Environments). Add
+#      required reviewers, set deployment branches to `main` only, and put
+#      these two secrets in the environment, not in repository secrets:
 #        AWS_ROLE_ARN_ECR     — the role ARN from step 2
 #        GITOPS_PR_TOKEN      — a fine-grained PAT (or GitHub App token) for
 #                               the deployment-config repo (`contents: write`
 #                               + `pull-requests: write` on that repo ONLY).
 #                               NEVER a classic PAT with broad scope.
+#      The IAM trust policy in step 2 must name this environment, not the
+#      branch (15.02 shows the condition).
 #
 #   5. Repository variables:
 #        AWS_REGION           — e.g. `ap-south-1`. Baseline region.
@@ -91,7 +95,8 @@ on:
       - '.github/workflows/catalog.yml'
 
 # Read-only by default. Each job asks for the scopes it needs below; ECR
-# push and cosign signing need id-token: write on the build job only.
+# push, cosign signing and build provenance need id-token: write and
+# attestations: write on the build job only.
 permissions:
   contents: read
 
@@ -244,9 +249,14 @@ jobs:
   build-sign-push:
     name: build + sign + push
     runs-on: ubuntu-latest
+    # Publishing runs in the `bookstore-publish` environment: its required
+    # reviewers, its main-only deployment branch rule and its secrets are the
+    # boundary. The if: below is a convenience (see 15.02).
+    environment: bookstore-publish
     permissions:
       contents: read
       id-token: write
+      attestations: write
     needs: scan
     # The keyless-sign + ECR-push path is unsafe on fork PRs (no trusted
     # OIDC identity, unreviewed code). Restrict to push events on main.
@@ -303,12 +313,11 @@ jobs:
           tags: |
             ${{ vars.ECR_REGISTRY }}/bookstore/${{ env.SERVICE }}:sha-${{ github.sha }}
             ${{ vars.ECR_REGISTRY }}/bookstore/${{ env.SERVICE }}:latest-main
-          # provenance: true attaches a SLSA provenance attestation to the
-          # manifest (who/what/how built it). sbom: true attaches an SBOM.
-          # Both are belt-and-braces with the explicit cosign attest steps
-          # below — different consumers prefer different formats.
-          provenance: true
-          sbom: true
+          # Off: the signed CycloneDX SBOM and SLSA provenance attestations below are
+          # the forms this Part verifies. BuildKit's own attestations are unsigned, so
+          # they would be a second, weaker copy.
+          provenance: false
+          sbom: false
           # GitHub Actions layer cache. type=gha keys by job + ref; re-runs
           # on the same branch reuse layers, the difference between a
           # 30-second and a 6-minute build.
@@ -326,10 +335,10 @@ jobs:
           exit-code: '1'
           ignore-unfixed: true
 
-      - name: Generate SBOM (syft → SPDX JSON)
+      - name: Generate SBOM (syft → CycloneDX JSON)
         run: |
           syft "${{ vars.ECR_REGISTRY }}/bookstore/${{ env.SERVICE }}@${{ steps.build.outputs.digest }}" \
-            -o spdx-json > "${{ env.SERVICE }}.spdx.json"
+            -o cyclonedx-json > "${{ env.SERVICE }}.cdx.json"
 
       - name: Cosign keyless sign
         env:
@@ -350,12 +359,18 @@ jobs:
         env:
           COSIGN_YES: 'true'
         run: |
-          cosign attest --yes --type spdxjson \
-            --predicate "${{ env.SERVICE }}.spdx.json" \
+          cosign attest --yes --type cyclonedx \
+            --predicate "${{ env.SERVICE }}.cdx.json" \
             "${{ vars.ECR_REGISTRY }}/bookstore/${{ env.SERVICE }}@${{ steps.build.outputs.digest }}"
           # The SBOM is now a cosign attestation bound to the image digest.
-          # A consumer can `cosign verify-attestation --type spdxjson` and
+          # A consumer can `cosign verify-attestation --type cyclonedx` and
           # be sure the SBOM came from THIS workflow signing THAT image.
+
+      - name: Attest build provenance (SLSA, GitHub attestation store)
+        uses: actions/attest-build-provenance@4d101475d8b20a2381f78447822ac1eab6504dd8 # v4.2.2
+        with:
+          subject-name: ${{ vars.ECR_REGISTRY }}/bookstore/${{ env.SERVICE }}
+          subject-digest: ${{ steps.build.outputs.digest }}
 
       - name: Upload digest artifact
         # Per-job artifact for the next job (update-gitops-pr) to consume.
@@ -382,6 +397,8 @@ jobs:
     permissions:
       contents: read
     needs: build-sign-push
+    # The GitOps token lives in the same environment, so only a main push reaches it.
+    environment: bookstore-publish
     if: github.event_name == 'push' && github.ref == 'refs/heads/main'
     steps:
       - name: Checkout GitOps repo
@@ -412,25 +429,45 @@ jobs:
           echo "$RUNNER_TEMP/bin" >> "$GITHUB_PATH"
           "$RUNNER_TEMP/bin/kustomize" version
 
-      - name: Bump dev overlay digest
+      - name: Bump dev pin (images Component only, size-checked)
         id: bump
+        env:
+          SERVICE: ${{ env.SERVICE }}
+          REGISTRY: ${{ vars.ECR_REGISTRY }}
+          MAX_CHANGED_LINES: "8"
         run: |
+          set -euo pipefail
           DIGEST="$(cat digest.txt)"
           if [ -z "$DIGEST" ] || ! echo "$DIGEST" | grep -q '^sha256:'; then
             echo "Refusing to write empty/invalid digest: '$DIGEST'"
             exit 1
           fi
-          cd gitops/kustomize/overlays/dev
-          kustomize edit set image \
-            "bookstore/${{ env.SERVICE }}=${{ vars.ECR_REGISTRY }}/bookstore/${{ env.SERVICE }}@${DIGEST}"
+          # Only the images/ Component is edited. kustomize edit rewrites the whole
+          # file it touches, so the size guard below is what keeps the diff readable.
+          PINS=gitops/kustomize/overlays/dev/images
+          ref="${REGISTRY}/bookstore/${SERVICE}@${DIGEST}"
+          (cd "$PINS" && kustomize edit set image "bookstore/${SERVICE}=${ref}")
+          changed="$(git -C gitops diff --name-only)"
+          if [ "$changed" != "kustomize/overlays/dev/images/kustomization.yaml" ]; then
+            echo "::error::the edit changed files other than the dev pins: ${changed}"
+            exit 1
+          fi
+          lines="$(git -C gitops diff --numstat | awk '{ n += $1 + $2 } END { print n + 0 }')"
+          if [ "$lines" -gt "$MAX_CHANGED_LINES" ]; then
+            echo "::error::the edit changed ${lines} lines, more than ${MAX_CHANGED_LINES}"
+            exit 1
+          fi
+          kustomize build gitops/kustomize/overlays/dev | grep -F -- "image: ${ref}" > /dev/null \
+            || { echo "::error::the dev overlay does not render ${ref}"; exit 1; }
           echo "digest=${DIGEST}" >> "$GITHUB_OUTPUT"
-          git -C "$(pwd)" diff kustomization.yaml
+          echo "changed lines: ${lines}"
 
       - name: Create PR
         uses: peter-evans/create-pull-request@22a9089034f40e5a961c8808d113e2c98fb63676 # v7.0.11
         with:
           path: gitops
           token: ${{ secrets.GITOPS_PR_TOKEN }}
+          add-paths: kustomize/overlays/dev/images/kustomization.yaml
           branch: bump/catalog-${{ github.sha }}
           base: main
           title: 'bump: catalog → ${{ github.sha }}'

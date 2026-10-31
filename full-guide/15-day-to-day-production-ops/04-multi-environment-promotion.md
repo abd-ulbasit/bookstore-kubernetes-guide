@@ -2,8 +2,8 @@
 
 > The dev → staging → prod pipeline as Git mechanics, not a CI/CD product
 > feature: one Argo CD `ApplicationSet` over a List generator, three
-> Kustomize overlays that differ ONLY in image-digest + secret-source +
-> scale, promotion = a Git PR that changes one digest line in the
+> Kustomize overlays that differ ONLY in image pin + secret source +
+> scale + public hostname, promotion = a Git PR that changes one pin line in the
 > overlay's `images/` Component, environment parity as a
 > hard invariant, and the two footguns this discipline kills: "image
 > promoted but config diverged" and "we test in prod because staging is
@@ -47,10 +47,10 @@ running into them:
 GitOps with Argo CD's **ApplicationSet** + a strict Kustomize **base + per-
 environment overlay** discipline kills all three. One `ApplicationSet`
 generates one `Application` per environment from one template; the
-**overlays differ ONLY in image-digest, secret-source, and scale**;
-promotion is a PR that **moves an already-built, already-signed image
-tag** from `overlays/dev/kustomization.yaml` into `overlays/staging/`
-then into `overlays/prod/`. Nothing in the *config* changes between
+**overlays differ ONLY in image pin, secret source, scale and public
+hostname**; promotion is a PR that **moves an already-built, already-signed
+image reference** from the dev pins into `overlays/staging/` and then into
+`overlays/prod/`. Nothing in the *config* changes between
 environments, only which digest they pin.
 
 This chapter codifies that discipline on the Bookstore Platform's
@@ -65,11 +65,11 @@ contract that makes "same code, three environments" mean the same thing.**
 - **Base + overlays = sameness + scoped variation.** The `base/` directory
   is the single source of truth for every deployable object — Deployments,
   Services, ConfigMaps, NetworkPolicies, PDBs. Overlays add **only**
-  per-environment differences: the image digest (different code, same
+  per-environment differences: the image pin (different code, same
   shape), the secret-source (where that environment's Secret comes from,
   [ch.05](05-production-secrets-vault-eso.md)), and scale (the replica
   count, where staging = prod minus scale, and the resource limits, where
-  dev = cheap). Anything an overlay touches **beyond those three
+  dev = cheap). Anything an overlay touches **beyond those four
   categories** is drift hiding as configuration.
 - **Three environments, three overlays, one ApplicationSet.** The
   ApplicationSet's **List generator** enumerates `[dev, staging, prod]`;
@@ -82,8 +82,8 @@ contract that makes "same code, three environments" mean the same thing.**
 - **Promotion is a PR.** No promotion API, no CI/CD product's "promote"
   button. To move the catalog from staging to prod a developer opens a
   PR that changes one line in `overlays/prod/images/kustomization.yaml`:
-  the `digest:` of `bookstore/catalog`, set to the SAME digest the staging
-  pin already names. The PR review IS the promotion gate. Argo CD syncs
+  the pin of `bookstore/catalog`, set to the reference that staging already
+  runs. The promotion check in step 4 enforces that. The PR review IS the promotion gate. Argo CD syncs
   on merge.
 - **Environment parity is the contract.** *Staging = prod minus scale*
   is the platform's hard rule. Staging runs the same Helm charts, the
@@ -92,14 +92,15 @@ contract that makes "same code, three environments" mean the same thing.**
   the same observability stack — at a fraction of the replica count.
   Dev is *staging minus seed-data*. The MOMENT staging adds an operator
   prod doesn't have, "passed in staging" loses its predictive power.
-- **The digest is the pin; a tag is only a label.** The `images:` entry
-  names a `digest:` (`@sha256:...`), which the release run takes from the
-  registry ([ch.02](02-application-cicd-pipelines.md)) and promotion moves.
-  A `newTag` may sit beside it for readers. Rendered with kubectl 1.37.2
-  (kustomize v5.8.1), a tag plus a digest comes out as `name:tag@digest`,
-  and a digest alone as `name@digest`. The runtime pulls by digest, so a
-  tag re-pushed later changes nothing that runs. Argo CD applies the
-  rendered Pod spec, so the digest in Git is the digest in the cluster.
+- **A digest is the pin that promotion moves; a tag is safe only when the
+  registry makes it immutable.** The `images:` entry names a `digest:`
+  (`@sha256:...`), which the build job takes from the registry
+  ([ch.02](02-application-cicd-pipelines.md)) and promotion moves. Rendered
+  with kubectl 1.37.2 (kustomize v5.8.1), a tag plus a digest comes out as
+  `name:tag@digest`, and a digest alone as `name@digest`. The example's prod
+  pins are not all digests: catalog pins one, while orders, payments-worker
+  and storefront pin `1.0.0`. For those, the registry must refuse to move the
+  release tag, which the threat table states as a requirement.
 
 The trap to keep in view: **"environment-specific" is contagious.** Once
 the prod overlay has one config the staging overlay lacks, the team
@@ -113,9 +114,9 @@ rate-limit at half scale, not a different rate-limit.
 
 | Threat | Control | Deeper |
 |---|---|---|
-| An overlay quietly weakens a control in one environment: a dropped `securityContext`, a PDB or a NetworkPolicy | Overlays change only the digest, the secret source and the scale. The render-diff check in step 4 flags any other difference | [01.01](../01-core-workloads/01-pods.md#baseline) for the controls that must stay in `base/` |
-| An unreviewed or untested digest reaches prod | Promotion moves one signed digest through the overlays, one reviewed PR at a time. A check that the digest soaked in staging first is still missing (question 4) | [15.03](03-image-signing-and-provenance.md) for signing the digest, [05.03](../05-security/03-supply-chain.md) for the concept |
-| A re-pointed tag changes what prod runs | The pin is a digest, and a tag is only a label beside it | [15.03](03-image-signing-and-provenance.md) |
+| An overlay quietly weakens a control in one environment: a dropped `securityContext`, a PDB or a NetworkPolicy | Overlays change only the pin, the secret source, the scale and the public hostname. The parity check in step 4 flags any other difference | [01.01](../01-core-workloads/01-pods.md#baseline) for the controls that must stay in `base/` |
+| An unreviewed or untested digest reaches prod | Promotion moves one signed reference through the overlays, one reviewed PR at a time. The promotion check in step 4 refuses a prod image that staging does not run; the soak time stays a reviewer's call (question 4) | [15.03](03-image-signing-and-provenance.md) for signing the digest, [05.03](../05-security/03-supply-chain.md) for the concept |
+| A re-pointed tag changes what prod runs | Digest pins for catalog. For tag pins, the registry's tag immutability is required (the 02 workflow's ECR prerequisites set it) | [15.03](03-image-signing-and-provenance.md) |
 
 ## Diagrams
 
@@ -129,12 +130,12 @@ flowchart LR
 
     test_dev["Smoke + load on dev cluster<br/>(canary if [ch.06](06-progressive-delivery-in-production.md))"]
 
-    pr2["PR-2: promote to staging<br/>overlays/staging (image pin)<br/>digest: sha256:abc123<br/>(SAME digest)"]
+    pr2["PR-2: promote to staging<br/>overlays/staging (image pin)<br/>digest: sha256:abc123"]
     stg_app["Application: bookstore-staging<br/>→ overlays/staging/<br/>(Argo CD syncs on merge)"]
 
     test_stg["Staging soak: 24h<br/>full prod-shaped traffic<br/>(staging = prod minus scale)"]
 
-    pr3["PR-3: promote to prod<br/>overlays/prod/images<br/>digest: sha256:abc123<br/>(SAME digest)<br/>>= 2 reviewers, change-record"]
+    pr3["PR-3: promote to prod<br/>overlays/prod/images<br/>digest: sha256:abc123<br/>(the digest staging runs)<br/>>= 2 reviewers, change-record"]
     prd_app["Application: bookstore-prod<br/>→ overlays/prod/<br/>(Argo CD canary deploy [ch.06](06-progressive-delivery-in-production.md))"]
 
     dev_ci --> pr1 --> dev_app --> test_dev --> pr2 --> stg_app --> test_stg --> pr3 --> prd_app
@@ -156,12 +157,12 @@ flowchart LR
    └── (same shape)        └── (same shape)         └── kustomization.yaml
                                                         digest: sha256:abc123
 
- The contract: the overlays differ in exactly three things:
-   1) image digest (a different digest is different code)
+ The contract: the overlays differ in exactly four things:
+   1) image pin (a different digest is different code)
    2) secret source (each environment names its own Secret source)
-   3) scale (replica count, resource limits)
- Everything else is in base/. That is environment parity. Step 4 shows
- where the example overlays in this repo fall short of this.
+   3) scale (replica count, resource limits and quotas, HPA and PDB bounds)
+   4) public hostname (each environment has its own address)
+ Everything else is in base/. That is environment parity. Step 4 checks it.
 ```
 
 ## Hands-on with the Bookstore Platform
@@ -228,12 +229,13 @@ repo now edits only the Component. It fails the job if the edit touches any
 other file or changes more than eight lines. [07.03](../07-delivery/03-cicd-pipeline.md)
 records the first real signing and promotion run.
 
-The platform tree does this differently. Its catalog pipeline runs
-`kustomize edit set image` on the dev overlay's own `kustomization.yaml`,
-in a separate GitOps repository. The step shown prints the diff for a
-reviewer and does not check its size, so the edit can rewrite the whole
-overlay. For a promotion, copy the guide's layout: the file a promotion
-edits is small, and the job enforces the size.
+The platform tree follows the same layout. Its catalog pipeline
+([ch.02](02-application-cicd-pipelines.md)) edits only the dev pins, in an
+`images/` Component of the separate GitOps repository, and fails the job if
+the diff touches another file or changes more than eight lines. The guide's
+own dev and staging overlays keep their pins inline for the local kind lab,
+so a promotion into them edits the inline list; the size check applies to the
+Component layout.
 
 ### 2. The per-environment ApplicationSet
 
@@ -243,9 +245,45 @@ cluster registered under that name. The `goTemplate` lines in the manifest
 turn on Go template mode and make a missing key fail the render instead of
 printing an empty value.
 
-The manifest is
+The AppProject below bounds what the three Applications may deploy: the
+Bookstore repository, the bookstore namespace on the three environment
+clusters, and the two cluster-scoped kinds the base ships. The ApplicationSet
+in the same file sets `project: bookstore-environments`, so every generated
+Application runs inside this bound. The first version of the example used
+`project: default`, which allows any source and any destination.
+
+```yaml
+apiVersion: argoproj.io/v1alpha1
+kind: AppProject
+metadata:
+  name: bookstore-environments
+  namespace: argocd
+spec:
+  description: Bookstore per-environment Applications (Part 15 ch.04).
+  sourceRepos:
+    - "https://github.com/<ORG>/<REPO>"
+  destinations:
+    - name: kind-bookstore-platform-dev
+      namespace: bookstore
+    - name: kind-bookstore-platform-staging
+      namespace: bookstore
+    - name: kind-bookstore-platform-prod
+      namespace: bookstore
+  clusterResourceWhitelist:
+    - group: ""
+      kind: Namespace
+    - group: scheduling.k8s.io
+      kind: PriorityClass
+```
+
+The ApplicationSet is in the same file, after a `---` line:
 [`examples/bookstore/argocd/02-applicationset-environments.yaml`](../examples/bookstore/argocd/02-applicationset-environments.yaml).
-Apply it once to the management cluster, as
+Its template uses Argo CD's Go-template syntax, which the chapter's gate cannot
+read as a manifest, so it stays in the examples tree. It names each
+Application `bookstore-<env>`, points its source at `overlays/<env>` and its
+destination at the kind context `kind-bookstore-platform-<env>`.
+
+Apply the file, which holds both documents, once to the management cluster, as
 [Part 13 ch.03](../13-grand-capstone-bookstore-platform/03-multi-region-active-active.md)
 does for its ApplicationSet. After that, Argo CD owns the three Applications.
 
@@ -258,55 +296,133 @@ kubectl get applications -n argocd
 
 ```sh
 # The pipeline (ch.02) builds, signs and pushes. The digest it reports is the
-# only input to a promotion. Each PR changes one digest line in the pin file
-# of the environment it targets: the inline `images:` for dev and staging in
-# this repo, the images/ Component for prod.
+# only input to a promotion. A promotion PR changes one reference in the pin
+# file of the environment it targets: the images/ Component for prod, and the
+# inline images list for dev and staging in this repo.
 #
 # Illustrative diffs, not captured output.
 #
-# PR 1, dev. Opened by the pipeline or a developer.
+# PR 1, dev. Opened by the pipeline (ch.02) in the GitOps repository, which
+# auto-merges it.
 #   - digest: sha256:OLD
 #   + digest: sha256:abc123def...
 #
-# PR 2, staging. Opened after the dev soak.
+# PR 2, prod: overlays/prod/images/kustomization.yaml. Two reviewers, a
+# change-record reference and a rollback link in the PR body. Before review,
+# the promotion check in step 4 must pass: the new reference is one staging
+# already runs.
 #   - digest: sha256:OLD
-#   + digest: sha256:abc123def...      (the SAME digest as dev)
-#
-# PR 3, prod: overlays/prod/images/kustomization.yaml. Two reviewers, a
-# change-record reference and a rollback link in the PR body.
-#   - digest: sha256:OLD
-#   + digest: sha256:abc123def...      (the SAME digest as staging)
+#   + digest: sha256:abc123def...      (the digest staging runs)
 #   Argo CD picks this up; the prod Rollout (ch.06) runs the canary.
 
 git log --oneline -- examples/bookstore/kustomize/overlays/prod/images/
 #  -> one commit per prod pin change.
 ```
 
-### 4. The "config diverged" verification
+### 4. The promotion checks: parity and provenance
 
-Promotion's correctness rests on environment parity. Check it on every PR
-that touches `overlays/`: render two overlays and fail the PR on any
-rendered difference other than the image, replica and environment-label
-lines. Without that check, parity is a guideline, not a rule. The check
-belongs in the pipeline from [07.03](../07-delivery/03-cicd-pipeline.md) as
-one more stage.
+Two checks run on every PR that touches `overlays/`. The parity check enforces
+the contract: two overlays may differ only in the four things the contract
+names. The promotion check enforces provenance: prod may run only an image
+that staging already runs. Without them, parity is a guideline and a
+promotion can skip staging.
+
+The parity check is a script. It renders both overlays, drops the fields the
+contract allows (the image pin, the scale fields, the public hostname and the
+environment label), drops the one Secret that prod removes, and fails on
+anything left. Save it as `parity_check.py` and run it with PyYAML installed:
+
+```python
+#!/usr/bin/env python3
+"""Check that two overlays differ only in the fields the promotion contract allows.
+
+Usage: parity_check.py OVERLAY_A OVERLAY_B
+
+The contract (15.04, Mental model) allows four kinds of difference: the image
+pin, the secret source, the scale (replicas, resource ceilings and quotas, HPA
+bounds, PDB floor) and the public hostname. Anything else is drift and fails.
+"""
+import subprocess
+import sys
+
+import yaml
+
+# Keys the contract allows to differ between environments.
+ALLOWED_KEYS = {
+    "image",                                  # the pin
+    "replicas", "minReplicas", "maxReplicas", "minAvailable",  # scale
+    "resources", "hard",                      # scale: ceilings and quotas
+    "host", "hosts",                          # the public hostname
+    "app.kubernetes.io/environment",          # the environment label
+}
+# The secret source: the staging overlay carries the demo Secret, prod does not.
+ALLOWED_ONLY_ON_ONE_SIDE = {("Secret", "db-credentials")}
+
+
+def render(overlay):
+    out = subprocess.run(["kubectl", "kustomize", overlay], check=True,
+                         capture_output=True, text=True).stdout
+    return [d for d in yaml.safe_load_all(out) if d]
+
+
+def normalise(node):
+    if isinstance(node, dict):
+        return {k: normalise(v) for k, v in node.items() if k not in ALLOWED_KEYS}
+    if isinstance(node, list):
+        return [normalise(v) for v in node]
+    return node
+
+
+def index(docs):
+    return {(d["kind"], d["metadata"]["name"]): normalise(d) for d in docs}
+
+
+def main(a, b):
+    left, right = index(render(a)), index(render(b))
+    drift = []
+    for key in sorted(set(left) | set(right)):
+        if key not in left or key not in right:
+            if key not in ALLOWED_ONLY_ON_ONE_SIDE:
+                drift.append(f"{key[0]}/{key[1]}: present in only one overlay")
+        elif left[key] != right[key]:
+            drift.append(f"{key[0]}/{key[1]}: differs outside the contract")
+    for line in drift:
+        print(line)
+    if drift:
+        return 1
+    print(f"OK: {a} and {b} differ only in the contract's fields")
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main(sys.argv[1], sys.argv[2]))
+```
+
+```sh
+python3 parity_check.py examples/bookstore/kustomize/overlays/staging examples/bookstore/kustomize/overlays/prod
+```
+
+It prints one `OK` line when the overlays conform, and it does for this
+repository's staging and prod overlays. Run it on dev against prod and it
+reports the PodDisruptionBudgets that dev does not have, which is drift the
+contract does not allow.
+
+The promotion check compares the images each overlay renders:
 
 ```sh
 O=examples/bookstore/kustomize/overlays
-drift="$(diff <(kubectl kustomize $O/staging) <(kubectl kustomize $O/prod) \
-  | grep -E '^[<>]' \
-  | grep -vE '^[<>] +(- )?(image|replicas|app\.kubernetes\.io/environment): ')"
-[ -z "$drift" ] && echo "OK: only image, replica and label lines differ" || { echo "$drift"; false; }
+S="$(kubectl kustomize $O/staging | grep -oE 'image: .*' | sort -u)"
+P="$(kubectl kustomize $O/prod | grep -oE 'image: .*' | sort -u)"
+missing="$(comm -13 <(echo "$S") <(echo "$P"))"
+[ -z "$missing" ] && echo "OK: prod runs only images staging runs" || { echo "$missing"; false; }
 ```
 
-Run against the example overlays in this repo, the check does not print OK.
-It lists the resource ceilings, the HPA and PDB values, the ingress host, the
-prod ResourceQuota, and the `db-credentials` Secret that prod removes. The
-Secret is the secret-source axis the contract allows, but a render diff
-cannot tell it apart from drift, so its PR comment carries the reason. The
-rest the contract says belongs in `base/`. The example keeps those lines
-because each teaches a knob, so read these overlays as a teaching tree, not
-as a model of parity. Closing the gap is a per-line decision.
+On this repository's example tree the promotion check fails for the four
+Bookstore application images. The cause is the teaching staging overlay, which
+runs local `:dev` images, while prod names registry references. The check
+does what it should: a service passes once staging runs the same reference.
+The soak time (at least 24h, in the checklist) is a reviewer's call. The check
+does not measure it.
 
 ## How it works under the hood
 
@@ -425,19 +541,21 @@ cleanly: the PR is the policy gate, the Rollout is the runtime gate.
 ## Quick Reference
 
 ```sh
-# The overlay shape. Three things differ between environments; nothing else.
+# The overlay shape. Four things differ between environments; nothing else.
 cat overlays/<env>/kustomization.yaml
 #   resources: [ ../../base ]
 #   components: [ images ]     # prod; dev and staging keep images: inline
 #   replicas: [ ... ]
-#   patches: [ ... ]           # secret source and scale only
+#   patches: [ ... ]           # secret source, scale and public hostname only
 cat overlays/<env>/images/kustomization.yaml   # the one file a promotion edits
 
-# Pre-merge parity check. Any output is drift to review.
+# Pre-merge checks: parity (the contract's fields only), then promotion
+# (prod runs only images staging runs). Either failing blocks the PR.
 O=examples/bookstore/kustomize/overlays
-drift="$(diff <(kubectl kustomize $O/staging) <(kubectl kustomize $O/prod) \
-  | grep -E '^[<>]' | grep -vE '^[<>] +(- )?(image|replicas|app\.kubernetes\.io/environment): ')"
-[ -z "$drift" ] || { echo "$drift"; false; }
+python3 parity_check.py $O/staging $O/prod
+S="$(kubectl kustomize $O/staging | grep -oE 'image: .*' | sort -u)"
+P="$(kubectl kustomize $O/prod | grep -oE 'image: .*' | sort -u)"
+[ -z "$(comm -13 <(echo "$S") <(echo "$P"))" ] || { echo "prod runs an image staging does not"; false; }
 
 # Promotion: one digest line in the prod pin file.
 git checkout -b promote/catalog/abc123
@@ -461,8 +579,8 @@ satisfy):
 
 - [ ] PR diff is **one** digest line in `overlays/prod/images/`, never
       a config change in the same PR.
-- [ ] Same digest is already live in `overlays/staging/` and has
-      soaked for ≥ 24h.
+- [ ] The promotion check passes: prod runs only an image staging runs.
+      Staging has soaked it for ≥ 24h (a reviewer's call; no job measures it).
 - [ ] Pre-merge `kustomize build` parity check is green.
 - [ ] Two reviewers approved (one from the owning service team, one
       from the platform team).
@@ -501,15 +619,12 @@ satisfy):
 4. **Hands-on extension: open a PR that moves the prod digest without first moving staging's. Which checks pass, and which should fail?**
    <details><summary>What you should see</summary>
 
-   The render check passes. The diff is one digest line in the prod pin
-   file, and the check allows that line. Nothing in a render diff knows when
-   a digest reached staging. The check that stops this is a promotion job
-   that reads the staging pin and refuses a prod pin that differs from it.
-   This repo's release workflow does not have that job yet, so review and
-   the change record are the only gates today. Treat that as a gap to close
-   before prod promotion is routine: the contract is that the same digest
-   moves through dev, staging and prod, and skipping staging ships code that
-   has never run in a prod-shaped environment.
+   The parity check passes: one pin line in the prod file is inside the
+   contract. The promotion check fails, because it compares prod's images
+   with the images staging renders, and this one is not among them. Review
+   still decides whether the change is wise, but the job stops the skip. The
+   contract is that the same reference moves through dev, staging and prod.
+   Skipping staging ships code that has never run in a prod-shaped environment.
 
    </details>
 
