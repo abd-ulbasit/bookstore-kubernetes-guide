@@ -7,8 +7,11 @@
 # bookstore-ml namespace and applies the same manifests. Lines that name the lab
 # namespace are kept as captured.
 # The lab cluster has a different name from the guide's, and so does its node.
-# The cluster's CNI is kindnet. The default-deny policy is accepted and stored
-# here. No traffic is sent to test it, so this run does not show enforcement.
+# The cluster's CNI is kindnet. Steps 0 to 4 show the default-deny policy
+# accepted and stored, and send no traffic. Steps 5 and 6 were recorded later
+# by examples/security-lab/labs/12-01-netpol.sh with LAB_PREFIX=p12-finish, in
+# namespaces p12-finish-bookstore-ml and p12-finish-open, and they show the
+# policy refusing a connection.
 # A first attempt lost its connection to the lab API during step 3 and printed a
 # connection error where the admission result belongs. That attempt is not
 # recorded. The namespace it left was deleted before this run, and the script
@@ -44,3 +47,23 @@ exit status: 1
 ## step 4: delete the lab namespace
 $ kubectl delete namespace p12-01-bookstore-ml
 namespace "p12-01-bookstore-ml" deleted
+
+## step 5: the default-deny policy refuses a connection, and a namespace without one does not
+$ kubectl apply -f - <<'EOF'   # Namespace bookstore-ml and default-deny NetworkPolicy
+namespace/p12-finish-bookstore-ml created
+networkpolicy.networking.k8s.io/default-deny created
+$ kubectl create namespace p12-finish-open (restricted, no NetworkPolicy)
+namespace/p12-finish-open created
+$ kubectl apply -f connect-check.yaml (in p12-finish-bookstore-ml)
+pod/connect-check created
+$ kubectl apply -f connect-check.yaml (in p12-finish-open)
+pod/connect-check created
+$ kubectl logs connect-check -n p12-finish-bookstore-ml
+connect to the API Service address: TimeoutError timed out
+$ kubectl logs connect-check -n p12-finish-open
+connect to the API Service address: connected
+
+## step 6: cleanup of the NetworkPolicy step
+$ kubectl delete namespace p12-finish-bookstore-ml p12-finish-open --wait=false
+namespace "p12-finish-bookstore-ml" deleted
+namespace "p12-finish-open" deleted
