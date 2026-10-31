@@ -23,7 +23,7 @@
 #   cluster itself.
 #
 # Apply with:
-#   kubectl apply -n monitoring -f pagerduty-integration.yaml
+#   kubectl apply -n prometheus-system -f pagerduty-integration.yaml
 # (assumes kube-prometheus-stack installed; targets the Alertmanager CR.)
 #
 # Production note:
@@ -38,7 +38,7 @@ apiVersion: monitoring.coreos.com/v1beta1
 kind: AlertmanagerConfig
 metadata:
   name: bookstore-pagerduty
-  namespace: monitoring
+  namespace: prometheus-system
   labels:
     app.kubernetes.io/name: alertmanager
     app.kubernetes.io/part-of: bookstore-platform
@@ -294,7 +294,7 @@ apiVersion: monitoring.coreos.com/v1
 kind: PrometheusRule
 metadata:
   name: bookstore-sample-alerts
-  namespace: monitoring
+  namespace: prometheus-system
 spec:
   groups:
     - name: bookstore-platform-sample
@@ -315,9 +315,9 @@ spec:
             region: '{{ $labels.region }}'     # auto-fills group
             tenant: '{{ $labels.tenant }}'     # surfaced in PD details
             # The operator routes only alerts whose namespace label equals
-            # the AlertmanagerConfig's namespace (monitoring). The sum()
+            # the AlertmanagerConfig's namespace (prometheus-system). The sum()
             # above drops every label, so this one must be set explicitly.
-            namespace: monitoring
+            namespace: prometheus-system
           annotations:
             # ----- mandatory annotations (PagerDuty surfaces these) -----
             summary: "Checkout error rate >5 % for 5 minutes"
