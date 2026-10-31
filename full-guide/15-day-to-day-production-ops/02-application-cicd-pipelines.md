@@ -264,7 +264,7 @@ go test -short -race -count=1 -coverpkg=./... -coverprofile=coverage.out ./...
 go tool cover -func=coverage.out | tail -1        # the same number CI prints
 
 # Stage 2 mirror: the Postgres contract test. testcontainers starts its own
-# Postgres, so Docker must be running on this machine:
+# Postgres, so Docker must be running on your machine:
 go test -race -count=1 -timeout=5m -run TestPostgresRepo_Contract ./...
 
 # Stage 3 mirror — Trivy scan, locally:
