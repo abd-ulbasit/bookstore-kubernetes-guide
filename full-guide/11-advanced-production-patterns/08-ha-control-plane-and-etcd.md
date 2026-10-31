@@ -175,7 +175,7 @@ data*.
 
 | Threat | Control in this chapter | Deeper |
 |---|---|---|
-| I7: clear etcd traffic. A host on the path reads Secrets off etcd traffic, or a client talks to etcd with no certificate. | Peer and client TLS, with client certificates required (`--client-cert-auth`, `--peer-client-cert-auth`). Port 2379 is reached only from control-plane nodes. | 05.04 (the same settings in context); 05.06 <!-- link-later: 05.06 --> (control-plane flags under kube-bench) |
+| I7: clear etcd traffic. A host on the path reads Secrets off etcd traffic, or a client talks to etcd with no certificate. | Peer and client TLS, with client certificates required (`--client-cert-auth`, `--peer-client-cert-auth`). Port 2379 is reached only from control-plane nodes. | 05.04 (the same settings in context); [05.06](../05-security/06-control-plane-and-node-hardening.md) (control-plane flags under kube-bench) |
 | A snapshot file gives every Secret value. | Treat each snapshot as a Secret: restricted permissions, and encrypted before it leaves the node (section 4). | 05.04 (encryption at rest); 08.02 (backup and restore) |
 
 The Bookstore threat model holds the first row as I7 in

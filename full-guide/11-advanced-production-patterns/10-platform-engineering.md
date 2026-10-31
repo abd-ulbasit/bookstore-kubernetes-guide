@@ -181,7 +181,7 @@ gap is named here, not hidden.
 
 | Threat | Control in this chapter | Deeper |
 |---|---|---|
-| E10: the provider's ServiceAccount holds more rights than the recipe needs, so a compromised provider, or a bad change to the recipe, reaches objects in every namespace | RBAC named to the kinds the recipe writes, the `bind` verb on the built-in `view` ClusterRole and nothing else, no `cluster-admin` binding, and Crossplane's RBAC manager turned off. By default the manager binds the provider to whatever its package asks for, which for provider-kubernetes includes Secrets in every namespace. A requester Role limited to the request namespace | Step 4 checks the boundary; [05.01](../05-security/01-authn-authz-rbac.md) for RBAC; 05.07 <!-- link-later: 05.07 --> for the admission policy that pins names and label changes |
+| E10: the provider's ServiceAccount holds more rights than the recipe needs, so a compromised provider, or a bad change to the recipe, reaches objects in every namespace | RBAC named to the kinds the recipe writes, the `bind` verb on the built-in `view` ClusterRole and nothing else, no `cluster-admin` binding, and Crossplane's RBAC manager turned off. By default the manager binds the provider to whatever its package asks for, which for provider-kubernetes includes Secrets in every namespace. A requester Role limited to the request namespace | Step 4 checks the boundary; [05.01](../05-security/01-authn-authz-rbac.md) for RBAC; [05.07](../05-security/07-admission-control-and-policy-as-code.md) for the admission policy that pins names and label changes |
 | A request names a tenant that is another tenant's namespace | The XRD's CEL rule requires `spec.tenant` to equal the request's name. All requests share one namespace, so names are unique there. Not exercised in this revision: the rule is in the schema the API server checks on create | Step 2 shows the rule; the residual is under the table |
 
 RBAC cannot restrict `create` or `update` to a name pattern, and namespaces are
@@ -197,7 +197,8 @@ only what it creates: the `bookstore-tenant-` prefix is fixed in the
 Composition. Nothing in the recipe bounds an update to a namespace that already
 exists. The admission policy that must close this, denying changes to
 `pod-security.kubernetes.io/*` labels by the provider's ServiceAccount, belongs
-with policy as code in 05.07 <!-- link-later: 05.07 -->.
+with policy as code in
+[05.07](../05-security/07-admission-control-and-policy-as-code.md).
 
 Requests share the `platform-tenants` namespace and one group, and the tenant
 name is free text. The CEL rule ties `spec.tenant` to the request's name, so a
@@ -840,7 +841,8 @@ The golden path composes with what earlier chapters built, on the same road:
   refuse it ([Part 05 ch.02](../05-security/02-pod-security.md)). A
   ValidatingAdmissionPolicy that pins the namespace names the provider may
   create is the control this chapter leaves for
-  05.07 <!-- link-later: 05.07 -->. It closes the gap that step 4 shows.
+  [05.07](../05-security/07-admission-control-and-policy-as-code.md). It closes
+  the gap that step 4 shows.
 
 ### 7. Clean up
 
@@ -1129,7 +1131,7 @@ Checklist:
    `create` to a name pattern, so the prefix is only a convention in the recipe.
    A ValidatingAdmissionPolicy that matches requests from that ServiceAccount and
    allows only names with the prefix closes it. It belongs with policy as code,
-   in 05.07 <!-- link-later: 05.07 -->.
+   in [05.07](../05-security/07-admission-control-and-policy-as-code.md).
 
    </details>
 

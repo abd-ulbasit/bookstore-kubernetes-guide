@@ -745,7 +745,7 @@ request to `noisy-tenant`. Anyone who can patch that FlowSchema can make the
 same change, so the write permission is the real control. Grant it to cluster
 administrators only, the way you would grant `cluster-admin`. Recording who
 changed these objects belongs with that grant, and the audit trail is in
-Part 05 ch.08 <!-- link-later: 05.08 -->.
+[Part 05 ch.08](../05-security/08-audit-detection-and-incident-response.md).
 
 Clean up. Remove the noisy client, its level, and the operator's objects:
 
