@@ -14,7 +14,7 @@
 > Kustomize** (and *both*).
 
 **Estimated time:** ~30 min read · ~90 min hands-on
-**Prerequisites:** [Part 01 ch.01](../01-core-workloads/01-pods.md#baseline) — the baseline every overlay must keep · [Part 07 ch.01](01-packaging-helm.md) — same problem; different answer (templating vs patching) · [Part 00 ch.06](../00-foundations/06-declarative-api-model.md) — patches are still declarative manifests · [Part 03 ch.01](../03-config-and-storage/01-configmaps.md) — configMapGenerator and the content-hash suffix
+**Prerequisites:** [Part 01 ch.01](../01-core-workloads/01-pods.md#baseline): the baseline every overlay must keep · [Part 07 ch.01](01-packaging-helm.md): same problem; different answer (templating vs patching) · [Part 00 ch.06](../00-foundations/06-declarative-api-model.md): patches are still declarative manifests · [Part 03 ch.01](../03-config-and-storage/01-configmaps.md): configMapGenerator and the content-hash suffix
 **You'll know after this:** • build a base + overlays layout and explain when an overlay should patch vs replace · • use strategic-merge and JSON6902 patches without the `labels:` immutability footgun · • show that an overlay has stripped a hardening field, by rendering it and scanning the render · • keep a generated Secret's value out of the render and out of Git · • pin a remote base to a commit and keep a promotion a one-file diff · • render dev/staging/prod overlays of the Bookstore (45 / 49 / 48 objects) · • articulate when to pick Helm, Kustomize or both (Helm + post-render Kustomize)
 
 <!-- tags: kustomize, platform-engineering, gitops, ci-cd -->
@@ -687,7 +687,7 @@ in a file of their own, where the rewrite can only touch the pins.
 [07.03 step 12](03-cicd-pipeline.md#12-the-seam-from-signed-digest-to-git)
 shows that run.
 
-### 9. Enable an optional component — and be honest about CRDs
+### 9. Enable an optional component, and be honest about CRDs
 
 The observability, scaling and policy extras are CRD-backed, so the base does
 not include them. Each is a **component** an overlay opts into, the Kustomize

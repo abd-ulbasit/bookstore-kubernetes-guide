@@ -14,7 +14,7 @@
 > with automatic rollback.
 
 **Estimated time:** ~30 min read · ~90 min hands-on
-**Prerequisites:** [Part 07 ch.04](04-gitops-argocd.md) (Argo CD syncs a `Rollout` once its project allows the kind) · [Part 01 ch.08](../01-core-workloads/08-deployment-strategies.md) — RollingUpdate gradually shifts 100% of users · [Part 06 ch.01](../06-production-readiness/01-observability-metrics.md) — Prometheus is the analysis-metric source · [Part 05 ch.03](../05-security/03-supply-chain.md) — a canary does not verify signatures; admission does
+**Prerequisites:** [Part 07 ch.04](04-gitops-argocd.md) (Argo CD syncs a `Rollout` once its project allows the kind) · [Part 01 ch.08](../01-core-workloads/08-deployment-strategies.md): RollingUpdate gradually shifts 100% of users · [Part 06 ch.01](../06-production-readiness/01-observability-metrics.md): Prometheus is the analysis-metric source · [Part 05 ch.03](../05-security/03-supply-chain.md): a canary does not verify signatures; admission does
 **You'll know after this:** • distinguish blue-green, canary and experiment release strategies · • convert a Deployment into an Argo Rollouts `Rollout` with traffic steps · • write `AnalysisTemplate`/`AnalysisRun` against Prometheus (success-rate and p95) · • set up automated promotion and automated rollback on failed analysis · • run the catalog as a metric-gated canary, and watch a silent canary fail closed
 
 <!-- tags: argo-rollouts, gitops, observability, ci-cd -->
@@ -623,7 +623,7 @@ promtool test rules no-floor.test.yaml
 Without the floor, a canary that serves half a request per second with no errors
 reads 1 and passes. The floor is what fails it.
 
-### 3. Apply the Rollout — watch a canary with traffic promote
+### 3. Apply the Rollout: watch a canary with traffic promote
 
 The lab did not run this step. The comments below give the expected results, and
 none of them is captured output.
@@ -716,7 +716,7 @@ kubectl get analysisrun -n bookstore                 # Successful
 kubectl delete pod loadgen -n bookstore              # stop the load
 ```
 
-### 4. A canary with no traffic fails closed — and rolls back
+### 4. A canary with no traffic fails closed, and rolls back
 
 This is the security property the gate exists for. Start a canary and send it
 nothing. A naive gate passes on silence. This one fails.
@@ -1094,7 +1094,7 @@ kubectl get clusterrole,clusterrolebinding | grep -c argo-rollouts
 - **The Prometheus queries are the Part 06 ch.01 RED queries, fail-closed and
   filtered to the canary.** success-rate = `1 − rate(5xx)/rate(all)` over
   `http_requests_total{handler,code}` (`handler!="metrics"` excludes the
-  deliberately-uninstrumented `/metrics` endpoint — `app/catalog/main.go`); p95
+  deliberately-uninstrumented `/metrics` endpoint in `app/catalog/main.go`); p95
   = `histogram_quantile(0.95, sum by (le) (rate(..._bucket[2m])))` over the
   duration histogram. Two changes make them safe to gate on. First, each query
   is restricted to `rollouts_pod_template_hash="{{args.canary-hash}}"`, the
@@ -1188,7 +1188,7 @@ kubectl get clusterrole,clusterrolebinding | grep -c argo-rollouts
 > the canary completing (or a human `promote`); rollback is the analysis
 > failing **or** `git revert` of the image bump ([ch.04](04-gitops-argocd.md)).
 > Don't drive prod rollouts with imperative `kubectl patch` or
-> `kubectl argo rollouts` as the source of truth — that re-introduces the
+> `kubectl argo rollouts` as the source of truth, which re-introduces the
 > un-auditable state ch.04 eliminated.
 
 > **In production (managed — EKS/GKE/AKS):** Argo Rollouts and Flagger run
@@ -1201,7 +1201,7 @@ kubectl get clusterrole,clusterrolebinding | grep -c argo-rollouts
 ## Quick Reference
 
 ```sh
-# Install (Helm, pinned — never releases/latest/download/<PINNED>.yaml)
+# Install (Helm, pinned: never releases/latest/download/<PINNED>.yaml)
 kubectl create namespace argo-rollouts
 kubectl label namespace argo-rollouts pod-security.kubernetes.io/enforce=restricted
 helm install argo-rollouts oci://ghcr.io/argoproj/argo-helm/argo-rollouts@sha256:09afe23380ec7f804221fb31471e0225cd6328586df2cff4da6093da62aab1ed -n argo-rollouts --wait
@@ -1283,7 +1283,7 @@ Checklist:
 
    </details>
 
-4. **Hands-on extension — see automated rollback. With a canary on catalog and a Prometheus analysis at `successCondition: result[0] >= 0.95`, ship an image that returns 500 on every 10th request (success ~90%). Apply, then watch `kubectl get rollout catalog -n bookstore -w`. What do you observe?**
+4. **Hands-on extension: see automated rollback. With a canary on catalog and a Prometheus analysis at `successCondition: result[0] >= 0.95`, ship an image that returns 500 on every 10th request (success ~90%). Apply, then watch `kubectl get rollout catalog -n bookstore -w`. What do you observe?**
    <details><summary>What you should see</summary>
 
    The canary advances through `setWeight: 10` and pauses. The `AnalysisRun` queries Prometheus, computes ~0.90 success, fails `>= 0.95`, accrues failures until they exceed `failureLimit`, then transitions to `Failed`. Argo Rollouts **automatically aborts**: it scales the canary ReplicaSet to 0 and the stable to its full replica count. No human pressed `rollout undo`. `kubectl get analysisrun -n bookstore` shows the failed run with the exact query result that triggered the abort. This is the load-bearing claim of the chapter, demonstrable in ~5 minutes.
