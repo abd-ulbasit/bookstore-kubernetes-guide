@@ -404,7 +404,7 @@ kubectl auth can-i get secrets -n <NS> \
 # distroless app Pod): busybox + a secret volume, `mount`+`cat` (tmpfs).
 ```
 
-Minimal Secret + safest consumption (file mount):
+Minimal Secret:
 
 ```yaml
 apiVersion: v1
@@ -412,8 +412,13 @@ kind: Secret
 metadata: { name: app-creds, namespace: <NS> }
 type: Opaque
 stringData: { PASSWORD: "…" }     # apiserver base64s into .data (encoding, NOT crypto)
----
-# in a container — file mount (rotates, low-leak) preferred over env:
+```
+
+Safest consumption is a file mount: it rotates, and it leaks less
+than an environment variable. This fragment is not applied on its own.
+It goes under the Pod's `spec.containers[]` and `spec.volumes`:
+
+```yaml
 volumeMounts: [ { name: creds, mountPath: /etc/creds, readOnly: true } ]
 volumes:      [ { name: creds, secret: { secretName: app-creds } } ]
 # (env form, only if unavoidable):
