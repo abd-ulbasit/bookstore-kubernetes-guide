@@ -14,14 +14,13 @@ all three:
    `<!-- tags: ... -->` HTML comment near its top; this index turns those tags
    inside out so you can ask "show me every chapter about `argo-cd`" or
    "everything tagged `cost`" and get an ordered chapter list.
-3. **By goal** — Section 4 is 10 topic-driven reading paths. Each path is an
+3. **By goal** — Section 4 is eight topic-driven reading paths. Each is an
    ordered, opinionated chapter list with a one-line "why this chapter, why
    here" plus an estimated time-to-complete and a one-sentence outcome
    statement at the end.
 
 These three lenses **complement** [Appendix E — Learning paths](E-learning-paths.md),
-which gives the four big role-based arcs (fast-track / zero-to-prod /
-exam-prep / SRE-platform). Appendix E is the high-level "which arc do I
+which gives the role-based arcs. Appendix E is the high-level "which arc do I
 follow?"; Appendix F is the fine-grained "for *this specific topic*, in *this
 order*, here are the chapters."
 
@@ -32,11 +31,11 @@ A few practical notes before the rest of the appendix:
   `<!-- tags: tag1, tag2, tag3 -->`. The tag list in Section 3 is generated
   *from* those comments — adding a new tag to a chapter is the entire workflow.
 - **The concept map is curated, not generated.** Section 2's diagram is hand-
-  drawn. It shows the load-bearing edges only (~30 nodes, ~60 edges) — not
-  every possible cross-reference. The goal is "what to learn next", not "every
+  drawn. It shows the load-bearing edges only, not every possible
+  cross-reference. The goal is "what to learn next", not "every
   link that exists." A complete machine-readable cross-reference would be the
   full text of the guide.
-- **Reading paths are opinionated.** Section 4 lists 10 paths. Each is *one*
+- **Reading paths are opinionated.** Section 4 lists eight paths. Each is *one*
   reasonable order through a slice of the guide — not the only one. If a path
   says "skip chapters X and Y", that's a deliberate scoping decision for the
   named outcome, not a claim that X and Y are unimportant.
@@ -69,6 +68,14 @@ Services from Parts 01-02 — but only the *new* concepts that a later part
 introduces get their own edges. The rule is "if you don't know **X**, the
 chapter introducing **Y** will be hard," and the arrow points from X to Y.
 
+<!-- link-later: 00.08 -->
+<!-- link-later: 05.00 -->
+<!-- link-later: 05.05 -->
+<!-- link-later: 05.06 -->
+<!-- link-later: 05.07 -->
+<!-- link-later: 05.08 -->
+<!-- link-later: 05.09 -->
+<!-- link-later: 05.10 -->
 ```mermaid
 graph LR
     %% Part 00 — foundations
@@ -77,6 +84,7 @@ graph LR
         api["Declarative API model"]
         controlplane["Control plane / etcd"]
         nodeplane["Node plane / kubelet / containerd"]
+        threat["Threat model / trust boundaries (00.08)"]
     end
 
     %% Part 01 — workloads
@@ -118,10 +126,17 @@ graph LR
 
     %% Part 05 — security
     subgraph p05["Part 05 - Security"]
-        rbac["RBAC"]
-        psa["PodSecurity (PSA restricted)"]
-        supply["Supply chain / SBOM / sign"]
-        hard["Cluster hardening / KMS / etcd-enc"]
+        attacker["Attacker view and goals (05.00)"]
+        rbac["Authn, authz and RBAC (05.01)"]
+        psa["Pod Security Admission, escape, user namespaces (05.02)"]
+        supply["Supply chain, SBOM, signing (05.03)"]
+        secrets["Secrets at rest and KMS (05.04)"]
+        sandbox["seccomp, AppArmor, SELinux, RuntimeClass (05.05)"]
+        hard["Control plane and node hardening, CIS (05.06)"]
+        admit["Admission policy as code (05.07)"]
+        detect["Audit logs, Falco, Tetragon, response (05.08)"]
+        vuln["Vulnerability management (05.09)"]
+        capstone["Capstone attack and harden (05.10)"]
     end
 
     %% Part 06 — production readiness
@@ -262,10 +277,21 @@ graph LR
     ds --> affinity
 
     %% Security
+    threat --> attacker
     api --> rbac
+    attacker --> rbac
+    attacker --> psa
     pod --> psa
+    psa --> sandbox
+    nodeplane --> sandbox
+    psa --> admit
     cicd --> supply
-    sec --> hard
+    supply --> vuln
+    sec --> secrets
+    controlplane --> hard
+    hard --> detect
+    detect --> capstone
+    vuln --> capstone
 
     %% Production readiness
     pod --> metrics
@@ -308,6 +334,7 @@ graph LR
     %% Advanced patterns
     operators --> opdev
     rbac --> admission
+    admit --> admission
     sec --> secretscale
     secretscale --> vault
     managed --> fleet
@@ -355,11 +382,11 @@ graph LR
     supply --> cosign
     kust --> promote
     argocd --> promote
-    vault --> secretscale
     progdel --> rollback
     progdel --> flags
     rollback --> hotfix
     tshoot --> oncall
+    detect --> oncall
     runbook --> oncall
     crossdr --> oncall
     oncall --> d2d
@@ -435,7 +462,7 @@ future tooling but don't help indexing.
 
 #### D
 
-**`day-2`** (45) — [05.01 — Authentication, authorization, RBAC](../05-security/01-authn-authz-rbac.md) · [05.02 — Pod security](../05-security/02-pod-security.md) · [05.03 — Supply chain security](../05-security/03-supply-chain.md) · [05.04 — Secrets and cluster hardening](../05-security/04-secrets-and-cluster-hardening.md) · [06.01 — Observability: metrics](../06-production-readiness/01-observability-metrics.md) · [06.02 — Logging](../06-production-readiness/02-logging.md) · [06.03 — Tracing](../06-production-readiness/03-tracing.md) · [06.04 — Autoscaling](../06-production-readiness/04-autoscaling.md) · [06.05 — Reliability and disruptions](../06-production-readiness/05-reliability-and-disruptions.md) · [06.06 — Capacity and cost](../06-production-readiness/06-capacity-and-cost.md) · [08.01 — Cluster lifecycle](../08-day-2-operations/01-cluster-lifecycle.md) · [08.02 — Backup and disaster recovery](../08-day-2-operations/02-backup-and-dr.md) · [08.03 — Troubleshooting playbook](../08-day-2-operations/03-troubleshooting-playbook.md) · [08.04 — Multi-tenancy and namespaces](../08-day-2-operations/04-multi-tenancy-and-namespaces.md) · [08.05 — Operators and CRDs](../08-day-2-operations/05-operators-and-crds.md) · [09.01 — Bookstore end-to-end](../09-end-to-end-bookstore/01-bookstore-end-to-end.md) · [10.01 — The managed Kubernetes model](../10-cloud-and-managed-kubernetes/01-managed-kubernetes-model.md) · [10.02 — Provisioning and infrastructure-as-code](../10-cloud-and-managed-kubernetes/02-provisioning-and-iac.md) · [10.05 — Cloud storage and data](../10-cloud-and-managed-kubernetes/05-cloud-storage-and-data.md) · [10.06 — Node autoscaling, cost & multi-cloud](../10-cloud-and-managed-kubernetes/06-node-autoscaling-cost-multicloud.md) · [11.01 — Admission webhooks](../11-advanced-production-patterns/01-admission-webhooks.md) · [11.02 — Operator development](../11-advanced-production-patterns/02-operator-development.md) · [11.03 — API Priority and Fairness](../11-advanced-production-patterns/03-api-priority-and-fairness.md) · [11.07 — Chaos engineering](../11-advanced-production-patterns/07-chaos-engineering.md) · [11.08 — HA control plane and etcd](../11-advanced-production-patterns/08-ha-control-plane-and-etcd.md) · [11.09 — Performance and scalability](../11-advanced-production-patterns/09-performance-and-scalability.md) · [13.03 — Multi-region active-active](../13-grand-capstone-bookstore-platform/03-multi-region-active-active.md) · [13.12 — Day-2: runbook + on-call playbook + DR drill + chaos game-day](../13-grand-capstone-bookstore-platform/12-day-2-runbook-on-call-dr-chaos.md) · [14.01 — Production-grade Terraform state](../14-eks-in-production-a-to-z/01-terraform-state-in-production.md) · [14.02 — EKS cluster lifecycle](../14-eks-in-production-a-to-z/02-eks-cluster-lifecycle.md) · [14.04 — Storage classes & EBS in production](../14-eks-in-production-a-to-z/04-storage-classes-and-ebs.md) · [14.05 — Logging & metrics cost discipline](../14-eks-in-production-a-to-z/05-logging-and-metrics-cost.md) · [14.06 — Cost guardrails](../14-eks-in-production-a-to-z/06-cost-guardrails.md) · [14.13 — Runtime defense & container security](../14-eks-in-production-a-to-z/13-runtime-defense-and-container-security.md) · [14.14 — Backup and restore with Velero](../14-eks-in-production-a-to-z/14-backup-and-restore-velero.md) · [14.17 — Cross-region DR + AWS account baseline + 90-day production-readiness runbook](../14-eks-in-production-a-to-z/17-cross-region-dr-account-baseline-90-day-runbook.md) · [15.01 — The PR-to-production lifecycle](../15-day-to-day-production-ops/01-pr-to-production-lifecycle.md) · [15.05 — Production secrets: Vault + ESO + rotation](../15-day-to-day-production-ops/05-production-secrets-vault-eso.md) · [15.06 — Progressive delivery in production](../15-day-to-day-production-ops/06-progressive-delivery-in-production.md) · [15.07 — Rollback playbook](../15-day-to-day-production-ops/07-rollback-playbook.md) · [15.08 — Feature flags and dark launches](../15-day-to-day-production-ops/08-feature-flags-and-dark-launches.md) · [15.09 — Hotfix workflow and breakglass](../15-day-to-day-production-ops/09-hotfix-workflow-and-breakglass.md) · [15.10 — Incident response & on-call](../15-day-to-day-production-ops/10-incident-response-and-on-call.md) · [15.11 — Day-to-day production operations](../15-day-to-day-production-ops/11-day-to-day-production-ops.md) · [15.12 — Capstone: the first 90 days running production](../15-day-to-day-production-ops/12-capstone-first-90-days.md)
+**`day-2`** (45) — [05.01 — Authentication, authorization, RBAC](../05-security/01-authn-authz-rbac.md) · [05.02 — Pod security](../05-security/02-pod-security.md) · [05.03 — Supply chain security](../05-security/03-supply-chain.md) · [05.04 — Secrets at rest and in use](../05-security/04-secrets-and-cluster-hardening.md) · [06.01 — Observability: metrics](../06-production-readiness/01-observability-metrics.md) · [06.02 — Logging](../06-production-readiness/02-logging.md) · [06.03 — Tracing](../06-production-readiness/03-tracing.md) · [06.04 — Autoscaling](../06-production-readiness/04-autoscaling.md) · [06.05 — Reliability and disruptions](../06-production-readiness/05-reliability-and-disruptions.md) · [06.06 — Capacity and cost](../06-production-readiness/06-capacity-and-cost.md) · [08.01 — Cluster lifecycle](../08-day-2-operations/01-cluster-lifecycle.md) · [08.02 — Backup and disaster recovery](../08-day-2-operations/02-backup-and-dr.md) · [08.03 — Troubleshooting playbook](../08-day-2-operations/03-troubleshooting-playbook.md) · [08.04 — Multi-tenancy and namespaces](../08-day-2-operations/04-multi-tenancy-and-namespaces.md) · [08.05 — Operators and CRDs](../08-day-2-operations/05-operators-and-crds.md) · [09.01 — Bookstore end-to-end](../09-end-to-end-bookstore/01-bookstore-end-to-end.md) · [10.01 — The managed Kubernetes model](../10-cloud-and-managed-kubernetes/01-managed-kubernetes-model.md) · [10.02 — Provisioning and infrastructure-as-code](../10-cloud-and-managed-kubernetes/02-provisioning-and-iac.md) · [10.05 — Cloud storage and data](../10-cloud-and-managed-kubernetes/05-cloud-storage-and-data.md) · [10.06 — Node autoscaling, cost & multi-cloud](../10-cloud-and-managed-kubernetes/06-node-autoscaling-cost-multicloud.md) · [11.01 — Admission webhooks](../11-advanced-production-patterns/01-admission-webhooks.md) · [11.02 — Operator development](../11-advanced-production-patterns/02-operator-development.md) · [11.03 — API Priority and Fairness](../11-advanced-production-patterns/03-api-priority-and-fairness.md) · [11.07 — Chaos engineering](../11-advanced-production-patterns/07-chaos-engineering.md) · [11.08 — HA control plane and etcd](../11-advanced-production-patterns/08-ha-control-plane-and-etcd.md) · [11.09 — Performance and scalability](../11-advanced-production-patterns/09-performance-and-scalability.md) · [13.03 — Multi-region active-active](../13-grand-capstone-bookstore-platform/03-multi-region-active-active.md) · [13.12 — Day-2: runbook + on-call playbook + DR drill + chaos game-day](../13-grand-capstone-bookstore-platform/12-day-2-runbook-on-call-dr-chaos.md) · [14.01 — Production-grade Terraform state](../14-eks-in-production-a-to-z/01-terraform-state-in-production.md) · [14.02 — EKS cluster lifecycle](../14-eks-in-production-a-to-z/02-eks-cluster-lifecycle.md) · [14.04 — Storage classes & EBS in production](../14-eks-in-production-a-to-z/04-storage-classes-and-ebs.md) · [14.05 — Logging & metrics cost discipline](../14-eks-in-production-a-to-z/05-logging-and-metrics-cost.md) · [14.06 — Cost guardrails](../14-eks-in-production-a-to-z/06-cost-guardrails.md) · [14.13 — Runtime defense & container security](../14-eks-in-production-a-to-z/13-runtime-defense-and-container-security.md) · [14.14 — Backup and restore with Velero](../14-eks-in-production-a-to-z/14-backup-and-restore-velero.md) · [14.17 — Cross-region DR + AWS account baseline + 90-day production-readiness runbook](../14-eks-in-production-a-to-z/17-cross-region-dr-account-baseline-90-day-runbook.md) · [15.01 — The PR-to-production lifecycle](../15-day-to-day-production-ops/01-pr-to-production-lifecycle.md) · [15.05 — Production secrets: Vault + ESO + rotation](../15-day-to-day-production-ops/05-production-secrets-vault-eso.md) · [15.06 — Progressive delivery in production](../15-day-to-day-production-ops/06-progressive-delivery-in-production.md) · [15.07 — Rollback playbook](../15-day-to-day-production-ops/07-rollback-playbook.md) · [15.08 — Feature flags and dark launches](../15-day-to-day-production-ops/08-feature-flags-and-dark-launches.md) · [15.09 — Hotfix workflow and breakglass](../15-day-to-day-production-ops/09-hotfix-workflow-and-breakglass.md) · [15.10 — Incident response & on-call](../15-day-to-day-production-ops/10-incident-response-and-on-call.md) · [15.11 — Day-to-day production operations](../15-day-to-day-production-ops/11-day-to-day-production-ops.md) · [15.12 — Capstone: the first 90 days running production](../15-day-to-day-production-ops/12-capstone-first-90-days.md)
 
 **`debezium`** (2) — [13.05 — Search and product discovery](../13-grand-capstone-bookstore-platform/05-search-and-product-discovery.md) · [13.06 — Payments and event sourcing](../13-grand-capstone-bookstore-platform/06-payments-and-event-sourcing.md)
 
@@ -566,11 +593,11 @@ future tooling but don't help indexing.
 
 **`scheduling`** (5) — [04.01 — The scheduler and nodes](../04-scheduling/01-scheduler-and-nodes.md) · [04.02 — Affinity, taints, and topology](../04-scheduling/02-affinity-taints-topology.md) · [04.03 — Priority and preemption](../04-scheduling/03-priority-and-preemption.md) · [12.02 — GPUs and accelerators](../12-kubernetes-for-machine-learning/02-gpus-and-accelerators.md) · [12.03 — Batch and gang scheduling](../12-kubernetes-for-machine-learning/03-batch-and-gang-scheduling.md)
 
-**`secrets`** (2) — [03.02 — Secrets](../03-config-and-storage/02-secrets.md) · [05.04 — Secrets and cluster hardening](../05-security/04-secrets-and-cluster-hardening.md)
+**`secrets`** (2) — [03.02 — Secrets](../03-config-and-storage/02-secrets.md) · [05.04 — Secrets at rest and in use](../05-security/04-secrets-and-cluster-hardening.md)
 
-**`secrets-rotation`** (3) — [05.04 — Secrets and cluster hardening](../05-security/04-secrets-and-cluster-hardening.md) · [11.05 — Secrets at scale](../11-advanced-production-patterns/05-secrets-at-scale.md) · [15.05 — Production secrets: Vault + ESO + rotation](../15-day-to-day-production-ops/05-production-secrets-vault-eso.md)
+**`secrets-rotation`** (3) — [05.04 — Secrets at rest and in use](../05-security/04-secrets-and-cluster-hardening.md) · [11.05 — Secrets at scale](../11-advanced-production-patterns/05-secrets-at-scale.md) · [15.05 — Production secrets: Vault + ESO + rotation](../15-day-to-day-production-ops/05-production-secrets-vault-eso.md)
 
-**`security`** (20) — [02.06 — Network policies](../02-networking/06-network-policies.md) · [03.02 — Secrets](../03-config-and-storage/02-secrets.md) · [05.01 — Authentication, authorization, RBAC](../05-security/01-authn-authz-rbac.md) · [05.02 — Pod security](../05-security/02-pod-security.md) · [05.03 — Supply chain security](../05-security/03-supply-chain.md) · [05.04 — Secrets and cluster hardening](../05-security/04-secrets-and-cluster-hardening.md) · [08.04 — Multi-tenancy and namespaces](../08-day-2-operations/04-multi-tenancy-and-namespaces.md) · [09.01 — Bookstore end-to-end](../09-end-to-end-bookstore/01-bookstore-end-to-end.md) · [10.03 — Cloud identity for workloads](../10-cloud-and-managed-kubernetes/03-cloud-identity.md) · [11.01 — Admission webhooks](../11-advanced-production-patterns/01-admission-webhooks.md) · [11.04 — Service mesh](../11-advanced-production-patterns/04-service-mesh.md) · [11.05 — Secrets at scale](../11-advanced-production-patterns/05-secrets-at-scale.md) · [13.04 — Real auth: Keycloak OIDC + IRSA + Istio JWT](../13-grand-capstone-bookstore-platform/04-real-auth-keycloak-irsa-istio-jwt.md) · [13.06 — Payments and event sourcing](../13-grand-capstone-bookstore-platform/06-payments-and-event-sourcing.md) · [13.07 — Edge: Istio Gateway + Coraza WAF + per-tenant rate limiting](../13-grand-capstone-bookstore-platform/07-edge-gateway-waf-rate-limiting.md) · [14.12 — Supply chain security in production](../14-eks-in-production-a-to-z/12-supply-chain-security.md) · [14.13 — Runtime defense & container security](../14-eks-in-production-a-to-z/13-runtime-defense-and-container-security.md) · [15.03 — Image signing and provenance in CI](../15-day-to-day-production-ops/03-image-signing-and-provenance.md) · [15.05 — Production secrets: Vault + ESO + rotation](../15-day-to-day-production-ops/05-production-secrets-vault-eso.md) · [15.09 — Hotfix workflow and breakglass](../15-day-to-day-production-ops/09-hotfix-workflow-and-breakglass.md)
+**`security`** (20) — [02.06 — Network policies](../02-networking/06-network-policies.md) · [03.02 — Secrets](../03-config-and-storage/02-secrets.md) · [05.01 — Authentication, authorization, RBAC](../05-security/01-authn-authz-rbac.md) · [05.02 — Pod security](../05-security/02-pod-security.md) · [05.03 — Supply chain security](../05-security/03-supply-chain.md) · [05.04 — Secrets at rest and in use](../05-security/04-secrets-and-cluster-hardening.md) · [08.04 — Multi-tenancy and namespaces](../08-day-2-operations/04-multi-tenancy-and-namespaces.md) · [09.01 — Bookstore end-to-end](../09-end-to-end-bookstore/01-bookstore-end-to-end.md) · [10.03 — Cloud identity for workloads](../10-cloud-and-managed-kubernetes/03-cloud-identity.md) · [11.01 — Admission webhooks](../11-advanced-production-patterns/01-admission-webhooks.md) · [11.04 — Service mesh](../11-advanced-production-patterns/04-service-mesh.md) · [11.05 — Secrets at scale](../11-advanced-production-patterns/05-secrets-at-scale.md) · [13.04 — Real auth: Keycloak OIDC + IRSA + Istio JWT](../13-grand-capstone-bookstore-platform/04-real-auth-keycloak-irsa-istio-jwt.md) · [13.06 — Payments and event sourcing](../13-grand-capstone-bookstore-platform/06-payments-and-event-sourcing.md) · [13.07 — Edge: Istio Gateway + Coraza WAF + per-tenant rate limiting](../13-grand-capstone-bookstore-platform/07-edge-gateway-waf-rate-limiting.md) · [14.12 — Supply chain security in production](../14-eks-in-production-a-to-z/12-supply-chain-security.md) · [14.13 — Runtime defense & container security](../14-eks-in-production-a-to-z/13-runtime-defense-and-container-security.md) · [15.03 — Image signing and provenance in CI](../15-day-to-day-production-ops/03-image-signing-and-provenance.md) · [15.05 — Production secrets: Vault + ESO + rotation](../15-day-to-day-production-ops/05-production-secrets-vault-eso.md) · [15.09 — Hotfix workflow and breakglass](../15-day-to-day-production-ops/09-hotfix-workflow-and-breakglass.md)
 
 **`slo`** (7) — [06.01 — Observability: metrics](../06-production-readiness/01-observability-metrics.md) · [06.05 — Reliability and disruptions](../06-production-readiness/05-reliability-and-disruptions.md) · [11.07 — Chaos engineering](../11-advanced-production-patterns/07-chaos-engineering.md) · [11.09 — Performance and scalability](../11-advanced-production-patterns/09-performance-and-scalability.md) · [13.09 — Observability: OpenTelemetry traces + Loki logs + Prometheus metrics + Grafana dashboards](../13-grand-capstone-bookstore-platform/09-observability-otel-tempo-loki-prometheus-grafana.md) · [13.12 — Day-2: runbook + on-call playbook + DR drill + chaos game-day](../13-grand-capstone-bookstore-platform/12-day-2-runbook-on-call-dr-chaos.md) · [15.06 — Progressive delivery in production](../15-day-to-day-production-ops/06-progressive-delivery-in-production.md)
 
@@ -620,20 +647,21 @@ defers security depth, delivery, and day-2.
 | 3 | [00.03 — Architecture overview](../00-foundations/03-architecture-overview.md) | The components you'll be talking to |
 | 4 | [00.06 — The declarative API model](../00-foundations/06-declarative-api-model.md) | Spec/status; the one mental model |
 | 5 | [00.07 — Local cluster setup](../00-foundations/07-local-cluster-setup.md) | kind cluster + kubectl basics |
-| 6 | [01.01 — Pods](../01-core-workloads/01-pods.md) | The unit you actually run |
-| 7 | [01.02 — Health and lifecycle](../01-core-workloads/02-health-and-lifecycle.md) | Probes — without them, nothing is production-real |
-| 8 | [01.03 — Resources and QoS](../01-core-workloads/03-resources-and-qos.md) | Requests/limits keep noisy neighbors off you |
-| 9 | [01.04 — ReplicaSets and Deployments](../01-core-workloads/04-replicasets-and-deployments.md) | Self-healing + rolling updates + rollback |
-| 10 | [01.07 — Jobs and CronJobs](../01-core-workloads/07-jobs-and-cronjobs.md) | Batch and scheduled work |
-| 11 | [02.01 — The networking model](../02-networking/01-networking-model.md) | IP-per-pod and where it comes from |
-| 12 | [02.02 — Services](../02-networking/02-services.md) | Stable in-cluster endpoints |
-| 13 | [02.03 — DNS and service discovery](../02-networking/03-dns-and-discovery.md) | How service names actually resolve |
-| 14 | [02.04 — Ingress](../02-networking/04-ingress.md) | Reach the app from outside |
-| 15 | [03.01 — ConfigMaps](../03-config-and-storage/01-configmaps.md) | Externalize configuration |
-| 16 | [03.02 — Secrets](../03-config-and-storage/02-secrets.md) | Externalize credentials (with caveats) |
-| 17 | [03.03 — Volumes](../03-config-and-storage/03-volumes.md) | Ephemeral data, downward API |
-| 18 | [03.04 — Persistent storage](../03-config-and-storage/04-persistent-storage.md) | PV/PVC/StorageClass — surviving pod death |
-| 19 | [04.01 — The scheduler and nodes](../04-scheduling/01-scheduler-and-nodes.md) | Why your pod landed where it did |
+| 6 | 00.08 Security foundations <!-- link-later: 00.08 --> | The threats the baseline answers, and why every manifest carries it |
+| 7 | [01.01 — Pods](../01-core-workloads/01-pods.md) | The unit you actually run |
+| 8 | [01.02 — Health and lifecycle](../01-core-workloads/02-health-and-lifecycle.md) | Probes — without them, nothing is production-real |
+| 9 | [01.03 — Resources and QoS](../01-core-workloads/03-resources-and-qos.md) | Requests/limits keep noisy neighbors off you |
+| 10 | [01.04 — ReplicaSets and Deployments](../01-core-workloads/04-replicasets-and-deployments.md) | Self-healing + rolling updates + rollback |
+| 11 | [01.07 — Jobs and CronJobs](../01-core-workloads/07-jobs-and-cronjobs.md) | Batch and scheduled work |
+| 12 | [02.01 — The networking model](../02-networking/01-networking-model.md) | IP-per-pod and where it comes from |
+| 13 | [02.02 — Services](../02-networking/02-services.md) | Stable in-cluster endpoints |
+| 14 | [02.03 — DNS and service discovery](../02-networking/03-dns-and-discovery.md) | How service names actually resolve |
+| 15 | [02.04 — Ingress](../02-networking/04-ingress.md) | Reach the app from outside |
+| 16 | [03.01 — ConfigMaps](../03-config-and-storage/01-configmaps.md) | Externalize configuration |
+| 17 | [03.02 — Secrets](../03-config-and-storage/02-secrets.md) | Externalize credentials (with caveats) |
+| 18 | [03.03 — Volumes](../03-config-and-storage/03-volumes.md) | Ephemeral data, downward API |
+| 19 | [03.04 — Persistent storage](../03-config-and-storage/04-persistent-storage.md) | PV/PVC/StorageClass — surviving pod death |
+| 20 | [04.01 — The scheduler and nodes](../04-scheduling/01-scheduler-and-nodes.md) | Why your pod landed where it did |
 
 **You'll be ready to:** deploy a multi-pod web app with persistent storage, expose it over HTTPS, and reason about why it's healthy or broken.
 
@@ -679,28 +707,35 @@ roughly cheapest-fix-first to hardest-fix-last.
 
 **You'll be ready to:** know where every dollar in your K8s bill goes and have the levers to push at least three of them.
 
-### Path 4 — Security top-to-bottom (~14 hours)
+### Path 4 — Security top-to-bottom (estimate pending Part 05)
 
-From "what an authenticated request looks like" to "the cluster survives a
-compromised pod." Reading lowest-layer-first.
+From the attacker's first foothold to a cluster that detects and contains
+it. Part 05 carries the path; the last rows show where each control runs in
+production.
 
 | # | Chapter | Why here |
 |---|---|---|
-| 1 | [05.01 — Authentication, authorization, RBAC](../05-security/01-authn-authz-rbac.md) | The "who can do what" model |
-| 2 | [05.02 — Pod security](../05-security/02-pod-security.md) | PSA restricted, dropped capabilities, seccomp |
-| 3 | [05.03 — Supply chain security](../05-security/03-supply-chain.md) | SBOM, vulnerability scanning in CI |
-| 4 | [05.04 — Secrets and cluster hardening](../05-security/04-secrets-and-cluster-hardening.md) | KMS, etcd-at-rest, the audit log |
-| 5 | [02.06 — Network policies](../02-networking/06-network-policies.md) | Default-deny, egress controls |
-| 6 | [11.01 — Admission webhooks](../11-advanced-production-patterns/01-admission-webhooks.md) | Policy at admission: Kyverno/Gatekeeper patterns |
-| 7 | [11.04 — Service mesh](../11-advanced-production-patterns/04-service-mesh.md) | mTLS, request-level authz, traffic policy |
-| 8 | [11.05 — Secrets at scale](../11-advanced-production-patterns/05-secrets-at-scale.md) | Vault, ESO, the rotation story |
-| 9 | [13.04 — Real auth: Keycloak + IRSA + Istio JWT](../13-grand-capstone-bookstore-platform/04-real-auth-keycloak-irsa-istio-jwt.md) | End-user OIDC + workload identity together |
-| 10 | [14.12 — Supply chain security in production](../14-eks-in-production-a-to-z/12-supply-chain-security.md) | Cosign signing + verification webhook |
-| 11 | [14.13 — Runtime defense & container security](../14-eks-in-production-a-to-z/13-runtime-defense-and-container-security.md) | Falco, eBPF-based runtime detection |
-| 12 | [15.03 — Image signing and provenance in CI](../15-day-to-day-production-ops/03-image-signing-and-provenance.md) | The CI side of cosign |
-| 13 | [15.05 — Production secrets: Vault + ESO + rotation](../15-day-to-day-production-ops/05-production-secrets-vault-eso.md) | The day-2 ops on secret rotation |
+| 1 | 00.08 Security foundations <!-- link-later: 00.08 --> | The bookstore threat model, STRIDE, and the trust boundaries to defend |
+| 2 | 05.00 The attacker's view <!-- link-later: 05.00 --> | Recon from a compromised Pod and from the network |
+| 3 | [05.01 Authentication, authorization, RBAC](../05-security/01-authn-authz-rbac.md) | Who can do what, and the escalation paths that break least privilege |
+| 4 | [05.02 Pod security](../05-security/02-pod-security.md) | Restricted Pod Security Admission, container escape, user namespaces |
+| 5 | [05.03 Supply chain security](../05-security/03-supply-chain.md) | Pinned images, SBOMs, static analysis of manifests |
+| 6 | [05.04 Secrets at rest and in use](../05-security/04-secrets-and-cluster-hardening.md) | Encryption at rest, KMS, and why files beat environment variables |
+| 7 | [02.06 Network policies](../02-networking/06-network-policies.md) | Default-deny, egress control, and the metadata endpoint |
+| 8 | 05.05 Kernel isolation: seccomp, AppArmor, SELinux, sandboxed runtimes <!-- link-later: 05.05 --> | What a container may ask the kernel to do, and sandboxed runtimes |
+| 9 | 05.06 Control plane and node hardening <!-- link-later: 05.06 --> | kube-bench, CIS checks, binary verification, upgrades |
+| 10 | 05.07 Admission control and policy as code <!-- link-later: 05.07 --> | ValidatingAdmissionPolicy first, then Kyverno and Gatekeeper |
+| 11 | 05.08 Audit logs, runtime detection and incident response <!-- link-later: 05.08 --> | Falco and Tetragon, then responding to a compromised workload |
+| 12 | 05.09 Running security on a platform team <!-- link-later: 05.09 --> | Vulnerability management, exceptions with an expiry, control mapping |
+| 13 | 05.10 Capstone: attack and harden the bookstore <!-- link-later: 05.10 --> | Attack, harden, re-attack, and keep the evidence |
+| 14 | [11.01 Admission webhooks](../11-advanced-production-patterns/01-admission-webhooks.md) | The production webhook that enforces what 05.07 teaches |
+| 15 | [11.04 Service mesh](../11-advanced-production-patterns/04-service-mesh.md) | Service-to-service mTLS and workload identity |
+| 16 | [13.04 Real auth: Keycloak + IRSA + Istio JWT](../13-grand-capstone-bookstore-platform/04-real-auth-keycloak-irsa-istio-jwt.md) | End-user OIDC and workload identity together |
+| 17 | [14.12 Supply chain security in production](../14-eks-in-production-a-to-z/12-supply-chain-security.md) | Cosign signing and a verification webhook |
+| 18 | [14.13 Runtime defense & container security](../14-eks-in-production-a-to-z/13-runtime-defense-and-container-security.md) | Falco and eBPF runtime detection on EKS |
+| 19 | [15.05 Production secrets: Vault + ESO + rotation](../15-day-to-day-production-ops/05-production-secrets-vault-eso.md) | Rotation as a day-2 routine |
 
-**You'll be ready to:** answer a CKS-level question on any of authn, authz, supply chain, runtime, or secrets — and explain why the controls compose.
+**You'll be ready to:** explain how identity, pod isolation, supply chain, kernel confinement, admission policy and detection compose, and show each control working on a lab cluster.
 
 ### Path 5 — Machine learning on Kubernetes (~16 hours)
 
@@ -792,59 +827,6 @@ golden-path / IDP story.
 | 10 | [15.12 — Capstone: the first 90 days](../15-day-to-day-production-ops/12-capstone-first-90-days.md) | What "platform success" looks like 90 days in |
 
 **You'll be ready to:** define a golden path for an internal application team — onboarding, paved-road deploy, observability defaults, cost visibility — and ship it as a product, not a side-project.
-
-### Path 9 — CKAD exam preparation (~20 hours)
-
-Chapters mapped to the CKAD curriculum domains. Read in order; the exam tests
-hands-on speed, so try every example.
-
-| # | Chapter | Why here (CKAD domain) |
-|---|---|---|
-| 1 | [00.06 — The declarative API model](../00-foundations/06-declarative-api-model.md) | Apply / labels / selectors (every domain) |
-| 2 | [00.07 — Local cluster setup](../00-foundations/07-local-cluster-setup.md) | kubectl context/imperative — exam speed |
-| 3 | [01.01 — Pods](../01-core-workloads/01-pods.md) | App design (~20%); multi-container, init |
-| 4 | [01.02 — Health and lifecycle](../01-core-workloads/02-health-and-lifecycle.md) | App observability (~15%); probes |
-| 5 | [01.03 — Resources and QoS](../01-core-workloads/03-resources-and-qos.md) | App design; resource requests/limits |
-| 6 | [01.04 — ReplicaSets and Deployments](../01-core-workloads/04-replicasets-and-deployments.md) | App deployment (~20%); rolling/rollback |
-| 7 | [01.07 — Jobs and CronJobs](../01-core-workloads/07-jobs-and-cronjobs.md) | App deployment; batch |
-| 8 | [01.08 — Deployment strategies](../01-core-workloads/08-deployment-strategies.md) | App deployment; blue-green/canary |
-| 9 | [02.02 — Services](../02-networking/02-services.md) | Services & networking (~20%) |
-| 10 | [02.03 — DNS and service discovery](../02-networking/03-dns-and-discovery.md) | Services & networking |
-| 11 | [02.04 — Ingress](../02-networking/04-ingress.md) | Services & networking |
-| 12 | [02.06 — Network policies](../02-networking/06-network-policies.md) | Services & networking |
-| 13 | [03.01 — ConfigMaps](../03-config-and-storage/01-configmaps.md) | App environment, config (~25%) |
-| 14 | [03.02 — Secrets](../03-config-and-storage/02-secrets.md) | App environment, config |
-| 15 | [03.03 — Volumes](../03-config-and-storage/03-volumes.md) | App environment, config |
-| 16 | [03.04 — Persistent storage](../03-config-and-storage/04-persistent-storage.md) | App environment, config |
-| 17 | [06.01 — Observability: metrics](../06-production-readiness/01-observability-metrics.md) | App observability |
-| 18 | [08.03 — Troubleshooting playbook](../08-day-2-operations/03-troubleshooting-playbook.md) | Exam survival skill: kubectl describe/logs/events |
-
-**You'll be ready to:** sit the CKAD exam and finish in time. The hands-on speed comes from drilling — read this guide, then time yourself on Killer.sh.
-
-### Path 10 — CKS exam preparation (~18 hours)
-
-Chapters mapped to the CKS curriculum. CKS is hands-on and heavy on Parts 05,
-11, and 14. Read in order; do every lab.
-
-| # | Chapter | Why here (CKS domain) |
-|---|---|---|
-| 1 | [00.04 — Control plane deep dive](../00-foundations/04-control-plane-deep-dive.md) | Cluster setup (~10%); apiserver flags |
-| 2 | [00.05 — Node components](../00-foundations/05-node-components.md) | Cluster setup; kubelet, containerd |
-| 3 | [05.01 — Authn, authz, RBAC](../05-security/01-authn-authz-rbac.md) | Cluster hardening (~15%); RBAC |
-| 4 | [05.02 — Pod security](../05-security/02-pod-security.md) | System hardening (~15%); PSA, capabilities |
-| 5 | [05.03 — Supply chain](../05-security/03-supply-chain.md) | Supply chain security (~20%); SBOM, scanners |
-| 6 | [05.04 — Secrets & cluster hardening](../05-security/04-secrets-and-cluster-hardening.md) | Cluster hardening; KMS, etcd-at-rest, audit |
-| 7 | [02.06 — Network policies](../02-networking/06-network-policies.md) | Cluster hardening; default-deny |
-| 8 | [11.01 — Admission webhooks](../11-advanced-production-patterns/01-admission-webhooks.md) | Cluster hardening; OPA/Kyverno/ImagePolicyWebhook |
-| 9 | [11.04 — Service mesh](../11-advanced-production-patterns/04-service-mesh.md) | Microservice vulnerabilities (~20%); mTLS |
-| 10 | [11.05 — Secrets at scale](../11-advanced-production-patterns/05-secrets-at-scale.md) | Microservice vulnerabilities; Vault/ESO |
-| 11 | [14.12 — Supply chain security in production](../14-eks-in-production-a-to-z/12-supply-chain-security.md) | Supply chain; cosign + verification |
-| 12 | [14.13 — Runtime defense & container security](../14-eks-in-production-a-to-z/13-runtime-defense-and-container-security.md) | Runtime security (~20%); Falco, sandboxing |
-| 13 | [15.03 — Image signing and provenance in CI](../15-day-to-day-production-ops/03-image-signing-and-provenance.md) | Supply chain; CI side |
-| 14 | [15.05 — Production secrets: Vault + ESO + rotation](../15-day-to-day-production-ops/05-production-secrets-vault-eso.md) | Microservice vulnerabilities; rotation drills |
-| 15 | [08.03 — Troubleshooting playbook](../08-day-2-operations/03-troubleshooting-playbook.md) | Required for exam-time debugging |
-
-**You'll be ready to:** sit the CKS exam. The exam tests speed and recall — drill the kubectl + auditctl + falco invocations until they're muscle memory.
 
 ---
 
