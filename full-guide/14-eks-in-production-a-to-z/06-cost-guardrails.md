@@ -244,7 +244,7 @@ Cost of each:
 - `infracost` installed locally (`brew install infracost`, or a release
   tarball from the project's GitHub releases page, checked against the
   checksum file published beside it; do not pipe an install script into a
-  shell). First run requires `infracost auth login` — free, no credit card
+  shell). First run requires `infracost auth login`: free, no credit card
   needed.
 - OpenCost installed per [Part 13 ch.10](../13-grand-capstone-bookstore-platform/10-cost-opencost-per-tenant-finops.md)
   (the chapter ships the install + per-tenant aggregation).

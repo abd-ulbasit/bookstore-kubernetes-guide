@@ -17,7 +17,7 @@
 > Backstage scaffolder.
 
 **Estimated time:** ~30 min read · ~60 min hands-on
-**Prerequisites:** [Part 13 ch.11](../13-grand-capstone-bookstore-platform/11-backstage-developer-portal-idp.md) — Backstage scaffolder that anchors the onboarding flow · [Part 11 ch.10](../11-advanced-production-patterns/10-platform-engineering.md) — DX principles you'll now operationalize on EKS · [Part 14 ch.10](./10-gitops-bootstrap-fresh-cluster.md) — outer-loop GitOps the inner-loop tools must respect
+**Prerequisites:** [Part 13 ch.11](../13-grand-capstone-bookstore-platform/11-backstage-developer-portal-idp.md): Backstage scaffolder that anchors the onboarding flow · [Part 11 ch.10](../11-advanced-production-patterns/10-platform-engineering.md): DX principles you'll now operationalize on EKS · [Part 14 ch.10](./10-gitops-bootstrap-fresh-cluster.md): outer-loop GitOps the inner-loop tools must respect
 
 **You'll know after this:** • understand why a slow inner loop is a compounding developer-velocity tax · • deploy Telepresence / Mirrord to re-route service traffic to a laptop process · • configure Skaffold / Tilt for file-watch → rebuild → deploy cycles against EKS · • use Devcontainers for "remote EKS, local IDE" workflows · • design a 5-minute developer onboarding that ties Backstage + Telepresence + Skaffold together
 

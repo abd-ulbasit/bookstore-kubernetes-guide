@@ -26,7 +26,7 @@
 > [`examples/bookstore/platform/`](../examples/bookstore/platform/) tree.
 
 **Estimated time:** ~60 min read · half-day hands-on
-**Prerequisites:** [Part 11 ch.02](02-operator-development.md) — operator pattern Crossplane composes with · [Part 11 ch.06](06-multi-cluster-and-fleet.md) — ApplicationSet delivery for the paved road · [Part 05 ch.07](../05-security/07-admission-control-and-policy-as-code.md) — Kyverno guardrails inside the paved road
+**Prerequisites:** [Part 11 ch.02](02-operator-development.md): operator pattern Crossplane composes with · [Part 11 ch.06](06-multi-cluster-and-fleet.md): ApplicationSet delivery for the paved road · [Part 05 ch.07](../05-security/07-admission-control-and-policy-as-code.md): Kyverno guardrails inside the paved road
 **You'll know after this:** • articulate the "platform as a product" thesis and the golden-path mental model · • author a Crossplane XRD + Composition + Claim that provisions a guarded namespace · • compare Crossplane / Backstage / Score and where each fits the IDP stack · • measure platform success via DORA / adoption / cognitive-load metrics · • decide build-vs-buy between Backstage and commercial IDPs
 
 **Tier A (kind).** The hands-on runs on a disposable kind cluster that you

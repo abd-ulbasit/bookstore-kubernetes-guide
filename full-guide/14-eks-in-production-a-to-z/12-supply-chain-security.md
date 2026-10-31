@@ -1,8 +1,8 @@
 # 14.12 — Supply chain security in production
 
 > [Part 05 ch.03](../05-security/03-supply-chain.md) introduced the
-> four-stage trust chain — **scan and SBOM, pin by digest, sign and
-> attest, admit** — for the kind-
+> four-stage trust chain (**scan and SBOM, pin by digest, sign and
+> attest, admit**) for the kind-
 > local Bookstore. This chapter is the **cloud-deployed path**: AWS
 > **ECR enhanced scanning** (billed by Amazon Inspector, not ECR),
 > **`syft`** for the SBOM-as-build-artifact discipline,
