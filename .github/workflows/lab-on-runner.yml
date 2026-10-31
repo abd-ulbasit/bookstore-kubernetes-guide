@@ -1,0 +1,348 @@
+name: lab-on-runner
+
+# Three labs that did not fit the small lab host, run where there is room: an
+# ubuntu-latest runner has 4 vCPU and 16 GiB of memory. Nothing runs on a
+# cloud account and no secret is read. A lab builds the Bookstore images from
+# this repository, loads them into a kind cluster, runs its script from
+# full-guide/examples/security-lab/labs, and uploads the transcript as an
+# artifact, in the format of the files under security-lab/evidence.
+#
+#   06-01  the real kube-prometheus-stack install with the chapter's values,
+#          node-exporter alone in its namespace at privileged, Prometheus's
+#          active targets, and a Grafana login refused without credentials
+#   06-04  the catalog HPA under the 06.06 load Job, scale-out, the hold at
+#          maxReplicas and the scale-in, on metrics-server with verified
+#          kubelet serving certificates
+#   09-01  the composed stack: metrics-server, Traefik, kube-prometheus-stack,
+#          Argo CD, Argo Rollouts, KEDA, Kyverno and the Velero controller,
+#          with the Bookstore prod overlay on top and the chapter's checks
+#
+# Run one lab, or all three, from the Actions tab (workflow_dispatch). Cluster:
+# kind v0.33.0 with the node image that cluster-three-node.yaml pins by digest.
+# Tools are the versions the guide's other workflows pin.
+#
+# Every action is pinned to a commit SHA; the trailing comment names the
+# release. Permissions start empty and each job asks for what it needs.
+
+on:
+  workflow_dispatch:
+    inputs:
+      lab:
+        description: 'Which lab to run'
+        type: choice
+        options: ['all', '06-01', '06-04', '09-01']
+        default: 'all'
+  # Only while the labs are developed. Removed before the branch merges.
+  push:
+    branches: ['security-first/ci-labs']
+
+permissions: {}
+
+concurrency:
+  group: lab-on-runner-${{ github.ref }}
+  cancel-in-progress: true
+
+defaults:
+  run:
+    shell: bash
+
+env:
+  KIND_CONFIG: full-guide/examples/security-lab/kind/cluster-three-node.yaml
+  BOOKSTORE: full-guide/examples/bookstore
+  LABS: full-guide/examples/security-lab/labs
+
+jobs:
+  lab-06-01:
+    name: 06.01 kube-prometheus-stack
+    if: ${{ github.event_name == 'push' || inputs.lab == 'all' || inputs.lab == '06-01' }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    permissions:
+      contents: read
+    steps:
+      - uses: step-security/harden-runner@dc2769abcc0fcfbadfc1df54081c1608579ef6b2 # v2.22.2
+        with:
+          egress-policy: audit
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: azure/setup-helm@9bc31f4ebc9c6b171d7bfbaa5d006ae7abdb4310 # v5.0.1
+        with:
+          version: 'v3.22.1'
+      - uses: azure/setup-kubectl@bda439f5f36b99b262ebdcd3613869bddb064c8e # v5.2.0
+        with:
+          version: 'v1.37.2'
+      - name: Read the node image digest from the kind config
+        id: pin
+        run: |
+          set -euo pipefail
+          image="$(awk '/image: kindest\/node/ {print $2; exit}' "$KIND_CONFIG")"
+          echo "node_image=${image}" >> "$GITHUB_OUTPUT"
+      - name: Build the catalog image
+        run: docker build -t bookstore/catalog:dev "${BOOKSTORE}/app/catalog"
+      - uses: helm/kind-action@1544676c07bb3570fcb70166beaa07c4528fd4aa # v1.15.1
+        with:
+          version: v0.33.0
+          node_image: ${{ steps.pin.outputs.node_image }}
+          config: ${{ env.KIND_CONFIG }}
+          cluster_name: bookstore
+      - name: Load the image into the cluster
+        run: kind load docker-image bookstore/catalog:dev --name bookstore
+      - name: Run the lab
+        id: lab
+        env:
+          LAB_SUMMARY: ${{ runner.temp }}/summary.md
+          LAB_WORK: ${{ runner.temp }}/lab-work
+        run: |
+          mkdir -p out
+          set +e
+          bash "${LABS}/06-01.sh" 2> >(tee out/stderr.txt >&2) | tee out/raw.txt
+          rc="${PIPESTATUS[0]}"
+          echo "exit=${rc}" >> "$GITHUB_OUTPUT"
+          exit 0
+      - name: Write the transcript
+        if: always()
+        env:
+          RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+          RUN_ATTEMPT: ${{ github.run_attempt }}
+        run: |
+          bash .github/scripts/lab-runner/transcript.sh 06-01 \
+            06-production-readiness/01-observability-metrics.md 06-01.sh \
+            out/raw.txt out/06-01.txt
+      - name: Collect diagnostics
+        if: always()
+        run: bash .github/scripts/lab-runner/diagnostics.sh out/diagnostics.txt
+      - name: Job summary
+        if: always()
+        env:
+          LAB_EXIT: ${{ steps.lab.outputs.exit }}
+          LAB_SUMMARY: ${{ runner.temp }}/summary.md
+        run: |
+          {
+            echo "## Lab 06.01, kube-prometheus-stack on a runner"
+            echo
+            echo "Lab script exit code: \`${LAB_EXIT:-not run}\` (0 means every check passed)."
+            echo
+            if [ -s "$LAB_SUMMARY" ]; then sed 's/^/- /' "$LAB_SUMMARY"; else echo "- the script wrote no summary lines"; fi
+            echo
+            echo "The transcript is the artifact \`evidence-06-01\`."
+          } >> "$GITHUB_STEP_SUMMARY"
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        if: always()
+        with:
+          name: evidence-06-01
+          path: |
+            out/06-01.txt
+            out/diagnostics.txt
+          retention-days: 14
+          if-no-files-found: warn
+      - name: Fail the job if a check failed
+        if: always()
+        env:
+          LAB_EXIT: ${{ steps.lab.outputs.exit }}
+        run: '[ "${LAB_EXIT:-1}" = 0 ]'
+
+  lab-06-04:
+    name: 06.04 HPA under load
+    if: ${{ github.event_name == 'push' || inputs.lab == 'all' || inputs.lab == '06-04' }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 90
+    permissions:
+      contents: read
+    steps:
+      - uses: step-security/harden-runner@dc2769abcc0fcfbadfc1df54081c1608579ef6b2 # v2.22.2
+        with:
+          egress-policy: audit
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: azure/setup-helm@9bc31f4ebc9c6b171d7bfbaa5d006ae7abdb4310 # v5.0.1
+        with:
+          version: 'v3.22.1'
+      - uses: azure/setup-kubectl@bda439f5f36b99b262ebdcd3613869bddb064c8e # v5.2.0
+        with:
+          version: 'v1.37.2'
+      - name: Read the node image digest from the kind config
+        id: pin
+        run: |
+          set -euo pipefail
+          image="$(awk '/image: kindest\/node/ {print $2; exit}' "$KIND_CONFIG")"
+          echo "node_image=${image}" >> "$GITHUB_OUTPUT"
+      - name: Build the catalog image
+        run: docker build -t bookstore/catalog:dev "${BOOKSTORE}/app/catalog"
+      - uses: helm/kind-action@1544676c07bb3570fcb70166beaa07c4528fd4aa # v1.15.1
+        with:
+          version: v0.33.0
+          node_image: ${{ steps.pin.outputs.node_image }}
+          config: ${{ env.KIND_CONFIG }}
+          cluster_name: bookstore
+      - name: Load the image into the cluster
+        run: kind load docker-image bookstore/catalog:dev --name bookstore
+      - name: Run the lab, one phase after another
+        id: lab
+        env:
+          LAB_SUMMARY: ${{ runner.temp }}/summary.md
+          LAB_WORK: ${{ runner.temp }}/lab-work
+        run: |
+          mkdir -p out
+          set +e
+          {
+            echo "# Runner recording, from examples/security-lab/labs/06-04.sh, one phase after another."
+            for phase in metrics bookstore spread idle load1 "load2 5" after cleanup; do
+              # shellcheck disable=SC2086
+              bash "${LABS}/06-04.sh" ${phase}
+              rc=$?
+              echo "phase ${phase}: exit ${rc}" >&2
+              if [ "$rc" -ne 0 ] && [ "$phase" != cleanup ]; then
+                echo "stopping after a failed phase" >&2
+                echo "# phase ${phase} stopped with exit ${rc}"
+                break
+              fi
+            done
+          } 2> >(tee out/stderr.txt >&2) | tee out/raw.txt
+          if grep -q '^# phase .* stopped' out/raw.txt; then echo "exit=1" >> "$GITHUB_OUTPUT"; else echo "exit=0" >> "$GITHUB_OUTPUT"; fi
+          exit 0
+      - name: Write the transcript
+        if: always()
+        env:
+          RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+          RUN_ATTEMPT: ${{ github.run_attempt }}
+        run: |
+          bash .github/scripts/lab-runner/transcript.sh 06-04 \
+            06-production-readiness/04-autoscaling.md 06-04.sh \
+            out/raw.txt out/06-04.txt
+      - name: Collect diagnostics
+        if: always()
+        run: bash .github/scripts/lab-runner/diagnostics.sh out/diagnostics.txt
+      - name: Job summary
+        if: always()
+        env:
+          LAB_EXIT: ${{ steps.lab.outputs.exit }}
+        run: |
+          {
+            echo "## Lab 06.04, the catalog HPA under load on a runner"
+            echo
+            echo "Phase result: \`${LAB_EXIT:-not run}\` (0 means every phase finished)."
+            echo
+            echo "Replica counts and CPU readings, from the load phases:"
+            echo
+            echo '```'
+            grep -E '^catalog +Deployment/catalog' out/raw.txt | awk '{print $3, $4, "replicas", $7}' | uniq | head -60
+            echo '```'
+            echo
+            echo "The transcript is the artifact \`evidence-06-04\`."
+          } >> "$GITHUB_STEP_SUMMARY"
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        if: always()
+        with:
+          name: evidence-06-04
+          path: |
+            out/06-04.txt
+            out/diagnostics.txt
+          retention-days: 14
+          if-no-files-found: warn
+      - name: Fail the job if a phase failed
+        if: always()
+        env:
+          LAB_EXIT: ${{ steps.lab.outputs.exit }}
+        run: '[ "${LAB_EXIT:-1}" = 0 ]'
+
+  lab-09-01:
+    name: 09.01 the composed stack
+    if: ${{ github.event_name == 'push' || inputs.lab == 'all' || inputs.lab == '09-01' }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 120
+    permissions:
+      contents: read
+    steps:
+      - uses: step-security/harden-runner@dc2769abcc0fcfbadfc1df54081c1608579ef6b2 # v2.22.2
+        with:
+          egress-policy: audit
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: azure/setup-helm@9bc31f4ebc9c6b171d7bfbaa5d006ae7abdb4310 # v5.0.1
+        with:
+          version: 'v3.22.1'
+      - uses: azure/setup-kubectl@bda439f5f36b99b262ebdcd3613869bddb064c8e # v5.2.0
+        with:
+          version: 'v1.37.2'
+      - name: Free disk space for the images of eight components
+        run: |
+          df -h /
+          sudo rm -rf /usr/share/dotnet /usr/local/lib/android /opt/ghc /opt/hostedtoolcache/CodeQL
+          df -h /
+      - name: Read the node image digest and print the chapter's kind config
+        id: pin
+        run: |
+          set -euo pipefail
+          image="$(awk '/image: kindest\/node/ {print $2; exit}' "$KIND_CONFIG")"
+          echo "node_image=${image}" >> "$GITHUB_OUTPUT"
+          bash "${LABS}/09-01.sh" kind-config > "${RUNNER_TEMP}/kind-capstone.yaml"
+          cat "${RUNNER_TEMP}/kind-capstone.yaml"
+      - name: Build the four images, with the chapter's command
+        run: |
+          set -euo pipefail
+          cd "${BOOKSTORE}/app"
+          for s in catalog orders payments-worker storefront; do
+            docker build -t bookstore/$s:dev ./$s
+          done
+      - uses: helm/kind-action@1544676c07bb3570fcb70166beaa07c4528fd4aa # v1.15.1
+        with:
+          version: v0.33.0
+          node_image: ${{ steps.pin.outputs.node_image }}
+          config: ${{ runner.temp }}/kind-capstone.yaml
+          cluster_name: bookstore
+      - name: Run the lab
+        id: lab
+        env:
+          LAB_SUMMARY: ${{ runner.temp }}/summary.md
+          LAB_WORK: ${{ runner.temp }}/lab-work
+        run: |
+          mkdir -p out
+          set +e
+          bash "${LABS}/09-01.sh" 2> >(tee out/stderr.txt >&2) | tee out/raw.txt
+          rc="${PIPESTATUS[0]}"
+          echo "exit=${rc}" >> "$GITHUB_OUTPUT"
+          exit 0
+      - name: Write the transcript
+        if: always()
+        env:
+          RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+          RUN_ATTEMPT: ${{ github.run_attempt }}
+        run: |
+          bash .github/scripts/lab-runner/transcript.sh 09-01 \
+            09-end-to-end-bookstore/01-bookstore-end-to-end.md 09-01.sh \
+            out/raw.txt out/09-01.txt
+      - name: Collect diagnostics
+        if: always()
+        run: bash .github/scripts/lab-runner/diagnostics.sh out/diagnostics.txt
+      - name: Job summary
+        if: always()
+        env:
+          LAB_EXIT: ${{ steps.lab.outputs.exit }}
+          LAB_SUMMARY: ${{ runner.temp }}/summary.md
+        run: |
+          {
+            echo "## Lab 09.01, the composed Bookstore stack on a runner"
+            echo
+            echo "Lab script exit code: \`${LAB_EXIT:-not run}\` (0 means every check passed)."
+            echo
+            if [ -s "$LAB_SUMMARY" ]; then sed 's/^/- /' "$LAB_SUMMARY"; else echo "- the script wrote no summary lines"; fi
+            echo
+            echo "The transcript is the artifact \`evidence-09-01\`."
+          } >> "$GITHUB_STEP_SUMMARY"
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        if: always()
+        with:
+          name: evidence-09-01
+          path: |
+            out/09-01.txt
+            out/diagnostics.txt
+          retention-days: 14
+          if-no-files-found: warn
+      - name: Fail the job if a check failed
+        if: always()
+        env:
+          LAB_EXIT: ${{ steps.lab.outputs.exit }}
+        run: '[ "${LAB_EXIT:-1}" = 0 ]'
