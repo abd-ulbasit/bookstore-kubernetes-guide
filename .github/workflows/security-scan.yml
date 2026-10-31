@@ -286,7 +286,10 @@ jobs:
           persist-credentials: false
       - run: |
           set -euo pipefail
-          want="FROM golang:${GO_VERSION}-alpine AS build"
+          # The tag must match GO_VERSION. A builder may also pin a digest after
+          # the tag (00.02 does, from its first appearance); this check reads the
+          # version, not the digest.
+          want="FROM golang:${GO_VERSION}-alpine"
           found=$(grep -rnE '^FROM golang:' --include='Dockerfile*' full-guide/examples || true)
           if [ -z "$found" ]; then
             echo "FAIL: no Go builder stages found. The examples moved or the"
@@ -294,10 +297,10 @@ jobs:
             exit 1
           fi
           echo "$found"
-          bad=$(printf '%s\n' "$found" | grep -vF ":${want}" || true)
+          bad=$(printf '%s\n' "$found" | grep -vE ":${want}(@sha256:[0-9a-f]{64})? AS build\$" || true)
           if [ -n "$bad" ]; then
             echo
-            echo "FAIL: these builder stages differ from '${want}':"
+            echo "FAIL: these builder stages differ from '${want}[@sha256:<digest>] AS build':"
             echo "$bad"
             exit 1
           fi

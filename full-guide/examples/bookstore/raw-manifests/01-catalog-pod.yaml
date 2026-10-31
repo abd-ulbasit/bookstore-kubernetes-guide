@@ -8,7 +8,8 @@
 # explained, against the threat it answers, in 01-core-workloads/01-pods.md.
 #
 # Needs the `bookstore` namespace (Pod Security `restricted`) and the
-# `catalog-sa` ServiceAccount, both created in Part 00 ch.07 step 6:
+# `catalog-sa` ServiceAccount, both created in Part 00 ch.07 step 6. Part 01
+# ch.01 step 1 checks both before this manifest is applied:
 #   kubectl apply -n bookstore -f examples/bookstore/raw-manifests/01-catalog-pod.yaml
 # Both dry runs need a reachable cluster, because kubectl reads the API
 # discovery first. Part 00 ch.06 shows the server-side and client-side forms:

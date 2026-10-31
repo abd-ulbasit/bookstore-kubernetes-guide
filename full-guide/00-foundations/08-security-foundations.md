@@ -270,10 +270,21 @@ guide suppresses. Each one gets an entry in one registry file, which records:
 - the chapter that explains it;
 - an expiry date no more than 12 months out.
 
-The registry file is not in the repository yet. Its gate is not built. Until
-both exist, this chapter does not claim that an exception is enforced. The
-rule still applies: a pull request that adds a namespace above `restricted`
-or a suppressed finding must add the entry in the same change.
+The registry is two files. `security/namespace-exceptions.yaml` lists every
+namespace the guide labels above `restricted`, at `baseline` or `privileged`.
+Each entry has a level, a reason, an upstream citation, the chapter that
+explains it, and an `expires` date. `.trivyignore.yaml`, at the repository root,
+lists each scanner finding the guide accepts, with the paths it covers. Each
+entry has an ID, its paths, a statement and an `expired_at` date. Trivy
+v0.76.1 marks ignore files experimental and does not read this one on its own,
+so the gates read it.
+
+`make gates-registry` checks both files in both directions. Every namespace
+labelled above `restricted` needs an entry, and every entry must still match a
+label. Every scanner entry must still match a finding. The gate fails an entry
+whose date has passed or that is more than 12 months out. A pull request that
+adds a namespace above `restricted` or a suppressed finding adds its entry in
+the same change.
 
 The gates already keep one allowlist of their own,
 `.github/scripts/gates/not-evaluated.allow`. It lists manifests no scanner

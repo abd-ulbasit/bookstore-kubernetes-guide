@@ -28,14 +28,14 @@ A Kubernetes cluster is **a brain plus a fleet of hands**, coordinated through
 a single doorway and a single shared notebook.
 
 - The **control plane** is the brain: it holds the desired and observed state
-  (the notebook, etcd), exposes the *only* doorway in or out (the API server),
+  (the notebook, etcd), exposes the doorway in and out (the API server),
   and runs the deciders (scheduler, controllers) that figure out what should
   happen.
 - The **worker nodes** are the hands: each runs an agent (kubelet) that reads
   the part of the notebook assigned to its machine and makes that machine
   match — pulling images, starting containers, wiring local networking.
 
-You only ever talk to the doorway. You write *intent* into the notebook through
+You talk to the doorway. You write *intent* into the notebook through
 it; the brain's deciders turn intent into instructions; the hands carry them
 out and write back what actually happened. This is the
 [reconciliation loop](01-why-kubernetes.md#the-reconciliation-loop-the-one-idea-to-keep)
@@ -74,7 +74,7 @@ flowchart LR
         pod["Pod<br/>containers"]
     end
     people -->|"1 authN, then authZ"| api
-    api -->|"2 only the API server"| etcd
+    api -->|"2 the API server writes etcd"| etcd
     api -->|"3 logs, exec, port-forward"| kubelet
     people -.->|"3 direct calls, if reachable"| kubelet
     kubelet -->|"4 local socket"| rt
@@ -84,8 +84,8 @@ flowchart LR
 
 Two components carry most of the risk. The API server takes every request
 from a user or a controller, and etcd holds the state those requests change.
-Most cluster hardening targets these two. Ch.08 turns these rows into a threat
-model for the Bookstore. <!-- link-later: 00.08 -->
+Most cluster hardening targets these two. [Ch.08](08-security-foundations.md)
+turns these rows into a threat model for the Bookstore.
 
 ## The cluster, on one page
 
@@ -118,7 +118,7 @@ flowchart TB
     end
 
     user -->|HTTPS API requests| api
-    api <-->|the only client of etcd| etcd
+    api <-->|the usual client of etcd| etcd
     sched -->|watch unscheduled Pods / write binding| api
     cm -->|watch + reconcile via API| api
     ccm -->|provision cloud resources| api
@@ -132,11 +132,10 @@ flowchart TB
 
 Two rules this picture encodes — internalize them now:
 
-1. **Everything goes through the API server.** No component reads or writes
-   etcd directly except the API server. The scheduler, controllers, kubelets,
-   `kubectl`, and your own controllers all talk *only* to the API server. This
-   single chokepoint is where authentication, authorization, validation, and
-   admission happen — and it's why "secure the API server" is so central
+1. **Everything goes through the API server.** The API server is the one
+   component meant to read or write etcd. The scheduler, controllers, kubelets,
+   `kubectl`, and your own controllers all talk to it. That chokepoint is where
+   authentication, authorization, validation, and admission happen, and it's why "secure the API server" is so central
    ([ch.04](04-control-plane-deep-dive.md),
    [Part 05](../05-security/01-authn-authz-rbac.md)).
 2. **Components don't call each other; they watch shared state and react.** The
@@ -152,7 +151,7 @@ Two rules this picture encodes — internalize them now:
 |---|---|---|
 | **Job** | Hold the truth; decide what should run where | Actually run the containers |
 | **Components** | api-server, etcd, scheduler, controller-manager, (cloud-controller-manager) | kubelet, container runtime, kube-proxy, your Pods |
-| **Talks to** | etcd (api-server only) + everything via api-server | api-server only |
+| **Talks to** | etcd (by design, via the api-server) + everything via api-server | api-server only |
 | **If it's down** | No *changes* can be made; running Pods keep running | Pods on that node are affected; the node is rescheduled around |
 | **Scale unit** | A few replicas for HA (odd # for etcd quorum) | Many nodes; add capacity by adding nodes |
 | **Where it lives** | Dedicated/managed nodes; *managed by the cloud on EKS/GKE/AKS* | Your worker nodes (you run/patch these even on managed) |
@@ -170,8 +169,8 @@ Control plane:
 
 - **kube-apiserver** — the front door and hub. A stateless REST server: every
   read/write of every object passes through it; it performs authentication,
-  authorization (RBAC), admission control, validation, and is the *only*
-  process that reads/writes etcd. Horizontally scalable (run several behind a
+  authorization (RBAC), admission control, validation, and is the
+  process designed to read and write etcd. Horizontally scalable (run several behind a
   load balancer). **Attack surface:** its HTTPS port, 6443 by default, which
   every client uses. Anything that can reach that port can send it a request,
   so the checks run on each request decide what gets through. Deep dive:
@@ -423,6 +422,8 @@ Remove the namespace when you are done with `kubectl delete namespace demo`.
 [bl-image-digest]: ../01-core-workloads/01-pods.md#baseline-image-digest
 [bl-resources]: ../01-core-workloads/01-pods.md#baseline-resources
 [bl-namespace]: ../01-core-workloads/01-pods.md#baseline-namespace
+[bl-privilege]: ../01-core-workloads/01-pods.md#baseline-privilege-escalation
+[bl-capabilities]: ../01-core-workloads/01-pods.md#baseline-capabilities
 
 ## How it works under the hood
 
@@ -493,13 +494,13 @@ The architecture in one skeleton (memorize this shape):
 
 ```
 CONTROL PLANE (decides)            DATA PLANE / worker nodes (do)
-  kube-apiserver  ── only door       kubelet           ── node agent
+  kube-apiserver  ── front door      kubelet           ── node agent
   etcd            ── source of truth container runtime ── runs containers (CRI)
   kube-scheduler  ── places Pods     kube-proxy        ── Service routing
   controller-mgr  ── reconcile loops CNI plugin        ── Pod networking
   (cloud-ctrl-mgr)── cloud glue      [your Pods]       ── the workloads
 
-Rule 1: only the API server talks to etcd; everyone talks only to the API server.
+Rule 1: the API server is the one meant to talk to etcd; everyone else talks to the API server.
 Rule 2: components don't call each other — they watch shared state and reconcile.
 ```
 

@@ -1,8 +1,8 @@
-# syntax=docker/dockerfile:1
+# syntax=docker/dockerfile:1@sha256:4edf897a3ffa55b89f906fc8cc78afdb3f1834cc9c7083565e611a8a7d5fe99e
 # Multi-stage build -> single static binary on distroless (nonroot).
 # Built and referenced by chapters as: bookstore/catalog:dev
 
-FROM golang:1.26.10-alpine AS build
+FROM golang:1.26.10-alpine@sha256:a2012b4a1d1f9f7e9f44e0d39b805a901e856b1dd80b4e6ee4338db547050308 AS build
 WORKDIR /src
 
 # Cache module downloads separately from source for faster rebuilds.

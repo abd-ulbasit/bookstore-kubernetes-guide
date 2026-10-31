@@ -1,21 +1,27 @@
 # Transcript for 00-foundations/04-control-plane-deep-dive.md, hands-on steps.
-# Tier A: kind cluster sf-pilot (a shared lab cluster), node Kubernetes
-# v1.37.0, kubectl v1.37.2, context kind-sf-pilot.
+# Tier A: a kind cluster on a shared lab host, node Kubernetes v1.37.0,
+# kubectl v1.37.2. The cluster name is shown as "lab" below (the same
+# redaction as the 00.03 transcript).
 # Namespace substitution: the chapter names the namespace control-plane-lab.
-# This run used p00-cp, as the shared-cluster rule requires. Every command
-# below is the chapter's command with that one name replaced.
+# The steps that create objects ran as p00-cp, as the shared-cluster rule
+# requires. Every command below is the chapter's command with that one name
+# replaced. The two reads that name control-plane-lab itself create nothing:
+# that namespace does not exist on this cluster, and the API server still
+# answers each request.
 # Pause digest: registry.k8s.io/pause:3.9 resolves to the index digest
 # sha256:7031c1b283388d2c2e09b57badb803c05ebed362dc88d84b480cc47f72a21097
 # (the Digest line of docker pull on the lab engine). Its image config
 # declares user 65535:65535.
+# A first pass of the steps timed out on the first rollout while the pause
+# image was pulled on the node, and its output is not reused. The steps below
+# are a second pass, from the same demo.yaml, that completed.
 # The namespace is deleted at the end of the run.
-
-## step 1: the baseline Deployment, replacing the imperative demo
-
+## step 1: the baseline Deployment, with its own ServiceAccount
 $ kubectl apply -f demo.yaml
 namespace/p00-cp created
+serviceaccount/demo-sa created
 deployment.apps/demo created
-
+exit=0
 $ kubectl -n p00-cp rollout status deployment/demo --timeout=120s
 Waiting for deployment spec update to be observed...
 Waiting for deployment "demo" rollout to finish: 0 out of 3 new replicas have been updated...
@@ -23,93 +29,115 @@ Waiting for deployment "demo" rollout to finish: 0 of 3 updated replicas are ava
 Waiting for deployment "demo" rollout to finish: 1 of 3 updated replicas are available...
 Waiting for deployment "demo" rollout to finish: 2 of 3 updated replicas are available...
 deployment "demo" successfully rolled out
-
+exit=0
 $ kubectl -n p00-cp get pods -l app=demo
-NAME                   READY   STATUS    RESTARTS   AGE
-demo-7df4fc77b-5rdkz   1/1     Running   0          19s
-demo-7df4fc77b-7fj4s   1/1     Running   0          19s
-demo-7df4fc77b-r8w7t   1/1     Running   0          19s
-
-## step 2: the ReplicaSet controller replaces a deleted Pod
-
-$ kubectl -n p00-cp delete pod demo-7df4fc77b-5rdkz --wait=true
-pod "demo-7df4fc77b-5rdkz" deleted from p00-cp namespace
-
+NAME                    READY   STATUS    RESTARTS   AGE
+demo-769bc68ff8-4q8vb   1/1     Running   0          26s
+demo-769bc68ff8-htlf6   1/1     Running   0          26s
+demo-769bc68ff8-jw7rq   1/1     Running   0          26s
+exit=0
+$ POD=$(kubectl -n p00-cp get pods -l app=demo -o jsonpath=...); kubectl -n p00-cp delete pod "$POD" --wait=true
+deleting demo-769bc68ff8-4q8vb
+pod "demo-769bc68ff8-4q8vb" deleted from p00-cp namespace
+exit=0
 $ kubectl -n p00-cp rollout status deployment/demo --timeout=120s
 Waiting for deployment "demo" rollout to finish: 2 of 3 updated replicas are available...
 deployment "demo" successfully rolled out
-
+exit=0
 $ kubectl -n p00-cp get pods -l app=demo
-NAME                   READY   STATUS    RESTARTS   AGE
-demo-7df4fc77b-4m92x   1/1     Running   0          4s
-demo-7df4fc77b-7fj4s   1/1     Running   0          24s
-demo-7df4fc77b-r8w7t   1/1     Running   0          24s
+NAME                    READY   STATUS    RESTARTS   AGE
+demo-769bc68ff8-htlf6   1/1     Running   0          38s
+demo-769bc68ff8-jw7rq   1/1     Running   0          38s
+demo-769bc68ff8-wnqxj   1/1     Running   0          11s
+exit=0
 
-## step 3: control-plane health, components and leases
-
+## step 2: control-plane health, components and leases
 $ kubectl get --raw='/readyz?verbose' | tail -1
 readyz check passed
-
+exit=0
 $ kubectl -n kube-system get pods -l tier=control-plane
 NAME                                             READY   STATUS    RESTARTS        AGE
-etcd-sf-pilot-control-plane                      1/1     Running   0               7h37m
-kube-apiserver-sf-pilot-control-plane            1/1     Running   1 (5h5m ago)    7h37m
-kube-controller-manager-sf-pilot-control-plane   1/1     Running   6 (3h25m ago)   7h37m
-kube-scheduler-sf-pilot-control-plane            1/1     Running   6 (3h25m ago)   7h37m
-
+etcd-lab-control-plane                      1/1     Running   0               9h
+kube-apiserver-lab-control-plane            1/1     Running   1 (7h14m ago)   9h
+kube-controller-manager-lab-control-plane   1/1     Running   22 (8m5s ago)   9h
+kube-scheduler-lab-control-plane            1/1     Running   22 (8m1s ago)   9h
+exit=0
 $ kubectl -n kube-system get lease
 NAME                                   HOLDER                                                                      AGE
-apiserver-xr5vsoumhtqpa32jmtz77owmla   apiserver-xr5vsoumhtqpa32jmtz77owmla_4f8190e7-2bcf-45b5-b3ad-4940a9db05d0   5h5m
-kube-controller-manager                sf-pilot-control-plane_b5a00ad8-06da-4094-a599-e461bab9a65c                 7h37m
-kube-scheduler                         sf-pilot-control-plane_fb017537-65ec-41da-88d1-019b83654780                 7h37m
+apiserver-xr5vsoumhtqpa32jmtz77owmla   apiserver-xr5vsoumhtqpa32jmtz77owmla_4f8190e7-2bcf-45b5-b3ad-4940a9db05d0   7h14m
+kube-controller-manager                lab-control-plane_5f0bc5a0-01c7-4117-99a7-7a3e289f064a                 9h
+kube-scheduler                         lab-control-plane_5fbd5113-9d98-4a9d-8008-7c03a039277e                 9h
+exit=0
 
-## step 4: authorization, one allowed and one denied request
-
-$ kubectl auth can-i create pods --namespace p00-cp
+## step 3: authorization, one allowed and one denied request
+$ kubectl auth can-i create pods --namespace control-plane-lab
 yes
+exit=0
+$ kubectl -n control-plane-lab get secrets --as=system:serviceaccount:control-plane-lab:reader
+Error from server (Forbidden): secrets is forbidden: User "system:serviceaccount:control-plane-lab:reader" cannot list resource "secrets" in API group "" in the namespace "control-plane-lab"
+exit=1
 
-$ kubectl auth can-i get secrets --namespace p00-cp --as=system:serviceaccount:p00-cp:reader
-no
-
-## step 5: which control-plane components hold etcd client flags
-
-$ for c in kube-apiserver kube-controller-manager kube-scheduler; do echo "$c: $(kubectl -n kube-system get pod -l component=$c -o jsonpath='{.items[0].spec.containers[0].command}' | grep -o -- '--etcd-[a-z]*' | sort -u | tr '\n' ' ')"; done
+## step 4: which control-plane components hold etcd client flags, and which mount the pki directory
+$ for c in kube-apiserver kube-controller-manager kube-scheduler; do ... etcd flags ...; done
 kube-apiserver: --etcd-cafile --etcd-certfile --etcd-keyfile --etcd-servers 
 kube-controller-manager: 
 kube-scheduler: 
+exit=0
+$ for c in ...; hostPath volumes ...
+kube-apiserver: /etc/ssl/certs /etc/ca-certificates /etc/kubernetes/pki /usr/local/share/ca-certificates /usr/share/ca-certificates
+kube-controller-manager: /etc/ssl/certs /etc/ca-certificates /etc/kubernetes/pki /etc/kubernetes/controller-manager.conf /usr/local/share/ca-certificates /usr/share/ca-certificates
+kube-scheduler: /etc/kubernetes/scheduler.conf
+exit=0
 
+
+## step 4b: the node's pki directory, file names only
+$ docker exec <kind node container> ls /etc/kubernetes/pki   (file names only)
+apiserver-etcd-client.crt
+apiserver-etcd-client.key
+apiserver-kubelet-client.crt
+apiserver-kubelet-client.key
+apiserver.crt
+apiserver.key
+ca.crt
+ca.key
+etcd
+front-proxy-ca.crt
+front-proxy-ca.key
+front-proxy-client.crt
+front-proxy-client.key
+sa.key
+sa.pub
+exit=0
+## step 5: encryption at rest and etcd client certificates
 $ kubectl -n kube-system get pod -l component=kube-apiserver -o jsonpath='{.items[0].spec.containers[0].command}' | grep -c encryption-provider-config
 0
-
-## step 6: a Secret, read back through the API and then from etcd
-
-$ kubectl -n p00-cp create secret generic demo-token --from-literal=token=demo-not-a-credential-7731
-secret/demo-token created
-
-$ kubectl -n p00-cp get secret demo-token -o jsonpath='{.data.token}' | base64 -d; echo
-demo-not-a-credential-7731
-
-$ ETCD=$(kubectl -n kube-system get pod -l component=etcd -o name)
-pod/etcd-sf-pilot-control-plane
-
-$ kubectl -n kube-system exec "$ETCD" -- etcdctl --endpoints=https://127.0.0.1:2379 --cacert=/etc/kubernetes/pki/etcd/ca.crt --cert=/etc/kubernetes/pki/etcd/server.crt --key=/etc/kubernetes/pki/etcd/server.key endpoint status --write-out=table
-┌────────────────────────┬─────────────────┬─────────┬─────────────────┬─────────┬────────┬───────────────────────┬────────┬───────────┬────────────┬───────────┬────────────┬────────────────────┬────────┬──────────────────────────┬───────────────────┐
-│        ENDPOINT        │       ID        │ VERSION │ STORAGE VERSION │ DB SIZE │ IN USE │ PERCENTAGE NOT IN USE │ QUOTA  │ IS LEADER │ IS LEARNER │ RAFT TERM │ RAFT INDEX │ RAFT APPLIED INDEX │ ERRORS │ DOWNGRADE TARGET VERSION │ DOWNGRADE ENABLED │
-├────────────────────────┼─────────────────┼─────────┼─────────────────┼─────────┼────────┼───────────────────────┼────────┼───────────┼────────────┼───────────┼────────────┼────────────────────┼────────┼──────────────────────────┼───────────────────┤
-│ https://127.0.0.1:2379 │ e58c878e0e01014 │   3.7.0 │           3.7.0 │  3.8 MB │ 1.3 MB │                   67% │ 2.1 GB │      true │      false │         2 │      56484 │              56484 │        │                          │             false │
-└────────────────────────┴─────────────────┴─────────┴─────────────────┴─────────┴────────┴───────────────────────┴────────┴───────────┴────────────┴───────────┴────────────┴────────────────────┴────────┴──────────────────────────┴───────────────────┘
-
-$ kubectl -n kube-system exec "$ETCD" -- etcdctl --endpoints=https://127.0.0.1:2379 --cacert=/etc/kubernetes/pki/etcd/ca.crt --cert=/etc/kubernetes/pki/etcd/server.crt --key=/etc/kubernetes/pki/etcd/server.key get /registry/secrets/p00-cp/demo-token --print-value-only | grep -a -o 'demo-not-a-credential-[0-9]*'
-demo-not-a-credential-7731
-
-## cleanup
-
-$ kubectl delete namespace p00-cp --wait=true
-namespace "p00-cp" deleted
-
-## step 7: etcd requires client certificates
-
-$ kubectl -n kube-system get pod -l component=etcd -o jsonpath='{.items[0].spec.containers[0].command}' | grep -o -- '[a-z-]*client-cert-auth=[a-z]*'
+exit=1
+$ etcd client-cert-auth flags
 --client-cert-auth=true
 --peer-client-cert-auth=true
+exit=0
 
+## step 6: a Secret, read back through the API and then from etcd
+$ kubectl -n p00-cp create secret generic demo-token --from-literal=token=demo-not-a-credential-7731
+secret/demo-token created
+exit=0
+$ kubectl -n p00-cp get secret demo-token -o jsonpath='{.data.token}' | base64 -d; echo
+demo-not-a-credential-7731
+exit=0
+$ ETCD=$(kubectl -n kube-system get pod -l component=etcd -o name); kubectl -n kube-system exec "$ETCD" -- etcdctl ... get /registry/secrets/p00-cp/demo-token --print-value-only | grep -a -o "demo-not-a-credential-[0-9]*"
+pod/etcd-lab-control-plane
+demo-not-a-credential-7731
+exit=0
+
+## cleanup
+$ kubectl delete namespace p00-cp --wait=true
+namespace "p00-cp" deleted
+exit=0
+$ kubectl get namespace control-plane-lab
+Error from server (NotFound): namespaces "control-plane-lab" not found
+exit=1
+## not used in the chapter: an attempt to list the controller-manager's pki directory
+$ kubectl -n kube-system exec <kube-controller-manager pod> -- ls /etc/kubernetes/pki
+pod/kube-controller-manager-lab-control-plane
+error: Internal error occurred: Internal error occurred: error executing command in container: failed to exec in container: failed to start exec "6699cf6ff574dda97471e72177554c855a045ebb9a8fa54c8c897ed419e067cb": OCI runtime exec failed: exec failed: unable to start container process: exec: "ls": executable file not found in $PATH
+exit=1

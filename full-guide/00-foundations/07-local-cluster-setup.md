@@ -44,7 +44,7 @@ client; **kubeconfig** is the file telling it *which* API server and *as whom*.
 
 These are the only threats this chapter owns. The Pod's own threats come with
 the Pod in [01.01](../01-core-workloads/01-pods.md#baseline). The threat model
-for the whole Bookstore is in Part 00 ch.08 <!-- link-later: 00.08 -->.
+for the whole Bookstore is in [Part 00 ch.08](08-security-foundations.md).
 
 ## Tooling diagram
 
@@ -144,7 +144,7 @@ You're now looking at the real architecture from
 [ch.03](03-architecture-overview.md):
 
 ```sh
-kubectl cluster-info                       # API server endpoint (the only door, ch.04)
+kubectl cluster-info                       # API server endpoint (the front door, ch.04)
 kubectl get nodes -o wide                  # the node container(s); STATUS should be Ready
 kubectl -n kube-system get pods            # control plane + CoreDNS + kube-proxy as Pods
 kubectl get --raw='/readyz?verbose'        # API server health gates (ch.04 pipeline)

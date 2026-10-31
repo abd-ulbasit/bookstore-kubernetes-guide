@@ -67,7 +67,7 @@ so namespaces are the unit you segment a shared cluster with
 
 This chapter names no threat specific to its subject. The platform supplies
 the controls, but it does not secure the workload for you, and
-<!-- link-later: 00.08 -->00.08 maps each threat to the control that answers
+[Ch.08](08-security-foundations.md) maps each threat to the control that answers
 it.
 
 [k8s-netpol]: https://kubernetes.io/docs/concepts/services-networking/network-policies/
