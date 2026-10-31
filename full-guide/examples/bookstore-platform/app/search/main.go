@@ -28,7 +28,7 @@ import (
 type config struct {
 	port            string
 	meiliBaseURL    string
-	meiliMasterKey  string
+	meiliAPIKey     string
 	indexNamePrefix string
 }
 
@@ -37,7 +37,7 @@ func main() {
 	cfg := config{
 		port:            envOr("PORT", "8080"),
 		meiliBaseURL:    envOr("MEILI_URL", "http://meilisearch.bookstore-platform-search.svc.cluster.local:7700"),
-		meiliMasterKey:  os.Getenv("MEILI_MASTER_KEY"),
+		meiliAPIKey:     os.Getenv("MEILI_API_KEY"),
 		indexNamePrefix: envOr("INDEX_PREFIX", "books-"),
 	}
 
@@ -115,8 +115,8 @@ func meiliSearch(ctx context.Context, cfg config, index, q string) ([]byte, erro
 		return nil, err
 	}
 	req.Header.Set("Content-Type", "application/json")
-	if cfg.meiliMasterKey != "" {
-		req.Header.Set("Authorization", "Bearer "+cfg.meiliMasterKey)
+	if cfg.meiliAPIKey != "" {
+		req.Header.Set("Authorization", "Bearer "+cfg.meiliAPIKey)
 	}
 	client := &http.Client{Timeout: 5 * time.Second}
 	resp, err := client.Do(req)

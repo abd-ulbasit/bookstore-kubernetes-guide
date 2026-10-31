@@ -105,6 +105,19 @@ the same document version, not a duplicate. The sink uses the document's
 primary key (the `books.id` column); Meilisearch upserts by primary key
 deterministically.
 
+## Threats and controls
+
+The search path adds four attack surfaces to the platform: a listener that
+takes writes from any pod, a key that can do more than search, a plugin
+archive nobody checked, and a password written into a manifest.
+
+| Threat | Control taught here | Deeper |
+|---|---|---|
+| A pod that is not a Kafka client writes or reads `books.cdc` | One TLS listener with mutual TLS, `authorization: simple`, and a KafkaUser whose ACLs name only the topics it uses (steps 2 and 5) | [Part 11 ch.04](../11-advanced-production-patterns/04-service-mesh.md) for the mesh |
+| A key that can delete indexes or list keys ends up in a workload | Scoped Meilisearch keys: `documents.add` for the sink, `search` for the service, both on `books-*` and both expiring (step 4) | [Meilisearch API keys](https://www.meilisearch.com/docs/learn/security/master_api_keys) |
+| A plugin archive is swapped between review and build | A `sha512sum` on each plugin artifact, verified by Strimzi at build (step 5) | [Strimzi 0.40.0 docs](https://strimzi.io/docs/operators/0.40.0/configuring.html) |
+| A password or key is committed in a manifest or a connector spec | External Secrets fills each Secret; connectors read files with `${dir:...}` (steps 3, 5 and 7) | [Part 13 ch.06](06-payments-and-event-sourcing.md) |
+
 ## Diagrams
 
 ### Diagram A — CDC pipeline (Mermaid)
@@ -175,17 +188,17 @@ DIMENSION              MEILISEARCH       OPENSEARCH         TYPESENSE         AL
 ─────────────────────  ────────────────  ─────────────────  ────────────────  ─────────────────────
 Language               Go                Java (JVM)         C++               SaaS (closed)
 K8s topology           1 StatefulSet     N-shard cluster    1 StatefulSet     external (HTTPS)
-RAM per 1M docs        ~200 MB           ~2-4 GB            ~150 MB           N/A
-Query latency p99      <50 ms            <50 ms             <30 ms            <50 ms
 Typo tolerance         built-in          configurable       built-in          built-in
 Facets / filters       built-in          built-in           built-in          built-in
-Vector search          v1.3+             yes                v0.25+            yes
 Multi-tenant pattern   index-per-tenant  index-per-tenant   collection-per-t  app-per-tenant
-Cluster mode (HA)      v1.7+ exp         yes (mature)       yes               managed
+Cluster mode (HA)      upstream docs     yes (mature)       yes               managed
 Cost                   self-hosted       self-hosted        self-hosted       per query
 When it wins           <10M docs/t,      >100M docs, full   speed > breadth   zero ops capacity
                        low ops cost      Elastic features
 ```
+
+The table leaves out memory and latency figures. This chapter did not measure
+them, and they change with each release.
 
 ## Hands-on with the Bookstore Platform
 
@@ -193,7 +206,10 @@ Assumes the three regions from
 [13.01](01-bookstore-2-from-toy-to-platform.md) are up and the platform-
 base from 13.01 is applied. We work in `us-east`; the Argo CD
 ApplicationSet (13.03) replicates this stack into `eu-west` and
-`ap-southeast` automatically.
+`ap-southeast` automatically. Every workload manifest below carries the
+[security baseline](../01-core-workloads/01-pods.md#baseline), and this
+chapter explains only the fields that are new here. Namespaces:
+`kafka-system` is labelled `baseline` (step 1); the others are `restricted`.
 
 ### 1. Install the Strimzi Kafka operator (pinned-Helm)
 
@@ -204,14 +220,42 @@ it's there.
 ```sh
 kubectl config use-context kind-bookstore-platform-us-east
 
+# Label the namespace before the operator lands in it. kafka-system is
+# baseline, not restricted: the Connect build runs as root (see below).
+kubectl create namespace kafka-system
+kubectl label namespace kafka-system \
+  pod-security.kubernetes.io/enforce=baseline \
+  pod-security.kubernetes.io/enforce-version=latest \
+  pod-security.kubernetes.io/audit=restricted \
+  pod-security.kubernetes.io/audit-version=latest \
+  pod-security.kubernetes.io/warn=restricted \
+  pod-security.kubernetes.io/warn-version=latest
+
 STRIMZI_VERSION="0.40.0"
 
 helm repo add strimzi https://strimzi.io/charts/
 helm install strimzi-operator strimzi/strimzi-kafka-operator \
-  --version "$STRIMZI_VERSION" -n kafka-system --create-namespace --wait
+  --version "$STRIMZI_VERSION" -n kafka-system \
+  -f examples/bookstore-platform/kafka/strimzi-values.yaml --wait
 ```
 
-Confirm the operator is up:
+The values file sets the chart's own security fields. The operator image
+declares UID 1001, so the pod runs as that user with no privilege
+escalation, every capability dropped and a read-only root filesystem. The
+chart mounts `/tmp` from an emptyDir, so the read-only root does not stop
+the operator from starting.
+
+**Why baseline.** The operator and the Kafka pods meet `restricted`. The
+KafkaConnect build does not. Strimzi builds the Connect image with the
+Kaniko executor, and that image declares no user and sets `USER=root`, so
+the build runs as root. A namespace has one level, so `kafka-system` takes
+`baseline`, the strictest level that admits the build. The exception is
+registered in `security/namespace-exceptions.yaml` with its reason and an
+expiry. This chapter adds no NetworkPolicy to `kafka-system`. The allows it
+needs depend on Kafka's own traffic, so they are a gap to close before
+production.
+
+Confirm the operator is up. *Illustrative output, not captured.*
 
 ```sh
 kubectl -n kafka-system get pods
@@ -235,23 +279,50 @@ kubectl -n kafka-system wait kafka/bookstore-platform-kafka \
   --for=condition=Ready --timeout=300s
 ```
 
+The cluster has one listener, `tls`, on port 9093. It requires mutual TLS
+(`authentication: type: tls`): a client presents a certificate that the
+clients CA signed, and Strimzi signs one for each KafkaUser. `authorization:
+type: simple` then checks each request against that user's ACLs. There is no
+plaintext listener, so a pod without a KafkaUser certificate cannot complete
+the handshake. Step 5 creates the one KafkaUser this chapter needs.
+
 What landed: a 3-broker KRaft cluster (combined broker + controller
 nodes from the KafkaNodePool) + six topics (`books.cdc`, `orders.placed`,
 `payments.completed`, `payments.failed`, `ml.predictions`, `ml.drift`).
-The Pod manifest carries the restricted PSA shape; the storage is
-per-broker PVCs of 10 GiB each.
+Each broker container drops all capabilities, forbids privilege escalation
+and runs from a read-only root filesystem. Strimzi mounts `/tmp` from an
+emptyDir. The storage is per-broker PVCs of 10 GiB each.
 
 ### 3. Apply Meilisearch
 
+The three ExternalSecrets that fill this chapter's Secrets from Vault are in
+`search/external-secrets.yaml`. They need External Secrets and the
+ClusterSecretStore from [Part 11 ch.05](../11-advanced-production-patterns/05-secrets-at-scale.md), which 13.06 also uses.
+
+Apply the Meilisearch manifest and the ExternalSecrets, then wait for the
+rollout. The `#` lines show illustrative output, not captured output.
+
 ```sh
 kubectl apply -f examples/bookstore-platform/search/meilisearch.yaml
+kubectl apply -f examples/bookstore-platform/search/external-secrets.yaml
 
 kubectl -n bookstore-platform-search rollout status statefulset/meilisearch
 # statefulset rolling update complete 1 pods at revision ...
 ```
 
+The image is pinned by digest. The tag `v1.56.0` sits in a comment because a
+tag can move and a digest cannot. The image declares no user, so the pod sets
+`runAsUser: 65532` itself, and `fsGroup` lets that user write the data
+volume.
+
+The namespace denies traffic by default. The `allow-index-clients` policy
+admits port 7700 from the tenant namespace and from `kafka-system`, where the
+sink runs. Meilisearch makes no outbound calls, so egress stays denied. A
+NetworkPolicy takes effect only on a CNI that enforces it. kind's default CNI
+does not, so on kind these objects are accepted but not enforced.
+
 Test it directly (port-forward; production goes through the Istio
-gateway):
+gateway). *Illustrative output, not captured.*
 
 ```sh
 kubectl -n bookstore-platform-search port-forward svc/meilisearch 7700:7700 >/dev/null 2>&1 &
@@ -260,10 +331,11 @@ curl -s http://localhost:7700/health
 # {"status":"available"}
 ```
 
-### 4. Pre-create the per-tenant indexes (idempotent)
+### 4. Pre-create the per-tenant indexes and the scoped keys (idempotent)
 
 Meilisearch auto-creates indexes on first write; explicit pre-creation
-sets the primary-key + searchable-attributes up front:
+sets the primary-key + searchable-attributes up front. The same master-key
+session creates the two scoped keys that the workloads use:
 
 ```sh
 MASTER_KEY=$(kubectl -n bookstore-platform-search get secret meilisearch-master-key -o jsonpath='{.data.master-key}' | base64 -d)
@@ -277,7 +349,24 @@ curl -s -X POST http://localhost:7700/indexes/books-acme-books/settings/searchab
   -H "Authorization: Bearer $MASTER_KEY" \
   -H "Content-Type: application/json" \
   -d '["title","author"]'
+
+# Sink key: documents.add on books-* only. Search key: search on books-* only.
+curl -s -X POST http://localhost:7700/keys \
+  -H "Authorization: Bearer $MASTER_KEY" \
+  -H "Content-Type: application/json" \
+  -d '{"description":"Debezium sink: add documents to books-* only","actions":["documents.add"],"indexes":["books-*"],"expiresAt":"2027-06-30T00:00:00Z"}'
+
+curl -s -X POST http://localhost:7700/keys \
+  -H "Authorization: Bearer $MASTER_KEY" \
+  -H "Content-Type: application/json" \
+  -d '{"description":"books-v2 search service: search books-* only","actions":["search"],"indexes":["books-*"],"expiresAt":"2027-06-30T00:00:00Z"}'
 ```
+
+The master key is for setup only. It can create keys, so no workload should
+hold it. Each key response carries the key value once. Store both values in
+Vault at `kv/bookstore-platform/meilisearch` as `sink_key` and `search_key`,
+the properties the ExternalSecrets read from step 3 onward, then discard the
+responses. Both keys expire on 2027-06-30, so rotate them before then.
 
 ### 5. Apply the Debezium connector
 
@@ -294,16 +383,27 @@ kubectl -n kafka-system wait kafkaconnect/bookstore-platform-connect \
   --for=condition=Ready --timeout=600s
 ```
 
-The KafkaConnect spec wires Kafka Connect's **FileConfigProvider** to
-the Meilisearch master-key Secret via Strimzi's `externalConfiguration`:
-the Secret named `meilisearch-master-key` (created with the StatefulSet
-in step 3) is mounted into the Connect Pod at
-`/opt/kafka/external-configuration/meili/`. The sink connector's
-`Authorization: Bearer ${file:...:master-key}` placeholder resolves
-against that path at start time, so the master key never appears in the
-connector spec or `kubectl describe` output — it is injected at runtime.
-Without this wiring every sink write returns 401 (Meilisearch runs with
-`--env production`) and the index never receives a row.
+The KafkaConnect spec mounts two Secrets through Strimzi's
+`externalConfiguration`: `meilisearch-sink-key`, which holds the sink's
+scoped key, and `debezium-postgres`, which holds the Postgres password. Strimzi
+mounts each Secret under `/opt/kafka/external-configuration/<volume>/`, one
+file per key. The connectors read those files with the
+**DirectoryConfigProvider** and `${dir:<directory>:<file>}`. The sink's header
+is `Authorization: Bearer ${dir:/opt/kafka/external-configuration/meili-sink:api-key}`,
+so neither value appears in the connector spec or in `kubectl describe`
+output. Without the header every sink write returns 401 (Meilisearch runs
+with `--env production`) and the index never receives a row.
+
+The Connect worker authenticates as the KafkaUser `bookstore-platform-connect`
+from the same file. Its certificate lands in a Secret of that name. Its ACLs
+cover `books.cdc`, the Connect internal topics and the sink's consumer group,
+and nothing else.
+
+Each plugin artifact carries a `sha512sum`. Strimzi verifies the download
+against it while it builds the Connect image, so a swapped archive fails the
+build. Debezium names its topic `bookstore-platform.public.books`. The
+`route` transform renames it to `books.cdc`, the topic the ACLs, the sink and
+`kafka/topics.yaml` all use.
 
 > **If the KafkaConnector does not reach Ready after 10 minutes:**
 > `kubectl -n kafka-system logs -l app.kubernetes.io/component=cdc` —
@@ -311,7 +411,8 @@ Without this wiring every sink write returns 401 (Meilisearch runs with
 > replication is not allowed for user` (missing REPLICATION role on the
 > Postgres user).
 
-Check both connectors land in RUNNING state:
+Check both connectors land in RUNNING state. *Illustrative output, not
+captured.*
 
 ```sh
 kubectl -n kafka-system get kafkaconnector
@@ -333,9 +434,10 @@ SQL
 # Wait ~3 seconds for the CDC pipeline.
 sleep 5
 
-# Verify the document is in Meilisearch.
+# Verify the document is in Meilisearch. The search uses the search key from
+# step 4, as the service does. The output below is illustrative, not captured.
 curl -s "http://localhost:7700/indexes/books-acme-books/search?q=kubernetes" \
-  -H "Authorization: Bearer $MASTER_KEY" | jq .
+  -H "Authorization: Bearer $SEARCH_KEY" | jq .
 # {
 #   "hits": [
 #     {
@@ -370,16 +472,26 @@ kubectl create namespace bookstore-platform-acme-books --dry-run=client -o yaml 
     pod-security.kubernetes.io/warn=restricted -o yaml | \
   kubectl apply -f -
 
-kubectl apply -f deployment.yaml -f service.yaml
+kubectl apply -f external-secret.yaml -f deployment.yaml -f service.yaml
 kubectl -n bookstore-platform-acme-books rollout status deployment/search
 ```
+
+The Deployment reads `MEILI_API_KEY`, the service's search key, from the
+`meilisearch-search-key` Secret. The ExternalSecret in
+`app/search/external-secret.yaml` creates that Secret from Vault, so apply it
+after step 4 has stored the key. The service never holds the master key. The `search-egress` policy
+allows out only DNS and port 7700. On a tenant namespace that 13.02's
+Composition stamped, the default-deny is already in place and this policy is
+the only egress allowed.
 
 ### 8. Curl the v2 endpoint through the Istio gateway
 
 With the JWT obtained in [13.04 step 3](04-real-auth-keycloak-irsa-istio-jwt.md):
 
 ```sh
-curl -sk -H "Authorization: Bearer $JWT" \
+# EDGE_CA is the edge CA certificate file exported in 13.07. The output below
+# is illustrative, not captured.
+curl -s --cacert "$EDGE_CA" -H "Authorization: Bearer $JWT" \
   "https://localhost:8443/api/v2/search?q=kuberentes"   # typo!
 # {"hits":[{"id":"k8s-in-action","title":"Kubernetes in Action",...}],
 #  "query":"kuberentes","processingTimeMs":3, ...}
@@ -461,7 +573,7 @@ strategies:
 > server-side cursor that retains WAL until the consumer acknowledges
 > it. If Debezium falls behind (or is paused for maintenance), the WAL
 > grows unbounded on the primary — disk fills, the primary crashes.
-> Set `max_slot_wal_keep_size` (Postgres 14+) to cap retained WAL
+> Set `max_slot_wal_keep_size` (Postgres 13+) to cap retained WAL
 > per-slot; set Prometheus alerts on `pg_replication_slots.confirmed_
 > flush_lsn` lag. The chapter cross-refs Part 06 ch.01 for the
 > alerting shape.
@@ -471,8 +583,11 @@ strategies:
 > indexes. Meilisearch's snapshot API
 > (`POST /snapshots`) writes a tarball to the data directory; a
 > CronJob that copies the snapshot to S3 nightly is the minimum
-> backup. Restoring is `meilisearch --import-snapshot snapshot.snapshot
-> --master-key=...`. Reindexing from Postgres via Debezium also works
+> backup. The snapshot holds every tenant's documents, so give the bucket the
+> same access rules as tenant data. Restoring is `meilisearch
+> --import-snapshot snapshot.snapshot`, with the master key in
+> `MEILI_MASTER_KEY` rather than a flag, because `ps` shows flags.
+> Reindexing from Postgres via Debezium also works
 > as a recovery — but at hours-of-downtime cost for >10M docs.
 
 > **In production:** **Cross-region search is eventually consistent;
@@ -497,19 +612,26 @@ strategies:
 ## Quick Reference
 
 ```sh
-# Install Strimzi (pinned)
+# Install Strimzi (pinned), in a namespace labelled baseline
+kubectl create namespace kafka-system
+kubectl label namespace kafka-system \
+  pod-security.kubernetes.io/enforce=baseline \
+  pod-security.kubernetes.io/audit=restricted \
+  pod-security.kubernetes.io/warn=restricted
 STRIMZI_VERSION="0.40.0"
 helm repo add strimzi https://strimzi.io/charts/
 helm install strimzi-operator strimzi/strimzi-kafka-operator \
-  --version "$STRIMZI_VERSION" -n kafka-system --create-namespace --wait
+  --version "$STRIMZI_VERSION" -n kafka-system \
+  -f examples/bookstore-platform/kafka/strimzi-values.yaml --wait
 
 # Kafka cluster + node pool + topics (cluster must exist before the pool)
 kubectl apply -f examples/bookstore-platform/kafka/cluster.yaml
 kubectl apply -f examples/bookstore-platform/kafka/nodepool.yaml
 kubectl apply -f examples/bookstore-platform/kafka/topics.yaml
 
-# Meilisearch
+# Meilisearch and its ExternalSecrets
 kubectl apply -f examples/bookstore-platform/search/meilisearch.yaml
+kubectl apply -f examples/bookstore-platform/search/external-secrets.yaml
 
 # Debezium + sink
 kubectl apply -f examples/bookstore-platform/search/debezium-connector.yaml
@@ -519,6 +641,7 @@ kubectl -n kafka-system get kafka,kafkatopic,kafkaconnect,kafkaconnector
 kubectl -n bookstore-platform-search get statefulset,svc
 
 # v2 search service
+kubectl apply -f examples/bookstore-platform/app/search/external-secret.yaml
 kubectl apply -f examples/bookstore-platform/app/search/deployment.yaml
 kubectl apply -f examples/bookstore-platform/app/search/service.yaml
 ```
@@ -541,7 +664,7 @@ spec:
     database.hostname: <CNPG-RW-SVC>
     database.port: "5432"
     database.user: debezium
-    database.password: "REPLACE-ME-VIA-ESO-NOT-IN-SOURCE"
+    database.password: "${dir:/opt/kafka/external-configuration/pg:password}"
     database.dbname: <DB>
     table.include.list: public.<TABLE>
     slot.name: <SLOT>
@@ -554,10 +677,12 @@ spec:
 # POST /indexes/<INDEX>/settings/filterable-attributes ["price","tenant_id"]
 ```
 
-Checklist (search wired correctly when all five are yes):
+Checklist (search wired correctly when all six are yes):
 
 - [ ] Postgres `wal_level = logical` AND a replication slot named in the
       Debezium config exists.
+- [ ] The Kafka listener is `tls` only, `authorization` is `simple`, and
+      the one KafkaUser's ACLs name only the topics it uses.
 - [ ] `KafkaTopic books.cdc` is Ready with 3 partitions / 3 replicas.
 - [ ] `KafkaConnect bookstore-platform-connect` builds successfully and
       both `KafkaConnector`s are Ready.
@@ -605,6 +730,13 @@ Checklist (search wired correctly when all five are yes):
 
    </details>
 
+6. **The sink's key is copied out of a Connect pod. What can the holder do, what can't they do, and what limits the damage?**
+   <details><summary>Show answer</summary>
+
+   The key holds `documents.add` on `books-*`. The holder can write or overwrite documents in every index the pattern covers, so search results can be poisoned. The holder cannot search, delete an index, or list or create keys. The limits are the scope, the expiry and rotation: create a new key with the master key, write it to Vault, and reload the connector so it reads the new file. The master key never sits in the Connect pod, so the holder cannot mint keys of their own.
+
+   </details>
+
 ## Further reading
 
 - **Ibryam & Huß, _Kubernetes Patterns_ 2e — *Event Sourcing* (ch.7)**
@@ -619,3 +751,9 @@ Checklist (search wired correctly when all five are yes):
   <https://strimzi.io/docs/operators/latest/configuring.html#assembly-deployment-configuration-kafka-connect-str>;
   **Camel Kafka Connectors** (HTTP sink reference)
   <https://camel.apache.org/camel-kafka-connector/latest/connectors/camel-http-sink-kafka-sink-connector.html>.
+- Official: **Meilisearch API keys** (actions, index patterns, expiry)
+  <https://www.meilisearch.com/docs/learn/security/master_api_keys>;
+  **Strimzi 0.40.0 docs**, the configuring guide (plugin `sha512sum`)
+  <https://strimzi.io/docs/operators/0.40.0/configuring.html> and the
+  deploying guide (external configuration, the cluster and clients CAs)
+  <https://strimzi.io/docs/operators/0.40.0/deploying.html>.

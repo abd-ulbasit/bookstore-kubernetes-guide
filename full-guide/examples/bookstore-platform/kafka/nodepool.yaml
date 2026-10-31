@@ -50,8 +50,9 @@ spec:
     limits:
       cpu: "1"
       memory: 2Gi
-  # PSA restricted — runAsNonRoot + non-root UID; Strimzi 0.40+ defaults
-  # already comply, but we are explicit.
+  # The broker pod and container meet the restricted profile. The namespace is
+  # baseline only for the Connect build (ch.13.05 step 1). Strimzi mounts /tmp
+  # as an emptyDir, so the root filesystem can stay read-only.
   template:
     pod:
       securityContext:
@@ -60,3 +61,9 @@ spec:
         fsGroup: 1000
         seccompProfile:
           type: RuntimeDefault
+    kafkaContainer:
+      securityContext:
+        allowPrivilegeEscalation: false
+        readOnlyRootFilesystem: true
+        capabilities:
+          drop: ["ALL"]
