@@ -79,6 +79,7 @@ spec:
         - maxSkew: 1
           topologyKey: kubernetes.io/hostname
           whenUnsatisfiable: DoNotSchedule
+          nodeTaintsPolicy: Honor   # a tainted node (the control plane) is not a spread domain
           labelSelector:
             matchLabels:
               app: storefront

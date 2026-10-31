@@ -181,6 +181,7 @@ topologySpreadConstraints:
   - maxSkew: {{ $ts.maxSkew }}
     topologyKey: {{ $ts.topologyKey }}
     whenUnsatisfiable: {{ $ts.whenUnsatisfiable }}
+    nodeTaintsPolicy: Honor
     labelSelector:
       matchLabels:
         app: {{ .app }}

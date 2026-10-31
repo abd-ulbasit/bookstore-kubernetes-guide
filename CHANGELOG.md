@@ -183,6 +183,13 @@ versions follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 - The vpc-cni `moved` block now targets `before_compute["vpc-cni"]`.
 - The ML pipeline's kubectl image (`bitnami/kubectl:1.31.1`, no longer
   published) is replaced by Chainguard's kubectl image, pinned by digest.
+- The Bookstore hostname spread sets `nodeTaintsPolicy: Honor` on catalog,
+  storefront and payments-worker (raw manifests, Kustomize base, Helm
+  helper). On a three-node kind cluster the tainted control-plane node
+  counted as an empty domain, so catalog's third replica stayed `Pending`.
+  A server dry run on Kubernetes 1.37 accepts the field and refuses other
+  values, and with the field set all three replicas schedule on the two
+  workers. The renders still hold: Helm 49, Kustomize 45, 49 and 48.
 
 ## [1.0.0] — 2026-05-23
 

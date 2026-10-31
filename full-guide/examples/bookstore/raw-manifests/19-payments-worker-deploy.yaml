@@ -125,6 +125,7 @@ spec:
         - maxSkew: 1
           topologyKey: kubernetes.io/hostname
           whenUnsatisfiable: ScheduleAnyway
+          nodeTaintsPolicy: Honor   # a tainted node (the control plane) is not a spread domain
           labelSelector:
             matchLabels:
               app: payments-worker
