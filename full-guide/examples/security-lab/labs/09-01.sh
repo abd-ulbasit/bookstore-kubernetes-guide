@@ -366,10 +366,15 @@ kubectl apply -f examples/bookstore/raw-manifests/00-namespace.yaml
 kubectl apply -f examples/bookstore/raw-manifests/05-serviceaccounts-rbac.yaml
 kubectl apply -f examples/bookstore/raw-manifests/15-catalog-config.yaml
 # kind only: db-credentials, generated here and never committed
+DB="$(openssl rand -hex 16)"; MQ="$(openssl rand -hex 16)"
 kubectl -n bookstore create secret generic db-credentials \
   --from-literal=POSTGRES_USER=bookstore \
-  --from-literal=POSTGRES_PASSWORD="$(openssl rand -hex 16)" \
-  --from-literal=POSTGRES_DB=bookstore
+  --from-literal=POSTGRES_PASSWORD="$DB" \
+  --from-literal=POSTGRES_DB=bookstore \
+  --from-literal=RABBITMQ_DEFAULT_USER=bookstore \
+  --from-literal=RABBITMQ_DEFAULT_PASS="$MQ" \
+  --from-literal=AMQP_URL="amqp://bookstore:${MQ}@rabbitmq:5672/"
+unset DB MQ
 kubectl apply -f examples/bookstore/raw-manifests/35-priorityclasses.yaml
 
 # A self-signed certificate stands in for the one cert-manager issues in prod
