@@ -114,7 +114,7 @@ vanilla-cluster-clean (zero `no matches for kind` on a plain cluster).
 | `keda` | + ScaledObject, TriggerAuthentication (names the Secret `rabbitmq-conn`, which you create; the component renders none) | KEDA, installed from a pinned chart into a labelled namespace (Part 07 ch.02 step 9) |
 | `gateway` | **SWAPS** Ingress → GatewayClass + Gateway + HTTPRoute | Gateway API CRDs + a controller (Part 02 ch.05 step 1 gives the CRD install and the Traefik Gateway provider) |
 | `traefik-rewrite` | + Middleware, and patches the base Ingress with the annotation that attaches it (the services serve `/books` and `/orders`, the UI calls `/api/...`) | Traefik CRDs, installed by the Traefik chart (Part 02 ch.04 step 2) |
-| `kyverno` | + `ClusterPolicy` (Audit-only; cluster-scoped) | Kyverno — label the `kyverno` namespace `restricted`, then `helm install kyverno kyverno/kyverno -n kyverno` (05.07) |
+| `kyverno` | + `ClusterPolicy` (Audit-only; cluster-scoped) | Kyverno: label the `kyverno` namespace `restricted`, then `helm install kyverno kyverno/kyverno -n kyverno` (05.07) |
 | `snapshot` | + VolumeSnapshotClass + VolumeSnapshot | external-snapshotter CRDs + controller + a snapshot-capable CSI driver |
 | `canary` | **SWAPS** `catalog` → `catalog-stable` + `catalog-canary` (and deletes the base catalog **HPA** so it is not orphaned) | none (built-in Deployments only) |
 

@@ -34,6 +34,8 @@ versions follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 - `BENCHMARKS.md` with k6 latency results against `catalog/`.
 
 ### Changed
+- Chapters 05.07 and 13.02 label the namespaces that relied on the old
+  default, since an unlabelled namespace now refuses a privileged Pod.
 - The Bookstore broker has no `guest` account. RabbitMQ takes its login from
   the `db-credentials` Secret (`RABBITMQ_DEFAULT_USER`,
   `RABBITMQ_DEFAULT_PASS`), and orders and payments-worker read `AMQP_URL`
