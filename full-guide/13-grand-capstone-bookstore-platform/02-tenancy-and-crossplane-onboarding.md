@@ -100,11 +100,10 @@ is the recipe; the claim is the input; Crossplane is the reconciler.**
   ([Part 10 ch.03](../10-cloud-and-managed-kubernetes/03-cloud-identity.md))
   for the IRSA piece). On kind the chapter walks the cluster-only path
   end-to-end; the cloud path is a strict superset and the YAML difference
-  is explicit. The Composition also stamps a `ClusterPolicy` reference
-  (or `Policy` per-tenant) to enforce image-signature verification on
-  the tenant's namespace. Phase 13b adds the actual Kyverno install +
-  policy bundle; the Composition's policy reference is wired today but
-  inert until Kyverno installs.
+  is explicit. The Composition carries a commented Kyverno `Policy` stub
+  that would bind the tenant namespace to an image-signature check. It
+  stays commented: this chapter installs no Kyverno.
+  [05.03](../05-security/03-supply-chain.md) covers signature checks.
 - **The Backstage scaffolder is the developer-facing input.** A platform
   team running `kubectl apply -f tenant-claim.yaml` is fine for week 1.
   By month 3 the tenant-onboarding form is a Backstage scaffolder
@@ -119,6 +118,24 @@ public face**. Every field is a permanent commitment — once `tier:
 a CRD conversion webhook (Part 11 ch.02). Design it small. The XRD ships
 six spec fields total; add the seventh only when a real tenant asked for
 it.
+
+## Threats and controls
+
+Tenants share one API server, one set of nodes and one kernel, so this is
+soft isolation. The controls below narrow what a tenant can reach. They do
+not stop a kernel exploit; the hard shapes in the table above do. A
+NetworkPolicy works only where the CNI enforces it. kind's default CNI,
+kindnet, does not document NetworkPolicy enforcement, so use a CNI that
+does before you count the default-deny as proven.
+
+| Threat | Control taught here | Deeper |
+|--------|---------------------|--------|
+| A tenant admin reads or changes another tenant's objects | RoleBinding to the tenant-admin ClusterRole, created in the tenant namespace only | [08.04](../08-day-2-operations/04-multi-tenancy-and-namespaces.md) |
+| A tenant pod reaches another tenant's pods | Default-deny NetworkPolicy composed into every tenant namespace; later chapters add allows only | [02.06](../02-networking/06-network-policies.md) |
+| One tenant exhausts the cluster | ResourceQuota and LimitRange composed per tenant | [01.03](../01-core-workloads/03-resources-and-qos.md) |
+| A tenant name lands on a platform namespace | The XRD refuses reserved names (Hands-on section 3) | This chapter |
+| A tenant pod runs privileged | Tenant namespace labelled `restricted` | [05.02](../05-security/02-pod-security.md) |
+| The Crossplane provider credential is stolen or over-used | Provider ServiceAccount bound to a named ClusterRole, never cluster-admin (Hands-on section 1) | [05.01](../05-security/01-authn-authz-rbac.md) |
 
 ## Diagrams
 
@@ -188,7 +205,7 @@ ClusterRole tenant-admin Yes              No (shared)   kube-rbac              Y
 CNPG Database           No                Yes           provider-cnpg          No (needs cloud)
 S3 Bucket               Yes               Yes (one)     provider-aws           No (needs cloud)
 IAM Role + trust policy Yes               Yes (one)     provider-aws           No (needs cloud)
-Backstage CatalogInfo   No                Yes           Backstage scaffolder   No (Phase 13c install)
+Backstage CatalogInfo   No                Yes           Backstage scaffolder   No (13.11 installs it)
 ```
 
 ## Hands-on with the Bookstore Platform
@@ -212,15 +229,24 @@ for the multi-cluster fan-out).
 ```sh
 kubectl config use-context kind-bookstore-platform-us-east
 
-# Pinned versions — bump deliberately, not silently.
-CROSSPLANE_CHART_VERSION="1.17.0"
-PROV_KUBERNETES_VERSION="v0.13.0"
+# Pinned versions. Bump deliberately, not silently. Crossplane 2.x serves
+# the v2 XRD in section 2; the 1.x chart does not.
+CROSSPLANE_CHART_VERSION="2.4.3"
+PROV_KUBERNETES_VERSION="v1.4.1"
 FN_PT_VERSION="v0.8.2"  # pin (matches Part 11 ch.10 — X2c)
+
+# Label the namespace before the install: enforce baseline, and warn and audit
+# at restricted so the gap stays visible (section 1 explains why).
+kubectl create namespace crossplane-system
+kubectl label namespace crossplane-system \
+  pod-security.kubernetes.io/enforce=baseline \
+  pod-security.kubernetes.io/audit=restricted \
+  pod-security.kubernetes.io/warn=restricted
 
 helm repo add crossplane-stable https://charts.crossplane.io/stable
 helm install crossplane crossplane-stable/crossplane \
   --version "$CROSSPLANE_CHART_VERSION" \
-  -n crossplane-system --create-namespace --wait
+  -n crossplane-system --wait
 
 # provider-kubernetes — lets the Composition manage in-cluster objects.
 kubectl apply -f - <<EOF
@@ -245,8 +271,7 @@ EOF
 kubectl wait --for=condition=Healthy function/function-patch-and-transform --timeout=180s
 
 # Bind provider-kubernetes to a ProviderConfig that uses the provider's own
-# in-cluster identity (its ServiceAccount). Then grant that SA the RBAC the
-# Composition needs (least-privilege; only the kinds the Composition stamps).
+# in-cluster identity (its ServiceAccount).
 kubectl apply -f - <<EOF
 apiVersion: kubernetes.crossplane.io/v1alpha1
 kind: ProviderConfig
@@ -255,31 +280,122 @@ spec:
   credentials: { source: InjectedIdentity }
 EOF
 
-PROV_SA=$(kubectl -n crossplane-system get sa \
-  -l pkg.crossplane.io/provider=provider-kubernetes \
-  -o jsonpath='{.items[0].metadata.name}')
-
-kubectl apply -f - <<EOF
-apiVersion: rbac.authorization.k8s.io/v1
-kind: ClusterRoleBinding
-metadata: { name: bookstore-platform-provider-kubernetes }
-roleRef:
-  apiGroup: rbac.authorization.k8s.io
-  kind: ClusterRole
-  name: cluster-admin   # scope this DOWN in production — see Production notes
-subjects:
-  - kind: ServiceAccount
-    name: ${PROV_SA}
-    namespace: crossplane-system
-EOF
 ```
 
-> **In production:** the `cluster-admin` ClusterRoleBinding above is the
-> "make the demo work" wiring. The Production notes section below
-> details how to scope it down to exactly the kinds the Composition stamps
-> (Namespace, ResourceQuota, LimitRange, RoleBinding, NetworkPolicy,
-> LocalQueue) — the least-privilege Part 05 ch.01 lesson applied to the
-> Crossplane provider's identity.
+The chart already sets the run-as user, no privilege escalation and a
+read-only root filesystem for its pods (`securityContextCrossplane` and
+`securityContextRBACManager`), so the install keeps those defaults. It sets
+no seccomp profile and drops no capabilities. That is why the namespace is
+`baseline` and not `restricted`. Render the chart and dry-run its
+`crossplane` Deployment in the labelled namespace to see the gap. The output
+blocks in this section are captured from a lab run on a cluster with a
+different name. That run used stand-in names that begin `p13-02-`, and a
+stand-in tenant-admin role with pods and secrets rules; the names show in
+the output:
+
+```sh
+helm template crossplane crossplane-stable/crossplane \
+  --version "$CROSSPLANE_CHART_VERSION" -n crossplane-system > crossplane-chart.yaml
+# Keep only the Deployment named crossplane, saved as crossplane-deployment.yaml.
+kubectl apply --dry-run=server -f crossplane-deployment.yaml
+```
+
+<!-- gate: output -->
+```text
+Warning: would violate PodSecurity "restricted:latest": unrestricted capabilities (containers "crossplane-init", "crossplane" must set securityContext.capabilities.drop=["ALL"]), runAsNonRoot != true (pod or containers "crossplane-init", "crossplane" must set securityContext.runAsNonRoot=true), seccompProfile (pod or containers "crossplane-init", "crossplane" must set securityContext.seccompProfile.type to "RuntimeDefault" or "Localhost")
+deployment.apps/crossplane created (server dry run)
+```
+
+`restricted` would reject these pods. `baseline` admits them, so the install
+goes ahead, and the registry entry for `crossplane-system` records the
+exception.
+
+The provider's ServiceAccount is the most valuable credential in this
+chapter: it creates every tenant namespace and binds roles inside them. Give
+it the kinds the Composition stamps and nothing cluster-wide. The `bind` rule
+matters. Kubernetes refuses a RoleBinding to a ClusterRole unless the creator
+holds that role's permissions or holds `bind` on it.
+
+```sh
+PROV_SA=$(kubectl -n crossplane-system get pods \
+  -l pkg.crossplane.io/provider=provider-kubernetes \
+  -o jsonpath='{.items[0].spec.serviceAccountName}')
+```
+
+```sh
+kubectl apply -f - <<EOF
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata: { name: bookstore-platform-provider-kubernetes }
+rules:
+  - apiGroups: [""]
+    resources: [namespaces, resourcequotas, limitranges]
+    verbs: [get, list, watch, create, update, patch, delete]
+  - apiGroups: [rbac.authorization.k8s.io]
+    resources: [rolebindings]
+    verbs: [get, list, watch, create, update, patch, delete]
+  - apiGroups: [rbac.authorization.k8s.io]
+    resources: [clusterroles]
+    resourceNames: [bookstore-platform-tenant-admin]
+    verbs: [bind]
+  - apiGroups: [networking.k8s.io]
+    resources: [networkpolicies]
+    verbs: [get, list, watch, create, update, patch, delete]
+  - apiGroups: [kueue.x-k8s.io]
+    resources: [localqueues]
+    verbs: [get, list, watch, create, update, patch, delete]
+EOF
+kubectl create clusterrolebinding bookstore-platform-provider-kubernetes \
+  --clusterrole=bookstore-platform-provider-kubernetes \
+  --serviceaccount=crossplane-system:"${PROV_SA}"
+```
+
+Check the reach. The first two answers are what the Composition needs; the
+other three are refused:
+
+```sh
+PROV="system:serviceaccount:crossplane-system:${PROV_SA}"
+kubectl auth can-i create namespaces --as="$PROV"
+kubectl auth can-i create networkpolicies -n bookstore-platform-acme-books --as="$PROV"
+kubectl auth can-i get secrets -n bookstore-platform-acme-books --as="$PROV"
+kubectl auth can-i create clusterrolebindings --as="$PROV"
+kubectl auth can-i '*' '*' --as="$PROV"
+```
+
+<!-- gate: output -->
+```text
+Warning: resource 'namespaces' is not namespace scoped
+yes
+# ...
+yes
+# ...
+no
+# ...
+Warning: resource 'clusterrolebindings' is not namespace scoped in group 'rbac.authorization.k8s.io'
+no
+# ...
+no
+```
+
+Without the `bind` rule, the provider's RoleBinding step fails. The captured
+run removed that rule and dry-ran the tenant RoleBinding as the provider:
+
+```sh
+kubectl create rolebinding bookstore-tenant-admin -n bookstore-platform-acme-books \
+  --clusterrole=bookstore-platform-tenant-admin \
+  --group=oidc:tenant-acme-books-admins \
+  --dry-run=server --as="$PROV"
+```
+
+<!-- gate: output -->
+```text
+error: failed to create rolebinding: rolebindings.rbac.authorization.k8s.io "bookstore-tenant-admin" is forbidden: user "system:serviceaccount:p13-02-crossplane:provider-kubernetes" (groups=["system:serviceaccounts" "system:serviceaccounts:p13-02-crossplane" "system:authenticated"]) is attempting to grant RBAC permissions not currently held:
+{APIGroups:[""], Resources:["pods"], Verbs:["get" "list" "watch" "create"]}
+{APIGroups:[""], Resources:["secrets"], Verbs:["get" "list" "watch" "create"]}
+```
+
+With the `bind` rule in place, the same dry run prints
+`rolebinding.rbac.authorization.k8s.io/bookstore-tenant-admin created (server dry run)`.
 
 ### 2. Apply the XRD + Composition
 
@@ -295,6 +411,7 @@ Verify the new API is served:
 
 ```sh
 kubectl api-resources --api-group=platform.bookstore.example.com
+# Illustrative output, not captured:
 # NAME              SHORTNAMES   APIVERSION                                  NAMESPACED   KIND
 # bookstoretenants               platform.bookstore.example.com/v1alpha1     false        BookstoreTenant
 ```
@@ -310,6 +427,7 @@ reconcile), check the XR:
 
 ```sh
 kubectl get bookstoretenant acme-books
+# Illustrative output, not captured:
 # NAME         SYNCED   READY   COMPOSITION                      AGE
 # acme-books   True     True    bookstore-tenant-cluster-only    90s
 ```
@@ -319,6 +437,7 @@ And the per-tenant stack:
 ```sh
 kubectl get ns bookstore-platform-acme-books -o jsonpath='{.metadata.labels}' \
   | tr ',' '\n'
+# Illustrative output, not captured:
 # pod-security.kubernetes.io/enforce: restricted
 # pod-security.kubernetes.io/audit: restricted
 # pod-security.kubernetes.io/warn: restricted
@@ -327,6 +446,7 @@ kubectl get ns bookstore-platform-acme-books -o jsonpath='{.metadata.labels}' \
 
 kubectl get resourcequota,limitrange,rolebinding,networkpolicy,localqueue \
   -n bookstore-platform-acme-books
+# Illustrative output, not captured:
 # resourcequota/bookstore-tenant     ...
 # limitrange/bookstore-tenant        ...
 # rolebinding/bookstore-tenant-admin ...
@@ -336,6 +456,21 @@ kubectl get resourcequota,limitrange,rolebinding,networkpolicy,localqueue \
 
 That is the platform's tenancy boundary, stood up from a 15-line claim.
 
+A reserved name is refused at admission, before Crossplane reconciles
+anything. Dry-run the same claim with `tenantName: system`:
+
+```sh
+kubectl apply --dry-run=server -f system-claim.yaml
+```
+
+<!-- gate: output -->
+```text
+The BookstoreTenant "system" is invalid: spec.tenantName: Invalid value: "system": tenantName is reserved for a platform namespace
+```
+
+The captured run tested that rule on a stand-in CRD, because the XRD needs
+Crossplane and the lab does not install it. The XRD carries the same rule.
+
 ### 4. Prove self-healing — delete a piece, watch it come back
 
 The "operator pattern, generalised" lesson: each composed object is owned
@@ -344,8 +479,9 @@ reconciles continuously. Delete the NetworkPolicy by hand:
 
 ```sh
 kubectl delete networkpolicy default-deny -n bookstore-platform-acme-books
-sleep 30
+sleep 60
 kubectl get networkpolicy -n bookstore-platform-acme-books
+# Illustrative output, not captured:
 # default-deny exists again — Crossplane recreated it.
 ```
 
@@ -354,37 +490,21 @@ Composition is the only producer; drift heals automatically.
 
 ### 5. The Backstage scaffolder hook (Workflow Template; install lives in 13.11)
 
-Backstage runs in 13.11. Phase 13a writes the **Argo Workflow Template**
-that Backstage's scaffolder will eventually call when a developer fills the
-"onboard a tenant" form. The Workflow generates the
-`BookstoreTenant` YAML and (on a real install) opens a PR against the
-platform's Git repo. On kind without Backstage, you can apply the
-WorkflowTemplate now; it sits ready until 13.11 installs the scaffolder.
-
-The WorkflowTemplate itself is scaffolded under `examples/bookstore-
-platform/backstage/` in Phase 13c (intentionally not in Phase 13a — it
-needs Argo Workflows installed, which lands in 13.08). The hook *shape*:
+Backstage runs in 13.11. Its scaffolder calls an **Argo Workflow Template**
+when a developer fills the "onboard a tenant" form. The Workflow renders the
+`BookstoreTenant` YAML and, on a real install, opens a PR against the
+platform's Git repo. The template needs Argo Workflows, which 13.08 installs.
+This chapter shows the step graph only, as a fragment to read, not apply:
 
 ```yaml
-# Sketch — full template in examples/bookstore-platform/backstage/ (Phase 13c).
-apiVersion: argoproj.io/v1alpha1
-kind: WorkflowTemplate
-metadata:
-  name: onboard-bookstore-tenant
-  namespace: argo
-spec:
-  entrypoint: onboard
-  arguments:
-    parameters:
-      - { name: tenantName }
-      - { name: displayName }
-      - { name: tier, default: trial }
-  templates:
-    - name: onboard
-      steps:
-        - - { name: render-claim, template: render-tenant-claim }
-        - - { name: open-pr,      template: open-platform-pr }
-        - - { name: notify,       template: notify-backstage-catalog }
+# Fragment: the step graph only. Not applied in this chapter.
+entrypoint: onboard
+templates:
+  - name: onboard
+    steps:
+      - - { name: render-claim, template: render-tenant-claim }
+      - - { name: open-pr,      template: open-platform-pr }
+      - - { name: notify,       template: notify-backstage-catalog }
 ```
 
 ### 6. Delete the tenant (proving the finalizer + cluster-scope decision)
@@ -393,6 +513,7 @@ The reason the XRD picked `scope: Cluster` is exactly this step:
 
 ```sh
 kubectl delete bookstoretenant acme-books
+# Illustrative output, not captured:
 # bookstoretenant.platform.bookstore.example.com "acme-books" deleted
 sleep 60
 kubectl get ns bookstore-platform-acme-books
@@ -473,15 +594,6 @@ is documented in Production notes.
 
 ## Production notes
 
-> **In production:** **Tenant-name validation must be tight.** The shipped
-> XRD enforces the regex `^[a-z]([-a-z0-9]*[a-z0-9])?$` + maxLength 40. A
-> production XRD also enforces a **reserved-words denylist** — `system`,
-> `default`, `kube-public`, `kube-system`, `kube-node-lease`, anything
-> starting with `bookstore-platform-` (already the prefix), `keycloak`,
-> `argocd`, `istio-system`. Without the denylist, a tenant named `system`
-> creates `bookstore-platform-system` — the platform's own system
-> namespace. Add the validation; future-you will thank you.
-
 > **In production:** **Tenant deletion is 24-hour soft-delete.** A real
 > SaaS does not delete on a `kubectl delete`. The pattern: the
 > `BookstoreTenant` carries a `spec.deletionRequest` field (date the
@@ -504,21 +616,6 @@ is documented in Production notes.
 > names, then apply the XR. After reconciliation, drift is healed; the
 > manual objects are now managed.
 
-> **In production:** **The provider-kubernetes RBAC must be scoped down.**
-> The Hands-on §1 grants `cluster-admin` to the provider's ServiceAccount
-> to keep the demo small. A production grant is a custom ClusterRole
-> with exactly:
->
-> | apiGroups | resources | verbs |
-> |-----------|-----------|-------|
-> | `""` | `namespaces`, `resourcequotas`, `limitranges` | `get`, `list`, `watch`, `create`, `update`, `patch`, `delete` |
-> | `rbac.authorization.k8s.io` | `rolebindings` | `get`, `list`, `watch`, `create`, `update`, `patch`, `delete` |
-> | `networking.k8s.io` | `networkpolicies` | `get`, `list`, `watch`, `create`, `update`, `patch`, `delete` |
-> | `kueue.x-k8s.io` | `localqueues` | `get`, `list`, `watch`, `create`, `update`, `patch`, `delete` |
->
-> Anything more is over-privilege; anything less and a Composition step
-> fails with a Forbidden error and the XR sits SYNCED=False.
-
 > **In production:** **Per-tier Compositions, not per-tier transforms.**
 > Ship one Composition per tier (`bookstore-tenant-trial`,
 > `bookstore-tenant-standard`, `bookstore-tenant-premium`), and let the
@@ -531,26 +628,33 @@ is documented in Production notes.
 
 ```sh
 # Install Crossplane + provider-kubernetes + function-patch-and-transform
-CROSSPLANE_CHART_VERSION="1.17.0"
-PROV_KUBERNETES_VERSION="v0.13.0"
+CROSSPLANE_CHART_VERSION="2.4.3"
+PROV_KUBERNETES_VERSION="v1.4.1"
 FN_PT_VERSION="v0.8.2"  # pin (matches Part 11 ch.10 — X2c)
 
+kubectl create namespace crossplane-system
+kubectl label namespace crossplane-system \
+  pod-security.kubernetes.io/enforce=baseline \
+  pod-security.kubernetes.io/audit=restricted \
+  pod-security.kubernetes.io/warn=restricted
 helm repo add crossplane-stable https://charts.crossplane.io/stable
 helm install crossplane crossplane-stable/crossplane \
-  --version "$CROSSPLANE_CHART_VERSION" \
-  -n crossplane-system --create-namespace --wait
+  --version "$CROSSPLANE_CHART_VERSION" -n crossplane-system --wait
 kubectl apply -f - <<EOF
 apiVersion: pkg.crossplane.io/v1
 kind: Provider
 metadata: { name: provider-kubernetes }
-spec: { package: xpkg.crossplane.io/crossplane-contrib/provider-kubernetes:${PROV_KUBERNETES_VERSION} }
+spec:
+  package: xpkg.crossplane.io/crossplane-contrib/provider-kubernetes:${PROV_KUBERNETES_VERSION}
 EOF
 kubectl wait --for=condition=Healthy provider/provider-kubernetes --timeout=300s
+# Then the scoped ClusterRole and binding from section 1 (not cluster-admin).
 kubectl apply -f - <<EOF
 apiVersion: pkg.crossplane.io/v1
 kind: Function
 metadata: { name: function-patch-and-transform }
-spec: { package: xpkg.crossplane.io/crossplane-contrib/function-patch-and-transform:${FN_PT_VERSION} }
+spec:
+  package: xpkg.crossplane.io/crossplane-contrib/function-patch-and-transform:${FN_PT_VERSION}
 EOF
 kubectl wait --for=condition=Healthy function/function-patch-and-transform --timeout=180s
 
@@ -613,7 +717,7 @@ Checklist (a tenant is correctly onboarded when all five are yes):
 2. **A tenant's `BookstoreTenant` XR shows `READY=False` for 10 minutes. What's the diagnostic path?**
    <details><summary>Show answer</summary>
 
-   (1) `kubectl describe bookstoretenant <name>` — read `status.conditions`; look for `Synced=False` (Composition rejected the input) vs `Ready=False` (composed resources exist but aren't healthy). (2) `kubectl get composite -A` — find the composite resource Crossplane created and `describe` it. (3) Check each composed object: `kubectl get rolebinding,networkpolicy,resourcequota,localqueue -n bookstore-platform-<tenant>`. (4) Look at Crossplane logs (`-n crossplane-system`) for reconcile errors. Common causes: a Composition step references a missing field on the XR, the Composition's `patchSets` has a typo, or a downstream resource has a webhook rejecting it (PSA-restricted blocking a pod the Composition tries to create).
+   (1) `kubectl describe bookstoretenant <name>`, read `status.conditions`; look for `Synced=False` (Composition rejected the input) vs `Ready=False` (composed resources exist but aren't healthy). (2) `kubectl get composite -A`, find the composite resource Crossplane created and `describe` it. (3) Check each composed object: `kubectl get rolebinding,networkpolicy,resourcequota,localqueue -n bookstore-platform-<tenant>`. (4) Look at Crossplane logs (`-n crossplane-system`) for reconcile errors. Common causes: a Composition step references a missing field on the XR, the Composition's `patchSets` has a typo, or an admission webhook rejects a composed object.
 
    </details>
 
@@ -634,7 +738,14 @@ Checklist (a tenant is correctly onboarded when all five are yes):
 5. **Hands-on: wire the Crossplane `BookstoreTenant` into a Backstage Software Template so a developer fills out a form and gets a tenant. What's the boundary between the form, the template render, and the XR?**
    <details><summary>What you should see</summary>
 
-   The Backstage scaffolder template defines a form (Tenant name, tier, region, contact email). When submitted, the template renders a YAML manifest (`apiVersion: bookstore.example.com/v1beta1, kind: BookstoreTenant, spec: {...}`) and opens a PR against the GitOps repo. The PR merges → Argo CD picks up the new file → applies the XR → Crossplane composes the namespace + RBAC + quota + Postgres + ... → tenant is live. Backstage handles UX + PR; Argo CD handles deploy; Crossplane handles infrastructure reconciliation. Each tool owns one layer; the boundaries are clean. See [Part 13 ch.11](11-backstage-developer-portal-idp.md).
+   The Backstage scaffolder template defines a form (Tenant name, tier, region, contact email). When submitted, the template renders a YAML manifest (`apiVersion: platform.bookstore.example.com/v1alpha1, kind: BookstoreTenant`) and opens a PR against the GitOps repo. The PR merges → Argo CD picks up the new file → applies the XR → Crossplane composes the namespace + RBAC + quota + Postgres + ... → tenant is live. Backstage handles UX + PR; Argo CD handles deploy; Crossplane handles infrastructure reconciliation. Each tool owns one layer; the boundaries are clean. See [Part 13 ch.11](11-backstage-developer-portal-idp.md).
+
+   </details>
+
+6. **Why does the provider's ClusterRole carry a `bind` rule, and what would cluster-admin add?**
+   <details><summary>Show answer</summary>
+
+   Kubernetes refuses to create a RoleBinding that grants permissions the creator does not hold, unless the creator holds `bind` on the referenced role. The provider creates each tenant RoleBinding, so it needs `bind` on `bookstore-platform-tenant-admin` and nothing more. Cluster-admin would let a stolen provider token create objects in every namespace and bind any role, which reaches every tenant and the platform's own namespaces. The scoped ClusterRole limits that token to the kinds the Composition stamps.
 
    </details>
 

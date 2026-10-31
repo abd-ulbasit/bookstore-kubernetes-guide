@@ -77,6 +77,11 @@ spec:
                   pattern: '^[a-z]([-a-z0-9]*[a-z0-9])?$'
                   minLength: 3
                   maxLength: 40
+                  # Reserved: each name is a platform namespace suffix, so a
+                  # tenant with that name would land on a platform namespace.
+                  x-kubernetes-validations:
+                    - rule: "!(self in ['system', 'ml', 'payments', 'search', 'orders', 'catalog'])"
+                      message: "tenantName is reserved for a platform namespace"
                 displayName:
                   type: string
                   description: >-

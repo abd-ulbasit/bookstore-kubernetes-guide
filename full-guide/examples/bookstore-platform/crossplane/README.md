@@ -20,21 +20,31 @@ contrasts with the Part 11 ch.10 `BookstoreEnvironment` choice.
 ## Install order
 
 ```sh
-CROSSPLANE_CHART_VERSION="1.17.0"
+CROSSPLANE_CHART_VERSION="2.4.3"
+PROV_KUBERNETES_VERSION="v1.4.1"
 FN_PT_VERSION="v0.8.2"
+
+kubectl create namespace crossplane-system
+kubectl label namespace crossplane-system \
+  pod-security.kubernetes.io/enforce=baseline \
+  pod-security.kubernetes.io/audit=restricted \
+  pod-security.kubernetes.io/warn=restricted
 
 helm repo add crossplane-stable https://charts.crossplane.io/stable
 helm install crossplane crossplane-stable/crossplane \
-  --version "$CROSSPLANE_CHART_VERSION" -n crossplane-system --create-namespace --wait
+  --version "$CROSSPLANE_CHART_VERSION" -n crossplane-system --wait
 
 # provider-kubernetes (for in-cluster Object creation)
 kubectl apply -f - <<EOF
 apiVersion: pkg.crossplane.io/v1
 kind: Provider
 metadata: { name: provider-kubernetes }
-spec: { package: xpkg.crossplane.io/crossplane-contrib/provider-kubernetes:v0.13.0 }
+spec: { package: xpkg.crossplane.io/crossplane-contrib/provider-kubernetes:${PROV_KUBERNETES_VERSION} }
 EOF
 kubectl wait --for=condition=Healthy provider/provider-kubernetes --timeout=300s
+
+# Provider RBAC: the scoped ClusterRole and binding from 13.02 section 1,
+# never cluster-admin.
 
 # function-patch-and-transform (Composition pipeline function)
 kubectl apply -f - <<EOF
