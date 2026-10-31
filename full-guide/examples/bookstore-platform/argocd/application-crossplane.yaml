@@ -31,20 +31,41 @@ spec:
   source:
     repoURL: "https://charts.crossplane.io/stable"
     chart: crossplane
-    # Pinned. Bump deliberately; never `latest`.
-    targetRevision: "1.17.0"
+    # Pinned. Bump deliberately; never `latest`. The 2.x chart serves the v2
+    # XRD that 13.02 uses; the 1.x chart does not.
+    targetRevision: "2.4.3"
     helm:
       releaseName: crossplane
       values: |
-        # Crossplane's controller securityContext is restricted-compliant by
-        # default in the upstream chart. Spell it out for the audit trail.
+        # The same restricted contexts 13.02 sets: the chart leaves seccomp
+        # unset and drops no capabilities by default. Both chart Deployments
+        # and their pods are spelled out here for the audit trail.
         securityContextCrossplane:
           runAsNonRoot: true
           runAsUser: 65532
+          runAsGroup: 65532
           allowPrivilegeEscalation: false
           readOnlyRootFilesystem: true
           capabilities:
             drop: ["ALL"]
+          seccompProfile:
+            type: RuntimeDefault
+        securityContextRBACManager:
+          runAsNonRoot: true
+          runAsUser: 65532
+          runAsGroup: 65532
+          allowPrivilegeEscalation: false
+          readOnlyRootFilesystem: true
+          capabilities:
+            drop: ["ALL"]
+          seccompProfile:
+            type: RuntimeDefault
+        podSecurityContextCrossplane:
+          runAsNonRoot: true
+          seccompProfile:
+            type: RuntimeDefault
+        podSecurityContextRBACManager:
+          runAsNonRoot: true
           seccompProfile:
             type: RuntimeDefault
         # Resource defaults — kind-friendly. Production tightens.
@@ -64,6 +85,7 @@ spec:
     automated:
       prune: false
       selfHeal: true
+    # No CreateNamespace: the namespace is created first, with its Pod Security
+    # labels (13.02 section 1), so the install never runs unlabelled.
     syncOptions:
-      - CreateNamespace=true
       - ServerSideApply=true

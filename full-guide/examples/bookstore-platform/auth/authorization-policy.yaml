@@ -20,7 +20,8 @@
 #   invalid or expired token  401 (RequestAuthentication rejects it)
 #   valid token               not 401 or 403: the policy let it through
 #
-# The `tenant` condition checks that the claim is present and non-empty. It
+# The `tenant` condition checks that the claim is present: `values: ["*"]` is
+# Istio's presence match, and it does not match when the claim is absent. It
 # does not compare the claim with the Host header; that comparison needs its
 # own policy and is not part of this chapter.
 #
@@ -74,6 +75,6 @@ spec:
         - operation:
             paths: ["/api/*"]
       when:
-        # The `tenant` custom claim MUST be present and non-empty.
+        # The `tenant` custom claim MUST be present (Istio presence match).
         - key: request.auth.claims[tenant]
-          notValues: [""]
+          values: ["*"]

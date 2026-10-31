@@ -128,6 +128,12 @@ NetworkPolicy works only where the CNI enforces it. kind's default CNI,
 kindnet, does not document NetworkPolicy enforcement, so use a CNI that
 does before you count the default-deny as proven.
 
+The default-deny above covers tenant namespaces only. The platform namespaces
+this part creates (argocd, cnpg-system, keycloak, crossplane-system and the
+Istio namespaces) have no default-deny NetworkPolicy in this tree. Writing one
+for each means allowing DNS and the API server first, and that is open work,
+not something these chapters deliver.
+
 | Threat | Control taught here | Deeper |
 |--------|---------------------|--------|
 | A tenant admin reads or changes another tenant's objects | RoleBinding to the tenant-admin ClusterRole, created in the tenant namespace only | [08.04](../08-day-2-operations/04-multi-tenancy-and-namespaces.md) |
@@ -135,7 +141,7 @@ does before you count the default-deny as proven.
 | One tenant exhausts the cluster | ResourceQuota and LimitRange composed per tenant | [01.03](../01-core-workloads/03-resources-and-qos.md) |
 | A tenant name lands on a platform namespace | The XRD refuses reserved names (Hands-on section 3) | This chapter |
 | A tenant pod runs privileged | Tenant namespace labelled `restricted` | [05.02](../05-security/02-pod-security.md) |
-| The Crossplane provider credential is stolen or over-used | Provider ServiceAccount bound to a named ClusterRole, never cluster-admin (Hands-on section 1) | [05.01](../05-security/01-authn-authz-rbac.md) |
+| The Crossplane provider credential is stolen or over-used | Provider ServiceAccount bound to a named ClusterRole, never cluster-admin, and a ValidatingAdmissionPolicy that confines its RoleBindings to tenant namespaces (Hands-on section 1) | [05.01](../05-security/01-authn-authz-rbac.md) |
 
 ## Diagrams
 
@@ -215,6 +221,18 @@ This chapter assumes the three regions from
 hands-on against just the us-east cluster for the install steps; the
 ApplicationSet in 13.03 fans the Composition out to all three).
 
+Install Kueue before section 2. The Composition stamps a Kueue `LocalQueue`
+for each tenant, and that CRD comes from Kueue. Without it the tenant's
+`LocalQueue` cannot be created, and the claim never becomes Ready. Use the
+version that [Part 12 ch.03](../12-kubernetes-for-machine-learning/03-batch-and-gang-scheduling.md)
+pins:
+
+```sh
+KUEUE_VERSION="0.17.0"
+helm install kueue oci://registry.k8s.io/kueue/charts/kueue \
+  --version "$KUEUE_VERSION" -n kueue-system --create-namespace --wait
+```
+
 ### 1. Install Crossplane (pinned-Helm, own namespace)
 
 The Crossplane install pattern + provider-kubernetes + function-patch-and-
@@ -232,8 +250,11 @@ kubectl config use-context kind-bookstore-platform-us-east
 # Pinned versions. Bump deliberately, not silently. Crossplane 2.x serves
 # the v2 XRD in section 2; the 1.x chart does not.
 CROSSPLANE_CHART_VERSION="2.4.3"
-PROV_KUBERNETES_VERSION="v1.4.1"
-FN_PT_VERSION="v0.8.2"  # pin (matches Part 11 ch.10 — X2c)
+# Packages pin by digest. The tags stay in comments for the reader.
+PROV_KUBERNETES_TAG="v1.4.1"
+PROV_KUBERNETES_DIGEST="sha256:19bac959b88d49fee4f1b2cc76a085210a4663aff04a9d1a307ac7339e2ae82a"
+FN_PT_TAG="v0.8.2"   # matches Part 11 ch.10
+FN_PT_DIGEST="sha256:c05a9add149bfa6fd0e6fc485e669d60a5d50c2f816b8303af4d5a89586795d0"
 
 # Label the namespace before the install: enforce baseline, and warn and audit
 # at restricted so the gap stays visible (section 1 explains why).
@@ -244,9 +265,39 @@ kubectl label namespace crossplane-system \
   pod-security.kubernetes.io/warn=restricted
 
 helm repo add crossplane-stable https://charts.crossplane.io/stable
+cat > crossplane-values.yaml <<'EOF'
+securityContextCrossplane:
+  runAsNonRoot: true
+  runAsUser: 65532
+  runAsGroup: 65532
+  allowPrivilegeEscalation: false
+  readOnlyRootFilesystem: true
+  capabilities:
+    drop: ["ALL"]
+  seccompProfile:
+    type: RuntimeDefault
+securityContextRBACManager:
+  runAsNonRoot: true
+  runAsUser: 65532
+  runAsGroup: 65532
+  allowPrivilegeEscalation: false
+  readOnlyRootFilesystem: true
+  capabilities:
+    drop: ["ALL"]
+  seccompProfile:
+    type: RuntimeDefault
+podSecurityContextCrossplane:
+  runAsNonRoot: true
+  seccompProfile:
+    type: RuntimeDefault
+podSecurityContextRBACManager:
+  runAsNonRoot: true
+  seccompProfile:
+    type: RuntimeDefault
+EOF
 helm install crossplane crossplane-stable/crossplane \
   --version "$CROSSPLANE_CHART_VERSION" \
-  -n crossplane-system --wait
+  -n crossplane-system -f crossplane-values.yaml --wait
 
 # provider-kubernetes — lets the Composition manage in-cluster objects.
 kubectl apply -f - <<EOF
@@ -254,7 +305,7 @@ apiVersion: pkg.crossplane.io/v1
 kind: Provider
 metadata: { name: provider-kubernetes }
 spec:
-  package: xpkg.crossplane.io/crossplane-contrib/provider-kubernetes:${PROV_KUBERNETES_VERSION}
+  package: xpkg.crossplane.io/crossplane-contrib/provider-kubernetes@${PROV_KUBERNETES_DIGEST}
 EOF
 kubectl wait --for=condition=Healthy provider/provider-kubernetes --timeout=300s
 
@@ -266,7 +317,7 @@ apiVersion: pkg.crossplane.io/v1
 kind: Function
 metadata: { name: function-patch-and-transform }
 spec:
-  package: xpkg.crossplane.io/crossplane-contrib/function-patch-and-transform:${FN_PT_VERSION}
+  package: xpkg.crossplane.io/crossplane-contrib/function-patch-and-transform@${FN_PT_DIGEST}
 EOF
 kubectl wait --for=condition=Healthy function/function-patch-and-transform --timeout=180s
 
@@ -282,37 +333,46 @@ EOF
 
 ```
 
-The chart already sets the run-as user, no privilege escalation and a
-read-only root filesystem for its pods (`securityContextCrossplane` and
-`securityContextRBACManager`), so the install keeps those defaults. It sets
-no seccomp profile and drops no capabilities. That is why the namespace is
-`baseline` and not `restricted`. Render the chart and dry-run its
-`crossplane` Deployment in the labelled namespace to see the gap. The output
-blocks in this section are captured from a lab run on a cluster with a
-different name. That run used stand-in names that begin `p13-02-`, and a
-stand-in tenant-admin role with pods and secrets rules; the names show in
-the output:
+The chart's defaults set the run-as user, no privilege escalation and a
+read-only root filesystem, but no seccomp profile and no dropped capabilities.
+The values file adds those to both chart Deployments, `crossplane` and
+`crossplane-rbac-manager`, and to their pods. Render the two Deployments with
+those values and dry-run them in a namespace labelled `restricted`. The output
+block below is captured from a lab run on a cluster with a different name. That
+run used a stand-in namespace, `p13-02-restricted`, for `crossplane-values-check`,
+and a stand-in tenant-admin role with pods and secrets rules, so the names show
+in the output:
 
 ```sh
 helm template crossplane crossplane-stable/crossplane \
-  --version "$CROSSPLANE_CHART_VERSION" -n crossplane-system > crossplane-chart.yaml
-# Keep only the Deployment named crossplane, saved as crossplane-deployment.yaml.
-kubectl apply --dry-run=server -f crossplane-deployment.yaml
+  --version "$CROSSPLANE_CHART_VERSION" -n crossplane-values-check \
+  -f crossplane-values.yaml \
+  --show-only templates/deployment.yaml \
+  --show-only templates/rbac-manager-deployment.yaml > crossplane-deployments.yaml
+kubectl create namespace crossplane-values-check
+kubectl label namespace crossplane-values-check \
+  pod-security.kubernetes.io/enforce=restricted
+kubectl apply --dry-run=server -n crossplane-values-check -f crossplane-deployments.yaml
+kubectl delete namespace crossplane-values-check
 ```
 
 <!-- gate: output -->
 ```text
-Warning: would violate PodSecurity "restricted:latest": unrestricted capabilities (containers "crossplane-init", "crossplane" must set securityContext.capabilities.drop=["ALL"]), runAsNonRoot != true (pod or containers "crossplane-init", "crossplane" must set securityContext.runAsNonRoot=true), seccompProfile (pod or containers "crossplane-init", "crossplane" must set securityContext.seccompProfile.type to "RuntimeDefault" or "Localhost")
 deployment.apps/crossplane created (server dry run)
+deployment.apps/crossplane-rbac-manager created (server dry run)
 ```
 
-`restricted` would reject these pods. `baseline` admits them, so the install
-goes ahead, and the registry entry for `crossplane-system` records the
-exception.
+`crossplane-system` keeps `enforce=baseline`, with warn and audit at
+`restricted`, for one reason. Crossplane creates the provider and function
+pods from their packages, and the pod template it gives them sets no seccomp
+profile. Those pods are what the `crossplane-system` entry in
+`security/namespace-exceptions.yaml` now covers. The chart's own pods do not
+need the exception.
 
 The provider's ServiceAccount is the most valuable credential in this
 chapter: it creates every tenant namespace and binds roles inside them. Give
-it the kinds the Composition stamps and nothing cluster-wide. The `bind` rule
+it the kinds the Composition stamps, then scope where it may use them. The
+ClusterRole below is bound cluster-wide, so a policy has to narrow it. The `bind` rule
 matters. Kubernetes refuses a RoleBinding to a ClusterRole unless the creator
 holds that role's permissions or holds `bind` on it.
 
@@ -350,8 +410,9 @@ kubectl create clusterrolebinding bookstore-platform-provider-kubernetes \
   --serviceaccount=crossplane-system:"${PROV_SA}"
 ```
 
-Check the reach. The first two answers are what the Composition needs; the
-other three are refused:
+Check the direct grants. The first two answers are what the Composition needs;
+the other three are refused. These rows test direct grants only, so the bind
+path is tested after the policy below:
 
 ```sh
 PROV="system:serviceaccount:crossplane-system:${PROV_SA}"
@@ -396,6 +457,55 @@ error: failed to create rolebinding: rolebindings.rbac.authorization.k8s.io "boo
 
 With the `bind` rule in place, the same dry run prints
 `rolebinding.rbac.authorization.k8s.io/bookstore-tenant-admin created (server dry run)`.
+
+The ClusterRole is bound cluster-wide, and its rules do not limit where the
+provider may bind. Without a scope, a RoleBinding to tenant-admin in
+`kube-system` passes both the `rolebindings` rule and the `bind` rule, and the
+bound role then reads that namespace's Secrets. The `can-i` rows above test
+direct grants, so they do not show that path. The policy below closes it. It
+matches the provider's identity, any ServiceAccount named `provider-kubernetes`,
+and allows its RoleBindings only in tenant namespaces, only to
+`bookstore-platform-tenant-admin`. It also limits its namespace updates and
+deletes to tenant namespaces. The policy file is
+[`provider-scope-policy.yaml`](../examples/bookstore-platform/crossplane/provider-scope-policy.yaml).
+
+```sh
+kubectl apply -f examples/bookstore-platform/crossplane/provider-scope-policy.yaml
+```
+
+The dry runs below use the provider's identity with `--as`. One namespace has
+the tenant label that the Composition stamps, and one does not. The lab run
+created both namespaces for the test and deleted them at the end:
+
+```sh
+PROV="system:serviceaccount:crossplane-system:${PROV_SA}"
+kubectl create rolebinding bookstore-tenant-admin -n bookstore-platform-untenanted \
+  --clusterrole=bookstore-platform-tenant-admin \
+  --group=oidc:tenant-acme-books-admins --dry-run=server --as="$PROV"
+kubectl create rolebinding bookstore-tenant-admin -n bookstore-platform-acme-books \
+  --clusterrole=bookstore-platform-tenant-admin \
+  --group=oidc:tenant-acme-books-admins --dry-run=server --as="$PROV"
+kubectl label namespace bookstore-platform-untenanted probe=1 --dry-run=server --as="$PROV"
+kubectl label namespace bookstore-platform-acme-books probe=1 --dry-run=server --as="$PROV"
+```
+
+<!-- gate: output -->
+```text
+validatingadmissionpolicy.admissionregistration.k8s.io/bookstore-platform-provider-scope created
+validatingadmissionpolicybinding.admissionregistration.k8s.io/bookstore-platform-provider-scope created
+# ...
+error: failed to create rolebinding: rolebindings.rbac.authorization.k8s.io "bookstore-tenant-admin" is forbidden: ValidatingAdmissionPolicy 'bookstore-platform-provider-scope' with binding 'bookstore-platform-provider-scope' denied request: The provider may bind roles only in a tenant namespace.
+# ...
+rolebinding.rbac.authorization.k8s.io/bookstore-tenant-admin created (server dry run)
+# ...
+The namespaces "p13-02-untenanted" is invalid: : ValidatingAdmissionPolicy 'bookstore-platform-provider-scope' with binding 'bookstore-platform-provider-scope' denied request: The provider may update or delete only tenant namespaces.
+# ...
+namespace/p13-02-tenant labeled (server dry run)
+```
+
+The first and third calls are refused by the policy even though the RBAC rules
+allow them. The second and fourth pass. The lab's stand-in namespaces are
+named `p13-02-untenanted` and `p13-02-tenant` in the output above.
 
 ### 2. Apply the XRD + Composition
 
@@ -629,8 +739,11 @@ is documented in Production notes.
 ```sh
 # Install Crossplane + provider-kubernetes + function-patch-and-transform
 CROSSPLANE_CHART_VERSION="2.4.3"
-PROV_KUBERNETES_VERSION="v1.4.1"
-FN_PT_VERSION="v0.8.2"  # pin (matches Part 11 ch.10 — X2c)
+# Packages pin by digest. The tags stay in comments for the reader.
+PROV_KUBERNETES_TAG="v1.4.1"
+PROV_KUBERNETES_DIGEST="sha256:19bac959b88d49fee4f1b2cc76a085210a4663aff04a9d1a307ac7339e2ae82a"
+FN_PT_TAG="v0.8.2"   # matches Part 11 ch.10
+FN_PT_DIGEST="sha256:c05a9add149bfa6fd0e6fc485e669d60a5d50c2f816b8303af4d5a89586795d0"
 
 kubectl create namespace crossplane-system
 kubectl label namespace crossplane-system \
@@ -639,13 +752,14 @@ kubectl label namespace crossplane-system \
   pod-security.kubernetes.io/warn=restricted
 helm repo add crossplane-stable https://charts.crossplane.io/stable
 helm install crossplane crossplane-stable/crossplane \
-  --version "$CROSSPLANE_CHART_VERSION" -n crossplane-system --wait
+  --version "$CROSSPLANE_CHART_VERSION" -n crossplane-system \
+  -f crossplane-values.yaml --wait
 kubectl apply -f - <<EOF
 apiVersion: pkg.crossplane.io/v1
 kind: Provider
 metadata: { name: provider-kubernetes }
 spec:
-  package: xpkg.crossplane.io/crossplane-contrib/provider-kubernetes:${PROV_KUBERNETES_VERSION}
+  package: xpkg.crossplane.io/crossplane-contrib/provider-kubernetes@${PROV_KUBERNETES_DIGEST}
 EOF
 kubectl wait --for=condition=Healthy provider/provider-kubernetes --timeout=300s
 # Then the scoped ClusterRole and binding from section 1 (not cluster-admin).
@@ -654,7 +768,7 @@ apiVersion: pkg.crossplane.io/v1
 kind: Function
 metadata: { name: function-patch-and-transform }
 spec:
-  package: xpkg.crossplane.io/crossplane-contrib/function-patch-and-transform:${FN_PT_VERSION}
+  package: xpkg.crossplane.io/crossplane-contrib/function-patch-and-transform@${FN_PT_DIGEST}
 EOF
 kubectl wait --for=condition=Healthy function/function-patch-and-transform --timeout=180s
 
@@ -745,7 +859,16 @@ Checklist (a tenant is correctly onboarded when all five are yes):
 6. **Why does the provider's ClusterRole carry a `bind` rule, and what would cluster-admin add?**
    <details><summary>Show answer</summary>
 
-   Kubernetes refuses to create a RoleBinding that grants permissions the creator does not hold, unless the creator holds `bind` on the referenced role. The provider creates each tenant RoleBinding, so it needs `bind` on `bookstore-platform-tenant-admin` and nothing more. Cluster-admin would let a stolen provider token create objects in every namespace and bind any role, which reaches every tenant and the platform's own namespaces. The scoped ClusterRole limits that token to the kinds the Composition stamps.
+   Kubernetes refuses to create a RoleBinding that grants permissions the
+   creator does not hold, unless the creator holds `bind` on the referenced
+   role, so the provider needs `bind` on `bookstore-platform-tenant-admin` and
+   nothing more. Bound cluster-wide, that rule alone would let a stolen
+   provider token bind tenant-admin in any namespace, kube-system included, and
+   read the Secrets there. The `can-i` rows test direct grants and do not show
+   that path. The `bookstore-platform-provider-scope` policy closes it: the
+   provider's RoleBindings go only into tenant namespaces, and only to
+   tenant-admin. Cluster-admin would add every other verb on every namespace,
+   including direct reads of every Secret.
 
    </details>
 

@@ -86,8 +86,9 @@ DNS routes by latency and shifts on health.**
 The trap to keep in view: **"active-active" sounds like "writes go
 anywhere"**. They don't. Writes go to one region's primary; reads go
 local. Marketing the architecture as "five-9s writes everywhere" is a lie
-that will hurt at the first failover. Sell the truth: "<5 min reader
-failover, <10 min writer failover; writes are routed; reads are local".
+that will hurt at the first failover. Sell the targets, labelled as targets:
+"<5 min reader failover and <10 min writer failover, design targets not
+measured on the lab; writes are routed; reads are local".
 
 ## Threats and controls
 
@@ -95,8 +96,8 @@ failover, <10 min writer failover; writes are routed; reads are local".
 |---|---|---|
 | A region outage takes the only writer with it | A standby in each other region, promoted by an explicit change | [Part 08 ch.02](../08-day-2-operations/02-backup-and-dr.md) |
 | A replication credential is stolen or reused | TLS client certificates with `verify-full`; no shared password; key pairs are copied, never written into a repo | [13.06](06-payments-and-event-sourcing.md) for how secrets reach the cluster |
-| The management Argo CD holds full rights in every region | Each cluster is registered with a narrow ServiceAccount, not the `argocd-manager` default | [13.01](01-bookstore-2-from-toy-to-platform.md) for platform roles, [13.12](12-day-2-runbook-on-call-dr-chaos.md) for break-glass |
-| Personal data leaves its residency region in a replica, backup, log or metric | Per-region buckets and sinks; only the Postgres stream crosses regions, and only where the design names it | [13.09](09-observability-otel-tempo-loki-prometheus-grafana.md), [13.10](10-cost-opencost-per-tenant-finops.md) |
+| The management Argo CD changes every region at once | Each cluster is registered with a ServiceAccount whose ClusterRole names only Namespaces, PriorityClasses and Kueue queues; RBAC stays out of its sync (step 3) | [13.01](01-bookstore-2-from-toy-to-platform.md) for platform roles |
+| Personal data leaves its residency region in a replica, backup, log or metric | None in this chapter. The Postgres stream copies the whole database to every region, which is the flow this row names (see the production note) | [13.09](09-observability-otel-tempo-loki-prometheus-grafana.md) and [13.10](10-cost-opencost-per-tenant-finops.md) add telemetry and cost flows this chapter does not constrain |
 
 `argocd cluster add` gives the management Argo CD full cluster privileges
 unless you name a ServiceAccount. The CLI prints that warning before it
@@ -293,25 +294,32 @@ helm install argocd argo/argo-cd \
   -n argocd --wait
 ```
 
-Log in through a port-forward. The server's certificate is self-signed on a
-lab cluster, so this first login skips verification with `--insecure`. On a
-real cluster, trust the certificate your ingress serves, and delete the
-initial admin secret once you have named users.
+Log in through a port-forward, and pin the server's certificate instead of
+skipping verification. On the lab the chart's certificate is self-signed, so
+the first fetch trusts what the server presents. That is trust on first use.
+On a real cluster, pin the CA that issued the certificate your ingress serves
+instead. Delete the initial admin secret once you have named users.
 
 ```sh
 ARGOCD_PWD=$(kubectl -n argocd get secret argocd-initial-admin-secret \
   -o jsonpath='{.data.password}' | base64 -d)
 kubectl -n argocd port-forward svc/argocd-server 8080:443 >/dev/null 2>&1 &
 sleep 3
-argocd login localhost:8080 --username admin --password "$ARGOCD_PWD" --insecure
+openssl s_client -connect localhost:8080 -servername localhost </dev/null 2>/dev/null \
+  | openssl x509 > argocd-server.crt
+argocd login localhost:8080 --username admin --password "$ARGOCD_PWD" \
+  --server-crt argocd-server.crt
 ```
 
 ### 3. Register the three regional clusters with narrow ServiceAccounts
 
-`argocd cluster add` creates an `argocd-manager` ServiceAccount with full
-cluster privileges unless you pass `--service-account`. The CLI prints that
-warning and asks for confirmation before it writes. Create a ServiceAccount
-on each cluster and register with it instead:
+`argocd cluster add` creates an `argocd-manager` ServiceAccount bound to
+`cluster-admin` unless you pass `--service-account`. Passing the flag makes
+the CLI use a ServiceAccount you made, and the CLI installs no RBAC for it.
+Write that RBAC yourself. On each cluster, create the ServiceAccount, a
+ClusterRole and a ClusterRoleBinding. The ClusterRole names only the kinds
+that Argo CD syncs from platform-base: Namespaces, PriorityClasses and the
+Kueue queues. It has no wildcard, no RBAC kind and no Secret:
 
 ```sh
 for ctx in \
@@ -335,53 +343,107 @@ metadata:
   annotations:
     kubernetes.io/service-account.name: argocd-platform-sync
 type: kubernetes.io/service-account-token
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: argocd-platform-sync
+rules:
+  - apiGroups: [""]
+    resources: ["namespaces"]
+    verbs: ["get", "list", "watch", "create", "update", "patch"]
+  - apiGroups: ["scheduling.k8s.io"]
+    resources: ["priorityclasses"]
+    verbs: ["get", "list", "watch", "create", "update", "patch"]
+  - apiGroups: ["kueue.x-k8s.io"]
+    resources: ["resourceflavors", "clusterqueues"]
+    verbs: ["get", "list", "watch", "create", "update", "patch"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: argocd-platform-sync
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: argocd-platform-sync
+subjects:
+  - kind: ServiceAccount
+    name: argocd-platform-sync
+    namespace: bookstore-platform-system
 EOF
 done
 ```
 
-Bind `argocd-platform-sync` to a ClusterRole written from the kinds
-platform-base applies (the manifests in the example tree list them), with no
-wildcard verbs and no right to create role bindings. The token Secret is
-long-lived, because Argo CD keeps the bearer token in its cluster Secret.
-That is why the `argocd` namespace and those cluster Secrets belong under the
-break-glass process in [13.12](12-day-2-runbook-on-call-dr-chaos.md).
-
-The Argo CD cluster registration uses the ServiceAccount's token:
+The ClusterRole sets the reach of the token, so check it before you register
+the cluster. Each row runs `kubectl auth can-i` as the ServiceAccount, with
+`--as`:
 
 ```sh
-argocd cluster add kind-bookstore-platform-us-east \
-  --service-account argocd-platform-sync \
-  --system-namespace bookstore-platform-system \
-  --label bookstore-platform.example.com/region=us-east \
-  --label bookstore-platform.example.com/role=writer \
-  --yes
-
-argocd cluster add kind-bookstore-platform-eu-west \
-  --service-account argocd-platform-sync \
-  --system-namespace bookstore-platform-system \
-  --label bookstore-platform.example.com/region=eu-west \
-  --label bookstore-platform.example.com/role=reader \
-  --yes
-
-argocd cluster add kind-bookstore-platform-ap-southeast \
-  --service-account argocd-platform-sync \
-  --system-namespace bookstore-platform-system \
-  --label bookstore-platform.example.com/region=ap-southeast \
-  --label bookstore-platform.example.com/role=reader \
-  --yes
-
-argocd cluster list
+SA=system:serviceaccount:bookstore-platform-system:argocd-platform-sync
+kubectl auth can-i create namespaces --as=$SA
+kubectl auth can-i create priorityclasses.scheduling.k8s.io --as=$SA
+kubectl auth can-i create clusterroles.rbac.authorization.k8s.io --as=$SA
+kubectl auth can-i escalate clusterroles.rbac.authorization.k8s.io --as=$SA
+kubectl auth can-i get secrets -n bookstore-platform-system --as=$SA
 ```
 
-The Cluster generator selects on the labels stamped on each cluster Secret
-that Argo CD stores, so the `--label` flags are what the ApplicationSet
-template reads.
+Kueue is CRD-backed, and `can-i` resolves a resource through API discovery,
+so the Kueue rows ask the API server for a SubjectAccessReview instead. That
+needs no CRD, and it prints `true` or `false`. The lab run printed both sets
+with a label on each row:
 
-> Note: on kind the cluster API endpoints are `https://127.0.0.1:<PORT>`,
-> which Argo CD running inside the us-east cluster cannot reach directly.
-> Use the `host.docker.internal` workaround documented in
-> [Part 11 ch.06](../11-advanced-production-patterns/06-multi-cluster-and-fleet.md);
-> on real EKS/GKE/AKS the cloud-internal API endpoint resolves naturally.
+<!-- gate: output -->
+```text
+create namespaces                                              yes
+create PriorityClasses                                         yes
+create ClusterRoles                                            no
+create ClusterRoleBindings                                     no
+escalate ClusterRoles                                          no
+create RoleBindings in a tenant namespace                      no
+get Secrets in a tenant namespace                              no
+get Secrets in the platform system namespace                   no
+create Pods in a tenant namespace                              no
+create Argo CD Applications in argocd                          no
+# ...
+create ClusterQueues                                           true
+create ResourceFlavors                                         true
+delete ClusterQueues                                           false
+create LocalQueues in a tenant namespace                       false
+```
+
+A ClusterRole can be created only by a caller that already holds every
+permission in it, or that holds the `escalate` verb on clusterroles
+([RBAC: restrictions on role creation or update](https://kubernetes.io/docs/reference/access-authn-authz/rbac/#restrictions-on-role-creation-or-update)).
+The Argo CD ServiceAccount holds neither, so it cannot sync the RBAC file in
+`platform-base/01-rbac.yaml`. That file holds three ClusterRoles, one of them
+`*` on everything. The platform-base kustomization therefore leaves it out,
+and a person applies it by hand through a reviewed change. A dry run as the
+ServiceAccount shows the refusal:
+
+```sh
+kubectl apply --dry-run=server -f examples/bookstore-platform/platform-base/01-rbac.yaml \
+  --as=system:serviceaccount:bookstore-platform-system:argocd-platform-sync
+```
+
+<!-- gate: output -->
+```text
+Error from server (Forbidden): error when retrieving current configuration of:
+Resource: "rbac.authorization.k8s.io/v1, Resource=clusterroles", GroupVersionKind: "rbac.authorization.k8s.io/v1, Kind=ClusterRole"
+Name: "bookstore-platform-admin", Namespace: ""
+# ...
+```
+
+The Crossplane XRDs and Compositions of
+[13.02](02-tenancy-and-crossplane-onboarding.md) are also applied by a
+person. A Composition decides what the provider creates, and the provider
+holds wider rights than this ServiceAccount.
+
+The token Secret is long-lived, because Argo CD keeps the bearer token in its
+cluster Secret. Anyone who can read the cluster Secrets in the `argocd`
+namespace holds the same rights as Argo CD. The operator ClusterRole in
+[13.01](01-bookstore-2-from-toy-to-platform.md) reads every Secret, so a
+person bound to it can read these tokens too.
 
 ### 4. Apply the root ApplicationSet
 
@@ -466,11 +528,13 @@ included, as the CNPG distributed-topology example does. Any standby can
 then become the writer later without a new manifest.
 
 Streaming replication runs over TLS client certificates. CNPG creates a
-`-replication` key pair and a `-ca` certificate for each Cluster. Copy the
-six Secrets for the three clusters into each `bookstore-platform-system`
-namespace before the Clusters start. They hold private keys, so move them
-with the secret tooling from [13.06](06-payments-and-event-sourcing.md),
-not by pasting them into a file.
+`-replication` key pair and a `-ca` certificate for each Cluster on its first
+reconcile, so the six Secrets appear only after the Clusters start. Apply the
+Clusters, wait until all six exist, and then copy them into each
+`bookstore-platform-system` namespace with the loop after the standbys. The
+Secrets hold private keys, so the copy runs through the API server in a pipe
+and never writes a file. [13.06](06-payments-and-event-sourcing.md) covers how
+secrets reach a cluster from a secret manager. It does not cover this copy.
 
 CNPG sets the pod and container security context itself, so these manifests
 leave `securityContext` to the operator. The baseline's
@@ -499,6 +563,9 @@ spec:
     initdb:
       database: bookstore
       owner: bookstore
+  certificates:
+    serverAltDNSNames:
+      - pg-us-east.bookstore-platform.example.com
   replica:
     primary: bookstore-platform-pg-us-east
     source: bookstore-platform-pg-eu-west
@@ -569,6 +636,9 @@ spec:
   bootstrap:
     pg_basebackup:
       source: bookstore-platform-pg-us-east
+  certificates:
+    serverAltDNSNames:
+      - pg-$region.bookstore-platform.example.com
   replica:
     primary: bookstore-platform-pg-us-east
     source: bookstore-platform-pg-us-east
@@ -622,9 +692,29 @@ EOF
 done
 ```
 
-The host names are placeholders. With `verify-full`, each host must appear in
-that cluster's server certificate, so the endpoint you expose across regions
-has to be a name that certificate covers. The
+The host names are placeholders. CNPG's server certificate covers the
+cluster's own service names by default. With `verify-full`, each exposed host
+must also appear in that certificate, so each Cluster lists its name under
+`spec.certificates.serverAltDNSNames`, as the manifests above do. Copy the
+Secrets once every Cluster exists, with this loop:
+
+```sh
+for src in us-east eu-west ap-southeast; do
+  for what in replication ca; do
+    name="bookstore-platform-pg-$src-$what"
+    for dst in us-east eu-west ap-southeast; do
+      [ "$src" = "$dst" ] && continue
+      kubectl --context "kind-bookstore-platform-$src" -n bookstore-platform-system \
+        get secret "$name" -o json \
+        | jq 'del(.metadata.uid, .metadata.resourceVersion, .metadata.creationTimestamp,
+                  .metadata.namespace, .metadata.ownerReferences, .metadata.managedFields)' \
+        | kubectl --context "kind-bookstore-platform-$dst" -n bookstore-platform-system apply -f -
+    done
+  done
+done
+```
+
+The
 [CNPG replica cluster docs](https://cloudnative-pg.io/documentation/current/replica_cluster/)
 describe the topology.
 
@@ -689,7 +779,7 @@ on the lab:
 | Step | Local cost | Real-cloud target | Requires human? |
 |------|------------|-------------------|-----------------|
 | Detect failure | seconds (Argo CD health) | seconds (DNS health check) | No |
-| Promote standby | seconds (patch) | ~30 s | No (Cluster API auto + watchdog) — but practically Yes (page) |
+| Promote standby | seconds (patch) | ~30 s | Yes: an operator patches `spec.replica.primary`, and pages first |
 | DNS propagate | n/a | 60 - 300 s (TTL) | No |
 | Workloads re-deploy | n/a | seconds (already running) | No |
 | Payments-worker re-locate | seconds (kind) | minutes (image pull on the new writer region) | No |
@@ -805,6 +895,16 @@ client, which costs more than it saves at e-commerce scale.
 >
 > The platform v2 ships pattern (2) for simplicity; pattern (1) is the
 > mature production answer at scale.
+
+> **In production:** **Regional data residency requires more than "deploy in
+> region X".** GDPR and DPDP compliance means the data stays in that region,
+> including replicas, backups, log streams, telemetry and any analytics derived
+> from the data. This chapter streams the whole database to all three regions,
+> so it does not meet a residency rule and does not solve the problem. A
+> residency design names which tables or tenants replicate to which region.
+> The telemetry and cost flows in [13.09](09-observability-otel-tempo-loki-prometheus-grafana.md)
+> and [13.10](10-cost-opencost-per-tenant-finops.md) have to respect the same
+> boundary.
 
 ## Quick Reference
 
@@ -937,14 +1037,16 @@ CNPG detects the failed primary and promotes an in-region standby on its own,
    limit that, and say what neither one stops.**
    <details><summary>Show answer</summary>
 
-The first is the narrow ServiceAccount per cluster (step 3). It limits Argo CD
-   to the kinds platform-base applies and, with no wildcard verbs and no right
-   to create role bindings, stops it from granting itself more. The second is
-   the `restricted` label on each namespace (step 1). It refuses a privileged
-   container even when Argo CD submits one. Neither stops a compromised Argo
-   CD from deploying an unsafe workload that `restricted` allows, or from
-   reading the bearer tokens in its own cluster Secrets. The break-glass
-   process in [13.12](12-day-2-runbook-on-call-dr-chaos.md) covers those.
+   The first is the narrow ServiceAccount per cluster (step 3). Its
+   ClusterRole names only Namespaces, PriorityClasses and Kueue queues, with
+   no wildcard, no RBAC kind and no Secret. The RBAC file stays out of Argo
+   CD's sync, so the token cannot create or change a ClusterRole. The second
+   is the `restricted` label on each namespace (step 1). It refuses a
+   privileged container even when Argo CD submits one. Neither stops a
+   compromised Argo CD from creating a namespace, a PriorityClass or a Kueue
+   queue in every region, from submitting an unsafe workload that
+   `restricted` allows, or from reading the bearer tokens in its own cluster
+   Secrets. The operator role in 13.01 can read those tokens as well.
 
    </details>
 

@@ -498,8 +498,10 @@ discipline:
   ApplicationSet, walks the DR drill (which on kind is `kind delete
   cluster --name bookstore-platform-us-east` + a documented promotion).
 - [13.04](04-real-auth-keycloak-irsa-istio-jwt.md) installs Keycloak + Istio
-  + applies the request-authentication / authorization-policy pair, with a
-  curl test that proves 401 -> 200 once you have a valid token.
+  + applies the request-authentication / authorization-policy pair, with
+  curls that show 403 with no token, 401 with a token that does not verify,
+  and a status other than 401 or 403 for a valid token (the gateway's own
+  answer until 13.07 gives `/api/*` a route).
 
 Phase 13b's first chapter (13.05) is the first place app workloads land.
 
@@ -538,7 +540,7 @@ across every chapter**. Three pieces, each grounded in earlier Parts:
   `helm install … --version "$<TOOL>_CHART_VERSION"`. The
   [`../examples/bookstore-platform/argocd/`](../examples/bookstore-platform/argocd/)
   Applications encode this — `application-keycloak.yaml` pins
-  `21.4.4`, `application-crossplane.yaml` pins `1.17.0`. The same lesson
+  `25.2.0`, `application-crossplane.yaml` pins `2.4.3`. The same lesson
   Part 07 ch.01 / ch.04 taught for the v1 Bookstore.
 - **Signed images via cosign, supply-chain CI, and per-tenant cost.**
   Part 05 ch.03 introduced cosign and Kyverno `verifyImages`. The platform's
@@ -677,10 +679,10 @@ Readiness checklist (Phase 13a complete when all four are yes):
 
    </details>
 
-3. **Map each Part 13 chapter to one of the seven v2 dimensions (tenancy, region, identity, search, payments, edge, ML, ops).**
+3. **Map each Part 13 chapter to one of the seven v2 dimensions (tenancy, region, identity, delivery, data, ML, day-2).**
    <details><summary>Show answer</summary>
 
-   ch.02 → tenancy. ch.03 → region. ch.04 → identity. ch.05 → search. ch.06 → payments. ch.07 → edge. ch.08 → ML. ch.09 → ops (observability). ch.10 → ops (cost). ch.11 → ops (developer portal). ch.12 → ops (day-2). The mapping shows ops is the largest dimension because each capability needs an operational story — dashboards, on-call, runbook, DR drill, cost-attribution — beyond the capability itself.
+   ch.02 → tenancy. ch.03 → region. ch.04 → identity. ch.05 → data (search index). ch.06 → data (payments and the outbox). ch.07 → identity (the edge enforces the verified-request boundary from ch.04). ch.08 → ML. ch.09 → day-2 (observability). ch.10 → day-2 (cost). ch.11 → delivery (the developer portal feeds GitOps). ch.12 → day-2 (on-call, DR, chaos). Day-2 takes the most chapters because each capability needs an operational story (dashboards, on-call, runbooks, DR drills, cost attribution) beyond the capability itself.
 
    </details>
 

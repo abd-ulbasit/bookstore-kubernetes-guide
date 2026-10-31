@@ -79,24 +79,15 @@ exceptions:
   - namespace: crossplane-system
     level: baseline
     reason: >-
-      The Crossplane chart's pods, and the default pod template Crossplane gives
-      the provider and function pods it runs here, set no seccomp profile and do
-      not drop all capabilities. The restricted profile rejects that; baseline
-      admits it, since no pod is privileged or uses a host namespace. Audit and
-      warn stay at restricted to show the gap.
+      Only the provider and function pods that Crossplane creates from packages
+      are left under this exception. The default pod template Crossplane gives
+      them sets no seccomp profile and drops no capabilities, so restricted
+      rejects them; baseline admits them, since no pod is privileged or uses a
+      host namespace. The chart's own Deployments meet restricted with the
+      values in 13.02 section 1. Audit and warn stay at restricted to show the
+      gap.
     upstream: https://github.com/crossplane/crossplane/blob/v2.4.3/internal/controller/pkg/runtime/runtime.go
     chapter: 13-grand-capstone-bookstore-platform/02-tenancy-and-crossplane-onboarding.md
-    expires: 2027-06-30
-
-  - namespace: istio-system
-    level: baseline
-    reason: >-
-      Istiod, the Istio control plane, has no pod-level seccomp setting in the
-      istio/istiod 1.30.7 chart, and restricted requires one. The pod admits at
-      baseline. The ingress gateway in the same namespace sets seccomp and
-      admits at restricted. The node agents run in istio-node, not here.
-    upstream: https://kubernetes.io/docs/concepts/security/pod-security-standards/#restricted
-    chapter: 13-grand-capstone-bookstore-platform/04-real-auth-keycloak-irsa-istio-jwt.md
     expires: 2027-06-30
 
   - namespace: istio-node

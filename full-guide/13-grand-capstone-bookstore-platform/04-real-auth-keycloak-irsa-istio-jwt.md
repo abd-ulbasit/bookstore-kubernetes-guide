@@ -110,7 +110,7 @@ modes (clock skew, JWKS unreachable, audience mismatch, key rotation gap).
 |---|---|---|
 | A token signed with a key the attacker chose, through a plain-HTTP JWKS answer | Asymmetric signing; JWKS fetched over HTTPS from the issuer's name | [13.07](07-edge-gateway-waf-rate-limiting.md) for the edge certificate |
 | A token minted for another realm or client | Issuer pinned byte for byte; one audience per client | [13.02](02-tenancy-and-crossplane-onboarding.md) for realm-per-tenant |
-| A request with no token reaching `/api/*` | ALLOW-only policy: a request that matches no ALLOW is denied | [13.02](02-tenancy-and-crossplane-onboarding.md) for the L3/L4 default deny |
+| A request with no token reaching `/api/*` | ALLOW-only policy: a request that matches no ALLOW is denied | [13.02](02-tenancy-and-crossplane-onboarding.md) for the tenant default deny; the platform namespaces have none yet |
 | A stolen access token that stays usable for hours | 15-minute access tokens; refresh tokens rotate and cannot be reused | [13.09](09-observability-otel-tempo-loki-prometheus-grafana.md) for issuance audit |
 | Client secrets or admin passwords in a workload file | Secrets created outside source; External Secrets in production | [13.06](06-payments-and-event-sourcing.md) |
 | Static cloud keys in a workload | IRSA-annotated ServiceAccount, no key in the Pod | [Part 10 ch.03](../10-cloud-and-managed-kubernetes/03-cloud-identity.md) |
@@ -143,7 +143,7 @@ sequenceDiagram
     SF->>U: Set-Cookie: session
     Note over G: --- next API call ---
     U->>G: GET /api/books<br/>Authorization: Bearer JWT
-    G->>KC: GET /protocol/openid-connect/certs<br/>(JWKS over HTTPS, cached 10 min)
+    G->>KC: GET /protocol/openid-connect/certs<br/>(JWKS over HTTPS, fetched by istiod every 20 min)
     KC-->>G: JWKS public keys
     G->>G: verify sig + iss + aud + exp + nbf
     G->>G: enforce AuthorizationPolicy<br/>(principal and tenant required for /api/*)
@@ -228,9 +228,14 @@ restricted profile forbids, so they run in their own namespace,
 `istio-node`, labelled `privileged`. OpenShift requires both to run in
 `kube-system`, which is the upstream precedent for node agents outside
 `istio-system` ([Istio platform prerequisites](https://istio.io/latest/docs/ambient/install/platform-prerequisites/)).
-`istiod` and the gateway stay in `istio-system`. `istiod` admits only at
-`baseline`, because the 1.30.7 chart sets no seccomp profile for it. The
-gateway is set to `restricted` and admits there.
+`istiod` and the gateway stay in `istio-system`, which is `restricted`. The
+1.30.7 chart sets no seccomp profile for `istiod`, so the install sets
+`pilot.seccompProfile.type=RuntimeDefault`. It also sets
+`trustedZtunnelNamespace=istio-node`, because ztunnel runs in its own
+namespace. Without that value istiod assumes `istio-system/ztunnel` is the
+trusted node account, and it refuses the certificate requests that ztunnel
+sends from `istio-node`. The gateway sets seccomp itself and admits at
+`restricted`.
 
 ```sh
 kubectl config use-context kind-bookstore-platform-us-east
@@ -239,7 +244,7 @@ ISTIO_VERSION="1.30.7"
 
 kubectl create namespace istio-system
 kubectl label namespace istio-system \
-  pod-security.kubernetes.io/enforce=baseline \
+  pod-security.kubernetes.io/enforce=restricted \
   pod-security.kubernetes.io/warn=restricted \
   pod-security.kubernetes.io/audit=restricted
 kubectl create namespace istio-node
@@ -253,7 +258,9 @@ helm install istio-base istio/base \
   --version "$ISTIO_VERSION" -n istio-system --wait
 helm install istiod istio/istiod \
   --version "$ISTIO_VERSION" -n istio-system \
-  --set profile=ambient --wait
+  --set profile=ambient \
+  --set trustedZtunnelNamespace=istio-node \
+  --set pilot.seccompProfile.type=RuntimeDefault --wait
 helm install istio-cni istio/cni \
   --version "$ISTIO_VERSION" -n istio-node \
   --set profile=ambient --wait
@@ -269,9 +276,20 @@ restates every field; the chart's own defaults would otherwise be lost.
 The `istio-cni` and `ztunnel` pods reach `istiod` through its service name
 in `istio-system`, which the charts set.
 
-Before the install, dry-run the gateway and `istiod` under those labels.
-Both admit. The one warning from `istiod` is the `restricted` warning its
-namespace reports, and it is why that namespace is `baseline`. The
+Before the install, dry-run the gateway and `istiod` under those labels. The
+`istiod` Deployment is rendered with the two values above and sent to the
+server in the labelled namespace:
+
+```sh
+helm template istiod istio/istiod --version "$ISTIO_VERSION" -n istio-system \
+  --set profile=ambient --set trustedZtunnelNamespace=istio-node \
+  --set pilot.seccompProfile.type=RuntimeDefault \
+  --show-only templates/deployment.yaml | kubectl apply --dry-run=server -f -
+```
+
+Both admit with no warning. The lab run did the `istiod` check in a stand-in
+namespace, `p13-04-istio-check`, labelled `restricted`, and the transcript
+records that. The
 RequestAuthentication and AuthorizationPolicy manifests need the Istio CRDs,
 so they are dry-run only after the install.
 
@@ -286,10 +304,6 @@ horizontalpodautoscaler.autoscaling/istio-ingressgateway created (server dry run
 
 <!-- gate: output -->
 ```text
-serviceaccount/istiod created (server dry run)
-# ...
-service/istiod created (server dry run)
-Warning: would violate PodSecurity "restricted:latest": seccompProfile (pod or container "discovery" must set securityContext.seccompProfile.type to "RuntimeDefault" or "Localhost")
 deployment.apps/istiod created (server dry run)
 ```
 
@@ -463,7 +477,7 @@ curl -s -o /dev/null -w "%{http_code}\n" --cacert "$EDGE_CA" \
   --resolve "$RESOLVE" -H "Authorization: Bearer not-a-jwt" "$API"
 
 # The token from step 3: the policy passes it. What the request gets after
-# that comes from routing, which 13.01 adds.
+# that comes from routing, which 13.07 adds.
 curl -s -o /dev/null -w "%{http_code}\n" --cacert "$EDGE_CA" \
   --resolve "$RESOLVE" -H "Authorization: Bearer ${TOKEN}" "$API"
 ```
@@ -475,7 +489,7 @@ Illustrative output, not captured:
 401
 ```
 
-The third call prints a status other than 401 or 403. Until 13.01 gives
+The third call prints a status other than 401 or 403. Until 13.07 gives
 `/api/*` a route, that status is the gateway's own not-found, and the
 policy has still let the request through.
 
@@ -528,12 +542,13 @@ When you rotate Keycloak's signing key, the new key is published in JWKS
 and signs new tokens. The old key stays published, so tokens it signed still
 verify, until the rotation window closes.
 
-Istio's gateway fetches JWKS through Envoy, which caches the key set for 10
-minutes by default. [RequestAuthentication](https://istio.io/latest/docs/reference/config/security/request_authentication/)
-has no field to change that interval. A new key therefore takes effect within
-about 10 minutes, and the rotation window has to outlast the longest token
-plus that cache: 15 minutes plus 10 is 25 minutes, and the production notes
-below set a day.
+Istiod resolves the JWKS and refreshes it every 20 minutes by default
+(`PILOT_JWT_PUB_KEY_REFRESH_INTERVAL`, default `20m0s`; the
+[pilot-discovery reference](https://istio.io/latest/docs/reference/commands/pilot-discovery/)
+gives it). The gateway takes its keys from istiod, so a new key reaches
+the gateway within about 20 minutes. The rotation window has to outlast the
+longest token plus that refresh: 15 minutes plus 20 is 35 minutes, and the
+production notes below set a day.
 
 If the window is shorter than that, tokens signed with the old key fail while
 the cache still holds it. Quiz 4 at the end of the chapter works through it.
@@ -567,10 +582,11 @@ one. A failed check returns 401 at the gateway, and downstream never sees
 the request. A missing token is not a failed check: RequestAuthentication
 passes it through, and the AuthorizationPolicy answers 403.
 
-**JWKS caching.** Istio fetches the JWKS from the issuer and Envoy caches it
-for 10 minutes. The `timeout` field on a JWT rule limits how long one fetch
-may take; nothing in the resource sets the cache interval. The lever you
-control is the rotation window described above.
+**JWKS refresh.** Istiod fetches the JWKS from the issuer every 20 minutes by
+default (`PILOT_JWT_PUB_KEY_REFRESH_INTERVAL`). Envoy fetches it itself only in
+the `envoy` or `hybrid` modes (`PILOT_JWT_ENABLE_REMOTE_JWKS`). The `timeout`
+field on a JWT rule limits how long one fetch may take. The lever you control
+is the rotation window described above.
 
 **IRSA in detail.** The projected SA token has an `aud` claim of
 `sts.amazonaws.com` (or whatever the workload's audience annotation
@@ -633,7 +649,7 @@ Secret.
 > **In production:** **JWKS rotation cadence — 90 days, two-key window.**
 > Rotate Keycloak's signing key on a fixed cadence (90 days is a common
 > choice; put yours in the runbook). Keep the old key published for at
-> least the access-token lifetime plus the 10-minute JWKS cache, and in
+> least the access-token lifetime plus the 20-minute JWKS refresh, and in
 > practice a day, so a slow refresh never misses. Less than the token
 > lifetime plus the cache and existing tokens fail mid-flight. Much more than
 > a month and a stolen key keeps working too long. Review the cadence
@@ -682,7 +698,7 @@ Secret.
 ```sh
 # Namespaces first, each with its Pod Security label (step 1 and step 2)
 kubectl create namespace istio-system
-kubectl label namespace istio-system pod-security.kubernetes.io/enforce=baseline
+kubectl label namespace istio-system pod-security.kubernetes.io/enforce=restricted
 kubectl create namespace istio-node
 kubectl label namespace istio-node pod-security.kubernetes.io/enforce=privileged
 kubectl create namespace keycloak
@@ -692,7 +708,7 @@ kubectl label namespace keycloak pod-security.kubernetes.io/enforce=restricted
 ISTIO_VERSION="1.30.7"
 helm repo add istio https://istio-release.storage.googleapis.com/charts
 helm install istio-base istio/base --version "$ISTIO_VERSION" -n istio-system --wait
-helm install istiod istio/istiod --version "$ISTIO_VERSION" -n istio-system --set profile=ambient --wait
+helm install istiod istio/istiod --version "$ISTIO_VERSION" -n istio-system --set profile=ambient --set trustedZtunnelNamespace=istio-node --set pilot.seccompProfile.type=RuntimeDefault --wait
 helm install istio-cni istio/cni --version "$ISTIO_VERSION" -n istio-node --set profile=ambient --wait
 helm install ztunnel istio/ztunnel --version "$ISTIO_VERSION" -n istio-node --wait
 helm install istio-ingressgateway istio/gateway --version "$ISTIO_VERSION" -n istio-system --wait \
@@ -753,7 +769,7 @@ spec:
         - operation: { paths: ["/api/*"] }
       when:
         - key: request.auth.claims[tenant]
-          notValues: [""]
+          values: ["*"]
 ```
 
 ```yaml
@@ -774,9 +790,9 @@ Checklist (auth is wired correctly when all six are yes):
 - [ ] `iss` claim in the issued JWT matches the
       `RequestAuthentication.spec.jwtRules[0].issuer` byte-for-byte.
 - [ ] `aud` claim matches one of the `audiences` listed.
-- [ ] The JWKS URL is HTTPS and reachable from the gateway.
-- [ ] The rotation window covers the access-token lifetime plus the 10-minute
-      JWKS cache.
+- [ ] The JWKS URL is HTTPS and reachable from istiod.
+- [ ] The rotation window covers the access-token lifetime plus the 20-minute
+      JWKS refresh that istiod runs by default.
 - [ ] A request to `/api/*` with no token returns 403, not 200.
 - [ ] IRSA role's trust policy specifies the `sub` and `aud` conditions
       for the cluster OIDC provider ([Part 10 ch.03](../10-cloud-and-managed-kubernetes/03-cloud-identity.md));
@@ -810,7 +826,7 @@ Checklist (auth is wired correctly when all six are yes):
 4. **You rotate the Keycloak signing key. For 30 minutes, about 5% of requests fail with "invalid signature." Why, and what's the fix?**
    <details><summary>Show answer</summary>
 
-   Envoy caches the JWKS for 10 minutes by default, and RequestAuthentication has no field to change it. Tokens signed with the new key fail until the gateway refetches the key set. The fix is in the rotation window: keep the old key published for at least the access-token lifetime plus the cache, which is 25 minutes at the 15-minute lifetime used here. The production notes set a day. A shorter window, or a rotation that removes the old key at once, produces exactly this failure for every token signed before the rotation.
+   Istiod refreshes the JWKS every 20 minutes by default, and the gateway takes its keys from istiod. Tokens signed with the new key fail until that refresh reaches the gateway. The fix is in the rotation window: keep the old key published for at least the access-token lifetime plus the refresh, which is 35 minutes at the 15-minute lifetime used here. The production notes set a day. A shorter window, or a rotation that removes the old key at once, produces exactly this failure for every token signed before the rotation.
 
    </details>
 

@@ -9,6 +9,12 @@
 # CRD is a stand-in in group p13-02.example.com that carries the same tenantName
 # rule as the XRD. Crossplane itself was not installed: the lab has no Crossplane
 # CRDs and this run installs no cluster-wide controller.
+# Section 7 creates a ValidatingAdmissionPolicy, its binding, a stand-in provider
+# ClusterRole and binding, and two test namespaces, then deletes them all in the
+# same section. The policy name is the chapter's own.
+# Section 8 renders the chart's two Deployments with the restricted values and
+# dry-runs them in a stand-in namespace, p13-02-restricted, for the chapter's
+# crossplane-values-check namespace. Section 8 creates and deletes that namespace.
 # Recorded by running the commands below in order. Terminal colour codes are
 # removed. Section 6 deletes every object this run created.
 ## 1. Cluster and client
@@ -93,3 +99,43 @@ customresourcedefinition.apiextensions.k8s.io "bookstoretenants.p13-02.example.c
 $ kubectl get ns,clusterrole,clusterrolebinding,crd -o name | grep -c p13-02
 0
 done
+
+## 7. The provider scope: a ValidatingAdmissionPolicy on what the bind rule allows
+$ kubectl create namespace p13-02-untenanted   (no tenant label)
+namespace/p13-02-untenanted created
+$ kubectl create namespace p13-02-tenant; kubectl label namespace p13-02-tenant bookstore-platform.example.com/tenant=acme-books
+namespace/p13-02-tenant created
+namespace/p13-02-tenant labeled
+$ kubectl apply -f - <<YAML   (the provider ClusterRole and binding from section 1, under the stand-in names)
+clusterrole.rbac.authorization.k8s.io/p13-02-provider-kubernetes created
+clusterrolebinding.rbac.authorization.k8s.io/p13-02-provider-kubernetes created
+$ kubectl apply -f examples/bookstore-platform/crossplane/provider-scope-policy.yaml
+validatingadmissionpolicy.admissionregistration.k8s.io/bookstore-platform-provider-scope created
+validatingadmissionpolicybinding.admissionregistration.k8s.io/bookstore-platform-provider-scope created
+$ kubectl create rolebinding bookstore-tenant-admin -n p13-02-untenanted --clusterrole=bookstore-platform-tenant-admin --group=oidc:tenant-acme-books-admins --dry-run=server --as=<provider>
+error: failed to create rolebinding: rolebindings.rbac.authorization.k8s.io "bookstore-tenant-admin" is forbidden: ValidatingAdmissionPolicy 'bookstore-platform-provider-scope' with binding 'bookstore-platform-provider-scope' denied request: The provider may bind roles only in a tenant namespace.
+$ kubectl create rolebinding bookstore-tenant-admin -n p13-02-tenant --clusterrole=bookstore-platform-tenant-admin --group=oidc:tenant-acme-books-admins --dry-run=server --as=<provider>
+rolebinding.rbac.authorization.k8s.io/bookstore-tenant-admin created (server dry run)
+$ kubectl label namespace p13-02-untenanted probe=1 --dry-run=server --as=<provider>
+The namespaces "p13-02-untenanted" is invalid: : ValidatingAdmissionPolicy 'bookstore-platform-provider-scope' with binding 'bookstore-platform-provider-scope' denied request: The provider may update or delete only tenant namespaces.
+$ kubectl label namespace p13-02-tenant probe=1 --dry-run=server --as=<provider>
+namespace/p13-02-tenant labeled (server dry run)
+$ cleanup: delete the policy, binding, provider RBAC and the two namespaces
+validatingadmissionpolicybinding.admissionregistration.k8s.io "bookstore-platform-provider-scope" deleted
+validatingadmissionpolicy.admissionregistration.k8s.io "bookstore-platform-provider-scope" deleted
+clusterrolebinding.rbac.authorization.k8s.io "p13-02-provider-kubernetes" deleted
+clusterrole.rbac.authorization.k8s.io "p13-02-provider-kubernetes" deleted
+namespace "p13-02-tenant" deleted
+namespace "p13-02-untenanted" deleted
+
+## 8. The chart's Deployments under restricted, with the values from section 1
+$ helm template crossplane crossplane-stable/crossplane --version 2.4.3 -n crossplane-values-check -f crossplane-values.yaml --show-only templates/deployment.yaml --show-only templates/rbac-manager-deployment.yaml > crossplane-deployments.yaml
+rendered: 2 Deployments
+$ kubectl create namespace crossplane-values-check; kubectl label namespace crossplane-values-check pod-security.kubernetes.io/enforce=restricted
+namespace/p13-02-restricted created
+namespace/p13-02-restricted labeled
+$ kubectl apply --dry-run=server -n crossplane-values-check -f crossplane-deployments.yaml
+deployment.apps/crossplane created (server dry run)
+deployment.apps/crossplane-rbac-manager created (server dry run)
+$ kubectl delete namespace crossplane-values-check
+namespace "p13-02-restricted" deleted
