@@ -67,6 +67,9 @@ spec:
   selector:
     matchLabels:
       app: catalog
+  # Copy the Rollout's Pod-template hash onto each series, so the canary
+  # AnalysisTemplates can measure the canary's Pods alone (ch.05).
+  podTargetLabels: ["rollouts-pod-template-hash"]
   namespaceSelector:
     matchNames: ["bookstore"]
   endpoints:

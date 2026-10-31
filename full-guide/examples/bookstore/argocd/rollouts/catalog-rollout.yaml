@@ -112,6 +112,9 @@ spec:
                 value: catalog
               - name: namespace
                 value: bookstore
+              - name: canary-hash
+                valueFrom:
+                  podTemplateHashValue: Latest   # the canary ReplicaSet's hash
         - setWeight: 50
         - pause: { duration: 60s }
         - setWeight: 100              # full promotion (analysis already passed)

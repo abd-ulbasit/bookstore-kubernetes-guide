@@ -1,0 +1,67 @@
+# Transcript for 07-delivery/05-progressive-delivery.md, chart renders and attempted cluster steps.
+# Tier A: one kind cluster with a Kubernetes v1.37.0 node, run from one
+# Linux lab host. Steps 1 and 2 are chart renders, which need only the
+# Helm repositories. The rollout itself was NOT run: the Argo Rollouts
+# controller and Prometheus are heavy installs, and another worker held
+# the lab's heavy-install lock. Step 3 was attempted and the cluster
+# refused the lab identity or did not answer, so no dry run executed. The
+# chapter cites the Argo Rollouts docs for the runtime behaviour.
+# Recorded by running the chapter's commands from full-guide/. Terminal
+# colour codes are removed. Nothing else is edited.
+## step 0: tools
+$ kubectl version --client
+Client Version: v1.37.2
+Kustomize Version: v5.8.1
+$ helm version --short
+v4.1.4+g05fa379
+$ kubectl config current-context
+kind-sf-pilot
+## step 1: render the Argo Rollouts chart before installing it
+$ helm show chart argo/argo-rollouts --version 2.43.8 | grep -E '^(name|version|appVersion):'
+appVersion: v1.10.1
+name: argo-rollouts
+version: 2.43.8
+$ helm template argo-rollouts argo/argo-rollouts --version 2.43.8 -n argo-rollouts | python3 kinds.py
+CustomResourceDefinition analysisruns.argoproj.io
+CustomResourceDefinition analysistemplates.argoproj.io
+CustomResourceDefinition clusteranalysistemplates.argoproj.io
+CustomResourceDefinition experiments.argoproj.io
+CustomResourceDefinition rollouts.argoproj.io
+ClusterRole argo-rollouts-aggregate-to-view
+ClusterRole argo-rollouts-aggregate-to-edit
+ClusterRole argo-rollouts-aggregate-to-admin
+ClusterRole argo-rollouts
+ClusterRoleBinding argo-rollouts
+$ helm template argo-rollouts argo/argo-rollouts --version 2.43.8 -n argo-rollouts | python3 pss_check.py
+Deployment/argo-rollouts: runAsNonRoot=ok no privilege escalation=ok drop ALL=ok seccomp=ok no host namespaces=ok no hostPath=ok
+restricted-field check: 1 of 1 workloads have every field set
+## step 2: render the trimmed Prometheus install
+$ helm show chart prometheus-community/kube-prometheus-stack --version 92.16.1 | grep -E '^(name|version|appVersion):'
+appVersion: v0.94.2
+name: kube-prometheus-stack
+version: 92.16.1
+$ helm template kube-prometheus-stack prometheus-community/kube-prometheus-stack --version 92.16.1 -n monitoring --set alertmanager.enabled=false --set grafana.enabled=false --set kubeStateMetrics.enabled=false --set nodeExporter.enabled=false | python3 kinds.py --count
+  3 ClusterRole
+  3 ClusterRoleBinding
+  1 Deployment
+  2 Job
+  1 MutatingWebhookConfiguration
+  1 Prometheus
+ 35 PrometheusRule
+  1 Role
+  1 RoleBinding
+  1 Secret
+  7 Service
+  3 ServiceAccount
+  9 ServiceMonitor
+  1 ValidatingWebhookConfiguration
+$ helm template kube-prometheus-stack prometheus-community/kube-prometheus-stack --version 92.16.1 -n monitoring --set alertmanager.enabled=false --set grafana.enabled=false --set kubeStateMetrics.enabled=false --set nodeExporter.enabled=false | python3 pss_check.py
+Deployment/kube-prometheus-stack-operator: runAsNonRoot=ok no privilege escalation=ok drop ALL=ok seccomp=ok no host namespaces=ok no hostPath=ok
+Job/kube-prometheus-stack-admission-create: runAsNonRoot=ok no privilege escalation=ok drop ALL=ok seccomp=ok no host namespaces=ok no hostPath=ok
+Job/kube-prometheus-stack-admission-patch: runAsNonRoot=ok no privilege escalation=ok drop ALL=ok seccomp=ok no host namespaces=ok no hostPath=ok
+restricted-field check: 3 of 3 workloads have every field set
+## step 3: attempted; the cluster refused the lab identity
+$ kubectl create namespace p07-05-bookstore
+Unable to connect to the server: EOF
+$ kubectl apply --dry-run=server -f catalog-rollout.yaml
+error: error validating "catalog-rollout.yaml": error validating data: failed to download openapi: Get "https://<api-server>/openapi/v2?timeout=32s": EOF; if you choose to ignore these errors, turn validation off with --validate=false
