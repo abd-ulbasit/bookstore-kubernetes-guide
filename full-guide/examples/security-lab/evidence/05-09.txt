@@ -36,18 +36,19 @@ validatingadmissionpolicybinding.admissionregistration.k8s.io/p05-09-exception-e
 ## step 4: wait until the binding enforces, using a server dry run
 binding enforced after about 2 second(s)
 
-## step 5: apply four namespaces; the policy admits or refuses each
+## step 5: apply five namespaces; the policy admits or refuses each
 $ kubectl apply -f namespaces.yaml
 namespace/p05-09-restricted created
 namespace/p05-09-exception created
 Error from server (Invalid): error when creating "namespaces.yaml": namespaces "p05-09-no-expiry" is forbidden: ValidatingAdmissionPolicy 'p05-09-exception-expiry' with binding 'p05-09-exception-expiry' denied request: a namespace below restricted needs a reason and an expiry within 365 days
+Error from server (Invalid): error when creating "namespaces.yaml": namespaces "p05-09-unlabelled" is forbidden: ValidatingAdmissionPolicy 'p05-09-exception-expiry' with binding 'p05-09-exception-expiry' denied request: a namespace below restricted needs a reason and an expiry within 365 days
 Error from server (Invalid): error when creating "namespaces.yaml": namespaces "p05-09-too-long" is forbidden: ValidatingAdmissionPolicy 'p05-09-exception-expiry' with binding 'p05-09-exception-expiry' denied request: a namespace below restricted needs a reason and an expiry within 365 days
 
-## step 6: which of the four exist now
-$ kubectl get ns p05-09-restricted p05-09-no-expiry p05-09-exception p05-09-too-long --ignore-not-found -L pod-security.kubernetes.io/enforce
+## step 6: which of the five exist now
+$ kubectl get ns p05-09-restricted p05-09-no-expiry p05-09-exception p05-09-unlabelled p05-09-too-long --ignore-not-found -L pod-security.kubernetes.io/enforce
 NAME                STATUS   AGE   ENFORCE
-p05-09-restricted   Active   2s    restricted
-p05-09-exception    Active   2s    baseline
+p05-09-restricted   Active   1s    restricted
+p05-09-exception    Active   1s    baseline
 
 ## step 7: a restricted service namespace, then its workload checked by a server dry run
 $ kubectl apply -f service-ns.yaml || { sleep 5; kubectl apply -f service-ns.yaml; }
@@ -77,4 +78,3 @@ validatingadmissionpolicybinding.admissionregistration.k8s.io "p05-09-exception-
 $ kubectl delete validatingadmissionpolicy p05-09-exception-expiry --ignore-not-found
 validatingadmissionpolicy.admissionregistration.k8s.io "p05-09-exception-expiry" deleted
 
-script-exit=0

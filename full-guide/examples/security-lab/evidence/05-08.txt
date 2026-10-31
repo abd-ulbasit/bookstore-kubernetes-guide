@@ -5,14 +5,14 @@ $ helm version --short
 v4.1.4+g05fa379
 $ kubectl get nodes -o wide
 NAME                     STATUS   ROLES           AGE   VERSION   INTERNAL-IP   EXTERNAL-IP   OS-IMAGE                       KERNEL-VERSION             CONTAINER-RUNTIME
-sf-pilot-control-plane   Ready    control-plane   9h    v1.37.0   172.18.0.2    <none>        Debian GNU/Linux 13 (trixie)   7.0.0-38-generic (amd64)   containerd://2.3.4
+sf-pilot-control-plane   Ready    control-plane   16h   v1.37.0   172.18.0.2    <none>        Debian GNU/Linux 13 (trixie)   7.0.0-38-generic (amd64)   containerd://2.3.4
 $ docker exec sf-pilot-control-plane grep -n audit /etc/kubernetes/manifests/kube-apiserver.yaml
 $ kubectl --kubeconfig=work/builder.kubeconfig auth whoami
 ATTRIBUTE                                           VALUE
 Username                                            system:serviceaccount:p05-08-attack:builder
-UID                                                 e935273d-5373-4b8a-875f-5d1277c1699f
+UID                                                 9d0f2f91-59f9-40d9-8d30-f70e579a73c7
 Groups                                              [system:serviceaccounts system:serviceaccounts:p05-08-attack system:authenticated]
-Extra: authentication.kubernetes.io/credential-id   [JTI=b34adc8e-f569-4c8b-bd51-0bf11b50de80]
+Extra: authentication.kubernetes.io/credential-id   [JTI=39e889c8-4451-4b5f-a86b-187a19e1775b]
 $ kubectl --kubeconfig=work/builder.kubeconfig get secret app-db -n p05-08-app
 Error from server (Forbidden): secrets "app-db" is forbidden: User "system:serviceaccount:p05-08-attack:builder" cannot get resource "secrets" in API group "" in the namespace "p05-08-app"
 $ kubectl --kubeconfig=work/builder.kubeconfig apply -f escape-node.yaml
@@ -30,15 +30,49 @@ $ kubectl apply -f escape-app.yaml
 Error from server (Forbidden): error when creating "work/escape-app.yaml": pods "escape-app" is forbidden: violates PodSecurity "restricted:v1.37": privileged (container "app" must not set securityContext.privileged=true), allowPrivilegeEscalation != false (container "app" must set securityContext.allowPrivilegeEscalation=false), unrestricted capabilities (container "app" must set securityContext.capabilities.drop=["ALL"]), restricted volume types (volume "node-root" uses restricted volume type "hostPath"), runAsNonRoot != true (pod or container "app" must set securityContext.runAsNonRoot=true), seccompProfile (pod or container "app" must set securityContext.seccompProfile.type to "RuntimeDefault" or "Localhost")
 $ kubectl --kubeconfig=work/builder.kubeconfig auth can-i create pods -n p05-08-app
 no
+$ helm repo add falcosecurity https://falcosecurity.github.io/charts --force-update
+"falcosecurity" has been added to your repositories
+$ helm repo add aqua https://aquasecurity.github.io/helm-charts/ --force-update
+"aqua" has been added to your repositories
+$ helm show chart falcosecurity/falco --version 9.2.2 | grep -E '^(version|appVersion)'
+appVersion: 0.45.2
+version: 9.2.2
+$ helm show chart aqua/trivy-operator --version 0.38.1 | grep -E '^(version|appVersion)'
+appVersion: 0.36.1
+version: 0.38.1
+$ kubectl -n kube-system get daemonset -o name
+daemonset.apps/kindnet
+daemonset.apps/kube-proxy
+$ helm template falco falcosecurity/falco --version 9.2.2 --namespace p05-08-falco -f falco-driver.yaml > falco-rendered.yaml
+$ grep -c 'privileged: true' falco-rendered.yaml
+0
+$ grep -A5 'capabilities:' falco-rendered.yaml | head -6
+            capabilities:
+              add:
+              - BPF
+              - SYS_RESOURCE
+              - PERFMON
+              - SYS_PTRACE
+$ helm template trivy aqua/trivy-operator --version 0.38.1 --namespace p05-08-trivy -f trivy-values.yaml > trivy-rendered.yaml
+$ grep -c 'runAsNonRoot: true' trivy-rendered.yaml
+1
+$ kubectl apply -f trivy-ns.yaml
+namespace/p05-08-trivy created
+$ kubectl apply --dry-run=server -f operator-probe.yaml; echo "server dry-run exit=$?"
+pod/operator-probe created (server dry run)
+server dry-run exit=0
+$ kubectl apply --dry-run=server -f operator-probe-root.yaml; echo "server dry-run exit=$?"
+Error from server (Forbidden): error when creating "operator-probe-root.yaml": pods "operator-probe" is forbidden: violates PodSecurity "restricted:v1.37": runAsNonRoot != true (pod or container "operator" must set securityContext.runAsNonRoot=true)
+server dry-run exit=1
 $ kubectl label pod escape-node -n p05-08-attack quarantine=true
 pod/escape-node labeled
 $ kubectl exec -n p05-08-attack escape-node -- nslookup kubernetes.default.svc.cluster.local | expand -t 4
 Server:     10.96.0.10
 Address:    10.96.0.10:53
 
+
 Name:   kubernetes.default.svc.cluster.local
 Address: 10.96.0.1
-
 
 $ kubectl apply -f quarantine.yaml
 networkpolicy.networking.k8s.io/quarantine created
@@ -48,8 +82,12 @@ command terminated with exit code 1
 
 $ kubectl get pod escape-node -n p05-08-attack -o yaml > evidence/pod.yaml
 $ kubectl get events -n p05-08-attack > evidence/events.txt
-$ ls -l evidence
+$ kubectl describe pod escape-node -n p05-08-attack > evidence/describe.txt
+$ kubectl logs escape-node -n p05-08-attack > evidence/logs.txt
+$ ls -1 evidence
+describe.txt
 events.txt
+logs.txt
 pod.yaml
 $ kubectl delete rolebinding ops-secret-reader -n p05-08-app
 rolebinding.rbac.authorization.k8s.io "ops-secret-reader" deleted from p05-08-app namespace
@@ -70,4 +108,5 @@ secret/app-db patched
 $ kubectl delete namespace p05-08-attack p05-08-app p05-08-falco p05-08-trivy
 namespace "p05-08-attack" deleted
 namespace "p05-08-app" deleted
-LAB_EXIT=0
+namespace "p05-08-trivy" deleted
+I1031 12:00:40.342315   31102 reflector.go:664] "Warning: watch ended with error" reflector="k8s.io/client-go/tools/watch/informerwatcher.go:162" type="*unstructured.Unstructured" err="an error on the server (\"unable to decode an event from the watch stream: http2: client connection lost\") has prevented the request from succeeding"

@@ -6,11 +6,11 @@
 > for what, a runtime detector watches what processes do, a scanner reads what
 > running specs allow, and a runbook takes a compromised Pod out of service
 > without destroying the evidence. The lab runs the attacks and the response
-> on a shared kind cluster. The audit log, Falco and Trivy Operator are written
+> on a lab cluster. The audit log, Falco and Trivy Operator are written
 > out and cited. Their runs are not in this chapter, and the lab header says
 > why.
 
-**Estimated time:** ~40 min read · ~45 min lab (scripted, shared cluster)
+**Estimated time:** ~40 min read · ~45 min lab (scripted, lab cluster)
 **Prerequisites:** [Part 05 ch.01](01-authn-authz-rbac.md): RBAC decides which
 API calls a principal may make · [Part 05 ch.02](02-pod-security.md): the
 escapes this chapter records ·
@@ -89,25 +89,25 @@ a run.
 
 ### Lab header
 
-- **Tier A, split.** The attack and response steps ran on the shared kind
-  cluster, sf-pilot. That node runs Kubernetes v1.37.0 with containerd 2.3.4 on
-  Debian 13, on a Linux lab host with kernel 7.0.0. kubectl is v1.37.2 and helm
-  is v4.1.4. The script is
+- **Tier A, split.** The attack and response steps ran on a lab cluster, a kind
+  cluster with Kubernetes v1.37.0 and containerd 2.3.4 on Debian 13, on a Linux
+  lab host. The output below came from a lab cluster with a different name from
+  the one this guide uses. kubectl is v1.37.2 and helm is v4.1.4. The script is
   [`labs/05-08.sh`](../examples/security-lab/labs/05-08.sh), run with
   `LAB_MODE=shared`. Its recorded output is
   [`evidence/05-08.txt`](../examples/security-lab/evidence/05-08.txt), from a
-  run on 31 October 2026 that ended with exit status 0.
-- **Not run.** The audit log steps, Falco, Trivy Operator, and the cordon step.
-  Cordoning the only node of a shared cluster would stop other workloads from
-  scheduling, so the script skips it there. The audit steps need an API server
-  flag, which means a throwaway cluster, and that cluster has not booted on the
-  lab host yet (below). The audit policy and kind configuration were checked
-  with `kubeadm config validate` and a YAML parse. Nothing in this chapter says
-  the audit log recorded anything.
+  run on 31 October 2026.
+- **Not run.** The audit log steps, the Falco and Trivy Operator installs, and
+  the cordon step. Cordoning the only node of a lab cluster would stop other
+  workloads from scheduling, so the script skips it there. The audit steps
+  need an API server flag, which means a throwaway cluster, and the shared run
+  did not create one. The chart checks and the Trivy probe did run; their
+  sections say what they show. Nothing in this chapter says the audit log
+  recorded anything.
 - **Run only against clusters you own.** The script refuses any context that
-  is not the shared cluster in shared mode, and refuses to start while its
-  namespaces still exist or are terminating. It creates `p05-08-attack` and
-  `p05-08-app`, and deletes them at the end.
+  is not the lab cluster in shared mode, and refuses to start while its
+  namespaces still exist or are terminating. It creates `attack` and
+  `app`, and deletes them at the end.
 - **What did not work the first time.** The throwaway cluster is the first
   problem. Its first kubeadm run timed out: the API server answered about three
   and a half minutes after the manifests were written, because etcd applies took
@@ -119,10 +119,11 @@ a run.
   shared run also collided with namespaces that were still terminating from
   the run before it, so the script now refuses to start over them.
 - **A kind node is a container.** Every node in this lab is a container that
-  shares the host's kernel. The `hostPath: /` mount in the escape Pod shows the
-  node container's root filesystem, not the lab host's. The payloads read a
-  hostname and write one marker file under `/tmp` in that container. Nothing in
-  the lab touches the machine that runs the container engine.
+  shares the host's kernel. The `hostPath: /` mount in the escape Pod shows
+  the node container's root filesystem, not the lab host's. The payloads read
+  a hostname and write one marker file under `/tmp` in that container. Nothing
+  in the lab touches the machine that runs the container engine. The attack
+  Pod is not privileged, so it has no access to that machine's devices.
 
 ### Namespaces, identities and a victim
 
@@ -134,14 +135,14 @@ as insecure on purpose.
 apiVersion: v1
 kind: Namespace
 metadata:
-  name: p05-08-attack
+  name: attack
   labels:
     pod-security.kubernetes.io/enforce: privileged
 ---
 apiVersion: v1
 kind: Namespace
 metadata:
-  name: p05-08-app
+  name: app
   labels:
     pod-security.kubernetes.io/enforce: restricted
     pod-security.kubernetes.io/enforce-version: v1.37
@@ -163,19 +164,19 @@ apiVersion: v1
 kind: ServiceAccount
 metadata:
   name: builder
-  namespace: p05-08-attack
+  namespace: attack
 ---
 apiVersion: v1
 kind: ServiceAccount
 metadata:
   name: ops
-  namespace: p05-08-attack
+  namespace: attack
 ---
 apiVersion: rbac.authorization.k8s.io/v1
 kind: Role
 metadata:
   name: builder
-  namespace: p05-08-attack
+  namespace: attack
 rules:
   - apiGroups: [""]
     resources: ["pods"]
@@ -188,11 +189,11 @@ apiVersion: rbac.authorization.k8s.io/v1
 kind: RoleBinding
 metadata:
   name: builder
-  namespace: p05-08-attack
+  namespace: attack
 subjects:
   - kind: ServiceAccount
     name: builder
-    namespace: p05-08-attack
+    namespace: attack
 roleRef:
   apiGroup: rbac.authorization.k8s.io
   kind: Role
@@ -202,7 +203,7 @@ apiVersion: rbac.authorization.k8s.io/v1
 kind: Role
 metadata:
   name: secret-reader
-  namespace: p05-08-app
+  namespace: app
 rules:
   - apiGroups: [""]
     resources: ["secrets"]
@@ -212,11 +213,11 @@ apiVersion: rbac.authorization.k8s.io/v1
 kind: RoleBinding
 metadata:
   name: ops-secret-reader
-  namespace: p05-08-app
+  namespace: app
 subjects:
   - kind: ServiceAccount
     name: ops
-    namespace: p05-08-attack
+    namespace: attack
 roleRef:
   apiGroup: rbac.authorization.k8s.io
   kind: Role
@@ -228,7 +229,7 @@ apiVersion: v1
 kind: Secret
 metadata:
   name: app-db
-  namespace: p05-08-app
+  namespace: app
 type: Opaque
 stringData:
   password: lab-only-value-not-a-credential
@@ -238,22 +239,36 @@ The lab keeps each identity's kubeconfig in a scratch `work` directory. The
 `builder` kubeconfig carries a token for `builder`, so the commands below run
 as that identity.
 
+The lab cluster's DaemonSets in `kube-system` are the networking and proxy
+pieces. The quarantine step below depends on which of them enforces
+NetworkPolicy, so the lab lists them first:
+
+```bash
+kubectl -n kube-system get daemonset -o name
+```
+
+<!-- gate: output -->
+```text
+daemonset.apps/kindnet
+daemonset.apps/kube-proxy
+```
+
 ### Attack: borrow an identity, read a Secret, reach the node
 
 The builder first asks for the Secret directly. RBAC refuses it.
 
 ```bash
 kubectl --kubeconfig=work/builder.kubeconfig auth whoami
-kubectl --kubeconfig=work/builder.kubeconfig get secret app-db -n p05-08-app
+kubectl --kubeconfig=work/builder.kubeconfig get secret app-db -n app
 ```
 
 <!-- gate: output -->
 ```text
 ATTRIBUTE                                           VALUE
 Username                                            system:serviceaccount:p05-08-attack:builder
-UID                                                 e935273d-5373-4b8a-875f-5d1277c1699f
+UID                                                 9d0f2f91-59f9-40d9-8d30-f70e579a73c7
 Groups                                              [system:serviceaccounts system:serviceaccounts:p05-08-attack system:authenticated]
-Extra: authentication.kubernetes.io/credential-id   [JTI=b34adc8e-f569-4c8b-bd51-0bf11b50de80]
+Extra: authentication.kubernetes.io/credential-id   [JTI=39e889c8-4451-4b5f-a86b-187a19e1775b]
 ```
 
 <!-- gate: output -->
@@ -261,29 +276,28 @@ Extra: authentication.kubernetes.io/credential-id   [JTI=b34adc8e-f569-4c8b-bd51
 Error from server (Forbidden): secrets "app-db" is forbidden: User "system:serviceaccount:p05-08-attack:builder" cannot get resource "secrets" in API group "" in the namespace "p05-08-app"
 ```
 
-Next the builder creates a Pod that names `ops` as its ServiceAccount. Creating
-Pods in a namespace lets the creator name any ServiceAccount in that namespace,
-which is the escalation from [05.01](01-authn-authz-rbac.md). The Pod is also
-privileged and mounts the node container's root, which is the escape from
-[05.02](02-pod-security.md). Both are the attack, so the manifest carries the
-insecure marker.
+Next the builder creates a Pod that names `ops` as its ServiceAccount.
+Creating Pods in a namespace lets the creator name any ServiceAccount in that
+namespace, which is the escalation from [05.01](01-authn-authz-rbac.md). The
+Pod mounts the node container's root, which is the escape from
+[05.02](02-pod-security.md). It is not privileged, so it has no access to the
+devices of the machine under the kind node. Both the identity and the mount
+are the attack, so the manifest carries the insecure marker.
 
 <!-- gate: insecure-on-purpose -->
 ```yaml
-# INSECURE ON PURPOSE: a privileged Pod that mounts the node's root and runs as the ops ServiceAccount. Lab cluster only.
+# INSECURE ON PURPOSE: a Pod that mounts the node container's root and runs as the ops ServiceAccount. Lab cluster only.
 apiVersion: v1
 kind: Pod
 metadata:
   name: escape-node
-  namespace: p05-08-attack
+  namespace: attack
 spec:
   serviceAccountName: ops
   containers:
     - name: app
       image: busybox@sha256:73aaf090f3d85aa34ee199857f03fa3a95c8ede2ffd4cc2cdb5b94e566b11662  # busybox:1.36
       command: ["sleep", "1800"]
-      securityContext:
-        privileged: true
       volumeMounts:
         - name: node-root
           mountPath: /host
@@ -294,15 +308,31 @@ spec:
         type: Directory
 ```
 
-The builder runs the Pod, reads the `ops` token from inside it, and uses that
-token to read the Secret. The token never leaves the lab's `work` directory.
+The builder runs the Pod, then reads the `ops` token from inside it and builds
+a kubeconfig for `ops` from that token. `make_kubeconfig` copies the cluster and
+its CA from the lab's kubeconfig, removes the admin credential, and adds the
+token. `CTX` is the context name in that kubeconfig:
+
+```bash
+make_kubeconfig() {
+  cp work/admin.kubeconfig work/$1.kubeconfig
+  KUBECONFIG=work/$1.kubeconfig kubectl config unset users.$CTX
+  KUBECONFIG=work/$1.kubeconfig kubectl config set-credentials $1 --token="$2"
+  KUBECONFIG=work/$1.kubeconfig kubectl config set-context $CTX --user=$1
+}
+```
+
+The token never leaves the lab's `work` directory.
 
 ```bash
 kubectl --kubeconfig=work/builder.kubeconfig apply -f escape-node.yaml
-kubectl wait --for=condition=Ready pod/escape-node -n p05-08-attack --timeout=180s
-kubectl --kubeconfig=work/builder.kubeconfig exec -n p05-08-attack escape-node -- \
+kubectl wait --for=condition=Ready pod/escape-node -n attack --timeout=180s
+kubectl --kubeconfig=work/builder.kubeconfig exec -n attack escape-node -- \
   sh -c 'test -s /var/run/secrets/kubernetes.io/serviceaccount/token && echo token-file-present'
-kubectl --kubeconfig=work/ops.kubeconfig get secret app-db -n p05-08-app -o name
+OPS_TOKEN=$(kubectl --kubeconfig=work/builder.kubeconfig exec -n attack escape-node -- \
+  cat /var/run/secrets/kubernetes.io/serviceaccount/token)
+make_kubeconfig ops "$OPS_TOKEN"
+kubectl --kubeconfig=work/ops.kubeconfig get secret app-db -n app -o name
 ```
 
 <!-- gate: output -->
@@ -320,12 +350,12 @@ secret/app-db
 ```
 
 The last attack step reads the node container's hostname through the mount and
-writes a marker file in its `/tmp`. The marker is named with the `p05-08`
-prefix, as the rules for the lab require.
+writes a marker file in its `/tmp`. The lab's objects carry a `p05-08` prefix,
+and this chapter drops it.
 
 ```bash
-kubectl --kubeconfig=work/builder.kubeconfig exec -n p05-08-attack escape-node -- \
-  sh -c 'cat /host/etc/hostname; touch /host/tmp/p05-08-marker && echo marker-written'
+kubectl --kubeconfig=work/builder.kubeconfig exec -n attack escape-node -- \
+  sh -c 'cat /host/etc/hostname; touch /host/tmp/marker && echo marker-written'
 ```
 
 <!-- gate: output -->
@@ -334,7 +364,7 @@ sf-pilot-control-plane
 marker-written
 ```
 
-The `hostname` is the kind node's, `sf-pilot-control-plane`. The file is in the
+The `hostname` is the kind node's name, as the output shows. The file is in the
 node container. Without the audit log, the trail is the `escape-node` Pod in
 the attack namespace and whatever the cluster still remembers about it.
 
@@ -352,7 +382,7 @@ apiVersion: v1
 kind: Pod
 metadata:
   name: escape-app
-  namespace: p05-08-app
+  namespace: app
 spec:
   containers:
     - name: app
@@ -372,7 +402,7 @@ spec:
 
 ```bash
 kubectl apply -f escape-app.yaml
-kubectl --kubeconfig=work/builder.kubeconfig auth can-i create pods -n p05-08-app
+kubectl --kubeconfig=work/builder.kubeconfig auth can-i create pods -n app
 ```
 
 <!-- gate: output -->
@@ -396,8 +426,8 @@ because nothing has been deleted yet.
 it, then apply a policy that allows no ingress and no egress for that label.
 
 ```bash
-kubectl label pod escape-node -n p05-08-attack quarantine=true
-kubectl exec -n p05-08-attack escape-node -- nslookup kubernetes.default.svc.cluster.local | expand -t 4
+kubectl label pod escape-node -n attack quarantine=true
+kubectl exec -n attack escape-node -- nslookup kubernetes.default.svc.cluster.local | expand -t 4
 ```
 
 <!-- gate: output -->
@@ -418,7 +448,7 @@ apiVersion: networking.k8s.io/v1
 kind: NetworkPolicy
 metadata:
   name: quarantine
-  namespace: p05-08-attack
+  namespace: attack
 spec:
   podSelector:
     matchLabels:
@@ -430,7 +460,7 @@ spec:
 
 ```bash
 kubectl apply -f quarantine.yaml
-kubectl exec -n p05-08-attack escape-node -- nslookup kubernetes.default.svc.cluster.local | expand -t 4
+kubectl exec -n attack escape-node -- nslookup kubernetes.default.svc.cluster.local | expand -t 4
 ```
 
 <!-- gate: output -->
@@ -442,27 +472,32 @@ command terminated with exit code 1
 
 ```
 
-The lookup worked before the policy and timed out after it. On this cluster the
-policy is enforced. The shared cluster's only CNI DaemonSet is kindnet, so this
-kindnet build enforces NetworkPolicy. That is an observation of this build, not
-a claim that every kind cluster does. Check it on your own cluster before you
-trust a quarantine. The policy cuts the network only. It does not revoke the
-token the attacker already holds, so the steps below still matter.
+The lookup worked before the policy and timed out after it. On this lab
+cluster the policy is enforced: the lookup worked before it and timed out
+after it. The `kube-system` DaemonSets listed above are kindnet and
+kube-proxy, and the lab did not test which of them enforces the policy. Check
+enforcement on your own cluster before you trust a quarantine. The policy cuts
+the network only. It does not revoke the token the attacker already holds, so
+the steps below still matter.
 
 **Step 2: capture evidence before anything is deleted.** Copy what the cluster
-says about the Pod into a directory that is not on the cluster, and keep it
-read-only. The lab writes into its scratch directory.
+says about the Pod, its logs and its events into a directory that is not on the
+cluster. The logs are taken before the Pod is deleted, because a deleted Pod's
+logs go with it.
 
 ```bash
-kubectl get pod escape-node -n p05-08-attack -o yaml > evidence/pod.yaml
-kubectl get events -n p05-08-attack > evidence/events.txt
-ls -l evidence
+kubectl get pod escape-node -n attack -o yaml > evidence/pod.yaml
+kubectl describe pod escape-node -n attack > evidence/describe.txt
+kubectl logs escape-node -n attack > evidence/logs.txt
+kubectl get events -n attack > evidence/events.txt
+ls -1 evidence
 ```
 
 <!-- gate: output -->
 ```text
-# ...
+describe.txt
 events.txt
+logs.txt
 pod.yaml
 ```
 
@@ -471,7 +506,7 @@ part of this capture. Both are cited in the audit and detection sections and
 were not run here.
 
 **Step 3: cordon the node.** `kubectl cordon <node>` stops the scheduler from
-placing new Pods there while the investigation runs. On the shared cluster the
+placing new Pods there while the investigation runs. On the lab cluster the
 script skips it, because cordoning the only node would block every other
 workload. Read the step as the procedure, not as a run.
 
@@ -479,9 +514,9 @@ workload. Read the step as the procedure, not as a run.
 credentials it could reach, and check that each old credential is refused.
 
 ```bash
-kubectl delete rolebinding ops-secret-reader -n p05-08-app
-kubectl delete pod escape-node -n p05-08-attack
-kubectl --kubeconfig=work/ops.kubeconfig get secret app-db -n p05-08-app -o name
+kubectl delete rolebinding ops-secret-reader -n app
+kubectl delete pod escape-node -n attack
+kubectl --kubeconfig=work/ops.kubeconfig get secret app-db -n app -o name
 kubectl --kubeconfig=work/ops.kubeconfig auth whoami
 ```
 
@@ -496,12 +531,12 @@ error: You must be logged in to the server (Unauthorized)
 error: You must be logged in to the server (Unauthorized)
 ```
 
-The `ops` token was bound to the Pod. After the RoleBinding was deleted and the
-Pod was gone, the API server returned `Unauthorized`, which is an
+The `ops` token was bound to the Pod. After the RoleBinding was deleted and
+the Pod was gone, the API server returned `Unauthorized`, which is an
 authentication refusal, not an authorization one. Both steps ran before the
-check, so the lab cannot say which one caused the refusal. The token is refused
-either way. The Kubernetes documentation on
-[service account tokens](https://kubernetes.io/docs/concepts/security/service-accounts/)
+check, so the lab cannot say which one caused the refusal. The token is
+refused either way. The Kubernetes documentation on [service account
+tokens](https://kubernetes.io/docs/concepts/security/service-accounts/)
 describes the bound-token model, and the lab checked its behaviour rather than
 quoting that page for it.
 
@@ -510,7 +545,7 @@ and recreating the ServiceAccount is the rotation step that makes the old
 token useless:
 
 ```bash
-kubectl delete serviceaccount builder -n p05-08-attack
+kubectl delete serviceaccount builder -n attack
 kubectl apply -f builder-sa.yaml
 kubectl --kubeconfig=work/builder.kubeconfig auth whoami
 ```
@@ -529,7 +564,7 @@ at the same time in a real system, so the rotation is a coordinated change, not
 a single patch.
 
 ```bash
-kubectl patch secret app-db -n p05-08-app --type merge \
+kubectl patch secret app-db -n app --type merge \
   -p '{"stringData":{"password":"lab-rotated-value"}}'
 ```
 
@@ -539,22 +574,32 @@ kubectl patch secret app-db -n p05-08-app --type merge \
 secret/app-db patched
 ```
 
-**Step 5: uncordon.** After the investigation, `kubectl uncordon <node>` returns
-the node to service. The shared-mode script skips it for the same reason it
-skips the cordon.
+**Step 5: do not uncordon.** A node whose root filesystem the Pod reached is not
+trusted again by returning it to service. The escape here was a `hostPath: /`
+mount, so the node is treated as compromised: drain it, replace it, and rotate
+what lived on it, including the kubelet's client certificate and any secret the
+node held. The lab does not run this step. Its throwaway cluster is deleted
+instead.
 
 ### Audit: what the log would show (not run)
 
 The audit steps need a cluster whose API server writes an audit log, which
 means an API server flag. The policy below is the one the lab would install.
-It was not run on a cluster, so nothing below is evidence. The lab's
-throwaway cluster has not booted on the lab host yet.
+It was not run on a cluster, so nothing below is evidence. The shared run did
+not create a throwaway cluster, so no audit flag was set on the cluster it
+used.
 
 The policy's rules are checked in order, and the first match sets the level.
-Secrets and ConfigMaps are `Metadata`, so the log names who read the Secret and
-never holds its value. Token requests are `Metadata` for the same reason. Pod
-changes, `exec` and RBAC changes are `Request`, so the log keeps the body: the
-image, the `hostPath`, the `serviceAccountName` and the exec command.
+Secrets and ConfigMaps are `Metadata`, so the log names who read the Secret
+and never holds its value. Token requests are `Metadata` for the same reason.
+Pod changes are `Request`, so the log keeps the body, which names the image,
+the `hostPath` and the `serviceAccountName`. `exec`, `attach` and
+`port-forward` have no request body. The command is in the request URI, which
+every level keeps. A WebSocket exec request can be audited with the verb `get`
+instead of `create`, depending on the release, so the rule lists both verbs.
+RBAC changes are `Request`, so a new binding is visible in full. The
+authorizer checks `bind` and `escalate`, but audit events carry the request
+verb, so the rule does not list them.
 
 ```yaml
 apiVersion: audit.k8s.io/v1
@@ -574,9 +619,14 @@ rules:
     verbs: ["create", "update", "patch", "delete"]
     resources:
       - group: ""
-        resources: ["pods", "pods/exec", "pods/attach", "pods/portforward"]
+        resources: ["pods"]
   - level: Request
-    verbs: ["create", "update", "patch", "delete", "bind", "escalate"]
+    verbs: ["create", "get"]
+    resources:
+      - group: ""
+        resources: ["pods/exec", "pods/attach", "pods/portforward"]
+  - level: Request
+    verbs: ["create", "update", "patch", "delete"]
     resources:
       - group: "rbac.authorization.k8s.io"
         resources: ["roles", "rolebindings", "clusterroles", "clusterrolebindings"]
@@ -585,10 +635,10 @@ rules:
 
 The kube-apiserver reads that file through `--audit-policy-file`, and writes
 events to the path given by `--audit-log-path`. Neither flag is optional for
-this lab: without the policy file no events are logged
-([Kubernetes audit](https://kubernetes.io/docs/tasks/debug/debug-cluster/audit/)).
-kind's Auditing page sets both flags through `kubeadmConfigPatches`
-([kind auditing](https://kind.sigs.k8s.io/docs/user/auditing/)). The kubeadm
+this lab: without the policy file no events are logged ([Kubernetes
+audit](https://kubernetes.io/docs/tasks/debug/debug-cluster/audit/)). kind's
+Auditing page sets both flags through `kubeadmConfigPatches` ([kind
+auditing](https://kind.sigs.k8s.io/docs/user/auditing/)). The kubeadm
 configuration in kind uses the v1beta4 list form for `extraArgs`, which is why
 the patch below uses a list. The timeouts are for a slow host. A fast machine
 may not need them, and the kubeadm defaults are printed in the node image
@@ -645,24 +695,26 @@ cluster.
 What the lab would query, once the log exists: the events for the lab's two
 namespaces, at the `ResponseComplete` stage so each request appears once. For
 each one, the user, the verb, the object, the status code, and for Pod changes
-the `serviceAccountName`, the `privileged` flag and any `hostPath`. For `exec`,
-the command. For token requests, who asked for a token and for which
-ServiceAccount. A `403` is a refused request, from RBAC or from admission, and
-the audit event carries that status. The lab's query was written for these
-fields. It did not run.
+the `serviceAccountName`, the `privileged` flag and any `hostPath`. For
+`exec`, the command from the request URI. For token requests, who asked for a
+token and for which ServiceAccount. A `403` is a refused request, from RBAC or
+from admission, and the audit event carries that status. The lab's query was
+written for these fields. It did not run.
 
 ### Detection: Falco, with Falcosidekick (not run)
 
 Falco watches kernel events on each node and turns them into alerts. It sees
 what the audit log does not: a process that opens a file or starts a program
-inside a container, on the node itself. Falco needs privilege to watch the
-kernel. Its [container setup page](https://falco.org/docs/setup/container/)
-names the capabilities the modern eBPF probe needs: `CAP_SYS_PTRACE`,
-`CAP_SYS_RESOURCE`, `CAP_BPF` and `CAP_PERFMON`. [02](02-pod-security.md)
-explained why no `restricted` or `baseline` namespace can admit them, so
-Falco's namespace is labelled `privileged`, and that is an exception: record
-it in the exceptions registry with its reason and an expiry within twelve
-months. The registry itself is taught in 05.09. <!-- link-later: 05.09 -->
+inside a container, on the node itself. Falco needs four capabilities to watch
+the kernel with its modern eBPF probe. Its [container setup
+page](https://falco.org/docs/setup/container/) names them: `CAP_SYS_PTRACE`,
+`CAP_SYS_RESOURCE`, `CAP_BPF` and `CAP_PERFMON`. The chart can run the probe
+with those capabilities alone, and its least-privileged setting turns that on.
+The DaemonSet still mounts host paths, and the lab does not test a lower Pod
+Security level for it, so Falco's namespace is labelled `privileged`. That is
+an exception. Its namespace carries the two annotations of the exception
+record, a reason and an expiry within twelve months, which
+[05.09](09-running-security-on-a-platform-team.md) describes.
 
 The lab's Falco configuration selects the modern eBPF driver and turns on
 Falcosidekick with debug logging, which is the only output this lab uses. A
@@ -672,16 +724,19 @@ real deployment sends alerts to a SIEM or a paging system instead.
 apiVersion: v1
 kind: Namespace
 metadata:
-  name: p05-08-falco
+  name: falco
   labels:
     pod-security.kubernetes.io/enforce: privileged
+  annotations:
+    security.example/exception-reason: "Falco driver mounts host paths; the container runs without privilege."
+    security.example/exception-expires: "2027-06-30"
 ```
 
 ```yaml
 driver:
   kind: modern_ebpf
   modernEbpf:
-    leastPrivileged: false
+    leastPrivileged: true
 image:
   tag: "0.45.2@sha256:1562a643953f938e02f47319b5214d93a235f11f646d60e9b8a516fd5a64698e"
 falcoctl:
@@ -698,16 +753,46 @@ falcosidekick:
 ```bash
 helm repo add falcosecurity https://falcosecurity.github.io/charts
 helm install falco falcosecurity/falco --version 9.2.2 \
-  --namespace p05-08-falco -f falco-values.yaml --wait --timeout 10m
+  --namespace falco -f falco-values.yaml --wait --timeout 10m
 ```
 
-The chart version 9.2.2 carries application 0.45.2. The image digests were
-checked against the registry, and `helm template` rendered the values with them
-before this chapter was written. The DaemonSet renders with `privileged: true`,
-which is the level the namespace label admits. The lab's attack sections would
-be re-run after Falco starts, with a second `escape-node`, so Falco has a fresh
-Pod start to see. Those steps were not run, so the alert names are not shown
-here.
+The chart version 9.2.2 carries application 0.45.2. The shared run checked
+that with `helm show chart`, and it rendered the driver settings above with
+`helm template`. The driver block alone is in `falco-driver.yaml`. Its render
+has no `privileged: true`, and it adds the four capabilities:
+
+```bash
+helm show chart falcosecurity/falco --version 9.2.2 | grep -E '^(version|appVersion)'
+helm template falco falcosecurity/falco --version 9.2.2 --namespace falco -f falco-driver.yaml > falco-rendered.yaml
+grep -c 'privileged: true' falco-rendered.yaml
+grep -A5 'capabilities:' falco-rendered.yaml | head -6
+```
+
+<!-- gate: output -->
+```text
+appVersion: 0.45.2
+version: 9.2.2
+```
+
+<!-- gate: output -->
+```text
+0
+```
+
+<!-- gate: output -->
+```text
+            capabilities:
+              add:
+              - BPF
+              - SYS_RESOURCE
+              - PERFMON
+              - SYS_PTRACE
+```
+
+The image digests are the ones the values file pins. This chapter did not
+re-resolve them against the registry. The lab would re-run the attack after
+Falco starts, with a second `escape-node`, so Falco has a fresh Pod start to
+see. Those steps were not run, so the alert names are not shown here.
 
 ### Continuous scanning: Trivy Operator (not run)
 
@@ -723,13 +808,31 @@ did not run.
 apiVersion: v1
 kind: Namespace
 metadata:
-  name: p05-08-trivy
+  name: trivy
   labels:
     pod-security.kubernetes.io/enforce: restricted
     pod-security.kubernetes.io/enforce-version: v1.37
 ```
 
 ```yaml
+podSecurityContext:
+  runAsNonRoot: true
+  runAsUser: 10000
+  runAsGroup: 10000
+  seccompProfile:
+    type: RuntimeDefault
+securityContext:
+  privileged: false
+  allowPrivilegeEscalation: false
+  readOnlyRootFilesystem: true
+  capabilities:
+    drop: ["ALL"]
+scanJobPodTemplatePodSecurityContext:
+  runAsNonRoot: true
+  runAsUser: 10000
+  runAsGroup: 10000
+  seccompProfile:
+    type: RuntimeDefault
 operator:
   scanJobsConcurrentLimit: 1
 image:
@@ -741,15 +844,52 @@ trivy:
 ```bash
 helm repo add aqua https://aquasecurity.github.io/helm-charts/
 helm install trivy aqua/trivy-operator --version 0.38.1 \
-  --namespace p05-08-trivy -f trivy-values.yaml --wait --timeout 10m
+  --namespace trivy -f trivy-values.yaml --wait --timeout 10m
 ```
 
 The chart is 0.38.1 with application 0.36.1, and the scanner is pinned to Trivy
-0.76.1, the version the guide's gates use. The namespace is `restricted`, and
-whether the operator's own pods and scan jobs run under it was not checked, so
-the chapter does not claim it. If they do not, the lowest level they run under
-is the one to label, with an exception recorded. Tetragon, the in-kernel
-enforcement option, is cited above and was not run.
+0.76.1, the version the guide's gates use. The namespace is labelled
+`restricted`, and the values above set the pod and container fields that level
+asks for. The shared run checked this in three steps. `helm template` rendered
+the operator's Deployment with `runAsNonRoot: true`. A server dry run then
+admitted a probe Pod that carries the operator's pod settings in a restricted
+namespace, and refused the same Pod without `runAsNonRoot`:
+
+```bash
+helm template trivy aqua/trivy-operator --version 0.38.1 --namespace trivy -f trivy-values.yaml > trivy-rendered.yaml
+grep -c 'runAsNonRoot: true' trivy-rendered.yaml
+kubectl apply -f trivy-ns.yaml
+kubectl apply --dry-run=server -f operator-probe.yaml; echo "server dry-run exit=$?"
+kubectl apply --dry-run=server -f operator-probe-root.yaml; echo "server dry-run exit=$?"
+```
+
+<!-- gate: output -->
+```text
+1
+```
+
+<!-- gate: output -->
+```text
+namespace/p05-08-trivy created
+```
+
+<!-- gate: output -->
+```text
+pod/operator-probe created (server dry run)
+server dry-run exit=0
+```
+
+<!-- gate: output -->
+```text
+Error from server (Forbidden): error when creating "operator-probe-root.yaml": pods "operator-probe" is forbidden: violates PodSecurity "restricted:v1.37": runAsNonRoot != true (pod or container "operator" must set securityContext.runAsNonRoot=true)
+server dry-run exit=1
+```
+
+The probe is not the operator's own Pod, which the lab did not create. The
+scan jobs' pods take their settings from
+`scanJobPodTemplatePodSecurityContext`, and the lab did not run a scan job.
+Those two parts are not claimed here. Tetragon, the in-kernel enforcement
+option, is cited above and was not run.
 
 ### Clean up
 
@@ -757,7 +897,7 @@ The lab deletes its namespaces. Helm releases are removed first when they were
 installed, and the throwaway cluster is deleted when the script created it.
 
 ```bash
-kubectl delete namespace p05-08-attack p05-08-app p05-08-falco p05-08-trivy
+kubectl delete namespace attack app falco trivy
 ```
 
 <!-- gate: output -->
@@ -765,6 +905,7 @@ kubectl delete namespace p05-08-attack p05-08-app p05-08-falco p05-08-trivy
 # ...
 namespace "p05-08-attack" deleted
 namespace "p05-08-app" deleted
+namespace "p05-08-trivy" deleted
 ```
 
 ## How it works under the hood
@@ -786,12 +927,13 @@ request. Its evidence is the event stream,
 which only the detector's outputs keep. The API server's audit log is the
 complementary record for changes to the cluster.
 
-**Bound tokens follow the Pod.** A token minted for a Pod is tied to that Pod's
-lifetime, and a token minted for a ServiceAccount is tied to that account's
-identity. The lab observed both: deleting the Pod ended the Pod-bound token's
-authority, and recreating the ServiceAccount ended the token that was minted for
-it. Both refusals were `Unauthorized`. The model is described in the
-[service account documentation](https://kubernetes.io/docs/concepts/security/service-accounts/).
+**Bound tokens follow the Pod.** A token minted for a Pod is tied to that
+Pod's lifetime, and a token minted for a ServiceAccount is tied to that
+account's identity. The lab observed both: deleting the Pod ended the
+Pod-bound token's authority, and recreating the ServiceAccount ended the token
+that was minted for it. Both refusals were `Unauthorized`. The model is
+described in the [service account
+documentation](https://kubernetes.io/docs/concepts/security/service-accounts/).
 
 **Admission and audit are different records of one event.** A Pod refused by
 Pod Security Admission never exists, so there is no Pod to scan later. Its
@@ -807,10 +949,11 @@ evidence points.
 > `Request` events hold Pod specs and exec commands.
 
 > **In production:** a detector that alerts on everything gets its alerts
-> ignored. Tune the rules to the workloads you run, and send the alerts
-> where someone is paid to read them. Operating that loop is taught in
+> ignored. Tune the rules to the workloads you run, and send the alerts where
+> someone is paid to read them. Operating that loop is taught in
 > [14.13](../14-eks-in-production-a-to-z/13-runtime-defense-and-container-security.md)
-> and in [15.10](../15-day-to-day-production-ops/10-incident-response-and-on-call.md).
+> and in
+> [15.10](../15-day-to-day-production-ops/10-incident-response-and-on-call.md).
 
 > **In production:** make the runbook a checklist with the evidence paths
 > written in before an incident, not after. Isolation, capture and cordon are
@@ -843,7 +986,7 @@ apiVersion: networking.k8s.io/v1
 kind: NetworkPolicy
 metadata:
   name: quarantine
-  namespace: p05-08-attack
+  namespace: attack
 spec:
   podSelector:
     matchLabels:
@@ -915,6 +1058,9 @@ kubectl delete serviceaccount SA -n NAMESPACE && kubectl apply -f SA.yaml
   <https://falco.org/docs/setup/container/>, and Falcosidekick,
   <https://github.com/falcosecurity/falcosidekick>.
 - Trivy Operator, <https://github.com/aquasecurity/trivy-operator>.
-- Tetragon, <https://tetragon.io/docs/>, for in-kernel enforcement. Not run here.
-- Production operation: [14.13](../14-eks-in-production-a-to-z/13-runtime-defense-and-container-security.md)
-  and [15.10](../15-day-to-day-production-ops/10-incident-response-and-on-call.md).
+- Tetragon, <https://tetragon.io/docs/>, for in-kernel enforcement. Not run
+  here.
+- Production operation:
+  [14.13](../14-eks-in-production-a-to-z/13-runtime-defense-and-container-security.md)
+  and
+  [15.10](../15-day-to-day-production-ops/10-incident-response-and-on-call.md).

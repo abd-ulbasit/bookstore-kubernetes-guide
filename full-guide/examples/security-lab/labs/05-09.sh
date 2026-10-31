@@ -10,8 +10,9 @@
 # Part 2 runs only against a kind cluster you own: the kubectl context must
 # start with kind-. It applies a ValidatingAdmissionPolicy that refuses a
 # namespace below restricted unless the namespace carries a reason and an expiry
-# date no more than 365 days out. It creates four p05-09-* namespaces to show
-# which the policy admits. It then creates a restricted service namespace, server
+# date no more than 365 days out. A namespace with no enforce label counts as
+# below restricted, because Pod Security's default is privileged. It creates five
+# p05-09-* namespaces to show which the policy admits. It then creates a restricted service namespace, server
 # dry-runs a complete catalog Deployment in it, and shows a privileged Pod refused.
 # It deletes everything it created. Namespace removal is slow on a busy control
 # plane, so the script does not wait for it; it waits a bounded time before a
@@ -165,7 +166,7 @@ spec:
       expression: >-
         has(object.metadata.labels) &&
         'pod-security.kubernetes.io/enforce' in object.metadata.labels ?
-        object.metadata.labels['pod-security.kubernetes.io/enforce'] : 'restricted'
+        object.metadata.labels['pod-security.kubernetes.io/enforce'] : ''
     - name: notes
       expression: >-
         has(object.metadata.annotations) ? object.metadata.annotations : {}
@@ -253,6 +254,11 @@ metadata:
 apiVersion: v1
 kind: Namespace
 metadata:
+  name: p05-09-unlabelled
+---
+apiVersion: v1
+kind: Namespace
+metadata:
   name: p05-09-too-long
   labels:
     pod-security.kubernetes.io/enforce: baseline
@@ -266,14 +272,14 @@ metadata:
     security.example/exception-expires: "2028-01-01"
 YAML
 
-echo '## step 5: apply four namespaces; the policy admits or refuses each'
+echo '## step 5: apply five namespaces; the policy admits or refuses each'
 run <<'CMD'
 kubectl apply -f namespaces.yaml
 CMD
 
-echo '## step 6: which of the four exist now'
+echo '## step 6: which of the five exist now'
 run <<'CMD'
-kubectl get ns p05-09-restricted p05-09-no-expiry p05-09-exception p05-09-too-long --ignore-not-found -L pod-security.kubernetes.io/enforce
+kubectl get ns p05-09-restricted p05-09-no-expiry p05-09-exception p05-09-unlabelled p05-09-too-long --ignore-not-found -L pod-security.kubernetes.io/enforce
 CMD
 
 echo '## step 7: a restricted service namespace, then its workload checked by a server dry run'

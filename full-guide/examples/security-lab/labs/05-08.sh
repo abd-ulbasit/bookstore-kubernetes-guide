@@ -321,7 +321,7 @@ show "kubectl --kubeconfig=work/builder.kubeconfig get secret app-db -n p05-08-a
   "KUBECONFIG=$WORK/builder.kubeconfig kubectl get secret app-db -n p05-08-app"
 
 cat > "$WORK/escape-node.yaml" <<'YAML'
-# INSECURE ON PURPOSE: a privileged Pod that mounts the node's root and runs as the ops ServiceAccount. Lab cluster only.
+# INSECURE ON PURPOSE: a Pod that mounts the node container's root and runs as the ops ServiceAccount. Lab cluster only.
 apiVersion: v1
 kind: Pod
 metadata:
@@ -333,8 +333,6 @@ spec:
     - name: app
       image: busybox@sha256:73aaf090f3d85aa34ee199857f03fa3a95c8ede2ffd4cc2cdb5b94e566b11662  # busybox:1.36
       command: ["sleep", "1800"]
-      securityContext:
-        privileged: true
       volumeMounts:
         - name: node-root
           mountPath: /host
@@ -413,6 +411,99 @@ if [ "$LAB_MODE" != shared ]; then
 show "query: requests refused with 403" "query_audit refused"
 fi
 
+##@ Charts: the versions, the settings the installs render with, and a restricted probe (no install)
+
+show "helm repo add falcosecurity https://falcosecurity.github.io/charts --force-update" \
+  "helm repo add falcosecurity https://falcosecurity.github.io/charts --force-update"
+show "helm repo add aqua https://aquasecurity.github.io/helm-charts/ --force-update" \
+  "helm repo add aqua https://aquasecurity.github.io/helm-charts/ --force-update"
+show "helm show chart falcosecurity/falco --version 9.2.2 | grep -E '^(version|appVersion)'" \
+  "helm show chart falcosecurity/falco --version 9.2.2 | grep -E '^(version|appVersion)'"
+show "helm show chart aqua/trivy-operator --version 0.38.1 | grep -E '^(version|appVersion)'" \
+  "helm show chart aqua/trivy-operator --version 0.38.1 | grep -E '^(version|appVersion)'"
+show "kubectl -n kube-system get daemonset -o name" "kubectl -n kube-system get daemonset -o name"
+
+cat > "$WORK/falco-driver.yaml" <<'YAML'
+driver:
+  kind: modern_ebpf
+  modernEbpf:
+    leastPrivileged: true
+YAML
+show "helm template falco falcosecurity/falco --version 9.2.2 --namespace p05-08-falco -f falco-driver.yaml > falco-rendered.yaml" \
+  "helm template falco falcosecurity/falco --version 9.2.2 --namespace p05-08-falco -f $WORK/falco-driver.yaml > $WORK/falco-rendered.yaml"
+show "grep -c 'privileged: true' falco-rendered.yaml" "grep -c 'privileged: true' $WORK/falco-rendered.yaml"
+show "grep -A5 'capabilities:' falco-rendered.yaml | head -6" "grep -A5 'capabilities:' $WORK/falco-rendered.yaml | head -6"
+
+cat > "$WORK/trivy-values.yaml" <<'YAML'
+podSecurityContext:
+  runAsNonRoot: true
+  runAsUser: 10000
+  runAsGroup: 10000
+  seccompProfile:
+    type: RuntimeDefault
+securityContext:
+  privileged: false
+  allowPrivilegeEscalation: false
+  readOnlyRootFilesystem: true
+  capabilities:
+    drop: ["ALL"]
+scanJobPodTemplatePodSecurityContext:
+  runAsNonRoot: true
+  runAsUser: 10000
+  runAsGroup: 10000
+  seccompProfile:
+    type: RuntimeDefault
+YAML
+show "helm template trivy aqua/trivy-operator --version 0.38.1 --namespace p05-08-trivy -f trivy-values.yaml > trivy-rendered.yaml" \
+  "helm template trivy aqua/trivy-operator --version 0.38.1 --namespace p05-08-trivy -f $WORK/trivy-values.yaml > $WORK/trivy-rendered.yaml"
+show "grep -c 'runAsNonRoot: true' trivy-rendered.yaml" "grep -c 'runAsNonRoot: true' $WORK/trivy-rendered.yaml"
+
+cat > "$WORK/trivy-ns.yaml" <<'YAML'
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: p05-08-trivy
+  labels:
+    pod-security.kubernetes.io/enforce: restricted
+    pod-security.kubernetes.io/enforce-version: v1.37
+YAML
+show "kubectl apply -f trivy-ns.yaml" "kubectl apply -f $WORK/trivy-ns.yaml"
+cat > "$WORK/operator-probe.yaml" <<'YAML'
+apiVersion: v1
+kind: Pod
+metadata:
+  name: operator-probe
+  namespace: p05-08-trivy
+spec:
+  securityContext:
+    runAsNonRoot: true
+    runAsUser: 10000
+    runAsGroup: 10000
+    seccompProfile:
+      type: RuntimeDefault
+  containers:
+    - name: operator
+      image: busybox@sha256:73aaf090f3d85aa34ee199857f03fa3a95c8ede2ffd4cc2cdb5b94e566b11662  # busybox:1.36
+      command: ["sleep", "600"]
+      securityContext:
+        allowPrivilegeEscalation: false
+        privileged: false
+        readOnlyRootFilesystem: true
+        capabilities:
+          drop: ["ALL"]
+      volumeMounts:
+        - mountPath: /tmp
+          name: cache-policies
+  volumes:
+    - name: cache-policies
+      emptyDir: {}
+YAML
+sed '/runAsNonRoot: true/d' "$WORK/operator-probe.yaml" > "$WORK/operator-probe-root.yaml"
+show "kubectl apply --dry-run=server -f operator-probe.yaml; echo \"server dry-run exit=\$?\"" \
+  "cd $WORK && kubectl apply --dry-run=server -f operator-probe.yaml; echo \"server dry-run exit=\$?\""
+show "kubectl apply --dry-run=server -f operator-probe-root.yaml; echo \"server dry-run exit=\$?\"" \
+  "cd $WORK && kubectl apply --dry-run=server -f operator-probe-root.yaml; echo \"server dry-run exit=\$?\""
+
 if [ "$LAB_MODE" != shared ]; then
 ##@ Detection: Falco with Falcosidekick
 
@@ -423,12 +514,15 @@ metadata:
   name: p05-08-falco
   labels:
     pod-security.kubernetes.io/enforce: privileged
+  annotations:
+    security.example/exception-reason: "Falco driver mounts host paths; the container runs without privilege."
+    security.example/exception-expires: "2027-06-30"
 YAML
 cat > "$WORK/falco-values.yaml" <<'YAML'
 driver:
   kind: modern_ebpf
   modernEbpf:
-    leastPrivileged: false
+    leastPrivileged: true
 image:
   tag: "0.45.2@sha256:1562a643953f938e02f47319b5214d93a235f11f646d60e9b8a516fd5a64698e"
 falcoctl:
@@ -470,6 +564,24 @@ metadata:
     pod-security.kubernetes.io/enforce-version: v1.37
 YAML
 cat > "$WORK/trivy-values.yaml" <<'YAML'
+podSecurityContext:
+  runAsNonRoot: true
+  runAsUser: 10000
+  runAsGroup: 10000
+  seccompProfile:
+    type: RuntimeDefault
+securityContext:
+  privileged: false
+  allowPrivilegeEscalation: false
+  readOnlyRootFilesystem: true
+  capabilities:
+    drop: ["ALL"]
+scanJobPodTemplatePodSecurityContext:
+  runAsNonRoot: true
+  runAsUser: 10000
+  runAsGroup: 10000
+  seccompProfile:
+    type: RuntimeDefault
 operator:
   scanJobsConcurrentLimit: 1
 image:
@@ -522,11 +634,15 @@ show "kubectl get pod escape-node -n p05-08-attack -o yaml > evidence/pod.yaml" 
   "kubectl get pod escape-node -n p05-08-attack -o yaml > $WORK/evidence/pod.yaml"
 show "kubectl get events -n p05-08-attack > evidence/events.txt" \
   "kubectl get events -n p05-08-attack > $WORK/evidence/events.txt"
+show "kubectl describe pod escape-node -n p05-08-attack > evidence/describe.txt" \
+  "kubectl describe pod escape-node -n p05-08-attack > $WORK/evidence/describe.txt"
+show "kubectl logs escape-node -n p05-08-attack > evidence/logs.txt" \
+  "kubectl logs escape-node -n p05-08-attack > $WORK/evidence/logs.txt"
 if [ "$LAB_MODE" != shared ]; then
 show "query: exec and create events for escape-node, from the audit log" \
   "query_audit exec > $WORK/evidence/audit-exec.txt; cat $WORK/evidence/audit-exec.txt"
 fi
-show "ls -l evidence" "ls -l $WORK/evidence | awk 'NR>1 {print \$NF}'"
+show "ls -1 evidence" "ls -1 $WORK/evidence"
 
 if [ "$LAB_MODE" != shared ]; then
 show "kubectl cordon $NODE" "kubectl cordon $NODE"
@@ -557,9 +673,8 @@ show "kubectl --kubeconfig=work/builder.kubeconfig auth whoami" \
 show "kubectl patch secret app-db -n p05-08-app --type merge -p '{\"stringData\":{\"password\":\"lab-rotated-value\"}}'" \
   "kubectl patch secret app-db -n p05-08-app --type merge -p '{\"stringData\":{\"password\":\"lab-rotated-value\"}}'"
 
-if [ "$LAB_MODE" != shared ]; then
-show "kubectl uncordon $NODE" "kubectl uncordon $NODE"
-fi
+# No uncordon: the escape reached the node's root, so the node is replaced, not
+# returned to service.
 
 ##@ Cleanup: remove what the lab installed, then the throwaway cluster
 

@@ -21,10 +21,20 @@ namespaces contains rc if {
 	rc.change.after != null
 }
 
+# A namespace below restricted is an exception only with both annotations of
+# the exception record (Part 05 ch.09). The same record the admission rule
+# reads; this rule checks that both are present, not the expiry window.
+excepted(rc) if {
+	ann := object.get(rc.change.after.metadata[0], "annotations", {})
+	ann["security.example/exception-reason"]
+	ann["security.example/exception-expires"]
+}
+
 deny contains msg if {
 	some rc in namespaces
 	labels := object.get(rc.change.after.metadata[0], "labels", {})
 	level := object.get(labels, "pod-security.kubernetes.io/enforce", "")
 	level != "restricted"
+	not excepted(rc)
 	msg := sprintf("BK-TF-001 %s enforces %q, not restricted", [rc.address, level])
 }

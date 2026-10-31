@@ -1,12 +1,12 @@
 # 07: Admission control and policy as code
 
-> Admission is the last check before the API server stores an object, and it is
-> the one place every create and update passes through. This chapter shows what
-> it can refuse that Pod Security cannot: a Service that asks for an external
-> IP, a Pod that forgets the baseline, an image nobody signed. It teaches the two
-> built-in policy kinds first, then Kyverno as the project's engine, then the
-> same rule in Rego for Gatekeeper. Last, the same rules run in CI before any
-> manifest reaches a cluster.
+> Admission is the last check before the API server stores an object, and it
+> is the one place every create and update passes through. This chapter shows
+> what it can refuse that Pod Security cannot: a Service that asks for an
+> external IP, a Pod that forgets the baseline, an image nobody signed. It
+> teaches the two built-in policy kinds first, then Kyverno as the project's
+> engine, then the same rule in Rego for Gatekeeper. Last, the same rules run
+> in CI before any manifest reaches a cluster.
 
 **Estimated time:** ~50 min read · ~40 min lab (scripted, shared mode)
 **Prerequisites:** [Part 05 ch.01](01-authn-authz-rbac.md): RBAC decides who may
@@ -49,8 +49,9 @@ chapter decides what the answer may contain.
 
 Policy as code is the second half. A rule kept as a file can be unit-tested,
 reviewed, and run in a pipeline before it reaches the cluster. The Bookstore
-states each rule once, in a form that CI runs and the cluster enforces, so a
-failure shows up in the pull request rather than as a refused deploy.
+keeps one rule ID for each rule. The rule is written in Rego for CI, and the
+cluster enforces the same rule in a form it can express, so a failure shows up
+in the pull request rather than as a refused deploy.
 
 ## Mental model
 
@@ -61,9 +62,10 @@ check may do.
    `MutatingAdmissionPolicy` may change the object. This is where a default
    goes in.
 2. **Validating admission** runs second, on the object as it will be stored.
-   Pod Security Admission, `ValidatingAdmissionPolicy`, and validating webhooks
-   such as Kyverno and Gatekeeper may only accept or refuse. The
-   [admission controllers page](https://kubernetes.io/docs/reference/access-authn-authz/admission-controllers/)
+   Pod Security Admission, `ValidatingAdmissionPolicy`, and validating
+   webhooks such as Kyverno and Gatekeeper may only accept or refuse. The
+   [admission controllers
+   page](https://kubernetes.io/docs/reference/access-authn-authz/admission-controllers/)
    states the two phases in that order.
 
 Three consequences follow. A validating check sees the defaults that a mutating
@@ -94,7 +96,7 @@ installs Gatekeeper beside it to show that the rule ports, then removes it.
 | Threat | Control this chapter teaches | Where it goes deeper |
 |---|---|---|
 | A Service asks for an external IP, so traffic meant for another address lands on this workload | `ValidatingAdmissionPolicy` refuses `spec.externalIPs` in labelled namespaces | [Service external IPs](https://kubernetes.io/docs/concepts/services-networking/service/#external-ips) |
-| A tag moves to a different image after review | `ValidatingAdmissionPolicy` requires a digest on every container image | [05.03](03-supply-chain.md) |
+| A tag moves to a different image after review | `ValidatingAdmissionPolicy` requires a digest on every third-party image, and refuses the `latest` tag | [05.03](03-supply-chain.md) |
 | A Pod runs an image nobody signed, under a digest anyone can pin | Kyverno `verifyImages` checks the signature against a key or an identity | [cosign verify](https://docs.sigstore.dev/cosign/verifying/verify/); [05.03](03-supply-chain.md) |
 | A workload forgets the seccomp profile | `MutatingAdmissionPolicy` fills in `RuntimeDefault` at admission | [01.01](../01-core-workloads/01-pods.md#baseline) |
 | A workload gets the default ServiceAccount token | Set `automountServiceAccountToken: false` in the manifest, and check it in CI; a policy that only changes the field does not remove the volume | [01.01](../01-core-workloads/01-pods.md#baseline) |
@@ -105,46 +107,53 @@ installs Gatekeeper beside it to show that the rule ports, then removes it.
 
 ### Lab header
 
-- **Tier A, two modes.** The lab runs against a kind cluster that you own, and it
-  refuses any other kubectl context. `MODE=shared` runs the steps that need no
-  throwaway cluster, on the lab's shared cluster. `MODE=full` creates a throwaway
+- **Tier A, two modes.** The lab runs against a kind cluster that you own, and
+  it refuses any other kubectl context. `MODE=shared` runs the steps that need
+  no throwaway cluster, on a lab cluster. `MODE=full` creates a throwaway
   cluster, `p05-07`, and runs the registry, the signing, and the Kyverno and
   Gatekeeper installs. The transcript below is a `MODE=shared` run.
+- **Names.** The lab prefixes its objects with `p05-07`, as in `p05-07-open`.
+  This chapter drops the prefix in its text, commands and manifests, so the
+  namespace is `open`. The captured output keeps the lab's names. It came from
+  a lab cluster with a different name from the one this guide uses.
 - **Script and transcript.**
   [`labs/05-07.sh`](../examples/security-lab/labs/05-07.sh) runs every command
   below and deletes what it creates. Its recorded output is
   [`evidence/05-07.txt`](../examples/security-lab/evidence/05-07.txt). The
   server is Kubernetes v1.37.0, and the client is kubectl v1.37.2.
 - **What ran.** Step 0 (the tools), steps 5 and 6 (the attack, the policies, and
-  the re-attack), step 13 (the policy checks), step 14 (the policies read back),
-  and step 16 (the Kyverno and Gatekeeper charts rendered and checked against
-  the cluster without being installed). Step 16 also shows the server refusing
-  the two policy objects, because their custom resources are not on this cluster.
+  the re-attack), step 12b (the API server's own refusal of `privileged: true`
+  with `allowPrivilegeEscalation: false`, in a server dry run), step 13 (the
+  policy checks), step 14 (the policies read back), and step 16 (the Kyverno and
+  Gatekeeper charts rendered and checked against the cluster without being
+  installed). Step 16 also shows kubectl refusing the two policy objects,
+  because their kinds are not on this cluster.
 - **What did not run.** Steps 1 to 4 (the throwaway cluster, the lab registry,
   the image push, and the signatures), step 7 (the signed Pod), steps 8 to 12
-  (the Kyverno install, Audit, Enforce, verifyImages, and Gatekeeper), and step 15
-  (the uninstall). The full mode was attempted three times on the lab host. Each
-  time the throwaway cluster's control plane did not finish bootstrapping inside
-  kubeadm's wait, or the node did not report its boot target in time, so no step
-  after cluster creation ran. Those steps are shown below as commands and marked
-  not run. Check the charts and the policy fields against their upstream
-  documentation before you rely on them.
-- **Namespaces.** `p05-07-open` enforces nothing and holds the attacks. The
-  shared run creates it, labels it for the policies, and deletes it at the end.
-  The full mode also creates `p05-07-signed`, `p05-07-kyverno`, and
-  `p05-07-registry`, and installs into `kyverno` and `gatekeeper-system`.
-- **Why a throwaway cluster in full mode.** The registry runs on the kind network
-  and every node must trust it. containerd reads that trust from its own
-  configuration, and only a cluster created with the `config_path` patch in
-  [`kind/admission.yaml`](../examples/security-lab/kind/admission.yaml) carries
-  it. The shared cluster keeps its default configuration.
+  (the Kyverno install, Audit, Enforce, verifyImages, and Gatekeeper), and step
+  15 (the uninstall). The full mode was attempted three times on the lab host.
+  Each time the throwaway cluster's control plane did not finish bootstrapping
+  inside kubeadm's wait, or the node did not report its boot target in time, so
+  no step after cluster creation ran. Those steps are shown below as commands
+  and are marked not run. The chart fields were checked against the pulled
+  3.9.2 chart and not against a running controller.
+- **Namespaces.** `open` enforces nothing and holds the attacks. The shared run
+  creates it, labels it for the policies, and deletes it at the end. Step 12b
+  creates `kyverno-demo` for two dry runs and deletes it. The full mode also
+  creates `signed`, `kyverno-demo`, and `lab-registry`, and installs into
+  `kyverno` and `gatekeeper-system`.
+- **Why a throwaway cluster in full mode.** The registry runs on the kind
+  network and every node must trust it. containerd reads that trust from its
+  own configuration, and only a cluster created with the `config_path` patch
+  in [`kind/admission.yaml`](../examples/security-lab/kind/admission.yaml)
+  carries it. The lab cluster keeps its default configuration.
 - **What did not work the first time.** A new namespace has no `default`
   ServiceAccount for a moment, and the API server refuses Pods in it until the
-  controller creates one. The script waits for it. A busybox Pod that runs `sleep`
-  as PID 1 ignored the stop signal on the shared cluster, and its namespace stayed
-  in `Terminating` for minutes. The final run starts from an empty namespace list.
-  The automount policy changed a field and did not remove a volume, which the
-  harden section below shows in detail.
+  controller creates one. The script waits for it. A busybox Pod that runs
+  `sleep` as PID 1 ignored the stop signal on the lab cluster, and its
+  namespace stayed in `Terminating` for minutes. The final run starts from an
+  empty namespace list. The automount policy changed a field and did not
+  remove a volume, which the harden section below shows in detail.
 
 The versions come first, so that each claim in this header has a captured
 source:
@@ -164,11 +173,11 @@ Terraform v1.14.8
 
 ### Recon: the open namespace
 
-The attacks run in a namespace with no Pod Security labels and no policy. Start
-with the Service. A Service with an `externalIPs` entry answers for that address
-on every node, so a tenant who may create Services can take traffic meant for
-another address. The
-[Service documentation](https://kubernetes.io/docs/concepts/services-networking/service/#external-ips)
+The attacks run in a namespace with no Pod Security labels and no policy.
+Start with the Service. A Service with an `externalIPs` entry answers for that
+address on every node, so a tenant who may create Services can take traffic
+meant for another address. The [Service
+documentation](https://kubernetes.io/docs/concepts/services-networking/service/#external-ips)
 describes the field, and the lab does not send traffic to it.
 
 <!-- gate: insecure-on-purpose -->
@@ -179,7 +188,7 @@ apiVersion: v1
 kind: Service
 metadata:
   name: catalog-ext
-  namespace: p05-07-open
+  namespace: open
 spec:
   selector:
     app: catalog
@@ -219,7 +228,7 @@ apiVersion: v1
 kind: Pod
 metadata:
   name: forgetful
-  namespace: p05-07-open
+  namespace: open
 spec:
   containers:
     - name: app
@@ -232,8 +241,8 @@ use the token.
 
 ```sh
 kubectl apply -f attack-forgetful.yaml
-kubectl -n p05-07-open exec forgetful -- sh -c 'grep Seccomp: /proc/self/status | tr "\t" " "; ls /var/run/secrets/kubernetes.io/serviceaccount/ 2>/dev/null | tr "\n" " "; echo'
-kubectl -n p05-07-open get pod forgetful -o jsonpath='{.spec.volumes[*].name}{"\n"}'
+kubectl -n open exec forgetful -- sh -c 'grep Seccomp: /proc/self/status | tr "\t" " "; ls /var/run/secrets/kubernetes.io/serviceaccount/ 2>/dev/null | tr "\n" " "; echo'
+kubectl -n open get pod forgetful -o jsonpath='{.spec.volumes[*].name}{"\n"}'
 ```
 
 <!-- gate: output -->
@@ -241,12 +250,15 @@ kubectl -n p05-07-open get pod forgetful -o jsonpath='{.spec.volumes[*].name}{"\
 ```
 Seccomp: 0
 ca.crt namespace token 
+# ...
+kube-api-access-5z49c
 ```
 
-`Seccomp: 0` means the process runs with no filter. The token directory is there,
-so the Pod's identity is mounted and ready to use. The Pod's volumes include a
-`kube-api-access` volume, which is the projected token. Neither result is a bug.
-The API server did what it was asked, and nothing asked for more.
+`Seccomp: 0` means the process runs with no filter. The token directory is
+there, so the Pod's identity is mounted and ready to use. The Pod's volumes
+include a `kube-api-access` volume, which is the projected token. Neither
+result is a bug. The API server did what it was asked, and nothing asked for
+more.
 
 ### Harden: a policy the built-in pair can enforce
 
@@ -264,7 +276,7 @@ label matter.
 apiVersion: admissionregistration.k8s.io/v1
 kind: ValidatingAdmissionPolicy
 metadata:
-  name: p05-07-no-external-ips
+  name: no-external-ips
 spec:
   failurePolicy: Fail
   matchConstraints:
@@ -281,14 +293,14 @@ spec:
 apiVersion: admissionregistration.k8s.io/v1
 kind: ValidatingAdmissionPolicyBinding
 metadata:
-  name: p05-07-no-external-ips
+  name: no-external-ips
 spec:
-  policyName: p05-07-no-external-ips
+  policyName: no-external-ips
   validationActions: [Deny]
   matchResources:
     namespaceSelector:
       matchLabels:
-        p05-07-lab: "true"
+        lab-policies: "true"
 ```
 
 `failurePolicy: Fail` means that an expression which cannot be evaluated refuses
@@ -305,7 +317,7 @@ one:
 apiVersion: admissionregistration.k8s.io/v1
 kind: ValidatingAdmissionPolicy
 metadata:
-  name: p05-07-digest-pinned
+  name: digest-pinned
 spec:
   failurePolicy: Fail
   matchConstraints:
@@ -314,35 +326,47 @@ spec:
         apiVersions: ["v1"]
         operations: ["CREATE", "UPDATE"]
         resources: ["pods"]
+  variables:
+    - name: images
+      expression: "object.spec.containers + (has(object.spec.initContainers) ? object.spec.initContainers : [])"
   validations:
-    - expression: "object.spec.containers.all(c, c.image.contains('@sha256:'))"
-      message: "every container image must be pinned by digest"
+    - expression: "variables.images.all(c, c.image.contains('@sha256:') || c.image.startsWith('registry.example.com/bookstore/'))"
+      message: "BK-POL-009: every third-party image must be pinned by digest"
+      reason: Forbidden
+    - expression: "variables.images.all(c, !c.image.endsWith(':latest'))"
+      message: "BK-POL-009: no image may use the latest tag"
       reason: Forbidden
 ---
 apiVersion: admissionregistration.k8s.io/v1
 kind: ValidatingAdmissionPolicyBinding
 metadata:
-  name: p05-07-digest-pinned
+  name: digest-pinned
 spec:
-  policyName: p05-07-digest-pinned
+  policyName: digest-pinned
   validationActions: [Deny]
   matchResources:
     namespaceSelector:
       matchLabels:
-        p05-07-lab: "true"
+        lab-policies: "true"
 ```
+
+The rule follows the baseline rule `BK-POL-009` that CI runs. A third-party
+image needs a digest, the `latest` tag is refused, and init containers are
+checked as well as app containers. Images under
+`registry.example.com/bookstore/` are exempt from the digest, because the
+Bookstore builds them and they carry the tag its build produced.
 
 A digest is not a signature. The rule says which bytes may run, not who made
 them. The verifyImages section below deals with that gap.
 
 The second kind of control is a `MutatingAdmissionPolicy`, which is GA in
-Kubernetes 1.36. It fills in a default when the author left a field out, and it
-does not overwrite a value the author set. The lab uses two. One sets the seccomp
-profile to `RuntimeDefault` when the Pod does not set one. The other sets
-`automountServiceAccountToken` to `false` when the Pod does not say.
+Kubernetes 1.36. It fills in a default when the author left a field out, and
+it does not overwrite a value the author set. The lab uses two. One sets the
+seccomp profile to `RuntimeDefault` when the Pod does not set one. The other
+sets `automountServiceAccountToken` to `false` when the Pod does not say.
 
-Each policy runs only when a condition holds. `matchConditions` is the guard, and
-the mutation is an apply configuration that the API server merges with the
+Each policy runs only when a condition holds. `matchConditions` is the guard,
+and the mutation is an apply configuration that the API server merges with the
 server-side apply strategy. A field the apply configuration does not name is
 left alone, and a field it names is set.
 
@@ -350,7 +374,7 @@ left alone, and a field it names is set.
 apiVersion: admissionregistration.k8s.io/v1
 kind: MutatingAdmissionPolicy
 metadata:
-  name: p05-07-default-automount-off
+  name: default-automount-off
 spec:
   failurePolicy: Fail
   reinvocationPolicy: IfNeeded
@@ -376,18 +400,18 @@ spec:
 apiVersion: admissionregistration.k8s.io/v1
 kind: MutatingAdmissionPolicyBinding
 metadata:
-  name: p05-07-default-automount-off
+  name: default-automount-off
 spec:
-  policyName: p05-07-default-automount-off
+  policyName: default-automount-off
   matchResources:
     namespaceSelector:
       matchLabels:
-        p05-07-lab: "true"
+        lab-policies: "true"
 ---
 apiVersion: admissionregistration.k8s.io/v1
 kind: MutatingAdmissionPolicy
 metadata:
-  name: p05-07-default-seccomp
+  name: default-seccomp
 spec:
   failurePolicy: Fail
   reinvocationPolicy: IfNeeded
@@ -417,25 +441,25 @@ spec:
 apiVersion: admissionregistration.k8s.io/v1
 kind: MutatingAdmissionPolicyBinding
 metadata:
-  name: p05-07-default-seccomp
+  name: default-seccomp
 spec:
-  policyName: p05-07-default-seccomp
+  policyName: default-seccomp
   matchResources:
     namespaceSelector:
       matchLabels:
-        p05-07-lab: "true"
+        lab-policies: "true"
 ```
 
 `reinvocationPolicy: IfNeeded` asks for the mutation to run again if a later
-mutation changes the Pod. The two policies here do not depend on each other, so
-the setting changes nothing in this lab. The
-[mutating admission policy page](https://kubernetes.io/docs/reference/access-authn-authz/mutating-admission-policy/)
+mutation changes the Pod. The two policies here do not depend on each other,
+so the setting changes nothing in this lab. The [mutating admission policy
+page](https://kubernetes.io/docs/reference/access-authn-authz/mutating-admission-policy/)
 describes it.
 
 A default is a guess the policy makes for every Pod it matches. The seccomp
-default is `RuntimeDefault` because the baseline asks for it. The policy does not
-judge the workload, and a Pod that needs a different profile must set one, which
-the mutation then leaves alone.
+default is `RuntimeDefault` because the baseline asks for it. The policy does
+not judge the workload, and a Pod that needs a different profile must set one,
+which the mutation then leaves alone.
 
 Apply the four objects, then label the attacked namespace so the bindings select
 it. The labelling is the switch. The namespace did not change, and the policies
@@ -443,7 +467,7 @@ started to apply to it.
 
 ```sh
 kubectl apply -f vap-no-external-ips.yaml -f vap-digest-pinned.yaml -f map-automount-off.yaml -f map-seccomp.yaml
-kubectl label namespace p05-07-open p05-07-lab=true
+kubectl label namespace open lab-policies=true
 ```
 
 <!-- gate: output -->
@@ -474,7 +498,7 @@ apiVersion: v1
 kind: Service
 metadata:
   name: catalog-ext-2
-  namespace: p05-07-open
+  namespace: open
 spec:
   selector:
     app: catalog
@@ -496,9 +520,9 @@ Warning: spec.externalIPs is deprecated and may no longer be implemented in some
 Error from server (Forbidden): error when creating "attack-service-2.yaml": services "catalog-ext-2" is forbidden: ValidatingAdmissionPolicy 'p05-07-no-external-ips' with binding 'p05-07-no-external-ips' denied request: a Service may not set spec.externalIPs
 ```
 
-The refusal names the policy and the binding, and it carries the message the policy
-wrote. A reader who meets this error in a cluster can find the rule in one
-command, which is the point of naming it.
+The refusal names the policy and the binding, and it carries the message the
+policy wrote. A reader who meets this error in a cluster can find the rule in
+one command, which is the point of naming it.
 
 The digest rule is next. This Pod is complete and passes the `restricted` level.
 The only thing wrong with it is the tag, and the digest rule is the control that
@@ -509,7 +533,7 @@ apiVersion: v1
 kind: Pod
 metadata:
   name: tag-only
-  namespace: p05-07-open
+  namespace: open
 spec:
   automountServiceAccountToken: false
   securityContext:
@@ -520,7 +544,7 @@ spec:
       type: RuntimeDefault
   containers:
     - name: app
-      image: registry.p05-07-registry.svc.cluster.local:5000/bookstore/catalog:lab
+      image: registry.lab-registry.svc.cluster.local:5000/bookstore/catalog:lab
       securityContext:
         allowPrivilegeEscalation: false
         readOnlyRootFilesystem: true
@@ -544,16 +568,16 @@ kubectl apply -f tag-only.yaml
 <!-- gate: output -->
 
 ```
-Error from server (Forbidden): error when creating "tag-only.yaml": pods "tag-only" is forbidden: ValidatingAdmissionPolicy 'p05-07-digest-pinned' with binding 'p05-07-digest-pinned' denied request: every container image must be pinned by digest
+Error from server (Forbidden): error when creating "tag-only.yaml": pods "tag-only" is forbidden: ValidatingAdmissionPolicy 'p05-07-digest-pinned' with binding 'p05-07-digest-pinned' denied request: BK-POL-009: every third-party image must be pinned by digest
 ```
 
 The image in that Pod is in the lab's registry, which the full mode runs. The
 refusal happens before any pull, so the shared run needs no registry for it.
 
 The forgetful Pod, written the same way as before, now comes back with the
-policies' defaults. Read the output in two parts. The stored Pod says `false` and
-`RuntimeDefault`, and the process reads `Seccomp: 2`, which is a filter. The
-token volume is still there:
+policies' defaults. Read the output in two parts. The stored Pod says `false`
+and `RuntimeDefault`, and the process reads `Seccomp: 2`, which is a filter.
+The token volume is still there:
 
 <!-- gate: insecure-on-purpose -->
 
@@ -563,7 +587,7 @@ apiVersion: v1
 kind: Pod
 metadata:
   name: forgetful-2
-  namespace: p05-07-open
+  namespace: open
 spec:
   containers:
     - name: app
@@ -573,9 +597,9 @@ spec:
 
 ```sh
 kubectl apply -f forgetful-2.yaml
-kubectl -n p05-07-open get pod forgetful-2 -o jsonpath='{.spec.automountServiceAccountToken}{" "}{.spec.securityContext.seccompProfile.type}{"\n"}'
-kubectl -n p05-07-open exec forgetful-2 -- sh -c 'grep Seccomp: /proc/self/status | tr "\t" " "; ls /var/run/secrets/kubernetes.io/serviceaccount/ 2>/dev/null | tr "\n" " "; echo'
-kubectl -n p05-07-open get pod forgetful-2 -o jsonpath='{.spec.volumes[*].name}{"\n"}'
+kubectl -n open get pod forgetful-2 -o jsonpath='{.spec.automountServiceAccountToken}{" "}{.spec.securityContext.seccompProfile.type}{"\n"}'
+kubectl -n open exec forgetful-2 -- sh -c 'grep Seccomp: /proc/self/status | tr "\t" " "; ls /var/run/secrets/kubernetes.io/serviceaccount/ 2>/dev/null | tr "\n" " "; echo'
+kubectl -n open get pod forgetful-2 -o jsonpath='{.spec.volumes[*].name}{"\n"}'
 ```
 
 <!-- gate: output -->
@@ -585,15 +609,17 @@ false RuntimeDefault
 # ...
 Seccomp: 2
 ca.crt namespace token 
+# ...
+kube-api-access-lwdnx
 ```
 
 The volume list shows a `kube-api-access` volume on this Pod, as it did on the
 attack Pod. That is the finding of this section. The automount policy changed
-the field, and the Pod still carries the projected token volume, so the token is
-still mounted. A policy that sets a field does not take back a volume that is
-already part of the Pod. The seccomp default worked, because the kubelet reads the
-seccomp field from the stored Pod, and the token did not, because the volume is
-a separate part of the Pod.
+the field, and the Pod still carries the projected token volume, so the token
+is still mounted. A policy that sets a field does not take back a volume that
+is already part of the Pod. The seccomp default worked, because the kubelet
+reads the seccomp field from the stored Pod, and the token did not, because
+the volume is a separate part of the Pod.
 
 The control that does work for the token is the manifest. A Pod that sets
 `automountServiceAccountToken: false` itself never asks for the volume. The
@@ -604,7 +630,7 @@ apiVersion: v1
 kind: Pod
 metadata:
   name: baseline
-  namespace: p05-07-open
+  namespace: open
 spec:
   automountServiceAccountToken: false
   securityContext:
@@ -635,7 +661,7 @@ spec:
 
 ```sh
 kubectl apply -f baseline.yaml
-kubectl -n p05-07-open exec baseline -- sh -c 'ls /var/run/secrets/kubernetes.io/serviceaccount 2>&1; echo'
+kubectl -n open exec baseline -- sh -c 'ls /var/run/secrets/kubernetes.io/serviceaccount 2>&1; echo'
 ```
 
 <!-- gate: output -->
@@ -644,8 +670,8 @@ kubectl -n p05-07-open exec baseline -- sh -c 'ls /var/run/secrets/kubernetes.io
 ls: /var/run/secrets/kubernetes.io/serviceaccount: No such file or directory
 ```
 
-Check the stored object and the running process, as the lab does, not the
-file in the repository. A reviewer who reads a manifest sees the fields its author
+Check the stored object and the running process, as the lab does, not the file
+in the repository. A reviewer who reads a manifest sees the fields its author
 wrote. The shift-left section below is how a repository catches a Pod that
 leaves them out, before it is applied.
 
@@ -657,15 +683,16 @@ the expression sees. Kyverno is the project's engine for those rules. It runs as
 a webhook, so it has to be installed and kept up, which is why it is the second
 choice and not the first.
 
-**Not run in this pass.** The steps in this section are the full mode of the
-lab. The commands are shown so that a reader can run them against a cluster that
-they own. What follows the commands is what the chart renders and what the server
-says about the policy objects without the Kyverno CRDs.
+**Not run.** The steps in this section are the full mode of the lab. The
+commands are shown so that a reader can run them against a cluster that they
+own. What follows the commands is what the pinned chart renders and what the
+server says about the policy objects without the Kyverno CRDs.
 
 The install pins the chart. `features.registryClient.allowInsecure` is set
-because the lab registry serves plain HTTP. A production cluster leaves it false,
-and serves its registry over TLS. The namespace is labelled `restricted` before
-the install, so the chart's Pods must meet that level to run:
+because the lab registry serves plain HTTP. A production cluster leaves it
+false, and serves its registry over TLS. The namespace is labelled
+`restricted` before the install, so the chart's Pods must meet that level to
+run:
 
 ```sh
 helm repo add kyverno https://kyverno.github.io/kyverno/ --force-update
@@ -684,6 +711,8 @@ it. Its output is the rendered manifest count and the images the chart names:
 ```
 80
 # ...
+1
+# ...
 image: "ghcr.io/kyverno/readiness-checker:v1.19.2"
 image: "reg.kyverno.io/kyverno/background-controller:v1.19.2"
 image: "reg.kyverno.io/kyverno/cleanup-controller:v1.19.2"
@@ -695,19 +724,36 @@ them by digest, as [05.03](03-supply-chain.md) pins third-party images. The Rego
 rule `BK-POL-009` refuses a third-party image that has no digest, so a Pod built
 from this chart would fail it until the tags are pinned.
 
+The step 16 output also shows that the 3.9.2 chart still serves
+`kyverno.io/v1 ClusterPolicy`, and that its CRD marks the kind deprecated. The
+CRD's warning names ValidatingPolicy, MutatingPolicy, GeneratingPolicy and
+ImageValidatingPolicy as the replacements, and points to a migration guide at
+<https://kyverno.io/docs/guides/migration-to-cel/>. This chapter keeps the
+`ClusterPolicy` form, because the pinned chart is the one the lab installs. It
+uses the fields the same CRD still accepts: the rule-level `failureAction`
+under `validate`, and `failureAction` under each `verifyImages` entry. The
+policy-level `validationFailureAction` is deprecated in the same CRD. A rule
+written for a later Kyverno release moves to one of the policy kinds the
+warning names.
+
 ### Audit before Enforce
 
 A new rule can break workloads that already run. The safe order is Audit first:
 the rule is evaluated, the result is recorded, and nothing is refused. Read the
 report, fix or excuse what it shows, then switch to Enforce.
 
-**Not run in this pass.** The privileged Pod below is the attack for this
-section. A privileged container holds every capability and sees the node's
-devices. Inside a kind node that is still a container, and its kernel is the one
-the node shares with the host, so the lab does not run anything that would reach
-it. The Pod is admitted, and the policy only reports it. The manifest carries the
-baseline everywhere except the one field that is the attack. `SIGNED-DIGEST`
-is the same digest as in the next section's Pod:
+**Not run.** The privileged Pod below is the attack for this section. A
+privileged container holds every capability and sees the node's devices.
+Inside a kind node that is still a container, and its kernel is the one the
+node shares with the host, so the lab does not run anything that would reach
+it. The Pod is admitted, and the policy only reports it. Its node selector
+names a label that no node carries, so the Pod stays Pending and its
+privileged container never starts. The manifest carries the rest of the
+baseline. The one field that is the attack is `privileged: true`. The
+baseline's `allowPrivilegeEscalation: false` cannot sit beside it, so the
+field is left out. The API server refuses that pair before any policy runs, as
+the dry run below shows. `SIGNED-DIGEST` is the same digest as in the next
+section's Pod:`SIGNED-DIGEST` is the same digest as in the next section's Pod:
 
 <!-- gate: insecure-on-purpose -->
 
@@ -717,8 +763,10 @@ apiVersion: v1
 kind: Pod
 metadata:
   name: escape-node
-  namespace: p05-07-kyverno
+  namespace: kyverno-demo
 spec:
+  nodeSelector:
+    lab-never-scheduled: "true"
   automountServiceAccountToken: false
   securityContext:
     runAsNonRoot: true
@@ -728,10 +776,9 @@ spec:
       type: RuntimeDefault
   containers:
     - name: app
-      image: registry.p05-07-registry.svc.cluster.local:5000/bookstore/catalog@sha256:SIGNED-DIGEST
+      image: registry.lab-registry.svc.cluster.local:5000/bookstore/catalog@sha256:SIGNED-DIGEST
       securityContext:
         privileged: true
-        allowPrivilegeEscalation: false
         readOnlyRootFilesystem: true
         capabilities:
           drop: ["ALL"]
@@ -746,19 +793,49 @@ spec:
       emptyDir: {}
 ```
 
-The policy names the rule with the same ID the Rego rule uses later, so one ID
-follows the rule from the cluster to CI:
+The API server checks the pair before admission runs. The shared run used
+busybox for the image, because a server dry run does not pull it, and it used
+a namespace with no Pod Security label:
+
+```sh
+kubectl create namespace kyverno-demo
+kubectl apply --dry-run=server -f escape-conflict.yaml; echo "server dry-run exit=$?"
+kubectl apply --dry-run=server -f escape-node-dryrun.yaml; echo "server dry-run exit=$?"
+```
+
+<!-- gate: output -->
+
+```
+namespace/p05-07-kyverno created
+```
+
+<!-- gate: output -->
+
+```
+The Pod "escape-node" is invalid: spec.containers[0].securityContext: Invalid value: {"Capabilities":{"Add":null,"Drop":["ALL"]},"Privileged":true,"SELinuxOptions":null,"WindowsOptions":null,"RunAsUser":null,"RunAsGroup":null,"RunAsNonRoot":null,"ReadOnlyRootFilesystem":true,"AllowPrivilegeEscalation":false,"ProcMount":null,"SeccompProfile":null,"AppArmorProfile":null}: cannot set `allowPrivilegeEscalation` to false and `privileged` to true
+server dry-run exit=1
+```
+
+<!-- gate: output -->
+
+```
+pod/escape-node created (server dry run)
+server dry-run exit=0
+```
+
+The refusal names both fields, and the second dry run, with the field left
+out, is accepted. The policy names the rule with the same ID the Rego rule
+uses later, so one ID follows the rule from the cluster to CI:
 
 ```yaml
 apiVersion: kyverno.io/v1
 kind: ClusterPolicy
 metadata:
-  name: p05-07-disallow-privileged
+  name: disallow-privileged
   annotations:
     policies.kyverno.io/title: Disallow privileged containers
     policies.kyverno.io/description: The Bookstore rule BK-POL-001, enforced at admission.
 spec:
-  validationFailureAction: Audit
   background: true
   rules:
     - name: no-privileged-containers
@@ -766,8 +843,9 @@ spec:
         any:
           - resources:
               kinds: [Pod]
-              namespaces: [p05-07-kyverno]
+              namespaces: [kyverno-demo]
       validate:
+        failureAction: Audit
         message: "BK-POL-001: privileged containers are not allowed"
         pattern:
           spec:
@@ -776,15 +854,16 @@ spec:
                   =(privileged): false
 ```
 
-The `=(...)` anchors make a field optional: a container with no `securityContext`
-passes, and one that sets `privileged` must set it to `false`. The
-`validationFailureAction` field is in the 3.9.2 CRD, where it sets the action for
-the whole policy.
+The `=(...)` anchors make a field optional: a container with no
+`securityContext` passes, and one that sets `privileged` must set it to
+`false`. The rule sets `failureAction: Audit` under `validate`, so the policy
+reports a violation and admits the Pod. The 3.9.2 CRD marks the policy-level
+`validationFailureAction` as deprecated in favour of this rule-level field.
 
 ```sh
 kubectl apply -f policy-disallow-privileged.yaml
 kubectl apply -f escape-node.yaml
-kubectl -n p05-07-kyverno get ephemeralreports,policyreports 2>/dev/null | head -5
+kubectl -n kyverno-demo get ephemeralreports,policyreports 2>/dev/null | head -5
 ```
 
 The expected result is that the Pod is admitted and the report records the
@@ -793,17 +872,17 @@ do before it can move to Enforce, and a namespace with a long list is not ready.
 
 ### Enforce
 
-Switch the same policy to Enforce, and send the same kind of Pod again. Use a new
-name:
+Switch the same policy to Enforce, and send the same kind of Pod again. Use a
+new name:
 
 ```sh
-kubectl patch clusterpolicy p05-07-disallow-privileged --type merge -p '{"spec":{"validationFailureAction":"Enforce"}}'
+kubectl patch clusterpolicy disallow-privileged --type json -p '[{"op":"replace","path":"/spec/rules/0/validate/failureAction","value":"Enforce"}]'
 kubectl apply -f escape-node-2.yaml
 ```
 
 `escape-node-2.yaml` is `escape-node.yaml` with its name changed. The expected
 result is a refusal from Kyverno with the same rule ID in the message, which is
-the rule that CI runs later. Neither result was captured in this pass.
+the rule that CI runs later. Neither result was captured.
 
 ### verifyImages: the signature, not only the digest
 
@@ -811,15 +890,15 @@ The digest rule says which bytes may run. It does not say that someone the team
 trusts built them. [05.03](03-supply-chain.md) signs the Bookstore image with a
 key. This section makes the cluster check that signature before it admits a Pod.
 
-**Not run in this pass.** The full mode signs a candidate image with a throwaway
-key made in its own work directory, and the public half goes into a Secret that
-Kyverno reads. Nothing private is committed. The Secret holds only the public key:
+**Not run.** The full mode signs a candidate image with a throwaway key made
+in its own work directory, and the public half goes into a Secret that Kyverno
+reads. Nothing private is committed. The Secret holds only the public key:
 
 ```sh
-kubectl -n kyverno create secret generic p05-07-cosign-pub --from-file=cosign.pub=cosign.pub
+kubectl -n kyverno create secret generic cosign-pub --from-file=cosign.pub=cosign.pub
 ```
 
-The full mode runs the image that its build pushed, as a Pod in `p05-07-signed`.
+The full mode runs the image that its build pushed, as a Pod in `signed`.
 The manifest carries the baseline in full. In it, `SIGNED-DIGEST` stands for the
 digest that step 3 of the script prints, which is the one `cosign` signs. Put
 that value in before you apply the file:
@@ -829,7 +908,7 @@ apiVersion: v1
 kind: Pod
 metadata:
   name: catalog
-  namespace: p05-07-signed
+  namespace: signed
 spec:
   automountServiceAccountToken: false
   securityContext:
@@ -840,7 +919,7 @@ spec:
       type: RuntimeDefault
   containers:
     - name: app
-      image: registry.p05-07-registry.svc.cluster.local:5000/bookstore/catalog@sha256:SIGNED-DIGEST
+      image: registry.lab-registry.svc.cluster.local:5000/bookstore/catalog@sha256:SIGNED-DIGEST
       ports:
         - containerPort: 8080
       securityContext:
@@ -859,26 +938,25 @@ spec:
       emptyDir: {}
 ```
 
-The namespace carries the lab label, so the two digest-and-defaults policies apply
-to it. The tampered image is the same Pod with a different digest and the name
-`catalog-tampered`. The full mode applies it before the signature rule exists, and
-expects the API server to admit it, because its digest is valid and nothing checks
-what the digest points to. It then deletes it.
+The namespace carries the lab label, so the two digest-and-defaults policies
+apply to it. The tampered image is the same Pod with a different digest and
+the name `catalog-tampered`. The full mode applies it before the signature
+rule exists, and expects the API server to admit it, because its digest is
+valid and nothing checks what the digest points to. It then deletes it.
 
 The policy below verifies every image in the namespace that matches the lab's
-registry name. The attestor names the key. The policy refuses a Pod whose image has
-no signature from that key:
+registry name. The attestor names the key. The policy refuses a Pod whose
+image has no signature from that key:
 
 ```yaml
 apiVersion: kyverno.io/v1
 kind: ClusterPolicy
 metadata:
-  name: p05-07-verify-signed-images
+  name: verify-signed-images
   annotations:
     policies.kyverno.io/title: Verify lab image signatures
-    policies.kyverno.io/description: Pods in p05-07-signed run only images signed by the lab key.
+    policies.kyverno.io/description: Pods in signed run only images signed by the lab key.
 spec:
-  validationFailureAction: Enforce
   background: false
   webhookTimeoutSeconds: 30
   rules:
@@ -887,31 +965,48 @@ spec:
         any:
           - resources:
               kinds: [Pod]
-              namespaces: [p05-07-signed]
+              namespaces: [signed]
       verifyImages:
         - imageReferences:
-            - "registry.p05-07-registry.svc.cluster.local:5000/bookstore/*"
+            - "registry.lab-registry.svc.cluster.local:5000/bookstore/*"
           verifyDigest: true
           required: true
+          failureAction: Enforce
           attestors:
             - entries:
                 - keys:
                     secret:
-                      name: p05-07-cosign-pub
+                      name: cosign-pub
                       namespace: kyverno
+                    rekor:
+                      ignoreTlog: true
 ```
 
-`required: true` turns an image with no signature into a refusal, rather than a
-pass with a warning. `verifyDigest: true` makes Kyverno check that the digest in
-the Pod is the digest it verified. The `imageReferences`, `verifyDigest`,
-`required`, and `secret` fields are in the 3.9.2 CRD.
+`required: true` turns an image with no signature into a refusal, rather than
+a pass with a warning. `verifyDigest: true` makes Kyverno check that the
+digest in the Pod is the digest it verified. The `imageReferences`,
+`verifyDigest`, `required`, `failureAction` and `keys` fields are in the 3.9.2
+CRD, and the [verify-images
+overview](https://kyverno.io/docs/policy-types/cluster-policy/verify-images/overview/)
+describes them.
 
-The identity here is a key, which is the simplest form a lab can run. A signing
-pipeline usually signs keyless and proves an identity instead: the workflow that
-signed the image, read from the OIDC token of the CI system. The rule then names
-an issuer and a subject rather than a key. That form is shown below and is **not
-run** in this lab, because it needs the public Fulcio and Rekor services reachable
-from the cluster. [07.03](../07-delivery/03-cicd-pipeline.md) signs that way from CI.
+The `rekor` block with `ignoreTlog: true` is for this lab only. The lab signs
+with a signing config that names no transparency log, so the signature has no
+Rekor entry, and the lab verifies it with `cosign verify
+--insecure-ignore-tlog`. Kyverno checks the Rekor entry unless the rule turns
+the check off, and the [sigstore
+page](https://kyverno.io/docs/policy-types/cluster-policy/verify-images/sigstore/)
+gives the switch: "To disable this set `ignoreTlog: true`". A production
+signature made against the public log has an entry, so the production rule
+removes the `rekor` block and keeps the check.
+
+The identity here is a key, which is the simplest form a lab can run. A
+signing pipeline usually signs keyless and proves an identity instead: the
+workflow that signed the image, read from the OIDC token of the CI system. The
+rule then names an issuer and a subject rather than a key. That form is shown
+below and is **not run** in this lab, because it needs the public Fulcio and
+Rekor services reachable from the cluster.
+[07.03](../07-delivery/03-cicd-pipeline.md) signs that way from CI.
 
 ```yaml
 # Fragment, not applied: the keyless identity form. Not run in this lab.
@@ -925,10 +1020,16 @@ verifyImages:
               subject: "https://github.com/<owner>/<repo>/.github/workflows/bookstore-pipeline.yml@refs/heads/master"
 ```
 
-The expected result is that the signed Pod keeps running and the tampered one is
-refused. The message should say that Kyverno could not verify the image, not that
-the policy failed, and that distinction matters when you debug a refusal. The rule
-worked, and the image failed it. Neither result was captured in this pass.
+The expected result is that the signed Pod keeps running and the tampered one
+is refused. The message should say that Kyverno could not verify the image,
+not that the policy failed, and that distinction matters when you debug a
+refusal. The rule worked, and the image failed it. Neither result was
+captured.
+
+The rule starts in Enforce with no Audit run before it. The `signed` namespace
+is new, and it holds only the Pods the lab creates, so no running workload
+exists for an Audit report to find. A rule that could refuse running workloads
+starts in Audit, as the privileged rule does.
 
 ### Gatekeeper: the same rule in Rego, side by side
 
@@ -938,7 +1039,7 @@ Kyverno, writes the same privileged rule, and runs it in dry-run. Dry-run denies
 nothing at admission, and it reports objects that already exist, which Kyverno's
 Audit mode did for the privileged Pod.
 
-**Not run in this pass.** The install follows the same pattern as Kyverno's: a
+**Not run.** The install follows the same pattern as Kyverno's: a
 restricted label first, then a pinned chart, with one replica so the lab stays
 small:
 
@@ -956,16 +1057,16 @@ the enforcement action and the scope:
 apiVersion: templates.gatekeeper.sh/v1
 kind: ConstraintTemplate
 metadata:
-  name: p05nopriv
+  name: noprivileged
 spec:
   crd:
     spec:
       names:
-        kind: P05NoPrivileged
+        kind: NoPrivileged
   targets:
     - target: admission.k8s.gatekeeper.sh
       rego: |
-        package p05nopriv
+        package noprivileged
 
         violation[{"msg": msg}] {
           c := input_containers[_]
@@ -984,36 +1085,38 @@ spec:
 
 ```yaml
 apiVersion: constraints.gatekeeper.sh/v1beta1
-kind: P05NoPrivileged
+kind: NoPrivileged
 metadata:
-  name: p05-no-privileged
+  name: no-privileged
 spec:
   enforcementAction: dryrun
   match:
     kinds:
       - apiGroups: [""]
         kinds: ["Pod"]
-    namespaces: ["p05-07-kyverno"]
+    namespaces: ["kyverno-demo"]
 ```
 
 The rule has two `input_containers` clauses on purpose: a privileged init
-container is as dangerous as a privileged app container, and the rule must check
-both. The Kyverno pattern above checks `containers` only, so the two rules do not
-match exactly. That difference is real, and the shift-left rule below checks both.
+container is as dangerous as a privileged app container, and the rule must
+check both. The Kyverno pattern above checks `containers` only, so the two
+rules do not match exactly. That difference is real, and the shift-left rule
+below checks both.
 
-The full mode waits for the audit, then reads the constraint's status, which should
-list the privileged Pod that Kyverno admitted in Audit mode:
+The full mode waits for the audit, then reads the constraint's status, which
+should list the privileged Pod that Kyverno admitted in Audit mode:
 
 ```sh
 kubectl apply -f gatekeeper-template.yaml
 kubectl apply -f gatekeeper-constraint.yaml
-kubectl get p05noprivileged p05-no-privileged -o jsonpath='{.spec.enforcementAction}{" "}{.status.totalViolations}{"\n"}'
-kubectl get p05noprivileged p05-no-privileged -o jsonpath='{.status.violations[0].message}{"\n"}'
+kubectl get noprivileged no-privileged -o jsonpath='{.spec.enforcementAction}{" "}{.status.totalViolations}{"\n"}'
+kubectl get noprivileged no-privileged -o jsonpath='{.status.violations[0].message}{"\n"}'
 ```
 
 The shared run applied the constraint's manifest to a cluster without the
-Gatekeeper CRDs. The server refused it, which is the same answer a reader gets
-before installing the chart:
+Gatekeeper CRDs. kubectl could not map the kind, so it refused the manifest
+before any request reached the server. A reader gets the same answer before
+installing the chart:
 
 <!-- gate: output -->
 
@@ -1023,16 +1126,17 @@ ensure CRDs are installed first
 server dry-run exit=1
 ```
 
-Both engines hold the same rule, under the same ID. Kyverno refuses new privileged
-Pods in the namespace, and Gatekeeper reports the one that already runs. Keep both
-only while you compare. Two engines enforcing one rule is two places to keep right.
+Both engines hold the same rule, under the same ID. Kyverno refuses new
+privileged Pods in the namespace, and Gatekeeper reports the one that already
+runs. Keep both only while you compare. Two engines enforcing one rule is two
+places to keep right.
 
 The full mode removes Gatekeeper and its CRDs, and deletes the Pod it reported:
 
 ```sh
-kubectl delete pod escape-node -n p05-07-kyverno --wait=true
-kubectl delete p05noprivileged p05-no-privileged
-kubectl delete constrainttemplate p05nopriv
+kubectl delete pod escape-node -n kyverno-demo --wait=true
+kubectl delete noprivileged no-privileged
+kubectl delete constrainttemplate noprivileged
 helm uninstall gatekeeper --namespace gatekeeper-system --wait
 kubectl get crd -o name | grep 'gatekeeper.sh' | xargs kubectl delete --wait=true
 kubectl delete namespace gatekeeper-system --wait=true
@@ -1046,14 +1150,16 @@ policy is written once, in Rego, under
 [`examples/bookstore/policy/`](../examples/bookstore/policy/kubernetes/baseline.rego):
 
 - `kubernetes/baseline.rego` checks Pods, workloads and Services against the
-  baseline from [01.01](../01-core-workloads/01-pods.md#baseline), with a rule ID
-  on every message: `BK-POL-001` for privileged, through `BK-POL-011` for a
-  namespace that is not `restricted`.
+  baseline from [01.01](../01-core-workloads/01-pods.md#baseline), with a rule
+  ID on every message: `BK-POL-001` for privileged, through `BK-POL-011` for a
+  namespace that is not `restricted`. A namespace below `restricted` passes
+  only with the two exception annotations that
+  [05.09](09-running-security-on-a-platform-team.md) describes.
 - `terraform/namespaces.rego` checks the namespaces a Terraform plan creates or
   changes. The rule is `BK-TF-001`: the namespace must enforce `restricted`.
 
-The rules have unit tests. Each test changes one field of a good input and checks
-that the matching rule, and only that one, fires:
+The rules have unit tests. Each test changes one field of a good input and
+checks that the matching rule, and only that one, fires:
 
 ```sh
 opa test full-guide/examples/bookstore/policy -v | tail -n 1
@@ -1062,12 +1168,12 @@ opa test full-guide/examples/bookstore/policy -v | tail -n 1
 <!-- gate: output -->
 
 ```
-PASS: 22/22
+PASS: 24/24
 ```
 
-Conftest runs the same rules on files. It checks the rendered production overlay of
-the Bookstore, which is what the cluster would receive, and it checks the
-Terraform plan of the namespaces, read as JSON:
+Conftest runs the same rules on files. It checks the rendered production
+overlay of the Bookstore, which is what the cluster would receive, and it
+checks the Terraform plan of the namespaces, read as JSON:
 
 ```sh
 kubectl kustomize full-guide/examples/bookstore/kustomize/overlays/prod > prod-overlay.yaml
@@ -1083,9 +1189,9 @@ conftest test --policy full-guide/examples/bookstore/policy --all-namespaces ful
 14 tests, 14 passed, 0 warnings, 0 failures, 0 exceptions
 ```
 
-Both pass. A rule that passes everything proves nothing, so the lab also plants a
-failure: it sets the namespace's enforce label to `privileged` in a copy of the plan
-and runs Conftest on that.
+Both pass. A rule that passes everything proves nothing, so the lab also
+plants a failure: it sets the namespace's enforce label to `privileged` in a
+copy of the plan and runs Conftest on that.
 
 ```sh
 jq '(.resource_changes[0].change.after.metadata[0].labels["pod-security.kubernetes.io/enforce"]) = "privileged"' full-guide/examples/bookstore/policy/terraform/plan.json > planted-plan.json
@@ -1111,11 +1217,12 @@ terraform plan -out=tfplan
 terraform show -json tfplan > plan.json
 ```
 
-The planted fixture is the same file with one label changed. It is also the control
-in CI: the pipeline's check workflow runs Conftest on it and fails unless `BK-TF-001`
-is reported. A namespace plan that runs through a cloud is a different job, and
-[Part 14](../14-eks-in-production-a-to-z/07-infrastructure-cicd-and-drift.md)
-covers the production shape of a Terraform pipeline.
+The planted fixture is the same file with one label changed. It is also the
+control in CI: the pipeline's check workflow runs Conftest on it and fails
+unless `BK-TF-001` is reported. A namespace plan that runs through a cloud is
+a different job, and [Part
+14](../14-eks-in-production-a-to-z/07-infrastructure-cicd-and-drift.md) covers
+the production shape of a Terraform pipeline.
 
 Finally, the lab lists the policies it created, to show what the cluster would
 hold:
@@ -1135,12 +1242,12 @@ validatingadmissionpolicy.admissionregistration.k8s.io/p05-07-no-external-ips
 
 ### What CI runs, and what it does not
 
-The Bookstore pipeline has a `policy` job. It runs the unit tests, Conftest on the
-rendered overlay, and Conftest on the Terraform plan, and `sign` waits for it like
-every other gate. Each step calls `ci/scan.sh`, which runs the tool from a
-digest-pinned image, the same way the other scanners do. The check workflow gives
-the job a control, so that a Conftest that stops reporting the planted namespace
-fails the build.
+The Bookstore pipeline has a `policy` job. It runs the unit tests, Conftest on
+the rendered overlay, and Conftest on the Terraform plan, and `sign` waits for
+it like every other gate. Each step calls `ci/scan.sh`, which runs the tool
+from a digest-pinned image, the same way the other scanners do. The check
+workflow gives the job a control, so that a Conftest that stops reporting the
+planted namespace fails the build.
 
 The scanner commands ran on a Linux Docker host while this chapter was written.
 The job itself has not run on GitHub Actions, so it is read, not run, until a
@@ -1160,26 +1267,26 @@ pipeline run on the repository shows it.
   single fields for that reason, and they leave a whole list or map alone.
 - **A volume is not a field.** The lab's automount policy set
   `automountServiceAccountToken` to `false`, and the Pod still had its
-  `kube-api-access` volume, so the token stayed mounted. The volume is a separate
-  part of the Pod, and a mutation that changes one field does not remove another
-  part. The lab did not trace which admission plugin added the volume, so it cites
-  the observed result, not the cause.
+  `kube-api-access` volume, so the token stayed mounted. The volume is a
+  separate part of the Pod, and a mutation that changes one field does not
+  remove another part. The lab did not trace which admission plugin added the
+  volume, so it cites the observed result, not the cause.
 - **Matching is by namespace label here.** The bindings select namespaces with a
   label. Labelling a namespace applies the policies to what is created in it
   afterwards, and nothing already running is changed. A rollout that wants the
   running workloads checked uses Audit, which reports them.
 - **Kyverno is a webhook.** Its admission controller answers each request, and
-  `failurePolicy` decides what a timeout does. `verifyImages` contacts the registry
-  for the digest and the signature, so the registry must answer, and the lab's
-  registry name resolves inside the cluster through a Service.
-- **Gatekeeper audits what exists.** Its audit controller lists the objects the
-  constraint matches on an interval, and writes the violations into the
-  constraint's status. A `dryrun` constraint denies nothing at admission, and the
-  audit still reports.
-- **Rego and CEL solve different problems.** CEL is small and fast and runs in the
-  server. Rego is a full logic language, which is why it can reason about a whole
-  plan or a list of containers with nested conditions, and why it runs in a
-  webhook or in CI.
+  `failurePolicy` decides what a timeout does. `verifyImages` contacts the
+  registry for the digest and the signature, so the registry must answer, and
+  the lab's registry name resolves inside the cluster through a Service.
+- **Gatekeeper audits what exists.** Its audit controller lists the objects
+  the constraint matches on an interval, and writes the violations into the
+  constraint's status. A `dryrun` constraint denies nothing at admission, and
+  the audit still reports.
+- **Rego and CEL solve different problems.** CEL is small and fast and runs in
+  the server. Rego is a full logic language, which is why it can reason about
+  a whole plan or a list of containers with nested conditions, and why it runs
+  in a webhook or in CI.
 
 ## Production notes
 
@@ -1187,21 +1294,25 @@ pipeline run on the repository shows it.
 > pair, and read the report for a release before switching to `Enforce`. The
 > privileged rule above shows the shape of that report.
 
-> **In production:** a webhook policy engine is a dependency of every write in the
-> cluster. Run it with at least two replicas, set `failurePolicy` on purpose, and
-> exclude the system namespaces from its own rules. Operating a cluster that runs
-> it is taught in [Part 10](../10-cloud-and-managed-kubernetes/01-managed-kubernetes-model.md)
-> and [Part 14](../14-eks-in-production-a-to-z/07-infrastructure-cicd-and-drift.md).
+> **In production:** a webhook policy engine is a dependency of every write in
+> the cluster. Run it with at least two replicas, set `failurePolicy` on
+> purpose, and exclude the system namespaces from its own rules. Operating a
+> cluster that runs it is taught in [Part
+> 10](../10-cloud-and-managed-kubernetes/01-managed-kubernetes-model.md) and
+> [Part
+> 14](../14-eks-in-production-a-to-z/07-infrastructure-cicd-and-drift.md).
 
-> **In production:** a rule that must have an exception gets one, with a reason and
-> an expiry, in the guide's exceptions registry, not as a dropped match. Kyverno's
-> `PolicyException` and a binding's label selector are both ways to make an
-> exception; both should be reviewed as code.
+> **In production:** a rule that must have an exception gets one, with a
+> reason and an expiry, as the exception record in
+> [05.09](09-running-security-on-a-platform-team.md), two annotations on the
+> Namespace, not as a dropped match. Kyverno's `PolicyException` and a
+> binding's label selector are both ways to make an exception; both should be
+> reviewed as code.
 
 > **In production:** verify identity, not only a signature. A key proves that
-> someone holding it signed the image. A keyless identity proves which workflow
-> built it. The [07.03](../07-delivery/03-cicd-pipeline.md) chapter signs that way,
-> and the rule here should check the same identity.
+> someone holding it signed the image. A keyless identity proves which
+> workflow built it. The [07.03](../07-delivery/03-cicd-pipeline.md) chapter
+> signs that way, and the rule here should check the same identity.
 
 ## Quick Reference
 
@@ -1220,7 +1331,7 @@ spec:
   matchResources:
     namespaceSelector:
       matchLabels:
-        p05-07-lab: "true"
+        lab-policies: "true"
 ```
 
 ```yaml
@@ -1245,13 +1356,16 @@ spec:
 ```yaml
 # Kyverno: report first, then refuse
 spec:
-  validationFailureAction: Audit   # then Enforce
   rules:
     - name: <rule>
+      validate:
+        failureAction: Audit   # then Enforce
+    - name: <image rule>
       verifyImages:
         - imageReferences: ["<registry>/*"]
           verifyDigest: true
           required: true
+          failureAction: Audit   # then Enforce
 ```
 
 ```sh
@@ -1272,12 +1386,12 @@ conftest test --policy <policy-dir> --all-namespaces <rendered.yaml>
    <details><summary>Show answer</summary>
 
    Yes, it keeps the token. The policy's `matchConditions` only fire when the
-   field is absent, and here it is set to `true`, so the mutation never runs. The
-   field that decides it is the Pod's own `automountServiceAccountToken`. A
-   dedicated ServiceAccount makes `true` acceptable under the baseline, and the
-   Rego rule `BK-POL-008` checks that. Even when the field is absent, the lab
-   showed that the policy's change does not remove the token volume, so the
-   manifest is the control.
+   field is absent, and here it is set to `true`, so the mutation never runs.
+   The field that decides it is the Pod's own `automountServiceAccountToken`.
+   A dedicated ServiceAccount makes `true` acceptable under the baseline, and
+   the Rego rule `BK-POL-008` checks that. Even when the field is absent, the
+   lab showed that the policy's change does not remove the token volume, so
+   the manifest is the control.
 
    </details>
 
@@ -1286,12 +1400,11 @@ conftest test --policy <policy-dir> --all-namespaces <rendered.yaml>
    would?**
    <details><summary>Show answer</summary>
 
-   The digest rule, `p05-07-digest-pinned`, refuses a Pod whose image has no
+   The digest rule, `digest-pinned`, refuses a Pod whose image has no
    digest, so a moving tag is refused at admission. It does not check who built
    the image, because a digest names bytes and says nothing about their author.
    The Kyverno `verifyImages` rule checks the signature, and so checks that the
-   key or identity it names signed those bytes. That rule was not run in this
-   pass.
+   key or identity it names signed those bytes. That rule was not run.
 
    </details>
 
@@ -1300,13 +1413,13 @@ conftest test --policy <policy-dir> --all-namespaces <rendered.yaml>
    control stops it, which does not, and why does the digest rule not stop it?**
    <details><summary>Show answer</summary>
 
-   The digest rule does not stop it, because the image has a digest, and the rule
-   only checks that one is present. `verifyImages` with `required: true` stops it
-   in a namespace the rule covers, because the image has no signature from the
-   named key. The mutating defaults do not stop it either: they set fields on a
-   Pod, and they do not look at the image. The gap is that a rule covers only the
-   namespaces it selects, so a namespace left out of the rule is open to this
-   attack.
+   The digest rule does not stop it, because the image has a digest, and the
+   rule only checks that one is present. `verifyImages` with `required: true`
+   stops it in a namespace the rule covers, because the image has no signature
+   from the named key. The mutating defaults do not stop it either: they set
+   fields on a Pod, and they do not look at the image. The gap is that a rule
+   covers only the namespaces it selects, so a namespace left out of the rule
+   is open to this attack.
 
    </details>
 
@@ -1314,19 +1427,32 @@ conftest test --policy <policy-dir> --all-namespaces <rendered.yaml>
    a control?**
    <details><summary>Show answer</summary>
 
-   Neither refuses anything. Each records the violation and lets the object in, so
-   the rule describes what the cluster would do, not what it does. The rule becomes
-   a control when it is in `Enforce`, or when CI refuses the manifest before it is
-   applied, and the report has been read and the findings fixed or excepted.
+   Neither refuses anything. Each records the violation and lets the object
+   in, so the rule describes what the cluster would do, not what it does. The
+   rule becomes a control when it is in `Enforce`, or when CI refuses the
+   manifest before it is applied, and the report has been read and the
+   findings fixed or excepted.
 
    </details>
 
 ## Further reading
 
-- [Admission controllers](https://kubernetes.io/docs/reference/access-authn-authz/admission-controllers/) and the two phases of admission.
-- [Validating admission policy](https://kubernetes.io/docs/reference/access-authn-authz/validating-admission-policy/) and [mutating admission policy](https://kubernetes.io/docs/reference/access-authn-authz/mutating-admission-policy/).
-- [Pod Security Admission](https://kubernetes.io/docs/concepts/security/pod-security-admission/), the built-in levels from chapter 02.
-- [Kyverno documentation](https://kyverno.io/docs/) and [Gatekeeper documentation](https://open-policy-agent.github.io/gatekeeper/website/docs/).
-- [OPA policy testing](https://www.openpolicyagent.org/docs/policy-testing) and [Conftest](https://www.conftest.dev/).
-- [cosign verify](https://docs.sigstore.dev/cosign/verifying/verify/) for the signature checks in this chapter.
-- [05.03](03-supply-chain.md) for the signing and digests this chapter relies on, and [11.01](../11-advanced-production-patterns/01-admission-webhooks.md) for writing a webhook.
+- [Admission
+  controllers](https://kubernetes.io/docs/reference/access-authn-authz/admission-controllers/)
+  and the two phases of admission.
+- [Validating admission
+  policy](https://kubernetes.io/docs/reference/access-authn-authz/validating-admission-policy/)
+  and [mutating admission
+  policy](https://kubernetes.io/docs/reference/access-authn-authz/mutating-admission-policy/).
+- [Pod Security
+  Admission](https://kubernetes.io/docs/concepts/security/pod-security-admission/),
+  the built-in levels from chapter 02.
+- [Kyverno documentation](https://kyverno.io/docs/) and [Gatekeeper
+  documentation](https://open-policy-agent.github.io/gatekeeper/website/docs/).
+- [OPA policy testing](https://www.openpolicyagent.org/docs/policy-testing)
+  and [Conftest](https://www.conftest.dev/).
+- [cosign verify](https://docs.sigstore.dev/cosign/verifying/verify/) for the
+  signature checks in this chapter.
+- [05.03](03-supply-chain.md) for the signing and digests this chapter relies
+  on, and [11.01](../11-advanced-production-patterns/01-admission-webhooks.md)
+  for writing a webhook.
