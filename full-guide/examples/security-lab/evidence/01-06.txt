@@ -2,6 +2,8 @@
 # Tier A: kind cluster sf-pilot, Kubernetes v1.37.0 node, kubectl v1.37.2.
 # Node runtime: containerd v2.3.4. Image busybox:1.36, pinned by digest.
 # Recorded by applying the chapter's manifests from one directory.
+# The node-logs steps were recorded again on 2026-10-31 on the same cluster, after the
+# namespace was renamed. The reads of kube-system objects come from the first recording.
 $ kubectl get daemonset -A
 NAMESPACE     NAME         DESIRED   CURRENT   READY   UP-TO-DATE   AVAILABLE   NODE SELECTOR            AGE
 kube-system   kindnet      1         1         1       1            1           kubernetes.io/os=linux   7h50m
@@ -32,95 +34,90 @@ $ kubectl get pod -n kube-system -l k8s-app=kube-proxy -o jsonpath='{.items[0].s
 {"requiredDuringSchedulingIgnoredDuringExecution":{"nodeSelectorTerms":[{"matchFields":[{"key":"metadata.name","operator":"In","values":["sf-pilot-control-plane"]}]}]}}
 
 $ kubectl apply -f ns-and-sa.yaml
-namespace/p01-node-logs created
+namespace/node-logs created
 serviceaccount/log-agent created
 
-$ kubectl apply -n p01-node-logs -f log-agent.yaml
+$ kubectl apply -n node-logs -f log-agent.yaml
 Warning: would violate PodSecurity "restricted:latest": restricted volume types (volume "pod-logs" uses restricted volume type "hostPath")
 daemonset.apps/log-agent created
 
-$ kubectl get ds log-agent -n p01-node-logs
+$ kubectl get ds log-agent -n node-logs
 NAME        DESIRED   CURRENT   READY   UP-TO-DATE   AVAILABLE   NODE SELECTOR   AGE
-log-agent   1         0         0       0            0           <none>          26s
+log-agent   1         0         0       0            0           <none>          25s
 
-$ kubectl get events -n p01-node-logs --sort-by=.lastTimestamp
+$ kubectl get events -n node-logs --sort-by=.lastTimestamp
 LAST SEEN   TYPE      REASON         OBJECT                MESSAGE
-21s         Warning   FailedCreate   daemonset/log-agent   Error creating: pods "log-agent-lh4gw" is forbidden: violates PodSecurity "restricted:latest": restricted volume types (volume "pod-logs" uses restricted volume type "hostPath")
-20s         Warning   FailedCreate   daemonset/log-agent   Error creating: pods "log-agent-vgwfv" is forbidden: violates PodSecurity "restricted:latest": restricted volume types (volume "pod-logs" uses restricted volume type "hostPath")
-20s         Warning   FailedCreate   daemonset/log-agent   Error creating: pods "log-agent-9wbbl" is forbidden: violates PodSecurity "restricted:latest": restricted volume types (volume "pod-logs" uses restricted volume type "hostPath")
-20s         Warning   FailedCreate   daemonset/log-agent   Error creating: pods "log-agent-w4ntt" is forbidden: violates PodSecurity "restricted:latest": restricted volume types (volume "pod-logs" uses restricted volume type "hostPath")
-20s         Warning   FailedCreate   daemonset/log-agent   Error creating: pods "log-agent-wskvm" is forbidden: violates PodSecurity "restricted:latest": restricted volume types (volume "pod-logs" uses restricted volume type "hostPath")
-19s         Warning   FailedCreate   daemonset/log-agent   Error creating: pods "log-agent-trt6g" is forbidden: violates PodSecurity "restricted:latest": restricted volume types (volume "pod-logs" uses restricted volume type "hostPath")
-19s         Warning   FailedCreate   daemonset/log-agent   Error creating: pods "log-agent-8ll8f" is forbidden: violates PodSecurity "restricted:latest": restricted volume types (volume "pod-logs" uses restricted volume type "hostPath")
-19s         Warning   FailedCreate   daemonset/log-agent   Error creating: pods "log-agent-nrslq" is forbidden: violates PodSecurity "restricted:latest": restricted volume types (volume "pod-logs" uses restricted volume type "hostPath")
-18s         Warning   FailedCreate   daemonset/log-agent   Error creating: pods "log-agent-7cttg" is forbidden: violates PodSecurity "restricted:latest": restricted volume types (volume "pod-logs" uses restricted volume type "hostPath")
-9s          Warning   FailedCreate   daemonset/log-agent   (combined from similar events): Error creating: pods "log-agent-6vrl8" is forbidden: violates PodSecurity "restricted:latest": restricted volume types (volume "pod-logs" uses restricted volume type "hostPath")
+23s         Warning   FailedCreate   daemonset/log-agent   Error creating: pods "log-agent-hdtl6" is forbidden: violates PodSecurity "restricted:latest": restricted volume types (volume "pod-logs" uses restricted volume type "hostPath")
+23s         Warning   FailedCreate   daemonset/log-agent   Error creating: pods "log-agent-dvndr" is forbidden: violates PodSecurity "restricted:latest": restricted volume types (volume "pod-logs" uses restricted volume type "hostPath")
+23s         Warning   FailedCreate   daemonset/log-agent   Error creating: pods "log-agent-z4c8v" is forbidden: violates PodSecurity "restricted:latest": restricted volume types (volume "pod-logs" uses restricted volume type "hostPath")
+23s         Warning   FailedCreate   daemonset/log-agent   Error creating: pods "log-agent-hfhpw" is forbidden: violates PodSecurity "restricted:latest": restricted volume types (volume "pod-logs" uses restricted volume type "hostPath")
+23s         Warning   FailedCreate   daemonset/log-agent   Error creating: pods "log-agent-672md" is forbidden: violates PodSecurity "restricted:latest": restricted volume types (volume "pod-logs" uses restricted volume type "hostPath")
+23s         Warning   FailedCreate   daemonset/log-agent   Error creating: pods "log-agent-cx6zj" is forbidden: violates PodSecurity "restricted:latest": restricted volume types (volume "pod-logs" uses restricted volume type "hostPath")
+23s         Warning   FailedCreate   daemonset/log-agent   Error creating: pods "log-agent-dmbqc" is forbidden: violates PodSecurity "restricted:latest": restricted volume types (volume "pod-logs" uses restricted volume type "hostPath")
+22s         Warning   FailedCreate   daemonset/log-agent   Error creating: pods "log-agent-gtkkt" is forbidden: violates PodSecurity "restricted:latest": restricted volume types (volume "pod-logs" uses restricted volume type "hostPath")
+22s         Warning   FailedCreate   daemonset/log-agent   Error creating: pods "log-agent-b5zw4" is forbidden: violates PodSecurity "restricted:latest": restricted volume types (volume "pod-logs" uses restricted volume type "hostPath")
+3s          Warning   FailedCreate   daemonset/log-agent   (combined from similar events): Error creating: pods "log-agent-r2th9" is forbidden: violates PodSecurity "restricted:latest": restricted volume types (volume "pod-logs" uses restricted volume type "hostPath")
 
-$ kubectl label namespace p01-node-logs pod-security.kubernetes.io/enforce=privileged --overwrite
-namespace/p01-node-logs labeled
+$ kubectl label namespace node-logs pod-security.kubernetes.io/enforce=privileged --overwrite
+namespace/node-logs labeled
 
-$ kubectl get namespace p01-node-logs --show-labels
-NAME            STATUS   AGE   LABELS
-p01-node-logs   Active   41s   kubernetes.io/metadata.name=p01-node-logs,pod-security.kubernetes.io/audit=restricted,pod-security.kubernetes.io/enforce=privileged,pod-security.kubernetes.io/warn=restricted
+$ kubectl get namespace node-logs -L pod-security.kubernetes.io/enforce,pod-security.kubernetes.io/audit,pod-security.kubernetes.io/warn
+NAME        STATUS   AGE   ENFORCE      AUDIT        WARN
+node-logs   Active   32s   privileged   restricted   restricted
 
-$ kubectl rollout status daemonset/log-agent -n p01-node-logs --timeout=180s
+$ kubectl rollout status daemonset/log-agent -n node-logs --timeout=180s
 Waiting for daemon set "log-agent" rollout to finish: 0 out of 1 new pods have been updated...
 Waiting for daemon set "log-agent" rollout to finish: 0 of 1 updated pods are available...
 daemon set "log-agent" successfully rolled out
 
-$ kubectl get pods -n p01-node-logs -o wide
-NAME              READY   STATUS    RESTARTS   AGE   IP             NODE                     NOMINATED NODE   READINESS GATES
-log-agent-g8cfx   1/1     Running   0          18s   10.244.0.147   sf-pilot-control-plane   <none>           <none>
+$ kubectl get pods -n node-logs -o wide
+NAME              READY   STATUS    RESTARTS   AGE   IP            NODE                     NOMINATED NODE   READINESS GATES
+log-agent-24wwh   1/1     Running   0          46s   10.244.0.45   sf-pilot-control-plane   <none>           <none>
 
-$ kubectl get ds log-agent -n p01-node-logs
+$ kubectl get ds log-agent -n node-logs
 NAME        DESIRED   CURRENT   READY   UP-TO-DATE   AVAILABLE   NODE SELECTOR   AGE
-log-agent   1         1         1       1            1           <none>          68s
+log-agent   1         1         1       1            1           <none>          92s
 
-$ kubectl logs -n p01-node-logs -l app=log-agent --tail=3
-node=sf-pilot-control-plane pod-log-files=25
+$ kubectl logs -n node-logs -l app=log-agent --tail=3
+node=sf-pilot-control-plane pod-log-files=41
 
-$ POD=$(kubectl get pods -n p01-node-logs -l app=log-agent -o name)
+$ POD=$(kubectl get pods -n node-logs -l app=log-agent -o name)
 
-$ kubectl exec -n p01-node-logs "$POD" -- id
+$ kubectl exec -n node-logs "$POD" -- id
 uid=65532 gid=65532 groups=0(root),65532
 
-$ kubectl exec -n p01-node-logs "$POD" -- ls -ld /host/var/log/pods
-drwxr-x---   26 root     root          4096 Oct 30 22:21 /host/var/log/pods
+$ kubectl exec -n node-logs "$POD" -- ls -ld /host/var/log/pods
+drwxr-x---   52 root     root          8192 Oct 31 01:25 /host/var/log/pods
 
-$ kubectl exec -n p01-node-logs "$POD" -- sh -c 'ls -l "$(ls /host/var/log/pods/*/*/*.log | head -1)"'
--rw-r-----    1 root     root          1324 Oct 30 18:41 /host/var/log/pods/kube-system_coredns-559f6c778d-77g29_5e234064-b084-43ff-885d-09eb7403e0b6/coredns/0.log
+$ kubectl exec -n node-logs "$POD" -- sh -c 'ls -l "$(ls /host/var/log/pods/*/*/*.log | head -1)"'
+-rw-r-----    1 root     root          4193 Oct 31 01:25 /host/var/log/pods/kube-system_coredns-559f6c778d-77g29_5e234064-b084-43ff-885d-09eb7403e0b6/coredns/0.log
 
-$ kubectl exec -n p01-node-logs "$POD" -- sh -c 'cat "$(ls /host/var/log/pods/*/*/*.log | head -1)" | wc -c'
-1324
+$ kubectl exec -n node-logs "$POD" -- sh -c 'cat "$(ls /host/var/log/pods/*/*/*.log | head -1)" | wc -c'
+4193
 
-$ kubectl exec -n p01-node-logs "$POD" -- touch /host/var/log/pods/probe
+$ kubectl exec -n node-logs "$POD" -- touch /host/var/log/pods/probe
 touch: /host/var/log/pods/probe: Read-only file system
 command terminated with exit code 1
 
-$ kubectl exec -n p01-node-logs "$POD" -- sh -c 'ls /var/run/secrets/kubernetes.io/serviceaccount 2>&1; echo exit=$?'
+$ kubectl exec -n node-logs "$POD" -- sh -c 'ls /var/run/secrets/kubernetes.io/serviceaccount 2>&1; echo exit=$?'
 ls: /var/run/secrets/kubernetes.io/serviceaccount: No such file or directory
 exit=1
 
-$ kubectl get ds log-agent -n p01-node-logs -o jsonpath='{.spec.updateStrategy}{"\n"}'
+$ kubectl get ds log-agent -n node-logs -o jsonpath='{.spec.updateStrategy}{"\n"}'
 {"rollingUpdate":{"maxSurge":0,"maxUnavailable":1},"type":"RollingUpdate"}
 
-$ kubectl delete daemonset log-agent -n p01-node-logs --wait=true --timeout=90s
-daemonset.apps "log-agent" deleted from p01-node-logs namespace
+$ kubectl delete daemonset log-agent -n node-logs --wait=true --timeout=90s
+daemonset.apps "log-agent" deleted from node-logs namespace
 
-$ kubectl delete namespace p01-node-logs --wait=false
-namespace "p01-node-logs" deleted
+$ kubectl delete namespace node-logs --wait=false
+namespace "node-logs" deleted
 
-$ kubectl get namespace p01-node-logs
-NAME            STATUS        AGE
-p01-node-logs   Terminating   110s
+$ kubectl get namespace node-logs
+NAME        STATUS        AGE
+node-logs   Terminating   2m
 
-$ kubectl get daemonset -A
-NAMESPACE     NAME         DESIRED   CURRENT   READY   UP-TO-DATE   AVAILABLE   NODE SELECTOR            AGE
-kube-system   kindnet      1         1         1       1            1           kubernetes.io/os=linux   7h52m
-kube-system   kube-proxy   1         1         1       1            1           kubernetes.io/os=linux   7h52m
-
-$ kubectl get namespace p01-node-logs
-Error from server (NotFound): namespaces "p01-node-logs" not found
+$ kubectl get namespace node-logs
+Error from server (NotFound): namespaces "node-logs" not found
 
 $ kubectl get pod -n kube-system -l k8s-app=kube-proxy -o jsonpath='{range .items[0].spec.tolerations[*]}{.key}{" "}{.operator}{" "}{.effect}{"\n"}{end}'
  Exists 

@@ -230,6 +230,17 @@ Namespace manifest, a `kubectl label` command or a Terraform namespace.
 only against a kubectl context that starts with `kind-`. Any other context
 needs `ALLOW_CONTEXT=NAME`. It prints the context before it writes.
 
+**A registered namespace is judged at its registered level.** A block whose
+namespaced documents all name one namespace, which has a sound entry in
+`security/namespace-exceptions.yaml` that names the block's own chapter, is
+dry-run in `gate-baseline` or `gate-privileged` instead, and a clean result is
+reported as `registered`. Everything else stays at `restricted` and fails as
+before: the same namespace used from another chapter, a workload that breaks
+the registered level (a privileged Pod in a `baseline` namespace), an
+unregistered namespace, an expired or unsound entry, a namespace registered
+twice, and a block that also reaches another namespace or none. Keep an
+excepted agent in a block of its own.
+
 The five core checks are KSV-0012, KSV-0014, KSV-0001, KSV-0003 and
 KSV-0030.
 

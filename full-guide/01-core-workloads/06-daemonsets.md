@@ -196,7 +196,7 @@ agent, and the lowest level that works is the answer. Save this as
 apiVersion: v1
 kind: Namespace
 metadata:
-  name: p01-node-logs
+  name: node-logs
   labels:
     pod-security.kubernetes.io/enforce: restricted
     pod-security.kubernetes.io/audit: restricted
@@ -206,7 +206,7 @@ apiVersion: v1
 kind: ServiceAccount
 metadata:
   name: log-agent
-  namespace: p01-node-logs
+  namespace: node-logs
 automountServiceAccountToken: false
 ```
 
@@ -221,7 +221,7 @@ kubectl apply -f ns-and-sa.yaml
 
 <!-- gate: output -->
 ```text
-namespace/p01-node-logs created
+namespace/node-logs created
 serviceaccount/log-agent created
 ```
 
@@ -236,7 +236,7 @@ apiVersion: apps/v1
 kind: DaemonSet
 metadata:
   name: log-agent
-  namespace: p01-node-logs
+  namespace: node-logs
   labels:
     app: log-agent
 spec:
@@ -341,9 +341,9 @@ Apply the manifest to the restricted namespace. The refusal is the point of
 this step, so it is a deliberate failure:
 
 ```sh
-kubectl apply -n p01-node-logs -f log-agent.yaml
-kubectl get ds log-agent -n p01-node-logs
-kubectl get events -n p01-node-logs --sort-by=.lastTimestamp
+kubectl apply -n node-logs -f log-agent.yaml
+kubectl get ds log-agent -n node-logs
+kubectl get events -n node-logs --sort-by=.lastTimestamp
 ```
 
 <!-- gate: output -->
@@ -355,15 +355,15 @@ daemonset.apps/log-agent created
 <!-- gate: output -->
 ```text
 NAME        DESIRED   CURRENT   READY   UP-TO-DATE   AVAILABLE   NODE SELECTOR   AGE
-log-agent   1         0         0       0            0           <none>          26s
+log-agent   1         0         0       0            0           <none>          25s
 ```
 
 <!-- gate: output -->
 ```text
 LAST SEEN   TYPE      REASON         OBJECT                MESSAGE
-21s         Warning   FailedCreate   daemonset/log-agent   Error creating: pods "log-agent-lh4gw" is forbidden: violates PodSecurity "restricted:latest": restricted volume types (volume "pod-logs" uses restricted volume type "hostPath")
+23s         Warning   FailedCreate   daemonset/log-agent   Error creating: pods "log-agent-hdtl6" is forbidden: violates PodSecurity "restricted:latest": restricted volume types (volume "pod-logs" uses restricted volume type "hostPath")
 # ...
-9s          Warning   FailedCreate   daemonset/log-agent   (combined from similar events): Error creating: pods "log-agent-6vrl8" is forbidden: violates PodSecurity "restricted:latest": restricted volume types (volume "pod-logs" uses restricted volume type "hostPath")
+3s          Warning   FailedCreate   daemonset/log-agent   (combined from similar events): Error creating: pods "log-agent-r2th9" is forbidden: violates PodSecurity "restricted:latest": restricted volume types (volume "pod-logs" uses restricted volume type "hostPath")
 ```
 
 The API server checks the Pods a controller creates, not the DaemonSet object
@@ -380,23 +380,24 @@ that works for this agent. Give the exception its own namespace, so no other
 workload inherits it:
 
 ```sh
-kubectl label namespace p01-node-logs pod-security.kubernetes.io/enforce=privileged --overwrite
-kubectl get namespace p01-node-logs --show-labels
-kubectl rollout status daemonset/log-agent -n p01-node-logs --timeout=180s
-kubectl get pods -n p01-node-logs -o wide
-kubectl get ds log-agent -n p01-node-logs
-kubectl logs -n p01-node-logs -l app=log-agent --tail=3
+kubectl label namespace node-logs pod-security.kubernetes.io/enforce=privileged --overwrite
+kubectl get namespace node-logs \
+  -L pod-security.kubernetes.io/enforce,pod-security.kubernetes.io/audit,pod-security.kubernetes.io/warn
+kubectl rollout status daemonset/log-agent -n node-logs --timeout=180s
+kubectl get pods -n node-logs -o wide
+kubectl get ds log-agent -n node-logs
+kubectl logs -n node-logs -l app=log-agent --tail=3
 ```
 
 <!-- gate: output -->
 ```text
-namespace/p01-node-logs labeled
+namespace/node-logs labeled
 ```
 
 <!-- gate: output -->
 ```text
-NAME            STATUS   AGE   LABELS
-p01-node-logs   Active   41s   kubernetes.io/metadata.name=p01-node-logs,pod-security.kubernetes.io/audit=restricted,pod-security.kubernetes.io/enforce=privileged,pod-security.kubernetes.io/warn=restricted
+NAME        STATUS   AGE   ENFORCE      AUDIT        WARN
+node-logs   Active   32s   privileged   restricted   restricted
 ```
 
 <!-- gate: output -->
@@ -408,19 +409,19 @@ daemon set "log-agent" successfully rolled out
 
 <!-- gate: output -->
 ```text
-NAME              READY   STATUS    RESTARTS   AGE   IP             NODE                     NOMINATED NODE   READINESS GATES
-log-agent-g8cfx   1/1     Running   0          18s   10.244.0.147   sf-pilot-control-plane   <none>           <none>
+NAME              READY   STATUS    RESTARTS   AGE   IP            NODE                     NOMINATED NODE   READINESS GATES
+log-agent-24wwh   1/1     Running   0          46s   10.244.0.45   sf-pilot-control-plane   <none>           <none>
 ```
 
 <!-- gate: output -->
 ```text
 NAME        DESIRED   CURRENT   READY   UP-TO-DATE   AVAILABLE   NODE SELECTOR   AGE
-log-agent   1         1         1       1            1           <none>          68s
+log-agent   1         1         1       1            1           <none>          92s
 ```
 
 <!-- gate: output -->
 ```text
-node=sf-pilot-control-plane pod-log-files=25
+node=sf-pilot-control-plane pod-log-files=41
 ```
 
 `audit` and `warn` stay at `restricted`. The API server still records, and
@@ -429,22 +430,21 @@ visible, and the warnings show when the agent drifts from the rest of the
 baseline.
 
 The exception also goes in the registry. Record it in
-`security/namespace-exceptions.yaml`, the one exceptions registry. That file
-is on the base branch and not yet on this one, so this chapter names it
-without a link. The entry records the namespace, the reason (the agent reads
-host logs), this chapter, and an expiry no more than 12 months away. A
-privileged namespace with no entry breaks the rule.
+`security/namespace-exceptions.yaml`, the one exceptions registry. The entry
+records the namespace, the reason (the agent reads host logs), this chapter,
+and an expiry no more than 12 months away. A privileged namespace with no
+entry breaks the rule.
 
 ### 5. What the agent can and cannot do
 
 ```sh
-POD=$(kubectl get pods -n p01-node-logs -l app=log-agent -o name)
-kubectl exec -n p01-node-logs "$POD" -- id
-kubectl exec -n p01-node-logs "$POD" -- ls -ld /host/var/log/pods
-kubectl exec -n p01-node-logs "$POD" -- sh -c 'ls -l "$(ls /host/var/log/pods/*/*/*.log | head -1)"'
-kubectl exec -n p01-node-logs "$POD" -- sh -c 'cat "$(ls /host/var/log/pods/*/*/*.log | head -1)" | wc -c'
-kubectl exec -n p01-node-logs "$POD" -- touch /host/var/log/pods/probe
-kubectl exec -n p01-node-logs "$POD" -- sh -c 'ls /var/run/secrets/kubernetes.io/serviceaccount 2>&1; echo exit=$?'
+POD=$(kubectl get pods -n node-logs -l app=log-agent -o name)
+kubectl exec -n node-logs "$POD" -- id
+kubectl exec -n node-logs "$POD" -- ls -ld /host/var/log/pods
+kubectl exec -n node-logs "$POD" -- sh -c 'ls -l "$(ls /host/var/log/pods/*/*/*.log | head -1)"'
+kubectl exec -n node-logs "$POD" -- sh -c 'cat "$(ls /host/var/log/pods/*/*/*.log | head -1)" | wc -c'
+kubectl exec -n node-logs "$POD" -- touch /host/var/log/pods/probe
+kubectl exec -n node-logs "$POD" -- sh -c 'ls /var/run/secrets/kubernetes.io/serviceaccount 2>&1; echo exit=$?'
 ```
 
 <!-- gate: output -->
@@ -454,17 +454,17 @@ uid=65532 gid=65532 groups=0(root),65532
 
 <!-- gate: output -->
 ```text
-drwxr-x---   26 root     root          4096 Oct 30 22:21 /host/var/log/pods
+drwxr-x---   52 root     root          8192 Oct 31 01:25 /host/var/log/pods
 ```
 
 <!-- gate: output -->
 ```text
--rw-r-----    1 root     root          1324 Oct 30 18:41 /host/var/log/pods/kube-system_coredns-559f6c778d-77g29_5e234064-b084-43ff-885d-09eb7403e0b6/coredns/0.log
+-rw-r-----    1 root     root          4193 Oct 31 01:25 /host/var/log/pods/kube-system_coredns-559f6c778d-77g29_5e234064-b084-43ff-885d-09eb7403e0b6/coredns/0.log
 ```
 
 <!-- gate: output -->
 ```text
-1324
+4193
 ```
 
 The agent is UID 65532, not root, and it reads the root-owned log through
@@ -488,8 +488,8 @@ exit=1
 ### 6. Clean up
 
 ```sh
-kubectl delete daemonset log-agent -n p01-node-logs
-kubectl delete namespace p01-node-logs
+kubectl delete daemonset log-agent -n node-logs
+kubectl delete namespace node-logs
 ```
 
 Delete the DaemonSet first, then the namespace. The namespace can stay
@@ -590,7 +590,7 @@ kubectl get daemonset -A                                  # all DaemonSets
 kubectl get ds <DS> -n <NS> -o wide                       # DESIRED == matching nodes
 kubectl describe ds <DS> -n <NS>                          # selectors, tolerations, Events
 kubectl get events -n <NS> --sort-by=.lastTimestamp       # FailedCreate: a Pod was refused
-kubectl label namespace <NS> pod-security.kubernetes.io/enforce=privileged --overwrite
+kubectl label namespace node-logs pod-security.kubernetes.io/enforce=privileged --overwrite
 kubectl rollout status    daemonset/<DS> -n <NS>
 kubectl rollout restart   daemonset/<DS> -n <NS>
 ```

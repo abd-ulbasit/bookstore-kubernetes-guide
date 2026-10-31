@@ -300,6 +300,17 @@ class NamespaceRegistryTests(unittest.TestCase):
         registry = self.load(ns_entry(), ns_entry())
         self.assertTrue(any("twice" in p for p in registry.problems), registry.problems)
 
+    def test_only_sound_unique_entries_are_usable_exceptions(self):
+        registry = self.load(
+            ns_entry("good", "baseline"),
+            ns_entry("expired", expires=TODAY - timedelta(days=1)),
+            ns_entry("twice"),
+            ns_entry("twice", "baseline"),
+        )
+        usable = rg.usable_exceptions(registry)
+        self.assertEqual({name: entry.level for name, entry in usable.items()}, {"good": "baseline"})
+        self.assertEqual(usable["good"].chapter, "01-core/01-a.md")
+
     def test_structure_errors_are_file_problems(self):
         for raw in ("- a\n", "exceptions: nope\n", "exceptions:\n  - text\n", "other: []\n"):
             with self.subTest(raw):

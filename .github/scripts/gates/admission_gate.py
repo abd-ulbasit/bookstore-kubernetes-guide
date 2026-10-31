@@ -6,6 +6,9 @@ enforces and warns at the `restricted` Pod Security level, and reports what
 the API server said:
 
 pass         accepted with no Pod Security complaint.
+registered   accepted with no Pod Security complaint, in the namespace of a
+             registered exception, at the level the registry gives it (below).
+             It is judged, and it is not a failure.
 violation    rejected for violating Pod Security, or accepted with a warning
              that says it would. A Deployment that breaks `restricted` is
              admitted with only a warning and exit 0 (its ReplicaSet is the
@@ -16,12 +19,30 @@ missing-crd  the cluster has no such custom resource definition. The block
              no cluster could apply it.
 error        any other failure, for example an invalid field.
 
+Registered exceptions (design section 5.4). A namespace above `restricted`
+is judged at its own level, not at `restricted`, only when all of this holds:
+  * security/namespace-exceptions.yaml (--namespace-registry) has an entry for
+    it, read by registry_gate.py. An entry that is expired, more than 12 months
+    out, short of a reason, a citation or an existing chapter, or that shares
+    its namespace with another entry, grants nothing;
+  * the entry's `chapter` is the block's own chapter, so another chapter that
+    uses the same namespace is still judged at `restricted`;
+  * every namespaced document in the block names that one namespace. A block
+    that also reaches another namespace, or none, is judged at `restricted`,
+    so a chapter keeps its excepted agent in a block of its own.
+Such a block is dry-run in `gate-baseline` or `gate-privileged`, which enforce
+and warn at the entry's level. A workload that breaks that level, for example
+a privileged Pod in a namespace registered at `baseline`, is a `violation`.
+Only a clean result becomes `registered`; every other status stays as it was.
+
 Insecure-on-purpose blocks are skipped, after the same marker policy the
 static gate applies: Part 05 chapters only, and never on a workload in
-namespace `bookstore`, `default` or none. Unparseable blocks cannot be
-applied and count as failures when in scope.
+namespace `bookstore`, `default` or none. A registered namespace does not
+relax it. Unparseable blocks cannot be applied and count as failures when in
+scope.
 
-The gate writes to the cluster: it creates the `gate-restricted` namespace.
+The gate writes to the cluster: it creates the `gate-restricted` namespace,
+and `gate-baseline` or `gate-privileged` when a registered block needs one.
 So it refuses to run unless the current kubectl context is a kind cluster
 (`kind-` prefix) or one named with --allow-context, and it prints the
 context before it writes.
@@ -35,17 +56,19 @@ stops the run instead of passing every block.
 
 Exit codes: 0 no in-scope violation, error or unparseable block, and no
 missing-crd block that holds a pod template off the allowlist. 1 at least
-one of those. 2 the control check, the cluster or the context could not be
-trusted, the manifest holds nothing, or no in-scope block was judged (every
-one was skipped or missing-crd). Blocks outside --scope are reported only;
-with no --scope everything is in scope. The ambient kubeconfig is used; the
-kubectl binary comes from --kubectl, the KUBECTL environment variable, or
-PATH. The allowlist (--allow FILE) is the one the static gate reads.
+one of those. 2 the control check, the cluster, the context or the namespace
+registry could not be trusted, the manifest holds nothing, or no in-scope
+block was judged (every one was skipped or missing-crd). Blocks outside
+--scope are reported only; with no --scope everything is in scope. The
+ambient kubeconfig is used; the kubectl binary comes from --kubectl, the
+KUBECTL environment variable, or PATH. The allowlist (--allow FILE) is the
+one the static gate reads.
 
 Usage:
     admission_gate.py --manifest M --scope CHAPTER [--scope ...]
                       [--allow FILE ...] [--allow-context NAME ...]
-                      [--report OUT.json]
+                      [--root full-guide] [--namespace-registry FILE]
+                      [--today YYYY-MM-DD] [--report OUT.json]
 """
 
 from __future__ import annotations
@@ -57,13 +80,17 @@ import os
 import re
 import subprocess
 import sys
+import time
 from collections import Counter
 from dataclasses import dataclass, field
+from datetime import date
 from pathlib import Path
 
 import yaml
 
 import extract_blocks as eb
+import registry_gate as rg
+import scanner_registry as sr
 from static_gate import (
     FIXTURES,
     KNOWN_KINDS,
@@ -76,13 +103,15 @@ from static_gate import (
     marker_problems,
 )
 
+RESTRICTED = "restricted"
 NAMESPACE = "gate-restricted"
-PSA_LABELS = {
-    "pod-security.kubernetes.io/enforce": "restricted",
-    "pod-security.kubernetes.io/warn": "restricted",
-}
 
 KIND_CONTEXT_PREFIX = "kind-"
+
+# A new namespace has no `default` ServiceAccount for a moment, and the API
+# server refuses a Pod there until it exists, whatever its security context.
+SERVICE_ACCOUNT_POLLS = 40
+SERVICE_ACCOUNT_WAIT = 0.5
 
 # Groups every Kubernetes API server serves itself. A kind in one of these is
 # never a custom resource, so "no matches" there is a wrong or removed
@@ -101,8 +130,8 @@ BUILTIN_GROUPS = frozenset(
 )  # fmt: skip
 
 PASS, VIOLATION, MISSING_CRD, ERROR = "pass", "violation", "missing-crd", "error"
-SKIPPED, UNPARSEABLE = "skipped-insecure", "unparseable"
-JUDGED = (PASS, VIOLATION, ERROR, UNPARSEABLE)
+SKIPPED, UNPARSEABLE, REGISTERED = "skipped-insecure", "unparseable", "registered"
+JUDGED = (PASS, REGISTERED, VIOLATION, ERROR, UNPARSEABLE)
 
 # Fixtures that must come back as a violation, every one of them hardened or
 # bare in a way Trivy alone cannot tell apart.
@@ -131,6 +160,8 @@ class Cluster:
 
     scoped: set[str] = field(default_factory=set)  # cluster-scoped kinds
     groups: set[str] = field(default_factory=set)  # API groups the server serves
+    exceptions: dict[str, rg.NamespaceEntry] = field(default_factory=dict)  # registry entries the gate may rely on
+    ready: set[str] = field(default_factory=set)  # Pod Security levels whose gate namespace exists
 
 
 def _is_custom_group(gv: str, served: set[str]) -> bool:
@@ -210,7 +241,7 @@ def check_context(kubectl: str, allowed: list[str]) -> str:
         return context
     raise ControlError(
         f"kubectl context {context!r} is not a kind cluster ({KIND_CONTEXT_PREFIX}*), and this "
-        f"gate creates the {NAMESPACE} namespace. Switch context, or pass "
+        f"gate creates the {NAMESPACE} namespace and its siblings. Switch context, or pass "
         f"--allow-context {context} if this cluster is meant for it"
     )
 
@@ -231,15 +262,43 @@ def served_groups(kubectl: str) -> set[str]:
     return groups
 
 
-def ensure_namespace(kubectl: str) -> None:
+def gate_namespace(level: str) -> str:
+    """Name the namespace that enforces and warns at a Pod Security level."""
+    return f"gate-{level}"
+
+
+def ensure_namespace(kubectl: str, cluster: Cluster, level: str = RESTRICTED) -> str:
+    """Create the gate namespace for a level once per run; return its name."""
+    name = gate_namespace(level)
+    if level in cluster.ready:
+        return name
     manifest = {
         "apiVersion": "v1",
         "kind": "Namespace",
-        "metadata": {"name": NAMESPACE, "labels": PSA_LABELS},
+        "metadata": {
+            "name": name,
+            "labels": {
+                "pod-security.kubernetes.io/enforce": level,
+                "pod-security.kubernetes.io/warn": level,
+            },
+        },
     }
     rc, out = kubectl_run(kubectl, ["apply", "-f", "-"], yaml.safe_dump(manifest))
     if rc != 0:
-        raise ControlError(f"cannot create namespace {NAMESPACE}: {out.strip()[:300]}")
+        raise ControlError(f"cannot create namespace {name}: {out.strip()[:300]}")
+    wait_for_default_service_account(kubectl, name)
+    cluster.ready.add(level)
+    return name
+
+
+def wait_for_default_service_account(kubectl: str, namespace: str) -> None:
+    """Return once the namespace has its `default` ServiceAccount, so a Pod dry-run is judged on Pod Security."""
+    for _ in range(SERVICE_ACCOUNT_POLLS):
+        rc, _out = kubectl_run(kubectl, ["get", "serviceaccount", "default", "-n", namespace, "-o", "name"])
+        if rc == 0:
+            return
+        time.sleep(SERVICE_ACCOUNT_WAIT)
+    raise ControlError(f"namespace {namespace} still has no default ServiceAccount, so a Pod cannot be dry-run in it")
 
 
 def referenced_service_accounts(docs: list[dict]) -> set[str]:
@@ -258,8 +317,8 @@ def referenced_service_accounts(docs: list[dict]) -> set[str]:
     return names
 
 
-def ensure_service_accounts(kubectl: str, names: set[str]) -> None:
-    """Create named ServiceAccounts in the gate namespace.
+def ensure_service_accounts(kubectl: str, names: set[str], namespace: str = NAMESPACE) -> None:
+    """Create named ServiceAccounts in a gate namespace.
 
     A server dry-run creates nothing, so a Pod naming a dedicated ServiceAccount
     would otherwise be refused for a reason that has nothing to do with Pod
@@ -269,18 +328,19 @@ def ensure_service_accounts(kubectl: str, names: set[str]) -> None:
         manifest = {
             "apiVersion": "v1",
             "kind": "ServiceAccount",
-            "metadata": {"name": name, "namespace": NAMESPACE},
+            "metadata": {"name": name, "namespace": namespace},
         }
         rc, out = kubectl_run(kubectl, ["apply", "-f", "-"], yaml.safe_dump(manifest))
         if rc != 0:
             raise ControlError(f"cannot create ServiceAccount {name}: {out.strip()[:300]}")
 
 
-def dry_run(kubectl: str, body: str, cluster: Cluster) -> tuple[str, str]:
-    """Server-side dry-run a block body in the gate namespace; return (status, output)."""
+def dry_run(kubectl: str, body: str, cluster: Cluster, level: str = RESTRICTED) -> tuple[str, str]:
+    """Server-side dry-run a block body in the gate namespace of a level; return (status, output)."""
     docs = [d for d in yaml.safe_load_all(body) if isinstance(d, dict)]
-    ensure_service_accounts(kubectl, referenced_service_accounts(docs))
-    payload = yaml.safe_dump_all(retarget(docs, NAMESPACE, cluster.scoped), sort_keys=False)
+    namespace = ensure_namespace(kubectl, cluster, level)
+    ensure_service_accounts(kubectl, referenced_service_accounts(docs), namespace)
+    payload = yaml.safe_dump_all(retarget(docs, namespace, cluster.scoped), sort_keys=False)
     rc, out = kubectl_run(
         kubectl, ["apply", "--dry-run=server", "--validate=strict", "-f", "-"], payload
     )
@@ -301,6 +361,28 @@ def check_control(kubectl: str, cluster: Cluster) -> None:
             )
 
 
+def registered_entry(docs: list[dict], chapter: str, cluster: Cluster) -> rg.NamespaceEntry | None:
+    """Return the registry entry that lets a block be judged above `restricted`, or None.
+
+    Every namespaced document must name one and the same namespace, and the
+    registry must hold a sound entry for it that names this chapter. Anything
+    short of that, such as a second namespace or a document with none, leaves
+    the block at `restricted`.
+    """
+    spaces = set()
+    for doc in docs:
+        if doc.get("kind") in cluster.scoped:
+            continue
+        meta = doc.get("metadata")
+        space = meta.get("namespace") if isinstance(meta, dict) else None
+        spaces.add(space if isinstance(space, str) else None)
+    if len(spaces) != 1:
+        return None
+    space = spaces.pop()
+    entry = cluster.exceptions.get(space) if space else None
+    return entry if entry and entry.chapter == chapter else None
+
+
 def judge(block: eb.Block, kubectl: str, cluster: Cluster) -> tuple[str, str]:
     if block.klass == eb.UNPARSEABLE:
         return UNPARSEABLE, block.note
@@ -310,7 +392,14 @@ def judge(block: eb.Block, kubectl: str, cluster: Cluster) -> tuple[str, str]:
         if problems:
             return ERROR, "insecure-on-purpose marker not allowed here: " + ", ".join(problems)
         return SKIPPED, ""
-    return dry_run(kubectl, body, cluster)
+    docs = [d for d in yaml.safe_load_all(body) if isinstance(d, dict)]
+    entry = registered_entry(docs, block.chapter, cluster)
+    if entry is None:
+        return dry_run(kubectl, body, cluster)
+    status, out = dry_run(kubectl, body, cluster, entry.level)
+    if status != PASS:
+        return status, out
+    return REGISTERED, f"judged at {entry.level} for registered namespace {entry.namespace}\n{out}"
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -319,6 +408,9 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--scope", action="append", default=[], metavar="CHAPTER")
     parser.add_argument("--allow", action="append", default=[], type=Path, metavar="FILE")
     parser.add_argument("--allow-context", action="append", default=[], metavar="NAME")
+    parser.add_argument("--root", default="full-guide", type=Path, help="the guide the registry's chapters sit in")
+    parser.add_argument("--namespace-registry", type=Path, metavar="FILE")
+    parser.add_argument("--today", type=date.fromisoformat, default=None, help="YYYY-MM-DD, to repeat a run as of another day")
     parser.add_argument("--report", type=Path)
     parser.add_argument("--kubectl", default=os.environ.get("KUBECTL", "kubectl"))
     args = parser.parse_args(argv)
@@ -329,18 +421,35 @@ def main(argv: list[str] | None = None) -> int:
             raise ControlError("the manifest holds no blocks, so there is nothing to check")
         check_scopes(blocks, args.scope)
         allow = load_allowlist(args.allow)
+        registry = rg.load_namespace_registry(
+            args.namespace_registry or rg.DEFAULT_NAMESPACE_REGISTRY,
+            args.today or date.today(),
+            args.root,
+            missing_ok=args.namespace_registry is None,
+        )
+        for problem in registry.problems:
+            print(f"admission gate: {registry.path}: {problem}")
+        for entry in registry.entries:
+            if entry.problems:
+                print(f"admission gate: {registry.path}: namespace {entry.namespace} is not applied: " + "; ".join(entry.problems))
         context = check_context(args.kubectl, args.allow_context)
         print(f"admission gate: kubectl context {context}")
-        cluster = Cluster(cluster_scoped_kinds(args.kubectl), served_groups(args.kubectl))
-        ensure_namespace(args.kubectl)
+        cluster = Cluster(
+            cluster_scoped_kinds(args.kubectl), served_groups(args.kubectl), rg.usable_exceptions(registry)
+        )
+        ensure_namespace(args.kubectl, cluster)
         check_control(args.kubectl, cluster)
-    except ControlError as exc:
+    except (ControlError, sr.RegistryError) as exc:
         print(f"admission gate aborted: {exc}", file=sys.stderr)
         return 2
 
     rows = []
     for block in blocks:
-        status, out = judge(block, args.kubectl, cluster)
+        try:
+            status, out = judge(block, args.kubectl, cluster)
+        except ControlError as exc:
+            print(f"admission gate aborted: {exc}", file=sys.stderr)
+            return 2
         unknown = [k for k in dict.fromkeys(block.kinds) if k not in KNOWN_KINDS]
         pod_template = status == MISSING_CRD and holds_pod_template(
             Path(block.path).read_text(encoding="utf-8")
@@ -367,11 +476,11 @@ def main(argv: list[str] | None = None) -> int:
     judged = sum(1 for r in scoped if r["status"] in JUDGED)
     unlisted = [r for r in scoped if r["pod_template"] and not r["allowed"]]
     for row in scoped:
-        if row["status"] in failing | {MISSING_CRD}:
+        if row["status"] in failing | {MISSING_CRD, REGISTERED}:
             first = row["detail"].splitlines()[0] if row["detail"] else ""
             tail = "  (holds a pod template, not allowlisted)" if row in unlisted else ""
             print(f"{row['status']:<12} {row['chapter']}:{row['line']}  {first[:110]}{tail}")
-    order = (PASS, VIOLATION, MISSING_CRD, ERROR, UNPARSEABLE, SKIPPED)
+    order = (PASS, REGISTERED, VIOLATION, MISSING_CRD, ERROR, UNPARSEABLE, SKIPPED)
     print(
         "admission gate: " + ", ".join(f"{counts[s]} {s}" for s in order)
         + f" ({len(scoped)} of {len(rows)} blocks in scope)"
