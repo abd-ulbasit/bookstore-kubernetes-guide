@@ -5,8 +5,8 @@
 > (managed RDS/Cloud SQL vs. an operator vs. a DIY StatefulSet — failure
 > domains, backups, failover, PITR); the **operator pattern** as the real
 > answer for stateful; data gravity & migration; quorum/replicas — applied with
-> a Bookstore Postgres snapshot, a restore, a credential rotation drill, and an
-> explicit production recommendation.
+> the Bookstore's snapshot manifests, a restore Pod, a credential rotation
+> drill, and an explicit production recommendation.
 
 **Estimated time:** ~15 min read · ~60 min hands-on
 **Prerequisites:** [Part 03 ch.04](04-persistent-storage.md): the PV/PVC mechanics being applied · [Part 01 ch.05](../01-core-workloads/05-statefulsets.md): the StatefulSet running the data tier · [Part 03 ch.02](02-secrets.md): the `db-credentials` Secret
@@ -76,16 +76,17 @@ customer data — and this chapter says exactly what you would.
 ## Threats and controls
 
 Every copy of the data is a second door, and a restore reopens old credentials.
-The table lists the threats specific to this topic. Each control is taught in
-the hands-on section that follows.
+The table lists the threats specific to this topic. Rows 1 and 4 are run in
+the hands-on section that follows. Rows 2, 3, 5 and 6 are design rules with
+citations; the hands-on does not run them.
 
 | Threat | Control taught here | Goes deeper |
 |---|---|---|
-| A snapshot is a read path around the PVC: whoever can create a `VolumeSnapshot` holds a copy they can mount | A Role for the snapshot job only, with `get`, `list` and `create` on `volumesnapshots` | [05.01](../05-security/01-authn-authz-rbac.md) |
-| A clone is a read path too: a PVC whose `dataSource` is another PVC copies the claim, and the snapshot rule does not stop it | Grant `create` on PVCs to the restore runbook, not to workloads | [05.01](../05-security/01-authn-authz-rbac.md) |
-| Creating Pods in a namespace reaches the PersistentVolumes that Pods mount, so no snapshot rule closes that door | Keep Pod creation and `pods/exec` to the workloads that need them | [01.01 baseline](../01-core-workloads/01-pods.md#baseline-service-account); [05.01](../05-security/01-authn-authz-rbac.md) |
-| A restore brings back the password the database held when the copy was taken, and the old one still logs in | Rotate the role password inside the restored database, then check the old password is refused | [03.02](02-secrets.md) for the Secret; rotation through an external store: <!-- link-later: 11.05 --> 11.05 and <!-- link-later: 15.05 --> 15.05 |
-| A snapshot or dump holds credential hashes and any secret the app kept in the data | Treat every copy as secret-bearing: restricted access, encryption at rest, copies kept off the cluster | [08.02](../08-day-2-operations/02-backup-and-dr.md) for backups; encryption at rest, <!-- link-later: 05.04 --> 05.04; volume encryption is a StorageClass property, [03.04](04-persistent-storage.md) |
+| A snapshot is a read path around the PVC: whoever can create a `VolumeSnapshot` holds a copy they can mount | A Role for the snapshot job only, with `get`, `list` and `create` on `volumesnapshots` (run in step 2) | [05.01](../05-security/01-authn-authz-rbac.md) |
+| A clone is a read path too: a PVC whose `dataSource` is another PVC copies the claim, and the snapshot rule does not stop it | Grant `create` on PVCs to the restore runbook, not to workloads (cited, not run) | [05.01](../05-security/01-authn-authz-rbac.md) |
+| Creating Pods in a namespace reaches the PersistentVolumes that Pods mount, so no snapshot rule closes that door | Keep Pod creation and `pods/exec` to the workloads that need them (cited, not run) | [01.01 baseline](../01-core-workloads/01-pods.md#baseline-service-account); [05.01](../05-security/01-authn-authz-rbac.md); [RBAC good practices](https://kubernetes.io/docs/concepts/security/rbac-good-practices/) |
+| A restore brings back the password the database held when the copy was taken, and the old one still logs in | Rotate the role password inside the restored database, then check the old password is refused (step 5, as a stand-in: the snapshot case itself was not run) | [03.02](02-secrets.md) for the Secret; rotation through an external store: <!-- link-later: 11.05 --> 11.05 and <!-- link-later: 15.05 --> 15.05 |
+| A snapshot or dump holds credential hashes and any secret the app kept in the data | Treat every copy as secret-bearing: restricted access, volume encryption where the StorageClass sets it, copies kept off the cluster | [08.02](../08-day-2-operations/02-backup-and-dr.md) for backups; volume encryption is a StorageClass property, [03.04](04-persistent-storage.md); etcd encryption, <!-- link-later: 05.04 --> 05.04 |
 | One Postgres Pod is a single point of data loss | A managed database, or an operator that runs failover, backup and PITR | [08.05](../08-day-2-operations/05-operators-and-crds.md) |
 
 ## Diagrams
@@ -172,7 +173,7 @@ kubectl get pod postgres-0 -n bookstore
 <!-- gate: output -->
 ```text
 NAME         READY   STATUS    RESTARTS   AGE
-postgres-0   1/1     Running   0          49s
+postgres-0   1/1     Running   0          80s
 ```
 
 ```sh
@@ -202,17 +203,14 @@ kubectl get pod postgres-0 -n bookstore -o jsonpath='{.spec.containers[0].securi
 {"allowPrivilegeEscalation":false,"capabilities":{"drop":["ALL"]},"readOnlyRootFilesystem":true}
 ```
 
-The pod-level fields are the baseline's, with two specifics. The official image
-runs as the `postgres` user, UID and GID 999, so the Pod says so and does not
-start as root. `fsGroup: 999` makes the kubelet give the PVC's files the group
-999, so the database can write its data directory without the image's own
-root-then-`gosu` step. `fsGroupChangePolicy: OnRootMismatch` tells the kubelet
-to re-own the volume only when its root directory has the wrong owner, so a
-restart does not walk a large data directory. The
-[baseline](../01-core-workloads/01-pods.md#baseline-run-as) explains the
-run-as fields and the
-[`fsGroup` note](../01-core-workloads/01-pods.md#baseline-fsgroup) explains the
-group.
+The pod-level fields are the baseline's. The official image runs as the
+`postgres` user, UID and GID 999, so the Pod says so and does not start as
+root. `fsGroup: 999` and `fsGroupChangePolicy: OnRootMismatch` are the fields
+the Bookstore's StatefulSet sets for its volume. What `fsGroup` does on this
+kind volume is measured in [03.04](04-persistent-storage.md#fsgroup). The
+[run-as baseline](../01-core-workloads/01-pods.md#baseline-run-as) and the
+[`fsGroup` baseline](../01-core-workloads/01-pods.md#baseline-fsgroup) explain
+the fields.
 
 Now the root filesystem. Postgres writes only where the manifest mounts an
 `emptyDir` or the data PVC:
@@ -310,6 +308,20 @@ subjects:
     namespace: bookstore
 ```
 
+Save the three objects as `snapshot-job-rbac.yaml` and apply them. The
+`Forbidden` and `NotFound` answers below depend on this apply:
+
+```sh
+kubectl apply -f snapshot-job-rbac.yaml
+```
+
+<!-- gate: output -->
+```text
+serviceaccount/snapshot-job created
+role.rbac.authorization.k8s.io/snapshotter created
+rolebinding.rbac.authorization.k8s.io/snapshot-job created
+```
+
 `resourceNames` cannot narrow the `create` verb. The Kubernetes RBAC reference
 states that "for create, this limitation is because the name of the new object
 may not be known at authorization time"
@@ -361,7 +373,7 @@ The manifests are still worth reading, and applying them shows the refusal the
 cluster gives:
 
 ```sh
-kubectl apply -f examples/bookstore/raw-manifests/18-postgres-snapshot.yaml
+kubectl apply -f - < examples/bookstore/raw-manifests/18-postgres-snapshot.yaml
 ```
 
 <!-- gate: output -->
@@ -404,14 +416,16 @@ persistentvolumeclaim/data-postgres-restore created
 <!-- gate: output -->
 ```text
 NAME                    STATUS    VOLUME   CAPACITY   ACCESS MODES   STORAGECLASS   VOLUMEATTRIBUTESCLASS   AGE
-data-postgres-restore   Pending                                      standard       <unset>                 0s
+data-postgres-restore   Pending                                      standard       <unset>                 1s
 ```
 
-On this cluster the API server accepted the claim, even though the snapshot
-kind it names is not served. The claim sat in `Pending`, and nothing reported an
-error. A restore runbook must check for `Pending`, not only for an error on
-apply. Step 4 needs a claim it can bind, so on this cluster the Pending claim
-is replaced.
+On this cluster the API server accepted the claim, although the snapshot kind
+it names is not served. The claim then sat in `Pending`, and the apply reported
+no error. `Pending` does not show that the snapshot was refused. kind's
+`standard` class uses `WaitForFirstConsumer` ([03.04](04-persistent-storage.md)
+shows the class), so a claim stays `Pending` until a Pod that uses it is
+scheduled. Step 4 shows the same `Pending` state on a claim without
+`dataSource`, and then gives that claim a Pod.
 
 Not run here, and cited instead:
 
@@ -423,20 +437,26 @@ Not run here, and cited instead:
   ([PVC data sources](https://kubernetes.io/docs/concepts/storage/volume-pvc-datasource/)).
   It needs a CSI driver with cloning support, which kind's provisioner does not
   have.
-- **Volume encryption.** Whether a volume is encrypted at rest is a property of
-  the StorageClass and the disk behind it. [03.04](04-persistent-storage.md)
+- **Volume encryption.** Whether a volume is encrypted is a property of the
+  StorageClass and the disk behind it. [03.04](04-persistent-storage.md)
   covers the StorageClass. kind does not encrypt its local volumes, so there is
   nothing to show here.
 
 ### 4. Restore into a Pod under restricted
 
 The restored volume needs a database process. This Pod is the restore's
-database, and it carries the full baseline. It differs from `20-` in two ways:
-the password comes from a file, and the Secret is mounted as a volume.
+database, and it carries the baseline. It is a bare Pod, not a StatefulSet Pod,
+and it differs from the `20-` Pod in these ways:
+
+- the password comes from a file (`POSTGRES_PASSWORD_FILE`), not `envFrom`;
+- the Secret is mounted as a volume, from a scratch Secret (below);
+- it sets no `fsGroupChangePolicy`, so the field from step 1 is absent;
+- it has no startup or liveness probe, and no CPU limit (`20-` sets 500m);
+- it has no `priorityClassName`, toleration or node affinity.
 
 On a cluster with a snapshot-capable driver, the claim from step 3 is this
-Pod's volume. On kind, replace the Pending claim with one that binds, which is
-the same claim without `dataSource`:
+Pod's volume. On kind, the Pod uses the same claim without `dataSource`.
+Replace the claim from step 3 with it:
 
 ```sh
 kubectl delete pvc data-postgres-restore -n bookstore
@@ -462,6 +482,43 @@ persistentvolumeclaim "data-postgres-restore" deleted from p03-05-stateful names
 <!-- gate: output -->
 ```text
 persistentvolumeclaim/data-postgres-restore created
+```
+
+The claim stays `Pending` until a Pod uses it, and its events name the reason:
+
+```sh
+kubectl get pvc data-postgres-restore -n bookstore
+kubectl describe pvc data-postgres-restore -n bookstore | sed -n '/^Events:/,$p'
+```
+
+<!-- gate: output -->
+```text
+NAME                    STATUS    VOLUME   CAPACITY   ACCESS MODES   STORAGECLASS   VOLUMEATTRIBUTESCLASS   AGE
+data-postgres-restore   Pending                                      standard       <unset>                 1s
+```
+
+<!-- gate: output -->
+```text
+Events:
+  Type    Reason                Age   From                         Message
+  ----    ------                ----  ----                         -------
+  Normal  WaitForFirstConsumer  1s    persistentvolume-controller  waiting for first consumer to be created before binding
+```
+
+The Pod reads its password from a scratch copy of the Secret. That keeps the
+rotation in step 5 away from the `db-credentials` Secret, which `postgres-0`
+and the apps read. Apply the same manifest with only its name changed. The
+value it carries is the DEMO-ONLY literal from `16-db-credentials.yaml`. That
+is acceptable on this throwaway cluster and nowhere else:
+
+```sh
+sed -e 's/name: db-credentials$/name: db-credentials-restore/' \
+  examples/bookstore/raw-manifests/16-db-credentials.yaml | kubectl apply -f -
+```
+
+<!-- gate: output -->
+```text
+secret/db-credentials-restore created
 ```
 
 Save the Pod below as `postgres-restore.yaml`, then apply it with
@@ -535,7 +592,7 @@ spec:
         sizeLimit: 32Mi
     - name: db-password
       secret:
-        secretName: db-credentials
+        secretName: db-credentials-restore
         defaultMode: 0440
         items:
           - key: POSTGRES_PASSWORD
@@ -558,11 +615,24 @@ kubectl get pod postgres-restore -n bookstore
 <!-- gate: output -->
 ```text
 NAME               READY   STATUS    RESTARTS   AGE
-postgres-restore   1/1     Running   0          113s
+postgres-restore   1/1     Running   0          118s
 ```
 
-The readiness probe asks Postgres over the socket, so `Ready` means the server
-accepts connections. Now check the identity and the mount:
+The claim is bound now, because the Pod that uses it has been scheduled:
+
+```sh
+kubectl get pvc data-postgres-restore -n bookstore
+```
+
+<!-- gate: output -->
+```text
+NAME                    STATUS   VOLUME                                     CAPACITY   ACCESS MODES   STORAGECLASS   VOLUMEATTRIBUTESCLASS   AGE
+data-postgres-restore   Bound    pvc-e0e46b1c-5c54-4db7-8c13-88ddaaef39ce   1Gi        RWO            standard       <unset>                 2m
+```
+
+The readiness probe asks Postgres over the socket. `Ready` therefore means the
+socket answered. It does not mean TCP is open, and step 5 shows the difference.
+Now check the identity and the mount:
 
 ```sh
 kubectl exec -n bookstore postgres-restore -- sh -c 'id; ls -l /run/secrets/db/; touch /run/secrets/db/x; echo "exit=$?"'
@@ -572,7 +642,7 @@ kubectl exec -n bookstore postgres-restore -- sh -c 'id; ls -l /run/secrets/db/;
 ```text
 uid=999(postgres) gid=999(postgres) groups=999(postgres),101(ssl-cert)
 total 0
-lrwxrwxrwx 1 root postgres 15 Oct 31 00:19 password -> ..data/password
+lrwxrwxrwx 1 root postgres 15 Oct 31 00:56 password -> ..data/password
 touch: cannot touch '/run/secrets/db/x': Read-only file system
 exit=1
 ```
@@ -582,32 +652,40 @@ The process runs as UID 999, and the Secret mount refuses writes because it is
 is a symlink into the volume's `..data` directory. The read itself is proven in
 step 5, where the same UID 999 process opens the file.
 
-Three fields are new here. `POSTGRES_PASSWORD_FILE` points at the mounted file,
-so the value never enters the container's environment. The Secret volume lists
-one key, so the Pod sees only the password and not the user name beside it.
-`defaultMode: 0440` makes the file readable by its owner and its group. With
-`fsGroup: 999` the group is 999, so the postgres process reads the file without
-the file being world-readable. Kubernetes stores a Secret volume in a `tmpfs`,
+`POSTGRES_PASSWORD_FILE` points at the mounted file, so the value never enters
+the container's environment. The Secret volume lists one key, so the Pod sees
+only the password and not the user name beside it. The `defaultMode: 0440` and
+`fsGroup: 999` settings work as they do for any Secret volume, which
+[03.03](03-volumes.md) covers. Kubernetes stores a Secret volume in a `tmpfs`,
 "so that the confidential data is not written to durable storage"
 ([Secrets](https://kubernetes.io/docs/concepts/configuration/secret/)).
 
-`PGDATA` must match the path the source Pod wrote. The restored volume holds a
-data directory at `pgdata/`, and a different `PGDATA` would start an empty
-cluster beside it.
+`PGDATA` must match the path the data directory lives at. On a snapshot-capable
+driver the restored volume holds the source's `pgdata/` directory, and a
+different `PGDATA` would start an empty cluster beside it. On kind the volume is
+empty, so the Pod creates `pgdata/` at this path itself.
 
 ### 5. Rotate the password after a restore
 
-Here is the trap. The official image reads `POSTGRES_PASSWORD` only when it
-starts with an empty data directory. The upstream documentation says these
-variables "will only have an effect if you start the container with a data
-directory that is empty" ([docker-library
-postgres](https://github.com/docker-library/docs/blob/master/postgres/README.md)).
-A restored volume is not empty. So changing the Secret after a restore changes
-what clients read from the Secret, and does nothing to the database. The
-database keeps the password its snapshot held. The old credential still works,
-and the new one is refused.
+This step is a stand-in for the restore case. A real restore brings back the
+database as its snapshot held it, password included. kind cannot produce that
+case, because the snapshot CRDs are not installed, so the volume here is a
+fresh, empty PVC. The restore Pod ran `initdb` on its first start, with the
+value its scratch Secret held then. The official image reads
+`POSTGRES_PASSWORD` only at that point. The steps below change the Secret
+afterwards and show the same rule: the database keeps the value it was created
+with. The snapshot case itself was not run.
 
-Two details make the check honest. First, the stock `pg_hba.conf` trusts the
+The upstream notes say the Docker-specific variables "will only have an effect
+if you start the container with a data directory that is empty". A restored
+volume is not empty, so the same rule should apply there
+([docker-library postgres](https://github.com/docker-library/docs/blob/master/postgres/README.md)).
+
+The Pod reads its password from `db-credentials-restore`. The shared
+`db-credentials` Secret, which `postgres-0` and the apps read, is not changed
+by any step in this section.
+
+Three details make the checks honest. First, the stock `pg_hba.conf` trusts the
 local socket and the loopback addresses, and asks for a password only for every
 other address. The recorded run shows the file:
 
@@ -630,22 +708,85 @@ Second, a check over `127.0.0.1` proves nothing about the password, so the
 checks below connect to the Pod's own address. Replace `<pod-ip>` with that
 address, which the Pod reports as `.status.podIP`.
 
-The rotation runs in four moves: write the new value to the Secret, wait for
-the file in the Pod to carry it, change the password inside the database, and
-check both directions.
+Third, `Ready` is a socket check, so TCP needs its own check. In the recorded
+run, the first TCP attempt right after the Pod reported Ready was refused:
 
 ```sh
-kubectl patch secret db-credentials -n bookstore --type merge --patch-file new-password.json
+kubectl exec -n bookstore postgres-restore -- sh -c 'PGPASSWORD="$(cat /run/secrets/db/password)" psql -h <pod-ip> -U bookstore -d bookstore -tAc "select 1"'
 ```
 
 <!-- gate: output -->
 ```text
-secret/db-credentials patched
+psql: error: connection to server at "<pod-ip>", port 5432 failed: Connection refused
+# ...
+command terminated with exit code 2
 ```
 
-Wait until `/run/secrets/db/password` in the Pod shows the new value. The kubelet
-syncs Secret volumes on its own schedule, so this can take a minute or more.
-Then the Secret's value must be refused, and the old one must still work:
+The run did not trace the Pod's phase at that moment. The lab script waits for
+TCP with `pg_isready` before it relies on the password checks. If the check
+below is refused, wait a few seconds and run it again.
+
+```sh
+kubectl exec -n bookstore postgres-restore -- sh -c 'pg_isready -h <pod-ip> -p 5432'
+```
+
+<!-- gate: output -->
+```text
+<pod-ip>:5432 - accepting connections
+```
+
+Before the rotation, the file holds the value the database was created with,
+and the database accepts it:
+
+```sh
+kubectl exec -n bookstore postgres-restore -- sh -c 'PGPASSWORD="$(cat /run/secrets/db/password)" psql -h <pod-ip> -U bookstore -d bookstore -tAc "select 1"'
+```
+
+<!-- gate: output -->
+```text
+1
+```
+
+The rotation has four moves: keep the current value, write a new one to the
+scratch Secret, wait for the file in the Pod to carry it, then change the
+password inside the database and check both directions. The current value goes
+into a shell variable and reaches `psql` on standard input, so it never appears
+in a command line:
+
+```sh
+OLD_PW=$(kubectl get secret db-credentials-restore -n bookstore -o jsonpath='{.data.POSTGRES_PASSWORD}' | base64 -d)
+```
+
+Write the new value to the scratch Secret. The patch file holds the value, so
+it is removed straight after the patch:
+
+```sh
+NEW=$(python3 -c 'import secrets; print(secrets.token_urlsafe(24))')
+printf '{"stringData":{"POSTGRES_PASSWORD":"%s"}}' "$NEW" > new-password.json
+kubectl patch secret db-credentials-restore -n bookstore --type merge --patch-file new-password.json
+rm new-password.json
+```
+
+<!-- gate: output -->
+```text
+secret/db-credentials-restore patched
+```
+
+The kubelet syncs Secret volumes on its own schedule, so this can take a minute
+or more. The loop below prints nothing. It stops when the file in the Pod holds
+the new value, or after five minutes:
+
+```sh
+deadline=$((SECONDS + 300))
+until [ "$(kubectl exec -n bookstore postgres-restore -- cat /run/secrets/db/password)" = "$NEW" ]; do
+  if [ "$SECONDS" -ge "$deadline" ]; then break; fi
+  sleep 10
+done
+```
+
+Now check both directions. The Secret's new value must be refused, because the
+database still holds the value it was created with. The old value must still be
+accepted:
 
 ```sh
 kubectl exec -n bookstore postgres-restore -- sh -c 'PGPASSWORD="$(cat /run/secrets/db/password)" psql -h <pod-ip> -U bookstore -d bookstore -tAc "select 1"'
@@ -658,7 +799,7 @@ command terminated with exit code 2
 ```
 
 ```sh
-kubectl exec -n bookstore postgres-restore -- sh -c 'PGPASSWORD=devpassword psql -h <pod-ip> -U bookstore -d bookstore -tAc "select 1"'
+printf '%s' "$OLD_PW" | kubectl exec -i -n bookstore postgres-restore -- sh -c 'PGPASSWORD="$(cat)" psql -h <pod-ip> -U bookstore -d bookstore -tAc "select 1"'
 ```
 
 <!-- gate: output -->
@@ -666,9 +807,9 @@ kubectl exec -n bookstore postgres-restore -- sh -c 'PGPASSWORD=devpassword psql
 1
 ```
 
-That is the restore trap: the database still answers to the password from the
-snapshot, and the Secret says something else. Now change the password inside
-the database. The socket asks for no password here, because the local rule is
+That is the stand-in: the database still answers to the value it was created
+with, and the Secret holds something else. Now change the password inside the
+database. The socket asks for no password here, because the local rule is
 `trust`:
 
 ```sh
@@ -696,7 +837,7 @@ kubectl exec -n bookstore postgres-restore -- sh -c 'PGPASSWORD="$(cat /run/secr
 ```
 
 ```sh
-kubectl exec -n bookstore postgres-restore -- sh -c 'PGPASSWORD=devpassword psql -h <pod-ip> -U bookstore -d bookstore -tAc "select 1"'
+printf '%s' "$OLD_PW" | kubectl exec -i -n bookstore postgres-restore -- sh -c 'PGPASSWORD="$(cat)" psql -h <pod-ip> -U bookstore -d bookstore -tAc "select 1"'
 ```
 
 <!-- gate: output -->
@@ -705,10 +846,9 @@ psql: error: connection to server at "<pod-ip>", port 5432 failed: FATAL:  passw
 command terminated with exit code 2
 ```
 
-`new-password.json` holds `{"stringData":{"POSTGRES_PASSWORD":"<new value>"}}`,
-written to a file that is deleted afterwards. A server that logs statements may
-record the `ALTER ROLE` text, and with it the value. In an interactive session,
-psql's `\password` prompts for the value and sends only its hash.
+A server that logs statements may record the `ALTER ROLE` text, and with it the
+value. In an interactive session, psql's `\password` prompts for the value and
+sends only its hash.
 
 Why the socket needs no password: PostgreSQL's `initdb` uses `trust` for local
 users unless told otherwise
@@ -717,19 +857,24 @@ who can `exec` into this Pod can change the database's passwords, which makes
 `pods/exec` on the database Pod database admin. Check the default on your own
 cluster before relying on it.
 
-Apps are a separate step. The Go services read `DB_DSN` from the environment,
-and the environment is fixed when a Pod starts. After the database changes,
-roll the Deployments that build `DB_DSN` from the Secret, or they keep the
-old value until they restart.
+This lab stops at the database. The shared `db-credentials` Secret and the
+Deployments that build `DB_DSN` from it are not touched. In a real cutover, the
+Secret the apps read is rotated, those Deployments are rolled, and only then
+does traffic move to the restored database. The Go services read `DB_DSN` from
+the environment, and the environment is fixed when a Pod starts, so a rotation
+alone does not reach them.
 
 ### 6. Clean up
 
 ```sh
 kubectl delete pod postgres-restore -n bookstore --now
 kubectl delete pvc data-postgres-restore -n bookstore
+kubectl delete secret db-credentials-restore -n bookstore
+kubectl delete -f snapshot-job-rbac.yaml
 ```
 
-Keep `postgres-0` and its PVC, which the rest of the guide uses.
+Keep `postgres-0`, its PVC and the `db-credentials` Secret, which the rest of
+the guide uses.
 
 ## How it works under the hood
 
@@ -826,8 +971,10 @@ kubectl get volumesnapshotclass
 kubectl get volumesnapshot -n bookstore
 kubectl get volumesnapshot postgres-snap-0 -n bookstore -o jsonpath='{.status.readyToUse}{"\n"}'
 # restore = NEW PVC from the snapshot (dataSource below); clone = NEW PVC from a PVC
-# a Pending restore claim is the signal to check, not an apply error
+# Pending is normal under WaitForFirstConsumer until a Pod mounts the claim.
+# The restore check is the Pod mounting the claim and the rows reading back.
 kubectl get pvc data-postgres-restore -n bookstore
+kubectl describe pvc data-postgres-restore -n bookstore | sed -n '/^Events:/,$p'
 # who can read the database pod's data? check the pod-create and exec rights too
 kubectl auth can-i create pods -n bookstore --as=system:serviceaccount:bookstore:postgres-sa
 ```
@@ -859,7 +1006,7 @@ Checklist:
 - [ ] Decision made deliberately: **managed** ▸ **operator** ▸ DIY (last resort)
 - [ ] Backups are **logical + PITR**, off-cluster, and **restore-tested**
 - [ ] Snapshot understood as crash-consistent point copy, **not** PITR/backup
-- [ ] Snapshot and clone rights held by one job identity, not by people or workloads
+- [ ] Snapshot rights held by one job identity; PVC create held by the restore runbook identity, not by workloads
 - [ ] After every restore: role password rotated inside the database, old one refused
 - [ ] Restore/clone path rehearsed and runbooked ([Part 08 ch.02](../08-day-2-operations/02-backup-and-dr.md))
 - [ ] Stateful replicas spread across failure domains; quorum sized (odd)
@@ -901,7 +1048,7 @@ Checklist:
 5. **Hands-on extension: with the Bookstore Postgres running on kind's `local-path` provisioner, apply `18-postgres-snapshot.yaml`, then apply the restore claim. What happens and what does the failure teach about CSI capabilities?**
    <details><summary>What you should see</summary>
 
-   The snapshot apply fails with "no matches for kind VolumeSnapshotClass" because the snapshot CRDs are not installed. The restore claim is accepted, and it stays `Pending` with no error. This teaches two things: snapshot, clone and expand are *CSI driver features*, not Kubernetes features, and a claim that never binds fails silently unless you check for `Pending` (see §3 of the hands-on).
+   The snapshot apply fails with "no matches for kind VolumeSnapshotClass" because the snapshot CRDs are not installed. The restore claim is accepted and stays `Pending`, and the apply reports no error. The same claim without `dataSource` also stays `Pending` until a Pod uses it, because kind's `standard` class waits for a consumer. So `Pending` does not show that the snapshot was refused. This teaches that snapshot, clone and expand are *CSI driver features*, not Kubernetes features, and that a restore is checked by a Pod that mounts the claim and by rows that read back (see §3 and §4 of the hands-on).
 
    </details>
 
@@ -915,7 +1062,7 @@ Checklist:
 7. **Security: after a restore, the Secret holds the new password and the database still accepts the old one. A colleague says the Secret rotation worked because the Secret changed. What does the database do, and why does the Secret change not reach it?**
    <details><summary>Show answer</summary>
 
-   The official image reads `POSTGRES_PASSWORD` only when it initialises an empty data directory. A restored volume is not empty, so the Secret value is never applied, and the database keeps the password its snapshot held ([docker-library postgres](https://github.com/docker-library/docs/blob/master/postgres/README.md)). The Secret change reached the file and the environment, but not the database. The fix is `ALTER ROLE` inside the database, then a check that the old password is refused, then a rollout of the apps that read the Secret (see §5 of the hands-on).
+   The official image reads `POSTGRES_PASSWORD` only when it initialises an empty data directory. Once the data directory exists, a Secret change is never applied, so the database keeps the password it was initialised with ([docker-library postgres](https://github.com/docker-library/docs/blob/master/postgres/README.md)). The Secret change reached the file, but not the database. A restored snapshot works the same way and keeps the password the snapshot carried. The hands-on shows the rule on a fresh volume, because kind cannot restore a snapshot. The fix is `ALTER ROLE` inside the database, then a check that the old password is refused, then a rollout of the apps that read the Secret (see §5 of the hands-on).
 
    </details>
 

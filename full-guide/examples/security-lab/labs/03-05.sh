@@ -11,6 +11,9 @@
 # The snapshot CRDs are not installed on this cluster. The VolumeSnapshot
 # steps record the refusal and create nothing. The restore Pod runs on a PVC
 # made without dataSource, so the Pod spec is the chapter's and the PVC is not.
+# The restore Pod reads a scratch Secret, db-credentials-restore, made from the
+# same manifest with only its name changed. The shared db-credentials Secret,
+# which postgres-0 and the apps read, is never patched.
 # Generated secret values are never printed.
 set +e
 
@@ -51,11 +54,13 @@ show "kubectl label namespace $NS pod-security.kubernetes.io/enforce=restricted 
   pod-security.kubernetes.io/warn=restricted
 echo
 
-echo "## step 2: the ServiceAccounts and the database Secret"
+echo "## step 2: the ServiceAccounts and the database Secrets"
 show "sed 's/namespace: bookstore/namespace: $NS/' $MANI/05-serviceaccounts-rbac.yaml | kubectl apply -f -"
 sed "s/namespace: bookstore/namespace: $NS/" "$MANI/05-serviceaccounts-rbac.yaml" | "$K" apply -f - 2>&1
 show "sed 's/namespace: bookstore/namespace: $NS/' $MANI/16-db-credentials.yaml | kubectl apply -f -"
 sed "s/namespace: bookstore/namespace: $NS/" "$MANI/16-db-credentials.yaml" | "$K" apply -f - 2>&1
+show "sed -e 's/name: db-credentials\$/name: db-credentials-restore/' -e 's/namespace: bookstore/namespace: $NS/' $MANI/16-db-credentials.yaml | kubectl apply -f -"
+sed -e 's/name: db-credentials$/name: db-credentials-restore/' -e "s/namespace: bookstore/namespace: $NS/" "$MANI/16-db-credentials.yaml" | "$K" apply -f - 2>&1
 echo
 
 echo "## step 3: the Postgres StatefulSet under restricted"
@@ -126,8 +131,9 @@ show "kubectl get --raw /apis/snapshot.storage.k8s.io/v1/namespaces/$NS/volumesn
 echo
 
 echo "## step 6: the VolumeSnapshotClass and VolumeSnapshot, on a cluster without the CRDs"
-show "sed 's/namespace: bookstore/namespace: $NS/' $MANI/18-postgres-snapshot.yaml | kubectl apply -f -"
-sed "s/namespace: bookstore/namespace: $NS/" "$MANI/18-postgres-snapshot.yaml" | "$K" apply -f - 2>&1
+show "kubectl apply -f - < examples/bookstore/raw-manifests/18-postgres-snapshot.yaml   # namespace set to $NS"
+sed "s/namespace: bookstore/namespace: $NS/" "$MANI/18-postgres-snapshot.yaml" > "$DIR/18.yaml"
+"$K" apply -f - 2>&1 < "$DIR/18.yaml"
 show "kubectl get volumesnapshot -n $NS"
 "$K" get volumesnapshot -n "$NS" 2>&1
 echo
@@ -154,7 +160,7 @@ show "kubectl get pvc data-postgres-restore -n $NS"
 "$K" get pvc data-postgres-restore -n "$NS" 2>&1
 show "kubectl delete pvc data-postgres-restore -n $NS --ignore-not-found"
 "$K" delete pvc data-postgres-restore -n "$NS" --ignore-not-found 2>&1
-show "kubectl apply -f -   # the same PVC without dataSource, which this cluster can satisfy"
+show "kubectl apply -f -   # the same PVC without dataSource, a control for the Pending claim"
 "$K" apply -f - 2>&1 <<EOF
 apiVersion: v1
 kind: PersistentVolumeClaim
@@ -167,6 +173,10 @@ spec:
     requests:
       storage: 1Gi
 EOF
+show "kubectl get pvc data-postgres-restore -n $NS"
+"$K" get pvc data-postgres-restore -n "$NS" 2>&1
+show "kubectl describe pvc data-postgres-restore -n $NS | sed -n '/^Events:/,\$p'"
+"$K" describe pvc data-postgres-restore -n "$NS" 2>&1 | sed -n '/^Events:/,$p'
 echo
 
 echo "## step 8: the restore Pod, under restricted, with the password from a file"
@@ -239,7 +249,7 @@ spec:
         sizeLimit: 32Mi
     - name: db-password
       secret:
-        secretName: db-credentials
+        secretName: db-credentials-restore
         defaultMode: 0440
         items:
           - key: POSTGRES_PASSWORD
@@ -249,12 +259,14 @@ show "kubectl wait --for=condition=Ready pod/postgres-restore -n $NS --timeout=9
 "$K" wait --for=condition=Ready pod/postgres-restore -n "$NS" --timeout=900s 2>&1
 show "kubectl get pod postgres-restore -n $NS"
 "$K" get pod postgres-restore -n "$NS" 2>&1
+show "kubectl get pvc data-postgres-restore -n $NS"
+"$K" get pvc data-postgres-restore -n "$NS" 2>&1
 inner='id; ls -l /run/secrets/db/; touch /run/secrets/db/x; echo "exit=$?"'
 show "kubectl exec -n $NS postgres-restore -- sh -c '$inner'"
 "$K" exec -n "$NS" postgres-restore -- sh -c "$inner" 2>&1
 echo
 
-echo "## step 9: the restore keeps the old password; the Secret value is not applied"
+echo "## step 9: the database keeps the password it was initialised with; a Secret change is not applied"
 # The stock pg_hba.conf trusts loopback, so the password checks below connect to
 # the Pod's own address, which the scram-sha-256 rule governs. The address is
 # replaced when the command runs and redacted in what is printed.
@@ -266,10 +278,26 @@ show "kubectl exec -n $NS postgres-restore -- sh -c '$inner'"
 inner='PGPASSWORD="$(cat /run/secrets/db/password)" psql -h <pod-ip> -U bookstore -d bookstore -tAc "select 1"'
 show "kubectl exec -n $NS postgres-restore -- sh -c '$inner'"
 "$K" exec -n "$NS" postgres-restore -- sh -c "${inner//<pod-ip>/$POD_IP}" 2>&1 | redact
+# Ready only proves the socket answers. Wait here until the server accepts TCP.
+deadline=$((SECONDS + 300))
+until "$K" exec -n "$NS" postgres-restore -- sh -c "pg_isready -h $POD_IP -p 5432" >/dev/null 2>&1; do
+  if [ "$SECONDS" -ge "$deadline" ]; then break; fi
+  sleep 5
+done
+inner='pg_isready -h <pod-ip> -p 5432'
+show "kubectl exec -n $NS postgres-restore -- sh -c '$inner'"
+"$K" exec -n "$NS" postgres-restore -- sh -c "${inner//<pod-ip>/$POD_IP}" 2>&1 | redact
+inner='PGPASSWORD="$(cat /run/secrets/db/password)" psql -h <pod-ip> -U bookstore -d bookstore -tAc "select 1"'
+show "kubectl exec -n $NS postgres-restore -- sh -c '$inner'"
+"$K" exec -n "$NS" postgres-restore -- sh -c "${inner//<pod-ip>/$POD_IP}" 2>&1 | redact
+# The value is read into a shell variable and never printed. It is passed on
+# stdin, so it does not appear in the command line either.
+show "OLD_PW=\$(kubectl get secret db-credentials-restore -n $NS -o jsonpath='{.data.POSTGRES_PASSWORD}' | base64 -d)"
+OLD_PW=$("$K" get secret db-credentials-restore -n "$NS" -o jsonpath='{.data.POSTGRES_PASSWORD}' | base64 -d)
 NEW=$("$PY" -c 'import secrets; print(secrets.token_urlsafe(24))')
 printf '{"stringData":{"POSTGRES_PASSWORD":"%s"}}' "$NEW" > "$DIR/patch.json"
-show "kubectl patch secret db-credentials -n $NS --type merge --patch-file <generated patch file>"
-"$K" patch secret db-credentials -n "$NS" --type merge --patch-file "$DIR/patch.json" 2>&1
+show "kubectl patch secret db-credentials-restore -n $NS --type merge --patch-file <generated patch file>"
+"$K" patch secret db-credentials-restore -n "$NS" --type merge --patch-file "$DIR/patch.json" 2>&1
 deadline=$((SECONDS + 300))
 until [ "$("$K" exec -n "$NS" postgres-restore -- cat /run/secrets/db/password 2>/dev/null)" = "$NEW" ]; do
   if [ "$SECONDS" -ge "$deadline" ]; then break; fi
@@ -283,9 +311,9 @@ fi
 inner='PGPASSWORD="$(cat /run/secrets/db/password)" psql -h <pod-ip> -U bookstore -d bookstore -tAc "select 1"'
 show "kubectl exec -n $NS postgres-restore -- sh -c '$inner'"
 "$K" exec -n "$NS" postgres-restore -- sh -c "${inner//<pod-ip>/$POD_IP}" 2>&1 | redact
-inner='PGPASSWORD=devpassword psql -h <pod-ip> -U bookstore -d bookstore -tAc "select 1"'
-show "kubectl exec -n $NS postgres-restore -- sh -c '$inner'"
-"$K" exec -n "$NS" postgres-restore -- sh -c "${inner//<pod-ip>/$POD_IP}" 2>&1 | redact
+inner='PGPASSWORD="$(cat)" psql -h <pod-ip> -U bookstore -d bookstore -tAc "select 1"'
+show "printf '%s' \"\$OLD_PW\" | kubectl exec -i -n $NS postgres-restore -- sh -c '$inner'"
+printf '%s' "$OLD_PW" | "$K" exec -i -n "$NS" postgres-restore -- sh -c "${inner//<pod-ip>/$POD_IP}" 2>&1 | redact
 show "kubectl exec -i -n $NS postgres-restore -- sh -c 'psql -h /var/run/postgresql -U bookstore -d bookstore -v ON_ERROR_STOP=1' <<SQL"
 cat <<'SQLTEXT'
 \set pw `cat /run/secrets/db/password`
@@ -298,9 +326,9 @@ SQL
 inner='PGPASSWORD="$(cat /run/secrets/db/password)" psql -h <pod-ip> -U bookstore -d bookstore -tAc "select 1"'
 show "kubectl exec -n $NS postgres-restore -- sh -c '$inner'"
 "$K" exec -n "$NS" postgres-restore -- sh -c "${inner//<pod-ip>/$POD_IP}" 2>&1 | redact
-inner='PGPASSWORD=devpassword psql -h <pod-ip> -U bookstore -d bookstore -tAc "select 1"'
-show "kubectl exec -n $NS postgres-restore -- sh -c '$inner'"
-"$K" exec -n "$NS" postgres-restore -- sh -c "${inner//<pod-ip>/$POD_IP}" 2>&1 | redact
+inner='PGPASSWORD="$(cat)" psql -h <pod-ip> -U bookstore -d bookstore -tAc "select 1"'
+show "printf '%s' \"\$OLD_PW\" | kubectl exec -i -n $NS postgres-restore -- sh -c '$inner'"
+printf '%s' "$OLD_PW" | "$K" exec -i -n "$NS" postgres-restore -- sh -c "${inner//<pod-ip>/$POD_IP}" 2>&1 | redact
 echo
 
 echo "## step 10: clean up"
