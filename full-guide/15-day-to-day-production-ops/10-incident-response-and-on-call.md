@@ -10,7 +10,7 @@
 > postmortem next week" trap that leaves postmortems unwritten.
 
 **Estimated time:** ~45 min read · ~90 min hands-on
-**Prerequisites:** [Part 13 ch.12](../13-grand-capstone-bookstore-platform/12-day-2-runbook-on-call-dr-chaos.md) — Part 13 runbook/on-call/postmortem foundation · [Part 06 ch.01](../06-production-readiness/01-observability-metrics.md) — SLOs that drive paging thresholds · [Part 15 ch.09](./09-hotfix-workflow-and-breakglass.md) — hotfix lane the resolve phase often invokes
+**Prerequisites:** [Part 13 ch.12](../13-grand-capstone-bookstore-platform/12-day-2-runbook-on-call-dr-chaos.md): Part 13 runbook/on-call/postmortem foundation · [Part 06 ch.01](../06-production-readiness/01-observability-metrics.md): SLOs that drive paging thresholds · [Part 15 ch.09](./09-hotfix-workflow-and-breakglass.md): hotfix lane the resolve phase often invokes
 
 **You'll know after this:** • run the full lifecycle — detect → triage → resolve → learn — with the artefact that operationalizes each phase · • wire Alertmanager → PagerDuty for detect, severity matrix for triage, runbook + IC discipline for resolve, blameless postmortem for learn · • walk the `incident/` artefact tree end-to-end against a real Bookstore page · • avoid the three production traps (alerts without runbooks, services without owners, "we'll write the postmortem next week") · • measure incident maturity via on-call review weekly, MTTR per service, postmortem-completion-rate
 
@@ -1001,8 +1001,8 @@ Incident-response checklist (the lifecycle is healthy when all six are yes):
 4. **An alert fires at 03:14 with no `runbook_url` annotation. The on-call has 5 minutes to triage. What does the chapter say should happen — both to this incident and to the alert definition?**
    <details><summary>Show answer</summary>
 
-   For *this* incident: the on-call has to do the runbook walk from scratch — dashboard URL (also mandatory), then guess based on the alert name. This is the worst-case triage shape; expected time-to-mitigation is longer than with a runbook, and this chapter
-does not put a number on the difference. For the *alert definition*: the chapter's discipline is a CI lint that fails any PR adding a `PrometheusRule` without both `runbook_url` and `dashboard_url` annotations. The example repo does not ship that lint yet, so a team adds it. The post-incident action item ships the missing runbook before the next quarter. The general principle: an un-actionable page is a noise contribution to burnout — and most "noisy" alert systems are noisy because too many alerts lack the metadata to triage.
+   For *this* incident: the on-call has to do the runbook walk from scratch: dashboard URL (also mandatory), then guess based on the alert name. This is the worst-case triage shape; expected time-to-mitigation is longer than with a runbook, and this chapter
+does not put a number on the difference. For the *alert definition*: the chapter's discipline is a CI lint that fails any PR adding a `PrometheusRule` without both `runbook_url` and `dashboard_url` annotations. The example repo does not ship that lint yet, so a team adds it. The post-incident action item ships the missing runbook before the next quarter. The general principle: an un-actionable page is a noise contribution to burnout, and most "noisy" alert systems are noisy because too many alerts lack the metadata to triage.
 
    </details>
 

@@ -15,16 +15,16 @@ secrets-vault-eso.md`) first. The chapter walks this directory end-to-end.
 | File | What it is | Applied via |
 |------|------------|-------------|
 | `policies/bookstore-platform-app.hcl` | Tenant-scoped READ-ONLY policy (Vault HCL). The Composition templates `<TENANT>` per tenant. | `vault policy write` (admin token) |
-| `policies/bookstore-platform-admin.hcl` | Onboarding policy — create per-tenant policies, KV paths, auth roles. | `vault policy write` (admin token, bootstrap-only) |
+| `policies/bookstore-platform-admin.hcl` | Onboarding policy: create per-tenant policies, KV paths, auth roles. | `vault policy write` (admin token, bootstrap-only) |
 | `auth-k8s/role-bookstore-platform.yaml` | Conceptual YAML for the `kubernetes` auth method role binding. **NOT a kubectl object** — see file header. | `vault write auth/kubernetes/role/...` |
-| `secret-store.yaml` | ESO SecretStore for one tenant namespace — binds that namespace's ServiceAccount to its Vault role. **CRD-intrinsic dry-run.** | `kubectl apply` (after ESO installed) |
-| `external-secret-sample.yaml` | Per-tenant ExternalSecret — pulls catalog DB creds from a static KV path into a Secret. **CRD-intrinsic dry-run.** | `kubectl apply` (after ESO installed) |
-| `dynamic-db-creds.yaml` | VaultDynamicSecret generator and ExternalSecret — a new Postgres role on each refresh. **CRD-intrinsic dry-run.** | `kubectl apply` (after ESO installed) |
+| `secret-store.yaml` | ESO SecretStore for one tenant namespace: binds that namespace's ServiceAccount to its Vault role. **CRD-intrinsic dry-run.** | `kubectl apply` (after ESO installed) |
+| `external-secret-sample.yaml` | Per-tenant ExternalSecret: pulls catalog DB creds from a static KV path into a Secret. **CRD-intrinsic dry-run.** | `kubectl apply` (after ESO installed) |
+| `dynamic-db-creds.yaml` | VaultDynamicSecret generator and ExternalSecret: a new Postgres role on each refresh. **CRD-intrinsic dry-run.** | `kubectl apply` (after ESO installed) |
 | `rotation/postgres-rotate.sh` | Dynamic Postgres credential rotation via Vault DB engine. Bootstrap + force-rotate + revoke. | `./rotation/postgres-rotate.sh bootstrap` |
 
 ## Pre-requisites
 
-1. **Vault running** — HA on EKS, KMS-unsealed, audit-logged, internal-only
+1. **Vault running**: HA on EKS, KMS-unsealed, audit-logged, internal-only
    Service `vault-active.vault.svc`. The dev-mode Vault from Part 11 ch.05
    also works for local validation; only `secret-store.yaml`'s `server`
    URL changes.

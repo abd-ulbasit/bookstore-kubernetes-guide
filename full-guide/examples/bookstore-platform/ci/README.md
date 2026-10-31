@@ -152,7 +152,7 @@ Backward references (these chapters exist):
 - **Part 07 ch.04** (GitOps with Argo CD) — what the merged PR triggers.
 - **Part 05 ch.03** (supply chain: SBOM + cosign) — the conceptual basis
   for the signing flow here.
-- **Part 14 ch.07** (CI/CD and drift) — the *infrastructure* side
+- **Part 14 ch.07** (CI/CD and drift): the *infrastructure* side
   of the same pattern, in Terraform.
 - **Part 14 ch.12** (Kyverno verifyImages in cloud) — the cluster-side
   verification of the keyless signatures produced here.

@@ -12,7 +12,7 @@
 > canary-as-cohort, and the rollback-to-last-known-good runbook.
 
 **Estimated time:** ~30 min read · ~90 min hands-on
-**Prerequisites:** [Part 07 ch.05](../07-delivery/05-progressive-delivery.md) — Rollouts mechanics this chapter productionizes · [Part 06 ch.01](../06-production-readiness/01-observability-metrics.md) — SLOs that define the gate · [Part 15 ch.04](./04-multi-environment-promotion.md) — promotion path the canary lives on
+**Prerequisites:** [Part 07 ch.05](../07-delivery/05-progressive-delivery.md): Rollouts mechanics this chapter productionizes · [Part 06 ch.01](../06-production-readiness/01-observability-metrics.md): SLOs that define the gate · [Part 15 ch.04](./04-multi-environment-promotion.md): promotion path the canary lives on
 
 **You'll know after this:** • configure an Argo Rollouts canary gated by an `AnalysisTemplate` over real Prometheus SLO metrics (success-rate, p99 latency, saturation) · • implement auto-promote on green / auto-rollback on red without human intervention · • choose blue-green for stateful workloads where rolling traffic shift would split writes · • design manual pause/resume as a deliberate intervention surface, not a workaround · • debug the production footguns dev-cluster demos hide ("canary succeeded but long-tail user broke", canary-as-percentage vs canary-as-cohort)
 
@@ -773,7 +773,7 @@ The production-canary checklist:
 - [ ] Rollout's `analysis` step references an AnalysisTemplate that
       encodes the actual SLO (not a placeholder threshold).
 - [ ] AnalysisTemplate queries the canary's pods specifically via
-      `pod=~"{{args.service-name}}-{{args.canary-pod-hash}}-.*"` — never
+      `pod=~"{{args.service-name}}-{{args.canary-pod-hash}}-.*"`, never
       averaged with stable.
 - [ ] Three metrics: success-rate, p99 latency, saturation. Each with
       `failureLimit: 2` or more (single-spike noise should not abort).
@@ -819,7 +819,7 @@ The production-canary checklist:
 
    </details>
 
-4. **Hands-on extension — apply a Rollout whose AnalysisTemplate query has a typo, such as `success_rate` instead of the `sum(rate(...))` form. Deploy a new image.**
+4. **Hands-on extension: apply a Rollout whose AnalysisTemplate query has a typo, such as `success_rate` instead of the `sum(rate(...))` form. Deploy a new image.**
    <details><summary>What you should see</summary>
 
    The query returns no data. The `len(result) > 0` guard turns the empty result into a failed measurement, so after more than `failureLimit` failed measurements the run fails and the
@@ -855,13 +855,13 @@ The production-canary checklist:
   Releases** — the canary discipline as practiced at Google;
   cohort routing, blast-radius bounding, the "successful canary
   but feature still broke" pattern.
-- **Argo Rollouts — Notifications**
+- **Argo Rollouts: Notifications**
   <https://argoproj.github.io/argo-rollouts/features/notifications/>; the
   `on-rollout-aborted` and `on-rollout-completed` triggers and the services.
-- **Argo Rollouts — Istio traffic management**
+- **Argo Rollouts: Istio traffic management**
   <https://argoproj.github.io/argo-rollouts/features/traffic-management/istio/>;
   the VirtualService route and DestinationRule subsets a canary needs.
-- **CloudNativePG — Rolling updates** and **Replica clusters**
+- **CloudNativePG: Rolling updates** and **Replica clusters**
   <https://cloudnative-pg.io/docs/current/rolling_update> and
   <https://cloudnative-pg.io/docs/current/replica_cluster>.
 - Part 07 ch.05 — the Argo Rollouts foundations this deepens.

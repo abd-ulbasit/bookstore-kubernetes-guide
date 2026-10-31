@@ -49,7 +49,7 @@ work in production:
 
 Each case has a different rollback tool, a different blast radius, a
 different recovery time. The **single biggest cause** of extended
-outages is **picking the wrong tool** — reverting in Git when
+outages is **picking the wrong tool**: reverting in Git when
 the bad change was a Kustomize patch (no-op; ops keep failing);
 reverting a commit when the bad change was a SQL migration
 (now the binary is rolled back AND the data is corrupted because the
@@ -537,7 +537,7 @@ The **code** layer rolls back what's on the running Pods. Argo CD
 syncs the revert commit; the manifests and the image reference from
 that commit get applied; the Deployment / Rollout controller rolls Pods
 to the old image. **Argo Rollouts** `abort` is faster than a
-revert commit because the stable ReplicaSet is **already alive** — the
+revert commit because the stable ReplicaSet is **already alive**: the
 abort scales the canary RS to 0 and the stable to full count. **Helm
 rollback** re-applies the chart's rendered manifests from the
 previous release's stored Secret; the same Pod-roll semantics.
@@ -707,7 +707,7 @@ Drill them monthly.
 1. **The chapter calls the rollback layer choice (code / data / config) the on-call's "first 60 seconds." Why is picking the wrong layer often worse than not rolling back at all?**
    <details><summary>Show answer</summary>
 
-   Picking the wrong layer compounds the incident. Examples from the chapter: reverting in Git when the bad change was a Kustomize patch — the rollback is a no-op, ops keep failing, the on-call wastes 20 minutes trying variants of the wrong tool. Reverting a commit when the bad change was a forward-only SQL migration — the binary rolls back to vN, but the schema is at vN+1, the old binary can't read the new schema, the service is fully down. reverting in Git to undo a config change while the data-layer issue continues — the symptoms keep firing, the team's confidence drops, the next escalation is "we don't know what's wrong." The discipline: classify the symptom layer first, then execute the matched runbook; never spray multiple rollback tools at the symptom.
+   Picking the wrong layer compounds the incident. Examples from the chapter include reverting in Git when the bad change was a Kustomize patch: the rollback is a no-op, ops keep failing, the on-call wastes 20 minutes trying variants of the wrong tool. Reverting a commit when the bad change was a forward-only SQL migration: the binary rolls back to vN, but the schema is at vN+1, the old binary can't read the new schema, the service is fully down. Reverting in Git to undo a config change while the data-layer issue continues: the symptoms keep firing, the team's confidence drops, the next escalation is "we don't know what's wrong." The discipline: classify the symptom layer first, then execute the matched runbook; never spray multiple rollback tools at the symptom.
 
    </details>
 
@@ -721,7 +721,7 @@ Drill them monthly.
 3. **A canary catches a regression at 50%. The on-call has two options: abort immediately (capacity event as stable scales up) or hold and observe. What's the chapter's stance, and what's the prevention?**
    <details><summary>Show answer</summary>
 
-   Abort immediately is the safe move; hold-and-observe is "usually a postmortem with the action item 'we should have rolled back immediately.'" The capacity-event risk is real — if stable was scaled down to 50% to make room for the canary, scaling back up to 100% is a sudden burst. The chapter's prevention: keep stable RS at 100% during canary (`maxUnavailable: 0`), making the canary purely *additive*. The catalog Rollout in the example tree uses this pattern — the canary is extra capacity, not a replacement; aborting at 50% just scales the canary RS to zero without touching stable. The trade-off: spare capacity for the canary, in exchange for an abort that is instant and moves no traffic onto a scaling stable.
+   Abort immediately is the safe move; hold-and-observe is "usually a postmortem with the action item 'we should have rolled back immediately.'" The capacity-event risk is real. If stable was scaled down to 50% to make room for the canary, scaling back up to 100% is a sudden burst. The chapter's prevention: keep stable RS at 100% during canary (`maxUnavailable: 0`), making the canary purely *additive*. The catalog Rollout in the example tree uses this pattern: the canary is extra capacity, not a replacement; aborting at 50% just scales the canary RS to zero without touching stable. The trade-off: spare capacity for the canary, in exchange for an abort that is instant and moves no traffic onto a scaling stable.
 
    </details>
 
@@ -735,7 +735,7 @@ Drill them monthly.
 5. **Hands-on extension — apply a Helm chart that overrides a Deployment's `resources.limits.memory` to `64Mi` (intentionally too low). Roll it out, watch pods OOMKill, then practice the config-layer rollback runbook.**
    <details><summary>What you should see</summary>
 
-   Pods start, immediately get OOMKilled, restart, OOMKill, enter CrashLoopBackOff. The symptom: code is fine, data is fine, *config* changed — the wrong layer for a digest rollback, because the values lived in Git. The right tool: `git revert <BAD-SHA>` in the GitOps repo + Argo CD sync. RTO measured from "PR opens" to "pods stable" should be 2-10 minutes (the PR review is the bottleneck — drill it on a non-prod cluster to remove friction). The lesson: the symptom (CrashLoop) doesn't tell you the layer; the *change* that introduced it does. Always check what changed in the last 30 minutes before picking the rollback tool.
+   Pods start, immediately get OOMKilled, restart, OOMKill, enter CrashLoopBackOff. The symptom: code is fine, data is fine, *config* changed. That is the wrong layer for a digest rollback, because the values lived in Git. The right tool: `git revert <BAD-SHA>` in the GitOps repo + Argo CD sync. RTO measured from "PR opens" to "pods stable" should be 2-10 minutes (the PR review is the bottleneck; drill it on a non-prod cluster to remove friction). The lesson: the symptom (CrashLoop) doesn't tell you the layer; the *change* that introduced it does. Always check what changed in the last 30 minutes before picking the rollback tool.
 
    </details>
 
@@ -757,15 +757,15 @@ Drill them monthly.
 
 ## Further reading
 
-- **[Argo CD docs — auto-sync](https://argo-cd.readthedocs.io/en/stable/user-guide/auto_sync/)** —
+- **[Argo CD docs: auto-sync](https://argo-cd.readthedocs.io/en/stable/user-guide/auto_sync/)**:
   how auto-sync is switched off and on, which the rollback steps depend on.
-- **[`kubectl argo rollouts abort`](https://github.com/argoproj/argo-rollouts/blob/master/docs/generated/kubectl-argo-rollouts/kubectl-argo-rollouts_abort.md)** —
+- **[`kubectl argo rollouts abort`](https://github.com/argoproj/argo-rollouts/blob/master/docs/generated/kubectl-argo-rollouts/kubectl-argo-rollouts_abort.md)**:
   reverts the steps and keeps the new version in `spec.template`, so a Git
   revert must follow it.
 - **[Helm docs — `helm rollback`](https://helm.sh/docs/helm/helm_rollback/)** —
   the release ledger + rollback semantics + the CRDs-not-rolled-back
   footgun.
-- **[CloudNativePG — "Recovery"](https://cloudnative-pg.io/docs/current/recovery)** —
+- **[CloudNativePG: "Recovery"](https://cloudnative-pg.io/docs/current/recovery)**:
   recovery as a bootstrap method, the `recoveryTarget` options, and the
   deprecation of native Barman Cloud in 1.26.
 - **[Velero — "Restore"](https://velero.io/docs/main/restore-reference/)** —

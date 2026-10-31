@@ -78,7 +78,7 @@ drop is restored on the cleanup PR.**
   - **KEPT**: lint (gofmt; 30s), unit tests for the changed package
     only (2 min), Trivy scan (1 min) on the pull request, and build +
     cosign sign + push (3 min) after the merge, from the merge commit
-    (see How it works). The scan is the non-negotiable — a hotfix that ships
+    (see How it works). The scan is the non-negotiable: a hotfix that ships
     a CVE is a security event in addition to the original incident.
   - **DROPPED**: full integration test suite (15 min); E2E browser
     tests (10 min); performance regression tests (5 min); soak
@@ -278,7 +278,7 @@ platform's GitHub, Argo CD, Vault and AWS accounts, which the guide does
 not provision. Treat the commands as reference and the output as
 illustrative. The upstream references are in Further reading.
 
-### 0. Prerequisites — fast-path CI workflow, Vault AWS secrets engine, audit channel
+### 0. Prerequisites: fast-path CI workflow, Vault AWS secrets engine, audit channel
 
 ```sh
 # The fast-path workflow lives in the bookstore-platform repo:
@@ -817,7 +817,7 @@ post-breakglass cleanup checklist is in
    subsequent step is slower and consumes more discipline-debt to execute, so
    you only take it if the prior step doesn't apply. A team that jumps to
    "hotfix" without first asking "could a flag flip mitigate?" wastes the
-   60-second option in favor of a 5-minute one — every saved minute is
+   60-second option in favor of a 5-minute one: every saved minute is
    customer impact avoided. Diagnose is the last resort because you're
    explicitly admitting you don't yet know the fix; that's the longest path
    and the one with the most uncertainty.
@@ -830,7 +830,7 @@ post-breakglass cleanup checklist is in
    the recovery?**
    <details><summary>Show answer</summary>
 
-   The "hotfix that broke audit trail" scenario. The action sequence violated three disciplines simultaneously: (1) bypassed CI signing, so the image is unsigned; the signature check in [Part 15 ch.03](03-image-signing-and-provenance.md) should have rejected it (and didn't, meaning either the policy isn't enforcing in prod or admission was bypassed too); (2) bypassed GitOps, so the cluster state drifted from Git — Argo CD will fight the manual change at next sync; (3) bypassed the audit trail, so there's no record of who did what when. The chapter's discipline: use the hotfix lane (CI fast-path: lint, unit and Trivy scan on the PR, then build, cosign sign, push, the GitOps digest PR and Argo CD sync after the merge, 5-8 min) — it bypasses the SLOW gates while keeping the safety-critical ones. Recovery: open the cleanup PR within 24h that codifies the change in Git, run the drift-check to import or delete any orphan resources, rotate any secrets the engineer touched, write the postmortem explaining why the disciplined hotfix lane wasn't used.
+   The "hotfix that broke audit trail" scenario. The action sequence violated three disciplines simultaneously: (1) bypassed CI signing, so the image is unsigned; the signature check in [Part 15 ch.03](03-image-signing-and-provenance.md) should have rejected it (and didn't, meaning either the policy isn't enforcing in prod or admission was bypassed too); (2) bypassed GitOps, so the cluster state drifted from Git; Argo CD will fight the manual change at next sync; (3) bypassed the audit trail, so there's no record of who did what when. The chapter's discipline: use the hotfix lane (CI fast-path: lint, unit and Trivy scan on the PR, then build, cosign sign, push, the GitOps digest PR and Argo CD sync after the merge, 5-8 min). It bypasses the SLOW gates while keeping the safety-critical ones. Recovery: open the cleanup PR within 24h that codifies the change in Git, run the drift-check to import or delete any orphan resources, rotate any secrets the engineer touched, write the postmortem explaining why the disciplined hotfix lane wasn't used.
 
    </details>
 
@@ -856,7 +856,7 @@ post-breakglass cleanup checklist is in
    <details><summary>Show answer</summary>
 
    **Wrong response**: tighten the hotfix process to make it harder to use
-   (more gates, more approvals). This is treating the symptom — engineers will
+   (more gates, more approvals). This is treating the symptom: engineers will
    route around the friction. **Right response**: treat the rate as a signal
    that the normal CI pipeline has a problem. The fix is unsexy: parallelize
    tests, cache dependencies (Go modules + Docker buildx GHA cache), remove
@@ -868,7 +868,7 @@ post-breakglass cleanup checklist is in
 
    </details>
 
-5. **Hands-on extension — execute the hotfix lane runbook against a synthetic
+5. **Hands-on extension: execute the hotfix lane runbook against a synthetic
    P0 in a test cluster (a deliberately broken catalog deploy). Time it
    end-to-end and capture every artifact required for the postmortem.**
    <details><summary>What you should see</summary>
