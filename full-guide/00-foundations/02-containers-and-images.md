@@ -235,11 +235,11 @@ This is the **actual** file at
 (read it yourself — it is intentionally short):
 
 ```dockerfile
-# syntax=docker/dockerfile:1
+# syntax=docker/dockerfile:1@sha256:4edf897a3ffa55b89f906fc8cc78afdb3f1834cc9c7083565e611a8a7d5fe99e
 # Multi-stage build -> single static binary on distroless (nonroot).
 # Built and referenced by chapters as: bookstore/catalog:dev
 
-FROM golang:1.26.10-alpine AS build
+FROM golang:1.26.10-alpine@sha256:a2012b4a1d1f9f7e9f44e0d39b805a901e856b1dd80b4e6ee4338db547050308 AS build
 WORKDIR /src
 
 # Cache module downloads separately from source for faster rebuilds.
@@ -261,17 +261,17 @@ ENTRYPOINT ["/catalog"]
 
 What each line does and *why it is written this way*:
 
-- **`# syntax=docker/dockerfile:1`** — selects the current BuildKit Dockerfile
+- **`# syntax=docker/dockerfile:1@sha256:…`**: selects the BuildKit Dockerfile
   frontend (stable v1 line), enabling modern build features regardless of the
-  local Docker version.
-- **`FROM golang:1.26.10-alpine AS build`** — stage 1, named `build`. A full Go
-  toolchain (on small Alpine) used *only to compile*. Nothing in this stage
-  ships. The tag names an exact patch release, not `1.26`: the Go standard
-  library is compiled *into* the binary, so the toolchain patch decides
-  which stdlib CVEs ship. It is the same version CI's `govulncheck` scans
-  with, and CI fails if the two drift apart. The build stage carries only its
-  tag: CI's check matches this exact line, so a digest there needs that check
-  changed first. That gap is open; the shipped base below is pinned.
+  local Docker version. The digest pins that frontend image, so the parser that
+  reads this file is the same bytes on every build.
+- **`FROM golang:1.26.10-alpine@sha256:… AS build`**: stage 1, named `build`. A
+  full Go toolchain (on small Alpine) used *only to compile*. Nothing in this
+  stage ships. The tag names an exact patch release, not `1.26`: the Go standard
+  library is compiled *into* the binary, so the toolchain patch decides which
+  stdlib CVEs ship. The digest pins the same bytes as the tag, so a re-pushed
+  tag cannot change the toolchain. CI's `go-toolchain-matches-scan` job checks
+  that the tag matches the version `govulncheck` scans with.
 - **`WORKDIR /src`** — sets/creates the working directory for subsequent
   commands in this stage.
 - **`COPY go.mod go.sum* ./` then `RUN go mod download`** — copy *only* the
@@ -322,8 +322,8 @@ for Kubernetes.
 > (see your engine's docs for the socket path).
 
 The steps below run in the order the chapter's evidence transcript records
-them. The transcript was captured on a remote engine: where you see
-`ssh thinkpad`, your run uses the local engine directly.
+them. Run each command against your own engine. The transcript was captured on
+a remote engine host, which is why its timestamps and host names differ.
 
 ### Lint the Dockerfile first
 
@@ -393,7 +393,9 @@ Entrypoint=[/catalog] User=65532:65532 Exposed=map[8080/tcp:{}]
 ### Check the image before it ships
 
 The history and the scan each run on the built image. Each check gets a
-control, so a clean result means the tool read its input.
+control: the same command runs on a throwaway image with a planted secret. A
+clean result on the catalog then means the tool read its input and found
+nothing.
 
 **Read the layers for secrets.** A secret passed as a build argument, or copied
 into a layer and deleted later, stays in the image history. Read the history,
@@ -422,6 +424,37 @@ bazel build @trixie//base-files/amd64:data_statusd
 
 The history shows the catalog's own steps at the top, then the base layers.
 Nothing in the build instructions matches a secret word.
+
+A zero means something only if the same grep finds a planted secret. Build a
+control image on your engine: a throwaway with a build argument named
+`API_TOKEN`, and a private key generated at build time, so no key is written
+into the repository. The image is never shipped:
+
+```sh
+openssl genpkey -algorithm RSA -pkeyopt rsa_keygen_bits:2048 -out key.pem
+cat > Dockerfile <<'EOF'
+# busybox:1.36, pinned by digest
+FROM busybox@sha256:73aaf090f3d85aa34ee199857f03fa3a95c8ede2ffd4cc2cdb5b94e566b11662
+ARG API_TOKEN=control-value
+COPY key.pem /etc/control/key.pem
+EOF
+docker build -q -t control/secret:dev .
+docker history --no-trunc --format '{{.CreatedBy}}' control/secret:dev | grep -i -E 'secret|token|password|api.?key'
+docker history --no-trunc --format '{{.CreatedBy}}' control/secret:dev | grep -c -i -E 'secret|token|password|api.?key'
+```
+
+<!-- gate: output -->
+```text
+ARG API_TOKEN=control-value
+```
+
+<!-- gate: output -->
+```text
+1
+```
+
+The grep finds the build argument in the control, so the catalog's 0 means the
+history holds no secret-looking step.
 
 **Scan the image** with Trivy 0.76.1, the version this guide's CI pins. Save the
 image to a tar file first, so Trivy reads the same bytes whether the engine is
@@ -470,9 +503,42 @@ checks reachability. The fix is to raise that module in `go.mod` and rebuild.
 This chapter leaves the example at its current version, so the scan here matches
 what the guide ships.
 
-Trivy's secret scanner reads file contents, and the scan above printed no secret
-section. In a Trivy report, a `-` under Secrets means not scanned, so read the
-detail sections for findings.
+The scan's log lines, which the block elides, include `[secret] Secret scanning
+is enabled`, so the scanner was on. The Secrets column reads `-` with no secret
+section below it. Trivy's legend calls `-` "not
+scanned", which does not settle what happened, so check the scanner against a
+control. Scan the control image, which holds a planted key, with the same
+scanner:
+
+```sh
+docker save control/secret:dev > control-secret.tar
+trivy image --input control-secret.tar --scanners secret --report summary | sed '/^\/etc\/control\/key.pem (secrets)/,$d'
+```
+
+The `sed` cuts the output at the detail section for the control's key, which
+repeats the key's first lines (masked) under a header. The summary is enough
+for this check.
+
+<!-- gate: output -->
+```text
+# ...
+Report Summary
+
+┌──────────────────────┬──────┬─────────┐
+│        Target        │ Type │ Secrets │
+├──────────────────────┼──────┼─────────┤
+│ /etc/control/key.pem │ text │    1    │
+└──────────────────────┴──────┴─────────┘
+Legend:
+- '-': Not scanned
+- '0': Clean (no security findings detected)
+```
+
+The control's layer holds a private key. Trivy's detail section, which the
+`sed` cuts, reports it as an `AsymmetricPrivateKey` at HIGH severity. The
+scanner read that file from the layer and counted it in the Secrets column. The
+catalog's `-` therefore means the scanner produced no secret result for its
+image, and the scan's detail sections list no secret.
 
 ### Run it with the hardening flags
 
@@ -494,8 +560,9 @@ docker run --rm --name catalog -p 8080:8080 -e PORT=8080 --read-only --cap-drop=
   through a setuid binary or file capabilities. The baseline's
   `allowPrivilegeEscalation: false` sets the same flag.
 
-Call the endpoints Kubernetes uses as probes from a second terminal. The
-captured run reached the same port through an ssh session to the engine host.
+Call the endpoints Kubernetes uses as probes from a second terminal on the
+machine where the container runs. The port is published there, so `localhost`
+reaches it.
 
 ```sh
 curl -s localhost:8080/healthz
@@ -548,12 +615,20 @@ applied as written.
 Stop the container from the second terminal with `docker stop catalog`. That
 sends SIGTERM, then SIGKILL if the process has not exited within the grace
 period. Ctrl-C in the foreground terminal sends SIGINT instead. The entrypoint
-is exec form, so the Go binary is PID 1 and receives the signal itself. The
-handler logs the shutdown:
+is exec form, so the Go binary is PID 1 and receives the signal itself:
 
 ```sh
 docker stop catalog
 ```
+
+<!-- gate: output -->
+```text
+catalog
+```
+
+The stop command prints only the container name. The handler's log lines appear
+in the foreground terminal where the container ran. The captured run saved that
+terminal's output to `catalog-run.log`, and it reads:
 
 <!-- gate: output -->
 ```text
@@ -565,7 +640,9 @@ docker stop catalog
 
 ### Deliberate failures
 
-The next two runs fail on purpose. Each one shows a control working.
+Two of the runs below fail on purpose, and each shows a control working. The
+busybox run without flags is a contrast, not a failure: it succeeds, and it
+shows what the flags change.
 
 **No shell.** Override the entrypoint with a shell. The image has none, so the
 container never starts. This is the no-shell property from the threats table:
@@ -596,8 +673,9 @@ CapEff: 00000000a80425fb
 NoNewPrivs: 0
 ```
 
-Without the flags the write succeeds, the capability set is full, and
-`no-new-privileges` is off. Now the same command with the three flags:
+That contrast run, with no flags, shows the write succeeding, the capability set
+full, and `no-new-privileges` off. Now the same command with the three flags.
+This run fails on purpose:
 
 ```sh
 # busybox:1.36, pinned by digest
@@ -611,7 +689,9 @@ CapEff: 0000000000000000
 NoNewPrivs: 1
 ```
 
-The write is denied, the capability set is empty, and `NoNewPrivs` is 1.
+The write is denied, the capability set is empty, and `NoNewPrivs` is 1. The
+three flags changed the three things the contrast run showed: the writable root,
+the capability set and `NoNewPrivs`.
 
 ## Production notes
 
@@ -652,8 +732,8 @@ docker inspect --format '{{index .RepoDigests 0}}' name:tag   # -> name@sha256:<
 Minimal production-shaped Dockerfile skeleton (multi-stage, non-root, static):
 
 ```dockerfile
-# syntax=docker/dockerfile:1
-FROM <TOOLCHAIN-IMAGE> AS build
+# syntax=docker/dockerfile:1@sha256:<DIGEST>
+FROM golang:<GO_VERSION>-alpine@sha256:<DIGEST> AS build
 WORKDIR /src
 COPY <DEPS-MANIFEST> ./          # copy dep manifests first → cache deps
 RUN <FETCH-DEPS>
@@ -687,14 +767,14 @@ Image checklist before it goes near a cluster:
 1. **Why are containers said to have a *weaker* isolation boundary than VMs, and what concrete Kubernetes defaults exist to compensate?**
    <details><summary>Show answer</summary>
 
-   Containers on a node share one host kernel — a kernel CVE is a cross-container escape vector, whereas each VM has its own kernel. To compensate, Kubernetes pushes non-root users, dropped capabilities, read-only rootfs, seccomp, and (for very sensitive workloads) sandboxed runtimes like gVisor/Kata via RuntimeClass (see §Containers vs. VMs and §Production notes).
+   Containers on a node share one host kernel: a kernel CVE is a cross-container escape vector, whereas each VM has its own kernel. To compensate, Kubernetes pushes non-root users, dropped capabilities, read-only rootfs, seccomp, and (for very sensitive workloads) sandboxed runtimes like gVisor/Kata via RuntimeClass (see §Containers vs. VMs).
 
    </details>
 
 2. **A teammate's Pod uses `image: bookstore/catalog:latest` and deploys two replicas. They report that one replica behaves differently from the other. What's the likely cause, and what's the fix?**
    <details><summary>Show answer</summary>
 
-   `:latest` is a *mutable* tag — the two nodes pulled the image at different times and got different bytes under the same name. Default `imagePullPolicy` for `:latest` is `Always`, so each pull may see the registry at a different revision. Fix: pin by digest (`image@sha256:…`) or an immutable, never-reused tag so a name maps to exactly one set of bytes (see §Tags vs. digests and §Production notes).
+   `:latest` is a *mutable* tag: the two nodes pulled the image at different times and got different bytes under the same name. Default `imagePullPolicy` for `:latest` is `Always`, so each pull may see the registry at a different revision. Fix: pin by digest (`image@sha256:…`) or an immutable, never-reused tag so a name maps to exactly one set of bytes (see §Tags vs. digests).
 
    </details>
 

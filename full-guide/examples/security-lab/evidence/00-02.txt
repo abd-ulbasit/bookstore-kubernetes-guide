@@ -4,6 +4,7 @@
 # curls localhost on the engine host with ssh, which is the same port.
 # The image build ran on the engine host from a copy of the catalog
 # directory, because the streamed build client stalled on a shared engine.
+# Timestamps are UTC. The Trivy control in Step 3 scans a throwaway image.
 
 $ docker version --format '{{.Server.Version}} {{.Server.Os}}/{{.Server.Arch}}'
 29.8.2 linux/amd64
@@ -14,11 +15,11 @@ Version: 0.76.1
 exit=0
 # Step 1. Lint the Dockerfile, then prove the linter reads its input.
 
-$ ssh thinkpad 'docker run --rm -i ghcr.io/hadolint/hadolint@sha256:32dac94127fd60b7b7e3fbfc65e1383b9b5e25c9bfd7b8536de7a539fe68a12d' < catalog/Dockerfile
+$ ssh engine 'docker run --rm -i ghcr.io/hadolint/hadolint@sha256:32dac94127fd60b7b7e3fbfc65e1383b9b5e25c9bfd7b8536de7a539fe68a12d' < catalog/Dockerfile
 exit=0
 # Step 1, control. A Dockerfile with known problems must print warnings.
 
-$ printf 'FROM alpine:latest\nRUN apk add curl\nUSER root\n' | ssh thinkpad 'docker run --rm -i ghcr.io/hadolint/hadolint@sha256:32dac94127fd60b7b7e3fbfc65e1383b9b5e25c9bfd7b8536de7a539fe68a12d /bin/hadolint --no-color -'
+$ printf 'FROM alpine:latest\nRUN apk add curl\nUSER root\n' | ssh engine 'docker run --rm -i ghcr.io/hadolint/hadolint@sha256:32dac94127fd60b7b7e3fbfc65e1383b9b5e25c9bfd7b8536de7a539fe68a12d /bin/hadolint --no-color -'
 -:1 DL3007 warning: Using latest is prone to errors if the image will ever update. Pin the version explicitly to a release tag
 -:2 DL3019 info: Use the `--no-cache` switch to avoid the need to use `--update` and remove `/var/cache/apk/*` when done installing packages
 -:2 DL3018 warning: Pin versions in apk add. Instead of `apk add <package>` use `apk add <package>=<version>`
@@ -27,7 +28,7 @@ $ printf 'FROM alpine:latest\nRUN apk add curl\nUSER root\n' | ssh thinkpad 'doc
 exit=1
 # Step 2. Build the catalog image.
 
-$ ssh thinkpad 'cd /tmp/catalog-build-0002 && docker build -t bookstore/catalog:dev .'
+$ ssh engine 'cd /tmp/catalog-build && docker build -t bookstore/catalog:dev .'
 #0 building with "default" instance using docker driver
 
 #1 [internal] load build definition from Dockerfile
@@ -147,7 +148,7 @@ $ docker history --no-trunc --format '{{.CreatedBy}}' bookstore/catalog:dev | gr
 0
 exit=1
 
-$ ssh thinkpad 'docker save bookstore/catalog:dev' > catalog-dev.tar
+$ ssh engine 'docker save bookstore/catalog:dev' > catalog-dev.tar
 exit=0
 
 $ ls -l catalog-dev.tar | awk '{print $5}'
@@ -155,15 +156,15 @@ $ ls -l catalog-dev.tar | awk '{print $5}'
 exit=0
 
 $ trivy image --input catalog-dev.tar
-2026-10-31T04:16:24+05:00	INFO	[vuln] Vulnerability scanning is enabled
-2026-10-31T04:16:24+05:00	INFO	[secret] Secret scanning is enabled
-2026-10-31T04:16:24+05:00	INFO	[secret] If your scanning is slow, please try '--scanners vuln' to disable secret scanning
-2026-10-31T04:16:24+05:00	INFO	[secret] Please see https://trivy.dev/docs/v0.76/guide/scanner/secret#recommendation for faster secret detection
-2026-10-31T04:16:24+05:00	INFO	Detected OS	family="debian" version="13.7"
-2026-10-31T04:16:24+05:00	INFO	[debian] Detecting vulnerabilities...	os_version="13" pkg_num=6
-2026-10-31T04:16:24+05:00	INFO	Number of language-specific files	num=1
-2026-10-31T04:16:24+05:00	INFO	[gobinary] Detecting vulnerabilities...
-2026-10-31T04:16:24+05:00	WARN	Using severities from other vendors for some vulnerabilities. Read https://trivy.dev/docs/v0.76/guide/scanner/vulnerability#severity-selection for details.
+2026-10-30T23:16:24Z	INFO	[vuln] Vulnerability scanning is enabled
+2026-10-30T23:16:24Z	INFO	[secret] Secret scanning is enabled
+2026-10-30T23:16:24Z	INFO	[secret] If your scanning is slow, please try '--scanners vuln' to disable secret scanning
+2026-10-30T23:16:24Z	INFO	[secret] Please see https://trivy.dev/docs/v0.76/guide/scanner/secret#recommendation for faster secret detection
+2026-10-30T23:16:24Z	INFO	Detected OS	family="debian" version="13.7"
+2026-10-30T23:16:24Z	INFO	[debian] Detecting vulnerabilities...	os_version="13" pkg_num=6
+2026-10-30T23:16:24Z	INFO	Number of language-specific files	num=1
+2026-10-30T23:16:24Z	INFO	[gobinary] Detecting vulnerabilities...
+2026-10-30T23:16:24Z	WARN	Using severities from other vendors for some vulnerabilities. Read https://trivy.dev/docs/v0.76/guide/scanner/vulnerability#severity-selection for details.
 
 Report Summary
 
@@ -193,10 +194,10 @@ Total: 1 (UNKNOWN: 1, LOW: 0, MEDIUM: 0, HIGH: 0, CRITICAL: 0)
 exit=0
 
 $ trivy image --input catalog-dev.tar --scanners secret --report summary
-2026-10-31T04:16:24+05:00	INFO	[secret] Secret scanning is enabled
-2026-10-31T04:16:24+05:00	INFO	[secret] Please see https://trivy.dev/docs/v0.76/guide/scanner/secret#recommendation for faster secret detection
-2026-10-31T04:16:24+05:00	INFO	Detected OS	family="debian" version="13.7"
-2026-10-31T04:16:24+05:00	INFO	Number of language-specific files	num=1
+2026-10-30T23:16:24Z	INFO	[secret] Secret scanning is enabled
+2026-10-30T23:16:24Z	INFO	[secret] Please see https://trivy.dev/docs/v0.76/guide/scanner/secret#recommendation for faster secret detection
+2026-10-30T23:16:24Z	INFO	Detected OS	family="debian" version="13.7"
+2026-10-30T23:16:24Z	INFO	Number of language-specific files	num=1
 
 Report Summary
 
@@ -212,18 +213,55 @@ Legend:
 - '0': Clean (no security findings detected)
 
 exit=0
+# Step 3, control. A planted secret must show up in both checks, or the clean
+# results above prove nothing. The engine builds a throwaway image: busybox, an
+# ARG named API_TOKEN, and a private key generated at build time (no key is
+# stored in the repository). The image is never shipped.
+
+$ openssl genpkey -algorithm RSA -pkeyopt rsa_keygen_bits:2048 -out key.pem
+exit=0
+$ docker build -q -t control/secret:dev .   (Dockerfile: busybox pinned by digest, ARG API_TOKEN=control-value, COPY key.pem)
+sha256:7d27f594ebb673ef69bc5bcb541f0c283f108c2adc131e8cd377daaee4aa802a
+exit=0
+
+$ docker history --no-trunc --format '{{.CreatedBy}}' control/secret:dev | grep -i -E 'secret|token|password|api.?key'
+ARG API_TOKEN=control-value
+exit=0
+$ docker history --no-trunc --format '{{.CreatedBy}}' control/secret:dev | grep -c -i -E 'secret|token|password|api.?key'
+1
+exit=0
+
+$ docker save control/secret:dev > control-secret.tar
+exit=0
+$ trivy image --input control-secret.tar --scanners secret --report summary | sed '/^\/etc\/control\/key.pem (secrets)/,$d'
+2026-10-31T00:23:29Z	INFO	[secret] Secret scanning is enabled
+2026-10-31T00:23:29Z	INFO	[secret] Please see https://trivy.dev/docs/v0.76/guide/scanner/secret#recommendation for faster secret detection
+2026-10-31T00:23:29Z	INFO	Number of language-specific files	num=0
+
+Report Summary
+
+┌──────────────────────┬──────┬─────────┐
+│        Target        │ Type │ Secrets │
+├──────────────────────┼──────┼─────────┤
+│ /etc/control/key.pem │ text │    1    │
+└──────────────────────┴──────┴─────────┘
+Legend:
+- '-': Not scanned
+- '0': Clean (no security findings detected)
+exit=0
+
 # Step 4. Run the image with the hardening flags, then stop it.
 $ docker run --rm --name catalog -p 8080:8080 -e PORT=8080 --read-only --cap-drop=ALL --security-opt=no-new-privileges bookstore/catalog:dev   (background; log saved)
 
-$ ssh thinkpad 'curl -s localhost:8080/healthz'
+$ ssh engine 'curl -s localhost:8080/healthz'
 {"status":"ok"}
 exit=0
 
-$ ssh thinkpad 'curl -s localhost:8080/readyz'
+$ ssh engine 'curl -s localhost:8080/readyz'
 {"status":"ready"}
 exit=0
 
-$ ssh thinkpad 'curl -s localhost:8080/books' | head -c 110; echo
+$ ssh engine 'curl -s localhost:8080/books' | head -c 110; echo
 [{"id":1,"title":"The Go Programming Language","author":"Donovan \u0026 Kernighan","price":39.99},{"id":2,"tit
 exit=0
 
@@ -267,7 +305,7 @@ NoNewPrivs: 1
 exit=0
 # Step 7. Clean up and check nothing is left running.
 
-$ ssh thinkpad 'rm -rf /tmp/catalog-build-0002'
+$ ssh engine 'rm -rf /tmp/catalog-build'
 exit=0
 
 $ docker ps -a --filter name=catalog --format '{{.Names}} {{.Status}}'

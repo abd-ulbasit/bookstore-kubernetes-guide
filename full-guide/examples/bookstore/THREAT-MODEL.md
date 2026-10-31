@@ -154,13 +154,12 @@ guide uses it as a map of goals, not as a checklist of techniques.
 - **Insecure on purpose.** None in this file. The guide's rule: insecure
   examples appear only in Part 05 labs and the capstone overlay, and never
   in the `bookstore` or `default` namespace. The gates enforce it.
-- **Exceptions.** None registered yet. A namespace above `restricted`, or a
-  suppressed scanner finding, needs an entry in the single exceptions
-  registry before it merges. The registry file is not in the repository
-  yet. Its first entry arrives with the first exception, in the same pull
-  request. Each entry records what is excepted, the reason with an upstream
-  citation, the chapter that explains it, and an expiry no more than 12
-  months out.
+- **Exceptions.** A namespace above `restricted`, or a suppressed scanner
+  finding, needs an entry in the registry before it merges. The registry is
+  `security/namespace-exceptions.yaml` for namespaces and `.trivyignore.yaml`
+  for scanner findings. Each entry records what is excepted, the reason with an
+  upstream citation, the chapter that explains it, and an expiry no more than 12
+  months out. `make gates-registry` fails an entry whose expiry has passed.
 - **Not an exception.** `.github/scripts/gates/not-evaluated.allow` lists
   manifests that no scanner could judge. It records gate blind spots. It
   does not grant policy exceptions.
@@ -169,4 +168,3 @@ guide uses it as a map of goals, not as a checklist of techniques.
 
 - D2: no edge rate limiting in the baseline.
 - RP1: audit records wait for 05.08.
-- The registry file and its gate are not built yet.
