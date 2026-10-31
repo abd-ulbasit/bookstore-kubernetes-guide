@@ -32,18 +32,26 @@
 
 set -euo pipefail
 
+# Credentials from Vault go to a private file (mode 0600 from mktemp) that
+# is deleted on exit. umask 077 keeps any other file this script makes
+# private too.
+umask 077
+CREDS_FILE="$(mktemp)"
+trap 'rm -f "${CREDS_FILE}"' EXIT
+
 TENANT="${TENANT:-acme-books}"
 ROLE_NAME="bookstore-platform-${TENANT}"
 DB_CONFIG_NAME="bookstore-platform-postgres-${TENANT}"
 PG_SVC="postgres.bookstore-platform-${TENANT}.svc.cluster.local"
-PG_DB="bookstore"
+PG_DB="bookstore_catalog"
 PG_ADMIN_USER="${PG_ADMIN_USER:-postgres}"
 
 # The admin password is read from the cluster's bootstrap Secret rather
 # than baked into the script. In production this Secret was itself
 # materialized from Vault — circular, but the bootstrap Secret is what
-# lets Vault talk to Postgres in the first place. Phase 15-R Terraform
-# stamps it directly into Vault's database engine config, not the cluster.
+# lets Vault talk to Postgres in the first place. After bootstrap, run
+# `vault write -f database/rotate-root/<config>` so that only Vault knows
+# the superuser password it uses.
 require_var() {
   if [ -z "${!1:-}" ]; then
     echo "ERROR: \$$1 is required" >&2
@@ -86,29 +94,25 @@ rotate() {
   echo "[1/2] Reading a fresh dynamic credential from Vault..."
   # The vault read MAKES Vault CREATE a new Postgres role. The output
   # carries: username, password, lease_id, lease_duration.
-  vault read -format=json "database/creds/${ROLE_NAME}" > /tmp/vault-creds.json
+  vault read -format=json "database/creds/${ROLE_NAME}" > "${CREDS_FILE}"
   local lease_id
-  lease_id=$(jq -r .lease_id < /tmp/vault-creds.json)
+  lease_id=$(jq -r .lease_id < "${CREDS_FILE}")
   local username
-  username=$(jq -r .data.username < /tmp/vault-creds.json)
+  username=$(jq -r .data.username < "${CREDS_FILE}")
 
   echo "  Minted Postgres role: ${username}"
   echo "  Lease ID:             ${lease_id}"
-  echo "  Lease duration:       $(jq -r .lease_duration < /tmp/vault-creds.json)s"
+  echo "  Lease duration:       $(jq -r .lease_duration < "${CREDS_FILE}")s"
 
   echo "[2/2] Validating the new credential against ${PG_SVC}..."
-  # PGPASSWORD via env so it does not appear in `ps`. We pipe the password
-  # straight from the JSON; nothing about it is persisted on disk beyond
-  # the temp file (which is rm'd below).
-  PGPASSWORD="$(jq -r .data.password < /tmp/vault-creds.json)" \
+  # PGPASSWORD via env so it does not appear in `ps`. The password is read
+  # from the private credentials file, which the EXIT trap removes.
+  PGPASSWORD="$(jq -r .data.password < "${CREDS_FILE}")" \
     psql --host="${PG_SVC}" --port=5432 --username="${username}" \
          --dbname="${PG_DB}" -c "SELECT 1 AS rotation_check" > /dev/null
   echo "  OK — new role authenticated and queried Postgres."
 
-  # NEVER leave the creds on disk past validation. Even on temp filesystems,
-  # the Part 03 ch.02 "secrets are projections" rule applies.
-  shred --remove /tmp/vault-creds.json 2>/dev/null || rm -f /tmp/vault-creds.json
-
+  # The EXIT trap deletes the credentials file when the script exits.
   echo "Rotation complete. The credential lives in Vault under lease"
   echo "${lease_id}; it will be auto-revoked after default_ttl."
 }

@@ -53,8 +53,8 @@ spec:
     - bookstore-platform-app-acme-books
 
   # ── Token lifetime ─────────────────────────────────────────────────────
-  # Short TTL: 15 minutes. ESO renews opportunistically; an exfiltrated
-  # token is dead in 15m. max_ttl caps the absolute lifetime; the
+  # Short TTL: 15 minutes, renewable up to max_ttl. An exfiltrated token
+  # expires in 15m unless someone renews it. max_ttl caps the absolute lifetime; the
   # kubernetes auth method does NOT support renewals past max_ttl —
   # after that, ESO MUST re-authenticate via SA token review, which
   # re-validates the SA still exists with the bound name+ns.
@@ -71,10 +71,9 @@ spec:
   # If the K8s cluster's projected ServiceAccount tokens are issued with
   # audience=https://vault.bookstore-platform.example.com, then a stolen
   # token cannot be presented to any other API (e.g. the OIDC IdP) — the
-  # token review checks the audience claim. The audience is set on the
-  # `projected` volume in the ESO ServiceAccount; see the ESO
-  # ClusterSecretStore in `cluster-secret-store.yaml`. The Crossplane
-  # Composition wires the SA's projected volume to use this audience.
+  # token review checks the audience claim. ESO asks for its token with
+  # this audience (serviceAccountRef.audiences in secret-store.yaml), and
+  # Vault refuses a login whose audience differs.
   audience: https://vault.bookstore-platform.example.com
 
   # ── Aliasing for audit ─────────────────────────────────────────────────

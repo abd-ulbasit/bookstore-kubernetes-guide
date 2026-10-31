@@ -1,11 +1,13 @@
 # `vault/` — Production secrets: Vault + ESO + rotation
 
 This tree is the **production replacement** for Part 11 ch.05's dev-mode
-Vault. It assumes the Phase 15-R Terraform tree has installed a real Vault
-on EKS (HA mode, KMS auto-unseal, audit device, internal-only Service) and
-shows the Kubernetes-side wiring: the per-tenant Vault policies, the
-Kubernetes auth method role binding, the ESO ClusterSecretStore, a sample
-tenant ExternalSecret, and a dynamic-Postgres rotation pattern.
+Vault. It assumes a real Vault is running on EKS (HA mode, KMS auto-unseal,
+audit device, internal-only Service). The Terraform in
+`../terraform/vault.tf` describes that setup; it is reference only and was
+not run for this chapter. The tree shows the Kubernetes-side wiring: the
+per-tenant Vault policies, the Kubernetes auth method role binding, a
+per-tenant SecretStore, a sample ExternalSecret, the dynamic database
+credentials, and the rotation script.
 
 Read Part 15 ch.05 (`../../../15-day-to-day-production-ops/05-production-
 secrets-vault-eso.md`) first. The chapter walks this directory end-to-end.
@@ -13,21 +15,22 @@ secrets-vault-eso.md`) first. The chapter walks this directory end-to-end.
 | File | What it is | Applied via |
 |------|------------|-------------|
 | `policies/bookstore-platform-app.hcl` | Tenant-scoped READ-ONLY policy (Vault HCL). The Composition templates `<TENANT>` per tenant. | `vault policy write` (admin token) |
-| `policies/bookstore-platform-admin.hcl` | Onboarding policy — create per-tenant policies, KV paths, auth roles. | `vault policy write` (root, bootstrap-only) |
+| `policies/bookstore-platform-admin.hcl` | Onboarding policy — create per-tenant policies, KV paths, auth roles. | `vault policy write` (admin token, bootstrap-only) |
 | `auth-k8s/role-bookstore-platform.yaml` | Conceptual YAML for the `kubernetes` auth method role binding. **NOT a kubectl object** — see file header. | `vault write auth/kubernetes/role/...` |
-| `cluster-secret-store.yaml` | ESO ClusterSecretStore — cluster-wide binding to Vault. **CRD-intrinsic dry-run.** | `kubectl apply` (after ESO installed) |
-| `external-secret-sample.yaml` | Per-tenant ExternalSecret — pulls catalog DB creds from Vault into a Secret. **CRD-intrinsic dry-run.** | `kubectl apply` (after ESO installed) |
+| `secret-store.yaml` | ESO SecretStore for one tenant namespace — binds that namespace's ServiceAccount to its Vault role. **CRD-intrinsic dry-run.** | `kubectl apply` (after ESO installed) |
+| `external-secret-sample.yaml` | Per-tenant ExternalSecret — pulls catalog DB creds from a static KV path into a Secret. **CRD-intrinsic dry-run.** | `kubectl apply` (after ESO installed) |
+| `dynamic-db-creds.yaml` | VaultDynamicSecret generator and ExternalSecret — a new Postgres role on each refresh. **CRD-intrinsic dry-run.** | `kubectl apply` (after ESO installed) |
 | `rotation/postgres-rotate.sh` | Dynamic Postgres credential rotation via Vault DB engine. Bootstrap + force-rotate + revoke. | `./rotation/postgres-rotate.sh bootstrap` |
 
 ## Pre-requisites
 
-1. **Phase 15-R Terraform tree applied** — Vault HA on EKS, KMS-unsealed,
-   audit-logged, internal-only Service `vault-active.vault.svc`. The dev-
-   mode Vault from Part 11 ch.05 also works for local validation; only
-   `cluster-secret-store.yaml`'s `server` URL changes.
+1. **Vault running** — HA on EKS, KMS-unsealed, audit-logged, internal-only
+   Service `vault-active.vault.svc`. The dev-mode Vault from Part 11 ch.05
+   also works for local validation; only `secret-store.yaml`'s `server`
+   URL changes.
 2. **External Secrets Operator installed** — pinned Helm, own namespace
-   (Part 11 ch.05 install step). The `ClusterSecretStore` and
-   `ExternalSecret` CRDs are required before any `kubectl apply` of the
+   (Part 11 ch.05 install step). The `SecretStore`, `ExternalSecret` and
+   `VaultDynamicSecret` CRDs are required before any `kubectl apply` of the
    files in this tree.
 3. **Per-tenant K8s ServiceAccount exists** — the Crossplane Composition
    (Part 13 ch.02) stamps `bookstore-platform-eso` SA in each tenant ns.
@@ -43,9 +46,12 @@ denied" and ESO retries forever).
 #    Verify: vault status (Sealed=false, HA Enabled=true).
 
 # 2. Initialize the Kubernetes auth method ONCE per cluster (Vault side).
-#    Phase 15-R Terraform did this; the manual fallback is:
+#    The Terraform tree does this; the manual fallback is below. Use a
+#    short-lived token from the admin policy, never the root token. With no
+#    token_reviewer_jwt, Vault uses its own pod's ServiceAccount token for
+#    TokenReview, so that ServiceAccount needs system:auth-delegator.
 kubectl -n vault exec -i vault-0 -- sh -c '
-  export VAULT_TOKEN=<root or admin>
+  export VAULT_TOKEN=<short-lived admin token>
   vault auth enable kubernetes
   vault write auth/kubernetes/config \
     kubernetes_host="https://kubernetes.default.svc:443"
@@ -59,7 +65,8 @@ sed "s/<TENANT>/${TENANT}/g" policies/bookstore-platform-app.hcl \
 vault write auth/kubernetes/role/bookstore-platform-${TENANT} \
   bound_service_account_names=bookstore-platform-eso \
   bound_service_account_namespaces=bookstore-platform-${TENANT} \
-  policies=bookstore-platform-app-${TENANT} ttl=15m max_ttl=1h
+  policies=bookstore-platform-app-${TENANT} ttl=15m max_ttl=1h \
+  audience=https://vault.bookstore-platform.example.com
 ```
 
 ## The auth-method-vs-static-token trade-off
@@ -87,7 +94,7 @@ ch.03 cloud workload identity, applied to Vault.
 | **Vault Agent template** | Sidecar re-renders a file in the Pod on Vault change. | Live (re-render); app must re-read file. | Apps that re-read config periodically (rare). PSA-restricted footgun applies. |
 
 The platform's default is **dynamic Postgres roles for the catalog DB
-password** (`external-secret-sample.yaml` + `rotation/postgres-rotate.sh`)
+password** (`dynamic-db-creds.yaml` + `rotation/postgres-rotate.sh`)
 and **static + `refreshInterval=1h`** for everything else (vendor API
 keys, OAuth client secrets). The dev/staging clusters use the same Vault
 instance with different mount paths and different policies — never a
