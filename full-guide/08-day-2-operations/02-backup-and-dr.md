@@ -16,6 +16,7 @@
 > **Bookstore DR runbook** for the three real loss scenarios.
 
 **Estimated time:** ~30 min read · ~90 min hands-on
+**Lab tier:** A (kind). Run this chapter's commands only against clusters you own.
 **Prerequisites:** [Part 03 ch.05](../03-config-and-storage/05-stateful-data-patterns.md): storage durability ≠ data safety · [Part 03 ch.04](../03-config-and-storage/04-persistent-storage.md): CSI VolumeSnapshot is the PV backup primitive · [Part 07 ch.04](../07-delivery/04-gitops-argocd.md): Git holds the desired state Velero doesn't need to re-back-up
 **You'll know after this:** • distinguish the three things to back up: etcd, PV data and Git · • run `etcdctl snapshot save` / `etcdutl snapshot restore` and the stop-apiserver → repoint sequence on kubeadm · • configure Velero with object storage and the CSI-snapshot or node-agent path · • use Postgres pre-backup consistency hooks and reason about RPO/RTO · • execute the Bookstore DR runbook for namespace, cluster and region loss
 > • treat a backup as a copy of your Secrets: a private store, scoped keys,
@@ -105,7 +106,7 @@ integrity*, not just *pod readiness*.
 | A backup copy exposes the Secrets it holds | Private, encrypted, versioned, object-locked store; the Secret demo in Backup security | [14.14](../14-eks-in-production-a-to-z/14-backup-and-restore-velero.md) |
 | Someone who can write to the bucket plants objects that a restore applies | Write access for the Velero key only; restores run from a named group | [05.01](../05-security/01-authn-authz-rbac.md) |
 | A restore recreates Secrets or RBAC with more power than the source had | Restore rights granted like cluster-admin; drills into a scratch namespace | [05.04](../05-security/04-secrets-and-cluster-hardening.md) |
-| The chart binds Velero's ServiceAccount to cluster-admin | A dedicated namespace; the privileged exception registered; the node agent off once CSI covers the volumes | [05.02](../05-security/02-pod-security.md) |
+| The chart binds Velero's ServiceAccount to cluster-admin | The chart keeps the binding, because the controller restores cluster-scoped objects. Limit who can drive it: restore rights go to one named group, and no one is granted `pods/exec` in `velero` (the Backup security section) | [05.01](../05-security/01-authn-authz-rbac.md) |
 | An untested backup fails when it is needed | A scheduled restore drill that checks rows, not Pod readiness | Step 4 |
 
 ## Diagrams
@@ -812,7 +813,13 @@ subjects:
     name: velero-restorers
 ```
 
-Check the grant with `kubectl auth can-i`, after the install in step 2. The
+Save the Role and the RoleBinding above as `velero-restorers.yaml` and apply it:
+
+```sh
+kubectl apply -f velero-restorers.yaml
+```
+
+Then check the grant with `kubectl auth can-i`, after the install in step 2. The
 CRDs must exist first: before they do, `kubectl auth can-i` warns that the server
 has no such resource type, and its answer for a group is not reliable.
 
@@ -881,8 +888,9 @@ kubectl apply -f examples/bookstore/operators/velero-schedule.yaml    # recurrin
 velero backup describe bookstore-now --details ; velero backup logs bookstore-now
 # Restore drill: a scratch namespace, never the live one (step 4)
 kubectl apply -f drill.yaml
-# Scope a restore by namespace mapping, not by label: a StatefulSet's
-# volumeClaimTemplate PVC carries no pod labels, so a label selector skips it.
+# Scope a backup by namespace, and check what a label selector matches before
+# you rely on it: an object without the label is skipped.
+kubectl get all,configmap,secret,pvc -n bookstore -l app=postgres
 
 # Layer 2: declarative (the cheap one): re-point Argo CD at Git
 kubectl apply -n argocd -f examples/bookstore/argocd/01-app-of-apps.yaml
@@ -903,34 +911,40 @@ spec:
       - name: postgres-consistency
         labelSelector: { matchLabels: { app: postgres } }
         pre:
-          - exec: { container: postgres, command: ["/bin/sh","-c","psql -c 'CHECKPOINT;'"], onError: Fail }
+          - exec:
+              container: postgres
+              command: ["/bin/sh","-c","PGPASSWORD=\"$POSTGRES_PASSWORD\" psql -U \"$POSTGRES_USER\" -d \"$POSTGRES_DB\" -c 'CHECKPOINT;'"]
+              onError: Fail
 ```
 
 Checklist:
 
-- [ ] **Three layers backed up:** etcd (self-managed) / **Git** (declarative,
-      the easy restore) / **Velero+CSI** (PV data): right tool per layer - [ ]
-      Backups in an **object store that outlives the cluster** (not an
-      in-cluster PVC), private, encrypted, versioned, object-locked and
-      replicated to a second region
-      ([14.14](../14-eks-in-production-a-to-z/14-backup-and-restore-velero.md))
-      - [ ] The Velero key **writes only** to its bucket; restore rights sit
-      in a named Role and are reviewed like cluster-admin - [ ] Backups are
-      treated as copies of Secrets: excluded where an external secret manager
-      restores them, and stored under the same controls - [ ] The `velero`
-      namespace is `privileged` only for the node agent, with a registered
-      exception; `restricted` once CSI snapshots replace it - [ ] DB backup
-      has a **consistency hook** (CHECKPOINT/`pg_dump`/`fsfreeze`); snapshots
-      are **crash-consistent, not PITR**: layer WAL/PITR for that - [ ]
-      **RPO** = backup interval (Velero `Schedule` cadence); **RTO** = restore
-      + readiness (pre-stage + GitOps to shrink) - [ ] **Restore drilled on a
-      schedule** into a scratch namespace, validating rows (not just Pod
-      readiness), with the RPO and RTO achieved recorded:
-      [DR-RUNBOOK.md](../examples/bookstore/operators/DR-RUNBOOK.md) rehearsed
-      - [ ] Velero objects pass the **CRD-intrinsic dry-run** check (step 6);
-      restore Pods are `restricted`-compliant - [ ] Managed DB / managed
-      cluster: know which layer the **provider** owns vs **you** (declarative
-      is always yours)
+- [ ] **Three layers backed up:** etcd (self-managed), **Git** (declarative,
+  the easy restore), and **Velero with CSI** (PV data). Use the right tool for
+  each layer.
+- [ ] Backups go to an **object store that outlives the cluster**, not an
+  in-cluster PVC. The store is private, encrypted, versioned, object-locked
+  and replicated to a second region
+  ([14.14](../14-eks-in-production-a-to-z/14-backup-and-restore-velero.md)).
+- [ ] The Velero key **writes only** to its bucket. Restore rights sit in a
+  named Role and are reviewed like cluster-admin.
+- [ ] Backups are treated as copies of Secrets: excluded where an external
+  secret manager restores them, and stored under the same controls.
+- [ ] The `velero` namespace is `restricted` on the CSI path. The node-agent
+  path needs a `privileged` exception, registered with its reason and expiry.
+- [ ] The database backup has a **consistency hook** (CHECKPOINT, `pg_dump` or
+  `fsfreeze`). Snapshots are **crash-consistent, not PITR**, so layer WAL or
+  PITR on top for that.
+- [ ] **RPO** equals the backup interval (the Velero `Schedule` cadence).
+  **RTO** is the restore plus readiness time, which pre-staging and GitOps
+  shrink.
+- [ ] **Restore drilled on a schedule** into a scratch namespace, validating
+  rows and not just Pod readiness. Record the RPO and RTO achieved, and rehearse
+  [DR-RUNBOOK.md](../examples/bookstore/operators/DR-RUNBOOK.md).
+- [ ] Velero objects pass the **CRD-intrinsic dry-run** check (step 6), and
+  restore Pods are `restricted`-compliant.
+- [ ] Managed database or managed cluster: know which layer the **provider**
+  owns and which you own. Declarative state is always yours.
 
 ## Test your understanding
 
@@ -943,10 +957,15 @@ Checklist:
 
    </details>
 
-2. **You run a Velero backup with `--selector app=postgres` and the StatefulSet's PV data is not included. Why?**
+2. **A teammate scopes a backup with `--selector app=postgres`. Name one kind of object in the namespace that such a selector can miss, and the command that shows what the selector matches before the backup runs.**
    <details><summary>Show answer</summary>
 
-   StatefulSet volumes are created from a `volumeClaimTemplate`: the generated PVCs (`data-postgres-0`, `data-postgres-1`) **don't inherit the pod's labels**, they only have the StatefulSet's templated labels. A `--selector app=postgres` matches the Pods but skips the PVCs (and therefore their PV data). The fix is scoping by **namespace + resource** (`--include-namespaces bookstore --include-resources persistentvolumeclaims,persistentvolumes`), not by selector. The chapter's Quick Reference explicitly warns about this.
+   Any object that does not carry the `app=postgres` label is skipped. A
+   ConfigMap or a Secret that the database reads, created without the label, is
+   one example. Run `kubectl get all,configmap,secret,pvc -n bookstore -l
+   app=postgres` and compare its output with `kubectl get all,configmap,secret,pvc
+   -n bookstore`, which lists everything. Scope the backup by namespace, and
+   check any selector against the full list before you rely on it.
 
    </details>
 
@@ -994,14 +1013,18 @@ Checklist:
   around recovery of the cluster itself).
 - **Lukša, _Kubernetes in Action_ 2e, ch.8** (PersistentVolumes: the storage
   layer a CSI VolumeSnapshot copies, the basis for *why* PV data is a separate
-  backup from etcd). - Official: etcd backup/restore for a Kubernetes cluster
-  <https://kubernetes.io/docs/tasks/administer-cluster/configure-upgrade-etcd/#backing-up-an-etcd-cluster>,
-  VolumeSnapshots
-  <https://kubernetes.io/docs/concepts/storage/volume-snapshots/>, and
-  encrypting Secrets at rest
-  <https://kubernetes.io/docs/tasks/administer-cluster/encrypt-data/>. -
-  Velero: file-system backup
-  <https://velero.io/docs/main/file-system-backup/>, backup hooks
-  <https://velero.io/docs/main/backup-hooks/>, and CSI snapshots
-  <https://velero.io/docs/main/csi/>. - Pod Security:
+  backup from etcd).
+- Official: etcd backup and restore for a Kubernetes cluster
+  <https://kubernetes.io/docs/tasks/administer-cluster/configure-upgrade-etcd/#backing-up-an-etcd-cluster>.
+- Official: VolumeSnapshots
+  <https://kubernetes.io/docs/concepts/storage/volume-snapshots/>.
+- Official: encrypting Secrets at rest
+  <https://kubernetes.io/docs/tasks/administer-cluster/encrypt-data/>.
+- Velero: file-system backup
+  <https://velero.io/docs/main/file-system-backup/>.
+- Velero: backup hooks
+  <https://velero.io/docs/main/backup-hooks/>.
+- Velero: CSI snapshots
+  <https://velero.io/docs/main/csi/>.
+- Pod Security:
   <https://kubernetes.io/docs/concepts/security/pod-security-standards/>.

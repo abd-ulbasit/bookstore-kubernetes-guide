@@ -78,8 +78,8 @@ attach to it; "how hostile are the tenants?" decides whether soft is enough.**
 - **Hard multi-tenancy = you don't trust the tenants, so the namespace isn't
   enough.** Add **node isolation** (taints/affinity or separate node pools so
   tenants don't share a kernel), and/or **separate control planes** (vCluster,
-  a virtual control plane per tenant; Capsule, a tenant operator; HNC,
-  hierarchical namespaces), and/or the bluntest, strongest answer:
+  a virtual control plane per tenant; Capsule, a tenant operator), and/or the
+  bluntest, strongest answer:
   **separate clusters**. The stronger the distrust, the further from "just a
   namespace" you go, up to "not even the same cluster".
 - **Env is not tenant.** *Environments* (dev/staging/prod of the **same** app)
@@ -141,7 +141,7 @@ flowchart TB
 
     subgraph hard["HARD multi-tenancy (untrusted): ADD on top"]
       node["Node isolation<br/>(taints/affinity, separate pools)"]
-      vc["Virtual/own control plane<br/>(vCluster / Capsule / HNC)"]
+      vc["Virtual/own control plane<br/>(vCluster / Capsule)"]
       apf["API Priority & Fairness<br/>(per-tenant apiserver fairness)"]
       sep["...or separate CLUSTERS<br/>(the strongest, bluntest boundary)"]
       node --> vc --> apf --> sep
@@ -233,6 +233,9 @@ kubectl get resourcequota,limitrange -n bookstore
 #   bookstore-quota: requests.cpu 2 / memory 2Gi / pods 30 (the ns CAP)
 #   bookstore-limits: per-Container default/min/max (per-workload)
 ```
+
+The lab captured the output below right after it applied the guardrail
+objects, without the Bookstore workloads, so usage reads zero:
 
 <!-- gate: output -->
 ```
@@ -389,8 +392,9 @@ kubectl get nodes
 ```
 
 The NetworkPolicy objects are in place, but whether a dropped packet is
-dropped depends on a policy-enforcing CNI. kind's default CNI does not enforce
-NetworkPolicy, so the lab checks the objects and not the traffic
+dropped depends on a policy-enforcing CNI. The kind cluster in Part 00 ch.07
+enforces NetworkPolicy, and that chapter shows a denied request. This lab
+checks the objects, not the traffic
 ([Part 02 ch.06](../02-networking/06-network-policies.md)).
 
 ### 4. How envs differ from tenants (the structural point, made concrete)
@@ -468,9 +472,8 @@ kind delete cluster --name bookstore
   to sandboxed runtimes (gVisor, Kata; chapter 05.05
   <!-- link-later: 05.05 -->), then to a virtual control plane per tenant
   (vCluster, with its own API server and CRDs), and finally to separate
-  clusters, the only complete boundary. Each step costs more to run; see
-  [ch.01](01-cluster-lifecycle.md) for the fleet cost. Choose by threat model,
-  not by Pod count.
+  clusters, the only complete boundary. Each step costs more to run. Choose by
+  threat model, not by Pod count.
 - **vCluster, Capsule and HNC: what they actually do.** **vCluster** runs a
   *virtual* Kubernetes API server (with its own etcd or k3s) for the tenant
   inside a host namespace. The tenant gets what looks like a whole cluster,
@@ -479,10 +482,11 @@ kind delete cluster --name bookstore
   namespace, short of a real cluster. **Capsule** is an operator that turns a
   `Tenant` CR into the enforced guardrail set (quota, RBAC, network, PSA)
   across a group of namespaces. It automates what `second-tenant.yaml` does by
-  hand, at fleet scale. **HNC** (Hierarchical Namespace Controller) gives
-  parent and child namespaces with **policy inheritance**, so a team's RBAC and
-  quota cascade to its sub-teams' namespaces. None give a kernel boundary. For
-  that you still need node isolation or separate clusters.
+  hand, at fleet scale. **HNC** (Hierarchical Namespace Controller) offered
+  parent and child namespaces with policy inheritance, but its repository is
+  archived and read-only upstream, so this guide does not recommend it for new
+  work. None of these give a kernel boundary. For that you still need node
+  isolation or separate clusters.
 - **Env vs tenant is an ownership fact, not a size fact.** dev/staging/prod are
   the **same** owner's lifecycle stages. They are Kustomize overlays
   ([Part 07 ch.02](../07-delivery/02-packaging-kustomize.md)) into one ns,
@@ -499,7 +503,7 @@ kind delete cluster --name bookstore
 > it's the stack you already run.** Per-team **namespace + RBAC +
 > ResourceQuota + LimitRange + NetworkPolicy (default-deny) + PSA** is
 > sufficient when tenants are teams in one org. Make it self-service and
-> *consistent*. Use a **Capsule `Tenant`** (or an HNC hierarchy, or a templated
+> *consistent*. Use a **Capsule `Tenant`** (or a templated
 > `second-tenant.yaml` applied by GitOps) so every tenant gets the *identical*
 > guardrail set with no per-tenant drift. Add **one AppProject per team**
 > ([Part 07 ch.04](../07-delivery/04-gitops-argocd.md)) so a tenant can only
@@ -552,7 +556,7 @@ Checklist:
       cluster-scoped objects or the apiserver
 - [ ] Every tenant gets the **full stack** (ns + RBAC + ResourceQuota +
       LimitRange + NetworkPolicy default-deny + PSA), *consistently*
-      (Capsule/HNC/GitOps templated, not hand-rolled per tenant)
+      (Capsule/GitOps templated, not hand-rolled per tenant)
 - [ ] **Envs are not tenants**: dev/staging/prod are overlays of one app (same
       owner); tenants are separate namespaces with **one AppProject per team**
 - [ ] Tenants **cannot mint their own quota or LimitRange** (capacity is

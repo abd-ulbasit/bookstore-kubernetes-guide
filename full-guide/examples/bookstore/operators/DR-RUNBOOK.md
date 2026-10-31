@@ -145,8 +145,8 @@ resurrect the *same* self-managed control plane rather than a fresh one.
    Velero's default `existingResourcePolicy: none` **skips** a resource that
    already exists, so it would *not* overwrite that empty PVC. Stop Postgres,
    **delete the empty PVC** so Velero re-creates it from the backup, then
-   restore (the same ns+resource scope as Scenario 2: *not* `--selector
-   app=postgres`, which silently skips the unlabelled volumeClaimTemplate PVC):
+   restore (the same ns+resource scope as Scenario 2). A label selector skips any
+   object without the label, so do not use `--selector app=postgres` here:
    ```sh
    kubectl scale deploy/catalog deploy/orders deploy/payments-worker \
      -n bookstore --replicas=0
