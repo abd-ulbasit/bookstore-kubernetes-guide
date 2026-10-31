@@ -1,0 +1,33 @@
+# Appendix B (glossary) check: does kindnet enforce NetworkPolicy on kind?
+# Tier A (kind). Lab cluster context: kind-sf-pilot. The chapter prints namespace bookstore;
+# this run used namespace pap-appb-np. Lab node name is verbatim.
+# Run from the repository's full-guide checkout, against a cluster the author owns.
+$ kubectl version
+Client Version: v1.37.2
+Server Version: v1.37.0
+$ kubectl get nodes
+NAME                     STATUS   ROLES           AGE   VERSION
+sf-pilot-control-plane   Ready    control-plane   12h   v1.37.0
+$ kubectl -n kube-system get pods -l app=kindnet
+NAME            READY   STATUS    RESTARTS   AGE
+kindnet-8659k   1/1     Running   0          12h
+$ kubectl create namespace pap-appb-np
+namespace/pap-appb-np created
+$ kubectl apply -f pods.yaml
+pod/web created
+pod/client created
+$ kubectl -n pap-appb-np wait --for=condition=Ready pod/web pod/client --timeout=120s
+pod/web condition met
+pod/client condition met
+# web pod IP: 10.244.0.109
+$ kubectl -n pap-appb-np exec client -- wget -q -O - -T 5 http://<web-ip>:8080/   (no policy yet)
+ok
+exit=0
+$ kubectl apply -f deny.yaml
+networkpolicy.networking.k8s.io/default-deny-ingress created
+$ kubectl -n pap-appb-np exec client -- wget -q -O - -T 5 http://<web-ip>:8080/   (default-deny ingress applied)
+wget: download timed out
+command terminated with exit code 1
+exit=1
+$ kubectl delete namespace pap-appb-np
+namespace "pap-appb-np" deleted
