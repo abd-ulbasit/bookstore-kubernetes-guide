@@ -133,7 +133,7 @@ The four layers:
     latency-based queries + $0.50 to $0.75 per health check/month. Cheap.
   - **AWS Global Accelerator** — one anycast IP, AWS's network
     edge routes traffic via the AWS backbone to the closest
-    healthy region's ALB. Sub-second failover (the edge sees the
+    healthy region's ALB. Failover in under a minute (the edge sees the
     health failure; no DNS TTL involved). **Cost**: $0.025/hour per accelerator
     (about $18 a month) plus data transfer premium. Not cheap.
   When each wins: see the comparison table in §Diagrams.
@@ -151,10 +151,10 @@ The four layers:
 | Dimension | Route 53 LBR | Global Accelerator |
 |---|---|---|
 | **Routing decision** | DNS (per resolver) | Anycast IP (per packet) |
-| **Failover speed** | TTL + detection (60s + 30s = ~90s for happy path; 15min for long-tail) | < 30 seconds (edge sees failure) |
+| **Failover speed** | TTL + detection (60s + 30s = ~90s for happy path; 15min for long-tail) | < 1 minute (AWS FAQ: "less than one minute") |
 | **Cost (idle)** | $0.50/zone/month | $18/accelerator/month |
 | **Cost (1 TB)** | $0.60 per million latency queries + DT charges | $18 + data transfer premium |
-| **DDoS protection** | Route 53 doesn't filter; pair with Shield | Built-in Shield Advanced |
+| **DDoS protection** | Shield Standard on by default (Route 53 does no filtering of its own); Shield Advanced optional | Shield Standard on by default; Shield Advanced optional |
 | **TLS termination** | Per-region ALB | Per-region ALB (GA is L4 pass-through) |
 | **Static IP** | No (Alias to ALB) | Yes (one anycast IP) |
 | **Sticky sessions** | Hard (resolver caches) | Easy (anycast preserves) |
@@ -163,7 +163,7 @@ The four layers:
 The bookstore platform's web-serving workload is fine on Route 53
 LBR — the < 5-min long-tail of stale routing is acceptable for
 e-commerce. A gaming platform or a video-chat backend should
-seriously consider Global Accelerator for sub-second failover.
+seriously consider Global Accelerator for failover faster than DNS allows.
 
 **ALB per region vs Global Accelerator with single IP.**
 
@@ -230,11 +230,14 @@ on `<CLUSTER-A-OIDC>:sub`, not `<CLUSTER-B-OIDC>:sub`. Patterns:
   Fewer roles, but the trust policy gets long and **adding a region
   requires rewriting the policy**. Doable for 2-3 regions; brittle
   beyond.
-- **AWS IAM Roles Anywhere + Workload Identity Federation.** A
-  newer pattern: a single role trusted by an external OIDC
-  provider (your CI's OIDC, e.g.); workloads in any region assume
-  it via STS. More flexible but more layers; out of scope for the
-  bookstore platform.
+- **IAM Roles Anywhere, or an IAM OIDC identity provider.** Two
+  newer patterns for one role that workloads in any region assume.
+  Roles Anywhere authenticates workloads with X.509 certificates
+  against a trust anchor, not OIDC. An IAM OIDC identity provider
+  lets a role's trust policy name an external OIDC issuer (your
+  CI's, e.g.), and workloads assume that role with
+  AssumeRoleWithWebIdentity. More flexible but more layers; out of
+  scope for the bookstore platform.
 
 The bookstore-platform tree's `multi-region/cluster-module/`
 implicitly uses pattern 1: each region's substrate creates its own
@@ -271,7 +274,7 @@ in the kind context; it's still the right framing in the cloud.)
 | Threat | Control | Deeper |
 |---|---|---|
 | A replica copies data into a region whose key or policy does not cover it | One KMS key per region for storage, WAL archive and any S3 CRR destination. S3 replicates SSE-KMS objects only when the rule opts in and names a destination-region key ([S3 docs](https://docs.aws.amazon.com/AmazonS3/latest/userguide/replication-config-for-kms-objects.html)). | [14.04](./04-storage-classes-and-ebs.md), [14.17](./17-cross-region-dr-account-baseline-90-day-runbook.md) |
-| A standby or its credential reads the whole primary | Replication authenticates with TLS client certificates, not a shared password ([CNPG security](https://cloudnative-pg.io/docs/1.30/security/)). The standby verifies the server chain with `verify-ca`, and the primary's NLB admits only peered CIDRs. | [14.08](./08-vpc-endpoints-and-egress.md) |
+| A standby or its credential reads the whole primary | Replication authenticates with TLS client certificates, not a shared password ([CNPG security](https://cloudnative-pg.io/documentation/1.24/security/)). The standby verifies the server chain with `verify-ca`, and the primary's NLB admits only peered CIDRs. | [14.08](./08-vpc-endpoints-and-egress.md) |
 | Someone who can edit DNS or health checks moves traffic | Limit `route53:ChangeResourceRecordSets` and health check edits to one reviewed role. | [14.17](./17-cross-region-dr-account-baseline-90-day-runbook.md) |
 
 ## Diagrams
@@ -337,9 +340,9 @@ ROUTE 53 LATENCY-BASED ROUTING (LBR) — DNS-LEVEL ROUTING
 
   Failover on us-east-1 failure:
     [t+0s]    us-east-1 fails
-    [t+30s]   Route 53 health check (3 consecutive fails @ 10s) marks region down
-    [t+60s]   Route 53 stops returning us-east-1 IP in DNS responses
-    [t+90s]   Resolvers that cached us-east-1 IP for 60s expire; re-query
+    [t+90s]   Route 53 health check (3 consecutive fails @ 30s) marks region down
+    [t+90s]   Route 53 stops returning us-east-1 IP in DNS responses
+    [t+150s]  Resolvers that cached us-east-1 IP for 60s expire; re-query
     [t+5min]  Most clients re-resolved to a healthy region
     [t+15min] Long-tail clients (resolvers with capped TTL) still cached on us-east-1
 
@@ -356,8 +359,8 @@ GLOBAL ACCELERATOR — ANYCAST IP, EDGE-LEVEL ROUTING
 
   Failover on us-east-1 failure:
     [t+0s]    us-east-1 fails
-    [t+10-30s] Edge health probes detect failure
-    [t+30s]   Edges stop routing to us-east-1; all traffic to eu-west-1/ap-southeast-1
+    [t+<60s]  Edges stop routing to us-east-1 (AWS: under one minute);
+              all traffic to eu-west-1/ap-southeast-1
               Client connections held over backbone — no DNS resolution involved.
 
   Cost: $18/accelerator/month + data transfer premium + per-AZ ALB charges
@@ -422,7 +425,7 @@ and container security contexts already meet `restricted`, so the namespace
 label is the only addition. Install CNPG into every region:
 
 ```bash
-CNPG_CHART_VERSION="0.22.1"   # chart 0.22.1 ships CloudNativePG 1.24.0
+CNPG_CHART_VERSION="0.22.1"   # chart 0.22.1 ships CloudNativePG 1.24.1
 helm repo add cnpg https://cloudnative-pg.github.io/charts
 helm repo update
 
@@ -452,6 +455,18 @@ done
 
 The primary writes to its local EBS volume; later, standbys will
 stream WAL from it.
+
+Before you apply the manifest, create the WAL archive bucket and its
+role. This chapter does not create either one. The bucket
+`bookstore-pg-wal-archive-us-east-1` belongs in us-east-1, with default
+encryption under that region's KMS key and public access blocked. The
+role's trust policy names the cluster's IAM OIDC provider and the
+ServiceAccount that CloudNativePG creates for the cluster. Check its
+name with `kubectl -n bookstore-platform-system get serviceaccount`
+before you write the `:sub` condition. The permissions are
+`s3:ListBucket` on the bucket, `s3:GetObject`, `s3:PutObject` and
+`s3:DeleteObject` on its objects, and `kms:Encrypt`, `kms:Decrypt` and
+`kms:GenerateDataKey` on the key.
 
 ```bash
 PRIMARY_CTX="arn:aws:eks:us-east-1:$(aws sts get-caller-identity \
@@ -486,12 +501,18 @@ spec:
     initdb:
       database: bookstore
       owner: bookstore
+  # The ServiceAccount CloudNativePG creates for this cluster carries the
+  # IRSA role, so the WAL archive needs no static credentials.
+  serviceAccountTemplate:
+    metadata:
+      annotations:
+        eks.amazonaws.com/role-arn: arn:aws:iam::<ACCOUNT-ID>:role/<CNPG-WAL-ROLE>
   # WAL archiving to S3 for PITR + standby bootstrap.
   backup:
     barmanObjectStore:
       destinationPath: "s3://bookstore-pg-wal-archive-us-east-1/"
       s3Credentials:
-        inheritFromIAMRole: true  # IRSA-wired SA, no static creds
+        inheritFromIAMRole: true  # reads the IRSA role through the ServiceAccount above
       wal:
         compression: gzip
       data:
@@ -510,8 +531,12 @@ spec:
                 service.beta.kubernetes.io/aws-load-balancer-type: "external"
                 service.beta.kubernetes.io/aws-load-balancer-nlb-target-type: "ip"
                 service.beta.kubernetes.io/aws-load-balancer-scheme: "internal"
+                service.beta.kubernetes.io/aws-load-balancer-target-group-attributes: "preserve_client_ip.enabled=true"
             spec:
               type: LoadBalancer
+              loadBalancerSourceRanges:
+                - <EU-WEST-1-VPC-CIDR>
+                - <AP-SOUTHEAST-1-VPC-CIDR>
 EOF
 ```
 
@@ -521,9 +546,16 @@ EOF
 > propagated. Without this, the standbys cannot reach the primary's
 > CNPG rw NLB. The bookstore-platform's `multi-region/` tree's
 > README explicitly notes this is out-of-tree wiring — the platform
-> team's responsibility. The NLB also exposes the primary's port 5432, so
-> its security group should admit only the peered CIDRs (see the
-> [AWS Load Balancer Controller NLB guide](https://kubernetes-sigs.github.io/aws-load-balancer-controller/latest/guide/service/nlb/)).
+> team's responsibility. The NLB also exposes the primary's port 5432.
+> `loadBalancerSourceRanges` limits it to the peered VPC CIDRs: the
+> controller creates a security group that admits only those ranges,
+> and it adds the backend rules that let them through. Client IP
+> preservation is off by default for IP targets, and the controller's
+> annotation reference says the source-range annotation is ignored
+> unless the client IP is preserved, so the `preserve_client_ip.enabled`
+> attribute in the manifest is required. Check the control from a CIDR
+> outside the list. See the [AWS Load Balancer Controller annotation
+> reference](https://kubernetes-sigs.github.io/aws-load-balancer-controller/latest/guide/service/annotations/).
 
 ### 4. Bootstrap CNPG standbys in eu-west-1 and ap-southeast-1
 
@@ -814,7 +846,7 @@ the anycast IPs) reaches the **closest AWS edge by BGP topology**;
 the edge forwards the packet over the AWS backbone to the closest
 healthy endpoint (a per-region ALB registered as an Endpoint Group).
 Health-check failure removes the endpoint from the rotation **at the
-edge** within < 30 seconds — no DNS resolution involved. The trade-
+edge** within about a minute (AWS documents less than one minute) — no DNS resolution involved. The trade-
 off is cost ($18/accelerator/month + per-GB transfer) and the
 constraint of L4 pass-through (TLS terminates at the regional ALB,
 not the accelerator).
@@ -1036,14 +1068,14 @@ Minimal multi-region active-active checklist (healthy when all 8 are yes):
 1. **When does Global Accelerator beat Route 53 latency-based routing, and when is Route 53 the right call?**
    <details><summary>Show answer</summary>
 
-   Global Accelerator wins when failover latency matters more than cost — its edge sees the health failure and re-routes packets in seconds, with no DNS TTL involved (TTL caching in resolvers can stretch DNS-based failover to 5-15 minutes for the long tail). It's also the right call when you need a static anycast IP (regulated environments that whitelist IPs) or built-in Shield Advanced DDoS protection. Route 53 LBR wins on cost ($0.50/zone/month vs $18/accelerator/month + data transfer premium), is simpler to wire (just records + health checks), and is fine when 60-90s happy-path failover is within SLA. Most mid-stage SaaS picks Route 53; financial / gaming / public-API-with-customer-firewall workloads pick GA.
+   Global Accelerator wins when failover latency matters more than cost — its edge sees the health failure and re-routes packets in under a minute, with no DNS TTL involved (TTL caching in resolvers can stretch DNS-based failover to 5-15 minutes for the long tail). It's also the right call when you need a static anycast IP (regulated environments that whitelist IPs) or DDoS protection (Shield Standard comes with Global Accelerator at no extra charge; Shield Advanced is an optional paid subscription). Route 53 LBR wins on cost ($0.50/zone/month vs $18/accelerator/month + data transfer premium), is simpler to wire (just records + health checks), and is fine when 60-90s happy-path failover is within SLA. Most mid-stage SaaS picks Route 53; financial / gaming / public-API-with-customer-firewall workloads pick GA.
 
    </details>
 
 2. **A team commits to a 5-minute RTO for writers. The CNPG primary is in us-east-1, standby in eu-west-1. The us-east region goes dark at 02:00 UTC. Walk through the runbook.**
    <details><summary>Show answer</summary>
 
-   (1) Route 53 health check fires on the per-region `/healthz` ALB endpoint (~30-60s detection); us-east record is removed from the latency set, surviving regions absorb traffic for readers. (2) On-call fences the old primary, then sets `spec.replica.enabled` to false on eu-west's standby Cluster; this is irreversible, and the promotion time should be measured in the drill rather than assumed. (3) Payments-worker (the writer-only workload) is re-deployed via Argo CD to eu-west — the ApplicationSet's Cluster generator targeting a `role=writer` label flips eu-west to writer, us-east to non-writer; reconciliation runs in seconds with a webhook. (4) Confirm WAL has fully replayed on the promoted primary (zero lag) before declaring writes resumed. Total: writers back in 5-7 min if the runbook is drilled monthly; without drilling, 15-30+ min as the operator hunts for the commands.
+   (1) Route 53 health check fires on the per-region `/healthz` ALB endpoint (~90s detection: 3 failures 30s apart); us-east record is removed from the latency set, surviving regions absorb traffic for readers. (2) On-call fences the old primary, then sets `spec.replica.enabled` to false on eu-west's standby Cluster; this is irreversible, and the promotion time should be measured in the drill rather than assumed. (3) Payments-worker (the writer-only workload) is re-deployed via Argo CD to eu-west — the ApplicationSet's Cluster generator targeting a `role=writer` label flips eu-west to writer, us-east to non-writer; reconciliation runs in seconds with a webhook. (4) Confirm WAL has fully replayed on the promoted primary (zero lag) before declaring writes resumed. Total: writers back in 5-7 min if the runbook is drilled monthly; without drilling, 15-30+ min as the operator hunts for the commands.
 
    </details>
 

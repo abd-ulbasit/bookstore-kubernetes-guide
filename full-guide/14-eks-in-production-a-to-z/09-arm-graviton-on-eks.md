@@ -323,19 +323,15 @@ self-hosted Graviton machine), arm64 builds run natively.
 > **In production:** Build arm64 on native arm64 builders once CI volume
 > grows. QEMU-emulated builds are fine for occasional one-offs.
 
-Once the push finishes, sign each platform, then pin the index digest.
-`--recursive` signs the index and each platform image it lists. Without
-the flag, cosign signs only the reference you name
-([cosign CLI](https://github.com/sigstore/cosign/blob/main/doc/cosign_sign.md)).
-Signing identity and the admission check belong to
-[14.12](./12-supply-chain-security.md).
+This chapter pushes by hand so you can see the index format. Do not sign
+the hand-pushed image. A keyless signature made on a laptop carries your
+own identity, and the admission rule in
+[14.12](./12-supply-chain-security.md) does not accept it. There, the
+pipeline signs the index and every platform entry of the images CI builds.
 
-```bash
-cosign sign --recursive <REGISTRY>/bookstore-catalog@sha256:<INDEX-DIGEST>
-```
-
-Use the index digest from the top-level `Digest:` line in step 3, not a
-platform entry.
+Pods pin the index digest, not a platform entry. Step 3 shows the
+`imagetools inspect` output that prints it on the top-level `Digest:`
+line.
 
 ### 3. Verify the manifest is multi-arch
 

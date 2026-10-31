@@ -163,9 +163,11 @@ resource "helm_release" "argocd" {
         containerSecurityContext = local.argocd_container_secctx
       }
 
-      # The Dex image declares 1001:1001, so its container overrides the pod UID.
+      # Dex keeps its ServiceAccount token: argocd-dex builds a Kubernetes
+      # client at startup, and the chart's argocd-dex-server Role grants its
+      # reads. The Dex image declares 1001:1001, so its container overrides
+      # the pod UID.
       dex = {
-        automountServiceAccountToken = false
         containerSecurityContext = merge(local.argocd_container_secctx, {
           runAsUser  = 1001
           runAsGroup = 1001

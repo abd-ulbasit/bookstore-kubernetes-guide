@@ -257,7 +257,11 @@ resource "kubectl_manifest" "require_signed_images_policy" {
               # reads the failure action here; the spec-level field is
               # deprecated.
               failureAction = var.image_signing_validation_failure_action
-              mutateDigest  = true
+              # Kyverno 1.13 rejects mutateDigest = true with an Audit
+              # failureAction ("mutateDigest must be set to false for Audit
+              # failure action"), so the policy create fails. Rewriting the
+              # tag to a digest is only wanted when Pods are enforced.
+              mutateDigest = var.image_signing_validation_failure_action == "Enforce"
               required     = true
               verifyDigest = true
             },

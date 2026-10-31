@@ -432,25 +432,29 @@ metadata:
   finalizers: [resources-finalizer.argocd.argoproj.io]
 spec:
   project: platform
-  source:
-    repoURL: https://stefanprodan.github.io/podinfo
-    chart: podinfo
-    targetRevision: 6.7.1
-    helm:
-      values: |
-        replicaCount: 1
-        serviceAccount:
-          enabled: true   # a dedicated ServiceAccount, not default
-        securityContext:  # the chart has no pod-level key
-          allowPrivilegeEscalation: false
-          readOnlyRootFilesystem: true
-          runAsNonRoot: true
-          runAsUser: 100  # user app in the image's /etc/passwd
-          runAsGroup: 101
-          capabilities:
-            drop: ["ALL"]
-          seccompProfile:
-            type: RuntimeDefault
+  sources:
+    - repoURL: https://stefanprodan.github.io/podinfo
+      chart: podinfo
+      targetRevision: 6.7.1
+      helm:
+        values: |
+          replicaCount: 1
+          serviceAccount:
+            enabled: false   # the Pod uses the namespace's default ServiceAccount
+          securityContext:  # the chart has no pod-level key
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            runAsNonRoot: true
+            runAsUser: 100  # user app in the image's /etc/passwd
+            runAsGroup: 101
+            capabilities:
+              drop: ["ALL"]
+            seccompProfile:
+              type: RuntimeDefault
+    # Holds the namespace's default ServiceAccount, with its token unmounted.
+    - repoURL: https://github.com/<YOUR-ORG>/platform-gitops
+      targetRevision: main
+      path: example
   destination:
     server: https://kubernetes.default.svc
     namespace: example
@@ -468,18 +472,40 @@ spec:
       - ServerSideApply=true
 ```
 
+The second source is one object: the namespace's `default` ServiceAccount,
+with its token unmounted. The chart can create a ServiceAccount of its own,
+but it has no field that turns the token off, so the Pod uses the default
+ServiceAccount, and Git sets the field. Save the object as
+`example/serviceaccount.yaml` in `platform-gitops`:
+
+```yaml
+# example/serviceaccount.yaml
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: default
+  namespace: example
+automountServiceAccountToken: false
+```
+
+For a workload with its own ServiceAccount, choose a chart that exposes
+the token field, and set it there.
+
 The `finalizers` line makes deleting this Application remove its
 workloads. `managedNamespaceMetadata` labels the `example` namespace
 `restricted` when Argo CD creates it ([sync
 options](https://argo-cd.readthedocs.io/en/stable/user-guide/sync-options/)).
-The image comes from the chart's version pin. Digest pinning of chart
-images belongs to [14.12](./12-supply-chain-security.md).
+The images come from the charts' version pins, by tag. The Argo CD chart
+takes an image tag and no digest field, so the images in this chapter stay
+tag-pinned. Digest pinning for them is a follow-up: mirror each image to
+your registry, sign the mirror in the pipeline of
+[14.12](./12-supply-chain-security.md), and pin the mirror's digest.
 
 Commit and push:
 
 ```bash
 cd platform-gitops
-git add argocd/apps/
+git add argocd/apps/ example/
 git commit -m "argocd: seed app-of-apps with projects and podinfo example"
 git push origin main
 ```
@@ -701,9 +727,11 @@ They set the [baseline](../01-core-workloads/01-pods.md#baseline) on every
 Argo CD pod. Pod-level fields come from `global.securityContext`, and
 container fields come from each component. Dex and Redis set their own
 UID. The controller, server, ApplicationSet and notifications controllers
-call the Kubernetes API, so they keep their dedicated ServiceAccounts with
-the token mounted. The repo-server, Dex and Redis mount no token. The keys
-match the chart templates at 7.7.10.
+call the Kubernetes API, so they keep their ServiceAccount tokens mounted.
+Dex does too: `argocd-dex rundex` builds a Kubernetes client at startup, and
+the chart's `argocd-dex-server` Role grants that client the reads it needs.
+The repo-server and Redis mount no token. The keys match the chart templates
+at 7.7.10.
 
 Create `argocd/apps/app-argo-cd-self.yaml`:
 
@@ -760,7 +788,6 @@ spec:
         notifications:
           containerSecurityContext: *restricted
         dex:
-          automountServiceAccountToken: false
           containerSecurityContext:  # the Dex image declares 1001:1001
             runAsUser: 1001
             runAsGroup: 1001
