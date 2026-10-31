@@ -1,0 +1,231 @@
+# Transcript for 06-production-readiness/03-tracing.md, lab steps 1 to 5.
+# Tier A: a kind cluster, Kubernetes v1.37.0 node, kubectl v1.37.2.
+# Node runtime: containerd 2.3.4. Node OS: Debian GNU/Linux 13 (trixie).
+# Charts: grafana/tempo 1.24.4 (Tempo 2.9.0); open-telemetry/opentelemetry-collector
+# 0.178.1 (collector 0.163.2, contrib image). Helm v4.1.4.
+# Host: a Linux lab host ran the kind cluster; kubectl and helm ran from a
+# macOS workstation through a tunnel. Not run on the reader's machine.
+# Recorded by running the chapter's commands in order. The reader's namespace
+# names are replaced: tracing ran as p06-03-tracing and bookstore as
+# p06-03-bookstore. Command lines that named a scratch directory show only the
+# file name. Lines that name the local API tunnel port and the admin user are
+# redacted; no output block in the chapter uses them. The node name is printed
+# as the lab cluster reports it. The chapter says once that its output came
+# from a lab cluster with a different name.
+# Enforcement: the kind cluster's default CNI, kindnet, enforced the policies in
+# step 3. The refused send in step 4 timed out after a 20-second wait.
+# What did not work the first time:
+#  - Nulling the Tempo chart's Jaeger receiver broke the render (helm template).
+#    The Jaeger receivers stay on, and the chapter says so.
+#  - Tempo's read-only root filesystem needed an emptyDir at /var/tempo for its
+#    trace blocks and WAL, found from the rendered volumes.
+#  - The first collector install hit an etcd request timeout. It was uninstalled
+#    and reinstalled with the namespace substituted.
+#  - Tempo's readiness probe returned 503 for about two minutes while its ring
+#    warmed up, then passed without changes.
+#  - The shared control plane flapped during the run. The controller manager lost
+#    its leader lease, and the collector Deployment waited for its ReplicaSet.
+#    kubectl calls returned RBAC errors or TLS handshake timeouts for minutes.
+#  - The first in-cluster send timed out during the TLS handshake and succeeded
+#    on retry. The cause was not traced further.
+#  - A label change does not take effect at once. A send straight after the
+#    relabel to catalog got through; the same send after a 20-second wait timed
+#    out. The chapter's step 4 waits for that reason.
+#  - The first collector release used the exporter key `otlp`. The chart renamed
+#    it `otlp_grpc` at install, with a deprecation notice. The chapter uses the
+#    new name. A later helm upgrade applied it (recorded below), and a first
+#    upgrade attempt broke the receiver name and was rolled back to a fixed
+#    revision.
+#  - The collector logged one export deadline toward Tempo at 01:35:38 and
+#    retried it. The trace query in step 5 returned the spans afterwards.
+#  - A plain-HTTP probe of port 4318, made while debugging a TLS timeout, was
+#    logged by the collector as an HTTP/2 preface error.
+#  - The release history: revision 2 was the upgrade that renamed the exporter
+#    key and also, through a bad substitution, the receiver. It crash-looped and
+#    failed. Revision 3 applied the corrected values. The chapter's values equal
+#    revision 3's apart from the namespace names.
+#  - Four sends returned success: one before the first relabel (run outside the
+#    logger), one inside the propagation window and two after restores. Tempo
+#    returned three copies. The difference was not traced; the collector's one
+#    export deadline at 01:35:38 is the likely cause.
+#
+$ kubectl -n p06-03-tracing create secret generic tempo-tls --from-file=tls.crt=tempo.crt --from-file=tls.key=tempo.key
+secret/tempo-tls created
+$ kubectl -n p06-03-tracing create secret generic otel-collector-tls --from-file=tls.crt=otel.crt --from-file=tls.key=otel.key --from-file=ca.crt=ca.crt
+secret/otel-collector-tls created
+$ helm install tempo grafana/tempo --version 1.24.4 --namespace p06-03-tracing -f tempo-values.yaml --wait --timeout 5m
+level=WARN msg="this chart is deprecated"
+level=ERROR msg="failed to record the release" error="update: failed to update: etcdserver: request timed out"
+NAME: tempo
+LAST DEPLOYED: Sat Oct 31 06:17:15 2026
+NAMESPACE: p06-03-tracing
+STATUS: deployed
+REVISION: 1
+DESCRIPTION: Install complete
+TEST SUITE: None
+$ helm install otel-collector open-telemetry/opentelemetry-collector --version 0.178.1 --namespace p06-03-tracing -f otel-values.yaml --wait --timeout 5m
+Error: INSTALLATION FAILED: etcdserver: request timed out
+Timeout: request did not complete within requested timeout - context deadline exceeded
+$ kubectl get pods -n p06-03-tracing -o wide
+NAME      READY   STATUS    RESTARTS   AGE     IP            NODE                     NOMINATED NODE   READINESS GATES
+tempo-0   1/1     Running   0          4m11s   10.244.0.26   sf-pilot-control-plane   <none>           <none>
+$ helm uninstall otel-collector --namespace p06-03-tracing
+release "otel-collector" uninstalled
+$ helm install otel-collector open-telemetry/opentelemetry-collector --version 0.178.1 --namespace p06-03-tracing -f otel-values.yaml --wait --timeout 8m
+$ helm uninstall otel-collector --namespace p06-03-tracing
+release "otel-collector" uninstalled
+$ kubectl -n p06-03-tracing delete secret tempo-tls otel-collector-tls
+secret "tempo-tls" deleted from p06-03-tracing namespace
+secret "otel-collector-tls" deleted from p06-03-tracing namespace
+$ (run from the scratch directory) bash cert-block-run.sh   # the step 1 commands, namespace substituted
+..+++++++++++++++++++++++++++++++++++++++*...+....+......+++++++++++++++++++++++++++++++++++++++*..................+..+....+.....+.+...+......+..................+..+.+..+...+...+....+...+.....+............+...+.............+.........+...+........+.+...+..+...+............+.+........+.+...+...........+......+...............+....+..+.......+........+.............+......+.....+.........+............+....+........+......+.+.....+.........+.......+.....+............+.+......+...+...+........+.+.....+....+......+........+.+..+....+...+.....+...+.......+...........+.......+..+..........+...........+....+........+.......+..+.........+.+.........+..+.........+.+..+.......+...+..+.........................+........+.+.....................+...+..+...+.+......+.....+.........+....+...........+..........++++++
+.+..........+.....+...................+........+...+.........+..........+.....+.+............+..+++++++++++++++++++++++++++++++++++++++*.......+....+.....+..........+..+...+....+..+.+..+.+...........+++++++++++++++++++++++++++++++++++++++*.........+......+........+.+.....+.+...............+..+.+..............+.+.....+...................+..+.+.........+........+...+....+.....+..........+......+.....+..........+.........+...+..................+.....+............+................+.....+.+...........+....+.....+......+...................++++++
+-----
+...+....+.....+.+......+...+......+......+...+..............+.+......+.....+.+..+......+......+.+.....+.........+.............+..+...+.+..+.......+++++++++++++++++++++++++++++++++++++++*....+............+...+.....+.+++++++++++++++++++++++++++++++++++++++*..+..+.........+.++++++
+.........+.+..+......+.......+..+...+...+....+.....+++++++++++++++++++++++++++++++++++++++*.........+...+...+..+.+..+...+.+......+........+..........+.....+.+...+++++++++++++++++++++++++++++++++++++++*....+.+......+......+.....+.............+..+.............+...........+....+......+...........+.......+..+..........+........+.+..+....+......+............+..++++++
+-----
+Certificate request self-signature ok
+subject=CN=tempo
+....................+.+.....+....+.....+...+++++++++++++++++++++++++++++++++++++++*.......+...+++++++++++++++++++++++++++++++++++++++*........+.....+.............+...+...+......+...+.....+...+....+...........+....+...............+..................+........+...+......+.+............+.....+...+.......+.....+.......+...+...............+..+.+...+...........+.+...+.....+.+.....+...+......+.......+.....+..........+..+.+..............+.+..+.......+.....+.....................+.......+...+.....+.+...+..+......+...+.+...+..+................+............+......+............+.....+.............+......+.....+.+.....+....+.....+.........+.+..........................+....+...+.....+..........+......+..+...+......+..........+.....+.+...+.........+.....+............+..................+...+.......+.....+...+...+.+...++++++
+....+..+.............+..+.......+..+.+..+++++++++++++++++++++++++++++++++++++++*......+......+...+....+...+........+....+.....+..........+..+....+.........+...+.....+..........+..+.+.....+.......+...+.........+++++++++++++++++++++++++++++++++++++++*....+.....+.+........+....+...+.........+...+......+............+.....+....+.....+.........+.......++++++
+-----
+Certificate request self-signature ok
+subject=CN=otel
+$ kubectl -n p06-03-tracing create secret generic tempo-tls --from-file=tls.crt=tempo.crt --from-file=tls.key=tempo.key
+secret/tempo-tls created
+$ kubectl -n p06-03-tracing create secret generic otel-collector-tls --from-file=tls.crt=otel.crt --from-file=tls.key=otel.key --from-file=ca.crt=ca.crt
+secret/otel-collector-tls created
+$ kubectl -n p06-03-tracing rollout restart statefulset/tempo
+statefulset.apps/tempo restarted
+$ helm install otel-collector open-telemetry/opentelemetry-collector --version 0.178.1 --namespace p06-03-tracing -f otel-values-run.yaml --wait --timeout 8m
+NAME: otel-collector
+LAST DEPLOYED: Sat Oct 31 06:26:31 2026
+NAMESPACE: p06-03-tracing
+STATUS: deployed
+REVISION: 1
+DESCRIPTION: Install complete
+TEST SUITE: None
+NOTES:
+[DEPRECATION] Exporter 'otlp' has been renamed to 'otlp_grpc'. Your config has been automatically rewritten for this release. Please update your values.yaml — auto-rewrite will be removed in a future release. See UPGRADING.md.
+[DEPRECATION] Pipeline 'traces' references renamed exporter 'otlp'. It has been automatically rewritten to 'otlp_grpc' for this release. Please update your values.yaml — auto-rewrite will be removed in a future release. See UPGRADING.md.
+NAME: otel-collector
+LAST DEPLOYED: Sat Oct 31 06:21:53 2026
+NAMESPACE: p06-03-tracing
+STATUS: deployed
+REVISION: 1
+DESCRIPTION: Install complete
+TEST SUITE: None
+NOTES:
+[DEPRECATION] Exporter 'otlp' has been renamed to 'otlp_grpc'. Your config has been automatically rewritten for this release. Please update your values.yaml — auto-rewrite will be removed in a future release. See UPGRADING.md.
+[DEPRECATION] Pipeline 'traces' references renamed exporter 'otlp'. It has been automatically rewritten to 'otlp_grpc' for this release. Please update your values.yaml — auto-rewrite will be removed in a future release. See UPGRADING.md.
+$ kubectl apply -f netpol-run.yaml
+networkpolicy.networking.k8s.io/default-deny-all created
+networkpolicy.networking.k8s.io/allow-dns-egress created
+networkpolicy.networking.k8s.io/allow-spans-into-collector created
+networkpolicy.networking.k8s.io/allow-collector-egress-to-tempo created
+networkpolicy.networking.k8s.io/allow-collector-and-grafana-into-tempo created
+$ kubectl get networkpolicy -n p06-03-tracing
+NAME                                     POD-SELECTOR                                     AGE
+allow-collector-and-grafana-into-tempo   app.kubernetes.io/name=tempo                     1s
+allow-collector-egress-to-tempo          app.kubernetes.io/name=opentelemetry-collector   3s
+allow-dns-egress                         <none>                                           8s
+allow-spans-into-collector               app.kubernetes.io/name=opentelemetry-collector   5s
+default-deny-all                         <none>                                           10s
+$ kubectl get pods -n p06-03-tracing
+NAME                                                      READY   STATUS    RESTARTS   AGE
+otel-collector-opentelemetry-collector-845d6f9dfc-dnkjs   1/1     Running   0          2m59s
+tempo-0                                                   1/1     Running   0          2m50s
+$ kubectl -n p06-03-bookstore create secret generic otel-ca --from-file=ca.crt=ca.crt
+secret/otel-ca created
+$ kubectl apply -f sender-run.yaml
+serviceaccount/span-sender created
+pod/span-sender created
+$ kubectl wait --for=condition=Ready pod/span-sender -n p06-03-bookstore --timeout=180s
+E1031 06:33:00.350482   91372 reflector.go:227] "Failed to watch" err="Get \"https://127.0.0.1:<port>/api/v1/namespaces/p06-03-bookstore/pods?allowWatchBookmarks=true&fieldSelector=metadata.name%3Dspan-sender&resourceVersion=89561&timeoutSeconds=335&watch=true\": context canceled - error from a previous attempt: EOF" reflector="k8s.io/client-go/tools/watch/informerwatcher.go:162" type="*unstructured.Unstructured"
+error: timed out waiting for the condition on pods/span-sender
+$ kubectl get pod span-sender -n p06-03-bookstore --show-labels
+Error from server (Forbidden): pods "span-sender" is forbidden: User "<user>" cannot get resource "pods" in API group "" in the namespace "p06-03-bookstore": rbac: RBAC: [clusterrole.rbac.authorization.k8s.io "cluster-admin" not found, clusterrole.rbac.authorization.k8s.io "system:discovery" not found, clusterrole.rbac.authorization.k8s.io "system:public-info-viewer" not found, clusterrole.rbac.authorization.k8s.io "system:basic-user" not found]
+$ kubectl cp span.json p06-03-bookstore/span-sender:/tmp/span.json
+$ kubectl exec -n p06-03-bookstore span-sender -- curl -sS --max-time 10 --cacert /etc/otel/ca/ca.crt -H Content-Type: application/json --data @/tmp/span.json https://otel-collector-opentelemetry-collector.p06-03-tracing.svc.cluster.local:4318/v1/traces
+curl: (28) Connection timed out after 10001 milliseconds
+command terminated with exit code 28
+$ kubectl label pod span-sender -n p06-03-bookstore app=catalog --overwrite
+pod/span-sender labeled
+$ kubectl exec -n p06-03-bookstore span-sender -- curl -sS --max-time 10 --cacert /etc/otel/ca/ca.crt -H Content-Type: application/json --data @/tmp/span.json https://otel-collector-opentelemetry-collector.p06-03-tracing.svc.cluster.local:4318/v1/traces
+curl: (6) Could not resolve host: otel-collector-opentelemetry-collector.p06-03-tracing.svc.cluster.local
+command terminated with exit code 6
+$ kubectl label pod span-sender -n p06-03-bookstore app=orders --overwrite
+pod/span-sender labeled
+$ kubectl exec -n p06-03-bookstore span-sender -- curl -sS --max-time 10 --cacert /etc/otel/ca/ca.crt -H Content-Type: application/json --data @/tmp/span.json https://otel-collector-opentelemetry-collector.p06-03-tracing.svc.cluster.local:4318/v1/traces
+{"partialSuccess":{}}
+$ kubectl label pod span-sender -n p06-03-bookstore app=catalog --overwrite
+pod/span-sender labeled
+$ kubectl exec -n p06-03-bookstore span-sender -- curl -sS --max-time 10 --cacert /etc/otel/ca/ca.crt -H Content-Type: application/json --data @/tmp/span.json https://otel-collector-opentelemetry-collector.p06-03-tracing.svc.cluster.local:4318/v1/traces
+{"partialSuccess":{}}
+$ kubectl exec -n p06-03-bookstore span-sender -- sleep 20
+$ kubectl exec -n p06-03-bookstore span-sender -- curl -sS --max-time 10 --cacert /etc/otel/ca/ca.crt -H Content-Type: application/json --data @/tmp/span.json https://otel-collector-opentelemetry-collector.p06-03-tracing.svc.cluster.local:4318/v1/traces
+curl: (28) Connection timed out after 10001 milliseconds
+command terminated with exit code 28
+$ kubectl label pod span-sender -n p06-03-bookstore app=orders --overwrite
+pod/span-sender labeled
+$ kubectl exec -n p06-03-bookstore span-sender -- sleep 20
+
+$ kubectl exec -n p06-03-bookstore span-sender -- curl -sS --max-time 10 --cacert /etc/otel/ca/ca.crt -H Content-Type: application/json --data @/tmp/span.json https://otel-collector-opentelemetry-collector.p06-03-tracing.svc.cluster.local:4318/v1/traces
+{"partialSuccess":{}}
+$ curl -s -o trace.json -w %{http_code}\n http://localhost:3200/api/traces/4bf92f3577b34da6a3ce929d0e0e4736
+200
+$ sh -c curl -s http://localhost:3200/api/traces/4bf92f3577b34da6a3ce929d0e0e4736 | grep -o '"key":"[^"]*"\|"stringValue":"[^"]*"'
+"key":"service.name"
+"stringValue":"orders"
+"key":"http.route"
+"stringValue":"/orders"
+"key":"order.id"
+"stringValue":"ord_1042"
+"key":"note"
+"stringValue":"refund for card ****"
+"key":"http.route"
+"stringValue":"/orders"
+"key":"order.id"
+"stringValue":"ord_1042"
+"key":"note"
+"stringValue":"refund for card ****"
+"key":"http.route"
+"stringValue":"/orders"
+"key":"order.id"
+"stringValue":"ord_1042"
+"key":"note"
+"stringValue":"refund for card ****"
+$ kubectl exec -n p06-03-bookstore span-sender -- sh -c nc -z -w 5 tempo.p06-03-tracing.svc.cluster.local 14250 && echo open14250 || echo refused14250
+refused14250
+$ kubectl exec -n p06-03-bookstore span-sender -- sh -c nc -z -w 5 tempo.p06-03-tracing.svc.cluster.local 14250; echo "nc exit $?"
+nc exit 1
+$ kubectl get pods -n p06-03-tracing
+NAME                                                      READY   STATUS    RESTARTS   AGE
+otel-collector-opentelemetry-collector-845d6f9dfc-dnkjs   1/1     Running   0          15m
+tempo-0                                                   1/1     Running   0          15m
+$ sh -c kubectl logs -n p06-03-tracing tempo-0 | grep "Starting .*server"
+ts=2026-10-31T01:27:15Z level=info msg="Starting GRPC server" component=tempo endpoint=0.0.0.0:4317
+ts=2026-10-31T01:27:15Z level=info msg="Starting UDP server for Binary Thrift" component=tempo endpoint=0.0.0.0:6832
+ts=2026-10-31T01:27:15Z level=info msg="Starting UDP server for Compact Thrift" component=tempo endpoint=0.0.0.0:6831
+ts=2026-10-31T01:27:15Z level=info msg="Starting HTTP server for Jaeger Thrift" component=tempo endpoint=0.0.0.0:14268
+ts=2026-10-31T01:27:15Z level=info msg="Starting gRPC server for Jaeger Protobuf" component=tempo endpoint=0.0.0.0:14250
+$ helm upgrade otel-collector open-telemetry/opentelemetry-collector --version 0.178.1 --namespace p06-03-tracing -f otel-values-run2.yaml --wait --timeout 8m
+level=WARN msg="upgrade failed" name=otel-collector error="resource Deployment/p06-03-tracing/otel-collector-opentelemetry-collector not ready. status: InProgress, message: Pending termination: 1\ncontext deadline exceeded"
+Error: UPGRADE FAILED: resource Deployment/p06-03-tracing/otel-collector-opentelemetry-collector not ready. status: InProgress, message: Pending termination: 1
+context deadline exceeded
+$ helm upgrade otel-collector open-telemetry/opentelemetry-collector --version 0.178.1 --namespace p06-03-tracing -f otel-values-run2.yaml --wait --timeout 5m
+Release "otel-collector" has been upgraded. Happy Helming!
+NAME: otel-collector
+LAST DEPLOYED: Sat Oct 31 06:53:54 2026
+NAMESPACE: p06-03-tracing
+STATUS: deployed
+REVISION: 3
+DESCRIPTION: Upgrade complete
+TEST SUITE: None
+NOTES:
+$ kubectl get pods -n p06-03-tracing
+NAME                                                      READY   STATUS    RESTARTS   AGE
+otel-collector-opentelemetry-collector-845d6f9dfc-dnkjs   1/1     Running   0          27m
+tempo-0                                                   1/1     Running   0          27m
+$ sh -c kubectl logs -n p06-03-tracing deploy/otel-collector-opentelemetry-collector --tail=200 | grep -ci "error"
+12

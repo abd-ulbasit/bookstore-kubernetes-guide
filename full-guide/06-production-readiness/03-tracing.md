@@ -5,13 +5,17 @@
 > manual instrumentation, the **OTel Collector**: receivers/processors/
 > exporters), backends (Jaeger/Tempo/Grafana), trace↔log↔metric correlation
 > via exemplars, and sampling/overhead — applied by tracing a Bookstore
-> checkout across storefront → orders → rabbitmq → payments-worker.
+> checkout across storefront → orders → rabbitmq → payments-worker. A trace
+> carries whatever the requests carried, so the chapter also covers the
+> controls that keep span data from leaking.
 
 **Estimated time:** ~15 min read · ~60 min hands-on
-**Prerequisites:** [Part 06 ch.01](01-observability-metrics.md) — metrics give p95, traces say *where* time went · [Part 06 ch.02](02-logging.md) — trace IDs are the join key to logs · [Part 02 ch.02](../02-networking/02-services.md) — the cross-service calls being traced
-**You'll know after this:** • explain traces, spans and W3C `traceparent` context propagation · • choose head sampling vs tail sampling for a given traffic shape · • deploy the OpenTelemetry Collector with receivers, processors and exporters · • correlate trace → log → metric via exemplars in Grafana / Tempo · • follow one Bookstore checkout across four services in a flamegraph
+**Prerequisites:** [Part 06 ch.01](01-observability-metrics.md), metrics give p95, traces say *where* time went · [Part 06 ch.02](02-logging.md), trace IDs are the join key to logs · [Part 02 ch.02](../02-networking/02-services.md), the cross-service calls being traced · [Part 02 ch.06](../02-networking/06-network-policies.md), the policies in step 3
+**You'll know after this:** • explain traces, spans and W3C `traceparent` context propagation · • choose head sampling vs tail sampling for a given traffic shape · • deploy the OpenTelemetry Collector with receivers, processors and exporters · • keep personal data and tokens out of span attributes, and name the control that drops them · • correlate trace → log → metric via exemplars in Grafana / Tempo · • follow one Bookstore checkout across four services in a flamegraph
 
-<!-- tags: observability, opentelemetry, day-2 -->
+<!-- tags: observability, opentelemetry, day-2, security -->
+
+
 
 ## Why this exists
 
@@ -75,6 +79,24 @@ third observability pillar; with metrics and logs it completes the
 > which is beyond these deliberately minimal teaching binaries. Everything
 > claimed to be runnable is; everything illustrative is labelled as such.
 
+## Threats and controls
+
+A trace records what each request carried, so it is only as safe as its
+contents. These threats belong to tracing. Log lines belong to
+[06.02](02-logging.md).
+
+| Threat | Control taught here | Goes deeper |
+|---|---|---|
+| A span attribute holds personal data or a token, and the trace store keeps it for everyone who can query traces | The app puts IDs in attributes, not values. The Collector deletes known keys and redacts matching values before export: [the pipeline](#collector-pipeline) | [03.02](../03-config-and-storage/02-secrets.md) for secret handling, [06.02](02-logging.md) for logs |
+| Any Pod in the cluster can send spans. The OTLP receiver accepts any sender that can reach it, so a neighbour can flood the Collector or plant fake spans | [A NetworkPolicy that admits only the services that emit spans](#netpol) | [02.06](../02-networking/06-network-policies.md) |
+| Spans cross the pod network in cleartext, so anything that can observe that traffic reads them | [TLS on the OTLP receivers and on the Collector-to-Tempo hop](#tracing-namespace) | [11.04](../11-advanced-production-patterns/04-service-mesh.md) for workload mTLS |
+| A caller outside the cluster sends its own `traceparent` or `baggage`, and that context reaches every service the request touches | [Start a new trace at the public edge, and propagate only the trace context](#propagation) | This chapter. [13.07](../13-grand-capstone-bookstore-platform/07-edge-gateway-waf-rate-limiting.md) covers the edge itself |
+
+The Collector is a backstop, not the first line. A service should not write
+a value into an attribute at all. The Collector's rules catch only the keys
+and patterns they name, so a new field needs a rule before it can be
+trusted.
+
 ## Diagrams
 
 ### A Bookstore checkout as a span tree (Mermaid, sequence)
@@ -113,11 +135,12 @@ sequenceDiagram
      (async, same trace via msg-header propagation)
    span E  payments-worker process payment          [####]         25ms  parent=D
 
- OTEL PIPELINE
-   [app + OTel SDK] --OTLP--> [OTel Collector] --> [Tempo / Jaeger]
-                               receivers: otlp
-                               processors: batch, tail_sampling, attributes
-                               exporters : otlp/tempo  (+ logging for debug)
+ OTEL PIPELINE          (TLS on both arrows)
+   [app + OTel SDK] --OTLP--> [OTel Collector] --OTLP--> [Tempo]
+                               receivers: otlp (4317, 4318)
+                               processors: memory_limiter, tail_sampling,
+                                           redaction, attributes, batch
+                               exporters : otlp (to Tempo, CA-verified)
    App knows ONLY the Collector endpoint (OTEL_EXPORTER_OTLP_ENDPOINT);
    swapping the backend is a Collector change, not an app change.
 ```
@@ -126,10 +149,17 @@ sequenceDiagram
 
 **Assumed working directory: the guide repo root (`full-guide/`).**
 
-We will: (1) deploy **Tempo** + the **OpenTelemetry Collector** into their own
-namespace; (2) see them healthy; (3) walk the exact instrumentation the Go
-services would need (env-driven OTLP) and the Collector config — being explicit
-about what is runnable vs illustrative.
+We will: (1) create the `tracing` namespace and the TLS material its workloads
+mount; (2) deploy **Tempo** and the **OpenTelemetry Collector** with pinned
+charts; (3) lock the namespace down with NetworkPolicies; (4) send spans from a
+service that emits them, and from one that must be refused; (5) check what
+Tempo stores; (6) read the instrumentation the Go services would need, being
+explicit about what is runnable and what is illustrative.
+
+**Tier A.** Run these steps on a kind cluster you own. They create namespaces
+and Secrets, so no shared cluster is safe for them. The output blocks below
+were captured on a lab cluster whose node has a different name, in namespaces
+named with a prefix. The commands here use the names in the text.
 
 ### 0. Prerequisites (self-bootstrapping)
 
@@ -145,124 +175,667 @@ kubectl apply -f examples/bookstore/raw-manifests/60-networkpolicy.yaml   # if a
 kubectl rollout status deployment/payments-worker -n bookstore
 ```
 
-### 1. Deploy Tempo + the OTel Collector (own namespace)
+### 1. The namespace and the TLS material {#tracing-namespace}
 
-These run in a `tracing` namespace — their own, **not** PSA-`restricted`
-`bookstore` (same reasoning as the metrics/logging stacks: platform
-telemetry infra lives beside the app, not in its hardened namespace):
+Telemetry infrastructure runs in its own `tracing` namespace, as the metrics
+and logging stacks do. The namespace enforces `restricted` like every other
+workload namespace, as the
+[baseline](../01-core-workloads/01-pods.md#baseline-namespace) asks.
+
+```sh
+kubectl apply -f - <<'EOF'
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: tracing
+  labels:
+    pod-security.kubernetes.io/enforce: restricted
+    pod-security.kubernetes.io/warn: restricted
+EOF
+```
+
+Span data crosses two hops, so both use TLS. This lab signs its own
+certificates with a CA it creates. A platform should use the CA it already
+trusts; [11.04](../11-advanced-production-patterns/04-service-mesh.md) covers
+workload identity. Keep `ca.key` on your machine, since no cluster object
+needs it. The Collector gets `ca.crt` to check Tempo's certificate, and the
+services that send spans get it in step 4.
+
+```sh
+mkdir tls && cd tls
+openssl req -x509 -newkey rsa:2048 -nodes -days 30 -subj "/CN=tracing-lab-ca" \
+  -keyout ca.key -out ca.crt
+printf 'subjectAltName=DNS:tempo.tracing.svc.cluster.local,DNS:tempo.tracing.svc,DNS:tempo\n' > san-tempo.cnf
+printf 'subjectAltName=DNS:otel-collector-opentelemetry-collector.tracing.svc.cluster.local,DNS:otel-collector-opentelemetry-collector.tracing.svc,DNS:localhost\n' > san-otel.cnf
+for name in tempo otel; do
+  openssl req -newkey rsa:2048 -nodes -subj "/CN=$name" \
+    -keyout $name.key -out $name.csr
+  openssl x509 -req -in $name.csr -CA ca.crt -CAkey ca.key -CAcreateserial \
+    -days 30 -extfile san-$name.cnf -out $name.crt
+done
+
+kubectl -n tracing create secret generic tempo-tls \
+  --from-file=tls.crt=tempo.crt --from-file=tls.key=tempo.key
+kubectl -n tracing create secret generic otel-collector-tls \
+  --from-file=tls.crt=otel.crt --from-file=tls.key=otel.key \
+  --from-file=ca.crt=ca.crt
+```
+
+The Collector's certificate also lists `localhost`, for a manual test over
+`kubectl port-forward`. Tempo's certificate names only the in-cluster Service.
+
+### 2. Tempo and the Collector from pinned charts {#pinned-charts}
+
+Two pinned charts are used here: `grafana/tempo` 1.24.4 (Tempo 2.9.0) and
+`open-telemetry/opentelemetry-collector` 0.178.1 (collector 0.163.2, the
+contrib image). Each image is pinned by digest, with the tag kept beside it.
+The Tempo chart has no digest field, so its `tag` carries `tag@digest`.
 
 ```sh
 helm repo add grafana https://grafana.github.io/helm-charts
 helm repo add open-telemetry https://open-telemetry.github.io/opentelemetry-helm-charts
 helm repo update
-kubectl create namespace tracing
 
-# Grafana Tempo (single-binary; filesystem storage is fine locally).
-helm install tempo grafana/tempo --namespace tracing --wait
-
-# OpenTelemetry Collector as a Deployment, OTLP in, Tempo out.
-# NOTE: the chart MERGES `config.*` into its bundled default config (it does
-# not replace it), and the nested `--set`/`--set-string` config paths are
-# version-sensitive across chart majors. The ROBUST path is a values file
-# (-f otel-values.yaml) carrying the full `config:` block — pin both the
-# chart version and that file. The inline --set form below is shown for
-# brevity; if the Collector Pod CrashLoops on a config key, switch to -f.
-helm install otel-collector open-telemetry/opentelemetry-collector \
-  --namespace tracing \
-  --set mode=deployment \
-  --set image.repository=otel/opentelemetry-collector-contrib \
-  --set-string config.exporters.otlp.endpoint=tempo.tracing.svc.cluster.local:4317 \
-  --set-string config.exporters.otlp.tls.insecure=true \
-  --wait
-  # or, robust:  -f otel-values.yaml   (full config: block; version-pinned)
-
-kubectl get pods -n tracing
-# Add Tempo as a Grafana datasource (ch.01's Grafana):
-#   Connections -> Data sources -> Tempo -> URL
-#   http://tempo.tracing.svc.cluster.local:3200
-# RELIABLE end-to-end verification is the Grafana->Explore->Tempo datasource
-# (Tempo returning a queried trace), NOT just "the Collector Pod is Running".
 ```
 
-The Collector now listens for OTLP on `:4317` (gRPC) / `:4318` (HTTP) and
-forwards spans to Tempo. This part is fully runnable — `kubectl get pods -n
-tracing` shows both healthy.
-
-### 2. The Collector pipeline (config as data)
-
-The Collector's value is the **processors** — the app just emits OTLP; the
-Collector does batching, tail-sampling and scrubbing centrally. A
-representative pipeline (the Helm chart renders this; shown to make the model
-concrete):
+Tempo reads its settings from the values file below. Save it as
+`tempo-values.yaml`:
 
 ```yaml
-receivers:
-  otlp:
-    protocols:
-      grpc: { endpoint: 0.0.0.0:4317 }
-      http: { endpoint: 0.0.0.0:4318 }
-processors:
-  batch: {}                                  # amortise export cost
-  tail_sampling:                             # keep the traces that matter
-    decision_wait: 10s
-    policies:
-      - name: errors
-        type: status_code
-        status_code: { status_codes: [ERROR] }   # keep 100% of errored traces
-      - name: slow
-        type: latency
-        latency: { threshold_ms: 500 }            # keep slow traces
-      - name: sample-rest
-        type: probabilistic
-        probabilistic: { sampling_percentage: 5 } # 5% of the boring ones
-  attributes:
-    actions:
-      - { key: db.statement, action: delete }     # scrub: never store raw SQL/PII
-exporters:
-  otlp:
-    endpoint: tempo.tracing.svc.cluster.local:4317
-    tls: { insecure: true }
-service:
-  pipelines:
-    traces:
-      receivers:  [otlp]
-      processors: [tail_sampling, attributes, batch]
-      exporters:  [otlp]
+tempo:
+  tag: "2.9.0@sha256:65a5789759435f1ef696f1953258b9bbdb18eb571d5ce711ff812d2e128288a4"
+  securityContext:
+    allowPrivilegeEscalation: false
+    readOnlyRootFilesystem: true
+    capabilities:
+      drop: ["ALL"]
+  resources:
+    requests: { cpu: 100m, memory: 256Mi }
+    limits: { memory: 512Mi }
+  extraVolumeMounts:
+    - name: data
+      mountPath: /var/tempo
+    - name: tls
+      mountPath: /etc/tempo/tls
+      readOnly: true
+    - name: tmp
+      mountPath: /tmp
+  receivers:
+    otlp:
+      protocols:
+        grpc:
+          endpoint: 0.0.0.0:4317
+          tls:
+            cert_file: /etc/tempo/tls/tls.crt
+            key_file: /etc/tempo/tls/tls.key
+        http: null
+securityContext:
+  seccompProfile:
+    type: RuntimeDefault
+serviceAccount:
+  automountServiceAccountToken: false
+extraVolumes:
+  - name: data
+    emptyDir: {}
+  - name: tls
+    secret:
+      secretName: tempo-tls
+      defaultMode: 0440
+  - name: tmp
+    emptyDir: {}
 ```
 
-Note the ordering rationale: `tail_sampling` must see the *whole* trace before
-deciding, then `attributes` scrubs sensitive fields, then `batch` amortises
-the export. Tail sampling lives here, **not** in the app — only the Collector
-sees all spans of a trace.
+The root filesystem is read-only, so Tempo writes its trace blocks and WAL to
+an `emptyDir` at `/var/tempo`, and `/tmp` is one too. The chart keeps its
+Jaeger receivers enabled, because its Service template reads their settings
+and a `null` there breaks the render. Step 3 closes their
+ports. The TLS key is mode `0440`, and the pod's `fsGroup` lets the Tempo
+group read it.
 
-### 3. How you would instrument the Go services (illustrative)
+```sh
+helm install tempo grafana/tempo --version 1.24.4 \
+  --namespace tracing -f tempo-values.yaml --wait
+```
 
-The demo binaries don't emit spans (stated above). The standard, minimal way
-to add it — **OTel via environment, zero backend coupling**:
+The Collector takes the values file below. Save it as `otel-values.yaml`:
 
-1. **Add the SDK + auto-instrumentation** to each service: the
-   `go.opentelemetry.io/otel` SDK, `otelhttp` (wraps `net/http` server and
-   client — covers storefront→orders and the HTTP handlers), and `otelsql` /
-   the AMQP propagation helpers for the Postgres and RabbitMQ hops.
-2. **Configure the exporter purely by env** (no code knows the backend) — the
-   container env added to the Deployment, pointing at the Collector Service:
+```yaml
+mode: deployment
+image:
+  repository: otel/opentelemetry-collector-contrib
+  tag: "0.163.2"
+  digest: "sha256:7f22d2a6748110ffb6a59bc0df448bccbf501cdb667d610ede4c61d3863d5849"
+podSecurityContext:
+  runAsNonRoot: true
+  runAsUser: 10001
+  runAsGroup: 10001
+  fsGroup: 10001
+  seccompProfile:
+    type: RuntimeDefault
+securityContext:
+  allowPrivilegeEscalation: false
+  readOnlyRootFilesystem: true
+  capabilities:
+    drop: ["ALL"]
+serviceAccount:
+  automountServiceAccountToken: false
+resources:
+  requests: { cpu: 100m, memory: 128Mi }
+  limits: { memory: 256Mi }
+extraVolumes:
+  - name: tls
+    secret:
+      secretName: otel-collector-tls
+      defaultMode: 0440
+  - name: tmp
+    emptyDir: {}
+extraVolumeMounts:
+  - name: tls
+    mountPath: /etc/otel/tls
+    readOnly: true
+  - name: tmp
+    mountPath: /tmp
+ports:
+  jaeger-compact:
+    enabled: false
+  jaeger-thrift:
+    enabled: false
+  jaeger-grpc:
+    enabled: false
+  zipkin:
+    enabled: false
+config:
+  receivers:
+    jaeger: null
+    zipkin: null
+    prometheus: null
+    otlp:
+      protocols:
+        grpc:
+          tls:
+            cert_file: /etc/otel/tls/tls.crt
+            key_file: /etc/otel/tls/tls.key
+        http:
+          tls:
+            cert_file: /etc/otel/tls/tls.crt
+            key_file: /etc/otel/tls/tls.key
+  processors:
+    tail_sampling:
+      decision_wait: 10s
+      policies:
+        - name: errors
+          type: status_code
+          status_code: { status_codes: [ERROR] }
+        - name: slow
+          type: latency
+          latency: { threshold_ms: 500 }
+        - name: sample-rest
+          type: probabilistic
+          probabilistic: { sampling_percentage: 5 }
+    redaction:
+      allow_all_keys: true
+      blocked_values:
+        - '\b4[0-9]{3}[ -]?[0-9]{4}[ -]?[0-9]{4}[ -]?[0-9]{4}\b'
+        - 'Bearer [A-Za-z0-9._~+/=-]+'
+    attributes:
+      actions:
+        - { key: user.name, action: delete }
+        - { key: db.statement, action: delete }
+        - { key: http.request.header.authorization, action: delete }
+        - { key: http.request.header.cookie, action: delete }
+  exporters:
+    debug: null
+    otlp_grpc:
+      endpoint: tempo.tracing.svc.cluster.local:4317
+      tls:
+        ca_file: /etc/otel/tls/ca.crt
+  service:
+    pipelines:
+      logs: null
+      metrics: null
+      traces:
+        receivers: [otlp]
+        processors: [memory_limiter, tail_sampling, redaction, attributes, batch]
+        exporters: [otlp_grpc]
+```
+
+The values replace the chart's default pipelines, so only traces remain and
+only OTLP enters them. The exporter checks Tempo's certificate against
+`ca.crt`, and nothing in the file turns that check off. The Service exposes
+only 4317 and 4318.
+
+```sh
+helm install otel-collector open-telemetry/opentelemetry-collector --version 0.178.1 \
+  --namespace tracing -f otel-values.yaml --wait
+kubectl get pods -n tracing
+```
+
+<!-- gate: output -->
+```
+NAME                                                      READY   STATUS    RESTARTS   AGE
+otel-collector-opentelemetry-collector-845d6f9dfc-dnkjs   1/1     Running   0          27m
+tempo-0                                                   1/1     Running   0          27m
+```
+
+Both Pods should reach `1/1 Running`. The Collector now listens for OTLP on
+`:4317` (gRPC) and `:4318` (HTTP, the port the services use) and forwards
+spans to Tempo. A Running Pod only shows that the process started. Add Tempo
+as a datasource in Grafana from [06.01](01-observability-metrics.md) at
+`http://tempo.tracing.svc.cluster.local:3200` and query a trace to see the
+pipeline work end to end. That query API stays plaintext inside the
+namespace in this chapter. Step 3 admits only Grafana to it, and encrypting
+it belongs with the workload TLS in
+[11.04](../11-advanced-production-patterns/04-service-mesh.md).
+
+### The Collector pipeline {#collector-pipeline}
+
+The Collector's value is its processors. The app emits OTLP, and the
+Collector samples, scrubs and batches centrally. The traces pipeline in the
+values file runs these processors, in this order:
+
+- `memory_limiter` refuses data before the Collector runs out of memory.
+- `tail_sampling` holds each trace for `decision_wait` and then keeps every
+  trace with an error, every trace over 500 ms, and 5% of the rest. It needs
+  the whole trace, so only the Collector can run it.
+- `redaction` replaces any attribute value matching a `blocked_values`
+  pattern with `****`, the processor's default masking string. The two
+  patterns here match a card-number shape and a bearer token wherever they
+  appear.
+- `attributes` deletes the keys it lists. A span has no use for a customer
+  name, a SQL statement or an Authorization header.
+- `batch` amortises the export.
+
+Scrubbing runs after sampling, so the sampling policies see the unscrubbed
+trace. They read only status and duration, which hold no personal data. Only
+the Collector sees every span of a trace, which is why sampling and scrubbing
+live here and not in each service.
+
+### 3. Close the namespace with NetworkPolicies {#netpol}
+
+The default-deny policy stops every Pod in `tracing` from talking in either
+direction. The rules after it open only the edges that spans need, and each
+edge gets a rule on both ends, as
+[02.06](../02-networking/06-network-policies.md) explains. The rules below
+admit three things:
+
+- Spans from the Bookstore services that emit them, on the Collector's HTTP
+  port 4318. The services send OTLP over HTTP, so the Collector's gRPC port
+  4317 stays closed to them. The namespace selector and the `app` selector sit
+  in one `from` entry, so both must match.
+- The Collector's traffic to Tempo on 4317, admitted at both ends.
+- Grafana's queries to Tempo on 3200, from the `monitoring` namespace.
+
+```yaml
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: default-deny-all
+  namespace: tracing
+spec:
+  podSelector: {}
+  policyTypes: ["Ingress", "Egress"]
+---
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: allow-dns-egress
+  namespace: tracing
+spec:
+  podSelector: {}
+  policyTypes: ["Egress"]
+  egress:
+    - to:
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: kube-system
+          podSelector:
+            matchLabels:
+              k8s-app: kube-dns
+      ports:
+        - { protocol: UDP, port: 53 }
+        - { protocol: TCP, port: 53 }
+---
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: allow-spans-into-collector
+  namespace: tracing
+spec:
+  podSelector:
+    matchLabels:
+      app.kubernetes.io/name: opentelemetry-collector
+  policyTypes: ["Ingress"]
+  ingress:
+    - from:
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: bookstore
+          podSelector:
+            matchExpressions:
+              - key: app
+                operator: In
+                values: ["storefront", "orders", "payments-worker"]
+      ports:
+        - { protocol: TCP, port: 4318 }
+---
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: allow-collector-egress-to-tempo
+  namespace: tracing
+spec:
+  podSelector:
+    matchLabels:
+      app.kubernetes.io/name: opentelemetry-collector
+  policyTypes: ["Egress"]
+  egress:
+    - to:
+        - podSelector:
+            matchLabels:
+              app.kubernetes.io/name: tempo
+      ports:
+        - { protocol: TCP, port: 4317 }
+---
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: allow-collector-and-grafana-into-tempo
+  namespace: tracing
+spec:
+  podSelector:
+    matchLabels:
+      app.kubernetes.io/name: tempo
+  policyTypes: ["Ingress"]
+  ingress:
+    - from:
+        - podSelector:
+            matchLabels:
+              app.kubernetes.io/name: opentelemetry-collector
+      ports:
+        - { protocol: TCP, port: 4317 }
+    - from:
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: monitoring
+          podSelector:
+            matchLabels:
+              app.kubernetes.io/name: grafana
+      ports:
+        - { protocol: TCP, port: 3200 }
+```
+
+Save the file as `netpol.yaml` and apply it:
+
+```sh
+kubectl apply -f netpol.yaml
+kubectl get networkpolicy -n tracing
+```
+
+<!-- gate: output -->
+```
+NAME                                     POD-SELECTOR                                     AGE
+allow-collector-and-grafana-into-tempo   app.kubernetes.io/name=tempo                     1s
+allow-collector-egress-to-tempo          app.kubernetes.io/name=opentelemetry-collector   3s
+allow-dns-egress                         <none>                                           8s
+allow-spans-into-collector               app.kubernetes.io/name=opentelemetry-collector   5s
+default-deny-all                         <none>                                           10s
+```
+
+Tempo's Service still lists the Jaeger and OpenCensus ports, and Tempo still
+listens on the Jaeger ones. None of them is admitted, so the policy is what
+keeps them closed. The lab's kind cluster enforces these rules, as step 4
+shows. A cluster whose CNI ignores NetworkPolicy accepts the same objects and
+enforces nothing, so check enforcement before you rely on the rules.
+
+### 4. Send spans from a service that emits them {#send-spans}
+
+Each service that exports spans needs the CA, so copy `ca.crt` into the
+`bookstore` namespace. Run this from the `tls` directory:
+
+```sh
+kubectl -n bookstore create secret generic otel-ca --from-file=ca.crt=ca.crt
+```
+
+A stand-in Pod labelled `app: orders` plays the orders service. It has its own
+ServiceAccount, runs as the curl image's `curl_user` (UID 100), and mounts the
+CA:
+
+```yaml
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: span-sender
+  namespace: bookstore
+automountServiceAccountToken: false
+---
+apiVersion: v1
+kind: Pod
+metadata:
+  name: span-sender
+  namespace: bookstore
+  labels:
+    app: orders
+spec:
+  serviceAccountName: span-sender
+  automountServiceAccountToken: false
+  securityContext:
+    runAsNonRoot: true
+    runAsUser: 100
+    runAsGroup: 101
+    seccompProfile:
+      type: RuntimeDefault
+  containers:
+    - name: sender
+      image: curlimages/curl@sha256:d9b4541e214bcd85196d6e92e2753ac6d0ea699f0af5741f8c6cccbfcf00ef4b # curlimages/curl:8.10.1
+      command: ["sleep", "3600"]
+      securityContext:
+        allowPrivilegeEscalation: false
+        readOnlyRootFilesystem: true
+        capabilities:
+          drop: ["ALL"]
+      resources:
+        requests: { cpu: 10m, memory: 16Mi }
+        limits: { memory: 64Mi }
+      volumeMounts:
+        - name: tmp
+          mountPath: /tmp
+        - name: otel-ca
+          mountPath: /etc/otel/ca
+          readOnly: true
+  volumes:
+    - name: tmp
+      emptyDir: {}
+    - name: otel-ca
+      secret:
+        secretName: otel-ca
+        defaultMode: 0444
+```
+
+Save the file as `span-sender.yaml`, apply it, and send one span. The payload
+is a slow `POST /orders` span, 800 ms long, that carries three things a span
+should never hold: a customer name, a bearer token and a card number in free
+text:
+
+```json
+{
+  "resourceSpans": [
+    {
+      "resource": {
+        "attributes": [
+          { "key": "service.name", "value": { "stringValue": "orders" } }
+        ]
+      },
+      "scopeSpans": [
+        {
+          "spans": [
+            {
+              "traceId": "4bf92f3577b34da6a3ce929d0e0e4736",
+              "spanId": "00f067aa0ba902b7",
+              "name": "POST /orders",
+              "kind": 2,
+              "startTimeUnixNano": "1793443200000000000",
+              "endTimeUnixNano": "1793443200800000000",
+              "attributes": [
+                { "key": "http.route", "value": { "stringValue": "/orders" } },
+                { "key": "order.id", "value": { "stringValue": "ord_1042" } },
+                { "key": "user.name", "value": { "stringValue": "Jane Doe" } },
+                { "key": "http.request.header.authorization", "value": { "stringValue": "Bearer lab-token-not-real" } },
+                { "key": "note", "value": { "stringValue": "refund for card 4111 1111 1111 1111" } }
+              ]
+            }
+          ]
+        }
+      ]
+    }
+  ]
+}
+```
+
+```sh
+kubectl apply -f span-sender.yaml
+kubectl cp span.json bookstore/span-sender:/tmp/span.json
+kubectl exec -n bookstore span-sender -- curl -sS --max-time 10 \
+  --cacert /etc/otel/ca/ca.crt -H 'Content-Type: application/json' \
+  --data @/tmp/span.json \
+  https://otel-collector-opentelemetry-collector.tracing.svc.cluster.local:4318/v1/traces
+```
+
+<!-- gate: output -->
+```
+{"partialSuccess":{}}
+```
+
+The Collector accepted the span. Now make the same Pod look like the catalog
+service. This step is a deliberate failure: the policy admits only the three
+emitting services.
+
+```sh
+kubectl label pod span-sender -n bookstore app=catalog --overwrite
+kubectl exec -n bookstore span-sender -- sleep 20
+kubectl exec -n bookstore span-sender -- curl -sS --max-time 10 \
+  --cacert /etc/otel/ca/ca.crt -H 'Content-Type: application/json' \
+  --data @/tmp/span.json \
+  https://otel-collector-opentelemetry-collector.tracing.svc.cluster.local:4318/v1/traces
+```
+
+<!-- gate: output -->
+```
+curl: (28) Connection timed out after 10001 milliseconds
+```
+
+The refusal is silent. curl gets no reply and waits out its timeout. The
+`sleep` matters. In the lab, a request sent straight after the label change
+still got through, and the same request sent after the 20-second wait timed
+out. Restore the label with `app=orders --overwrite`, and the same request
+succeeds again.
+
+### 5. Check what Tempo stores {#what-tempo-stores}
+
+Query the trace through a port-forward, and print only the attribute keys and
+values:
+
+```sh
+kubectl -n tracing port-forward svc/tempo 3200:3200 &
+curl -s http://localhost:3200/api/traces/4bf92f3577b34da6a3ce929d0e0e4736 \
+  | grep -o '"key":"[^"]*"\|"stringValue":"[^"]*"'
+kill %1
+```
+
+<!-- gate: output -->
+```
+"key":"service.name"
+"stringValue":"orders"
+"key":"http.route"
+"stringValue":"/orders"
+"key":"order.id"
+"stringValue":"ord_1042"
+"key":"note"
+"stringValue":"refund for card ****"
+```
+
+The customer name and the Authorization header are gone, and the card number
+in `note` is masked. The Collector did all three, before Tempo stored
+anything. This lab resent the span on purpose while testing, so the trace
+holds several identical copies. A real service sends each span once.
+
+Tempo still listens on Jaeger ingest ports. This probe shows that a Pod in
+`bookstore` cannot reach one of them, port 14250:
+
+```sh
+kubectl exec -n bookstore span-sender -- sh -c 'nc -z -w 5 tempo.tracing.svc.cluster.local 14250; echo "nc exit $?"'
+```
+
+<!-- gate: output -->
+```
+nc exit 1
+```
+
+Tempo's log names the listeners it started. The Jaeger ones are among them:
+
+```sh
+kubectl logs -n tracing tempo-0 | grep "Starting .*server"
+```
+
+<!-- gate: output -->
+```
+ts=2026-10-31T01:27:15Z level=info msg="Starting GRPC server" component=tempo endpoint=0.0.0.0:4317
+ts=2026-10-31T01:27:15Z level=info msg="Starting UDP server for Binary Thrift" component=tempo endpoint=0.0.0.0:6832
+ts=2026-10-31T01:27:15Z level=info msg="Starting UDP server for Compact Thrift" component=tempo endpoint=0.0.0.0:6831
+ts=2026-10-31T01:27:15Z level=info msg="Starting HTTP server for Jaeger Thrift" component=tempo endpoint=0.0.0.0:14268
+ts=2026-10-31T01:27:15Z level=info msg="Starting gRPC server for Jaeger Protobuf" component=tempo endpoint=0.0.0.0:14250
+```
+
+### 6. How the Go services would emit spans (illustrative) {#propagation}
+
+The demo binaries don't emit spans (stated above). The minimal way to add
+them keeps the backend out of the code: OTel is configured through the
+environment.
+
+1. **Add the SDK and auto-instrumentation** to each service: the
+   `go.opentelemetry.io/otel` SDK, `otelhttp` (wraps the `net/http` server and
+   client, which covers storefront→orders and the HTTP handlers), and `otelsql`
+   plus the AMQP propagation helpers for the Postgres and RabbitMQ hops.
+2. **Configure the exporter through the environment.** The endpoint is HTTPS,
+   and the CA comes from the `otel-ca` Secret of step 4, mounted read-only at
+   `/etc/otel/ca` the way the sender mounts it. The container env, as a
+   fragment:
 
    ```yaml
    env:
      - name: OTEL_EXPORTER_OTLP_ENDPOINT
-       value: "http://otel-collector-opentelemetry-collector.tracing.svc.cluster.local:4318"
+       value: "https://otel-collector-opentelemetry-collector.tracing.svc.cluster.local:4318"
+     - name: OTEL_EXPORTER_OTLP_CERTIFICATE
+       value: "/etc/otel/ca/ca.crt"
      - name: OTEL_SERVICE_NAME
        value: "orders"                       # per service
+     - name: OTEL_PROPAGATORS
+       value: "tracecontext"                 # no baggage, see below
      - name: OTEL_TRACES_SAMPLER
-       value: "parentbased_always_on"        # let the Collector tail-sample
+       value: "parentbased_always_on"        # the Collector samples
    ```
 
-3. **Propagation is automatic with `otelhttp`**: the orders client injects
-   `traceparent` into the POST to itself-from-storefront and into downstream
-   calls; `otelhttp` on the server extracts it. For the async hop, orders
-   injects the trace context into the **AMQP message headers** on publish and
-   payments-worker extracts it on consume — turning span D and span E into one
-   trace across the queue (the dashed link in the diagram).
+   `OTEL_PROPAGATORS` defaults to `tracecontext,baggage`. Baggage carries
+   arbitrary key and value pairs to every service the request reaches, so the
+   Bookstore leaves it out. Turn it on only for a value a downstream service
+   must read, and never for personal data.
+
+3. **Start a new trace at the public edge.** The storefront is the first
+   service an outside caller reaches. Its inbound handler must not adopt a
+   `traceparent` from outside. Otherwise the caller chooses the trace ID, or
+   joins its request to a trace that belongs to someone else.
+   `otelhttp.WithPublicEndpointFn` links the incoming context to the new span
+   instead of making it the parent. The predicate lets the storefront return
+   true for requests from outside the cluster and keep the parent relationship
+   for calls from inside. The
+   [otelhttp package docs](https://pkg.go.dev/go.opentelemetry.io/contrib/instrumentation/net/http/otelhttp)
+   describe the option.
+4. **Propagation is automatic inside the cluster.** Each service's outbound
+   client injects `traceparent`, and its server extracts it. For the async hop,
+   orders writes the trace context into the AMQP message headers on publish,
+   and payments-worker reads it on consume. That turns span D and span E into
+   one trace across the queue, the dashed link in the diagram. Once a service
+   emits spans, its egress rule in `60-networkpolicy.yaml` also needs port 4318
+   toward the `tracing` namespace. The example has no such rule yet.
 
 With that, a checkout produces the span tree shown above; in Grafana →
 Explore → Tempo you would search by trace ID (or by service/duration) and see
@@ -271,7 +844,7 @@ latency explicit. This subsection is the *approach*, faithfully accurate to how
 OTel-Go works; wiring it into these deliberately tiny binaries is left as the
 illustrative step (the guide keeps the demo apps minimal on purpose).
 
-### 4. Correlating traces with logs and metrics
+### 7. Correlating traces with logs and metrics
 
 The payoff of one shared `trace_id`:
 
@@ -337,8 +910,8 @@ The payoff of one shared `trace_id`:
 > **In production:** **propagate context across async boundaries.** The
 > orders → RabbitMQ → payments-worker hop only stays one trace if the trace
 > context is injected into the message headers and extracted on consume. A
-> missing async propagator is the most common "the trace stops at the queue"
-> bug — and it is exactly the Bookstore's checkout path.
+> missing async propagator is a common cause of "the trace stops at the
+> queue", and it sits on the Bookstore's checkout path.
 
 > **In production:** wire the **three pillars together** — `trace_id` on
 > every log line ([ch.02](02-logging.md)) and **exemplars** on latency
@@ -358,6 +931,7 @@ The payoff of one shared `trace_id`:
 ```sh
 kubectl get pods -n tracing                                   # Collector + Tempo
 kubectl logs -n tracing deploy/otel-collector-opentelemetry-collector  # pipeline health
+kubectl get networkpolicy -n tracing                          # the edges that are open
 kubectl -n tracing port-forward svc/tempo 3200:3200           # Tempo API (or via Grafana)
 # Grafana -> Explore -> Tempo: search by trace_id / service / duration
 ```
@@ -373,8 +947,10 @@ Minimal instrumentation contract (per service):
 
 ```yaml
 env:
-  - { name: OTEL_EXPORTER_OTLP_ENDPOINT, value: "http://<COLLECTOR>.tracing.svc:4318" }
+  - { name: OTEL_EXPORTER_OTLP_ENDPOINT, value: "https://<COLLECTOR>.tracing.svc.cluster.local:4318" }
+  - { name: OTEL_EXPORTER_OTLP_CERTIFICATE, value: "/etc/otel/ca/ca.crt" }
   - { name: OTEL_SERVICE_NAME,           value: "<SERVICE>" }
+  - { name: OTEL_PROPAGATORS,            value: "tracecontext" }
   - { name: OTEL_TRACES_SAMPLER,         value: "parentbased_always_on" }  # tail-sample in Collector
 # + the OTel SDK + otelhttp (HTTP) + AMQP propagator (async) in the app
 ```
@@ -383,10 +959,12 @@ Checklist:
 
 - [ ] OTel SDK + auto-instrumentation in each service (HTTP **and** AMQP)
 - [ ] Context propagated over HTTP **and** message headers (async hop)
-- [ ] Backend endpoint via `OTEL_EXPORTER_OTLP_ENDPOINT` only (no coupling)
+- [ ] The public edge starts a new trace (`WithPublicEndpointFn`), and `OTEL_PROPAGATORS` is `tracecontext`
+- [ ] Backend endpoint via `OTEL_EXPORTER_OTLP_ENDPOINT` only (no coupling), over `https://` with the CA mounted
 - [ ] Tail sampling in the Collector (keep errors/slow), not 1% head sampling
 - [ ] `trace_id` on log lines + exemplars on latency histograms
-- [ ] Collector runs in its own namespace; PII scrubbed in a processor
+- [ ] `tracing` is `restricted`; NetworkPolicy admits only the services that emit spans
+- [ ] No personal data or tokens in attributes; a new field gets a redaction rule before it ships
 
 ## Test your understanding
 
@@ -427,6 +1005,13 @@ Checklist:
 
    </details>
 
+6. **A developer adds the customer's email address to a new span attribute named `contact`. The Collector rules in this chapter are unchanged. Does the address reach Tempo, and what should change?**
+   <details><summary>Show answer</summary>
+
+   It reaches Tempo. The `attributes` processor deletes only the keys it names (`user.name`, `db.statement`, and the Authorization and cookie headers). The `redaction` processor matches only the card-number and bearer-token patterns. An email address matches neither, so it passes. Two changes are needed. The service should not write the address into a span at all; an order ID serves the same purpose. The Collector should also get a rule for the new key, or a pattern for the value, so a slip is caught there. For a stronger default, set `redaction` to `allow_all_keys: false` with an `allowed_keys` list, which drops every key the list does not name. The cost is keeping that list current.
+
+   </details>
+
 ## Further reading
 
 - **Rosso et al., _Production Kubernetes_, ch.9 — Observability** (tracing as
@@ -437,3 +1022,10 @@ Checklist:
   <https://www.w3.org/TR/trace-context/>, and the Kubernetes tracing/
   instrumentation note
   <https://kubernetes.io/docs/concepts/cluster-administration/system-traces/>.
+- The SDK environment variables, including `OTEL_PROPAGATORS` and its
+  default: <https://opentelemetry.io/docs/specs/otel/configuration/sdk-environment-variables/>.
+- The Collector's redaction processor, with its `allow_all_keys`,
+  `allowed_keys` and `blocked_values` settings:
+  <https://github.com/open-telemetry/opentelemetry-collector-contrib/tree/main/processor/redactionprocessor>.
+- `otelhttp`, with the public-endpoint option:
+  <https://pkg.go.dev/go.opentelemetry.io/contrib/instrumentation/net/http/otelhttp>.
