@@ -193,13 +193,16 @@ and [`DR-RUNBOOK.md`](../examples/bookstore/operators/DR-RUNBOOK.md). It does
 > cluster on Kubernetes 1.37.0, under the shared heavy-install lock. The output
 > in this chapter came from a cluster with a different name, and its namespaces
 > carried a `p08-02-` prefix, which the commands here leave out. The run
-> rendered the pinned Velero chart, read the UID the Velero image runs as,
-> checked the security settings the chart renders, installed the Velero CRDs,
-> asked the API server to validate the three Velero objects with strict field
-> checks, and removed the CRDs afterwards. It did not install the Velero
-> controller or the node agent, and it did not run a backup or a restore. A full
-> install is heavy and shares the lab with other work, so those steps are
-> rendered and cited here, not captured.
+> installed the pinned Velero chart on the default path (CSI snapshots, no node
+> agent) into a `restricted` namespace, with placeholder credentials and an
+> object-store endpoint that does not resolve. The controller ran and reported
+> its storage location unavailable. The run read the Pod's settings back,
+> asked the API server to validate the node-agent exception without installing
+> it, validated the three Velero objects with strict field checks, and removed
+> the chart and its CRDs. It ran no object store, no snapshot-capable CSI
+> driver, no backup and no restore: the cluster's storage class cannot take
+> snapshots. Steps 3 and 4 are reader steps, and the `velero` CLI step is cited.
+> Steps 0 and 1, the cluster setup and etcd, are not run either.
 >
 > **MinIO is not installed here.** Its community repository was archived on
 > 2026-04-25 and says it is no longer maintained, and the chart's last release
@@ -324,11 +327,14 @@ sha256:c89fb5b6d1fd6afd368e0f483e6f5555fd62851a1eada8ac5c72482e674ca17b
 sha256:c85a7fa803569e3128c33e4f5766f84ab156c8d171c9f1dd2715581d45ce98fa
 ```
 
-These pins are not a Kubernetes compatibility claim. Velero's documentation
-pairs releases with plugin versions and does not name a Kubernetes range this
-chapter could check, and the controller did not run on Kubernetes 1.37 here.
-Read the Velero release notes before you move the cluster to a new minor
-version.
+These pins are not a Kubernetes compatibility claim. Velero's
+[README](https://github.com/vmware-tanzu/velero#velero-compatibility-matrix)
+lists Velero 1.18 as expected to work on Kubernetes 1.18 and later, and as
+tested on 1.33.7, 1.34.1 and 1.35.0. Kubernetes 1.37 is not on that list. In
+the lab, on Kubernetes 1.37.0, the controller started and checked its storage
+location (below). No backup or restore ran there, so those two operations are
+unverified on 1.37. Read the Velero release notes before you move the cluster
+to a new minor version.
 
 ```sh
 # Pins, checked 2026-10-31. Digests are the multi-architecture index digests.
@@ -337,14 +343,46 @@ VELERO_IMAGE_DIGEST=sha256:c89fb5b6d1fd6afd368e0f483e6f5555fd62851a1eada8ac5c724
 VELERO_AWS_PLUGIN=docker.io/velero/velero-plugin-for-aws@sha256:c85a7fa803569e3128c33e4f5766f84ab156c8d171c9f1dd2715581d45ce98fa  # v1.14.4
 ```
 
+**The `velero` CLI.** The chart installs the server. The CLI, which the
+`velero backup describe` and `velero backup logs` commands below need, is a
+separate binary, and it is a program you run with your own credentials. Pin
+it to the release of the image and check its SHA-256 before it runs. The
+release page publishes a `CHECKSUM` file and a digest for each asset. The
+digests below came from the release's asset list on 2026-10-31. The lab did
+not download or run the CLI, so this step is cited, not captured. The chart's
+own install notes name an older CLI (1.18.2); use the one that matches the
+image.
+
+```sh
+VELERO_CLI_VERSION=v1.18.4
+# linux/amd64. On macOS with Apple silicon use the darwin-arm64 asset, whose
+# digest is e51ce875fb3e47996b0b425edefff72f4106ad891b4e6577c21bda20c41f27c3,
+# and check it with `shasum -a 256 -c -`. Other platforms: the release page.
+VELERO_CLI_SHA256=e520c17d8997e1c9d0a28ae013592e4473ca3bd82cb3acd132e51286263f74bf
+ASSET="velero-$VELERO_CLI_VERSION-linux-amd64.tar.gz"
+curl -fsSLO "https://github.com/vmware-tanzu/velero/releases/download/$VELERO_CLI_VERSION/$ASSET"
+echo "$VELERO_CLI_SHA256  $ASSET" | sha256sum -c -
+tar -xzf "$ASSET"        # then put the unpacked velero binary on your PATH
+velero version --client-only
+```
+
+Every status command in this chapter has a `kubectl` form
+(`kubectl -n velero get backup,restore`), so the CLI is a convenience. Its
+`backup logs` command, which downloads the log from the bucket, has no
+`kubectl` equivalent.
+
 Velero gets its own namespace, and the namespace is the first thing to label.
-The node agent mounts host paths to read pod volumes for file-system backups,
-and the `baseline` level forbids `hostPath`, so the namespace enforces
-`privileged`. Its audit and warn labels stay at `restricted`, which reports
-anything in the namespace that breaks the stricter rules. The exception is
-registered in `security/namespace-exceptions.yaml` with its reason and expiry.
-Once CSI snapshots cover your volumes, set `deployNodeAgent=false`, nothing in
-the namespace needs `hostPath`, and the namespace can drop to `restricted`.
+The default install takes volume snapshots through the cluster's CSI driver
+and runs no node agent, so nothing in the namespace needs a host path, root or
+a capability. The namespace is therefore `restricted` like the Bookstore's,
+and it has no entry in the exceptions registry. The lab admitted the
+controller and the chart's one-shot CRD job under this label, as the install
+output below shows.
+
+The chart's CRD job has no `resources` value, so it would run without a
+request or a memory limit. The namespace carries a LimitRange that gives every
+container in it a default request and a memory limit. The lab read those
+defaults back from the CRD job's Pod and from the plugin init container.
 
 Save this block as `velero-namespace.yaml`:
 
@@ -354,18 +392,30 @@ kind: Namespace
 metadata:
   name: velero
   labels:
-    pod-security.kubernetes.io/enforce: privileged
+    pod-security.kubernetes.io/enforce: restricted
     pod-security.kubernetes.io/audit: restricted
     pod-security.kubernetes.io/warn: restricted
+---
+apiVersion: v1
+kind: LimitRange
+metadata:
+  name: velero-defaults
+  namespace: velero
+spec:
+  limits:
+    - type: Container
+      defaultRequest: {cpu: 50m, memory: 64Mi}
+      default: {memory: 256Mi}
 ```
 
 The namespace is default-deny, as the baseline requires from
 [02.06](../02-networking/06-network-policies.md) on. The second policy allows
 only what Velero needs: DNS, the API server and the object store. The address
 ranges below are placeholders. Replace them with your API server's addresses
-(port 6443, or 443 on a managed control plane) and your store's address. The
-policy does not allow metrics scraping, which needs its own ingress rule from
-your monitoring namespace.
+(port 6443, or 443 on a managed control plane) and your store's address, and
+apply the file after the install below: with the placeholders in place the
+controller could not reach the API server. The policy does not allow metrics
+scraping, which needs its own ingress rule from your monitoring namespace.
 
 Save these two policies as `velero-netpol.yaml`:
 
@@ -413,17 +463,21 @@ spec:
         - { port: 443, protocol: TCP }
 ```
 
-Velero's Pods run under the baseline with the chart's own values. The pod-level
-values set a numeric UID, `runAsNonRoot` and the `RuntimeDefault` seccomp
-profile. The UID is 1002, which is the `cnb` user the image declares in its
-`/etc/passwd`. The image has no shell, so the lab read that file through a probe
-Pod that mounted the image as a volume. The container values drop every
-capability and make the root filesystem read-only. The chart already mounts
-writable `emptyDir` volumes at `/tmp` and `/scratch`, so the read-only root does
-not stop the server from writing. The plugin init container gets the same
-container values. `automountServiceAccountToken` stays `true`, because the
-controller calls the API server and runs under its own ServiceAccount, which is
-the case the baseline allows.
+The chart's own values set the Velero Pod to run as UID 1002, with
+`runAsNonRoot` and the `RuntimeDefault` seccomp profile. The UID is the `cnb`
+user the image declares in its `/etc/passwd`. The image has no shell, so the
+lab read that file through a probe Pod that mounted the image as a volume. The
+container values drop every capability and make the root filesystem read-only.
+The chart already mounts writable `emptyDir` volumes at `/tmp` and `/scratch`,
+so the read-only root does not stop the server from writing. The plugin init
+container gets the same container values. `automountServiceAccountToken` stays
+`true`, because the controller calls the API server and runs under its own
+ServiceAccount, which is the case the baseline allows. The chart leaves
+`resources` empty, so the install sets a request of 500m CPU and 128Mi memory
+and a 512Mi memory limit, the figures Velero's own install documentation lists
+for its Deployment ([customize
+installation](https://velero.io/docs/v1.18/customize-installation/)). Size
+them to your cluster.
 
 The lab read the UID with the probe Pod, and its output was:
 
@@ -432,10 +486,25 @@ The lab read the UID with the probe Pod, and its output was:
 cnb:1002:1000
 ```
 
-The node agent keeps the chart's defaults. It runs as root by design, because it
-reads volume files that belong to other users. That is the reason for the
-privileged namespace, and it is the part to switch off first when CSI snapshots
-take over.
+Three more values choose the CSI path:
+
+- `configuration.features=EnableCSI` turns on Velero's CSI snapshot support.
+  Velero's [CSI page](https://velero.io/docs/v1.18/csi/) says to enable the
+  flag, and that the CSI plugin is built into Velero since 1.14.
+- `deployNodeAgent=false` runs no node agent, which is the only Velero
+  component that needs host paths.
+- `snapshotsEnabled=false` leaves out the chart's `VolumeSnapshotLocation`.
+  That object belongs to provider plugins that snapshot disks themselves. CSI
+  snapshots do not use it, and with the chart's default list the lab's render
+  produced one with an empty provider.
+
+Velero finds a snapshot class by label, so the cluster needs a CSI driver with
+snapshot support, the snapshot CRDs and controller, and one
+`VolumeSnapshotClass` per driver labelled `velero.io/csi-volumesnapshot-class:
+"true"` (`kubectl label volumesnapshotclass <class>
+velero.io/csi-volumesnapshot-class=true`). Check what your cluster has before
+you rely on this path: the lab cluster's default storage class is
+`rancher.io/local-path`, which cannot snapshot.
 
 Create the namespace and the credentials Secret, then install the chart. The
 store's bucket, region, endpoint and key come from your store. The key should
@@ -444,7 +513,7 @@ shell history, and the Secret keeps them out of the chart values, so
 `helm get values` never shows them.
 
 ```sh
-kubectl apply -f velero-namespace.yaml -f velero-netpol.yaml
+kubectl apply -f velero-namespace.yaml
 
 printf 'Bucket name: '; read -r VELERO_BUCKET
 printf 'Store region: '; read -r VELERO_REGION
@@ -469,39 +538,176 @@ helm install velero vmware-tanzu/velero -n velero \
   --set-json 'initContainers=[{"name":"velero-plugin-for-aws","image":"'"$VELERO_AWS_PLUGIN"'","imagePullPolicy":"IfNotPresent","securityContext":{"allowPrivilegeEscalation":false,"readOnlyRootFilesystem":true,"capabilities":{"drop":["ALL"]}},"volumeMounts":[{"mountPath":"/target","name":"plugins"}]}]' \
   --set-json 'podSecurityContext={"runAsNonRoot":true,"runAsUser":1002,"runAsGroup":1000,"seccompProfile":{"type":"RuntimeDefault"}}' \
   --set-json 'containerSecurityContext={"allowPrivilegeEscalation":false,"readOnlyRootFilesystem":true,"capabilities":{"drop":["ALL"]}}' \
+  --set resources.requests.cpu=500m \
+  --set resources.requests.memory=128Mi \
+  --set resources.limits.memory=512Mi \
+  --set configuration.features=EnableCSI \
+  --set deployNodeAgent=false \
+  --set snapshotsEnabled=false \
   --set 'configuration.backupStorageLocation[0].name=default' \
   --set 'configuration.backupStorageLocation[0].provider=aws' \
   --set "configuration.backupStorageLocation[0].bucket=$VELERO_BUCKET" \
   --set "configuration.backupStorageLocation[0].config.region=$VELERO_REGION" \
   --set "configuration.backupStorageLocation[0].config.s3Url=$VELERO_S3_URL" \
   --set 'configuration.backupStorageLocation[0].config.s3ForcePathStyle=true' \
-  --set credentials.existingSecret=velero-cloud-credentials \
-  --set deployNodeAgent=true \
-  --set snapshotsEnabled=false
+  --set credentials.existingSecret=velero-cloud-credentials
 
 kubectl -n velero rollout status deploy/velero
 kubectl -n velero get pods
+kubectl -n velero get backupstoragelocation
 ```
 
-The lab rendered the chart with the same security flags, using placeholder
-bucket values and installing nothing, and read the Velero Deployment back:
+The lab ran this install with placeholder credentials and an endpoint that
+does not resolve, so it had no bucket to use. The controller started under
+`restricted`, and so did the chart's CRD job. The controller reported the
+storage location unavailable, which is the right answer for an endpoint that
+does not exist:
 
 <!-- gate: output -->
 ```
-image: docker.io/velero/velero@sha256:c89fb5b6d1fd6afd368e0f483e6f5555fd62851a1eada8ac5c72482e674ca17b
-pod securityContext: runAsNonRoot=True runAsUser=1002 runAsGroup=1000 seccomp=RuntimeDefault
-container securityContext: allowPrivilegeEscalation=False readOnlyRootFilesystem=True drop=ALL
+secret/velero-cloud-credentials created
+# ...
+STATUS: deployed
+# ...
+deployment "velero" successfully rolled out
+NAME                     READY   STATUS    RESTARTS   AGE
+velero-cb65f7cf8-hzkfz   1/1     Running   0          38s
+# ...
+NAME      PHASE         LAST VALIDATED   AGE   DEFAULT
+default   Unavailable   28s              38s   true
 ```
 
-The `deployNodeAgent=true` and `snapshotsEnabled=false` pair is the kind path:
-no CSI snapshot class is installed, so the node agent copies the volume files
-instead. A production cluster with a snapshot-capable CSI driver sets
-`snapshotsEnabled=true` and leaves the node agent off.
+The same Deployment, read back from the cluster after the install, shows what
+the Pod runs with. The listing has no DaemonSet, because no node agent runs:
 
-Installing Velero created the `velero.io` CRDs (`Backup`, `Restore`, `Schedule`,
-`BackupStorageLocation` and the rest). This is what makes the manifests below
-dry-runnable. Before the install, a client dry-run prints `no matches for kind
-"Backup"`.
+```sh
+kubectl -n velero get deploy,daemonset
+kubectl -n velero get deploy velero -o jsonpath='{range .spec.template.spec.containers[*]}{.name}{" resources: "}{.resources}{"\n"}{end}'
+kubectl -n velero get pod -l name=velero -o jsonpath='{range .items[0].spec.initContainers[*]}{.name}{" resources (from the LimitRange): "}{.resources}{"\n"}{end}'
+kubectl -n velero get deploy velero -o jsonpath='pod securityContext: {.spec.template.spec.securityContext}{"\n"}'
+kubectl -n velero get deploy velero -o jsonpath='container securityContext: {.spec.template.spec.containers[0].securityContext}{"\n"}'
+kubectl -n velero get deploy velero -o jsonpath='server args: {.spec.template.spec.containers[0].args}{"\n"}'
+```
+
+<!-- gate: output -->
+```
+NAME                     READY   UP-TO-DATE   AVAILABLE   AGE
+deployment.apps/velero   1/1     1            1           38s
+# ...
+velero resources: {"limits":{"memory":"512Mi"},"requests":{"cpu":"500m","memory":"128Mi"}}
+velero-plugin-for-aws resources (from the LimitRange): {"limits":{"memory":"256Mi"},"requests":{"cpu":"50m","memory":"64Mi"}}
+pod securityContext: {"runAsGroup":1000,"runAsNonRoot":true,"runAsUser":1002,"seccompProfile":{"type":"RuntimeDefault"}}
+container securityContext: {"allowPrivilegeEscalation":false,"capabilities":{"drop":["ALL"]},"readOnlyRootFilesystem":true}
+server args: ["server","--uploader-type=kopia","--features=EnableCSI","--repo-maintenance-job-configmap=velero-repo-maintenance"]
+```
+
+Installing Velero created the `velero.io` CRDs (`Backup`, `Restore`,
+`Schedule`, `BackupStorageLocation` and the rest). This is what makes the
+manifests below dry-runnable. Before the install, a client dry-run prints `no
+matches for kind "Backup"`.
+
+Apply the NetworkPolicies once you have replaced the placeholder ranges:
+
+```sh
+kubectl apply -f velero-netpol.yaml
+```
+
+#### The exceptions: storage that cannot keep snapshots
+
+The default path leans on the storage system keeping the snapshot. Storage
+that cannot, which is common on-premises, needs the node agent. There are two
+ways to run it, and each costs a different exception.
+
+**Data movement, without a host path.** Velero's built-in data mover copies the
+snapshot's data to the bucket. Upstream says it "doesn't require the host path
+for pod volumes", and the chart's `nodeAgent.disableHostPath` removes the host
+paths ([CSI snapshot data
+movement](https://velero.io/docs/v1.18/csi-snapshot-data-movement/)). The agent
+still runs as root. The lab rendered it with the chart's security values and
+asked the API server to validate it in the restricted namespace. Root was the
+only thing it named, besides the capabilities the render leaves open:
+
+```sh
+helm template velero vmware-tanzu/velero -n velero --version "$VELERO_CHART_VERSION" \
+  --show-only templates/node-agent-daemonset.yaml \
+  --set image.digest="$VELERO_IMAGE_DIGEST" \
+  --set deployNodeAgent=true --set snapshotsEnabled=false \
+  --set configuration.features=EnableCSI \
+  --set credentials.existingSecret=velero-cloud-credentials \
+  --set nodeAgent.disableHostPath=true \
+  --set-json 'nodeAgent.podSecurityContext={"runAsUser":0,"seccompProfile":{"type":"RuntimeDefault"}}' \
+  --set-json 'nodeAgent.containerSecurityContext={"allowPrivilegeEscalation":false}' \
+  --set nodeAgent.resources.requests.cpu=500m \
+  --set nodeAgent.resources.requests.memory=512Mi \
+  --set nodeAgent.resources.limits.memory=1Gi \
+  | kubectl apply --dry-run=server -f -
+```
+
+<!-- gate: output -->
+```
+Warning: would violate PodSecurity "restricted:latest": unrestricted capabilities (container "node-agent" must set securityContext.capabilities.drop=["ALL"]), runAsNonRoot != true (pod or container "node-agent" must set securityContext.runAsNonRoot=true), runAsUser=0 (pod must not set runAsUser=0)
+daemonset.apps/node-agent created (server dry run)
+```
+
+The Pod Security Standards forbid host paths at `baseline` and allow root, so
+the `baseline` level should admit this agent. The lab did not run it in a
+`baseline` namespace and did not run the data mover. If you adopt it, label
+the namespace for that level and register the exception.
+
+**File-system backup, with a host path.** Kopia reads each Pod's volume files
+through the node's kubelet directory, so the agent mounts
+`/var/lib/kubelet/pods` from the host. The `baseline` level forbids `hostPath`,
+so this variant needs a `privileged` namespace. The same command without
+`--set nodeAgent.disableHostPath=true` renders the host paths, and the dry run
+says so:
+
+<!-- gate: output -->
+```
+Warning: would violate PodSecurity "restricted:latest": unrestricted capabilities (container "node-agent" must set securityContext.capabilities.drop=["ALL"]), restricted volume types (volumes "host-pods", "host-plugins" use restricted volume type "hostPath"), runAsNonRoot != true (pod or container "node-agent" must set securityContext.runAsNonRoot=true), runAsUser=0 (pod must not set runAsUser=0)
+daemonset.apps/node-agent created (server dry run)
+```
+
+The exception is registered in `security/namespace-exceptions.yaml` with its
+reason and expiry. Audit and warn stay at `restricted`, so the namespace keeps
+reporting what it excuses. Save this block as `velero-namespace-fs.yaml` and
+apply it in place of the Namespace in `velero-namespace.yaml`. Keep the
+LimitRange:
+
+```yaml
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: velero
+  labels:
+    pod-security.kubernetes.io/enforce: privileged
+    pod-security.kubernetes.io/audit: restricted
+    pod-security.kubernetes.io/warn: restricted
+```
+
+Then add these values to the install above, and set `snapshotsEnabled=false` as
+before. The pod values add the seccomp profile that the chart leaves out. The
+container value forbids privilege escalation. The capabilities stay at the
+runtime default, because the agent reads files that belong to other users, and
+an untested `drop: ["ALL"]` could stop it reading them. Test a tighter set
+against your own volumes before you adopt one. Upstream's [file-system backup
+page](https://velero.io/docs/v1.18/file-system-backup/) also says the agent
+needs root and, in some environments, privileged mode, which these values do
+not set. The lab dry-ran these values and did not install the agent:
+
+```sh
+  --set deployNodeAgent=true \
+  --set-json 'nodeAgent.podSecurityContext={"runAsUser":0,"seccompProfile":{"type":"RuntimeDefault"}}' \
+  --set-json 'nodeAgent.containerSecurityContext={"allowPrivilegeEscalation":false}' \
+  --set nodeAgent.resources.requests.cpu=500m \
+  --set nodeAgent.resources.requests.memory=512Mi \
+  --set nodeAgent.resources.limits.memory=1Gi
+```
+
+The Backup in step 3 changes with the path: set `snapshotVolumes: false` and
+`defaultVolumesToFsBackup: true` in it. File-system backup is opt-in by
+default. Without that flag, each Pod needs the annotation
+`backup.velero.io/backup-volumes=<volume name>`, and Velero does not add it for
+you.
 
 ### 3. Back up the Bookstore namespace (with the consistency hook)
 
@@ -511,6 +717,17 @@ so the data is captured clean. The backup includes the `db-credentials` Secret.
 That is deliberate, and it is the reason for [Backup security](#backup-security)
 below. Read that section before you store a backup anywhere.
 
+This step and the next are reader steps. They need a cluster whose CSI driver
+can snapshot, with a labelled `VolumeSnapshotClass` (step 2), and a bucket
+that Velero can reach. The lab cluster had neither, so it ran neither step.
+Check first that a snapshot class exists for the driver behind the Postgres
+PVC:
+
+```sh
+kubectl get volumesnapshotclass
+kubectl get pvc -n bookstore data-postgres-0 -o jsonpath='{.spec.storageClassName}{"\n"}'
+```
+
 ```sh
 kubectl apply -f examples/bookstore/operators/velero-backup.yaml
 velero backup describe bookstore-now --details
@@ -519,13 +736,10 @@ kubectl get backup bookstore-now -n velero -o jsonpath='{.status.phase}{"\n"}'
 #   → Completed
 ```
 
-The saved manifest is the CSI path: `snapshotVolumes: true` takes a
-VolumeSnapshot of each volume. On the kind path, with the node agent and no
-snapshot class, change the Backup to `snapshotVolumes: false` and
-`defaultVolumesToFsBackup: true`. File-system backup is opt-in by default.
-Without that flag, each Pod needs the annotation
-`backup.velero.io/backup-volumes=<volume name>`, and Velero does not add it
-for you.
+The saved manifest matches the default install: `snapshotVolumes: true` takes
+a VolumeSnapshot of each volume, and `defaultVolumesToFsBackup` is `false`.
+The node-agent exception in step 2 changes both fields. Applied to a cluster
+installed the default way, the other combination backs up no volume data.
 
 The recurring posture is the one you run in production, because it sets the RPO:
 
@@ -582,7 +796,7 @@ spec:
 kubectl apply -f drill.yaml
 kubectl -n velero get restore bookstore-drill -o jsonpath='{.status.phase}{"\n"}'
 #   → Completed
-kubectl -n velero get podvolumerestores -l velero.io/restore-name=bookstore-drill
+kubectl get pvc -n bookstore-drill          # data-postgres-0 is Bound, from a snapshot
 kubectl exec -n bookstore-drill postgres-0 -- \
   psql -U bookstore -d bookstore -c 'SELECT * FROM dr_demo;'
 #   → before-backup
@@ -591,8 +805,10 @@ kubectl exec -n bookstore-drill postgres-0 -- \
 Check the row, not the Pod. A Ready Pod shows that Postgres started, and a
 drill that passes on readiness alone can pass on an empty database. If a
 restored Pod stays Pending, read the events in `bookstore-drill` first. Pod
-Security admission checks the restored Pods too, including the `restore-wait`
-init container that Velero adds to Pods that restore file-system data.
+Security admission checks the restored Pods too. On the file-system exception
+path, that includes the `restore-wait` init container that Velero adds to Pods
+that restore file-system data, and `kubectl -n velero get podvolumerestores`
+lists those restores.
 
 When the drill is done, delete it:
 
@@ -603,13 +819,14 @@ kubectl -n velero delete restore bookstore-drill
 
 The drill is the rehearsal for
 [DR-RUNBOOK.md](../examples/bookstore/operators/DR-RUNBOOK.md). A production
-restore uses CSI VolumeSnapshots instead of the node agent: the restored PVC
-is created from the snapshot, and the snapshot class decides how the snapshot
-is taken. The `Restore` object is the same either way.
+restore creates the PVC from the snapshot, and the snapshot class decides how
+the snapshot is taken. The `Restore` object is the same on the exception path.
 
-**Honest scope of the drill.** The lab did not run it, because it needs the
-controller and an object store. The `Restore` in it passed the strict server-side check in step 6. The drill is the step to run first on a new cluster, and
-the RPO and RTO it measures are the numbers to write down.
+**Honest scope of the drill.** The lab did not run it, because it needs a
+bucket and a snapshot-capable driver, and the lab had neither. The `Restore`
+in it passed the strict server-side check in step 6. The drill is the step to
+run first on a new cluster, and the RPO and RTO it measures are the numbers to
+write down.
 
 ### 5. The GitOps-DR insight (why Layer 2 is nearly free)
 
@@ -640,10 +857,10 @@ this guide. After step 2, `kubectl apply --dry-run=server --validate=strict`
 checks the three files against the installed schema. Strict validation makes an
 unknown field name an error, so a typo fails instead of being dropped.
 
-The lab installed the CRDs from the chart's render under the shared
-heavy-install lock, asked the API server to validate the three files with strict
-server-side validation, and removed the CRDs afterwards. It installed no
-controller. The first output is the three files accepted. The second is the same
+The lab did this while its install from step 2 was running, under the shared
+heavy-install lock. It asked the API server to validate the three files with
+strict server-side validation, and removed the chart and the CRDs afterwards.
+The first output is the three files accepted. The second is the same
 strict check catching a misspelt field name:
 
 <!-- gate: output -->
@@ -658,14 +875,22 @@ restore.velero.io/bookstore-drill created (server dry run)
 Error from server (BadRequest): error when creating "restore-typo.yaml": Restore in version "v1" cannot be handled as a Restore: strict decoding error: unknown field "spec.namespaceMappng"
 ```
 
-Clean up the chapter's objects, then the chart, and check for leftover CRDs:
+Clean up the chapter's objects, then the chart, and check for leftover
+cluster-scoped objects. Helm leaves the CRDs, because the chart's job created
+them. The lab's check printed that nothing was left:
 
 ```sh
 kubectl delete -f examples/bookstore/operators/velero-schedule.yaml --ignore-not-found
 kubectl delete -f examples/bookstore/operators/velero-backup.yaml --ignore-not-found
 helm uninstall velero -n velero
 kubectl get crd -o name | grep '\.velero\.io' | xargs -r kubectl delete
+kubectl get crd,clusterrole,clusterrolebinding -o name | grep -i velero || echo "no velero cluster objects left"
 kind delete cluster --name bookstore
+```
+
+<!-- gate: output -->
+```
+no velero cluster objects left
 ```
 
 ## How it works under the hood
@@ -744,12 +969,12 @@ kubectl get secret db-demo -n bookstore -o jsonpath='{.data.password}' | base64 
 
 <!-- gate: output -->
 ```
-{"password":"NzczMGZmYTQxZjBkNzA4YTg0ZTcyN2M3MGJkNmMwMzE="}
+{"password":"YmI5YWIzNDhhM2FkMTVlZDRiNjcwMjE1YWZmY2U0NWY="}
 ```
 
 <!-- gate: output -->
 ```
-7730ffa41f0d708a84e727c70bd6c031
+bb9ab348a3ad15ed4b670215affce45f
 ```
 
 Encryption at rest does not change this. The API server can encrypt Secrets in
@@ -880,9 +1105,13 @@ ETCDCTL_API=3 etcdctl --endpoints=https://127.0.0.1:2379 \
 etcdutl snapshot status snap.db -w table   # etcd 3.6+: etcdutl, not etcdctl
 etcdutl snapshot restore snap.db --data-dir <NEW>
 
-# Layer 3: Velero (Helm, pinned chart and image digest; never releases/latest)
+# Layer 3: Velero (Helm, pinned chart and image digest; never releases/latest).
+# Default path: restricted namespace (step 2), node agent off, CSI snapshots.
+kubectl apply -f velero-namespace.yaml
 helm install velero vmware-tanzu/velero -n velero --version "$VELERO_CHART_VERSION" \
-  --set image.digest="$VELERO_IMAGE_DIGEST" ...    # full security values: step 2
+  --set image.digest="$VELERO_IMAGE_DIGEST" \
+  --set configuration.features=EnableCSI --set deployNodeAgent=false \
+  --set snapshotsEnabled=false ...    # plus the security values and resources: step 2
 kubectl apply -f examples/bookstore/operators/velero-backup.yaml      # on demand
 kubectl apply -f examples/bookstore/operators/velero-schedule.yaml    # recurring
 velero backup describe bookstore-now --details ; velero backup logs bookstore-now
@@ -930,8 +1159,12 @@ Checklist:
   named Role and are reviewed like cluster-admin.
 - [ ] Backups are treated as copies of Secrets: excluded where an external
   secret manager restores them, and stored under the same controls.
-- [ ] The `velero` namespace is `restricted` on the CSI path. The node-agent
-  path needs a `privileged` exception, registered with its reason and expiry.
+- [ ] The `velero` namespace is `restricted` on the default path: CSI
+  snapshots and no node agent. A node agent is an exception, and the
+  file-system variant needs `privileged`, registered with its reason and
+  expiry.
+- [ ] The `velero` CLI is pinned to the image's release and checked against its
+  published SHA-256 before it runs.
 - [ ] The database backup has a **consistency hook** (CHECKPOINT, `pg_dump` or
   `fsfreeze`). Snapshots are **crash-consistent, not PITR**, so layer WAL or
   PITR on top for that.

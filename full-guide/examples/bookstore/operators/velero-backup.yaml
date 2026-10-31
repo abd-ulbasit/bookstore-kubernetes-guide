@@ -32,15 +32,20 @@
 # object store (a BackupStorageLocation: S3, GCS, Azure Blob or another
 # S3-compatible store) and PV data via CSI snapshots or the node agent. A kind
 # cluster has no cloud bucket, so ch.02 points the chart at a bucket you
-# provide and uses the node agent (snapshotVolumes false, defaultVolumesToFsBackup
-# true). A production restore needs a real object store and a snapshot-capable
-# CSI driver. The Backup objects are the same either way.
+# provide. This file is the chapter's default install: the CSI snapshot path
+# (snapshotVolumes true, defaultVolumesToFsBackup false), with the node agent
+# off. The node-agent variant is the chapter's labelled exception and needs
+# the two fields flipped, as the comment on them says. A restore needs a real
+# object store and a snapshot-capable CSI driver; kind's default storage class
+# has neither a driver nor a snapshot class.
 #
 # Requires (to actually apply, not just read):
 #   - Velero installed (Helm vmware-tanzu/velero OR `velero install`, pinned)
 #     into its own `velero` namespace, with a BackupStorageLocation (S3-compatible)
-#   - the snapshot-capable CSI path (CSI plugin + VolumeSnapshotClass) OR
-#     defaultVolumesToFsBackup for the node-agent file path
+#   - a snapshot-capable CSI driver, its VolumeSnapshotClass labelled
+#     velero.io/csi-volumesnapshot-class: "true", and Velero installed with
+#     the EnableCSI feature flag (the chapter's install sets it) OR, for the
+#     node-agent exception, defaultVolumesToFsBackup
 #   - the Bookstore deployed in `bookstore` (the standard prereq→workload chain)
 # Apply (Velero-installed cluster only):
 #   kubectl apply -f examples/bookstore/operators/velero-backup.yaml
@@ -61,9 +66,9 @@ spec:
   # Snapshot the PVs (the Postgres data-postgres-0 PVC) via the cluster's CSI
   # VolumeSnapshot path: ties directly to Part 03 ch.05 / 18-postgres-snapshot.
   snapshotVolumes: true
-  # If the cluster has no snapshot-capable CSI driver, flip this to true to use
-  # Velero's node-agent filesystem backup instead (kind path). Set snapshotVolumes
-  # to false in the same change, or the volume is considered for a snapshot.
+  # Node-agent exception only (the chapter's labelled variant, which needs a
+  # privileged namespace): set this to true and snapshotVolumes to false in the
+  # same change, or the volume is also considered for a snapshot.
   defaultVolumesToFsBackup: false
   # Keep this backup for 7 days, then Velero garbage-collects it.
   ttl: 168h0m0s

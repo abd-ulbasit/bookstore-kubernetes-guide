@@ -145,25 +145,14 @@ exceptions:
   - namespace: velero
     level: privileged
     reason: >-
-      The Velero node agent reads pod volumes through a hostPath volume
-      (/var/lib/kubelet/pods) for file-system backups, and the Pod Security
-      Standards forbid hostPath at baseline, so only privileged admits it. The
-      chapter's kind path needs the node agent because no snapshot-capable CSI
-      driver is installed. Production sets deployNodeAgent=false once CSI
-      snapshots cover the volumes, and this entry goes with the node agent. The
-      Velero controller itself runs under the restricted rules.
-    upstream: https://velero.io/docs/main/file-system-backup/
-    chapter: 08-day-2-operations/02-backup-and-dr.md
-    expires: 2027-06-30
-
-  - namespace: p08-02-velero
-    level: privileged
-    reason: >-
-      The lab for chapter 08.02 applies the chapter's velero Namespace under the
-      lab's name, with the same privileged label the chapter sets, so the
-      manifest runs against a real cluster. The script deletes the namespace at
-      the end. The chapter's own exception is the velero entry above.
-    upstream: https://kubernetes.io/docs/concepts/security/pod-security-standards/
+      Only the chapter's file-system-backup variant needs this. Its Velero node
+      agent reads pod volumes through a hostPath volume (/var/lib/kubelet/pods)
+      and runs as root, and the Pod Security Standards forbid hostPath at
+      baseline, so only privileged admits it. The chapter's default install
+      takes CSI snapshots with the node agent off and runs in a restricted
+      namespace, which needs no exception. The namespace keeps audit and warn at
+      restricted. The Velero controller itself runs under the restricted rules.
+    upstream: https://velero.io/docs/v1.18/file-system-backup/
     chapter: 08-day-2-operations/02-backup-and-dr.md
     expires: 2027-06-30
 
@@ -177,18 +166,6 @@ exceptions:
       privileged admits it. The namespace holds only node debugger Pods, is
       granted to on-call only, and keeps audit and warn at restricted. The
       chapter shows the same Pod refused in a restricted namespace.
-    upstream: https://kubernetes.io/docs/concepts/security/pod-security-standards/#privileged
-    chapter: 08-day-2-operations/03-troubleshooting-playbook.md
-    expires: 2027-06-30
-
-  - namespace: p08-03-node-debug
-    level: privileged
-    reason: >-
-      The lab for chapter 08.03 applies a privileged namespace under the lab's
-      name, with the same privileged label the chapter's node-debug namespace
-      sets, so the node debugger Pod runs against a real cluster. The script
-      deletes the namespace at the end. The chapter's own exception is the
-      node-debug entry above.
     upstream: https://kubernetes.io/docs/concepts/security/pod-security-standards/#privileged
     chapter: 08-day-2-operations/03-troubleshooting-playbook.md
     expires: 2027-06-30
