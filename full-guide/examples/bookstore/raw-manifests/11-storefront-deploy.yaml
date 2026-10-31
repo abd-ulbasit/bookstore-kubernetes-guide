@@ -7,7 +7,7 @@
 # Part 04 SCHEDULING LAYER (ch.02 + ch.03 — additive only; the original spec
 # above is unchanged, only the three fields below were ADDED to template.spec):
 #  • ch.02 topologySpreadConstraints: spread the 2 storefront replicas across
-#    nodes (maxSkew 1) as a preference (ScheduleAnyway, see the block below).
+#    nodes (maxSkew 1) so a node/zone loss can't blank the whole UI tier.
 #  • ch.02 podAntiAffinity (preferred): bias the 2 replicas onto different
 #    nodes; "preferred" so a single-node kind cluster still schedules both.
 #  • ch.03 priorityClassName: bookstore-critical (35-) — user-facing tier.
@@ -72,14 +72,13 @@ spec:
           type: RuntimeDefault
       # --- Part 04 ch.03: same user-facing tier as catalog (35-).
       priorityClassName: bookstore-critical
-      # --- Part 04 ch.02: spread the 2 replicas across nodes. ScheduleAnyway
-      # makes it a preference: on the two-worker kind cluster of ch.02 one
-      # worker is the dedicated pool, and a hard rule would hold replicas
-      # Pending. labelSelector scopes the skew count to storefront Pods only.
+      # --- Part 04 ch.02: spread the 2 replicas across nodes (HA). Hard rule;
+      # on a single-node kind cluster scale to 1 or use ch.02's multi-node kind
+      # config. labelSelector scopes the skew count to storefront Pods only.
       topologySpreadConstraints:
         - maxSkew: 1
           topologyKey: kubernetes.io/hostname
-          whenUnsatisfiable: ScheduleAnyway
+          whenUnsatisfiable: DoNotSchedule
           labelSelector:
             matchLabels:
               app: storefront
