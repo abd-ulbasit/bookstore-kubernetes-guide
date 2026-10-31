@@ -143,6 +143,9 @@ versions follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 - Part 04 Scheduling (04.01 to 04.03) is rewritten security-first, with real
   labs on a three-node kind cluster, and `04-scheduling/` joins the enforced
   list.
+- Part 07 Delivery (07.01, 07.02, 07.04 and 07.05) is rewritten
+  security-first, with the Helm, Argo CD and Argo Rollouts runs recorded on
+  kind (07.03 landed earlier), and `07-delivery/` joins the enforced list.
 
 ### Fixed
 - Standalone EKS add-ons (kube-proxy, CoreDNS, EBS CSI) now follow
