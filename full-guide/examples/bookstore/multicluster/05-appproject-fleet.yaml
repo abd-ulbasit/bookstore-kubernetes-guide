@@ -1,0 +1,38 @@
+# Bookstore fleet AppProject (Part 11 ch.06): the guardrail for every
+# Application that the ApplicationSets in this directory generate.
+#
+# Why a new project and not examples/bookstore/argocd/00-appproject.yaml:
+# that project allows one destination, the in-cluster API, so an Application
+# generated for a member cluster is refused. This project allows the two
+# fleet members by their Argo CD cluster name, and only the bookstore
+# namespace on each.
+#
+# clusterResourceWhitelist is empty on purpose. Namespaces and PriorityClasses
+# are cluster-scoped and belong to the platform team (see the chapter); the
+# fleet overlays in ../fleet-overlays/ drop them, so no generated Application
+# asks for a cluster-scoped object.
+#
+# Apply (once, on the hub):
+#   kubectl apply -n argocd -f examples/bookstore/multicluster/05-appproject-fleet.yaml
+apiVersion: argoproj.io/v1alpha1
+kind: AppProject
+metadata:
+  name: bookstore-fleet
+  namespace: argocd
+  finalizers:
+    - resources-finalizer.argocd.argoproj.io
+spec:
+  description: Bookstore on fleet members. Namespaced objects only.
+
+  sourceRepos:
+    - https://github.com/your-org/bookstore.git   # PLACEHOLDER — replace your-org
+
+  destinations:
+    - name: hub                 # the Argo CD cluster names, from the cluster Secrets
+      namespace: bookstore
+    - name: east
+      namespace: bookstore
+
+  clusterResourceWhitelist: []
+
+  namespaceResourceBlacklist: []

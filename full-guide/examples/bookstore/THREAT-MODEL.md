@@ -59,6 +59,7 @@ stable.
 | TB7 | CI and workstations to the cluster | R2, R3 |
 | TB8 | Registry to the node | R6 |
 | TB9 | Namespace to namespace | R4 |
+| TB10 | Argo CD on the hub to the API server of a member, with the token the hub holds for it | A compromised hub, or anyone who reads the hub's cluster Secrets |
 
 ## Entry points
 
@@ -89,6 +90,7 @@ guide yet). Part 00 ch.08 names the enforcer of each baseline field.
 | S2 | A stolen kubeconfig acts as an operator | Authentication at the API server, RBAC, short-lived credentials | cluster | 05.01 |
 | S3 | A Pod impersonates another Pod on the network | Default-deny NetworkPolicy, then explicit allows | cluster | 02.06 |
 | S6 | A Pod copies a label such as `app: storefront` and is trusted as that workload | Mesh authorization by SPIFFE identity from its ServiceAccount, with default-deny at the waypoint | later | 11.04 (`40-authz-default-deny.yaml`); workload X.509 identity 05.01 |
+| S8 | The hub holds a token for every member, so one leaked token reaches that member's API | One ServiceAccount per member in its own namespace, a Role in the workload namespace only, and a token that lasts 24 hours | review | 11.06, Fleet credentials |
 
 ### Tampering
 
@@ -147,7 +149,7 @@ guide uses it as a map of goals, not as a checklist of techniques.
 | Privilege Escalation | Root in a container, a setuid binary, a capability, a privileged Pod, or escape to the host (escape-to-host, T1611) | E1 to E5 |
 | Stealth | A change that leaves no audit record or avoids review | RP1, T3 |
 | Defense Impairment | A policy, gate or NetworkPolicy switched off | T3, S3, E4 |
-| Credential Access | A Secret, a mounted token or etcd read directly | I1, I2, I4, S2 |
+| Credential Access | A Secret, a mounted token or etcd read directly | I1, I2, I4, S2, S8 |
 | Discovery | Listing Pods or reaching the kubelet from inside the cluster | I3, S1 |
 | Lateral Movement | Pod to Pod, or namespace to namespace | S3, TB9 |
 | Impact | Corrupted or deleted records, exhausted resources | A1, D1, D2 |

@@ -1,0 +1,223 @@
+# Transcript for 11-advanced-production-patterns/06-multi-cluster-and-fleet.md.
+# Tier A: a kind cluster, Kubernetes v1.37.0 node, kubectl v1.37.2, Helm v4.1.4.
+# Run on 2026-10-31 against the lab kind cluster sf-pilot.
+# Substitution: the chapter prints the reader's names. This run used these
+# names for them, in every command below:
+#   bookstore      -> p11-06-bookstore (the Bookstore namespace)
+#   fleet-system   -> p11-06-fleet (the spoke identity's namespace)
+#   argocd         -> p11-06-argocd for the chart dry run and the Secret dry
+#                     run. The ApplicationSet and AppProject checks use the
+#                     chapter's own argocd namespace name, because kubectl
+#                     fails at resource mapping and creates nothing.
+#   kind-bookstore-east and kind-bookstore-hub -> kind-sf-pilot. The lab has
+#                     one cluster, so both members are the same API server.
+# The lab copies the chapter's register_member with three substitutions, shown
+# in section 6: the context is kind-sf-pilot, the identity namespace is
+# p11-06-fleet, and the apply is a server dry run into p11-06-argocd. The member
+# templates change only their namespace.
+# Not run, and why:
+#   - The Argo CD controllers were not installed. The lab heavy-install lock was
+#     held by another install when this chapter ran (see the heavy_lock check
+#     in section 2), so the chart was rendered and server dry-run only.
+#   - The base's Namespace and three PriorityClasses are cluster-scoped. They
+#     were not applied here: the cluster is shared and the objects would be
+#     cluster-wide. The fleet overlays drop them, and the dry runs prove that.
+#   - No cloud resource was created.
+# Paths in the commands are relative to full-guide/, the working directory the
+# chapter assumes. The lab working folder is shortened to lab/ in every path.
+# Section 6 uses envsubst, which the chapter also uses.
+$ kubectl config current-context
+kind-sf-pilot
+$ kubectl get namespaces -o name | grep p11-06 || echo 'no p11-06 namespaces before the run'
+no p11-06 namespaces before the run
+$ kubectl delete namespace p11-06-argocd --ignore-not-found
+# 1. The pinned Argo CD chart renders, and renders under restricted
+$ helm repo add argo https://argoproj.github.io/argo-helm
+"argo" already exists with the same configuration, skipping
+$ helm show chart argo/argo-cd --version 10.11.6 | grep -E '^(version|appVersion):'
+appVersion: v3.5.6
+version: 10.11.6
+$ helm template argocd argo/argo-cd --version 10.11.6 --namespace p11-06-argocd > lab/tmp/lab/argo-render.yaml && grep -c '^kind:' lab/tmp/lab/argo-render.yaml
+59
+$ grep '^kind:' lab/tmp/lab/argo-render.yaml | sort | uniq -c
+   3 kind: ClusterRole
+   3 kind: ClusterRoleBinding
+   8 kind: ConfigMap
+   3 kind: CustomResourceDefinition
+   6 kind: Deployment
+   1 kind: Job
+   6 kind: NetworkPolicy
+   7 kind: Role
+   7 kind: RoleBinding
+   2 kind: Secret
+   5 kind: Service
+   7 kind: ServiceAccount
+   1 kind: StatefulSet
+$ kubectl create namespace p11-06-argocd
+namespace/p11-06-argocd created
+$ kubectl label namespace p11-06-argocd pod-security.kubernetes.io/enforce=restricted pod-security.kubernetes.io/audit=restricted pod-security.kubernetes.io/warn=restricted
+namespace/p11-06-argocd labeled
+$ kubectl apply --server-side --field-manager=dryrun -n p11-06-argocd --dry-run=server -f lab/tmp/lab/argo-render.yaml > lab/tmp/lab/argo-dryrun.txt 2>&1; echo exit=$?; grep -c 'server dry run' lab/tmp/lab/argo-dryrun.txt; grep -c 'would violate' lab/tmp/lab/argo-dryrun.txt
+exit=0
+59
+0
+# Control: a Pod that restricted must refuse, dry-run as the same namespace.
+$ cat <<'EOF' | kubectl apply -n p11-06-argocd --dry-run=server -f -
+apiVersion: v1
+kind: Pod
+metadata:
+  name: p11-06-psa-control
+spec:
+  containers:
+    - name: app
+      image: busybox:1.36
+      command: ["sleep", "3600"]
+EOF
+Error from server (Forbidden): error when creating "STDIN": pods "p11-06-psa-control" is forbidden: violates PodSecurity "restricted:latest": allowPrivilegeEscalation != false (container "app" must set securityContext.allowPrivilegeEscalation=false), unrestricted capabilities (container "app" must set securityContext.capabilities.drop=["ALL"]), runAsNonRoot != true (pod or container "app" must set securityContext.runAsNonRoot=true), seccompProfile (pod or container "app" must set securityContext.seccompProfile.type to "RuntimeDefault" or "Localhost")
+# Control: a Deployment that restricted only warns about, dry-run the same way.
+$ cat <<'EOF' | kubectl apply -n p11-06-argocd --dry-run=server -f -
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: p11-06-psa-control-deploy
+spec:
+  replicas: 1
+  selector:
+    matchLabels: {app: control}
+  template:
+    metadata:
+      labels: {app: control}
+    spec:
+      containers:
+        - name: app
+          image: busybox:1.36
+          command: ["sleep", "3600"]
+EOF
+Warning: would violate PodSecurity "restricted:latest": allowPrivilegeEscalation != false (container "app" must set securityContext.allowPrivilegeEscalation=false), unrestricted capabilities (container "app" must set securityContext.capabilities.drop=["ALL"]), runAsNonRoot != true (pod or container "app" must set securityContext.runAsNonRoot=true), seccompProfile (pod or container "app" must set securityContext.seccompProfile.type to "RuntimeDefault" or "Localhost")
+deployment.apps/p11-06-psa-control-deploy created (server dry run)
+# 2. The fleet manifests against the rendered CRDs, and the heavy lock
+$ kubectl apply -n argocd --dry-run=server -f examples/bookstore/multicluster/10-applicationset-cluster-generator.yaml
+error: resource mapping not found for name: "bookstore-fleet" namespace: "argocd" from "examples/bookstore/multicluster/10-applicationset-cluster-generator.yaml": no matches for kind "ApplicationSet" in version "argoproj.io/v1alpha1"
+ensure CRDs are installed first
+$ kubectl apply -n argocd --dry-run=server -f examples/bookstore/multicluster/05-appproject-fleet.yaml
+error: resource mapping not found for name: "bookstore-fleet" namespace: "argocd" from "examples/bookstore/multicluster/05-appproject-fleet.yaml": no matches for kind "AppProject" in version "argoproj.io/v1alpha1"
+ensure CRDs are installed first
+$ lab/venv/bin/python lab/tmp/argo/validate_strict.py lab/tmp/lab/argo-render.yaml applicationsets.argoproj.io examples/bookstore/multicluster/10-applicationset-cluster-generator.yaml examples/bookstore/multicluster/20-applicationset-matrix-generator.yaml
+ApplicationSet/bookstore-fleet: valid against applicationsets.argoproj.io (v1alpha1, unknown fields rejected)
+ApplicationSet/bookstore-fleet-matrix: valid against applicationsets.argoproj.io (v1alpha1, unknown fields rejected)
+$ lab/venv/bin/python lab/tmp/argo/validate_strict.py lab/tmp/lab/argo-render.yaml appprojects.argoproj.io examples/bookstore/multicluster/05-appproject-fleet.yaml
+AppProject/bookstore-fleet: valid against appprojects.argoproj.io (v1alpha1, unknown fields rejected)
+# Deliberate: a misspelt field must be refused, or the check proves nothing.
+$ lab/venv/bin/python lab/tmp/argo/validate_strict.py lab/tmp/lab/argo-render.yaml applicationsets.argoproj.io lab/tmp/argo/typo.yaml; echo exit=$?
+lab/tmp/argo/typo.yaml: spec: 'generators' is a required property
+lab/tmp/argo/typo.yaml: spec: Additional properties are not allowed ('generatorz' was unexpected)
+exit=1
+$ source "lab/env.sh" >/dev/null 2>&1; if heavy_lock; then heavy_unlock; echo 'heavy lock was free; no heavy install was run'; else echo "heavy_lock exit=$?: held by another install; no Argo CD controllers installed"; fi
+heavy_lock exit=1: held by another install; no Argo CD controllers installed
+# 3. Scope the spoke identity before the hub holds a credential to it
+$ grep -n 'pod-security' examples/bookstore/kustomize/base/00-namespace.yaml
+39:    pod-security.kubernetes.io/enforce: restricted
+40:    pod-security.kubernetes.io/enforce-version: latest
+41:    pod-security.kubernetes.io/audit: restricted
+42:    pod-security.kubernetes.io/audit-version: latest
+43:    pod-security.kubernetes.io/warn: restricted
+44:    pod-security.kubernetes.io/warn-version: latest
+$ sed -e 's/bookstore/p11-06-bookstore/g' examples/bookstore/kustomize/base/00-namespace.yaml | kubectl apply -f -
+namespace/p11-06-bookstore created
+resourcequota/p11-06-bookstore-quota created
+limitrange/p11-06-bookstore-limits created
+$ sed -e 's/fleet-system/p11-06-fleet/g' -e 's/namespace: bookstore/namespace: p11-06-bookstore/g' lab/tmp/lab/chapter-spoke.yaml > lab/tmp/lab/spoke.yaml && kubectl apply -f lab/tmp/lab/spoke.yaml
+namespace/p11-06-fleet created
+serviceaccount/fleet-argocd created
+role.rbac.authorization.k8s.io/fleet-deployer created
+rolebinding.rbac.authorization.k8s.io/fleet-deployer created
+$ kubectl get sa fleet-argocd -n p11-06-fleet -o jsonpath='{.automountServiceAccountToken}'; echo
+false
+$ kubectl get secrets -n p11-06-fleet --field-selector type=kubernetes.io/service-account-token -o name | wc -l
+       0
+$ kubectl auth can-i create deployments.apps -n p11-06-bookstore --as=system:serviceaccount:p11-06-fleet:fleet-argocd
+yes
+$ kubectl auth can-i get pods -n p11-06-bookstore --as=system:serviceaccount:p11-06-fleet:fleet-argocd
+yes
+$ kubectl auth can-i get secrets -n p11-06-bookstore --as=system:serviceaccount:p11-06-fleet:fleet-argocd
+yes
+$ kubectl auth can-i get secrets -n kube-system --as=system:serviceaccount:p11-06-fleet:fleet-argocd
+no
+$ kubectl auth can-i list namespaces --as=system:serviceaccount:p11-06-fleet:fleet-argocd
+Warning: resource 'namespaces' is not namespace scoped
+
+no
+$ kubectl auth can-i create priorityclasses.scheduling.k8s.io --as=system:serviceaccount:p11-06-fleet:fleet-argocd
+Warning: resource 'priorityclasses' is not namespace scoped in group 'scheduling.k8s.io'
+
+no
+# 4. The token itself: scope, lifetime and a deliberate denial
+# The test uses a kubeconfig that holds only the token, with the cluster CA.
+$ TOKEN=$(kubectl create token fleet-argocd -n p11-06-fleet --duration=24h) && kubectl config view --raw --minify -o jsonpath="{.clusters[0].cluster.certificate-authority-data}" | base64 -d > $LAB/ca.crt && kubectl config set-cluster member --server="$(kubectl config view --minify -o jsonpath="{.clusters[0].cluster.server}")" --certificate-authority=$LAB/ca.crt --embed-certs=true --kubeconfig=$LAB/fleet.kubeconfig && kubectl config set-credentials fleet-argocd --token="$TOKEN" --kubeconfig=$LAB/fleet.kubeconfig && kubectl config set-context fleet --cluster=member --user=fleet-argocd --kubeconfig=$LAB/fleet.kubeconfig && echo "token-only kubeconfig written"
+Cluster "member" set.
+User "fleet-argocd" set.
+Context "fleet" created.
+token-only kubeconfig written
+$ kubectl --kubeconfig=$LAB/fleet.kubeconfig --context=fleet auth can-i delete deployments.apps -n p11-06-bookstore
+yes
+# Deliberate denial: the same token outside its namespace.
+$ kubectl --kubeconfig=$LAB/fleet.kubeconfig --context=fleet get configmaps -n kube-system 2>&1 | head -1
+Error from server (Forbidden): configmaps is forbidden: User "system:serviceaccount:p11-06-fleet:fleet-argocd" cannot list resource "configmaps" in API group "" in the namespace "kube-system"
+$ kubectl --kubeconfig=$LAB/fleet.kubeconfig --context=fleet get namespaces 2>&1 | head -1
+Error from server (Forbidden): namespaces is forbidden: User "system:serviceaccount:p11-06-fleet:fleet-argocd" cannot list resource "namespaces" in API group "" at the cluster scope
+$ kubectl --kubeconfig=$LAB/fleet.kubeconfig --context=fleet auth can-i create priorityclasses.scheduling.k8s.io 2>/dev/null
+no
+$ rm -f $LAB/fleet.kubeconfig $LAB/ca.crt && echo "token kubeconfig removed"
+token kubeconfig removed
+$ lab/venv/bin/python lab/tmp/lab/token-ttl.py "$(kubectl create token fleet-argocd -n p11-06-fleet --duration=24h)"
+lifetime_seconds: 86400
+subject: system:serviceaccount:p11-06-fleet:fleet-argocd
+$ lab/venv/bin/python lab/tmp/lab/token-ttl.py "$(kubectl create token fleet-argocd -n p11-06-fleet --duration=8760h)"
+lifetime_seconds: 31536000
+subject: system:serviceaccount:p11-06-fleet:fleet-argocd
+# 5. The fleet overlays render inside the identity's Role
+$ kubectl kustomize examples/bookstore/multicluster/fleet-overlays/dev | sed -e 's/namespace: bookstore/namespace: p11-06-bookstore/' > lab/tmp/lab/fleet-dev-rendered.yaml && echo rendered
+rendered
+# A server dry run creates nothing, so a RoleBinding whose Role is only in the dry run is refused. The Role is created for real first, by the identity.
+$ lab/venv/bin/python lab/tmp/lab/pick.py Role catalog-config-reader < lab/tmp/lab/fleet-dev-rendered.yaml | kubectl --as=system:serviceaccount:p11-06-fleet:fleet-argocd apply -n p11-06-bookstore -f -
+role.rbac.authorization.k8s.io/catalog-config-reader created
+$ lab/venv/bin/python lab/tmp/lab/pick.py RoleBinding catalog-config-reader-binding < lab/tmp/lab/fleet-dev-rendered.yaml | kubectl --as=system:serviceaccount:p11-06-fleet:fleet-argocd apply --dry-run=server -n p11-06-bookstore -f - 2>&1 | head -4
+rolebinding.rbac.authorization.k8s.io/catalog-config-reader-binding created (server dry run)
+$ kubectl kustomize examples/bookstore/multicluster/fleet-overlays/dev | sed -e 's/namespace: bookstore/namespace: p11-06-bookstore/' > lab/tmp/lab/fleet-dev-rendered.yaml && echo rendered
+rendered
+$ lab/venv/bin/python lab/tmp/lab/pick.py RoleBinding catalog-config-reader-binding < lab/tmp/lab/fleet-dev-rendered.yaml | kubectl --as=system:serviceaccount:p11-06-fleet:fleet-argocd apply --dry-run=server -n p11-06-bookstore -f - 2>&1 | head -4
+rolebinding.rbac.authorization.k8s.io/catalog-config-reader-binding created (server dry run)
+$ lab/venv/bin/python lab/tmp/lab/pick.py Role catalog-config-reader < lab/tmp/lab/fleet-dev-rendered.yaml | kubectl --as=system:serviceaccount:p11-06-fleet:fleet-argocd apply --dry-run=server -n p11-06-bookstore -f - 2>&1 | head -4
+role.rbac.authorization.k8s.io/catalog-config-reader unchanged (server dry run)
+$ kubectl kustomize examples/bookstore/multicluster/fleet-overlays/dev | sed -e 's/namespace: bookstore/namespace: p11-06-bookstore/' | kubectl --as=system:serviceaccount:p11-06-fleet:fleet-argocd apply --dry-run=server -n p11-06-bookstore -f - > lab/tmp/lab/fleet-dev.txt 2>&1; echo exit=$?; grep -c 'server dry run' lab/tmp/lab/fleet-dev.txt; grep -v 'server dry run' lab/tmp/lab/fleet-dev.txt | head -3
+exit=0
+41
+$ kubectl kustomize examples/bookstore/multicluster/fleet-overlays/staging | sed -e 's/namespace: bookstore/namespace: p11-06-bookstore/' | kubectl --as=system:serviceaccount:p11-06-fleet:fleet-argocd apply --dry-run=server -n p11-06-bookstore -f - > lab/tmp/lab/fleet-staging.txt 2>&1; echo exit=$?; grep -c 'server dry run' lab/tmp/lab/fleet-staging.txt; grep -v 'server dry run' lab/tmp/lab/fleet-staging.txt | head -3
+exit=0
+45
+$ kubectl kustomize examples/bookstore/multicluster/fleet-overlays/dev | grep -cE '^kind: (Namespace|PriorityClass)$' || true
+0
+# Deliberate denial: the unfiltered Part 07 dev overlay, as the same identity.
+$ kubectl kustomize examples/bookstore/kustomize/overlays/dev | sed -e 's/namespace: bookstore/namespace: p11-06-bookstore/' | kubectl --as=system:serviceaccount:p11-06-fleet:fleet-argocd apply --dry-run=server -n p11-06-bookstore -f - 2>&1 | grep -i forbidden | head -3
+Error from server (Forbidden): error when retrieving current configuration of:
+from server for: "STDIN": namespaces "bookstore" is forbidden: User "system:serviceaccount:p11-06-fleet:fleet-argocd" cannot get resource "namespaces" in API group "" in the namespace "bookstore"
+Error from server (Forbidden): error when retrieving current configuration of:
+# 6. Register the members: the Secret is applied, never printed
+$ sed -e 's/fleet-system/p11-06-fleet/g' -e 's/kind-bookstore-hub/kind-sf-pilot/g' -e 's/apply -n argocd/apply --dry-run=server -n p11-06-argocd/' lab/tmp/lab/chapter-register.sh > lab/tmp/lab/register-member.sh && echo 'lab copy of register_member written'
+lab copy of register_member written
+$ sed -e 's/namespace: argocd/namespace: p11-06-argocd/' lab/tmp/lab/chapter-member-east.yaml > lab/tmp/lab/member-secret-east.yaml && sed -e 's/namespace: argocd/namespace: p11-06-argocd/' lab/tmp/lab/chapter-member-hub.yaml > lab/tmp/lab/member-secret-hub.yaml && echo 'lab copies of the member Secrets written'
+lab copies of the member Secrets written
+$ cd lab/tmp/lab && source ./register-member.sh && register_member member-secret-east.yaml kind-sf-pilot && register_member member-secret-hub.yaml kind-sf-pilot
+secret/bookstore-east created (server dry run)
+secret/bookstore-hub created (server dry run)
+$ kubectl get secret -n p11-06-argocd -l argocd.argoproj.io/secret-type=cluster -o name | wc -l
+       0
+# 7. Clean up the lab namespaces
+$ kubectl delete namespace p11-06-bookstore p11-06-fleet p11-06-argocd --wait=true
+namespace "p11-06-bookstore" deleted
+namespace "p11-06-fleet" deleted
+namespace "p11-06-argocd" deleted
+$ kubectl get namespaces -o name | grep -c p11-06 || true
+0
+$ kubectl get clusterrole,clusterrolebinding -o name | grep -c p11-06 || true
+0
