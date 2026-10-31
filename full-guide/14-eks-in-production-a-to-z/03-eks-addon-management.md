@@ -134,16 +134,17 @@ version the tree's `~> 20.31` constraint resolved to when we ran
 - With it, the entry becomes `aws_eks_addon.before_compute`, which has
   no `depends_on`. Nothing in the module makes a node group wait for it.
 
-So the flag removes the add-on's wait for the compute. It adds no wait in
-the other direction. The node groups depend on `time_sleep.this`, which
-waits `dataplane_wait_duration` (30 seconds by default) after the control
-plane is active. The module's comment on that timer says it exists to give
-add-ons that must be configured before compute time to come up. That is a
-timing gap, not an ordering. A node that registers before vpc-cni is
-ACTIVE has no IP for its Pods until the add-on arrives. The other three
-add-ons need no ordering against the nodes: kube-proxy runs as a DaemonSet
-and affects Service routing, not Pod IPs, and CoreDNS and EBS-CSI are
-Deployments whose Pods wait for an IP and start when one is available.
+So the flag removes the add-on's wait for the compute. It adds no wait in the
+other direction. The node groups depend on `time_sleep.this`, which waits
+`dataplane_wait_duration` (30 seconds by default) after the control plane is
+active. The module's comment on that timer says it exists to give add-ons that
+must be configured before compute time to come up. That is a timing gap, not
+an ordering. A node that registers before vpc-cni is ACTIVE has no IP for its
+Pods until the add-on arrives. The other three add-ons need no ordering
+against the nodes: kube-proxy runs as a DaemonSet and affects Service routing,
+not Pod IPs, and CoreDNS and the EBS-CSI controller are Deployments whose Pods
+wait for an IP and start when one is available. The EBS-CSI node plugin is a
+DaemonSet ([14.04](04-storage-classes-and-ebs.md)).
 
 Standalone `aws_eks_addon.vpc_cni` (a separate resource block, not inside
 the module's `cluster_addons` map) has no edge to the node group either.
@@ -192,18 +193,16 @@ separate fields govern this, and they fire at different moments:
   `terraform apply` with no such change sends no update and leaves hand
   edits in place. When an update runs, this setting decides what happens
   to fields edited by hand.
-  - `OVERWRITE` — changed values go back to Amazon EKS defaults during
-    the update. The dev-cluster default: the declared state wins at the
-    next update.
-  - `PRESERVE` — hand edits stay through the update. The production
-    choice when an ops engineer has patched the add-on in an incident and
-    the Terraform PR to codify the change hasn't landed yet.
-  - `NONE` — EKS changes nothing, and the update can fail on a conflict.
+  - `OVERWRITE`: changed values go back to Amazon EKS defaults during
+    the update. The declared state wins at the next update.
+  - `PRESERVE`: hand edits stay through the update. Use it when an ops
+    engineer has patched the add-on in an incident and the Terraform PR to
+    codify the change has not landed yet.
+  - `NONE`: EKS changes nothing, and the update can fail on a conflict.
 
-The bookstore-platform tree uses `OVERWRITE` for both as a default for a
-teaching cluster. A production team that patches an add-on by hand should
-set `PRESERVE` on it until the patch is in Terraform, and then keep the
-patch in `configuration_values`.
+The bookstore-platform tree uses `OVERWRITE` on both. An add-on that someone
+has patched by hand should be set to `PRESERVE` until the patch is in
+`configuration_values`, and then it stays there.
 
 **Pod Identity Agent — IRSA's replacement.** **EKS Pod Identity** is a
 simpler alternative to IRSA. IRSA requires an OIDC provider, a trust
@@ -239,8 +238,8 @@ frozen one has to move before the control plane can go any further.
 
 | Threat | Control in this chapter | Goes deeper in |
 |---|---|---|
-| An add-on with no role of its own uses the node IAM role's permissions | One IRSA role per add-on that calls AWS, bound with `service_account_role_arn`; add-ons that make no AWS calls get none | [Part 10 ch.03](../10-cloud-and-managed-kubernetes/03-cloud-identity.md) |
-| An add-on build moves without review, for example when a default changes during an unrelated upgrade | Pin `addon_version` in staging and production; read the plan before a cluster upgrade | [14.02](02-eks-cluster-lifecycle.md) |
+| An add-on with no role of its own uses the node IAM role's permissions | One IRSA role per add-on that calls AWS, bound with `service_account_role_arn`; add-ons that make no AWS calls get none; the system node group drops its copy of the CNI grant (`iam_role_attach_cni_policy = false`) | [Part 10 ch.03](../10-cloud-and-managed-kubernetes/03-cloud-identity.md) |
+| An add-on build moves without review, for example when a default changes during an unrelated upgrade | Every add-on build change is a line in a plan that someone reviews before apply, and a cluster upgrade is its own reviewed plan | [14.02](02-eks-cluster-lifecycle.md) |
 | A hand edit that Terraform cannot see, or that a later update silently reverts | Declare changes in `configuration_values`; set `resolve_conflicts_on_update` on purpose | [14.07](07-infrastructure-cicd-and-drift.md) |
 
 ## Diagrams
@@ -384,15 +383,18 @@ default is not always the newest build, so read the column for your
 cluster's minor rather than trusting a number from this page. Adding
 `--kubernetes-version 1.37` lists only the builds offered on 1.37.
 
-### 4. Bump an addon to a specific version (optional — tracking usually wins)
+### 4. Hold one add-on on a named build (an exception to the lookup)
 
-In `addons.tf`, change:
+The lookup is the rule. Hold an add-on only for a stated reason, such as a
+regression in the default build. The hold is one reviewed change in its own
+PR, and the PR that moves the add-on on removes it. In `addons.tf`, the hold
+replaces the lookup for that one add-on:
 
 ```hcl
 resource "aws_eks_addon" "coredns" {
   cluster_name                = module.eks.cluster_name
   addon_name                  = "coredns"
-  addon_version               = "v1.14.7-eksbuild.22"  # pinned, was the lookup
+  addon_version               = "<build from describe-addon-versions>"  # held: <reason>
   # ...
 }
 ```
@@ -405,8 +407,9 @@ terraform apply -target=aws_eks_addon.coredns
 ```
 
 Use `-target` only for surgical addon-version changes; never for
-ongoing operations. The pin lets you control upgrade timing (you bump
-CoreDNS when *you* are ready, not when EKS picks a new default).
+ongoing operations. Read the held add-on's line in the plan like any other.
+The plan shows the build the hold keeps, and the PR that drops the hold shows
+the lookup's build as the change.
 
 ### 5. Check what Terraform orders
 
@@ -420,12 +423,53 @@ terraform graph -type=apply > apply-graph.dot
 grep -F 'aws_eks_addon.before_compute' apply-graph.dot
 ```
 
-The matching lines show the add-on's own edges, to its version lookup and
-to locals. No line points to it, so no node group waits for it. The regular
-`aws_eks_addon.this` resources do wait for the node groups, because the
-module makes them depend on the compute. That is the edge `before_compute`
-removes, and the module adds nothing in its place. A node group reaches
-`time_sleep.this`, the timer, but not `aws_eks_addon.before_compute`.
+The grep prints six lines. One is the node's own declaration, three are its
+outgoing edges (to its version lookup, to locals and to the add-on timeouts),
+and two point at it: the module's `cluster_addons` output and the provider's
+close step. None comes from a node group, so the grep alone shows that no
+node group names the add-on. It cannot show what waits on what through other
+resources, so check reachability from the node group. The script below
+follows the edges from the node group and reports what it reaches. The vertex
+names are those of module 20.37.2; if yours differ, grep for
+`aws_eks_node_group.this` and copy the name:
+
+```bash
+python3 - apply-graph.dot <<'PY'
+import re
+import sys
+
+NODE_GROUP = "[root] module.eks.module.eks_managed_node_group.aws_eks_node_group.this (expand)"
+TIMER = "[root] module.eks.time_sleep.this (expand)"
+ADDON = "[root] module.eks.aws_eks_addon.before_compute (expand)"
+
+edges = {}
+for line in open(sys.argv[1]):
+    match = re.match(r'\s*"([^"]+)" -> "([^"]+)"', line)
+    if match:
+        edges.setdefault(match.group(1), set()).add(match.group(2))
+
+seen, todo = set(), [NODE_GROUP]
+while todo:
+    for nxt in edges.get(todo.pop(), ()):
+        if nxt not in seen:
+            seen.add(nxt)
+            todo.append(nxt)
+
+print("node group reaches the timer:", TIMER in seen)
+print("node group reaches vpc-cni:", ADDON in seen)
+PY
+```
+
+On a clean copy of the example tree (Terraform 1.14.8, module 20.37.2, no
+AWS calls), the script prints:
+
+```text
+node group reaches the timer: True
+node group reaches vpc-cni: False
+```
+
+The node group reaches the timer, and the check shows it does not reach the
+add-on. That is the gap `before_compute` leaves open.
 
 ### 6. See what a hand edit does to add-on state
 
@@ -511,6 +555,17 @@ a projected token, as in
 [Part 10 ch.03](../10-cloud-and-managed-kubernetes/03-cloud-identity.md).
 Left unset, the add-on uses the node IAM role's permissions instead.
 
+**The node role's copy of the grant.** The EKS module attaches
+`AmazonEKS_CNI_Policy` to each managed node group role by default, so the
+node role holds the grant that vpc-cni now gets through its own IRSA role.
+The system node group sets `iam_role_attach_cni_policy = false` in `eks.tf`
+to drop that copy. Apply it once `aws-node` runs on its IRSA role: on a
+running cluster, let the vpc-cni role change land first. The module's
+default IMDS hop limit is 2, which lets a Pod reach the node role's
+credentials. The hop limit is the subject of
+[14.08](08-vpc-endpoints-and-egress.md), and this tree keeps the module
+default until then.
+
 **`before_compute = true` mechanics.** In `terraform-aws-modules/eks`
 20.37.2, the flag moves the entry from `aws_eks_addon.this` to
 `aws_eks_addon.before_compute` (see `main.tf`). The `this` resources carry
@@ -558,22 +613,16 @@ Identity is the simpler default.
 
 ## Production notes
 
-> **In production:** Pin `addon_version` for staging and production;
-> track the default for dev. The dev cluster benefits from "latest
-> works" (you see new addon behavior early); staging and production
-> benefit from "the version we tested" (no surprise bump when EKS
-> rotates defaults during an unrelated upgrade). **When `addon_version`
-> tracks the default (an `aws_eks_addon_version` lookup, or `null`
-> inside the EKS module's `cluster_addons`), a control-plane upgrade
-> through Terraform also moves every addon whose default build differs
-> on the new minor, with no commit of its own. Both lookups read the
-> Kubernetes version that the same configuration sets, so read the plan
-> for the new add-on builds before you apply. Mitigation: pin
-> `addon_version` in staging and production so addon bumps are explicit
-> commits.** The bookstore-platform tree tracks the default throughout
-> because it's a teaching artifact; flip to pinned in your fork. (A bare
-> `null` on a standalone `aws_eks_addon` is not tracking: the provider
-> keeps the installed build, see [ch.02](02-eks-cluster-lifecycle.md).)
+> **In production:** Read the add-on lines of every plan. When
+> `addon_version` tracks the default (an `aws_eks_addon_version` lookup, or
+> `null` inside the EKS module's `cluster_addons`), a control-plane upgrade
+> through Terraform also moves every addon whose default build differs on the
+> new minor, in the same plan and with no commit of its own. Both lookups read
+> the Kubernetes version that the same configuration sets, so the plan shows
+> the new builds before anything applies. Make the cluster bump its own
+> reviewed PR, and review the add-on lines in it. (A bare `null` on a
+> standalone `aws_eks_addon` is not tracking: the provider keeps the installed
+> build, see [ch.02](02-eks-cluster-lifecycle.md).)
 
 > **In production:** `resolve_conflicts_on_update = "PRESERVE"` is the
 > right choice for an add-on whose live objects get edited outside
@@ -700,11 +749,11 @@ Addon-management checklist (the cluster is healthy when all five are yes):
 - [ ] Conformance window verified for the cluster's K8s minor
       (`aws eks describe-addon-versions --kubernetes-version <CURRENT>`
       lists all four essentials).
-- [ ] `resolve_conflicts_on_update` policy set deliberately
-      (OVERWRITE for dev, PRESERVE for staging/prod when customized).
-- [ ] Addon versions are pinned in staging/prod (not tracking EKS's
-      default via a lookup or a module `null`) so AWS-side default
-      rotations don't surprise the team.
+- [ ] `resolve_conflicts_on_update` set on purpose: OVERWRITE for an
+      add-on whose configuration Terraform owns, PRESERVE while a hand
+      patch waits for its PR.
+- [ ] Every apply's plan was read for add-on build changes, and the
+      cluster bump was its own reviewed plan.
 
 ## Test your understanding
 
@@ -720,7 +769,14 @@ Addon-management checklist (the cluster is healthy when all five are yes):
 2. **You run `terraform apply` to bump K8s from 1.36 to 1.37 with every addon tracking EKS's default build (as the bookstore tree does). Mid-apply, the LB Controller starts crashlooping. What's happening and how do you avoid this in prod?**
    <details><summary>Show answer</summary>
 
-   Tracking the default (`addon_version` from an `aws_eks_addon_version` lookup keyed on the cluster's version) moves kube-proxy, and every other managed addon whose default build differs on the new minor, in the same plan as the cluster upgrade. One of those default bumps changed an API the LB Controller (a self-managed Helm release) depended on. The chapter's discipline: pin `addon_version` to specific certified strings in staging/prod (not a tracking lookup), stage each addon bump as its own PR in a separate apply, and let dev clusters track the default to find these surprises before prod hits them.
+   Tracking the default (`addon_version` from an `aws_eks_addon_version`
+   lookup keyed on the cluster's version) moves kube-proxy, and every other
+   managed addon whose default build differs on the new minor, in the same
+   plan as the cluster upgrade. One of those default bumps changed an API the
+   LB Controller (a self-managed Helm release) depended on. The control is the
+   plan review: the add-on lines name each build that changes, so read them
+   against the release notes before apply, and make the cluster bump and any
+   add-on bump separate reviewed PRs, each with its own apply.
 
    </details>
 

@@ -160,6 +160,11 @@ module "eks" {
       capacity_type  = "ON_DEMAND"
       ami_type       = "AL2023_x86_64_STANDARD"
 
+      # aws-node runs on its own IRSA role (cluster_addons.vpc-cni above), so
+      # the node role does not need the CNI grant the module attaches by
+      # default. The IMDS hop limit is the subject of 14.08.
+      iam_role_attach_cni_policy = false
+
       min_size     = var.system_node_min_size
       max_size     = var.system_node_max_size
       desired_size = var.system_node_desired_size

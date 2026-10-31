@@ -10,9 +10,9 @@
 > binding mode that keeps Pods and their volumes in the same AZ.
 
 **Estimated time:** ~30 min read · ~60 min hands-on
-**Prerequisites:** [Part 14 ch.03](./03-eks-addon-management.md) — EBS-CSI addon required first · [Part 10 ch.04](../10-cloud-and-managed-kubernetes/05-cloud-storage-and-data.md) — kind→cloud storage transition · [Part 06 ch.02](../03-config-and-storage/05-stateful-data-patterns.md) — StatefulSet binding semantics on EBS
+**Prerequisites:** [Part 14 ch.03](./03-eks-addon-management.md) — EBS-CSI addon required first · [Part 10 ch.05](../10-cloud-and-managed-kubernetes/05-cloud-storage-and-data.md) — kind→cloud storage transition · [Part 03 ch.05](../03-config-and-storage/05-stateful-data-patterns.md) — StatefulSet binding semantics on EBS
 
-**You'll know after this:** • understand why gp2 (default) should be replaced with gp3 on day one — 20% cheaper, tunable IOPS, no burst-credit footgun · • encrypt every volume with a customer-managed KMS key set on the StorageClass · • use `WaitForFirstConsumer` to keep Pods and volumes in the same AZ · • design a snapshot lifecycle for production EBS volumes · • debug the AZ-local reality of EBS when a Pod can't reschedule across zones
+**You'll know after this:** • understand why gp2 (default) should be replaced with gp3 on day one — 20% cheaper, tunable IOPS, no burst-credit footgun · • encrypt every volume the default StorageClass provisions with a customer-managed KMS key · • use `WaitForFirstConsumer` to keep Pods and volumes in the same AZ · • design a snapshot lifecycle for production EBS volumes · • debug the AZ-local reality of EBS when a Pod can't reschedule across zones
 
 <!-- tags: storage, ebs-csi, eks, cloud, day-2 -->
 
@@ -134,8 +134,10 @@ with another account. AWS does not allow sharing snapshots encrypted
 with `aws/ebs`, and a shared encrypted snapshot needs its key shared as
 well. Disabling a key stops new attachments; a volume that is already
 attached keeps working until it detaches. Encrypted snapshots cannot be
-public. For the rest, turn on block public access for snapshots in each
-Region. The key of an existing volume or snapshot cannot be changed, so
+public. Block public access for snapshots is a Regional account setting, and
+this tree does not set it. Turn it on per Region with `aws ec2
+enable-snapshot-block-public-access --state block-all-sharing`. The key of an
+existing volume or snapshot cannot be changed, so
 to move data under the CMK, copy the snapshot with the new key and
 restore it. A key costs $1 a month, plus $0.03 per 10,000 requests.
 
@@ -218,8 +220,8 @@ replicas. Cost guardrails are in [14.06](./06-cost-guardrails.md).
 
 | Threat | Control in this chapter | Deeper |
 |---|---|---|
-| Volume data read with a key the team does not control | Encrypt every volume with a customer-managed KMS key whose key policy names only the EBS-CSI controller role for volume use | Envelope encryption: [05.04](../05-security/04-secrets-and-cluster-hardening.md) |
-| A snapshot shared or exposed outside the account | Encrypted snapshots cannot be public; block public access for snapshots covers the rest, per Region | [08.02](../08-day-2-operations/02-backup-and-dr.md) |
+| Volume data read with a key the team does not control | Encrypt every volume the default class provisions with a customer-managed KMS key whose key policy names only the EBS-CSI controller role for volume use | Envelope encryption: [05.04](../05-security/04-secrets-and-cluster-hardening.md) |
+| A snapshot shared or exposed outside the account | Snapshots of CMK volumes are encrypted, so they cannot be made public, and sharing one needs its key shared too; the Regional block public access setting is in the mental model | [08.02](../08-day-2-operations/02-backup-and-dr.md) |
 | A deleted claim takes its data with it | `reclaimPolicy: Retain` keeps the volume until someone removes it on purpose | [14.14](./14-backup-and-restore-velero.md) |
 | A restored snapshot gives read access the original claim did not | Snapshot verbs go only to the team that owns the data; no tenant role holds `volumesnapshotcontents` | [05.01](../05-security/01-authn-authz-rbac.md) |
 
@@ -276,13 +278,19 @@ Illustrative output (not captured):
 ```text
 NAME                       PROVISIONER             RECLAIMPOLICY   VOLUMEBINDINGMODE      ALLOWVOLUMEEXPANSION   AGE
 gp2                        kubernetes.io/aws-ebs   Delete          WaitForFirstConsumer   false                  3d
-gp3-encrypted (default)    ebs.csi.aws.com         Delete          WaitForFirstConsumer   true                   3d
+gp3-encrypted (default)    ebs.csi.aws.com         Retain          WaitForFirstConsumer   true                   3d
 ```
 
 Confirm:
 
 - `gp3-encrypted` has the `(default)` marker.
 - `gp2` does **not** have the `(default)` marker.
+
+Demoting gp2 changes only the default. A claim that names `gp2` still gets a
+volume with the class's parameters, which do not include the team's key, and
+its reclaim policy is `Delete`. This tree leaves the class in place. Delete it
+to remove it (volumes already bound are not affected), or deny it with an
+admission policy.
 
 If both have `(default)`, Kubernetes is holding two defaults, which its
 documentation advises against. The Terraform's
@@ -325,11 +333,11 @@ Seven things to confirm:
   legacy `kubernetes.io/aws-ebs`.
 - `type: gp3` — not gp2.
 - `encrypted: "true"` — always-on, no per-PVC opt-in.
-- `kmsKeyId` — your customer-managed key, not the `aws/ebs` default.
+- `kmsKeyId`: your customer-managed key, not the `aws/ebs` default.
 - `volumeBindingMode: WaitForFirstConsumer` — Pod-scheduling drives
   volume placement.
 - `allowVolumeExpansion: true` — online resize works.
-- `reclaimPolicy: Retain` — a deleted claim keeps its volume.
+- `reclaimPolicy: Retain`: a deleted claim keeps its volume.
 
 ### 3. Create a test PVC
 
@@ -569,12 +577,12 @@ rolling 24 hours, and each must complete before the next one starts.
 
 **VolumeSnapshot lifecycle.** A `VolumeSnapshot` CR triggers the
 external-snapshotter sidecar (on the EBS-CSI controller) to call
-`CreateSnapshot` against AWS EC2. AWS allocates a snapshot ID and copies
-the changed blocks to its own storage in the background. The snapshot is **point-in-time consistent
-at the EBS level** (crash-consistent, not application-consistent —
-in-flight database writes may or may not be in the snapshot). For
-application-consistent snapshots, the workload must quiesce (a CNPG
-`Backup` CR, a Postgres `pg_start_backup()` / `pg_stop_backup()`).
+`CreateSnapshot` against AWS EC2. AWS allocates a snapshot ID and copies the
+changed blocks to its own storage in the background. The snapshot is
+**point-in-time consistent at the EBS level** (crash-consistent, not
+application-consistent — in-flight database writes may or may not be in the
+snapshot). For application-consistent snapshots, the workload must quiesce (a
+CNPG `Backup` CR, a Postgres `pg_start_backup()` / `pg_stop_backup()`).
 
 A `VolumeSnapshot` is the namespaced claim object (like a PVC for
 snapshots); the CSI driver creates a `VolumeSnapshotContent`
@@ -750,7 +758,3 @@ Storage-class checklist (the production setup is right when all six are yes):
 - **Ibryam & Huß, *Kubernetes Patterns* 2e — *Stateful Service***;
   the broader stateful-workload pattern this chapter's storage
   discipline supports.
-- **Kubernetes topology-aware hints**
-  <https://kubernetes.io/docs/concepts/services-networking/topology-aware-routing/>;
-  the upstream reference for the cross-AZ traffic minimization the
-  production notes reference.

@@ -122,17 +122,13 @@ one terraform apply
 karpenter nodes: not in the apply; rotate via expireAfter or a forced drain
 ```
 
-The node group reads its cluster name and version from a `time_sleep`
-resource that waits `dataplane_wait_duration` (30 seconds by default)
-after the cluster is active. That is a timer, not a check that vpc-cni
-has finished. The module's comment says the timer exists to give
-before_compute addons time, but no edge makes the node group wait for
-the add-on. The skew policy makes the parallel update acceptable:
-kube-proxy and CoreDNS need only the new API server, which the control
-plane update has already reached, and kube-proxy may be up to three
-minors older or newer than the kubelet it runs alongside. Step 7 checks
-the result. If your change process needs AWS's order, split the change
-into two applies; this chapter does not.
+The node group waits on a 30-second `time_sleep` after the control plane is
+active, and no edge makes it wait for vpc-cni.
+[14.03](03-eks-addon-management.md) explains the timer and how to check it.
+The skew policy makes the parallel update acceptable: kube-proxy and CoreDNS
+need only the new API server, which the control plane update has already
+reached. Step 7 checks the result. If your change process needs AWS's order,
+split the change into two applies; this chapter does not.
 
 Reverse the control plane and nodes and a kubelet runs ahead of its API
 server, which the skew policy does not allow. Bump add-ons before the
@@ -141,12 +137,11 @@ yet (for example, a CRD version).
 
 **Kubernetes version-skew policy** (upstream, as of K8s 1.28+):
 kubelet can be up to **3 minor versions older** than kube-apiserver
-(N-3). kube-proxy must not be newer than kube-apiserver, may be up to
-3 minors older than it, and may be up to 3 minors older or newer than
-the kubelet it runs alongside. kube-controller-manager and
-kube-scheduler must not be newer than kube-apiserver and may be up to
-1 minor older. kubectl stays within ±1 of kube-apiserver. Diagram B
-below summarizes this policy for EKS.
+(N-3). kube-controller-manager and kube-scheduler must not be newer than
+kube-apiserver and may be up to 1 minor older. kubectl stays within ±1 of
+kube-apiserver. kube-proxy has its own rule, which is tied to the add-on
+build it runs ([14.03](03-eks-addon-management.md)). Diagram B below
+summarizes this policy for EKS.
 
 **Standard support vs extended support** — the cost math (730 hours/month):
 
@@ -451,12 +446,10 @@ new version, so an add-on shows an in-place `addon_version` change only
 when that default differs from the build installed. Check the plan for
 each add-on rather than assume a change.
 
-The one replacement is `module.eks.time_sleep.this[0]`, a timer from
-the `hashicorp/time` provider. The module uses it to wait `dataplane_wait_duration` (30 seconds by
-default) after the cluster is active, before it creates the dataplane
-components such as the node groups (the variable's own description).
-Its `triggers` include the cluster version, so every version bump
-re-creates it. It is harmless: replacing it touches no AWS resource and
+The one replacement is `module.eks.time_sleep.this[0]`, the timer the node
+groups wait on ([14.03](03-eks-addon-management.md) covers what it does and
+does not order). Its `triggers` include the cluster version, so every version
+bump re-creates it. It is harmless: replacing it touches no AWS resource and
 costs a 30-second wait.
 
 If the plan destroys anything else, **stop and investigate**. Apart
@@ -682,9 +675,10 @@ date. The bookstore-platform README's §3 Version policy is the template.
 
 > **In production:** `kubent` runs in CI, not just before upgrades.
 > Add `kubent --target-version <next minor>` to your nightly
-> drift-detection job ([14.07](07-infrastructure-cicd-and-drift.md)). The day someone
-> commits a manifest that uses a soon-to-be-removed API, CI fails
-> and you fix it months before the deadline.
+> drift-detection job
+> ([14.07](07-infrastructure-cicd-and-drift.md)). The day someone commits a
+> manifest that uses a soon-to-be-removed API, CI fails and you fix it months
+> before the deadline.
 
 > **In production:** PodDisruptionBudgets matter during node-pool
 > rolls. Without a PDB, a node drain can take a service below quorum. A
@@ -750,7 +744,14 @@ Pre-upgrade checklist (the bump is safe when all five are yes):
 1. **Why does the control plane move first, and why does AWS list add-ons after nodes when this tree updates some add-ons alongside the node roll?**
    <details><summary>Show answer</summary>
 
-   The skew policy allows kubelet to be **older** than apiserver (up to 3 minors behind) but **never newer**, so nodes cannot move ahead of the control plane. AWS's update procedure lists nodes before add-ons. The tree enforces the control plane first and orders vpc-cni before the node group only by a 30-second timer; it updates kube-proxy, CoreDNS and EBS-CSI alongside the node roll. The skew policy allows that, because those add-ons need only the new API server, and kube-proxy may be up to three minors older or newer than the kubelet. Check the add-on versions after the apply (step 7).
+   The skew policy allows kubelet to be **older** than apiserver (up to 3
+   minors behind) but **never newer**, so nodes cannot move ahead of the
+   control plane. AWS's update procedure lists nodes before add-ons. The tree
+   enforces the control plane first. It updates vpc-cni, kube-proxy, CoreDNS
+   and EBS-CSI in the same apply as the node roll, and the only ordering for
+   vpc-cni is a 30-second timer; [14.03](03-eks-addon-management.md) explains
+   why. The skew policy allows that parallel update. Check the add-on versions
+   after the apply (step 7).
 
    </details>
 
@@ -764,7 +765,15 @@ Pre-upgrade checklist (the bump is safe when all five are yes):
 3. **A team pins `addon_version = "v1.20.0-eksbuild.1"` in Terraform to "avoid surprises." Six months later they move the control plane to 1.37. What happens to that add-on, and why is it a problem?**
    <details><summary>Show answer</summary>
 
-   The pin bypasses the tree's `aws_eks_addon_version` lookup, and EKS does not update an add-on when the cluster updates. With the pin unchanged, the plan shows no change for that add-on, so it stays on a build chosen for an older minor and not checked against 1.37. AWS asks you to verify add-on compatibility with the cluster before an update. The chapter's pattern, `addon_version` from an `aws_eks_addon_version` lookup for the cluster's version, moves the add-on with each bump. Pin a version only to test it in staging.
+   The pin bypasses the tree's `aws_eks_addon_version` lookup, and EKS does
+   not update an add-on when the cluster updates. With the pin unchanged, the
+   plan shows no change for that add-on, so it stays on a build chosen for an
+   older minor and not checked against 1.37. AWS asks you to verify add-on
+   compatibility with the cluster before an update. The chapter's pattern,
+   `addon_version` from an `aws_eks_addon_version` lookup for the cluster's
+   version, moves the add-on with each bump. Hold a build only as a reviewed
+   exception: the PR names the reason, and the next upgrade PR removes the pin
+   ([14.03](03-eks-addon-management.md)).
 
    </details>
 
@@ -815,7 +824,7 @@ Pre-upgrade checklist (the bump is safe when all five are yes):
 - **AWS EKS Best Practices Guide — Cluster upgrades**
   <https://docs.aws.amazon.com/eks/latest/best-practices/cluster-upgrades.html>;
   the AWS team's upgrade guidance, linked from the update-cluster page.
-- **AWS EKS — Kubernetes versions standard support**
+- **AWS EKS: Kubernetes versions standard support**
   <https://docs.aws.amazon.com/eks/latest/userguide/kubernetes-versions-standard.html>;
   the 1.37 section lists the action-required changes in Step 3.
 - **Kubernetes deprecation guide**

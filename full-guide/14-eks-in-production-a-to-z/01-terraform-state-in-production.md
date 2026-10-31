@@ -115,9 +115,10 @@ The four dimensions and how the S3-with-lockfile backend addresses each:
   public-access-block settings, so an ACL or bucket policy cannot make the
   bucket public.
 
-Terraform 1.10 (November 2024) introduced `use_lockfile = true` on the S3
-backend, and Terraform 1.11 (February 2025) made it generally available
-([changelog](https://github.com/hashicorp/terraform/blob/v1.11/CHANGELOG.md)).
+Terraform 1.10 ([changelog](https://github.com/hashicorp/terraform/blob/v1.10/CHANGELOG.md),
+November 2024) introduced `use_lockfile = true` on the S3 backend, and
+Terraform 1.11 ([changelog](https://github.com/hashicorp/terraform/blob/v1.11/CHANGELOG.md),
+February 2025) made it generally available.
 The backend docs now mark **`dynamodb_table` as deprecated**.
 The legacy pattern needed a separate DynamoDB table (one more resource,
 one more IAM policy, one more capacity-mode decision); the new pattern
@@ -240,21 +241,58 @@ under 63 chars (S3 limit).
 
 State holds every attribute in plaintext: IAM policies, subnet and key IDs,
 and any secret a resource returns. This tree holds no cluster token, but its
-state is still an account map ([platform README](../examples/bookstore-platform/terraform/README.md),
-"What is in state"). Encrypt it with a customer-managed key.
-Terraform needs `kms:Encrypt`, `kms:Decrypt` and `kms:GenerateDataKey` on the
-key ([S3 backend docs](https://developer.hashicorp.com/terraform/language/backend/s3)),
-so grant them only to the roles that run Terraform. The key costs $1 a month,
-and symmetric requests cost $0.03 per 10,000
-([AWS KMS pricing](https://aws.amazon.com/kms/pricing/)).
+state is still an account map ([platform
+README](../examples/bookstore-platform/terraform/README.md), "What is in
+state"). Encrypt it with a customer-managed key. Terraform needs
+`kms:Encrypt`, `kms:Decrypt` and `kms:GenerateDataKey` on the key ([S3 backend
+docs](https://developer.hashicorp.com/terraform/language/backend/s3)), so
+grant them only to the roles that run Terraform. The default key policy hands
+key use to IAM for the whole account, so any identity with a matching IAM
+policy could decrypt state. The key policy below names only the key administrator and the
+Terraform roles. The key costs $1 a month, and symmetric requests cost $0.03 per
+10,000 ([AWS KMS pricing](https://aws.amazon.com/kms/pricing/)).
 
 From the repo root:
 
 ```bash
+ACCOUNT_ID="$(aws sts get-caller-identity --query Account --output text)"
+cat > tfstate-key-policy.json <<EOF
+{
+  "Version": "2012-10-17",
+  "Statement": [
+    {
+      "Sid": "StateKeyAdministration",
+      "Effect": "Allow",
+      "Principal": {"AWS": "arn:aws:iam::${ACCOUNT_ID}:role/<KEY-ADMIN-ROLE>"},
+      "Action": [
+        "kms:Create*", "kms:Describe*", "kms:Enable*", "kms:List*",
+        "kms:Put*", "kms:Update*", "kms:Revoke*", "kms:Disable*",
+        "kms:Get*", "kms:Delete*", "kms:ScheduleKeyDeletion",
+        "kms:CancelKeyDeletion", "kms:TagResource", "kms:UntagResource"
+      ],
+      "Resource": "*"
+    },
+    {
+      "Sid": "StateReadersAndWriters",
+      "Effect": "Allow",
+      "Principal": {"AWS": [
+        "arn:aws:iam::${ACCOUNT_ID}:role/<PLAN-ROLE>",
+        "arn:aws:iam::${ACCOUNT_ID}:role/<APPLY-ROLE>"
+      ]},
+      "Action": ["kms:Decrypt", "kms:Encrypt", "kms:GenerateDataKey"],
+      "Resource": "*"
+    }
+  ]
+}
+EOF
+
 export TFSTATE_KMS_ARN="$(aws kms create-key \
   --region "$TFSTATE_REGION" \
   --description "Terraform state" \
+  --policy file://tfstate-key-policy.json \
   --query KeyMetadata.Arn --output text)"
+aws kms enable-key-rotation --region "$TFSTATE_REGION" \
+  --key-id "$TFSTATE_KMS_ARN"
 
 cd examples/bookstore-platform/terraform
 ./bootstrap-state.sh "$TFSTATE_BUCKET" "$TFSTATE_REGION" "$TFSTATE_KMS_ARN"
@@ -280,6 +318,10 @@ Bootstrap S3 state backend
 [..] Setting lifecycle rule (expire noncurrent versions @ 90 days)
 [ok] Lifecycle rule set
 ```
+
+Replace the three role placeholders with roles from your account. Run these
+commands as the key administrator role, since the policy grants key
+administration to that role alone.
 
 Re-run the script with the same key ARN only. Without the third argument it
 sets the bucket default back to SSE-S3.
@@ -328,6 +370,10 @@ backend "s3" {
 overrides the bucket's KMS default, so set both
 ([Terraform source](https://github.com/hashicorp/terraform/blob/main/internal/backend/remote-state/s3/client.go)).
 
+The example file ships `kms_key_id` uncommented, so an edit that replaces only
+the bucket and region still writes KMS-encrypted state. Replace its placeholder
+with the key from step 3.
+
 The single most important line is `use_lockfile = true`. Without it,
 two concurrent applies race; with it, S3's conditional-write atomicity
 serializes them.
@@ -354,6 +400,8 @@ Do you want to copy existing state to the new backend?
 Answer `yes`. Terraform uploads the local state to S3, switches the
 backend, and confirms:
 
+Illustrative output (not captured):
+
 ```text
 Successfully configured the backend "s3"! Terraform will automatically
 use this backend unless the backend configuration changes.
@@ -361,11 +409,16 @@ use this backend unless the backend configuration changes.
 
 ### 6. Verify the lock object lifecycle
 
-Run a no-op apply to watch locking in action:
+Run a no-op apply to watch locking in action. It is a no-op only on a tree that
+is already applied. On a tree that was never applied, `apply` would build the
+whole stack, so save a plan first and read it:
 
 ```bash
-terraform apply -auto-approve
+terraform plan -out=lock-check.tfplan
+terraform apply lock-check.tfplan
 ```
+
+If the saved plan lists changes, stop and find out why before you apply it.
 
 In a second terminal, while the apply is mid-flight:
 
@@ -447,14 +500,47 @@ force-unlocking a live apply is the path to state corruption.
 The policy from step 3 blocks plain HTTP and public access. It does not stop
 a principal that holds `s3:DeleteObjectVersion`. Deleting a bucket needs every
 version gone first, so the guard must block version deletes, not only the
-bucket delete. Choose one:
+bucket delete. This step uses Object Lock. It keeps each object version until
+its retention ends. In governance mode, users with
+`s3:BypassGovernanceRetention` can override it. It needs versioning, which
+S3 turns on when the bucket is created with Object Lock. Locked versions stay
+past the 90-day cleanup rule until their retention ends
+([Object Lock](https://docs.aws.amazon.com/AmazonS3/latest/userguide/object-lock.html)).
 
-- **Object Lock** keeps each object version until its retention ends. In
-  compliance mode nobody can delete it, root included. In governance mode,
-  users with `s3:BypassGovernanceRetention` can override it. It needs
-  versioning, which step 3 enables. Locked versions stay past the 90-day
-  cleanup rule until their retention ends
-  ([Object Lock](https://docs.aws.amazon.com/AmazonS3/latest/userguide/object-lock.html)).
+Object Lock is set when the bucket is created. Create the state bucket with it
+before you run `bootstrap-state.sh`, which then finds the bucket and re-applies
+its settings. In `us-east-1`, leave out the `--create-bucket-configuration`
+line:
+
+```bash
+aws s3api create-bucket --bucket "$TFSTATE_BUCKET" --region "$TFSTATE_REGION" \
+  --create-bucket-configuration LocationConstraint="$TFSTATE_REGION" \
+  --object-lock-enabled-for-bucket
+aws s3api put-object-lock-configuration --bucket "$TFSTATE_BUCKET" \
+  --object-lock-configuration \
+  '{"ObjectLockEnabled":"Enabled","Rule":{"DefaultRetention":{"Mode":"GOVERNANCE","Days":90}}}'
+```
+
+Then try a delete of the current state version. This is a deliberate action on
+a bucket you own, and it should fail:
+
+```bash
+VERSION_ID="$(aws s3api list-object-versions --bucket "$TFSTATE_BUCKET" \
+  --prefix bookstore-platform/terraform.tfstate \
+  --query 'Versions[?IsLatest].VersionId' --output text)"
+aws s3api delete-object --bucket "$TFSTATE_BUCKET" \
+  --key bookstore-platform/terraform.tfstate --version-id "$VERSION_ID"
+```
+
+Illustrative result (not captured): the delete fails with an access error that
+names Object Lock, and the version stays in the bucket. A principal that holds
+`s3:BypassGovernanceRetention` and passes `--bypass-governance-retention` can
+still remove it, which is why governance mode is the choice for a lab.
+Compliance mode cannot be shortened by anyone, root included.
+
+MFA Delete is the other option. It needs an MFA device and the root account,
+so this step does not use it.
+
 - **MFA Delete** requires an MFA code to delete a version permanently or to
   change the bucket's versioning. Only the bucket owner's root account can
   enable it, and only with the CLI or API
@@ -608,7 +694,7 @@ never be able to take down the other.
 
 # Copy + edit the backend file.
 cp backend-s3.tf.example backend-s3.tf
-# (edit bucket + region to match)
+# (edit bucket, region and kms_key_id to match)
 
 # Migrate local state to S3 (one-time).
 terraform init -migrate-state
@@ -618,6 +704,11 @@ rm terraform.tfstate terraform.tfstate.backup
 
 # Verify state lives in S3.
 aws s3 ls "s3://tfstate-bookstore-<INITIALS>/bookstore-platform/"
+
+# Confirm the state object is SSE-KMS, not the SSE-S3 default.
+aws s3api head-object --bucket tfstate-bookstore-<INITIALS> \
+  --key bookstore-platform/terraform.tfstate \
+  --query ServerSideEncryption --output text
 
 # Force-unlock if a crashed apply left a stuck lock.
 terraform force-unlock <UUID>
@@ -645,17 +736,23 @@ terraform {
 }
 ```
 
-State-backend checklist (the migration is done when all seven are yes):
+State-backend checklist (the migration is done when all eight are yes):
 
 - [ ] Bucket versioning is ON (`aws s3api get-bucket-versioning`).
 - [ ] Bucket default encryption is SSE-KMS with the key from step 3, and
-      `kms_key_id` in the backend matches it (`get-bucket-encryption`).
+      `kms_key_id` in the backend matches it (`get-bucket-encryption`). The
+      state object itself reads back as `aws:kms`, not `AES256`, because
+      Terraform sends its own header (`head-object`, Quick Reference).
+- [ ] The state key's policy names the Terraform roles, with no
+      account-wide delegation, and rotation is on
+      (`aws kms get-key-rotation-status --key-id <KEY-ARN>`).
 - [ ] Public-access-block is ON on all four dimensions
       (`get-public-access-block`).
 - [ ] Lifecycle expires noncurrent versions
       (`get-bucket-lifecycle-configuration`); 90 days, unless you chose MFA
       Delete (step 10).
-- [ ] A deletion guard is set: Object Lock or MFA Delete (step 10).
+- [ ] Object Lock is on with a default retention (step 10):
+      `aws s3api get-object-lock-configuration --bucket <BUCKET>`.
 - [ ] `use_lockfile = true` is in the backend block; **NO**
       `dynamodb_table = "..."` line.
 - [ ] State file is under ~10 MB (`aws s3 ls --summarize`); anything
@@ -682,7 +779,13 @@ State-backend checklist (the migration is done when all seven are yes):
 3. **Your state holds an `aws_iam_access_key` secret in plaintext. Which controls limit who can read it, and why is SSE-S3 alone not enough?**
    <details><summary>Show answer</summary>
 
-   The public-access block and the TLS-only policy keep the bucket private and force HTTPS. IAM decides who holds `s3:GetObject`, and with SSE-S3 every one of those principals reads the secret in plaintext. SSE-KMS adds a second gate: reading state also needs `kms:Decrypt` under a key policy, and CloudTrail records each decrypt unless a trail excludes KMS events. The stronger fix is upstream: avoid long-lived access keys in Terraform, or pass a `pgp_key`, which keeps the secret out of plaintext state at the cost of automation.
+   The public-access block and the TLS-only policy keep the bucket private and
+   force HTTPS. IAM decides who holds `s3:GetObject`, and with SSE-S3 every
+   one of those principals reads the secret in plaintext. SSE-KMS adds a
+   second gate: reading state also needs `kms:Decrypt` under a key policy, and CloudTrail logs the KMS calls. With a Bucket Key, S3 makes one KMS call per requester per key period, not one per read. The
+   stronger fix is upstream: avoid long-lived access keys in Terraform, or
+   pass a `pgp_key`, which keeps the secret out of plaintext state at the cost
+   of automation.
 
    </details>
 

@@ -14,8 +14,7 @@
 # What it creates:
 #   - S3 bucket with versioning enabled (state history)
 #   - Default encryption: SSE-S3 (AES256), or SSE-KMS with the customer-
-#     managed key you pass as the third argument (recommended for anything
-#     beyond a lab, see below)
+#     managed key you pass as the third argument (recommended, see below)
 #   - Public-access-block on all 4 dimensions (defense in depth)
 #   - A bucket policy that DENIES any request not made over TLS
 #     (aws:SecureTransport = false)
@@ -30,8 +29,9 @@
 # s3:GetObject on the bucket can read the state, which contains every
 # attribute Terraform manages (see README "What is in state"). With
 # SSE-KMS and a key policy, reading state also needs kms:Decrypt on that
-# key. That is a second gate, owned separately from S3 permissions, and
-# every decrypt is logged in CloudTrail.
+# key. That is a second gate, owned separately from S3 permissions. KMS calls
+# are logged in CloudTrail. A Bucket Key (set below) cuts them to one per
+# requester per key period, not one per read.
 
 set -euo pipefail
 
@@ -77,7 +77,7 @@ if [[ -n "${KMS_KEY_ARN}" ]]; then
   echo "[ok] SSE-KMS enabled. Set kms_key_id in backend-s3.tf to the same ARN."
 else
   echo "[..] Enabling default encryption (SSE-S3). Pass a KMS key ARN as the"
-  echo "     third argument to use SSE-KMS instead (recommended beyond a lab)."
+  echo "     third argument to use SSE-KMS instead (recommended)."
   aws s3api put-bucket-encryption \
     --bucket "${BUCKET}" \
     --server-side-encryption-configuration \

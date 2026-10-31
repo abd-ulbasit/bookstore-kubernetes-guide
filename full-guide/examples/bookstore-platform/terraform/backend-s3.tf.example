@@ -60,17 +60,17 @@ terraform {
     # `terraform force-unlock <LOCK_ID>` removes it.
     use_lockfile = true
 
-    # RECOMMENDED beyond a lab: SSE-KMS with a customer-managed key. With
-    # SSE-S3, s3:GetObject on the bucket is enough to read state, and state
-    # holds every attribute Terraform manages (README: "What is in state").
-    # With a CMK, reading state also needs kms:Decrypt under a key policy you
-    # control, and CloudTrail records each decrypt unless a trail excludes KMS
-    # events. Whoever reads state then
-    # needs kms:Decrypt on the key; whoever writes state or the .tflock
-    # object also needs kms:GenerateDataKey (and the key policy must allow
-    # both). The CI roles are listed in .github/workflows/terraform.yml.
-    # Set kms_key_id to the ARN you passed to bootstrap-state.sh. Without it,
-    # encrypt = true writes SSE-S3 objects whatever the bucket default is.
-    #   kms_key_id = "arn:aws:kms:ap-south-1:<ACCOUNT-ID>:key/<KEY-ID>"
+    # SSE-KMS with a customer-managed key. With SSE-S3, s3:GetObject on the
+    # bucket is enough to read state, and state holds every attribute
+    # Terraform manages (README: "What is in state"). With a CMK, reading
+    # state also needs kms:Decrypt under the key policy, and KMS calls are
+    # logged in CloudTrail: one per requester per Bucket Key period, not one
+    # per read. Whoever reads state needs kms:Decrypt on the key; whoever
+    # writes state or the .tflock object also needs kms:GenerateDataKey, and
+    # the key policy must allow both. The CI roles are listed in
+    # .github/workflows/terraform.yml. Replace the placeholder with the ARN
+    # you passed to bootstrap-state.sh. Without kms_key_id, encrypt = true
+    # writes SSE-S3 objects whatever the bucket default is.
+    kms_key_id = "arn:aws:kms:ap-south-1:<ACCOUNT-ID>:key/<KEY-ID>"
   }
 }
