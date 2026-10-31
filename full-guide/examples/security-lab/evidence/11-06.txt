@@ -17,7 +17,7 @@
 # templates change only their namespace.
 # Not run, and why:
 #   - The Argo CD controllers were not installed. The lab heavy-install lock was
-#     held by another install when this chapter ran (see the heavy_lock check
+#     held by another install when this chapter ran (see the install lock check
 #     in section 2), so the chart was rendered and server dry-run only.
 #   - The base's Namespace and three PriorityClasses are cluster-scoped. They
 #     were not applied here: the cluster is shared and the objects would be
@@ -112,8 +112,8 @@ $ lab/venv/bin/python lab/tmp/argo/validate_strict.py lab/tmp/lab/argo-render.ya
 lab/tmp/argo/typo.yaml: spec: 'generators' is a required property
 lab/tmp/argo/typo.yaml: spec: Additional properties are not allowed ('generatorz' was unexpected)
 exit=1
-$ source "lab/env.sh" >/dev/null 2>&1; if heavy_lock; then heavy_unlock; echo 'heavy lock was free; no heavy install was run'; else echo "heavy_lock exit=$?: held by another install; no Argo CD controllers installed"; fi
-heavy_lock exit=1: held by another install; no Argo CD controllers installed
+$ source "lab/env.sh" >/dev/null 2>&1; if install_lock; then install_unlock; echo 'heavy lock was free; no heavy install was run'; else echo "install_lock exit=$?: held by another install; no Argo CD controllers installed"; fi
+install_lock exit=1: held by another install; no Argo CD controllers installed
 # 3. Scope the spoke identity before the hub holds a credential to it
 $ grep -n 'pod-security' examples/bookstore/kustomize/base/00-namespace.yaml
 39:    pod-security.kubernetes.io/enforce: restricted

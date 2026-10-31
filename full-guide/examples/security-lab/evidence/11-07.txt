@@ -88,7 +88,7 @@ $ helm version --short
 v4.1.4+g05fa379
 exit 0
 
-$ heavy_lock
+$ install_lock
 acquired
 released
 
@@ -204,7 +204,7 @@ exit 0
 
 ## Run B: heavy install, RBAC checks, dry runs and cleanup
 
-$ heavy_lock
+$ install_lock
 acquired
 exit 0
 
@@ -358,7 +358,7 @@ Unable to connect to the server: EOF
 0
 exit 0
 
-$ heavy_lock
+$ install_lock
 not acquired: another install holds the lock
 
 $ kubectl -n chaos-mesh get pods
@@ -398,7 +398,7 @@ exit 0
 $ heavy_unlock
 released
 
-$ heavy_lock
+$ install_lock
 acquired
 exit 0
 

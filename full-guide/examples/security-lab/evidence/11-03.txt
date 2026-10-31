@@ -5,7 +5,7 @@
 # below is the lab cluster's own, not the one a reader's kind cluster prints.
 # Run on 2026-10-31.
 # No heavy install ran: the chapter installs nothing beyond its own objects,
-# so heavy_lock was not taken.
+# so the install lock was not taken.
 # Substitution: the chapter prints `noisy-tenant` for the noisy client's
 # namespace. This run created p11-03-noisy-tenant in its place, and the lab
 # copies of the noisy-tenant manifests were rewritten with
