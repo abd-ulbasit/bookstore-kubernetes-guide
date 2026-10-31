@@ -43,8 +43,8 @@ is something to **defend** as well as something that defends: it scans the
 code, the images and the manifests, and it scans the workflow files that run
 it. What it hands the cluster is a digest, a signature, an SBOM and a
 provenance statement, which is what an Enforce policy needs to check. Turning
-Enforce on is a separate decision, taken where the policy lives (05.07
-<!-- link-later: 05.07 -->).
+Enforce on is a separate decision, taken where the policy lives
+([05.07](../05-security/07-admission-control-and-policy-as-code.md)).
 
 ## Mental model
 
@@ -92,7 +92,7 @@ that step can go wrong. The last four rows are about the pipeline itself.
 | The image runs as root, hides a secret or sits on an end-of-life base | hadolint, Dockle, Trivy on the image | [05.03](../05-security/03-supply-chain.md), [00.02](../00-foundations/02-containers-and-images.md) |
 | Nobody can say what is inside an image when a CVE lands | A Syft SBOM, scanned by Grype and Trivy | [05.03](../05-security/03-supply-chain.md) |
 | The image in the registry is not the one CI built, or is one that failed a gate | Push once, and only after every other job passed; sign the digest keyless; attach SLSA provenance | [15.03](../15-day-to-day-production-ops/03-image-signing-and-provenance.md) |
-| A manifest asks for more than the baseline allows | KubeLinter, kubesec and Trivy config on the rendered overlay | [01.01](../01-core-workloads/01-pods.md#baseline), policy as code in 05.07 <!-- link-later: 05.07 --> |
+| A manifest asks for more than the baseline allows | KubeLinter, kubesec and Trivy config on the rendered overlay | [01.01](../01-core-workloads/01-pods.md#baseline), policy as code in [05.07](../05-security/07-admission-control-and-policy-as-code.md) |
 | The running service leaks through its responses | ZAP baseline against it on a throwaway kind cluster | [15.02](../15-day-to-day-production-ops/02-application-cicd-pipelines.md) |
 | The pipeline is the attack: an injectable expression, a tag that moves, a token that can do too much | SHA-pinned actions, per-job `permissions`, zizmor and actionlint fail the build. Harden-Runner (audit mode) and Scorecard only report | [15.02](../15-day-to-day-production-ops/02-application-cicd-pipelines.md) |
 | A scanner goes quiet and every build passes | A control per scanner against the vulnerable fixture | this chapter |
@@ -102,7 +102,8 @@ that step can go wrong. The last four rows are about the pipeline itself.
 This chapter makes the signatures and the evidence. It does not make the
 cluster ask for them: checking a signature at admission (Kyverno
 `verifyImages`, with the identity from step 8) is a separate control that
-arrives with 05.07 <!-- link-later: 05.07 -->. The Audit policy from 05.03
+arrives with [05.07](../05-security/07-admission-control-and-policy-as-code.md).
+The Audit policy from 05.03
 reports a Pod whose image is unsigned and blocks nothing. So what you can rely
 on after this chapter is that a signed digest came from this workflow with
 every gate green. It is not a guarantee that an unsigned image cannot run.
@@ -626,7 +627,8 @@ cosign attest --yes --type cyclonedx --predicate sbom.cdx.json "$REF"
 ```
 
 The job alone asks for `id-token: write`. What a *consumer* runs, and what
-05.07 <!-- link-later: 05.07 --> turns into an admission rule, checks the
+[05.07](../05-security/07-admission-control-and-policy-as-code.md) turns into an
+admission rule, checks the
 identity, not just the signature
 ([`cosign verify`](https://docs.sigstore.dev/cosign/verifying/verify/)):
 
@@ -896,7 +898,8 @@ Argo CD applies. They overlap on purpose: KubeLinter checks shape, kubesec
 scores Pod specs, and Trivy config checks its misconfiguration library, whose
 five core checks are the baseline from
 [Part 01 ch.01](../01-core-workloads/01-pods.md#baseline). Conftest policies
-join them with 05.07 <!-- link-later: 05.07 -->.
+join them with
+[05.07](../05-security/07-admission-control-and-policy-as-code.md).
 
 ```sh
 kubectl kustomize examples/bookstore/kustomize/overlays/prod > scan-reports/prod-overlay.yaml
@@ -2021,8 +2024,9 @@ still be believed.
   checks each base image weekly and opens a pull request when it moves, and
   the pipeline runs on that PR. And the SBOM that `sbom` keeps for 90 days answers "is this digest
   affected?" on the day a CVE lands. Rescanning what is deployed, on a
-  schedule, belongs with vulnerability management (05.09
-  <!-- link-later: 05.09 -->). Set `ignore-unfixed` to `false` for the
+  schedule, belongs with vulnerability management
+  ([05.09](../05-security/09-running-security-on-a-platform-team.md)
+). Set `ignore-unfixed` to `false` for the
   stricter gate.
 - **Keyless signing has no key.** The platform mints a short-lived **OIDC**
   token naming the workflow identity. Cosign sends it to **Fulcio**, which

@@ -69,13 +69,6 @@ introduces get their own edges. The rule is "if you don't know **X**, the
 chapter introducing **Y** will be hard," and the arrow points from X to Y.
 
 <!-- link-later: 00.08 -->
-<!-- link-later: 05.00 -->
-<!-- link-later: 05.05 -->
-<!-- link-later: 05.06 -->
-<!-- link-later: 05.07 -->
-<!-- link-later: 05.08 -->
-<!-- link-later: 05.09 -->
-<!-- link-later: 05.10 -->
 ```mermaid
 graph LR
     %% Part 00 — foundations
@@ -707,7 +700,7 @@ roughly cheapest-fix-first to hardest-fix-last.
 
 **You'll be ready to:** know where every dollar in your K8s bill goes and have the levers to push at least three of them.
 
-### Path 4 - Security top-to-bottom (estimate pending Part 05) <!-- link-later: 05.10 -->
+### Path 4 - Security top-to-bottom (estimate pending)
 
 From the attacker's first foothold to a cluster that detects and contains
 it. Part 05 carries the path; the last rows show where each control runs in
@@ -716,18 +709,18 @@ production.
 | # | Chapter | Why here |
 |---|---|---|
 | 1 | 00.08 Security foundations <!-- link-later: 00.08 --> | The bookstore threat model, STRIDE, and the trust boundaries to defend |
-| 2 | 05.00 The attacker's view <!-- link-later: 05.00 --> | Recon from a compromised Pod and from the network |
+| 2 | [05.00 The attacker's view](../05-security/00-the-attackers-view.md) | Recon from a compromised Pod and from the network |
 | 3 | [05.01 Authentication, authorization, RBAC](../05-security/01-authn-authz-rbac.md) | Who can do what, and the escalation paths that break least privilege |
 | 4 | [05.02 Pod security](../05-security/02-pod-security.md) | Restricted Pod Security Admission, container escape, user namespaces |
 | 5 | [05.03 Supply chain security](../05-security/03-supply-chain.md) | Pinned images, SBOMs, static analysis of manifests |
 | 6 | [05.04 Secrets at rest and in use](../05-security/04-secrets-and-cluster-hardening.md) | Encryption at rest, KMS, and why files beat environment variables |
 | 7 | [02.06 Network policies](../02-networking/06-network-policies.md) | Default-deny, egress control, and the metadata endpoint |
-| 8 | 05.05 Kernel isolation: seccomp, AppArmor, SELinux, sandboxed runtimes <!-- link-later: 05.05 --> | What a container may ask the kernel to do, and sandboxed runtimes |
-| 9 | 05.06 Control plane and node hardening <!-- link-later: 05.06 --> | kube-bench, CIS checks, binary verification, upgrades |
-| 10 | 05.07 Admission control and policy as code <!-- link-later: 05.07 --> | ValidatingAdmissionPolicy first, then Kyverno and Gatekeeper |
-| 11 | 05.08 Audit logs, runtime detection and incident response <!-- link-later: 05.08 --> | Falco and Tetragon, then responding to a compromised workload |
-| 12 | 05.09 Running security on a platform team <!-- link-later: 05.09 --> | Vulnerability management, exceptions with an expiry, control mapping |
-| 13 | 05.10 Capstone: attack and harden the bookstore <!-- link-later: 05.10 --> | Attack, harden, re-attack, and keep the evidence |
+| 8 | [05.05 Kernel isolation: seccomp, AppArmor, SELinux, sandboxed runtimes](../05-security/05-kernel-isolation.md) | What a container may ask the kernel to do, and sandboxed runtimes |
+| 9 | [05.06 Control plane and node hardening](../05-security/06-control-plane-and-node-hardening.md) | kube-bench, CIS checks, binary verification, upgrades |
+| 10 | [05.07 Admission control and policy as code](../05-security/07-admission-control-and-policy-as-code.md) | ValidatingAdmissionPolicy first, then Kyverno and Gatekeeper |
+| 11 | [05.08 Audit logs, runtime detection and incident response](../05-security/08-audit-detection-and-incident-response.md) | Falco and Tetragon, then responding to a compromised workload |
+| 12 | [05.09 Running security on a platform team](../05-security/09-running-security-on-a-platform-team.md) | Vulnerability management, exceptions with an expiry, control mapping |
+| 13 | [05.10 Capstone: attack and harden the bookstore](../05-security/10-capstone-attack-and-harden-the-bookstore.md) | Attack, harden, re-attack, and keep the evidence |
 | 14 | [11.01 Admission webhooks](../11-advanced-production-patterns/01-admission-webhooks.md) | The production webhook that enforces what 05.07 teaches |
 | 15 | [11.04 Service mesh](../11-advanced-production-patterns/04-service-mesh.md) | Service-to-service mTLS and workload identity |
 | 16 | [13.04 Real auth: Keycloak + IRSA + Istio JWT](../13-grand-capstone-bookstore-platform/04-real-auth-keycloak-irsa-istio-jwt.md) | End-user OIDC and workload identity together |

@@ -81,10 +81,10 @@ toleration and required node affinity together.
 |---|---|---|
 | General Pods drift onto the dedicated pool | `NoSchedule` taint on the pool node | none |
 | A sensitive Pod lands on a general node | required node affinity on the pool label, not preferred | none |
-| Any author writes the toleration and lands on the pool | RBAC on who may create or update Pods and the workloads that carry a pod template (in the lab, `catalog-sa` may do neither); the taint itself is not a boundary | RBAC: [05.01](../05-security/01-authn-authz-rbac.md); restricting tolerations by admission: 05.07 <!-- link-later: 05.07 --> |
-| A Pod sets `nodeName` and skips the scheduler's `NoSchedule` check | none in the scheduler. Ch.01 shows the bypass; the kubelet refuses only a Pod that does not tolerate a `NoExecute` taint | deny `nodeName` in sensitive namespaces, [Part 04 ch.01](01-scheduler-and-nodes.md#6-refuse-nodename-in-a-sensitive-namespace); admission 05.07 <!-- link-later: 05.07 --> |
+| Any author writes the toleration and lands on the pool | RBAC on who may create or update Pods and the workloads that carry a pod template (in the lab, `catalog-sa` may do neither); the taint itself is not a boundary | RBAC: [05.01](../05-security/01-authn-authz-rbac.md); restricting tolerations by admission: [05.07](../05-security/07-admission-control-and-policy-as-code.md) |
+| A Pod sets `nodeName` and skips the scheduler's `NoSchedule` check | none in the scheduler. Ch.01 shows the bypass; the kubelet refuses only a Pod that does not tolerate a `NoExecute` taint | deny `nodeName` in sensitive namespaces, [Part 04 ch.01](01-scheduler-and-nodes.md#6-refuse-nodename-in-a-sensitive-namespace); admission [05.07](../05-security/07-admission-control-and-policy-as-code.md) |
 | A node labels itself into the pool, or removes its own taint | NodeRestriction refuses both for a key under `node-restriction.kubernetes.io/` (tested in section 2). An unprefixed key stays open to a kubelet, so the pool key carries the prefix | none |
-| Pods share a node, so they share its kernel | not solved by placement | 05.05 <!-- link-later: 05.05 --> |
+| Pods share a node, so they share its kernel | not solved by placement | [05.05](../05-security/05-kernel-isolation.md) |
 
 Topology spread is availability, not security. It limits what one node or
 zone failure takes down, and it does nothing against an author who can create
@@ -671,7 +671,8 @@ priority class: a tenant that may create Deployments but not Pods still gets
 its Pods scheduled. [Authentication, authorization and
 RBAC](../05-security/01-authn-authz-rbac.md) teaches the Role itself.
 Restricting which tolerations a namespace may use is an admission policy, which
-this chapter does not build: 05.07 <!-- link-later: 05.07 -->.
+this chapter does not build:
+[05.07](../05-security/07-admission-control-and-policy-as-code.md).
 
 ```sh
 kubectl delete pod pool-tenant -n bookstore
@@ -966,7 +967,8 @@ Checklist:
   pool
 - [ ] A toleration is never treated as authorization: RBAC limits who may
   write Pods and the workload kinds that carry a pod template, and admission
-  limits tolerations (05.07 <!-- link-later: 05.07 -->)
+  limits tolerations
+  ([05.07](../05-security/07-admission-control-and-policy-as-code.md))
 - [ ] Pods that set `spec.nodeName` are denied in sensitive namespaces ([Part
   04 ch.01](01-scheduler-and-nodes.md)); a `NoSchedule` pool taint does not
   stop them
@@ -1012,7 +1014,17 @@ Checklist:
    have stopped it, and why can neither the taint nor the affinity do that?**
    <details><summary>Show answer</summary>
 
-   Neither the taint nor the affinity checks who wrote the Pod. The scheduler reads what the Pod says, and this Pod says the right things. The control sits before the scheduler: RBAC decides who may create or update Pods and the workload kinds whose controllers create them, so withholding `pods` alone is not enough (in §5 the lab's `catalog-sa` was refused on both `pods` and `deployments`), and an admission policy can reject tolerations for the pool key from namespaces that may not use the pool. That policy is 05.07 <!-- link-later: 05.07 -->. A related case: a Pod that sets `nodeName` skips the scheduler and a `NoSchedule` taint, so the control is to deny `nodeName` in sensitive namespaces ([Part 04 ch.01](01-scheduler-and-nodes.md)).
+   Neither the taint nor the affinity checks who wrote the Pod. The scheduler
+   reads what the Pod says, and this Pod says the right things. The control sits
+   before the scheduler: RBAC decides who may create or update Pods and the
+   workload kinds whose controllers create them, so withholding `pods` alone is
+   not enough (in §5 the lab's `catalog-sa` was refused on both `pods` and
+   `deployments`), and an admission policy can reject tolerations for the pool
+   key from namespaces that may not use the pool. That policy is
+   [05.07](../05-security/07-admission-control-and-policy-as-code.md). A related
+   case: a Pod that sets `nodeName` skips the scheduler and a `NoSchedule`
+   taint, so the control is to deny `nodeName` in sensitive namespaces ([Part 04
+   ch.01](01-scheduler-and-nodes.md)).
 
    </details>
 

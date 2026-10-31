@@ -51,7 +51,8 @@ Three differences matter:
 
 So a Secret is the right object for the database password, and it is not
 secure by itself. Encryption at rest is a separate apiserver setting, off by
-default, and it is taught in 05.04. <!-- link-later: 05.04 --> Keeping values
+default, and it is taught in
+[05.04](../05-security/04-secrets-and-cluster-hardening.md). Keeping values
 out of Git altogether, with an external store, is taught in 11.05.
 <!-- link-later: 11.05 -->
 
@@ -761,7 +762,7 @@ kubectl delete serviceaccount secret-reader secret-lister pod-creator -n booksto
   JSON and YAML. The apiserver writes that base64 into etcd, so by default the
   etcd data is reversible by anyone who can read it, including an etcd backup.
   Encryption at rest is a separate apiserver setting, off by default, and it is
-  taught in 05.04. <!-- link-later: 05.04 -->
+  taught in [05.04](../05-security/04-secrets-and-cluster-hardening.md).
 - **`stringData` and the apply annotation.** `stringData` is write-only
   convenience: the apiserver base64-encodes it into `data` on write. But
   `kubectl apply` keeps the manifest in the last-applied annotation, and a
@@ -887,7 +888,8 @@ Checklist:
    applied with `stringData` also sits in plain text in the last-applied
    annotation. Minimum hardening: (a) keep real values out of Git, with an
    external store (11.05 <!-- link-later: 11.05 -->); (b) enable encryption at
-   rest (05.04 <!-- link-later: 05.04 -->); (c) grant `get`, `list` and Pod
+   rest ([05.04](../05-security/04-secrets-and-cluster-hardening.md)); (c) grant
+   `get`, `list` and Pod
    `create` on Secrets only where needed ([step
    4](#4-who-can-read-one-secret-get-by-name)
    to [step 6](#6-a-subject-that-may-only-create-pods-reads-a-secret)).
@@ -968,5 +970,6 @@ Checklist:
   `resourceNames` and verb rules used in steps 4 to 6.
 - Kubernetes, Encrypting Confidential Data at Rest:
   <https://kubernetes.io/docs/tasks/administer-cluster/encrypt-data/>. The
-  upstream for 05.04, which teaches it.
-  <!-- link-later: 05.04 -->
+  upstream for [05.04](../05-security/04-secrets-and-cluster-hardening.md),
+  which teaches it.
+

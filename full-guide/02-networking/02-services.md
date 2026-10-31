@@ -65,7 +65,7 @@ against the Service itself.
 | Threat | Control taught here | Goes deeper |
 |---|---|---|
 | The Service is reachable from outside the cluster because its type was changed without a decision | `ClusterIP` by default. A `NodePort` or `LoadBalancer` is an exposure decision, taken at the edge ([ch.04](04-ingress.md), [ch.05](05-gateway-api.md)) | [10.04](../10-cloud-and-managed-kubernetes/04-cloud-networking-and-load-balancing.md) |
-| Whoever can create a Service with `spec.externalIPs` intercepts traffic to that IP (CVE-2020-8554, unfixed upstream) | No `externalIPs` field. [Upstream deprecated it in v1.36](https://kubernetes.io/blog/2026/05/14/kubernetes-v1-36-deprecation-and-removal-of-service-externalips/) | 05.07 <!-- link-later: 05.07 --> |
+| Whoever can create a Service with `spec.externalIPs` intercepts traffic to that IP (CVE-2020-8554, unfixed upstream) | No `externalIPs` field. [Upstream deprecated it in v1.36](https://kubernetes.io/blog/2026/05/14/kubernetes-v1-36-deprecation-and-removal-of-service-externalips/) | [05.07](../05-security/07-admission-control-and-policy-as-code.md) |
 | A Pod that carries a selector's labels becomes an endpoint, whoever created it. A selector wider than one tier sends one tier's traffic to another tier's Pods | Narrow selectors that name the tier's own `app` label. RBAC decides who may create a Pod with those labels | [05.01](../05-security/01-authn-authz-rbac.md) |
 | Write access to Endpoints or EndpointSlices lets a user send a Service's traffic to locations it could not reach otherwise (CVE-2021-25740, unfixed upstream) | No write access to Endpoints or EndpointSlices outside the controllers. [Upstream says](https://kubernetes.io/docs/concepts/services-networking/service/#services-without-selectors) endpoint IPs must not be loopback or link-local, and cannot be another Service's ClusterIP. Other addresses are allowed, so the write is the control point | [05.01](../05-security/01-authn-authz-rbac.md) |
 
@@ -829,7 +829,8 @@ Checklist:
    [deprecated the field in v1.36](https://kubernetes.io/blog/2026/05/14/kubernetes-v1-36-deprecation-and-removal-of-service-externalips/)
    and recommends an external load balancer controller or a Gateway API
    implementation. In this guide that is [ch.05](05-gateway-api.md), and the
-   admission rule that refuses the field is 05.07 <!-- link-later: 05.07 -->.
+   admission rule that refuses the field is
+   [05.07](../05-security/07-admission-control-and-policy-as-code.md).
 
    </details>
 

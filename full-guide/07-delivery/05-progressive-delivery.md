@@ -96,7 +96,7 @@ Each row names a threat that gets past the canary alone.
 | Threat | Control taught here | Goes deeper |
 |---|---|---|
 | A bad or malicious image reaches every user at once | A staged canary: 10% of the replicas first, then a metric gate. A failed gate scales the canary to 0 | [01.08](../01-core-workloads/08-deployment-strategies.md) for the manual form, [15.06](../15-day-to-day-production-ops/06-progressive-delivery-in-production.md) for production |
-| The canary runs a digest nobody verified | Not this chapter. The Rollout runs whatever digest it names, and a canary does not check it. Admission must refuse unsigned digests | [05.03](../05-security/03-supply-chain.md) for signing and the admission policy, [07.03](03-cicd-pipeline.md) for the signed digest, policy as code in 05.07 <!-- link-later: 05.07 --> |
+| The canary runs a digest nobody verified | Not this chapter. The Rollout runs whatever digest it names, and a canary does not check it. Admission must refuse unsigned digests | [05.03](../05-security/03-supply-chain.md) for signing and the admission policy, [07.03](03-cicd-pipeline.md) for the signed digest, policy as code in [05.07](../05-security/07-admission-control-and-policy-as-code.md) |
 | Analysis passes because nothing was measured | Fail closed: the canary must serve at least one request per second, and no data is a failure | this chapter |
 | Stable traffic hides a failing canary | The queries filter on the canary's pod-template hash, so only the canary's Pods are judged | this chapter |
 | The gate is weakened by an edit to an AnalysisTemplate or a Rollout | Who may edit either is an RBAC question, and every change goes through the GitOps review | [05.01](../05-security/01-authn-authz-rbac.md), [07.04](04-gitops-argocd.md) |

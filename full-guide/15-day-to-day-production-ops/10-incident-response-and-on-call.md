@@ -174,7 +174,7 @@ in the incident loop longer than necessary (high customer impact).
 
 | Threat | Control | Deeper |
 |---|---|---|
-| A compromised workload keeps acting while the team debates, or a delete destroys the evidence | Isolate first with a quarantine label and a deny-all NetworkPolicy, capture what kubectl can read, roll back through Git, rotate, then delete (hands-on section 7). The label does not reliably end connections that are already open | 05.08 <!-- link-later: 05.08 --> for the attack and capture beyond kubectl |
+| A compromised workload keeps acting while the team debates, or a delete destroys the evidence | Isolate first with a quarantine label and a deny-all NetworkPolicy, capture what kubectl can read, roll back through Git, rotate, then delete (hands-on section 7). The label does not reliably end connections that are already open | [05.08](../05-security/08-audit-detection-and-incident-response.md) for the attack and capture beyond kubectl |
 | Routing keys or other credentials typed into the response stay in shell history or chat | Deliver them as an ExternalSecret from Vault, and rotate on exposure | [15.05](./05-production-secrets-vault-eso.md), [11.05](../11-advanced-production-patterns/05-secrets-at-scale.md) |
 | Emergency access granted during the incident and never taken back | A time-boxed breakglass role that alerts on use | [15.09](./09-hotfix-workflow-and-breakglass.md) |
 
@@ -621,8 +621,8 @@ Evidence files can hold sensitive values, such as environment literals and
 tokens that reached a log line, so keep them where only the incident team can
 read them. The steps above do not capture process memory or the
 container's disk.
-That capture belongs to the attack analysis in 05.08
-<!-- link-later: 05.08 -->.
+That capture belongs to the attack analysis in
+[05.08](../05-security/08-audit-detection-and-incident-response.md).
 
 **Roll back.** If the image is the suspect, roll the Deployment back to a
 known-good digest, through Git, as [15.07](./07-rollback-playbook.md)

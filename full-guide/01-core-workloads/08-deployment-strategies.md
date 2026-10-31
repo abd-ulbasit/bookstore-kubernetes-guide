@@ -76,7 +76,7 @@ than the build it tests. The table lists the threats this chapter owns.
 
 | Threat | Control taught here | Goes deeper |
 |---|---|---|
-| A Pod that copies a Service's labels receives its traffic | Label discipline: the shared `app` label is set only on the Deployments' templates, and the endpoints show any Pod that matches it | [02.02](../02-networking/02-services.md); who may create such a Pod, 05.07 <!-- link-later: 05.07 --> |
+| A Pod that copies a Service's labels receives its traffic | Label discipline: the shared `app` label is set only on the Deployments' templates, and the endpoints show any Pod that matches it | [02.02](../02-networking/02-services.md); who may create such a Pod, [05.07](../05-security/07-admission-control-and-policy-as-code.md) |
 | A canary ships without the baseline and runs as root or with a writable root filesystem | The canary carries the full baseline, and the namespace refuses any Pod that lacks it, so a ReplicaSet cannot create one | [05.02](../05-security/02-pod-security.md) |
 | A bad image reaches every user before anyone notices | Readiness keeps an image that cannot start from serving. A canary limits how many users run a build that starts, and scaling it to 0 stops it | [07.05](../07-delivery/05-progressive-delivery.md) |
 
@@ -708,7 +708,9 @@ baseline. What stops it is RBAC. Create Pods, Deployments, Jobs, CronJobs and
 DaemonSets only for principals who need them, because each of those kinds makes
 Pods ([05.01](../05-security/01-authn-authz-rbac.md)). Add an admission
 rule that accepts the `app: catalog` label only from the release's
-ServiceAccount (05.07 <!-- link-later: 05.07 -->). Narrowing the Service
+ServiceAccount
+([05.07](../05-security/07-admission-control-and-policy-as-code.md)). Narrowing
+the Service
 selector does not help, because the copy matches it by design. Delete the probe
 Pod and the copy:
 
@@ -1007,7 +1009,18 @@ Checklist:
 3. **A teammate applies a Pod with the full baseline and the label `app: catalog` to test something. Within seconds the Service sends it requests. Which control should have stopped this, and why did the baseline not?**
    <details><summary>Show answer</summary>
 
-   The baseline says how a Pod runs: non-root, read-only root, no capabilities. It says nothing about who may run one, so a Pod that carries the baseline passes admission. What should have stopped it is RBAC that limits who can create Pods in the namespace, and every workload kind that makes them (Deployments, Jobs, CronJobs and DaemonSets, not only bare Pods) ([05.01](../05-security/01-authn-authz-rbac.md)), together with an admission rule that accepts the `app: catalog` label only from the release's ServiceAccount (05.07 <!-- link-later: 05.07 -->). Narrowing the Service selector does not help, because the teammate's Pod matches it by design. After any unexpected Pod, check the endpoints. The extra Pod shows up there.
+   The baseline says how a Pod runs: non-root, read-only root, no capabilities.
+   It says nothing about who may run one, so a Pod that carries the baseline
+   passes admission. What should have stopped it is RBAC that limits who can
+   create Pods in the namespace, and every workload kind that makes them
+   (Deployments, Jobs, CronJobs and DaemonSets, not only bare Pods)
+   ([05.01](../05-security/01-authn-authz-rbac.md)), together with an admission
+   rule that accepts the `app: catalog` label only from the release's
+   ServiceAccount
+   ([05.07](../05-security/07-admission-control-and-policy-as-code.md)).
+   Narrowing the Service selector does not help, because the teammate's Pod
+   matches it by design. After any unexpected Pod, check the endpoints. The
+   extra Pod shows up there.
 
    </details>
 

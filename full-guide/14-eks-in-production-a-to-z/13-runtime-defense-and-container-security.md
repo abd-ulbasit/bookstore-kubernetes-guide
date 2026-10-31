@@ -210,7 +210,7 @@ up with a high-signal alert stream.
 
 | Threat | Control in this chapter | Deeper |
 |---|---|---|
-| Unexpected binary or reverse shell in a container | Falco rules at warning and above (drop-and-execute is critical, a netcat reverse shell is warning), routed to an alert pipeline (hands-on steps 3, 7) | 05.08 <!-- link-later: 05.08 -->, [15.10](../15-day-to-day-production-ops/10-incident-response-and-on-call.md) |
+| Unexpected binary or reverse shell in a container | Falco rules at warning and above (drop-and-execute is critical, a netcat reverse shell is warning), routed to an alert pipeline (hands-on steps 3, 7) | [05.08](../05-security/08-audit-detection-and-incident-response.md), [15.10](../15-day-to-day-production-ops/10-incident-response-and-on-call.md) |
 | Credential read from a file (IRSA token, mounted secret) | Falco sensitive-file rule, and a custom rule for paths the defaults miss (steps 3, 6) | [14.03](./03-eks-addon-management.md) for IRSA scoping |
 | Container escape or activity directly on the node | Triage order: evidence first, then node replacement (Triage section) | [15.10](../15-day-to-day-production-ops/10-incident-response-and-on-call.md) |
 | Control-plane misuse, such as `kubectl exec` into kube-system | GuardDuty EKS Audit Log Monitoring (step 8) | [14.05](./05-logging-and-metrics-cost.md) for audit log retention |

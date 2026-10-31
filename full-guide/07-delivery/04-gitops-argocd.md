@@ -84,7 +84,7 @@ components is [01.01](../01-core-workloads/01-pods.md#baseline).
 
 | Threat | Control taught here | Goes deeper |
 |---|---|---|
-| The controller writes whatever Git asks, and its own RBAC allows any object | AppProjects fence what Git can ask for: destinations, kind allow-lists, no Argo kinds in the tenant project | admission, 05.07 <!-- link-later: 05.07 --> |
+| The controller writes whatever Git asks, and its own RBAC allows any object | AppProjects fence what Git can ask for: destinations, kind allow-lists, no Argo kinds in the tenant project | admission, [05.07](../05-security/07-admission-control-and-policy-as-code.md) |
 | A user syncs production, or edits a project they do not own | Argo RBAC by project, action and object, mapped from SSO groups, with no default access | [05.01](../05-security/01-authn-authz-rbac.md) |
 | A standing admin password on the most privileged UI in the cluster | `admin.enabled: false`, so SSO is the only way in | [05.01](../05-security/01-authn-authz-rbac.md) |
 | A repository credential that can push, or that reaches every repo | Read-only deploy key or GitHub App per repo; the credential is a Secret in the Argo namespace, so reading that namespace reads every repository credential | [03.02](../03-config-and-storage/02-secrets.md) |

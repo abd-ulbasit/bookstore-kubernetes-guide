@@ -48,9 +48,9 @@ teaches, and the body explains it.
 
 | Threat | Control taught here | Deeper |
 |---|---|---|
-| A caller who reaches the kubelet API on port 10250 reads Pod specs and runs commands in containers | Anonymous auth off and Webhook authorization, so every caller is identified and checked. The Hands-on shows a refused anonymous request | Kubelet hardening in 05.06 <!-- link-later: 05.06 --> |
+| A caller who reaches the kubelet API on port 10250 reads Pod specs and runs commands in containers | Anonymous auth off and Webhook authorization, so every caller is identified and checked. The Hands-on shows a refused anonymous request | Kubelet hardening in [05.06](../05-security/06-control-plane-and-node-hardening.md) |
 | A process that can write to the runtime socket starts a container with any mount, which is root on the node | The socket stays root-owned and out of Pods. The `restricted` level refuses the `hostPath` a Pod needs to reach it | [Pod security](../05-security/02-pod-security.md), and 05.02 |
-| An unpatched runtime lets a container escape, as with runc CVE-2024-21626 | containerd and runc at releases that carry the fix, checked on every node | Node patching in 05.06 <!-- link-later: 05.06 --> |
+| An unpatched runtime lets a container escape, as with runc CVE-2024-21626 | containerd and runc at releases that carry the fix, checked on every node | Node patching in [05.06](../05-security/06-control-plane-and-node-hardening.md) |
 
 ## The node, in boxes
 
@@ -200,7 +200,8 @@ host's filesystem. runc 1.1.12 has the fix
 Even on managed clusters, the runtime on the worker nodes is yours to patch.
 Runtime CVEs are a real escape vector, so see also the
 [supply chain](../05-security/03-supply-chain.md) chapter. Node patching and
-upgrades are in 05.06 <!-- link-later: 05.06 -->. The Hands-on checks the runc
+upgrades are in [05.06](../05-security/06-control-plane-and-node-hardening.md).
+The Hands-on checks the runc
 version on this node.
 
 ### A stronger boundary: sandboxed runtimes
@@ -209,7 +210,7 @@ Containers share the host kernel, so a kernel flaw is reachable from every
 container on the node. For Pods that run code you do not trust, select a
 sandboxed runtime such as gVisor (`runsc`) or Kata Containers with a
 RuntimeClass. The CRI seam makes that a per-Pod choice. The kernel controls
-are in 05.05 <!-- link-later: 05.05 -->.
+are in [05.05](../05-security/05-kernel-isolation.md).
 
 ## The pause (sandbox) container
 

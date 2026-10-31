@@ -68,7 +68,7 @@ on purpose, and the steps below show two ways that happens.
 
 | Threat | Control taught here | Deeper |
 |---|---|---|
-| A Pod sets `spec.nodeName`, which skips the scheduler's taint and affinity filters | A ValidatingAdmissionPolicy refuses `nodeName` in namespaces labelled `tier: sensitive` | [05.01](../05-security/01-authn-authz-rbac.md) for RBAC; <!-- link-later: 05.07 --> 05.07 for policy engines |
+| A Pod sets `spec.nodeName`, which skips the scheduler's taint and affinity filters | A ValidatingAdmissionPolicy refuses `nodeName` in namespaces labelled `tier: sensitive` | [05.01](../05-security/01-authn-authz-rbac.md) for RBAC; [05.07](../05-security/07-admission-control-and-policy-as-code.md) for policy engines |
 | A kubelet labels its own Node into a dedicated pool | NodeRestriction refuses the `node-restriction.kubernetes.io/` prefix, so only an administrator sets a pool label | [02](02-affinity-taints-topology.md), the pool itself |
 
 The policy holds only while RBAC keeps users from editing the policy, its
