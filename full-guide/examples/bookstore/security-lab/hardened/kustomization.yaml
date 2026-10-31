@@ -12,9 +12,10 @@
 # 90-admission.yaml. The policy is cluster-scoped, so it is bound to
 # p05-capstone only.
 #
-# 91-capstone-allows.yaml adds the two edges the base's default-deny blocks and
+# 91-capstone-allows.yaml adds the two edges the recorded run's base blocked and
 # the capstone needs: the catalog's Redis connection and the migration Job's
-# connection to postgres. The base is unchanged.
+# connection to postgres. The current base allows both, so these repeat its
+# rules. The base is unchanged.
 apiVersion: kustomize.config.k8s.io/v1beta1
 kind: Kustomization
 

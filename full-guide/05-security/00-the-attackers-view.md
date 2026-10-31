@@ -89,10 +89,10 @@ row uses the enterprise matrix's
 | Threat | Control this chapter teaches | Where it goes deeper |
 |---|---|---|
 | A Pod that names no ServiceAccount mounts the default token, and whoever holds it can ask the API (T1552.007, T1528) | `automountServiceAccountToken: false`, and a ServiceAccount of its own | [01.01 baseline](../01-core-workloads/01-pods.md#baseline-service-account); 05.01 for what a token may do |
-| A token works from anywhere the API is reachable, and it outlives its Pod for a while (T1550.001) | No token in the Pod at all; a token is refused once its Pod is gone | 05.06 for the API server's token flags <!-- link-later: 05.06 --> |
+| A token works from anywhere the API is reachable, and it outlives its Pod for a while (T1550.001) | No token in the Pod at all; a token is refused once its Pod is gone | [05.06 for the API server's token flags](06-control-plane-and-node-hardening.md) |
 | Environment variables and DNS name every Service the Pod can reach (T1613, T1046) | `enableServiceLinks: false`; names stay in DNS, so reach is narrowed instead | [02.06](../02-networking/06-network-policies.md) for default-deny; [05.04](04-secrets-and-cluster-hardening.md) for secrets in the environment |
-| The kubelet on the node answers every Pod on the network (T1046) | A NetworkPolicy that denies egress to the node's gateway address | [02.06](../02-networking/06-network-policies.md); kubelet flags in 05.06 <!-- link-later: 05.06 --> |
-| A flat network lets any Pod reach any Service in any namespace (T1046) | Default-deny ingress and egress, with explicit allows selected by label | [02.06](../02-networking/06-network-policies.md); admission rules in 05.07 <!-- link-later: 05.07 --> |
+| The kubelet on the node answers every Pod on the network (T1046) | A NetworkPolicy that denies egress to the node's gateway address | [02.06](../02-networking/06-network-policies.md); kubelet flags in [05.06](06-control-plane-and-node-hardening.md) |
+| A flat network lets any Pod reach any Service in any namespace (T1046) | Default-deny ingress and egress, with explicit allows selected by label | [02.06](../02-networking/06-network-policies.md); admission rules in [05.07](07-admission-control-and-policy-as-code.md) |
 | The default identity holds more rights than its Pod needs (T1613) | Least privilege on every identity, checked with `kubectl auth can-i --list` | [05.01](01-authn-authz-rbac.md) |
 | The cloud metadata address serves node identity to any Pod (T1552.005) | Not reachable on kind, so this chapter cites it and does not run it on a cloud | [10.03](../10-cloud-and-managed-kubernetes/03-cloud-identity.md), and [Production notes](#production-notes) below |
 
@@ -916,26 +916,41 @@ describes the binding and the rule that a bound object which no longer exists
 stops authenticating.
 
 The lifetime is the surprise. This token's `exp` claim is exactly one year
-after its `iat`. The `kube-apiserver` flag
-`--service-account-extend-token-expiration` turns on the extension, and in the
-v1.37.0 source its option constructor sets it to `true`
-([the source](https://raw.githubusercontent.com/kubernetes/kubernetes/v1.37.0/pkg/kubeapiserver/options/authentication.go)).
+after its `iat`, although the ServiceAccount admin page says a bound token
+lasts one hour by default and that the kubelet refreshes it. The
+`kube-apiserver`
+flag `--service-account-extend-token-expiration` turns on the extension. Its
+[reference
+entry](https://kubernetes.io/docs/reference/command-line-tools-reference/kube-apiserver/)
+gives the default as `true` and says tokens injected at admission are extended
+up to one year. In the v1.37.0 source, the `WithServiceAccounts` option builder
+sets `ExtendExpiration` to `true`
+([the
+source](https://raw.githubusercontent.com/kubernetes/kubernetes/v1.37.0/pkg/kubeapiserver/options/authentication.go)),
+and the control plane's options call it through `WithAll()`
+([options.go](https://raw.githubusercontent.com/kubernetes/kubernetes/v1.37.0/pkg/controlplane/apiserver/options/options.go)).
 The flag exists so that tokens injected at admission keep working while
 clients move to bound tokens. A cluster that wants short-lived tokens for
-these Pods must set the flag off, and chapter 05.06 <!-- link-later: 05.06 -->
+these Pods must set the flag off, and [chapter
+05.06](06-control-plane-and-node-hardening.md)
 covers the API server flags that bear on it. Until then, a stolen automounted
 token is a year-long credential, and the reader's first defense is not to
 mount it at all.
 
 ### Service environment variables
 
-The kubelet writes two variables per Service in the Pod's namespace, a host
-and a port, when the Pod starts, and it writes the `KUBERNETES_SERVICE_*` pair
-for the API server. A Service created after the Pod starts is not written into
-it. The
+When the Pod starts, the kubelet writes a host variable and a port variable
+for each Service in the Pod's namespace, along with the Docker-links-style
+variables that the Service page lists. It also writes the
+`KUBERNETES_SERVICE_*` pair for the API server. A Service created after the Pod
+starts is not written into it. The
 [Service documentation](https://kubernetes.io/docs/concepts/services-networking/service/#environment-variables)
-describes the variables, and `enableServiceLinks` in the Pod spec controls the
-per-Service set. This run confirms what the field does and does not remove.
+describes the variables and says a Service must exist before the Pod for its
+variables to appear. The
+[Pod API
+reference](https://kubernetes.io/docs/reference/kubernetes-api/workload-resources/pod-v1/#PodSpec)
+documents `enableServiceLinks`, which controls the per-Service set. This run
+confirms what the field does and does not remove.
 
 ### DNS and the search path
 
@@ -946,7 +961,9 @@ against the search list first. The system resolver, which curl uses, applies
 the list. The busybox `nslookup` in this image asked the name as written,
 which is why the short name failed in the first run. The
 [DNS for Services and Pods](https://kubernetes.io/docs/concepts/services-networking/dns-pod-service/)
-page describes the naming.
+page shows the `search` list and `options ndots:5`, and
+[resolv.conf(5)](https://man7.org/linux/man-pages/man5/resolv.conf.5.html)
+defines `ndots`.
 
 ### The kubelet's checks
 

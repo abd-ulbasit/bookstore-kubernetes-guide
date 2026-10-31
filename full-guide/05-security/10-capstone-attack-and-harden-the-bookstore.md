@@ -167,11 +167,10 @@ and links to them rather than repeating them.
   admission and the ValidatingAdmissionPolicy, both built into the API server.
 
 Both privileged namespaces are exceptions to the default that ADR 0005 sets,
-which makes `restricted` the default.
-[Chapter 09](09-running-security-on-a-platform-team.md) says that this
-repository has no registry file for namespace exceptions yet,
-and that a chapter which records one keeps the record in its own text. The
-table below is that text. Each row gives a reason, an owner and an expiry no
+which makes `restricted` the default. Each has an entry in
+`security/namespace-exceptions.yaml`, the registry that
+[chapter 09](09-running-security-on-a-platform-team.md) explains, and the table
+below repeats the entries. Each row gives a reason, an owner and an expiry no
 later than 2027-10-31. The admission rule that chapter 09 writes for namespace
 annotations is not installed on the lab cluster, so these two namespaces carry
 no annotations.
@@ -198,17 +197,24 @@ overlay or the lab script. The base is unchanged.
   to start and to answer.
 - **Redis stays, and needs two allows.** The catalog's readiness check dials
   Redis, so a catalog without Redis never becomes ready and never joins its
-  Service. The component keeps the Redis Deployment. The base's default-deny
-  policy blocks the catalog's edge to Redis, so the hardened overlay adds the
-  Redis allows described in step 11.
-- **The migration Job cannot reach postgres under the base's policies.** The
-  base allows ingress to postgres only from pods labelled `app: catalog`. The
-  migration Job's pods carry `app: db-migrate`, so under the base policies the
-  migration cannot connect. The vulnerable overlay removes the base's policies,
-  so the migration runs there. After hardening, the lab deletes the finished
-  Job and applies the overlay again, so the migration runs under the policies,
-  and step 11 shows it complete. The base has the same gap, and the chapter
-  does not fix the base.
+  Service. The component keeps the Redis Deployment. The base that the lab ran
+  against had a default-deny policy that blocked the catalog's edge to Redis,
+  so the hardened overlay adds the Redis allows described in step 11. The base
+  has since added the same edge to `allow-data-tier-ingress` and
+  `allow-backend-egress` ([Part 02
+  ch.06](../02-networking/06-network-policies.md)), so on the current base the
+  overlay's Redis allows repeat rules that already exist. Policies are
+  additive, so the repeat changes nothing.
+- **The migration Job could not reach postgres under the old base's policies.**
+  The base that the lab ran against allowed ingress to postgres only from pods
+  labelled `app: catalog`. The migration Job's pods carry `app: db-migrate`, so
+  under those policies the migration could not connect. The vulnerable overlay
+  removes the base's policies, so the migration runs there. After hardening,
+  the lab deletes the finished Job and applies the overlay again, so the
+  migration runs under the policies, and step 11 shows it complete. The current
+  base names `app: db-migrate` in `allow-data-tier-ingress` and
+  `allow-backend-egress`, so the overlay's two migration policies repeat those
+  rules too.
 
 ### The vulnerable overlay
 
@@ -725,7 +731,8 @@ same base and the same component. It adds the admission policy in
 [`90-admission.yaml`](../examples/bookstore/security-lab/hardened/90-admission.yaml)
 and four NetworkPolicies, in
 [`91-capstone-allows.yaml`](../examples/bookstore/security-lab/hardened/91-capstone-allows.yaml),
-that the base does not give:
+that the base of the recorded run did not give. The current base allows the
+same four edges in its own policies, so on it these four repeat rules:
 
 | Policy | Selects | Allows |
 |---|---|---|
@@ -1011,8 +1018,8 @@ flags, and this lab did not change them.
 
 The lab does not show the catalog's own path, and the chapter does not claim
 that default-deny closes it. A compromised catalog Pod keeps the base's
-explicit allows: `allow-backend-egress` and `allow-catalog-to-postgres` both
-name `app: catalog`. It still reaches postgres:5432, and its environment holds
+explicit allows: on the current base, `allow-backend-egress` and
+`allow-data-tier-ingress` both name `app: catalog`. It still reaches postgres:5432, and its environment holds
 `POSTGRES_PASSWORD` from the Secret. Closing that path takes a narrower rule
 or a database credential that the catalog cannot read, and this lab builds
 neither.
@@ -1114,10 +1121,10 @@ to postgres is not closed by the policy.
   ch.13](../14-eks-in-production-a-to-z/13-runtime-defense-and-container-security.md)
   and [Part 15
   ch.10](../15-day-to-day-production-ops/10-incident-response-and-on-call.md).
-- **Exceptions.** The two privileged namespaces expire within 12 months. The
-  registry that would record them does not exist yet. [Chapter
-  09](09-running-security-on-a-platform-team.md) explains why, and the table
-  in the lab header is the record until it does.
+- **Exceptions.** The two privileged namespaces expire within 12 months. Both
+  are in `security/namespace-exceptions.yaml`, which [chapter
+  09](09-running-security-on-a-platform-team.md) explains, and `make
+  gates-registry` fails once an entry's date has passed.
 
 ## Quick Reference
 

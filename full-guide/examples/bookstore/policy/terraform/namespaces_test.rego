@@ -23,24 +23,27 @@ test_privileged_namespace_fails if {
 	startswith(m, "BK-TF-001 kubernetes_namespace_v1.legacy")
 }
 
+# excepted_change is a namespace at the given level that carries the exception
+# record.
+excepted_change(name, level) := {"resource_changes": [{
+	"address": sprintf("kubernetes_namespace_v1.%s", [name]),
+	"type": "kubernetes_namespace_v1",
+	"name": name,
+	"change": {
+		"actions": ["create"],
+		"after": {"metadata": [{
+			"name": name,
+			"labels": {"pod-security.kubernetes.io/enforce": level},
+			"annotations": {
+				"security.example/exception-reason": "Host mounts for the Falco driver.",
+				"security.example/exception-expires": "2027-06-30",
+			},
+		}]},
+	},
+}]}
+
 test_excepted_namespace_passes if {
-	ok := {"resource_changes": [{
-		"address": "kubernetes_namespace_v1.falco",
-		"type": "kubernetes_namespace_v1",
-		"name": "falco",
-		"change": {
-			"actions": ["create"],
-			"after": {"metadata": [{
-				"name": "falco",
-				"labels": {"pod-security.kubernetes.io/enforce": "privileged"},
-				"annotations": {
-					"security.example/exception-reason": "Host mounts for the Falco driver.",
-					"security.example/exception-expires": "2027-06-30",
-				},
-			}]},
-		},
-	}]}
-	count(deny) == 0 with input as ok
+	count(deny) == 0 with input as excepted_change("falco", "privileged")
 }
 
 test_missing_label_fails if {

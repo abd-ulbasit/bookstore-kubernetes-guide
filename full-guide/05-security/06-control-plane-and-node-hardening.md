@@ -104,12 +104,13 @@ cannot show a host's settings.
 > runs are in
 > [`evidence/05-06.txt`](../examples/security-lab/evidence/05-06.txt). **Run
 > it only against a kind cluster you own.** The script refuses any context
-> that is not `kind-*`. It creates three `p05-` namespaces and a few
-> cluster-scoped objects named `p05-06-*`, and deletes them when it finishes.
-> It changes no flag on the node. A kind node is a container on the machine
-> that runs kind, and it shares that machine's kernel. The probes run from a
-> Pod on the node network or through kubectl, and nothing here reaches a cloud
-> or runs a kernel exploit.
+> that is not `kind-*`. It creates three namespaces, `kube-bench`,
+> `p05-attack` and `p05-kubelet-authz`, and a few cluster-scoped objects named
+> `p05-06-*`, and deletes them when it finishes. The commands below call the
+> last two `attack` and `kubelet-authz`. It changes no flag on the node. A kind
+> node is a container on the machine that runs kind, and it shares that
+> machine's kernel. The probes run from a Pod on the node network or through
+> kubectl, and nothing here reaches a cloud or runs a kernel exploit.
 
 What did not work the first time, kept in the transcript rather than tidied
 away:
@@ -186,8 +187,9 @@ the Job until it completes, fails or times out.
 The `kube-bench` namespace is labelled `privileged`, because the Job reads the
 node's files and process table as root, which the baseline forbids. That is an
 exception to `restricted`. Its reason is the diagnostic, its chapter is this one,
-and its expiry is 2027-10-31, within twelve months. The lab header records the
-same entry.
+and its expiry is 2027-10-31, within twelve months. The entry is in
+`security/namespace-exceptions.yaml` at the repository root, which
+[05.09](09-running-security-on-a-platform-team.md) explains.
 
 ```yaml
 apiVersion: v1
@@ -418,7 +420,7 @@ The twelve failures sort into fixes and limits:
 |---|---|---|
 | `1.2.15`, `1.3.2`, `1.4.1` | `--profiling` is not `false` on the API server, the controller manager and the scheduler | Fix. The flag is absent, and kube-bench reads that as profiling on. Set `--profiling=false` on each. Not run here. |
 | `1.2.5` | `--kubelet-certificate-authority` is not set | Fix, with a prerequisite. Without it the API server does not verify the kubelet's serving certificate. The fix needs kubelet serving certificates from a CA. The lab did not set that up. Cited, not run. |
-| `1.2.16` to `1.2.19` | No audit log path, age, backup or size | Fix, and it belongs to the audit policy. The API server's flags set no audit log path. <!-- link-later: 05.08 --> Chapter 05.08 covers the policy and its flags. |
+| `1.2.16` to `1.2.19` | No audit log path, age, backup or size | Fix, and it belongs to the audit policy. The API server's flags set no audit log path. [Chapter 05.08](08-audit-detection-and-incident-response.md) covers the policy and its flags. |
 | `1.2.30` | The service account token expiry extension is not set to `false` | Fix. It is a token-lifetime setting, and [05.00](00-the-attackers-view.md) showed what a token can do. Not run here. |
 | `1.1.12` | The etcd data directory is not owned by `etcd:etcd` | Limit on this node. etcd runs as a static Pod here, and the check expects a dedicated owner for the data directory. Changing it is a kubeadm change, not run. |
 | `4.1.1`, `4.1.9` | The kubelet service file and its config file are not `600` or stricter | Limit on a kind node, because the files sit inside the node container. On a host they are permissions to set. Cited, not run, under node OS hardening. |
@@ -992,8 +994,8 @@ kube-bench run --benchmark cis-1.12
 
    The job needs `hostPID` and `hostPath` to read the node, which the baseline
    forbids, and the lab creates the namespace and deletes it when it finishes.
-   Its exception is recorded in the lab header, with its reason, this chapter,
-   and an expiry date within 12 months. A `privileged` namespace with
+   Its exception is recorded in the exceptions registry, with its reason, this
+   chapter, and an expiry date within 12 months. A `privileged` namespace with
    no entry is a finding, not a lab.
 
    </details>

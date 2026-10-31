@@ -40,9 +40,12 @@ done
 
 redact() { cat; }
 
+# show prints its arguments as one command, then runs that command. A command
+# may arrive as a single quoted string or as separate words.
 show() {
-  printf '$ %s\n' "$(printf '%s\n' "$1" | redact)"
-  eval "$1" 2>&1 | redact
+  local cmd="$*"
+  printf '$ %s\n' "$(printf '%s\n' "$cmd" | redact)"
+  eval "$cmd" 2>&1 | redact
 }
 
 # copy_cmd DST prints the command that copies busybox from escape-node into
@@ -115,13 +118,13 @@ show "kubectl get nodes -o custom-columns=NAME:.metadata.name,KUBELET:.status.no
 
 echo "## namespaces"
 show "kubectl create namespace p05-02-attack"
-show "kubectl label namespace p05-02-attack pod-security.kubernetes.io/enforce=privileged"
+show kubectl label namespace p05-02-attack pod-security.kubernetes.io/enforce=privileged
 show "kubectl create namespace p05-02-baseline"
-show "kubectl label namespace p05-02-baseline pod-security.kubernetes.io/enforce=baseline pod-security.kubernetes.io/enforce-version=latest pod-security.kubernetes.io/warn=restricted pod-security.kubernetes.io/warn-version=latest"
+show kubectl label namespace p05-02-baseline pod-security.kubernetes.io/enforce=baseline pod-security.kubernetes.io/enforce-version=latest pod-security.kubernetes.io/warn=restricted pod-security.kubernetes.io/warn-version=latest
 show "kubectl create namespace p05-02-restricted"
-show "kubectl label namespace p05-02-restricted pod-security.kubernetes.io/enforce=restricted pod-security.kubernetes.io/enforce-version=latest pod-security.kubernetes.io/audit=restricted pod-security.kubernetes.io/audit-version=latest pod-security.kubernetes.io/warn=restricted pod-security.kubernetes.io/warn-version=latest"
+show kubectl label namespace p05-02-restricted pod-security.kubernetes.io/enforce=restricted pod-security.kubernetes.io/enforce-version=latest pod-security.kubernetes.io/audit=restricted pod-security.kubernetes.io/audit-version=latest pod-security.kubernetes.io/warn=restricted pod-security.kubernetes.io/warn-version=latest
 show "kubectl create namespace p05-02-bookstore"
-show "kubectl label namespace p05-02-bookstore pod-security.kubernetes.io/enforce=restricted pod-security.kubernetes.io/enforce-version=latest pod-security.kubernetes.io/audit=restricted pod-security.kubernetes.io/audit-version=latest pod-security.kubernetes.io/warn=restricted pod-security.kubernetes.io/warn-version=latest"
+show kubectl label namespace p05-02-bookstore pod-security.kubernetes.io/enforce=restricted pod-security.kubernetes.io/enforce-version=latest pod-security.kubernetes.io/audit=restricted pod-security.kubernetes.io/audit-version=latest pod-security.kubernetes.io/warn=restricted pod-security.kubernetes.io/warn-version=latest
 show "kubectl create namespace p05-02-unlabelled"
 show "for ns in p05-02-attack p05-02-baseline p05-02-restricted p05-02-bookstore p05-02-unlabelled; do for i in \$(seq 60); do kubectl -n \$ns get serviceaccount default >/dev/null 2>&1 && break; sleep 1; done; echo \"default serviceaccount in \$ns\"; done"
 

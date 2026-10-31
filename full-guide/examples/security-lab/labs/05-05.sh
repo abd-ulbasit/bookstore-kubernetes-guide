@@ -3,11 +3,17 @@
 #
 # Run this ONLY against a kind cluster you own, created from
 # kind/kernel-cluster.yaml (named security-lab-kernel). The lab creates two
-# namespaces of its own: p05-05-attack, labelled `privileged` for the one Pod that
-# runs unconfined, and p05-05-restricted, labelled `restricted`, which holds every
+# namespaces of its own: kernel-attack, labelled `privileged` for the one Pod that
+# runs unconfined, and kernel-restricted, labelled `restricted`, which holds every
 # hardened Pod. It copies seccomp profiles into the kind node, reads the node's
 # AppArmor filesystem but loads no profile, and, with P05_RUNTIME=1, runs one
 # gVisor Pod through a RuntimeClass. Everything it created is deleted at the end.
+#
+# The recorded run named the two namespaces p05-05-attack and p05-05-restricted.
+# This file and the transcript carry the chapter's names, kernel-attack and
+# kernel-restricted. The exceptions registry reads Pod Security labels from
+# scripts and transcripts, and it registers the chapter's namespace, not a lab
+# name. That rename is the only edit made after the run.
 #
 # A kind node is a container. It shares the lab host's kernel, so a seccomp
 # filter applies to the node's processes, and an AppArmor profile would enter
@@ -18,7 +24,7 @@
 # container or another cluster, and no kernel exploit runs.
 #
 # The one deliberately insecure manifest is unconfined. It runs in
-# p05-05-attack only.
+# kernel-attack only.
 #
 # Two modes. By default (P05_RUNTIME=1) it also runs the gVisor step, which
 # installs runsc into the node and restarts the node's containerd, so use a
@@ -56,7 +62,7 @@ node_put() { # <local file> <path inside the node>
 
 trap 'cd / && rm -rf "$work"' EXIT
 
-kubectl delete ns p05-05-attack p05-05-restricted --ignore-not-found --wait=true >/dev/null 2>&1
+kubectl delete ns kernel-attack kernel-restricted --ignore-not-found --wait=true >/dev/null 2>&1
 kubectl delete runtimeclass gvisor --ignore-not-found >/dev/null 2>&1
 
 echo "## node: $NODE, kubectl $(kubectl version --client -o yaml 2>/dev/null | awk '/gitVersion/{print $2; exit}')"
@@ -73,17 +79,17 @@ RUNTIME=${P05_RUNTIME:-1}
 
 echo '## step 2: two namespaces, one that permits everything and one restricted'
 run <<'CMD'
-kubectl create ns p05-05-attack
-kubectl label ns p05-05-attack pod-security.kubernetes.io/enforce=privileged
-kubectl create ns p05-05-restricted
-kubectl label ns p05-05-restricted \
+kubectl create ns kernel-attack
+kubectl label ns kernel-attack pod-security.kubernetes.io/enforce=privileged
+kubectl create ns kernel-restricted
+kubectl label ns kernel-restricted \
   pod-security.kubernetes.io/enforce=restricted \
   pod-security.kubernetes.io/audit=restricted \
   pod-security.kubernetes.io/warn=restricted
 CMD
 # A Pod that names no ServiceAccount is refused until the controller has made
 # the namespace's `default` one, so a scripted apply has to wait for it.
-for ns in p05-05-attack p05-05-restricted; do
+for ns in kernel-attack kernel-restricted; do
   until kubectl get sa default -n "$ns" >/dev/null 2>&1; do sleep 1; done
 done
 
@@ -93,7 +99,7 @@ apiVersion: v1
 kind: Pod
 metadata:
   name: unconfined
-  namespace: p05-05-attack
+  namespace: kernel-attack
 spec:
   automountServiceAccountToken: false
   securityContext:
@@ -130,7 +136,7 @@ apiVersion: v1
 kind: Pod
 metadata:
   name: runtimedefault
-  namespace: p05-05-restricted
+  namespace: kernel-restricted
 spec:
   automountServiceAccountToken: false
   securityContext:
@@ -166,18 +172,18 @@ echo '## step 3: seccomp Unconfined against RuntimeDefault, for one personality 
 run <<'CMD'
 kubectl apply -f unconfined.yaml
 kubectl apply -f runtimedefault.yaml
-kubectl -n p05-05-attack wait --for=condition=Ready pod/unconfined --timeout=180s
-kubectl -n p05-05-restricted wait --for=condition=Ready pod/runtimedefault --timeout=180s
+kubectl -n kernel-attack wait --for=condition=Ready pod/unconfined --timeout=180s
+kubectl -n kernel-restricted wait --for=condition=Ready pod/runtimedefault --timeout=180s
 CMD
 
 echo '## step 3a: the Unconfined Pod: no filter, the personality call succeeds'
 run <<'CMD'
-kubectl -n p05-05-attack exec unconfined -- sh -c 'grep "^Seccomp:" /proc/self/status | tr "\t" " "; setarch linux64 -R /bin/true 2>&1; echo exit=$?'
+kubectl -n kernel-attack exec unconfined -- sh -c 'grep "^Seccomp:" /proc/self/status | tr "\t" " "; setarch linux64 -R /bin/true 2>&1; echo exit=$?'
 CMD
 
 echo '## step 3b: the RuntimeDefault Pod: the same call is refused by the filter'
 run <<'CMD'
-kubectl -n p05-05-restricted exec runtimedefault -- sh -c 'grep "^Seccomp:" /proc/self/status | tr "\t" " "; setarch linux64 -R /bin/true 2>&1; echo exit=$?'
+kubectl -n kernel-restricted exec runtimedefault -- sh -c 'grep "^Seccomp:" /proc/self/status | tr "\t" " "; setarch linux64 -R /bin/true 2>&1; echo exit=$?'
 CMD
 
 echo '## step 3c: restricted refuses the Unconfined spec at admission (server dry run)'
@@ -187,7 +193,7 @@ apiVersion: v1
 kind: Pod
 metadata:
   name: unconfined-restricted
-  namespace: p05-05-restricted
+  namespace: kernel-restricted
 spec:
   automountServiceAccountToken: false
   securityContext:
@@ -231,7 +237,7 @@ apiVersion: v1
 kind: Pod
 metadata:
   name: audit
-  namespace: p05-05-restricted
+  namespace: kernel-restricted
 spec:
   automountServiceAccountToken: false
   securityContext:
@@ -265,7 +271,7 @@ spec:
 YAML
 run <<'CMD'
 kubectl apply -f audit.yaml
-kubectl -n p05-05-restricted wait --for=condition=Ready pod/audit --timeout=180s
+kubectl -n kernel-restricted wait --for=condition=Ready pod/audit --timeout=180s
 CMD
 
 # The audit profile's default action is SCMP_ACT_LOG: every syscall is logged
@@ -275,12 +281,12 @@ CMD
 # carries no host name.
 SINCE=$(date +%s)
 run <<'CMD'
-kubectl -n p05-05-restricted exec audit -- sh -c 'id -u; cat /etc/passwd >/dev/null; ls / >/dev/null; echo done'
+kubectl -n kernel-restricted exec audit -- sh -c 'id -u; cat /etc/passwd >/dev/null; ls / >/dev/null; echo done'
 CMD
 # The kernel prints its count of dropped records only when it next prints one,
 # so wait out the rate-limit window and make one more exec to flush the count.
 sleep 6
-kubectl -n p05-05-restricted exec audit -- true >/dev/null 2>&1
+kubectl -n kernel-restricted exec audit -- true >/dev/null 2>&1
 journalctl -k -o cat --since "@$SINCE" --no-pager > audit-journal.txt 2>/dev/null
 echo '## step 4a: the kernel log: the records it printed, and the ones it dropped'
 run <<'CMD'
@@ -309,7 +315,7 @@ apiVersion: v1
 kind: Pod
 metadata:
   name: enforce
-  namespace: p05-05-restricted
+  namespace: kernel-restricted
 spec:
   automountServiceAccountToken: false
   securityContext:
@@ -343,11 +349,11 @@ spec:
 YAML
 run <<'CMD'
 kubectl apply -f enforce.yaml
-kubectl -n p05-05-restricted wait --for=condition=Ready pod/enforce --timeout=180s
+kubectl -n kernel-restricted wait --for=condition=Ready pod/enforce --timeout=180s
 CMD
 echo '## step 4c: enforce: the workload still runs, and the personality call is refused'
 run <<'CMD'
-kubectl -n p05-05-restricted exec enforce -- sh -c 'grep "^Seccomp:" /proc/self/status | tr "\t" " "; id -u; cat /etc/passwd >/dev/null && echo workload-ok; setarch linux64 -R /bin/true 2>&1; echo exit=$?'
+kubectl -n kernel-restricted exec enforce -- sh -c 'grep "^Seccomp:" /proc/self/status | tr "\t" " "; id -u; cat /etc/passwd >/dev/null && echo workload-ok; setarch linux64 -R /bin/true 2>&1; echo exit=$?'
 CMD
 
 echo '## step 5: AppArmor: read-only checks, nothing loaded. A profile would enter the host kernel.'
@@ -396,7 +402,7 @@ apiVersion: v1
 kind: Pod
 metadata:
   name: gvisor
-  namespace: p05-05-restricted
+  namespace: kernel-restricted
 spec:
   runtimeClassName: gvisor
   automountServiceAccountToken: false
@@ -431,11 +437,11 @@ YAML
 run <<'CMD'
 kubectl apply -f runtimeclass.yaml
 kubectl apply -f gvisor.yaml
-kubectl -n p05-05-restricted wait --for=condition=Ready pod/gvisor --timeout=240s
+kubectl -n kernel-restricted wait --for=condition=Ready pod/gvisor --timeout=240s
 CMD
 echo '## step 6a: the gVisor Pod reports a kernel of its own; the node reports the host kernel'
 run <<'CMD'
-kubectl -n p05-05-restricted exec gvisor -- sh -c 'uname -r; dmesg | head -2'
+kubectl -n kernel-restricted exec gvisor -- sh -c 'uname -r; dmesg | head -2'
 docker exec $NODE uname -r
 CMD
 
@@ -446,7 +452,7 @@ fi
 
 echo '## step 7: cleanup: the namespaces, the RuntimeClass and the seccomp profiles'
 run <<CMD
-kubectl delete ns p05-05-attack p05-05-restricted --wait=true
+kubectl delete ns kernel-attack kernel-restricted --wait=true
 kubectl delete runtimeclass gvisor --ignore-not-found
 docker exec $NODE rm -f /var/lib/kubelet/seccomp/profiles/audit.json /var/lib/kubelet/seccomp/profiles/deny-personality.json
 CMD

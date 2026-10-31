@@ -44,9 +44,9 @@ registry is the worked example.
 
 This chapter teaches no attack. Its lab checks the records that keep
 exceptions honest. The controls those records depend on are proved in Part 05
-ch.00 to ch.05, and the admission chapter, 05.07, covers the policy engines in
-depth.
-<!-- link-later: 05.07 -->
+ch.00 to ch.05, and the admission chapter,
+[05.07](07-admission-control-and-policy-as-code.md), covers the policy engines
+in depth.
 
 ## Mental model
 
@@ -75,7 +75,7 @@ one is a way the security work quietly stops being true.
 
 | Threat | Control this chapter teaches | Where it goes deeper |
 |---|---|---|
-| A threat model no longer matches the system | A short model per system, with reread triggers written into it | STRIDE and the threat matrix, Part 00 ch.08 <!-- link-later: 00.08 --> |
+| A threat model no longer matches the system | A short model per system, with reread triggers written into it | STRIDE and the threat matrix, [Part 00 ch.08](../00-foundations/08-security-foundations.md) |
 | A finding is fixed, or ignored, with no recorded reason | A triage decision per finding, and VEX where a product statement applies | [OpenVEX specification](https://github.com/openvex/spec/blob/main/OPENVEX-SPEC.md) |
 | An exception outlives the reason it was granted | An expiry date on every registry entry, enforced by the scanner or by the expiry stage | The registry, below |
 | A namespace is lowered below `restricted` with no record | An admission rule that refuses a lower level without a reason and an expiry within 365 days | [ValidatingAdmissionPolicy](https://kubernetes.io/docs/reference/access-authn-authz/validating-admission-policy/) |
@@ -84,9 +84,10 @@ one is a way the security work quietly stops being true.
 
 ## Threat modelling as a habit
 
-The method is STRIDE, which Part 00 ch.08 teaches in full
-<!-- link-later: 00.08 -->. This section is the habit around it: when a model is
-reread, where it lives, and what an entry looks like.
+The method is STRIDE, which
+[Part 00 ch.08](../00-foundations/08-security-foundations.md) teaches in full.
+This section is the habit around it: when a model is reread, where it lives,
+and what an entry looks like.
 
 A model is out of date as soon as one of these changes. Write the list into
 the model file, so the next reviewer sees it:
@@ -104,7 +105,7 @@ intended controls. The gates and admission are what check them.
 
 | Threat (STRIDE) | Control | Checked by |
 |---|---|---|
-| Tampering: a changed image reaches the cluster (T) | Image pinned by digest, built and signed by the pipeline | The pipeline gates in [ch.03](03-supply-chain.md); admission in 05.07 <!-- link-later: 05.07 --> |
+| Tampering: a changed image reaches the cluster (T) | Image pinned by digest, built and signed by the pipeline | The pipeline gates in [ch.03](03-supply-chain.md); admission in [05.07](07-admission-control-and-policy-as-code.md) |
 | Tampering: the running container's files are changed (T) | `readOnlyRootFilesystem: true`, with writes only to an `emptyDir` | The baseline in [01.01](../01-core-workloads/01-pods.md#baseline) |
 | Elevation: a vulnerable package in the base image is used (E) | Image scan at the pipeline gate; a dated registry entry for any accepted finding | Trivy in the pipeline, and the registry below |
 | Disclosure: a compromised process reads the API with a default token (I) | `automountServiceAccountToken: false` and a dedicated ServiceAccount | [ch.01](01-authn-authz-rbac.md) and the baseline |
@@ -194,8 +195,19 @@ decision come back on purpose.
 
 ### This repository's registry
 
-The design asks for one file. The repository has four, one per scanner, and
-the pipeline reads them together.
+The guide's own registry is two files at the repository root, and
+[00.08](../00-foundations/08-security-foundations.md#registering-an-exception)
+introduces them. `security/namespace-exceptions.yaml` lists every namespace the
+guide labels above `restricted`, with its level, reason, upstream citation,
+chapter and `expires` date. `.trivyignore.yaml` lists each scanner finding the
+guide accepts, with its paths, a statement and an `expired_at` date. `make
+gates-registry` checks both in both directions and runs in the pull request
+checks. A namespace the guide labels above `restricted`, in a chapter, a lab
+script, a transcript or an example tree, needs an entry. An entry that no
+label or finding matches any more is a failure too.
+
+The Bookstore pipeline keeps four scanner lists of its own, one per tool. They
+are the pipeline's working lists, and the pipeline reads them together.
 
 | File | Scanner | Who enforces its dates |
 |---|---|---|
@@ -204,13 +216,13 @@ the pipeline reads them together.
 | `full-guide/examples/bookstore/ci/kube-linter.yaml` | KubeLinter | The `expiry` stage of `ci/scan.sh`, which reads a `Revisit by` date beside each entry |
 | `full-guide/examples/bookstore/ci/zap/baseline.conf` | ZAP | The same `expiry` stage |
 
-Namespace exceptions are not in these four files. Their record is the
-Namespace itself: two annotations, `security.example/exception-reason` and
+A namespace exception has a second record, in the cluster. The Namespace
+carries two annotations, `security.example/exception-reason` and
 `security.example/exception-expires`. The admission rule in the hands-on, and
 the Rego rules `BK-POL-011` and `BK-TF-001` in
 [05.07](07-admission-control-and-policy-as-code.md), read the same two
-annotations. A chapter that records a namespace exception uses them and points
-here.
+annotations. The registry file records the decision for the guide, and the
+annotations record it on the object the cluster admits.
 
 ### An entry, and how Trivy reads its date
 
@@ -422,7 +434,7 @@ any other namespace on a lab cluster.
 apiVersion: admissionregistration.k8s.io/v1
 kind: ValidatingAdmissionPolicy
 metadata:
-  name: exception-expiry
+  name: p05-09-exception-expiry
 spec:
   failurePolicy: Fail
   matchConstraints:
@@ -456,9 +468,9 @@ spec:
 apiVersion: admissionregistration.k8s.io/v1
 kind: ValidatingAdmissionPolicyBinding
 metadata:
-  name: exception-expiry
+  name: p05-09-exception-expiry
 spec:
-  policyName: exception-expiry
+  policyName: p05-09-exception-expiry
   validationActions: ["Deny"]
 ```
 
@@ -487,7 +499,7 @@ labelled at the same level for enforce, audit and warn, as
 apiVersion: v1
 kind: Namespace
 metadata:
-  name: restricted
+  name: p05-09-restricted
   labels:
     pod-security.kubernetes.io/enforce: restricted
     pod-security.kubernetes.io/enforce-version: v1.37
@@ -499,7 +511,7 @@ metadata:
 apiVersion: v1
 kind: Namespace
 metadata:
-  name: no-expiry
+  name: p05-09-no-expiry
   labels:
     pod-security.kubernetes.io/enforce: baseline
     pod-security.kubernetes.io/enforce-version: v1.37
@@ -511,7 +523,7 @@ metadata:
 apiVersion: v1
 kind: Namespace
 metadata:
-  name: exception
+  name: p05-09-exception
   labels:
     pod-security.kubernetes.io/enforce: baseline
     pod-security.kubernetes.io/enforce-version: v1.37
@@ -526,17 +538,12 @@ metadata:
 apiVersion: v1
 kind: Namespace
 metadata:
-  name: unlabelled
+  name: p05-09-unlabelled
 ---
 apiVersion: v1
 kind: Namespace
 metadata:
-  name: unlabelled
----
-apiVersion: v1
-kind: Namespace
-metadata:
-  name: too-long
+  name: p05-09-too-long
   labels:
     pod-security.kubernetes.io/enforce: baseline
     pod-security.kubernetes.io/enforce-version: v1.37
@@ -589,7 +596,7 @@ the UID the image declares.
 apiVersion: v1
 kind: Namespace
 metadata:
-  name: service
+  name: p05-09-service
   labels:
     pod-security.kubernetes.io/enforce: restricted
     pod-security.kubernetes.io/enforce-version: v1.37
@@ -604,14 +611,14 @@ apiVersion: v1
 kind: ServiceAccount
 metadata:
   name: catalog
-  namespace: service
+  namespace: p05-09-service
 automountServiceAccountToken: false
 ---
 apiVersion: apps/v1
 kind: Deployment
 metadata:
   name: catalog
-  namespace: service
+  namespace: p05-09-service
   labels:
     app.kubernetes.io/name: catalog
 spec:
@@ -718,7 +725,8 @@ guide's controls to them, and says what each reference does not cover.
 ### CIS Kubernetes Benchmark
 
 The section numbers below come from the `cis-1.12` profile in kube-bench
-v0.16.0, which 05.06 <!-- link-later: 05.06 --> runs against the lab cluster.
+v0.16.0, which [05.06](06-control-plane-and-node-hardening.md) runs against the
+lab cluster.
 CIS publishes a newer Kubernetes benchmark, which its site lists as version
 2.1.0 at the time of checking. Its numbering may differ, so map against the
 version your audit uses. Every policy in the `cis-1.12` profile is marked
@@ -762,8 +770,8 @@ topic. The topics map onto this Part as follows.
 | Network separation | Part 02 ch.06 <!-- link-later: 02.06 --> |
 | Authentication and authorization | [ch.01](01-authn-authz-rbac.md) |
 | Secrets | [ch.04](04-secrets-and-cluster-hardening.md) |
-| Audit logging and threat detection | Part 05 ch.08 <!-- link-later: 05.08 --> |
-| Upgrades and supply chain | [ch.03](03-supply-chain.md) and Part 05 ch.06 <!-- link-later: 05.06 --> |
+| Audit logging and threat detection | [Part 05 ch.08](08-audit-detection-and-incident-response.md) |
+| Upgrades and supply chain | [ch.03](03-supply-chain.md) and [Part 05 ch.06](06-control-plane-and-node-hardening.md) |
 
 ### NIST SP 800-190
 
@@ -776,9 +784,9 @@ operating system. The guide's chapters cover them as follows.
 |---|---|
 | Image | [ch.03](03-supply-chain.md): scans, SBOMs, digests and signing |
 | Registry | [ch.03](03-supply-chain.md) and the signing chapter in Part 15 <!-- link-later: 15.03 --> |
-| Orchestrator | [ch.01](01-authn-authz-rbac.md) for identity, and admission in 05.07 <!-- link-later: 05.07 --> |
+| Orchestrator | [ch.01](01-authn-authz-rbac.md) for identity, and admission in [05.07](07-admission-control-and-policy-as-code.md) |
 | Container | [ch.02](02-pod-security.md), [ch.04](04-secrets-and-cluster-hardening.md) and [ch.05](05-kernel-isolation.md) |
-| Host operating system | [ch.05](05-kernel-isolation.md) and the node chapter, 05.06 <!-- link-later: 05.06 --> |
+| Host operating system | [ch.05](05-kernel-isolation.md) and the node chapter, [05.06](06-control-plane-and-node-hardening.md) |
 
 ## Security review checklist for new services
 
@@ -809,7 +817,8 @@ control, the chapter that teaches it, and what evidence the reviewer reads.
       reason, the owner chapter, and an expiry within 12 months. Evidence: the
       registry files and the expiry stage's output.
 - [ ] **An owner** who reads the service's findings queue and its runtime
-      alerts (Part 05 ch.08 <!-- link-later: 05.08 -->). Evidence: the owner
+      alerts ([Part 05 ch.08](08-audit-detection-and-incident-response.md)).
+      Evidence: the owner
       field in the model file.
 
 ## Cited, not run

@@ -37,13 +37,13 @@ patches:
         name: default-deny-all
   - target:
       kind: NetworkPolicy
-      name: allow-catalog-to-postgres
+      name: allow-data-tier-ingress
     patch: |-
       $patch: delete
       apiVersion: networking.k8s.io/v1
       kind: NetworkPolicy
       metadata:
-        name: allow-catalog-to-postgres
+        name: allow-data-tier-ingress
   - target:
       kind: NetworkPolicy
       name: allow-backend-egress
@@ -118,11 +118,4 @@ patches:
         name: allow-storefront-to-apis
   - target:
       kind: Namespace
-    patch: |-
-      apiVersion: v1
-      kind: Namespace
-      metadata:
-        name: p05-capstone
-        labels:
-          pod-security.kubernetes.io/enforce: privileged
-          pod-security.kubernetes.io/enforce-version: latest
+    path: 91-namespace-privileged.yaml

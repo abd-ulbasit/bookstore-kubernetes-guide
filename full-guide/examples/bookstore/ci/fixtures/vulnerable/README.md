@@ -28,6 +28,7 @@ quiet, crashes, or renames its rules, the control fails.
 | Trivy, config | a privileged Pod in `deployment.json` | `KSV-0017` |
 | KubeLinter | the same Pod | `privileged-container` |
 | kubesec | the same Pod | `Privileged` |
+| Conftest | a namespace in a Terraform plan with no `enforce` label (`policy/plan.json`) | `BK-TF-001` |
 | zizmor | a PR title pasted into a shell (`bad-workflow.yml`) | `template-injection` |
 | actionlint | the same line | `potentially untrusted` |
 | expiry check | an exception list (`exceptions.conf`) with a lapsed date and an undated entry | `lapsed on 2020-01-01`, `no Revisit by DATE` |

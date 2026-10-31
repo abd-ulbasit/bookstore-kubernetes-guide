@@ -41,16 +41,6 @@ exceptions:
     chapter: 01-core-workloads/06-daemonsets.md
     expires: 2027-06-30
 
-  - namespace: psa-lab
-    level: privileged
-    reason: >-
-      The Part 05 Pod Security lab runs deliberately insecure Pods in a throwaway
-      kind namespace to show what the privileged profile allows. The lab script
-      creates the namespace, labels it and deletes it at the end.
-    upstream: https://kubernetes.io/docs/concepts/security/pod-security-standards/
-    chapter: 05-security/02-pod-security.md
-    expires: 2027-06-30
-
   - namespace: kube-system
     level: privileged
     reason: >-
@@ -169,3 +159,143 @@ exceptions:
     upstream: https://kubernetes.io/docs/concepts/security/pod-security-standards/#privileged
     chapter: 08-day-2-operations/03-troubleshooting-playbook.md
     expires: 2027-06-30
+  - namespace: p05-recon-app
+    level: baseline
+    reason: >-
+      The Part 05 recon lab needs an application with a weak start: a root Pod
+      that names no ServiceAccount and keeps the default token. Baseline admits
+      that Pod, and restricted does not. The namespace enforces baseline, warns
+      at restricted, and holds that one marked Pod. The lab script deletes the
+      namespace at the end.
+    upstream: https://kubernetes.io/docs/concepts/security/pod-security-standards/
+    chapter: 05-security/00-the-attackers-view.md
+    expires: 2027-10-31
+
+  - namespace: p05-rbac
+    level: baseline
+    reason: >-
+      The Part 05 RBAC lab holds a victim Pod and seven identities that each
+      carry one ordinary-looking grant. Path A creates a Pod that sets no
+      securityContext, to show that a grant to create Pods lets a caller borrow
+      a ServiceAccount and its token. Baseline admits that Pod, and restricted
+      does not. The lab script deletes the namespace at the end.
+    upstream: https://kubernetes.io/docs/concepts/security/pod-security-standards/
+    chapter: 05-security/01-authn-authz-rbac.md
+    expires: 2027-10-31
+
+  - namespace: p05-02-attack
+    level: privileged
+    reason: >-
+      The Part 05 Pod Security lab runs Pods that are insecure on purpose:
+      privileged, hostPID, hostPath and a mounted runtime socket. They show what
+      each field allows on a kind node. Only privileged admits them. The
+      namespace holds those marked Pods and nothing else, and the lab script
+      deletes it at the end.
+    upstream: https://kubernetes.io/docs/concepts/security/pod-security-standards/
+    chapter: 05-security/02-pod-security.md
+    expires: 2027-10-31
+
+  - namespace: p05-02-baseline
+    level: baseline
+    reason: >-
+      The Part 05 Pod Security lab applies a default Pod with no securityContext
+      to show what baseline admits and what it warns about at restricted.
+      Baseline admits that Pod, and restricted does not. The namespace warns at
+      restricted. The lab script deletes it at the end.
+    upstream: https://kubernetes.io/docs/concepts/security/pod-security-standards/
+    chapter: 05-security/02-pod-security.md
+    expires: 2027-10-31
+
+  - namespace: kernel-attack
+    level: privileged
+    reason: >-
+      The Part 05 kernel isolation lab runs one Pod with the Unconfined seccomp
+      profile, to show what a filter-free Pod can call that a RuntimeDefault Pod
+      cannot. The restricted and baseline levels both refuse the Unconfined
+      profile, so only privileged admits it. The namespace holds that one marked
+      Pod, and the lab script deletes it at the end. Every other Pod in the lab
+      runs in kernel-restricted.
+    upstream: https://kubernetes.io/docs/concepts/security/pod-security-standards/
+    chapter: 05-security/05-kernel-isolation.md
+    expires: 2027-10-31
+
+  - namespace: kube-bench
+    level: privileged
+    reason: >-
+      The kube-bench Job reads the node's files and process table as root. Its
+      upstream manifest sets hostPID and mounts the hostPath directories
+      /var/lib/etcd, /etc/kubernetes and /usr/bin. Baseline forbids both host
+      namespaces and hostPath, so only privileged admits the Job. The Part 05
+      control plane lab runs it once, then deletes the namespace.
+    upstream: https://github.com/aquasecurity/kube-bench/blob/main/job.yaml
+    chapter: 05-security/06-control-plane-and-node-hardening.md
+    expires: 2027-10-31
+
+  - namespace: attack
+    level: privileged
+    reason: >-
+      The Part 05 audit and response lab runs a Pod that mounts the node's root
+      filesystem with hostPath, as the attack the chapter then audits, detects
+      and responds to. Baseline forbids hostPath, so only privileged admits it.
+      The namespace holds the lab's marked Pods and the build identity that
+      creates them, and the lab script deletes it at the end.
+    upstream: https://kubernetes.io/docs/concepts/security/pod-security-standards/
+    chapter: 05-security/08-audit-detection-and-incident-response.md
+    expires: 2027-10-31
+
+  - namespace: p05-09-exception
+    level: baseline
+    reason: >-
+      The Part 05 registry lab applies this namespace at baseline with a reason
+      and an expiry on it, to show that the admission rule admits a namespace
+      below restricted that carries its record. The lab script deletes it at the
+      end.
+    upstream: https://kubernetes.io/docs/concepts/security/pod-security-standards/
+    chapter: 05-security/09-running-security-on-a-platform-team.md
+    expires: 2027-10-31
+
+  - namespace: p05-09-no-expiry
+    level: baseline
+    reason: >-
+      The Part 05 registry lab applies this namespace at baseline with no reason
+      and no expiry, to show that the admission rule refuses it. The rule
+      refuses it, so it is never created. It is registered because the chapter's
+      manifest labels it baseline and the registry gate reads that label.
+    upstream: https://kubernetes.io/docs/concepts/security/pod-security-standards/
+    chapter: 05-security/09-running-security-on-a-platform-team.md
+    expires: 2027-10-31
+
+  - namespace: p05-09-too-long
+    level: baseline
+    reason: >-
+      The Part 05 registry lab applies this namespace at baseline with an expiry
+      more than 365 days out, to show that the admission rule refuses it. The
+      rule refuses it, so it is never created. It is registered because the
+      chapter's manifest labels it baseline and the registry gate reads that
+      label.
+    upstream: https://kubernetes.io/docs/concepts/security/pod-security-standards/
+    chapter: 05-security/09-running-security-on-a-platform-team.md
+    expires: 2027-10-31
+
+  - namespace: p05-capstone
+    level: privileged
+    reason: >-
+      The Part 05 capstone applies a deliberately weak Bookstore overlay to this
+      namespace, so that the foothold Pod and the borrowed Pod the attack chain
+      needs are admitted. The namespace is privileged in the vulnerable phase
+      only. The hardened overlay does not apply that label, and the base's
+      restricted label stands. The lab script deletes the namespace at the end.
+    upstream: https://kubernetes.io/docs/concepts/security/pod-security-standards/
+    chapter: 05-security/10-capstone-attack-and-harden-the-bookstore.md
+    expires: 2027-10-31
+
+  - namespace: p05-capstone-bench
+    level: privileged
+    reason: >-
+      The capstone runs kube-bench once, as a Job in this namespace. Its
+      upstream manifest sets hostPID and mounts hostPath directories, which
+      baseline forbids, so only privileged admits the Job. The lab script
+      deletes the namespace at the end.
+    upstream: https://github.com/aquasecurity/kube-bench/blob/main/job.yaml
+    chapter: 05-security/10-capstone-attack-and-harden-the-bookstore.md
+    expires: 2027-10-31
