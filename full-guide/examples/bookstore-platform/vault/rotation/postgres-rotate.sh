@@ -22,7 +22,7 @@
 #
 # Usage:
 #   export VAULT_ADDR=https://vault-active.vault.svc.cluster.local:8200
-#   export VAULT_TOKEN=<a token with the bookstore-platform-admin policy>
+#   export VAULT_TOKEN=<the bootstrap token for bootstrap; the admin token for the rest>
 #   ./postgres-rotate.sh bootstrap    # one-time setup
 #   ./postgres-rotate.sh rotate       # force a new credential, validate
 #   ./postgres-rotate.sh revoke <lease-id>
@@ -65,7 +65,9 @@ bootstrap() {
   require_var PG_ADMIN_PASSWORD
 
   echo "[1/3] Enable database secrets engine (idempotent — ok if already enabled)..."
-  vault secrets enable -path=database database 2>/dev/null || true
+  if ! vault secrets list -format=json | jq -e 'has("database/")' > /dev/null; then
+    vault secrets enable -path=database database
+  fi
 
   echo "[2/3] Configure connection to tenant Postgres ${PG_SVC}..."
   vault write "database/config/${DB_CONFIG_NAME}" \

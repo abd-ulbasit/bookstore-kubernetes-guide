@@ -1,0 +1,179 @@
+# Bookstore Platform, Part 15 ch.06: the objects the catalog Rollout needs
+# before it can run. Apply this file first, then the Rollout from the chapter.
+#   - the namespace, with the restricted labels and a default-deny policy
+#   - the catalog ServiceAccount, with no token mounted
+#   - the stable and canary Services that Argo Rollouts switches between
+#   - the Istio DestinationRule that defines the stable and canary subsets
+#   - the Istio VirtualService with the cohort routes and the primary route
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: bookstore-platform-catalog
+  labels:
+    app.kubernetes.io/part-of: bookstore-platform
+    pod-security.kubernetes.io/enforce: restricted
+    pod-security.kubernetes.io/audit: restricted
+    pod-security.kubernetes.io/warn: restricted
+---
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: catalog
+  namespace: bookstore-platform-catalog
+automountServiceAccountToken: false
+---
+# Default deny first, then the explicit allows. The catalog's egress to
+# Flagsmith is added in its own file (feature-flags/catalog-flagsmith-egress.yaml).
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: default-deny
+  namespace: bookstore-platform-catalog
+spec:
+  podSelector: {}
+  policyTypes: [Ingress, Egress]
+---
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: allow-ingress
+  namespace: bookstore-platform-catalog
+spec:
+  podSelector: {}
+  policyTypes: [Ingress]
+  ingress:
+    # The mesh ingress gateway and the sidecars reach the HTTP port.
+    - from:
+        - namespaceSelector:
+            matchLabels: { kubernetes.io/metadata.name: istio-system }
+      ports:
+        - { protocol: TCP, port: 8080 }
+    # Prometheus scrapes the metrics port.
+    - from:
+        - namespaceSelector:
+            matchLabels: { kubernetes.io/metadata.name: monitoring }
+      ports:
+        - { protocol: TCP, port: 8080 }
+    # Pods in this namespace may call each other.
+    - from:
+        - podSelector: {}
+---
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: allow-egress
+  namespace: bookstore-platform-catalog
+spec:
+  podSelector: {}
+  policyTypes: [Egress]
+  egress:
+    # DNS.
+    - to:
+        - namespaceSelector:
+            matchLabels: { kubernetes.io/metadata.name: kube-system }
+      ports:
+        - { protocol: UDP, port: 53 }
+        - { protocol: TCP, port: 53 }
+    # The sidecar's control-plane connection to istiod.
+    - to:
+        - namespaceSelector:
+            matchLabels: { kubernetes.io/metadata.name: istio-system }
+      ports:
+        - { protocol: TCP, port: 15012 }
+    # Pods in this namespace, including the catalog database.
+    - to:
+        - podSelector: {}
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: catalog-stable
+  namespace: bookstore-platform-catalog
+spec:
+  # Argo Rollouts adds the pod-template-hash to this selector at runtime and
+  # moves it to the stable ReplicaSet.
+  selector:
+    app: catalog
+  ports:
+    - name: http
+      port: 8080
+      targetPort: http
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: catalog-canary
+  namespace: bookstore-platform-catalog
+spec:
+  selector:
+    app: catalog
+  ports:
+    - name: http
+      port: 8080
+      targetPort: http
+---
+apiVersion: networking.istio.io/v1
+kind: DestinationRule
+metadata:
+  name: catalog
+  namespace: bookstore-platform-catalog
+spec:
+  host: catalog.bookstore-platform-catalog.svc.cluster.local
+  trafficPolicy:
+    tls:
+      mode: ISTIO_MUTUAL
+  # Argo Rollouts writes the rollouts-pod-template-hash label into each
+  # subset's labels, so the subsets follow the stable and canary ReplicaSets.
+  subsets:
+    - name: stable
+      labels:
+        app: catalog
+    - name: canary
+      labels:
+        app: catalog
+---
+apiVersion: networking.istio.io/v1
+kind: VirtualService
+metadata:
+  name: catalog
+  namespace: bookstore-platform-catalog
+spec:
+  hosts:
+    - catalog.bookstore-platform-catalog.svc.cluster.local
+  gateways:
+    - mesh
+  http:
+    # Cohort routes come first. They match the header the storefront sets
+    # from the verified session, never a value the client sent.
+    - name: internal-cohort
+      match:
+        - headers:
+            x-canary-cohort:
+              exact: internal
+      route:
+        - destination:
+            host: catalog.bookstore-platform-catalog.svc.cluster.local
+            subset: canary
+          weight: 100
+    - name: enterprise-cohort
+      match:
+        - headers:
+            x-canary-cohort:
+              exact: enterprise
+      route:
+        - destination:
+            host: catalog.bookstore-platform-catalog.svc.cluster.local
+            subset: stable
+          weight: 100
+    # The route the Rollout names in trafficRouting.istio.virtualService.routes.
+    # Argo Rollouts rewrites the two weights while the canary runs.
+    - name: primary
+      route:
+        - destination:
+            host: catalog.bookstore-platform-catalog.svc.cluster.local
+            subset: stable
+          weight: 100
+        - destination:
+            host: catalog.bookstore-platform-catalog.svc.cluster.local
+            subset: canary
+          weight: 0

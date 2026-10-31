@@ -1,0 +1,21 @@
+# Bookstore Platform, Part 15 ch.08: the catalog may call the Flagsmith API.
+# The catalog namespace's default-deny egress (15.06, catalog-traffic.yaml)
+# blocks it. This policy adds one allow, on port 8000, to the flagsmith
+# namespace. The flagsmith namespace admits this traffic in
+# flagsmith-namespace.yaml.
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: allow-flagsmith-egress
+  namespace: bookstore-platform-catalog
+spec:
+  podSelector:
+    matchLabels:
+      app: catalog
+  policyTypes: [Egress]
+  egress:
+    - to:
+        - namespaceSelector:
+            matchLabels: { kubernetes.io/metadata.name: flagsmith }
+      ports:
+        - { protocol: TCP, port: 8000 }

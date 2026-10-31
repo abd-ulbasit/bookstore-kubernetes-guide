@@ -91,8 +91,8 @@ that NEVER kills user experience to satisfy the rollout".**
   the canary's traffic (not the stable's); (b) **p99 latency** —
   bounded to the SLO's promised tail; (c) **saturation** — CPU /
   memory / queue depth predicting near-future failure even when
-  current errors are zero. All three must pass; any one tripping
-  failureLimit times aborts the rollout.
+  current errors are zero. All three must pass; any one failing more
+  than failureLimit times aborts the rollout.
 - **Pause-resume is the human override surface.** A canary at 25%
   that has passed analysis can be *paused indefinitely* with `kubectl
   argo rollouts pause`. The traffic stays at 25%; the rollout waits
@@ -128,6 +128,7 @@ PR — Part 15 ch.07's pattern).
 | A bad release passes analysis, or missing data reads as healthy | Queries scoped to the canary's pods, and `len(result) > 0` in every `successCondition`, so an empty result fails the gate | [06.01](../06-production-readiness/01-observability-metrics.md) |
 | Someone who should not move the rollout pauses, promotes or aborts it | A Role that binds pause, promote and abort to the release group only (Hands-on step 6) | [05.01](../05-security/01-authn-authz-rbac.md) |
 | The rollout changes outside Git, so the reviewed spec is not what runs | The Rollout changes only by pull request, and Argo CD reverts drift | [15.01](01-pr-to-production-lifecycle.md) |
+| A client sets `x-canary-cohort` to force the canary or to skip it | The edge drops any value a client sent (`edge/cohort-header-strip.yaml`), and the storefront sets the header from the verified session | [Part 11 ch.04](../11-advanced-production-patterns/04-service-mesh.md) |
 
 ## Diagrams
 
@@ -152,11 +153,11 @@ flowchart TD
 
     deploy --> canary_rs --> w10 --> p1 --> an1
     an1 -- pass --> w25 --> p2 --> an2
-    an1 -- "failureLimit reached" --> abort
+    an1 -- "failureLimit exceeded" --> abort
     an2 -- pass --> w50 --> p3 --> an3
-    an2 -- "failureLimit reached" --> abort
+    an2 -- "failureLimit exceeded" --> abort
     an3 -- pass --> w100 --> promote
-    an3 -- "failureLimit reached" --> abort
+    an3 -- "failureLimit exceeded" --> abort
 ```
 
 ### Diagram B — Canary by percentage vs canary by cohort (ASCII)
@@ -213,7 +214,10 @@ output shown after a command is illustrative, and no step runs on a cloud.
 The AnalysisTemplate is in
 `examples/bookstore-platform/argocd/rollouts/analysis-template-slo.yaml`,
 because the gate reads `{{ }}` in a chapter block as template text. The
-Rollout is inline and complete.
+Rollout is inline. The objects it needs (the namespace, the `catalog`
+ServiceAccount, the Services, the DestinationRule and the VirtualService)
+are in `examples/bookstore-platform/argocd/rollouts/catalog-traffic.yaml`.
+Apply that file before the Rollout.
 
 We will: (0) verify Argo Rollouts, Prometheus and Istio are installed;
 (1) apply the AnalysisTemplate with three SLO queries; (2) apply the
@@ -413,10 +417,11 @@ and `canary` subsets. The
 [Argo Rollouts Istio page](https://argoproj.github.io/argo-rollouts/features/traffic-management/istio/)
 lists both requirements.
 
-The companion Istio `VirtualService` carries the cohort routing from
-Diagram B. `x-canary-cohort` headers override the percentage. The
-platform's storefront sets this header for internal employees (always
-canary) and for enterprise tenants (never canary until 100%).
+The VirtualService in that file carries the cohort routing from Diagram B.
+The `x-canary-cohort` header overrides the percentage: `internal` goes 100%
+to canary and `enterprise` goes 100% to stable. The storefront sets the
+header from the verified session. The edge drops any value a client sent,
+as the next Production note explains.
 
 ### 3. Ship a good digest and watch it promote
 
@@ -455,12 +460,16 @@ unmerged branch whose handlers return errors on the catalog path.
 # Illustrative output, not captured on any cluster.
 #   success-rate: 0.85 against 0.999, measurement Failed
 #   success-rate: 0.83 against 0.999, measurement Failed
-#   analysis run Failed (failureLimit 2): rollout aborted
+#   success-rate: 0.84 against 0.999, measurement Failed
+#   analysis run Failed (failureLimit 2 exceeded): rollout aborted
 #   traffic back to stable; canary scaled down after abortScaleDownDelaySeconds
 ```
 
-Each failed measurement counts toward `failureLimit`, and the run fails
-when the count reaches it. The `on-rollout-aborted` trigger then sends the
+Each failed measurement counts toward `failureLimit`. The limit is the
+number of failures the metric tolerates, so with `failureLimit: 2` the first
+two failed measurements are allowed and the third fails the run. The API
+type's comment describes it as the maximum number of failures allowed before
+the metric is considered Failed. The `on-rollout-aborted` trigger then sends the
 page (Production notes). Find the failing run from the cluster:
 
 ```sh
@@ -472,9 +481,10 @@ kubectl describe analysisrun <name> -n bookstore-platform-catalog
 
 Argo Rollouts' `blueGreen` strategy flips the active Service from one
 ReplicaSet to another of the same Rollout. It fits a release whose two
-versions must not serve writes at once. The block below replaces
-`strategy.canary` in the spec from step 2, and the rest of the Rollout
-does not change. It is a fragment, so it has no `kind`:
+versions must not serve writes at once. The block below is the strategy of an orders Rollout. That Rollout is a
+separate object with its own Services and namespace, and the catalog Rollout
+from step 2 keeps its canary strategy. The orders Rollout is not built in
+this chapter. It is a fragment, so it has no `kind`:
 
 ```yaml
 strategy:
@@ -483,24 +493,15 @@ strategy:
     previewService: orders-preview
     autoPromotionEnabled: false           # a person promotes after checks
     scaleDownDelaySeconds: 1800           # keep the old ReplicaSet 30 minutes
-    prePromotionAnalysis:
-      templates:
-        - templateName: bookstore-slo-gate
-      args:
-        - name: service-name
-          value: orders
-        - name: namespace
-          value: <namespace>
-        - name: canary-pod-hash
-          valueFrom:
-            podTemplateHashValue: Latest
 ```
 
 `autoPromotionEnabled` defaults to true, so set it to false explicitly.
-Pre-promotion analysis runs once the new ReplicaSet is fully available
-and before traffic switches. Post-promotion analysis runs after the switch. `scaleDownDelaySeconds`
-defaults to 30; 1800 keeps the old ReplicaSet for a longer rollback
-window.
+`scaleDownDelaySeconds` sets how long the old ReplicaSet stays up; 1800
+keeps it for a 30-minute rollback window. No pre-promotion analysis is
+wired here. The SLO template measures `catalog_*` series in the catalog
+namespace, so it cannot gate orders as written. A smoke check against
+`orders-preview` before the promote command is recommended, and a
+per-service template is the extension this chapter does not build.
 
 The Service flip moves traffic, not data. The database under a release
 like this keeps its own replication. CloudNativePG does not need
@@ -649,6 +650,14 @@ it at the edge based on a customer attribute; every internal hop
 preserves it (the Istio sidecar copies it forward). A service that
 strips the header at its hop breaks the contract.
 
+**The edge drops what clients send.** Every hop copies the header forward,
+so a client that sent `x-canary-cohort: internal` would reach the unreviewed
+canary, and one that sent `enterprise` would skip it. The route in
+`examples/bookstore-platform/edge/cohort-header-strip.yaml` removes the
+header with a `RequestHeaderModifier` filter before any hop sees it. Only
+the storefront sets it afterwards. Any other route that reaches the catalog
+needs the same filter.
+
 ## Production notes
 
 > **In production:** Every Rollout has an `AnalysisTemplate`, never
@@ -692,8 +701,9 @@ strips the header at its hop breaks the contract.
 > should know where the release stands against that point.
 
 > **In production:** `abortScaleDownDelaySeconds` is the window that lets
-> in-flight requests drain before the canary's Pods go. The upstream page
-> does not state a default, so set it on every Rollout. Too short and
+> in-flight requests drain before the canary's Pods go. The Argo Rollouts specification gives
+> the default as 30 seconds for a canary, so the 30 above is that default. Set
+> it on every Rollout anyway, so the value shows up in review. Too short and
 > customers see connection resets; too long and the canary lingers after
 > a rollback. The platform's rule of thumb is twice the service's p99
 > request duration, so a service with 60-second requests needs more than
@@ -812,7 +822,8 @@ The production-canary checklist:
 4. **Hands-on extension — apply a Rollout whose AnalysisTemplate query has a typo, such as `success_rate` instead of the `sum(rate(...))` form. Deploy a new image.**
    <details><summary>What you should see</summary>
 
-   The query returns no data. The `len(result) > 0` guard turns the empty result into a failed measurement, so after `failureLimit` failures the run fails and the rollout aborts, even though the new code is fine. The chapter's discipline: **pre-merge CI verifies the Rollout spec compiles and references live AnalysisTemplates** with sanity-checked queries. A canary that auto-aborts because of a typo is a worse failure mode than a canary that ships broken code, because the team starts ignoring the auto-aborts.
+   The query returns no data. The `len(result) > 0` guard turns the empty result into a failed measurement, so after more than `failureLimit` failed measurements the run fails and the
+   rollout aborts, even though the new code is fine. The chapter's discipline: **pre-merge CI verifies the Rollout spec compiles and references live AnalysisTemplates** with sanity-checked queries. A canary that auto-aborts because of a typo is a worse failure mode than a canary that ships broken code, because the team starts ignoring the auto-aborts.
 
    </details>
 

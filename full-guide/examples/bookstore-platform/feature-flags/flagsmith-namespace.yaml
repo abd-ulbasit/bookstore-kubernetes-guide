@@ -71,6 +71,12 @@ spec:
         - podSelector: {}
       ports:
         - { protocol: TCP, port: 8000 }
+    # The catalog calls the API on port 8000 (08, section 3).
+    - from:
+        - namespaceSelector:
+            matchLabels: { kubernetes.io/metadata.name: bookstore-platform-catalog }
+      ports:
+        - { protocol: TCP, port: 8000 }
     # Prometheus scrapes the API metrics port.
     - from:
         - namespaceSelector:
