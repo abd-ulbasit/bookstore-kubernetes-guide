@@ -16,12 +16,13 @@
 > PSA-`restricted` GPU-pod footgun (CUDA images default to root) — applied with
 > the **honest GPU reality** (a real GPU node is required; exact commands +
 > representative labelled output, never faked) plus a CPU-only fallback note,
+> the one privileged namespace the GPU stack needs (a registered exception),
 > and a restricted-compliant GPU training Pod in
 > [`examples/bookstore/ml/gpu/`](../examples/bookstore/ml/gpu/).
 
 **Estimated time:** ~45 min read · ~90 min hands-on
 **Prerequisites:** [Part 01 ch.03](../01-core-workloads/03-resources-and-qos.md) — CPU/memory resources GPUs structurally differ from · [Part 04 ch.02](../04-scheduling/02-affinity-taints-topology.md) — taints/tolerations that gate GPU node pools · [Part 06 ch.01](../06-production-readiness/01-observability-metrics.md) — Prometheus pipeline DCGM exporter feeds
-**You'll know after this:** • explain the device-plugin model and why GPUs are non-overcommittable · • install the NVIDIA GPU Operator and verify driver + DCGM + device plugin · • request a GPU in a Pod and gate scheduling via taints + nodeAffinity · • compare time-slicing vs MPS vs MIG for GPU sharing · • avoid the PSA-restricted CUDA-image root-user footgun
+**You'll know after this:** • explain the device-plugin model and why GPUs are non-overcommittable · • install the NVIDIA GPU Operator and verify driver + DCGM + device plugin · • request a GPU in a Pod and gate scheduling via taints + nodeAffinity · • compare time-slicing vs MPS vs MIG for GPU sharing · • avoid the PSA-restricted CUDA-image root-user footgun · • say which GPU components need host access, and why they get the one exception
 
 <!-- tags: ml, gpu, mig, scheduling, observability, cost -->
 
@@ -49,7 +50,8 @@ taint/toleration/affinity recipe, now load-bearing), the three ways to *share*
 one GPU (time-slicing / MPS / MIG), and how to *see* GPU utilisation (DCGM →
 Prometheus, the [Part 06 ch.01](../06-production-readiness/01-observability-metrics.md)
 pipeline). And it is **honest**: real GPU steps need a real GPU node — the
-Bookstore recommendations model is deliberately tiny and CPU-only (ch.03, X3b),
+Bookstore recommendations model is deliberately tiny and CPU-only (chapters
+[03](03-batch-and-gang-scheduling.md) and [04](04-distributed-training.md)),
 so GPU here is the *"now scale it up"* path with exact commands and
 representative, clearly-labelled output, never invented `nvidia-smi` numbers.
 
@@ -77,23 +79,49 @@ indivisible by default, request==limit, and gated onto a tainted node pool.**
 - **GPU nodes are a fenced, expensive pool.** A GPU node should run *only* GPU
   work, or you waste money parking a stateless web Pod on a $$$ accelerator
   host. The recipe is exactly [Part 04 ch.02](../04-scheduling/02-affinity-taints-topology.md):
-  **taint** the GPU pool (`nvidia.com/gpu=present:NoSchedule`, which the GPU
-  Operator can also auto-apply), give GPU Pods a matching **toleration**, and
+  **taint** the GPU pool (`nvidia.com/gpu=present:NoSchedule`, applied when the
+  node pool is created), give GPU Pods a matching **toleration**, and
   add **nodeAffinity** so they are *attracted* to GPU nodes (a toleration only
   removes the fence; affinity pulls them in). General Bookstore Pods carry no
-  toleration, so they cannot drift onto GPU nodes.
+  toleration, so they cannot drift onto GPU nodes. A GPU node is often
+  dedicated, so this fence is also the boundary that keeps other teams' Pods
+  off hardware they should not use.
 - **The GPU Operator installs the whole stack so you don't.** Driver + NVIDIA
   container toolkit + device plugin + DCGM metrics exporter + node feature
   discovery is a lot of node plumbing. The **NVIDIA GPU Operator** is a single
   operator (one `ClusterPolicy` CR) that deploys and lifecycles all of it via a
   pinned Helm chart in its own namespace — the [Operator](#further-reading)
-  pattern applied to "make GPUs work".
+  pattern applied to "make GPUs work". That namespace is the one privileged
+  namespace in Part 12, because the stack needs host access (below).
 
 The trap to keep in view: PSA `restricted` does **not** exempt GPU pods, and
-most CUDA/framework images default to **root**. A GPU Pod must still be
-`runAsNonRoot` + drop ALL caps + `seccompProfile: RuntimeDefault`
-([Part 05 ch.02](../05-security/02-pod-security.md)) — the hands-on shows the
-compliant shape that *still gets the GPU*.
+most CUDA/framework images default to **root**. The base image this chapter
+uses declares no user, so it runs as root unless the Pod says otherwise. A GPU
+Pod must still be `runAsNonRoot`, drop ALL caps, and set
+`seccompProfile: RuntimeDefault`
+([Part 05 ch.02](../05-security/02-pod-security.md)). The hands-on shows the
+refused root Pod, then the compliant shape.
+
+A second trap sits under the GPU Pods. The stack that makes the GPU visible
+(driver, container toolkit, device plugin, DCGM exporter, GPU feature discovery
+and node feature discovery) needs host access, and it cannot run `restricted`.
+It gets its own namespace, the registered exception, and no workload shares it.
+
+## Threats and controls
+
+Each row is specific to GPUs. The cost fence from the mental model is the
+fourth row, and this chapter teaches it as a security boundary too.
+
+| Threat | Control taught here | Goes deeper |
+|---|---|---|
+| The GPU stack's node agents run with host access. A compromised driver, toolkit or device plugin is a compromised node | Their own namespace, `gpu-operator`, labelled `privileged` and registered as the one exception in Part 12, with a reason, an upstream citation and an expiry. Step 1 shows which components need what | [05.02](../05-security/02-pod-security.md) for the levels; the registry in `security/namespace-exceptions.yaml` |
+| A GPU workload runs as root, because CUDA images declare no user | Every GPU workload is `restricted`: a non-root UID, dropped capabilities and a seccomp profile. Step 3 shows the refusal | [01.01](../01-core-workloads/01-pods.md#baseline) |
+| Two tenants share one GPU and see each other's memory or faults | Exclusive GPUs by default. Time-slicing only where tenants trust each other, and MIG for hardware isolation. Step 5 cites both | [08.04](../08-day-2-operations/04-multi-tenancy-and-namespaces.md) |
+| An ordinary Pod takes a costly GPU node, or a GPU Pod lands where it should not | A taint on the GPU pool, and a toleration and a required nodeAffinity on GPU Pods only | [04.02](../04-scheduling/02-affinity-taints-topology.md) |
+
+The first row is the exception, and it is the only privileged namespace in
+Part 12. A GPU workload never joins it. A GPU workload that asks for privilege
+is refused like any other Pod.
 
 ## Diagrams
 
@@ -127,12 +155,12 @@ flowchart TB
  ─────────────────────────────────────────────────────────────────────────────
  Mode          What a "GPU" means      Isolation         Best for
  ------------  ----------------------  ----------------  --------------------------
- Exclusive     1 Pod = 1 whole GPU     full (HW)         training; the safe default
-  (default)      limits: nvidia.com/      strongest
+ Exclusive     1 Pod = 1 whole GPU     no sharing        training; the safe default
+  (default)      limits: nvidia.com/      by design
                  gpu: 1
 
  MIG           HW-partitioned into     STRONG (HW        many smaller, isolated
-  (A100/H100+)   instances, e.g.         partitions:       jobs/inference on big
+  (supported)    instances, e.g.         partitions:       jobs/inference on big
                  nvidia.com/             mem + compute     GPUs; predictable QoS
                  mig-1g.10gb: 1          fenced)
 
@@ -141,14 +169,15 @@ flowchart TB
                  robining; advertised    mem isolation,    NOT for guaranteed
                  as N "nvidia.com/gpu"   noisy neighbour)  perf or untrusted tenants
 
- MPS           N Pods share via CUDA   WEAK (spatial;    concurrent small kernels
-  (Multi-       Multi-Process Service   limited mem        from cooperating
-   Process)      (concurrent contexts)   carve-out)        workloads; better
-                                                            throughput than slicing
+ MPS           N Pods share via CUDA   separate GPU      concurrent small kernels
+  (Multi-       Multi-Process Service   address spaces;  from cooperating
+   Process)      (concurrent contexts)   limited fault     workloads; better
+                                         containment       throughput than slicing
 
  RULE OF THUMB:  training → exclusive (or MIG slice).  Inference/dev that can't
    fill a GPU → MIG if the HW supports it (real isolation); else time-slicing
-   (cheap, no isolation) or MPS (better throughput, weak isolation). Sharing is
+   (cheap, no isolation) or MPS (better throughput, limited fault containment).
+   Tenants who do not trust each other get exclusive GPUs or MIG. Sharing is
    always OPT-IN config on the device plugin / GPU Operator — never automatic.
 ```
 
@@ -163,91 +192,187 @@ and changes nothing in the existing Bookstore.
 
 > **The honest GPU reality (read first).** kind runs in containers on your
 > machine and has **no GPU**. The GPU Operator install, `nvidia-smi`, and the
-> GPU Pod below require a **real GPU node pool** (a cloud GPU node group, or a
-> bare-metal box with an NVIDIA GPU + driver). The commands here are the
-> *exact, correct* ones; the outputs shown are **representative, labelled
-> illustrative** captures from a GPU node — they are not produced by kind and
-> are not invented numbers. **The recommendations model itself needs no GPU**:
-> it is tiny and CPU-only — ch.03 gang-schedules a 2-worker CPU "training" that
-> runs on kind, and X3b does the real CPU train→serve. GPU here is purely the
-> *"scale training up"* path, marked as such everywhere.
+> GPU Pod in step 2 require a **real GPU node pool** (a cloud GPU node group, or
+> a bare-metal box with an NVIDIA GPU + driver). Steps 1, 2 and 5 are **cited,
+> not run**: their outputs are **representative, labelled illustrative** text,
+> not captures. Steps 3 and 4 ran on a kind cluster, and their output is
+> captured below. The lab cluster's node has a different name from the examples
+> below, and the captured lines keep the name the lab printed.
+> **The recommendations model itself needs no GPU**: it is tiny and CPU-only.
+> Chapter 03 gang-schedules a two-worker CPU training run, and chapter 04 trains
+> it on CPU. GPU here is purely the *"scale training up"* path, marked as such
+> everywhere.
 
-### 1. Install the NVIDIA GPU Operator (pinned Helm, own namespace) — GPU cluster
+### 1. Install the GPU Operator in its own namespace (not run here)
 
-On a cluster with GPU nodes, install the operator from its **pinned** Helm
-chart into its own namespace (never
-`kubectl apply -f .../releases/latest/download/<FILE>.yaml` — same rule as
-every operator install in this guide):
+On a cluster with GPU nodes, create the operator's namespace and label it
+before the install. The operator's Pods need the `privileged` level, so the
+namespace must allow it when the cluster enforces Pod Security admission. The
+[GPU Operator docs](https://docs.nvidia.com/datacenter/cloud-native/gpu-operator/latest/getting-started.html)
+give the same label. Then install from the operator's **pinned** Helm chart,
+never from a `releases/latest/download/<FILE>.yaml` URL, the same rule as every
+operator install in this guide:
 
 ```sh
-# Pin to a release you have tested; bump deliberately. (Representative version
-# below — check the project's releases and pin exactly, like the guide pins
-# every chart, e.g. Part 11 ch.04's ISTIO_CHART_VERSION.)
-GPU_OPERATOR_VERSION="v24.9.1"
+# Label first. privileged is the lowest level the stack runs under (the table
+# below shows why). audit and warn stay at restricted, so every privileged Pod
+# still shows up as a restricted violation in the logs.
+kubectl create namespace gpu-operator
+kubectl label namespace gpu-operator \
+  pod-security.kubernetes.io/enforce=privileged \
+  pod-security.kubernetes.io/audit=restricted \
+  pod-security.kubernetes.io/warn=restricted --overwrite
 
-helm repo add nvidia https://nvidia.github.io/gpu-operator && helm repo update
-helm install gpu-operator nvidia/gpu-operator \
-  -n gpu-operator --create-namespace \
+# Pin the chart you have tested and bump it deliberately. v26.7.2 was the
+# newest chart when this chapter was checked (helm search repo nvidia/gpu-operator).
+GPU_OPERATOR_VERSION="v26.7.2"
+
+helm repo add nvidia https://helm.ngc.nvidia.com/nvidia && helm repo update
+helm install gpu-operator nvidia/gpu-operator -n gpu-operator \
   --version "$GPU_OPERATOR_VERSION" --wait
+# Nodes that already carry the NVIDIA driver: add --set driver.enabled=false.
 ```
 
-The operator reconciles a single **`ClusterPolicy`** CR and, on GPU nodes,
-brings up the whole stack. Watch it converge and confirm the node now
-advertises GPUs:
+What each component does, and the host access it asks for. The access column
+comes from the operator's v26.7.2 sources and the chart render. The lab checked
+both, and its counts are below:
+
+| Component | Role | Host access in the v26.7.2 sources |
+|---|---|---|
+| **NVIDIA driver** (DaemonSet) | the kernel driver on each GPU node, or a check of a pre-installed host driver | privileged containers, `hostPID`, mounts of the host root `/` and `/sys` |
+| **NVIDIA container toolkit** | wires the container runtime so containers can see the GPU | privileged containers, `hostPID`, mounts of the host root `/` and `/dev/char` |
+| **device plugin** (DaemonSet) | advertises `nvidia.com/gpu` to the kubelet over the device-plugin gRPC API | privileged containers, mounts of the host root `/` and the kubelet's device-plugin directory |
+| **DCGM exporter** | exports GPU metrics (utilisation, memory, power) for Prometheus | privileged containers, a mount of the kubelet's pod-resources directory |
+| **GPU Feature Discovery** (DaemonSet) | emits `nvidia.com/gpu.*` labels such as `product`, `count` and `memory` | privileged containers, a mount of `/sys` |
+| **Node Feature Discovery** (worker) | labels each node with hardware features, such as the NVIDIA PCI vendor ID | not privileged, but seven `hostPath` mounts, among them `/boot`, `/sys` and `/usr/lib` |
+
+The chart renders one DaemonSet, NFD's worker. The GPU components are created
+at runtime from the `ClusterPolicy`, so their privileges come from the
+operator's sources. Each count below is the number of matching lines in a
+file, not a count of containers, so read the counts as a sign of host access:
+
+<!-- gate: output -->
+```
+privileged: true in the render: 0
+hostPath volumes in the render: 7
+```
+
+<!-- gate: output -->
+```
+state-driver/0500_daemonset.yaml             privileged=6 hostPID=1 hostPath=14
+state-container-toolkit/0500_daemonset.yaml  privileged=2 hostPID=1 hostPath=8
+state-device-plugin/0500_daemonset.yaml      privileged=3 hostPID=0 hostPath=7
+state-dcgm-exporter/0800_daemonset.yaml      privileged=2 hostPID=0 hostPath=2
+gpu-feature-discovery/0500_daemonset.yaml    privileged=3 hostPID=0 hostPath=3
+```
+
+The seven `hostPath` mounts in the render all belong to the NFD worker. Baseline
+forbids privileged containers, host namespaces and `hostPath` volumes, so the
+stack cannot run at `baseline` either. The
+[Pod Security Standards](https://kubernetes.io/docs/concepts/security/pod-security-standards/#baseline)
+list those restrictions. `privileged` is the lowest level that admits all of
+it, and the namespace holds the stack and nothing else. Its registry entry in
+`security/namespace-exceptions.yaml` names this chapter and expires within
+twelve months.
+
+Two things shrink the surface. `driver.enabled=false` leaves out the driver
+DaemonSet on nodes that already carry the driver, as the
+[operator docs](https://docs.nvidia.com/datacenter/cloud-native/gpu-operator/latest/getting-started.html)
+describe. And the chart version is a security control: a driver bump runs with
+host access on every GPU node, so upgrade it like a node-OS change and test it
+on a canary pool first. A silent bump can break every training job on the
+cluster.
+
+The operator reconciles a single **`ClusterPolicy`** CR. On a GPU cluster it
+brings up the stack, and the commands below show what to watch:
 
 ```sh
 kubectl get pods -n gpu-operator
-# representative (a GPU node present):
-#   nvidia-driver-daemonset-xxxxx                 Running
-#   nvidia-container-toolkit-daemonset-xxxxx      Running
-#   nvidia-device-plugin-daemonset-xxxxx          Running
-#   nvidia-dcgm-exporter-xxxxx                    Running
-#   gpu-feature-discovery-xxxxx                   Running
-#   gpu-operator-...                              Running
-
 kubectl get nodes -o custom-columns=\
 'NODE:.metadata.name,GPU:.status.allocatable.nvidia\.com/gpu'
-# representative:
-#   gpu-node-1   1        <- the device plugin advertised the GPU(s)
-#   cpu-node-1   <none>   <- no GPU here
 ```
 
-What each component does (the operator manages all of them):
+Illustrative output from a GPU node, not captured here. The names are the
+DaemonSets' own names in the operator sources:
 
-| Component | Role |
-|---|---|
-| **NVIDIA driver** (DaemonSet) | kernel driver on each GPU node (or uses a pre-installed host driver) |
-| **NVIDIA container toolkit** | wires the container runtime so containers can see the GPU |
-| **device plugin** (DaemonSet) | advertises `nvidia.com/gpu` to the kubelet (the gRPC mechanism) |
-| **DCGM exporter** | exports GPU metrics (util, memory, temp, power) for Prometheus |
-| **Node Feature Discovery (NFD)** | general hardware-feature labelling framework on every node; **GFD depends on it** |
-| **GPU Feature Discovery (GFD)** (DaemonSet) | NVIDIA add-on to NFD; emits `nvidia.com/gpu.*` node labels (incl. `nvidia.com/gpu.present`, `nvidia.com/gpu.product`, MIG-strategy labels) — the labels consumed by the `nodeAffinity` rule in step 3 below. The `gpu-feature-discovery-…` Pod in step 1's `kubectl get pods -n gpu-operator` output is GFD. |
+```
+nvidia-driver-daemonset-xxxxx                      Running
+nvidia-container-toolkit-daemonset-xxxxx           Running
+nvidia-device-plugin-daemonset-xxxxx               Running
+nvidia-dcgm-exporter-xxxxx                         Running
+gpu-feature-discovery-xxxxx                        Running
+gpu-operator-node-feature-discovery-worker-xxxxx   Running
+gpu-operator-xxxxxxxxxx-xxxxx                      Running
 
-### 2. `nvidia-smi` from a GPU Pod — the canonical sanity check (GPU node)
+NODE         GPU
+gpu-node-1   1        <- the device plugin advertised the GPU
+cpu-node-1   <none>   <- no GPU here
+```
 
-The real "is the GPU usable from a Pod" check. **Restricted-compliant** (the
-CUDA base image defaults to root — we force non-root + drop caps + seccomp, and
-it *still* sees the GPU):
+### 2. `nvidia-smi` from a GPU Pod (GPU node, not run here)
+
+The check that a GPU is usable from a Pod. The manifest is complete and
+restricted-compliant. Its base image declares no user (the image config in the registry says so),
+so the UID is ours to pick: 65532, the same number the Job uses. Save the two
+documents as `gpu-smoketest.yaml`:
+
+```yaml
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: gpu-smoketest
+  namespace: bookstore-ml
+automountServiceAccountToken: false
+---
+apiVersion: v1
+kind: Pod
+metadata:
+  name: gpu-smoketest
+  namespace: bookstore-ml
+spec:
+  serviceAccountName: gpu-smoketest
+  automountServiceAccountToken: false
+  restartPolicy: Never
+  tolerations:                      # PERMISSION past the GPU pool taint
+    - { key: nvidia.com/gpu, operator: Exists, effect: NoSchedule }
+  affinity:                         # ATTRACTION: GPU nodes only
+    nodeAffinity:
+      requiredDuringSchedulingIgnoredDuringExecution:
+        nodeSelectorTerms:
+          - matchExpressions:
+              - { key: nvidia.com/gpu.present, operator: In, values: ["true"] }
+  securityContext:
+    runAsNonRoot: true
+    runAsUser: 65532
+    runAsGroup: 65532
+    seccompProfile: { type: RuntimeDefault }
+  containers:
+    - name: gpu-smoketest
+      # nvidia/cuda:12.4.1-base-ubuntu22.04, pinned by its index digest.
+      image: nvidia/cuda@sha256:0f6bfcbf267e65123bcc2287e2153dedfc0f24772fb5ce84afe16ac4b2fada95
+      command: ["nvidia-smi"]
+      securityContext:
+        allowPrivilegeEscalation: false
+        readOnlyRootFilesystem: true
+        capabilities: { drop: ["ALL"] }
+      resources:
+        requests: { cpu: 100m, memory: 128Mi }
+        limits: { cpu: 500m, memory: 256Mi, nvidia.com/gpu: 1 }
+      volumeMounts:
+        - { name: tmp, mountPath: /tmp }
+  volumes:
+    - name: tmp
+      emptyDir: {}
+```
 
 ```sh
-kubectl run gpu-smoketest -n bookstore-ml --rm -it --restart=Never \
-  --image=nvidia/cuda:12.4.1-base-ubuntu22.04 \
-  --overrides='{
-    "spec":{
-      "tolerations":[{"key":"nvidia.com/gpu","operator":"Exists","effect":"NoSchedule"}],
-      "securityContext":{"runAsNonRoot":true,"runAsUser":65532,"runAsGroup":65532,
-        "seccompProfile":{"type":"RuntimeDefault"}},
-      "containers":[{"name":"gpu-smoketest","image":"nvidia/cuda:12.4.1-base-ubuntu22.04",
-        "command":["nvidia-smi"],
-        "resources":{"limits":{"nvidia.com/gpu":"1"}},
-        "securityContext":{"allowPrivilegeEscalation":false,
-          "capabilities":{"drop":["ALL"]},
-          "runAsNonRoot":true,"runAsUser":65532}}]}}'
+kubectl apply -f gpu-smoketest.yaml
+kubectl logs -n bookstore-ml gpu-smoketest
+kubectl delete -n bookstore-ml pod gpu-smoketest
 ```
 
-Representative `nvidia-smi` output **from a real GPU node** (illustrative —
-exact model/driver/numbers depend on your hardware; this is *not* produced by
-kind and *not* a fabricated benchmark):
+Illustrative `nvidia-smi` output **from a real GPU node**, not captured here
+(the model, driver and numbers depend on your hardware):
 
 ```
 +-----------------------------------------------------------------------------+
@@ -261,57 +386,148 @@ kind and *not* a fabricated benchmark):
 +-------------------------------+----------------------+----------------------+
 ```
 
-`0%`/`0MiB` here just means *idle* (it ran `nvidia-smi`, not a workload). The
-point is the container **saw the GPU** under a `restricted` securityContext. If
-instead you see `nvidia-smi: command not found` or no GPU, the device plugin /
-toolkit is not ready (re-check step 1) — that is the real failure mode, shown
-honestly rather than faked.
+`0%` and `0MiB` mean idle: the command ran, and no workload did. The point is
+that the container **sees the GPU** under a `restricted` securityContext. If it
+fails with a permission error, do not relax the namespace. The exception is for
+the GPU stack, and a GPU workload never joins it. Change the workload's UID or
+its image and keep the namespace restricted. If you see `nvidia-smi: command
+not found` or no GPU, the device plugin or toolkit is not ready. Re-check
+step 1, because that is the usual failure.
 
-### 3. The restricted GPU training Pod (the scale-up artifact)
+### 3. The restricted profile refuses the root default (run on kind)
+
+This step is a **deliberate denial**. The command below is what a Pod looks
+like when it leaves out the securityContext from step 2. The API server refuses
+it, and the message names each missing field. The lab ran it on a cluster that
+enforces `restricted`:
+
+```sh
+# nvidia/cuda:12.4.1-base-ubuntu22.04, pinned by its index digest. No
+# securityContext on purpose: this request is refused.
+kubectl run gpu-root-test -n bookstore-ml --restart=Never \
+  --image=nvidia/cuda@sha256:0f6bfcbf267e65123bcc2287e2153dedfc0f24772fb5ce84afe16ac4b2fada95 \
+  -- nvidia-smi
+```
+
+Captured output:
+
+<!-- gate: output -->
+```
+Error from server (Forbidden): pods "gpu-root-test" is forbidden: violates PodSecurity "restricted:latest": allowPrivilegeEscalation != false (container "gpu-root-test" must set securityContext.allowPrivilegeEscalation=false), unrestricted capabilities (container "gpu-root-test" must set securityContext.capabilities.drop=["ALL"]), runAsNonRoot != true (pod or container "gpu-root-test" must set securityContext.runAsNonRoot=true), seccompProfile (pod or container "gpu-root-test" must set securityContext.seccompProfile.type to "RuntimeDefault" or "Localhost")
+```
+
+The image is the root default. The lab read its declared user for `linux/amd64`
+from the registry with `docker buildx imagetools`. The check printed its
+fallback text, which means the field is empty:
+
+<!-- gate: output -->
+```
+<no USER declared>
+```
+
+Admission refuses the Pod before a node runs it, so the image is never pulled.
+The fix is the securityContext in step 2, not a looser namespace.
+
+### 4. The restricted GPU Job, admitted and then Pending (run on kind)
 
 The committed manifest
 [`examples/bookstore/ml/gpu/recommender-train-gpu.yaml`](../examples/bookstore/ml/gpu/recommender-train-gpu.yaml)
-is the *"now train the recommender on a GPU"* shape: a **`Job`** (built-in —
-dry-runs cleanly, no CRD), requesting `nvidia.com/gpu: 1`, with the GPU
-toleration + nodeAffinity, fully `restricted`-compliant. Its header states it
-**needs a GPU node; the CPU path is ch.03 / X3b**. Validate it the way the
-guide validates everything — a client dry-run (built-in kind, so it passes):
+is the *"now train the recommender on a GPU"* shape. It holds two documents: a
+ServiceAccount of its own, and a built-in `Job`, so it dry-runs without a CRD.
+The Pod carries the baseline, the GPU toleration and a required nodeAffinity.
+Validate it on the client, then ask the API server to admit it into the
+restricted namespace. A dry run does not schedule, so none of this needs a GPU:
 
 ```sh
-# from the repo root (full-guide/). Built-in Job → dry-runs cleanly anywhere
-# (no GPU needed to VALIDATE; it just won't SCHEDULE without a GPU node).
+# from the repo root (full-guide/)
 kubectl apply --dry-run=client -f examples/bookstore/ml/gpu/recommender-train-gpu.yaml
-#   job.batch/recommender-train-gpu created (dry run)
 
-# PSA proof: server dry-run into the restricted bookstore-ml ns (PSA runs in
-# admission) — zero PodSecurity violations despite the CUDA-class base image,
-# because the securityContext is restricted-compliant:
+# PSA proof: the server runs admission, Pod Security included, in bookstore-ml
 kubectl apply --dry-run=server -n bookstore-ml \
   -f examples/bookstore/ml/gpu/recommender-train-gpu.yaml
-#   job.batch/recommender-train-gpu created (server dry run)   ← no PSA warning
 ```
 
-On a **real GPU cluster** you would `kubectl apply` it (no `--dry-run`); on
-kind it would stay `Pending` with `0/1 nodes are available: 1 Insufficient
-nvidia.com/gpu` — *which is the correct, honest behaviour*, not a bug. The
-recommender does not need this path to work end-to-end — ch.03 and X3b run it
-CPU-only.
+Captured output. The client dry run:
 
-### 4. Sharing a GPU and seeing utilisation (concepts; GPU cluster)
+<!-- gate: output -->
+```
+serviceaccount/recommender-train-gpu created (dry run)
+job.batch/recommender-train-gpu created (dry run)
+```
+
+The server dry run, with no PodSecurity warning:
+
+<!-- gate: output -->
+```
+serviceaccount/recommender-train-gpu created (server dry run)
+job.batch/recommender-train-gpu created (server dry run)
+```
+
+Applying the Job for real is safe on this cluster, and it shows the scheduler's
+reason. The Pod stays `Pending`, because nothing on the cluster is a GPU node.
+On a GPU cluster the same command schedules the Pod.
+
+```sh
+kubectl apply -f examples/bookstore/ml/gpu/recommender-train-gpu.yaml
+kubectl get pods -n bookstore-ml -l job-name=recommender-train-gpu
+kubectl get events -n bookstore-ml --field-selector reason=FailedScheduling
+```
+
+The Pod and the events, as captured:
+
+<!-- gate: output -->
+```
+NAME                          READY   STATUS    RESTARTS   AGE
+recommender-train-gpu-9gcr9   0/1     Pending   0          0s
+```
+
+<!-- gate: output -->
+```
+REASON             MESSAGE
+FailedScheduling   0/1 nodes are available: 1 node(s) didn't match Pod's node affinity/selector. preemption: 0/1 nodes are available: 1 Preemption is not helpful for scheduling.
+```
+
+The message names the affinity, not the GPU count. This node does not carry
+`nvidia.com/gpu.present=true`, which the GPU Operator sets on GPU nodes, so the
+required nodeAffinity removes it before the GPU count matters. On a GPU node
+with that label, the affinity passes and the GPU count decides. The Pod never
+starts, so no training image is pulled. The recommender does not need this path
+to work end to end: [chapter 03](03-batch-and-gang-scheduling.md) and
+[chapter 04](04-distributed-training.md) run it CPU-only. Remove the Job
+when you are done:
+
+```sh
+kubectl delete -f examples/bookstore/ml/gpu/recommender-train-gpu.yaml
+```
+
+### 5. Sharing a GPU and seeing utilisation (cited, not run here)
 
 You rarely give every small job a whole GPU. **Sharing is opt-in config** on
 the device plugin / GPU Operator:
 
 - **Time-slicing** — a device-plugin config tells the plugin to advertise one
-  physical GPU as N `nvidia.com/gpu` "replicas"; the driver round-robins. No
-  memory isolation, noisy-neighbour — fine for dev/notebooks, *never* for
-  guaranteed-perf or untrusted multi-tenant.
-- **MPS** — CUDA Multi-Process Service runs concurrent contexts spatially;
-  better throughput than slicing, still weak isolation.
-- **MIG** — on A100/H100-class GPUs, hardware-partitions the card into isolated
-  instances advertised as e.g. `nvidia.com/mig-1g.10gb`; **strong** isolation
-  (memory + compute fenced) — the right answer for many isolated
-  jobs/inference on a big GPU.
+  physical GPU as N `nvidia.com/gpu` "replicas"; the driver round-robins. The
+  replicas have **no memory or fault isolation** between them. The
+  [GPU Operator's sharing page](https://docs.nvidia.com/datacenter/cloud-native/gpu-operator/latest/gpu-sharing.html)
+  says so, and it is fine for dev notebooks and bursty, non-critical work. It is
+  *never* the choice for guaranteed performance or for tenants who do not trust
+  each other: a neighbour's crash or memory use reaches you.
+- **MPS** — CUDA Multi-Process Service gives each client its own GPU address
+  space and runs the clients' kernels concurrently. NVIDIA documents only
+  **limited fault containment** for it
+  ([MPS memory protection and error containment](https://docs.nvidia.com/deploy/mps/when-to-use-mps.html)).
+  It suits cooperating workloads from one trust domain, and throughput is its
+  point, not isolation.
+- **MIG** — on supported GPUs, hardware-partitions the card into instances
+  advertised as, for example, `nvidia.com/mig-1g.10gb`. Each instance has
+  dedicated compute and memory. The GPU Operator's sharing page states that MIG
+  gives **memory and fault isolation at the hardware layer**, and the
+  [MIG user guide](https://docs.nvidia.com/datacenter/tesla/mig-user-guide/)
+  describes the instances as isolated. This is the right answer for many
+  isolated jobs or inference on one large GPU.
+
+Exclusive GPUs stay the default. Sharing is a deliberate choice, and the
+threat table's second-tenant row is the reason.
 
 Utilisation is the **cost lever** (idle GPUs burn money — [ch.01](01-why-ml-on-kubernetes.md)
 and [Part 06 ch.06](../06-production-readiness/06-capacity-and-cost.md)). The
@@ -320,7 +536,8 @@ the exact [Part 06 ch.01](../06-production-readiness/01-observability-metrics.md
 pipeline (a `ServiceMonitor`/scrape config), then alert/dashboard on idle:
 
 ```sh
-# DCGM exposes metrics like (representative metric NAMES, from a GPU node):
+# Metric names from the exporter's default counters file (etc/default-counters.csv
+# in NVIDIA/dcgm-exporter); the values come from a GPU node:
 #   DCGM_FI_DEV_GPU_UTIL        GPU utilisation %      (the headline cost signal)
 #   DCGM_FI_DEV_FB_USED         framebuffer (VRAM) MiB used
 #   DCGM_FI_DEV_POWER_USAGE     watts
@@ -356,29 +573,28 @@ kubectl get svc -n gpu-operator -l app=nvidia-dcgm-exporter
   not change this at the core API — it changes *what one advertised unit means*
   (a slice, an MPS context, a MIG instance) at the device-plugin layer.
 - **What the GPU Operator actually reconciles.** It owns one cluster-scoped
-  **`ClusterPolicy`** CR describing the desired stack, and runs controllers
-  that, on nodes labelled as GPU-capable (via **NFD** — the general hardware-
-  feature labelling framework), deploy: a driver container (or validates a
-  host driver), the NVIDIA container toolkit (so the runtime injects the GPU),
-  the device plugin DaemonSet, the DCGM exporter, **GFD** (the NVIDIA
-  DaemonSet that extends NFD and emits the `nvidia.com/gpu.*` labels the
-  chapter's `nodeAffinity` consumes — the `gpu-feature-discovery-…` Pod in
-  step 1's `kubectl get pods -n gpu-operator` output is GFD), and validation
-  Pods. It can also **auto-taint** GPU nodes and manage MIG
-  configuration. Because it is a normal operator, its `ClusterPolicy` is a CRD:
-  a client dry-run of a `ClusterPolicy` before the operator is installed prints
-  `no matches for kind "ClusterPolicy"` — the same documented CRD-intrinsic
-  behaviour as every other operator in this guide (the chapter installs via
-  pinned Helm so the CRD exists).
-- **Taint/affinity is the cost fence, mechanically.** The GPU Operator (or you)
-  applies a `NoSchedule` taint to GPU nodes. From
-  [Part 04 ch.02](../04-scheduling/02-affinity-taints-topology.md): the taint
+  **`ClusterPolicy`** CR that describes the desired stack. Its controllers label
+  each node that **NFD** marks as an NVIDIA PCI device with
+  `nvidia.com/gpu.present=true`, which the operator's
+  [state manager](https://github.com/NVIDIA/gpu-operator/blob/v26.7.2/controllers/state_manager.go)
+  reads from NFD's `pci-10de` labels. On those nodes it deploys the driver (or
+  checks a host driver), the NVIDIA container toolkit, the device plugin, the
+  DCGM exporter, and **GFD**. GFD adds the `nvidia.com/gpu.product`, `count` and
+  `memory` labels that describe the hardware. The `nodeAffinity` in this chapter
+  matches the operator's `gpu.present` label, not a GFD label. The
+  `ClusterPolicy` is a custom resource, so the chart installs its CRD before the
+  policy exists.
+- **Taint/affinity is the cost fence, mechanically.** The fence is a
+  `NoSchedule` taint on the GPU pool, which you apply when you create the pool.
+  From [Part 04 ch.02](../04-scheduling/02-affinity-taints-topology.md): the taint
   makes the scheduler's `TaintToleration` plugin **Filter out** GPU nodes for
-  any Pod lacking the matching toleration — so the stateless Bookstore web Pods
+  any Pod lacking the matching toleration, so the stateless Bookstore web Pods
   *cannot* land there. A GPU Pod adds the toleration (removes the fence) **and**
-  nodeAffinity for a GPU label (the `NodeAffinity` plugin **Scores** GPU nodes
-  up) — permission plus attraction, the exact recipe from that chapter, now
-  protecting real money.
+  a required nodeAffinity for the GPU label. The required term is also a filter:
+  a node without the label is removed, so the Pod can only land on a GPU node. A
+  *preferred* term would score GPU nodes up instead, which is attraction without
+  a fence. The required form plus the toleration is the recipe from that
+  chapter, now protecting real money.
 - **Utilisation, mechanically, is just Part 06 ch.01.** DCGM exporter is a
   normal Prometheus target; `DCGM_FI_DEV_GPU_UTIL` and friends flow through the
   *same* metrics pipeline you built in
@@ -394,54 +610,42 @@ kubectl get svc -n gpu-operator -l app=nvidia-dcgm-exporter
 ## Production notes
 
 > **In production:** put GPU nodes in a **dedicated, tainted node pool** and
-> add the matching toleration + nodeAffinity to *only* GPU workloads — the
-> [Part 04 ch.02](../04-scheduling/02-affinity-taints-topology.md) recipe. On
-> EKS/GKE/AKS create the GPU node group pre-tainted/labelled and let the
-> cluster-autoscaler scale it independently (and scale it to **zero** when
-> idle). A stray web Pod on a GPU host is pure waste; an un-tainted GPU pool
+> add the matching toleration + nodeAffinity to *only* GPU workloads, the
+> [Part 04 ch.02](../04-scheduling/02-affinity-taints-topology.md) recipe. Let
+> the cluster autoscaler scale the pool on its own, down to **zero** when it is
+> idle. A stray web Pod on a GPU host is pure waste, and an untainted GPU pool
 > guarantees that waste.
-
-> **In production:** install the **GPU Operator via a pinned chart** and pin
-> the **driver/CUDA versions** deliberately; treat a GPU-stack upgrade like a
-> node-OS upgrade (test on a canary pool first). A silent driver bump can break
-> every training job on the cluster. Never install GPU components from a
-> `releases/latest/download/<FILE>.yaml` URL.
-
-> **In production:** GPU pods are **not** exempt from PSA. Most CUDA/framework/
-> notebook images run as root; `restricted` rejects them. Run them
-> `runAsNonRoot` + non-root UID + drop ALL caps + `seccompProfile: RuntimeDefault`
-> (the Bookstore GPU Job does exactly this and *still* gets the
-> GPU). `--dry-run=server` into the enforcing namespace *before* shipping —
-> the [Part 05 ch.02](../05-security/02-pod-security.md) discipline applies
-> unchanged. (A small set of GPU-stack DaemonSets — the driver/toolkit — do
-> need elevated privileges; those run in the **operator's own namespace**, not
-> your app namespace, and are the operator's concern, not your workloads'.)
 
 > **In production: utilisation is the GPU cost metric.** Scrape DCGM into
 > Prometheus ([Part 06 ch.01](../06-production-readiness/01-observability-metrics.md))
 > and alert on **allocated-but-idle** GPUs. Choose sharing deliberately: MIG
-> for isolated multi-tenant/inference on big GPUs (real HW isolation),
-> time-slicing only for dev/bursty non-critical work (no isolation, noisy
-> neighbour), MPS for cooperating concurrent small kernels. "We bought GPUs
-> running at 15%" is the dominant ML cost failure — fix it with sharing +
-> scheduling (ch.03), not more GPUs.
+> for isolated multi-tenant or inference work on big GPUs, time-slicing only
+> for dev and bursty non-critical work (no memory or fault isolation), MPS for
+> cooperating concurrent small kernels. "We bought GPUs running at 15%" is the
+> dominant ML cost failure. Fix it with sharing and scheduling
+> ([ch.03](03-batch-and-gang-scheduling.md)), not with more GPUs.
 
-> **In production (managed — EKS/GKE/AKS):** GPU node groups are a few clicks,
-> but the same rules hold — pinned operator/driver, tainted pool, restricted
-> pods, DCGM→Prometheus, scale-to-zero. GKE offers GPU time-sharing/MIG as node
-> config; EKS/AKS use the NVIDIA GPU Operator (or the provider's GPU AMI/device
-> plugin). The Kubernetes API surface (`nvidia.com/gpu`, taints, the operator)
-> is identical to the local model — that portability is the point
-> ([Part 10](../10-cloud-and-managed-kubernetes/01-managed-kubernetes-model.md)).
+> **In production (managed clusters):** GPU node pools on managed Kubernetes
+> use the same API, so the rules above carry over: a pinned operator, a tainted
+> pool, restricted workload Pods, and DCGM scraped into Prometheus. Node-pool
+> settings differ by provider, and this guide does not run them on a cloud, so
+> read the provider's GPU node pool documentation for those. The Kubernetes
+> surface (`nvidia.com/gpu`, taints, the operator) is the same as the local
+> model ([Part 10](../10-cloud-and-managed-kubernetes/01-managed-kubernetes-model.md)).
 
 ## Quick Reference
 
 ```sh
-# Install the GPU Operator (pinned Helm, own ns) — on a GPU cluster
-GPU_OPERATOR_VERSION="v24.9.1"   # pin to a tested release; bump deliberately
-helm repo add nvidia https://nvidia.github.io/gpu-operator && helm repo update
+# Install the GPU Operator: label its namespace privileged, then pinned Helm (GPU cluster)
+kubectl create namespace gpu-operator
+kubectl label namespace gpu-operator \
+  pod-security.kubernetes.io/enforce=privileged \
+  pod-security.kubernetes.io/audit=restricted \
+  pod-security.kubernetes.io/warn=restricted --overwrite
+GPU_OPERATOR_VERSION="v26.7.2"   # pin a tested release; bump deliberately
+helm repo add nvidia https://helm.ngc.nvidia.com/nvidia && helm repo update
 helm install gpu-operator nvidia/gpu-operator -n gpu-operator \
-  --create-namespace --version "$GPU_OPERATOR_VERSION" --wait
+  --version "$GPU_OPERATOR_VERSION" --wait
 
 # See GPUs the cluster knows about / inspect a GPU node
 kubectl get nodes -o custom-columns=\
@@ -460,35 +664,46 @@ Minimal `restricted`-compliant GPU Pod skeleton:
 
 ```yaml
 spec:
+  automountServiceAccountToken: false           # a ServiceAccount of its own
+  serviceAccountName: <own-sa>                  # never default
   tolerations:                                  # PERMISSION past the GPU taint
     - { key: nvidia.com/gpu, operator: Exists, effect: NoSchedule }
-  affinity:                                     # ATTRACTION to GPU nodes
+  affinity:                                     # REQUIRED: GPU nodes only
     nodeAffinity:
       requiredDuringSchedulingIgnoredDuringExecution:
         nodeSelectorTerms:
           - matchExpressions:
               - { key: nvidia.com/gpu.present, operator: In, values: ["true"] }
-  securityContext:                              # NOT exempt from PSA restricted
+  securityContext:                              # NOT exempt from restricted
     runAsNonRoot: true
-    runAsUser: 65532
+    runAsUser: 65532                            # the image's UID, or one you chose
     seccompProfile: { type: RuntimeDefault }
   containers:
     - name: train
-      image: <CUDA-OR-FRAMEWORK-IMAGE>
+      image: <CUDA-OR-FRAMEWORK-IMAGE@sha256:...>   # pinned by digest
       resources:
-        limits:    { nvidia.com/gpu: 1 }        # devices: limit == request
+        limits: { nvidia.com/gpu: 1, memory: 1Gi }  # devices: limit == request
       securityContext:
         allowPrivilegeEscalation: false
+        readOnlyRootFilesystem: true
         capabilities: { drop: ["ALL"] }
+      volumeMounts:
+        - { name: tmp, mountPath: /tmp }
+  volumes:
+    - name: tmp
+      emptyDir: {}
 ```
 
 Checklist:
 
-- [ ] GPU Operator installed via **pinned Helm** in its **own** namespace
+- [ ] The GPU stack is installed via **pinned Helm** into its own `gpu-operator`
+      namespace, labelled `privileged` and registered as the Part 12 exception
 - [ ] GPU nodes **tainted**; only GPU pods carry the toleration + nodeAffinity
 - [ ] GPU requested as `limits: nvidia.com/gpu: N` (limit == request; no overcommit)
-- [ ] GPU pods are **restricted**-compliant (root CUDA image footgun handled)
-- [ ] Sharing chosen deliberately: MIG (isolation) / time-slice (dev) / MPS
+- [ ] GPU workloads are **restricted**-compliant with a pinned image; the root
+      default is refused, not waived
+- [ ] Sharing chosen deliberately: exclusive or MIG for tenants that do not
+      trust each other; time-slicing only for trusted dev work
 - [ ] DCGM → Prometheus; alert on allocated-but-idle GPUs (the cost lever)
 - [ ] GPU-needing steps honestly marked; a CPU path exists (the recommender)
 
@@ -513,21 +728,21 @@ Checklist:
 3. **You enable time-slicing for the dev environment so multiple notebooks share one GPU. A user complains "my training run takes 4x as long." What's happening?**
    <details><summary>Show answer</summary>
 
-   Time-slicing is exactly what it says: it multiplexes CUDA contexts onto one GPU via the NVIDIA driver, round-robining at the kernel level. If 4 workloads share, each gets ~25% of the GPU's compute time — a training run that takes 1 hour on a dedicated GPU takes ~4 hours sharing 4-way. Time-slicing trades throughput for cost. For dev/notebooks where utilization is bursty, that's a win. For production training, you want MIG (hardware isolation, partitioned GPU memory + compute slices) or dedicated GPUs. The user's complaint is the expected behavior — surface it in dashboards so people understand.
+   Time-slicing is exactly what it says: it multiplexes CUDA contexts onto one GPU via the NVIDIA driver, round-robining at the kernel level. If 4 workloads share, each gets ~25% of the GPU's compute time — a training run that takes 1 hour on a dedicated GPU takes ~4 hours sharing 4-way. Time-slicing trades throughput for cost. For dev/notebooks where utilization is bursty, that's a win. Sharing also removes isolation: the replicas have no memory or fault isolation, so one notebook that exhausts GPU memory or faults can take down the training run beside it. For production training, you want MIG (hardware isolation, partitioned GPU memory + compute slices) or dedicated GPUs. The user's complaint is the expected behavior, so surface it in dashboards so people understand.
 
    </details>
 
-4. **A teammate runs a CUDA training pod with `runAsNonRoot: true` and `runAsUser: 1000`. The Pod CrashLoopBackoffs with "permission denied" on `/usr/local/nvidia`. What's wrong, and how do you fix it without abandoning PSA-restricted?**
+4. **A teammate runs a CUDA training Pod in `bookstore-ml` with `runAsNonRoot: true` and `runAsUser: 1000`. The Pod fails with a permission error once the training code touches the GPU. The namespace is `restricted`. What do you check first, and what do you refuse to change?**
    <details><summary>Show answer</summary>
 
-   The stock NVIDIA CUDA image expects to run as root; `/usr/local/nvidia` and the device files have root-owned permissions. With `runAsUser: 1000`, the process can't read the driver files. Fixes (escalating): (a) rebuild the image with `USER 1000` and chown the necessary paths during build; (b) use a CUDA base image that supports non-root (NVIDIA's `cuda:*-devel-ubi8` with explicit uid setup); (c) for the legitimately-root-required niche case, use a *baseline*-namespace exclusively for that workload and harden via fsGroup + SELinux + dedicated node pool. The PSA-restricted GPU footgun is real; the rebuild-with-non-root path is what most teams adopt.
+   Start with the error. It names the file or device the process could not open. The base image declares no user, so its files were written for root, and UID 1000 may not be allowed to read what the training code needs. Fix the workload, not the namespace. Either build the image so that the files the process reads are readable by UID 1000, and set `USER 1000` in the Dockerfile, or choose a UID that the image's files already allow. Then confirm the choice on a GPU node, since the lab cluster has none. Refuse two changes: moving the workload to a `baseline` or `privileged` namespace, and adding privileges to its securityContext. The only privileged namespace in Part 12 is the GPU stack's, and a GPU workload never joins it.
 
    </details>
 
-5. **Hands-on: create a Pod requesting `nvidia.com/gpu: 1` on a 0-GPU cluster, then check `kubectl describe pod`. Now install the GPU Operator (or fake the device plugin) and resubmit. What changes in the events?**
+5. **On a cluster with no GPU, a Pod requests `nvidia.com/gpu: 1` and a required nodeAffinity on `nvidia.com/gpu.present=true`. What does the scheduler report, and what changes once a GPU node exists?**
    <details><summary>What you should see</summary>
 
-   On the 0-GPU cluster: Pod stays `Pending` with event `FailedScheduling: 0/N nodes are available: N Insufficient nvidia.com/gpu`. The scheduler is honest — nothing matches the resource request. Once a GPU node joins (or you install the device plugin on a faked GPU node), the scheduler finds capacity and the Pod schedules. The lesson: GPUs are inert resources — the device plugin advertises them, the scheduler picks based on what's advertised, the kubelet binds the device when the Pod starts. No magic; the same primitive as CPU/memory but countable.
+   The event reports `0/1 nodes are available: 1 node(s) didn't match Pod's node affinity/selector`, as step 4 captured. The scheduler never reaches the GPU count, because the node lacks the `nvidia.com/gpu.present=true` label. Once the GPU Operator labels a GPU node, the affinity passes, and the scheduler checks the request against that node's allocatable `nvidia.com/gpu`. If the count is zero, the message becomes an `Insufficient nvidia.com/gpu` message. The GPU is still an inert, countable resource: the device plugin advertises it, the scheduler fits the count, and the kubelet binds a device when the Pod starts.
 
    </details>
 
@@ -546,3 +761,12 @@ Checklist:
   <https://kubernetes.io/docs/concepts/extend-kubernetes/compute-storage-net/device-plugins/>,
   and scheduling GPUs
   <https://kubernetes.io/docs/tasks/manage-gpus/scheduling-gpus/>.
+- Sources for the claims in this chapter: the GPU Operator's getting-started
+  page, which gives the Pod Security label
+  <https://docs.nvidia.com/datacenter/cloud-native/gpu-operator/latest/getting-started.html>;
+  its GPU sharing page <https://docs.nvidia.com/datacenter/cloud-native/gpu-operator/latest/gpu-sharing.html>;
+  the MIG user guide <https://docs.nvidia.com/datacenter/tesla/mig-user-guide/>;
+  the MPS memory protection page <https://docs.nvidia.com/deploy/mps/when-to-use-mps.html>;
+  the operator's v26.7.2 assets <https://github.com/NVIDIA/gpu-operator/tree/v26.7.2/assets>;
+  and the Pod Security Standards
+  <https://kubernetes.io/docs/concepts/security/pod-security-standards/>.

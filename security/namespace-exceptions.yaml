@@ -158,6 +158,18 @@ exceptions:
       chapter shows the same Pod refused in a restricted namespace.
     upstream: https://kubernetes.io/docs/concepts/security/pod-security-standards/#privileged
     chapter: 08-day-2-operations/03-troubleshooting-playbook.md
+  - namespace: gpu-operator
+    level: privileged
+    reason: >-
+      The NVIDIA GPU Operator's node DaemonSets need host access. The driver and
+      the container toolkit run privileged with hostPID and host root mounts, and
+      the device plugin, DCGM exporter and GPU feature discovery run privileged
+      with hostPath mounts. Node feature discovery mounts hostPath volumes too.
+      Baseline forbids privileged containers and hostPath volumes, so only
+      privileged admits the stack. Workload Pods never join this namespace, and
+      audit and warn stay at restricted.
+    upstream: https://docs.nvidia.com/datacenter/cloud-native/gpu-operator/latest/getting-started.html
+    chapter: 12-kubernetes-for-machine-learning/02-gpus-and-accelerators.md
     expires: 2027-06-30
   - namespace: p05-recon-app
     level: baseline
