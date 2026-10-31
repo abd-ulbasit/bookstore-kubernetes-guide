@@ -12,5 +12,6 @@
 # Remove a line only if the chapter is deleted or renamed.
 
 01-core-workloads/01-pods.md
+01-core-workloads/
 05-security/02-pod-security.md
 07-delivery/03-cicd-pipeline.md

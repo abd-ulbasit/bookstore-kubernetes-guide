@@ -87,6 +87,11 @@ versions follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   repository. The workflow header and the PR body now say what GitHub did with
   the bot-opened PR's `pull_request` runs: created them with no jobs and left
   them at `action_required`.
+- Part 01 Core workloads (01.02 to 01.08) is rewritten security-first on the
+  01.01 baseline, with threats and controls in each chapter and lab evidence
+  checked by the evidence gate. The admission gate judges a registered
+  namespace at its registered level only for the chapter it names, and
+  `01-core-workloads/` joins the enforced list.
 
 ### Fixed
 - Standalone EKS add-ons (kube-proxy, CoreDNS, EBS CSI) now follow
