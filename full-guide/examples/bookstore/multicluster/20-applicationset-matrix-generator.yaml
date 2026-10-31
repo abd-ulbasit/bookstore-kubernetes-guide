@@ -53,14 +53,14 @@ spec:
               selector:
                 matchLabels:
                   bookstore.example.com/fleet: "true"
-          # AXIS 2 — every overlay DIRECTORY in the repo (dev/staging/prod),
-          # enumerated straight from Git. Adding overlays/<x>/ adds an
+          # AXIS 2 — every fleet overlay DIRECTORY in the repo (dev/staging),
+          # enumerated straight from Git. Adding fleet-overlays/<x>/ adds an
           # Application per cluster automatically.
           - git:
               repoURL: https://github.com/your-org/bookstore.git   # PLACEHOLDER — replace your-org
               revision: main
               directories:
-                - path: examples/bookstore/kustomize/overlays/*
+                - path: examples/bookstore/multicluster/fleet-overlays/*
   template:
     metadata:
       # bookstore-<cluster>-<overlay-dir-basename>, unique per matrix cell.
@@ -68,13 +68,13 @@ spec:
       labels:
         app.kubernetes.io/part-of: bookstore
     spec:
-      project: bookstore
+      project: bookstore-fleet           # the fleet AppProject (05-appproject-fleet.yaml)
       source:
         repoURL: https://github.com/your-org/bookstore.git         # PLACEHOLDER — replace your-org
         targetRevision: main
-        path: '{{.path.path}}'             # the real overlay dir from the git axis
+        path: '{{.path.path}}'             # the real fleet overlay dir from the git axis
       destination:
-        server: '{{.server}}'              # the cluster from the clusters axis
+        name: '{{.name}}'                  # the cluster from the clusters axis
         # Per-environment namespace so dev/staging/prod can co-reside on one
         # cluster without colliding. The base ships `bookstore`; for the
         # matrix topology you would parametrize the namespace transformer per
@@ -83,4 +83,4 @@ spec:
       syncPolicy:
         automated: { prune: true, selfHeal: true }
         syncOptions:
-          - CreateNamespace=false          # base owns the PSA ns (Part 07 ch.04)
+          - CreateNamespace=false          # the platform team owns the PSA-labelled namespace

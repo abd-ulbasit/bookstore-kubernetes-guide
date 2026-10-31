@@ -1,0 +1,45 @@
+# Part 11 ch.06: drops the cluster-scoped objects from the Bookstore base
+# for a fleet member. The fleet identity is namespaced (the fleet-deployer
+# Role in the bookstore namespace) and cannot create or patch a Namespace or
+# a PriorityClass, and RBAC cannot narrow a create by object name. The
+# platform team applies 00-namespace.yaml and 35-priorityclasses.yaml from
+# the base with its own identity, before the first sync.
+apiVersion: kustomize.config.k8s.io/v1alpha1
+kind: Component
+patches:
+  - target:
+      kind: Namespace
+      name: bookstore
+    patch: |-
+      $patch: delete
+      apiVersion: v1
+      kind: Namespace
+      metadata:
+        name: bookstore
+  - target:
+      kind: PriorityClass
+      name: bookstore-data
+    patch: |-
+      $patch: delete
+      apiVersion: scheduling.k8s.io/v1
+      kind: PriorityClass
+      metadata:
+        name: bookstore-data
+  - target:
+      kind: PriorityClass
+      name: bookstore-critical
+    patch: |-
+      $patch: delete
+      apiVersion: scheduling.k8s.io/v1
+      kind: PriorityClass
+      metadata:
+        name: bookstore-critical
+  - target:
+      kind: PriorityClass
+      name: bookstore-batch
+    patch: |-
+      $patch: delete
+      apiVersion: scheduling.k8s.io/v1
+      kind: PriorityClass
+      metadata:
+        name: bookstore-batch

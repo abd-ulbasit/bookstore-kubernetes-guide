@@ -1,0 +1,8 @@
+# Part 11 ch.06: the Part 07 dev overlay for a fleet member, with the
+# cluster-scoped objects dropped (see ../../fleet-components/).
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+resources:
+  - ../../../kustomize/overlays/dev
+components:
+  - ../../fleet-components/drop-cluster-scoped

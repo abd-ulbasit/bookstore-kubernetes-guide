@@ -105,4 +105,10 @@ misconfigurations:
     paths:
       - full-guide/13-grand-capstone-bookstore-platform/02-tenancy-and-crossplane-onboarding.md
     statement: "The provider ClusterRole writes NetworkPolicies, which the Composition stamps as each tenant's default-deny policy (chapter 13.02, section 1). KSV-0056 flags write access to networking objects. The grant leaves out services, endpoints, endpointslices and ingresses, and it is cluster-wide because the provider creates the tenant namespaces. The Kubernetes network policy reference: https://kubernetes.io/docs/concepts/services-networking/network-policies/"
+  # The fleet deployer Role in 11.06 writes the Services, NetworkPolicies and
+  # Ingresses that the Bookstore base ships, so a deployer must change them.
+  - id: KSV-0056
+    paths:
+      - full-guide/11-advanced-production-patterns/06-multi-cluster-and-fleet.md
+    statement: "The fleet deployer Role in chapter 11.06 writes the Services, NetworkPolicies and Ingresses that the Bookstore base ships, so the deployer must be able to change them. The Role is bound to one member identity in the bookstore namespace only, and that identity's token lasts 24 hours (S8 in THREAT-MODEL.md). A reviewer checks the rendered overlay in Git before each sync (T3)."
     expired_at: 2027-06-30
