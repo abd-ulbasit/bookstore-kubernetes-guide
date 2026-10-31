@@ -137,3 +137,12 @@ condition = "AND"
 paths = ['''^full-guide/examples/security-lab/evidence/12-03\.txt$''']
 regexTarget = "line"
 regexes = ['''(?m)^\$ kubectl api-resources --api-group=scheduling\.k8s\.io$''']
+
+[[allowlists]]
+description = """The 05.07 transcript prints the command `kubectl api-resources \
+--api-group=wgpolicyk8s.io`, which the generic rule reads as a key."""
+targetRules = ["generic-api-key"]
+condition = "AND"
+paths = ['''^full-guide/examples/security-lab/evidence/05-07\.txt$''']
+regexTarget = "line"
+regexes = ['''(?m)^\$ kubectl api-resources --api-group=wgpolicyk8s\.io$''']

@@ -1108,6 +1108,24 @@ class ReferencedServiceAccountTests(unittest.TestCase):
         self.assertEqual(self._names("kind: Foo\nspec: 3"), set())
 
 
+class ReferencedRuntimeClassTests(unittest.TestCase):
+    """A server dry-run creates nothing, so a named RuntimeClass must already exist."""
+
+    def _names(self, body):
+        docs = [d for d in yaml.safe_load_all(body) if isinstance(d, dict)]
+        return ag.referenced_runtime_classes(docs)
+
+    def test_bare_pod_and_templates_are_read(self):
+        pod = "kind: Pod\nspec: {runtimeClassName: gvisor}"
+        dep = "kind: Deployment\nspec: {template: {spec: {runtimeClassName: kata}}}"
+        cron = "kind: CronJob\nspec: {jobTemplate: {spec: {template: {spec: {runtimeClassName: wasm}}}}}"
+        self.assertEqual(self._names(pod + "\n---\n" + dep + "\n---\n" + cron), {"gvisor", "kata", "wasm"})
+
+    def test_absent_name_and_non_mapping_spec_are_ignored(self):
+        self.assertEqual(self._names("kind: Pod\nspec: {containers: []}"), set())
+        self.assertEqual(self._names("kind: Foo\nspec: 3"), set())
+
+
 class AdmissionCliTests(unittest.TestCase):
     def setUp(self):
         self._tmp = tempfile.TemporaryDirectory()

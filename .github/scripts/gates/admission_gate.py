@@ -317,6 +317,42 @@ def referenced_service_accounts(docs: list[dict]) -> set[str]:
     return names
 
 
+def referenced_runtime_classes(docs: list[dict]) -> set[str]:
+    """Names of the RuntimeClasses a block's Pod specs refer to."""
+    names: set[str] = set()
+    for doc in docs:
+        spec = doc.get("spec")
+        if not isinstance(spec, dict):
+            continue
+        template = spec.get("template") or {}
+        job = (spec.get("jobTemplate") or {}).get("spec") or {}
+        for pod_spec in (spec, template.get("spec") or {}, (job.get("template") or {}).get("spec") or {}):
+            name = pod_spec.get("runtimeClassName") if isinstance(pod_spec, dict) else None
+            if name:
+                names.add(name)
+    return names
+
+
+def ensure_runtime_classes(kubectl: str, names: set[str]) -> None:
+    """Create named RuntimeClasses for the dry run.
+
+    A chapter defines the RuntimeClass in an earlier block, and a server dry-run
+    creates nothing, so a Pod naming it would be refused for a reason that has
+    nothing to do with Pod Security. The handler never runs, because a dry run
+    starts no container, and Pod Security still judges the Pod.
+    """
+    for name in sorted(names):
+        manifest = {
+            "apiVersion": "node.k8s.io/v1",
+            "kind": "RuntimeClass",
+            "metadata": {"name": name},
+            "handler": "runc",
+        }
+        rc, out = kubectl_run(kubectl, ["apply", "-f", "-"], yaml.safe_dump(manifest))
+        if rc != 0:
+            raise ControlError(f"cannot create RuntimeClass {name}: {out.strip()[:300]}")
+
+
 def ensure_service_accounts(kubectl: str, names: set[str], namespace: str = NAMESPACE) -> None:
     """Create named ServiceAccounts in a gate namespace.
 
@@ -340,6 +376,7 @@ def dry_run(kubectl: str, body: str, cluster: Cluster, level: str = RESTRICTED) 
     docs = [d for d in yaml.safe_load_all(body) if isinstance(d, dict)]
     namespace = ensure_namespace(kubectl, cluster, level)
     ensure_service_accounts(kubectl, referenced_service_accounts(docs), namespace)
+    ensure_runtime_classes(kubectl, referenced_runtime_classes(docs))
     payload = yaml.safe_dump_all(retarget(docs, namespace, cluster.scoped), sort_keys=False)
     rc, out = kubectl_run(
         kubectl, ["apply", "--dry-run=server", "--validate=strict", "-f", "-"], payload
