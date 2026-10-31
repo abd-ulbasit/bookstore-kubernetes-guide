@@ -4,8 +4,8 @@
 # TOTAL) and a LimitRange (per-container defaults + min/max). From ch.04 onward
 # every Bookstore workload (catalog, storefront, postgres, jobs, ...) is created
 # in this namespace. The Part 00 / ch.01-02 single-Pod files are kept WITHOUT a
-# namespace on purpose — they are frozen object-model teaching snapshots in
-# `default` and are not migrated.
+# namespace on purpose: they are frozen object-model teaching snapshots, not
+# migrated, and the reader applies them into `bookstore`.
 #
 # This file is numbered 00- so a combined dry-run/apply of the directory
 # creates the Namespace + governance objects before the namespaced workloads.

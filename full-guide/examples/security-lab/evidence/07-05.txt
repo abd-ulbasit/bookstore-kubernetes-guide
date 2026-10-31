@@ -65,3 +65,63 @@ $ kubectl create namespace p07-05-bookstore
 Unable to connect to the server: EOF
 $ kubectl apply --dry-run=server -f catalog-rollout.yaml
 error: error validating "catalog-rollout.yaml": error validating data: failed to download openapi: Get "https://<api-server>/openapi/v2?timeout=32s": EOF; if you choose to ignore these errors, turn validation off with --validate=false
+
+# Steps 1b and 3b were run after the chapter was revised: Argo Rollouts and
+# kube-prometheus-stack were rendered from their OCI digests, the render was scanned
+# with Trivy, and the gate's PromQL was run offline with promtool. The lab cluster
+# was not used for these steps. The promtool binary came from the Prometheus v3.15.1
+# darwin-arm64 release, and its checksum was checked against that release's sha256sums.txt.
+## step 3a: the promtool binary (client side)
+$ shasum -a 256 prometheus-3.15.1.darwin-arm64.tar.gz
+0d4d3d9837d27e4fcd0bd16d115b1b8d6732a4bf3e69107f1190d9ef653ae471  prometheus-3.15.1.darwin-arm64.tar.gz
+$ grep darwin-arm64 sha256sums.txt
+0d4d3d9837d27e4fcd0bd16d115b1b8d6732a4bf3e69107f1190d9ef653ae471  prometheus-3.15.1.darwin-arm64.tar.gz
+$ promtool --version
+promtool, version 3.15.1 (branch: HEAD, revision: bae3eced0a5369e050e83ea73bc381d7c4b1a719)
+## step 1b and step 3b: the digest form, the Trivy scan, and the offline gate test
+$ helm template argo-rollouts oci://ghcr.io/argoproj/argo-helm/argo-rollouts@sha256:09afe23380ec7f804221fb31471e0225cd6328586df2cff4da6093da62aab1ed -n argo-rollouts > review/argo-rollouts/rollouts.yaml
+$ awk '/^kind:/{kind=$2} /^  name:/{print kind, $2}' review/argo-rollouts/rollouts.yaml | sort | uniq
+ClusterRole argo-rollouts
+ClusterRole argo-rollouts-aggregate-to-admin
+ClusterRole argo-rollouts-aggregate-to-edit
+ClusterRole argo-rollouts-aggregate-to-view
+ClusterRoleBinding argo-rollouts
+ConfigMap argo-rollouts-config
+ConfigMap argo-rollouts-notification-configmap
+CustomResourceDefinition analysisruns.argoproj.io
+CustomResourceDefinition analysistemplates.argoproj.io
+CustomResourceDefinition clusteranalysistemplates.argoproj.io
+CustomResourceDefinition experiments.argoproj.io
+CustomResourceDefinition rollouts.argoproj.io
+Deployment argo-rollouts
+ServiceAccount argo-rollouts
+$ trivy config --quiet --severity HIGH,CRITICAL review/argo-rollouts | grep -E '^(Total|Failures)|Tests:'
+Tests: 36 (SUCCESSES: 33, FAILURES: 3)
+Failures: 3 (HIGH: 2, CRITICAL: 1)
+$ helm template kube-prometheus-stack oci://ghcr.io/prometheus-community/charts/kube-prometheus-stack@sha256:737e6f32fa29f7a0a48ef51be34b58686b1c8588e35692814528874d9e7c87de -n monitoring --set alertmanager.enabled=false --set grafana.enabled=false --set kubeStateMetrics.enabled=false --set nodeExporter.enabled=false > review/kps/kps.yaml
+$ grep -E '^kind:' review/kps/kps.yaml | sort | uniq -c
+   3 kind: ClusterRole
+   3 kind: ClusterRoleBinding
+   1 kind: Deployment
+   2 kind: Job
+   1 kind: MutatingWebhookConfiguration
+   1 kind: Prometheus
+  35 kind: PrometheusRule
+   1 kind: Role
+   1 kind: RoleBinding
+   1 kind: Secret
+   7 kind: Service
+   3 kind: ServiceAccount
+   9 kind: ServiceMonitor
+   1 kind: ValidatingWebhookConfiguration
+$ trivy config --quiet --severity HIGH,CRITICAL review/kps | grep -E '^(Total|Failures)|Tests:'
+Tests: 38 (SUCCESSES: 34, FAILURES: 4)
+Failures: 4 (HIGH: 2, CRITICAL: 2)
+$ cd gate && ../prometheus-3.15.1.darwin-arm64/promtool test rules catalog-gate.test.yaml; echo "exit=$?"
+  SUCCESS
+
+exit=0
+$ cd gate && ../prometheus-3.15.1.darwin-arm64/promtool test rules no-floor.test.yaml; echo "exit=$?"
+  SUCCESS
+
+exit=0

@@ -52,7 +52,9 @@ chapter packages the *exact same Bookstore* — every restricted
 [`examples/bookstore/helm/bookstore/`](../examples/bookstore/helm/bookstore/),
 and proves the rendered output is logically equivalent to the raw manifests.
 [ch.02](02-packaging-kustomize.md) does the same with Kustomize and contrasts
-the two; [ch.04](04-gitops-argocd.md) has Argo CD render this chart from Git.
+the two. [ch.04](04-gitops-argocd.md) has Argo CD reconcile the ch.02 overlays
+from Git. Argo CD can also take this chart as an Application source, but this
+guide does not wire that up.
 
 ## Mental model
 
@@ -270,15 +272,17 @@ PrometheusRule, KEDA `ScaledObject`, Gateway, Kyverno `ClusterPolicy`,
 VolumeSnapshot) is behind a value toggle that defaults **off** where the CRD
 is not built into Kubernetes, so a plain render is 100% built-in API kinds.
 
-### 1a. Values that cannot weaken the baseline
+### 1a. Values the schema refuses
 
 Helm merges the chart's values, then each `-f` file, then each `--set`, so any
 of them can change a field. The chart's `values.schema.json` fixes the baseline
 fields in every `securityProfiles` entry: `runAsNonRoot: true`, `runAsUser` of
 at least 1, `allowPrivilegeEscalation: false`, `readOnlyRootFilesystem: true`,
 `capabilities.drop` containing `ALL`, and the `RuntimeDefault` seccomp profile.
-Helm validates the values before it renders, so a weaker value stops the
-command and nothing is produced:
+It also refuses any field it does not list, so `privileged` and
+`capabilities.add` are refused. It pins the namespace's Pod Security level to
+`restricted` and keeps the NetworkPolicy on. Helm validates the values before
+it renders, so a refused value stops the command and nothing is produced:
 
 ```sh
 helm template bookstore examples/bookstore/helm/bookstore -n bookstore \
@@ -290,6 +294,57 @@ helm template bookstore examples/bookstore/helm/bookstore -n bookstore \
 bookstore:
 - at '/securityProfiles/goService/container/allowPrivilegeEscalation': value must be false
 ```
+
+```sh
+helm template bookstore examples/bookstore/helm/bookstore -n bookstore \
+  --set securityProfiles.goService.container.privileged=true | head -n 3
+```
+
+<!-- gate: output -->
+```text
+Error: values don't meet the specifications of the schema(s) in the following chart(s):
+bookstore:
+- at '/securityProfiles/goService/container': additional properties 'privileged' not allowed
+```
+
+```sh
+helm template bookstore examples/bookstore/helm/bookstore -n bookstore \
+  --set 'securityProfiles.goService.container.capabilities.add[0]=SYS_ADMIN' | head -n 3
+```
+
+<!-- gate: output -->
+```text
+Error: values don't meet the specifications of the schema(s) in the following chart(s):
+bookstore:
+- at '/securityProfiles/goService/container/capabilities/add': maxItems: got 1, want 0
+```
+
+```sh
+helm template bookstore examples/bookstore/helm/bookstore -n bookstore \
+  --set namespace.psa.enforce=privileged | head -n 3
+```
+
+<!-- gate: output -->
+```text
+Error: values don't meet the specifications of the schema(s) in the following chart(s):
+bookstore:
+- at '/namespace/psa/enforce': value must be 'restricted'
+```
+
+```sh
+helm template bookstore examples/bookstore/helm/bookstore -n bookstore \
+  --set networkPolicy.enabled=false | head -n 3
+```
+
+<!-- gate: output -->
+```text
+Error: values don't meet the specifications of the schema(s) in the following chart(s):
+bookstore:
+- at '/networkPolicy/enabled': value must be true
+```
+
+The schema is not a complete policy. The Kyverno action is `Audit` on purpose
+(see the toggles below), so the schema does not pin it.
 
 `readOnlyRootFilesystem=false` and `runAsUser=0` fail the same way. A workload
 that needs a writable path gets an `emptyDir` mounted at that path, as the
@@ -338,8 +393,13 @@ error during command execution: no signatures found
 ```
 
 A missing signature is a fact to record, not a pass. The digest pin and the
-render review are then the checks you have. When a publisher does sign, keep
-the verification and name the identity you expect.
+render review are then the checks you have. The regular expression in the
+example accepts a signature from any workflow and any ref under the publisher's
+repository, so it is a first look and not a check. When a publisher does sign,
+pin the full identity with `--certificate-identity` set to the workflow path
+and the ref that the publisher's own documentation names, and keep the
+verification in your review record. This guide does not state that identity,
+because the captured run found no signature to read it from.
 
 Render the chart to a file, count its objects and scan the render. Helm
 renders with the chart's default values here; a real install uses your values.
@@ -401,21 +461,24 @@ see a finished migration rather than one still running. (Drop `--wait` and the
 command returns immediately; the hook Job may still be `Running` — just
 re-check it in a moment.) Helm then prints `NOTES.txt` (rendered): what was
 created, how to reach it, the CRD-toggle reminders, and the demo-Secret
-warning. Watch it converge:
+warning. Watch it converge. The lab run stopped before this step, so the
+comments below are the results to expect, not captured output:
 
 ```sh
 kubectl get pods -n bookstore -w
-# postgres-0 Running; catalog/orders/storefront/payments-worker/redis/rabbitmq Ready
+# Expected: postgres-0 Running; catalog/orders/storefront/payments-worker/redis/rabbitmq Ready
 kubectl get job db-migrate -n bookstore         # the post-install HOOK Job (Completed)
 kubectl logs job/db-migrate -n bookstore        # "migration complete"
 ```
 
-Confirm the namespace really enforces `restricted` and the pods were admitted:
+Confirm the namespace really enforces `restricted` and the pods were admitted.
+Illustrative output (not captured in the lab run): the comments show the
+expected results.
 
 ```sh
 kubectl get ns bookstore -o jsonpath='{.metadata.labels}' | tr ',' '\n' | grep pod-security
-# pod-security.kubernetes.io/enforce:restricted ... (audit + warn too)
-kubectl get pods -n bookstore        # all Running — restricted did NOT reject our pods
+# Expected: pod-security.kubernetes.io/enforce:restricted ... (audit + warn too)
+kubectl get pods -n bookstore        # Expected: all Running, with no admission refusals
 ```
 
 ### 3. Inspect the release (the thing raw `kubectl` never gave us)
@@ -433,7 +496,8 @@ helm history bookstore -n bookstore                # one revision so far
 ```
 
 `helm get manifest` reads the release **Secret**, not the cluster — prove the
-release is stored in-cluster (no Tiller, just a Secret):
+release is stored in-cluster (no Tiller, just a Secret). Illustrative output
+(not captured in the lab run):
 
 ```sh
 kubectl get secret -n bookstore -l owner=helm
@@ -463,22 +527,36 @@ prints only the values you supplied, so with the defaults it shows no password.
 `helm get values bookstore -n bookstore --all` prints every computed value,
 password included. The CLI help reads `-a, --all  dump all (computed) values`.
 
-Prod turns the demo Secret off:
+Prod turns the demo Secrets off:
 
 ```sh
 helm template bookstore examples/bookstore/helm/bookstore -n bookstore \
-  -f examples/bookstore/helm/bookstore/values-prod.yaml | grep -A3 "^kind: Secret" | grep "  name:"
+  -f examples/bookstore/helm/bookstore/values-prod.yaml | grep -c "^kind: Secret"
 ```
 
 <!-- gate: output -->
 ```text
-  name: rabbitmq-conn
+0
 ```
 
-`db-credentials` is gone in prod (`dbCredentials.create: false`). One Secret
-remains: `rabbitmq-conn`, the KEDA scaler's connection string, which still
-carries the stock `guest:guest` demo credentials. The chart has no toggle for
-it yet, so until it has one, create that Secret from outside the chart as well.
+```sh
+helm template bookstore examples/bookstore/helm/bookstore -n bookstore \
+  -f examples/bookstore/helm/bookstore/values-prod.yaml | grep -n "name: rabbitmq-conn"
+```
+
+<!-- gate: output -->
+```text
+1915:      name: rabbitmq-conn
+```
+
+`db-credentials` is gone in prod (`dbCredentials.create: false`), and so is the
+KEDA scaler's `rabbitmq-conn` Secret (`keda.connectionSecret.create: false`).
+The ScaledObject's TriggerAuthentication still names `rabbitmq-conn`, so
+production must supply a Secret of that name out of band, the same way as
+`db-credentials`. The prod render still holds one plain `guest:guest` string,
+the payments-worker's `AMQP_URL` value (`grep -c "guest:guest"` counts it).
+Moving that value into a Secret is the same change, and this chapter does not
+make it.
 
 ### 4. Override values, upgrade, roll back
 
@@ -505,6 +583,10 @@ diff /tmp/cur.yaml /tmp/new.yaml | head -40
 > ```
 >
 > This compares the *live release* to the *proposed* release and reports only real changes.
+
+The comments in the upgrade and rollback blocks of this section give the
+results to expect. The lab run did not reach this section, so none of that
+output is captured.
 
 Apply it as **revision 2**, then change one value via `--set` as **revision
 3** (precedence: `--set` beats `-f` beats chart defaults):
@@ -556,16 +638,21 @@ kubectl label namespace bs-verify \
 helm template bookstore examples/bookstore/helm/bookstore -n bs-verify \
   --set namespace.create=false --set namespace.name=bs-verify \
   | kubectl apply --dry-run=server -n bs-verify -f -
-# every workload: "<OBJ> created (server dry run)" — ZERO PodSecurity violations
+# Expected: every workload reports "<OBJ> created (server dry run)" with no PodSecurity warning (not captured in the lab run)
 
 kubectl delete namespace bs-verify         # leave the cluster as you found it
 ```
 
-Every Deployment/StatefulSet/Job/CronJob is admitted under `enforce:
-restricted` with **no PodSecurity warnings** — because `_helpers.tpl` renders
-the *exact* per-image restricted `securityContext` from Part 05 ch.02 (Go
-services UID 65532 + read-only root FS; storefront UID 101; postgres/rabbitmq
-UID 999 + `fsGroup`, no read-only root FS; redis UID 999 + read-only root FS).
+The lab run did not reach the server dry run, so its admission result is not
+captured here. The render is built so that each Deployment, StatefulSet, Job
+and CronJob should be admitted under `enforce: restricted` with no PodSecurity
+warning, because `_helpers.tpl` renders the per-image restricted
+`securityContext` from Part 05 ch.02 (Go services UID 65532 and a read-only
+root FS; storefront UID 101; postgres and rabbitmq UID 999 with `fsGroup`, a
+read-only root FS and emptyDir mounts for the paths they write outside the
+data volume; redis UID 999 with a read-only root FS). Section 1's schema pins
+the fields that these contexts set. Run the dry run below on your cluster to
+check admission.
 
 ### 6. Toggle a CRD-backed extra — and be honest about operators
 
@@ -591,11 +678,20 @@ raw manifests
 `80-`, `51-`, `70-`, `18-`) already documented: the *templated object is
 schema-correct*, but the **CRD must exist first**. Install the operator with
 **Helm** (never a `releases/latest/download/<PINNED-FILE>.yaml` URL — it 404s
-when a new release ships), then the same toggle applies cleanly:
+when a new release ships), then the same toggle applies cleanly. This guide installs
+the KEDA chart from its HTTP repository, so it pins the tarball by the SHA-256 in
+the repository index. Create and label the namespace first, as section 2
+does for `bookstore`, so the install does not leave it unlabelled. The
+`restricted` label is what the render check in [ch.05](05-progressive-delivery.md)
+uses for the other third-party charts, and the three KEDA Deployments set the
+restricted fields in their render:
 
 ```sh
-helm repo add kedacore https://kedacore.github.io/charts && helm repo update
-helm install keda kedacore/keda --version 2.21.0 -n keda --create-namespace --wait
+kubectl create namespace keda
+kubectl label namespace keda pod-security.kubernetes.io/enforce=restricted
+curl -fsSLO https://kedacore.github.io/charts/keda-2.21.0.tgz
+echo "a7da56bf41a33dad9d2fc82a6fdecee552fff947d80bf1e1dbcf4db0f9e26dee  keda-2.21.0.tgz" | shasum -a 256 -c -
+helm install keda ./keda-2.21.0.tgz -n keda --wait
 helm upgrade bookstore examples/bookstore/helm/bookstore -n bookstore \
   --set namespace.create=false --set keda.enabled=true --wait
 kubectl get scaledobject,hpa -n bookstore     # KEDA created the managed HPA
@@ -742,7 +838,8 @@ parent `values.yaml` keys named after a subchart override its values. A
 are excellent but hide the StatefulSet, the per-image UID/`fsGroup`, and the
 scheduling layer behind *their* values API — which would defeat the entire
 point of Parts 04–05 (you would no longer see *why* postgres runs as UID 999
-with `fsGroup` and no read-only root FS). So the chart ships **in-house
+with `fsGroup`, a read-only root filesystem and emptyDir mounts for the paths it
+writes). So the chart ships **in-house
 templates** for those three; subchart dependency mechanics are taught here
 conceptually. Helm also has a special **`crds/`** directory (plain YAML,
 installed once before templates, never upgraded/deleted by Helm). This chart
@@ -780,9 +877,10 @@ and `helm-diff` (preview an upgrade's three-way diff before applying).
 > **In production: NEVER put real secrets in `values.yaml`.** The
 > `db-credentials` Secret this chart renders is **demo-only** — a Secret is
 > base64, not encryption (the same warning as Part 03 ch.02 / Part 05 ch.04).
-> Set `dbCredentials.create=false` (as `values-prod.yaml` does) and have
-> **External Secrets Operator / Sealed Secrets / Vault** provide a Secret of
-> the same name out of band; enable encryption-at-rest on the apiserver. For
+> Set `dbCredentials.create=false` and `keda.connectionSecret.create=false`
+> (as `values-prod.yaml` does) and have
+> **External Secrets Operator / Sealed Secrets / Vault** provide Secrets of
+> the same names out of band; enable encryption-at-rest on the apiserver. For
 > values files that *do* contain sensitive config, use `helm secrets`
 > (SOPS-backed) so the file is encrypted in Git and decrypted only at
 > install. Secrets in `values.yaml` also end up in the release record, and
@@ -928,7 +1026,7 @@ Checklist:
 6. **A teammate adds `--set securityProfiles.goService.container.allowPrivilegeEscalation=true` to get a sidecar past a startup error. What happens, and what should they do instead?**
    <details><summary>Show answer</summary>
 
-   The render stops before anything is applied: the schema says `value must be false` at that path. The schema covers every `securityProfiles` entry, so no single value can weaken the shared baseline. The right fix is in the workload's image or its command, or a reviewed change to the schema that every profile would also have to satisfy. A flag on the install command is not that review.
+   The render stops before anything is applied: the schema says `value must be false` at that path. The schema covers every `securityProfiles` entry and refuses any field it does not list, so `privileged`, `capabilities.add`, a Pod Security level other than `restricted` and `networkPolicy.enabled=false` are refused too. Values outside those fields, such as the Kyverno action, are not pinned, so a values file can still change them. The right fix is in the workload's image or its command, or a reviewed change to the schema that every profile would also have to satisfy. A flag on the install command is not that review.
 
    </details>
 

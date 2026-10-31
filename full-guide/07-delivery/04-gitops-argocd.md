@@ -240,9 +240,19 @@ kubectl label namespace argocd \
   pod-security.kubernetes.io/enforce=restricted \
   pod-security.kubernetes.io/audit=restricted \
   pod-security.kubernetes.io/warn=restricted
-helm install argocd oci://ghcr.io/argoproj/argo-helm/argo-cd \
-  --version 10.11.6 -n argocd -f argocd-values.yaml --wait
+helm install argocd oci://ghcr.io/argoproj/argo-helm/argo-cd@sha256:90f462a0695121f65a71cd053619f80023b4efef6bc211f750ffcaaa1628b5b6 \
+  -n argocd -f argocd-values.yaml --wait
 ```
+
+The captured run installed by version 10.11.6, and the digest in the output
+below is the one Helm pulled for that version. The command above names that
+digest directly, so the artifact you install is the one you reviewed in the
+section 1b check of [ch.01](01-packaging-helm.md).
+
+The captured output in this chapter came from Helm v4.1.4, the client the lab
+had. [Chapter 01](01-packaging-helm.md) uses Helm v3.22.1. The commands are the
+same, but the two versions word some errors differently, so expect Helm 4
+wording in the output below.
 
 The first attempt failed. The pre-install Job timed out, and the captured
 error is below. The Job's pod was admitted under `restricted`, so the namespace
@@ -270,9 +280,9 @@ argocd-repo-server-59b65b86b9-68wlf   1/1     Running   0               5m12s
 argocd-server-7b4c5bdf58-b426h        1/1     Running   1 (3m20s ago)   5m12s
 ```
 
-The install is pinned by version and by digest. The helm pull printed the
-digest of the chart it fetched, so a reader can compare it with the registry.
-The server restarted once during the install. Read its logs if that happens
+The captured install named the chart by version, and the helm pull printed
+the digest that version resolved to, so a reader can compare it with the
+registry. The server restarted once during the install. Read its logs if that happens
 to you, rather than treating a restart as normal.
 
 ### 2. Read the blast radius before you trust the controller
@@ -280,8 +290,8 @@ to you, rather than treating a restart as normal.
 The render shows what the controller may write. This needs no cluster:
 
 ```sh
-helm template argocd oci://ghcr.io/argoproj/argo-helm/argo-cd \
-  --version 10.11.6 -n argocd -f argocd-values.yaml \
+helm template argocd oci://ghcr.io/argoproj/argo-helm/argo-cd@sha256:90f462a0695121f65a71cd053619f80023b4efef6bc211f750ffcaaa1628b5b6 \
+  -n argocd -f argocd-values.yaml \
   | sed -n '/^kind: ClusterRole$/,/^---$/p' | sed -n '/^rules:/,$p' | head -10
 ```
 
@@ -303,17 +313,20 @@ rules:
 That is the controller's ClusterRole with every verb on every resource. The
 AppProject below does not change it. The AppProject limits what Git may
 ask the controller to write, while this rule limits what a compromised
-controller can do. Narrowing the controller ClusterRole is the next control
-(`controller.clusterRoleRules` in the chart). This chapter does not do it,
-because a rule set that breaks the reconcile loop would need a sync to prove,
-and no sync ran.
+controller can do. The chart can narrow it through `controller.clusterRoleRules`,
+and this chapter leaves that value at its default. A narrower rule set must
+cover every kind the three overlays reconcile, and a set that is too narrow
+stops the reconcile loop. The lab ran no sync, so it cannot show that a
+narrower set works. The wildcard is therefore an accepted risk for this lab
+install only, for the reason just given, until 2027-04-30, when the install is
+reviewed again. It is not accepted for production.
 
 The API server's role is also wide. Its own rules include a wildcard on
 resources, with `get`, `patch` and `delete`:
 
 ```sh
-helm template argocd oci://ghcr.io/argoproj/argo-helm/argo-cd \
-  --version 10.11.6 -n argocd -f argocd-values.yaml \
+helm template argocd oci://ghcr.io/argoproj/argo-helm/argo-cd@sha256:90f462a0695121f65a71cd053619f80023b4efef6bc211f750ffcaaa1628b5b6 \
+  -n argocd -f argocd-values.yaml \
   | awk 'BEGIN{RS="\n---\n"} /\nkind: ClusterRole\n/ && /name: argocd-server\n/' \
   | sed -n '/^rules:/,$p' | head -24
 ```
@@ -452,6 +465,8 @@ The **`bookstore`** project is the tenant. Three choices make it a fence:
   kinds the three overlays render, and no Argo kind. A tenant commit cannot
   create an `Application` or an `AppProject`, and that is what stops a
   tenant from rewriting its own fence.
+  The Argo Rollouts kinds (`Rollout`, `AnalysisTemplate`) are not in this list,
+  and [ch.05](05-progressive-delivery.md) says what adding them would widen.
 
 The **`platform`** project holds the root Application and nothing else. It
 may create Application objects in `argocd`, and it allows no cluster-scoped
@@ -463,14 +478,35 @@ permits it and no deny rule rejects it
 (<https://argo-cd.readthedocs.io/en/stable/user-guide/projects/>). A child
 Application that names a namespace outside `bookstore` is therefore refused.
 The platform project lets the root manage Application objects in `argocd` and
-nothing else. The reader should prove the first case with a probe Application
-that targets `kube-system`. Check that its status reports a destination error
-and that nothing is synced.
+nothing else. The reader should prove the first case with the deliberate
+failure below. It is a probe Application that targets `kube-system`. Apply it,
+then check that its status reports a destination error and that nothing is
+synced:
 
-The lab applied a probe Application in project `bookstore` with destination
-namespace `kube-system`. Its repository was the one the project allows, so only
-the destination was out of scope. Argo CD refused it at validation, before any
-sync:
+```yaml
+# Deliberate failure: the destination is outside the bookstore project.
+# Replace your-org in repoURL. The project allows that repository, so only
+# the destination is refused.
+apiVersion: argoproj.io/v1alpha1
+kind: Application
+metadata:
+  name: probe-kube-system
+  namespace: argocd
+spec:
+  project: bookstore
+  source:
+    repoURL: https://github.com/your-org/bookstore.git   # PLACEHOLDER
+    targetRevision: main
+    path: examples/bookstore/kustomize/overlays/dev
+  destination:
+    server: https://kubernetes.default.svc
+    namespace: kube-system
+```
+
+The lab applied a probe Application with the same project and destination
+namespace. Its file was not kept, and its repository was the one the project
+allows, so only the destination was out of scope. Argo CD refused it at
+validation, before any sync:
 
 <!-- gate: output -->
 
@@ -677,8 +713,8 @@ on its own objects only, and then the deletes finished.
 helm show chart oci://ghcr.io/argoproj/argo-helm/argo-cd --version 10.11.6
 kubectl create namespace argocd
 kubectl label namespace argocd pod-security.kubernetes.io/enforce=restricted
-helm install argocd oci://ghcr.io/argoproj/argo-helm/argo-cd \
-  --version 10.11.6 -n argocd -f argocd-values.yaml --wait
+helm install argocd oci://ghcr.io/argoproj/argo-helm/argo-cd@sha256:90f462a0695121f65a71cd053619f80023b4efef6bc211f750ffcaaa1628b5b6 \
+  -n argocd -f argocd-values.yaml --wait
 
 # Fence, then bootstrap (platform applies both; no tenant credential)
 kubectl apply -n argocd -f examples/bookstore/argocd/00-appproject.yaml
@@ -713,12 +749,12 @@ spec:
 
 Checklist:
 
-- [ ] The chart is pinned by version, and the install is labelled `restricted`
+- [ ] The chart is pinned by digest, and the install is labelled `restricted`
       and confirmed on a live cluster.
 - [ ] `admin.enabled: false`, SSO on, `policy.default` empty, groups mapped to
       roles.
-- [ ] The controller's ClusterRole is known to be wide, and narrowing it is a
-      tracked item.
+- [ ] The controller's ClusterRole is wide. Section 2 records it as an accepted
+      risk for the lab install only, with its expiry.
 - [ ] Two AppProjects: the tenant holds no Argo kinds and an allow-list of
       namespaced kinds; the platform owns the root.
 - [ ] The root's path is protected by review, and the tenant cannot write to it.
@@ -733,7 +769,7 @@ Checklist:
 1. **A developer on the `bookstore-developers` group can sync dev. Name the three policy lines that let that happen, and say which line stops them syncing prod.**
    <details><summary>Show answer</summary>
 
-   The grant is `g, bookstore-developers, role:bookstore-syncer`, which gives the role `role:bookstore-syncer`. That role carries `p, role:bookstore-syncer, applications, sync, bookstore/bookstore-dev, allow`, which permits the sync of dev. Prod is not in any sync line for that role. The absence is the control: `policy.default` is empty, so an action with no matching line is denied.
+   The three lines are the grant `g, bookstore-developers, role:bookstore-syncer`, the read line `p, role:bookstore-syncer, applications, get, bookstore/*, allow` that lets the group see the Applications, and the dev sync line `p, role:bookstore-syncer, applications, sync, bookstore/bookstore-dev, allow`. No line permits a sync of prod: prod is not in any sync line for that role. The absence is the control: `policy.default` is empty, so an action with no matching line is denied.
 
    </details>
 
@@ -761,7 +797,7 @@ Checklist:
 5. **Argo's own ClusterRole grants `*` on `*`. Does the AppProject fence reduce that? Say what each fence limits.**
    <details><summary>Show answer</summary>
 
-   No. The AppProject limits what Git may ask the controller to write: destinations, cluster and namespaced kinds, and which Argo kinds a tenant can create. The ClusterRole limits what a compromised controller can do, and it stays wide here. Narrowing it through `controller.clusterRoleRules` is a separate control, with its own test, and this chapter does not do it.
+   No. The AppProject limits what Git may ask the controller to write: destinations, cluster and namespaced kinds, and which Argo kinds a tenant can create. The ClusterRole limits what a compromised controller can do, and it stays wide here. Narrowing it through `controller.clusterRoleRules` is a separate control, with its own test. Section 2 records the accepted risk and its expiry.
 
    </details>
 

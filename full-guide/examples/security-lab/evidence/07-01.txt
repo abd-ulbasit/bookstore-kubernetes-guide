@@ -143,3 +143,38 @@ $ helm template bookstore examples/bookstore/helm/bookstore -n bookstore -f exam
 1
 $ helm template bookstore examples/bookstore/helm/bookstore -n bookstore | grep -c "^kind: Secret"
 1
+# Step 5 was run after the chart change that adds keda.connectionSecret.create
+# and tightens values.schema.json. The prod render of step 4 above is from the
+# earlier chart: it still rendered the rabbitmq-conn Secret, which step 5 shows is gone.
+## step 5: refusals from the tightened schema, and the KEDA secret toggle (chart renders, no cluster)
+$ helm lint examples/bookstore/helm/bookstore | tail -n 2
+
+1 chart(s) linted, 0 chart(s) failed
+$ helm template bookstore examples/bookstore/helm/bookstore -n bookstore --set securityProfiles.goService.container.privileged=true | head -n 3
+Error: values don't meet the specifications of the schema(s) in the following chart(s):
+bookstore:
+- at '/securityProfiles/goService/container': additional properties 'privileged' not allowed
+
+$ helm template bookstore examples/bookstore/helm/bookstore -n bookstore --set 'securityProfiles.goService.container.capabilities.add[0]=SYS_ADMIN' | head -n 3
+Error: values don't meet the specifications of the schema(s) in the following chart(s):
+bookstore:
+- at '/securityProfiles/goService/container/capabilities/add': maxItems: got 1, want 0
+
+$ helm template bookstore examples/bookstore/helm/bookstore -n bookstore --set namespace.psa.enforce=privileged | head -n 3
+Error: values don't meet the specifications of the schema(s) in the following chart(s):
+bookstore:
+- at '/namespace/psa/enforce': value must be 'restricted'
+
+$ helm template bookstore examples/bookstore/helm/bookstore -n bookstore --set networkPolicy.enabled=false | head -n 3
+Error: values don't meet the specifications of the schema(s) in the following chart(s):
+bookstore:
+- at '/networkPolicy/enabled': value must be true
+
+$ helm template bookstore examples/bookstore/helm/bookstore -n bookstore -f examples/bookstore/helm/bookstore/values-prod.yaml | grep -c '^kind: Secret'
+0
+$ helm template bookstore examples/bookstore/helm/bookstore -n bookstore -f examples/bookstore/helm/bookstore/values-prod.yaml | grep -n 'name: rabbitmq-conn'
+1915:      name: rabbitmq-conn
+$ helm template bookstore examples/bookstore/helm/bookstore -n bookstore -f examples/bookstore/helm/bookstore/values-prod.yaml | grep -c 'guest:guest'
+1
+$ helm template bookstore examples/bookstore/helm/bookstore -n bookstore --set keda.enabled=true --set keda.connectionSecret.create=false | grep -c 'name: rabbitmq-conn'
+1

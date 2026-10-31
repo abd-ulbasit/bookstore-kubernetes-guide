@@ -18,18 +18,22 @@
     "securityProfile": {
       "type": "object",
       "required": ["pod", "container"],
-      "additionalProperties": true,
+      "additionalProperties": false,
       "properties": {
         "pod": {
           "type": "object",
           "required": ["runAsNonRoot", "runAsUser", "seccompProfile"],
-          "additionalProperties": true,
+          "additionalProperties": false,
           "properties": {
             "runAsNonRoot": { "const": true },
             "runAsUser": { "type": "integer", "minimum": 1 },
+            "runAsGroup": { "type": "integer", "minimum": 1 },
+            "fsGroup": { "type": "integer", "minimum": 1 },
+            "fsGroupChangePolicy": { "type": "string", "enum": ["OnRootMismatch", "Always"] },
             "seccompProfile": {
               "type": "object",
               "required": ["type"],
+              "additionalProperties": false,
               "properties": { "type": { "const": "RuntimeDefault" } }
             }
           }
@@ -37,14 +41,18 @@
         "container": {
           "type": "object",
           "required": ["allowPrivilegeEscalation", "readOnlyRootFilesystem", "capabilities"],
-          "additionalProperties": true,
+          "additionalProperties": false,
           "properties": {
             "allowPrivilegeEscalation": { "const": false },
             "readOnlyRootFilesystem": { "const": true },
             "capabilities": {
               "type": "object",
               "required": ["drop"],
-              "properties": { "drop": { "type": "array", "contains": { "const": "ALL" } } }
+              "additionalProperties": false,
+              "properties": {
+                "drop": { "type": "array", "contains": { "const": "ALL" } },
+                "add": { "type": "array", "maxItems": 0 }
+              }
             }
           }
         }
@@ -77,9 +85,9 @@
           "type": "object",
           "additionalProperties": true,
           "properties": {
-            "enforce": { "type": "string", "enum": ["privileged", "baseline", "restricted"] },
-            "audit": { "type": "string", "enum": ["privileged", "baseline", "restricted"] },
-            "warn": { "type": "string", "enum": ["privileged", "baseline", "restricted"] }
+            "enforce": { "const": "restricted" },
+            "audit": { "const": "restricted" },
+            "warn": { "const": "restricted" }
           }
         }
       }
@@ -118,7 +126,7 @@
     "networkPolicy": {
       "type": "object",
       "additionalProperties": true,
-      "properties": { "enabled": { "type": "boolean" } }
+      "properties": { "enabled": { "const": true } }
     },
     "hpa": {
       "type": "object",
@@ -135,7 +143,12 @@
       "properties": {
         "enabled": { "type": "boolean" },
         "minReplicaCount": { "type": "integer", "minimum": 0 },
-        "maxReplicaCount": { "type": "integer", "minimum": 1 }
+        "maxReplicaCount": { "type": "integer", "minimum": 1 },
+        "connectionSecret": {
+          "type": "object",
+          "additionalProperties": true,
+          "properties": { "create": { "type": "boolean" } }
+        }
       }
     },
     "serviceMonitor": {
