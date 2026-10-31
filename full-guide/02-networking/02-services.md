@@ -65,9 +65,9 @@ against the Service itself.
 | Threat | Control taught here | Goes deeper |
 |---|---|---|
 | The Service is reachable from outside the cluster because its type was changed without a decision | `ClusterIP` by default. A `NodePort` or `LoadBalancer` is an exposure decision, taken at the edge ([ch.04](04-ingress.md), [ch.05](05-gateway-api.md)) | [10.04](../10-cloud-and-managed-kubernetes/04-cloud-networking-and-load-balancing.md) |
-| Whoever can create a Service with `spec.externalIPs` intercepts traffic to that IP (CVE-2020-8554, unfixed upstream) | No `externalIPs` field. Upstream deprecated it in v1.36 | 05.07 <!-- link-later: 05.07 --> |
-| A Pod that carries a selector's labels becomes an endpoint, whoever created it. A selector wider than one tier sends one tier's traffic to another tier's Pods | Select on the tier's own `app` label, which only that tier's pod template sets | [05.01](../05-security/01-authn-authz-rbac.md) |
-| Write access to Endpoints or EndpointSlices lets a user send a Service's traffic to locations it could not reach otherwise (CVE-2021-25740, unfixed upstream) | No write access to Endpoints or EndpointSlices outside the controllers. Upstream rules out loopback, link-local and ClusterIP endpoints; other addresses are allowed, so the write is the control point | [05.01](../05-security/01-authn-authz-rbac.md) |
+| Whoever can create a Service with `spec.externalIPs` intercepts traffic to that IP (CVE-2020-8554, unfixed upstream) | No `externalIPs` field. [Upstream deprecated it in v1.36](https://kubernetes.io/blog/2026/05/14/kubernetes-v1-36-deprecation-and-removal-of-service-externalips/) | 05.07 <!-- link-later: 05.07 --> |
+| A Pod that carries a selector's labels becomes an endpoint, whoever created it. A selector wider than one tier sends one tier's traffic to another tier's Pods | Narrow selectors that name the tier's own `app` label. RBAC decides who may create a Pod with those labels | [05.01](../05-security/01-authn-authz-rbac.md) |
+| Write access to Endpoints or EndpointSlices lets a user send a Service's traffic to locations it could not reach otherwise (CVE-2021-25740, unfixed upstream) | No write access to Endpoints or EndpointSlices outside the controllers. [Upstream says](https://kubernetes.io/docs/concepts/services-networking/service/#services-without-selectors) endpoint IPs must not be loopback or link-local, and cannot be another Service's ClusterIP. Other addresses are allowed, so the write is the control point | [05.01](../05-security/01-authn-authz-rbac.md) |
 
 The last two rows are RBAC questions. Who may create a Pod with a label, and
 who may write an endpoint, decide whether a selector can be trusted. Both are
@@ -236,9 +236,19 @@ option. Call it from a client Pod instead. The client carries the baseline,
 and its image is pinned by digest with the tag in a comment, as
 [the baseline](../01-core-workloads/01-pods.md#baseline-image-digest) asks.
 Its process is a `sleep`, and `kubectl exec` runs `curl` inside it. Save this
-block as `client.yaml`:
+block as `client.yaml`. The ServiceAccount is the client's own, so the Pod
+does not run as `default`. It mounts no token, because it makes no API calls.
 
 ```yaml
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: client
+  namespace: bookstore
+  labels:
+    app.kubernetes.io/part-of: bookstore
+automountServiceAccountToken: false
+---
 apiVersion: v1
 kind: Pod
 metadata:
@@ -248,11 +258,12 @@ metadata:
     app: client                       # no Service selects this label
     app.kubernetes.io/part-of: bookstore
 spec:
+  serviceAccountName: client
   automountServiceAccountToken: false
   securityContext:
     runAsNonRoot: true
-    runAsUser: 65532
-    runAsGroup: 65532
+    runAsUser: 100                    # curl_user, the UID the image declares
+    runAsGroup: 101
     seccompProfile:
       type: RuntimeDefault
   containers:
@@ -360,8 +371,9 @@ clusters, as the [kube-proxy modes](#kube-proxy-modes-iptables-vs-nftables-vs-eb
 section below explains, so an upgrade cannot change it. The API's description
 of the field follows. It says the IPs are "not managed by Kubernetes", which
 is why the [threats table](#threats-and-controls) treats the field as a choice
-you make by hand. It does not mention the deprecation. The upstream docs
-record that.
+you make by hand. It does not mention the deprecation. The
+[upstream post of 2026-05-14](https://kubernetes.io/blog/2026/05/14/kubernetes-v1-36-deprecation-and-removal-of-service-externalips/)
+records that.
 
 <!-- gate: output -->
 ```text
@@ -457,9 +469,10 @@ records the choice → reply is un-DNATed transparently. No extra hop.
   managed RDS) a stable in-cluster name.
 - **`spec.externalIPs`**: not a type. Any type can carry a list of IPs that
   the cluster may not own. Traffic that arrives for one of those IPs on the
-  Service port is routed to the Service's endpoints. Upstream deprecated the
-  field in v1.36 and tells users to migrate away from it, toward an external
-  load balancer controller or a Gateway API implementation. The reason is
+  Service port is routed to the Service's endpoints. Upstream
+  [deprecated the field in v1.36](https://kubernetes.io/blog/2026/05/14/kubernetes-v1-36-deprecation-and-removal-of-service-externalips/)
+  and tells users to migrate away from it, toward an external load balancer
+  controller or a Gateway API implementation. The reason is
   CVE-2020-8554: whoever can create a Service with the field can intercept
   traffic to the IP it names.
 
@@ -626,8 +639,9 @@ Checklist:
    `spec.externalIPs` makes the cluster route traffic for that IP and port to
    the Service's endpoints, whether or not the cluster owns the address. Anyone
    who can create a Service with the field can intercept traffic to the IP it
-   names (CVE-2020-8554, unfixed upstream). Upstream deprecated the field in
-   v1.36 and recommends an external load balancer controller or a Gateway API
+   names (CVE-2020-8554, unfixed upstream). Upstream
+   [deprecated the field in v1.36](https://kubernetes.io/blog/2026/05/14/kubernetes-v1-36-deprecation-and-removal-of-service-externalips/)
+   and recommends an external load balancer controller or a Gateway API
    implementation. In this guide that is [ch.05](05-gateway-api.md), and the
    admission rule that refuses the field is 05.07 <!-- link-later: 05.07 -->.
 
@@ -649,3 +663,6 @@ Checklist:
 - The Kubernetes project blog post of 2026-05-26 on unfixed CVEs, for the
   status of CVE-2020-8554 and CVE-2021-25740 and the RBAC mitigation:
   <https://kubernetes.io/blog/2026/05/26/reconciling-unfixed-kubernetes-cves/>.
+- The Kubernetes project blog post of 2026-05-14 on the deprecation of
+  `spec.externalIPs` in v1.36:
+  <https://kubernetes.io/blog/2026/05/14/kubernetes-v1-36-deprecation-and-removal-of-service-externalips/>.

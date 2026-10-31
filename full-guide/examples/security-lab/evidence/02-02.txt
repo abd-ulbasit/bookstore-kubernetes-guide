@@ -39,3 +39,104 @@ DESCRIPTION:
     
 
 
+
+# Appended run: the client step, run again after the setup above. The shared
+# cluster's API timed out during the setup (etcd request timeouts), so the client
+# Pod was never created and the step printed no output. Its manifest, with the
+# client ServiceAccount and UID 100 and GID 101, passed the admission gate's
+# server dry run.
+
+$ kubectl apply -f 00-namespace.yaml
+namespace/p02-02-bookstore created
+resourcequota/bookstore-quota created
+Error from server: error when creating "00-namespace.yaml": etcdserver: request timed out
+
+$ kubectl apply -f 05-serviceaccounts-rbac.yaml
+serviceaccount/catalog-sa created
+serviceaccount/storefront-sa created
+serviceaccount/orders-sa created
+serviceaccount/postgres-sa created
+serviceaccount/redis-sa created
+serviceaccount/rabbitmq-sa created
+serviceaccount/migrate-sa created
+role.rbac.authorization.k8s.io/catalog-config-reader created
+rolebinding.rbac.authorization.k8s.io/catalog-config-reader-binding created
+Error from server: error when creating "05-serviceaccounts-rbac.yaml": etcdserver: request timed out
+
+$ kubectl apply -f 15-catalog-config.yaml
+configmap/catalog-config created
+
+$ kubectl apply -f 16-db-credentials.yaml
+secret/db-credentials created
+
+$ kubectl apply -f 20-postgres-statefulset.yaml
+service/postgres created
+statefulset.apps/postgres created
+
+$ kubectl -n p02-02-bookstore rollout status statefulset/postgres --timeout=180s
+Waiting for statefulset spec update to be observed...
+Waiting for 1 pods to be ready...
+Waiting for 1 pods to be ready...
+error: timed out waiting for the condition
+
+$ kubectl apply -f 21-db-migrate-job.yaml
+job.batch/db-migrate created
+
+$ kubectl -n p02-02-bookstore wait --for=condition=complete job/db-migrate --timeout=180s
+error: timed out waiting for the condition on jobs/db-migrate
+
+$ kubectl apply -f 12-redis.yaml
+deployment.apps/redis created
+
+$ kubectl apply -f 10-catalog-deploy.yaml
+deployment.apps/catalog created
+
+$ kubectl apply -f 40-services.yaml
+service/catalog created
+service/storefront created
+service/orders created
+service/redis created
+service/rabbitmq created
+service/payments-worker created
+
+$ kubectl -n p02-02-bookstore rollout status deploy/catalog --timeout=180s
+Waiting for deployment "catalog" rollout to finish: 0 of 3 updated replicas are available...
+error: timed out waiting for the condition
+
+$ kubectl apply -f client.yaml
+Error from server (Timeout): error when retrieving current configuration of:
+Resource: "/v1, Resource=serviceaccounts", GroupVersionKind: "/v1, Kind=ServiceAccount"
+Name: "client", Namespace: "p02-02-bookstore"
+from server for: "client.yaml": the server was unable to return a response in the time allotted, but may still be processing the request (get serviceaccounts client)
+error when retrieving current configuration of:
+Resource: "/v1, Resource=pods", GroupVersionKind: "/v1, Kind=Pod"
+Name: "client", Namespace: "p02-02-bookstore"
+from server for: "client.yaml": Get "https://<lab-api>/api/v1/namespaces/p02-02-bookstore/pods/client": EOF
+
+$ kubectl wait --for=condition=Ready pod/client -n p02-02-bookstore --timeout=120s
+Unable to connect to the server: EOF
+
+$ kubectl get svc catalog -n p02-02-bookstore -o jsonpath="{.spec.clusterIP}{\"\n\"}"
+Error from server (Forbidden): services "catalog" is forbidden: User "kubernetes-admin" cannot get resource "services" in API group "" in the namespace "p02-02-bookstore": rbac: RBAC: [clusterrole.rbac.authorization.k8s.io "cluster-admin" not found, clusterrole.rbac.authorization.k8s.io "system:discovery" not found, clusterrole.rbac.authorization.k8s.io "system:public-info-viewer" not found, clusterrole.rbac.authorization.k8s.io "system:basic-user" not found]
+
+$ kubectl get pods -n p02-02-bookstore -l app=catalog -o custom-columns=NAME:.metadata.name,IP:.status.podIP
+NAME                      IP
+catalog-6d5cbbd6f-8q52h   10.244.0.63
+catalog-6d5cbbd6f-sgcl2   10.244.0.62
+catalog-6d5cbbd6f-ztbd2   10.244.0.64
+
+$ kubectl exec -n p02-02-bookstore client -- sh -c "for i in 1 2 3 4 5 6; do curl -s http://catalog.p02-02-bookstore.svc.cluster.local/books | head -c 60; echo; done"
+Error from server (NotFound): pods "client" not found
+
+$ kubectl exec -n p02-02-bookstore client -- curl -s http://catalog.p02-02-bookstore.svc.cluster.local/healthz
+Error from server (NotFound): pods "client" not found
+
+$ kubectl get pod client -n p02-02-bookstore -o jsonpath="{.spec.serviceAccountName} {.spec.securityContext.runAsUser}:{.spec.securityContext.runAsGroup}{\"\n\"}"
+Error from server (NotFound): pods "client" not found
+
+$ kubectl exec -n p02-02-bookstore client -- id
+Error from server (NotFound): pods "client" not found
+
+$ kubectl delete namespace p02-02-bookstore --wait=true --timeout=180s
+namespace "p02-02-bookstore" deleted
+error: timed out waiting for the condition on namespaces/p02-02-bookstore

@@ -1,19 +1,20 @@
 # Transcript for 02-networking/04-ingress.md (Part 02 chapter 04).
-# Tier A: kind cluster sf-pilot on the lab host, Kubernetes v1.37.0 node,
+# Tier A: kind cluster on the lab host, Kubernetes v1.37.0 node,
 # kubectl v1.37.2, helm v4.1.4, chart traefik/traefik 42.2.0 (app v3.7.16).
 # Namespace rewrite: the chapter says bookstore and traefik. The run used
 # p02-04-bookstore and p02-traefik, because p02-bookstore was in use by another
 # run on the shared cluster. Manifest copies differ only in namespace names,
-# and the values file copy keeps the chapter's values.
-# Heavy lock: heavy_lock was held by another worker, so this run did NOT install
-# Traefik. Traefik lines are helm dry runs, a server dry run, and the output of
-# a second release being refused. Routing through Traefik was not captured.
+# and the values file copy differs from the chapter only in namespace names and
+# comments.
+# Heavy lock: Parts A and B ran while another worker held heavy_lock, so they did
+# NOT install Traefik. Parts C and D installed Traefik under heavy_lock on this
+# cluster and captured routing through it.
 # The transcript is redacted: another release's namespace name is shown as
 # <other-release-namespace>, and local paths are shown as kubectl and helm.
 #
 # Part A: runs made before a second Traefik release appeared on the cluster.
 $ kubectl config current-context
-kind-sf-pilot
+kind-lab
 
 $ kubectl apply -f tree/00-namespace.yaml
 namespace/p02-04-bookstore created
@@ -342,3 +343,663 @@ Update Complete. ⎈Happy Helming!⎈
 
 $ kubectl apply --dry-run=server -f 00-traefik-namespace.yaml
 namespace/p02-traefik unchanged (server dry run)
+
+# Part C: the first recorded run under heavy_lock, with the fixed values. Its
+# dry run is the pre-install check; the install and checks after it come from
+# the same session. Another release on the shared cluster held the IngressClass
+# name during the second-release check, so that refusal names it as
+# <other-release-namespace>.
+
+$ kubectl config current-context
+kind-lab
+
+$ kubectl apply -f 00-traefik-namespace.yaml
+namespace/p02-traefik created
+
+$ helm install traefik traefik/traefik --version 42.2.0 --namespace p02-traefik -f traefik-values.lab.yaml --dry-run=server 2>&1 | grep -iE "warning|error|^STATUS:"
+STATUS: pending-install
+
+$ helm install traefik traefik/traefik --version 42.2.0 --namespace p02-traefik -f traefik-values.lab.yaml --wait --timeout 5m
+NAME: traefik
+LAST DEPLOYED: Sat Oct 31 05:41:34 2026
+NAMESPACE: p02-traefik
+STATUS: deployed
+REVISION: 1
+DESCRIPTION: Install complete
+TEST SUITE: None
+NOTES:
+traefik with docker.io/traefik:v3.7.16@sha256:1336e85aaed293bd63d005086e0dd013b04078b26aaeb1c18b26a2f928af7e65 has been deployed successfully on p02-traefik namespace!
+
+$ kubectl -n p02-traefik get pods,svc
+NAME                           READY   STATUS    RESTARTS   AGE
+pod/traefik-55fd4fd896-bpbqw   1/1     Running   0          2m43s
+
+NAME              TYPE       CLUSTER-IP      EXTERNAL-IP   PORT(S)                      AGE
+service/traefik   NodePort   10.96.138.183   <none>        80:30080/TCP,443:30443/TCP   2m45s
+
+$ kubectl get ingressclass traefik
+NAME      CONTROLLER                      PARAMETERS   AGE
+traefik   traefik.io/ingress-controller   <none>       2m43s
+
+$ helm template traefik traefik/traefik --version 42.2.0 --namespace p02-traefik -f traefik-values.lab.yaml | grep -iE -- "--providers\.kubernetes(ingress|crd)\.(ingressclass|strictprefix|defaulttls)|type: NodePort"
+  type: NodePort
+        - --providers.kubernetescrd.defaultTLSResourcesNamespace=p02-traefik
+        - --providers.kubernetesingress.ingressClass=traefik
+        - --providers.kubernetesingress.strictPrefixMatching=true
+
+$ kubectl apply -f tree/00-namespace.yaml
+namespace/p02-04-bookstore created
+resourcequota/bookstore-quota created
+limitrange/bookstore-limits created
+
+$ kubectl apply -f tree/05-serviceaccounts-rbac.yaml
+serviceaccount/catalog-sa created
+serviceaccount/storefront-sa created
+serviceaccount/orders-sa created
+serviceaccount/payments-worker-sa created
+serviceaccount/postgres-sa created
+serviceaccount/redis-sa created
+serviceaccount/rabbitmq-sa created
+serviceaccount/migrate-sa created
+role.rbac.authorization.k8s.io/catalog-config-reader created
+rolebinding.rbac.authorization.k8s.io/catalog-config-reader-binding created
+
+$ kubectl apply -f tree/15-catalog-config.yaml
+configmap/catalog-config created
+
+$ kubectl apply -f tree/16-db-credentials.yaml
+secret/db-credentials created
+
+$ kubectl apply -f tree/20-postgres-statefulset.yaml
+service/postgres created
+statefulset.apps/postgres created
+
+$ kubectl -n p02-04-bookstore rollout status statefulset/postgres --timeout=180s
+Waiting for statefulset spec update to be observed...
+Waiting for 1 pods to be ready...
+Waiting for 1 pods to be ready...
+partitioned roll out complete: 1 new pods have been updated...
+
+$ kubectl apply -f tree/21-db-migrate-job.yaml
+job.batch/db-migrate created
+
+$ kubectl -n p02-04-bookstore wait --for=condition=complete job/db-migrate --timeout=180s
+job.batch/db-migrate condition met
+
+$ kubectl apply -f tree/12-redis.yaml
+deployment.apps/redis created
+
+$ kubectl apply -f tree/10-catalog-deploy.yaml
+deployment.apps/catalog created
+
+$ kubectl apply -f tree/11-storefront-deploy.yaml
+deployment.apps/storefront created
+
+$ kubectl apply -f tree/14-orders-deploy.yaml
+deployment.apps/orders created
+
+$ kubectl apply -f tree/40-services.yaml
+service/catalog created
+service/storefront created
+service/orders created
+service/redis created
+service/rabbitmq created
+service/payments-worker created
+
+$ kubectl -n p02-04-bookstore rollout status deploy/catalog --timeout=180s
+Waiting for deployment "catalog" rollout to finish: 0 of 3 updated replicas are available...
+Waiting for deployment "catalog" rollout to finish: 1 of 3 updated replicas are available...
+Waiting for deployment "catalog" rollout to finish: 2 of 3 updated replicas are available...
+deployment "catalog" successfully rolled out
+
+$ mkdir -p tls && cd tls && openssl req -x509 -nodes -days 365 -newkey rsa:2048 -keyout tls.key -out tls.crt -subj "/CN=bookstore.localdev.me" -addext "subjectAltName=DNS:bookstore.localdev.me" >/dev/null 2>&1; openssl x509 -in tls.crt -noout -subject -ext subjectAltName 2>&1 || openssl x509 -in tls.crt -noout -subject -text | grep -A1 "Subject Alternative"
+subject=CN=bookstore.localdev.me
+X509v3 Subject Alternative Name: 
+    DNS:bookstore.localdev.me
+
+$ kubectl -n p02-04-bookstore create secret tls bookstore-tls --cert=tls/tls.crt --key=tls/tls.key
+secret/bookstore-tls created
+
+$ kubectl -n p02-04-bookstore port-forward svc/catalog 18080:80 >/dev/null 2>&1 & echo $! > pf-catalog.pid; kubectl -n p02-04-bookstore port-forward svc/orders 18081:80 >/dev/null 2>&1 & echo $! > pf-orders.pid; kubectl -n p02-04-bookstore port-forward svc/storefront 18082:80 >/dev/null 2>&1 & echo $! > pf-storefront.pid; sleep 2; echo started
+started
+
+$ curl -s --retry 10 --retry-connrefused --retry-delay 1 -w "\n%{http_code}\n" http://localhost:18080/books
+[]
+200
+
+$ curl -s -w "\n%{http_code}\n" http://localhost:18080/api/books
+404 page not found
+
+404
+
+$ curl -s -w "\n%{http_code}\n" -X POST http://localhost:18081/orders -H "Content-Type: application/json" -d "{\"book_id\":1,\"qty\":2}"
+{"order_id":1,"status":"accepted"}
+
+201
+
+$ curl -s -w "\n%{http_code}\n" http://localhost:18082/healthz
+{"status":"ok"}
+200
+
+$ kill $(cat pf-catalog.pid) $(cat pf-orders.pid) $(cat pf-storefront.pid); echo stopped
+stopped
+
+$ kubectl apply --dry-run=server -f 50-ingress-traefik.lab.yaml
+middleware.traefik.io/rewrite-api-prefix created (server dry run)
+ingress.networking.k8s.io/bookstore created (server dry run)
+
+$ kubectl apply -f 50-ingress-traefik.lab.yaml
+middleware.traefik.io/rewrite-api-prefix created
+ingress.networking.k8s.io/bookstore created
+
+$ kubectl get ingress -n p02-04-bookstore
+NAME        CLASS     HOSTS                   ADDRESS   PORTS     AGE
+bookstore   traefik   bookstore.localdev.me             80, 443   1s
+
+$ kubectl describe ingress bookstore -n p02-04-bookstore
+Name:             bookstore
+Labels:           app.kubernetes.io/part-of=bookstore
+Namespace:        p02-04-bookstore
+Address:          
+Ingress Class:    traefik
+Default backend:  <default>
+TLS:
+  bookstore-tls terminates bookstore.localdev.me
+Rules:
+  Host                   Path  Backends
+  ----                   ----  --------
+  bookstore.localdev.me  
+                         /api/books    catalog:80 (10.244.0.172:8080,10.244.0.173:8080,10.244.0.174:8080)
+                         /api/orders   orders:80 (10.244.0.176:8080,10.244.0.178:8080)
+                         /             storefront:80 (10.244.0.177:8080,10.244.0.175:8080)
+Annotations:             traefik.ingress.kubernetes.io/router.middlewares: p02-04-bookstore-rewrite-api-prefix@kubernetescrd
+Events:                  <none>
+
+$ kubectl -n p02-traefik port-forward svc/traefik 8443:443 >/dev/null 2>&1 & echo $! > pf-traefik.pid; sleep 3; echo started
+started
+
+$ kubectl apply -f probe-classless.yaml -f probe-nginx-class.yaml
+ingress.networking.k8s.io/probe-classless created
+ingress.networking.k8s.io/probe-nginx-class created
+
+$ curl -sk -w "\n%{http_code}\n" --resolve classless.localdev.me:8443:127.0.0.1 https://classless.localdev.me:8443/
+404 page not found
+
+404
+
+$ kubectl delete -f probe-classless.yaml -f probe-nginx-class.yaml --ignore-not-found
+ingress.networking.k8s.io "probe-classless" deleted from p02-04-bookstore namespace
+ingress.networking.k8s.io "probe-nginx-class" deleted from p02-04-bookstore namespace
+
+$ cd tls && curl -s --cacert tls.crt --resolve bookstore.localdev.me:8443:127.0.0.1 -w "\n%{http_code}\n" https://bookstore.localdev.me:8443/healthz
+{"status":"ok"}
+200
+
+$ cd tls && curl -s --cacert tls.crt --resolve bookstore.localdev.me:8443:127.0.0.1 -w "\n%{http_code}\n" https://bookstore.localdev.me:8443/api/books
+[]
+200
+
+$ cd tls && curl -s --cacert tls.crt --resolve bookstore.localdev.me:8443:127.0.0.1 -w "\n%{http_code}\n" -X POST https://bookstore.localdev.me:8443/api/orders -H "Content-Type: application/json" -d "{\"book_id\":1,\"qty\":2}"
+{"order_id":2,"status":"accepted"}
+
+201
+
+$ cd tls && curl -s --cacert tls.crt --resolve bookstore.localdev.me:8443:127.0.0.1 -w "\n%{http_code}\n" https://bookstore.localdev.me:8443/api/booksx
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Bookstore</title>
+  <style>
+    body { font-family: system-ui, sans-serif; max-width: 760px; margin: 2rem auto; padding: 0 1rem; }
+    h1 { margin-bottom: 0.25rem; }
+    .muted { color: #666; font-size: 0.9rem; }
+    table { border-collapse: collapse; width: 100%; margin: 1rem 0; }
+    th, td { border: 1px solid #ddd; padding: 0.5rem 0.75rem; text-align: left; }
+    th { background: #f5f5f5; }
+    form { display: flex; gap: 0.5rem; align-items: end; flex-wrap: wrap; margin-top: 1rem; }
+    label { display: flex; flex-direction: column; font-size: 0.85rem; }
+    input { padding: 0.4rem; }
+    button { padding: 0.5rem 1rem; cursor: pointer; }
+    #status { margin-top: 0.75rem; font-weight: 600; }
+  </style>
+</head>
+<body>
+  <h1>Bookstore</h1>
+  <p class="muted">Static storefront. Calls <code>/api/books</code> (catalog) and posts to <code>/api/orders</code> (orders).</p>
+
+  <h2>Catalog</h2>
+  <table id="books">
+    <thead><tr><th>ID</th><th>Title</th><th>Author</th><th>Price</th></tr></thead>
+    <tbody><tr><td colspan="4">Loading…</td></tr></tbody>
+  </table>
+
+  <h2>Place an order</h2>
+  <form id="order-form">
+    <label>Book ID
+      <input type="number" id="book_id" name="book_id" min="1" value="1" required />
+    </label>
+    <label>Quantity
+      <input type="number" id="qty" name="qty" min="1" value="1" required />
+    </label>
+    <button type="submit">Order</button>
+  </form>
+  <div id="status"></div>
+
+  <script>
+    // esc HTML-escapes a value before it is interpolated into innerHTML.
+    // Always escape server/user-controlled data to prevent XSS.
+    function esc(v) {
+      return String(v)
+        .replace(/&/g, '&amp;')
+        .replace(/</g, '&lt;')
+        .replace(/>/g, '&gt;');
+    }
+
+    async function loadBooks() {
+      const tbody = document.querySelector('#books tbody');
+      try {
+        const res = await fetch('/api/books');
+        if (!res.ok) throw new Error('HTTP ' + res.status);
+        const books = await res.json();
+        tbody.innerHTML = books.map(b =>
+          `<tr><td>${esc(b.id)}</td><td>${esc(b.title)}</td><td>${esc(b.author)}</td><td>$${esc(b.price)}</td></tr>`
+        ).join('') || '<tr><td colspan="4">No books</td></tr>';
+      } catch (e) {
+        tbody.innerHTML = `<tr><td colspan="4">Catalog unavailable: ${esc(e.message)}</td></tr>`;
+      }
+    }
+
+    document.getElementById('order-form').addEventListener('submit', async (ev) => {
+      ev.preventDefault();
+      const status = document.getElementById('status');
+      const body = {
+        book_id: Number(document.getElementById('book_id').value),
+        qty: Number(document.getElementById('qty').value),
+      };
+      status.textContent = 'Placing order…';
+      try {
+        const res = await fetch('/api/orders', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify(body),
+        });
+        const data = await res.json().catch(() => ({}));
+        status.textContent = res.ok
+          ? `Order accepted (id ${data.order_id ?? '?'})`
+          : `Order failed: ${data.error ?? res.status}`;
+      } catch (e) {
+        status.textContent = 'Order failed: ' + e.message;
+      }
+    });
+
+    loadBooks();
+  </script>
+</body>
+</html>
+
+200
+
+$ kill $(cat pf-traefik.pid); echo stopped
+stopped
+
+$ kubectl -n p02-traefik port-forward svc/traefik 8080:80 >/dev/null 2>&1 & echo $! > pf-web.pid; sleep 3; cd tls && curl -sI --resolve bookstore.localdev.me:8080:127.0.0.1 http://bookstore.localdev.me:8080/ | head -3; kill $(cat ../pf-web.pid)
+HTTP/1.1 308 Permanent Redirect
+Location: https://bookstore.localdev.me/
+Date: Sat, 31 Oct 2026 00:48:28 GMT
+
+$ kubectl create namespace p02-traefik2 && kubectl label namespace p02-traefik2 pod-security.kubernetes.io/enforce=restricted >/dev/null
+namespace/p02-traefik2 created
+
+$ helm template second traefik/traefik --version 42.2.0 --namespace p02-traefik2 | grep -A2 "kind: IngressClass" | grep "name:"
+
+$ helm install second traefik/traefik --version 42.2.0 --namespace p02-traefik2 --set ingressClass.name=traefik --wait --timeout 90s 2>&1 | tail -3
+Error: INSTALLATION FAILED: unable to continue with install: IngressClass "traefik" in namespace "" exists and cannot be imported into the current release: invalid ownership metadata; annotation validation error: key "meta.helm.sh/release-name" must equal "second": current value is "traefik"; annotation validation error: key "meta.helm.sh/release-namespace" must equal "p02-traefik2": current value is "<other-release-namespace>"
+
+$ kubectl delete namespace p02-traefik2 --wait=true --timeout=120s
+namespace "p02-traefik2" deleted
+
+$ kubectl delete namespace p02-04-bookstore --wait=true --timeout=180s
+namespace "p02-04-bookstore" deleted
+
+$ helm uninstall traefik -n p02-traefik
+release "traefik" uninstalled
+
+$ kubectl delete namespace p02-traefik --wait=true --timeout=120s
+namespace "p02-traefik" deleted
+
+$ kubectl get ingressclass traefik
+Error from server (NotFound): ingressclasses.networking.k8s.io "traefik" not found
+
+# Part D: a second recorded run from the start, with the same values. Its dry run
+# was refused because another release held the IngressClass name at that moment,
+# so the chapter takes its pre-install dry-run output from Part C. The install
+# and every later check come from this run.
+
+$ kubectl config current-context
+kind-lab
+
+$ kubectl apply -f 00-traefik-namespace.yaml
+namespace/p02-traefik created
+
+$ helm install traefik traefik/traefik --version 42.2.0 --namespace p02-traefik -f traefik-values.lab.yaml --dry-run=server 2>&1 | grep -iE "warning|error|^STATUS:"
+Error: INSTALLATION FAILED: unable to continue with install: IngressClass "traefik" in namespace "" exists and cannot be imported into the current release: invalid ownership metadata; annotation validation error: key "meta.helm.sh/release-namespace" must equal "p02-traefik": current value is "<other-release-namespace>"
+
+$ helm install traefik traefik/traefik --version 42.2.0 --namespace p02-traefik -f traefik-values.lab.yaml --wait --timeout 5m
+NAME: traefik
+LAST DEPLOYED: Sat Oct 31 05:52:41 2026
+NAMESPACE: p02-traefik
+STATUS: deployed
+REVISION: 1
+DESCRIPTION: Install complete
+TEST SUITE: None
+NOTES:
+traefik with docker.io/traefik:v3.7.16@sha256:1336e85aaed293bd63d005086e0dd013b04078b26aaeb1c18b26a2f928af7e65 has been deployed successfully on p02-traefik namespace!
+
+$ kubectl -n p02-traefik get pods,svc
+NAME                           READY   STATUS    RESTARTS   AGE
+pod/traefik-55fd4fd896-j4pvj   1/1     Running   0          59s
+
+NAME              TYPE       CLUSTER-IP      EXTERNAL-IP   PORT(S)                      AGE
+service/traefik   NodePort   10.96.169.177   <none>        80:30080/TCP,443:30443/TCP   60s
+
+$ kubectl get ingressclass traefik
+NAME      CONTROLLER                      PARAMETERS   AGE
+traefik   traefik.io/ingress-controller   <none>       59s
+
+$ kubectl get ingressclass traefik -o jsonpath="{.metadata.annotations.meta\.helm\.sh/release-namespace}{\"\n\"}"
+p02-traefik
+
+$ helm template traefik traefik/traefik --version 42.2.0 --namespace p02-traefik -f traefik-values.lab.yaml | grep -iE -- "--providers\.kubernetes(ingress|crd)\.(ingressclass|strictprefix|defaulttls)|type: NodePort"
+  type: NodePort
+        - --providers.kubernetescrd.defaultTLSResourcesNamespace=p02-traefik
+        - --providers.kubernetesingress.ingressClass=traefik
+        - --providers.kubernetesingress.strictPrefixMatching=true
+
+$ kubectl apply -f tree/00-namespace.yaml
+namespace/p02-04-bookstore created
+resourcequota/bookstore-quota created
+limitrange/bookstore-limits created
+
+$ kubectl apply -f tree/05-serviceaccounts-rbac.yaml
+serviceaccount/catalog-sa created
+serviceaccount/storefront-sa created
+serviceaccount/orders-sa created
+serviceaccount/payments-worker-sa created
+serviceaccount/postgres-sa created
+serviceaccount/redis-sa created
+serviceaccount/rabbitmq-sa created
+serviceaccount/migrate-sa created
+role.rbac.authorization.k8s.io/catalog-config-reader created
+rolebinding.rbac.authorization.k8s.io/catalog-config-reader-binding created
+
+$ kubectl apply -f tree/15-catalog-config.yaml
+configmap/catalog-config created
+
+$ kubectl apply -f tree/16-db-credentials.yaml
+secret/db-credentials created
+
+$ kubectl apply -f tree/20-postgres-statefulset.yaml
+service/postgres created
+statefulset.apps/postgres created
+
+$ kubectl -n p02-04-bookstore rollout status statefulset/postgres --timeout=180s
+Waiting for statefulset spec update to be observed...
+Waiting for 1 pods to be ready...
+Waiting for 1 pods to be ready...
+partitioned roll out complete: 1 new pods have been updated...
+
+$ kubectl apply -f tree/21-db-migrate-job.yaml
+job.batch/db-migrate created
+
+$ kubectl -n p02-04-bookstore wait --for=condition=complete job/db-migrate --timeout=180s
+job.batch/db-migrate condition met
+
+$ kubectl apply -f tree/12-redis.yaml
+deployment.apps/redis created
+
+$ kubectl apply -f tree/10-catalog-deploy.yaml
+deployment.apps/catalog created
+
+$ kubectl apply -f tree/11-storefront-deploy.yaml
+deployment.apps/storefront created
+
+$ kubectl apply -f tree/14-orders-deploy.yaml
+deployment.apps/orders created
+
+$ kubectl apply -f tree/40-services.yaml
+service/catalog created
+service/storefront created
+service/orders created
+service/redis created
+service/rabbitmq created
+service/payments-worker created
+
+$ kubectl -n p02-04-bookstore rollout status deploy/catalog --timeout=180s
+Waiting for deployment "catalog" rollout to finish: 0 of 3 updated replicas are available...
+Waiting for deployment "catalog" rollout to finish: 1 of 3 updated replicas are available...
+Waiting for deployment "catalog" rollout to finish: 2 of 3 updated replicas are available...
+deployment "catalog" successfully rolled out
+
+$ mkdir -p tls && cd tls && openssl req -x509 -nodes -days 365 -newkey rsa:2048 -keyout tls.key -out tls.crt -subj "/CN=bookstore.localdev.me" -addext "subjectAltName=DNS:bookstore.localdev.me" >/dev/null 2>&1; openssl x509 -in tls.crt -noout -subject -ext subjectAltName 2>&1 || openssl x509 -in tls.crt -noout -subject -text | grep -A1 "Subject Alternative"
+subject=CN=bookstore.localdev.me
+X509v3 Subject Alternative Name: 
+    DNS:bookstore.localdev.me
+
+$ kubectl -n p02-04-bookstore create secret tls bookstore-tls --cert=tls/tls.crt --key=tls/tls.key
+secret/bookstore-tls created
+
+$ kubectl -n p02-04-bookstore port-forward svc/catalog 18080:80 >/dev/null 2>&1 & echo $! > pf-catalog.pid; kubectl -n p02-04-bookstore port-forward svc/orders 18081:80 >/dev/null 2>&1 & echo $! > pf-orders.pid; kubectl -n p02-04-bookstore port-forward svc/storefront 18082:80 >/dev/null 2>&1 & echo $! > pf-storefront.pid; sleep 2; echo started
+started
+
+$ curl -s --retry 10 --retry-connrefused --retry-delay 1 -w "\n%{http_code}\n" http://localhost:18080/books
+[]
+200
+
+$ curl -s -w "\n%{http_code}\n" http://localhost:18080/api/books
+404 page not found
+
+404
+
+$ curl -s -w "\n%{http_code}\n" -X POST http://localhost:18081/orders -H "Content-Type: application/json" -d "{\"book_id\":1,\"qty\":2}"
+{"order_id":1,"status":"accepted"}
+
+201
+
+$ curl -s -w "\n%{http_code}\n" http://localhost:18082/healthz
+{"status":"ok"}
+200
+
+$ kill $(cat pf-catalog.pid) $(cat pf-orders.pid) $(cat pf-storefront.pid); echo stopped
+stopped
+
+$ kubectl apply --dry-run=server -f 50-ingress-traefik.lab.yaml
+middleware.traefik.io/rewrite-api-prefix created (server dry run)
+ingress.networking.k8s.io/bookstore created (server dry run)
+
+$ kubectl apply -f 50-ingress-traefik.lab.yaml
+middleware.traefik.io/rewrite-api-prefix created
+ingress.networking.k8s.io/bookstore created
+
+$ kubectl get ingress -n p02-04-bookstore
+NAME        CLASS     HOSTS                   ADDRESS   PORTS     AGE
+bookstore   traefik   bookstore.localdev.me             80, 443   1s
+
+$ kubectl describe ingress bookstore -n p02-04-bookstore
+Name:             bookstore
+Labels:           app.kubernetes.io/part-of=bookstore
+Namespace:        p02-04-bookstore
+Address:          
+Ingress Class:    traefik
+Default backend:  <default>
+TLS:
+  bookstore-tls terminates bookstore.localdev.me
+Rules:
+  Host                   Path  Backends
+  ----                   ----  --------
+  bookstore.localdev.me  
+                         /api/books    catalog:80 (10.244.0.206:8080,10.244.0.207:8080,10.244.0.208:8080)
+                         /api/orders   orders:80 (10.244.0.212:8080,10.244.0.211:8080)
+                         /             storefront:80 (10.244.0.210:8080,10.244.0.209:8080)
+Annotations:             traefik.ingress.kubernetes.io/router.middlewares: p02-04-bookstore-rewrite-api-prefix@kubernetescrd
+Events:                  <none>
+
+$ kubectl -n p02-traefik port-forward svc/traefik 8443:443 >/dev/null 2>&1 & echo $! > pf-traefik.pid; sleep 3; echo started
+started
+
+$ kubectl apply -f probe-classless.yaml -f probe-nginx-class.yaml
+ingress.networking.k8s.io/probe-classless created
+ingress.networking.k8s.io/probe-nginx-class created
+
+$ curl -sk -w "\n%{http_code}\n" --resolve classless.localdev.me:8443:127.0.0.1 https://classless.localdev.me:8443/
+404 page not found
+
+404
+
+$ kubectl delete -f probe-classless.yaml -f probe-nginx-class.yaml --ignore-not-found
+ingress.networking.k8s.io "probe-classless" deleted from p02-04-bookstore namespace
+ingress.networking.k8s.io "probe-nginx-class" deleted from p02-04-bookstore namespace
+
+$ cd tls && curl -s --cacert tls.crt --resolve bookstore.localdev.me:8443:127.0.0.1 -w "\n%{http_code}\n" https://bookstore.localdev.me:8443/healthz
+{"status":"ok"}
+200
+
+$ cd tls && curl -s --cacert tls.crt --resolve bookstore.localdev.me:8443:127.0.0.1 -w "\n%{http_code}\n" https://bookstore.localdev.me:8443/api/books
+[]
+200
+
+$ cd tls && curl -s --cacert tls.crt --resolve bookstore.localdev.me:8443:127.0.0.1 -w "\n%{http_code}\n" -X POST https://bookstore.localdev.me:8443/api/orders -H "Content-Type: application/json" -d "{\"book_id\":1,\"qty\":2}"
+{"order_id":2,"status":"accepted"}
+
+201
+
+$ cd tls && curl -s --cacert tls.crt --resolve bookstore.localdev.me:8443:127.0.0.1 -w "\n%{http_code}\n" https://bookstore.localdev.me:8443/api/booksx
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Bookstore</title>
+  <style>
+    body { font-family: system-ui, sans-serif; max-width: 760px; margin: 2rem auto; padding: 0 1rem; }
+    h1 { margin-bottom: 0.25rem; }
+    .muted { color: #666; font-size: 0.9rem; }
+    table { border-collapse: collapse; width: 100%; margin: 1rem 0; }
+    th, td { border: 1px solid #ddd; padding: 0.5rem 0.75rem; text-align: left; }
+    th { background: #f5f5f5; }
+    form { display: flex; gap: 0.5rem; align-items: end; flex-wrap: wrap; margin-top: 1rem; }
+    label { display: flex; flex-direction: column; font-size: 0.85rem; }
+    input { padding: 0.4rem; }
+    button { padding: 0.5rem 1rem; cursor: pointer; }
+    #status { margin-top: 0.75rem; font-weight: 600; }
+  </style>
+</head>
+<body>
+  <h1>Bookstore</h1>
+  <p class="muted">Static storefront. Calls <code>/api/books</code> (catalog) and posts to <code>/api/orders</code> (orders).</p>
+
+  <h2>Catalog</h2>
+  <table id="books">
+    <thead><tr><th>ID</th><th>Title</th><th>Author</th><th>Price</th></tr></thead>
+    <tbody><tr><td colspan="4">Loading…</td></tr></tbody>
+  </table>
+
+  <h2>Place an order</h2>
+  <form id="order-form">
+    <label>Book ID
+      <input type="number" id="book_id" name="book_id" min="1" value="1" required />
+    </label>
+    <label>Quantity
+      <input type="number" id="qty" name="qty" min="1" value="1" required />
+    </label>
+    <button type="submit">Order</button>
+  </form>
+  <div id="status"></div>
+
+  <script>
+    // esc HTML-escapes a value before it is interpolated into innerHTML.
+    // Always escape server/user-controlled data to prevent XSS.
+    function esc(v) {
+      return String(v)
+        .replace(/&/g, '&amp;')
+        .replace(/</g, '&lt;')
+        .replace(/>/g, '&gt;');
+    }
+
+    async function loadBooks() {
+      const tbody = document.querySelector('#books tbody');
+      try {
+        const res = await fetch('/api/books');
+        if (!res.ok) throw new Error('HTTP ' + res.status);
+        const books = await res.json();
+        tbody.innerHTML = books.map(b =>
+          `<tr><td>${esc(b.id)}</td><td>${esc(b.title)}</td><td>${esc(b.author)}</td><td>$${esc(b.price)}</td></tr>`
+        ).join('') || '<tr><td colspan="4">No books</td></tr>';
+      } catch (e) {
+        tbody.innerHTML = `<tr><td colspan="4">Catalog unavailable: ${esc(e.message)}</td></tr>`;
+      }
+    }
+
+    document.getElementById('order-form').addEventListener('submit', async (ev) => {
+      ev.preventDefault();
+      const status = document.getElementById('status');
+      const body = {
+        book_id: Number(document.getElementById('book_id').value),
+        qty: Number(document.getElementById('qty').value),
+      };
+      status.textContent = 'Placing order…';
+      try {
+        const res = await fetch('/api/orders', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify(body),
+        });
+        const data = await res.json().catch(() => ({}));
+        status.textContent = res.ok
+          ? `Order accepted (id ${data.order_id ?? '?'})`
+          : `Order failed: ${data.error ?? res.status}`;
+      } catch (e) {
+        status.textContent = 'Order failed: ' + e.message;
+      }
+    });
+
+    loadBooks();
+  </script>
+</body>
+</html>
+
+200
+
+$ kill $(cat pf-traefik.pid); echo stopped
+stopped
+
+$ kubectl -n p02-traefik port-forward svc/traefik 8080:80 >/dev/null 2>&1 & echo $! > pf-web.pid; sleep 3; cd tls && curl -sI --resolve bookstore.localdev.me:8080:127.0.0.1 http://bookstore.localdev.me:8080/ | head -3; kill $(cat ../pf-web.pid)
+HTTP/1.1 308 Permanent Redirect
+Location: https://bookstore.localdev.me/
+Date: Sat, 31 Oct 2026 00:57:50 GMT
+
+$ kubectl create namespace p02-traefik2 && kubectl label namespace p02-traefik2 pod-security.kubernetes.io/enforce=restricted >/dev/null
+namespace/p02-traefik2 created
+
+$ helm install second traefik/traefik --version 42.2.0 --namespace p02-traefik2 --set ingressClass.name=traefik --wait --timeout 90s 2>&1 | tail -3
+Error: INSTALLATION FAILED: unable to continue with install: IngressClass "traefik" in namespace "" exists and cannot be imported into the current release: invalid ownership metadata; annotation validation error: key "meta.helm.sh/release-name" must equal "second": current value is "traefik"; annotation validation error: key "meta.helm.sh/release-namespace" must equal "p02-traefik2": current value is "p02-traefik"
+
+$ kubectl delete namespace p02-traefik2 --wait=true --timeout=120s
+namespace "p02-traefik2" deleted
+
+$ kubectl delete namespace p02-04-bookstore --wait=true --timeout=180s
+namespace "p02-04-bookstore" deleted
+error: timed out waiting for the condition on namespaces/p02-04-bookstore
+
+$ helm uninstall traefik -n p02-traefik
+release "traefik" uninstalled
+
+$ kubectl delete namespace p02-traefik --wait=true --timeout=120s
+namespace "p02-traefik" deleted
+
+$ kubectl get ingressclass traefik
+Error from server (NotFound): ingressclasses.networking.k8s.io "traefik" not found
+
+$ kubectl get ingressclass traefik -o jsonpath="{.metadata.annotations.meta\.helm\.sh/release-namespace}{\"\n\"}"
+Error from server (NotFound): ingressclasses.networking.k8s.io "traefik" not found

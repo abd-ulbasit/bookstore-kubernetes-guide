@@ -1,5 +1,5 @@
 # Transcript for 02-networking/03-dns-and-discovery.md.
-# Tier A: a kind cluster (sf-pilot), Kubernetes v1.37.0 node, kubectl v1.37.2.
+# Tier A: a kind cluster (lab cluster), Kubernetes v1.37.0 node, kubectl v1.37.2.
 # Captured runs use namespace p02-bookstore, from a scratch copy of the
 # examples/bookstore raw manifests with the namespace rewritten from bookstore
 # to p02-bookstore. The chapter text uses the name bookstore.
@@ -348,3 +348,85 @@ namespace "p02-bookstore" deleted
 $ kubectl -n p02-other delete pod dns-probe --force --grace-period=0
 pod "dns-probe" force deleted from p02-other namespace
 # kubectl get ns then reported p02-other and p02-bookstore gone.
+
+# Appended run: the probe with its own ServiceAccount, for the chapter's
+# step 0 and step 2. The chapter names the other namespace dns-other; this run
+# used p02-other. The lab host's search domains are redacted, as in the parts
+# above. Both namespaces were deleted after the run. Their deletion then stayed
+# Terminating on the shared cluster, because metrics.k8s.io discovery was stale.
+
+$ kubectl apply -f 00-namespace.yaml
+namespace/p02-bookstore created
+resourcequota/bookstore-quota created
+limitrange/bookstore-limits created
+
+$ kubectl apply -f 40-services.yaml
+service/catalog created
+service/storefront created
+service/orders created
+service/redis created
+service/rabbitmq created
+service/payments-worker created
+
+$ kubectl apply -n p02-bookstore -f dns-probe.yaml
+serviceaccount/dns-probe created
+pod/dns-probe created
+
+$ kubectl -n p02-bookstore wait --for=condition=Ready pod/dns-probe --timeout=300s
+pod/dns-probe condition met
+
+$ kubectl -n p02-bookstore get pod dns-probe -o jsonpath="{.spec.serviceAccountName}{\"\n\"}"
+dns-probe
+
+$ kubectl apply -f dns-other.yaml
+namespace/p02-other created
+
+$ kubectl apply -n p02-other -f dns-probe.yaml
+serviceaccount/dns-probe created
+pod/dns-probe created
+
+$ kubectl -n p02-other wait --for=condition=Ready pod/dns-probe --timeout=300s
+pod/dns-probe condition met
+
+$ kubectl -n p02-bookstore exec dns-probe -- cat /etc/resolv.conf
+search p02-bookstore.svc.cluster.local svc.cluster.local cluster.local <host search domains redacted>
+nameserver 10.96.0.10
+options ndots:5
+
+$ kubectl -n p02-bookstore exec dns-probe -- nslookup catalog
+;; Got recursion not available from 10.96.0.10
+Server:		10.96.0.10
+Address:	10.96.0.10#53
+
+Name:	catalog.p02-bookstore.svc.cluster.local
+Address: 10.96.146.195
+;; Got recursion not available from 10.96.0.10
+
+
+$ kubectl -n p02-other exec dns-probe -- nslookup catalog
+;; Got recursion not available from 10.96.0.10
+;; Got recursion not available from 10.96.0.10
+;; Got recursion not available from 10.96.0.10
+;; Got SERVFAIL reply from 10.96.0.10
+Server:		10.96.0.10
+Address:	10.96.0.10#53
+
+** server can't find catalog: SERVFAIL
+
+command terminated with exit code 1
+
+$ kubectl -n p02-other exec dns-probe -- nslookup catalog.p02-bookstore
+;; Got recursion not available from 10.96.0.10
+;; Got recursion not available from 10.96.0.10
+Server:		10.96.0.10
+Address:	10.96.0.10#53
+
+Name:	catalog.p02-bookstore.svc.cluster.local
+Address: 10.96.146.195
+;; Got recursion not available from 10.96.0.10
+
+
+$ kubectl delete namespace p02-other p02-bookstore --wait=true --timeout=180s
+namespace "p02-other" deleted
+namespace "p02-bookstore" deleted
+error: timed out waiting for the condition on namespaces/p02-other

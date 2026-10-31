@@ -177,12 +177,14 @@ kubectl apply -f examples/bookstore/raw-manifests/10-catalog-deploy.yaml
 ```
 
 Catalog reads Postgres when `DB_DSN` is set, and its readiness probe
-(`/readyz`) pings Postgres. Until Postgres runs, catalog shows `0/1` Ready.
-This chapter needs a Running Pod with an IP, so it does not wait for Ready.
+(`/readyz`) pings Postgres and Redis, because `15-catalog-config.yaml` sets
+`REDIS_ADDR`. Until both run, catalog shows `0/1` Ready. This chapter needs a
+Running Pod with an IP, so it does not wait for Ready.
 
 The output below came from a shared lab cluster, where the same files were
 applied under the namespace names `p02-01-bookstore` and `p02-01-netdemo`. The
-output prints no namespace names, so it matches what you will see.
+node name is redacted, and the Pod and node IP addresses differ on your
+cluster, so compare the shape of the output, not its values.
 
 ### 1. Every Pod has its own IP (the flat LAN)
 
@@ -193,9 +195,9 @@ kubectl get pods -n bookstore -l app=catalog -o custom-columns=POD:.metadata.nam
 <!-- gate: output -->
 ```
 POD                        IP             NODE
-catalog-86d7dc55cc-dl2mk   10.244.0.191   sf-pilot-control-plane
-catalog-86d7dc55cc-f6gjb   10.244.0.192   sf-pilot-control-plane
-catalog-86d7dc55cc-m85rq   10.244.0.188   sf-pilot-control-plane
+catalog-86d7dc55cc-dl2mk   10.244.0.191   <node-name>
+catalog-86d7dc55cc-f6gjb   10.244.0.192   <node-name>
+catalog-86d7dc55cc-m85rq   10.244.0.188   <node-name>
 ```
 
 Each catalog Pod has its own address from the Pod CIDR. The node's own address
@@ -208,7 +210,7 @@ kubectl get nodes -o custom-columns='NAME:.metadata.name,IP:.status.addresses[0]
 <!-- gate: output -->
 ```
 NAME                     IP
-sf-pilot-control-plane   172.18.0.2
+<node-name>   172.18.0.2
 ```
 
 ### 2. Pod to Pod across namespaces: the threat, working

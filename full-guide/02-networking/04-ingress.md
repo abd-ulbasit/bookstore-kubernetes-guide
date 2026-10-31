@@ -8,7 +8,7 @@
 
 **Estimated time:** ~15 min read · ~60 min hands-on
 **Prerequisites:** [Part 02 ch.02](02-services.md) — the Services Ingress fronts · [Part 02 ch.03](03-dns-and-discovery.md) — name resolution outside the cluster
-**You'll know after this:** • distinguish the Ingress resource from the Ingress controller · • configure host/path rules and `pathType` (Exact, Prefix, ImplementationSpecific) · • set up TLS termination using a Secret · • understand what `IngressClass` does and why its default stays off · • expose Bookstore through Traefik with one TLS endpoint
+**You'll know after this:** • distinguish the Ingress resource from the Ingress controller · • configure host/path rules and `pathType` (Exact, Prefix, ImplementationSpecific) · • set up TLS termination using a Secret · • understand what `IngressClass` does, and why Traefik is pinned to one class name and the default stays off · • expose Bookstore through Traefik with one TLS endpoint
 
 <!-- tags: networking, ingress, traefik, tls, l7 -->
 
@@ -55,8 +55,8 @@ below belong to that position.
 
 | Threat | Control in this chapter | Goes deeper |
 |---|---|---|
-| A controller flaw reaches Secrets. IngressNightmare (CVE-2025-1974, CVSS 9.8) needed only pod-network access to reach Secrets that ingress-nginx could read cluster-wide by default ([Kubernetes blog](https://kubernetes.io/blog/2025/03/24/ingress-nginx-cve-2025-1974/)). | One maintained controller, Traefik, installed from a pinned chart and image digest. Its watch list limits the namespaces it routes. | [Part 05 ch.03](../05-security/03-supply-chain.md): scanning and provenance |
-| Plaintext at the edge, or a certificate that does not match the host. | HTTP redirects to HTTPS at the entrypoint. The TLS Secret sits in the app namespace with a SAN for the host. | [Part 02 ch.05](05-gateway-api.md): listeners. In-cluster TLS: <!-- link-later: 11.04 --> 11.04 |
+| A controller flaw reaches Secrets. IngressNightmare (CVE-2025-1974, CVSS 9.8) needed only pod-network access to reach Secrets that ingress-nginx could read cluster-wide by default ([Kubernetes blog](https://kubernetes.io/blog/2025/03/24/ingress-nginx-cve-2025-1974/)). | One maintained controller, Traefik, installed from a pinned chart and image digest. Its Ingress and CRD watch lists name only `bookstore`, and only Ingresses that name the `traefik` class are routed. The ClusterRole still reads every Secret cluster-wide: the watch lists narrow what is routed, not what the token may read. That residual read is the price of the cluster-scoped install, since the chart does not allow the IngressClass with `rbac.namespaced`. | [Part 05 ch.03](../05-security/03-supply-chain.md): scanning and provenance |
+| Plaintext at the edge, or a certificate that does not match the host. | HTTP redirects to HTTPS at the entrypoint. The TLS Secret sits in the app namespace with a SAN for the host. | [Part 02 ch.05](05-gateway-api.md): listeners. In-cluster TLS: [Part 11 ch.04](../11-advanced-production-patterns/04-service-mesh.md) |
 | Routing set by controller-specific annotations. | `Prefix` paths only. The one rewrite is a typed Middleware with an explicit regex, not a free-form annotation. | [Part 02 ch.05](05-gateway-api.md): typed filters |
 | A weakly labelled controller namespace. | The `traefik` namespace is labelled `restricted`, the same level as the bookstore. | [Part 05 ch.02](../05-security/02-pod-security.md) |
 
@@ -212,11 +212,17 @@ image:
 ingressClass:
   enabled: true
   name: traefik
-  isDefaultClass: false        # classless Ingresses are not adopted
+  isDefaultClass: false        # classless Ingresses are not adopted by default
 providers:
   kubernetesIngress:
-    namespaces:                # the only namespaces Traefik routes
+    ingressClass: traefik      # only Ingresses that name this class are routed
+    namespaces:                # the Ingress watch list
       - bookstore
+    strictPrefixMatching: true # /api/books does not match /api/booksx
+  kubernetesCRD:
+    namespaces:                # the IngressRoute, Middleware and TLS watch list
+      - bookstore
+    defaultTLSResourcesNamespace: traefik
 ports:
   web:
     nodePort: 30080            # matches the kind mapping in step 1
@@ -229,7 +235,8 @@ ports:
   websecure:
     nodePort: 30443
 service:
-  type: NodePort
+  spec:
+    type: NodePort             # the chart's Service spec; `service.type` is ignored
 resources:                     # the baseline's requests and memory limit
   requests:
     cpu: 100m
@@ -243,12 +250,21 @@ Each setting answers a threat from the table above:
 - **Image.** A pinned digest means the Pod runs the bytes you reviewed. The
   digest is the value Kubernetes verifies, so the tag is a label only. This
   is the [baseline's image rule](../01-core-workloads/01-pods.md#baseline-image-digest).
-- **IngressClass.** `isDefaultClass: false` stops Traefik from adopting an
-  Ingress that names no class. The chart's default is `true`. Every Ingress
-  in this guide names `traefik` explicitly.
-- **Watch list.** The chart's own comment says an empty list means Traefik
-  watches all namespaces. Add a namespace here before an Ingress in it is
-  routed.
+- **IngressClass.** Two settings keep a classless Ingress out. The
+  `ingressClass: traefik` setting makes Traefik route only Ingresses whose
+  class is `traefik`. Without it, the provider processes Ingresses that have
+  no class, or an empty annotation, or the value `traefik`, as the chart's
+  comment says. `isDefaultClass: false` stops the IngressClass from becoming
+  the cluster default. The chart's default is `true`. Every Ingress in this
+  guide names `traefik` explicitly, and step 6 shows a classless Ingress left
+  unrouted.
+- **Watch lists.** An empty list means Traefik watches all namespaces. The
+  `kubernetesIngress` list scopes Ingresses, and the `kubernetesCRD` list
+  scopes IngressRoute, Middleware and TLS objects. The chart's default for the
+  CRD provider is `enabled: true`, so this list is what stops a Middleware in
+  another namespace from being served. `defaultTLSResourcesNamespace` limits
+  which namespace may define the default TLS store. It needs Traefik v3.7.11 or
+  later.
 - **Redirect.** The `web` entrypoint answers HTTP with a redirect to the
   `websecure` entrypoint, so no request is served in cleartext
   ([Traefik entrypoint docs](https://doc.traefik.io/traefik/reference/install-configuration/entrypoints/#configuration-example)).
@@ -281,21 +297,77 @@ kubectl -n traefik get pods,svc
 kubectl get ingressclass traefik
 ```
 
+<!-- gate: output -->
+```text
+NAME                           READY   STATUS    RESTARTS   AGE
+pod/traefik-55fd4fd896-j4pvj   1/1     Running   0          59s
+
+NAME              TYPE       CLUSTER-IP      EXTERNAL-IP   PORT(S)                      AGE
+service/traefik   NodePort   10.96.169.177   <none>        80:30080/TCP,443:30443/TCP   60s
+```
+
+The Service is `NodePort`, with the node ports that step 1 maps to localhost.
+The IngressClass is registered under the name the Ingresses will name:
+
+<!-- gate: output -->
+```text
+NAME      CONTROLLER                      PARAMETERS   AGE
+traefik   traefik.io/ingress-controller   <none>       59s
+```
+
+Check the two routing settings in the rendered manifest. `helm template` shows
+the arguments the controller runs with, before anything is installed:
+
+```sh
+helm template traefik traefik/traefik --version 42.2.0 -n traefik -f traefik-values.yaml \
+  | grep -iE -- "--providers\.kubernetes(ingress|crd)\.(ingressclass|strictprefix|defaulttls)|type: NodePort"
+```
+
+<!-- gate: output -->
+```text
+  type: NodePort
+# ...
+        - --providers.kubernetesingress.ingressClass=traefik
+        - --providers.kubernetesingress.strictPrefixMatching=true
+```
+
 The Pod mounts a ServiceAccount token because Traefik must call the API to
 watch Ingresses, Services, EndpointSlices and Secrets. It is the chart's own
 `traefik` ServiceAccount, so the token belongs to the controller alone, which
 is the baseline's rule for a workload that calls the API.
 
 The chart's default grants that ServiceAccount `get`, `list` and `watch` on
-Secrets in every namespace, through a ClusterRole. The watch list narrows
-which Ingresses Traefik routes. It does not narrow what the token may read.
-The chart offers `rbac.namespaced: true` to use Roles instead, but its own
-comment says the IngressClass cannot be used with namespaced RBAC, so this
-chapter keeps the cluster-scoped install.
+Secrets in every namespace, through a ClusterRole. The watch lists narrow
+which Ingresses and CRD objects Traefik routes. They do not narrow what the
+token may read, so a flaw in Traefik can read every Secret in the cluster.
+That is the residual exposure of this install. The chart offers
+`rbac.namespaced: true` with `rbac.secretResourceNames` to narrow Secret reads
+to named Secrets, but its comments say the IngressClass cannot be used with
+namespaced RBAC, and resource names do not apply to cluster-scoped list and
+watch rules. This chapter keeps the cluster-scoped install and accepts the
+residual read.
 
-Only one Traefik release fits on a cluster. The IngressClass and the CRDs are
-cluster-scoped, and a second release of the chart fails at install because
-Helm refuses to take over the first release's IngressClass.
+Two releases collide when they set the same IngressClass name. The IngressClass
+is cluster-scoped, and this chapter sets its name to `traefik`. A second
+release that sets the same name is refused at install. With the release above
+still installed, create a second namespace with the same labels and install a
+second release into it, setting the name:
+
+```sh
+kubectl create namespace p02-traefik2
+helm install second traefik/traefik --version 42.2.0 --namespace p02-traefik2 \
+  --set ingressClass.name=traefik --wait --timeout 90s
+```
+
+<!-- gate: output -->
+```text
+Error: INSTALLATION FAILED: unable to continue with install: IngressClass "traefik" in namespace "" exists and cannot be imported into the current release: invalid ownership metadata; annotation validation error: key "meta.helm.sh/release-name" must equal "second": current value is "traefik"; annotation validation error: key "meta.helm.sh/release-namespace" must equal "p02-traefik2": current value is "p02-traefik"
+```
+
+The lab names are `p02-` prefixed, so the namespace in the message is the
+lab's. The message names the release that owns the class.
+
+To run a second release, give it its own `ingressClass.name`.
 
 ### 3. The Bookstore workloads
 
@@ -481,8 +553,11 @@ spec:
 ```
 
 The regex matches only `/api/books` and `/api/orders`, so `/` and `/healthz`
-reach the storefront unchanged. `Prefix` matches whole path segments, so
-`/api/books` matches `/api/books/3` but not `/api/booksx`. One Middleware
+reach the storefront unchanged. `Prefix` matches whole path segments, as the
+Kubernetes Ingress spec defines it, so `/api/books` matches `/api/books/3` but
+not `/api/booksx`. Traefik follows that rule only with
+`strictPrefixMatching: true` in the step 2 values, which the chart leaves
+`false`. Step 7 shows the request that the setting is for. One Middleware
 serves both API routes because the annotation sits on the Ingress and the
 regex touches only the two API paths.
 
@@ -514,34 +589,160 @@ kubectl get ingress -n bookstore
 kubectl describe ingress bookstore -n bookstore
 ```
 
-### 7. Route traffic through the one endpoint
-
-On a kind cluster with the step 1 mappings, localhost is the edge. Use
-`--cacert` so curl trusts the self-signed certificate for this host. The `-k`
-flag would skip the check instead.
-
-```sh
-curl --cacert tls.crt https://bookstore.localdev.me/healthz            # storefront via "/"
-curl --cacert tls.crt https://bookstore.localdev.me/api/books          # catalog /books (rewritten)
-curl --cacert tls.crt -X POST https://bookstore.localdev.me/api/orders \
-  -H 'Content-Type: application/json' -d '{"book_id":1,"qty":2}'      # orders /orders
-curl -sI http://bookstore.localdev.me/                                 # plain HTTP is redirected
+<!-- gate: output -->
+```text
+NAME        CLASS     HOSTS                   ADDRESS   PORTS     AGE
+bookstore   traefik   bookstore.localdev.me             80, 443   1s
 ```
 
-The first three requests reach the same backends as step 5. The last one
-gets a redirect to the HTTPS URL, not the storefront.
+The class is `traefik`, and the host and the TLS ports match the Ingress. The
+`ADDRESS` column is empty on this cluster. The Service is a NodePort, so it has
+no load balancer address to show.
 
-### 8. kind without port mappings: the port-forward alternative
+### 7. Route traffic through the one endpoint
 
-If `localhost` does not reach Traefik, forward to its Service and send the
-hostname with `--resolve`. The name stays in the TLS handshake, so the
-certificate check still runs.
+This lab cluster has no port mappings, so the requests below go through a
+port-forward to the Traefik Service. Step 8 gives the form for a cluster with
+the step 1 mappings. Run the curl commands from the directory that holds
+`tls.crt`. The `--resolve` flag sends the hostname to 127.0.0.1, so the TLS
+handshake still checks the certificate for `bookstore.localdev.me`.
 
 ```sh
 kubectl -n traefik port-forward svc/traefik 8443:443 &
-curl --cacert tls.crt --resolve bookstore.localdev.me:8443:127.0.0.1 \
-  https://bookstore.localdev.me:8443/api/books
+```
+
+Before the Bookstore requests, two probe Ingresses test the class setting. Save
+the first as `probe-classless.yaml`. It has no class. Save the second as
+`probe-nginx-class.yaml`. It names the class `nginx`, which this cluster does not
+have. Each routes `/` on `classless.localdev.me` to the storefront, if Traefik
+adopts it.
+
+```yaml
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: probe-classless
+  namespace: bookstore
+spec:
+  rules:
+    - host: classless.localdev.me
+      http:
+        paths:
+          - path: /
+            pathType: Prefix
+            backend:
+              service:
+                name: storefront
+                port:
+                  number: 80
+```
+
+```yaml
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: probe-nginx-class
+  namespace: bookstore
+spec:
+  ingressClassName: nginx
+  rules:
+    - host: classless.localdev.me
+      http:
+        paths:
+          - path: /
+            pathType: Prefix
+            backend:
+              service:
+                name: storefront
+                port:
+                  number: 80
+```
+
+```sh
+kubectl apply -f probe-classless.yaml -f probe-nginx-class.yaml
+curl -sk -w "\n%{http_code}\n" --resolve classless.localdev.me:8443:127.0.0.1 https://classless.localdev.me:8443/
+kubectl delete -f probe-classless.yaml -f probe-nginx-class.yaml
+```
+
+<!-- gate: output -->
+```text
+404 page not found
+404
+```
+
+Neither probe was adopted. The 404 is Traefik's own, not the storefront's
+page, so no router matched the request. The Bookstore Ingress, which names
+`traefik`, is adopted, and the requests below reach its backends:
+
+```sh
+curl -s --cacert tls.crt --resolve bookstore.localdev.me:8443:127.0.0.1 -w "\n%{http_code}\n" https://bookstore.localdev.me:8443/healthz
+curl -s --cacert tls.crt --resolve bookstore.localdev.me:8443:127.0.0.1 -w "\n%{http_code}\n" https://bookstore.localdev.me:8443/api/books
+curl -s --cacert tls.crt --resolve bookstore.localdev.me:8443:127.0.0.1 -w "\n%{http_code}\n" -X POST https://bookstore.localdev.me:8443/api/orders -H "Content-Type: application/json" -d '{"book_id":1,"qty":2}'
+```
+
+<!-- gate: output -->
+```text
+{"status":"ok"}
+200
+```
+
+<!-- gate: output -->
+```text
+[]
+200
+```
+
+<!-- gate: output -->
+```text
+{"order_id":2,"status":"accepted"}
+201
+```
+
+The first two requests reach the storefront and the catalog, as in step 5.
+The order ID is 2 because step 5 already wrote order 1.
+
+Now the request that the strict prefix rule is for. `/api/booksx` is not a
+catalog path, so it must not reach the catalog:
+
+```sh
+curl -s --cacert tls.crt --resolve bookstore.localdev.me:8443:127.0.0.1 -w "\n%{http_code}\n" https://bookstore.localdev.me:8443/api/booksx
+```
+
+<!-- gate: output -->
+```text
+<!DOCTYPE html>
+# ...
+  <title>Bookstore</title>
+# ...
+200
+```
+
+It reaches the storefront, which answers `200` with its own page, and not the
+catalog. The `/` rule took it, because `strictPrefixMatching` keeps `/api/books`
+from matching it.
+
+```sh
 kill %1
+```
+
+### 8. Localhost with the step 1 mappings
+
+With the mappings from step 1, `localhost` is the edge, and no port-forward is
+needed. The same requests go to `https://bookstore.localdev.me/...` on port
+443, with `--cacert tls.crt` and no `--resolve`. Plain HTTP on port 80 is
+redirected to HTTPS, as the lab run showed through a port-forward to the web
+entrypoint:
+
+```sh
+kubectl -n traefik port-forward svc/traefik 8080:80 &
+curl -sI --resolve bookstore.localdev.me:8080:127.0.0.1 http://bookstore.localdev.me:8080/ | head -3
+kill %1
+```
+
+<!-- gate: output -->
+```text
+HTTP/1.1 308 Permanent Redirect
+Location: https://bookstore.localdev.me/
 ```
 
 > **Lineage note.** `50-ingress-traefik.yaml` is the Bookstore's external edge
@@ -574,10 +775,15 @@ A cluster can run several controllers. **IngressClass** (a cluster-scoped
 object created by the controller install) names a controller; an Ingress
 selects one via `spec.ingressClassName: traefik`. An Ingress with **no class**
 is handled only if a controller is marked the **default**
-(`ingressclass.kubernetes.io/is-default-class: "true"`), else it's **ignored**
-— another classic "Ingress does nothing". The Kubernetes docs say a default
-class should be defined if `ingressClassName` is omitted. This chapter keeps
-the default off, so every Ingress names its class. (The deprecated
+(`ingressclass.kubernetes.io/is-default-class: "true"`). Otherwise the Ingress
+is **ignored**, which is another classic "Ingress does nothing" symptom. The
+Kubernetes docs say a default class should be defined if `ingressClassName` is
+omitted. Traefik adds a check of its own. Its `providers.kubernetesIngress.ingressClass`
+setting makes the controller route only Ingresses that name the class. Without
+that setting, the chart's comment says Traefik also processes Ingresses with no
+class, whether or not a default exists. This chapter sets both, so the default
+stays off and a classless Ingress stays unrouted, and step 7 shows the 404.
+Every Ingress names its class. (The deprecated
 `kubernetes.io/ingress.class` annotation predates IngressClass; on every
 supported version (this guide: **v1.37**) use `ingressClassName`.)
 
@@ -711,8 +917,13 @@ spec:
 Checklist:
 
 - [ ] One ingress **controller** is installed, its **IngressClass** is
-  referenced, and `isDefaultClass` is `false`
-- [ ] The controller watches only the namespaces it routes
+  referenced, `providers.kubernetesIngress.ingressClass` names that class,
+  and `isDefaultClass` is `false`
+- [ ] The Ingress and CRD watch lists name only the namespaces the controller
+  routes, and `defaultTLSResourcesNamespace` names the one namespace that may
+  define the default TLS store
+- [ ] The controller's ClusterRole still reads every Secret cluster-wide.
+  This residual exposure is accepted in this chapter (see step 2)
 - [ ] TLS Secret exists with a **SAN matching the host** (cert-manager in prod), and HTTP redirects to HTTPS
 - [ ] Paths use portable **`Prefix`/`Exact`**; any rewrite is a typed Middleware
 - [ ] The controller's namespace is `restricted`, and its image is pinned by digest
@@ -731,10 +942,10 @@ Checklist:
 
    </details>
 
-2. **A teammate sets `isDefaultClass` to `true` on the Traefik IngressClass, which is the chart's default, and then creates an Ingress in `bookstore` with no `ingressClassName`. What happens, and why does this chapter keep the default off?**
+2. **A teammate removes `providers.kubernetesIngress.ingressClass` from the values and sets `isDefaultClass` to `true`. They then create an Ingress in `bookstore` with no `ingressClassName`. Does Traefik route it, and why does this chapter set both values?**
    <details><summary>Show answer</summary>
 
-   The classless Ingress is adopted by the default class, so Traefik starts routing it without anyone choosing the controller for it. A routing change then reaches the edge without a reviewer naming the controller. With the default off, an Ingress that names no class is ignored, and each route must name `traefik` on purpose. The watch list limits this to the namespaces Traefik routes, so the default still matters in every namespace on that list (see §IngressClass and step 2).
+   Yes. Without the named class, the provider processes an Ingress with no class, so the controller routes a route that nobody assigned to it. With `isDefaultClass: true`, the IngressClass also becomes the cluster default, so every classless Ingress in the cluster falls to Traefik, including ones created later. The chapter sets both: `ingressClass: traefik` keeps classless Ingresses out of the routing, and `isDefaultClass: false` keeps the class from becoming the default. Step 6 shows a classless Ingress left unrouted, with a 404 from Traefik and no backend answering. The watch lists still limit which namespaces are routed (see §IngressClass and step 2).
 
    </details>
 
