@@ -712,7 +712,7 @@ separate effect.)
   other's counts. Kubernetes also applies **cluster-level default constraints**
   (`maxSkew: 3` over hostname and `maxSkew: 5` over zone, both
   `ScheduleAnyway`) to Pods that declare none, via the scheduler's
-  `PodTopologySpread` plugin defaults — a gentle built-in spreading even when
+  `PodTopologySpread` plugin defaults: a gentle built-in spreading even when
   you specify nothing.
 - **How they combine, in pipeline terms.** All of these are scheduler
   *plugins* from [ch.01](01-scheduler-and-nodes.md): `NodeAffinity`,
@@ -854,7 +854,7 @@ Checklist:
 2. **You set `requiredDuringSchedulingIgnoredDuringExecution` node affinity on a Deployment, then later remove the matching label from the node. The running Pods stay there. Walk through the suffix's literal meaning.**
    <details><summary>Show answer</summary>
 
-   `…DuringScheduling` = the rule is applied when the scheduler places the Pod. `IgnoredDuringExecution` = once running, label changes are ignored for that Pod — it is not evicted. The only mechanism that *does* evict running Pods on a node-side change is a `NoExecute` taint, which is why that effect exists separately. There is no `RequiredDuringExecution` for affinity (see §6. Watch IgnoredDuringExecution actually mean what it says).
+   `…DuringScheduling` = the rule is applied when the scheduler places the Pod. `IgnoredDuringExecution` = once running, label changes are ignored for that Pod; it is not evicted. The only mechanism that *does* evict running Pods on a node-side change is a `NoExecute` taint, which is why that effect exists separately. There is no `RequiredDuringExecution` for affinity (see §6. Watch IgnoredDuringExecution actually mean what it says).
 
    </details>
 

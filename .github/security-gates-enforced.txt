@@ -16,6 +16,7 @@
 01-core-workloads/
 02-networking/
 03-config-and-storage/
+04-scheduling/
 05-security/02-pod-security.md
 06-production-readiness/
 07-delivery/03-cicd-pipeline.md
