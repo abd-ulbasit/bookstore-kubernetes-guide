@@ -1,6 +1,8 @@
 #!/usr/bin/env bash
 # Lab 12.08, MLflow step: the tracker with basic authentication. Shows a 401
-# without credentials and a 200 with the generated admin credentials.
+# without credentials, a 200 with the generated admin credentials and a 403 for
+# a Host header outside --allowed-hosts, all from the allowed namespace, and a
+# timeout from a namespace outside the allow-list.
 #
 # Run this ONLY against a kind cluster you own, from the guide's full-guide/
 # directory, after the other 12-08 steps. Its output is appended to the
@@ -43,7 +45,7 @@ echo "## step 12: the MLflow tracker with basic authentication"
 show "kubectl create namespace $ML (stands in for bookstore-ml) and $ST (outside the allow-list)"
 "$K" create namespace "$ML" 2>&1
 "$K" create namespace "$ST" 2>&1
-show "python: write the manifest with the lab namespace names (the Namespace object, the policy's namespace and the allowed namespace)"
+show "python: write the manifest with the lab namespace names (the Namespace object, the policy's namespace, the allowed namespace and the Service host names in --allowed-hosts)"
 python3 - "$MANI" "$WORK/mlflow.yaml" "$NS" "$ML" <<'PY'
 import sys, yaml
 src, dst, ns, ml = sys.argv[1:5]
@@ -56,6 +58,8 @@ for d in docs:
     text = yaml.safe_dump(d, sort_keys=False)
     if "bookstore-ml" in text:
         text = text.replace("bookstore-ml", ml)
+    if "mlflow.mlflow.svc" in text:
+        text = text.replace("mlflow.mlflow.svc", "mlflow." + ns + ".svc")
     d.clear(); d.update(yaml.safe_load(text))
 with open(dst, "w", encoding="utf-8") as fh:
     yaml.safe_dump_all(docs, fh, sort_keys=False)
@@ -81,14 +85,17 @@ show "kubectl rollout status deployment/mlflow -n $NS --timeout=300s"
 
 cat > "$WORK/probe.py" <<'PY'
 import base64, json, os, time, urllib.error, urllib.request
-url = os.environ["MLFLOW_URL"] + "/api/2.0/mlflow/experiments/search?max_results=10"
+base = os.environ["MLFLOW_URL"]
+url = base + "/api/2.0/mlflow/experiments/search?max_results=10"
 tries = int(os.environ.get("PROBE_TRIES", "45"))
 user = os.environ.get("MLFLOW_USER")
 password = os.environ.get("MLFLOW_PASSWORD")
 
 
-def call(with_login):
-    req = urllib.request.Request(url)
+def call(target, with_login=False, host=None):
+    req = urllib.request.Request(target)
+    if host:
+        req.add_header("Host", host)
     if with_login:
         token = base64.b64encode(f"{user}:{password}".encode()).decode()
         req.add_header("Authorization", "Basic " + token)
@@ -102,18 +109,23 @@ def call(with_login):
 last = None
 for _ in range(tries):
     try:
-        code, _body = call(False)
+        # The tracker needs a while to start. /health answers without a login
+        # and without the Host check, and any answer means it is up.
+        call(base + "/health")
+        code, _body = call(url)
         print("experiments/search without credentials: HTTP", code)
         if user:
-            code, body = call(True)
+            code, body = call(url, with_login=True)
             if code == 200:
                 names = [e["name"] for e in json.loads(body).get("experiments", [])]
                 print("experiments/search with the admin login: HTTP", code, "experiments:", names)
             else:
                 print("experiments/search with the admin login: HTTP", code, body[:100].decode())
+            code, body = call(url, host="other.example.com")
+            print("experiments/search with another Host header: HTTP", code, body[:100].decode())
         break
-    except urllib.error.URLError as e:
-        last = e.reason
+    except OSError as e:
+        last = getattr(e, "reason", e)
         time.sleep(2)
 else:
     print("experiments/search without credentials: failed:", type(last).__name__, str(last)[:60])
@@ -170,8 +182,8 @@ EOF2
   "$K" exec -i -n "$PNS" "$POD" -- python -I - < "$WORK/probe.py" 2>&1
 done
 
-show "kubectl logs deployment/mlflow -n $NS (the access lines: user, request, status; client address, time and agent cut)"
-"$K" logs deployment/mlflow -n "$NS" 2>&1 | grep -E 'HTTP/1.1" [0-9]+ ' | sed -E 's/^[0-9.]+ - ([^ ]+) \[[^]]*\] ("[^"]*" [0-9]+) .*/\1 \2/'
+show "kubectl logs deployment/mlflow -n $NS (the access lines for the search requests: request and status; time and client address cut)"
+"$K" logs deployment/mlflow -n "$NS" 2>&1 | grep -E 'HTTP/1.1" [0-9]+ ' | grep -v ' /health ' | sed -E 's/^[^"]* - ("[^"]*" [0-9]+).*/\1/'
 
 echo
 echo "## step 13: cleanup of the MLflow step"

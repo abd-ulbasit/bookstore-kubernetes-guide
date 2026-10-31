@@ -18,13 +18,25 @@
 # What did not work the first time: the first run printed a local temporary
 # directory in the quota denial line. The script now runs from its own work
 # directory, and this transcript is the second run.
-# Steps 12 and 13 were recorded in a later run of
-# examples/security-lab/labs/12-08-mlflow.sh with LAB_PREFIX=p12-finish, so
-# their namespaces are p12-finish-mlflow, p12-finish-ml and p12-finish-store.
-# The first recording of step 12 answered every request with 500: MLflow 3.3.2
-# starts uvicorn unless a server option is given, and uvicorn cannot serve the
-# Flask basic-auth app. The Deployment now passes --gunicorn-opts, and this is
-# the recording of the fixed run. The image is bookstore/mlflow-auth:dev.
+# Steps 12 and 13 were recorded again on 2026-10-31 by running
+# examples/security-lab/labs/12-08-mlflow.sh with LAB_PREFIX=p12-cve, so their
+# namespaces are p12-cve-mlflow, p12-cve-ml and p12-cve-store. The image is
+# bookstore/mlflow-auth:dev, now built from python:3.14-slim with MLflow 3.17.2
+# and every package pinned; an earlier recording of this step used the upstream
+# 3.3.2 image. That recording answered every request with 500 until the
+# Deployment passed --gunicorn-opts. On 3.17.2 the flag is not needed.
+# Two things changed instead, and runs before this recording showed both. With
+# the 3.3.2 arguments, a request through the Service name was refused with 403
+# (Invalid Host header) until --allowed-hosts named the Service. And with that
+# fixed, the Pod was OOMKilled at 1 GiB with two workers and once at 1.5 GiB
+# with one worker, because 3.17.2 starts a job runner next to the workers; with
+# MLFLOW_SERVER_ENABLE_JOB_EXECUTION=false two workers measured 0.65 GiB.
+# The access log is uvicorn's now. It names the request and the status, not the
+# user, and it lists the refused requests as well as the allowed one.
+# Steps 0 to 5 were recorded before the tracker image changed. Step 0 reads the
+# digest of the upstream 3.3.2 image, which the tracker image no longer builds
+# on, and step 4 sends an earlier copy of the tracker manifest to the server as
+# a dry run. Step 12 is the recording of the manifest in the tree.
 $ kubectl version --client
 Client Version: v1.37.2
 $ helm version --short
@@ -84,42 +96,45 @@ namespace "p12-08-ml" deleted
 namespace "p12-08-mlflow" deleted
 
 ## step 12: the MLflow tracker with basic authentication
-$ kubectl create namespace p12-finish-ml (stands in for bookstore-ml) and p12-finish-store (outside the allow-list)
-namespace/p12-finish-ml created
-namespace/p12-finish-store created
-$ python: write the manifest with the lab namespace names (the Namespace object, the policy's namespace and the allowed namespace)
+$ kubectl create namespace p12-cve-ml (stands in for bookstore-ml) and p12-cve-store (outside the allow-list)
+namespace/p12-cve-ml created
+namespace/p12-cve-store created
+$ python: write the manifest with the lab namespace names (the Namespace object, the policy's namespace, the allowed namespace and the Service host names in --allowed-hosts)
 wrote 7 documents
 $ kubectl apply -f mlflow.yaml (the namespace, the policies, the Service and the Deployment)
-namespace/p12-finish-mlflow created
+namespace/p12-cve-mlflow created
 serviceaccount/mlflow created
 networkpolicy.networking.k8s.io/default-deny created
-networkpolicy.networking.k8s.io/allow-p12-finish-ml created
+networkpolicy.networking.k8s.io/allow-p12-cve-ml created
 networkpolicy.networking.k8s.io/allow-tracker-egress created
 service/mlflow created
 deployment.apps/mlflow created
-$ kubectl create secret generic mlflow-auth -n p12-finish-mlflow (basic_auth.ini, backend-store-uri and the Flask key, generated; none printed)
+$ kubectl create secret generic mlflow-auth -n p12-cve-mlflow (basic_auth.ini, backend-store-uri and the Flask key, generated; none printed)
 secret/mlflow-auth created
-$ kubectl create secret generic mlflow-client -n p12-finish-ml (the admin login the caller uses; generated, not printed)
+$ kubectl create secret generic mlflow-client -n p12-cve-ml (the admin login the caller uses; generated, not printed)
 secret/mlflow-client created
-$ kubectl rollout status deployment/mlflow -n p12-finish-mlflow --timeout=300s
+$ kubectl rollout status deployment/mlflow -n p12-cve-mlflow --timeout=300s
 Waiting for deployment "mlflow" rollout to finish: 0 of 1 updated replicas are available...
 deployment "mlflow" successfully rolled out
-$ kubectl apply -f caller.yaml (in p12-finish-ml)
+$ kubectl apply -f caller.yaml (in p12-cve-ml)
 pod/caller created
 pod/caller condition met
-$ kubectl exec -i -n p12-finish-ml caller -- python -I - < probe.py
+$ kubectl exec -i -n p12-cve-ml caller -- python -I - < probe.py
 experiments/search without credentials: HTTP 401
 experiments/search with the admin login: HTTP 200 experiments: ['Default']
-$ kubectl apply -f stranger.yaml (in p12-finish-store)
+experiments/search with another Host header: HTTP 403 Invalid Host header - possible DNS rebinding attack detected
+$ kubectl apply -f stranger.yaml (in p12-cve-store)
 pod/stranger created
 pod/stranger condition met
-$ kubectl exec -i -n p12-finish-store stranger -- python -I - < probe.py
+$ kubectl exec -i -n p12-cve-store stranger -- python -I - < probe.py
 experiments/search without credentials: failed: TimeoutError timed out
-$ kubectl logs deployment/mlflow -n p12-finish-mlflow (the access lines: user, request, status; client address, time and agent cut)
-admin "GET /api/2.0/mlflow/experiments/search?max_results=10 HTTP/1.1" 200
+$ kubectl logs deployment/mlflow -n p12-cve-mlflow (the access lines for the search requests: request and status; time and client address cut)
+"GET /api/2.0/mlflow/experiments/search?max_results=10 HTTP/1.1" 401
+"GET /api/2.0/mlflow/experiments/search?max_results=10 HTTP/1.1" 200
+"GET /api/2.0/mlflow/experiments/search?max_results=10 HTTP/1.1" 403
 
 ## step 13: cleanup of the MLflow step
-$ kubectl delete namespace p12-finish-mlflow p12-finish-ml p12-finish-store --wait=false
-namespace "p12-finish-mlflow" deleted
-namespace "p12-finish-ml" deleted
-namespace "p12-finish-store" deleted
+$ kubectl delete namespace p12-cve-mlflow p12-cve-ml p12-cve-store --wait=false
+namespace "p12-cve-mlflow" deleted
+namespace "p12-cve-ml" deleted
+namespace "p12-cve-store" deleted

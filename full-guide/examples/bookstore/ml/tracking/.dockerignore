@@ -1,0 +1,3 @@
+# The image needs only the pinned package list.
+*
+!requirements.txt

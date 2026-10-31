@@ -164,7 +164,10 @@ versions follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 - Part 12 Kubernetes for machine learning (12.01 to 12.08) is rewritten
   security-first, with the default-deny, Kueue and JobSet runs recorded on a
   kind cluster, GPU behaviour cited and not run, and
-  `12-kubernetes-for-machine-learning/` joins the enforced list.
+  `12-kubernetes-for-machine-learning/` joins the enforced list. The MLflow
+  tracker image is built on `python:3.14-slim` (pinned by digest) with MLflow
+  3.17.2 and 94 pinned packages, and its Python packages scan clean at
+  CRITICAL and HIGH; the training image drops pip as the serving image does.
 
 ### Fixed
 - Standalone EKS add-ons (kube-proxy, CoreDNS, EBS CSI) now follow

@@ -668,16 +668,49 @@ The chart is not the install. Bitnami's MLflow chart (5.1.17, app 3.3.2) names
 the image `docker.io/bitnami/mlflow:3.3.2-debian-12-r0`, and that tag does not
 resolve on the registry as of this run, so the chart cannot start as shipped.
 Its default Service type is `LoadBalancer`, and its defaults deploy a
-PostgreSQL and a MinIO, which this guide does not run. This section uses the
-upstream image instead, `ghcr.io/mlflow/mlflow` at `v3.3.2`, pinned by the
-digest of its image index.
+PostgreSQL and a MinIO, which this guide does not run. This section builds the
+tracker's own image instead, from the MLflow release on PyPI.
 
-The upstream image is `pip install mlflow==3.3.2` and nothing more. It has no
-Flask-WTF, which the basic-auth app imports, no PostgreSQL driver for the
-external database, and no boto3 for an `s3://` artifact store. The image in
+The first version of this section built on the upstream `ghcr.io/mlflow/mlflow`
+image at 3.3.2 and added three packages. The CI image scan of that build
+reported 83 alerts, 8 of them critical, in the Python packages the image
+carried (pillow 11.3.0, urllib3 2.5.0, pyasn1 0.6.1, starlette 0.47.3, sqlparse
+0.5.3, setuptools 65.5.1 and pip 23.0.1, besides MLflow 3.3.2 itself, on Python
+3.10). A guide that teaches image scanning should not ship an image like that,
+so the image in
 [`examples/bookstore/ml/tracking/`](../examples/bookstore/ml/tracking/Dockerfile)
-builds on that digest and adds the three packages at pinned versions. It keeps
-the upstream user, UID 65532, and the Deployment sets the same UID itself.
+is built another way:
+
+- It starts from `python:3.14-slim`, pinned by digest, and installs MLflow
+  3.17.2, the release on PyPI as of 2026-10-31, into a virtual environment in a
+  builder stage. It uses Python 3.14 and not the newer 3.15, because MLflow
+  3.17.2 requires pyarrow below 26 and those pyarrow releases have no wheel for
+  3.15.
+- [`requirements.txt`](../examples/bookstore/ml/tracking/requirements.txt) pins
+  all 94 packages: the three direct choices (`mlflow[auth]`, `psycopg2-binary`
+  for the external PostgreSQL store and `boto3` for an `s3://` artifact store)
+  and everything they pull in. The list was resolved on 2026-10-31 and every
+  pin is a wheel, so the build needs no compiler.
+- The runtime stage copies the virtual environment in and removes pip, because
+  nothing in a running tracker installs a package and pip's vendored libraries
+  only add findings. The image has no setuptools and no wheel package either.
+  It runs as UID 65532, and the Deployment sets the same UID itself.
+
+Scan the image you build, because the answer changes from day to day. On
+2026-10-31, `trivy image` v0.76.1 (database of 2026-10-30) reported nothing at
+`CRITICAL` and nothing in the 94 Python packages at `HIGH`. It reported 44
+`HIGH` findings, all in 17 Debian 13 packages of the base image, for 8
+advisories: util-linux and the libraries built from it, ncurses, `libacl1`,
+`libsystemd0` and `perl-base`. Debian lists each of them as affected with no
+fixed version, or as fix deferred, so there is no newer package to install.
+Five of the 17 are marked Essential in the image's package database and the
+others are their libraries or marked required, so they stay in a Debian slim
+base. The guide's training and serving images, built on `python:3.12-slim`,
+report the same 44. These findings are left reported, and are not listed in
+`.trivyignore.yaml`: that file records accepted findings from the file scan, the
+CI image scan does not read it, and an entry that matches no file finding fails
+the registry check. Rebuild on a newer base when Debian ships fixes, and scan
+again.
 
 ```sh
 docker build -t bookstore/mlflow-auth:dev examples/bookstore/ml/tracking
@@ -690,29 +723,39 @@ and the chapter sets both:
 
 - `MLFLOW_FLASK_SERVER_SECRET_KEY`, the key that signs the server's session
   state. It comes from the Secret.
-- `admin_password` in the `basic_auth.ini` file. In MLflow 3.3.2 the admin
-  password is read from that file, not from a `MLFLOW_AUTH_ADMIN_PASSWORD`
-  variable, so the variable this section used to name does nothing.
+- `admin_password` in the `basic_auth.ini` file. The `basic_auth.ini` that the
+  3.17.2 release ships says the admin user is created from that setting or from
+  the `MLFLOW_AUTH_ADMIN_PASSWORD` variable, and that the server will not start
+  with neither. This chapter uses the file, which the Secret mounts, so the
+  password stays out of the Pod's environment. MLflow 3.3.2 read only the file.
+  The lab did not try the variable.
 
-**The server option is part of the fix.** `mlflow server` starts uvicorn unless
-a server option is given, and uvicorn calls the app as ASGI. The basic-auth app
-is a Flask app, which speaks WSGI. The first run of this chapter used no option,
-and every request returned `500` with a `TypeError` from uvicorn's Flask
-adapter. The pinned image's `mlflow/server/__init__.py` shows the choice: it
-uses uvicorn unless `--gunicorn-opts` or `--waitress-opts` is set. The
-[authentication page at the v3.3.2 tag](https://github.com/mlflow/mlflow/blob/v3.3.2/docs/docs/classic-ml/auth/index.mdx)
-shows only `mlflow server --app-name basic-auth`, and does not mention the
-server option.
-The cause and the workaround come from an upstream issue instead, where an
-MLflow maintainer says the auth app was not updated when uvicorn became the
-default, and tells users to pass `--gunicorn-opts`
-([mlflow/mlflow#17324](https://github.com/mlflow/mlflow/issues/17324);
-also [#17503](https://github.com/mlflow/mlflow/issues/17503)). The manifest does
-that, with two gunicorn workers and a 60-second timeout. gunicorn is already in
-the image. MLflow prints a `FutureWarning` that recommends uvicorn, which is its
-general advice and not about this app. That issue is closed upstream. This
-chapter pins 3.3.2 and did not try a newer release, so check the release you
-run before you drop the flag.
+**Three arguments changed with the release.** Each of them showed up as a failed
+request or a dead Pod, and not as a warning at build time, so run the lab's
+checks again whenever you move MLflow.
+
+- **No server option.** `mlflow server` starts uvicorn unless a server option is
+  given. In 3.3.2 the basic-auth app was a Flask app, uvicorn called it as ASGI
+  and every request returned `500`, so the chapter passed `--gunicorn-opts`
+  ([mlflow/mlflow#17324](https://github.com/mlflow/mlflow/issues/17324) has the
+  cause and that workaround). On 3.17.2 the lab served the same app under the
+  default uvicorn and got `401` without a login and `200` with one, with no
+  server option. The old option still starts gunicorn, with a `FutureWarning`
+  that recommends uvicorn, so the manifest drops it.
+- **`--allowed-hosts`.** 3.17.2 checks the `Host` header of every request except
+  `/health` and `/version`, and answers `403 Invalid Host header` before it
+  looks at the login. The default list is localhost and the private address
+  ranges, and a Service name is neither. With the 3.3.2 arguments on 3.17.2,
+  every request through the Service name got that `403`. The manifest names the
+  Service in the two forms a Pod would use. The check protects against DNS
+  rebinding and is not access control: the NetworkPolicy and the login are.
+- **Server jobs off.** 3.17.2 also starts a job runner beside the workers unless
+  `MLFLOW_SERVER_ENABLE_JOB_EXECUTION` is `false`. With the runner on, the Pod
+  was killed for memory (`OOMKilled`) at a 1 GiB limit with two workers, and once
+  at 1.5 GiB with one worker, and two workers measured 1.6 GiB when idle. With
+  jobs off, two workers measured 0.65 GiB. The tracker here serves run logging
+  and the registry, which need no jobs, so the manifest turns them off and
+  keeps a 1 GiB limit.
 
 The config's default permission is `READ` for every user, so the config sets
 `NO_PERMISSIONS`. Its `database_uri` defaults to SQLite in the working
@@ -762,12 +805,13 @@ the same manifest with namespaces of its own standing in for `bookstore-ml`,
 the one namespace the allow policy admits, and for a namespace outside the
 allow-list. Captured lines keep the lab's names: the policy line ends in the
 name that stands in for `bookstore-ml`, and the tracker's namespace ends in
-`mlflow`. The capture below is step 12 of the lab, recorded after the fix. The
-Deployment rolled out under the restricted settings. A request from the allowed
-namespace without credentials got `401`, and the same request with the
+`mlflow`. The capture below is step 12 of the lab, recorded on the 3.17.2 image.
+The Deployment rolled out under the restricted settings. A request from the
+allowed namespace without credentials got `401`, and the same request with the
 generated admin login got `200` and the one experiment that a new store holds,
-`Default`. A request from the other namespace timed out, which is what a
-dropped packet looks like. [02.06](../02-networking/06-network-policies.md)
+`Default`. The same request with a `Host` header outside `--allowed-hosts` got
+`403`. A request from the other namespace timed out, which is what a dropped
+packet looks like. [02.06](../02-networking/06-network-policies.md)
 shows that kind's default CNI, kindnet, has enforced NetworkPolicy since kind
 v0.24.0, and the tracker answered the allowed namespace from the same Service,
 so the timeout is the policy and not a broken tracker. The lab also created a
@@ -777,45 +821,51 @@ it needs, not the admin. The generated values are never printed.
 
 <!-- gate: output -->
 ```text
-$ kubectl create namespace p12-finish-ml (stands in for bookstore-ml) and p12-finish-store (outside the allow-list)
-namespace/p12-finish-ml created
-namespace/p12-finish-store created
-$ python: write the manifest with the lab namespace names (the Namespace object, the policy's namespace and the allowed namespace)
+$ kubectl create namespace p12-cve-ml (stands in for bookstore-ml) and p12-cve-store (outside the allow-list)
+namespace/p12-cve-ml created
+namespace/p12-cve-store created
+$ python: write the manifest with the lab namespace names (the Namespace object, the policy's namespace, the allowed namespace and the Service host names in --allowed-hosts)
 wrote 7 documents
 $ kubectl apply -f mlflow.yaml (the namespace, the policies, the Service and the Deployment)
-namespace/p12-finish-mlflow created
+namespace/p12-cve-mlflow created
 serviceaccount/mlflow created
 networkpolicy.networking.k8s.io/default-deny created
-networkpolicy.networking.k8s.io/allow-p12-finish-ml created
+networkpolicy.networking.k8s.io/allow-p12-cve-ml created
 networkpolicy.networking.k8s.io/allow-tracker-egress created
 service/mlflow created
 deployment.apps/mlflow created
-$ kubectl create secret generic mlflow-auth -n p12-finish-mlflow (basic_auth.ini, backend-store-uri and the Flask key, generated; none printed)
+$ kubectl create secret generic mlflow-auth -n p12-cve-mlflow (basic_auth.ini, backend-store-uri and the Flask key, generated; none printed)
 secret/mlflow-auth created
-$ kubectl create secret generic mlflow-client -n p12-finish-ml (the admin login the caller uses; generated, not printed)
+$ kubectl create secret generic mlflow-client -n p12-cve-ml (the admin login the caller uses; generated, not printed)
 secret/mlflow-client created
-$ kubectl rollout status deployment/mlflow -n p12-finish-mlflow --timeout=300s
+$ kubectl rollout status deployment/mlflow -n p12-cve-mlflow --timeout=300s
 Waiting for deployment "mlflow" rollout to finish: 0 of 1 updated replicas are available...
 deployment "mlflow" successfully rolled out
-$ kubectl apply -f caller.yaml (in p12-finish-ml)
+$ kubectl apply -f caller.yaml (in p12-cve-ml)
 pod/caller created
 pod/caller condition met
-$ kubectl exec -i -n p12-finish-ml caller -- python -I - < probe.py
+$ kubectl exec -i -n p12-cve-ml caller -- python -I - < probe.py
 experiments/search without credentials: HTTP 401
 experiments/search with the admin login: HTTP 200 experiments: ['Default']
-$ kubectl apply -f stranger.yaml (in p12-finish-store)
+experiments/search with another Host header: HTTP 403 Invalid Host header - possible DNS rebinding attack detected
+$ kubectl apply -f stranger.yaml (in p12-cve-store)
 pod/stranger created
 pod/stranger condition met
-$ kubectl exec -i -n p12-finish-store stranger -- python -I - < probe.py
+$ kubectl exec -i -n p12-cve-store stranger -- python -I - < probe.py
 experiments/search without credentials: failed: TimeoutError timed out
-$ kubectl logs deployment/mlflow -n p12-finish-mlflow (the access lines: user, request, status; client address, time and agent cut)
-admin "GET /api/2.0/mlflow/experiments/search?max_results=10 HTTP/1.1" 200
+$ kubectl logs deployment/mlflow -n p12-cve-mlflow (the access lines for the search requests: request and status; time and client address cut)
+"GET /api/2.0/mlflow/experiments/search?max_results=10 HTTP/1.1" 401
+"GET /api/2.0/mlflow/experiments/search?max_results=10 HTTP/1.1" 200
+"GET /api/2.0/mlflow/experiments/search?max_results=10 HTTP/1.1" 403
 ```
 
-The access log in the last lines shows the authenticated request under the user
-`admin`. The refused requests did not appear in that log in this run, so
-watch for failed logins at the client or at a proxy in front of the tracker, not
-in the server's access log. Two things are still open. The artifact bucket
+The access log in the last lines lists the three requests that reached the
+tracker, with their status: `401`, `200` and `403`. It names no user, so unlike
+the 3.3.2 log it cannot tell you who logged in, and a failed login looks like a
+missing one. The request from the other namespace never reached the tracker and
+has no line: it shows only as the timeout at the client. Watch for failed logins
+at the client or at a proxy in front of the tracker, and count the `401` lines
+here. Two things are still open. The artifact bucket
 needs its own identity, which
 [Part 10 ch.03](../10-cloud-and-managed-kubernetes/03-cloud-identity.md)
 covers. That identity is the only reason to turn the ServiceAccount token on,
@@ -1355,10 +1405,12 @@ Checklist:
   **Pod Security Standards** <https://kubernetes.io/docs/concepts/security/pod-security-standards/>.
 - **MLflow basic authentication**: the basic HTTP auth page in the MLflow
   repository, <https://github.com/mlflow/mlflow/blob/master/docs/docs/self-hosting/security/basic-http-auth.mdx>,
-  and the page as of the pinned release,
+  and the page as of the 3.3.2 release this chapter first used,
   <https://github.com/mlflow/mlflow/blob/v3.3.2/docs/docs/classic-ml/auth/index.mdx>.
-  The uvicorn and Flask mismatch is in
-  <https://github.com/mlflow/mlflow/issues/17324>.
+  The uvicorn and Flask mismatch that 3.3.2 had is in
+  <https://github.com/mlflow/mlflow/issues/17324>. The `--allowed-hosts` and
+  `--disable-security-middleware` options are in `mlflow server --help` of the
+  3.17.2 release.
 - **Karpenter disruption** (the `karpenter.sh/do-not-disrupt` annotation and
   NodePool budgets) <https://karpenter.sh/docs/concepts/disruption/>.
 - Official: **Argo Workflows** <https://argo-workflows.readthedocs.io/>;

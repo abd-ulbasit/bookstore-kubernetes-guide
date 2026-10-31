@@ -127,16 +127,22 @@ spec:
         - name: mlflow
           image: bookstore/mlflow-auth:dev   # built from ./Dockerfile; pin by digest in production
           command: ["/bin/sh", "-c"]
-          # --gunicorn-opts selects the WSGI server. Without a server option,
-          # MLflow 3.3.2 starts uvicorn, which calls the Flask basic-auth app as
-          # ASGI, and every request returns 500 (mlflow issue 17324). The value
-          # may be empty; --timeout 60 is a plain gunicorn option.
+          # MLflow 3.17.2 serves the basic-auth app under uvicorn by default, so
+          # no server option is needed (3.3.2 needed --gunicorn-opts). Its
+          # Host-header check is on: a request is refused with 403 unless its
+          # Host is one of --allowed-hosts, and a Service name is not in the
+          # default list (localhost and private addresses). The two names are
+          # the Service in this namespace, with and without the cluster domain.
+          # Server jobs are off (the env below): 3.17.2 otherwise starts a job
+          # runner next to the workers, and with two workers the Pod measured
+          # 1.6 GiB on the lab, where with jobs off it measured 0.65 GiB. The
+          # tracker serves logging and the registry, which need no jobs.
           args:
             - >-
               exec mlflow server --host 0.0.0.0 --port 5000
               --app-name basic-auth
               --workers 2
-              --gunicorn-opts "--timeout 60 --access-logfile -"
+              --allowed-hosts "mlflow.mlflow.svc.cluster.local:5000,mlflow.mlflow.svc:5000"
               --backend-store-uri "$(cat /etc/mlflow-auth/backend-store-uri)"
               --artifacts-destination "$ARTIFACT_ROOT"
           env:
@@ -149,6 +155,8 @@ spec:
                   key: flask-secret-key
             - name: ARTIFACT_ROOT
               value: s3://example-bucket/mlflow   # placeholder: your bucket
+            - name: MLFLOW_SERVER_ENABLE_JOB_EXECUTION
+              value: "false"
           ports:
             - name: http
               containerPort: 5000
@@ -160,7 +168,7 @@ spec:
           resources:
             requests:
               cpu: 250m
-              memory: 512Mi
+              memory: 768Mi
             limits:
               memory: 1Gi
           volumeMounts:
