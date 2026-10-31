@@ -41,7 +41,7 @@ misconfigurations:
       - full-guide/examples/bookstore-platform/kustomize/regions/ap-southeast
       - full-guide/examples/bookstore-platform/kustomize/regions/eu-west
       - full-guide/examples/bookstore-platform/kustomize/regions/us-east
-    statement: "Platform roles that can manage Secrets, accepted by design (chapter 13.01, SECURITY-SCAN.md section 1.3). bookstore-platform-operator reads and writes Secrets for platform work, and bookstore-platform-tenant-admin reads them only in its own namespace, because the Composition binds it per tenant. The file ships ClusterRoles only, so the blast radius is set by each binding and by the human gate in 13.04."
+    statement: "Platform roles that can manage Secrets, accepted by design (chapter 13.01, SECURITY-SCAN.md section 1.3). bookstore-platform-operator reads and writes Secrets for platform work, and bookstore-platform-tenant-admin reads them only in its own namespace, because the Composition binds it per tenant. The file ships ClusterRoles only, so the blast radius is set by each binding and by the break-glass process in 13.12."
     expired_at: 2027-06-30
   - id: KSV-0044
     paths:
@@ -49,7 +49,7 @@ misconfigurations:
       - full-guide/examples/bookstore-platform/kustomize/regions/ap-southeast
       - full-guide/examples/bookstore-platform/kustomize/regions/eu-west
       - full-guide/examples/bookstore-platform/kustomize/regions/us-east
-    statement: "Break-glass platform RBAC, accepted by design (chapter 13.01, SECURITY-SCAN.md section 1.3). bookstore-platform-admin is a cluster wildcard as strong as cluster-admin. The file ships ClusterRoles only, so the blast radius is set by each binding and by the human gate in 13.04."
+    statement: "Break-glass platform RBAC, accepted by design (chapter 13.01, SECURITY-SCAN.md section 1.3). bookstore-platform-admin is a cluster wildcard as strong as cluster-admin. The file ships ClusterRoles only, so the blast radius is set by each binding and by the break-glass process in 13.12."
     expired_at: 2027-06-30
   - id: KSV-0045
     paths:
@@ -57,7 +57,7 @@ misconfigurations:
       - full-guide/examples/bookstore-platform/kustomize/regions/ap-southeast
       - full-guide/examples/bookstore-platform/kustomize/regions/eu-west
       - full-guide/examples/bookstore-platform/kustomize/regions/us-east
-    statement: "Break-glass platform RBAC, accepted by design (chapter 13.01, SECURITY-SCAN.md section 1.3). bookstore-platform-tenant-admin grants wildcard verbs on workloads and Services, and the Composition binds it only inside each tenant namespace. The file ships ClusterRoles only, so the blast radius is set by each binding and by the human gate in 13.04."
+    statement: "Break-glass platform RBAC, accepted by design (chapter 13.01, SECURITY-SCAN.md section 1.3). bookstore-platform-tenant-admin grants wildcard verbs on workloads and Services, and the Composition binds it only inside each tenant namespace. The file ships ClusterRoles only, so the blast radius is set by each binding and by the break-glass process in 13.12."
     expired_at: 2027-06-30
   - id: KSV-0046
     paths:
@@ -65,7 +65,7 @@ misconfigurations:
       - full-guide/examples/bookstore-platform/kustomize/regions/ap-southeast
       - full-guide/examples/bookstore-platform/kustomize/regions/eu-west
       - full-guide/examples/bookstore-platform/kustomize/regions/us-east
-    statement: "Break-glass platform RBAC, accepted by design (chapter 13.01, SECURITY-SCAN.md section 1.3). bookstore-platform-admin manages all resources, as a break-glass role must, and bookstore-platform-operator reads every resource and manages the Crossplane API groups. The file ships ClusterRoles only, so the blast radius is set by each binding and by the human gate in 13.04."
+    statement: "Break-glass platform RBAC, accepted by design (chapter 13.01, SECURITY-SCAN.md section 1.3). bookstore-platform-admin manages all resources, as a break-glass role must, and bookstore-platform-operator reads every resource and manages the Crossplane API groups. The file ships ClusterRoles only, so the blast radius is set by each binding and by the break-glass process in 13.12."
     expired_at: 2027-06-30
   - id: KSV-0056
     paths:
@@ -73,7 +73,7 @@ misconfigurations:
       - full-guide/examples/bookstore-platform/kustomize/regions/ap-southeast
       - full-guide/examples/bookstore-platform/kustomize/regions/eu-west
       - full-guide/examples/bookstore-platform/kustomize/regions/us-east
-    statement: "Break-glass platform RBAC, accepted by design (chapter 13.01, SECURITY-SCAN.md section 1.3). bookstore-platform-operator writes Services, and bookstore-platform-tenant-admin manages Services inside its own tenant namespace. The file ships ClusterRoles only, so the blast radius is set by each binding and by the human gate in 13.04."
+    statement: "Break-glass platform RBAC, accepted by design (chapter 13.01, SECURITY-SCAN.md section 1.3). bookstore-platform-operator writes Services, and bookstore-platform-tenant-admin manages Services inside its own tenant namespace. The file ships ClusterRoles only, so the blast radius is set by each binding and by the break-glass process in 13.12."
     expired_at: 2027-06-30
   # The operator manager role creates the Services of each tenant it reconciles,
   # so it writes services. It holds no secrets rule (see the file header).

@@ -1,0 +1,80 @@
+# Transcript for 13-grand-capstone-bookstore-platform/01-bookstore-2-from-toy-to-platform.md
+# Commands run in order from the guide's full-guide/ directory, with the
+# examples/ paths the chapter prints. Terminal colour codes removed. Nothing
+# else is edited.
+# Cluster: one kind cluster, sf-pilot, Kubernetes v1.37.0 (single control-plane
+# node). The chapter's three-region topology is not built here; its names are
+# the reader's, and this cluster has a different name.
+# Versions: kubectl v1.37.2, Helm v4.1.4, Trivy 0.76.1 (gates only).
+# Substitution: the real apply in step 4 uses platform-base/00-namespaces.yaml
+# with each namespace name prefixed p13-01- (p13-01-bookstore-platform and so
+# on). Step 5 targets p13-01-bookstore-platform. Step 6 deletes those three
+# namespaces. Every other command runs as printed.
+# Steps 3 and 5 use --dry-run=server, so the cluster-scoped objects are never
+# created.
+
+## step 0: client version and context
+$ kubectl version --client
+Client Version: v1.37.2
+Kustomize Version: v5.8.1
+$ kubectl config current-context
+kind-sf-pilot
+
+## step 1: render the platform base and the region overlays (no cluster)
+$ for d in kustomize/base kustomize/regions/us-east kustomize/regions/eu-west kustomize/regions/ap-southeast; do kubectl kustomize examples/bookstore-platform/$d | grep -c "^kind:"; done
+13
+13
+13
+13
+
+## step 2: v1 invariants
+$ helm lint examples/bookstore/helm/bookstore
+==> Linting examples/bookstore/helm/bookstore
+[INFO] Chart.yaml: icon is recommended
+
+1 chart(s) linted, 0 chart(s) failed
+$ helm template examples/bookstore/helm/bookstore | kubectl apply --dry-run=client -f - | grep -cE "(configured|created)"
+49
+$ for o in dev staging prod; do kubectl kustomize examples/bookstore/kustomize/overlays/$o | grep -c "^kind:"; done
+45
+49
+48
+
+## step 3: server dry run of platform-base (creates nothing)
+$ for f in 00-namespaces 01-rbac 02-priorityclasses; do kubectl apply --dry-run=server -f examples/bookstore-platform/platform-base/$f.yaml; done
+namespace/bookstore-platform created (server dry run)
+namespace/bookstore-platform-system created (server dry run)
+namespace/bookstore-platform-ml created (server dry run)
+clusterrole.rbac.authorization.k8s.io/bookstore-platform-admin created (server dry run)
+clusterrole.rbac.authorization.k8s.io/bookstore-platform-operator created (server dry run)
+clusterrole.rbac.authorization.k8s.io/bookstore-platform-tenant-admin created (server dry run)
+priorityclass.scheduling.k8s.io/bookstore-platform-data created (server dry run)
+priorityclass.scheduling.k8s.io/bookstore-platform-edge created (server dry run)
+priorityclass.scheduling.k8s.io/bookstore-platform-critical created (server dry run)
+priorityclass.scheduling.k8s.io/bookstore-platform-async created (server dry run)
+priorityclass.scheduling.k8s.io/bookstore-platform-ml-serving created (server dry run)
+priorityclass.scheduling.k8s.io/bookstore-platform-batch created (server dry run)
+priorityclass.scheduling.k8s.io/bookstore-platform-ml-batch created (server dry run)
+
+## step 4: real apply of the namespaces under p13-01 names
+$ sed -e 's/name: bookstore-platform/name: p13-01-bookstore-platform/' examples/bookstore-platform/platform-base/00-namespaces.yaml | kubectl apply -f -
+namespace/p13-01-bookstore-platform created
+namespace/p13-01-bookstore-platform-system created
+namespace/p13-01-bookstore-platform-ml created
+$ kubectl get ns -l app.kubernetes.io/part-of=bookstore-platform -L pod-security.kubernetes.io/enforce
+NAME                               STATUS   AGE   ENFORCE
+p13-01-bookstore-platform          Active   0s    restricted
+p13-01-bookstore-platform-ml       Active   0s    restricted
+p13-01-bookstore-platform-system   Active   0s    restricted
+
+## step 5: deliberate denied request (a root container, no securityContext)
+$ kubectl run probe-root --image=bookstore/catalog:dev --restart=Never --dry-run=server -n p13-01-bookstore-platform
+Error from server (Forbidden): pods "probe-root" is forbidden: violates PodSecurity "restricted:latest": allowPrivilegeEscalation != false (container "probe-root" must set securityContext.allowPrivilegeEscalation=false), unrestricted capabilities (container "probe-root" must set securityContext.capabilities.drop=["ALL"]), runAsNonRoot != true (pod or container "probe-root" must set securityContext.runAsNonRoot=true), seccompProfile (pod or container "probe-root" must set securityContext.seccompProfile.type to "RuntimeDefault" or "Localhost")
+
+## step 6: clean up the captured namespaces
+$ kubectl delete ns p13-01-bookstore-platform p13-01-bookstore-platform-system p13-01-bookstore-platform-ml
+namespace "p13-01-bookstore-platform" deleted
+namespace "p13-01-bookstore-platform-system" deleted
+namespace "p13-01-bookstore-platform-ml" deleted
+$ kubectl get ns -o name | grep -c p13-01 || true
+0

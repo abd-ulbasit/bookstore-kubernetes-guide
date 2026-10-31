@@ -2,25 +2,30 @@
 # that span the platform, modelled on the Team Topologies platform-vs-stream
 # split (Part 11 ch.10):
 #
-#   platform-admin     Cluster-scoped break-glass: full access to platform
-#                      namespaces + the right to create/delete tenants. SMALL
-#                      group; auditable. Maps in production to a Keycloak group
-#                      that requires step-up auth (13.04 — humans only).
-#   platform-operator  Day-to-day platform team: read everything (Secrets
+#   bookstore-platform-admin
+#                      Break-glass: cluster-wide, as strong as cluster-admin.
+#                      Full access to the platform namespaces and the right to
+#                      create and delete tenants. Small group. Bind it only
+#                      through the break-glass process in 13.12 (humans only,
+#                      expiry, audit). Humans reach it through OIDC (13.04).
+#   bookstore-platform-operator
+#                      Day-to-day platform team: read everything (Secrets
 #                      included, see the rule); write the cluster-wide
 #                      platform stack (Crossplane XRDs/Compositions, Argo CD
 #                      root Applications, the platform-base namespaces).
 #                      CANNOT delete a tenant ns.
-#   tenant-admin       Per-tenant role REFERENCE: bound by the Crossplane
+#   bookstore-platform-tenant-admin
+#                      Per-tenant role REFERENCE: bound by the Crossplane
 #                      Composition (13.02) inside each `bookstore-platform-
-#                      <TENANT>` ns. Has full namespace control of its OWN ns
-#                      and nothing else. THIS file ships the ClusterRole; the
+#                      <TENANT>` ns. Controls the workloads and Services of its
+#                      OWN ns; reads Secrets and NetworkPolicies there but
+#                      cannot change them. THIS file ships the ClusterRole; the
 #                      Composition creates the RoleBinding per tenant.
 #
 # This file ships ClusterRoles only — the bindings to real principals
 # (Keycloak groups via the OIDC group claim, 13.04) are environment-specific
-# and NOT shipped in source. A production wiring binds platform-admin to e.g.
-# `oidc:platform-admins` via a separately-managed ClusterRoleBinding.
+# and NOT shipped in source. A production wiring binds bookstore-platform-admin
+# to e.g. `oidc:platform-admins` via a separately-managed ClusterRoleBinding.
 #
 # WHY NO BINDINGS HERE: bindings name real principals; principals differ per
 # cluster / region / Keycloak realm. Shipping a binding to a placeholder name
@@ -51,7 +56,7 @@ rules:
   #                                         deleting tenant namespaces, which
   #                                         are cluster-scoped and need it.
   # So the "bounded blast radius" of break-glass comes from the binding and
-  # the gate in front of it (13.04: humans only, step-up auth, audited), not
+  # the gate in front of it (13.12: humans only, expiry, audited), not
   # from this rule. Treat every ClusterRoleBinding to this role as a
   # cluster-admin grant.
   - apiGroups: ["*"]

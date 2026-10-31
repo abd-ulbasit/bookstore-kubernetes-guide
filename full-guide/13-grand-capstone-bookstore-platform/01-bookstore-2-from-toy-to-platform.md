@@ -1,12 +1,12 @@
 # 13.01 — Bookstore 2.0: from toy to platform
 
 > What makes a production e-commerce platform on Kubernetes different from
-> the threadable v1 we built across Parts 00 - 09, and how the next eleven
+> the v1 we built across Parts 00 - 09, and how the next eleven
 > chapters get us there.
 
-**Estimated time:** ~30 min read · (no hands-on)
+**Estimated time:** ~30 min read · ~20 min hands-on on one kind cluster
 **Prerequisites:** [Part 09 ch.01](../09-end-to-end-bookstore/01-bookstore-end-to-end.md) — v1 Bookstore this chapter contrasts v2 with · [Part 11 ch.10](../11-advanced-production-patterns/10-platform-engineering.md) — platform-engineering frame v2 lives in
-**You'll know after this:** • name the seven dimensions (tenancy, region, identity, search, payments, edge, ML, ops) where v2 leaves v1 · • articulate why v2 is structurally a different artifact, not "v1 with more features" · • map each Part 13 chapter onto a v2 dimension · • describe the bookstore-platform-v2 directory layout · • justify when v1's small-on-purpose shape is the right choice
+**You'll know after this:** • name the seven dimensions (tenancy, region, identity, delivery, data, ML, day-2) where v2 leaves v1 · • articulate why v2 is structurally a different artifact, not "v1 with more features" · • map each Part 13 chapter onto a v2 dimension · • describe the bookstore-platform-v2 directory layout · • justify when v1's small-on-purpose shape is the right choice
 
 <!-- tags: bookstore-v2, mental-model, capstone, platform-engineering -->
 
@@ -124,6 +124,21 @@ question.
 > workloads cleanly split; mesh-verified; rotatable; auditable) is the
 > whole game.
 
+## Threats and controls
+
+The platform's threat model is in
+[the Bookstore threat model](../examples/bookstore/THREAT-MODEL.md), and
+[00.08](../00-foundations/08-security-foundations.md) defines the terms. This
+chapter owns the cluster-wide boundary that every tenant inherits: the
+namespaces, the platform roles and the admission level.
+
+| Threat | Control taught here | Goes deeper in |
+|---|---|---|
+| A compromised container escalates to the node | Namespaces enforce `restricted`, so a non-compliant Pod is refused (Hands-on, section 2) | [05.02](../05-security/02-pod-security.md), [01.01 baseline](../01-core-workloads/01-pods.md#baseline) |
+| A platform role reads or changes every tenant's Secrets | Platform roles ship as ClusterRoles with no bindings. The operator role's Secret access is an accepted finding in `.trivyignore.yaml` | [05.01](../05-security/01-authn-authz-rbac.md), [05.04](../05-security/04-secrets-and-cluster-hardening.md) |
+| Break-glass access that outlives the incident | The admin role is cluster-admin in all but name, so it is bound only through the break-glass process | [13.12](12-day-2-runbook-on-call-dr-chaos.md) |
+| A tenant reaches into another tenant's namespace | The tenant role is a ClusterRole that works only through a per-tenant RoleBinding | [13.02](02-tenancy-and-crossplane-onboarding.md) |
+
 ## Diagrams
 
 ### Diagram A — v1 vs v2 at the service-architecture level (Mermaid)
@@ -200,7 +215,7 @@ Tenancy                single tenant                 N tenants (BookstoreTenant 
 Onboarding             manual ns + RBAC + quota      one BookstoreTenant claim (13.02)
 Region                 single region (kind)          3 regions active-active (13.03)
 Data                   1 Postgres StatefulSet        CNPG primary + 2 streaming standbys
-Cross-region failover  (none)                        promote standby + DNS flip <10 min
+Cross-region failover  (none)                        promote standby + DNS flip
 Auth — humans          shared-HMAC toy JWT           Keycloak OIDC, realm-per-tenant
 Auth — workloads       (same JWT, kind hand-wave)    IRSA / Workload Identity (13.04)
 Mesh JWT verify        (none)                        Istio RequestAuth + AuthZ (13.04)
@@ -228,6 +243,13 @@ walks the [`examples/bookstore-platform/`](../examples/bookstore-platform/)
 tree you will populate across Part 13 and stands up the three-region kind
 topology that the rest of the part runs against.
 
+The output shown in this chapter was captured on one kind cluster named
+`sf-pilot` (Kubernetes v1.37.0), not on the clusters named here. That run did
+not build the three regions, and it created its namespaces under prefixed names
+so it could delete them afterwards. The commands below print the reader's names.
+The [transcript](../examples/security-lab/evidence/13-01.txt) lists each
+substitution in its header.
+
 ### 0. The platform tree, walked
 
 From the guide repo root:
@@ -236,8 +258,8 @@ From the guide repo root:
 ls examples/bookstore-platform/
 ```
 
-You should see (the directories Phase 13a creates; the rest land in 13b/c
-as stubs with READMEs that explain what fills them):
+Illustrative listing, not captured. This chapter uses `clusters/`,
+`platform-base/` and `kustomize/`; later chapters fill the others, as marked:
 
 ```text
 README.md            ← platform overview, kind-runnable path, v1↔v2 thread
@@ -292,7 +314,8 @@ Confirm the contexts:
 kubectl config get-contexts -o name | grep '^kind-bookstore-platform-'
 ```
 
-Expected:
+Illustrative output, not captured. The captured run did not execute the
+script, because it starts three kind clusters and the lab cluster is one:
 
 ```text
 kind-bookstore-platform-us-east
@@ -301,6 +324,34 @@ kind-bookstore-platform-ap-southeast
 ```
 
 ### 2. Apply the platform-base into each region
+
+Dry-run first, against your current context. The server runs validation and
+admission on every object and creates nothing:
+
+```sh
+for f in 00-namespaces 01-rbac 02-priorityclasses; do
+  kubectl apply --dry-run=server -f examples/bookstore-platform/platform-base/$f.yaml
+done
+```
+
+<!-- gate: output -->
+```text
+namespace/bookstore-platform created (server dry run)
+namespace/bookstore-platform-system created (server dry run)
+namespace/bookstore-platform-ml created (server dry run)
+clusterrole.rbac.authorization.k8s.io/bookstore-platform-admin created (server dry run)
+clusterrole.rbac.authorization.k8s.io/bookstore-platform-operator created (server dry run)
+clusterrole.rbac.authorization.k8s.io/bookstore-platform-tenant-admin created (server dry run)
+priorityclass.scheduling.k8s.io/bookstore-platform-data created (server dry run)
+priorityclass.scheduling.k8s.io/bookstore-platform-edge created (server dry run)
+priorityclass.scheduling.k8s.io/bookstore-platform-critical created (server dry run)
+priorityclass.scheduling.k8s.io/bookstore-platform-async created (server dry run)
+priorityclass.scheduling.k8s.io/bookstore-platform-ml-serving created (server dry run)
+priorityclass.scheduling.k8s.io/bookstore-platform-batch created (server dry run)
+priorityclass.scheduling.k8s.io/bookstore-platform-ml-batch created (server dry run)
+```
+
+Then apply to each region:
 
 ```sh
 for ctx in \
@@ -316,34 +367,47 @@ done
 ```
 
 What landed in each cluster: three `bookstore-platform-*` namespaces (all
-PSA `enforce: restricted`), three platform `ClusterRole`s (admin /
-operator / tenant-admin), and seven `PriorityClass`es (the platform priority
-ladder from data > edge > critical > async > ml-serving > batch > ml-batch).
-Verify:
+PSA `enforce: restricted`), three platform ClusterRoles
+(`bookstore-platform-admin`, `-operator` and `-tenant-admin`), and seven
+PriorityClasses (the platform priority ladder from data > edge > critical >
+async > ml-serving > batch > ml-batch). The admin role is as strong as
+cluster-admin, so bind it only through the break-glass process in 13.12. The
+operator role reads every Secret, which is why `.trivyignore.yaml` records it
+as an accepted finding. The tenant-admin role does nothing until a per-tenant
+RoleBinding (13.02) gives it a namespace.
+
+Verify with:
 
 ```sh
 kubectl --context kind-bookstore-platform-us-east \
-  get ns -l app.kubernetes.io/part-of=bookstore-platform
-# NAME                          STATUS   AGE
-# bookstore-platform            Active   30s
-# bookstore-platform-ml         Active   30s
-# bookstore-platform-system     Active   30s
+  get ns -l app.kubernetes.io/part-of=bookstore-platform \
+  -L pod-security.kubernetes.io/enforce
 
 kubectl --context kind-bookstore-platform-us-east \
   get clusterrole | grep bookstore-platform
-# bookstore-platform-admin
-# bookstore-platform-operator
-# bookstore-platform-tenant-admin
 
 kubectl --context kind-bookstore-platform-us-east \
   get priorityclass | grep bookstore-platform
-# bookstore-platform-data           1000000
-# bookstore-platform-edge            800000
-# bookstore-platform-critical        100000
-# bookstore-platform-async            50000
-# bookstore-platform-ml-serving       10000
-# bookstore-platform-batch             1000
-# bookstore-platform-ml-batch           100
+```
+
+The first command lists the three namespaces with `ENFORCE` set to
+`restricted`. The other two list the ClusterRoles and PriorityClasses by name.
+
+Now test the control. The next request is deliberate: a root container with
+no `securityContext`, asked for in a `restricted` namespace. The API server
+refuses it, and the refusal lists what is missing. `readOnlyRootFilesystem` is
+not one of the [restricted checks](https://kubernetes.io/docs/concepts/security/pod-security-standards/#restricted),
+but the baseline asks for it anyway
+([01.01](../01-core-workloads/01-pods.md#baseline)).
+
+```sh
+kubectl run probe-root --image=bookstore/catalog:dev --restart=Never \
+  --dry-run=server -n bookstore-platform
+```
+
+<!-- gate: output -->
+```text
+Error from server (Forbidden): pods "probe-root" is forbidden: violates PodSecurity "restricted:latest": allowPrivilegeEscalation != false (container "probe-root" must set securityContext.allowPrivilegeEscalation=false), unrestricted capabilities (container "probe-root" must set securityContext.capabilities.drop=["ALL"]), runAsNonRoot != true (pod or container "probe-root" must set securityContext.runAsNonRoot=true), seccompProfile (pod or container "probe-root" must set securityContext.seccompProfile.type to "RuntimeDefault" or "Localhost")
 ```
 
 ### 3. The kustomize render path (what Argo CD will apply)
@@ -356,17 +420,17 @@ adds a region label + a `cnpg-primary` annotation + a regional DNS-hostname
 annotation. From the repo root:
 
 ```sh
-kubectl kustomize examples/bookstore-platform/kustomize/base | grep -c '^kind:'
-# 13
+for d in kustomize/base kustomize/regions/us-east kustomize/regions/eu-west kustomize/regions/ap-southeast; do
+  kubectl kustomize examples/bookstore-platform/$d | grep -c '^kind:'
+done
+```
 
-kubectl kustomize examples/bookstore-platform/kustomize/regions/us-east | grep -c '^kind:'
-# 13
-
-kubectl kustomize examples/bookstore-platform/kustomize/regions/eu-west | grep -c '^kind:'
-# 13
-
-kubectl kustomize examples/bookstore-platform/kustomize/regions/ap-southeast | grep -c '^kind:'
-# 13
+<!-- gate: output -->
+```text
+13
+13
+13
+13
 ```
 
 The 13 is by design: 3 namespaces + 3 ClusterRoles + 7 PriorityClasses. The
@@ -382,16 +446,37 @@ have to remain true after every Part 13 phase. Re-prove them:
 
 ```sh
 helm lint examples/bookstore/helm/bookstore
-# ==> Linting examples/bookstore/helm/bookstore
-# 1 chart(s) linted, 0 chart(s) failed
+```
 
+<!-- gate: output -->
+```text
+==> Linting examples/bookstore/helm/bookstore
+[INFO] Chart.yaml: icon is recommended
+
+1 chart(s) linted, 0 chart(s) failed
+```
+
+```sh
 helm template examples/bookstore/helm/bookstore \
   | kubectl apply --dry-run=client -f - | grep -cE '(configured|created)'
-# 49
+```
 
-kubectl kustomize examples/bookstore/kustomize/overlays/dev     | grep -c '^kind:'   # 45
-kubectl kustomize examples/bookstore/kustomize/overlays/staging | grep -c '^kind:'   # 49
-kubectl kustomize examples/bookstore/kustomize/overlays/prod    | grep -c '^kind:'   # 48
+<!-- gate: output -->
+```text
+49
+```
+
+```sh
+for o in dev staging prod; do
+  kubectl kustomize examples/bookstore/kustomize/overlays/$o | grep -c '^kind:'
+done
+```
+
+<!-- gate: output -->
+```text
+45
+49
+48
 ```
 
 If any of those numbers drift in your tree, the v1 invariant is broken;
@@ -435,15 +520,15 @@ across every chapter**. Three pieces, each grounded in earlier Parts:
 
 - **PSA `restricted` everywhere.** Every namespace the platform owns —
   cluster-wide `bookstore-platform-*` and per-tenant
-  `bookstore-platform-<TENANT>` — carries the three Pod Security Admission
-  labels (`enforce: restricted` + `audit: restricted` + `warn: restricted`),
-  pinned to `latest`. Every Pod template the platform ships satisfies it
-  (`runAsNonRoot: true`, non-root `runAsUser`, `seccompProfile:
-  RuntimeDefault`, container `allowPrivilegeEscalation: false`,
-  `capabilities.drop: [ALL]`, `readOnlyRootFilesystem: true` where feasible
-  + `emptyDir` for writable caches). This is Part 05 ch.02 carried to the
-  platform layer; the v1 Bookstore established it, v2 inherits it. No
-  privileged workload, no exceptions.
+  `bookstore-platform-<TENANT>`, carries three Pod Security Admission
+  labels set to `restricted`: `enforce` refuses a non-compliant Pod, while
+  `audit` and `warn` record and report one, so a regression shows up even
+  where enforce is relaxed. Every Pod template the platform ships meets the
+  [security baseline](../01-core-workloads/01-pods.md#baseline), whose fields
+  01.01 explains, unless it is a registered exception. This is Part 05 ch.02
+  carried to the platform layer. Each exception is registered in
+  `security/namespace-exceptions.yaml` with its reason, its upstream source
+  and an expiry.
 - **Pinned-Helm installs into their own namespaces.** Every system operator
   (Crossplane, Keycloak, Istio, KServe, Strimzi, ESO, Tempo, Loki,
   OpenCost, Backstage, Chaos Mesh) installs via a pinned-version Helm
@@ -456,11 +541,11 @@ across every chapter**. Three pieces, each grounded in earlier Parts:
   `21.4.4`, `application-crossplane.yaml` pins `1.17.0`. The same lesson
   Part 07 ch.01 / ch.04 taught for the v1 Bookstore.
 - **Signed images via cosign, supply-chain CI, and per-tenant cost.**
-  Part 05 ch.03 introduced cosign + Kyverno `verifyImages`; the platform's
-  CI signs every image at build time, and a `bookstore-platform-` cluster-
-  wide Kyverno policy enforces signature presence on every Pod. Per-tenant
-  cost is OpenCost (Phase 13c) labelled by the tenant label the Crossplane
-  Composition stamps. Real SLOs that page (latency / availability /
+  Part 05 ch.03 introduced cosign and Kyverno `verifyImages`. The platform's
+  CI signs every image at build time, and a Kyverno policy that refuses
+  unsigned images ships as an optional Terraform module, off by default.
+  Per-tenant cost is OpenCost (Phase 13c) labelled by the tenant label the
+  Crossplane Composition stamps. Real SLOs that page (latency / availability /
   error-budget burn rate) are Part 06 ch.01 deepened in 13.09 —
   Alertmanager routes by tenant + region + severity, not "everyone gets
   the same page".
@@ -500,25 +585,26 @@ and it is what the rest of Part 13 demonstrates.
 > `backstage/`. Feature team owns its tenant's `app/`. The
 > `bookstore-platform-tenant-admin` ClusterRole in `01-rbac.yaml` is the
 > binding surface: a feature-team identity (Keycloak group, OIDC group
-> claim) bound to that ClusterRole inside its tenant ns gets full control
-> of the ns — and nothing outside. That is the guardrail the Crossplane
+> claim) bound to that ClusterRole inside its tenant ns gets control of the
+> workloads and Services there, read access to its Secrets and
+> NetworkPolicies, and nothing outside. That is the guardrail the Crossplane
 > Composition enforces by construction; it is the same Part 11 ch.10
 > "paved road" lesson scaled to a multi-tenant SaaS.
 
 > **In production:** The honest cost of v2 vs v1, at the order of magnitude
 > a real team should plan for:
 >
-> - **Compute.** Three regions ≈ 3× single-region cost. Karpenter / Cluster
->   Autoscaler (Part 10 ch.06) absorbs some of that via spot, but the
->   floor is multi-region for stateful workloads.
+> - **Compute.** Three regions multiply the compute floor. Karpenter /
+>   Cluster Autoscaler (Part 10 ch.06) absorbs some of that via spot, but
+>   stateful workloads keep a multi-region floor.
 > - **Data egress.** Cross-region streaming replication and S3 cross-
->   region asset replication add 5 - 15 % to monthly cloud bills on real
->   traffic shapes. Budget for it.
-> - **Engineering time.** Supply-chain CI (signed images + SBOM + policy
->   verification + admission webhooks) adds ~5 % to per-PR build time.
->   Worth it; budget for it.
-> - **Operational time.** The minimum viable platform team at three-region,
->   multi-tenant SaaS scale is four engineers; below that, incidents
+>   region asset replication add egress charges that grow with real
+>   traffic. Budget for it.
+> - **Engineering time.** Supply-chain CI (signed images, SBOMs, policy
+>   verification, admission webhooks) adds build time to every PR. Worth
+>   it; budget for it.
+> - **Operational time.** A three-region, multi-tenant platform needs a
+>   team large enough to staff on-call and still ship. Below that, incidents
 >   consume all capacity and no new capabilities ship.
 
 > **In production:** Things v2 does NOT change from v1, and it is worth
@@ -558,38 +644,9 @@ kubectl kustomize examples/bookstore/kustomize/overlays/staging | grep -c '^kind
 kubectl kustomize examples/bookstore/kustomize/overlays/prod    | grep -c '^kind:'   # 48
 ```
 
-Minimal skeleton — the root ApplicationSet template (sketch; the full
-manifest lives at
-[`../examples/bookstore-platform/argocd/applicationset-platform.yaml`](../examples/bookstore-platform/argocd/applicationset-platform.yaml)):
-
-```yaml
-apiVersion: argoproj.io/v1alpha1
-kind: ApplicationSet
-metadata:
-  name: platform-base
-  namespace: argocd
-spec:
-  generators:
-    - clusters:
-        selector:
-          matchLabels:
-            argocd.argoproj.io/secret-type: cluster
-        values:
-          region: "{{ index .metadata.labels \"bookstore-platform.example.com/region\" }}"
-  template:
-    metadata:
-      name: "platform-base-{{ .values.region }}"
-    spec:
-      project: default
-      source:
-        repoURL: "https://github.com/<ORG>/<REPO>"
-        targetRevision: main
-        path: "full-guide/examples/bookstore-platform/kustomize/regions/{{ .values.region }}"
-      destination:
-        name: "{{ .name }}"
-      syncPolicy:
-        automated: { prune: true, selfHeal: true }
-```
+The root ApplicationSet that applies this stack to each region is in
+[`../examples/bookstore-platform/argocd/applicationset-platform.yaml`](../examples/bookstore-platform/argocd/applicationset-platform.yaml);
+13.03 walks through it.
 
 Readiness checklist (Phase 13a complete when all four are yes):
 
@@ -599,9 +656,8 @@ Readiness checklist (Phase 13a complete when all four are yes):
       (`kubectl kustomize examples/bookstore-platform/kustomize/regions/<REGION> | grep -c '^kind:'`).
 - [ ] `helm lint examples/bookstore/helm/bookstore` reports 0 failed and
       the helm template still produces 49 objects (v1 invariant intact).
-- [ ] The four chapter files in
-      `13-grand-capstone-bookstore-platform/0{1,2,3,4}-*.md` exist with
-      the full 9-section anatomy.
+- [ ] The chapter files 13.02 to 13.04 exist in
+      `13-grand-capstone-bookstore-platform/`.
 
 ## Test your understanding
 
@@ -631,12 +687,32 @@ Readiness checklist (Phase 13a complete when all four are yes):
 4. **Hands-on: render the `bookstore-platform` kustomize overlay for one region and count the objects. Compare to v1's 49. What's the rough delta and what does it tell you?**
    <details><summary>What you should see</summary>
 
-   v2 has on the order of 80-150 objects per region (depending on which chapters' infra is enabled): Crossplane XRDs, ApplicationSets, Istio Gateway + WAF, Keycloak, Strimzi Kafka, MLflow, KServe, Backstage, OpenCost. The delta tells you (a) v2 is structurally larger and (b) most new objects are CRDs from operators — the cluster's "API surface" has grown, not just its workload count. This is platform engineering: more objects, but each managed by an operator the platform team owns.
+   v2 has far more objects per region than the 13 here, and the count grows with each chapter's infrastructure: Crossplane XRDs, ApplicationSets, Istio Gateway + WAF, Keycloak, Strimzi Kafka, MLflow, KServe, Backstage, OpenCost. The delta tells you (a) v2 is structurally larger and (b) most new objects are CRDs from operators, so the cluster's "API surface" has grown, not just its workload count. This is platform engineering: more objects, but each managed by an operator the platform team owns.
+
+   </details>
+
+5. **A feature team's Deployment is refused in its `bookstore-platform-<TENANT>`
+   namespace with a PodSecurity error. What do you change, and what do you leave
+   alone?**
+   <details><summary>Show answer</summary>
+
+   Change the workload until it meets the baseline: a non-root `runAsUser`,
+   `seccompProfile: RuntimeDefault`, `allowPrivilegeEscalation: false`,
+   `capabilities.drop: ["ALL"]`, and an `emptyDir` for each writable path.
+   Leave the namespace's `enforce` label alone. Relaxing it moves the risk onto
+   every Pod in that namespace. If a workload truly needs more, it needs a
+   registered exception with a reason, an upstream source and an expiry, reviewed
+   like any other change.
 
    </details>
 
 ## Further reading
 
+- Official: **Pod Security Admission**,
+  <https://kubernetes.io/docs/concepts/security/pod-security-admission/>, and
+  **RBAC good practices**,
+  <https://kubernetes.io/docs/concepts/security/rbac-good-practices/>. The
+  controls in this chapter rest on both.
 - **Rosso et al., _Production Kubernetes_, ch.6 — "Application Cluster
   Topology"** and **ch.16 — "Platform Abstractions"** — the cluster-as-
   product pattern this part scales up to multi-tenant SaaS, and the
