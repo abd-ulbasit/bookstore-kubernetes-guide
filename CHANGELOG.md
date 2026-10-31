@@ -175,6 +175,7 @@ versions follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   tracker image is built on `python:3.14-slim` (pinned by digest) with MLflow
   3.17.2 and 94 pinned packages, and its Python packages scan clean at
   CRITICAL and HIGH; the training image drops pip as the serving image does.
+- Heavy labs in Parts 05 and 06 (05.05, 05.07, 05.08, 06.01, 06.04) run for real on a three-node kind cluster, with captured output in place of the not-run labels, and the catalog, storefront and payments-worker spreads honour node taints (`nodeTaintsPolicy: Honor`).
 
 ### Fixed
 - Standalone EKS add-ons (kube-proxy, CoreDNS, EBS CSI) now follow
