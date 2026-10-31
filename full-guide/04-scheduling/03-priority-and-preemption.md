@@ -6,11 +6,12 @@
 > best-effort, the nominated node); preemption vs. node-pressure eviction vs.
 > API-initiated eviction vs. `kubectl drain`; `cordon`/`drain`/`uncordon`
 > mechanics; and the descheduler add-on — applied by giving the Bookstore a
-> priority ladder so the data tier outranks the APIs, which outrank batch.
+> priority ladder so the data tier outranks the APIs, which outrank batch, and
+> a quota that stops a tenant from choosing the top classes.
 
 **Estimated time:** ~30 min read · ~60 min hands-on
 **Prerequisites:** [Part 04 ch.01](01-scheduler-and-nodes.md) — the scheduling cycle that runs preemption · [Part 04 ch.02](02-affinity-taints-topology.md) — placement constraints that interact with preemption
-**You'll know after this:** • design a PriorityClass ladder and understand `preemptionPolicy` · • trace the preemption flow (victim selection, graceful deletion, nominated node) · • distinguish preemption from node-pressure eviction, API-initiated eviction, and `kubectl drain` · • use `cordon` / `drain` / `uncordon` correctly during node maintenance · • give the Bookstore a priority ladder so the data tier outranks APIs which outrank batch
+**You'll know after this:** • design a PriorityClass ladder and understand `preemptionPolicy` · • trace the preemption flow (victim selection, graceful deletion, nominated node) · • distinguish preemption from node-pressure eviction, API-initiated eviction, and `kubectl drain` · • use `cordon` / `drain` / `uncordon` correctly during node maintenance · • give the Bookstore a priority ladder so the data tier outranks APIs which outrank batch • stop a tenant from taking a high class with a ResourceQuota
 
 <!-- tags: scheduling, priority-classes, preemption, eviction, drain, pdb -->
 
@@ -35,6 +36,12 @@ the precise line between the four things people conflate —
 **`kubectl drain`** — because confusing them is a classic production
 mis-diagnosis.
 
+The same lever is a threat on a shared cluster. Whoever may set a class on a
+Pod can evict the Pods of everyone running at a lower class, and the scheduler
+applies the rule to whatever class it is given. Scheduling does not stop that.
+What decides it is RBAC, which says who may name a class, and a quota, which
+says how many Pods may use it. The Threats and controls section sets both out.
+
 ## Mental model
 
 Priority is a **single integer per Pod that orders the queue and licenses
@@ -53,8 +60,9 @@ eviction-for-room**:
   high queue position but **will not evict anyone** to get scheduled.
 - **Preemption ≠ eviction ≠ drain.** Preemption is the *scheduler* making room
   for a pending higher-priority Pod. **Node-pressure eviction** is the *kubelet*
-  killing Pods because the *node* is out of memory/disk (ordered by
-  [QoS](../01-core-workloads/03-resources-and-qos.md), not PriorityClass).
+  killing Pods because the *node* is out of memory/disk (it ranks
+  Pods first by whether their usage exceeds their
+  [requests](../01-core-workloads/03-resources-and-qos.md), then by PriorityClass).
   **API-initiated eviction** is a client calling the eviction API (respects
   PodDisruptionBudgets *strictly*). **`kubectl drain`** is you, using
   API-initiated eviction to empty a node for maintenance. Different actor,
@@ -64,6 +72,24 @@ eviction-for-room**:
 Bookstore ladder: `bookstore-data` (postgres) **>** `bookstore-critical`
 (catalog/orders/storefront) **>** `bookstore-batch` (migration/cleanup) — far
 below the cluster's `system-*-critical`.
+
+## Threats and controls
+
+Priority is not a security boundary. It decides who waits and who is evicted,
+and the scheduler applies that rule to whatever class a Pod names. The boundary
+is who may name a class: RBAC on the Pods and on the controllers that create
+them, and a quota in every tenant namespace. Limits as denial of service, such
+as a Pod that asks for a whole node, belong to
+[Part 01 ch.03](../01-core-workloads/03-resources-and-qos.md).
+
+| Threat | Control in this chapter | Deeper |
+|---|---|---|
+| A tenant gives its own Pods a high class and evicts neighbours in other namespaces | A ResourceQuota with a PriorityClass `scopeSelector` in each tenant namespace. Section 6 shows it refusing the request | [Part 05 ch.01](../05-security/01-authn-authz-rbac.md) for RBAC |
+| A tenant reaches the same class through a Deployment, Job or CronJob, which writes the class into a pod template | The quota counts Pods however their controller created them. RBAC on Pods alone does not stop this | [Part 05 ch.01](../05-security/01-authn-authz-rbac.md) |
+| A tenant creates or changes a PriorityClass. Classes are cluster-wide, so a new value or `globalDefault` changes every namespace | No tenant role grants `priorityclasses`. Section 3 shows the `can-i` check | [Part 05 ch.01](../05-security/01-authn-authz-rbac.md) |
+| A tenant uses `system-cluster-critical` or `system-node-critical` in its own namespace | Admission accepts them outside `kube-system` on this cluster (section 4), so the quota lists them too | [PriorityClass scope](https://kubernetes.io/docs/concepts/policy/resource-quotas/) |
+| Batch work evicts serving Pods to run sooner | `preemptionPolicy: Never` on the batch class. This protects availability, not a boundary | [Part 06 ch.05](../06-production-readiness/05-reliability-and-disruptions.md) |
+| A namespace owner deletes the quota that limits it | Keep `resourcequotas` writes in a platform role. Upstream can also require a matching quota for a class, through an admission configuration | [Part 05 ch.01](../05-security/01-authn-authz-rbac.md) |
 
 ## Diagrams
 
@@ -108,8 +134,8 @@ FOUR DIFFERENT THINGS THAT REMOVE A RUNNING/PENDING POD
   ------------------------  ----------  ----------------------  --------------------------
   Preemption                scheduler   a higher-prio Pod is    strictly lower PRIORITY;
                                           Pending, needs room    PDB best-effort
-  Node-pressure eviction    kubelet     node mem/disk/pid       QoS: BestEffort → Burstable
-                                          threshold crossed       (over-request) → Guaranteed
+  Node-pressure eviction    kubelet     node mem/disk/pid       usage over requests first,
+                                          threshold crossed       then PriorityClass
   API-initiated eviction    any client  Eviction subresource    PDB STRICTLY enforced
   kubectl drain             you         node maintenance        = API eviction + cordon
 ```
@@ -156,9 +182,7 @@ preemptionPolicy: Never # batch waits for room; it NEVER evicts others
 # from the repo root (full-guide/) — cluster-scoped: no -n needed
 kubectl apply -f examples/bookstore/raw-manifests/35-priorityclasses.yaml
 kubectl get priorityclass | grep -E 'bookstore|system-'
-#   bookstore-data      1000000   false
-#   bookstore-critical  100000    false
-#   bookstore-batch     1000      false   (and the built-in system-*-critical)
+# Expect three bookstore-* rows, with values 1000000, 100000 and 1000.
 ```
 
 The wide value gaps only need to *order* the tiers; the space lets future
@@ -206,49 +230,423 @@ kubectl get pods -n bookstore \
 > guide does not set `globalDefault: true`: it would change priority for Pods
 > that never opted in, cluster-wide.)
 
-### 3. Watch preemption actually happen
+### 3. Set up a tenant and a batch neighbour
 
-Create a low-priority "filler" that hogs a node, then schedule a high-priority
-Pod that can only fit by evicting the filler. Uses public images and a throwaway
-namespace-local name so no saved manifest changes:
+This section sets up the problem on three nodes, so one worker can fill up
+while another stays free. Create the cluster from the config the Part 04
+chapters share, which has one control plane and two workers:
 
 ```sh
-ALLOC=$(kubectl get nodes -o jsonpath='{.items[0].status.allocatable.cpu}')
-echo "node allocatable CPU = $ALLOC"   # size the requests near this
-
-# (a) Low-priority filler: bookstore-batch, requests most of a node.
-kubectl -n bookstore create deployment filler --image=registry.k8s.io/pause:3.9
-kubectl -n bookstore patch deployment filler --type=json -p \
-  '[{"op":"add","path":"/spec/template/spec/priorityClassName","value":"bookstore-batch"}]'
-kubectl -n bookstore set resources deployment/filler --requests=cpu=900m
-kubectl -n bookstore scale deployment/filler --replicas=4   # pack the node(s)
-kubectl -n bookstore get pods -l app=filler -o wide
-
-# (b) High-priority Pod that needs room the filler is occupying:
-kubectl -n bookstore create deployment vip --image=registry.k8s.io/pause:3.9
-kubectl -n bookstore patch deployment vip --type=json -p \
-  '[{"op":"add","path":"/spec/template/spec/priorityClassName","value":"bookstore-data"}]'
-kubectl -n bookstore set resources deployment/vip --requests=cpu=900m
-
-# Watch: the scheduler PREEMPTS filler Pods (lower priority) to fit vip.
-kubectl -n bookstore get events --sort-by=.metadata.creationTimestamp | tail -n 15
-#   ... Preempted by bookstore/<VIP-POD> on node <NODE>
-kubectl -n bookstore get pods -o wide   # some filler Pods terminated/Pending; vip Running
-kubectl -n bookstore get pod -l app=vip \
-  -o jsonpath='{.items[0].status.nominatedNodeName}{"\n"}'   # set during preemption
-
-# Reverse: bookstore-batch has preemptionPolicy:Never — it never does this TO others.
-kubectl -n bookstore delete deployment filler vip            # clean up
+kind create cluster --name bookstore --config examples/security-lab/kind/cluster-three-node.yaml
 ```
 
-You just saw the full flow: `vip` (priority 1000000) was Pending → `PostFilter`
-found that evicting `filler` (priority 1000) frees enough CPU → `filler` Pods
-got a **graceful** SIGTERM (their `terminationGracePeriodSeconds` + any preStop
-ran) → `vip.status.nominatedNodeName` was set → `vip` scheduled. Crucially,
-`filler` could preempt **nothing** itself: `bookstore-batch` is
-`preemptionPolicy: Never`.
+Each filler and the vip request `cpu: "3"`. On the lab's kind workers, which
+report 4 allocatable CPU, that is three-quarters of one worker. On a smaller
+worker, set those requests to about three-quarters of one worker's allocatable
+CPU, so that two fillers fill both workers and the vip needs a victim.
+`kubectl get node -o custom-columns=NAME:.metadata.name,CPU:.status.allocatable.cpu`
+shows the value.
 
-### 4. `cordon` / `drain` / `uncordon` (the operator's tool)
+The output in sections 3 to 6 came from a lab cluster whose nodes are named
+`sf-sched-*`, and whose namespaces and PriorityClasses had a fixed prefix added
+to them. The commands here use the names the chapter gives.
+
+A tenant in `team-a` has one identity, `deployer`. Its RBAC lets it create
+Deployments in its namespace and nothing else. The `bookstore` namespace runs a
+batch filler that takes most of two workers. Later, the tenant asks for the
+data-tier class.
+
+Apply the tenant's namespace and RBAC first. A cluster administrator applies
+this block. The tenant cannot create ServiceAccounts or Roles.
+
+Save it as `tenant.yaml`:
+
+```yaml
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: team-a
+  labels:
+    pod-security.kubernetes.io/enforce: restricted
+    pod-security.kubernetes.io/warn: restricted
+---
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: vip
+  namespace: team-a
+automountServiceAccountToken: false
+---
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: deployer
+  namespace: team-a
+automountServiceAccountToken: false
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: deployer
+  namespace: team-a
+rules:
+  - apiGroups: ["apps"]
+    resources: ["deployments"]
+    verbs: ["get", "list", "watch", "create", "update", "patch", "delete"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: deployer
+  namespace: team-a
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: Role
+  name: deployer
+subjects:
+  - kind: ServiceAccount
+    name: deployer
+    namespace: team-a
+```
+
+Save the filler as `filler.yaml` and apply it. Its class is
+`bookstore-batch`, with `preemptionPolicy: Never`, so it waits for room and
+never evicts anyone to get it. The pod template carries the baseline in
+full. Each field is explained in [01.01](../01-core-workloads/01-pods.md#baseline).
+The pause image declares UID and GID 65535, so the baseline pins those.
+
+```yaml
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: filler
+  namespace: bookstore
+automountServiceAccountToken: false
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: filler
+  namespace: bookstore
+spec:
+  replicas: 2
+  selector:
+    matchLabels:
+      app: filler
+  template:
+    metadata:
+      labels:
+        app: filler
+    spec:
+      serviceAccountName: filler
+      automountServiceAccountToken: false
+      priorityClassName: bookstore-batch
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 65535
+        runAsGroup: 65535
+        seccompProfile:
+          type: RuntimeDefault
+      containers:
+        - name: pause
+          # registry.k8s.io/pause:3.9, pinned by its index digest
+          image: registry.k8s.io/pause@sha256:7031c1b283388d2c2e09b57badb803c05ebed362dc88d84b480cc47f72a21097
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities:
+              drop: ["ALL"]
+          resources:
+            requests:
+              cpu: "3"
+              memory: 64Mi
+            limits:
+              memory: 64Mi
+          volumeMounts:
+            - name: tmp
+              mountPath: /tmp
+      volumes:
+        - name: tmp
+          emptyDir: {}
+```
+
+```sh
+kubectl apply -f tenant.yaml
+kubectl apply -f filler.yaml
+kubectl -n bookstore rollout status deployment/filler --timeout=180s
+kubectl -n bookstore get pods -l app=filler \
+  -o custom-columns=NAME:.metadata.name,NODE:.spec.nodeName,STATUS:.status.phase,PRIORITY:.spec.priority
+```
+
+<!-- gate: output -->
+```text
+NAME                     NODE               STATUS    PRIORITY
+filler-9467fbd58-clgfb   sf-sched-worker    Running   1000
+filler-9467fbd58-fxw5n   sf-sched-worker2   Running   1000
+```
+
+Check what the deployer may do. It can create Deployments, and a Deployment
+carries a pod template, which is where a class lives. It cannot create a Pod
+directly, and it cannot create a PriorityClass at all.
+
+```sh
+kubectl auth can-i create priorityclasses --as=system:serviceaccount:team-a:deployer
+kubectl auth can-i create deployments -n team-a --as=system:serviceaccount:team-a:deployer
+kubectl auth can-i create pods -n team-a --as=system:serviceaccount:team-a:deployer
+```
+
+<!-- gate: output -->
+```text
+Warning: resource 'priorityclasses' is not namespace scoped in group 'scheduling.k8s.io'
+no
+# ...
+yes
+# ...
+no
+```
+
+### 4. Check what admission allows
+
+Before you rely on a class, check what the API server accepts. These are
+server-side dry runs, so nothing is created. The name and value rules are
+upstream: a user-defined PriorityClass name cannot start with `system-`, and a
+user-defined value cannot exceed `1000000000`
+([PriorityClass docs](https://kubernetes.io/docs/concepts/scheduling-eviction/pod-priority-preemption/)).
+
+The probe Pod below matters most for a tenant. It names
+`system-cluster-critical` and runs as the tenant's ServiceAccount in the
+tenant's namespace. Save it as `probe.yaml`. It is applied only with
+`--dry-run=server`, so it is never scheduled.
+
+```yaml
+apiVersion: v1
+kind: Pod
+metadata:
+  name: probe
+  namespace: team-a
+spec:
+  serviceAccountName: vip
+  automountServiceAccountToken: false
+  priorityClassName: system-cluster-critical
+  securityContext:
+    runAsNonRoot: true
+    runAsUser: 65535
+    runAsGroup: 65535
+    seccompProfile:
+      type: RuntimeDefault
+  containers:
+    - name: pause
+      # registry.k8s.io/pause:3.9, pinned by its index digest
+      image: registry.k8s.io/pause@sha256:7031c1b283388d2c2e09b57badb803c05ebed362dc88d84b480cc47f72a21097
+      securityContext:
+        allowPrivilegeEscalation: false
+        readOnlyRootFilesystem: true
+        capabilities:
+          drop: ["ALL"]
+      resources:
+        requests:
+          cpu: 10m
+          memory: 16Mi
+        limits:
+          memory: 16Mi
+      volumeMounts:
+        - name: tmp
+          mountPath: /tmp
+  volumes:
+    - name: tmp
+      emptyDir: {}
+```
+
+```sh
+kubectl create priorityclass system-example --value=1 --dry-run=server
+kubectl create priorityclass too-high --value=1000000001 --dry-run=server
+kubectl create priorityclass ceiling --value=1000000000 --dry-run=server
+kubectl apply --dry-run=server -f probe.yaml
+```
+
+<!-- gate: output -->
+```text
+error: failed to create priorityclass: PriorityClass.scheduling.k8s.io "system-example" is invalid: metadata.name: Forbidden: priority class names with 'system-' prefix are reserved for system use only. error: system-example is not a known system priority class
+# ...
+error: failed to create priorityclass: PriorityClass.scheduling.k8s.io "too-high" is invalid: value: Forbidden: maximum allowed value of a user defined priority is 1000000000
+# ...
+priorityclass.scheduling.k8s.io/ceiling created (server dry run)
+# ...
+pod/probe created (server dry run)
+```
+
+The two refusals are the upstream rules working. The ceiling is accepted, so
+`1000000000` is the highest value a user can give a class. The probe is also
+accepted. On this cluster, default admission lets a tenant's Pod name
+`system-cluster-critical` in its own namespace, and that class outranks every
+Bookstore tier. Nothing in the default configuration stops it. The quota in
+section 6 therefore lists both system classes, not only the Bookstore ones.
+
+### 5. Watch a tenant preempt across namespaces
+
+The `vip` Deployment asks for the data-tier class. The deployer applies it, as
+a tenant would. Both workers are full, and the lowest-priority thing running is
+a filler in another namespace. Save the Deployment as `vip.yaml`.
+
+```yaml
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: vip
+  namespace: team-a
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: vip
+  template:
+    metadata:
+      labels:
+        app: vip
+    spec:
+      serviceAccountName: vip
+      automountServiceAccountToken: false
+      priorityClassName: bookstore-data
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 65535
+        runAsGroup: 65535
+        seccompProfile:
+          type: RuntimeDefault
+      containers:
+        - name: pause
+          # registry.k8s.io/pause:3.9, pinned by its index digest
+          image: registry.k8s.io/pause@sha256:7031c1b283388d2c2e09b57badb803c05ebed362dc88d84b480cc47f72a21097
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities:
+              drop: ["ALL"]
+          resources:
+            requests:
+              cpu: "3"
+              memory: 64Mi
+            limits:
+              memory: 64Mi
+          volumeMounts:
+            - name: tmp
+              mountPath: /tmp
+      volumes:
+        - name: tmp
+          emptyDir: {}
+```
+
+```sh
+kubectl --as=system:serviceaccount:team-a:deployer apply -f vip.yaml
+kubectl -n team-a rollout status deployment/vip --timeout=180s
+kubectl -n team-a get events --field-selector reason=FailedScheduling
+kubectl -n bookstore get events --field-selector reason=Preempted
+kubectl -n bookstore get pods -l app=filler \
+  -o custom-columns=NAME:.metadata.name,NODE:.spec.nodeName,STATUS:.status.phase,PRIORITY:.spec.priority
+kubectl -n team-a get pods -l app=vip \
+  -o custom-columns=NAME:.metadata.name,NOMINATED:.status.nominatedNodeName,NODE:.spec.nodeName,STATUS:.status.phase,PRIORITY:.spec.priority
+```
+
+<!-- gate: output -->
+```text
+LAST SEEN   TYPE      REASON             OBJECT                     MESSAGE
+61s         Warning   FailedScheduling   pod/vip-859f69475f-9fjfd   0/3 nodes are available: 1 node(s) had untolerated taint(s), 2 Insufficient cpu. preemption: found a potential placement for pod on node sf-sched-worker2, preempting 1 victims
+# ...
+LAST SEEN   TYPE     REASON      OBJECT                       MESSAGE
+63s         Normal   Preempted   pod/filler-9467fbd58-fxw5n   Preempted by pod 4b8e5762-ed8e-4918-a675-e1b64965e456 on node sf-sched-worker2
+# ...
+NAME                     NODE              STATUS    PRIORITY
+filler-9467fbd58-clgfb   sf-sched-worker   Running   1000
+filler-9467fbd58-xsp4k   <none>            Pending   1000
+# ...
+NAME                   NOMINATED   NODE               STATUS    PRIORITY
+vip-859f69475f-9fjfd   <none>      sf-sched-worker2   Running   1000000
+```
+
+The scheduler's message says that no node fits the vip as it stands, and that
+one node would fit it if a victim left. It picks that node and one victim. The
+victim gets a graceful stop, and the `Preempted` event on the filler names the
+preemptor by its UID. The displaced filler is Pending, not gone. Its class is
+`preemptionPolicy: Never`, so it cannot preempt the vip to win its place back.
+While the victim terminates, the scheduler records the chosen node on the vip
+as `status.nominatedNodeName`. Upstream does not guarantee that the Pod lands
+there. Once the Pod is bound, the field is empty, which the table shows.
+
+### 6. Refuse the tier with a quota
+
+The defence is a ResourceQuota whose `scopeSelector` names the PriorityClasses.
+A quota with a PriorityClass scope matches only Pods that name one of its
+classes ([Kubernetes docs](https://kubernetes.io/docs/concepts/policy/resource-quotas/)).
+This quota sets `pods: "0"` for the two Bookstore tiers and the two system
+classes, so the namespace runs none of them. Pods that name the batch class, or
+no class, are not matched. Save it as `quota.yaml`.
+
+```yaml
+apiVersion: v1
+kind: ResourceQuota
+metadata:
+  name: no-data-tier
+  namespace: team-a
+spec:
+  hard:
+    pods: "0"
+  scopeSelector:
+    matchExpressions:
+      - operator: In
+        scopeName: PriorityClass
+        values: ["bookstore-data", "bookstore-critical", "system-cluster-critical", "system-node-critical"]
+```
+
+Remove the earlier `vip`, apply the quota, and apply the `vip` Deployment as the
+tenant again. Then check the probe and the batch probe against the quota.
+
+```sh
+kubectl -n team-a delete deployment vip
+kubectl -n bookstore rollout status deployment/filler --timeout=180s
+kubectl apply -f quota.yaml
+kubectl --as=system:serviceaccount:team-a:deployer apply -f vip.yaml
+kubectl -n team-a wait deployment/vip --for=condition=ReplicaFailure --timeout=120s
+kubectl -n team-a get events --field-selector reason=FailedCreate
+kubectl apply --dry-run=server -f probe.yaml
+sed 's/system-cluster-critical/bookstore-batch/' probe.yaml | kubectl apply --dry-run=server -f -
+kubectl -n bookstore get pods -l app=filler \
+  -o custom-columns=NAME:.metadata.name,NODE:.spec.nodeName,STATUS:.status.phase,PRIORITY:.spec.priority
+```
+
+<!-- gate: output -->
+```text
+deployment.apps/vip condition met
+# ...
+LAST SEEN   TYPE      REASON         OBJECT                      MESSAGE
+# ...
+0s          Warning   FailedCreate   replicaset/vip-859f69475f   Error creating: pods "vip-859f69475f-2dcjk" is forbidden: exceeded quota: no-data-tier, requested: pods=1, used: pods=0, limited: pods=0
+# ...
+Error from server (Forbidden): error when creating "STDIN": pods "probe" is forbidden: exceeded quota: no-data-tier, requested: pods=1, used: pods=0, limited: pods=0
+# ...
+pod/probe created (server dry run)
+# ...
+NAME                     NODE               STATUS    PRIORITY
+filler-9467fbd58-clgfb   sf-sched-worker    Running   1000
+filler-9467fbd58-xsp4k   sf-sched-worker2   Running   1000
+```
+
+The Deployment was accepted, because RBAC allows it. The refusal came at Pod
+admission. The ReplicaSet controller tried to create Pods, the quota refused
+them, and the ReplicaSet reported each refusal as a `FailedCreate` event. The
+same check covers any controller and any route into a Pod. The batch probe is
+accepted, which shows the quota matches only the listed classes. The filler
+kept running, and nothing was preempted, because the request never reached the
+scheduler.
+
+Two limits apply. A quota protects only a namespace that has one. Upstream can
+require a matching quota for a class in every namespace, through an API server
+admission configuration (`limitedResources`). That is a cluster setting, and
+this chapter does not change the cluster's configuration. A quota is also only
+as strong as the rights over it. A tenant that can edit or delete its
+`ResourceQuota` removes the control, so `resourcequotas` belongs to a platform
+role.
+
+### 7. `cordon` / `drain` / `uncordon` (the operator's tool)
 
 ```sh
 NODE=$(kubectl get nodes -o jsonpath='{.items[0].metadata.name}')
@@ -286,9 +684,10 @@ here, just know which mechanism honors them strictly.
   `pod.spec.priority`. No class named ⇒ the value of the `globalDefault` class
   if one exists, else `0`. An **unknown** class name ⇒ the Pod is **rejected at
   admission** (hence the name must exist first, and must match between `35-` and
-  the workloads). User-created classes are capped below
-  `1000000000`; the two built-ins `system-cluster-critical` (2000000000) and
-  `system-node-critical` (2000001000) are above that ceiling so platform Pods
+  the workloads). A user-defined value can be at most
+  `1000000000`, and a name cannot start with `system-` (section 4 shows both
+  refusals). The two built-ins, `system-cluster-critical` (2000000000) and
+  `system-node-critical` (2000001000), sit above that ceiling, so platform Pods
   always outrank application Pods.
 - **`globalDefault` and `preemptionPolicy`.** Exactly one PriorityClass may set
   `globalDefault: true`; it then supplies the priority for **every** Pod
@@ -312,20 +711,31 @@ here, just know which mechanism honors them strictly.
   `status.nominatedNodeName` set so other scheduling sees the slot is spoken
   for; `P` is then re-queued and **re-evaluated** — it usually lands on the
   nominated node but is not contractually guaranteed to (the scheduler
-  re-checks; conditions may have changed).
-- **Preemption vs. node-pressure eviction — different ordering.** Preemption
-  orders by **`pod.spec.priority`** (PriorityClass). **Node-pressure eviction**
-  (the kubelet, when a node crosses a memory/disk/PID **eviction signal
-  threshold** such as `memory.available<100Mi`) orders by **QoS then usage-over-
-  requests**, *not* by PriorityClass: it reclaims by killing **BestEffort**
-  first, then **Burstable** Pods most over their requests, then **Guaranteed**
-  last — exactly the order from
-  [Part 01 ch.03](../01-core-workloads/03-resources-and-qos.md). (Modern
-  kubelets do consider priority as a secondary factor among same-QoS Pods, but
-  QoS dominates.) So a high-`PriorityClass`, BestEffort Pod can still be
-  node-pressure-evicted before a low-priority Guaranteed one — priority protects
-  against the *scheduler preempting you*, QoS+requests protect against the
-  *kubelet reclaiming you*. They are orthogonal; you need both set correctly.
+  re-checks; conditions may have changed). Once the Pod is bound, the field is
+  cleared: section 5 shows `<none>` for the bound vip.
+- **Preemption vs. node-pressure eviction: different ordering.** Preemption
+  orders by **`pod.spec.priority`**. Node-pressure eviction (the kubelet, when
+  a node crosses a memory, disk or PID threshold such as
+  `memory.available<100Mi`) ranks Pods in a different order: first the Pods
+  whose usage of the starved resource exceeds their requests, then by
+  PriorityClass, then by usage relative to requests. QoS class is not part of
+  that ranking. [Part 01 ch.03](../01-core-workloads/03-resources-and-qos.md)
+  shows how the classes follow from requests. A BestEffort Pod has no requests,
+  so it is over them as soon as it uses anything. A BestEffort Pod with a high
+  class is therefore still in the first group the kubelet evicts from, ahead of
+  Guaranteed Pods of a lower class. Priority protects against the *scheduler*
+  removing you; requests and usage decide the *kubelet*. You need both set
+  correctly.
+- **A ResourceQuota by PriorityClass.** A quota whose `scopeSelector` names
+  classes matches only Pods that name one of them, and it limits what it tracks
+  for them, such as `pods`, `cpu` and `memory`
+  ([docs](https://kubernetes.io/docs/concepts/policy/resource-quotas/)).
+  Admission applies it to the Pod however the Pod was created, so it also
+  refuses the Pods that a Deployment's ReplicaSet tries to create (section 6). A
+  namespace with no matching quota is not restricted by default. Upstream can
+  change that with an admission configuration (`limitedResources`) that rejects
+  a class in any namespace without a matching quota. That is a cluster setting,
+  not something a workload can set.
 - **API-initiated eviction & `drain`.** The **Eviction** subresource
   (`POST .../pods/<P>/eviction`) is a *policy-aware delete*: the API server
   permits it **only if it would not violate a `PodDisruptionBudget`** (otherwise
@@ -375,12 +785,13 @@ here, just know which mechanism honors them strictly.
 > `bookstore-batch` does exactly this. Reserve preemption (the default policy)
 > for things that genuinely must run *now*.
 
-> **In production:** **priority and QoS are orthogonal — set both.**
-> PriorityClass governs scheduler **preemption**; QoS + requests govern kubelet
-> **node-pressure eviction**. A critical Pod that is `BestEffort` will still be
-> the first thing the kubelet kills under node memory pressure regardless of its
-> high priority. Make must-not-die Pods *both* high-priority *and* Guaranteed
-> (request==limit), as the Bookstore does for Postgres.
+> **In production:** priority does not protect a Pod from node-pressure
+> eviction. The kubelet ranks Pods by usage against requests first and by
+> priority second, so a must-not-die Pod needs both a high class and requests
+> that match its real usage. The Bookstore's Postgres sets requests below its
+> limits, so it is Burstable: once its usage exceeds its requests, it is in the
+> first group the kubelet evicts from, whatever its class. Size its requests
+> from measured usage.
 
 > **In production:** PDBs are honored **strictly by `drain`/eviction** but only
 > **best-effort by preemption**. Size PDBs so maintenance can proceed (not
@@ -413,7 +824,8 @@ kubectl drain    <NODE> --ignore-daemonsets --delete-emptydir-data --timeout=120
 kubectl uncordon <NODE>                                    # resume scheduling
 ```
 
-Minimal skeletons:
+Minimal skeletons. The first is a complete object. The second is a fragment:
+the pod template of any workload, with no `kind`, so it is not a manifest.
 
 ```yaml
 apiVersion: scheduling.k8s.io/v1
@@ -423,9 +835,10 @@ value: 100000
 globalDefault: false                     # avoid true unless deliberately cluster-wide
 preemptionPolicy: PreemptLowerPriority    # or Never (high queue spot, no evicting)
 description: "User-facing services."
----
-apiVersion: apps/v1
-kind: Deployment
+```
+
+```yaml
+# Fragment: the pod template of a workload.
 spec:
   template:
     spec:
@@ -438,9 +851,11 @@ Checklist:
 - [ ] All app classes are below `system-cluster-critical`/`system-node-critical`
 - [ ] No unintended `globalDefault: true` (or it is a low/normal value)
 - [ ] Batch/deferrable work uses `preemptionPolicy: Never`
-- [ ] Must-not-die Pods are **both** high-priority **and** Guaranteed QoS
+- [ ] Every tenant namespace has a ResourceQuota whose `scopeSelector` lists every high class, the system classes included
+- [ ] Tenant roles cannot create or update `priorityclasses` or `resourcequotas`
+- [ ] Must-not-die Pods have a high class **and** requests that match their usage
 - [ ] PDBs sized so `drain` can proceed; drain script uses `--ignore-daemonsets`
-- [ ] Know which removed your Pod: preemption (priority) vs. node-pressure (QoS) vs. drain (PDB)
+- [ ] Know which removed your Pod: preemption (priority) vs. node-pressure (requests, then priority) vs. drain (PDB)
 
 ## Test your understanding
 
@@ -449,7 +864,7 @@ Checklist:
 1. **Explain the difference between scheduler preemption and kubelet node-pressure eviction. Both make a Pod disappear under "out of capacity" — how do you tell which one happened?**
    <details><summary>Show answer</summary>
 
-   Preemption is the scheduler proactively evicting strictly *lower-priority* Pods to make room for a Pending higher-priority Pod — ordered by `pod.spec.priority`. Node-pressure eviction is the kubelet killing Pods because the node crossed a memory/disk/PID threshold — ordered by QoS (BestEffort first, then Burstable most-over-requests, Guaranteed last). Tell them apart: `kubectl get events --field-selector reason=Preempted` for the scheduler; `kubectl describe node` Events show `Evicted` with `MemoryPressure` for the kubelet (see §Mental model and §How it works, "Preemption vs. node-pressure eviction").
+   Preemption is the scheduler proactively evicting strictly *lower-priority* Pods to make room for a Pending higher-priority Pod, ordered by `pod.spec.priority`. Node-pressure eviction is the kubelet killing Pods because the node crossed a memory, disk or PID threshold. It ranks Pods by whether their usage exceeds their requests, then by PriorityClass, then by usage relative to requests; QoS class is not the ranking. Tell them apart: `kubectl get events -n <NS> --field-selector reason=Preempted` shows the scheduler's preemptions, and node Events show `Evicted` with `MemoryPressure` for the kubelet (see §Mental model and §How it works, "Preemption vs. node-pressure eviction").
 
    </details>
 
@@ -470,14 +885,21 @@ Checklist:
 4. **You run `kubectl drain node-1`, and it hangs forever even though there's only one Deployment with 3 replicas. List two PDB-related explanations and the fix.**
    <details><summary>Show answer</summary>
 
-   (1) PDB `minAvailable: 3` for a 3-replica Deployment: any eviction would violate the budget, so the API-eviction returns 429 forever. (2) PDB `maxUnavailable: 0`: same effect from the other side. Drain *strictly* honors PDBs (unlike preemption, which respects them best-effort). Fix: relax the PDB to `minAvailable: 2` (or `maxUnavailable: 1`), so 2 of 3 must remain — drain can take one Pod at a time per node (see §4. cordon/drain/uncordon and §Production notes, "PDBs honored strictly by drain").
+   (1) PDB `minAvailable: 3` for a 3-replica Deployment: any eviction would violate the budget, so the API-eviction returns 429 forever. (2) PDB `maxUnavailable: 0`: same effect from the other side. Drain *strictly* honors PDBs (unlike preemption, which respects them best-effort). Fix: relax the PDB to `minAvailable: 2` (or `maxUnavailable: 1`), so 2 of 3 must remain — drain can take one Pod at a time per node (see §7. cordon/drain/uncordon and §Production notes, "PDBs honored strictly by drain").
 
    </details>
 
 5. **Hands-on extension: apply the Bookstore PriorityClasses, deploy a "filler" Deployment with `priorityClassName: bookstore-batch` that requests most of a node's CPU, then deploy a `bookstore-data` Pod that needs that CPU. What do you observe in `kubectl get events`, and what would change if you reversed the priority classes?**
    <details><summary>What you should see</summary>
 
-   You see `Preempted` events for filler Pods — the scheduler evicts them (graceful SIGTERM + terminationGracePeriod) to make room for the data Pod, which then schedules on the freed node (its `status.nominatedNodeName` set during the gap). Reversing priorities makes filler the higher tier: now `bookstore-data` would have no lower-priority Pods to preempt and would simply stay `Pending` until natural capacity appears (see §3. Watch preemption actually happen).
+   You see `Preempted` events for filler Pods — the scheduler evicts them (graceful SIGTERM + terminationGracePeriod) to make room for the data Pod, which then schedules on the freed node (its `status.nominatedNodeName` set during the gap). Reversing priorities makes filler the higher tier: now `bookstore-data` would have no lower-priority Pods to preempt and would simply stay `Pending` until natural capacity appears (see §5. Watch a tenant preempt across namespaces).
+
+   </details>
+
+6. **A tenant's Deployment names `bookstore-data`, and RBAC lets the tenant create Deployments but not Pods. Does RBAC on Pods stop the preemption? What does a quota do that RBAC does not, and what does neither cover?**
+   <details><summary>Show answer</summary>
+
+   RBAC on Pods does not stop it. The Deployment is allowed, and the ReplicaSet controller creates the Pods, so the class reaches the scheduler. A ResourceQuota whose `scopeSelector` names the class refuses at Pod admission, whichever controller created the Pod, and section 6 shows the ReplicaSet's `FailedCreate` event. Neither covers a namespace that has no quota, unless the admission configuration requires one, and neither covers a cluster administrator who can edit the quota or the classes. Those belong to platform RBAC and to the cluster's admission configuration.
 
    </details>
 
@@ -494,4 +916,6 @@ Checklist:
   node-pressure eviction
   <https://kubernetes.io/docs/concepts/scheduling-eviction/node-pressure-eviction/>,
   and safely draining a node
-  <https://kubernetes.io/docs/tasks/administer-cluster/safely-drain-node/>.
+  <https://kubernetes.io/docs/tasks/administer-cluster/safely-drain-node/>,
+  and resource quotas, with the PriorityClass scope
+  <https://kubernetes.io/docs/concepts/policy/resource-quotas/>.

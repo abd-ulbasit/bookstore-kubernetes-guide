@@ -1,0 +1,141 @@
+# Transcript for full-guide/04-scheduling/03-priority-and-preemption.md.
+# Tier A: a kind cluster named sf-sched on one Linux lab host. It has one
+# control plane and two workers, each a Kubernetes v1.37.0 node, and the client
+# is kubectl v1.37.2. The cluster is shared with other workers, so this run used
+# its own namespaces, p04-03-bookstore and p04-03-team-a, where the chapter
+# prints bookstore and team-a. Its PriorityClasses carry the prefix
+# p04-03-bookstore-, where the chapter prints bookstore-. The lab node names
+# (sf-sched-*) are kept as captured.
+# The manifests are the chapter's own blocks, saved to files under the names the
+# chapter gives. Each is applied through a sed expression that adds the prefix
+# shown in the command. The Part 01 namespace bookstore is created here by a
+# lab-only file, because this cluster has no earlier chapters. The filler and
+# the vip are applied with the same text the chapter prints.
+# The kind create step was not run: the cluster already existed. The config the
+# chapter names is examples/security-lab/kind/cluster-three-node.yaml.
+# The dry-run PriorityClass names (system-example, too-high, ceiling) are never
+# created, so they carry no prefix.
+# What did not work the first time: the first capture put only the two
+# Bookstore classes in the quota. A probe then showed the system class accepted
+# in the tenant namespace, so the quota was widened to the two system classes
+# and the run was repeated. Two earlier runs also started while one worker
+# carried a NoSchedule taint from another workload. The filler was then applied
+# with one replica, and the run was repeated after the taint was gone. The
+# first line of the run records the state it started in. The transcript below
+# is the run that completed on a clean cluster, with two replicas.
+# The cluster-wide list of PriorityClasses at the start can show objects that
+# belong to other workers. This run changed only the p04-03 objects it created,
+# and deleted only those.
+# no worker carries another workload's taint at this point; the filler is applied with two replicas
+$ kubectl version
+Client Version: v1.37.2
+Kustomize Version: v5.8.1
+Server Version: v1.37.0
+$ kubectl config current-context
+kind-sf-sched
+$ kubectl get nodes -o custom-columns=NAME:.metadata.name,CPU:.status.allocatable.cpu,MEMORY:.status.allocatable.memory,TAINTS:.spec.taints[*].key
+NAME                     CPU   MEMORY      TAINTS
+sf-sched-control-plane   4     7480448Ki   node-role.kubernetes.io/control-plane
+sf-sched-worker          4     7480448Ki   <none>
+sf-sched-worker2         4     7480448Ki   <none>
+$ kubectl get priorityclass
+NAME                      VALUE        GLOBAL-DEFAULT   AGE   PREEMPTIONPOLICY
+system-cluster-critical   2000000000   false            51m   PreemptLowerPriority
+system-node-critical      2000001000   false            51m   PreemptLowerPriority
+$ sed -e 's/bookstore-/p04-03-bookstore-/g' examples/bookstore/raw-manifests/35-priorityclasses.yaml | kubectl apply -f -
+priorityclass.scheduling.k8s.io/p04-03-bookstore-data created
+priorityclass.scheduling.k8s.io/p04-03-bookstore-critical created
+priorityclass.scheduling.k8s.io/p04-03-bookstore-batch created
+$ sed -e 's/bookstore-/p04-03-bookstore-/g' -e 's/: bookstore$/: p04-03-bookstore/' -e 's/: team-a$/: p04-03-team-a/' lab-bookstore-namespace.yaml | kubectl apply -f -
+namespace/p04-03-bookstore created
+$ sed -e 's/bookstore-/p04-03-bookstore-/g' -e 's/: bookstore$/: p04-03-bookstore/' -e 's/: team-a$/: p04-03-team-a/' tenant.yaml | kubectl apply -f -
+namespace/p04-03-team-a created
+serviceaccount/vip created
+serviceaccount/deployer created
+role.rbac.authorization.k8s.io/deployer created
+rolebinding.rbac.authorization.k8s.io/deployer created
+$ sed  -e 's/bookstore-/p04-03-bookstore-/g' -e 's/: bookstore$/: p04-03-bookstore/' -e 's/: team-a$/: p04-03-team-a/' filler.yaml | kubectl apply -f -
+serviceaccount/filler created
+deployment.apps/filler created
+$ kubectl -n p04-03-bookstore rollout status deployment/filler --timeout=180s
+Waiting for deployment "filler" rollout to finish: 0 of 2 updated replicas are available...
+Waiting for deployment "filler" rollout to finish: 1 of 2 updated replicas are available...
+deployment "filler" successfully rolled out
+$ kubectl -n p04-03-bookstore get pods -l app=filler -o custom-columns=NAME:.metadata.name,NODE:.spec.nodeName,STATUS:.status.phase,PRIORITY:.spec.priority
+NAME                     NODE               STATUS    PRIORITY
+filler-9467fbd58-clgfb   sf-sched-worker    Running   1000
+filler-9467fbd58-fxw5n   sf-sched-worker2   Running   1000
+$ kubectl auth can-i create priorityclasses --as=system:serviceaccount:p04-03-team-a:deployer
+Warning: resource 'priorityclasses' is not namespace scoped in group 'scheduling.k8s.io'
+
+no
+$ kubectl auth can-i create deployments -n p04-03-team-a --as=system:serviceaccount:p04-03-team-a:deployer
+yes
+$ kubectl auth can-i create pods -n p04-03-team-a --as=system:serviceaccount:p04-03-team-a:deployer
+no
+$ kubectl create priorityclass system-example --value=1 --dry-run=server
+error: failed to create priorityclass: PriorityClass.scheduling.k8s.io "system-example" is invalid: metadata.name: Forbidden: priority class names with 'system-' prefix are reserved for system use only. error: system-example is not a known system priority class
+$ kubectl create priorityclass too-high --value=1000000001 --dry-run=server
+error: failed to create priorityclass: PriorityClass.scheduling.k8s.io "too-high" is invalid: value: Forbidden: maximum allowed value of a user defined priority is 1000000000
+$ kubectl create priorityclass ceiling --value=1000000000 --dry-run=server
+priorityclass.scheduling.k8s.io/ceiling created (server dry run)
+$ sed -e 's/bookstore-/p04-03-bookstore-/g' -e 's/: bookstore$/: p04-03-bookstore/' -e 's/: team-a$/: p04-03-team-a/' probe.yaml | kubectl apply --dry-run=server -f -
+pod/probe created (server dry run)
+$ sed -e 's/bookstore-/p04-03-bookstore-/g' -e 's/: bookstore$/: p04-03-bookstore/' -e 's/: team-a$/: p04-03-team-a/' vip.yaml | kubectl --as=system:serviceaccount:p04-03-team-a:deployer apply -f -
+deployment.apps/vip created
+$ kubectl -n p04-03-team-a rollout status deployment/vip --timeout=180s
+Waiting for deployment "vip" rollout to finish: 0 of 1 updated replicas are available...
+deployment "vip" successfully rolled out
+$ kubectl -n p04-03-team-a get events --field-selector reason=FailedScheduling
+LAST SEEN   TYPE      REASON             OBJECT                     MESSAGE
+61s         Warning   FailedScheduling   pod/vip-859f69475f-9fjfd   0/3 nodes are available: 1 node(s) had untolerated taint(s), 2 Insufficient cpu. preemption: found a potential placement for pod on node sf-sched-worker2, preempting 1 victims
+$ kubectl -n p04-03-bookstore get events --field-selector reason=Preempted
+LAST SEEN   TYPE     REASON      OBJECT                       MESSAGE
+63s         Normal   Preempted   pod/filler-9467fbd58-fxw5n   Preempted by pod 4b8e5762-ed8e-4918-a675-e1b64965e456 on node sf-sched-worker2
+$ kubectl -n p04-03-bookstore get pods -l app=filler -o custom-columns=NAME:.metadata.name,NODE:.spec.nodeName,STATUS:.status.phase,PRIORITY:.spec.priority
+NAME                     NODE              STATUS    PRIORITY
+filler-9467fbd58-clgfb   sf-sched-worker   Running   1000
+filler-9467fbd58-xsp4k   <none>            Pending   1000
+$ kubectl -n p04-03-team-a get pods -l app=vip -o custom-columns=NAME:.metadata.name,NOMINATED:.status.nominatedNodeName,NODE:.spec.nodeName,STATUS:.status.phase,PRIORITY:.spec.priority
+NAME                   NOMINATED   NODE               STATUS    PRIORITY
+vip-859f69475f-9fjfd   <none>      sf-sched-worker2   Running   1000000
+$ kubectl -n p04-03-team-a delete deployment vip --wait=true --timeout=120s
+deployment.apps "vip" deleted from p04-03-team-a namespace
+$ kubectl -n p04-03-bookstore rollout status deployment/filler --timeout=180s
+Waiting for deployment "filler" rollout to finish: 1 of 2 updated replicas are available...
+deployment "filler" successfully rolled out
+$ sed -e 's/bookstore-/p04-03-bookstore-/g' -e 's/: bookstore$/: p04-03-bookstore/' -e 's/: team-a$/: p04-03-team-a/' quota.yaml | kubectl apply -f -
+resourcequota/no-data-tier created
+$ sed -e 's/bookstore-/p04-03-bookstore-/g' -e 's/: bookstore$/: p04-03-bookstore/' -e 's/: team-a$/: p04-03-team-a/' vip.yaml | kubectl --as=system:serviceaccount:p04-03-team-a:deployer apply -f -
+deployment.apps/vip created
+$ kubectl -n p04-03-team-a wait deployment/vip --for=condition=ReplicaFailure --timeout=120s
+deployment.apps/vip condition met
+$ kubectl -n p04-03-team-a get events --field-selector reason=FailedCreate
+LAST SEEN   TYPE      REASON         OBJECT                      MESSAGE
+1s          Warning   FailedCreate   replicaset/vip-859f69475f   Error creating: pods "vip-859f69475f-z4hdm" is forbidden: exceeded quota: no-data-tier, requested: pods=1, used: pods=0, limited: pods=0
+1s          Warning   FailedCreate   replicaset/vip-859f69475f   Error creating: pods "vip-859f69475f-xj9rz" is forbidden: exceeded quota: no-data-tier, requested: pods=1, used: pods=0, limited: pods=0
+1s          Warning   FailedCreate   replicaset/vip-859f69475f   Error creating: pods "vip-859f69475f-5ljx2" is forbidden: exceeded quota: no-data-tier, requested: pods=1, used: pods=0, limited: pods=0
+1s          Warning   FailedCreate   replicaset/vip-859f69475f   Error creating: pods "vip-859f69475f-qt7v7" is forbidden: exceeded quota: no-data-tier, requested: pods=1, used: pods=0, limited: pods=0
+1s          Warning   FailedCreate   replicaset/vip-859f69475f   Error creating: pods "vip-859f69475f-xrtlh" is forbidden: exceeded quota: no-data-tier, requested: pods=1, used: pods=0, limited: pods=0
+0s          Warning   FailedCreate   replicaset/vip-859f69475f   Error creating: pods "vip-859f69475f-2dcjk" is forbidden: exceeded quota: no-data-tier, requested: pods=1, used: pods=0, limited: pods=0
+$ sed -e 's/bookstore-/p04-03-bookstore-/g' -e 's/: bookstore$/: p04-03-bookstore/' -e 's/: team-a$/: p04-03-team-a/' probe.yaml | kubectl apply --dry-run=server -f -
+Error from server (Forbidden): error when creating "STDIN": pods "probe" is forbidden: exceeded quota: no-data-tier, requested: pods=1, used: pods=0, limited: pods=0
+$ sed -e 's/bookstore-/p04-03-bookstore-/g' -e 's/: bookstore$/: p04-03-bookstore/' -e 's/: team-a$/: p04-03-team-a/' -e 's/system-cluster-critical/p04-03-bookstore-batch/' probe.yaml | kubectl apply --dry-run=server -f -
+pod/probe created (server dry run)
+$ kubectl -n p04-03-bookstore get pods -l app=filler -o custom-columns=NAME:.metadata.name,NODE:.spec.nodeName,STATUS:.status.phase,PRIORITY:.spec.priority
+NAME                     NODE               STATUS    PRIORITY
+filler-9467fbd58-clgfb   sf-sched-worker    Running   1000
+filler-9467fbd58-xsp4k   sf-sched-worker2   Running   1000
+$ kubectl -n p04-03-team-a delete deployment vip --wait=true --timeout=120s
+deployment.apps "vip" deleted from p04-03-team-a namespace
+$ kubectl delete namespace p04-03-bookstore p04-03-team-a --wait=true --timeout=180s
+namespace "p04-03-bookstore" deleted
+namespace "p04-03-team-a" deleted
+$ kubectl delete priorityclass p04-03-bookstore-data p04-03-bookstore-critical p04-03-bookstore-batch
+priorityclass.scheduling.k8s.io "p04-03-bookstore-data" deleted
+priorityclass.scheduling.k8s.io "p04-03-bookstore-critical" deleted
+priorityclass.scheduling.k8s.io "p04-03-bookstore-batch" deleted
+$ kubectl get priorityclass
+NAME                      VALUE        GLOBAL-DEFAULT   AGE   PREEMPTIONPOLICY
+system-cluster-critical   2000000000   false            53m   PreemptLowerPriority
+system-node-critical      2000001000   false            53m   PreemptLowerPriority
