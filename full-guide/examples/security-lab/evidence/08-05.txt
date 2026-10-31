@@ -1,0 +1,188 @@
+# Transcript for 08-day-2-operations/05-operators-and-crds.md, lab steps 1 to 12.
+# Tier A: a kind cluster, Kubernetes v1.37.0 server, kubectl v1.37.2, Helm v4.1.4.
+# Chart cnpg/cloudnative-pg 0.29.1 (operator 1.30.1). Steps 1 to 12 only read,
+# render or dry-run: nothing was installed. Namespaces created by the run were
+# deleted at the end.
+# Recorded by running examples/security-lab/labs/08-05.sh from full-guide/ with
+# NS_CNPG=p08-05-cnpg-system and NS_BOOK=p08-05-bookstore. The chapter prints
+# cnpg-system and bookstore; the captured lines carry the prefixed names. The
+# cluster has a different name from the guide's, and the output does not show it.
+#
+# What did not work the first time: client-side apply of the chart's CRDs
+# (step 6) refuses the clusters and poolers CRDs, because the last-applied
+# annotation kubectl adds exceeds the 256 KiB limit. Server-side apply (step 6b)
+# accepts all eleven. A first run also dry-ran Pods before the namespace's
+# default ServiceAccount existed, which gave a ServiceAccount error instead of
+# the admission result. Step 8 now waits for that ServiceAccount.
+#
+# Not run: the operator install, the Cluster, the failover, the DB_DSN rewire
+# and the migration against a live database. The shared cluster was in use by
+# other lab work, so those chapter steps are reader steps with no captured output.
+
+## step 1: the chart version the guide pins
+$ helm show chart cnpg/cloudnative-pg --version "$CHART" | grep -E '^(version|appVersion|kubeVersion):'
+appVersion: 1.30.1
+kubeVersion: '>=1.29.0-0'
+version: 0.29.1
+
+## step 2: the operator namespace, labelled restricted before the install
+$ kubectl apply -f cnpg-namespace.yaml
+kubectl get namespace "$NS_CNPG" -L pod-security.kubernetes.io/enforce
+namespace/p08-05-cnpg-system created
+NAME                 STATUS   AGE   ENFORCE
+p08-05-cnpg-system   Active   1s    restricted
+
+## step 3: the ClusterRole the chart renders, read before installing
+$ helm template cnpg cnpg/cloudnative-pg --version "$CHART" --namespace "$NS_CNPG" --show-only templates/rbac.yaml > rbac.yaml
+awk '/^kind: ClusterRole$/{on=1} /^---$/{on=0} on' rbac.yaml | grep -B3 -A9 '^  - secrets$'
+  - ""
+  resources:
+  - configmaps
+  - secrets
+  - services
+  verbs:
+  - create
+  - delete
+  - get
+  - list
+  - patch
+  - update
+  - watch
+
+## step 3b: the same ClusterRole also execs into pods and creates bindings
+$ awk '/^kind: ClusterRole$/{on=1} /^---$/{on=0} on' rbac.yaml | grep -B3 -A4 '^  - pods/exec$'
+awk '/^kind: ClusterRole$/{on=1} /^---$/{on=0} on' rbac.yaml | grep -B3 -A6 '^  - rolebindings$'
+  resources:
+  - persistentvolumeclaims
+  - pods
+  - pods/exec
+  verbs:
+  - create
+  - delete
+  - get
+- apiGroups:
+  - rbac.authorization.k8s.io
+  resources:
+  - rolebindings
+  - roles
+  verbs:
+  - create
+  - get
+  - list
+  - patch
+
+## step 3c: the binding that gives the ClusterRole to the operator ServiceAccount
+$ awk '/^kind: ClusterRoleBinding$/{on=1} /^---$/{on=0} on' rbac.yaml
+kind: ClusterRoleBinding
+metadata:
+  name: cnpg-cloudnative-pg
+  labels:
+    helm.sh/chart: cloudnative-pg-0.29.1
+    app.kubernetes.io/name: cloudnative-pg
+    app.kubernetes.io/instance: cnpg
+    app.kubernetes.io/version: "1.30.1"
+    app.kubernetes.io/managed-by: Helm
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: cnpg-cloudnative-pg
+subjects:
+- kind: ServiceAccount
+  name: cnpg-cloudnative-pg
+  namespace: p08-05-cnpg-system
+
+## step 4: the same render with the namespaced option
+$ helm template cnpg cnpg/cloudnative-pg --version "$CHART" --namespace "$NS_CNPG" --set config.clusterWide=false --show-only templates/rbac.yaml > rbac-namespaced.yaml
+awk '/^kind: ClusterRole$/{on=1} /^---$/{on=0} on' rbac-namespaced.yaml | grep -c '^  - secrets$'
+grep -c '^kind: Role$' rbac-namespaced.yaml
+0
+1
+
+## step 5: the CRD schema the chart renders: the privileged field and the enum
+$ helm template cnpg cnpg/cloudnative-pg --version "$CHART" --namespace "$NS_CNPG" --show-only templates/crds/crds.yaml > crds.yaml
+grep -m1 -A4 'privileged:' crds.yaml
+grep -m1 -A10 'primaryUpdateStrategy:' crds.yaml | tail -n 4
+                  privileged:
+                    description: |-
+                      Run container in privileged mode.
+                      Processes in privileged containers are essentially equivalent to root on the host.
+                      Defaults to false.
+                - unsupervised
+                - supervised
+                type: string
+              priorityClassName:
+
+## step 6: the API server accepts the chart CRDs (server dry run, nothing stored)
+$ kubectl apply --dry-run=server -f crds.yaml
+customresourcedefinition.apiextensions.k8s.io/backups.postgresql.cnpg.io created (server dry run)
+customresourcedefinition.apiextensions.k8s.io/clusterimagecatalogs.postgresql.cnpg.io created (server dry run)
+customresourcedefinition.apiextensions.k8s.io/databaseroles.postgresql.cnpg.io created (server dry run)
+customresourcedefinition.apiextensions.k8s.io/databases.postgresql.cnpg.io created (server dry run)
+customresourcedefinition.apiextensions.k8s.io/failoverquorums.postgresql.cnpg.io created (server dry run)
+customresourcedefinition.apiextensions.k8s.io/imagecatalogs.postgresql.cnpg.io created (server dry run)
+customresourcedefinition.apiextensions.k8s.io/publications.postgresql.cnpg.io created (server dry run)
+customresourcedefinition.apiextensions.k8s.io/scheduledbackups.postgresql.cnpg.io created (server dry run)
+customresourcedefinition.apiextensions.k8s.io/subscriptions.postgresql.cnpg.io created (server dry run)
+Error from server (Invalid): error when creating "crds.yaml": CustomResourceDefinition.apiextensions.k8s.io "clusters.postgresql.cnpg.io" is invalid: metadata.annotations: Too long: may not be more than 262144 bytes
+Error from server (Invalid): error when creating "crds.yaml": CustomResourceDefinition.apiextensions.k8s.io "poolers.postgresql.cnpg.io" is invalid: metadata.annotations: Too long: may not be more than 262144 bytes
+
+## step 6b: the same CRDs with server-side apply (server dry run, nothing stored)
+$ kubectl apply --dry-run=server --server-side -f crds.yaml
+customresourcedefinition.apiextensions.k8s.io/backups.postgresql.cnpg.io serverside-applied (server dry run)
+customresourcedefinition.apiextensions.k8s.io/clusterimagecatalogs.postgresql.cnpg.io serverside-applied (server dry run)
+customresourcedefinition.apiextensions.k8s.io/clusters.postgresql.cnpg.io serverside-applied (server dry run)
+customresourcedefinition.apiextensions.k8s.io/databaseroles.postgresql.cnpg.io serverside-applied (server dry run)
+customresourcedefinition.apiextensions.k8s.io/databases.postgresql.cnpg.io serverside-applied (server dry run)
+customresourcedefinition.apiextensions.k8s.io/failoverquorums.postgresql.cnpg.io serverside-applied (server dry run)
+customresourcedefinition.apiextensions.k8s.io/imagecatalogs.postgresql.cnpg.io serverside-applied (server dry run)
+customresourcedefinition.apiextensions.k8s.io/poolers.postgresql.cnpg.io serverside-applied (server dry run)
+customresourcedefinition.apiextensions.k8s.io/publications.postgresql.cnpg.io serverside-applied (server dry run)
+customresourcedefinition.apiextensions.k8s.io/scheduledbackups.postgresql.cnpg.io serverside-applied (server dry run)
+customresourcedefinition.apiextensions.k8s.io/subscriptions.postgresql.cnpg.io serverside-applied (server dry run)
+
+## step 7: before the CRDs are installed, the Cluster kind does not exist
+$ nsrender "$bk/operators/cnpg-cluster.yaml" | kubectl apply --dry-run=client -f -
+error: resource mapping not found for name: "bookstore-db" namespace: "p08-05-bookstore" from "STDIN": no matches for kind "Cluster" in version "postgresql.cnpg.io/v1"
+ensure CRDs are installed first
+
+## step 8: the Bookstore namespace with its quota, labelled restricted
+$ nsrender "$bk/raw-manifests/00-namespace.yaml" | kubectl apply -f -
+for i in $(seq 1 60); do kubectl get serviceaccount default -n "$NS_BOOK" >/dev/null 2>&1 && break; sleep 1; done
+kubectl get serviceaccount default -n "$NS_BOOK" --no-headers
+namespace/p08-05-bookstore created
+resourcequota/bookstore-quota created
+limitrange/bookstore-limits created
+default   1s
+
+## step 9: the restricted namespace refuses a privileged Pod (deliberate)
+$ kubectl run privileged-probe -n "$NS_BOOK" --image="$PG_IMAGE" --restart=Never --dry-run=server --overrides='{"spec":{"containers":[{"name":"privileged-probe","image":"'"$PG_IMAGE"'","securityContext":{"privileged":true}}]}}'
+Error from server (Forbidden): pods "privileged-probe" is forbidden: violates PodSecurity "restricted:latest": privileged (container "privileged-probe" must not set securityContext.privileged=true), allowPrivilegeEscalation != false (container "privileged-probe" must set securityContext.allowPrivilegeEscalation=false), unrestricted capabilities (container "privileged-probe" must set securityContext.capabilities.drop=["ALL"]), runAsNonRoot != true (pod or container "privileged-probe" must set securityContext.runAsNonRoot=true), seccompProfile (pod or container "privileged-probe" must set securityContext.seccompProfile.type to "RuntimeDefault" or "Localhost")
+
+## step 10: the same namespace admits the migration Pod from chapter 05
+$ kubectl apply --dry-run=server -f migrate.yaml
+pod/db-migrate-cnpg created (server dry run)
+
+## step 11: the operator objects, with the image pinned by digest, dry-run into the restricted namespace
+$ helm template cnpg cnpg/cloudnative-pg --version "$CHART" --namespace "$NS_CNPG" --set image.tag="$OP_TAG" --show-only templates/deployment.yaml > operator-deploy.yaml
+grep -m1 'image:' operator-deploy.yaml
+helm template cnpg cnpg/cloudnative-pg --version "$CHART" --namespace "$NS_CNPG" --set image.tag="$OP_TAG" --show-only templates/rbac.yaml --show-only templates/config.yaml --show-only templates/deployment.yaml --show-only templates/service.yaml > operator.yaml
+kubectl apply --dry-run=server -n "$NS_CNPG" -f operator.yaml
+        image: "ghcr.io/cloudnative-pg/cloudnative-pg:1.30.1@sha256:923c267ec29636db3bee20f993d0ec4973fa22998e1adad37da79e4d32b5bc07"
+serviceaccount/cnpg-cloudnative-pg created (server dry run)
+clusterrole.rbac.authorization.k8s.io/cnpg-cloudnative-pg created (server dry run)
+clusterrole.rbac.authorization.k8s.io/cnpg-cloudnative-pg-view created (server dry run)
+clusterrole.rbac.authorization.k8s.io/cnpg-cloudnative-pg-edit created (server dry run)
+clusterrolebinding.rbac.authorization.k8s.io/cnpg-cloudnative-pg created (server dry run)
+configmap/cnpg-controller-manager-config created (server dry run)
+deployment.apps/cnpg-cloudnative-pg created (server dry run)
+service/cnpg-webhook-service created (server dry run)
+
+## step 12: delete the namespaces this lab created
+$ kubectl delete namespace "$NS_BOOK" "$NS_CNPG" --wait=true --timeout=300s
+kubectl get namespace "$NS_BOOK" "$NS_CNPG" 2>&1 | tail -n 2
+namespace "p08-05-bookstore" deleted
+namespace "p08-05-cnpg-system" deleted
+Error from server (NotFound): namespaces "p08-05-bookstore" not found
+Error from server (NotFound): namespaces "p08-05-cnpg-system" not found
+
+lab 08.05 finished
