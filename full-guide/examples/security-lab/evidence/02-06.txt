@@ -1,0 +1,185 @@
+# Transcript for 02-networking/06-network-policies.md, hands-on steps 0 to 6.
+# Tier A: a kind v0.33.0 cluster on a lab host, one control-plane node on
+# Kubernetes v1.37.0, kindnetd image kindest/kindnetd:v20260820-69b56db7,
+# kubectl v1.37.2. The cluster is shared with other lab workers.
+# Recorded by a script that issues the chapter's commands in
+# order. Every command and manifest uses the namespace p02-06-bookstore in
+# place of bookstore. The Bookstore files were copied to a scratch directory
+# and rewritten in their namespace only. 60-networkpolicy.yaml is that copy.
+# Step 3 applies the redis pair after the file, because the file has no
+# catalog-to-redis rule and catalog's readiness check reads Redis.
+# Step 1 pins the probe image curlimages/curl by digest; the tag is 8.9.1.
+# Step 6 uses the kind network's IPv4 gateway as the stand-in address. The
+# lab has no metadata service, so 169.254.169.254 times out with or without
+# the rule and proves nothing here.
+# An earlier attempt on this cluster stopped at step 1 because the control
+# plane's kube-scheduler was crash-looping. That attempt is not part of this
+# transcript. The run below began after the scheduler was ready.
+# The cleanup at the end deletes the probe. The namespace is removed after.
+## step 0: the CNI enforces policy
+$ kubectl -n kube-system get daemonset kindnet
+NAME      DESIRED   CURRENT   READY   UP-TO-DATE   AVAILABLE   NODE SELECTOR            AGE
+kindnet   1         1         1       1            1           kubernetes.io/os=linux   9h
+$ kubectl -n kube-system logs ds/kindnet | grep "Policy engine is ready"
+I1030 14:30:08.306411       1 controller.go:185] "Policy engine is ready."
+$ kubectl -n kube-system get pods -l k8s-app=kube-dns
+NAME                       READY   STATUS    RESTARTS   AGE
+coredns-559f6c778d-77g29   1/1     Running   0          9h
+coredns-559f6c778d-xmmqq   1/1     Running   0          9h
+## setup: the Bookstore pieces the probe calls (earlier chapters)
+$ kubectl apply -f 00-namespace.yaml -f 05-serviceaccounts-rbac.yaml -f 15-catalog-config.yaml -f 16-db-credentials.yaml -f 40-services.yaml
+namespace/p02-06-bookstore unchanged
+resourcequota/p02-06-bookstore-quota unchanged
+limitrange/p02-06-bookstore-limits unchanged
+serviceaccount/catalog-sa unchanged
+serviceaccount/storefront-sa unchanged
+serviceaccount/orders-sa unchanged
+serviceaccount/payments-worker-sa unchanged
+serviceaccount/postgres-sa unchanged
+serviceaccount/redis-sa unchanged
+serviceaccount/rabbitmq-sa unchanged
+serviceaccount/migrate-sa unchanged
+role.rbac.authorization.k8s.io/catalog-config-reader unchanged
+rolebinding.rbac.authorization.k8s.io/catalog-config-reader-binding unchanged
+configmap/catalog-config unchanged
+secret/db-credentials configured
+service/catalog unchanged
+service/storefront unchanged
+service/orders unchanged
+service/redis unchanged
+service/rabbitmq unchanged
+service/payments-worker unchanged
+$ kubectl apply -f 10-catalog-deploy.yaml -f 12-redis.yaml -f 20-postgres-statefulset.yaml
+deployment.apps/catalog configured
+deployment.apps/redis unchanged
+service/postgres unchanged
+statefulset.apps/postgres configured
+$ kubectl -n p02-06-bookstore rollout status deploy/catalog
+deployment "catalog" successfully rolled out
+$ kubectl -n p02-06-bookstore get pods
+NAME                       READY   STATUS    RESTARTS      AGE
+catalog-5469f6cfbf-86jcl   1/1     Running   0             7m14s
+catalog-5469f6cfbf-g794h   1/1     Running   0             25m
+catalog-5469f6cfbf-zrdgw   1/1     Running   0             7m28s
+postgres-0                 1/1     Running   1 (18m ago)   23m
+redis-574bb544f-7fzvc      1/1     Running   0             8m9s
+## step 1: the probe, and the request with no policy
+$ kubectl delete pod probe -n p02-06-bookstore --ignore-not-found
+$ kubectl delete networkpolicy --all -n p02-06-bookstore
+networkpolicy.networking.k8s.io "allow-backend-egress" deleted from p02-06-bookstore namespace
+networkpolicy.networking.k8s.io "allow-catalog-egress-redis" deleted from p02-06-bookstore namespace
+networkpolicy.networking.k8s.io "allow-catalog-to-postgres" deleted from p02-06-bookstore namespace
+networkpolicy.networking.k8s.io "allow-catalog-to-redis" deleted from p02-06-bookstore namespace
+networkpolicy.networking.k8s.io "allow-dns-egress" deleted from p02-06-bookstore namespace
+networkpolicy.networking.k8s.io "allow-ingress-to-http-tiers" deleted from p02-06-bookstore namespace
+networkpolicy.networking.k8s.io "allow-monitoring-scrape" deleted from p02-06-bookstore namespace
+networkpolicy.networking.k8s.io "allow-orders-to-rabbitmq" deleted from p02-06-bookstore namespace
+networkpolicy.networking.k8s.io "allow-payments-worker-egress" deleted from p02-06-bookstore namespace
+networkpolicy.networking.k8s.io "allow-storefront-egress" deleted from p02-06-bookstore namespace
+networkpolicy.networking.k8s.io "allow-storefront-to-apis" deleted from p02-06-bookstore namespace
+networkpolicy.networking.k8s.io "allow-worker-https-except-metadata" deleted from p02-06-bookstore namespace
+networkpolicy.networking.k8s.io "default-deny-all" deleted from p02-06-bookstore namespace
+$ kubectl apply -f - <<EOF   # the probe Pod, with the baseline
+pod/probe created
+$ kubectl wait --for=condition=Ready pod/probe -n p02-06-bookstore --timeout=90s
+pod/probe condition met
+$ CATALOG_IP=$(kubectl get pod -n p02-06-bookstore -l app=catalog -o jsonpath='{.items[0].status.podIP}')
+$ echo $CATALOG_IP
+10.244.0.41
+$ kubectl exec -n p02-06-bookstore probe -- curl -sS --max-time 5 http://$CATALOG_IP:8080/healthz
+{"status":"ok"}
+## step 2: default-deny, DNS allowed, then the same request
+$ kubectl apply -f - <<EOF   # default-deny-all and allow-dns-egress
+networkpolicy.networking.k8s.io/default-deny-all created
+networkpolicy.networking.k8s.io/allow-dns-egress created
+$ kubectl exec -n p02-06-bookstore probe -- curl -sS --max-time 5 http://$CATALOG_IP:8080/healthz
+curl: (28) Connection timed out after 5002 milliseconds
+command terminated with exit code 28
+## step 3: the Bookstore's allows, then the same request
+$ kubectl apply -f examples/bookstore/raw-manifests/60-networkpolicy.yaml
+networkpolicy.networking.k8s.io/default-deny-all configured
+networkpolicy.networking.k8s.io/allow-dns-egress configured
+networkpolicy.networking.k8s.io/allow-ingress-to-http-tiers created
+networkpolicy.networking.k8s.io/allow-storefront-to-apis created
+networkpolicy.networking.k8s.io/allow-catalog-to-postgres created
+networkpolicy.networking.k8s.io/allow-orders-to-rabbitmq created
+networkpolicy.networking.k8s.io/allow-backend-egress created
+networkpolicy.networking.k8s.io/allow-storefront-egress created
+networkpolicy.networking.k8s.io/allow-payments-worker-egress created
+networkpolicy.networking.k8s.io/allow-monitoring-scrape created
+$ kubectl apply -f - <<EOF   # the redis pair the file does not have yet
+networkpolicy.networking.k8s.io/allow-catalog-to-redis created
+networkpolicy.networking.k8s.io/allow-catalog-egress-redis created
+$ kubectl exec -n p02-06-bookstore probe -- curl -sS --max-time 5 http://$CATALOG_IP:8080/healthz
+{"status":"ok"}
+$ kubectl get pods -n p02-06-bookstore -l app=catalog
+NAME                       READY   STATUS    RESTARTS   AGE
+catalog-5469f6cfbf-86jcl   1/1     Running   0          7m43s
+catalog-5469f6cfbf-g794h   1/1     Running   0          25m
+catalog-5469f6cfbf-zrdgw   1/1     Running   0          7m57s
+$ kubectl delete networkpolicy allow-storefront-egress -n p02-06-bookstore
+networkpolicy.networking.k8s.io "allow-storefront-egress" deleted from p02-06-bookstore namespace
+$ kubectl exec -n p02-06-bookstore probe -- curl -sS --max-time 5 http://$CATALOG_IP:8080/healthz
+curl: (28) Connection timed out after 5002 milliseconds
+command terminated with exit code 28
+$ kubectl apply -f examples/bookstore/raw-manifests/60-networkpolicy.yaml
+networkpolicy.networking.k8s.io/default-deny-all unchanged
+networkpolicy.networking.k8s.io/allow-dns-egress unchanged
+networkpolicy.networking.k8s.io/allow-ingress-to-http-tiers unchanged
+networkpolicy.networking.k8s.io/allow-storefront-to-apis unchanged
+networkpolicy.networking.k8s.io/allow-catalog-to-postgres unchanged
+networkpolicy.networking.k8s.io/allow-orders-to-rabbitmq unchanged
+networkpolicy.networking.k8s.io/allow-backend-egress unchanged
+networkpolicy.networking.k8s.io/allow-storefront-egress created
+networkpolicy.networking.k8s.io/allow-payments-worker-egress unchanged
+networkpolicy.networking.k8s.io/allow-monitoring-scrape unchanged
+## step 4: the DNS gotcha
+$ kubectl delete networkpolicy allow-dns-egress -n p02-06-bookstore
+networkpolicy.networking.k8s.io "allow-dns-egress" deleted from p02-06-bookstore namespace
+$ kubectl exec -n p02-06-bookstore probe -- curl -sS --max-time 5 http://catalog.p02-06-bookstore.svc.cluster.local/healthz
+curl: (28) Resolving timed out after 5001 milliseconds
+command terminated with exit code 28
+$ kubectl apply -f examples/bookstore/raw-manifests/60-networkpolicy.yaml
+networkpolicy.networking.k8s.io/default-deny-all unchanged
+networkpolicy.networking.k8s.io/allow-dns-egress created
+networkpolicy.networking.k8s.io/allow-ingress-to-http-tiers unchanged
+networkpolicy.networking.k8s.io/allow-storefront-to-apis unchanged
+networkpolicy.networking.k8s.io/allow-catalog-to-postgres unchanged
+networkpolicy.networking.k8s.io/allow-orders-to-rabbitmq unchanged
+networkpolicy.networking.k8s.io/allow-backend-egress unchanged
+networkpolicy.networking.k8s.io/allow-storefront-egress unchanged
+networkpolicy.networking.k8s.io/allow-payments-worker-egress unchanged
+networkpolicy.networking.k8s.io/allow-monitoring-scrape unchanged
+## step 5: the same request from a workload with no allow
+$ kubectl label pod probe -n p02-06-bookstore app=intruder --overwrite
+pod/probe labeled
+$ kubectl exec -n p02-06-bookstore probe -- curl -sS --max-time 5 http://$CATALOG_IP:8080/healthz
+curl: (28) Connection timed out after 5002 milliseconds
+command terminated with exit code 28
+$ kubectl label pod probe -n p02-06-bookstore app=storefront --overwrite
+pod/probe labeled
+## step 6: egress to the metadata address, with an except
+$ cat > worker-egress.yaml <<'EOF'   # the policy as the chapter gives it
+$ kubectl apply -f worker-egress.yaml
+networkpolicy.networking.k8s.io/allow-worker-https-except-metadata created
+$ kubectl label pod probe -n p02-06-bookstore app=payments-worker --overwrite
+pod/probe labeled
+$ GW=$(docker network inspect kind -f '{{range .IPAM.Config}}{{println .Gateway}}{{end}}' | grep '\.')
+$ echo $GW
+172.18.0.1
+$ kubectl exec -n p02-06-bookstore probe -- curl -sS --max-time 5 https://$GW:443/
+curl: (7) Failed to connect to 172.18.0.1 port 443 after 0 ms: Could not connect to server
+command terminated with exit code 7
+$ sed "s#169.254.169.254/32#$GW/32#" worker-egress.yaml | kubectl apply -f -
+networkpolicy.networking.k8s.io/allow-worker-https-except-metadata configured
+$ kubectl exec -n p02-06-bookstore probe -- curl -sS --max-time 5 https://$GW:443/
+curl: (28) Connection timed out after 5002 milliseconds
+command terminated with exit code 28
+$ kubectl apply -f worker-egress.yaml
+networkpolicy.networking.k8s.io/allow-worker-https-except-metadata configured
+$ kubectl label pod probe -n p02-06-bookstore app=storefront --overwrite
+pod/probe labeled
+## cleanup
+$ kubectl delete pod probe -n p02-06-bookstore
+pod "probe" deleted from p02-06-bookstore namespace
+## end of run
