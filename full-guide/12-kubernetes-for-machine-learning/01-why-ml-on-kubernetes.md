@@ -230,10 +230,13 @@ Bookstore changes.
 **Tier A (kind).** The recorded run is in
 [`examples/security-lab/evidence/12-01.txt`](../examples/security-lab/evidence/12-01.txt),
 made by
-[`examples/security-lab/labs/12-01.sh`](../examples/security-lab/labs/12-01.sh).
-It ran in its own namespace, `p12-01-bookstore-ml`, on a kind cluster whose name
-and node name differ from the guide's. Lines that name that namespace are kept
-as captured. Every command below names `bookstore-ml`.
+[`examples/security-lab/labs/12-01.sh`](../examples/security-lab/labs/12-01.sh),
+and the denied connection of section 2 by
+[`12-01-netpol.sh`](../examples/security-lab/labs/12-01-netpol.sh).
+It ran in a namespace of its own, standing in for `bookstore-ml`, on a kind
+cluster whose name and node name differ from the guide's. Captured lines keep
+the lab's namespace name, which ends in `bookstore-ml`; on your cluster it
+reads `bookstore-ml`. Every command below names `bookstore-ml`.
 
 ### 1. The ML thread overview and dataset stub (already created)
 
@@ -309,12 +312,12 @@ namespace/p12-01-bookstore-ml created
 networkpolicy.networking.k8s.io/default-deny created
 ```
 
-The lab cluster's CNI is kindnet, the one that comes with kind. This lab checks
-that the policy is accepted and stored. It sends no traffic, so it does not
-show enforcement here; [ch.05](05-notebooks-and-interactive.md) applies a
-policy on the same cluster and captures a connection it blocks.
-[Part 02 ch.06](../02-networking/06-network-policies.md) covers enforcement,
-which needs a CNI that enforces the policy.
+The lab cluster's CNI is kindnet, the one that comes with kind. kind has
+enforced NetworkPolicy since v0.24.0, through the policy engine in kindnet.
+[Part 02 ch.06](../02-networking/06-network-policies.md) cites that and checks
+it with a denied request. A cluster on another CNI needs the same check, because
+a policy that the CNI ignores protects nothing. The two blocks that follow show
+the policy accepted and stored. The denied connection comes after them.
 
 Check that the Pod Security labels landed and the policy is stored. The
 `-version` labels tell the admission check to use the newest Pod Security rules
@@ -343,6 +346,39 @@ kubectl get networkpolicy -n bookstore-ml
 NAME           POD-SELECTOR   AGE
 default-deny   <none>         0s
 ```
+
+Stored is not enforced, so the lab also sent a connection through the policy.
+It ran one identical Pod in two restricted namespaces: the chapter's namespace
+with its default-deny policy, and a second namespace with no policy. The Pod
+opens a TCP connection to the cluster's own API Service address, which it reads
+from its environment, and prints what happened. The two namespaces differ only
+in the policy. The Pod in the namespace with the policy timed out, which is what
+a dropped packet looks like. The Pod in the namespace without one connected:
+
+<!-- gate: output -->
+
+```text
+$ kubectl apply -f - <<'EOF'   # Namespace bookstore-ml and default-deny NetworkPolicy
+namespace/p12-finish-bookstore-ml created
+networkpolicy.networking.k8s.io/default-deny created
+$ kubectl create namespace p12-finish-open (restricted, no NetworkPolicy)
+namespace/p12-finish-open created
+$ kubectl apply -f connect-check.yaml (in p12-finish-bookstore-ml)
+pod/connect-check created
+$ kubectl apply -f connect-check.yaml (in p12-finish-open)
+pod/connect-check created
+$ kubectl logs connect-check -n p12-finish-bookstore-ml
+connect to the API Service address: TimeoutError timed out
+$ kubectl logs connect-check -n p12-finish-open
+connect to the API Service address: connected
+```
+
+The lab names its two namespaces `p12-finish-bookstore-ml` and `p12-finish-open`
+in the capture. They stand in for `bookstore-ml` and for any namespace with no
+policy. The connection was an outbound one, so this shows the egress half of
+the policy. Each later chapter adds an allow for its own workload, and
+[Part 02 ch.06](../02-networking/06-network-policies.md) carries on with the
+allows.
 
 ### 3. A refused Pod: the control working
 
@@ -577,7 +613,7 @@ Checklist (before any ML workload lands):
 5. **A data scientist wants to load `model.joblib` from a bucket another team owns. What is the risk, and which control comes first?**
    <details><summary>Show answer</summary>
 
-   joblib files are pickle-based, and unpickling can run arbitrary code during the load, as the [Python `pickle` documentation](https://docs.python.org/3/library/pickle.html) warns. Loading the file runs the file author's code, so treat the artifact as code. The first control is to load only an artifact whose digest matches the record from the training run, from a read-only mount in a restricted Pod. ch.06 covers the load-time check, and ch.07 records the digest.
+   joblib files are pickle-based, and unpickling can run arbitrary code during the load, as the [Python `pickle` documentation](https://docs.python.org/3/library/pickle.html) and the [`joblib.load` reference](https://joblib.readthedocs.io/en/stable/generated/joblib.load.html) warn. Loading the file runs the file author's code, so treat the artifact as code. The first control is to load only an artifact whose digest matches the record from the training run, from a read-only mount in a restricted Pod. ch.06 covers the load-time check, and ch.07 records the digest.
 
    </details>
 
