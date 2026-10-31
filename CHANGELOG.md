@@ -153,6 +153,10 @@ versions follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 - Part 08 Day-2 operations (08.01 to 08.05) is rewritten security-first, with
   the 08.01 drill and the 08.04 quota and tenant refusals run on a three-node
   kind cluster, and `08-day-2-operations/` joins the enforced list.
+- Part 05 Security (05.00 to 05.10) is rewritten security-first, from four
+  chapters to eleven, with each lab run as attack, harden, re-attack and
+  evidence on kind, and `05-security/` joins the enforced list. The full
+  Kyverno, Gatekeeper, Falco and Trivy Operator installs are still marked not run.
 
 ### Fixed
 - Standalone EKS add-ons (kube-proxy, CoreDNS, EBS CSI) now follow

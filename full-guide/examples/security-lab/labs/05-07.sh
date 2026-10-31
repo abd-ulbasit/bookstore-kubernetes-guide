@@ -62,7 +62,8 @@ wait_sa() { for i in $(seq 1 60); do kubectl -n "$1" get serviceaccount default 
 kind() { if [ -n "$LAB_HOST" ]; then ssh "$LAB_HOST" "$KIND" "$@"; else "$KIND" "$@"; fi; }
 
 
-# runs under heavy_lock because Kyverno and Gatekeeper are large installs; the
+# Kyverno and Gatekeeper are large installs: run this lab when no other heavy
+# install is running on the same cluster.
 
 work=$(mktemp -d) && cd "$work" || exit 2
 
