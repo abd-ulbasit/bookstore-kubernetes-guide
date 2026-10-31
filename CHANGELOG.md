@@ -140,6 +140,9 @@ versions follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   TLS-only Kafka, and `13-grand-capstone-bookstore-platform/` joins the
   enforced list. Heavy stacks were validated with `helm template` and server
   dry runs, and nothing ran on AWS or GCP.
+- Part 04 Scheduling (04.01 to 04.03) is rewritten security-first, with real
+  labs on a three-node kind cluster, and `04-scheduling/` joins the enforced
+  list.
 
 ### Fixed
 - Standalone EKS add-ons (kube-proxy, CoreDNS, EBS CSI) now follow

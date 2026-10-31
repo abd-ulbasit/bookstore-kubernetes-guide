@@ -8,7 +8,7 @@
 > `schedulingGates` / scheduling readiness — diagnosed on a real Bookstore Pod.
 
 **Estimated time:** ~30 min read · ~30 min hands-on
-**Prerequisites:** [Part 00 ch.04](../00-foundations/04-control-plane-deep-dive.md) — where the scheduler sits · [Part 01 ch.03](../01-core-workloads/03-resources-and-qos.md) — requests drive scheduling decisions · [Part 01 ch.01](../01-core-workloads/01-pods.md) (the baseline every manifest here carries)
+**Prerequisites:** [Part 00 ch.04](../00-foundations/04-control-plane-deep-dive.md): where the scheduler sits · [Part 01 ch.03](../01-core-workloads/03-resources-and-qos.md): requests drive scheduling decisions · [Part 01 ch.01](../01-core-workloads/01-pods.md) (the baseline every manifest here carries)
 **You'll know after this:** • trace the scheduling queue (active / backoff / unschedulable) · • distinguish the scheduling cycle from the binding cycle (Filter → Score → Reserve → Permit → Bind) · • read scheduler-framework plugin extension points · • differentiate node capacity from allocatable and account for system/kube-reserved · • diagnose a `Pending` Pod from its Events on a real cluster
 
 <!-- tags: scheduling, scheduler, allocatable, scheduling-gates, troubleshooting -->
