@@ -173,12 +173,17 @@ with four more added here: `kueue-values.yaml`, `recommender-batch-serviceaccoun
 `gpu-quota-probe.yaml` and `unlabelled-probe.yaml`. It changes nothing in the
 existing Bookstore.
 
-**What was run.** This path runs on kind (tier A). For this revision the
-charts were rendered with their pinned values, and the Kueue and JobSet objects
-were checked against the chart CRD schemas by field name and type. The Kueue
-and JobSet installs and the gang run were not captured, so their output below
-is illustrative. The quota probe in step 4 was captured on a lab cluster whose
-node name differs from yours, and its output block says so.
+**What was run.** This path runs on kind (tier A). The lab installed the
+pinned JobSet and Kueue charts, held a Job with no queue label suspended, ran
+the two-worker gang to completion, and then removed both charts, their
+namespaces and their CRDs. The transcript is
+[`evidence/12-03.txt`](../examples/security-lab/evidence/12-03.txt), recorded by
+[`labs/12-03-kueue.sh`](../examples/security-lab/labs/12-03-kueue.sh), and the
+captured blocks below come from it. The lab used namespaces of its own in place
+of `jobset-system`, `kueue-system` and `bookstore-ml`, and applied the chapter's
+files with only the name `bookstore-ml` replaced, so captured lines carry the
+lab's names where yours carry those. The node name differs from yours too. The
+quota probe in step 4 was captured in an earlier run. No GPU was involved.
 
 > **CPU-only, runs on kind — no GPU.** The recommendations "training" here is a
 > deliberately tiny 2-worker JobSet that just sleeps/echoes (it stands in for
@@ -230,6 +235,34 @@ kubectl get pods -n jobset-system
 kubectl get pods -n kueue-system
 kubectl api-resources | grep -E 'jobset|kueue'   # JobSet + Kueue CRDs now exist
 ```
+
+The lab ran those installs in namespaces labelled `restricted` first, and kept
+only the lines of `helm install` that name the release and its status. Both
+controllers started under the restricted label:
+
+<!-- gate: output -->
+```text
+$ helm install jobset oci://registry.k8s.io/jobset/charts/jobset --version 0.11.1 -n p12-finish-jobset --wait (image pinned by digest)
+NAME: jobset
+NAMESPACE: p12-finish-jobset
+STATUS: deployed
+$ helm install kueue oci://registry.k8s.io/kueue/charts/kueue --version 0.17.0 -n p12-finish-kueue --wait -f examples/bookstore/ml/batch/kueue-values.yaml
+NAME: kueue
+NAMESPACE: p12-finish-kueue
+STATUS: deployed
+$ kubectl get pods -n p12-finish-jobset
+NAME                                READY   PHASE
+jobset-controller-86d78b955-ztk68   true    Running
+$ kubectl get pods -n p12-finish-kueue
+NAME                                        READY   PHASE
+kueue-controller-manager-577dfc8464-t8sx7   true    Running
+```
+
+The JobSet CRD, `jobsets.jobset.x-k8s.io`, was still on the cluster after
+`helm uninstall`, and the lab deleted it by hand. The Kueue CRDs were gone with
+the release. Removing the install is therefore four steps: uninstall both
+releases, delete the namespaces, list the CRDs of both groups, and delete what
+is left. The end of step 3 shows the removal's captured output.
 
 The values file is the chart's own default configuration with three changes.
 The first is `manageJobsWithoutQueueName: true`. Kueue's
@@ -358,6 +391,23 @@ kubectl get localqueue  -n bookstore-ml
 # ClusterQueue shows PENDING/ADMITTED workloads; LocalQueue is the team handle.
 ```
 
+Captured from the lab, with the lab's names in place of `bookstore-ml`:
+
+<!-- gate: output -->
+```text
+$ kubectl apply -f kueue-resourceflavor.yaml (namespace p12-finish-ml)
+resourceflavor.kueue.x-k8s.io/p12-finish-ml-flavor created
+$ kubectl apply -f kueue-clusterqueue.yaml (namespace p12-finish-ml)
+clusterqueue.kueue.x-k8s.io/p12-finish-ml-cq created
+$ kubectl apply -f kueue-localqueue.yaml (namespace p12-finish-ml)
+localqueue.kueue.x-k8s.io/p12-finish-ml-lq created
+$ kubectl apply -f recommender-batch-serviceaccount.yaml (namespace p12-finish-ml)
+serviceaccount/recommender-batch created
+$ kubectl get clusterqueue p12-finish-ml-cq
+NAME               COHORT   PENDING WORKLOADS
+p12-finish-ml-cq            0
+```
+
 ### 3. The gang-scheduled 2-worker "training" JobSet (CPU, on kind)
 
 [`batch/recommender-jobset.yaml`](../examples/bookstore/ml/batch/recommender-jobset.yaml)
@@ -381,6 +431,28 @@ kubectl get pods -n bookstore-ml -l app.kubernetes.io/component=recommender-trai
 
 kubectl get jobset recommender-train -n bookstore-ml \
   -o jsonpath='{.status.conditions}'           # Completed when the gang finishes
+```
+
+Captured from the lab: the Workload shows `ADMITTED` and `FINISHED`, and the two
+worker Pods report the same start time, because Kueue released the whole gang
+at once:
+
+<!-- gate: output -->
+```text
+$ kubectl apply -f recommender-jobset.yaml (namespace p12-finish-ml)
+jobset.jobset.x-k8s.io/recommender-train created
+$ kubectl wait --for=condition=Completed jobset/recommender-train -n p12-finish-ml --timeout=240s
+jobset.jobset.x-k8s.io/recommender-train condition met
+$ kubectl get workloads.kueue.x-k8s.io -n p12-finish-ml
+NAME                             QUEUE              RESERVED IN        ADMITTED   FINISHED   AGE
+jobset-recommender-train-63e35   p12-finish-ml-lq   p12-finish-ml-cq   True       True       27s
+$ kubectl get pods -n p12-finish-ml -l app.kubernetes.io/component=recommender-train -o custom-columns=NAME:.metadata.name,PHASE:.status.phase,STARTED:.status.startTime
+NAME                                 PHASE       STARTED
+recommender-train-worker-0-0-x4zgh   Succeeded   2026-10-31T08:05:11Z
+recommender-train-worker-0-1-cnscw   Succeeded   2026-10-31T08:05:11Z
+$ kubectl get jobset recommender-train -n p12-finish-ml
+NAME                TERMINALSTATE   RESTARTS   COMPLETED   SUSPENDED   AGE
+recommender-train   Completed       0          True        false       27s
 ```
 
 The busybox image declares no user, and its default UID is 0. Captured on the
@@ -409,9 +481,24 @@ kubectl get job unlabelled-probe -n bookstore-ml -o jsonpath='{.spec.suspend}{"\
 kubectl get pods -n bookstore-ml -l job-name=unlabelled-probe
 ```
 
-Illustrative, not captured: the first check prints `true`, and the last prints
-`No resources found in bookstore-ml namespace.` Kueue suspends the Job and no
-Pod exists. With the chart default, the same Job would start at once.
+Captured from the lab. The Job was created with `suspend` set to `true`, and
+no Pod exists for it, so it never ran:
+
+<!-- gate: output -->
+```text
+$ kubectl apply -f unlabelled-probe.yaml (namespace p12-finish-ml)
+job.batch/unlabelled-probe created
+$ kubectl get job unlabelled-probe -n p12-finish-ml -o jsonpath='{.spec.suspend}'
+true
+$ kubectl get pods -n p12-finish-ml -l job-name=unlabelled-probe
+No resources found in p12-finish-ml namespace.
+$ kubectl delete job unlabelled-probe -n p12-finish-ml
+job.batch "unlabelled-probe" deleted from p12-finish-ml namespace
+```
+
+With the chart default for `manageJobsWithoutQueueName`, which is `false`, the
+configuration reference cited above says the same Job would start at once. The
+lab did not run that case.
 
 Watch the queue mechanic directly: lower the ClusterQueue's CPU
 `nominalQuota` below what the gang needs and resubmit — the JobSet stays
@@ -429,6 +516,59 @@ kubectl get pods -n bookstore-ml -l app.kubernetes.io/component=recommender-trai
 kubectl patch clusterqueue bookstore-ml-cq --type=json \
   -p '[{"op":"replace","path":"/spec/resourceGroups/0/flavors/0/resources/0/nominalQuota","value":"4"}]'
 #   The queued JobSet is now admitted and its gang starts together.
+```
+
+Captured from the lab. With the CPU quota at zero the Workload exists but holds
+no quota and shows no `ADMITTED`, and no Pod exists. After the quota was
+restored, the JobSet ran to `Completed`:
+
+<!-- gate: output -->
+```text
+$ kubectl delete jobset recommender-train -n p12-finish-ml
+jobset.jobset.x-k8s.io "recommender-train" deleted from p12-finish-ml namespace
+$ kubectl patch clusterqueue p12-finish-ml-cq (cpu nominalQuota to 0)
+clusterqueue.kueue.x-k8s.io/p12-finish-ml-cq patched
+$ kubectl apply -f recommender-jobset.yaml (namespace p12-finish-ml)
+jobset.jobset.x-k8s.io/recommender-train created
+$ kubectl get workloads.kueue.x-k8s.io -n p12-finish-ml
+NAME                             QUEUE              RESERVED IN   ADMITTED   FINISHED   AGE
+jobset-recommender-train-02aa0   p12-finish-ml-lq                                       15s
+$ kubectl get pods -n p12-finish-ml -l app.kubernetes.io/component=recommender-train
+No resources found in p12-finish-ml namespace.
+$ kubectl patch clusterqueue p12-finish-ml-cq (cpu nominalQuota back to 4)
+clusterqueue.kueue.x-k8s.io/p12-finish-ml-cq patched
+$ kubectl wait --for=condition=Completed jobset/recommender-train -n p12-finish-ml --timeout=240s
+jobset.jobset.x-k8s.io/recommender-train condition met
+```
+
+Last, removal. The lab took the install out in this order, and finished with
+a count of what was left: no CRD, no webhook configuration and no cluster role
+of either project.
+
+<!-- gate: output -->
+```text
+$ kubectl delete jobset,localqueue --all -n p12-finish-ml; kubectl delete clusterqueue,resourceflavor (the lab's two)
+jobset.jobset.x-k8s.io "recommender-train" deleted from p12-finish-ml namespace
+localqueue.kueue.x-k8s.io "p12-finish-ml-lq" deleted from p12-finish-ml namespace
+clusterqueue.kueue.x-k8s.io "p12-finish-ml-cq" deleted
+resourceflavor.kueue.x-k8s.io "p12-finish-ml-flavor" deleted
+$ helm uninstall kueue -n p12-finish-kueue; helm uninstall jobset -n p12-finish-jobset
+release "kueue" uninstalled
+release "jobset" uninstalled
+$ kubectl delete namespace p12-finish-ml p12-finish-kueue p12-finish-jobset --wait=true
+namespace "p12-finish-ml" deleted
+namespace "p12-finish-kueue" deleted
+namespace "p12-finish-jobset" deleted
+$ kubectl get crd -o name | grep -E 'kueue|jobset' (what the uninstalls left behind)
+customresourcedefinition.apiextensions.k8s.io/jobsets.jobset.x-k8s.io
+$ kubectl delete (each CRD listed above)
+customresourcedefinition.apiextensions.k8s.io "jobsets.jobset.x-k8s.io" deleted
+$ kubectl get crd -o name | grep -c -E 'kueue|jobset'
+0
+$ kubectl get validatingwebhookconfiguration,mutatingwebhookconfiguration -o name | grep -c -E 'kueue|jobset'
+0
+$ kubectl get clusterrole -o name | grep -c -E 'kueue|jobset'
+0
 ```
 
 ### 4. Multi-tenant GPU quota (the fair-share fence)
