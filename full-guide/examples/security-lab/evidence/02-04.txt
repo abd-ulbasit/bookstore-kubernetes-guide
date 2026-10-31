@@ -1,0 +1,344 @@
+# Transcript for 02-networking/04-ingress.md (Part 02 chapter 04).
+# Tier A: kind cluster sf-pilot on the lab host, Kubernetes v1.37.0 node,
+# kubectl v1.37.2, helm v4.1.4, chart traefik/traefik 42.2.0 (app v3.7.16).
+# Namespace rewrite: the chapter says bookstore and traefik. The run used
+# p02-04-bookstore and p02-traefik, because p02-bookstore was in use by another
+# run on the shared cluster. Manifest copies differ only in namespace names,
+# and the values file copy keeps the chapter's values.
+# Heavy lock: heavy_lock was held by another worker, so this run did NOT install
+# Traefik. Traefik lines are helm dry runs, a server dry run, and the output of
+# a second release being refused. Routing through Traefik was not captured.
+# The transcript is redacted: another release's namespace name is shown as
+# <other-release-namespace>, and local paths are shown as kubectl and helm.
+#
+# Part A: runs made before a second Traefik release appeared on the cluster.
+$ kubectl config current-context
+kind-sf-pilot
+
+$ kubectl apply -f tree/00-namespace.yaml
+namespace/p02-04-bookstore created
+resourcequota/bookstore-quota created
+limitrange/bookstore-limits created
+
+$ kubectl apply -f tree/05-serviceaccounts-rbac.yaml
+serviceaccount/catalog-sa created
+serviceaccount/storefront-sa created
+serviceaccount/orders-sa created
+serviceaccount/payments-worker-sa created
+serviceaccount/postgres-sa created
+serviceaccount/redis-sa created
+serviceaccount/rabbitmq-sa created
+serviceaccount/migrate-sa created
+role.rbac.authorization.k8s.io/catalog-config-reader created
+rolebinding.rbac.authorization.k8s.io/catalog-config-reader-binding created
+
+$ kubectl apply -f tree/15-catalog-config.yaml
+configmap/catalog-config created
+
+$ kubectl apply -f tree/16-db-credentials.yaml
+secret/db-credentials created
+
+$ kubectl apply -f tree/20-postgres-statefulset.yaml
+service/postgres created
+statefulset.apps/postgres created
+
+$ kubectl -n p02-04-bookstore rollout status statefulset/postgres --timeout=170s
+Waiting for statefulset spec update to be observed...
+Waiting for 1 pods to be ready...
+Waiting for 1 pods to be ready...
+Waiting for 1 pods to be ready...
+Waiting for 1 pods to be ready...
+Waiting for 1 pods to be ready...
+error: timed out waiting for the condition
+
+$ kubectl apply -f tree/21-db-migrate-job.yaml
+job.batch/db-migrate created
+
+$ kubectl -n p02-04-bookstore wait --for=condition=complete job/db-migrate --timeout=150s
+error: timed out waiting for the condition on jobs/db-migrate
+
+$ kubectl apply -f tree/10-catalog-deploy.yaml
+deployment.apps/catalog created
+
+$ kubectl apply -f tree/11-storefront-deploy.yaml
+deployment.apps/storefront created
+
+$ kubectl apply -f tree/14-orders-deploy.yaml
+deployment.apps/orders created
+
+$ kubectl apply -f tree/40-services.yaml
+service/catalog created
+service/storefront created
+service/orders created
+service/redis created
+service/rabbitmq created
+service/payments-worker created
+
+$ kubectl -n p02-04-bookstore rollout status deploy/catalog --timeout=170s
+Waiting for deployment spec update to be observed...
+Waiting for deployment spec update to be observed...
+Waiting for deployment "catalog" rollout to finish: 0 out of 3 new replicas have been updated...
+Waiting for deployment "catalog" rollout to finish: 0 of 3 updated replicas are available...
+
+$ kubectl -n p02-04-bookstore exec postgres-0 -- pg_isready -U bookstore -d bookstore
+/var/run/postgresql:5432 - accepting connections
+
+$ kubectl -n p02-04-bookstore delete job db-migrate --wait=true
+job.batch "db-migrate" deleted from p02-04-bookstore namespace
+
+$ kubectl apply -f tree/21-db-migrate-job.yaml
+job.batch/db-migrate created
+
+$ kubectl -n p02-04-bookstore wait --for=condition=complete job/db-migrate --timeout=100s
+error: timed out waiting for the condition
+error: timed out waiting for the condition on jobs/db-migrate
+
+$ kubectl apply -f tree/12-redis.yaml
+deployment.apps/redis created
+
+$ kubectl -n p02-04-bookstore rollout status deploy/redis --timeout=90s
+Waiting for deployment spec update to be observed...
+Waiting for deployment "redis" rollout to finish: 0 out of 1 new replicas have been updated...
+Waiting for deployment "redis" rollout to finish: 0 of 1 updated replicas are available...
+error: timed out waiting for the condition
+
+$ kubectl -n p02-04-bookstore rollout status deploy/catalog --timeout=90s
+Waiting for deployment "catalog" rollout to finish: 0 of 3 updated replicas are available...
+Waiting for deployment "catalog" rollout to finish: 1 of 3 updated replicas are available...
+Waiting for deployment "catalog" rollout to finish: 2 of 3 updated replicas are available...
+deployment "catalog" successfully rolled out
+
+$ kubectl -n p02-04-bookstore get pods
+NAME                          READY   STATUS      RESTARTS   AGE
+catalog-8546fc8c9-45426       1/1     Running     0          4m51s
+catalog-8546fc8c9-4hmjk       1/1     Running     0          4m51s
+catalog-8546fc8c9-w7mqm       1/1     Running     0          4m53s
+db-migrate-5dcc4              0/1     Completed   0          3m52s
+orders-d77cbcb9b-47fsn        1/1     Running     0          4m51s
+orders-d77cbcb9b-szdxv        1/1     Running     0          4m50s
+postgres-0                    1/1     Running     0          9m9s
+redis-574bb544f-4drkm         1/1     Running     0          107s
+storefront-76cbb89847-kqd4t   1/1     Running     0          4m53s
+storefront-76cbb89847-vw9p7   1/1     Running     0          4m52s
+
+$ kubectl -n p02-04-bookstore port-forward svc/catalog 18080:80 (and orders 18081:80, storefront 18082:80)
+
+$ curl -s --retry 10 --retry-connrefused --retry-delay 1 -w \nHTTP %{http_code}\n http://localhost:18080/books
+[]
+HTTP 200
+
+$ curl -s -w \nHTTP %{http_code}\n http://localhost:18080/api/books
+404 page not found
+
+HTTP 404
+
+$ curl -s -w \nHTTP %{http_code}\n -X POST http://localhost:18081/orders -H Content-Type: application/json -d {"book_id":1,"qty":2}
+{"order_id":1,"status":"accepted"}
+
+HTTP 201
+
+$ curl -s -w \nHTTP %{http_code}\n http://localhost:18082/healthz
+{"status":"ok"}
+HTTP 200
+
+$ helm show chart traefik/traefik --version 42.2.0
+annotations:
+  artifacthub.io/changes: |
+    - kind: added
+      description: "feat(ports): add http.maxHeaderValueCount value"
+    - kind: added
+      description: "feat(hub): add ec2 sessionToken value"
+    - kind: added
+      description: "feat(hub): support traefik hub v3.20.20 and v3.21.7"
+    - kind: added
+      description: "feat(global): add aliasHeadersStrategy value"
+  traefik.io/hub-max-version: v3.21.7
+  traefik.io/hub-min-version: v3.19.3
+  traefik.io/proxy-max-version: v3.7.16
+  traefik.io/proxy-min-version: v3.6.0
+apiVersion: v2
+appVersion: v3.7.16
+description: A Traefik based Kubernetes ingress controller
+home: https://traefik.io/
+icon: https://raw.githubusercontent.com/traefik/traefik/master/docs/content/assets/img/traefik.logo.png
+keywords:
+- traefik
+- ingress
+- networking
+kubeVersion: '>=1.30.0-0'
+maintainers:
+- email: <maintainer-email>
+  name: mloiseleur
+- email: <maintainer-email>
+  name: darkweaver87
+- name: jnoordsij
+name: traefik
+sources:
+- https://github.com/traefik/traefik-helm-chart
+- https://github.com/traefik/traefik
+type: application
+version: 42.2.0
+
+
+$ helm show crds traefik/traefik --version 42.2.0 | grep -n (Middleware CRD name, group, version, replacePathRegex fields)
+17:  - name: v1alpha1
+385:  - name: v1alpha1
+726:  - name: v1alpha1
+1063:  - name: v1alpha1
+1281:  - name: v1alpha1
+1556:  - name: v1alpha1
+1739:  - name: v1alpha1
+2057:  - name: v1alpha1
+2266:  - name: v1alpha1
+2435:  - name: v1alpha1
+3143:  - name: v1alpha1
+3313:  - name: v1alpha1
+
+$ helm install traefik traefik/traefik --version 42.2.0 -n p02-traefik -f traefik-values.lab.yaml --dry-run=server  (exit code, then warnings)
+helm exit=0
+NAME: traefik
+NAMESPACE: p02-traefik
+STATUS: pending-install
+
+$ grep Middleware CRD name, group, and replacePathRegex fields in helm show crds output
+4080:  group: traefik.io
+4570:  group: traefik.io
+4834:  group: traefik.io
+4949:  name: middlewares.traefik.io
+4951:  group: traefik.io
+6215:                  regex:
+6219:                  replacement:
+6253:              replacePathRegex:
+
+$ kubectl apply --dry-run=server -f 50-ingress-traefik.lab.yaml
+ingress.networking.k8s.io/bookstore created (server dry run)
+error: resource mapping not found for name: "rewrite-api-prefix" namespace: "p02-04-bookstore" from "50-ingress-traefik.lab.yaml": no matches for kind "Middleware" in version "traefik.io/v1alpha1"
+ensure CRDs are installed first
+
+$ kubectl apply --dry-run=server -f 00-traefik-namespace.yaml
+namespace/p02-traefik unchanged (server dry run)
+
+$ openssl req -x509 -nodes -days 365 -newkey rsa:2048 -keyout tls.key -out tls.crt -subj /CN=bookstore.localdev.me -addext subjectAltName=DNS:bookstore.localdev.me
+....+...+.........+..+..........+...+........+...+.+......+..+.............+..+......+.+........+...+.........+....+...........+.+..+...+....+.....+....+++++++++++++++++++++++++++++++++++++++*.....+.+....................+....+.................+...+.+...+...+............+++++++++++++++++++++++++++++++++++++++*..+...+.....+.+..+............+.+.....+...............+.......+.....+.......+..+....+.....+..........+..+.......+........+.......+.....+.+.....+.+.....+................+..+.+............+..+......+.+..............+................+.....+......+...+.........+...+...+.......+........+.+..................+...+.....+.............+.....+....+...+.........+.....+...+.+..+....+........+............+....+............+...+..+....+.....+.+..+..................+..........+..................+..+...+.......+..+............+.+..+.......+.....+.+.....+...+.+......+..+..........+..+.+........+..........++++++
+..............+..........+++++++++++++++++++++++++++++++++++++++*.....+...+..+............+......+............+.........+.+.........+...........+...+++++++++++++++++++++++++++++++++++++++*..+.+.....+...+.........+...+............+...+...............+...+......+..................+.+......+...+..+......+.........+...............+.+..+.+......+.....+...+.......+...+.....+............+..........+..............+.......+........+.+...+..+....+...........+.+...+..+.........+..........+.........+......+.....+..........+......+..+.+......+...+..+................+...+.........+............+...+.......................+....+......+........+......+...+.+............+..+................+..+..........+.....+.........+....+..+....+...+.....+......+.+...............+......+..+...+.......+.....+...+...+....+..+.........................+...+.....+.+.....+.........+.+......+.........+......+......+.....+.........+.+........+....+..+....+.....+......+.+............+..+...+..........+...............+.....+.+.....+.......+.....+....+........+............+.+...............+...+..+.............+......+......+..+...+............+.............+..+.+............+........+.......+...+...........+......+.......+..+......+...+.+..................+..+.+..+......+......+.+...+..............+...+.........+....+.........+........+...................+......+.....+.......+...+...+......+......+........+....+............+...+..+....+...........+...............+....+.....+.....................+.+........+.........+......+......++++++
+-----
+
+$ sh -c openssl x509 -in tls.crt -noout -subject -ext subjectAltName 2>&1 || openssl x509 -in tls.crt -noout -subject -text | grep -A1 "Subject Alternative"
+subject=CN=bookstore.localdev.me
+X509v3 Subject Alternative Name: 
+    DNS:bookstore.localdev.me
+
+$ kubectl -n p02-04-bookstore create secret tls bookstore-tls --cert=tls.crt --key=tls.key
+secret/bookstore-tls created
+
+$ kubectl -n p02-04-bookstore get secret bookstore-tls -o custom-columns=NAME:.metadata.name,TYPE:.type
+NAME            TYPE
+bookstore-tls   kubernetes.io/tls
+
+$ openssl x509 -in tls.crt -noout -subject -ext subjectAltName
+subject=CN=bookstore.localdev.me
+X509v3 Subject Alternative Name: 
+    DNS:bookstore.localdev.me
+
+# Part B: the clean final run, after the other release was found on the cluster.
+$ helm show chart traefik/traefik --version 42.2.0
+annotations:
+  artifacthub.io/changes: |
+    - kind: added
+      description: "feat(ports): add http.maxHeaderValueCount value"
+    - kind: added
+      description: "feat(hub): add ec2 sessionToken value"
+    - kind: added
+      description: "feat(hub): support traefik hub v3.20.20 and v3.21.7"
+    - kind: added
+      description: "feat(global): add aliasHeadersStrategy value"
+  traefik.io/hub-max-version: v3.21.7
+  traefik.io/hub-min-version: v3.19.3
+  traefik.io/proxy-max-version: v3.7.16
+  traefik.io/proxy-min-version: v3.6.0
+apiVersion: v2
+appVersion: v3.7.16
+description: A Traefik based Kubernetes ingress controller
+home: https://traefik.io/
+icon: https://raw.githubusercontent.com/traefik/traefik/master/docs/content/assets/img/traefik.logo.png
+keywords:
+- traefik
+- ingress
+- networking
+kubeVersion: '>=1.30.0-0'
+maintainers:
+- email: <maintainer-email>
+  name: mloiseleur
+- email: <maintainer-email>
+  name: darkweaver87
+- name: jnoordsij
+name: traefik
+sources:
+- https://github.com/traefik/traefik-helm-chart
+- https://github.com/traefik/traefik
+type: application
+version: 42.2.0
+
+
+$ helm install traefik traefik/traefik --version 42.2.0 -n p02-traefik -f traefik-values.yaml --dry-run=server 2>&1 | grep -iE "warning|error|^STATUS:"
+Error: INSTALLATION FAILED: unable to continue with install: IngressClass "traefik" in namespace "" exists and cannot be imported into the current release: invalid ownership metadata; annotation validation error: key "meta.helm.sh/release-namespace" must equal "p02-traefik": current value is "p02-05-traefik"
+
+$ kubectl apply --dry-run=server -f 50-ingress-traefik.yaml
+middleware.traefik.io/rewrite-api-prefix created (server dry run)
+ingress.networking.k8s.io/bookstore created (server dry run)
+
+$ openssl x509 -in tls.crt -noout -subject -ext subjectAltName
+subject=CN=bookstore.localdev.me
+X509v3 Subject Alternative Name: 
+    DNS:bookstore.localdev.me
+
+$ kubectl -n p02-04-bookstore create secret tls bookstore-tls --cert=tls.crt --key=tls.key
+error: failed to create secret secrets "bookstore-tls" already exists
+
+$ kubectl -n p02-04-bookstore get secret bookstore-tls -o custom-columns=NAME:.metadata.name,TYPE:.type
+NAME            TYPE
+bookstore-tls   kubernetes.io/tls
+
+$ kubectl -n p02-04-bookstore port-forward svc/catalog 18080:80  (orders 18081:80, storefront 18082:80 in the background)
+
+$ curl -s --retry 10 --retry-connrefused --retry-delay 1 -w \n%{http_code}\n http://localhost:18080/books
+[]
+200
+
+$ curl -s -w \n%{http_code}\n http://localhost:18080/api/books
+404 page not found
+
+404
+
+$ curl -s -w \n%{http_code}\n -X POST http://localhost:18081/orders -H Content-Type: application/json -d {"book_id":1,"qty":2}
+{"order_id":2,"status":"accepted"}
+
+201
+
+$ curl -s -w \n%{http_code}\n http://localhost:18082/healthz
+{"status":"ok"}
+200
+
+$ kubectl -n p02-04-bookstore delete secret bookstore-tls
+secret "bookstore-tls" deleted from p02-04-bookstore namespace
+
+$ kubectl -n p02-04-bookstore create secret tls bookstore-tls --cert=tls.crt --key=tls.key
+secret/bookstore-tls created
+
+$ helm install traefik traefik/traefik --version 42.2.0 -n p02-traefik -f traefik-values.yaml --dry-run=server 2>&1 | grep -i "INSTALLATION FAILED" (run again: a second release on this cluster)
+Error: INSTALLATION FAILED: unable to continue with install: IngressClass "traefik" in namespace "" exists and cannot be imported into the current release: invalid ownership metadata; annotation validation error: key "meta.helm.sh/release-namespace" must equal "p02-traefik": current value is "<other-release-namespace>"
+
+$ kubectl get ingressclass traefik (owned by another release; left untouched)
+NAME                CONTROLLER                      PARAMETERS   AGE
+traefik (default)   traefik.io/ingress-controller   <none>       3m21s
+
+$ helm repo add traefik https://traefik.github.io/charts
+"traefik" already exists with the same configuration, skipping
+
+$ helm repo update traefik
+Hang tight while we grab the latest from your chart repositories...
+...Successfully got an update from the "traefik" chart repository
+Update Complete. ⎈Happy Helming!⎈
+
+$ kubectl apply --dry-run=server -f 00-traefik-namespace.yaml
+namespace/p02-traefik unchanged (server dry run)
