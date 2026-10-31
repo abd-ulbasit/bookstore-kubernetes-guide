@@ -12,13 +12,16 @@
 #
 #   1. Set the existing vpc-cni addon to `preserve = false` (so EKS removes
 #      its CNI plugin from /etc/cni/net.d on nodes) OR remove the vpc-cni
-#      entry from module.eks.cluster_addons in eks.tf.
+#      entry from module.eks.cluster_addons in eks.tf. Remove the kube-proxy
+#      add-on the same way.
 #
 #   2. kubectl drain every existing node. Workloads will go Pending until
 #      the new CNI is in place.
 #
-#   3. Apply this file (after renaming to cilium-installation.tf), which
-#      installs Cilium + replaces kube-proxy.
+#   3. Label kube-system (kubectl label namespace kube-system
+#      pod-security.kubernetes.io/enforce=privileged), then apply this file
+#      (after renaming to cilium-installation.tf). It installs Cilium. Delete
+#      any kube-proxy DaemonSet left over.
 #
 #   4. Cordon + delete the nodes (Karpenter will replace them). When they
 #      come back, they'll come back with Cilium as the CNI.
@@ -34,32 +37,35 @@
 # stock NetworkPolicy), Cilium Cluster Mesh (if you ever need multi-cluster
 # networking).
 #
-# Cilium needs: more privilege than VPC-CNI (NET_ADMIN, BPF, SYS_ADMIN), a
-# separate cilium namespace with PSA enforce=privileged (Cilium agents only),
-# and a kernel new enough to support modern eBPF (the AL2023 EKS-optimized
-# AMI is fine).
+# Cilium needs more privilege than VPC-CNI (NET_ADMIN, SYS_ADMIN and others,
+# host networking), the kube-system namespace labelled
+# enforce=privileged, and a kernel of 5.10 or later (the AL2023
+# EKS-optimized AMI is fine).
 #
 # ============================================================================
 # PSA EXCEPTION — Cilium AGENTS need privileged. The operator does NOT.
 # ============================================================================
 # The same warning that applies to Falco applies here: Cilium's AGENT pod
-# (the per-node daemonset) runs with CAP_NET_ADMIN + CAP_BPF + CAP_SYS_ADMIN
-# to attach eBPF programs to the kernel network stack. Its namespace
-# (`kube-system`, where it ships upstream) cannot be restricted-PSA — agents
-# need privileged.
+# (the per-node daemonset) uses host networking, hostPath mounts and
+# capabilities such as NET_ADMIN and SYS_ADMIN to attach eBPF programs to
+# the kernel network stack. Its chart default also sets seccomp and AppArmor
+# to Unconfined. The baseline forbids each of these, so its namespace
+# (`kube-system`, where it ships upstream) needs the privileged level. Label
+# it before the install:
+#   kubectl label namespace kube-system pod-security.kubernetes.io/enforce=privileged
 #
-# The cilium-OPERATOR is a control-plane process that does NOT load eBPF
-# programs. It runs as a normal Deployment in `kube-system`, with no host
-# network and no privileged capabilities. We set its securityContext
-# explicitly below so it inherits nothing accidental from the agent's chart
-# defaults and is clearly restricted-PSA compliant.
+# The cilium-OPERATOR does not load eBPF programs. It runs as a Deployment in
+# `kube-system` with all capabilities dropped. Its chart default is
+# hostNetwork: true, which restricted forbids, so it cannot meet restricted.
+# We set its container securityContext explicitly below so the chart cannot
+# promote it by accident.
 ################################################################################
 
 # --- Variables (move to variables.tf when you commit this) -------------------
 # variable "cilium_chart_version" {
-#   description = "Cilium Helm chart version. 1.16.x is the current stable line."
+#   description = "Cilium Helm chart version, checked against 1.20.4."
 #   type        = string
-#   default     = "1.16.4"
+#   default     = "1.20.4"
 # }
 
 ################################################################################
@@ -72,7 +78,7 @@ resource "helm_release" "cilium" {
 
   repository = "https://helm.cilium.io/"
   chart      = "cilium"
-  version    = "1.16.4" # var.cilium_chart_version once you wire the variable
+  version    = "1.20.4" # var.cilium_chart_version once you wire the variable
 
   timeout = 900
   wait    = true
@@ -89,6 +95,16 @@ resource "helm_release" "cilium" {
       k8sServicePort = "443"
 
       routingMode = "native" # use the underlying VPC routing
+      # ENI IPAM gives pods secondary VPC IPs. The operator makes the EC2
+      # calls, so its service account gets the ENI permissions (IRSA), not
+      # the node role.
+      ipam = {
+        mode = "eni"
+      }
+      eni = {
+        enabled = true
+      }
+      egressMasqueradeInterfaces = "eth0"
       endpointRoutes = {
         enabled = true
       }
@@ -120,12 +136,11 @@ resource "helm_release" "cilium" {
         }
       }
 
-      # ──── Operator placement + explicit restricted-PSA security context ─
-      # The operator runs in `kube-system` (default chart placement). PSA on
-      # kube-system is privileged because the AGENT also runs there — but
-      # the operator does NOT need privileged. We pin it to a restricted
-      # security context so a future tightening of the chart can't promote
-      # privilege via inherited defaults.
+      # ──── Operator placement + explicit container security context ─
+      # The operator runs in `kube-system` (default chart placement). It does
+      # not need privileged, but its chart default is hostNetwork: true, which
+      # restricted forbids. We pin its container security context so a chart
+      # change cannot promote privilege through inherited defaults.
       operator = {
         replicas = 2
         nodeSelector = {
