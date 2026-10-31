@@ -1,16 +1,16 @@
-# Bookstore — Part 08 ch.02 "Backup and disaster recovery": a Velero Schedule
+# Bookstore: Part 08 ch.02 "Backup and disaster recovery": a Velero Schedule
 # that takes the SAME consistent, PV-inclusive `bookstore` backup as
-# velero-backup.yaml on a recurring cron — this is the actual production
+# velero-backup.yaml on a recurring cron: this is the actual production
 # posture (a one-off Backup is for ad-hoc drills; a Schedule gives you an RPO).
 #
-# !!! CRD-BACKED — intrinsic dry-run behavior (the SAME documented behavior as
+# !!! CRD-BACKED: intrinsic dry-run behavior (the SAME documented behavior as
 #     velero-backup.yaml / 18- / 51- / 70- / 80- / 83- / argocd/) !!!
 #   `Schedule` is a CRD (velero.io/v1) installed by Velero. On a cluster
 #   WITHOUT Velero installed:
 #       kubectl apply --dry-run=client -f examples/bookstore/operators/velero-schedule.yaml
 #       error: resource mapping not found ... no matches for kind "Schedule"
 #       in version "velero.io/v1"
-#     EXPECTED, not a defect — identical precedent to every CRD object in this
+#     EXPECTED, not a defect: identical precedent to every CRD object in this
 #     guide. Schema verified by reading + the official Velero API reference.
 #     `Schedule.spec.template` is exactly a `Backup` spec; it is kept
 #     byte-aligned with velero-backup.yaml's spec so the scheduled backup is
@@ -37,7 +37,7 @@ spec:
   schedule: "0 2 * * *"
   # Skip a run if the previous one is still going (no overlapping backups).
   skipImmediately: false
-  # `template` IS a Backup spec — kept identical to velero-backup.yaml so the
+  # `template` IS a Backup spec: kept identical to velero-backup.yaml so the
   # scheduled backup and the ad-hoc one are the same backup, just recurring.
   template:
     includedNamespaces:
