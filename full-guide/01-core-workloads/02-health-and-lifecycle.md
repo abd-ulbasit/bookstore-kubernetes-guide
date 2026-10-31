@@ -644,6 +644,9 @@ drain. Every container in the Pod shares this one budget, sidecars included.
 > non-trivial boot (JVM warmup, large cache load, migrations). Sizing liveness
 > `initialDelaySeconds` for worst-case boot makes post-boot hangs slow to
 > detect; a startup probe decouples the two.
+>
+> The Postgres StatefulSet in [01.05](05-statefulsets.md) adds a `startupProbe`
+> of this kind, so `initdb` and crash recovery are not taken for a hang.
 
 > **In production:** size `terminationGracePeriodSeconds` to the **real**
 > worst-case in-flight request time **plus** the `preStop` sleep, and have the

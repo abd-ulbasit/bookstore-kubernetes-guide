@@ -79,7 +79,6 @@ than the build it tests. The table lists the threats this chapter owns.
 | A Pod that copies a Service's labels receives its traffic | Label discipline: the shared `app` label is set only on the Deployments' templates, and the endpoints show any Pod that matches it | [02.02](../02-networking/02-services.md); who may create such a Pod, 05.07 <!-- link-later: 05.07 --> |
 | A canary ships without the baseline and runs as root or with a writable root filesystem | The canary carries the full baseline, and the namespace refuses any Pod that lacks it, so a ReplicaSet cannot create one | [05.02](../05-security/02-pod-security.md) |
 | A bad image reaches every user before anyone notices | Readiness keeps an image that cannot start from serving. A canary limits how many users run a build that starts, and scaling it to 0 stops it | [07.05](../07-delivery/05-progressive-delivery.md) |
-| A rollback reinstates an image that is no longer trusted | `kubectl rollout undo` restores an earlier pod template. Keep the bad ReplicaSet to read, and pin images by digest so an old reference means the same bytes | [01.04](04-replicasets-and-deployments.md), [05.03](../05-security/03-supply-chain.md) |
 
 Two limits matter. A build that starts and misbehaves gets past readiness, so
 only metrics and a person or controller catch it. And a rollback restores code,
@@ -377,7 +376,7 @@ Ten Ready endpoints: nine from the stable track and one from the canary. The
 ### 2. Measure the split from the Pods' own counters
 
 The catalog counts each request it answers in `http_requests_total`, labelled
-by handler and status code, and serves the counts on `/metrics` on its own
+by handler and status code, and serves the counts on `/metrics` on the app
 port. The catalog's logs do not record requests, so the lab reads each Pod's
 counter through the API server's proxy. The probe calls only `/books`. The
 kubelet's probes call `/healthz` and `/readyz`, which have their own handler
@@ -550,7 +549,7 @@ Probe again, after deleting the previous probe Pod and applying the manifest
 from step 2:
 
 ```sh
-kubectl delete pod curlbox -n bookstore
+kubectl delete pod curlbox -n bookstore --ignore-not-found
 # apply the probe manifest from step 2 again, then wait:
 kubectl wait --for=jsonpath='{.status.phase}'=Succeeded pod/curlbox -n bookstore --timeout=180s
 served
@@ -705,9 +704,10 @@ wait more time, and read the counters once the Pod reaches `Succeeded`.
 
 The copy took 28 of the 200 requests. From the Service's side, the copy and a
 canary Pod look the same. Admission did not stop it, because the copy meets the
-baseline. What stops it is who can create Pods in the namespace. That is RBAC
-on Pod creation ([05.01](../05-security/01-authn-authz-rbac.md)), together with
-an admission rule that accepts the `app: catalog` label only from the release's
+baseline. What stops it is RBAC. Create Pods, Deployments, Jobs, CronJobs and
+DaemonSets only for principals who need them, because each of those kinds makes
+Pods ([05.01](../05-security/01-authn-authz-rbac.md)). Add an admission
+rule that accepts the `app: catalog` label only from the release's
 ServiceAccount (05.07 <!-- link-later: 05.07 -->). Narrowing the Service
 selector does not help, because the copy matches it by design. Delete the probe
 Pod and the copy:
@@ -771,7 +771,9 @@ catalog-stable-64d4dc76b6-xhhjb   0/1     Pending             0          59s    
 
 Seven Pods are Ready. The new Pods never become Ready, so none of them is
 an endpoint.
-Roll back to the last revision:
+Roll back to the last revision. [01.04](04-replicasets-and-deployments.md#4-scale-roll-and-roll-back)
+shows `rollout undo`, and the warning it prints for an object created with
+`kubectl apply`. The rollback here runs the same command:
 
 ```sh
 kubectl rollout undo deploy/catalog-stable -n bookstore
@@ -781,12 +783,6 @@ kubectl get endpointslices -n bookstore -l kubernetes.io/service-name=catalog \
   -o jsonpath='{range .items[*].endpoints[*]}{.conditions.ready}{"\n"}{end}' \
   | sort | uniq -c
 kubectl get rs -n bookstore -l app=catalog,track=stable
-```
-
-<!-- gate: output -->
-```text
-Warning: resource deployments/catalog-stable was previously managed with 'kubectl apply'. Rolling back will not update the kubectl.kubernetes.io/last-applied-configuration annotation, which may cause unexpected behavior on future 'kubectl apply' operations. Consider using 'kubectl apply' with your previous configuration file instead.
-deployment.apps/catalog-stable rolled back
 ```
 
 <!-- gate: output -->
@@ -811,73 +807,26 @@ catalog-stable-5cc48c67c7   9         9         9       11m
 catalog-stable-64d4dc76b6   0         0         0       2m6s
 ```
 
-The warning is real. This Deployment was created with `kubectl apply`, and
-`rollout undo` does not update its `last-applied-configuration` annotation. A
-later `kubectl apply` of the file puts back whatever the file says, so fix the
-file in version control first. Then apply it, and the file and the cluster
-agree.
+The `last-applied-configuration` annotation is not updated by a rollback, so
+fix the file in version control before the next `kubectl apply`. Otherwise the
+apply puts the bad image back. The revision history and digest pinning that make
+a rollback safe are covered in [01.04](04-replicasets-and-deployments.md).
 
 A rollback restores code, not state. The bad build may have read credentials
 or called services with the identity it had. Those stay valid until they are
 rotated ([05.04](../05-security/04-secrets-and-cluster-hardening.md)). Keep the
-bad ReplicaSet at zero replicas until you have read it. The listing shows it,
-and `revisionHistoryLimit` in the manifest decides how many old ReplicaSets
-stay. The rollback is also only as trusted as the image it returns to. Pin the
-reviewed image by digest, as the baseline does for third-party images
-([01.01](01-pods.md#baseline-image-digest)), so the old revision cannot change
-quietly.
+bad ReplicaSet at zero replicas until you have read it.
 
-### 6. Refusals (deliberate failures)
+### 6. Refusals, shown once
 
-Two commands fail on purpose, so you recognise the refusals. The first is a
-bare Pod with no baseline, which admission refuses as [01.01](01-pods.md)
-showed. The second is a canary Deployment with no baseline. The API server
-accepts the Deployment with a warning, but its ReplicaSet cannot create the Pod.
-Neither leaves anything running.
-
-```sh
-kubectl run canary-probe --image=bookstore/catalog:dev -n bookstore --dry-run=server -- /catalog
-```
-
-<!-- gate: output -->
-```text
-Error from server (Forbidden): pods "canary-probe" is forbidden: violates PodSecurity "restricted:latest": allowPrivilegeEscalation != false (container "canary-probe" must set securityContext.allowPrivilegeEscalation=false), unrestricted capabilities (container "canary-probe" must set securityContext.capabilities.drop=["ALL"]), runAsNonRoot != true (pod or container "canary-probe" must set securityContext.runAsNonRoot=true), seccompProfile (pod or container "canary-probe" must set securityContext.seccompProfile.type to "RuntimeDefault" or "Localhost")
-```
-
-```sh
-kubectl create deployment canary-nobase --image=bookstore/catalog:dev -n bookstore
-kubectl get deployment canary-nobase -n bookstore
-kubectl get deployment canary-nobase -n bookstore -o jsonpath='{.status.conditions[?(@.type=="ReplicaFailure")].message}{"\n"}'
-kubectl get rs -n bookstore -l app=canary-nobase
-kubectl delete deployment canary-nobase -n bookstore
-```
-
-<!-- gate: output -->
-```text
-Warning: would violate PodSecurity "restricted:latest": allowPrivilegeEscalation != false (container "catalog" must set securityContext.allowPrivilegeEscalation=false), unrestricted capabilities (container "catalog" must set securityContext.capabilities.drop=["ALL"]), runAsNonRoot != true (pod or container "catalog" must set securityContext.runAsNonRoot=true), seccompProfile (pod or container "catalog" must set securityContext.seccompProfile.type to "RuntimeDefault" or "Localhost")
-deployment.apps/canary-nobase created
-```
-
-<!-- gate: output -->
-```text
-NAME            READY   UP-TO-DATE   AVAILABLE   AGE
-canary-nobase   0/1     0            0           16s
-```
-
-<!-- gate: output -->
-```text
-pods "canary-nobase-88f8db48c-8n4ms" is forbidden: violates PodSecurity "restricted:latest": allowPrivilegeEscalation != false (container "catalog" must set securityContext.allowPrivilegeEscalation=false), unrestricted capabilities (container "catalog" must set securityContext.capabilities.drop=["ALL"]), runAsNonRoot != true (pod or container "catalog" must set securityContext.runAsNonRoot=true), seccompProfile (pod or container "catalog" must set securityContext.seccompProfile.type to "RuntimeDefault" or "Localhost")
-```
-
-<!-- gate: output -->
-```text
-NAME                      DESIRED   CURRENT   READY   AGE
-canary-nobase-88f8db48c   1         0         0       18s
-```
-
-The canary never runs. A build without the baseline does not reach users, and
-the reason is printed in the ReplicaFailure condition, where you will look
-first.
+Two refusals that a Deployment can meet are demonstrated in other chapters, so
+this chapter does not repeat them. A bare Pod with no baseline is refused, as
+[01.01](01-pods.md) shows. A Deployment whose template has no baseline is
+accepted with a warning, and its ReplicaSet cannot create the Pod, as
+[01.04](04-replicasets-and-deployments.md#5-a-deployment-that-breaks-restricted-deliberate-action)
+shows. A canary is a Deployment like any other, so both rules apply to it
+unchanged. The reason is printed in the ReplicaFailure condition of the
+Deployment, where you look first.
 
 > **Why this is "manual".** The traffic share follows the replica ratio, the
 > split is coarse, and **you** watch the metrics and run the `scale` commands.
@@ -1058,21 +1007,24 @@ Checklist:
 3. **A teammate applies a Pod with the full baseline and the label `app: catalog` to test something. Within seconds the Service sends it requests. Which control should have stopped this, and why did the baseline not?**
    <details><summary>Show answer</summary>
 
-   The baseline says how a Pod runs: non-root, read-only root, no capabilities. It says nothing about who may run one, so a Pod that carries the baseline passes admission. What should have stopped it is RBAC that limits who can create Pods in the namespace ([05.01](../05-security/01-authn-authz-rbac.md)), together with an admission rule that accepts the `app: catalog` label only from the release's ServiceAccount (05.07 <!-- link-later: 05.07 -->). Narrowing the Service selector does not help, because the teammate's Pod matches it by design. After any unexpected Pod, check the endpoints. The extra Pod shows up there.
+   The baseline says how a Pod runs: non-root, read-only root, no capabilities. It says nothing about who may run one, so a Pod that carries the baseline passes admission. What should have stopped it is RBAC that limits who can create Pods in the namespace, and every workload kind that makes them (Deployments, Jobs, CronJobs and DaemonSets, not only bare Pods) ([05.01](../05-security/01-authn-authz-rbac.md)), together with an admission rule that accepts the `app: catalog` label only from the release's ServiceAccount (05.07 <!-- link-later: 05.07 -->). Narrowing the Service selector does not help, because the teammate's Pod matches it by design. After any unexpected Pod, check the endpoints. The extra Pod shows up there.
 
    </details>
 
 4. **A bad image lands on `catalog-stable`, and you run `kubectl rollout undo`. The previous revision uses the tag `bookstore/catalog:dev`, which someone re-pushed last week. What did the rollback restore, and what did it leave in place?**
    <details><summary>Show answer</summary>
 
-   It restored the previous pod template, so the Pods use that image reference again. The reference is a moving tag, so you get whatever the tag points to now, which may not be the build you reviewed. Pin the reviewed image by digest, so the old reference means the same bytes. The rollback also leaves in place the credentials and network reach the bad build used. They stay valid until you rotate them ([05.04](../05-security/04-secrets-and-cluster-hardening.md)). Keep the bad ReplicaSet to read it, and fix the manifest in version control. Otherwise the next `kubectl apply` brings the bad image back.
+   It restored the previous pod template, so the Pods use that image reference again. The reference is a moving tag, so you get whatever the tag points to now, which may not be the build you reviewed. Pinning the image by digest is the fix, as [01.04](04-replicasets-and-deployments.md)
+explains. The rollback also leaves in place the credentials and network
+reach the bad build used. They stay valid until you rotate them
+([05.04](../05-security/04-secrets-and-cluster-hardening.md)).
 
    </details>
 
 5. **A 9-stable-1-canary split should give about 10% of requests to the canary, but the canary's `http_requests_total` counter shows about 17%. List two plausible causes.**
    <details><summary>Show answer</summary>
 
-   (1) Connection reuse: a client that opened a connection to the canary keeps sending requests over it. On persistent connections the split is per connection, not per request. (2) Stable Pods went unready, so only 5 of the 9 stable Pods took traffic. With the canary Ready, that is 1 in 6, which is about 17%. Count the Ready endpoints per track with the query in the Quick Reference. This is why precise weights need L7 weighted routing (see [how it works under the hood](#how-it-works-under-the-hood)).
+   (1) Connection reuse: a client that opened a connection to the canary keeps sending requests over it. On persistent connections the split is per connection, not per request. (2) Stable Pods went unready, so only 5 of the 9 stable Pods took traffic. With the canary Ready, that is 1 in 6, which is about 17%. Count the Pods per track with `kubectl get pods -L track`, as the Quick Reference shows. This is why precise weights need L7 weighted routing (see [how it works under the hood](#how-it-works-under-the-hood)).
 
    </details>
 

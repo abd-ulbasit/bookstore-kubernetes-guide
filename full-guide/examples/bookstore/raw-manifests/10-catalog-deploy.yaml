@@ -2,7 +2,7 @@
 # Extended in Part 03: ch.01 (ConfigMap), ch.02 (Secret-built DB_DSN),
 # ch.03 (emptyDir scratch + downwardAPI volume). One cumulative file.
 #
-# catalog GRADUATES from a bare Pod (01/02, in `default`) to a self-healing
+# catalog GRADUATES from a bare Pod (01/02, in `bookstore`) to a self-healing
 # Deployment in the `bookstore` namespace (ch.03). It carries forward the ch.02
 # health probes + graceful-shutdown lifecycle and the ch.03 requests/limits.
 # The bare-Pod files are kept as frozen teaching seeds and are NOT edited; this
@@ -181,7 +181,7 @@ spec:
             successThreshold: 1
           lifecycle:
             preStop:
-              # Native sleep handler (beta & default-on at 1.30, GA 1.33 —
+              # Native sleep handler (beta and on by default in 1.30, stable in 1.34;
               # works on any 1.30+ cluster). NOT exec: distroless/static image
               # has no shell or coreutils, so /bin/sleep is absent and an exec
               # preStop would fail (grace delay silently skipped).
