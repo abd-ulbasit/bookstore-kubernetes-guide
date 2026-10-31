@@ -474,7 +474,7 @@ spec:
   validationActions: ["Deny"]
 ```
 
-The lab first clears any `*` namespace an earlier run left, then
+The lab first clears any `p05-09-` namespace an earlier run left, then
 applies the policy. Applying it prints the two objects it creates:
 
 <!-- gate: output -->
@@ -573,10 +573,10 @@ Error from server (Invalid): error when creating "namespaces.yaml": namespaces "
 Error from server (Invalid): error when creating "namespaces.yaml": namespaces "p05-09-too-long" is forbidden: ValidatingAdmissionPolicy 'p05-09-exception-expiry' with binding 'p05-09-exception-expiry' denied request: a namespace below restricted needs a reason and an expiry within 365 days
 ```
 
-**Deliberate refusals.** The two errors above are the admission rule working.
+**Deliberate refusals.** The three errors above are the admission rule working.
 The namespaces named in them are refused on purpose.
 
-The next step lists which namespaces exist. The two refused names are absent.
+The next step lists which namespaces exist. The three refused names are absent.
 
 <!-- gate: output -->
 ```
@@ -748,7 +748,7 @@ each row another way: admission, the gates, or a dated review.
 | 5.2.5 | Minimize the admission of containers sharing the host network namespace | [ch.02](02-pod-security.md) |
 | 5.2.7 | Minimize the admission of root containers | The baseline's `runAsNonRoot` |
 | 5.2.11 | Minimize the admission of HostPath volumes | [ch.02](02-pod-security.md) |
-| 5.3.2 | Ensure that all Namespaces have NetworkPolicies defined | Part 02 ch.06, the default-deny policy <!-- link-later: 02.06 --> |
+| 5.3.2 | Ensure that all Namespaces have NetworkPolicies defined | [Part 02 ch.06](../02-networking/06-network-policies.md), the default-deny policy |
 | 5.4.1 | Prefer Secrets as files over Secrets as environment variables | [ch.04](04-secrets-and-cluster-hardening.md) |
 | 5.6.2 | Ensure the seccomp profile is set in Pod definitions | The baseline's `seccompProfile`, and [ch.05](05-kernel-isolation.md) |
 | 5.6.4 | The default namespace should not be used | The guide's rule: no workload runs in `default` |
@@ -767,7 +767,7 @@ topic. The topics map onto this Part as follows.
 | Topic | Where this Part covers it |
 |---|---|
 | Pod security | [ch.02](02-pod-security.md) and [ch.05](05-kernel-isolation.md) |
-| Network separation | Part 02 ch.06 <!-- link-later: 02.06 --> |
+| Network separation | [Part 02 ch.06](../02-networking/06-network-policies.md) |
 | Authentication and authorization | [ch.01](01-authn-authz-rbac.md) |
 | Secrets | [ch.04](04-secrets-and-cluster-hardening.md) |
 | Audit logging and threat detection | [Part 05 ch.08](08-audit-detection-and-incident-response.md) |
@@ -809,8 +809,9 @@ control, the chapter that teaches it, and what evidence the reviewer reads.
 - [ ] **An image pinned by digest**, or the guide's own build tag, with its
       SBOM and scan attached in the pipeline ([ch.03](03-supply-chain.md)).
       Evidence: the pipeline's gate results.
-- [ ] **A default-deny NetworkPolicy**, with explicit allows (Part 02 ch.06
-  <!-- link-later: 02.06 -->). Evidence: the policy in the rendered manifests.
+- [ ] **A default-deny NetworkPolicy**, with explicit allows ([Part 02
+  ch.06](../02-networking/06-network-policies.md)). Evidence: the policy in the
+  rendered manifests.
 - [ ] **Secrets from a store and mounted as files**, not environment variables
       ([ch.04](04-secrets-and-cluster-hardening.md)). Evidence: the Pod spec.
 - [ ] **A registry entry for every accepted finding or exception**, with a
