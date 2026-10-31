@@ -68,7 +68,19 @@ path "auth/kubernetes/config" {
   capabilities = ["read"]
 }
 
-path "database/config/bookstore-platform-postgres" {
+path "database/config/bookstore-platform-postgres-*" {
+  capabilities = ["read"]
+}
+
+# Rotate the superuser password so only Vault knows it (15.05 step 4).
+path "database/rotate-root/bookstore-platform-postgres-*" {
+  capabilities = ["update"]
+}
+
+# Read dynamic credentials for the rotate subcommand. The admin policy already
+# reads every static secret under secret/data/bookstore-platform/*, so this
+# adds no reach beyond that subtree.
+path "database/creds/bookstore-platform-*" {
   capabilities = ["read"]
 }
 
@@ -77,6 +89,16 @@ path "database/config/bookstore-platform-postgres" {
 # the tenant's prefix (faster than waiting for natural expiry). The
 # `lookup` capability lets the offboarder find the leases first.
 path "sys/leases/lookup" {
+  capabilities = ["update"]
+}
+
+path "sys/leases/lookup/database/creds/bookstore-platform-*" {
+  capabilities = ["list"]
+}
+
+# Revoke one lease by ID (the revoke subcommand). Vault ACLs cannot limit this
+# to a prefix, so it reaches any lease. Prefer revoke-prefix above.
+path "sys/leases/revoke" {
   capabilities = ["update"]
 }
 

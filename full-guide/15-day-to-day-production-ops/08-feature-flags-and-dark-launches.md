@@ -137,10 +137,16 @@ observable.**
   act. The check for "may this user do this" stays in server code, with
   its own tests, so a flag set wrong, or a flag service that is down,
   cannot grant access.
-- **Who can flip, and the record.** Restrict production flag changes to
-  the platform team and on-call, through the roles your Flagsmith
-  edition supports. Each change should record who made it, when, and
-  the value before and after. During an incident, post every flip to
+- **Who can flip, and the record.** Production flag changes go to the
+  platform team and on-call. Flagsmith documents role-based access control
+  as a paid-plan feature ([RBAC docs](https://docs.flagsmith.com/system-administration/rbac)).
+  This chapter's open-source install does not enforce it, so the restriction
+  is a process control. A flip is either a reviewed PR to
+  `sample-flag-config.json` or an entry in the incident log, and each one
+  records who made it, when, and the value before and after. The self-hosted
+  page lists audit logs under the Enterprise plan
+  ([Flagsmith self-hosted](https://www.flagsmith.com/self-hosted)), so the
+  record does not depend on them. During an incident, post every flip to
   `#bookstore-platform-status` with the incident ID, the flag and the
   reason.
 
@@ -164,7 +170,7 @@ expired flag becomes a tech-debt ticket the platform team chases.
 |---|---|---|
 | A flag decides an access check, so a wrong or unavailable flag opens an admin or tenant path | Flags choose among code paths the caller may already use. Authorization stays in server code, with its own tests | [Part 05 ch.01](../05-security/01-authn-authz-rbac.md) |
 | The environment key leaks from a manifest, a command line or a client bundle | The key comes from an ExternalSecret and reaches the Pod as a secret reference, never as a literal | [Part 15 ch.05](05-production-secrets-vault-eso.md), [Part 11 ch.05](../11-advanced-production-patterns/05-secrets-at-scale.md) |
-| A production flag changes with no named person, no reason and no record | Production flips go to the platform team and on-call. Each flip records who, when, and the old and new values | [Part 15 ch.09](09-hotfix-workflow-and-breakglass.md) |
+| A production flag changes with no named person, no reason and no record | Production flips go to the platform team and on-call, as a reviewed PR or a logged incident entry. The open-source edition does not enforce Flagsmith RBAC or audit logs, so this is a process control | [Part 15 ch.09](09-hotfix-workflow-and-breakglass.md) |
 | A stale flag keeps a dead branch reachable and untested | The 30-day removal rule: each flag has an owner and a removal date, and removal is a code PR | [Mental model](#mental-model) |
 
 ## Diagrams
@@ -293,6 +299,31 @@ spec:
   owner: flagsmith
 EOF
 
+# The flagsmith namespace reads Vault through its own namespaced store, never
+# a ClusterSecretStore (15.05). Create the vault-server-ca ConfigMap in this
+# namespace first, as 15.05 step 3 does. The policy is in
+# feature-flags/vault-flagsmith-read.hcl, and the platform admin writes it with
+# the stdin pattern from 15.05 step 2.
+kubectl apply -f - <<'EOF'
+apiVersion: external-secrets.io/v1
+kind: SecretStore
+metadata: { name: vault-flagsmith, namespace: flagsmith }
+spec:
+  provider:
+    vault:
+      server: "https://vault-active.vault.svc.cluster.local:8200"
+      path: "secret"
+      version: "v2"
+      caProvider: { type: ConfigMap, name: vault-server-ca, key: ca.crt }
+      auth:
+        kubernetes:
+          mountPath: kubernetes
+          role: flagsmith
+          serviceAccountRef:
+            name: flagsmith-api
+            audiences: [https://vault.bookstore-platform.example.com]
+EOF
+
 # ExternalSecret: the database URL and the Django secret key from Vault.
 kubectl apply -f - <<'EOF'
 apiVersion: external-secrets.io/v1
@@ -300,7 +331,7 @@ kind: ExternalSecret
 metadata: { name: flagsmith-api-secrets, namespace: flagsmith }
 spec:
   refreshInterval: 1h
-  secretStoreRef: { name: vault-platform, kind: ClusterSecretStore }
+  secretStoreRef: { name: vault-flagsmith, kind: SecretStore }
   target: { name: flagsmith-api-secrets, creationPolicy: Owner }
   data:
     - secretKey: DATABASE_URL
@@ -348,30 +379,67 @@ go get github.com/open-feature/go-sdk-contrib/providers/flagsmith
 go get github.com/Flagsmith/flagsmith-go-client/v3
 ```
 
-The server-side environment key reaches the catalog through an ExternalSecret,
-so it never appears in a manifest or a command line. The catalog namespace
-also needs an egress allow to the `flagsmith` namespace on port 8000, the
-same explicit-allow pattern as 02.06.
+The server-side environment key reaches the catalog through an ExternalSecret
+from a namespaced SecretStore in the catalog namespace. That store logs in
+with the `bookstore-platform-catalog-flagsmith` Vault role, bound to the
+`catalog` ServiceAccount, and the role's policy reads one path, shown in
+`feature-flags/vault-catalog-flagsmith-read.hcl`. Egress to Flagsmith is one
+allow in `feature-flags/catalog-flagsmith-egress.yaml`, added to the
+namespace's default-deny egress from 15.06. This is the same explicit-allow
+pattern as 02.06.
 
 ```sh
 kubectl apply -f - <<'EOF'
 apiVersion: external-secrets.io/v1
+kind: SecretStore
+metadata: { name: vault-catalog-flagsmith, namespace: bookstore-platform-catalog }
+spec:
+  provider:
+    vault:
+      server: "https://vault-active.vault.svc.cluster.local:8200"
+      path: "secret"
+      version: "v2"
+      caProvider: { type: ConfigMap, name: vault-server-ca, key: ca.crt }
+      auth:
+        kubernetes:
+          mountPath: kubernetes
+          role: bookstore-platform-catalog-flagsmith
+          serviceAccountRef:
+            name: catalog
+            audiences: [https://vault.bookstore-platform.example.com]
+EOF
+
+kubectl apply -f - <<'EOF'
+apiVersion: external-secrets.io/v1
 kind: ExternalSecret
-metadata: { name: flagsmith-sdk, namespace: bookstore-platform-acme-books }
+metadata: { name: flagsmith-sdk, namespace: bookstore-platform-catalog }
 spec:
   refreshInterval: 1h
-  secretStoreRef: { name: vault-platform, kind: ClusterSecretStore }
+  secretStoreRef: { name: vault-catalog-flagsmith, kind: SecretStore }
   target: { name: flagsmith-sdk, creationPolicy: Owner }
   data:
     - secretKey: FLAGSMITH_ENV_KEY
-      remoteRef: { key: feature-flags/flagsmith/production, property: server_side_environment_key }
+      remoteRef: { key: bookstore-platform/catalog/flagsmith-sdk, property: server_side_environment_key }
 EOF
+```
 
-kubectl -n bookstore-platform-acme-books set env deployment/catalog \
-  FEATURE_FLAG_PROVIDER=flagsmith \
-  FLAGSMITH_API_URL=http://flagsmith-api.flagsmith.svc:8000/api/v1/
-kubectl -n bookstore-platform-acme-books set env deployment/catalog \
-  --from=secret/flagsmith-sdk
+The catalog is a Rollout that Argo CD manages ([15.06](06-progressive-delivery-in-production.md)),
+so the wiring goes into its container spec through a pull request. `kubectl set env`
+changes the live object, which self-heal reverts, and the audit trail shows no
+review. Add these entries to the existing `env` list of the catalog Rollout:
+
+```yaml
+# In the catalog Rollout's containers[0].env (15.06), changed by pull request.
+env:
+  - name: FEATURE_FLAG_PROVIDER
+    value: flagsmith
+  - name: FLAGSMITH_API_URL
+    value: http://flagsmith-api.flagsmith.svc:8000/api/v1/
+  - name: FLAGSMITH_ENV_KEY
+    valueFrom:
+      secretKeyRef:
+        name: flagsmith-sdk
+        key: FLAGSMITH_ENV_KEY
 ```
 
 ### 4. Exercise dark launch: the `catalog_v2_search_engine` flag
@@ -524,10 +592,10 @@ polling.
 > flags has 50 within a year; the codebase fills with `if
 > flags.Bool(...)` branches that are always true; engineers spend
 > review time mentally reasoning about flag combinations. The
-> defence: a hard policy with teeth — flags older than 30 days at
-> 100% are auto-tagged for removal; the platform team's weekly
-> review tracks flag retirement rate; flag-debt is a sprint-level
-> metric.
+> defence is a hard policy with teeth. Recommended, not built in this guide:
+> flags older than 30 days at 100% are auto-tagged for removal, and the
+> platform team's weekly review tracks retirement rate. The weekly review
+> here is the manual list check in section 7.
 
 > **In production:** **The "I'll add a flag, just in case" anti-
 > pattern.** Engineers under-pressure-to-ship will wrap small
@@ -535,7 +603,8 @@ polling.
 > those flags never flip; they pollute the codebase forever. The
 > discipline: a flag has a **named owner**, an **expected
 > behaviour at 100%**, and an **expected removal date** at
-> creation. No flag without all three; CI rejects the PR otherwise.
+> creation. Recommended, not built: a CI check that rejects a flag without all
+> three. Until one exists, review enforces it.
 
 > **In production:** **The "I'll use flags instead of canaries"
 > anti-pattern.** A team replaces Argo Rollouts canary with a flag-
@@ -572,9 +641,8 @@ helm upgrade --install flagsmith flagsmith/flagsmith \
   --values examples/bookstore-platform/feature-flags/flagsmith-helm-values.yaml \
   --wait
 
-# Give the catalog its server-side key from a Secret, never a literal
-kubectl -n bookstore-platform-acme-books set env deployment/catalog \
-  --from=secret/flagsmith-sdk
+# The catalog's server-side key comes from the flagsmith-sdk Secret, wired into
+# the Rollout by pull request (section 3).
 
 # Flip a flag in the Flagsmith UI, post the flip in the status channel,
 # then wait one SDK refresh interval (60 seconds by default) before you
@@ -607,7 +675,7 @@ switch — are exercised in Hands-on.
 2. **You discover a feature flag has been at 100% for 8 months. Removing it from the codebase requires deleting code paths that have been dead for 7 months. What's the chapter's stance on this situation and what's the prevention?**
    <details><summary>Show answer</summary>
 
-   "Flag stuck enabled in prod" is the canonical flag-debt failure. Every flag has three states: "actively rolling out" → "rolled out at 100%" → "should be removed." Most flags get stuck at state 2 — the rollout finished, nobody decommissioned, the codebase accumulates `if flags.Bool(...)` branches that are always true, every code path doubles in cost-to-test. The chapter's defence: a **30-day stale-flag policy** with every flag having an owner + expected-removal date; the weekly report names stale flags; an expired flag becomes a tech-debt ticket the platform team chases. The discipline is "aggressive flag retirement separates teams that use flags effectively from teams that drown in them." For this one specific 8-month case: open a PR removing the flag and the dead branch, force-merge with an explicit changelog entry, ship through the normal deploy lifecycle.
+   "Flag stuck enabled in prod" is the canonical flag-debt failure. Every flag has three states: "actively rolling out" → "rolled out at 100%" → "should be removed." Most flags get stuck at state 2 — the rollout finished, nobody decommissioned, the codebase accumulates `if flags.Bool(...)` branches that are always true, every code path doubles in cost-to-test. The chapter's defence: a **30-day stale-flag policy** with every flag having an owner + expected-removal date; the weekly report names stale flags; an expired flag becomes a tech-debt ticket the platform team chases. The discipline is "aggressive flag retirement separates teams that use flags effectively from teams that drown in them." For this one specific 8-month case: open a PR that removes the flag and the dead branch, take the normal review, and ship it through the normal deploy lifecycle.
 
    </details>
 
@@ -628,7 +696,7 @@ switch — are exercised in Hands-on.
 5. **Hands-on extension: wire a kill switch into a stateless code path, flip it OFF, watch traffic respond. Then deliberately make Flagsmith unreachable (`kubectl -n flagsmith scale deployment/flagsmith-api --replicas=0`, on a cluster you own) and observe behavior with kill switch at "feature enabled" default.**
    <details><summary>What you should see</summary>
 
-   With Flagsmith reachable, flipping the flag OFF propagates to clients within the SDK refresh interval (default 60s); the gated code path is unreachable, requests bypass it cleanly. With Flagsmith unreachable AND default-on-failure set to "feature enabled," clients use the cached previous value until cache expiry, then fall back to the safe default ("feature enabled") — service keeps working. If the default had been "feature disabled" the flag service outage would have killed every kill-switched feature simultaneously. The lesson: defaults matter more than the flag values themselves; pick them so flag-service failures degrade gracefully rather than catastrophically.
+   With Flagsmith reachable, flipping the flag OFF propagates to clients within the SDK refresh interval (default 60s); the gated code path is unreachable, requests bypass it cleanly. With Flagsmith unreachable AND default-on-failure set to "feature enabled," clients keep the environment definition they last loaded, so each kill switch keeps its last value and the service keeps working. The safe default applies only where no definition was ever loaded, such as a pod that starts during the outage, and that pod gets "feature enabled". If the default had been "feature disabled" the flag service outage would have killed every kill-switched feature simultaneously. The lesson: defaults matter more than the flag values themselves; pick them so flag-service failures degrade gracefully rather than catastrophically.
 
    </details>
 

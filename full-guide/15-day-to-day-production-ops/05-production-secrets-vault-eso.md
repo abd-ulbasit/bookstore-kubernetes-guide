@@ -241,49 +241,59 @@ kubectl get crd | grep external-secrets
 ### 1. The three-step bootstrap
 
 The reference Terraform handles steps 1 and 2 declaratively. The commands
-below are the manual version, for a Vault you run yourself:
+below are the manual version, for a Vault you run yourself. They need two identities, and neither is the
+root token. The **bootstrap token** runs the one-time `sys/*` steps. It is
+bound to `policies/bookstore-platform-bootstrap.hcl`, has a one-hour TTL, and
+is revoked after use. The **admin token** runs routine onboarding and is bound
+to `policies/bookstore-platform-admin.hcl`. Root writes the bootstrap policy and
+mints the bootstrap token once; that step is outside these commands:
 
 ```sh
 # STEP 1: Unseal (production: automatic via KMS; dev-mode: already unsealed)
 kubectl -n vault exec vault-0 -- vault status
 #   Sealed=false → step 1 done
 
-# STEP 2: Initialize Kubernetes auth method (idempotent; the Terraform does it)
-# With no token_reviewer_jwt below, Vault sends its own pod's ServiceAccount
-# token to TokenReview, so that ServiceAccount needs system:auth-delegator.
-# The admin token arrives on stdin, so it never appears in an argument list.
-# Use a short-lived token from the admin policy, never the root token.
-printf '%s\n' "${VAULT_TOKEN}" | kubectl -n vault exec -i vault-0 -- sh -c '
-  read -r VAULT_TOKEN && export VAULT_TOKEN
-  vault auth enable kubernetes 2>/dev/null || true
-  vault write auth/kubernetes/config \
-    kubernetes_host="https://kubernetes.default.svc:443" \
-    disable_iss_validation=true
-'
+# One vault command in the vault-0 pod. The token travels on stdin, so it
+# never appears in the argument list of kubectl or vault.
+vault_in_pod() {
+  printf '%s\n' "${VAULT_TOKEN}" | kubectl -n vault exec -i vault-0 -- \
+    sh -c 'read -r VAULT_TOKEN && export VAULT_TOKEN && exec "$@"' sh "$@"
+}
+
+# Read the bootstrap token without echo, so it stays out of shell history.
+read -rs VAULT_TOKEN && export VAULT_TOKEN   # paste the bootstrap token, then Enter
+
+# STEP 2: Initialize the Kubernetes auth method (idempotent; the Terraform does it).
+# With no token_reviewer_jwt, Vault sends its own pod's ServiceAccount token to
+# TokenReview, so that ServiceAccount needs system:auth-delegator.
+vault_in_pod vault auth list -format=json | jq -e 'has("kubernetes/")' > /dev/null \
+  || vault_in_pod vault auth enable kubernetes
+vault_in_pod vault write auth/kubernetes/config \
+  kubernetes_host="https://kubernetes.default.svc:443" \
+  disable_iss_validation=true
 # disable_iss_validation=true is the value Vault recommends for every
 # version, and the default on mounts created since Vault 1.9. Vault then
 # does not check the token's iss claim.
 
-# STEP 3: Write the admin policy + bind to platform identity
+# STEP 3: Write the admin policy, so the admin token can onboard tenants
 kubectl cp examples/bookstore-platform/vault/policies/bookstore-platform-admin.hcl \
   vault/vault-0:/tmp/admin.hcl
-printf '%s\n' "${VAULT_TOKEN}" | kubectl -n vault exec -i vault-0 -- sh -c '
-  read -r VAULT_TOKEN && export VAULT_TOKEN
-  vault policy write bookstore-platform-admin /tmp/admin.hcl
-'
-#  After this, an admin token (held by Terraform / the Composition) can
-#  create per-tenant policies + roles WITHOUT being root.
+vault_in_pod vault policy write bookstore-platform-admin /tmp/admin.hcl
+
+# Keep the bootstrap token. Step 4 needs it for the database engine, and it is
+# revoked at the end of step 4.
 ```
 
 ### 2. Onboard a tenant manually (the Composition path's manual equivalent)
 
 In production, the BookstoreTenant Crossplane Composition ([Part 13 ch.02](../13-grand-capstone-bookstore-platform/02-tenancy-and-crossplane-onboarding.md))
 does the next four commands declaratively via the Vault Terraform
-provider. The manual path here is the same operations. The `vault` commands
-below run in the `vault-0` pod and need the admin token, sent on stdin as
-in step 1.
+provider. The manual path here is the same operations. The commands below run
+through `vault_in_pod` from step 1, which sends the admin token on stdin.
 
 ```sh
+# Admin token, read without echo (stays out of history).
+read -rs VAULT_TOKEN && export VAULT_TOKEN   # paste the admin token, then Enter
 TENANT=acme-books
 
 # Per-tenant policy (read-only, scoped to this tenant's KV path)
@@ -291,29 +301,23 @@ sed "s/<TENANT>/${TENANT}/g" \
   examples/bookstore-platform/vault/policies/bookstore-platform-app.hcl \
   > /tmp/app-${TENANT}.hcl
 kubectl cp /tmp/app-${TENANT}.hcl vault/vault-0:/tmp/app.hcl
-kubectl -n vault exec vault-0 -- vault policy write \
-  bookstore-platform-app-${TENANT} /tmp/app.hcl
+vault_in_pod vault policy write bookstore-platform-app-${TENANT} /tmp/app.hcl
 
 # Per-tenant Kubernetes auth role (binds the tenant SA to the policy)
-kubectl -n vault exec vault-0 -- vault write \
-  auth/kubernetes/role/bookstore-platform-${TENANT} \
+vault_in_pod vault write auth/kubernetes/role/bookstore-platform-${TENANT} \
   bound_service_account_names=bookstore-platform-eso \
   bound_service_account_namespaces=bookstore-platform-${TENANT} \
   policies=bookstore-platform-app-${TENANT} \
   ttl=15m max_ttl=1h \
   audience=https://vault.bookstore-platform.example.com
 
-# Per-tenant KV path with a sample DB-password Secret (static; the
-# dynamic-creds case follows in step 5)
-kubectl -n vault exec vault-0 -- vault kv put \
-  secret/bookstore-platform/${TENANT}/catalog/db-password \
-  username=catalog \
-  password="$(openssl rand -base64 32)" \
-  dbname=bookstore_catalog
+# Per-tenant KV path with a sample DB password. The value is made inside the
+# pod and passed to vault as a file (password=@FILE), so it never appears in
+# an argument list or in a local shell.
+vault_in_pod sh -c 'umask 077 && head -c 32 /dev/urandom | base64 | tr -d "\n" > /tmp/pw && vault kv put secret/bookstore-platform/acme-books/catalog/db-password username=catalog password=@/tmp/pw dbname=bookstore_catalog; rm -f /tmp/pw'
 
 # Verify (admin scope)
-kubectl -n vault exec vault-0 -- vault kv get \
-  secret/bookstore-platform/${TENANT}/catalog/db-password
+vault_in_pod vault kv get secret/bookstore-platform/${TENANT}/catalog/db-password
 ```
 
 ### 3. Create the tenant namespace, its ServiceAccount, and the SecretStore
@@ -339,21 +343,67 @@ metadata:
   name: bookstore-platform-eso
   namespace: bookstore-platform-acme-books
 automountServiceAccountToken: false
+---
+# Default deny first, then the explicit allows. ESO's controller calls Vault
+# from its own namespace, so these policies cover the tenant's own pods only.
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: default-deny
+  namespace: bookstore-platform-acme-books
+spec:
+  podSelector: {}
+  policyTypes: [Ingress, Egress]
+---
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: allow-dns
+  namespace: bookstore-platform-acme-books
+spec:
+  podSelector: {}
+  policyTypes: [Egress]
+  egress:
+    - to:
+        - namespaceSelector:
+            matchLabels: { kubernetes.io/metadata.name: kube-system }
+      ports:
+        - { protocol: UDP, port: 53 }
+        - { protocol: TCP, port: 53 }
+---
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: allow-same-namespace
+  namespace: bookstore-platform-acme-books
+spec:
+  podSelector: {}
+  policyTypes: [Ingress, Egress]
+  ingress:
+    - from:
+        - podSelector: {}
+  egress:
+    - to:
+        - podSelector: {}
 ```
 
 ```sh
 kubectl apply -f tenant.yaml
 
-# The SecretStore reads the CA from a ConfigMap in this namespace. The
-# Composition copies vault-server-ca here.
+# The SecretStore reads the Vault server CA from a ConfigMap in this namespace.
+# Save the CA that signed the Vault server certificate as vault-ca.pem first.
+# The Composition copies it here in production.
+kubectl -n bookstore-platform-acme-books create configmap vault-server-ca \
+  --from-file=ca.crt=vault-ca.pem
 kubectl apply -f examples/bookstore-platform/vault/secret-store.yaml
 kubectl -n bookstore-platform-acme-books get secretstore vault-bookstore-platform \
   -o jsonpath='{.status.conditions[*].type}={.status.conditions[*].status}{"\n"}'
 #   Ready=True (ESO logged in to Vault with the tenant ServiceAccount)
 
-# Tenants should not be able to create stores. Expect "no" for a tenant user.
+# Tenants should not be able to create stores. Expect "no" for the tenant's own
+# ServiceAccount, the identity its workloads run as.
 kubectl auth can-i create secretstores -n bookstore-platform-acme-books \
-  --as=<tenant user>
+  --as=system:serviceaccount:bookstore-platform-acme-books:bookstore-platform-eso
 
 # The ExternalSecret pulls from the tenant's static KV path
 kubectl apply -f examples/bookstore-platform/vault/external-secret-sample.yaml
@@ -368,6 +418,13 @@ kubectl get secret catalog-db-credentials -n bookstore-platform-acme-books \
 # envFrom: secretRef consumes this byte-identically to a static Secret.
 ```
 
+The tenant boundary is enforced at Vault login, not in Kubernetes. The role's
+`bound_service_account_namespaces` admits only `bookstore-platform-acme-books`,
+so a login from any other namespace is refused. The Vault Kubernetes auth
+method documents this binding ([Vault Kubernetes auth](https://developer.hashicorp.com/vault/docs/auth/kubernetes)).
+The lab did not run a cross-namespace login, so no captured output is shown
+for it.
+
 ### 4. Dynamic Postgres credentials — the rotation primitive
 
 The static KV case above is the **fallback** pattern (vendor secrets
@@ -379,9 +436,9 @@ revocation is automatic.
 # Bootstrap the database engine for the tenant (one-time; in production
 # the Composition does this via the Vault TF provider). Run this from a pod
 # in the cluster or through `kubectl port-forward`: the vault-active name
-# does not resolve on a laptop. Use a short-lived admin token, not root.
+# does not resolve on a laptop. Use the bootstrap token here, never root.
 export VAULT_ADDR=https://vault-active.vault.svc.cluster.local:8200
-export VAULT_TOKEN=<short-lived admin token>
+read -rs VAULT_TOKEN && export VAULT_TOKEN   # bootstrap token, pasted without echo
 export PG_ADMIN_PASSWORD=$(kubectl get secret postgres-superuser \
   -n bookstore-platform-acme-books -o jsonpath='{.data.password}' | base64 -d)
 
@@ -389,6 +446,12 @@ export PG_ADMIN_PASSWORD=$(kubectl get secret postgres-superuser \
 #   [1/3] enable database secrets engine
 #   [2/3] configure connection to bookstore-platform-acme-books postgres
 #   [3/3] define role with CREATE/REVOKE SQL templates
+
+# The bootstrap is done. Revoke the bootstrap token, then switch to the admin
+# token (read without echo) for everything that follows. If the bootstrap
+# needs a rerun, mint a new bootstrap token instead of keeping this one.
+vault token revoke -self
+read -rs VAULT_TOKEN && export VAULT_TOKEN   # admin token, pasted without echo
 
 # Rotate the superuser password so that only Vault knows it. The
 # PG_ADMIN_PASSWORD exported above is stale after this; discard it.
@@ -416,9 +479,10 @@ catalog; the Production notes explain why.
 ### 5. Revoke a lease and watch the next refresh
 
 ```sh
-# Trigger an immediate rotation by deleting the lease
-LEASE_ID=$(kubectl -n vault exec vault-0 -- \
-  vault list -format=json sys/leases/lookup/database/creds/bookstore-platform-acme-books \
+# Revoke one lease to force a rotation. The revoke subcommand uses the admin
+# token and VAULT_ADDR from step 4, and needs sys/leases/revoke in the policy.
+LEASE_ID=$(vault_in_pod vault list -format=json \
+  sys/leases/lookup/database/creds/bookstore-platform-acme-books \
   | jq -r '.[0]')
 ./examples/bookstore-platform/vault/rotation/postgres-rotate.sh revoke "${LEASE_ID}"
 #   The Postgres role is DROPped immediately. The Secret keeps the dead
