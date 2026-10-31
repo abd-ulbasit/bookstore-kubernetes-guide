@@ -424,9 +424,12 @@ traefik   traefik.io/ingress-controller   <none>       29s
 
 **2) kube-prometheus-stack, metrics.**
 [06.01](../06-production-readiness/01-observability-metrics.md) owns this
-install. Its node-exporter reads host paths, so its namespace takes the
+install. Its node-exporter reads host paths, so node-exporter gets a
+namespace of its own, `node-exporter`, through the chart's
+`prometheus-node-exporter.namespaceOverride`. That namespace takes the
 `privileged` level, with `audit` and `warn` at `restricted`, and the registry
-entry is 06.01's. **Cited, not run:** the same install in 06.01 did not finish
+entry is 06.01's. The rest of the stack runs in `monitoring`, labelled
+`restricted`. **Cited, not run:** the same install in 06.01 did not finish
 on the shared lab cluster. Use the pinned chart from 06.01 with `--version
 "$KPS_CHART_VERSION"`.
 

@@ -1292,6 +1292,9 @@ Checklist:
    own namespace labelled `privileged`, which is the lowest standard it works
    under, and record the exception with its reason, owning chapter and an
    expiry within twelve months. See "Exceptions, not exemptions" above.
+   [06.01](../06-production-readiness/01-observability-metrics.md) does this
+   for kube-prometheus-stack, with the chart's
+   `prometheus-node-exporter.namespaceOverride`.
 
    </details>
 

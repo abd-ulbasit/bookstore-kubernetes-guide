@@ -351,11 +351,13 @@ spec:
 #     The `from` entry below carries BOTH selectors. In one entry they must
 #     both match (a pod in that namespace AND carrying that label). Two list
 #     items would mean either one matches, which would admit every pod in
-#     `monitoring`, Grafana and node-exporter included. The namespace match
-#     uses the immutable kubernetes.io/metadata.name label. storefront is
-#     deliberately NOT here: the nginx UI is not scraped. Rule 4 still lets
-#     storefront reach this port for the API, and NetworkPolicy cannot filter
-#     by path (see 06.01 for the consequence).
+#     `monitoring`, Grafana included. node-exporter is not among them: 06.01
+#     runs it in a namespace of its own, `node-exporter`, so that
+#     `monitoring` can stay at the restricted Pod Security level. The
+#     namespace match uses the immutable kubernetes.io/metadata.name label.
+#     storefront is deliberately NOT here: the nginx UI is not scraped. Rule
+#     4 still lets storefront reach this port for the API, and NetworkPolicy
+#     cannot filter by path (see 06.01 for the consequence).
 #
 #     INTENTIONALLY ONE-SIDED (contrast the "both-ends" rules 4-9). The
 #     intra-namespace backend edges need an egress half because BOTH endpoints

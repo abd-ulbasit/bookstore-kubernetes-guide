@@ -12,12 +12,13 @@
 # installed, `kubectl apply --dry-run=client` of an overlay that includes this
 # component prints `no matches for kind "ServiceMonitor"` /
 # `"PrometheusRule"` — EXPECTED and correct (the objects are schema-valid; the
-# CRDs must exist first). Install kube-prometheus-stack (Operator + CRDs) in
-# the `monitoring` namespace via Helm before enabling this on a live cluster:
-#   helm repo add prometheus-community https://prometheus-community.github.io/helm-charts
-#   helm repo update
-#   helm install kube-prometheus-stack prometheus-community/kube-prometheus-stack \
-#     -n monitoring --create-namespace
+# CRDs must exist first). Install kube-prometheus-stack (Operator + CRDs) via
+# Helm before enabling this on a live cluster, with the namespaces, labels and
+# values of Part 06 ch.01 section 2: `monitoring` at the restricted Pod
+# Security level, and node-exporter alone in its own `node-exporter`
+# namespace through the chart's prometheus-node-exporter.namespaceOverride.
+# A bare `helm install -n monitoring --create-namespace` would leave
+# `monitoring` unlabelled and put the node-exporter DaemonSet in it.
 # The vendored objects carry `release: kube-prometheus-stack`, which MUST match
 # the Prometheus serviceMonitorSelector/ruleSelector (see raw 80-/81- headers).
 #
