@@ -1132,7 +1132,7 @@ kubectl get clusterrole,clusterrolebinding | grep -c argo-rollouts
 - **Flagger — the alternative, and the contrast.** **Flagger** is a separate
   operator that drives a canary by **mutating a standard Deployment + a
   service mesh** (Istio/Linkerd/App Mesh/Gateway API or an Ingress
-  controller) — it does **not**
+  controller), and it does **not**
   introduce a new workload CRD; it reads the mesh's metrics and shifts mesh
   weights, promoting/rolling-back on Prometheus checks just like Rollouts.
   Trade-off: Flagger **requires a mesh/ingress** (its traffic primitive) but

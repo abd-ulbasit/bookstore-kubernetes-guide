@@ -46,7 +46,7 @@ components, the declarative API model, local cluster setup.
 | [05 — Node components](../00-foundations/05-node-components.md) | L ch.2, ch.3 | R ch.3 (Container Runtime) |
 | [06 — The declarative API model](../00-foundations/06-declarative-api-model.md) | L ch.4 (Introducing Kubernetes API objects) | KP ch.3 (Declarative Deployment) |
 | [07 — Local cluster setup](../00-foundations/07-local-cluster-setup.md) | P ch.3; L ch.3 | official docs (below) |
-| [08 — Security foundations](../00-foundations/08-security-foundations.md) | NIST SP 800-190 (below) | Kubernetes security checklist (below) |
+| [08: Security foundations](../00-foundations/08-security-foundations.md) | NIST SP 800-190 (below) | Kubernetes security checklist (below) |
 
 Official docs:
 - Kubernetes components & architecture — <https://kubernetes.io/docs/concepts/overview/components/>
