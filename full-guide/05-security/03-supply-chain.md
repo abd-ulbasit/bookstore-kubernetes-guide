@@ -8,8 +8,8 @@
 > is in [Part 07 ch.03](../07-delivery/03-cicd-pipeline.md).
 
 **Estimated time:** ~30 min read · ~60 min hands-on (the lab is scripted)
-**Prerequisites:** [Part 05 ch.02](02-pod-security.md) — a hardened Pod can still run a malicious image · [Part 00 ch.02](../00-foundations/02-containers-and-images.md) — image tags, digests and registries · [Part 00 ch.04](../00-foundations/04-control-plane-deep-dive.md) — admission runs before persistence
-**You'll know after this:** • scan an image digest and an SBOM, and explain why two scanners disagree · • write a CycloneDX SBOM with Syft and attest it to a digest · • sign a digest and verify it, and show that a moved tag fails · • pin a Pod to a digest and confirm the running bytes are the signed ones · • lint a manifest with KubeLinter, kubesec and Trivy config, and say what each one misses
+**Prerequisites:** [Part 05 ch.02](02-pod-security.md): a hardened Pod can still run a malicious image · [Part 00 ch.02](../00-foundations/02-containers-and-images.md): image tags, digests and registries · [Part 00 ch.04](../00-foundations/04-control-plane-deep-dive.md): admission runs before persistence
+**You'll know after this:** • scan an image digest and an SBOM, and explain why two scanners disagree · • write a CycloneDX SBOM with Syft and attest it to a digest · • sign a digest and verify it, and show that a moved tag fails · • pin a Pod to a digest in its manifest, and check the pin with a server dry run · • lint a manifest with KubeLinter, kubesec and Trivy config, and say what each one misses
 
 <!-- tags: security, supply-chain, ci-cd, day-2 -->
 
@@ -37,19 +37,19 @@ before a policy depends on it.
 A container image is **untrusted input until proven otherwise**, and trust is
 built in four stages, each answering one question:
 
-1. **What is in it?** — *Scan* the image and emit an **SBOM** (a bill of
+1. **What is in it?** *Scan* the image and emit an **SBOM** (a bill of
    materials). Finds known-vulnerable packages and records exactly what
    shipped. (Trivy/Grype, syft.)
-2. **Is it exactly what we built?** — *Pin by digest* (`name@sha256:…`) so the
+2. **Is it exactly what we built?** *Pin by digest* (`name@sha256:…`) so the
    reference is immutable; a tag like `:dev`/`:latest` can be repointed at
    anything later.
-3. **Who vouches for it?** — *Sign* the digest (Cosign) and *attest* what it
+3. **Who vouches for it?** *Sign* the digest (Cosign) and *attest* what it
    contains (an SBOM) and how it was built (provenance). A signature proves
    *this digest was signed by that key or identity*. It does **not** prove the
    image is bug-free or non-malicious: provenance ≠ safety. A key you hold
    proves that you signed. A keyless signature from CI proves a workflow
    identity, and [07.03](../07-delivery/03-cicd-pipeline.md) builds that path.
-4. **Will the cluster refuse the rest?** — *Admission* checks the reference
+4. **Will the cluster refuse the rest?** *Admission* checks the reference
    and the signature before the API server stores the Pod. The restricted
    namespace from [ch.02](02-pod-security.md) already refuses the insecure
    manifest in this chapter's lab. Checking signatures at admission is
@@ -63,7 +63,10 @@ covers that lifecycle.
 ## Threats and controls
 
 Each threat is a way the image a Pod runs can differ from the one you meant to
-ship. The lab below lands the first two and shows the rest.
+ship. The lab below shows a moved tag fail verification (step 10) and a
+signed digest verify (steps 8 and 9). The pin in the first row is shown only
+as a server dry run (step 13). What a pinned Pod does after a tag move is
+cited, not run: steps 11 and 12 need a throwaway cluster.
 
 | Threat | Control this chapter teaches | Where it goes deeper |
 |---|---|---|
@@ -124,7 +127,7 @@ flowchart LR
 **Tier A: kind, and a lab registry on the same Docker host.** Run this lab only
 against a kind cluster you own. The script refuses any kubectl context that is
 not a kind cluster, and it creates and deletes only namespaces and containers
-named `p05-*`. Steps 11 and 12 change what a node pulls, so they need the
+named `p05-03-*`. Steps 11 and 12 change what a node pulls, so they need the
 throwaway cluster described in
 [`kind/supply-chain.yaml`](../examples/security-lab/kind/supply-chain.yaml),
 which `kind create cluster` builds from that file. Every other step runs on
@@ -137,7 +140,9 @@ what ran: the Kubernetes v1.37.0 node, Trivy 0.76.1, Syft 1.55.0, Grype
 0.38.1. It also records what did not work the first time, and the lab host:
 Ubuntu 26.04.1 with Docker 29.8.2. This revision ran the scanners from a
 workstation, over an ssh tunnel to the registry. Nothing here is tested on any
-other host system.
+other host system. The captured output keeps the lab's own names,
+`p05-03-supply-chain` and `p05-03-registry`, where the commands in this
+chapter use `supply-chain` and `lab-registry`.
 
 ### Set up
 
@@ -170,7 +175,7 @@ identity is the digest, which the registry reports for the image index:
 
 <!-- gate: output -->
 ```text
-signed digest: sha256:ff0f9bfad18c52223ebcffbcf4ab5cfe43b1b829d4ee6e715f90d9c4637e6709
+signed digest: sha256:9478671474c03d066d43e5a6c3b038215d9e83acf8465b8f617ea54eab1e1f33
 ```
 
 The index lists the amd64 image and an attestation manifest for it:
@@ -179,14 +184,14 @@ The index lists the amd64 image and an attestation manifest for it:
 ```text
 Name:      localhost:5001/bookstore/catalog:lab
 MediaType: application/vnd.oci.image.index.v1+json
-Digest:    sha256:ff0f9bfad18c52223ebcffbcf4ab5cfe43b1b829d4ee6e715f90d9c4637e6709
+Digest:    sha256:9478671474c03d066d43e5a6c3b038215d9e83acf8465b8f617ea54eab1e1f33
 
 Manifests:
   Name:        localhost:5001/bookstore/catalog:lab@sha256:0874c9b2a5c21a42e0a114dab56ec765148acde815595129a0c9661337d29c54
   MediaType:   application/vnd.oci.image.manifest.v1+json
   Platform:    linux/amd64
 
-  Name:        localhost:5001/bookstore/catalog:lab@sha256:d2357b9b1985b184649637e75774c72c779600e7ee9e679dccbb1f96ff511650
+  Name:        localhost:5001/bookstore/catalog:lab@sha256:d4bccd93be32e968fccbbb94f5409b0cba827b2ed895ea2b480a997d194cdf45
   MediaType:   application/vnd.oci.image.manifest.v1+json
   Platform:    unknown/unknown
   Annotations:
@@ -217,8 +222,8 @@ Report Summary
 ┌──────────────────────────────────────────────────────────────────────────────────┬──────────┬─────────────────┐
 │                                      Target                                      │   Type   │ Vulnerabilities │
 ├──────────────────────────────────────────────────────────────────────────────────┼──────────┼─────────────────┤
-│ localhost:5001/bookstore/catalog@sha256:ff0f9bfad18c52223ebcffbcf4ab5cfe43b1b82- │  debian  │        0        │
-│ 9d4ee6e715f90d9c4637e6709 (debian 13.7)                                          │          │                 │
+│ localhost:5001/bookstore/catalog@sha256:9478671474c03d066d43e5a6c3b038215d9e83a- │  debian  │        0        │
+│ cf8465b8f617ea54eab1e1f33 (debian 13.7)                                          │          │                 │
 ├──────────────────────────────────────────────────────────────────────────────────┼──────────┼─────────────────┤
 │ catalog                                                                          │ gobinary │        0        │
 └──────────────────────────────────────────────────────────────────────────────────┴──────────┴─────────────────┘
@@ -302,7 +307,7 @@ The signature goes to the lab registry only:
 ```text
 verify exit=0
 WARNING: Skipping tlog verification is an insecure practice that lacks transparency and auditability verification for the signature.
-sha256:ff0f9bfad18c52223ebcffbcf4ab5cfe43b1b829d4ee6e715f90d9c4637e6709
+sha256:9478671474c03d066d43e5a6c3b038215d9e83acf8465b8f617ea54eab1e1f33
 ```
 
 `cosign verify` passes for the digest. The lab passes `--insecure-ignore-tlog`,
@@ -332,8 +337,8 @@ digest, changes one file, and pushes the result under the same tag:
 
 <!-- gate: output -->
 ```text
-signed digest:  sha256:ff0f9bfad18c52223ebcffbcf4ab5cfe43b1b829d4ee6e715f90d9c4637e6709
-tag now points: sha256:00160ed9aae00940ea1f5ace21bf7d6f96f108d05d092d6334f160a68672554a
+signed digest:  sha256:9478671474c03d066d43e5a6c3b038215d9e83acf8465b8f617ea54eab1e1f33
+tag now points: sha256:dd388115b18e1b02efa8b72c12c93fef257475f1f14f981331f2f070899fe269
 ```
 
 The tag now points at a new digest. The signed digest is unchanged, and the
@@ -355,13 +360,13 @@ Steps 11 and 12 of the lab create two baseline Pods, and they did not run in
 this revision. The first names the tag with `imagePullPolicy: Always`, which
 asks the kubelet to pull the tag each time the container starts. The second
 names the signed digest. The Pod for the tag is below. Whatever the tag points
-at when the node pulls it is what runs. After step 8, that is the attacker's
+at when the node pulls it is what runs. After step 10, that is the attacker's
 build:
 
 ```yaml
 apiVersion: v1
 kind: Pod
-metadata: {name: catalog-by-tag, namespace: p05-supply-chain}
+metadata: {name: catalog-by-tag, namespace: supply-chain}
 spec:
   serviceAccountName: catalog
   automountServiceAccountToken: false
@@ -372,7 +377,7 @@ spec:
     seccompProfile: {type: RuntimeDefault}
   containers:
     - name: catalog
-      image: p05-registry:5000/bookstore/catalog:lab
+      image: lab-registry:5000/bookstore/catalog:lab
       imagePullPolicy: Always
       securityContext:
         allowPrivilegeEscalation: false
@@ -385,15 +390,16 @@ spec:
   volumes: [{name: tmp, emptyDir: {}}]
 ```
 
-**Not run here.** This Pod needs the throwaway cluster `p05-supply`, which this
+**Not run here.** This Pod needs the throwaway cluster `supply-chain`, which this
 revision did not create, so the lab skipped it and printed that it did. The
 kubelet's pull policies are defined on the
 [Kubernetes container images page](https://kubernetes.io/docs/concepts/containers/images/#image-pull-policy).
 There, `Always` means the kubelet asks the runtime to pull the image each time
-it launches the container, and an unset policy becomes `IfNotPresent` when the
-Pod is created. What this Pod runs on a real node was not observed here. The
-expected result is that its digest differs from the signed digest after
-step 8.
+it launches the container. An unset policy is chosen from the image reference
+when the Pod is created: a digest, or a tag other than `:latest`, gives
+`IfNotPresent`, and a `:latest` tag or no tag gives `Always`. What this Pod
+runs on a real node was not observed here. The expected result is that its
+digest differs from the signed digest after step 10.
 
 The hardened form pins the digest from step 3 and keeps the rest of the
 baseline:
@@ -401,7 +407,7 @@ baseline:
 ```yaml
 apiVersion: v1
 kind: Pod
-metadata: {name: catalog-by-digest, namespace: p05-supply-chain}
+metadata: {name: catalog-by-digest, namespace: supply-chain}
 spec:
   serviceAccountName: catalog
   automountServiceAccountToken: false
@@ -412,7 +418,7 @@ spec:
     seccompProfile: {type: RuntimeDefault}
   containers:
     - name: catalog
-      image: p05-registry:5000/bookstore/catalog@sha256:ff0f9bfad18c52223ebcffbcf4ab5cfe43b1b829d4ee6e715f90d9c4637e6709
+      image: lab-registry:5000/bookstore/catalog@sha256:9478671474c03d066d43e5a6c3b038215d9e83acf8465b8f617ea54eab1e1f33
       imagePullPolicy: IfNotPresent
       securityContext:
         allowPrivilegeEscalation: false
@@ -442,7 +448,7 @@ see one that does not exist yet. It has `automountServiceAccountToken: false`:
 ```yaml
 apiVersion: v1
 kind: ServiceAccount
-metadata: {name: catalog, namespace: p05-supply-chain}
+metadata: {name: catalog, namespace: supply-chain}
 automountServiceAccountToken: false
 ```
 
@@ -457,13 +463,13 @@ the lab creates:
 # INSECURE ON PURPOSE: a Pod that every manifest linter should refuse. Lab cluster only.
 apiVersion: v1
 kind: Pod
-metadata: {name: catalog-insecure, namespace: p05-supply-chain}
+metadata: {name: catalog-insecure, namespace: supply-chain}
 spec:
   serviceAccountName: catalog
   hostNetwork: true
   containers:
     - name: catalog
-      image: p05-registry:5000/bookstore/catalog:lab
+      image: lab-registry:5000/bookstore/catalog:lab
       securityContext:
         privileged: true
         runAsUser: 0
@@ -478,7 +484,7 @@ reports seven:
 Error: found 7 lint errors
 KubeLinter 0.8.3
 # ...
-insecure.yaml: (object: p05-supply-chain/catalog-insecure /v1, Kind=Pod) resource shares host's network namespace (via hostNetwork=true). (check: host-network, remediation: Ensure the host's network namespace is not shared.)
+insecure.yaml: (object: p05-03-supply-chain/catalog-insecure /v1, Kind=Pod) resource shares host's network namespace (via hostNetwork=true). (check: host-network, remediation: Ensure the host's network namespace is not shared.)
 # ...
 kube-linter exit=1
 ```
@@ -503,7 +509,7 @@ KSV-0014 (HIGH): Container 'catalog' of Pod 'catalog-insecure' should set 'secur
 # ...
 KSV-0017 (HIGH): Container 'catalog' of Pod 'catalog-insecure' should set 'securityContext.privileged' to false
 # ...
-KSV-0118 (HIGH): pod catalog-insecure in p05-supply-chain namespace is using the default security context, which allows root privileges
+KSV-0118 (HIGH): pod catalog-insecure in p05-03-supply-chain namespace is using the default security context, which allows root privileges
 ```
 
 The restricted namespace refuses the insecure Pod at admission, and names the
@@ -527,12 +533,12 @@ a scratch directory and removes that directory too:
 
 <!-- gate: output -->
 ```text
-namespace "p05-supply-chain" deleted
-p05-registry
+namespace "p05-03-supply-chain" deleted
+p05-03-registry
 ```
 
 Delete the cluster when you have finished with it: `kind delete cluster --name
-p05-supply`. The lab does not delete a cluster you created.
+supply-chain`. The lab does not delete a cluster you created.
 
 ### What the run proves, and what it does not
 
@@ -554,12 +560,9 @@ the same tools in CI, and of the cloud chapters that run them in production
   the bytes. For an image index, the hash covers the index document, which
   lists each platform image and each attestation by its own digest. Step 10
   of the lab moves the tag. Step 11 is the Pod that names the tag, and it was
-  not run in this revision. A digest reference cannot move; the tag can.
-  whatever the registry holds under that name today. `…@sha256:<HASH>` names
-  the bytes. For an image index, the hash covers the index document, which
-  lists each platform image and each attestation by its own digest. Step 10
-  of the lab moves the tag, and step 11 shows a Pod that names the tag running
-  the new bytes. A digest reference cannot move; the tag can.
+  not run in this revision. A digest reference cannot move; the tag can. The
+[Kubernetes images page](https://kubernetes.io/docs/concepts/containers/images/)
+says the same: tags can be moved, and digests are fixed.
 - **Scanners compare an inventory with a database, and each database has its
   own identifiers.** Trivy and Grype both enumerate the Debian packages and
   the Go modules in the image, then look each one up. The same module can
@@ -607,7 +610,7 @@ the same tools in CI, and of the cloud chapters that run them in production
 ```sh
 docker buildx imagetools inspect <REGISTRY>/<IMAGE>:<TAG> --format '{{.Manifest.Digest}}'
 docker buildx build --provenance=mode=max --push -t <REGISTRY>/<IMAGE>:<TAG> <CONTEXT>
-trivy image --exit-code 1 --severity CRITICAL <REGISTRY>/<IMAGE>@<DIGEST>  # CI gate
+trivy image --exit-code 1 --severity HIGH,CRITICAL <REGISTRY>/<IMAGE>@<DIGEST>  # CI gate
 syft <REGISTRY>/<IMAGE>@<DIGEST> -o cyclonedx-json=sbom.cdx.json           # SBOM
 grype sbom:sbom.cdx.json --vex <VEX-FILE>                                  # SBOM scan with VEX
 cosign sign --yes <REGISTRY>/<IMAGE>@<DIGEST>                              # keyless, in CI

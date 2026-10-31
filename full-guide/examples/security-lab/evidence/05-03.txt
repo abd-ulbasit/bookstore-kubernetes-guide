@@ -6,10 +6,16 @@
 # Versions: Trivy 0.76.1, Syft 1.55.0, Grype 0.121.0, cosign 3.1.4, KubeLinter
 # 0.8.3, kubesec 2.15.0, Docker buildx 0.38.1 with the BuildKit (v0.33.1) built
 # into the Docker daemon, and registry:3 pinned by digest.
-# Recorded by running examples/security-lab/labs/05-03.sh from full-guide/
-# against the kind cluster sf-pilot. The script exited 0.
-# Steps 11 and 12 need the throwaway cluster p05-supply. This run did not create
-# it, so the script skipped them. The chapter cites them and labels them not run.
+# Recorded by running labs/05-03.sh from examples/security-lab/ against the
+# shared kind cluster sf-pilot. The script exited 0.
+#
+# Names: the chapter's commands use the namespace supply-chain and the registry
+# name lab-registry. This run used the lab's own names, p05-03-supply-chain and
+# p05-03-registry, which the lab creates and deletes. Captured output keeps them.
+#
+# Steps 11 and 12 need the throwaway cluster supply-chain. This run did not
+# create it, so the script skipped them. The chapter cites them and labels them
+# not run.
 #
 # What did not work the first time:
 # - The docker-container BuildKit builder could not start on the Docker host:
@@ -23,6 +29,11 @@
 # - A server dry-run cannot see a ServiceAccount that exists only in the dry-run,
 #   so the first run refused the baseline Pod. The lab now creates the
 #   ServiceAccount first, then dry-runs the Pod against it.
+# - A first run was stopped at step 14. The removal of the registry container
+#   hung on the Docker host and the container stayed in the removal state for
+#   several minutes. The run was repeated from step 0 after the host cleared
+#   it. Only the repeated run is kept here. The catalog build is not
+#   reproducible, so its digest differs from the first run's.
 ## step 0: the tools this run used
 $ trivy --version | head -1
 syft version | grep Version
@@ -48,42 +59,43 @@ v1.37.0
 github.com/docker/buildx v0.38.1
 
 ## step 1: a lab registry on the kind network, and the nodes told to trust it
-$ docker run -d --name p05-registry --network kind -p 127.0.0.1:5001:5000 registry:3@sha256:d4032d4cc323c1731c707931ecada07a53076eac38e3b61ae57533f170f2c6c3 >/dev/null && echo "registry started"
+$ docker run -d --name p05-03-registry --network kind --network-alias lab-registry -p 127.0.0.1:5001:5000 registry:3@sha256:d4032d4cc323c1731c707931ecada07a53076eac38e3b61ae57533f170f2c6c3 >/dev/null && echo "registry started"
 registry started
 
-$ for n in $(docker ps --filter label=io.x-k8s.kind.cluster=p05-supply --format '{{.Names}}'); do
-  docker exec "$n" mkdir -p /etc/containerd/certs.d/p05-registry:5000
-  docker exec -i "$n" sh -c 'cat > /etc/containerd/certs.d/p05-registry:5000/hosts.toml' < hosts.toml
-  docker exec "$n" getent hosts p05-registry >/dev/null && echo "$n resolves p05-registry"
+$ for n in $(docker ps --filter label=io.x-k8s.kind.cluster=supply-chain --format '{{.Names}}'); do
+  docker exec "$n" mkdir -p /etc/containerd/certs.d/lab-registry:5000
+  docker exec -i "$n" sh -c 'cat > /etc/containerd/certs.d/lab-registry:5000/hosts.toml' < hosts.toml
+  docker exec "$n" getent hosts lab-registry >/dev/null && echo "$n resolves lab-registry"
 done
 
 ## step 2: a namespace that enforces restricted
-$ kubectl create ns p05-supply-chain
-kubectl label ns p05-supply-chain pod-security.kubernetes.io/enforce=restricted \
+$ kubectl create ns p05-03-supply-chain
+kubectl label ns p05-03-supply-chain pod-security.kubernetes.io/enforce=restricted \
   pod-security.kubernetes.io/audit=restricted pod-security.kubernetes.io/warn=restricted
-namespace/p05-supply-chain created
-namespace/p05-supply-chain labeled
+namespace/p05-03-supply-chain created
+namespace/p05-03-supply-chain labeled
 
 ## step 3: build the catalog with BuildKit provenance and push it to the lab registry
 $ docker buildx build --platform linux/amd64 --provenance=mode=max --push --progress=quiet \
   -t localhost:5001/bookstore/catalog:lab "$guide/examples/bookstore/app/catalog"
-sha256:ff0f9bfad18c52223ebcffbcf4ab5cfe43b1b829d4ee6e715f90d9c4637e6709
+2026/10/31 11:36:52 http2: server: error reading preface from client dummy-1: read |0: file already closed
+sha256:9478671474c03d066d43e5a6c3b038215d9e83acf8465b8f617ea54eab1e1f33
 
 $ D0=$(docker buildx imagetools inspect localhost:5001/bookstore/catalog:lab --format '{{.Manifest.Digest}}')
 echo "signed digest: $D0"
-signed digest: sha256:ff0f9bfad18c52223ebcffbcf4ab5cfe43b1b829d4ee6e715f90d9c4637e6709
+signed digest: sha256:9478671474c03d066d43e5a6c3b038215d9e83acf8465b8f617ea54eab1e1f33
 
 $ docker buildx imagetools inspect localhost:5001/bookstore/catalog:lab
 Name:      localhost:5001/bookstore/catalog:lab
 MediaType: application/vnd.oci.image.index.v1+json
-Digest:    sha256:ff0f9bfad18c52223ebcffbcf4ab5cfe43b1b829d4ee6e715f90d9c4637e6709
+Digest:    sha256:9478671474c03d066d43e5a6c3b038215d9e83acf8465b8f617ea54eab1e1f33
            
 Manifests: 
   Name:        localhost:5001/bookstore/catalog:lab@sha256:0874c9b2a5c21a42e0a114dab56ec765148acde815595129a0c9661337d29c54
   MediaType:   application/vnd.oci.image.manifest.v1+json
   Platform:    linux/amd64
                
-  Name:        localhost:5001/bookstore/catalog:lab@sha256:d2357b9b1985b184649637e75774c72c779600e7ee9e679dccbb1f96ff511650
+  Name:        localhost:5001/bookstore/catalog:lab@sha256:d4bccd93be32e968fccbbb94f5409b0cba827b2ed895ea2b480a997d194cdf45
   MediaType:   application/vnd.oci.image.manifest.v1+json
   Platform:    unknown/unknown
   Annotations: 
@@ -101,20 +113,20 @@ pkg:docker/gcr.io/distroless/static sha256:18f4cc26c9ffa7f20a359298be7deadac5c60
 
 ## step 4: scan the image digest with Trivy
 $ trivy image --platform linux/amd64 --image-src remote --scanners vuln --severity HIGH,CRITICAL localhost:5001/bookstore/catalog@$D0
-2026-10-31T05:34:12+05:00	INFO	[vuln] Vulnerability scanning is enabled
-2026-10-31T05:34:12+05:00	INFO	Detected OS	family="debian" version="13.7"
-2026-10-31T05:34:12+05:00	INFO	[debian] Detecting vulnerabilities...	os_version="13" pkg_num=6
-2026-10-31T05:34:12+05:00	INFO	Number of language-specific files	num=1
-2026-10-31T05:34:12+05:00	INFO	[gobinary] Detecting vulnerabilities...
-2026-10-31T05:34:12+05:00	WARN	Using severities from other vendors for some vulnerabilities. Read https://trivy.dev/docs/v0.76/guide/scanner/vulnerability#severity-selection for details.
+2026-10-31T11:37:47+05:00	INFO	[vuln] Vulnerability scanning is enabled
+2026-10-31T11:37:47+05:00	INFO	Detected OS	family="debian" version="13.7"
+2026-10-31T11:37:47+05:00	INFO	[debian] Detecting vulnerabilities...	os_version="13" pkg_num=6
+2026-10-31T11:37:47+05:00	INFO	Number of language-specific files	num=1
+2026-10-31T11:37:47+05:00	INFO	[gobinary] Detecting vulnerabilities...
+2026-10-31T11:37:47+05:00	WARN	Using severities from other vendors for some vulnerabilities. Read https://trivy.dev/docs/v0.76/guide/scanner/vulnerability#severity-selection for details.
 
 Report Summary
 
 ┌──────────────────────────────────────────────────────────────────────────────────┬──────────┬─────────────────┐
 │                                      Target                                      │   Type   │ Vulnerabilities │
 ├──────────────────────────────────────────────────────────────────────────────────┼──────────┼─────────────────┤
-│ localhost:5001/bookstore/catalog@sha256:ff0f9bfad18c52223ebcffbcf4ab5cfe43b1b82- │  debian  │        0        │
-│ 9d4ee6e715f90d9c4637e6709 (debian 13.7)                                          │          │                 │
+│ localhost:5001/bookstore/catalog@sha256:9478671474c03d066d43e5a6c3b038215d9e83a- │  debian  │        0        │
+│ cf8465b8f617ea54eab1e1f33 (debian 13.7)                                          │          │                 │
 ├──────────────────────────────────────────────────────────────────────────────────┼──────────┼─────────────────┤
 │ catalog                                                                          │ gobinary │        0        │
 └──────────────────────────────────────────────────────────────────────────────────┴──────────┴─────────────────┘
@@ -186,7 +198,7 @@ head -n 1 verify.err
 jq -r '.[0].critical.image."docker-manifest-digest"' verify.json
 verify exit=0
 WARNING: Skipping tlog verification is an insecure practice that lacks transparency and auditability verification for the signature.
-sha256:ff0f9bfad18c52223ebcffbcf4ab5cfe43b1b829d4ee6e715f90d9c4637e6709
+sha256:9478671474c03d066d43e5a6c3b038215d9e83acf8465b8f617ea54eab1e1f33
 
 ## step 9: attest the SBOM as a signed in-toto statement, then read its predicate type
 $ COSIGN_PASSWORD= cosign attest --yes --key cosign.key --signing-config=signing-config.json --type cyclonedx --predicate catalog.cdx.json localhost:5001/bookstore/catalog@$D0
@@ -201,9 +213,9 @@ $ docker buildx build --platform linux/amd64 --provenance=false --push --progres
 D1=$(docker buildx imagetools inspect localhost:5001/bookstore/catalog:lab --format '{{.Manifest.Digest}}')
 echo "signed digest:  $D0"
 echo "tag now points: $D1"
-sha256:00160ed9aae00940ea1f5ace21bf7d6f96f108d05d092d6334f160a68672554a
-signed digest:  sha256:ff0f9bfad18c52223ebcffbcf4ab5cfe43b1b829d4ee6e715f90d9c4637e6709
-tag now points: sha256:00160ed9aae00940ea1f5ace21bf7d6f96f108d05d092d6334f160a68672554a
+sha256:dd388115b18e1b02efa8b72c12c93fef257475f1f14f981331f2f070899fe269
+signed digest:  sha256:9478671474c03d066d43e5a6c3b038215d9e83acf8465b8f617ea54eab1e1f33
+tag now points: sha256:dd388115b18e1b02efa8b72c12c93fef257475f1f14f981331f2f070899fe269
 
 $ cosign verify --key cosign.pub --insecure-ignore-tlog localhost:5001/bookstore/catalog:lab >/dev/null 2>verify-tag.err
 echo "verify of the tag, exit=$?"
@@ -211,7 +223,7 @@ grep -v WARNING verify-tag.err | head -n 1
 verify of the tag, exit=10
 Error: no signatures found
 
-## steps 11 and 12 need the throwaway cluster p05-supply, so this run skips them
+## steps 11 and 12 need the throwaway cluster supply-chain, so this run skips them
 ## the chapter cites them to upstream and labels them not run
 
 ## step 13: lint two manifests, then ask the restricted namespace to refuse the insecure one
@@ -221,19 +233,19 @@ echo "kube-linter exit=$st"
 Error: found 7 lint errors
 KubeLinter 0.8.3
 
-insecure.yaml: (object: p05-supply-chain/catalog-insecure /v1, Kind=Pod) resource shares host's network namespace (via hostNetwork=true). (check: host-network, remediation: Ensure the host's network namespace is not shared.)
+insecure.yaml: (object: p05-03-supply-chain/catalog-insecure /v1, Kind=Pod) resource shares host's network namespace (via hostNetwork=true). (check: host-network, remediation: Ensure the host's network namespace is not shared.)
 
-insecure.yaml: (object: p05-supply-chain/catalog-insecure /v1, Kind=Pod) container "catalog" does not have a read-only root file system (check: no-read-only-root-fs, remediation: Set readOnlyRootFilesystem to true in the container securityContext.)
+insecure.yaml: (object: p05-03-supply-chain/catalog-insecure /v1, Kind=Pod) container "catalog" does not have a read-only root file system (check: no-read-only-root-fs, remediation: Set readOnlyRootFilesystem to true in the container securityContext.)
 
-insecure.yaml: (object: p05-supply-chain/catalog-insecure /v1, Kind=Pod) container "catalog" has AllowPrivilegeEscalation set to true. (check: privilege-escalation-container, remediation: Ensure containers do not allow privilege escalation by setting allowPrivilegeEscalation=false, privileged=false and removing CAP_SYS_ADMIN capability. See https://kubernetes.io/docs/tasks/configure-pod-container/security-context/ for more details.)
+insecure.yaml: (object: p05-03-supply-chain/catalog-insecure /v1, Kind=Pod) container "catalog" has AllowPrivilegeEscalation set to true. (check: privilege-escalation-container, remediation: Ensure containers do not allow privilege escalation by setting allowPrivilegeEscalation=false, privileged=false and removing CAP_SYS_ADMIN capability. See https://kubernetes.io/docs/tasks/configure-pod-container/security-context/ for more details.)
 
-insecure.yaml: (object: p05-supply-chain/catalog-insecure /v1, Kind=Pod) container "catalog" is privileged (check: privileged-container, remediation: Do not run your container as privileged unless it is required.)
+insecure.yaml: (object: p05-03-supply-chain/catalog-insecure /v1, Kind=Pod) container "catalog" is privileged (check: privileged-container, remediation: Do not run your container as privileged unless it is required.)
 
-insecure.yaml: (object: p05-supply-chain/catalog-insecure /v1, Kind=Pod) container "catalog" is not set to runAsNonRoot (check: run-as-non-root, remediation: Set runAsUser to a non-zero number and runAsNonRoot to true in your pod or container securityContext. Refer to https://kubernetes.io/docs/tasks/configure-pod-container/security-context/ for details.)
+insecure.yaml: (object: p05-03-supply-chain/catalog-insecure /v1, Kind=Pod) container "catalog" is not set to runAsNonRoot (check: run-as-non-root, remediation: Set runAsUser to a non-zero number and runAsNonRoot to true in your pod or container securityContext. Refer to https://kubernetes.io/docs/tasks/configure-pod-container/security-context/ for details.)
 
-insecure.yaml: (object: p05-supply-chain/catalog-insecure /v1, Kind=Pod) container "catalog" has cpu request 0 (check: unset-cpu-requirements, remediation: Set CPU requests for your container based on its requirements. Refer to https://kubernetes.io/docs/concepts/configuration/manage-resources-containers/#requests-and-limits for details.)
+insecure.yaml: (object: p05-03-supply-chain/catalog-insecure /v1, Kind=Pod) container "catalog" has cpu request 0 (check: unset-cpu-requirements, remediation: Set CPU requests for your container based on its requirements. Refer to https://kubernetes.io/docs/concepts/configuration/manage-resources-containers/#requests-and-limits for details.)
 
-insecure.yaml: (object: p05-supply-chain/catalog-insecure /v1, Kind=Pod) container "catalog" has memory limit 0 (check: unset-memory-requirements, remediation: Set memory limits for your container based on its requirements. Refer to https://kubernetes.io/docs/concepts/configuration/manage-resources-containers/#requests-and-limits for details.)
+insecure.yaml: (object: p05-03-supply-chain/catalog-insecure /v1, Kind=Pod) container "catalog" has memory limit 0 (check: unset-memory-requirements, remediation: Set memory limits for your container based on its requirements. Refer to https://kubernetes.io/docs/concepts/configuration/manage-resources-containers/#requests-and-limits for details.)
 
 kube-linter exit=1
 
@@ -275,7 +287,7 @@ See https://avd.aquasec.com/misconfig/ksv-0009
    7 │   hostNetwork: true
    8 │   containers:
    9 │     - name: catalog
-  10 │       image: p05-registry:5000/bookstore/catalog:lab
+  10 │       image: lab-registry:5000/bookstore/catalog:lab
   11 │       securityContext:
   12 │         privileged: true
   13 │         runAsUser: 0
@@ -292,7 +304,7 @@ See https://avd.aquasec.com/misconfig/ksv-0014
  insecure.yaml:9-14
 ────────────────────────────────────────
    9 ┌     - name: catalog
-  10 │       image: p05-registry:5000/bookstore/catalog:lab
+  10 │       image: lab-registry:5000/bookstore/catalog:lab
   11 │       securityContext:
   12 │         privileged: true
   13 │         runAsUser: 0
@@ -309,7 +321,7 @@ See https://avd.aquasec.com/misconfig/ksv-0017
  insecure.yaml:9-14
 ────────────────────────────────────────
    9 ┌     - name: catalog
-  10 │       image: p05-registry:5000/bookstore/catalog:lab
+  10 │       image: lab-registry:5000/bookstore/catalog:lab
   11 │       securityContext:
   12 │         privileged: true
   13 │         runAsUser: 0
@@ -317,7 +329,7 @@ See https://avd.aquasec.com/misconfig/ksv-0017
 ────────────────────────────────────────
 
 
-KSV-0118 (HIGH): pod catalog-insecure in p05-supply-chain namespace is using the default security context, which allows root privileges
+KSV-0118 (HIGH): pod catalog-insecure in p05-03-supply-chain namespace is using the default security context, which allows root privileges
 ════════════════════════════════════════
 Security context controls the allocation of security parameters for the pod/container/volume, ensuring the appropriate level of protection. Relying on default security context may expose vulnerabilities to potential attacks that rely on privileged access.
 
@@ -330,7 +342,7 @@ See https://avd.aquasec.com/misconfig/ksv-0118
    7 │   hostNetwork: true
    8 │   containers:
    9 │     - name: catalog
-  10 │       image: p05-registry:5000/bookstore/catalog:lab
+  10 │       image: lab-registry:5000/bookstore/catalog:lab
   11 │       securityContext:
   12 │         privileged: true
   13 │         runAsUser: 0
@@ -351,18 +363,18 @@ Legend:
 - '0': Clean (no security findings detected)
 
 
-$ kubectl apply -n p05-supply-chain -f serviceaccount.yaml
+$ kubectl apply -n p05-03-supply-chain -f serviceaccount.yaml
 serviceaccount/catalog created
 
-$ kubectl apply --dry-run=server -n p05-supply-chain -f insecure.yaml 2>&1 | head -n 1
+$ kubectl apply --dry-run=server -n p05-03-supply-chain -f insecure.yaml 2>&1 | head -n 1
 Error from server (Forbidden): error when creating "insecure.yaml": pods "catalog-insecure" is forbidden: violates PodSecurity "restricted:latest": host namespaces (hostNetwork=true), privileged (container "catalog" must not set securityContext.privileged=true), allowPrivilegeEscalation != false (container "catalog" must set securityContext.allowPrivilegeEscalation=false), unrestricted capabilities (container "catalog" must set securityContext.capabilities.drop=["ALL"]), runAsNonRoot != true (pod or container "catalog" must set securityContext.runAsNonRoot=true), runAsUser=0 (container "catalog" must not set runAsUser=0), seccompProfile (pod or container "catalog" must set securityContext.seccompProfile.type to "RuntimeDefault" or "Localhost")
 
-$ kubectl apply --dry-run=server -n p05-supply-chain -f by-digest.yaml
+$ kubectl apply --dry-run=server -n p05-03-supply-chain -f by-digest.yaml
 pod/catalog-by-digest created (server dry run)
 
 ## step 14: tear down what the lab created
-$ kubectl delete ns p05-supply-chain --wait=true
-docker rm -f p05-registry
-namespace "p05-supply-chain" deleted
-p05-registry
+$ kubectl delete ns p05-03-supply-chain --wait=true
+docker rm -f p05-03-registry
+namespace "p05-03-supply-chain" deleted
+p05-03-registry
 

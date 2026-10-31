@@ -11,7 +11,7 @@
 # restricted namespace to refuse the insecure one.
 #
 # Steps 11 and 12 change what a node pulls, so they run only against the
-# throwaway cluster p05-supply (kind/supply-chain.yaml), which carries the
+# throwaway cluster supply-chain (kind/supply-chain.yaml), which carries the
 # containerd setting that lets a node reach the lab registry. On any other
 # kind cluster they are skipped and printed as skipped. The script deletes
 # what it made: the namespace, the registry and the scratch directory.
@@ -25,9 +25,9 @@
 #   ssh -fN -L 5001:127.0.0.1:5001 <docker-host>
 set +e
 
-NS=p05-supply-chain
+NS=p05-03-supply-chain
 REG=localhost:5001                # where the scanners and the signer reach it
-NODE_REG=p05-registry:5000        # the same registry, as the kind nodes name it
+NODE_REG=lab-registry:5000          # the same registry, as the kind nodes name it
 REG_IMAGE='registry:3@sha256:d4032d4cc323c1731c707931ecada07a53076eac38e3b61ae57533f170f2c6c3'
 
 # Read a command from stdin, print it exactly as written, then run it.
@@ -39,7 +39,7 @@ case "$ctx" in
   *) echo "refusing to run: kubectl context '$ctx' is not a kind cluster" >&2; exit 2 ;;
 esac
 cluster=no
-[ "$ctx" = kind-p05-supply ] && cluster=yes
+[ "$ctx" = kind-supply-chain ] && cluster=yes
 
 guide=$(cd "$(dirname "$0")/../../.." && pwd) || exit 1   # full-guide/
 work=$(mktemp -d) && cd "$work" || exit 1
@@ -58,17 +58,17 @@ docker buildx version | cut -d' ' -f1-2
 CMD
 
 echo '## step 1: a lab registry on the kind network, and the nodes told to trust it'
-docker rm -f p05-registry >/dev/null 2>&1
+docker rm -f p05-03-registry >/dev/null 2>&1
 run <<CMD
-docker run -d --name p05-registry --network kind -p 127.0.0.1:5001:5000 $REG_IMAGE >/dev/null && echo "registry started"
+docker run -d --name p05-03-registry --network kind --network-alias lab-registry -p 127.0.0.1:5001:5000 $REG_IMAGE >/dev/null && echo "registry started"
 CMD
 for i in $(seq 1 60); do curl -fsS -m 2 "http://$REG/v2/" >/dev/null 2>&1 && break; sleep 1; done
 printf '[host."http://%s"]\n  capabilities = ["pull", "resolve"]\n' "$NODE_REG" > hosts.toml
 run <<'CMD'
-for n in $(docker ps --filter label=io.x-k8s.kind.cluster=p05-supply --format '{{.Names}}'); do
-  docker exec "$n" mkdir -p /etc/containerd/certs.d/p05-registry:5000
-  docker exec -i "$n" sh -c 'cat > /etc/containerd/certs.d/p05-registry:5000/hosts.toml' < hosts.toml
-  docker exec "$n" getent hosts p05-registry >/dev/null && echo "$n resolves p05-registry"
+for n in $(docker ps --filter label=io.x-k8s.kind.cluster=supply-chain --format '{{.Names}}'); do
+  docker exec "$n" mkdir -p /etc/containerd/certs.d/lab-registry:5000
+  docker exec -i "$n" sh -c 'cat > /etc/containerd/certs.d/lab-registry:5000/hosts.toml' < hosts.toml
+  docker exec "$n" getent hosts lab-registry >/dev/null && echo "$n resolves lab-registry"
 done
 CMD
 
@@ -277,7 +277,7 @@ kubectl wait -n $NS --for=condition=Ready --timeout=120s pod/catalog-by-digest
 echo "running digest: \$(kubectl get pod -n $NS catalog-by-digest -o jsonpath='{.status.containerStatuses[0].imageID}' | sed 's/.*@//')"
 CMD
 else
-echo '## steps 11 and 12 need the throwaway cluster p05-supply, so this run skips them'
+echo '## steps 11 and 12 need the throwaway cluster supply-chain, so this run skips them'
 echo '## the chapter cites them to upstream and labels them not run'
 echo
 fi
@@ -325,6 +325,6 @@ CMD
 echo '## step 14: tear down what the lab created'
 run <<CMD
 kubectl delete ns $NS --wait=true
-docker rm -f p05-registry
+docker rm -f p05-03-registry
 CMD
 cd / && rm -rf "$work"
