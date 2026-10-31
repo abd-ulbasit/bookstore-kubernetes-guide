@@ -708,7 +708,7 @@ Checklist:
 3. **Payments-worker reads from a RabbitMQ queue. At 3am the queue is empty. Why is HPA on CPU the wrong scaler, and what does KEDA do differently?**
    <details><summary>Show answer</summary>
 
-   An idle consumer at 3am uses ~0 CPU regardless of queue depth — HPA on CPU sees "low utilization" and could scale all the way down to `minReplicas: 1`, but cannot scale **to zero**, because CPU is only measured on running Pods. (The `HPAScaleToZero` feature gate is in beta and on by default, so an HPA on an Object or External metric may set `minReplicas: 0`; you would still need a metrics adapter to feed it the queue depth.) KEDA exposes the queue depth as an external metric *and* manages the HPA, including the scale-from-zero / scale-to-zero transitions (which an HPA on CPU cannot do). KEDA is the right tool for queue/event-driven work; HPA on CPU is the wrong scaler for the wrong signal.
+   An idle consumer at 3am uses ~0 CPU regardless of queue depth: HPA on CPU sees "low utilization" and could scale all the way down to `minReplicas: 1`, but cannot scale **to zero**, because CPU is only measured on running Pods. (The `HPAScaleToZero` feature gate is in beta and on by default, so an HPA on an Object or External metric may set `minReplicas: 0`; you would still need a metrics adapter to feed it the queue depth.) KEDA exposes the queue depth as an external metric *and* manages the HPA, including the scale-from-zero / scale-to-zero transitions (which an HPA on CPU cannot do). KEDA is the right tool for queue/event-driven work; HPA on CPU is the wrong scaler for the wrong signal.
 
    </details>
 
