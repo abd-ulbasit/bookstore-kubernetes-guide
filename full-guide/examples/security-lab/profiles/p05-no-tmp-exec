@@ -1,0 +1,13 @@
+#include <tunables/global>
+
+# Lab profile for 05.05. Allow what a container normally does, then refuse to
+# run any program from the writable /tmp or /dev/shm volumes. The deny rules
+# override the blanket `file` rule below them.
+profile p05-no-tmp-exec flags=(attach_disconnected) {
+  #include <abstractions/base>
+
+  file,
+
+  deny /tmp/** x,
+  deny /dev/shm/** x,
+}

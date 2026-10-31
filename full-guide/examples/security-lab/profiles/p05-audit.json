@@ -1,0 +1,4 @@
+{
+  "defaultAction": "SCMP_ACT_LOG",
+  "architectures": ["SCMP_ARCH_X86_64"]
+}
