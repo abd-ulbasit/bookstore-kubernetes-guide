@@ -196,10 +196,10 @@ PodDisruptionBudget for the drain step. Every manifest carries the
 > the verified binary install and the kind version move are cited and labeled.
 
 The captured output in this chapter came from a three-node kind cluster named
-`sf-sched` (context `kind-sf-sched`, Kubernetes v1.37.0), not from a cluster
+`lab` (context `kind-lab`, Kubernetes v1.37.0), not from a cluster
 named `bookstore`. The namespace the commands name, `drain-demo`, was
-`p08-01-drain` in that run. Node and pod names below are verbatim from that
-cluster, and yours will differ.
+`p08-01-drain` in that run. Node and pod names below come from that
+cluster, with its name shortened to `lab`, and yours will differ.
 
 ### 1. See the cluster's version and node versions
 
@@ -226,9 +226,9 @@ Server Version: v1.37.0
 <!-- gate: output -->
 ```
 NAME                     KUBELET   RUNTIME              UNSCHEDULABLE
-sf-sched-control-plane   v1.37.0   containerd://2.3.4   <none>
-sf-sched-worker          v1.37.0   containerd://2.3.4   <none>
-sf-sched-worker2         v1.37.0   containerd://2.3.4   <none>
+lab-control-plane   v1.37.0   containerd://2.3.4   <none>
+lab-worker          v1.37.0   containerd://2.3.4   <none>
+lab-worker2         v1.37.0   containerd://2.3.4   <none>
 ```
 
 ### 2. Write the drill's manifests
@@ -431,8 +431,8 @@ deployment "drain-demo" successfully rolled out
 <!-- gate: output -->
 ```
 NAME                          NODE               PHASE
-drain-demo-7549c4bbd6-5bq79   sf-sched-worker    Running
-drain-demo-7549c4bbd6-nn5qk   sf-sched-worker2   Running
+drain-demo-7549c4bbd6-5bq79   lab-worker    Running
+drain-demo-7549c4bbd6-nn5qk   lab-worker2   Running
 ```
 
 ### 4. Drain a worker under a PodDisruptionBudget
@@ -449,16 +449,16 @@ kubectl drain <worker> --ignore-daemonsets --delete-emptydir-data --pod-selector
 
 <!-- gate: output -->
 ```
-$ kubectl cordon sf-sched-worker2
-node/sf-sched-worker2 cordoned
+$ kubectl cordon lab-worker2
+node/lab-worker2 cordoned
 
-$ kubectl drain sf-sched-worker2 --ignore-daemonsets --delete-emptydir-data --pod-selector app=drain-demo --timeout=45s
-node/sf-sched-worker2 already cordoned
+$ kubectl drain lab-worker2 --ignore-daemonsets --delete-emptydir-data --pod-selector app=drain-demo --timeout=45s
+node/lab-worker2 already cordoned
 evicting pod p08-01-drain/drain-demo-7549c4bbd6-nn5qk
 error when evicting pods/"drain-demo-7549c4bbd6-nn5qk" -n "p08-01-drain" (will retry after 5s): Cannot evict pod as it would violate the pod's disruption budget.
 # ...
 There are pending nodes to be drained:
- sf-sched-worker2
+ lab-worker2
 error when evicting pods/"drain-demo-7549c4bbd6-nn5qk" -n "p08-01-drain": global timeout reached: 45s
 ```
 
@@ -497,14 +497,14 @@ kubectl get nodes -o custom-columns=NAME:.metadata.name,UNSCHEDULABLE:.spec.unsc
 
 <!-- gate: output -->
 ```
-$ kubectl uncordon sf-sched-worker2
-node/sf-sched-worker2 uncordoned
+$ kubectl uncordon lab-worker2
+node/lab-worker2 uncordoned
 
 $ kubectl get nodes -o custom-columns=NAME:.metadata.name,UNSCHEDULABLE:.spec.unschedulable
 NAME                     UNSCHEDULABLE
-sf-sched-control-plane   <none>
-sf-sched-worker          <none>
-sf-sched-worker2         <none>
+lab-control-plane   <none>
+lab-worker          <none>
+lab-worker2         <none>
 ```
 
 ### 5. CVE response: triage, patch, drain, verify
