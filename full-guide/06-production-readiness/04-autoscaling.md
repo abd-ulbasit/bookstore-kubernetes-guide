@@ -32,6 +32,12 @@ that must be understood separately: scale the **Pods** of a workload (HPA /
 VPA / KEDA), and scale the **nodes** of the cluster (Cluster Autoscaler /
 Karpenter). They compose; they do not substitute.
 
+Scaling also has a security side. Whatever can drive the metric, or write the
+autoscaler object, can drive your bill. A flood of requests or messages adds
+Pods and nodes you pay for, and anyone who can edit an HPA can raise its
+ceiling. The [threats and controls](#threats-and-controls) table names each
+case and its control.
+
 ## Mental model
 
 Four mechanisms, four jobs:
@@ -66,6 +72,21 @@ count for each and uses the **maximum** (never the sum — it scales for the
 most-stressed dimension). A **tolerance** (default 10%) suppresses scaling
 when the ratio is within ±10% of 1.0 (no thrashing around the target). KEDA's
 managed HPA runs this *same* formula on the queue-length metric.
+
+## Threats and controls
+
+Autoscaling makes the bill follow whoever can move the metric or the scaler
+object. The threats below are the ones specific to scaling. The controls are
+the bounds and access rules around the scaler, not the HPA algorithm.
+
+| Threat | Control | Goes deeper in |
+|---|---|---|
+| A traffic spike or a message flood scales the workload past what you can pay for (a cost attack) | `maxReplicas` on the HPA and `maxReplicaCount` on the ScaledObject, both inside the namespace ResourceQuota | [01.03](../01-core-workloads/03-resources-and-qos.md), [06.06](06-capacity-and-cost.md) |
+| A subject that can edit an HPA or ScaledObject raises its bounds or retargets it | No workload ServiceAccount holds rights on autoscaling objects; only the team that owns the scaling writes them | [05.01](../05-security/01-authn-authz-rbac.md) |
+| The metric source is forged or drifts, so someone else's number sets the replica count | Scale on a backlog that only trusted producers can write, and give the scaler a broker user that can read queue length and nothing else | [05.01](../05-security/01-authn-authz-rbac.md) |
+| The external metrics API serves a value nobody checks, or goes down | The APIService that serves `external.metrics.k8s.io` is cluster-wide. Install it from a pinned chart, keep its RBAC narrow and monitor it. When it is down the HPA freezes | [06.01](01-observability-metrics.md) |
+| The scaler's broker credential is readable by tenants | The credential sits in a Secret that a TriggerAuthentication names, never inline in the ScaledObject | [03.02](../03-config-and-storage/02-secrets.md) |
+| Pending Pods grow the node pool without limit | The node autoscaler's own maximum, set by the platform, bounds the nodes that `maxReplicas` asks for | [10.06](../10-cloud-and-managed-kubernetes/06-node-autoscaling-cost-multicloud.md) |
 
 ## Diagrams
 
@@ -133,8 +154,11 @@ flowchart LR
 
 We will: (1) add the **payments-worker** Deployment (its first manifest); (2)
 add an **HPA** on catalog; (3) install **KEDA** and add a **ScaledObject**
-scaling payments-worker on RabbitMQ queue depth; (4) load-test both with a
-restricted-compliant public-image generator.
+scaling payments-worker on RabbitMQ queue depth; (4) describe the load tests,
+which this lab run did not reach.
+
+The output blocks come from a lab cluster whose node has a different name, and
+its namespaces had other names. The commands use the chapter's names.
 
 ### 0. Prerequisites (self-bootstrapping)
 
@@ -145,8 +169,10 @@ Bring up the cluster + Bookstore as in
 ```sh
 kubectl apply -f examples/bookstore/raw-manifests/13-rabbitmq.yaml
 kubectl rollout status deployment/rabbitmq -n bookstore
-# (metrics-server install: ch.01 step 1 — required for the HPA CPU metric.)
 ```
+
+The CPU metric needs metrics-server, which ch.01 step 1 installs. Without
+it the HPA reports `<unknown>` and does not scale. Step 2 shows that state.
 
 ### 1. Add the payments-worker Deployment
 
@@ -158,72 +184,9 @@ manifest — KEDA needs a real Deployment to scale. New files:
   (`automountServiceAccountToken: false`, **no** Role/RoleBinding — the worker
   never calls the API; same posture as `orders-sa`).
 - [`examples/bookstore/raw-manifests/19-payments-worker-deploy.yaml`](../examples/bookstore/raw-manifests/19-payments-worker-deploy.yaml)
-  — the Deployment. Shape (full restricted SC like catalog, `AMQP_URL` →
-  rabbitmq Service, scheduling layer consistent with siblings):
-
-```yaml
-# (excerpt — condensed for the chapter; the authoritative full spec, incl.
-#  probe tuning fields, is examples/bookstore/raw-manifests/19-payments-worker-deploy.yaml)
-apiVersion: apps/v1
-kind: Deployment
-metadata:
-  name: payments-worker
-  namespace: bookstore
-  labels: { app: payments-worker, component: worker, app.kubernetes.io/part-of: bookstore }
-spec:
-  replicas: 1                       # resting state; KEDA (83-) OWNS the count
-  selector: { matchLabels: { app: payments-worker } }
-  template:
-    metadata:
-      labels: { app: payments-worker, component: worker }
-    spec:
-      serviceAccountName: payments-worker-sa
-      automountServiceAccountToken: false
-      securityContext:              # PSA restricted (pod) — same as catalog 10-
-        runAsNonRoot: true
-        runAsUser: 65532
-        runAsGroup: 65532
-        seccompProfile: { type: RuntimeDefault }
-      priorityClassName: bookstore-critical          # checkout path: above batch
-      topologySpreadConstraints:                     # spread KEDA-scaled replicas
-        - maxSkew: 1
-          topologyKey: kubernetes.io/hostname
-          whenUnsatisfiable: ScheduleAnyway          # availability > strict spread
-          labelSelector: { matchLabels: { app: payments-worker } }
-      affinity:
-        podAntiAffinity:
-          preferredDuringSchedulingIgnoredDuringExecution:
-            - weight: 100
-              podAffinityTerm:
-                topologyKey: kubernetes.io/hostname
-                labelSelector: { matchLabels: { app: payments-worker } }
-      containers:
-        - name: payments-worker
-          image: bookstore/payments-worker:dev
-          imagePullPolicy: IfNotPresent
-          securityContext:          # PSA restricted (container)
-            allowPrivilegeEscalation: false
-            readOnlyRootFilesystem: true
-            capabilities: { drop: ["ALL"] }
-          ports: [{ name: metrics, containerPort: 8080 }]   # /healthz + /metrics
-          env:
-            - { name: PORT, value: "8080" }
-            - { name: LOG_LEVEL, value: "info" }
-            - name: AMQP_URL                                # the async edge
-              value: "amqp://guest:guest@rabbitmq.bookstore.svc.cluster.local:5672/"
-          # Only /healthz exists (a consumer has no /readyz); ALL THREE probes
-          # use it (full failureThreshold/timeout tuning is in the saved 19-).
-          startupProbe:   { httpGet: { path: /healthz, port: metrics }, periodSeconds: 5, failureThreshold: 30 }
-          livenessProbe:  { httpGet: { path: /healthz, port: metrics }, periodSeconds: 10 }
-          readinessProbe: { httpGet: { path: /healthz, port: metrics }, periodSeconds: 5 }
-          lifecycle: { preStop: { sleep: { seconds: 5 } } }  # native; distroless-safe
-          resources:
-            requests: { cpu: 50m, memory: 64Mi }
-            limits:   { cpu: 250m, memory: 128Mi }
-          volumeMounts: [{ name: tmp, mountPath: /tmp }]     # RO-rootfs scratch
-      volumes: [{ name: tmp, emptyDir: { sizeLimit: 32Mi } }]
-      terminationGracePeriodSeconds: 30
-```
+  Its Deployment is complete: restricted security context like catalog's,
+  `AMQP_URL` pointing at the rabbitmq Service, and a scheduling layer that
+  matches the other workloads. Its decisions are in its header.
 
 > **Decisions (documented in the manifest header).** *No DB_DSN* — the worker
 > never touches Postgres (contrast catalog/orders). *Only `/healthz`* — a
@@ -252,9 +215,26 @@ kubectl apply -f examples/bookstore/raw-manifests/19-payments-worker-deploy.yaml
 kubectl apply -f examples/bookstore/raw-manifests/40-services.yaml
 kubectl apply -f examples/bookstore/raw-manifests/60-networkpolicy.yaml   # if a policy CNI runs
 kubectl rollout status deployment/payments-worker -n bookstore
-# The bookstore ns is enforce:restricted — this Pod is admitted with ZERO
-# PodSecurity warnings (proven by a server-side dry-run; same method Part 05
-# ch.02 used for catalog/orders).
+```
+
+The `bookstore` namespace enforces `restricted`. The apply above printed no
+PodSecurity warnings, and the rollout returned:
+
+<!-- gate: output -->
+```
+Waiting for deployment "payments-worker" rollout to finish: 0 out of 1 new replicas have been updated...
+Waiting for deployment "payments-worker" rollout to finish: 0 of 1 updated replicas are available...
+deployment "payments-worker" successfully rolled out
+```
+
+The worker then logs that it is consuming the queue. Its log, read later in
+the same run, shows that it reached the broker with the credentials in its
+manifest:
+
+<!-- gate: output -->
+```
+{"time":"2026-10-31T01:16:50.927332267Z","level":"INFO","msg":"payments-worker health server listening","addr":":8080"}
+{"time":"2026-10-31T01:16:51.837100283Z","level":"INFO","msg":"consuming queue","queue":"orders"}
 ```
 
 ### 2. An HPA on catalog (CPU + a custom req/s metric)
@@ -308,24 +288,94 @@ kubectl get hpa catalog -n bookstore -w        # TARGETS shows current/target
 kubectl describe hpa catalog -n bookstore      # per-metric values + events
 ```
 
+The lab run for this chapter had no working resource metrics API. The
+`metrics.k8s.io` APIService was registered to a metrics-server with no
+endpoints, so the HPA could not read CPU and did not scale. The output below
+is that state. It is the failure the production notes describe: the HPA
+freezes at its current count.
+
+<!-- gate: output -->
+```
+NAME      REFERENCE            TARGETS                            MINPODS   MAXPODS   REPLICAS   AGE
+catalog   Deployment/catalog   cpu: <unknown>/70%, <unknown>/50   2         6         3          45s
+```
+
+The describe output says why:
+
+<!-- gate: output -->
+```
+Conditions:
+  Type           Status  Reason                   Message
+  ----           ------  ------                   -------
+  AbleToScale    True    SucceededGetScale        the HPA controller was able to get the target's current scale
+  ScalingActive  False   FailedGetResourceMetric  the HPA was unable to compute the replica count: failed to get cpu utilization: unable to get metrics for resource cpu: unable to fetch metrics from resource metrics API: the server is currently unable to handle the request (get pods.metrics.k8s.io)
+```
+
+<!-- gate: output -->
+```
+  Type     Reason                        Age                From                       Message
+  ----     ------                        ----               ----                       -------
+  Warning  FailedGetResourceMetric       15s (x3 over 46s)  horizontal-pod-autoscaler  failed to get cpu utilization: unable to get metrics for resource cpu: unable to fetch metrics from resource metrics API: the server is currently unable to handle the request (get pods.metrics.k8s.io)
+  Warning  FailedGetPodsMetric           15s (x3 over 46s)  horizontal-pod-autoscaler  unable to get metric http_requests_per_second: unable to fetch metrics from custom metrics API: no custom metrics API (custom.metrics.k8s.io) registered
+  Warning  FailedComputeMetricsReplicas  15s (x3 over 46s)  horizontal-pod-autoscaler  invalid metrics (2 invalid out of 2), first error is: failed to get cpu resource metric value: failed to get cpu utilization: unable to get metrics for resource cpu: unable to fetch metrics from resource metrics API: the server is currently unable to handle the request (get pods.metrics.k8s.io)
+```
+
+The `MAXPODS` column is the ceiling the controls in the threats table protect.
+This run never reached it, because no metric reached the HPA.
+
+The HPA's own access is the other half of that control. The lines below come
+from a shell loop that prints each answer with its ServiceAccount's name:
+
+<!-- gate: output -->
+```
+catalog-sa patch-hpa: no
+payments-worker-sa patch-hpa: no
+orders-sa patch-hpa: no
+orders-sa update-deployment-scale: no
+```
+
+Each answer is `no`. None of these ServiceAccounts can raise a ceiling, and
+`orders-sa` cannot write a replica count either.
+
 ### 3. KEDA: scale payments-worker on RabbitMQ queue depth
 
-Install KEDA via its Helm chart into its **own** `keda` namespace (its own
-namespace — not PSA-restricted; fine, exactly like the observability stacks in
-[ch.01](01-observability-metrics.md)). Helm (not a raw
-`releases/latest/download/<PINNED-FILE>.yaml` URL — that 404s the moment a
-newer KEDA ships, since `latest/` resolves to the newest tag but the filename
-is version-pinned) is the same install method this part uses for
-metrics-server's add-on peers, kube-prometheus-stack, Loki, Alloy, Tempo and
-the OTel Collector:
+Install KEDA into its own `keda` namespace. Create the namespace and label it
+first at `restricted`. The rendered Deployments set every field that
+`restricted` checks: `runAsNonRoot`, the `RuntimeDefault` seccomp profile, no
+privilege escalation, a read-only root filesystem and all capabilities dropped.
+So the namespace should need no exception. The lab did not run admission
+against these pods. Use Helm, not a raw `releases/latest/download` URL, because
+that URL names a version-pinned file that stops matching when KEDA ships a new
+tag.
 
 ```sh
 helm repo add kedacore https://kedacore.github.io/charts
 helm repo update
-helm install keda kedacore/keda \
-  --namespace keda --create-namespace --wait
+kubectl create namespace keda
+kubectl label namespace keda \
+  pod-security.kubernetes.io/enforce=restricted \
+  pod-security.kubernetes.io/audit=restricted \
+  pod-security.kubernetes.io/warn=restricted
+helm install keda kedacore/keda --version 2.21.0 \
+  --namespace keda --wait
 kubectl -n keda rollout status deployment/keda-operator
 ```
+
+The lab run for this chapter could not install KEDA on the shared cluster at
+that time. It rendered the chart with `helm template` and dry-ran the render,
+so the install block above is the upstream command and has not run in the lab.
+The render's security contexts, printed by a short script, are:
+
+<!-- gate: output -->
+```
+keda-operator pod: {'runAsNonRoot': True}
+    keda-operator container: {'allowPrivilegeEscalation': False, 'capabilities': {'drop': ['ALL']}, 'readOnlyRootFilesystem': True, 'seccompProfile': {'type': 'RuntimeDefault'}}
+keda-operator-metrics-apiserver pod: {'runAsNonRoot': True}
+    keda-operator-metrics-apiserver container: {'allowPrivilegeEscalation': False, 'capabilities': {'drop': ['ALL']}, 'readOnlyRootFilesystem': True, 'seccompProfile': {'type': 'RuntimeDefault'}}
+keda-admission-webhooks pod: {'runAsNonRoot': True}
+    keda-admission-webhooks container: {'allowPrivilegeEscalation': False, 'capabilities': {'drop': ['ALL']}, 'readOnlyRootFilesystem': True, 'seccompProfile': {'type': 'RuntimeDefault'}}
+```
+
 
 New file
 [`examples/bookstore/raw-manifests/83-keda-scaledobject.yaml`](../examples/bookstore/raw-manifests/83-keda-scaledobject.yaml)
@@ -352,78 +402,36 @@ spec:
       authenticationRef: { name: rabbitmq-trigger-auth }
 ```
 
-> **KEDA wraps an HPA — see it.** `83-` does **not** contain an HPA, yet:
->
-> ```sh
-> kubectl apply -f examples/bookstore/raw-manifests/83-keda-scaledobject.yaml
-> kubectl get scaledobject,hpa -n bookstore
-> #   NAME ... scaledobject.keda.sh/payments-worker
-> #   NAME ... horizontalpodautoscaler.../keda-hpa-payments-worker   <-- KEDA made this
-> ```
->
-> KEDA's operator created a managed HPA whose external metric is the live
-> "orders" queue length; that HPA runs the **same** `ceil(replicas × len/value)` formula as the catalog HPA. The piece a plain HPA cannot do —
-> 0↔1 — is done by KEDA itself (it patches the Deployment to 0 after
-> `cooldownPeriod` of `queue ≤ activationValue`, and back to 1 the instant a
-> message arrives).
+> **KEDA wraps an HPA.** `83-` does **not** contain an HPA. KEDA's operator
+creates one for the ScaledObject, with the live queue length as its external
+metric, and that HPA runs the same `ceil(replicas × len/value)` formula as the
+catalog HPA. The one thing a plain HPA cannot do, moving between 0 and 1, KEDA
+does itself: it scales the Deployment to `minReplicaCount` once the trigger has
+been inactive for `cooldownPeriod`, and back up when a message arrives.
 
-> **CRD-backed — expected dry-run note.** `ScaledObject`/`TriggerAuthentication`
-> are KEDA CRDs (`keda.sh/v1alpha1`). Without KEDA installed,
-> `kubectl apply --dry-run=client -f 83-...` prints
-> `no matches for kind "ScaledObject" in version "keda.sh/v1alpha1"` —
-> **expected, not a defect**, exactly like the Gateway API
-> ([Part 02 ch.05](../02-networking/05-gateway-api.md)) and Kyverno
-> ([Part 05 ch.03](../05-security/03-supply-chain.md)) objects, and like
-> `80-`/`81-` from [ch.01](01-observability-metrics.md). The `19-`
-> Deployment and the `82-` HPA are built-ins and **do** dry-run cleanly.
+> **CRD-backed objects.** `ScaledObject` and `TriggerAuthentication` are KEDA
+CRDs (`keda.sh/v1alpha1`). Before KEDA is installed, a server dry run of `83-`
+fails with `no matches for kind "ScaledObject" in version "keda.sh/v1alpha1"`,
+as it did in the lab run. That is expected, not a defect, the same as the
+Gateway API and Kyverno objects in earlier chapters. The `19-` Deployment and
+the `82-` HPA are built-ins and dry-run cleanly.
 
-### 4. Load-test both (restricted-compliant generator)
+### 4. Load tests: left for you to run
 
-Drive catalog with HTTP and orders to fill the queue, from **public-image**
-load generators. PSA `restricted` is satisfied via `--overrides` (pinned
-`rakyll/hey` / `curlimages/curl`, both run fine non-root — pinned tags, never
-`:latest`, per this guide's image policy).
+This lab run did not reach the scale-out. The HPA had no metric to read, and
+KEDA was not installed, so neither the catalog HPA nor the queue scaler moved.
+Run the load yourself once steps 2 and 3 show live metrics. Use a load
+generator image pinned by digest, and give it the same restricted
+securityContext as the workloads.
 
-**First, the catalog HPA (works as-is):**
+Orders publishes to the queue only when `AMQP_URL` is set. `14-` leaves it
+unset on purpose (its header explains), so the queue stays empty until that
+changes. The orders log from the lab run shows the unset state:
 
-```sh
-# Hammer catalog -> CPU/req-rate rises -> the catalog HPA scales out (watch §2).
-kubectl run hey -n bookstore --rm -it --restart=Never \
-  --image=ghcr.io/rakyll/hey:0.1.4 \
-  --overrides='{"spec":{"securityContext":{"runAsNonRoot":true,"runAsUser":65532,"seccompProfile":{"type":"RuntimeDefault"}},"containers":[{"name":"hey","image":"ghcr.io/rakyll/hey:0.1.4","args":["-z","2m","-c","50","http://catalog.bookstore.svc.cluster.local/books"],"securityContext":{"allowPrivilegeEscalation":false,"capabilities":{"drop":["ALL"]},"readOnlyRootFilesystem":true}}]}}'
+<!-- gate: output -->
 ```
-
-**Then KEDA — but enable order publishing FIRST (read this before flooding).**
-The canonical
-[`14-orders-deploy.yaml`](../examples/bookstore/raw-manifests/14-orders-deploy.yaml)
-leaves `AMQP_URL` **unset** (Part-02 networking scaffolding), so orders
-*silently drops* events and **nothing ever enqueues** — the flood below would
-do nothing to the queue and KEDA would never scale. Point orders at the same
-rabbitmq Service the worker uses (this is a **demo-only** env override on the
-live Deployment, not an edit to `14-`; revert it afterwards):
-
-```sh
-# DEMO-ONLY: make orders actually publish to the 'orders' queue.
-kubectl set env deployment/orders -n bookstore \
-  AMQP_URL="amqp://guest:guest@rabbitmq.bookstore.svc.cluster.local:5672/"
-kubectl rollout status deployment/orders -n bookstore
-# now: flood orders -> the 'orders' queue grows -> KEDA scales payments-worker
-#      from 0/1 up toward maxReplicaCount; watch it drain then scale back to 0.
-kubectl run flood -n bookstore --rm -it --restart=Never \
-  --image=curlimages/curl:8.10.1 \
-  --overrides='{"spec":{"securityContext":{"runAsNonRoot":true,"runAsUser":65534,"seccompProfile":{"type":"RuntimeDefault"}},"containers":[{"name":"flood","image":"curlimages/curl:8.10.1","command":["sh","-c","for i in $(seq 1 500); do curl -s -o /dev/null -XPOST http://orders.bookstore.svc.cluster.local/orders -d \"{\\\"book_id\\\":1,\\\"qty\\\":1}\"; done; echo done"],"securityContext":{"allowPrivilegeEscalation":false,"capabilities":{"drop":["ALL"]},"readOnlyRootFilesystem":true}}]}}'
-
-watch kubectl get hpa,scaledobject,deploy/payments-worker,deploy/catalog -n bookstore
-
-# Revert the demo-only change (restore the canonical AMQP_URL-unset behaviour):
-kubectl set env deployment/orders -n bookstore AMQP_URL-
-kubectl rollout status deployment/orders -n bookstore
+{"time":"2026-10-31T01:07:16.078833493Z","level":"INFO","msg":"AMQP_URL unset; order events will not be published"}
 ```
-
-(`14-` is intentionally left unchanged on disk — `AMQP_URL` arrives there
-permanently in [Part 07](../07-delivery/01-packaging-helm.md) when the broker
-gets real credentials; this chapter only flips it at runtime to demonstrate
-the scaler, then reverts.)
 
 ## How it works under the hood
 
@@ -450,7 +458,7 @@ the scaler, then reverts.)
   **admission** webhook rewrites requests on (re)creation. Modes: `Off`
   (recommend only — *the sizing tool*, [ch.06](06-capacity-and-cost.md)),
   `Initial` (set on create only), `Auto`/`Recreate` (evict to resize — note:
-  in-place Pod resize has been GA since v1.35, but these classic VPA modes
+  in-place Pod resize is a separate feature, and these classic VPA modes
   still evict and recreate the Pod).
 - **Why HPA + VPA on the same metric conflict.** HPA scales replicas on, say,
   CPU utilization; VPA in `Auto` rewrites the CPU **request**. But
@@ -468,8 +476,8 @@ the scaler, then reverts.)
   **activation**: while the trigger is inactive (`≤ activationValue` for
   `cooldownPeriod`) KEDA scales the Deployment to `minReplicaCount` (which can
   be **0**) and removes the HPA's lower bound; the first event reactivates it.
-  Until v1.37 a stock HPA could not reach or leave 0. Since 1.37 the
-  beta, on-by-default `HPAScaleToZero` feature lets an HPA on an Object or
+  A stock HPA could not reach or leave 0 for a long time. The beta
+  `HPAScaleToZero` feature gate lets an HPA on an Object or
   External metric set `minReplicas: 0`, but something must still serve that
   metric. KEDA ships that adapter and owns the 0↔1 activation, which is its
   added value, and why a queue consumer (idle most of the night) is its
@@ -531,31 +539,6 @@ kubectl top pods -n <NS>                            # the metric source (metrics
 kubectl get deploy <D> -n <NS> -o jsonpath='{.spec.replicas}'   # current count
 ```
 
-Minimal HPA + KEDA ScaledObject skeleton:
-
-```yaml
-apiVersion: autoscaling/v2
-kind: HorizontalPodAutoscaler
-spec:
-  scaleTargetRef: { apiVersion: apps/v1, kind: Deployment, name: <D> }
-  minReplicas: 2
-  maxReplicas: 10
-  metrics:
-    - type: Resource
-      resource: { name: cpu, target: { type: Utilization, averageUtilization: 70 } }
----
-apiVersion: keda.sh/v1alpha1
-kind: ScaledObject
-spec:
-  scaleTargetRef: { name: <D> }
-  minReplicaCount: 0            # KEDA-only: scale to zero
-  maxReplicaCount: 10
-  triggers:
-    - type: rabbitmq
-      metadata: { protocol: amqp, queueName: <q>, mode: QueueLength, value: "20" }
-      authenticationRef: { name: <TRIGGERAUTH> }
-```
-
 Checklist:
 
 - [ ] HPA `desired = ceil(cur × curMetric/target)`; multi-metric → **max**
@@ -565,6 +548,7 @@ Checklist:
 - [ ] `maxReplicas` bounded by the namespace ResourceQuota
 - [ ] metrics-server (Resource) / adapter / KEDA metrics API installed & monitored
 - [ ] A node autoscaler (Cluster Autoscaler / Karpenter) for the Pod growth
+- [ ] No workload ServiceAccount can write HPAs or ScaledObjects
 
 ## Test your understanding
 
@@ -587,12 +571,12 @@ Checklist:
 3. **Payments-worker reads from a RabbitMQ queue. At 3am the queue is empty. Why is HPA on CPU the wrong scaler, and what does KEDA do differently?**
    <details><summary>Show answer</summary>
 
-   An idle consumer at 3am uses ~0 CPU regardless of queue depth — HPA on CPU sees "low utilization" and could scale all the way down to `minReplicas: 1`, but cannot scale **to zero**, because CPU is only measured on running Pods. (Since v1.37 the `HPAScaleToZero` feature is beta and on by default, so an HPA on an Object or External metric may set `minReplicas: 0`; you would still need a metrics adapter to feed it the queue depth.) KEDA exposes the queue depth as an external metric *and* manages the HPA, including the scale-from-zero / scale-to-zero transitions (which an HPA on CPU cannot do). KEDA is the right tool for queue/event-driven work; HPA on CPU is the wrong scaler for the wrong signal.
+   An idle consumer at 3am uses ~0 CPU regardless of queue depth — HPA on CPU sees "low utilization" and could scale all the way down to `minReplicas: 1`, but cannot scale **to zero**, because CPU is only measured on running Pods. (The `HPAScaleToZero` feature gate is in beta and on by default, so an HPA on an Object or External metric may set `minReplicas: 0`; you would still need a metrics adapter to feed it the queue depth.) KEDA exposes the queue depth as an external metric *and* manages the HPA, including the scale-from-zero / scale-to-zero transitions (which an HPA on CPU cannot do). KEDA is the right tool for queue/event-driven work; HPA on CPU is the wrong scaler for the wrong signal.
 
    </details>
 
 4. **Hands-on extension — make KEDA scale to zero. Apply a `ScaledObject` with `minReplicaCount: 0` for payments-worker on RabbitMQ. Drain the queue. Watch `kubectl get deploy payments-worker -w`. Now publish one message. Time how long it takes for the first replica to be Ready.**
-   <details><summary>What you should see</summary>
+   <details><summary>What you should see (expected, not measured in the lab run)</summary>
 
    After ~30s of idle, replicas drop to 0 — KEDA scales the Deployment to zero via the managed HPA. On the new message, KEDA detects the queue depth, scales to 1, and you watch a Pod transition Pending → ContainerCreating → Running → Ready, typically 10-30s. That delay is the **cold-start cost** of scale-to-zero; size your `pollingInterval` (default 30s) and `cooldownPeriod` against your SLO. For latency-sensitive paths, `minReplicaCount: 1` is the right trade.
 
@@ -602,6 +586,21 @@ Checklist:
    <details><summary>Show answer</summary>
 
    HPA scales the *replica count* up to 50, but the scheduler can only place 30 — the other 20 stay `Pending` with `FailedScheduling: 0/X nodes available`. That's where the **node autoscaler** (Cluster Autoscaler or Karpenter) comes in: it watches Pending Pods and provisions more nodes. HPA scales Pods; Karpenter/CA scales nodes; you need both. Without a node autoscaler the HPA's `maxReplicas` is whatever the cluster's current capacity allows — and the cluster never grows on its own.
+
+   </details>
+
+6. **A compromised workload can update catalog's Deployment scale but cannot
+   patch HorizontalPodAutoscalers. Why does that split matter for the bill?**
+   <details><summary>Show answer</summary>
+
+   The HPA holds `maxReplicas`, the ceiling. An attacker who can patch the HPA
+   can raise that ceiling and let the bill follow the attack. Writing the scale
+   subresource only sets the count for now, and the HPA controller overwrites
+   it on its next pass, so the ceiling is the control that matters. The lab run
+   checked the workload ServiceAccounts: each one got `no` for patching HPAs,
+   and `orders-sa` got `no` for updating a Deployment's scale (see step 2).
+   Keep both rights away from workloads, and let only the team that owns the
+   scaling write autoscaling objects.
 
    </details>
 
@@ -617,3 +616,5 @@ Checklist:
   (and the HPA algorithm:
   <https://kubernetes.io/docs/tasks/run-application/horizontal-pod-autoscale/#algorithm-details>),
   and KEDA: <https://keda.sh/docs/latest/concepts/scaling-deployments/>.
+- Pod Security Standards, for the `restricted` fields the KEDA step
+  checks: <https://kubernetes.io/docs/concepts/security/pod-security-standards/>.

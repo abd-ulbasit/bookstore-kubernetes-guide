@@ -1,0 +1,450 @@
+# Transcript for 06-production-readiness/04-autoscaling.md, hands-on steps 0 to 3.
+# Tier A: a kind cluster, Kubernetes v1.37.0 node, kubectl v1.37.2 client.
+# Single control-plane node named sf-pilot-control-plane (the lab cluster's name
+# is not the chapter's `kind-bookstore`). Shared cluster: other workers' objects
+# are present and were not touched.
+# Namespace substitution: the chapter's `bookstore` is `p06-04-bookstore` in
+# this run, and `keda` is `p06-04-keda`. The manifests were applied from copies
+# with only the namespace names changed. A path in a working copy is written as
+# its repository path, examples/bookstore/raw-manifests/.
+# Recorded by running the commands in order from the repository root. Terminal
+# colour codes are removed. A local API tunnel address is written as <port>.
+# Nothing else is edited.
+#
+# What did not work the first time:
+# - 12-redis.yaml was missing from the first apply, so catalog's /readyz failed
+#   on Redis and its rollout hit the progress deadline. Applying Redis fixed it.
+# - The first apply of 19-payments-worker-deploy.yaml and one rollout check
+#   lost the API connection (EOF). Both were re-run.
+# - The resource metrics API (v1beta1.metrics.k8s.io) was registered to another
+#   worker's metrics-server, which had no endpoints. The HPA therefore reported
+#   <unknown> for CPU and never scaled (step 2).
+# - No install lock could be taken for KEDA (another worker held it), so KEDA
+#   was not installed. Step 3 renders the chart and dry-runs it instead.
+# - The KEDA test namespace stayed Terminating after its delete, because the
+#   stale v1beta1.metrics.k8s.io discovery failure blocks namespace deletion.
+#   The namespace was left to finish once the discovery failure clears.
+#
+# Not run in this transcript: the load tests and the KEDA scale-out and
+# scale-to-zero runs, which need a resource metrics API or a running KEDA.
+## step 0
+$ kubectl apply -f 00-namespace.yaml
+namespace/p06-04-bookstore created
+resourcequota/bookstore-quota created
+limitrange/bookstore-limits created
+$ kubectl apply -f 05-serviceaccounts-rbac.yaml
+serviceaccount/catalog-sa created
+serviceaccount/storefront-sa created
+serviceaccount/orders-sa created
+serviceaccount/payments-worker-sa created
+serviceaccount/postgres-sa created
+serviceaccount/redis-sa created
+serviceaccount/rabbitmq-sa created
+serviceaccount/migrate-sa created
+role.rbac.authorization.k8s.io/catalog-config-reader created
+rolebinding.rbac.authorization.k8s.io/catalog-config-reader-binding created
+$ kubectl apply -f 15-catalog-config.yaml
+configmap/catalog-config created
+$ kubectl apply -f 16-db-credentials.yaml
+secret/db-credentials created
+$ kubectl apply -f 35-priorityclasses.yaml
+priorityclass.scheduling.k8s.io/bookstore-data configured
+priorityclass.scheduling.k8s.io/bookstore-critical configured
+priorityclass.scheduling.k8s.io/bookstore-batch configured
+$ kubectl apply -f 20-postgres-statefulset.yaml
+service/postgres created
+statefulset.apps/postgres created
+$ kubectl rollout status statefulset/postgres -n p06-04-bookstore --timeout=240s
+Waiting for 1 pods to be ready...
+Waiting for 1 pods to be ready...
+partitioned roll out complete: 1 new pods have been updated...
+$ kubectl apply -f 21-db-migrate-job.yaml
+job.batch/db-migrate created
+$ kubectl wait --for=condition=complete job/db-migrate -n p06-04-bookstore --timeout=180s
+job.batch/db-migrate condition met
+$ kubectl apply -f 10-catalog-deploy.yaml
+deployment.apps/catalog created
+$ kubectl apply -f 13-rabbitmq.yaml
+deployment.apps/rabbitmq created
+$ kubectl apply -f 14-orders-deploy.yaml
+deployment.apps/orders created
+$ kubectl apply -f 40-services.yaml
+service/catalog created
+service/storefront created
+service/orders created
+service/redis created
+service/rabbitmq created
+service/payments-worker created
+$ kubectl rollout status deployment/rabbitmq -n p06-04-bookstore --timeout=300s
+Waiting for deployment "rabbitmq" rollout to finish: 0 of 1 updated replicas are available...
+error: timed out waiting for the condition
+$ kubectl rollout status deployment/catalog -n p06-04-bookstore --timeout=300s
+Unable to connect to the server: EOF
+## step 1
+$ kubectl apply -f 19-payments-worker-deploy.yaml
+error: error validating "19-payments-worker-deploy.yaml": error validating data: failed to download openapi: unknown; if you choose to ignore these errors, turn validation off with --validate=false
+$ kubectl rollout status deployment/payments-worker -n p06-04-bookstore --timeout=200s
+Error from server (NotFound): deployments.apps "payments-worker" not found
+$ kubectl rollout status deployment/orders -n p06-04-bookstore --timeout=200s
+Waiting for deployment "orders" rollout to finish: 0 of 2 updated replicas are available...
+$ kubectl apply -f examples/bookstore/raw-manifests/12-redis.yaml
+Error from server (NotFound): error when creating "examples/bookstore/raw-manifests/12-redis.yaml": namespaces "bookstore" not found
+$ kubectl apply -f 12-redis.yaml
+deployment.apps/redis created
+$ kubectl rollout status deployment/redis -n p06-04-bookstore --timeout=200s
+Waiting for deployment spec update to be observed...
+Waiting for deployment spec update to be observed...
+Waiting for deployment "redis" rollout to finish: 0 out of 1 new replicas have been updated...
+Waiting for deployment "redis" rollout to finish: 0 of 1 updated replicas are available...
+deployment "redis" successfully rolled out
+$ kubectl rollout status deployment/catalog -n p06-04-bookstore --timeout=200s
+error: deployment "catalog" exceeded its progress deadline
+$ kubectl get pods -n p06-04-bookstore
+NAME                        READY   STATUS    RESTARTS   AGE
+catalog-d994db675-5bmjt     0/1     Running   0          10m
+catalog-d994db675-k6xn8     0/1     Running   0          10m
+catalog-d994db675-trjqg     0/1     Running   0          10m
+orders-798c77d4cb-vfsrg     1/1     Running   0          10m
+orders-798c77d4cb-xxc6p     1/1     Running   0          10m
+postgres-0                  1/1     Running   0          13m
+rabbitmq-5997cbcb5d-sgrv4   1/1     Running   0          10m
+redis-574bb544f-b6prm       1/1     Running   0          98s
+$ kubectl apply -f 19-payments-worker-deploy.yaml
+deployment.apps/payments-worker created
+$ kubectl rollout status deployment/payments-worker -n p06-04-bookstore --timeout=180s
+Waiting for deployment spec update to be observed...
+Waiting for deployment "payments-worker" rollout to finish: 0 out of 1 new replicas have been updated...
+Waiting for deployment "payments-worker" rollout to finish: 0 of 1 updated replicas are available...
+deployment "payments-worker" successfully rolled out
+$ kubectl apply -f 60-networkpolicy.yaml
+networkpolicy.networking.k8s.io/default-deny-all created
+networkpolicy.networking.k8s.io/allow-dns-egress created
+networkpolicy.networking.k8s.io/allow-ingress-to-http-tiers created
+networkpolicy.networking.k8s.io/allow-storefront-to-apis created
+networkpolicy.networking.k8s.io/allow-data-tier-ingress created
+networkpolicy.networking.k8s.io/allow-orders-to-rabbitmq created
+networkpolicy.networking.k8s.io/allow-backend-egress created
+networkpolicy.networking.k8s.io/allow-storefront-egress created
+networkpolicy.networking.k8s.io/allow-payments-worker-egress created
+networkpolicy.networking.k8s.io/allow-monitoring-scrape created
+## step 2
+$ kubectl apply -f 82-hpa-catalog.yaml
+horizontalpodautoscaler.autoscaling/catalog created
+$ kubectl get hpa catalog -n p06-04-bookstore
+NAME      REFERENCE            TARGETS                            MINPODS   MAXPODS   REPLICAS   AGE
+catalog   Deployment/catalog   cpu: <unknown>/70%, <unknown>/50   2         6         3          45s
+$ kubectl describe hpa catalog -n p06-04-bookstore
+Name:                                                  catalog
+Namespace:                                             p06-04-bookstore
+Labels:                                                app=catalog
+                                                       app.kubernetes.io/part-of=bookstore
+Annotations:                                           <none>
+CreationTimestamp:                                     Sat, 31 Oct 2026 06:17:42 +0500
+Reference:                                             Deployment/catalog
+Metrics:                                               ( current / target )
+  resource cpu on pods  (as a percentage of request):  <unknown> / 70%
+  "http_requests_per_second" on pods:                  <unknown> / 50
+Min replicas:                                          2
+Max replicas:                                          6
+Behavior:
+  Scale Up:
+    Stabilization Window: 60 seconds
+    Select Policy: Max
+    Policies:
+      - Type: Percent  Value: 100  Period: 60 seconds
+      - Type: Pods     Value: 2    Period: 60 seconds
+  Scale Down:
+    Stabilization Window: 300 seconds
+    Select Policy: Max
+    Policies:
+      - Type: Percent  Value: 50  Period: 60 seconds
+Deployment pods:       3 current / 0 desired
+Conditions:
+  Type           Status  Reason                   Message
+  ----           ------  ------                   -------
+  AbleToScale    True    SucceededGetScale        the HPA controller was able to get the target's current scale
+  ScalingActive  False   FailedGetResourceMetric  the HPA was unable to compute the replica count: failed to get cpu utilization: unable to get metrics for resource cpu: unable to fetch metrics from resource metrics API: the server is currently unable to handle the request (get pods.metrics.k8s.io)
+Events:
+  Type     Reason                        Age                From                       Message
+  ----     ------                        ----               ----                       -------
+  Warning  FailedGetResourceMetric       15s (x3 over 46s)  horizontal-pod-autoscaler  failed to get cpu utilization: unable to get metrics for resource cpu: unable to fetch metrics from resource metrics API: the server is currently unable to handle the request (get pods.metrics.k8s.io)
+  Warning  FailedGetPodsMetric           15s (x3 over 46s)  horizontal-pod-autoscaler  unable to get metric http_requests_per_second: unable to fetch metrics from custom metrics API: no custom metrics API (custom.metrics.k8s.io) registered
+  Warning  FailedComputeMetricsReplicas  15s (x3 over 46s)  horizontal-pod-autoscaler  invalid metrics (2 invalid out of 2), first error is: failed to get cpu resource metric value: failed to get cpu utilization: unable to get metrics for resource cpu: unable to fetch metrics from resource metrics API: the server is currently unable to handle the request (get pods.metrics.k8s.io)
+$ kubectl get apiservices
+NAME                                SERVICE                                AVAILABLE                  AGE
+v1.                                 Local                                  True                       10h
+v1.admissionregistration.k8s.io     Local                                  True                       10h
+v1.apiextensions.k8s.io             Local                                  True                       10h
+v1.apps                             Local                                  True                       10h
+v1.authentication.k8s.io            Local                                  True                       10h
+v1.authorization.k8s.io             Local                                  True                       10h
+v1.autoscaling                      Local                                  True                       10h
+v1.batch                            Local                                  True                       10h
+v1.certificates.k8s.io              Local                                  True                       10h
+v1.coordination.k8s.io              Local                                  True                       10h
+v1.discovery.k8s.io                 Local                                  True                       10h
+v1.events.k8s.io                    Local                                  True                       10h
+v1.flowcontrol.apiserver.k8s.io     Local                                  True                       10h
+v1.gateway.networking.k8s.io        Local                                  True                       16m
+v1.networking.k8s.io                Local                                  True                       10h
+v1.node.k8s.io                      Local                                  True                       10h
+v1.policy                           Local                                  True                       10h
+v1.rbac.authorization.k8s.io        Local                                  True                       10h
+v1.resource.k8s.io                  Local                                  True                       10h
+v1.scheduling.k8s.io                Local                                  True                       10h
+v1.storage.k8s.io                   Local                                  True                       10h
+v1.storagemigration.k8s.io          Local                                  True                       10h
+v1alpha1.hub.traefik.io             Local                                  True                       81m
+v1alpha1.traefik.io                 Local                                  True                       81m
+v1beta1.gateway.networking.k8s.io   Local                                  True                       16m
+v1beta1.metrics.k8s.io              p06-01-metrics-server/metrics-server   False (MissingEndpoints)   72s
+v2.autoscaling                      Local                                  True                       10h
+$ sh -c kubectl get --raw /metrics | grep -E '^kubernetes_feature_enabled\{name="HPAScaleToZero"' 
+kubernetes_feature_enabled{name="HPAScaleToZero",stage="BETA"} 1
+$ sh -c kubectl get --raw /metrics | grep -E '^kubernetes_feature_enabled\{name="InPlacePodVerticalScaling"' 
+kubernetes_feature_enabled{name="InPlacePodVerticalScaling",stage=""} 1
+$ kubectl auth can-i patch horizontalpodautoscalers -n p06-04-bookstore --as=system:serviceaccount:p06-04-bookstore:catalog-sa
+no
+$ kubectl auth can-i patch horizontalpodautoscalers -n p06-04-bookstore --as=system:serviceaccount:p06-04-bookstore:payments-worker-sa
+no
+$ kubectl auth can-i update deployments/scale -n p06-04-bookstore --as=system:serviceaccount:p06-04-bookstore:orders-sa
+no
+$ kubectl auth can-i list horizontalpodautoscalers -n p06-04-bookstore --as=system:serviceaccount:p06-04-bookstore:catalog-sa
+no
+$ kubectl auth can-i patch horizontalpodautoscalers -n p06-04-bookstore
+yes
+## step 3
+$ sh -c helm template keda kedacore/keda --version 2.21.0 --namespace p06-04-keda --include-crds > keda-render.yaml && grep -c '^kind:' keda-render.yaml
+29
+$ sh -c grep '^kind:' keda-render.yaml | sort | uniq -c
+   1 kind: APIService
+   4 kind: ClusterRole
+   5 kind: ClusterRoleBinding
+   6 kind: CustomResourceDefinition
+   3 kind: Deployment
+   1 kind: Role
+   2 kind: RoleBinding
+   3 kind: Service
+   3 kind: ServiceAccount
+   1 kind: ValidatingWebhookConfiguration
+$ sh -c kubectl apply --dry-run=server -f keda-render.yaml 2>&1 | tail -4
+Error from server (NotFound): error when creating "keda-render.yaml": namespaces "p06-04-keda" not found
+Error from server (NotFound): error when creating "keda-render.yaml": namespaces "p06-04-keda" not found
+Error from server (NotFound): error when creating "keda-render.yaml": namespaces "p06-04-keda" not found
+Error from server (NotFound): error when creating "keda-render.yaml": namespaces "p06-04-keda" not found
+$ sh -c kubectl apply --dry-run=server -f 83-keda-scaledobject.yaml 2>&1 | tail -4
+resource mapping not found for name: "rabbitmq-trigger-auth" namespace: "p06-04-bookstore" from "83-keda-scaledobject.yaml": no matches for kind "TriggerAuthentication" in version "keda.sh/v1alpha1"
+ensure CRDs are installed first
+resource mapping not found for name: "payments-worker" namespace: "p06-04-bookstore" from "83-keda-scaledobject.yaml": no matches for kind "ScaledObject" in version "keda.sh/v1alpha1"
+ensure CRDs are installed first
+$ sh -c kubectl apply --dry-run=server -f 19-payments-worker-deploy.yaml 2>&1 | tail -2
+deployment.apps/payments-worker unchanged (server dry run)
+$ kubectl create namespace p06-04-keda
+namespace/p06-04-keda created
+$ sh -c kubectl apply --dry-run=server -f keda-render.yaml 2>&1 | tail -30
+serviceaccount/keda-operator created (server dry run)
+serviceaccount/keda-metrics-server created (server dry run)
+serviceaccount/keda-webhook created (server dry run)
+customresourcedefinition.apiextensions.k8s.io/cloudeventsources.eventing.keda.sh created (server dry run)
+customresourcedefinition.apiextensions.k8s.io/clustercloudeventsources.eventing.keda.sh created (server dry run)
+customresourcedefinition.apiextensions.k8s.io/clustertriggerauthentications.keda.sh created (server dry run)
+customresourcedefinition.apiextensions.k8s.io/scaledobjects.keda.sh created (server dry run)
+customresourcedefinition.apiextensions.k8s.io/triggerauthentications.keda.sh created (server dry run)
+clusterrole.rbac.authorization.k8s.io/keda-operator created (server dry run)
+clusterrole.rbac.authorization.k8s.io/keda-operator-minimal-cluster-role created (server dry run)
+clusterrole.rbac.authorization.k8s.io/keda-operator-external-metrics-reader created (server dry run)
+clusterrole.rbac.authorization.k8s.io/keda-operator-webhook created (server dry run)
+clusterrolebinding.rbac.authorization.k8s.io/keda-operator created (server dry run)
+clusterrolebinding.rbac.authorization.k8s.io/keda-operator-minimal created (server dry run)
+clusterrolebinding.rbac.authorization.k8s.io/keda-operator-system-auth-delegator created (server dry run)
+clusterrolebinding.rbac.authorization.k8s.io/keda-operator-hpa-controller-external-metrics created (server dry run)
+clusterrolebinding.rbac.authorization.k8s.io/keda-operator-webhook created (server dry run)
+role.rbac.authorization.k8s.io/keda-operator-certs created (server dry run)
+rolebinding.rbac.authorization.k8s.io/keda-operator-certs created (server dry run)
+rolebinding.rbac.authorization.k8s.io/keda-operator-auth-reader created (server dry run)
+service/keda-operator created (server dry run)
+service/keda-operator-metrics-apiserver created (server dry run)
+service/keda-admission-webhooks created (server dry run)
+deployment.apps/keda-operator created (server dry run)
+deployment.apps/keda-operator-metrics-apiserver created (server dry run)
+deployment.apps/keda-admission-webhooks created (server dry run)
+apiservice.apiregistration.k8s.io/v1beta1.external.metrics.k8s.io created (server dry run)
+validatingwebhookconfiguration.admissionregistration.k8s.io/keda-admission created (server dry run)
+The CustomResourceDefinition "scaledjobs.keda.sh" is invalid: metadata.annotations: Too long: may not be more than 262144 bytes
+$ kubectl delete namespace p06-04-keda --wait=true
+namespace "p06-04-keda" deleted
+## after step 3: pod logs and the rendered KEDA security contexts
+$ kubectl logs -n p06-04-bookstore deploy/payments-worker --tail=5
+{"time":"2026-10-31T01:16:50.927332267Z","level":"INFO","msg":"payments-worker health server listening","addr":":8080"}
+{"time":"2026-10-31T01:16:51.837100283Z","level":"INFO","msg":"consuming queue","queue":"orders"}
+$ kubectl logs -n p06-04-bookstore deploy/orders --tail=3
+Found 2 pods, using pod/orders-798c77d4cb-vfsrg
+{"time":"2026-10-31T01:07:16.077283941Z","level":"INFO","msg":"postgres configured"}
+{"time":"2026-10-31T01:07:16.078833493Z","level":"INFO","msg":"AMQP_URL unset; order events will not be published"}
+{"time":"2026-10-31T01:07:16.081538051Z","level":"INFO","msg":"orders listening","addr":":8080"}
+$ python keda-ctx.py
+keda-operator pod: {'runAsNonRoot': True}
+    keda-operator container: {'allowPrivilegeEscalation': False, 'capabilities': {'drop': ['ALL']}, 'readOnlyRootFilesystem': True, 'seccompProfile': {'type': 'RuntimeDefault'}}
+keda-operator-metrics-apiserver pod: {'runAsNonRoot': True}
+    keda-operator-metrics-apiserver container: {'allowPrivilegeEscalation': False, 'capabilities': {'drop': ['ALL']}, 'readOnlyRootFilesystem': True, 'seccompProfile': {'type': 'RuntimeDefault'}}
+keda-admission-webhooks pod: {'runAsNonRoot': True}
+    keda-admission-webhooks container: {'allowPrivilegeEscalation': False, 'capabilities': {'drop': ['ALL']}, 'readOnlyRootFilesystem': True, 'seccompProfile': {'type': 'RuntimeDefault'}}
+## cleanup
+$ kubectl delete namespace p06-04-bookstore --wait=false
+namespace "p06-04-bookstore" deleted
+$ kubectl get ns p06-04-bookstore p06-04-keda
+NAME               STATUS        AGE
+p06-04-bookstore   Terminating   27m
+p06-04-keda        Terminating   10m
+$ kubectl get priorityclass bookstore-critical bookstore-data bookstore-batch
+NAME                 VALUE     GLOBAL-DEFAULT   AGE     PREEMPTIONPOLICY
+bookstore-critical   100000    false            3h21m   PreemptLowerPriority
+bookstore-data       1000000   false            3h21m   PreemptLowerPriority
+bookstore-batch      1000      false            3h21m   Never
+$ kubectl get pods -A
+NAMESPACE               NAME                                                        READY   STATUS              RESTARTS         AGE
+kube-system             coredns-559f6c778d-77g29                                    1/1     Running             0                11h
+kube-system             coredns-559f6c778d-xmmqq                                    1/1     Running             0                11h
+kube-system             etcd-sf-pilot-control-plane                                 1/1     Running             0                11h
+kube-system             kindnet-8659k                                               1/1     Running             0                11h
+kube-system             kube-apiserver-sf-pilot-control-plane                       1/1     Running             2 (20m ago)      11h
+kube-system             kube-controller-manager-sf-pilot-control-plane              1/1     Running             32 (9m28s ago)   11h
+kube-system             kube-proxy-pb9p9                                            1/1     Running             0                11h
+kube-system             kube-scheduler-sf-pilot-control-plane                       1/1     Running             31 (9m21s ago)   11h
+local-path-storage      local-path-provisioner-75f7fc7dc5-94msl                     1/1     Running             0                10h
+p02-02-bookstore        catalog-6d5cbbd6f-8q52h                                     0/1     Running             0                2m7s
+p02-02-bookstore        catalog-6d5cbbd6f-sgcl2                                     0/1     Running             0                2m8s
+p02-02-bookstore        catalog-6d5cbbd6f-ztbd2                                     0/1     Running             0                2m7s
+p02-02-bookstore        postgres-0                                                  0/1     Running             1 (95s ago)      6m22s
+p02-02-bookstore        redis-574bb544f-6jk7g                                       1/1     Running             0                2m9s
+p02-05-bookstore        catalog-fd56cf48-c5qql                                      1/1     Running             0                4m47s
+p02-05-bookstore        catalog-fd56cf48-lgvdx                                      1/1     Running             0                4m49s
+p02-05-bookstore        catalog-fd56cf48-v9cj2                                      1/1     Running             0                4m47s
+p02-05-bookstore        db-migrate-fqvtc                                            0/1     Completed           0                6m20s
+p02-05-bookstore        orders-5dd7dc7497-2fh58                                     1/1     Running             0                4m40s
+p02-05-bookstore        orders-5dd7dc7497-gpwcw                                     1/1     Running             0                4m42s
+p02-05-bookstore        postgres-0                                                  1/1     Running             0                10m
+p02-05-bookstore        redis-574bb544f-hfpzs                                       1/1     Running             0                4m51s
+p02-05-bookstore        storefront-76cbb89847-vtmmr                                 1/1     Running             0                4m43s
+p02-05-bookstore        storefront-76cbb89847-w8mnc                                 1/1     Running             0                4m42s
+p02-05-traefik          traefik-85669b6b7d-n9l82                                    1/1     Running             0                3m1s
+p05-capstone            catalog-68cfbbbd54-26czm                                    0/1     Running             0                6m18s
+p05-capstone            catalog-68cfbbbd54-jltqm                                    0/1     Running             0                6m21s
+p05-capstone            catalog-68cfbbbd54-mf7t8                                    0/1     Running             0                6m18s
+p05-capstone            db-migrate-f79bs                                            1/1     Running             0                6m23s
+p05-capstone            postgres-0                                                  1/1     Running             2 (52s ago)      6m21s
+p06-01-metrics-server   metrics-server-c4994bc54-b2jpz                              0/1     Running             0                12m
+p06-01-monitoring       kube-prometheus-stack-grafana-57d9867647-8k7lj              0/3     ContainerCreating   0                31s
+p06-01-monitoring       kube-prometheus-stack-kube-state-metrics-78dc75b868-q5slq   0/1     ContainerCreating   0                31s
+p06-01-monitoring       kube-prometheus-stack-operator-dbf7f9444-wlldg              0/1     ContainerCreating   0                32s
+p06-01-monitoring       kube-prometheus-stack-prometheus-node-exporter-q62gt        0/1     ContainerCreating   0                32s
+p06-02-bookstore        catalog-58bfcfdc9c-dn9mh                                    0/1     Running             0                16m
+p06-02-bookstore        catalog-58bfcfdc9c-gmlz7                                    0/1     Running             0                16m
+p06-02-bookstore        catalog-58bfcfdc9c-hpd9h                                    0/1     Running             0                16m
+p06-02-bookstore        orders-546bb95ddb-7kf4k                                     1/1     Running             0                15m
+p06-02-bookstore        orders-546bb95ddb-jj9jk                                     1/1     Running             0                16m
+p06-02-bookstore        postgres-0                                                  1/1     Running             0                16m
+p06-03-bookstore        span-sender                                                 0/1     Pending             0                3s
+p06-03-tracing          otel-collector-opentelemetry-collector-845d6f9dfc-dnkjs     1/1     Running             0                3m18s
+p06-03-tracing          tempo-0                                                     1/1     Running             0                3m9s
+p06-04-bookstore        catalog-d994db675-5bmjt                                     1/1     Running             0                25m
+p06-04-bookstore        catalog-d994db675-k6xn8                                     1/1     Running             0                25m
+p06-04-bookstore        catalog-d994db675-trjqg                                     1/1     Running             0                25m
+p06-04-bookstore        orders-798c77d4cb-vfsrg                                     1/1     Running             0                24m
+p06-04-bookstore        orders-798c77d4cb-xxc6p                                     1/1     Running             0                24m
+p06-04-bookstore        payments-worker-8549498bd8-g42cp                            1/1     Running             0                13m
+p06-04-bookstore        postgres-0                                                  1/1     Running             0                27m
+p06-04-bookstore        rabbitmq-5997cbcb5d-sgrv4                                   1/1     Running             0                24m
+p06-04-bookstore        redis-574bb544f-b6prm                                       1/1     Running             0                15m
+p06-05-bookstore-2      postgres-0                                                  0/1     Running             1 (99s ago)      6m22s
+$ kubectl get pods -A
+NAMESPACE               NAME                                                        READY   STATUS              RESTARTS         AGE
+kube-system             coredns-559f6c778d-77g29                                    1/1     Running             0                11h
+kube-system             coredns-559f6c778d-xmmqq                                    1/1     Running             0                11h
+kube-system             etcd-sf-pilot-control-plane                                 1/1     Running             0                11h
+kube-system             kindnet-8659k                                               1/1     Running             0                11h
+kube-system             kube-apiserver-sf-pilot-control-plane                       1/1     Running             2 (20m ago)      11h
+kube-system             kube-controller-manager-sf-pilot-control-plane              1/1     Running             32 (9m39s ago)   11h
+kube-system             kube-proxy-pb9p9                                            1/1     Running             0                11h
+kube-system             kube-scheduler-sf-pilot-control-plane                       1/1     Running             31 (9m32s ago)   11h
+local-path-storage      local-path-provisioner-75f7fc7dc5-94msl                     1/1     Running             0                10h
+p02-02-bookstore        catalog-6d5cbbd6f-8q52h                                     0/1     Running             0                2m18s
+p02-02-bookstore        catalog-6d5cbbd6f-sgcl2                                     0/1     Running             0                2m19s
+p02-02-bookstore        catalog-6d5cbbd6f-ztbd2                                     0/1     Running             0                2m18s
+p02-02-bookstore        postgres-0                                                  0/1     Running             1 (106s ago)     6m33s
+p02-02-bookstore        redis-574bb544f-6jk7g                                       1/1     Running             0                2m20s
+p02-05-bookstore        catalog-fd56cf48-c5qql                                      1/1     Running             0                4m58s
+p02-05-bookstore        catalog-fd56cf48-lgvdx                                      1/1     Running             0                5m
+p02-05-bookstore        catalog-fd56cf48-v9cj2                                      1/1     Running             0                4m58s
+p02-05-bookstore        db-migrate-fqvtc                                            0/1     Completed           0                6m31s
+p02-05-bookstore        orders-5dd7dc7497-2fh58                                     1/1     Running             0                4m51s
+p02-05-bookstore        orders-5dd7dc7497-gpwcw                                     1/1     Running             0                4m53s
+p02-05-bookstore        postgres-0                                                  1/1     Running             0                10m
+p02-05-bookstore        redis-574bb544f-hfpzs                                       1/1     Running             0                5m2s
+p02-05-bookstore        storefront-76cbb89847-vtmmr                                 1/1     Running             0                4m54s
+p02-05-bookstore        storefront-76cbb89847-w8mnc                                 1/1     Running             0                4m53s
+p02-05-traefik          traefik-85669b6b7d-n9l82                                    1/1     Running             0                3m12s
+p05-capstone            catalog-68cfbbbd54-26czm                                    0/1     Running             0                6m29s
+p05-capstone            catalog-68cfbbbd54-jltqm                                    0/1     Running             0                6m32s
+p05-capstone            catalog-68cfbbbd54-mf7t8                                    0/1     Running             0                6m29s
+p05-capstone            db-migrate-f79bs                                            1/1     Running             0                6m34s
+p05-capstone            postgres-0                                                  1/1     Running             2 (63s ago)      6m32s
+p06-01-metrics-server   metrics-server-c4994bc54-b2jpz                              0/1     Running             0                12m
+p06-01-monitoring       kube-prometheus-stack-grafana-57d9867647-8k7lj              0/3     ContainerCreating   0                42s
+p06-01-monitoring       kube-prometheus-stack-kube-state-metrics-78dc75b868-q5slq   0/1     ContainerCreating   0                42s
+p06-01-monitoring       kube-prometheus-stack-operator-dbf7f9444-wlldg              0/1     ContainerCreating   0                43s
+p06-01-monitoring       kube-prometheus-stack-prometheus-node-exporter-q62gt        0/1     ContainerCreating   0                43s
+p06-02-bookstore        catalog-58bfcfdc9c-dn9mh                                    0/1     Running             0                16m
+p06-02-bookstore        catalog-58bfcfdc9c-gmlz7                                    0/1     Running             0                16m
+p06-02-bookstore        catalog-58bfcfdc9c-hpd9h                                    0/1     Running             0                16m
+p06-02-bookstore        orders-546bb95ddb-7kf4k                                     1/1     Running             0                16m
+p06-02-bookstore        orders-546bb95ddb-jj9jk                                     1/1     Running             0                16m
+p06-02-bookstore        postgres-0                                                  1/1     Running             0                16m
+p06-03-bookstore        span-sender                                                 0/1     ContainerCreating   0                14s
+p06-03-tracing          otel-collector-opentelemetry-collector-845d6f9dfc-dnkjs     1/1     Running             0                3m29s
+p06-03-tracing          tempo-0                                                     1/1     Running             0                3m20s
+p06-04-bookstore        catalog-d994db675-5bmjt                                     1/1     Running             0                25m
+p06-04-bookstore        catalog-d994db675-k6xn8                                     1/1     Running             0                25m
+p06-04-bookstore        catalog-d994db675-trjqg                                     1/1     Running             0                25m
+p06-04-bookstore        orders-798c77d4cb-vfsrg                                     1/1     Running             0                25m
+p06-04-bookstore        orders-798c77d4cb-xxc6p                                     1/1     Running             0                25m
+p06-04-bookstore        payments-worker-8549498bd8-g42cp                            1/1     Running             0                13m
+p06-04-bookstore        postgres-0                                                  1/1     Running             0                27m
+p06-04-bookstore        rabbitmq-5997cbcb5d-sgrv4                                   1/1     Running             0                25m
+p06-04-bookstore        redis-574bb544f-b6prm                                       1/1     Running             0                16m
+p06-05-bookstore-2      postgres-0                                                  0/1     Running             1 (110s ago)     6m33s
+$ sh -c kubectl get ns p06-04-bookstore -o jsonpath='{.status.conditions[?(@.status=="True")].type}' 2>&1; echo
+
+$ kubectl get apiservice v1beta1.metrics.k8s.io
+NAME                     SERVICE                                AVAILABLE                  AGE
+v1beta1.metrics.k8s.io   p06-01-metrics-server/metrics-server   False (MissingEndpoints)   13m
+$ kubectl delete deploy,sts,job,svc,hpa,networkpolicy,pdb --all -n p06-04-bookstore --wait=false
+deployment.apps "catalog" deleted from p06-04-bookstore namespace
+deployment.apps "orders" deleted from p06-04-bookstore namespace
+E1031 06:33:02.754976   76059 reflector.go:227] "Failed to watch" err="namespaces \"p06-04-keda\" is forbidden: User \"kubernetes-admin\" cannot watch resource \"namespaces\" in API group \"\" at the cluster scope - error from a previous attempt: EOF" reflector="k8s.io/client-go/tools/watch/informerwatcher.go:162" type="*unstructured.Unstructured"
+Error from server: etcdserver: request timed out
+Error from server (Timeout): Timeout: request did not complete within requested timeout - context deadline exceeded
+Error from server (Timeout): Timeout: request did not complete within requested timeout - context deadline exceeded
+[Get "https://127.0.0.1:<port>/apis/apps/v1/namespaces/p06-04-bookstore/statefulsets": EOF, Get "https://127.0.0.1:<port>/apis/batch/v1/namespaces/p06-04-bookstore/jobs": EOF, services is forbidden: User "kubernetes-admin" cannot list resource "services" in API group "" in the namespace "p06-04-bookstore", horizontalpodautoscalers.autoscaling is forbidden: User "kubernetes-admin" cannot list resource "horizontalpodautoscalers" in API group "autoscaling" in the namespace "p06-04-bookstore": rbac: RBAC: [clusterrole.rbac.authorization.k8s.io "cluster-admin" not found, clusterrole.rbac.authorization.k8s.io "system:discovery" not found, clusterrole.rbac.authorization.k8s.io "system:public-info-viewer" not found, clusterrole.rbac.authorization.k8s.io "system:basic-user" not found], networkpolicies.networking.k8s.io is forbidden: User "kubernetes-admin" cannot list resource "networkpolicies" in API group "networking.k8s.io" in the namespace "p06-04-bookstore": rbac: RBAC: [clusterrole.rbac.authorization.k8s.io "system:public-info-viewer" not found, clusterrole.rbac.authorization.k8s.io "system:basic-user" not found, clusterrole.rbac.authorization.k8s.io "cluster-admin" not found, clusterrole.rbac.authorization.k8s.io "system:discovery" not found]]
+$ kubectl get pods -n p06-04-bookstore
+NAME                               READY   STATUS        RESTARTS   AGE
+catalog-d994db675-5bmjt            1/1     Terminating   0          28m
+catalog-d994db675-k6xn8            1/1     Terminating   0          28m
+catalog-d994db675-trjqg            1/1     Terminating   0          28m
+orders-798c77d4cb-vfsrg            1/1     Terminating   0          28m
+orders-798c77d4cb-xxc6p            1/1     Terminating   0          28m
+payments-worker-8549498bd8-g42cp   1/1     Terminating   0          16m
+postgres-0                         1/1     Running       0          31m
+rabbitmq-5997cbcb5d-sgrv4          1/1     Running       0          28m
+redis-574bb544f-b6prm              1/1     Running       0          19m
+$ kubectl get ns p06-04-bookstore p06-04-keda
+NAME               STATUS        AGE
+p06-04-bookstore   Terminating   31m
+p06-04-keda        Terminating   13m
+## rbac check, run after cleanup began
+$ for sa in catalog-sa payments-worker-sa orders-sa; do echo "$sa patch-hpa: $(kubectl auth can-i patch horizontalpodautoscalers -n p06-04-bookstore --as=system:serviceaccount:p06-04-bookstore:$sa)"; done; echo "orders-sa update-deployment-scale: $(kubectl auth can-i update deployments/scale -n p06-04-bookstore --as=system:serviceaccount:p06-04-bookstore:orders-sa)"
+catalog-sa patch-hpa: no
+payments-worker-sa patch-hpa: no
+orders-sa patch-hpa: no
+orders-sa update-deployment-scale: no
+E1031 06:38:36.367186   76059 reflector.go:227] "Failed to watch" err="namespaces \"p06-04-keda\" is forbidden: User \"kubernetes-admin\" cannot watch resource \"namespaces\" in API group \"\" at the cluster scope" reflector="k8s.io/client-go/tools/watch/informerwatcher.go:162" type="*unstructured.Unstructured"
