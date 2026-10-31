@@ -1,0 +1,169 @@
+# Bookstore Platform v2 - Part 13 ch.08: the Kafka identities of the ML loop,
+# and the ESO copies its workloads mount. The drift detector reads
+# ml.predictions and writes ml.drift; the Argo Events EventSource reads
+# ml.drift. Each is a KafkaUser with a TLS certificate and simple ACLs on the
+# TLS listener in kafka/cluster.yaml (13.05). A principal with no rule gets no
+# access, so a leaked detector certificate cannot publish a fake drift event
+# to any other topic.
+#
+# The User Operator writes each user's secret into kafka-system. The ML
+# namespace cannot mount it, so a SecretStore of the kubernetes provider reads
+# only the two named secrets, through the Role below. This is the pattern
+# payments/stripe-eso-externalsecret.yaml uses (13.06).
+#
+# !!! CRD-INTRINSIC DRY-RUN
+#   KafkaUser, SecretStore and ExternalSecret need Strimzi and ESO. Without
+#   them a dry-run prints "no matches for kind ..." and that is EXPECTED.
+#
+# Apply:
+#   kubectl apply -f examples/bookstore-platform/ml/kafka-users.yaml
+---
+apiVersion: kafka.strimzi.io/v1beta2
+kind: KafkaUser
+metadata:
+  name: alibi-detect
+  namespace: kafka-system
+  labels:
+    strimzi.io/cluster: bookstore-platform-kafka
+    app.kubernetes.io/part-of: bookstore-platform
+    app.kubernetes.io/component: ml-drift
+spec:
+  authentication:
+    type: tls
+  authorization:
+    type: simple
+    acls:
+      - resource: { type: topic, name: ml.predictions, patternType: literal }
+        operations: [Describe, Read]
+        type: allow
+      - resource: { type: group, name: alibi-detect, patternType: literal }
+        operations: [Read]
+        type: allow
+      - resource: { type: topic, name: ml.drift, patternType: literal }
+        operations: [Describe, Write]
+        type: allow
+---
+apiVersion: kafka.strimzi.io/v1beta2
+kind: KafkaUser
+metadata:
+  name: argo-events-drift
+  namespace: kafka-system
+  labels:
+    strimzi.io/cluster: bookstore-platform-kafka
+    app.kubernetes.io/part-of: bookstore-platform
+    app.kubernetes.io/component: ml-drift-trigger
+spec:
+  authentication:
+    type: tls
+  authorization:
+    type: simple
+    acls:
+      - resource: { type: topic, name: ml.drift, patternType: literal }
+        operations: [Describe, Read]
+        type: allow
+      - resource: { type: group, name: argo-events-drift, patternType: literal }
+        operations: [Read]
+        type: allow
+---
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: ml-kafka-reader
+  namespace: bookstore-platform-ml
+  labels:
+    app.kubernetes.io/part-of: bookstore-platform
+    app.kubernetes.io/component: ml-secrets
+automountServiceAccountToken: false
+---
+# The Role names the two secrets this store may read, and nothing else in
+# kafka-system (the Stripe and broker secrets stay out of reach).
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: ml-kafka-secrets-reader
+  namespace: kafka-system
+  labels:
+    app.kubernetes.io/part-of: bookstore-platform
+rules:
+  - apiGroups: [""]
+    resources: ["secrets"]
+    resourceNames: ["alibi-detect", "argo-events-drift"]
+    verbs: ["get"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: ml-kafka-secrets-reader
+  namespace: kafka-system
+  labels:
+    app.kubernetes.io/part-of: bookstore-platform
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: Role
+  name: ml-kafka-secrets-reader
+subjects:
+  - kind: ServiceAccount
+    name: ml-kafka-reader
+    namespace: bookstore-platform-ml
+---
+apiVersion: external-secrets.io/v1beta1
+kind: SecretStore
+metadata:
+  name: ml-kafka-secrets
+  namespace: bookstore-platform-ml
+  labels:
+    app.kubernetes.io/part-of: bookstore-platform
+    app.kubernetes.io/component: ml-secrets
+spec:
+  provider:
+    kubernetes:
+      remoteNamespace: kafka-system
+      server:
+        url: "https://kubernetes.default.svc"
+        caProvider:
+          type: ConfigMap
+          name: kube-root-ca.crt
+          key: ca.crt
+      auth:
+        serviceAccount:
+          name: ml-kafka-reader
+---
+apiVersion: external-secrets.io/v1beta1
+kind: ExternalSecret
+metadata:
+  name: alibi-detect-kafka
+  namespace: bookstore-platform-ml
+  labels:
+    app.kubernetes.io/part-of: bookstore-platform
+    app.kubernetes.io/component: ml-drift
+spec:
+  refreshInterval: 1h
+  secretStoreRef:
+    name: ml-kafka-secrets
+    kind: SecretStore
+  target:
+    name: alibi-detect-kafka
+    creationPolicy: Owner
+  dataFrom:
+    - extract:
+        key: alibi-detect
+---
+apiVersion: external-secrets.io/v1beta1
+kind: ExternalSecret
+metadata:
+  name: argo-events-kafka
+  namespace: bookstore-platform-ml
+  labels:
+    app.kubernetes.io/part-of: bookstore-platform
+    app.kubernetes.io/component: ml-drift-trigger
+spec:
+  refreshInterval: 1h
+  secretStoreRef:
+    name: ml-kafka-secrets
+    kind: SecretStore
+  target:
+    name: argo-events-kafka
+    creationPolicy: Owner
+  dataFrom:
+    - extract:
+        key: argo-events-drift

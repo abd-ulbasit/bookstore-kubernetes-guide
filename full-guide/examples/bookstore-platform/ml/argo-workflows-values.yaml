@@ -1,0 +1,46 @@
+# Bookstore Platform v2 - Part 13 ch.08: values for the Argo Workflows chart.
+#
+#   helm install argo-workflows argo/argo-workflows --version 0.42.0 \
+#     -n argo -f examples/bookstore-platform/ml/argo-workflows-values.yaml
+#
+# Chart 0.42.0 runs Argo Workflows v3.5.10. Its defaults assume a `default`
+# workflow namespace and an unset executor context, so this file moves the
+# workflows into bookstore-platform-ml and sets the executor's container
+# hardening, which the restricted namespace requires on the init and wait
+# containers.
+#
+# The argo CLI submits through the Kubernetes API, so the Argo server (UI and
+# REST) stays off: one less listening pod to harden.
+
+controller:
+  # The controller watches this namespace and creates the chart's executor
+  # Role and RoleBinding in it. Nothing outside it is granted.
+  workflowNamespaces:
+    - bookstore-platform-ml
+  podSecurityContext:
+    runAsNonRoot: true
+    seccompProfile:
+      type: RuntimeDefault
+  securityContext:
+    readOnlyRootFilesystem: true
+    runAsNonRoot: true
+    allowPrivilegeEscalation: false
+    capabilities:
+      drop:
+        - ALL
+
+# The init and wait containers the executor injects into each workflow pod.
+executor:
+  securityContext:
+    runAsNonRoot: true
+    runAsUser: 65532
+    allowPrivilegeEscalation: false
+    readOnlyRootFilesystem: true
+    seccompProfile:
+      type: RuntimeDefault
+    capabilities:
+      drop:
+        - ALL
+
+server:
+  enabled: false

@@ -1,26 +1,84 @@
-# Bookstore Platform v2 — Part 13 ch.08: Argo Events EventSource + Sensor
+# Bookstore Platform v2 - Part 13 ch.08: Argo Events EventSource + Sensor
 # that watches the `ml.drift` Kafka topic and submits the
 # `recommender-train` WorkflowTemplate on threshold breach.
 #
 # Two CRs:
-#   - EventSource — declares HOW to listen (Kafka, in this case).
-#   - Sensor      — declares WHAT to do when an event arrives (submit a
+#   - EventSource - declares HOW to listen (Kafka over the TLS listener).
+#   - Sensor      - declares WHAT to do when an event arrives (submit a
 #                   Workflow, with parameters derived from the event).
 #
-# Together they close the MLOps loop: prediction -> drift -> retrain.
+# The EventSource pod never calls the Kubernetes API, so its ServiceAccount
+# has no token. The Sensor pod submits Workflows, so its ServiceAccount gets a
+# token and a Role that allows creating Workflows in this namespace and nothing
+# else.
 #
 # !!! CRD-INTRINSIC DRY-RUN
-#   `EventSource` + `Sensor` are `argoproj.io/v1alpha1` — Argo Events CRDs.
+#   `EventSource` + `Sensor` are `argoproj.io/v1alpha1` - Argo Events CRDs.
 #   WITHOUT Argo Events (and Argo Workflows for the trigger) installed:
 #     no matches for kind "EventSource" in version "argoproj.io/v1alpha1"
 #     no matches for kind "Sensor"      in version "argoproj.io/v1alpha1"
 #   EXPECTED. Install Argo Events via pinned-Helm (chapter §Hands-on).
 #
-# Apply (after Argo Events + Argo Workflows + `kafka/` + the training
+# Apply (after Argo Events + Argo Workflows + kafka-users.yaml + the training
 # workflow template):
 #   kubectl apply -f examples/bookstore-platform/ml/argo-events-drift-trigger.yaml
 ---
-# EventSource: watch ml.drift topic.
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: argo-events-drift-source
+  namespace: bookstore-platform-ml
+  labels:
+    app.kubernetes.io/part-of: bookstore-platform
+    app.kubernetes.io/component: ml-drift-trigger
+automountServiceAccountToken: false
+---
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: argo-events-drift-sensor
+  namespace: bookstore-platform-ml
+  labels:
+    app.kubernetes.io/part-of: bookstore-platform
+    app.kubernetes.io/component: ml-drift-trigger
+automountServiceAccountToken: true
+---
+# The sensor may create Workflows in this namespace and read the template it
+# names. It cannot touch pods, secrets or other Workflows.
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: argo-events-drift-sensor
+  namespace: bookstore-platform-ml
+  labels:
+    app.kubernetes.io/part-of: bookstore-platform
+rules:
+  - apiGroups: ["argoproj.io"]
+    resources: ["workflows"]
+    verbs: ["create"]
+  - apiGroups: ["argoproj.io"]
+    resources: ["workflowtemplates"]
+    resourceNames: ["recommender-train"]
+    verbs: ["get"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: argo-events-drift-sensor
+  namespace: bookstore-platform-ml
+  labels:
+    app.kubernetes.io/part-of: bookstore-platform
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: Role
+  name: argo-events-drift-sensor
+subjects:
+  - kind: ServiceAccount
+    name: argo-events-drift-sensor
+    namespace: bookstore-platform-ml
+---
+# EventSource: watch ml.drift on the TLS listener, with the KafkaUser
+# certificate from the argo-events-kafka Secret (kafka-users.yaml).
 apiVersion: argoproj.io/v1alpha1
 kind: EventSource
 metadata:
@@ -30,11 +88,33 @@ metadata:
     app.kubernetes.io/part-of: bookstore-platform
     app.kubernetes.io/component: ml-drift-trigger
 spec:
+  template:
+    serviceAccountName: argo-events-drift-source
+    securityContext:
+      runAsNonRoot: true
+      runAsUser: 65532
+      runAsGroup: 65532
+      fsGroup: 65532
+      seccompProfile:
+        type: RuntimeDefault
+    container:
+      securityContext:
+        allowPrivilegeEscalation: false
+        readOnlyRootFilesystem: true
+        capabilities:
+          drop: ["ALL"]
+      resources:
+        requests: { cpu: 50m, memory: 64Mi }
+        limits: { memory: 128Mi }
   kafka:
     drift-events:
-      url: bookstore-platform-kafka-kafka-bootstrap.kafka-system.svc.cluster.local:9092
+      url: bookstore-platform-kafka-kafka-bootstrap.kafka-system.svc.cluster.local:9093
       topic: ml.drift
-      # `partition` removed — Argo Events with a `consumerGroup` consumes
+      tls:
+        caCertSecret: { name: argo-events-kafka, key: ca.crt }
+        clientCertSecret: { name: argo-events-kafka, key: user.crt }
+        clientKeySecret: { name: argo-events-kafka, key: user.key }
+      # `partition` removed - Argo Events with a `consumerGroup` consumes
       # ALL partitions of the topic (group assignment via the broker's
       # protocol). A hardcoded partition: "0" would have ignored 2/3 of
       # the drift events on the 3-partition topic.
@@ -54,6 +134,24 @@ metadata:
     app.kubernetes.io/part-of: bookstore-platform
     app.kubernetes.io/component: ml-drift-trigger
 spec:
+  template:
+    serviceAccountName: argo-events-drift-sensor
+    securityContext:
+      runAsNonRoot: true
+      runAsUser: 65532
+      runAsGroup: 65532
+      fsGroup: 65532
+      seccompProfile:
+        type: RuntimeDefault
+    container:
+      securityContext:
+        allowPrivilegeEscalation: false
+        readOnlyRootFilesystem: true
+        capabilities:
+          drop: ["ALL"]
+      resources:
+        requests: { cpu: 50m, memory: 64Mi }
+        limits: { memory: 128Mi }
   dependencies:
     - name: drift-event
       eventSourceName: ml-drift-eventsource
@@ -97,13 +195,13 @@ spec:
                       value: "recommender-drift-retrain"
                     - name: min-eval-score
                       value: "0.45"
-          # Map the drift event's payload onto the Workflow parameters via
-          # `parameters[]`. Two examples — production maps the feature
-          # name + KS statistic into a custom param the train.py can use
-          # to bias the training run (e.g. "this feature drifted —
-          # upweight it"). The chapter walks this.
+                    - name: drift-feature
+                      value: ""
+          # Map the drift event's payload onto the Workflow parameters. The
+          # feature name lands in the drift-feature argument (index 3, the
+          # fourth parameter above). The train step does not read it yet.
           parameters:
             - src:
                 dependencyName: drift-event
                 dataKey: body.feature
-              dest: spec.arguments.parameters.2.value.feature
+              dest: spec.arguments.parameters.3.value

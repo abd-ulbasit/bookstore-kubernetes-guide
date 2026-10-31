@@ -47,8 +47,8 @@ v2 wires the full loop with the production-shape components:
 - **Argo Workflows** — the training engine (Part 12 ch.07 — re-used,
   not re-taught).
 - **KServe** — the predictor with traffic split + canary (Part 12
-  ch.06 — re-used; the chapter adds the **MLflow storage URI**
-  + the canary metric gate).
+  ch.06, re-used; the chapter adds the promote step that writes the
+  production artifact path into `storageUri`, and the canary gate).
 - **Alibi-Detect** — the drift detector. Kolmogorov-Smirnov over a
   sliding window of predictions.
 - **Argo Events** — the EventSource + Sensor that watches the drift
@@ -82,10 +82,11 @@ typed artifact is queryable.**
   `staging` alias on the new version. Production promotion is a
   **separate** Workflow that requires a human approval (the
   GitHub-PR-as-approval pattern).
-- **Station 3: Serve (KServe).** A KServe `InferenceService` carries
-  `storageUri: models://recommender/production`. KServe's
-  MLflow storage initializer resolves the alias to a versioned S3
-  artifact path at start; the predictor loads `model.joblib`.
+- **Station 3: Serve (KServe).** A KServe `InferenceService` carries a
+  plain `s3://` `storageUri`. KServe does not resolve MLflow aliases, so
+  the promote step asks MLflow for the production version's artifact path
+  and writes it into `storageUri`. KServe downloads the artifact and the
+  predictor loads `model.joblib`.
   Traffic split: 90 % `production` / 10 % `staging` on subsequent rolls
   via the `canaryTrafficPercent` field.
 - **Station 4: Monitor (Alibi-Detect).** A Deployment running the
@@ -108,6 +109,23 @@ different books). Reference window must be **per-season** or per-
 data" will cause runaway retraining. The chapter walks the seasonal
 reference pattern.
 
+## Threats and controls
+
+A `model.joblib` is a Python pickle. Loading it runs code its author chose,
+so a model artifact is code, not data. Part 12 ch.06 covers the serving
+path that loads it; the loading risk is stated here because that chapter
+does not state it.
+
+| Threat | Control in this chapter | Goes deeper in |
+|---|---|---|
+| A tampered `model.joblib` runs code when the predictor loads it | Restricted predictor pod with no token; write access to the artifact bucket granted to the training identity only | Part 12 ch.06 (serving) |
+| Unreviewed promotion to production | Training moves the `staging` alias only; `production` moves in a reviewed change | 13.11 (approval flow) |
+| Forged or flooding drift events trigger retrains | Per-principal KafkaUser ACLs on the TLS listener; the Sensor filters on `p_value` and holds a Role for Workflows only | 13.05 (Kafka ACLs), 13.12 (runbook) |
+| Anyone who reaches MLflow rewrites the registry | MLflow basic auth on; both credentials synced from Vault by ESO | 13.06 (ESO), 13.04 (identity) |
+
+This chapter does not sign artifacts. Check that the predictor cannot write
+the bucket, and that only the training identity can.
+
 ## Diagrams
 
 ### Diagram A — the 5-station loop (Mermaid)
@@ -124,7 +142,7 @@ flowchart LR
     end
 
     subgraph s3srv["3. Serve (KServe)"]
-      isvc["InferenceService<br/>storageUri:<br/>models://recommender/production<br/>canaryTrafficPercent: 10"]
+      isvc["InferenceService<br/>storageUri:<br/>s3 path of production version<br/>canaryTrafficPercent: 10"]
       rec["recommendations API<br/>(POSTs to KServe<br/>publishes ml.predictions)"]
     end
 
@@ -142,7 +160,7 @@ flowchart LR
 
     tr_dag -->|"log artifact"| mlflow
     mlflow <-->|"upload / download"| s3art
-    mlflow -->|"resolve alias"| isvc
+    mlflow -->|"promote step writes artifact path"| isvc
     isvc -->|"v1 protocol"| rec
     rec -->|"publish each prediction"| k1
     k1 --> ad
@@ -161,7 +179,7 @@ STATION       PART 12 TAUGHT                  PART 13.08 ADDS
 ────────────  ──────────────────────────────  ─────────────────────────────────────
 1. Train      Argo WorkflowTemplate (12.07)   MLflow log_artifact + register call
 2. Register   ConfigMap stamp (12.07 X3c)     MLflow Model Registry + alias
-3. Serve      KServe InferenceService (12.06) models:// storage URI + canary slot
+3. Serve      KServe InferenceService (12.06) s3 storageUri set by promote + canary
 4. Monitor    (none)                          Alibi-Detect KSDrift Deployment
 5. Retrain    CronWorkflow nightly (12.07)    Argo Events EventSource + Sensor
 Honest        rule-based recommender          real loop, drift-triggered retrain
@@ -173,21 +191,54 @@ Assumes ch.13.05 ran (Strimzi + Kafka topics exist); the two ML topics
 (`ml.predictions` and `ml.drift`) are declared in `kafka/topics.yaml`
 and reconciled by Strimzi's Topic Operator.
 
+Output blocks are illustrative unless the text says they were captured.
+The two version checks below were captured on a lab cluster whose name
+differs from this chapter's; the transcript records the substitutions.
+
 ### 1. Install Argo Workflows + Argo Events (pinned-Helm)
 
 ```sh
 kubectl config use-context kind-bookstore-platform-us-east
 
-ARGO_WORKFLOWS_VERSION="0.42.0"
-ARGO_EVENTS_VERSION="2.4.0"
+ARGO_WORKFLOWS_VERSION="0.42.0"   # Argo Workflows v3.5.10
+ARGO_EVENTS_VERSION="2.4.0"       # Argo Events v1.8.0
+ML=examples/bookstore-platform/ml
 
 helm repo add argo https://argoproj.github.io/argo-helm
+helm show chart argo/argo-workflows --version "$ARGO_WORKFLOWS_VERSION" | grep -E '^(appVersion|version):'
+helm show chart argo/argo-events --version "$ARGO_EVENTS_VERSION" | grep -E '^(appVersion|version):'
+```
+
+<!-- gate: output -->
+
+```text
+appVersion: v3.5.10
+version: 0.42.0
+appVersion: v1.8.0
+version: 2.4.0
+```
+
+Each namespace is labelled `restricted` before its install, so the chart's
+pods are admitted only when they comply. The values files move the workflows
+into `bookstore-platform-ml` and turn the Argo server off (the `argo` CLI
+talks to the API directly). `training-rbac.yaml` then binds the chart's
+executor Role to the `recommender-train` ServiceAccount, in that namespace
+only. That ServiceAccount needs its
+token: the executor reports each step's result through a
+`WorkflowTaskResult`.
+
+```sh
+kubectl create namespace argo
+kubectl label namespace argo pod-security.kubernetes.io/enforce=restricted
+kubectl create namespace argo-events
+kubectl label namespace argo-events pod-security.kubernetes.io/enforce=restricted
+
 helm install argo-workflows argo/argo-workflows \
   --version "$ARGO_WORKFLOWS_VERSION" \
-  -n argo --create-namespace --wait
+  -n argo -f "$ML/argo-workflows-values.yaml" --wait
 helm install argo-events argo/argo-events \
   --version "$ARGO_EVENTS_VERSION" \
-  -n argo-events --create-namespace --wait
+  -n argo-events -f "$ML/argo-events-values.yaml" --wait
 ```
 
 (KServe + Knative + cert-manager are assumed installed from the Part 12
@@ -196,23 +247,41 @@ ch.06 hands-on; if not, follow that chapter first.)
 ### 2. Install MLflow
 
 ```sh
-# Via Argo CD Application (the GitOps path)
-kubectl apply -f examples/bookstore-platform/ml/mlflow-application.yaml
-
-# Or directly via Helm (the imperative path the chapter shows for clarity)
-MLFLOW_CHART_VERSION="0.10.0"
+MLFLOW_CHART_VERSION="0.10.0"   # community-charts/mlflow, MLflow 2.19.0
+ML=examples/bookstore-platform/ml
 
 helm repo add community-charts https://community-charts.github.io/helm-charts
+helm show chart community-charts/mlflow --version "$MLFLOW_CHART_VERSION" | grep -E '^(appVersion|version):'
+```
+
+<!-- gate: output -->
+
+```text
+appVersion: 2.19.0
+version: 0.10.0
+```
+
+The two credentials come from the ESO-managed `mlflow-credentials` Secret.
+The chart needs both as values and copies them into Secrets it owns, so
+they reach the cluster, but neither Git nor the values file holds them. The
+`--set-string` arguments put them on the command line; run this with shell
+history off.
+
+```sh
+kubectl create namespace mlflow
+kubectl label namespace mlflow pod-security.kubernetes.io/enforce=restricted
+kubectl apply -f "$ML/mlflow-credentials.yaml"
+kubectl -n mlflow wait --for=condition=Ready externalsecret/mlflow-credentials --timeout=120s
+
 helm install mlflow community-charts/mlflow \
   --version "$MLFLOW_CHART_VERSION" \
-  -n mlflow --create-namespace --wait \
-  --set 'backendStore.postgres.enabled=true' \
-  --set 'backendStore.postgres.host=bookstore-platform-cnpg-rw.cnpg-system.svc.cluster.local' \
-  --set 'backendStore.postgres.database=mlflow' \
-  --set 'backendStore.postgres.user=mlflow' \
-  --set 'backendStore.postgres.password=REPLACE-ME-VIA-ESO-NOT-IN-SOURCE' \
-  --set 'artifactRoot.s3.enabled=true' \
-  --set 'artifactRoot.s3.bucket=bookstore-platform-mlflow-us-east'
+  -n mlflow -f "$ML/mlflow-values.yaml" --wait \
+  --set-string "backendStore.postgres.password=$(kubectl -n mlflow get secret mlflow-credentials -o jsonpath='{.data.postgres-password}' | base64 -d)" \
+  --set-string "auth.adminPassword=$(kubectl -n mlflow get secret mlflow-credentials -o jsonpath='{.data.admin-password}' | base64 -d)"
+```
+
+`mlflow-application.yaml` is the GitOps shape of the same install. It leaves
+both credentials empty, so a secret-aware Argo CD plugin has to supply them.
 ```
 
 Why community-charts/mlflow (not bitnami/mlflow): community-charts is
@@ -223,22 +292,30 @@ cluster-wide. Pick one; the platform v2 picks community-charts.
 Verify:
 
 ```sh
+ADMIN_PASSWORD="$(kubectl -n mlflow get secret mlflow-credentials -o jsonpath='{.data.admin-password}' | base64 -d)"
 kubectl -n mlflow port-forward svc/mlflow 5000:5000 >/dev/null 2>&1 &
 sleep 3
-curl -s http://localhost:5000/api/2.0/mlflow/registered-models/list | jq .
+curl -s -u "mlflow-admin:$ADMIN_PASSWORD" http://localhost:5000/api/2.0/mlflow/registered-models/list | jq .
+# Illustrative output, not captured:
 # {"registered_models":[]}
 ```
 
 ### 3. Apply the training Workflow + serving InferenceService + drift detector + retrain trigger
 
 ```sh
+kubectl apply -f examples/bookstore-platform/ml/kafka-users.yaml
+kubectl apply -f examples/bookstore-platform/ml/training-rbac.yaml
 kubectl apply -f examples/bookstore-platform/ml/training-workflow.yaml
 kubectl apply -f examples/bookstore-platform/ml/inferenceservice.yaml
 kubectl apply -f examples/bookstore-platform/ml/alibi-detect-drift.yaml
 kubectl apply -f examples/bookstore-platform/ml/argo-events-drift-trigger.yaml
 ```
 
-What landed:
+`kafka-users.yaml` comes first: the drift detector and the EventSource mount
+the certificates it issues. The InferenceService's `storageUri` is a
+placeholder until step 5 writes the real path.
+
+What landed (illustrative output, not captured):
 
 ```sh
 kubectl -n bookstore-platform-ml get workflowtemplate,inferenceservice,deploy,eventsource,sensor
@@ -272,11 +349,11 @@ argo submit --from workflowtemplate/recommender-train -n bookstore-platform-ml
 kubectl -n bookstore-platform-ml get wf -w
 ```
 
-After completion (~3-5 min on kind):
+After the run completes:
 
 ```sh
 # MLflow logged the run + registered the new model version
-curl -s http://localhost:5000/api/2.0/mlflow/registered-models/get?name=recommender | jq .
+curl -s -u "mlflow-admin:$ADMIN_PASSWORD" http://localhost:5000/api/2.0/mlflow/registered-models/get?name=recommender | jq .
 # {
 #   "registered_model": {
 #     "name": "recommender",
@@ -294,25 +371,33 @@ recommended pattern: a GitHub PR that updates a `models.yaml` file
 under `examples/bookstore-platform/ml/`; the merge of the PR triggers
 an Argo CD sync that runs a small Workflow `promote-production.yaml`.
 
-A simpler kind-runnable approximation:
+The lab version runs the same calls by hand, with the admin credential:
 
 ```sh
-# Via the MLflow API directly (PROD: do this via an Argo Workflow
-# whose ServiceAccount is bound to a Vault-protected token):
-curl -s -X POST "http://localhost:5000/api/2.0/mlflow/registered-models/alias" \
+# Lab only. In production these calls run in a reviewed Workflow under its
+# own identity (see Production notes).
+curl -s -u "mlflow-admin:$ADMIN_PASSWORD" -X POST \
+  "http://localhost:5000/api/2.0/mlflow/registered-models/alias" \
   -H "Content-Type: application/json" \
   -d '{"name":"recommender","alias":"production","version":"1"}'
 
-# KServe re-resolves the alias on next pod restart.
-kubectl -n bookstore-platform-ml rollout restart inferenceservice/recommender
+# Write the production version's artifact path into the InferenceService.
+# Moving the alias alone changes nothing in serving.
+ARTIFACT_URI="$(curl -s -u "mlflow-admin:$ADMIN_PASSWORD" \
+  "http://localhost:5000/api/2.0/mlflow/model-versions/get-download-uri?name=recommender&version=1" | jq -r .artifact_uri)"
+kubectl -n bookstore-platform-ml patch inferenceservice recommender --type merge \
+  -p "{\"spec\":{\"predictor\":{\"model\":{\"storageUri\":\"$ARTIFACT_URI\"}}}}"
 ```
 
 ### 6. Generate predictions (to feed the drift detector)
 
+`EDGE_CA_FILE` is the edge CA that 13.07 exports. The loop checks the
+edge's certificate against that CA; it does not skip the check with `-k`.
+
 ```sh
 # Recommendations API (assumes ch.13.08's app/recommendations/ is deployed)
 for i in $(seq 1 1100); do
-  curl -sk -H "Authorization: Bearer $JWT" \
+  curl -s --cacert "$EDGE_CA_FILE" -H "Authorization: Bearer $JWT" \
     -X POST \
     -H "Content-Type: application/json" \
     -d "{\"user_id\":\"u-$i\",\"features\":[0.5,0.3,0.2]}" \
@@ -328,14 +413,14 @@ done
 ```sh
 # Send 200 predictions with shifted features (drift the distribution)
 for i in $(seq 1 200); do
-  curl -sk -H "Authorization: Bearer $JWT" \
+  curl -s --cacert "$EDGE_CA_FILE" -H "Authorization: Bearer $JWT" \
     -X POST \
     -H "Content-Type: application/json" \
     -d "{\"user_id\":\"u-d-$i\",\"features\":[5.0,3.0,2.0]}" \
     https://localhost:8443/api/v2/recommendations >/dev/null
 done
 
-# Watch the drift detector log
+# Watch the drift detector log (illustrative output, not captured)
 kubectl -n bookstore-platform-ml logs -l app=alibi-detect --tail=20
 # {"level":"INFO","msg":"drift detected","feature":"price","ks":0.41,"p_value":0.003}
 
@@ -365,13 +450,11 @@ The pre-2.0 API used **stages** (`None`/`Staging`/`Production`/
 multi-valued (you can have two `canary` versions) and stages are
 single-valued + capitalised + named-from-a-fixed-set. v2 uses aliases.
 
-**KServe storage initializer for MLflow.** KServe 0.12+ ships a
-`models://` URI scheme (the MLflow standard form). At Pod start, an
-init-container reads the URI, calls MLflow's API to resolve the alias
-to an S3 path, downloads the artifact, mounts it into the predictor
-container at the standard `/mnt/models` path. Authentication: an
-`mlflow-credentials` Secret (token-based) is mounted into the
-init-container; production grades that to a per-tenant token.
+**KServe storage initializer.** KServe downloads `storageUri` into
+`/mnt/models` before the predictor starts. Its built-in sources are S3,
+GCS, Azure Blob, HTTP(S), Git, PVC, Hugging Face and OCI images; it does
+not read MLflow aliases. The promote step does that resolution (Station
+3), so the predictor never holds MLflow credentials.
 
 **Canary at the InferenceService level.** KServe's
 `canaryTrafficPercent: 10` field is meaningful **only on subsequent
@@ -383,8 +466,8 @@ update lands. The flow: after the first deploy, change the
 revision and `canaryTrafficPercent: 10` routes 10 % to it (90 % stays
 on the previous revision). The two slots are distinct Knative
 Revisions (each a Deployment under the hood). A promote operation
-flips the `production` alias in MLflow; KServe restarts the
-Production-slot Pod which re-resolves to the new version.
+writes the new artifact path into `storageUri`; KServe rolls out a new
+revision for it. Moving the MLflow alias alone changes nothing in serving.
 
 **Alibi-Detect — the KS test.** Kolmogorov-Smirnov is a non-parametric
 two-sample test: given two empirical distributions (reference window
@@ -482,19 +565,22 @@ The platform v2 ships (2); (3) is covered in ch.13.11.
 ## Quick Reference
 
 ```sh
-# Install (pinned)
+# Install (pinned; label each namespace restricted first, see Hands-on)
 ARGO_WORKFLOWS_VERSION="0.42.0"
 ARGO_EVENTS_VERSION="2.4.0"
 MLFLOW_CHART_VERSION="0.10.0"
+ML=examples/bookstore-platform/ml
 
 helm repo add argo https://argoproj.github.io/argo-helm
-helm install argo-workflows argo/argo-workflows --version "$ARGO_WORKFLOWS_VERSION" -n argo --create-namespace --wait
-helm install argo-events argo/argo-events --version "$ARGO_EVENTS_VERSION" -n argo-events --create-namespace --wait
+helm install argo-workflows argo/argo-workflows --version "$ARGO_WORKFLOWS_VERSION" -n argo -f "$ML/argo-workflows-values.yaml" --wait
+helm install argo-events argo/argo-events --version "$ARGO_EVENTS_VERSION" -n argo-events -f "$ML/argo-events-values.yaml" --wait
 
 helm repo add community-charts https://community-charts.github.io/helm-charts
-helm install mlflow community-charts/mlflow --version "$MLFLOW_CHART_VERSION" -n mlflow --create-namespace --wait
+helm install mlflow community-charts/mlflow --version "$MLFLOW_CHART_VERSION" -n mlflow -f "$ML/mlflow-values.yaml" --wait   # credentials: Hands-on step 2
 
 # Apply the loop
+kubectl apply -f examples/bookstore-platform/ml/kafka-users.yaml
+kubectl apply -f examples/bookstore-platform/ml/training-rbac.yaml
 kubectl apply -f examples/bookstore-platform/ml/training-workflow.yaml
 kubectl apply -f examples/bookstore-platform/ml/inferenceservice.yaml
 kubectl apply -f examples/bookstore-platform/ml/alibi-detect-drift.yaml
@@ -503,82 +589,11 @@ kubectl apply -f examples/bookstore-platform/ml/argo-events-drift-trigger.yaml
 # Submit a training run
 argo submit --from workflowtemplate/recommender-train -n bookstore-platform-ml
 
-# Promote staging -> production (PROD: via Argo Workflow + PR)
-curl -s -X POST http://mlflow.mlflow.svc.cluster.local:5000/api/2.0/mlflow/registered-models/alias \
-  -d '{"name":"recommender","alias":"production","version":"1"}' \
-  -H "Content-Type: application/json"
+# Promote staging -> production: a reviewed change (PROD), Hands-on step 5 (lab)
 ```
 
-Minimal skeletons:
-
-```yaml
-# Argo WorkflowTemplate (sketch — full at ml/training-workflow.yaml)
-apiVersion: argoproj.io/v1alpha1
-kind: WorkflowTemplate
-metadata: { name: <NAME>, namespace: <NS> }
-spec:
-  entrypoint: pipeline
-  templates:
-    - name: pipeline
-      dag:
-        tasks:
-          - { name: train, template: train-step }
-          - { name: eval, template: eval-step, depends: train }
-          - { name: register, template: register-step, depends: eval.Succeeded }
-          - { name: promote, template: promote-step, depends: register.Succeeded }
----
-# KServe InferenceService with MLflow URI
-apiVersion: serving.kserve.io/v1beta1
-kind: InferenceService
-metadata: { name: <NAME>, namespace: <NS> }
-spec:
-  predictor:
-    model:
-      modelFormat: { name: sklearn }
-      storageUri: "models://<MODEL>/<ALIAS>"
-  canaryTrafficPercent: 10
----
-# Alibi-Detect Deployment (sketch — see ml/alibi-detect-drift.yaml)
-apiVersion: apps/v1
-kind: Deployment
-metadata: { name: alibi-detect, namespace: <NS> }
-spec:
-  template:
-    spec:
-      containers:
-        - name: alibi-detect
-          image: bookstore-platform/alibi-detect:1.0.0
-          env:
-            - { name: DRIFT_DETECTOR, value: "ks" }
-            - { name: DRIFT_P_VALUE,  value: "0.05" }
-            - { name: SLIDING_WINDOW_SIZE, value: "1000" }
----
-# Argo Events EventSource + Sensor (sketch)
-apiVersion: argoproj.io/v1alpha1
-kind: EventSource
-metadata: { name: <ES-NAME>, namespace: <NS> }
-spec:
-  kafka:
-    drift-events:
-      url: <KAFKA-BOOTSTRAP>
-      topic: ml.drift
----
-apiVersion: argoproj.io/v1alpha1
-kind: Sensor
-metadata: { name: <SEN-NAME>, namespace: <NS> }
-spec:
-  dependencies:
-    - name: drift-event
-      eventSourceName: <ES-NAME>
-      eventName: drift-events
-      filters:
-        data:
-          - { path: body.p_value, type: number, comparator: "<", value: ["0.05"] }
-  triggers:
-    - template:
-        name: submit-retrain
-        argoWorkflow: { operation: submit, ... }
-```
+The full manifests, with the baseline, are in
+`examples/bookstore-platform/ml/`. The sketches are not repeated here.
 
 Checklist (the ML loop closed when all seven are yes):
 
@@ -586,8 +601,8 @@ Checklist (the ML loop closed when all seven are yes):
       returns the recommender.
 - [ ] `recommender-train` WorkflowTemplate submits cleanly; produces a
       Staging version in MLflow.
-- [ ] KServe `InferenceService` resolves `models://recommender/production`
-      and serves at /v1/models/recommender:predict.
+- [ ] KServe `InferenceService` `storageUri` points at the production
+      artifact and serves at /v1/models/recommender:predict.
 - [ ] `canaryTrafficPercent` set; a fraction of traffic hits the staging
       slot.
 - [ ] `alibi-detect` Pod is Running; reference window loaded from MLflow.
@@ -623,7 +638,7 @@ Checklist (the ML loop closed when all seven are yes):
 4. **Why is "promote to production" a GitOps PR rather than `mlflow promote --to=Production`?**
    <details><summary>Show answer</summary>
 
-   The PR is auditable, reviewable, and tied to a commit. `mlflow promote` is a side-effect with no git trail — you can't easily rollback the cluster's state to "what was production at 14:30 yesterday." The PR's diff shows the storageUri changing from `models://recommender@123` to `models://recommender@145`, with the eval-results, drift-baseline, and a checklist (security review, perf test, rollback plan). Argo CD picks it up on merge. The same GitOps discipline applied to app code (Part 07 ch.04) applies to model versions. Human-gated, audit-trailed, reversible — three properties the MLflow CLI doesn't give you.
+   The PR is auditable, reviewable, and tied to a commit. `mlflow promote` is a side-effect with no git trail; you can't easily rollback the cluster's state to "what was production at 14:30 yesterday." The PR's diff shows the `storageUri` changing from one artifact path to another, with the eval-results, drift-baseline, and a checklist (security review, perf test, rollback plan). Argo CD picks it up on merge. The same GitOps discipline applied to app code (Part 07 ch.04) applies to model versions. Human-gated, audit-trailed, reversible; three properties the MLflow CLI doesn't give you.
 
    </details>
 
@@ -631,6 +646,21 @@ Checklist (the ML loop closed when all seven are yes):
    <details><summary>What you should see</summary>
 
    alibi-detect computes a drift score per window (sliding window of N requests). After ~the window length, the score crosses threshold and the detector emits an event (Prometheus metric `alibi_drift_score`, a Kubernetes Event, or a webhook). Detection latency depends on (a) window size — too small = noisy false positives, too large = slow detection, (b) detector algorithm — KS is fast, MMD bootstrap is slow, (c) feature dimensionality. Typical: 5-30 min detection latency for moderate drift. The metric appears on the recommender dashboard; the Sensor triggers a retrain Workflow; the loop closes within hours, not days.
+
+   </details>
+
+6. **Why must a model artifact be treated as code, and which decision
+   gates production?**
+   <details><summary>Show answer</summary>
+
+   `model.joblib` is a pickle, and loading one runs the code inside it.
+   Whoever can write the artifact bucket can ship code into the predictor,
+   so write access to that bucket is the control that matters, and only the
+   training identity should hold it. The predictor pod stays restricted and
+   tokenless, which limits what injected code can reach, but it does not stop
+   it. The `production` alias moves in a reviewed change, so a training run
+   alone cannot send a model to traffic. The reviewer approves the version and
+   the `storageUri` diff together.
 
    </details>
 

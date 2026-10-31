@@ -1,0 +1,64 @@
+# Bookstore Platform v2 - Part 13 ch.08: values for the MLflow chart, for the
+# Helm path. Same content as the `values` block in mlflow-application.yaml; keep
+# the two in step. The two credential values stay empty here: the hands-on
+# passes them on the Helm command line from the ESO-managed mlflow-credentials
+# Secret (mlflow-credentials.yaml).
+#
+#   helm install mlflow community-charts/mlflow --version 0.10.0 -n mlflow \
+#     -f examples/bookstore-platform/ml/mlflow-values.yaml
+image:
+  repository: burakince/mlflow
+  # Tag, then digest: the chart renders "<repo>:<tag>" as-is.
+  tag: "2.19.0@sha256:1ff57f23e2d2db86ea5cf094696f9fd4edb6888985158de29a1a0c3a0c9fc8af"
+backendStore:
+  # Tracking metadata: per-region CNPG `mlflow` logical DB.
+  postgres:
+    enabled: true
+    host: bookstore-platform-cnpg-rw.cnpg-system.svc.cluster.local
+    port: 5432
+    database: mlflow
+    user: mlflow
+    password: ""   # supplied at sync; see the header
+artifactRoot:
+  s3:
+    enabled: true
+    bucket: bookstore-platform-mlflow-us-east
+    path: ""
+    awsAccessKeyId: ""      # IRSA: no static keys
+    awsSecretAccessKey: ""
+auth:
+  enabled: true
+  adminUsername: mlflow-admin
+  adminPassword: ""         # supplied at sync; see the header
+serviceAccount:
+  create: true
+  # Only the MLflow server calls S3, and it uses IRSA, not the token.
+  automount: false
+  annotations:
+    eks.amazonaws.com/role-arn: "arn:aws:iam::REPLACE-ACCOUNT:role/bookstore-platform-mlflow"
+podSecurityContext:
+  runAsNonRoot: true
+  runAsUser: 65532
+  runAsGroup: 65532
+  fsGroup: 65532
+  seccompProfile:
+    type: RuntimeDefault
+securityContext:
+  allowPrivilegeEscalation: false
+  readOnlyRootFilesystem: true
+  capabilities:
+    drop: ["ALL"]
+extraVolumes:
+  - name: tmp
+    emptyDir: {}
+extraVolumeMounts:
+  - name: tmp
+    mountPath: /tmp
+serviceMonitor:
+  enabled: true
+resources:
+  requests:
+    cpu: 100m
+    memory: 256Mi
+  limits:
+    memory: 512Mi

@@ -1,32 +1,25 @@
-# Bookstore Platform v2 — Part 13 ch.08: the recommender InferenceService.
-# KServe pulls the model from MLflow Model Registry via the
-# `models://recommender/production` storageUri (the KServe standard MLflow
-# URI form). Canary rolls: change storageUri to point at `staging` after
-# the first deploy; KServe creates a second revision and routes
-# canaryTrafficPercent (10 %) to it.
+# Bookstore Platform v2 - Part 13 ch.08: the recommender InferenceService.
 #
-# v1 (Part 12 ch.06) used `pvc://` to load model.joblib from a PVC. v2
-# uses MLflow as the registry; the storage initializer fetches the model
-# from S3 (where MLflow stores artifacts) using the URI MLflow returns
-# for the named alias.
+# KServe does not resolve MLflow aliases. `storageUri` takes a plain storage
+# URI (s3:// here), so the promote step resolves the `production` alias to the
+# version's artifact path and writes that path into this field. A canary roll
+# is the same step with the `staging` version's path, and canaryTrafficPercent
+# routes a share of traffic to the new revision.
+#
+# v1 (Part 12 ch.06) used `pvc://` to load model.joblib from a PVC. v2 uses
+# MLflow as the registry; the storage initializer fetches the artifact from S3.
 #
 # !!! CRD-INTRINSIC DRY-RUN
-#   `InferenceService` is `serving.kserve.io/v1beta1` — a KServe CRD.
+#   `InferenceService` is `serving.kserve.io/v1beta1` - a KServe CRD.
 #   WITHOUT KServe (+ Knative Serving + cert-manager) installed:
 #     no matches for kind "InferenceService" in version "serving.kserve.io/v1beta1"
-#   EXPECTED. The chapter cross-refs Part 12 ch.06 for the KServe install.
+#   EXPECTED. Part 12 ch.06 installs KServe 0.13.1.
 #
-# Two predictor slots (canary deploy):
-#   - production   — `models:/recommender/Production` (alias resolved to
-#                    a model version by MLflow at start).
-#   - canary       — `models:/recommender/Staging` (gets 10 % of traffic).
-# When the canary passes the metric gate, the promote workflow flips the
-# alias and the canary slot drops to 0 %.
+# PSA - `bookstore-platform-ml` is `enforce: restricted`. The pod-level fields
+# below are the restricted set. The runtime container's own hardening comes
+# from the ServingRuntime the model format resolves to, not from this resource.
 #
-# PSA — `bookstore-platform-ml` is `enforce: restricted`. PodSpec carries
-# the restricted set; KServe propagates it into the Knative Revision.
-#
-# Apply (after KServe + MLflow + ESO-injected S3 creds):
+# Apply (after KServe, MLflow and the ESO-synced S3 read identity):
 #   kubectl apply -f examples/bookstore-platform/ml/inferenceservice.yaml
 ---
 apiVersion: serving.kserve.io/v1beta1
@@ -56,16 +49,12 @@ spec:
       fsGroup: 65532
       seccompProfile:
         type: RuntimeDefault
-    # 90 % of traffic — Production alias.
+    # The production version's artifact. Written by the promote step, never
+    # edited by hand; the path below is a placeholder.
     model:
       modelFormat:
         name: sklearn
-      # MLflow storage URI — `models://<NAME>/<ALIAS>` is the KServe
-      # standard MLflow URI form. The MLflow storage initializer
-      # resolves the alias to a versioned S3 artifact path at start.
-      # Pinned to the `production` alias here; the canary roll points
-      # at `staging` (see canaryTrafficPercent below).
-      storageUri: "models://recommender/production"
+      storageUri: "s3://bookstore-platform-mlflow-us-east/REPLACE-WITH-PRODUCTION-ARTIFACT-PATH"
       resources:
         requests:
           cpu: 100m
@@ -73,16 +62,6 @@ spec:
         limits:
           cpu: 500m
           memory: 512Mi
-      securityContext:
-        allowPrivilegeEscalation: false
-        readOnlyRootFilesystem: true
-        capabilities:
-          drop: ["ALL"]
-  # KServe's `canaryTrafficPercent` is meaningful only on SUBSEQUENT rolls
-  # (changing `storageUri`). On first apply the InferenceService has one
-  # revision and 100 % of traffic goes there; this field is read on the
-  # next storageUri update. The promote loop: change the URI to point at
-  # the `staging` alias; KServe creates a second revision and routes 10 %
-  # of traffic to it. Promote on metric gate (the chapter's promote.py +
-  # a small Argo Workflow that watches Prometheus).
-  canaryTrafficPercent: 10
+    # Share of traffic for the candidate revision after a storageUri change.
+    # KServe reads it only on that change; a first apply serves 100%.
+    canaryTrafficPercent: 10
