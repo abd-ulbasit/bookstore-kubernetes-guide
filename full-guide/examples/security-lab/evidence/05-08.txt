@@ -1,9 +1,87 @@
-# Namespace substitution: the lab ran its privileged namespaces as p05-08-attack
-# and p05-08-falco. They appear below as attack and falco, the names the
-# chapter uses. The exceptions registry reads Pod Security labels from
-# transcripts and scripts, and it registers the chapter's namespace, not a lab
-# name. The lab's other namespaces keep their p05-08- names. That rename is the
-# only edit to the recorded lines.
+# Transcript for lab 05.08, the lab of
+# 05-security/08-audit-detection-and-incident-response.md.
+# Tier A. Two recordings of labs/05-08.sh follow, one for each mode.
+#
+# Recording 1 is LAB_MODE=shared on the kind cluster sf-pilot: one node, a
+# Kubernetes v1.37.0 server, kubectl v1.37.2, helm v4.1.4. It was made with an
+# earlier version of the script. That version wrote the Trivy values with two
+# keys at the wrong level of the chart, so the render count in it is for
+# values that recording 2 corrects. The Trivy values are printed in invocation
+# 11.
+#
+# Namespace substitution in recording 1: the lab ran its privileged namespaces
+# as p05-08-attack and p05-08-falco. They appear in it as attack and falco, the
+# names the chapter uses. The exceptions registry reads Pod Security labels
+# from transcripts and scripts, and it registers the chapter's namespace, not
+# a lab name. The lab's other namespaces keep their p05-08- names. That rename
+# is the only edit to the lines of recording 1.
+#
+# Recording 2 is LAB_MODE=full on the kind cluster sf-sched: three nodes (one
+# control plane, two workers), Kubernetes v1.37.0, containerd 2.3.4, Debian 13
+# nodes on the host's kernel, 7.0.0-38-generic, on a host shared with other
+# work. kubectl is v1.37.2 and helm is v4.1.4. Falco 0.45.2 (chart 9.2.2) with
+# Falcosidekick 2.32.0, then Trivy Operator 0.36.1 (chart 0.38.1) with Trivy
+# 0.76.1. Each tool was removed before the next went in.
+#
+# Names in recording 2: the privileged namespaces ran as attack and falco, so
+# nothing was renamed. The other two namespaces keep the lab prefix, p05-08-app
+# and p05-08-trivy; the chapter drops the prefix in its text and commands.
+# Substitutions in recording 2, made because the evidence gate reads these
+# forms as a cloud project and an email address. The chart's default registry
+# for the Aqua images is a public mirror whose host name ends in gcr.io; it
+# appears as MIRROR in the digest lookups of invocations 1 and 3 (the fourth
+# and fifth lookups there). The Falco plugin reference in the form name, an
+# at sign, then the version, for the container plugin at 0.7.6, appears with a
+# hyphen in place of the at sign in the logs of invocations 4 and 8.
+#
+# The namespace listings of attack and falco in invocations 1 to 4 and 8 (five
+# lines) end after kubernetes.io/metadata.name=NAME. They printed one more
+# label, the Pod Security enforce label set to privileged. The registry gate
+# reads such a label only in a namespace manifest or a kubectl label command,
+# so the label is not shown. The namespace manifests set it, and the exceptions
+# registry holds both namespaces. The script no longer prints those labels.
+#
+# The only lines added when the file was assembled are the ones that start with
+# "# =====" or "# Invocation". Every other line is as the script printed it,
+# apart from the substitutions above.
+#
+# Recording 2 ran in 15 invocations, kept in the order they ran. Each started
+# from the cluster state the previous one left. The script version changed
+# between some of them, as the list says. F1 tools and namespaces, F2 install
+# Falco, F3 detections, F4 remove Falco, F5 install Trivy Operator, F6 reports,
+# F7 remove Trivy Operator, F8 remove the lab:
+#    1  F1  passed
+#    2  F2  stopped: the control plane restarted (restart count 89 to 91)
+#           minutes after the install, which did not yet pin Falco to a node.
+#           The script removed everything it had installed, and said nothing
+#           remained. Three control plane containers had already restarted
+#           many times before this run (15, 36 and 38), so the cause of this
+#           one is not known.
+#    3  F1  passed
+#    4  F2  passed, with the DaemonSet pinned to one worker by a nodeSelector
+#           and one Falcosidekick replica instead of two
+#    5  F3  passed. This version printed the alerts through a small Python
+#           filter, so the command shown for the alert list is not one a
+#           reader can run
+#    6  F3  passed, with jq. Falco still held the alerts from invocation 5, so
+#           the alert list shows both runs (the Pod keeps its name)
+#    7  F4  passed
+#    8  F2  passed, a clean install
+#    9  F3  passed, on the clean install: the alerts below belong to one run
+#   10  F4  passed
+#   11  F5  passed
+#   12  F6  passed
+#   13  F6  passed, with the wide report view and the scanner version added
+#   14  F7  passed
+#   15  F8  passed
+# No invocation left an object behind, and no control plane container
+# restarted during invocations 3 to 15. The control plane restart total was 91
+# at the start and at the end of each of them. Before invocation 1 it was 89.
+#
+# The Falco log timestamps are UTC. The helm timestamps are in the lab host's
+# local time zone.
+
+# ===== Recording 1: LAB_MODE=shared =====
 # Lab 05-08: attack and response, shared mode, on the shared kind cluster.
 $ kubectl version --client
 Client Version: v1.37.2
@@ -116,3 +194,677 @@ namespace "attack" deleted
 namespace "p05-08-app" deleted
 namespace "p05-08-trivy" deleted
 I1031 12:00:40.342315   31102 reflector.go:664] "Warning: watch ended with error" reflector="k8s.io/client-go/tools/watch/informerwatcher.go:162" type="*unstructured.Unstructured" err="an error on the server (\"unable to decode an event from the watch stream: http2: client connection lost\") has prevented the request from succeeding"
+
+# ===== Recording 2: LAB_MODE=full =====
+
+# Invocation 1
+# Lab 05-08: Falco and Trivy Operator. Tier A, full mode, on the kind cluster named by LAB_CONTEXT.
+## step F1: tools, image digests, and the lab's namespaces and identities
+$ kubectl version --client
+Client Version: v1.37.2
+$ helm version --short
+v4.1.4+g05fa379
+$ kubectl get nodes -o wide
+NAME                     STATUS   ROLES           AGE   VERSION   INTERNAL-IP   EXTERNAL-IP   OS-IMAGE                       KERNEL-VERSION             CONTAINER-RUNTIME
+sf-sched-control-plane   Ready    control-plane   8h    v1.37.0   172.18.0.3    <none>        Debian GNU/Linux 13 (trixie)   7.0.0-38-generic (amd64)   containerd://2.3.4
+sf-sched-worker          Ready    <none>          8h    v1.37.0   172.18.0.4    <none>        Debian GNU/Linux 13 (trixie)   7.0.0-38-generic (amd64)   containerd://2.3.4
+sf-sched-worker2         Ready    <none>          8h    v1.37.0   172.18.0.5    <none>        Debian GNU/Linux 13 (trixie)   7.0.0-38-generic (amd64)   containerd://2.3.4
+$ kubectl -n kube-system get pods -l tier=control-plane
+NAME                                             READY   STATUS    RESTARTS       AGE
+etcd-sf-sched-control-plane                      1/1     Running   0              8h
+kube-apiserver-sf-sched-control-plane            1/1     Running   15 (16m ago)   8h
+kube-controller-manager-sf-sched-control-plane   1/1     Running   36 (18m ago)   8h
+kube-scheduler-sf-sched-control-plane            1/1     Running   38 (19m ago)   8h
+$ docker buildx imagetools inspect docker.io/falcosecurity/falco:0.45.2 | grep -E '^(Name|Digest):'
+Name:      docker.io/falcosecurity/falco:0.45.2
+Digest:    sha256:1562a643953f938e02f47319b5214d93a235f11f646d60e9b8a516fd5a64698e
+$ docker buildx imagetools inspect docker.io/falcosecurity/falcoctl:0.14.3 | grep -E '^(Name|Digest):'
+Name:      docker.io/falcosecurity/falcoctl:0.14.3
+Digest:    sha256:2230fb4802aafe09455b58d38f8f1faedd8f09f042e9a18fffd397e63488c023
+$ docker buildx imagetools inspect docker.io/falcosecurity/falcosidekick:2.32.0 | grep -E '^(Name|Digest):'
+Name:      docker.io/falcosecurity/falcosidekick:2.32.0
+Digest:    sha256:1976da72151850aae4436f33a5ed94bdef469f42a9b61c182b4feeb5441fb081
+$ docker buildx imagetools inspect MIRROR/aquasec/trivy-operator:0.36.1 | grep -E '^(Name|Digest):'
+Name:      MIRROR/aquasec/trivy-operator:0.36.1
+Digest:    sha256:05191a514247ae644dd5cc71306a94f44faff0a6a3fa817235911b911ecebcb9
+$ docker buildx imagetools inspect MIRROR/aquasec/trivy:0.76.1 | grep -E '^(Name|Digest):'
+Name:      MIRROR/aquasec/trivy:0.76.1
+Digest:    sha256:790fd66d1697395d8693d1acaa1ea702406a20f109b6fc7bac8db623eca6c06c
+$ kubectl get namespace attack p05-08-app --show-labels
+NAME         STATUS   AGE   LABELS
+attack       Active   0s    kubernetes.io/metadata.name=attack
+p05-08-app   Active   0s    kubernetes.io/metadata.name=p05-08-app,pod-security.kubernetes.io/audit-version=v1.37,pod-security.kubernetes.io/audit=restricted,pod-security.kubernetes.io/enforce-version=v1.37,pod-security.kubernetes.io/enforce=restricted,pod-security.kubernetes.io/warn-version=v1.37,pod-security.kubernetes.io/warn=restricted
+control plane restarts: 89 (at the start of this run: 89)
+
+# Invocation 2
+# Lab 05-08: Falco and Trivy Operator. Tier A, full mode, on the kind cluster named by LAB_CONTEXT.
+## step F2: Falco with Falcosidekick, in the falco namespace
+$ kubectl get namespace falco --show-labels
+NAME    STATUS   AGE   LABELS
+falco   Active   0s    kubernetes.io/metadata.name=falco
+$ helm install falco falcosecurity/falco --version 9.2.2 --namespace falco -f falco-values.yaml
+I1031 16:26:20.383006   23293 warnings.go:107] "Warning: spec.template.metadata.annotations[container.apparmor.security.beta.kubernetes.io/falco]: deprecated since v1.30; use the \"appArmorProfile\" field instead"
+NAME: falco
+LAST DEPLOYED: Sat Oct 31 16:26:17 2026
+NAMESPACE: falco
+STATUS: deployed
+REVISION: 1
+DESCRIPTION: Install complete
+NOTES:
+Falco agents are spinning up on each node in your cluster. After a few
+seconds, they are going to start monitoring your containers looking for
+security issues.
+STOP: the control plane restarted (89 to 91)
+run failed or stopped (exit 3): removing Falco, Trivy Operator and the lab's namespaces
+nothing remains
+
+# Invocation 3
+# Lab 05-08: Falco and Trivy Operator. Tier A, full mode, on the kind cluster named by LAB_CONTEXT.
+## step F1: tools, image digests, and the lab's namespaces and identities
+$ kubectl version --client
+Client Version: v1.37.2
+$ helm version --short
+v4.1.4+g05fa379
+$ kubectl get nodes -o wide
+NAME                     STATUS   ROLES           AGE   VERSION   INTERNAL-IP   EXTERNAL-IP   OS-IMAGE                       KERNEL-VERSION             CONTAINER-RUNTIME
+sf-sched-control-plane   Ready    control-plane   8h    v1.37.0   172.18.0.3    <none>        Debian GNU/Linux 13 (trixie)   7.0.0-38-generic (amd64)   containerd://2.3.4
+sf-sched-worker          Ready    <none>          8h    v1.37.0   172.18.0.4    <none>        Debian GNU/Linux 13 (trixie)   7.0.0-38-generic (amd64)   containerd://2.3.4
+sf-sched-worker2         Ready    <none>          8h    v1.37.0   172.18.0.5    <none>        Debian GNU/Linux 13 (trixie)   7.0.0-38-generic (amd64)   containerd://2.3.4
+$ kubectl -n kube-system get pods -l tier=control-plane
+NAME                                             READY   STATUS    RESTARTS         AGE
+etcd-sf-sched-control-plane                      1/1     Running   0                8h
+kube-apiserver-sf-sched-control-plane            1/1     Running   15 (25m ago)     8h
+kube-controller-manager-sf-sched-control-plane   1/1     Running   37 (4m49s ago)   8h
+kube-scheduler-sf-sched-control-plane            1/1     Running   39 (4m49s ago)   8h
+$ docker buildx imagetools inspect docker.io/falcosecurity/falco:0.45.2 | grep -E '^(Name|Digest):'
+Name:      docker.io/falcosecurity/falco:0.45.2
+Digest:    sha256:1562a643953f938e02f47319b5214d93a235f11f646d60e9b8a516fd5a64698e
+$ docker buildx imagetools inspect docker.io/falcosecurity/falcoctl:0.14.3 | grep -E '^(Name|Digest):'
+Name:      docker.io/falcosecurity/falcoctl:0.14.3
+Digest:    sha256:2230fb4802aafe09455b58d38f8f1faedd8f09f042e9a18fffd397e63488c023
+$ docker buildx imagetools inspect docker.io/falcosecurity/falcosidekick:2.32.0 | grep -E '^(Name|Digest):'
+Name:      docker.io/falcosecurity/falcosidekick:2.32.0
+Digest:    sha256:1976da72151850aae4436f33a5ed94bdef469f42a9b61c182b4feeb5441fb081
+$ docker buildx imagetools inspect MIRROR/aquasec/trivy-operator:0.36.1 | grep -E '^(Name|Digest):'
+Name:      MIRROR/aquasec/trivy-operator:0.36.1
+Digest:    sha256:05191a514247ae644dd5cc71306a94f44faff0a6a3fa817235911b911ecebcb9
+$ docker buildx imagetools inspect MIRROR/aquasec/trivy:0.76.1 | grep -E '^(Name|Digest):'
+Name:      MIRROR/aquasec/trivy:0.76.1
+Digest:    sha256:790fd66d1697395d8693d1acaa1ea702406a20f109b6fc7bac8db623eca6c06c
+$ kubectl get namespace attack p05-08-app --show-labels
+NAME         STATUS   AGE   LABELS
+attack       Active   1s    kubernetes.io/metadata.name=attack
+p05-08-app   Active   1s    kubernetes.io/metadata.name=p05-08-app,pod-security.kubernetes.io/audit-version=v1.37,pod-security.kubernetes.io/audit=restricted,pod-security.kubernetes.io/enforce-version=v1.37,pod-security.kubernetes.io/enforce=restricted,pod-security.kubernetes.io/warn-version=v1.37,pod-security.kubernetes.io/warn=restricted
+control plane restarts: 91 (at the start of this run: 91)
+
+# Invocation 4
+# Lab 05-08: Falco and Trivy Operator. Tier A, full mode, on the kind cluster named by LAB_CONTEXT.
+## step F2: Falco with Falcosidekick, in the falco namespace
+$ kubectl get namespace falco --show-labels
+NAME    STATUS   AGE   LABELS
+falco   Active   0s    kubernetes.io/metadata.name=falco
+$ cat falco-values.yaml
+driver:
+  kind: modern_ebpf
+  modernEbpf:
+    leastPrivileged: true
+image:
+  tag: "0.45.2@sha256:1562a643953f938e02f47319b5214d93a235f11f646d60e9b8a516fd5a64698e"
+falcoctl:
+  image:
+    tag: "0.14.3@sha256:2230fb4802aafe09455b58d38f8f1faedd8f09f042e9a18fffd397e63488c023"
+falcosidekick:
+  enabled: true
+  replicaCount: 1
+  image:
+    tag: "2.32.0@sha256:1976da72151850aae4436f33a5ed94bdef469f42a9b61c182b4feeb5441fb081"
+  config:
+    debug: true
+nodeSelector:
+  kubernetes.io/hostname: sf-sched-worker
+$ helm install falco falcosecurity/falco --version 9.2.2 --namespace falco -f falco-values.yaml
+I1031 16:34:47.719337   29004 warnings.go:107] "Warning: spec.template.metadata.annotations[container.apparmor.security.beta.kubernetes.io/falco]: deprecated since v1.30; use the \"appArmorProfile\" field instead"
+NAME: falco
+LAST DEPLOYED: Sat Oct 31 16:34:46 2026
+NAMESPACE: falco
+STATUS: deployed
+REVISION: 1
+DESCRIPTION: Install complete
+NOTES:
+Falco agents are spinning up on each node in your cluster. After a few
+seconds, they are going to start monitoring your containers looking for
+security issues.
+falco DaemonSet ready on 1 of 1 nodes; falcosidekick available: 1
+
+$ kubectl get pods -n falco -o wide
+NAME                                   READY   STATUS    RESTARTS   AGE   IP             NODE               NOMINATED NODE   READINESS GATES
+falco-7fjht                            2/2     Running   0          65s   10.244.1.69    sf-sched-worker    <none>           <none>
+falco-falcosidekick-6fd47bc46f-kprsq   1/1     Running   0          65s   10.244.2.103   sf-sched-worker2   <none>           <none>
+$ kubectl logs -n falco falco-7fjht -c falco | head -30
+Sat Oct 31 11:35:35 2026: Falco version: 0.45.2 (x86_64)
+Sat Oct 31 11:35:35 2026: Falco initialized with configuration files:
+Sat Oct 31 11:35:35 2026:    /etc/falco/falco.yaml | schema validation: ok
+Sat Oct 31 11:35:35 2026: System info: Linux version 7.0.0-38-generic (buildd@lcy02-amd64-070) (x86_64-linux-gnu-gcc (Ubuntu 15.2.0-16ubuntu1) 15.2.0, GNU ld (GNU Binutils for Ubuntu) 2.46) #38-Ubuntu SMP PREEMPT_DYNAMIC Fri Sep  4 09:10:14 UTC 2026
+Sat Oct 31 11:35:35 2026: Loaded plugin 'container-0.7.6' from file /usr/share/falco/plugins/libcontainer.so
+Sat Oct 31 11:35:35 2026: [libs]: container: Enabled 'podman' container engine.
+Sat Oct 31 11:35:35 2026: [libs]: container: * enabled container runtime socket at '/host/run/podman/podman.sock'
+Sat Oct 31 11:35:35 2026: [libs]: container: Enabled 'docker' container engine.
+Sat Oct 31 11:35:35 2026: [libs]: container: * enabled container runtime socket at '/host/var/run/docker.sock'
+Sat Oct 31 11:35:35 2026: [libs]: container: Enabled 'cri' container engine.
+Sat Oct 31 11:35:35 2026: [libs]: container: * enabled container runtime socket at '/host/run/containerd/containerd.sock'
+Sat Oct 31 11:35:35 2026: [libs]: container: * enabled container runtime socket at '/host/run/crio/crio.sock'
+Sat Oct 31 11:35:35 2026: [libs]: container: * enabled container runtime socket at '/host/run/k3s/containerd/containerd.sock'
+Sat Oct 31 11:35:35 2026: [libs]: container: * enabled container runtime socket at '/host/run/host-containerd/containerd.sock'
+Sat Oct 31 11:35:35 2026: [libs]: container: Enabled 'containerd' container engine.
+Sat Oct 31 11:35:35 2026: [libs]: container: * enabled container runtime socket at '/host/run/host-containerd/containerd.sock'
+Sat Oct 31 11:35:35 2026: [libs]: container: Enabled 'lxc' container engine.
+Sat Oct 31 11:35:35 2026: [libs]: container: Enabled 'libvirt_lxc' container engine.
+Sat Oct 31 11:35:35 2026: [libs]: container: Enabled 'bpm' container engine.
+Sat Oct 31 11:35:35 2026: Loading rules from:
+Sat Oct 31 11:35:36 2026:    /etc/falco/falco_rules.yaml | schema validation: ok
+Sat Oct 31 11:35:36 2026: Hostname value has been overridden via environment variable to: sf-sched-worker
+Sat Oct 31 11:35:36 2026: The chosen syscall buffer dimension is: 8388608 bytes (8 MBs)
+Sat Oct 31 11:35:36 2026: Starting health webserver with threadiness 4, listening on 0.0.0.0:8765
+Sat Oct 31 11:35:36 2026: Loaded event sources: syscall
+Sat Oct 31 11:35:36 2026: Enabled event sources: syscall
+Sat Oct 31 11:35:36 2026: Opening 'syscall' source with modern BPF probe.
+Sat Oct 31 11:35:36 2026: One ring buffer every '2' CPUs.
+Sat Oct 31 11:35:36 2026: [libs]: Trying to open the right engine!
+Sat Oct 31 11:35:36 2026: [libs]: libpman: disabled BPF iterators (not running in the root PID namespace, or failed to determine it)
+control plane restarts: 91 (at the start of this run: 91)
+
+# Invocation 5
+# Lab 05-08: Falco and Trivy Operator. Tier A, full mode, on the kind cluster named by LAB_CONTEXT.
+## step F3: detections: a shell in the lab Pod and a read of a sensitive file
+control plane restarts: 91 (at the start of this run: 91)
+
+$ kubectl --kubeconfig=work/builder.kubeconfig apply -f escape-node.yaml
+pod/escape-node created
+$ kubectl wait --for=condition=Ready pod/escape-node -n attack --timeout=180s
+pod/escape-node condition met
+$ kubectl get pod escape-node -n attack -o wide
+NAME          READY   STATUS    RESTARTS   AGE   IP            NODE              NOMINATED NODE   READINESS GATES
+escape-node   1/1     Running   0          5s    10.244.1.70   sf-sched-worker   <none>           <none>
+$ kubectl --kubeconfig=work/builder.kubeconfig exec -it -n attack escape-node -- sh -c 'cat /etc/shadow > /dev/null && echo shadow-read'
+shadow-read
+$ kubectl --kubeconfig=work/builder.kubeconfig exec -it -n attack escape-node -- sh -c 'chroot /host cat /etc/shadow > /dev/null && echo node-shadow-read'
+node-shadow-read
+$ kubectl --kubeconfig=work/builder.kubeconfig exec -n attack escape-node -- sh -c 'cat /host/etc/shadow > /dev/null && echo host-path-read'
+host-path-read
+$ kubectl logs -n falco $FALCO_POD -c falco | falco_alerts
+Critical | Drop and execute new binary in container | proc.name=mount | proc.cmdline=mount -o ro,bind /run/containerd/io.containerd.runtime.v2.task/k8s.io/124533bbdb8aeedbde2edb0661225616ead855a96a001bcbd9dac2006dbb6703/rootfs/product_name /run/containerd/io.containerd.runtime.v2.task/k8s.io/124533bbdb8aeedbde2edb0661225616ead855a96a001bcbd9dac2006dbb6703/rootfs/sys/class/dmi/id/product_name | container.name=app | k8s.ns.name=attack
+Critical | Drop and execute new binary in container | proc.name=mount | proc.cmdline=mount -o ro,bind /run/containerd/io.containerd.runtime.v2.task/k8s.io/124533bbdb8aeedbde2edb0661225616ead855a96a001bcbd9dac2006dbb6703/rootfs/product_uuid /run/containerd/io.containerd.runtime.v2.task/k8s.io/124533bbdb8aeedbde2edb0661225616ead855a96a001bcbd9dac2006dbb6703/rootfs/sys/class/dmi/id/product_uuid | container.name=app | k8s.ns.name=attack
+Critical | Drop and execute new binary in container | proc.name=mount | proc.cmdline=mount -o ro,bind /run/containerd/io.containerd.runtime.v2.task/k8s.io/124533bbdb8aeedbde2edb0661225616ead855a96a001bcbd9dac2006dbb6703/rootfs/product_uuid /run/containerd/io.containerd.runtime.v2.task/k8s.io/124533bbdb8aeedbde2edb0661225616ead855a96a001bcbd9dac2006dbb6703/rootfs/sys/devices/virtual/dmi/id/product_uuid | container.name=app | k8s.ns.name=attack
+Notice | Terminal shell in container | proc.name=sh | proc.cmdline=sh -c cat /etc/shadow > /dev/null && echo shadow-read | container.name=app | k8s.ns.name=attack
+Warning | Read sensitive file untrusted | proc.name=cat | proc.cmdline=cat /etc/shadow | fd.name=/etc/shadow | container.name=app | k8s.ns.name=attack
+Notice | Terminal shell in container | proc.name=sh | proc.cmdline=sh -c chroot /host cat /etc/shadow > /dev/null && echo node-shadow-read | container.name=app | k8s.ns.name=attack
+Warning | Read sensitive file untrusted | proc.name=cat | proc.cmdline=cat /etc/shadow | fd.name=/etc/shadow | container.name=app | k8s.ns.name=attack
+$ kubectl logs -n falco deploy/falco-falcosidekick | grep -c escape-node
+7
+control plane restarts: 91 (at the start of this run: 91)
+
+# Invocation 6
+# Lab 05-08: Falco and Trivy Operator. Tier A, full mode, on the kind cluster named by LAB_CONTEXT.
+## step F3: detections: a shell in the lab Pod and a read of a sensitive file
+control plane restarts: 91 (at the start of this run: 91)
+
+$ kubectl --kubeconfig=work/builder.kubeconfig apply -f escape-node.yaml
+pod/escape-node created
+$ kubectl wait --for=condition=Ready pod/escape-node -n attack --timeout=180s
+pod/escape-node condition met
+$ kubectl get pod escape-node -n attack -o wide
+NAME          READY   STATUS    RESTARTS   AGE   IP            NODE              NOMINATED NODE   READINESS GATES
+escape-node   1/1     Running   0          2s    10.244.1.71   sf-sched-worker   <none>           <none>
+$ kubectl --kubeconfig=work/builder.kubeconfig exec -it -n attack escape-node -- sh -c 'cat /etc/shadow > /dev/null && echo shadow-read'
+shadow-read
+$ kubectl --kubeconfig=work/builder.kubeconfig exec -it -n attack escape-node -- sh -c 'chroot /host cat /etc/shadow > /dev/null && echo node-shadow-read'
+node-shadow-read
+$ kubectl --kubeconfig=work/builder.kubeconfig exec -n attack escape-node -- sh -c 'cat /host/etc/shadow > /dev/null && echo host-path-read'
+host-path-read
+$ cat alert.jq
+"\(.priority) | \(.rule) | \(.output_fields["proc.cmdline"])"
+$ kubectl logs -n falco ds/falco -c falco --since=3m | grep escape-node | jq -r -f alert.jq
+Notice | Terminal shell in container | sh -c cat /etc/shadow > /dev/null && echo shadow-read
+Warning | Read sensitive file untrusted | cat /etc/shadow
+Notice | Terminal shell in container | sh -c chroot /host cat /etc/shadow > /dev/null && echo node-shadow-read
+Warning | Read sensitive file untrusted | cat /etc/shadow
+Critical | Drop and execute new binary in container | mount -o ro,bind /run/containerd/io.containerd.runtime.v2.task/k8s.io/ba84029985f2f62f9c4773feaac73d8ce52067a9eacb0f7a5ebae524fd739df1/rootfs/product_name /run/containerd/io.containerd.runtime.v2.task/k8s.io/ba84029985f2f62f9c4773feaac73d8ce52067a9eacb0f7a5ebae524fd739df1/rootfs/sys/class/dmi/id/product_name
+Critical | Drop and execute new binary in container | mount -o ro,bind /run/containerd/io.containerd.runtime.v2.task/k8s.io/ba84029985f2f62f9c4773feaac73d8ce52067a9eacb0f7a5ebae524fd739df1/rootfs/product_uuid /run/containerd/io.containerd.runtime.v2.task/k8s.io/ba84029985f2f62f9c4773feaac73d8ce52067a9eacb0f7a5ebae524fd739df1/rootfs/sys/class/dmi/id/product_uuid
+Critical | Drop and execute new binary in container | mount -o ro,bind /run/containerd/io.containerd.runtime.v2.task/k8s.io/ba84029985f2f62f9c4773feaac73d8ce52067a9eacb0f7a5ebae524fd739df1/rootfs/product_uuid /run/containerd/io.containerd.runtime.v2.task/k8s.io/ba84029985f2f62f9c4773feaac73d8ce52067a9eacb0f7a5ebae524fd739df1/rootfs/sys/devices/virtual/dmi/id/product_uuid
+Notice | Terminal shell in container | sh -c cat /etc/shadow > /dev/null && echo shadow-read
+Warning | Read sensitive file untrusted | cat /etc/shadow
+Notice | Terminal shell in container | sh -c chroot /host cat /etc/shadow > /dev/null && echo node-shadow-read
+Warning | Read sensitive file untrusted | cat /etc/shadow
+$ kubectl logs -n falco ds/falco -c falco --since=3m | grep 'Read sensitive file untrusted' | grep escape-node | head -1 | jq .
+{
+  "hostname": "sf-sched-worker",
+  "output": "11:36:21.966706435: Warning Sensitive file opened for reading by non-trusted program | file=/etc/shadow gparent=containerd-shim ggparent=<NA> gggparent=<NA> evt_type=openat user=root user_uid=0 user_loginuid=-1 process=cat proc_exepath=/bin/cat parent=sh command=cat /etc/shadow terminal=34816 container_id=124533bbdb8a container_name=app container_image_repository=docker.io/library/busybox container_image_tag=b116e155074440ffd9e449559433feb4cd2341eb3554b1da1c638c976e56451d k8s_pod_name=escape-node k8s_ns_name=attack",
+  "output_fields": {
+    "container.id": "124533bbdb8a",
+    "container.image.repository": "docker.io/library/busybox",
+    "container.image.tag": "b116e155074440ffd9e449559433feb4cd2341eb3554b1da1c638c976e56451d",
+    "container.name": "app",
+    "evt.time": 1793446581966706435,
+    "evt.type": "openat",
+    "fd.name": "/etc/shadow",
+    "k8s.ns.name": "attack",
+    "k8s.pod.name": "escape-node",
+    "proc.aname[2]": "containerd-shim",
+    "proc.aname[3]": null,
+    "proc.aname[4]": null,
+    "proc.cmdline": "cat /etc/shadow",
+    "proc.exepath": "/bin/cat",
+    "proc.name": "cat",
+    "proc.pname": "sh",
+    "proc.tty": 34816,
+    "user.loginuid": -1,
+    "user.name": "root",
+    "user.uid": 0
+  },
+  "priority": "Warning",
+  "rule": "Read sensitive file untrusted",
+  "source": "syscall",
+  "tags": [
+    "T1555",
+    "container",
+    "filesystem",
+    "host",
+    "maturity_stable",
+    "mitre_credential_access"
+  ],
+  "time": "2026-10-31T11:36:21.966706435Z"
+}
+$ kubectl logs -n falco deploy/falco-falcosidekick --since=3m | grep -c escape-node
+11
+$ kubectl logs -n falco deploy/falco-falcosidekick --since=3m | grep -m1 'Sensitive file opened' | cut -c1-120
+2026/10/31 11:36:21 [DEBUG] : Falco's payload : {"uuid":"62a94dd5-241d-4879-92af-1deb79630ccd","output":"11:36:21.966706
+control plane restarts: 91 (at the start of this run: 91)
+
+# Invocation 7
+# Lab 05-08: Falco and Trivy Operator. Tier A, full mode, on the kind cluster named by LAB_CONTEXT.
+## step F4: remove Falco
+$ helm uninstall falco -n falco
+release "falco" uninstalled
+$ kubectl delete namespace falco
+namespace "falco" deleted
+$ kubectl get namespace falco
+Error from server (NotFound): namespaces "falco" not found
+$ kubectl get validatingwebhookconfigurations,mutatingwebhookconfigurations -o name | grep -ci falco
+0
+$ kubectl get clusterrole,clusterrolebinding -o name | grep -ci falco
+0
+control plane restarts: 91 (at the start of this run: 91)
+
+# Invocation 8
+# Lab 05-08: Falco and Trivy Operator. Tier A, full mode, on the kind cluster named by LAB_CONTEXT.
+## step F2: Falco with Falcosidekick, in the falco namespace
+$ kubectl get namespace falco --show-labels
+NAME    STATUS   AGE   LABELS
+falco   Active   0s    kubernetes.io/metadata.name=falco
+$ cat falco-values.yaml
+driver:
+  kind: modern_ebpf
+  modernEbpf:
+    leastPrivileged: true
+image:
+  tag: "0.45.2@sha256:1562a643953f938e02f47319b5214d93a235f11f646d60e9b8a516fd5a64698e"
+falcoctl:
+  image:
+    tag: "0.14.3@sha256:2230fb4802aafe09455b58d38f8f1faedd8f09f042e9a18fffd397e63488c023"
+falcosidekick:
+  enabled: true
+  replicaCount: 1
+  image:
+    tag: "2.32.0@sha256:1976da72151850aae4436f33a5ed94bdef469f42a9b61c182b4feeb5441fb081"
+  config:
+    debug: true
+nodeSelector:
+  kubernetes.io/hostname: sf-sched-worker
+$ helm install falco falcosecurity/falco --version 9.2.2 --namespace falco -f falco-values.yaml
+I1031 16:39:52.870519   32245 warnings.go:107] "Warning: spec.template.metadata.annotations[container.apparmor.security.beta.kubernetes.io/falco]: deprecated since v1.30; use the \"appArmorProfile\" field instead"
+NAME: falco
+LAST DEPLOYED: Sat Oct 31 16:39:51 2026
+NAMESPACE: falco
+STATUS: deployed
+REVISION: 1
+DESCRIPTION: Install complete
+NOTES:
+Falco agents are spinning up on each node in your cluster. After a few
+seconds, they are going to start monitoring your containers looking for
+security issues.
+falco DaemonSet ready on 1 of 1 nodes; falcosidekick available: 1
+
+$ kubectl get pods -n falco -o wide
+NAME                                   READY   STATUS    RESTARTS   AGE   IP             NODE               NOMINATED NODE   READINESS GATES
+falco-5pxjc                            2/2     Running   0          54s   10.244.1.72    sf-sched-worker    <none>           <none>
+falco-falcosidekick-6fd47bc46f-ndbrq   1/1     Running   0          54s   10.244.2.104   sf-sched-worker2   <none>           <none>
+$ kubectl logs -n falco falco-5pxjc -c falco | head -30
+Sat Oct 31 11:40:40 2026: Falco version: 0.45.2 (x86_64)
+Sat Oct 31 11:40:40 2026: Falco initialized with configuration files:
+Sat Oct 31 11:40:40 2026:    /etc/falco/falco.yaml | schema validation: ok
+Sat Oct 31 11:40:40 2026: System info: Linux version 7.0.0-38-generic (buildd@lcy02-amd64-070) (x86_64-linux-gnu-gcc (Ubuntu 15.2.0-16ubuntu1) 15.2.0, GNU ld (GNU Binutils for Ubuntu) 2.46) #38-Ubuntu SMP PREEMPT_DYNAMIC Fri Sep  4 09:10:14 UTC 2026
+Sat Oct 31 11:40:40 2026: Loaded plugin 'container-0.7.6' from file /usr/share/falco/plugins/libcontainer.so
+Sat Oct 31 11:40:40 2026: [libs]: container: Enabled 'podman' container engine.
+Sat Oct 31 11:40:40 2026: [libs]: container: * enabled container runtime socket at '/host/run/podman/podman.sock'
+Sat Oct 31 11:40:40 2026: [libs]: container: Enabled 'docker' container engine.
+Sat Oct 31 11:40:40 2026: [libs]: container: * enabled container runtime socket at '/host/var/run/docker.sock'
+Sat Oct 31 11:40:40 2026: [libs]: container: Enabled 'cri' container engine.
+Sat Oct 31 11:40:40 2026: [libs]: container: * enabled container runtime socket at '/host/run/containerd/containerd.sock'
+Sat Oct 31 11:40:40 2026: [libs]: container: * enabled container runtime socket at '/host/run/crio/crio.sock'
+Sat Oct 31 11:40:40 2026: [libs]: container: * enabled container runtime socket at '/host/run/k3s/containerd/containerd.sock'
+Sat Oct 31 11:40:40 2026: [libs]: container: * enabled container runtime socket at '/host/run/host-containerd/containerd.sock'
+Sat Oct 31 11:40:40 2026: [libs]: container: Enabled 'containerd' container engine.
+Sat Oct 31 11:40:40 2026: [libs]: container: * enabled container runtime socket at '/host/run/host-containerd/containerd.sock'
+Sat Oct 31 11:40:40 2026: [libs]: container: Enabled 'lxc' container engine.
+Sat Oct 31 11:40:40 2026: [libs]: container: Enabled 'libvirt_lxc' container engine.
+Sat Oct 31 11:40:40 2026: [libs]: container: Enabled 'bpm' container engine.
+Sat Oct 31 11:40:40 2026: Loading rules from:
+Sat Oct 31 11:40:40 2026:    /etc/falco/falco_rules.yaml | schema validation: ok
+Sat Oct 31 11:40:40 2026: Hostname value has been overridden via environment variable to: sf-sched-worker
+Sat Oct 31 11:40:40 2026: The chosen syscall buffer dimension is: 8388608 bytes (8 MBs)
+Sat Oct 31 11:40:40 2026: Starting health webserver with threadiness 4, listening on 0.0.0.0:8765
+Sat Oct 31 11:40:40 2026: Loaded event sources: syscall
+Sat Oct 31 11:40:40 2026: Enabled event sources: syscall
+Sat Oct 31 11:40:40 2026: Opening 'syscall' source with modern BPF probe.
+Sat Oct 31 11:40:40 2026: One ring buffer every '2' CPUs.
+Sat Oct 31 11:40:40 2026: [libs]: Trying to open the right engine!
+Sat Oct 31 11:40:40 2026: [libs]: libpman: disabled BPF iterators (not running in the root PID namespace, or failed to determine it)
+control plane restarts: 91 (at the start of this run: 91)
+
+# Invocation 9
+# Lab 05-08: Falco and Trivy Operator. Tier A, full mode, on the kind cluster named by LAB_CONTEXT.
+## step F3: detections: a shell in the lab Pod and a read of a sensitive file
+control plane restarts: 91 (at the start of this run: 91)
+
+$ kubectl --kubeconfig=work/builder.kubeconfig apply -f escape-node.yaml
+pod/escape-node created
+$ kubectl wait --for=condition=Ready pod/escape-node -n attack --timeout=180s
+pod/escape-node condition met
+$ kubectl get pod escape-node -n attack -o wide
+NAME          READY   STATUS    RESTARTS   AGE   IP            NODE              NOMINATED NODE   READINESS GATES
+escape-node   1/1     Running   0          3s    10.244.1.73   sf-sched-worker   <none>           <none>
+$ kubectl --kubeconfig=work/builder.kubeconfig exec -it -n attack escape-node -- sh -c 'cat /etc/shadow > /dev/null && echo shadow-read'
+shadow-read
+$ kubectl --kubeconfig=work/builder.kubeconfig exec -it -n attack escape-node -- sh -c 'chroot /host cat /etc/shadow > /dev/null && echo node-shadow-read'
+node-shadow-read
+$ kubectl --kubeconfig=work/builder.kubeconfig exec -n attack escape-node -- sh -c 'cat /host/etc/shadow > /dev/null && echo host-path-read'
+host-path-read
+$ cat alert.jq
+"\(.priority) | \(.rule) | \(.output_fields["proc.cmdline"])"
+$ kubectl logs -n falco ds/falco -c falco | grep escape-node | jq -r -f alert.jq
+Critical | Drop and execute new binary in container | mount -o ro,bind /run/containerd/io.containerd.runtime.v2.task/k8s.io/14b556d74d4dc01e2495ec08ba0bfe3b479d1781d606551e60610011d3859111/rootfs/product_name /run/containerd/io.containerd.runtime.v2.task/k8s.io/14b556d74d4dc01e2495ec08ba0bfe3b479d1781d606551e60610011d3859111/rootfs/sys/class/dmi/id/product_name
+Critical | Drop and execute new binary in container | mount -o ro,bind /run/containerd/io.containerd.runtime.v2.task/k8s.io/14b556d74d4dc01e2495ec08ba0bfe3b479d1781d606551e60610011d3859111/rootfs/product_uuid /run/containerd/io.containerd.runtime.v2.task/k8s.io/14b556d74d4dc01e2495ec08ba0bfe3b479d1781d606551e60610011d3859111/rootfs/sys/class/dmi/id/product_uuid
+Critical | Drop and execute new binary in container | mount -o ro,bind /run/containerd/io.containerd.runtime.v2.task/k8s.io/14b556d74d4dc01e2495ec08ba0bfe3b479d1781d606551e60610011d3859111/rootfs/product_uuid /run/containerd/io.containerd.runtime.v2.task/k8s.io/14b556d74d4dc01e2495ec08ba0bfe3b479d1781d606551e60610011d3859111/rootfs/sys/devices/virtual/dmi/id/product_uuid
+Notice | Terminal shell in container | sh -c cat /etc/shadow > /dev/null && echo shadow-read
+Warning | Read sensitive file untrusted | cat /etc/shadow
+Notice | Terminal shell in container | sh -c chroot /host cat /etc/shadow > /dev/null && echo node-shadow-read
+Warning | Read sensitive file untrusted | cat /etc/shadow
+$ kubectl logs -n falco ds/falco -c falco | grep 'Read sensitive file untrusted' | grep escape-node | head -1 | jq .
+{
+  "hostname": "sf-sched-worker",
+  "output": "11:41:42.701698939: Warning Sensitive file opened for reading by non-trusted program | file=/etc/shadow gparent=containerd-shim ggparent=<NA> gggparent=<NA> evt_type=openat user=root user_uid=0 user_loginuid=-1 process=cat proc_exepath=/bin/cat parent=sh command=cat /etc/shadow terminal=34816 container_id=14b556d74d4d container_name=app container_image_repository=docker.io/library/busybox container_image_tag=b116e155074440ffd9e449559433feb4cd2341eb3554b1da1c638c976e56451d k8s_pod_name=escape-node k8s_ns_name=attack",
+  "output_fields": {
+    "container.id": "14b556d74d4d",
+    "container.image.repository": "docker.io/library/busybox",
+    "container.image.tag": "b116e155074440ffd9e449559433feb4cd2341eb3554b1da1c638c976e56451d",
+    "container.name": "app",
+    "evt.time": 1793446902701698939,
+    "evt.type": "openat",
+    "fd.name": "/etc/shadow",
+    "k8s.ns.name": "attack",
+    "k8s.pod.name": "escape-node",
+    "proc.aname[2]": "containerd-shim",
+    "proc.aname[3]": null,
+    "proc.aname[4]": null,
+    "proc.cmdline": "cat /etc/shadow",
+    "proc.exepath": "/bin/cat",
+    "proc.name": "cat",
+    "proc.pname": "sh",
+    "proc.tty": 34816,
+    "user.loginuid": -1,
+    "user.name": "root",
+    "user.uid": 0
+  },
+  "priority": "Warning",
+  "rule": "Read sensitive file untrusted",
+  "source": "syscall",
+  "tags": [
+    "T1555",
+    "container",
+    "filesystem",
+    "host",
+    "maturity_stable",
+    "mitre_credential_access"
+  ],
+  "time": "2026-10-31T11:41:42.701698939Z"
+}
+$ kubectl logs -n falco deploy/falco-falcosidekick | grep -c escape-node
+7
+$ kubectl logs -n falco deploy/falco-falcosidekick | grep -m1 'Sensitive file opened' | cut -c1-120
+2026/10/31 11:41:42 [DEBUG] : Falco's payload : {"uuid":"8ff2e2ee-a0b2-4b2e-b960-37ad66a35c99","output":"11:41:42.701698
+control plane restarts: 91 (at the start of this run: 91)
+
+# Invocation 10
+# Lab 05-08: Falco and Trivy Operator. Tier A, full mode, on the kind cluster named by LAB_CONTEXT.
+## step F4: remove Falco
+$ helm uninstall falco -n falco
+release "falco" uninstalled
+$ kubectl delete namespace falco
+namespace "falco" deleted
+$ kubectl get namespace falco
+Error from server (NotFound): namespaces "falco" not found
+$ kubectl get validatingwebhookconfigurations,mutatingwebhookconfigurations -o name | grep -ci falco
+0
+$ kubectl get clusterrole,clusterrolebinding -o name | grep -ci falco
+0
+control plane restarts: 91 (at the start of this run: 91)
+
+# Invocation 11
+# Lab 05-08: Falco and Trivy Operator. Tier A, full mode, on the kind cluster named by LAB_CONTEXT.
+## step F5: Trivy Operator, installed with the chart pinned and the namespace labelled
+control plane restarts: 91 (at the start of this run: 91)
+
+$ kubectl get namespace p05-08-trivy --show-labels
+NAME           STATUS   AGE   LABELS
+p05-08-trivy   Active   0s    kubernetes.io/metadata.name=p05-08-trivy,pod-security.kubernetes.io/enforce-version=v1.37,pod-security.kubernetes.io/enforce=restricted
+$ cat trivy-values.yaml
+targetNamespaces: attack
+podSecurityContext:
+  runAsNonRoot: true
+  runAsUser: 10000
+  runAsGroup: 10000
+  seccompProfile:
+    type: RuntimeDefault
+securityContext:
+  privileged: false
+  allowPrivilegeEscalation: false
+  readOnlyRootFilesystem: true
+  capabilities:
+    drop: ["ALL"]
+operator:
+  scanJobsConcurrentLimit: 1
+  sbomGenerationEnabled: false
+  exposedSecretScannerEnabled: false
+  rbacAssessmentScannerEnabled: false
+  infraAssessmentScannerEnabled: false
+  clusterComplianceEnabled: false
+trivyOperator:
+  scanJobPodTemplatePodSecurityContext:
+    runAsNonRoot: true
+    runAsUser: 10000
+    runAsGroup: 10000
+    seccompProfile:
+      type: RuntimeDefault
+image:
+  tag: "0.36.1@sha256:05191a514247ae644dd5cc71306a94f44faff0a6a3fa817235911b911ecebcb9"
+trivy:
+  image:
+    tag: "0.76.1@sha256:790fd66d1697395d8693d1acaa1ea702406a20f109b6fc7bac8db623eca6c06c"
+$ helm install trivy aqua/trivy-operator --version 0.38.1 --namespace p05-08-trivy -f trivy-values.yaml
+NAME: trivy
+LAST DEPLOYED: Sat Oct 31 16:42:51 2026
+NAMESPACE: p05-08-trivy
+STATUS: deployed
+REVISION: 1
+DESCRIPTION: Install complete
+TEST SUITE: None
+NOTES:
+You have installed Trivy Operator in the p05-08-trivy namespace.
+It is configured to discover Kubernetes workloads and resources in
+attack namespace(s).
+
+Inspect created VulnerabilityReports by:
+
+    kubectl get vulnerabilityreports --all-namespaces -o wide
+
+Inspect created ConfigAuditReports by:
+
+    kubectl get configauditreports --all-namespaces -o wide
+
+Inspect the work log of trivy-operator by:
+
+    kubectl logs -n p05-08-trivy deployment/trivy-trivy-operator
+every Deployment in p05-08-trivy is available
+
+$ kubectl get pods -n p05-08-trivy
+NAME                                       READY   STATUS     RESTARTS   AGE
+scan-vulnerabilityreport-bdd695f4b-fztzx   0/1     Init:0/1   0          14s
+trivy-trivy-operator-5b5877ddcb-dvv7t      1/1     Running    0          53s
+control plane restarts: 91 (at the start of this run: 91)
+
+# Invocation 12
+# Lab 05-08: Falco and Trivy Operator. Tier A, full mode, on the kind cluster named by LAB_CONTEXT.
+## step F6: the reports Trivy Operator writes for the lab Pod
+control plane restarts: 91 (at the start of this run: 91)
+
+$ kubectl get configauditreports -n attack
+NAME              SCANNER   AGE
+pod-escape-node   Trivy     20s
+$ kubectl get configauditreport pod-escape-node -n attack -o jsonpath='{range .report.checks[?(@.success==false)]}{.checkID} {.severity} {.title}{"\n"}{end}'
+AVD-KSV-0036 MEDIUM Protecting Pod service account tokens
+AVD-KSV-0030 LOW Runtime/Default Seccomp profile not set
+AVD-KSV-0118 HIGH Default security context configured
+AVD-KSV-0118 HIGH Default security context configured
+AVD-KSV-0121 HIGH Kubernetes resource with disallowed volumes mounted
+AVD-KSV-0014 HIGH Root file system is not read-only
+AVD-KSV-0106 LOW Container capabilities must only include NET_BIND_SERVICE
+AVD-KSV-0003 LOW Default capabilities: some containers do not drop all
+AVD-KSV-0012 MEDIUM Runs as root user
+AVD-KSV-0021 LOW Runs with GID <= 10000
+AVD-KSV-0018 LOW Memory not limited
+AVD-KSV-0001 MEDIUM Can elevate its own privileges
+AVD-KSV-0020 LOW Runs with UID <= 10000
+AVD-KSV-0016 LOW Memory requests not specified
+AVD-KSV-0015 LOW CPU requests not specified
+AVD-KSV-0104 MEDIUM Seccomp policies disabled
+AVD-KSV-0023 MEDIUM hostPath volumes mounted
+AVD-KSV-0004 LOW Default capabilities: some containers do not drop any
+AVD-KSV-0011 LOW CPU not limited
+$ kubectl get vulnerabilityreports -n attack
+NAME                  REPOSITORY        TAG       SCANNER   AGE
+pod-escape-node-app   library/busybox   busybox   Trivy     1s
+$ kubectl get jobs,pods -n p05-08-trivy
+NAME                                        READY   STATUS    RESTARTS   AGE
+pod/trivy-trivy-operator-5b5877ddcb-dvv7t   1/1     Running   0          3m58s
+control plane restarts: 91 (at the start of this run: 91)
+
+# Invocation 13
+# Lab 05-08: Falco and Trivy Operator. Tier A, full mode, on the kind cluster named by LAB_CONTEXT.
+## step F6: the reports Trivy Operator writes for the lab Pod
+control plane restarts: 91 (at the start of this run: 91)
+
+$ kubectl get configauditreports -n attack
+NAME              SCANNER   AGE
+pod-escape-node   Trivy     3m32s
+$ kubectl get configauditreport pod-escape-node -n attack -o jsonpath='{range .report.checks[?(@.success==false)]}{.checkID} {.severity} {.title}{"\n"}{end}'
+AVD-KSV-0036 MEDIUM Protecting Pod service account tokens
+AVD-KSV-0030 LOW Runtime/Default Seccomp profile not set
+AVD-KSV-0118 HIGH Default security context configured
+AVD-KSV-0118 HIGH Default security context configured
+AVD-KSV-0121 HIGH Kubernetes resource with disallowed volumes mounted
+AVD-KSV-0014 HIGH Root file system is not read-only
+AVD-KSV-0106 LOW Container capabilities must only include NET_BIND_SERVICE
+AVD-KSV-0003 LOW Default capabilities: some containers do not drop all
+AVD-KSV-0012 MEDIUM Runs as root user
+AVD-KSV-0021 LOW Runs with GID <= 10000
+AVD-KSV-0018 LOW Memory not limited
+AVD-KSV-0001 MEDIUM Can elevate its own privileges
+AVD-KSV-0020 LOW Runs with UID <= 10000
+AVD-KSV-0016 LOW Memory requests not specified
+AVD-KSV-0015 LOW CPU requests not specified
+AVD-KSV-0104 MEDIUM Seccomp policies disabled
+AVD-KSV-0023 MEDIUM hostPath volumes mounted
+AVD-KSV-0004 LOW Default capabilities: some containers do not drop any
+AVD-KSV-0011 LOW CPU not limited
+$ kubectl get vulnerabilityreports -n attack -o wide
+NAME                  REPOSITORY        TAG       SCANNER   AGE   CRITICAL   HIGH   MEDIUM   LOW   UNKNOWN
+pod-escape-node-app   library/busybox   busybox   Trivy     16s   0          0      0        0     0
+$ kubectl get vulnerabilityreport pod-escape-node-app -n attack -o jsonpath='{.report.scanner.name} {.report.scanner.version}{"\n"}{.report.artifact.repository}{"\n"}'
+Trivy sha256:790fd66d1697395d8693d1acaa1ea702406a20f109b6fc7bac8db623eca6c06c
+library/busybox
+$ kubectl get jobs,pods -n p05-08-trivy
+NAME                                        READY   STATUS    RESTARTS   AGE
+pod/trivy-trivy-operator-5b5877ddcb-dvv7t   1/1     Running   0          4m13s
+control plane restarts: 91 (at the start of this run: 91)
+
+# Invocation 14
+# Lab 05-08: Falco and Trivy Operator. Tier A, full mode, on the kind cluster named by LAB_CONTEXT.
+## step F7: remove Trivy Operator, its CRDs and any webhook configuration
+$ helm uninstall trivy -n p05-08-trivy
+release "trivy" uninstalled
+$ kubectl delete namespace p05-08-trivy
+namespace "p05-08-trivy" deleted
+$ kubectl get crd -o name | grep aquasecurity.github.io
+customresourcedefinition.apiextensions.k8s.io/clustercompliancereports.aquasecurity.github.io
+customresourcedefinition.apiextensions.k8s.io/clusterconfigauditreports.aquasecurity.github.io
+customresourcedefinition.apiextensions.k8s.io/clusterinfraassessmentreports.aquasecurity.github.io
+customresourcedefinition.apiextensions.k8s.io/clusterrbacassessmentreports.aquasecurity.github.io
+customresourcedefinition.apiextensions.k8s.io/clustersbomreports.aquasecurity.github.io
+customresourcedefinition.apiextensions.k8s.io/clustervulnerabilityreports.aquasecurity.github.io
+customresourcedefinition.apiextensions.k8s.io/configauditreports.aquasecurity.github.io
+customresourcedefinition.apiextensions.k8s.io/exposedsecretreports.aquasecurity.github.io
+customresourcedefinition.apiextensions.k8s.io/infraassessmentreports.aquasecurity.github.io
+customresourcedefinition.apiextensions.k8s.io/rbacassessmentreports.aquasecurity.github.io
+customresourcedefinition.apiextensions.k8s.io/sbomreports.aquasecurity.github.io
+customresourcedefinition.apiextensions.k8s.io/vulnerabilityreports.aquasecurity.github.io
+$ kubectl get crd -o name | grep aquasecurity.github.io | xargs kubectl delete
+customresourcedefinition.apiextensions.k8s.io "clustercompliancereports.aquasecurity.github.io" deleted
+customresourcedefinition.apiextensions.k8s.io "clusterconfigauditreports.aquasecurity.github.io" deleted
+customresourcedefinition.apiextensions.k8s.io "clusterinfraassessmentreports.aquasecurity.github.io" deleted
+customresourcedefinition.apiextensions.k8s.io "clusterrbacassessmentreports.aquasecurity.github.io" deleted
+customresourcedefinition.apiextensions.k8s.io "clustersbomreports.aquasecurity.github.io" deleted
+customresourcedefinition.apiextensions.k8s.io "clustervulnerabilityreports.aquasecurity.github.io" deleted
+customresourcedefinition.apiextensions.k8s.io "configauditreports.aquasecurity.github.io" deleted
+customresourcedefinition.apiextensions.k8s.io "exposedsecretreports.aquasecurity.github.io" deleted
+customresourcedefinition.apiextensions.k8s.io "infraassessmentreports.aquasecurity.github.io" deleted
+customresourcedefinition.apiextensions.k8s.io "rbacassessmentreports.aquasecurity.github.io" deleted
+customresourcedefinition.apiextensions.k8s.io "sbomreports.aquasecurity.github.io" deleted
+customresourcedefinition.apiextensions.k8s.io "vulnerabilityreports.aquasecurity.github.io" deleted
+$ kubectl get validatingwebhookconfigurations,mutatingwebhookconfigurations -o name | grep -ci trivy
+0
+$ kubectl get clusterrole,clusterrolebinding -o name | grep -ci trivy
+0
+control plane restarts: 91 (at the start of this run: 91)
+
+# Invocation 15
+# Lab 05-08: Falco and Trivy Operator. Tier A, full mode, on the kind cluster named by LAB_CONTEXT.
+## step F8: remove the lab's namespaces and check that nothing remains
+$ kubectl delete namespace attack p05-08-app
+namespace "attack" deleted
+namespace "p05-08-app" deleted
+$ kubectl get namespace
+NAME                 STATUS   AGE
+default              Active   9h
+gate-baseline        Active   6h59m
+gate-privileged      Active   7h
+gate-restricted      Active   7h
+kube-node-lease      Active   9h
+kube-public          Active   9h
+kube-system          Active   9h
+local-path-storage   Active   9h
+$ kubectl get validatingwebhookconfigurations,mutatingwebhookconfigurations
+No resources found
+$ kubectl get crd
+No resources found
+nothing of the lab remains
+control plane restarts: 91 (at the start of this run: 91)
