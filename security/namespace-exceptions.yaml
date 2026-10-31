@@ -102,19 +102,6 @@ exceptions:
     chapter: 13-grand-capstone-bookstore-platform/04-real-auth-keycloak-irsa-istio-jwt.md
     expires: 2027-06-30
 
-  - namespace: chaos-mesh
-    level: privileged
-    reason: >-
-      The Chaos Mesh chaos-daemon DaemonSet sets hostPID: true and runs a
-      privileged container, since privileged is true in the chart's default
-      values. It injects faults into the containers on each node, and baseline
-      forbids host namespaces and privileged containers, so only privileged
-      admits the daemon. The controller manager and the DNS server share the
-      namespace. The experiments run in a restricted namespace of their own.
-    upstream: https://github.com/chaos-mesh/chaos-mesh/blob/v2.7.0/helm/chaos-mesh/values.yaml
-    chapter: 13-grand-capstone-bookstore-platform/12-day-2-runbook-on-call-dr-chaos.md
-    expires: 2027-06-30
-
   - namespace: kafka-system
     level: baseline
     reason: >-
