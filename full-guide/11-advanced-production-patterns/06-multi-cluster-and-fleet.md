@@ -220,14 +220,19 @@ overlay; (5) the cross-cluster networking and data gravity reality, honestly.
 > came from a lab cluster with a different name from the one this chapter
 > prints, and the lab used its own namespace names. The transcript is
 > `full-guide/examples/security-lab/evidence/11-06.txt`. The cross-cluster
-> networking is explained, not reproduced.
+> networking is explained, not reproduced. A later review pass added
+> read-only checks: the chart render with digest pins, the controller's
+> ClusterRole, and the internal kind address. They are the last steps of the
+> transcript.
 
 ### 0. The two-cluster requirement (honest, reproducible)
 
 [`multicluster/00-two-cluster-topology.yaml`](../examples/bookstore/multicluster/00-two-cluster-topology.yaml)
 is a **not-applied doc carrier** (same honesty pattern as the apiserver-level
-`cluster/` files): the real artifacts are the `kind` / `argocd cluster add`
-commands it documents. Two clusters — a **hub** (runs Argo CD) and a member:
+`cluster/` files). Its header lists the commands the chapter runs, in the
+chapter's order. The real artifacts are the `kind` commands here and the
+`register_member` function in section 3, not `argocd cluster add`, which the
+chapter forbids. Two clusters — a **hub** (runs Argo CD) and a member:
 
 ```sh
 kind delete cluster --name bookstore-hub  2>/dev/null || true
@@ -257,9 +262,55 @@ kubectl label namespace argocd \
   pod-security.kubernetes.io/audit=restricted \
   pod-security.kubernetes.io/warn=restricted
 helm install argocd argo/argo-cd -n argocd \
-  --version "$ARGOCD_CHART_VERSION" --wait
+  --version "$ARGOCD_CHART_VERSION" --wait \
+  --set global.image.tag="v3.5.6@sha256:8e5cc5bb008df8a09dba439462e58c94c55b7735888d3ebde0c25fc05e4e5335" \
+  --set dex.image.tag="v2.46.1@sha256:65b72ca0f4b0bf6d4ada84ec21da8851782563404ac7b8f926923d27ceced9ab" \
+  --set redis.image.tag="8.6.4-alpine@sha256:2cc044fc5a07c9b701f8f1255a309ae9ad7856e694ac03513bf3648c01e40763"
 kubectl -n argocd rollout status deploy/argocd-server
 ```
+
+The chart's defaults name each image by tag alone. The three `--set` lines pin
+the images by digest, the same way the guide pins the Vault and ESO images.
+The digests are the registry's manifest digests for those tags. The check
+below prints each image the render uses, with its count:
+
+```sh
+helm template argocd argo/argo-cd --version 10.11.6 --namespace argocd \
+  --set global.image.tag="v3.5.6@sha256:8e5cc5bb008df8a09dba439462e58c94c55b7735888d3ebde0c25fc05e4e5335" \
+  --set dex.image.tag="v2.46.1@sha256:65b72ca0f4b0bf6d4ada84ec21da8851782563404ac7b8f926923d27ceced9ab" \
+  --set redis.image.tag="8.6.4-alpine@sha256:2cc044fc5a07c9b701f8f1255a309ae9ad7856e694ac03513bf3648c01e40763" \
+  | grep -o 'image: [^ ]*' | sort | uniq -c
+```
+
+<!-- gate: output -->
+```text
+   1 image: ecr-public.aws.com/docker/library/redis:8.6.4-alpine@sha256:2cc044fc5a07c9b701f8f1255a309ae9ad7856e694ac03513bf3648c01e40763
+   1 image: ghcr.io/dexidp/dex:v2.46.1@sha256:65b72ca0f4b0bf6d4ada84ec21da8851782563404ac7b8f926923d27ceced9ab
+   8 image: quay.io/argoproj/argocd:v3.5.6@sha256:8e5cc5bb008df8a09dba439462e58c94c55b7735888d3ebde0c25fc05e4e5335
+```
+
+The chart's default install also gives the hub's application controller a
+ClusterRole that matches every API group, resource and verb, and every
+non-resource URL. The chart sets `createClusterRoles: true` by default, and
+the render shows the rule:
+
+```sh
+helm template argocd argo/argo-cd --version 10.11.6 --namespace argocd \
+  | python3 -c 'import sys,yaml; [print(d["metadata"]["name"], d["rules"]) for d in yaml.safe_load_all(sys.stdin) if d and d.get("kind")=="ClusterRole" and "application-controller" in d["metadata"]["name"]]'
+```
+
+<!-- gate: output -->
+```text
+argocd-application-controller [{'apiGroups': ['*'], 'resources': ['*'], 'verbs': ['*']}, {'nonResourceURLs': ['*'], 'verbs': ['*']}]
+```
+
+That is cluster-admin on the hub, and it is the residual of this design. The
+hub's own controller already holds it, so scoping the member identities does
+not shrink the hub's power. Setting `createClusterRoles=false` removes the
+chart's ClusterRole, and the controller then needs RBAC that this chapter does
+not write. The chapter keeps the default and names the residual. The hub
+therefore needs the strictest controls in the fleet: the Secret rules in the
+section below, and API access limited to the platform team.
 
 The lab rendered the chart, then ran a server-side dry run of the 59 rendered
 objects into the labelled namespace. The dry run accepted all of them, with
@@ -596,21 +647,23 @@ a shell variable and piped straight into `kubectl`. It is never printed and
 never written to disk:
 
 ```sh
-register_member() {  # FILE CONTEXT: write one member's cluster Secret to the hub
+register_member() {  # FILE CONTEXT CLUSTER: write one member's cluster Secret to the hub
   export MEMBER_SERVER MEMBER_CA_B64 MEMBER_TOKEN
-  MEMBER_SERVER=$(kubectl --context "$2" config view --minify -o jsonpath='{.clusters[0].cluster.server}')
+  # The Argo CD pods run inside the kind network. The kubeconfig holds the
+  # host-loopback address, which they cannot reach, so take the internal one.
+  MEMBER_SERVER=$(kind get kubeconfig --internal --name "$3" | awk '/server:/ {print $2; exit}')
   MEMBER_CA_B64=$(kubectl --context "$2" config view --raw --minify -o jsonpath='{.clusters[0].cluster.certificate-authority-data}')
   MEMBER_TOKEN=$(kubectl --context "$2" create token fleet-argocd -n fleet-system --duration=24h)
   envsubst < "$1" | kubectl --context kind-bookstore-hub apply -n argocd -f -
 }
-register_member member-secret-east.yaml kind-bookstore-east
-register_member member-secret-hub.yaml kind-bookstore-hub
+register_member member-secret-east.yaml kind-bookstore-east bookstore-east
+register_member member-secret-hub.yaml kind-bookstore-hub bookstore-hub
 kubectl -n argocd get secret -l argocd.argoproj.io/secret-type=cluster -o name | wc -l
 ```
 
-The lab ran the same function, with the same templates in its own namespace.
-It applied both Secrets as server dry runs, so none was stored. The count at
-the end is zero. After a real apply it reads 2.
+The lab ran the first form of the function, with the same templates in its own
+namespace. It applied both Secrets as server dry runs, so none was stored. The
+count at the end is zero. After a real apply it reads 2.
 
 <!-- gate: output -->
 ```text
@@ -620,16 +673,50 @@ secret/bookstore-hub created (server dry run)
        0
 ```
 
+The function above takes the internal address. The lab ran an earlier form,
+which read the server from the kubeconfig context. For a kind cluster that
+address is host-loopback (`https://127.0.0.1:<port>`), and a pod cannot reach
+it, so that form would have registered members the controllers could not
+contact. The earlier form was applied only as a server dry run, so nothing was
+stored. The lab then read the internal address, and the names on the API
+server certificate, with read-only commands on the lab's kind cluster. It did
+not register a member with the new form:
+
+```sh
+kind get kubeconfig --internal --name sf-pilot | grep 'server:'
+docker exec sf-pilot-control-plane openssl x509 -in /etc/kubernetes/pki/apiserver.crt -noout -ext subjectAltName
+```
+
+<!-- gate: output -->
+```text
+    server: https://sf-pilot-control-plane:6443
+```
+
+<!-- gate: output -->
+```text
+X509v3 Subject Alternative Name:
+    DNS:kubernetes, DNS:kubernetes.default, DNS:kubernetes.default.svc, DNS:kubernetes.default.svc.cluster.local, DNS:localhost, DNS:sf-pilot-control-plane, IP Address:10.96.0.1, IP Address:172.18.0.2, IP Address:127.0.0.1
+```
+
+The internal address names the control-plane container, and the certificate
+lists that name. The same check is the reason the function reads the server
+from `kind get kubeconfig --internal`. The lab cluster is `sf-pilot`; the
+chapter's clusters are `bookstore-hub` and `bookstore-east`, and their names
+follow the same pattern.
+
 The hub is a member too. Its own Argo CD uses the same identity to reach its
 own API, so the hub holds a token to itself. Scope that one the same way.
 
-Rotation is the open problem. A 24-hour token means re-running this function
-every day, from a machine that can reach every member. That machine is itself
-a credential holder. Two ways to remove the stored copy are for later. An
-external secret store can render the Secret from a source that rotates
-(<!-- link-later: 05.05 --> Secrets at scale), and a cloud workload identity
-can let the hub mint its own token from an IAM role instead of holding one
-([Part 10 ch.03](../10-cloud-and-managed-kubernetes/03-cloud-identity.md)).
+Rotation is the open problem, and this chapter does not solve it. A 24-hour
+token means re-running this function every day, from a machine that can reach
+every member. That machine is itself a credential holder. The stored token is
+the weakest form of this design. Two forms avoid storing it. An external
+secret store can render the Secret from a source that rotates, which is how
+[Secrets at scale](05-secrets-at-scale.md) keeps a credential out of Git. A
+cloud workload identity can let the hub mint its own token from an IAM role
+instead of holding one ([Part 10 ch.03](../10-cloud-and-managed-kubernetes/03-cloud-identity.md)).
+This chapter builds neither: kind has no IAM, and the rotating source for
+member tokens is outside its scope. It stores a token and names the cost.
 
 ### 4. One ApplicationSet → the Bookstore on both clusters
 
@@ -815,21 +902,31 @@ kind delete cluster --name bookstore-east
 A hub that holds a token for every member is the most valuable target in the
 fleet. Anyone who reads the cluster Secrets in the hub's `argocd` namespace
 holds every member's token, and the Argo CD controllers read those Secrets
-constantly. Three rules keep one leak from becoming a fleet-wide compromise.
+constantly. Four rules keep one leak from becoming a fleet-wide compromise.
 
 - **Scope each member's token.** The member identity from step 2 acts in one
   namespace and holds nothing cluster-scoped. A stolen token gives one
   namespace on one member. It cannot list other namespaces, read another
   namespace's Secrets, or create PriorityClasses. The lab checked each of
   these with `kubectl auth can-i` and with the token itself. The identity can
-  still read every Secret in `bookstore`, so keep the credentials that matter
-  out of Git and out of that namespace (<!-- link-later: 05.05 -->).
-- **Limit the lifetime.** A TokenRequest token expires. Ask for a duration
-  every time (`--duration=24h` here), because the default is one hour and a
-  long request is honoured. Never create a long-lived token Secret for a
-  member. The Kubernetes documentation calls that a risk and reserves it for
-  cases where the TokenRequest API will not do. Revoke a member at once by
-  deleting its RoleBinding: the token keeps its identity but loses every right.
+  still read every Secret in `bookstore`, because a Deployment needs them. A
+  credential that the namespace holds is therefore readable by the fleet
+  identity. The fleet overlays also render the lab's demo
+  `16-db-credentials.yaml` from Git into every member, so the demo password
+  sits in Git. Before a member holds a real credential, replace that file with
+  an ExternalSecret, as [Secrets at scale](05-secrets-at-scale.md) shows.
+- **Limit the lifetime, and revoke by ServiceAccount.** A TokenRequest token
+  expires. Ask for a duration every time (`--duration=24h` here), because the
+  default is one hour and a long request is honoured. Never create a long-lived
+  token Secret for a member. The Kubernetes documentation calls that a risk and
+  reserves it for cases where the TokenRequest API will not do. Revoking a
+  member means deleting its `fleet-argocd` ServiceAccount, because a
+  TokenRequest token is bound to that ServiceAccount. Deleting the RoleBinding
+  is not enough. The Role lets the token create RoleBindings and Secrets, so a
+  thief could bind another subject to `fleet-deployer`, or create a token
+  Secret for another ServiceAccount in `bookstore`. After you delete the
+  ServiceAccount, list the RoleBindings and Secrets in `bookstore` and remove
+  any the fleet did not create.
 - **Prefer pull.** In the model above the hub reaches out to each member, so
   the hub holds a credential for each one. In a pull model each member runs its
   own reconciler that reads from Git, and the member needs read access to Git
@@ -882,7 +979,10 @@ constantly. Three rules keep one leak from becoming a fleet-wide compromise.
 ARGOCD_CHART_VERSION=10.11.6
 kubectl create namespace argocd
 kubectl label namespace argocd pod-security.kubernetes.io/enforce=restricted pod-security.kubernetes.io/audit=restricted pod-security.kubernetes.io/warn=restricted
-helm install argocd argo/argo-cd -n argocd --version "$ARGOCD_CHART_VERSION" --wait
+helm install argocd argo/argo-cd -n argocd --version "$ARGOCD_CHART_VERSION" --wait \
+  --set global.image.tag="v3.5.6@sha256:8e5cc5bb008df8a09dba439462e58c94c55b7735888d3ebde0c25fc05e4e5335" \
+  --set dex.image.tag="v2.46.1@sha256:65b72ca0f4b0bf6d4ada84ec21da8851782563404ac7b8f926923d27ceced9ab" \
+  --set redis.image.tag="8.6.4-alpine@sha256:2cc044fc5a07c9b701f8f1255a309ae9ad7856e694ac03513bf3648c01e40763"
 
 # Each member: a namespace for the identity, a scoped Role, no automatic token
 kubectl apply -f fleet-identity.yaml
@@ -892,7 +992,7 @@ kubectl auth can-i --list --as=system:serviceaccount:fleet-system:fleet-argocd -
 kubectl create token fleet-argocd -n fleet-system --duration=24h
 
 # Register a member on the hub (writes its cluster Secret; define register_member first)
-register_member member-secret-east.yaml kind-bookstore-east
+register_member member-secret-east.yaml kind-bookstore-east bookstore-east
 
 # One ApplicationSet -> N Applications
 kubectl apply -n argocd -f examples/bookstore/multicluster/05-appproject-fleet.yaml
@@ -969,7 +1069,7 @@ Checklist:
 6. **A member's token leaks. What can the holder do, what can it not do, and how long does it work?**
    <details><summary>Show answer</summary>
 
-   (1) Inside `bookstore` on that member only: create, change and delete the objects the Role lists, and read every Secret in that namespace. It cannot read other namespaces (the lab's `kube-system` read was refused), list Namespaces, or create PriorityClasses, which are cluster-scoped. (2) It works until its expiry, 24 hours here, because the duration was set explicitly. (3) Containment: delete the RoleBinding `fleet-deployer` in `bookstore`, and the token loses every right at once. Then re-check the identity before you mint a new token. The Secrets the namespace holds are the real exposure, which is why they stay out of Git.
+   (1) Inside `bookstore` on that member only: create, change and delete the objects the Role lists, and read every Secret in that namespace. It cannot read other namespaces (the lab's `kube-system` read was refused), list Namespaces, or create PriorityClasses, which are cluster-scoped. (2) It works until its expiry, 24 hours here, because the duration was set explicitly. (3) Containment: delete the `fleet-argocd` ServiceAccount. A TokenRequest token is bound to it, so the token stops working. Deleting only the RoleBinding `fleet-deployer` is not enough, because the token can create RoleBindings and Secrets. After you delete the ServiceAccount, list the RoleBindings and Secrets in `bookstore`, remove any the fleet did not create, and rebuild the identity before you mint a new token. The Secrets the namespace holds are the real exposure, which is why the credentials that matter stay out of Git.
 
    </details>
 

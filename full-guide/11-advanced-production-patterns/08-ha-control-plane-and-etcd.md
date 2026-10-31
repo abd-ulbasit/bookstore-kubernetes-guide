@@ -225,7 +225,7 @@ flowchart TB
 
     clients --> lb
     lb --> a1 & a2 & a3
-    a1 & a2 & a3 -->|"apiserver = the only KUBERNETES component that talks<br/>to etcd; its etcd client load-balances across the<br/>members (endpoints list) and the etcd CLUSTER<br/>forwards writes to the leader internally"| etcdc
+    a1 & a2 & a3 -->|"apiserver = the only KUBERNETES component that talks<br/>to etcd; in stacked mode each apiserver uses the etcd<br/>member on its own node (127.0.0.1:2379); the etcd CLUSTER<br/>forwards writes to the leader internally"| etcdc
     e1 --- e2 --- e3
     etcdc -.-> q
     cm2 -. "leader Lease<br/>(coordination.k8s.io)" .-> a2
@@ -418,10 +418,23 @@ kubectl -n kube-system get pod -l component=kube-apiserver \
 "--etcd-servers=https://127.0.0.1:2379"
 ```
 
-The list has no `--encryption-provider-config`. This cluster therefore stores
-Secrets in etcd without encryption at rest. Section 4 shows what a backup then
-holds, and [05.04](../05-security/04-secrets-and-cluster-hardening.md) covers
-the fix.
+Encryption at rest is a separate flag, and the `grep etcd` above would drop it.
+This count looks for the flag by name, so a zero is a real answer:
+
+```sh
+kubectl -n kube-system get pod -l component=kube-apiserver \
+  -o jsonpath='{.items[0].spec.containers[0].command}' | tr ',' '\n' \
+  | grep -c 'encryption-provider-config'
+```
+
+<!-- gate: output -->
+```text
+0
+```
+
+No `--encryption-provider-config` is set, so this cluster stores Secrets in
+etcd without encryption at rest. Section 4 shows what a backup then holds, and
+[05.04](../05-security/04-secrets-and-cluster-hardening.md) covers the fix.
 
 ### 1. Talk to etcd: member list, endpoint status, endpoint health
 
@@ -650,6 +663,7 @@ docker exec kind-control-plane sh -c 'crictl exec \
   --key=/etc/kubernetes/pki/etcd/server.key \
   snapshot save /var/lib/etcd/etcd-canary.db'
 docker cp kind-control-plane:/var/lib/etcd/etcd-canary.db ./etcd-canary.db
+ls -l ./etcd-canary.db | awk '{print "snapshot bytes:", $5}'
 grep -a -c 'canary-7f3a9c2e' ./etcd-canary.db
 ```
 
@@ -692,24 +706,33 @@ The etcd recovery guide says: "For v3.6 and later, users can only use etcdctl
 to take the data to a snapshot, but use etcdutl to restore data"
 ([etcd recovery](https://etcd.io/docs/latest/op-guide/recovery/)).
 
-Delete the canary Secret with its namespace when you finish:
+The snapshot now sits in two places outside etcd: the node's etcd data
+directory and your working directory. Delete both copies, then the canary
+Secret with its namespace:
 
 ```sh
+rm -f ./etcd-canary.db
+docker exec kind-control-plane rm -f /var/lib/etcd/etcd-canary.db
 kubectl delete namespace etcd-probe
 ```
+
+Protecting the copy you keep is advice here, and the lab did not run it. Mode
+`0600` keeps other local users off the file. It does nothing for a copy that
+leaves the node, so the protection that matters is encryption at rest for the
+Secrets the snapshot holds, plus a store that only the backup role can read.
 
 
 ### 5. Compaction, defragmentation, the space quota and the NOSPACE alarm
 
-**Compaction** discards MVCC history below a revision (Kubernetes' apiserver
-auto-compacts by default: the `--etcd-compaction-interval`, default `5m0s`, it frees
-space *logically only*. **Defragmentation** physically rewrites the backend
-file to reclaim it — and it **blocks the member it runs on** (it holds the
-backend while rewriting), so it is done **one member at a time**, off-peak,
-**and the current Raft leader LAST**: defragging the leader stops it long
-enough to trigger a leader **re-election** (a cluster-wide write blip), so you
-defrag every follower first and the leader last (by which point its load has
-moved):
+**Compaction** discards MVCC history below a revision. The Kubernetes
+apiserver auto-compacts by default, every `--etcd-compaction-interval`
+(`5m0s`), but compaction frees space *logically only*. **Defragmentation**
+physically rewrites the backend file to reclaim it — and it **blocks the
+member it runs on** (it holds the backend while rewriting), so it is done
+**one member at a time**, off-peak, **and the current Raft leader LAST**:
+defragging the leader stops it long enough to trigger a leader **re-election**
+(a cluster-wide write blip), so you defrag every follower first and the leader
+last (by which point its load has moved):
 
 ```sh
 # Manual compaction to a revision (apiserver does this automatically; shown for
@@ -726,18 +749,49 @@ LEADER_EP=$(etcd endpoint status --cluster -w json \
 
 # DEFRAG — ONE MEMBER AT A TIME, FOLLOWERS FIRST, LEADER LAST. Per-endpoint,
 # never --cluster all-at-once (a production script defers $LEADER_EP exactly so):
+# The etcd() helper from section 1 fixes --endpoints to this node's member, so
+# the per-member calls use a helper that takes the endpoint as its first
+# argument. Passing --endpoints to etcd() would add a second endpoint, not
+# replace the first.
+etcd_ep() { ep="$1"; shift; kubectl -n kube-system exec "$ETCD_POD" -- etcdctl \
+  --endpoints="$ep" \
+  --cacert=/etc/kubernetes/pki/etcd/ca.crt \
+  --cert=/etc/kubernetes/pki/etcd/server.crt \
+  --key=/etc/kubernetes/pki/etcd/server.key "$@"; }
+
 EPS=$(etcd member list -w json | python3 -c 'import sys,json;print(" ".join(m["clientURLs"][0] for m in json.load(sys.stdin)["members"]))')
 for EP in $EPS; do
   [ "$EP" = "$LEADER_EP" ] && continue        # skip the leader on this pass
   echo "defrag follower $EP (blocks THIS member only; brief latency spike)"
-  etcd --endpoints="$EP" defrag
+  etcd_ep "$EP" defrag
   sleep 5      # let it settle before the next member (never simultaneous)
 done
 echo "defrag LEADER $LEADER_EP LAST (its load has moved; minimal re-election risk)"
-etcd --endpoints="$LEADER_EP" defrag
+etcd_ep "$LEADER_EP" defrag
 etcd endpoint status --cluster -w json | python3 -m json.tool | grep -E '"dbSize"|"dbSizeInUse"'
 #   dbSize now ≈ dbSizeInUse -> the fragmentation was physically reclaimed.
 ```
+
+Before the loop runs on a live cluster, check its helper with a read-only
+call against the one member. The lab did not repeat the defragmentation,
+which had timed out on this overloaded cluster:
+
+```sh
+etcd_ep "$LEADER_EP" endpoint status -w table
+```
+
+<!-- gate: output -->
+```text
+┌─────────────────────────┬─────────────────┬─────────┬─────────────────┬─────────┬────────┬───────────────────────┬────────┬───────────┬────────────┬───────────┬────────────┬────────────────────┬────────┬──────────────────────────┬───────────────────┐
+│        ENDPOINT         │       ID        │ VERSION │ STORAGE VERSION │ DB SIZE │ IN USE │ PERCENTAGE NOT IN USE │ QUOTA  │ IS LEADER │ IS LEARNER │ RAFT TERM │ RAFT INDEX │ RAFT APPLIED INDEX │ ERRORS │ DOWNGRADE TARGET VERSION │ DOWNGRADE ENABLED │
+├─────────────────────────┼─────────────────┼─────────┼─────────────────┼─────────┼────────┼───────────────────────┼────────┼───────────┼────────────┼───────────┼────────────┼────────────────────┼────────┼──────────────────────────┼───────────────────┤
+│ https://172.18.0.2:2379 │ e58c878e0e01014 │   3.7.0 │           3.7.0 │   49 MB │  15 MB │                   70% │ 2.1 GB │      true │      false │         4 │     167150 │             167150 │        │                          │             false │
+└─────────────────────────┴─────────────────┴─────────┴─────────────────┴─────────┴────────┴───────────────────────┴────────┴───────────┴────────────┴───────────┴────────────┴────────────────────┴────────┴──────────────────────────┴───────────────────┘
+```
+
+The helper sends each call to the endpoint named on its own command line, so
+the loop reaches each member in turn and never the one the helper was built
+with.
 
 The lab did not run the manual compaction: the API server already compacts
 every five minutes, and a second compaction adds nothing. The lab did read the
@@ -1129,15 +1183,17 @@ kind create cluster --name bookstore-ha --config examples/bookstore/platform/ha-
 # etcdctl into kind's etcd static Pod (the etcd image has no shell but ships
 # etcdctl; the app pods don't, so they use `kubectl debug --profile=restricted`)
 E0=$(kubectl -n kube-system get pod -l component=etcd -o jsonpath='{.items[0].metadata.name}')
-ETCD="kubectl -n kube-system exec $E0 -- etcdctl --endpoints=https://127.0.0.1:2379 \
+ETCD="kubectl -n kube-system exec $E0 -- etcdctl \
   --cacert=/etc/kubernetes/pki/etcd/ca.crt --cert=/etc/kubernetes/pki/etcd/server.crt \
   --key=/etc/kubernetes/pki/etcd/server.key"
-$ETCD member list -w table                 # members; quorum = floor(n/2)+1
-$ETCD endpoint status --cluster -w table   # LEADER, DB SIZE, RAFT TERM/INDEX
-$ETCD endpoint health  --cluster -w table  # quorum heartbeat
-$ETCD alarm list                           # NOSPACE/CORRUPT — check FIRST
-$ETCD --endpoints=<ONE-EP> defrag          # ONE at a time, off-peak, LEADER LAST
-$ETCD alarm disarm                         # AFTER freeing space (sticky alarm!)
+$ETCD --endpoints=https://127.0.0.1:2379 member list -w table                 # members; quorum = floor(n/2)+1
+$ETCD --endpoints=https://127.0.0.1:2379 endpoint status --cluster -w table   # LEADER, DB SIZE, RAFT TERM/INDEX
+$ETCD --endpoints=https://127.0.0.1:2379 endpoint health  --cluster -w table  # quorum heartbeat
+$ETCD --endpoints=https://127.0.0.1:2379 alarm list                           # NOSPACE/CORRUPT — check FIRST
+kubectl -n kube-system exec $E0 -- etcdctl --endpoints=<ONE-EP> \
+  --cacert=/etc/kubernetes/pki/etcd/ca.crt --cert=/etc/kubernetes/pki/etcd/server.crt \
+  --key=/etc/kubernetes/pki/etcd/server.key defrag   # ONE at a time, off-peak, LEADER LAST
+$ETCD --endpoints=https://127.0.0.1:2379 alarm disarm                         # AFTER freeing space (sticky alarm!)
 
 # Self-managed kubeadm node (NOT kind; managed = provider's, you can't):
 ETCDCTL_API=3 etcdctl --endpoints=https://127.0.0.1:2379 \

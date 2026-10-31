@@ -221,3 +221,47 @@ $ kubectl get namespaces -o name | grep -c p11-06 || true
 0
 $ kubectl get clusterrole,clusterrolebinding -o name | grep -c p11-06 || true
 0
+
+## Review pass: digest pins and the internal member address (run after the chapter review; the lab host alias is written as lab-host)
+=== step R1: the chart renders the three images by digest (no cluster; the Mac renders) ===
+$ helm template argocd argo/argo-cd --version 10.11.6 --namespace argocd --set global.image.tag="v3.5.6@sha256:8e5cc5bb008df8a09dba439462e58c94c55b7735888d3ebde0c25fc05e4e5335" --set dex.image.tag="v2.46.1@sha256:65b72ca0f4b0bf6d4ada84ec21da8851782563404ac7b8f926923d27ceced9ab" --set redis.image.tag="8.6.4-alpine@sha256:2cc044fc5a07c9b701f8f1255a309ae9ad7856e694ac03513bf3648c01e40763" | grep -o 'image: [^ ]*' | sort | uniq -c
+   1 image: ecr-public.aws.com/docker/library/redis:8.6.4-alpine@sha256:2cc044fc5a07c9b701f8f1255a309ae9ad7856e694ac03513bf3648c01e40763
+   1 image: ghcr.io/dexidp/dex:v2.46.1@sha256:65b72ca0f4b0bf6d4ada84ec21da8851782563404ac7b8f926923d27ceced9ab
+   8 image: quay.io/argoproj/argocd:v3.5.6@sha256:8e5cc5bb008df8a09dba439462e58c94c55b7735888d3ebde0c25fc05e4e5335
+[exit=0]
+$ helm template argocd argo/argo-cd --version 10.11.6 --namespace argocd | grep -o 'image: [^ ]*' | sort | uniq -c
+   1 image: ecr-public.aws.com/docker/library/redis:8.6.4-alpine
+   1 image: ghcr.io/dexidp/dex:v2.46.1
+   8 image: quay.io/argoproj/argocd:v3.5.6
+[exit=0]
+=== step R2: the controller ClusterRole the default chart renders (no cluster; the Mac renders) ===
+$ helm template argocd argo/argo-cd --version 10.11.6 --namespace argocd | grep -A6 'name: argocd-application-controller$' | head -12
+    app.kubernetes.io/name: argocd-application-controller
+    app.kubernetes.io/instance: argocd
+    app.kubernetes.io/component: application-controller
+    app.kubernetes.io/managed-by: Helm
+    app.kubernetes.io/part-of: argocd
+    app.kubernetes.io/version: "v3.5.6"
+  name: argocd-application-controller
+  namespace: argocd
+spec:
+  ingress:
+  - from:
+    - namespaceSelector: {}
+[exit=0]
+=== step R3: the internal kubeconfig address of a kind cluster (read-only, lab host) ===
+$ ssh -o ConnectTimeout=10 lab-host '~/.local/bin/kind-v0.33.0 get kubeconfig --internal --name sf-pilot' | grep 'server:'
+    server: https://sf-pilot-control-plane:6443
+[exit=0]
+$ ssh -o ConnectTimeout=10 lab-host '~/.local/bin/kind-v0.33.0 get kubeconfig --name sf-pilot' | grep 'server:'
+    server: https://127.0.0.1:36011
+[exit=0]
+=== step R4: the API server certificate names the control-plane container (read-only) ===
+$ ssh -o ConnectTimeout=10 lab-host 'docker exec sf-pilot-control-plane openssl x509 -in /etc/kubernetes/pki/apiserver.crt -noout -ext subjectAltName'
+X509v3 Subject Alternative Name: 
+    DNS:kubernetes, DNS:kubernetes.default, DNS:kubernetes.default.svc, DNS:kubernetes.default.svc.cluster.local, DNS:localhost, DNS:sf-pilot-control-plane, IP Address:10.96.0.1, IP Address:172.18.0.2, IP Address:127.0.0.1
+[exit=0]
+=== step R2b: the controller ClusterRole rules, read from the same render (no cluster) ===
+$ helm template argocd argo/argo-cd --version 10.11.6 --namespace argocd | python3 -c 'import sys,yaml; [print(d["metadata"]["name"], d["rules"]) for d in yaml.safe_load_all(sys.stdin) if d and d.get("kind")=="ClusterRole" and "application-controller" in d["metadata"]["name"]]'
+argocd-application-controller [{'apiGroups': ['*'], 'resources': ['*'], 'verbs': ['*']}, {'nonResourceURLs': ['*'], 'verbs': ['*']}]
+[exit=0]
