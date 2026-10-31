@@ -7,7 +7,7 @@
 > [`incident/`](../examples/bookstore-platform/incident/) artefact tree
 > end-to-end and surfaces the three production traps: alerts without
 > runbooks, services without owners, and the "we'll write the
-> postmortem next week" trap that wastes 60 % of postmortems.
+> postmortem next week" trap that leaves postmortems unwritten.
 
 **Estimated time:** ~45 min read · ~90 min hands-on
 **Prerequisites:** [Part 13 ch.12](../13-grand-capstone-bookstore-platform/12-day-2-runbook-on-call-dr-chaos.md) — Part 13 runbook/on-call/postmortem foundation · [Part 06 ch.01](../06-production-readiness/01-observability-metrics.md) — SLOs that drive paging thresholds · [Part 15 ch.09](./09-hotfix-workflow-and-breakglass.md) — hotfix lane the resolve phase often invokes
@@ -107,18 +107,27 @@ The four phases visualized:
   section 7 before any clean-up.
 - **Phase 3 — Resolve (minutes to hours; on-call + responders).** Walk
   Steps 2-4 of the runbook (Diagnose → Mitigate). The goal is
-  **mitigation**, not root-cause fix. Rollback. Scale. Patch. Three
+  **mitigation**, not root-cause fix. Rollback. Scale. Patch. Every
+  mitigation goes through Git, so that Argo CD does not revert it
+  (see [15.01](./01-pr-to-production-lifecycle.md): Git is the only
+  write path to production, and self-heal reverts drift). Three
   example mitigations:
-  - **Rollback** (Argo Rollouts abort → previous version): usually the
-    quickest. Always the first option if the cause is "a recent
+  - **Rollback** (revert the release commit, or Argo Rollouts abort →
+    previous version, per [15.07](./07-rollback-playbook.md)): usually
+    the quickest. Always the first option if the cause is "a recent
     deploy."
-  - **Scale-up** (kubectl scale deployment → more replicas): quick when
-    the pods fit on existing nodes; new nodes take longer. The mitigation for
-    capacity-related failures.
-  - **Patch** (ConfigMap edit → rolling restart): a rolling restart after
-    the edit. The
-    mitigation when a misconfiguration is the cause and rollback
-    isn't viable.
+  - **Scale-up** (raise `replicas` in the GitOps repo and merge): quick
+    when the pods fit on existing nodes; new nodes take longer. The
+    mitigation for capacity-related failures.
+  - **Patch** (commit the ConfigMap change, then let Argo CD sync and
+    restart the pods): the mitigation when a misconfiguration is the
+    cause and rollback isn't viable.
+  - **Live edit** (`kubectl scale`, `kubectl edit`, `kubectl set image`)
+    is an exception, not a mitigation. Self-heal reverts it within
+    minutes unless you pause auto-sync for that Application first. If
+    you use it, label it in the incident channel, pause auto-sync, make
+    the change, and commit the same change back to Git before you close
+    the incident. An unlabelled live edit is an audit finding.
   Customer-visible impact ends; status page updates to "monitoring";
   after a 15-minute clean window, "resolved."
 - **Phase 4 — Learn (5 business days; IC + author + team).** The IC
@@ -165,7 +174,7 @@ in the incident loop longer than necessary (high customer impact).
 
 | Threat | Control | Deeper |
 |---|---|---|
-| A compromised workload keeps acting while the team debates, or a delete destroys the evidence | Isolate first with a quarantine label and a deny-all NetworkPolicy, capture what kubectl can read, then delete (hands-on section 7) | 05.08 <!-- link-later: 05.08 --> for the attack and capture beyond kubectl |
+| A compromised workload keeps acting while the team debates, or a delete destroys the evidence | Isolate first with a quarantine label and a deny-all NetworkPolicy, capture what kubectl can read, roll back through Git, rotate, then delete (hands-on section 7). The label does not reliably end connections that are already open | 05.08 <!-- link-later: 05.08 --> for the attack and capture beyond kubectl |
 | Routing keys or other credentials typed into the response stay in shell history or chat | Deliver them as an ExternalSecret from Vault, and rotate on exposure | [15.05](./05-production-secrets-vault-eso.md), [11.05](../11-advanced-production-patterns/05-secrets-at-scale.md) |
 | Emergency access granted during the incident and never taken back | A time-boxed breakglass role that alerts on use | [15.09](./09-hotfix-workflow-and-breakglass.md) |
 
@@ -296,8 +305,13 @@ ExternalSecret syncs them into the `pagerduty-keys` Secret that the receivers
 read. Do not use `kubectl create secret --from-literal` for this: the literal
 lands in your shell history. Store each key in Vault once, through the Vault
 UI or with `vault kv put` and the `key=@file` form, so the value stays off the
-command line. Save the block below as `pagerduty-keys-externalsecret.yaml`. It
-uses the `vault-monitoring` SecretStore from the prerequisites.
+command line. Save the block below as `incident-secrets-externalsecret.yaml`. It
+uses the `vault-monitoring` SecretStore from the prerequisites. It has two
+documents: the PagerDuty routing keys, and the Slack webhook that the P3 and
+hygiene receivers read. The AlertmanagerConfig references both Secrets, and
+the operator rejects the whole configuration when a referenced Secret is
+missing, so the P0 route fails along with the rest. Create both before you
+apply the configuration.
 
 ```yaml
 apiVersion: external-secrets.io/v1
@@ -320,14 +334,31 @@ spec:
       remoteRef: { key: bookstore/pagerduty, property: p1-routing-key }
     - secretKey: p2-routing-key
       remoteRef: { key: bookstore/pagerduty, property: p2-routing-key }
+---
+apiVersion: external-secrets.io/v1
+kind: ExternalSecret
+metadata:
+  name: slack-webhooks
+  namespace: monitoring
+spec:
+  refreshInterval: "1h"
+  secretStoreRef:
+    name: vault-monitoring
+    kind: SecretStore
+  target:
+    name: slack-webhooks
+    creationPolicy: Owner
+  data:
+    - secretKey: bookstore-alerts-webhook
+      remoteRef: { key: bookstore/slack, property: bookstore-alerts-webhook }
 ```
 
 `ExternalSecret` is a CRD from External Secrets Operator. Until the operator
 is installed, a dry-run reports `no matches for kind "ExternalSecret"`.
 
 ```bash
-kubectl apply -f pagerduty-keys-externalsecret.yaml
-kubectl -n monitoring get externalsecret pagerduty-keys
+kubectl apply -f incident-secrets-externalsecret.yaml
+kubectl -n monitoring get externalsecret pagerduty-keys slack-webhooks
 
 # Apply the AlertmanagerConfig and the sample PrometheusRule.
 kubectl apply -f examples/bookstore-platform/incident/pagerduty-integration.yaml
@@ -356,7 +387,8 @@ curl -X POST http://localhost:9093/api/v2/alerts -H "Content-Type: application/j
     "alertname": "BookstoreSynthetic",
     "severity": "P0",
     "service": "checkout",
-    "region": "us-east-1"
+    "region": "us-east-1",
+    "namespace": "monitoring"
   },
   "annotations": {
     "summary": "Synthetic test alert — please ack and resolve",
@@ -365,6 +397,13 @@ curl -X POST http://localhost:9093/api/v2/alerts -H "Content-Type: application/j
   }
 }]'
 ```
+
+The `namespace` label is required, not decorative. The Prometheus Operator
+scopes an AlertmanagerConfig to alerts whose `namespace` label equals the
+config's own namespace (`monitoring` here), unless the Alertmanager sets
+`alertmanagerConfigMatcherStrategy` to `None`. An alert without the label
+falls through to the default receiver. The sample PrometheusRule carries the
+same label for the same reason.
 
 A page should arrive in PagerDuty's high-urgency policy within 30
 seconds. Verify in the PagerDuty UI:
@@ -384,6 +423,12 @@ test should take < 5 minutes end-to-end.
 Trigger a real-shape failure on purpose: scale the `payments-gateway`
 deployment to zero in the bookstore namespace. This is a deliberate
 action for the drill; never run it against production traffic.
+
+Run the drill in a namespace whose Argo CD Application has self-heal off.
+In a namespace with self-heal on, Argo CD restores `replicas: 3` within
+minutes, and the drill measures the restore instead of the alert path. The
+drill is the only place in this chapter where a live scale is the point; the
+mitigation below goes through Git.
 
 ```bash
 # (Run in a dedicated terminal; this is the "incident" being created)
@@ -409,11 +454,18 @@ if Incident.io is wired).
 runbook (`runbook-payments-failure-rate.md`) Step 1 (Check) is
 `kubectl get pods -l app=payments-gateway` — confirms the pod count
 is 0; the alert is real. Step 2 (Diagnose) walks to "deployment
-recently scaled to 0?" Step 3 (Mitigate) is `kubectl scale
-deployment payments-gateway --replicas=3`. Run the mitigation:
+recently scaled to 0?" Step 3 (Mitigate) is to restore
+`replicas: 3`. Run the mitigation through Git: set `replicas: 3` for
+`payments-gateway` in the GitOps overlay, open the PR, and merge it. Argo CD
+syncs the change. If you must use a live scale for speed, pause auto-sync on
+the Application first, label the action in the incident channel, and commit
+the same replica count back before you close the incident.
 
 ```bash
-kubectl -n bookstore-platform-acme-books scale deployment payments-gateway --replicas=3
+# In the GitOps repo: set replicas: 3 for payments-gateway, open a PR, and
+# merge it after review. Then wait for Argo CD to converge (<APP> is the
+# Application that owns the overlay):
+argocd app wait <APP> --health --sync
 ```
 
 Watch the error rate drop. Update the status page: "Mitigation
@@ -487,16 +539,19 @@ anti-pattern.
 
 Use this path when the signal is a security one: an unexpected shell in a
 running container, a credential used from an address you do not know, or a
-process nobody can explain. Rollback is still the usual fix for a bad
-deploy, but it deletes the pods it replaces, so run the first three steps
-before any rollback or delete. The order is isolate, capture, rotate, then
-delete. Isolation keeps the pod and its state alive. Capture reads what
-kubectl can see before anything goes away. Rotation waits for isolation, so
-the pod cannot read the new values.
+process nobody can explain. The order is isolate, capture, roll back, rotate,
+then delete. Isolation keeps the pod and its state alive while you work.
+Capture reads what kubectl can see before anything goes away. Rollback is the
+usual fix for a bad deploy, but a rollout scales the old ReplicaSet down, and
+that can delete the suspect pod before you have read it. So the rollback comes
+after capture, not before. Rotation invalidates the values the pod could
+already read. It does not keep new values from the pod, as the Rotate step
+explains.
 
 Keep this policy in the namespace before any incident, so that the response
-is one label. A NetworkPolicy that selects pods and lists no rules denies all
-their traffic in both directions ([Kubernetes NetworkPolicy
+is one label. A NetworkPolicy that selects pods and lists no rules denies the
+traffic that new connections would carry, in both directions ([Kubernetes
+NetworkPolicy
 docs](https://kubernetes.io/docs/concepts/services-networking/network-policies/)).
 Save the block as `quarantine-deny-all.yaml` and apply it once:
 
@@ -523,6 +578,16 @@ Policies add up. An allow policy that also selects the pod, such as a
 namespace-wide allow with an empty `podSelector`, still lets its traffic
 through. Check the namespace for one before you rely on the quarantine.
 
+The quarantine has three limits you must plan around. It stops new flows; it
+does not reliably end flows that are already open. The Kubernetes docs leave
+it to the network plugin whether a change to a pod's labels or policies
+applies to an existing connection (the section "NetworkPolicy's impact on
+existing connections"). A reverse shell or command-and-control stream may keep
+running after the label goes on. Second, the policy does not stop traffic from
+the pod's own node, which is always allowed, so kubelet probes still reach the
+pod. Third, the policy is not the only control: the rotation and the delete
+below do the work that the label cannot.
+
 **Isolate.** Removing the `app` label takes the pod out of the Service and the
 ReplicaSet, which the bookstore manifests select on. The ReplicaSet starts a
 replacement, and the suspect pod keeps running:
@@ -533,9 +598,9 @@ POD=suspect-pod-name   # the suspect pod's name
 kubectl -n "$NS" label pod "$POD" quarantine=true app-
 ```
 
-If the image is the suspect, roll the Deployment back to a known-good digest
-([15.07](./07-rollback-playbook.md)) before you remove the label. The
-replacement starts at once, and it runs the same image otherwise.
+Removing the label also starts a replacement from the same ReplicaSet, which
+runs the same image. Nothing about the suspect pod changes; it keeps running
+under the quarantine policy until you delete it.
 
 **Capture.** Save what kubectl can read before the pod restarts or goes away:
 
@@ -559,12 +624,30 @@ container's disk.
 That capture belongs to the attack analysis in 05.08
 <!-- link-later: 05.08 -->.
 
+**Roll back.** If the image is the suspect, roll the Deployment back to a
+known-good digest, through Git, as [15.07](./07-rollback-playbook.md)
+describes. The rollout creates a ReplicaSet for the known-good digest and
+scales the old one down. The isolated pod no longer matches the old
+ReplicaSet's selector, so the rollout leaves it running. Wait until the
+replacement is Ready on the known-good digest before you continue:
+
+```bash
+kubectl -n "$NS" rollout status deployment/<DEPLOYMENT>
+kubectl -n "$NS" get pods -l app=<LABEL> \
+  -o custom-columns=NAME:.metadata.name,IMAGE:.spec.containers[*].image
+```
+
 **Rotate.** Rotate the credentials the pod could read, through the
 ExternalSecret path in [15.05](./05-production-secrets-vault-eso.md), so the
-values it holds stop working. Then remove the pod's ServiceAccount from its
-RoleBindings, as [05.01](../05-security/01-authn-authz-rbac.md) describes, so
-its token stops authorizing API calls. A dedicated ServiceAccount keeps this
-from touching other workloads.
+values it already holds stop working. Then remove the pod's ServiceAccount from
+its RoleBindings, as [05.01](../05-security/01-authn-authz-rbac.md) describes,
+so its token stops authorizing API calls. A dedicated ServiceAccount keeps this
+from touching other workloads. Rotation does not keep new values from the
+isolated pod. The kubelet updates a Secret mounted as a volume in place, so
+the quarantined pod can read the rotated value. Only a Secret read as an
+environment variable stays at the old value, and only until the pod restarts.
+Do not treat the egress block as the control that protects the new values,
+because it does not end open connections. Delete the pod soon after rotation.
 
 **Delete.** Only now:
 
@@ -572,14 +655,24 @@ from touching other workloads.
 kubectl -n "$NS" delete pod "$POD"
 ```
 
-The Deployment starts a replacement from the digest it names. Pin that digest
-to one that [15.03](./03-image-signing-and-provenance.md) verified.
+Deleting the orphaned pod starts nothing new. The ReplicaSet already started
+its replacement when the label went, and the rollback already moved the
+workload to the known-good digest. Check the replacement's image digest
+against the one [15.03](./03-image-signing-and-provenance.md) verified before
+you call the workload clean.
 
-Check that the policy holds. From a healthy pod in the namespace, send a
-request to the quarantined pod's IP with a short timeout, for example
-`curl --max-time 3`. The expected result, which this chapter has not captured,
-is usually a timeout rather than a connection refused, because most
-policy engines drop packets instead of rejecting them. The request is a deliberate test of a denial.
+Check the policy before you rely on it, with two tests:
+
+- From a healthy pod in the namespace, send a new request to the quarantined
+  pod's IP with `curl --max-time 3`. Expect a timeout, not a connection
+  refused, because most policy engines drop packets.
+- Before you apply the label, open a long-lived TCP connection from a healthy
+  pod to a port the suspect pod serves, and keep it open. After the label, see
+  whether that connection still carries data. Your network plugin decides
+  this, and the upstream docs say so. Record what your plugin does.
+
+Neither result is captured in this chapter. The expected outcomes are the
+ones above, not measured ones.
 
 ## How it works under the hood
 
@@ -825,12 +918,13 @@ kubectl apply -f pagerduty-keys-externalsecret.yaml
 # 3. Test the route tree with a synthetic alert
 kubectl -n monitoring port-forward svc/alertmanager-operated 9093:9093 &
 curl -X POST http://localhost:9093/api/v2/alerts -H "Content-Type: application/json" \
-  -d '[{"labels":{"alertname":"BookstoreSynthetic","severity":"P0","service":"checkout","region":"us-east-1"},"annotations":{"summary":"test","runbook_url":"https://example.com/runbook","dashboard_url":"https://example.com/dashboard"}}]'
+  -d '[{"labels":{"alertname":"BookstoreSynthetic","severity":"P0","service":"checkout","region":"us-east-1","namespace":"monitoring"},"annotations":{"summary":"test","runbook_url":"https://example.com/runbook","dashboard_url":"https://example.com/dashboard"}}]'
 
-# 4. Walk a real-shape incident (scale payments-gateway to zero, as a drill)
+# 4. Walk a real-shape incident (scale payments-gateway to zero, as a drill,
+#    in a namespace whose Application has self-heal off)
 kubectl -n bookstore-platform-acme-books scale deployment payments-gateway --replicas=0
-# wait for page; ack; open runbook; mitigate
-kubectl -n bookstore-platform-acme-books scale deployment payments-gateway --replicas=3
+# wait for page; ack; open runbook; mitigate through Git (replicas: 3 in the
+# GitOps overlay, reviewed and merged), not with a live scale
 
 # 5. Open the sample postmortem to see what "good" looks like
 $PAGER examples/bookstore-platform/incident/sample-postmortem-2026-04-15.md
@@ -839,7 +933,8 @@ $PAGER examples/bookstore-platform/incident/sample-postmortem-2026-04-15.md
 cp examples/bookstore-platform/incident/oncall-handoff-template.md \
    docs/handoffs/$(date -u +%Y-%m-%d).md
 
-# 7. Security signal: quarantine the pod (label it, do not delete it)
+# 7. Security signal: quarantine the pod (label it, capture, roll back through
+#    Git, rotate, then delete; a label does not reliably end open connections)
 kubectl -n bookstore-platform-acme-books label pod "$POD" quarantine=true app-
 ```
 
@@ -906,7 +1001,8 @@ Incident-response checklist (the lifecycle is healthy when all six are yes):
 4. **An alert fires at 03:14 with no `runbook_url` annotation. The on-call has 5 minutes to triage. What does the chapter say should happen — both to this incident and to the alert definition?**
    <details><summary>Show answer</summary>
 
-   For *this* incident: the on-call has to do the runbook walk from scratch — dashboard URL (also mandatory), then guess based on the alert name. This is the worst-case triage shape; expected time-to-mitigation is 2-5x longer than with a runbook. For the *alert definition*: the chapter's discipline is a CI lint that fails any PR adding a `PrometheusRule` without both `runbook_url` and `dashboard_url` annotations. The example repo does not ship that lint yet, so a team adds it. The post-incident action item ships the missing runbook before the next quarter. The general principle: an un-actionable page is a noise contribution to burnout — and most "noisy" alert systems are noisy because too many alerts lack the metadata to triage.
+   For *this* incident: the on-call has to do the runbook walk from scratch — dashboard URL (also mandatory), then guess based on the alert name. This is the worst-case triage shape; expected time-to-mitigation is longer than with a runbook, and this chapter
+does not put a number on the difference. For the *alert definition*: the chapter's discipline is a CI lint that fails any PR adding a `PrometheusRule` without both `runbook_url` and `dashboard_url` annotations. The example repo does not ship that lint yet, so a team adds it. The post-incident action item ships the missing runbook before the next quarter. The general principle: an un-actionable page is a noise contribution to burnout — and most "noisy" alert systems are noisy because too many alerts lack the metadata to triage.
 
    </details>
 

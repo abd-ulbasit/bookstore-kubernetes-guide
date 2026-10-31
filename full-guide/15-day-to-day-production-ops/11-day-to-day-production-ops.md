@@ -11,7 +11,7 @@
 > and the ops-time-vs-feature-time balance.
 
 **Estimated time:** ~30 min read · ~60 min hands-on
-**Prerequisites:** [Part 15 ch.10](./10-incident-response-and-on-call.md) — the reactive side this chapter complements with the proactive side · [Part 14 ch.06](../14-eks-in-production-a-to-z/06-cost-guardrails.md) — cost-review inputs · [Part 11 ch.04](../06-production-readiness/06-capacity-and-cost.md) — proactive ops framing
+**Prerequisites:** [Part 15 ch.10](./10-incident-response-and-on-call.md) — the reactive side this chapter complements with the proactive side · [Part 14 ch.06](../14-eks-in-production-a-to-z/06-cost-guardrails.md) — cost-review inputs · [Part 06 ch.06](../06-production-readiness/06-capacity-and-cost.md) — proactive ops framing
 
 **You'll know after this:** • run the weekly/monthly/quarterly ops cadence (Monday cost review, biweekly capacity review, weekly on-call review, monthly postmortem review) · • make scaling decisions intentionally — when to add a NodePool, when to bump the system-node-group, when (mostly never) to add Cluster Autoscaler alongside Karpenter · • execute the 90-day check-in "do we still have the right cluster shape" · • avoid the three production traps (no one owns ops, "we'll automate that later", ops-time-vs-feature-time imbalance) · • measure team ops maturity via a small ratio dashboard (ops-time%, hotfix-PR-count, missed-postmortem-count) · • keep security controls from expiring quietly (exception renewals, access review, digest patch review)
 
@@ -139,10 +139,11 @@ decision:
    to the next-larger instance class (m6i.large → m6i.xlarge);
    roll the nodes one at a time.
 4. **Cluster CPU/memory headroom approaches 0 during peak**.
-   Decision: **bump the Karpenter NodePool's `limits` AND bump the
-   per-NodePool `nodeClassRef` to larger instance types.** Without
-   the first, Karpenter won't add nodes; without the second, the
-   nodes Karpenter adds will hit the same per-node limit.
+   Decision: **raise the Karpenter NodePool's `limits` AND widen its
+   `requirements` to larger instance sizes.** `nodeClassRef` points at an
+   EC2NodeClass (AMI, subnets, security groups); it does not choose instance
+   types. Without the first, Karpenter won't add nodes; without the second,
+   the nodes Karpenter adds will hit the same per-node size limit.
 
 The decision **not** to make: **enabling Cluster Autoscaler
 alongside Karpenter**. This is almost never the right call.
@@ -204,7 +205,7 @@ CAPACITY-REVIEW OBSERVATION                                   DECISION
 A single NodePool is at >80% utilization for the last 7 days  Bump that pool's max limits (limits.cpu, limits.memory)
 A workload doesn't fit any existing NodePool's requirements   Add a NEW NodePool (additive; existing pools untouched)
 System-node-group is at >70% memory                          Bump system-node-group instance size (m6i.large -> xlarge)
-Cluster headroom approaches 0 during peak                     Bump Karpenter limits AND bump NodePool nodeClassRef
+Cluster headroom approaches 0 during peak                     Raise Karpenter limits AND widen NodePool requirements to larger sizes
 NodePool is consistently below 30% utilization               Delete the pool (or merge into a sibling pool)
 A workload would benefit from spot pricing                   Add a spot NodePool with the workload's matching requirements
 ─────────────────────────────────────────────────────────     ──────────────────────────────────────────────
@@ -329,10 +330,12 @@ The capacity review walks the Karpenter consolidation history + the
 cluster headroom:
 
 ```bash
-# Look at Karpenter's recent consolidation activity (the "did pods
-# get bin-packed or did Karpenter add nodes?" question)
-kubectl logs -n kube-system -l app.kubernetes.io/name=karpenter \
-  --since=14d | grep -E "(consolidat|disrupt)" | head -50
+# Karpenter's disruption decisions over 14 days, by NodePool and reason (the
+# "did pods get bin-packed, or did Karpenter add nodes?" question). Pod logs
+# do not keep 14 days of history, so read the controller's counter from
+# Prometheus. If your retention is shorter than 14 days, shorten the window.
+#   sum by (nodepool, decision, reason) (
+#     increase(karpenter_voluntary_disruption_decisions_by_nodepool_total[14d]))
 
 # Cluster-wide CPU/memory utilization (last 14 days)
 # (assuming kube-prometheus-stack installed)
@@ -470,6 +473,25 @@ which fails an entry whose expiry has passed. For each third-party image,
 compare its digest pin with the upstream tag it came from. A patched digest
 ships as a pull request through the pipeline, not as an in-place edit.
 
+The read-only commands for both checks are below. The output is illustrative,
+not captured.
+
+```bash
+# Exceptions: the namespaces above restricted, with their levels and expiry
+kubectl get ns -L pod-security.kubernetes.io/enforce
+yq '.exceptions[] | [.namespace, .level, .expires] | @tsv' security/namespace-exceptions.yaml
+
+# Digest pins: the digest each manifest pins, and the digest the upstream
+# tag resolves to today. A difference means a patch is available.
+grep -rhoE 'image: [^ ]+@sha256:[0-9a-f]{64}' helm/ | sort -u
+crane digest <IMAGE>:<UPSTREAM_TAG>
+```
+
+```text
+# Illustrative output of the yq command (not captured):
+falco	privileged	2027-06-30
+```
+
 Output: a quarterly platform health doc updated with:
 
 - Action-item closure rate this month (target >80 %)
@@ -506,6 +528,27 @@ Are we still happy with the auth + admission stack?       Security eng          
 Who still holds cluster-admin and standing grants?      Security eng           RBAC audit PR, breakglass check
 ─────────────────────────────────────────────────────────   ──────────────────    ────────────────────
 ```
+
+The access row needs a query, not a memory. These commands only read:
+
+```bash
+# Subjects bound to cluster-admin or the platform admin role, cluster-wide
+kubectl get clusterrolebindings -o json | jq -r '
+  .items[] | select(.roleRef.name=="cluster-admin" or .roleRef.name=="bookstore-platform-admin")
+  | .metadata.name as $b | (.subjects // [])[] | "\($b)\t\(.kind)\t\(.name)"'
+
+# The same, for namespaced RoleBindings
+kubectl get rolebindings -A -o json | jq -r '
+  .items[] | select(.roleRef.name=="cluster-admin" or .roleRef.name=="bookstore-platform-admin")
+  | "\(.metadata.namespace)/\(.metadata.name)" as $b | (.subjects // [])[] | "\($b)\t\(.kind)\t\(.name)"'
+
+# On EKS, the access entries that map IAM principals into the cluster
+aws eks list-access-entries --cluster-name <CLUSTER>
+```
+
+Every line the commands print is a standing grant to review. A group subject
+is a Keycloak group in this guide, so its members need the same review in the
+identity provider.
 
 Output: a `docs/cluster-shape/YYYY-QN.md` doc + a roadmap of
 strategic action items for the next quarter. The 90-day check-in
@@ -551,9 +594,9 @@ weekly; ad-hoc-as-needed). Each of the four follows how fast its
 signal changes:
 
 - **Cost requires weekly review** because cost surprises compound.
-  A 20 % budget overrun caught in week 1 is a $X surprise; the
-  same overrun caught in week 4 is a $4X surprise. The compounding
-  forces weekly cadence.
+  An overrun caught in week 1 has had less time to grow than the same
+  overrun caught in week 4, and the gap widens with each unnoticed week.
+  The compounding forces weekly cadence.
 - **Capacity requires biweekly review** because Karpenter handles
   the day-to-day; the human review is about pool inventory, which
   changes on the scale of weeks, not days. Biweekly is the
@@ -699,8 +742,8 @@ running "just in case"; it isn't earning its operational cost.
 > = the team is either ignoring ops (it'll catch up) or running a
 > very mature platform (rare; verify).
 >
-> The split is a share of the team's people, not of its hours. In a
-> small team each cadence point falls on fewer people, so a missed one is
+> The split is a share of the team's hours, measured as section 6
+> describes. In a small team each cadence point falls on fewer people, so a missed one is
 > felt sooner. Below 3 engineers, the team does ops ad hoc and the cadence
 > collapses into "we'll meet when something breaks."
 
@@ -776,8 +819,11 @@ $EDITOR docs/cost-reviews/$(date -u +%Y-%m-%d).md  # fill in
 
 # BIWEEKLY FRIDAY — capacity review (45 min, eng-on-deck)
 kubectl get nodepool -o yaml > docs/capacity-reviews/$(date -u +%Y-%m-%d)-nodepools.yaml
-kubectl logs -n kube-system -l app.kubernetes.io/name=karpenter --since=14d | \
-  grep -E "(consolidat|disrupt)" > docs/capacity-reviews/$(date -u +%Y-%m-%d)-karpenter.log
+# PROM_URL is your Prometheus HTTP endpoint. Karpenter disruption decisions,
+# 14 days, by NodePool and reason (section 2 explains the query):
+curl -sG "$PROM_URL/api/v1/query" \
+  --data-urlencode 'query=sum by (nodepool, decision, reason) (increase(karpenter_voluntary_disruption_decisions_by_nodepool_total[14d]))' \
+  > docs/capacity-reviews/$(date -u +%Y-%m-%d)-karpenter.json
 $EDITOR docs/capacity-reviews/$(date -u +%Y-%m-%d).md  # write doc + decisions
 
 # WEEKLY FRIDAY — on-call review (30 min, outgoing primary)
@@ -878,7 +924,7 @@ Day-to-day ops checklist (the cadence is healthy when all six are yes):
 4. **Hands-on extension — run the Monday cost-review for the bookstore platform: open OpenCost + AWS Budgets, compare last week's spend, post the three numbers (total spend, $/tenant top-5, biggest WoW delta) in the team channel.**
    <details><summary>What you should see</summary>
 
-   The total-spend number should match within ~24h-lag of Cost Explorer's reported figure. The $/tenant top-5 surfaces who's actually consuming compute — if the top tenant is "platform" (cluster-internals like Argo CD, Prometheus, Falco) that's expected; if it's a customer tenant with 5x the typical share, that's the conversation. The biggest WoW delta catches the surprises: a new test cluster someone spun up, a Karpenter pool that drifted up, an EBS snapshot lifecycle that's accumulating. The exercise's value isn't the numbers themselves; it's that **someone looks every Monday** — surprises caught in week 1 are 10x cheaper to fix than surprises caught in week 4.
+   The total-spend number should match within ~24h-lag of Cost Explorer's reported figure. The $/tenant top-5 surfaces who's actually consuming compute — if the top tenant is "platform" (cluster-internals like Argo CD, Prometheus, Falco) that's expected; if it's a customer tenant with 5x the typical share, that's the conversation. The biggest WoW delta catches the surprises: a new test cluster someone spun up, a Karpenter pool that drifted up, an EBS snapshot lifecycle that's accumulating. The exercise's value isn't the numbers themselves; it's that **someone looks every Monday** — surprises caught in week 1 are usually cheaper to fix than the same surprises caught in week 4, because they have had less time to spread.
 
    </details>
 

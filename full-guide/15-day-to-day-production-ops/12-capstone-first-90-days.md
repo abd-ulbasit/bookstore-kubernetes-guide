@@ -180,7 +180,7 @@ decay**.
 
 | Threat | Control | Deeper |
 |---|---|---|
-| The previous owner's access outlives the handover: cluster admin, Vault, CI secrets, PagerDuty admin | Inventory every holder on Day 1. Cut privileged access at the Day 31 cutover and rotate the secrets they could read. Secondary duty needs read-only access plus break-glass. | [Part 05 ch.01](../05-security/01-authn-authz-rbac.md) (RBAC); [ch.15.05](./05-production-secrets-vault-eso.md); [ch.15.09](./09-hotfix-workflow-and-breakglass.md) |
+| The previous owner's access outlives the handover: cluster admin, Vault, CI secrets, PagerDuty admin | Inventory every holder on Day 1. Cut privileged access at the Day 31 cutover and rotate the secrets they could read. After the cutover the secondary has no standing cluster access. This guide has no time-limited Kubernetes break-glass, so a Kubernetes-side incident goes to the primary, or to a namespace-scoped RoleBinding that a platform admin adds through a reviewed PR and removes afterwards. | [Part 05 ch.01](../05-security/01-authn-authz-rbac.md) (RBAC); [ch.15.05](./05-production-secrets-vault-eso.md); [ch.15.09](./09-hotfix-workflow-and-breakglass.md) |
 | Tribal shortcuts ("just `kubectl edit` it") bypass the change path | Write the change path down in Phase 1. Ship every solo change as a PR through Argo CD. Retire the shortcuts on the cutover date. | [ch.15.01](./01-pr-to-production-lifecycle.md); [ch.15.04](./04-multi-environment-promotion.md) |
 
 ## Diagrams
@@ -240,25 +240,28 @@ PHASE       DAY      DELIVERABLE                              CHAPTER REF       
 ─────       ─────    ─────────────────────────────────────    ─────────────────      ────────────────────────────────────────
 Inherit     1-3      cluster access verified                  Part 14 ch.02          kubectl get nodes returns ready nodes
 Inherit     3-7      lifecycle + CI/CD pipeline traced        ch.15.01 + ch.15.02    one PR walked end-to-end, screenshots in wiki
-Inherit     7-14     runbooks read; promotion path mapped     ch.15.04 + ch.15.07    wiki page: "the bookstore-platform release flow"
+Inherit     7-14     all prior Part 15 chapters read          Part 15 ch.01-11       notes file per chapter in team wiki
 Inherit    14-21     shadow on-call for one rotation          ch.15.10               on-call shadow log, 3+ pages observed
-Inherit    21-28     alert routing audit + backup audit       ch.15.10 + Part 14 ch.14  test page received; velero get backups clean
+Inherit    21-25     alert routing audit                      ch.15.10               test incident closed, runbook link current
+Inherit    25-28     backup audit (read-only)                 Part 14 ch.14          velero get backups: every backup Completed
 Inherit    28-30     Day-30 review meeting                    this chapter           gate answered yes; written sign-off
 ─────       ─────    ─────────────────────────────────────    ─────────────────      ────────────────────────────────────────
-Own        31        cut previous owner's privileged access   ch.15.05 + ch.15.09    auth can-i denies their principal
-Own        31-35     ack first synthetic page solo            ch.15.10               synthetic incident closed, response < target
-Own        35-40     write first training postmortem          ch.15.10               postmortem file in runbooks/postmortems/
-Own        40-45     rotate one secret end-to-end             ch.15.05               vault rotation log + pod restart confirmed
-Own        45-50     promote one change dev->staging->prod    ch.15.04 + ch.15.06    Argo CD UI shows Synced; Rollout AnalysisRun pass
-Own        50-55     drill the rollback playbook              ch.15.07               argo rollouts undo executed in <5min on staging
-Own        55-60     Day-60 review meeting                    this chapter           gate answered yes; written sign-off
+Own        31        cut previous owner's privileged access   ch.15.05 + ch.15.09    subject enumeration empty; can-i denies
+Own        31-35     ack first synthetic page, then postmortem ch.15.10               synthetic incident closed; postmortem filed
+Own        35-40     rotate one secret end-to-end             ch.15.05               vault rotation log + pod restart confirmed
+Own        40-45     promote one change dev->staging->prod    ch.15.04 + ch.15.06    Argo CD UI shows Synced; Rollout AnalysisRun pass
+Own        45-50     drill the rollback playbook              ch.15.07               argo rollouts undo executed in <5min on staging
+Own        50-55     run a feature-flag dark launch           ch.15.08               flag transitions in the provider's audit log
+Own        55-58     hotfix workflow rehearsal (no invoke)    ch.15.09               rehearsal log in runbooks/
+Own        58-60     Day-60 review meeting                    this chapter           gate answered yes; written sign-off
 ─────       ─────    ─────────────────────────────────────    ─────────────────      ────────────────────────────────────────
 Mature     61-65     first cost review with optimizations     ch.15.11               OpenCost report + at least 1 cost-reduction PR
 Mature     65-70     write 3 new runbooks from real incidents Part 13 ch.12          3 new files in runbooks/, each <alert,check,...>
 Mature     70-75     lead chaos game-day on staging           Part 13 ch.12          chaos CR applied, postmortem written, AIs tracked
 Mature     75-80     first DR drill (kind or cloud)           Part 14 ch.17          dr-drill-log.md entry with RTO/RPO numbers
-Mature     80-85     close 3 action items from prev incidents ch.15.10 + ch.15.11    PRs merged for AIs, tickets closed
-Mature     85-90     90-day review presentation               this chapter           slide deck delivered to platform team
+Mature     80-83     close 3 action items from prev incidents ch.15.10 + ch.15.11    PRs merged for AIs, tickets closed
+Mature     83-87     build the 90-day review deck             this chapter           deck shared with platform team
+Mature     87-90     90-day review presentation + handoff     this chapter           meeting notes; PagerDuty config diff
 ─────       ─────    ─────────────────────────────────────    ─────────────────      ────────────────────────────────────────
 Day 91+    handoff complete; previous owner is reference, not pager target
 ```
@@ -411,25 +414,25 @@ the runbook first, type commands second." This is the operational
 shape ch.15.10 names — **not memorising what's broken, but knowing
 the triage process** — installed by repetition.
 
-### Day 30 — Ack a synthetic P2 page; resolve it; write the first postmortem
+### Day 31-35 — Ack a synthetic P2 page; resolve it; write the first postmortem
 
 ```bash
-# Day 30 is the Day-30 gate. The new owner is now the primary on-call
-# for the next rotation; the previous owner is on secondary (still
+# The Day-30 gate has passed. From Day 31 the new owner is the primary
+# on-call for the next rotation; the previous owner is on secondary (still
 # escalation-available but not paged first). The first page is
 # typically synthetic — the team's on-call lead injects a controlled
 # fault (a chaos-mesh pod-kill of one non-critical service) to test
 # the rotation. The new owner does not know the page is synthetic
 # until after they resolve it.
 
-# Day 30, T+0: page fires (illustrative: the example tree has no
+# Day 31, T+0: page fires (illustrative: the example tree has no
 # runbook for this alert, and writing one becomes an action item)
 # "PaymentsWebhookBacklog: webhook delivery queue >100 messages for 5min"
 # Severity: P2 (degraded, not down)
 
-# Day 30, T+30s: acknowledge the page in PagerDuty (UI or CLI)
+# Day 31, T+30s: acknowledge the page in PagerDuty (UI or CLI)
 
-# Day 30, T+1m: no runbook matches this alert. Open the closest one and
+# Day 31, T+1m: no runbook matches this alert. Open the closest one and
 # use its check order: Check, then Diagnose, then Mitigate.
 cat runbooks/runbook-payments-failure-rate.md
 kubectl -n bookstore-platform get pods -l app=payments-webhook
@@ -439,9 +442,9 @@ kubectl -n bookstore-platform logs <pod> -p
 # Mitigate: kubectl delete pod <pod> (the ReplicaSet recreates it; the
 # queue drains once every replica is healthy)
 
-# Day 30, T+8m: the queue drains; alert clears; incident resolved.
+# Day 31, T+8m: the queue drains; alert clears; incident resolved.
 
-# Day 30, T+30m: the new owner writes the first postmortem (ch.15.10's
+# Day 31, T+30m: the new owner writes the first postmortem (ch.15.10's
 # template). Required even for P2 during training week.
 mkdir -p runbooks/postmortems
 cp runbooks/postmortem-template.md \
@@ -454,21 +457,51 @@ $EDITOR runbooks/postmortems/$(date -u +%Y-%m-%d)-payments-webhook-backlog.md
 # limit? add an OOM alert that fires earlier than the backlog alert?),
 # Lessons (the backlog alert is downstream of pod health; we want both).
 
-# Day 30, T+45m: the on-call lead reveals the chaos injection.
+# Day 31, T+45m: the on-call lead reveals the chaos injection.
 # The new owner learns: their triage worked end-to-end; the
 # postmortem is real even though the incident was synthetic.
 ```
 
-The new owner ends Day 30 with: a real postmortem (filename, date,
-action items) in `runbooks/postmortems/`; the Day-30 gate answered
-**yes**. The team graduates to Phase 2.
+The new owner ends Day 35 with: a real postmortem (filename, date,
+action items) in `runbooks/postmortems/`. The Day-30 gate was answered
+**yes** before the cutover on Day 31.
 
-### Day 60 — Lead a chaos game-day on staging
+### Day 31: Cut over privileged access, then prove it
+
+The cutover removes the previous owner's standing access, and the proof
+enumerates subjects. One `kubectl auth can-i` check is not enough: `--as`
+takes one username, and `--as-group` takes only the groups you name, so a
+single `no` cannot show that the person is absent from every group, access
+entry or Vault policy they held.
+
+```bash
+PREV=<PREVIOUS-OWNER>
+# Kubernetes: every binding that names the person or a group they belonged to
+kubectl get clusterrolebindings,rolebindings -A -o json | jq -r --arg u "$PREV" '
+  .items[] | . as $b | (.subjects // [])[] | select(.name==$u or .name=="<GROUP-NAME>")
+  | "\($b.kind)\t\($b.metadata.namespace // "-")\t\($b.metadata.name)\t\(.kind)/\(.name)"'
+# EKS: no access entry for the person's IAM principal
+aws eks list-access-entries --cluster-name <CLUSTER> | jq -r '.accessEntries[]' \
+  | grep -i "<PREVIOUS-OWNER-IDENTITY>" || echo "no access entry"
+# Vault: the entity's direct policies and group memberships
+vault read identity/entity/name/$PREV
+# GitHub: repository permission and team membership
+gh api repos/<ORG>/bookstore-platform/collaborators/$PREV/permission --jq .permission
+gh api orgs/<ORG>/teams/platform-admins/memberships/$PREV 2>/dev/null || echo "not a member"
+# Denied action, once for each group the person held
+kubectl auth can-i delete secrets -n bookstore-platform --as "$PREV" --as-group <EACH-GROUP>
+```
+
+Every enumeration must come back empty, and each `can-i` must print `no`.
+Rotate each secret the previous owner could read, and check the rotations in
+the Vault audit log. The cutover is not done until the enumeration is clean.
+
+### Day 70-75 — Lead a chaos game-day on staging
 
 This is a plan for a game-day. No such game-day ran for this chapter.
 
 ```bash
-# Day 60 is mid-Phase-3 territory in this hands-on; the new owner
+# Day 70-75 is Phase 3 territory in this hands-on; the new owner
 # leads (not just executes) a chaos game-day on the staging cluster.
 # The hypothesis: "the bookstore-platform checkout flow stays
 # available when one of three payments-gateway pods is killed."
@@ -522,10 +555,11 @@ $EDITOR runbooks/postmortems/<YYYY-MM-DD>-chaos-payments-gateway.md
 # simultaneously).
 ```
 
-The new owner ends Day 60 with: a chaos game-day they LED (not just
+The new owner ends Day 75 with: a chaos game-day they LED (not just
 ran a script for), a postmortem with action items, and a peer-
-witness who can confirm "yes, they did this end-to-end." Day-60
-gate answered **yes**.
+witness who can confirm "yes, they did this end-to-end." The game-day
+is a Phase 3 exit item, not a gate question; the Day-60 gate is the
+production-release question.
 
 ### Day 90 — Present the first 90-day review to the platform team
 
@@ -597,7 +631,7 @@ dashboard says what is broken). The burden is **"how do I work the
 triage tree?"** — which check command to run first, when to escalate,
 when to declare an incident channel, when to wake the database team.
 That is **procedural**, not **diagnostic**. Shadowing (Day 14-21)
-teaches the procedure; live acks (Day 30+) exercise the procedure
+teaches the procedure; live acks (Day 31+) exercise the procedure
 under load. Doing the live acks first means the new on-call is
 learning the procedure under cognitive overload — they will skip
 steps, miss the diagnose-before-mitigate guard, and resolve incidents
@@ -611,9 +645,9 @@ A team that runs a chaos game-day before they know how to write a
 postmortem produces a fire drill (the chaos fires; people scramble;
 the chaos clears; nobody writes anything down because nobody knows
 the template); the cost was real (engineer time, slight on-call
-stress) and the return was zero. Phase 2 (Day 35-40) introduces the
-postmortem against a **synthetic low-stakes failure** (the Day 30
-chaos-injected page); Phase 3 (Day 75-80) introduces the **chaos
+stress) and the return was zero. Phase 2 (Day 31-35) introduces the
+postmortem against a **synthetic low-stakes failure** (the Day 31
+chaos-injected page); Phase 3 (Day 70-75) introduces the **chaos
 game-day** against the staging environment. The postmortem template
 is muscle memory by then. The chaos game-day's writeup is not a
 struggle.
@@ -1029,13 +1063,15 @@ Goal: run the procedures the previous owner used to run. Make your
 first low-stakes mistakes in supervised settings.
 
 - [ ] **Day 31: Cut over privileged access.** The previous owner
-      moves to secondary. Remove their cluster-admin, Vault and CI
-      admin access, or cut it to read-only with break-glass under
-      ch.15.09. Rotate each secret they could read (ch.15.05).
-      Teaches: Part 05 ch.01, ch.15.05, ch.15.09. Proof: `kubectl
-      auth can-i delete secrets -n bookstore-platform --as
-      <PREVIOUS-OWNER>` prints `no`; the rotations are in the Vault
-      audit log.
+      moves to secondary and loses cluster-admin, Vault and CI admin
+      access. This guide has no time-limited Kubernetes break-glass
+      (ch.15.09), so the secondary has no standing cluster access.
+      Rotate each secret they could read (ch.15.05). Teaches: Part 05
+      ch.01, ch.15.05, ch.15.09. Proof: the subject enumeration in
+      the hands-on (Day 31) comes back empty, and `kubectl auth
+      can-i delete secrets -n bookstore-platform --as <PREVIOUS-OWNER>
+      --as-group <EACH-GROUP>` prints `no` for each group; the
+      rotations are in the Vault audit log.
 - [ ] **Day 31-35: Ack the first synthetic page solo.** The team
       lead injects a controlled chaos fault (a pod-kill of a non-
       critical service); the new owner acks, triages, resolves;
@@ -1166,7 +1202,10 @@ Day 120 target.
       another iteration (a written Day 120 commitment).
 - [ ] The previous owner's privileged access was cut on Day 31 and
       the secrets they could read were rotated. The proof is the
-      denied `kubectl auth can-i` check and the Vault audit entries.
+      clean subject enumeration (Kubernetes bindings, EKS access
+      entries, Vault entity, GitHub permissions), the denied
+      `kubectl auth can-i --as-group` checks, and the Vault audit
+      entries.
 
 ## Test your understanding
 
@@ -1182,7 +1221,7 @@ Day 120 target.
 2. **Walk through how the eleven Part 15 chapters map onto the three phases. What goes in 1-30, 31-60, 61-90, and why?**
    <details><summary>Show answer</summary>
 
-   **Phase 1 (1-30, Inherit)**: ch.15.01 (the lifecycle to recognize), ch.15.05 (read the secret-management story so it's not opaque), ch.15.10 (incident-response shape so shadow weeks make sense), ch.15.11 (the cadence the previous owner runs). Passive consumption. **Phase 2 (31-60, Own)**: ch.15.02 (run a CI workflow), ch.15.03 (sign an image), ch.15.04 (promote a change through dev → staging → prod), ch.15.07 (run a synthetic rollback drill), ch.15.09 (read the hotfix runbook, don't yet execute one). Active execution under low stakes. **Phase 3 (61-90, Mature)**: ch.15.06 (lead a canary deploy with real SLO gates), ch.15.08 (own a feature flag end-to-end including retirement), ch.15.09 (execute a real hotfix if one arises), drive a DR drill, run the postmortem, conduct a chaos game-day. Leadership. The arc: read → execute → lead.
+   **Phase 1 (1-30, Inherit)**: ch.15.01 (the lifecycle to recognize), ch.15.05 (read the secret-management story so it's not opaque), ch.15.10 (incident-response shape so shadow weeks make sense), ch.15.11 (the cadence the previous owner runs). Passive consumption. **Phase 2 (31-60, Own)**: ch.15.02 (run a CI workflow), ch.15.03 (sign an image), ch.15.04 (promote a change through dev → staging → prod), ch.15.06 (promote through a canary gated by an AnalysisRun), ch.15.07 (run a synthetic rollback drill), ch.15.08 (dark-launch one flag), ch.15.09 (rehearse the hotfix runbook without invoking it). Active execution under low stakes. **Phase 3 (61-90, Mature)**: ch.15.11 (the first cost review with shipped optimizations), ch.15.09 (execute a real hotfix only if one arises), drive a DR drill, run the postmortem, conduct a chaos game-day. Leadership. The arc: read → execute → lead.
 
    </details>
 
@@ -1210,7 +1249,7 @@ Day 120 target.
 6. **On the Day 31 cutover the previous owner moves to secondary. On Day 60 their cluster-admin, Vault and CI tokens still work. Which control is missing, and how do you prove it is closed?**
    <details><summary>Show answer</summary>
 
-   The Day 1 access inventory and the Day 31 cutover were skipped, so privileged access outlived the handover. Standing access keeps working after the person has stopped owning the system, which is the first threat in this chapter's table. The fix is to cut that access on Day 31, or cut it to read-only plus break-glass under ch.15.09, and to rotate each secret the previous owner could read. Rotation matters because a revoked token does not help if the value was copied. The proof is a denied action: `kubectl auth can-i delete secrets -n bookstore-platform --as <PREVIOUS-OWNER>` prints `no`, and the Vault audit log shows the rotations.
+   The Day 1 access inventory and the Day 31 cutover were skipped, so privileged access outlived the handover. Standing access keeps working after the person has stopped owning the system, which is the first threat in this chapter's table. The fix is to cut that access on Day 31, leaving the secondary with no standing cluster access, and to rotate each secret the previous owner could read. Rotation matters because a revoked token does not help if the value was copied. The proof is an enumeration of every Kubernetes binding, EKS access entry, Vault entity and GitHub permission that names the previous owner, and it must come back empty. Each `kubectl auth can-i ... --as-group` check for a group they held must print `no`. The Vault audit log shows the rotations.
 
    </details>
 

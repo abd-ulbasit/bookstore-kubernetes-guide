@@ -76,8 +76,9 @@ drop is restored on the cleanup PR.**
   fast-path drops the slow gates. The timings here are illustrative, so
   measure your own pipeline:
   - **KEPT**: lint (gofmt; 30s), unit tests for the changed package
-    only (2 min), Trivy scan (1 min), build + cosign sign + push
-    (3 min). The scan is the non-negotiable — a hotfix that ships
+    only (2 min), Trivy scan (1 min) on the pull request, and build +
+    cosign sign + push (3 min) after the merge, from the merge commit
+    (see How it works). The scan is the non-negotiable — a hotfix that ships
     a CVE is a security event in addition to the original incident.
   - **DROPPED**: full integration test suite (15 min); E2E browser
     tests (10 min); performance regression tests (5 min); soak
@@ -87,13 +88,16 @@ drop is restored on the cleanup PR.**
   security event of its own: a hotfix that ships a CVE adds a second
   incident to the first.
 - **Branch-protection bypass.** Main requires a review and passing
-  status checks. `gh pr merge --admin` merges past those requirements,
-  and GitHub honours it only for actors on the branch's bypass list
-  (here, the `@platform-admins` team). Each admin merge should post to
-  `#bookstore-platform-audit`. The **approver** named in the Slack
-  declaration is accountable for the merge. That line is a convention:
-  nothing in GitHub checks it, and the audit channel is where a missing
-  approver shows.
+  status checks. `gh pr merge --admin` merges past those requirements.
+  GitHub's protected-branch rules do not bind repository admins unless
+  the rule has "Do not allow bypassing the above settings" turned on.
+  Without that setting, every admin can admin-merge, and a bypass list
+  does not narrow it. The enforced form is that setting (or a ruleset
+  with the same effect), with only `@platform-admins` as bypass actors.
+  Each admin merge should post to `#bookstore-platform-audit`. The
+  **approver** named in the Slack declaration is a convention: nothing
+  in GitHub checks it, and the audit channel is where a missing approver
+  shows.
 - **The breakglass IAM role.** Some hotfixes need AWS permissions
   beyond the standard platform-engineer role (an IRSA lockout; a
   Crossplane controller in a bad state; a need to delete a
@@ -102,8 +106,10 @@ drop is restored on the cleanup PR.**
     services (EC2, EKS, S3 under the platform's bucket prefix, RDS,
     KMS without key deletion, Route 53, CloudWatch, Secrets Manager),
     in the platform's regions. IAM is read-only, apart from repairing
-    platform roles and deactivating leaked keys. Every action that
-    creates a lasting identity is denied.
+    platform roles and deactivating leaked keys. Creating a lasting
+    identity is denied: IAM users, access keys, login profiles, roles,
+    policies, identity providers, and EKS access entries and pod
+    identity associations.
   - **One-hour session behind a Vault login.** The human logs in to
     Vault with MFA at the identity provider. Vault's AWS secrets engine
     then calls `sts:AssumeRole` and returns credentials that expire
@@ -114,10 +120,22 @@ drop is restored on the cleanup PR.**
     guide does not ship one.
   - **Audit-trail-protected.** Explicit Deny on CloudTrail management
     (`DenyCloudTrailManagement`), on Organizations and billing, and on
-    the audit and backup buckets. An explicit Deny overrides any Allow,
-    so even broad admin cannot tamper with the audit log. This Deny is
-    the most important line in the policy: without it the postmortem
-    becomes archaeology.
+    deleting, overwriting or reconfiguring the objects and buckets of the
+    audit and backup stores (`DenyDestroyAuditedResources` and
+    `DenyTamperingWithAuditAndBackupObjects`). An explicit Deny overrides
+    any Allow, so the session cannot alter the audit log or the backups
+    that a recovery would need. This Deny is the most important line in
+    the policy: without it the postmortem becomes archaeology.
+  - **Residual risk the policy does not close.** Two changes to the
+    existing `bookstore-platform-*` roles stay allowed:
+    `iam:AttachRolePolicy` (any managed policy except AdministratorAccess,
+    IAMFullAccess and PowerUserAccess) and `iam:UpdateAssumeRolePolicy`.
+    Repairing a locked-out platform role needs both. Either one outlives
+    the one-hour session: an attached policy stays attached, and a changed
+    trust policy can let an outside principal assume the role. So the
+    session does not guarantee that its effects end with it. The 24-hour
+    review checks every such CloudTrail event, and that review is the
+    control here, not the policy.
   - **Alert on use.** Each assumption should page on-call and post to
     `#bookstore-platform-audit`. The guide does not ship the rule that
     does this.
@@ -171,9 +189,9 @@ felt wrong.
 
 | Threat | Control in this chapter | Deeper |
 |---|---|---|
-| An emergency change skips review and checks, or reaches the cluster outside Git | The fast-path keeps lint, unit tests, the scan and signing. An admin merge needs a named approver, and the cleanup PR restores the dropped gates in Git | [Part 15 ch.01](01-pr-to-production-lifecycle.md) for Git as the only write path; [ch.02](02-application-cicd-pipelines.md) for the pipeline |
+| An emergency change skips review and checks, or reaches the cluster outside Git | The fast-path keeps lint, unit tests, the scan, and the build and signing from the merge commit. An admin merge is limited to the bypass list and posts to the audit channel; the named approver is a convention. The cleanup PR restores the dropped gates in Git | [Part 15 ch.01](01-pr-to-production-lifecycle.md) for Git as the only write path; [ch.02](02-application-cicd-pipelines.md) for the pipeline |
 | Standing admin: a role or binding that is always on | AWS: the breakglass role is reached only through a Vault login with MFA, for one hour. Kubernetes: `bookstore-platform-admin` is a standing grant; a time-limited one is not built | [Part 05 ch.01](../05-security/01-authn-authz-rbac.md) for RBAC; [Part 13 ch.04](../13-grand-capstone-bookstore-platform/04-real-auth-keycloak-irsa-istio-jwt.md) for the Keycloak groups |
-| The session tampers with the audit trail, or its use goes unnoticed | An explicit Deny on CloudTrail management, Organizations and the audit buckets; IAM persistence denied; an alert on every assumption; the 24-hour review | [Part 14 ch.13](../14-eks-in-production-a-to-z/13-runtime-defense-and-container-security.md) for runtime audit |
+| The session tampers with the audit trail, or its use goes unnoticed | An explicit Deny on CloudTrail management, Organizations and the audit and backup stores; IAM and EKS persistence denied; the 24-hour CloudTrail review. Gap: this guide ships no alert on assumption, so use is found by the review, not in real time | [Part 14 ch.13](../14-eks-in-production-a-to-z/13-runtime-defense-and-container-security.md) for runtime audit |
 | Debt outlives the session: ghost identities, drifted resources, secrets it saw | The 24-hour cleanup: CloudTrail review, rotation, drift check. Session credentials expire by themselves | [Part 15 ch.05](05-production-secrets-vault-eso.md) for rotation; [Part 14 ch.07](../14-eks-in-production-a-to-z/07-infrastructure-cicd-and-drift.md) for drift |
 
 ## Diagrams
@@ -210,19 +228,21 @@ Timings are illustrative, not measured.
 
 ```text
 NORMAL FLOW (~30 min)                 HOTFIX FAST-PATH (~6 min)
-─────────────────────────             ─────────────────────────
-1. lint              30s     KEPT     lint              30s
-2. unit tests        3m      KEPT     unit (changed pkg) 2m
+─────────────────────────             ───────────────────────────────────────
+1. lint              30s     KEPT     lint              30s   (on the PR)
+2. unit tests        3m      KEPT     unit (changed pkg) 2m   (on the PR)
 3. integration tests 15m     DROPPED  ─
 4. E2E tests         10m     DROPPED  ─
 5. perf regression   5m      DROPPED  ─
-6. Trivy scan        1m      KEPT     Trivy scan         1m
-7. build             1m      KEPT     build              1m
+6. Trivy scan        1m      KEPT     Trivy scan         1m   (on the PR)
+   ── admin merge: branch protection bypassed, audited ──
+7. build             1m      KEPT     build              1m   (merge commit)
 8. cosign sign       30s     KEPT     cosign sign        30s
 9. push to ECR       1m      KEPT     push to ECR        1m
-10. Argo CD sync     1m      KEPT     Argo CD sync       1m
-─────────────────────────             ─────────────────────────
-TOTAL: ~30 min                        TOTAL: ~6 min
+10. GitOps PR        -       KEPT     digest-bump PR     20s  (approver merges)
+11. Argo CD sync     1m      KEPT     Argo CD sync       1m   (on GitOps merge)
+─────────────────────────             ───────────────────────────────────────
+TOTAL: ~30 min                        TOTAL: ~6 min (illustrative)
 
 RE-RUN on the cleanup PR (within 24h):
   3. integration tests
@@ -329,20 +349,20 @@ Postmortem: <follows within 48h>
 
 Smallest possible fix; single-line nil-check before deref."
 
-# Adding the `hotfix` label triggers the fast-path workflow.
+# Adding the `hotfix` label runs the checks job of the fast-path workflow.
+# It builds nothing and pushes nothing: a pull request gets no OIDC token.
 gh pr edit <PR_NUMBER> --add-label hotfix
 
-# Watch the fast-path checks:
+# Watch the checks:
 gh pr checks <PR_NUMBER> --watch
 # Illustrative output:
 # lint                        pass    25s
 # unit-changed-package        pass    1m45s
 # trivy-scan                  pass    52s
-# build-cosign-push           pass    3m15s
-# Total: about six minutes.
+# Total: about three minutes. The image is built after the merge.
 ```
 
-### 4. Admin-merge + Argo CD sync
+### 4. Admin-merge, build from the merge commit, then GitOps and sync
 
 ```sh
 # The approver named in the declaration (@alice here) does the merge:
@@ -350,10 +370,18 @@ gh pr merge <PR_NUMBER> --admin --squash
 # Illustrative: the audit channel shows a line such as
 #   "@alice merged PR #4321 (HOTFIX:...) via admin bypass"
 
-# Argo CD syncs on its own schedule, or sooner on a webhook. This manual
-# sync does not prune: pruning deletes live objects that Git does not
-# list, which can remove a live fix that Git has not caught up with.
-argocd app sync bookstore-catalog-us-east
+# The merge starts the build job on main. It builds, signs and pushes the
+# image from the merge commit, then opens a digest-bump PR in the GitOps
+# repository. Find the run and watch it:
+gh run list --workflow hotfix-fastpath.yml --branch main --limit 1
+gh run watch <RUN_ID>
+# Illustrative: build-sign-push pass 3m15s; gitops-digest-bump pass 20s.
+
+# The approver merges the digest-bump PR after review, in the GitOps
+# repository. Argo CD syncs on that merge, through its webhook. Use a
+# manual sync only if the webhook was missed. A manual sync does not prune:
+# pruning deletes live objects that Git does not list, which can remove a
+# live fix that Git has not caught up with.
 argocd app wait bookstore-catalog-us-east --health --sync
 # Illustrative: Application Healthy and Synced.
 ```
@@ -369,7 +397,7 @@ kubectl -n monitoring exec -ti prom-stack-kube-prom-prometheus-0 -- \
 # Expect the rate to fall back toward its pre-incident level.
 
 # Customer-facing smoke test:
-curl -s https://api.bookstore-platform.example.com/v1/catalog/search?q=kubernetes&pagination_size=100 \
+curl -s 'https://api.bookstore-platform.example.com/v1/catalog/search?q=kubernetes&pagination_size=100' \
   | jq '.results | length'
 # Expected: 100, the page size asked for. The bug returned 0.
 
@@ -466,8 +494,11 @@ EOF
 #  Account: dev only"
 
 # Log in to Vault with MFA first. Then assume the role (one-hour session).
+# role_session_name is your handle. CloudTrail records it as the session's
+# user name, and the 24-hour review below searches on it. Without it, Vault
+# generates a name that the review cannot find.
 ROLE_CREDS=$(vault read -format=json aws/sts/breakglass-emergency \
-  | jq -r '.data')
+  role_session_name=alice | jq -r '.data')
 export AWS_ACCESS_KEY_ID=$(echo $ROLE_CREDS | jq -r '.access_key')
 export AWS_SECRET_ACCESS_KEY=$(echo $ROLE_CREDS | jq -r '.secret_key')
 export AWS_SESSION_TOKEN=$(echo $ROLE_CREDS | jq -r '.security_token')
@@ -491,12 +522,16 @@ aws cloudtrail stop-logging --name <TRAIL_NAME>
 # An error occurred (AccessDenied) when calling the StopLogging operation:
 #   ... with an explicit deny in an identity-based policy
 
-# End the session early, then clear the credentials from the shell.
-vault lease revoke <LEASE_ID>
+# Clear the credentials from the shell. The session ends at its one-hour
+# TTL. Vault cannot revoke a single STS credential, so `vault lease revoke`
+# does not end the session. To cut every session the role issued before a
+# moment, attach a deny on aws:TokenIssueTime to the role. That affects every
+# session of the role, not only yours.
 unset AWS_ACCESS_KEY_ID AWS_SECRET_ACCESS_KEY AWS_SESSION_TOKEN
 
 # Run the cleanup checklist (see
 # examples/bookstore-platform/hotfix/cleanup-after-breakglass.md):
+# alice is the role_session_name passed to Vault above.
 aws cloudtrail lookup-events \
   --lookup-attributes "AttributeKey=UserName,AttributeValue=alice" \
   --start-time "2026-05-20T13:00:00Z" \
@@ -516,7 +551,13 @@ terraform -chdir=<TERRAFORM_DIR> plan -refresh-only \
 ## How it works under the hood
 
 **The fast-path workflow.** It is a separate file with only the fast
-steps, so the normal workflow stays unchanged:
+steps, so the normal workflow's steps stay as they are. It runs in two
+places, and the split is deliberate. On the pull request, the checks job
+runs lint, the changed-package unit tests and the scan, with a read-only
+token and no OIDC token: nothing from an unmerged branch is built, signed
+or pushed. After the approver merges, the same file runs on `push` to
+`main` for the merge commit. That run builds, signs and pushes the image,
+then opens the digest-bump PR in the GitOps repository.
 
 ```yaml
 # .github/workflows/hotfix-fastpath.yml (sketch)
@@ -524,43 +565,72 @@ name: Hotfix Fast-Path
 on:
   pull_request:
     types: [labeled]
+  push:
+    branches: [main]
 permissions:
   contents: read
 jobs:
-  fastpath:
-    if: github.event.label.name == 'hotfix'
+  checks:
+    if: github.event_name == 'pull_request' && github.event.label.name == 'hotfix'
     runs-on: ubuntu-22.04
-    permissions:                # a job-level block replaces the workflow's
-      contents: read
-      id-token: write           # OIDC for cosign keyless and the push role
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - run: ./scripts/ci-lint.sh
       - run: ./scripts/ci-unit-changed.sh        # only the touched package
       - run: ./scripts/ci-scan.sh                # Trivy; non-negotiable
+  build-sign-push:
+    # Only the merge of a hotfix PR. The squash-merge title starts with
+    # "HOTFIX:", and that title is the guard. Branch protection keeps other
+    # commits off main.
+    if: github.event_name == 'push' && startsWith(github.event.head_commit.message, 'HOTFIX:')
+    runs-on: ubuntu-22.04
+    permissions:                # a job-level block replaces the workflow's
+      contents: read
+      id-token: write           # OIDC for cosign keyless and the ECR push role
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - run: ./scripts/ci-build-cosign-push.sh   # signed image to ECR
-      - run: ./scripts/ci-argocd-sync-trigger.sh
+  gitops-digest-bump:
+    needs: build-sign-push
+    runs-on: ubuntu-22.04
+    steps:
+      - run: ./scripts/ci-gitops-digest-pr.sh    # a PR to the GitOps repo, not a push
 ```
 
-The normal workflow has the same steps PLUS the slow integration /
-E2E / perf steps. The cleanup PR re-runs the normal workflow.
+The push runs on `main`, so its OIDC subject is the one the ECR push role
+already trusts. The lane adds no trust. A pull request token has a different
+subject, and the role does not accept it, so a build from an unmerged branch
+cannot push.
+
+The normal workflow also runs on the push to `main`. It must skip the same
+commit, using the same title guard, or the commit builds twice and two digests
+can reach the GitOps repository. Add that guard to the normal workflow when you
+adopt the lane. This chapter does not change the normal workflow.
 
 The fast-path is a separate file on purpose. Keyless signing binds each
-signature to the workflow that made it, so fast-path images carry a
-different identity from the normal pipeline's. Whether a cluster accepts
-that identity is the policy decision in
-[Part 15 ch.03](03-image-signing-and-provenance.md).
+signature to the workflow that made it. This lane signs as
+`hotfix-fastpath.yml` on `refs/heads/main`, so its signature subject is
+`hotfix-fastpath.yml@refs/heads/main`, which differs from the normal
+pipeline's subject. The verify policy must list that subject, or an
+enforcing cluster rejects the lane's image. The example policy in
+[Part 15 ch.03](03-image-signing-and-provenance.md) lists only the normal
+pipeline's subject. Adding this one is a decision you make when you adopt the
+lane: review the workflow file as you would review the pipeline, then add the
+subject with a comment that names the lane.
 
-**Branch-protection bypass mechanics.** GitHub's branch protection has
-a bypass list, set by the "Allow specified actors to bypass required
-pull requests" option. The Bookstore Platform repo lists the
-`@platform-admins` team there. `gh pr merge --admin` asks GitHub to
-merge with administrator privileges; the CLI manual describes it as
-merging a pull request that does not meet requirements. GitHub's
-organization audit log has a protected-branch category. Check that it
-records admin merges before you rely on it. The post to
-`#bookstore-platform-audit` is the platform's convention, and this
-guide does not ship the bot that sends it.
+**Branch-protection bypass mechanics.** `gh pr merge --admin` asks GitHub
+to merge with administrator privileges; the CLI manual describes it as
+merging a pull request that does not meet requirements. The enforced control
+is the repository's branch-protection setting "Do not allow bypassing the
+above settings" (or a ruleset with the same effect). With it on, admins are
+subject to the rules, and only the actors on the bypass list can merge past
+them. The Bookstore Platform repo lists `@platform-admins` there. The
+protected-branches page documents the enforcement option. It does not name
+the bypass-list setting, so confirm that setting's name in your repository's
+settings before you rely on it. GitHub's organization audit log has a
+protected-branch category. Check that it records admin merges before you rely
+on it. The post to `#bookstore-platform-audit` is the platform's convention,
+and this guide does not ship the bot that sends it.
 
 **The breakglass role's Vault wiring.** Vault's AWS secrets engine
 generates **STS credentials** on-demand against a configured IAM
@@ -579,8 +649,9 @@ vault path        aws/roles/breakglass-emergency
 A user assumes the role via:
 
 ```text
-vault read aws/sts/breakglass-emergency
+vault read aws/sts/breakglass-emergency role_session_name=<HANDLE>
 # Returns: access_key, secret_key, security_token, lease_id, lease_duration: 3600
+# The session name is the handle the 24-hour review searches on.
 ```
 
 The MFA gate sits at the Vault login: the user authenticates through an
@@ -698,13 +769,14 @@ git push origin hotfix/INC-<ID>-<DESC>
 # OPEN PR; add `hotfix` label
 gh pr create --title "HOTFIX: ..." --body "..."
 gh pr edit <PR> --add-label hotfix
-gh pr checks <PR> --watch       # ~6 minutes
+gh pr checks <PR> --watch       # ~3 minutes; checks only, nothing is built yet
 
-# APPROVER admin-merges (only after the declaration)
+# APPROVER admin-merges (only after the declaration); the merge builds
+# and signs from the merge commit, then opens the GitOps digest-bump PR
 gh pr merge <PR> --admin --squash
 
-# SYNC Argo CD (no --prune: it deletes live objects Git does not list)
-argocd app sync <APP>
+# APPROVER merges the GitOps digest-bump PR; Argo CD syncs on that merge.
+# Manual sync only if the webhook is missed. Never with --prune.
 argocd app wait <APP> --health --sync
 
 # VERIFY metric recovered
@@ -719,7 +791,7 @@ cp examples/bookstore-platform/runbooks/postmortem-template.md \
    postmortems/INC-<ID>.md
 
 # (BREAKGLASS, only when standard role can't do it)
-vault read aws/sts/breakglass-emergency       # MFA login first; 1-hour session
+vault read aws/sts/breakglass-emergency role_session_name=<HANDLE>  # MFA login first; 1-hour session
 # ... do the work; keep a side-channel log in Slack thread
 # After: cleanup-after-breakglass.md (24h);
 #        postmortem includes breakglass sections.
@@ -758,7 +830,7 @@ post-breakglass cleanup checklist is in
    the recovery?**
    <details><summary>Show answer</summary>
 
-   The "hotfix that broke audit trail" scenario. The action sequence violated three disciplines simultaneously: (1) bypassed CI signing, so the image is unsigned; the signature check in [Part 15 ch.03](03-image-signing-and-provenance.md) should have rejected it (and didn't, meaning either the policy isn't enforcing in prod or admission was bypassed too); (2) bypassed GitOps, so the cluster state drifted from Git — Argo CD will fight the manual change at next sync; (3) bypassed the audit trail, so there's no record of who did what when. The chapter's discipline: use the hotfix lane (CI fast-path: lint + unit + Trivy scan + cosign sign + push + Argo CD sync, 5-8 min) — it bypasses the SLOW gates while keeping the safety-critical ones. Recovery: open the cleanup PR within 24h that codifies the change in Git, run the drift-check to import or delete any orphan resources, rotate any secrets the engineer touched, write the postmortem explaining why the disciplined hotfix lane wasn't used.
+   The "hotfix that broke audit trail" scenario. The action sequence violated three disciplines simultaneously: (1) bypassed CI signing, so the image is unsigned; the signature check in [Part 15 ch.03](03-image-signing-and-provenance.md) should have rejected it (and didn't, meaning either the policy isn't enforcing in prod or admission was bypassed too); (2) bypassed GitOps, so the cluster state drifted from Git — Argo CD will fight the manual change at next sync; (3) bypassed the audit trail, so there's no record of who did what when. The chapter's discipline: use the hotfix lane (CI fast-path: lint, unit and Trivy scan on the PR, then build, cosign sign, push, the GitOps digest PR and Argo CD sync after the merge, 5-8 min) — it bypasses the SLOW gates while keeping the safety-critical ones. Recovery: open the cleanup PR within 24h that codifies the change in Git, run the drift-check to import or delete any orphan resources, rotate any secrets the engineer touched, write the postmortem explaining why the disciplined hotfix lane wasn't used.
 
    </details>
 
@@ -807,7 +879,7 @@ post-breakglass cleanup checklist is in
    takes from page to cleared alert is for your own drill to measure; this
    chapter gives no measured figure. Required artifacts: (1) the hotfix PR
    with the explicit "P0 hotfix" label and a link to the incident ticket; (2)
-   Slack declaration in `#bookstore-platform-audit` with the
+   Slack declaration in `#bookstore-platform-status` with the
    `@platform-admins` approver named; (3) cosign signature in Rekor for the
    hotfix image; (4) the cleanup PR opened within 24h that restores the
    dropped tests and adds the missing test that would have caught the bug. The
