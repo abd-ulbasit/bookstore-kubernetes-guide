@@ -1,6 +1,19 @@
-# Lab 05.06 recorded on the shared kind cluster sf-pilot (Kubernetes v1.37.0 node, kubectl v1.37.2 on the workstation).
-# In attempt 1 the signing identity is redacted to the variable the final run uses. Attempt 1 is kept because it shows two first-run failures: after every capability was dropped, kube-bench could not read root-owned files; and the kubelet cached authorization decisions while the probes ran. The final run is the second section. Attempts 2 and 3 ran the same steps with those two fixes and are not kept. The cleanup of the final run timed out under host load, and the lab objects were removed by hand afterwards.
-
+# Lab 05.06 recorded on the kind cluster sf-pilot (Kubernetes v1.37.0 node,
+# kubectl v1.37.2 on the workstation). The chapter's commands use the names
+# kube-bench, attack, kubelet-authz and node-stats, node-pods, node-proxy. The
+# lab names its own namespaces p05-kube-bench, p05-attack and p05-kubelet-authz,
+# and its cluster-scoped objects p05-06-*. The captured output keeps those names.
+#
+# Attempt 1 is kept because it shows two first-run failures: after every
+# capability was dropped, kube-bench could not read root-owned files, and the
+# kubelet cached a denial for /pods after a grant.
+#
+# The final run is a fresh run of labs/05-06.sh to the end. Its fine-grained
+# step probes five paths: /stats/summary, /metrics, /pods, /healthz and
+# /containerLogs. Attempt 1 probed three, so the final run has more lines in that
+# step. An earlier run of the final script was stopped by a 600-second timeout
+# during the 310-second wait, so its last probe and step 6 did not print. That
+# run is not kept; the run below is the repeat.
 === attempt 1 (before the fixes) ===
 ## step 0: the cluster this run used
 $ kubectl version --client
@@ -159,7 +172,7 @@ kubectl get nodes -o wide
 Client Version: v1.37.2
 Kustomize Version: v5.8.1
 NAME                     STATUS   ROLES           AGE   VERSION   INTERNAL-IP   EXTERNAL-IP   OS-IMAGE                       KERNEL-VERSION             CONTAINER-RUNTIME
-sf-pilot-control-plane   Ready    control-plane   10h   v1.37.0   172.18.0.2    <none>        Debian GNU/Linux 13 (trixie)   7.0.0-38-generic (amd64)   containerd://2.3.4
+sf-pilot-control-plane   Ready    control-plane   16h   v1.37.0   172.18.0.2    <none>        Debian GNU/Linux 13 (trixie)   7.0.0-38-generic (amd64)   containerd://2.3.4
 
 node: sf-pilot-control-plane, internal address: 172.18.0.2
 
@@ -176,9 +189,9 @@ docker exec $NODE grep -n -E 'client-cert-auth|listen-client-urls' /etc/kubernet
 14:    - kube-apiserver
 17:    - --authorization-mode=Node,RBAC
 55:    name: kube-apiserver
-17:    - --client-cert-auth=true
-23:    - --listen-client-urls=https://127.0.0.1:2379,https://172.18.0.2:2379
-28:    - --peer-client-cert-auth=true
+18:    - --client-cert-auth=true
+24:    - --listen-client-urls=https://127.0.0.1:2379,https://172.18.0.2:2379
+29:    - --peer-client-cert-auth=true
 
 ## step 2: kube-bench with no benchmark named, as its upstream Job runs it
 $ kubectl apply -f kube-bench-auto.yaml
@@ -299,7 +312,7 @@ exit code: 55
 $ kubectl apply -f stats-agent.yaml
 kubectl apply -f node-stats.yaml
 kubectl -n p05-kubelet-authz wait --for=condition=Ready pod/stats-agent --timeout=180s
-kubectl exec -n p05-kubelet-authz stats-agent -- env NODE_IP=$NODE_IP sh -c 'T=$(cat /var/run/secrets/kubernetes.io/serviceaccount/token); for p in /stats/summary /pods /containerLogs/p05-kubelet-authz/none/none; do curl -sk -o /dev/null -w "$p, nodes/stats only: %{http_code}\n" -H "Authorization: Bearer $T" --max-time 5 https://$NODE_IP:10250$p; done'
+kubectl exec -n p05-kubelet-authz stats-agent -- env NODE_IP=$NODE_IP sh -c 'T=$(cat /var/run/secrets/kubernetes.io/serviceaccount/token); for p in /stats/summary /metrics /pods /healthz /containerLogs/p05-kubelet-authz/none/none; do curl -sk -o /dev/null -w "$p, nodes/stats only: %{http_code}\n" -H "Authorization: Bearer $T" --max-time 5 https://$NODE_IP:10250$p; done'
 namespace/p05-kubelet-authz created
 serviceaccount/stats-agent created
 pod/stats-agent created
@@ -307,27 +320,33 @@ clusterrole.rbac.authorization.k8s.io/p05-06-node-stats created
 clusterrolebinding.rbac.authorization.k8s.io/p05-06-node-stats created
 pod/stats-agent condition met
 /stats/summary, nodes/stats only: 200
+/metrics, nodes/stats only: 403
 /pods, nodes/stats only: 403
+/healthz, nodes/stats only: 403
 /containerLogs/p05-kubelet-authz/none/none, nodes/stats only: 403
 
 $ kubectl apply -f node-pods.yaml
 sleep 35
-kubectl exec -n p05-kubelet-authz stats-agent -- env NODE_IP=$NODE_IP sh -c 'T=$(cat /var/run/secrets/kubernetes.io/serviceaccount/token); for p in /stats/summary /pods /containerLogs/p05-kubelet-authz/none/none; do curl -sk -o /dev/null -w "$p, with nodes/pods added: %{http_code}\n" -H "Authorization: Bearer $T" --max-time 5 https://$NODE_IP:10250$p; done'
+kubectl exec -n p05-kubelet-authz stats-agent -- env NODE_IP=$NODE_IP sh -c 'T=$(cat /var/run/secrets/kubernetes.io/serviceaccount/token); for p in /stats/summary /metrics /pods /healthz /containerLogs/p05-kubelet-authz/none/none; do curl -sk -o /dev/null -w "$p, with nodes/pods added: %{http_code}\n" -H "Authorization: Bearer $T" --max-time 5 https://$NODE_IP:10250$p; done'
 clusterrole.rbac.authorization.k8s.io/p05-06-node-pods created
 clusterrolebinding.rbac.authorization.k8s.io/p05-06-node-pods created
 /stats/summary, with nodes/pods added: 200
+/metrics, with nodes/pods added: 403
 /pods, with nodes/pods added: 200
+/healthz, with nodes/pods added: 403
 /containerLogs/p05-kubelet-authz/none/none, with nodes/pods added: 403
 
 $ kubectl apply -f node-proxy.yaml
 sleep 35
-kubectl exec -n p05-kubelet-authz stats-agent -- env NODE_IP=$NODE_IP sh -c 'T=$(cat /var/run/secrets/kubernetes.io/serviceaccount/token); curl -sk -o /dev/null -w "/containerLogs, with the broad nodes/proxy grant: %{http_code}\n" -H "Authorization: Bearer $T" --max-time 5 https://$NODE_IP:10250/containerLogs/p05-kubelet-authz/none/none'
+kubectl exec -n p05-kubelet-authz stats-agent -- env NODE_IP=$NODE_IP sh -c 'T=$(cat /var/run/secrets/kubernetes.io/serviceaccount/token); for p in /metrics /healthz /containerLogs/p05-kubelet-authz/none/none; do curl -sk -o /dev/null -w "$p, with the broad nodes/proxy grant: %{http_code}\n" -H "Authorization: Bearer $T" --max-time 5 https://$NODE_IP:10250$p; done'
 kubectl delete clusterrolebinding p05-06-node-proxy clusterrole p05-06-node-proxy --ignore-not-found
 sleep 310
 kubectl exec -n p05-kubelet-authz stats-agent -- env NODE_IP=$NODE_IP sh -c 'T=$(cat /var/run/secrets/kubernetes.io/serviceaccount/token); curl -sk -o /dev/null -w "/containerLogs, after the broad grant is removed: %{http_code}\n" -H "Authorization: Bearer $T" --max-time 5 https://$NODE_IP:10250/containerLogs/p05-kubelet-authz/none/none'
 clusterrole.rbac.authorization.k8s.io/p05-06-node-proxy created
 clusterrolebinding.rbac.authorization.k8s.io/p05-06-node-proxy created
-/containerLogs, with the broad nodes/proxy grant: 404
+/metrics, with the broad nodes/proxy grant: 403
+/healthz, with the broad nodes/proxy grant: 200
+/containerLogs/p05-kubelet-authz/none/none, with the broad nodes/proxy grant: 404
 clusterrolebinding.rbac.authorization.k8s.io "p05-06-node-proxy" deleted
 /containerLogs, after the broad grant is removed: 403
 
@@ -354,14 +373,12 @@ Verified OK
 $ kubectl delete ns p05-attack p05-kubelet-authz p05-kube-bench --ignore-not-found --wait=true
 kubectl delete clusterrolebinding p05-06-node-stats p05-06-node-pods p05-06-node-proxy --ignore-not-found
 kubectl delete clusterrole p05-06-node-stats p05-06-node-pods p05-06-node-proxy --ignore-not-found
-Error from server (Timeout): Timeout: request did not complete within requested timeout - context deadline exceeded
-Error from server (Timeout): Timeout: request did not complete within requested timeout - context deadline exceeded
-Unable to connect to the server: unexpected EOF
-Unable to connect to the server: EOF
-Unable to connect to the server: EOF
-Unable to connect to the server: EOF
-Unable to connect to the server: EOF
-Unable to connect to the server: EOF
-Unable to connect to the server: EOF
+namespace "p05-attack" deleted
+namespace "p05-kubelet-authz" deleted
+namespace "p05-kube-bench" deleted
+clusterrolebinding.rbac.authorization.k8s.io "p05-06-node-stats" deleted
+clusterrolebinding.rbac.authorization.k8s.io "p05-06-node-pods" deleted
+clusterrole.rbac.authorization.k8s.io "p05-06-node-stats" deleted
+clusterrole.rbac.authorization.k8s.io "p05-06-node-pods" deleted
+clusterrole.rbac.authorization.k8s.io "p05-06-node-proxy" deleted
 
-LAB EXIT 0

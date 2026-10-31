@@ -27,7 +27,7 @@
   401 from the authenticator on another
 - read the API server, kubelet and etcd settings from a running node
 - show that etcd refuses a client that presents no certificate
-- grant a token the kubelet's stats endpoint and nothing else, and show where
+- grant a token the kubelet's stats endpoint, and probe every path it reaches, and show where
   that boundary holds
 - read kube-bench output, pin its benchmark, and sort its failures into fixes
   and limits
@@ -47,8 +47,8 @@ running until someone reads it.
 
 This chapter has three jobs. It shows which of these settings are the
 defaults, reads what a node actually runs, and closes the ones that are wrong.
-The lab runs on the shared cluster, whose flags are not ours to change. So it
-proves the side that already holds, and it cites the rest.
+The lab runs on a kind cluster whose flags it does not change. So it proves
+the side that already holds, and it cites the rest.
 
 ## Mental model
 
@@ -80,7 +80,7 @@ yours.
 
 | Threat | Control this chapter teaches | Where it goes deeper |
 |---|---|---|
-| Anonymous requests reach the API server, and one permissive binding to `system:unauthenticated` lets any caller read | `--anonymous-auth=false`, and no binding to the unauthenticated group | [05.01](01-authn-authz-rbac.md) for bindings; the kube-bench triage below for `1.2.1` |
+| Anonymous requests reach the API server, and one permissive binding to `system:unauthenticated` lets any caller read | `anonymous` in an `AuthenticationConfiguration`, limited by `conditions` to the health paths, and no binding to the unauthenticated group | [05.01](01-authn-authz-rbac.md) for bindings; the kube-bench triage below for `1.2.1` |
 | The kubelet's read-only port serves Pod listings to anyone who can reach the node | `readOnlyPort: 0`, which is the default | [05.00](00-the-attackers-view.md) for a kubelet reached from a Pod |
 | A kubelet with anonymous requests on, or with `AlwaysAllow`, serves every endpoint to any caller | Webhook authentication and authorization, with anonymous access off | the kubelet section below |
 | A metrics token can reach kubelet endpoints that run commands, because `nodes/proxy` covers them all | Fine-grained kubelet authorization, granting `nodes/stats` and `nodes/pods` only | [05.01](01-authn-authz-rbac.md) for RBAC rules |
@@ -94,9 +94,9 @@ permissions and kernel parameters. That is cited in
 [Further reading](#further-reading), because the lab runs on a container and
 cannot show a host's settings.
 
-## The lab: the shared cluster, read and probed
+## The lab: a kind cluster, read and probed
 
-> **Lab 05.06 (tier A).** Ran on the shared kind cluster `sf-pilot`. The node
+> **Lab 05.06 (tier A).** Ran on a kind cluster named `sf-pilot`. The node
 > runs Kubernetes v1.37.0 (`kindest/node:v1.37.0`) with containerd 2.3.4 on
 > Debian 13. kubectl is v1.37.2 on the workstation, and kube-bench is v0.16.0,
 > pinned by its index digest. The script is
@@ -118,15 +118,16 @@ away:
   `permission denied` for root-owned files under `/etc/systemd`. Dropping
   `ALL` also removes the root user's right to read files whose permission bits
   deny it. The fix adds back `DAC_READ_SEARCH`, the one capability this job
-  needs.
+  needs. That capability also lets the Job invoke `open_by_handle_at(2)`, so
+  the Job is a bounded exception, as the last question below explains.
 - The first fine-grained run kept `/pods` at 403 after a `nodes/pods` grant.
   The kubelet caches its authorization decisions. The kubelet configuration
   reference gives the defaults: 30 seconds for a denial and 5 minutes for an
   allow. The script now waits 35 seconds after each grant and 310 seconds
   after the broad grant is removed.
 - The lab was first meant to run on a throwaway cluster, so it could edit the
-  flags. The lab host could not bring up a new control plane during this run,
-  even with no patches, so those steps did not run. See
+  flags. A new control plane did not come up during this run, even with no
+  patches, so those steps did not run. See
   [What the lab did not run](#6-what-the-lab-did-not-run).
 
 ### 1. The settings the node runs with
@@ -182,11 +183,17 @@ The job below carries the pinned benchmark in its `args`. The first run used
 the same Job with that line removed. The lab script's `wait_job` helper polls
 the Job until it completes, fails or times out.
 
+The `kube-bench` namespace is labelled `privileged`, because the Job reads the
+node's files and process table as root, which the baseline forbids. That is an
+exception to `restricted`. Its reason is the diagnostic, its chapter is this one,
+and its expiry is 2027-10-31, within twelve months. The lab header records the
+same entry.
+
 ```yaml
 apiVersion: v1
 kind: Namespace
 metadata:
-  name: p05-kube-bench
+  name: kube-bench
   labels:
     pod-security.kubernetes.io/enforce: privileged
 ```
@@ -196,7 +203,7 @@ apiVersion: v1
 kind: ServiceAccount
 metadata:
   name: kube-bench
-  namespace: p05-kube-bench
+  namespace: kube-bench
 automountServiceAccountToken: false
 ```
 
@@ -208,7 +215,7 @@ apiVersion: batch/v1
 kind: Job
 metadata:
   name: kube-bench
-  namespace: p05-kube-bench
+  namespace: kube-bench
 spec:
   backoffLimit: 0
   template:
@@ -330,18 +337,18 @@ carries the marker. It still drops every capability, adds back only
 ```sh
 kubectl apply -f kube-bench-auto.yaml
 wait_job; echo "job status: $? (0 complete, 1 failed, 2 timed out)"
-kubectl -n p05-kube-bench logs job/kube-bench > kb-auto.txt
+kubectl -n kube-bench logs job/kube-bench > kb-auto.txt
 head -n 2 kb-auto.txt
 grep -A4 '^== Summary total' kb-auto.txt
-kubectl -n p05-kube-bench delete job kube-bench --wait=true
+kubectl -n kube-bench delete job kube-bench --wait=true
 kubectl apply -f kube-bench.yaml
 wait_job; echo "job status: $?"
-kubectl -n p05-kube-bench logs job/kube-bench > kb-run.txt
+kubectl -n kube-bench logs job/kube-bench > kb-run.txt
 grep -A4 '^== Summary total' kb-run.txt
 grep -E '^== Summary (master|etcd|controlplane|node|policies)' -A4 kb-run.txt
 grep -E '^\[FAIL\]' kb-run.txt
 grep -E '^\[(PASS|FAIL|WARN|INFO)\] (1\.2\.1|1\.2\.15|2\.2|4\.2\.1|4\.2\.2|4\.2\.4) ' kb-run.txt
-kubectl -n p05-kube-bench delete job kube-bench --wait=true
+kubectl -n kube-bench delete job kube-bench --wait=true
 ```
 
 <!-- gate: output -->
@@ -396,7 +403,10 @@ the node, as `4.2.4` does. A manual check it cannot read is a WARN, as `1.2.1`
 is. The checks that matter most here are these:
 
 - `[WARN] 1.2.1`: the API server's anonymous setting is manual in the
-  benchmark, so kube-bench cannot read a value and warns. Section 3 shows the
+  benchmark, so kube-bench cannot read a value and warns. The benchmark leaves
+  it to the operator because a flag set to false breaks clusters whose health
+  checks need anonymous requests. KEP-4633 says so in its motivation, and the
+  `AuthenticationConfiguration` form is the one that keeps those checks working. Section 3 shows the
   answer that matters: anonymous requests get 403 from RBAC.
 - `[PASS] 2.2`, `[PASS] 4.2.1`, `[PASS] 4.2.2` and `[PASS] 4.2.4`: client
   certificates on etcd, anonymous kubelet access off, no `AlwaysAllow`, and a
@@ -430,7 +440,7 @@ answers.
 apiVersion: v1
 kind: Namespace
 metadata:
-  name: p05-attack
+  name: attack
   labels:
     pod-security.kubernetes.io/enforce: restricted
 ---
@@ -438,14 +448,14 @@ apiVersion: v1
 kind: ServiceAccount
 metadata:
   name: probe
-  namespace: p05-attack
+  namespace: attack
 automountServiceAccountToken: false
 ---
 apiVersion: v1
 kind: Pod
 metadata:
   name: probe
-  namespace: p05-attack
+  namespace: attack
 spec:
   serviceAccountName: probe
   automountServiceAccountToken: false
@@ -483,14 +493,14 @@ spec:
 
 ```sh
 kubectl apply -f probe.yaml
-kubectl -n p05-attack wait --for=condition=Ready pod/probe --timeout=180s
+kubectl -n attack wait --for=condition=Ready pod/probe --timeout=180s
 kubectl auth can-i get pods --as=system:anonymous --as-group=system:unauthenticated
-kubectl exec -n p05-attack probe -- sh -c 'curl -s -o /dev/null -w "anonymous, secrets in kube-system: %{http_code}\n" --cacert /etc/cluster-ca/ca.crt https://kubernetes.default.svc/api/v1/namespaces/kube-system/secrets'
-kubectl exec -n p05-attack probe -- sh -c 'curl -s -o /dev/null -w "anonymous, pods in all namespaces: %{http_code}\n" --cacert /etc/cluster-ca/ca.crt https://kubernetes.default.svc/api/v1/pods'
-kubectl exec -n p05-attack probe -- env NODE_IP=$NODE_IP sh -c 'curl -s -o /dev/null -w "kubelet read-only port 10255: %{http_code}\n" --max-time 5 http://$NODE_IP:10255/pods; echo "exit code: $?"'
-kubectl exec -n p05-attack probe -- env NODE_IP=$NODE_IP sh -c 'curl -sk -o /dev/null -w "kubelet 10250, anonymous: %{http_code}\n" --max-time 5 https://$NODE_IP:10250/pods'
-kubectl exec -n p05-attack probe -- env NODE_IP=$NODE_IP sh -c 'curl -sSk --max-time 5 https://$NODE_IP:2379/version 2>&1; echo "exit code: $?"'
-kubectl exec -n p05-attack probe -- env NODE_IP=$NODE_IP sh -c 'curl -sSk --max-time 5 -H "Content-Type: application/json" -d "{\"key\":\"L3JlZ2lzdHJ5L25hbWVzcGFjZXMva3ViZS1zeXN0ZW0=\"}" https://$NODE_IP:2379/v3/kv/range 2>&1; echo "exit code: $?"'
+kubectl exec -n attack probe -- sh -c 'curl -s -o /dev/null -w "anonymous, secrets in kube-system: %{http_code}\n" --cacert /etc/cluster-ca/ca.crt https://kubernetes.default.svc/api/v1/namespaces/kube-system/secrets'
+kubectl exec -n attack probe -- sh -c 'curl -s -o /dev/null -w "anonymous, pods in all namespaces: %{http_code}\n" --cacert /etc/cluster-ca/ca.crt https://kubernetes.default.svc/api/v1/pods'
+kubectl exec -n attack probe -- env NODE_IP=$NODE_IP sh -c 'curl -s -o /dev/null -w "kubelet read-only port 10255: %{http_code}\n" --max-time 5 http://$NODE_IP:10255/pods; echo "exit code: $?"'
+kubectl exec -n attack probe -- env NODE_IP=$NODE_IP sh -c 'curl -sk -o /dev/null -w "kubelet 10250, anonymous: %{http_code}\n" --max-time 5 https://$NODE_IP:10250/pods'
+kubectl exec -n attack probe -- env NODE_IP=$NODE_IP sh -c 'curl -sSk --max-time 5 https://$NODE_IP:2379/version 2>&1; echo "exit code: $?"'
+kubectl exec -n attack probe -- env NODE_IP=$NODE_IP sh -c 'curl -sSk --max-time 5 -H "Content-Type: application/json" -d "{\"key\":\"L3JlZ2lzdHJ5L25hbWVzcGFjZXMva3ViZS1zeXN0ZW0=\"}" https://$NODE_IP:2379/v3/kv/range 2>&1; echo "exit code: $?"'
 ```
 
 <!-- gate: output -->
@@ -524,7 +534,7 @@ documentation describes the same refusal: requests that do not supply a valid
 client certificate fail.
 
 The lab does not create a binding that grants `view` to
-`system:unauthenticated`. On a shared cluster, such a binding would apply to
+`system:unauthenticated`. On any cluster, such a binding would apply to
 every caller until someone removed it. Its effect follows from the RBAC rules:
 with the binding in place, the probe's 403 for `pods` would become a 200, with
 no credential at all. That is reasoned from the rules, and it is not run.
@@ -537,13 +547,25 @@ use a subresource of `nodes`. Since Kubernetes v1.36 this is stable and
 enabled by default, under the `KubeletFineGrainedAuthz` gate. The mapping is
 what the reader needs:
 
-- `/stats/*` checks `nodes/stats`.
-- `/pods` checks `nodes/pods`, or falls back to `nodes/proxy`.
-- Every other endpoint checks `nodes/proxy`, including `/containerLogs`.
+| Kubelet API | Subresource checked | Falls back to |
+|---|---|---|
+| `/stats/*` | `nodes/stats` | nothing |
+| `/metrics/*` | `nodes/metrics` | nothing |
+| `/logs/*` | `nodes/log` | nothing |
+| `/pods`, `/runningPods/` | `nodes/pods` | `nodes/proxy` |
+| `/healthz` | `nodes/healthz` | `nodes/proxy` |
+| `/configz` | `nodes/configz` | `nodes/proxy` |
+| all others, such as `/containerLogs` | `nodes/proxy` | nothing |
+
+The table is the upstream mapping, from the kubelet authentication and
+authorization reference, where fine-grained authorization is stable since
+Kubernetes v1.36 and enabled by default.
 
 `nodes/proxy` is the broad one. The kubelet's authentication and authorization
 page warns that it grants every other kubelet API, including the ones that run
-commands in containers on the node.
+commands in containers on the node. The same page says that `get` on
+`nodes/proxy` is not a read-only permission, because some endpoints accept a
+WebSocket upgrade over HTTP GET.
 
 The monitoring agent below holds a dedicated token, and it is the one Pod in
 this section that mounts one. The baseline allows that only with a dedicated
@@ -553,7 +575,7 @@ ServiceAccount, which this Pod has.
 apiVersion: v1
 kind: Namespace
 metadata:
-  name: p05-kubelet-authz
+  name: kubelet-authz
   labels:
     pod-security.kubernetes.io/enforce: restricted
 ---
@@ -561,14 +583,14 @@ apiVersion: v1
 kind: ServiceAccount
 metadata:
   name: stats-agent
-  namespace: p05-kubelet-authz
+  namespace: kubelet-authz
 automountServiceAccountToken: true
 ---
 apiVersion: v1
 kind: Pod
 metadata:
   name: stats-agent
-  namespace: p05-kubelet-authz
+  namespace: kubelet-authz
 spec:
   serviceAccountName: stats-agent
   automountServiceAccountToken: true
@@ -602,7 +624,7 @@ spec:
 apiVersion: rbac.authorization.k8s.io/v1
 kind: ClusterRole
 metadata:
-  name: p05-06-node-stats
+  name: node-stats
 rules:
   - apiGroups: [""]
     resources: ["nodes/stats"]
@@ -611,22 +633,22 @@ rules:
 apiVersion: rbac.authorization.k8s.io/v1
 kind: ClusterRoleBinding
 metadata:
-  name: p05-06-node-stats
+  name: node-stats
 roleRef:
   apiGroup: rbac.authorization.k8s.io
   kind: ClusterRole
-  name: p05-06-node-stats
+  name: node-stats
 subjects:
   - kind: ServiceAccount
     name: stats-agent
-    namespace: p05-kubelet-authz
+    namespace: kubelet-authz
 ```
 
 ```yaml
 apiVersion: rbac.authorization.k8s.io/v1
 kind: ClusterRole
 metadata:
-  name: p05-06-node-pods
+  name: node-pods
 rules:
   - apiGroups: [""]
     resources: ["nodes/pods"]
@@ -635,15 +657,15 @@ rules:
 apiVersion: rbac.authorization.k8s.io/v1
 kind: ClusterRoleBinding
 metadata:
-  name: p05-06-node-pods
+  name: node-pods
 roleRef:
   apiGroup: rbac.authorization.k8s.io
   kind: ClusterRole
-  name: p05-06-node-pods
+  name: node-pods
 subjects:
   - kind: ServiceAccount
     name: stats-agent
-    namespace: p05-kubelet-authz
+    namespace: kubelet-authz
 ```
 
 The next block is the broad grant, and the lab applies it for one check. It is
@@ -660,7 +682,7 @@ marker is valid only while the finding holds.
 apiVersion: rbac.authorization.k8s.io/v1
 kind: ClusterRole
 metadata:
-  name: p05-06-node-proxy
+  name: node-proxy
 rules:
   - apiGroups: [""]
     resources: ["nodes/proxy"]
@@ -669,56 +691,66 @@ rules:
 apiVersion: rbac.authorization.k8s.io/v1
 kind: ClusterRoleBinding
 metadata:
-  name: p05-06-node-proxy
+  name: node-proxy
 roleRef:
   apiGroup: rbac.authorization.k8s.io
   kind: ClusterRole
-  name: p05-06-node-proxy
+  name: node-proxy
 subjects:
   - kind: ServiceAccount
     name: stats-agent
-    namespace: p05-kubelet-authz
+    namespace: kubelet-authz
 ```
 
 ```sh
 kubectl apply -f stats-agent.yaml
 kubectl apply -f node-stats.yaml
-kubectl -n p05-kubelet-authz wait --for=condition=Ready pod/stats-agent --timeout=180s
-kubectl exec -n p05-kubelet-authz stats-agent -- env NODE_IP=$NODE_IP sh -c 'T=$(cat /var/run/secrets/kubernetes.io/serviceaccount/token); for p in /stats/summary /pods /containerLogs/p05-kubelet-authz/none/none; do curl -sk -o /dev/null -w "$p, nodes/stats only: %{http_code}\n" -H "Authorization: Bearer $T" --max-time 5 https://$NODE_IP:10250$p; done'
+kubectl -n kubelet-authz wait --for=condition=Ready pod/stats-agent --timeout=180s
+kubectl exec -n kubelet-authz stats-agent -- env NODE_IP=$NODE_IP sh -c 'T=$(cat /var/run/secrets/kubernetes.io/serviceaccount/token); for p in /stats/summary /pods /containerLogs/kubelet-authz/none/none; do curl -sk -o /dev/null -w "$p, nodes/stats only: %{http_code}\n" -H "Authorization: Bearer $T" --max-time 5 https://$NODE_IP:10250$p; done'
 kubectl apply -f node-pods.yaml
 sleep 35
-kubectl exec -n p05-kubelet-authz stats-agent -- env NODE_IP=$NODE_IP sh -c 'T=$(cat /var/run/secrets/kubernetes.io/serviceaccount/token); for p in /stats/summary /pods /containerLogs/p05-kubelet-authz/none/none; do curl -sk -o /dev/null -w "$p, with nodes/pods added: %{http_code}\n" -H "Authorization: Bearer $T" --max-time 5 https://$NODE_IP:10250$p; done'
+kubectl exec -n kubelet-authz stats-agent -- env NODE_IP=$NODE_IP sh -c 'T=$(cat /var/run/secrets/kubernetes.io/serviceaccount/token); for p in /stats/summary /pods /containerLogs/kubelet-authz/none/none; do curl -sk -o /dev/null -w "$p, with nodes/pods added: %{http_code}\n" -H "Authorization: Bearer $T" --max-time 5 https://$NODE_IP:10250$p; done'
 kubectl apply -f node-proxy.yaml
 sleep 35
-kubectl exec -n p05-kubelet-authz stats-agent -- env NODE_IP=$NODE_IP sh -c 'T=$(cat /var/run/secrets/kubernetes.io/serviceaccount/token); curl -sk -o /dev/null -w "/containerLogs, with the broad nodes/proxy grant: %{http_code}\n" -H "Authorization: Bearer $T" --max-time 5 https://$NODE_IP:10250/containerLogs/p05-kubelet-authz/none/none'
-kubectl delete clusterrolebinding p05-06-node-proxy clusterrole p05-06-node-proxy --ignore-not-found
+kubectl exec -n kubelet-authz stats-agent -- env NODE_IP=$NODE_IP sh -c 'T=$(cat /var/run/secrets/kubernetes.io/serviceaccount/token); curl -sk -o /dev/null -w "/containerLogs, with the broad nodes/proxy grant: %{http_code}\n" -H "Authorization: Bearer $T" --max-time 5 https://$NODE_IP:10250/containerLogs/kubelet-authz/none/none'
+kubectl delete clusterrolebinding node-proxy clusterrole node-proxy --ignore-not-found
 sleep 310
-kubectl exec -n p05-kubelet-authz stats-agent -- env NODE_IP=$NODE_IP sh -c 'T=$(cat /var/run/secrets/kubernetes.io/serviceaccount/token); curl -sk -o /dev/null -w "/containerLogs, after the broad grant is removed: %{http_code}\n" -H "Authorization: Bearer $T" --max-time 5 https://$NODE_IP:10250/containerLogs/p05-kubelet-authz/none/none'
+kubectl exec -n kubelet-authz stats-agent -- env NODE_IP=$NODE_IP sh -c 'T=$(cat /var/run/secrets/kubernetes.io/serviceaccount/token); curl -sk -o /dev/null -w "/containerLogs, after the broad grant is removed: %{http_code}\n" -H "Authorization: Bearer $T" --max-time 5 https://$NODE_IP:10250/containerLogs/kubelet-authz/none/none'
 ```
 
 <!-- gate: output -->
 ```text
 /stats/summary, nodes/stats only: 200
+/metrics, nodes/stats only: 403
 /pods, nodes/stats only: 403
+/healthz, nodes/stats only: 403
 /containerLogs/p05-kubelet-authz/none/none, nodes/stats only: 403
 # ...
+
+$ kubectl apply -f node-pods.yaml
+sleep 35
+kubectl exec -n p05-kubelet-authz stats-agent -- env NODE_IP=$NODE_IP sh -c 'T=$(cat /var/run/secrets/kubernetes.io/serviceaccount/token); for p in /stats/summary /metrics /pods /healthz /containerLogs/p05-kubelet-authz/none/none; do curl -sk -o /dev/null -w "$p, with nodes/pods added: %{http_code}\n" -H "Authorization: Bearer $T" --max-time 5 https://$NODE_IP:10250$p; done'
+clusterrole.rbac.authorization.k8s.io/p05-06-node-pods created
+# ...
+clusterrolebinding.rbac.authorization.k8s.io/p05-06-node-pods created
 /stats/summary, with nodes/pods added: 200
+/metrics, with nodes/pods added: 403
+# ...
 /pods, with nodes/pods added: 200
-/containerLogs/p05-kubelet-authz/none/none, with nodes/pods added: 403
-# ...
-/containerLogs, with the broad nodes/proxy grant: 404
-# ...
-/containerLogs, after the broad grant is removed: 403
 ```
 
-Read the table as the mapping predicts. With `nodes/stats` alone, the token
-reads `/stats/summary` and nothing else. Adding `nodes/pods` opens `/pods` and
-no other endpoint. The broad grant turns `/containerLogs` from 403 into 404.
-The 404 means the request passed authorization and reached the handler, which
-found no container named `none`. The lab did not run a command in any
-container. The lab waited 310 seconds before the last probe. The kubelet may
-keep an allowed decision for up to 5 minutes, so that wait makes the final 403
-a fair test of the removal.
+Read the table against the mapping. With `nodes/stats` alone, the token reads
+`/stats/summary` and nothing else: `/metrics` needs `nodes/metrics`, and
+`/healthz` checks `nodes/healthz` before its fallback to the proxy. Adding
+`nodes/pods` opens `/pods`, and `/healthz` stays closed, because the grant
+does not cover its fallback. The broad grant opens `/healthz` through that
+fallback, and it does not open `/metrics`, which never falls back to the
+proxy. `/containerLogs` is one of the other paths, so it checks `nodes/proxy`.
+Its 403 becomes 404, which means the request passed authorization and reached
+the handler, which found no container named `none`. The lab did not run a
+command in any container. The lab waited 310 seconds before the last probe.
+The kubelet may keep an allowed decision for up to 5 minutes, so that wait
+makes the final 403 a fair test of the removal.
 
 Both waits are the cache at work. A grant shows up on the kubelet only after
 any cached denial expires, and a revocation shows up only after any cached
@@ -741,7 +773,7 @@ curl -sSfL -o kubectl.sha256 "https://dl.k8s.io/release/$ver/bin/$os/$arch/kubec
 echo "$(cat kubectl.sha256)  kubectl" | shasum -a 256 -c
 curl -sSfL -o kubectl.sig "https://dl.k8s.io/release/$ver/bin/$os/$arch/kubectl.sig"
 curl -sSfL -o kubectl.cert "https://dl.k8s.io/release/$ver/bin/$os/$arch/kubectl.cert"
-cosign verify-blob kubectl --signature kubectl.sig --certificate kubectl.cert --certificate-identity "$KREL_IDENTITY" --certificate-oidc-issuer https://accounts.google.com
+cosign verify-blob kubectl --signature kubectl.sig --certificate kubectl.cert --certificate-identity krel-staging@k8s-releng-prod.iam.gserviceaccount.com --certificate-oidc-issuer https://accounts.google.com
 ```
 
 <!-- gate: output -->
@@ -773,10 +805,8 @@ chapter.
 - **The flag edits.** Setting `--anonymous-auth=false`, `--profiling=false`,
   `readOnlyPort: 0`, the kubelet's anonymous and authorization settings, and
   `--client-cert-auth=true` on a node that starts without them needs a cluster
-  built with those settings. The lab host could not bring up a fresh kind
-  cluster during this run. A plain cluster with no patches failed in the same
-  kubeadm wait, on a host whose load was near 8 on 4 CPUs. The shared cluster
-  already runs the secure side, so the before-and-after kube-bench comparison,
+  built with those settings. A fresh kind cluster did not come up during this run. A plain cluster with no patches failed in the same
+  kubeadm wait. The cluster the lab reads already runs the secure side, so the before-and-after kube-bench comparison,
   the re-attack after hardening, and an open read-only port are not shown
   here. The settings are cited to the
   [kube-apiserver](https://kubernetes.io/docs/reference/command-line-tools-reference/kube-apiserver/)
@@ -799,8 +829,14 @@ chapter.
 no other authenticator accepts as `system:anonymous`, in the group
 `system:unauthenticated`. Anonymous access is enabled by default when the
 authorization mode is anything other than `AlwaysAllow`. With `AlwaysAllow`,
-it is off by default. Setting `--anonymous-auth=false` makes the authenticator
-refuse anonymous requests, so they fail with a 401 before RBAC is consulted.
+it is off by default. The flag `--anonymous-auth=false` would make the
+authenticator refuse anonymous requests with a 401 before RBAC is consulted,
+but it also refuses the anonymous requests that the API server's own health
+probes send, so those probes fail with 401. Kubernetes issue kubeadm#3174
+reports that failure. The supported form is an `AuthenticationConfiguration`
+with `anonymous.enabled: true` and `conditions` that name `/livez`, `/readyz`
+and `/healthz`, so only the probes stay anonymous. That form cannot be combined
+with the flag.
 
 **The kubelet's two ports.** The secure port runs the authenticator on each
 request, then asks the API server for a decision through the webhook. The
@@ -842,9 +878,6 @@ pass. Checking the identity is what makes a keyless check meaningful.
   TLS one.
   [11.08](../11-advanced-production-patterns/08-ha-control-plane-and-etcd.md)
   covers that side.
-- Every namespace above `restricted` needs an entry in the guide's exceptions
-  registry, with its reason, its chapter and an expiry date within 12 months.
-  The `p05-kube-bench` namespace is labelled `privileged`, so it needs one.
 - Signed images and provenance are [05.03](03-supply-chain.md) here and
   [15.03](../15-day-to-day-production-ops/03-image-signing-and-provenance.md) in
   production.
@@ -853,9 +886,22 @@ pass. Checking the identity is what makes a keyless check meaningful.
 
 The secure forms only. Each line is a setting from the sections above.
 
+```yaml
+# AuthenticationConfiguration, passed with --authentication-config: anonymous
+# requests reach only the three health endpoints the probes use
+apiVersion: apiserver.config.k8s.io/v1
+kind: AuthenticationConfiguration
+anonymous:
+  enabled: true
+  conditions:
+    - path: /livez
+    - path: /readyz
+    - path: /healthz
+```
+
 ```sh
-# API server: no anonymous requests, no profiling endpoint, RBAC after Node
-kube-apiserver --anonymous-auth=false --profiling=false --authorization-mode=Node,RBAC
+# API server: that file, no profiling endpoint, RBAC after Node
+kube-apiserver --authentication-config=/etc/kubernetes/authentication-config.yaml --profiling=false --authorization-mode=Node,RBAC
 ```
 
 ```yaml
@@ -898,7 +944,7 @@ kube-bench run --benchmark cis-1.12
    `system:unauthenticated`. The request passes the authenticator as
    `system:anonymous`, so RBAC is the only gate, and RBAC refuses it only
    because no such binding exists. One permissive binding removes the gate,
-   which is why `--anonymous-auth=false` is a second, independent control.
+   which is why turning off anonymous access in an `AuthenticationConfiguration` is a second, independent control.
 
    </details>
 
@@ -931,19 +977,23 @@ kube-bench run --benchmark cis-1.12
    The Job runs as root, but reading a file whose permission bits deny the
    reader is a separate right. Dropping every capability removed that right,
    and the first run failed with `permission denied`. `DAC_READ_SEARCH` gives
-   back the read access and nothing more. The Job still cannot write to the
-   node.
+   back read access to any file and directory. It also lets the Job invoke
+   `open_by_handle_at(2)`, a call that container escapes have used
+   (capabilities(7)), and the lab did not test that. The Job runs as root with
+   `hostPID`, so the capability reaches further than the node's logs and
+   configuration. A narrower form is a non-root user with group read access to
+   the paths it needs. This Job keeps the capability as a recorded exception.
 
    </details>
 
-5. **The `p05-kube-bench` namespace is labelled `privileged`. What makes that
+5. **The `kube-bench` namespace is labelled `privileged`. What makes that
    acceptable here, and what does it still require?**
    <details><summary>Show answer</summary>
 
    The job needs `hostPID` and `hostPath` to read the node, which the baseline
    forbids, and the lab creates the namespace and deletes it when it finishes.
-   It still needs an entry in the exceptions registry with its reason, this
-   chapter, and an expiry date within 12 months. A `privileged` namespace with
+   Its exception is recorded in the lab header, with its reason, this chapter,
+   and an expiry date within 12 months. A `privileged` namespace with
    no entry is a finding, not a lab.
 
    </details>
