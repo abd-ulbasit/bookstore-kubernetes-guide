@@ -1,0 +1,252 @@
+# Transcript for 05-security/04-secrets-and-cluster-hardening.md (lab 05.04).
+# Tier A: kind on a Linux lab host.
+# Versions: kind v0.33.0; node image kindest/node:v1.37.0, pinned by digest;
+# Kubernetes v1.37.0; kubectl v1.37.0, copied from that node image so the
+# client matches the server; etcd 3.7.0; containerd 2.3.4; busybox:1.36 by
+# digest.
+# Recorded by running labs/05-04.sh. Two runs, in this order.
+#
+# Run 1: MODE=all, on a throwaway kind cluster the script created and named
+#   p05-enc. Steps 1 to 8 ran with the commands the chapter shows. Steps 9 and
+#   10 did not finish: the lab host's disk was saturated, so the Pods never
+#   became Ready and the apiserver restarted under them. Step 11 could not
+#   delete the cluster until the host freed up; the cluster is gone now.
+#   Run 1 used an earlier revision of the script. Steps 1 to 8 have the same
+#   commands in the committed script; only step titles and the grouping of
+#   steps 9 to 11 changed.
+# Run 2: MODE=inuse, on a second kind cluster the lab owns, in a namespace the
+#   run created. Steps 9 to 11 ran here and are the in-use results the chapter
+#   shows. The namespace is deleted at the end.
+#
+# Name substitution. The chapter prints secrets-lab for the namespace and
+# lab-secrets for the cluster. The captured runs used p05-04-secrets for the
+# namespace and p05-enc for the cluster, and the node is p05-enc-control-plane.
+# Run 2 output never names its cluster.
+#
+# ===== RUN 1 (MODE=all) =====
+## step 1: a throwaway cluster whose apiserver reads an encryption config
+$ kind version
+kind create cluster --name p05-enc --config kind.yaml --kubeconfig kubeconfig --wait 600s
+kind v0.33.0 go1.26.7 linux/amd64
+Creating cluster "p05-enc" ...
+ • Ensuring node image (kindest/node:v1.37.0) 🖼️  ...
+ ✓ Ensuring node image (kindest/node:v1.37.0) 🖼️
+ • Preparing nodes 📦   ...
+ ✓ Preparing nodes 📦 
+ • Writing configuration 📜  ...
+ ✓ Writing configuration 📜
+ • Starting control-plane 🕹️  ...
+ ✓ Starting control-plane 🕹️
+ • Installing CNI 🔌  ...
+ ✓ Installing CNI 🔌
+ • Installing StorageClass 💾  ...
+ ✓ Installing StorageClass 💾
+ • Waiting ≤ 10m0s for control-plane = Ready ⏳  ...
+ ✓ Waiting ≤ 10m0s for control-plane = Ready ⏳
+ • Ready after 1m0s 💚
+Set kubectl context to "kind-p05-enc"
+You can now use your cluster with:
+
+kubectl cluster-info --context kind-p05-enc --kubeconfig kubeconfig
+
+Thanks for using kind! 😊
+
+$ kubectl version
+kubectl get nodes -o custom-columns=NAME:.metadata.name,KUBELET:.status.nodeInfo.kubeletVersion,RUNTIME:.status.nodeInfo.containerRuntimeVersion
+docker exec "$NODE" grep -m 4 '^apiVersion' /kind/kubeadm.conf
+kubectl -n kube-system get pod -l component=kube-apiserver -o jsonpath='{range .items[0].spec.containers[0].command[*]}{@}{"\n"}{end}' | grep encryption
+kubectl get --raw /metrics | grep '^apiserver_encryption_config_controller' | cut -c1-120
+etcd_ctl version
+Client Version: v1.37.0
+Kustomize Version: v5.8.1
+Server Version: v1.37.0
+NAME                    KUBELET   RUNTIME
+p05-enc-control-plane   v1.37.0   containerd://2.3.4
+apiVersion: kubeadm.k8s.io/v1beta4
+apiVersion: kubeadm.k8s.io/v1beta4
+apiVersion: kubeadm.k8s.io/v1beta4
+apiVersion: kubelet.config.k8s.io/v1beta1
+--encryption-provider-config=/etc/kubernetes/enc/encryption-config.yaml
+--encryption-provider-config-automatic-reload=true
+apiserver_encryption_config_controller_last_config_info{apiserver_id_hash="sha256:df5695c37bf9404c5455b2f50853064cda3207
+etcdctl version: 3.7.0
+API version: 3.7
+
+## step 2: a namespace that enforces restricted, and an old Secret
+$ kubectl create namespace p05-04-secrets
+kubectl label namespace p05-04-secrets pod-security.kubernetes.io/enforce=restricted pod-security.kubernetes.io/audit=restricted pod-security.kubernetes.io/warn=restricted
+for i in $(seq 1 60); do kubectl get serviceaccount default -n p05-04-secrets >/dev/null 2>&1 && break; sleep 1; done
+kubectl create secret generic db-credentials -n p05-04-secrets --from-literal=password=lab-marker-0f3c9a
+namespace/p05-04-secrets created
+namespace/p05-04-secrets labeled
+secret/db-credentials created
+
+## step 3: the API returns the value, because base64 is not encryption
+$ kubectl get secret db-credentials -n p05-04-secrets -o jsonpath='{.data.password}'; echo
+kubectl get secret db-credentials -n p05-04-secrets -o jsonpath='{.data.password}' | base64 -d; echo
+bGFiLW1hcmtlci0wZjNjOWE=
+lab-marker-0f3c9a
+
+## step 4: attack: the same Secret in etcd, read from inside the kind node
+$ etcd_get db-credentials > db.raw
+head -c 4 db.raw | od -An -c
+grep -a -o 'lab-marker-[0-9a-f]*' db.raw
+   k   8   s  \0
+lab-marker-0f3c9a
+
+## step 5: enable encryption: an aesgcm key encrypts new writes
+$ head -c 32 /dev/urandom | base64 | tr -d '\n' >key1
+apply_config key1=key1
+sed 's/secret: .*/secret: <redacted>/' "$ENC_DIR/encryption-config.yaml"
+apiserver reloaded the encryption config
+apiserver_encryption_config_controller_automatic_reload_last_timestamp_seconds{apiserver_id_hash="sha256:df5695c37bf9404c5455b2f50853064cda3207ab78268df5267439d
+apiserver_encryption_config_controller_automatic_reloads_total{apiserver_id_hash="sha256:df5695c37bf9404c5455b2f50853064cda3207ab78268df5267439dff1c7a30c",statu
+apiserver_encryption_config_controller_last_config_info{apiserver_id_hash="sha256:df5695c37bf9404c5455b2f50853064cda3207ab78268df5267439dff1c7a30c",hash="sha256
+apiVersion: apiserver.config.k8s.io/v1
+kind: EncryptionConfiguration
+resources:
+  - resources: ["secrets"]
+    providers:
+      - aesgcm:
+          keys:
+            - name: key1
+              secret: <redacted>
+      - identity: {}
+
+## step 6: a new Secret is encrypted; the old one stays plaintext
+$ kubectl create secret generic new-credentials -n p05-04-secrets --from-literal=password=lab-new-7e2d41
+etcd_get new-credentials > new.raw
+grep -a -o 'k8s:enc:[a-z]*:v1:[a-z0-9]*:' new.raw
+grep -a -c 'lab-new-7e2d41' new.raw
+etcd_get db-credentials > db.raw
+grep -a -c 'lab-marker-0f3c9a' db.raw
+secret/new-credentials created
+k8s:enc:aesgcm:v1:key1:
+0
+1
+
+## step 7: rewrite every Secret, so each one is encrypted under key1
+$ kubectl get secrets --all-namespaces -o json | kubectl replace -f - | grep -c replaced
+etcd_get db-credentials > db.raw
+grep -a -c 'lab-marker-0f3c9a' db.raw
+grep -a -o 'k8s:enc:[a-z]*:v1:[a-z0-9]*:' db.raw
+3
+0
+k8s:enc:aesgcm:v1:key1:
+
+## step 8: rotate. key2 encrypts new writes, key1 still decrypts, then key1 goes
+$ head -c 32 /dev/urandom | base64 | tr -d '\n' >key2
+apply_config key2=key2 key1=key1
+kubectl get secrets --all-namespaces -o json | kubectl replace -f - | grep -c replaced
+etcd_get db-credentials > db.raw
+grep -a -o 'k8s:enc:[a-z]*:v1:[a-z0-9]*:' db.raw
+apply_config key2=key2
+kubectl get secret db-credentials -n p05-04-secrets -o jsonpath='{.data.password}' | base64 -d; echo
+apiserver reloaded the encryption config
+apiserver_encryption_config_controller_automatic_reload_last_timestamp_seconds{apiserver_id_hash="sha256:df5695c37bf9404c5455b2f50853064cda3207ab78268df5267439d
+apiserver_encryption_config_controller_automatic_reloads_total{apiserver_id_hash="sha256:df5695c37bf9404c5455b2f50853064cda3207ab78268df5267439dff1c7a30c",statu
+apiserver_encryption_config_controller_last_config_info{apiserver_id_hash="sha256:df5695c37bf9404c5455b2f50853064cda3207ab78268df5267439dff1c7a30c",hash="sha256
+3
+k8s:enc:aesgcm:v1:key2:
+apiserver reloaded the encryption config
+apiserver_encryption_config_controller_automatic_reload_last_timestamp_seconds{apiserver_id_hash="sha256:df5695c37bf9404c5455b2f50853064cda3207ab78268df5267439d
+apiserver_encryption_config_controller_automatic_reloads_total{apiserver_id_hash="sha256:df5695c37bf9404c5455b2f50853064cda3207ab78268df5267439dff1c7a30c",statu
+apiserver_encryption_config_controller_last_config_info{apiserver_id_hash="sha256:df5695c37bf9404c5455b2f50853064cda3207ab78268df5267439dff1c7a30c",hash="sha256
+lab-marker-0f3c9a
+
+## step 9: in use. An environment variable against a mounted file
+$ kubectl apply -f app.yaml
+kubectl wait --for=condition=Ready pod/app-env pod/app-file -n p05-04-secrets --timeout=180s
+kubectl exec -n p05-04-secrets app-env -- sh -c 'tr "\0" "\n" </proc/1/environ | grep DB_PASSWORD'
+kubectl exec -n p05-04-secrets app-file -- ls -lL /etc/creds/password
+kubectl exec -n p05-04-secrets app-file -- cat /etc/creds/password; echo
+kubectl exec -n p05-04-secrets app-file -- sh -c "grep '/etc/creds ' /proc/mounts | cut -d ' ' -f 3"
+serviceaccount/app created
+pod/app-env created
+pod/app-file created
+timed out waiting for the condition on pods/app-env
+timed out waiting for the condition on pods/app-file
+error: unable to upgrade connection: container not found ("app")
+error: unable to upgrade connection: container not found ("app")
+error: unable to upgrade connection: container not found ("app")
+
+error: unable to upgrade connection: container not found ("app")
+
+$ new=$(printf '%s' lab-marker-rotated | base64 | tr -d '\n')
+kubectl patch secret db-credentials -n p05-04-secrets --type merge -p "{\"data\":{\"password\":\"$new\"}}"
+for i in $(seq 1 60); do kubectl exec -n p05-04-secrets app-file -- cat /etc/creds/password 2>/dev/null | grep -q rotated && break; sleep 5; done
+kubectl exec -n p05-04-secrets app-file -- cat /etc/creds/password; echo
+kubectl exec -n p05-04-secrets app-env -- sh -c 'tr "\0" "\n" </proc/1/environ | grep DB_PASSWORD'
+secret/db-credentials patched
+lab-marker-rotated
+error: unexpected EOF
+
+## step 10: where an emptyDir lives on the node
+$ kubectl exec -n p05-04-secrets app-file -- sh -c 'cp /etc/creds/password /cache/password && cp /etc/creds/password /scratch/password'
+uid=$(kubectl get pod -n p05-04-secrets app-file -o jsonpath='{.metadata.uid}')
+docker exec "$NODE" cat "/var/lib/kubelet/pods/$uid/volumes/kubernetes.io~empty-dir/cache/password"; echo
+docker exec "$NODE" stat -f -c '%T %n' "/var/lib/kubelet/pods/$uid/volumes/kubernetes.io~empty-dir/cache" "/var/lib/kubelet/pods/$uid/volumes/kubernetes.io~empty-dir/scratch"
+Unable to connect to the server: EOF
+error: Get "https://127.0.0.1:35223/api/v1/namespaces/p05-04-secrets/pods/app-file": read tcp 127.0.0.1:34598->127.0.0.1:35223: read: connection reset by peer - error from a previous attempt: read tcp 127.0.0.1:50686->127.0.0.1:35223: read: connection reset by peer
+cat: /var/lib/kubelet/pods//volumes/kubernetes.io~empty-dir/cache/password: No such file or directory
+
+stat: cannot read file system information for '/var/lib/kubelet/pods//volumes/kubernetes.io~empty-dir/cache': No such file or directory
+stat: cannot read file system information for '/var/lib/kubelet/pods//volumes/kubernetes.io~empty-dir/scratch': No such file or directory
+
+## step 11: delete the cluster; the trap removes the directories
+$ kind delete cluster --name p05-enc
+Deleting cluster "p05-enc" ...
+ERROR: failed to delete cluster "p05-enc": failed to delete nodes: command "docker rm -f -v p05-enc-control-plane" failed with error: exit status 1
+
+Command Output: Error response from daemon: cannot remove container "p05-enc-control-plane": could not kill container: tried to kill container, but did not receive an exit event
+
+
+# ===== RUN 2 (MODE=inuse) =====
+## step 9: in use. An environment variable against a mounted file
+$ kubectl create namespace p05-04-secrets
+kubectl label namespace p05-04-secrets pod-security.kubernetes.io/enforce=restricted pod-security.kubernetes.io/audit=restricted pod-security.kubernetes.io/warn=restricted
+for i in $(seq 1 60); do kubectl get serviceaccount default -n p05-04-secrets >/dev/null 2>&1 && break; sleep 1; done
+kubectl create secret generic db-credentials -n p05-04-secrets --from-literal=password=lab-marker-0f3c9a
+namespace/p05-04-secrets created
+namespace/p05-04-secrets labeled
+secret/db-credentials created
+
+$ kubectl apply -f app.yaml
+kubectl wait --for=condition=Ready pod/app-env pod/app-file -n p05-04-secrets --timeout=180s
+kubectl exec -n p05-04-secrets app-env -- sh -c 'tr "\0" "\n" </proc/1/environ | grep DB_PASSWORD'
+kubectl exec -n p05-04-secrets app-file -- ls -lL /etc/creds/password
+kubectl exec -n p05-04-secrets app-file -- cat /etc/creds/password; echo
+kubectl exec -n p05-04-secrets app-file -- sh -c "grep '/etc/creds ' /proc/mounts | cut -d ' ' -f 3"
+serviceaccount/app created
+pod/app-env created
+pod/app-file created
+pod/app-env condition met
+pod/app-file condition met
+DB_PASSWORD=lab-marker-0f3c9a
+-r--r-----    1 root     65532           17 Oct 31 04:19 /etc/creds/password
+lab-marker-0f3c9a
+tmpfs
+
+$ new=$(printf '%s' lab-marker-rotated | base64 | tr -d '\n')
+kubectl patch secret db-credentials -n p05-04-secrets --type merge -p "{\"data\":{\"password\":\"$new\"}}"
+for i in $(seq 1 60); do kubectl exec -n p05-04-secrets app-file -- cat /etc/creds/password 2>/dev/null | grep -q rotated && break; sleep 5; done
+kubectl exec -n p05-04-secrets app-file -- cat /etc/creds/password; echo
+kubectl exec -n p05-04-secrets app-env -- sh -c 'tr "\0" "\n" </proc/1/environ | grep DB_PASSWORD'
+secret/db-credentials patched
+lab-marker-rotated
+DB_PASSWORD=lab-marker-0f3c9a
+
+## step 10: where an emptyDir lives on the node
+$ kubectl exec -n p05-04-secrets app-file -- sh -c 'cp /etc/creds/password /cache/password && cp /etc/creds/password /scratch/password'
+uid=$(kubectl get pod -n p05-04-secrets app-file -o jsonpath='{.metadata.uid}')
+docker exec "$NODE" cat "/var/lib/kubelet/pods/$uid/volumes/kubernetes.io~empty-dir/cache/password"; echo
+docker exec "$NODE" stat -f -c '%T %n' "/var/lib/kubelet/pods/$uid/volumes/kubernetes.io~empty-dir/cache" "/var/lib/kubelet/pods/$uid/volumes/kubernetes.io~empty-dir/scratch"
+lab-marker-rotated
+xfs /var/lib/kubelet/pods/df8a04a1-3cb9-46b1-876a-2c45c7fc5180/volumes/kubernetes.io~empty-dir/cache
+tmpfs /var/lib/kubelet/pods/df8a04a1-3cb9-46b1-876a-2c45c7fc5180/volumes/kubernetes.io~empty-dir/scratch
+
+## step 11: delete the namespace this run made; the cluster stays
+$ kubectl delete namespace p05-04-secrets
+namespace "p05-04-secrets" deleted
+E1031 09:33:40.461956  126632 reflector.go:227] "Failed to watch" err="namespaces \"p05-04-secrets\" is forbidden: User \"kubernetes-admin\" cannot watch resource \"namespaces\" in API group \"\" at the cluster scope - error from a previous attempt: EOF" reflector="k8s.io/client-go/tools/watch/informerwatcher.go:162" type="*unstructured.Unstructured"
+
