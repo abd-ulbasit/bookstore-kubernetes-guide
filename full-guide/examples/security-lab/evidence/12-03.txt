@@ -1,0 +1,55 @@
+# Transcript for 12-kubernetes-for-machine-learning/03-batch-and-gang-scheduling.md.
+# Tier A: kind. Kubernetes v1.37.0 server, kubectl v1.37.2.
+# Recorded on a shared lab cluster; its node name differs from the one a kind
+# cluster on a reader's machine prints.
+# The run used the scratch namespace p12-03-bookstore-ml where the chapter says
+# bookstore-ml. The copy of gpu-quota-probe.yaml was rewritten to that namespace
+# and nothing else changed.
+# Not in this transcript: the Kueue and JobSet installs and the gang run. Those
+# steps were not captured, and the chapter labels their output illustrative.
+# Commands are shown as "$ ..." lines. "[exit N]" lines give the exit code of
+# the command above them.
+$ kubectl get --raw /version
+{
+  "major": "1",
+  "minor": "37",
+  "emulationMajor": "1",
+  "emulationMinor": "37",
+  "minCompatibilityMajor": "1",
+  "minCompatibilityMinor": "36",
+  "gitVersion": "v1.37.0",
+  "gitCommit": "f54c212e3a2f75d674b717a9b29052b20b60aefc",
+  "gitTreeState": "clean",
+  "buildDate": "2026-08-26T10:44:25Z
+$ kubectl api-resources --api-group=scheduling.k8s.io
+NAME              SHORTNAMES   APIVERSION             NAMESPACED   KIND
+priorityclasses   pc           scheduling.k8s.io/v1   false        PriorityClass
+$ docker run --rm busybox@sha256:73aaf090f3d85aa34ee199857f03fa3a95c8ede2ffd4cc2cdb5b94e566b11662 id -u
+0
+$ kubectl create namespace p12-03-bookstore-ml
+namespace/p12-03-bookstore-ml created
+$ kubectl label namespace p12-03-bookstore-ml (ch.01 labels) --overwrite
+namespace/p12-03-bookstore-ml labeled
+$ kubectl get ns p12-03-bookstore-ml -o jsonpath labels | grep pod-security
+"pod-security.kubernetes.io/audit":"restricted"
+"pod-security.kubernetes.io/audit-version":"latest"
+"pod-security.kubernetes.io/enforce":"restricted"
+"pod-security.kubernetes.io/enforce-version":"latest"
+"pod-security.kubernetes.io/warn":"restricted"
+"pod-security.kubernetes.io/warn-version":"latest"}
+$ kubectl create -n p12-03-bookstore-ml quota gpu-quota --hard=requests.nvidia.com/gpu=4 | kubectl apply -f -
+resourcequota/gpu-quota created
+$ kubectl get resourcequota -n p12-03-bookstore-ml
+NAME        REQUEST                        LIMIT   AGE
+gpu-quota   requests.nvidia.com/gpu: 0/4           1s
+$ kubectl apply --dry-run=server -f gpu-quota-probe.yaml   (5 GPUs: DELIBERATE denial)
+Error from server (Forbidden): error when creating "gpu-quota-probe.yaml": pods "gpu-quota-probe" is forbidden: exceeded quota: gpu-quota, requested: requests.nvidia.com/gpu=5, used: requests.nvidia.com/gpu=0, limited: requests.nvidia.com/gpu=4
+[exit 1]
+$ kubectl apply --dry-run=server -f gpu-quota-probe.yaml   (4 GPUs: within quota)
+pod/gpu-quota-probe created (server dry run)
+[exit 0]
+$ kubectl get resourcequota gpu-quota -n p12-03-bookstore-ml   (dry runs charge nothing)
+NAME        REQUEST                        LIMIT   AGE
+gpu-quota   requests.nvidia.com/gpu: 0/4           1s
+$ kubectl delete namespace p12-03-bookstore-ml   (cleanup of the namespace this run created)
+namespace "p12-03-bookstore-ml" deleted
