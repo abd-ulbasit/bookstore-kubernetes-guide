@@ -210,9 +210,9 @@ kubectl rollout status deployment/catalog -n bookstore
 Create `volumes-scratch` for the rest of this chapter. It enforces
 `restricted`. Its ServiceAccount mounts no API token and has no RoleBinding of
 its own, so a Pod that uses it has no API permissions. Every `emptyDir` below
-has a `sizeLimit`. The baseline in
-[01.01](../01-core-workloads/01-pods.md#baseline) shows `emptyDir: {}` for
-`/tmp`; read that as a placeholder for a size.
+has a `sizeLimit`, as the `/tmp` volume in the
+[01.01 baseline](../01-core-workloads/01-pods.md#baseline) does, and so does
+every one in the Bookstore's raw manifests, Kustomize base and Helm templates.
 
 The recorded run used a scratch namespace named `p03-volumes` on a lab kind
 cluster whose name differs from the guide's. Lines in the output blocks that
