@@ -10,7 +10,7 @@
 
 **Estimated time:** ~30 min read · ~60 min hands-on
 **Prerequisites:** [Part 04 ch.01](../04-scheduling/01-scheduler-and-nodes.md) — workloads are scheduled and running · [Part 05 ch.02](../05-security/02-pod-security.md) — hardened and running, but is it *healthy*? · [Part 01 ch.02](../01-core-workloads/02-health-and-lifecycle.md) — probes vs metrics: liveness ≠ p95 latency
-**You'll know after this:** • distinguish metrics-server (resource metrics for HPA) from Prometheus (monitoring TSDB) · • read PromQL for RED, USE and the four golden signals · • deploy the Prometheus Operator and write ServiceMonitor + PrometheusRule resources · • interpret kube-state-metrics, node-exporter and application `/metrics` together · • alert on the Bookstore catalog's error rate via Alertmanager
+**You'll know after this:** • distinguish metrics-server (resource metrics for HPA) from Prometheus (monitoring TSDB) · • read PromQL for RED, USE and the four golden signals · • deploy the Prometheus Operator and write ServiceMonitor + PrometheusRule resources · • interpret kube-state-metrics, node-exporter and application `/metrics` together · • alert on the Bookstore catalog's error rate via Alertmanager • lock `/metrics` to Prometheus and say what the endpoint reveals
 
 <!-- tags: observability, prometheus, slo, day-2 -->
 
@@ -70,6 +70,17 @@ Three metric *sources* you will always run, answering different questions:
 | **Application metrics** | what the app is doing | `http_requests_total`, `orders_placed_total` |
 | **kube-state-metrics** | the desired/observed state of K8s *objects* | `kube_deployment_status_replicas_available` |
 | **node-exporter** | the *machine* underneath | `node_cpu_seconds_total`, `node_filesystem_avail_bytes` |
+
+## Threats and controls
+
+| Threat | Control in this chapter | Deeper |
+|---|---|---|
+| Anyone who can reach the metrics port reads route names, traffic and the Go version | A NetworkPolicy admits only the Prometheus pods to `:8080` (section 4) | [02.06](../02-networking/06-network-policies.md) |
+| A public route forwards `/metrics` to the app | No Ingress or Gateway rule may match it (section 4 shows one that does) | [02.04](../02-networking/04-ingress.md), [02.05](../02-networking/05-gateway-api.md) |
+| node-exporter needs host networking and host paths, which the baseline forbids | `monitoring` is labelled `privileged`, registered as an exception, with host PID off | [05.02](../05-security/02-pod-security.md) |
+| A Grafana admin password written into a values file or manifest | `grafana.admin.existingSecret`: the password lives in a Secret you create | [03.02](../03-config-and-storage/02-secrets.md) |
+| Personal data or secrets reaching the TSDB through labels | Labels stay bounded (`handler`, `code`); log redaction is in [06.02](02-logging.md) | [06.02](02-logging.md) |
+| metrics-server trusting a kubelet it cannot verify | Verification stays on; the insecure flag is never taught | [metrics-server FAQ](https://github.com/kubernetes-sigs/metrics-server/blob/master/FAQ.md) |
 
 ## Diagrams
 
@@ -131,11 +142,12 @@ flowchart LR
 
 **Assumed working directory: the guide repo root (`full-guide/`).**
 
-We will: (1) install **metrics-server** and see `kubectl top`/HPA-grade
-metrics; (2) install **kube-prometheus-stack** (Prometheus Operator +
-Prometheus + Alertmanager + Grafana + node-exporter + kube-state-metrics) into
-its own `monitoring` namespace; (3) point a **ServiceMonitor** at catalog's
-existing `/metrics`; (4) query it with PromQL; (5) add a **PrometheusRule**.
+We will: (1) install **metrics-server** and see what its refusal looks like on
+kind; (2) install **kube-prometheus-stack** (Prometheus Operator + Prometheus +
+Alertmanager + Grafana + node-exporter + kube-state-metrics) into its own
+`monitoring` namespace; (3) point a **ServiceMonitor** at catalog's existing
+`/metrics`; (4) lock `/metrics` down to Prometheus; (5) query it with PromQL;
+(6) add a **PrometheusRule**.
 
 ### 0. Prerequisites (self-bootstrapping — re-run after any kind recreate)
 
@@ -168,6 +180,7 @@ kubectl apply -f examples/bookstore/raw-manifests/13-rabbitmq.yaml
 kubectl apply -f examples/bookstore/raw-manifests/20-postgres-statefulset.yaml
 kubectl rollout status statefulset/postgres -n bookstore
 kubectl apply -f examples/bookstore/raw-manifests/10-catalog-deploy.yaml
+kubectl apply -f examples/bookstore/raw-manifests/11-storefront-deploy.yaml
 kubectl apply -f examples/bookstore/raw-manifests/14-orders-deploy.yaml
 kubectl apply -f examples/bookstore/raw-manifests/40-services.yaml
 kubectl apply -f examples/bookstore/raw-manifests/21-db-migrate-job.yaml   # schema
@@ -180,28 +193,67 @@ kubectl rollout status deployment/catalog -n bookstore
 
 ### 1. metrics-server (the resource-metrics plane)
 
-Install via Helm (same install method as every other add-on in this part; a
-raw `releases/latest/download/components.yaml` URL is fragile — `latest/`
-resolves to the newest tag but the filename is fixed, so it can 404 or skew —
-and Helm lets the kind/k3d TLS flag be set declaratively at install time
-instead of a post-install patch). The chart installs into `kube-system`:
+Install it with Helm into a namespace of its own, labelled `restricted`. The
+chart's `securityContext` values already set what `restricted` asks for
+(non-root, a read-only root filesystem, every capability dropped, the
+`RuntimeDefault` seccomp profile), and the install keeps them. The chart does
+not go into `kube-system`, which this chapter does not relabel:
 
 ```sh
+kubectl create namespace metrics-server
+kubectl label namespace metrics-server \
+  pod-security.kubernetes.io/enforce=restricted \
+  pod-security.kubernetes.io/audit=restricted \
+  pod-security.kubernetes.io/warn=restricted
 helm repo add metrics-server https://kubernetes-sigs.github.io/metrics-server/
 helm repo update
-# --kubelet-insecure-tls: on kind/k3d the kubelet serving cert is self-signed
-# so metrics-server's TLS verification fails without it (LOCAL ONLY — in
-# production the kubelet cert is properly signed; never set this there).
 helm install metrics-server metrics-server/metrics-server \
-  --namespace kube-system \
-  --set 'args={--kubelet-insecure-tls}' \
-  --wait
-kubectl -n kube-system rollout status deployment/metrics-server
-
-# Now the metrics.k8s.io API is served — `kubectl top` works:
+  --version 3.14.0 \
+  --namespace metrics-server
+kubectl -n metrics-server get pods
 kubectl top nodes
-kubectl top pods -n bookstore
 ```
+
+<!-- gate: output -->
+```
+NAME                             READY   STATUS    RESTARTS   AGE
+metrics-server-c4994bc54-b2jpz   0/1     Running   0          53s
+```
+
+<!-- gate: output -->
+```
+error: Metrics API not available
+```
+
+The output in this section came from a lab cluster whose node has a different
+name from yours. The pod runs, but it does not become ready on this cluster.
+Read its log to see why:
+
+```sh
+kubectl -n metrics-server logs deploy/metrics-server --tail=3
+```
+
+<!-- gate: output -->
+```
+E1031 01:17:58.628753       1 scraper.go:149] "Failed to scrape node" err="Get \"https://172.18.0.2:10250/metrics/resource\": tls: failed to verify certificate: x509: cannot validate certificate for 172.18.0.2 because it doesn't contain any IP SANs" node="sf-pilot-control-plane"
+```
+
+The log line is the control working. The kubelet's serving certificate on a
+kind node does not list the node's IP address, so metrics-server's
+verification refuses it. The tempting fix is `--kubelet-insecure-tls`, which
+turns verification off for every kubelet in the cluster, so this chapter does
+not teach it. The [metrics-server
+FAQ](https://github.com/kubernetes-sigs/metrics-server/blob/master/FAQ.md)
+names the secure setup: validate the kubelet certificate with
+`--kubelet-certificate-authority`, and keep the insecure flags off. Serving
+certificates that the cluster CA signs come from the CSR flow, which
+`--rotate-server-certificates` turns on ([kubelet
+reference](https://kubernetes.io/docs/reference/command-line-tools-reference/kubelet/)).
+A kind configuration would have to set that up, and this lab cluster does not
+have one. So on kind this chapter stops at the refusal. Until metrics-server
+serves, `kubectl get apiservice v1beta1.metrics.k8s.io` reports `False
+(MissingEndpoints)`, and the HPA in [ch.04](04-autoscaling.md) has no resource
+metrics on this cluster.
 
 `kubectl top` returns **current** usage only — there is no `--since`, no
 history. That is the entire point of metrics-server: it is the live feed the
@@ -209,20 +261,99 @@ HPA samples ([ch.04](04-autoscaling.md)), not a monitoring store.
 
 ### 2. kube-prometheus-stack (the monitoring plane)
 
-Install via Helm into a dedicated `monitoring` namespace. That namespace is
-**not** the `bookstore` namespace and is **not** PSA-restricted — the stack's
-node-exporter is a privileged host-level DaemonSet and belongs in its own
-trusted namespace, exactly like the log agent in [ch.02](02-logging.md):
+Install the chart into a `monitoring` namespace of its own, not `bookstore`.
+That namespace cannot be `restricted`. node-exporter is a host-level
+DaemonSet, and it needs host networking and host paths, which `restricted` and
+`baseline` both forbid. So `monitoring` is labelled `privileged`, which makes
+it an exception. The exception is registered in
+`security/namespace-exceptions.yaml` at the repository root, with its reason
+and an expiry date. The warn and audit labels stay at `restricted`, so the
+warnings name every pod that would fail it, and the dry run below shows that
+node-exporter is the only one.
+
+This lab's install did not finish on the shared cluster, so the stack below is
+checked by a server-side dry run of the rendered chart, not by a running stack.
+The evidence file records what ran.
 
 ```sh
 helm repo add prometheus-community https://prometheus-community.github.io/helm-charts
 helm repo update
 kubectl create namespace monitoring
-# Release name MUST be kube-prometheus-stack — the ServiceMonitor/PrometheusRule
-# `release:` label (80-/81-) must match Prometheus's selector (see below).
+kubectl label namespace monitoring \
+  pod-security.kubernetes.io/enforce=privileged \
+  pod-security.kubernetes.io/audit=restricted \
+  pod-security.kubernetes.io/warn=restricted
+kubectl -n monitoring create secret generic grafana-admin \
+  --from-literal=admin-user=admin \
+  --from-literal=admin-password="$(openssl rand -base64 24)"
+```
+
+<!-- gate: output -->
+```
+secret/grafana-admin created
+```
+
+The password is generated and never written to a file. Without an
+`existingSecret`, the chart's Grafana subchart writes a random admin password
+into a Secret it chooses. Naming your own Secret keeps the password out of the
+values file.
+
+The values file keeps node-exporter's host networking and its read-only root
+mount, which the network and filesystem collectors read. It turns off the
+shared host PID namespace, because the chart's collectors read host data
+through the `/host` mounts instead. Check after install that `node_` series
+still appear. The file also sets the seccomp and capability fields that the
+chart exposes:
+
+```sh
+cat > monitoring-values.yaml <<'EOF'
+grafana:
+  admin:
+    existingSecret: grafana-admin
+prometheus-node-exporter:
+  hostPID: false
+  securityContext:
+    seccompProfile:
+      type: RuntimeDefault
+  containerSecurityContext:
+    allowPrivilegeEscalation: false
+    capabilities:
+      drop: ["ALL"]
+EOF
+```
+
+Before installing, render the chart and dry-run it against the server. Nothing
+is created, and the warning reports what `restricted` would refuse:
+
+```sh
+helm template kube-prometheus-stack prometheus-community/kube-prometheus-stack \
+  --version 92.16.1 --namespace monitoring --values monitoring-values.yaml \
+  --skip-tests | kubectl apply --dry-run=server -f -
+```
+
+<!-- gate: output -->
+```
+Warning: would violate PodSecurity "restricted:latest": host namespaces (hostNetwork=true), restricted volume types (volumes "proc", "sys", "root" use restricted volume type "hostPath")
+```
+
+That one warning is the registered exception: host networking and host paths.
+Nothing else in the chart fails `restricted`. `--skip-tests` leaves out the
+chart's test hook, which `helm test` runs and `helm install` does not. The dry
+run needs the chart's CRDs in place for the `Prometheus` and `ServiceMonitor`
+kinds. Without them the server does not know those kinds. `helm show chart`
+reports the chart as version 92.16.1, which is the version pinned below.
+
+Install the pinned version:
+
+```sh
+# The release name must be kube-prometheus-stack: the `release:` label on 80-
+# and 81- has to match Prometheus's selector (see below).
 helm install kube-prometheus-stack \
   prometheus-community/kube-prometheus-stack \
-  --namespace monitoring --wait
+  --version 92.16.1 \
+  --namespace monitoring \
+  --values monitoring-values.yaml \
+  --wait
 kubectl get pods -n monitoring
 ```
 
@@ -234,7 +365,7 @@ Grafana via port-forward (local only):
 kubectl -n monitoring port-forward svc/kube-prometheus-stack-prometheus 9090:9090 &
 # Prometheus UI: http://localhost:9090  (Status -> Targets shows what it scrapes)
 kubectl -n monitoring port-forward svc/kube-prometheus-stack-grafana 3000:80 &
-# Grafana: http://localhost:3000 (admin / prom-operator by default — change it)
+# Grafana: http://localhost:3000 (user admin; the password is in grafana-admin)
 ```
 
 ### 3. Scrape the Bookstore: a ServiceMonitor
@@ -287,12 +418,21 @@ kubectl apply -f examples/bookstore/raw-manifests/80-servicemonitor.yaml
 # Prometheus UI -> Status -> Targets: bookstore/catalog should be UP within ~30s.
 ```
 
+The lab created both objects with the chart's CRDs in place. No operator ran
+there, so nothing scraped them:
+
+<!-- gate: output -->
+```
+servicemonitor.monitoring.coreos.com/catalog created
+servicemonitor.monitoring.coreos.com/payments-worker created
+```
+
 > **NetworkPolicy interaction.** Once a policy-enforcing CNI is in play (Part 02
 > ch.06), default-deny ingress in `bookstore` blocks Prometheus's scrape and
-> every target shows "context deadline exceeded". `60-networkpolicy.yaml` was
-> extended this phase with rule 10 (`allow-monitoring-scrape`) admitting the
-> `monitoring` namespace to catalog/orders/payments-worker on `:8080` — apply
-> the updated `60-networkpolicy.yaml` if you are running with Calico/Cilium.
+> every target shows "context deadline exceeded". Rule 10 of
+> `60-networkpolicy.yaml` (`allow-monitoring-scrape`) admits only the Prometheus
+> pods in `monitoring` to catalog, orders and payments-worker on `:8080`.
+> Section 4 applies it.
 > Note this rule is **deliberately one-sided** — unlike the intra-`bookstore`
 > backend edges (Part 02 ch.06), which need *both* a destination Ingress
 > *and* a source Egress rule because *both* endpoints sit in the default-deny
@@ -303,20 +443,157 @@ kubectl apply -f examples/bookstore/raw-manifests/80-servicemonitor.yaml
 > locked-down side (`bookstore`) has a half to add, so the missing "other
 > half" is correct by design, not an omission.
 
-### 4. Query the Bookstore with PromQL
+### 4. Lock `/metrics` to Prometheus
 
-Generate some traffic, then query (Prometheus UI → Graph, or `/api/v1/query`).
-catalog is distroless (no shell), so drive it from an **ephemeral
-public-image** Pod, not `kubectl exec`:
+catalog serves `/metrics` on the port its API uses, `:8080`, and nothing
+authenticates the request. Before a NetworkPolicy exists, a pod in any namespace
+can read it. The probe below stands in for such a pod. It runs as UID 100 and
+GID 101, which the curl image declares, with the restricted settings from the
+[baseline](../01-core-workloads/01-pods.md#baseline):
 
 ```sh
-# A restricted-compliant curl Pod in `bookstore` (PSA enforce:restricted),
-# looping to create requests. --overrides supplies the restricted SC so PSA
-# admits this ad-hoc Pod (curlimages/curl runs fine as non-root).
-kubectl run loadgen -n bookstore --rm -it --restart=Never \
-  --image=curlimages/curl:8.10.1 \
-  --overrides='{"spec":{"securityContext":{"runAsNonRoot":true,"runAsUser":65534,"seccompProfile":{"type":"RuntimeDefault"}},"containers":[{"name":"loadgen","image":"curlimages/curl:8.10.1","command":["sh","-c","for i in $(seq 1 300); do curl -s -o /dev/null http://catalog.bookstore.svc.cluster.local/books; done; echo done"],"securityContext":{"allowPrivilegeEscalation":false,"capabilities":{"drop":["ALL"]},"readOnlyRootFilesystem":true}}]}}'
+kubectl create namespace probe
+kubectl label namespace probe \
+  pod-security.kubernetes.io/enforce=restricted \
+  pod-security.kubernetes.io/audit=restricted \
+  pod-security.kubernetes.io/warn=restricted
+kubectl -n probe create serviceaccount probe
+# curlimages/curl:8.10.1, pinned by digest
+kubectl run probe -n probe --rm -i --restart=Never \
+  --image=curlimages/curl@sha256:d9b4541e214bcd85196d6e92e2753ac6d0ea699f0af5741f8c6cccbfcf00ef4b \
+  --overrides='{"spec":{"serviceAccountName":"probe","automountServiceAccountToken":false,"securityContext":{"runAsNonRoot":true,"runAsUser":100,"runAsGroup":101,"seccompProfile":{"type":"RuntimeDefault"}},"containers":[{"name":"probe","image":"curlimages/curl@sha256:d9b4541e214bcd85196d6e92e2753ac6d0ea699f0af5741f8c6cccbfcf00ef4b","command":["curl","-sS","-m","5","http://catalog.bookstore.svc.cluster.local/metrics"],"resources":{"requests":{"cpu":"10m","memory":"16Mi"},"limits":{"memory":"32Mi"}},"securityContext":{"allowPrivilegeEscalation":false,"readOnlyRootFilesystem":true,"capabilities":{"drop":["ALL"]}}}]}}'
 ```
+
+<!-- gate: output -->
+```
+# HELP go_info Information about the Go environment.
+# TYPE go_info gauge
+go_info{version="go1.26.10"} 1
+```
+
+Most of the body is runtime detail. `go_info` gives the Go version, which is
+enough to match a runtime advisory. The `handler` and `code` labels name each
+route and status the app serves, and the counters show the traffic per route.
+The health endpoints already show traffic before any load, because the
+kubelet's probes call `healthz` and `readyz`:
+
+<!-- gate: output -->
+```
+http_requests_total{code="200",handler="healthz"} 4
+http_requests_total{code="200",handler="readyz"} 8
+```
+
+The labels hold no customer data, but the counters still show how busy the
+service is. The other services add business volume to the same kind of
+endpoint, as `orders_placed_total` and `payments_processed_total`. Any pod that
+reaches the port reads all of it.
+
+Apply the lock. Rule 10 admits the Prometheus pods and nothing else in
+`monitoring`:
+
+```sh
+kubectl apply -f examples/bookstore/raw-manifests/60-networkpolicy.yaml
+```
+
+<!-- gate: output -->
+```
+networkpolicy.networking.k8s.io/default-deny-all created
+# ...
+networkpolicy.networking.k8s.io/allow-monitoring-scrape created
+```
+
+Rule 10 is the only edge into `monitoring`, and its `from` entry needs both
+selectors. Two stand-in pods in that namespace show it. The first carries
+`app.kubernetes.io/name: prometheus`, the label to check on the chart's real
+Prometheus pods with `kubectl -n monitoring get pods --show-labels` once the
+stack runs. The second carries a Grafana label. This lab did not run the
+stack, so the stand-ins are the test.
+
+```sh
+kubectl -n monitoring create serviceaccount standin
+kubectl run prometheus-standin -n monitoring --labels=app.kubernetes.io/name=prometheus \
+  --rm -i --restart=Never --image=curlimages/curl@sha256:d9b4541e214bcd85196d6e92e2753ac6d0ea699f0af5741f8c6cccbfcf00ef4b \
+  --overrides='{"spec":{"serviceAccountName":"standin","automountServiceAccountToken":false,"securityContext":{"runAsNonRoot":true,"runAsUser":100,"runAsGroup":101,"seccompProfile":{"type":"RuntimeDefault"}},"containers":[{"name":"prometheus-standin","image":"curlimages/curl@sha256:d9b4541e214bcd85196d6e92e2753ac6d0ea699f0af5741f8c6cccbfcf00ef4b","command":["curl","-sS","-m","5","-o","/dev/null","-w","%{http_code}\n","http://catalog.bookstore.svc.cluster.local/metrics"],"resources":{"requests":{"cpu":"10m","memory":"16Mi"},"limits":{"memory":"32Mi"}},"securityContext":{"allowPrivilegeEscalation":false,"readOnlyRootFilesystem":true,"capabilities":{"drop":["ALL"]}}}]}}'
+kubectl run grafana-standin -n monitoring --labels=app.kubernetes.io/name=grafana \
+  --rm -i --restart=Never --image=curlimages/curl@sha256:d9b4541e214bcd85196d6e92e2753ac6d0ea699f0af5741f8c6cccbfcf00ef4b \
+  --overrides='{"spec":{"serviceAccountName":"standin","automountServiceAccountToken":false,"securityContext":{"runAsNonRoot":true,"runAsUser":100,"runAsGroup":101,"seccompProfile":{"type":"RuntimeDefault"}},"containers":[{"name":"grafana-standin","image":"curlimages/curl@sha256:d9b4541e214bcd85196d6e92e2753ac6d0ea699f0af5741f8c6cccbfcf00ef4b","command":["curl","-sS","-m","5","-o","/dev/null","-w","%{http_code}\n","http://catalog.bookstore.svc.cluster.local/metrics"],"resources":{"requests":{"cpu":"10m","memory":"16Mi"},"limits":{"memory":"32Mi"}},"securityContext":{"allowPrivilegeEscalation":false,"readOnlyRootFilesystem":true,"capabilities":{"drop":["ALL"]}}}]}}'
+```
+
+<!-- gate: output -->
+```
+200
+```
+
+The labelled stand-in gets `200`. The other is refused although it sits in the
+same namespace. That is what the single `from` entry does. Two list items
+would have admitted both pods.
+
+<!-- gate: output -->
+```
+000
+curl: (28) Connection timed out after 5002 milliseconds
+```
+
+Run the same probe again:
+
+<!-- gate: output -->
+```
+curl: (28) Connection timed out after 5001 milliseconds
+```
+
+Exit code 28 is curl's timeout, and it is the result the policy should give. The
+Bookstore's default-deny ingress has no rule that admits pods in `probe`, so the
+connection is dropped and never answered.
+
+Rule 4 still admits storefront to the same port, for the API. A NetworkPolicy
+matches pods and ports, never URL paths, so storefront reads the same endpoint:
+
+```sh
+kubectl -n bookstore exec deploy/storefront -- wget -q -O - http://catalog/metrics
+```
+
+<!-- gate: output -->
+```
+# HELP go_info Information about the Go environment.
+# TYPE go_info gauge
+go_info{version="go1.26.10"} 1
+```
+
+That is the residual exposure, and the lock does not close it. The fix is a
+metrics port that only Prometheus can reach, which catalog does not have yet, or
+a layer-7 policy that matches the path, which this chapter does not build.
+
+> **The public route.** No Ingress or Gateway rule may send `/metrics` to the
+> app. The Gateway example in [02.05](../02-networking/05-gateway-api.md) meets
+> this: its prefix rewrite turns `/api/books/metrics` into `/books/metrics`,
+> which catalog does not serve. The Ingress example in
+> [02.04](../02-networking/04-ingress.md) does not. Its path
+> `/api/books(/|$)(.*)` keeps the suffix, and `rewrite-target: /$2` would turn
+> `/api/books/metrics` into `/metrics`
+> ([ingress-nginx rewrite](https://kubernetes.github.io/ingress-nginx/examples/rewrite/)).
+> That is a defect in Part 02's example, and the fix belongs there: rewrite to
+> the fixed `/books` path. Until it is fixed, the Ingress example would route
+> `/metrics` to catalog.
+
+### 5. Query the Bookstore with PromQL
+
+Generate traffic from storefront, the one caller the policy admits. catalog is
+distroless (no shell), so the load cannot run inside it. Storefront's image has
+a shell and BusyBox `wget`:
+
+```sh
+kubectl -n bookstore exec deploy/storefront -- \
+  sh -c 'for i in $(seq 1 200); do wget -q -O /dev/null http://catalog/books; done; echo done'
+```
+
+<!-- gate: output -->
+```
+done
+```
+
+`-q` hides failed requests, so check the counters rather than the loop's count.
+Then query (Prometheus UI → Graph, or `/api/v1/query`). A throwaway pod would be
+refused by the same policy, which is the point of the lock.
 
 The RED queries (these work against the metrics catalog already exports):
 
@@ -337,7 +614,7 @@ In Grafana, the bundled "Kubernetes / Compute Resources" dashboards already
 work (kube-state-metrics + node-exporter feed them); build a Bookstore RED
 dashboard from the three queries above (one panel each).
 
-### 5. Alert on catalog's error rate: a PrometheusRule
+### 6. Alert on catalog's error rate: a PrometheusRule
 
 New file
 [`examples/bookstore/raw-manifests/81-prometheusrule.yaml`](../examples/bookstore/raw-manifests/81-prometheusrule.yaml)
@@ -501,7 +778,9 @@ Checklist:
 - [ ] App exposes `/metrics`; labels are **bounded** (no IDs/paths)
 - [ ] ServiceMonitor carries the `release:` label Prometheus selects on
 - [ ] Alerts are symptom-based (errors/latency/SLO), not CPU
-- [ ] NetworkPolicy allows `monitoring` → app `:8080` (if a policy CNI runs)
+- [ ] NetworkPolicy admits only the Prometheus pods to app `:8080`
+- [ ] No Ingress or Gateway rule matches `/metrics`
+- [ ] `monitoring` is a registered exception; Grafana's login is a Secret
 - [ ] Retention/long-term storage and cardinality budget decided
 
 ## Test your understanding
@@ -525,7 +804,7 @@ Checklist:
 3. **Your `http_requests_total` series has labels `{handler, code, customer_id}`. After a week Prometheus is OOMing and queries are slow. What's the root cause and the fix?**
    <details><summary>Show answer</summary>
 
-   `customer_id` is unbounded — every customer creates a new time series, and Prometheus's memory cost is proportional to *active series count*, not request volume. This is **label cardinality explosion**, the #1 way to break a Prometheus. Fix: drop `customer_id` from the metric (it belongs in *logs* or *traces*, not metrics), keep labels to a low-cardinality set (`handler`, `code`, `method`) — usually under ~100 per metric.
+   `customer_id` is unbounded — every customer creates a new time series, and Prometheus's memory cost is proportional to *active series count*, not request volume. This is **label cardinality explosion**, the #1 way to break a Prometheus. Fix: drop `customer_id` from the metric (it belongs in *logs* or *traces*, not metrics), keep labels to a small, fixed set of values (`handler`, `code`, `method`).
 
    </details>
 
@@ -543,6 +822,19 @@ Checklist:
 
    </details>
 
+6. **A teammate wants an Ingress rule for `/api/books/metrics`, so the dashboard team can read catalog's metrics from outside the cluster. What do you tell them, and what do you check before approving it?**
+   <details><summary>Show answer</summary>
+
+   Say no. `/metrics` has no authentication, and it reveals the Go version,
+   the route names and the traffic per route. A route that keeps the suffix
+   hands the endpoint to anyone who can reach the host. Give the dashboard
+   team Grafana, which has its own login, and keep the scrape inside the
+   cluster. Before approving any route, check every Ingress and Gateway rule
+   for a path that could match `/metrics`, including suffix captures such as
+   `(.*)` and their rewrites.
+
+   </details>
+
 ## Further reading
 
 - **Rosso et al., _Production Kubernetes_, ch.9 — Observability** (metrics
@@ -554,3 +846,4 @@ Checklist:
   (metrics-server / `metrics.k8s.io`),
   <https://prometheus.io/docs/introduction/overview/> and the Prometheus
   Operator design: <https://prometheus-operator.dev/docs/getting-started/introduction/>.
+- metrics-server's secure setup, <https://github.com/kubernetes-sigs/metrics-server/blob/master/FAQ.md>, and kubelet serving certificates, <https://kubernetes.io/docs/reference/command-line-tools-reference/kubelet/>.

@@ -44,9 +44,10 @@
 #  • Prometheus scrape (Part 06 ch.01): kube-prometheus-stack runs in the
 #    `monitoring` namespace and must reach the /metrics ports of catalog,
 #    orders and payments-worker (all :8080). default-deny Ingress (rule 1)
-#    blocks that, so a new Ingress policy (rule 10) admits the monitoring
-#    namespace to those three tiers on 8080. Without it every ServiceMonitor
-#    target shows "context deadline exceeded" once a policy CNI is enforcing.
+#    blocks that, so a new Ingress policy (rule 10) admits the Prometheus
+#    pods, and only them, to those three tiers on 8080. Without it every
+#    ServiceMonitor target shows "context deadline exceeded" once a policy
+#    CNI is enforcing.
 #
 # Requires (objects to enforce against):
 #   kubectl apply -f examples/bookstore/raw-manifests/00-namespace.yaml
@@ -335,14 +336,20 @@ spec:
       ports:
         - { protocol: TCP, port: 5672 }
 ---
-# 10) Part 06 ch.01 — allow the monitoring namespace (kube-prometheus-stack,
-#     installed in ch.01) to SCRAPE the /metrics endpoints of the three
-#     metrics-exposing tiers on :8080. default-deny Ingress (rule 1) blocks
-#     Prometheus otherwise and every ServiceMonitor (80-) / PodMonitor target
-#     reports a scrape timeout. Namespace match uses the immutable
-#     kubernetes.io/metadata.name label (= the namespace Prometheus runs in;
-#     adjust if you installed kube-prometheus-stack elsewhere). storefront is
-#     deliberately NOT here — the nginx UI exposes no Prometheus metrics.
+# 10) Part 06 ch.01 — let ONLY the Prometheus pods in the `monitoring`
+#     namespace (kube-prometheus-stack, installed in ch.01) scrape the /metrics
+#     endpoints of the three metrics-exposing tiers on :8080. default-deny
+#     Ingress (rule 1) blocks Prometheus otherwise and every ServiceMonitor
+#     (80-) / PodMonitor target reports a scrape timeout.
+#
+#     The `from` entry below carries BOTH selectors. In one entry they must
+#     both match (a pod in that namespace AND carrying that label). Two list
+#     items would mean either one matches, which would admit every pod in
+#     `monitoring`, Grafana and node-exporter included. The namespace match
+#     uses the immutable kubernetes.io/metadata.name label. storefront is
+#     deliberately NOT here: the nginx UI is not scraped. Rule 4 still lets
+#     storefront reach this port for the API, and NetworkPolicy cannot filter
+#     by path (see 06.01 for the consequence).
 #
 #     INTENTIONALLY ONE-SIDED (contrast the "both-ends" rules 4-9). The
 #     intra-namespace backend edges need an egress half because BOTH endpoints
@@ -370,8 +377,11 @@ spec:
   policyTypes: ["Ingress"]
   ingress:
     - from:
-        - namespaceSelector:
+        - namespaceSelector:            # one entry: both selectors must match
             matchLabels:
               kubernetes.io/metadata.name: monitoring
+          podSelector:
+            matchLabels:
+              app.kubernetes.io/name: prometheus
       ports:
         - { protocol: TCP, port: 8080 }
