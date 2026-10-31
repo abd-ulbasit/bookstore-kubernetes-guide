@@ -166,9 +166,10 @@ package flags
 
 import (
     "context"
+    "time"
 
     flagsmith "github.com/Flagsmith/flagsmith-go-client/v3"
-    "github.com/open-feature/go-sdk-contrib/providers/flagsmith/pkg"
+    flagsmithProvider "github.com/open-feature/go-sdk-contrib/providers/flagsmith/pkg"
     "github.com/open-feature/go-sdk/openfeature"
 )
 
@@ -183,7 +184,7 @@ func RegisterFlagsmith(ctx context.Context, apiURL, envKey string) error {
         flagsmith.WithBaseURL(apiURL),
         flagsmith.WithLocalEvaluation(ctx),  // pull flags every 60s for
                                               // low-latency in-process eval
-        flagsmith.WithEnvironmentRefreshInterval(60),
+        flagsmith.WithEnvironmentRefreshInterval(60 * time.Second),
     )
     provider := flagsmithProvider.NewProvider(client)
     return openfeature.SetProvider(provider)

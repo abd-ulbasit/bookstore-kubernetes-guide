@@ -1,0 +1,102 @@
+# Bookstore Platform, Part 15 ch.08: the flagsmith namespace and the
+# controls the Flagsmith chart does not set itself. Apply before the Helm
+# install (see the chapter).
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: flagsmith
+  labels:
+    app.kubernetes.io/part-of: bookstore-platform
+    pod-security.kubernetes.io/enforce: restricted
+    pod-security.kubernetes.io/warn: restricted
+---
+# The chart renders the migrate-db init container with no resources block.
+# These defaults give it a memory limit and a request.
+apiVersion: v1
+kind: LimitRange
+metadata:
+  name: flagsmith-defaults
+  namespace: flagsmith
+spec:
+  limits:
+    - type: Container
+      defaultRequest:
+        cpu: 50m
+        memory: 128Mi
+      default:
+        memory: 512Mi
+---
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: flagsmith-api
+  namespace: flagsmith
+automountServiceAccountToken: false
+---
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: flagsmith-frontend
+  namespace: flagsmith
+automountServiceAccountToken: false
+---
+# Default deny first, then the explicit allows.
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: default-deny
+  namespace: flagsmith
+spec:
+  podSelector: {}
+  policyTypes: [Ingress, Egress]
+---
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: allow-ingress
+  namespace: flagsmith
+spec:
+  podSelector: {}
+  policyTypes: [Ingress]
+  ingress:
+    # The Istio gateway reaches the API and the frontend.
+    - from:
+        - namespaceSelector:
+            matchLabels: { kubernetes.io/metadata.name: istio-system }
+      ports:
+        - { protocol: TCP, port: 8000 }
+        - { protocol: TCP, port: 8080 }
+    # The frontend calls the API inside the namespace.
+    - from:
+        - podSelector: {}
+      ports:
+        - { protocol: TCP, port: 8000 }
+    # Prometheus scrapes the API metrics port.
+    - from:
+        - namespaceSelector:
+            matchLabels: { kubernetes.io/metadata.name: monitoring }
+      ports:
+        - { protocol: TCP, port: 9100 }
+---
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: allow-egress
+  namespace: flagsmith
+spec:
+  podSelector: {}
+  policyTypes: [Egress]
+  egress:
+    # DNS.
+    - to:
+        - namespaceSelector:
+            matchLabels: { kubernetes.io/metadata.name: kube-system }
+      ports:
+        - { protocol: UDP, port: 53 }
+        - { protocol: TCP, port: 53 }
+    # The CloudNativePG cluster that holds the Flagsmith database.
+    - to:
+        - namespaceSelector:
+            matchLabels: { kubernetes.io/metadata.name: cnpg-system }
+      ports:
+        - { protocol: TCP, port: 5432 }

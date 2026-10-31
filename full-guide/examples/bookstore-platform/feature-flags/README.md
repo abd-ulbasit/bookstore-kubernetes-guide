@@ -9,7 +9,8 @@ this directory is the reference implementation.
 
 | File | What it is | When to touch |
 |------|------------|---------------|
-| [`flagsmith-helm-values.yaml`](flagsmith-helm-values.yaml) | Helm values for `flagsmith/flagsmith` (chart 0.39.1) | Updating the install (chart bumps; PSA changes; resources) |
+| [`flagsmith-helm-values.yaml`](flagsmith-helm-values.yaml) | Helm values for `flagsmith/flagsmith` (chart 0.85.0) | Updating the install (chart bumps; PSA changes; resources) |
+| [`flagsmith-namespace.yaml`](flagsmith-namespace.yaml) | The `flagsmith` namespace, LimitRange, ServiceAccounts and NetworkPolicies | Changing the namespace policy |
 | [`sample-flag-config.json`](sample-flag-config.json) | Six representative flags + four segments | Adding a new flag in IaC — commit the export here |
 | [`catalog-go-sdk-integration.md`](catalog-go-sdk-integration.md) | How catalog (Go) consumes flags via OpenFeature + Flagsmith / LaunchDarkly | Onboarding a new service to feature flags |
 | [`README.md`](README.md) | This file | Adding a new artifact to the directory |
@@ -45,16 +46,16 @@ this directory is the reference implementation.
 
 The Flagsmith **server-side environment keys** (per-env, per-provider)
 are stored in **Vault** under
-`kv/data/feature-flags/flagsmith/<env>` and `kv/data/feature-flags/
+`feature-flags/flagsmith/<env>` on the KV v2 mount (ExternalSecret keys omit `data/`) and `kv/data/feature-flags/
 launchdarkly/<env>`. The Bookstore Go services pull them via
 ExternalSecrets ([Part 15 ch.05](../../../15-day-to-day-production-ops/05-production-secrets-vault-eso.md)).
 
 ## Pinning + upgrades
 
-- **Chart version**: pin `--version 0.39.1` (or whatever is current
-  at install time). Floating versions cause silent drift.
-- **Image tags**: pin `api.image.tag` and `frontend.image.tag` to
-  matching versions; the chart's defaults may move.
+- **Chart version**: pin `--version 0.85.0`. Floating versions cause
+  silent drift.
+- **Image tags**: pinned by digest in `flagsmith-helm-values.yaml`
+  (2.286.0). Re-pin both images when the chart's appVersion moves.
 - **Upgrade order**: dev → staging → prod with > 1h soak each. A
   Flagsmith API change has bitten teams that upgraded prod first.
 
