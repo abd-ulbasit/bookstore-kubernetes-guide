@@ -10,9 +10,17 @@
 #   - Namespaces may be updated or deleted by the provider only when they are
 #     tenant namespaces.
 #
-# The match is on the provider's identity: any ServiceAccount whose name starts
-# with provider-kubernetes, in any namespace. Humans and the Argo CD
-# ServiceAccount are not matched, so their rights are unchanged.
+# The match is one identity, written out in full:
+#   system:serviceaccount:crossplane-system:provider-kubernetes
+# That is the ServiceAccount the DeploymentRuntimeConfig in 13.02 section 1
+# gives the provider pod, and the only subject of the ClusterRoleBinding that
+# grants the provider's ClusterRole. The grant and this restriction name the
+# same identity, so neither can drift from the other without the provider
+# losing its rights: rename the ServiceAccount and the binding no longer
+# reaches the pod. Humans and the Argo CD ServiceAccount are not matched, so
+# their rights are unchanged. Binding the ClusterRole to any second identity
+# would leave that identity unrestricted, so the binding must name this one
+# alone.
 #
 # Apply (after the provider ClusterRole and binding from 13.02 section 1):
 #   kubectl apply -f examples/bookstore-platform/crossplane/provider-scope-policy.yaml
@@ -36,7 +44,7 @@ spec:
         resources: ["namespaces"]
   matchConditions:
     - name: provider-identity
-      expression: "request.userInfo.username.matches('^system:serviceaccount:[^:]+:provider-kubernetes')"
+      expression: "request.userInfo.username == 'system:serviceaccount:crossplane-system:provider-kubernetes'"
   validations:
     - expression: >-
         request.resource.resource != 'rolebindings' ||

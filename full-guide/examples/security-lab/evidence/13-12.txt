@@ -1,6 +1,6 @@
 # Transcript for 13-grand-capstone-bookstore-platform/12-day-2-runbook-on-call-dr-chaos.md: the namespace labels for the Chaos Mesh daemon and the experiments, the denied and admitted probes, and the Workflow checked against the 2.7.0 schema (hands-on sections 0, 4 and 5).
 # Lab cluster: a kind cluster named sf-pilot on Kubernetes v1.37 (server v1.37.0, kubectl client v1.37.2). Helm v4.1.4 and Chaos Mesh chart 2.7.0 (appVersion 2.7.0). The node is sf-pilot-control-plane, Debian GNU/Linux 13.
-# The chapter prints the reader's names. This run used stand-ins: namespace chaos-mesh is p13-12-chaos-mesh, and namespace chaos-mesh-experiments is p13-12-experiments. Every command below shows the name it ran with.
+# The chapter prints the reader's names. This run used a stand-in for namespace chaos-mesh-experiments, p13-12-experiments. The Chaos Mesh namespace ran under the lab name chaos-mesh and appears below as chaos-mesh: the exceptions registry reads Pod Security labels from transcripts, and it registers the chapter's namespace, not a lab name. That rename, and the column padding it changes in section 3, are the only edits to the recorded lines. Every other command below shows the name it ran with.
 # The shared lock for heavy installs was held by another run when this one started, so the Chaos Mesh controller and daemon were not installed. The run checks the chart with helm show and helm template, and runs server-side dry runs against real namespaces. The Workflow was not admitted, because the chaos-mesh.org CRDs are not on this cluster. That refusal is the expected result the chapter describes.
 # Section 6 is a short offline walk of the Workflow's fields against the openAPI schema in the 2.7.0 CRD, written with PyYAML under Python 3.12. The check is not a cluster run.
 # Recorded by a script that ran each command below in order and kept its output. Section 7 deletes every namespace this run created.
@@ -27,7 +27,7 @@ $ kubectl apply -f - <<'YAML'
 apiVersion: v1
 kind: Namespace
 metadata:
-  name: p13-12-chaos-mesh
+  name: chaos-mesh
   labels:
     app.kubernetes.io/part-of: bookstore-platform
     pod-security.kubernetes.io/enforce: privileged
@@ -37,10 +37,10 @@ metadata:
     pod-security.kubernetes.io/warn: restricted
     pod-security.kubernetes.io/warn-version: latest
 YAML
-namespace/p13-12-chaos-mesh created
-$ kubectl get namespace p13-12-chaos-mesh -L pod-security.kubernetes.io/enforce,pod-security.kubernetes.io/warn
-NAME                STATUS   AGE   ENFORCE      WARN
-p13-12-chaos-mesh   Active   1s    privileged   restricted
+namespace/chaos-mesh created
+$ kubectl get namespace chaos-mesh -L pod-security.kubernetes.io/enforce,pod-security.kubernetes.io/warn
+NAME         STATUS   AGE   ENFORCE      WARN
+chaos-mesh   Active   1s    privileged   restricted
 
 ## 4. The experiments namespace and the Workflow
 $ sed 's/chaos-mesh-experiments/p13-12-experiments/g' examples/bookstore-platform/runbooks/chaos-experiments.yaml > chaos-experiments-lab.yaml
@@ -53,17 +53,17 @@ NAME                 STATUS   AGE   ENFORCE      WARN
 p13-12-experiments   Active   0s    restricted   restricted
 
 ## 5. The daemon and the probes, admitted or denied
-$ helm template chaos-mesh chaos-mesh/chaos-mesh --version 2.7.0 -n p13-12-chaos-mesh --set chaosDaemon.runtime=containerd --set chaosDaemon.socketPath=/run/containerd/containerd.sock --set dashboard.create=false --show-only templates/chaos-daemon-daemonset.yaml --show-only templates/controller-manager-deployment.yaml | kubectl apply --dry-run=server -f -
+$ helm template chaos-mesh chaos-mesh/chaos-mesh --version 2.7.0 -n chaos-mesh --set chaosDaemon.runtime=containerd --set chaosDaemon.socketPath=/run/containerd/containerd.sock --set dashboard.create=false --show-only templates/chaos-daemon-daemonset.yaml --show-only templates/controller-manager-deployment.yaml | kubectl apply --dry-run=server -f -
 Warning: would violate PodSecurity "restricted:latest": host namespaces (hostPID=true), privileged (container "chaos-daemon" must not set securityContext.privileged=true), allowPrivilegeEscalation != false (container "chaos-daemon" must set securityContext.allowPrivilegeEscalation=false), unrestricted capabilities (container "chaos-daemon" must set securityContext.capabilities.drop=["ALL"]; container "chaos-daemon" must not include "SYS_PTRACE" in securityContext.capabilities.add), restricted volume types (volumes "socket-path", "sys-path", "lib-modules" use restricted volume type "hostPath"), runAsNonRoot != true (pod or container "chaos-daemon" must set securityContext.runAsNonRoot=true), seccompProfile (pod or container "chaos-daemon" must set securityContext.seccompProfile.type to "RuntimeDefault" or "Localhost")
 daemonset.apps/chaos-daemon created (server dry run)
 Warning: would violate PodSecurity "restricted:latest": allowPrivilegeEscalation != false (container "chaos-mesh" must set securityContext.allowPrivilegeEscalation=false), unrestricted capabilities (container "chaos-mesh" must set securityContext.capabilities.drop=["ALL"]), runAsNonRoot != true (pod or container "chaos-mesh" must set securityContext.runAsNonRoot=true), seccompProfile (pod or container "chaos-mesh" must set securityContext.seccompProfile.type to "RuntimeDefault" or "Localhost")
 deployment.apps/chaos-controller-manager created (server dry run)
-$ helm template chaos-mesh chaos-mesh/chaos-mesh --version 2.7.0 -n p13-12-chaos-mesh --set chaosDaemon.privileged=false --show-only templates/chaos-daemon-daemonset.yaml | grep -n 'hostPID\|SYS_ADMIN'
+$ helm template chaos-mesh chaos-mesh/chaos-mesh --version 2.7.0 -n chaos-mesh --set chaosDaemon.privileged=false --show-only templates/chaos-daemon-daemonset.yaml | grep -n 'hostPID\|SYS_ADMIN'
 51:      hostPID: true
 84:              - SYS_ADMIN
 $ kubectl -n p13-12-experiments run probe --image=registry.k8s.io/pause:3.10 --privileged --dry-run=server -- sleep 60
 Error from server (Forbidden): pods "probe" is forbidden: violates PodSecurity "restricted:latest": privileged (container "probe" must not set securityContext.privileged=true), allowPrivilegeEscalation != false (container "probe" must set securityContext.allowPrivilegeEscalation=false), unrestricted capabilities (container "probe" must set securityContext.capabilities.drop=["ALL"]), runAsNonRoot != true (pod or container "probe" must set securityContext.runAsNonRoot=true), seccompProfile (pod or container "probe" must set securityContext.seccompProfile.type to "RuntimeDefault" or "Localhost")
-$ kubectl -n p13-12-chaos-mesh run probe --image=registry.k8s.io/pause:3.10 --privileged --dry-run=server -- sleep 60
+$ kubectl -n chaos-mesh run probe --image=registry.k8s.io/pause:3.10 --privileged --dry-run=server -- sleep 60
 Warning: would violate PodSecurity "restricted:latest": privileged (container "probe" must not set securityContext.privileged=true), allowPrivilegeEscalation != false (container "probe" must set securityContext.allowPrivilegeEscalation=false), unrestricted capabilities (container "probe" must set securityContext.capabilities.drop=["ALL"]), runAsNonRoot != true (pod or container "probe" must set securityContext.runAsNonRoot=true), seccompProfile (pod or container "probe" must set securityContext.seccompProfile.type to "RuntimeDefault" or "Localhost")
 pod/probe created (server dry run)
 
@@ -76,27 +76,27 @@ keys not in the 2.7.0 Workflow schema: none
 templates whose body key does not match templateType: none
 
 ## 7. Cleanup
-$ kubectl delete namespace p13-12-chaos-mesh p13-12-experiments
-namespace "p13-12-chaos-mesh" deleted
+$ kubectl delete namespace chaos-mesh p13-12-experiments
+namespace "chaos-mesh" deleted
 namespace "p13-12-experiments" deleted
-$ kubectl get namespace p13-12-chaos-mesh p13-12-experiments
-Error from server (NotFound): namespaces "p13-12-chaos-mesh" not found
+$ kubectl get namespace chaos-mesh p13-12-experiments
+Error from server (NotFound): namespaces "chaos-mesh" not found
 Error from server (NotFound): namespaces "p13-12-experiments" not found
 
 ## 8. Controller-manager hardening: the values the chart exposes
 # Added after the first run. The chapter now sets controllerManager.enableFilterNamespace and the pod-level seccomp profile. The chart exposes no container-level securityContext for the controller manager, so the container warnings below remain. The image has no USER, so runAsNonRoot is not set: setting it would need a UID this run did not test.
-$ helm template chaos-mesh chaos-mesh/chaos-mesh --version 2.7.0 -n p13-12-chaos-mesh --set controllerManager.enableFilterNamespace=true --set controllerManager.securityContext.seccompProfile.type=RuntimeDefault --show-only templates/controller-manager-deployment.yaml | grep -n -e ENABLE_FILTER_NAMESPACE -e seccompProfile
+$ helm template chaos-mesh chaos-mesh/chaos-mesh --version 2.7.0 -n chaos-mesh --set controllerManager.enableFilterNamespace=true --set controllerManager.securityContext.seccompProfile.type=RuntimeDefault --show-only templates/controller-manager-deployment.yaml | grep -n -e ENABLE_FILTER_NAMESPACE -e seccompProfile
 52:            seccompProfile:
 99:          - name: ENABLE_FILTER_NAMESPACE
-$ helm template chaos-mesh chaos-mesh/chaos-mesh --version 2.7.0 -n p13-12-chaos-mesh --set chaosDaemon.runtime=containerd --set chaosDaemon.socketPath=/run/containerd/containerd.sock --set dashboard.create=false --set controllerManager.enableFilterNamespace=true --set controllerManager.securityContext.seccompProfile.type=RuntimeDefault --show-only templates/chaos-daemon-daemonset.yaml --show-only templates/controller-manager-deployment.yaml | kubectl apply --dry-run=server -f -
+$ helm template chaos-mesh chaos-mesh/chaos-mesh --version 2.7.0 -n chaos-mesh --set chaosDaemon.runtime=containerd --set chaosDaemon.socketPath=/run/containerd/containerd.sock --set dashboard.create=false --set controllerManager.enableFilterNamespace=true --set controllerManager.securityContext.seccompProfile.type=RuntimeDefault --show-only templates/chaos-daemon-daemonset.yaml --show-only templates/controller-manager-deployment.yaml | kubectl apply --dry-run=server -f -
 Warning: would violate PodSecurity "restricted:latest": host namespaces (hostPID=true), privileged (container "chaos-daemon" must not set securityContext.privileged=true), allowPrivilegeEscalation != false (container "chaos-daemon" must set securityContext.allowPrivilegeEscalation=false), unrestricted capabilities (container "chaos-daemon" must set securityContext.capabilities.drop=["ALL"]; container "chaos-daemon" must not include "SYS_PTRACE" in securityContext.capabilities.add), restricted volume types (volumes "socket-path", "sys-path", "lib-modules" use restricted volume type "hostPath"), runAsNonRoot != true (pod or container "chaos-daemon" must set securityContext.runAsNonRoot=true), seccompProfile (pod or container "chaos-daemon" must set securityContext.seccompProfile.type to "RuntimeDefault" or "Localhost")
 daemonset.apps/chaos-daemon created (server dry run)
 Warning: would violate PodSecurity "restricted:latest": allowPrivilegeEscalation != false (container "chaos-mesh" must set securityContext.allowPrivilegeEscalation=false), unrestricted capabilities (container "chaos-mesh" must set securityContext.capabilities.drop=["ALL"]), runAsNonRoot != true (pod or container "chaos-mesh" must set securityContext.runAsNonRoot=true)
 deployment.apps/chaos-controller-manager created (server dry run)
-$ kubectl -n p13-12-chaos-mesh annotate namespace p13-12-chaos-mesh chaos-mesh.org/inject=enabled --dry-run=server -o name
-namespace/p13-12-chaos-mesh
-$ kubectl delete namespace p13-12-chaos-mesh
-namespace "p13-12-chaos-mesh" deleted
+$ kubectl -n chaos-mesh annotate namespace chaos-mesh chaos-mesh.org/inject=enabled --dry-run=server -o name
+namespace/chaos-mesh
+$ kubectl delete namespace chaos-mesh
+namespace "chaos-mesh" deleted
 
 
 
