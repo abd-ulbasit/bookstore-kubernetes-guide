@@ -57,6 +57,20 @@ every "the file looks right but the object is wrong" bug is one of these.
   A key that is present is not a control. Write the fields out, as the
   [baseline](../01-core-workloads/01-pods.md#baseline) does.
 
+The server refuses both forms in a `restricted` namespace. This is a
+deliberate failure: a Pod whose `securityContext:` is empty, with the rest of
+the Pod written out, applied with a server dry run. The `{}` form
+(`securityContext: {}`) is refused the same way.
+
+```sh
+kubectl apply --dry-run=server -f null-sc.yaml -n bookstore
+```
+
+<!-- gate: output -->
+```text
+Error from server (Forbidden): error when creating "null-sc.yaml": pods "null-sc" is forbidden: violates PodSecurity "restricted:latest": allowPrivilegeEscalation != false (container "app" must set securityContext.allowPrivilegeEscalation=false), unrestricted capabilities (container "app" must set securityContext.capabilities.drop=["ALL"]), runAsNonRoot != true (pod or container "app" must set securityContext.runAsNonRoot=true), seccompProfile (pod or container "app" must set securityContext.seccompProfile.type to "RuntimeDefault" or "Localhost")
+```
+
 The client dry run misses the Norway problem, and the server catches it. This
 is a deliberate failure: a ConfigMap whose `data` holds an unquoted `yes`.
 
@@ -130,10 +144,11 @@ kubectl apply --dry-run=server -f manifest.yaml      # + full apiserver admissio
 
 The client run still reads the API schema from the cluster, so it fails
 without one, and it misses the type errors the server reports, as the boolean
-example above shows. Read the server's warnings as well. A `restricted`
-namespace warns about a Deployment rather than refusing it, because the Pods
-the Deployment would create are the ones refused
-([01.01](../01-core-workloads/01-pods.md#baseline-namespace)).
+example above shows. Read the server's warnings as well. A namespace that sets
+only `enforce: restricted` does not warn about a bare Deployment. A namespace
+that also sets `warn: restricted`, as `bookstore` does, warns about it instead
+of refusing it, because the Pods the Deployment would create are the ones
+refused ([01.01](../01-core-workloads/01-pods.md#baseline-namespace)).
 
 > **Convention used throughout the guide:** quote ambiguous scalars (versions,
 > tags, booleans-as-strings, all-digit strings), use `|-` for single-line secret
@@ -377,42 +392,18 @@ spec: { }                       # DESIRED state — you author this
 
 ## The canonical workload spec
 
-Every workload in this guide carries the same `spec` fields, and the
-[security baseline](../01-core-workloads/01-pods.md#baseline) explains each
-one. The block below is copied from that section, and the two must stay
-identical:
+Every workload in this guide carries the same `spec` fields. The
+[security baseline](../01-core-workloads/01-pods.md#baseline) lists them and
+explains each one, so this appendix does not copy them. A second copy would
+drift from the one the chapters teach.
 
-```yaml
-spec:
-  serviceAccountName: catalog-sa
-  automountServiceAccountToken: false
-  securityContext:
-    runAsNonRoot: true
-    runAsUser: 65532
-    runAsGroup: 65532
-    seccompProfile:
-      type: RuntimeDefault
-  containers:
-    - name: catalog
-      image: bookstore/catalog:dev
-      securityContext:
-        allowPrivilegeEscalation: false
-        readOnlyRootFilesystem: true
-        capabilities:
-          drop: ["ALL"]
-      resources:
-        requests: { cpu: 50m, memory: 64Mi }
-        limits: { memory: 128Mi }
-      volumeMounts:
-        - name: tmp
-          mountPath: /tmp
-  volumes:
-    - name: tmp
-      emptyDir: {}
-```
-
-Put the object's `apiVersion`, `kind` and `metadata` around it. Pin a
-third-party image by digest, as
+Some baseline values are per image, not fixed for the guide. `runAsUser`,
+`runAsGroup` and any `fsGroup` must be the numeric UID and GID that the image
+declares, and `serviceAccountName` is the workload's own ServiceAccount. Copy
+the values from the image, not from another workload. A third-party image
+(postgres, redis, nginx) given the Bookstore's UID can pass a scanner and
+`restricted` admission, then fail at start on a UID or file-ownership mismatch.
+Pin a third-party image by digest, as
 [01.01](../01-core-workloads/01-pods.md#baseline-image-digest) explains. The
 Bookstore images keep the tag their build produced.
 

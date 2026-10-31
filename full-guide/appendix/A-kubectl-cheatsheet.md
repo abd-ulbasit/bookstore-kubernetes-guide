@@ -15,9 +15,9 @@ chapter anatomy. `<NS>` = a namespace, `<POD>`/`<SVC>`/`<D>` = object names,
 `<C>` = a container name. The running example is the **Bookstore** in the
 `bookstore` namespace (PSA `enforce: restricted`).
 
-The output blocks came from a lab run on a kind cluster named `sf-pilot`
-(Kubernetes 1.37.0). Node names in them are the lab's, and a scratch namespace
-stood in for `bookstore`.
+The output blocks came from a lab run on a kind cluster on Kubernetes 1.37.0,
+under a cluster name other than `bookstore`. Node names in them are the lab's
+and are kept verbatim, and a scratch namespace stood in for `bookstore`.
 
 > **The one rule that prevents the worst outage:** before *any* mutating
 > command, confirm `kubectl config current-context`. Acting on the wrong
@@ -72,16 +72,20 @@ The generated file has no `securityContext`. Add the
 [baseline](../01-core-workloads/01-pods.md#baseline) before you apply it to a
 restricted namespace. Section 5 shows what a bare workload does there.
 
-Generators (each accepts `--dry-run=client -o yaml`; without that flag the
-object is created at once, and a workload created this way has no
-securityContext, so a restricted namespace refuses its Pods):
+Generators for a workload or a namespace take `--dry-run=client -o yaml`.
+Without that flag the object is created at once. A workload created this way
+has no securityContext, so a restricted namespace refuses its Pods, and a
+namespace gets no Pod Security labels. Use the flag every time, and add the
+fields by hand before you apply:
 
 ```sh
-kubectl run catalog --image=bookstore/catalog:dev --port=8080 --restart=Never   # a bare Pod
-kubectl create deployment catalog --image=bookstore/catalog:dev --replicas=3
-kubectl create job db-migrate --image=postgres:16 \
-  -- psql -h postgres -U bookstore -d bookstore -c 'SELECT 1'   # args after -- are argv (no shell)
-kubectl create cronjob cleanup --image=postgres:16 --schedule="0 3 * * *" \
+kubectl run catalog --image=bookstore/catalog:dev --port=8080 --restart=Never --dry-run=client -o yaml   # a bare Pod
+kubectl create deployment catalog --image=bookstore/catalog:dev --replicas=3 --dry-run=client -o yaml
+# postgres:16, pinned by digest (01.01)
+kubectl create job db-migrate --image=postgres@sha256:1beaa3084eee2676f20a9cd9928f0bf2c5bf674f8e49f81017912183d377c61c \
+  --dry-run=client -o yaml -- psql -h postgres -U bookstore -d bookstore -c 'SELECT 1'   # args after -- are argv (no shell)
+kubectl create cronjob cleanup --image=postgres@sha256:1beaa3084eee2676f20a9cd9928f0bf2c5bf674f8e49f81017912183d377c61c \
+  --schedule="0 3 * * *" --dry-run=client -o yaml \
   -- sh -c '/scripts/cleanup.sh'   # use sh -c for a path; bare 'cleanup.sh' would resolve via $PATH
 kubectl create configmap catalog-config --from-literal=LOG_LEVEL=info \
   --from-file=app.properties
@@ -94,10 +98,8 @@ kubectl create role catalog-config-reader --verb=get --resource=configmaps \
   --resource-name=catalog-config
 kubectl create rolebinding catalog-config-reader-binding \
   --role=catalog-config-reader --serviceaccount=bookstore:catalog-sa
-kubectl create clusterrole pod-reader --verb=get,list,watch --resource=pods
-kubectl create clusterrolebinding pr --clusterrole=pod-reader --serviceaccount=bookstore:catalog-sa   # cluster-wide: a workload should get a RoleBinding (section 6)
 kubectl create quota bookstore-quota --hard=cpu=4,memory=8Gi,pods=20
-kubectl create namespace bookstore     # no Pod Security labels yet: section 8 applies them
+kubectl create namespace bookstore --dry-run=client -o yaml   # then add the Pod Security labels of 01.01 step 1
 kubectl create ingress bookstore --rule="bookstore.localdev.me/*=storefront:80"
 ```
 
@@ -268,8 +270,10 @@ kubectl logs -n <NS> -l app=catalog --prefix              # by label, prefix eac
 # container so PSA admits it (runAsNonRoot, drop ALL, seccomp RuntimeDefault).
 POD=$(kubectl get pod -n bookstore -l app=catalog \
   -o jsonpath='{.items[0].metadata.name}')
+# busybox:1.36, pinned by digest (01.01)
 kubectl debug -it -n bookstore pod/"$POD" \
-  --image=busybox:1.36 --target=catalog --profile=restricted -- sh
+  --image=busybox@sha256:73aaf090f3d85aa34ee199857f03fa3a95c8ede2ffd4cc2cdb5b94e566b11662 \
+  --target=catalog --profile=restricted -- sh
 #   inside: wget -qO- localhost:8080/healthz ; nslookup postgres ; nc -z postgres 5432 ; ps
 #   (the container stays in the Pod's spec, exited, until the Pod is deleted.
 #    The Pod's own containers are untouched.)
@@ -277,13 +281,17 @@ kubectl debug -it -n bookstore pod/"$POD" \
 # (b) Debug a COPY: change the image freely, and the live Pod is untouched.
 # --copy-to makes a new Pod from the target:
 kubectl debug -it -n bookstore pod/"$POD" --copy-to=catalog-dbg \
-  --set-image=catalog=busybox:1.36 --profile=restricted -- sh
+  --set-image=catalog=busybox@sha256:73aaf090f3d85aa34ee199857f03fa3a95c8ede2ffd4cc2cdb5b94e566b11662 \
+  --profile=restricted -- sh
 kubectl delete pod catalog-dbg -n bookstore         # clean up the copy when done
 
 # Node debugging: a pod in the node's host namespaces (hostNetwork, hostPID,
 # hostIPC), with the node's filesystem at /host. Restricted refuses it.
-# Use it only in a namespace the guide registers at privileged, such as psa-lab.
-kubectl debug node/<NODE> -n psa-lab -it --profile=sysadmin --image=busybox:1.36
+# Use it only in a namespace the guide registers at privileged. Create and
+# label that namespace first, as 05.02 does, and put its name in place of
+# REGISTERED-NS.
+kubectl debug node/<NODE> -n <REGISTERED-NS> -it --profile=sysadmin \
+  --image=busybox@sha256:73aaf090f3d85aa34ee199857f03fa3a95c8ede2ffd4cc2cdb5b94e566b11662
 ```
 
 > **Why `--profile`, not a bare `--image`.** An ephemeral container joins the
@@ -293,18 +301,18 @@ kubectl debug node/<NODE> -n psa-lab -it --profile=sysadmin --image=busybox:1.36
 > `general` (the default), `baseline`, `restricted`, `netadmin` and `sysadmin`.
 > Use `restricted` in `bookstore`.
 
-The lab run used a Pod that carries the baseline and a busybox debugger. Without
-a profile, kubectl warns that the target runs as non-root, and the API server
-then refuses the container. The warning from that run:
+The lab run used the `target` Pod from the baseline, with a busybox debugger and
+no `--profile`. kubectl warns that the target runs as non-root, and the API
+server then refuses the container. The warning and the refusal from that run:
 
 <!-- gate: output -->
 ```text
 Warning: Non-root user is configured for the entire target Pod, and some capabilities granted by debug profile may not work. Please consider using "--custom" with a custom profile that specifies "securityContext.runAsUser: 0".
+Error from server (Forbidden): pods "target" is forbidden: violates PodSecurity "restricted:latest": allowPrivilegeEscalation != false (container "debugger-rfxpr" must set securityContext.allowPrivilegeEscalation=false), unrestricted capabilities (container "debugger-rfxpr" must set securityContext.capabilities.drop=["ALL"]; container "debugger-rfxpr" must not include "SYS_PTRACE" in securityContext.capabilities.add)
 ```
 
-The refusal begins `Error from server (Forbidden): pods "target" is forbidden:
-violates PodSecurity "restricted:latest"`. With `--profile=restricted` the
-container is admitted, with this securityContext:
+With `--profile=restricted` the container is admitted, with this
+securityContext:
 
 <!-- gate: output -->
 ```text
@@ -328,7 +336,8 @@ refuses it, and names the host namespaces it asks for:
 
 <!-- gate: output -->
 ```text
-Creating debugging pod node-debugger-sf-pilot-control-plane-p54r8 with container debugger on node sf-pilot-control-plane.
+Creating debugging pod node-debugger-sf-pilot-control-plane-sxs6m with container debugger on node sf-pilot-control-plane.
+Error from server (Forbidden): pods "node-debugger-sf-pilot-control-plane-sxs6m" is forbidden: violates PodSecurity "restricted:latest": host namespaces (hostNetwork=true, hostPID=true, hostIPC=true), privileged (container "debugger" must not set securityContext.privileged=true), allowPrivilegeEscalation != false (container "debugger" must set securityContext.allowPrivilegeEscalation=false), unrestricted capabilities (container "debugger" must set securityContext.capabilities.drop=["ALL"]), restricted volume types (volume "host-root" uses restricted volume type "hostPath"), runAsNonRoot != true (pod or container "debugger" must set securityContext.runAsNonRoot=true), seccompProfile (pod or container "debugger" must set securityContext.seccompProfile.type to "RuntimeDefault" or "Localhost")
 ```
 
 Run node debugging only in a namespace the guide registers at privileged, with
@@ -338,18 +347,21 @@ per-symptom debugging tree and [05.02](../05-security/02-pod-security.md) for
 PSA.
 
 Ad-hoc pod in the **`bookstore`** namespace. The namespace refuses a Pod without
-the baseline, so this one-liner sets all of it. The fields are explained at the
+the baseline. It runs as the `catalog-sa` ServiceAccount that the bootstrap in
+section 8 creates, not as `default`. The fields are explained at the
 [baseline](../01-core-workloads/01-pods.md#baseline). The output below is from a
 run in a restricted scratch namespace:
 
 ```sh
-kubectl run sa-peek -n bookstore --image=busybox:1.36 --restart=Never -i --rm \
-  --overrides='{"apiVersion":"v1","spec":{"automountServiceAccountToken":false,"securityContext":{"runAsNonRoot":true,"runAsUser":65532,"runAsGroup":65532,"seccompProfile":{"type":"RuntimeDefault"}},"containers":[{"name":"sa-peek","image":"busybox:1.36","command":["sh","-c","echo restricted-compliant pod OK"],"securityContext":{"allowPrivilegeEscalation":false,"readOnlyRootFilesystem":true,"capabilities":{"drop":["ALL"]}},"resources":{"requests":{"cpu":"10m","memory":"16Mi"},"limits":{"memory":"32Mi"}},"volumeMounts":[{"name":"tmp","mountPath":"/tmp"}]}],"volumes":[{"name":"tmp","emptyDir":{}}]}}'
+kubectl run sa-peek -n bookstore --image=busybox@sha256:73aaf090f3d85aa34ee199857f03fa3a95c8ede2ffd4cc2cdb5b94e566b11662 \
+  --restart=Never -i --rm --pod-running-timeout=5m \
+  --overrides='{"apiVersion":"v1","spec":{"serviceAccountName":"catalog-sa","automountServiceAccountToken":false,"securityContext":{"runAsNonRoot":true,"runAsUser":65532,"runAsGroup":65532,"seccompProfile":{"type":"RuntimeDefault"}},"containers":[{"name":"sa-peek","image":"busybox@sha256:73aaf090f3d85aa34ee199857f03fa3a95c8ede2ffd4cc2cdb5b94e566b11662","command":["sh","-c","echo restricted-compliant pod OK"],"securityContext":{"allowPrivilegeEscalation":false,"readOnlyRootFilesystem":true,"capabilities":{"drop":["ALL"]}},"resources":{"requests":{"cpu":"10m","memory":"16Mi"},"limits":{"memory":"32Mi"}},"volumeMounts":[{"name":"tmp","mountPath":"/tmp"}]}],"volumes":[{"name":"tmp","emptyDir":{}}]}}'
 #   NOTE: "apiVersion":"v1" is REQUIRED (kubectl needs the Pod wrapper to
 #   merge the override). The "containers" override REPLACES the generated
 #   container (it does not merge), so "name" AND "image" must be repeated
 #   correctly. Preview the merged Pod with --dry-run=client -o yaml:
-#     kubectl run sa-peek -n bookstore --image=busybox:1.36 --restart=Never \
+#     kubectl run sa-peek -n bookstore --restart=Never \
+#       --image=busybox@sha256:73aaf090f3d85aa34ee199857f03fa3a95c8ede2ffd4cc2cdb5b94e566b11662 \
 #       --dry-run=client -o yaml --overrides='{...same JSON...}'
 ```
 
@@ -380,7 +392,7 @@ kubectl apply -f manifest.yaml                            # declarative create/u
 kubectl apply -f dir/                                     # a directory of manifests
 kubectl apply -f https://example.com/manifest.yaml        # a URL (pin the URL; see note)
 kubectl apply -k overlays/dev                             # render a kustomization, then apply
-kubectl apply -f manifest.yaml --dry-run=client           # parse + local validate, NO cluster
+kubectl apply -f manifest.yaml --dry-run=client           # validates against the API server's schema; persists nothing; needs a cluster
 kubectl apply -f manifest.yaml --dry-run=server           # run apiserver admission incl. PSA, NO persist
 kubectl apply -f manifest.yaml --server-side --field-manager=ci   # Server-Side Apply (field ownership)
 kubectl apply -f manifest.yaml --server-side --force-conflicts     # take ownership on conflict (use deliberately)
@@ -393,23 +405,30 @@ kubectl delete -k overlays/dev
 kubectl kustomize overlays/prod                           # render only (no apply); built into kubectl
 ```
 
-> **Server dry-run is the PSA proof.** `--dry-run=client` only parses YAML.
-> `--dry-run=server` runs the full admission pipeline (including **Pod Security
-> Admission**) without persisting. This is how the guide certifies every
-> Bookstore workload is admitted under `enforce: restricted`
+> **Server dry-run is the PSA proof.** `--dry-run=client` reads the schema from
+> the API server, so it fails with no reachable cluster, and it does not run
+> admission. `--dry-run=server` runs the full admission pipeline (including
+> **Pod Security Admission**) without persisting. This is how the guide
+> certifies every Bookstore workload is admitted under `enforce: restricted`
 > ([05-security/02](../05-security/02-pod-security.md),
 > [07-delivery/01](../07-delivery/01-packaging-helm.md)).
 >
 > A Deployment passes the server dry-run differently. Its Pods are checked when
-> the ReplicaSet creates them, so a bare Deployment can come back with only a
-> `Warning: would violate PodSecurity "restricted:latest"` line and still be
-> created. Read the warnings, then check the ReplicaSet. In the lab run the
-> ReplicaSet stayed at zero Pods, and its events named the refusal:
+> the ReplicaSet creates them. In a namespace that also sets `warn: restricted`,
+> as `bookstore` does, a bare Deployment comes back with only a
+> `Warning: would violate PodSecurity "restricted:latest"` line and is still
+> created. An `enforce` label alone prints no such warning, so read the warnings
+> and check the ReplicaSet either way. In the lab run, with `enforce`, `audit`
+> and `warn` all set, the ReplicaSet stayed at zero Pods, and its events named
+> the refusal:
 
 <!-- gate: output -->
 ```text
 NAME                     DESIRED   CURRENT   READY   AGE
-bare-deploy-6645c4d875   1         0         0       15s
+bare-deploy-568895bc57   1         0         0       20s
+# ...
+LAST SEEN          TYPE      REASON         OBJECT                              MESSAGE
+22s                Warning   FailedCreate   ReplicaSet/bare-deploy-568895bc57   Error creating: pods "bare-deploy-568895bc57-g6qfd" is forbidden: violates PodSecurity "restricted:latest": allowPrivilegeEscalation != false (container "busybox" must set securityContext.allowPrivilegeEscalation=false), unrestricted capabilities (container "busybox" must set securityContext.capabilities.drop=["ALL"]), runAsNonRoot != true (pod or container "busybox" must set securityContext.runAsNonRoot=true), seccompProfile (pod or container "busybox" must set securityContext.seccompProfile.type to "RuntimeDefault" or "Localhost")
 ```
 
 > **Server-Side Apply (SSA).** Each field has a recorded *manager*
