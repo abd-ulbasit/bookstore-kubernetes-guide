@@ -30,10 +30,11 @@ habit that a later chapter reverses. The reasoning is in
 chapter follows are in [`docs/security-first-authoring.md`](docs/security-first-authoring.md),
 and the targets are Kubernetes 1.37 and kind v0.33.0.
 
-**Done so far.** No Part is finished yet. Three pilot chapters are rewritten,
-and CI fails a pull request that breaks any of them:
+**Done so far.** Part 01 Core workloads is rewritten, all eight chapters, and
+two chapters from other Parts are too. CI fails a pull request that breaks
+any of them:
 
-- [01.01 Pods](full-guide/01-core-workloads/01-pods.md), the baseline from the first manifest;
+- [01.01 Pods](full-guide/01-core-workloads/01-pods.md) through [01.08 Deployment strategies](full-guide/01-core-workloads/08-deployment-strategies.md), the baseline from the first manifest in 01.01;
 - [05.02 Pod security](full-guide/05-security/02-pod-security.md), with the attacks run on a lab cluster;
 - [07.03 The CI/CD pipeline](full-guide/07-delivery/03-cicd-pipeline.md), the pipeline the example services use.
 
