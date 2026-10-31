@@ -6,7 +6,7 @@
 > rule, optimistic concurrency, finalizers/ownerReferences, the
 > alpha/beta/stable + deprecation policy, Server-Side Apply, and CRDs). Written
 > for Kubernetes **1.37**, the version this guide targets. This is reference
-> material — it does **not** follow the nine-section chapter anatomy; it
+> material. It does **not** follow the nine-section chapter anatomy; it
 > cross-links the chapter that *teaches* each topic in depth.
 
 ---
@@ -258,7 +258,7 @@ The Deployment "catalog" is invalid: spec.selector: Invalid value: {"matchLabels
 
 The update is refused, so the new spec never rolls out. Changing the selector
 means deleting and recreating the workload, which causes downtime. The two
-ways the guide teaches you to trip this — and avoid it:
+ways the guide teaches you to trip this, and how to avoid it:
 
 - **Kustomize `commonLabels` footgun.** The legacy `commonLabels:` transformer
   injects its labels into `metadata.labels` **and into `spec.selector` and the

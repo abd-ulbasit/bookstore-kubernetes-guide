@@ -3,7 +3,7 @@
 > A topic → resource map: for each Part of this guide, the most relevant
 > chapter(s) from the reference library plus 1–3 curated official-docs links.
 > The book chapters here are the ones each guide chapter cites. A row marked
-> link-later is a plan, checked when its chapter lands. This guide is **standalone** — these are for going
+> link-later is a plan, checked when its chapter lands. This guide is **standalone**. These are for going
 > *deeper* on what a chapter already taught, not prerequisites.
 
 This is a reference (no nine-section anatomy). Each chapter of the guide also
@@ -150,7 +150,7 @@ and runtime detection, and vulnerability management.
 | [01 — Authn, authz, RBAC](../05-security/01-authn-authz-rbac.md) | KP ch.26 (Access Control) | R ch.10 (Identity); L securing-the-API-server material |
 | [02 — Pod security](../05-security/02-pod-security.md) | KP ch.23 (Process Containment) | R ch.8 (Admission Control); official docs (Pod Security Standards) |
 | [03 — Supply chain](../05-security/03-supply-chain.md) | R ch.15 (Software Supply Chain) | KP ch.30 (Image Builder); official docs (Kyverno/Cosign) |
-| [04 — Secrets at rest and in use](../05-security/04-secrets-and-cluster-hardening.md) | R ch.7 (Secret Management) | KP ch.25 (Secure Configuration) |
+| [04 - Secrets at rest and in use](../05-security/04-secrets-and-cluster-hardening.md) | R ch.7 (Secret Management) | KP ch.25 (Secure Configuration) |
 | 05: Kernel isolation: seccomp, AppArmor, SELinux, sandboxed runtimes <!-- link-later: 05.05 --> | KP ch.23 (Process Containment) | seccomp and AppArmor docs (below) |
 | 06: Control plane and node hardening <!-- link-later: 05.06 --> | L securing-the-API-server material | CIS Kubernetes Benchmark (below) |
 | 07: Admission control and policy as code <!-- link-later: 05.07 --> | R ch.8 (Admission Control) | Kyverno docs (below) |
@@ -317,7 +317,7 @@ Official docs:
 Standout articles:
 - "The Operator Pattern" original CoreOS post — <https://kubernetes.io/docs/concepts/extend-kubernetes/operator/> (the official write-up)
 - Istio ambient announcement / architecture overview — <https://istio.io/latest/blog/2022/introducing-ambient-mesh/>
-- Manuel Pais on Internal Developer Platforms / Team Topologies — <https://teamtopologies.com/key-concepts>
+- Manuel Pais on Internal Developer Platforms / Team Topologies - <https://teamtopologies.com/key-concepts>
 - "Principles of Chaos Engineering" — <https://principlesofchaos.org/>
 - Kelsey Hightower, "Kubernetes The Hard Way" (for control-plane internals you can map onto HA) — <https://github.com/kelseyhightower/kubernetes-the-hard-way>
 
@@ -347,9 +347,9 @@ Official docs:
 - Kubeflow — <https://www.kubeflow.org/docs/> · Kubeflow Training Operator — <https://www.kubeflow.org/docs/components/training/> · Katib — <https://www.kubeflow.org/docs/components/katib/> · Kubeflow Notebooks — <https://www.kubeflow.org/docs/components/notebooks/> · Kubeflow Pipelines — <https://www.kubeflow.org/docs/components/pipelines/>
 - Ray — <https://docs.ray.io/> · KubeRay — <https://docs.ray.io/en/latest/cluster/kubernetes/index.html>
 - JupyterHub Zero-to-JupyterHub — <https://z2jh.jupyter.org/en/stable/> · KubeSpawner — <https://jupyterhub-kubespawner.readthedocs.io/>
-- KServe — <https://kserve.github.io/website/> · Seldon Core — <https://github.com/SeldonIO/seldon-core> · NVIDIA Triton — <https://docs.nvidia.com/deeplearning/triton-inference-server/user-guide/docs/>
+- KServe - <https://kserve.github.io/website/> · Seldon Core - <https://github.com/SeldonIO/seldon-core> · NVIDIA Triton - <https://docs.nvidia.com/deeplearning/triton-inference-server/user-guide/docs/>
 - Argo Workflows — <https://argo-workflows.readthedocs.io/> · Argo Events — <https://argoproj.github.io/argo-events/> · Tekton Pipelines — <https://tekton.dev/docs/pipelines/>
-- MLflow — <https://mlflow.org/docs/latest/> · OpenCost — <https://www.opencost.io/docs/> · Alibi-Detect — <https://github.com/SeldonIO/alibi-detect> · Evidently — <https://docs.evidentlyai.com/>
+- MLflow - <https://mlflow.org/docs/latest/> · OpenCost - <https://www.opencost.io/docs/> · Alibi-Detect - <https://github.com/SeldonIO/alibi-detect> · Evidently - <https://docs.evidentlyai.com/>
 
 Standout articles:
 - "MLOps: Continuous delivery and automation pipelines in machine learning" (Google Cloud — the L0/L1/L2 maturity model) — <https://cloud.google.com/architecture/mlops-continuous-delivery-and-automation-pipelines-in-machine-learning>
@@ -385,7 +385,7 @@ discipline.
 
 Official docs:
 - Keycloak — <https://www.keycloak.org/documentation> · Keycloak realms / clients — <https://www.keycloak.org/docs/latest/server_admin/> · Keycloak Operator (Kubernetes) — <https://www.keycloak.org/operator/installation>
-- Crossplane — <https://docs.crossplane.io/> · Compositions / XRDs — <https://docs.crossplane.io/latest/composition/> · Crossplane v2 (composition functions) — <https://docs.crossplane.io/latest/>
+- Crossplane - <https://docs.crossplane.io/> · Compositions / XRDs - <https://docs.crossplane.io/latest/composition/> · Crossplane v2 (composition functions) - <https://docs.crossplane.io/latest/>
 - CloudNativePG — <https://cloudnative-pg.io/docs/> · `ReplicaCluster` (cross-region) — <https://cloudnative-pg.io/documentation/current/replica_cluster/>
 - Strimzi — <https://strimzi.io/docs/operators/latest/overview> · `KafkaConnect` / `KafkaConnector` — <https://strimzi.io/docs/operators/latest/configuring#assembly-deployment-configuration-kafka-connect-str>
 - Debezium — <https://debezium.io/documentation/reference/stable/> · Postgres connector — <https://debezium.io/documentation/reference/stable/connectors/postgresql.html>
@@ -395,7 +395,7 @@ Official docs:
 - OWASP Core Rule Set — <https://coreruleset.org/docs/> · OWASP ModSecurity CRS GitHub — <https://github.com/coreruleset/coreruleset>
 - MLflow — <https://mlflow.org/docs/latest/> · Model Registry — <https://mlflow.org/docs/latest/model-registry.html>
 - KServe — <https://kserve.github.io/website/> · KServe canary rollouts — <https://kserve.github.io/website/latest/modelserving/v1beta1/rollout/canary/>
-- Alibi-Detect — <https://github.com/SeldonIO/alibi-detect> · Evidently — <https://docs.evidentlyai.com/>
+- Alibi-Detect - <https://github.com/SeldonIO/alibi-detect> · Evidently - <https://docs.evidentlyai.com/>
 - OpenTelemetry — <https://opentelemetry.io/docs/> · OTel Collector — <https://opentelemetry.io/docs/collector/> · OTLP — <https://opentelemetry.io/docs/specs/otlp/>
 - Grafana Tempo — <https://grafana.com/docs/tempo/latest/> · Grafana Loki — <https://grafana.com/docs/loki/latest/> · Grafana variables — <https://grafana.com/docs/grafana/latest/dashboards/variables/>
 - Prometheus Alertmanager (inhibition / routing) — <https://prometheus.io/docs/alerting/latest/alertmanager/>
@@ -408,10 +408,10 @@ Official docs:
 Standout articles:
 - Google SRE Book — ch.11 "Being On-Call", ch.14 "Managing Incidents", ch.15 "Postmortem Culture: Learning from Failure" — <https://sre.google/sre-book/being-on-call/> · <https://sre.google/sre-book/managing-incidents/> · <https://sre.google/sre-book/postmortem-culture/>
 - FinOps Foundation — the FinOps framework + maturity model — <https://www.finops.org/framework/>
-- Spotify's Backstage adoption story — <https://backstage.spotify.com/blog/> (and the canonical "Spotify Engineering Culture" backstage posts at <https://engineering.atspotify.com/>)
+- Spotify's Backstage adoption story - <https://backstage.spotify.com/blog/> (and the canonical "Spotify Engineering Culture" backstage posts at <https://engineering.atspotify.com/>)
 - Debezium outbox-pattern canonical post — <https://debezium.io/blog/2019/02/19/reliable-microservices-data-exchange-with-the-outbox-pattern/>
-- Google Cloud Architecture Center — multi-region active-active patterns — <https://cloud.google.com/architecture/disaster-recovery>
-- Istio ambient + Coraza WAF — <https://istio.io/latest/blog/> (browse for the WAF + ambient announcements)
+- Google Cloud Architecture Center - multi-region active-active patterns - <https://cloud.google.com/architecture/disaster-recovery>
+- Istio ambient + Coraza WAF - <https://istio.io/latest/blog/> (browse for the WAF + ambient announcements)
 
 ---
 
@@ -462,16 +462,16 @@ Official docs:
 - Argo CD App-of-Apps pattern — <https://argo-cd.readthedocs.io/en/stable/operator-manual/cluster-bootstrapping/> · App-of-Apps canonical blog — <https://argo-cd.readthedocs.io/en/stable/operator-manual/declarative-setup/>
 - AWS Route 53 latency-based routing — <https://docs.aws.amazon.com/Route53/latest/DeveloperGuide/routing-policy.html#routing-policy-latency> · AWS Global Accelerator — <https://docs.aws.amazon.com/global-accelerator/latest/dg/what-is-global-accelerator.html>
 - CloudNativePG cross-region `ReplicaCluster` — <https://cloudnative-pg.io/documentation/current/replica_cluster/>
-- Sigstore — <https://docs.sigstore.dev/> · cosign — <https://docs.sigstore.dev/cosign/> · cosign keyless — <https://docs.sigstore.dev/cosign/signing/overview/>
+- Sigstore - <https://docs.sigstore.dev/> · cosign - <https://docs.sigstore.dev/cosign/> · cosign keyless - <https://docs.sigstore.dev/cosign/signing/overview/>
 - syft (SBOM) — <https://github.com/anchore/syft> · grype (CVE scanner) — <https://github.com/anchore/grype>
 - SLSA framework — <https://slsa.dev/spec/v1.0/> · SLSA build levels — <https://slsa.dev/spec/v1.0/levels>
 - AWS ECR scanning (basic + enhanced) — <https://docs.aws.amazon.com/AmazonECR/latest/userguide/image-scanning.html> · enhanced scanning with Inspector — <https://docs.aws.amazon.com/AmazonECR/latest/userguide/image-scanning-enhanced.html>
-- Kyverno `verifyImages` — <https://kyverno.io/docs/policy-types/cluster-policy/verify-images/> · Kyverno policy library — <https://kyverno.io/policies/>
-- Falco — <https://falco.org/docs/> · Falco setup and the modern eBPF driver — <https://falco.org/docs/setup/>
+- Kyverno `verifyImages` - <https://kyverno.io/docs/policy-types/cluster-policy/verify-images/> · Kyverno policy library - <https://kyverno.io/policies/>
+- Falco - <https://falco.org/docs/> · Falco setup and the modern eBPF driver - <https://falco.org/docs/setup/>
 - Tetragon — <https://tetragon.io/docs/overview/> · Tetragon `TracingPolicy` CRD — <https://tetragon.io/docs/concepts/tracing-policy/>
 - AWS GuardDuty for EKS (Audit + Runtime) — <https://docs.aws.amazon.com/guardduty/latest/ug/kubernetes-protection.html> · Runtime Monitoring — <https://docs.aws.amazon.com/guardduty/latest/ug/runtime-monitoring.html>
 - Velero — <https://velero.io/docs/main/> · Velero on AWS (BSL + VSL + Kopia) — <https://velero.io/docs/main/csi/> · Velero schedule — <https://velero.io/docs/main/api-types/schedule/>
-- Cilium — <https://docs.cilium.io/en/stable/> · Cilium Helm install — <https://docs.cilium.io/en/stable/installation/k8s-install-helm/> · Hubble observability — <https://docs.cilium.io/en/stable/observability/hubble/>
+- Cilium - <https://docs.cilium.io/en/stable/> · Cilium Helm install - <https://docs.cilium.io/en/stable/installation/k8s-install-helm/> · Hubble observability - <https://docs.cilium.io/en/stable/observability/hubble/>
 - Telepresence — <https://www.telepresence.io/docs/latest/quick-start/> · personal intercepts — <https://www.telepresence.io/docs/latest/concepts/intercepts/>
 - Mirrord — <https://mirrord.dev/docs/overview/introduction/> · Mirrord mirror + steal modes — <https://mirrord.dev/docs/reference/configuration/#feature-network-incoming>
 - Skaffold — <https://skaffold.dev/docs/> · Skaffold sync mode — <https://skaffold.dev/docs/filesync/>
@@ -483,7 +483,7 @@ Official docs:
 Standout articles:
 - Google SRE Book — ch.32 "The Evolving SRE Engagement Model" — <https://sre.google/sre-book/evolving-sre-engagement-model/>
 - "Terraform 1.10: native S3 state locking with `use_lockfile`" — HashiCorp release notes — <https://github.com/hashicorp/terraform/releases/tag/v1.10.0> · S3 backend doc note — <https://developer.hashicorp.com/terraform/language/settings/backends/s3#s3-bucket-permissions>
-- Spotify's Backstage adoption story (developer-experience case study) — <https://backstage.spotify.com/blog/> · <https://engineering.atspotify.com/>
+- Spotify's Backstage adoption story (developer-experience case study) - <https://backstage.spotify.com/blog/> · <https://engineering.atspotify.com/>
 - "From kubectl to Atlantis: GitOps for Terraform" — Atlantis blog — <https://www.runatlantis.io/blog/>
 - "Cilium on EKS in production" — Isovalent blog — <https://isovalent.com/blog/>
 
@@ -520,9 +520,9 @@ Official docs:
 - Argo Rollouts — <https://argoproj.github.io/argo-rollouts/> · `AnalysisTemplate` — <https://argoproj.github.io/argo-rollouts/features/analysis/> · canary strategy — <https://argoproj.github.io/argo-rollouts/features/canary/> · blue-green strategy — <https://argoproj.github.io/argo-rollouts/features/bluegreen/>
 - OpenFeature — <https://openfeature.dev/docs/reference/intro> · OpenFeature spec — <https://openfeature.dev/specification/>
 - Flagsmith — <https://docs.flagsmith.com/> · LaunchDarkly — <https://docs.launchdarkly.com/> · Unleash — <https://docs.getunleash.io/>
-- PagerDuty support — <https://support.pagerduty.com/> · PagerDuty Events API — <https://developer.pagerduty.com/docs/events-api-v2/overview/>
+- PagerDuty support - <https://support.pagerduty.com/> · PagerDuty Events API - <https://developer.pagerduty.com/docs/events-api-v2/overview/>
 - Incident.io — <https://incident.io/docs> · FireHydrant — <https://docs.firehydrant.com/> · Rootly — <https://rootly.com/docs>
-- Atlassian Statuspage — <https://support.atlassian.com/statuspage/> · Incident management handbook — <https://www.atlassian.com/incident-management/handbook>
+- Atlassian Statuspage - <https://support.atlassian.com/statuspage/> · Incident management handbook - <https://www.atlassian.com/incident-management/handbook>
 - Velero restore — <https://velero.io/docs/main/restore-reference/> · selective restore — <https://velero.io/docs/main/resource-filtering/>
 - Postgres point-in-time recovery (CloudNativePG) — <https://cloudnative-pg.io/documentation/current/recovery/> · backup config — <https://cloudnative-pg.io/documentation/current/backup/>
 - AWS S3 versioning — <https://docs.aws.amazon.com/AmazonS3/latest/userguide/Versioning.html> · S3 Batch Operations restore — <https://docs.aws.amazon.com/AmazonS3/latest/userguide/batch-ops.html>
@@ -532,7 +532,7 @@ Official docs:
 
 Standout articles:
 - Google SRE Book — ch.11 "Being On-Call", ch.14 "Managing Incidents", ch.15 "Postmortem Culture: Learning from Failure" — <https://sre.google/sre-book/being-on-call/> · <https://sre.google/sre-book/managing-incidents/> · <https://sre.google/sre-book/postmortem-culture/>
-- Charity Majors — "Test in production" canon — <https://charity.wtf/> · "I test in prod" — <https://increment.com/testing/i-test-in-production/>
+- Charity Majors - "Test in production" canon - <https://charity.wtf/> · "I test in prod" - <https://increment.com/testing/i-test-in-production/>
 - Camille Fournier, *The Manager's Path* (O'Reilly) — the canonical reference on on-call as a team practice, tech-lead transitions, and incident postmortem culture — <https://www.oreilly.com/library/view/the-managers-path/9781491973882/>
 - Incident.io blog on postmortem practice: <https://incident.io/blog/>
 

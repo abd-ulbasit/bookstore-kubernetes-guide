@@ -75,7 +75,7 @@ local cluster.
 
 **Why this order:** it is the dependency order of the system itself — you cannot
 secure or deliver a workload you cannot yet run, observe, or place. **Skips:**
-nothing — this is the complete path. Total ≈ **56–85 hours** of focused,
+nothing. This is the complete path. Total ≈ **56–85 hours** of focused,
 hands-on study, not counting the link-later chapters <!-- link-later: 05.10 -->,
 which are not timed yet (less if you skip the under-the-hood and
 `In production:` sections; those are the production-relevant parts, so don't
@@ -83,7 +83,7 @@ skip them if you're going to production).
 
 ---
 
-## Path 3 — Platform / SRE / Ops track (Parts 04–08 emphasis)
+## Path 3 - Platform / SRE / Ops track (Parts 04–08 emphasis)
 
 For engineers who already run apps and need the *operate-at-scale* skills:
 scheduling, security posture, observability, delivery automation, and day-2.
@@ -104,28 +104,28 @@ hangs off it).
 | 9 | 05.06: Control plane and node hardening <!-- link-later: 05.06 --> | CIS benchmarks on the nodes you run |
 | 10 | 05.07: Admission control and policy as code <!-- link-later: 05.07 --> | Policy as code, enforced for every team |
 | 11 | 05.08: Audit logs, runtime detection and incident response <!-- link-later: 05.08 --> | What the platform records and alerts on |
-| 12 | [06-production-readiness/01 — Observability: metrics](../06-production-readiness/01-observability-metrics.md) | You cannot operate what you cannot see |
-| 13 | [06-production-readiness/02 — Logging](../06-production-readiness/02-logging.md) | Centralized logs |
-| 14 | [06-production-readiness/03 — Tracing](../06-production-readiness/03-tracing.md) | Cross-service latency/failure |
-| 15 | [06-production-readiness/04 — Autoscaling](../06-production-readiness/04-autoscaling.md) | HPA/VPA/KEDA/Cluster Autoscaler |
-| 16 | [06-production-readiness/05 — Reliability and disruptions](../06-production-readiness/05-reliability-and-disruptions.md) | PDBs, SLOs, disruption budgets |
-| 17 | [06-production-readiness/06 — Capacity and cost](../06-production-readiness/06-capacity-and-cost.md) | Right-sizing, bin-packing, FinOps |
-| 18 | [07-delivery/01 — Packaging with Helm](../07-delivery/01-packaging-helm.md) | The platform's release unit |
-| 19 | [07-delivery/02 — Packaging with Kustomize](../07-delivery/02-packaging-kustomize.md) | Env overlays without a DSL |
-| 20 | [07-delivery/03 — CI/CD pipeline](../07-delivery/03-cicd-pipeline.md) | Build→scan→push→deploy |
-| 21 | [07-delivery/04 — GitOps with Argo CD](../07-delivery/04-gitops-argocd.md) | The cluster *is* the repo |
-| 22 | [07-delivery/05 — Progressive delivery](../07-delivery/05-progressive-delivery.md) | Metric-gated rollouts |
-| 23 | [08-day-2-operations/01 — Cluster lifecycle](../08-day-2-operations/01-cluster-lifecycle.md) | Upgrades, version skew, node maintenance |
-| 24 | [08-day-2-operations/02 — Backup and DR](../08-day-2-operations/02-backup-and-dr.md) | etcd/PV backup, a rehearsed restore |
-| 25 | [08-day-2-operations/03 — Troubleshooting playbook](../08-day-2-operations/03-troubleshooting-playbook.md) | The incident method + distroless debug |
-| 26 | [08-day-2-operations/04 — Multi-tenancy and namespaces](../08-day-2-operations/04-multi-tenancy-and-namespaces.md) | Many teams, one cluster |
-| 27 | [08-day-2-operations/05 — Operators and CRDs](../08-day-2-operations/05-operators-and-crds.md) | Automating stateful day-2 |
-| 28 | [09-end-to-end-bookstore/01 — Bookstore end-to-end](../09-end-to-end-bookstore/01-bookstore-end-to-end.md) | The whole platform exercised: GitOps + observe + scale + harden + DR |
+| 12 | [06-production-readiness/01 - Observability: metrics](../06-production-readiness/01-observability-metrics.md) | You cannot operate what you cannot see |
+| 13 | [06-production-readiness/02 - Logging](../06-production-readiness/02-logging.md) | Centralized logs |
+| 14 | [06-production-readiness/03 - Tracing](../06-production-readiness/03-tracing.md) | Cross-service latency/failure |
+| 15 | [06-production-readiness/04 - Autoscaling](../06-production-readiness/04-autoscaling.md) | HPA/VPA/KEDA/Cluster Autoscaler |
+| 16 | [06-production-readiness/05 - Reliability and disruptions](../06-production-readiness/05-reliability-and-disruptions.md) | PDBs, SLOs, disruption budgets |
+| 17 | [06-production-readiness/06 - Capacity and cost](../06-production-readiness/06-capacity-and-cost.md) | Right-sizing, bin-packing, FinOps |
+| 18 | [07-delivery/01 - Packaging with Helm](../07-delivery/01-packaging-helm.md) | The platform's release unit |
+| 19 | [07-delivery/02 - Packaging with Kustomize](../07-delivery/02-packaging-kustomize.md) | Env overlays without a DSL |
+| 20 | [07-delivery/03 - CI/CD pipeline](../07-delivery/03-cicd-pipeline.md) | Build→scan→push→deploy |
+| 21 | [07-delivery/04 - GitOps with Argo CD](../07-delivery/04-gitops-argocd.md) | The cluster *is* the repo |
+| 22 | [07-delivery/05 - Progressive delivery](../07-delivery/05-progressive-delivery.md) | Metric-gated rollouts |
+| 23 | [08-day-2-operations/01 - Cluster lifecycle](../08-day-2-operations/01-cluster-lifecycle.md) | Upgrades, version skew, node maintenance |
+| 24 | [08-day-2-operations/02 - Backup and DR](../08-day-2-operations/02-backup-and-dr.md) | etcd/PV backup, a rehearsed restore |
+| 25 | [08-day-2-operations/03 - Troubleshooting playbook](../08-day-2-operations/03-troubleshooting-playbook.md) | The incident method + distroless debug |
+| 26 | [08-day-2-operations/04 - Multi-tenancy and namespaces](../08-day-2-operations/04-multi-tenancy-and-namespaces.md) | Many teams, one cluster |
+| 27 | [08-day-2-operations/05 - Operators and CRDs](../08-day-2-operations/05-operators-and-crds.md) | Automating stateful day-2 |
+| 28 | [09-end-to-end-bookstore/01 - Bookstore end-to-end](../09-end-to-end-bookstore/01-bookstore-end-to-end.md) | The whole platform exercised: GitOps + observe + scale + harden + DR |
 
 **Why this order:** internals → placement → security floor → observability →
 scale/reliability/cost → delivery automation → day-2 → compose it all.
 **Skips (be honest):** application-author depth (multi-container patterns,
-Jobs/CronJobs detail, app config ergonomics) — that is Path 1; this track
+Jobs/CronJobs detail, app config ergonomics). That is Path 1; this track
 assumes you can already write a workload and focuses on running fleets of them.
 
 ---
