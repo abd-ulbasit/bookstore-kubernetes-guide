@@ -11,7 +11,7 @@
 # read as they do on Linux: the client that ran the script had no sha512sum,
 # and the script put a one-line stand-in for shasum -a 512 on its PATH. In the
 # command lines, $WORKER, $GVISOR_RELEASE, $ARCH and $GVISOR_SHA512 are the
-# script's variables. Their values are sf-sched-worker, 20261026.0, x86_64 and
+# script's variables. Their values are demo-lab-worker, 20261026.0, x86_64 and
 # the digest pinned in the script.
 #
 # Run 2, the earlier one, is a single-node kind cluster, run with
@@ -24,16 +24,16 @@
 # edit to the recorded lines.
 #
 # The lab's kind config names its cluster security-lab-kernel, so the node
-# names below, sf-sched-* in run 1 and sf-pilot-* in run 2, differ from the
+# names below, demo-lab-* in run 1 and sf-pilot-* in run 2, differ from the
 # ones the commands would print on that cluster.
 
-## node: sf-sched-control-plane, kubectl v1.37.2
+## node: demo-lab-control-plane, kubectl v1.37.2
 
 ## step 1: the node shares the lab host kernel, and sees AppArmor
-$ docker exec sf-sched-control-plane uname -r
-docker exec sf-sched-control-plane cat /sys/module/apparmor/parameters/enabled
-docker exec sf-sched-control-plane sh -c 'test -d /sys/kernel/security/apparmor && echo apparmor-securityfs-present || echo apparmor-securityfs-absent'
-docker exec sf-sched-control-plane sh -c 'test -e /sys/fs/selinux && echo selinux-present || echo selinux-absent'
+$ docker exec demo-lab-control-plane uname -r
+docker exec demo-lab-control-plane cat /sys/module/apparmor/parameters/enabled
+docker exec demo-lab-control-plane sh -c 'test -d /sys/kernel/security/apparmor && echo apparmor-securityfs-present || echo apparmor-securityfs-absent'
+docker exec demo-lab-control-plane sh -c 'test -e /sys/fs/selinux && echo selinux-present || echo selinux-absent'
 7.0.0-38-generic
 Y
 apparmor-securityfs-absent
@@ -155,7 +155,7 @@ kubelet AppArmor
 
 ## step 6: SELinux and sandboxed runtimes: gVisor, through a RuntimeClass
 ## SELinux is not run here: step 1 shows the node has no SELinux filesystem.
-## runtime node: sf-sched-worker, gVisor release 20261026.0 for x86_64
+## runtime node: demo-lab-worker, gVisor release 20261026.0 for x86_64
 
 $ URL=https://storage.googleapis.com/gvisor/releases/release/$GVISOR_RELEASE/$ARCH
 curl -fsSLO "$URL/gvisor.tar.zstd" -O "$URL/gvisor.tar.zstd.sha512"
@@ -186,8 +186,8 @@ kubectl label node $WORKER example.com/runsc=installed
 
 [plugins."io.containerd.grpc.v1.cri".containerd.runtimes.runsc]
   runtime_type = "io.containerd.runsc.v1"
-node/sf-sched-worker condition met
-node/sf-sched-worker labeled
+node/demo-lab-worker condition met
+node/demo-lab-worker labeled
 
 ## step 6b: a RuntimeClass and a Pod that selects it
 $ kubectl apply -f runtimeclass.yaml
@@ -231,8 +231,8 @@ docker exec $WORKER rm -rf /usr/local/bin/runsc /usr/local/bin/containerd-shim-r
 docker exec $WORKER mv /etc/containerd/config.toml.lab-backup /etc/containerd/config.toml
 docker exec $WORKER systemctl restart containerd
 kubectl wait --for=condition=Ready node/$WORKER --timeout=240s
-node/sf-sched-worker unlabeled
-node/sf-sched-worker condition met
+node/demo-lab-worker unlabeled
+node/demo-lab-worker condition met
 
 ## step 7a: what remains of the install
 $ docker exec $WORKER sh -c 'ls /usr/local/bin | grep -c -E "runsc|gvisor"; grep -c runsc /etc/containerd/config.toml; ls /etc/containerd'

@@ -144,7 +144,7 @@ a lab cluster and links to them rather than repeating them.
 
 - **Tier A, run in two parts.** The seccomp steps (3 and 4) ran on a
   single-node kind cluster named `sf-pilot`. The other steps (1, 2 and 5 to 7)
-  ran later on a three-node kind cluster named `sf-sched`. Both have nodes on
+  ran later on a three-node kind cluster named `demo-lab`. Both have nodes on
   Kubernetes v1.37.0 and containerd 2.3.4, on a Linux host whose kernel is
   7.0.0 with AppArmor enabled. `kubectl` is v1.37.2. The gVisor release is
   `20261026.0`, and `runsc --version` printed `release-20261026.0`. The lab's
@@ -862,8 +862,8 @@ kubectl label node "$WORKER" example.com/runsc=installed
 ```
 [plugins."io.containerd.grpc.v1.cri".containerd.runtimes.runsc]
   runtime_type = "io.containerd.runsc.v1"
-node/sf-sched-worker condition met
-node/sf-sched-worker labeled
+node/demo-lab-worker condition met
+node/demo-lab-worker labeled
 ```
 
 The RuntimeClass names the handler. Its `scheduling.nodeSelector` is merged
@@ -1044,8 +1044,8 @@ kubectl wait --for=condition=Ready node/"$WORKER" --timeout=240s
 <!-- gate: output -->
 
 ```
-node/sf-sched-worker unlabeled
-node/sf-sched-worker condition met
+node/demo-lab-worker unlabeled
+node/demo-lab-worker condition met
 ```
 
 Then check what remains of the install. The first two numbers count `runsc` or

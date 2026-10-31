@@ -11,7 +11,7 @@
 # removed from the script later (see its header), so a rerun does not print
 # them.
 #
-# Recording 2 is MODE=full on the kind cluster sf-sched: three nodes, the same
+# Recording 2 is MODE=full on the kind cluster demo-lab: three nodes, the same
 # server and kubectl versions, on a host shared with other work. The script
 # installs one engine at a time and removes it before the next goes in. It was
 # run in 16 invocations, kept below in the order they ran. Each started from
@@ -299,7 +299,7 @@ mutatingadmissionpolicy.admissionregistration.k8s.io "p05-07-default-automount-o
 mutatingadmissionpolicy.admissionregistration.k8s.io "p05-07-default-seccomp" deleted
 
 
-=== recording 2: MODE=full, kind cluster sf-sched ===
+=== recording 2: MODE=full, kind cluster demo-lab ===
 --- invocation 1: STEPS="F1" ---
 ## mode: full, on the kind cluster LAB_CONTEXT names; Kyverno and Gatekeeper are installed in turn
 ## step 0: the tools this run used

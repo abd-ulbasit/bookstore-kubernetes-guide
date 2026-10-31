@@ -16,7 +16,7 @@
 # a lab name. The lab's other namespaces keep their p05-08- names. That rename
 # is the only edit to the lines of recording 1.
 #
-# Recording 2 is LAB_MODE=full on the kind cluster sf-sched: three nodes (one
+# Recording 2 is LAB_MODE=full on the kind cluster demo-lab: three nodes (one
 # control plane, two workers), Kubernetes v1.37.0, containerd 2.3.4, Debian 13
 # nodes on the host's kernel, 7.0.0-38-generic, on a host shared with other
 # work. kubectl is v1.37.2 and helm is v4.1.4. Falco 0.45.2 (chart 9.2.2) with
@@ -206,15 +206,15 @@ $ helm version --short
 v4.1.4+g05fa379
 $ kubectl get nodes -o wide
 NAME                     STATUS   ROLES           AGE   VERSION   INTERNAL-IP   EXTERNAL-IP   OS-IMAGE                       KERNEL-VERSION             CONTAINER-RUNTIME
-sf-sched-control-plane   Ready    control-plane   8h    v1.37.0   172.18.0.3    <none>        Debian GNU/Linux 13 (trixie)   7.0.0-38-generic (amd64)   containerd://2.3.4
-sf-sched-worker          Ready    <none>          8h    v1.37.0   172.18.0.4    <none>        Debian GNU/Linux 13 (trixie)   7.0.0-38-generic (amd64)   containerd://2.3.4
-sf-sched-worker2         Ready    <none>          8h    v1.37.0   172.18.0.5    <none>        Debian GNU/Linux 13 (trixie)   7.0.0-38-generic (amd64)   containerd://2.3.4
+demo-lab-control-plane   Ready    control-plane   8h    v1.37.0   172.18.0.3    <none>        Debian GNU/Linux 13 (trixie)   7.0.0-38-generic (amd64)   containerd://2.3.4
+demo-lab-worker          Ready    <none>          8h    v1.37.0   172.18.0.4    <none>        Debian GNU/Linux 13 (trixie)   7.0.0-38-generic (amd64)   containerd://2.3.4
+demo-lab-worker2         Ready    <none>          8h    v1.37.0   172.18.0.5    <none>        Debian GNU/Linux 13 (trixie)   7.0.0-38-generic (amd64)   containerd://2.3.4
 $ kubectl -n kube-system get pods -l tier=control-plane
 NAME                                             READY   STATUS    RESTARTS       AGE
-etcd-sf-sched-control-plane                      1/1     Running   0              8h
-kube-apiserver-sf-sched-control-plane            1/1     Running   15 (16m ago)   8h
-kube-controller-manager-sf-sched-control-plane   1/1     Running   36 (18m ago)   8h
-kube-scheduler-sf-sched-control-plane            1/1     Running   38 (19m ago)   8h
+etcd-demo-lab-control-plane                      1/1     Running   0              8h
+kube-apiserver-demo-lab-control-plane            1/1     Running   15 (16m ago)   8h
+kube-controller-manager-demo-lab-control-plane   1/1     Running   36 (18m ago)   8h
+kube-scheduler-demo-lab-control-plane            1/1     Running   38 (19m ago)   8h
 $ docker buildx imagetools inspect docker.io/falcosecurity/falco:0.45.2 | grep -E '^(Name|Digest):'
 Name:      docker.io/falcosecurity/falco:0.45.2
 Digest:    sha256:1562a643953f938e02f47319b5214d93a235f11f646d60e9b8a516fd5a64698e
@@ -267,15 +267,15 @@ $ helm version --short
 v4.1.4+g05fa379
 $ kubectl get nodes -o wide
 NAME                     STATUS   ROLES           AGE   VERSION   INTERNAL-IP   EXTERNAL-IP   OS-IMAGE                       KERNEL-VERSION             CONTAINER-RUNTIME
-sf-sched-control-plane   Ready    control-plane   8h    v1.37.0   172.18.0.3    <none>        Debian GNU/Linux 13 (trixie)   7.0.0-38-generic (amd64)   containerd://2.3.4
-sf-sched-worker          Ready    <none>          8h    v1.37.0   172.18.0.4    <none>        Debian GNU/Linux 13 (trixie)   7.0.0-38-generic (amd64)   containerd://2.3.4
-sf-sched-worker2         Ready    <none>          8h    v1.37.0   172.18.0.5    <none>        Debian GNU/Linux 13 (trixie)   7.0.0-38-generic (amd64)   containerd://2.3.4
+demo-lab-control-plane   Ready    control-plane   8h    v1.37.0   172.18.0.3    <none>        Debian GNU/Linux 13 (trixie)   7.0.0-38-generic (amd64)   containerd://2.3.4
+demo-lab-worker          Ready    <none>          8h    v1.37.0   172.18.0.4    <none>        Debian GNU/Linux 13 (trixie)   7.0.0-38-generic (amd64)   containerd://2.3.4
+demo-lab-worker2         Ready    <none>          8h    v1.37.0   172.18.0.5    <none>        Debian GNU/Linux 13 (trixie)   7.0.0-38-generic (amd64)   containerd://2.3.4
 $ kubectl -n kube-system get pods -l tier=control-plane
 NAME                                             READY   STATUS    RESTARTS         AGE
-etcd-sf-sched-control-plane                      1/1     Running   0                8h
-kube-apiserver-sf-sched-control-plane            1/1     Running   15 (25m ago)     8h
-kube-controller-manager-sf-sched-control-plane   1/1     Running   37 (4m49s ago)   8h
-kube-scheduler-sf-sched-control-plane            1/1     Running   39 (4m49s ago)   8h
+etcd-demo-lab-control-plane                      1/1     Running   0                8h
+kube-apiserver-demo-lab-control-plane            1/1     Running   15 (25m ago)     8h
+kube-controller-manager-demo-lab-control-plane   1/1     Running   37 (4m49s ago)   8h
+kube-scheduler-demo-lab-control-plane            1/1     Running   39 (4m49s ago)   8h
 $ docker buildx imagetools inspect docker.io/falcosecurity/falco:0.45.2 | grep -E '^(Name|Digest):'
 Name:      docker.io/falcosecurity/falco:0.45.2
 Digest:    sha256:1562a643953f938e02f47319b5214d93a235f11f646d60e9b8a516fd5a64698e
@@ -321,7 +321,7 @@ falcosidekick:
   config:
     debug: true
 nodeSelector:
-  kubernetes.io/hostname: sf-sched-worker
+  kubernetes.io/hostname: demo-lab-worker
 $ helm install falco falcosecurity/falco --version 9.2.2 --namespace falco -f falco-values.yaml
 I1031 16:34:47.719337   29004 warnings.go:107] "Warning: spec.template.metadata.annotations[container.apparmor.security.beta.kubernetes.io/falco]: deprecated since v1.30; use the \"appArmorProfile\" field instead"
 NAME: falco
@@ -338,8 +338,8 @@ falco DaemonSet ready on 1 of 1 nodes; falcosidekick available: 1
 
 $ kubectl get pods -n falco -o wide
 NAME                                   READY   STATUS    RESTARTS   AGE   IP             NODE               NOMINATED NODE   READINESS GATES
-falco-7fjht                            2/2     Running   0          65s   10.244.1.69    sf-sched-worker    <none>           <none>
-falco-falcosidekick-6fd47bc46f-kprsq   1/1     Running   0          65s   10.244.2.103   sf-sched-worker2   <none>           <none>
+falco-7fjht                            2/2     Running   0          65s   10.244.1.69    demo-lab-worker    <none>           <none>
+falco-falcosidekick-6fd47bc46f-kprsq   1/1     Running   0          65s   10.244.2.103   demo-lab-worker2   <none>           <none>
 $ kubectl logs -n falco falco-7fjht -c falco | head -30
 Sat Oct 31 11:35:35 2026: Falco version: 0.45.2 (x86_64)
 Sat Oct 31 11:35:35 2026: Falco initialized with configuration files:
@@ -362,7 +362,7 @@ Sat Oct 31 11:35:35 2026: [libs]: container: Enabled 'libvirt_lxc' container eng
 Sat Oct 31 11:35:35 2026: [libs]: container: Enabled 'bpm' container engine.
 Sat Oct 31 11:35:35 2026: Loading rules from:
 Sat Oct 31 11:35:36 2026:    /etc/falco/falco_rules.yaml | schema validation: ok
-Sat Oct 31 11:35:36 2026: Hostname value has been overridden via environment variable to: sf-sched-worker
+Sat Oct 31 11:35:36 2026: Hostname value has been overridden via environment variable to: demo-lab-worker
 Sat Oct 31 11:35:36 2026: The chosen syscall buffer dimension is: 8388608 bytes (8 MBs)
 Sat Oct 31 11:35:36 2026: Starting health webserver with threadiness 4, listening on 0.0.0.0:8765
 Sat Oct 31 11:35:36 2026: Loaded event sources: syscall
@@ -384,7 +384,7 @@ $ kubectl wait --for=condition=Ready pod/escape-node -n attack --timeout=180s
 pod/escape-node condition met
 $ kubectl get pod escape-node -n attack -o wide
 NAME          READY   STATUS    RESTARTS   AGE   IP            NODE              NOMINATED NODE   READINESS GATES
-escape-node   1/1     Running   0          5s    10.244.1.70   sf-sched-worker   <none>           <none>
+escape-node   1/1     Running   0          5s    10.244.1.70   demo-lab-worker   <none>           <none>
 $ kubectl --kubeconfig=work/builder.kubeconfig exec -it -n attack escape-node -- sh -c 'cat /etc/shadow > /dev/null && echo shadow-read'
 shadow-read
 $ kubectl --kubeconfig=work/builder.kubeconfig exec -it -n attack escape-node -- sh -c 'chroot /host cat /etc/shadow > /dev/null && echo node-shadow-read'
@@ -414,7 +414,7 @@ $ kubectl wait --for=condition=Ready pod/escape-node -n attack --timeout=180s
 pod/escape-node condition met
 $ kubectl get pod escape-node -n attack -o wide
 NAME          READY   STATUS    RESTARTS   AGE   IP            NODE              NOMINATED NODE   READINESS GATES
-escape-node   1/1     Running   0          2s    10.244.1.71   sf-sched-worker   <none>           <none>
+escape-node   1/1     Running   0          2s    10.244.1.71   demo-lab-worker   <none>           <none>
 $ kubectl --kubeconfig=work/builder.kubeconfig exec -it -n attack escape-node -- sh -c 'cat /etc/shadow > /dev/null && echo shadow-read'
 shadow-read
 $ kubectl --kubeconfig=work/builder.kubeconfig exec -it -n attack escape-node -- sh -c 'chroot /host cat /etc/shadow > /dev/null && echo node-shadow-read'
@@ -437,7 +437,7 @@ Notice | Terminal shell in container | sh -c chroot /host cat /etc/shadow > /dev
 Warning | Read sensitive file untrusted | cat /etc/shadow
 $ kubectl logs -n falco ds/falco -c falco --since=3m | grep 'Read sensitive file untrusted' | grep escape-node | head -1 | jq .
 {
-  "hostname": "sf-sched-worker",
+  "hostname": "demo-lab-worker",
   "output": "11:36:21.966706435: Warning Sensitive file opened for reading by non-trusted program | file=/etc/shadow gparent=containerd-shim ggparent=<NA> gggparent=<NA> evt_type=openat user=root user_uid=0 user_loginuid=-1 process=cat proc_exepath=/bin/cat parent=sh command=cat /etc/shadow terminal=34816 container_id=124533bbdb8a container_name=app container_image_repository=docker.io/library/busybox container_image_tag=b116e155074440ffd9e449559433feb4cd2341eb3554b1da1c638c976e56451d k8s_pod_name=escape-node k8s_ns_name=attack",
   "output_fields": {
     "container.id": "124533bbdb8a",
@@ -519,7 +519,7 @@ falcosidekick:
   config:
     debug: true
 nodeSelector:
-  kubernetes.io/hostname: sf-sched-worker
+  kubernetes.io/hostname: demo-lab-worker
 $ helm install falco falcosecurity/falco --version 9.2.2 --namespace falco -f falco-values.yaml
 I1031 16:39:52.870519   32245 warnings.go:107] "Warning: spec.template.metadata.annotations[container.apparmor.security.beta.kubernetes.io/falco]: deprecated since v1.30; use the \"appArmorProfile\" field instead"
 NAME: falco
@@ -536,8 +536,8 @@ falco DaemonSet ready on 1 of 1 nodes; falcosidekick available: 1
 
 $ kubectl get pods -n falco -o wide
 NAME                                   READY   STATUS    RESTARTS   AGE   IP             NODE               NOMINATED NODE   READINESS GATES
-falco-5pxjc                            2/2     Running   0          54s   10.244.1.72    sf-sched-worker    <none>           <none>
-falco-falcosidekick-6fd47bc46f-ndbrq   1/1     Running   0          54s   10.244.2.104   sf-sched-worker2   <none>           <none>
+falco-5pxjc                            2/2     Running   0          54s   10.244.1.72    demo-lab-worker    <none>           <none>
+falco-falcosidekick-6fd47bc46f-ndbrq   1/1     Running   0          54s   10.244.2.104   demo-lab-worker2   <none>           <none>
 $ kubectl logs -n falco falco-5pxjc -c falco | head -30
 Sat Oct 31 11:40:40 2026: Falco version: 0.45.2 (x86_64)
 Sat Oct 31 11:40:40 2026: Falco initialized with configuration files:
@@ -560,7 +560,7 @@ Sat Oct 31 11:40:40 2026: [libs]: container: Enabled 'libvirt_lxc' container eng
 Sat Oct 31 11:40:40 2026: [libs]: container: Enabled 'bpm' container engine.
 Sat Oct 31 11:40:40 2026: Loading rules from:
 Sat Oct 31 11:40:40 2026:    /etc/falco/falco_rules.yaml | schema validation: ok
-Sat Oct 31 11:40:40 2026: Hostname value has been overridden via environment variable to: sf-sched-worker
+Sat Oct 31 11:40:40 2026: Hostname value has been overridden via environment variable to: demo-lab-worker
 Sat Oct 31 11:40:40 2026: The chosen syscall buffer dimension is: 8388608 bytes (8 MBs)
 Sat Oct 31 11:40:40 2026: Starting health webserver with threadiness 4, listening on 0.0.0.0:8765
 Sat Oct 31 11:40:40 2026: Loaded event sources: syscall
@@ -582,7 +582,7 @@ $ kubectl wait --for=condition=Ready pod/escape-node -n attack --timeout=180s
 pod/escape-node condition met
 $ kubectl get pod escape-node -n attack -o wide
 NAME          READY   STATUS    RESTARTS   AGE   IP            NODE              NOMINATED NODE   READINESS GATES
-escape-node   1/1     Running   0          3s    10.244.1.73   sf-sched-worker   <none>           <none>
+escape-node   1/1     Running   0          3s    10.244.1.73   demo-lab-worker   <none>           <none>
 $ kubectl --kubeconfig=work/builder.kubeconfig exec -it -n attack escape-node -- sh -c 'cat /etc/shadow > /dev/null && echo shadow-read'
 shadow-read
 $ kubectl --kubeconfig=work/builder.kubeconfig exec -it -n attack escape-node -- sh -c 'chroot /host cat /etc/shadow > /dev/null && echo node-shadow-read'
@@ -601,7 +601,7 @@ Notice | Terminal shell in container | sh -c chroot /host cat /etc/shadow > /dev
 Warning | Read sensitive file untrusted | cat /etc/shadow
 $ kubectl logs -n falco ds/falco -c falco | grep 'Read sensitive file untrusted' | grep escape-node | head -1 | jq .
 {
-  "hostname": "sf-sched-worker",
+  "hostname": "demo-lab-worker",
   "output": "11:41:42.701698939: Warning Sensitive file opened for reading by non-trusted program | file=/etc/shadow gparent=containerd-shim ggparent=<NA> gggparent=<NA> evt_type=openat user=root user_uid=0 user_loginuid=-1 process=cat proc_exepath=/bin/cat parent=sh command=cat /etc/shadow terminal=34816 container_id=14b556d74d4d container_name=app container_image_repository=docker.io/library/busybox container_image_tag=b116e155074440ffd9e449559433feb4cd2341eb3554b1da1c638c976e56451d k8s_pod_name=escape-node k8s_ns_name=attack",
   "output_fields": {
     "container.id": "14b556d74d4d",

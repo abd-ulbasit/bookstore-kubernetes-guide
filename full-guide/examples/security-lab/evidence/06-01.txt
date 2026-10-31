@@ -7,7 +7,7 @@
 # on a single-node cluster, shown as sf-pilot-control-plane, so the chapter's
 # output comes from a lab cluster with different node names. Steps 2, 14 and
 # 15 ran in the second session on a three-node cluster of the same versions
-# (sf-sched-control-plane and two workers). The second cluster had about 3 GiB
+# (demo-lab-control-plane and two workers). The second cluster had about 3 GiB
 # of host memory to spare and a slow disk.
 #
 # Namespace substitution: in the first session the chapter's bookstore,
@@ -145,10 +145,10 @@ context deadline exceeded
 # Before the install the kube-system restart counts were kube-apiserver 15, kube-controller-manager 37, kube-scheduler 39. The install printed the Helm error above after eight minutes, and the API server then answered 'Unable to connect to the server: EOF' and, after it came back, Forbidden for a while, as it did in the first run.
 $ kubectl --request-timeout=60s -n kube-system get pods | grep -E 'NAME|kube-apiserver|kube-controller-manager|kube-scheduler|etcd'
 NAME                                             READY   STATUS    RESTARTS         AGE
-etcd-sf-sched-control-plane                      1/1     Running   0                9h
-kube-apiserver-sf-sched-control-plane            1/1     Running   17 (60s ago)     9h
-kube-controller-manager-sf-sched-control-plane   1/1     Running   38 (4m1s ago)    9h
-kube-scheduler-sf-sched-control-plane            0/1     Running   40 (3m54s ago)   9h
+etcd-demo-lab-control-plane                      1/1     Running   0                9h
+kube-apiserver-demo-lab-control-plane            1/1     Running   17 (60s ago)     9h
+kube-controller-manager-demo-lab-control-plane   1/1     Running   38 (4m1s ago)    9h
+kube-scheduler-demo-lab-control-plane            0/1     Running   40 (3m54s ago)   9h
 $ kubectl --request-timeout=60s -n monitoring get pods
 NAME                                                        READY   STATUS             RESTARTS      AGE
 alertmanager-kube-prometheus-stack-alertmanager-0           2/2     Running            0             11m
@@ -204,10 +204,10 @@ kube-system          Active   9h
 local-path-storage   Active   9h
 $ kubectl --request-timeout=60s -n kube-system get pods | grep -E 'NAME|kube-apiserver|kube-controller-manager|kube-scheduler|etcd'
 NAME                                             READY   STATUS    RESTARTS         AGE
-etcd-sf-sched-control-plane                      1/1     Running   0                9h
-kube-apiserver-sf-sched-control-plane            1/1     Running   17 (99s ago)     9h
-kube-controller-manager-sf-sched-control-plane   1/1     Running   38 (4m40s ago)   9h
-kube-scheduler-sf-sched-control-plane            1/1     Running   40 (4m33s ago)   9h
+etcd-demo-lab-control-plane                      1/1     Running   0                9h
+kube-apiserver-demo-lab-control-plane            1/1     Running   17 (99s ago)     9h
+kube-controller-manager-demo-lab-control-plane   1/1     Running   38 (4m40s ago)   9h
+kube-scheduler-demo-lab-control-plane            1/1     Running   40 (4m33s ago)   9h
 # The Prometheus operator, not Helm, creates the kubelet Service in kube-system, so helm uninstall leaves it. The count above is that Service; it is deleted here.
 $ kubectl --request-timeout=60s -n kube-system get svc,endpoints,endpointslices -o name | grep prometheus
 Warning: v1 Endpoints is deprecated in v1.33+; use discovery.k8s.io/v1 EndpointSlice

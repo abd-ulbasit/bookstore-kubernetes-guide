@@ -843,8 +843,8 @@ STATUS: deployed
 <!-- gate: output -->
 ```text
 NAME                                   READY   STATUS    RESTARTS   AGE   IP             NODE               NOMINATED NODE   READINESS GATES
-falco-5pxjc                            2/2     Running   0          54s   10.244.1.72    sf-sched-worker    <none>           <none>
-falco-falcosidekick-6fd47bc46f-ndbrq   1/1     Running   0          54s   10.244.2.104   sf-sched-worker2   <none>           <none>
+falco-5pxjc                            2/2     Running   0          54s   10.244.1.72    demo-lab-worker    <none>           <none>
+falco-falcosidekick-6fd47bc46f-ndbrq   1/1     Running   0          54s   10.244.2.104   demo-lab-worker2   <none>           <none>
 ```
 
 <!-- gate: output -->
@@ -975,7 +975,7 @@ kubectl logs -n falco ds/falco -c falco | grep 'Read sensitive file untrusted' |
 <!-- gate: output -->
 ```text
 {
-  "hostname": "sf-sched-worker",
+  "hostname": "demo-lab-worker",
 # ...
   "output_fields": {
     "container.id": "14b556d74d4d",
