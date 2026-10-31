@@ -158,8 +158,8 @@ spec:
                       labels: { app.kubernetes.io/part-of: bookstore }
                     spec:
                       hard:
-                        # 'small' defaults; a richer Composition would map
-                        # spec.size -> different totals (ch.10 notes this).
+                        # One quota for every tenant. The XRD has no size
+                        # field, so no request can pick another total.
                         requests.cpu: "2"
                         requests.memory: 2Gi
                         limits.cpu: "4"

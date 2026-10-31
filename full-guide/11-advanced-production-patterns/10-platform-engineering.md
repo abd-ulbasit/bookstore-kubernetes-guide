@@ -168,28 +168,44 @@ scaled to the whole developer interface.
 The golden path is itself a control, so its threats are about the identity that
 does the writing and about the request a developer can make. Most of the
 guardrails it expands into are inherited from earlier parts, and this chapter
-does not repeat them. Pods, namespaces and admission follow
+does not repeat them. The tenant namespaces follow
 [01.01](../01-core-workloads/01-pods.md#baseline),
 [05.02](../05-security/02-pod-security.md) and
-[02.06](../02-networking/06-network-policies.md). Crossplane's own pods, and the
-provider and function pods, carry the baseline through the chart values and the
-runtime config in step 1, and the namespace label is registered. One threat is
-specific to this chapter. Its ID is in the
-[Bookstore threat model](../examples/bookstore/THREAT-MODEL.md), which this
-chapter extends.
+[02.06](../02-networking/06-network-policies.md), through the Composition.
+Crossplane's own pods run under the chart's restricted values, and the provider
+and function pods run under the runtime config in step 1. The namespaces that
+hold those controllers get no default-deny NetworkPolicy in this chapter. The
+controllers reach the API server and the package registry, and a default-deny
+policy for them needs egress allows that this chapter does not work out. That
+gap is named here, not hidden.
 
 | Threat | Control in this chapter | Deeper |
 |---|---|---|
-| E10: the provider's ServiceAccount holds more rights than the recipe needs, so a compromised provider, or a bad change to the recipe, reaches objects in every namespace | RBAC named to the kinds the recipe writes, the `bind` verb on the built-in `view` ClusterRole and nothing else, no `cluster-admin` binding, and a requester Role limited to the request namespace | Step 4 of the hands-on checks the boundary; [05.01](../05-security/01-authn-authz-rbac.md) for RBAC; 05.07 <!-- link-later: 05.07 --> for the admission policy that pins names |
+| E10: the provider's ServiceAccount holds more rights than the recipe needs, so a compromised provider, or a bad change to the recipe, reaches objects in every namespace | RBAC named to the kinds the recipe writes, the `bind` verb on the built-in `view` ClusterRole and nothing else, no `cluster-admin` binding, and Crossplane's RBAC manager turned off. By default the manager binds the provider to whatever its package asks for, which for provider-kubernetes includes Secrets in every namespace. A requester Role limited to the request namespace | Step 4 checks the boundary; [05.01](../05-security/01-authn-authz-rbac.md) for RBAC; 05.07 <!-- link-later: 05.07 --> for the admission policy that pins names and label changes |
+| A request names a tenant that is another tenant's namespace | The XRD's CEL rule requires `spec.tenant` to equal the request's name. All requests share one namespace, so names are unique there. Not exercised in this revision: the rule is in the schema the API server checks on create | Step 2 shows the rule; the residual is under the table |
 
-RBAC cannot restrict `create` to a name pattern, and namespaces are
-cluster-scoped. So the provider keeps cluster-wide `create` and `delete` on
-namespaces, and cluster-wide writes on its ResourceQuota, LimitRange,
-NetworkPolicy and RoleBinding kinds. That residual is named here, not hidden.
-Today the recipe bounds it: the `bookstore-tenant-` prefix is fixed in the
-Composition, and the tenant name must match the XRD's pattern. The admission
-check that pins the names the provider may create belongs with policy as code,
-in 05.07 <!-- link-later: 05.07 -->.
+RBAC cannot restrict `create` or `update` to a name pattern, and namespaces are
+cluster-scoped. So the provider keeps cluster-wide `create`, `update`, `patch`
+and `delete` on namespaces, and cluster-wide writes on its ResourceQuota,
+LimitRange, NetworkPolicy and RoleBinding kinds. That residual is named here,
+not hidden. The update and patch verbs carry the larger risk. A compromised
+provider, or a bad edit to the recipe, could relabel any namespace, for example
+set `pod-security.kubernetes.io/enforce=privileged` on `bookstore` or
+`kube-system`. Cluster-wide patch and delete on NetworkPolicy and RoleBinding
+can also remove a default-deny policy or a tenant's access. The recipe bounds
+only what it creates: the `bookstore-tenant-` prefix is fixed in the
+Composition. Nothing in the recipe bounds an update to a namespace that already
+exists. The admission policy that must close this, denying changes to
+`pod-security.kubernetes.io/*` labels by the provider's ServiceAccount, belongs
+with policy as code in 05.07 <!-- link-later: 05.07 -->.
+
+Requests share the `platform-tenants` namespace and one group, and the tenant
+name is free text. The CEL rule ties `spec.tenant` to the request's name, so a
+request in that namespace cannot target another tenant's namespace. A second
+request namespace, with its own role, would need the same rule to hold across
+namespaces, and this chapter grants only one. The recipe does not set
+`managementPolicies` on its Objects, so the Crossplane default applies to them,
+and this chapter does not narrow it.
 
 ## Diagrams
 
@@ -287,16 +303,18 @@ ClusterRole and a binding. Do not run them against a shared cluster.
 
 > **What this revision ran, and what it did not.** The lab ran on a kind
 > cluster, Kubernetes v1.37.0, with kubectl v1.37.2 and Helm v4.1.4. The
-> captured blocks below are real output: the pod-security warnings the chart's
-> pods get, the server dry-runs before the platform CRDs exist, and the
-> provider and requester rights, checked by impersonation and with
-> SubjectAccessReview. The live Crossplane install and reconcile did not run in
-> this revision, because the shared lab was reserved for another install at the
-> time. The install commands are the upstream procedure, checked against the
-> chart and the CRDs at the pinned versions. Output that those steps would
-> print is marked illustrative.
+> captured blocks are real output: the restricted dry run of the chart, the
+> Crossplane install, the provider and the function reaching Healthy, and the
+> provider's rights checked by impersonation. The first install ran with
+> Crossplane's RBAC manager on, and the captured check shows what that grants.
+> The XRD and the Composition applied. The XRD never reported status conditions
+> and the claim never reconciled in the window, because the shared lab's
+> apiserver was restarting. So the tenant namespace, quota, RoleBinding and
+> NetworkPolicy are described from the Composition, and are not shown running.
+> The Backstage portal is illustrative and was not run. The output came from a
+> lab cluster with a different name from the one these commands use.
 
-### 0. Prerequisites — a cluster (the golden path provisions INTO it)
+### 0. Prerequisites: a cluster (the golden path provisions INTO it)
 
 A kind cluster is enough. The golden path provisions objects in the cluster
 through provider-kubernetes, so no cloud account is needed for the namespace
@@ -312,11 +330,16 @@ kind create cluster --name bookstore
 kubectl cluster-info
 ```
 
-### 1. Install Crossplane at the lowest Pod Security level that works
+### 1. Install Crossplane at the restricted level
 
 Crossplane runs controller pods, so it gets its own namespace, and the label
-goes on before the install. First check the chart against the label. A dry run
-renders the chart and sends it to the API server, which creates nothing:
+goes on before the install. The chart's pods run as non-root, but its container
+security values default to no `capabilities.drop`, so `restricted` refuses
+them. Two values maps, `securityContextCrossplane` and
+`securityContextRBACManager`, take a free-form container `securityContext`, and
+the commands below set them. First check the chart against the label with a
+dry run. It renders the chart and sends it to the API server, which creates
+nothing:
 
 ```sh
 kubectl create namespace crossplane-probe
@@ -330,6 +353,8 @@ helm template crossplane crossplane-stable/crossplane --version 2.4.3 \
   --namespace crossplane-probe \
   --set-json 'podSecurityContextCrossplane={"runAsNonRoot":true,"seccompProfile":{"type":"RuntimeDefault"}}' \
   --set-json 'podSecurityContextRBACManager={"runAsNonRoot":true,"seccompProfile":{"type":"RuntimeDefault"}}' \
+  --set-json 'securityContextCrossplane={"runAsUser":65532,"runAsGroup":65532,"allowPrivilegeEscalation":false,"readOnlyRootFilesystem":true,"capabilities":{"drop":["ALL"]}}' \
+  --set-json 'securityContextRBACManager={"runAsUser":65532,"runAsGroup":65532,"allowPrivilegeEscalation":false,"readOnlyRootFilesystem":true,"capabilities":{"drop":["ALL"]}}' \
   | kubectl apply --dry-run=server -f - 2>&1 | grep -E '^Warning|^deployment|^Error'
 kubectl delete namespace crossplane-probe
 ```
@@ -337,23 +362,21 @@ kubectl delete namespace crossplane-probe
 <!-- gate: output -->
 
 ```text
-Warning: would violate PodSecurity "restricted:latest": unrestricted capabilities (containers "crossplane-init", "crossplane" must set securityContext.capabilities.drop=["ALL"])
 deployment.apps/crossplane created (server dry run)
 deployment.apps/crossplane-rbac-manager created (server dry run)
 ```
 
-The chart exposes `runAsNonRoot` and `seccompProfile` as pod-level values, and
-the probe sets them. It does not set `capabilities.drop: ["ALL"]` on its
-containers, and it has no value for that. So `restricted` would refuse the
-pods, and the warning names the containers that lack it. The Pod Security
-`baseline` profile does not require dropped capabilities, only that no unsafe
-capability is added
-([the profile's list](https://kubernetes.io/docs/concepts/security/pod-security-standards/#baseline)).
-So the namespace takes `baseline` at enforce, and `restricted` at audit and
-warn, so the gap stays visible in the API server's warnings and audit log. The
-exception is recorded in the registry at `security/namespace-exceptions.yaml` in
-the repository root, with its reason and an expiry. The label is in a manifest,
-so the gate can read it:
+The dry run prints no `Warning` line, so the namespace takes `restricted` at
+enforce, audit and warn, and the registry needs no exception for it. The probe
+renders the RBAC manager, which the chart enables by default. The install below
+turns it off, for the reason in the next paragraph.
+
+Crossplane's RBAC manager gives each provider the rights its package asks for.
+For provider-kubernetes, that request includes Secrets, ConfigMaps, events and
+leases in every namespace. The first lab install ran with the manager on, and
+the rights check in step 4 answered `yes` to `get secrets -A` for the
+provider. The install below turns the manager off, so the only binding for the
+provider is the one this chapter writes:
 
 ```sh
 kubectl apply -f - <<'EOF'
@@ -362,25 +385,29 @@ kind: Namespace
 metadata:
   name: crossplane-system
   labels:
-    # The lowest level the chart's pods pass. Registered in
-    # security/namespace-exceptions.yaml. Audit and warn stay at restricted.
-    pod-security.kubernetes.io/enforce: baseline
+    pod-security.kubernetes.io/enforce: restricted
     pod-security.kubernetes.io/audit: restricted
     pod-security.kubernetes.io/warn: restricted
 EOF
 helm install crossplane crossplane-stable/crossplane \
   --namespace crossplane-system --version 2.4.3 --wait \
+  --set rbacManager.deploy=false \
   --set-json 'podSecurityContextCrossplane={"runAsNonRoot":true,"seccompProfile":{"type":"RuntimeDefault"}}' \
-  --set-json 'podSecurityContextRBACManager={"runAsNonRoot":true,"seccompProfile":{"type":"RuntimeDefault"}}'
+  --set-json 'podSecurityContextRBACManager={"runAsNonRoot":true,"seccompProfile":{"type":"RuntimeDefault"}}' \
+  --set-json 'securityContextCrossplane={"runAsUser":65532,"runAsGroup":65532,"allowPrivilegeEscalation":false,"readOnlyRootFilesystem":true,"capabilities":{"drop":["ALL"]}}' \
+  --set-json 'securityContextRBACManager={"runAsUser":65532,"runAsGroup":65532,"allowPrivilegeEscalation":false,"readOnlyRootFilesystem":true,"capabilities":{"drop":["ALL"]}}'
 ```
 
-Crossplane runs the provider and the function as pods too, and it creates
-those pods itself. A `DeploymentRuntimeConfig` gives them the baseline. The
-container name `package-runtime` is the runtime container Crossplane gives each
-package. `runAsUser` is set to a number because the function image's user is
-named `nonroot`, and the kubelet cannot verify a user name as non-root. The UID
-65532 is the one the chart's own pods run as. The volume gives `/tmp` a
-writable path, as in [01.01's baseline](../01-core-workloads/01-pods.md#baseline).
+Crossplane creates the provider and the function pods itself. A
+`DeploymentRuntimeConfig` gives them the baseline. The container name
+`package-runtime` is the runtime container Crossplane gives each package.
+`runAsUser` is set to a number because the function image's user is named
+`nonroot`, and the kubelet cannot verify a user name as non-root. The UID 65532
+is the one the chart's own pods run as. The volume gives `/tmp` a writable
+path, as in [01.01's baseline](../01-core-workloads/01-pods.md#baseline).
+`serviceAccountTemplate` fixes the provider's ServiceAccount name. Without it,
+each new provider revision gets a new ServiceAccount, and a bump of the pinned
+version would leave the binding in step 1 pointing at the old one.
 
 ```sh
 kubectl apply -f - <<'EOF'
@@ -389,6 +416,9 @@ kind: DeploymentRuntimeConfig
 metadata:
   name: bookstore-paved-road
 spec:
+  serviceAccountTemplate:
+    metadata:
+      name: bookstore-paved-road
   deploymentTemplate:
     spec:
       selector: {}
@@ -414,6 +444,13 @@ spec:
             - name: tmp
               emptyDir: {}
 EOF
+```
+
+The Provider and the Function take no pod template of their own. They
+run under the runtime config above, and the step waits for both to be
+Healthy.
+
+```sh
 kubectl apply -f - <<'EOF'
 apiVersion: pkg.crossplane.io/v1
 kind: Provider
@@ -435,19 +472,28 @@ spec:
   runtimeConfigRef:
     name: bookstore-paved-road
 EOF
-kubectl wait --for=condition=Healthy provider/provider-kubernetes --timeout=180s
-kubectl wait --for=condition=Healthy function/function-patch-and-transform --timeout=180s
+kubectl wait --for=condition=Healthy provider/provider-kubernetes --timeout=300s
+kubectl wait --for=condition=Healthy function/function-patch-and-transform --timeout=300s
+```
+
+<!-- gate: output -->
+
+```text
+provider.pkg.crossplane.io/provider-kubernetes condition met
+# ...
+function.pkg.crossplane.io/function-patch-and-transform condition met
 ```
 
 The order matters. The Function and the Provider must be Healthy before the
 Composition in step 2 is applied, or its pipeline never runs and the request
 never reconciles.
 
-The provider's ServiceAccount needs rights on the objects the recipe writes.
-The provider-kubernetes README shows an in-cluster setup that binds the
-provider to `cluster-admin`. This chapter does not take that step. Instead,
-one ClusterRole names the kinds the recipe writes, and gives the `bind` verb on
-the built-in `view` ClusterRole and nothing else:
+The provider's ServiceAccount needs rights on the objects the recipe writes,
+and on Crossplane's own managed-resource kinds. The provider-kubernetes README
+shows an in-cluster setup that binds the provider to `cluster-admin`. This
+chapter does not take that step. One ClusterRole names the kinds the recipe
+writes, the managed-resource kinds, and the `bind` verb on the built-in `view`
+ClusterRole. It has no Secrets:
 
 ```sh
 kubectl apply -f - <<'EOF'
@@ -458,7 +504,7 @@ metadata:
 rules:
   # Namespaces are cluster-scoped, so these verbs apply to every namespace.
   # RBAC cannot restrict create by name, so the name check is a policy
-  # (05.07, step 6 names the gap).
+  # (05.07 names the gap).
   - apiGroups: [""]
     resources: ["namespaces", "resourcequotas", "limitranges"]
     verbs: ["get", "list", "watch", "create", "update", "patch", "delete"]
@@ -474,14 +520,33 @@ rules:
     resources: ["clusterroles"]
     resourceNames: ["view"]
     verbs: ["bind"]
+  # Crossplane's own managed resources: the Object kinds and their
+  # ProviderConfig usage records. No Secrets and no ConfigMaps here.
+  - apiGroups: ["kubernetes.m.crossplane.io", "kubernetes.crossplane.io"]
+    resources:
+      - objects
+      - objects/status
+      - observedobjectcollections
+      - observedobjectcollections/status
+      - providerconfigs
+      - providerconfigs/status
+      - providerconfigusages
+      - providerconfigusages/status
+    verbs: ["get", "list", "watch", "update", "patch", "create"]
+  - apiGroups: ["kubernetes.m.crossplane.io", "kubernetes.crossplane.io"]
+    resources: ["*/finalizers"]
+    verbs: ["update"]
+  # Read-only: the provider checks each kind's scope before it watches it.
+  - apiGroups: ["apiextensions.k8s.io"]
+    resources: ["customresourcedefinitions"]
+    verbs: ["get", "list", "watch"]
 EOF
-SA=$(kubectl get serviceaccounts -n crossplane-system -o name | grep provider-kubernetes | sed 's|serviceaccount/|crossplane-system:|')
 kubectl create clusterrolebinding bookstore-paved-road \
-  --clusterrole=bookstore-paved-road --serviceaccount="$SA"
+  --clusterrole=bookstore-paved-road \
+  --serviceaccount=crossplane-system:bookstore-paved-road
 ```
 
-If the grep matches more than one ServiceAccount, keep the one for the current
-provider revision. Step 4 checks what this binding allows.
+Step 4 checks what this binding allows.
 
 ### 2. The API and the recipe: the XRD and the Composition
 
@@ -516,20 +581,32 @@ ensure CRDs are installed first
 ```
 
 That is the expected result, and it is the same as for any CRD-backed object in
-this guide. After step 1 the dry run succeeds, and the XRD becomes a served API:
+this guide. After step 1 the dry run succeeds, and the XRD becomes a served API.
+Crossplane creates the CRD from the XRD asynchronously, so the reader waits for
+the CRD to exist before waiting for it to be Established:
 
 ```sh
 kubectl apply -f examples/bookstore/platform/crossplane-xrd.yaml
+until kubectl get crd bookstoreenvironments.platform.bookstore.example.com \
+  >/dev/null 2>&1; do sleep 2; done
 kubectl wait --for=condition=Established \
   crd/bookstoreenvironments.platform.bookstore.example.com --timeout=120s
 kubectl apply -f examples/bookstore/platform/crossplane-composition.yaml
 ```
 
+In the lab run, the XRD had not reported any status condition within the
+window. The composite controller could not start its watch while the apiserver
+restarted, so the Composition was applied but did not run. The rest of this
+step describes what the Composition does. It is not shown running in this
+revision.
+
 The XRD in [`crossplane-xrd.yaml`](../examples/bookstore/platform/crossplane-xrd.yaml)
 declares the API `BookstoreEnvironment`, in the Crossplane v2 model. Its scope
 defaults to `Namespaced`, so the developer creates the request directly in a
-namespace, and the schema has two fields: a `tenant` name and a `size`. Nothing
-about securityContext, RBAC, quota or NetworkPolicy is in the request.
+namespace. The schema has one field, `tenant`. A CEL rule on the schema
+requires `spec.tenant` to equal the request's name, so the tenant name and the
+request name cannot diverge. Nothing about securityContext, RBAC, quota or
+NetworkPolicy is in the request.
 
 The Composition is the recipe. It turns one `BookstoreEnvironment` into five
 objects, each wrapped in a namespaced `kubernetes.m.crossplane.io` Object in the
@@ -553,7 +630,8 @@ step 4 checks both.
 Claims live in a request namespace. This one is labelled `restricted` because it
 runs no pods. The ProviderConfig tells the namespaced Objects to use the
 provider's own identity, so no credentials are stored. The Role lets one group
-create and manage claims here, and nothing else.
+create and manage claims here, and nothing else. The claim itself is applied in
+step 4, after the checks.
 
 ```sh
 kubectl apply -f - <<'EOF'
@@ -600,6 +678,91 @@ subjects:
     # placeholder: map this to the requesting team's group in your IdP
     name: bookstore-platform-requesters
 EOF
+```
+
+### 4. Prove what the provider and the requester can do
+
+These checks ask the API server about permissions, so they create nothing. Run
+them after step 1, against the real provider ServiceAccount, and before the
+claim is applied. Set `PROVIDER` first:
+
+```sh
+PROVIDER="system:serviceaccount:crossplane-system:bookstore-paved-road"
+kubectl auth can-i create namespaces --as="$PROVIDER"
+kubectl auth can-i delete namespaces --as="$PROVIDER"
+kubectl auth can-i get secrets -A --as="$PROVIDER"
+kubectl auth can-i create clusterrolebindings --as="$PROVIDER"
+kubectl auth can-i create roles -A --as="$PROVIDER"
+kubectl auth can-i create deployments -A --as="$PROVIDER"
+kubectl auth can-i create rolebindings -A --as="$PROVIDER"
+kubectl auth can-i bind clusterrole/view --as="$PROVIDER"
+kubectl auth can-i bind clusterrole/cluster-admin --as="$PROVIDER"
+```
+
+<!-- gate: output -->
+
+```text
+Warning: resource 'namespaces' is not namespace scoped
+yes
+# ...
+Warning: resource 'namespaces' is not namespace scoped
+yes
+# ...
+no
+# ...
+Warning: resource 'clusterrolebindings' is not namespace scoped in group 'rbac.authorization.k8s.io'
+no
+# ...
+no
+# ...
+no
+# ...
+yes
+# ...
+Warning: resource 'clusterroles' is not namespace scoped in group 'rbac.authorization.k8s.io'
+yes
+# ...
+Warning: resource 'clusterroles' is not namespace scoped in group 'rbac.authorization.k8s.io'
+no
+```
+
+The warnings are part of the output. `kubectl auth can-i` prints them for
+cluster-scoped kinds, and they do not change the answer. The `get secrets -A` answer is the one that changed. On the first
+install, with the RBAC manager on, it answered `yes`. The manager's grant gave
+the provider Secrets in every namespace. After the manager was turned off and
+the ClusterRole above was applied, it answers `no`.
+
+The provider may create and delete namespaces, and may write RoleBindings. It
+may bind `view`, and it may not bind `cluster-admin`. It cannot read Secrets
+anywhere, and it cannot create ClusterRoleBindings, Roles or Deployments.
+
+Next, the requester check. `kubectl auth can-i` maps the resource name through
+the server's discovery. When the server does not serve the kind yet, it prints
+a warning, drops the group, and answers about a different resource, so its `no`
+is for the wrong reason. The lab run showed this for `bookstoreenvironments`
+before the XRD existed. A SubjectAccessReview asks the server the same question
+with the group and the resource given, so its answer is right either way. The
+first answer should be `true`, for a claim in the request namespace, and the
+other two `false`, for the `default` namespace and for a Secret:
+
+```sh
+echo '{"apiVersion":"authorization.k8s.io/v1","kind":"SubjectAccessReview","spec":{"user":"tenant-dev","groups":["bookstore-platform-requesters"],"resourceAttributes":{"namespace":"platform-tenants","verb":"create","group":"platform.bookstore.example.com","resource":"bookstoreenvironments"}}}' | kubectl create -o jsonpath='{.status.allowed}{"\n"}' -f -
+echo '{"apiVersion":"authorization.k8s.io/v1","kind":"SubjectAccessReview","spec":{"user":"tenant-dev","groups":["bookstore-platform-requesters"],"resourceAttributes":{"namespace":"default","verb":"create","group":"platform.bookstore.example.com","resource":"bookstoreenvironments"}}}' | kubectl create -o jsonpath='{.status.allowed}{"\n"}' -f -
+echo '{"apiVersion":"authorization.k8s.io/v1","kind":"SubjectAccessReview","spec":{"user":"tenant-dev","groups":["bookstore-platform-requesters"],"resourceAttributes":{"namespace":"platform-tenants","verb":"get","resource":"secrets"}}}' | kubectl create -o jsonpath='{.status.allowed}{"\n"}' -f -
+```
+
+<!-- gate: output -->
+
+```text
+true
+false
+false
+```
+
+Only now apply the claim. The Composition creates the tenant namespace from the
+claim's name, so the tenant checks need the reconciled namespace:
+
+```sh
 kubectl apply -f examples/bookstore/platform/bookstore-env-claim.yaml
 kubectl get bookstoreenvironment acme -n platform-tenants
 ```
@@ -616,85 +779,17 @@ Crossplane then creates the five objects, and the tenant namespace appears with
 `pod-security.kubernetes.io/enforce=restricted` on it. The objects are owned by
 the claim, so deleting the claim deletes them.
 
-### 4. Prove what the provider and the requester can do
-
-These checks ask the API server about permissions, so they create nothing. Run
-them after step 1, against the real provider ServiceAccount, and before any
-claim is applied. Set `PROVIDER` first:
-
-```sh
-SA=$(kubectl get serviceaccounts -n crossplane-system -o name | grep provider-kubernetes | sed 's|serviceaccount/|crossplane-system:|')
-PROVIDER="system:serviceaccount:$SA"
-kubectl auth can-i create namespaces --as="$PROVIDER"
-kubectl auth can-i delete namespaces --as="$PROVIDER"
-kubectl auth can-i get secrets -A --as="$PROVIDER"
-kubectl auth can-i create clusterrolebindings --as="$PROVIDER"
-kubectl auth can-i create roles -A --as="$PROVIDER"
-kubectl auth can-i create deployments -A --as="$PROVIDER"
-kubectl auth can-i create rolebindings -A --as="$PROVIDER"
-kubectl auth can-i bind clusterrole/view --as="$PROVIDER"
-kubectl auth can-i bind clusterrole/cluster-admin --as="$PROVIDER"
-```
-
-<!-- gate: output -->
-
-```text
-yes
-yes
-no
-no
-no
-no
-yes
-yes
-no
-```
-
-In the lab, the install did not run, so the same checks ran against a
-ServiceAccount name standing in for the provider's, bound to the same
-ClusterRole. The answers are the ones the design requires. The provider may
-create and delete namespaces, and may write RoleBindings. It may bind `view`,
-and it may not bind `cluster-admin`. It cannot read Secrets anywhere, and it
-cannot create ClusterRoleBindings, Roles or Deployments.
-
-Next, a developer in the tenant's group, in a namespace that the recipe would
-create, can read its pods and cannot read its Secrets or create workloads:
+Once the namespace exists, a developer in the tenant's group can read its pods
+and cannot read its Secrets or create workloads. These answer `yes` only when
+the Composition's RoleBinding exists in `bookstore-tenant-acme`, so run them
+after the claim reconciles. Expected, illustrative and not captured here:
+`yes`, `no`, `no`, `no`.
 
 ```sh
 kubectl auth can-i get pods -n bookstore-tenant-acme --as=tenant-dev --as-group=bookstore-tenant-acme
 kubectl auth can-i get secrets -n bookstore-tenant-acme --as=tenant-dev --as-group=bookstore-tenant-acme
 kubectl auth can-i create deployments -n bookstore-tenant-acme --as=tenant-dev --as-group=bookstore-tenant-acme
 kubectl auth can-i get pods -n default --as=tenant-dev --as-group=bookstore-tenant-acme
-```
-
-<!-- gate: output -->
-
-```text
-yes
-no
-no
-no
-```
-
-The requester check uses SubjectAccessReview. `kubectl auth can-i` maps the
-resource name on the client, so it refuses a kind the server has not yet
-served. A SubjectAccessReview asks the server the same question without that
-mapping. The first answer should be `true`, for a claim in the request
-namespace, and the other two `false`, for the `default` namespace and for a
-Secret:
-
-```sh
-echo '{"apiVersion":"authorization.k8s.io/v1","kind":"SubjectAccessReview","spec":{"user":"tenant-dev","groups":["bookstore-platform-requesters"],"resourceAttributes":{"namespace":"platform-tenants","verb":"create","group":"platform.bookstore.example.com","resource":"bookstoreenvironments"}}}' | kubectl create -o jsonpath='{.status.allowed}{"\n"}' -f -
-echo '{"apiVersion":"authorization.k8s.io/v1","kind":"SubjectAccessReview","spec":{"user":"tenant-dev","groups":["bookstore-platform-requesters"],"resourceAttributes":{"namespace":"default","verb":"create","group":"platform.bookstore.example.com","resource":"bookstoreenvironments"}}}' | kubectl create -o jsonpath='{.status.allowed}{"\n"}' -f -
-echo '{"apiVersion":"authorization.k8s.io/v1","kind":"SubjectAccessReview","spec":{"user":"tenant-dev","groups":["bookstore-platform-requesters"],"resourceAttributes":{"namespace":"platform-tenants","verb":"get","resource":"secrets"}}}' | kubectl create -o jsonpath='{.status.allowed}{"\n"}' -f -
-```
-
-<!-- gate: output -->
-
-```text
-true
-false
-false
 ```
 
 ### 5. Backstage: the developer's front door (illustrative)
@@ -714,25 +809,18 @@ python3 -c 'import yaml; list(yaml.safe_load_all(open("examples/bookstore/platfo
 ```
 
 The full portal is a Node app with a database, auth and plugins, and it is
-heavy. Its value here is the template and catalog model, so this chapter gives
-the portal's pinned Helm install as an illustrative command and does not run it.
-The chart version was checked with
-`helm show chart backstage/backstage --version 2.10.2`:
-
-```sh
-helm repo add backstage https://backstage.github.io/charts
-helm repo update backstage
-helm install backstage backstage/backstage \
-  --namespace backstage --create-namespace --version 2.10.2 --wait
-```
+heavy. Its value here is the template and catalog model, so this chapter does
+not install it. The portal chart is `backstage/backstage`, version 2.10.2,
+checked with `helm show chart`. A real install belongs in a namespace labelled
+`restricted` first, with the chart's security values set.
 
 The conceptual flow, end to end: the developer picks the "Bookstore service
-(golden path)" template and fills in `name`, `owner` and `size`. Backstage
-scaffolds a repository with the service skeleton, the `BookstoreEnvironment`
-claim and the Argo `Application`, and opens a pull request. The merge is
-reconciled by Argo CD, Crossplane provisions the guarded namespace, and the
-new component appears in the catalog. Backstage never applies anything to the
-cluster. It commits to Git, and Git is still the only write path.
+(golden path)" template and fills in `name` and `owner`. Backstage scaffolds a
+repository with the service skeleton, the `BookstoreEnvironment` claim and the
+Argo `Application`, and opens a pull request. The merge is reconciled by Argo
+CD, Crossplane provisions the guarded namespace, and the new component appears
+in the catalog. Backstage never applies anything to the cluster. It commits to
+Git, and Git is still the only write path.
 
 ### 6. Where the operator and ApplicationSet plug into the same road
 
@@ -757,7 +845,8 @@ The golden path composes with what earlier chapters built, on the same road:
 ### 7. Clean up
 
 Delete the claim first, so Crossplane removes the composed objects and the
-tenant namespace, then remove the platform objects and the packages:
+tenant namespace, then remove the platform objects and the packages. The CRDs
+that Crossplane installed stay after `helm uninstall`, so delete them too:
 
 ```sh
 kubectl delete -f examples/bookstore/platform/bookstore-env-claim.yaml --ignore-not-found
@@ -771,6 +860,7 @@ kubectl delete provider provider-kubernetes --ignore-not-found
 kubectl delete deploymentruntimeconfig bookstore-paved-road --ignore-not-found
 helm uninstall crossplane -n crossplane-system
 kubectl delete namespace crossplane-system --ignore-not-found
+kubectl get crd -o name | grep 'crossplane.io' | xargs kubectl delete
 kind delete cluster --name bookstore        # also removes everything above
 ```
 
@@ -918,26 +1008,28 @@ kind delete cluster --name bookstore        # also removes everything above
 ## Quick Reference
 
 ```sh
-# Crossplane: its own namespace, at the lowest level its pods pass (registered)
+# Crossplane: its own namespace, at the restricted level (no registry entry)
 kubectl apply -f - <<'EOF'
 apiVersion: v1
 kind: Namespace
 metadata:
   name: crossplane-system
   labels:
-    pod-security.kubernetes.io/enforce: baseline
+    pod-security.kubernetes.io/enforce: restricted
     pod-security.kubernetes.io/audit: restricted
     pod-security.kubernetes.io/warn: restricted
 EOF
 helm repo add crossplane-stable https://charts.crossplane.io/stable && helm repo update
 helm install crossplane crossplane-stable/crossplane -n crossplane-system \
-  --version 2.4.3 --wait \
+  --version 2.4.3 --wait --set rbacManager.deploy=false \
   --set-json 'podSecurityContextCrossplane={"runAsNonRoot":true,"seccompProfile":{"type":"RuntimeDefault"}}' \
-  --set-json 'podSecurityContextRBACManager={"runAsNonRoot":true,"seccompProfile":{"type":"RuntimeDefault"}}'
+  --set-json 'podSecurityContextRBACManager={"runAsNonRoot":true,"seccompProfile":{"type":"RuntimeDefault"}}' \
+  --set-json 'securityContextCrossplane={"runAsUser":65532,"runAsGroup":65532,"allowPrivilegeEscalation":false,"readOnlyRootFilesystem":true,"capabilities":{"drop":["ALL"]}}' \
+  --set-json 'securityContextRBACManager={"runAsUser":65532,"runAsGroup":65532,"allowPrivilegeEscalation":false,"readOnlyRootFilesystem":true,"capabilities":{"drop":["ALL"]}}'
 # Step 1 also applies the DeploymentRuntimeConfig, the Provider and the Function.
 # Wait for both packages before anything else:
-kubectl wait --for=condition=Healthy provider/provider-kubernetes --timeout=180s
-kubectl wait --for=condition=Healthy function/function-patch-and-transform --timeout=180s
+kubectl wait --for=condition=Healthy provider/provider-kubernetes --timeout=300s
+kubectl wait --for=condition=Healthy function/function-patch-and-transform --timeout=300s
 
 # The golden path, in this order: XRD -> Composition -> request namespace ->
 # claim. The Function and Provider must be Healthy before the Composition.
@@ -949,12 +1041,11 @@ kubectl get rolebinding,resourcequota,limitrange,networkpolicy \
   -n bookstore-tenant-acme
 
 # Provider rights, checked without changing anything
+PROVIDER="system:serviceaccount:crossplane-system:bookstore-paved-road"
 kubectl auth can-i bind clusterrole/cluster-admin --as="$PROVIDER"   # no
+kubectl auth can-i get secrets -A --as="$PROVIDER"                  # no
 
-# Backstage (ILLUSTRATIVE: pinned Helm, own namespace; the Template is the lesson)
-helm repo add backstage https://backstage.github.io/charts && helm repo update
-helm install backstage backstage/backstage -n backstage --create-namespace \
-  --version 2.10.2
+# Backstage: the Template is the lesson; the portal is not installed here
 ```
 
 Minimal skeletons are not repeated here. The full manifests are in the steps
@@ -965,13 +1056,15 @@ Checklist:
 - [ ] Golden path = **self-service API** (XRD claim) whose **only** expansion
       is the guide's hardened, bounded and isolated stack: guardrails **by
       construction**, with admission as the backstop
-- [ ] Crossplane in its own namespace, at the lowest Pod Security level its
-      pods pass, registered in `security/namespace-exceptions.yaml`; the
-      chart's pod-level values set
+- [ ] Crossplane in its own namespace at the **restricted** level, with the
+      chart's container and pod values set, and no registry exception
 - [ ] Provider and function pods under a DeploymentRuntimeConfig that carries
-      the baseline
-- [ ] Provider rights: only the kinds the recipe writes, `bind` on `view`
-      alone, no `cluster-admin` binding; checked with `kubectl auth can-i --as`
+      the baseline and fixes the provider's ServiceAccount name
+- [ ] Crossplane's RBAC manager off (`rbacManager.deploy=false`), so the
+      provider holds only the binding this chapter writes
+- [ ] Provider rights: only the kinds the recipe writes and Crossplane's own
+      managed-resource kinds, `bind` on `view` alone, no Secrets, no
+      `cluster-admin` binding; checked with `kubectl auth can-i --as`
 - [ ] Requester rights limited to the request namespace
 - [ ] Composed objects are **namespaced** `kubernetes.m.crossplane.io` Objects
       in the XR's namespace; pinned chart and provider versions

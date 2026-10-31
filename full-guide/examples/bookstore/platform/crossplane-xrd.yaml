@@ -1,7 +1,7 @@
 # Bookstore — Part 11 ch.10 "Platform engineering": the CompositeResourceDefinition
 # (XRD) that declares the NEW high-level self-service API `BookstoreEnvironment`.
 # This is the developer-facing face of the PAVED ROAD: a developer supplies a
-# `tenant` name + a `size` and NOTHING about securityContext / RBAC / quota /
+# `tenant` name and NOTHING about securityContext / RBAC / quota /
 # NetworkPolicy / policy — the Composition (crossplane-composition.yaml) expands
 # it, BY CONSTRUCTION, into the guide's hardened/bounded/isolated stack
 # (Part 05 ch.01-02 + Part 01 ch.03 + Part 02 ch.06 + Part 08 ch.04).
@@ -37,7 +37,7 @@
 # Apply (after Crossplane installed — ch.10 step 1):
 #   kubectl apply -f examples/bookstore/platform/crossplane-xrd.yaml
 #   kubectl wait --for=condition=Established \
-#     crd/bookstoreenvironments.platform.bookstore.example.com --timeout=120s
+#     xrd/bookstoreenvironments.platform.bookstore.example.com --timeout=120s
 apiVersion: apiextensions.crossplane.io/v2
 kind: CompositeResourceDefinition
 metadata:
@@ -59,10 +59,15 @@ spec:
       schema:
         openAPIV3Schema:
           type: object
+          # The XR name and the tenant must match. Requests share one
+          # namespace, so the name is unique there, and the tenant then is too.
+          x-kubernetes-validations:
+            - rule: "self.spec.tenant == self.metadata.name"
+              message: "spec.tenant must equal metadata.name"
           properties:
             spec:
               type: object
-              # THE ENTIRE DEVELOPER INTERFACE — 2 fields. No security/RBAC/
+              # THE ENTIRE DEVELOPER INTERFACE — 1 field. No security/RBAC/
               # quota/network knobs: those are the platform's job, expanded by
               # the Composition. A developer CANNOT request an un-guarded env.
               properties:
@@ -74,13 +79,6 @@ spec:
                     quota/NetworkPolicy objects in it.
                   pattern: '^[a-z]([-a-z0-9]*[a-z0-9])?$'
                   maxLength: 40
-                size:
-                  type: string
-                  description: >-
-                    Coarse t-shirt size; the Composition maps it to the
-                    ResourceQuota/LimitRange totals (small=default here).
-                  enum: [small, medium, large]
-                  default: small
               required: [tenant]
             status:
               type: object

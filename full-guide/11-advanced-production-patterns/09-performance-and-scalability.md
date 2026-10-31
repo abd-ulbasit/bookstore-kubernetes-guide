@@ -6,7 +6,7 @@
 > apiserver(authn/authz/admission/**watch cache**)→etcd (**disk fsync latency
 > is the floor** — [ch.08](08-ha-control-plane-and-etcd.md)); **apiserver
 > tuning** (`--max-requests-inflight`/`--max-mutating-requests-inflight` vs APF,
-> watch-cache sizing, `--target-ram-mb`, audit cost, large-LIST /
+> the watch cache, audit cost, large-LIST /
 > `limit`+`continue` pagination, the "list secrets/configmaps cluster-wide"
 > anti-pattern); **etcd performance** (SSD/fsync, `--heartbeat-interval`/
 > `--election-timeout`, keyspace size, #objects/watchers); **kubelet/node**
@@ -20,12 +20,21 @@
 > control-vs-treatment methodology); the cost of observability / large objects
 > / leader-election churn at scale — applied by scraping the Bookstore
 > cluster's apiserver+etcd metrics, a tiny pinned **kube-burner** Bookstore-like
-> object run with percentile readout, and reading **scheduler pprof**, honest
+> object run with percentile readout, and reading **apiserver pprof**, honest
 > that real limits need real scale.
 
 **Estimated time:** ~60 min read · ~120 min hands-on
 **Prerequisites:** [Part 11 ch.03](03-api-priority-and-fairness.md) — APF in the request path · [Part 11 ch.08](08-ha-control-plane-and-etcd.md) — etcd fsync latency as the floor · [Part 06 ch.01](../06-production-readiness/01-observability-metrics.md) — metrics scraping for apiserver+etcd
-**You'll know after this:** • trace a request through client qps/burst → APF → apiserver → etcd · • tune apiserver inflight limits, watch-cache, and audit cost · • read the official Kubernetes scalability thresholds + SLOs (≤5000 nodes / ≤150k pods) · • profile the apiserver from its control-plane node with a read-only token · • bound one tenant's object count and LIST cost · • run a small kube-burner load test and read percentile latencies correctly
+**You'll know after this:** • trace a request through client qps/burst → APF →
+apiserver → etcd · • tune apiserver inflight limits, watch-cache, and audit
+cost · • read the official Kubernetes scalability thresholds + SLOs (≤5000
+nodes / ≤150k pods) · • profile the apiserver from its control-plane node with
+a read-only token · • bound one tenant's object count and LIST cost · • run a
+small kube-burner load test and read percentile latencies correctly
+
+**Tier A (kind).** The hands-on runs on a kind cluster that you own, and
+section 4 runs a kube-burner load test on it. Run it only against clusters you
+own.
 
 <!-- tags: day-2, observability, platform-engineering, slo -->
 
@@ -114,9 +123,11 @@ state — never averages, never one run.**
 - **The big knobs, by component.** *apiserver*: `--max-requests-inflight` /
   `--max-mutating-requests-inflight` cap **total** concurrency that **APF then
   subdivides** ([ch.03](03-api-priority-and-fairness.md) — APF is the *unit of
-  isolation*, these are the global ceiling); watch-cache sizing
-  (`--watch-cache-sizes`); **audit** logging cost (a verbose policy is real
-  per-request latency); **pagination** (`limit` + `continue`). *etcd*:
+  isolation*, these are the global ceiling); the watch cache, which
+  `--watch-cache-sizes` can only disable per resource (`0` turns it off, and
+  every other value is equivalent, so it is not a size to tune); **audit**
+  logging cost (a verbose policy is real per-request latency); **pagination**
+  (`limit` + `continue`). *etcd*:
   SSD/fsync,
   `--heartbeat-interval`/`--election-timeout` vs inter-member RTT, keyspace
   size, # objects & watchers ([ch.08](08-ha-control-plane-and-etcd.md)).
@@ -174,8 +185,10 @@ against, D3 and I2. Each row below gives the control this chapter teaches:
 APF bounds how fast one client can use the apiserver. It does not bound how
 many objects that client leaves behind. Every object stays in etcd and counts
 toward every LIST of its kind, so object count needs its own control. The
-threat model names APF as the control for D3. The quota is the second control
-on that row: it bounds the total, where APF bounds the rate.
+threat model names APF as the control for D3. The quota is a second control
+that this chapter adds for the same threat. It bounds the total, where APF
+bounds the rate. The threat model's D3 row does not list the quota yet, so the
+row does not cover it.
 
 A Namespace is cluster-scoped, and no namespace's quota counts it, so who may
 create Namespaces is an RBAC decision. Policy checks on that belong to policy
@@ -235,7 +248,7 @@ flowchart TB
        protect with: dedicated SSD, low jitter (ch.08). NO apiserver
        tuning beats a slow etcd disk.
     apiserver ........ --max-requests-inflight / --max-mutating-* (TOTAL
-       ceiling APF subdivides, ch.03); watch-cache size; --target-ram-mb;
+       ceiling APF subdivides, ch.03); the watch cache;
        AUDIT policy cost; pagination (limit+continue) vs huge LISTs
     etcd ............. SSD; --heartbeat-interval/--election-timeout vs RTT;
        keyspace size; #objects & #watchers (ch.08)
@@ -265,11 +278,12 @@ overlay, the operator, or any other `examples/bookstore/**` file — purely
 additive.
 
 We will: (0) the honest laptop-vs-real-scale story; (1) scrape the Bookstore
-cluster's **apiserver** request-latency + **etcd** fsync metrics; (2) read
-**scheduler `/debug/pprof`**; (3) a **tiny pinned kube-burner** run creating/
-deleting N Bookstore-like objects and read the **latency percentiles**; (4) the
-scalability SLOs as the yardstick; (5) the "list everything" anti-pattern shown
-concretely.
+cluster's **apiserver** request-latency and **etcd** fsync metrics; (2)
+profile the **apiserver** from the control-plane node, and show the two routes
+that fail; (3) bound the object count of one namespace and what one identity
+may read; (4) a **tiny pinned kube-burner** run that creates and deletes
+Bookstore-like objects, with the percentile readout; (5) the scalability SLOs
+as the yardstick; (6) the "list everything" anti-pattern shown concretely.
 
 > **The honest scale story (read this first).** A single kind node is **~3-4
 > orders of magnitude** below the scalability envelope (1 node vs 5,000;
@@ -283,6 +297,16 @@ concretely.
 > transferable. This is the same established honesty as [ch.08](08-ha-control-plane-and-etcd.md)'s
 > "multi-CP kind is real, real HA HW is narrated".
 
+> **What this revision ran, and what it did not.** The lab ran on a kind
+> cluster, Kubernetes v1.37.0, with kubectl v1.37.2. Captured here: the
+> apiserver and etcd metrics, the apiserver and scheduler profile routes and
+> the two refusals they return, the namespace and its object-count quota, the
+> RBAC grant and its checks, the kube-burner checksum and version, and the
+> apiserver certificate check. Not captured: the quota refusal (the lab's
+> controller manager was crash-looping) and the kube-burner pod-latency run
+> (the ReplicaSet controller was not creating pods). Section 3 and section 4
+> say so where they apply.
+
 ### 0. Prerequisites — the Bookstore cluster (a real measurement subject)
 
 Bring up the cluster + Bookstore exactly as in [Part 08 ch.02](../08-day-2-operations/02-backup-and-dr.md)
@@ -290,8 +314,8 @@ step 0 (kind, the four `bookstore/*:dev` images, the standard raw-manifests
 chain, the migrate Job complete, deployments available). That gives a live
 apiserver/etcd to scrape and a real workload to perturb. (kube-burner /
 clusterloader2 tooling installs into its **own** namespace / runs as a CLI —
-**never** into the PSA-`restricted` `bookstore` namespace; any object it
-creates *in* `bookstore` is restricted-compliant — §3.)
+**never** into the PSA-`restricted` `bookstore` namespace; the run creates its
+objects in `bookstore-perf`, which section 2 labels `restricted`.)
 
 ### 1. Scrape the apiserver & etcd latency metrics (the request path, measured)
 
@@ -330,8 +354,8 @@ kubectl get --raw='/metrics' | grep '^apiserver_storage_list_total' \
 ```
 
 On the lab node, the etcd command returned the two lines below. The lab
-cluster is named `sf-pilot`, not `bookstore`, and its host was under heavy
-load, so the mean here is not a benchmark:
+cluster has a different name from the one these commands use, and its host
+was under heavy load, so the mean here is not a benchmark:
 
 <!-- gate: output -->
 ```text
@@ -376,9 +400,24 @@ metadata:
 ```
 
 Two obvious routes fail on a kubeadm cluster, and the failures show why. The
-scheduler's secure port refuses the apiserver's pod-proxy route, because kubeadm
-binds it to `127.0.0.1`. The proxied request for the apiserver's own profile
-reaches it as `system:anonymous`, and RBAC refuses that:
+first asks the apiserver to proxy the request to the scheduler's secure port.
+That port is bound to `127.0.0.1`, so the proxy is refused:
+
+```sh
+kubectl get --raw="/api/v1/namespaces/kube-system/pods/https:kube-scheduler-bookstore-control-plane:10259/proxy/debug/pprof/heap"
+```
+
+<!-- gate: output -->
+```text
+Error from server (ServiceUnavailable): error trying to reach service: dial tcp 172.18.0.2:10259: connect: connection refused
+```
+
+The second asks the same proxy route for the apiserver's own profile. The
+request reaches the apiserver as `system:anonymous`, and RBAC refuses it:
+
+```sh
+kubectl get --raw="/api/v1/namespaces/kube-system/pods/https:kube-apiserver-bookstore-control-plane:6443/proxy/debug/pprof/heap"
+```
 
 <!-- gate: output -->
 ```text
@@ -517,10 +556,15 @@ kubectl apply -f object-cap.yaml
 kubectl -n bookstore-perf get resourcequota object-cap
 ```
 
-Once the quota is in place, a create that would take a count past its `hard`
-value is refused. The quota covers only its own namespace, and a Namespace is
-cluster-scoped, so the quota cannot limit how many namespaces a tenant creates.
-That is an RBAC decision.
+The quota is enforced when an object is created: a create that would take a
+count past its `hard` value is refused. The lab run did not capture that
+refusal. Its kube-controller-manager was crash-looping, which keeps the
+quota's `status.used` current, so the quota showed no usage and all 21
+ConfigMap creates were accepted. The refusal is the upstream behaviour, and
+this chapter does not demonstrate it here. Check it on a cluster whose
+controller manager is healthy before you rely on it. The quota covers only its
+own namespace, and a Namespace is cluster-scoped, so the quota cannot limit how
+many namespaces a tenant creates. That is an RBAC decision.
 
 The second control is what one identity may read. A broad grant turns one
 `LIST` into a read of every Secret, which is threat I2. This Role lets one
@@ -636,12 +680,18 @@ cd examples/bookstore/platform
 kubectl delete namespace bookstore-perf --ignore-not-found
 ```
 
-Read the P99 rows of the pod-latency summary that the run prints, not the
+When the run prints its pod-latency summary, read the P99 rows, not the
 averages. The `podLatency` measurement uses the same percentile method a
 clusterloader2 run uses at scale; only the object count and the cluster change.
 Repeat the run with one variable changed, control against treatment, before you
 read a difference as real. The pods carry the baseline, and the pause image is
 pinned by digest, so every run creates the same pods.
+
+This revision did not capture the pod-latency run. In the lab, the ReplicaSet
+controller was not creating pods when the run was attempted, so no percentile
+summary was printed. The config and its templates have not been executed
+against a cluster here. Run them on a healthy cluster you own before you cite
+a number from them.
 
 ### 5. The scalability SLOs as the yardstick
 
@@ -725,9 +775,10 @@ kind delete cluster --name bookstore
   ([ch.03](03-api-priority-and-fairness.md) is the *isolation* layer, these are
   the *global ceiling*). Raising the inflight limits without faster etcd just
   moves the bottleneck onto etcd (more concurrent writes → more fsync
-  contention). Watch-cache sizing (`--watch-cache-sizes`) bounds apiserver
-  memory — undersized, the cache evicts and reads fall through to etcd;
-  oversized, the apiserver OOMs under big LISTs. Verbose **audit** policy is
+  contention). The watch cache serves reads from memory. `--watch-cache-sizes`
+  can only turn it off for one resource (size `0`); every other value is
+  equivalent, so there is no size to tune. The cache's memory follows the
+  objects it holds. Verbose **audit** policy is
   per-request synchronous work (every request serialised to the audit sink) —
   a real, often-overlooked latency and I/O cost at scale.
 - **etcd capacity scales with objects, watchers, and keyspace, not just QPS.**
@@ -876,8 +927,9 @@ Checklist:
       ([08.04](../08-day-2-operations/04-multi-tenancy-and-namespaces.md)), and
       RBAC that decides who may create Namespaces
 - [ ] apiserver `--max-*-inflight` understood as the **total ceiling APF
-      subdivides** ([ch.03](03-api-priority-and-fairness.md)); watch cache sized
-      with `--watch-cache-sizes`; **audit policy lean**
+      subdivides** ([ch.03](03-api-priority-and-fairness.md)); watch cache on (its
+      `--watch-cache-sizes` only disables it per resource, so leave it on);
+      **audit policy lean**
 - [ ] Design **inside ≈5000 nodes / 150000 pods**, plus the API and
       pod-startup **SLOs**; past the envelope **shard**
       ([ch.06](06-multi-cluster-and-fleet.md)), not super-size
@@ -891,37 +943,77 @@ Checklist:
 
 ## Test your understanding
 
-> Try each before opening the answer drawer. The act of trying is the exercise; the answer is the check.
+> Try each before opening the answer drawer. The act of trying is the
+exercise; the answer is the check.
 
 1. **Why is etcd disk fsync latency "the floor" for apiserver write latency?**
    <details><summary>Show answer</summary>
 
-   Every mutating apiserver call ends in `etcdserver.Write` which calls Raft's append-entry, which calls disk fsync on the leader plus quorum followers before acknowledging. The apiserver cannot return success until that round-trip completes. If fsync p99 is 30ms, no amount of apiserver tuning brings write latency below 30ms — the floor is the disk. The fix is faster storage (local NVMe), not bigger apiserver flags. This is why production etcd runs on dedicated low-latency disks, not shared cloud storage.
+   Every mutating apiserver call ends in `etcdserver.Write` which calls Raft's
+   append-entry, which calls disk fsync on the leader plus quorum followers
+   before acknowledging. The apiserver cannot return success until that
+   round-trip completes. If fsync p99 is 30ms, no amount of apiserver tuning
+   brings write latency below 30ms — the floor is the disk. The fix is faster
+   storage (local NVMe), not bigger apiserver flags. This is why production
+   etcd runs on dedicated low-latency disks, not shared cloud storage.
 
    </details>
 
-2. **A teammate writes `kubectl get pods --all-namespaces` from a script every 10s. The cluster has 50,000 Pods. What is the impact on the control plane and what's the fix?**
+2. **A teammate writes `kubectl get pods --all-namespaces` from a script every
+   10s. The cluster has 50,000 Pods. What is the impact on the control plane
+   and what's the fix?**
    <details><summary>Show answer</summary>
 
-   Each call reads the full 50k Pods (a large JSON response). The watch cache serves it (not an etcd keyspace scan), and kubectl already pages it in chunks of 500 (`--chunk-size`), but the apiserver still converts and encodes every object every 10s, and APF charges each LIST seats in proportion to the objects it returns. With many such clients, the apiserver's RAM balloons (`--target-ram-mb`), GC churns, and `apiserver_request_duration_seconds` p99 spikes. Pagination (`limit` + `continue`) only bounds each response; the fix is a watch with a resourceVersion to receive only deltas. Better: use a SharedInformer / client-go cache — never pull a full snapshot in a loop. This anti-pattern is the #1 cause of large-cluster apiserver pressure.
+   Each call reads the full 50k Pods (a large JSON response). The watch cache
+   serves it (not an etcd keyspace scan), and kubectl already pages it in
+   chunks of 500 (`--chunk-size`), but the apiserver still converts and
+   encodes every object every 10s, and APF charges each LIST seats in
+   proportion to the objects it returns. With many such clients, the
+   apiserver's RAM balloons, GC churns, and
+   `apiserver_request_duration_seconds` p99 spikes. Pagination (`limit` +
+   `continue`) only bounds each response; the fix is a watch with a
+   resourceVersion to receive only deltas. Better: use a SharedInformer /
+   client-go cache — never pull a full snapshot in a loop. This anti-pattern
+   is the #1 cause of large-cluster apiserver pressure.
 
    </details>
 
-3. **You bump `--max-requests-inflight=400` and `--max-mutating-requests-inflight=200`, but apiserver still tail-latency spikes. What did you miss?**
+3. **You bump `--max-requests-inflight=400` and
+   `--max-mutating-requests-inflight=200`, but apiserver still tail-latency
+   spikes. What did you miss?**
    <details><summary>Show answer</summary>
 
-   APF is the active limiter; the inflight flags set the total it divides. Tuning the legacy flags higher just raises the ceiling; APF still partitions traffic per priority level and queues. The real diagnostic is `apiserver_flowcontrol_nominal_limit_seats` per level vs `apiserver_flowcontrol_current_inqueue_requests` — see [ch.03](03-api-priority-and-fairness.md). Likely the bottleneck is a slow admission webhook, a watch-cache miss path, audit logging, or etcd write pressure. Always profile (`/debug/pprof`) before tuning concurrency.
+   APF is the active limiter; the inflight flags set the total it divides.
+   Tuning the legacy flags higher just raises the ceiling; APF still
+   partitions traffic per priority level and queues. The real diagnostic is
+   `apiserver_flowcontrol_nominal_limit_seats` per level vs
+   `apiserver_flowcontrol_current_inqueue_requests` — see
+   [ch.03](03-api-priority-and-fairness.md). Likely the bottleneck is a slow
+   admission webhook, a watch-cache miss path, audit logging, or etcd write
+   pressure. Always profile (`/debug/pprof`) before tuning concurrency.
 
    </details>
 
-4. **Hands-on: with `kube-burner` or `clusterloader2`, ramp up 1000 namespaces × 10 Deployments × 3 replicas. What do you watch on the control plane?**
+4. **Hands-on: with `kube-burner` or `clusterloader2`, ramp up 1000 namespaces
+   × 10 Deployments × 3 replicas. What do you watch on the control plane?**
    <details><summary>What you should see</summary>
 
-   `apiserver_request_duration_seconds` per verb (POST/PATCH for create, LIST for the bootstrap, WATCH for the long-poll). `etcd_disk_backend_commit_duration_seconds` and `etcd_disk_wal_fsync_duration_seconds`. `apiserver_flowcontrol_current_inqueue_requests` for APF queueing. `apiserver_resource_objects` by resource — Pods will be 30k, Endpoints will be 10k, ReplicaSets 10k. Scheduler `scheduler_scheduling_attempt_duration_seconds`. Run two passes — once at baseline, once with the change — and compare *percentiles*, not means. If anything degrades 2x at the percentile, you've found your regression.
+   `apiserver_request_duration_seconds` per verb (POST/PATCH for create, LIST
+   for the bootstrap, WATCH for the long-poll).
+   `etcd_disk_backend_commit_duration_seconds` and
+   `etcd_disk_wal_fsync_duration_seconds`.
+   `apiserver_flowcontrol_current_inqueue_requests` for APF queueing.
+   `apiserver_resource_objects` by resource — Pods will be 30k, Endpoints will
+   be 10k, ReplicaSets 10k. Scheduler
+   `scheduler_scheduling_attempt_duration_seconds`. Run two passes — once at
+   baseline, once with the change — and compare *percentiles*, not means. If
+   anything degrades 2x at the percentile, you've found your regression.
 
    </details>
 
-5. **A tenant's controller creates ConfigMaps in a loop, at 5 requests per second, inside its own APF level. What does APF stop, what does it leave open, and what closes the gap?**
+5. **A tenant's controller creates ConfigMaps in a loop, at 5 requests per
+   second, inside its own APF level. What does APF stop, what does it leave
+   open, and what closes the gap?**
    <details><summary>Show answer</summary>
 
    APF stops the controller from taking more than its share of apiserver
@@ -929,9 +1021,11 @@ Checklist:
    Each ConfigMap it creates stays in etcd and counts toward the namespace's
    object total, and every LIST of ConfigMaps in that namespace grows with it.
    A `ResourceQuota` with `count/configmaps` caps the total in that namespace,
-   and later creates are refused with an `exceeded quota` error. No namespace's
+   and later creates are refused. The upstream error reads `exceeded quota`,
+   which the lab run did not capture (section 3). No namespace's
    quota counts Namespace objects, so who may create Namespaces is an RBAC
-   question. See [08.04](../08-day-2-operations/04-multi-tenancy-and-namespaces.md)
+   question. See
+   [08.04](../08-day-2-operations/04-multi-tenancy-and-namespaces.md)
    for the quota, and the threat table above for the controls.
 
    </details>

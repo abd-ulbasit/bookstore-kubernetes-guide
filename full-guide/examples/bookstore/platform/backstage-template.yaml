@@ -26,7 +26,7 @@
 # exactly as the guide substitutes a real Git remote / real scale elsewhere.
 #
 # THE CONCEPTUAL FLOW (ch.10 §4): developer opens Backstage -> picks this
-# template -> fills name/owner/size -> Backstage scaffolds a repo with the
+# template -> fills name and owner -> Backstage scaffolds a repo with the
 # service skeleton + the BookstoreEnvironment claim + an Argo Application and
 # OPENS A PR (Backstage commits to GIT — it does NOT apply to the cluster) ->
 # merge -> Argo CD reconciles (Part 07 ch.04) and Crossplane provisions the
@@ -71,12 +71,6 @@ spec:
           type: string
           description: the owning team/group (maps to catalog ownership + RBAC)
           ui:field: OwnerPicker
-        size:
-          title: Environment size
-          type: string
-          enum: [small, medium, large]
-          default: small
-          description: t-shirt size; the platform maps it to the quota totals
   # ---- The STEPS Backstage runs (scaffold -> PR; NEVER kubectl apply) ----
   steps:
     - id: fetch
@@ -90,7 +84,6 @@ spec:
         values:
           name: ${{ parameters.name }}
           owner: ${{ parameters.owner }}
-          size: ${{ parameters.size }}
     - id: publish
       name: Open a PR (Git is the only write path — Part 07 ch.04)
       action: publish:github:pull-request
