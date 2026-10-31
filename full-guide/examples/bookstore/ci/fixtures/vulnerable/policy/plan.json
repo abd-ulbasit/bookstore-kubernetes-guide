@@ -1,0 +1,137 @@
+{
+  "format_version": "1.2",
+  "terraform_version": "1.14.8",
+  "planned_values": {
+    "root_module": {
+      "resources": [
+        {
+          "address": "kubernetes_namespace_v1.bookstore",
+          "mode": "managed",
+          "type": "kubernetes_namespace_v1",
+          "name": "bookstore",
+          "provider_name": "registry.terraform.io/hashicorp/kubernetes",
+          "schema_version": 0,
+          "values": {
+            "metadata": [
+              {
+                "annotations": null,
+                "generate_name": null,
+                "labels": {
+                  "pod-security.kubernetes.io/audit": "restricted",
+                  "pod-security.kubernetes.io/enforce": "restricted",
+                  "pod-security.kubernetes.io/warn": "restricted"
+                },
+                "name": "bookstore"
+              }
+            ],
+            "timeouts": null,
+            "wait_for_default_service_account": false
+          },
+          "sensitive_values": {
+            "metadata": [
+              {
+                "labels": {}
+              }
+            ]
+          }
+        }
+      ]
+    }
+  },
+  "resource_changes": [
+    {
+      "address": "kubernetes_namespace_v1.bookstore",
+      "mode": "managed",
+      "type": "kubernetes_namespace_v1",
+      "name": "bookstore",
+      "provider_name": "registry.terraform.io/hashicorp/kubernetes",
+      "change": {
+        "actions": [
+          "create"
+        ],
+        "before": null,
+        "after": {
+          "metadata": [
+            {
+              "annotations": null,
+              "generate_name": null,
+              "labels": {
+                "pod-security.kubernetes.io/audit": "restricted",
+                "pod-security.kubernetes.io/enforce": "privileged",
+                "pod-security.kubernetes.io/warn": "restricted"
+              },
+              "name": "bookstore"
+            }
+          ],
+          "timeouts": null,
+          "wait_for_default_service_account": false
+        },
+        "after_unknown": {
+          "id": true,
+          "metadata": [
+            {
+              "generation": true,
+              "labels": {},
+              "resource_version": true,
+              "uid": true
+            }
+          ]
+        },
+        "before_sensitive": false,
+        "after_sensitive": {
+          "metadata": [
+            {
+              "labels": {}
+            }
+          ]
+        }
+      }
+    }
+  ],
+  "configuration": {
+    "provider_config": {
+      "kubernetes": {
+        "name": "kubernetes",
+        "full_name": "registry.terraform.io/hashicorp/kubernetes",
+        "version_constraint": "3.4.0",
+        "expressions": {
+          "config_path": {
+            "constant_value": "~/.kube/config"
+          }
+        }
+      }
+    },
+    "root_module": {
+      "resources": [
+        {
+          "address": "kubernetes_namespace_v1.bookstore",
+          "mode": "managed",
+          "type": "kubernetes_namespace_v1",
+          "name": "bookstore",
+          "provider_config_key": "kubernetes",
+          "expressions": {
+            "metadata": [
+              {
+                "labels": {
+                  "constant_value": {
+                    "pod-security.kubernetes.io/audit": "restricted",
+                    "pod-security.kubernetes.io/enforce": "restricted",
+                    "pod-security.kubernetes.io/warn": "restricted"
+                  }
+                },
+                "name": {
+                  "constant_value": "bookstore"
+                }
+              }
+            ]
+          },
+          "schema_version": 0
+        }
+      ]
+    }
+  },
+  "timestamp": "2026-10-30T23:19:45Z",
+  "applyable": true,
+  "complete": true,
+  "errored": false
+}

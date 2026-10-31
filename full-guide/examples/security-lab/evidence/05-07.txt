@@ -1,0 +1,195 @@
+## mode: shared, on the shared lab cluster; the throwaway p05-07 cluster is not created in this mode
+## step 0: the tools this run used
+$ kubectl version
+helm version --short
+cosign version | grep GitVersion
+opa version | head -1
+conftest --version | head -1
+terraform version | head -1
+Client Version: v1.37.2
+Kustomize Version: v5.8.1
+Server Version: v1.37.0
+v4.1.4+g05fa379
+GitVersion:    v3.1.4
+Version: 1.22.0
+Conftest: 0.71.1
+Terraform v1.14.8
+
+## step 1: a throwaway cluster, two tunnels, and the Kubernetes version [full mode]
+## step 2: a lab registry on the kind network, the nodes told to trust it, and a name the Pods resolve [full mode]
+## step 3: a Bookstore image pushed to the lab registry, and a tampered copy of it [full mode]
+## step 4: sign the candidate with a throwaway key and no transparency log; verify both digests [full mode]
+## step 5: the attack, in a namespace with no policy
+$ kubectl create namespace p05-07-open
+namespace/p05-07-open created
+
+$ kubectl -n p05-07-open get serviceaccount default -o name
+serviceaccount/default
+
+$ kubectl apply -f attack-service.yaml
+Warning: spec.externalIPs is deprecated and may no longer be implemented in some clusters
+service/catalog-ext created
+
+$ kubectl apply -f attack-forgetful.yaml
+pod/forgetful created
+
+$ kubectl -n p05-07-open wait --for=condition=Ready pod/forgetful --timeout=120s
+pod/forgetful condition met
+
+$ kubectl -n p05-07-open exec forgetful -- sh -c 'grep Seccomp: /proc/self/status | tr "\t" " "; ls /var/run/secrets/kubernetes.io/serviceaccount/ 2>/dev/null | tr "\n" " "; echo'
+Seccomp: 0
+ca.crt namespace token 
+
+$ kubectl -n p05-07-open get pod forgetful -o jsonpath='{.spec.volumes[*].name}{"\n"}'
+kube-api-access-l4wgr
+
+## step 6: the same namespace, with the policies in place and the namespace labelled
+$ kubectl apply -f vap-no-external-ips.yaml -f vap-digest-pinned.yaml -f map-automount-off.yaml -f map-seccomp.yaml
+validatingadmissionpolicy.admissionregistration.k8s.io/p05-07-no-external-ips created
+validatingadmissionpolicybinding.admissionregistration.k8s.io/p05-07-no-external-ips created
+validatingadmissionpolicy.admissionregistration.k8s.io/p05-07-digest-pinned created
+validatingadmissionpolicybinding.admissionregistration.k8s.io/p05-07-digest-pinned created
+mutatingadmissionpolicy.admissionregistration.k8s.io/p05-07-default-automount-off created
+mutatingadmissionpolicybinding.admissionregistration.k8s.io/p05-07-default-automount-off created
+mutatingadmissionpolicy.admissionregistration.k8s.io/p05-07-default-seccomp created
+mutatingadmissionpolicybinding.admissionregistration.k8s.io/p05-07-default-seccomp created
+
+$ sleep 5
+
+$ kubectl label namespace p05-07-open p05-07-lab=true
+namespace/p05-07-open labeled
+
+$ sleep 5
+
+$ kubectl apply -f attack-service-2.yaml
+Warning: spec.externalIPs is deprecated and may no longer be implemented in some clusters
+Error from server (Forbidden): error when creating "attack-service-2.yaml": services "catalog-ext-2" is forbidden: ValidatingAdmissionPolicy 'p05-07-no-external-ips' with binding 'p05-07-no-external-ips' denied request: a Service may not set spec.externalIPs
+
+$ kubectl apply -f tag-only.yaml
+Error from server (Forbidden): error when creating "tag-only.yaml": pods "tag-only" is forbidden: ValidatingAdmissionPolicy 'p05-07-digest-pinned' with binding 'p05-07-digest-pinned' denied request: every container image must be pinned by digest
+
+$ kubectl apply -f forgetful-2.yaml
+pod/forgetful-2 created
+
+$ kubectl -n p05-07-open wait --for=condition=Ready pod/forgetful-2 --timeout=120s
+pod/forgetful-2 condition met
+
+$ kubectl -n p05-07-open get pod forgetful-2 -o jsonpath='{.spec.automountServiceAccountToken}{" "}{.spec.securityContext.seccompProfile.type}{"\n"}'
+false RuntimeDefault
+
+$ kubectl -n p05-07-open exec forgetful-2 -- sh -c 'grep Seccomp: /proc/self/status | tr "\t" " "; ls /var/run/secrets/kubernetes.io/serviceaccount/ 2>/dev/null | tr "\n" " "; echo'
+Seccomp: 2
+ca.crt namespace token 
+
+$ kubectl -n p05-07-open get pod forgetful-2 -o jsonpath='{.spec.volumes[*].name}{"\n"}'
+kube-api-access-gpsls
+
+$ kubectl apply -f baseline.yaml
+pod/baseline created
+
+$ kubectl -n p05-07-open wait --for=condition=Ready pod/baseline --timeout=120s
+pod/baseline condition met
+
+$ kubectl -n p05-07-open exec baseline -- sh -c 'ls /var/run/secrets/kubernetes.io/serviceaccount 2>&1; echo'
+ls: /var/run/secrets/kubernetes.io/serviceaccount: No such file or directory
+
+
+## step 7: the Bookstore catalog, with the full baseline and a digest, in a namespace the policies cover [full mode]
+## step 8: Kyverno, installed with the chart pinned and the namespace labelled [full mode]
+## step 9: Audit before Enforce: a privileged Pod is admitted and reported [full mode]
+## step 10: Enforce: the same rule refuses the next privileged Pod [full mode]
+## step 11: verifyImages: the signature is checked, not only the digest [full mode]
+## step 12: Gatekeeper, the same rule in Rego, in dry-run beside Kyverno [full mode]
+## step 13: the same policy as unit tests and as checks on manifests and a Terraform plan (no cluster)
+$ opa test guide/examples/bookstore/policy -v | tail -n 1
+PASS: 22/22
+
+$ kubectl kustomize guide/examples/bookstore/kustomize/overlays/prod > prod-overlay.yaml
+
+$ conftest test --no-color --policy guide/examples/bookstore/policy --all-namespaces prod-overlay.yaml
+
+672 tests, 672 passed, 0 warnings, 0 failures, 0 exceptions
+
+$ conftest test --no-color --policy guide/examples/bookstore/policy --all-namespaces guide/examples/bookstore/policy/terraform/plan.json
+
+14 tests, 14 passed, 0 warnings, 0 failures, 0 exceptions
+
+$ conftest test --no-color --policy guide/examples/bookstore/policy --all-namespaces planted-plan.json; echo "planted plan exit=$?"
+FAIL - planted-plan.json - bookstore.terraform - BK-TF-001 kubernetes_namespace_v1.bookstore enforces "privileged", not restricted
+
+14 tests, 13 passed, 0 warnings, 1 failure, 0 exceptions
+planted plan exit=1
+
+## step 14: the Kyverno admission path, read back from the cluster
+$ kubectl get validatingadmissionpolicy,mutatingadmissionpolicy -o name | grep p05-07 | sort
+mutatingadmissionpolicy.admissionregistration.k8s.io/p05-07-default-automount-off
+mutatingadmissionpolicy.admissionregistration.k8s.io/p05-07-default-seccomp
+validatingadmissionpolicy.admissionregistration.k8s.io/p05-07-digest-pinned
+validatingadmissionpolicy.admissionregistration.k8s.io/p05-07-no-external-ips
+
+## step 15: remove Kyverno and the lab objects [full mode]
+## step 16: the Kyverno and Gatekeeper installs, rendered and checked without a cluster [shared mode]
+$ helm repo add kyverno https://kyverno.github.io/kyverno/ --force-update
+"kyverno" has been added to your repositories
+
+$ helm repo add gatekeeper https://open-policy-agent.github.io/gatekeeper/charts --force-update
+"gatekeeper" has been added to your repositories
+
+$ helm template kyverno kyverno/kyverno --version 3.9.2 --namespace kyverno --set features.registryClient.allowInsecure=true --set admissionController.replicas=1 --set backgroundController.replicas=1 --set cleanupController.replicas=1 --set reportsController.replicas=1 > kyverno-rendered.yaml
+
+$ grep -c '^kind: ' kyverno-rendered.yaml
+80
+
+$ grep -h 'image: ' kyverno-rendered.yaml | sed 's/^ *//' | sort -u | head -4
+image: "ghcr.io/kyverno/readiness-checker:v1.19.2"
+image: "reg.kyverno.io/kyverno/background-controller:v1.19.2"
+image: "reg.kyverno.io/kyverno/cleanup-controller:v1.19.2"
+image: "reg.kyverno.io/kyverno/kyverno-cli:v1.19.2"
+
+$ helm template gatekeeper gatekeeper/gatekeeper --version 3.23.1 --namespace gatekeeper-system --set replicas=1 > gatekeeper-rendered.yaml
+
+$ grep -c '^kind: ' gatekeeper-rendered.yaml
+21
+
+$ kubectl apply --dry-run=client -f policy-disallow-privileged.yaml
+error: resource mapping not found for name: "p05-07-disallow-privileged" namespace: "" from "policy-disallow-privileged.yaml": no matches for kind "ClusterPolicy" in version "kyverno.io/v1"
+ensure CRDs are installed first
+
+$ kubectl apply --dry-run=server -f policy-disallow-privileged.yaml; echo "server dry-run exit=$?"
+error: resource mapping not found for name: "p05-07-disallow-privileged" namespace: "" from "policy-disallow-privileged.yaml": no matches for kind "ClusterPolicy" in version "kyverno.io/v1"
+ensure CRDs are installed first
+server dry-run exit=1
+
+$ kubectl apply --dry-run=server -f gatekeeper-constraint.yaml; echo "server dry-run exit=$?"
+error: resource mapping not found for name: "p05-no-privileged" namespace: "" from "gatekeeper-constraint.yaml": no matches for kind "P05NoPrivileged" in version "constraints.gatekeeper.sh/v1beta1"
+ensure CRDs are installed first
+server dry-run exit=1
+
+## cleanup: the lab objects, the cluster, the registry and the tunnels
+$ for ns in p05-07-open p05-07-signed p05-07-kyverno; do kubectl -n "$ns" delete pods --all --force --grace-period=0 --ignore-not-found 2>/dev/null; done
+pod "baseline" force deleted from p05-07-open namespace
+pod "forgetful" force deleted from p05-07-open namespace
+pod "forgetful-2" force deleted from p05-07-open namespace
+No resources found
+No resources found
+
+$ kubectl delete namespace p05-07-open p05-07-kyverno p05-07-signed p05-07-registry p05-07-gatekeeper --ignore-not-found --wait=true --timeout=180s
+namespace "p05-07-open" deleted
+
+$ kubectl delete validatingadmissionpolicybinding p05-07-no-external-ips p05-07-digest-pinned --ignore-not-found
+validatingadmissionpolicybinding.admissionregistration.k8s.io "p05-07-no-external-ips" deleted
+validatingadmissionpolicybinding.admissionregistration.k8s.io "p05-07-digest-pinned" deleted
+
+$ kubectl delete validatingadmissionpolicy p05-07-no-external-ips p05-07-digest-pinned --ignore-not-found
+validatingadmissionpolicy.admissionregistration.k8s.io "p05-07-no-external-ips" deleted
+validatingadmissionpolicy.admissionregistration.k8s.io "p05-07-digest-pinned" deleted
+
+$ kubectl delete mutatingadmissionpolicybinding p05-07-default-automount-off p05-07-default-seccomp --ignore-not-found
+mutatingadmissionpolicybinding.admissionregistration.k8s.io "p05-07-default-automount-off" deleted
+mutatingadmissionpolicybinding.admissionregistration.k8s.io "p05-07-default-seccomp" deleted
+
+$ kubectl delete mutatingadmissionpolicy p05-07-default-automount-off p05-07-default-seccomp --ignore-not-found
+mutatingadmissionpolicy.admissionregistration.k8s.io "p05-07-default-automount-off" deleted
+mutatingadmissionpolicy.admissionregistration.k8s.io "p05-07-default-seccomp" deleted
+
+run exit=0
