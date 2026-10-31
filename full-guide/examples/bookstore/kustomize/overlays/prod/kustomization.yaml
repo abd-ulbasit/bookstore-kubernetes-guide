@@ -151,6 +151,31 @@ patches:
                       port:
                         number: 80
 
+  # NAMESPACE QUOTA. The base ResourceQuota (requests 2 CPU and 2Gi, limits 4
+  # CPU and 4Gi, 30 Pods) is sized for the single-replica dev shape. This
+  # overlay's own replica counts and limits come to 5.0 CPU and 3392Mi of
+  # limits, 1.05 CPU and 1664Mi of requests and 14 Pods in steady state, so the
+  # base quota refused them: the runtime gate (G4) saw postgres and the
+  # db-migrate Job fail with "exceeded quota". The ceilings below are about
+  # twice that steady state, so a rolling update can surge and the batch Jobs
+  # still fit. Strategic-merge: only the five hard limits change.
+  - target:
+      version: v1
+      kind: ResourceQuota
+      name: bookstore-quota
+    patch: |
+      apiVersion: v1
+      kind: ResourceQuota
+      metadata:
+        name: bookstore-quota
+      spec:
+        hard:
+          requests.cpu: "4"
+          requests.memory: 4Gi
+          limits.cpu: "10"
+          limits.memory: 8Gi
+          pods: "60"
+
   # PRODUCTION SECRET HANDLING. The in-repo demo Secret `db-credentials`
   # (16-, base64 != encryption, demo-only) is DELETED from the prod render.
   # In prod a Secret of the SAME NAME is created out of band by External

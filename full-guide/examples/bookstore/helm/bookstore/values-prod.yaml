@@ -36,6 +36,21 @@ paymentsWorker:
     repository: registry.example.com/bookstore/payments-worker
     tag: "1.0.0"
 
+# The namespace quota must hold the replica counts above. The chart default
+# (requests 2 CPU and 2Gi, limits 4 CPU and 4Gi, 30 Pods) is sized for one
+# replica per tier and refused these: they come to 5.0 CPU and 3392Mi of limits,
+# 1.05 CPU and 1664Mi of requests and 14 Pods in steady state. The ceilings
+# below are about twice that, so a rolling update can surge. Same numbers as
+# kustomize/overlays/prod.
+namespace:
+  resourceQuota:
+    hard:
+      requests.cpu: "4"
+      requests.memory: 4Gi
+      limits.cpu: "10"
+      limits.memory: 8Gi
+      pods: "60"
+
 # Full production surface.
 hpa:
   enabled: true
