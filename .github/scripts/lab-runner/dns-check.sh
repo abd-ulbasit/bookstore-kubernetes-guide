@@ -30,7 +30,7 @@ probe() {
   local name=$1 url=$2 phase
   kubectl delete pod "$name" --ignore-not-found --now >/dev/null 2>&1
   kubectl run "$name" --restart=Never --image="$CURL" \
-    --overrides='{"spec":{"automountServiceAccountToken":false,"securityContext":{"runAsNonRoot":true,"runAsUser":100,"runAsGroup":101,"seccompProfile":{"type":"RuntimeDefault"}},"containers":[{"name":"'"$name"'","image":"'"$CURL"'","command":["curl","-sS","-m","10","-o","/dev/null","-w","%{http_code}\\n","'"$url"'"],"securityContext":{"allowPrivilegeEscalation":false,"readOnlyRootFilesystem":true,"capabilities":{"drop":["ALL"]}}}]}}' >/dev/null 2>&1
+    --overrides='{"spec":{"automountServiceAccountToken":false,"securityContext":{"runAsNonRoot":true,"runAsUser":100,"runAsGroup":101,"seccompProfile":{"type":"RuntimeDefault"}},"containers":[{"name":"'"$name"'","image":"'"$CURL"'","command":["curl","-sSk","-m","10","-o","/dev/null","-w","%{http_code}\\n","'"$url"'"],"securityContext":{"allowPrivilegeEscalation":false,"readOnlyRootFilesystem":true,"capabilities":{"drop":["ALL"]}}}]}}' >/dev/null 2>&1
   for _ in $(seq 1 45); do
     phase=$(kubectl get pod "$name" -o jsonpath='{.status.phase}' 2>/dev/null)
     case "$phase" in Succeeded|Failed) break ;; esac
