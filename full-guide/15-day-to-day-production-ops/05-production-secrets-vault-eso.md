@@ -12,7 +12,7 @@
 > CI logs", lease-storm during a Vault restart).
 
 **Estimated time:** ~45 min read · ~half-day hands-on
-**Prerequisites:** [Part 11 ch.05](../11-advanced-production-patterns/05-secrets-at-scale.md) — dev-mode Vault + ESO this chapter productionizes · [Part 05 ch.04](../05-security/04-secrets-and-cluster-hardening.md): the secrets concepts this chapter operates · [Part 14 ch.13](../14-eks-in-production-a-to-z/13-runtime-defense-and-container-security.md) — runtime defense that detects misuse · [Part 13 ch.02](../13-grand-capstone-bookstore-platform/02-tenancy-and-crossplane-onboarding.md) — Crossplane Composition that stamps per-tenant ExternalSecrets
+**Prerequisites:** [Part 11 ch.05](../11-advanced-production-patterns/05-secrets-at-scale.md): dev-mode Vault + ESO this chapter productionizes · [Part 05 ch.04](../05-security/04-secrets-and-cluster-hardening.md): the secrets concepts this chapter operates · [Part 14 ch.13](../14-eks-in-production-a-to-z/13-runtime-defense-and-container-security.md): runtime defense that detects misuse · [Part 13 ch.02](../13-grand-capstone-bookstore-platform/02-tenancy-and-crossplane-onboarding.md): Crossplane Composition that stamps per-tenant ExternalSecrets
 
 **You'll know after this:** • explain the HA Vault with KMS auto-unseal that the reference Terraform describes · • execute the three-step bootstrap (unseal → init Kubernetes auth method → bind first policy) safely · • implement the per-tenant SecretStore + ExternalSecret pattern · • configure dynamic Postgres credentials as the strongest rotation form and own the rotation cadence as platform discipline · • debug the production footguns dev-mode hides (auto-unseal failure, audience drift, "secret in CI logs", lease-storm on Vault restart)
 
@@ -87,7 +87,7 @@ token scoped to a tenant-specific policy.**
   ServiceAccount in that tenant's namespace, and the Vault policy, which
   grants only that tenant's paths.
 - **The three-step bootstrap.** *Step 1*: Vault unseal (auto-unseal;
-  check once with `vault status`). *Step 2* — Initialize
+  check once with `vault status`). *Step 2*: Initialize
   the Kubernetes auth method (one `vault auth enable kubernetes` +
   config). *Step 3* — Write the admin policy + bind it to the platform
   team's identity (so the Composition can stamp per-tenant policies
@@ -775,7 +775,7 @@ The production-Vault checklist:
 4. **Hands-on extension: read a dynamic Postgres credential from Vault: `vault read database/creds/bookstore-platform-acme-books`. Copy the username, then run `vault lease revoke <lease_id>` and try to connect with that username.**
    <details><summary>What you should see</summary>
 
-   Vault revokes the lease: the username/password no longer authenticates against Postgres because the revocation SQL has run (the role was `DROP`'d). The connection fails immediately with an auth error. This is the chapter's claim made concrete: rotation isn't an operation, it's the natural lifecycle. A leaked dynamic credential works until its lease ends, or until one API call (`lease revoke`) ends it. Static credentials in Postgres would require connecting, running `ALTER USER ... PASSWORD`, redistributing to consumers — minutes to hours of coordination. Dynamic credentials collapse that to seconds.
+   Vault revokes the lease: the username/password no longer authenticates against Postgres because the revocation SQL has run (the role was `DROP`'d). The connection fails immediately with an auth error. This is the chapter's claim made concrete: rotation isn't an operation, it's the natural lifecycle. A leaked dynamic credential works until its lease ends, or until one API call (`lease revoke`) ends it. Static credentials in Postgres would require connecting, running `ALTER USER ... PASSWORD`, redistributing to consumers, which takes minutes to hours of coordination. Dynamic credentials collapse that to seconds.
 
    </details>
 

@@ -10,7 +10,7 @@
 > the vocabulary; chapters 15.02 onward operationalise each stage.
 
 **Estimated time:** ~15 min read · ~30 min hands-on
-**Prerequisites:** [Part 07 ch.01](../07-delivery/01-packaging-helm.md) — Helm/Kustomize/CI/GitOps that underpin the loop · [Part 11 ch.10](../11-advanced-production-patterns/10-platform-engineering.md) — production maturity framing · [Part 14 ch.10](../14-eks-in-production-a-to-z/10-gitops-bootstrap-fresh-cluster.md) — Argo CD reconcile that closes the loop
+**Prerequisites:** [Part 07 ch.01](../07-delivery/01-packaging-helm.md): Helm/Kustomize/CI/GitOps that underpin the loop · [Part 11 ch.10](../11-advanced-production-patterns/10-platform-engineering.md): production maturity framing · [Part 14 ch.10](../14-eks-in-production-a-to-z/10-gitops-bootstrap-fresh-cluster.md): Argo CD reconcile that closes the loop
 
 **You'll know after this:** • name the eight stages of the PR-to-production loop (commit → PR → CI → review/merge → GitOps repo update → Argo CD reconcile → progressive rollout → SLO gate → done) · • articulate the load-bearing rule "every change to production is a Git commit; nothing else" · • map each subsequent Part 15 chapter onto the stage it operationalizes · • diagnose where in the loop a stuck change is currently sitting · • use the loop diagram as the shared vocabulary across CI/CD, security, and ops conversations
 
@@ -313,7 +313,7 @@ A developer fixes a 5xx in `catalog`. Here is the **exact** sequence:
                    PR against bookstore-gitops/kustomize/overlays/dev:
                      'bump: catalog -> abc123'
                    The dev overlay PR auto-merges (low-risk env). The
-                   staging + prod overlays get separate PRs in 15.04 — those
+                   staging + prod overlays get separate PRs in 15.04; those
                    need human review.
 
  6. Argo CD        in-cluster controller polls bookstore-gitops on a timer
@@ -398,8 +398,8 @@ enforcing "rollback is a commit, not a kubectl undo".
   (CI) writes a CycloneDX SBOM (syft), signed and attached to the image
   digest with cosign attest, and a SLSA provenance attestation from
   `actions/attest-build-provenance`, bound to the same digest (Part 15
-  ch.02 and ch.03). A future consumer — a *new* admission controller, a
-  compliance scanner, an SBOM diff tool — can read these attestations
+  ch.02 and ch.03). A future consumer, such as a *new* admission controller, a
+  compliance scanner, or an SBOM diff tool, can read these attestations
   *without trusting the pipeline that produced them*; they verify the
   attestation chain back to the Sigstore root. Logs would not give you
   this; attestations are the cryptographic form of the evidence.
@@ -581,6 +581,6 @@ Checklist:
   <https://opengitops.dev/>; Argo CD docs —
   <https://argo-cd.readthedocs.io/en/stable/>; Argo Rollouts canary —
   <https://argoproj.github.io/argo-rollouts/features/canary/>; Sigstore
-  cosign — <https://docs.sigstore.dev/cosign/overview/>; GitHub protected
+  cosign: <https://docs.sigstore.dev/cosign/overview/>; GitHub protected
   branches: <https://docs.github.com/en/repositories/configuring-branches-and-merges-in-your-repository/managing-protected-branches/about-protected-branches>;
   Argo CD automated sync: <https://argo-cd.readthedocs.io/en/stable/user-guide/auto_sync/>.

@@ -414,7 +414,7 @@ the runbook first, type commands second." This is the operational
 shape ch.15.10 names — **not memorising what's broken, but knowing
 the triage process** — installed by repetition.
 
-### Day 31-35 — Ack a synthetic P2 page; resolve it; write the first postmortem
+### Day 31-35: Ack a synthetic P2 page; resolve it; write the first postmortem
 
 ```bash
 # The Day-30 gate has passed. From Day 31 the new owner is the primary
@@ -496,7 +496,7 @@ Every enumeration must come back empty, and each `can-i` must print `no`.
 Rotate each secret the previous owner could read, and check the rotations in
 the Vault audit log. The cutover is not done until the enumeration is clean.
 
-### Day 70-75 — Lead a chaos game-day on staging
+### Day 70-75: Lead a chaos game-day on staging
 
 This is a plan for a game-day. No such game-day ran for this chapter.
 

