@@ -207,7 +207,7 @@ This Pod is a deliberate failure, labelled so you can tell it from the
 hardened workloads. It hands the orders service a DSN in URL form with an
 invalid escape (`%zz`). The password comes from a Secret, the way the example
 builds `DB_DSN`, so it never appears in the manifest. The service cannot parse
-the DSN and logs the error.
+the DSN and logs the failure.
 
 ```sh
 kubectl -n bookstore create secret generic dsn-demo \
@@ -268,15 +268,20 @@ kubectl -n bookstore logs dsn-demo --tail=3
 
 <!-- gate: output -->
 ```text
-{"time":"2026-10-31T02:05:57.164867808Z","level":"ERROR","msg":"connect postgres","err":"cannot parse `postgres://app:xxxxxx@localhost:5432/books`: failed to parse as URL (invalid URL escape \"%zz\")"}
+{"time":"2026-10-31T14:14:05.407565098Z","level":"ERROR","msg":"connect postgres","error_class":"dsn_parse"}
 ```
 
-The planted password does not appear. The driver masked it: the error shows
-`xxxxxx` in its place. That is the library's behaviour in this version, not a
-control you own. The rule is the one that holds for every version: the service
-must not put a DSN in a log call at all. The example services log the driver's
-error on their connect paths, and that is safe here only because of the
-masking.
+The line names the class of the failure, `dsn_parse`, and nothing else. The
+driver's own message for this DSN quotes it with the password masked as
+`xxxxxx`. That masking is the library's behaviour in this version, not a
+control you own, so the services do not lean on it. On the connect path,
+`orders` and `catalog` log the class that `errClass` returns (`dsn_parse`,
+`timeout`, `network` or `other`) and never the driver's text. The rule that
+holds for every version is that no DSN reaches a log call at all. Other log
+calls in the services still pass the driver's error: the readiness probes and
+the query paths ([01.02](../01-core-workloads/02-health-and-lifecycle.md) shows
+the Redis dial error that `readyz` logs). They are not on the connect path and
+this chapter does not change them.
 
 ### 3. Remove values at the source first
 
