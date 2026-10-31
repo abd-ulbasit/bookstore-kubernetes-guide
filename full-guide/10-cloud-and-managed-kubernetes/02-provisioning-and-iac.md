@@ -436,6 +436,22 @@ you make that choice, accept the finding on purpose: put it in your exceptions
 registry with its reason, its chapter and an expiry within 12 months, and
 remove the entry when the egress design is in place.
 
+**This root module is a self-contained illustration, and it is not the
+platform tree.** It pins `terraform-aws-modules/eks` at 21.29.0, which takes
+the v21 input names (`name`, `kubernetes_version`, `endpoint_public_access`)
+and needs AWS provider 6.59 or later, so the root pins provider 6.71.0. The
+platform tree of Part 14,
+[`examples/bookstore-platform/terraform`](../examples/bookstore-platform/terraform/eks.tf),
+pins the module at `~> 20.31` and uses the v20 names (`cluster_name`,
+`cluster_version`, `cluster_endpoint_public_access`). It stays on v20 on
+purpose. Module 20.37.2 needs a provider below 6.0, and that tree pins the
+provider at `~> 5.95` and uses the module's Karpenter sub-module at the same
+v20 line. [14.03](../14-eks-in-production-a-to-z/03-eks-addon-management.md)
+cites 20.37.2 for its add-on ordering. Moving the tree to v21 changes the
+provider major, the input names and the sub-module together, and the check
+that counts is a plan against a real account, which this chapter did not run.
+So do not copy input names from one to the other.
+
 The cloud steps follow. They are cited, not run:
 
 ```sh
