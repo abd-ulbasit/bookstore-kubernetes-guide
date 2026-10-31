@@ -135,7 +135,8 @@ The real fix is still a rate-limited, level-triggered, idempotent loop
 
 Edge traffic floods (threat D2 in the
 [Bookstore threat model](../examples/bookstore/THREAT-MODEL.md)) are a
-different layer: edge rate limiting belongs to 13.07. <!-- link-later: 13.07 -->
+different layer: edge rate limiting belongs to
+[13.07](../13-grand-capstone-bookstore-platform/07-edge-gateway-waf-rate-limiting.md).
 
 **APF is fairness, not a security boundary.** It limits how much of the
 apiserver one identity can use. It does not decide whether that identity may

@@ -53,8 +53,8 @@ So a Secret is the right object for the database password, and it is not
 secure by itself. Encryption at rest is a separate apiserver setting, off by
 default, and it is taught in
 [05.04](../05-security/04-secrets-and-cluster-hardening.md). Keeping values
-out of Git altogether, with an external store, is taught in 11.05.
-<!-- link-later: 11.05 -->
+out of Git altogether, with an external store, is taught in
+[11.05](../11-advanced-production-patterns/05-secrets-at-scale.md).
 
 ## Threats and controls
 
@@ -978,8 +978,9 @@ kubectl delete serviceaccount secret-reader secret-lister pod-creator -n booksto
   `secretKeyRef`, `envFrom` or a Secret volume. Only the Postgres TCP connection
   needs an egress allow, and that exists already.
 - **External stores.** Sealed Secrets, the External Secrets Operator and Vault
-  keep the source of truth outside Git. They are taught in 11.05 and 15.05.
-  <!-- link-later: 11.05 --> <!-- link-later: 15.05 -->
+  keep the source of truth outside Git. They are taught in
+  [11.05](../11-advanced-production-patterns/05-secrets-at-scale.md) and
+  [15.05](../15-day-to-day-production-ops/05-production-secrets-vault-eso.md).
 
 ## Quick Reference
 
@@ -1049,8 +1050,10 @@ Checklist:
    holds the same reversible bytes unless encryption at rest is on. A value
    applied with `stringData` also sits in plain text in the last-applied
    annotation. Minimum hardening: (a) keep real values out of Git, with an
-   external store (11.05 <!-- link-later: 11.05 -->); (b) enable encryption at
-   rest ([05.04](../05-security/04-secrets-and-cluster-hardening.md)); (c) grant
+   external store
+   ([11.05](../11-advanced-production-patterns/05-secrets-at-scale.md));
+   (b) enable encryption at rest
+   ([05.04](../05-security/04-secrets-and-cluster-hardening.md)); (c) grant
    `get`, `list` and Pod
    `create` on Secrets only where needed ([step
    4](#4-who-can-read-one-secret-get-by-name)

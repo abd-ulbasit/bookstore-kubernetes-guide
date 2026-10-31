@@ -783,7 +783,8 @@ operating system. The guide's chapters cover them as follows.
 | Category | Where this guide covers it |
 |---|---|
 | Image | [ch.03](03-supply-chain.md): scans, SBOMs, digests and signing |
-| Registry | [ch.03](03-supply-chain.md) and the signing chapter in Part 15 <!-- link-later: 15.03 --> |
+| Registry | [ch.03](03-supply-chain.md) and the signing chapter in Part 15,
+[15.03](../15-day-to-day-production-ops/03-image-signing-and-provenance.md) |
 | Orchestrator | [ch.01](01-authn-authz-rbac.md) for identity, and admission in [05.07](07-admission-control-and-policy-as-code.md) |
 | Container | [ch.02](02-pod-security.md), [ch.04](04-secrets-and-cluster-hardening.md) and [ch.05](05-kernel-isolation.md) |
 | Host operating system | [ch.05](05-kernel-isolation.md) and the node chapter, [05.06](06-control-plane-and-node-hardening.md) |

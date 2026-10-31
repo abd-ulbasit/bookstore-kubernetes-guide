@@ -114,7 +114,7 @@ control this chapter teaches and where the topic goes deeper.
 | Relaxing the namespace's Pod Security level to get a debug step through | Never relax `bookstore`. Debug under `restricted` with a restricted-shaped container, or copy the Pod inside the same namespace | [Part 05 ch.02](../05-security/02-pod-security.md) |
 | A debug container that runs as root, keeps capabilities or joins host namespaces | Restricted profile and the Pod's inherited UID; other profiles are for namespaces that register them | section 2 below |
 | A same-UID debug container reads the target's environment, which holds `DB_DSN` | `--target` shares the process view, so the debug container can read the target's environment. Only on-call gets `pods/ephemeralcontainers`, and each session is audited. Section 3 shows the read | section 3 below |
-| `pods/exec` and `pods/ephemeralcontainers` as hidden privilege | Grant both by RBAC to on-call only, and check that the workload's ServiceAccount has neither (section 2) | [Part 05 ch.01](../05-security/01-authn-authz-rbac.md); Part 05 ch.08 (audit) <!-- link-later: 05.08 --> |
+| `pods/exec` and `pods/ephemeralcontainers` as hidden privilege | Grant both by RBAC to on-call only, and check that the workload's ServiceAccount has neither (section 2) | [Part 05 ch.01](../05-security/01-authn-authz-rbac.md); [Part 05 ch.08](../05-security/08-audit-detection-and-incident-response.md) (audit) |
 
 Node-level debugging has its own threat, a Pod that reaches the host itself.
 It is covered in the section on node-level debugging below.
@@ -928,7 +928,8 @@ Keep the rules that follow with the namespace:
 > ([Auditing](https://kubernetes.io/docs/tasks/debug/debug-cluster/audit/)), so
 > the policy needs its own entry for `pods/ephemeralcontainers` and for
 > `pods/exec`. A debug session in production is a security event, not a free
-> action. The policy itself is Part 05 ch.08 (audit) <!-- link-later: 05.08 -->.
+> action. The policy itself is
+> [Part 05 ch.08](../05-security/08-audit-detection-and-incident-response.md) (audit).
 
 > **In production: distroless means `kubectl debug` is the *only* in-Pod
 > option, so design for it.** You cannot `exec sh` into `catalog`, `orders` or

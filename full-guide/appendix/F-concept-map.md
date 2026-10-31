@@ -68,7 +68,9 @@ Services from Parts 01-02 — but only the *new* concepts that a later part
 introduces get their own edges. The rule is "if you don't know **X**, the
 chapter introducing **Y** will be hard," and the arrow points from X to Y.
 
-<!-- link-later: 00.08 -->
+The Part 00 node marked 00.08 is
+[Security foundations](../00-foundations/08-security-foundations.md).
+
 ```mermaid
 graph LR
     %% Part 00 — foundations
@@ -640,7 +642,7 @@ defers security depth, delivery, and day-2.
 | 3 | [00.03 — Architecture overview](../00-foundations/03-architecture-overview.md) | The components you'll be talking to |
 | 4 | [00.06 — The declarative API model](../00-foundations/06-declarative-api-model.md) | Spec/status; the one mental model |
 | 5 | [00.07 — Local cluster setup](../00-foundations/07-local-cluster-setup.md) | kind cluster + kubectl basics |
-| 6 | 00.08 Security foundations <!-- link-later: 00.08 --> | The threats the baseline answers, and why every manifest carries it |
+| 6 | [00.08 Security foundations](../00-foundations/08-security-foundations.md) | The threats the baseline answers, and why every manifest carries it |
 | 7 | [01.01 - Pods](../01-core-workloads/01-pods.md) | The unit you actually run |
 | 8 | [01.02 - Health and lifecycle](../01-core-workloads/02-health-and-lifecycle.md) | Probes - without them, nothing is production-real |
 | 9 | [01.03 - Resources and QoS](../01-core-workloads/03-resources-and-qos.md) | Requests/limits keep noisy neighbors off you |
@@ -708,7 +710,7 @@ production.
 
 | # | Chapter | Why here |
 |---|---|---|
-| 1 | 00.08 Security foundations <!-- link-later: 00.08 --> | The bookstore threat model, STRIDE, and the trust boundaries to defend |
+| 1 | [00.08 Security foundations](../00-foundations/08-security-foundations.md) | The bookstore threat model, STRIDE, and the trust boundaries to defend |
 | 2 | [05.00 The attacker's view](../05-security/00-the-attackers-view.md) | Recon from a compromised Pod and from the network |
 | 3 | [05.01 Authentication, authorization, RBAC](../05-security/01-authn-authz-rbac.md) | Who can do what, and the escalation paths that break least privilege |
 | 4 | [05.02 Pod security](../05-security/02-pod-security.md) | Restricted Pod Security Admission, container escape, user namespaces |

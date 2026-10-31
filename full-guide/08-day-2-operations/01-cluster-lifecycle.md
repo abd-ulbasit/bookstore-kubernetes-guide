@@ -105,8 +105,8 @@ for kind`. Day-2 cluster work is disciplined *before* the change.
 
 | Threat | Control this chapter teaches | Goes deeper |
 |---|---|---|
-| A published CVE stays live because nobody tracked the patch window of the running minor | Read the support window and the official CVE feed, then patch and verify (step 5) | Node and control-plane hardening: 05.06 <!-- link-later: 05.06 --> |
-| A release binary is replaced, or is not the one the project published | Verify the signature before the binary runs (step 6) | Binary verification concepts: 05.06 <!-- link-later: 05.06 -->; image signing: [05.03](../05-security/03-supply-chain.md) |
+| A published CVE stays live because nobody tracked the patch window of the running minor | Read the support window and the official CVE feed, then patch and verify (step 5) | Node and control-plane hardening: [05.06](../05-security/06-control-plane-and-node-hardening.md) |
+| A release binary is replaced, or is not the one the project published | Verify the signature before the binary runs (step 6) | Binary verification concepts: [05.06](../05-security/06-control-plane-and-node-hardening.md); image signing: [05.03](../05-security/03-supply-chain.md) |
 | A skewed upgrade breaks a control component, so a patch becomes an outage | The apiserver-first order and the skew window (Mental model) | [Part 00 ch.04](../00-foundations/04-control-plane-deep-dive.md) for what each component does |
 | A removed `apiVersion` silently drops a policy object, because the apply fails in a pipeline that ignores errors | A server dry run and the deprecated-API audit before the upgrade (step 3) | Operator-managed APIs: [11.02](../11-advanced-production-patterns/02-operator-development.md) |
 | A drain evicts every replica of a workload at once | A PodDisruptionBudget that the eviction API enforces (step 4) | [Part 06 ch.05](../06-production-readiness/05-reliability-and-disruptions.md) |
