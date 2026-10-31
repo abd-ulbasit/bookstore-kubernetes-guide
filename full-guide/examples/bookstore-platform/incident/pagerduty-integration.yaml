@@ -27,10 +27,10 @@
 # (assumes kube-prometheus-stack installed; targets the Alertmanager CR.)
 #
 # Production note:
-#   The PagerDuty routing keys below are deliberately placeholders. Real
-#   keys live in a SealedSecret / ExternalSecret (see Part 15 ch.05).
-#   The keys are scoped per-service in PagerDuty so a key leak is
-#   contained to one severity-channel. Rotate quarterly.
+#   The routing keys are not in this file. The ExternalSecret
+#   `pagerduty-keys` (chapter 15.10) syncs them from Vault into the Secret
+#   the receivers read. The keys are scoped per-service in PagerDuty so a
+#   key leak is contained to one severity-channel. Rotate quarterly.
 # ---------------------------------------------------------------------------
 apiVersion: monitoring.coreos.com/v1beta1
 kind: AlertmanagerConfig
@@ -284,27 +284,6 @@ spec:
 
 ---
 # ---------------------------------------------------------------------------
-# Secret skeleton — the actual routing keys
-# ---------------------------------------------------------------------------
-# In production this Secret is created by ExternalSecrets from Vault
-# (see ch.15.05). The skeleton below is the schema, NOT the credentials.
-# Do NOT commit literal routing keys; the keys below are obviously fake.
-# ---------------------------------------------------------------------------
-apiVersion: v1
-kind: Secret
-metadata:
-  name: pagerduty-keys
-  namespace: monitoring
-type: Opaque
-stringData:
-  # Each key is a 32-character routing key from PagerDuty's Events API V2.
-  # Generate one per service in PagerDuty UI; rotate quarterly.
-  p0-routing-key: REPLACE_ME_FROM_VAULT_PAGERDUTY_P0
-  p1-routing-key: REPLACE_ME_FROM_VAULT_PAGERDUTY_P1
-  p2-routing-key: REPLACE_ME_FROM_VAULT_PAGERDUTY_P2
-
----
-# ---------------------------------------------------------------------------
 # Sample PrometheusRule — shows the SHAPE every alert must have to route
 # correctly through the tree above. Note the four mandatory labels +
 # the two mandatory annotations.
@@ -340,6 +319,6 @@ spec:
               Checkout requests returning 5xx for tenant {{ $labels.tenant }}
               in region {{ $labels.region }} above the 5% SLO budget.
             # Every alert MUST have a runbook_url. Alerts without one
-            # fail alert-hygiene review and get deleted.
+            # fail alert-hygiene review (chapter 15.11).
             runbook_url: "https://github.com/your-org/bookstore-platform/blob/main/examples/bookstore-platform/runbooks/runbook-payments-failure-rate.md"
             dashboard_url: "https://grafana.bookstore-platform.example.com/d/bookstore-checkout"
