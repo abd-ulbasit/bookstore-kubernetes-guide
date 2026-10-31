@@ -8,7 +8,7 @@
 #   catalog-sa may create Pods            01 (RBAC; closed by removing the Role)
 #   payments-worker-sa may read Secrets   01 and 04 (closed by the same)
 #   no digest pin on the attack image     03 (closed by a digest in the Pod)
-#   an unencrypted etcd (sf-pilot)        04 (cited, not closed on sf-pilot)
+#   an unencrypted etcd (the lab cluster) 04 (cited, not closed on the lab cluster)
 #   no NetworkPolicy at all: a flat network  02.06 (the base's ten policies are removed here)
 #   no admission rule on images           07 (closed by the hardened VAP)
 apiVersion: kustomize.config.k8s.io/v1beta1

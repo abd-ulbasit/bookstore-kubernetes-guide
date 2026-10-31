@@ -1,7 +1,8 @@
 # Transcript for 05-security/10-capstone-attack-and-harden-the-bookstore.md, lab steps 1 to 16.
-# Run on kind-sf-pilot: a kind node on Kubernetes v1.37.0 with kernel 7.0.0.
-# The pod address in step 3 is redacted to <pod-ip>. Step 16 removes everything
-# the lab created, including the cluster-wide admission policy.
+# Two runs of labs/05-10.sh on the same kind cluster: steps 1 to 11 first, then steps 12 to 16 (LAB_FROM and LAB_TO). The second run starts from the cluster the first left and removes everything it created at its end.
+# Cluster: a kind cluster on Kubernetes v1.37.0 made by kind v0.33.0, on a Linux machine with kernel 7.0.0. kubectl is v1.37.2. kube-bench is v0.16.0, pinned by digest, and the Job runs with --benchmark cis-1.12.
+# The cluster name in this run differs from the one a reader creates. The node name and the kubeconfig names in the output are kept as printed.
+# This transcript replaces an earlier one. The earlier run had no Redis or migration allows and an unpinned kube-bench, so its output does not match the chapter.
 ## step 1: the vulnerable bookstore, applied as one overlay
 $ kubectl apply -k "$overlays/vulnerable"
 namespace/p05-capstone created
@@ -47,8 +48,8 @@ Waiting for 1 pods to be ready...
 partitioned roll out complete: 1 new pods have been updated...
 job.batch/db-migrate condition met
 deployment "catalog" successfully rolled out
-NAME           STATUS   AGE    ENFORCE      WARN
-p05-capstone   Active   3m9s   privileged   restricted
+NAME           STATUS   AGE     ENFORCE      WARN
+p05-capstone   Active   2m59s   privileged   restricted
 
 ## step 2: the foothold, a Pod the vulnerable namespace admits
 $ kubectl apply -f foothold-vulnerable.yaml
@@ -66,27 +67,31 @@ $ kubectl -n p05-capstone exec p05-capstone-foothold -- sh -c '
   echo "token file: $(wc -c < /var/run/secrets/kubernetes.io/serviceaccount/token) bytes (contents not printed)"
   echo "Services in the namespace, from env: $(env | grep -c _SERVICE_HOST)"
   nslookup postgres.$ns.svc.cluster.local 2>&1 | grep -E "^Name|^Address" | tail -2
-  can() { curl -s --max-time 20 --cacert $CA -H "Authorization: Bearer $T" -H "Content-Type: application/json" -X POST https://kubernetes.default.svc/apis/authorization.k8s.io/v1/selfsubjectaccessreviews -d "{\"apiVersion\":\"authorization.k8s.io/v1\",\"kind\":\"SelfSubjectAccessReview\",\"spec\":{\"resourceAttributes\":{\"namespace\":\"$ns\",\"verb\":\"$1\",\"resource\":\"$2\"}}}" | grep -o "\"allowed\": *[a-z]*"; }
-  for pair in "create pods" "get secrets" "list secrets" "get configmaps"; do echo "$pair: $(can $pair)"; done'
+  can() { curl -s --max-time 20 --cacert $CA -H "Authorization: Bearer $T" -H "Content-Type: application/json" -X POST https://kubernetes.default.svc/apis/authorization.k8s.io/v1/selfsubjectaccessreviews -d "{\"apiVersion\":\"authorization.k8s.io/v1\",\"kind\":\"SelfSubjectAccessReview\",\"spec\":{\"resourceAttributes\":{\"namespace\":\"$ns\",\"verb\":\"$1\",\"resource\":\"$2\"$3}}}" | grep -o "\"allowed\": *[a-z]*"; }
+  for pair in "create pods" "get secrets" "list secrets" "get configmaps"; do echo "$pair: $(can $pair)"; done
+  echo "get configmap catalog-config: $(can get configmaps ",\"name\":\"catalog-config\"")"'
 namespace: p05-capstone
 token file: 1209 bytes (contents not printed)
 Services in the namespace, from env: 6
 Name:	postgres.p05-capstone.svc.cluster.local
-Address: <pod-ip>
+Address: 10.244.0.190
 create pods: "allowed": true
 get secrets: "allowed": false
 list secrets: "allowed": false
 get configmaps: "allowed": false
+get configmap catalog-config: "allowed": true
 
 ## step 4: borrow payments-worker-sa by creating a Pod that names it
 $ kubectl create --dry-run=client -o json -f borrow.yaml > borrow.json
 kubectl -n p05-capstone exec -i p05-capstone-foothold -- sh -c '
   T=$(cat /var/run/secrets/kubernetes.io/serviceaccount/token)
   CA=/var/run/secrets/kubernetes.io/serviceaccount/ca.crt
-  curl -s -o /dev/null -w "create the borrowing Pod: HTTP %{http_code}\n" --cacert $CA -H "Authorization: Bearer $T" -H "Content-Type: application/json" -X POST https://kubernetes.default.svc/api/v1/namespaces/p05-capstone/pods --data-binary @-' < borrow.json
+  curl -s -D /tmp/borrow-headers.txt -o /dev/null -w "create the borrowing Pod: HTTP %{http_code}\n" --cacert $CA -H "Authorization: Bearer $T" -H "Content-Type: application/json" -X POST https://kubernetes.default.svc/api/v1/namespaces/p05-capstone/pods --data-binary @-
+  grep -i "^warning:" /tmp/borrow-headers.txt | tr -d "\r"' < borrow.json
 kubectl -n p05-capstone wait --for=condition=Ready pod/p05-capstone-borrow --timeout=180s
 kubectl -n p05-capstone get pod p05-capstone-borrow -o jsonpath='{.spec.serviceAccountName}{"\n"}'
 create the borrowing Pod: HTTP 201
+warning: 299 - "would violate PodSecurity \"restricted:latest\": allowPrivilegeEscalation != false (container \"curl\" must set securityContext.allowPrivilegeEscalation=false), restricted volume types (volume \"node-root\" uses restricted volume type \"hostPath\"), runAsNonRoot != true (pod or container \"curl\" must set securityContext.runAsNonRoot=true), runAsUser=0 (pod must not set runAsUser=0), seccompProfile (pod must not set securityContext.seccompProfile.type to \"Unconfined\")"
 pod/p05-capstone-borrow condition met
 payments-worker-sa
 
@@ -121,36 +126,39 @@ $ docker exec "$NODE" sh -c '
   echo "etcd snapshot: $(ls /var/lib/etcd/member/snap/ | tr "\n" " ")"
   echo "k8s:enc: prefix matches: $(grep -a -c "k8s:enc:" /var/lib/etcd/member/snap/db)"
   echo "plaintext password matches: $(grep -a -c devpassword /var/lib/etcd/member/snap/db)"'
-etcd snapshot: 0000000000000002-0000000000015f9b.snap 0000000000000002-00000000000186ac.snap 0000000000000003-000000000001adbd.snap 0000000000000003-000000000001d4ce.snap 0000000000000003-000000000001fbdf.snap db 
+etcd snapshot: 0000000000000003-0000000000024a01.snap 0000000000000004-0000000000027112.snap 0000000000000004-0000000000029823.snap 0000000000000004-000000000002bf34.snap 0000000000000004-000000000002e645.snap db db.tmp.3571960911 
 k8s:enc: prefix matches: 0
-plaintext password matches: 35
+plaintext password matches: 14
 
 ## step 8: reach postgres from the foothold, in a namespace with no NetworkPolicy
 $ kubectl -n p05-capstone get networkpolicy 2>&1
 kubectl -n p05-capstone exec p05-capstone-foothold -- sh -c 'curl -sS --connect-timeout 5 --max-time 8 -o /dev/null -w "postgres:5432 TCP connect time: %{time_connect}\n" telnet://postgres.p05-capstone.svc.cluster.local:5432 </dev/null; true'
 No resources found in p05-capstone namespace.
 curl: (28) Time-out
-postgres:5432 TCP connect time: 0.302018
+postgres:5432 TCP connect time: 0.871938
 
 ## step 9: which image ran, by digest
 $ kubectl -n p05-capstone get pod p05-capstone-foothold -o jsonpath='{.spec.containers[0].image}{"\n"}{.status.containerStatuses[0].imageID}{"\n"}'
 curlimages/curl:8.22.0
 docker.io/curlimages/curl@sha256:58adaa4e8dca9c988bae2aba4ab3434a0bb2da16bbe3f92dec39ec7785166777
 
-## step 10: kube-bench, the control plane and the policies
-$ ssh thinkpad "~/.local/bin/kind-v0.33.0 load docker-image aquasec/kube-bench:v0.16.0 --name sf-pilot" 2>&1 | tail -1
+## step 10: kube-bench, pinned to cis-1.12, on the control plane and the node
+$ on_host "$KIND_BIN load docker-image aquasec/kube-bench:v0.16.0 --name $CLUSTER" 2>&1 | tail -1
 kubectl apply -f kube-bench.yaml
 kubectl -n p05-capstone-bench wait --for=condition=complete job/kube-bench --timeout=420s
+kubectl -n p05-capstone-bench get job kube-bench -o jsonpath='{.spec.template.spec.containers[0].args}{"\n"}'
 kubectl -n p05-capstone-bench logs job/kube-bench > bench.txt 2>&1
 grep -E "^== Summary|checks (PASS|FAIL|WARN|INFO)" bench.txt
 grep -c "\[FAIL\]" bench.txt
 Command Output: ctr: content digest sha256:2048e9b04537706e57a25bca4f39bab86e347aec9cf1d7a86071a289cd240777: not found
 namespace/p05-capstone-bench created
+serviceaccount/kube-bench created
 job.batch/kube-bench created
 job.batch/kube-bench condition met
+["run","--benchmark","cis-1.12"]
 == Summary master ==
-43 checks PASS
-11 checks FAIL
+39 checks PASS
+10 checks FAIL
 11 checks WARN
 0 checks INFO
 == Summary etcd ==
@@ -158,15 +166,25 @@ job.batch/kube-bench condition met
 0 checks FAIL
 0 checks WARN
 0 checks INFO
+== Summary controlplane ==
+0 checks PASS
+0 checks FAIL
+5 checks WARN
+0 checks INFO
 == Summary node ==
-19 checks PASS
-1 checks FAIL
-3 checks WARN
+17 checks PASS
+2 checks FAIL
+6 checks WARN
+0 checks INFO
+== Summary policies ==
+0 checks PASS
+0 checks FAIL
+34 checks WARN
 0 checks INFO
 == Summary total ==
-69 checks PASS
+63 checks PASS
 12 checks FAIL
-14 checks WARN
+56 checks WARN
 0 checks INFO
 12
 
@@ -174,7 +192,12 @@ job.batch/kube-bench condition met
 $ kubectl -n p05-capstone delete pod p05-capstone-foothold p05-capstone-borrow --ignore-not-found --wait=true
 kubectl -n p05-capstone delete role catalog-debugger payments-secret-reader --ignore-not-found
 kubectl -n p05-capstone delete rolebinding catalog-debugger payments-secret-reader --ignore-not-found
-kubectl apply -k "$overlays/hardened"
+kubectl apply -k "$overlays/hardened" | grep -v " unchanged$"
+kubectl -n p05-capstone delete job db-migrate --wait=true
+kubectl apply -k "$overlays/hardened" | grep -v " unchanged$"
+kubectl -n p05-capstone wait --for=condition=complete job/db-migrate --timeout=600s
+kubectl -n p05-capstone rollout status deploy/catalog --timeout=600s
+kubectl -n p05-capstone get endpoints catalog
 kubectl get ns p05-capstone -L pod-security.kubernetes.io/enforce -L pod-security.kubernetes.io/warn
 kubectl get validatingadmissionpolicy,validatingadmissionpolicybinding p05-capstone-digest-pinned
 pod "p05-capstone-foothold" deleted from p05-capstone namespace
@@ -184,39 +207,20 @@ role.rbac.authorization.k8s.io "payments-secret-reader" deleted from p05-capston
 rolebinding.rbac.authorization.k8s.io "catalog-debugger" deleted from p05-capstone namespace
 rolebinding.rbac.authorization.k8s.io "payments-secret-reader" deleted from p05-capstone namespace
 namespace/p05-capstone configured
-resourcequota/bookstore-quota unchanged
-serviceaccount/catalog-sa unchanged
-serviceaccount/migrate-sa unchanged
-serviceaccount/orders-sa unchanged
-serviceaccount/payments-worker-sa unchanged
-serviceaccount/postgres-sa unchanged
-serviceaccount/rabbitmq-sa unchanged
-serviceaccount/redis-sa unchanged
-serviceaccount/storefront-sa unchanged
-role.rbac.authorization.k8s.io/catalog-config-reader unchanged
-rolebinding.rbac.authorization.k8s.io/catalog-config-reader-binding unchanged
-configmap/catalog-config unchanged
 secret/db-credentials configured
-service/catalog unchanged
-service/orders unchanged
-service/payments-worker unchanged
-service/postgres unchanged
-service/rabbitmq unchanged
-service/redis unchanged
-service/storefront unchanged
-limitrange/bookstore-limits unchanged
 priorityclass.scheduling.k8s.io/bookstore-batch configured
 priorityclass.scheduling.k8s.io/bookstore-critical configured
 priorityclass.scheduling.k8s.io/bookstore-data configured
 deployment.apps/catalog configured
-deployment.apps/redis unchanged
 statefulset.apps/postgres configured
 validatingadmissionpolicy.admissionregistration.k8s.io/p05-capstone-digest-pinned created
 validatingadmissionpolicybinding.admissionregistration.k8s.io/p05-capstone-digest-pinned created
-job.batch/db-migrate unchanged
-ingress.networking.k8s.io/bookstore unchanged
 networkpolicy.networking.k8s.io/allow-backend-egress created
+networkpolicy.networking.k8s.io/allow-catalog-egress-to-redis created
 networkpolicy.networking.k8s.io/allow-catalog-to-postgres created
+networkpolicy.networking.k8s.io/allow-catalog-to-redis created
+networkpolicy.networking.k8s.io/allow-db-migrate-egress created
+networkpolicy.networking.k8s.io/allow-db-migrate-to-postgres created
 networkpolicy.networking.k8s.io/allow-dns-egress created
 networkpolicy.networking.k8s.io/allow-ingress-to-http-tiers created
 networkpolicy.networking.k8s.io/allow-monitoring-scrape created
@@ -225,13 +229,27 @@ networkpolicy.networking.k8s.io/allow-payments-worker-egress created
 networkpolicy.networking.k8s.io/allow-storefront-egress created
 networkpolicy.networking.k8s.io/allow-storefront-to-apis created
 networkpolicy.networking.k8s.io/default-deny-all created
-NAME           STATUS   AGE     ENFORCE      WARN
-p05-capstone   Active   5m31s   restricted   restricted
+job.batch "db-migrate" deleted from p05-capstone namespace
+secret/db-credentials configured
+priorityclass.scheduling.k8s.io/bookstore-batch configured
+priorityclass.scheduling.k8s.io/bookstore-critical configured
+priorityclass.scheduling.k8s.io/bookstore-data configured
+deployment.apps/catalog configured
+statefulset.apps/postgres configured
+validatingadmissionpolicy.admissionregistration.k8s.io/p05-capstone-digest-pinned configured
+job.batch/db-migrate created
+job.batch/db-migrate condition met
+deployment "catalog" successfully rolled out
+Warning: v1 Endpoints is deprecated in v1.33+; use discovery.k8s.io/v1 EndpointSlice
+NAME      ENDPOINTS                                               AGE
+catalog   10.244.0.184:8080,10.244.0.185:8080,10.244.0.187:8080   11m
+NAME           STATUS   AGE   ENFORCE      WARN
+p05-capstone   Active   11m   restricted   restricted
 NAME                                                                                VALIDATIONS   PARAMKIND   AGE
-validatingadmissionpolicy.admissionregistration.k8s.io/p05-capstone-digest-pinned   1             <unset>     4s
+validatingadmissionpolicy.admissionregistration.k8s.io/p05-capstone-digest-pinned   1             <unset>     25s
 
 NAME                                                                                       POLICYNAME                   PARAMREF   AGE
-validatingadmissionpolicybinding.admissionregistration.k8s.io/p05-capstone-digest-pinned   p05-capstone-digest-pinned   <unset>    4s
+validatingadmissionpolicybinding.admissionregistration.k8s.io/p05-capstone-digest-pinned   p05-capstone-digest-pinned   <unset>    25s
 
 ## step 12: re-attack. The insecure foothold is refused at admission
 $ kubectl apply -f foothold-vulnerable.yaml
@@ -243,32 +261,39 @@ kubectl -n p05-capstone wait --for=condition=Ready pod/p05-capstone-foothold --t
 kubectl -n p05-capstone exec p05-capstone-foothold -- sh -c 'curl -sS --connect-timeout 5 --max-time 8 --cacert /var/run/secrets/kubernetes.io/serviceaccount/ca.crt -H "Authorization: Bearer $(cat /var/run/secrets/kubernetes.io/serviceaccount/token)" -o /dev/null -w "API from the foothold: HTTP %{http_code}, curl exit %{exitcode}\n" https://kubernetes.default.svc/api/v1/namespaces/p05-capstone/pods; true'
 kubectl auth can-i create pods --as=system:serviceaccount:p05-capstone:catalog-sa -n p05-capstone
 kubectl auth can-i get secrets --as=system:serviceaccount:p05-capstone:catalog-sa -n p05-capstone
-kubectl auth can-i get configmaps --as=system:serviceaccount:p05-capstone:catalog-sa -n p05-capstone
+kubectl auth can-i get configmap/catalog-config --as=system:serviceaccount:p05-capstone:catalog-sa -n p05-capstone
 kubectl apply -f borrow.yaml --dry-run=server --as=system:serviceaccount:p05-capstone:catalog-sa 2>&1 | cut -c1-200
+kubectl create -f borrow.yaml --dry-run=server 2>&1 | cut -c1-400
 pod/p05-capstone-foothold created
 pod/p05-capstone-foothold condition met
-curl: (28) Connection timed out after 5001 milliseconds
 API from the foothold: HTTP 000, curl exit 28
+curl: (28) Connection timed out after 5001 milliseconds
 no
 no
-no
+yes
 Error from server (Forbidden): error when retrieving current configuration of:
 Resource: "/v1, Resource=pods", GroupVersionKind: "/v1, Kind=Pod"
 Name: "p05-capstone-borrow", Namespace: "p05-capstone"
 from server for: "borrow.yaml": pods "p05-capstone-borrow" is forbidden: User "system:serviceaccount:p05-capstone:catalog-sa" cannot get resource "pods" in API group "" in the namespace "p05-capstone"
+Error from server (Forbidden): error when creating "borrow.yaml": pods "p05-capstone-borrow" is forbidden: violates PodSecurity "restricted:latest": allowPrivilegeEscalation != false (container "curl" must set securityContext.allowPrivilegeEscalation=false), restricted volume types (volume "node-root" uses restricted volume type "hostPath"), runAsNonRoot != true (pod or container "curl" must set s
 
-## step 14: re-attack. The tag-only image is refused by the digest policy
+## step 14: re-attack. The tag-only image and the tag-only debug container are refused by the digest policy
 $ kubectl apply -f foothold-tag.yaml
+kubectl -n p05-capstone debug p05-capstone-foothold --image=curlimages/curl:8.22.0 --profile=restricted --container=debugger -- sleep 60
 The pods "p05-capstone-foothold-tag" is invalid: : ValidatingAdmissionPolicy 'p05-capstone-digest-pinned' with binding 'p05-capstone-digest-pinned' denied request: p05-capstone: every third-party image must be pinned by digest (05.03).
+The pods "p05-capstone-foothold" is invalid: : ValidatingAdmissionPolicy 'p05-capstone-digest-pinned' with binding 'p05-capstone-digest-pinned' denied request: p05-capstone: every third-party image must be pinned by digest (05.03).
 
 ## step 15: re-attack. The network and the node, after hardening
 $ kubectl -n p05-capstone get netpol default-deny-all -o jsonpath='{.spec.podSelector} {.spec.policyTypes}{"\n"}'
 kubectl -n p05-capstone exec p05-capstone-foothold -- sh -c 'curl -sS --connect-timeout 5 --max-time 8 -o /dev/null -w "postgres:5432 TCP connect time: %{time_connect}\n" telnet://postgres.p05-capstone.svc.cluster.local:5432 </dev/null; true'
 docker exec "$NODE" sh -c 'echo "plaintext password matches: $(grep -a -c devpassword /var/lib/etcd/member/snap/db)"'
+docker exec "$NODE" sh -c 'echo "CNI configuration on the node: $(ls /etc/cni/net.d | tr "\n" " ")"; echo "kindnet containers running: $(crictl ps --name kindnet -q | wc -l)"'
 {} ["Ingress","Egress"]
-curl: (28) Connection timed out after 5002 milliseconds
 postgres:5432 TCP connect time: 0.000000
-plaintext password matches: 36
+curl: (28) Connection timed out after 5000 milliseconds
+plaintext password matches: 17
+CNI configuration on the node: 10-kindnet.conflist 
+kindnet containers running: 1
 
 ## step 16: clean up everything the lab created
 $ kubectl delete ns p05-capstone p05-capstone-bench --ignore-not-found --wait=true

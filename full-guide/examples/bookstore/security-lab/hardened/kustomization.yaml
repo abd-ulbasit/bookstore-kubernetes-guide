@@ -9,8 +9,12 @@
 #                                        02 and 05 (the base already carries them)
 #
 # The one thing the base does not give is the admission rule in
-# 90-admission.yaml. The cluster is shared, so the policy is cluster-scoped
-# and bound to p05-capstone only.
+# 90-admission.yaml. The policy is cluster-scoped, so it is bound to
+# p05-capstone only.
+#
+# 91-capstone-allows.yaml adds the two edges the base's default-deny blocks and
+# the capstone needs: the catalog's Redis connection and the migration Job's
+# connection to postgres. The base is unchanged.
 apiVersion: kustomize.config.k8s.io/v1beta1
 kind: Kustomization
 
@@ -19,6 +23,7 @@ namespace: p05-capstone
 resources:
   - ../../kustomize/base
   - 90-admission.yaml
+  - 91-capstone-allows.yaml
 
 components:
   - ../components/capstone
