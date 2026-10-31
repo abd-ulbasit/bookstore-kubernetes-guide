@@ -48,10 +48,10 @@ named path to **Optimize** and **Operate**.
 > **labels that drift from the workload**. Without a label policy
 > enforced *at workload creation*, the join key rots; OpenCost's
 > Allocation table has more "unallocated" than tenant-scoped lines; the
-> showback dashboard is useless. v2 enforces tenant labels through
-> Crossplane (every `BookstoreTenant` Composition stamps them); a
-> Kyverno policy mutates any pod missing the label; the Allocation
-> table stays clean.
+> showback dashboard is useless. v2 stamps the tenant label on each
+> namespace through Crossplane (the `BookstoreTenant` Composition), and
+> the cost join reads that namespace label. A Kyverno policy for pods
+> created outside the Composition is production work, not shipped here.
 
 ## Mental model
 
@@ -113,9 +113,28 @@ mesh, an MLflow client downloading models across regions — each can
 add a four-figure surprise. OpenCost's network costs are best-effort
 without the cloud billing connector; production wires the connector.
 
+## Threats and controls
+
+This chapter holds the billing data. Whoever can read the cost API or the
+bill learns what each tenant spends.
+
+| Threat | Control | Deeper |
+|---|---|---|
+| A pod in any namespace reads every tenant's cost from the API | Ingress to the OpenCost pods is closed except from Prometheus (`opencost-networkpolicy.yaml`) | [Part 02 ch.06](../02-networking/06-network-policies.md) |
+| The MCP server answers cost queries for all tenants | MCP is off in the values file | step 1 below |
+| A static key in a cloud integration secret reads the whole bill | No key in the chart values. The billing connector uses the OpenCost ServiceAccount's workload identity, with read access to the billing export only | [Part 13 ch.04](04-real-auth-keycloak-irsa-istio-jwt.md) |
+| The OpenCost ServiceAccount reads Secrets across the cluster | The chart's ClusterRole grants no Secrets; step 2 checks it with `kubectl auth can-i` | [Part 05 ch.01](../05-security/01-authn-authz-rbac.md) |
+| A tenant moves its cost onto another tenant by relabelling pods | Cost joins on the namespace label. Crossplane writes it, and a tenant's RoleBinding is namespaced, so it cannot change a Namespace | [Part 13 ch.02](02-tenancy-and-crossplane-onboarding.md) |
+
+The all-tenant dashboard in step 5 lists every tenant. Keep it in a folder
+only FinOps can open, and give each tenant its own view with the tenant
+pinned. The `tenant` variable filters a view; it does not restrict who sees
+it. The `tenant-budgets` ConfigMap holds commercial terms, so grant `get` on
+it to FinOps alone.
+
 ## Diagrams
 
-### Diagram A — the OpenCost data flow (Mermaid)
+### Diagram A (Mermaid): the OpenCost data flow
 
 ```mermaid
 flowchart LR
@@ -180,35 +199,101 @@ Per-workload-class label join       class=ml / app / system      Grafana class p
   `region` labels on every workload (Crossplane Composition stamps
   them in ch.13.02).
 
-### 1. Install OpenCost (pinned-Helm)
+### 1. Install OpenCost (pinned Helm, restricted namespace)
 
 ```sh
 kubectl config use-context kind-bookstore-platform-us-east
 
-OPENCOST_VERSION="1.115.0"
+kubectl create namespace opencost
+kubectl label namespace opencost \
+  pod-security.kubernetes.io/enforce=restricted \
+  pod-security.kubernetes.io/audit=restricted \
+  pod-security.kubernetes.io/warn=restricted
 
 helm repo add opencost https://opencost.github.io/opencost-helm-chart
 helm repo update
 
 helm install opencost opencost/opencost \
-  --version "$OPENCOST_VERSION" \
-  -n opencost --create-namespace --wait \
-  --set 'opencost.prometheus.internal.enabled=false' \
-  --set 'opencost.prometheus.external.enabled=true' \
-  --set 'opencost.prometheus.external.url=http://kube-prometheus-stack-prometheus.prometheus-system.svc.cluster.local:9090' \
-  --set 'opencost.exporter.defaultClusterId=bookstore-platform-us-east' \
-  --set 'opencost.ui.enabled=true'
+  --version 2.5.33 \
+  -n opencost \
+  -f examples/bookstore-platform/cost/opencost-values.yaml
 ```
 
-`prometheus.external.enabled=true` — OpenCost reuses the
-`kube-prometheus-stack` Prometheus (ch.13.09) instead of bringing its
-own. Saves a Prometheus instance per cluster.
+Chart 2.5.33 runs OpenCost 1.121.3. The labels go on before the chart, so
+admission checks every pod from the first one. The values file reuses the
+Prometheus from ch.13.09 (`prometheus.external`) instead of starting a
+second one. It also sets the parts of the chart that the baseline does not
+cover by default:
+
+- **`mcp.enabled: false`.** The MCP server answers cost queries for every
+  tenant to any pod that reaches port 8081. The chart turns it on by default.
+- **`ui.enabled: false`.** The UI rewrites its own bundle under `/var/www`
+  when it starts. A read-only root filesystem refuses that write and the pod
+  crash-loops. The API and the Grafana dashboards are the read paths.
+- **`securityContext` and `podSecurityContext`.** The
+  [baseline](../01-core-workloads/01-pods.md#baseline). The exporter image
+  declares user 1001 and no group.
+- **`podAutomountServiceAccountToken: true`.** OpenCost reads pods, nodes
+  and namespaces through the API, so it keeps its token. The chart creates a
+  ServiceAccount for it alone.
+- **`extraVolumes`.** The collector writes under `/var/configs`, so that path
+  is an emptyDir.
+
+Set `opencost.metrics.serviceMonitor.enabled` to `false` if the Prometheus
+Operator CRDs from ch.13.09 are not installed. The ServiceMonitor is what
+lets Prometheus scrape the `opencost_*` series.
 
 ### 2. Apply the platform cost manifests
 
 ```sh
-# OpenCost as Argo CD Application (the GitOps path)
+# GitOps path: Argo CD syncs the same chart and values. Use it instead of
+# the Helm install in step 1, not after it.
 kubectl apply -f examples/bookstore-platform/cost/opencost-application.yaml
+
+# Only Prometheus may reach the OpenCost API on port 9003
+kubectl apply -f examples/bookstore-platform/cost/opencost-networkpolicy.yaml
+```
+
+The policy closes ingress to the namespace by default, then opens port 9003
+for Prometheus alone. Egress stays open here, because OpenCost calls the API
+server and Prometheus, whose addresses differ per cluster.
+[Part 02 ch.06](../02-networking/06-network-policies.md) shows the egress form.
+
+```yaml
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: opencost-default-deny-ingress
+  namespace: opencost
+  labels:
+    app.kubernetes.io/part-of: bookstore-platform
+spec:
+  podSelector: {}
+  policyTypes: ["Ingress"]
+---
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: opencost-allow-prometheus-scrape
+  namespace: opencost
+  labels:
+    app.kubernetes.io/part-of: bookstore-platform
+spec:
+  podSelector:
+    matchLabels:
+      app.kubernetes.io/name: opencost
+  policyTypes: ["Ingress"]
+  ingress:
+    - from:
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: prometheus-system
+      ports:
+        - protocol: TCP
+          port: 9003
+```
+
+```sh
 
 # Recording rules: per-tenant aggregations (run server-side in Prometheus)
 kubectl apply -f examples/bookstore-platform/cost/opencost-tenant-aggregations.yaml
@@ -220,31 +305,80 @@ kubectl apply -f examples/bookstore-platform/cost/grafana-cost-dashboard.yaml
 kubectl apply -f examples/bookstore-platform/cost/budget-alerts.yaml
 ```
 
-### 3. Verify the OpenCost API
+The output in this step came from a lab cluster with a different name.
+
+The policy is the control for the billing data. Enforcement needs a CNI that
+enforces NetworkPolicy; [Part 00 ch.07](../00-foundations/07-local-cluster-setup.md)
+builds one that does. A pod outside the namespace asks for the allocation and
+gets no answer. This is a deliberate failure, from a pod in another namespace:
+
+<!-- gate: output -->
+```text
+wget: download timed out
+rc=1
+```
+
+Remove the policy and the same request returns the answer. Without the
+policy, every pod in the cluster can read every tenant's cost.
+
+<!-- gate: output -->
+```text
+{"code":200,"data":[{}]}
+opencost-rc=0
+```
+
+Next, the ServiceAccount's reach. It cannot read Secrets, but it can read pod
+specs, so keep credentials out of literal env values:
 
 ```sh
-kubectl -n opencost port-forward svc/opencost 9003:9003 &
+kubectl auth can-i get secrets -A --as=system:serviceaccount:opencost:opencost
+kubectl auth can-i list pods -A --as=system:serviceaccount:opencost:opencost
+```
 
-# The Allocation API — "show me everything by namespace, last 24h"
-curl -s "http://localhost:9003/allocation?window=24h&aggregate=namespace" | jq '.data[0]'
-# {
-#   "bookstore-platform-acme-books": {
-#     "name": "bookstore-platform-acme-books",
-#     "cpuCost": 0.42,
-#     "ramCost": 0.18,
-#     "pvCost": 0.05,
-#     "totalCost": 0.65,
-#     ...
-#   },
-#   "bookstore-platform-foo-books": { ... }
-# }
+<!-- gate: output -->
+```text
+no
+# ...
+yes
+```
+
+### 3. Verify the OpenCost API
+
+The API answers through the API server's service proxy. The check opens no
+port and needs no port-forward.
+
+```sh
+kubectl get --raw "/api/v1/namespaces/opencost/services/opencost:9003/proxy/allocation?window=24h&aggregate=namespace"
+```
+
+<!-- gate: output -->
+```text
+{"code":200,"data":[{}]}
+```
+
+The answer is empty here because the lab's Prometheus had no scrape target.
+Once Prometheus scrapes OpenCost, the same request returns one entry per
+namespace. Illustrative output, not captured:
+
+```json
+{
+  "bookstore-platform-acme-books": {
+    "name": "bookstore-platform-acme-books",
+    "cpuCost": 0.42,
+    "ramCost": 0.18,
+    "pvCost": 0.05,
+    "totalCost": 0.65,
+    ...
+  }
+}
 ```
 
 ### 4. Aggregate per-tenant via the platform label
 
 ```sh
 # Group by the platform's tenant label
-curl -s "http://localhost:9003/allocation?window=7d&aggregate=label:bookstore-platform.example.com/tenant" | jq '.data | to_entries[] | {tenant: .key, totalCost: .value.totalCost}'
+kubectl get --raw "/api/v1/namespaces/opencost/services/opencost:9003/proxy/allocation?window=7d&aggregate=label:bookstore-platform.example.com/tenant" | jq '.data | to_entries[] | {tenant: .key, totalCost: .value.totalCost}'
+# Illustrative output, not captured:
 # [
 #   { "tenant": "acme-books",  "totalCost": 12.34 },
 #   { "tenant": "foo-books",   "totalCost":  3.21 },
@@ -253,8 +387,8 @@ curl -s "http://localhost:9003/allocation?window=7d&aggregate=label:bookstore-pl
 ```
 
 The `__unallocated__` line is the audit: any workload missing the
-tenant label falls here. v2 keeps it < 1 % via the Crossplane stamp +
-the Kyverno policy that mutates missing labels at admission.
+tenant label falls here. The target is under 1 %. The Crossplane
+Composition stamps the namespace, and a pod's cost follows its namespace.
 
 ### 5. The Grafana cost dashboard
 
@@ -278,9 +412,10 @@ kubectl -n prometheus-system port-forward svc/kube-prometheus-stack-grafana 3000
 # Increase the recorded cost for acme-books past 80% of the monthly budget
 # (production: the cost rises naturally; here we simulate by setting a
 # tight test budget)
-kubectl -n opencost get configmap budgets -o yaml
+kubectl -n opencost get configmap tenant-budgets -o yaml
+# Illustrative output, not captured:
 # data:
-#   acme-books-monthly-budget: "5.00"   # USD
+#   acme-books-monthly-budget: "5000.00"   # USD
 #   foo-books-monthly-budget:  "500.00"
 
 # Generate workload that crosses the threshold...
@@ -295,11 +430,9 @@ kubectl -n prometheus-system port-forward svc/kube-prometheus-stack-alertmanager
 ```sh
 # Switch clusters to inspect the regional split
 for ctx in kind-bookstore-platform-us-east kind-bookstore-platform-eu-west kind-bookstore-platform-ap-southeast; do
-  kubectl --context "$ctx" -n opencost port-forward svc/opencost 9003:9003 &
-  sleep 2
-  curl -s "http://localhost:9003/allocation?window=24h&aggregate=cluster" | jq ".data | keys"
-  kill %1; sleep 1
+  kubectl --context "$ctx" get --raw "/api/v1/namespaces/opencost/services/opencost:9003/proxy/allocation?window=24h&aggregate=cluster" | jq ".data | keys"
 done
+# Illustrative output, not captured:
 # us-east-1   $X.XX
 # eu-west-1   $Y.YY
 # ap-southeast-1 $Z.ZZ
@@ -371,11 +504,11 @@ recording rule, not the raw OpenCost API. v2's
 `opencost-tenant-aggregations.yaml` defines:
 
 ```yaml
-- record: bookstore_tenant_cost_per_hour
+- record: bookstore:cost_per_hour:by_tenant
   expr: |
     sum by (tenant) (
-      rate(opencost_allocation_total_cost_dollars[1h])
-        * on (namespace) group_left(tenant)
+      opencost_namespace_total_hourly_cost
+        * on(namespace) group_left(tenant)
           kube_namespace_labels{label_bookstore_platform_example_com_tenant!=""}
     )
 ```
@@ -387,17 +520,17 @@ OpenCost; we layer them via Prometheus rules:
 - alert: BookstoreTenantBudgetWarn
   expr: |
     (
-      sum_over_time(bookstore_tenant_cost_per_hour[30d:1h])
-      / on(tenant) bookstore_tenant_monthly_budget
+      bookstore:cost_mtd:by_tenant
+      / on(tenant) bookstore:tenant_monthly_budget
     ) > 0.8
   for: 1h
   labels: { severity: warn }
 ```
 
-`bookstore_tenant_monthly_budget` is a static metric exposed by a
-small `budget-exporter` reading from a ConfigMap. Hot-reloaded by
-the operator. Production grades this to a CRD (`BookstoreBudget`)
-the FinOps team manages.
+In the file, the budget is a static recording rule,
+`bookstore:tenant_monthly_budget`, that mirrors the `tenant-budgets`
+ConfigMap. Production replaces it with an exporter that reads the
+ConfigMap, or with a CRD the FinOps team manages.
 
 **The FinOps maturity model — the three phases.** From the
 [FinOps Foundation framework](https://www.finops.org/framework/):
@@ -424,10 +557,11 @@ the FinOps team manages.
 > labels next sprint." Once a resource is created without the
 > label, its cost is **unallocatable** for its lifetime; the audit
 > trail is broken; the showback dashboard has a permanent
-> `__unallocated__` line. Mitigation: a Kyverno **mutate** policy
-> that injects `tenant=<NAMESPACE-derived>` on any Pod missing it;
-> a Crossplane Composition that stamps every Workload labels at
-> render time. Both are in v2's platform-base.
+> `__unallocated__` line. v2's join uses the namespace label, which
+> the Crossplane Composition writes when it creates the tenant
+> (ch.13.02), so a pod's cost follows its namespace from creation.
+> A Kyverno **mutate** policy for pods created outside the
+> Composition is production work; the lab does not ship one.
 
 > **In production:** **Showback for a quarter; chargeback when
 > stable.** The temptation to invoice tenants from day one is a
@@ -475,20 +609,24 @@ the FinOps team manages.
 ## Quick Reference
 
 ```sh
-# Pinned install
-OPENCOST_VERSION="1.115.0"
-
+# Restricted namespace first, then the pinned chart
+kubectl create namespace opencost
+kubectl label namespace opencost \
+  pod-security.kubernetes.io/enforce=restricted \
+  pod-security.kubernetes.io/audit=restricted \
+  pod-security.kubernetes.io/warn=restricted
 helm repo add opencost https://opencost.github.io/opencost-helm-chart
-helm install opencost opencost/opencost --version "$OPENCOST_VERSION" -n opencost --create-namespace --wait
+helm install opencost opencost/opencost --version 2.5.33 -n opencost \
+  -f examples/bookstore-platform/cost/opencost-values.yaml
 
 # Apply the cost manifests
-kubectl apply -f examples/bookstore-platform/cost/opencost-application.yaml
+kubectl apply -f examples/bookstore-platform/cost/opencost-networkpolicy.yaml
 kubectl apply -f examples/bookstore-platform/cost/opencost-tenant-aggregations.yaml
 kubectl apply -f examples/bookstore-platform/cost/grafana-cost-dashboard.yaml
 kubectl apply -f examples/bookstore-platform/cost/budget-alerts.yaml
 
-# Per-tenant cost (last 7 days)
-curl -s "http://opencost.opencost.svc.cluster.local:9003/allocation?window=7d&aggregate=label:bookstore-platform.example.com/tenant" | jq .
+# Per-tenant cost (last 7 days), through the API server proxy
+kubectl get --raw "/api/v1/namespaces/opencost/services/opencost:9003/proxy/allocation?window=7d&aggregate=label:bookstore-platform.example.com/tenant" | jq .
 ```
 
 Minimal skeletons:
@@ -503,22 +641,22 @@ spec:
     - name: bookstore-cost-aggregations
       interval: 5m
       rules:
-        - record: bookstore_tenant_cost_per_hour
+        - record: bookstore:cost_per_hour:by_tenant
           expr: |
             sum by (tenant) (
-              opencost_allocation_total_cost_dollars
-                * on (namespace) group_left(tenant)
-                  kube_namespace_labels
+              opencost_namespace_total_hourly_cost
+                * on(namespace) group_left(tenant)
+                  kube_namespace_labels{label_bookstore_platform_example_com_tenant!=""}
             )
         - alert: BookstoreTenantBudgetWarn
           expr: |
-            sum_over_time(bookstore_tenant_cost_per_hour[30d:1h])
-            / on(tenant) bookstore_tenant_monthly_budget > 0.8
+            sum_over_time(bookstore:cost_per_hour:by_tenant[30d:1h])
+            / on(tenant) bookstore:tenant_monthly_budget > 0.8
           for: 1h
           labels: { severity: warn }
 ```
 
-Checklist (the cost story closed when all seven are yes):
+Checklist (the cost story closed when all eight are yes):
 
 - [ ] OpenCost installed; Allocation API returns Allocations for every
       namespace.
@@ -529,6 +667,8 @@ Checklist (the cost story closed when all seven are yes):
 - [ ] Cloud billing source connected (CUR / GCP billing export / Azure
       Cost Management).
 - [ ] Budget alerts fire at 80 % (warn) + 100 % (page).
+- [ ] Only Prometheus reaches port 9003, and the OpenCost ServiceAccount
+      cannot read Secrets (step 2).
 - [ ] FinOps maturity: platform self-describes as "Inform"; path to
       "Optimize" written down.
 
@@ -568,6 +708,13 @@ Checklist (the cost story closed when all seven are yes):
    <details><summary>Show answer</summary>
 
    **Inform** = "everyone sees their cost" — OpenCost installed, dashboards exist, monthly reports go out. Team behavior unchanged. **Optimize** = "teams act on cost signals" — engineers see cost in PRs (the FinOps Foundation pattern of cost annotations on commits), Karpenter consolidation enabled, scale-to-zero on dev/staging, right-sizing via VPA recommendations, spot for batch. To move: (1) Pick one heavy-spend workload, right-size it as a forcing function, publish the win. (2) Add cost panels to every team's Grafana, with a $/month KPI on team scorecards. (3) Negotiate RIs/SP on the steady baseline (post right-sizing!). (4) Quarterly "FinOps review" with engineering leads. Optimize is a culture shift, not a tool install.
+
+   </details>
+
+6. **A pod in a tenant namespace can reach the OpenCost API. What does it learn, which control stops it, and why is an RBAC check on the OpenCost ServiceAccount not enough?**
+   <details><summary>Show answer</summary>
+
+   It learns what every tenant spends, by namespace and workload. That is billing data about the other tenants. The chart puts no authentication in front of the API, so reachability is the access control. The control is the ingress NetworkPolicy that admits only Prometheus to port 9003 (step 2). RBAC on the ServiceAccount limits what OpenCost itself reads. It does nothing about a caller that never talks to OpenCost with a token. The proof is the request from a pod outside the namespace that times out.
 
    </details>
 

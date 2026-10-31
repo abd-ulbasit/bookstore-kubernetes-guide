@@ -1,0 +1,44 @@
+# Bookstore Platform v2 - Part 13 ch.10: who may reach the OpenCost API.
+#
+# Port 9003 answers cost queries for every tenant. A pod in any tenant
+# namespace that can reach it can read the whole cluster's cost, so ingress
+# is closed by default and opened for Prometheus alone. Egress stays open
+# here: OpenCost calls the API server and Prometheus, whose addresses differ
+# per cluster. Part 02 ch.06 shows the egress form of default-deny.
+#
+# Enforcement needs a CNI that enforces NetworkPolicy (Part 00 ch.07).
+#
+# Apply:
+#   kubectl apply -f examples/bookstore-platform/cost/opencost-networkpolicy.yaml
+---
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: opencost-default-deny-ingress
+  namespace: opencost
+  labels:
+    app.kubernetes.io/part-of: bookstore-platform
+spec:
+  podSelector: {}
+  policyTypes: ["Ingress"]
+---
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: opencost-allow-prometheus-scrape
+  namespace: opencost
+  labels:
+    app.kubernetes.io/part-of: bookstore-platform
+spec:
+  podSelector:
+    matchLabels:
+      app.kubernetes.io/name: opencost
+  policyTypes: ["Ingress"]
+  ingress:
+    - from:
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: prometheus-system
+      ports:
+        - protocol: TCP
+          port: 9003
