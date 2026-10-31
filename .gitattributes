@@ -1,0 +1,3 @@
+# Parts land in parallel during the security-first rewrite, each appending here.
+.github/security-gates-enforced.txt merge=union
+CHANGELOG.md merge=union
