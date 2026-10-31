@@ -51,9 +51,8 @@ were defects in this repo, now fixed. See
 ## Chapter plan, mapped to Part 14
 
 Fourteen chapters mirror an EKS chapter. Four have no EKS counterpart because
-they are the parts of GKE that are genuinely different, and those four are the
-ones worth the most in an interview, because they are where "I know
-Kubernetes" stops being portable.
+they are the parts of GKE that are genuinely different, and those four are
+where what you know about Kubernetes stops being portable.
 
 | # | Chapter | Part 14 counterpart | The GCP-specific thing |
 |---|---|---|---|
@@ -75,14 +74,13 @@ Kubernetes" stops being portable.
 | 16 | Security posture and runtime | 13 | Workload vulnerability scanning, the posture dashboard |
 | 17 | Multi-cluster and DR | 11, 17 | Fleets, Multi Cluster Ingress, Config Sync |
 
-**Chapters 03, 04, 10 and 14 first.** They carry the most interview weight and
-the least overlap with what a single-node k3s already teaches.
+**Chapters 03, 04, 10 and 14 first.** They are the most GKE-specific and
+overlap least with what a single-node local cluster already teaches.
 
-## What this Part buys that the ThinkPad cannot
+## What this Part buys that a local cluster cannot
 
-The k3s box is single-node. Everything below needs more than one node or a
-cloud control plane, which is exactly the gap `18-kubernetes.md` names as
-unbuyable at home:
+A local kind or k3s cluster is single-node and has no cloud control plane.
+Everything below needs more than one node or a cloud control plane:
 
 - Cordon, drain, and watch pods reschedule somewhere real
 - A node genuinely disappearing (spot preemption, 30 seconds notice)
@@ -102,11 +100,11 @@ confirm nothing left. Nine of ten checks passed and both failures were defects
 in this repo, now fixed. See
 [`examples/gke/README.md`](../examples/gke/README.md) for what broke.
 
-| Session | What | The thing it teaches that a single-node k3s cannot |
+| Session | What | The thing it teaches that a single-node local cluster cannot |
 |---|---|---|
 | **L2** | Deploy the bookstore. Cordon a node, drain it, watch pods reschedule under real load | Drain and reschedule with traffic on it. L1's smoke test had no load |
 | **L3** | Workload Identity end to end: bind a KSA to a GSA, read a GCS bucket with no key on disk | Cloud IAM meeting Kubernetes RBAC, where most real cluster-access bugs live |
-| **L4** | Delete a spot node under a running workload, or wait for a real preemption | A node genuinely disappearing. A homelab node never leaves |
+| **L4** | Delete a spot node under a running workload, or wait for a real preemption | A node genuinely disappearing. A local node never leaves |
 
 Then [Part 17](../17-ml-platform-on-gke/) picks up with the GPU labs, which
 need the same cluster plus the node pool in

@@ -60,8 +60,7 @@ resource "google_container_node_pool" "gpu" {
       count = 1
 
       # Let GKE install and manage the driver. Doing this by hand via the
-      # NVIDIA GPU Operator is lab G1's alternative path, and knowing that
-      # GKE offers both is the interview-relevant part.
+      # NVIDIA GPU Operator is lab G1's alternative path. GKE offers both.
       gpu_driver_installation_config {
         gpu_driver_version = "LATEST"
       }
