@@ -55,6 +55,24 @@ versions follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   of nftables, native sidecars, SELinuxMount, HPAScaleToZero, removed
   metrics and feature gates, and support windows.
 
+- The prod image pins move out of `overlays/prod/kustomization.yaml` into a
+  Kustomize Component, `overlays/prod/images/`, that holds only the `images:`
+  list. The first real run of `bookstore-release.yml` ran `kustomize edit set
+  image` on the whole overlay and turned a one-line pin into 143 added and 145
+  removed lines, which no reviewer could read, in a PR whose merge is the
+  production deploy. The prod render is byte-identical (48 objects). The
+  promotion job now edits only that file and fails if it changes any other or
+  more than 8 lines.
+- The promotion PR carries the real owner, repository and digest in its body,
+  with a `cosign verify` that matches the signing identity exactly (branch
+  included) and a `gh attestation verify`. A PR opened with `GITHUB_TOKEN`
+  triggers no workflows, so a new `checks` job dispatches
+  `example-trees-check.yml` and `security-gates.yml` on the PR's branch.
+- The runtime gate (G4) deploys the prod overlay with its image pins pointed at
+  the images it built, so a promoted digest does not break it.
+- OpenSSF Scorecard runs on a dispatch from the default branch, not only on a
+  push, so the release workflow gets a score.
+
 ### Fixed
 - Standalone EKS add-ons (kube-proxy, CoreDNS, EBS CSI) now follow
   cluster upgrades through an `aws_eks_addon_version` lookup; with

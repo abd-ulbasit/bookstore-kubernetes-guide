@@ -1,0 +1,37 @@
+# Bookstore PRODUCTION image pins.
+#
+# This file holds the `images:` list and nothing else, on purpose. The release
+# workflow (.github/workflows/bookstore-release.yml) promotes a signed image by
+# running `kustomize edit set image` in THIS directory, and `kustomize edit`
+# rewrites the whole file it touches: it re-indents lists, sorts keys and moves
+# comments. Run on the full prod overlay, it turned a one-line pin into 143
+# added and 145 removed lines that nobody could review, and merging that PR is
+# the production deploy. Kept in a file of its own, the edit can touch only this
+# small file.
+#
+# A pin is either name + newName + newTag (an immutable tag) or name + newName
+# + digest (what promotion writes: the digest the registry computed, which the
+# release workflow signed). `images:` rewrites both the name and the tag, so no
+# Deployment YAML is hand-edited. The placeholder registry below is replaced
+# one service at a time as each service is promoted.
+#
+# Keep the file in the shape `kustomize edit` writes: lists not indented, keys
+# in alphabetical order, entries sorted by name. Comments belong above
+# `apiVersion`; the tool hoists a comment inside the list above the list.
+#
+# The prod overlay includes this directory with `components:`.
+apiVersion: kustomize.config.k8s.io/v1alpha1
+kind: Component
+images:
+- name: bookstore/catalog
+  newName: registry.example.com/bookstore/catalog
+  newTag: 1.0.0
+- name: bookstore/orders
+  newName: registry.example.com/bookstore/orders
+  newTag: 1.0.0
+- name: bookstore/payments-worker
+  newName: registry.example.com/bookstore/payments-worker
+  newTag: 1.0.0
+- name: bookstore/storefront
+  newName: registry.example.com/bookstore/storefront
+  newTag: 1.0.0

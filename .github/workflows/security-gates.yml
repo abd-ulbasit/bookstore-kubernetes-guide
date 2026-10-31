@@ -408,6 +408,7 @@ jobs:
           node_image: ${{ env.KIND_NODE_IMAGE }}
           cluster_name: runtime
       - name: Load the four images into the cluster
+        id: load
         env:
           VARIANT: ${{ matrix.variant }}
         run: |
@@ -415,27 +416,37 @@ jobs:
           for service in catalog orders payments-worker storefront; do
             kind load image-archive "image-in/${service}.tar" --name runtime
           done
-          # The production overlay pins registry.example.com/bookstore/<service>:1.0.0,
-          # a placeholder registry nobody can pull from. Give the images built
-          # above those names, so the overlay deploys exactly as written.
+          tree="$BOOKSTORE"
+          # The production overlay pins its images in overlays/prod/images/: a
+          # placeholder registry nobody can pull from, and, once a service has
+          # been promoted, the digest of an image the release workflow pushed
+          # to ghcr.io. The images built above have neither that name nor that
+          # digest. So this variant deploys a copy of the tree in which that one
+          # file points each pin at the image built above, and the overlay is
+          # otherwise exactly as written. G2 and G3 judge the pins as
+          # written; the release workflow scanned and signed the pushed image.
           if [ "$VARIANT" = kustomize-prod ]; then
-            for service in catalog orders payments-worker storefront; do
-              docker load --input "image-in/${service}.tar"
-              ref="$(kubectl kustomize "$BOOKSTORE/kustomize/overlays/prod" \
-                | grep -oE "[a-z0-9.-]+/bookstore/${service}:[A-Za-z0-9._-]+" | sort -u)"
-              [ "$(printf '%s\n' "$ref" | wc -l)" -eq 1 ] || { echo "::error::expected one image for ${service} in the prod overlay, got: ${ref}"; exit 1; }
-              docker tag "bookstore/${service}:dev" "$ref"
-              kind load docker-image "$ref" --name runtime
-            done
+            tree="${RUNNER_TEMP}/bookstore-gate"
+            cp -R "$BOOKSTORE" "$tree"
+            {
+              echo 'apiVersion: kustomize.config.k8s.io/v1alpha1'
+              echo 'kind: Component'
+              echo 'images:'
+              for service in catalog orders payments-worker storefront; do
+                printf -- '- name: bookstore/%s\n  newTag: dev\n' "$service"
+              done
+            } > "${tree}/kustomize/overlays/prod/images/kustomization.yaml"
           fi
+          echo "tree=${tree}" >> "$GITHUB_OUTPUT"
       - name: G4, deploy and wait for every workload
         env:
           VARIANT: ${{ matrix.variant }}
+          GATE_TREE: ${{ steps.load.outputs.tree }}
         run: |
           mkdir -p reports
           python .github/scripts/gates/runtime_gate.py \
             --variant "$VARIANT" \
-            --tree "$BOOKSTORE" \
+            --tree "$GATE_TREE" \
             --timeout 900 \
             --report "reports/runtime-${VARIANT}.json"
       - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2

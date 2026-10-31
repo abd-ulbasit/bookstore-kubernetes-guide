@@ -20,9 +20,50 @@ name: bookstore-release
 # pull-request branch would carry that branch's identity, and the point of the
 # identity is that only reviewed code can earn it.
 #
+# WHAT THE PROMOTION PR CHANGES. One small file:
+# full-guide/examples/bookstore/kustomize/overlays/prod/images/kustomization.yaml,
+# a Kustomize Component that holds only the image pins. `kustomize edit` rewrites
+# the whole file it touches, so while the pins sat in the prod overlay itself
+# the first real run turned a one-line pin into 143 added and 145 removed lines:
+# it moved the overlay's patches and left its comments floating, and a reviewer
+# could not tell what was being deployed. The job also fails, before it opens
+# the PR, if the edit touches any other file or changes more than 8 lines.
+#
+# WHY THE PR HAS NO CHECKS OF ITS OWN. A pull request opened with GITHUB_TOKEN
+# triggers no workflows: the docs say that events triggered by the GITHUB_TOKEN
+# do not create a new workflow run, except workflow_dispatch and
+# repository_dispatch
+# (https://docs.github.com/en/actions/concepts/security/github_token, section
+# "When GITHUB_TOKEN triggers workflow runs"). So the `checks` job dispatches
+# the two workflows that judge what this PR changes, on the PR's branch:
+#
+#   example-trees-check.yml   the prod overlay still renders 48 objects (ADR 0007)
+#   security-gates.yml        the rendered overlay passes G2 and G3 and deploys
+#                             under restricted Pod Security (G4)
+#
+# Their runs are attached to the PR's head commit, so they show up as its
+# checks. `checks` has `actions: write` and nothing else, in a job of its own
+# with no checkout: the REST endpoint that creates a dispatch event needs the
+# Actions permission at write level
+# (https://docs.github.com/en/rest/authentication/permissions-required-for-github-apps),
+# and keeping it out of the job that holds `contents: write` means no one job
+# can both push a branch and start runs. A dispatched workflow runs with the
+# permissions its own file declares, not the dispatcher's, and the branch holds
+# main's workflow files unchanged (the promote job fails if the edit touches
+# any file but the pins), so a dispatch runs nothing that main does not already
+# run. It can still start a run on demand, which is why the list is fixed in
+# this file. secret-scan is left out: its failure job files a rolling issue on
+# any non-PR event.
+# If the checks are missing (the dispatch failed, or you want the PR event),
+# close the PR and reopen it: a person's reopen triggers the pull_request
+# workflows.
+#
 # Set up once in the repository (Settings, Actions, General): allow GitHub
 # Actions to create pull requests. Without it the promotion job fails after
-# the signing has succeeded, which is the right order to fail in.
+# the signing has succeeded, which is the right order to fail in. That setting
+# is on for this repository. It is one switch for two powers, creating and
+# approving pull requests, so it needs a ruleset that requires a human review
+# if the bot must not be able to merge its own promotion.
 
 on:
   workflow_dispatch:
@@ -76,6 +117,9 @@ jobs:
     permissions:
       contents: write
       pull-requests: write
+    outputs:
+      branch: ${{ steps.pr.outputs.pull-request-branch }}
+      operation: ${{ steps.pr.outputs.pull-request-operation }}
     steps:
       - uses: step-security/harden-runner@dc2769abcc0fcfbadfc1df54081c1608579ef6b2 # v2.22.2
         with:
@@ -106,35 +150,108 @@ jobs:
           tar -xzf kustomize.tar.gz kustomize
           sudo install -m 0755 kustomize /usr/local/bin/kustomize
           rm -f kustomize kustomize.tar.gz
-      - name: Pin the digest into the prod overlay
+      - name: Pin the digest into the prod image pins
         env:
           OWNER: ${{ github.repository_owner }}
           SERVICE: ${{ inputs.service }}
           DIGEST: ${{ needs.release.outputs.digest }}
+          # Edits to this file only. See WHAT THE PROMOTION PR CHANGES, above.
+          PINS: full-guide/examples/bookstore/kustomize/overlays/prod/images
+          MAX_CHANGED_LINES: "8"
         run: |
           set -euo pipefail
-          cd "$BOOKSTORE/kustomize/overlays/prod"
-          kustomize edit set image "bookstore/${SERVICE}=ghcr.io/${OWNER,,}/bookstore-${SERVICE}@${DIGEST}"
+          ref="ghcr.io/${OWNER,,}/bookstore-${SERVICE}@${DIGEST}"
+          (cd "$PINS" && kustomize edit set image "bookstore/${SERVICE}=${ref}")
           git diff --stat
+          changed="$(git diff --name-only)"
+          if [ "$changed" != "$PINS/kustomization.yaml" ]; then
+            echo "::error::the edit changed files other than ${PINS}/kustomization.yaml: ${changed}"
+            exit 1
+          fi
+          lines="$(git diff --numstat | awk '{ n += $1 + $2 } END { print n + 0 }')"
+          if [ "$lines" -gt "$MAX_CHANGED_LINES" ]; then
+            echo "::error::the edit changed ${lines} lines, more than ${MAX_CHANGED_LINES}; kustomize reformatted the file, and a reviewer cannot read that"
+            exit 1
+          fi
+          # The pin must reach the prod render, or the PR would promote nothing.
+          kustomize build full-guide/examples/bookstore/kustomize/overlays/prod | grep -F -- "image: ${ref}" > /dev/null \
+            || { echo "::error::the prod overlay does not render ${ref}"; exit 1; }
+          echo "changed lines: ${lines}"
+      - name: Write the pull request body
+        env:
+          REPOSITORY: ${{ github.repository }}
+          OWNER: ${{ github.repository_owner }}
+          SERVICE: ${{ inputs.service }}
+          DIGEST: ${{ needs.release.outputs.digest }}
+          # The release job only runs on the default branch, so this is
+          # refs/heads/<default branch>, the identity the signature carries.
+          SIGNER_REF: ${{ github.ref }}
+          RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+        run: |
+          set -euo pipefail
+          image="ghcr.io/${OWNER,,}/bookstore-${SERVICE}@${DIGEST}"
+          identity="https://github.com/${REPOSITORY}/.github/workflows/bookstore-pipeline.yml@${SIGNER_REF}"
+          cat > "$RUNNER_TEMP/pr-body.md" <<EOF
+          Pins \`bookstore/${SERVICE}\` in \`overlays/prod/images\` to the digest the
+          [release run](${RUN_URL}) built, scanned, signed and attested:
+
+              ${image}
+
+          Verify before merging. Both commands read the public image and need
+          nothing else; the first needs [cosign](https://docs.sigstore.dev/cosign/system_config/installation/),
+          the second needs \`gh\` signed in.
+
+              cosign verify \\
+                --certificate-identity '${identity}' \\
+                --certificate-oidc-issuer https://token.actions.githubusercontent.com \\
+                ${image}
+
+              gh attestation verify oci://${image} --repo ${REPOSITORY}
+
+          The identity is matched exactly, branch included, so a signature made from
+          any other branch is refused.
+
+          This PR changes one file. Its checks (the prod overlay still renders, and
+          the security gates) are dispatched on this branch by the \`checks\` job,
+          because a pull request opened with GITHUB_TOKEN triggers no workflows. If
+          they are missing, close and reopen this PR.
+
+          Merging this PR is the production deploy. To roll back, revert it.
+          EOF
       - name: Open the promotion PR (merging it is the deploy trigger)
+        id: pr
         uses: peter-evans/create-pull-request@5f6978faf089d4d20b00c7766989d076bb2fc7f1 # v8.1.1
         with:
           branch: ci/promote-${{ inputs.service }}
           delete-branch: true
-          add-paths: full-guide/examples/bookstore/kustomize/overlays/prod/kustomization.yaml
+          add-paths: full-guide/examples/bookstore/kustomize/overlays/prod/images/kustomization.yaml
           commit-message: "ci: promote ${{ inputs.service }} to prod (signed digest)"
           committer: "bookstore-ci[bot] <bookstore-ci[bot]@users.noreply.github.com>"
           author: "bookstore-ci[bot] <bookstore-ci[bot]@users.noreply.github.com>"
           title: "Promote ${{ inputs.service }} to prod (signed digest)"
-          body: |
-            Pins `bookstore/${{ inputs.service }}` in `overlays/prod` to the digest the
-            release workflow just built, scanned, signed and attested.
-
-            Verify the signature before merging:
-
-                cosign verify ghcr.io/OWNER/bookstore-${{ inputs.service }}@DIGEST \
-                  --certificate-identity-regexp 'https://github.com/OWNER/REPO/.github/workflows/bookstore-pipeline.yml@.*' \
-                  --certificate-oidc-issuer https://token.actions.githubusercontent.com
-
-            Merging this PR is the production deploy. To roll back, revert it.
+          body-path: ${{ runner.temp }}/pr-body.md
           labels: promotion
+
+  checks:
+    name: checks on the promotion PR (${{ inputs.service }})
+    needs: promote
+    # Nothing to check when the pin was already on the default branch.
+    if: contains(fromJSON('["created", "updated"]'), needs.promote.outputs.operation)
+    runs-on: ubuntu-latest
+    # Its own job, with nothing but this: see WHY THE PR HAS NO CHECKS OF ITS OWN.
+    permissions:
+      actions: write
+    steps:
+      - uses: step-security/harden-runner@dc2769abcc0fcfbadfc1df54081c1608579ef6b2 # v2.22.2
+        with:
+          egress-policy: audit
+      - name: Dispatch the checks on the promotion branch
+        env:
+          GH_TOKEN: ${{ github.token }}
+          BRANCH: ${{ needs.promote.outputs.branch }}
+        run: |
+          set -euo pipefail
+          for workflow in example-trees-check.yml security-gates.yml; do
+            gh workflow run "$workflow" --repo "$GITHUB_REPOSITORY" --ref "$BRANCH"
+            echo "dispatched ${workflow} on ${BRANCH}" | tee -a "$GITHUB_STEP_SUMMARY"
+          done

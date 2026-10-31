@@ -70,9 +70,14 @@ jobs:
 
   # ---------------------------------------------------------------------------
   # bump-manifests: the CI -> GitOps seam. CI does not `kubectl apply`. It
-  # writes the signed digests into the kustomize prod overlay and opens a
-  # pull request. Merging the PR is the deploy: Argo CD (ch.04) sees the merge
-  # commit and reconciles.
+  # writes the signed digests into the prod overlay's images/ Component and
+  # opens a pull request. Merging the PR is the deploy: Argo CD (ch.04) sees
+  # the merge commit and reconciles.
+  #
+  # The edit targets overlays/prod/images/, a file that holds only the image
+  # pins. `kustomize edit` rewrites the whole file it touches, so pointed at
+  # the full overlay it turned a one-line pin into 288 changed lines that a
+  # reviewer could not read.
   #
   # Why a PR and not `git push origin HEAD:main`: a direct push sent every
   # merge to prod with no reviewer and no staging step. Set up in YOUR repo:
@@ -127,7 +132,7 @@ jobs:
           OWNER: ${{ github.repository_owner }}
         run: |
           set -euo pipefail
-          cd kustomize/overlays/prod
+          cd kustomize/overlays/prod/images
           for svc in catalog orders payments-worker storefront; do
             f="${GITHUB_WORKSPACE}/digests/${svc}.digest"
             [ -s "$f" ] || { echo "::error::missing digest for ${svc}"; exit 1; }
@@ -142,13 +147,13 @@ jobs:
         with:
           branch: ci/bump-prod-images
           delete-branch: true
-          add-paths: kustomize/overlays/prod/kustomization.yaml
+          add-paths: kustomize/overlays/prod/images/kustomization.yaml
           commit-message: "ci: bump prod images to ${{ github.sha }} (signed digests)"
           committer: "bookstore-ci[bot] <bookstore-ci[bot]@users.noreply.github.com>"
           author: "bookstore-ci[bot] <bookstore-ci[bot]@users.noreply.github.com>"
           title: "Promote ${{ github.sha }} to prod (signed digests)"
           body: |
-            Pins every Bookstore image in `overlays/prod` to the digest CI just
+            Pins every Bookstore image in `overlays/prod/images` to the digest CI just
             built, scanned, signed and attested.
 
             Merging this PR is the production deploy: Argo CD syncs the merge

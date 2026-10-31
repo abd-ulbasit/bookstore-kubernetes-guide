@@ -3,7 +3,8 @@
 # Child of the App-of-Apps root. Points Argo CD at the REAL 6b prod kustomize
 # overlay — the one CI's `bump-manifests` job (ch.03) writes signed image
 # DIGESTS into. The CI→GitOps loop closes HERE: CI commits a digest to
-# overlays/prod/kustomization.yaml → Argo CD detects the commit → syncs prod.
+# overlays/prod/images/kustomization.yaml → Argo CD detects the commit → syncs
+# prod.
 #
 # overlays/prod → 48 objects (base 49 − the demo Secret, which prod
 # $patch:deletes; a real Secret of the same name is supplied out-of-band by

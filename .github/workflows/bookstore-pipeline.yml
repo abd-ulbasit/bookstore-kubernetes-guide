@@ -484,7 +484,11 @@ jobs:
   # of every job) is in audit mode: it LOGS the runner's outbound calls and
   # does not block them. Scorecard grades the repository's own habits (branch
   # protection, pinned dependencies, token permissions); it reports a score
-  # rather than gating, and it only runs on the default branch.
+  # rather than gating, and it only runs on the default branch, on a push or a
+  # dispatch. (Its condition once said push alone, so the release workflow,
+  # which is a dispatch, skipped it. The action accepts workflow_dispatch from
+  # the default branch but calls that trigger experimental, so the step cannot
+  # fail the job.)
   # ---------------------------------------------------------------------------
   workflow-hardening:
     if: inputs.repo-wide
@@ -513,12 +517,23 @@ jobs:
         run: |
           "$BOOKSTORE/ci/scan.sh" expiry "$BOOKSTORE/ci/zap/baseline.conf $BOOKSTORE/ci/kube-linter.yaml"
       - name: OpenSSF Scorecard (default branch only)
-        if: github.event_name == 'push' && github.ref == format('refs/heads/{0}', github.event.repository.default_branch)
+        id: scorecard
+        if: contains(fromJSON('["push", "workflow_dispatch"]'), github.event_name) && github.ref == format('refs/heads/{0}', github.event.repository.default_branch)
+        continue-on-error: true
         uses: ossf/scorecard-action@fa7117db83c52d787ae5a89f350999701505d78e # v2.5.0
         with:
-          results_file: scan-reports/scorecard.sarif
-          results_format: sarif
+          results_file: scan-reports/scorecard.json
+          results_format: json
           publish_results: false
+      - name: Scorecard aggregate score
+        if: steps.scorecard.outcome == 'success'
+        run: |
+          set -euo pipefail
+          jq -r '"Scorecard aggregate score: \(.score) / 10"' scan-reports/scorecard.json
+          jq -r '.checks[] | "  \(.score)\t\(.name)"' scan-reports/scorecard.json
+      - name: Scorecard produced no result
+        if: steps.scorecard.outcome == 'failure'
+        run: echo "::warning::OpenSSF Scorecard failed, so this run has no score. It does not gate; read the Scorecard step's log."
       - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         if: always()
         with:

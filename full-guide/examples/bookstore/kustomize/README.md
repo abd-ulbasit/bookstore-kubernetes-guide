@@ -23,6 +23,7 @@ examples/bookstore/kustomize/
 │   ├── dev/kustomization.yaml    # 1 replica, debug, no HPA/PDB, host bookstore.dev.local        → 45 objects
 │   ├── staging/kustomization.yaml# 2 replicas, moderate, HPA/PDB on, bookstore.staging.example.com → 49 objects
 │   └── prod/kustomization.yaml   # 4/3/3 replicas, tuned, registry images, demo Secret OFF        → 48 objects
+│       └── images/               # kind: Component, only the image pins; promotion edits this file
 └── components/                   # kind: Component — opt-in, each documents its CRD prereq
     ├── servicemonitor/           # + ServiceMonitor×2 + PrometheusRule   (Prometheus Operator CRDs)
     ├── keda/                     # + ScaledObject + TriggerAuth + Secret (KEDA CRDs)

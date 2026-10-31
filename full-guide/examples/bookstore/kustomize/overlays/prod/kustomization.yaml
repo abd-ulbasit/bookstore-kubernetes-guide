@@ -4,7 +4,7 @@
 #   kubectl apply  -k examples/bookstore/kustomize/overlays/prod
 #
 # Prod: higher replica counts, larger resource ceilings, real registry images
-# pinned by an immutable tag (ideally a digest), the full HPA/PDB surface, and
+# pinned by an immutable tag or a digest (images/), the full HPA/PDB surface, and
 # — critically — the demo Secret is REMOVED. In production `db-credentials` is
 # provided OUT OF BAND by External Secrets Operator / Sealed Secrets / Vault
 # (same NAME the workloads expect). NEVER ship a real password in Git. Mirrors
@@ -22,6 +22,12 @@ kind: Kustomization
 # decision" (cross-resource DNS / NetworkPolicy coherence).
 resources:
   - ../../base
+
+# The image pins live in images/, a Component that holds only an `images:`
+# list, so the promotion job's `kustomize edit set image` changes a few lines
+# of that file and never rewrites this one. See images/kustomization.yaml.
+components:
+  - images
 
 labels:
   - pairs:
@@ -196,20 +202,3 @@ patches:
       kind: Secret
       metadata:
         name: db-credentials
-
-# Pull real, immutably-tagged images from the registry (replace the registry
-# host for your environment). `images:` rewrites BOTH the name and the tag —
-# no Deployment YAML is hand-edited. In prod prefer name@sha256:<digest>.
-images:
-  - name: bookstore/catalog
-    newName: registry.example.com/bookstore/catalog
-    newTag: "1.0.0"
-  - name: bookstore/storefront
-    newName: registry.example.com/bookstore/storefront
-    newTag: "1.0.0"
-  - name: bookstore/orders
-    newName: registry.example.com/bookstore/orders
-    newTag: "1.0.0"
-  - name: bookstore/payments-worker
-    newName: registry.example.com/bookstore/payments-worker
-    newTag: "1.0.0"

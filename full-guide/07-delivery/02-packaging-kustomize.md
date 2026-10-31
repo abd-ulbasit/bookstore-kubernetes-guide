@@ -112,7 +112,7 @@ order, then validation — emitting one deterministic multi-doc stream.
 ```mermaid
 flowchart TD
     base["base/ kustomization.yaml<br/>19 vendored manifests (the deployable app)<br/>namespace: bookstore · labels: managed-by<br/>images: 4x bookstore/*:dev"]
-    ov["overlays/prod/ kustomization.yaml<br/>resources: ../../base<br/>+ replicas/images/patches/label"]
+    ov["overlays/prod/ kustomization.yaml<br/>resources: ../../base<br/>+ replicas/patches/label<br/>components: images/ (the pins)"]
     acc["Accumulate resources<br/>base pulled in via resources:<br/>(load-restrictor: root-only)"]
     gen["Generators<br/>configMapGenerator / secretGenerator<br/>(+ content-hash name suffix)<br/>— none here; static demo Secret"]
     tr["Transformer pipeline (fixed order)<br/>namespace &rarr; labels/annotations &rarr;<br/>namePrefix/Suffix &rarr; images &rarr;<br/>replicas &rarr; patches (SM + JSON6902)<br/>&rarr; reference rewrites"]
@@ -142,7 +142,9 @@ flowchart TD
  │   ├── staging/  2 replicas, moderate resources, HPA/PDB on,
  │   │             host bookstore.staging.example.com       → 49 objects
  │   └── prod/     4/3/3 replicas, tuned, registry images,
- │                 demo Secret $patch:delete'd              → 48 objects
+ │       │         demo Secret $patch:delete'd              → 48 objects
+ │       └── images/   kind: Component, only the image pins, so a
+ │                     promotion edits this file and no other
  └── components/                 kind: Component — opt-in via overlay components:
      ├── servicemonitor/  + ServiceMonitor×2 + PrometheusRule  (Prom Operator CRDs)
      ├── keda/            + ScaledObject + TriggerAuth + Secret (KEDA CRDs)
@@ -262,7 +264,9 @@ diff <(kubectl kustomize examples/bookstore/kustomize/overlays/dev) \
 ```
 
 Each difference comes from a **typed transformer or patch**, never a
-hand-edited manifest. From `overlays/prod/kustomization.yaml`:
+hand-edited manifest. From `overlays/prod/kustomization.yaml` (the `images:`
+list sits in `overlays/prod/images/kustomization.yaml`, a Component the overlay
+lists under `components:`; it is shown in place here):
 
 ```yaml
 replicas:                              # the replicas: transformer, not edited YAML
@@ -271,7 +275,7 @@ replicas:                              # the replicas: transformer, not edited Y
 images:                                # the images: transformer rewrites name+tag
   - name: bookstore/catalog
     newName: registry.example.com/bookstore/catalog
-    newTag: "1.0.0"                     # in prod prefer name@sha256:<DIGEST>
+    newTag: "1.0.0"                     # promotion writes digest: sha256:<DIGEST> instead
 patches:
   - target: { group: apps, version: v1, kind: Deployment, name: catalog }
     patch: |                            # strategic-merge: only resources change
@@ -615,11 +619,18 @@ chart to — the packaging changed; the deployed app did not.
 
 > **In production: promote environments by overlay, not by editing.** dev →
 > staging → prod is "the same base, three small overlays" — a promotion is a
-> reviewed change to *one overlay file* (a tag in `images:`, a count in
+> reviewed change to *one small file* (a tag in `images:`, a count in
 > `replicas:`). The base is never edited per environment, so environments
 > cannot silently diverge. Pin image **digests** (`newDigest:`), not tags, in
 > the prod overlay (Part 05 ch.03's supply-chain story); the `images:`
 > transformer takes a digest directly.
+>
+> **Keep what a tool edits in a file of its own.** `kustomize edit` re-marshals
+> the whole file it touches: it re-indents lists, sorts keys and hoists
+> comments. Pointed at a full overlay, it turned a one-line image pin into a
+> diff of 288 changed lines (143 added, 145 removed). The Bookstore keeps the prod pins in
+> `overlays/prod/images/` for that reason; [07.03](03-cicd-pipeline.md) shows
+> the run that found it.
 
 > **In production: the `commonLabels` immutability footgun is a real outage.**
 > Adding an env/version label via `commonLabels` (or a `labels:` block without
