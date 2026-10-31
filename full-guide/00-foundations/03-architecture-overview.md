@@ -382,6 +382,22 @@ spec:
 EOF
 ```
 
+Once the rollout finishes, read back what the API server stored for the first
+Pod: its security context, its container's security context, and the token
+setting.
+
+```sh
+kubectl -n demo rollout status deployment/demo --timeout=240s
+kubectl -n demo get pod -l app=demo -o jsonpath='{.items[0].spec.securityContext}{"\n"}{.items[0].spec.containers[0].securityContext}{"\n"}{.items[0].spec.automountServiceAccountToken}{"\n"}'
+```
+
+<!-- gate: output -->
+```text
+{"runAsGroup":65535,"runAsNonRoot":true,"runAsUser":65535,"seccompProfile":{"type":"RuntimeDefault"}}
+{"allowPrivilegeEscalation":false,"capabilities":{"drop":["ALL"]},"readOnlyRootFilesystem":true}
+false
+```
+
 The digest names the `registry.k8s.io/pause:3.9` image index, which lists
 amd64 and arm64 among other platforms, so the same line pulls on either. Each
 field answers one threat. The list below gives one sentence per field and links
