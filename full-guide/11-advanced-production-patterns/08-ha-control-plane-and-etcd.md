@@ -17,15 +17,22 @@
 > `--data-dir`/`--initial-cluster` reconstruction, the "restore = a NEW logical
 > cluster" gotcha, member replace); **node-loss recovery** (lose 1 of 3 → quorum
 > holds; lose 2 of 3 → lost-quorum recovery); **component leader election**
-> (`Lease`, `--leader-elect`). Applied with a **3-control-plane kind cluster**,
-> `etcdctl` into kind's etcd static Pod, a real `defrag`, the
-> `kube-scheduler` `Lease`, and a simulated control-plane-node loss — the
-> **Bookstore stays up because its data is in the Postgres StatefulSet, not
-> etcd** (cluster state ≠ app data).
+> (`Lease`, `--leader-elect`). The labs read the control plane's TLS flags,
+> show that port 2379 refuses a client with no certificate, and show that a
+> snapshot holds Secret values. The quorum and node-loss labs need a
+> **three-control-plane kind cluster**, a heavy install, so they are narrated
+> and marked as not run. The **Bookstore stays up because its data is in the
+> Postgres StatefulSet, not etcd** (cluster state ≠ app data).
 
 **Estimated time:** ~60 min read · ~120 min hands-on
 **Prerequisites:** [Part 00 ch.04](../00-foundations/04-control-plane-deep-dive.md) — HA topology + quorum table this chapter operationalises · [Part 08 ch.02](../08-day-2-operations/02-backup-and-dr.md) — etcd snapshot save/restore basics this chapter deepens
 **You'll know after this:** • justify ≥3 control-plane nodes behind an API LB from the Raft quorum math · • run defragmentation, set the space quota, and recover from `NOSPACE` alarms · • restore etcd from a snapshot and explain "restore = a new logical cluster" · • diagnose a lost-quorum scenario and execute member-replace recovery · • separate cluster state (etcd) from app data (Postgres) in a DR plan
+
+**Lab tier:** A (kind). Run the labs only against a cluster you own. Sections
+0 to 6 run on a kind cluster with one control-plane node, which is what the
+captured run used. Sections 7 to 9 need more than one control-plane node or a
+kubeadm node, so they are narrated. The captured run is in
+[`examples/security-lab/evidence/11-08.txt`](../examples/security-lab/evidence/11-08.txt).
 
 <!-- tags: foundations, day-2, dr, observability, platform-engineering -->
 
@@ -67,6 +74,13 @@ ways, and every one is an etcd or quorum misunderstanding:
    runs against (it rewrites the backend file). Defragging **all members
    simultaneously** stalls the whole etcd cluster — the maintenance becomes the
    incident. It must be **one member at a time**.
+5. **Anyone who can reach etcd reads every Secret.** etcd sits below the
+   API server, so RBAC and admission do not apply to it. A client that opens a
+   TLS connection to port 2379 and presents a certificate the member trusts
+   reads the whole keyspace, Secrets included. A snapshot of that keyspace
+   holds the same values. Whether this happens depends on the TLS settings
+   and on who can reach the port, which this chapter covers in sections 0, 3
+   and 4.
 
 This chapter makes the control plane operable: the quorum arithmetic you size
 for, the maintenance you schedule (defrag/compaction/alarm), the DR procedures
@@ -136,6 +150,15 @@ control-plane outage is a quorum or maintenance fact about the back.**
   exactly one is active, so no work is done twice. It is the same declarative
   model applied to the control plane's own coordination ([Part 00
   ch.04](../00-foundations/04-control-plane-deep-dive.md)).
+- **etcd trusts certificates, not network position.** Port 2379 listens on
+  the control-plane node's address as well as on loopback, so any host that
+  can route to that address can open a connection. What stops it is the TLS
+  handshake. With `--client-cert-auth=true`, etcd refuses a client that does
+  not present a certificate signed by its trusted CA, and
+  `--peer-client-cert-auth=true` applies the same rule to members on 2380. A
+  firewall or security group decides who can route there. NetworkPolicy is not
+  the gate, because Kubernetes leaves its effect on `hostNetwork` pods
+  undefined ([Network Policies](https://kubernetes.io/docs/concepts/services-networking/network-policies/)).
 
 The trap to keep in view: **HA is not "more replicas everywhere" — it is "an
 odd, correctly-operated etcd quorum, an LB in front of stateless apiservers,
@@ -147,6 +170,16 @@ single-node one would have. And throughout, remember the Bookstore: its
 state* (recoverable from snapshot + GitOps, [Part 08
 ch.02](../08-day-2-operations/02-backup-and-dr.md)), never the *application
 data*.
+
+## Threats and controls
+
+| Threat | Control in this chapter | Deeper |
+|---|---|---|
+| I7: clear etcd traffic. A host on the path reads Secrets off etcd traffic, or a client talks to etcd with no certificate. | Peer and client TLS, with client certificates required (`--client-cert-auth`, `--peer-client-cert-auth`). Port 2379 is reached only from control-plane nodes. | 05.04 (the same settings in context); 05.06 <!-- link-later: 05.06 --> (control-plane flags under kube-bench) |
+| A snapshot file gives every Secret value. | Treat each snapshot as a Secret: restricted permissions, and encrypted before it leaves the node (section 4). | 05.04 (encryption at rest); 08.02 (backup and restore) |
+
+The Bookstore threat model holds the first row as I7 in
+[`THREAT-MODEL.md`](../examples/bookstore/THREAT-MODEL.md).
 
 ## Diagrams
 
@@ -265,35 +298,538 @@ Bookstore manifest, Helm chart, Kustomize overlay, the operator, or any other
 `examples/bookstore/**` file — purely additive (the Gateway-vs-Ingress / CNPG /
 multicluster precedent).
 
-We will: (0) the honest single-node-vs-real-HA story; (1) a **3-control-plane
-kind cluster** (kind genuinely supports this); (2) `etcdctl` into kind's etcd
-static Pod — `member list` / `endpoint status -w table` / `endpoint health`;
-(3) a real **defrag** + the compaction/quota/alarm mechanics; (4) the
-`kube-scheduler` **`Lease`**; (5) simulate losing a control-plane node and
-watch **quorum hold while the Bookstore stays up** (its data is in the PVC, not
-etcd); (6) the DR procedures — single-member replace vs full-cluster restore —
-narrated where real HW is needed.
+We will, in order: (0) read the control plane's TLS flags, which changes
+nothing in the cluster; (1) talk to etcd with its client certificates; (2) read
+the backend size; (3) show that port 2379 refuses a client with no certificate;
+(4) show that a snapshot holds Secret values, then delete it; (5) defragment,
+and read the quota and alarm mechanics; (6) read the `kube-scheduler` `Lease`.
+Sections 0 to 6 run on one control-plane node. Sections 7 and 8 need three:
+quorum and node loss are narrated there. Section 9 needs a kubeadm node, so
+the restore procedures are narrated too.
 
-> **The honest HA story (read this first).** A *3-control-plane kind cluster
-> IS fully reproducible* on one machine (kind runs each control-plane node as a
-> container; 3 → a real 3-member etcd with a real quorum), and `etcdctl`
-> against kind's etcd static Pod **is** real. What is **not** reproducible on a
-> laptop: a real **API load balancer / VIP**, true **machine/AZ** failure
+> **The honest HA story (read this first).** A three-control-plane kind
+> cluster *can* run on one machine (kind runs each control-plane node as a
+> container, and three nodes give a real three-member etcd with a real quorum),
+> and `etcdctl` against kind's etcd static Pod is real. What a laptop cannot
+> reproduce: a real **API load balancer / VIP**, true **machine or AZ** failure
 > domains, **external etcd** on dedicated hosts, and full-cluster etcd restore
-> on a kubeadm node with `/etc/kubernetes/`. Those are given as the **exact
-> correct commands** and clearly marked "needs real HW / kubeadm / a cloud" —
-> the same established honesty as [Part 08
-> ch.02](../08-day-2-operations/02-backup-and-dr.md)'s etcd-restore narration.
-> Nothing is faked; the multi-CP etcd quorum, defrag, alarms and leader
-> election below are all **real on kind**.
+> on a kubeadm node with `/etc/kubernetes/`. Those are given as the exact
+> commands and marked "needs real HW / kubeadm / a cloud", the same honesty as
+> [Part 08 ch.02](../08-day-2-operations/02-backup-and-dr.md)'s etcd-restore
+> narration. The captured run in the evidence file covers sections 0 to 6 only.
+> The three-member commands in sections 7 and 8 are illustrative: when the
+> captured run happened, the lab's heavy-install lock was held, so no
+> three-control-plane cluster was created for them.
 
-### 0. Prerequisites — a 3-control-plane kind cluster (real multi-member etcd)
+### 0. Read the control plane's TLS flags
+
+The static Pod's command line is etcd's whole configuration. Read it before
+any client talks to etcd:
+
+```sh
+kubectl -n kube-system get pod -l component=etcd \
+  -o jsonpath='{.items[0].spec.containers[0].command}' | tr ',' '\n'
+```
+
+The lab's control-plane node is named `sf-pilot-control-plane`, and the output
+below is kept verbatim from it. Your node has your cluster's name and address.
+Lines the output leaves out are marked `# ...`.
+
+<!-- gate: output -->
+```text
+["etcd"
+"--unsafe-no-fsync=true"
+"--advertise-client-urls=https://172.18.0.2:2379"
+"--cert-file=/etc/kubernetes/pki/etcd/server.crt"
+"--client-cert-auth=true"
+# ...
+"--listen-client-urls=https://127.0.0.1:2379
+https://172.18.0.2:2379"
+# ...
+"--peer-client-cert-auth=true"
+# ...
+"--trusted-ca-file=/etc/kubernetes/pki/etcd/ca.crt"
+```
+
+Each TLS field is explained where it first appears:
+
+- `--client-cert-auth=true` makes etcd refuse a request that does not carry a
+  valid client certificate. The etcd security guide puts it as "requests that
+  don't supply a valid client certificate will fail"
+  ([etcd security](https://etcd.io/docs/latest/op-guide/security/)).
+- `--peer-client-cert-auth=true` applies the same check to the other members,
+  which talk on port 2380.
+- `--cert-file`, `--key-file` and `--trusted-ca-file` give etcd its server
+  certificate, its key, and the CA that signs the client certificates it will
+  accept. The `--peer-*` flags do the same for member-to-member traffic.
+- `--listen-client-urls` names two addresses: loopback, and the node's own
+  address. The second one is what makes port 2379 reachable from other hosts,
+  and section 3 tests it.
+- `--listen-metrics-urls=http://127.0.0.1:2381` serves metrics and health over
+  plain HTTP, on loopback only, so no remote client reaches it.
+
+The Pod also runs with host networking, so etcd listens on the node's address
+and not on a Pod address:
+
+```sh
+kubectl -n kube-system get pod -l component=etcd \
+  -o jsonpath='{.items[0].spec.hostNetwork}{"\n"}'
+```
+
+<!-- gate: output -->
+```text
+true
+```
+
+The one flag in the list that must not reach a production cluster is
+`--unsafe-no-fsync=true`. kind sets it to make the lab faster. The etcd help
+text gives the cost, and the same help text gives the quota default that
+section 5 sizes against:
+
+```sh
+ETCD_POD=$(kubectl -n kube-system get pod -l component=etcd \
+  -o jsonpath='{.items[0].metadata.name}')
+kubectl -n kube-system exec "$ETCD_POD" -- etcd --help \
+  | grep -A1 -E 'quota-backend-bytes|unsafe-no-fsync'
+```
+
+<!-- gate: output -->
+```text
+  --quota-backend-bytes '0'
+    Sets the maximum size (in bytes) that the etcd backend database may consume. Exceeding this triggers an alarm and puts etcd in read-only mode. Set to 0 to use the default 2GiB limit.
+--
+  --unsafe-no-fsync 'false'
+    Disables fsync, unsafe, will cause data loss.
+```
+
+The API server is etcd's only client, and its flags name the CA it trusts and
+the client certificate it presents:
+
+```sh
+kubectl -n kube-system get pod -l component=kube-apiserver \
+  -o jsonpath='{.items[0].spec.containers[0].command}' | tr ',' '\n' | grep etcd
+```
+
+<!-- gate: output -->
+```text
+"--etcd-cafile=/etc/kubernetes/pki/etcd/ca.crt"
+"--etcd-certfile=/etc/kubernetes/pki/apiserver-etcd-client.crt"
+"--etcd-keyfile=/etc/kubernetes/pki/apiserver-etcd-client.key"
+"--etcd-servers=https://127.0.0.1:2379"
+```
+
+The list has no `--encryption-provider-config`. This cluster therefore stores
+Secrets in etcd without encryption at rest. Section 4 shows what a backup then
+holds, and [05.04](../05-security/04-secrets-and-cluster-hardening.md) covers
+the fix.
+
+### 1. Talk to etcd: member list, endpoint status, endpoint health
+
+kind runs etcd as a static Pod in `kube-system`, with the control-plane
+certificates mounted from `/etc/kubernetes/pki/etcd/`. The Pod's certificates
+are the client credentials, so run `etcdctl` inside the Pod with them:
+
+```sh
+ETCD_POD=$(kubectl -n kube-system get pod -l component=etcd \
+  -o jsonpath='{.items[0].metadata.name}')
+etcd() { kubectl -n kube-system exec "$ETCD_POD" -- etcdctl \
+  --endpoints=https://127.0.0.1:2379 \
+  --cacert=/etc/kubernetes/pki/etcd/ca.crt \
+  --cert=/etc/kubernetes/pki/etcd/server.crt \
+  --key=/etc/kubernetes/pki/etcd/server.key "$@"; }
+
+etcd member list -w table
+etcd endpoint status -w table
+etcd endpoint health -w table
+```
+
+<!-- gate: output -->
+```text
+┌─────────────────┬─────────┬────────────────────────┬─────────────────────────┬─────────────────────────┬────────────┐
+│       ID        │ STATUS  │          NAME          │       PEER ADDRS        │      CLIENT ADDRS       │ IS LEARNER │
+├─────────────────┼─────────┼────────────────────────┼─────────────────────────┼─────────────────────────┼────────────┤
+│ e58c878e0e01014 │ started │ sf-pilot-control-plane │ https://172.18.0.2:2380 │ https://172.18.0.2:2379 │      false │
+└─────────────────┴─────────┴────────────────────────┴─────────────────────────┴─────────────────────────┴────────────┘
+```
+
+<!-- gate: output -->
+```text
+┌────────────────────────┬─────────────────┬─────────┬─────────────────┬─────────┬────────┬───────────────────────┬────────┬───────────┬────────────┬───────────┬────────────┬────────────────────┬────────┬──────────────────────────┬───────────────────┐
+│        ENDPOINT        │       ID        │ VERSION │ STORAGE VERSION │ DB SIZE │ IN USE │ PERCENTAGE NOT IN USE │ QUOTA  │ IS LEADER │ IS LEARNER │ RAFT TERM │ RAFT INDEX │ RAFT APPLIED INDEX │ ERRORS │ DOWNGRADE TARGET VERSION │ DOWNGRADE ENABLED │
+├────────────────────────┼─────────────────┼─────────┼─────────────────┼─────────┼────────┼───────────────────────┼────────┼───────────┼────────────┼───────────┼────────────┼────────────────────┼────────┼──────────────────────────┼───────────────────┤
+│ https://127.0.0.1:2379 │ e58c878e0e01014 │   3.7.0 │           3.7.0 │   49 MB │  12 MB │                   76% │ 2.1 GB │      true │      false │         3 │     151715 │             151715 │        │                          │             false │
+└────────────────────────┴─────────────────┴─────────┴─────────────────┴─────────┴────────┴───────────────────────┴────────┴───────────┴────────────┴───────────┴────────────┴────────────────────┴────────┴──────────────────────────┴───────────────────┘
+```
+
+<!-- gate: output -->
+```text
+┌────────────────────────┬────────┬─────────────┬───────┐
+│        ENDPOINT        │ HEALTH │    TOOK     │ ERROR │
+├────────────────────────┼────────┼─────────────┼───────┤
+│ https://127.0.0.1:2379 │   true │ 13.931169ms │       │
+└────────────────────────┴────────┴─────────────┴───────┘
+```
+
+`member list` shows one member, `endpoint status` shows the leader and the
+quota, and `endpoint health` is the heartbeat. The quota column reads 2.1 GB,
+which is the 2 GiB default from section 0. Three-member clusters add rows; the
+commands are the same.
+
+### 2. Backend DB size: the number you alert on
+
+The backend file only grows until you compact and defragment. Read its size,
+its live data, and its quota:
+
+```sh
+etcd endpoint status -w json | python3 -m json.tool \
+  | grep -E '"dbSize|"dbSizeInUse|"dbSizeQuota'
+etcd alarm list
+```
+
+<!-- gate: output -->
+```text
+            "dbSize": 48664576,
+            "dbSizeInUse": 12152832,
+            "dbSizeQuota": 2147483648,
+```
+
+`dbSize` is the file on disk, and `dbSizeInUse` is the live data. In the first
+read, 48.7 MB sat on disk with 12.2 MB live, so most of the file was free
+space that defragmentation can return (section 5). `etcd alarm list` prints
+nothing when no alarm is set. An alarm that is set is the first thing to check
+during an outage.
+
+### 3. Who can reach 2379, and what a client without a certificate gets
+
+Port 2379 answers on the node's address, as section 0 showed. Any Pod on the
+cluster network can route to that address, so the question is what the port
+asks of its caller. This probe is a restricted Pod on the control-plane node,
+where etcd runs. It calls the member's health endpoint with no client
+certificate. Save the manifest as `etcd-probe.yaml`:
+
+```yaml
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: etcd-probe
+  labels:
+    pod-security.kubernetes.io/enforce: restricted
+    pod-security.kubernetes.io/audit: restricted
+    pod-security.kubernetes.io/warn: restricted
+---
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: etcd-probe
+  namespace: etcd-probe
+automountServiceAccountToken: false
+---
+apiVersion: v1
+kind: Pod
+metadata:
+  name: etcd-probe
+  namespace: etcd-probe
+spec:
+  automountServiceAccountToken: false
+  serviceAccountName: etcd-probe
+  restartPolicy: Never
+  nodeSelector:
+    node-role.kubernetes.io/control-plane: ""
+  tolerations:
+    - key: node-role.kubernetes.io/control-plane
+      operator: Exists
+      effect: NoSchedule
+  securityContext:
+    runAsNonRoot: true
+    runAsUser: 100                  # curl_user, declared by the image
+    runAsGroup: 101                 # curl_group
+    seccompProfile:
+      type: RuntimeDefault
+  containers:
+    - name: probe
+      # curlimages/curl:8.23.0, index digest
+      image: curlimages/curl@sha256:3fb7e13e5d179a845c97d78204f3f1064d1907037f26a3ebf91710571151fd93
+      imagePullPolicy: IfNotPresent
+      command: ["curl"]
+      args:
+        - --silent
+        - --show-error
+        - --insecure                # skips server verification on purpose
+        - https://$(HOST_IP):2379/health
+      env:
+        - name: HOST_IP
+          valueFrom:
+            fieldRef:
+              fieldPath: status.hostIP
+      securityContext:
+        allowPrivilegeEscalation: false
+        readOnlyRootFilesystem: true
+        capabilities:
+          drop: ["ALL"]
+      resources:
+        requests:
+          cpu: 10m
+          memory: 16Mi
+        limits:
+          memory: 64Mi
+      volumeMounts:
+        - name: tmp
+          mountPath: /tmp
+  volumes:
+    - name: tmp
+      emptyDir: {}
+```
+
+The probe runs as `curl_user` (UID 100, GID 101), the user the image declares,
+so the numeric IDs match the image, as the
+[baseline](../01-core-workloads/01-pods.md#baseline-run-as) asks. The
+`nodeSelector` and toleration place it on a control-plane node, so
+`status.hostIP` is that node's address.
+
+`--insecure` is deliberate. The probe does not hold the etcd CA, so without
+the flag curl would stop at the server-certificate check and never reach the
+client-certificate check. The failure below is the result this step is after.
+Never use `--insecure` with a real client.
+
+Apply it, wait for it to fail, and read the log:
+
+```sh
+kubectl apply -f etcd-probe.yaml
+kubectl -n etcd-probe wait --for=jsonpath='{.status.phase}'=Failed \
+  pod/etcd-probe --timeout=240s
+kubectl -n etcd-probe logs pod/etcd-probe
+```
+
+<!-- gate: output -->
+```text
+curl: (55) OpenSSL SSL_read: OpenSSL/3.5.9: error:0A00045C:SSL routines::tlsv13 alert certificate required, errno 0
+```
+
+The server answered the handshake and refused it, because the probe presented
+no certificate. The container exited with code 55. The same endpoint answers a
+client that holds the control-plane certificates, as section 1 showed.
+
+NetworkPolicy does not close this gap. The Kubernetes docs leave its effect on
+`hostNetwork` pods undefined: the network plugin may or may not apply policy
+to them ([Network Policies](https://kubernetes.io/docs/concepts/services-networking/network-policies/)).
+etcd runs with host networking, so a policy written for it may or may not
+apply. Limit port 2379 with the node firewall or the security group, to the
+control-plane nodes. The kubeadm port table lists 2379 as the etcd client API
+on control-plane nodes ([ports and protocols](https://kubernetes.io/docs/reference/networking/ports-and-protocols/)).
+Keep the TLS check as the control that does not depend on the network, and rerun
+this probe after any network change.
+
+### 4. The backup holds your Secrets
+
+A snapshot is a copy of the whole keyspace, and Secrets are objects in it. Test
+that with a canary value. Store it in a Secret:
+
+```sh
+kubectl -n etcd-probe create secret generic etcd-canary \
+  --from-literal=token=canary-7f3a9c2e
+```
+
+<!-- gate: output -->
+```text
+secret/etcd-canary created
+```
+
+Take a snapshot inside the etcd container. The lab's first attempt ran this
+through `kubectl exec`, and the API server dropped the stream after twenty
+seconds with `keepalive ping failed to receive ACK within timeout`, because the
+lab was overloaded. The command below runs the same save through the node's
+container runtime. It worked, and it is the form the captured output came from.
+Replace `kind-control-plane` with your node's name in the copy step:
+
+```sh
+docker exec kind-control-plane sh -c 'crictl exec \
+  $(crictl ps -q --name etcd | head -1) etcdctl \
+  --endpoints=https://127.0.0.1:2379 \
+  --cacert=/etc/kubernetes/pki/etcd/ca.crt \
+  --cert=/etc/kubernetes/pki/etcd/server.crt \
+  --key=/etc/kubernetes/pki/etcd/server.key \
+  snapshot save /var/lib/etcd/etcd-canary.db'
+docker cp kind-control-plane:/var/lib/etcd/etcd-canary.db ./etcd-canary.db
+grep -a -c 'canary-7f3a9c2e' ./etcd-canary.db
+```
+
+<!-- gate: output -->
+```text
+{"level":"info","ts":"2026-10-31T05:03:42.810201Z","caller":"snapshot/v3_snapshot.go:121","msg":"saved","path":"/var/lib/etcd/etcd-canary.db"}
+Snapshot saved at /var/lib/etcd/etcd-canary.db
+Server version 3.7.0
+```
+
+<!-- gate: output -->
+```text
+snapshot bytes: 48664608
+```
+
+<!-- gate: output -->
+```text
+1
+```
+
+The count is 1: the canary value sits in the snapshot in plain text. Section 0
+showed that nothing encrypts Secrets in this cluster, so the backup is a
+Secret store. Anyone who can read the file reads every Secret in it. Treat each
+snapshot as a credential: restrict who reads it, store it encrypted outside the
+node, and turn on encryption at rest
+([05.04](../05-security/04-secrets-and-cluster-hardening.md)) so the file holds
+ciphertext. The backup procedure is in
+[Part 08 ch.02](../08-day-2-operations/02-backup-and-dr.md).
+
+Only one subcommand in `etcdctl snapshot` writes a snapshot, and etcd 3.6 and
+later restore one only with `etcdutl`. The lab's etcd 3.7.0 lists `save` alone:
+
+<!-- gate: output -->
+```text
+Available Commands:
+  save        Stores an etcd node backend snapshot to a given file
+```
+
+The etcd recovery guide says: "For v3.6 and later, users can only use etcdctl
+to take the data to a snapshot, but use etcdutl to restore data"
+([etcd recovery](https://etcd.io/docs/latest/op-guide/recovery/)).
+
+Delete the canary Secret with its namespace when you finish:
+
+```sh
+kubectl delete namespace etcd-probe
+```
+
+
+### 5. Compaction, defragmentation, the space quota and the NOSPACE alarm
+
+**Compaction** discards MVCC history below a revision (Kubernetes' apiserver
+auto-compacts by default: the `--etcd-compaction-interval`, default `5m0s`, it frees
+space *logically only*. **Defragmentation** physically rewrites the backend
+file to reclaim it — and it **blocks the member it runs on** (it holds the
+backend while rewriting), so it is done **one member at a time**, off-peak,
+**and the current Raft leader LAST**: defragging the leader stops it long
+enough to trigger a leader **re-election** (a cluster-wide write blip), so you
+defrag every follower first and the leader last (by which point its load has
+moved):
+
+```sh
+# Manual compaction to a revision (apiserver does this automatically; shown for
+# the mechanism). Get the current revision, compact below it:
+REV=$(etcd endpoint status -w json | python3 -c 'import sys,json;print(json.load(sys.stdin)[0]["Status"]["header"]["revision"])')
+etcd compact "$REV"
+#   compacted revision <REV>   (history below REV gone; dbSize UNCHANGED yet)
+
+# Identify the current LEADER so we defrag it LAST (its stop-the-world window
+# would otherwise force a leader re-election mid-maintenance):
+etcd endpoint status --cluster -w table        # the row with IS LEADER = true
+LEADER_EP=$(etcd endpoint status --cluster -w json \
+  | python3 -c 'import sys,json; print(next(e["Endpoint"] for e in json.load(sys.stdin) if e["Status"]["leader"]==e["Status"]["header"]["member_id"]))')
+
+# DEFRAG — ONE MEMBER AT A TIME, FOLLOWERS FIRST, LEADER LAST. Per-endpoint,
+# never --cluster all-at-once (a production script defers $LEADER_EP exactly so):
+EPS=$(etcd member list -w json | python3 -c 'import sys,json;print(" ".join(m["clientURLs"][0] for m in json.load(sys.stdin)["members"]))')
+for EP in $EPS; do
+  [ "$EP" = "$LEADER_EP" ] && continue        # skip the leader on this pass
+  echo "defrag follower $EP (blocks THIS member only; brief latency spike)"
+  etcd --endpoints="$EP" defrag
+  sleep 5      # let it settle before the next member (never simultaneous)
+done
+echo "defrag LEADER $LEADER_EP LAST (its load has moved; minimal re-election risk)"
+etcd --endpoints="$LEADER_EP" defrag
+etcd endpoint status --cluster -w json | python3 -m json.tool | grep -E '"dbSize"|"dbSizeInUse"'
+#   dbSize now ≈ dbSizeInUse -> the fragmentation was physically reclaimed.
+```
+
+The lab did not run the manual compaction: the API server already compacts
+every five minutes, and a second compaction adds nothing. The lab did read the
+fragmentation before it tried a defrag:
+
+<!-- gate: output -->
+```text
+            "dbSize": 48664576,
+            "dbSizeInUse": 8335360,
+            "dbSizeQuota": 2147483648,
+```
+
+The file is 48.7 MB and 8.3 MB of it is live, so defragmentation has about
+40 MB to return. On this one-member cluster the loop above has no followers
+and defragments only the leader. The lab's defrag did not finish. The client
+gave up after five seconds, while the API server was overloaded:
+
+<!-- gate: output -->
+```text
+Failed to defragment etcd member[https://127.0.0.1:2379]. took 5.006531169s. (context deadline exceeded)
+```
+
+A second attempt, through the node's runtime, found the etcd container had
+restarted, so the lab has no defrag result to show. Run the loop on a quiet
+cluster and expect `dbSizeInUse` to stay the same while `dbSize` falls.
+
+> **The `NOSPACE` alarm — the classic etcd outage, and its recovery.** etcd is
+> started with **`--quota-backend-bytes`**. Left at `0`, it uses etcd's built-in
+> 2 GiB quota; the endpoint status in section 2 reports it as `dbSizeQuota`.
+> Set it explicitly for your cluster. If the backend exceeds the quota, etcd
+> raises a **`NOSPACE` alarm** and
+> rejects **all writes cluster-wide** (reads still work) — and **stays
+> read-only even after you free space**, until you explicitly **disarm** it.
+> The recovery, in order: `etcd alarm list` (see `NOSPACE`) → free space
+> (compact to a recent revision → defrag every member, one at a time,
+> followers first and the leader last) →
+> **`etcd alarm disarm`** → verify writes resume (`etcd endpoint status`
+> healthy, `etcd alarm list` empty). Skipping the **disarm** is why a
+> "disk-full → cleared the disk" incident *stays* an outage. On kind you can
+> see the knob and the (empty) alarm list; deliberately filling etcd to trip it
+> is destructive and is **described, not run**, here — the exact precedent of
+> [Part 08 ch.02](../08-day-2-operations/02-backup-and-dr.md)'s narrated
+> destructive sequences.
+
+**Auto-compaction** is the prevention: etcd's `--auto-compaction-mode` is
+`periodic` (e.g. retain `1h` of history) or `revision` (retain the last `N`
+revisions); the Kubernetes apiserver additionally compacts on its own interval.
+You set it once at etcd start; you still **defrag on a schedule** (compaction
+without defrag never shrinks the file) and **alert on `dbSize`**.
+
+### 6. Component leader election: the `Lease`
+
+controller-manager and scheduler run on all 3 control-plane nodes but exactly
+one of each is active, holding a `coordination.k8s.io/Lease` it renews
+(`--leader-elect`, [Part 00
+ch.04](../00-foundations/04-control-plane-deep-dive.md)). Inspect it:
+
+```sh
+kubectl -n kube-system get lease kube-scheduler kube-controller-manager
+#   NAME                      HOLDER                              AGE
+#   kube-scheduler            bookstore-ha-control-plane2_<UUID>  ...
+#   kube-controller-manager   bookstore-ha-control-plane_<UUID>   ...
+kubectl -n kube-system get lease kube-scheduler -o jsonpath='{.spec.holderIdentity}{"\n"}'
+kubectl -n kube-system get lease kube-scheduler \
+  -o jsonpath='{.spec.renewTime} (renews every {.spec.leaseDurationSeconds}s){"\n"}'
+# Only the HOLDER schedules. If that node dies, another scheduler acquires the
+# Lease within leaseDurationSeconds and takes over — no double-scheduling,
+# zero config beyond --leader-elect. THIS is why running 3 is safe.
+```
+
+The lab's single control-plane node holds both leases. The output is:
+
+<!-- gate: output -->
+```text
+NAME                      HOLDER                                                        AGE
+kube-scheduler            sf-pilot-control-plane_c31bbbd1-ae69-4a7f-9fd6-47d8c1e2256f   14h
+kube-controller-manager   sf-pilot-control-plane_6a0f2bb1-06cd-4c17-8509-2d7857d9cee4   14h
+```
+
+The lease lasts 15 seconds unless its holder renews it, so a dead holder is
+replaced within that window.
+
+### 7. Three control planes: prerequisites (heavy, narrated)
+
+**Narrated, not run.** This needs three control-plane nodes. The lab's heavy-install lock was held when the captured run happened, so this cluster was not created.
 
 [`platform/ha-kind-3cp.yaml`](../examples/bookstore/platform/ha-kind-3cp.yaml)
 declares 3 control-plane + 2 worker nodes. kind, given ≥2 control-plane nodes,
 **stands up a real stacked-etcd cluster** (and an internal Envoy load balancer
-as the API front; kind v0.32.0 replaced HAProxy with Envoy) — a faithful,
-laptop-sized HA control plane:
+as the API front; kind v0.32.0 replaced HAProxy with Envoy, per the
+[kind release notes](https://github.com/kubernetes-sigs/kind/releases), and the
+lab's v0.33.0 keeps it), a faithful, laptop-sized HA control plane:
 
 ```sh
 # It is a KIND config, not a k8s object — validate it's well-formed YAML,
@@ -341,154 +877,9 @@ kubectl exec -n bookstore postgres-0 -- psql -U bookstore -d bookstore -c \
   "CREATE TABLE IF NOT EXISTS ha_demo(note text); INSERT INTO ha_demo VALUES ('survives-cp-loss');"
 ```
 
-### 1. Talk to etcd — member list / endpoint status / endpoint health
+### 8. Lose a control-plane node: quorum holds, the Bookstore stays up (heavy, narrated)
 
-kind runs etcd as a **static Pod** in `kube-system` with its client certs
-mounted at `/etc/kubernetes/pki/etcd/`. **The etcd image ships `etcdctl`**:
-kubeadm 1.37's default `registry.k8s.io/etcd:3.7.0-0` is distroless (no
-shell, like the Bookstore app images — [Part 05
-ch.03](../05-security/03-supply-chain.md)) but bundles `etcd`, `etcdctl` and
-`etcdutl`, so `kubectl exec … etcdctl …` runs that binary directly here. You
-would *never* do this with the distroless `catalog`/`orders` Pods, which ship
-no such tool (those are debugged via `kubectl debug --profile=restricted`,
-[Part 08 ch.03](../08-day-2-operations/03-troubleshooting-playbook.md)).
-Define a helper that runs `etcdctl` inside the first etcd Pod over its mTLS:
-
-```sh
-E0=$(kubectl -n kube-system get pod -l component=etcd \
-  -o jsonpath='{.items[0].metadata.name}')
-etcd() { kubectl -n kube-system exec "$E0" -- etcdctl \
-  --endpoints=https://127.0.0.1:2379 \
-  --cacert=/etc/kubernetes/pki/etcd/ca.crt \
-  --cert=/etc/kubernetes/pki/etcd/server.crt \
-  --key=/etc/kubernetes/pki/etcd/server.key "$@"; }
-
-etcd member list -w table
-#   +----+---------+-----------------------+--------------------+--------------------+
-#   | ID | STATUS  |        NAME           |     PEER ADDRS     |    CLIENT ADDRS    |
-#   +----+---------+-----------------------+--------------------+--------------------+
-#   |..a | started | bookstore-ha-control-plane    | https://...:2380 | https://...:2379 |
-#   |..b | started | bookstore-ha-control-plane2   | ...                                   |
-#   |..c | started | bookstore-ha-control-plane3   | ...   3 MEMBERS = quorum 2, tol 1     |
-
-etcd endpoint status --cluster -w table
-#   ENDPOINT  ID  VERSION  DB SIZE  IS LEADER  IS LEARNER  RAFT TERM  RAFT INDEX ...
-#   ...:2379  ..b  3.7.0   ~3.5 MB  true       false       ...        ...   <- LEADER
-#   ...:2379  ..a  3.7.0   ~3.5 MB  false      false
-#   ...:2379  ..c  3.7.0   ~3.5 MB  false      false        (DB SIZE = backend file)
-
-etcd endpoint health --cluster -w table
-#   ENDPOINT   HEALTH   TOOK    ERROR
-#   ...:2379   true     4.1ms
-#   ...:2379   true     3.8ms          all 3 healthy -> a healthy quorum
-#   ...:2379   true     5.0ms
-```
-
-`endpoint status` is your day-2 dashboard: **one** `IS LEADER true`, the
-**DB SIZE** per member (watch this — §3), the **RAFT TERM/INDEX** advancing
-together (members in sync). `endpoint health` is the quorum heartbeat.
-
-### 2. Backend DB size — the number you alert on
-
-The backend file only grows until you compact **and** defrag. Read it directly
-(this is what a Prometheus alert watches via `etcd_mvcc_db_total_size_in_bytes`
-/ `etcd_server_quota_backend_bytes` — [Part 06
-ch.01](../06-production-readiness/01-observability-metrics.md)):
-
-```sh
-etcd endpoint status --cluster -w json | python3 -m json.tool | grep -E '"dbSize"|"dbSizeInUse"'
-#   "dbSize":        the on-disk backend file size (what the quota limits)
-#   "dbSizeInUse":   logically live bytes. dbSize - dbSizeInUse = FRAGMENTATION
-#                     (space compaction freed but defrag has NOT reclaimed).
-etcd alarm list           # (empty) — no NOSPACE/CORRUPT alarm. THE thing to check first.
-```
-
-A large `dbSize − dbSizeInUse` gap is the signal to **defrag**; a `dbSize`
-approaching the quota is the signal an alarm is imminent.
-
-### 3. Compaction, defragmentation, the space quota & the NOSPACE alarm
-
-**Compaction** discards MVCC history below a revision (Kubernetes' apiserver
-auto-compacts by default — the `--etcd-compaction-interval`, ~5m); it frees
-space *logically only*. **Defragmentation** physically rewrites the backend
-file to reclaim it — and it **blocks the member it runs on** (it holds the
-backend while rewriting), so it is done **one member at a time**, off-peak,
-**and the current Raft leader LAST**: defragging the leader stops it long
-enough to trigger a leader **re-election** (a cluster-wide write blip), so you
-defrag every follower first and the leader last (by which point its load has
-moved):
-
-```sh
-# Manual compaction to a revision (apiserver does this automatically; shown for
-# the mechanism). Get the current revision, compact below it:
-REV=$(etcd endpoint status -w json | python3 -c 'import sys,json;print(json.load(sys.stdin)[0]["Status"]["header"]["revision"])')
-etcd compact "$REV"
-#   compacted revision <REV>   (history below REV gone; dbSize UNCHANGED yet)
-
-# Identify the current LEADER so we defrag it LAST (its stop-the-world window
-# would otherwise force a leader re-election mid-maintenance):
-etcd endpoint status --cluster -w table        # the row with IS LEADER = true
-LEADER_EP=$(etcd endpoint status --cluster -w json \
-  | python3 -c 'import sys,json; print(next(e["Endpoint"] for e in json.load(sys.stdin) if e["Status"]["leader"]==e["Status"]["header"]["member_id"]))')
-
-# DEFRAG — ONE MEMBER AT A TIME, FOLLOWERS FIRST, LEADER LAST. Per-endpoint,
-# never --cluster all-at-once (a production script defers $LEADER_EP exactly so):
-EPS=$(etcd member list -w json | python3 -c 'import sys,json;print(" ".join(m["clientURLs"][0] for m in json.load(sys.stdin)["members"]))')
-for EP in $EPS; do
-  [ "$EP" = "$LEADER_EP" ] && continue        # skip the leader on this pass
-  echo "defrag follower $EP (blocks THIS member only; brief latency spike)"
-  etcd --endpoints="$EP" defrag
-  sleep 5      # let it settle before the next member (never simultaneous)
-done
-echo "defrag LEADER $LEADER_EP LAST (its load has moved; minimal re-election risk)"
-etcd --endpoints="$LEADER_EP" defrag
-etcd endpoint status --cluster -w json | python3 -m json.tool | grep -E '"dbSize"|"dbSizeInUse"'
-#   dbSize now ≈ dbSizeInUse -> the fragmentation was physically reclaimed.
-```
-
-> **The `NOSPACE` alarm — the classic etcd outage, and its recovery.** etcd is
-> started with **`--quota-backend-bytes`** (default ~2 GiB; production often
-> 8 GiB). If the backend exceeds it, etcd raises a **`NOSPACE` alarm** and
-> rejects **all writes cluster-wide** (reads still work) — and **stays
-> read-only even after you free space**, until you explicitly **disarm** it.
-> The recovery, in order: `etcd alarm list` (see `NOSPACE`) → free space
-> (compact to a recent revision → defrag every member, one at a time,
-> followers first and the leader last) →
-> **`etcd alarm disarm`** → verify writes resume (`etcd endpoint status`
-> healthy, `etcd alarm list` empty). Skipping the **disarm** is why a
-> "disk-full → cleared the disk" incident *stays* an outage. On kind you can
-> see the knob and the (empty) alarm list; deliberately filling etcd to trip it
-> is destructive and is **described, not run**, here — the exact precedent of
-> [Part 08 ch.02](../08-day-2-operations/02-backup-and-dr.md)'s narrated
-> destructive sequences.
-
-**Auto-compaction** is the prevention: etcd's `--auto-compaction-mode` is
-`periodic` (e.g. retain `1h` of history) or `revision` (retain the last `N`
-revisions); the Kubernetes apiserver additionally compacts on its own interval.
-You set it once at etcd start; you still **defrag on a schedule** (compaction
-without defrag never shrinks the file) and **alert on `dbSize`**.
-
-### 4. Component leader election — the `Lease`
-
-controller-manager and scheduler run on all 3 control-plane nodes but exactly
-one of each is active, holding a `coordination.k8s.io/Lease` it renews
-(`--leader-elect`, [Part 00
-ch.04](../00-foundations/04-control-plane-deep-dive.md)). Inspect it:
-
-```sh
-kubectl -n kube-system get lease kube-scheduler kube-controller-manager
-#   NAME                      HOLDER                              AGE
-#   kube-scheduler            bookstore-ha-control-plane2_<UUID>  ...
-#   kube-controller-manager   bookstore-ha-control-plane_<UUID>   ...
-kubectl -n kube-system get lease kube-scheduler -o jsonpath='{.spec.holderIdentity}{"\n"}'
-kubectl -n kube-system get lease kube-scheduler \
-  -o jsonpath='{.spec.renewTime} (renews every {.spec.leaseDurationSeconds}s){"\n"}'
-# Only the HOLDER schedules. If that node dies, another scheduler acquires the
-# Lease within leaseDurationSeconds and takes over — no double-scheduling,
-# zero config beyond --leader-elect. THIS is why running 3 is safe.
-```
-
-### 5. Lose a control-plane node — quorum holds, the Bookstore stays up
+**Narrated, not run.** It needs the three-node cluster from section 7.
 
 Stop one control-plane node (an etcd member + an apiserver go down together —
 the stacked-topology coupling). With 3 members, quorum is 2: **losing 1 keeps
@@ -526,12 +917,14 @@ sleep 20; etcd endpoint health --cluster -w table 2>/dev/null   # 3/3 healthy ag
 > but you cannot *change* anything. Recovery is **not** "wait": with quorum
 > permanently lost you either bring a stopped member back (restores quorum
 > instantly — the kind-feasible path: `docker start` the node) **or**, if
-> members are truly gone, perform the **full-cluster snapshot restore** of §6.
+> members are truly gone, perform the **full-cluster snapshot restore** of §9.
 > This destructive 2-of-3 case is **described, not run** (it wedges the lab
 > cluster); the kind-reproducible lesson is the **1-of-3** case above — quorum
 > *held*.
 
-### 6. etcd DR beyond a snapshot — single-member replace vs full-cluster restore
+### 9. etcd DR beyond a snapshot: single-member replace vs full-cluster restore (narrated)
+
+**Narrated, not run.** It needs a kubeadm node, which kind does not provide.
 
 [Part 08 ch.02](../08-day-2-operations/02-backup-and-dr.md) covered `snapshot
 save` and the stop-apiserver→restore→repoint sequence for **total loss**. The
@@ -560,8 +953,8 @@ etcd member list -w table        # 3 'started' again; quorum restored. NO snapsh
 #   ONLY here do you restore a snapshot — and it builds a NEW LOGICAL CLUSTER:
 #   1. stop ALL apiservers + etcd (move static-Pod manifests out — Part 08 ch.02).
 #   2. on EACH intended member, restore the SAME snapshot into a FRESH data-dir
-#      with that member's identity baked in (etcdutl: etcd v3.6 removed
-#      `etcdctl snapshot restore`):
+#      with that member's identity baked in (etcdutl restores snapshots: from etcd 3.6 on,
+#      etcdctl only takes them):
 etcdutl snapshot restore /backups/etcd-<DATE>.db \
   --name <MEMBER-NAME> \
   --initial-cluster <M1>=https://<IP1>:2380,<M2>=https://<IP2>:2380,<M3>=https://<IP3>:2380 \
@@ -624,7 +1017,7 @@ kind delete cluster --name bookstore-ha
   **Defragmentation** rewrites the backend to actually return the space, and
   because it must hold the backend while rewriting, it **blocks that member**
   for its duration — hence one-member-at-a-time and off-peak. The Kubernetes
-  apiserver auto-compacts (its `--etcd-compaction-interval`); etcd can *also*
+  apiserver auto-compacts (its `--etcd-compaction-interval`, default `5m0s`); etcd can *also*
   auto-compact (`--auto-compaction-mode/-retention`). Defrag is *not*
   automatic — it is the operator's scheduled job, and "compaction is on so
   we're fine" is the common mistake that ends in a slowly-growing,
@@ -698,7 +1091,7 @@ kind delete cluster --name bookstore-ha
 > last** (cluster-wide simultaneous defrag is a self-inflicted stall;
 > defragging the leader mid-pass forces a needless re-election); set
 > `--quota-backend-bytes` deliberately
-> (commonly 8 GiB) and alert on `etcd_mvcc_db_total_size_in_bytes` approaching
+> sized to your data and alert on `etcd_mvcc_db_total_size_in_bytes` approaching
 > `etcd_server_quota_backend_bytes` and on `etcd_server_has_leader == 0` /
 > `etcd_server_health_failures` — so you defrag/compact **before** `NOSPACE`,
 > not after. **Rehearse the `alarm list → free space → alarm disarm`
@@ -710,8 +1103,8 @@ kind delete cluster --name bookstore-ha
 > — **never** a snapshot restore. Total etcd loss is **restore
 > the same snapshot into a fresh data-dir on every member** (a *new* logical
 > cluster, repoint apiservers). Test restore on a schedule and validate the
-> *cluster*, not just that etcd starts. Encrypt Secrets at rest and lock down
-> etcd peer/client TLS — raw etcd access bypasses RBAC entirely ([Part 05
+> *cluster*, not just that etcd starts. Treat snapshots as Secrets and keep client and peer TLS on (sections 0
+> and 4). Raw etcd access bypasses RBAC entirely ([Part 05
 > ch.04](../05-security/04-secrets-and-cluster-hardening.md)). For
 > declaratively-managed apps (the Bookstore), **GitOps makes the etcd restore
 > optional**: rebuild cluster state from Git, restore only the PVC data ([Part
@@ -733,7 +1126,7 @@ kind delete cluster --name bookstore-ha
 # 3-control-plane kind cluster (real multi-member etcd quorum on a laptop)
 kind create cluster --name bookstore-ha --config examples/bookstore/platform/ha-kind-3cp.yaml
 
-# etcdctl into kind's etcd static Pod (the distroless etcd image still SHIPS
+# etcdctl into kind's etcd static Pod (the etcd image has no shell but ships
 # etcdctl; the app pods don't, so they use `kubectl debug --profile=restricted`)
 E0=$(kubectl -n kube-system get pod -l component=etcd -o jsonpath='{.items[0].metadata.name}')
 ETCD="kubectl -n kube-system exec $E0 -- etcdctl --endpoints=https://127.0.0.1:2379 \
@@ -757,6 +1150,9 @@ ETCDCTL_API=3 etcdctl --endpoints=https://127.0.0.1:2379 \
 #   --initial-cluster <ALL> --initial-cluster-token <NEW>
 #   (a NEW logical cluster; repoint apiservers)
 
+# TLS on a control-plane node: the client and peer flags must be true
+kubectl -n kube-system get pod -l component=etcd -o jsonpath='{.items[0].spec.containers[0].command}' | tr ',' '\n' | grep -E 'client-cert-auth'
+
 # Component leader election (why running 3 ctrl-mgr/scheduler is safe)
 kubectl -n kube-system get lease kube-scheduler kube-controller-manager
 ```
@@ -776,6 +1172,10 @@ Minimal HA control-plane shape (the thing to provision):
 
 Checklist:
 
+- [ ] **TLS on** for client and peer (`--client-cert-auth=true`,
+      `--peer-client-cert-auth=true`); port 2379 reached only from control-plane
+      nodes (the section 3 probe proves it); no `--unsafe-no-fsync` outside the
+      lab; snapshots handled as Secrets (section 4)
 - [ ] **Odd** etcd (3 default / 5 large); **never even** (no tolerance gain);
       members spread across **failure domains** (no AZ holds the majority)
 - [ ] Apiservers **active-active behind an LB/VIP**; ctrl-mgr & scheduler
@@ -811,7 +1211,7 @@ Checklist:
 2. **Your etcd cluster shows steady backend-DB growth and `etcd_disk_backend_commit_duration_seconds` p99 is climbing. What do you check and in what order?**
    <details><summary>Show answer</summary>
 
-   (1) `etcdctl endpoint status` — is the DB size near the `--quota-backend-bytes` limit? If yes, you're about to get a `NOSPACE` alarm. (2) `etcdctl compaction` and `etcdctl defrag` — post-compaction defrag releases space; do it one member at a time to avoid taking quorum offline. (3) `etcdctl alarm list` — if `NOSPACE` is set, after freeing space you must `etcdctl alarm disarm` (the sticky-alarm step everyone forgets). (4) Long-term: enable auto-compaction (`--auto-compaction-mode=periodic --auto-compaction-retention=8h`), raise the quota, and audit what's writing — runaway controllers writing to large Lease objects, large ConfigMaps, or huge audit events that aren't supposed to be in etcd.
+   (1) `etcdctl endpoint status` — is the DB size near the `--quota-backend-bytes` limit? If yes, you're about to get a `NOSPACE` alarm. (2) `etcdctl compact` and `etcdctl defrag`: post-compaction defrag releases space; do it one member at a time to avoid taking quorum offline. (3) `etcdctl alarm list` — if `NOSPACE` is set, after freeing space you must `etcdctl alarm disarm` (the sticky-alarm step everyone forgets). (4) Long-term: enable auto-compaction (`--auto-compaction-mode=periodic --auto-compaction-retention=8h`), raise the quota, and audit what's writing — runaway controllers writing to large Lease objects, large ConfigMaps, or huge audit events that aren't supposed to be in etcd.
 
    </details>
 
@@ -836,6 +1236,13 @@ Checklist:
 
    </details>
 
+6. **A colleague says port 2379 is only on the control-plane subnet, so etcd needs no client certificates. What is wrong with that, and what do you check?**
+   <details><summary>Show answer</summary>
+
+   etcd listens on the node's own address (`--listen-client-urls`), and its Pod runs with host networking. A subnet limits which hosts route to the port, but a misrouted host, a second host on that subnet, or a compromised workload on the node still reaches it. The control that holds without the network is `--client-cert-auth=true`: the handshake fails for any client that lacks a certificate from the trusted CA (section 3 shows the refusal). NetworkPolicy does not fix it, because its effect on hostNetwork pods is undefined. Check the flags in section 0, rerun the probe in section 3 after each network change, and confirm that the firewall admits only control-plane nodes to 2379 and 2380.
+
+   </details>
+
 ## Further reading
 
 - **Rosso et al., _Production Kubernetes_, ch.1 — "A Path to Production" & ch.2
@@ -855,3 +1262,9 @@ Checklist:
   <https://etcd.io/docs/latest/op-guide/runtime-configuration/>, and the
   high-availability/HA topology options
   <https://kubernetes.io/docs/setup/production-environment/tools/kubeadm/ha-topology/>.
+- etcd security guide, TLS and client certificate authentication:
+  <https://etcd.io/docs/latest/op-guide/security/>
+- etcd recovery guide, where `etcdctl` takes snapshots and `etcdutl` restores them:
+  <https://etcd.io/docs/latest/op-guide/recovery/>
+- Kubernetes ports and protocols, the etcd client API on control-plane nodes:
+  <https://kubernetes.io/docs/reference/networking/ports-and-protocols/>
