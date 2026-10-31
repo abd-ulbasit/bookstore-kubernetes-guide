@@ -1,11 +1,11 @@
-# Appendix A — `kubectl` cheatsheet
+# Appendix A: `kubectl` cheatsheet
 
 > A task-organized `kubectl` reference for this guide, current for Kubernetes
-> **v1.30+** (flags checked against `kubectl` v1.37.2 / embedded Kustomize
+> **1.37** (flags checked against `kubectl` v1.37.2 and the embedded Kustomize
 > v5.8.1). Every command here is one this guide actually uses; the conventions
 > (distroless `kubectl debug`, the PSA-`restricted` `bookstore` namespace,
 > Helm-pinned operator installs, the bootstrap order, server-side apply) are the
-> guide's hard-won ones — they are called out where they matter, not invented
+> guide's hard-won ones; they are called out where they matter, not invented
 > here. Keep this open while you work; the **[Which chapter teaches
 > this](#which-chapter-teaches-this)** table at the end maps every area back to
 > the chapter that explains *why*.
@@ -14,6 +14,10 @@ This is a reference, not a tutorial. It does **not** follow the nine-section
 chapter anatomy. `<NS>` = a namespace, `<POD>`/`<SVC>`/`<D>` = object names,
 `<C>` = a container name. The running example is the **Bookstore** in the
 `bookstore` namespace (PSA `enforce: restricted`).
+
+The output blocks came from a lab run on a kind cluster named `sf-pilot`
+(Kubernetes 1.37.0). Node names in them are the lab's, and a scratch namespace
+stood in for `bookstore`.
 
 > **The one rule that prevents the worst outage:** before *any* mutating
 > command, confirm `kubectl config current-context`. Acting on the wrong
@@ -32,7 +36,7 @@ kubectl config set-context --current --namespace=<NS>   # default ns for THIS co
 kubectl config view --minify                      # the effective config for the current context
 ```
 
-Per-command overrides (do not rely on these for safety — set the context):
+Per-command overrides (do not rely on these for safety; set the context):
 
 ```sh
 kubectl get pods -n <NS>                          # one-off namespace override
@@ -41,7 +45,7 @@ kubectl --context <CTX> -n <NS> get pods          # fully explicit (scripts/CI)
 ```
 
 > **Discipline:** *always* either set the namespace on the context or pass
-> `-n <NS>`. A command with no namespace silently targets `default` — a common
+> `-n <NS>`. A command with no namespace silently targets `default`: a common
 > "why is nothing there?" The Bookstore lives in `bookstore`, never `default`.
 > `kubens`/`kubectx` (<https://github.com/ahmetb/kubectx>) are widely-used
 > **third-party** helpers (not part of `kubectl`) for fast namespace/context
@@ -49,7 +53,7 @@ kubectl --context <CTX> -n <NS> get pods          # fully explicit (scripts/CI)
 
 ---
 
-## 2. Fast imperative creation (CKAD-speed) → manifest workflow
+## 2. Imperative creation → manifest workflow
 
 The guide's workflow: generate YAML imperatively, redirect to a file, edit, then
 `apply` and keep in Git. `--dry-run=client -o yaml` is the bridge from "fast to
@@ -60,11 +64,17 @@ type" to "declarative and reviewable"
 # The imperative -> manifest pattern (use this constantly):
 kubectl create deployment catalog --image=bookstore/catalog:dev \
   --dry-run=client -o yaml > catalog-deploy.yaml      # generate, don't apply
-$EDITOR catalog-deploy.yaml                            # add probes, resources, securityContext
+$EDITOR catalog-deploy.yaml                            # add the baseline, probes, resources
 kubectl apply -f catalog-deploy.yaml                   # declarative create/update
 ```
 
-Generators (each accepts `--dry-run=client -o yaml`):
+The generated file has no `securityContext`. Add the
+[baseline](../01-core-workloads/01-pods.md#baseline) before you apply it to a
+restricted namespace. Section 5 shows what a bare workload does there.
+
+Generators (each accepts `--dry-run=client -o yaml`; without that flag the
+object is created at once, and a workload created this way has no
+securityContext, so a restricted namespace refuses its Pods):
 
 ```sh
 kubectl run catalog --image=bookstore/catalog:dev --port=8080 --restart=Never   # a bare Pod
@@ -76,18 +86,18 @@ kubectl create cronjob cleanup --image=postgres:16 --schedule="0 3 * * *" \
 kubectl create configmap catalog-config --from-literal=LOG_LEVEL=info \
   --from-file=app.properties
 kubectl create secret generic db-credentials \
-  --from-literal=POSTGRES_PASSWORD=devpassword          # base64, NOT encryption
-kubectl create secret docker-registry regcred \
-  --docker-server=<REG> --docker-username=<U> --docker-password=<P>
-kubectl create serviceaccount catalog-sa
+  --from-file=POSTGRES_PASSWORD=<PASSWORD-FILE>         # value read from a file; base64, NOT encryption
+kubectl create secret generic regcred --type=kubernetes.io/dockerconfigjson \
+  --from-file=.dockerconfigjson=<DOCKER-CONFIG-FILE>
+kubectl create serviceaccount catalog-sa --dry-run=client -o yaml   # then set automountServiceAccountToken: false
 kubectl create role catalog-config-reader --verb=get --resource=configmaps \
   --resource-name=catalog-config
 kubectl create rolebinding catalog-config-reader-binding \
   --role=catalog-config-reader --serviceaccount=bookstore:catalog-sa
 kubectl create clusterrole pod-reader --verb=get,list,watch --resource=pods
-kubectl create clusterrolebinding pr --clusterrole=pod-reader --serviceaccount=bookstore:catalog-sa
+kubectl create clusterrolebinding pr --clusterrole=pod-reader --serviceaccount=bookstore:catalog-sa   # cluster-wide: a workload should get a RoleBinding (section 6)
 kubectl create quota bookstore-quota --hard=cpu=4,memory=8Gi,pods=20
-kubectl create namespace bookstore
+kubectl create namespace bookstore     # no Pod Security labels yet: section 8 applies them
 kubectl create ingress bookstore --rule="bookstore.localdev.me/*=storefront:80"
 ```
 
@@ -99,7 +109,7 @@ kubectl expose deployment catalog --port=8080 --type=ClusterIP --dry-run=client 
 ```
 
 In-place edits to running objects (fast for learning/incident response; in
-production change the *source*, not the live object —
+production change the *source*, not the live object; see
 [00-foundations/06](../00-foundations/06-declarative-api-model.md)):
 
 ```sh
@@ -132,7 +142,7 @@ kubectl rollout pause      deploy/catalog -n bookstore          # batch several 
 kubectl rollout resume     deploy/catalog -n bookstore
 ```
 
-Schema discovery (authoritative, version-correct — reach for it constantly):
+Schema discovery (authoritative, version-correct; reach for it constantly):
 
 ```sh
 kubectl explain deploy.spec.template.spec.containers          # one level
@@ -164,7 +174,7 @@ kubectl get pods -n <NS> -l 'app,!canary'                 # has 'app', NOT 'cana
 kubectl get pods -n <NS> --field-selector status.phase=Running
 ```
 
-Custom output — jsonpath, custom-columns, go-template:
+Custom output: jsonpath, custom-columns, go-template:
 
 ```sh
 # jsonpath: pull exact fields (note the {} and quoting)
@@ -186,6 +196,7 @@ kubectl get pods -n <NS> \
 ```sh
 kubectl describe pod <POD> -n <NS>                        # human view + the Events section
 kubectl describe deploy/catalog -n <NS>
+kubectl describe secret db-credentials -n <NS>            # key names and sizes, no values
 
 # kubectl events (the modern command; richer than `get events`):
 kubectl events -n <NS>                                    # namespace events
@@ -205,15 +216,34 @@ kubectl cluster-info                                      # control-plane endpoi
 kubectl get componentstatuses                             # legacy; prefer /readyz on modern clusters
 ```
 
+> **Secret values stay off the screen.** `kubectl get secret -o yaml` and
+> `-o json` print every value, base64 encoded. Base64 is an encoding, not
+> encryption ([05.04](../05-security/04-secrets-and-cluster-hardening.md)), so
+> that output is the secret itself. `describe` shows key names and sizes only.
+> The lab run of `describe` below leaves out the namespace, labels and
+> annotations lines:
+
+<!-- gate: output -->
+```text
+Name:         db-credentials
+# ...
+Type:  Opaque
+
+Data
+====
+POSTGRES_PASSWORD:  11 bytes
+```
+
 ---
 
-## 4. Debug — guide-consistent (distroless, PSA-`restricted`)
+## 4. Debug: guide-consistent (distroless, PSA-`restricted`)
 
 > **The reflex that fails in this codebase.** `catalog`, `orders`, and
 > `payments-worker` are distroless `gcr.io/distroless/static:nonroot` images:
 > **no shell, no `ps`, no `curl`**. `kubectl exec catalog -- sh` returns
-> `exec: "sh": executable file not found`. The correct tool is **`kubectl debug`** with an ephemeral container. `postgres`/`redis`/`rabbitmq` are stock
-> images and *do* have a shell — the Bookstore is mixed; know which
+> `exec: "sh": executable file not found`. The correct tool is
+> **`kubectl debug`** with an ephemeral container. `postgres`/`redis`/`rabbitmq`
+> are stock images and *do* have a shell; the Bookstore is mixed; know which
 > ([08-day-2-operations/03](../08-day-2-operations/03-troubleshooting-playbook.md)).
 
 Logs and the troubleshooting trident:
@@ -222,72 +252,114 @@ Logs and the troubleshooting trident:
 kubectl logs <POD> -n <NS>                                # stdout/stderr
 kubectl logs <POD> -n <NS> -c <C>                         # a specific container
 kubectl logs <POD> -n <NS> -f                             # follow
-kubectl logs <POD> -n <NS> --previous                     # the PREVIOUS (crashed) container — CrashLoop
+kubectl logs <POD> -n <NS> --previous                     # the PREVIOUS (crashed) container; CrashLoop
 kubectl logs <POD> -n <NS> --since=15m                    # time-bounded
 kubectl logs <POD> -n <NS> --tail=100 --timestamps
 kubectl logs deploy/catalog -n <NS> --all-containers      # logs across a workload's pods
 kubectl logs -n <NS> -l app=catalog --prefix              # by label, prefix each line with the pod
 ```
 
-`kubectl debug` — ephemeral containers (the right primitive for distroless):
+`kubectl debug`: ephemeral containers (the right primitive for distroless):
 
 ```sh
-# (a) EPHEMERAL debug into a RUNNING distroless pod — inject a tooling
-# container that SHARES the target's PROCESS + NETWORK namespaces.
-# --target=<CTR> requires a *Pod name* (not a Deployment): with a workload
-# name kubectl debug does copy-to instead, NOT ephemeral injection. Resolve
-# one pod of the workload first. --profile=restricted (GA in v1.30) shapes
-# it runAsNonRoot + drop ALL + seccomp RuntimeDefault so PSA admits it.
+# (a) EPHEMERAL debug into a RUNNING distroless pod: inject a tooling
+# container that SHARES the target's PROCESS + NETWORK namespaces. Name a Pod:
+# resolve one pod of the workload first. --profile=restricted shapes the
+# container so PSA admits it (runAsNonRoot, drop ALL, seccomp RuntimeDefault).
 POD=$(kubectl get pod -n bookstore -l app=catalog \
   -o jsonpath='{.items[0].metadata.name}')
 kubectl debug -it -n bookstore pod/"$POD" \
-  --image=nicolaka/netshoot --target=catalog --profile=restricted -- /bin/bash
-#   inside: curl -s localhost:8080/healthz ; nslookup postgres ; nc -vz postgres 5432 ; ps aux
-#   (the ephemeral container is gone on exit; the live Pod is untouched.)
+  --image=busybox:1.36 --target=catalog --profile=restricted -- sh
+#   inside: wget -qO- localhost:8080/healthz ; nslookup postgres ; nc -z postgres 5432 ; ps
+#   (the container stays in the Pod's spec, exited, until the Pod is deleted.
+#    The Pod's own containers are untouched.)
 
-# (b) Debug a COPY (mutate freely — swap image/entrypoint — live Pod untouched).
-# This form DOES take a Pod name OR a workload; --copy-to makes a new Pod:
-kubectl debug -n bookstore pod/"$POD" --copy-to=catalog-dbg \
+# (b) Debug a COPY: change the image freely, and the live Pod is untouched.
+# --copy-to makes a new Pod from the target:
+kubectl debug -it -n bookstore pod/"$POD" --copy-to=catalog-dbg \
   --set-image=catalog=busybox:1.36 --profile=restricted -- sh
-#   equivalently from the Deployment: kubectl debug -n bookstore deploy/catalog \
-#     --copy-to=catalog-dbg --set-image=catalog=busybox:1.36 --profile=restricted -- sh
 kubectl delete pod catalog-dbg -n bookstore         # clean up the copy when done
 
-# Node-level debugging (host fs at /host, host namespaces) — for kubelet/containerd/disk:
-kubectl debug node/<NODE> -it --profile=sysadmin --image=busybox:1.36
+# Node debugging: a pod in the node's host namespaces (hostNetwork, hostPID,
+# hostIPC), with the node's filesystem at /host. Restricted refuses it.
+# Use it only in a namespace the guide registers at privileged, such as psa-lab.
+kubectl debug node/<NODE> -n psa-lab -it --profile=sysadmin --image=busybox:1.36
 ```
 
 > **Why `--profile`, not a bare `--image`.** An ephemeral container joins the
 > *target Pod's* namespace, so in `bookstore` it must itself satisfy PSA
-> `restricted`. `--profile=restricted` shapes it to comply (use this for
-> `bookstore`); a bare `--image=busybox` with no profile is **rejected by PSA**.
-> The fallback for a tool image that cannot be made restricted-compliant: debug
-> a **copy in the `default` namespace** (`--copy-to=dbg --namespace=default`),
-> which has no PSA enforcement. Profiles: `restricted` (PSA-`restricted` ns —
-> the Bookstore), `general` (non-PSA ns), `sysadmin`/`netadmin` (privileged /
-> NET_ADMIN, for `node/<N>` debugging only)
-> ([08-day-2-operations/03](../08-day-2-operations/03-troubleshooting-playbook.md),
-> [05-security/02](../05-security/02-pod-security.md)).
+> `restricted`. A bare `--image` gets the default `general` profile, which does
+> not add the restricted fields, and PSA refuses the container. The profiles are
+> `general` (the default), `baseline`, `restricted`, `netadmin` and `sysadmin`.
+> Use `restricted` in `bookstore`.
 
-Ad-hoc pod in the **`bookstore`** namespace — must be restricted-compliant. The
-one-liner `--overrides` JSON the guide uses (busybox/curl/netshoot all run fine
-under this `securityContext`):
+The lab run used a Pod that carries the baseline and a busybox debugger. Without
+a profile, kubectl warns that the target runs as non-root, and the API server
+then refuses the container. The warning from that run:
+
+<!-- gate: output -->
+```text
+Warning: Non-root user is configured for the entire target Pod, and some capabilities granted by debug profile may not work. Please consider using "--custom" with a custom profile that specifies "securityContext.runAsUser: 0".
+```
+
+The refusal begins `Error from server (Forbidden): pods "target" is forbidden:
+violates PodSecurity "restricted:latest"`. With `--profile=restricted` the
+container is admitted, with this securityContext:
+
+<!-- gate: output -->
+```text
+{"allowPrivilegeEscalation":false,"capabilities":{"drop":["ALL"]},"runAsNonRoot":true,"seccompProfile":{"type":"RuntimeDefault"}}
+```
+
+Its log shows it ran as the Pod's UID and listed the target's `sleep` as PID 1,
+so the two share a process namespace:
+
+<!-- gate: output -->
+```text
+65532
+PID   USER     TIME  COMMAND
+    1 65532     0:00 sleep 3600
+   14 65532     0:00 ps
+```
+
+A node debugger is a privileged pod. In a restricted namespace the API server
+refuses it, and names the host namespaces it asks for:
+`host namespaces (hostNetwork=true, hostPID=true, hostIPC=true)`. The lab run:
+
+<!-- gate: output -->
+```text
+Creating debugging pod node-debugger-sf-pilot-control-plane-p54r8 with container debugger on node sf-pilot-control-plane.
+```
+
+Run node debugging only in a namespace the guide registers at privileged, with
+its reason recorded in the exceptions registry (<!-- link-later: 00.08 -->).
+See [08.03](../08-day-2-operations/03-troubleshooting-playbook.md) for the
+per-symptom debugging tree and [05.02](../05-security/02-pod-security.md) for
+PSA.
+
+Ad-hoc pod in the **`bookstore`** namespace. The namespace refuses a Pod without
+the baseline, so this one-liner sets all of it. The fields are explained at the
+[baseline](../01-core-workloads/01-pods.md#baseline). The output below is from a
+run in a restricted scratch namespace:
 
 ```sh
 kubectl run sa-peek -n bookstore --image=busybox:1.36 --restart=Never -i --rm \
-  --overrides='{"apiVersion":"v1","spec":{"securityContext":{"runAsNonRoot":true,"runAsUser":65532,"seccompProfile":{"type":"RuntimeDefault"}},"containers":[{"name":"sa-peek","image":"busybox:1.36","securityContext":{"allowPrivilegeEscalation":false,"capabilities":{"drop":["ALL"]}},"command":["sh","-c","echo restricted-compliant pod OK"]}]}}'
+  --overrides='{"apiVersion":"v1","spec":{"automountServiceAccountToken":false,"securityContext":{"runAsNonRoot":true,"runAsUser":65532,"runAsGroup":65532,"seccompProfile":{"type":"RuntimeDefault"}},"containers":[{"name":"sa-peek","image":"busybox:1.36","command":["sh","-c","echo restricted-compliant pod OK"],"securityContext":{"allowPrivilegeEscalation":false,"readOnlyRootFilesystem":true,"capabilities":{"drop":["ALL"]}},"resources":{"requests":{"cpu":"10m","memory":"16Mi"},"limits":{"memory":"32Mi"}},"volumeMounts":[{"name":"tmp","mountPath":"/tmp"}]}],"volumes":[{"name":"tmp","emptyDir":{}}]}}'
 #   NOTE: "apiVersion":"v1" is REQUIRED (kubectl needs the Pod wrapper to
 #   merge the override). The "containers" override REPLACES the generated
 #   container (it does not merge), so "name" AND "image" must be repeated
 #   correctly. Preview the merged Pod with --dry-run=client -o yaml:
 #     kubectl run sa-peek -n bookstore --image=busybox:1.36 --restart=Never \
 #       --dry-run=client -o yaml --overrides='{...same JSON...}'
-#   (Or: run an unconstrained throwaway pod in the `default` namespace, which
-#    does NOT enforce PSA — the simplest path when you just need a scratch pod.)
+```
+
+<!-- gate: output -->
+```text
+restricted-compliant pod OK
 ```
 
 `exec`, `port-forward`, `cp`, `attach` (note: `exec ... sh` only works on
-images that *have* a shell — not the distroless Go services):
+images that *have* a shell, not the distroless Go services):
 
 ```sh
 kubectl exec -it -n <NS> <POD> -c <C> -- sh               # shell (stock images only)
@@ -306,7 +378,7 @@ kubectl attach -it -n <NS> <POD>                          # attach to PID 1's st
 ```sh
 kubectl apply -f manifest.yaml                            # declarative create/update (3-way merge)
 kubectl apply -f dir/                                     # a directory of manifests
-kubectl apply -f https://example.com/manifest.yaml        # a URL (pin the URL — see note)
+kubectl apply -f https://example.com/manifest.yaml        # a URL (pin the URL; see note)
 kubectl apply -k overlays/dev                             # render a kustomization, then apply
 kubectl apply -f manifest.yaml --dry-run=client           # parse + local validate, NO cluster
 kubectl apply -f manifest.yaml --dry-run=server           # run apiserver admission incl. PSA, NO persist
@@ -318,15 +390,27 @@ kubectl replace -f manifest.yaml                          # full replace (object
 kubectl replace --force -f manifest.yaml                  # delete + recreate (loses immutable-field history)
 kubectl delete -f manifest.yaml                           # delete what a manifest declares
 kubectl delete -k overlays/dev
-kubectl kustomize overlays/prod                           # render only (no apply) — built into kubectl
+kubectl kustomize overlays/prod                           # render only (no apply); built into kubectl
 ```
 
 > **Server dry-run is the PSA proof.** `--dry-run=client` only parses YAML.
 > `--dry-run=server` runs the full admission pipeline (including **Pod Security
-> Admission**) without persisting — this is how the guide certifies every
+> Admission**) without persisting. This is how the guide certifies every
 > Bookstore workload is admitted under `enforce: restricted`
 > ([05-security/02](../05-security/02-pod-security.md),
 > [07-delivery/01](../07-delivery/01-packaging-helm.md)).
+>
+> A Deployment passes the server dry-run differently. Its Pods are checked when
+> the ReplicaSet creates them, so a bare Deployment can come back with only a
+> `Warning: would violate PodSecurity "restricted:latest"` line and still be
+> created. Read the warnings, then check the ReplicaSet. In the lab run the
+> ReplicaSet stayed at zero Pods, and its events named the refusal:
+
+<!-- gate: output -->
+```text
+NAME                     DESIRED   CURRENT   READY   AGE
+bare-deploy-6645c4d875   1         0         0       15s
+```
 
 > **Server-Side Apply (SSA).** Each field has a recorded *manager*
 > (`metadata.managedFields`); the API server merges by field ownership and
@@ -337,10 +421,10 @@ kubectl kustomize overlays/prod                           # render only (no appl
 > ([00-foundations/06](../00-foundations/06-declarative-api-model.md),
 > [appendix C](C-yaml-and-api-conventions.md)).
 
-> **Operator installs — pin, do not `latest`-URL.** The guide installs
+> **Operator installs: pin, do not `latest`-URL.** The guide installs
 > operators (Prometheus, KEDA, Kyverno, Gateway API, snapshotter, CNPG, Argo)
 > with **pinned Helm charts** (`helm repo add … && helm install … --version <PINNED>`),
-> *never* `kubectl apply -f https://…/releases/latest/download/<PINNED-FILE>.yaml` — that URL 404s the
+> *never* `kubectl apply -f https://…/releases/latest/download/<PINNED-FILE>.yaml`; that URL 404s the
 > moment a new release ships
 > ([08-day-2-operations/05](../08-day-2-operations/05-operators-and-crds.md),
 > [07-delivery/01](../07-delivery/01-packaging-helm.md)).
@@ -359,13 +443,24 @@ kubectl auth can-i get configmap/catalog-config -n bookstore \
 kubectl auth can-i --list -n bookstore \
   --as=system:serviceaccount:bookstore:orders-sa          # what can this SA do? (~nothing, by design)
 kubectl auth can-i get secrets -n <NS> --as=alice --as-group=dev   # impersonate user+group
-kubectl create token catalog-sa -n bookstore              # mint a short-lived SA token (TokenRequest API)
+kubectl create token catalog-sa -n bookstore              # mint a short-lived SA token; it prints the bearer token
 kubectl create token catalog-sa -n bookstore --duration=10m --audience=api
 kubectl get sa,role,rolebinding,clusterrole,clusterrolebinding -n <NS>
 kubectl describe clusterrole view                         # inspect a built-in role
+kubectl get namespace bookstore -L pod-security.kubernetes.io/enforce -L pod-security.kubernetes.io/warn   # PSA levels in force
+kubectl get pods -A -o custom-columns='NS:.metadata.namespace,NAME:.metadata.name,HOSTNET:.spec.hostNetwork,SA:.spec.serviceAccountName'   # hostNetwork and ServiceAccount, cluster-wide
 ```
 
-> `--as`/`--as-group` is **impersonation** — itself an RBAC-gated power
+Without a binding, the answer for a ServiceAccount is `no`, and the exit status
+is 1, so a script can branch on it. The lab run used a ServiceAccount with no
+binding:
+
+<!-- gate: output -->
+```text
+no
+```
+
+> `--as`/`--as-group` is **impersonation**, itself an RBAC-gated power
 > (`impersonate` verb), the canonical way to audit another identity without its
 > credentials. `kubectl auth can-i` asks the *real* authorizer, so it is the
 > authoritative answer ([05-security/01](../05-security/01-authn-authz-rbac.md)).
@@ -428,29 +523,6 @@ kubectl rollout status statefulset/postgres -n bookstore        # StatefulSet re
 
 ---
 
-## CKAD speed tips
-
-```text
-┌─ FAST IN THE EXAM (and in real incident response) ───────────────────────────┐
-│ • alias k=kubectl ; export do='--dry-run=client -o yaml' ; export now=       │
-│     '--grace-period=0 --force'  →  k run x --image=nginx $do > x.yaml        │
-│ • GENERATE, don't hand-write: create/run/expose ... --dry-run=client -o yaml │
-│     > f.yaml, then edit. Faster and less error-prone than typing YAML.       │
-│ • kubectl explain <KIND>.spec.<FIELD> --recursive  before guessing a field.  │
-│ • kubectl <CMD> --help | less  — the per-command flags are exam-legal docs.  │
-│ • -o jsonpath / custom-columns to extract one value fast (image, nodeName).  │
-│ • k get po -w  (or kubectl events -w) to watch a rollout converge live.      │
-│ • k delete po x $now  to skip the 30s graceful term when you need it gone.   │
-│ • Set the namespace ONCE: k config set-context --current --namespace=<NS>.   │
-│ • kubectl debug (NOT exec sh) for distroless; --profile=restricted in a      │
-│     PSA-restricted ns.                                                       │
-│ • --dry-run=server validates against admission (incl. PSA) without applying. │
-│ • k apply -k <OVERLAY> / k kustomize <OVERLAY> — Kustomize is built in.      │
-└──────────────────────────────────────────────────────────────────────────────┘
-```
-
----
-
 ## Which chapter teaches this
 
 Every command area maps back to the chapter that explains *why* it works that
@@ -458,38 +530,39 @@ way. Read the chapter; keep this page for the syntax.
 
 | Command area | Chapter that teaches it |
 |---|---|
-| Contexts, kubeconfig, the everyday verbs, `kubectl` as a REST client | [00-foundations/07 — Local cluster setup](../00-foundations/07-local-cluster-setup.md) |
-| The declarative model, `apply` 3-way merge, **SSA**, `explain`, `diff`, labels/selectors | [00-foundations/06 — The declarative API model](../00-foundations/06-declarative-api-model.md) |
-| The API server pipeline (authN/authZ/admission) behind these calls | [00-foundations/04 — Control plane deep dive](../00-foundations/04-control-plane-deep-dive.md) |
-| Pods, `kubectl run`, multi-container | [01-core-workloads/01 — Pods](../01-core-workloads/01-pods.md) |
-| Probes, lifecycle, `--previous`, readiness vs Endpoints | [01-core-workloads/02 — Health and lifecycle](../01-core-workloads/02-health-and-lifecycle.md) |
-| `set resources`, requests/limits, QoS, OOM | [01-core-workloads/03 — Resources and QoS](../01-core-workloads/03-resources-and-qos.md) |
-| `create deployment`, `scale`, `rollout *`, `set image` | [01-core-workloads/04 — ReplicaSets and Deployments](../01-core-workloads/04-replicasets-and-deployments.md) |
-| StatefulSet `rollout status`, ordinals | [01-core-workloads/05 — StatefulSets](../01-core-workloads/05-statefulsets.md) |
-| `create job`/`cronjob`, `wait --for=condition=complete` | [01-core-workloads/07 — Jobs and CronJobs](../01-core-workloads/07-jobs-and-cronjobs.md) |
-| `expose`, Services, Endpoints | [02-networking/02 — Services](../02-networking/02-services.md) |
-| DNS lookups from a debug container | [02-networking/03 — DNS and service discovery](../02-networking/03-dns-and-discovery.md) |
-| `create ingress` | [02-networking/04 — Ingress](../02-networking/04-ingress.md) |
-| NetworkPolicy diagnosis (`nc`/`nslookup` from `kubectl debug`) | [02-networking/06 — Network policies](../02-networking/06-network-policies.md) |
-| `create configmap`, `set env` | [03-config-and-storage/01 — ConfigMaps](../03-config-and-storage/01-configmaps.md) |
-| `create secret`, why it is base64 not encryption, `create token` | [03-config-and-storage/02 — Secrets](../03-config-and-storage/02-secrets.md) |
-| PVC/StorageClass inspection | [03-config-and-storage/04 — Persistent storage](../03-config-and-storage/04-persistent-storage.md) |
-| Affinity/taint/topology fields (via `explain`/`describe node`) | [04-scheduling/02 — Affinity, taints, topology](../04-scheduling/02-affinity-taints-topology.md) |
-| PriorityClass, preemption, `Evicted` | [04-scheduling/03 — Priority and preemption](../04-scheduling/03-priority-and-preemption.md) |
-| `auth whoami/can-i`, `create token`, RBAC objects, `--as` | [05-security/01 — Authn, authz, RBAC](../05-security/01-authn-authz-rbac.md) |
-| **PSA `restricted`**, `--dry-run=server` as the PSA proof, restricted `--overrides`/`--profile` | [05-security/02 — Pod security](../05-security/02-pod-security.md) |
-| Image digests, `kubectl debug` & distroless rationale | [05-security/03 — Supply chain](../05-security/03-supply-chain.md) |
-| `top pod/node`, `get --raw /metrics` | [06-production-readiness/01 — Observability: metrics](../06-production-readiness/01-observability-metrics.md) |
-| `logs` patterns, `--since`, `-l --prefix` | [06-production-readiness/02 — Logging](../06-production-readiness/02-logging.md) |
-| `autoscale`, HPA inspection | [06-production-readiness/04 — Autoscaling](../06-production-readiness/04-autoscaling.md) |
-| PodDisruptionBudget, drain interaction | [06-production-readiness/05 — Reliability and disruptions](../06-production-readiness/05-reliability-and-disruptions.md) |
-| Helm-pinned operator installs, `--dry-run=server` cert | [07-delivery/01 — Packaging with Helm](../07-delivery/01-packaging-helm.md) |
-| `apply -k`, `kustomize`, `diff -k` | [07-delivery/02 — Packaging with Kustomize](../07-delivery/02-packaging-kustomize.md) |
-| `cordon`/`drain`/`uncordon`, version skew | [08-day-2-operations/01 — Cluster lifecycle](../08-day-2-operations/01-cluster-lifecycle.md) |
-| **`kubectl debug` (distroless, `--profile=restricted`)**, the per-symptom tree | [08-day-2-operations/03 — Troubleshooting playbook](../08-day-2-operations/03-troubleshooting-playbook.md) |
-| Namespaces, ResourceQuota, `create quota` | [08-day-2-operations/04 — Multi-tenancy and namespaces](../08-day-2-operations/04-multi-tenancy-and-namespaces.md) |
-| CRDs/operators, `api-resources` for CRD discovery | [08-day-2-operations/05 — Operators and CRDs](../08-day-2-operations/05-operators-and-crds.md) |
-| The full bootstrap order & `kubectl wait` gating | [09-end-to-end-bookstore/01 — Bookstore end-to-end](../09-end-to-end-bookstore/01-bookstore-end-to-end.md) |
+| Contexts, kubeconfig, the everyday verbs, `kubectl` as a REST client | [00-foundations/07: Local cluster setup](../00-foundations/07-local-cluster-setup.md) |
+| The declarative model, `apply` 3-way merge, **SSA**, `explain`, `diff`, labels/selectors | [00-foundations/06: The declarative API model](../00-foundations/06-declarative-api-model.md) |
+| The API server pipeline (authN/authZ/admission) behind these calls | [00-foundations/04: Control plane deep dive](../00-foundations/04-control-plane-deep-dive.md) |
+| Pods, `kubectl run`, multi-container | [01-core-workloads/01: Pods](../01-core-workloads/01-pods.md) |
+| Probes, lifecycle, `--previous`, readiness vs Endpoints | [01-core-workloads/02: Health and lifecycle](../01-core-workloads/02-health-and-lifecycle.md) |
+| `set resources`, requests/limits, QoS, OOM | [01-core-workloads/03: Resources and QoS](../01-core-workloads/03-resources-and-qos.md) |
+| `create deployment`, `scale`, `rollout *`, `set image` | [01-core-workloads/04: ReplicaSets and Deployments](../01-core-workloads/04-replicasets-and-deployments.md) |
+| StatefulSet `rollout status`, ordinals | [01-core-workloads/05: StatefulSets](../01-core-workloads/05-statefulsets.md) |
+| `create job`/`cronjob`, `wait --for=condition=complete` | [01-core-workloads/07: Jobs and CronJobs](../01-core-workloads/07-jobs-and-cronjobs.md) |
+| `expose`, Services, Endpoints | [02-networking/02: Services](../02-networking/02-services.md) |
+| DNS lookups from a debug container | [02-networking/03: DNS and service discovery](../02-networking/03-dns-and-discovery.md) |
+| `create ingress` | [02-networking/04: Ingress](../02-networking/04-ingress.md) |
+| NetworkPolicy diagnosis (`nc`/`nslookup` from `kubectl debug`) | [02-networking/06: Network policies](../02-networking/06-network-policies.md) |
+| `create configmap`, `set env` | [03-config-and-storage/01: ConfigMaps](../03-config-and-storage/01-configmaps.md) |
+| `create secret`, `describe secret`, why it is base64 not encryption, `create token` | [03-config-and-storage/02: Secrets](../03-config-and-storage/02-secrets.md), [05.04](../05-security/04-secrets-and-cluster-hardening.md) |
+| PVC/StorageClass inspection | [03-config-and-storage/04: Persistent storage](../03-config-and-storage/04-persistent-storage.md) |
+| Affinity/taint/topology fields (via `explain`/`describe node`) | [04-scheduling/02: Affinity, taints, topology](../04-scheduling/02-affinity-taints-topology.md) |
+| PriorityClass, preemption, `Evicted` | [04-scheduling/03: Priority and preemption](../04-scheduling/03-priority-and-preemption.md) |
+| `auth whoami/can-i`, `create token`, RBAC objects, `--as` | [05-security/01: Authn, authz, RBAC](../05-security/01-authn-authz-rbac.md) |
+| **PSA `restricted`**, `--dry-run=server` as the PSA proof, restricted `--overrides`/`--profile` | [05-security/02: Pod security](../05-security/02-pod-security.md) |
+| Image digests, `kubectl debug` & distroless rationale | [05-security/03: Supply chain](../05-security/03-supply-chain.md) |
+| `top pod/node`, `get --raw /metrics` | [06-production-readiness/01: Observability: metrics](../06-production-readiness/01-observability-metrics.md) |
+| `logs` patterns, `--since`, `-l --prefix` | [06-production-readiness/02: Logging](../06-production-readiness/02-logging.md) |
+| `autoscale`, HPA inspection | [06-production-readiness/04: Autoscaling](../06-production-readiness/04-autoscaling.md) |
+| PodDisruptionBudget, drain interaction | [06-production-readiness/05: Reliability and disruptions](../06-production-readiness/05-reliability-and-disruptions.md) |
+| Helm-pinned operator installs, `--dry-run=server` cert | [07-delivery/01: Packaging with Helm](../07-delivery/01-packaging-helm.md) |
+| `apply -k`, `kustomize`, `diff -k` | [07-delivery/02: Packaging with Kustomize](../07-delivery/02-packaging-kustomize.md) |
+| `cordon`/`drain`/`uncordon`, version skew | [08-day-2-operations/01: Cluster lifecycle](../08-day-2-operations/01-cluster-lifecycle.md) |
+| **`kubectl debug` (distroless, `--profile=restricted`)**, the per-symptom tree | [08-day-2-operations/03: Troubleshooting playbook](../08-day-2-operations/03-troubleshooting-playbook.md) |
+| `debug node` (host namespaces) and the exceptions a debug namespace needs | Part 05.06, node hardening <!-- link-later: 05.06 -->; 00.08, the exceptions registry <!-- link-later: 00.08 --> |
+| Namespaces, ResourceQuota, `create quota` | [08-day-2-operations/04: Multi-tenancy and namespaces](../08-day-2-operations/04-multi-tenancy-and-namespaces.md) |
+| CRDs/operators, `api-resources` for CRD discovery | [08-day-2-operations/05: Operators and CRDs](../08-day-2-operations/05-operators-and-crds.md) |
+| The full bootstrap order & `kubectl wait` gating | [09-end-to-end-bookstore/01: Bookstore end-to-end](../09-end-to-end-bookstore/01-bookstore-end-to-end.md) |
 
 Node lifecycle (drain/cordon) and `crictl` (data-plane peek inside a kind node):
 
@@ -502,7 +575,7 @@ docker exec -it bookstore-control-plane crictl ps          # kind node: running 
 docker exec -it bookstore-control-plane crictl pods        # kind node: pod sandboxes
 ```
 
-See also: [Appendix B — Glossary](B-glossary.md) for any term above,
-[Appendix C — YAML & API conventions](C-yaml-and-api-conventions.md) for the
-`apply`/SSA/jsonpath/deprecation details, and [Appendix E — Learning
+See also: [Appendix B: Glossary](B-glossary.md) for any term above,
+[Appendix C: YAML & API conventions](C-yaml-and-api-conventions.md) for the
+`apply`/SSA/jsonpath/deprecation details, and [Appendix E: Learning
 paths](E-learning-paths.md) for where these commands appear in a study order.
