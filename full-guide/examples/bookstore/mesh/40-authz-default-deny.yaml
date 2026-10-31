@@ -26,10 +26,12 @@
 #   confirm the calling Pod's ServiceAccount before you rely on this rule. Add
 #   a principal for each other caller, and nothing else.
 #
-# Only the waypoint enforces these rules, and only for traffic that the
-# `catalog` Service sends through it (30-waypoint.yaml, step 3). Calls that
-# bypass the waypoint are not checked here, which is why the Service label
-# in step 3 matters.
+# Only the waypoint enforces the two rules above, and only for traffic that
+# goes through it. A request that dials a catalog Pod IP skips the waypoint,
+# and no Layer 7 rule sees it (Istio's waypoint page calls this the bypass).
+# The third object in this file closes that path at Layer 4: it admits only
+# the waypoint's identity to the catalog Pods. The Service label in step 3
+# does not prevent the bypass by itself.
 #
 # !!! CRD-INTRINSIC DRY-RUN !!!
 #   `AuthorizationPolicy` is `security.istio.io/v1`, an Istio CRD. Without
@@ -79,3 +81,23 @@ spec:
         - operation:
             methods: ["GET"]
             paths: ["/books"]
+---
+apiVersion: security.istio.io/v1
+kind: AuthorizationPolicy
+metadata:
+  name: catalog-require-waypoint
+  namespace: bookstore
+  labels:
+    app: catalog
+    app.kubernetes.io/part-of: bookstore
+spec:
+  # A workload selector, not a targetRef: ztunnel enforces it at Layer 4, so it
+  # also holds when a client dials a catalog Pod IP and skips the waypoint.
+  selector:
+    matchLabels:
+      app: catalog
+  action: ALLOW
+  rules:
+    - from:
+        - source:
+            principals: ["cluster.local/ns/bookstore/sa/catalog-waypoint"]

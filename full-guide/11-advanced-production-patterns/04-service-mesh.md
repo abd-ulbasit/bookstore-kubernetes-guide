@@ -131,7 +131,7 @@ job is traffic and operations, and the threat model does not track those.
 
 | Threat | Control this chapter teaches | Goes deeper in |
 |--------|------------------------------|----------------|
-| S6: a Pod copies a label such as `app: storefront` and is trusted as that workload | SPIFFE identity from the ServiceAccount, checked by an authorization policy that denies by default at the waypoint (step 3b) | [Part 05 ch.01](../05-security/01-authn-authz-rbac.md): workload X.509 identity, and who may run Pods as a ServiceAccount |
+| S6: a Pod copies a label such as `app: storefront` and is trusted as that workload | SPIFFE identity from the ServiceAccount, checked by an authorization policy that denies by default at the waypoint, and a Layer 4 policy that admits only the waypoint's identity to `catalog` Pods, so a direct Pod-IP call cannot skip the waypoint (step 3b) | [Part 05 ch.01](../05-security/01-authn-authz-rbac.md): workload X.509 identity, and who may run Pods as a ServiceAccount |
 | I5: a Pod on the pod network reads the traffic of an edge that policy allows | Strict mTLS between meshed workloads, so no plaintext crosses the pod network (step 2) | [Part 02 ch.06](../02-networking/06-network-policies.md): the NetworkPolicy still applies underneath |
 
 The identity control is only as strong as the rule on who may create Pods.
@@ -402,8 +402,8 @@ The Bookstore already learned a canary in [Part 07 ch.05](../07-delivery/05-prog
 *Pods*). A **mesh canary shifts the *request ratio*** between two stable
 Services regardless of replica counts — 10% means 10% of *requests*, not "1
 Pod in 10". Deploy the **additive** v2 `catalog` Deployment + `catalog-canary`
-Service ([`mesh/05-catalog-v2-deploy.yaml`](../examples/bookstore/mesh/05-catalog-v2-deploy.yaml)
-, and the canonical `10-catalog-deploy.yaml`/`40-services.yaml` are untouched). Its
+Service ([`mesh/05-catalog-v2-deploy.yaml`](../examples/bookstore/mesh/05-catalog-v2-deploy.yaml)),
+and the canonical `10-catalog-deploy.yaml`/`40-services.yaml` are untouched. Its
 Pods carry `app: catalog-canary`, not `app: catalog`: the canonical `catalog`
 Service selects `app: catalog`, and a v2 Pod with that label would take stable
 traffic too. Then deploy a waypoint so `catalog` has an L7 enforcement point in
@@ -485,12 +485,54 @@ kubectl apply -f examples/bookstore/mesh/40-authz-default-deny.yaml
 kubectl get authorizationpolicy -n bookstore
 ```
 
+**The bypass.** Both policies above are enforced at the waypoint, and only
+traffic that goes through the waypoint reaches it. Istio's waypoint page says
+that a request sent straight to a workload IP, when the waypoint handles only
+service traffic (the default), skips the waypoint, and that any Layer 7 policy
+the waypoint would have enforced then never takes effect. So a meshed Pod that
+dials a `catalog` Pod IP directly gets no L7 check at all. The `app: storefront`
+label is not the issue here: the bypass removes the check for every caller.
+
+The third policy closes the bypass. It selects the `catalog` Pods and admits
+only the waypoint's identity. A waypoint uses the ServiceAccount named after its
+Gateway, so that identity is `catalog-waypoint`. Because the policy selects
+workloads rather than the waypoint, ztunnel enforces it at Layer 4, and it holds
+for a direct call as well:
+
+```yaml
+apiVersion: security.istio.io/v1
+kind: AuthorizationPolicy
+metadata:
+  name: catalog-require-waypoint
+  namespace: bookstore
+spec:
+  selector:
+    matchLabels:
+      app: catalog
+  action: ALLOW
+  rules:
+    - from:
+        - source:
+            principals: ["cluster.local/ns/bookstore/sa/catalog-waypoint"]
+```
+
+It is a second ALLOW policy on the same Pods, so any meshed caller that is not
+the waypoint is denied at Layer 4, and that includes a Pod that dials a
+`catalog` Pod IP. Check the waypoint's ServiceAccount on your cluster before
+you apply it:
+
+```sh
+kubectl get pod -n bookstore -l gateway.networking.k8s.io/gateway-name=catalog-waypoint -o jsonpath='{.items[0].spec.serviceAccountName}{"\n"}'
+```
+
 **Cited, not captured.** The behaviour above is documented by Istio and was not
-run in the lab. Two things to check before you rely on the rule. First, the
+run in the lab. Three things to check before you rely on the rules. First, the
 storefront calls `/api/books`, but the proxy location in
 `app/storefront/nginx.conf` is commented out, so enable it and confirm which
 ServiceAccount actually calls `catalog`. Second, a principal is an allow for one
-identity only: add one for each other caller and nothing else.
+identity only: add one for each other caller and nothing else. Third, a direct
+call to a `catalog` Pod IP should now be refused, and the waypoint's own call
+admitted. Test both on your cluster; the lab did not.
 
 ### 4. The sidecar-injection-vs-PSA-restricted footgun (the core lesson)
 
@@ -636,10 +678,10 @@ says the same: the CNI namespace must enforce `privileged`.
 [CNI page](https://istio.io/latest/docs/setup/additional-setup/cni/) calls it
 "effectively a replacement for the `istio-init` container". The injected proxy
 then needs no `NET_ADMIN` or `NET_RAW`. The agent itself still needs elevated
-privileges, so it stays in `istio-system`. The injected proxy also needs a seccomp profile: the
-sidecar injection template emits one only when `global.proxy.seccompProfile`
-is set, and its 1.30.7 default is empty. Set it to `RuntimeDefault` for sidecar
-mode.
+privileges, so it stays in `istio-system`. The injected proxy also needs a
+seccomp profile. The sidecar injection template emits one only when
+`global.proxy.seccompProfile` is set, and its 1.30.7 default is empty. Set it
+to `RuntimeDefault` for sidecar mode.
 
 **(3) Verify the shape, do not assume it.** The waypoint is itself a
 restricted-compliant container only with the step 1 setting. Confirm it after
@@ -806,15 +848,15 @@ Minimal skeletons (full files in `examples/bookstore/mesh/`):
 # Strict mTLS, namespace-wide (PERMISSIVE only inside the migration window)
 apiVersion: security.istio.io/v1
 kind: PeerAuthentication
-metadata: { name: strict, namespace: <NS> }      # CRD — needs Istio installed
+metadata: { name: strict, namespace: bookstore }      # CRD: needs Istio installed
 spec: { mtls: { mode: STRICT } }
 ---
 # Default deny at a waypoint: an ALLOW policy with no rules matches nothing
 apiVersion: security.istio.io/v1
 kind: AuthorizationPolicy
-metadata: { name: allow-nothing, namespace: <NS> }  # CRD: needs Istio installed
+metadata: { name: catalog-allow-nothing, namespace: bookstore }  # CRD: needs Istio installed
 spec:
-  targetRefs: [ { kind: Gateway, group: gateway.networking.k8s.io, name: <WAYPOINT> } ]
+  targetRefs: [ { kind: Gateway, group: gateway.networking.k8s.io, name: catalog-waypoint } ]
   action: ALLOW
 ---
 # Mesh (east-west) canary — GAMMA: HTTPRoute parentRef = a SERVICE
@@ -869,7 +911,7 @@ Checklist:
 2. **You install Istio with automatic sidecar injection enabled on the `bookstore` namespace, but the namespace has PSA-restricted set. Pods fail to start with "init container istio-init not allowed." What's happening and what are your options?**
    <details><summary>Show answer</summary>
 
-   The `istio-init` init container needs `NET_ADMIN` and `NET_RAW` capabilities to set up iptables for traffic redirection. PSA-restricted forbids these capabilities. Options: (a) switch to Istio CNI mode: the cluster-wide CNI plugin installs the iptables rules once per node so the init container is not needed; (b) switch to **Istio ambient mode**: no sidecar at all, ztunnel handles L4 mTLS at the node, optional waypoint Pods handle L7; Downgrading the tenant namespace to `baseline` does not help, because baseline refuses `NET_ADMIN` as well. The only namespace that may run the node agents is a privileged control-plane namespace such as `istio-system`, never a tenant namespace. Ambient is the cleanest answer because it removes the sidecar-vs-PSA tension for the app Pods entirely.
+   The `istio-init` init container needs `NET_ADMIN` and `NET_RAW` capabilities to set up iptables for traffic redirection. PSA-restricted forbids these capabilities. Options: (a) switch to Istio CNI mode: the cluster-wide CNI plugin installs the iptables rules once per node so the init container is not needed; (b) switch to **Istio ambient mode**: no sidecar at all, ztunnel handles L4 mTLS at the node, optional waypoint Pods handle L7. Downgrading the tenant namespace to `baseline` does not help, because baseline refuses `NET_ADMIN` as well. The only namespace that may run the node agents is a privileged control-plane namespace such as `istio-system`, never a tenant namespace. Ambient is the cleanest answer because it removes the sidecar-vs-PSA tension for the app Pods entirely.
 
    </details>
 

@@ -21,13 +21,13 @@
 # note used throughout the guide — stated for webhooks.
 #
 # DEADLOCK-AVOIDANCE (the chapter's headline footgun): both configs scope by
-# namespaceSelector to EXCLUDE kube-system AND the operator's OWN namespace
-# (bookstore-operator-system) and any namespace labelled
-# bookstore.example.com/webhook-exempt. A Pod-validating webhook that can
-# block Pods in its own namespace cannot be (re)scheduled if it ever goes
-# down — a self-inflicted cluster outage. The validating webhook is further
-# scoped to ONLY the `bookstore` namespace (objectSelector-free; the in-code
-# rule also early-returns for other namespaces — defense in depth).
+# namespaceSelector to ONLY the `bookstore` namespace. Neither can reach
+# kube-system or the operator's OWN namespace (bookstore-operator-system), so
+# a webhook outage cannot block the Pod that would bring the webhook back. A
+# Pod-validating webhook that can block Pods in its own namespace cannot be
+# (re)scheduled if it ever goes down, which is a self-inflicted cluster
+# outage. The in-code rule also early-returns for other namespaces (defense
+# in depth).
 apiVersion: admissionregistration.k8s.io/v1
 kind: MutatingWebhookConfiguration
 metadata:
@@ -59,10 +59,8 @@ webhooks:
     namespaceSelector:
       matchExpressions:
         - key: kubernetes.io/metadata.name
-          operator: NotIn
-          values: ["kube-system", "kube-node-lease", "bookstore-operator-system"]
-        - key: bookstore.example.com/webhook-exempt
-          operator: DoesNotExist
+          operator: In
+          values: ["bookstore"] # ONLY the Bookstore app namespace, as the validator
 ---
 apiVersion: admissionregistration.k8s.io/v1
 kind: ValidatingWebhookConfiguration

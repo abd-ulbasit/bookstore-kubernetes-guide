@@ -17,7 +17,7 @@
 > PriorityLevel + FlowSchema so a buggy reconcile can't take down the control
 > plane.
 
-**Estimated time:** ~45 min read · ~60 min hands-on
+**Estimated time:** ~45 min read · ~60 min hands-on · **Lab tier: A (kind).** Run it only against a cluster you own.
 **Prerequisites:** [Part 00 ch.04](../00-foundations/04-control-plane-deep-dive.md) — apiserver request path APF protects · [Part 11 ch.02](02-operator-development.md) — operator whose traffic this chapter classifies
 **You'll know after this:** • explain how FlowSchema + PriorityLevelConfiguration shape apiserver concurrency · • classify a tenant's noisy LIST/WATCH into a bounded PriorityLevel · • read APF metrics (rejected / inqueue / dispatched) and connect them to client behavior · • tune `--kube-api-qps` / `--kube-api-burst` against APF for a controller · • diagnose a noisy client from its 429s, its response headers and the APF metrics
 
@@ -409,7 +409,8 @@ X-Kubernetes-Pf-Prioritylevel-Uid: 3a537671-e452-41b2-a5f5-14faf29ce94d
 The `403` is expected: that identity has no RBAC grant for configmaps in
 `default`. The headers are still there, so the server classified the request
 before authorization refused it. Headers carry UIDs, not names. Read the
-operator's UIDs with `kubectl get flowschema bookstore-operator -o jsonpath='{.metadata.uid}'`
+operator's UIDs with
+`kubectl get flowschema bookstore-operator -o jsonpath='{.metadata.uid}'`
 and the same command for the PriorityLevelConfiguration. The lab's
 ServiceAccount did not exist: the request is impersonated with `--as`, and the
 classification does not depend on the ServiceAccount existing. If you have
@@ -445,7 +446,10 @@ a metric. Step 4 shows most of these with values.
 
 The noisy client is a CI runner outside the cluster that holds a short-lived
 token. It gets its own namespace, a ServiceAccount that mounts no token into a
-pod, and read access to ConfigMaps in that one namespace only. The Pod Security
+pod, and read access through the built-in `view` ClusterRole, bound in that one
+namespace. `view` reads most objects there, but it leaves Secrets out, and it
+is broader than this runner needs: a Role with `get`, `list` and `watch` on
+`configmaps` alone would be tighter. The lab used `view`. The Pod Security
 labels follow the namespace rule in
 [01.01](../01-core-workloads/01-pods.md#baseline-namespace), and the
 ServiceAccount follows
@@ -656,7 +660,7 @@ The server's counters show the same split, and that nothing else was
 touched:
 
 ```sh
-kubectl get --raw=/metrics | grep '^apiserver_flowcontrol_\(dispatched_requests_total\|rejected_requests_total\|current_inqueue_requests\)' | grep 'noisy-tenant'
+kubectl get --raw=/metrics | grep '^apiserver_flowcontrol_\(dispatched_requests_total\|rejected_requests_total\)' | grep 'noisy-tenant'
 kubectl get --raw=/metrics | grep 'bookstore-operator' | grep '^apiserver_flowcontrol_\(dispatched\|rejected\|current_inqueue_requests\)'
 ```
 
