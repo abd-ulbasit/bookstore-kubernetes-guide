@@ -228,9 +228,13 @@ kubectl label namespace argocd pod-security.kubernetes.io/enforce=restricted \
 kubectl create namespace argo-rollouts
 kubectl label namespace argo-rollouts pod-security.kubernetes.io/enforce=restricted
 CMD
+# The chart pulls its Redis image from ECR Public by default. The first run
+# on a runner was refused there ("toomanyrequests: Data limit exceeded"), so
+# this run pulls the same tag from Docker Hub, the one chart value that moves.
 run <<'CMD'
 helm install argocd oci://ghcr.io/argoproj/argo-helm/argo-cd@sha256:90f462a0695121f65a71cd053619f80023b4efef6bc211f750ffcaaa1628b5b6 \
-  -n argocd -f argocd-values.yaml --wait --timeout 10m
+  -n argocd -f argocd-values.yaml --set redis.image.repository=docker.io/library/redis \
+  --wait --timeout 10m
 CMD
 run <<'CMD'
 helm install argo-rollouts oci://ghcr.io/argoproj/argo-helm/argo-rollouts@sha256:09afe23380ec7f804221fb31471e0225cd6328586df2cff4da6093da62aab1ed \
@@ -458,18 +462,19 @@ run <<'CMD'
 kubectl -n monitoring port-forward svc/kube-prometheus-stack-prometheus 9090:9090 >/dev/null 2>&1 &
 sleep 8
 CMD
+for i in $(seq 1 40); do
+  h=$(curl -s 'localhost:9090/api/v1/targets?state=active' | jq -r '.data.activeTargets[] | select(.labels.namespace=="bookstore" and .labels.job=="catalog") | .health' 2>/dev/null | sort -u | tr '\n' ' ')
+  case "$h" in *up*) break ;; esac
+  sleep 5
+done
+sleep 30
 run <<'CMD'
 for i in $(seq 1 300); do
   curl -sk -o /dev/null -H 'Host: bookstore.example.com' https://localhost/api/books
 done
 echo sent 300 requests through the edge
 CMD
-for i in $(seq 1 40); do
-  h=$(curl -s 'localhost:9090/api/v1/targets?state=active' | jq -r '.data.activeTargets[] | select(.labels.namespace=="bookstore" and .labels.job=="catalog") | .health' 2>/dev/null | sort -u | tr '\n' ' ')
-  case "$h" in *up*) break ;; esac
-  sleep 5
-done
-sleep 45
+sleep 60
 run <<'CMD'
 curl -s 'localhost:9090/api/v1/targets?state=active' \
   | jq -r '.data.activeTargets[] | select(.labels.namespace=="bookstore") | [.labels.job, .labels.namespace, .health] | @tsv' | sort
@@ -528,6 +533,15 @@ run <<'CMD'
 kubectl get scaledobject -n bookstore
 kubectl get deploy payments-worker -n bookstore
 CMD
+run <<'CMD'
+kubectl -n bookstore get scaledobject payments-worker -o jsonpath='{range .status.conditions[*]}{.type}{" "}{.status}{" "}{.reason}{" "}{.message}{"\n"}{end}' | sed 's|amqp://[^@]*@|amqp://REDACTED@|g'
+CMD
+run <<'CMD'
+kubectl -n keda logs deploy/keda-operator --tail=300 | grep payments-worker | tail -3 | cut -c1-400 | sed 's|amqp://[^@]*@|amqp://REDACTED@|g'
+CMD
+run <<'CMD'
+kubectl describe hpa catalog -n bookstore | sed -n '/^Conditions:/,/^Events:/p'
+CMD
 r=$(kubectl -n bookstore get scaledobject payments-worker -o jsonpath='{.status.conditions[?(@.type=="Ready")].status}' 2>/dev/null)
 summary "KEDA ScaledObject payments-worker Ready: ${r:-unknown}"
 [ "$r" = True ] || fail=1
@@ -560,7 +574,11 @@ run <<'CMD'
 kubectl get policyreport -n bookstore
 CMD
 run <<'CMD'
-kubectl get policyreport -n bookstore -o jsonpath='{range .items[*]}{.summary}{"\n"}{end}' | head -3
+kubectl get policyreport -n bookstore -o json | jq -c '[.items[].summary] | {pass: (map(.pass) | add), fail: (map(.fail) | add)}'
+CMD
+run <<'CMD'
+kubectl get policyreport -n bookstore -o json \
+  | jq -r '[.items[].results[]? | select(.result=="fail") | .policy + " " + .rule] | group_by(.) | .[] | "\(.[0]) \(length)"'
 CMD
 
 # ---------------------------------------------------------------------------
@@ -581,7 +599,8 @@ echo '## runner step (k): day-2 sampler, a debug container on distroless catalog
 run <<'CMD'
 POD=$(kubectl get pods -n bookstore -l app=catalog -o jsonpath='{.items[0].metadata.name}')
 # gcr.io/distroless/static:debug-nonroot, pinned by the digest below
-kubectl debug -n bookstore pod/$POD --target=catalog --profile=restricted \
+# A runner has no terminal, so stdin is a pipe that stays open for the attach.
+sleep 20 | kubectl debug -n bookstore pod/$POD --target=catalog --profile=restricted \
   --image=gcr.io/distroless/static@sha256:c7b8faacc4439b8f5c41ca7ce4a3f8ff3e8520cb0c3444fae7292f687b00d0dd \
   --container=debugger -i --quiet -- /busybox/sh -c \
   'id -u; nc -z -w 3 postgres.bookstore.svc.cluster.local 5432 && echo PG-REACHABLE'

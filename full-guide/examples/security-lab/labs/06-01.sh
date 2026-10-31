@@ -229,9 +229,20 @@ CMD
 curl -s 'localhost:9090/api/v1/rules' \
   | jq -r '.data.groups[] | select(.name=="bookstore-catalog.rules") | .rules[] | [.name, .state, .health] | @tsv'
 CMD
+  # CatalogAbsent holds while no catalog target is up. Wait for it to clear.
+  for i in $(seq 1 40); do
+    st=$(curl -s 'localhost:9090/api/v1/rules' | jq -r '.data.groups[] | select(.name=="bookstore-catalog.rules") | .rules[] | select(.name=="CatalogAbsent") | .state' 2>/dev/null)
+    [ "$st" = inactive ] && break
+    sleep 5
+  done
+  echo '## runner step 5d: the rules again, once the targets have been scraped'
+  run <<'CMD'
+curl -s 'localhost:9090/api/v1/rules' \
+  | jq -r '.data.groups[] | select(.name=="bookstore-catalog.rules") | .rules[] | [.name, .state, .health] | @tsv'
+CMD
   run <<'CMD'
 curl -s 'localhost:9090/api/v1/query' --data-urlencode 'query=sum(rate(http_requests_total{namespace="bookstore",handler!="metrics"}[2m])) by (handler)' \
-  | jq -r '.data.result[] | .metric.handler'
+  | jq -r '.data.result[] | .metric.handler' | sort
 CMD
   bt=$(curl -s 'localhost:9090/api/v1/targets?state=active' | jq -r '.data.activeTargets[] | select(.labels.namespace=="bookstore" and .labels.job=="catalog") | .health' 2>/dev/null | sort -u | tr '\n' ' ')
   summary "Prometheus scrape of bookstore/catalog through rule 10: ${bt:-no target}"

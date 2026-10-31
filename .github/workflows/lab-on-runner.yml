@@ -85,6 +85,8 @@ jobs:
           kubectl_version: v1.37.2
       - name: Wait until every node is Ready
         run: kubectl wait --for=condition=Ready nodes --all --timeout=300s
+      - name: Make cluster names resolvable from musl images
+        run: bash .github/scripts/lab-runner/dns-check.sh
       - name: Load the image into the cluster
         run: kind load docker-image bookstore/catalog:dev --name bookstore
       - name: Run the lab
@@ -178,6 +180,8 @@ jobs:
           kubectl_version: v1.37.2
       - name: Wait until every node is Ready
         run: kubectl wait --for=condition=Ready nodes --all --timeout=300s
+      - name: Make cluster names resolvable from musl images
+        run: bash .github/scripts/lab-runner/dns-check.sh
       - name: Load the image into the cluster
         run: kind load docker-image bookstore/catalog:dev --name bookstore
       - name: Run the lab, one phase after another
@@ -298,6 +302,8 @@ jobs:
           kubectl_version: v1.37.2
       - name: Wait until every node is Ready
         run: kubectl wait --for=condition=Ready nodes --all --timeout=300s
+      - name: Make cluster names resolvable from musl images
+        run: bash .github/scripts/lab-runner/dns-check.sh
       - name: Run the lab
         id: lab
         env:
