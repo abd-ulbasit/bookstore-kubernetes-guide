@@ -75,6 +75,9 @@ var _ = Describe("BookstoreTenant controller", func() {
 		Expect(k8sClient.Get(ctx, types.NamespacedName{Name: "tenant", Namespace: nsName}, &dep)).To(Succeed())
 		Expect(*dep.Spec.Replicas).To(Equal(int32(2)))
 		Expect(*dep.Spec.Template.Spec.SecurityContext.RunAsNonRoot).To(BeTrue())
+		Expect(*dep.Spec.Template.Spec.SecurityContext.RunAsUser).To(Equal(int64(65535)))
+		Expect(*dep.Spec.Template.Spec.AutomountServiceAccountToken).To(BeFalse())
+		Expect(dep.Spec.Template.Spec.Volumes).To(HaveLen(1))
 		c := dep.Spec.Template.Spec.Containers[0]
 		Expect(*c.SecurityContext.AllowPrivilegeEscalation).To(BeFalse())
 		Expect(c.SecurityContext.Capabilities.Drop).To(ContainElement(corev1.Capability("ALL")))

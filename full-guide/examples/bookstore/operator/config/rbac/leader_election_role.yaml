@@ -1,0 +1,15 @@
+# Leader-election Role, written by hand. controller-gen writes only the
+# ClusterRole into role.yaml, so this Role lives in its own file. The elector
+# gets and renews one Lease, so it needs get, create and update on leases.
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: bookstore-operator-leader-election-role
+  namespace: bookstore-operator-system
+rules:
+  - apiGroups: ["coordination.k8s.io"]
+    resources: ["leases"]
+    verbs: ["get", "create", "update"]
+  - apiGroups: [""]
+    resources: ["events"]
+    verbs: ["create", "patch"]

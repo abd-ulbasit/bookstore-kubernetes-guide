@@ -1,46 +1,9 @@
-# Bookstore — Part 11 ch.02 "Operator development": the BookstoreTenant CRD.
-#
-# Equivalent to `make manifests` (controller-gen crd) output; committed so the
-# tree is usable without controller-gen installed. Regenerate after editing
-# api/*/bookstoretenant_types.go with: make manifests
-#
-# !!! CRD-BACKED — intrinsic dry-run behavior (the SAME precedent as the guide's
-# other CRD-backed files: raw-manifests/51-gateway.yaml, 70-kyverno-policy.yaml,
-# 18-postgres-snapshot.yaml, the argocd/ tree, operators/cnpg-cluster.yaml,
-# cloud/karpenter-nodepool.yaml) !!!
-# This file IS the CustomResourceDefinition, so applying THIS file is what makes
-# the `BookstoreTenant` kind exist. The SAMPLE custom resource
-# (config/samples/bookstore_v1beta1_bookstoretenant.yaml) and the
-# Mutating/ValidatingWebhookConfiguration that reference the not-yet-deployed
-# operator Service therefore behave intrinsically:
-#   • `kubectl apply --dry-run=client -f config/samples/...` on a cluster
-#     WITHOUT this CRD installed prints:
-#       error: resource mapping not found ... no matches for kind
-#       "BookstoreTenant" in version "bookstore.example.com/v1beta1"
-#     That is EXPECTED and NOT a defect — identical to every other CRD-backed
-#     file in the guide. After `make install` (or applying this file), the
-#     sample dry-runs/applies cleanly.
-#   • The webhook configurations reference Service
-#     bookstore-operator-webhook-service; until the operator Deployment +
-#     Service + cert exist the apiserver cannot call the webhook (it is simply
-#     "not present"). The configs are schema-correct.
-# The CRD itself is a built-in apiextensions.k8s.io/v1 object, so THIS file
-# dry-runs/*applies* clean on any v1.30+ cluster.
-#
-# scope: Cluster. BookstoreTenant is cluster-scoped so it can own the
-# cluster-scoped tenant Namespace and the children inside it (a namespaced
-# owner cannot). spec.scope is IMMUTABLE once the CRD is established: an
-# install of the earlier Namespaced CRD must be deleted (which deletes every
-# BookstoreTenant) and recreated from this file, not re-applied over.
-#
-# conversion.strategy: Webhook — v1beta1 is the storage+hub version; v1alpha1
-# is converted via the operator's /convert endpoint (see api/v1alpha1/
-# bookstoretenant_conversion.go). cert-manager injects the caBundle (the
-# cert-manager.io/inject-ca-from annotation is added by config/default in a
-# full kustomize deploy; shown unset here so this file stands alone).
+---
 apiVersion: apiextensions.k8s.io/v1
 kind: CustomResourceDefinition
 metadata:
+  annotations:
+    controller-gen.kubebuilder.io/version: v0.22.0
   name: bookstoretenants.bookstore.example.com
 spec:
   group: bookstore.example.com
@@ -48,142 +11,334 @@ spec:
     kind: BookstoreTenant
     listKind: BookstoreTenantList
     plural: bookstoretenants
-    singular: bookstoretenant
     shortNames:
-      - btn
+    - btn
+    singular: bookstoretenant
   scope: Cluster
-  conversion:
-    strategy: Webhook
-    webhook:
-      conversionReviewVersions: ["v1"]
-      clientConfig:
-        service:
-          name: bookstore-operator-webhook-service
-          namespace: bookstore-operator-system
-          path: /convert
   versions:
-    - name: v1alpha1
-      served: true
-      storage: false
-      additionalPrinterColumns:
-        - name: Tenant
-          type: string
-          jsonPath: .spec.tenantName
-        - name: Phase
-          type: string
-          jsonPath: .status.phase
-        - name: Age
-          type: date
-          jsonPath: .metadata.creationTimestamp
-      schema:
-        openAPIV3Schema:
-          type: object
-          properties:
-            apiVersion: { type: string }
-            kind: { type: string }
-            metadata: { type: object }
-            spec:
-              type: object
-              required: ["tenantName"]
-              properties:
-                tenantName:
-                  type: string
-                  minLength: 1
-                  maxLength: 40
-                  pattern: ^[a-z0-9]([-a-z0-9]*[a-z0-9])?$
-                replicas:
-                  type: integer
-                  format: int32
-                  minimum: 0
-                  maximum: 5
-                  default: 1
-                size:
-                  type: string
-                  enum: ["s", "m", "l"]
-                  default: s
-            status:
-              type: object
-              properties:
-                observedGeneration: { type: integer, format: int64 }
-                namespace: { type: string }
-                phase: { type: string }
-                conditions:
-                  type: array
-                  items:
-                    type: object
-                    required: ["lastTransitionTime", "message", "reason", "status", "type"]
-                    properties:
-                      lastTransitionTime: { type: string, format: date-time }
-                      message: { type: string, maxLength: 32768 }
-                      observedGeneration: { type: integer, format: int64, minimum: 0 }
-                      reason: { type: string, maxLength: 1024, minLength: 1 }
-                      status: { type: string, enum: ["True", "False", "Unknown"] }
-                      type: { type: string, maxLength: 316 }
-                  x-kubernetes-list-map-keys: ["type"]
-                  x-kubernetes-list-type: map
-      subresources:
-        status: {}
-    - name: v1beta1
-      served: true
-      storage: true
-      additionalPrinterColumns:
-        - name: Tenant
-          type: string
-          jsonPath: .spec.tenantName
-        - name: Phase
-          type: string
-          jsonPath: .status.phase
-        - name: Namespace
-          type: string
-          jsonPath: .status.namespace
-        - name: Age
-          type: date
-          jsonPath: .metadata.creationTimestamp
-      schema:
-        openAPIV3Schema:
-          type: object
-          properties:
-            apiVersion: { type: string }
-            kind: { type: string }
-            metadata: { type: object }
-            spec:
-              type: object
-              required: ["tenantName"]
-              properties:
-                tenantName:
-                  type: string
-                  minLength: 1
-                  maxLength: 40
-                  pattern: ^[a-z0-9]([-a-z0-9]*[a-z0-9])?$
-                replicas:
-                  type: integer
-                  format: int32
-                  minimum: 0
-                  maximum: 5
-                  default: 1
-                tier:
-                  type: string
-                  enum: ["small", "medium", "large"]
-                  default: small
-            status:
-              type: object
-              properties:
-                observedGeneration: { type: integer, format: int64 }
-                namespace: { type: string }
-                phase: { type: string }
-                conditions:
-                  type: array
-                  items:
-                    type: object
-                    required: ["lastTransitionTime", "message", "reason", "status", "type"]
-                    properties:
-                      lastTransitionTime: { type: string, format: date-time }
-                      message: { type: string, maxLength: 32768 }
-                      observedGeneration: { type: integer, format: int64, minimum: 0 }
-                      reason: { type: string, maxLength: 1024, minLength: 1 }
-                      status: { type: string, enum: ["True", "False", "Unknown"] }
-                      type: { type: string, maxLength: 316 }
-                  x-kubernetes-list-map-keys: ["type"]
-                  x-kubernetes-list-type: map
-      subresources:
-        status: {}
+  - additionalPrinterColumns:
+    - jsonPath: .spec.tenantName
+      name: Tenant
+      type: string
+    - jsonPath: .status.phase
+      name: Phase
+      type: string
+    - jsonPath: .metadata.creationTimestamp
+      name: Age
+      type: date
+    name: v1alpha1
+    schema:
+      openAPIV3Schema:
+        description: |-
+          BookstoreTenant is the v1alpha1 (spoke) schema for the bookstoretenants API.
+          Cluster-scoped, like the v1beta1 hub (scope is a property of the whole CRD).
+        properties:
+          apiVersion:
+            description: |-
+              APIVersion defines the versioned schema of this representation of an object.
+              Servers should convert recognized schemas to the latest internal value, and
+              may reject unrecognized values.
+              More info: https://git.k8s.io/community/contributors/devel/sig-architecture/api-conventions.md#resources
+            type: string
+          kind:
+            description: |-
+              Kind is a string value representing the REST resource this object represents.
+              Servers may infer this from the endpoint the client submits requests to.
+              Cannot be updated.
+              In CamelCase.
+              More info: https://git.k8s.io/community/contributors/devel/sig-architecture/api-conventions.md#types-kinds
+            type: string
+          metadata:
+            type: object
+          spec:
+            description: "BookstoreTenantSpec (v1alpha1) is the ORIGINAL, deprecated
+              shape. It differs\nfrom the v1beta1 hub on purpose so the conversion
+              has real work to do:\n\n\tv1alpha1                    v1beta1 (hub)\n\t--------
+              \                   -------------\n\ttenantName            <-->  tenantName
+              \       (identical)\n\treplicas              <-->  replicas          (identical)\n\tsize
+              \ (\"s\"/\"m\"/\"l\")   <-->  tier (\"small\"/    (RENAMED + REMAPPED
+              VALUES)\n\t                             \"medium\"/\"large\")\n\nThe
+              conversion code (bookstoretenant_conversion.go) maps `size` <-> `tier`.\nThis
+              is the canonical \"we renamed/reshaped a field across an API version\"\nscenario
+              a conversion webhook exists for."
+            properties:
+              replicas:
+                default: 1
+                description: Replicas — see v1beta1; unchanged across versions.
+                format: int32
+                maximum: 5
+                minimum: 0
+                type: integer
+              size:
+                default: s
+                description: |-
+                  Size is the v1alpha1 resource-profile selector. v1beta1 renamed this to
+                  `tier` and changed the enum values ("s"->"small" etc). The conversion
+                  webhook remaps it; an unknown/empty value defaults to the small profile.
+                enum:
+                - s
+                - m
+                - l
+                type: string
+              tenantName:
+                description: TenantName — see v1beta1; unchanged across versions.
+                maxLength: 40
+                minLength: 1
+                pattern: ^[a-z0-9]([-a-z0-9]*[a-z0-9])?$
+                type: string
+            required:
+            - tenantName
+            type: object
+          status:
+            description: |-
+              BookstoreTenantStatus (v1alpha1) — identical fields to the hub; copied
+              straight through by the conversion.
+            properties:
+              conditions:
+                items:
+                  description: Condition contains details for one aspect of the current
+                    state of this API Resource.
+                  properties:
+                    lastTransitionTime:
+                      description: |-
+                        lastTransitionTime is the last time the condition transitioned from one status to another.
+                        This should be when the underlying condition changed.  If that is not known, then using the time when the API field changed is acceptable.
+                      format: date-time
+                      type: string
+                    message:
+                      description: |-
+                        message is a human readable message indicating details about the transition.
+                        This may be an empty string.
+                      maxLength: 32768
+                      type: string
+                    observedGeneration:
+                      description: |-
+                        observedGeneration represents the .metadata.generation that the condition was set based upon.
+                        For instance, if .metadata.generation is currently 12, but the .status.conditions[x].observedGeneration is 9, the condition is out of date
+                        with respect to the current state of the instance.
+                      format: int64
+                      minimum: 0
+                      type: integer
+                    reason:
+                      description: |-
+                        reason contains a programmatic identifier indicating the reason for the condition's last transition.
+                        Producers of specific condition types may define expected values and meanings for this field,
+                        and whether the values are considered a guaranteed API.
+                        The value should be a CamelCase string.
+                        This field may not be empty.
+                      maxLength: 1024
+                      minLength: 1
+                      pattern: ^[A-Za-z]([A-Za-z0-9_,:]*[A-Za-z0-9_])?$
+                      type: string
+                    status:
+                      description: status of the condition, one of True, False, Unknown.
+                      enum:
+                      - "True"
+                      - "False"
+                      - Unknown
+                      type: string
+                    type:
+                      description: type of condition in CamelCase or in foo.example.com/CamelCase.
+                      maxLength: 316
+                      pattern: ^([a-z0-9]([-a-z0-9]*[a-z0-9])?(\.[a-z0-9]([-a-z0-9]*[a-z0-9])?)*/)?(([A-Za-z0-9][-A-Za-z0-9_.]*)?[A-Za-z0-9])$
+                      type: string
+                  required:
+                  - lastTransitionTime
+                  - message
+                  - reason
+                  - status
+                  - type
+                  type: object
+                type: array
+                x-kubernetes-list-map-keys:
+                - type
+                x-kubernetes-list-type: map
+              namespace:
+                type: string
+              observedGeneration:
+                format: int64
+                type: integer
+              phase:
+                type: string
+            type: object
+        type: object
+    served: true
+    storage: false
+    subresources:
+      status: {}
+  - additionalPrinterColumns:
+    - jsonPath: .spec.tenantName
+      name: Tenant
+      type: string
+    - jsonPath: .status.phase
+      name: Phase
+      type: string
+    - jsonPath: .status.namespace
+      name: Namespace
+      type: string
+    - jsonPath: .metadata.creationTimestamp
+      name: Age
+      type: date
+    name: v1beta1
+    schema:
+      openAPIV3Schema:
+        description: |-
+          BookstoreTenant is the Schema for the bookstoretenants API.
+          It is the HUB (and storage) version.
+
+          It is CLUSTER-scoped on purpose. The controller owns a cluster-scoped
+          Namespace plus namespaced children inside it, and Kubernetes only lets a
+          cluster-scoped owner do that: a namespaced owner cannot own objects in
+          another namespace or any cluster-scoped object. With a cluster-scoped
+          owner, deleting a tenant garbage-collects its Namespace and everything in it.
+        properties:
+          apiVersion:
+            description: |-
+              APIVersion defines the versioned schema of this representation of an object.
+              Servers should convert recognized schemas to the latest internal value, and
+              may reject unrecognized values.
+              More info: https://git.k8s.io/community/contributors/devel/sig-architecture/api-conventions.md#resources
+            type: string
+          kind:
+            description: |-
+              Kind is a string value representing the REST resource this object represents.
+              Servers may infer this from the endpoint the client submits requests to.
+              Cannot be updated.
+              In CamelCase.
+              More info: https://git.k8s.io/community/contributors/devel/sig-architecture/api-conventions.md#types-kinds
+            type: string
+          metadata:
+            type: object
+          spec:
+            description: |-
+              BookstoreTenantSpec defines the desired state of a BookstoreTenant.
+
+              A BookstoreTenant is a small, deliberately-bounded "give a tenant their own
+              isolated slice of the Bookstore" custom resource. The controller reconciles
+              it into a restricted-PodSecurity-compliant Namespace containing a Deployment
+              a public pause image, not a real Bookstore service — the point is the
+              controller machinery (watch -> reconcile -> status), not the payload. See
+              Part 11 ch.02 and the explicit contrast with Part 08 ch.05 (consuming an
+              operator) vs this (building one).
+
+              v1beta1 is the HUB version: the schema below is the canonical one; v1alpha1
+              is a thin spoke that converts to/from it (api/v1alpha1/*_conversion.go).
+            properties:
+              replicas:
+                default: 1
+                description: |-
+                  Replicas is the desired replica count for the tenant's placeholder
+                  Deployment. Bounded on purpose: a tenant CR must not be able to ask for
+                  an unbounded workload.
+                format: int32
+                maximum: 5
+                minimum: 0
+                type: integer
+              tenantName:
+                description: |-
+                  TenantName is the logical tenant identifier. The controller creates a
+                  namespace named "bookstore-tenant-<tenantName>" and labels it for the
+                  PodSecurity `restricted` standard.
+                maxLength: 40
+                minLength: 1
+                pattern: ^[a-z0-9]([-a-z0-9]*[a-z0-9])?$
+                type: string
+              tier:
+                default: small
+                description: |-
+                  Tier selects a coarse resource profile applied to the tenant workload.
+                  It exists so the conversion story (v1alpha1) has a field whose default
+                  differs across versions — see the conversion code.
+                enum:
+                - small
+                - medium
+                - large
+                type: string
+            required:
+            - tenantName
+            type: object
+          status:
+            description: BookstoreTenantStatus defines the observed state of a BookstoreTenant.
+            properties:
+              conditions:
+                description: |-
+                  Conditions is the standard condition list. The controller sets a "Ready"
+                  condition (and "Degraded" on error) using meta.SetStatusCondition.
+                items:
+                  description: Condition contains details for one aspect of the current
+                    state of this API Resource.
+                  properties:
+                    lastTransitionTime:
+                      description: |-
+                        lastTransitionTime is the last time the condition transitioned from one status to another.
+                        This should be when the underlying condition changed.  If that is not known, then using the time when the API field changed is acceptable.
+                      format: date-time
+                      type: string
+                    message:
+                      description: |-
+                        message is a human readable message indicating details about the transition.
+                        This may be an empty string.
+                      maxLength: 32768
+                      type: string
+                    observedGeneration:
+                      description: |-
+                        observedGeneration represents the .metadata.generation that the condition was set based upon.
+                        For instance, if .metadata.generation is currently 12, but the .status.conditions[x].observedGeneration is 9, the condition is out of date
+                        with respect to the current state of the instance.
+                      format: int64
+                      minimum: 0
+                      type: integer
+                    reason:
+                      description: |-
+                        reason contains a programmatic identifier indicating the reason for the condition's last transition.
+                        Producers of specific condition types may define expected values and meanings for this field,
+                        and whether the values are considered a guaranteed API.
+                        The value should be a CamelCase string.
+                        This field may not be empty.
+                      maxLength: 1024
+                      minLength: 1
+                      pattern: ^[A-Za-z]([A-Za-z0-9_,:]*[A-Za-z0-9_])?$
+                      type: string
+                    status:
+                      description: status of the condition, one of True, False, Unknown.
+                      enum:
+                      - "True"
+                      - "False"
+                      - Unknown
+                      type: string
+                    type:
+                      description: type of condition in CamelCase or in foo.example.com/CamelCase.
+                      maxLength: 316
+                      pattern: ^([a-z0-9]([-a-z0-9]*[a-z0-9])?(\.[a-z0-9]([-a-z0-9]*[a-z0-9])?)*/)?(([A-Za-z0-9][-A-Za-z0-9_.]*)?[A-Za-z0-9])$
+                      type: string
+                  required:
+                  - lastTransitionTime
+                  - message
+                  - reason
+                  - status
+                  - type
+                  type: object
+                type: array
+                x-kubernetes-list-map-keys:
+                - type
+                x-kubernetes-list-type: map
+              namespace:
+                description: Namespace is the tenant namespace the controller created/owns.
+                type: string
+              observedGeneration:
+                description: |-
+                  ObservedGeneration is the .metadata.generation the controller last
+                  reconciled. status is stale unless ObservedGeneration == generation.
+                format: int64
+                type: integer
+              phase:
+                description: |-
+                  Phase is a single-word coarse summary (Pending|Provisioning|Ready|
+                  Terminating) for `kubectl get`.
+                type: string
+            type: object
+        type: object
+    served: true
+    storage: true
+    subresources:
+      status: {}

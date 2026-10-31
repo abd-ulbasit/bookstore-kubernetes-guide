@@ -1,0 +1,299 @@
+# Transcript for 11-advanced-production-patterns/02-operator-development.md.
+# Tier A: a kind cluster named sf-pilot, Kubernetes v1.37.0 server, kubectl v1.37.2.
+# Run on 2026-10-31 against the shared lab cluster. Every namespace and every
+# cluster-scoped object the run created carries the p11-02 prefix or is the
+# chapter's own CRD or ClusterRole name; all of them were deleted at the end.
+# Substitution: the chapter prints `acme`, `bookstore-operator-system` and
+# `bookstore-tenant-acme`. This run used `p11-02-acme`, `p11-02-operator-system`
+# and `bookstore-tenant-p11-02-acme`. The lab copy of the config renamed
+# `bookstore-operator-system` to `p11-02-operator-system` and `acme` to
+# `p11-02-acme` in every YAML file. The v1alpha1 document was applied from a copy
+# that holds only the sample's second document, with `acme-legacy` renamed to
+# `p11-02-acme-legacy`. The two dry-runs of the sample use the reader's names.
+# The cluster's node name is printed as captured. The chapter says once that its
+# output came from a lab cluster with a different name.
+# Not run on the cluster: cert-manager, which the lab cluster did not have. The
+# serving certificate is a self-signed certificate made with openssl, and the
+# CRD's caBundle was patched by hand. The webhook configurations were not applied:
+# they intercept Pod creation in every namespace their selectors do not exclude,
+# and this cluster is shared. The webhook Service was applied alone, taken from
+# config/webhook/manifests.yaml. The Pod admission webhooks were not exercised.
+# No heavy install ran, so no heavy lock was taken.
+# What did not work the first time: the lab engine stalled on the image build
+# for several minutes, and then the module download inside the build hit a TLS
+# handshake timeout. The build was repeated and succeeded. An image of the
+# unfixed code was not built, so the missing /convert route was not seen live.
+# The fix is shown by the manager's `Conversion webhook enabled` line and by the
+# conversion round trip. Under load, some reads timed out, returned EOF, or (once)
+# returned Forbidden to the cluster-admin identity. Each one was repeated, and the
+# repeat is kept below the failure.
+# Mac-side lines run on the author's Mac, not the cluster: the lines that start
+# with `cd "$OP"` or `cd "$WT"`, and the controller-gen runs in the scratch copy.
+# `$OP` is the operator directory and `$WT` is the worktree root. The envtest
+# binaries for 1.37.0 came from setup-envtest.
+# Versions: controller-runtime v0.25.2, client-go v0.37.2, controller-tools
+# v0.22.0, kustomize v5.8.1 (bundled in kubectl), setup-envtest release-0.25.
+# The manager image is bookstore/operator:dev, built from the committed Dockerfile
+# with its base images pinned by digest, and loaded into the lab node.
+# Lines that begin with `[exit N]` are not command output. They mark a non-zero exit.
+# Lab transcript for 11-advanced-production-patterns/02-operator-development.md
+$ kubectl config current-context
+kind-sf-pilot
+$ kubectl version
+Client Version: v1.37.2
+Kustomize Version: v5.8.1
+Server Version: v1.37.0
+$ kubectl get crd bookstoretenants.bookstore.example.com
+Error from server (NotFound): customresourcedefinitions.apiextensions.k8s.io "bookstoretenants.bookstore.example.com" not found
+[exit 1]
+$ kubectl get clusterrole bookstore-operator-manager-role
+Error from server (NotFound): clusterroles.rbac.authorization.k8s.io "bookstore-operator-manager-role" not found
+[exit 1]
+$ kubectl get ns p11-02-operator-system
+Error from server (NotFound): namespaces "p11-02-operator-system" not found
+[exit 1]
+$ kubectl apply --dry-run=client -f sample-reader.yaml
+resource mapping not found for name: "acme" namespace: "" from "sample-reader.yaml": no matches for kind "BookstoreTenant" in version "bookstore.example.com/v1beta1"
+ensure CRDs are installed first
+resource mapping not found for name: "acme-legacy" namespace: "" from "sample-reader.yaml": no matches for kind "BookstoreTenant" in version "bookstore.example.com/v1alpha1"
+ensure CRDs are installed first
+[exit 1]
+$ kubectl kustomize config/crd > crd-built.yaml && kubectl apply -f crd-built.yaml
+customresourcedefinition.apiextensions.k8s.io/bookstoretenants.bookstore.example.com created
+$ kubectl create namespace p11-02-operator-system
+namespace/p11-02-operator-system created
+$ kubectl apply -k config/rbac
+serviceaccount/bookstore-operator-controller-manager created
+role.rbac.authorization.k8s.io/bookstore-operator-leader-election-role created
+clusterrole.rbac.authorization.k8s.io/bookstore-operator-manager-role created
+rolebinding.rbac.authorization.k8s.io/bookstore-operator-leader-election-rolebinding created
+clusterrolebinding.rbac.authorization.k8s.io/bookstore-operator-manager-rolebinding created
+$ kubectl apply -f webhook-service.yaml
+service/bookstore-operator-webhook-service created
+$ openssl req -x509 -newkey rsa:2048 -nodes -days 1 -keyout tls.key -out tls.crt -subj '/CN=bookstore-operator-webhook-service.p11-02-operator-system.svc' -addext 'subjectAltName=DNS:bookstore-operator-webhook-service.p11-02-operator-system.svc,DNS:bookstore-operator-webhook-service.p11-02-operator-system.svc.cluster.local' -addext 'basicConstraints=critical,CA:TRUE'
+.....+......+++++++++++++++++++++++++++++++++++++++*.+..+...+.......+.....+...+.+++++++++++++++++++++++++++++++++++++++*...............+....+.....+.+..+.............+..............+....+..+....+...+..+....+.........+........+...................+......+..+.+.....+.+....................+.+........+......+...+.......+...+..+...+......+...............+.........++++++
+..+...+......+.+............+.....+............+....+.....+....+........+....+.....+...+.......+......+...+..+++++++++++++++++++++++++++++++++++++++*....+..+.+.....+.+...+..+...+++++++++++++++++++++++++++++++++++++++*.....+.......+..+...+............+................+..+...+.+.....+..........+.....+....+..+.........+.........+.+...+......+.....+.........+..........+........+...+.+...............+........+.......+..............+.+...+...+........+.+......+.....+.......+..+...................+.........+...+..+.............+.........+.....+...+............+...+......+......+....+.........+...+...+..............+.......+...+...........+.+...+..+.+...+............+...+..+.........+.+..+...+..........+...+............+..+.......+........+.......+...+........+...+.........+.+.....+.+........+...++++++
+-----
+$ kubectl -n p11-02-operator-system create secret tls bookstore-operator-webhook-cert --cert=tls.crt --key=tls.key
+secret/bookstore-operator-webhook-cert created
+$ printf '{"spec":{"conversion":{"webhook":{"clientConfig":{"caBundle":"%s"}}}}}' "$(base64 < tls.crt | tr -d '\n')" > cabundle-patch.json
+$ kubectl patch crd bookstoretenants.bookstore.example.com --type=merge --patch-file cabundle-patch.json
+customresourcedefinition.apiextensions.k8s.io/bookstoretenants.bookstore.example.com patched
+$ kubectl apply -k config/manager
+Warning: resource namespaces/p11-02-operator-system is missing the kubectl.kubernetes.io/last-applied-configuration annotation which is required by kubectl apply. kubectl apply should only be used on resources created declaratively by either kubectl create --save-config or kubectl apply. The missing annotation will be patched automatically.
+namespace/p11-02-operator-system configured
+deployment.apps/bookstore-operator-controller-manager created
+$ kubectl -n p11-02-operator-system rollout status deploy/bookstore-operator-controller-manager --timeout=300s
+Waiting for deployment spec update to be observed...
+Waiting for deployment spec update to be observed...
+Waiting for deployment "bookstore-operator-controller-manager" rollout to finish: 0 out of 1 new replicas have been updated...
+Waiting for deployment "bookstore-operator-controller-manager" rollout to finish: 0 of 1 updated replicas are available...
+deployment "bookstore-operator-controller-manager" successfully rolled out
+$ kubectl -n p11-02-operator-system logs deploy/bookstore-operator-controller-manager --tail=300 | grep -E 'Conversion webhook|starting manager|Starting workers|Serving webhook|acquired lease|ERROR'
+2026-10-31T05:28:27Z	INFO	controller-runtime.builder	Conversion webhook enabled	{"GVK": "bookstore.example.com/v1beta1, Kind=BookstoreTenant"}
+2026-10-31T05:28:27Z	INFO	setup	starting manager
+2026-10-31T05:28:27Z	INFO	controller-runtime.webhook	Serving webhook server	{"host": "", "port": 9443}
+2026-10-31T05:28:28Z	INFO	leaderelection	Successfully acquired lease	{"lock": "p11-02-operator-system/bookstore-operator.bookstore.example.com"}
+2026-10-31T05:28:28Z	INFO	Starting workers	{"controller": "bookstoretenant", "controllerGroup": "bookstore.example.com", "controllerKind": "BookstoreTenant", "worker count": 1}
+$ kubectl apply -f tenant-v1beta1.yaml
+bookstoretenant.bookstore.example.com/p11-02-acme created
+$ kubectl wait --for=jsonpath='{.status.phase}'=Ready bookstoretenant/p11-02-acme --timeout=180s
+bookstoretenant.bookstore.example.com/p11-02-acme condition met
+$ kubectl get bookstoretenant p11-02-acme -o wide
+Error from server (Timeout): the server was unable to return a response in the time allotted, but may still be processing the request (get bookstoretenants.bookstore.example.com p11-02-acme)
+[exit 1]
+$ kubectl get bookstoretenant p11-02-acme -o jsonpath='{.status.phase}'; echo
+Unable to connect to the server: EOF
+
+$ kubectl get bookstoretenant p11-02-acme -o jsonpath='{.status.conditions[?(@.type=="Ready")].status}'; echo
+Unable to connect to the server: EOF
+
+$ kubectl get ns bookstore-tenant-p11-02-acme -o jsonpath='{.metadata.labels.pod-security\.kubernetes\.io/enforce}'; echo
+Error from server (Forbidden): namespaces "bookstore-tenant-p11-02-acme" is forbidden: User "kubernetes-admin" cannot get resource "namespaces" in API group "" in the namespace "bookstore-tenant-p11-02-acme"
+
+$ kubectl get ns bookstore-tenant-p11-02-acme -o jsonpath='{.metadata.ownerReferences[0].kind}'; echo
+Error from server (Forbidden): namespaces "bookstore-tenant-p11-02-acme" is forbidden: User "kubernetes-admin" cannot get resource "namespaces" in API group "" in the namespace "bookstore-tenant-p11-02-acme"
+
+$ kubectl get deploy,svc,cm -n bookstore-tenant-p11-02-acme -o name
+deployment.apps/tenant
+service/tenant
+configmap/kube-root-ca.crt
+configmap/tenant-config
+$ kubectl get deploy tenant -n bookstore-tenant-p11-02-acme -o jsonpath='{.metadata.ownerReferences[0].kind} {.spec.template.spec.automountServiceAccountToken} {.spec.template.spec.securityContext.runAsUser}'; echo
+BookstoreTenant false 65535
+$ kubectl get bookstoretenant p11-02-acme -o jsonpath='{.metadata.generation} {.status.observedGeneration}'; echo
+1 1
+$ kubectl get events -n default --field-selector involvedObject.name=p11-02-acme -o custom-columns=REASON:.reason,TYPE:.type
+REASON       TYPE
+Reconciled   Normal
+$ kubectl delete deploy tenant -n bookstore-tenant-p11-02-acme
+deployment.apps "tenant" deleted from bookstore-tenant-p11-02-acme namespace
+$ for i in $(seq 1 60); do kubectl get deploy tenant -n bookstore-tenant-p11-02-acme >/dev/null 2>&1 && break; sleep 2; done; kubectl get deploy tenant -n bookstore-tenant-p11-02-acme -o name
+deployment.apps/tenant
+$ kubectl patch bookstoretenant p11-02-acme --type=merge -p '{"spec":{"replicas":3}}'
+bookstoretenant.bookstore.example.com/p11-02-acme patched
+$ for i in $(seq 1 60); do [ "$(kubectl get bookstoretenant p11-02-acme -o jsonpath='{.status.observedGeneration}')" = 2 ] && break; sleep 2; done; kubectl get bookstoretenant p11-02-acme -o jsonpath='{.metadata.generation} {.status.observedGeneration}'; echo
+2 2
+$ kubectl get deploy tenant -n bookstore-tenant-p11-02-acme -o jsonpath='{.spec.replicas}'; echo
+3
+$ kubectl auth can-i delete namespaces --as=system:serviceaccount:p11-02-operator-system:bookstore-operator-controller-manager
+Warning: resource 'namespaces' is not namespace scoped
+
+no
+[exit 1]
+$ kubectl auth can-i get secrets -n kube-system --as=system:serviceaccount:p11-02-operator-system:bookstore-operator-controller-manager
+no
+[exit 1]
+$ kubectl auth can-i create deployments -n kube-system --as=system:serviceaccount:p11-02-operator-system:bookstore-operator-controller-manager
+yes
+$ kubectl get bookstoretenant p11-02-acme -o wide
+NAME          TENANT        PHASE   NAMESPACE                      AGE
+p11-02-acme   p11-02-acme   Ready   bookstore-tenant-p11-02-acme   3m19s
+$ kubectl get bookstoretenant p11-02-acme -o jsonpath='{.status.phase}'; echo
+Ready
+$ kubectl get bookstoretenant p11-02-acme -o jsonpath='{.status.conditions[?(@.type=="Ready")].status}'; echo
+True
+$ kubectl get ns bookstore-tenant-p11-02-acme -o jsonpath='{.metadata.labels.pod-security\.kubernetes\.io/enforce}'; echo
+restricted
+$ kubectl get ns bookstore-tenant-p11-02-acme -o jsonpath='{.metadata.ownerReferences[0].kind}'; echo
+BookstoreTenant
+$ kubectl -n p11-02-operator-system scale deploy/bookstore-operator-controller-manager --replicas=0
+deployment.apps/bookstore-operator-controller-manager scaled
+$ kubectl -n p11-02-operator-system wait --for=delete pod -l control-plane=controller-manager --timeout=180s
+pod/bookstore-operator-controller-manager-7db65d6d88-7dcz8 condition met
+$ kubectl delete bookstoretenant p11-02-acme --wait=false
+bookstoretenant.bookstore.example.com "p11-02-acme" deleted
+$ kubectl get bookstoretenant p11-02-acme -o jsonpath='{.metadata.deletionTimestamp} {.metadata.finalizers}'; echo
+2026-10-31T05:32:17Z ["bookstore.example.com/tenant-finalizer"]
+$ kubectl get deploy,cm -n bookstore-tenant-p11-02-acme -o name
+deployment.apps/tenant
+configmap/kube-root-ca.crt
+configmap/tenant-config
+$ kubectl -n p11-02-operator-system scale deploy/bookstore-operator-controller-manager --replicas=1
+deployment.apps/bookstore-operator-controller-manager scaled
+$ kubectl -n p11-02-operator-system rollout status deploy/bookstore-operator-controller-manager --timeout=300s
+Waiting for deployment "bookstore-operator-controller-manager" rollout to finish: 0 of 1 updated replicas are available...
+deployment "bookstore-operator-controller-manager" successfully rolled out
+$ kubectl wait --for=delete bookstoretenant/p11-02-acme --timeout=240s
+bookstoretenant.bookstore.example.com/p11-02-acme condition met
+$ kubectl wait --for=delete namespace/bookstore-tenant-p11-02-acme --timeout=300s
+namespace/bookstore-tenant-p11-02-acme condition met
+$ kubectl get ns bookstore-tenant-p11-02-acme
+Error from server (NotFound): namespaces "bookstore-tenant-p11-02-acme" not found
+[exit 1]
+$ kubectl -n p11-02-operator-system logs deploy/bookstore-operator-controller-manager --tail=400 | grep -i 'finaliz'
+2026-10-31T05:32:56Z	INFO	finalizing tenant	{"controller": "bookstoretenant", "controllerGroup": "bookstore.example.com", "controllerKind": "BookstoreTenant", "BookstoreTenant": {"name":"p11-02-acme"}, "namespace": "", "name": "p11-02-acme", "reconcileID": "56a821f9-fef6-4db2-86a5-15a00630183a", "tenant": "p11-02-acme"}
+2026-10-31T05:32:56Z	DEBUG	events	Event occurred	{"object": {"name":"p11-02-acme"}, "kind": "BookstoreTenant", "apiVersion": "bookstore.example.com/v1beta1", "type": "Normal", "reason": "Finalized", "action": "Finalize", "note": "tenant \"p11-02-acme\" finalized; namespace bookstore-tenant-p11-02-acme is garbage-collected through its ownerReference"}
+$ kubectl apply -f tenant-v1alpha1.yaml
+bookstoretenant.bookstore.example.com/p11-02-acme-legacy created
+$ kubectl get bookstoretenant.v1beta1.bookstore.example.com p11-02-acme-legacy -o jsonpath='{.spec.tier}'; echo
+medium
+$ kubectl get bookstoretenant.v1alpha1.bookstore.example.com p11-02-acme-legacy -o jsonpath='{.spec.size}'; echo
+m
+$ kubectl get bookstoretenant.v1alpha1.bookstore.example.com p11-02-acme-legacy -o jsonpath='{.spec.replicas}'; echo
+2
+$ kubectl delete bookstoretenant p11-02-acme-legacy --wait=true --timeout=240s
+bookstoretenant.bookstore.example.com "p11-02-acme-legacy" deleted
+$ rm -rf wide && mkdir -p wide/out && cp -R "$OP/api" "$OP/internal" "$OP/cmd" "$OP/hack" "$OP/go.mod" "$OP/go.sum" wide/
+$ sed -i.bak '/+kubebuilder:rbac/d' wide/internal/controller/bookstoretenant_controller.go
+$ printf '\n// +kubebuilder:rbac:groups=*,resources=*,verbs=*\n' >> wide/internal/controller/bookstoretenant_controller.go
+$ cd wide && "$OP/bin/controller-gen" rbac:roleName=bookstore-operator-manager-role paths="./api/..." paths="./internal/..." output:rbac:artifacts:config=out && cat out/role.yaml
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: bookstore-operator-manager-role
+rules:
+- apiGroups:
+  - '*'
+  resources:
+  - '*'
+  verbs:
+  - '*'
+$ cd "$OP" && go build ./... && go vet ./... && echo BUILD_VET_OK
+BUILD_VET_OK
+$ cd "$OP" && KUBEBUILDER_ASSETS="$EA" go test -count=1 -v ./internal/controller/ 2>&1 | grep -a -E '^(=== RUN|--- |PASS|FAIL|ok)'
+=== RUN   TestControllers
+--- PASS: TestControllers (6.93s)
+PASS
+ok  	github.com/bookstore/operator/internal/controller	6.959s
+$ cd "$OP" && go test -count=1 ./... 2>&1 | grep -a -E '^(ok|FAIL|\?)'
+ok  	github.com/bookstore/operator/api/v1alpha1	0.012s
+?   	github.com/bookstore/operator/api/v1beta1	[no test files]
+?   	github.com/bookstore/operator/cmd	[no test files]
+ok  	github.com/bookstore/operator/internal/controller	0.033s
+?   	github.com/bookstore/operator/internal/webhook/v1	[no test files]
+$ cd "$OP" && make manifests >/dev/null && cat config/rbac/role.yaml
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: bookstore-operator-manager-role
+rules:
+- apiGroups:
+  - ""
+  resources:
+  - configmaps
+  - namespaces
+  - services
+  verbs:
+  - create
+  - get
+  - list
+  - update
+  - watch
+- apiGroups:
+  - apps
+  resources:
+  - deployments
+  verbs:
+  - create
+  - get
+  - list
+  - update
+  - watch
+- apiGroups:
+  - bookstore.example.com
+  resources:
+  - bookstoretenants
+  verbs:
+  - get
+  - list
+  - update
+  - watch
+- apiGroups:
+  - bookstore.example.com
+  resources:
+  - bookstoretenants/finalizers
+  - bookstoretenants/status
+  verbs:
+  - update
+- apiGroups:
+  - events.k8s.io
+  resources:
+  - events
+  verbs:
+  - create
+  - patch
+$ kubectl delete ns p11-02-operator-system --wait=true --timeout=300s
+namespace "p11-02-operator-system" deleted
+$ kubectl delete crd bookstoretenants.bookstore.example.com --wait=true --timeout=300s
+customresourcedefinition.apiextensions.k8s.io "bookstoretenants.bookstore.example.com" deleted
+$ kubectl delete clusterrole bookstore-operator-manager-role --ignore-not-found
+clusterrole.rbac.authorization.k8s.io "bookstore-operator-manager-role" deleted
+$ kubectl delete clusterrolebinding bookstore-operator-manager-rolebinding --ignore-not-found
+clusterrolebinding.rbac.authorization.k8s.io "bookstore-operator-manager-rolebinding" deleted
+$ kubectl get ns | grep p11-02 || echo 'no p11-02 namespaces left'
+bookstore-tenant-p11-02-acme-legacy   Terminating   63s
+$ kubectl get crd bookstoretenants.bookstore.example.com
+Error from server (NotFound): customresourcedefinitions.apiextensions.k8s.io "bookstoretenants.bookstore.example.com" not found
+[exit 1]
+$ kubectl get clusterrole bookstore-operator-manager-role
+Error from server (NotFound): clusterroles.rbac.authorization.k8s.io "bookstore-operator-manager-role" not found
+[exit 1]
+$ cd "$WT" && kubectl apply --dry-run=client -f full-guide/examples/bookstore/operator/config/samples/bookstore_v1beta1_bookstoretenant.yaml
+resource mapping not found for name: "acme" namespace: "" from "full-guide/examples/bookstore/operator/config/samples/bookstore_v1beta1_bookstoretenant.yaml": no matches for kind "BookstoreTenant" in version "bookstore.example.com/v1beta1"
+ensure CRDs are installed first
+resource mapping not found for name: "acme-legacy" namespace: "" from "full-guide/examples/bookstore/operator/config/samples/bookstore_v1beta1_bookstoretenant.yaml": no matches for kind "BookstoreTenant" in version "bookstore.example.com/v1alpha1"
+ensure CRDs are installed first
+[exit 1]

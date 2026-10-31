@@ -1,0 +1,9 @@
+# cert-manager copies the serving certificate's CA into the CRD's
+# conversion.webhook.clientConfig.caBundle. Without this annotation the
+# apiserver cannot verify /convert and every v1alpha1 request fails.
+apiVersion: apiextensions.k8s.io/v1
+kind: CustomResourceDefinition
+metadata:
+  name: bookstoretenants.bookstore.example.com
+  annotations:
+    cert-manager.io/inject-ca-from: bookstore-operator-system/bookstore-operator-serving-cert
