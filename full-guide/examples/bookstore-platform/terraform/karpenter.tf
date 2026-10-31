@@ -204,6 +204,14 @@ resource "helm_release" "karpenter" {
       ]
 
       controller = {
+        # The system nodes allow one IMDS hop (eks.tf), so the controller cannot
+        # read its region from IMDS. Set it here.
+        env = [
+          {
+            name  = "AWS_REGION"
+            value = var.region
+          }
+        ]
         resources = {
           requests = {
             cpu    = "200m"

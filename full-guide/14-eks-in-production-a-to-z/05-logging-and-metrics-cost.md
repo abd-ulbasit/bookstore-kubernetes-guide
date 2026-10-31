@@ -158,11 +158,47 @@ this chapter covers and where each control lives.
 
 | Threat | Control in this chapter | Deeper |
 |---|---|---|
-| An identity with log-admin rights shortens retention or deletes the group, erasing evidence | Set retention in Terraform, so the apply role owns it. Deny `logs:PutRetentionPolicy`, `logs:DeleteLogGroup` and `logs:DeleteLogStream` to every other principal. Keep a copy in an Object Lock bucket (Production notes). | [Part 14 ch.03](03-eks-addon-management.md), [Part 14 ch.07](07-infrastructure-cicd-and-drift.md) |
+| An identity with log-admin rights shortens retention or deletes the group, erasing evidence | Set retention in Terraform, so the apply role owns it. A service control policy (below the table) denies `logs:PutRetentionPolicy`, `logs:DeleteLogGroup` and `logs:DeleteLogStream` to every principal except that role. Keep a copy in an Object Lock bucket (Production notes). | [Part 14 ch.03](03-eks-addon-management.md), [Part 14 ch.07](07-infrastructure-cicd-and-drift.md) |
 | The audit stream stops. Delivery is best effort, so the gap goes unseen | Alarm on missing ingestion as well as high volume (step 5) | Part 05 ch.08 <!-- link-later: 05.08 --> |
 | A broad audit-policy exclusion hides a compromised identity's reads | Do not exclude audit events. Cut volume at the noisy caller (step 4). | Part 05 ch.08 <!-- link-later: 05.08 --> |
 | Logs carry secrets or personal data, and everyone with console access reads them | Scrub at the boundary, and limit who can read the groups | [Part 06 ch.02](../06-production-readiness/02-logging.md) |
 | Loki with `auth_enabled: false` lets any pod that reaches the gateway read every app log | A NetworkPolicy that admits only Fluent Bit and Grafana (step 6) | [Part 02 ch.06](../02-networking/06-network-policies.md) |
+
+The retention deny is a service control policy in the AWS Organizations
+management account, attached to the OUs that hold the workload accounts.
+It names one exempt principal, the apply role from
+[Part 14 ch.07](07-infrastructure-cicd-and-drift.md), which is the only
+role that sets retention in Terraform. The policy does not reach the
+management account, and an SCP does not grant anything, so it only
+narrows what the other principals can do
+([SCP examples](https://docs.aws.amazon.com/organizations/latest/userguide/orgs_manage_policies_scps_examples.html)).
+
+```json
+{
+  "Version": "2012-10-17",
+  "Statement": [
+    {
+      "Sid": "DenyLogRetentionChangesExceptApplyRole",
+      "Effect": "Deny",
+      "Action": [
+        "logs:PutRetentionPolicy",
+        "logs:DeleteLogGroup",
+        "logs:DeleteLogStream"
+      ],
+      "Resource": "*",
+      "Condition": {
+        "ArnNotLike": {
+          "aws:PrincipalArn": "arn:aws:iam::<AWS_ACCOUNT_ID>:role/github-actions-terraform-apply"
+        }
+      }
+    }
+  ]
+}
+```
+
+Because of this deny, no other role can call `put-retention-policy`,
+including the log agent. Step 6 therefore creates its group in Terraform
+with retention set, rather than letting the agent create it.
 
 ## Diagrams
 
@@ -277,14 +313,11 @@ Confirm `retention = 30`. The 30 is the example default. This group
 also holds the audit stream, so set the value your audit window requires
 (see Production notes for keeping a longer copy). If `retention = null`,
 the log group is **never-expire**, and the cluster was deployed without
-the retention variable set. Fix it immediately:
-
-```bash
-aws logs put-retention-policy \
-  --region "$REGION" \
-  --log-group-name "/aws/eks/$CLUSTER/cluster" \
-  --retention-in-days 30
-```
+the retention variable set. Fix it through Terraform: set
+`cloudwatch_log_group_retention_in_days` and apply the change with the
+apply role. The SCP above denies `put-retention-policy` to every other
+principal, so a manual call from a reader's session fails with
+`AccessDenied`, which is the intended result.
 
 ### 2. Discover the unbounded log groups Terraform didn't create
 
@@ -300,31 +333,35 @@ aws logs describe-log-groups \
 Each group in this list has no expiry. Decide each one before you cap it:
 a group that holds audit evidence needs its own window, not 30 days. The
 name filter below is a guard, not a classification, so read the list
-first. Then cap the rest:
+first.
+
+The query selects `[logGroupName]` as a one-element list per group, so
+`--output text` prints one name per line. A plain `logGroupName` list
+would print every name on one tab-separated line, and a `grep` over that
+line would drop every group at once.
 
 ```bash
-# Bulk cap unmanaged log groups to 30 days, skipping audit-named groups.
+# Print the cap commands for unmanaged groups to 30 days, skipping
+# audit-named groups. Review the output, then run it under the apply role.
 aws logs describe-log-groups \
   --region "$REGION" \
-  --query 'logGroups[?retentionInDays==null].logGroupName' \
+  --query 'logGroups[?retentionInDays==null].[logGroupName]' \
   --output text | \
 grep -v -E 'audit|evidence' | \
 while read -r LG; do
-  echo "Capping $LG to 30 days..."
-  aws logs put-retention-policy \
-    --region "$REGION" \
-    --log-group-name "$LG" \
-    --retention-in-days 30
+  echo aws logs put-retention-policy --region "$REGION" \
+    --log-group-name "$LG" --retention-in-days 30
 done
 ```
 
-Production note: the cap-script is a one-shot. The *durable* fix is
-either a Terraform resource per log group (verbose but explicit) or
-a `aws_cloudwatch_log_group` Terraform resource with a wildcard +
-`for_each` that the addon discovers. A common shortcut is a script on
-a schedule, run weekly by the drift check in
-[Part 14 ch.07](07-infrastructure-cicd-and-drift.md). Run the cap with
-the logging owner's role, since that role can shorten evidence windows.
+Production note: the cap is a one-shot. The *durable* fix is either a
+Terraform resource per log group (verbose but explicit) or an
+`aws_cloudwatch_log_group` resource with a wildcard + `for_each` that
+the addon discovers. A weekly read-only job can run the describe query
+above and report groups with no retention. It cannot cap them, because the
+plan role in [Part 14 ch.07](07-infrastructure-cicd-and-drift.md) has no
+`logs:PutRetentionPolicy`. Only the apply role may change retention, because
+the SCP in Threats and controls exempts that role alone.
 
 ### 3. Measure ingestion volume per log group
 
@@ -356,14 +393,16 @@ reconcile loop.
 ### 4. Find the chatty controller
 
 ```bash
-# Find the noisiest log stream in the audit log group.
+# List the most recently active streams in the cluster log group. CloudWatch
+# no longer reports stored bytes per stream, so volume is measured in the
+# tail below, not here.
 aws logs describe-log-streams \
   --region "$REGION" \
   --log-group-name "/aws/eks/$CLUSTER/cluster" \
   --order-by LastEventTime \
   --descending \
   --max-items 10 \
-  --query 'logStreams[].{name:logStreamName,size:storedBytes}' \
+  --query 'logStreams[].{name:logStreamName,lastEvent:lastEventTimestamp}' \
   --output table
 
 # Tail the audit stream for one minute to spot the chatty caller.
@@ -477,6 +516,12 @@ sidecar:
     enabled: false
 loki:
   auth_enabled: false
+  commonConfig:
+    replication_factor: 1
+  image:
+    # Tag 3.6.7 is the chart's appVersion for 6.55.0. The digest pins it.
+    tag: 3.6.7
+    digest: sha256:3c8fd3570dd9219951a60d3f919c7f31923d10baee578b77bc26c4a0b32d092d
   podSecurityContext:
     seccompProfile:
       type: RuntimeDefault
@@ -497,6 +542,9 @@ loki:
     s3:
       region: <REGION>
 gateway:
+  image:
+    tag: 1.29-alpine
+    digest: sha256:0c79d56aee561a1d81c63f00eee5fb5fe29279560cdc55e91425133104c7fbe6
   podSecurityContext:
     seccompProfile:
       type: RuntimeDefault
@@ -514,9 +562,18 @@ ServiceAccount does not mount an API token. The IRSA annotation gives
 Loki S3 access through a role from [Part 14 ch.03](03-eks-addon-management.md),
 and that role should reach only these two buckets. `auth_enabled: false`
 turns off tenant headers, not authentication. Any pod that reaches
-`loki-gateway` can read every stream, so the NetworkPolicy in
-[Part 02 ch.06](../02-networking/06-network-policies.md) must admit only
-the Fluent Bit and Grafana pods.
+`loki-gateway` can read every stream, so the NetworkPolicy in step 6
+below admits only the Fluent Bit and Grafana pods
+([Part 02 ch.06](../02-networking/06-network-policies.md) covers the
+policy model).
+
+`replication_factor: 1` is required with one replica. The chart defaults
+to 3, and with one replica every write fails with "at least 2 live
+replicas required, could only find 1". The
+[Grafana monolithic install guide](https://grafana.com/docs/loki/latest/setup/install/helm/install-monolithic/)
+states the same requirement. The dry-run below cannot catch this, because
+it checks only the manifests. The digests pin the Loki and gateway images,
+and the tags stay beside them so a reader can see the version.
 
 Render the chart against the namespace before you install. A
 `restricted` violation appears as a PodSecurity warning in this dry-run:
@@ -526,8 +583,10 @@ kubectl apply -f logging-namespace.yaml
 helm repo add grafana https://grafana.github.io/helm-charts
 helm repo update
 
-# Chart 6.18.0 (Loki app 3.2.0), confirmed in the Grafana repo on 2026-10-31.
-LOKI_VERSION="6.18.0"
+# Chart 6.55.0 (Loki app 3.6.7), the newest 6.x chart in the Grafana repo
+# index on 2026-10-31. The 7.x line is described as Grafana Enterprise Logs,
+# so this guide stays on 6.x. Run helm search repo grafana/loki --versions.
+LOKI_VERSION="6.55.0"
 helm template loki grafana/loki --version "$LOKI_VERSION" -n logging \
   -f loki-values.yaml | kubectl apply --dry-run=server -n logging -f -
 
@@ -535,6 +594,17 @@ helm install loki grafana/loki \
   --version "$LOKI_VERSION" \
   -n logging --wait \
   -f loki-values.yaml
+
+# Readiness check: push one line through the gateway, then read it back.
+# A 204 response means the write was accepted. Without replication_factor: 1
+# the push returns a 500 that says at least 2 live replicas are required.
+TS="$(date +%s)000000000"
+PUSH="{\"streams\":[{\"stream\":{\"job\":\"readiness\"},\"values\":[[\"$TS\",\"readiness check\"]]}]}"
+kubectl -n logging exec deploy/loki-gateway -- wget -S -O- \
+  --header='Content-Type: application/json' --post-data="$PUSH" \
+  http://localhost:8080/loki/api/v1/push
+kubectl -n logging exec deploy/loki-gateway -- wget -O- -q \
+  'http://localhost:8080/loki/api/v1/query_range?query=%7Bjob%3D%22readiness%22%7D&limit=5'
 
 # Route app namespaces to Loki and kube-system pod logs to CloudWatch.
 # Excerpt to add to your existing fluent-bit.conf:
@@ -552,13 +622,100 @@ cat <<EOF
     region      $REGION
     log_group_name /aws/eks/$CLUSTER/system
     log_stream_prefix fluentbit-
-    auto_create_group true
+    auto_create_group false
 EOF
 ```
 
 This split sends apps to Loki and kube-system pod logs to CloudWatch. Apps
 usually generate most of the volume and have shorter retention needs. The
 control-plane audit stream stays in its EKS group, outside this split.
+
+The agent does not create the `system` group. A group the agent creates has
+no retention, and the agent's `log_retention_days` option would call
+`PutRetentionPolicy` from the agent's role, which the SCP denies. Terraform
+creates the group with retention first, and the agent writes into it:
+
+```hcl
+resource "aws_cloudwatch_log_group" "system" {
+  name              = "/aws/eks/<CLUSTER_NAME>/system"
+  retention_in_days = 30
+}
+```
+
+Apply the NetworkPolicy before Loki takes traffic. The tree's `logging`
+namespace has no default-deny, so this step adds one. The labels match the
+`fluent/fluent-bit` and `kube-prometheus-stack` chart defaults. Match them to
+your agent and Grafana.
+
+```yaml
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: default-deny-ingress
+  namespace: logging
+spec:
+  podSelector: {}
+  policyTypes:
+    - Ingress
+---
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: loki-gateway-from-clients
+  namespace: logging
+spec:
+  podSelector:
+    matchLabels:
+      app.kubernetes.io/name: loki
+      app.kubernetes.io/component: gateway
+  policyTypes:
+    - Ingress
+  ingress:
+    - from:
+        - podSelector:
+            matchLabels:
+              app.kubernetes.io/name: fluent-bit
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: prometheus-system
+          podSelector:
+            matchLabels:
+              app.kubernetes.io/name: grafana
+      ports:
+        - protocol: TCP
+          port: 8080
+---
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: loki-from-gateway
+  namespace: logging
+spec:
+  podSelector:
+    matchLabels:
+      app.kubernetes.io/name: loki
+      app.kubernetes.io/component: single-binary
+  policyTypes:
+    - Ingress
+  ingress:
+    - from:
+        - podSelector:
+            matchLabels:
+              app.kubernetes.io/name: loki
+              app.kubernetes.io/component: gateway
+      ports:
+        - protocol: TCP
+          port: 3100
+```
+
+Check the objects with a server-side dry run before you apply them, with
+`kubectl apply --dry-run=server -f <file>`. Enforcement depends on the
+cluster's network plugin, so confirm it with a request from a pod that the
+policy should block. The rules follow the
+[NetworkPolicy](https://kubernetes.io/docs/concepts/services-networking/network-policies/)
+semantics: once a pod is selected by an ingress policy, only the listed
+peers and ports reach it. The policies in this step have not been applied
+in a lab run.
 
 ### 7. Audit the metrics cardinality before it explodes
 
@@ -698,8 +855,8 @@ metrics.
 - **Scrubbing** (the same volume, but smaller per line): Fluent Bit
   `modify` filter strips PII fields; the line still ships but is
   10-50% smaller. Tiny dollar impact unless lines were enormous;
-  large compliance-scope impact (no PII in CloudWatch keeps you
-  out of GDPR/HIPAA evaluation for that log group).
+  less sensitive data in the group, so a privacy review of that
+  group has less to cover.
 - **Retention** at the sink: the log/storage lifecycle policy.
   Doesn't reduce ingestion (which is paid before retention applies);
   reduces stored cost only.
@@ -710,9 +867,10 @@ metrics.
 > of the cluster's first apply, including groups an agent creates for
 > add-on logs. The
 > `aws logs describe-log-groups --query 'logGroups[?retentionInDays==null]'`
-> query is the drift check. Run it weekly from the drift workflow in
-> [14.07](07-infrastructure-cicd-and-drift.md), and alert on any group
-> that never expires, audit groups included.
+> query is the drift check. Run it weekly from a read-only job, such as the
+> drift workflow in [14.07](07-infrastructure-cicd-and-drift.md) extended with
+> this query. The plan role can describe groups but cannot change retention.
+> Alert on any group that never expires, audit groups included.
 
 > **In production:** Drop debug logs in production at the application
 > level, not at the Fluent Bit level. The example workloads set
@@ -778,14 +936,15 @@ metrics.
 ## Quick Reference
 
 ```bash
-# Cap unmanaged log groups after review, skipping audit-named groups (drift script).
+# Print the cap commands for unmanaged groups, skipping audit-named groups.
+# Review them, then run them under the apply role.
 aws logs describe-log-groups \
   --region "$REGION" \
-  --query 'logGroups[?retentionInDays==null].logGroupName' \
+  --query 'logGroups[?retentionInDays==null].[logGroupName]' \
   --output text | \
 grep -v -E 'audit|evidence' | \
 while read -r LG; do
-  aws logs put-retention-policy --region "$REGION" \
+  echo aws logs put-retention-policy --region "$REGION" \
     --log-group-name "$LG" --retention-in-days 30
 done
 
@@ -801,12 +960,16 @@ aws cloudwatch get-metric-statistics --region "$REGION" \
 curl -s 'http://localhost:9090/api/v1/query' \
   --data-urlencode 'query=topk(10, count by (__name__)({__name__=~".+"}))'
 
-# Alarm on log-volume spike.
-aws cloudwatch put-metric-alarm --alarm-name "${CLUSTER}-log-volume-high" \
+# Alarm on log-volume spike, or on no ingestion (the same alarm as step 5).
+aws cloudwatch put-metric-alarm --region "$REGION" \
+  --alarm-name "${CLUSTER}-cluster-log-volume-high" \
+  --alarm-description "EKS cluster log ingestion above 5 GB/day" \
   --metric-name IncomingBytes --namespace AWS/Logs --statistic Sum \
   --period 86400 --evaluation-periods 1 --threshold 5368709120 \
   --comparison-operator GreaterThanThreshold \
-  --dimensions Name=LogGroupName,Value="/aws/eks/$CLUSTER/cluster"
+  --treat-missing-data breaching \
+  --dimensions Name=LogGroupName,Value="/aws/eks/$CLUSTER/cluster" \
+  --alarm-actions "<SNS_TOPIC_ARN>"
 ```
 
 Minimal skeleton: the OUTPUT fragment that splits apps to Loki and
@@ -827,9 +990,11 @@ it to your existing `fluent-bit.conf` rather than applying it on its own:
     region      <REGION>
     log_group_name /aws/eks/<CLUSTER>/system
     log_stream_prefix fluentbit-
-    log_retention_days 30
-    auto_create_group true
+    auto_create_group false
 ```
+
+Create the `system` group in Terraform with `retention_in_days = 30` before
+the agent starts (step 6 shows the resource).
 
 Cost-and-evidence checklist (the bill and the evidence are both bounded
 when all seven are yes):
@@ -858,7 +1023,7 @@ when all seven are yes):
 2. **Finance flags a CloudWatch bill of $400/month for one cluster. You inherit it, run `aws logs describe-log-groups`, and see 12 log groups with `retentionInDays: null`. What do you do first, and what's the trap with rushing the fix?**
    <details><summary>Show answer</summary>
 
-   The unbounded log groups have been accumulating since cluster creation — storage cost dominates ingestion at this point. The fix is to set `retention_in_days` (via Terraform if managed, `aws logs put-retention-policy` if not) for each group; AWS will then begin expiring logs older than the cap on the next cycle. The trap: if any of those logs are compliance-bound (audit logs for SOC2/HIPAA), you can't just slap 7-day retention on them — coordinate with the compliance team, set the audit log to 90/365 days, and route a daily export to a cheaper S3 lifecycle-managed bucket. The bill falls as old data expires; the compliance posture stays intact.
+   The unbounded log groups have been accumulating since cluster creation; storage cost dominates ingestion at this point. The fix is to set `retention_in_days` (via Terraform if managed, `aws logs put-retention-policy` if not) for each group; AWS will then begin expiring logs older than the cap on the next cycle. The trap: if any of those logs are compliance-bound (audit logs for SOC2/HIPAA), you can't just slap 7-day retention on them ; coordinate with the compliance team, set the audit log to 90/365 days, and subscribe a copy of the events to Kinesis Data Firehose, which writes to an S3 bucket with Object Lock (Production notes explain why not a daily export). The bill falls as old data expires; the compliance posture stays intact.
 
    </details>
 
@@ -877,7 +1042,7 @@ when all seven are yes):
    The change is itself an API call, which CloudTrail records as a
    management event if your trail covers CloudWatch Logs. The controls
    are preventive first: deny the retention and delete actions to every
-   principal except the apply role, which sets retention in Terraform.
+   principal except the apply role, which sets retention in Terraform. The SCP in Threats and controls is that deny.
    Second, keep a copy in an S3 bucket with Object Lock, which the
    attacker's retention change cannot reach. The first control is in
    Threats and controls, and the copy is in Production notes.

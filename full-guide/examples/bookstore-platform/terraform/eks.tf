@@ -160,9 +160,19 @@ module "eks" {
       capacity_type  = "ON_DEMAND"
       ami_type       = "AL2023_x86_64_STANDARD"
 
+      # IMDSv2 only, with hop limit 1, so a Pod cannot reach the node role's
+      # credentials. The module default hop limit is 2. Changing this rolls the
+      # system nodes. Pods that read the region or VPC ID from IMDS must get
+      # those values from their own configuration.
+      metadata_options = {
+        http_endpoint               = "enabled"
+        http_tokens                 = "required"
+        http_put_response_hop_limit = 1
+      }
+
       # aws-node runs on its own IRSA role (cluster_addons.vpc-cni above), so
       # the node role does not need the CNI grant the module attaches by
-      # default. The IMDS hop limit is the subject of 14.08.
+      # default. The IMDS settings above are explained in 14.08.
       iam_role_attach_cni_policy = false
 
       min_size     = var.system_node_min_size

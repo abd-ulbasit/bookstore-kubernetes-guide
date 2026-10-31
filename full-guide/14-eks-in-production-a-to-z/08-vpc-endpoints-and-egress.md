@@ -183,7 +183,7 @@ in standing fees on a 3-AZ cluster. If your cluster only pushes
 |---|---|---|
 | A Pod copies data to a bucket in an attacker's account through the S3 endpoint | S3 endpoint policy limited to this account's buckets and the ECR layer bucket (Step 6) | this chapter |
 | A Pod sends data to an internet host over the NAT path | Network ACLs on the subnets, plus an egress firewall or proxy | [02.06](../02-networking/06-network-policies.md) covers in-cluster egress policy |
-| A Pod reads the node's instance credentials from IMDS | IMDSv2 required, hop limit 1 (node metadata, under How it works) | [10.03](../10-cloud-and-managed-kubernetes/03-cloud-identity.md) |
+| A Pod reads the node's instance credentials from IMDS | IMDSv2 required, hop limit 1, set on the `system` node group (`eks.tf`) and on the `EC2NodeClass` (node metadata, under How it works) | [10.03](../10-cloud-and-managed-kubernetes/03-cloud-identity.md) |
 
 Exfiltration can leave by any path, so each path needs its own control.
 The endpoint policy only sees traffic that uses the endpoint. Egress
@@ -372,22 +372,25 @@ this cluster, only the gateway endpoints make sense.
 ### 3. Enable the gateway endpoints first (the unambiguous win)
 
 The Phase 14-R `vpc-endpoints.tf` ships **all seven endpoints** (the S3
-gateway and six interface endpoints) under one flag. To enable *only*
-the S3 gateway, a minimal local override:
+gateway and six interface endpoints) under one flag. The flag below creates
+all seven unless you take Option B. To roll out the gateway first, take
+Option B now and add the interface endpoints in Step 5:
 
 ```bash
 cd examples/bookstore-platform/terraform
 
-# Option A — enable the full set (when data volume justifies it):
+# Set the flag once. It gates the S3 gateway endpoint and the six interface
+# endpoints together. Do not append it again in a later step: a second
+# line for the same key fails with "Attribute redefined".
 cat <<EOF >> example.tfvars
 enable_vpc_endpoints = true
 EOF
 
-# Option B — for the "gateway only" case (no interface endpoints,
-# zero standing fees), edit the vpc-endpoints.tf locally to comment
-# out the interface endpoints block. Production teams who only need
-# gateway endpoints typically fork or extend the module rather than
-# patching the example tree.
+# Option B: gateway only, with no interface endpoints and no standing fees.
+# Before the plan below, comment out the `resource "aws_vpc_endpoint"
+# "interface"` block in vpc-endpoints.tf. The S3 gateway endpoint stays.
+# Step 5 uncomments the block. Production teams who want this split for
+# good typically fork or extend the module rather than patching the example.
 
 terraform plan -var-file=example.tfvars -out=endpoints.tfplan
 terraform apply endpoints.tfplan
@@ -462,11 +465,9 @@ volume:
 ```bash
 # If the NAT traffic that remains is still above the per-endpoint
 # break-even (about 625 GB/month per endpoint in a 3-AZ cluster) and
-# most of it goes to ECR, Logs or STS, enable the full set:
-cat <<EOF >> example.tfvars
-enable_vpc_endpoints = true
-EOF
-
+# most of it goes to ECR, Logs or STS, add the interface endpoints. The flag
+# is already set in Step 3, so only uncomment the interface block there if
+# you took Option B. Then plan:
 terraform plan -var-file=example.tfvars -out=endpoints-full.tfplan
 terraform apply endpoints-full.tfplan
 ```
@@ -479,10 +480,14 @@ private DNS take time to become ready.
 
 By default, the endpoint lets every IAM principal in the VPC reach any
 S3 bucket. The policy below allows only buckets owned by your account,
-plus the bucket that ECR stores image layers in. It is a fragment: add
-the data source and the `policy` line to `aws_vpc_endpoint.s3` in
-`vpc-endpoints.tf`. This guide does not apply it to AWS, so test it in
-a non-production account first.
+plus the bucket that ECR stores image layers in. The tree's
+`vpc-endpoints.tf` carries it on `aws_vpc_endpoint.s3`, and the caller
+identity data source comes from `locals.tf`. A request through the endpoint
+for a bucket in another account is denied, because `s3:ResourceAccount` does
+not match ([S3 condition keys](https://docs.aws.amazon.com/AmazonS3/latest/userguide/amazon-s3-policy-keys.html)).
+This guide does not apply the policy to AWS. Test it in a non-production
+account first, because a statement that is too narrow blocks traffic the
+cluster needs, such as pulls from an AWS-owned bucket that it does not name.
 
 ```hcl
 data "aws_caller_identity" "current" {}
@@ -630,9 +635,9 @@ for "never through this endpoint" rules.
 
 The bookstore-platform's
 [`vpc-endpoints.tf`](../examples/bookstore-platform/terraform/vpc-endpoints.tf)
-ships with no endpoint policies (default-allow); add restrictive
-policies as a follow-up once you've decided which buckets/services
-are allowed.
+puts the restrictive S3 policy from Step 6 on the gateway endpoint. Its six
+interface endpoints carry no endpoint policy, so they allow every action
+that the caller's IAM policy allows.
 
 **Data-transfer cost mechanics.** Where the bytes go sets the price:
 
@@ -663,7 +668,9 @@ VPC) typically need TGW.
 **Node instance metadata.** Each node serves instance metadata at
 `169.254.169.254`, including temporary credentials for the node role.
 A Pod that can reach that address can use the node's permissions, so
-close the path on each node. Karpenter's `EC2NodeClass` takes these
+close the path on every node. The tree sets the same values on two node
+sources: the `system` managed node group in `eks.tf`, and Karpenter's
+`EC2NodeClass` in `karpenter-pools.tf`. The `EC2NodeClass` takes these
 settings under `spec`:
 
 ```yaml
@@ -682,8 +689,14 @@ is the setting EKS best practices recommend to block Pod access to the
 node role ([EKS best practices](https://aws.github.io/aws-eks-best-practices/security/docs/iam/)).
 Karpenter applies these same values when `metadataOptions` is omitted
 ([Karpenter NodeClass docs](https://karpenter.sh/docs/concepts/nodeclasses/)).
-Set them anyway so a later edit cannot drop them silently. The
-bookstore-platform tree's EC2NodeClass relies on the default.
+Set them explicitly so a later edit cannot drop them silently. The
+module default for a managed node group is a hop limit of 2, so the
+`system` group sets its own `metadata_options` in `eks.tf`. Changing that
+value rolls the system nodes. A Pod that reads its region or VPC ID from
+IMDS needs that value from its own configuration once the hop limit is 1.
+The tree's load balancer controller gets both from Terraform, and Karpenter
+gets the region from `AWS_REGION`. Check any other add-on on the system pool
+for IMDS reads before you apply this.
 
 ## Production notes
 
@@ -719,9 +732,9 @@ bookstore-platform tree's EC2NodeClass relies on the default.
 > requests a second, each extra kilobyte per request is about 2.6 TB a
 > month, which costs about $26 a month on each side of a cross-AZ hop.
 > Istio's locality-aware routing sends traffic to the same AZ first
-> when it can. The bookstore-platform tree leaves locality routing as a
-> follow-up, since it needs Istio configuration rather than Terraform.
-> For now, monitor cross-AZ traffic via VPC Flow Logs.
+> when it can. The bookstore-platform tree does not configure locality
+> routing, because that needs Istio configuration rather than Terraform.
+> Monitor cross-AZ traffic with VPC Flow Logs.
 
 > **In production:** Watch the interface endpoint quota. The default
 > is 50 interface and Gateway Load Balancer endpoints combined per VPC,
@@ -777,8 +790,7 @@ resource "aws_vpc_endpoint" "s3" {
   })
 }
 
-data "aws_caller_identity" "current" {}
-
+# The tree declares data "aws_caller_identity" "current" in locals.tf.
 data "aws_iam_policy_document" "s3_endpoint" {
   count = var.enable_vpc_endpoints ? 1 : 0
 
@@ -869,7 +881,7 @@ are yes):
 
 ## Further reading
 
-- **AWS VPC endpoints — official docs**
+- **AWS VPC endpoints: official docs**
   <https://docs.aws.amazon.com/vpc/latest/privatelink/concepts.html>;
   the canonical reference for gateway vs interface, private DNS,
   endpoint policies, and the service-availability matrix.
@@ -880,26 +892,26 @@ are yes):
   <https://aws.amazon.com/ec2/pricing/on-demand/#Data_Transfer>;
   the full $/GB matrix for intra-AZ, cross-AZ, cross-region, and
   Internet egress.
-- **AWS — ECR interface and gateway endpoints**
+- **AWS: ECR interface and gateway endpoints**
   <https://docs.aws.amazon.com/AmazonECR/latest/userguide/vpc-endpoints.html>;
   the starport layer bucket, the S3 gateway requirement and the
   endpoint policy example used in Step 6.
-- **AWS — S3 gateway endpoint policies**
+- **AWS: S3 gateway endpoint policies**
   <https://docs.aws.amazon.com/vpc/latest/privatelink/vpc-endpoints-s3.html>;
   the `s3:ResourceAccount` pattern and the free-of-charge statement.
-- **AWS — NAT gateway basics**
+- **AWS: NAT gateway basics**
   <https://docs.aws.amazon.com/vpc/latest/userguide/nat-gateway-basics.html>;
   no security groups on NAT gateways, and network ACLs for its subnet.
-- **AWS — Interface endpoint policies**
+- **AWS: Interface endpoint policies**
   <https://docs.aws.amazon.com/vpc/latest/privatelink/vpc-endpoints-access.html>;
   the endpoint policy reference.
-- **AWS — PrivateLink quotas**
+- **AWS: PrivateLink quotas**
   <https://docs.aws.amazon.com/vpc/latest/privatelink/vpc-limits-endpoints.html>;
   the interface endpoint quota and its default.
-- **AWS — EC2 instance metadata options**
+- **AWS: EC2 instance metadata options**
   <https://docs.aws.amazon.com/AWSEC2/latest/UserGuide/configuring-IMDS-existing-instances.html>;
   `httpTokens` and the hop limit.
-- **Karpenter — EC2NodeClass**
+- **Karpenter: EC2NodeClass**
   <https://karpenter.sh/docs/concepts/nodeclasses/>; the
   `metadataOptions` defaults this chapter cites.
 - **AWS VPC Flow Logs**

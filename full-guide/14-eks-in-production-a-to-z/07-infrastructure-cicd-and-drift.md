@@ -167,8 +167,11 @@ assumed by a PR plan. The usual "fix" is to loosen the trust to
 `repo:<ORG>/<REPO>:*`, which hands the role to every branch. The
 right fix is **two roles**. A PR plan runs the PR's code: provider
 plugins, `external` and `http` data sources, module code, all with
-the job's credentials. So the plan role must be one you are willing to
-give anyone who can push a branch, which means read-only. Without
+the job's credentials. So the plan role may not write anything, and it is
+still a sensitive role: it reads state, which can hold secret values, and
+through its EKS access entry it reads the release Secrets that Helm refresh
+needs. Its credentials reach PR code only after a reviewer approves the
+run (section 3). Without
 `id-token: write` a run cannot request an OIDC token at all
 ([OIDC reference](https://docs.github.com/en/actions/reference/security/oidc)).
 Repositories created after July 15, 2026 use the immutable form
@@ -207,9 +210,9 @@ apply prevents three hours of incident recovery.
 | An unreviewed change is applied | Apply the saved plan from `plan-main`, behind `production` reviewers | |
 | Plan output or artifacts expose account data | Plan text goes to a file; private repository; one-day artifact retention | |
 | A console or out-of-band change goes unnoticed | Nightly `plan -refresh-only`, then CloudTrail | |
-| Misconfigured Terraform is merged | Static analysis of the tree before merge; this pipeline does not run it yet | [05.03](../05-security/03-supply-chain.md) |
+| Misconfigured Terraform is merged | Not enforced by this pipeline. It runs no IaC scanner. A blocking scanner fails on the tree's CRITICAL `trivy config` findings (for example a public API CIDR and unrestricted egress), so accept those with reasons before you add one | [05.03](../05-security/03-supply-chain.md) |
 | A pipeline action is swapped for another version | Actions pinned by full commit SHA | [14.12](./12-supply-chain-security.md) |
-| A plan that breaks policy is applied | Policy checks on the saved plan, not in this pipeline yet | 05.07 <!-- link-later: 05.07 --> |
+| A plan that breaks policy is applied | Not enforced by this pipeline. It runs no policy check on the saved plan | 05.07 <!-- link-later: 05.07 --> |
 
 ## Diagrams
 
@@ -305,7 +308,7 @@ docs.
 
 Two roles, because a PR plan runs the PR's code (see *Mental model*):
 
-- **`github-actions-terraform-plan`**: read-only, trusted only from the
+- **`github-actions-terraform-plan`**: describe-only, trusted only from the
   `terraform-plan` and `terraform-drift` GitHub environments. The PR
   plan, the post-merge plan and the nightly drift check use it.
 - **`github-actions-terraform-apply`**: can change the account, trusted
@@ -363,21 +366,82 @@ aws iam create-role --role-name github-actions-terraform-plan \
 aws iam create-role --role-name github-actions-terraform-apply \
   --assume-role-policy-document file://trust-production.json
 
-# Plan role: read-only. Also give it s3:GetObject/ListBucket on the state
-# bucket (plans run with -lock=false, so no lock-file writes). The
-# workflow passes its ARN to Terraform as terraform_plan_role_arn, and
-# eks.tf grants it a view-only EKS access entry (Helm refresh reads
-# release Secrets).
-aws iam attach-role-policy --role-name github-actions-terraform-plan \
-  --policy-arn arn:aws:iam::aws:policy/ReadOnlyAccess
+# Plan role: describe-only, scoped to the services this tree refreshes, plus
+# read access to the state object and its key. It does not attach
+# ReadOnlyAccess. That managed policy reads S3 objects, SQS messages, log
+# events and DynamoDB items across the account, and the plan needs none of
+# them. The workflow passes the role's ARN to Terraform as
+# terraform_plan_role_arn, and eks.tf gives the role a view EKS access entry.
+# That entry reads release Secrets, because Helm refresh reads them, so this
+# role is sensitive, and the reviewer gate in section 3 is mandatory.
+cat <<'EOF' > terraform-plan-read.json
+{
+  "Version": "2012-10-17",
+  "Statement": [
+    {
+      "Sid": "DescribeTreeServices",
+      "Effect": "Allow",
+      "Action": [
+        "autoscaling:Describe*",
+        "budgets:ViewBudget",
+        "budgets:DescribeBudget",
+        "cloudwatch:Describe*",
+        "ec2:Describe*",
+        "eks:Describe*",
+        "eks:List*",
+        "events:Describe*",
+        "events:List*",
+        "iam:Get*",
+        "iam:List*",
+        "kms:Describe*",
+        "kms:GetKeyPolicy",
+        "kms:GetKeyRotationStatus",
+        "kms:ListAliases",
+        "kms:ListKeys",
+        "kms:ListResourceTags",
+        "logs:Describe*",
+        "logs:ListTagsForResource",
+        "route53:Get*",
+        "route53:List*",
+        "s3:GetBucket*",
+        "s3:GetEncryptionConfiguration",
+        "s3:GetLifecycleConfiguration",
+        "sns:GetSubscriptionAttributes",
+        "sns:GetTopicAttributes",
+        "sns:ListSubscriptionsByTopic",
+        "sns:ListTagsForResource",
+        "sqs:GetQueueAttributes",
+        "sqs:ListQueueTags",
+        "sqs:ListQueues"
+      ],
+      "Resource": "*"
+    },
+    {
+      "Sid": "ReadStateObject",
+      "Effect": "Allow",
+      "Action": ["s3:GetObject", "s3:ListBucket"],
+      "Resource": [
+        "arn:aws:s3:::<STATE_BUCKET>",
+        "arn:aws:s3:::<STATE_BUCKET>/*"
+      ]
+    },
+    {
+      "Sid": "ReadStateKey",
+      "Effect": "Allow",
+      "Action": ["kms:Decrypt", "kms:DescribeKey"],
+      "Resource": "<STATE_KMS_KEY_ARN>"
+    }
+  ]
+}
+EOF
 
-# SSE-KMS state bucket (Part 14 ch.01)? ReadOnlyAccess has no kms:Decrypt,
-# and every state read needs it. Grant it on the state key only.
 aws iam put-role-policy --role-name github-actions-terraform-plan \
-  --policy-name tfstate-kms-read --policy-document '{
-    "Version": "2012-10-17",
-    "Statement": [{"Effect": "Allow", "Action": "kms:Decrypt",
-                   "Resource": "<STATE_KMS_KEY_ARN>"}]}'
+  --policy-name terraform-plan-read \
+  --policy-document file://terraform-plan-read.json
+
+# This list is a starting point, not a verified minimum. Run a plan with the
+# role, add only the action each AccessDenied names, and review the result
+# with IAM Access Analyzer over CloudTrail events.
 
 # Apply role: in a THROWAWAY SANDBOX ACCOUNT ONLY, AdministratorAccess
 # gets the lab running. Before anything real, replace it with what this
@@ -428,9 +492,15 @@ Create three environments in **Settings → Environments**:
 
 | Environment | Protection rules |
 |---|---|
-| `terraform-plan` | optional required reviewers (add them if people outside your team can push branches) |
+| `terraform-plan` | **required reviewers** (at least one person other than the PR author) and a **deployment branch rule** (see the note below) |
 | `production` | **required reviewers**, deployment branches = `main` only, prevent self-review |
 | `terraform-drift` | deployment branches = `main` only; no reviewers, because nobody approves at 03:00 (section 6) |
+
+The `terraform-plan` reviewers are not optional. A `pull_request` run
+presents a `refs/pull/<N>/merge` ref rather than a branch name, so write the
+deployment branch rule to admit that form, then confirm with a PR from a fork
+that the fork cannot obtain the plan role. Until both checks pass, do not
+let outside contributors open PRs that reach the plan job.
 
 Then two repository variables. Each is the role a job assumes *and* a
 Terraform input: the workflow's `env:` block passes both ARNs to
@@ -851,15 +921,16 @@ noise compared to engineering time saved.
 > It still matters for trust, because the apply role's `sub` pins
 > the environment name.
 
-> **In production:** Give the plan role read and nothing else, and
-> treat it as shared with everyone who can push a branch. A PR plan
-> executes the PR's provider plugins, `external`/`http` data sources
-> and module code with the job's credentials. For this tree that
-> means read-only AWS plus a view-only EKS access entry (Helm reads
-> release Secrets during refresh, so "view" here includes Secrets).
-> If people outside your team can push branches, add required
-> reviewers to the `terraform-plan` environment too. Credentials are
-> then minted for PR code only after a maintainer approves.
+> **In production:** Give the plan role describe-only access to the
+> services the tree refreshes, plus the state object and key, and treat
+> it as sensitive. A PR plan executes the PR's provider plugins,
+> `external`/`http` data sources and module code with the job's
+> credentials. For this tree that means describe-only AWS plus a view
+> EKS access entry. Helm reads release Secrets during refresh, so the
+> view entry can read Secrets cluster-wide. Required reviewers on
+> `terraform-plan` are therefore mandatory, not an option for later.
+> Credentials are minted for PR code only after a maintainer approves, and the deployment branch rule in section 3
+> limits which refs can request them.
 
 > **In production:** Don't put long-lived credentials in GitHub
 > Secrets, period. The number of leaks where a `AWS_ACCESS_KEY_ID`
@@ -913,8 +984,9 @@ aws iam create-open-id-connect-provider \
 # production (sub = ...:environment:<NAME>).
 aws iam create-role --role-name github-actions-terraform-plan \
   --assume-role-policy-document file://trust-terraform-plan.json
-aws iam attach-role-policy --role-name github-actions-terraform-plan \
-  --policy-arn arn:aws:iam::aws:policy/ReadOnlyAccess
+aws iam put-role-policy --role-name github-actions-terraform-plan \
+  --policy-name terraform-plan-read \
+  --policy-document file://terraform-plan-read.json
 aws iam create-role --role-name github-actions-terraform-apply \
   --assume-role-policy-document file://trust-production.json
 # (sandbox: AdministratorAccess; real accounts: a policy scoped to what the tree creates)
@@ -1012,7 +1084,7 @@ CI/CD-readiness checklist (production-shape when all seven are yes):
 2. **A nightly drift check fires: 2 resources have drifted. The issue lists the drifted addresses, and CloudTrail shows that someone widened the EKS API server CIDR in the AWS console at 14:30 yesterday. What are the four reconciliation flavors the chapter teaches and which do you pick here?**
    <details><summary>Show answer</summary>
 
-   The four flavors: (1) **Revert in cloud** — undo the console change to match code; (2) **Codify in Terraform** — accept the change and PR it into `.tf`; (3) **Document the exception** — accept the divergence with explicit reasoning (rare); (4) **Both/neither** — case-by-case. For this incident: ask why it happened. If it was an emergency response to a P0 (the operator widened CIDR to debug from a new IP), codify it in a PR with the runbook reference. If it was someone exploring the console without context, revert immediately and rotate the IAM role's permissions to remove console-write where it's not needed.
+   The four reconciliation flavors in `drift-check/DRIFT.md` (Step 3) are: (3a) **Roll forward into Terraform**, when the change is good; (3b) **Roll back via Terraform**, when the change is bad; (3c) **Unexpected destroy**, where you stop and do not apply; and (3d) **Create on existing**, where you import rather than create. For this incident, ask why the CIDR was widened. If it was an emergency response to a P0 (the operator widened it to debug from a new IP), it is a 3a: edit the `.tf` to match, plan to zero diff, and merge with the runbook reference. If someone explored the console without context, it is a 3b: apply the code's value and remove the console-write permission that allowed the change.
 
    </details>
 
