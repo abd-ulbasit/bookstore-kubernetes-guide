@@ -1,18 +1,21 @@
 # Bookstore — Part 07 ch.05: AnalysisTemplate — catalog p95 latency gate.
 #
-# The Rollout's second canary GATE. Queries PROMETHEUS for catalog's p95
-# request latency from the SAME histogram Part 06 ch.01 made the catalog
-# binary export (app/catalog/main.go):
+# The Rollout's second canary GATE. Queries PROMETHEUS for the p95 request
+# latency of the CANARY's own Pods, from the SAME histogram Part 06 ch.01 made
+# the catalog binary export (app/catalog/main.go):
 #   http_request_duration_seconds_bucket{handler}   — a histogram (DefBuckets)
 #
 #   p95 = histogram_quantile(0.95, sum by (le) (rate(..._bucket[2m])))
 #
-# The canary stays only while p95 ≤ the threshold (default 0.5s); breach it
-# `failureLimit` times and the AnalysisRun fails → Argo Rollouts ABORTS and
-# AUTO-ROLLS-BACK to stable. This is the standard quantile pattern from Part 06
-# ch.01 §4 "Duration" — a quantile MUST be computed from the bucket
-# distribution (it cannot be averaged across pods), which is exactly why the
-# app exports a histogram, not a latency gauge.
+# The canary stays only while p95 ≤ the threshold (default 0.5s); once the
+# breaches exceed `failureLimit`, the AnalysisRun fails → Argo Rollouts ABORTS and
+# AUTO-ROLLS-BACK to stable. A quantile MUST be computed from the bucket
+# distribution (it cannot be averaged across pods), which is why the app
+# exports a histogram, not a latency gauge.
+#
+# FAIL CLOSED. With fewer than one request per second on the canary the query
+# returns 1000 (seconds), which no threshold allows. A canary that serves no traffic is
+# not a fast canary; it is an untested one.
 #
 # CRD-INTRINSIC NOTE: `AnalysisTemplate` = `argoproj.io/v1alpha1` (Argo
 # Rollouts CRD). Without the controller, a client dry-run prints `no matches
@@ -30,6 +33,7 @@ spec:
   args:
     - name: service-name
     - name: namespace
+    - name: canary-hash
     - name: prometheus-port
       value: "9090"
     - name: p95-threshold-seconds
@@ -38,21 +42,27 @@ spec:
     - name: catalog-latency-p95
       interval: 20s
       count: 5
-      # PASS while p95 ≤ threshold. `>= 0` keeps a quiet canary (no samples →
-      # histogram_quantile yields NaN; the `or vector(0)` guard makes it 0).
+      # PASS while p95 ≤ threshold. A silent canary yields 1000 and fails.
       successCondition: result[0] <= {{args.p95-threshold-seconds}}
       failureLimit: 3
       provider:
         prometheus:
           address: "http://kube-prometheus-stack-prometheus.monitoring.svc.cluster.local:{{args.prometheus-port}}"
           timeout: 30
-          # REAL PromQL — the Part 06 ch.01 §4 "Duration" quantile query over
-          # the books handler's duration histogram. handler="books" is the
-          # user-facing path (app/catalog/main.go instruments /books as
-          # handler "books"); /metrics is uninstrumented by design.
+          # The Part 06 ch.01 §4 "Duration" quantile over the books handler,
+          # restricted to the canary's Pods. handler="books" is the user-facing
+          # path (app/catalog/main.go instruments /books as handler "books");
+          # /metrics is uninstrumented by design. The `and on()` clause demands
+          # at least one request per second, and `or on() vector(1000)` makes
+          # an empty result a failure.
           query: |
-            histogram_quantile(0.95,
-              sum by (le) (
-                rate(http_request_duration_seconds_bucket{handler="books",namespace="{{args.namespace}}"}[2m])
+            (
+              histogram_quantile(0.95,
+                sum by (le) (
+                  rate(http_request_duration_seconds_bucket{handler="books",namespace="{{args.namespace}}",rollouts_pod_template_hash="{{args.canary-hash}}"}[2m])
+                )
               )
-            ) or vector(0)
+              and on()
+              (sum(rate(http_request_duration_seconds_count{handler="books",namespace="{{args.namespace}}",rollouts_pod_template_hash="{{args.canary-hash}}"}[2m])) >= 1)
+            )
+            or on() vector(1000)

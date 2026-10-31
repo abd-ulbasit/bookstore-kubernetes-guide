@@ -14,8 +14,8 @@
 > with automatic rollback.
 
 **Estimated time:** ~30 min read · ~90 min hands-on
-**Prerequisites:** [Part 07 ch.04](04-gitops-argocd.md) — Argo syncs the `Rollout` CRD just like a Deployment · [Part 01 ch.08](../01-core-workloads/08-deployment-strategies.md) — RollingUpdate gradually shifts 100% of users · [Part 06 ch.01](../06-production-readiness/01-observability-metrics.md) — Prometheus is the analysis-metric source
-**You'll know after this:** • distinguish blue-green, canary and experiment release strategies · • convert a Deployment into an Argo Rollouts `Rollout` with traffic steps · • write `AnalysisTemplate`/`AnalysisRun` against Prometheus (success-rate and p95) · • set up automated promotion and automated rollback on failed analysis · • run the Bookstore catalog as a metric-gated canary end-to-end
+**Prerequisites:** [Part 07 ch.04](04-gitops-argocd.md) — Argo syncs the `Rollout` CRD just like a Deployment · [Part 01 ch.08](../01-core-workloads/08-deployment-strategies.md) — RollingUpdate gradually shifts 100% of users · [Part 06 ch.01](../06-production-readiness/01-observability-metrics.md) — Prometheus is the analysis-metric source · [Part 05 ch.03](../05-security/03-supply-chain.md) — a canary does not verify signatures; admission does
+**You'll know after this:** • distinguish blue-green, canary and experiment release strategies · • convert a Deployment into an Argo Rollouts `Rollout` with traffic steps · • write `AnalysisTemplate`/`AnalysisRun` against Prometheus (success-rate and p95) · • set up automated promotion and automated rollback on failed analysis · • run the catalog as a metric-gated canary, and watch a silent canary fail closed
 
 <!-- tags: argo-rollouts, gitops, observability, ci-cd -->
 
@@ -73,17 +73,39 @@ automatic abort, not a state transition.**
 - **It composes with everything prior.** A `Rollout` is just a CRD — Argo CD
   ([ch.04](04-gitops-argocd.md)) syncs it from Git like any object (GitOps +
   progressive delivery, together). The metric queries are the *same PromQL*
-  Part 06 ch.01 wrote against the *same* catalog `/metrics`. The Pod template
-  is catalog's *exact restricted* template.
+  Part 06 ch.01 wrote, restricted to the canary's Pods. The Pod template is
+  catalog's *exact restricted* template.
 
 The trap to keep in view: the gate is only as honest as the metrics. A canary
-with no traffic emits no errors and no latency — analysis would "pass" on
-silence. The discipline (and the *metric honesty* this chapter is explicit
-about): **drive real traffic during analysis**, query bounded RED signals, and
-guard the PromQL so "no data" is a defined value, not NaN. The demo catalog
-binary emits `http_requests_total` + a duration histogram for real; whether it
-emits **5xx on demand** is the one illustrative part — so this chapter gives an
-honest way to *induce* errors to see the auto-rollback fire.
+with no traffic emits no errors and no latency, so a naive analysis would
+"pass" on silence. The discipline (and the *metric honesty* this chapter is
+explicit about): **fail closed** when there is no evidence, **measure the
+canary's own Pods** rather than the blend, and **drive real traffic during
+analysis**. The demo catalog binary emits `http_requests_total` and a duration
+histogram for real. It does not emit **5xx on demand**, so this chapter shows
+the silent-canary failure and the passing canary, and leaves the 5xx path to
+the query.
+
+## Threats and controls
+
+A canary is a control over how far a build spreads. It limits what a bad build
+can do and how long it runs, and it is only as good as the metrics it reads.
+Each row names a threat that gets past the canary alone.
+
+| Threat | Control taught here | Goes deeper |
+|---|---|---|
+| A bad or malicious image reaches every user at once | A staged canary: 10% of the replicas first, then a metric gate. A failed gate scales the canary to 0 | [01.08](../01-core-workloads/08-deployment-strategies.md) for the manual form, [15.06](../15-day-to-day-production-ops/06-progressive-delivery-in-production.md) for production |
+| The canary runs a digest nobody verified | Not this chapter. The Rollout runs whatever digest it names, and a canary does not check it. Admission must refuse unsigned digests | [05.03](../05-security/03-supply-chain.md) for signing and the admission policy, [07.03](03-cicd-pipeline.md) for the signed digest, policy as code in 05.07 <!-- link-later: 05.07 --> |
+| Analysis passes because nothing was measured | Fail closed: the canary must serve at least one request per second, and no data is a failure | this chapter |
+| Stable traffic hides a failing canary | The queries filter on the canary's pod-template hash, so only the canary's Pods are judged | this chapter |
+| The gate is weakened by an edit to an AnalysisTemplate or a Rollout | Who may edit either is an RBAC question, and every change goes through the GitOps review | [05.01](../05-security/01-authn-authz-rbac.md), [07.04](04-gitops-argocd.md) |
+| The canary is looser than the stable build | The canary's Pod template is the stable template, and the restricted namespace refuses any Pod that lacks the baseline | [01.08](../01-core-workloads/08-deployment-strategies.md), [05.02](../05-security/02-pod-security.md) |
+
+Two limits remain. A canary limits which users get a bad build and for how
+long. It does not undo what the build did to them, so a rollback restores code
+and not state, which [01.08](../01-core-workloads/08-deployment-strategies.md)
+covers for credentials. And a build that stays under the thresholds is
+promoted, so the thresholds are part of the security decision.
 
 ## Diagrams
 
@@ -94,12 +116,12 @@ The catalog Rollout's actual flow
 
 ```mermaid
 flowchart TD
-    new["new image set<br/>(kubectl argo rollouts set image<br/>or Argo CD syncs a new digest)"]
+    new["new image set<br/>(kubectl patch the image<br/>or Argo CD syncs a new digest)"]
     w10["setWeight 10%<br/>canary RS scaled to 10%"]
     p1["pause 60s<br/>(soak; manual hold possible)"]
     w25["setWeight 25%"]
     p2["pause 60s"]
-    an{"analysis GATE<br/>Prometheus: success-rate ≥ 0.95<br/>AND p95 ≤ 0.5s<br/>(AnalysisRun, failureLimit 3)"}
+    an{"analysis GATE<br/>Prometheus: success-rate ≥ 0.95<br/>AND p95 ≤ 0.5s<br/>(AnalysisRun, failureLimit 3)<br/>no traffic counts as a failure"}
     w50["setWeight 50%"]
     p3["pause 60s"]
     w100["setWeight 100%<br/>promote: canary → stable"]
@@ -133,6 +155,8 @@ flowchart TD
 
 ## Hands-on with the Bookstore
 
+**Tier A (kind).** Run this only against a cluster you own.
+
 **Assumed working directory: the guide repo root (`full-guide/`).** This
 chapter adds
 [`examples/bookstore/argocd/rollouts/`](../examples/bookstore/argocd/rollouts/)
@@ -141,10 +165,16 @@ the catalog Deployment; its Pod template is `10-catalog-deploy.yaml`'s
 template **verbatim** (same restricted SC, scheduling layer, probes,
 ConfigMap/Secret env, byte-identical `DB_DSN`).
 
-We will: (0) fresh cluster + images; (1) install Argo Rollouts (Helm) + the
-kubectl plugin; (2) prereqs + Prometheus; (3) apply the Rollout and watch a
-**passing** canary auto-promote; (4) **induce errors** and watch analysis
-**fail and auto-roll-back**.
+We will: (0) fresh cluster + images; (1) install Argo Rollouts; (2) catalog
+prereqs and a trimmed Prometheus; (3) a canary with real traffic that
+promotes; (4) a canary with no traffic that fails closed and rolls back. The
+outputs marked as captured were recorded on a lab kind cluster named
+`sf-pilot`, not the `bookstore` cluster these commands create. They are chart
+renders, so they involve no namespace. During the run the lab cluster stopped
+accepting the run's credentials, so the server dry runs are not captured, and
+the Argo Rollouts controller and Prometheus were not installed. The rollout
+behaviour in steps 3 and 4 is cited to the Argo Rollouts analysis
+documentation rather than captured.
 
 ### 0. Prerequisites — fresh cluster + the four images (self-bootstrapping)
 
@@ -161,45 +191,80 @@ for s in catalog orders payments-worker storefront; do kind load docker-image bo
 
 > **Self-bootstrapping note.** After any `kind delete && kind create` you must
 > re-`kind load` the four images and re-run the install + apply chain below
-> (install Argo Rollouts → apply prereqs + Prometheus → apply the
+> (install Argo Rollouts → apply prereqs + Postgres + Prometheus → apply the
 > AnalysisTemplates → apply the Rollout). A fresh cluster has none of it.
 
-### 1. Install Argo Rollouts + the kubectl plugin
+### 1. Install Argo Rollouts
 
 Per this guide's rule — **Helm / official-stable, never a
 `releases/latest/download/<PINNED-FILE>.yaml`** (it 404s on a new release).
 Argo Rollouts' Helm chart is in the same `argo` repo as Argo CD
-([ch.04](04-gitops-argocd.md)); it installs into its **own** non-restricted
-`argo-rollouts` namespace:
+([ch.04](04-gitops-argocd.md)). The chart is pinned to `2.43.8`, which ships
+the v1.10.1 controller. Its namespace enforces `restricted`: the chart's own
+security values already set `runAsNonRoot`, `allowPrivilegeEscalation: false`,
+all capabilities dropped, a read-only root filesystem and the `RuntimeDefault`
+seccomp profile, so the controller needs no exception:
 
 ```sh
 helm repo add argo https://argoproj.github.io/argo-helm
 helm repo update
 kubectl create namespace argo-rollouts
-helm install argo-rollouts argo/argo-rollouts -n argo-rollouts --wait
+kubectl label namespace argo-rollouts pod-security.kubernetes.io/enforce=restricted
+helm install argo-rollouts argo/argo-rollouts --version 2.43.8 \
+  -n argo-rollouts --wait
 kubectl -n argo-rollouts rollout status deploy/argo-rollouts
-# (its own ns — like argocd / monitoring / keda — not PSA-restricted; the
-#  catalog Pods it manages still land in the restricted `bookstore` ns.)
-
-# The kubectl plugin (best Rollout UX). Pinned/Helm-style, NOT a
-# latest/download-of-a-version-pinned-file pattern:
-brew install argoproj/tap/kubectl-argo-rollouts
-#   Linux: download the plugin binary from the project's releases page (see
-#   argoproj.github.io/argo-rollouts/installation/) and chmod +x it.
-kubectl argo rollouts version
 ```
+
+The `kubectl argo rollouts` plugin is optional. It adds a friendlier `get
+--watch` view, but every command in this chapter uses plain `kubectl`. To
+install it on macOS, run `brew install argoproj/tap/kubectl-argo-rollouts`.
+On Linux, download the binary from the project's releases page, which is
+listed in the Argo Rollouts installation docs.
 
 Installing the controller created the `argoproj.io` Rollout CRDs. **That is
 what makes the manifests dry-runnable** — before this, a client dry-run prints
-`no matches for kind "Rollout"` (the documented CRD-intrinsic behaviour;
-step 4).
+`no matches for kind "Rollout"` (the documented CRD-intrinsic behaviour; see
+the section after the lab).
 
-### 2. Catalog prereqs + Prometheus (the analysis needs real metrics)
+Before installing, the lab rendered the chart and listed what it creates. The
+CRDs are the `argoproj.io` objects. The `ClusterRole` and `ClusterRoleBinding`
+objects are the controller's cluster-scoped RBAC, which the chart creates by
+default (`clusterInstall: true`). The controller Deployment sets every field
+the restricted profile checks. The captured output is below. Two short helper
+scripts read the rendered YAML to produce it; they are not in the repository.
+
+<!-- gate: output -->
+```text
+CustomResourceDefinition analysisruns.argoproj.io
+CustomResourceDefinition analysistemplates.argoproj.io
+CustomResourceDefinition clusteranalysistemplates.argoproj.io
+CustomResourceDefinition experiments.argoproj.io
+CustomResourceDefinition rollouts.argoproj.io
+ClusterRole argo-rollouts-aggregate-to-view
+ClusterRole argo-rollouts-aggregate-to-edit
+ClusterRole argo-rollouts-aggregate-to-admin
+ClusterRole argo-rollouts
+ClusterRoleBinding argo-rollouts
+```
+
+<!-- gate: output -->
+```text
+Deployment/argo-rollouts: runAsNonRoot=ok no privilege escalation=ok drop ALL=ok seccomp=ok no host namespaces=ok no hostPath=ok
+restricted-field check: 1 of 1 workloads have every field set
+```
+
+The restricted field check reads each workload's rendered fields. It covers
+`runAsNonRoot`, no privilege escalation, all capabilities dropped, a seccomp
+profile, and no host namespaces or `hostPath`. It is a render check, not an
+admission test. The admission test is the namespace label itself, and the
+Pods in step 3 are what it admits or refuses.
+
+### 2. Catalog prereqs + Postgres + Prometheus (the analysis needs real metrics)
 
 The analysis queries Prometheus for catalog metrics, so the metrics pipeline
 must exist **before** the rollout demo (per the rule: enable what a demo
 depends on *first*, not as a trailing caveat). Apply catalog's dependencies,
-install kube-prometheus-stack (Part 06 ch.01), and point its ServiceMonitor at
+install a trimmed Prometheus (Part 06 ch.01), and point its ServiceMonitor at
 catalog:
 
 ```sh
@@ -211,19 +276,68 @@ kubectl apply -f examples/bookstore/raw-manifests/15-catalog-config.yaml
 kubectl apply -f examples/bookstore/raw-manifests/16-db-credentials.yaml
 kubectl apply -f examples/bookstore/raw-manifests/35-priorityclasses.yaml
 kubectl apply -f examples/bookstore/raw-manifests/40-services.yaml      # the shared `catalog` Service
+kubectl apply -f examples/bookstore/raw-manifests/20-postgres-statefulset.yaml
+kubectl -n bookstore rollout status statefulset/postgres
+# catalog's /readyz pings Postgres when DB_DSN is set, so without this step
+# no canary Pod can become Ready.
 
-# Prometheus (Part 06 ch.01 — its own non-restricted `monitoring` ns):
+# Prometheus (Part 06 ch.01's chart, pinned, with only the parts the gate reads):
 helm repo add prometheus-community https://prometheus-community.github.io/helm-charts
 helm repo update
 kubectl create namespace monitoring
+kubectl label namespace monitoring pod-security.kubernetes.io/enforce=restricted
 helm install kube-prometheus-stack prometheus-community/kube-prometheus-stack \
-  -n monitoring --wait
+  --version 92.16.1 -n monitoring --wait \
+  --set alertmanager.enabled=false \
+  --set grafana.enabled=false \
+  --set kubeStateMetrics.enabled=false \
+  --set nodeExporter.enabled=false
 # Scrape catalog (the ServiceMonitor's `release: kube-prometheus-stack` label
 # MUST match Prometheus's selector — Part 06 ch.01's load-bearing note):
 kubectl apply -f examples/bookstore/raw-manifests/80-servicemonitor.yaml
 ```
 
-### 3. Apply the Rollout — watch a passing canary auto-promote
+The trimmed install keeps the Prometheus server and the Operator that reads
+ServiceMonitors, which is all the gate needs. The node exporter needs host
+networking and host paths, which `restricted` refuses. It feeds node
+dashboards, not the catalog gate, so it is off rather than granted.
+Alertmanager, Grafana and kube-state-metrics are off for the same reason: the
+gate reads catalog's own series. A privilege that only an optional feature needs is turned
+off, not granted.
+
+The captured render, from the same helper scripts, shows no DaemonSet and no
+host-level workload. The operator and the admission Jobs set every field the
+restricted profile checks. The Prometheus server Pod is generated from its
+custom resource and is not in that check, so the `restricted` label on
+`monitoring` is a claim the live install still has to pass.
+
+<!-- gate: output -->
+```text
+  3 ClusterRole
+  3 ClusterRoleBinding
+  1 Deployment
+  2 Job
+  1 MutatingWebhookConfiguration
+  1 Prometheus
+ 35 PrometheusRule
+  1 Role
+  1 RoleBinding
+  1 Secret
+  7 Service
+  3 ServiceAccount
+  9 ServiceMonitor
+  1 ValidatingWebhookConfiguration
+```
+
+<!-- gate: output -->
+```text
+Deployment/kube-prometheus-stack-operator: runAsNonRoot=ok no privilege escalation=ok drop ALL=ok seccomp=ok no host namespaces=ok no hostPath=ok
+Job/kube-prometheus-stack-admission-create: runAsNonRoot=ok no privilege escalation=ok drop ALL=ok seccomp=ok no host namespaces=ok no hostPath=ok
+Job/kube-prometheus-stack-admission-patch: runAsNonRoot=ok no privilege escalation=ok drop ALL=ok seccomp=ok no host namespaces=ok no hostPath=ok
+restricted-field check: 3 of 3 workloads have every field set
+```
+
+### 3. Apply the Rollout — watch a canary with traffic promote
 
 ```sh
 kubectl apply -f examples/bookstore/argocd/rollouts/analysistemplate-success-rate.yaml
@@ -233,86 +347,119 @@ kubectl apply -f examples/bookstore/argocd/rollouts/catalog-rollout.yaml
 # First apply = the initial revision (canary steps are SKIPPED on the very
 # first rollout — there is no "stable" to canary against yet). It comes up at
 # `replicas: 4`, all restricted-admitted:
-kubectl argo rollouts get rollout catalog -n bookstore --watch
-kubectl get pods -n bookstore -l app=catalog        # 4/4 Running (PSA restricted OK)
+kubectl get rollout catalog -n bookstore
+kubectl get pods -n bookstore -l app=catalog --show-labels   # 4/4 Running (PSA restricted OK)
 ```
 
-Now trigger a **real canary** by changing the image (this is what Argo CD
-would do when CI commits a new digest — [ch.03](03-cicd-pipeline.md)/[ch.04](04-gitops-argocd.md)).
-Re-tag the same image so it actually rolls (the binary is identical, so
-metrics stay healthy → the canary should **pass and auto-promote**):
+A canary needs traffic during analysis, or the gate fails closed (see the
+next section). The load generator is a complete Pod with the baseline, so it
+can run in the restricted namespace. Its image is pinned by digest, with the
+tag in a comment:
 
 ```sh
-# Drive traffic FIRST so analysis has real RED signals to measure (a silent
-# canary is the metric-honesty trap — the guarded PromQL treats "no data" as
-# healthy, but you want a real measurement). Restricted-compliant load Pod in
-# `bookstore` (PSA enforce:restricted) via --overrides, same technique as
-# Part 06 ch.01/ch.04:
-kubectl run loadgen -n bookstore --restart=Never \
-  --image=curlimages/curl:8.10.1 \
-  --overrides='{"spec":{"securityContext":{"runAsNonRoot":true,"runAsUser":65534,"seccompProfile":{"type":"RuntimeDefault"}},"containers":[{"name":"loadgen","image":"curlimages/curl:8.10.1","command":["sh","-c","while true; do curl -s -o /dev/null http://catalog.bookstore.svc.cluster.local/books; done"],"securityContext":{"allowPrivilegeEscalation":false,"capabilities":{"drop":["ALL"]},"readOnlyRootFilesystem":true}}]}}'
+kubectl apply -f - <<'EOF'
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: loadgen
+  namespace: bookstore
+automountServiceAccountToken: false
+---
+apiVersion: v1
+kind: Pod
+metadata:
+  name: loadgen
+  namespace: bookstore
+  labels:
+    app: loadgen
+spec:
+  serviceAccountName: loadgen
+  automountServiceAccountToken: false
+  restartPolicy: Never
+  securityContext:
+    runAsNonRoot: true
+    runAsUser: 65534
+    runAsGroup: 65534
+    seccompProfile:
+      type: RuntimeDefault
+  containers:
+    - name: loadgen
+      image: curlimages/curl@sha256:d9b4541e214bcd85196d6e92e2753ac6d0ea699f0af5741f8c6cccbfcf00ef4b  # curlimages/curl:8.10.1
+      command: ["sh", "-c", "while true; do curl -s -o /dev/null http://catalog.bookstore.svc.cluster.local/books; done"]
+      securityContext:
+        allowPrivilegeEscalation: false
+        readOnlyRootFilesystem: true
+        capabilities:
+          drop: ["ALL"]
+      resources:
+        requests:
+          cpu: 50m
+          memory: 32Mi
+        limits:
+          cpu: 200m
+          memory: 64Mi
+      volumeMounts:
+        - name: tmp
+          mountPath: /tmp
+  volumes:
+    - name: tmp
+      emptyDir: {}
+EOF
+```
 
-# Trigger the canary (new image ref → Rollout starts the canary steps):
-kubectl argo rollouts set image catalog -n bookstore \
-  catalog=bookstore/catalog:dev
-kubectl argo rollouts get rollout catalog -n bookstore --watch
+Now trigger a **real canary** with a new image reference. A new tag is a new
+Pod template, so the Rollout starts the canary steps. The bytes are the same as
+the stable image, so healthy metrics should promote it. In production CI pushes
+a new **digest** instead ([ch.03](03-cicd-pipeline.md)), and Argo CD syncs it
+([ch.04](04-gitops-argocd.md)):
+
+```sh
+docker tag bookstore/catalog:dev bookstore/catalog:canary
+kind load docker-image bookstore/catalog:canary --name bookstore
+
+kubectl patch rollout catalog -n bookstore --type=json \
+  -p='[{"op":"replace","path":"/spec/template/spec/containers/0/image","value":"bookstore/catalog:canary"}]'
+
 #  10% → pause 60s → 25% → pause 60s → ANALYSIS (success-rate ≥0.95 &&
-#  p95 ≤0.5s, sampled 5x/20s) → 50% → pause → 100% promote. With healthy
-#  metrics the AnalysisRun passes and the canary is promoted automatically.
+#  p95 ≤0.5s, sampled 5x/20s, canary Pods only) → 50% → pause → 100% promote.
+timeout 300 kubectl get rollout catalog -n bookstore -w
 kubectl get analysisrun -n bookstore                 # Successful
 kubectl delete pod loadgen -n bookstore              # stop the load
 ```
 
-### 4. Induce errors — watch analysis FAIL and auto-roll-back
+### 4. A canary with no traffic fails closed — and rolls back
 
-The honest part (metric honesty): the demo binary serves `/books` fine, so to
-*see the rollback* you must make the canary actually unhealthy. The cleanest,
-reproducible way is to make the canary Pods fail readiness/serve errors by
-pointing the **canary** at a broken config — but the simplest honest lever is
-to **flood with a bad path** so the catalog returns 404s and drive the
-success-rate query below threshold, *and* point the analysis at a handler that
-errors. Concretely, induce 5xx by overloading catalog past its tiny CPU limit
-while the canary analysis samples (latency p95 breaches `0.5s` and the gate
-trips):
+This is the security property the gate exists for. Start a canary and send it
+nothing. A naive gate passes on silence. This one fails.
 
 ```sh
-# Re-trigger a canary, then SATURATE catalog so p95 latency blows past the
-# 0.5s gate (the binary is healthy, so we attack the LATENCY signal — an
-# honest, reproducible failure the p95 AnalysisTemplate is designed to catch).
-kubectl argo rollouts set image catalog -n bookstore catalog=bookstore/catalog:dev
-kubectl run hammer -n bookstore --restart=Never \
-  --image=ghcr.io/rakyll/hey:0.1.4 \
-  --overrides='{"spec":{"securityContext":{"runAsNonRoot":true,"runAsUser":65532,"seccompProfile":{"type":"RuntimeDefault"}},"containers":[{"name":"hammer","image":"ghcr.io/rakyll/hey:0.1.4","args":["-z","8m","-c","200","http://catalog.bookstore.svc.cluster.local/books"],"securityContext":{"allowPrivilegeEscalation":false,"capabilities":{"drop":["ALL"]},"readOnlyRootFilesystem":true}}]}}'
+kubectl patch rollout catalog -n bookstore --type=json \
+  -p='[{"op":"add","path":"/spec/template/metadata/annotations","value":{"example.bookstore/trial":"silent"}}]'
+# A new annotation is a new pod template, so the Rollout starts a canary with
+# the same image. The loadgen Pod is gone, so the Service sees no traffic.
 
-kubectl argo rollouts get rollout catalog -n bookstore --watch
-#  … reaches the ANALYSIS step → p95 from the duration histogram exceeds
-#  0.5s under 200 concurrent clients → successCondition fails → after
-#  failureLimit (3) samples the AnalysisRun FAILS → the Rollout ABORTS:
-#  the controller scales the canary ReplicaSet to 0 and stable back to 100%
-#  — AUTOMATED ROLLBACK, no kubectl rollout undo, before a full rollout.
+timeout 400 kubectl get rollout catalog -n bookstore -w
 kubectl get analysisrun -n bookstore                 # Failed
-kubectl argo rollouts get rollout catalog -n bookstore   # Degraded → then stable
-kubectl delete pod hammer -n bookstore
-# Manually retry/promote/abort if ever needed:
-kubectl argo rollouts retry  rollout catalog -n bookstore
-kubectl argo rollouts promote catalog -n bookstore       # skip remaining pause/steps
-kubectl argo rollouts abort   catalog -n bookstore       # force rollback to stable
+kubectl get replicaset -n bookstore -l app=catalog   # canary scaled to 0
 ```
 
-> **What is real vs illustrative (stated plainly).** The PromQL in both
-> AnalysisTemplates is **real** and runs against the **actual** catalog series
-> Part 06 ch.01 exports (`http_requests_total{handler,code}`,
-> `http_request_duration_seconds_bucket{handler}`). The success-rate path's
-> *illustrative* bit is that the tiny demo binary does not emit 5xx on demand —
-> so the reproducible failure shown drives the **p95 latency** gate (saturate
-> catalog past its 250m CPU limit → p95 > 0.5s), which is genuine and
-> deterministic. To exercise the success-rate gate specifically, deploy a
-> canary image that returns 500s (in real life: the actual buggy build) — the
-> 5xx query then trips identically.
+The sequence: the canary takes 10% and pauses, then 25% and pauses. At
+analysis, every measurement reads 0 because the canary served no requests. The
+success check is false, each measurement counts as a failure, and once failures
+exceed `failureLimit` the AnalysisRun fails. The Rollout aborts, the canary
+ReplicaSet goes to zero, and the stable ReplicaSet keeps 100% of its replicas.
+Nobody ran `kubectl rollout undo`.
+
+To see the latency gate fail the same way, saturate the catalog with a load
+tool running about 200 concurrent clients. The canary's p95 then breaks the
+0.5 s threshold, and the AnalysisRun fails. This lab does not capture that run.
+It is the same mechanism with a different query.
 
 ### CRD-intrinsic dry-run (documented, like every prior CRD object)
 
-On a cluster **without** the Argo Rollouts controller:
+On a cluster **without** the Argo Rollouts controller, the client dry run
+prints an error like the following. The lines are illustrative and were not
+captured in this lab run, because the server dry runs were not accepted:
 
 ```sh
 kubectl apply --dry-run=client -f examples/bookstore/argocd/rollouts/catalog-rollout.yaml
@@ -364,8 +511,8 @@ kind delete cluster --name bookstore
   `metric` runs its provider query every `interval`, `count` times; the
   measurement is `result` (`result[0]` = the first/only scalar). It is
   **Successful** while `successCondition` holds; a measurement that violates
-  it counts toward `failureLimit`; reaching `failureLimit` marks the
-  AnalysisRun **Failed**.
+  it counts toward `failureLimit`; once failures exceed `failureLimit` the
+  AnalysisRun is **Failed**.
 - **Automated rollback is the controller's reaction to a Failed run.** When
   the AnalysisRun fails, the Rollout enters **Aborted**: the controller scales
   the **canary ReplicaSet to 0** and the **stable ReplicaSet back to 100%** —
@@ -373,14 +520,31 @@ kind delete cluster --name bookstore
   `kubectl rollout undo`** and no human. (`abortScaleDownDelaySeconds` can keep
   the canary briefly for forensics.) This is the property RollingUpdate
   structurally cannot provide: its progress is unconditional.
-- **The Prometheus queries are the Part 06 ch.01 RED queries.** success-rate =
-  `1 − rate(5xx)/rate(all)` over `http_requests_total{handler,code}`
-  (`handler!="metrics"` excludes the deliberately-uninstrumented `/metrics`
-  endpoint — `app/catalog/main.go`); p95 =
-  `histogram_quantile(0.95, sum by (le) (rate(..._bucket[2m])))` over the
-  duration histogram. Both carry an `or vector(0)` guard so **"no traffic"
-  yields a defined value, not NaN** — without it a quiet canary's `0/0`
-  would erroneously fail the gate (the metric-honesty failure mode).
+- **The Prometheus queries are the Part 06 ch.01 RED queries, fail-closed and
+  filtered to the canary.** success-rate = `1 − rate(5xx)/rate(all)` over
+  `http_requests_total{handler,code}` (`handler!="metrics"` excludes the
+  deliberately-uninstrumented `/metrics` endpoint — `app/catalog/main.go`); p95
+  = `histogram_quantile(0.95, sum by (le) (rate(..._bucket[2m])))` over the
+  duration histogram. Two changes make them safe to gate on. First, each query
+  is restricted to `rollouts_pod_template_hash="{{args.canary-hash}}"`, the
+  canary's own Pods. The hash is a Rollout argument, `valueFrom:
+  podTemplateHashValue: Latest`, and the catalog ServiceMonitor copies the Pod
+  label onto each series with `podTargetLabels`. Without that filter, stable
+  traffic dilutes a failing canary: at 10% weight, a canary whose requests all
+  fail still reads about 90% success overall, below the threshold, but a canary
+  that fails half its requests reads about 95%, and that passes. Second, the
+  query fails closed. The `and on()` clause demands at least one request per
+  second, and `or on() vector(0)` (`vector(1000)` for latency) turns an empty
+  result into a value that breaks the threshold. A query that returns nothing
+  would otherwise leave the gate with nothing to judge.
+- **The controller is a privileged system.** The chart's default,
+  `clusterInstall: true`, creates a cluster controller role, which its own
+  values comment says requires cluster RBAC. Set `clusterInstall: false` to run
+  it in namespaced mode, which needs no cluster RBAC. The controller also makes
+  outbound calls on the analysis's behalf. The Prometheus provider calls the
+  address in the template, and the web provider calls the URL in the template.
+  Whoever can write an AnalysisTemplate therefore chooses where the controller
+  connects, and the template is as sensitive as the Rollout it gates.
 - **GitOps + progressive delivery compose because a Rollout is just a CRD.**
   Argo CD ([ch.04](04-gitops-argocd.md)) syncs the `Rollout`/`AnalysisTemplate`
   objects from Git like any manifest; Argo CD ships a health check for
@@ -414,12 +578,23 @@ kind delete cluster --name bookstore
 
 > **In production: the gate is only as good as the metrics and the traffic.**
 > An analysis over a canary with no traffic, unbounded-cardinality labels, or
-> NaN-prone queries is theater. Drive representative load during analysis (or
-> rely on real production traffic at a small weight), query **bounded RED
-> signals** (the Part 06 ch.01 discipline), guard "no data", and set
-> `failureLimit`/`count`/`interval` so a transient blip doesn't abort but a
-> real regression does. Add a `pause: {}` (indefinite) step for a human gate
-> before 100% on the riskiest services.
+> a query that can return nothing is theater. The queries in this chapter fail
+> closed and filter to the canary's Pods; keep both properties when you adapt
+> them. Drive representative load during analysis (or rely on real production
+> traffic at a small weight), query **bounded RED signals** (the Part 06 ch.01
+> discipline), and set `failureLimit`/`count`/`interval` so a transient blip
+> doesn't abort but a real regression does. Add a `pause: {}` (indefinite) step
+> for a human gate before 100% on the riskiest services.
+
+> **In production: an AnalysisTemplate is code with network reach.** The
+> controller calls the metric endpoint a template names, and a web provider
+> calls its URL, so whoever can write a template chooses where the controller
+> connects. Keep templates in Git behind review ([ch.04](04-gitops-argocd.md)),
+> restrict who can create or edit them with RBAC
+> ([Part 05 ch.01](../05-security/01-authn-authz-rbac.md)), and keep the
+> Rollout's image a signed digest from CI ([ch.03](03-cicd-pipeline.md)) that
+> admission verifies ([Part 05 ch.03](../05-security/03-supply-chain.md)). A
+> canary that skips signature verification is a hole, however well it measures.
 
 > **In production: decide who owns `.spec.replicas` — Rollout, HPA, or KEDA —
 > never two.** A `Rollout` manages its ReplicaSets' replicas. An HPA/KEDA must
@@ -437,8 +612,9 @@ kind delete cluster --name bookstore
 > declarative.** The `Rollout` lives in Git; Argo CD syncs it; promotion is
 > the canary completing (or a human `promote`); rollback is the analysis
 > failing **or** `git revert` of the image bump ([ch.04](04-gitops-argocd.md)).
-> Don't drive prod rollouts with imperative `kubectl argo rollouts` as the
-> source of truth — that re-introduces the un-auditable state ch.04 eliminated.
+> Don't drive prod rollouts with imperative `kubectl patch` or
+> `kubectl argo rollouts` as the source of truth — that re-introduces the
+> un-auditable state ch.04 eliminated.
 
 > **In production (managed — EKS/GKE/AKS):** Argo Rollouts and Flagger run
 > identically on managed clusters; the only variable is the **traffic
@@ -450,74 +626,59 @@ kind delete cluster --name bookstore
 ## Quick Reference
 
 ```sh
-# Install (Helm — never releases/latest/download/<PINNED>.yaml) + plugin
+# Install (Helm, pinned — never releases/latest/download/<PINNED>.yaml)
 helm repo add argo https://argoproj.github.io/argo-helm && helm repo update
 kubectl create namespace argo-rollouts
-helm install argo-rollouts argo/argo-rollouts -n argo-rollouts --wait
-brew install argoproj/tap/kubectl-argo-rollouts        # Linux: project releases page
+kubectl label namespace argo-rollouts pod-security.kubernetes.io/enforce=restricted
+helm install argo-rollouts argo/argo-rollouts --version 2.43.8 -n argo-rollouts --wait
 
-# Drive a rollout
+# Drive a rollout (plain kubectl; the kubectl-argo-rollouts plugin is optional)
 kubectl apply -f examples/bookstore/argocd/rollouts/        # AnalysisTemplates + Rollout
-kubectl argo rollouts get rollout catalog -n bookstore --watch
-kubectl argo rollouts set image catalog -n bookstore catalog=bookstore/catalog:dev
-kubectl argo rollouts promote catalog -n bookstore         # skip a pause
-kubectl argo rollouts abort   catalog -n bookstore         # force rollback to stable
+kubectl get rollout catalog -n bookstore -w
+kubectl patch rollout catalog -n bookstore --type=json \
+  -p='[{"op":"replace","path":"/spec/template/spec/containers/0/image","value":"bookstore/catalog:canary"}]'
 kubectl get analysisrun -n bookstore                       # Successful / Failed
 ```
 
-Minimal `Rollout` + `AnalysisTemplate` skeleton (full set in `argocd/rollouts/`):
+The canary steps and the gate, as a fragment. The complete Rollout is
+[`catalog-rollout.yaml`](../examples/bookstore/argocd/rollouts/catalog-rollout.yaml),
+and the complete AnalysisTemplates sit beside it:
 
 ```yaml
-apiVersion: argoproj.io/v1alpha1          # CRD — needs Argo Rollouts installed
-kind: Rollout
-metadata: { name: catalog, namespace: bookstore }
-spec:
-  replicas: 4
-  selector: { matchLabels: { app: catalog } }
-  strategy:
-    canary:
-      steps:
-        - setWeight: 10
-        - pause: { duration: 60s }
-        - setWeight: 25
-        - pause: { duration: 60s }
-        - analysis: { templates: [ { templateName: catalog-success-rate } ] }   # GATE
-        - setWeight: 50
-        - pause: { duration: 60s }
-        - setWeight: 100
-  template: { }                            # catalog 10-'s Pod template VERBATIM
-                                           # (restricted SC + scheduling + DB_DSN)
----
-apiVersion: argoproj.io/v1alpha1
-kind: AnalysisTemplate
-metadata: { name: catalog-success-rate, namespace: bookstore }
-spec:
-  metrics:
-    - name: success-rate
-      interval: 20s
-      successCondition: result[0] >= 0.95          # else → auto-rollback
-      failureLimit: 3
-      provider:
-        prometheus:
-          address: http://kube-prometheus-stack-prometheus.monitoring:9090
-          query: 1 - (sum(rate(http_requests_total{code=~"5..",handler!="metrics"}[2m]))
-                       / sum(rate(http_requests_total{handler!="metrics"}[2m])) or vector(0))
+strategy:
+  canary:
+    steps:
+      - setWeight: 10
+      - pause: { duration: 60s }
+      - setWeight: 25
+      - pause: { duration: 60s }
+      - analysis:                       # the GATE: no traffic fails it
+          templates:
+            - templateName: catalog-success-rate
+            - templateName: catalog-latency-p95
+          args:
+            - name: canary-hash
+              valueFrom:
+                podTemplateHashValue: Latest
+      - setWeight: 100
 ```
 
 Checklist:
 
 - [ ] User-facing rollout is a **metric-gated canary**, not a bare
       RollingUpdate; `analysis` step gates progression
-- [ ] `AnalysisTemplate` queries **bounded RED signals** (Part 06 ch.01
-      PromQL), guards "no data" (`or vector(0)`), sane `failureLimit`/`count`
+- [ ] `AnalysisTemplate` queries the **canary's own Pods** (`rollouts_pod_template_hash`)
+      and **fails closed**: a minimum request rate, and no data is a failure
 - [ ] Failed analysis ⇒ **automatic rollback** (canary→0, stable→100); no
       `kubectl rollout undo`
 - [ ] `Rollout` Pod template = catalog's **exact restricted** template (SC,
       scheduling, probes, byte-identical `DB_DSN`) — PSA `restricted` clean
 - [ ] **One** owner of `.spec.replicas`: the Rollout (HPA/KEDA, if any,
       target the **Rollout**, never the replaced Deployment)
-- [ ] Real traffic driven during analysis (a silent canary "passes" on
-      nothing); riskiest services get a human `pause: {}` gate
+- [ ] Real traffic driven during analysis (a silent canary fails the gate);
+      riskiest services get a human `pause: {}` gate
+- [ ] AnalysisTemplates and Rollouts are reviewed in Git and edit access is
+      restricted by RBAC; the image is a signed digest that admission verifies
 - [ ] `Rollout` is GitOps-managed (Argo CD syncs the CRD); rollback also
       `git revert`-able; CRDs installed (else documented `no matches for kind`)
 
@@ -532,10 +693,10 @@ Checklist:
 
    </details>
 
-2. **You set up an Argo Rollouts canary at 10% with a Prometheus success-rate analysis gate. At 02:00 (low traffic), the canary advances through every step in seconds. At 14:00 (high traffic), the same canary takes 20 minutes. Is something broken?**
+2. **A teammate says: "The analysis passed, so the canary is healthy." The canary took no traffic during the analysis window. What happens, and why?**
    <details><summary>Show answer</summary>
 
-   No — at 02:00 the canary serves so few requests that the analysis result is `vector(0)` (no errors observed) or its `count: <small>` succeeds quickly; at 14:00 the same `interval` and `count` produces real statistical evidence over a meaningful window. Two improvements: (1) guard with `or vector(0)` to avoid divide-by-zero passing, (2) tune `interval`+`count` so the canary has *enough traffic* to be statistically meaningful — a silent canary "passes" on nothing.
+   The gate fails, and the rollout aborts. The success-rate query has an `and on()` clause that requires at least one request per second on the canary's Pods. Below that the clause is empty, and the outer `or on() vector(0)` turns the result into 0. Then `result[0] >= 0.95` is false, each measurement counts as a failure, and once failures exceed `failureLimit` the AnalysisRun fails. The Rollout aborts and scales the canary to zero. Silence is not evidence, so the gate treats it as a failure. A quiet canary will abort, and that is the right trade for a gate: drive representative load, or the gate has nothing to judge.
 
    </details>
 
@@ -546,7 +707,7 @@ Checklist:
 
    </details>
 
-4. **Hands-on extension — see automated rollback. With a canary on catalog and a Prometheus analysis at `successCondition: result[0] >= 0.95`, ship an image that returns 500 on every 10th request (success ~90%). Apply, then watch `kubectl argo rollouts get rollout catalog -w`. What do you observe?**
+4. **Hands-on extension — see automated rollback. With a canary on catalog and a Prometheus analysis at `successCondition: result[0] >= 0.95`, ship an image that returns 500 on every 10th request (success ~90%). Apply, then watch `kubectl get rollout catalog -n bookstore -w`. What do you observe?**
    <details><summary>What you should see</summary>
 
    The canary advances through `setWeight: 10` and pauses. The `AnalysisRun` queries Prometheus, computes ~0.90 success, fails `>= 0.95`, accrues failures up to `failureLimit`, then transitions to `Failed`. Argo Rollouts **automatically aborts** — scales the canary ReplicaSet to 0 and the stable to its full replica count. No human pressed `rollout undo`. `kubectl get analysisrun -n bookstore` shows the failed run with the exact query result that triggered the abort. This is the load-bearing claim of the chapter, demonstrable in ~5 minutes.
