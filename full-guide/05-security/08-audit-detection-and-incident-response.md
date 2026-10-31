@@ -847,7 +847,6 @@ attack:builder                               get    pods/escape-node  403
 attack:builder                               get    pods/escape-node  403
 ```
 
-
 ### Detection: Falco, with Falcosidekick
 
 Falco watches kernel events on each node and turns them into alerts. It sees

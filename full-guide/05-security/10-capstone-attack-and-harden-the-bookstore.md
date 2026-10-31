@@ -89,7 +89,7 @@ reaches what it should not.
 | A Secret is readable in plaintext from etcd and its snapshots | Encryption at rest. Not applied on the lab cluster, and step 7 shows the plaintext | [04](04-secrets-and-cluster-hardening.md) |
 | A Pod reaches the database, or the API, across the namespace | A default-deny NetworkPolicy with explicit allows. Step 15 shows the lab cluster enforcing it | [Part 02 ch.06](../02-networking/06-network-policies.md), [Part 00 ch.07](../00-foundations/07-local-cluster-setup.md) |
 | The control plane is misconfigured in ways the workload cannot see | kube-bench output recorded as evidence. Fixes belong to chapter 06 | [06](06-control-plane-and-node-hardening.md) |
-| The attack leaves no record in the API | The audit log is cited, not run here. It needs a throwaway cluster with an audit policy | [08](08-audit-detection-and-incident-response.md) |
+| The attack leaves no record in the API | The audit log is not read here. Chapter 08 runs it on a throwaway cluster with an audit policy | [08](08-audit-detection-and-incident-response.md) |
 
 The first eight rows are what this lab runs. The last row is evidence this
 chapter names and does not produce, for the reasons in the lab header.
@@ -159,7 +159,7 @@ and links to them rather than repeating them.
   log:* the API server on the lab cluster has no audit policy, and this lab
   does not change its flags. An audit run needs a throwaway cluster built from
   [`kind/audit-cluster.yaml`](../examples/security-lab/kind/audit-cluster.yaml).
-  The audit evidence is cited to
+  The audit evidence is in
   [chapter 08](08-audit-detection-and-incident-response.md).
   *Falco and runtime detection:* a Falco install is a heavy install, and it
   belongs to chapter 08. *Kyverno policy reports:* Kyverno is not installed on

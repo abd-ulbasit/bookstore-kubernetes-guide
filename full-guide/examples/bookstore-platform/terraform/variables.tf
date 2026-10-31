@@ -398,7 +398,7 @@ variable "falco_alert_email" {
 }
 
 variable "falco_chart_version" {
-  description = "Falco Helm chart version (falcosecurity/falco). falco.tf was verified against 4.13.0. Chart 9.2.2 (Falco 0.45.2) is what the 05.08 lab rendered, and this tree has not been re-rendered against it, so check the values with helm template before moving."
+  description = "Falco Helm chart version (falcosecurity/falco). falco.tf was verified against 4.13.0. Chart 9.2.2 (Falco 0.45.2) is what the 05.08 lab installed and ran on kind, and this tree has not been re-rendered against it, so check the values with helm template before moving."
   type        = string
   default     = "4.13.0"
 }
@@ -452,7 +452,7 @@ variable "image_signing_validation_failure_action" {
 }
 
 variable "kyverno_chart_version" {
-  description = "Kyverno Helm chart version. The policies here were written for the 3.3 line. The 05.07 lab pulled chart 3.9.2, whose CRD marks the ClusterPolicy kind deprecated, and this tree has not been re-rendered against it."
+  description = "Kyverno Helm chart version. The policies here were written for the 3.3 line. The 05.07 lab installed chart 3.9.2 on kind, whose CRD marks the ClusterPolicy kind deprecated, and this tree has not been re-rendered against it."
   type        = string
   default     = "3.3.4"
 }
