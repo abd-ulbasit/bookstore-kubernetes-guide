@@ -1,0 +1,282 @@
+# Transcript for 06-capacity-and-cost.md (06.06), lab steps 1 to 19.
+# Tier A: a kind cluster, Kubernetes v1.37.0, kubectl v1.37.2, helm 3.22.1.
+# Host: a Linux lab host. Nothing was created on a cloud account.
+#
+# Substitutions: the chapter's namespace `bookstore` is `p06-06-shop` in every
+# command below, the VPA namespace `vpa` is `p06-06-recommender` and the
+# OpenCost namespace `opencost` is `p06-06-costs`. The helm binary ran as
+# `helm3`. The manifests and values files are the chapter's, copied into a
+# scratch directory and never committed. A chapter line that prints a
+# substituted namespace is elided with `# ...`.
+# The output came from a lab cluster whose node names differ from the chapter's.
+#
+# Not run here: kube-prometheus-stack, metrics-server and the load Job itself.
+# The lab has no metrics API and no Prometheus, and the install lock was held by
+# another run, so the load Job, the VPA recommender and OpenCost were checked
+# with server-side dry runs and helm template only. Admission is what these runs
+# prove; they do not show that the containers start.
+#
+# Steps 8 and 9 ran before the load-generator ServiceAccount was added to the
+# Job; steps 18 and 19 repeat them with it, in a second scratch namespace.
+#
+# Deliberate failures: step 3 (a LoadBalancer Service over the spend quota),
+# step 7 (a Pod asking for 3 CPU, over the LimitRange maximum), step 11 (a
+# VerticalPodAutoscaler before its CRD exists) and step 13 (the OpenCost chart
+# with its default security context). The API server refuses each one.
+#
+# What did not work the first time: the first attempts used other scratch
+# namespaces, and their dry runs timed out while the cluster's etcd was slow.
+# At the last check (step 17) the scratch namespaces were still terminating,
+# and their names are not reused. The VPA chart rendered
+# helm test hooks, which failed admission until --skip-tests was added. Without
+# a CPU limit on the Pod, the LimitRange injected 500m (step 6). The OpenCost
+# chart's defaults fail the restricted profile (step 13).
+
+## step 1: the Bookstore boundary, in a lab namespace
+$ sed 's/bookstore/p06-06-shop/g' 00-namespace.yaml | kubectl apply -f -
+namespace/p06-06-shop created
+resourcequota/p06-06-shop-quota created
+limitrange/p06-06-shop-limits created
+$ sed 's/bookstore/p06-06-shop/g' 05-serviceaccounts-rbac.yaml | kubectl apply -f -
+serviceaccount/catalog-sa created
+serviceaccount/storefront-sa created
+serviceaccount/orders-sa created
+serviceaccount/payments-worker-sa created
+serviceaccount/postgres-sa created
+serviceaccount/redis-sa created
+serviceaccount/rabbitmq-sa created
+serviceaccount/migrate-sa created
+role.rbac.authorization.k8s.io/catalog-config-reader created
+rolebinding.rbac.authorization.k8s.io/catalog-config-reader-binding created
+
+## step 2: the spend quota
+$ sed 's/bookstore/p06-06-shop/g' spend-quota.yaml | kubectl apply -f -
+resourcequota/spend-ceiling created
+
+## step 3: a LoadBalancer Service, deliberately denied by the spend quota
+$ sed 's/bookstore/p06-06-shop/g' catalog-public.yaml | kubectl apply -f -
+Error from server (Forbidden): error when creating "STDIN": services "catalog-public" is forbidden: exceeded quota: spend-ceiling, requested: services.loadbalancers=1,services.nodeports=1, used: services.loadbalancers=0,services.nodeports=0, limited: services.loadbalancers=0,services.nodeports=0
+
+## step 4: the spend quota as the namespace reports it
+$ kubectl describe resourcequota spend-ceiling -n p06-06-shop
+Name:                   spend-ceiling
+Namespace:              p06-06-shop
+Resource                Used  Hard
+--------                ----  ----
+persistentvolumeclaims  0     4
+requests.storage        0     10Gi
+services.loadbalancers  0     0
+services.nodeports      0     0
+$ kubectl describe resourcequota p06-06-shop-quota -n p06-06-shop
+Name:            p06-06-shop-quota
+Namespace:       p06-06-shop
+Resource         Used  Hard
+--------         ----  ----
+limits.cpu       0     4
+limits.memory    0     4Gi
+pods             0     30
+requests.cpu     0     2
+requests.memory  0     2Gi
+
+## step 5: the right-sized catalog Pod, server dry run
+$ sed 's/bookstore/p06-06-shop/g' catalog-rightsize-check.yaml | kubectl apply --dry-run=server -f -
+pod/catalog-rightsize-check created (server dry run)
+
+## step 6: the same Pod without a CPU limit: the LimitRange injects one
+$ grep -v 'cpu: 500m' catalog-rightsize-check.yaml | sed 's/bookstore/p06-06-shop/g' | kubectl apply --dry-run=server -o jsonpath='{.spec.containers[0].resources}' -f -
+{"limits":{"cpu":"500m","memory":"96Mi"},"requests":{"cpu":"40m","memory":"96Mi"}}
+
+## step 7: a 3 CPU request and a 4 CPU limit, deliberately refused by the LimitRange
+$ sed 's/bookstore/p06-06-shop/g; s/cpu: 40m/cpu: 3/; s/cpu: 500m/cpu: 4/' catalog-rightsize-check.yaml | kubectl apply --dry-run=server -f -
+Error from server (Forbidden): error when creating "STDIN": pods "catalog-rightsize-check" is forbidden: maximum cpu usage per Container is 2, but limit is 4
+
+## step 8: the load-generator allows, server dry run
+$ sed 's/bookstore/p06-06-shop/g' load-allow.yaml | kubectl apply --dry-run=server -f -
+networkpolicy.networking.k8s.io/allow-load-generator-egress created (server dry run)
+networkpolicy.networking.k8s.io/allow-load-generator-to-catalog created (server dry run)
+
+## step 9: the load Job, server dry run
+$ sed 's/bookstore/p06-06-shop/g' load-catalog.yaml | kubectl apply --dry-run=server -f -
+job.batch/load-catalog created (server dry run)
+
+## step 10: the VPA recommender chart in a restricted namespace, server dry run
+$ kubectl create namespace p06-06-recommender
+namespace/p06-06-recommender created
+$ kubectl label namespace p06-06-recommender pod-security.kubernetes.io/enforce=restricted pod-security.kubernetes.io/audit=restricted pod-security.kubernetes.io/warn=restricted
+namespace/p06-06-recommender labeled
+$ helm3 template vpa fairwinds-stable/vpa --version 5.1.0 --namespace p06-06-recommender --set updater.enabled=false --set admissionController.enabled=false --include-crds --skip-tests | kubectl apply --dry-run=server -n p06-06-recommender -f -
+customresourcedefinition.apiextensions.k8s.io/verticalpodautoscalercheckpoints.autoscaling.k8s.io created (server dry run)
+customresourcedefinition.apiextensions.k8s.io/verticalpodautoscalers.autoscaling.k8s.io created (server dry run)
+serviceaccount/vpa-recommender created (server dry run)
+clusterrole.rbac.authorization.k8s.io/vpa-metrics-reader created (server dry run)
+clusterrole.rbac.authorization.k8s.io/vpa-actor created (server dry run)
+clusterrole.rbac.authorization.k8s.io/vpa-status-actor created (server dry run)
+clusterrole.rbac.authorization.k8s.io/vpa-checkpoint-actor created (server dry run)
+clusterrole.rbac.authorization.k8s.io/vpa-evictioner created (server dry run)
+clusterrole.rbac.authorization.k8s.io/vpa-target-reader created (server dry run)
+clusterrole.rbac.authorization.k8s.io/vpa-status-reader created (server dry run)
+clusterrole.rbac.authorization.k8s.io/vpa-updater-in-place created (server dry run)
+clusterrolebinding.rbac.authorization.k8s.io/vpa-metrics-reader created (server dry run)
+clusterrolebinding.rbac.authorization.k8s.io/vpa-checkpoint-actor created (server dry run)
+clusterrolebinding.rbac.authorization.k8s.io/vpa-status-actor created (server dry run)
+clusterrolebinding.rbac.authorization.k8s.io/vpa-actor created (server dry run)
+clusterrolebinding.rbac.authorization.k8s.io/vpa-target-reader-binding created (server dry run)
+deployment.apps/vpa-recommender created (server dry run)
+
+## step 11: the VerticalPodAutoscaler before its CRD exists, deliberately refused
+$ kubectl apply --dry-run=server -f vpa.yaml
+error: resource mapping not found for name: "catalog" namespace: "bookstore" from "vpa.yaml": no matches for kind "VerticalPodAutoscaler" in version "autoscaling.k8s.io/v1"
+ensure CRDs are installed first
+
+## step 12: OpenCost in a restricted namespace, with the chart's security values
+$ kubectl create namespace p06-06-costs
+namespace/p06-06-costs created
+$ kubectl label namespace p06-06-costs pod-security.kubernetes.io/enforce=restricted pod-security.kubernetes.io/audit=restricted pod-security.kubernetes.io/warn=restricted
+namespace/p06-06-costs labeled
+$ helm3 template opencost opencost/opencost --version 2.5.33 --namespace p06-06-costs -f oc-secure-values.yaml --skip-tests | kubectl apply --dry-run=server -n p06-06-costs -f -
+serviceaccount/opencost created (server dry run)
+configmap/opencost-ui-nginx-config created (server dry run)
+clusterrole.rbac.authorization.k8s.io/opencost created (server dry run)
+clusterrolebinding.rbac.authorization.k8s.io/opencost created (server dry run)
+service/opencost created (server dry run)
+deployment.apps/opencost created (server dry run)
+
+## step 13: OpenCost with the chart defaults, deliberately warned by the restricted namespace
+$ helm3 template opencost opencost/opencost --version 2.5.33 --namespace p06-06-costs --skip-tests | kubectl apply --dry-run=server -n p06-06-costs -f -
+serviceaccount/opencost created (server dry run)
+configmap/opencost-ui-nginx-config created (server dry run)
+clusterrole.rbac.authorization.k8s.io/opencost created (server dry run)
+clusterrolebinding.rbac.authorization.k8s.io/opencost created (server dry run)
+service/opencost created (server dry run)
+Warning: would violate PodSecurity "restricted:latest": allowPrivilegeEscalation != false (containers "opencost", "opencost-ui" must set securityContext.allowPrivilegeEscalation=false), unrestricted capabilities (containers "opencost", "opencost-ui" must set securityContext.capabilities.drop=["ALL"]), runAsNonRoot != true (pod or containers "opencost", "opencost-ui" must set securityContext.runAsNonRoot=true), seccompProfile (pod or containers "opencost", "opencost-ui" must set securityContext.seccompProfile.type to "RuntimeDefault" or "Localhost")
+deployment.apps/opencost created (server dry run)
+
+## step 14: where the billing credential and the MCP port appear in the render
+$ helm3 template opencost opencost/opencost --version 2.5.33 --namespace p06-06-costs -f oc-secure-values.yaml --skip-tests | grep -n -A3 'secretName: opencost-cloud-integration'
+418:            secretName: opencost-cloud-integration
+419-            items:
+420-              - key: cloud-integration.json
+421-                path: cloud-integration.json
+$ helm3 template opencost opencost/opencost --version 2.5.33 --namespace p06-06-costs --skip-tests | grep -c 'name: mcp-server'
+2
+$ helm3 template opencost opencost/opencost --version 2.5.33 --namespace p06-06-costs -f oc-secure-values.yaml --skip-tests | grep -c 'name: mcp-server'
+0
+
+## step 15: the OpenCost ClusterRole, which reads across namespaces
+$ helm3 template opencost opencost/opencost --version 2.5.33 --namespace p06-06-costs -f oc-secure-values.yaml --skip-tests | awk '/^kind: ClusterRole$/{f=1} /^---/{f=0} f'
+kind: ClusterRole
+metadata:
+  name: opencost
+  labels:
+    helm.sh/chart: opencost-2.5.33
+    app.kubernetes.io/name: opencost
+    app.kubernetes.io/instance: opencost
+    app.kubernetes.io/version: "1.121.3"
+    app.kubernetes.io/part-of: opencost
+    app.kubernetes.io/managed-by: Helm
+rules:
+  - apiGroups: [""]
+    resources:
+      - configmaps
+      - deployments
+      - nodes
+      - pods
+      - services
+      - resourcequotas
+      - replicationcontrollers
+      - limitranges
+      - persistentvolumeclaims
+      - persistentvolumes
+      - namespaces
+      - endpoints
+    verbs:
+      - get
+      - list
+      - watch
+  - apiGroups:
+      - extensions
+    resources:
+      - daemonsets
+      - deployments
+      - replicasets
+    verbs:
+      - get
+      - list
+      - watch
+  - apiGroups:
+      - apps
+    resources:
+      - statefulsets
+      - deployments
+      - daemonsets
+      - replicasets
+    verbs:
+      - list
+      - watch
+  - apiGroups:
+      - batch
+    resources:
+      - cronjobs
+      - jobs
+    verbs:
+      - get
+      - list
+      - watch
+  - apiGroups:
+      - autoscaling
+    resources:
+      - horizontalpodautoscalers
+    verbs:
+      - get
+      - list
+      - watch
+  - apiGroups:
+      - policy
+    resources:
+      - poddisruptionbudgets
+    verbs:
+      - get
+      - list
+      - watch
+  - apiGroups:
+      - storage.k8s.io
+    resources:
+      - storageclasses
+    verbs:
+      - get
+      - list
+      - watch
+
+## step 16: clean up the lab namespaces and confirm the dry runs left no cluster objects
+$ kubectl delete namespace p06-06-shop p06-06-recommender p06-06-costs --wait=false
+namespace "p06-06-shop" deleted
+namespace "p06-06-recommender" deleted
+namespace "p06-06-costs" deleted
+$ kubectl get clusterrole opencost vpa-actor
+Error from server (NotFound): clusterroles.rbac.authorization.k8s.io "opencost" not found
+Error from server (NotFound): clusterroles.rbac.authorization.k8s.io "vpa-actor" not found
+
+## step 17: the scratch namespaces, checked again
+$ kubectl get namespaces | grep p06-06
+p06-06-bookstore        Terminating   15m
+p06-06-costs            Terminating   4m58s
+p06-06-opencost         Terminating   14m
+p06-06-recommender      Terminating   5m31s
+p06-06-shop             Terminating   6m14s
+p06-06-vpa              Terminating   14m
+
+## step 18: the load-generator ServiceAccount, its allows and the Job, server dry run
+$ kubectl create namespace p06-06-load
+namespace/p06-06-load created
+$ kubectl label namespace p06-06-load pod-security.kubernetes.io/enforce=restricted pod-security.kubernetes.io/audit=restricted pod-security.kubernetes.io/warn=restricted
+namespace/p06-06-load labeled
+$ sed 's/bookstore/p06-06-load/g' load-allow.yaml | kubectl apply --dry-run=server -f -
+serviceaccount/load-generator-sa created (server dry run)
+networkpolicy.networking.k8s.io/allow-load-generator-egress created (server dry run)
+networkpolicy.networking.k8s.io/allow-load-generator-to-catalog created (server dry run)
+$ sed 's/bookstore/p06-06-load/g' load-catalog.yaml | kubectl apply --dry-run=server -f -
+job.batch/load-catalog created (server dry run)
+
+## step 19: remove the load namespace
+$ kubectl delete namespace p06-06-load --wait=false
+namespace "p06-06-load" deleted
