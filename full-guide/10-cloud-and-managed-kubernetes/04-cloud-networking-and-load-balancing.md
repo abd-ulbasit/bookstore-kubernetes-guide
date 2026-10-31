@@ -24,8 +24,8 @@
 ## Why this exists
 
 [Part 02](../02-networking/01-networking-model.md) built the Bookstore's whole
-network on kind: a flat Pod LAN, ClusterIP Services, an ingress-nginx
-controller behind `kind`'s port-map, NetworkPolicy enforced by Calico. Every
+network on kind: a flat Pod LAN, ClusterIP Services, a Traefik controller
+behind `kind`'s port-map, NetworkPolicy enforced by kindnet. Every
 one of those pieces *changes shape* on EKS/GKE/AKS — and the changes are
 exactly where cloud networking incidents come from:
 
