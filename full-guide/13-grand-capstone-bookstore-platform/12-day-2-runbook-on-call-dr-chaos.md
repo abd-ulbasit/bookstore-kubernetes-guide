@@ -501,19 +501,19 @@ The Chaos Mesh Workflow in
 5 Chaos Mesh experiments + an optional cordon-based region-loss
 simulation in `dr-drill-script.sh`. The five Chaos Mesh CRs:
 
-1. **PodChaos — pod-kill** on payments-gateway (tests the replica count and
+1. **PodChaos: pod-kill** on payments-gateway (tests the replica count and
    any PodDisruptionBudget you add first).
 2. **NetworkChaos — network-delay** on catalog → orders (test timeouts + retries).
-3. **IOChaos — io-latency** on the CNPG primary's data volume (test
+3. **IOChaos: io-latency** on the CNPG primary's data volume (test
    replication lag and failover).
-4. **DNSChaos — region-DNS-loss** (DNS queries for
+4. **DNSChaos: region-DNS-loss** (DNS queries for
    `*.bookstore-platform.example.com` return an error, in one tenant
-   namespace) — disrupts what the *application* sees of remote
+   namespace). This disrupts what the *application* sees of remote
    regions; complements the cordon-based simulation in
    `dr-drill-script.sh` which disrupts what the *cluster* sees of its
    own nodes. Tests the DR runbook + saga compensation.
-5. **HTTPChaos — payments-failure** (the webhook receiver answers 500 for
-   three minutes) — tests the saga compensation (ch.13.06).
+5. **HTTPChaos: payments-failure** (the webhook receiver answers 500 for
+   three minutes). Tests the saga compensation (ch.13.06).
 
 Each experiment has:
 - A hypothesis ("storefront stays up").

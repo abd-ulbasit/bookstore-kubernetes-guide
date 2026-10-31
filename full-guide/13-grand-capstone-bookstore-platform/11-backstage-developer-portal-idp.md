@@ -553,7 +553,7 @@ set of actions:
   content.
 - `publish:github:pull-request` — open a PR.
 - `catalog:register` — add the new entity to the catalog.
-- `kubernetes:apply` — apply a manifest (v2 uses this for the Argo CD
+- `kubernetes:apply`: apply a manifest (v2 uses this for the Argo CD
   Application). It is not built in: the custom image must bundle the
   Kubernetes scaffolder module that provides it.
 - `fs:rename`, `fs:delete`, `roadiehq:utils:*`: small file ops. The
@@ -730,7 +730,7 @@ Checklist (the developer portal closed when all seven are yes):
 2. **A developer scaffolds a new service from the template. What downstream side-effects should the template trigger to make the service "platform-compliant" out of the box?**
    <details><summary>Show answer</summary>
 
-   The template should: (1) Create a new git repo with `main.go` + Dockerfile + Makefile + restricted-PSA Deployment/Service. (2) Register the new service's Argo CD `Application` in the `bookstore-tenants` project. (3) Join the service to an existing tenant. The platform team onboards tenants (ch.13.02); the template does not create them. (4) Register the service in the Backstage catalog (`catalog-info.yaml`). (5) Wire OpenTelemetry instrumentation, Prometheus ServiceMonitor, Grafana dashboard from a per-service template. (6) Add the team's on-call rotation. Anything not automated by the template becomes a manual chore that gets skipped — and a service skipping any of these is the "ghost service" with no dashboard, no alerts, no owner. The template is the golden path because it removes the alternatives.
+   The template should: (1) Create a new git repo with `main.go` + Dockerfile + Makefile + restricted-PSA Deployment/Service. (2) Register the new service's Argo CD `Application` in the `bookstore-tenants` project. (3) Join the service to an existing tenant. The platform team onboards tenants (ch.13.02); the template does not create them. (4) Register the service in the Backstage catalog (`catalog-info.yaml`). (5) Wire OpenTelemetry instrumentation, Prometheus ServiceMonitor, Grafana dashboard from a per-service template. (6) Add the team's on-call rotation. Anything not automated by the template becomes a manual chore that gets skipped, and a service skipping any of these is the "ghost service" with no dashboard, no alerts, no owner. The template is the golden path because it removes the alternatives.
 
    </details>
 
@@ -759,7 +759,7 @@ Checklist (the developer portal closed when all seven are yes):
    <details><summary>What you should see</summary>
 
    Illustrative estimates, not measured on the lab. Form submission → ~30s for
-   the template to create the git repo and push the initial commit. Argo CD sync → ~30s for the new Application to reconcile. Pod schedule + start → 30-60s. The tenant must already exist; its onboarding (ch.13.02) is a separate run. Compare this to the "ticket to platform team, wait two weeks" old shape — that's the value the portal delivers, measured in days saved per service per quarter.
+   the template to create the git repo and push the initial commit. Argo CD sync → ~30s for the new Application to reconcile. Pod schedule + start → 30-60s. The tenant must already exist; its onboarding (ch.13.02) is a separate run. Compare this to the "ticket to platform team, wait two weeks" old shape. That is the value the portal delivers, measured in days saved per service per quarter.
 
    </details>
 
