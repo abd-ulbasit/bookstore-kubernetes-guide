@@ -58,15 +58,14 @@ cloud cost levers, the honest portability boundary, and a checklist that maps
 every cloud concern back to its Part-10 chapter. The reference is *Production
 Kubernetes* (Autoscaling / Multitenancy) and the Karpenter docs.
 
-> **This chapter needs a real cloud account.** Node autoscaling and spot act
-> on real cloud VM APIs — kind has fixed "nodes" ([Part 06
-> ch.04](../06-production-readiness/04-autoscaling.md) said exactly this). Per
-> the [ch.01](01-managed-kubernetes-model.md) honesty pattern: every command/
-> object is **exact and correct**; the **Bookstore Karpenter file is
-> dry-runnable on kind** (it prints the documented CRD `no matches for kind`
-> until Karpenter is installed — schema-correct), and the Bookstore manifests/
-> PDBs are unchanged; only cloud node behaviour needs the account. No output
-> faked.
+> **Nothing in this chapter runs on a cloud.** Node autoscaling and spot act
+> on cloud VM APIs, and this guide's lab has no cloud account, so node
+> behaviour is cited with its check date (2026-10-31) and not run. The checks
+> ran on the lab cluster, a kind cluster named `sf-pilot`. Its captured output
+> keeps that name, and `examples/security-lab/evidence/10-06.txt` records the
+> namespace substitution. The Karpenter objects were checked against the CRD
+> schema of the pinned chart. The controller was checked by a server dry-run
+> of its rendered manifests, because the CRDs are not installed on the lab.
 
 ## Mental model
 
@@ -80,7 +79,7 @@ the pricing model; portability = the K8s API is, the cloud plumbing isn't.**
   VMSS, [ch.02](02-provisioning-and-iac.md)). When Pods are `Pending` for
   *insufficient resources*, CA increases a group's desired count within
   min/max; when a node sits below the **scale-down utilisation threshold
-  (default ~50% of allocatable requested, configurable via
+  (default 0.5, that is 50% of allocatable requested, set by
   `--scale-down-utilization-threshold`)** and its Pods can move (honoring
   **PDBs** — [Part 06 ch.05](../06-production-readiness/05-reliability-and-disruptions.md)),
   it removes the node. Simple, mature, but **node *shape* is fixed by the
@@ -95,18 +94,23 @@ the pricing model; portability = the K8s API is, the cloud plumbing isn't.**
   pools automatically (CA-plus-shape); **GKE Autopilot** removes node
   management entirely (you declare Pods, Google sizes/bills the nodes —
   [ch.01](01-managed-kubernetes-model.md) boundary shifts further to the
-  provider). AKS uses the cluster autoscaler (Karpenter-for-Azure exists in
-  preview). Same idea, provider-shaped.
-- **Spot/preemptible is the big lever — for the *right* tier.** Spot VMs are
-  60–90% cheaper but can be **reclaimed with ~2 min notice**. Correct for the
-  **fault-tolerant stateless** Bookstore tiers (storefront/catalog/orders/
-  payments-worker) **protected by PDBs + spread** ([Part 06
-  ch.05](../06-production-readiness/05-reliability-and-disruptions.md) / [Part
-  04 ch.02](../04-scheduling/02-affinity-taints-topology.md)) and graceful
-  shutdown ([Part 01 ch.02](../01-core-workloads/02-health-and-lifecycle.md)).
-  **Wrong** for the data tier ([Part 03
-  ch.05](../03-config-and-storage/05-stateful-data-patterns.md)) — a reclaimed
-  Postgres node is an outage. Taints/`capacity-type` keep the DB off spot.
+  provider). AKS offers the cluster autoscaler and Node Autoprovision (NAP),
+  which installs Karpenter on the cluster through the AKS Karpenter provider.
+  Same idea, provider-shaped.
+- **Spot/preemptible is the big lever, for the *right* tier.** On AWS, Spot
+  capacity is up to 90% cheaper than On-Demand, and it can be **reclaimed at
+  short notice**: 2 minutes on AWS, 30 seconds on Azure (Scheduled Events,
+  best effort), and a preemption notice you configure on GCP (0 or 120
+  seconds). Correct for the **fault-tolerant stateless** Bookstore tiers
+  (storefront/catalog/orders/payments-worker), protected by **replicas and
+  spread** ([Part 04 ch.02](../04-scheduling/02-affinity-taints-topology.md))
+  and graceful shutdown ([Part 01
+  ch.02](../01-core-workloads/02-health-and-lifecycle.md)). A
+  PodDisruptionBudget does not hold a reclaim (section 4 below). **Wrong** for
+  the data tier ([Part 03
+  ch.05](../03-config-and-storage/05-stateful-data-patterns.md)): a reclaimed
+  Postgres node is an outage. Keep it on a pool that is on-demand only, and
+  make Postgres require that pool (section 4).
 - **Cost = requests × node price × time, and the FinOps loop still rules.**
   [Part 06 ch.06](../06-production-readiness/06-capacity-and-cost.md): the
   scheduler reserves *requests*, the autoscaler buys *nodes for requests* —
@@ -123,7 +127,8 @@ the pricing model; portability = the K8s API is, the cloud plumbing isn't.**
   ([ch.04](04-cloud-networking-and-load-balancing.md)), IAM mapping
   ([ch.03](03-cloud-identity.md)), CSI driver/StorageClass
   ([ch.05](05-cloud-storage-and-data.md)), CNI specifics, and the node
-  autoscaler (Karpenter is AWS-only). Multi-cloud = keep the portable layer
+  autoscaler (Karpenter's AWS provider is AWS-only; AKS and GKE ship their
+  own). Multi-cloud = keep the portable layer
   pristine and isolate the non-portable layer in overlays/values.
 
 The trap to hold onto: **a node autoscaler does not fix bad requests, and
@@ -131,6 +136,26 @@ spot does not fix the data tier.** Sequence: right-size requests ([Part 06
 ch.06](../06-production-readiness/06-capacity-and-cost.md)) → pick the right
 node autoscaler → spot the stateless tiers (PDB-protected) → apply
 committed-use discounts. Out of order, you optimise air.
+
+## Threats and controls
+
+| Threat | Control taught here | Goes deeper in |
+|---|---|---|
+| A node provisioner that can pass any role launches nodes under a role it should not hold | Scope `iam:PassRole` to the one node role ARN, and keep that node role minimal | [ch.03](03-cloud-identity.md) |
+| A scale-up as a cost attack: a flood of requests, or a runaway HPA, buys nodes | Bound the pool (`limits`) and the Pods (namespace ResourceQuota) | [Part 06 ch.04](../06-production-readiness/04-autoscaling.md) |
+| `alias: al2023@latest` moves every node to a new image with no review | Pin a reviewed AMI alias release, and roll it on purpose | [Part 08 ch.01](../08-day-2-operations/01-cluster-lifecycle.md) |
+| Spot capacity under the data tier | An on-demand pool, tainted, that Postgres requires | [ch.05](05-cloud-storage-and-data.md) |
+
+The controller is the most privileged piece in this chapter, and its scope is
+set in two places. Its IAM role must pass the node role and nothing else. AWS
+describes `iam:PassRole` as the permission that lets a principal hand a role to
+a service, and it advises limiting that permission with the `Resource` element,
+not a tag condition, because tag conditions on PassRole do not give reliable
+results ([AWS IAM, checked 2026-10-31](https://docs.aws.amazon.com/IAM/latest/UserGuide/id_roles_use_passrole.html)).
+Its in-cluster RBAC is wide as well. The chart's `karpenter-core` ClusterRole
+can create `pods/eviction`, delete Pods in every namespace, and patch or delete
+Nodes. Its only namespaced grant in `kube-system` is `get` on the `kube-dns` Service. Keep the
+chart's ClusterRoles as they are, and do not widen them to make a NodePool work.
 
 ## Diagrams
 
@@ -145,13 +170,13 @@ flowchart TD
     sched["kube-scheduler<br/>(Part 04 ch.01)"]
     pend{"Pods Pending<br/>(insufficient resources)?"}
     kp["Karpenter controller<br/>reads pending Pods' EXACT<br/>requests + constraints"]
-    pick["pick the CHEAPEST instance type<br/>from a BROAD set that fits<br/>(spot-first for stateless)"]
+    pick["pick an instance type from a BROAD set<br/>that fits (spot allowed for stateless)"]
     node["provision a RIGHT-SIZED node JIT<br/>(NodePool/EC2NodeClass —<br/>examples/bookstore/cloud/)"]
     place["scheduler places the Pods"]
     cons{"nodes under-utilised /<br/>Pods repackable?"}
     consolidate["CONSOLIDATE: cordon+drain<br/>(honors PDBs — Part 06 ch.05),<br/>repack, remove/replace node<br/>(disruption budget bounds it)"]
-    spot{"spot interruption<br/>notice (~2 min)?"}
-    drain["cordon+drain the node<br/>(PDB + graceful shutdown<br/>Part 01 ch.02) -> Pods reschedule"]
+    spot{"spot interruption<br/>notice (2 min on AWS)?"}
+    drain["taint + drain the node<br/>(PDBs do not hold a reclaim;<br/>preStop + grace, Part 01 ch.02)<br/>-> Pods reschedule"]
 
     hpa --> sched --> pend
     pend -- no --> sched
@@ -182,8 +207,8 @@ flowchart TD
                                             PDB+budget-honored)
   spot              via spot node groups   first-class        via spot pools /
                                             (capacity-type)     Autopilot Spot
-  portability       all clouds (the CA     AWS/EKS ONLY       GCP ONLY
-                     project; per-cloud     (Azure preview)
+  portability       all clouds (the CA     AWS provider;      GCP ONLY
+                     project; per-cloud     AKS NAP on Azure)
                      provider)
   best for          fixed, predictable     variable/spiky,    GCP-native;
                      fleets; multi-cloud    spot-heavy, cost-   hands-off (Auto-
@@ -193,10 +218,10 @@ flowchart TD
  COST LEVERS (apply IN THIS ORDER — Part 06 ch.06):
   1. RIGHT-SIZE requests (Part 06 ch.06) ........ biggest single win
   2. NODE AUTOSCALER sized to real requests ..... no fleet of air
-  3. SPOT for stateless (PDB+spread protected) .. 60-90% off those nodes
+  3. SPOT for stateless (spread + grace) ........ up to 90% off (AWS)
   4. CONSOLIDATION / scale-to-zero (KEDA) ....... remove idle cost
-  5. COMMITTED-USE discounts (Reserved/Savings/   10-60% off the steady
-     CUD) for the steady baseline ..............   baseline
+  5. COMMITTED-USE discounts (Reserved/Savings/   AWS Compute Savings
+     CUD) for the steady baseline ..............   Plans: up to 66%
   6. COST-ALLOCATE per ns/workload (OpenCost/     spend owned, not
      cloud tooling) ............................   discovered
   WRONG ORDER = optimising air (cheap nodes running over-requested Pods).
@@ -207,9 +232,9 @@ flowchart TD
 **Assumed working directory: the guide repo root (`full-guide/`).** This
 chapter adds **one new file** —
 [`examples/bookstore/cloud/karpenter-nodepool.yaml`](../examples/bookstore/cloud/karpenter-nodepool.yaml)
-— and edits **nothing** canonical. **Illustrative** (Karpenter needs an EKS
-cluster); the dry-run showing the documented CRD-intrinsic behaviour is
-**runnable on kind now**.
+, and edits **nothing** canonical. The file runs only on an EKS cluster with
+Karpenter installed. Its client dry-run runs on kind and shows the CRD gap
+(section 6).
 
 ### 1. The problem made concrete: the catalog HPA needs somewhere to scale
 
@@ -218,10 +243,99 @@ catalog HPA ([`82-hpa-catalog.yaml`](../examples/bookstore/raw-manifests/82-hpa-
 `maxReplicas: 6`) and the KEDA-scaled `payments-worker`
 ([`83-keda-scaledobject.yaml`](../examples/bookstore/raw-manifests/83-keda-scaledobject.yaml),
 `maxReplicaCount: 10`). On a cloud cluster with no node autoscaler, a sale
-drives the HPA to 6 catalog Pods, the cluster has room for 3, and **3 Pods sit
+drives the HPA to 6 catalog Pods (an illustrative sale, not a measurement),
+the cluster has room for 3, and **3 Pods sit
 `Pending`** — the HPA worked, nothing caught the overflow. The node tier is
 what makes the [Part 06 ch.04](../06-production-readiness/04-autoscaling.md)
 Pod autoscaling actually deliver capacity.
+
+You can reproduce the overflow on the lab cluster. This step is deliberate: the
+manifest below is a complete workload with the baseline, and its one container
+asks for 64 CPUs, more than the lab node has (4), so the scheduler cannot place
+it. Delete it as soon as you have seen the result. On a cloud cluster the same
+`Pending` Pod makes Karpenter buy a node.
+
+```yaml
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: overflow-demo
+  namespace: bookstore
+automountServiceAccountToken: false
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: overflow-demo
+  namespace: bookstore
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: overflow-demo
+  template:
+    metadata:
+      labels:
+        app: overflow-demo
+    spec:
+      serviceAccountName: overflow-demo
+      automountServiceAccountToken: false
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 65532
+        runAsGroup: 65532
+        seccompProfile:
+          type: RuntimeDefault
+      containers:
+        - name: app
+          image: bookstore/catalog:dev
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities:
+              drop: ["ALL"]
+          resources:
+            requests:
+              cpu: "64"          # more than the lab node has: stays Pending
+              memory: 96Mi
+            limits:
+              memory: 128Mi
+          volumeMounts:
+            - name: tmp
+              mountPath: /tmp
+      volumes:
+        - name: tmp
+          emptyDir: {}
+```
+
+```sh
+kubectl apply -f overflow-demo.yaml
+kubectl -n bookstore describe pod -l app=overflow-demo | sed -n '/^Events:/,$p'
+kubectl -n bookstore get pods
+```
+
+<!-- gate: output -->
+```
+Events:
+  Type     Reason            Age   From               Message
+  ----     ------            ----  ----               -------
+  Warning  FailedScheduling  1s    default-scheduler  0/1 nodes are available: 1 Insufficient cpu. preemption: 0/1 nodes are available: 1 Preemption is not helpful for scheduling.
+```
+
+<!-- gate: output -->
+```
+NAME                             READY   STATUS    RESTARTS   AGE
+overflow-demo-5cc95fb7fc-v7crw   0/1     Pending   0          11s
+```
+
+The Pod stays `Pending` because the scheduler found no node with 64 free CPUs.
+The lab has no node autoscaler, so nothing else happens. On EKS with the
+Bookstore NodePool (illustrative, not captured), Karpenter reads the same
+`Pending` Pod and launches a node that fits it, if the requirements and
+`limits` allow an instance that large. One request buys one large node. That
+is the cost attack in miniature. The `limits` block caps the pool's total, so a
+runaway scale-up stops at the cap, not at the price. Remove the demo with
+`kubectl -n bookstore delete deploy/overflow-demo sa/overflow-demo`.
 
 ### 2. Install Karpenter (pinned Helm) — the lead path on EKS
 
@@ -230,14 +344,26 @@ Per the guide's hard rule — **pinned Helm, never
 used for KEDA/kube-prometheus-stack/Velero):
 
 ```sh
-# Karpenter via its OCI Helm chart, PINNED: 1.15.x is the only line its
-# compatibility matrix lists for Kubernetes 1.37. The controller needs IRSA/Pod
-# Identity (ch.03) to call EC2 with NO static key; the node IAM role, the
-# karpenter.sh/discovery subnet/SG tags and the SQS interruption queue (spot
-# notices) must pre-exist (ch.02 cluster IaC).
+# Karpenter's chart is pinned to 1.15.1. Karpenter's compatibility matrix
+# lists 1.15.x for Kubernetes 1.37 (checked 2026-10-31; cited, not run). The
+# controller calls EC2 through IRSA or Pod Identity (ch.03), so no static key
+# is needed. The node IAM role, the karpenter.sh/discovery tags and the SQS
+# interruption queue must already exist (ch.02).
 helm registry logout public.ecr.aws    # anonymous pull, as Karpenter's docs do
+
+# Namespace first, labelled restricted. The chart's template already sets the
+# restricted fields (runAsNonRoot, no privilege escalation, all capabilities
+# dropped, seccomp RuntimeDefault), so no chart values change. Karpenter must
+# not run on nodes it manages: give the namespace a managed node group or
+# Fargate, as Karpenter's getting-started guide advises.
+kubectl create namespace karpenter
+kubectl label namespace karpenter pod-security.kubernetes.io/enforce=restricted pod-security.kubernetes.io/audit=restricted pod-security.kubernetes.io/warn=restricted
+
+# The CRDs come from their own chart. The controller chart does not ship them.
+helm upgrade --install karpenter-crd oci://public.ecr.aws/karpenter/karpenter-crd \
+  --version 1.15.1 -n karpenter
 helm upgrade --install karpenter oci://public.ecr.aws/karpenter/karpenter \
-  --version 1.15.1 -n karpenter --create-namespace \
+  --version 1.15.1 -n karpenter \
   --set "settings.clusterName=$CLUSTER_NAME" \
   --set "settings.interruptionQueue=$CLUSTER_NAME" \
   --set "serviceAccount.annotations.eks\.amazonaws\.com/role-arn=arn:aws:iam::123456789012:role/KarpenterController" \
@@ -246,24 +372,31 @@ kubectl -n karpenter rollout status deploy/karpenter
 kubectl get crd | grep karpenter        # nodepools, ec2nodeclasses now registered
 ```
 
+The controller's ServiceAccount keeps its API token, because the controller
+calls the Kubernetes API. That is the one place this chapter sets
+`automountServiceAccountToken: true`, and it is allowed only because the
+ServiceAccount is dedicated to the controller ([baseline](../01-core-workloads/01-pods.md#baseline)).
+
 ### 3. Apply the Bookstore NodePool/EC2NodeClass (the new file)
 
 [`examples/bookstore/cloud/karpenter-nodepool.yaml`](../examples/bookstore/cloud/karpenter-nodepool.yaml)
-is sized for the Bookstore's stateless tiers: a **broad instance set**
-(c/m/r families, no nano/micro), **spot-first** `capacity-type`, a
-**consolidation** policy + **disruption budget** that works *with* the
-Bookstore's `84-pdb.yaml` ([Part 06
-ch.05](../06-production-readiness/05-reliability-and-disruptions.md)), a
-**`limits`** block capping spend (the cost guardrail — mirrors the namespace
-ResourceQuota bounding the HPA in [Part 06
-ch.04](../06-production-readiness/04-autoscaling.md)), and an `EC2NodeClass`
-with a **minimal node role** + **IMDSv2 hop-limit 1** so Bookstore Pods cannot
-steal the node identity ([ch.03](03-cloud-identity.md)). Core shape:
+has two pools and one node template. The stateless pool takes a **broad
+instance set** (c/m/r families, no nano/micro), **spot and on-demand** capacity
+(the `capacity-type` requirement), a **consolidation** policy and **disruption
+budget** that works *with* the Bookstore's `84-pdb.yaml` ([Part 06
+ch.05](../06-production-readiness/05-reliability-and-disruptions.md)), and
+**`limits`** that cap what the pool may provision. The limits cap the total,
+not the price of each node. The data pool is on-demand only, tainted
+`dedicated=database:NoSchedule` and labelled `dedicated=database`, which the
+Postgres manifest must require (section 4). The `EC2NodeClass` has a **minimal
+node role** and **IMDSv2 with hop limit 1**: a container on the pod network
+cannot reach the node's metadata and take its role
+([ch.03](03-cloud-identity.md)).
+Its AMI alias is one you pin. The fragment below shows the stateless pool's
+core fields. The file holds the complete objects, and this fragment has no
+`kind:`, so it is not a manifest.
 
 ```yaml
-apiVersion: karpenter.sh/v1
-kind: NodePool
-metadata: { name: bookstore-stateless }
 spec:
   template:
     spec:
@@ -273,11 +406,13 @@ spec:
       nodeClassRef: { group: karpenter.k8s.aws, kind: EC2NodeClass, name: bookstore-default }
   disruption:
     consolidationPolicy: WhenEmptyOrUnderutilized
-    budgets: [ { nodes: "10%" } ]          # works WITH 84-pdb.yaml (Part 06 ch.05)
-  limits: { cpu: "200", memory: 200Gi }    # the spend ceiling (cost guardrail)
+    budgets: [ { nodes: "10%" } ]          # voluntary disruption only; honours PDBs
+  limits: { cpu: "200", memory: 200Gi }    # caps what the pool may provision
 ```
 
 ```sh
+# Set <RELEASE> in the file to the AL2023 release you reviewed first; the file
+# header explains why.
 kubectl apply -f examples/bookstore/cloud/karpenter-nodepool.yaml   # Karpenter-EKS only
 kubectl get nodepool,ec2nodeclass
 # Now drive the catalog HPA (the Part 06 ch.04 load test) so Pods go Pending;
@@ -285,8 +420,9 @@ kubectl get nodepool,ec2nodeclass
 # consolidate when load drops:
 kubectl get nodeclaims -w        # Karpenter creating/removing nodes
 kubectl get nodes -L karpenter.sh/capacity-type -L topology.kubernetes.io/zone
-#   stateless Pods land on SPOT nodes, AZ-spread; postgres does NOT (it has no
-#   spot toleration and its zonal disk pins it — ch.05).
+#   stateless Pods land on SPOT nodes, AZ-spread. Postgres moves to the data
+#   pool only after its owner change (section 4); until then it can land on any
+#   node its tolerations allow, spot included.
 ```
 
 ### 4. The spot + PDB story for the stateless tiers (no app change)
@@ -297,9 +433,13 @@ The Bookstore is **already built for spot** — no manifest change needed:
   fault-tolerant; a reclaimed node reschedules them.
 - [`84-pdb.yaml`](../examples/bookstore/raw-manifests/84-pdb.yaml) ([Part 06
   ch.05](../06-production-readiness/05-reliability-and-disruptions.md)) bounds
-  how many go down at once — Karpenter's drain on spot-interruption/
-  consolidation **honors it** (the same eviction-API contract as a node
-  drain, [Part 08 ch.01](../08-day-2-operations/01-cluster-lifecycle.md)).
+  how many go down at once during **voluntary** disruption: consolidation and
+  drains, which use the eviction API ([Part 08
+  ch.01](../08-day-2-operations/01-cluster-lifecycle.md)). A PDB does not hold
+  back a node that Karpenter is terminating. A NodePool's
+  `terminationGracePeriod` bypasses blocked PDBs, and Karpenter deletes the
+  Pods before it ends ([Karpenter disruption docs](https://karpenter.sh/docs/concepts/disruption/),
+  checked 2026-10-31, cited not run). A reclaim gets the same limited window.
 - `topologySpreadConstraints`/`podAntiAffinity` ([Part 04
   ch.02](../04-scheduling/02-affinity-taints-topology.md)) keep replicas off
   one node/AZ so a single spot reclamation can't take the tier.
@@ -307,14 +447,38 @@ The Bookstore is **already built for spot** — no manifest change needed:
   ([Part 01 ch.02](../01-core-workloads/02-health-and-lifecycle.md)) make the
   ~2-min spot drain graceful — in-flight requests finish, the worker drains
   its RabbitMQ message ([Part 06 ch.04](../06-production-readiness/04-autoscaling.md)).
+  The stateless pool's `terminationGracePeriod` (1m in the file) must be at
+  least the longest `preStop` plus grace period these tiers rely on, or the
+  drain cuts them short.
 
-The **data tier stays off spot**: `postgres` has no spot toleration, its
-zonal disk pins it ([ch.05](05-cloud-storage-and-data.md)), and a reclaimed
-Postgres node is an outage ([Part 03
-ch.05](../03-config-and-storage/05-stateful-data-patterns.md)). This is the
-[Part 06 ch.06](../06-production-readiness/06-capacity-and-cost.md) rule —
-spot the stateless, never the data — realised by Karpenter config, not app
-edits.
+The **data tier stays off spot**, and this is the one change the chapter asks
+for outside the Karpenter file. The `bookstore-data` pool is on-demand only and
+tainted `dedicated=database:NoSchedule`, so only Pods that tolerate that taint
+can land on it. The canonical Postgres manifest tolerates the taint, but it
+only *prefers* the `dedicated=database` label. Until the owner makes that label
+a requirement, Postgres can land on a spot node in the stateless pool.
+[`20-postgres-statefulset.yaml`](../examples/bookstore/raw-manifests/20-postgres-statefulset.yaml)
+is canonical, so this chapter does not edit it. The owner adds a required term
+beside the preferred one, in the cloud overlay (not the base), because the lab's
+single-node kind cluster has no such node and would leave Postgres `Pending`:
+
+```yaml
+# Owner change to 20-postgres-statefulset.yaml, under affinity.nodeAffinity,
+# beside the existing preferred term. A fragment, so it has no kind.
+requiredDuringSchedulingIgnoredDuringExecution:
+  nodeSelectorTerms:
+    - matchExpressions:
+        - key: dedicated
+          operator: In
+          values: ["database"]
+```
+
+With that term in place, Postgres can land only on the data pool, which is
+on-demand only. Until then, "the data tier stays off spot" is a gap. It is the
+[Part 06 ch.06](../06-production-readiness/06-capacity-and-cost.md) rule (spot
+the stateless, never the data), realised by Karpenter config plus one owner
+change. Postgres's zonal disk still pins it to one zone
+([ch.05](05-cloud-storage-and-data.md)).
 
 ### 5. Cost & FinOps on the Bookstore (the loop, cloud-priced)
 
@@ -325,11 +489,12 @@ edits.
 # 1. RIGHT-SIZE requests FIRST (Part 06 ch.06) — the catalog recommendation
 #    there (cpu 40m, mem 96Mi==limit) shrinks what the autoscaler must buy.
 # 2. NODE autoscaler sized to real requests (steps 2-3) — no fleet of air.
-# 3. SPOT the stateless tiers (step 4) — 60-90% off those nodes.
+# 3. SPOT the stateless tiers (step 4): up to 90% off those nodes (AWS).
 # 4. SCALE-TO-ZERO: payments-worker via KEDA (Part 06 ch.04) + Karpenter
 #    consolidation removes the idle node entirely at 3am.
 # 5. COMMITTED-USE: cover the steady baseline (postgres + min HPA replicas)
-#    with Savings Plans / Reserved / CUD (10-60% off the always-on part).
+#    with Savings Plans / Reserved / CUD (AWS Compute Savings Plans: up to 66%
+#    off On-Demand; other providers' terms differ).
 # 6. COST-ALLOCATE: tag nodes/resources by owner; OpenCost (Part 06 ch.06) or
 #    the cloud's split-cost/cost-allocation tooling attributes $ per
 #    namespace/workload -> the Bookstore's spend is OWNED, not discovered.
@@ -341,31 +506,86 @@ ch.06](../06-production-readiness/06-capacity-and-cost.md) said this); the
 *efficiency ratio* (usage ÷ request) and the spot/consolidation behaviour are
 real on the managed cluster.
 
-### 6. The CRD-intrinsic dry-run (documented, like every prior CRD object)
+### 6. Checking the objects before the CRDs exist
 
 ```sh
-# from the repo root (full-guide/) — RUNNABLE on kind, no cloud:
+# from the repo root (full-guide/), on a cluster without Karpenter installed:
 kubectl apply --dry-run=client -f examples/bookstore/cloud/karpenter-nodepool.yaml
-# error: ... no matches for kind "NodePool" in version "karpenter.sh/v1"
-# error: ... no matches for kind "EC2NodeClass" in version "karpenter.k8s.aws/v1"
 ```
 
-That is **expected and correct** — the *exact* precedent of
+<!-- gate: output -->
+```
+resource mapping not found for name: "bookstore-stateless" namespace: "" from "examples/bookstore/cloud/karpenter-nodepool.yaml": no matches for kind "NodePool" in version "karpenter.sh/v1"
+ensure CRDs are installed first
+resource mapping not found for name: "bookstore-data" namespace: "" from "examples/bookstore/cloud/karpenter-nodepool.yaml": no matches for kind "NodePool" in version "karpenter.sh/v1"
+ensure CRDs are installed first
+resource mapping not found for name: "bookstore-default" namespace: "" from "examples/bookstore/cloud/karpenter-nodepool.yaml": no matches for kind "EC2NodeClass" in version "karpenter.k8s.aws/v1"
+ensure CRDs are installed first
+```
+
+That output is from the lab cluster, which had no Karpenter CRDs. It is the
+expected result, not a defect in the file. It is the same precedent as
 [`51-gateway.yaml`](../examples/bookstore/raw-manifests/51-gateway.yaml),
 [`83-keda-scaledobject.yaml`](../examples/bookstore/raw-manifests/83-keda-scaledobject.yaml),
 [`70-kyverno-policy.yaml`](../examples/bookstore/raw-manifests/70-kyverno-policy.yaml),
 [`18-postgres-snapshot.yaml`](../examples/bookstore/raw-manifests/18-postgres-snapshot.yaml),
 the `argocd/` tree, and
 [`operators/velero-backup.yaml`](../examples/bookstore/operators/velero-backup.yaml).
-The file is **schema-correct** (verified against the Karpenter API reference);
-the CRDs must exist first (step 2). Its header documents this exactly.
+The file's header explains it.
+
+The schema check needs the CRDs, and the lab could not install them: the
+cluster's heavy-install lock was held by another run, and Karpenter is a heavy
+install in this guide. So the objects were checked two other ways.
+
+- **Offline, against the pinned chart.** `helm template` of
+  `oci://public.ecr.aws/karpenter/karpenter-crd` at 1.15.1 yields the CRDs. The
+  three objects were checked against their schemas for unknown fields, types,
+  required fields and enums. The CEL rules were read by hand. The
+  restricted-label rule exempts `karpenter.sh/capacity-type` by name, and every
+  requirement has the values its operator needs.
+- **Once the CRDs exist.** `kubectl apply --dry-run=server -f` on the file runs
+  the same schema and the CEL rules inside the API server. Run it before the
+  first real apply.
+
+The controller needs no CRDs to render. Its rendered manifests passed a server
+dry-run in a namespace labelled `restricted`, with no PodSecurity warning:
+
+```sh
+helm template karpenter oci://public.ecr.aws/karpenter/karpenter --version 1.15.1 \
+  --namespace karpenter --set settings.clusterName=$CLUSTER_NAME \
+  --set settings.interruptionQueue=$CLUSTER_NAME \
+  --set "serviceAccount.annotations.eks\.amazonaws\.com/role-arn=arn:aws:iam::123456789012:role/KarpenterController" > rendered.yaml
+kubectl apply --dry-run=server -n karpenter -f rendered.yaml
+```
+
+<!-- gate: output -->
+```
+poddisruptionbudget.policy/karpenter created (server dry run)
+serviceaccount/karpenter created (server dry run)
+clusterrole.rbac.authorization.k8s.io/karpenter-admin created (server dry run)
+clusterrole.rbac.authorization.k8s.io/karpenter-core created (server dry run)
+clusterrole.rbac.authorization.k8s.io/karpenter created (server dry run)
+clusterrolebinding.rbac.authorization.k8s.io/karpenter-core created (server dry run)
+clusterrolebinding.rbac.authorization.k8s.io/karpenter created (server dry run)
+role.rbac.authorization.k8s.io/karpenter created (server dry run)
+rolebinding.rbac.authorization.k8s.io/karpenter created (server dry run)
+service/karpenter created (server dry run)
+deployment.apps/karpenter created (server dry run)
+# ...
+```
+
+The chart also has two objects in `kube-system`: a Role and a RoleBinding that
+let Karpenter `get` the `kube-dns` Service, and nothing else there.
+`kubectl` refuses them under a different `-n`, so read them in `rendered.yaml`
+rather than dry-running them. The two refusals are omitted above.
 
 > **Lineage note.** This is the node tier the [Part 06
 > ch.04](../06-production-readiness/04-autoscaling.md) HPA/KEDA callouts and
 > the [Part 06 ch.06](../06-production-readiness/06-capacity-and-cost.md)
-> FinOps loop pointed at — *"a node autoscaler (Cluster Autoscaler/Karpenter)
-> for the Pod growth"* and *"spot for fault-tolerant tiers, protected by PDBs
-> + spread"*. It deepens, never contradicts, those callouts. The Bookstore
+> FinOps loop pointed at: a node autoscaler for the Pod growth, and spot for the
+> fault-tolerant tiers. It deepens those callouts. Where it narrows one, the
+> narrower statement wins: a PDB bounds voluntary disruption and does not hold
+> a spot reclaim (section 4). The Bookstore
 > manifests, `84-pdb.yaml`, and the scheduling layer are **unchanged** — spot
 > is a Karpenter-config decision, not an app edit.
 
@@ -375,8 +595,8 @@ the CRDs must exist first (step 2). Its header documents this exactly.
   due to insufficient resources and, per node group, **increases the cloud
   ASG/MIG/VMSS desired count** within min/max ([ch.02](02-provisioning-and-iac.md));
   when a node's requested utilisation stays below
-  `--scale-down-utilization-threshold` (**default ~50%** of allocatable) for
-  `--scale-down-unneeded-time` and its Pods can be evicted (eviction API →
+  `--scale-down-utilization-threshold` (**default 0.5**, that is 50% of allocatable) for
+  `--scale-down-unneeded-time` (default 10 minutes) and its Pods can be evicted (eviction API →
   **PDBs honored**, [Part 06
   ch.05](../06-production-readiness/05-reliability-and-disruptions.md)), it
   scales the group down. It reacts to the **scheduler's** verdict ([Part 04
@@ -387,7 +607,7 @@ the CRDs must exist first (step 2). Its header documents this exactly.
   watches **`Pending` Pods directly**, computes a node that satisfies their
   *exact* aggregate requests + affinities/taints/topology, and **launches that
   instance** from a broad type set (the `NodePool.requirements` /
-  `EC2NodeClass`) — choosing the cheapest fitting type, spot-first if allowed.
+  `EC2NodeClass`), choosing a type from the ones the requirements allow.
   It then runs **consolidation**: if Pods can be repacked onto fewer/cheaper
   nodes, it cordons+drains the loser (eviction API → **PDBs + disruption
   budgets** honored) and removes/replaces it. The result is closer-to-optimal
@@ -395,21 +615,20 @@ the CRDs must exist first (step 2). Its header documents this exactly.
   ch.04](../06-production-readiness/04-autoscaling.md) Karpenter callout,
   mechanised. `consolidationPolicy`/`budgets`/`expireAfter` (in the Bookstore
   file) bound how aggressive and how disruptive it is.
-- **Why spot needs PDBs + spread + graceful shutdown — and the data tier
-  doesn't get spot.** Spot reclamation is an involuntary disruption with ~2
-  min notice. The Bookstore survives it on the stateless tiers because
-  **`84-pdb.yaml`** ([Part 06
-  ch.05](../06-production-readiness/05-reliability-and-disruptions.md)) caps
-  concurrent loss, **spread** ([Part 04
-  ch.02](../04-scheduling/02-affinity-taints-topology.md)) means no single
-  node/AZ hosts a whole tier, and **`preStop` + grace**
+- **Why spot needs spread and graceful shutdown, and the data tier doesn't get
+  spot.** Spot reclamation is an involuntary disruption, with a 2-minute
+  notice on AWS. The Bookstore survives it on the stateless tiers because
+  **spread** ([Part 04 ch.02](../04-scheduling/02-affinity-taints-topology.md))
+  means no single node or AZ hosts a whole tier, and **`preStop` + grace**
   ([Part 01 ch.02](../01-core-workloads/02-health-and-lifecycle.md)) lets
-  in-flight work finish in the 2-min window. The data tier has **none of
-  these guarantees against node loss** — Postgres is a singleton on a zonal
-  disk ([ch.05](05-cloud-storage-and-data.md)); a reclaimed Postgres node is
-  an outage and a restore ([Part 08
-  ch.02](../08-day-2-operations/02-backup-and-dr.md)), so it must run
-  on-demand (no spot toleration / a separate on-demand pool). This is exactly
+  in-flight work finish in the notice window. **`84-pdb.yaml`**
+  ([Part 06 ch.05](../06-production-readiness/05-reliability-and-disruptions.md))
+  bounds voluntary disruption, and does not hold a reclaim. The data tier has
+  **none of these guarantees against node loss**. Postgres is a singleton on a
+  zonal disk ([ch.05](05-cloud-storage-and-data.md)), and a reclaimed Postgres
+  node is an outage and a restore ([Part 08
+  ch.02](../08-day-2-operations/02-backup-and-dr.md)). So it must run on the
+  on-demand data pool, which Postgres requires (section 4). This is exactly
   the [Part 06 ch.06](../06-production-readiness/06-capacity-and-cost.md)
   "spot-ize the stateless, not the data" rule, made mechanical.
 - **The cost equation, and why request-rightsizing comes first.** The cloud
@@ -433,8 +652,8 @@ the CRDs must exist first (step 2). Its header documents this exactly.
   **Autopilot** removes node management and bills per Pod resource — the
   [ch.01](01-managed-kubernetes-model.md) responsibility boundary moves
   further to Google, but **the app SLO, PDBs, requests, and the FinOps loop
-  stay yours**. AKS uses the cluster autoscaler; Karpenter-for-Azure is in
-  preview. The Pod-tier autoscaling (HPA/KEDA/VPA, [Part 06
+  stay yours**. AKS offers the cluster autoscaler and NAP, which installs
+  Karpenter through the AKS Karpenter provider. The Pod-tier autoscaling (HPA/KEDA/VPA, [Part 06
   ch.04](../06-production-readiness/04-autoscaling.md)) is fully portable; the
   **node tier is provider-specific** — which is the headline of the
   portability section.
@@ -448,7 +667,8 @@ the CRDs must exist first (step 2). Its header documents this exactly.
   identity mapping ([ch.03](03-cloud-identity.md)), the CSI driver +
   StorageClass `parameters` ([ch.05](05-cloud-storage-and-data.md)), the CNI
   specifics ([ch.04](04-cloud-networking-and-load-balancing.md)), and the node
-  autoscaler (Karpenter = AWS only). Multi-cloud/hybrid strategy = keep the
+  autoscaler (Karpenter's AWS provider is AWS-only; AKS and GKE have their own
+  provisioners). Multi-cloud/hybrid strategy = keep the
   portable layer untouched and confine the non-portable layer to overlays/
   values/per-cluster add-ons — exactly the Kustomize/Helm structure Part 07
   already gave the Bookstore. "Portable Kubernetes" is true *for the workload*
@@ -462,18 +682,20 @@ the CRDs must exist first (step 2). Its header documents this exactly.
 > 06 ch.04](../06-production-readiness/04-autoscaling.md)) only deliver
 > capacity if `Pending` Pods trigger nodes. Use **Karpenter** on EKS
 > (right-sized JIT + consolidation + spot — the Bookstore file), **NAP/
-> Autopilot** on GKE, the **cluster autoscaler** on AKS. Bound it (`limits` /
+> Autopilot** on GKE, **NAP** (or the **cluster autoscaler**) on AKS. Bound it (`limits` /
 > ASG max / namespace ResourceQuota — [Part 06
 > ch.04](../06-production-readiness/04-autoscaling.md)) so scaling can't
 > exhaust the bill.
 
-> **In production: spot the fault-tolerant tiers (PDB + spread + graceful),
-> never the data tier.** Spot is 60–90% off and safe for the Bookstore
-> stateless tiers *because* of `84-pdb.yaml`, topology spread, and `preStop`
-> grace ([Part 06 ch.05](../06-production-readiness/05-reliability-and-disruptions.md)
-> / [Part 04 ch.02](../04-scheduling/02-affinity-taints-topology.md) / [Part
-> 01 ch.02](../01-core-workloads/02-health-and-lifecycle.md)). Keep Postgres
-> on-demand — a reclaimed DB node on a zonal disk
+> **In production: spot the fault-tolerant tiers (spread + graceful),
+> never the data tier.** Spot is up to 90% off on AWS, and it is safe for the
+> Bookstore stateless tiers *because* of topology spread, replicas, and
+> `preStop` grace ([Part 04 ch.02](../04-scheduling/02-affinity-taints-topology.md)
+> / [Part 01 ch.02](../01-core-workloads/02-health-and-lifecycle.md)).
+> `84-pdb.yaml` bounds voluntary disruption, and it does not hold a reclaim
+> ([Part 06 ch.05](../06-production-readiness/05-reliability-and-disruptions.md)).
+> Keep Postgres on the on-demand data pool, which its manifest must require
+> (section 4). A reclaimed DB node on a zonal disk
 > ([ch.05](05-cloud-storage-and-data.md)) is an outage + restore ([Part 08
 > ch.02](../08-day-2-operations/02-backup-and-dr.md)). Handle interruption
 > with a node-termination handler / Karpenter's native draining.
@@ -514,10 +736,14 @@ the CRDs must exist first (step 2). Its header documents this exactly.
 
 ```sh
 # Install Karpenter (pinned Helm; never releases/latest/download/<PINNED>.yaml)
+kubectl create namespace karpenter
+kubectl label namespace karpenter pod-security.kubernetes.io/enforce=restricted pod-security.kubernetes.io/audit=restricted pod-security.kubernetes.io/warn=restricted
+helm upgrade --install karpenter-crd oci://public.ecr.aws/karpenter/karpenter-crd \
+  --version 1.15.1 -n karpenter
 helm upgrade --install karpenter oci://public.ecr.aws/karpenter/karpenter \
-  --version 1.15.1 -n karpenter --create-namespace \
+  --version 1.15.1 -n karpenter \
   --set settings.clusterName=$CLUSTER_NAME ...           # IRSA SA (ch.03), no key
-kubectl apply -f examples/bookstore/cloud/karpenter-nodepool.yaml   # Karpenter-EKS only
+kubectl apply -f examples/bookstore/cloud/karpenter-nodepool.yaml   # EKS only; set <RELEASE> first
 
 # Watch the node tier react to the Part 06 ch.04 HPA/KEDA Pod growth
 kubectl get nodeclaims -w                                  # Karpenter add/remove
@@ -527,32 +753,31 @@ kubectl get pdb -n bookstore                               # 84-pdb.yaml bounds 
 # Cost levers (Part 06 ch.06 order): right-size -> autoscaler -> spot ->
 #   consolidate/scale-to-zero -> committed-use -> allocate (OpenCost/cloud)
 
-# CRD-intrinsic dry-run (RUNNABLE on kind; documented in the file's header):
-kubectl apply --dry-run=client -f examples/bookstore/cloud/karpenter-nodepool.yaml
-# -> no matches for kind "NodePool"/"EC2NodeClass" until Karpenter is installed
+# Before the CRDs exist, a client dry-run reports no matches for the kinds
+# (section 6). Once they exist, validate on the server:
+kubectl apply --dry-run=server -f examples/bookstore/cloud/karpenter-nodepool.yaml
 ```
 
-Minimal Karpenter `NodePool` + `EC2NodeClass` skeleton (full, documented set
-in [`examples/bookstore/cloud/karpenter-nodepool.yaml`](../examples/bookstore/cloud/karpenter-nodepool.yaml)):
+Fragments of the two Karpenter objects, secure fields only (no `kind:`, so
+these are not manifests; the complete objects are in
+[`examples/bookstore/cloud/karpenter-nodepool.yaml`](../examples/bookstore/cloud/karpenter-nodepool.yaml)):
 
 ```yaml
-apiVersion: karpenter.sh/v1                # CRD — needs Karpenter installed
-kind: NodePool
-spec:
-  template:
-    spec:
-      requirements:
-        - { key: karpenter.sh/capacity-type, operator: In, values: ["spot","on-demand"] }
-      nodeClassRef: { group: karpenter.k8s.aws, kind: EC2NodeClass, name: default }
-  disruption: { consolidationPolicy: WhenEmptyOrUnderutilized, budgets: [ { nodes: "10%" } ] }
-  limits: { cpu: "200", memory: 200Gi }    # the spend ceiling (cost guardrail)
----
-apiVersion: karpenter.k8s.aws/v1           # CRD
-kind: EC2NodeClass
-spec:
+spec:                                      # EC2NodeClass: the node template
   amiFamily: AL2023
+  amiSelectorTerms:
+    - alias: al2023@v<RELEASE>             # a reviewed release, never @latest
   role: "KarpenterNodeRole-<CLUSTER>"      # MINIMAL node role (ch.03)
   metadataOptions: { httpTokens: required, httpPutResponseHopLimit: 1 }  # ch.03
+```
+
+```yaml
+spec:                                      # NodePool: the policy
+  template:
+    spec:
+      nodeClassRef: { group: karpenter.k8s.aws, kind: EC2NodeClass, name: bookstore-default }
+  disruption: { consolidationPolicy: WhenEmptyOrUnderutilized, budgets: [ { nodes: "10%" } ] }
+  limits: { cpu: "200", memory: 200Gi }    # caps what the pool may provision
 ```
 
 Cloud production-readiness checklist (each concern → its Part-10 chapter):
@@ -569,7 +794,7 @@ Cloud production-readiness checklist (each concern → its Part-10 chapter):
       designed for; snapshot+Velero ([ch.05](05-cloud-storage-and-data.md) /
       [Part 08 ch.02](../08-day-2-operations/02-backup-and-dr.md))
 - [ ] **Node autoscaler** (Karpenter/NAP/CA) bounded; **spot** the stateless
-      (PDB+spread); **right-size first**, then commitments; cost allocated
+      (spread + grace); **right-size first**, then commitments; cost allocated
       ([ch.06](06-node-autoscaling-cost-multicloud.md) / [Part 06
       ch.06](../06-production-readiness/06-capacity-and-cost.md))
 - [ ] Portable layer (manifests/Helm/Kustomize/GitOps) **unchanged**;
@@ -582,35 +807,42 @@ Cloud production-readiness checklist (each concern → its Part-10 chapter):
 1. **In one sentence each, distinguish Cluster Autoscaler from Karpenter.**
    <details><summary>Show answer</summary>
 
-   Cluster Autoscaler scales pre-defined ASGs up or down based on unschedulable Pods and node utilization — it picks from the node shapes you declared. Karpenter dynamically provisions just-in-time, right-sized nodes by reading the requirements of unschedulable Pods (CPU, memory, GPU, arch, capacity-type) and choosing the cheapest EC2 instance type that fits, then consolidates underutilized nodes. CA is "bounded by your ASG choices"; Karpenter is "bounded by your NodePool requirements."
+   Cluster Autoscaler scales pre-defined ASGs up or down based on unschedulable Pods and node utilization; it picks from the node shapes you declared. Karpenter dynamically provisions just-in-time, right-sized nodes by reading the requirements of unschedulable Pods (CPU, memory, GPU, arch, capacity-type) and choosing an instance type that fits from the ones its requirements allow, then consolidates underutilized nodes. CA is "bounded by your ASG choices"; Karpenter is "bounded by your NodePool requirements."
 
    </details>
 
-2. **Karpenter is provisioning spot nodes for the stateless tier, but AWS just reclaimed a spot node mid-checkout. Your storefront PDB is `minAvailable: 2` and you have 3 storefront replicas. What happens, and what would have happened with a 2-second-handler?**
+2. **AWS reclaims a spot node that holds one of the three `catalog` Pods, and the catalog PDB is `minAvailable: 2` (from `84-pdb.yaml`). Does the PDB stop the reclaim? What keeps the catalog up, and what would a 2-second SIGTERM handler change?**
    <details><summary>Show answer</summary>
 
-   AWS sends a 2-minute spot interruption notice; Karpenter taints the node, marking it for graceful shutdown. Pods are drained respecting the PDB — if draining would violate `minAvailable: 2`, Karpenter waits. Within the 2-minute window, the checkout in-flight finishes (preStop honors the timeout), the Pod terminates, and a new node + Pod come up elsewhere. With a 2-second SIGTERM handler that ignores the grace period, the in-flight checkout would be dropped, the customer sees an error, and you have an apology to write. The right pattern is: PDB + spot interruption handler + preStop hook + idempotent client retries.
+   No. A PDB bounds voluntary disruption, and it does not stop a node that is being terminated. A NodePool's `terminationGracePeriod` bypasses blocked PDBs, and Karpenter deletes the Pods before that period ends, even Pods a PDB would block. What keeps the catalog up is spread across nodes (one reclaim should take at most one of the three replicas), the `preStop` and graceful shutdown that let in-flight requests finish inside AWS's 2-minute notice, and clients that retry. With a 2-second handler that ignores the grace period, in-flight requests are cut off mid-flight. The fix is a handler that uses the window, not a stricter PDB.
 
    </details>
 
 3. **You're spending $14,000/month on GPU nodes that show ~12% utilization. Walk through the cost-attack order before touching commitments (RIs/SP).**
    <details><summary>Show answer</summary>
 
-   First, right-size requests: VPA-recommend the actual GPU memory and CPU each workload uses, drop oversized requests. Second, enable MIG or time-slicing where workloads are GPU-fractional. Third, move dev/notebook GPU work to spot with checkpointing. Fourth, scale-to-zero serving when idle (KServe Knative — see [Part 12 ch.06](../12-kubernetes-for-machine-learning/06-model-serving-and-inference.md)). Fifth, consolidation: Karpenter `consolidation: WhenUnderutilized` packs Pods onto fewer nodes. Only *then*, with the utilization curve in hand, commit to Savings Plans for the steady baseline (typically the bottom 30-50% of the curve). Committing before right-sizing locks in waste.
+   First, right-size requests: VPA-recommend the actual GPU memory and CPU each workload uses, drop oversized requests. Second, enable MIG or time-slicing where workloads are GPU-fractional. Third, move dev/notebook GPU work to spot with checkpointing. Fourth, scale-to-zero serving when idle (KServe Knative, see [Part 12 ch.06](../12-kubernetes-for-machine-learning/06-model-serving-and-inference.md)). Fifth, consolidation: a NodePool with `consolidationPolicy: WhenEmptyOrUnderutilized` repacks Pods onto fewer nodes. Only *then*, with the utilization curve in hand, commit to Savings Plans for the steady baseline, sized to the part of the curve that never drops. Committing before right-sizing locks in waste.
 
    </details>
 
 4. **What is portable across EKS/GKE/AKS, and what is not?**
    <details><summary>Show answer</summary>
 
-   Portable: the Kubernetes API itself (Deployments, Services, StatefulSets, PVCs by abstract StorageClass), Helm/Kustomize/GitOps tooling, RBAC, NetworkPolicy resources, Prometheus metrics names, Istio/Linkerd manifests, application code. Not portable: load-balancer Service annotations (ALB/NLB/GCLB/AGIC), CSI driver names (`ebs.csi.aws.com` vs `pd.csi.storage.gke.io`), CNI specifics (VPC CNI vs Calico vs Cilium), cloud IAM bindings (IRSA vs Workload Identity vs Federated Credential), node autoscaler (Karpenter is AWS-only today). The discipline: keep the portable layer in `base/`, isolate non-portable in `overlays/aws/` and `overlays/gcp/`.
+   Portable: the Kubernetes API itself (Deployments, Services, StatefulSets, PVCs by abstract StorageClass), Helm/Kustomize/GitOps tooling, RBAC, NetworkPolicy resources, Prometheus metrics names, Istio/Linkerd manifests, application code. Not portable: load-balancer Service annotations (ALB/NLB/GCLB/AGIC), CSI driver names (`ebs.csi.aws.com` vs `pd.csi.storage.gke.io`), CNI specifics (VPC CNI vs Calico vs Cilium), cloud IAM bindings (IRSA vs Workload Identity vs Federated Credential), node autoscaler (the Karpenter AWS provider is AWS-only; AKS and GKE have their own). The discipline: keep the portable layer in `base/`, isolate non-portable in `overlays/aws/` and `overlays/gcp/`.
 
    </details>
 
-5. **Hands-on: write a Karpenter `NodePool` that prefers spot instances of arch `amd64` with 4-16 vCPU, falls back to on-demand if no spot is available, and uses consolidation. Then `kubectl apply` and watch a 10-replica Deployment scale up. What instance types did Karpenter pick?**
-   <details><summary>What you should see</summary>
+5. **Hands-on, on an EKS cluster with Karpenter installed: write a NodePool that allows `amd64` nodes of 4 to 16 vCPU, on spot or on-demand, with consolidation. Apply it and scale a 10-replica Deployment. Which instance types did Karpenter pick?**
+   <details><summary>What you should see (illustrative, not captured)</summary>
 
-   Karpenter consults the EC2 pricing model and selects the cheapest instance type per AZ that satisfies the workload's CPU/memory requests — typically a mix of `m5.large`/`m6i.large`/`c6i.large` spot instances. After scale-down, Karpenter `consolidation: WhenUnderutilized` collapses to a smaller node count by replanning the schedule. You'll see different instance shapes coming and going — that's the point: instead of one fixed shape, Karpenter optimizes per-workload across the EC2 catalog.
+   Bound the vCPU range with the `karpenter.k8s.aws/instance-cpu` label, using the `Gt` and `Lt` operators: a requirement with `Gt` and `values: ["3"]`, and another with `Lt` and `values: ["17"]`. Karpenter then chooses among the types the requirements allow. Which types appear depends on region, price and capacity at the time, so the answer is what `kubectl get nodeclaims` shows on your cluster, not a fixed list. After load drops, consolidation removes nodes that are underused or empty.
+
+   </details>
+
+6. **Security: the node provisioner's IAM role allows `iam:PassRole` on `Resource: "*"`, and a Pod in the Bookstore is compromised. What can the attacker reach, and which settings stop the escalation?**
+   <details><summary>Show answer</summary>
+
+   The compromised Pod cannot call AWS on its own. The Bookstore uses IRSA or Pod Identity with no static key, and the hop limit of 1 keeps a pod-network container off the node's metadata endpoint. The dangerous route is the controller's identity. If that identity can pass any role, an attacker who obtains the controller's credentials can launch an instance under a role with more power than the node role, then read that role's credentials from the new instance. Scope `iam:PassRole` to the one node role ARN, and keep the node role minimal. AWS advises against tag conditions on PassRole, because they are not reliable. The two settings in this chapter are that scoped `Resource`, and `httpPutResponseHopLimit: 1` with `httpTokens: required` on the EC2NodeClass.
 
    </details>
 
@@ -629,6 +861,24 @@ Cloud production-readiness checklist (each concern → its Part-10 chapter):
   GKE node auto-provisioning
   <https://cloud.google.com/kubernetes-engine/docs/how-to/node-auto-provisioning>,
   AKS cluster autoscaler
-  <https://learn.microsoft.com/en-us/azure/aks/cluster-autoscaler>, and AWS
-  cost-optimisation for Kubernetes
+  <https://learn.microsoft.com/en-us/azure/aks/cluster-autoscaler>, AKS Node
+  Autoprovision
+  <https://learn.microsoft.com/en-us/azure/aks/node-auto-provisioning>, and AWS
+  cost-optimisation for Kubernetes (a 2019 post)
   <https://aws.amazon.com/blogs/containers/cost-optimization-for-kubernetes-on-aws/>.
+- Cited, not run (checked 2026-10-31): Karpenter disruption
+  <https://karpenter.sh/docs/concepts/disruption/>, Karpenter NodeClasses
+  <https://karpenter.sh/docs/concepts/nodeclasses/>, Karpenter compatibility
+  <https://karpenter.sh/docs/upgrading/compatibility/>, Karpenter instance
+  labels <https://karpenter.sh/docs/reference/instance-types/>, Cluster
+  Autoscaler FAQ
+  <https://github.com/kubernetes/autoscaler/blob/master/cluster-autoscaler/FAQ.md>,
+  EC2 Spot interruption notices
+  <https://docs.aws.amazon.com/AWSEC2/latest/UserGuide/spot-instance-termination-notices.html>,
+  EC2 Spot pricing <https://aws.amazon.com/ec2/spot/pricing/>, Compute Savings
+  Plans <https://aws.amazon.com/savingsplans/compute-pricing/>, IAM PassRole
+  <https://docs.aws.amazon.com/IAM/latest/UserGuide/id_roles_use_passrole.html>,
+  EC2 instance metadata options
+  <https://docs.aws.amazon.com/AWSEC2/latest/UserGuide/configuring-instance-metadata-options.html>,
+  Google Cloud Spot VMs <https://docs.cloud.google.com/compute/docs/instances/spot>,
+  and Azure Spot VMs <https://learn.microsoft.com/en-us/azure/virtual-machines/spot-vms>.

@@ -1,60 +1,52 @@
-# Bookstore — Part 10 ch.06 "Node autoscaling, cost & multi-cloud": a Karpenter
-# NodePool + EC2NodeClass sized for the Bookstore's stateless tiers.
+# Bookstore, Part 10 ch.06 "Node autoscaling, cost & multi-cloud": Karpenter
+# objects for the Bookstore's node tiers. Two NodePools (the stateless tiers,
+# and the data tier that Postgres must use) share one EC2NodeClass.
 #
 # Karpenter is a node autoscaler for AWS/EKS that provisions JUST-IN-TIME,
 # RIGHT-SIZED nodes from a broad instance-type set in response to UNschedulable
 # Pods, and CONSOLIDATES (removes/replaces under-used nodes) — instead of
-# scaling fixed node groups like the Cluster Autoscaler. This pair tells
+# scaling fixed node groups like the Cluster Autoscaler. Two kinds tell
 # Karpenter HOW it may provision nodes for the Bookstore:
 #   • NodePool      — the provisioning + disruption POLICY (instance families,
-#                     spot, limits, consolidation, expiry).
-#   • EC2NodeClass  — the AWS-specific node TEMPLATE (AMI family, the IAM role
-#                     the node uses, subnet/security-group discovery by tag).
+#                     capacity type, taints, limits, consolidation, expiry).
+#   • EC2NodeClass  is the AWS-specific node TEMPLATE (AMI, the IAM role the
+#                     node uses, subnet/security-group discovery by tag).
 #
-# !!! CRD-BACKED — intrinsic dry-run behavior (the SAME precedent as the guide's
-# other CRD-backed files: raw-manifests/51-gateway.yaml, 70-kyverno-policy.yaml,
-# 80-servicemonitor.yaml, 83-keda-scaledobject.yaml, 18-postgres-snapshot.yaml,
-# the argocd/ tree, operators/velero-*.yaml) !!!
-# NodePool / EC2NodeClass are NOT built-in Kubernetes kinds. They are CRDs from
-# the Karpenter project (karpenter.sh / karpenter.k8s.aws), installed together
-# with the Karpenter controller (via its pinned Helm chart — NEVER a
-# releases/latest/download/<pinned-file>.yaml URL, which 404s when a new
-# Karpenter ships). Therefore:
-#   • `kubectl apply --dry-run=client -f` (or a whole-dir client dry-run) on a
-#     cluster WITHOUT Karpenter installed prints:
+# CRD-BACKED. NodePool and EC2NodeClass are not built-in Kubernetes kinds. They
+# come from the karpenter-crd chart (pinned to 1.15.1, the same version as the
+# controller chart), which must be installed before these objects apply. With
+# no CRDs installed, a client dry-run prints:
 #       error: resource mapping not found ... no matches for kind "NodePool"
 #       in version "karpenter.sh/v1"
 #       error: ... no matches for kind "EC2NodeClass" in version
 #       "karpenter.k8s.aws/v1"
-#     That is EXPECTED and NOT a manifest defect — identical to the Gateway API
-#     / KEDA / Kyverno / VolumeSnapshot / Velero situation already documented
-#     across the guide. Schema correctness here is verified by reading + the
-#     Karpenter API reference, not by a client dry-run.
-#   • Karpenter is AWS/EKS-only. The equivalent on GKE is node
-#     auto-provisioning / Autopilot; on AKS, the cluster autoscaler / NAP
-#     (Karpenter-for-Azure exists in preview). The CONCEPT (JIT right-sized
-#     nodes + consolidation) is portable; this object is not (ch.06 tabulates
-#     what is/ isn't portable).
+# That is expected and is not a defect in this file. Once the CRDs exist, a
+# server-side dry-run validates the schema and the CEL rules.
 #
-# Requires (to actually apply, not just read):
-#   - an EKS cluster (Part 10 ch.02) with Karpenter installed via its pinned
-#     Helm chart, and the Karpenter controller IAM (IRSA/Pod Identity — ch.03)
+# Karpenter is AWS/EKS-only in this file. GKE's node auto-provisioning and
+# Autopilot are Google's own; AKS Node Autoprovision runs Karpenter with the
+# AKS provider. The CONCEPT (JIT right-sized nodes + consolidation) is portable;
+# these objects are not (ch.06 tabulates what is and isn't portable).
+#
+# Requires (to apply, not just read):
+#   - an EKS cluster (Part 10 ch.02) with the karpenter-crd and karpenter charts
+#     installed (ch.06 section 2), and the controller's identity (ch.03)
 #   - the node IAM role `KarpenterNodeRole-<cluster>` to exist
-#   - subnets/security groups TAGGED `karpenter.sh/discovery: <cluster>` so the
-#     EC2NodeClass can discover them
+#   - subnets and security groups TAGGED `karpenter.sh/discovery: <cluster>`
+#   - for the data pool, the owner change to 20-postgres-statefulset.yaml in
+#     ch.06 section 4; this file does not edit the canonical manifests
 #
-# !!! AMI-TRACKING FOOTGUN (read before copy-pasting to prod) !!!
-# The EC2NodeClass below uses `alias: al2023@latest`, which SILENTLY tracks the
-# newest EKS AL2023 AMI; combined with `expireAfter: 720h`, nodes adopt a new
-# AMI ~monthly with NO review — convenient for LEARNING but it contradicts the
-# guide's repeatedly-taught "pin everything / never :latest" rule (Part 05 ch.03,
-# Part 07, Part 10 ch.02). For prod, pin a specific alias version (e.g.
-# al2023@v20261026) or an AMI ID and review before rolling. Kept as `@latest`
-# here ON PURPOSE for the lab, flagged like every other "demo-only" choice.
+# !!! AMI PIN (required before applying) !!!
+# The EC2NodeClass below carries the placeholder `al2023@v<RELEASE>`. Replace
+# <RELEASE> with an AL2023 release you have reviewed for your Kubernetes minor
+# before the first apply. `al2023@latest` is not used: it moves every node to a
+# new AMI release with no review, and Karpenter's own documentation says it is
+# not recommended for production.
+#
 # Apply (Karpenter-enabled EKS only):
 #   kubectl apply -f examples/bookstore/cloud/karpenter-nodepool.yaml
 #   kubectl get nodepool,ec2nodeclass
-#   # then a pending Bookstore Pod that doesn't fit triggers JIT provisioning;
+#   # a pending Bookstore Pod that does not fit triggers JIT provisioning;
 #   # `kubectl get nodeclaims -w` shows Karpenter create a right-sized node.
 apiVersion: karpenter.sh/v1
 kind: NodePool
@@ -64,17 +56,18 @@ metadata:
     app.kubernetes.io/part-of: bookstore
 spec:
   # The Pod template Karpenter provisions FOR. Karpenter inspects pending Pods'
-  # requests + constraints and launches the cheapest node that fits them.
+  # requests + constraints and launches a node that fits them, from the types
+  # these requirements allow.
   template:
     metadata:
       labels:
         # Bookstore stateless tiers (storefront/catalog/orders/payments-worker)
-        # can target this pool via nodeSelector/affinity if desired; the data
-        # tier (postgres) deliberately does NOT use spot (see the taint note).
+        # can target this pool via nodeSelector/affinity if desired. Postgres
+        # does not run here: it runs only on bookstore-data (below).
         bookstore.io/node-pool: stateless
     spec:
-      # Let Karpenter pick from a BROAD instance set (right-sizing comes from
-      # breadth — it bin-packs pending Pods onto the cheapest fitting type).
+      # Let Karpenter pick from a BROAD instance set: a wide set gives it more
+      # options to fit pending Pods without buying a much larger node.
       requirements:
         - key: kubernetes.io/arch
           operator: In
@@ -84,7 +77,7 @@ spec:
           values: ["linux"]
         - key: karpenter.sh/capacity-type
           operator: In
-          values: ["spot", "on-demand"]      # SPOT-first for stateless (ch.06)
+          values: ["spot", "on-demand"]      # spot is allowed for stateless only
         - key: karpenter.k8s.aws/instance-category
           operator: In
           values: ["c", "m", "r"]            # general/compute/mem families
@@ -96,11 +89,11 @@ spec:
         group: karpenter.k8s.aws
         kind: EC2NodeClass
         name: bookstore-default
-      # Spot interruption + node lifetime: Karpenter cordons/drains a node on a
-      # spot-interruption notice and on expiry, HONORING PodDisruptionBudgets
-      # (the Bookstore ships 84-pdb.yaml — Part 06 ch.05). The stateless tiers
-      # tolerate this; the data tier must not run here.
-      expireAfter: 720h                       # recycle nodes ~monthly (patching)
+      # Node lifetime and drain. Expiry drains a node after 720h (about 30
+      # days). terminationGracePeriod caps how long a drain waits for each Pod.
+      # It bypasses blocked PodDisruptionBudgets, so it must exceed the longest
+      # preStop plus grace period the stateless tiers rely on.
+      expireAfter: 720h
       terminationGracePeriod: 1m
   # Disruption = consolidation: Karpenter removes/replaces nodes whose Pods can
   # be safely repacked elsewhere, shrinking the bill (ch.06 / Part 06 ch.06).
@@ -108,15 +101,60 @@ spec:
     consolidationPolicy: WhenEmptyOrUnderutilized
     consolidateAfter: 1m
     budgets:
-      - nodes: "10%"                          # disrupt at most 10% of nodes at
-                                              #   once (works WITH PDBs, not
-                                              #   instead of them — Part 06 ch.05)
-  # Cap the pool so node autoscaling can NEVER exceed a known spend ceiling
-  # (the cost guardrail — ch.06 / Part 06 ch.06; mirrors the namespace
-  # ResourceQuota bounding the HPA in Part 06 ch.04).
+      - nodes: "10%"                          # at most 10% of nodes disrupted
+                                              #   at once; voluntary disruption
+                                              #   only, honours PDBs (Part 06 ch.05)
+  # Limits cap the CPU and memory this pool may provision. They do not cap
+  # dollars: prices vary by instance type and capacity type. They do bound how
+  # far a scale-up can go (ch.06 threats table; Part 06 ch.04).
   limits:
     cpu: "200"
     memory: 200Gi
+---
+apiVersion: karpenter.sh/v1
+kind: NodePool
+metadata:
+  name: bookstore-data
+  labels:
+    app.kubernetes.io/part-of: bookstore
+spec:
+  template:
+    metadata:
+      labels:
+        # Postgres must REQUIRE this label (the owner change in ch.06 section 4).
+        # A label alone attracts Pods; the taint below keeps everything else out.
+        dedicated: database
+    spec:
+      taints:
+        # Only Pods that tolerate dedicated=database:NoSchedule land here.
+        # Postgres's canonical manifest tolerates it; the stateless tiers do not.
+        - key: dedicated
+          value: database
+          effect: NoSchedule
+      requirements:
+        - key: kubernetes.io/arch
+          operator: In
+          values: ["amd64"]
+        - key: kubernetes.io/os
+          operator: In
+          values: ["linux"]
+        - key: karpenter.sh/capacity-type
+          operator: In
+          values: ["on-demand"]              # never spot for the data tier
+      nodeClassRef:
+        group: karpenter.k8s.aws
+        kind: EC2NodeClass
+        name: bookstore-default
+      # Expiry drains a node, and Postgres is a singleton with no replica to
+      # take over. Roll these nodes in a planned window, not by expiry.
+      expireAfter: 8760h
+  disruption:
+    # Empty nodes are removed; occupied data nodes are never consolidated away
+    # from under Postgres.
+    consolidationPolicy: WhenEmpty
+  limits:
+    cpu: "16"
+    memory: 64Gi
 ---
 apiVersion: karpenter.k8s.aws/v1
 kind: EC2NodeClass
@@ -127,11 +165,9 @@ metadata:
 spec:
   amiFamily: AL2023                           # the node OS image family
   amiSelectorTerms:
-    # al2023@latest tracks the LATEST EKS AL2023 AMI — fine for LEARNING; in
-    # prod pin a specific alias version (e.g. al2023@v20261026) or an AMI ID
-    # and review before rolling, per the guide's pin-everything rule (Part 07 /
-    # Part 10 ch.02). See the AMI-TRACKING FOOTGUN note in the header above.
-    - alias: al2023@latest                    # tracks latest (see footgun note)
+    # Pin a reviewed AL2023 release (family@version). Replace <RELEASE> before
+    # applying. See the AMI PIN note in the header above.
+    - alias: al2023@v<RELEASE>
   # The node's INSTANCE role (distinct from the Karpenter CONTROLLER's IRSA/Pod
   # Identity role — ch.03). Keep it minimal: only what the kubelet/CNI/CSI need
   # (ch.03 "keep the node role tiny; block the metadata endpoint").
@@ -154,9 +190,9 @@ spec:
         volumeType: gp3
         encrypted: true
   metadataOptions:
-    # IMDSv2 + a low hop limit so Bookstore Pods CANNOT reach the node's
-    # instance metadata to steal the node role — workload identity (ch.03)
-    # only holds if this escape is closed.
+    # IMDSv2 + a hop limit of 1, so a container on the pod network cannot reach
+    # the node's instance metadata to take the node role. Workload identity
+    # (ch.03) only holds if this escape is closed.
     httpEndpoint: enabled
     httpTokens: required
     httpPutResponseHopLimit: 1
