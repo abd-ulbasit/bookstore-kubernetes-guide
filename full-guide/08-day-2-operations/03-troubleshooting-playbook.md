@@ -394,8 +394,8 @@ kubectl rollout status deploy/catalog -n bookstore       # 1/1 READY; Endpoints 
 > (Fails → DNS egress denied.) vs `nc -vz postgres 5432` (fails but DNS ok → the postgres ingress/own egress
 > allow is missing — NetworkPolicy needs the allow on **both** ends). Revert =
 > re-apply the full `60-networkpolicy.yaml` (it is whitelist-correct as
-> shipped). On kind's default CNI NetworkPolicy is a silent no-op (ch.06) —
-> this branch is fully visible only on a policy-enforcing CNI.
+> shipped). kindnet enforces NetworkPolicy from kind v0.24.0 on, but a Running
+> kindnet can enforce nothing, so check a denied request (ch.06, step 0).
 
 ### 6. Verify the cluster is back to known-good (the discipline check)
 

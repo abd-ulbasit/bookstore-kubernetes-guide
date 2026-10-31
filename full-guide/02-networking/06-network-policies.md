@@ -61,8 +61,9 @@ request proves enforcement on your cluster (step 0 explains why).
 |---|---|---|
 | A compromised Pod reaches any other Pod (lateral movement) | Default deny in both directions, then one allow per real edge, on both ends | [Part 08 ch.04](../08-day-2-operations/04-multi-tenancy-and-namespaces.md) for namespaces shared by tenants |
 | A workload calls the cloud metadata endpoint and takes its credentials | `ipBlock` with an `except` for `169.254.169.254/32` (step 6) | [Part 10 ch.03](../10-cloud-and-managed-kubernetes/03-cloud-identity.md) |
-| Data leaves through open egress or DNS | Egress limited to named peers and ports; DNS only to `kube-dns`; no `0.0.0.0/0` without an `except` | [Part 11 ch.04](../11-advanced-production-patterns/04-service-mesh.md) for L7 rules |
-| A policy that enforces nothing: the CNI ignores it, or the engine fails open | A denied request after every change; the engine's start line is a start check only (step 0) | [Part 00 ch.07](../00-foundations/07-local-cluster-setup.md) for the cluster, [Part 10 ch.04](../10-cloud-and-managed-kubernetes/04-cloud-networking-and-load-balancing.md) for managed CNIs |
+| Data leaves through open egress | Egress limited to named peers and ports; no `0.0.0.0/0` without a port and an `except` (step 6) | [Part 11 ch.04](../11-advanced-production-patterns/04-service-mesh.md) for L7 rules |
+| Data leaves inside DNS queries | Not blocked here. The DNS allow (step 2) pins lookups to `kube-dns`, which forwards them upstream | A DNS-aware control, outside this chapter |
+| A policy that enforces nothing: the CNI ignores it, or the engine fails open | A denied request after every change; the engine's start line is a start check only (step 0) | [Part 10 ch.04](../10-cloud-and-managed-kubernetes/04-cloud-networking-and-load-balancing.md) for managed CNIs |
 
 ## Diagrams
 
@@ -92,6 +93,7 @@ flowchart TB
     cat -->|"ALLOW :5432 (rules 5+7)"| pg
     ord -->|"ALLOW :5672 (rules 6+7)"| mq
     sf  -.->|"DENIED (no rule): UI must not hit the DB"| pg
+    cat -->|"ALLOW :6379 (rules 11+12)"| rd
     ord -.->|"DENIED (no rule): no orders→redis path"| rd
     bk  ===>|"ALLOW UDP/TCP 53 to kube-dns (rule 2 — MANDATORY)"| dns
 
@@ -106,14 +108,14 @@ flowchart TB
  ─────────────────────────────────────────────────────────────────────────────────────
  ingress ctrl        ✔(8080)  ✔(8080)  ✔(8080)    ·         ·       ·       ·        —
  storefront            —      ✔(8080)  ✔(8080)    ✗         ✗       ✗     ✔(53)      ✗
- catalog               ✗        —        ✗     ✔(5432)      ✗       ✗     ✔(53)      ✗
+ catalog               ✗        —        ✗     ✔(5432)      ✗     ✔(6379)  ✔(53)      ✗
  orders                ✗        ✗        —        ✗      ✔(5672)    ✗     ✔(53)      ✗
  (every bookstore Pod) ·        ·        ·        ·         ·       ·     ✔(53)      ✗
  ─────────────────────────────────────────────────────────────────────────────────────
    ✔ = explicitly allowed (rule #)   ✗ = denied by default-deny (no allow)
    · = not applicable / not part of the app's required edges
-   redis has NO inbound allow yet (catalog runs with REDIS_ADDR unset, ch.02);
-   add an allow-catalog-to-redis rule when redis is wired in Part 03.
+   redis takes inbound traffic only from catalog (rule 11), and catalog's
+   egress to it is rule 12.
 ```
 
 ## Hands-on with the Bookstore
@@ -125,14 +127,16 @@ the `bookstore` namespace and the workloads it segments:
 `20-postgres-statefulset.yaml`
 ([Part 01 ch.05](../01-core-workloads/05-statefulsets.md)). Also apply
 `05-serviceaccounts-rbac.yaml`, `15-catalog-config.yaml`,
-`16-db-credentials.yaml` and `40-services.yaml`. Either edge stack from
-[ch.04](04-ingress.md)/[ch.05](05-gateway-api.md) may be present (the policy
-targets the controller's *namespace*, same either way).
+`16-db-credentials.yaml` and `40-services.yaml`. Step 3 sends one request
+through the controller, so it needs an edge stack from
+[ch.04](04-ingress.md) (Traefik, the Ingress from its step 6 and the TLS
+Secret) or from [ch.05](05-gateway-api.md). The policy admits the `traefik`
+namespace, where both stacks run Traefik.
 
 The steps run in order. Each one changes one thing and repeats the same
-request, so every result is a policy decision. The captured output comes from
-a lab copy of the namespace called `p02-06-bookstore`; in your cluster it is
-`bookstore`.
+request, so every result is a policy decision. The captured output comes from lab copies of the namespaces called
+`p02-06-bookstore` and `p02-06-traefik`; in your cluster they are `bookstore`
+and `traefik`.
 
 ### 0. Check that the cluster's CNI enforces policy
 
@@ -151,7 +155,7 @@ kubectl -n kube-system get pods -l k8s-app=kube-dns
 <!-- gate: output -->
 ```text
 NAME      DESIRED   CURRENT   READY   UP-TO-DATE   AVAILABLE   NODE SELECTOR            AGE
-kindnet   1         1         1       1            1           kubernetes.io/os=linux   9h
+kindnet   1         1         1       1            1           kubernetes.io/os=linux   11h
 ```
 
 <!-- gate: output -->
@@ -162,8 +166,8 @@ I1030 14:30:08.306411       1 controller.go:185] "Policy engine is ready."
 <!-- gate: output -->
 ```text
 NAME                       READY   STATUS    RESTARTS   AGE
-coredns-559f6c778d-77g29   1/1     Running   0          9h
-coredns-559f6c778d-xmmqq   1/1     Running   0          9h
+coredns-559f6c778d-77g29   1/1     Running   0          11h
+coredns-559f6c778d-xmmqq   1/1     Running   0          11h
 ```
 
 The log line is necessary, not sufficient. kindnetd starts the policy
@@ -300,8 +304,8 @@ well, so that a later change which quietly removes a policy fails the build.
 
 ### 3. The Bookstore's allows, then the same request
 
-Apply the file. It holds the default deny, the DNS allow, and one allow for each
-edge, on both ends.
+Apply the file. It holds the default deny, the DNS allow, one allow for each
+edge on both ends, and the redis pair that catalog's readiness check needs.
 
 ```sh
 kubectl apply -f examples/bookstore/raw-manifests/60-networkpolicy.yaml
@@ -319,12 +323,15 @@ networkpolicy.networking.k8s.io/allow-backend-egress created
 networkpolicy.networking.k8s.io/allow-storefront-egress created
 networkpolicy.networking.k8s.io/allow-payments-worker-egress created
 networkpolicy.networking.k8s.io/allow-monitoring-scrape created
+networkpolicy.networking.k8s.io/allow-catalog-to-redis created
+networkpolicy.networking.k8s.io/allow-catalog-egress-redis created
 ```
 
 The rules, in order:
 
-- **rule 3** `allow-ingress-to-http-tiers`: the ingress controller's namespace
-  to storefront, catalog and orders on `:8080`.
+- **rule 3** `allow-ingress-to-http-tiers`: the `traefik` namespace, where the
+  controller from ch.04 and ch.05 runs, to storefront, catalog and orders on
+  `:8080`.
 - **rule 4** `allow-storefront-to-apis`: storefront to catalog and orders on
   `:8080`, the ingress side of that edge.
 - **rule 5** `allow-catalog-to-postgres` and **rule 6**
@@ -335,44 +342,17 @@ The rules, in order:
   and orders.
 
 Rules 9 and 10 come from later Parts (the payments worker, and the monitoring
-scrape). They follow the same pattern.
+scrape). They follow the same pattern. Rules 11 and 12, the redis pair, use the
+same both-ends pattern: catalog's readiness check pings Redis.
 
-The file has no rule for redis. Catalog's readiness check reads Redis
-(`REDIS_ADDR` in `15-catalog-config.yaml`), so without a rule catalog stops
-being Ready once the default deny is in force. Apply this pair after the file.
-It is a both-ends allow like the others, and `60-networkpolicy.yaml` should
-carry it too.
+Catalog's readiness check pings Redis (`REDIS_ADDR` in
+`15-catalog-config.yaml`), so without the pair catalog would stop being Ready
+once the default deny is in force. Check the request, and the Ready state of
+catalog:
 
 ```sh
-kubectl apply -f - <<'EOF'
-apiVersion: networking.k8s.io/v1
-kind: NetworkPolicy
-metadata: { name: allow-catalog-to-redis, namespace: bookstore }
-spec:
-  podSelector: { matchLabels: { app: redis } }
-  policyTypes: ["Ingress"]
-  ingress:
-    - from: [ { podSelector: { matchLabels: { app: catalog } } } ]
-      ports: [ { protocol: TCP, port: 6379 } ]
----
-apiVersion: networking.k8s.io/v1
-kind: NetworkPolicy
-metadata: { name: allow-catalog-egress-redis, namespace: bookstore }
-spec:
-  podSelector: { matchLabels: { app: catalog } }
-  policyTypes: ["Egress"]
-  egress:
-    - to: [ { podSelector: { matchLabels: { app: redis } } } ]
-      ports: [ { protocol: TCP, port: 6379 } ]
-EOF
 kubectl exec -n bookstore probe -- curl -sS --max-time 5 http://$CATALOG_IP:8080/healthz
 kubectl get pods -n bookstore -l app=catalog
-```
-
-<!-- gate: output -->
-```text
-networkpolicy.networking.k8s.io/allow-catalog-to-redis created
-networkpolicy.networking.k8s.io/allow-catalog-egress-redis created
 ```
 
 <!-- gate: output -->
@@ -383,9 +363,9 @@ networkpolicy.networking.k8s.io/allow-catalog-egress-redis created
 <!-- gate: output -->
 ```text
 NAME                       READY   STATUS    RESTARTS   AGE
-catalog-5469f6cfbf-86jcl   1/1     Running   0          7m43s
-catalog-5469f6cfbf-g794h   1/1     Running   0          25m
-catalog-5469f6cfbf-zrdgw   1/1     Running   0          7m57s
+catalog-5469f6cfbf-5m5kq   1/1     Running   0          88s
+catalog-5469f6cfbf-kp7s8   1/1     Running   0          88s
+catalog-5469f6cfbf-vw2zb   1/1     Running   0          88s
 ```
 
 The request passes once both ends of the edge are allowed. Next, remove only the
@@ -422,7 +402,32 @@ networkpolicy.networking.k8s.io/allow-backend-egress unchanged
 networkpolicy.networking.k8s.io/allow-storefront-egress created
 networkpolicy.networking.k8s.io/allow-payments-worker-egress unchanged
 networkpolicy.networking.k8s.io/allow-monitoring-scrape unchanged
+networkpolicy.networking.k8s.io/allow-catalog-to-redis unchanged
+networkpolicy.networking.k8s.io/allow-catalog-egress-redis unchanged
 ```
+
+The controller reaches the same tiers from its own namespace, through rule 3.
+If you applied an edge stack from [ch.04](04-ingress.md) or
+[ch.05](05-gateway-api.md), send one request through it. Port-forward the
+controller's Service, then call the Bookstore's host:
+
+```sh
+kubectl port-forward -n traefik svc/traefik 8443:443 &
+PF=$!
+sleep 2
+curl -sS --cacert tls.crt --resolve bookstore.localdev.me:8443:127.0.0.1 \
+  https://bookstore.localdev.me:8443/api/books -w "\nHTTP %{http_code}\n"
+kill $PF
+```
+
+<!-- gate: output -->
+```text
+[]
+HTTP 200
+```
+
+The list is empty on a fresh database. `HTTP 200` shows that the controller
+reached a catalog Pod through rule 3, after the restore above.
 
 ### 4. The DNS gotcha, demonstrated
 
@@ -492,23 +497,24 @@ command terminated with exit code 28
 
 On a cloud node, `169.254.169.254` serves the instance metadata, which can
 include credentials ([Part 10 ch.03](../10-cloud-and-managed-kubernetes/03-cloud-identity.md)).
-A worker that calls an external payment API over HTTPS needs internet egress,
-but not that address. An `ipBlock` admits every address in its `cidr` except
-those in `except`. Use it for addresses outside the cluster: the upstream docs
-say Pod IPs are too ephemeral for it. Never leave `0.0.0.0/0` open without a
-port and an `except`, because open egress is an exfiltration path.
+A workload that calls an external API over HTTPS needs internet egress, but not
+that address. An `ipBlock` admits every address in its `cidr` except those in
+`except`. Use it for addresses outside the cluster: the upstream docs say Pod
+IPs are too ephemeral for it. Never leave `0.0.0.0/0` open without a port and
+an `except`, because open egress is an exfiltration path.
 
-The worker's policy is added to the rules it already has, so the worker keeps
-its rabbitmq egress from the file.
+None of the Bookstore's workloads calls an external API, so this rule stays out
+of `60-networkpolicy.yaml`. The step applies it to the probe alone, through a
+scratch label, and deletes it at the end.
 
 ```sh
-cat > worker-egress.yaml <<'EOF'
+cat > scratch-egress.yaml <<'EOF'
 apiVersion: networking.k8s.io/v1
 kind: NetworkPolicy
-metadata: { name: allow-worker-https-except-metadata, namespace: bookstore }
+metadata: { name: scratch-https-except-metadata, namespace: bookstore }
 spec:
   podSelector:
-    matchLabels: { app: payments-worker }
+    matchLabels: { app: scratch-egress }
   policyTypes: ["Egress"]
   egress:
     - to:
@@ -517,13 +523,28 @@ spec:
             except: ["169.254.169.254/32"]   # cloud instance metadata
       ports: [ { protocol: TCP, port: 443 } ]
 EOF
-kubectl apply -f worker-egress.yaml
-kubectl label pod probe -n bookstore app=payments-worker --overwrite
+kubectl apply -f scratch-egress.yaml
+kubectl label pod probe -n bookstore app=scratch-egress --overwrite
 ```
 
 <!-- gate: output -->
 ```text
-networkpolicy.networking.k8s.io/allow-worker-https-except-metadata created
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata: { name: scratch-https-except-metadata, namespace: p02-06-bookstore }
+spec:
+  podSelector:
+    matchLabels: { app: scratch-egress }
+  policyTypes: ["Egress"]
+  egress:
+    - to:
+        - ipBlock:
+            cidr: 0.0.0.0/0
+            except: ["169.254.169.254/32"]   # cloud instance metadata
+      ports: [ { protocol: TCP, port: 443 } ]
+EOF2
+kubectl apply -f scratch-egress.yaml
+networkpolicy.networking.k8s.io/scratch-https-except-metadata created
 ```
 
 <!-- gate: output -->
@@ -558,15 +579,13 @@ Now put the gateway into the `except` list, with the same manifest. The `sed`
 changes only the address, and the rest of the rule is the one above.
 
 ```sh
-sed "s#169.254.169.254/32#$GW/32#" worker-egress.yaml | kubectl apply -f -
+sed "s#169.254.169.254/32#$GW/32#" scratch-egress.yaml | kubectl apply -f -
 kubectl exec -n bookstore probe -- curl -sS --max-time 5 https://$GW:443/
-kubectl apply -f worker-egress.yaml
-kubectl label pod probe -n bookstore app=storefront --overwrite
 ```
 
 <!-- gate: output -->
 ```text
-networkpolicy.networking.k8s.io/allow-worker-https-except-metadata configured
+networkpolicy.networking.k8s.io/scratch-https-except-metadata configured
 ```
 
 <!-- gate: output -->
@@ -577,21 +596,35 @@ command terminated with exit code 28
 
 Same request, same Pod, and now the except drops it. On a cloud node, the
 request to `169.254.169.254` is the one that matters. The gateway shows that
-the except works on this cluster. The last two commands restore the rule and
-the storefront label.
-
-Delete the probe when you are done:
+the except works on this cluster. Delete the scratch rule, restore the Pod's
+label, and delete the probe:
 
 ```sh
+kubectl delete networkpolicy scratch-https-except-metadata -n bookstore
+kubectl label pod probe -n bookstore app=storefront --overwrite
 kubectl delete pod probe -n bookstore
 ```
 
+<!-- gate: output -->
+```text
+networkpolicy.networking.k8s.io "scratch-https-except-metadata" deleted from p02-06-bookstore namespace
+```
+
+<!-- gate: output -->
+```text
+pod/probe labeled
+```
+
+<!-- gate: output -->
+```text
+pod "probe" deleted from p02-06-bookstore namespace
+```
+
 > **Lineage note.** `60-networkpolicy.yaml` is the Bookstore's segmentation
-> layer. Its selectors are a **subset of the real pod labels** from
-> `10-`/`11-`/`13-`/`14-`/`20-` (`app: catalog|storefront|orders|rabbitmq|postgres`).
-> Redis gets its pair in step 3 until the file carries it. Tighter identity
-> (per-ServiceAccount), Pod Security, and admission rules that enforce the
-> labels are [Part 05](../05-security/02-pod-security.md).
+> layer. Its selectors match the real pod labels from `10-` to `14-`, `19-`
+> and `20-` (`app: catalog|storefront|orders|rabbitmq|redis|postgres|payments-worker`).
+> Tighter identity (per-ServiceAccount), Pod Security, and admission rules that
+> enforce the labels are [Part 05](../05-security/02-pod-security.md).
 
 ## How it works under the hood
 
@@ -621,9 +654,9 @@ strictly "deny by selection, allow by addition" (a whitelist).
   `app: storefront`). Same-namespace only unless combined with a
   namespaceSelector.
 - **`namespaceSelector`** — all Pods in namespaces matching labels (e.g.
-  `kubernetes.io/metadata.name: ingress-nginx` — that label is auto-set on
+  `kubernetes.io/metadata.name: traefik` , a label auto-set on
   every namespace and immutable, ideal for targeting `kube-system`/
-  `ingress-nginx`).
+  `traefik`).
 - **`namespaceSelector` + `podSelector` in the *same* peer entry** — the
   **intersection**: those Pods *in* those namespaces (how the Bookstore allows
   *the kube-dns Pods in kube-system*, not all of kube-system).
@@ -698,19 +731,24 @@ that matters with a denied request.
 ### What NetworkPolicy cannot do
 
 NetworkPolicy matches Pods by label and addresses by CIDR, at layers 3 and 4
-only. The upstream docs for Kubernetes 1.37 list what it does not do:
+only. The upstream docs list what it does not do, and the list includes:
 
-- **No DNS names as destinations.** A rule names a label or a CIDR. Name rules
-  need a CNI extension, such as Cilium's FQDN policies.
-- **No HTTP or TLS rules.** It cannot allow `GET /healthz` and deny `POST`, or
-  match a certificate. That is layer 7, which a mesh or an L7 proxy handles
-  ([Part 11 ch.04](../11-advanced-production-patterns/04-service-mesh.md)).
-- **No control of node traffic.** Traffic to and from the node a Pod runs on is
-  always allowed, and a `hostNetwork` Pod counts as node traffic.
-- **No deny rule.** Policies only add allows over a deny baseline. You cannot
-  write "deny this peer" over an allow.
-- **No record of blocked connections.** A dropped packet leaves no trace in the
-  NetworkPolicy API. Use the CNI's own logs or flow tooling for that.
+- **Services by name (upstream).** A rule names a label or a CIDR, not a
+  Service name. Name rules need a CNI extension, such as Cilium's FQDN
+  policies.
+- **Anything TLS-related (upstream).** The policy cannot match a certificate.
+  Its fields also have no HTTP methods or paths, so it cannot allow
+  `GET /healthz` and deny `POST`. That is layer 7, which a mesh or an L7 proxy
+  handles ([Part 11 ch.04](../11-advanced-production-patterns/04-service-mesh.md)).
+- **Loopback and node traffic (upstream).** Pods cannot block localhost access
+  or access from their resident node. The upstream docs call the behaviour for
+  `hostNetwork` Pods undefined. The most common implementation treats their
+  traffic as node traffic, which is allowed.
+- **Explicit deny (upstream).** Policies only add allows over a deny baseline.
+  You cannot write "deny this peer" over an allow.
+- **Logging of blocked connections (upstream).** A dropped packet leaves no
+  trace in the NetworkPolicy API. Use the CNI's own logs or flow tooling for
+  that.
 
 ## Quick Reference
 
@@ -775,7 +813,7 @@ Checklist:
 2. **A teammate adds default-deny egress and the entire app stops working. Nothing is "denied" in logs — calls just hang. What single rule is missing and why is this *the* classic gotcha?**
    <details><summary>Show answer</summary>
 
-   `allow-dns-egress` — every Service-name lookup is an egress packet to CoreDNS (`kube-dns` in `kube-system`) on UDP/TCP 53, now blocked. Without name resolution, no connections even start. The classic gotcha because DNS is invisible to most application code — you see HTTP timeouts, not "DNS denied". Always pair default-deny egress with an explicit allow to kube-dns Pods on UDP+TCP 53 (see §3. The DNS gotcha, demonstrated).
+   `allow-dns-egress`: every Service-name lookup is an egress packet to CoreDNS (`kube-dns` in `kube-system`) on UDP/TCP 53, now blocked. Without name resolution, no connections even start. The classic gotcha because DNS is invisible to most application code. You see HTTP timeouts, not "DNS denied". Always pair default-deny egress with an explicit allow to kube-dns Pods on UDP+TCP 53 (see step 4 of the hands-on, the DNS gotcha).
 
    </details>
 

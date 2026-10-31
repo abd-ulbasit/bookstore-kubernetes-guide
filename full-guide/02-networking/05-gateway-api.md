@@ -17,11 +17,11 @@
 
 [ch.04](04-ingress.md) exposed the Bookstore, but exposed Ingress's ceilings:
 **everything beyond host/path is controller-specific annotation string-soup**
-(the Bookstore's `rewrite-target` is an annotation that only one controller
-reads), there is **one
-role** (no separation between the team that owns the cluster's edge/TLS and the
-team that owns *their* service's routes), it is **HTTP-only**, and the
-annotation surface is **unvalidated** (typos fail silently at the controller).
+(the Bookstore's path rewrite is a Traefik Middleware, attached through an
+annotation that only Traefik reads), there is **one role** (no separation
+between the team that owns the cluster's edge/TLS and the team that owns
+*their* service's routes), it is **HTTP-only**, and the annotation surface is
+**unvalidated** (typos fail silently at the controller).
 
 **Gateway API** is the project's answer: a set of **typed, portable CRDs** that
 expresses routing as first-class spec fields (not annotations), splits the
@@ -120,19 +120,20 @@ flowchart TB
 **Assumed working directory: the guide repo root (`full-guide/`).** Requires
 the `bookstore` namespace, the Services from [ch.02](02-services.md)
 (`40-services.yaml`) and their Deployments, plus a TLS Secret `bookstore-tls`
-in `bookstore` (created in [ch.04](04-ingress.md) step 2 — reused as-is).
+in `bookstore` (created in [ch.04](04-ingress.md) step 4, reused as-is).
 
-> **Alternative, not addition — apply 51- OR 50-, never both.**
+> **Alternative, not addition: apply the Gateway API stack or the Ingress
+> stack, never both.**
 > [`51-gateway.yaml`](../examples/bookstore/raw-manifests/51-gateway.yaml)
-> expresses the **same** external routing as
-> [`50-ingress.yaml`](../examples/bookstore/raw-manifests/50-ingress.yaml) via
-> a different data plane. Running both binds the same hostname/paths twice.
-> Choose one stack: **Ingress** = `40-` + `50-`; **Gateway API** = `40-` +
-> `51-`. Both are dry-run valid in isolation and in a whole-directory dry-run
-> — a *client* dry-run does **not** detect the runtime hostname overlap, and
-> Gateway kinds only map once the CRDs are installed (intrinsic to Gateway API
-> being CRD-based). To switch from the ch.04 stack:
-> `kubectl delete -f examples/bookstore/raw-manifests/50-ingress.yaml` first.
+> expresses the **same** external routing as the Traefik Ingress from
+> [ch.04](04-ingress.md) step 6 (`50-ingress-traefik.yaml`), via a different
+> data plane. Running both binds the same hostname/paths twice. Choose one
+> stack: **Ingress** = `40-` + the ch.04 Ingress; **Gateway API** = `40-` +
+> `51-`. A *client* dry-run does **not** detect the runtime hostname overlap,
+> and Gateway kinds only map once the CRDs are installed (intrinsic to Gateway
+> API being CRD-based). To switch from the ch.04 stack, delete the file that
+> holds that Ingress and its Middleware: `kubectl delete -f
+> 50-ingress-traefik.yaml`.
 
 ### 1. Install the Gateway API CRDs and the Traefik Gateway provider
 
@@ -156,16 +157,16 @@ channel, `standard`:
 
 <!-- gate: output -->
 ```text
-backendtlspolicies.gateway.networking.k8s.io   Namespaced   v1(storage)           2026-10-30T23:35:45Z
-gatewayclasses.gateway.networking.k8s.io       Cluster      v1(storage),v1beta1   2026-10-30T23:35:47Z
-gateways.gateway.networking.k8s.io             Namespaced   v1(storage),v1beta1   2026-10-30T23:35:48Z
-grpcroutes.gateway.networking.k8s.io           Namespaced   v1(storage)           2026-10-30T23:35:50Z
-httproutes.gateway.networking.k8s.io           Namespaced   v1(storage),v1beta1   2026-10-30T23:35:50Z
-listenersets.gateway.networking.k8s.io         Namespaced   v1(storage)           2026-10-30T23:35:52Z
-referencegrants.gateway.networking.k8s.io      Namespaced   v1,v1beta1(storage)   2026-10-30T23:35:54Z
-tcproutes.gateway.networking.k8s.io            Namespaced   v1(storage)           2026-10-30T23:35:57Z
-tlsroutes.gateway.networking.k8s.io            Namespaced   v1(storage)           2026-10-30T23:35:59Z
-udproutes.gateway.networking.k8s.io            Namespaced   v1(storage)           2026-10-30T23:36:01Z
+backendtlspolicies.gateway.networking.k8s.io   Namespaced   v1(storage)           2026-10-31T01:02:23Z
+gatewayclasses.gateway.networking.k8s.io       Cluster      v1(storage),v1beta1   2026-10-31T01:02:23Z
+gateways.gateway.networking.k8s.io             Namespaced   v1(storage),v1beta1   2026-10-31T01:02:23Z
+grpcroutes.gateway.networking.k8s.io           Namespaced   v1(storage)           2026-10-31T01:02:24Z
+httproutes.gateway.networking.k8s.io           Namespaced   v1(storage),v1beta1   2026-10-31T01:02:25Z
+listenersets.gateway.networking.k8s.io         Namespaced   v1(storage)           2026-10-31T01:02:25Z
+referencegrants.gateway.networking.k8s.io      Namespaced   v1,v1beta1(storage)   2026-10-31T01:02:26Z
+tcproutes.gateway.networking.k8s.io            Namespaced   v1(storage)           2026-10-31T01:02:27Z
+tlsroutes.gateway.networking.k8s.io            Namespaced   v1(storage)           2026-10-31T01:02:29Z
+udproutes.gateway.networking.k8s.io            Namespaced   v1(storage)           2026-10-31T01:02:30Z
 ```
 
 <!-- gate: output -->
@@ -176,54 +177,32 @@ standard
 The kind list alone does not give the channel. The standard install also
 registers `TLSRoute`, `TCPRoute` and `UDPRoute`, so read the annotation.
 
-Save this namespace as `traefik-namespace.yaml` and apply it before the
-install, so the namespace carries its Pod Security label from its first Pod:
+The `traefik` namespace and its Pod Security labels come from
+[ch.04](04-ingress.md) step 2, so this step changes only the release.
+
+The values from ch.04 stay in force: the watch list, the IngressClass default
+and the pinned image. This step adds the Gateway provider in a second file.
+Helm applies the files in order, and the second file holds only the Gateway
+keys:
 
 ```yaml
-apiVersion: v1
-kind: Namespace
-metadata:
-  name: traefik
-  labels:
-    pod-security.kubernetes.io/enforce: restricted
-    pod-security.kubernetes.io/enforce-version: latest
-    pod-security.kubernetes.io/audit: restricted
-    pod-security.kubernetes.io/audit-version: latest
-    pod-security.kubernetes.io/warn: restricted
-    pod-security.kubernetes.io/warn-version: latest
-```
-
-Save these values as `traefik-values.yaml`. They set the image digest, turn on
-the Gateway provider, and expose the controller on the NodePorts the kind
-cluster maps. The chart's own security settings stay as shipped: non-root,
-read-only root filesystem, every capability dropped:
-
-```yaml
-image:
-  digest: sha256:1336e85aaed293bd63d005086e0dd013b04078b26aaeb1c18b26a2f928af7e65  # docker.io/traefik:v3.7.16
-  versionOverride: v3.7.16       # the tag the digest was resolved from
 providers:
   kubernetesGateway:
-    enabled: true                # the Gateway API provider
+    enabled: true                # the Gateway API provider, beside the Ingress one
 gateway:
   enabled: false                 # the Bookstore's own Gateway (51-) replaces
                                  # the chart's default one
-service:
-  spec:
-    type: NodePort               # kind has no load balancer; see the port
-                                 # mapping below
-ports:
-  web:
-    nodePort: 30080
-  websecure:
-    nodePort: 30443
 ```
+
+Save it as `traefik-gateway-values.yaml`, then upgrade the ch.04 release in
+place. The release name and namespace stay the same:
 
 ```sh
 helm repo add traefik https://traefik.github.io/charts
 helm repo update traefik
 helm upgrade --install traefik traefik/traefik --version 42.2.0 \
-  --namespace traefik --values traefik-values.yaml
+  --namespace traefik --values traefik-values.yaml \
+  --values traefik-gateway-values.yaml
 ```
 
 The chart renders a GatewayClass named `traefik`. Read its `controllerName`,
@@ -264,11 +243,15 @@ nodes:
     extraPortMappings:
       - containerPort: 30080     # Traefik web NodePort
         hostPort: 80
+        listenAddress: "127.0.0.1"
         protocol: TCP
       - containerPort: 30443     # Traefik websecure NodePort
         hostPort: 443
+        listenAddress: "127.0.0.1"
         protocol: TCP
 ```
+
+`listenAddress` keeps the ports on localhost, as in ch.04 step 1.
 
 Without the mapping, forward the Service and send the requests in steps 2 and 4
 to port 8443 on the loopback address:
@@ -371,9 +354,21 @@ ResolvedRefs=True
 ```
 
 `Programmed=True` means Traefik has configured its data plane.
-`ResolvedRefs=True` means the TLS Secret and every backend Service resolved.
+The route's `ResolvedRefs=True` means every backend Service in its rules
+resolved. The TLS Secret is a listener condition, so read the listener's
+conditions for it:
 
-Check TLS with the certificate from [ch.04](04-ingress.md) step 2. Verify
+```sh
+kubectl get gateway bookstore -n bookstore \
+  -o jsonpath='{range .status.listeners[*]}{.name}: {range .conditions[*]}{.type}={.status} {end}{"\n"}{end}'
+```
+
+<!-- gate: output -->
+```text
+https: Accepted=True ResolvedRefs=True Programmed=True
+```
+
+Check TLS with the certificate from [ch.04](04-ingress.md) step 4. Verify
 against `tls.crt` rather than skipping verification with `-k`:
 
 ```sh
@@ -583,11 +578,16 @@ spec:
       name: catalog
 ```
 
-Save the grant as `referencegrant.yaml`, apply it, and check the route. Then
-fetch a book through the team's path:
+Save the grant as `referencegrant.yaml`, apply it, and wait until the route
+reports `ResolvedRefs=True`. The controller reconciles the grant a moment after
+the apply, so a check straight after the apply can still show the old value.
+Then fetch a book through the team's path:
 
 ```sh
 kubectl apply -f referencegrant.yaml
+kubectl wait httproute team-a-books -n team-a \
+  --for=jsonpath='{.status.parents[0].conditions[?(@.type=="ResolvedRefs")].status}'=True \
+  --timeout=60s
 kubectl get httproute team-a-books -n team-a -o jsonpath='{range .status.parents[0].conditions[*]}{.type}={.status} {.reason}{"\n"}{end}'
 curl -sS --cacert tls.crt https://bookstore.localdev.me/team-a/books -w "\nHTTP %{http_code}\n"
 ```
@@ -623,12 +623,10 @@ another needs a `ReferenceGrant` in the Secret's namespace, with `from` set to
 the Gateway and `to` set to `Secret`.
 
 > **Lineage note.** `51-gateway.yaml` is the **Gateway-API alternative** to
-> `50-ingress.yaml`; the Bookstore ships both so the guide can teach the
-> migration, but a running cluster uses exactly one.
-> [ch.06](06-network-policies.md) (`60-networkpolicy.yaml`) restricts the
-> controller-to-app edges with an allow rule that names the controller's
-> namespace. Both stacks run Traefik in `traefik`, so that rule works for
-> either one once it names that namespace.
+> the Traefik Ingress from [ch.04](04-ingress.md) step 6. A running cluster
+> uses exactly one. [ch.06](06-network-policies.md)
+> (`60-networkpolicy.yaml`) restricts the controller-to-app edges with an
+> allow rule that names the `traefik` namespace, which both stacks use.
 
 ## How it works under the hood
 
@@ -656,8 +654,8 @@ the listener's `hostname`. A route must also name the Gateway in its
   **schema-validated `spec`**, rejected at apply if malformed (vs. Ingress
   annotations failing silently at the controller).
 - **Portability:** the Bookstore's rewrite is the **core `URLRewrite` filter**,
-  identical across conformant implementations — unlike
-  `nginx.ingress.kubernetes.io/rewrite-target`. Conformance is tested by the
+  identical across conformant implementations, where the ch.04 rewrite is a
+  Traefik Middleware that only Traefik reads. Conformance is tested by the
   project, so behavior is consistent.
 - **Role-oriented & RBAC-friendly:** infra owns GatewayClass/Gateway; apps own
   routes. RBAC can grant a team **HTTPRoute** in their namespace **without**
@@ -695,8 +693,8 @@ the route says so itself, which Ingress does not. Step 3 showed a refusal with
 2. **Infra**: create `GatewayClass` + `Gateway` (listeners + TLS — reuse the
    existing TLS Secret, as the Bookstore does).
 3. **App**: translate each Ingress rule into **HTTPRoute** rules; replace
-   annotation behaviors with **typed filters** (the Bookstore's
-   `rewrite-target` → `URLRewrite`/`ReplacePrefixMatch`).
+   annotation behaviors with **typed filters** (the Bookstore's Traefik
+   Middleware → `URLRewrite`/`ReplacePrefixMatch`).
 4. Run **in parallel on a test hostname**, verify via **status conditions** +
    real requests, then cut traffic over and **remove the Ingress** (the
    Bookstore keeps both files only as teaching artifacts; never both live).
@@ -729,13 +727,11 @@ the route says so itself, which Ingress does not. Step 3 showed a refusal with
 > namespace label in step 3 is an approval, so no team's RBAC may set labels
 > on its own namespace.
 
-> **In production:** the controller holds the keys. The lab's Traefik
-> ClusterRole, rendered with the Gateway provider on, grants `get`, `list` and
-> `watch` on Secrets in every namespace. `providers.kubernetesGateway.namespaces`
-> limits the namespaces the controller watches, but the permission itself
-> stays cluster-wide. Pin the chart, keep the controller's namespace under the
-> strictest policy you run, and read [ch.04](04-ingress.md) for the controller
-> threats this chapter does not repeat.
+> **In production:** list the namespaces the controller watches for Gateway
+> routes in `providers.kubernetesGateway.namespaces`. The list narrows what
+> Traefik routes, not its RBAC: the chart's ClusterRole still reads Secrets in
+> every namespace. Keep the controller's namespace under the strictest policy
+> you run. [ch.04](04-ingress.md) covers that controller threat in full.
 
 > **In production:** **gate on status conditions in automation.** CI/CD and
 > GitOps ([Part 07 ch.04](../07-delivery/04-gitops-argocd.md)) should block
@@ -862,10 +858,13 @@ Checklist:
 4. **The Bookstore's Gateway and HTTPRoute are both in `bookstore`. A platform team moves the Gateway to a shared `edge` namespace and keeps the route in `bookstore`. What must change, and which object controls each part?**
    <details><summary>Show answer</summary>
 
-   Attachment is the Gateway owner's decision. The `edge` Gateway's
-   `allowedRoutes` must select the `bookstore` namespace, for example with a
-   label selector, and the `bookstore` namespace must carry that label. No
-   ReferenceGrant governs the attachment. The route's backends are Services in
+   Two things change. The route's `parentRefs` must name the Gateway's
+   namespace, `namespace: edge`. Without it the route looks for the Gateway in
+   its own namespace, never finds it, and never attaches. Attachment is the
+   Gateway owner's decision: the `edge` Gateway's `allowedRoutes` must select
+   the `bookstore` namespace, for example with a label selector, and the
+   `bookstore` namespace must carry that label. No ReferenceGrant governs the
+   attachment. The route's backends are Services in
    `bookstore`, and the route sits there too, so nothing crosses a namespace
    for them. The exception is the TLS Secret: if it stays in `bookstore` while
    the Gateway runs in `edge`, the `bookstore` namespace needs a

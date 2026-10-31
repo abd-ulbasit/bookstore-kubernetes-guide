@@ -577,15 +577,15 @@ gateway:
     secretName: bookstore-tls
 
 # ---------------------------------------------------------------------------
-# NetworkPolicies (raw-manifests 60-networkpolicy.yaml) — all 10
+# NetworkPolicies (raw-manifests 60-networkpolicy.yaml): all 12
 # ---------------------------------------------------------------------------
-# NetworkPolicy is a built-in kind, so this defaults ON (enforcement still
-# needs a policy CNI — kindnet is a silent no-op; see ch.06). Namespace names
-# are parameterized for portability.
+# NetworkPolicy is a built-in kind, so this defaults ON. Enforcement needs a
+# policy engine in the CNI: kindnet has one from kind v0.24.0 on (ch.06 step
+# 0). Namespace names are parameterized for portability.
 networkPolicy:
   enabled: true
   dnsNamespace: kube-system
-  ingressControllerNamespace: ingress-nginx
+  ingressControllerNamespace: traefik
   monitoringNamespace: monitoring
 
 # ---------------------------------------------------------------------------
