@@ -1,6 +1,6 @@
 # Bookstore — Part 11 ch.10 "Platform engineering": the CLAIM — the
 # developer-facing request. This is ALL a developer writes to get a full
-# hardened environment: a name + a size. Everything else (PSA-restricted
+# hardened environment: a name. Everything else (PSA-restricted
 # namespace, least-privilege RBAC, ResourceQuota/LimitRange, default-deny
 # NetworkPolicy) is expanded BY THE PLATFORM via the Composition
 # (crossplane-composition.yaml) — the developer cannot produce an un-guarded
@@ -49,4 +49,3 @@ spec:
   # The ENTIRE developer input. No securityContext, RBAC, quota, or network
   # config — the platform owns all of that (guardrails by construction).
   tenant: acme
-  size: small

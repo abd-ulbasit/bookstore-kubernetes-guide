@@ -1,30 +1,63 @@
 # Transcript for full-guide/11-advanced-production-patterns/10-platform-engineering.md
 # Tier A: the kind cluster sf-pilot, Kubernetes v1.37.0 server, kubectl v1.37.2,
-# Helm v4.1.4, Crossplane chart 2.4.3 (not installed in this run; see below).
-# Run on 2026-10-31 against the shared lab cluster, from the chapter's
-# directory. Every command below ran; commands are listed as they were typed.
+# Helm v4.1.4, Crossplane chart 2.4.3. Two passes, both on 2026-10-31 against
+# the shared lab cluster, from the chapter's directory. Every command below ran;
+# commands are listed as they were typed. The first pass ran the checks that
+# need no install. The resumed pass (the second half of this file, from its
+# "## resumed pass" headers on) ran the Crossplane install, the provider and
+# function, the XRD and Composition, the request namespace and the claim.
 #
-# What ran and what did not:
-#   ran: the pre-install server dry-runs, the pod-security probe rendered from
-#        the chart, the RBAC checks by impersonation, the requester check by
-#        SubjectAccessReview, the registry gates.
-#   did not run: the Crossplane install (helm install), the provider and
-#        function packages, the XRD and Composition in the cluster, and the
-#        claim. The shared lab was reserved for another install when this run
-#        began, so these steps were not executed. Step 4's "provider" is a
-#        ServiceAccount name, simulated and bound to the same ClusterRole.
+# Resumed pass, what ran and what did not:
+#   ran: the restricted dry run of the chart; the Crossplane install in two
+#        forms (the first with Crossplane's RBAC manager on, the second with
+#        rbacManager.deploy=false, after the first was uninstalled); the
+#        DeploymentRuntimeConfig, Provider and Function (Healthy); the provider
+#        rights by impersonation before and after the ClusterRole change; the
+#        XRD and Composition; the request namespace, requester Role and claim;
+#        cleanup of everything the pass created.
+#   did not: the claim did not reconcile, and the XRD never reported status
+#        conditions, in the window. The composite controller could not start its
+#        informers while the lab apiserver restarted (its restart count rose
+#        through the pass). So no composed object was seen, and the requester
+#        check of the tenant namespace was not run after the claim.
+#   a line "[exit ]" means the status of a pipeline was not captured.
 #
 # Substitution: the chapter prints the reader's names. This run gave the
-# namespaces the p11-10 prefix, so a namespace in a command below is the
-# chapter's name with p11-10- in front of it. The tenant was named p11-10-acme,
-# so bookstore-tenant-acme became bookstore-tenant-p11-10-acme.
-# Cluster-scoped objects (the ClusterRole and its ClusterRoleBinding, the
-# platform-probe namespaces) keep the chapter's names where they have one.
-# Every namespace and cluster object this run created was deleted at the end.
-# Note: the probe was also run with enforce=baseline while the chapter was
-# drafted. That run is not kept here: the chapter quotes the restricted
-# probe, and a baseline label in this file would need a registry entry for
-# a lab-only namespace.
+# namespaces the p11-10 prefix (p11-10-probe, p11-10-crossplane, p11-10-tenants)
+# and named the tenant p11-10-acme, so bookstore-tenant-acme would have become
+# bookstore-tenant-p11-10-acme. Cluster-scoped objects keep the chapter's names
+# (the ClusterRole, the ClusterRoleBinding, the Provider and the Function, the
+# XRD, the Composition). The ServiceAccount of the provider is named
+# bookstore-paved-road in the runtime config.
+# The first pass's header (below) describes its own run; the resumed pass
+# replaced its "did not run" lines.
+#
+# First pass header, as it was written before the resumed pass:
+# # Helm v4.1.4, Crossplane chart 2.4.3 (not installed in this run; see below).
+# # Run on 2026-10-31 against the shared lab cluster, from the chapter's
+# # directory. Every command below ran; commands are listed as they were typed.
+# #
+# # What ran and what did not:
+# #   ran: the pre-install server dry-runs, the pod-security probe rendered from
+# #        the chart, the RBAC checks by impersonation, the requester check by
+# #        SubjectAccessReview, the registry gates.
+# #   did not run: the Crossplane install (helm install), the provider and
+# #        function packages, the XRD and Composition in the cluster, and the
+# #        claim. The shared lab was reserved for another install when this run
+# #        began, so these steps were not executed. Step 4's "provider" is a
+# #        ServiceAccount name, simulated and bound to the same ClusterRole.
+# #
+# # Substitution: the chapter prints the reader's names. This run gave the
+# # namespaces the p11-10 prefix, so a namespace in a command below is the
+# # chapter's name with p11-10- in front of it. The tenant was named p11-10-acme,
+# # so bookstore-tenant-acme became bookstore-tenant-p11-10-acme.
+# # Cluster-scoped objects (the ClusterRole and its ClusterRoleBinding, the
+# # platform-probe namespaces) keep the chapter's names where they have one.
+# # Every namespace and cluster object this run created was deleted at the end.
+# # Note: the probe was also run with enforce=baseline while the chapter was
+# # drafted. That run is not kept here: the chapter quotes the restricted
+# # probe, and a baseline label in this file would need a registry entry for
+# # a lab-only namespace.
 
 $ kubectl version
 Client Version: v1.37.2
@@ -248,3 +281,350 @@ $ kubectl get ns p11-10-psa-probe p11-10-psa-restricted p11-10-platform-tenants 
 
 $ kubectl get clusterrole,clusterrolebinding bookstore-paved-road --ignore-not-found --request-timeout=40s
 [exit 0]
+
+## resumed pass: step 1 on the lab cluster (heavy install run in this pass)
+$ kubectl create namespace p11-10-probe
+namespace/p11-10-probe created
+[exit 0]
+$ kubectl label namespace p11-10-probe pod-security.kubernetes.io/enforce=restricted pod-security.kubernetes.io/audit=restricted pod-security.kubernetes.io/warn=restricted
+namespace/p11-10-probe labeled
+[exit 0]
+$ helm repo add crossplane-stable https://charts.crossplane.io/stable
+"crossplane-stable" already exists with the same configuration, skipping
+[exit 0]
+$ helm repo update crossplane-stable
+Hang tight while we grab the latest from your chart repositories...
+...Successfully got an update from the "crossplane-stable" chart repository
+Update Complete. ⎈Happy Helming!⎈
+[exit 0]
+$ helm template crossplane crossplane-stable/crossplane --version 2.4.3 --namespace p11-10-probe --set-json 'podSecurityContextCrossplane={"runAsNonRoot":true,"seccompProfile":{"type":"RuntimeDefault"}}' --set-json 'podSecurityContextRBACManager={"runAsNonRoot":true,"seccompProfile":{"type":"RuntimeDefault"}}' --set-json 'securityContextCrossplane={"runAsUser":65532,"runAsGroup":65532,"allowPrivilegeEscalation":false,"readOnlyRootFilesystem":true,"capabilities":{"drop":["ALL"]}}' --set-json 'securityContextRBACManager={"runAsUser":65532,"runAsGroup":65532,"allowPrivilegeEscalation":false,"readOnlyRootFilesystem":true,"capabilities":{"drop":["ALL"]}}' | kubectl apply --dry-run=server -n p11-10-probe -f - 2>&1 | grep -E '^Warning|^deployment|^Error'
+deployment.apps/crossplane created (server dry run)
+deployment.apps/crossplane-rbac-manager created (server dry run)
+[exit ]
+$ kubectl delete namespace p11-10-probe
+namespace "p11-10-probe" deleted
+[exit 0]
+$ kubectl apply -f - (Namespace p11-10-crossplane, restricted at enforce, audit and warn)
+namespace/p11-10-crossplane created
+[exit 0]
+$ helm install crossplane crossplane-stable/crossplane --namespace p11-10-crossplane --version 2.4.3 --wait [pod-level and container-level chart values as in the probe]
+NAME: crossplane
+LAST DEPLOYED: Sat Oct 31 10:34:39 2026
+NAMESPACE: p11-10-crossplane
+STATUS: deployed
+REVISION: 1
+DESCRIPTION: Install complete
+TEST SUITE: None
+NOTES:
+Release: crossplane
+
+Chart Name: crossplane
+Chart Description: Crossplane is an open source Kubernetes add-on that enables platform teams to assemble infrastructure from multiple vendors, and expose higher level self-service APIs for application teams to consume.
+Chart Version: 2.4.3
+Chart Application Version: 2.4.3
+
+Kube Version: v1.37.0
+[exit ]
+$ kubectl apply -f - (DeploymentRuntimeConfig bookstore-paved-road, fixed provider ServiceAccount name, then Provider and Function)
+deploymentruntimeconfig.pkg.crossplane.io/bookstore-paved-road created
+provider.pkg.crossplane.io/provider-kubernetes created
+function.pkg.crossplane.io/function-patch-and-transform created
+[exit 0]
+$ kubectl wait --for=condition=Healthy provider/provider-kubernetes --timeout=180s
+error: timed out waiting for the condition on providers/provider-kubernetes
+[exit 1]
+$ kubectl wait --for=condition=Healthy function/function-patch-and-transform --timeout=180s
+Unable to connect to the server: EOF
+[exit 1]
+$ kubectl wait --for=condition=Healthy provider/provider-kubernetes --timeout=300s (retry after the apiserver restarted)
+provider.pkg.crossplane.io/provider-kubernetes condition met
+[exit 0]
+$ kubectl wait --for=condition=Healthy function/function-patch-and-transform --timeout=300s
+function.pkg.crossplane.io/function-patch-and-transform condition met
+[exit 0]
+$ kubectl -n p11-10-crossplane get serviceaccount bookstore-paved-road
+NAME                   AGE
+bookstore-paved-road   13m
+[exit 0]
+$ kubectl apply -f - (ClusterRole bookstore-paved-road)
+clusterrole.rbac.authorization.k8s.io/bookstore-paved-road created
+[exit 0]
+$ kubectl create clusterrolebinding bookstore-paved-road --clusterrole=bookstore-paved-road --serviceaccount=p11-10-crossplane:bookstore-paved-road
+clusterrolebinding.rbac.authorization.k8s.io/bookstore-paved-road created
+[exit 0]
+## resumed pass: step 4, provider rights checked against the real provider ServiceAccount
+$ PROVIDER="system:serviceaccount:p11-10-crossplane:bookstore-paved-road"
+$ kubectl auth can-i create namespaces  --as=$PROVIDER
+Warning: resource 'namespaces' is not namespace scoped
+
+yes
+[exit 0]
+$ kubectl auth can-i delete namespaces  --as=$PROVIDER
+Warning: resource 'namespaces' is not namespace scoped
+
+yes
+[exit 0]
+$ kubectl auth can-i get secrets -A --as=$PROVIDER
+yes
+[exit 0]
+$ kubectl auth can-i create clusterrolebindings  --as=$PROVIDER
+Warning: resource 'clusterrolebindings' is not namespace scoped in group 'rbac.authorization.k8s.io'
+
+no
+[exit 1]
+$ kubectl auth can-i create roles -A --as=$PROVIDER
+no
+[exit 1]
+$ kubectl auth can-i create deployments -A --as=$PROVIDER
+no
+[exit 1]
+$ kubectl auth can-i create rolebindings -A --as=$PROVIDER
+yes
+[exit 0]
+$ kubectl auth can-i bind clusterrole/view  --as=$PROVIDER
+Warning: resource 'clusterroles' is not namespace scoped in group 'rbac.authorization.k8s.io'
+
+yes
+[exit 0]
+$ kubectl auth can-i bind clusterrole/cluster-admin  --as=$PROVIDER
+Warning: resource 'clusterroles' is not namespace scoped in group 'rbac.authorization.k8s.io'
+
+no
+[exit 1]
+## resumed pass: the grant the chart makes on its own (found by step 4 above)
+$ kubectl get clusterrolebinding (subjects that name the provider ServiceAccount)
+bookstore-paved-road -> bookstore-paved-road subject p11-10-crossplane bookstore-paved-road
+crossplane:provider:provider-kubernetes-2d25dda0c83d:system -> crossplane:provider:provider-kubernetes-2d25dda0c83d:system subject p11-10-crossplane bookstore-paved-road
+$ kubectl get clusterrole crossplane:provider:provider-kubernetes-2d25dda0c83d:system -o jsonpath=(rules naming secrets)
+  - ""
+  - coordination.k8s.io
+  resources:
+  - secrets
+  - configmaps
+  - events
+  - leases
+[exit 0]
+$ helm upgrade crossplane crossplane-stable/crossplane -n p11-10-crossplane --version 2.4.3 --wait [same values, rbacManager.deploy=false]
+level=WARN msg="upgrade failed" name=crossplane error="conflict occurred while applying object /crossplane rbac.authorization.k8s.io/v1, Kind=ClusterRole: Apply failed with 1 conflict: conflict with \"clusterrole-aggregation-controller\": .rules"
+Error: UPGRADE FAILED: conflict occurred while applying object /crossplane rbac.authorization.k8s.io/v1, Kind=ClusterRole: Apply failed with 1 conflict: conflict with "clusterrole-aggregation-controller": .rules
+[exit 1]
+Error: UPGRADE FAILED: conflict occurred while applying object /crossplane rbac.authorization.k8s.io/v1, Kind=ClusterRole: Apply failed with 1 conflict: conflict with "clusterrole-aggregation-controller": .rules
+[exit 1]
+$ helm uninstall crossplane -n p11-10-crossplane --wait   (the in-place upgrade conflicted with the aggregation controller on the chart ClusterRole)
+release "crossplane" uninstalled
+[exit 0]
+$ kubectl delete clusterrolebinding,clusterrole crossplane:provider:provider-kubernetes-2d25dda0c83d:system   (generated by the RBAC manager, owned by the ProviderRevision)
+clusterrolebinding.rbac.authorization.k8s.io "crossplane:provider:provider-kubernetes-2d25dda0c83d:system" deleted
+clusterrole.rbac.authorization.k8s.io "crossplane:provider:provider-kubernetes-2d25dda0c83d:system" deleted
+[exit 0]
+$ helm install crossplane crossplane-stable/crossplane --namespace p11-10-crossplane --version 2.4.3 --wait [rbacManager.deploy=false, container values as before]
+[exit 0]
+NAME: crossplane
+LAST DEPLOYED: Sat Oct 31 10:52:06 2026
+NAMESPACE: p11-10-crossplane
+$ helm list -n p11-10-crossplane
+NAME      	NAMESPACE        	REVISION	UPDATED                             	STATUS  	CHART           	APP VERSION
+crossplane	p11-10-crossplane	1       	2026-10-31 10:52:06.224715 +0500 PKT	deployed	crossplane-2.4.3	2.4.3      
+$ kubectl -n p11-10-crossplane get deploy   (the rbac-manager deployment from the first install survived the uninstall)
+NAME                                        READY   UP-TO-DATE   AVAILABLE   AGE
+crossplane                                  1/1     1            1           110s
+crossplane-rbac-manager                     1/1     1            1           19m
+function-patch-and-transform-e9fec78aeef5   1/1     1            1           16m
+provider-kubernetes-2d25dda0c83d            1/1     1            1           16m
+$ kubectl -n p11-10-crossplane delete deployment crossplane-rbac-manager
+deployment.apps "crossplane-rbac-manager" deleted from p11-10-crossplane namespace
+[exit 0]
+$ kubectl delete clusterrole,clusterrolebinding crossplane-rbac-manager  (left from the first install)
+clusterrolebinding.rbac.authorization.k8s.io "crossplane-rbac-manager" deleted
+clusterrole.rbac.authorization.k8s.io "crossplane-rbac-manager" deleted
+[exit 0]
+$ kubectl delete clusterrolebinding,clusterrole crossplane:provider:provider-kubernetes-2d25dda0c83d:system  (recreated before the RBAC manager was removed)
+clusterrolebinding.rbac.authorization.k8s.io "crossplane:provider:provider-kubernetes-2d25dda0c83d:system" deleted
+clusterrole.rbac.authorization.k8s.io "crossplane:provider:provider-kubernetes-2d25dda0c83d:system" deleted
+[exit 0]
+$ kubectl apply -f - (ClusterRole bookstore-paved-road, now with the Crossplane managed-resource rules the RBAC manager used to add, and no Secrets)
+clusterrole.rbac.authorization.k8s.io/bookstore-paved-road configured
+[exit 0]
+## resumed pass: step 4 again, after the RBAC manager was turned off
+$ PROVIDER="system:serviceaccount:p11-10-crossplane:bookstore-paved-road"
+$ kubectl auth can-i create namespaces  --as=$PROVIDER
+Warning: resource 'namespaces' is not namespace scoped
+
+yes
+[exit 0]
+$ kubectl auth can-i delete namespaces  --as=$PROVIDER
+Warning: resource 'namespaces' is not namespace scoped
+
+yes
+[exit 0]
+$ kubectl auth can-i get secrets -A --as=$PROVIDER
+no
+[exit 1]
+$ kubectl auth can-i create clusterrolebindings  --as=$PROVIDER
+Warning: resource 'clusterrolebindings' is not namespace scoped in group 'rbac.authorization.k8s.io'
+
+no
+[exit 1]
+$ kubectl auth can-i create roles -A --as=$PROVIDER
+no
+[exit 1]
+$ kubectl auth can-i create deployments -A --as=$PROVIDER
+no
+[exit 1]
+$ kubectl auth can-i create rolebindings -A --as=$PROVIDER
+yes
+[exit 0]
+$ kubectl auth can-i bind clusterrole/view  --as=$PROVIDER
+Warning: resource 'clusterroles' is not namespace scoped in group 'rbac.authorization.k8s.io'
+
+yes
+[exit 0]
+$ kubectl auth can-i bind clusterrole/cluster-admin  --as=$PROVIDER
+Warning: resource 'clusterroles' is not namespace scoped in group 'rbac.authorization.k8s.io'
+
+no
+[exit 1]
+## resumed pass: step 2, the XRD and the Composition in the cluster
+$ kubectl apply --dry-run=server -f examples/bookstore/platform/crossplane-xrd.yaml
+compositeresourcedefinition.apiextensions.crossplane.io/bookstoreenvironments.platform.bookstore.example.com created (server dry run)
+[exit 0]
+$ kubectl apply -f examples/bookstore/platform/crossplane-xrd.yaml
+compositeresourcedefinition.apiextensions.crossplane.io/bookstoreenvironments.platform.bookstore.example.com created
+[exit 0]
+$ kubectl wait --for=condition=Established xrd/bookstoreenvironments.platform.bookstore.example.com --timeout=120s
+error: timed out waiting for the condition on compositeresourcedefinitions/bookstoreenvironments.platform.bookstore.example.com
+[exit 1]
+$ kubectl wait --for=condition=Established crd/bookstoreenvironments.platform.bookstore.example.com --timeout=120s
+customresourcedefinition.apiextensions.k8s.io/bookstoreenvironments.platform.bookstore.example.com condition met
+[exit 0]
+$ kubectl apply -f examples/bookstore/platform/crossplane-composition.yaml
+composition.apiextensions.crossplane.io/bookstore-guarded-namespace created
+[exit 0]
+$ kubectl get xrd bookstoreenvironments.platform.bookstore.example.com -o jsonpath=conditions
+[exit 0]
+## resumed pass: step 3, the request namespace, the requester Role and the claim (names substituted: p11-10-tenants, p11-10-acme)
+$ kubectl apply -f - (Namespace p11-10-tenants restricted, ProviderConfig default, Role and RoleBinding for the requester group)
+namespace/p11-10-tenants created
+providerconfig.kubernetes.m.crossplane.io/default created
+role.rbac.authorization.k8s.io/bookstore-environment-requester created
+rolebinding.rbac.authorization.k8s.io/bookstore-environment-requester created
+[exit 0]
+$ kubectl apply -f claim (examples/bookstore/platform/bookstore-env-claim.yaml with the substituted names)
+bookstoreenvironment.platform.bookstore.example.com/p11-10-acme created
+[exit 0]
+$ kubectl get bookstoreenvironment p11-10-acme -n p11-10-tenants
+NAME          SYNCED   READY   COMPOSITION   AGE
+p11-10-acme                                  0s
+[exit 0]
+## resumed pass: the claim did not reconcile in the window (the composite controller could not start its informers while the apiserver restarted); evidence of the provider pod security context:
+$ kubectl -n p11-10-crossplane get pod/provider-kubernetes-2d25dda0c83d-67b7f4ccc6-4cwc9 -o jsonpath=(pod and container security context)
+{"runAsGroup":65532,"runAsNonRoot":true,"runAsUser":65532,"seccompProfile":{"type":"RuntimeDefault"}}
+package-runtime {"allowPrivilegeEscalation":false,"capabilities":{"drop":["ALL"]},"readOnlyRootFilesystem":true}
+[exit 0]
+$ kubectl -n p11-10-crossplane get pods
+NAME                                                         READY   STATUS    RESTARTS      AGE
+crossplane-5bbc8c99b-jg24m                                   1/1     Running   0             13m
+function-patch-and-transform-e9fec78aeef5-6dbf8f9f8f-hwf6b   1/1     Running   0             27m
+provider-kubernetes-2d25dda0c83d-67b7f4ccc6-4cwc9            1/1     Running   3 (17m ago)   27m
+[exit 0]
+$ kubectl get compositeresourcedefinitions.v2.apiextensions.crossplane.io bookstoreenvironments.platform.bookstore.example.com -o jsonpath=conditions
+[exit 0]
+$ kubectl get events -n p11-10-tenants
+No resources found in p11-10-tenants namespace.
+## resumed pass: cleanup (every object this pass created)
+$ kubectl delete bookstoreenvironment p11-10-acme -n p11-10-tenants --wait=false --ignore-not-found
+bookstoreenvironment.platform.bookstore.example.com "p11-10-acme" deleted from p11-10-tenants namespace
+[exit 0]
+$ kubectl delete composition bookstore-guarded-namespace --ignore-not-found --wait=false
+composition.apiextensions.crossplane.io "bookstore-guarded-namespace" deleted
+[exit 0]
+$ kubectl delete compositeresourcedefinition bookstoreenvironments.platform.bookstore.example.com --ignore-not-found --wait=false
+compositeresourcedefinition.apiextensions.crossplane.io "bookstoreenvironments.platform.bookstore.example.com" deleted
+[exit 0]
+$ kubectl delete namespace p11-10-tenants --ignore-not-found --wait=false
+namespace "p11-10-tenants" deleted
+[exit 0]
+$ kubectl delete clusterrolebinding bookstore-paved-road --ignore-not-found
+clusterrolebinding.rbac.authorization.k8s.io "bookstore-paved-road" deleted
+[exit 0]
+$ kubectl delete clusterrole bookstore-paved-road --ignore-not-found
+clusterrole.rbac.authorization.k8s.io "bookstore-paved-road" deleted
+[exit 0]
+$ kubectl delete function function-patch-and-transform --ignore-not-found --wait=false
+function.pkg.crossplane.io "function-patch-and-transform" deleted
+[exit 0]
+$ kubectl delete provider provider-kubernetes --ignore-not-found --wait=false
+error: you must specify only one resource
+[exit 1]
+$ kubectl delete deploymentruntimeconfig bookstore-paved-road --ignore-not-found
+deploymentruntimeconfig.pkg.crossplane.io "bookstore-paved-road" deleted
+[exit 0]
+$ kubectl delete providers.pkg.crossplane.io provider-kubernetes --ignore-not-found --wait=false
+provider.pkg.crossplane.io "provider-kubernetes" deleted
+[exit 0]
+$ helm uninstall crossplane -n p11-10-crossplane --wait
+release "crossplane" uninstalled
+[exit 0]
+$ kubectl delete clusterrolebinding crossplane:provider:provider-kubernetes-2d25dda0c83d:system --ignore-not-found
+[exit 0]
+$ kubectl delete clusterrole crossplane:provider:provider-kubernetes-2d25dda0c83d:system --ignore-not-found
+[exit 0]
+$ kubectl delete namespace p11-10-crossplane --ignore-not-found --wait=false
+namespace "p11-10-crossplane" deleted
+[exit 0]
+$ kubectl delete crd (every CRD in a crossplane.io group, all absent before this pass)
+      31
+usage: xargs [-0opt] [-E eofstr] [-I replstr [-R replacements] [-S replsize]]
+             [-J replstr] [-L number] [-n number [-x]] [-P maxprocs]
+             [-s size] [utility [argument ...]]
+[exit ]
+$ kubectl delete clusterrole,clusterrolebinding (names containing crossplane, absent before this pass)
+      13
+             [-J replstr] [-L number] [-n number [-x]] [-P maxprocs]
+             [-s size] [utility [argument ...]]
+$ kubectl get crd | grep -c crossplane (after)
+30
+$ kubectl get ns | grep p11-10 (after)
+2
+$ re-take heavy lock for the rest of the cleanup
+$ xargs kubectl delete (every crossplane.io CRD) < list
+customresourcedefinition.apiextensions.k8s.io "usages.protection.crossplane.io" deleted
+customresourcedefinition.apiextensions.k8s.io "watchoperations.ops.crossplane.io" deleted
+[exit ]
+$ xargs kubectl delete (clusterroles and clusterrolebindings with crossplane in the name)
+clusterrole.rbac.authorization.k8s.io "crossplane:system:aggregate-to-crossplane" deleted
+clusterrolebinding.rbac.authorization.k8s.io "crossplane-admin" deleted
+$ kubectl get crd | grep -c crossplane (after)
+4
+$ kubectl get clusterrole,clusterrolebinding | grep -ci crossplane (after)
+0
+$ kubectl get ns | grep -c p11-10 (after)
+1
+$ kubectl delete crd compositeresourcedefinitions.apiextensions.crossplane.io locks.pkg.crossplane.io providerconfigs.kubernetes.m.crossplane.io providerrevisions.pkg.crossplane.io
+customresourcedefinition.apiextensions.k8s.io "compositeresourcedefinitions.apiextensions.crossplane.io" deleted
+customresourcedefinition.apiextensions.k8s.io "locks.pkg.crossplane.io" deleted
+customresourcedefinition.apiextensions.k8s.io "providerconfigs.kubernetes.m.crossplane.io" deleted
+customresourcedefinition.apiextensions.k8s.io "providerrevisions.pkg.crossplane.io" deleted
+[exit 0]
+$ kubectl get ns p11-10-tenants -o jsonpath=conditions
+NamespaceDeletionDiscoveryFailure=False All resources successfully discovered
+NamespaceDeletionGroupVersionParsingFailure=False All legacy kube types successfully parsed
+NamespaceDeletionContentFailure=False All content successfully deleted, may be waiting on finalization
+NamespaceContentRemaining=True Some resources are remaining: providerconfigs.kubernetes.m.crossplane.io has 1 resource instances
+NamespaceFinalizersRemaining=True Some content in the namespace has finalizers remaining: in-use.crossplane.io in 1 resource instances
+[exit 0]
+$ kubectl patch providerconfig default -n p11-10-tenants (clear the in-use finalizer left after the controller was removed)
+providerconfig.kubernetes.m.crossplane.io/default patched
+[exit 0]
+$ kubectl patch providerrevision.pkg.crossplane.io/provider-kubernetes-2d25dda0c83d (clear finalizers)
+providerrevision.pkg.crossplane.io/provider-kubernetes-2d25dda0c83d patched
+$ kubectl patch lock.pkg.crossplane.io/lock (clear finalizers)
+lock.pkg.crossplane.io/lock patched
+$ kubectl patch compositeresourcedefinition.apiextensions.crossplane.io/bookstoreenvironments.platform.bookstore.example.com (clear finalizers)
+compositeresourcedefinition.apiextensions.crossplane.io/bookstoreenvironments.platform.bookstore.example.com patched
+$ kubectl get crd | grep -c crossplane (after)
+0
+$ kubectl get ns | grep -c p11-10 (after)
+0
+$ kubectl get clusterrole,clusterrolebinding | grep -ci crossplane (after)
+0
