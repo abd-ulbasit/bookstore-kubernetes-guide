@@ -47,14 +47,16 @@ metadata:
   name: mesh-sidecar-shape
   namespace: bookstore
   labels:
-    app: catalog                       # a real Bookstore label (illustrative)
-    app.kubernetes.io/part-of: bookstore
+    app: mesh-sidecar-shape            # not `catalog`: the catalog Service
+    app.kubernetes.io/part-of: bookstore   # would otherwise select this Pod
   annotations:
     # In a real sidecar-mode mesh this is where injection is opted in
     # (e.g. sidecar.istio.io/inject: "true"); shown for orientation only —
     # this artifact hand-writes the *resulting* restricted-compliant shape.
     sidecar.istio.io/inject: "false"
 spec:
+  serviceAccountName: catalog-sa       # a dedicated SA, never `default`
+  automountServiceAccountToken: false
   # POD-LEVEL restricted baseline (PSA restricted requires these).
   securityContext:
     runAsNonRoot: true
@@ -64,7 +66,7 @@ spec:
   containers:
     # ---- the application container (stand-in: pause) -----------------------
     - name: app
-      image: registry.k8s.io/pause:3.9
+      image: registry.k8s.io/pause:3.9@sha256:7031c1b283388d2c2e09b57badb803c05ebed362dc88d84b480cc47f72a21097
       securityContext:
         allowPrivilegeEscalation: false
         readOnlyRootFilesystem: true
@@ -76,13 +78,16 @@ spec:
       resources:
         requests: { cpu: "10m", memory: "16Mi" }
         limits:   { cpu: "50m", memory: "32Mi" }
+      volumeMounts:
+        - name: tmp
+          mountPath: /tmp
     # ---- the INJECTED istio-proxy SIDECAR shape (this is the lesson) -------
     # A real mesh injects this container. For PSA `restricted` to admit the
     # Pod, the injected proxy MUST carry EXACTLY this securityContext. If your
     # mesh's injection template omits any of these, PSA rejects every meshed
     # Pod in `bookstore`. (Stand-in image; the securityContext is the point.)
     - name: istio-proxy
-      image: registry.k8s.io/pause:3.9
+      image: registry.k8s.io/pause:3.9@sha256:7031c1b283388d2c2e09b57badb803c05ebed362dc88d84b480cc47f72a21097
       securityContext:
         runAsNonRoot: true
         runAsUser: 1337                 # Istio's proxy UID — non-root (OK)
@@ -98,3 +103,9 @@ spec:
       resources:
         requests: { cpu: "10m", memory: "40Mi" }
         limits:   { cpu: "100m", memory: "128Mi" }
+      volumeMounts:
+        - name: tmp
+          mountPath: /tmp
+  volumes:
+    - name: tmp
+      emptyDir: {}

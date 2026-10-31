@@ -15,6 +15,9 @@
 > (contrasted with the Part 07 ch.05 Argo Rollouts replica-ratio canary).
 
 **Estimated time:** ~60 min read · ~120 min hands-on
+**Lab tier:** A (kind), on Kubernetes 1.37. Run it only against a cluster you
+own. The Istio install is not run in the captured lab; the setup note in the
+hands-on says which steps are cited instead of captured.
 **Prerequisites:** [Part 02 ch.06](../02-networking/06-network-policies.md) — L3/L4 segmentation the mesh complements at L7 · [Part 05 ch.01](../05-security/01-authn-authz-rbac.md) — workload-identity gap mTLS fills · [Part 02 ch.05](../02-networking/05-gateway-api.md) — Gateway API the mesh interoperates with
 **You'll know after this:** • compare sidecar / Istio ambient / Linkerd data-plane models · • turn on strict mTLS for a namespace and verify the cryptographic identity · • run a mesh-layer canary and contrast it with an Argo Rollouts replica-ratio canary · • avoid the sidecar-injection-vs-PSA-restricted footgun · • justify when NOT to adopt a mesh
 
@@ -120,6 +123,23 @@ just. Pick the lowest-overhead model that meets the requirement (often
 ambient), roll mTLS out `PERMISSIVE`→`STRICT`, and make absolutely sure
 anything injected into `bookstore` is restricted-compliant.
 
+## Threats and controls
+
+This chapter adds two rows to the Bookstore threat model in
+[`THREAT-MODEL.md`](../examples/bookstore/THREAT-MODEL.md). Most of a mesh's
+job is traffic and operations, and the threat model does not track those.
+
+| Threat | Control this chapter teaches | Goes deeper in |
+|--------|------------------------------|----------------|
+| S6: a Pod copies a label such as `app: storefront` and is trusted as that workload | SPIFFE identity from the ServiceAccount, checked by an authorization policy that denies by default at the waypoint (step 3b) | [Part 05 ch.01](../05-security/01-authn-authz-rbac.md): workload X.509 identity, and who may run Pods as a ServiceAccount |
+| I5: a Pod on the pod network reads the traffic of an edge that policy allows | Strict mTLS between meshed workloads, so no plaintext crosses the pod network (step 2) | [Part 02 ch.06](../02-networking/06-network-policies.md): the NetworkPolicy still applies underneath |
+
+The identity control is only as strong as the rule on who may create Pods.
+Kubernetes lets anyone who can create Pods in a namespace run them as any
+ServiceAccount in that namespace
+([RBAC good practices](https://kubernetes.io/docs/concepts/security/rbac-good-practices/)),
+so the mesh's identity and the RBAC on Pod creation must be read together.
+
 ## Diagrams
 
 ### Diagram A — data path + control plane + mTLS (Istio ambient, the Bookstore's choice) (Mermaid)
@@ -136,7 +156,7 @@ flowchart TB
             sf["storefront Pod<br/>(no injected container)"]
             cat["catalog Pod<br/>(no injected container)"]
         end
-        wp["catalog waypoint<br/>(Envoy Deployment, restricted-compliant)<br/>L7: canary / retries / timeout"]
+        wp["catalog waypoint<br/>(Envoy Deployment; restricted only with seccomp set)<br/>L7: canary / retries / timeout / authz"]
     end
 
     subgraph nodeB["Node B"]
@@ -188,7 +208,7 @@ flowchart TB
 
   WHEN **NOT** to add a mesh: few services; NetworkPolicy + Gateway API +
   app-level retries already suffice; you can't run/operate the control plane;
-  the latency/again-failure-domain cost outweighs uniform mTLS/L7/telemetry.
+  the latency and the extra failure domain outweigh uniform mTLS/L7/telemetry.
 ```
 
 ## Hands-on with the Bookstore
@@ -202,16 +222,21 @@ file — the namespace enrollment is a `kubectl label` *patch* on the existing
 Gateway-vs-Ingress and operator precedents).
 
 We will: (0) self-bootstrap the Bookstore; (1) install **Istio ambient** via
-pinned Helm and justify the choice; (2) enroll `bookstore` and turn on
-**strict mTLS**, proving identity is cryptographic; (3) run a **mesh-layer
-canary** on `catalog` and contrast it with the Part 07 ch.05 replica-ratio
-canary; (4) confront the **sidecar-injection-vs-PSA footgun** explicitly.
+pinned Helm, with its namespace labelled privileged first; (2) enroll
+`bookstore` and turn on **strict mTLS**; (3) add a waypoint and a **mesh-layer
+canary** on `catalog`, contrasted with the Part 07 ch.05 replica-ratio canary;
+(3b) apply **default-deny authorization** at that waypoint; (4) confront the
+**sidecar-injection-vs-PSA footgun** explicitly.
 
-> **The honest setup story (read first).** A mesh genuinely needs a control
-> plane installed — there is no zero-setup path. Everything here is **fully
-> reproducible on a single kind cluster** (ambient works on kind), it is just
-> not zero-install. Every manifest dry-run runs with **no cluster**; the mesh
-> *behaviour* needs the Istio install below. Non-reproducible bits are marked.
+> **What was run and what was not (read first).** The captured output below
+> came from a kind cluster named `sf-pilot` (its node is
+> `sf-pilot-control-plane`), not `bookstore`, and from the namespace
+> `p11-04-mesh` where this chapter prints `bookstore`. The captured runs cover
+> the chart renders, the `restricted` admission of the node agents, the
+> waypoint and the init container, and the Pods that were refused. **Not
+> run:** the Istio install itself, the mTLS and authorization behaviour, and
+> the canary split. Those steps are marked **cited, not captured**, and their
+> behaviour is taken from Istio's documentation.
 
 ### 0. Prerequisites — the running Bookstore (self-bootstrapping)
 
@@ -263,37 +288,66 @@ Install via the **pinned Helm charts** — per this guide's rule, **never**
 when a new release ships; same precedent as the Kyverno/KEDA/Argo CD/cert-
 manager installs):
 
+Istio 1.30.7 is pinned. Its charts are the latest stable release in Istio's
+chart repository, and their digests match the repository index. Istio's
+supported-releases page lists 1.31 as the only current minor that supports
+Kubernetes 1.37, but no 1.31 chart is published yet, so this chapter pins
+1.30.7, whose listed Kubernetes range is 1.32 to 1.36. Before you install on a
+1.37 cluster, check that page and move the pin to a chart that supports your
+version.
+
 ```sh
-ISTIO_CHART_VERSION=1.24.2          # istio Helm charts (pin)
+ISTIO_CHART_VERSION=1.30.7          # pinned; see the note above
 helm repo add istio https://istio-release.storage.googleapis.com/charts
 helm repo update
 
+# Label the namespace before anything runs in it. The node agents need hostPath
+# volumes and added capabilities, which restricted and baseline both refuse, so
+# the lowest level that works for this namespace is privileged (step 4).
+kubectl create namespace istio-system
+kubectl label namespace istio-system pod-security.kubernetes.io/enforce=privileged pod-security.kubernetes.io/audit=privileged pod-security.kubernetes.io/warn=privileged
+
 # 1. base (CRDs + cluster roles), 2. istiod (control plane), 3. CNI
 #    (sets up ambient redirection), 4. ztunnel (the per-node L4/mTLS proxy):
-helm install istio-base istio/base -n istio-system --create-namespace \
+helm install istio-base istio/base -n istio-system \
   --version "$ISTIO_CHART_VERSION" --set defaultRevision=default --wait
+# gateways.seccompProfile sets the seccomp profile on the waypoint Pods that
+# istiod creates. The chart default is empty, and restricted refuses a Pod with
+# no seccomp profile (step 4).
 helm install istiod istio/istiod -n istio-system \
-  --version "$ISTIO_CHART_VERSION" --set profile=ambient --wait
+  --version "$ISTIO_CHART_VERSION" --set profile=ambient \
+  --set gateways.seccompProfile.type=RuntimeDefault --wait
 helm install istio-cni istio/cni -n istio-system \
   --version "$ISTIO_CHART_VERSION" --set profile=ambient --wait
 helm install ztunnel istio/ztunnel -n istio-system \
   --version "$ISTIO_CHART_VERSION" --wait
 
 kubectl -n istio-system get pods       # istiod + istio-cni-node + ztunnel
-# Gateway API CRDs are needed for waypoints + GAMMA routes (Part 02 ch.05):
-kubectl get crd gateways.gateway.networking.k8s.io >/dev/null 2>&1 || \
-  kubectl apply -f \
-  https://github.com/kubernetes-sigs/gateway-api/releases/download/v1.2.0/standard-install.yaml
+# Waypoints and GAMMA routes need the Gateway API CRDs (Part 02 ch.05). Install
+# the version your Istio release documents. The check below does nothing if
+# they are present:
+kubectl get crd gateways.gateway.networking.k8s.io >/dev/null 2>&1 \
+  || echo "install the Gateway API CRDs first"
 ```
 
 Installing Istio created the `istio.io` CRDs (`PeerAuthentication`,
 `VirtualService`, `DestinationRule`, …). **This is what makes the mesh
-manifests dry-runnable** — before this, a client dry-run of them prints `no
-matches for kind "PeerAuthentication"` (the documented CRD-intrinsic
-behaviour; step 4 / each file header — exact precedent of
-`raw-manifests/70-`/`83-`/`51-`/`argocd/`).
+manifests dry-runnable.** Before it, a server dry-run of them is refused with
+a CRD message. The lab captured that refusal for the strict mTLS file, before
+Istio was installed:
 
-### 2. Enroll `bookstore`, turn on strict mTLS, prove identity is cryptographic
+<!-- gate: output -->
+```
+$ kubectl apply --dry-run=server -f mesh-copy/10-peerauthentication-strict-mtls.yaml
+error: resource mapping not found for name: "bookstore-strict-mtls" namespace: "p11-04-mesh" from "mesh-copy/10-peerauthentication-strict-mtls.yaml": no matches for kind "PeerAuthentication" in version "security.istio.io/v1"
+ensure CRDs are installed first
+```
+
+The `mesh-copy` path and the `p11-04-mesh` namespace are the lab's; the file
+itself is `mesh/10-peerauthentication-strict-mtls.yaml` in the reader's
+namespace `bookstore`.
+
+### 2. Enroll `bookstore` and turn on strict mTLS
 
 Enroll the namespace into the ambient data plane. This is a **label patch on
 the existing canonical namespace**, *not* a re-apply of a Namespace object
@@ -307,35 +361,39 @@ kubectl label namespace bookstore istio.io/dataplane-mode=ambient
 kubectl get pods -n bookstore        # same Pods, same age, NO extra container
 kubectl get pod -n bookstore -l app=catalog \
   -o jsonpath='{.items[0].spec.containers[*].name}'; echo
-#   → catalog        (ONE container — no istio-proxy injected. The PSA footgun
-#                      simply does not arise in ambient: nothing was mutated.)
+# expected, not captured in the lab: `catalog` alone. Ambient injects no
+# istio-proxy container into the app Pod, so nothing is mutated for PSA to refuse.
 ```
 
 Now enforce **strict mTLS** for the whole namespace with
-[`mesh/10-peerauthentication-strict-mtls.yaml`](../examples/bookstore/mesh/10-peerauthentication-strict-mtls.yaml)
-(its header documents the CRD-intrinsic dry-run and the `PERMISSIVE`→`STRICT`
-rollout — the same Audit→Enforce lifecycle as [Part 05 ch.03](../05-security/03-supply-chain.md)
-and the [ch.01](01-admission-webhooks.md) webhook Ignore→Fail):
+[`mesh/10-peerauthentication-strict-mtls.yaml`](../examples/bookstore/mesh/10-peerauthentication-strict-mtls.yaml).
+Go through a migration window first, because a namespace-wide `STRICT` refuses
+every client that is not meshed yet. Copy the file, change `mode: STRICT` to
+`mode: PERMISSIVE` in the copy, apply it, and confirm in Istio's telemetry that
+every edge already uses mTLS. Then apply the strict file. Do not leave
+PERMISSIVE in place after that window. This is the same staged rollout as the
+Audit→Enforce lifecycle in [Part 05 ch.03](../05-security/03-supply-chain.md)
+and the webhook Ignore→Fail in [ch.01](01-admission-webhooks.md).
 
 ```sh
 kubectl apply -f examples/bookstore/mesh/10-peerauthentication-strict-mtls.yaml
 kubectl get peerauthentication -n bookstore
-# Every catalog↔postgres / storefront↔catalog call is now mTLS, by SPIFFE
-# identity, with ZERO change to app/*/main.go. Inspect the identity istiod
-# issued for the catalog ServiceAccount:
-istioctl proxy-config secret \
-  $(kubectl get pod -n bookstore -l app=catalog -o jsonpath='{.items[0].metadata.name}') \
-  -n bookstore 2>/dev/null | head -5 || \
-  echo "(istioctl optional; mTLS still enforced by ztunnel — verify in step below)"
 ```
 
-**Prove the identity is cryptographic, not label-based** — the gap
-[Part 05 ch.01](../05-security/01-authn-authz-rbac.md) named. A NetworkPolicy
-would let *any* Pod labelled `app: catalog` talk to postgres; with `STRICT`
-mTLS, a Pod with the right label but **no mesh identity** (one that bypasses
-ztunnel) is refused at the cryptographic layer. The Bookstore's
-catalog→postgres path keeps working because catalog has a real SPIFFE SVID;
-the label alone is no longer sufficient.
+Ambient keeps each workload's SVID in its node's ztunnel, not in the app Pod,
+so the app Pod has no certificate to inspect. Istio's ambient documentation
+describes how to read the certificates a ztunnel holds
+([Istio ambient](https://istio.io/latest/docs/ambient/)). That check is
+**cited, not captured** in this lab.
+
+**What STRICT buys (cited, not captured).** Under `STRICT`, a meshed workload
+accepts only mutual TLS, and the peer must present a SPIFFE identity. Istio
+documents the modes in its
+[PeerAuthentication reference](https://istio.io/latest/docs/reference/config/security/peer_authentication/).
+A NetworkPolicy allows an edge by label and does not encrypt it, so anyone who
+can observe the pod network reads the traffic on an allowed edge. With
+`STRICT`, a Pod outside the mesh cannot send that traffic in plaintext, and
+step 3b checks the caller's identity, not its label.
 
 ### 3. A mesh-layer canary on `catalog` — contrast the Part 07 ch.05 canary
 
@@ -345,9 +403,11 @@ The Bookstore already learned a canary in [Part 07 ch.05](../07-delivery/05-prog
 Services regardless of replica counts — 10% means 10% of *requests*, not "1
 Pod in 10". Deploy the **additive** v2 `catalog` Deployment + `catalog-canary`
 Service ([`mesh/05-catalog-v2-deploy.yaml`](../examples/bookstore/mesh/05-catalog-v2-deploy.yaml)
-— the canonical `10-catalog-deploy.yaml`/`40-services.yaml` are untouched),
-deploy a waypoint so `catalog` has an L7 enforcement point in ambient, then
-apply the GAMMA route:
+, and the canonical `10-catalog-deploy.yaml`/`40-services.yaml` are untouched). Its
+Pods carry `app: catalog-canary`, not `app: catalog`: the canonical `catalog`
+Service selects `app: catalog`, and a v2 Pod with that label would take stable
+traffic too. Then deploy a waypoint so `catalog` has an L7 enforcement point in
+ambient, and apply the GAMMA route:
 
 ```sh
 # Additive v2 backend for the demo. NOTE: `bookstore` enforces PSA
@@ -358,8 +418,9 @@ apply the GAMMA route:
 kubectl apply -f examples/bookstore/mesh/05-catalog-v2-deploy.yaml
 kubectl rollout status deployment/catalog-v2 -n bookstore
 
-# L7 in ambient needs a waypoint for `catalog` (restricted-compliant by
-# default — step 4 explains why that matters here). Ambient waypoint scoping
+# L7 in ambient needs a waypoint for `catalog`. It runs restricted only with
+# the seccomp setting from step 1, and step 4 shows the refusal without it.
+# Ambient waypoint scoping
 # is TWO parts: the waypoint Gateway carries `istio.io/waypoint-for: service`
 # (set in 30-), and the target Service opts in with `istio.io/use-waypoint`
 # (least blast radius: ONLY catalog is waypointed, not the whole namespace):
@@ -373,22 +434,16 @@ kubectl get httproute catalog-mesh-canary -n bookstore \
   -o jsonpath='{.status.parents[*].conditions[*].type}{"\n"}'   # Accepted/ResolvedRefs
 ```
 
-Drive in-mesh traffic and watch ~10% land on v2 — request-proportional, no
-Deployment scaled:
-
-```sh
-# An ephemeral, restricted-compliant in-mesh client (ns is PSA restricted;
-# never exec the distroless catalog Pod — Part 03 ch.02 discipline):
-for i in $(seq 1 50); do
-  kubectl run hit-$i -n bookstore --image=curlimages/curl:8.9.1 --restart=Never -i --rm \
-    --overrides='{"apiVersion":"v1","spec":{"securityContext":{"runAsNonRoot":true,"runAsUser":65532,"seccompProfile":{"type":"RuntimeDefault"}},"containers":[{"name":"c","image":"curlimages/curl:8.9.1","securityContext":{"allowPrivilegeEscalation":false,"capabilities":{"drop":["ALL"]},"readOnlyRootFilesystem":true},"command":["curl","-s","--max-time","3","http://catalog.bookstore.svc.cluster.local/healthz"]}]}}' \
-    >/dev/null 2>&1
-done
-# ~45 of 50 served by catalog (v1), ~5 by catalog-v2 — REQUEST-proportional.
-# Argo Rollouts (Part 07 ch.05) would instead change how many PODS are v2.
-# In production the weights are stepped progressively and gated on the catalog
-# SLO (raw-manifests/81-prometheusrule.yaml: CatalogHighErrorRate / P95).
-```
+**Where the split shows (cited, not captured).** A weighted route is
+request-proportional: 10% of requests go to `catalog-canary` whatever the
+replica counts, while an Argo Rollouts canary changes how many Pods are v2.
+Istio's standard metrics count requests per destination workload
+([Istio metrics reference](https://istio.io/latest/docs/reference/config/metrics/)),
+so watch those counts while you change the weights. The lab did not drive this
+traffic, so the split is not measured here. In production, step the weights
+gradually and gate each step on the catalog SLO
+(`raw-manifests/81-prometheusrule.yaml`: `CatalogHighErrorRate` and the P95
+alert).
 
 Use the Istio-native form
 ([`mesh/21-catalog-canary-virtualservice.yaml`](../examples/bookstore/mesh/21-catalog-canary-virtualservice.yaml))
@@ -397,6 +452,46 @@ rule as `50-ingress`/`51-gateway`) when you also want mesh-native **retries,
 timeouts, and outlier detection / circuit breaking** in one place; that file's
 `DestinationRule` carries exactly those L7 resilience knobs.
 
+### 3b. Default-deny authorization at the waypoint
+
+Strict mTLS says who the caller is. Authorization says what it may do, and its
+default must be deny. [`mesh/40-authz-default-deny.yaml`](../examples/bookstore/mesh/40-authz-default-deny.yaml)
+holds two `AuthorizationPolicy` objects, both attached to the waypoint through
+`targetRefs`. The first is an ALLOW policy with no rules, so it matches
+nothing. Istio's reference says an ALLOW policy with no rules denies every
+request to the workload, and that a workload with no ALLOW policy allows
+everything that is not denied
+([AuthorizationPolicy reference](https://istio.io/latest/docs/reference/config/security/authorization-policy/)).
+The second policy adds one allow:
+
+```yaml
+  rules:
+    - from:
+        - source:
+            principals: ["cluster.local/ns/bookstore/sa/storefront-sa"]
+      to:
+        - operation:
+            methods: ["GET"]
+            paths: ["/books"]
+```
+
+The principal is the caller's identity, written as its trust domain, namespace
+and ServiceAccount. It is only available under mTLS, which is why step 2
+comes first. A Pod labelled `app: storefront` that runs as another
+ServiceAccount matches no principal and is denied.
+
+```sh
+kubectl apply -f examples/bookstore/mesh/40-authz-default-deny.yaml
+kubectl get authorizationpolicy -n bookstore
+```
+
+**Cited, not captured.** The behaviour above is documented by Istio and was not
+run in the lab. Two things to check before you rely on the rule. First, the
+storefront calls `/api/books`, but the proxy location in
+`app/storefront/nginx.conf` is commented out, so enable it and confirm which
+ServiceAccount actually calls `catalog`. Second, a principal is an allow for one
+identity only: add one for each other caller and nothing else.
+
 ### 4. The sidecar-injection-vs-PSA-restricted footgun (the core lesson)
 
 This is the single most important operational point in the chapter, and the
@@ -404,43 +499,159 @@ reason the Bookstore uses ambient. [`mesh/10-sidecar-mode-podtemplate.yaml`](../
 is a teaching artifact — a Pod showing the restricted-compliant shape an
 **injected** istio-proxy sidecar *must* have:
 
-```sh
-# This Pod's "istio-proxy" container carries the FULL restricted
-# securityContext (runAsNonRoot, UID 1337, drop ALL, seccomp RuntimeDefault).
-# Because it is compliant, PSA ADMITS it into the restricted bookstore ns:
-kubectl apply -f examples/bookstore/mesh/10-sidecar-mode-podtemplate.yaml
-kubectl get pod mesh-sidecar-shape -n bookstore        # Running
+The mesh file [`mesh/10-sidecar-mode-podtemplate.yaml`](../examples/bookstore/mesh/10-sidecar-mode-podtemplate.yaml)
+shows the restricted shape of an injected proxy. Its `istio-proxy` container
+sets every field restricted asks for, including `seccompProfile`, and the Pod
+runs as a dedicated ServiceAccount with its token unmounted. The lab did not
+apply this file after its fixes. The refusals below turn on the same fields,
+and they are what a sidecar mesh does to a restricted namespace when one of
+those fields is missing.
 
-# Now break it the way a misconfigured sidecar mesh does — drop ONE
-# restricted field from the proxy container and PSA rejects the WHOLE Pod:
-kubectl delete pod mesh-sidecar-shape -n bookstore
-kubectl run psa-reject -n bookstore --image=registry.k8s.io/pause:3.9 \
-  --overrides='{"spec":{"containers":[{"name":"istio-proxy","image":"registry.k8s.io/pause:3.9","securityContext":{"allowPrivilegeEscalation":true}}]}}'
-# Error from server (Forbidden): pods "psa-reject" is forbidden: violates
-#   PodSecurity "restricted:latest": allowPrivilegeEscalation != false ...
-#   ↑ THIS is what a sidecar mesh whose injection template emits a
-#     non-compliant proxy does to EVERY Pod in a restricted namespace:
-#     the app never runs. "I enabled the mesh and my hardened namespace
-#     stopped scheduling" — a textbook incident.
+**Refusal 1: no seccomp profile.** The waypoint's container in the 1.30.7
+chart has `runAsNonRoot`, a non-root UID and `drop: ["ALL"]`, but no seccomp
+profile unless `gateways.seccompProfile` is set (step 1). This fragment is that
+container without the profile. It is the deliberate failure:
+
+```yaml
+    - name: istio-proxy
+      securityContext:
+        privileged: false
+        runAsNonRoot: true
+        runAsUser: 1337
+        runAsGroup: 1337
+        allowPrivilegeEscalation: false
+        readOnlyRootFilesystem: true
+        capabilities:
+          drop: ["ALL"]
 ```
 
-The fixes, in preference order (all in the file header): **(1) ambient** — no
-injected container, the footgun cannot arise (the Bookstore's choice; verified
-in step 2 — the catalog Pod has exactly one container); **(2) the Istio CNI
-plugin** — removes the privileged `istio-init` container so only the
-restricted-compliant `istio-proxy` remains, the supported way to run *sidecar*
-mode in a restricted namespace; **(3)** ensure the injection template emits
-the exact restricted `securityContext` and **verify it** — never assume. The
-waypoint Istio deploys *into* `bookstore` (step 3) is itself
-restricted-compliant by default for the same reason — confirm it:
+<!-- gate: output -->
+```
+$ kubectl apply -f pods/waypoint-no-seccomp.yaml
+Error from server (Forbidden): error when creating "pods/waypoint-no-seccomp.yaml": pods "waypoint-shape-no-seccomp" is forbidden: violates PodSecurity "restricted:latest": seccompProfile (pod or container "istio-proxy" must set securityContext.seccompProfile.type to "RuntimeDefault" or "Localhost")
+```
+
+The same Pod with `seccompProfile: {type: RuntimeDefault}` at pod level is
+admitted. Here it is in full, with the baseline, so you can apply it:
+
+```yaml
+apiVersion: v1
+kind: Pod
+metadata:
+  name: waypoint-shape-seccomp
+  namespace: bookstore
+  labels:
+    app: mesh-proxy-shape              # not `catalog`: the catalog Service would select it
+    app.kubernetes.io/part-of: bookstore
+spec:
+  serviceAccountName: catalog-sa
+  automountServiceAccountToken: false
+  securityContext:
+    seccompProfile:
+      type: RuntimeDefault
+  containers:
+    - name: istio-proxy
+      image: bookstore/catalog:dev
+      imagePullPolicy: IfNotPresent
+      securityContext:
+        privileged: false
+        runAsNonRoot: true
+        runAsUser: 1337
+        runAsGroup: 1337
+        allowPrivilegeEscalation: false
+        readOnlyRootFilesystem: true
+        capabilities:
+          drop: ["ALL"]
+      resources:
+        requests: { cpu: 10m, memory: 64Mi }
+        limits: { memory: 128Mi }
+      volumeMounts:
+        - name: tmp
+          mountPath: /tmp
+  volumes:
+    - name: tmp
+      emptyDir: {}
+```
+
+The lab applied the same shape from its own file, `pods/waypoint-seccomp.yaml`.
+That copy was labelled `app: catalog`, which the manifest above changes so the
+catalog Service does not select it. The admission and the value read back were
+captured:
+
+<!-- gate: output -->
+```
+$ kubectl apply -f pods/waypoint-seccomp.yaml
+pod/waypoint-shape-seccomp created
+
+$ kubectl get pod waypoint-shape-seccomp -n p11-04-mesh -o jsonpath='{.spec.securityContext.seccompProfile.type}'; echo
+RuntimeDefault
+```
+
+**Refusal 2: the classic `istio-init` container.** Sidecar injection without
+the CNI plugin adds an init container that programs iptables. It needs
+`NET_ADMIN` and `NET_RAW`, which restricted refuses. The fragment is that
+container, and the refusal is the lab's output:
+
+```yaml
+  initContainers:
+    - name: istio-init
+      securityContext:
+        runAsNonRoot: false
+        runAsUser: 0
+        capabilities:
+          add: ["NET_ADMIN", "NET_RAW"]
+```
+
+<!-- gate: output -->
+```
+$ kubectl apply -f pods/istio-init-shape.yaml
+Error from server (Forbidden): error when creating "pods/istio-init-shape.yaml": pods "istio-init-shape" is forbidden: violates PodSecurity "restricted:latest": allowPrivilegeEscalation != false (container "istio-init" must set securityContext.allowPrivilegeEscalation=false), unrestricted capabilities (container "istio-init" must set securityContext.capabilities.drop=["ALL"]; container "istio-init" must not include "NET_ADMIN", "NET_RAW" in securityContext.capabilities.add), runAsNonRoot != true (container "istio-init" must not set securityContext.runAsNonRoot=false), runAsUser=0 (container "istio-init" must not set runAsUser=0)
+```
+
+Either refusal rejects the **whole** Pod. The app container never starts. This
+is the textbook incident: the mesh is enabled, and the hardened namespace stops
+scheduling. The fixes differ by data plane.
+
+**(1) Ambient, the Bookstore's choice.** The app Pods get no injected
+container, so there is nothing to refuse. The node agents run in `istio-system`
+instead. The lab's dry-run of them against a `restricted` namespace shows what
+they need. The ztunnel warning, from a dry-run that created nothing:
+
+<!-- gate: output -->
+```
+$ kubectl apply --dry-run=server -f pods/ztunnel-ds.yaml
+Warning: would violate PodSecurity "restricted:latest": allowPrivilegeEscalation != false (container "istio-proxy" must set securityContext.allowPrivilegeEscalation=false), unrestricted capabilities (container "istio-proxy" must not include "NET_ADMIN", "NET_RAW", "SYS_ADMIN" in securityContext.capabilities.add), restricted volume types (volume "cni-ztunnel-sock-dir" uses restricted volume type "hostPath"), runAsNonRoot != true (container "istio-proxy" must not set securityContext.runAsNonRoot=false), runAsUser=0 (container "istio-proxy" must not set runAsUser=0), seccompProfile (pod or container "istio-proxy" must set securityContext.seccompProfile.type to "RuntimeDefault" or "Localhost")
+daemonset.apps/ztunnel created (server dry run)
+```
+
+The CNI node agent gives the same kind of warning, with `hostPath` volumes and
+`NET_ADMIN`, `NET_RAW`, `SYS_ADMIN`, `DAC_OVERRIDE` and `SYS_PTRACE` added. Both
+agents run as root, so the namespace that holds them must be `privileged`.
+That is the label step 1 sets on `istio-system`. Istio's
+[Pod Security page](https://istio.io/latest/docs/setup/additional-setup/pod-security-admission/)
+says the same: the CNI namespace must enforce `privileged`.
+
+**(2) Sidecar mode with the Istio CNI plugin.** The CNI agent replaces the
+`istio-init` container; Istio's
+[CNI page](https://istio.io/latest/docs/setup/additional-setup/cni/) calls it
+"effectively a replacement for the `istio-init` container". The injected proxy
+then needs no `NET_ADMIN` or `NET_RAW`. The agent itself still needs elevated
+privileges, so it stays in `istio-system`. The injected proxy also needs a seccomp profile: the
+sidecar injection template emits one only when `global.proxy.seccompProfile`
+is set, and its 1.30.7 default is empty. Set it to `RuntimeDefault` for sidecar
+mode.
+
+**(3) Verify the shape, do not assume it.** The waypoint is itself a
+restricted-compliant container only with the step 1 setting. Confirm it after
+apply, and keep a check in CI that meshed Pods still satisfy `restricted`
+([Part 05 ch.02](../05-security/02-pod-security.md), [ch.01](01-admission-webhooks.md)).
+The expected value is in the comment, and the lab did not capture it:
 
 ```sh
 kubectl get pod -n bookstore \
   -l gateway.networking.k8s.io/gateway-name=catalog-waypoint \
-  -o jsonpath='{.items[0].spec.containers[0].securityContext}'; echo
-#   → runAsNonRoot:true, drop:["ALL"], seccompProfile RuntimeDefault — a
-#     restricted-compliant Envoy. An injected component landing in `bookstore`
-#     MUST look like this or PSA refuses it.
+  -o jsonpath='{.items[0].spec.containers[0].securityContext.seccompProfile.type}{"\n"}'
+# expected, not captured in the lab: RuntimeDefault
 ```
 
 Clean up:
@@ -515,10 +726,25 @@ kind delete cluster --name bookstore
   non-root UID / `drop: ["ALL"]` / `seccompProfile: RuntimeDefault`, or an
   init container needing `NET_ADMIN`, makes PSA **reject the whole Pod** — the
   app never runs. Ambient sidesteps this by not injecting anything into app
-  Pods (the data path is the node ztunnel + an out-of-Pod waypoint, both
-  restricted-compliant); the Istio CNI plugin sidesteps the `istio-init` part
-  for sidecar mode. This is *the* reason data-plane model choice and PSA
-  interact, and why this guide meshes the restricted Bookstore with ambient.
+  Pods. Its node agents run in a privileged `istio-system`, and its waypoint
+  runs restricted once the seccomp setting from step 1 is applied. The Istio
+  CNI plugin sidesteps the `istio-init` part for sidecar mode. This is *the*
+  reason data-plane model choice and PSA interact, and why this guide meshes
+  the restricted Bookstore with ambient.
+- **Workload X.509 identity from Kubernetes is a separate API.** Pod
+  certificates (`PodCertificateRequest`) and ClusterTrustBundles are served as
+  `certificates.k8s.io/v1`. The 1.37 documentation marks both stable. The
+  PodCertificateRequests section says "Feature state: Stable since Kubernetes
+  v1.37; enabled by default", and the cluster trust bundle sections use the
+  same wording ([certificate signing requests](https://kubernetes.io/docs/reference/access-authn-authz/certificate-signing-requests/)).
+  The feature gate table lists PodCertificateRequest as alpha in 1.34, beta in
+  1.35 to 1.36, and stable in 1.37, and ClusterTrustBundle as alpha in 1.27,
+  beta in 1.33 to 1.36, and stable in 1.37
+  ([feature gates](https://kubernetes.io/docs/reference/command-line-tools-reference/feature-gates/)).
+  This chapter does not use them: the mesh's own CA issues the SVIDs. Workload
+  X.509 identity belongs to [Part 05 ch.01](../05-security/01-authn-authz-rbac.md),
+  and whether a given mesh can consume Pod certificates is a question for that
+  mesh's own documentation.
 
 ## Production notes
 
@@ -532,25 +758,6 @@ kind delete cluster --name bookstore
 > the **lowest-overhead model that meets the requirement** — ambient or
 > Linkerd over classic per-Pod sidecars unless you need per-workload Envoy.
 
-> **In production: roll mTLS out `PERMISSIVE` → verify 100% → `STRICT`, never
-> straight to `STRICT`.** A namespace-wide `STRICT` PeerAuthentication
-> instantly refuses any not-yet-meshed client — the exact analog of
-> [Part 05 ch.03](../05-security/03-supply-chain.md)'s Audit→Enforce and
-> [ch.01](01-admission-webhooks.md)'s webhook Ignore→Fail. Run `PERMISSIVE`,
-> confirm telemetry shows all traffic already mTLS, then flip. Keep
-> NetworkPolicy underneath: a mesh-policy mistake should still hit an L4
-> deny-by-default, not an open network.
-
-> **In production: in a PSA-`restricted` namespace, the injected data plane
-> must be restricted-compliant — verify it, don't assume.** A sidecar mesh
-> whose injection template emits a non-compliant proxy (or a privileged
-> `istio-init`) makes PSA reject **every** Pod in the namespace — a
-> self-inflicted, cluster-visible outage. Use **ambient** (no injection) or
-> the **Istio CNI plugin** (drops the privileged init container) for
-> restricted namespaces, pin the injection template, and add an admission/CI
-> check that meshed Pods still satisfy `restricted`
-> ([Part 05 ch.02](../05-security/02-pod-security.md), [ch.01](01-admission-webhooks.md)).
-
 > **In production: run the control plane HA and treat data-plane upgrades like
 > app rollouts.** istiod/Linkerd-controller with ≥2 replicas + a PDB
 > ([Part 06 ch.05](../06-production-readiness/05-reliability-and-disruptions.md));
@@ -560,47 +767,55 @@ kind delete cluster --name bookstore
 > installs (Istio revisions / Linkerd's staged upgrade) and roll the data
 > plane behind the control plane, canarying on the app SLOs.
 
-> **In production (managed — EKS/GKE/AKS):** managed mesh options exist —
-> **GKE** ships managed Anthos Service Mesh / managed Istio; **EKS**
-> integrates Istio/Linkerd/App Mesh-successors; cloud CNIs (Cilium with its
-> own mesh, AWS VPC CNI) interact with mesh redirection. The mesh **CRDs and
-> policies are portable**; the install/managed-control-plane and CNI
-> integration are provider-specific. Multi-cluster mesh (shared trust domain,
-> cross-cluster service discovery) is the natural next step —
-> [ch.06](06-multi-cluster-and-fleet.md) covers the fleet side.
+> **In production (managed control planes):** several providers offer a
+> managed mesh. The mesh **CRDs and policies in this chapter are the portable
+> part**; the install, the upgrade path and the interaction with the cluster's
+> CNI are provider-specific, so read the provider's documentation before you
+> adopt one. Multi-cluster mesh (shared trust domain, cross-cluster service
+> discovery) is the natural next step; [ch.06](06-multi-cluster-and-fleet.md)
+> covers the fleet side.
 
 ## Quick Reference
 
 ```sh
-# Install Istio AMBIENT (PINNED Helm charts — never releases/latest/download URL)
+# Install Istio AMBIENT (pinned charts, verified at 1.30.7; check the support
+# matrix for your Kubernetes version first). Never a releases/latest URL.
 helm repo add istio https://istio-release.storage.googleapis.com/charts && helm repo update
-helm install istio-base istio/base -n istio-system --create-namespace --version 1.24.2 --wait
-helm install istiod istio/istiod -n istio-system --version 1.24.2 --set profile=ambient --wait
-helm install istio-cni istio/cni -n istio-system --version 1.24.2 --set profile=ambient --wait
-helm install ztunnel istio/ztunnel -n istio-system --version 1.24.2 --wait
+kubectl create namespace istio-system
+kubectl label namespace istio-system pod-security.kubernetes.io/enforce=privileged pod-security.kubernetes.io/audit=privileged pod-security.kubernetes.io/warn=privileged
+helm install istio-base istio/base -n istio-system --version 1.30.7 --set defaultRevision=default --wait
+helm install istiod istio/istiod -n istio-system --version 1.30.7 --set profile=ambient --set gateways.seccompProfile.type=RuntimeDefault --wait
+helm install istio-cni istio/cni -n istio-system --version 1.30.7 --set profile=ambient --wait
+helm install ztunnel istio/ztunnel -n istio-system --version 1.30.7 --wait
 
 # Enroll a namespace (LABEL PATCH on the existing ns — never re-apply the ns object)
 kubectl label namespace bookstore istio.io/dataplane-mode=ambient
-kubectl get pod -n bookstore -l app=catalog -o jsonpath='{.items[0].spec.containers[*].name}'  # no proxy injected
+kubectl get pod -n bookstore -l app=catalog -o jsonpath='{.items[0].spec.containers[*].name}'  # catalog only: no proxy injected
 
-# mTLS + L7 routing (CRD-backed → dry-run shows "no matches" until Istio installed)
-kubectl apply -f examples/bookstore/mesh/10-peerauthentication-strict-mtls.yaml   # PERMISSIVE first in prod, verify, THEN STRICT (see Production notes)
-kubectl apply -f examples/bookstore/mesh/30-waypoint.yaml                          # L7 for catalog
-kubectl apply -f examples/bookstore/mesh/20-catalog-canary-httproute.yaml          # GAMMA canary
-kubectl get peerauthentication,httproute,gateway -n bookstore
-# AMBIENT: app Pods have NO Envoy sidecar — SVIDs live in ztunnel, so query
-# the ztunnel Pod (in istio-system), NOT the app Pod, for the SPIFFE SVID:
-istioctl proxy-config secret <ZTUNNEL-POD> -n istio-system   # <POD> = the ztunnel Pod, not the app Pod
+# Strict mTLS (after a PERMISSIVE window), the waypoint, default-deny authz, the canary
+kubectl apply -f examples/bookstore/mesh/10-peerauthentication-strict-mtls.yaml
+kubectl apply -f examples/bookstore/mesh/30-waypoint.yaml
+kubectl apply -f examples/bookstore/mesh/40-authz-default-deny.yaml
+kubectl apply -f examples/bookstore/mesh/20-catalog-canary-httproute.yaml
+kubectl get peerauthentication,authorizationpolicy,httproute,gateway -n bookstore
 ```
 
 Minimal skeletons (full files in `examples/bookstore/mesh/`):
 
 ```yaml
-# Strict mTLS, namespace-wide — roll out PERMISSIVE → STRICT
+# Strict mTLS, namespace-wide (PERMISSIVE only inside the migration window)
 apiVersion: security.istio.io/v1
 kind: PeerAuthentication
 metadata: { name: strict, namespace: <NS> }      # CRD — needs Istio installed
-spec: { mtls: { mode: STRICT } }                 # PERMISSIVE first in production
+spec: { mtls: { mode: STRICT } }
+---
+# Default deny at a waypoint: an ALLOW policy with no rules matches nothing
+apiVersion: security.istio.io/v1
+kind: AuthorizationPolicy
+metadata: { name: allow-nothing, namespace: <NS> }  # CRD: needs Istio installed
+spec:
+  targetRefs: [ { kind: Gateway, group: gateway.networking.k8s.io, name: <WAYPOINT> } ]
+  action: ALLOW
 ---
 # Mesh (east-west) canary — GAMMA: HTTPRoute parentRef = a SERVICE
 apiVersion: gateway.networking.k8s.io/v1
@@ -620,10 +835,18 @@ Checklist:
       telemetry** is a requirement — not by default; **when-NOT** considered
 - [ ] **Data-plane model** chosen deliberately: ambient/Linkerd over classic
       sidecar unless per-Pod Envoy is needed; **ambient for PSA-restricted ns**
-- [ ] System components in **`istio-system`/own ns**, never `bookstore`;
-      anything injected/deployed into `bookstore` is **restricted-compliant**
-- [ ] mTLS rolled **`PERMISSIVE` → verify 100% → `STRICT`**; NetworkPolicy
-      ([Part 02 ch.06](../02-networking/06-network-policies.md)) kept underneath
+- [ ] System components in **`istio-system`**, labelled `privileged` and
+      registered in `security/namespace-exceptions.yaml`; never `bookstore`.
+      Anything injected or deployed into `bookstore` is
+      **restricted-compliant**, with the waypoint's seccomp profile set
+- [ ] mTLS rolled **`PERMISSIVE` → verify → `STRICT`** (no PERMISSIVE left
+      behind); NetworkPolicy ([Part 02 ch.06](../02-networking/06-network-policies.md))
+      kept underneath
+- [ ] **Default-deny** `AuthorizationPolicy` at the waypoint, with principals
+      that name ServiceAccounts; who may create Pods is restricted
+      ([Part 05 ch.01](../05-security/01-authn-authz-rbac.md))
+- [ ] Chart pinned to a verified version, and the support matrix checked for
+      your Kubernetes version
 - [ ] Mesh **east-west** routing understood vs **Gateway API north-south**
       ([Part 02 ch.05](../02-networking/05-gateway-api.md)); GAMMA where portable
 - [ ] Mesh canary (request-ratio) vs Argo Rollouts canary (replica-ratio,
@@ -646,7 +869,7 @@ Checklist:
 2. **You install Istio with automatic sidecar injection enabled on the `bookstore` namespace, but the namespace has PSA-restricted set. Pods fail to start with "init container istio-init not allowed." What's happening and what are your options?**
    <details><summary>Show answer</summary>
 
-   The `istio-init` init container needs `NET_ADMIN` and `NET_RAW` capabilities to set up iptables for traffic redirection. PSA-restricted forbids these capabilities. Options: (a) switch to Istio CNI mode — the cluster-wide CNI plugin installs the iptables rules once per node so the init container is not needed; (b) switch to **Istio ambient mode** — no sidecar at all, ztunnel handles L4 mTLS at the node, optional waypoint Pods handle L7; (c) downgrade the namespace to `baseline` (acceptable for the mesh control plane's own namespace but not for tenant namespaces). Ambient is the cleanest answer because it removes the sidecar-vs-PSA tension entirely.
+   The `istio-init` init container needs `NET_ADMIN` and `NET_RAW` capabilities to set up iptables for traffic redirection. PSA-restricted forbids these capabilities. Options: (a) switch to Istio CNI mode: the cluster-wide CNI plugin installs the iptables rules once per node so the init container is not needed; (b) switch to **Istio ambient mode**: no sidecar at all, ztunnel handles L4 mTLS at the node, optional waypoint Pods handle L7; Downgrading the tenant namespace to `baseline` does not help, because baseline refuses `NET_ADMIN` as well. The only namespace that may run the node agents is a privileged control-plane namespace such as `istio-system`, never a tenant namespace. Ambient is the cleanest answer because it removes the sidecar-vs-PSA tension for the app Pods entirely.
 
    </details>
 
@@ -664,10 +887,10 @@ Checklist:
 
    </details>
 
-5. **Hands-on: enable Istio ambient on `bookstore`, then run `curl storefront → catalog` from inside a Pod and capture the traffic with `tcpdump`. What do you see on the wire vs an unmeshed cluster?**
-   <details><summary>What you should see</summary>
+5. **A teammate adds `labels: {app: storefront}` to a Pod in another namespace and expects the catalog waypoint to let it read `/books`. Using the authorization policy in step 3b, why does the request still fail, and what would have to change for a Pod to be allowed?**
+   <details><summary>Show answer</summary>
 
-   Unmeshed: plain HTTP from `storefront` Pod to `catalog` ClusterIP, no encryption. With ambient: traffic from the Pod is intercepted by the node's ztunnel, encrypted with HBONE (HTTP/2 CONNECT with mTLS), tunneled to the destination node's ztunnel, then delivered plaintext to the destination Pod. `tcpdump` on the source node shows TLS-wrapped HBONE; on either Pod's loopback, plain HTTP. The mTLS layer is invisible to app code — that's the entire point.
+   The policy names principals, which are SPIFFE identities derived from a ServiceAccount (`cluster.local/ns/bookstore/sa/storefront-sa`), not labels. A Pod that copies the label has a different ServiceAccount and therefore a different identity, and it is outside the `bookstore` namespace besides. The ALLOW policy with no rules denies it by default, and the single allow matches only the storefront principal. To allow the Pod, its identity would have to be added as a principal, which is a deliberate review decision. The control also depends on who may create Pods: anyone who can create Pods in a namespace can run one as any ServiceAccount there, so restrict Pod creation as well. Istio's [AuthorizationPolicy reference](https://istio.io/latest/docs/reference/config/security/authorization-policy/) describes the principal format and the default.
 
    </details>
 
@@ -687,3 +910,16 @@ Checklist:
   <https://linkerd.io/2/overview/>, the **SPIFFE** project
   <https://spiffe.io/docs/latest/spiffe-about/overview/>, and Gateway API for
   Mesh (GAMMA) <https://gateway-api.sigs.k8s.io/mesh/>.
+- The sources this chapter cites for its security claims: Istio's supported
+  releases <https://istio.io/latest/docs/releases/supported-releases/>, its
+  Pod Security admission page
+  <https://istio.io/latest/docs/setup/additional-setup/pod-security-admission/>,
+  its CNI page <https://istio.io/latest/docs/setup/additional-setup/cni/>,
+  the AuthorizationPolicy reference
+  <https://istio.io/latest/docs/reference/config/security/authorization-policy/>,
+  Kubernetes' Pod Security Standards
+  <https://kubernetes.io/docs/concepts/security/pod-security-standards/>, its
+  RBAC good practices
+  <https://kubernetes.io/docs/concepts/security/rbac-good-practices/>, and the
+  feature gates reference
+  <https://kubernetes.io/docs/reference/command-line-tools-reference/feature-gates/>.

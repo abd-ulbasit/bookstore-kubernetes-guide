@@ -1,0 +1,81 @@
+# Bookstore, Part 11 ch.04 "Service mesh": default-deny authorization at L7
+# for the `catalog` waypoint (30-waypoint.yaml).
+#
+# HOW THE TWO POLICIES COMBINE
+#   Istio evaluates DENY first, then ALLOW. If a workload has at least one
+#   ALLOW policy, a request that matches none of them is denied. The first
+#   policy below is that ALLOW policy with no rules: it matches nothing, so
+#   it denies every request to the waypoint by default. The second one adds
+#   a single allow: GET /books from the storefront ServiceAccount's SPIFFE
+#   identity. Anything else, including a request from a Pod that carries the
+#   label `app: storefront`, is denied.
+#
+# WHY A LABEL IS NOT ENOUGH (threat S6)
+#   The principal is the cryptographic identity of the caller, derived from
+#   its ServiceAccount (`cluster.local/ns/<NS>/sa/<SA>`), and it requires
+#   mutual TLS (10-peerauthentication-strict-mtls.yaml). A Pod that copies a
+#   label gets no identity from it. The control still depends on who may run
+#   a Pod as storefront-sa: Kubernetes lets anyone who can create Pods in the
+#   namespace use any ServiceAccount there, so restrict Pod creation (Part 05
+#   ch.01) as well.
+#
+# THE CALLER IS A DESIGN CHOICE TO CHECK
+#   storefront-sa is the caller this design assumes: the storefront page calls
+#   /api/books, and its proxy is meant to send that to catalog. The proxy
+#   location in app/storefront/nginx.conf is commented out, so enable it and
+#   confirm the calling Pod's ServiceAccount before you rely on this rule. Add
+#   a principal for each other caller, and nothing else.
+#
+# Only the waypoint enforces these rules, and only for traffic that the
+# `catalog` Service sends through it (30-waypoint.yaml, step 3). Calls that
+# bypass the waypoint are not checked here, which is why the Service label
+# in step 3 matters.
+#
+# !!! CRD-INTRINSIC DRY-RUN !!!
+#   `AuthorizationPolicy` is `security.istio.io/v1`, an Istio CRD. Without
+#   Istio installed a client dry-run prints
+#     no matches for kind "AuthorizationPolicy" in version "security.istio.io/v1"
+#   which is expected: install Istio first (the chapter's step 1).
+#
+# Apply (after 10-peerauthentication and 30-waypoint):
+#   kubectl apply -f examples/bookstore/mesh/40-authz-default-deny.yaml
+#   kubectl get authorizationpolicy -n bookstore
+apiVersion: security.istio.io/v1
+kind: AuthorizationPolicy
+metadata:
+  name: catalog-allow-nothing
+  namespace: bookstore
+  labels:
+    app: catalog
+    app.kubernetes.io/part-of: bookstore
+spec:
+  # Attached to the waypoint, not to the Pods: a waypoint is the only place
+  # Istio enforces L7 authorization. The `selector` form would be ignored here.
+  targetRefs:
+    - kind: Gateway
+      group: gateway.networking.k8s.io
+      name: catalog-waypoint
+  action: ALLOW
+---
+apiVersion: security.istio.io/v1
+kind: AuthorizationPolicy
+metadata:
+  name: catalog-allow-storefront-get-books
+  namespace: bookstore
+  labels:
+    app: catalog
+    app.kubernetes.io/part-of: bookstore
+spec:
+  targetRefs:
+    - kind: Gateway
+      group: gateway.networking.k8s.io
+      name: catalog-waypoint
+  action: ALLOW
+  rules:
+    - from:
+        - source:
+            principals: ["cluster.local/ns/bookstore/sa/storefront-sa"]
+      to:
+        - operation:
+            methods: ["GET"]
+            paths: ["/books"]

@@ -88,6 +88,7 @@ guide yet). Part 00 ch.08 names the enforcer of each baseline field.
 | S1 | A Pod calls the API as another identity | Its own ServiceAccount, with `automountServiceAccountToken: false` | review | 01.01, `#baseline-service-account` |
 | S2 | A stolen kubeconfig acts as an operator | Authentication at the API server, RBAC, short-lived credentials | cluster | 05.01 |
 | S3 | A Pod impersonates another Pod on the network | Default-deny NetworkPolicy, then explicit allows | cluster | 02.06 |
+| S6 | A Pod copies a label such as `app: storefront` and is trusted as that workload | Mesh authorization by SPIFFE identity from its ServiceAccount, with default-deny at the waypoint | later | 11.04 (`40-authz-default-deny.yaml`); workload X.509 identity 05.01 |
 
 ### Tampering
 
@@ -112,6 +113,7 @@ guide yet). Part 00 ch.08 names the enforcer of each baseline field.
 | I2 | A broad RBAC grant reads Secrets | One ServiceAccount and one narrow Role per workload | cluster | 05.01 |
 | I3 | A caller reads Pod specs or runs commands through the kubelet | Anonymous kubelet auth off, webhook authorization | cluster | 05.06 <!-- link-later: 05.06 --> |
 | I4 | Application code reads a mounted ServiceAccount token | `automountServiceAccountToken: false` | review | 01.01, `#baseline-service-account` |
+| I5 | A Pod on the network reads the traffic of an edge that policy allows | Strict mTLS between meshed workloads, so plaintext never crosses the pod network | later | 11.04 (`10-peerauthentication-strict-mtls.yaml`); NetworkPolicy 02.06 still applies underneath |
 
 ### Denial of service
 
