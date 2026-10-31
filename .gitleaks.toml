@@ -30,9 +30,12 @@
 useDefault = true
 
 [[allowlists]]
-description = """Part 03 ch.02 decodes the DEMO-ONLY db-credentials Secret on \
-screen to prove base64 is not encryption. The value shown is the demo \
-password, base64-encoded, in a shell comment."""
+description = """Part 03 ch.02 at commit 2c7d81c0 printed the base64 of the \
+DEMO-ONLY db-credentials password in a shell comment, to show that base64 \
+is not encryption. The current chapter prints no such line; it decodes only \
+non-secret keys and counts the generated value. This entry keeps full-history \
+scans clean for that old line. It can be DELETED only when no ref contains \
+2c7d81c0 (or a rebased copy of it)."""
 targetRules = ["generic-api-key"]
 condition = "AND"
 paths = ['''^full-guide/03-config-and-storage/02-secrets\.md$''']
