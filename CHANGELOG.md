@@ -23,6 +23,21 @@ versions follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   and 17, outlines whose labs wait, are report only
   (`.github/security-gates-report-only.txt`), and
   `.github/security-gates-enforced.txt` lists what the gates must have read.
+  for every workload. Chapter failures are report mode except the chapters
+  in `.github/security-gates-enforced.txt`.
+- `lab-on-runner.yml`: runs the three labs that did not fit the small lab host
+  on a GitHub Actions runner, on a kind v0.33.0 cluster. 06.01 installs
+  kube-prometheus-stack for real (Prometheus's targets, a Grafana login refused
+  without credentials). 06.04 drives the catalog HPA with the 06.06 load Job to
+  `maxReplicas` and back. 09.01 composes metrics-server, Traefik,
+  kube-prometheus-stack, Argo CD, Argo Rollouts, KEDA, Kyverno and the Velero
+  controller under the Bookstore prod overlay. The transcripts carry the run
+  URL, and the chapters replace their not-run labels with the captured output.
+  The runs found three things the lab host could not: a curl Pod on a GitHub runner
+  cannot resolve cluster names until the VM's DNS search domain is dropped from
+  the kind nodes, the KEDA operator is refused by the Bookstore's default-deny
+  policy, and the Kustomize base and Helm HPA still list a Pods metric that
+  nothing serves.
 - `bookstore-release.yml`: dispatch one service through the reusable
   pipeline with publish on (signing, provenance, SBOM attestation) and open a
   promotion PR. Default branch only.

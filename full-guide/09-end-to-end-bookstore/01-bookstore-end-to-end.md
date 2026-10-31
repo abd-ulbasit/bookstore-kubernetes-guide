@@ -117,6 +117,7 @@ and the chapter that owns the topic.
 | A demo override left live becomes the state | The kind-only image override is reverted in the working tree, and the prod render drops the demo Secret (d). A running cluster keeps the kind images until the next sync | [07.04](../07-delivery/04-gitops-argocd.md) |
 | A Pod outside the edge reaches the data tier | A bookstore Pod with no allow rule is refused on its way to Postgres (e) | [02.06](../02-networking/06-network-policies.md) |
 | An image other than the signed digest reaches prod | Check that the release workflow signed the pinned catalog digest before the apply (d). Admission-time enforcement is in [05.03](../05-security/03-supply-chain.md) and [05.07](../05-security/07-admission-control-and-policy-as-code.md) | [07.03](../07-delivery/03-cicd-pipeline.md) |
+| A controller in one namespace cannot reach what it scales, and only the custom resource's status says so | Read the status of every custom resource after the apply, not only the Pods (g) | [06.04](../06-production-readiness/04-autoscaling.md) |
 | An exception reused by another namespace | One registry entry per namespace, with a reason and an expiry (c) | [00.08](../00-foundations/08-security-foundations.md) |
 | A restore returns objects without their data | Check the rows after a restore, not the Pod status (j) | [08.02](../08-day-2-operations/02-backup-and-dr.md) |
 
@@ -251,16 +252,24 @@ balancer and no managed etcd ([Part 00
 ch.07](../00-foundations/07-local-cluster-setup.md)). Everything else is real
 Kubernetes.
 
-**The captured run.** The outputs marked as captured came from a lab cluster
-with a different name and one node. Its namespaces carried a lab prefix, which
-the commands here do not print, and the transcript header records that
-substitution. Each step that needs more than one worker, a metrics pipeline or
-an object store is labelled **cited, not run**, and so is any step the lab did
-not execute.
+**The captured run.** Two recordings back the outputs marked as captured, and
+the transcript's header describes both. The first came from a lab cluster with
+a different name and one node. Its namespaces carried a lab prefix, which the
+commands here do not print. The second ran the chapter on a GitHub Actions
+runner, on a kind cluster of one control plane and three workers built from the
+config in (a), with the chapter's own names. It installed Traefik,
+kube-prometheus-stack, Argo CD, Argo Rollouts, KEDA, Kyverno and the Velero
+controller, applied the prod overlay with the prefix strip, and ran the checks
+in (e) to (h), (j) and (k). It added two things the chapter does not list. A
+metrics-server comes first, because the HPA in (g) needs a resource metrics API.
+A lab-only NetworkPolicy appears in (g), where the default-deny policy
+refuses the KEDA operator. What neither recording executed is labelled **cited,
+not run**: the GitOps form with a Git remote, the canary release, the backup
+and the restore, and the node drain.
 
 ### (a) Cluster: a multi-node kind cluster
 
-**Cited, not run.** The lab cluster already existed. Steps (b) to (f) and (h)
+The runner built this cluster from the config below. Steps (b) to (f) and (h)
 to (l) need only one node. The scheduling spread in [Part 04
 ch.02](../04-scheduling/02-affinity-taints-topology.md) and the PDB-respecting
 drains in [Part 06
@@ -311,6 +320,17 @@ kind create cluster --name bookstore --config kind-capstone.yaml
 kubectl get nodes -L topology.kubernetes.io/zone,dedicated   # 1 cp + 3 workers
 ```
 
+The runner's answer shows the zone labels and the dedicated database node:
+
+<!-- gate: output -->
+```
+NAME                      STATUS   ROLES           AGE   VERSION   ZONE     DEDICATED
+bookstore-control-plane   Ready    control-plane   48s   v1.37.0            
+bookstore-worker          Ready    <none>          33s   v1.37.0   zone-a   
+bookstore-worker2         Ready    <none>          33s   v1.37.0   zone-b   
+bookstore-worker3         Ready    <none>          33s   v1.37.0   zone-b   database
+```
+
 > Single-node fallback: `kind create cluster --name bookstore` is enough for
 > steps (b) to (f) and (h) to (l). The spread and drain checks in (g) need the
 > multi-node config above, so the full run uses it.
@@ -320,9 +340,6 @@ kubectl get nodes -L topology.kubernetes.io/zone,dedicated   # 1 cp + 3 workers
 > ch.07](../00-foundations/07-local-cluster-setup.md).
 
 ### (b) Images: build and load the four services
-
-**Cited, not run.** The lab cluster already held these four images, so the build
-and load were not repeated.
 
 The Bookstore images are local (`bookstore/<SVC>:dev`); a kind node cannot
 pull them from a registry, so they must be **loaded** into the node
@@ -340,6 +357,17 @@ for s in catalog orders payments-worker storefront; do
   kind load docker-image bookstore/$s:dev --name bookstore
 done
 docker exec bookstore-control-plane crictl images | grep bookstore  # loaded
+```
+
+The runner built the four images with the loop above and loaded each into all
+four nodes. The node's runtime lists them:
+
+<!-- gate: output -->
+```
+docker.io/bookstore/catalog                     dev                  3bbc0a7f71799       6.86MB
+docker.io/bookstore/orders                      dev                  8765b75e0b764       6.39MB
+docker.io/bookstore/payments-worker             dev                  b2f981aace238       5.2MB
+docker.io/bookstore/storefront                  dev                  c0e79edabca3c       26.1MB
 ```
 
 Three of the images are Go binaries on `gcr.io/distroless/static:nonroot`,
@@ -429,14 +457,21 @@ namespace of its own, `node-exporter`, through the chart's
 `prometheus-node-exporter.namespaceOverride`. That namespace takes the
 `privileged` level, with `audit` and `warn` at `restricted`, and the registry
 entry is 06.01's. The rest of the stack runs in `monitoring`, labelled
-`restricted`. **Cited, not run:** the same install in 06.01 did not finish
-on the shared lab cluster. Use the pinned chart from 06.01 with `--version
-"$KPS_CHART_VERSION"`.
+`restricted`. Install the pinned chart from 06.01 with `--version
+"$KPS_CHART_VERSION"` and the values file that chapter gives. On the runner it
+finished with `--wait`, and every Pod in `monitoring` and `node-exporter` was
+ready. [06.01](../06-production-readiness/01-observability-metrics.md) shows
+the install, the targets and the Grafana login in detail.
 
 **3) Argo CD and Argo Rollouts, delivery.** Label both namespaces
 `restricted`, then install from the pinned charts in
 [07.04](../07-delivery/04-gitops-argocd.md) and
-[07.05](../07-delivery/05-progressive-delivery.md). **Cited, not run.**
+[07.05](../07-delivery/05-progressive-delivery.md). Both ran on the runner.
+Argo CD's chart pulls its Redis image from ECR Public by default, and the
+first run there was refused with `toomanyrequests: Data limit exceeded`, so
+that Pod never started. The install that worked sets one chart value,
+`--set redis.image.repository=docker.io/library/redis`, which pulls the same
+tag from Docker Hub. Nothing else in the values changed.
 
 ```sh
 kubectl create namespace argocd
@@ -449,17 +484,19 @@ kubectl label namespace argo-rollouts pod-security.kubernetes.io/enforce=restric
 
 **4) KEDA, event-driven scaling.** Label `keda` `restricted`, then install
 with `--version "$KEDA_CHART_VERSION"` as
-[06.04](../06-production-readiness/04-autoscaling.md) does. **Cited, not
-run.**
+[06.04](../06-production-readiness/04-autoscaling.md) does. It ran on the
+runner, and (g) shows its scaler at work.
 
 **5) Kyverno, policy.** Label `kyverno` `restricted`, then install with
 `--version "$KYVERNO_CHART_VERSION"`. The policy set and its Audit report belong
 to
-[05.07](../05-security/07-admission-control-and-policy-as-code.md).
-**Cited, not run.** The chart version is
-checked against its repository with `helm show chart`, which was run below.
-The install is not run. Kyverno's upstream documentation is at
-<https://kyverno.io/docs/>, and this chart ships Kyverno v1.19.2.
+[05.07](../05-security/07-admission-control-and-policy-as-code.md). The runner installed it with one replica
+of each of its four controllers (`--set admissionController.replicas=1` and the
+same for the background, cleanup and reports controllers), so it is not a high
+availability install. Step (h) applies the Audit policy and reads the report.
+Kyverno's upstream documentation is at <https://kyverno.io/docs/>, and this
+chart ships Kyverno v1.19.2. The chart version is checked against its
+repository with `helm show chart`:
 
 ```sh
 helm repo add kyverno https://kyverno.github.io/kyverno/
@@ -477,8 +514,10 @@ version: 3.9.2
 **6) Velero, backup.** Install from
 [08.02](../08-day-2-operations/02-backup-and-dr.md), which owns the
 CSI-snapshot path in a `restricted` namespace and the one registered
-node-agent exception. It needs a bucket, and the lab has none, so it is
-**cited, not run**.
+node-agent exception. It needs a bucket, and the runner has none. The chart's
+controller ran against a placeholder store, as in 08.02, so it reports its
+storage location `Unavailable`, which is the honest state. The backup and the
+restore in (j) are **cited, not run**.
 
 Each install registers its CRDs: Traefik registers the Middleware the rewrite
 uses, and the other charts register theirs. Before an install, a client dry run
@@ -486,6 +525,56 @@ of a manifest that uses one of those kinds prints `no matches for kind`, which
 is expected. After the install
 the same manifests validate. This walkthrough installs the operators first, so
 every later step applies cleanly.
+
+All eight releases were `deployed` on the runner: metrics-server and the seven
+components above. The Pods by namespace, before the Bookstore went on:
+
+```sh
+helm list -A
+kubectl get pods -A --no-headers | awk '{print $1}' | sort | uniq -c
+```
+
+<!-- gate: output -->
+```
+NAME                    NAMESPACE       REVISION    UPDATED                                 STATUS      CHART                           APP VERSION
+argo-rollouts           argo-rollouts   1           2026-10-31 17:20:36.617988292 +0000 UTC deployed    argo-rollouts-2.43.8            v1.10.1    
+argocd                  argocd          1           2026-10-31 17:19:56.700990813 +0000 UTC deployed    argo-cd-10.11.6                 v3.5.6     
+keda                    keda            1           2026-10-31 17:20:42.523205294 +0000 UTC deployed    keda-2.21.0                     2.21.0     
+kube-prometheus-stack   monitoring      1           2026-10-31 17:19:09.14536668 +0000 UTC  deployed    kube-prometheus-stack-92.16.1   v0.94.2    
+kyverno                 kyverno         1           2026-10-31 17:21:20.748827911 +0000 UTC deployed    kyverno-3.9.2                   v1.19.2    
+metrics-server          metrics-server  1           2026-10-31 17:18:10.41836468 +0000 UTC  deployed    metrics-server-3.14.0           0.9.0      
+traefik                 traefik         1           2026-10-31 17:18:50.144902616 +0000 UTC deployed    traefik-42.2.0                  v3.7.16    
+velero                  velero          1           2026-10-31 17:21:52.78445134 +0000 UTC  deployed    velero-12.2.2                   1.18.2     
+```
+
+<!-- gate: output -->
+```
+      2 argo-rollouts
+      4 argocd
+      3 keda
+     14 kube-system
+      4 kyverno
+      1 local-path-storage
+      1 metrics-server
+      5 monitoring
+      4 node-exporter
+      1 traefik
+      1 velero
+```
+
+The platform alone used 4852 MiB of the runner's 15983 MiB (the `used`
+column), more than the roughly 3 GiB the small lab host had to spare:
+
+```sh
+free -m
+```
+
+<!-- gate: output -->
+```
+               total        used        free      shared  buff/cache   available
+Mem:           15983        4852         247          91       11318       11130
+Swap:           3071           0        3071
+```
 
 ### (d) Deliver the prod overlay: GitOps, or the direct path
 
@@ -543,7 +632,17 @@ the `traefik-rewrite` component ([02.04](../02-networking/04-ingress.md),
 step 6). Add `../../components/traefik-rewrite` under `components:` in
 `examples/bookstore/kustomize/overlays/prod/kustomization.yaml`. With the
 component, the prod render has 49 objects: the 48 of the plain overlay plus the
-Middleware.
+Middleware. The runner counted them after making the two edits to its copy of
+the tree:
+
+```sh
+kubectl kustomize examples/bookstore/kustomize/overlays/prod | grep -c '^kind:'
+```
+
+<!-- gate: output -->
+```
+49
+```
 
 **kind only: the image override.** The prod overlay pins catalog and orders by
 digest from `ghcr.io`, and storefront and payments-worker by tag from
@@ -559,9 +658,11 @@ the block.
 Secret in `16-db-credentials.yaml`, because prod receives `db-credentials` from
 External Secrets, Sealed Secrets or Vault
 ([Part 05 ch.04](../05-security/04-secrets-and-cluster-hardening.md)). kind has
-none of those, so this run creates the Secret by hand with a generated password
-and the same three keys the demo file carries. Nothing is committed, and this
-chapter never applies the demo file, which holds a fixed password. `kubectl
+none of those, so this run creates the Secret by hand with generated passwords
+and the six keys the demo file carries: the Postgres user, password and
+database, the broker's default user and password, and the `AMQP_URL` that
+orders and payments-worker read. Nothing is committed, and this chapter never
+applies the demo file, which holds fixed passwords. `kubectl
 apply -k` does not prune, so the hand-made Secret stays when the overlay
 renders without it.
 
@@ -629,10 +730,15 @@ kubectl apply -f examples/bookstore/raw-manifests/00-namespace.yaml
 kubectl apply -f examples/bookstore/raw-manifests/05-serviceaccounts-rbac.yaml
 kubectl apply -f examples/bookstore/raw-manifests/15-catalog-config.yaml
 # kind only: db-credentials, generated here and never committed
+DB="$(openssl rand -hex 16)"; MQ="$(openssl rand -hex 16)"
 kubectl -n bookstore create secret generic db-credentials \
   --from-literal=POSTGRES_USER=bookstore \
-  --from-literal=POSTGRES_PASSWORD="$(openssl rand -hex 16)" \
-  --from-literal=POSTGRES_DB=bookstore
+  --from-literal=POSTGRES_PASSWORD="$DB" \
+  --from-literal=POSTGRES_DB=bookstore \
+  --from-literal=RABBITMQ_DEFAULT_USER=bookstore \
+  --from-literal=RABBITMQ_DEFAULT_PASS="$MQ" \
+  --from-literal=AMQP_URL="amqp://bookstore:${MQ}@rabbitmq:5672/"
+unset DB MQ
 kubectl apply -f examples/bookstore/raw-manifests/35-priorityclasses.yaml
 
 # A self-signed certificate stands in for the one cert-manager issues in prod
@@ -704,8 +810,38 @@ curl -sk -o /dev/null -w '%{http_code}\n' \
   -H 'Host: bookstore.example.com' https://localhost/api/books
 ```
 
-The lab node has no port mapping, so the captured check ran from a client Pod
-in its own restricted namespace, which calls the Traefik Service:
+The runner's cluster has the port mapping from (a), so the check ran from the
+runner itself, once for the status and once for the body:
+
+```sh
+curl -sk -H 'Host: bookstore.example.com' https://localhost/api/books
+```
+
+<!-- gate: output -->
+```
+200
+```
+
+<!-- gate: output -->
+```
+[]
+```
+
+The Middleware that does the prefix strip is the object the render added. Its
+regular expression is the one 02.04 explains:
+
+```sh
+kubectl -n bookstore get middleware.traefik.io rewrite-api-prefix -o jsonpath='{.spec.replacePathRegex}{"\n"}'
+```
+
+<!-- gate: output -->
+```
+{"regex":"^/api/(books|orders)(.*)","replacement":"/$1$2"}
+```
+
+The first recording's node had no port mapping, so it ran the same check from
+a client Pod in its own restricted namespace, which calls the Traefik Service.
+The runner ran that too:
 
 ```sh
 kubectl create namespace client
@@ -783,6 +919,45 @@ rewrite Middleware turns `/api/books` into `/books`, and the NetworkPolicy
 port 8080. The empty list is correct: the migration created the schema and
 loaded no books.
 
+**The edge does not deliver `/metrics`.**
+[06.01](../06-production-readiness/01-observability-metrics.md) reads from the
+manifests that no public rule can reach catalog's `/metrics`. With Traefik and
+the rewrite running, the claim can be measured. The first request goes to the
+public root, which only the `/` path matches, so storefront answers it. The
+other two go through the rewrite and land on routes catalog and orders do not
+have:
+
+```sh
+for p in /metrics /api/books/metrics /api/orders/metrics; do
+  curl -sk -o /dev/null -w "%{http_code} $p\n" -H 'Host: bookstore.example.com' "https://localhost$p"
+done
+```
+
+<!-- gate: output -->
+```
+200 /metrics
+404 /api/books/metrics
+404 /api/orders/metrics
+```
+
+The 200 on `/metrics` is storefront's page, not catalog's. Catalog's endpoint
+starts its body with Go runtime series, so a body without one is not catalog's.
+Counting the `go_info` lines in each body makes that check:
+
+```sh
+for p in /metrics /api/books/metrics; do
+  printf '%s go_info lines: ' "$p"
+  curl -sk -H 'Host: bookstore.example.com' "https://localhost$p" | grep -c '^go_info'
+done
+```
+
+<!-- gate: output -->
+```
+/metrics go_info lines: 0
+/api/books/metrics go_info lines: 0
+```
+
+
 **The refusal.** The data tier admits only the tiers that use it. A Pod in the
 bookstore namespace that matches no allow rule has no path to Postgres. DNS
 still resolves, because `allow-dns-egress` admits it, so the Pod fails at the
@@ -849,14 +1024,48 @@ kindnet enforced it, which this timeout shows.
 [02.06](../02-networking/06-network-policies.md) covers how to check the CNI
 on your own cluster.
 
-### (f) Verify observability (cited, not run)
+### (f) Verify observability
 
-The lab did not install kube-prometheus-stack (see (c)), so these checks are
-cited to [06.01](../06-production-readiness/01-observability-metrics.md).
 Prometheus discovers catalog through the ServiceMonitor, which the Operator
-turns into scrape configuration. The PrometheusRule arms the alert. The RED
-signals come from the PromQL below, which is the series catalog's Go binary
-exports:
+turns into scrape configuration. The PrometheusRule arms the alert. The runner
+applied both files from the raw manifests, sent 300 requests through the edge,
+and asked Prometheus what it had scraped. The targets are the four catalog
+Pods and payments-worker's metrics Service, all up behind the default-deny
+policy:
+
+```sh
+kubectl apply -f examples/bookstore/raw-manifests/80-servicemonitor.yaml
+kubectl apply -f examples/bookstore/raw-manifests/81-prometheusrule.yaml
+kubectl -n monitoring port-forward svc/kube-prometheus-stack-prometheus 9090:9090 &
+curl -s 'localhost:9090/api/v1/targets?state=active' \
+  | jq -r '.data.activeTargets[] | select(.labels.namespace=="bookstore") | [.labels.job, .labels.namespace, .health] | @tsv' | sort
+```
+
+<!-- gate: output -->
+```
+catalog bookstore   up
+catalog bookstore   up
+catalog bookstore   up
+catalog bookstore   up
+payments-worker bookstore   up
+```
+
+The three rules loaded, and none is firing:
+
+```sh
+curl -s 'localhost:9090/api/v1/rules' \
+  | jq -r '.data.groups[] | select(.name=="bookstore-catalog.rules") | .rules[] | [.name, .state, .health] | @tsv'
+```
+
+<!-- gate: output -->
+```
+CatalogHighErrorRate    inactive    ok
+CatalogHighLatencyP95   inactive    ok
+CatalogAbsent   inactive    ok
+```
+
+The RED signals come from the PromQL below, which is the series catalog's Go
+binary exports:
 
 ```text
 request rate : sum(rate(http_requests_total{namespace="bookstore"}[5m]))
@@ -866,24 +1075,180 @@ p95 latency  : histogram_quantile(0.95, sum by (le)
                  (rate(http_request_duration_seconds_bucket{handler="books"}[5m])))
 ```
 
-### (g) Verify scaling and reliability (cited, not run)
+Each query answers through the API. The lines below print the status, the
+number of series and, for the rate, whether the value is above zero. The rate
+query returned one series with a positive value:
+
+```sh
+curl -s localhost:9090/api/v1/query --data-urlencode 'query=sum(rate(http_requests_total{namespace="bookstore"}[5m]))' \
+  | jq -r '.status, (.data.result | length), (.data.result[0].value[1] | tonumber > 0)'
+```
+
+<!-- gate: output -->
+```
+success
+1
+true
+```
+
+The p95 query printed the same three lines. The error-ratio query printed its
+status and a series count of 1, so the counters hold some 5xx responses. The
+value is not shown here, and the rules above, which leave the metrics handler
+out, were not firing:
+
+<!-- gate: output -->
+```
+success
+1
+```
+
+
+### (g) Verify scaling and reliability
 
 Three mechanisms, each owned by its chapter: the HPA scales catalog on CPU
 ([06.04](../06-production-readiness/04-autoscaling.md)), KEDA scales
 payments-worker on queue depth (06.04), and a PodDisruptionBudget keeps
 catalog available through a node drain
 ([06.05](../06-production-readiness/05-reliability-and-disruptions.md)). The
-prod overlay sets the HPA to 4 to 12 replicas. A drain needs at least two
-worker nodes, and the lab has one, so none of these ran here.
+prod overlay sets the HPA to 4 to 12 replicas. The runner checked the first
+two and read the third's objects. It did not drain a node, so the drain stays
+**cited, not run** here.
+
+**The HPA reads CPU through metrics-server, and one metric it cannot read.**
+The `TARGETS` column has two entries. The CPU metric is read. The second is
+the Pods metric `http_requests_per_second`, which only an adapter serving
+`custom.metrics.k8s.io` can answer, and the composed cluster has none:
+
+```sh
+kubectl get hpa catalog -n bookstore
+kubectl get pdb -n bookstore
+kubectl describe hpa catalog -n bookstore | sed -n '/^Conditions:/,/^Events:/p'
+```
+
+<!-- gate: output -->
+```
+NAME      REFERENCE            TARGETS                     MINPODS   MAXPODS   REPLICAS   AGE
+catalog   Deployment/catalog   cpu: 1%/70%, <unknown>/50   4         12        4          2m30s
+```
+
+<!-- gate: output -->
+```
+NAME         MIN AVAILABLE   MAX UNAVAILABLE   ALLOWED DISRUPTIONS   AGE
+catalog      2               N/A               2                     2m31s
+orders       1               N/A               2                     2m31s
+storefront   1               N/A               2                     2m31s
+```
+
+<!-- gate: output -->
+```
+Conditions:
+  Type           Status  Reason               Message
+  ----           ------  ------               -------
+  AbleToScale    True    SucceededGetScale    the HPA controller was able to get the target's current scale
+  ScalingActive  False   FailedGetPodsMetric  the HPA was unable to compute the replica count: unable to get metric http_requests_per_second: unable to fetch metrics from custom metrics API: no custom metrics API (custom.metrics.k8s.io) registered
+Events:
+```
+
+This is a finding of the composed run.
+[06.04](../06-production-readiness/04-autoscaling.md) explains why the applied
+raw `82-hpa-catalog.yaml` has no requests-per-second metric: the HPA skips a
+scale-down while a metric cannot be fetched, so a dead metric blocks scale-in.
+The Kustomize base and the Helm template still list that Pods metric, and the
+prod overlay inherits it. Until those copies match the raw file, the prod HPA
+can scale out on CPU and will not scale in.
+
+**KEDA, refused by the default-deny policy.** The scaler's broker credential is
+a RabbitMQ user of its own, as 06.04 step 3 creates it, and the apply creates
+the `TriggerAuthentication` and the `ScaledObject`. The `ScaledObject` did not
+become ready. Its conditions name the cause: the KEDA operator, in the `keda`
+namespace, could not open a connection to RabbitMQ in `bookstore`.
+
+```sh
+kubectl apply -f examples/bookstore/raw-manifests/83-keda-scaledobject.yaml
+kubectl -n bookstore get scaledobject payments-worker \
+  -o jsonpath='{range .status.conditions[*]}{.type}{" "}{.status}{" "}{.reason}{" "}{.message}{"\n"}{end}'
+```
+
+<!-- gate: output -->
+```
+Ready False ScaledObjectCheckFailed failed to ensure HPA is correctly created for ScaledObject: error establishing connection to RabbitMQ: dial tcp 10.96.61.59:5672: i/o timeout
+Active Unknown UnknownState ScaledObject check failed
+Fallback False NoFallbackFound No fallbacks are active on this scaled object
+Paused False  
+```
+
+A timeout on a Service address is the signature of a NetworkPolicy drop. The
+`bookstore` namespace is default-deny, and its RabbitMQ rule admits orders and
+payments-worker. Nothing admits the KEDA operator, so the connection hangs. The
+Pod and the scaler look healthy and only the object's status shows the failure.
+A rule for the operator, added for the lab only and not shipped, shows that the
+missing rule is the whole cause:
+
+```yaml
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: lab-allow-keda-to-rabbitmq
+  namespace: bookstore
+spec:
+  podSelector:
+    matchLabels:
+      app: rabbitmq
+  policyTypes: ["Ingress"]
+  ingress:
+    - from:
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: keda
+          podSelector:
+            matchLabels:
+              app.kubernetes.io/name: keda-operator
+      ports:
+        - { protocol: TCP, port: 5672 }
+```
+
+This is a deliberate action, and the file is a probe, not a Bookstore manifest.
+With it applied, the `ScaledObject` became ready, KEDA created the HPA behind
+it, and the empty queue took `payments-worker` to zero replicas after the
+cooldown:
+
+```sh
+kubectl apply -f lab-allow-keda-to-rabbitmq.yaml
+kubectl get scaledobject,hpa -n bookstore
+kubectl get deploy payments-worker -n bookstore
+```
+
+<!-- gate: output -->
+```
+networkpolicy.networking.k8s.io/lab-allow-keda-to-rabbitmq created
+```
+
+<!-- gate: output -->
+```
+NAME                                   SCALETARGETKIND      SCALETARGETNAME   MIN   MAX   READY   ACTIVE    FALLBACK   PAUSED   TRIGGERS   AUTHENTICATIONS         AGE
+scaledobject.keda.sh/payments-worker   apps/v1.Deployment   payments-worker   0     10    True    Unknown   False      False    rabbitmq   rabbitmq-trigger-auth   66s
+
+NAME                                                           REFERENCE                    TARGETS                     MINPODS   MAXPODS   REPLICAS   AGE
+horizontalpodautoscaler.autoscaling/catalog                    Deployment/catalog           cpu: 1%/70%, <unknown>/50   4         12        4          3m40s
+horizontalpodautoscaler.autoscaling/keda-hpa-payments-worker   Deployment/payments-worker   0/20 (avg)                  1         10        1          4s
+NAME              READY   UP-TO-DATE   AVAILABLE   AGE
+payments-worker   0/0     0            0           3m42s
+```
+
+The fix belongs in `60-networkpolicy.yaml` and in the 06.04 steps, which do not
+mention this policy yet. The lesson for a composed system is the check: read
+the status of every custom resource after the apply, and do not stop at the
+Pods.
 
 ### (h) Verify security posture
 
-Two checks ([Part 05](../05-security/02-pod-security.md)) ran in the lab:
-restricted admission refuses a privileged Pod, and the catalog ServiceAccount
-holds only the rights it needs. The policy engine's report on the workloads
-belongs to
-[05.07](../05-security/07-admission-control-and-policy-as-code.md) and is not
-run here.
+Three checks ([Part 05](../05-security/02-pod-security.md)) ran: restricted
+admission refuses a privileged Pod, the catalog ServiceAccount holds only the
+rights it needs, and the policy engine reports on the running workloads. The
+policy set belongs to
+[05.07](../05-security/07-admission-control-and-policy-as-code.md), so the
+report below only shows that Kyverno, installed beside the rest, evaluates the
+Bookstore.
 
 **Admission refuses a privileged Pod.** This is a deliberate action. The Pod
 asks for `privileged: true` in a restricted namespace. A server-side dry run
@@ -926,7 +1291,42 @@ no
 The second command prints `no` and exits with status 1. The Role comes from
 `raw-manifests/05-serviceaccounts-rbac.yaml`.
 
-### (i) Progressive delivery (cited, not run)
+**Kyverno reports on the running workloads.** The policy file is
+`70-kyverno-policy.yaml`, in Audit mode on purpose. It reports and does not
+block. The runner applied it to the running Bookstore, waited for the
+background scan to write its reports, and summed them:
+
+```sh
+kubectl apply -f examples/bookstore/raw-manifests/70-kyverno-policy.yaml
+kubectl get clusterpolicy
+kubectl get policyreport -n bookstore -o json | jq -c '[.items[].summary] | {pass: (map(.pass) | add), fail: (map(.fail) | add)}'
+kubectl get policyreport -n bookstore -o json \
+  | jq -r '[.items[].results[]? | select(.result=="fail") | .policy + " " + .rule] | group_by(.) | .[] | "\(.[0]) \(length)"'
+```
+
+<!-- gate: output -->
+```
+NAME                           ADMISSION   BACKGROUND   READY   AGE   MESSAGE
+bookstore-image-supply-chain   true        true         True    46s   Ready
+```
+
+<!-- gate: output -->
+```
+{"pass":69,"fail":18}
+```
+
+<!-- gate: output -->
+```
+bookstore-image-supply-chain autogen-require-image-digest 8
+bookstore-image-supply-chain require-image-digest 10
+```
+
+Every failure is the digest rule. The Bookstore's images are
+`bookstore/<service>:dev`, tags and not digests, and the policy reports exactly
+that and nothing else. The other rules pass. The header of `70-` explains why
+the policy is in Audit mode, and why Enforce would block the guide's own images.
+
+### (i) Progressive delivery
 
 The catalog Rollout (`argocd/rollouts/catalog-rollout.yaml`) replaces the
 catalog Deployment with a metric-gated canary: 10, then 25, then 50, then 100
@@ -934,8 +1334,36 @@ percent of traffic, with an AnalysisTemplate gate on success rate and p95
 latency from the PromQL in (f). A passing analysis promotes. A failing one
 aborts, and the stable ReplicaSet returns to full replicas, with no `kubectl
 rollout undo`. [Part 07 ch.05](../07-delivery/05-progressive-delivery.md) owns
-the install, the Argo Rollouts namespace label and the stand-in metric. This
-run did not install Argo Rollouts (see (c)).
+the install, the Argo Rollouts namespace label and the stand-in metric. The
+runner installed Argo CD and Argo Rollouts in (c), and their controllers and
+CRDs were up:
+
+```sh
+kubectl get pods -n argocd
+kubectl get pods -n argo-rollouts
+kubectl get crd applications.argoproj.io appprojects.argoproj.io rollouts.argoproj.io analysistemplates.argoproj.io
+```
+
+<!-- gate: output -->
+```
+NAME                                  READY   STATUS    RESTARTS   AGE
+argocd-application-controller-0       1/1     Running   0          6m58s
+argocd-redis-8f88c7899-89mhc          1/1     Running   0          6m58s
+argocd-repo-server-59b65b86b9-tpbt6   1/1     Running   0          6m58s
+argocd-server-7b4c5bdf58-rdd74        1/1     Running   0          6m58s
+NAME                             READY   STATUS    RESTARTS   AGE
+argo-rollouts-6695f965fc-k9j2b   1/1     Running   0          6m32s
+argo-rollouts-6695f965fc-nwjkl   1/1     Running   0          6m32s
+NAME                            SCOPE        VERSIONS            CREATED AT
+applications.argoproj.io        Namespaced   v1alpha1(storage)   2026-10-31T17:20:10Z
+appprojects.argoproj.io         Namespaced   v1alpha1(storage)   2026-10-31T17:20:10Z
+rollouts.argoproj.io            Namespaced   v1alpha1(storage)   2026-10-31T17:20:37Z
+analysistemplates.argoproj.io   Namespaced   v1alpha1(storage)   2026-10-31T17:20:37Z
+```
+
+The canary release itself is **cited, not run**: no Rollout was applied, no
+analysis ran and no Git remote was synced. Argo CD would need the remote from
+(d) before it has anything to reconcile.
 
 The Rollout owns `.spec.replicas`. Do not apply the `82-` HPA next to it: the
 HPA targets a Deployment the Rollout replaces, which orphans the autoscaler.
@@ -943,7 +1371,24 @@ HPA targets a Deployment the Rollout replaces, which orphans the autoscaler.
 ### (j) Backup & DR drill: a marker row, then a scratch-namespace restore
 
 **Cited, not run.** The drill needs a bucket and a snapshot-capable CSI driver,
-and the lab had neither. Velero is installed in step (c) from
+and neither recording had either. The runner did run the controller, from the
+chart on the CSI snapshot path, against a placeholder store. It reports the
+storage location `Unavailable` because nothing answers at the placeholder, and
+the chart registered 13 `velero.io` CRDs:
+
+```sh
+kubectl -n velero get backupstoragelocation
+kubectl get crd -o name | grep -c '\.velero\.io$'
+```
+
+<!-- gate: output -->
+```
+NAME      PHASE         LAST VALIDATED   AGE    DEFAULT
+default   Unavailable   51s              5m7s   true
+13
+```
+
+Velero is installed in step (c) from
 [08.02](../08-day-2-operations/02-backup-and-dr.md), which owns the install and
 the drill. The schedule is
 [`operators/velero-schedule.yaml`](../examples/bookstore/operators/velero-schedule.yaml),
@@ -1033,6 +1478,18 @@ rule for busybox. The `:debug-nonroot` tag carries the busybox shell that the
 probe runs. `--target` makes the container share catalog's namespaces, so the
 probe leaves from catalog's identity and its NetworkPolicy path. The ephemeral
 container goes away with the Pod, and the Deployment is never touched.
+
+The runner has no terminal, so it held stdin open with `sleep 20 |` in front of
+the command and read the debug container's log after the attach. The log has
+the same two lines as the block above:
+
+<!-- gate: output -->
+```
+PG-REACHABLE
+attach exit: 0
+65532
+PG-REACHABLE
+```
 
 <!-- gate: output -->
 ```text
@@ -1162,12 +1619,13 @@ for data. Conflating them is the classic "I snapshotted etcd, I'm safe" outage
 > precedent, never hidden): (1) kind fakes the machines, not the API
 > ([Part 00 ch.07](../00-foundations/07-local-cluster-setup.md)); (2) the Git
 > remote is a placeholder URL, and the run used the direct path; (3) the object
-> store is absent on the lab, so the backup drill is cited; (4) the prod overlay
-> is applied with a kind-only image override and a hand-made database Secret,
-> both scoped to kind; (5) the canary is replica-ratio, not mesh-percentage, and
-> is cited; (6) zones are synthetic node labels on a multi-node config, and the
-> lab has one node, so spread and drain are cited. None of these change the
-> Kubernetes mechanics being demonstrated.
+> store is absent on the lab and on the runner, so the backup drill is cited;
+> (4) the prod overlay is applied with a kind-only image override and a
+> hand-made database Secret, both scoped to kind; (5) the canary is
+> replica-ratio, not mesh-percentage, and is cited; (6) zones are synthetic
+> node labels on a multi-node config. The first lab had one node, so spread and
+> drain were cited there, and the runner's four nodes ran the spread but no
+> drain. None of these change the Kubernetes mechanics being demonstrated.
 
 ## Quick Reference
 
@@ -1200,11 +1658,16 @@ cosign verify --certificate-identity 'https://github.com/abd-ulbasit/bookstore-k
 kubectl apply -f examples/bookstore/raw-manifests/00-namespace.yaml
 kubectl apply -f examples/bookstore/raw-manifests/05-serviceaccounts-rbac.yaml
 kubectl apply -f examples/bookstore/raw-manifests/15-catalog-config.yaml
-# kind only: db-credentials, created by hand with a generated password (d.2)
+# kind only: db-credentials, created by hand with generated passwords (d.2)
+DB="$(openssl rand -hex 16)"; MQ="$(openssl rand -hex 16)"
 kubectl -n bookstore create secret generic db-credentials \
   --from-literal=POSTGRES_USER=bookstore \
-  --from-literal=POSTGRES_PASSWORD="$(openssl rand -hex 16)" \
-  --from-literal=POSTGRES_DB=bookstore
+  --from-literal=POSTGRES_PASSWORD="$DB" \
+  --from-literal=POSTGRES_DB=bookstore \
+  --from-literal=RABBITMQ_DEFAULT_USER=bookstore \
+  --from-literal=RABBITMQ_DEFAULT_PASS="$MQ" \
+  --from-literal=AMQP_URL="amqp://bookstore:${MQ}@rabbitmq:5672/"
+unset DB MQ
 kubectl apply -f examples/bookstore/raw-manifests/35-priorityclasses.yaml
 openssl req -x509 -newkey rsa:2048 -nodes -days 30 \
   -subj "/CN=bookstore.example.com" -keyout tls.key -out tls.crt
@@ -1217,7 +1680,7 @@ kubectl wait --for=condition=available deploy --all -n bookstore --timeout=300s
 git checkout -- examples/bookstore/kustomize/overlays/prod/images/kustomization.yaml
 
 # (e) NET: the edge answers 200; the NetworkPolicy refuses (see (e)) ----------------
-# (f) OBS and (g) SCALE + PDB: cited to 06.01, 06.04 and 06.05
+# (f) OBS and (g) SCALE: ran on the runner. The node drain is cited to 06.05
 # (h) SEC: a restricted refusal; the ServiceAccount's rules -----------------------
 # (i) CANARY: cited to 07.05   (j) BACKUP + DR: cited to 08.02
 # (k) DAY-2: kubectl debug --profile=restricted with a numeric non-root image

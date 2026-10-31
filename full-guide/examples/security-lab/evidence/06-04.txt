@@ -45,26 +45,29 @@
 #   "step 0e (continued)" reads it from the same pod after the fix.
 # - The Bookstore phase stopped at its wait for the catalog rollout. The third
 #   catalog replica stayed Pending: catalog spreads over kubernetes.io/hostname
-#   with DoNotSchedule, and the tainted control-plane node counts as an empty
-#   domain, so each worker may hold one replica. The spread phase shows the
-#   event and patches nodeTaintsPolicy: Honor on the Deployment in the cluster
-#   (the shipped file is unchanged), and the rollout then completed.
-#   The wait for the rollout moved from the bookstore phase to the spread
-#   phase in the committed script after this run.
-# - The load phase did not finish. About 75 seconds in, the host's load average
-#   was near 30 on four cores, API answers slowed (one sampling pass took about
-#   two minutes and `kubectl top` answered "Metrics API not available"), and
-#   kube-controller-manager and kube-scheduler restarted once each. Before this
-#   run they already showed 38 and 40 restarts in about ten hours, and the
-#   kube-apiserver 17. Under the rule for this lab, the Job was deleted and
-#   everything the run installed was removed. The controller-manager and the
-#   scheduler restarted once more during the removal.
+#   with DoNotSchedule, and the tainted control-plane node counted as an empty
+#   domain. The shipped Deployment now sets nodeTaintsPolicy: Honor, so the
+#   runner recording below shows the placement with the field. That section of
+#   the second recording is no longer in this file.
+# - The load phase did not finish on the lab host. About 75 seconds in, the
+#   host's load average was near 30 on four cores, API answers slowed, and
+#   kube-controller-manager and kube-scheduler restarted once each, so the Job
+#   was deleted and everything the run installed was removed. The runner
+#   recording below ran the same load phase to the end. That section of the
+#   second recording is no longer in this file.
 #
-# Not run in this transcript: the scale-out of catalog under load, the lowered
-# CPU target, the hold at maxReplicas and the scale-in after the load, and the
-# load tests of the KEDA scaler. KEDA was not installed. The resource metrics
-# API was served only from the metrics phase to the cleanup phase of the second
-# recording.
+# Third recording, from the line "# Runner recording for" to the end of this
+# file: the whole of examples/security-lab/labs/06-04.sh, phase after phase, on
+# a GitHub Actions runner. Its own header gives the versions. Run URL:
+# https://github.com/abd-ulbasit/bookstore-kubernetes-guide/actions/runs/41223339026
+# It ran the placement of catalog's replicas, the HPA at its shipped target,
+# the 06.06 load Job, the lowered CPU target, the hold at maxReplicas, the
+# scale-in after the Job and the cleanup, on metrics-server with verified
+# kubelet serving certificates.
+#
+# Not run in this transcript: the load tests of the KEDA scaler. KEDA was
+# rendered and dry-run in the first recording and installed in the 09.01
+# transcript.
 ## step 0
 $ kubectl apply -f 00-namespace.yaml
 namespace/p06-04-bookstore created
@@ -837,33 +840,6 @@ networkpolicy.networking.k8s.io/allow-payments-worker-egress created
 networkpolicy.networking.k8s.io/allow-monitoring-scrape created
 networkpolicy.networking.k8s.io/allow-span-egress created
 
-## step 0g: the third catalog replica, and the lab-only change that places it
-$ kubectl get pods -n bookstore -l app=catalog -o wide
-NAME                       READY   STATUS    RESTARTS   AGE     IP             NODE               NOMINATED NODE   READINESS GATES
-catalog-86d7dc55cc-6l268   1/1     Running   0          6m18s   10.244.2.112   demo-lab-worker2   <none>           <none>
-catalog-86d7dc55cc-nd99d   1/1     Running   0          6m17s   10.244.1.80    demo-lab-worker    <none>           <none>
-catalog-86d7dc55cc-ptvkj   0/1     Pending   0          6m17s   <none>         <none>             <none>           <none>
-
-$ kubectl get events -n bookstore --field-selector reason=FailedScheduling
-LAST SEEN   TYPE      REASON             OBJECT                         MESSAGE
-54s         Warning   FailedScheduling   pod/catalog-86d7dc55cc-ptvkj   0/3 nodes are available: 1 node(s) had untolerated taint(s), 2 node(s) didn't match pod topology spread constraints. preemption: 0/3 nodes are available: 1 No preemption victims found for incoming pod, 1 Preemption is not helpful for scheduling, 1 node(s) didn't match pod topology spread constraints.
-
-$ kubectl get deployment catalog -n bookstore -o jsonpath='{.spec.template.spec.topologySpreadConstraints}{"\n"}'
-[{"labelSelector":{"matchLabels":{"app":"catalog"}},"maxSkew":1,"topologyKey":"kubernetes.io/hostname","whenUnsatisfiable":"DoNotSchedule"}]
-
-$ kubectl patch deployment catalog -n bookstore --type json -p '[{"op":"add","path":"/spec/template/spec/topologySpreadConstraints/0/nodeTaintsPolicy","value":"Honor"}]'
-deployment.apps/catalog patched
-
-$ kubectl rollout status deployment/catalog -n bookstore
-deployment "catalog" successfully rolled out
-
-$ kubectl get pods -n bookstore -l app=catalog -o wide
-NAME                       READY   STATUS        RESTARTS   AGE    IP             NODE               NOMINATED NODE   READINESS GATES
-catalog-74995c78bb-9csnp   1/1     Running       0          7s     10.244.1.82    demo-lab-worker    <none>           <none>
-catalog-74995c78bb-rnjch   1/1     Running       0          26s    10.244.2.113   demo-lab-worker2   <none>           <none>
-catalog-74995c78bb-zpbgk   1/1     Running       0          44s    10.244.1.81    demo-lab-worker    <none>           <none>
-catalog-86d7dc55cc-6l268   1/1     Terminating   0          7m3s   10.244.2.112   demo-lab-worker2   <none>           <none>
-
 ## step 2: the HPA at its shipped target, with no load
 $ kubectl apply -f examples/bookstore/raw-manifests/82-hpa-catalog.yaml
 horizontalpodautoscaler.autoscaling/catalog created
@@ -966,69 +942,6 @@ catalog   Deployment/catalog   cpu: 2%/70%   2     6     2     5m37s
 catalog-74995c78bb-9csnp   1m    3Mi   
 catalog-74995c78bb-rnjch   1m    3Mi   
 
-## step 4: the 06.06 load Job, with the loop lengthened to 420 seconds
-$ grep -n 'end=' load-catalog.yaml
-29:              end=$(( $(date +%s) + 420 ))
-
-$ kubectl apply -f load-allow.yaml
-serviceaccount/load-generator-sa created
-networkpolicy.networking.k8s.io/allow-load-generator-egress created
-networkpolicy.networking.k8s.io/allow-load-generator-to-catalog created
-
-$ kubectl apply -f load-catalog.yaml
-job.batch/load-catalog created
-
-## step 4a: at the shipped 70 percent target
-$ start=$(date +%s)
-while [ $(( $(date +%s) - start )) -lt 120 ]; do
-  echo "t=+$(( $(date +%s) - start ))s"
-  kubectl get hpa catalog -n bookstore --no-headers
-  kubectl top pods -n bookstore --no-headers
-  sleep 20
-done
-t=+0s
-catalog   Deployment/catalog   cpu: 2%/70%   2     6     2     6m42s
-catalog-74995c78bb-9csnp   1m    3Mi     
-catalog-74995c78bb-rnjch   1m    3Mi     
-postgres-0                 30m   104Mi   
-redis-574bb544f-b7tvt      4m    3Mi     
-t=+20s
-catalog   Deployment/catalog   cpu: 6%/70%   2     6     2     7m3s
-catalog-74995c78bb-9csnp   3m    4Mi     
-catalog-74995c78bb-rnjch   3m    7Mi     
-load-catalog-shx7j         86m   1Mi     
-postgres-0                 39m   111Mi   
-redis-574bb544f-b7tvt      5m    3Mi     
-t=+41s
-catalog   Deployment/catalog   cpu: 24%/70%   2     6     2     7m23s
-catalog-74995c78bb-9csnp   14m    8Mi     
-catalog-74995c78bb-rnjch   10m    8Mi     
-load-catalog-shx7j         434m   11Mi    
-postgres-0                 44m    111Mi   
-redis-574bb544f-b7tvt      8m     3Mi     
-t=+75s
-catalog   Deployment/catalog   cpu: 21%/70%   2     6     2     9m19s
-error: Metrics API not available
-
-## abort: the control plane restarted while the Job ran, so the Job was deleted
-$ kubectl delete job load-catalog -n bookstore --wait=false
-job.batch "load-catalog" deleted from bookstore namespace
-
-$ kubectl get pods -n kube-system
-NAME                                             READY   STATUS    RESTARTS        AGE
-coredns-559f6c778d-9vkt4                         1/1     Running   0               10h
-coredns-559f6c778d-lk2hp                         1/1     Running   0               10h
-etcd-demo-lab-control-plane                      1/1     Running   0               10h
-kindnet-7ppzx                                    1/1     Running   0               10h
-kindnet-fjrk9                                    1/1     Running   0               10h
-kindnet-rm62x                                    1/1     Running   1               10h
-kube-apiserver-demo-lab-control-plane            1/1     Running   17 (45m ago)    10h
-kube-controller-manager-demo-lab-control-plane   1/1     Running   39 (111s ago)   10h
-kube-proxy-25k5p                                 1/1     Running   0               10h
-kube-proxy-2mzj2                                 1/1     Running   0               10h
-kube-proxy-pfxbz                                 1/1     Running   0               10h
-kube-scheduler-demo-lab-control-plane            1/1     Running   41 (89s ago)    10h
-
 ## cleanup
 $ kubectl delete namespace bookstore --wait=true
 namespace "bookstore" deleted
@@ -1087,3 +1000,835 @@ NAME                     STATUS   ROLES           AGE   VERSION
 demo-lab-control-plane   Ready    control-plane   10h   v1.37.0
 demo-lab-worker          Ready    <none>          10h   v1.37.0
 demo-lab-worker2         Ready    <none>          10h   v1.37.0
+# Runner recording for 06-production-readiness/04-autoscaling.md.
+# It ran on a GitHub Actions runner, not on the lab host. Run URL:
+# https://github.com/abd-ulbasit/bookstore-kubernetes-guide/actions/runs/41223339026 (attempt 1)
+# Commit: 43314971a16564a587342caf0fc24a420f8cdd20
+# Tier A: a kind cluster of 3 nodes, Kubernetes v1.37.0 (kind v0.33.0,
+# node image pinned by digest in examples/security-lab/kind), kubectl
+# v1.37.2, Helm v3.22.1. Node runtime: containerd://2.3.4.
+# Host: Ubuntu 26.04.1 LTS, kernel 7.0.0-1017-azure, 4 vCPU, about 16 GiB of
+# memory, Docker 29.4.2. Recorded by running
+# examples/security-lab/labs/06-04.sh from the workflow lab-on-runner.yml.
+# Paths of the runner's checkout and temporary directory are written as
+# <repo> and <tmp>. Terminal colour codes are removed, and tabs become spaces
+# (tab stops every 4 columns, as the evidence gate reads a chapter's code
+# blocks). Nothing else is edited.
+#
+# Runner recording, from examples/security-lab/labs/06-04.sh, one phase after another.
+## step 0a: the cluster, and no resource metrics yet
+$ kubectl get nodes
+NAME                      STATUS   ROLES           AGE   VERSION
+bookstore-control-plane   Ready    control-plane   38s   v1.37.0
+bookstore-worker          Ready    <none>          29s   v1.37.0
+bookstore-worker2         Ready    <none>          29s   v1.37.0
+
+$ kubectl get apiservice v1beta1.metrics.k8s.io
+Error from server (NotFound): apiservices.apiregistration.k8s.io "v1beta1.metrics.k8s.io" not found
+
+$ kubectl top nodes
+error: Metrics API not available
+
+## step 0b: metrics-server, installed as in 06.01 step 1
+$ kubectl create namespace metrics-server
+namespace/metrics-server created
+
+$ kubectl label namespace metrics-server pod-security.kubernetes.io/enforce=restricted pod-security.kubernetes.io/audit=restricted pod-security.kubernetes.io/warn=restricted
+namespace/metrics-server labeled
+
+$ helm install metrics-server metrics-server/metrics-server --version 3.14.0 --namespace metrics-server
+NAME: metrics-server
+LAST DEPLOYED: Sat Oct 31 17:13:31 2026
+NAMESPACE: metrics-server
+STATUS: deployed
+REVISION: 1
+TEST SUITE: None
+NOTES:
+***********************************************************************
+* Metrics Server                                                      *
+***********************************************************************
+  Chart version: 3.14.0
+  App version:   0.9.0
+  Image tag:     registry.k8s.io/metrics-server/metrics-server:v0.9.0
+***********************************************************************
+
+$ kubectl -n metrics-server get deploy metrics-server -o jsonpath='{.metadata.labels.helm\.sh/chart}{"\n"}{.spec.template.spec.containers[0].image}{"\n"}'
+metrics-server-3.14.0
+registry.k8s.io/metrics-server/metrics-server:v0.9.0
+
+$ kubectl -n metrics-server get pods
+NAME                             READY   STATUS    RESTARTS   AGE
+metrics-server-c4994bc54-lsjbv   0/1     Running   0          5s
+
+$ kubectl get apiservice v1beta1.metrics.k8s.io
+NAME                     SERVICE                         AVAILABLE                  AGE
+v1beta1.metrics.k8s.io   metrics-server/metrics-server   False (MissingEndpoints)   5s
+
+$ kubectl top nodes
+error: Metrics API not available
+
+$ kubectl -n metrics-server logs deploy/metrics-server --tail=3
+I1031 17:13:34.708371       1 shared_informer.go:409] "Caches are synced"
+I1031 17:13:34.708387       1 shared_informer.go:409] "Caches are synced"
+I1031 17:13:34.708374       1 shared_informer.go:409] "Caches are synced"
+
+## step 0c: kubelet serving certificates
+$ kubectl get csr
+NAME        AGE   SIGNERNAME                                    REQUESTOR                             REQUESTEDDURATION   CONDITION
+csr-7vkdc   35s   kubernetes.io/kube-apiserver-client-kubelet   system:bootstrap:abcdef               <none>              Approved,Issued
+csr-7w2fk   44s   kubernetes.io/kube-apiserver-client-kubelet   system:node:bookstore-control-plane   <none>              Approved,Issued
+csr-pc4rr   35s   kubernetes.io/kube-apiserver-client-kubelet   system:bootstrap:abcdef               <none>              Approved,Issued
+
+$ for n in $(kubectl get nodes -o name | sed 's|node/||'); do
+  docker exec "$n" sh -c 'cp /var/lib/kubelet/config.yaml /var/lib/kubelet/config.yaml.orig && echo "serverTLSBootstrap: true" >> /var/lib/kubelet/config.yaml && systemctl restart kubelet && grep serverTLSBootstrap /var/lib/kubelet/config.yaml'
+done
+serverTLSBootstrap: true
+serverTLSBootstrap: true
+serverTLSBootstrap: true
+
+$ kubectl get csr --field-selector spec.signerName=kubernetes.io/kubelet-serving
+NAME        AGE   SIGNERNAME                      REQUESTOR                             REQUESTEDDURATION   CONDITION
+csr-4zw4v   3s    kubernetes.io/kubelet-serving   system:node:bookstore-worker          <none>              Pending
+csr-59t2c   4s    kubernetes.io/kubelet-serving   system:node:bookstore-worker2         <none>              Pending
+csr-bfzk7   4s    kubernetes.io/kubelet-serving   system:node:bookstore-control-plane   <none>              Pending
+
+## step 0d: check each request before approving it
+$ for c in $(kubectl get csr --field-selector spec.signerName=kubernetes.io/kubelet-serving -o name); do
+  u=$(kubectl get "$c" -o jsonpath='{.spec.username}')
+  s=$(kubectl get "$c" -o jsonpath='{.spec.request}' | base64 -d | openssl req -noout -text | grep -A1 'Alternative Name' | tail -1 | sed 's/^ *//')
+  echo "${c#*/} $u $s"
+done
+csr-4zw4v system:node:bookstore-worker DNS:bookstore-worker, IP Address:172.18.0.2
+csr-59t2c system:node:bookstore-worker2 DNS:bookstore-worker2, IP Address:172.18.0.3
+csr-bfzk7 system:node:bookstore-control-plane DNS:bookstore-control-plane, IP Address:172.18.0.4
+
+$ kubectl certificate approve $(kubectl get csr --field-selector spec.signerName=kubernetes.io/kubelet-serving -o name)
+certificatesigningrequest.certificates.k8s.io/csr-4zw4v approved
+certificatesigningrequest.certificates.k8s.io/csr-59t2c approved
+certificatesigningrequest.certificates.k8s.io/csr-bfzk7 approved
+
+$ kubectl get csr --field-selector spec.signerName=kubernetes.io/kubelet-serving
+NAME        AGE   SIGNERNAME                      REQUESTOR                             REQUESTEDDURATION   CONDITION
+csr-4zw4v   3s    kubernetes.io/kubelet-serving   system:node:bookstore-worker          <none>              Approved,Issued
+csr-59t2c   4s    kubernetes.io/kubelet-serving   system:node:bookstore-worker2         <none>              Approved,Issued
+csr-bfzk7   4s    kubernetes.io/kubelet-serving   system:node:bookstore-control-plane   <none>              Approved,Issued
+
+## step 0e: metrics-server serves, with verification still on
+$ kubectl -n metrics-server rollout status deployment/metrics-server --timeout=300s
+deployment "metrics-server" successfully rolled out
+
+$ kubectl get apiservice v1beta1.metrics.k8s.io
+NAME                     SERVICE                         AVAILABLE   AGE
+v1beta1.metrics.k8s.io   metrics-server/metrics-server   True        50s
+
+$ kubectl top nodes
+NAME                      CPU(cores)   CPU(%)   MEMORY(bytes)   MEMORY(%)   
+bookstore-control-plane   81m          2%       545Mi           3%          
+bookstore-worker          13m          0%       123Mi           0%          
+bookstore-worker2         18m          0%       148Mi           0%          
+
+$ kubectl -n metrics-server get deploy metrics-server -o jsonpath='{.spec.template.spec.containers[0].args}{"\n"}'
+["--secure-port=10250","--cert-dir=/tmp","--kubelet-preferred-address-types=InternalIP,ExternalIP,Hostname","--kubelet-use-node-status-port","--metric-resolution=15s"]
+
+$ kubectl -n metrics-server get deploy metrics-server -o jsonpath='{.spec.template.spec.containers[0].args}' | grep -c insecure
+0
+
+## step 0f: the Bookstore pieces that catalog needs
+$ kubectl apply -f examples/bookstore/raw-manifests/00-namespace.yaml
+namespace/bookstore created
+resourcequota/bookstore-quota created
+limitrange/bookstore-limits created
+
+$ kubectl apply -f examples/bookstore/raw-manifests/05-serviceaccounts-rbac.yaml
+serviceaccount/catalog-sa created
+serviceaccount/storefront-sa created
+serviceaccount/orders-sa created
+serviceaccount/payments-worker-sa created
+serviceaccount/postgres-sa created
+serviceaccount/redis-sa created
+serviceaccount/rabbitmq-sa created
+serviceaccount/migrate-sa created
+role.rbac.authorization.k8s.io/catalog-config-reader created
+rolebinding.rbac.authorization.k8s.io/catalog-config-reader-binding created
+
+$ kubectl apply -f examples/bookstore/raw-manifests/15-catalog-config.yaml
+configmap/catalog-config created
+
+$ kubectl apply -f examples/bookstore/raw-manifests/16-db-credentials.yaml
+secret/db-credentials created
+
+$ kubectl apply -f examples/bookstore/raw-manifests/35-priorityclasses.yaml
+priorityclass.scheduling.k8s.io/bookstore-data created
+priorityclass.scheduling.k8s.io/bookstore-critical created
+priorityclass.scheduling.k8s.io/bookstore-batch created
+
+$ kubectl apply -f examples/bookstore/raw-manifests/20-postgres-statefulset.yaml
+service/postgres created
+statefulset.apps/postgres created
+
+$ kubectl apply -f examples/bookstore/raw-manifests/21-db-migrate-job.yaml
+job.batch/db-migrate created
+
+$ kubectl apply -f examples/bookstore/raw-manifests/12-redis.yaml
+deployment.apps/redis created
+
+$ kubectl apply -f examples/bookstore/raw-manifests/10-catalog-deploy.yaml
+deployment.apps/catalog created
+
+$ kubectl apply -f examples/bookstore/raw-manifests/40-services.yaml
+service/catalog created
+service/storefront created
+service/orders created
+service/redis created
+service/rabbitmq created
+service/payments-worker created
+
+$ kubectl apply -f examples/bookstore/raw-manifests/60-networkpolicy.yaml
+networkpolicy.networking.k8s.io/default-deny-all created
+networkpolicy.networking.k8s.io/allow-dns-egress created
+networkpolicy.networking.k8s.io/allow-ingress-to-http-tiers created
+networkpolicy.networking.k8s.io/allow-storefront-to-apis created
+networkpolicy.networking.k8s.io/allow-data-tier-ingress created
+networkpolicy.networking.k8s.io/allow-orders-to-rabbitmq created
+networkpolicy.networking.k8s.io/allow-backend-egress created
+networkpolicy.networking.k8s.io/allow-storefront-egress created
+networkpolicy.networking.k8s.io/allow-payments-worker-egress created
+networkpolicy.networking.k8s.io/allow-monitoring-scrape created
+networkpolicy.networking.k8s.io/allow-span-egress created
+
+## step 0g: the third catalog replica, placed on the two workers
+$ kubectl get deployment catalog -n bookstore -o jsonpath='{.spec.template.spec.topologySpreadConstraints}{"\n"}'
+[{"labelSelector":{"matchLabels":{"app":"catalog"}},"maxSkew":1,"nodeTaintsPolicy":"Honor","topologyKey":"kubernetes.io/hostname","whenUnsatisfiable":"DoNotSchedule"}]
+
+$ kubectl rollout status deployment/catalog -n bookstore
+deployment "catalog" successfully rolled out
+
+$ kubectl get pods -n bookstore -l app=catalog -o wide
+NAME                       READY   STATUS    RESTARTS   AGE   IP            NODE                NOMINATED NODE   READINESS GATES
+catalog-74995c78bb-ftnkc   1/1     Running   0          6s    10.244.1.4    bookstore-worker2   <none>           <none>
+catalog-74995c78bb-qnw2p   1/1     Running   0          6s    10.244.2.10   bookstore-worker    <none>           <none>
+catalog-74995c78bb-smgrd   1/1     Running   0          6s    10.244.1.3    bookstore-worker2   <none>           <none>
+
+$ kubectl get events -n bookstore --field-selector reason=FailedScheduling
+No resources found in bookstore namespace.
+
+## step 2: the HPA at its shipped target, with no load
+$ kubectl apply -f examples/bookstore/raw-manifests/82-hpa-catalog.yaml
+horizontalpodautoscaler.autoscaling/catalog created
+
+$ kubectl get hpa catalog -n bookstore
+NAME      REFERENCE            TARGETS       MINPODS   MAXPODS   REPLICAS   AGE
+catalog   Deployment/catalog   cpu: 2%/70%   2         6         3          30s
+
+$ kubectl describe hpa catalog -n bookstore | sed -n '/^Reference:/,$p'
+Reference:                                             Deployment/catalog
+Metrics:                                               ( current / target )
+  resource cpu on pods  (as a percentage of request):  2% (1m) / 70%
+Min replicas:                                          2
+Max replicas:                                          6
+Behavior:
+  Scale Up:
+    Stabilization Window: 60 seconds
+    Select Policy: Max
+    Policies:
+      - Type: Percent  Value: 100  Period: 60 seconds
+      - Type: Pods     Value: 2    Period: 60 seconds
+  Scale Down:
+    Stabilization Window: 300 seconds
+    Select Policy: Max
+    Policies:
+      - Type: Percent  Value: 50  Period: 60 seconds
+Deployment pods:       3 current / 3 desired
+Conditions:
+  Type            Status  Reason               Message
+  ----            ------  ------               -------
+  AbleToScale     True    ScaleDownStabilized  recent recommendations were higher than current one, applying the highest recent recommendation
+  ScalingActive   True    ValidMetricFound     the HPA was able to successfully calculate a replica count from cpu resource utilization (percentage of request)
+  ScalingLimited  False   DesiredWithinRange   the desired count is within the acceptable range
+Events:
+  Type     Reason                        Age   From                       Message
+  ----     ------                        ----  ----                       -------
+  Warning  FailedGetResourceMetric       30s   horizontal-pod-autoscaler  failed to get cpu utilization: unable to get metrics for resource cpu: no metrics returned from resource metrics API
+  Warning  FailedComputeMetricsReplicas  30s   horizontal-pod-autoscaler  invalid metrics (1 invalid out of 1), first error is: failed to get cpu resource metric value: failed to get cpu utilization: unable to get metrics for resource cpu: no metrics returned from resource metrics API
+  Warning  FailedGetResourceMetric       15s   horizontal-pod-autoscaler  failed to get cpu utilization: did not receive metrics for targeted pods (pods might be unready)
+  Warning  FailedComputeMetricsReplicas  15s   horizontal-pod-autoscaler  invalid metrics (1 invalid out of 1), first error is: failed to get cpu resource metric value: failed to get cpu utilization: did not receive metrics for targeted pods (pods might be unready)
+
+## step 2b: the same HPA over the next six minutes, still no load
+$ start=$(date +%s)
+while [ $(( $(date +%s) - start )) -lt 360 ]; do
+  echo "t=+$(( $(date +%s) - start ))s"
+  kubectl get hpa catalog -n bookstore --no-headers
+  kubectl top pods -n bookstore -l app=catalog --no-headers
+  sleep 30
+done
+t=+0s
+catalog   Deployment/catalog   cpu: 2%/70%   2     6     3     30s
+catalog-74995c78bb-ftnkc   4m    2Mi   
+catalog-74995c78bb-qnw2p   1m    2Mi   
+catalog-74995c78bb-smgrd   1m    2Mi   
+t=+30s
+catalog   Deployment/catalog   cpu: 2%/70%   2     6     3     61s
+catalog-74995c78bb-ftnkc   1m    2Mi   
+catalog-74995c78bb-qnw2p   1m    2Mi   
+catalog-74995c78bb-smgrd   1m    2Mi   
+t=+61s
+catalog   Deployment/catalog   cpu: 2%/70%   2     6     3     91s
+catalog-74995c78bb-ftnkc   1m    2Mi   
+catalog-74995c78bb-qnw2p   1m    2Mi   
+catalog-74995c78bb-smgrd   1m    2Mi   
+t=+91s
+catalog   Deployment/catalog   cpu: 2%/70%   2     6     3     2m1s
+catalog-74995c78bb-ftnkc   1m    3Mi   
+catalog-74995c78bb-qnw2p   1m    2Mi   
+catalog-74995c78bb-smgrd   1m    2Mi   
+t=+121s
+catalog   Deployment/catalog   cpu: 2%/70%   2     6     3     2m31s
+catalog-74995c78bb-ftnkc   1m    2Mi   
+catalog-74995c78bb-qnw2p   1m    2Mi   
+catalog-74995c78bb-smgrd   1m    2Mi   
+t=+151s
+catalog   Deployment/catalog   cpu: 2%/70%   2     6     3     3m1s
+catalog-74995c78bb-ftnkc   1m    2Mi   
+catalog-74995c78bb-qnw2p   1m    3Mi   
+catalog-74995c78bb-smgrd   1m    2Mi   
+t=+181s
+catalog   Deployment/catalog   cpu: 2%/70%   2     6     3     3m31s
+catalog-74995c78bb-ftnkc   1m    2Mi   
+catalog-74995c78bb-qnw2p   1m    2Mi   
+catalog-74995c78bb-smgrd   1m    2Mi   
+t=+211s
+catalog   Deployment/catalog   cpu: 2%/70%   2     6     3     4m1s
+catalog-74995c78bb-ftnkc   1m    2Mi   
+catalog-74995c78bb-qnw2p   1m    2Mi   
+catalog-74995c78bb-smgrd   1m    2Mi   
+t=+241s
+catalog   Deployment/catalog   cpu: 2%/70%   2     6     3     4m31s
+catalog-74995c78bb-ftnkc   1m    2Mi   
+catalog-74995c78bb-qnw2p   1m    2Mi   
+catalog-74995c78bb-smgrd   1m    2Mi   
+t=+271s
+catalog   Deployment/catalog   cpu: 2%/70%   2     6     3     5m1s
+catalog-74995c78bb-ftnkc   1m    3Mi   
+catalog-74995c78bb-qnw2p   1m    3Mi   
+catalog-74995c78bb-smgrd   1m    2Mi   
+t=+301s
+catalog   Deployment/catalog   cpu: 2%/70%   2     6     2     5m31s
+catalog-74995c78bb-ftnkc   1m    3Mi   
+catalog-74995c78bb-qnw2p   1m    3Mi   
+t=+331s
+catalog   Deployment/catalog   cpu: 2%/70%   2     6     2     6m2s
+catalog-74995c78bb-ftnkc   1m    3Mi   
+catalog-74995c78bb-qnw2p   1m    3Mi   
+
+## step 4: the 06.06 load Job, with the loop lengthened to 420 seconds
+$ grep -n 'end=' load-catalog.yaml
+29:              end=$(( $(date +%s) + 420 ))
+
+$ kubectl apply -f load-allow.yaml
+serviceaccount/load-generator-sa created
+networkpolicy.networking.k8s.io/allow-load-generator-egress created
+networkpolicy.networking.k8s.io/allow-load-generator-to-catalog created
+
+$ kubectl apply -f load-catalog.yaml
+job.batch/load-catalog created
+
+## step 4: the load Pod reaches catalog through the allow policies
+$ kubectl -n bookstore exec job/load-catalog -- curl -sS -m 5 -o /dev/null -w '%{http_code}\n' http://catalog.bookstore.svc.cluster.local/books
+200
+
+## step 4a: at the shipped 70 percent target
+$ start=$(date +%s)
+while [ $(( $(date +%s) - start )) -lt 120 ]; do
+  echo "t=+$(( $(date +%s) - start ))s"
+  kubectl get hpa catalog -n bookstore --no-headers
+  kubectl top pods -n bookstore --no-headers
+  sleep 20
+done
+t=+0s
+catalog   Deployment/catalog   cpu: 2%/70%   2     6     2     6m33s
+catalog-74995c78bb-ftnkc   1m    3Mi    
+catalog-74995c78bb-qnw2p   1m    3Mi    
+postgres-0                 13m   29Mi   
+redis-574bb544f-mzxtr      2m    3Mi    
+t=+20s
+catalog   Deployment/catalog   cpu: 3%/70%   2     6     2     6m53s
+catalog-74995c78bb-ftnkc   1m    3Mi    
+catalog-74995c78bb-qnw2p   2m    4Mi    
+postgres-0                 16m   33Mi   
+redis-574bb544f-mzxtr      2m    3Mi    
+t=+40s
+catalog   Deployment/catalog   cpu: 35%/70%   2     6     2     7m13s
+catalog-74995c78bb-ftnkc   15m    6Mi    
+catalog-74995c78bb-qnw2p   20m    6Mi    
+load-catalog-6ljb2         500m   8Mi    
+postgres-0                 17m    33Mi   
+redis-574bb544f-mzxtr      8m     3Mi    
+t=+60s
+catalog   Deployment/catalog   cpu: 39%/70%   2     6     2     7m33s
+catalog-74995c78bb-ftnkc   20m    7Mi    
+catalog-74995c78bb-qnw2p   19m    8Mi    
+load-catalog-6ljb2         497m   10Mi   
+postgres-0                 17m    33Mi   
+redis-574bb544f-mzxtr      8m     3Mi    
+t=+81s
+catalog   Deployment/catalog   cpu: 39%/70%   2     6     2     7m54s
+catalog-74995c78bb-ftnkc   21m    7Mi    
+catalog-74995c78bb-qnw2p   18m    7Mi    
+load-catalog-6ljb2         499m   10Mi   
+postgres-0                 15m    33Mi   
+redis-574bb544f-mzxtr      8m     3Mi    
+t=+101s
+catalog   Deployment/catalog   cpu: 39%/70%   2     6     2     8m14s
+catalog-74995c78bb-ftnkc   20m    7Mi    
+catalog-74995c78bb-qnw2p   18m    7Mi    
+load-catalog-6ljb2         499m   11Mi   
+postgres-0                 18m    33Mi   
+redis-574bb544f-mzxtr      8m     3Mi    
+
+## step 4b: the CPU target lowered to 5 percent, bounds unchanged
+$ kubectl patch hpa catalog -n bookstore --type json -p '[{"op":"replace","path":"/spec/metrics/0/resource/target/averageUtilization","value":5}]'
+horizontalpodautoscaler.autoscaling/catalog patched
+
+$ kubectl get hpa catalog -n bookstore -o jsonpath='min={.spec.minReplicas} max={.spec.maxReplicas} target={.spec.metrics[0].resource.target.averageUtilization}{"\n"}'
+min=2 max=6 target=5
+
+$ start=$(date +%s)
+held=0
+while [ $(( $(date +%s) - start )) -lt 300 ]; do
+  echo "t=+$(( $(date +%s) - start ))s"
+  kubectl get hpa catalog -n bookstore --no-headers
+  kubectl top pods -n bookstore --no-headers
+  if [ "$(kubectl get hpa catalog -n bookstore -o jsonpath='{.status.currentReplicas}')" = 6 ]; then held=$((held + 1)); fi
+  if [ "$held" = 3 ]; then
+    echo "-- the HPA has read 6 replicas on 3 samples, with the Job still running"
+    kubectl describe hpa catalog -n bookstore | sed -n '/^Conditions:/,/^Events:/p'
+  fi
+  sleep 20
+done
+t=+0s
+catalog   Deployment/catalog   cpu: 37%/5%   2     6     2     8m34s
+catalog-74995c78bb-ftnkc   19m    7Mi    
+catalog-74995c78bb-qnw2p   18m    8Mi    
+load-catalog-6ljb2         497m   11Mi   
+postgres-0                 15m    33Mi   
+redis-574bb544f-mzxtr      8m     3Mi    
+t=+20s
+catalog   Deployment/catalog   cpu: 39%/5%   2     6     2     8m54s
+catalog-74995c78bb-ftnkc   20m    7Mi    
+catalog-74995c78bb-qnw2p   19m    7Mi    
+load-catalog-6ljb2         497m   10Mi   
+postgres-0                 13m    33Mi   
+redis-574bb544f-mzxtr      8m     3Mi    
+t=+41s
+catalog   Deployment/catalog   cpu: 39%/5%   2     6     2     9m15s
+catalog-74995c78bb-ftnkc   20m    7Mi    
+catalog-74995c78bb-qnw2p   19m    7Mi    
+load-catalog-6ljb2         498m   7Mi    
+postgres-0                 14m    33Mi   
+redis-574bb544f-mzxtr      8m     4Mi    
+t=+61s
+catalog   Deployment/catalog   cpu: 39%/5%   2     6     2     9m35s
+catalog-74995c78bb-ftnkc   20m    8Mi    
+catalog-74995c78bb-qnw2p   19m    8Mi    
+load-catalog-6ljb2         498m   10Mi   
+postgres-0                 17m    33Mi   
+redis-574bb544f-mzxtr      8m     4Mi    
+t=+81s
+catalog   Deployment/catalog   cpu: 39%/5%   2     6     4     9m55s
+catalog-74995c78bb-ftnkc   15m    7Mi    
+catalog-74995c78bb-qnw2p   16m    7Mi    
+catalog-74995c78bb-qtsxs   11m    4Mi    
+catalog-74995c78bb-z4l9c   10m    4Mi    
+load-catalog-6ljb2         498m   11Mi   
+postgres-0                 18m    35Mi   
+redis-574bb544f-mzxtr      8m     3Mi    
+t=+101s
+catalog   Deployment/catalog   cpu: 26%/5%   2     6     4     10m
+catalog-74995c78bb-ftnkc   11m    8Mi    
+catalog-74995c78bb-qnw2p   11m    7Mi    
+catalog-74995c78bb-qtsxs   11m    6Mi    
+catalog-74995c78bb-z4l9c   10m    5Mi    
+load-catalog-6ljb2         500m   9Mi    
+postgres-0                 14m    35Mi   
+redis-574bb544f-mzxtr      8m     3Mi    
+t=+121s
+catalog   Deployment/catalog   cpu: 22%/5%   2     6     4     10m
+catalog-74995c78bb-ftnkc   10m    7Mi    
+catalog-74995c78bb-qnw2p   11m    8Mi    
+catalog-74995c78bb-qtsxs   12m    6Mi    
+catalog-74995c78bb-z4l9c   11m    6Mi    
+load-catalog-6ljb2         497m   11Mi   
+postgres-0                 17m    35Mi   
+redis-574bb544f-mzxtr      8m     4Mi    
+t=+141s
+catalog   Deployment/catalog   cpu: 18%/5%   2     6     6     10m
+catalog-74995c78bb-ftnkc   7m     8Mi    
+catalog-74995c78bb-m28fj   8m     3Mi    
+catalog-74995c78bb-qnw2p   8m     7Mi    
+catalog-74995c78bb-qtsxs   9m     7Mi    
+catalog-74995c78bb-z4l9c   8m     7Mi    
+catalog-74995c78bb-zhxbk   8m     3Mi    
+load-catalog-6ljb2         428m   10Mi   
+postgres-0                 13m    38Mi   
+redis-574bb544f-mzxtr      8m     3Mi    
+t=+162s
+catalog   Deployment/catalog   cpu: 15%/5%   2     6     6     11m
+catalog-74995c78bb-ftnkc   8m     7Mi    
+catalog-74995c78bb-m28fj   8m     4Mi    
+catalog-74995c78bb-qnw2p   8m     8Mi    
+catalog-74995c78bb-qtsxs   8m     7Mi    
+catalog-74995c78bb-z4l9c   8m     7Mi    
+catalog-74995c78bb-zhxbk   7m     3Mi    
+load-catalog-6ljb2         497m   10Mi   
+postgres-0                 18m    39Mi   
+redis-574bb544f-mzxtr      8m     4Mi    
+t=+182s
+catalog   Deployment/catalog   cpu: 15%/5%   2     6     6     11m
+catalog-74995c78bb-ftnkc   9m     7Mi    
+catalog-74995c78bb-m28fj   7m     5Mi    
+catalog-74995c78bb-qnw2p   7m     7Mi    
+catalog-74995c78bb-qtsxs   8m     7Mi    
+catalog-74995c78bb-z4l9c   7m     7Mi    
+catalog-74995c78bb-zhxbk   8m     5Mi    
+load-catalog-6ljb2         500m   11Mi   
+postgres-0                 15m    39Mi   
+redis-574bb544f-mzxtr      8m     4Mi    
+-- the HPA has read 6 replicas on 3 samples, with the Job still running
+Conditions:
+  Type            Status  Reason             Message
+  ----            ------  ------             -------
+  AbleToScale     True    ScaleUpStabilized  recent recommendations were lower than current one, applying the lowest recent recommendation
+  ScalingActive   True    ValidMetricFound   the HPA was able to successfully calculate a replica count from cpu resource utilization (percentage of request)
+  ScalingLimited  True    TooManyReplicas    the desired replica count is more than the maximum replica count
+  ScaledToZero    False   NotScaledToZero    the HPA controller did not scale the workload to zero
+Events:
+t=+202s
+catalog   Deployment/catalog   cpu: 15%/5%   2     6     6     11m
+catalog-74995c78bb-ftnkc   8m     8Mi    
+catalog-74995c78bb-m28fj   8m     5Mi    
+catalog-74995c78bb-qnw2p   7m     7Mi    
+catalog-74995c78bb-qtsxs   8m     7Mi    
+catalog-74995c78bb-z4l9c   9m     7Mi    
+catalog-74995c78bb-zhxbk   8m     6Mi    
+load-catalog-6ljb2         498m   5Mi    
+postgres-0                 17m    40Mi   
+redis-574bb544f-mzxtr      8m     4Mi    
+t=+222s
+catalog   Deployment/catalog   cpu: 15%/5%   2     6     6     12m
+catalog-74995c78bb-ftnkc   8m     7Mi    
+catalog-74995c78bb-m28fj   7m     6Mi    
+catalog-74995c78bb-qnw2p   8m     8Mi    
+catalog-74995c78bb-qtsxs   7m     7Mi    
+catalog-74995c78bb-z4l9c   8m     7Mi    
+catalog-74995c78bb-zhxbk   8m     6Mi    
+load-catalog-6ljb2         498m   11Mi   
+postgres-0                 17m    40Mi   
+redis-574bb544f-mzxtr      8m     3Mi    
+t=+243s
+catalog   Deployment/catalog   cpu: 15%/5%   2     6     6     12m
+catalog-74995c78bb-ftnkc   8m     7Mi    
+catalog-74995c78bb-m28fj   7m     6Mi    
+catalog-74995c78bb-qnw2p   8m     7Mi    
+catalog-74995c78bb-qtsxs   7m     7Mi    
+catalog-74995c78bb-z4l9c   7m     7Mi    
+catalog-74995c78bb-zhxbk   8m     7Mi    
+load-catalog-6ljb2         499m   9Mi    
+postgres-0                 17m    40Mi   
+redis-574bb544f-mzxtr      8m     4Mi    
+t=+263s
+catalog   Deployment/catalog   cpu: 16%/5%   2     6     6     12m
+catalog-74995c78bb-ftnkc   8m     7Mi    
+catalog-74995c78bb-m28fj   7m     7Mi    
+catalog-74995c78bb-qnw2p   7m     7Mi    
+catalog-74995c78bb-qtsxs   8m     7Mi    
+catalog-74995c78bb-z4l9c   7m     7Mi    
+catalog-74995c78bb-zhxbk   8m     7Mi    
+load-catalog-6ljb2         497m   6Mi    
+postgres-0                 13m    40Mi   
+redis-574bb544f-mzxtr      8m     4Mi    
+t=+283s
+catalog   Deployment/catalog   cpu: 15%/5%   2     6     6     13m
+catalog-74995c78bb-ftnkc   7m     8Mi    
+catalog-74995c78bb-m28fj   7m     8Mi    
+catalog-74995c78bb-qnw2p   8m     7Mi    
+catalog-74995c78bb-qtsxs   8m     7Mi    
+catalog-74995c78bb-z4l9c   7m     7Mi    
+catalog-74995c78bb-zhxbk   8m     7Mi    
+load-catalog-6ljb2         498m   12Mi   
+postgres-0                 19m    40Mi   
+redis-574bb544f-mzxtr      8m     4Mi    
+
+## step 4c: the HPA at the ceiling, and the end of the Job
+$ kubectl describe hpa catalog -n bookstore | sed -n '/^Reference:/,$p'
+Reference:                                             Deployment/catalog
+Metrics:                                               ( current / target )
+  resource cpu on pods  (as a percentage of request):  15% (7m) / 5%
+Min replicas:                                          2
+Max replicas:                                          6
+Behavior:
+  Scale Up:
+    Stabilization Window: 60 seconds
+    Select Policy: Max
+    Policies:
+      - Type: Percent  Value: 100  Period: 60 seconds
+      - Type: Pods     Value: 2    Period: 60 seconds
+  Scale Down:
+    Stabilization Window: 300 seconds
+    Select Policy: Max
+    Policies:
+      - Type: Percent  Value: 50  Period: 60 seconds
+Deployment pods:       6 current / 6 desired
+Conditions:
+  Type            Status  Reason            Message
+  ----            ------  ------            -------
+  AbleToScale     True    ReadyForNewScale  recommended size matches current size
+  ScalingActive   True    ValidMetricFound  the HPA was able to successfully calculate a replica count from cpu resource utilization (percentage of request)
+  ScalingLimited  True    TooManyReplicas   the desired replica count is more than the maximum replica count
+  ScaledToZero    False   NotScaledToZero   the HPA controller did not scale the workload to zero
+Events:
+  Type     Reason                        Age    From                       Message
+  ----     ------                        ----   ----                       -------
+  Warning  FailedGetResourceMetric       13m    horizontal-pod-autoscaler  failed to get cpu utilization: unable to get metrics for resource cpu: no metrics returned from resource metrics API
+  Warning  FailedComputeMetricsReplicas  13m    horizontal-pod-autoscaler  invalid metrics (1 invalid out of 1), first error is: failed to get cpu resource metric value: failed to get cpu utilization: unable to get metrics for resource cpu: no metrics returned from resource metrics API
+  Warning  FailedGetResourceMetric       13m    horizontal-pod-autoscaler  failed to get cpu utilization: did not receive metrics for targeted pods (pods might be unready)
+  Warning  FailedComputeMetricsReplicas  13m    horizontal-pod-autoscaler  invalid metrics (1 invalid out of 1), first error is: failed to get cpu resource metric value: failed to get cpu utilization: did not receive metrics for targeted pods (pods might be unready)
+  Normal   SuccessfulRescale             8m37s  horizontal-pod-autoscaler  New size: 2; reason: All metrics below target
+  Normal   SuccessfulRescale             4m7s   horizontal-pod-autoscaler  New size: 4; reason: cpu resource utilization (percentage of request) above target
+  Normal   SuccessfulRescale             3m7s   horizontal-pod-autoscaler  New size: 6; reason: cpu resource utilization (percentage of request) above target
+
+$ kubectl get deployment catalog -n bookstore
+NAME      READY   UP-TO-DATE   AVAILABLE   AGE
+catalog   6/6     6            6           13m
+
+$ kubectl get job load-catalog -n bookstore
+NAME           STATUS     COMPLETIONS   DURATION   AGE
+load-catalog   Complete   1/1           7m2s       7m5s
+
+## step 4d: after the Job ends
+$ kubectl get job load-catalog -n bookstore
+NAME           STATUS     COMPLETIONS   DURATION   AGE
+load-catalog   Complete   1/1           7m2s       7m5s
+
+$ start=$(date +%s)
+while [ $(( $(date +%s) - start )) -lt 660 ]; do
+  echo "t=+$(( $(date +%s) - start ))s"
+  kubectl get hpa catalog -n bookstore --no-headers
+  kubectl top pods -n bookstore -l app=catalog --no-headers
+  sleep 30
+done
+t=+0s
+catalog   Deployment/catalog   cpu: 15%/5%   2     6     6     13m
+catalog-74995c78bb-ftnkc   7m    8Mi   
+catalog-74995c78bb-m28fj   8m    7Mi   
+catalog-74995c78bb-qnw2p   8m    7Mi   
+catalog-74995c78bb-qtsxs   8m    7Mi   
+catalog-74995c78bb-z4l9c   8m    7Mi   
+catalog-74995c78bb-zhxbk   8m    7Mi   
+t=+30s
+catalog   Deployment/catalog   cpu: 2%/5%   2     6     6     14m
+catalog-74995c78bb-ftnkc   1m    7Mi   
+catalog-74995c78bb-m28fj   1m    7Mi   
+catalog-74995c78bb-qnw2p   1m    7Mi   
+catalog-74995c78bb-qtsxs   1m    7Mi   
+catalog-74995c78bb-z4l9c   2m    7Mi   
+catalog-74995c78bb-zhxbk   1m    7Mi   
+t=+61s
+catalog   Deployment/catalog   cpu: 2%/5%   2     6     6     14m
+catalog-74995c78bb-ftnkc   1m    8Mi   
+catalog-74995c78bb-m28fj   1m    7Mi   
+catalog-74995c78bb-qnw2p   1m    7Mi   
+catalog-74995c78bb-qtsxs   1m    7Mi   
+catalog-74995c78bb-z4l9c   1m    7Mi   
+catalog-74995c78bb-zhxbk   1m    7Mi   
+t=+91s
+catalog   Deployment/catalog   cpu: 2%/5%   2     6     6     15m
+catalog-74995c78bb-ftnkc   1m    7Mi   
+catalog-74995c78bb-m28fj   1m    7Mi   
+catalog-74995c78bb-qnw2p   1m    7Mi   
+catalog-74995c78bb-qtsxs   1m    7Mi   
+catalog-74995c78bb-z4l9c   1m    7Mi   
+catalog-74995c78bb-zhxbk   1m    7Mi   
+t=+121s
+catalog   Deployment/catalog   cpu: 2%/5%   2     6     6     15m
+catalog-74995c78bb-ftnkc   1m    7Mi   
+catalog-74995c78bb-m28fj   1m    7Mi   
+catalog-74995c78bb-qnw2p   1m    7Mi   
+catalog-74995c78bb-qtsxs   1m    7Mi   
+catalog-74995c78bb-z4l9c   1m    7Mi   
+catalog-74995c78bb-zhxbk   1m    5Mi   
+t=+151s
+catalog   Deployment/catalog   cpu: 2%/5%   2     6     6     16m
+catalog-74995c78bb-ftnkc   1m    6Mi   
+catalog-74995c78bb-m28fj   1m    5Mi   
+catalog-74995c78bb-qnw2p   1m    5Mi   
+catalog-74995c78bb-qtsxs   1m    7Mi   
+catalog-74995c78bb-z4l9c   1m    7Mi   
+catalog-74995c78bb-zhxbk   1m    5Mi   
+t=+181s
+catalog   Deployment/catalog   cpu: 2%/5%   2     6     6     16m
+catalog-74995c78bb-ftnkc   1m    6Mi   
+catalog-74995c78bb-m28fj   1m    5Mi   
+catalog-74995c78bb-qnw2p   1m    5Mi   
+catalog-74995c78bb-qtsxs   1m    7Mi   
+catalog-74995c78bb-z4l9c   1m    7Mi   
+catalog-74995c78bb-zhxbk   1m    5Mi   
+t=+211s
+catalog   Deployment/catalog   cpu: 2%/5%   2     6     6     17m
+catalog-74995c78bb-ftnkc   1m    6Mi   
+catalog-74995c78bb-m28fj   1m    5Mi   
+catalog-74995c78bb-qnw2p   1m    5Mi   
+catalog-74995c78bb-qtsxs   1m    4Mi   
+catalog-74995c78bb-z4l9c   1m    4Mi   
+catalog-74995c78bb-zhxbk   1m    5Mi   
+t=+241s
+catalog   Deployment/catalog   cpu: 2%/5%   2     6     6     17m
+catalog-74995c78bb-ftnkc   1m    5Mi   
+catalog-74995c78bb-m28fj   1m    5Mi   
+catalog-74995c78bb-qnw2p   1m    5Mi   
+catalog-74995c78bb-qtsxs   1m    4Mi   
+catalog-74995c78bb-z4l9c   1m    4Mi   
+catalog-74995c78bb-zhxbk   1m    4Mi   
+t=+271s
+catalog   Deployment/catalog   cpu: 2%/5%   2     6     6     18m
+catalog-74995c78bb-ftnkc   1m    5Mi   
+catalog-74995c78bb-m28fj   1m    4Mi   
+catalog-74995c78bb-qnw2p   1m    5Mi   
+catalog-74995c78bb-qtsxs   1m    4Mi   
+catalog-74995c78bb-z4l9c   1m    4Mi   
+catalog-74995c78bb-zhxbk   1m    4Mi   
+t=+301s
+catalog   Deployment/catalog   cpu: 2%/5%   2     6     6     18m
+catalog-74995c78bb-ftnkc   1m    5Mi   
+catalog-74995c78bb-m28fj   1m    4Mi   
+catalog-74995c78bb-qnw2p   1m    5Mi   
+catalog-74995c78bb-qtsxs   1m    4Mi   
+catalog-74995c78bb-z4l9c   1m    4Mi   
+catalog-74995c78bb-zhxbk   1m    4Mi   
+t=+332s
+catalog   Deployment/catalog   cpu: 2%/5%   2     6     3     19m
+catalog-74995c78bb-ftnkc   1m    5Mi   
+catalog-74995c78bb-qnw2p   1m    5Mi   
+catalog-74995c78bb-zhxbk   1m    4Mi   
+t=+362s
+catalog   Deployment/catalog   cpu: 2%/5%   2     6     3     19m
+catalog-74995c78bb-ftnkc   1m    5Mi   
+catalog-74995c78bb-qnw2p   1m    5Mi   
+catalog-74995c78bb-zhxbk   1m    5Mi   
+t=+392s
+catalog   Deployment/catalog   cpu: 2%/5%   2     6     3     20m
+catalog-74995c78bb-ftnkc   1m    5Mi   
+catalog-74995c78bb-qnw2p   1m    5Mi   
+catalog-74995c78bb-zhxbk   1m    4Mi   
+t=+422s
+catalog   Deployment/catalog   cpu: 2%/5%   2     6     3     20m
+catalog-74995c78bb-ftnkc   1m    5Mi   
+catalog-74995c78bb-qnw2p   1m    5Mi   
+catalog-74995c78bb-zhxbk   1m    4Mi   
+t=+452s
+catalog   Deployment/catalog   cpu: 2%/5%   2     6     3     21m
+catalog-74995c78bb-ftnkc   1m    5Mi   
+catalog-74995c78bb-qnw2p   1m    5Mi   
+catalog-74995c78bb-zhxbk   1m    4Mi   
+t=+482s
+catalog   Deployment/catalog   cpu: 2%/5%   2     6     3     21m
+catalog-74995c78bb-ftnkc   1m    5Mi   
+catalog-74995c78bb-qnw2p   1m    5Mi   
+catalog-74995c78bb-zhxbk   1m    5Mi   
+t=+512s
+catalog   Deployment/catalog   cpu: 2%/5%   2     6     3     22m
+catalog-74995c78bb-ftnkc   1m    5Mi   
+catalog-74995c78bb-qnw2p   1m    5Mi   
+catalog-74995c78bb-zhxbk   1m    4Mi   
+t=+542s
+catalog   Deployment/catalog   cpu: 2%/5%   2     6     3     22m
+catalog-74995c78bb-ftnkc   1m    5Mi   
+catalog-74995c78bb-qnw2p   1m    5Mi   
+catalog-74995c78bb-zhxbk   1m    4Mi   
+t=+572s
+catalog   Deployment/catalog   cpu: 2%/5%   2     6     3     23m
+catalog-74995c78bb-ftnkc   1m    5Mi   
+catalog-74995c78bb-qnw2p   1m    5Mi   
+catalog-74995c78bb-zhxbk   1m    4Mi   
+t=+602s
+catalog   Deployment/catalog   cpu: 2%/5%   2     6     3     23m
+catalog-74995c78bb-ftnkc   1m    5Mi   
+catalog-74995c78bb-qnw2p   1m    5Mi   
+catalog-74995c78bb-zhxbk   1m    4Mi   
+t=+633s
+catalog   Deployment/catalog   cpu: 2%/5%   2     6     2     24m
+catalog-74995c78bb-ftnkc   1m    5Mi   
+catalog-74995c78bb-qnw2p   1m    5Mi   
+
+$ kubectl describe hpa catalog -n bookstore | sed -n '/^Events:/,$p'
+Events:
+  Type     Reason                        Age                From                       Message
+  ----     ------                        ----               ----                       -------
+  Warning  FailedGetResourceMetric       24m                horizontal-pod-autoscaler  failed to get cpu utilization: unable to get metrics for resource cpu: no metrics returned from resource metrics API
+  Warning  FailedComputeMetricsReplicas  24m                horizontal-pod-autoscaler  invalid metrics (1 invalid out of 1), first error is: failed to get cpu resource metric value: failed to get cpu utilization: unable to get metrics for resource cpu: no metrics returned from resource metrics API
+  Warning  FailedGetResourceMetric       24m                horizontal-pod-autoscaler  failed to get cpu utilization: did not receive metrics for targeted pods (pods might be unready)
+  Warning  FailedComputeMetricsReplicas  24m                horizontal-pod-autoscaler  invalid metrics (1 invalid out of 1), first error is: failed to get cpu resource metric value: failed to get cpu utilization: did not receive metrics for targeted pods (pods might be unready)
+  Normal   SuccessfulRescale             15m                horizontal-pod-autoscaler  New size: 4; reason: cpu resource utilization (percentage of request) above target
+  Normal   SuccessfulRescale             14m                horizontal-pod-autoscaler  New size: 6; reason: cpu resource utilization (percentage of request) above target
+  Normal   SuccessfulRescale             5m54s              horizontal-pod-autoscaler  New size: 3; reason: All metrics below target
+  Normal   SuccessfulRescale             54s (x2 over 19m)  horizontal-pod-autoscaler  New size: 2; reason: All metrics below target
+
+## cleanup
+$ kubectl delete namespace bookstore --wait=true
+namespace "bookstore" deleted
+
+$ kubectl delete priorityclass bookstore-critical bookstore-data bookstore-batch
+priorityclass.scheduling.k8s.io "bookstore-critical" deleted
+priorityclass.scheduling.k8s.io "bookstore-data" deleted
+priorityclass.scheduling.k8s.io "bookstore-batch" deleted
+
+$ helm uninstall metrics-server --namespace metrics-server
+release "metrics-server" uninstalled
+
+$ kubectl delete namespace metrics-server --wait=true
+namespace "metrics-server" deleted
+
+$ for n in $(kubectl get nodes -o name | sed 's|node/||'); do
+  docker exec "$n" sh -c 'cp /var/lib/kubelet/config.yaml.orig /var/lib/kubelet/config.yaml && rm /var/lib/kubelet/config.yaml.orig && rm -f /var/lib/kubelet/pki/kubelet-server-*.pem && systemctl restart kubelet && grep -c serverTLSBootstrap /var/lib/kubelet/config.yaml'
+done
+0
+0
+0
+
+$ kubectl delete csr --field-selector spec.signerName=kubernetes.io/kubelet-serving
+certificatesigningrequest.certificates.k8s.io "csr-4zw4v" deleted
+certificatesigningrequest.certificates.k8s.io "csr-59t2c" deleted
+certificatesigningrequest.certificates.k8s.io "csr-bfzk7" deleted
+
+## cleanup check
+$ kubectl get ns
+NAME                 STATUS   AGE
+default              Active   27m
+kube-node-lease      Active   27m
+kube-public          Active   27m
+kube-system          Active   27m
+local-path-storage   Active   27m
+
+$ kubectl get crd,validatingwebhookconfigurations,mutatingwebhookconfigurations,csr,priorityclass
+NAME                                                      AGE   SIGNERNAME                                    REQUESTOR                             REQUESTEDDURATION   CONDITION
+certificatesigningrequest.certificates.k8s.io/csr-7vkdc   27m   kubernetes.io/kube-apiserver-client-kubelet   system:bootstrap:abcdef               <none>              Approved,Issued
+certificatesigningrequest.certificates.k8s.io/csr-7w2fk   27m   kubernetes.io/kube-apiserver-client-kubelet   system:node:bookstore-control-plane   <none>              Approved,Issued
+certificatesigningrequest.certificates.k8s.io/csr-pc4rr   27m   kubernetes.io/kube-apiserver-client-kubelet   system:bootstrap:abcdef               <none>              Approved,Issued
+
+NAME                                                      VALUE        GLOBAL-DEFAULT   AGE   PREEMPTIONPOLICY
+priorityclass.scheduling.k8s.io/system-cluster-critical   2000000000   false            27m   PreemptLowerPriority
+priorityclass.scheduling.k8s.io/system-node-critical      2000001000   false            27m   PreemptLowerPriority
+
+$ kubectl get apiservices | grep -v Local
+NAME                              SERVICE   AVAILABLE   AGE
+
+$ kubectl get clusterrole,clusterrolebinding -o name | grep -c metrics-server
+0
+
+$ kubectl -n kube-system get rolebinding -o name | grep -c metrics-server
+0
+
+$ kubectl get nodes
+NAME                      STATUS   ROLES           AGE   VERSION
+bookstore-control-plane   Ready    control-plane   27m   v1.37.0
+bookstore-worker          Ready    <none>          27m   v1.37.0
+bookstore-worker2         Ready    <none>          27m   v1.37.0

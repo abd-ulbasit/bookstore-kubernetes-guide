@@ -156,16 +156,18 @@ flowchart LR
 We will: (0) give the cluster a resource metrics API that still verifies its
 kubelets; (1) add the **payments-worker** Deployment (its first manifest); (2)
 add an **HPA** on catalog; (3) install **KEDA** and add a **ScaledObject**
-scaling payments-worker on RabbitMQ queue depth; (4) start the load Job, which
-this lab run had to stop early.
+scaling payments-worker on RabbitMQ queue depth; (4) run the load Job and watch
+the HPA scale out, hold at its ceiling and scale back in.
 
-The output blocks come from two lab clusters whose nodes have other names than
-yours. Step 1, step 3, the quota and access checks in step 2 and the orders log
-in step 4 ran on a single-node cluster whose namespaces had other names. The
-metrics API in step 0, the HPA readings in step 2 and the load Job in step 4
-ran on a three-node cluster with the chapter's own namespace names. The
-transcript's header lists both runs and what each did not do. The commands use
-the chapter's names.
+The output blocks come from three recordings, and the transcript's header lists
+what each did. Two ran on lab clusters whose nodes have other names than yours:
+step 1, step 3, the quota and access checks in step 2 and the orders log in
+step 4 ran on a single-node cluster whose namespaces had other names, and the
+metrics API in step 0 and the HPA readings in step 2 ran on a three-node
+cluster with the chapter's own namespace names. The third ran the whole of step
+0g and step 4 on a GitHub Actions runner, a three-node kind cluster named
+`bookstore` with the chapter's own namespace names, because the load needs more
+room than the lab host had. The commands use the chapter's names.
 
 ### 0. Prerequisites (self-bootstrapping)
 
@@ -178,60 +180,52 @@ kubectl rollout status deployment/rabbitmq -n bookstore
 ```
 
 **Catalog needs room for its replicas.** Catalog spreads its replicas over the
-nodes with a hard rule: `topologySpreadConstraints` on
-`kubernetes.io/hostname`, `maxSkew: 1`, `DoNotSchedule`. On a three-node kind
-cluster the control-plane node carries a `NoSchedule` taint, but the default
-`nodeTaintsPolicy: Ignore` still counts it as an empty domain
-([04.02](../04-scheduling/02-affinity-taints-topology.md) explains the policy).
-Each worker may then hold one replica, and the third waits:
+nodes with a hard rule: `topologySpreadConstraints` on `kubernetes.io/hostname`,
+`maxSkew: 1`, `DoNotSchedule`. On a three-node kind cluster the control-plane
+node carries a `NoSchedule` taint. With the default `nodeTaintsPolicy: Ignore`
+the rule still counts that node as an empty domain.
+[04.02](../04-scheduling/02-affinity-taints-topology.md) explains the policy.
+Each worker may then hold one replica, and the third waits `Pending`. A
+recording on a three-node lab cluster showed that, before the shipped
+Deployment changed. It now sets `nodeTaintsPolicy: Honor`, which leaves out a
+node the Pod's tolerations do not cover when it counts domains. A single-node
+cluster does not need the field. This is the constraint as shipped, and the
+placement it gave on a runner:
 
 ```sh
+kubectl get deployment catalog -n bookstore -o jsonpath='{.spec.template.spec.topologySpreadConstraints}{"\n"}'
+kubectl rollout status deployment/catalog -n bookstore
 kubectl get pods -n bookstore -l app=catalog -o wide
 kubectl get events -n bookstore --field-selector reason=FailedScheduling
 ```
 
 <!-- gate: output -->
 ```
-NAME                       READY   STATUS    RESTARTS   AGE     IP             NODE               NOMINATED NODE   READINESS GATES
-catalog-86d7dc55cc-6l268   1/1     Running   0          6m18s   10.244.2.112   demo-lab-worker2   <none>           <none>
-catalog-86d7dc55cc-nd99d   1/1     Running   0          6m17s   10.244.1.80    demo-lab-worker    <none>           <none>
-catalog-86d7dc55cc-ptvkj   0/1     Pending   0          6m17s   <none>         <none>             <none>           <none>
+[{"labelSelector":{"matchLabels":{"app":"catalog"}},"maxSkew":1,"nodeTaintsPolicy":"Honor","topologyKey":"kubernetes.io/hostname","whenUnsatisfiable":"DoNotSchedule"}]
 ```
 
 <!-- gate: output -->
 ```
-LAST SEEN   TYPE      REASON             OBJECT                         MESSAGE
-54s         Warning   FailedScheduling   pod/catalog-86d7dc55cc-ptvkj   0/3 nodes are available: 1 node(s) had untolerated taint(s), 2 node(s) didn't match pod topology spread constraints. preemption: 0/3 nodes are available: 1 No preemption victims found for incoming pod, 1 Preemption is not helpful for scheduling, 1 node(s) didn't match pod topology spread constraints.
+deployment "catalog" successfully rolled out
+```
+
+<!-- gate: output -->
+```
+NAME                       READY   STATUS    RESTARTS   AGE   IP            NODE                NOMINATED NODE   READINESS GATES
+catalog-74995c78bb-ftnkc   1/1     Running   0          6s    10.244.1.4    bookstore-worker2   <none>           <none>
+catalog-74995c78bb-qnw2p   1/1     Running   0          6s    10.244.2.10   bookstore-worker    <none>           <none>
+catalog-74995c78bb-smgrd   1/1     Running   0          6s    10.244.1.3    bookstore-worker2   <none>           <none>
+```
+
+<!-- gate: output -->
+```
+No resources found in bookstore namespace.
 ```
 
 This matters here because `maxReplicas` only caps what the HPA asks for. The
 scheduler decides what is placed, and on a cloud cluster a node autoscaler
 answers a Pod left `Pending` by adding a node (see the
 [threats](#threats-and-controls)).
-The lab fixed it on the cluster object and left the shipped file alone. The
-patch adds `nodeTaintsPolicy: Honor`, which leaves out a node the Pod's
-tolerations do not cover when it counts domains. A single-node cluster does
-not need it:
-
-```sh
-kubectl patch deployment catalog -n bookstore --type json \
-  -p '[{"op":"add","path":"/spec/template/spec/topologySpreadConstraints/0/nodeTaintsPolicy","value":"Honor"}]'
-kubectl rollout status deployment/catalog -n bookstore
-kubectl get pods -n bookstore -l app=catalog -o wide
-```
-
-<!-- gate: output -->
-```
-deployment.apps/catalog patched
-# ...
-deployment "catalog" successfully rolled out
-# ...
-NAME                       READY   STATUS        RESTARTS   AGE    IP             NODE               NOMINATED NODE   READINESS GATES
-catalog-74995c78bb-9csnp   1/1     Running       0          7s     10.244.1.82    demo-lab-worker    <none>           <none>
-catalog-74995c78bb-rnjch   1/1     Running       0          26s    10.244.2.113   demo-lab-worker2   <none>           <none>
-catalog-74995c78bb-zpbgk   1/1     Running       0          44s    10.244.1.81    demo-lab-worker    <none>           <none>
-catalog-86d7dc55cc-6l268   1/1     Terminating   0          7m3s   10.244.2.112   demo-lab-worker2   <none>           <none>
-```
 
 **A resource metrics API that checks the kubelets.** The HPA's CPU metric
 needs a resource metrics API, which metrics-server serves.
@@ -584,10 +578,9 @@ catalog-74995c78bb-9csnp   1m    3Mi
 catalog-74995c78bb-rnjch   1m    3Mi   
 ```
 
-`MAXPODS` is the ceiling that the threats table protects. This run never
-reached it, because the load that would push CPU past the target had to be
-stopped early (step 4). The ceiling does not need a metric to show, though.
-The namespace ResourceQuota is the hard limit under `maxReplicas`. The
+`MAXPODS` is the ceiling that the threats table protects. Step 4 drives the
+HPA to it under load. The namespace ResourceQuota is the hard limit under
+`maxReplicas`, and it does not need a metric to show. The
 quota demonstration below was recorded earlier, with the HPA applied but
 unable to read a metric. A working HPA owns the replica count, so delete it
 (`kubectl delete hpa catalog -n bookstore`) before you scale by hand, and
@@ -755,6 +748,13 @@ restricted dry run and the broker's grant above are the evidence in this
 chapter. The install, the scale-out and the scale-to-zero are not run here.
 Run them on a cluster you own, after the install above.
 
+[09.01](../09-end-to-end-bookstore/01-bookstore-end-to-end.md) installed the
+same chart and applied `83-` on a runner, beside the rest of the platform.
+There the `ScaledObject` stayed not ready until a NetworkPolicy admitted the
+KEDA operator to RabbitMQ, because the Bookstore's default-deny policy has no
+such rule. Read the object's `Ready` condition after the apply, and not only
+the Pods.
+
 New file
 [`examples/bookstore/raw-manifests/83-keda-scaledobject.yaml`](../examples/bookstore/raw-manifests/83-keda-scaledobject.yaml)
 (a `TriggerAuthentication` and a `ScaledObject`, which names the Secret that
@@ -796,7 +796,7 @@ Gateway API and Kyverno objects in earlier chapters. The `19-` Deployment and
 the `82-` HPA are built-ins and dry-run cleanly.
 
 
-### 4. The load Job: what ran, and what did not
+### 4. The load Job, the ceiling and the scale-in
 
 The load comes from the Job and the two NetworkPolicies in [06.06 section
 1](06-capacity-and-cost.md#1-measure-catalogs-real-usage), which use a curl
@@ -824,79 +824,66 @@ networkpolicy.networking.k8s.io/allow-load-generator-to-catalog created
 job.batch/load-catalog created
 ```
 
+Before you trust a load test, check that the load reaches the service under
+test. This request runs from the load Pod itself, through the two policies
+above:
+
+```sh
+kubectl -n bookstore exec job/load-catalog -- \
+  curl -sS -m 5 -o /dev/null -w '%{http_code}\n' http://catalog.bookstore.svc.cluster.local/books
+```
+
+<!-- gate: output -->
+```
+200
+```
+
+The check earned its place. The first runs on a runner sent no load at all: the
+Job's curl could not resolve the Service name, because Docker copies the VM's
+DNS search domain into the kind nodes and curl's resolver gives up on it. The
+load Pod still used about 500m of CPU, since failing requests in a tight loop
+cost CPU, while catalog stayed at 1m. A load Pod that burns CPU while the
+service idles is the sign.
+
 Watch the HPA and the Pods' CPU from the same shell, every 20 seconds, with the
 loop from step 2 (change the pause to 20 and drop the `-l app=catalog` filter
-so the load Pod shows). This is the lab's first two minutes at the shipped
-70% target. Each catalog Pod requests 50m, so the target is 35m of CPU per
-Pod:
+so the load Pod shows). This is the first two minutes at the shipped 70%
+target. Each catalog Pod requests 50m, so the target is 35m of CPU per Pod.
+Here are the first and the last of the 6 samples:
 
 <!-- gate: output -->
 ```
 t=+0s
-catalog   Deployment/catalog   cpu: 2%/70%   2     6     2     6m42s
-catalog-74995c78bb-9csnp   1m    3Mi     
-catalog-74995c78bb-rnjch   1m    3Mi     
-postgres-0                 30m   104Mi   
-redis-574bb544f-b7tvt      4m    3Mi     
-t=+20s
-catalog   Deployment/catalog   cpu: 6%/70%   2     6     2     7m3s
-catalog-74995c78bb-9csnp   3m    4Mi     
-catalog-74995c78bb-rnjch   3m    7Mi     
-load-catalog-shx7j         86m   1Mi     
-postgres-0                 39m   111Mi   
-redis-574bb544f-b7tvt      5m    3Mi     
-t=+41s
-catalog   Deployment/catalog   cpu: 24%/70%   2     6     2     7m23s
-catalog-74995c78bb-9csnp   14m    8Mi     
-catalog-74995c78bb-rnjch   10m    8Mi     
-load-catalog-shx7j         434m   11Mi    
-postgres-0                 44m    111Mi   
-redis-574bb544f-b7tvt      8m     3Mi     
+catalog   Deployment/catalog   cpu: 2%/70%   2     6     2     6m33s
+catalog-74995c78bb-ftnkc   1m    3Mi    
+catalog-74995c78bb-qnw2p   1m    3Mi    
+postgres-0                 13m   29Mi   
+redis-574bb544f-mzxtr      2m    3Mi    
 ```
 
-At 41 seconds each catalog Pod used 10m to 14m, which is 24% of its request
+<!-- gate: output -->
+```
+t=+101s
+catalog   Deployment/catalog   cpu: 39%/70%   2     6     2     8m14s
+catalog-74995c78bb-ftnkc   20m    7Mi    
+catalog-74995c78bb-qnw2p   18m    7Mi    
+load-catalog-6ljb2         499m   11Mi   
+postgres-0                 18m    33Mi   
+redis-574bb544f-mzxtr      8m     3Mi    
+
+```
+
+The two catalog Pods settled at 20m and 18m, which is 39% of the request
 and under the 70% target, so the HPA correctly held at 2 replicas. The
-generator cost more than the service under test: the load Pod used 434m and
-Postgres 44m. In the 75 seconds recorded, this load stayed under the shipped
-target, so at that target it had not added a replica.
+generator cost far more than the service under test: the load Pod used
+499m and Postgres 18m. At the shipped target this load does not add a
+replica, and that is the right answer.
 
-**The run stopped here.** About 75 seconds in, the sampling pass that should
-have taken 20 seconds took two minutes (the AGE column jumps from 7m23s to
-9m19s), and `kubectl top` answered that the metrics API was not available:
-
-<!-- gate: output -->
-```
-t=+75s
-catalog   Deployment/catalog   cpu: 21%/70%   2     6     2     9m19s
-error: Metrics API not available
-```
-
-The host's load average had risen to about 30 on four cores, and the control
-plane's controller manager and scheduler restarted. Both already showed
-dozens of restarts before the run (38 and 40 in about ten hours), so one more
-each is no proof that the Job caused it. It came while the host was saturated,
-and the lab's rule for that is to stop. The Job was deleted and everything the
-run had installed was removed. The restart counts about two minutes later:
-
-<!-- gate: output -->
-```
-NAME                                             READY   STATUS    RESTARTS        AGE
-# ...
-kube-controller-manager-demo-lab-control-plane   1/1     Running   39 (111s ago)   10h
-# ...
-kube-scheduler-demo-lab-control-plane            1/1     Running   41 (89s ago)    10h
-```
-
-**Not run.** The scale-out to 4 and then 6 replicas, the hold at `MAXPODS`,
-the `ScalingLimited` condition changing to `True` and the scale-in after the
-Job all stayed unmeasured, and no number in this chapter claims them. Run
-them on a cluster you own, with room for the load. The shipped bounds stay as
-they are. Only the CPU target changes, because the Job above reached about
-24% of the request. Lowering the target to 5% gives 2.5m per Pod, and the
-formula would ask for `ceil(2 x 24/5)`, which is 10 replicas from that reading.
-The ceiling of 6 is then what stops it, and that stop is the property that
-bounds a cost attack. This is the expectation from the manifest and the
-reading above, not a measurement:
+To see the ceiling, lower only the target. The bounds stay as shipped. At 5%
+the formula asks for `ceil(2 x 39/5)`, which is 16 replicas,
+and the ceiling of 6 is what stops it. That stop is the property that bounds
+a cost attack. Patch the target, sample every 20 seconds, and read the HPA's
+conditions once it has held at 6 for a minute:
 
 ```sh
 kubectl patch hpa catalog -n bookstore --type json \
@@ -905,12 +892,89 @@ kubectl get hpa catalog -n bookstore -w
 kubectl describe hpa catalog -n bookstore | sed -n '/^Conditions:/,$p'
 ```
 
-Expect REPLICAS to climb to 6 and stay there while the Job runs, however high
-CPU reads, with `ScalingLimited` at `True` and the reason `TooManyReplicas`. If
-it passes 6, check `maxReplicas` on the object you applied. After the Job ends,
-the 300 second `scaleDown` window holds the replicas for five minutes before
-they fall. If your host struggles as this one did, lower the Job's concurrency
-before the target: the `seq 10` in its loop sets how many requests run at once.
+The samples below keep the time and the HPA line. The `scaleUp` policy takes
+the larger of two more Pods or a doubling every 60 seconds, after a 60 second
+stabilization window, so 2 became 4 and then 6, a minute or so apart. At 283
+seconds it was still at 6 with the Job running:
+
+<!-- gate: output -->
+```
+t=+61s
+catalog   Deployment/catalog   cpu: 39%/5%   2     6     2     9m35s
+# ...
+t=+81s
+catalog   Deployment/catalog   cpu: 39%/5%   2     6     4     9m55s
+# ...
+t=+141s
+catalog   Deployment/catalog   cpu: 18%/5%   2     6     6     10m
+# ...
+t=+283s
+catalog   Deployment/catalog   cpu: 15%/5%   2     6     6     13m
+```
+
+While the Job ran, CPU stayed above the target, so the desired count stayed
+above the ceiling. The HPA's conditions say so. `ScalingLimited` is `True` with
+the reason `TooManyReplicas`, and `ScalingActive` is `True`, so the metric was
+read:
+
+<!-- gate: output -->
+```
+Conditions:
+  Type            Status  Reason             Message
+  ----            ------  ------             -------
+  AbleToScale     True    ScaleUpStabilized  recent recommendations were lower than current one, applying the lowest recent recommendation
+  ScalingActive   True    ValidMetricFound   the HPA was able to successfully calculate a replica count from cpu resource utilization (percentage of request)
+  ScalingLimited  True    TooManyReplicas    the desired replica count is more than the maximum replica count
+  ScaledToZero    False   NotScaledToZero    the HPA controller did not scale the workload to zero
+```
+
+The Deployment and the Job, read after the loop:
+
+<!-- gate: output -->
+```
+NAME      READY   UP-TO-DATE   AVAILABLE   AGE
+catalog   6/6     6            6           13m
+```
+
+<!-- gate: output -->
+```
+NAME           STATUS     COMPLETIONS   DURATION   AGE
+load-catalog   Complete   1/1           7m2s       7m5s
+```
+
+The Job ran its 420 seconds and completed. The `scaleDown` policy holds the
+replicas for 300 seconds after the load stops, then releases at most half of
+them every 60 seconds. This is the same loop for the 22 samples after the Job,
+30 seconds apart. The count was still 6 at 301 seconds and had fallen
+by the next sample:
+
+<!-- gate: output -->
+```
+t=+0s
+catalog   Deployment/catalog   cpu: 15%/5%   2     6     6     13m
+# ...
+t=+301s
+catalog   Deployment/catalog   cpu: 2%/5%   2     6     6     18m
+# ...
+t=+332s
+catalog   Deployment/catalog   cpu: 2%/5%   2     6     3     19m
+# ...
+t=+633s
+catalog   Deployment/catalog   cpu: 2%/5%   2     6     2     24m
+```
+
+The count reached the floor of 2 by 633 seconds.
+
+The HPA's events record each change with its reason:
+
+<!-- gate: output -->
+```
+  Normal   SuccessfulRescale             15m                horizontal-pod-autoscaler  New size: 4; reason: cpu resource utilization (percentage of request) above target
+  Normal   SuccessfulRescale             14m                horizontal-pod-autoscaler  New size: 6; reason: cpu resource utilization (percentage of request) above target
+  Normal   SuccessfulRescale             5m54s              horizontal-pod-autoscaler  New size: 3; reason: All metrics below target
+  Normal   SuccessfulRescale             54s (x2 over 19m)  horizontal-pod-autoscaler  New size: 2; reason: All metrics below target
+```
+
 
 Orders publishes to the queue when `AMQP_URL` is set, and `14-` reads it from
 the `db-credentials` Secret, so the queue fills when orders arrive. Each

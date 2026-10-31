@@ -456,55 +456,49 @@ kubectl get pods -n monitoring
 kubectl get pods -n node-exporter
 ```
 
-This install did not finish on the lab cluster, which had about 3 GiB of
-memory to spare and a slow disk. Helm printed the one warning the dry run
-predicted, then gave up on Grafana after eight minutes:
+The install finished. It ran on a GitHub Actions runner, a machine with 4 vCPU
+and about 16 GiB of memory, and `--wait` returned in under a minute. An earlier
+attempt on a lab host with about 3 GiB of memory to spare did not finish: Helm
+gave up on Grafana after eight minutes and the control plane restarted while it
+ran. The host was too small. Nothing below depends on that attempt. Helm
+printed the one warning the dry run predicted, and nothing else warned:
 
 <!-- gate: output -->
 ```
-I1031 17:11:31.890334   59522 warnings.go:107] "Warning: would violate PodSecurity \"restricted:latest\": host namespaces (hostNetwork=true), restricted volume types (volumes \"proc\", \"sys\", \"root\" use restricted volume type \"hostPath\")"
-Error: INSTALLATION FAILED: resource Deployment/monitoring/kube-prometheus-stack-grafana not ready. status: InProgress, message: Available: 0/1
-context deadline exceeded
+I1031 17:13:47.863359   14211 warnings.go:107] "Warning: would violate PodSecurity \"restricted:latest\": host namespaces (hostNetwork=true), restricted volume types (volumes \"proc\", \"sys\", \"root\" use restricted volume type \"hostPath\")"
+NAME: kube-prometheus-stack
+LAST DEPLOYED: Sat Oct 31 17:13:42 2026
+NAMESPACE: monitoring
+STATUS: deployed
+REVISION: 1
 ```
 
-The API server restarted while the install ran. Before it, the restart counts
-in `kube-system` were 15 for the API server, 37 for the controller manager and
-39 for the scheduler. Afterwards they read:
-
-<!-- gate: output -->
-```
-NAME                                             READY   STATUS    RESTARTS         AGE
-etcd-demo-lab-control-plane                      1/1     Running   0                9h
-kube-apiserver-demo-lab-control-plane            1/1     Running   17 (60s ago)     9h
-kube-controller-manager-demo-lab-control-plane   1/1     Running   38 (4m1s ago)    9h
-kube-scheduler-demo-lab-control-plane            0/1     Running   40 (3m54s ago)   9h
-```
-
-A restarting control plane is the stop signal for a lab cluster, so the run
-was stopped and removed. The transcript shows the removal, the CRDs included.
-This is what the two namespaces held when it was stopped:
+The two namespaces hold what the table above says. The five Pods in
+`monitoring` are the operator, Prometheus, Alertmanager, Grafana and
+kube-state-metrics. Every one was ready when `--wait` returned. The three
+node-exporter Pods, one per node, are in `node-exporter`:
 
 <!-- gate: output -->
 ```
-NAME                                                        READY   STATUS             RESTARTS      AGE
-alertmanager-kube-prometheus-stack-alertmanager-0           2/2     Running            0             11m
-kube-prometheus-stack-grafana-57d9867647-jmfnk              2/3     Running            1 (45s ago)   12m
-kube-prometheus-stack-kube-state-metrics-78dc75b868-d62m8   0/1     CrashLoopBackOff   5 (68s ago)   12m
-kube-prometheus-stack-operator-dbf7f9444-p2826              1/1     Running            0             12m
-prometheus-kube-prometheus-stack-prometheus-0               2/2     Running            0             11m
+NAME                                                        READY   STATUS    RESTARTS   AGE
+alertmanager-kube-prometheus-stack-alertmanager-0           2/2     Running   0          34s
+kube-prometheus-stack-grafana-57d9867647-6r2qr              3/3     Running   0          39s
+kube-prometheus-stack-kube-state-metrics-78dc75b868-rp4rd   1/1     Running   0          39s
+kube-prometheus-stack-operator-dbf7f9444-jrbnf              1/1     Running   0          39s
+prometheus-kube-prometheus-stack-prometheus-0               2/2     Running   0          34s
 ```
 
 <!-- gate: output -->
 ```
 NAME                                                   READY   STATUS    RESTARTS   AGE
-kube-prometheus-stack-prometheus-node-exporter-b6cbm   1/1     Running   0          12m
-kube-prometheus-stack-prometheus-node-exporter-jm6d5   1/1     Running   0          12m
-kube-prometheus-stack-prometheus-node-exporter-wf8kh   1/1     Running   0          12m
+kube-prometheus-stack-prometheus-node-exporter-686nj   1/1     Running   0          39s
+kube-prometheus-stack-prometheus-node-exporter-98tb4   1/1     Running   0          39s
+kube-prometheus-stack-prometheus-node-exporter-wbbgq   1/1     Running   0          39s
 ```
 
-Read it for the security claim, not for the failure. A Pod that a namespace
-refuses shows up as a `FailedCreate` event on its controller, and the cluster
-held none:
+Read it for the security claim, not only for the ready count. A Pod that a
+namespace refuses shows up as a `FailedCreate` event on its controller, and the
+cluster held none:
 
 ```sh
 kubectl get events -A --field-selector reason=FailedCreate
@@ -515,33 +509,139 @@ kubectl get events -A --field-selector reason=FailedCreate
 No resources found
 ```
 
-So the Pods that the install got as far as creating in `monitoring`, among
-them Prometheus and Alertmanager, which the dry run could not judge, were
-admitted by a namespace that enforces `restricted`. The three node-exporter
-Pods run in `node-exporter`. Grafana was 2/3 ready and
-kube-state-metrics was in `CrashLoopBackOff` when the run stopped. Their logs
-were not read, so this lab does not say why.
+So every Pod the install created, among them Prometheus and Alertmanager,
+which the dry run could not judge, was admitted by a namespace that enforces
+`restricted`. The DaemonSet in `node-exporter` keeps host networking, which
+its network collectors need, and with `hostPID: false` it shares no PID
+namespace with the node. The empty `hostPID` below is the unset field, which
+means false:
 
-**Not run on this lab:** a stack with every Pod Ready, Prometheus's list of
-active targets and a Grafana login attempt. There is no output for them here.
-On a cluster you own, open both UIs through a port-forward, which stays local:
+```sh
+kubectl -n node-exporter get daemonset \
+  -o jsonpath='{.items[0].metadata.name} hostNetwork={.items[0].spec.template.spec.hostNetwork} hostPID={.items[0].spec.template.spec.hostPID}{"\n"}'
+```
+
+<!-- gate: output -->
+```
+kube-prometheus-stack-prometheus-node-exporter hostNetwork=true hostPID=
+```
+
+Open both UIs through a port-forward, which stays local, and read what
+Prometheus scrapes. Its UI is at `http://localhost:9090` (Status, then
+Targets), and Grafana's is at `http://localhost:3000` (user `admin`; the
+password is in `grafana-admin`):
 
 ```sh
 kubectl -n monitoring port-forward svc/kube-prometheus-stack-prometheus 9090:9090 &
-# Prometheus UI: http://localhost:9090  (Status -> Targets shows what it scrapes)
 kubectl -n monitoring port-forward svc/kube-prometheus-stack-grafana 3000:80 &
-# Grafana: http://localhost:3000 (user admin; the password is in grafana-admin)
+curl -s 'localhost:9090/api/v1/targets?state=active' \
+  | jq -r '.data.activeTargets[] | [.labels.job, .labels.namespace, .health] | @tsv' | sort
 ```
 
-Then check the two claims this section makes about the running stack. The
-first lists every active target with its health. The second sends Grafana's
-API a request with no credentials, and a `401` means the login is enforced:
+The runner listed 28 active targets, 22 up and 6 down. The
+`kubelet` rows are each node's three paths (metrics, cAdvisor and probes), and
+the `node-exporter` rows are the three DaemonSet Pods in their own namespace:
+
+<!-- gate: output -->
+```
+apiserver   default up
+coredns kube-system up
+coredns kube-system up
+kube-controller-manager kube-system down
+kube-etcd   kube-system down
+kube-prometheus-stack-alertmanager  monitoring  up
+kube-prometheus-stack-alertmanager  monitoring  up
+kube-prometheus-stack-grafana   monitoring  up
+kube-prometheus-stack-operator  monitoring  up
+kube-prometheus-stack-prometheus    monitoring  up
+kube-prometheus-stack-prometheus    monitoring  up
+kube-proxy  kube-system down
+kube-proxy  kube-system down
+kube-proxy  kube-system down
+kube-scheduler  kube-system down
+kube-state-metrics  monitoring  up
+kubelet kube-system up
+kubelet kube-system up
+kubelet kube-system up
+kubelet kube-system up
+kubelet kube-system up
+kubelet kube-system up
+kubelet kube-system up
+kubelet kube-system up
+kubelet kube-system up
+node-exporter   node-exporter   up
+node-exporter   node-exporter   up
+node-exporter   node-exporter   up
+```
+
+The 6 that are down are the control-plane components and kube-proxy. Their
+scrape error is `connection refused` on the node's address, which is what a
+metrics port bound to the loopback address answers. kubeadm, which kind uses,
+binds those ports to the loopback address by default. So these 6 fail to
+scrape on kind however the chart is installed, and the rows to trust on kind
+are the other 22:
 
 ```sh
 curl -s 'localhost:9090/api/v1/targets?state=active' \
-  | jq -r '.data.activeTargets[] | [.labels.job, .labels.namespace, .health] | @tsv'
-curl -s -o /dev/null -w '%{http_code}\n' localhost:3000/api/org
+  | jq -r '.data.activeTargets[] | select(.health!="up") | [.labels.job, .scrapeUrl, .lastError] | @tsv' | sort
 ```
+
+<!-- gate: output -->
+```
+kube-controller-manager https://172.18.0.3:10257/metrics    Get "https://172.18.0.3:10257/metrics": dial tcp 172.18.0.3:10257: connect: connection refused
+kube-etcd   http://172.18.0.3:2381/metrics  Get "http://172.18.0.3:2381/metrics": dial tcp 172.18.0.3:2381: connect: connection refused
+kube-proxy  http://172.18.0.2:10249/metrics Get "http://172.18.0.2:10249/metrics": dial tcp 172.18.0.2:10249: connect: connection refused
+kube-proxy  http://172.18.0.3:10249/metrics Get "http://172.18.0.3:10249/metrics": dial tcp 172.18.0.3:10249: connect: connection refused
+kube-proxy  http://172.18.0.4:10249/metrics Get "http://172.18.0.4:10249/metrics": dial tcp 172.18.0.4:10249: connect: connection refused
+kube-scheduler  https://172.18.0.3:10259/metrics    Get "https://172.18.0.3:10259/metrics": dial tcp 172.18.0.3:10259: connect: connection refused
+```
+
+Moving node-exporter into its own namespace and turning off the shared PID
+namespace must not cost the node metrics. The first query counts the
+`node_cpu_seconds_total` series by the namespace they came from. The second
+counts the node-exporter targets that are up:
+
+```sh
+curl -s 'localhost:9090/api/v1/query' --data-urlencode 'query=count(node_cpu_seconds_total) by (namespace)' \
+  | jq -r '.data.result[] | [.metric.namespace, .value[1]] | @tsv'
+curl -s 'localhost:9090/api/v1/query' --data-urlencode 'query=count(up{job="node-exporter"} == 1)' \
+  | jq -r '.data.result[0].value[1]'
+```
+
+<!-- gate: output -->
+```
+node-exporter   96
+```
+
+<!-- gate: output -->
+```
+3
+```
+
+Grafana's login is the second claim. The first request below carries no
+credentials, and a `401` means the login is enforced. A refusal proves
+something only if a request with the right credentials is accepted, so the
+second request reads the generated password from the Secret into a shell
+variable and sends it. The status line is all that prints, and the password is
+never shown:
+
+```sh
+curl -s -o /dev/null -w '%{http_code}\n' localhost:3000/api/org
+GPW=$(kubectl -n monitoring get secret grafana-admin -o jsonpath='{.data.admin-password}' | base64 -d)
+curl -s -o /dev/null -w '%{http_code}\n' -u "admin:$GPW" localhost:3000/api/org
+unset GPW
+```
+
+<!-- gate: output -->
+```
+401
+```
+
+<!-- gate: output -->
+```
+200
+```
+
 
 ### 3. Scrape the Bookstore: a ServiceMonitor
 
@@ -593,14 +693,38 @@ kubectl apply -f examples/bookstore/raw-manifests/80-servicemonitor.yaml
 # Prometheus UI -> Status -> Targets: bookstore/catalog should be UP within ~30s.
 ```
 
-The lab created both objects with the chart's CRDs in place. No operator ran
-there, so nothing scraped them:
+On the runner the stack was running, and `60-networkpolicy.yaml` from section 4
+was already applied. The apply created both objects:
 
 <!-- gate: output -->
 ```
 servicemonitor.monitoring.coreos.com/catalog created
 servicemonitor.monitoring.coreos.com/payments-worker created
 ```
+
+Within a minute Prometheus listed catalog's Pods as targets, and every one was
+up. They are up behind the default-deny policy because rule 10 admits the real
+Prometheus Pod, the one the label `app.kubernetes.io/name=prometheus` selects:
+
+```sh
+kubectl -n monitoring get pods -l app.kubernetes.io/name=prometheus
+curl -s 'localhost:9090/api/v1/targets?state=active' \
+  | jq -r '.data.activeTargets[] | select(.labels.namespace=="bookstore") | [.labels.job, .labels.namespace, .health] | @tsv' | sort
+```
+
+<!-- gate: output -->
+```
+NAME                                            READY   STATUS    RESTARTS   AGE
+prometheus-kube-prometheus-stack-prometheus-0   2/2     Running   0          3m11s
+```
+
+<!-- gate: output -->
+```
+catalog bookstore   up
+catalog bookstore   up
+catalog bookstore   up
+```
+
 
 > **NetworkPolicy interaction.** Once a policy-enforcing CNI is in play (Part 02
 > ch.06), default-deny ingress in `bookstore` blocks Prometheus's scrape and
@@ -681,10 +805,10 @@ Rule 10 is the only edge into `monitoring`, and its `from` entry needs both
 selectors. Two stand-in pods in that namespace show it. The first carries
 `app.kubernetes.io/name: prometheus`, the label to check on the chart's real
 Prometheus pods with `kubectl -n monitoring get pods --show-labels` once the
-stack runs. The second carries a Grafana label. This lab ran the Bookstore
-without the stack, so the stand-ins are the test. node-exporter is not part
-of it: the DaemonSet lives in its own namespace and is not a source this rule
-admits.
+stack runs. The second carries a Grafana label. The stand-ins need no stack,
+so they test the rule's selectors on their own, and section 3 showed the same
+rule admitting the real Prometheus Pod. node-exporter is not part of it: the
+DaemonSet lives in its own namespace and is not a source this rule admits.
 
 ```sh
 kubectl -n monitoring create serviceaccount standin
@@ -785,6 +909,11 @@ a `stripPrefix` of `/api/books`, which turns `/api/books/metrics` into
 request `/metrics` through the public host as well, to confirm that the edge
 answers with storefront's page and not with the metrics body.
 
+[09.01](../09-end-to-end-bookstore/01-bookstore-end-to-end.md) measured the
+edge half. With Traefik and the rewrite running on a runner, `/metrics` on the
+public host returned storefront's page with no `go_info` line, and
+`/api/books/metrics` and `/api/orders/metrics` both returned 404.
+
 ### 5. Query the Bookstore with PromQL
 
 Generate traffic from storefront, the one caller the policy admits. catalog is
@@ -857,6 +986,22 @@ spec:
 kubectl apply -f examples/bookstore/raw-manifests/81-prometheusrule.yaml
 # Prometheus UI -> Alerts: the 3 rules appear (Inactive until the expr trips,
 # then Pending for `for:` 10m, then Firing -> Alertmanager).
+```
+
+On the runner Prometheus loaded all three rules from the PrometheusRule. The
+API reports each one healthy and not firing, as it should while catalog serves
+no errors:
+
+```sh
+curl -s 'localhost:9090/api/v1/rules' \
+  | jq -r '.data.groups[] | select(.name=="bookstore-catalog.rules") | .rules[] | [.name, .state, .health] | @tsv'
+```
+
+<!-- gate: output -->
+```
+CatalogHighErrorRate    inactive    ok
+CatalogHighLatencyP95   inactive    ok
+CatalogAbsent   inactive    ok
 ```
 
 `for: 10m` means the condition must hold continuously for 10 minutes before
