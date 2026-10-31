@@ -13,7 +13,7 @@
 # is edited.
 #
 # Second recording (from "## second recording"): a three-node cluster, shown as
-# sf-sched-control-plane and two workers, with about 3 GiB of host memory to
+# demo-lab-control-plane and two workers, with about 3 GiB of host memory to
 # spare and a slow disk. It ran the script examples/security-lab/labs/06-04.sh
 # one phase at a time (metrics, bookstore, spread, idle, load1, then cleanup),
 # each phase in one foreground command, and used the chapter's own namespace
@@ -653,9 +653,9 @@ $ kubectl -n p06-04-bookstore exec deploy/rabbitmq -- rabbitmqctl list_user_perm
 ## step 0a: the cluster, and no resource metrics yet
 $ kubectl get nodes
 NAME                     STATUS   ROLES           AGE   VERSION
-sf-sched-control-plane   Ready    control-plane   10h   v1.37.0
-sf-sched-worker          Ready    <none>          10h   v1.37.0
-sf-sched-worker2         Ready    <none>          10h   v1.37.0
+demo-lab-control-plane   Ready    control-plane   10h   v1.37.0
+demo-lab-worker          Ready    <none>          10h   v1.37.0
+demo-lab-worker2         Ready    <none>          10h   v1.37.0
 
 $ kubectl get apiservice v1beta1.metrics.k8s.io
 Error from server (NotFound): apiservices.apiregistration.k8s.io "v1beta1.metrics.k8s.io" not found
@@ -720,9 +720,9 @@ serverTLSBootstrap: true
 
 $ kubectl get csr
 NAME        AGE   SIGNERNAME                      REQUESTOR                            REQUESTEDDURATION   CONDITION
-csr-5wktd   2s    kubernetes.io/kubelet-serving   system:node:sf-sched-worker          <none>              Pending
-csr-bjx5p   1s    kubernetes.io/kubelet-serving   system:node:sf-sched-worker2         <none>              Pending
-csr-jg8hl   3s    kubernetes.io/kubelet-serving   system:node:sf-sched-control-plane   <none>              Pending
+csr-5wktd   2s    kubernetes.io/kubelet-serving   system:node:demo-lab-worker          <none>              Pending
+csr-bjx5p   1s    kubernetes.io/kubelet-serving   system:node:demo-lab-worker2         <none>              Pending
+csr-jg8hl   3s    kubernetes.io/kubelet-serving   system:node:demo-lab-control-plane   <none>              Pending
 
 ## step 0d: check each request before approving it
 $ for c in $(kubectl get csr -o name); do
@@ -730,9 +730,9 @@ $ for c in $(kubectl get csr -o name); do
   s=$(kubectl get "$c" -o jsonpath='{.spec.request}' | base64 -d | openssl req -noout -text | grep -A1 'Alternative Name' | tail -1 | sed 's/^ *//')
   echo "${c#*/} $u $s"
 done
-csr-5wktd system:node:sf-sched-worker DNS:sf-sched-worker, IP Address:172.18.0.4
-csr-bjx5p system:node:sf-sched-worker2 DNS:sf-sched-worker2, IP Address:172.18.0.5
-csr-jg8hl system:node:sf-sched-control-plane DNS:sf-sched-control-plane, IP Address:172.18.0.3
+csr-5wktd system:node:demo-lab-worker DNS:demo-lab-worker, IP Address:172.18.0.4
+csr-bjx5p system:node:demo-lab-worker2 DNS:demo-lab-worker2, IP Address:172.18.0.5
+csr-jg8hl system:node:demo-lab-control-plane DNS:demo-lab-control-plane, IP Address:172.18.0.3
 
 $ kubectl certificate approve $(kubectl get csr -o name)
 certificatesigningrequest.certificates.k8s.io/csr-5wktd approved
@@ -741,9 +741,9 @@ certificatesigningrequest.certificates.k8s.io/csr-jg8hl approved
 
 $ kubectl get csr
 NAME        AGE   SIGNERNAME                      REQUESTOR                            REQUESTEDDURATION   CONDITION
-csr-5wktd   7s    kubernetes.io/kubelet-serving   system:node:sf-sched-worker          <none>              Approved,Issued
-csr-bjx5p   6s    kubernetes.io/kubelet-serving   system:node:sf-sched-worker2         <none>              Approved,Issued
-csr-jg8hl   8s    kubernetes.io/kubelet-serving   system:node:sf-sched-control-plane   <none>              Approved,Issued
+csr-5wktd   7s    kubernetes.io/kubelet-serving   system:node:demo-lab-worker          <none>              Approved,Issued
+csr-bjx5p   6s    kubernetes.io/kubelet-serving   system:node:demo-lab-worker2         <none>              Approved,Issued
+csr-jg8hl   8s    kubernetes.io/kubelet-serving   system:node:demo-lab-control-plane   <none>              Approved,Issued
 
 ## step 0e: metrics-server serves, with verification still on
 $ kubectl -n metrics-server rollout status deployment/metrics-server --timeout=300s
@@ -755,9 +755,9 @@ v1beta1.metrics.k8s.io   metrics-server/metrics-server   True        82s
 
 $ kubectl top nodes
 NAME                     CPU(cores)   CPU(%)   MEMORY(bytes)   MEMORY(%)   
-sf-sched-control-plane   139m         3%       1139Mi          15%         
-sf-sched-worker          37m          0%       239Mi           3%          
-sf-sched-worker2         23m          0%       272Mi           3%          
+demo-lab-control-plane   139m         3%       1139Mi          15%         
+demo-lab-worker          37m          0%       239Mi           3%          
+demo-lab-worker2         23m          0%       272Mi           3%          
 
 $ kubectl -n metrics-server get deploy metrics-server -o jsonpath='{.spec.template.spec.containers[0].args}{"\n"}'
 ["--secure-port=10250","--cert-dir=/tmp","--kubelet-preferred-address-types=InternalIP,ExternalIP,Hostname","--kubelet-use-node-status-port","--metric-resolution=15s"]
@@ -767,9 +767,9 @@ $ kubectl -n metrics-server get deploy metrics-server -o jsonpath='{.spec.templa
 
 ## step 0e (continued): the first scrape errors, read from the same pod after the fix
 $ kubectl -n metrics-server logs deploy/metrics-server | grep 'Failed to scrape' | head -3
-E1031 12:48:31.000213       1 scraper.go:149] "Failed to scrape node" err="Get \"https://172.18.0.4:10250/metrics/resource\": tls: failed to verify certificate: x509: cannot validate certificate for 172.18.0.4 because it doesn't contain any IP SANs" node="sf-sched-worker"
-E1031 12:48:31.000755       1 scraper.go:149] "Failed to scrape node" err="Get \"https://172.18.0.5:10250/metrics/resource\": tls: failed to verify certificate: x509: cannot validate certificate for 172.18.0.5 because it doesn't contain any IP SANs" node="sf-sched-worker2"
-E1031 12:48:31.007548       1 scraper.go:149] "Failed to scrape node" err="Get \"https://172.18.0.3:10250/metrics/resource\": tls: failed to verify certificate: x509: cannot validate certificate for 172.18.0.3 because it doesn't contain any IP SANs" node="sf-sched-control-plane"
+E1031 12:48:31.000213       1 scraper.go:149] "Failed to scrape node" err="Get \"https://172.18.0.4:10250/metrics/resource\": tls: failed to verify certificate: x509: cannot validate certificate for 172.18.0.4 because it doesn't contain any IP SANs" node="demo-lab-worker"
+E1031 12:48:31.000755       1 scraper.go:149] "Failed to scrape node" err="Get \"https://172.18.0.5:10250/metrics/resource\": tls: failed to verify certificate: x509: cannot validate certificate for 172.18.0.5 because it doesn't contain any IP SANs" node="demo-lab-worker2"
+E1031 12:48:31.007548       1 scraper.go:149] "Failed to scrape node" err="Get \"https://172.18.0.3:10250/metrics/resource\": tls: failed to verify certificate: x509: cannot validate certificate for 172.18.0.3 because it doesn't contain any IP SANs" node="demo-lab-control-plane"
 
 $ kubectl -n metrics-server logs deploy/metrics-server | grep -c 'Failed to scrape'
 3
@@ -840,8 +840,8 @@ networkpolicy.networking.k8s.io/allow-span-egress created
 ## step 0g: the third catalog replica, and the lab-only change that places it
 $ kubectl get pods -n bookstore -l app=catalog -o wide
 NAME                       READY   STATUS    RESTARTS   AGE     IP             NODE               NOMINATED NODE   READINESS GATES
-catalog-86d7dc55cc-6l268   1/1     Running   0          6m18s   10.244.2.112   sf-sched-worker2   <none>           <none>
-catalog-86d7dc55cc-nd99d   1/1     Running   0          6m17s   10.244.1.80    sf-sched-worker    <none>           <none>
+catalog-86d7dc55cc-6l268   1/1     Running   0          6m18s   10.244.2.112   demo-lab-worker2   <none>           <none>
+catalog-86d7dc55cc-nd99d   1/1     Running   0          6m17s   10.244.1.80    demo-lab-worker    <none>           <none>
 catalog-86d7dc55cc-ptvkj   0/1     Pending   0          6m17s   <none>         <none>             <none>           <none>
 
 $ kubectl get events -n bookstore --field-selector reason=FailedScheduling
@@ -859,10 +859,10 @@ deployment "catalog" successfully rolled out
 
 $ kubectl get pods -n bookstore -l app=catalog -o wide
 NAME                       READY   STATUS        RESTARTS   AGE    IP             NODE               NOMINATED NODE   READINESS GATES
-catalog-74995c78bb-9csnp   1/1     Running       0          7s     10.244.1.82    sf-sched-worker    <none>           <none>
-catalog-74995c78bb-rnjch   1/1     Running       0          26s    10.244.2.113   sf-sched-worker2   <none>           <none>
-catalog-74995c78bb-zpbgk   1/1     Running       0          44s    10.244.1.81    sf-sched-worker    <none>           <none>
-catalog-86d7dc55cc-6l268   1/1     Terminating   0          7m3s   10.244.2.112   sf-sched-worker2   <none>           <none>
+catalog-74995c78bb-9csnp   1/1     Running       0          7s     10.244.1.82    demo-lab-worker    <none>           <none>
+catalog-74995c78bb-rnjch   1/1     Running       0          26s    10.244.2.113   demo-lab-worker2   <none>           <none>
+catalog-74995c78bb-zpbgk   1/1     Running       0          44s    10.244.1.81    demo-lab-worker    <none>           <none>
+catalog-86d7dc55cc-6l268   1/1     Terminating   0          7m3s   10.244.2.112   demo-lab-worker2   <none>           <none>
 
 ## step 2: the HPA at its shipped target, with no load
 $ kubectl apply -f examples/bookstore/raw-manifests/82-hpa-catalog.yaml
@@ -1018,16 +1018,16 @@ $ kubectl get pods -n kube-system
 NAME                                             READY   STATUS    RESTARTS        AGE
 coredns-559f6c778d-9vkt4                         1/1     Running   0               10h
 coredns-559f6c778d-lk2hp                         1/1     Running   0               10h
-etcd-sf-sched-control-plane                      1/1     Running   0               10h
+etcd-demo-lab-control-plane                      1/1     Running   0               10h
 kindnet-7ppzx                                    1/1     Running   0               10h
 kindnet-fjrk9                                    1/1     Running   0               10h
 kindnet-rm62x                                    1/1     Running   1               10h
-kube-apiserver-sf-sched-control-plane            1/1     Running   17 (45m ago)    10h
-kube-controller-manager-sf-sched-control-plane   1/1     Running   39 (111s ago)   10h
+kube-apiserver-demo-lab-control-plane            1/1     Running   17 (45m ago)    10h
+kube-controller-manager-demo-lab-control-plane   1/1     Running   39 (111s ago)   10h
 kube-proxy-25k5p                                 1/1     Running   0               10h
 kube-proxy-2mzj2                                 1/1     Running   0               10h
 kube-proxy-pfxbz                                 1/1     Running   0               10h
-kube-scheduler-sf-sched-control-plane            1/1     Running   41 (89s ago)    10h
+kube-scheduler-demo-lab-control-plane            1/1     Running   41 (89s ago)    10h
 
 ## cleanup
 $ kubectl delete namespace bookstore --wait=true
@@ -1084,6 +1084,6 @@ $ kubectl -n kube-system get rolebinding -o name | grep -c metrics-server
 
 $ kubectl get nodes
 NAME                     STATUS   ROLES           AGE   VERSION
-sf-sched-control-plane   Ready    control-plane   10h   v1.37.0
-sf-sched-worker          Ready    <none>          10h   v1.37.0
-sf-sched-worker2         Ready    <none>          10h   v1.37.0
+demo-lab-control-plane   Ready    control-plane   10h   v1.37.0
+demo-lab-worker          Ready    <none>          10h   v1.37.0
+demo-lab-worker2         Ready    <none>          10h   v1.37.0

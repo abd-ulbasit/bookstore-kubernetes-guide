@@ -474,10 +474,10 @@ in `kube-system` were 15 for the API server, 37 for the controller manager and
 <!-- gate: output -->
 ```
 NAME                                             READY   STATUS    RESTARTS         AGE
-etcd-sf-sched-control-plane                      1/1     Running   0                9h
-kube-apiserver-sf-sched-control-plane            1/1     Running   17 (60s ago)     9h
-kube-controller-manager-sf-sched-control-plane   1/1     Running   38 (4m1s ago)    9h
-kube-scheduler-sf-sched-control-plane            0/1     Running   40 (3m54s ago)   9h
+etcd-demo-lab-control-plane                      1/1     Running   0                9h
+kube-apiserver-demo-lab-control-plane            1/1     Running   17 (60s ago)     9h
+kube-controller-manager-demo-lab-control-plane   1/1     Running   38 (4m1s ago)    9h
+kube-scheduler-demo-lab-control-plane            0/1     Running   40 (3m54s ago)   9h
 ```
 
 A restarting control plane is the stop signal for a lab cluster, so the run

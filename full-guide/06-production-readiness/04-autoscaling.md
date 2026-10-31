@@ -193,8 +193,8 @@ kubectl get events -n bookstore --field-selector reason=FailedScheduling
 <!-- gate: output -->
 ```
 NAME                       READY   STATUS    RESTARTS   AGE     IP             NODE               NOMINATED NODE   READINESS GATES
-catalog-86d7dc55cc-6l268   1/1     Running   0          6m18s   10.244.2.112   sf-sched-worker2   <none>           <none>
-catalog-86d7dc55cc-nd99d   1/1     Running   0          6m17s   10.244.1.80    sf-sched-worker    <none>           <none>
+catalog-86d7dc55cc-6l268   1/1     Running   0          6m18s   10.244.2.112   demo-lab-worker2   <none>           <none>
+catalog-86d7dc55cc-nd99d   1/1     Running   0          6m17s   10.244.1.80    demo-lab-worker    <none>           <none>
 catalog-86d7dc55cc-ptvkj   0/1     Pending   0          6m17s   <none>         <none>             <none>           <none>
 ```
 
@@ -227,10 +227,10 @@ deployment.apps/catalog patched
 deployment "catalog" successfully rolled out
 # ...
 NAME                       READY   STATUS        RESTARTS   AGE    IP             NODE               NOMINATED NODE   READINESS GATES
-catalog-74995c78bb-9csnp   1/1     Running       0          7s     10.244.1.82    sf-sched-worker    <none>           <none>
-catalog-74995c78bb-rnjch   1/1     Running       0          26s    10.244.2.113   sf-sched-worker2   <none>           <none>
-catalog-74995c78bb-zpbgk   1/1     Running       0          44s    10.244.1.81    sf-sched-worker    <none>           <none>
-catalog-86d7dc55cc-6l268   1/1     Terminating   0          7m3s   10.244.2.112   sf-sched-worker2   <none>           <none>
+catalog-74995c78bb-9csnp   1/1     Running       0          7s     10.244.1.82    demo-lab-worker    <none>           <none>
+catalog-74995c78bb-rnjch   1/1     Running       0          26s    10.244.2.113   demo-lab-worker2   <none>           <none>
+catalog-74995c78bb-zpbgk   1/1     Running       0          44s    10.244.1.81    demo-lab-worker    <none>           <none>
+catalog-86d7dc55cc-6l268   1/1     Terminating   0          7m3s   10.244.2.112   demo-lab-worker2   <none>           <none>
 ```
 
 **A resource metrics API that checks the kubelets.** The HPA's CPU metric
@@ -279,9 +279,9 @@ kubectl -n metrics-server logs deploy/metrics-server | grep 'Failed to scrape' |
 
 <!-- gate: output -->
 ```
-E1031 12:48:31.000213       1 scraper.go:149] "Failed to scrape node" err="Get \"https://172.18.0.4:10250/metrics/resource\": tls: failed to verify certificate: x509: cannot validate certificate for 172.18.0.4 because it doesn't contain any IP SANs" node="sf-sched-worker"
-E1031 12:48:31.000755       1 scraper.go:149] "Failed to scrape node" err="Get \"https://172.18.0.5:10250/metrics/resource\": tls: failed to verify certificate: x509: cannot validate certificate for 172.18.0.5 because it doesn't contain any IP SANs" node="sf-sched-worker2"
-E1031 12:48:31.007548       1 scraper.go:149] "Failed to scrape node" err="Get \"https://172.18.0.3:10250/metrics/resource\": tls: failed to verify certificate: x509: cannot validate certificate for 172.18.0.3 because it doesn't contain any IP SANs" node="sf-sched-control-plane"
+E1031 12:48:31.000213       1 scraper.go:149] "Failed to scrape node" err="Get \"https://172.18.0.4:10250/metrics/resource\": tls: failed to verify certificate: x509: cannot validate certificate for 172.18.0.4 because it doesn't contain any IP SANs" node="demo-lab-worker"
+E1031 12:48:31.000755       1 scraper.go:149] "Failed to scrape node" err="Get \"https://172.18.0.5:10250/metrics/resource\": tls: failed to verify certificate: x509: cannot validate certificate for 172.18.0.5 because it doesn't contain any IP SANs" node="demo-lab-worker2"
+E1031 12:48:31.007548       1 scraper.go:149] "Failed to scrape node" err="Get \"https://172.18.0.3:10250/metrics/resource\": tls: failed to verify certificate: x509: cannot validate certificate for 172.18.0.3 because it doesn't contain any IP SANs" node="demo-lab-control-plane"
 ```
 
 The refusal is the control working, and the fix keeps it. Each kubelet asks
@@ -308,9 +308,9 @@ serverTLSBootstrap: true
 serverTLSBootstrap: true
 # ...
 NAME        AGE   SIGNERNAME                      REQUESTOR                            REQUESTEDDURATION   CONDITION
-csr-5wktd   2s    kubernetes.io/kubelet-serving   system:node:sf-sched-worker          <none>              Pending
-csr-bjx5p   1s    kubernetes.io/kubelet-serving   system:node:sf-sched-worker2         <none>              Pending
-csr-jg8hl   3s    kubernetes.io/kubelet-serving   system:node:sf-sched-control-plane   <none>              Pending
+csr-5wktd   2s    kubernetes.io/kubelet-serving   system:node:demo-lab-worker          <none>              Pending
+csr-bjx5p   1s    kubernetes.io/kubelet-serving   system:node:demo-lab-worker2         <none>              Pending
+csr-jg8hl   3s    kubernetes.io/kubelet-serving   system:node:demo-lab-control-plane   <none>              Pending
 ```
 
 The controller manager does not approve this signer's requests on its own
@@ -331,9 +331,9 @@ kubectl certificate approve $(kubectl get csr -o name)
 
 <!-- gate: output -->
 ```
-csr-5wktd system:node:sf-sched-worker DNS:sf-sched-worker, IP Address:172.18.0.4
-csr-bjx5p system:node:sf-sched-worker2 DNS:sf-sched-worker2, IP Address:172.18.0.5
-csr-jg8hl system:node:sf-sched-control-plane DNS:sf-sched-control-plane, IP Address:172.18.0.3
+csr-5wktd system:node:demo-lab-worker DNS:demo-lab-worker, IP Address:172.18.0.4
+csr-bjx5p system:node:demo-lab-worker2 DNS:demo-lab-worker2, IP Address:172.18.0.5
+csr-jg8hl system:node:demo-lab-control-plane DNS:demo-lab-control-plane, IP Address:172.18.0.3
 # ...
 certificatesigningrequest.certificates.k8s.io/csr-5wktd approved
 certificatesigningrequest.certificates.k8s.io/csr-bjx5p approved
@@ -357,9 +357,9 @@ NAME                     SERVICE                         AVAILABLE   AGE
 v1beta1.metrics.k8s.io   metrics-server/metrics-server   True        82s
 # ...
 NAME                     CPU(cores)   CPU(%)   MEMORY(bytes)   MEMORY(%)   
-sf-sched-control-plane   139m         3%       1139Mi          15%         
-sf-sched-worker          37m          0%       239Mi           3%          
-sf-sched-worker2         23m          0%       272Mi           3%          
+demo-lab-control-plane   139m         3%       1139Mi          15%         
+demo-lab-worker          37m          0%       239Mi           3%          
+demo-lab-worker2         23m          0%       272Mi           3%          
 ```
 
 Last, confirm that the fix did not switch verification off. The container
@@ -877,9 +877,9 @@ run had installed was removed. The restart counts about two minutes later:
 ```
 NAME                                             READY   STATUS    RESTARTS        AGE
 # ...
-kube-controller-manager-sf-sched-control-plane   1/1     Running   39 (111s ago)   10h
+kube-controller-manager-demo-lab-control-plane   1/1     Running   39 (111s ago)   10h
 # ...
-kube-scheduler-sf-sched-control-plane            1/1     Running   41 (89s ago)    10h
+kube-scheduler-demo-lab-control-plane            1/1     Running   41 (89s ago)    10h
 ```
 
 **Not run.** The scale-out to 4 and then 6 replicas, the hold at `MAXPODS`,
