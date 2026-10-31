@@ -87,7 +87,7 @@ APF is QoS for the API server, the way requests/limits are QoS for nodes.**
   there. Put a busy identity in it and you have recreated the pre-APF problem
   of no isolation. `Limited` = a bounded slice of the apiserver's total
   concurrency, set by **`nominalConcurrencyShares`** (a *weight*, not an
-  absolute — each level's nominal share is proportional to its shares).
+  absolute: each level's nominal share is proportional to its shares).
   `Limited` levels can **lend** idle concurrency (`lendablePercent`) and
   **borrow** spare capacity (`borrowingLimitPercent`) so the floor is
   guaranteed but idle capacity isn't wasted.
@@ -185,7 +185,7 @@ flowchart TB
     pw -->|"share exhausted"| r429
 ```
 
-### Diagram B — the built-in flow schemas and where the operator lands (ASCII)
+### Diagram B: the built-in flow schemas and where the operator lands (ASCII)
 
 ```
  APF: BUILT-IN FLOW SCHEMAS + WHERE THE OPERATOR GOES ─────────────────────
@@ -217,7 +217,7 @@ flowchart TB
   level, competing with every other ServiceAccount. A hot-loop bug there
   throttles that shared bucket -> collateral damage to OTHER controllers in it.
   Pinning it to its OWN precedence-600 Limited level (shares 10, queued,
-  ByNamespace) — ahead of P9000 and clear of the node flows at 500 — means a
+  ByNamespace), ahead of P9000 and clear of the node flows at 500, means a
   buggy reconcile drains ONLY its own queue & share: it gets 429'd, the rest of
   the control plane (kubelets, scheduler, other controllers, kubectl) is
   untouched. APF = QoS for the apiserver (cf. requests/limits = QoS for nodes,
