@@ -451,13 +451,13 @@ catalog Pods, one storefront and one orders, and the second held one of each:
 <!-- gate: output -->
 ```text
 NAME READY STATUS NODE
-catalog-59cfcf98bc-kmg64 1/1 Running sf-sched-worker
-catalog-59cfcf98bc-ld59l 1/1 Running sf-sched-worker
-orders-775657dddc-8jzqw 1/1 Running sf-sched-worker
-storefront-67f7fbd969-cqcnt 1/1 Running sf-sched-worker
-catalog-59cfcf98bc-x7l4c 1/1 Running sf-sched-worker2
-orders-775657dddc-9ftct 1/1 Running sf-sched-worker2
-storefront-67f7fbd969-mmw6x 1/1 Running sf-sched-worker2
+catalog-59cfcf98bc-kmg64 1/1 Running lab-worker
+catalog-59cfcf98bc-ld59l 1/1 Running lab-worker
+orders-775657dddc-8jzqw 1/1 Running lab-worker
+storefront-67f7fbd969-cqcnt 1/1 Running lab-worker
+catalog-59cfcf98bc-x7l4c 1/1 Running lab-worker2
+orders-775657dddc-9ftct 1/1 Running lab-worker2
+storefront-67f7fbd969-mmw6x 1/1 Running lab-worker2
 ```
 
 Set `NODE` to the worker you chose. The lab drained the first one:
@@ -469,7 +469,7 @@ echo "draining $NODE"
 
 <!-- gate: output -->
 ```text
-draining sf-sched-worker
+draining lab-worker
 ```
 
 Watch the budget in a second shell with `kubectl get pdb catalog -n bookstore
@@ -492,7 +492,7 @@ once. The lab's output, with the repeated retries trimmed:
 
 <!-- gate: output -->
 ```text
-node/sf-sched-worker cordoned
+node/lab-worker cordoned
 Warning: ignoring DaemonSet-managed Pods: kube-system/kindnet-rm62x, kube-system/kube-proxy-pfxbz
 evicting pod p06-finish-pdb/storefront-67f7fbd969-cqcnt
 evicting pod p06-finish-pdb/catalog-59cfcf98bc-kmg64
@@ -508,7 +508,7 @@ pod/storefront-67f7fbd969-cqcnt evicted
 # ...
 evicting pod p06-finish-pdb/catalog-59cfcf98bc-ld59l
 pod/catalog-59cfcf98bc-ld59l evicted
-node/sf-sched-worker drained
+node/lab-worker drained
 ```
 
 The first catalog eviction fitted the budget, and the second did not. The
@@ -542,13 +542,13 @@ kubectl get pods -n bookstore -o wide --sort-by=.spec.nodeName | awk '{print $1,
 <!-- gate: output -->
 ```text
 NAME READY STATUS NODE
-catalog-59cfcf98bc-565kd 0/1 Running sf-sched-worker2
-catalog-59cfcf98bc-hjmdc 1/1 Running sf-sched-worker2
-catalog-59cfcf98bc-x7l4c 1/1 Running sf-sched-worker2
-orders-775657dddc-9ftct 1/1 Running sf-sched-worker2
-orders-775657dddc-hqblr 1/1 Running sf-sched-worker2
-storefront-67f7fbd969-mmw6x 1/1 Running sf-sched-worker2
-storefront-67f7fbd969-rkvlz 1/1 Running sf-sched-worker2
+catalog-59cfcf98bc-565kd 0/1 Running lab-worker2
+catalog-59cfcf98bc-hjmdc 1/1 Running lab-worker2
+catalog-59cfcf98bc-x7l4c 1/1 Running lab-worker2
+orders-775657dddc-9ftct 1/1 Running lab-worker2
+orders-775657dddc-hqblr 1/1 Running lab-worker2
+storefront-67f7fbd969-mmw6x 1/1 Running lab-worker2
+storefront-67f7fbd969-rkvlz 1/1 Running lab-worker2
 ```
 
 Once that Pod is Ready the budgets read what they did before the drain. Read
@@ -569,7 +569,7 @@ storefront   1               N/A               1                     2m6s
 
 <!-- gate: output -->
 ```text
-node/sf-sched-worker uncordoned
+node/lab-worker uncordoned
 ```
 
 Two things can keep a drain waiting, and the lab saw the first. A budget at zero
