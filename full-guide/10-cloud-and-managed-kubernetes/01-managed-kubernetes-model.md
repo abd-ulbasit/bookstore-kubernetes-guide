@@ -50,14 +50,13 @@ that side is yours, and confusing them is the production incident". The
 reference is *Production Kubernetes* (Deployment Models / A Path to
 Production).
 
-> **This whole Part needs a real cloud account.** Unlike Parts 00–09, the
-> managed-cluster hands-on **cannot run on kind** — there is no AWS/GCP/Azure
-> control plane in a laptop container. The honesty pattern, stated once here
-> and re-stated per chapter: each cloud hands-on is **illustrative**, the
-> provider commands shown are the **exact correct ones**, and *wherever a
-> piece can still be shown locally* (the boundary reasoning, the Bookstore
-> manifests that are unchanged on cloud, a client dry-run) it is — with an
-> explicit *"on a real EKS/GKE/AKS this is …"* bridge. No output is ever faked.
+> **Nothing in this Part runs on a cloud.** A managed control plane cannot run
+> in a kind cluster, and no AWS, GCP or Azure cluster was created for this
+> Part. Provider behaviour is therefore **cited, not run**: each claim links to
+> the provider's own documentation, checked on 2026-10-31. Cloud commands are
+> **illustrative** and are for clusters you own. Wherever a piece can still be
+> shown locally (the boundary reasoning, the Bookstore manifests that are
+> unchanged on cloud, a client dry-run) it is. No output is ever faked.
 
 ## Mental model
 
@@ -66,13 +65,13 @@ half above the API, you operate the half below it, and the API server is the
 seam.**
 
 - **The provider owns and *SLAs* the control plane.** kube-apiserver,
-  kube-controller-manager, kube-scheduler, **etcd** (+ its backups,
-  encryption-at-rest, HA topology, patching, certificate rotation) run in the
-  provider's account, invisible to you. You get an **API endpoint** and an
-  uptime SLA (commonly **99.95%** for the *control plane reachability* — read
-  the exact SLA: it covers the API endpoint, **not** your workloads). You
-  cannot SSH the control plane, cannot `etcdctl` it, cannot change apiserver
-  flags except through the provider's narrow knobs.
+  kube-controller-manager, kube-scheduler, and **etcd** (with its backups,
+  encryption at rest, and HA) run in the provider's account, invisible to you.
+  You get an **API endpoint** and an uptime SLA. EKS, and AKS on a paid tier
+  with zones, both commit **99.95%** for that endpoint. Read the exact SLA:
+  it covers the API endpoint, **not** your workloads. You cannot SSH the
+  control plane, cannot `etcdctl` it, and cannot change apiserver flags. AKS
+  states that customers cannot alter its managed components.
 - **You own everything that runs your app.** Worker **nodes** (their OS image/
   AMI, kubelet version, autoscaling, patching cadence — even "managed node
   groups" are *your* EC2/Compute instances on *your* bill), every **workload**,
@@ -87,22 +86,25 @@ seam.**
   apply`; you **request** a control-plane upgrade (the provider performs the
   apiserver→cm/sched→etcd dance behind its SLA) and then **you** roll the node
   pools. The provider also imposes a **supported-version window** (a minor
-  gets 12 to 14 months of standard support: AKS 12, EKS and GKE 14; paid
-  extended support or LTS stretches that to 24 to 26 months) and
+  gets 12 to 14 months of standard support: AKS 12, EKS and GKE 14; a paid
+  extended support or LTS option stretches that to about 24 to 26 months) and
   **maintenance windows** — drift onto an end-of-support minor and you get a
   *forced* upgrade.
 - **Region / AZ topology is now a first-class design input.** A cloud region
-  is several **Availability Zones** (independent failure domains). The control
-  plane can be **zonal** (cheaper, one AZ — an AZ outage can take the API
-  with it) or **regional/multi-AZ** (the production default — the provider
-  spreads etcd/apiserver across AZs). **Your nodes** must *also* be spread
-  across AZs (a node pool per AZ, or a multi-AZ pool) or a single-AZ failure
-  takes the Bookstore down regardless of how HA the control plane is.
+  is several **Availability Zones** (independent failure domains). Who sets
+  the control plane's zone spread depends on the provider: EKS runs it across
+  three AZs, AKS on the Standard tier spreads it across zones where the region
+  has them, and GKE lets you choose a **zonal** cluster (one zone, so an outage
+  there can take the API with it) or a **regional** one (control plane
+  replicated across zones). **Your nodes** must *also* be spread across AZs (a
+  node pool per AZ, or a multi-AZ pool) or a single-AZ failure takes the
+  Bookstore down regardless of how HA the control plane is.
 - **The cost shape inverts.** kind is free. A managed cluster is **a flat
-  control-plane fee** (roughly **$0.10/hour ≈ ~$73/month per cluster** on
-  EKS/AKS standard tier and GKE standard's per-cluster fee; GKE Autopilot
-  prices differently — per Pod resource) **plus the node bill** (the large,
-  variable part) **plus** data egress, load balancers ([ch.04](04-cloud-networking-and-load-balancing.md)),
+  control-plane fee per cluster**. EKS publishes **$0.10 per cluster-hour**,
+  about $73 a month at 730 hours; the other providers set their own rates, and
+  GKE Autopilot bills Pod resources rather than nodes (check each pricing
+  page). On top of that come **the node bill** (the large, variable part),
+  data egress, load balancers ([ch.04](04-cloud-networking-and-load-balancing.md)),
   and disks ([ch.05](05-cloud-storage-and-data.md)). The control-plane fee is
   the *small, predictable* number; **nodes are where the money is and where
   [ch.06](06-node-autoscaling-cost-multicloud.md)/[Part 06
@@ -113,6 +115,62 @@ The trap to hold onto: **"managed" removes the *control-plane* toil, not the
 NetworkPolicy, RBAC, right-sizing, backups of *your data*) is exactly as much
 your job on EKS as on kind — the provider just stopped you from also having to
 babysit etcd.
+
+## Threats and controls
+
+| Threat | Control this chapter teaches | Goes deeper |
+|---|---|---|
+| Misreading who secures a layer, so a gap has no owner | The split per provider in [Who secures what](#who-secures-what) | RBAC: [Part 05 ch.01](../05-security/01-authn-authz-rbac.md) |
+| An API endpoint open to the internet by default | Check the endpoint access setting on day one, since EKS starts public | [10.04](04-cloud-networking-and-load-balancing.md) |
+| Secrets read with no record of who read them | Know what the provider encrypts, and turn on the logs that are yours | KMS: [Part 05 ch.04](../05-security/04-secrets-and-cluster-hardening.md); audit: Part 05 ch.08 <!-- link-later: 05.08 --> |
+| An out-of-support minor that the provider upgrades for you | Track each end-of-support date and upgrade on your own schedule | [Part 08 ch.01](../08-day-2-operations/01-cluster-lifecycle.md) |
+
+## Who secures what
+
+Each provider draws the line in its own documentation. The matrix gives the
+default for each area, and the notes under it name the provider page behind
+each row. Checked 2026-10-31.
+
+```
+ AREA                     EKS            GKE            AKS
+ Control plane and etcd   provider       provider       provider
+ Audit logs               you, opt in    on by default  shared
+ Node OS and patching     you            shared         shared
+ Kubernetes upgrades      shared         shared         shared
+ RBAC and IAM mapping     you            you            you
+ Workload security        you            you            you
+ Secrets management       you            you            you
+```
+
+- **Control plane.** EKS runs and secures the control plane, including its
+  nodes and etcd. GKE hardens and patches it. AKS maintains and operates all
+  of its Kubernetes components, etcd included.
+- **Audit logs.** EKS sends control plane logs to CloudWatch only for the log
+  types you enable, and they are off by default. GKE's Admin Activity logs for
+  the API server are always on; its Data Access logs stay off until you enable
+  them. AKS shares platform monitoring with you: you enable the diagnostic
+  settings.
+- **Control-plane trust.** The provider can see your objects, so know what it
+  can reach. EKS says no person can access the plaintext keys that protect
+  etcd. GKE audit-logs the SSH sessions of its Site Reliability Engineers.
+  AKS support cannot sign in to your agent nodes without your permission, and
+  its cluster role is granted only under an active ticket, with just-in-time
+  access.
+- **Node OS.** On EKS managed node groups AWS builds patched AMIs and you
+  deploy them. Self-managed nodes are entirely yours. GKE hardens and patches
+  the node OS and expects Standard node pools to stay on automatic upgrades.
+  AKS publishes node images weekly and expects them applied within 90 days.
+- **Upgrades.** Shared on all three. You trigger or schedule them, and each
+  provider upgrades a version that has run out of support (see
+  [How it works](#how-it-works-under-the-hood)).
+- **Secrets.** EKS encrypts all Kubernetes API data with envelope encryption
+  by default from 1.28, under an AWS-owned key unless you bring your own. GKE
+  encrypts cluster state at the file-system layer by default. On AKS, secrets
+  management is yours.
+- **Workload security.** Yours on every provider. AKS lists RBAC, Pod security
+  and secrets management as customer areas. GKE leaves RBAC and IAM policy,
+  container images and data with you. EKS leaves node and container
+  configuration and platform IAM with you.
 
 ## Diagrams
 
@@ -128,7 +186,7 @@ flowchart TB
         api["kube-apiserver<br/>(the API endpoint + its uptime SLA)"]
         cm["kube-controller-manager"]
         sch["kube-scheduler"]
-        etcd[("etcd<br/>+ backups + encryption-at-rest<br/>+ HA across AZs + cert rotation")]
+        etcd[("etcd<br/>+ provider backups (not yours to restore)<br/>+ encryption at rest, HA across zones")]
         cpupg["control-plane patching/upgrade<br/>(apiserver-first, behind the SLA)"]
     end
 
@@ -136,7 +194,7 @@ flowchart TB
         nodes["worker nodes / node pools<br/>(AMI/OS image, kubelet version,<br/>node autoscaling, patching) — YOUR bill"]
         wl["workloads<br/>(Deployments/StatefulSets, probes,<br/>PDBs, right-sizing, app SLOs)"]
         net["networking wiring<br/>(VPC/subnets, CNI choice,<br/>Service/Ingress/NetworkPolicy)"]
-        iam["cloud-IAM <-> K8s identity mapping<br/>(IRSA / Workload Identity — ch.03)"]
+        iam["cloud-IAM <-> K8s identity mapping<br/>(IRSA or EKS Pod Identity, GKE Workload<br/>Identity, Microsoft Entra Workload ID; ch.03)"]
         sec["in-cluster security<br/>(RBAC, PSA, policy — Part 05)"]
         data["YOUR data backups<br/>(Postgres PVC — Velero/snapshots,<br/>Part 08 ch.02)"]
     end
@@ -192,9 +250,9 @@ chapter adds **no manifests** — it is the conceptual map for the Part. The
 Bookstore manifests do **not change** to run on a managed cluster (that is the
 point of standardising on portable Kubernetes APIs); what changes is *which
 side of the boundary* each operational concern lives on. This Hands-on is
-**illustrative** (a managed cluster needs a cloud account — provisioning is
-[ch.02](02-provisioning-and-iac.md)); the parts that *are* runnable locally
-are marked.
+**illustrative** (provisioning a managed cluster is
+[ch.02](02-provisioning-and-iac.md) and needs an account of your own); the
+parts that *are* runnable locally are marked.
 
 ### 1. Where each Bookstore tier lands on a managed cluster (runnable: the reasoning)
 
@@ -217,10 +275,7 @@ manifest edit — it is the placement decision you make per tier:
                          to one AZ               NOT a DROP TABLE    Part 08
                                                                      ch.02)
  redis / rabbitmq        your node pool         CP reachability     these are
- (in-cluster here)        (or a managed         (if in-cluster)      yours; a
-                          service in prod —                          managed
-                          ch.05 prod note)                           svc moves
-                                                                     the line
+ (in-cluster here)                              (if in-cluster)      yours
  ─────────────────────────────────────────────────────────────────────────────
  etcd / apiserver /      PROVIDER's account     ALL of it (run,     nothing —
  scheduler / cm           (you never see it)     patch, HA, back     you can't
@@ -277,8 +332,9 @@ and Layers 2 (Git) + 3 (the Postgres PVC, via Velero/CSI snapshot) stay
 ## How it works under the hood
 
 - **The three managed offerings, structurally.** **Amazon EKS** runs the
-  control plane in an AWS-owned account, multi-AZ by default, exposed as an
-  API endpoint (public, private, or both); nodes are EC2 via *self-managed*,
+  control plane in an AWS-owned account across three AZs, exposed as an API
+  endpoint that is public by default on new clusters (private access and
+  public CIDR limits are options); nodes are EC2 via *self-managed*,
   *managed node groups*, or *Fargate* (serverless Pods). **Google GKE** has
   two modes: **Standard** (you manage node pools; per-cluster management fee)
   and **Autopilot** (Google manages nodes too — you only declare Pods, billed
@@ -289,9 +345,11 @@ and Layers 2 (Git) + 3 (the Postgres PVC, via Velero/CSI snapshot) stay
   differences (node modes, fee model, default CNI) are *below* the seam and
   are the subject of [ch.02](02-provisioning-and-iac.md)–[ch.06](06-node-autoscaling-cost-multicloud.md).
 - **Why you cannot `etcdctl` a managed cluster.** etcd lives in the provider's
-  account with no client endpoint or cert exposed to you — exactly as [Part 08
-  ch.02](../08-day-2-operations/02-backup-and-dr.md) stated. The provider
-  snapshots/restores etcd under its SLA. The consequence is *not* a limitation
+  account, and you get no etcd endpoint to use, as [Part 08
+  ch.02](../08-day-2-operations/02-backup-and-dr.md) describes. The provider
+  keeps its own etcd backups for its recovery, and you cannot restore your
+  cluster from them: AKS documents automated etcd backups every 30 minutes
+  that customers cannot access. The consequence is *not* a limitation
   to work around — it is *why* the Bookstore's DR is Git (declarative) +
   Velero (data): that posture is identical on self-managed and managed, so the
   app does not care who runs etcd.
@@ -306,30 +364,34 @@ and Layers 2 (Git) + 3 (the Postgres PVC, via Velero/CSI snapshot) stay
   **node pool** — a *surge or rolling* replacement (new-version nodes added,
   old ones cordoned/drained honoring **PDBs** — [Part 06
   ch.05](../06-production-readiness/05-reliability-and-disruptions.md) — then
-  deleted). GKE **release channels** (rapid/regular/stable) and EKS/AKS
-  auto-upgrade can do the control plane *and* nodes automatically within the
-  channel — opt in deliberately, and keep manifests on **GA APIs** so an
-  auto-upgrade is a non-event (the property the Bookstore already has).
-- **The supported-version window is a hard constraint, not advice.** Each
-  provider gives a minor 12 to 14 months of standard support (AKS 12, EKS
-  and GKE 14). Paid extended support stretches that: EKS extended support
-  (on by default, billed) to 26 months, the GKE Extended channel to 24, and
-  AKS LTS (opt-in, Premium tier) to about 24. When the last window closes
-  the provider **force-upgrades** you to keep the fleet supportable; EKS
-  says that can happen any time after the end-of-extended-support date,
-  with no notification before the update. A cluster you "never touch"
-  therefore *still* moves — which is why the [Part 08
-  ch.01](../08-day-2-operations/01-cluster-lifecycle.md) deprecated-API audit
-  (`pluto`/`kubent`, `apiserver_requested_deprecated_apis`) is *more*
-  important on managed, not less: the upgrade can arrive on the provider's
-  schedule. The Bookstore is deliberately clean here (only `apps/v1`,
-  `batch/v1`, `networking.k8s.io/v1`, `policy/v1`, `autoscaling/v2`,
-  `scheduling.k8s.io/v1` + documented CRD groups), so a forced minor bump is a
-  non-event.
+  deleted). GKE **release channels** (rapid/regular/stable) and AKS
+  auto-upgrade channels can upgrade the control plane *and* nodes
+  automatically. EKS managed node groups are not upgraded when the control
+  plane is, so the node step stays yours. Opt in deliberately, and keep
+  manifests on **GA APIs** so an auto-upgrade is a non-event (the property the
+  Bookstore already has).
+- **The supported-version window is a hard constraint, not advice.** EKS gives
+  a minor 14 months of standard support and then 12 months of extended
+  support. Extended support is on by default and billed per cluster-hour.
+  When the last window closes, EKS upgrades the control plane on its own
+  schedule, at any time, with no notice before the update. GKE gives at least
+  14 months of standard support and up to 24 with its Extended channel, which
+  carries an extra per-cluster fee. AKS gives 12 months of community support,
+  and LTS adds a year on the Premium tier, which you must opt into. After a
+  60-day grace period AKS upgrades an out-of-support cluster itself. It
+  notifies you first, but that upgrade ignores your maintenance window, does
+  not stop for deprecated APIs, and can override a PDB that blocks a node
+  drain. A cluster you "never touch" therefore *still* moves, which is why the
+  [Part 08 ch.01](../08-day-2-operations/01-cluster-lifecycle.md) deprecated-API
+  audit (`pluto`/`kubent`, `apiserver_requested_deprecated_apis`) is *more*
+  important on managed, not less. The Bookstore is deliberately clean here
+  (only `apps/v1`, `batch/v1`, `networking.k8s.io/v1`, `policy/v1`,
+  `autoscaling/v2`, `rbac.authorization.k8s.io/v1`, `scheduling.k8s.io/v1`,
+  plus documented CRD groups), so a forced minor bump is a non-event.
 - **Zonal vs regional control plane, and node spread, are *separate*
-  decisions.** A regional/multi-AZ control plane (the production default —
-  EKS is multi-AZ always; GKE *regional* clusters; AKS *availability zones*)
-  survives a single-AZ outage *for the API*. It does **nothing** for your
+  decisions.** A multi-AZ control plane (the usual production choice: EKS
+  always; GKE *regional* clusters; AKS on the Standard tier where the region
+  has zones) survives a single-AZ outage *for the API*. It does **nothing** for your
   workloads unless your **node pools are also AZ-spread** and your stateful
   Pods tolerate the zonal-disk pin ([ch.05](05-cloud-storage-and-data.md)).
   The Bookstore's existing `topologySpreadConstraints` and
@@ -341,11 +403,11 @@ and Layers 2 (Git) + 3 (the Postgres PVC, via Velero/CSI snapshot) stay
   manifests already carry the hostname-spread; zone-spread is the cloud
   refinement).
 - **The cost shape, mechanically.** Control-plane fee = a flat hourly charge
-  per cluster (≈$0.10/h on EKS/AKS-Standard-tier and GKE Standard's per-cluster
-  fee; the **AKS Free tier** waives the fee but **without the 99.95%
-  Standard-tier uptime SLA** — the Free tier still has a 99.5% API-server
-  *availability target*, just no financially-backed SLA; GKE Autopilot does
-  not charge a CP fee but bills Pod resource). **Nodes** = standard
+  per cluster. EKS publishes $0.10 per cluster-hour. AKS's **Free tier** has no
+  cluster fee and no financially backed uptime SLA; the Standard and Premium
+  tiers carry the SLA, and their rates are on AKS's pricing page. GKE's
+  per-cluster fee and Autopilot's Pod billing are on its pricing page.
+  **Nodes** = standard
   VM pricing × node count × time — the dominant, variable cost, and the one
   the cluster autoscaler/Karpenter and right-sizing
   ([ch.06](06-node-autoscaling-cost-multicloud.md), [Part 06
@@ -424,10 +486,13 @@ kubectl get nodes -o wide                          # YOUR nodes (kubelet ver, AZ
 kubectl get nodes -L topology.kubernetes.io/zone   # node AZ spread (yours to ensure)
 
 # Provider control-plane ops you TRIGGER (provider performs CP; you roll nodes):
-# One minor per step (Part 08 ch.01); here 1.36 -> 1.37:
-eksctl upgrade cluster --name $CLUSTER_NAME --version 1.37     # AWS EKS
+# One minor per step (Part 08 ch.01); here 1.36 -> 1.37. eksctl only plans
+# until --approve is given:
+eksctl upgrade cluster --name $CLUSTER_NAME --version 1.37 --approve  # AWS EKS
+# List the versions GKE offers, then pick one for $GKE_VERSION:
+gcloud container get-server-config --location $LOCATION
 gcloud container clusters upgrade $CLUSTER_NAME --master \
-  --cluster-version 1.37.1-gke.1552000   # Google GKE (CP); no version = default
+  --cluster-version $GKE_VERSION --location $LOCATION  # Google GKE (CP)
 az aks upgrade -g $RG -n $CLUSTER_NAME --kubernetes-version 1.37  # Azure AKS
 # then upgrade each NODE POOL (surge/rolling, honors PDBs) — provider-specific (ch.02)
 
@@ -461,6 +526,11 @@ Checklist:
       RBAC/PSA/right-sizing/**your-data backups**) — "managed" did not remove them
 - [ ] DR is **Git (declarative) + Velero (data)** — etcd is the provider's
       ([Part 08 ch.02](../08-day-2-operations/02-backup-and-dr.md))
+- [ ] Control-plane audit logs are on and readable by you (EKS: opt in per log
+      type; GKE: Admin Activity is always on, Data Access is off; AKS: enable
+      diagnostic settings)
+- [ ] API endpoint reviewed: EKS clusters start public, so restrict it (private
+      endpoint or public CIDR limits; [10.04](04-cloud-networking-and-load-balancing.md))
 - [ ] Cost owned at the **node** layer (not the CP fee); spend allocated per
       workload ([ch.06](06-node-autoscaling-cost-multicloud.md))
 - [ ] Lock-in is deliberate: portable layer kept portable, non-portable layer
@@ -470,10 +540,10 @@ Checklist:
 
 > Try each before opening the answer drawer. The act of trying is the exercise; the answer is the check.
 
-1. **Your EKS control plane is "regional" — what failure modes does that absorb vs leave to you?**
+1. **Your EKS control plane spans three Availability Zones. What failure modes does that absorb, and what does it leave to you?**
    <details><summary>Show answer</summary>
 
-   AWS runs the apiserver/scheduler/controller-manager/etcd across ≥3 AZs and SLAs the API endpoint's uptime; an AZ outage will not take the control plane down. What stays yours: nodes pinned to a single AZ (workloads die when that AZ dies), zonal EBS volumes that pin a StatefulSet Pod to its AZ, and the application SLOs. The provider absorbs control-plane HA; you still own node and data AZ-spread.
+   AWS runs the API server, controller manager, scheduler, and etcd across three AZs and commits to 99.95% uptime for the API endpoint, so an AZ outage does not take the control plane down. What stays yours: nodes pinned to a single AZ (workloads die when that AZ dies), zonal EBS volumes that pin a StatefulSet Pod to its AZ, and the application SLOs. The provider absorbs control-plane HA; you still own node and data AZ-spread.
 
    </details>
 
@@ -494,24 +564,31 @@ Checklist:
 
    </details>
 
-3. **Hands-on: provision an EKS cluster with a zonal control plane (one AZ) and a regional control plane (3 AZs), then `kubectl get nodes -L topology.kubernetes.io/zone`. Drop one AZ in each (simulate by tainting/cordoning all nodes in that AZ). What is the difference in observed behavior?**
-   <details><summary>What you should see</summary>
+3. **Your GKE cluster is zonal, and its zone goes down. What stops working, what keeps running, and what would a regional cluster change?**
+   <details><summary>Show answer</summary>
 
-   On the regional CP, the apiserver stays reachable and only the Pods that landed on the failed-AZ nodes are rescheduled (if they have no zonal volume claims pinning them). On the zonal CP, you lose the apiserver itself when its AZ goes — `kubectl` calls hang/error and nothing reschedules until the AZ recovers. The regional control plane costs more per hour, and that delta is what you are buying.
+   A zonal control plane lives in that one zone, so the API endpoint goes with it. `kubectl` fails, and nothing new is scheduled until the zone recovers. Pods on nodes in the other zones keep running, because they do not need the API to keep serving. A regional cluster replicates its control plane across zones, so the API survives the loss. It does nothing for your Pods unless your node pools also span zones and your stateful Pods can survive a zone loss ([ch.05](05-cloud-storage-and-data.md)). EKS has no zonal option to compare with, since its control plane always spans three AZs. See the GKE regional clusters page in Further reading.
 
    </details>
 
 4. **A teammate says "we're on managed EKS, so we don't need Velero." How do you respond?**
    <details><summary>Show answer</summary>
 
-   The provider backs up etcd (the cluster's control state) and restores it under their SLA, but they do not back up your PersistentVolumes, your secrets that live in cloud Secrets Manager, or your application data inside Postgres/MySQL. Velero covers the data side: PVCs, snapshots, and namespace-scoped resources. Managed-EKS + Velero is the actual DR posture — managed alone gives you the control plane back with empty disks. See [Part 08 ch.02](../08-day-2-operations/02-backup-and-dr.md).
+   The provider keeps etcd backups (the cluster's control state) for its own recovery, and you cannot restore your cluster from them. AKS, for example, documents automated etcd backups every 30 minutes that customers cannot access. The provider does not back up your PersistentVolumes, your data inside Postgres or MySQL, or secrets you keep in an external store. Velero covers the data side: PVCs, snapshots, and namespace-scoped resources. Managed EKS plus Velero is the actual DR posture; managed alone gives you a working control plane with empty disks. See [Part 08 ch.02](../08-day-2-operations/02-backup-and-dr.md).
 
    </details>
 
 5. **You inherit a managed cluster and the cloud bill shows $0.10/hour for the CP and $4,800/month in node costs. The CTO asks "why is the cloud bill so high — isn't managed Kubernetes supposed to be cheap?" Frame the answer.**
    <details><summary>Show answer</summary>
 
-   The control-plane fee is the small, flat, predictable line item — typically $73/month for EKS or zero on GKE Autopilot. The node bill is the real spend and lives entirely on the customer's side of the seam: instance types chosen, count, AZ-spread, on-demand vs spot, idle capacity from over-sized requests, and headroom for HPA bursts. Managed kubernetes did not change node economics — it only removed the operational burden of running the control plane. [ch.06](06-node-autoscaling-cost-multicloud.md) drills into the node-tier cost levers.
+   The control-plane fee is the small, flat, predictable line item — EKS publishes $0.10 per cluster-hour, about $73 a month, and the other providers charge their own per-cluster rates. The node bill is the real spend and lives entirely on the customer's side of the seam: instance types chosen, count, AZ-spread, on-demand vs spot, idle capacity from over-sized requests, and headroom for HPA bursts. Managed kubernetes did not change node economics — it only removed the operational burden of running the control plane. [ch.06](06-node-autoscaling-cost-multicloud.md) drills into the node-tier cost levers.
+
+   </details>
+
+6. **A teammate says: "The provider encrypts etcd, so our Secrets are safe in the cluster." What is true, and what stays yours?**
+   <details><summary>Show answer</summary>
+
+   Partly true. By default the provider encrypts the cluster's data at rest: EKS envelope-encrypts all Kubernetes API data from 1.28 with an AWS-owned key unless you bring your own, and GKE encrypts etcd at the file-system layer. That protects the storage. It does not limit who can read through the API. Anyone your RBAC lets `get` a Secret reads its plaintext, so scoping RBAC ([Part 05 ch.01](../05-security/01-authn-authz-rbac.md)) is yours. Choosing a customer-managed key and its policy is yours too ([Part 05 ch.04](../05-security/04-secrets-and-cluster-hardening.md)). Whether you can later show who read a Secret depends on audit logs, and the defaults differ: EKS control plane logs are off until you enable them, GKE Admin Activity logs are always on, and AKS needs diagnostic settings.
 
    </details>
 
@@ -524,9 +601,41 @@ Checklist:
 - **Lukša, _Kubernetes in Action_ 2e, ch.3** (how the control plane is
   composed — the structural basis for *why* the API server is the seam and
   what the provider is actually running for you).
-- Official: Amazon EKS overview
-  <https://docs.aws.amazon.com/eks/latest/userguide/what-is-eks.html>, GKE
-  overview <https://cloud.google.com/kubernetes-engine/docs/concepts/kubernetes-engine-overview>,
-  AKS overview <https://learn.microsoft.com/en-us/azure/aks/what-is-aks>, and
-  the upstream version-skew policy
-  <https://kubernetes.io/releases/version-skew-policy/>.
+- Provider sources, checked 2026-10-31 (cited, not run):
+  - EKS: security and shared responsibility
+    <https://docs.aws.amazon.com/eks/latest/userguide/security.html>; control
+    plane across three AZs
+    <https://docs.aws.amazon.com/eks/latest/best-practices/reliability.html>;
+    control plane logs
+    <https://docs.aws.amazon.com/eks/latest/userguide/control-plane-logs.html>;
+    envelope encryption
+    <https://docs.aws.amazon.com/eks/latest/userguide/envelope-encryption.html>;
+    version lifecycle
+    <https://docs.aws.amazon.com/eks/latest/userguide/kubernetes-versions.html>;
+    endpoint access
+    <https://docs.aws.amazon.com/eks/latest/userguide/cluster-endpoint.html>;
+    SLA <https://aws.amazon.com/eks/sla/>; pricing
+    <https://aws.amazon.com/eks/pricing/>.
+  - GKE: shared responsibility
+    <https://docs.cloud.google.com/kubernetes-engine/docs/concepts/shared-responsibility>;
+    control plane security
+    <https://docs.cloud.google.com/kubernetes-engine/docs/concepts/control-plane-security>;
+    audit logging
+    <https://docs.cloud.google.com/kubernetes-engine/docs/how-to/audit-logging>;
+    regional clusters
+    <https://docs.cloud.google.com/kubernetes-engine/docs/concepts/regional-clusters>;
+    versioning <https://docs.cloud.google.com/kubernetes-engine/versioning>;
+    pricing <https://cloud.google.com/kubernetes-engine/pricing>.
+  - AKS: support policies
+    <https://learn.microsoft.com/en-us/azure/aks/support-policies>; supported
+    versions
+    <https://learn.microsoft.com/en-us/azure/aks/supported-kubernetes-versions>;
+    long-term support <https://learn.microsoft.com/en-us/azure/aks/long-term-support>;
+    pricing tiers and SLA
+    <https://learn.microsoft.com/en-us/azure/aks/free-standard-pricing-tiers>.
+  - Upstream: the version skew policy
+    <https://kubernetes.io/releases/version-skew-policy/>, and the deprecation
+    guide <https://kubernetes.io/docs/reference/using-api/deprecation-guide/>.
+- Overviews: EKS <https://docs.aws.amazon.com/eks/latest/userguide/what-is-eks.html>,
+  GKE <https://cloud.google.com/kubernetes-engine/docs/concepts/kubernetes-engine-overview>,
+  AKS <https://learn.microsoft.com/en-us/azure/aks/what-is-aks>.
