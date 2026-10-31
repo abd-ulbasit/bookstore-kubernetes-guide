@@ -1,0 +1,87 @@
+# Transcript for 12-kubernetes-for-machine-learning/02-gpus-and-accelerators.md, lab steps 0 to 6.
+# Tier A: a kind cluster that the lab owns. Kubernetes v1.37.0 server, kubectl
+# v1.37.2.
+# Recorded by running examples/security-lab/labs/12-02.sh from full-guide/.
+# The lab used its own namespace, p12-02-gpu. The chapter names the bookstore-ml
+# namespace and applies the same files with only the namespace replaced. Lines
+# that name the lab namespace are kept as captured.
+# The cluster's one node has a different name from the chapter's examples. The
+# captured lines keep the name the lab printed.
+# The cluster has no GPU. The lab installs no GPU Operator. Step 5 renders the
+# chart and reads the operator's sources at v26.7.2; it installs nothing.
+# What did not work the first time: the first run started kubectl wait before
+# the Job had created its Pod, and wait exits at once when nothing matches. The
+# script now waits for the Pod to exist first. This transcript is the rerun.
+## step 0: versions, the cluster, the image pin and the GPU column
+$ kubectl version
+Client Version: v1.37.2
+Server Version: v1.37.0
+$ kubectl get nodes (GPU column)
+NODE                     GPU
+sf-pilot-control-plane   <none>
+$ kubectl get nodes (taints)
+NODE                     TAINTS
+sf-pilot-control-plane   <none>
+$ docker buildx imagetools inspect nvidia/cuda:12.4.1-base-ubuntu22.04 (digest)
+Digest:    sha256:0f6bfcbf267e65123bcc2287e2153dedfc0f24772fb5ce84afe16ac4b2fada95
+$ docker buildx imagetools inspect ... (declared user)
+<no USER declared>
+
+## step 1: a restricted namespace, labelled as chapter 12.01 labels bookstore-ml
+$ kubectl get namespace p12-02-gpu
+Error from server (NotFound): namespaces "p12-02-gpu" not found
+$ kubectl create namespace p12-02-gpu
+namespace/p12-02-gpu created
+$ kubectl label namespace p12-02-gpu (restricted, enforce audit warn, version latest)
+namespace/p12-02-gpu labeled
+
+## step 2: deliberate denial, a root-default CUDA image with no securityContext
+$ kubectl run gpu-root-test -n p12-02-gpu --image=nvidia/cuda@sha256:0f6bfcbf267e65123bcc2287e2153dedfc0f24772fb5ce84afe16ac4b2fada95 --restart=Never -- nvidia-smi
+Error from server (Forbidden): pods "gpu-root-test" is forbidden: violates PodSecurity "restricted:latest": allowPrivilegeEscalation != false (container "gpu-root-test" must set securityContext.allowPrivilegeEscalation=false), unrestricted capabilities (container "gpu-root-test" must set securityContext.capabilities.drop=["ALL"]), runAsNonRoot != true (pod or container "gpu-root-test" must set securityContext.runAsNonRoot=true), seccompProfile (pod or container "gpu-root-test" must set securityContext.seccompProfile.type to "RuntimeDefault" or "Localhost")
+$ kubectl get pods -n p12-02-gpu
+No resources found in p12-02-gpu namespace.
+
+## step 3: the restricted GPU Job, checked by the client and by the server
+$ kubectl apply --dry-run=client -f examples/bookstore/ml/gpu/recommender-train-gpu.yaml (namespace p12-02-gpu)
+serviceaccount/recommender-train-gpu created (dry run)
+job.batch/recommender-train-gpu created (dry run)
+$ kubectl apply --dry-run=server -n p12-02-gpu -f examples/bookstore/ml/gpu/recommender-train-gpu.yaml (namespace p12-02-gpu)
+serviceaccount/recommender-train-gpu created (server dry run)
+job.batch/recommender-train-gpu created (server dry run)
+
+## step 4: the same Job applied to a cluster with no GPU
+$ kubectl apply -n p12-02-gpu -f examples/bookstore/ml/gpu/recommender-train-gpu.yaml (namespace p12-02-gpu)
+serviceaccount/recommender-train-gpu created
+job.batch/recommender-train-gpu created
+$ kubectl wait pod -n p12-02-gpu -l job-name=recommender-train-gpu --for=create --timeout=60s
+pod/recommender-train-gpu-9gcr9 condition met
+$ kubectl wait pod -n p12-02-gpu -l job-name=recommender-train-gpu --for=condition=PodScheduled=False --timeout=120s
+pod/recommender-train-gpu-9gcr9 condition met
+$ kubectl get pods -n p12-02-gpu
+NAME                          READY   STATUS    RESTARTS   AGE
+recommender-train-gpu-9gcr9   0/1     Pending   0          0s
+$ kubectl get events -n p12-02-gpu --field-selector reason=FailedScheduling
+REASON             MESSAGE
+FailedScheduling   0/1 nodes are available: 1 node(s) didn't match Pod's node affinity/selector. preemption: 0/1 nodes are available: 1 Preemption is not helpful for scheduling.
+
+## step 5: where the GPU stack needs host access (chart render and operator sources)
+$ helm show chart nvidia/gpu-operator --version v26.7.2
+"nvidia" has been added to your repositories
+appVersion: v26.7.2
+version: v26.7.2
+$ helm template gpu-operator nvidia/gpu-operator --version v26.7.2 -n gpu-operator
+render exit: 0
+privileged: true in the render: 0
+hostPath volumes in the render: 7
+$ curl the v26.7.2 DaemonSet sources and count their host access
+state-driver/0500_daemonset.yaml             privileged=6 hostPID=1 hostPath=14
+state-container-toolkit/0500_daemonset.yaml  privileged=2 hostPID=1 hostPath=8
+state-device-plugin/0500_daemonset.yaml      privileged=3 hostPID=0 hostPath=7
+state-dcgm-exporter/0800_daemonset.yaml      privileged=2 hostPID=0 hostPath=2
+gpu-feature-discovery/0500_daemonset.yaml    privileged=3 hostPID=0 hostPath=3
+
+## step 6: clean up the lab namespace
+$ kubectl delete namespace p12-02-gpu
+namespace "p12-02-gpu" deleted
+$ kubectl get namespace p12-02-gpu
+Error from server (NotFound): namespaces "p12-02-gpu" not found
