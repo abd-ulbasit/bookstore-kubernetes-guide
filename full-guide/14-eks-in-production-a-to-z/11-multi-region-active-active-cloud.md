@@ -846,7 +846,7 @@ the anycast IPs) reaches the **closest AWS edge by BGP topology**;
 the edge forwards the packet over the AWS backbone to the closest
 healthy endpoint (a per-region ALB registered as an Endpoint Group).
 Health-check failure removes the endpoint from the rotation **at the
-edge** within about a minute (AWS documents less than one minute) — no DNS resolution involved. The trade-
+edge** within about a minute (AWS documents less than one minute), with no DNS resolution involved. The trade-
 off is cost ($18/accelerator/month + per-GB transfer) and the
 constraint of L4 pass-through (TLS terminates at the regional ALB,
 not the accelerator).
@@ -1068,14 +1068,14 @@ Minimal multi-region active-active checklist (healthy when all 8 are yes):
 1. **When does Global Accelerator beat Route 53 latency-based routing, and when is Route 53 the right call?**
    <details><summary>Show answer</summary>
 
-   Global Accelerator wins when failover latency matters more than cost — its edge sees the health failure and re-routes packets in under a minute, with no DNS TTL involved (TTL caching in resolvers can stretch DNS-based failover to 5-15 minutes for the long tail). It's also the right call when you need a static anycast IP (regulated environments that whitelist IPs) or DDoS protection (Shield Standard comes with Global Accelerator at no extra charge; Shield Advanced is an optional paid subscription). Route 53 LBR wins on cost ($0.50/zone/month vs $18/accelerator/month + data transfer premium), is simpler to wire (just records + health checks), and is fine when 60-90s happy-path failover is within SLA. Most mid-stage SaaS picks Route 53; financial / gaming / public-API-with-customer-firewall workloads pick GA.
+   Global Accelerator wins when failover latency matters more than cost, and its edge sees the health failure and re-routes packets in under a minute, with no DNS TTL involved (TTL caching in resolvers can stretch DNS-based failover to 5-15 minutes for the long tail). It's also the right call when you need a static anycast IP (regulated environments that whitelist IPs) or DDoS protection (Shield Standard comes with Global Accelerator at no extra charge; Shield Advanced is an optional paid subscription). Route 53 LBR wins on cost ($0.50/zone/month vs $18/accelerator/month + data transfer premium), is simpler to wire (just records + health checks), and is fine when 60-90s happy-path failover is within SLA. Most mid-stage SaaS picks Route 53; financial / gaming / public-API-with-customer-firewall workloads pick GA.
 
    </details>
 
 2. **A team commits to a 5-minute RTO for writers. The CNPG primary is in us-east-1, standby in eu-west-1. The us-east region goes dark at 02:00 UTC. Walk through the runbook.**
    <details><summary>Show answer</summary>
 
-   (1) Route 53 health check fires on the per-region `/healthz` ALB endpoint (~90s detection: 3 failures 30s apart); us-east record is removed from the latency set, surviving regions absorb traffic for readers. (2) On-call fences the old primary, then sets `spec.replica.enabled` to false on eu-west's standby Cluster; this is irreversible, and the promotion time should be measured in the drill rather than assumed. (3) Payments-worker (the writer-only workload) is re-deployed via Argo CD to eu-west — the ApplicationSet's Cluster generator targeting a `role=writer` label flips eu-west to writer, us-east to non-writer; reconciliation runs in seconds with a webhook. (4) Confirm WAL has fully replayed on the promoted primary (zero lag) before declaring writes resumed. Total: writers back in 5-7 min if the runbook is drilled monthly; without drilling, 15-30+ min as the operator hunts for the commands.
+   (1) Route 53 health check fires on the per-region `/healthz` ALB endpoint (~90s detection: 3 failures 30s apart); us-east record is removed from the latency set, surviving regions absorb traffic for readers. (2) On-call fences the old primary, then sets `spec.replica.enabled` to false on eu-west's standby Cluster; this is irreversible, and the promotion time should be measured in the drill rather than assumed. (3) Payments-worker (the writer-only workload) is re-deployed via Argo CD to eu-west, the ApplicationSet's Cluster generator targeting a `role=writer` label flips eu-west to writer, us-east to non-writer; reconciliation runs in seconds with a webhook. (4) Confirm WAL has fully replayed on the promoted primary (zero lag) before declaring writes resumed. Total: writers back in 5-7 min if the runbook is drilled monthly; without drilling, 15-30+ min as the operator hunts for the commands.
 
    </details>
 
