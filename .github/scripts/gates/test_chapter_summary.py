@@ -1,12 +1,13 @@
 #!/usr/bin/env python3
-"""Tests for `chapter_summary.py`, the report-mode switch in the gates workflow.
+"""Tests for `chapter_summary.py`, the verdict of the gates workflow.
 
 Run from the repository root:
 
     python -m unittest discover -s .github/scripts/gates
 
-The script decides whether a pull request stays green while most of the guide
-still fails the gates. Each test builds small reports and checks one rule.
+The script decides whether a pull request stays green. Any chapter that fails
+a gate fails the job, except the outlines named in the report-only file. Each
+test builds small reports and checks one rule.
 """
 
 from __future__ import annotations
@@ -47,6 +48,8 @@ class Case(unittest.TestCase):
             path.parent.mkdir(parents=True, exist_ok=True)
             path.write_text("# chapter\n", encoding="utf-8")
         (self.root / "examples/bookstore/raw-manifests").mkdir(parents=True)
+        (self.root / "16-outline").mkdir()
+        (self.root / "16-outline/README.md").write_text("# outline\n", encoding="utf-8")
 
     def report(self, name: str, rows: list[dict]) -> str:
         path = self.dir / f"{name}.json"
@@ -58,8 +61,15 @@ class Case(unittest.TestCase):
         path.write_text("# comment\n" + "\n".join(entries) + "\n", encoding="utf-8")
         return path
 
-    def run_main(self, gates: list[str], enforced: Path) -> tuple[int, str, str]:
+    def report_only(self, *entries: str) -> Path:
+        path = self.dir / "report-only.txt"
+        path.write_text("# comment\n" + "\n".join(entries) + "\n", encoding="utf-8")
+        return path
+
+    def run_main(self, gates: list[str], enforced: Path, report_only: Path | None = None) -> tuple[int, str, str]:
         argv = ["--enforced", str(enforced), "--root", str(self.root)]
+        if report_only is not None:
+            argv += ["--report-only", str(report_only)]
         for gate in gates:
             argv += ["--gate", gate]
         out, err = io.StringIO(), io.StringIO()
@@ -69,13 +79,32 @@ class Case(unittest.TestCase):
 
 
 class VerdictTests(Case):
-    def test_a_failing_chapter_in_report_mode_does_not_fail_the_job(self) -> None:
+    def test_a_failing_chapter_on_no_list_fails_the_job(self) -> None:
         static = self.report("static", [static_row(PASSING), static_row(FAILING, "fail", ids=["KSV-0014"])])
         code, out, _ = self.run_main([f"G2:static:{static}:1"], self.enforced(PASSING))
-        self.assertEqual(code, 0, out)
-        self.assertIn("Failing, report mode only", out)
+        self.assertEqual(code, 1, out)
         self.assertIn(FAILING, out)
         self.assertIn("KSV-0014", out)
+
+    def test_a_failing_report_only_chapter_is_listed_and_does_not_fail_the_job(self) -> None:
+        static = self.report("static", [static_row(PASSING), static_row(FAILING, "fail", ids=["KSV-0014"])])
+        code, out, _ = self.run_main([f"G2:static:{static}:1"], self.enforced(PASSING), self.report_only(FAILING))
+        self.assertEqual(code, 0, out)
+        self.assertIn("Failing, report only", out)
+        self.assertIn(FAILING, out)
+        self.assertIn("KSV-0014", out)
+
+    def test_a_report_only_directory_covers_the_chapters_under_it(self) -> None:
+        static = self.report("static", [static_row(PASSING), static_row("16-outline/01-first.md", "fail")])
+        code, out, _ = self.run_main([f"G2:static:{static}:1"], self.enforced(PASSING), self.report_only("16-outline/"))
+        self.assertEqual(code, 0, out)
+        self.assertIn("16-outline/01-first.md", out)
+
+    def test_a_report_only_entry_does_not_excuse_another_chapter(self) -> None:
+        static = self.report("static", [static_row(PASSING, "fail"), static_row(FAILING, "fail")])
+        code, out, _ = self.run_main([f"G2:static:{static}:1"], self.enforced(PASSING), self.report_only(FAILING))
+        self.assertEqual(code, 1, out)
+        self.assertIn("FAIL: " + PASSING, out)
 
     def test_an_enforced_chapter_that_fails_fails_the_job(self) -> None:
         static = self.report("static", [static_row(PASSING, "fail", ids=["KSV-0001"]), static_row(FAILING, "fail")])
@@ -141,6 +170,18 @@ class SafetyTests(Case):
         code, out, _ = self.run_main([f"G2:static:{static}:1"], self.enforced(PASSING))
         self.assertEqual(code, 1, out)
         self.assertIn("NOT CHECKED", out)
+
+    def test_a_report_only_path_that_does_not_exist_is_an_input_error(self) -> None:
+        static = self.report("static", [static_row(PASSING)])
+        code, _, err = self.run_main([f"G2:static:{static}:0"], self.enforced(PASSING), self.report_only("16-gone/"))
+        self.assertEqual(code, 2)
+        self.assertIn("never be checked", err)
+
+    def test_a_missing_report_only_file_is_an_input_error(self) -> None:
+        static = self.report("static", [static_row(PASSING)])
+        code, _, err = self.run_main([f"G2:static:{static}:0"], self.enforced(PASSING), self.dir / "none.txt")
+        self.assertEqual(code, 2)
+        self.assertIn("report-only list", err)
 
     def test_an_enforced_path_that_does_not_exist_is_an_input_error(self) -> None:
         static = self.report("static", [static_row(PASSING)])

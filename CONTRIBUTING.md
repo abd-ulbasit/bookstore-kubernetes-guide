@@ -44,9 +44,9 @@ the versions in `.devcontainer/devcontainer.json` is the manual equivalent.
    make gates-static SCOPE=05-security/02-pod-security.md   # your chapter
    ```
    `make gates-static` needs Trivy, and `make gates-admission` needs a kind
-   cluster. A chapter or example tree that `.github/security-gates-enforced.txt`
-   names fails CI on a violation. Others only report, so do not read a green
-   run as proof that a new manifest carries the baseline.
+   cluster. Every chapter and example tree fails CI on a violation, except
+   Parts 16 and 17, which are outlines whose labs wait
+   (`.github/security-gates-report-only.txt`).
 5. **Open the PR**, fill in the template, link the issue.
 
 ## What gets accepted
