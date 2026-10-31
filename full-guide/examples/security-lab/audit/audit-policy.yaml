@@ -1,0 +1,37 @@
+# Audit policy for the Part 05 detection lab (chapter 05.08, tier A). The API
+# server reads it through --audit-policy-file. The first rule that matches a
+# request sets its level. Lab cluster only.
+apiVersion: audit.k8s.io/v1
+kind: Policy
+# Drop the RequestReceived stage, so each request is recorded once, after the
+# response, instead of twice.
+omitStages:
+  - RequestReceived
+rules:
+  # Secrets and ConfigMaps: record who read or changed what, never the value.
+  # A Metadata entry carries no request or response body, so the log cannot
+  # leak a secret.
+  - level: Metadata
+    resources:
+      - group: ""
+        resources: ["secrets", "configmaps"]
+  # A token request mints a credential. Record who asked, not the token.
+  - level: Metadata
+    resources:
+      - group: ""
+        resources: ["serviceaccounts/token"]
+  # Pod changes, exec, attach and port-forward: keep the request body, which
+  # names the image, the hostPath, the serviceAccountName and the command.
+  - level: Request
+    verbs: ["create", "update", "patch", "delete"]
+    resources:
+      - group: ""
+        resources: ["pods", "pods/exec", "pods/attach", "pods/portforward"]
+  # RBAC changes: keep the request, so a new binding is visible in full.
+  - level: Request
+    verbs: ["create", "update", "patch", "delete", "bind", "escalate"]
+    resources:
+      - group: "rbac.authorization.k8s.io"
+        resources: ["roles", "rolebindings", "clusterroles", "clusterrolebindings"]
+  # Everything else: who did what, without the body.
+  - level: Metadata
