@@ -43,9 +43,11 @@ them beside the rest. 01-catalog-pod.yaml and 02-catalog-pod-sidecar.yaml are
 two states of one Pod (the chapters delete one before applying the other), so
 the gate applies each alone, waits for it to be Ready and deletes it before the
 rest. 30-catalog-canary.yaml is a second form of catalog ("Do NOT run both
-stacks at once"), so the gate runs it after the rest has passed: it deletes
-10-catalog-deploy.yaml's workloads, applies the canary stacks in their place
-and waits for them. Nothing is skipped.
+stacks at once") and its header asks only for the namespace and the
+ServiceAccounts, so the gate runs it after the rest has passed and on a clean
+slate: it deletes every workload the rest created, applies the canary stacks and
+waits for them. Nothing is skipped. (Ten canary replicas at their own limits do
+not fit the namespace quota beside the whole app, and were never meant to.)
 
 The gate writes to the cluster, so it refuses to run unless the kubectl
 context is a kind cluster (`kind-` prefix) or one named with --allow-context.
@@ -82,8 +84,9 @@ TREE = "full-guide/examples/bookstore"
 VARIANTS = ("raw", "helm", "kustomize-dev", "kustomize-staging", "kustomize-prod")
 WORKLOAD_KINDS = ("Pod", "Deployment", "StatefulSet", "DaemonSet", "Job", "CronJob")
 SNAPSHOT_FILES = ("01-catalog-pod.yaml", "02-catalog-pod-sidecar.yaml")
-# A file that replaces the workloads of another file, and may not run beside it.
-VARIANT_FILES = {"30-catalog-canary.yaml": ("10-catalog-deploy.yaml",)}
+# A file that may not run beside the rest and needs only the namespace, so it
+# runs on its own afterwards.
+VARIANT_FILES = ("30-catalog-canary.yaml",)
 HEAD_FILES = ("00-namespace.yaml", "05-serviceaccounts-rbac.yaml")
 STAND_IN_SECRET = "db-credentials"
 PSA_WARNING = "would violate PodSecurity"
@@ -155,7 +158,7 @@ def load_docs(text: str, source: str) -> list[Doc]:
     return docs
 
 
-Variant = tuple[str, list["Doc"], list["Doc"]]
+Variant = tuple[str, list["Doc"]]
 
 
 def raw_forms(tree: Path) -> tuple[list[Doc], list[tuple[str, list[Doc]]], list[Variant]]:
@@ -164,16 +167,14 @@ def raw_forms(tree: Path) -> tuple[list[Doc], list[tuple[str, list[Doc]]], list[
     files = sorted(folder.glob("*.yaml"))
     if not files:
         raise GateError(f"{folder} holds no manifests")
-    loaded = {path.name: load_docs(path.read_text(encoding="utf-8"), path.name) for path in files}
     head, snapshots, rest, variants = [], [], [], []
-    for name, docs in loaded.items():
+    for path in files:
+        name = path.name
+        docs = load_docs(path.read_text(encoding="utf-8"), name)
         if name in SNAPSHOT_FILES:
             snapshots.append((name, docs))
         elif name in VARIANT_FILES:
-            replaced = [d for old in VARIANT_FILES[name] for d in loaded.get(old, [])]
-            if not replaced:
-                raise GateError(f"{name} replaces {', '.join(VARIANT_FILES[name])}, which holds no documents")
-            variants.append((name, replaced, docs))
+            variants.append((name, docs))
         elif name in HEAD_FILES:
             head += docs
         else:
@@ -504,12 +505,15 @@ def run_snapshots(kubectl: str, snapshots: list[tuple[str, list[Doc]]], deadline
 
 
 def run_variants(kubectl: str, variants: list[Variant], deadline: float, result: Result) -> None:
-    """Swap each variant in for the workloads it replaces, and wait for it."""
-    for name, replaced, docs in variants:
-        print(f"variant {name}: delete what it replaces, apply it, wait for it", flush=True)
-        for doc in (d for d in replaced if d.kind in WORKLOAD_KINDS):
-            run_tool([kubectl, "delete", doc.kind.lower(), doc.name, "--namespace", NAMESPACE, "--ignore-not-found", "--wait=true"])
-            result.workloads.pop(doc.label(), None)
+    """Run each variant alone: clear every workload, apply the variant, wait for it."""
+    for name, docs in variants:
+        print(f"variant {name}: delete every workload, apply it alone, wait for it", flush=True)
+        kinds = "deployment,statefulset,daemonset,job,cronjob,pod"
+        rc, _, err = run_tool([kubectl, "delete", kinds, "--all", "--namespace", NAMESPACE, "--wait=true", "--timeout=240s"])
+        if rc != 0:
+            raise Failure(f"cannot clear the namespace before {name}: {err.strip()[:300]}")
+        for label in [k for k in result.workloads if " (" not in k]:
+            result.workloads[f"{label} (cleared before {name})"] = result.workloads.pop(label)
         apply_docs(kubectl, docs, name)
         mine = [d for d in expected_workloads(docs) if d.kind != "CronJob"]
         try:
@@ -534,7 +538,7 @@ def deploy(args: argparse.Namespace, result: Result) -> list[Doc]:
     served = served_kinds(args.kubectl)
     docs, skipped = split_unserved(docs, served)
     snapshot_docs = [d for _, group in snapshots for d in group]
-    variant_docs = [d for _, _, group in variants for d in group]
+    variant_docs = [d for _, group in variants for d in group]
     variant_docs, variant_skipped = split_unserved(variant_docs, served)
     skipped += variant_skipped
     holding = [d.label() for d in skipped if runs_pods(d)]

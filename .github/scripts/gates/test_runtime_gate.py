@@ -236,6 +236,10 @@ elif args[0] == "create" and args[1] == "job":
     state.setdefault("manual_jobs", []).append(args[2])
     save()
     print("job.batch/" + args[2] + " created")
+elif args[0] == "delete" and "--all" in args:
+    kinds = args[1].split(",")
+    state["applied"] = [x for x in state["applied"] if x[0].lower() not in kinds]
+    save()
 elif args[0] == "delete":
     state["applied"] = [x for x in state["applied"] if not (x[0].lower() == args[1] and x[1] == args[2])]
     save()
@@ -394,7 +398,7 @@ class FakeCluster(unittest.TestCase):
         self.assertEqual(left, [])
 
 
-    def test_a_variant_replaces_the_workloads_it_names_and_must_come_up(self) -> None:
+    def test_a_variant_runs_alone_after_the_rest_and_must_come_up(self) -> None:
         stack = lambda name: doc("Deployment", name, spec={"replicas": 1, "template": {"spec": {"containers": [{"name": "c"}]}}})  # noqa: E731
         tree = self.tree(
             {
@@ -410,15 +414,9 @@ class FakeCluster(unittest.TestCase):
         workloads = json.loads(report.read_text())["workloads"]
         self.assertIn("Deployment/catalog-stable (30-catalog-canary.yaml)", workloads)
         self.assertIn("Deployment/catalog-canary (30-catalog-canary.yaml)", workloads)
-        self.assertNotIn("Deployment/catalog", workloads)
+        self.assertIn("Deployment/catalog (cleared before 30-catalog-canary.yaml)", workloads)
         applied = [name for kind, name in json.loads(self.state_path.read_text())["applied"] if kind == "Deployment"]
         self.assertEqual(sorted(applied), ["catalog-canary", "catalog-stable"])
-
-    def test_a_variant_that_replaces_nothing_aborts_with_exit_2(self) -> None:
-        tree = self.tree({"00-namespace.yaml": [NAMESPACE_DOC], "10-app.yaml": [deployment("catalog")], "30-catalog-canary.yaml": [deployment("catalog-stable")]})
-        code, _, err = self.gate(tree)
-        self.assertEqual(code, 2)
-        self.assertIn("30-catalog-canary.yaml replaces", err)
 
 
 @unittest.skipUnless(HAVE_RENDERERS, "needs helm and kubectl to render the Bookstore forms")
@@ -430,7 +428,7 @@ class RealForms(unittest.TestCase):
         out = {}
         for variant in rg.VARIANTS:
             docs, snapshots, variants = rg.render(variant, TREE, shutil.which("helm") or "helm", shutil.which("kubectl") or "kubectl")
-            out[variant] = (docs, snapshots + [(name, group) for name, _, group in variants])
+            out[variant] = (docs, snapshots + variants)
         return out
 
     def test_every_form_creates_a_restricted_namespace_and_holds_workloads(self) -> None:
@@ -458,9 +456,8 @@ class RealForms(unittest.TestCase):
     def test_the_raw_form_holds_two_snapshot_pods_and_the_canary_variant(self) -> None:
         docs, snapshots, variants = rg.render("raw", TREE, "helm", "kubectl")
         self.assertEqual([name for name, _ in snapshots], list(rg.SNAPSHOT_FILES))
-        self.assertEqual([name for name, _, _ in variants], list(rg.VARIANT_FILES))
-        (_, replaced, canary), = variants
-        self.assertEqual([d.label() for d in replaced if d.kind == "Deployment"], ["Deployment/catalog"])
+        self.assertEqual([name for name, _ in variants], list(rg.VARIANT_FILES))
+        (_, canary), = variants
         self.assertEqual(sorted(d.label() for d in canary if d.kind == "Deployment"), ["Deployment/catalog-canary", "Deployment/catalog-stable"])
         self.assertNotIn("Deployment/catalog-canary", [d.label() for d in docs])
 
