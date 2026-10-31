@@ -15,7 +15,7 @@
 #   jobset.x-k8s.io/v1alpha2 (replicatedJobs / shared headless Service).
 #
 # CPU-ONLY, RUNS ON KIND — NO GPU. This is a deliberately tiny 2-worker gang
-# that just echoes/sleeps: a stand-in for the REAL CPU training in X3b
+# that just echoes/sleeps: a stand-in for the REAL CPU training in ch.04
 # (ml/train/). Its purpose is to demonstrate GANG ADMISSION + the QUEUE +
 # QUOTA mechanics LOCALLY without a GPU. The GPU "scale-up" path is
 # ../gpu/recommender-train-gpu.yaml (ch.02). No GPU/training output is faked.
@@ -63,6 +63,9 @@ spec:
               automountServiceAccountToken: false
               securityContext:        # pod-level — restricted-compliant
                 runAsNonRoot: true
+                # busybox declares no user (its default UID is 0), so the UID
+                # here is chosen, not declared. Any non-root UID satisfies
+                # restricted; this one has not been run on the image yet.
                 runAsUser: 65532
                 runAsGroup: 65532
                 seccompProfile:
@@ -70,9 +73,9 @@ spec:
               containers:
                 - name: train
                   # Tiny public image with a shell; stands in for the real CPU
-                  # recommender training image (X3b). No GPU, no fabricated
+                  # recommender training image (ch.04). No GPU, no fabricated
                   # training/nvidia output — it states what it represents.
-                  image: busybox:1.36
+                  image: busybox@sha256:73aaf090f3d85aa34ee199857f03fa3a95c8ede2ffd4cc2cdb5b94e566b11662   # busybox:1.36
                   command: ["/bin/sh", "-c"]
                   args:
                     - |
@@ -80,7 +83,7 @@ spec:
                       echo "[recommender-train] CPU gang worker starting."
                       echo "Gang member ${JOB_COMPLETION_INDEX:-?} of the"
                       echo "2-worker recommendations 'training' (CPU-only)."
-                      echo "Stands in for X3b real training: build the"
+                      echo "Stands in for the ch.04 real training: build the"
                       echo "customer x book co-occurrence matrix + top-K."
                       echo "Both workers were admitted TOGETHER by Kueue"
                       echo "(gang via spec.suspend) — never 1-of-2 wedged."
