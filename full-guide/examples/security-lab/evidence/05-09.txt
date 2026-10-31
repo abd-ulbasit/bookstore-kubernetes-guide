@@ -1,0 +1,80 @@
+## part 1: a scanner honours a registry entry until its expired_at date
+$ trivy --version | head -1
+Version: 0.76.1
+
+## step 1: no registry entry, so the privileged container fails KSV-0017
+$ trivy config --quiet --format json --ignorefile "" exception-demo.yaml | grep -c '"ID": "KSV-0017"'
+1
+
+## step 2: an entry with expired_at 2027-04-29, still in force
+$ trivy config --quiet --format json --ignorefile ignore-future.yaml exception-demo.yaml | grep -c '"ID": "KSV-0017"'
+0
+
+## step 3: the same entry with expired_at 2026-10-01, now past its date
+$ trivy config --quiet --format json --ignorefile ignore-expired.yaml exception-demo.yaml | grep -c '"ID": "KSV-0017"'
+1
+
+## part 1b, step 1: the bookstore expiry stage, as CI runs it on the repository
+$ (cd "$REPO" && REPORT_DIR="$work/reports-ci" bash full-guide/examples/bookstore/ci/scan.sh expiry "full-guide/examples/bookstore/ci/zap/baseline.conf full-guide/examples/bookstore/ci/kube-linter.yaml"; echo "exit=$?")
+scan.sh: expiry clean on full-guide/examples/bookstore/ci/zap/baseline.conf full-guide/examples/bookstore/ci/kube-linter.yaml
+exit=0
+
+## part 1b, step 2: the same stage on a copy whose entry has a Revisit by date in the past
+$ (cd "$work/lapsed" && REPORT_DIR=reports bash "$REPO/full-guide/examples/bookstore/ci/scan.sh" expiry exceptions.conf; echo "exit=$?"; cat reports/expiry.txt)
+scan.sh: expiry flagged exceptions.conf (exit 1, report reports/expiry.txt)
+exit=1
+exceptions.conf:4: lapsed on 2020-01-01 (today is 2026-10-31):     - no-anti-affinity
+
+## part 2: the admission half, on a kind cluster you own
+## part 2, step 0: no p05-09 namespace from an earlier run is left
+none left
+
+$ kubectl apply -f policy.yaml
+validatingadmissionpolicy.admissionregistration.k8s.io/p05-09-exception-expiry created
+validatingadmissionpolicybinding.admissionregistration.k8s.io/p05-09-exception-expiry created
+
+## step 4: wait until the binding enforces, using a server dry run
+binding enforced after about 2 second(s)
+
+## step 5: apply four namespaces; the policy admits or refuses each
+$ kubectl apply -f namespaces.yaml
+namespace/p05-09-restricted created
+namespace/p05-09-exception created
+Error from server (Invalid): error when creating "namespaces.yaml": namespaces "p05-09-no-expiry" is forbidden: ValidatingAdmissionPolicy 'p05-09-exception-expiry' with binding 'p05-09-exception-expiry' denied request: a namespace below restricted needs a reason and an expiry within 365 days
+Error from server (Invalid): error when creating "namespaces.yaml": namespaces "p05-09-too-long" is forbidden: ValidatingAdmissionPolicy 'p05-09-exception-expiry' with binding 'p05-09-exception-expiry' denied request: a namespace below restricted needs a reason and an expiry within 365 days
+
+## step 6: which of the four exist now
+$ kubectl get ns p05-09-restricted p05-09-no-expiry p05-09-exception p05-09-too-long --ignore-not-found -L pod-security.kubernetes.io/enforce
+NAME                STATUS   AGE   ENFORCE
+p05-09-restricted   Active   2s    restricted
+p05-09-exception    Active   2s    baseline
+
+## step 7: a restricted service namespace, then its workload checked by a server dry run
+$ kubectl apply -f service-ns.yaml || { sleep 5; kubectl apply -f service-ns.yaml; }
+namespace/p05-09-service created
+
+$ kubectl apply --dry-run=server -f catalog-review.yaml
+serviceaccount/catalog created (server dry run)
+deployment.apps/catalog created (server dry run)
+
+## step 7b: the namespace gets its default ServiceAccount, which admission looks up
+$ for i in $(seq 1 60); do kubectl -n p05-09-service get serviceaccount default -o name 2>/dev/null && break; sleep 2; done
+serviceaccount/default
+
+## step 8: a deliberately privileged Pod in the same namespace, refused at admission
+$ kubectl -n p05-09-service run catalog-privileged --image=bookstore/catalog:dev --privileged --dry-run=server
+Error from server (Forbidden): pods "catalog-privileged" is forbidden: violates PodSecurity "restricted:v1.37": privileged (container "catalog-privileged" must not set securityContext.privileged=true), allowPrivilegeEscalation != false (container "catalog-privileged" must set securityContext.allowPrivilegeEscalation=false), unrestricted capabilities (container "catalog-privileged" must set securityContext.capabilities.drop=["ALL"]), runAsNonRoot != true (pod or container "catalog-privileged" must set securityContext.runAsNonRoot=true), seccompProfile (pod or container "catalog-privileged" must set securityContext.seccompProfile.type to "RuntimeDefault" or "Localhost")
+
+## step 9: clean up what this run created
+$ kubectl delete ns p05-09-restricted p05-09-no-expiry p05-09-exception p05-09-too-long p05-09-service --ignore-not-found --wait=false
+namespace "p05-09-restricted" deleted
+namespace "p05-09-exception" deleted
+namespace "p05-09-service" deleted
+
+$ kubectl delete validatingadmissionpolicybinding p05-09-exception-expiry --ignore-not-found
+validatingadmissionpolicybinding.admissionregistration.k8s.io "p05-09-exception-expiry" deleted
+
+$ kubectl delete validatingadmissionpolicy p05-09-exception-expiry --ignore-not-found
+validatingadmissionpolicy.admissionregistration.k8s.io "p05-09-exception-expiry" deleted
+
+script-exit=0
