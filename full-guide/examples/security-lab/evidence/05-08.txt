@@ -1,0 +1,73 @@
+# Lab 05-08: attack and response, shared mode, on the shared kind cluster.
+$ kubectl version --client
+Client Version: v1.37.2
+$ helm version --short
+v4.1.4+g05fa379
+$ kubectl get nodes -o wide
+NAME                     STATUS   ROLES           AGE   VERSION   INTERNAL-IP   EXTERNAL-IP   OS-IMAGE                       KERNEL-VERSION             CONTAINER-RUNTIME
+sf-pilot-control-plane   Ready    control-plane   9h    v1.37.0   172.18.0.2    <none>        Debian GNU/Linux 13 (trixie)   7.0.0-38-generic (amd64)   containerd://2.3.4
+$ docker exec sf-pilot-control-plane grep -n audit /etc/kubernetes/manifests/kube-apiserver.yaml
+$ kubectl --kubeconfig=work/builder.kubeconfig auth whoami
+ATTRIBUTE                                           VALUE
+Username                                            system:serviceaccount:p05-08-attack:builder
+UID                                                 e935273d-5373-4b8a-875f-5d1277c1699f
+Groups                                              [system:serviceaccounts system:serviceaccounts:p05-08-attack system:authenticated]
+Extra: authentication.kubernetes.io/credential-id   [JTI=b34adc8e-f569-4c8b-bd51-0bf11b50de80]
+$ kubectl --kubeconfig=work/builder.kubeconfig get secret app-db -n p05-08-app
+Error from server (Forbidden): secrets "app-db" is forbidden: User "system:serviceaccount:p05-08-attack:builder" cannot get resource "secrets" in API group "" in the namespace "p05-08-app"
+$ kubectl --kubeconfig=work/builder.kubeconfig apply -f escape-node.yaml
+pod/escape-node created
+$ kubectl wait --for=condition=Ready pod/escape-node -n p05-08-attack --timeout=180s
+pod/escape-node condition met
+$ kubectl --kubeconfig=work/builder.kubeconfig exec -n p05-08-attack escape-node -- sh -c 'test -s /var/run/secrets/kubernetes.io/serviceaccount/token && echo token-file-present'
+token-file-present
+$ kubectl --kubeconfig=work/ops.kubeconfig get secret app-db -n p05-08-app -o name
+secret/app-db
+$ kubectl --kubeconfig=work/builder.kubeconfig exec -n p05-08-attack escape-node -- sh -c 'cat /host/etc/hostname; touch /host/tmp/p05-08-marker && echo marker-written'
+sf-pilot-control-plane
+marker-written
+$ kubectl apply -f escape-app.yaml
+Error from server (Forbidden): error when creating "work/escape-app.yaml": pods "escape-app" is forbidden: violates PodSecurity "restricted:v1.37": privileged (container "app" must not set securityContext.privileged=true), allowPrivilegeEscalation != false (container "app" must set securityContext.allowPrivilegeEscalation=false), unrestricted capabilities (container "app" must set securityContext.capabilities.drop=["ALL"]), restricted volume types (volume "node-root" uses restricted volume type "hostPath"), runAsNonRoot != true (pod or container "app" must set securityContext.runAsNonRoot=true), seccompProfile (pod or container "app" must set securityContext.seccompProfile.type to "RuntimeDefault" or "Localhost")
+$ kubectl --kubeconfig=work/builder.kubeconfig auth can-i create pods -n p05-08-app
+no
+$ kubectl label pod escape-node -n p05-08-attack quarantine=true
+pod/escape-node labeled
+$ kubectl exec -n p05-08-attack escape-node -- nslookup kubernetes.default.svc.cluster.local | expand -t 4
+Server:     10.96.0.10
+Address:    10.96.0.10:53
+
+Name:   kubernetes.default.svc.cluster.local
+Address: 10.96.0.1
+
+
+$ kubectl apply -f quarantine.yaml
+networkpolicy.networking.k8s.io/quarantine created
+$ kubectl exec -n p05-08-attack escape-node -- nslookup kubernetes.default.svc.cluster.local | expand -t 4
+command terminated with exit code 1
+;; connection timed out; no servers could be reached
+
+$ kubectl get pod escape-node -n p05-08-attack -o yaml > evidence/pod.yaml
+$ kubectl get events -n p05-08-attack > evidence/events.txt
+$ ls -l evidence
+events.txt
+pod.yaml
+$ kubectl delete rolebinding ops-secret-reader -n p05-08-app
+rolebinding.rbac.authorization.k8s.io "ops-secret-reader" deleted from p05-08-app namespace
+$ kubectl delete pod escape-node -n p05-08-attack
+pod "escape-node" deleted from p05-08-attack namespace
+$ kubectl --kubeconfig=work/ops.kubeconfig get secret app-db -n p05-08-app -o name
+error: You must be logged in to the server (Unauthorized)
+$ kubectl --kubeconfig=work/ops.kubeconfig auth whoami
+error: You must be logged in to the server (Unauthorized)
+$ kubectl delete serviceaccount builder -n p05-08-attack
+serviceaccount "builder" deleted from p05-08-attack namespace
+$ kubectl apply -f builder-sa.yaml
+serviceaccount/builder created
+$ kubectl --kubeconfig=work/builder.kubeconfig auth whoami
+error: You must be logged in to the server (Unauthorized)
+$ kubectl patch secret app-db -n p05-08-app --type merge -p '{"stringData":{"password":"lab-rotated-value"}}'
+secret/app-db patched
+$ kubectl delete namespace p05-08-attack p05-08-app p05-08-falco p05-08-trivy
+namespace "p05-08-attack" deleted
+namespace "p05-08-app" deleted
+LAB_EXIT=0
