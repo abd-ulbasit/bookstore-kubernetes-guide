@@ -4,12 +4,12 @@
 # that cluster. The worker it drains must not carry a NoSchedule taint for
 # other workloads, because the two replicas have to land on it.
 #
-# It creates one namespace, p08-01-drain (the chapter calls it drain-demo), and
-# runs the checks an upgrade starts with: the served versions and nodes, a
-# server dry-run that proves a removed apiVersion is refused, and a drain of
-# one worker. Two replicas run on that worker under a PodDisruptionBudget that
-# keeps both up, so the drain is refused and times out. The script then
-# uncordons the worker and deletes the namespace.
+# It creates one namespace, p08-01-drain (the chapter calls it drain-demo), with
+# a default-deny NetworkPolicy, and runs the checks an upgrade starts with: the
+# served versions and nodes, a server dry-run that proves a removed apiVersion
+# is refused, and a drain of one worker. Two replicas run under a
+# PodDisruptionBudget that keeps both up, so the drain is refused and times out.
+# The script then uncordons the worker and deletes the namespace.
 #
 # The kubeadm upgrade and the kind version move are not run here. A version
 # move recreates the cluster, so it cannot share one with other labs.
@@ -43,6 +43,15 @@ metadata:
     pod-security.kubernetes.io/enforce: restricted
     pod-security.kubernetes.io/audit: restricted
     pod-security.kubernetes.io/warn: restricted
+---
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: default-deny-all
+  namespace: $NS
+spec:
+  podSelector: {}
+  policyTypes: ["Ingress", "Egress"]
 YAML
 
 cat > workload.yaml <<YAML

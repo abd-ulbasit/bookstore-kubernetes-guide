@@ -12,6 +12,13 @@
 # that cluster, after use_multinode.
 # Run once, complete, exit 0.
 #
+# Second run (2026-10-31): the drill namespace gained the default-deny
+# NetworkPolicy that 02.06 asks every namespace to carry, and the script was run
+# again on the same three-node cluster. No node carried a taint this time, so
+# the scheduler put one replica on each worker, and the drain evicted the one
+# Pod on sf-sched-worker2. The budget refused it all the same. The first run's
+# notes below describe the first run.
+#
 # What did not work first, and was not used as evidence:
 #   - The shared kind cluster used by other labs did not answer its API during
 #     this session, so the run moved to the three-node cluster above.
@@ -46,6 +53,7 @@ policy/v1
 
 $ kubectl apply -f namespace.yaml
 namespace/p08-01-drain created
+networkpolicy.networking.k8s.io/default-deny-all created
 
 $ sed "s#policy/v1\$#policy/v1beta1#" pdb.yaml > pdb-v1beta1.yaml
 
@@ -64,71 +72,49 @@ $ kubectl apply -f pdb.yaml
 poddisruptionbudget.policy/drain-demo created
 
 $ kubectl rollout status deployment/drain-demo -n p08-01-drain --timeout=180s
-Waiting for deployment "drain-demo" rollout to finish: 0 out of 2 new replicas have been updated...
 Waiting for deployment "drain-demo" rollout to finish: 0 of 2 updated replicas are available...
 Waiting for deployment "drain-demo" rollout to finish: 1 of 2 updated replicas are available...
 deployment "drain-demo" successfully rolled out
 
 $ kubectl get pods -n p08-01-drain -o custom-columns=NAME:.metadata.name,NODE:.spec.nodeName,PHASE:.status.phase
 NAME                          NODE               PHASE
-drain-demo-7549c4bbd6-5sh9l   sf-sched-worker2   Running
-drain-demo-7549c4bbd6-g99pz   sf-sched-worker2   Running
+drain-demo-7549c4bbd6-5bq79   sf-sched-worker    Running
+drain-demo-7549c4bbd6-nn5qk   sf-sched-worker2   Running
 
 $ kubectl cordon sf-sched-worker2
 node/sf-sched-worker2 cordoned
 
 $ kubectl drain sf-sched-worker2 --ignore-daemonsets --delete-emptydir-data --pod-selector app=drain-demo --timeout=45s
 node/sf-sched-worker2 already cordoned
-evicting pod p08-01-drain/drain-demo-7549c4bbd6-g99pz
-evicting pod p08-01-drain/drain-demo-7549c4bbd6-5sh9l
-error when evicting pods/"drain-demo-7549c4bbd6-g99pz" -n "p08-01-drain" (will retry after 5s): Cannot evict pod as it would violate the pod's disruption budget.
-error when evicting pods/"drain-demo-7549c4bbd6-5sh9l" -n "p08-01-drain" (will retry after 5s): Cannot evict pod as it would violate the pod's disruption budget.
-evicting pod p08-01-drain/drain-demo-7549c4bbd6-5sh9l
-evicting pod p08-01-drain/drain-demo-7549c4bbd6-g99pz
-error when evicting pods/"drain-demo-7549c4bbd6-g99pz" -n "p08-01-drain" (will retry after 5s): Cannot evict pod as it would violate the pod's disruption budget.
-error when evicting pods/"drain-demo-7549c4bbd6-5sh9l" -n "p08-01-drain" (will retry after 5s): Cannot evict pod as it would violate the pod's disruption budget.
-evicting pod p08-01-drain/drain-demo-7549c4bbd6-g99pz
-evicting pod p08-01-drain/drain-demo-7549c4bbd6-5sh9l
-error when evicting pods/"drain-demo-7549c4bbd6-g99pz" -n "p08-01-drain" (will retry after 5s): Cannot evict pod as it would violate the pod's disruption budget.
-error when evicting pods/"drain-demo-7549c4bbd6-5sh9l" -n "p08-01-drain" (will retry after 5s): Cannot evict pod as it would violate the pod's disruption budget.
-evicting pod p08-01-drain/drain-demo-7549c4bbd6-5sh9l
-evicting pod p08-01-drain/drain-demo-7549c4bbd6-g99pz
-error when evicting pods/"drain-demo-7549c4bbd6-5sh9l" -n "p08-01-drain" (will retry after 5s): Cannot evict pod as it would violate the pod's disruption budget.
-error when evicting pods/"drain-demo-7549c4bbd6-g99pz" -n "p08-01-drain" (will retry after 5s): Cannot evict pod as it would violate the pod's disruption budget.
-evicting pod p08-01-drain/drain-demo-7549c4bbd6-g99pz
-evicting pod p08-01-drain/drain-demo-7549c4bbd6-5sh9l
-error when evicting pods/"drain-demo-7549c4bbd6-g99pz" -n "p08-01-drain" (will retry after 5s): Cannot evict pod as it would violate the pod's disruption budget.
-error when evicting pods/"drain-demo-7549c4bbd6-5sh9l" -n "p08-01-drain" (will retry after 5s): Cannot evict pod as it would violate the pod's disruption budget.
-evicting pod p08-01-drain/drain-demo-7549c4bbd6-5sh9l
-evicting pod p08-01-drain/drain-demo-7549c4bbd6-g99pz
-error when evicting pods/"drain-demo-7549c4bbd6-5sh9l" -n "p08-01-drain" (will retry after 5s): Cannot evict pod as it would violate the pod's disruption budget.
-error when evicting pods/"drain-demo-7549c4bbd6-g99pz" -n "p08-01-drain" (will retry after 5s): Cannot evict pod as it would violate the pod's disruption budget.
-evicting pod p08-01-drain/drain-demo-7549c4bbd6-5sh9l
-evicting pod p08-01-drain/drain-demo-7549c4bbd6-g99pz
-error when evicting pods/"drain-demo-7549c4bbd6-g99pz" -n "p08-01-drain" (will retry after 5s): Cannot evict pod as it would violate the pod's disruption budget.
-error when evicting pods/"drain-demo-7549c4bbd6-5sh9l" -n "p08-01-drain" (will retry after 5s): Cannot evict pod as it would violate the pod's disruption budget.
-evicting pod p08-01-drain/drain-demo-7549c4bbd6-g99pz
-evicting pod p08-01-drain/drain-demo-7549c4bbd6-5sh9l
-error when evicting pods/"drain-demo-7549c4bbd6-5sh9l" -n "p08-01-drain" (will retry after 5s): Cannot evict pod as it would violate the pod's disruption budget.
-error when evicting pods/"drain-demo-7549c4bbd6-g99pz" -n "p08-01-drain" (will retry after 5s): Cannot evict pod as it would violate the pod's disruption budget.
-evicting pod p08-01-drain/drain-demo-7549c4bbd6-g99pz
-evicting pod p08-01-drain/drain-demo-7549c4bbd6-5sh9l
-error when evicting pods/"drain-demo-7549c4bbd6-g99pz" -n "p08-01-drain" (will retry after 5s): Cannot evict pod as it would violate the pod's disruption budget.
-error when evicting pods/"drain-demo-7549c4bbd6-5sh9l" -n "p08-01-drain" (will retry after 5s): Cannot evict pod as it would violate the pod's disruption budget.
-evicting pod p08-01-drain/drain-demo-7549c4bbd6-g99pz
-evicting pod p08-01-drain/drain-demo-7549c4bbd6-5sh9l
-There are pending pods in node "sf-sched-worker2" when an error occurred: [error when evicting pods/"drain-demo-7549c4bbd6-g99pz" -n "p08-01-drain": global timeout reached: 45s, error when evicting pods/"drain-demo-7549c4bbd6-5sh9l" -n "p08-01-drain": global timeout reached: 45s]
-pod/drain-demo-7549c4bbd6-5sh9l
-pod/drain-demo-7549c4bbd6-g99pz
-error: unable to drain node "sf-sched-worker2" due to error: [error when evicting pods/"drain-demo-7549c4bbd6-g99pz" -n "p08-01-drain": global timeout reached: 45s, error when evicting pods/"drain-demo-7549c4bbd6-5sh9l" -n "p08-01-drain": global timeout reached: 45s], continuing command...
+evicting pod p08-01-drain/drain-demo-7549c4bbd6-nn5qk
+error when evicting pods/"drain-demo-7549c4bbd6-nn5qk" -n "p08-01-drain" (will retry after 5s): Cannot evict pod as it would violate the pod's disruption budget.
+evicting pod p08-01-drain/drain-demo-7549c4bbd6-nn5qk
+error when evicting pods/"drain-demo-7549c4bbd6-nn5qk" -n "p08-01-drain" (will retry after 5s): Cannot evict pod as it would violate the pod's disruption budget.
+evicting pod p08-01-drain/drain-demo-7549c4bbd6-nn5qk
+error when evicting pods/"drain-demo-7549c4bbd6-nn5qk" -n "p08-01-drain" (will retry after 5s): Cannot evict pod as it would violate the pod's disruption budget.
+evicting pod p08-01-drain/drain-demo-7549c4bbd6-nn5qk
+error when evicting pods/"drain-demo-7549c4bbd6-nn5qk" -n "p08-01-drain" (will retry after 5s): Cannot evict pod as it would violate the pod's disruption budget.
+evicting pod p08-01-drain/drain-demo-7549c4bbd6-nn5qk
+error when evicting pods/"drain-demo-7549c4bbd6-nn5qk" -n "p08-01-drain" (will retry after 5s): Cannot evict pod as it would violate the pod's disruption budget.
+evicting pod p08-01-drain/drain-demo-7549c4bbd6-nn5qk
+error when evicting pods/"drain-demo-7549c4bbd6-nn5qk" -n "p08-01-drain" (will retry after 5s): Cannot evict pod as it would violate the pod's disruption budget.
+evicting pod p08-01-drain/drain-demo-7549c4bbd6-nn5qk
+error when evicting pods/"drain-demo-7549c4bbd6-nn5qk" -n "p08-01-drain" (will retry after 5s): Cannot evict pod as it would violate the pod's disruption budget.
+evicting pod p08-01-drain/drain-demo-7549c4bbd6-nn5qk
+error when evicting pods/"drain-demo-7549c4bbd6-nn5qk" -n "p08-01-drain" (will retry after 5s): Cannot evict pod as it would violate the pod's disruption budget.
+evicting pod p08-01-drain/drain-demo-7549c4bbd6-nn5qk
+error when evicting pods/"drain-demo-7549c4bbd6-nn5qk" -n "p08-01-drain" (will retry after 5s): Cannot evict pod as it would violate the pod's disruption budget.
+evicting pod p08-01-drain/drain-demo-7549c4bbd6-nn5qk
+There are pending pods in node "sf-sched-worker2" when an error occurred: error when evicting pods/"drain-demo-7549c4bbd6-nn5qk" -n "p08-01-drain": global timeout reached: 45s
+pod/drain-demo-7549c4bbd6-nn5qk
+error: unable to drain node "sf-sched-worker2" due to error: error when evicting pods/"drain-demo-7549c4bbd6-nn5qk" -n "p08-01-drain": global timeout reached: 45s, continuing command...
 There are pending nodes to be drained:
  sf-sched-worker2
-error when evicting pods/"drain-demo-7549c4bbd6-g99pz" -n "p08-01-drain": global timeout reached: 45s
-error when evicting pods/"drain-demo-7549c4bbd6-5sh9l" -n "p08-01-drain": global timeout reached: 45s
+error when evicting pods/"drain-demo-7549c4bbd6-nn5qk" -n "p08-01-drain": global timeout reached: 45s
 
 $ kubectl get pdb drain-demo -n p08-01-drain
 NAME         MIN AVAILABLE   MAX UNAVAILABLE   ALLOWED DISRUPTIONS   AGE
-drain-demo   2               N/A               0                     68s
+drain-demo   2               N/A               0                     52s
 
 $ kubectl uncordon sf-sched-worker2
 node/sf-sched-worker2 uncordoned
