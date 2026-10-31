@@ -408,11 +408,26 @@ jobs:
           node_image: ${{ env.KIND_NODE_IMAGE }}
           cluster_name: runtime
       - name: Load the four images into the cluster
+        env:
+          VARIANT: ${{ matrix.variant }}
         run: |
           set -euo pipefail
           for service in catalog orders payments-worker storefront; do
             kind load image-archive "image-in/${service}.tar" --name runtime
           done
+          # The production overlay pins registry.example.com/bookstore/<service>:1.0.0,
+          # a placeholder registry nobody can pull from. Give the images built
+          # above those names, so the overlay deploys exactly as written.
+          if [ "$VARIANT" = kustomize-prod ]; then
+            for service in catalog orders payments-worker storefront; do
+              docker load --input "image-in/${service}.tar"
+              ref="$(kubectl kustomize "$BOOKSTORE/kustomize/overlays/prod" \
+                | grep -oE "[a-z0-9.-]+/bookstore/${service}:[A-Za-z0-9._-]+" | sort -u)"
+              [ "$(printf '%s\n' "$ref" | wc -l)" -eq 1 ] || { echo "::error::expected one image for ${service} in the prod overlay, got: ${ref}"; exit 1; }
+              docker tag "bookstore/${service}:dev" "$ref"
+              kind load docker-image "$ref" --name runtime
+            done
+          fi
       - name: G4, deploy and wait for every workload
         env:
           VARIANT: ${{ matrix.variant }}
