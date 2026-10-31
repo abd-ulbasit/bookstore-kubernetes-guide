@@ -1,0 +1,277 @@
+# Transcript for 08-day-2-operations/02-backup-and-dr.md, lab steps 1 to 9.
+# Tier A: a kind cluster on Kubernetes v1.37.0, kubectl v1.37.2.
+# Recorded by running examples/security-lab/labs/08-02.sh.
+# The output in the chapter came from a lab cluster with a different name, and
+# its namespaces carried the p08-02- prefix. The commands in the chapter use the
+# reader's names (bookstore, velero); this transcript shows the lab's names,
+# and the substitution is made only where the script builds a manifest.
+#
+# Not run: the Velero controller, the node agent, an object store, a backup and
+# a restore. The Velero CRDs were installed under the shared heavy-install lock
+# and removed at the end (step 9). The chart was rendered, not installed.
+#
+# What did not work the first time: the probe Pod needs the namespace's default
+# ServiceAccount, which appeared a few seconds late, so the script waits for it.
+# The Velero image has no shell, so the probe mounts the image as a volume (the
+# image-volume feature, which this cluster has) and reads /etc/passwd from it.
+#
+## step 1: pins, checked against the registries and the chart repository
+$ helm show chart vmware-tanzu/velero --version 12.2.2 | grep -E '^(appVersion|version):'
+appVersion: 1.18.2
+version: 12.2.2
+
+$ timeout 120 docker buildx imagetools inspect velero/velero:v1.18.4 --format '{{.Manifest.Digest}}'
+sha256:c89fb5b6d1fd6afd368e0f483e6f5555fd62851a1eada8ac5c72482e674ca17b
+$ timeout 120 docker buildx imagetools inspect velero/velero-plugin-for-aws:v1.14.4 --format '{{.Manifest.Digest}}'
+sha256:c85a7fa803569e3128c33e4f5766f84ab156c8d171c9f1dd2715581d45ce98fa
+## step 2: the user the Velero image runs as, read from its /etc/passwd
+$ kubectl apply -f - <<'YAML'
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: p08-02-velero
+  labels:
+    pod-security.kubernetes.io/enforce: privileged
+    pod-security.kubernetes.io/audit: restricted
+    pod-security.kubernetes.io/warn: restricted
+YAML
+namespace/p08-02-velero created
+
+$ kubectl apply -n p08-02-velero -f - <<'YAML'
+apiVersion: v1
+kind: Pod
+metadata:
+  name: uid-probe
+  namespace: p08-02-velero
+spec:
+  automountServiceAccountToken: false
+  restartPolicy: Never
+  securityContext:
+    runAsNonRoot: true
+    runAsUser: 65534
+    runAsGroup: 65534
+    seccompProfile:
+      type: RuntimeDefault
+  containers:
+    - name: probe
+      image: busybox@sha256:73aaf090f3d85aa34ee199857f03fa3a95c8ede2ffd4cc2cdb5b94e566b11662
+      command: ["sh", "-c", "grep '^cnb:' /img/etc/passwd | cut -d: -f1,3,4"]
+      securityContext:
+        allowPrivilegeEscalation: false
+        readOnlyRootFilesystem: true
+        capabilities:
+          drop: ["ALL"]
+      resources:
+        requests:
+          cpu: 10m
+          memory: 16Mi
+        limits:
+          memory: 64Mi
+      volumeMounts:
+        - name: img
+          mountPath: /img
+          readOnly: true
+  volumes:
+    - name: img
+      image:
+        reference: docker.io/velero/velero@sha256:c89fb5b6d1fd6afd368e0f483e6f5555fd62851a1eada8ac5c72482e674ca17b
+        pullPolicy: IfNotPresent
+YAML
+kubectl wait --for=jsonpath='{.status.phase}'=Succeeded pod/uid-probe -n p08-02-velero --timeout=280s
+kubectl logs uid-probe -n p08-02-velero
+kubectl delete pod uid-probe -n p08-02-velero --now
+pod/uid-probe created
+pod/uid-probe condition met
+cnb:1002:1000
+pod "uid-probe" deleted from p08-02-velero namespace
+
+## step 3: the chapter's NetworkPolicy and restorer RBAC blocks
+$ kubectl apply -f - <<'YAML'
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: default-deny-all
+  namespace: p08-02-velero
+spec:
+  podSelector: {}
+  policyTypes: ["Ingress", "Egress"]
+---
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: velero-egress
+  namespace: p08-02-velero
+spec:
+  podSelector: {}
+  policyTypes: ["Egress"]
+  egress:
+    # DNS, through the cluster resolver.
+    - to:
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: kube-system
+          podSelector:
+            matchLabels:
+              k8s-app: kube-dns
+      ports:
+        - { port: 53, protocol: UDP }
+        - { port: 53, protocol: TCP }
+    # The API server. Replace the range with your control-plane addresses.
+    - to:
+        - ipBlock:
+            cidr: 192.0.2.0/24
+      ports:
+        - { port: 6443, protocol: TCP }
+    # The object store. Replace the range with your store's address.
+    - to:
+        - ipBlock:
+            cidr: 198.51.100.0/24
+      ports:
+        - { port: 443, protocol: TCP }
+---
+YAML
+networkpolicy.networking.k8s.io/default-deny-all created
+networkpolicy.networking.k8s.io/velero-egress created
+
+$ kubectl apply -f - <<'YAML'
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: velero-restorer
+  namespace: p08-02-velero
+rules:
+  - apiGroups: ["velero.io"]
+    resources: ["restores"]
+    verbs: ["create", "get", "list", "watch"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: velero-restorers
+  namespace: p08-02-velero
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: Role
+  name: velero-restorer
+subjects:
+  - apiGroup: rbac.authorization.k8s.io
+    kind: Group
+    name: velero-restorers
+---
+YAML
+role.rbac.authorization.k8s.io/velero-restorer created
+rolebinding.rbac.authorization.k8s.io/velero-restorers created
+
+## step 4: the chart rendered with the chapter's security values, and its CRDs installed
+$ helm template velero vmware-tanzu/velero -n velero --version 12.2.2 \
+  --set image.digest=sha256:c89fb5b6d1fd6afd368e0f483e6f5555fd62851a1eada8ac5c72482e674ca17b \
+  --set-json 'podSecurityContext={"runAsNonRoot":true,"runAsUser":1002,"runAsGroup":1000,"seccompProfile":{"type":"RuntimeDefault"}}' \
+  --set-json 'containerSecurityContext={"allowPrivilegeEscalation":false,"readOnlyRootFilesystem":true,"capabilities":{"drop":["ALL"]}}' \
+  --set deployNodeAgent=true --set snapshotsEnabled=false \
+  --set credentials.existingSecret=velero-cloud-credentials \
+  --set 'configuration.backupStorageLocation[0].name=default' \
+  --set 'configuration.backupStorageLocation[0].provider=aws' \
+  --set 'configuration.backupStorageLocation[0].bucket=example' \
+  --set 'configuration.backupStorageLocation[0].config.region=us-east-1' \
+  --set 'configuration.backupStorageLocation[0].config.s3Url=https://s3.example.com' \
+  --set 'configuration.backupStorageLocation[0].config.s3ForcePathStyle=true' \
+  --include-crds > velero-render.yaml && echo "rendered $(grep -c '^kind:' velero-render.yaml) objects"
+rendered 26 objects
+
+$ "$PY" -I - velero-render.yaml <<'PYEOF'
+import sys, yaml
+docs = [d for d in yaml.safe_load_all(open(sys.argv[1])) if d]
+crds = [d for d in docs if d.get("kind") == "CustomResourceDefinition"]
+with open("velero-crds.yaml", "w") as f:
+    yaml.safe_dump_all(crds, f)
+print(f"{len(crds)} CustomResourceDefinitions written")
+PYEOF
+retry_cmd kubectl apply -f velero-crds.yaml
+13 CustomResourceDefinitions written
+customresourcedefinition.apiextensions.k8s.io/backuprepositories.velero.io created
+customresourcedefinition.apiextensions.k8s.io/backups.velero.io created
+customresourcedefinition.apiextensions.k8s.io/backupstoragelocations.velero.io created
+customresourcedefinition.apiextensions.k8s.io/datadownloads.velero.io created
+customresourcedefinition.apiextensions.k8s.io/datauploads.velero.io created
+customresourcedefinition.apiextensions.k8s.io/deletebackuprequests.velero.io created
+customresourcedefinition.apiextensions.k8s.io/downloadrequests.velero.io created
+customresourcedefinition.apiextensions.k8s.io/podvolumebackups.velero.io created
+customresourcedefinition.apiextensions.k8s.io/podvolumerestores.velero.io created
+customresourcedefinition.apiextensions.k8s.io/restores.velero.io created
+customresourcedefinition.apiextensions.k8s.io/schedules.velero.io created
+customresourcedefinition.apiextensions.k8s.io/serverstatusrequests.velero.io created
+customresourcedefinition.apiextensions.k8s.io/volumesnapshotlocations.velero.io created
+
+## step 5: the restore grant, asked of the API server
+$ kubectl auth can-i create restores.velero.io -n p08-02-velero --as=alice
+kubectl auth can-i create restores.velero.io -n p08-02-velero --as=alice --as-group=velero-restorers
+kubectl auth can-i get secrets -n p08-02-bookstore --as=alice --as-group=velero-restorers
+no
+yes
+no
+
+## step 6: a generated value in a Secret, read back as a backup stores it
+$ retry_cmd kubectl create namespace p08-02-bookstore
+retry_cmd kubectl label namespace p08-02-bookstore pod-security.kubernetes.io/enforce=restricted
+namespace/p08-02-bookstore created
+namespace/p08-02-bookstore labeled
+
+$ retry_cmd kubectl create secret generic db-demo -n p08-02-bookstore --from-literal=password="$(openssl rand -hex 16)"
+secret/db-demo created
+
+$ kubectl get secret db-demo -n p08-02-bookstore -o jsonpath='{.data}'; echo
+{"password":"NzczMGZmYTQxZjBkNzA4YTg0ZTcyN2M3MGJkNmMwMzE="}
+
+$ kubectl get secret db-demo -n p08-02-bookstore -o jsonpath='{.data.password}' | base64 -d; echo
+7730ffa41f0d708a84e727c70bd6c031
+
+## step 7: the Velero Deployment in the render, with the chapter's security values
+$ "$PY" -I - velero-render.yaml <<'PYEOF'
+import sys, yaml
+for doc in yaml.safe_load_all(open(sys.argv[1])):
+    if not doc or doc.get("kind") != "Deployment" or doc["metadata"]["name"] != "velero":
+        continue
+    pod = doc["spec"]["template"]["spec"]
+    c = pod["containers"][0]
+    sc = pod["securityContext"]
+    cs = c["securityContext"]
+    print("image:", c["image"])
+    print("pod securityContext: runAsNonRoot=%s runAsUser=%s runAsGroup=%s seccomp=%s" % (
+        sc["runAsNonRoot"], sc["runAsUser"], sc["runAsGroup"], sc["seccompProfile"]["type"]))
+    print("container securityContext: allowPrivilegeEscalation=%s readOnlyRootFilesystem=%s drop=%s" % (
+        cs["allowPrivilegeEscalation"], cs["readOnlyRootFilesystem"], ",".join(cs["capabilities"]["drop"])))
+PYEOF
+image: docker.io/velero/velero@sha256:c89fb5b6d1fd6afd368e0f483e6f5555fd62851a1eada8ac5c72482e674ca17b
+pod securityContext: runAsNonRoot=True runAsUser=1002 runAsGroup=1000 seccomp=RuntimeDefault
+container securityContext: allowPrivilegeEscalation=False readOnlyRootFilesystem=True drop=ALL
+
+## step 8: the three Velero objects, validated by the API server with strict field checks
+$ chapter_yaml "kind: Restore" > restore-all.yaml
+"$PY" -I - restore-all.yaml restore.yaml <<'PYEOF'
+import re, sys
+text = open(sys.argv[1], encoding="utf-8").read()
+docs = [d for d in re.split(r"(?m)^---$", text) if "kind: Restore" in d]
+open(sys.argv[2], "w", encoding="utf-8").write(docs[0])
+PYEOF
+"$PY" -I - velero-backup.yaml velero-schedule.yaml <<'PYEOF'
+import re, sys
+for name in sys.argv[1:]:
+    text = open(name, encoding="utf-8").read()
+    text = re.sub(r"(?m)^(  namespace: )velero\b", r"\g<1>p08-02-velero", text)
+    open(name, "w", encoding="utf-8").write(text)
+PYEOF
+kubectl apply --dry-run=server --validate=strict -f velero-backup.yaml -f velero-schedule.yaml -f restore.yaml
+backup.velero.io/bookstore-now created (server dry run)
+schedule.velero.io/bookstore-daily created (server dry run)
+restore.velero.io/bookstore-drill created (server dry run)
+
+$ sed 's/^spec:$/spec:\n  namespaceMappng: {}/' restore.yaml > restore-typo.yaml
+kubectl apply --dry-run=server --validate=strict -f restore-typo.yaml
+Error from server (BadRequest): error when creating "restore-typo.yaml": Restore in version "v1" cannot be handled as a Restore: strict decoding error: unknown field "spec.namespaceMappng"
+
+## step 9: delete what this lab created
+$ retry_cmd kubectl delete namespace p08-02-bookstore p08-02-velero --wait=true --timeout=240s
+namespace "p08-02-bookstore" deleted
+namespace "p08-02-velero" deleted
+
+# lab 08-02 finished

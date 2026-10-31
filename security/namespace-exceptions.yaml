@@ -142,3 +142,27 @@ exceptions:
     chapter: 11-advanced-production-patterns/07-chaos-engineering.md
     expires: 2027-06-30
 
+  - namespace: velero
+    level: privileged
+    reason: >-
+      The Velero node agent reads pod volumes through a hostPath volume
+      (/var/lib/kubelet/pods) for file-system backups, and the Pod Security
+      Standards forbid hostPath at baseline, so only privileged admits it. The
+      chapter's kind path needs the node agent because no snapshot-capable CSI
+      driver is installed. Production sets deployNodeAgent=false once CSI
+      snapshots cover the volumes, and this entry goes with the node agent. The
+      Velero controller itself runs under the restricted rules.
+    upstream: https://velero.io/docs/main/file-system-backup/
+    chapter: 08-day-2-operations/02-backup-and-dr.md
+    expires: 2027-06-30
+
+  - namespace: p08-02-velero
+    level: privileged
+    reason: >-
+      The lab for chapter 08.02 applies the chapter's velero Namespace under the
+      lab's name, with the same privileged label the chapter sets, so the
+      manifest runs against a real cluster. The script deletes the namespace at
+      the end. The chapter's own exception is the velero entry above.
+    upstream: https://kubernetes.io/docs/concepts/security/pod-security-standards/
+    chapter: 08-day-2-operations/02-backup-and-dr.md
+    expires: 2027-06-30
