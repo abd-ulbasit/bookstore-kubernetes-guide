@@ -15,7 +15,7 @@
 #
 # Secret payloads (PagerDuty service key, Slack webhook URL) ARE NOT
 # inlined here — they are referenced via secretKeyRef and materialised
-# by ESO from the secret backend (Part 05 ch.04).
+# by External Secrets (13.06), one ExternalSecret per Secret named here.
 #
 # Apply:
 #   kubectl apply -f examples/bookstore-platform/observability/alertmanager-routes.yaml

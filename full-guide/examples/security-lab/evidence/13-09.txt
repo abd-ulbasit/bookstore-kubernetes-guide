@@ -1,0 +1,225 @@
+# Lab transcript for 13.09 (Observability: OpenTelemetry, Tempo, Loki,
+# Prometheus, Grafana). Run on a lab cluster whose name differs from the
+# chapter's. Namespaces were substituted in the commands and the output:
+# prometheus-system -> p13-09-prom, tempo-system -> p13-09-tempo,
+# loki-system -> p13-09-loki, opentelemetry-system -> p13-09-otel.
+# Resource names are unchanged, and the output below is verbatim.
+# Versions: kubectl v1.37.2 against a Kubernetes 1.37 cluster, helm v4.1.4.
+# Charts: kube-prometheus-stack 62.7.0 (prometheus-operator v0.76.1),
+# tempo-distributed 1.16.0 (Tempo 2.5.0), loki 6.16.0 (Loki 3.1.1),
+# opentelemetry-operator 0.115.0 (operator 0.153.0). Collector:
+# opentelemetry-collector-contrib 0.153.0, pinned by digest on GHCR.
+# Server dry runs and config validation only. Nothing was installed:
+# heavy_lock was busy, so Prometheus, Grafana, Tempo, Loki, the OTel
+# operator and the collector did not run.
+# What did not work the first time: the tag 0.115.0 of the collector
+# image is not on Docker Hub (the 404 below), so the pinned image is the
+# GHCR build of 0.153.0. An earlier validation rejected the telemetry
+# address key in 0.153.0, and the config uses the readers form now. The
+# first validation through an environment variable stalled, so the run
+# below passes the config on stdin. During the namespace steps the API
+# answered EOF twice and Forbidden once; those lines are kept verbatim.
+# The namespace labels were already in place from an earlier step of
+# the same session, and the final delete removed the namespaces.
+$ echo 'heavy_lock: busy when this run started, so no heavy install ran. Charts were rendered and server dry-run only.'
+heavy_lock: busy when this run started, so no heavy install ran. Charts were rendered and server dry-run only.
+$ helm show chart prometheus-community/kube-prometheus-stack --version 62.7.0 | grep -E '^(name|version|appVersion):'
+appVersion: v0.76.1
+name: kube-prometheus-stack
+version: 62.7.0
+$ helm show chart grafana/tempo-distributed --version 1.16.0 | grep -E '^(name|version|appVersion):'
+appVersion: 2.5.0
+name: tempo-distributed
+version: 1.16.0
+$ helm show chart grafana/loki --version 6.16.0 | grep -E '^(name|version|appVersion):'
+appVersion: 3.1.1
+name: loki
+version: 6.16.0
+$ helm show chart open-telemetry/opentelemetry-operator --version 0.115.0 | grep -E '^(name|version|appVersion):'
+appVersion: 0.153.0
+name: opentelemetry-operator
+version: 0.115.0
+$ curl -s https://hub.docker.com/v2/repositories/otel/opentelemetry-collector-contrib/tags/0.115.0; echo
+{"message":"httperror 404: tag '0.115.0' not found","errinfo":{"namespace":"otel","repository":"opentelemetry-collector-contrib","tag":"0.115.0"}}
+$ docker pull ghcr.io/open-telemetry/opentelemetry-collector-releases/opentelemetry-collector-contrib@sha256:93aad750175cbf1a973ae1c5886c3371f4d800f61be25cdd26870b8441ffe9fa | tail -2
+Status: Image is up to date for ghcr.io/open-telemetry/opentelemetry-collector-releases/opentelemetry-collector-contrib@sha256:93aad750175cbf1a973ae1c5886c3371f4d800f61be25cdd26870b8441ffe9fa
+ghcr.io/open-telemetry/opentelemetry-collector-releases/opentelemetry-collector-contrib@sha256:93aad750175cbf1a973ae1c5886c3371f4d800f61be25cdd26870b8441ffe9fa
+$ docker run --rm --entrypoint /otelcol-contrib ghcr.io/open-telemetry/opentelemetry-collector-releases/opentelemetry-collector-contrib@sha256:93aad750175cbf1a973ae1c5886c3371f4d800f61be25cdd26870b8441ffe9fa --version
+otelcol-contrib version 0.153.0
+$ kubectl delete namespace p13-09-prom p13-09-tempo p13-09-loki p13-09-otel --ignore-not-found --wait=true
+Unable to connect to the server: EOF
+Unable to connect to the server: EOF
+Unable to connect to the server: EOF
+Unable to connect to the server: EOF
+$ kubectl create namespace p13-09-prom
+Unable to connect to the server: EOF
+$ kubectl create namespace p13-09-tempo
+Unable to connect to the server: EOF
+$ kubectl create namespace p13-09-loki
+Unable to connect to the server: EOF
+$ kubectl create namespace p13-09-otel
+Unable to connect to the server: EOF
+$ for n in p13-09-prom p13-09-tempo p13-09-loki p13-09-otel; do kubectl label namespace $n pod-security.kubernetes.io/enforce=restricted pod-security.kubernetes.io/warn=restricted pod-security.kubernetes.io/audit=restricted; done
+Unable to connect to the server: EOF
+Error from server (Forbidden): namespaces "p13-09-tempo" is forbidden: User "kubernetes-admin" cannot get resource "namespaces" in API group "" in the namespace "p13-09-tempo"
+namespace/p13-09-loki not labeled
+namespace/p13-09-otel not labeled
+$ kubectl get namespaces p13-09-prom p13-09-tempo p13-09-loki p13-09-otel --show-labels
+NAME           STATUS   AGE   LABELS
+p13-09-prom    Active   27m   kubernetes.io/metadata.name=p13-09-prom,pod-security.kubernetes.io/audit=restricted,pod-security.kubernetes.io/enforce=restricted,pod-security.kubernetes.io/warn=restricted
+p13-09-tempo   Active   27m   kubernetes.io/metadata.name=p13-09-tempo,pod-security.kubernetes.io/audit=restricted,pod-security.kubernetes.io/enforce=restricted,pod-security.kubernetes.io/warn=restricted
+p13-09-loki    Active   27m   kubernetes.io/metadata.name=p13-09-loki,pod-security.kubernetes.io/audit=restricted,pod-security.kubernetes.io/enforce=restricted,pod-security.kubernetes.io/warn=restricted
+p13-09-otel    Active   27m   kubernetes.io/metadata.name=p13-09-otel,pod-security.kubernetes.io/audit=restricted,pod-security.kubernetes.io/enforce=restricted,pod-security.kubernetes.io/warn=restricted
+$ helm template kube-prometheus-stack prometheus-community/kube-prometheus-stack --version 62.7.0 -n prometheus-system --set prometheus.prometheusSpec.serviceMonitorSelectorNilUsesHelmValues=false --set prometheus.prometheusSpec.podMonitorSelectorNilUsesHelmValues=false --set prometheus.prometheusSpec.enableRemoteWriteReceiver=true --set nodeExporter.enabled=false --set grafana.admin.existingSecret=grafana-admin --set grafana.admin.userKey=admin-user --set grafana.admin.passwordKey=admin-password --set grafana.testFramework.enabled=false --set grafana.securityContext.seccompProfile.type=RuntimeDefault --set grafana.containerSecurityContext.readOnlyRootFilesystem=true --set grafana.sidecar.securityContext.allowPrivilegeEscalation=false --set grafana.sidecar.securityContext.readOnlyRootFilesystem=true --set 'grafana.sidecar.securityContext.capabilities.drop[0]=ALL' --set grafana.sidecar.dashboards.enabled=true --set grafana.sidecar.datasources.enabled=true > kps-render.yaml && python3 filt.py kps-render.yaml kps-dry.yaml p13-09-prom
+kept 52 dropped {'cluster-scoped': 12, 'CRD-backed (no CRD in lab)': 49}
+$ kubectl apply --dry-run=server -f kps-dry.yaml
+serviceaccount/kube-prometheus-stack-grafana created (server dry run)
+serviceaccount/kube-prometheus-stack-kube-state-metrics created (server dry run)
+serviceaccount/kube-prometheus-stack-alertmanager created (server dry run)
+serviceaccount/kube-prometheus-stack-operator created (server dry run)
+serviceaccount/kube-prometheus-stack-prometheus created (server dry run)
+secret/alertmanager-kube-prometheus-stack-alertmanager created (server dry run)
+configmap/kube-prometheus-stack-grafana-config-dashboards created (server dry run)
+configmap/kube-prometheus-stack-grafana created (server dry run)
+configmap/kube-prometheus-stack-grafana-datasource created (server dry run)
+configmap/kube-prometheus-stack-alertmanager-overview created (server dry run)
+configmap/kube-prometheus-stack-apiserver created (server dry run)
+configmap/kube-prometheus-stack-cluster-total created (server dry run)
+configmap/kube-prometheus-stack-controller-manager created (server dry run)
+configmap/kube-prometheus-stack-etcd created (server dry run)
+configmap/kube-prometheus-stack-grafana-overview created (server dry run)
+configmap/kube-prometheus-stack-k8s-coredns created (server dry run)
+configmap/kube-prometheus-stack-k8s-resources-cluster created (server dry run)
+configmap/kube-prometheus-stack-k8s-resources-multicluster created (server dry run)
+configmap/kube-prometheus-stack-k8s-resources-namespace created (server dry run)
+configmap/kube-prometheus-stack-k8s-resources-node created (server dry run)
+configmap/kube-prometheus-stack-k8s-resources-pod created (server dry run)
+configmap/kube-prometheus-stack-k8s-resources-workload created (server dry run)
+configmap/kube-prometheus-stack-k8s-resources-workloads-namespace created (server dry run)
+configmap/kube-prometheus-stack-kubelet created (server dry run)
+configmap/kube-prometheus-stack-namespace-by-pod created (server dry run)
+configmap/kube-prometheus-stack-namespace-by-workload created (server dry run)
+configmap/kube-prometheus-stack-persistentvolumesusage created (server dry run)
+configmap/kube-prometheus-stack-pod-total created (server dry run)
+configmap/kube-prometheus-stack-prometheus created (server dry run)
+configmap/kube-prometheus-stack-proxy created (server dry run)
+configmap/kube-prometheus-stack-scheduler created (server dry run)
+configmap/kube-prometheus-stack-workload-total created (server dry run)
+role.rbac.authorization.k8s.io/kube-prometheus-stack-grafana created (server dry run)
+rolebinding.rbac.authorization.k8s.io/kube-prometheus-stack-grafana created (server dry run)
+service/kube-prometheus-stack-grafana created (server dry run)
+service/kube-prometheus-stack-kube-state-metrics created (server dry run)
+service/kube-prometheus-stack-alertmanager created (server dry run)
+service/kube-prometheus-stack-coredns created (server dry run)
+service/kube-prometheus-stack-kube-controller-manager created (server dry run)
+service/kube-prometheus-stack-kube-etcd created (server dry run)
+service/kube-prometheus-stack-kube-proxy created (server dry run)
+service/kube-prometheus-stack-kube-scheduler created (server dry run)
+service/kube-prometheus-stack-operator created (server dry run)
+service/kube-prometheus-stack-prometheus created (server dry run)
+deployment.apps/kube-prometheus-stack-grafana created (server dry run)
+deployment.apps/kube-prometheus-stack-kube-state-metrics created (server dry run)
+deployment.apps/kube-prometheus-stack-operator created (server dry run)
+serviceaccount/kube-prometheus-stack-admission created (server dry run)
+role.rbac.authorization.k8s.io/kube-prometheus-stack-admission created (server dry run)
+rolebinding.rbac.authorization.k8s.io/kube-prometheus-stack-admission created (server dry run)
+job.batch/kube-prometheus-stack-admission-create created (server dry run)
+job.batch/kube-prometheus-stack-admission-patch created (server dry run)
+$ kubectl apply --dry-run=server -f control-privileged.yaml
+Warning: would violate PodSecurity "restricted:latest": host namespaces (hostNetwork=true), privileged (container "app" must not set securityContext.privileged=true), allowPrivilegeEscalation != false (container "app" must set securityContext.allowPrivilegeEscalation=false), unrestricted capabilities (container "app" must set securityContext.capabilities.drop=["ALL"]), runAsNonRoot != true (pod or container "app" must set securityContext.runAsNonRoot=true), seccompProfile (pod or container "app" must set securityContext.seccompProfile.type to "RuntimeDefault" or "Localhost")
+deployment.apps/psa-control-privileged created (server dry run)
+$ helm template tempo grafana/tempo-distributed --version 1.16.0 -n tempo-system --set tempo.podSecurityContext.runAsNonRoot=true --set tempo.podSecurityContext.seccompProfile.type=RuntimeDefault --set traces.otlp.grpc.enabled=true --set traces.otlp.http.enabled=true --set storage.trace.backend=s3 --set storage.trace.s3.bucket=bookstore-platform-tempo-us-east --set storage.trace.s3.endpoint=s3.us-east-1.amazonaws.com > tempo-render.yaml && python3 filt.py tempo-render.yaml tempo-dry.yaml p13-09-tempo
+kept 20 dropped {}
+$ kubectl apply --dry-run=server -f tempo-dry.yaml
+poddisruptionbudget.policy/tempo-ingester created (server dry run)
+serviceaccount/tempo created (server dry run)
+configmap/tempo-runtime created (server dry run)
+configmap/tempo-config created (server dry run)
+service/tempo-compactor created (server dry run)
+service/tempo-distributor-discovery created (server dry run)
+service/tempo-distributor created (server dry run)
+service/tempo-gossip-ring created (server dry run)
+service/tempo-ingester-discovery created (server dry run)
+service/tempo-ingester created (server dry run)
+service/tempo-memcached created (server dry run)
+service/tempo-querier created (server dry run)
+service/tempo-query-frontend-discovery created (server dry run)
+service/tempo-query-frontend created (server dry run)
+deployment.apps/tempo-compactor created (server dry run)
+deployment.apps/tempo-distributor created (server dry run)
+deployment.apps/tempo-querier created (server dry run)
+deployment.apps/tempo-query-frontend created (server dry run)
+statefulset.apps/tempo-ingester created (server dry run)
+statefulset.apps/tempo-memcached created (server dry run)
+$ helm template loki grafana/loki --version 6.16.0 -n loki-system --set serviceAccount.automountServiceAccountToken=false --set loki.podSecurityContext.seccompProfile.type=RuntimeDefault --set gateway.podSecurityContext.seccompProfile.type=RuntimeDefault --set memcached.podSecurityContext.seccompProfile.type=RuntimeDefault --set lokiCanary.enabled=false --set test.enabled=false --set deploymentMode=Distributed --set loki.auth_enabled=false --set loki.storage.bucketNames.chunks=bookstore-platform-loki-us-east --set loki.storage.type=s3 --set 'loki.schemaConfig.configs[0].from=2025-01-01' --set 'loki.schemaConfig.configs[0].store=tsdb' --set 'loki.schemaConfig.configs[0].object_store=s3' > loki-render.yaml && python3 filt.py loki-render.yaml loki-dry.yaml p13-09-loki
+kept 36 dropped {'cluster-scoped': 2}
+$ kubectl apply --dry-run=server -f loki-dry.yaml
+poddisruptionbudget.policy/loki-memcached-chunks-cache created (server dry run)
+poddisruptionbudget.policy/loki-memcached-results-cache created (server dry run)
+serviceaccount/loki created (server dry run)
+configmap/loki created (server dry run)
+configmap/loki-gateway created (server dry run)
+configmap/loki-runtime created (server dry run)
+service/loki-chunks-cache created (server dry run)
+service/loki-compactor created (server dry run)
+service/loki-distributor-headless created (server dry run)
+service/loki-distributor created (server dry run)
+service/loki-gateway created (server dry run)
+service/loki-index-gateway-headless created (server dry run)
+service/loki-index-gateway created (server dry run)
+service/loki-ingester-zone-a-headless created (server dry run)
+service/loki-ingester-zone-b-headless created (server dry run)
+service/loki-ingester-zone-c-headless created (server dry run)
+service/loki-querier created (server dry run)
+service/loki-query-frontend-headless created (server dry run)
+service/loki-query-frontend created (server dry run)
+service/loki-query-scheduler created (server dry run)
+service/loki-results-cache created (server dry run)
+service/loki-ruler created (server dry run)
+service/loki-memberlist created (server dry run)
+deployment.apps/loki-distributor created (server dry run)
+deployment.apps/loki-gateway created (server dry run)
+deployment.apps/loki-querier created (server dry run)
+deployment.apps/loki-query-frontend created (server dry run)
+deployment.apps/loki-query-scheduler created (server dry run)
+statefulset.apps/loki-chunks-cache created (server dry run)
+statefulset.apps/loki-compactor created (server dry run)
+statefulset.apps/loki-index-gateway created (server dry run)
+statefulset.apps/loki-ingester-zone-a created (server dry run)
+statefulset.apps/loki-ingester-zone-b created (server dry run)
+statefulset.apps/loki-ingester-zone-c created (server dry run)
+statefulset.apps/loki-results-cache created (server dry run)
+statefulset.apps/loki-ruler created (server dry run)
+$ helm template opentelemetry-operator open-telemetry/opentelemetry-operator --version 0.115.0 -n opentelemetry-system --set securityContext.seccompProfile.type=RuntimeDefault --set manager.securityContext.readOnlyRootFilesystem=true --set admissionWebhooks.certManager.enabled=true > otel-render.yaml && python3 filt.py otel-render.yaml otel-dry.yaml p13-09-otel
+kept 6 dropped {'cluster-scoped': 9, 'CRD-backed (no CRD in lab)': 2, 'helm test hook': 3}
+$ kubectl apply --dry-run=server -f otel-dry.yaml
+serviceaccount/opentelemetry-operator created (server dry run)
+role.rbac.authorization.k8s.io/opentelemetry-operator-leader-election created (server dry run)
+rolebinding.rbac.authorization.k8s.io/opentelemetry-operator-leader-election created (server dry run)
+service/opentelemetry-operator created (server dry run)
+service/opentelemetry-operator-webhook created (server dry run)
+deployment.apps/opentelemetry-operator created (server dry run)
+$ sed 's/namespace: prometheus-system/namespace: p13-09-prom/' 'full-guide/full-guide/examples/bookstore-platform/observability/grafana-dashboards.yaml' > dash-dry.yaml && sed 's/namespace: prometheus-system/namespace: p13-09-prom/' 'full-guide/full-guide/examples/bookstore-platform/observability/grafana-datasources.yaml' > ds-dry.yaml && kubectl apply --dry-run=server -f dash-dry.yaml -f ds-dry.yaml
+configmap/bookstore-platform-overview created (server dry run)
+configmap/bookstore-platform-grafana-datasources created (server dry run)
+$ python3 -c "import yaml; d=[x for x in yaml.safe_load_all(open('otel-config.yaml'))]; print('config top-level keys:', list(d[0].keys()) if d and d[0] else d)" 2>/dev/null || true
+config top-level keys: ['receivers', 'processors', 'exporters', 'service']
+$ docker run --rm -i --entrypoint /otelcol-contrib ghcr.io/open-telemetry/opentelemetry-collector-releases/opentelemetry-collector-contrib@sha256:93aad750175cbf1a973ae1c5886c3371f4d800f61be25cdd26870b8441ffe9fa validate --config /dev/stdin < otel-config.yaml; echo "validate exit=$?"
+validate exit=0
+$ kubectl delete namespace p13-09-prom p13-09-tempo p13-09-loki p13-09-otel --ignore-not-found --wait=true
+namespace "p13-09-prom" deleted
+namespace "p13-09-tempo" deleted
+namespace "p13-09-loki" deleted
+namespace "p13-09-otel" deleted
+$ kubectl get namespaces | grep -c p13-09 || true
+0
+
+# OpenTelemetryCollector CR, checked against the operator CRD (chart 0.115.0)
+$ python3 check-otel-cr.py otel-r.yaml otel-collector.yaml
+CRD opentelemetrycollectors.opentelemetry.io version v1beta1 served True storage True
+field securityContext present in CR: True | in CRD schema: True
+field podSecurityContext present in CR: True | in CRD schema: True
+field resources present in CR: True | in CRD schema: True
+field config present in CR: True | in CRD schema: True
+unknown spec fields: none
+schema errors: 0

@@ -1,28 +1,15 @@
-# Bookstore Platform v2 — Part 13 ch.09: Grafana dashboards for the
-# platform overview (RED + USE per service, per-tenant variable).
-# Uses grafana-operator's GrafanaDashboard CRD so the JSON dashboard
-# definition is managed declaratively.
+# Bookstore Platform v2 — Part 13 ch.09: the Grafana dashboard for the
+# platform overview (RED per service, per-tenant and per-region variables).
 #
-# v1's dashboard was a Grafana sidecar-discovered ConfigMap; v2's is
-# a typed GrafanaDashboard CR (CRD-backed) — same effect, GitOps-clean
-# lifecycle.
-#
-# !!! CRD-INTRINSIC DRY-RUN
-#   `GrafanaDashboard` is `grafana.integreatly.org/v1beta1` — installed
-#   by grafana-operator. WITHOUT grafana-operator:
-#     no matches for kind "GrafanaDashboard" in version "grafana.integreatly.org/v1beta1"
-#   EXPECTED.
-#
-# The dashboard JSON below is intentionally minimal — the per-tenant
-# variable, the RED panels for the v2 services, and the trace ID link
-# panel. Production uses a fuller dashboard set; this file is the
-# canonical reference.
+# kube-prometheus-stack runs the Grafana sidecar with the dashboards label
+# enabled (grafana.sidecar.dashboards.enabled=true in 13.09 step 1). The
+# sidecar loads every ConfigMap labelled grafana_dashboard: "1" from any
+# namespace, so the dashboard is a ConfigMap, not a CRD.
 #
 # Apply:
 #   kubectl apply -f examples/bookstore-platform/observability/grafana-dashboards.yaml
----
-apiVersion: grafana.integreatly.org/v1beta1
-kind: GrafanaDashboard
+apiVersion: v1
+kind: ConfigMap
 metadata:
   name: bookstore-platform-overview
   namespace: prometheus-system
@@ -33,21 +20,8 @@ metadata:
     app.kubernetes.io/component: observability-dashboard
     app.kubernetes.io/version: "1.0.0"
     grafana_dashboard: "1"
-spec:
-  instanceSelector:
-    matchLabels:
-      dashboards: bookstore-platform
-  resyncPeriod: 1m
-  # The JSON below is a minimal "Bookstore Platform Overview" dashboard.
-  # It defines:
-  #   - $tenant + $region variables (sourced from kube_namespace_labels)
-  #   - 6 RED panels (per service: catalog, orders, payments-gateway,
-  #     search, events, recommendations)
-  #   - 1 active-alerts table
-  #   - 1 active-traces table (Tempo)
-  # The full dashboard JSON is a 1500+ line artifact in production;
-  # this file ships the structural skeleton + the variable wiring.
-  json: |
+data:
+  bookstore-platform-overview.json: |
     {
       "uid": "bookstore-platform-overview",
       "title": "Bookstore Platform — Overview",

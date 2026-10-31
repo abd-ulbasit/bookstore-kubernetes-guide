@@ -84,11 +84,17 @@ routed by tenant + region + severity.**
     language is **LogQL** ("show me logs for tenant=acme-books where
     `level=error`").
   - **Prometheus** (metrics). The familiar TSDB. PromQL.
-- **Grafana.** Three datasources — one per backend. Every dashboard has
+- **Grafana.** Three datasources, one per backend. Every dashboard has
   a `tenant` template variable that filters the queries. Drill-down: a
-  Prometheus latency spike has a "view traces" button that hands the
-  `traceId` to Tempo; a Tempo span has a "view logs" button that hands
-  the `traceId` + service to Loki.
+  Tempo span has a "view logs" button that hands the `traceId` and
+  service to Loki, and a Loki line with a `traceID` links back to Tempo.
+- **Per-tenant reads.** A dashboard variable filters; it does not
+  authorize. Anyone who edits the variable reads whatever the datasource
+  returns. Put a per-tenant proxy in front of the datasources that
+  enforces the tenant from the JWT, or use Grafana Enterprise
+  data-source permissions. This chapter's Grafana is internal to the
+  platform team; tenants reach their data through a portal (13.02 owns
+  tenant access).
 - **Alertmanager.** Inside `kube-prometheus-stack`. The routing tree
   groups by `{tenant, region, severity}`. `severity=page` routes to
   PagerDuty; `severity=warn` to Slack; `severity=info` to a digest.
@@ -106,6 +112,15 @@ million series) destroys the TSDB. Loki the same. Tempo the same. The
 platform's `tenant` label is OK (~50 tenants); `region` is OK (3
 regions); `user_id` is NOT OK in any of the three. Logs may carry
 `user_id` in the body (high-cardinality field); never in a label.
+
+## Threats and controls
+
+| Threat | Control in this chapter | Deeper |
+|---|---|---|
+| A credential lands in a span attribute | The collector's `attributes/redact` processor deletes authorization and cookie headers before export | [Part 06 ch.02](../06-production-readiness/02-logging.md) for personal data in log bodies |
+| Default Grafana admin password (`prom-operator` in the chart) | Grafana reads its admin login from a Secret that External Secrets fills; the install never sets a password | [13.06](06-payments-and-event-sourcing.md) for External Secrets |
+| Node agent with host access (node-exporter renders `hostNetwork` and `hostPID`) | Node-exporter is off; no chapter in this Part reads node metrics | [Part 05 ch.02](../05-security/02-pod-security.md) for the Pod Security levels |
+| Cross-tenant reads through a shared dashboard | Dashboard variables filter; a per-tenant proxy enforces access | [13.02](02-tenancy-and-crossplane-onboarding.md) |
 
 ## Diagrams
 
@@ -219,9 +234,94 @@ Already established in
 [Part 06 ch.01](../06-production-readiness/01-observability-metrics.md);
 v2 promotes it to its own namespace + GitOps-managed.
 
-```sh
-kubectl config use-context kind-bookstore-platform-us-east
+Label the four namespaces before any install. The stacks in this chapter
+run at `restricted`, the level whose fields are explained in the
+[security baseline](../01-core-workloads/01-pods.md#baseline):
 
+```yaml
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: prometheus-system
+  labels:
+    pod-security.kubernetes.io/enforce: restricted
+    pod-security.kubernetes.io/warn: restricted
+    pod-security.kubernetes.io/audit: restricted
+---
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: tempo-system
+  labels:
+    pod-security.kubernetes.io/enforce: restricted
+    pod-security.kubernetes.io/warn: restricted
+    pod-security.kubernetes.io/audit: restricted
+---
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: loki-system
+  labels:
+    pod-security.kubernetes.io/enforce: restricted
+    pod-security.kubernetes.io/warn: restricted
+    pod-security.kubernetes.io/audit: restricted
+---
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: opentelemetry-system
+  labels:
+    pod-security.kubernetes.io/enforce: restricted
+    pod-security.kubernetes.io/warn: restricted
+    pod-security.kubernetes.io/audit: restricted
+```
+
+Save the block as `namespaces.yaml` and apply it:
+
+
+Grafana's admin login comes from a Secret that External Secrets fills from
+the vault ([13.06](06-payments-and-event-sourcing.md)). The chart's default
+admin password is `prom-operator`, so the install points Grafana at this
+Secret and never sets a password:
+
+```yaml
+# grafana-admin-externalsecret.yaml
+apiVersion: external-secrets.io/v1beta1
+kind: ExternalSecret
+metadata:
+  name: grafana-admin
+  namespace: prometheus-system
+spec:
+  refreshInterval: 1h
+  secretStoreRef:
+    name: bookstore-platform-vault
+    kind: ClusterSecretStore
+  target:
+    name: grafana-admin
+    creationPolicy: Owner
+  data:
+    - secretKey: admin-user
+      remoteRef:
+        key: kv/bookstore-platform/grafana-admin
+        property: user
+    - secretKey: admin-password
+      remoteRef:
+        key: kv/bookstore-platform/grafana-admin
+        property: password
+```
+
+Save it as `grafana-admin-externalsecret.yaml` and apply it:
+
+```sh
+kubectl apply -f grafana-admin-externalsecret.yaml
+```
+
+Install with the hardening values. Node-exporter is off because the chart
+renders it with `hostNetwork` and `hostPID`, and nothing in this Part reads
+node metrics. Grafana and its sidecars run with the RuntimeDefault seccomp
+profile, and their root filesystem is read-only:
+
+```sh
 KUBE_PROMETHEUS_STACK_VERSION="62.7.0"
 
 helm repo add prometheus-community https://prometheus-community.github.io/helm-charts
@@ -229,18 +329,58 @@ helm repo update
 
 helm install kube-prometheus-stack prometheus-community/kube-prometheus-stack \
   --version "$KUBE_PROMETHEUS_STACK_VERSION" \
-  -n prometheus-system --create-namespace --wait \
+  -n prometheus-system --wait \
   --set 'prometheus.prometheusSpec.serviceMonitorSelectorNilUsesHelmValues=false' \
   --set 'prometheus.prometheusSpec.podMonitorSelectorNilUsesHelmValues=false' \
-  --set 'grafana.adminPassword=REPLACE-ME-VIA-ESO-NOT-IN-SOURCE' \
+  --set 'prometheus.prometheusSpec.enableRemoteWriteReceiver=true' \
+  --set 'nodeExporter.enabled=false' \
+  --set 'grafana.admin.existingSecret=grafana-admin' \
+  --set 'grafana.admin.userKey=admin-user' \
+  --set 'grafana.admin.passwordKey=admin-password' \
+  --set 'grafana.testFramework.enabled=false' \
+  --set 'grafana.securityContext.seccompProfile.type=RuntimeDefault' \
+  --set 'grafana.containerSecurityContext.readOnlyRootFilesystem=true' \
+  --set 'grafana.sidecar.securityContext.allowPrivilegeEscalation=false' \
+  --set 'grafana.sidecar.securityContext.readOnlyRootFilesystem=true' \
+  --set 'grafana.sidecar.securityContext.capabilities.drop[0]=ALL' \
   --set 'grafana.sidecar.dashboards.enabled=true' \
   --set 'grafana.sidecar.datasources.enabled=true'
 ```
 
-What landed: Prometheus + Alertmanager + Grafana + node-exporter +
-kube-state-metrics, all wired by the Prometheus Operator. Grafana's
-sidecar watches for ConfigMaps labelled `grafana_dashboard: "1"` and
-`grafana_datasource: "1"` and reloads on change.
+`enableRemoteWriteReceiver` lets the collector push metrics with
+remote_write (step 5). The Grafana sidecars watch ConfigMaps in every
+namespace, and kube-state-metrics, the operator and the admission Jobs call
+the API, so those workloads keep their token mounted, each under its own
+ServiceAccount. Everything else is off the API.
+
+What landed: Prometheus, Alertmanager, Grafana and kube-state-metrics, all
+wired by the Prometheus Operator. Grafana's sidecar watches for ConfigMaps
+labelled `grafana_dashboard: "1"` and `grafana_datasource: "1"`.
+
+The captured output in this chapter comes from a lab cluster with a
+different name. The transcript records the substitutions.
+
+Before the install, the lab dry-ran the chart's workloads into a
+`restricted` namespace. A privileged control Deployment, dry-run the same
+way, is refused with a warning:
+
+<!-- gate: output -->
+```text
+Warning: would violate PodSecurity "restricted:latest": host namespaces (hostNetwork=true), privileged (container "app" must not set securityContext.privileged=true), allowPrivilegeEscalation != false (container "app" must set securityContext.allowPrivilegeEscalation=false), unrestricted capabilities (container "app" must set securityContext.capabilities.drop=["ALL"]), runAsNonRoot != true (pod or container "app" must set securityContext.runAsNonRoot=true), seccompProfile (pod or container "app" must set securityContext.seccompProfile.type to "RuntimeDefault" or "Localhost")
+deployment.apps/psa-control-privileged created (server dry run)
+```
+
+The chart's own Deployments and Jobs come back with no warning:
+
+<!-- gate: output -->
+```text
+deployment.apps/kube-prometheus-stack-grafana created (server dry run)
+deployment.apps/kube-prometheus-stack-kube-state-metrics created (server dry run)
+deployment.apps/kube-prometheus-stack-operator created (server dry run)
+# ...
+job.batch/kube-prometheus-stack-admission-create created (server dry run)
+job.batch/kube-prometheus-stack-admission-patch created (server dry run)
+```
 
 ### 2. Install Tempo (traces backend)
 
@@ -252,9 +392,11 @@ helm repo update
 
 helm install tempo grafana/tempo-distributed \
   --version "$TEMPO_CHART_VERSION" \
-  -n tempo-system --create-namespace --wait \
+  -n tempo-system --wait \
   --set 'traces.otlp.grpc.enabled=true' \
   --set 'traces.otlp.http.enabled=true' \
+  --set 'tempo.podSecurityContext.runAsNonRoot=true' \
+  --set 'tempo.podSecurityContext.seccompProfile.type=RuntimeDefault' \
   --set 'storage.trace.backend=s3' \
   --set 'storage.trace.s3.bucket=bookstore-platform-tempo-us-east' \
   --set 'storage.trace.s3.endpoint=s3.us-east-1.amazonaws.com'
@@ -263,7 +405,9 @@ helm install tempo grafana/tempo-distributed \
 The chart picks `tempo-distributed` (the production shape) over `tempo`
 (single-binary). The trade is the same as Loki: distributed scales,
 single-binary is a kind-only shortcut. v2 picks distributed; document
-the version so the audit can re-derive it.
+the version so the audit can re-derive it. The services are
+`tempo-distributor` (OTLP on 4318, where the collector exports) and
+`tempo-query-frontend` (queries on 3100, where Grafana reads).
 
 ### 3. Install Loki (logs backend)
 
@@ -272,9 +416,15 @@ LOKI_CHART_VERSION="6.16.0"
 
 helm install loki grafana/loki \
   --version "$LOKI_CHART_VERSION" \
-  -n loki-system --create-namespace --wait \
+  -n loki-system --wait \
   --set 'deploymentMode=Distributed' \
   --set 'loki.auth_enabled=false' \
+  --set 'serviceAccount.automountServiceAccountToken=false' \
+  --set 'loki.podSecurityContext.seccompProfile.type=RuntimeDefault' \
+  --set 'gateway.podSecurityContext.seccompProfile.type=RuntimeDefault' \
+  --set 'memcached.podSecurityContext.seccompProfile.type=RuntimeDefault' \
+  --set 'lokiCanary.enabled=false' \
+  --set 'test.enabled=false' \
   --set 'loki.storage.bucketNames.chunks=bookstore-platform-loki-us-east' \
   --set 'loki.storage.type=s3' \
   --set 'loki.schemaConfig.configs[0].from=2025-01-01' \
@@ -284,6 +434,9 @@ helm install loki grafana/loki \
 
 Loki v3+ requires a `schemaConfig` even on a fresh cluster; the chart
 errors loudly without it. Production wires real S3 creds via ESO.
+Loki's components do not call the API, so they get no token. The canary
+is a DaemonSet that writes test lines from every node. It is optional, so
+it is off here, and the test pod runs only on `helm test`.
 
 ### 4. Install the OpenTelemetry Operator (the Collector CRD)
 
@@ -295,14 +448,16 @@ helm repo update
 
 helm install opentelemetry-operator open-telemetry/opentelemetry-operator \
   --version "$OTEL_OPERATOR_VERSION" \
-  -n opentelemetry-system --create-namespace --wait \
-  --set 'manager.collectorImage.repository=otel/opentelemetry-collector-contrib' \
+  -n opentelemetry-system --wait \
+  --set 'securityContext.seccompProfile.type=RuntimeDefault' \
+  --set 'manager.securityContext.readOnlyRootFilesystem=true' \
   --set 'admissionWebhooks.certManager.enabled=true'
 ```
 
 The operator brings the `OpenTelemetryCollector` CRD. The collector is
 a normal workload (DaemonSet here); the operator just templates the
-config + watches the CR.
+config + watches the CR. The collector sets its own image in the CR
+(step 5), so the chart's default image does not apply.
 
 ### 5. Apply the platform observability manifests
 
@@ -315,12 +470,18 @@ kubectl apply -f examples/bookstore-platform/observability/prometheus-rules.yaml
 kubectl apply -f examples/bookstore-platform/observability/alertmanager-routes.yaml
 ```
 
-What landed:
+The collector image is the contrib build 0.153.0, pinned by digest on
+GHCR. The tag sits in the file as a comment. Its `attributes/redact`
+processor deletes authorization and cookie headers from spans and logs
+before they leave the node. The collector config passes
+`otelcol-contrib validate` in that image.
+
+Illustrative output, not captured:
 
 ```sh
 kubectl -n opentelemetry-system get opentelemetrycollector
 # NAME                       MODE        VERSION   AGE
-# bookstore-platform-otel    daemonset   0.115.0   30s
+# bookstore-platform-otel    daemonset   0.153.0   30s
 
 kubectl get prometheusrule -A -l app.kubernetes.io/part-of=bookstore-platform
 # NAMESPACE             NAME                          AGE
@@ -333,24 +494,25 @@ kubectl -n prometheus-system get configmap -l grafana_dashboard=1
 
 ### 6. Drive a request through the request path
 
-The chapter assumes ch.13.06 (payments) + ch.13.07 (edge) ran. A real
-checkout:
+The chapter assumes ch.13.06 (payments) + ch.13.07 (edge) ran. Get an
+access token for a tenant=acme-books user with the sign-in flow from
+[13.04](04-real-auth-keycloak-irsa-istio-jwt.md), and export it as `JWT`.
+Then drive a checkout through the edge port-forward from 13.07, trusting
+the edge CA exported there:
 
 ```sh
-# Get a JWT for tenant=acme-books (ch.13.04)
-JWT="$(curl -sk -X POST https://keycloak.bookstore-platform-system.svc.cluster.local/realms/bookstore-platform/protocol/openid-connect/token \
-  -d 'grant_type=password' \
-  -d 'client_id=storefront' \
-  -d 'username=alice@acme-books.example.com' \
-  -d 'password=REPLACE-ME-VIA-ESO-NOT-IN-SOURCE' | jq -r .access_token)"
-
-# Drive a checkout
-curl -sk -H "Authorization: Bearer $JWT" \
+curl -s --cacert edge-ca.crt \
+  -H "Authorization: Bearer $JWT" \
   -H "Content-Type: application/json" \
   -X POST \
   -d '{"items":[{"isbn":"978-0-13-468599-1","qty":1}],"payment_method":"pm_card_visa"}' \
-  https://gateway.bookstore-platform.example.com/api/v2/checkout
-# {"order_id":"ord-abc","status":"paid","trace_id":"7f3a..."}
+  https://localhost:8443/api/v2/checkout
+```
+
+Illustrative output, not captured:
+
+```json
+{"order_id":"ord-abc","status":"paid","trace_id":"7f3a..."}
 ```
 
 ### 7. Find the request in all three pillars
@@ -359,7 +521,8 @@ curl -sk -H "Authorization: Bearer $JWT" \
 # Port-forward Grafana
 kubectl -n prometheus-system port-forward svc/kube-prometheus-stack-grafana 3000:80 &
 
-# Open http://localhost:3000 — admin / <password>
+# Open http://localhost:3000 and sign in with the admin user and password
+# that External Secrets wrote into the grafana-admin Secret.
 # Explore -> Tempo -> Search by traceId 7f3a... (12 spans across 9 services).
 # Explore -> Loki  -> {service="payments-gateway"} | json | traceId="7f3a..."
 # Explore -> Prometheus -> histogram_quantile(0.95, sum by(le) (rate(http_request_duration_seconds_bucket{service="catalog"}[5m])))
@@ -373,8 +536,8 @@ Pick `acme-books` and every panel re-queries with `tenant=acme-books`.
 ```sh
 # Trigger a 5xx burst on catalog (one minute of failing requests)
 for i in $(seq 1 200); do
-  curl -sk -H "Authorization: Bearer $JWT" \
-    https://gateway.bookstore-platform.example.com/api/v2/catalog/items/__forced_500__ >/dev/null
+  curl -s --cacert edge-ca.crt -H "Authorization: Bearer $JWT" \
+    https://localhost:8443/api/v2/catalog/items/__forced_500__ >/dev/null
 done
 
 # Watch Alertmanager
@@ -450,7 +613,7 @@ time.
 **Prometheus + the `remote_write` story.** The OTel Collector's
 `prometheusremotewrite` exporter pushes metrics into Prometheus
 (the inverse of pull). Prometheus's own scrape targets remain for
-metrics that are easier to expose: kube-state-metrics, node-exporter,
+metrics that are easier to expose: kube-state-metrics,
 Kafka JMX. The app metrics flow via OTLP → Collector → remote_write
 because OTLP carries the resource attributes (tenant, region) for
 free; the Prometheus scrape would have to re-label them in.
@@ -553,18 +716,6 @@ traceparent if Stripe echoes a correlation id).
 > alerts; the legacy "threshold for 5 min" alert is the
 > lagging-indicator anti-pattern named here.
 
-> **In production:** **Per-tenant dashboards are a privilege
-> escalation surface.** A tenant viewing another tenant's
-> Grafana data is a P0 leak. Two mitigations: (1) **dashboard
-> variables alone are not auth** — back the Grafana datasource
-> with a per-tenant `Authorization` header (Grafana
-> Enterprise's data-source permissions, or front the datasource
-> with a per-tenant proxy that enforces the tenant from the
-> JWT); (2) **the platform-team Grafana is internal**; tenants
-> see their data via a tenant-portal that calls the same
-> backends with a scoped token. v2 sketches both; the chapter
-> ships (1) for the platform-team UI.
-
 ## Quick Reference
 
 ```sh
@@ -579,10 +730,10 @@ helm repo add grafana https://grafana.github.io/helm-charts
 helm repo add open-telemetry https://open-telemetry.github.io/opentelemetry-helm-charts
 helm repo update
 
-helm install kube-prometheus-stack prometheus-community/kube-prometheus-stack --version "$KUBE_PROMETHEUS_STACK_VERSION" -n prometheus-system --create-namespace --wait
-helm install tempo grafana/tempo-distributed --version "$TEMPO_CHART_VERSION" -n tempo-system --create-namespace --wait
-helm install loki grafana/loki --version "$LOKI_CHART_VERSION" -n loki-system --create-namespace --wait
-helm install opentelemetry-operator open-telemetry/opentelemetry-operator --version "$OTEL_OPERATOR_VERSION" -n opentelemetry-system --create-namespace --wait
+# Namespaces first (restricted), then one install per stack with the
+# hardening flags from steps 1 to 4.
+kubectl apply -f namespaces.yaml
+kubectl apply -f grafana-admin-externalsecret.yaml
 
 # Apply the platform pieces
 kubectl apply -f examples/bookstore-platform/observability/otel-collector.yaml
@@ -592,60 +743,7 @@ kubectl apply -f examples/bookstore-platform/observability/prometheus-rules.yaml
 kubectl apply -f examples/bookstore-platform/observability/alertmanager-routes.yaml
 ```
 
-Minimal skeletons:
-
-```yaml
-# OpenTelemetryCollector (sketch — full at observability/otel-collector.yaml)
-apiVersion: opentelemetry.io/v1beta1
-kind: OpenTelemetryCollector
-metadata: { name: <NAME>, namespace: opentelemetry-system }
-spec:
-  mode: daemonset
-  config:
-    receivers:
-      otlp:
-        protocols: { grpc: {}, http: {} }
-    processors:
-      batch: {}
-      memory_limiter: { check_interval: 1s, limit_mib: 512 }
-      resource:
-        attributes:
-          - { key: region, value: <REGION>, action: insert }
-    exporters:
-      otlphttp/tempo: { endpoint: http://tempo.tempo-system.svc.cluster.local:4318 }
-      otlphttp/loki:  { endpoint: http://loki.loki-system.svc.cluster.local:3100/otlp }
-      prometheusremotewrite: { endpoint: http://kube-prometheus-stack-prometheus.prometheus-system.svc.cluster.local:9090/api/v1/write }
-    service:
-      pipelines:
-        traces:  { receivers: [otlp], processors: [memory_limiter, resource, batch], exporters: [otlphttp/tempo] }
-        logs:    { receivers: [otlp], processors: [memory_limiter, resource, batch], exporters: [otlphttp/loki] }
-        metrics: { receivers: [otlp], processors: [memory_limiter, resource, batch], exporters: [prometheusremotewrite] }
----
-# Grafana DataSource (CRD-backed by grafana-operator)
-apiVersion: grafana.integreatly.org/v1beta1
-kind: GrafanaDatasource
-metadata: { name: tempo, namespace: prometheus-system }
-spec:
-  datasource:
-    name: Tempo
-    type: tempo
-    url: http://tempo.tempo-system.svc.cluster.local:3100
----
-# PrometheusRule with burn-rate alert
-apiVersion: monitoring.coreos.com/v1
-kind: PrometheusRule
-metadata: { name: <NAME>, namespace: prometheus-system }
-spec:
-  groups:
-    - name: bookstore-platform-burn
-      rules:
-        - alert: BookstoreErrorBudgetBurn
-          expr: |
-            (sum(rate(http_requests_total{code=~"5.."}[1h])) /
-             sum(rate(http_requests_total[1h]))) > (14.4 * 0.001)
-          for: 5m
-          labels: { severity: page, tenant: "$tenant", region: "$region" }
-```
+The full manifests are in `examples/bookstore-platform/observability/`.
 
 Checklist (the observability story closed when all seven are yes):
 
@@ -700,6 +798,20 @@ Checklist (the observability story closed when all seven are yes):
    <details><summary>What you should see</summary>
 
    The OTel SDK injects `traceparent: 00-<trace-id>-<span-id>-01` into outbound HTTP headers and into the SQL session as a comment (`/* traceparent='...' */`). The downstream service's middleware extracts the header and starts its span as a child of the incoming context. Postgres logs the comment via `log_statement = 'all'` so query traces tie back. If propagation breaks at any hop (a middleware that strips headers, a `database/sql` driver that doesn't forward context), the trace fragments into orphans. Walk the chain with a single test request and verify each service produces a span with the same trace ID. The propagation is the foundation; the visualization is the payoff.
+
+   </details>
+
+6. **Why is node-exporter off in this stack, and where does the Grafana
+   admin password come from?**
+   <details><summary>Show answer</summary>
+
+   Chart 62.7.0 renders node-exporter with `hostNetwork` and `hostPID`.
+   Pod Security `restricted` forbids both, and no chapter in this Part
+   reads node metrics, so the feature is off rather than given a
+   privileged namespace. The chart's default Grafana password is
+   `prom-operator`. The install sets `grafana.admin.existingSecret`, so
+   the password comes from the `grafana-admin` Secret that External Secrets
+   fills from the vault. The chart values carry no password.
 
    </details>
 
