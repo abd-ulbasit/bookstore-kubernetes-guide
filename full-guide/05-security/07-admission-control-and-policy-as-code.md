@@ -8,7 +8,8 @@
 > engine, then the same rule in Rego for Gatekeeper. Last, the same rules run
 > in CI before any manifest reaches a cluster.
 
-**Estimated time:** ~50 min read · ~40 min lab (scripted, shared mode)
+**Estimated time:** ~50 min read · ~40 min lab (scripted, shared mode) · ~30 min
+more for the engines (full mode)
 **Prerequisites:** [Part 05 ch.01](01-authn-authz-rbac.md): RBAC decides who may
 ask for a change · [Part 05 ch.02](02-pod-security.md): Pod Security Admission
 and the `restricted` level · [Part 05 ch.03](03-supply-chain.md): image digests
@@ -107,53 +108,70 @@ installs Gatekeeper beside it to show that the rule ports, then removes it.
 
 ### Lab header
 
-- **Tier A, two modes.** The lab runs against a kind cluster that you own, and
-  it refuses any other kubectl context. `MODE=shared` runs the steps that need
-  no throwaway cluster, on a lab cluster. `MODE=full` creates a throwaway
-  cluster, `p05-07`, and runs the registry, the signing, and the Kyverno and
-  Gatekeeper installs. The transcript below is a `MODE=shared` run.
+- **Tier A, two modes.** The lab runs against a kind cluster that you own. You
+  name its kubectl context in `LAB_CONTEXT`, and the script refuses any other.
+  `MODE=shared` runs the steps that install no engine, on one cluster.
+  `MODE=full` installs Kyverno and then Gatekeeper on a cluster, one after the
+  other, and removes each before the next. The full mode needs a cluster with
+  internet access, because the signature checks read ghcr.io and the public
+  Sigstore services, and a host with some CPU to spare, as the notes below
+  show. The transcript below holds one recording of each mode.
 - **Names.** The lab prefixes its objects with `p05-07`, as in `p05-07-open`.
   This chapter drops the prefix in its text, commands and manifests, so the
-  namespace is `open`. The captured output keeps the lab's names. It came from
-  a lab cluster with a different name from the one this guide uses.
+  namespace is `open`, and the `p05-07-kyverno` namespace is `kyverno-demo`.
+  The captured output keeps the lab's names. The two recordings came from two
+  lab clusters, with names different from the one this guide uses.
 - **Script and transcript.**
   [`labs/05-07.sh`](../examples/security-lab/labs/05-07.sh) runs every command
   below and deletes what it creates. Its recorded output is
-  [`evidence/05-07.txt`](../examples/security-lab/evidence/05-07.txt). The
-  server is Kubernetes v1.37.0, and the client is kubectl v1.37.2.
-- **What ran.** Step 0 (the tools), steps 5 and 6 (the attack, the policies, and
-  the re-attack), step 12b (the API server's own refusal of `privileged: true`
-  with `allowPrivilegeEscalation: false`, in a server dry run), step 13 (the
-  policy checks), step 14 (the policies read back), and step 16 (the Kyverno and
-  Gatekeeper charts rendered and checked against the cluster without being
-  installed). Step 16 also shows kubectl refusing the two policy objects,
-  because their kinds are not on this cluster.
-- **What did not run.** Steps 1 to 4 (the throwaway cluster, the lab registry,
-  the image push, and the signatures), step 7 (the signed Pod), steps 8 to 12
-  (the Kyverno install, Audit, Enforce, verifyImages, and Gatekeeper), and step
-  15 (the uninstall). The full mode was attempted three times on the lab host.
-  Each time the throwaway cluster's control plane did not finish bootstrapping
-  inside kubeadm's wait, or the node did not report its boot target in time, so
-  no step after cluster creation ran. Those steps are shown below as commands
-  and are marked not run. The chart fields were checked against the pulled
-  3.9.2 chart and not against a running controller.
+  [`evidence/05-07.txt`](../examples/security-lab/evidence/05-07.txt), whose
+  header lists the 16 invocations of the full mode and what each one did. Both
+  clusters ran a Kubernetes v1.37.0 server, and the client is kubectl v1.37.2.
+- **What ran.** In the shared mode: step 0 (the tools), steps 5 and 6 (the
+  attack, the policies, and the re-attack), step 12b (the API server's own
+  refusal of `privileged: true` with `allowPrivilegeEscalation: false`, in a
+  server dry run), step 13 (the policy checks), step 14 (the policies read
+  back), and step 16 (the Kyverno and Gatekeeper charts rendered and checked
+  against the cluster without being installed). In the full mode: Kyverno
+  (chart 3.9.2, app v1.19.2) installed, a privileged Pod admitted in Audit and
+  refused in Enforce, a `verifyImages` rule that admitted the Bookstore's signed
+  catalog image at its production digest and refused an image with no
+  signature, and then Gatekeeper (chart 3.23.1, app v3.23.1) with the same
+  privileged rule, reporting in `dryrun` and refusing the same manifest in
+  `deny`, and removed.
+- **What did not run.** The Kyverno removal, in the form the script now has. It
+  was run twice in an earlier form and neither run ended cleanly, and the lab
+  removed what was left by hand. The section on removing an engine says what
+  went wrong. Nothing else in the full mode is marked not run, and the earlier
+  steps that built a throwaway cluster, a lab registry and a lab signing key
+  are gone from the script. The full mode never got past cluster creation with
+  them, on three attempts, and the Bookstore's own signed image tests the same
+  rule against a real signature. The chart fields in the shared mode were
+  checked against the pulled 3.9.2 chart, and the full mode ran them.
+- **What went wrong in the full mode.** The lab cluster shares a host with other
+  work, and its control plane Pods had restarted often before the lab began.
+  The script stops when that restart count rises and removes what it installed.
+  Seven of the 16 invocations did not run to the end for that reason, or
+  because the API server stopped answering. The engines also made it worse:
+  the first install, with four Kyverno controllers, never became ready. The
+  chapter keeps these failures instead of the one clean run, because they are
+  what an engine costs a small cluster.
 - **Namespaces.** `open` enforces nothing and holds the attacks. The shared run
   creates it, labels it for the policies, and deletes it at the end. Step 12b
-  creates `kyverno-demo` for two dry runs and deletes it. The full mode also
-  creates `signed`, `kyverno-demo`, and `lab-registry`, and installs into
-  `kyverno` and `gatekeeper-system`.
-- **Why a throwaway cluster in full mode.** The registry runs on the kind
-  network and every node must trust it. containerd reads that trust from its
-  own configuration, and only a cluster created with the `config_path` patch
-  in [`kind/admission.yaml`](../examples/security-lab/kind/admission.yaml)
-  carries it. The lab cluster keeps its default configuration.
+  creates `kyverno-demo` for two dry runs and deletes it. The full mode
+  creates `kyverno-demo`, `signed`, `kyverno` and `gatekeeper-system`. The two
+  engine namespaces carry the `restricted` Pod Security label, and the charts
+  ran under it without an exception.
 - **What did not work the first time.** A new namespace has no `default`
   ServiceAccount for a moment, and the API server refuses Pods in it until the
   controller creates one. The script waits for it. A busybox Pod that runs
   `sleep` as PID 1 ignored the stop signal on the lab cluster, and its
   namespace stayed in `Terminating` for minutes. The final run starts from an
   empty namespace list. The automount policy changed a field and did not
-  remove a volume, which the harden section below shows in detail.
+  remove a volume, which the harden section below shows in detail. In the full
+  mode, Kyverno's default verification type found no signature on a signed
+  image, and a busybox image was refused for a lookup timeout and not for a
+  missing signature. The `verifyImages` section keeps both.
 
 The versions come first, so that each claim in this header has a captured
 source:
@@ -571,8 +589,8 @@ kubectl apply -f tag-only.yaml
 Error from server (Forbidden): error when creating "tag-only.yaml": pods "tag-only" is forbidden: ValidatingAdmissionPolicy 'p05-07-digest-pinned' with binding 'p05-07-digest-pinned' denied request: BK-POL-009: every third-party image must be pinned by digest
 ```
 
-The image in that Pod is in the lab's registry, which the full mode runs. The
-refusal happens before any pull, so the shared run needs no registry for it.
+The image in that Pod names a registry that this lab does not run. The refusal
+happens before any pull, so the lab needs no registry for it.
 
 The forgetful Pod, written the same way as before, now comes back with the
 policies' defaults. Read the output in two parts. The stored Pod says `false`
@@ -683,28 +701,100 @@ the expression sees. Kyverno is the project's engine for those rules. It runs as
 a webhook, so it has to be installed and kept up, which is why it is the second
 choice and not the first.
 
-**Not run.** The steps in this section are the full mode of the lab. The
-commands are shown so that a reader can run them against a cluster that they
-own. What follows the commands is what the pinned chart renders and what the
-server says about the policy objects without the Kyverno CRDs.
-
-The install pins the chart. `features.registryClient.allowInsecure` is set
-because the lab registry serves plain HTTP. A production cluster leaves it
-false, and serves its registry over TLS. The namespace is labelled
-`restricted` before the install, so the chart's Pods must meet that level to
-run:
+The install pins the chart, and it labels the namespace `restricted` first, so
+the chart's Pods must meet that level to run. The chart's metadata shows what
+the pin refers to:
 
 ```sh
 helm repo add kyverno https://kyverno.github.io/kyverno/ --force-update
-helm show chart kyverno/kyverno --version 3.9.2
+helm show chart kyverno/kyverno --version 3.9.2 | grep -E '^(name|version|appVersion|kubeVersion):'
 kubectl create namespace kyverno
 kubectl label namespace kyverno pod-security.kubernetes.io/enforce=restricted
-helm upgrade --install kyverno kyverno/kyverno --version 3.9.2 --namespace kyverno --wait --timeout 10m --set features.registryClient.allowInsecure=true --set admissionController.replicas=1 --set backgroundController.replicas=1 --set cleanupController.replicas=1 --set reportsController.replicas=1
+```
+
+<!-- gate: output -->
+
+```
+appVersion: v1.19.2
+kubeVersion: '>=1.25.0-0'
+name: kyverno
+version: 3.9.2
+```
+
+Eight `--set` flags differ from the chart's defaults, and every one of them
+makes the install smaller, because the lab host was small and busy:
+
+- `admissionController.replicas=1` and `reportsController.replicas=1`: one
+  replica each. The chart warns that one admission controller is not highly
+  available, and a lab does not need it to be.
+- `backgroundController.enabled=false` and `cleanupController.enabled=false`:
+  no background controller, which serves generate and mutate-existing rules, and
+  no cleanup controller, which serves TTL cleanup. This chapter uses neither.
+- `features.generateValidatingAdmissionPolicy.enabled=false` and
+  `features.validatingAdmissionPolicyReports.enabled=false`: the chart switches
+  both on, and they add watches on the API server.
+- `admissionController.dnsConfig` with `ndots` set to `1`: a name with a dot is
+  looked up as written, not after five search suffixes. The lab added it
+  because lookups from the admission controller had timed out. It did not cure
+  every timeout, as the verifyImages section shows, so treat it as a precaution
+  and not as the fix.
+
+```sh
+helm upgrade --install kyverno kyverno/kyverno --version 3.9.2 --namespace kyverno \
+  --set admissionController.replicas=1 --set reportsController.replicas=1 \
+  --set backgroundController.enabled=false --set cleanupController.enabled=false \
+  --set features.generateValidatingAdmissionPolicy.enabled=false \
+  --set features.validatingAdmissionPolicyReports.enabled=false \
+  --set-string 'admissionController.dnsConfig.options[0].name=ndots' \
+  --set-string 'admissionController.dnsConfig.options[0].value=1'
 kubectl -n kyverno get deploy
 ```
 
-The shared run rendered the same chart with the same values and did not install
-it. Its output is the rendered manifest count and the images the chart names:
+<!-- gate: output -->
+
+```
+NAME                           READY   UP-TO-DATE   AVAILABLE   AGE
+kyverno-admission-controller   1/1     1            1           4m
+kyverno-reports-controller     1/1     1            1           4m
+```
+
+The lab does not use `helm --wait` for this install. It polls the Deployments
+instead, and it checks the restart count of the control plane Pods every ten
+seconds, because `--wait` cannot stop for a control plane that is falling over.
+The first install ran four controllers, one replica each, with `--wait`. The
+admission controller was not ready after seven minutes, and helm gave up:
+
+<!-- gate: output -->
+
+```
+Error: resource Deployment/kyverno/kyverno-admission-controller not ready. status: InProgress, message: Available: 0/1
+context deadline exceeded
+
+FAILED: the Kyverno install did not finish
+```
+
+The reduced install passed in four of the seven times the lab ran it, and the
+lab's guard stopped it in the other three because the control plane Pods of the
+lab cluster restarted. The transcript keeps all of them. A webhook engine is a
+dependency of every write to the API server, and on a cluster that is short of
+CPU and disk, installing it was the heaviest step of this chapter.
+
+The step 16 output of the shared run also shows that the 3.9.2 chart still
+serves `kyverno.io/v1 ClusterPolicy`, and that its CRD marks the kind
+deprecated. The same warning appears on every `kubectl` call that touches a
+`ClusterPolicy` in this lab. It names ValidatingPolicy, MutatingPolicy,
+GeneratingPolicy and ImageValidatingPolicy as the replacements, and points to a
+migration guide at <https://kyverno.io/docs/guides/migration-to-cel/>. This
+chapter keeps the `ClusterPolicy` form, because the pinned chart is the one the
+lab installs. It uses the fields the same CRD still accepts: the rule-level
+`failureAction` under `validate`, and `failureAction` under each `verifyImages`
+entry. The policy-level `validationFailureAction` is deprecated in the same CRD.
+A rule written for a later Kyverno release moves to one of the policy kinds the
+warning names.
+
+The shared run rendered the same chart with its default values and did not
+install it. Its output is the rendered manifest count and the images the chart
+names:
 
 <!-- gate: output -->
 
@@ -724,36 +814,24 @@ them by digest, as [05.03](03-supply-chain.md) pins third-party images. The Rego
 rule `BK-POL-009` refuses a third-party image that has no digest, so a Pod built
 from this chart would fail it until the tags are pinned.
 
-The step 16 output also shows that the 3.9.2 chart still serves
-`kyverno.io/v1 ClusterPolicy`, and that its CRD marks the kind deprecated. The
-CRD's warning names ValidatingPolicy, MutatingPolicy, GeneratingPolicy and
-ImageValidatingPolicy as the replacements, and points to a migration guide at
-<https://kyverno.io/docs/guides/migration-to-cel/>. This chapter keeps the
-`ClusterPolicy` form, because the pinned chart is the one the lab installs. It
-uses the fields the same CRD still accepts: the rule-level `failureAction`
-under `validate`, and `failureAction` under each `verifyImages` entry. The
-policy-level `validationFailureAction` is deprecated in the same CRD. A rule
-written for a later Kyverno release moves to one of the policy kinds the
-warning names.
-
 ### Audit before Enforce
 
 A new rule can break workloads that already run. The safe order is Audit first:
 the rule is evaluated, the result is recorded, and nothing is refused. Read the
 report, fix or excuse what it shows, then switch to Enforce.
 
-**Not run.** The privileged Pod below is the attack for this section. A
-privileged container holds every capability and sees the node's devices.
-Inside a kind node that is still a container, and its kernel is the one the
-node shares with the host, so the lab does not run anything that would reach
-it. The Pod is admitted, and the policy only reports it. Its node selector
-names a label that no node carries, so the Pod stays Pending and its
-privileged container never starts. The manifest carries the rest of the
-baseline. The one field that is the attack is `privileged: true`. The
-baseline's `allowPrivilegeEscalation: false` cannot sit beside it, so the
-field is left out. The API server refuses that pair before any policy runs, as
-the dry run below shows. `SIGNED-DIGEST` is the same digest as in the next
-section's Pod:`SIGNED-DIGEST` is the same digest as in the next section's Pod:
+The privileged Pod below is the attack for this section. A privileged container
+holds every capability and sees the node's devices. Inside a kind node that is
+still a container, and its kernel is the one the node shares with the host, so
+the lab does not run anything that would reach it. The Pod is admitted, and the
+policy only reports it. Its node selector names a label that no node carries,
+so the Pod stays Pending and its privileged container never starts, and its
+image is never pulled. The image is the Bookstore catalog at the digest the
+production overlay pins. The manifest carries the rest of the baseline. The one
+field that is the attack is `privileged: true`. The baseline's
+`allowPrivilegeEscalation: false` cannot sit beside it, so the field is left
+out. The API server refuses that pair before any policy runs, as the dry run
+below shows:
 
 <!-- gate: insecure-on-purpose -->
 
@@ -776,7 +854,7 @@ spec:
       type: RuntimeDefault
   containers:
     - name: app
-      image: registry.lab-registry.svc.cluster.local:5000/bookstore/catalog@sha256:SIGNED-DIGEST
+      image: ghcr.io/abd-ulbasit/bookstore-catalog@sha256:eaa26ada0a2e1575026a5e71e74572ed0bfdde80f50012e91a7be28f0de16ced
       securityContext:
         privileged: true
         readOnlyRootFilesystem: true
@@ -862,13 +940,42 @@ reports a violation and admits the Pod. The 3.9.2 CRD marks the policy-level
 
 ```sh
 kubectl apply -f policy-disallow-privileged.yaml
+kubectl wait --for=condition=Ready clusterpolicy/disallow-privileged --timeout=120s
 kubectl apply -f escape-node.yaml
-kubectl -n kyverno-demo get ephemeralreports,policyreports 2>/dev/null | head -5
+kubectl -n kyverno-demo get pod escape-node -o jsonpath='{.metadata.name} admitted, privileged={.spec.containers[0].securityContext.privileged}{"\n"}'
+kubectl -n kyverno-demo get ephemeralreports,policyreports
+kubectl -n kyverno-demo get ephemeralreports -o jsonpath='{range .items[*].spec.results[*]}{.policy}{" "}{.rule}{" "}{.result}{" "}{.message}{"\n"}{end}'
 ```
 
-The expected result is that the Pod is admitted and the report records the
-violation. That is what Audit is for. The report is the list of work a team must
-do before it can move to Enforce, and a namespace with a long list is not ready.
+<!-- gate: output -->
+
+```
+escape-node admitted, privileged=true
+```
+
+The Pod is admitted, which is what Audit means. The admission controller
+recorded the result as an `EphemeralReport` with the source `admission`, one
+failure, and the Pod as its owner. Kyverno's reports controller aggregates
+those into a `PolicyReport` that lists every result for a namespace. The lab
+read the reports 95 seconds after the Pod, and the table lists only the
+ephemeral report. The `PolicyReport` had not been written yet, so read the
+ephemeral report, which holds the policy, the rule, the result and the message:
+
+<!-- gate: output -->
+
+```
+NAME                                                                            SOURCE      GROUP   KIND   OWNER         PASS   FAIL   WARN   ERROR   SKIP   AGE
+ephemeralreport.reports.kyverno.io/5bd70a7d-fd29-4bf5-9173-eafd6752cdb8-bxzv9   admission           Pod    escape-node   0      1      0      0       0      95s
+```
+
+<!-- gate: output -->
+
+```
+p05-07-disallow-privileged no-privileged-containers fail validation error: BK-POL-001: privileged containers are not allowed. rule no-privileged-containers failed at path /spec/containers/0/securityContext/privileged/
+```
+
+That is what Audit is for. The report is the list of work a team must do before
+it can move to Enforce, and a namespace with a long list is not ready.
 
 ### Enforce
 
@@ -877,31 +984,141 @@ new name:
 
 ```sh
 kubectl patch clusterpolicy disallow-privileged --type json -p '[{"op":"replace","path":"/spec/rules/0/validate/failureAction","value":"Enforce"}]'
-kubectl apply -f escape-node-2.yaml
+kubectl apply -f escape-node-2.yaml; echo "apply exit=$?"
 ```
 
-`escape-node-2.yaml` is `escape-node.yaml` with its name changed. The expected
-result is a refusal from Kyverno with the same rule ID in the message, which is
-the rule that CI runs later. Neither result was captured.
+`escape-node-2.yaml` is `escape-node.yaml` with its name changed. Kyverno
+refuses it, with the same rule ID in the message, which is the rule that CI
+runs later:
+
+<!-- gate: output -->
+
+```
+Error from server: error when creating "escape-node-2.yaml": admission webhook "validate.kyverno.svc-fail" denied the request: 
+
+resource Pod/p05-07-kyverno/escape-node-2 was blocked due to the following policies 
+
+p05-07-disallow-privileged:
+  no-privileged-containers: 'validation error: BK-POL-001: privileged containers are not allowed. rule no-privileged-containers failed at path /spec/containers/0/securityContext/privileged/'
+apply exit=1
+```
+
+Kyverno names this webhook `svc-fail`, and the lab saw a request refused when
+the webhook could not answer in time, which the verifyImages section keeps. A
+rule that refuses everything proves nothing, so the lab also sent a Pod with
+`allowPrivilegeEscalation: false` in place of `privileged: true`. The same
+engine admitted it, and the namespace holds the Audit Pod and the compliant
+one, and not the refused one:
+
+<!-- gate: output -->
+
+```
+pod/compliant created
+
+$ kubectl -n p05-07-kyverno get pods -o name
+pod/compliant
+pod/escape-node
+```
 
 ### verifyImages: the signature, not only the digest
 
 The digest rule says which bytes may run. It does not say that someone the team
-trusts built them. [05.03](03-supply-chain.md) signs the Bookstore image with a
-key. This section makes the cluster check that signature before it admits a Pod.
-
-**Not run.** The full mode signs a candidate image with a throwaway key made
-in its own work directory, and the public half goes into a Secret that Kyverno
-reads. Nothing private is committed. The Secret holds only the public key:
+trusts built them. [07.03](../07-delivery/03-cicd-pipeline.md) signs the
+Bookstore images keyless from CI, and the identity they are signed as is the
+workflow that built them, not a person and not a key. This section makes the
+cluster check that identity before it admits a Pod. It uses the image the guide
+really publishes, `ghcr.io/abd-ulbasit/bookstore-catalog`, at the digest the
+production overlay pins. Read the digest from the rendered overlay, and check
+the signature from your workstation first, with the identity from 07.03:
 
 ```sh
-kubectl -n kyverno create secret generic cosign-pub --from-file=cosign.pub=cosign.pub
+kubectl kustomize full-guide/examples/bookstore/kustomize/overlays/prod | grep -o 'ghcr.io/abd-ulbasit/bookstore-catalog@sha256:[0-9a-f]*' | sort -u
+IMAGE=ghcr.io/abd-ulbasit/bookstore-catalog@sha256:eaa26ada0a2e1575026a5e71e74572ed0bfdde80f50012e91a7be28f0de16ced
+ID=https://github.com/abd-ulbasit/bookstore-kubernetes-guide/.github/workflows/bookstore-pipeline.yml@refs/heads/main
+DOCKER_CONFIG=$(mktemp -d) cosign verify --certificate-identity "$ID" --certificate-oidc-issuer https://token.actions.githubusercontent.com "$IMAGE" >/dev/null 2>verify.err; echo "cosign verify exit=$?"; grep -E '^(Verification for|  - )' verify.err
 ```
 
-The full mode runs the image that its build pushed, as a Pod in `signed`.
-The manifest carries the baseline in full. In it, `SIGNED-DIGEST` stands for the
-digest that step 3 of the script prints, which is the one `cosign` signs. Put
-that value in before you apply the file:
+<!-- gate: output -->
+
+```
+ghcr.io/abd-ulbasit/bookstore-catalog@sha256:eaa26ada0a2e1575026a5e71e74572ed0bfdde80f50012e91a7be28f0de16ced
+# ...
+cosign verify exit=0
+Verification for ghcr.io/abd-ulbasit/bookstore-catalog@sha256:eaa26ada0a2e1575026a5e71e74572ed0bfdde80f50012e91a7be28f0de16ced --
+  - The cosign claims were validated
+  - Existence of the claims in the transparency log was verified offline
+  - The code-signing certificate was verified using trusted certificate authority certificates
+```
+
+The policy below makes the cluster ask the same question. It covers every image
+in the namespace `signed`, and it names the issuer and the subject that
+07.03 verifies:
+
+```yaml
+apiVersion: kyverno.io/v1
+kind: ClusterPolicy
+metadata:
+  name: verify-signed-images
+  annotations:
+    policies.kyverno.io/title: Verify image signatures
+    policies.kyverno.io/description: Pods in signed run only images that the Bookstore pipeline signed.
+spec:
+  background: false
+  webhookTimeoutSeconds: 30
+  rules:
+    - name: signed-by-the-pipeline
+      match:
+        any:
+          - resources:
+              kinds: [Pod]
+              namespaces: [signed]
+      verifyImages:
+        - imageReferences:
+            - "*"
+          type: SigstoreBundle
+          verifyDigest: true
+          required: true
+          failureAction: Enforce
+          attestors:
+            - entries:
+                - keyless:
+                    issuer: "https://token.actions.githubusercontent.com"
+                    subject: "https://github.com/abd-ulbasit/bookstore-kubernetes-guide/.github/workflows/bookstore-pipeline.yml@refs/heads/main"
+                    rekor:
+                      url: https://rekor.sigstore.dev
+```
+
+`required: true` turns an image with no matching signature into a refusal,
+rather than a pass with a warning. `verifyDigest: true` makes Kyverno check that
+the digest in the Pod is the digest it verified, and `imageReferences: ["*"]`
+puts every image in the namespace under the rule. The `issuer` and `subject`
+are matched as written, so the subject is the whole string, branch included,
+just as in 07.03: a signature made by the same workflow on another branch does
+not match. The `rekor` block names the public transparency log, and the check
+of the log entry stays on, because the pipeline's signature has an entry in it.
+The fields are in the 3.9.2 CRD, and the [verify-images
+overview](https://kyverno.io/docs/policy-types/cluster-policy/verify-images/overview/)
+describes them.
+
+`type: SigstoreBundle` is not decoration. The CRD lists three types, `Cosign`,
+`SigstoreBundle` and `Notary`, and says `Cosign` is the default. The lab's
+first run that reached the registry used the default, and Kyverno found nothing
+to verify on the image that the workstation had just verified:
+
+<!-- gate: output -->
+
+```
+  signed-by-the-pipeline: 'failed to verify image ghcr.io/abd-ulbasit/bookstore-catalog@sha256:eaa26ada0a2e1575026a5e71e74572ed0bfdde80f50012e91a7be28f0de16ced: .attestors[0].entries[0].keyless: no signatures found'
+```
+
+With `type: SigstoreBundle` the same image, in the same namespace, verified. The
+lab does not trace why the default type missed it. It cites the two results,
+and it leaves the choice of type to the pipeline that signs: check how yours
+stores its signatures before you write the rule.
+
+The Pod below is the Bookstore catalog with the full baseline and the digest.
+It carries the same node selector as before, so it is admitted and stays
+Pending, and the image is never pulled:
 
 ```yaml
 apiVersion: v1
@@ -910,6 +1127,8 @@ metadata:
   name: catalog
   namespace: signed
 spec:
+  nodeSelector:
+    lab-never-scheduled: "true"
   automountServiceAccountToken: false
   securityContext:
     runAsNonRoot: true
@@ -919,7 +1138,7 @@ spec:
       type: RuntimeDefault
   containers:
     - name: app
-      image: registry.lab-registry.svc.cluster.local:5000/bookstore/catalog@sha256:SIGNED-DIGEST
+      image: ghcr.io/abd-ulbasit/bookstore-catalog@sha256:eaa26ada0a2e1575026a5e71e74572ed0bfdde80f50012e91a7be28f0de16ced
       ports:
         - containerPort: 8080
       securityContext:
@@ -938,93 +1157,145 @@ spec:
       emptyDir: {}
 ```
 
-The namespace carries the lab label, so the two digest-and-defaults policies
-apply to it. The tampered image is the same Pod with a different digest and
-the name `catalog-tampered`. The full mode applies it before the signature
-rule exists, and expects the API server to admit it, because its digest is
-valid and nothing checks what the digest points to. It then deletes it.
+```sh
+kubectl create namespace signed
+kubectl apply -f policy-verify-signed.yaml
+kubectl wait --for=condition=Ready clusterpolicy/verify-signed-images --timeout=120s
+kubectl apply -f catalog-signed.yaml
+kubectl -n signed get pod catalog -o jsonpath='{.metadata.annotations.kyverno\.io/verify-images}{"\n"}'
+```
 
-The policy below verifies every image in the namespace that matches the lab's
-registry name. The attestor names the key. The policy refuses a Pod whose
-image has no signature from that key:
+The Pod is admitted, and Kyverno records its decision on the object in an
+annotation:
+
+<!-- gate: output -->
+
+```
+pod/catalog created
+
+$ kubectl -n p05-07-signed get pod catalog -o jsonpath='{.metadata.annotations.kyverno\.io/verify-images}{"\n"}'
+{"ghcr.io/abd-ulbasit/bookstore-catalog@sha256:eaa26ada0a2e1575026a5e71e74572ed0bfdde80f50012e91a7be28f0de16ced":"pass"}
+```
+
+Now the image nobody on the pipeline signed. The lab needed an image that a
+cluster can reach and that carries no signature under any identity. It reads one
+from the cluster: the init container image of Kyverno's own admission
+controller, at the digest the node pulled. `cosign verify` with a pattern that
+accepts every identity finds nothing to verify:
+
+```sh
+kubectl -n kyverno get pod -l app.kubernetes.io/component=admission-controller -o jsonpath='{.items[0].status.initContainerStatuses[0].imageID}{"\n"}'
+DOCKER_CONFIG=$(mktemp -d) cosign verify --certificate-identity-regexp '.*' --certificate-oidc-issuer-regexp '.*' reg.kyverno.io/kyverno/kyvernopre@sha256:27f3cc52e628559b56d08363b85316819802086c9808606914f7805a244148f4 >/dev/null 2>verify-unsigned.err; echo "cosign verify exit=$?"; head -n 1 verify-unsigned.err
+```
+
+<!-- gate: output -->
+
+```
+reg.kyverno.io/kyverno/kyvernopre@sha256:27f3cc52e628559b56d08363b85316819802086c9808606914f7805a244148f4
+# ...
+cosign verify exit=10
+Error: no signatures found
+```
+
+The Pod is the catalog Pod with that image. It has a digest, which is all the
+digest rule asks for, and the rest of the baseline is the same:
 
 ```yaml
-apiVersion: kyverno.io/v1
-kind: ClusterPolicy
+apiVersion: v1
+kind: Pod
 metadata:
-  name: verify-signed-images
-  annotations:
-    policies.kyverno.io/title: Verify lab image signatures
-    policies.kyverno.io/description: Pods in signed run only images signed by the lab key.
+  name: unsigned
+  namespace: signed
 spec:
-  background: false
-  webhookTimeoutSeconds: 30
-  rules:
-    - name: signed-by-lab-key
-      match:
-        any:
-          - resources:
-              kinds: [Pod]
-              namespaces: [signed]
-      verifyImages:
-        - imageReferences:
-            - "registry.lab-registry.svc.cluster.local:5000/bookstore/*"
-          verifyDigest: true
-          required: true
-          failureAction: Enforce
-          attestors:
-            - entries:
-                - keys:
-                    secret:
-                      name: cosign-pub
-                      namespace: kyverno
-                    rekor:
-                      ignoreTlog: true
+  nodeSelector:
+    lab-never-scheduled: "true"
+  automountServiceAccountToken: false
+  securityContext:
+    runAsNonRoot: true
+    runAsUser: 65532
+    runAsGroup: 65532
+    seccompProfile:
+      type: RuntimeDefault
+  containers:
+    - name: app
+      image: reg.kyverno.io/kyverno/kyvernopre@sha256:27f3cc52e628559b56d08363b85316819802086c9808606914f7805a244148f4
+      securityContext:
+        allowPrivilegeEscalation: false
+        readOnlyRootFilesystem: true
+        capabilities:
+          drop: ["ALL"]
+      resources:
+        requests: {cpu: 50m, memory: 32Mi}
+        limits: {memory: 64Mi}
+      volumeMounts:
+        - name: tmp
+          mountPath: /tmp
+  volumes:
+    - name: tmp
+      emptyDir: {}
 ```
 
-`required: true` turns an image with no signature into a refusal, rather than
-a pass with a warning. `verifyDigest: true` makes Kyverno check that the
-digest in the Pod is the digest it verified. The `imageReferences`,
-`verifyDigest`, `required`, `failureAction` and `keys` fields are in the 3.9.2
-CRD, and the [verify-images
-overview](https://kyverno.io/docs/policy-types/cluster-policy/verify-images/overview/)
-describes them.
-
-The `rekor` block with `ignoreTlog: true` is for this lab only. The lab signs
-with a signing config that names no transparency log, so the signature has no
-Rekor entry, and the lab verifies it with `cosign verify
---insecure-ignore-tlog`. Kyverno checks the Rekor entry unless the rule turns
-the check off, and the [sigstore
-page](https://kyverno.io/docs/policy-types/cluster-policy/verify-images/sigstore/)
-gives the switch: "To disable this set `ignoreTlog: true`". A production
-signature made against the public log has an entry, so the production rule
-removes the `rekor` block and keeps the check.
-
-The identity here is a key, which is the simplest form a lab can run. A
-signing pipeline usually signs keyless and proves an identity instead: the
-workflow that signed the image, read from the OIDC token of the CI system. The
-rule then names an issuer and a subject rather than a key. That form is shown
-below and is **not run** in this lab, because it needs the public Fulcio and
-Rekor services reachable from the cluster.
-[07.03](../07-delivery/03-cicd-pipeline.md) signs that way from CI.
-
-```yaml
-# Fragment, not applied: the keyless identity form. Not run in this lab.
-verifyImages:
-  - imageReferences:
-      - "registry.example.com/bookstore/*"
-    attestors:
-      - entries:
-          - keyless:
-              issuer: "https://token.actions.githubusercontent.com"
-              subject: "https://github.com/<owner>/<repo>/.github/workflows/bookstore-pipeline.yml@refs/heads/master"
+```sh
+kubectl apply -f unsigned.yaml; echo "apply exit=$?"
+kubectl -n signed get pods -o name
 ```
 
-The expected result is that the signed Pod keeps running and the tampered one
-is refused. The message should say that Kyverno could not verify the image,
-not that the policy failed, and that distinction matters when you debug a
-refusal. The rule worked, and the image failed it. Neither result was
-captured.
+Kyverno refuses it. The message says that it could not verify the image, and
+that no matching signature exists. The rule worked, and the image failed it,
+which is the distinction to look for when you debug a refusal:
+
+<!-- gate: output -->
+
+```
+Error from server: error when creating "unsigned.yaml": admission webhook "mutate.kyverno.svc-fail" denied the request: 
+
+resource Pod/p05-07-signed/unsigned was blocked due to the following policies 
+
+p05-07-verify-signed-images:
+  signed-by-the-pipeline: 'failed to verify image reg.kyverno.io/kyverno/kyvernopre@sha256:27f3cc52e628559b56d08363b85316819802086c9808606914f7805a244148f4: .attestors[0].entries[0].keyless: sigstore bundle verification failed: no matching signatures found'
+apply exit=1
+
+$ kubectl -n p05-07-signed get pods -o name
+pod/catalog
+```
+
+That is the control the chapter set out to show. A digest alone would have
+admitted both Pods. The signature rule admitted the one the pipeline built and
+refused the one it did not.
+
+Two earlier runs of this step are worth keeping, because they refused a Pod for
+a reason that proves nothing about signatures. The first used busybox, pinned by
+digest, as the unsigned image. Kyverno refused it, and the reason it gave was a
+lookup that timed out, not a missing signature:
+
+<!-- gate: output -->
+
+```
+  signed-by-the-pipeline: 'failed to verify image docker.io/busybox@sha256:73aaf090f3d85aa34ee199857f03fa3a95c8ede2ffd4cc2cdb5b94e566b11662: .attestors[0].entries[0].keyless: Get "https://index.docker.io/v2/": dial tcp: lookup index.docker.io: i/o timeout'
+```
+
+The lookup kept timing out for Docker Hub names, with and without the `ndots`
+option, while names on ghcr.io and reg.kyverno.io resolved in the later runs.
+The lab did not find the cause, and it is why the lab dropped busybox for this
+step. An earlier run, before the `ndots` option, showed what a webhook that
+cannot finish does. The signed Pod hit the webhook's 30 second limit, and the
+API server refused the Pod instead of admitting it:
+
+<!-- gate: output -->
+
+```
+Error from server (InternalError): error when creating "catalog-signed.yaml": Internal error occurred: failed calling webhook "mutate.kyverno.svc-fail": failed to call webhook: Post "https://kyverno-svc.kyverno.svc:443/mutate/fail?timeout=30s": context deadline exceeded (Client.Timeout exceeded while awaiting headers)
+```
+
+That refusal is the failure policy at work. It is the safe direction for a
+security control, and it is also how a slow registry or a slow resolver stops a
+deploy, so the production notes below say to plan for it.
+
+The identity here is a workflow, which is the form a pipeline can keep without
+holding a key. A rule that names a key instead is also possible: `keys` in
+place of `keyless`, with the public key in a Secret. This chapter does not run
+that form. The keyless form is what [07.03](../07-delivery/03-cicd-pipeline.md)
+produces, so it is the form the cluster should check.
 
 The rule starts in Enforce with no Audit run before it. The `signed` namespace
 is new, and it holds only the Pods the lab creates, so no running workload
@@ -1034,23 +1305,42 @@ starts in Audit, as the privileged rule does.
 ### Gatekeeper: the same rule in Rego, side by side
 
 Gatekeeper is the other common engine. It takes its rules in Rego, which is also
-what OPA runs in the shift-left section below. The full mode installs it beside
-Kyverno, writes the same privileged rule, and runs it in dry-run. Dry-run denies
-nothing at admission, and it reports objects that already exist, which Kyverno's
-Audit mode did for the privileged Pod.
+what OPA runs in the shift-left section below. The lab removes Kyverno first,
+then installs Gatekeeper, writes the same privileged rule, and runs it in
+dry-run and then in deny. Dry-run denies nothing at admission, and it reports
+objects that already exist, which Kyverno's Audit mode did for the privileged
+Pod. The lab keeps that Pod, so Gatekeeper finds it.
 
-**Not run.** The install follows the same pattern as Kyverno's: a
-restricted label first, then a pinned chart, with one replica so the lab stays
-small:
+The install follows the same pattern as Kyverno's: a restricted label first,
+then a pinned chart, with one replica so the lab stays small:
 
 ```sh
 helm repo add gatekeeper https://open-policy-agent.github.io/gatekeeper/charts --force-update
+helm show chart gatekeeper/gatekeeper --version 3.23.1 | grep -E '^(name|version|appVersion|kubeVersion):'
 kubectl create namespace gatekeeper-system
 kubectl label namespace gatekeeper-system pod-security.kubernetes.io/enforce=restricted
-helm upgrade --install gatekeeper gatekeeper/gatekeeper --version 3.23.1 --namespace gatekeeper-system --wait --timeout 10m --set replicas=1
+helm upgrade --install gatekeeper gatekeeper/gatekeeper --version 3.23.1 --namespace gatekeeper-system --set replicas=1
+kubectl -n gatekeeper-system get deploy
 ```
 
-A `ConstraintTemplate` holds the Rego. The constraint is an instance of it, with
+<!-- gate: output -->
+
+```
+appVersion: v3.23.1
+name: gatekeeper
+version: 3.23.1
+```
+
+<!-- gate: output -->
+
+```
+NAME                            READY   UP-TO-DATE   AVAILABLE   AGE
+gatekeeper-audit                1/1     1            1           2m30s
+gatekeeper-controller-manager   1/1     1            1           2m30s
+```
+
+The chart installed under the `restricted` label with no exception. A
+`ConstraintTemplate` holds the Rego. The constraint is an instance of it, with
 the enforcement action and the scope:
 
 ```yaml
@@ -1103,14 +1393,46 @@ check both. The Kyverno pattern above checks `containers` only, so the two
 rules do not match exactly. That difference is real, and the shift-left rule
 below checks both.
 
-The full mode waits for the audit, then reads the constraint's status, which
-should list the privileged Pod that Kyverno admitted in Audit mode:
+The audit lists what already exists, so it reports the Pod that Kyverno
+admitted in Audit mode. The lab waits for the audit, reads the constraint's
+status, and then sends the same Pod that Kyverno refused, still in dry-run:
 
 ```sh
 kubectl apply -f gatekeeper-template.yaml
+kubectl wait --for=condition=Established crd/noprivileged.constraints.gatekeeper.sh --timeout=120s
 kubectl apply -f gatekeeper-constraint.yaml
 kubectl get noprivileged no-privileged -o jsonpath='{.spec.enforcementAction}{" "}{.status.totalViolations}{"\n"}'
 kubectl get noprivileged no-privileged -o jsonpath='{.status.violations[0].message}{"\n"}'
+kubectl apply -f escape-node-2.yaml
+kubectl delete pod escape-node-2 -n kyverno-demo --wait=true
+```
+
+<!-- gate: output -->
+
+```
+dryrun 1
+# ...
+BK-POL-001 container app runs privileged
+# ...
+pod/escape-node-2 created
+```
+
+Dry-run found the one Pod and admitted the new one, as it should: it denies
+nothing. Now switch the constraint to `deny` and send the same file again,
+which is the manifest Kyverno refused in the Enforce section:
+
+```sh
+kubectl patch noprivileged no-privileged --type merge -p '{"spec":{"enforcementAction":"deny"}}'
+kubectl apply -f escape-node-2.yaml; echo "apply exit=$?"
+```
+
+Gatekeeper refuses it with the same rule ID:
+
+<!-- gate: output -->
+
+```
+Error from server (Forbidden): error when creating "escape-node-2.yaml": admission webhook "validation.gatekeeper.sh" denied the request: [p05-no-privileged] BK-POL-001 container app runs privileged
+apply exit=1
 ```
 
 The shared run applied the constraint's manifest to a cluster without the
@@ -1126,21 +1448,90 @@ ensure CRDs are installed first
 server dry-run exit=1
 ```
 
-Both engines hold the same rule, under the same ID. Kyverno refuses new
-privileged Pods in the namespace, and Gatekeeper reports the one that already
-runs. Keep both only while you compare. Two engines enforcing one rule is two
-places to keep right.
+Both engines hold the same rule, under the same ID. Kyverno refused the
+privileged Pod in Enforce, and Gatekeeper refused the same manifest in `deny`,
+after reporting the one that already existed in `dryrun`. Keep both only while
+you compare. Two engines enforcing one rule is two places to keep right.
 
-The full mode removes Gatekeeper and its CRDs, and deletes the Pod it reported:
+### Removing an engine
+
+An engine that is removed in the wrong order can leave the cluster worse than
+before. The webhook configurations are cluster objects, and each one points at
+a Service in the engine's namespace. If the Service goes and the configuration
+stays, every request the configuration matches fails or waits for its timeout.
+The lab removes Gatekeeper in an order that leaves nothing, and checks:
 
 ```sh
-kubectl delete pod escape-node -n kyverno-demo --wait=true
 kubectl delete noprivileged no-privileged
 kubectl delete constrainttemplate noprivileged
-helm uninstall gatekeeper --namespace gatekeeper-system --wait
-kubectl get crd -o name | grep 'gatekeeper.sh' | xargs kubectl delete --wait=true
+helm uninstall gatekeeper --namespace gatekeeper-system --wait --timeout 4m
 kubectl delete namespace gatekeeper-system --wait=true
+kubectl get validatingwebhookconfigurations,mutatingwebhookconfigurations -o name | grep -iE 'gatekeeper' | xargs kubectl delete --ignore-not-found
+kubectl get crd -o name | grep -E 'gatekeeper\.sh' | xargs kubectl delete --wait=true
+kubectl get clusterrole,clusterrolebinding -o name | grep -iE 'gatekeeper' | xargs kubectl delete --ignore-not-found
+kubectl delete namespace kyverno-demo --wait=true
+kubectl get crd -o name | grep -cE 'kyverno\.io|wgpolicyk8s\.io|gatekeeper\.sh'
+kubectl get validatingwebhookconfigurations,mutatingwebhookconfigurations -o name | grep -ciE 'kyverno|gatekeeper'
+kubectl get clusterrole,clusterrolebinding -o name | grep -ciE 'kyverno|gatekeeper'
+kubectl get namespace -o name | grep -cE 'namespace/(kyverno|gatekeeper-system|p05-07-)'
 ```
+
+<!-- gate: output -->
+
+```
+release "gatekeeper" uninstalled
+# ...
+namespace "gatekeeper-system" deleted
+# ...
+namespace "p05-07-kyverno" deleted
+
+## nothing of either engine remains
+$ kubectl get crd -o name | grep -cE 'kyverno\.io|wgpolicyk8s\.io|gatekeeper\.sh'
+0
+
+$ kubectl get validatingwebhookconfigurations,mutatingwebhookconfigurations -o name | grep -ciE 'kyverno|gatekeeper'
+0
+
+$ kubectl get clusterrole,clusterrolebinding -o name | grep -ciE 'kyverno|gatekeeper'
+0
+
+$ kubectl get namespace -o name | grep -cE 'namespace/(kyverno|gatekeeper-system|p05-07-)'
+0
+```
+
+The last four commands count what is left, and the counts are only worth
+trusting when each `kubectl` call succeeded, because a failed `grep -c` prints
+`0` too. The lab learned that in its Kyverno removal. The first removal used
+the plain order that the Gatekeeper chart tolerates: `helm uninstall --wait`,
+then the webhook configurations, then the CRDs, then the namespace. Kyverno's
+chart runs a pre-delete Job, and the Job had not finished when helm gave up:
+
+<!-- gate: output -->
+
+```
+Error: resource Job/kyverno/kyverno-scale-to-zero not ready. status: InProgress, message: Job in progress
+context deadline exceeded
+```
+
+The lab then deleted the webhook configurations while the Kyverno controllers
+were still running, and the controllers wrote them back. After the namespace
+went, the count of Kyverno webhook configurations was not zero:
+
+<!-- gate: output -->
+
+```
+$ kubectl get validatingwebhookconfigurations,mutatingwebhookconfigurations -o name | grep -ci kyverno
+8
+```
+
+Eight webhook configurations pointed at a Service that no longer existed. The
+lab removed them by hand, and rewrote the step so that the namespace goes
+before the configurations, the chart's hook is skipped, and the step fails if
+anything is left. A second removal of Kyverno was then cut short, because the
+API server of the lab cluster stopped answering while it ran, and every check
+in it failed. The lab removed Kyverno by hand again, in the safe order. **The
+rewritten Kyverno removal was not run to the end.** The order it uses ran for
+Gatekeeper, as above, and not for Kyverno.
 
 ### Shift left: the same rules in CI
 
@@ -1277,8 +1668,10 @@ pipeline run on the repository shows it.
   running workloads checked uses Audit, which reports them.
 - **Kyverno is a webhook.** Its admission controller answers each request, and
   `failurePolicy` decides what a timeout does. `verifyImages` contacts the
-  registry for the digest and the signature, so the registry must answer, and
-  the lab's registry name resolves inside the cluster through a Service.
+  registry for the digest and the signature, and the Sigstore services for the
+  log entry, from inside the admission controller's Pod. Those lookups run
+  while the API server waits, so a slow resolver or a slow registry becomes a
+  refused Pod once the webhook's 30 seconds are used, as the lab saw.
 - **Gatekeeper audits what exists.** Its audit controller lists the objects
   the constraint matches on an interval, and writes the violations into the
   constraint's status. A `dryrun` constraint denies nothing at admission, and
@@ -1312,7 +1705,21 @@ pipeline run on the repository shows it.
 > **In production:** verify identity, not only a signature. A key proves that
 > someone holding it signed the image. A keyless identity proves which
 > workflow built it. The [07.03](../07-delivery/03-cicd-pipeline.md) chapter
-> signs that way, and the rule here should check the same identity.
+> signs that way, and the rule here checks the same identity, branch included.
+
+> **In production:** remove a policy engine in an order that leaves no webhook
+> behind. Delete the policies, then the engine's namespace, so that its
+> controllers stop, and only then the webhook configurations, the CRDs and the
+> cluster roles. A controller that is still running writes its webhook
+> configurations back, and a configuration that outlives its Service makes the
+> requests it matches fail or wait. Count what is left, and check that the
+> count came from a `kubectl` call that succeeded.
+
+> **In production:** a webhook engine adds load to the API server. In this lab
+> the control plane Pods restarted during installs, on a cluster that was short
+> of CPU and disk, and the lab does not know how much of that the engines
+> caused. Size the control plane for the engine, install it at a quiet time, and
+> watch the restart count of the control plane Pods while you do.
 
 ## Quick Reference
 
@@ -1363,9 +1770,17 @@ spec:
     - name: <image rule>
       verifyImages:
         - imageReferences: ["<registry>/*"]
+          type: SigstoreBundle   # match the type to how the pipeline signs
           verifyDigest: true
           required: true
           failureAction: Audit   # then Enforce
+          attestors:
+            - entries:
+                - keyless:
+                    issuer: "https://token.actions.githubusercontent.com"
+                    subject: "<the workflow identity, branch included>"
+                    rekor:
+                      url: https://rekor.sigstore.dev
 ```
 
 ```sh
@@ -1404,7 +1819,8 @@ conftest test --policy <policy-dir> --all-namespaces <rendered.yaml>
    digest, so a moving tag is refused at admission. It does not check who built
    the image, because a digest names bytes and says nothing about their author.
    The Kyverno `verifyImages` rule checks the signature, and so checks that the
-   key or identity it names signed those bytes. That rule was not run.
+   key or identity it names signed those bytes. The lab ran that rule: it
+   admitted the pipeline's digest and refused an image with no signature.
 
    </details>
 

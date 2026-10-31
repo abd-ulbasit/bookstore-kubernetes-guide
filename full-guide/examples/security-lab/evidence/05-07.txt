@@ -1,3 +1,91 @@
+# Transcript for lab 05.07, the lab of
+# 05-security/07-admission-control-and-policy-as-code.md.
+# Tier A. Two recordings of labs/05-07.sh follow, one for each mode.
+#
+# Recording 1 is MODE=shared on the kind cluster sf-pilot: one node, a
+# Kubernetes v1.37.0 server, kubectl v1.37.2. It was made with an earlier
+# version of the script. That version also listed a throwaway cluster, a lab
+# registry and a lab signing key as steps 1 to 4, 7 to 12 and 15, and printed
+# their headings without running them in shared mode. Those headings stay in
+# the recording because the recording is not edited. The steps themselves were
+# removed from the script later (see its header), so a rerun does not print
+# them.
+#
+# Recording 2 is MODE=full on the kind cluster sf-sched: three nodes, the same
+# server and kubectl versions, on a host shared with other work. The script
+# installs one engine at a time and removes it before the next goes in. It was
+# run in 16 invocations, kept below in the order they ran. Each started from
+# the cluster state the previous one left. The script's own cleanup removed
+# what a failed or stopped invocation had installed. Three invocations left
+# objects behind: invocation 1, whose cleanup could not remove them, and
+# invocations 11 and 15, which ended normally and so ran no cleanup. Those
+# objects were removed by hand with kubectl delete, in commands that are not in
+# this file:
+#   invocation 1   22 Kyverno CRDs and 2 webhook configurations
+#   invocation 11  8 webhook configurations and 16 cluster roles and bindings
+#   invocation 15  the whole Kyverno install, in the order namespace, webhook
+#                  configurations, CRDs, cluster roles
+# Every invocation printed the tools step (step 0) again. Each copy is kept.
+#
+# Names: the lab prefixes its objects with p05-07, as in p05-07-open and
+# p05-07-signed. The chapter drops the prefix in its text, commands and
+# manifests, and calls the p05-07-kyverno namespace kyverno-demo. The captured
+# output keeps the lab's names. One rename is the only edit to the recorded
+# lines: the local port of the API tunnel appears as <api-port>, in
+# invocations 7 and 15.
+#
+# Chart versions, from helm show chart in invocations 14 and 12: Kyverno chart
+# 3.9.2 (app v1.19.2) and Gatekeeper chart 3.23.1 (app v3.23.1).
+#
+# The invocations of recording 2, with the steps each ran (F1 install Kyverno,
+# F2 Audit, F3 Enforce, F4 verifyImages, F4a a helm upgrade that set a DNS
+# option and was later dropped, F5 remove Kyverno, F6 install Gatekeeper, F7
+# the same rule in Rego as dryrun and then deny, F8 remove Gatekeeper):
+#    1  F1           four controllers and helm --wait: the admission controller
+#                    was not ready in 7 minutes; the install failed and was
+#                    removed
+#    2  F1           the reduced install (two controllers): passed
+#    3  F2           stopped: the control plane restarted
+#    4  F1 F2 F3     passed (the PolicyReport poll is an older version)
+#    5  F2 F3 F4     F2 and F3 passed. F4 failed: a 30 second webhook timeout
+#                    for the Bookstore image, a lookup timeout for busybox
+#    6  F4a F4       F4a failed on a value type. F4 with the default
+#                    verification type found no signatures on the Bookstore
+#                    image
+#    7  F4a F4       stopped: the control plane restarted after the upgrade
+#    8  F1 F2 F3     stopped: the control plane restarted
+#    9  F1 F2 F3     stopped: the control plane restarted
+#   10  F1 F4        passed, with type SigstoreBundle. The unsigned image then
+#                    was busybox, refused on a lookup timeout
+#   11  F2 F3 F4 F5  F2 to F4 passed, with the Kyverno image as the unsigned
+#                    one. F5 did not remove Kyverno cleanly (8 webhook
+#                    configurations were left)
+#   12  F6 F7        Gatekeeper install, dryrun and deny: passed
+#   13  F8           Gatekeeper removal: passed
+#   14  F1 F4        passed
+#   15  F5           the API server stopped answering during the removal; the
+#                    checks in it are unreliable, and the output 0 in it is a
+#                    failed kubectl, not a count
+#   16  F1 F4        stopped: the control plane restarted
+#
+# Seven of the 16 did not run to the end: 1 (install timed out), 3, 7, 8, 9
+# and 16 (the script's guard saw the control plane Pods restart) and 15 (the
+# API server stopped answering). The guard stops on any rise in the restart
+# count of the control plane Pods, whatever the cause. The controller manager
+# and the scheduler of this cluster had restarted 21 and 23 times in its first
+# 6 hours, before the lab ran, read with kubectl at the start and not recorded
+# here.
+#
+# What did not run in the form the script now has: step F5. Invocation 11 ran
+# an earlier order (helm uninstall, then webhook configurations, then CRDs,
+# then the namespace) and left 8 Kyverno webhook configurations, because the
+# controllers were still running and wrote them back. The script's F5 now
+# removes the namespace before the webhook configurations, skips the chart's
+# pre-delete Job with --no-hooks, and fails if anything is left. That form was
+# not run to the end. The same order, without --no-hooks, ran for Gatekeeper
+# in invocation 13.
+#
+=== recording 1: MODE=shared, kind cluster sf-pilot ===
 ## mode: shared, on the shared lab cluster; the throwaway p05-07 cluster is not created in this mode
 ## step 0: the tools this run used
 $ kubectl version
@@ -209,4 +297,1550 @@ mutatingadmissionpolicybinding.admissionregistration.k8s.io "p05-07-default-secc
 $ kubectl delete mutatingadmissionpolicy p05-07-default-automount-off p05-07-default-seccomp --ignore-not-found
 mutatingadmissionpolicy.admissionregistration.k8s.io "p05-07-default-automount-off" deleted
 mutatingadmissionpolicy.admissionregistration.k8s.io "p05-07-default-seccomp" deleted
+
+
+=== recording 2: MODE=full, kind cluster sf-sched ===
+--- invocation 1: STEPS="F1" ---
+## mode: full, on the kind cluster LAB_CONTEXT names; Kyverno and Gatekeeper are installed in turn
+## step 0: the tools this run used
+$ kubectl version
+helm version --short
+cosign version | grep GitVersion
+opa version | head -1
+conftest --version | head -1
+terraform version | head -1
+Client Version: v1.37.2
+Kustomize Version: v5.8.1
+Server Version: v1.37.0
+v4.1.4+g05fa379
+GitVersion:    v3.1.4
+Version: 1.22.0
+Conftest: 0.71.1
+Terraform v1.14.8
+
+## step F1: Kyverno, installed with the chart pinned and the namespace labelled
+$ helm repo add kyverno https://kyverno.github.io/kyverno/ --force-update
+"kyverno" has been added to your repositories
+
+$ helm show chart kyverno/kyverno --version 3.9.2 | grep -E '^(name|version|appVersion|kubeVersion):'
+appVersion: v1.19.2
+kubeVersion: '>=1.25.0-0'
+name: kyverno
+version: 3.9.2
+
+$ kubectl create namespace kyverno
+namespace/kyverno created
+
+$ kubectl label namespace kyverno pod-security.kubernetes.io/enforce=restricted
+namespace/kyverno labeled
+
+$ helm upgrade --install kyverno kyverno/kyverno --version 3.9.2 --namespace kyverno --wait --timeout 7m --set admissionController.replicas=1 --set backgroundController.replicas=1 --set cleanupController.replicas=1 --set reportsController.replicas=1
+Release "kyverno" does not exist. Installing it now.
+Error: resource Deployment/kyverno/kyverno-admission-controller not ready. status: InProgress, message: Available: 0/1
+context deadline exceeded
+
+FAILED: the Kyverno install did not finish
+## cleanup
+run failed or stopped (exit 1): removing both engines
+STILL PRESENT, remove by hand:
+customresourcedefinition.apiextensions.k8s.io/cleanuppolicies.kyverno.io
+customresourcedefinition.apiextensions.k8s.io/clustercleanuppolicies.kyverno.io
+customresourcedefinition.apiextensions.k8s.io/clusterephemeralreports.reports.kyverno.io
+customresourcedefinition.apiextensions.k8s.io/clusterpolicies.kyverno.io
+customresourcedefinition.apiextensions.k8s.io/clusterpolicyreports.wgpolicyk8s.io
+customresourcedefinition.apiextensions.k8s.io/deletingpolicies.policies.kyverno.io
+customresourcedefinition.apiextensions.k8s.io/ephemeralreports.reports.kyverno.io
+customresourcedefinition.apiextensions.k8s.io/generatingpolicies.policies.kyverno.io
+customresourcedefinition.apiextensions.k8s.io/globalcontextentries.kyverno.io
+customresourcedefinition.apiextensions.k8s.io/imagevalidatingpolicies.policies.kyverno.io
+customresourcedefinition.apiextensions.k8s.io/mutatingpolicies.policies.kyverno.io
+customresourcedefinition.apiextensions.k8s.io/namespaceddeletingpolicies.policies.kyverno.io
+customresourcedefinition.apiextensions.k8s.io/namespacedgeneratingpolicies.policies.kyverno.io
+customresourcedefinition.apiextensions.k8s.io/namespacedimagevalidatingpolicies.policies.kyverno.io
+customresourcedefinition.apiextensions.k8s.io/namespacedmutatingpolicies.policies.kyverno.io
+customresourcedefinition.apiextensions.k8s.io/namespacedvalidatingpolicies.policies.kyverno.io
+customresourcedefinition.apiextensions.k8s.io/policies.kyverno.io
+customresourcedefinition.apiextensions.k8s.io/policyexceptions.kyverno.io
+customresourcedefinition.apiextensions.k8s.io/policyexceptions.policies.kyverno.io
+customresourcedefinition.apiextensions.k8s.io/policyreports.wgpolicyk8s.io
+customresourcedefinition.apiextensions.k8s.io/updaterequests.kyverno.io
+customresourcedefinition.apiextensions.k8s.io/validatingpolicies.policies.kyverno.io
+validatingwebhookconfiguration.admissionregistration.k8s.io/kyverno-cleanup-validating-webhook-cfg
+validatingwebhookconfiguration.admissionregistration.k8s.io/kyverno-ttl-validating-webhook-cfg
+
+--- invocation 2: STEPS="F1" ---
+## mode: full, on the kind cluster LAB_CONTEXT names; Kyverno and Gatekeeper are installed in turn
+## step 0: the tools this run used
+$ kubectl version
+helm version --short
+cosign version | grep GitVersion
+opa version | head -1
+conftest --version | head -1
+terraform version | head -1
+Client Version: v1.37.2
+Kustomize Version: v5.8.1
+Server Version: v1.37.0
+v4.1.4+g05fa379
+GitVersion:    v3.1.4
+Version: 1.22.0
+Conftest: 0.71.1
+Terraform v1.14.8
+
+## step F1: Kyverno, installed with the chart pinned and the namespace labelled
+$ helm repo add kyverno https://kyverno.github.io/kyverno/ --force-update
+"kyverno" has been added to your repositories
+
+$ helm show chart kyverno/kyverno --version 3.9.2 | grep -E '^(name|version|appVersion|kubeVersion):'
+appVersion: v1.19.2
+kubeVersion: '>=1.25.0-0'
+name: kyverno
+version: 3.9.2
+
+$ kubectl create namespace kyverno
+namespace/kyverno created
+
+$ kubectl label namespace kyverno pod-security.kubernetes.io/enforce=restricted
+namespace/kyverno labeled
+
+$ helm upgrade --install kyverno kyverno/kyverno --version 3.9.2 --namespace kyverno --set admissionController.replicas=1 --set reportsController.replicas=1 --set backgroundController.enabled=false --set cleanupController.enabled=false --set features.generateValidatingAdmissionPolicy.enabled=false --set features.validatingAdmissionPolicyReports.enabled=false
+Release "kyverno" does not exist. Installing it now.
+NAME: kyverno
+LAST DEPLOYED: Sat Oct 31 14:06:10 2026
+NAMESPACE: kyverno
+STATUS: deployed
+REVISION: 1
+DESCRIPTION: Install complete
+NOTES:
+Chart version: 3.9.2
+Kyverno version: v1.19.2
+
+Thank you for installing kyverno! Your release is named kyverno.
+
+The following components have been installed in your cluster:
+- CRDs
+- Admission controller
+- Reports controller
+
+
+⚠️  WARNING: Setting the admission controller replica count below 2 means Kyverno is not running in high availability mode.
+
+
+⚠️  WARNING: PolicyExceptions are disabled by default. To enable them, set '--enablePolicyException' to true.
+⚠️  WARNING: The legacy kyverno.io policy types are deprecated and will be removed in a future release. Migrate to their policies.kyverno.io replacements:
+    - ClusterPolicy / Policy → ValidatingPolicy, MutatingPolicy, GeneratingPolicy, ImageValidatingPolicy (and their namespaced variants)
+    - ClusterCleanupPolicy / CleanupPolicy → DeletingPolicy / NamespacedDeletingPolicy
+    - PolicyException (kyverno.io) → PolicyException (policies.kyverno.io)
+    See https://kyverno.io/docs/guides/migration-to-cel/ for the migration guide.
+
+💡 Note: There is a trade-off when deciding which approach to take regarding Namespace exclusions. Please see the documentation at https://kyverno.io/docs/installation/#security-vs-operability to understand the risks.
+
+every Deployment in kyverno is available
+
+$ kubectl -n kyverno get deploy
+NAME                           READY   UP-TO-DATE   AVAILABLE   AGE
+kyverno-admission-controller   1/1     1            1           4m26s
+kyverno-reports-controller     1/1     1            1           4m26s
+
+$ kubectl get validatingwebhookconfigurations,mutatingwebhookconfigurations -o name | grep kyverno | sort
+mutatingwebhookconfiguration.admissionregistration.k8s.io/kyverno-policy-mutating-webhook-cfg
+mutatingwebhookconfiguration.admissionregistration.k8s.io/kyverno-resource-mutating-webhook-cfg
+mutatingwebhookconfiguration.admissionregistration.k8s.io/kyverno-verify-mutating-webhook-cfg
+validatingwebhookconfiguration.admissionregistration.k8s.io/kyverno-cel-exception-validating-webhook-cfg
+validatingwebhookconfiguration.admissionregistration.k8s.io/kyverno-exception-validating-webhook-cfg
+validatingwebhookconfiguration.admissionregistration.k8s.io/kyverno-global-context-validating-webhook-cfg
+validatingwebhookconfiguration.admissionregistration.k8s.io/kyverno-policy-validating-webhook-cfg
+validatingwebhookconfiguration.admissionregistration.k8s.io/kyverno-resource-validating-webhook-cfg
+
+control plane restarts: 59 (at the start of this run: 59)
+
+## cleanup
+
+--- invocation 3: STEPS="F2" ---
+## mode: full, on the kind cluster LAB_CONTEXT names; Kyverno and Gatekeeper are installed in turn
+## step 0: the tools this run used
+$ kubectl version
+helm version --short
+cosign version | grep GitVersion
+opa version | head -1
+conftest --version | head -1
+terraform version | head -1
+Client Version: v1.37.2
+Kustomize Version: v5.8.1
+Server Version: v1.37.0
+v4.1.4+g05fa379
+GitVersion:    v3.1.4
+Version: 1.22.0
+Conftest: 0.71.1
+Terraform v1.14.8
+
+## step F2: Audit before Enforce: a privileged Pod is admitted and reported
+$ kubectl create namespace p05-07-kyverno
+namespace/p05-07-kyverno created
+
+$ kubectl -n p05-07-kyverno get serviceaccount default -o name
+serviceaccount/default
+
+$ kubectl apply -f policy-disallow-privileged.yaml
+Warning: kyverno.io/v1 ClusterPolicy is deprecated and will be removed in a future release; migrate to ValidatingPolicy, MutatingPolicy, GeneratingPolicy or ImageValidatingPolicy (policies.kyverno.io), see https://kyverno.io/docs/guides/migration-to-cel/
+clusterpolicy.kyverno.io/p05-07-disallow-privileged created
+
+$ kubectl wait --for=condition=Ready clusterpolicy/p05-07-disallow-privileged --timeout=120s
+Warning: kyverno.io/v1 ClusterPolicy is deprecated and will be removed in a future release; migrate to ValidatingPolicy, MutatingPolicy, GeneratingPolicy or ImageValidatingPolicy (policies.kyverno.io), see https://kyverno.io/docs/guides/migration-to-cel/
+clusterpolicy.kyverno.io/p05-07-disallow-privileged condition met
+
+$ kubectl apply -f escape-node.yaml
+pod/escape-node created
+
+$ kubectl -n p05-07-kyverno get pod escape-node -o jsonpath='{.metadata.name} admitted, privileged={.spec.containers[0].securityContext.privileged}{"\n"}'
+escape-node admitted, privileged=true
+
+$ kubectl api-resources --api-group=wgpolicyk8s.io
+NAME                   SHORTNAMES   APIVERSION                NAMESPACED   KIND
+clusterpolicyreports   cpolr        wgpolicyk8s.io/v1alpha2   false        ClusterPolicyReport
+policyreports          polr         wgpolicyk8s.io/v1alpha2   true         PolicyReport
+
+$ kubectl -n p05-07-kyverno get policyreports
+No resources found in p05-07-kyverno namespace.
+
+$ kubectl -n p05-07-kyverno get policyreports -o jsonpath='{range .items[*].results[*]}{.policy}{" "}{.rule}{" "}{.result}{" "}{.message}{"\n"}{end}'
+
+STOP: the control plane restarted (59 to 61)
+## cleanup
+run failed or stopped (exit 3): removing both engines
+nothing of either engine remains
+
+--- invocation 4: STEPS="F1 F2 F3" ---
+## mode: full, on the kind cluster LAB_CONTEXT names; Kyverno and Gatekeeper are installed in turn
+## step 0: the tools this run used
+$ kubectl version
+helm version --short
+cosign version | grep GitVersion
+opa version | head -1
+conftest --version | head -1
+terraform version | head -1
+Client Version: v1.37.2
+Kustomize Version: v5.8.1
+Server Version: v1.37.0
+v4.1.4+g05fa379
+GitVersion:    v3.1.4
+Version: 1.22.0
+Conftest: 0.71.1
+Terraform v1.14.8
+
+## step F1: Kyverno, installed with the chart pinned and the namespace labelled
+$ helm repo add kyverno https://kyverno.github.io/kyverno/ --force-update
+"kyverno" has been added to your repositories
+
+$ helm show chart kyverno/kyverno --version 3.9.2 | grep -E '^(name|version|appVersion|kubeVersion):'
+appVersion: v1.19.2
+kubeVersion: '>=1.25.0-0'
+name: kyverno
+version: 3.9.2
+
+$ kubectl create namespace kyverno
+namespace/kyverno created
+
+$ kubectl label namespace kyverno pod-security.kubernetes.io/enforce=restricted
+namespace/kyverno labeled
+
+$ helm upgrade --install kyverno kyverno/kyverno --version 3.9.2 --namespace kyverno --set admissionController.replicas=1 --set reportsController.replicas=1 --set backgroundController.enabled=false --set cleanupController.enabled=false --set features.generateValidatingAdmissionPolicy.enabled=false --set features.validatingAdmissionPolicyReports.enabled=false
+Release "kyverno" does not exist. Installing it now.
+NAME: kyverno
+LAST DEPLOYED: Sat Oct 31 14:18:25 2026
+NAMESPACE: kyverno
+STATUS: deployed
+REVISION: 1
+DESCRIPTION: Install complete
+NOTES:
+Chart version: 3.9.2
+Kyverno version: v1.19.2
+
+Thank you for installing kyverno! Your release is named kyverno.
+
+The following components have been installed in your cluster:
+- CRDs
+- Admission controller
+- Reports controller
+
+
+⚠️  WARNING: Setting the admission controller replica count below 2 means Kyverno is not running in high availability mode.
+
+
+⚠️  WARNING: PolicyExceptions are disabled by default. To enable them, set '--enablePolicyException' to true.
+⚠️  WARNING: The legacy kyverno.io policy types are deprecated and will be removed in a future release. Migrate to their policies.kyverno.io replacements:
+    - ClusterPolicy / Policy → ValidatingPolicy, MutatingPolicy, GeneratingPolicy, ImageValidatingPolicy (and their namespaced variants)
+    - ClusterCleanupPolicy / CleanupPolicy → DeletingPolicy / NamespacedDeletingPolicy
+    - PolicyException (kyverno.io) → PolicyException (policies.kyverno.io)
+    See https://kyverno.io/docs/guides/migration-to-cel/ for the migration guide.
+
+💡 Note: There is a trade-off when deciding which approach to take regarding Namespace exclusions. Please see the documentation at https://kyverno.io/docs/installation/#security-vs-operability to understand the risks.
+
+every Deployment in kyverno is available
+
+$ kubectl -n kyverno get deploy
+NAME                           READY   UP-TO-DATE   AVAILABLE   AGE
+kyverno-admission-controller   1/1     1            1           69s
+kyverno-reports-controller     1/1     1            1           69s
+
+$ kubectl get validatingwebhookconfigurations,mutatingwebhookconfigurations -o name | grep kyverno | sort
+mutatingwebhookconfiguration.admissionregistration.k8s.io/kyverno-policy-mutating-webhook-cfg
+mutatingwebhookconfiguration.admissionregistration.k8s.io/kyverno-resource-mutating-webhook-cfg
+mutatingwebhookconfiguration.admissionregistration.k8s.io/kyverno-verify-mutating-webhook-cfg
+validatingwebhookconfiguration.admissionregistration.k8s.io/kyverno-cel-exception-validating-webhook-cfg
+validatingwebhookconfiguration.admissionregistration.k8s.io/kyverno-exception-validating-webhook-cfg
+validatingwebhookconfiguration.admissionregistration.k8s.io/kyverno-global-context-validating-webhook-cfg
+validatingwebhookconfiguration.admissionregistration.k8s.io/kyverno-policy-validating-webhook-cfg
+validatingwebhookconfiguration.admissionregistration.k8s.io/kyverno-resource-validating-webhook-cfg
+
+control plane restarts: 61 (at the start of this run: 61)
+
+## step F2: Audit before Enforce: a privileged Pod is admitted and reported
+$ kubectl create namespace p05-07-kyverno
+namespace/p05-07-kyverno created
+
+$ kubectl -n p05-07-kyverno get serviceaccount default -o name
+serviceaccount/default
+
+$ kubectl apply -f policy-disallow-privileged.yaml
+Warning: kyverno.io/v1 ClusterPolicy is deprecated and will be removed in a future release; migrate to ValidatingPolicy, MutatingPolicy, GeneratingPolicy or ImageValidatingPolicy (policies.kyverno.io), see https://kyverno.io/docs/guides/migration-to-cel/
+clusterpolicy.kyverno.io/p05-07-disallow-privileged created
+
+$ kubectl wait --for=condition=Ready clusterpolicy/p05-07-disallow-privileged --timeout=120s
+Warning: kyverno.io/v1 ClusterPolicy is deprecated and will be removed in a future release; migrate to ValidatingPolicy, MutatingPolicy, GeneratingPolicy or ImageValidatingPolicy (policies.kyverno.io), see https://kyverno.io/docs/guides/migration-to-cel/
+clusterpolicy.kyverno.io/p05-07-disallow-privileged condition met
+
+$ kubectl apply -f escape-node.yaml
+pod/escape-node created
+
+$ kubectl -n p05-07-kyverno get pod escape-node -o jsonpath='{.metadata.name} admitted, privileged={.spec.containers[0].securityContext.privileged}{"\n"}'
+escape-node admitted, privileged=true
+
+$ kubectl -n p05-07-kyverno get ephemeralreports,policyreports
+NAME                                                                            SOURCE      GROUP   KIND   OWNER         PASS   FAIL   WARN   ERROR   SKIP   AGE
+ephemeralreport.reports.kyverno.io/21451f25-9e6d-4b95-8683-af6d7f759866-nxh7n   admission           Pod    escape-node   0      1      0      0       0      3m8s
+
+$ kubectl -n p05-07-kyverno get policyreports -o jsonpath='{range .items[*].results[*]}{.policy}{" "}{.rule}{" "}{.result}{" "}{.message}{"\n"}{end}'
+
+control plane restarts: 61 (at the start of this run: 61)
+
+## step F3: Enforce: the same rule refuses the next privileged Pod
+$ kubectl patch clusterpolicy p05-07-disallow-privileged --type json -p '[{"op":"replace","path":"/spec/rules/0/validate/failureAction","value":"Enforce"}]'
+Warning: kyverno.io/v1 ClusterPolicy is deprecated and will be removed in a future release; migrate to ValidatingPolicy, MutatingPolicy, GeneratingPolicy or ImageValidatingPolicy (policies.kyverno.io), see https://kyverno.io/docs/guides/migration-to-cel/
+clusterpolicy.kyverno.io/p05-07-disallow-privileged patched
+
+$ kubectl apply -f escape-node-2.yaml; echo "apply exit=$?"
+Error from server: error when creating "escape-node-2.yaml": admission webhook "validate.kyverno.svc-fail" denied the request: 
+
+resource Pod/p05-07-kyverno/escape-node-2 was blocked due to the following policies 
+
+p05-07-disallow-privileged:
+  no-privileged-containers: 'validation error: BK-POL-001: privileged containers are not allowed. rule no-privileged-containers failed at path /spec/containers/0/securityContext/privileged/'
+apply exit=1
+
+$ kubectl apply -f compliant.yaml
+pod/compliant created
+
+$ kubectl -n p05-07-kyverno get pods -o name
+pod/compliant
+pod/escape-node
+
+control plane restarts: 61 (at the start of this run: 61)
+
+## cleanup
+
+--- invocation 5: STEPS="F2 F3 F4" ---
+## mode: full, on the kind cluster LAB_CONTEXT names; Kyverno and Gatekeeper are installed in turn
+## step 0: the tools this run used
+$ kubectl version
+helm version --short
+cosign version | grep GitVersion
+opa version | head -1
+conftest --version | head -1
+terraform version | head -1
+Client Version: v1.37.2
+Kustomize Version: v5.8.1
+Server Version: v1.37.0
+v4.1.4+g05fa379
+GitVersion:    v3.1.4
+Version: 1.22.0
+Conftest: 0.71.1
+Terraform v1.14.8
+
+## step F2: Audit before Enforce: a privileged Pod is admitted and reported
+$ kubectl create namespace p05-07-kyverno
+namespace/p05-07-kyverno created
+
+$ kubectl -n p05-07-kyverno get serviceaccount default -o name
+serviceaccount/default
+
+$ kubectl apply -f policy-disallow-privileged.yaml
+Warning: kyverno.io/v1 ClusterPolicy is deprecated and will be removed in a future release; migrate to ValidatingPolicy, MutatingPolicy, GeneratingPolicy or ImageValidatingPolicy (policies.kyverno.io), see https://kyverno.io/docs/guides/migration-to-cel/
+clusterpolicy.kyverno.io/p05-07-disallow-privileged created
+
+$ kubectl wait --for=condition=Ready clusterpolicy/p05-07-disallow-privileged --timeout=120s
+Warning: kyverno.io/v1 ClusterPolicy is deprecated and will be removed in a future release; migrate to ValidatingPolicy, MutatingPolicy, GeneratingPolicy or ImageValidatingPolicy (policies.kyverno.io), see https://kyverno.io/docs/guides/migration-to-cel/
+clusterpolicy.kyverno.io/p05-07-disallow-privileged condition met
+
+$ kubectl apply -f escape-node.yaml
+pod/escape-node created
+
+$ kubectl -n p05-07-kyverno get pod escape-node -o jsonpath='{.metadata.name} admitted, privileged={.spec.containers[0].securityContext.privileged}{"\n"}'
+escape-node admitted, privileged=true
+
+$ kubectl -n p05-07-kyverno get ephemeralreports,policyreports
+NAME                                                                            SOURCE      GROUP   KIND   OWNER         PASS   FAIL   WARN   ERROR   SKIP   AGE
+ephemeralreport.reports.kyverno.io/816d8cb5-d2df-417b-ae2a-a5ada66c40d0-587vw   admission           Pod    escape-node   0      1      0      0       0      95s
+
+$ kubectl -n p05-07-kyverno get ephemeralreports -o jsonpath='{range .items[*].spec.results[*]}{.policy}{" "}{.rule}{" "}{.result}{" "}{.message}{"\n"}{end}'
+p05-07-disallow-privileged no-privileged-containers fail validation error: BK-POL-001: privileged containers are not allowed. rule no-privileged-containers failed at path /spec/containers/0/securityContext/privileged/
+
+control plane restarts: 61 (at the start of this run: 61)
+
+## step F3: Enforce: the same rule refuses the next privileged Pod
+$ kubectl patch clusterpolicy p05-07-disallow-privileged --type json -p '[{"op":"replace","path":"/spec/rules/0/validate/failureAction","value":"Enforce"}]'
+Warning: kyverno.io/v1 ClusterPolicy is deprecated and will be removed in a future release; migrate to ValidatingPolicy, MutatingPolicy, GeneratingPolicy or ImageValidatingPolicy (policies.kyverno.io), see https://kyverno.io/docs/guides/migration-to-cel/
+clusterpolicy.kyverno.io/p05-07-disallow-privileged patched
+
+$ kubectl apply -f escape-node-2.yaml; echo "apply exit=$?"
+Error from server: error when creating "escape-node-2.yaml": admission webhook "validate.kyverno.svc-fail" denied the request: 
+
+resource Pod/p05-07-kyverno/escape-node-2 was blocked due to the following policies 
+
+p05-07-disallow-privileged:
+  no-privileged-containers: 'validation error: BK-POL-001: privileged containers are not allowed. rule no-privileged-containers failed at path /spec/containers/0/securityContext/privileged/'
+apply exit=1
+
+$ kubectl apply -f compliant.yaml
+pod/compliant created
+
+$ kubectl -n p05-07-kyverno get pods -o name
+pod/compliant
+pod/escape-node
+
+control plane restarts: 61 (at the start of this run: 61)
+
+## step F4: verifyImages: the signature and the workflow identity are checked, not only the digest
+$ kubectl kustomize guide/examples/bookstore/kustomize/overlays/prod | grep -o 'ghcr.io/abd-ulbasit/bookstore-catalog@sha256:[0-9a-f]*' | sort -u
+ghcr.io/abd-ulbasit/bookstore-catalog@sha256:eaa26ada0a2e1575026a5e71e74572ed0bfdde80f50012e91a7be28f0de16ced
+
+$ DOCKER_CONFIG=$(mktemp -d) cosign verify --certificate-identity 'https://github.com/abd-ulbasit/bookstore-kubernetes-guide/.github/workflows/bookstore-pipeline.yml@refs/heads/main' --certificate-oidc-issuer https://token.actions.githubusercontent.com ghcr.io/abd-ulbasit/bookstore-catalog@sha256:eaa26ada0a2e1575026a5e71e74572ed0bfdde80f50012e91a7be28f0de16ced >/dev/null 2>verify.err; echo "cosign verify exit=$?"; grep -E '^(Verification for|  - )' verify.err
+cosign verify exit=0
+Verification for ghcr.io/abd-ulbasit/bookstore-catalog@sha256:eaa26ada0a2e1575026a5e71e74572ed0bfdde80f50012e91a7be28f0de16ced --
+  - The cosign claims were validated
+  - Existence of the claims in the transparency log was verified offline
+  - The code-signing certificate was verified using trusted certificate authority certificates
+
+$ kubectl create namespace p05-07-signed
+namespace/p05-07-signed created
+
+$ kubectl -n p05-07-signed get serviceaccount default -o name
+serviceaccount/default
+
+$ kubectl apply -f policy-verify-signed.yaml
+Warning: kyverno.io/v1 ClusterPolicy is deprecated and will be removed in a future release; migrate to ValidatingPolicy, MutatingPolicy, GeneratingPolicy or ImageValidatingPolicy (policies.kyverno.io), see https://kyverno.io/docs/guides/migration-to-cel/
+clusterpolicy.kyverno.io/p05-07-verify-signed-images created
+
+$ kubectl wait --for=condition=Ready clusterpolicy/p05-07-verify-signed-images --timeout=120s
+Warning: kyverno.io/v1 ClusterPolicy is deprecated and will be removed in a future release; migrate to ValidatingPolicy, MutatingPolicy, GeneratingPolicy or ImageValidatingPolicy (policies.kyverno.io), see https://kyverno.io/docs/guides/migration-to-cel/
+clusterpolicy.kyverno.io/p05-07-verify-signed-images condition met
+
+$ kubectl apply -f catalog-signed.yaml
+Error from server (InternalError): error when creating "catalog-signed.yaml": Internal error occurred: failed calling webhook "mutate.kyverno.svc-fail": failed to call webhook: Post "https://kyverno-svc.kyverno.svc:443/mutate/fail?timeout=30s": context deadline exceeded (Client.Timeout exceeded while awaiting headers)
+
+$ kubectl -n p05-07-signed get pod catalog -o jsonpath='{.metadata.annotations.kyverno\.io/verify-images}{"\n"}'
+Error from server (NotFound): pods "catalog" not found
+
+$ kubectl apply -f unsigned.yaml; echo "apply exit=$?"
+Error from server: error when creating "unsigned.yaml": admission webhook "mutate.kyverno.svc-fail" denied the request: 
+
+resource Pod/p05-07-signed/unsigned was blocked due to the following policies 
+
+p05-07-verify-signed-images:
+  signed-by-the-pipeline: 'failed to verify image docker.io/busybox@sha256:73aaf090f3d85aa34ee199857f03fa3a95c8ede2ffd4cc2cdb5b94e566b11662: .attestors[0].entries[0].keyless: Get "https://index.docker.io/v2/": dial tcp: lookup index.docker.io: i/o timeout'
+apply exit=1
+
+$ kubectl -n p05-07-signed get pods -o name
+
+control plane restarts: 61 (at the start of this run: 61)
+
+## cleanup
+
+--- invocation 6: STEPS="F4a F4" ---
+## mode: full, on the kind cluster LAB_CONTEXT names; Kyverno and Gatekeeper are installed in turn
+## step 0: the tools this run used
+$ kubectl version
+helm version --short
+cosign version | grep GitVersion
+opa version | head -1
+conftest --version | head -1
+terraform version | head -1
+Client Version: v1.37.2
+Kustomize Version: v5.8.1
+Server Version: v1.37.0
+v4.1.4+g05fa379
+GitVersion:    v3.1.4
+Version: 1.22.0
+Conftest: 0.71.1
+Terraform v1.14.8
+
+## step F4a: short DNS names for the admission controller
+$ helm upgrade kyverno kyverno/kyverno --version 3.9.2 --namespace kyverno --reuse-values --set 'admissionController.dnsConfig.options[0].name=ndots' --set 'admissionController.dnsConfig.options[0].value=1' | head -n 4
+level=WARN msg="upgrade failed" name=kyverno error="failed to create typed patch object (kyverno/kyverno-admission-controller; apps/v1, Kind=Deployment): .spec.template.spec.dnsConfig.options[0].value: expected string, got &value.valueUnstructured{Value:1}"
+Error: UPGRADE FAILED: failed to create typed patch object (kyverno/kyverno-admission-controller; apps/v1, Kind=Deployment): .spec.template.spec.dnsConfig.options[0].value: expected string, got &value.valueUnstructured{Value:1}
+
+$ kubectl -n kyverno rollout status deploy/kyverno-admission-controller --timeout=300s
+deployment "kyverno-admission-controller" successfully rolled out
+
+$ kubectl -n kyverno get deploy kyverno-admission-controller -o jsonpath='{.spec.template.spec.dnsConfig}{"\n"}'
+
+
+control plane restarts: 61 (at the start of this run: 61)
+
+## step F4: verifyImages: the signature and the workflow identity are checked, not only the digest
+$ kubectl kustomize guide/examples/bookstore/kustomize/overlays/prod | grep -o 'ghcr.io/abd-ulbasit/bookstore-catalog@sha256:[0-9a-f]*' | sort -u
+ghcr.io/abd-ulbasit/bookstore-catalog@sha256:eaa26ada0a2e1575026a5e71e74572ed0bfdde80f50012e91a7be28f0de16ced
+
+$ DOCKER_CONFIG=$(mktemp -d) cosign verify --certificate-identity 'https://github.com/abd-ulbasit/bookstore-kubernetes-guide/.github/workflows/bookstore-pipeline.yml@refs/heads/main' --certificate-oidc-issuer https://token.actions.githubusercontent.com ghcr.io/abd-ulbasit/bookstore-catalog@sha256:eaa26ada0a2e1575026a5e71e74572ed0bfdde80f50012e91a7be28f0de16ced >/dev/null 2>verify.err; echo "cosign verify exit=$?"; grep -E '^(Verification for|  - )' verify.err
+cosign verify exit=0
+Verification for ghcr.io/abd-ulbasit/bookstore-catalog@sha256:eaa26ada0a2e1575026a5e71e74572ed0bfdde80f50012e91a7be28f0de16ced --
+  - The cosign claims were validated
+  - Existence of the claims in the transparency log was verified offline
+  - The code-signing certificate was verified using trusted certificate authority certificates
+
+$ kubectl create namespace p05-07-signed
+namespace/p05-07-signed created
+
+$ kubectl -n p05-07-signed get serviceaccount default -o name
+serviceaccount/default
+
+$ kubectl apply -f policy-verify-signed.yaml
+Warning: kyverno.io/v1 ClusterPolicy is deprecated and will be removed in a future release; migrate to ValidatingPolicy, MutatingPolicy, GeneratingPolicy or ImageValidatingPolicy (policies.kyverno.io), see https://kyverno.io/docs/guides/migration-to-cel/
+clusterpolicy.kyverno.io/p05-07-verify-signed-images created
+
+$ kubectl wait --for=condition=Ready clusterpolicy/p05-07-verify-signed-images --timeout=120s
+Warning: kyverno.io/v1 ClusterPolicy is deprecated and will be removed in a future release; migrate to ValidatingPolicy, MutatingPolicy, GeneratingPolicy or ImageValidatingPolicy (policies.kyverno.io), see https://kyverno.io/docs/guides/migration-to-cel/
+clusterpolicy.kyverno.io/p05-07-verify-signed-images condition met
+
+$ kubectl apply -f catalog-signed.yaml
+Error from server: error when creating "catalog-signed.yaml": admission webhook "mutate.kyverno.svc-fail" denied the request: 
+
+resource Pod/p05-07-signed/catalog was blocked due to the following policies 
+
+p05-07-verify-signed-images:
+  signed-by-the-pipeline: 'failed to verify image ghcr.io/abd-ulbasit/bookstore-catalog@sha256:eaa26ada0a2e1575026a5e71e74572ed0bfdde80f50012e91a7be28f0de16ced: .attestors[0].entries[0].keyless: no signatures found'
+
+$ kubectl -n p05-07-signed get pod catalog -o jsonpath='{.metadata.annotations.kyverno\.io/verify-images}{"\n"}'
+Error from server (NotFound): pods "catalog" not found
+
+$ kubectl apply -f unsigned.yaml; echo "apply exit=$?"
+Error from server: error when creating "unsigned.yaml": admission webhook "mutate.kyverno.svc-fail" denied the request: 
+
+resource Pod/p05-07-signed/unsigned was blocked due to the following policies 
+
+p05-07-verify-signed-images:
+  signed-by-the-pipeline: 'failed to verify image docker.io/busybox@sha256:73aaf090f3d85aa34ee199857f03fa3a95c8ede2ffd4cc2cdb5b94e566b11662: .attestors[0].entries[0].keyless: Get "https://index.docker.io/v2/": dial tcp: lookup index.docker.io: i/o timeout'
+apply exit=1
+
+$ kubectl -n p05-07-signed get pods -o name
+
+control plane restarts: 61 (at the start of this run: 61)
+
+## cleanup
+
+--- invocation 7: STEPS="F4a F4" ---
+## mode: full, on the kind cluster LAB_CONTEXT names; Kyverno and Gatekeeper are installed in turn
+## step 0: the tools this run used
+$ kubectl version
+helm version --short
+cosign version | grep GitVersion
+opa version | head -1
+conftest --version | head -1
+terraform version | head -1
+Client Version: v1.37.2
+Kustomize Version: v5.8.1
+Server Version: v1.37.0
+v4.1.4+g05fa379
+GitVersion:    v3.1.4
+Version: 1.22.0
+Conftest: 0.71.1
+Terraform v1.14.8
+
+## step F4a: short DNS names for the admission controller
+$ helm upgrade kyverno kyverno/kyverno --version 3.9.2 --namespace kyverno --reuse-values --set-string 'admissionController.dnsConfig.options[0].name=ndots' --set-string 'admissionController.dnsConfig.options[0].value=1' | head -n 4
+level=WARN msg="upgrade failed" name=kyverno error="post-upgrade hooks failed: Delete \"https://127.0.0.1:<api-port>/api/v1/namespaces/kyverno/serviceaccounts/kyverno-migrate-resources\": EOF"
+level=WARN msg="failed to update release" name=kyverno revision=3 error="update: failed to update: Put \"https://127.0.0.1:<api-port>/api/v1/namespaces/kyverno/secrets/sh.helm.release.v1.kyverno.v3\": EOF"
+Error: UPGRADE FAILED: post-upgrade hooks failed: Delete "https://127.0.0.1:<api-port>/api/v1/namespaces/kyverno/serviceaccounts/kyverno-migrate-resources": EOF
+
+$ kubectl -n kyverno rollout status deploy/kyverno-admission-controller --timeout=300s
+Error from server (Forbidden): deployments.apps "kyverno-admission-controller" is forbidden: User "kubernetes-admin" cannot get resource "deployments" in API group "apps" in the namespace "kyverno"
+
+$ kubectl -n kyverno get deploy kyverno-admission-controller -o jsonpath='{.spec.template.spec.dnsConfig}{"\n"}'
+Error from server (Forbidden): deployments.apps "kyverno-admission-controller" is forbidden: User "kubernetes-admin" cannot get resource "deployments" in API group "apps" in the namespace "kyverno"
+
+control plane restarts: 0 (at the start of this run: 61)
+
+## step F4: verifyImages: the signature and the workflow identity are checked, not only the digest
+$ kubectl kustomize guide/examples/bookstore/kustomize/overlays/prod | grep -o 'ghcr.io/abd-ulbasit/bookstore-catalog@sha256:[0-9a-f]*' | sort -u
+ghcr.io/abd-ulbasit/bookstore-catalog@sha256:eaa26ada0a2e1575026a5e71e74572ed0bfdde80f50012e91a7be28f0de16ced
+
+$ DOCKER_CONFIG=$(mktemp -d) cosign verify --certificate-identity 'https://github.com/abd-ulbasit/bookstore-kubernetes-guide/.github/workflows/bookstore-pipeline.yml@refs/heads/main' --certificate-oidc-issuer https://token.actions.githubusercontent.com ghcr.io/abd-ulbasit/bookstore-catalog@sha256:eaa26ada0a2e1575026a5e71e74572ed0bfdde80f50012e91a7be28f0de16ced >/dev/null 2>verify.err; echo "cosign verify exit=$?"; grep -E '^(Verification for|  - )' verify.err
+cosign verify exit=0
+Verification for ghcr.io/abd-ulbasit/bookstore-catalog@sha256:eaa26ada0a2e1575026a5e71e74572ed0bfdde80f50012e91a7be28f0de16ced --
+  - The cosign claims were validated
+  - Existence of the claims in the transparency log was verified offline
+  - The code-signing certificate was verified using trusted certificate authority certificates
+
+$ kubectl create namespace p05-07-signed
+Error from server (Forbidden): namespaces is forbidden: User "kubernetes-admin" cannot create resource "namespaces" in API group "" at the cluster scope
+
+$ kubectl -n p05-07-signed get serviceaccount default -o name
+Error from server (NotFound): namespaces "p05-07-signed" not found
+
+$ kubectl apply -f policy-verify-signed.yaml
+Warning: kyverno.io/v1 ClusterPolicy is deprecated and will be removed in a future release; migrate to ValidatingPolicy, MutatingPolicy, GeneratingPolicy or ImageValidatingPolicy (policies.kyverno.io), see https://kyverno.io/docs/guides/migration-to-cel/
+Error from server (InternalError): error when creating "policy-verify-signed.yaml": Internal error occurred: failed calling webhook "mutate-policy.kyverno.svc": failed to call webhook: Post "https://kyverno-svc.kyverno.svc:443/policymutate?timeout=10s": dial tcp 10.96.22.238:443: connect: connection refused
+
+$ kubectl wait --for=condition=Ready clusterpolicy/p05-07-verify-signed-images --timeout=120s
+Warning: kyverno.io/v1 ClusterPolicy is deprecated and will be removed in a future release; migrate to ValidatingPolicy, MutatingPolicy, GeneratingPolicy or ImageValidatingPolicy (policies.kyverno.io), see https://kyverno.io/docs/guides/migration-to-cel/
+Error from server (NotFound): clusterpolicies.kyverno.io "p05-07-verify-signed-images" not found
+
+$ kubectl apply -f catalog-signed.yaml
+Error from server (NotFound): error when creating "catalog-signed.yaml": namespaces "p05-07-signed" not found
+
+$ kubectl -n p05-07-signed get pod catalog -o jsonpath='{.metadata.annotations.kyverno\.io/verify-images}{"\n"}'
+Error from server (NotFound): namespaces "p05-07-signed" not found
+
+$ kubectl apply -f unsigned.yaml; echo "apply exit=$?"
+Error from server (NotFound): error when creating "unsigned.yaml": namespaces "p05-07-signed" not found
+apply exit=1
+
+$ kubectl -n p05-07-signed get pods -o name
+
+STOP: the control plane restarted (61 to 67)
+## cleanup
+run failed or stopped (exit 3): removing both engines
+nothing of either engine remains
+
+--- invocation 8: STEPS="F1 F2 F3" ---
+## mode: full, on the kind cluster LAB_CONTEXT names; Kyverno and Gatekeeper are installed in turn
+## step 0: the tools this run used
+$ kubectl version
+helm version --short
+cosign version | grep GitVersion
+opa version | head -1
+conftest --version | head -1
+terraform version | head -1
+Client Version: v1.37.2
+Kustomize Version: v5.8.1
+Server Version: v1.37.0
+v4.1.4+g05fa379
+GitVersion:    v3.1.4
+Version: 1.22.0
+Conftest: 0.71.1
+Terraform v1.14.8
+
+## step F1: Kyverno, installed with the chart pinned and the namespace labelled
+$ helm repo add kyverno https://kyverno.github.io/kyverno/ --force-update
+"kyverno" has been added to your repositories
+
+$ helm show chart kyverno/kyverno --version 3.9.2 | grep -E '^(name|version|appVersion|kubeVersion):'
+appVersion: v1.19.2
+kubeVersion: '>=1.25.0-0'
+name: kyverno
+version: 3.9.2
+
+$ kubectl create namespace kyverno
+namespace/kyverno created
+
+$ kubectl label namespace kyverno pod-security.kubernetes.io/enforce=restricted
+namespace/kyverno labeled
+
+$ helm upgrade --install kyverno kyverno/kyverno --version 3.9.2 --namespace kyverno --set admissionController.replicas=1 --set reportsController.replicas=1 --set backgroundController.enabled=false --set cleanupController.enabled=false --set features.generateValidatingAdmissionPolicy.enabled=false --set features.validatingAdmissionPolicyReports.enabled=false --set-string 'admissionController.dnsConfig.options[0].name=ndots' --set-string 'admissionController.dnsConfig.options[0].value=1'
+Release "kyverno" does not exist. Installing it now.
+NAME: kyverno
+LAST DEPLOYED: Sat Oct 31 14:51:27 2026
+NAMESPACE: kyverno
+STATUS: deployed
+REVISION: 1
+DESCRIPTION: Install complete
+NOTES:
+Chart version: 3.9.2
+Kyverno version: v1.19.2
+
+Thank you for installing kyverno! Your release is named kyverno.
+
+The following components have been installed in your cluster:
+- CRDs
+- Admission controller
+- Reports controller
+
+
+⚠️  WARNING: Setting the admission controller replica count below 2 means Kyverno is not running in high availability mode.
+
+
+⚠️  WARNING: PolicyExceptions are disabled by default. To enable them, set '--enablePolicyException' to true.
+⚠️  WARNING: The legacy kyverno.io policy types are deprecated and will be removed in a future release. Migrate to their policies.kyverno.io replacements:
+    - ClusterPolicy / Policy → ValidatingPolicy, MutatingPolicy, GeneratingPolicy, ImageValidatingPolicy (and their namespaced variants)
+    - ClusterCleanupPolicy / CleanupPolicy → DeletingPolicy / NamespacedDeletingPolicy
+    - PolicyException (kyverno.io) → PolicyException (policies.kyverno.io)
+    See https://kyverno.io/docs/guides/migration-to-cel/ for the migration guide.
+
+💡 Note: There is a trade-off when deciding which approach to take regarding Namespace exclusions. Please see the documentation at https://kyverno.io/docs/installation/#security-vs-operability to understand the risks.
+
+STOP: the control plane restarted (69 to 70)
+## cleanup
+run failed or stopped (exit 3): removing both engines
+nothing of either engine remains
+
+--- invocation 9: STEPS="F1 F2 F3" ---
+## mode: full, on the kind cluster LAB_CONTEXT names; Kyverno and Gatekeeper are installed in turn
+## step 0: the tools this run used
+$ kubectl version
+helm version --short
+cosign version | grep GitVersion
+opa version | head -1
+conftest --version | head -1
+terraform version | head -1
+Client Version: v1.37.2
+Kustomize Version: v5.8.1
+Server Version: v1.37.0
+v4.1.4+g05fa379
+GitVersion:    v3.1.4
+Version: 1.22.0
+Conftest: 0.71.1
+Terraform v1.14.8
+
+## step F1: Kyverno, installed with the chart pinned and the namespace labelled
+$ helm repo add kyverno https://kyverno.github.io/kyverno/ --force-update
+"kyverno" has been added to your repositories
+
+$ helm show chart kyverno/kyverno --version 3.9.2 | grep -E '^(name|version|appVersion|kubeVersion):'
+appVersion: v1.19.2
+kubeVersion: '>=1.25.0-0'
+name: kyverno
+version: 3.9.2
+
+$ kubectl create namespace kyverno
+namespace/kyverno created
+
+$ kubectl label namespace kyverno pod-security.kubernetes.io/enforce=restricted
+namespace/kyverno labeled
+
+$ helm upgrade --install kyverno kyverno/kyverno --version 3.9.2 --namespace kyverno --set admissionController.replicas=1 --set reportsController.replicas=1 --set backgroundController.enabled=false --set cleanupController.enabled=false --set features.generateValidatingAdmissionPolicy.enabled=false --set features.validatingAdmissionPolicyReports.enabled=false --set-string 'admissionController.dnsConfig.options[0].name=ndots' --set-string 'admissionController.dnsConfig.options[0].value=1'
+Release "kyverno" does not exist. Installing it now.
+NAME: kyverno
+LAST DEPLOYED: Sat Oct 31 15:08:42 2026
+NAMESPACE: kyverno
+STATUS: deployed
+REVISION: 1
+DESCRIPTION: Install complete
+NOTES:
+Chart version: 3.9.2
+Kyverno version: v1.19.2
+
+Thank you for installing kyverno! Your release is named kyverno.
+
+The following components have been installed in your cluster:
+- CRDs
+- Admission controller
+- Reports controller
+
+
+⚠️  WARNING: Setting the admission controller replica count below 2 means Kyverno is not running in high availability mode.
+
+
+⚠️  WARNING: PolicyExceptions are disabled by default. To enable them, set '--enablePolicyException' to true.
+⚠️  WARNING: The legacy kyverno.io policy types are deprecated and will be removed in a future release. Migrate to their policies.kyverno.io replacements:
+    - ClusterPolicy / Policy → ValidatingPolicy, MutatingPolicy, GeneratingPolicy, ImageValidatingPolicy (and their namespaced variants)
+    - ClusterCleanupPolicy / CleanupPolicy → DeletingPolicy / NamespacedDeletingPolicy
+    - PolicyException (kyverno.io) → PolicyException (policies.kyverno.io)
+    See https://kyverno.io/docs/guides/migration-to-cel/ for the migration guide.
+
+💡 Note: There is a trade-off when deciding which approach to take regarding Namespace exclusions. Please see the documentation at https://kyverno.io/docs/installation/#security-vs-operability to understand the risks.
+
+STOP: the control plane restarted (74 to 75)
+## cleanup
+run failed or stopped (exit 3): removing both engines
+nothing of either engine remains
+
+--- invocation 10: STEPS="F1 F4" ---
+## mode: full, on the kind cluster LAB_CONTEXT names; Kyverno and Gatekeeper are installed in turn
+## step 0: the tools this run used
+$ kubectl version
+helm version --short
+cosign version | grep GitVersion
+opa version | head -1
+conftest --version | head -1
+terraform version | head -1
+Client Version: v1.37.2
+Kustomize Version: v5.8.1
+Server Version: v1.37.0
+v4.1.4+g05fa379
+GitVersion:    v3.1.4
+Version: 1.22.0
+Conftest: 0.71.1
+Terraform v1.14.8
+
+## step F1: Kyverno, installed with the chart pinned and the namespace labelled
+$ helm repo add kyverno https://kyverno.github.io/kyverno/ --force-update
+"kyverno" has been added to your repositories
+
+$ helm show chart kyverno/kyverno --version 3.9.2 | grep -E '^(name|version|appVersion|kubeVersion):'
+appVersion: v1.19.2
+kubeVersion: '>=1.25.0-0'
+name: kyverno
+version: 3.9.2
+
+$ kubectl create namespace kyverno
+namespace/kyverno created
+
+$ kubectl label namespace kyverno pod-security.kubernetes.io/enforce=restricted
+namespace/kyverno labeled
+
+$ helm upgrade --install kyverno kyverno/kyverno --version 3.9.2 --namespace kyverno --set admissionController.replicas=1 --set reportsController.replicas=1 --set backgroundController.enabled=false --set cleanupController.enabled=false --set features.generateValidatingAdmissionPolicy.enabled=false --set features.validatingAdmissionPolicyReports.enabled=false --set-string 'admissionController.dnsConfig.options[0].name=ndots' --set-string 'admissionController.dnsConfig.options[0].value=1'
+Release "kyverno" does not exist. Installing it now.
+NAME: kyverno
+LAST DEPLOYED: Sat Oct 31 15:21:59 2026
+NAMESPACE: kyverno
+STATUS: deployed
+REVISION: 1
+DESCRIPTION: Install complete
+NOTES:
+Chart version: 3.9.2
+Kyverno version: v1.19.2
+
+Thank you for installing kyverno! Your release is named kyverno.
+
+The following components have been installed in your cluster:
+- CRDs
+- Admission controller
+- Reports controller
+
+
+⚠️  WARNING: Setting the admission controller replica count below 2 means Kyverno is not running in high availability mode.
+
+
+⚠️  WARNING: PolicyExceptions are disabled by default. To enable them, set '--enablePolicyException' to true.
+⚠️  WARNING: The legacy kyverno.io policy types are deprecated and will be removed in a future release. Migrate to their policies.kyverno.io replacements:
+    - ClusterPolicy / Policy → ValidatingPolicy, MutatingPolicy, GeneratingPolicy, ImageValidatingPolicy (and their namespaced variants)
+    - ClusterCleanupPolicy / CleanupPolicy → DeletingPolicy / NamespacedDeletingPolicy
+    - PolicyException (kyverno.io) → PolicyException (policies.kyverno.io)
+    See https://kyverno.io/docs/guides/migration-to-cel/ for the migration guide.
+
+💡 Note: There is a trade-off when deciding which approach to take regarding Namespace exclusions. Please see the documentation at https://kyverno.io/docs/installation/#security-vs-operability to understand the risks.
+
+every Deployment in kyverno is available
+
+$ kubectl -n kyverno get deploy
+NAME                           READY   UP-TO-DATE   AVAILABLE   AGE
+kyverno-admission-controller   1/1     1            1           79s
+kyverno-reports-controller     1/1     1            1           79s
+
+$ kubectl get validatingwebhookconfigurations,mutatingwebhookconfigurations -o name | grep kyverno | sort
+mutatingwebhookconfiguration.admissionregistration.k8s.io/kyverno-policy-mutating-webhook-cfg
+mutatingwebhookconfiguration.admissionregistration.k8s.io/kyverno-resource-mutating-webhook-cfg
+mutatingwebhookconfiguration.admissionregistration.k8s.io/kyverno-verify-mutating-webhook-cfg
+validatingwebhookconfiguration.admissionregistration.k8s.io/kyverno-cel-exception-validating-webhook-cfg
+validatingwebhookconfiguration.admissionregistration.k8s.io/kyverno-exception-validating-webhook-cfg
+validatingwebhookconfiguration.admissionregistration.k8s.io/kyverno-global-context-validating-webhook-cfg
+validatingwebhookconfiguration.admissionregistration.k8s.io/kyverno-policy-validating-webhook-cfg
+validatingwebhookconfiguration.admissionregistration.k8s.io/kyverno-resource-validating-webhook-cfg
+
+control plane restarts: 77 (at the start of this run: 77)
+
+## step F4: verifyImages: the signature and the workflow identity are checked, not only the digest
+$ kubectl kustomize guide/examples/bookstore/kustomize/overlays/prod | grep -o 'ghcr.io/abd-ulbasit/bookstore-catalog@sha256:[0-9a-f]*' | sort -u
+ghcr.io/abd-ulbasit/bookstore-catalog@sha256:eaa26ada0a2e1575026a5e71e74572ed0bfdde80f50012e91a7be28f0de16ced
+
+$ DOCKER_CONFIG=$(mktemp -d) cosign verify --certificate-identity 'https://github.com/abd-ulbasit/bookstore-kubernetes-guide/.github/workflows/bookstore-pipeline.yml@refs/heads/main' --certificate-oidc-issuer https://token.actions.githubusercontent.com ghcr.io/abd-ulbasit/bookstore-catalog@sha256:eaa26ada0a2e1575026a5e71e74572ed0bfdde80f50012e91a7be28f0de16ced >/dev/null 2>verify.err; echo "cosign verify exit=$?"; grep -E '^(Verification for|  - )' verify.err
+cosign verify exit=0
+Verification for ghcr.io/abd-ulbasit/bookstore-catalog@sha256:eaa26ada0a2e1575026a5e71e74572ed0bfdde80f50012e91a7be28f0de16ced --
+  - The cosign claims were validated
+  - Existence of the claims in the transparency log was verified offline
+  - The code-signing certificate was verified using trusted certificate authority certificates
+
+$ kubectl create namespace p05-07-signed
+namespace/p05-07-signed created
+
+$ kubectl -n p05-07-signed get serviceaccount default -o name
+serviceaccount/default
+
+$ kubectl apply -f policy-verify-signed.yaml
+Warning: kyverno.io/v1 ClusterPolicy is deprecated and will be removed in a future release; migrate to ValidatingPolicy, MutatingPolicy, GeneratingPolicy or ImageValidatingPolicy (policies.kyverno.io), see https://kyverno.io/docs/guides/migration-to-cel/
+clusterpolicy.kyverno.io/p05-07-verify-signed-images created
+
+$ kubectl wait --for=condition=Ready clusterpolicy/p05-07-verify-signed-images --timeout=120s
+Warning: kyverno.io/v1 ClusterPolicy is deprecated and will be removed in a future release; migrate to ValidatingPolicy, MutatingPolicy, GeneratingPolicy or ImageValidatingPolicy (policies.kyverno.io), see https://kyverno.io/docs/guides/migration-to-cel/
+clusterpolicy.kyverno.io/p05-07-verify-signed-images condition met
+
+$ kubectl apply -f catalog-signed.yaml
+pod/catalog created
+
+$ kubectl -n p05-07-signed get pod catalog -o jsonpath='{.metadata.annotations.kyverno\.io/verify-images}{"\n"}'
+{"ghcr.io/abd-ulbasit/bookstore-catalog@sha256:eaa26ada0a2e1575026a5e71e74572ed0bfdde80f50012e91a7be28f0de16ced":"pass"}
+
+$ kubectl apply -f unsigned.yaml; echo "apply exit=$?"
+Error from server: error when creating "unsigned.yaml": admission webhook "mutate.kyverno.svc-fail" denied the request: 
+
+resource Pod/p05-07-signed/unsigned was blocked due to the following policies 
+
+p05-07-verify-signed-images:
+  signed-by-the-pipeline: 'failed to verify image docker.io/busybox@sha256:73aaf090f3d85aa34ee199857f03fa3a95c8ede2ffd4cc2cdb5b94e566b11662: .attestors[0].entries[0].keyless: failed to fetch bundles: docker.io/busybox@sha256:73aaf090f3d85aa34ee199857f03fa3a95c8ede2ffd4cc2cdb5b94e566b11662: Get "https://index.docker.io/v2/": dial tcp: lookup index.docker.io: i/o timeout'
+apply exit=1
+
+$ kubectl -n p05-07-signed get pods -o name
+pod/catalog
+
+control plane restarts: 77 (at the start of this run: 77)
+
+## cleanup
+
+--- invocation 11: STEPS="F2 F3 F4 F5" ---
+## mode: full, on the kind cluster LAB_CONTEXT names; Kyverno and Gatekeeper are installed in turn
+## step 0: the tools this run used
+$ kubectl version
+helm version --short
+cosign version | grep GitVersion
+opa version | head -1
+conftest --version | head -1
+terraform version | head -1
+Client Version: v1.37.2
+Kustomize Version: v5.8.1
+Server Version: v1.37.0
+v4.1.4+g05fa379
+GitVersion:    v3.1.4
+Version: 1.22.0
+Conftest: 0.71.1
+Terraform v1.14.8
+
+## step F2: Audit before Enforce: a privileged Pod is admitted and reported
+$ kubectl create namespace p05-07-kyverno
+namespace/p05-07-kyverno created
+
+$ kubectl -n p05-07-kyverno get serviceaccount default -o name
+serviceaccount/default
+
+$ kubectl apply -f policy-disallow-privileged.yaml
+Warning: kyverno.io/v1 ClusterPolicy is deprecated and will be removed in a future release; migrate to ValidatingPolicy, MutatingPolicy, GeneratingPolicy or ImageValidatingPolicy (policies.kyverno.io), see https://kyverno.io/docs/guides/migration-to-cel/
+clusterpolicy.kyverno.io/p05-07-disallow-privileged created
+
+$ kubectl wait --for=condition=Ready clusterpolicy/p05-07-disallow-privileged --timeout=120s
+Warning: kyverno.io/v1 ClusterPolicy is deprecated and will be removed in a future release; migrate to ValidatingPolicy, MutatingPolicy, GeneratingPolicy or ImageValidatingPolicy (policies.kyverno.io), see https://kyverno.io/docs/guides/migration-to-cel/
+clusterpolicy.kyverno.io/p05-07-disallow-privileged condition met
+
+$ kubectl apply -f escape-node.yaml
+pod/escape-node created
+
+$ kubectl -n p05-07-kyverno get pod escape-node -o jsonpath='{.metadata.name} admitted, privileged={.spec.containers[0].securityContext.privileged}{"\n"}'
+escape-node admitted, privileged=true
+
+$ kubectl -n p05-07-kyverno get ephemeralreports,policyreports
+NAME                                                                            SOURCE      GROUP   KIND   OWNER         PASS   FAIL   WARN   ERROR   SKIP   AGE
+ephemeralreport.reports.kyverno.io/5bd70a7d-fd29-4bf5-9173-eafd6752cdb8-bxzv9   admission           Pod    escape-node   0      1      0      0       0      95s
+
+$ kubectl -n p05-07-kyverno get ephemeralreports -o jsonpath='{range .items[*].spec.results[*]}{.policy}{" "}{.rule}{" "}{.result}{" "}{.message}{"\n"}{end}'
+p05-07-disallow-privileged no-privileged-containers fail validation error: BK-POL-001: privileged containers are not allowed. rule no-privileged-containers failed at path /spec/containers/0/securityContext/privileged/
+
+control plane restarts: 77 (at the start of this run: 77)
+
+## step F3: Enforce: the same rule refuses the next privileged Pod
+$ kubectl patch clusterpolicy p05-07-disallow-privileged --type json -p '[{"op":"replace","path":"/spec/rules/0/validate/failureAction","value":"Enforce"}]'
+Warning: kyverno.io/v1 ClusterPolicy is deprecated and will be removed in a future release; migrate to ValidatingPolicy, MutatingPolicy, GeneratingPolicy or ImageValidatingPolicy (policies.kyverno.io), see https://kyverno.io/docs/guides/migration-to-cel/
+clusterpolicy.kyverno.io/p05-07-disallow-privileged patched
+
+$ kubectl apply -f escape-node-2.yaml; echo "apply exit=$?"
+Error from server: error when creating "escape-node-2.yaml": admission webhook "validate.kyverno.svc-fail" denied the request: 
+
+resource Pod/p05-07-kyverno/escape-node-2 was blocked due to the following policies 
+
+p05-07-disallow-privileged:
+  no-privileged-containers: 'validation error: BK-POL-001: privileged containers are not allowed. rule no-privileged-containers failed at path /spec/containers/0/securityContext/privileged/'
+apply exit=1
+
+$ kubectl apply -f compliant.yaml
+pod/compliant created
+
+$ kubectl -n p05-07-kyverno get pods -o name
+pod/compliant
+pod/escape-node
+
+control plane restarts: 77 (at the start of this run: 77)
+
+## step F4: verifyImages: the signature and the workflow identity are checked, not only the digest
+$ kubectl kustomize guide/examples/bookstore/kustomize/overlays/prod | grep -o 'ghcr.io/abd-ulbasit/bookstore-catalog@sha256:[0-9a-f]*' | sort -u
+ghcr.io/abd-ulbasit/bookstore-catalog@sha256:eaa26ada0a2e1575026a5e71e74572ed0bfdde80f50012e91a7be28f0de16ced
+
+$ DOCKER_CONFIG=$(mktemp -d) cosign verify --certificate-identity 'https://github.com/abd-ulbasit/bookstore-kubernetes-guide/.github/workflows/bookstore-pipeline.yml@refs/heads/main' --certificate-oidc-issuer https://token.actions.githubusercontent.com ghcr.io/abd-ulbasit/bookstore-catalog@sha256:eaa26ada0a2e1575026a5e71e74572ed0bfdde80f50012e91a7be28f0de16ced >/dev/null 2>verify.err; echo "cosign verify exit=$?"; grep -E '^(Verification for|  - )' verify.err
+cosign verify exit=0
+Verification for ghcr.io/abd-ulbasit/bookstore-catalog@sha256:eaa26ada0a2e1575026a5e71e74572ed0bfdde80f50012e91a7be28f0de16ced --
+  - The cosign claims were validated
+  - Existence of the claims in the transparency log was verified offline
+  - The code-signing certificate was verified using trusted certificate authority certificates
+
+$ kubectl create namespace p05-07-signed
+namespace/p05-07-signed created
+
+$ kubectl -n p05-07-signed get serviceaccount default -o name
+serviceaccount/default
+
+$ kubectl apply -f policy-verify-signed.yaml
+Warning: kyverno.io/v1 ClusterPolicy is deprecated and will be removed in a future release; migrate to ValidatingPolicy, MutatingPolicy, GeneratingPolicy or ImageValidatingPolicy (policies.kyverno.io), see https://kyverno.io/docs/guides/migration-to-cel/
+clusterpolicy.kyverno.io/p05-07-verify-signed-images created
+
+$ kubectl wait --for=condition=Ready clusterpolicy/p05-07-verify-signed-images --timeout=120s
+Warning: kyverno.io/v1 ClusterPolicy is deprecated and will be removed in a future release; migrate to ValidatingPolicy, MutatingPolicy, GeneratingPolicy or ImageValidatingPolicy (policies.kyverno.io), see https://kyverno.io/docs/guides/migration-to-cel/
+clusterpolicy.kyverno.io/p05-07-verify-signed-images condition met
+
+$ kubectl apply -f catalog-signed.yaml
+pod/catalog created
+
+$ kubectl -n p05-07-signed get pod catalog -o jsonpath='{.metadata.annotations.kyverno\.io/verify-images}{"\n"}'
+{"ghcr.io/abd-ulbasit/bookstore-catalog@sha256:eaa26ada0a2e1575026a5e71e74572ed0bfdde80f50012e91a7be28f0de16ced":"pass"}
+
+$ kubectl -n kyverno get pod -l app.kubernetes.io/component=admission-controller -o jsonpath='{.items[0].status.initContainerStatuses[0].imageID}{"\n"}'
+reg.kyverno.io/kyverno/kyvernopre@sha256:27f3cc52e628559b56d08363b85316819802086c9808606914f7805a244148f4
+
+$ DOCKER_CONFIG=$(mktemp -d) cosign verify --certificate-identity-regexp '.*' --certificate-oidc-issuer-regexp '.*' reg.kyverno.io/kyverno/kyvernopre@sha256:27f3cc52e628559b56d08363b85316819802086c9808606914f7805a244148f4 >/dev/null 2>verify-unsigned.err; echo "cosign verify exit=$?"; head -n 1 verify-unsigned.err
+cosign verify exit=10
+Error: no signatures found
+
+$ kubectl apply -f unsigned.yaml; echo "apply exit=$?"
+Error from server: error when creating "unsigned.yaml": admission webhook "mutate.kyverno.svc-fail" denied the request: 
+
+resource Pod/p05-07-signed/unsigned was blocked due to the following policies 
+
+p05-07-verify-signed-images:
+  signed-by-the-pipeline: 'failed to verify image reg.kyverno.io/kyverno/kyvernopre@sha256:27f3cc52e628559b56d08363b85316819802086c9808606914f7805a244148f4: .attestors[0].entries[0].keyless: sigstore bundle verification failed: no matching signatures found'
+apply exit=1
+
+$ kubectl -n p05-07-signed get pods -o name
+pod/catalog
+
+control plane restarts: 77 (at the start of this run: 77)
+
+## step F5: remove Kyverno, its CRDs and its webhook configurations
+$ kubectl delete clusterpolicy p05-07-disallow-privileged p05-07-verify-signed-images
+Warning: kyverno.io/v1 ClusterPolicy is deprecated and will be removed in a future release; migrate to ValidatingPolicy, MutatingPolicy, GeneratingPolicy or ImageValidatingPolicy (policies.kyverno.io), see https://kyverno.io/docs/guides/migration-to-cel/
+clusterpolicy.kyverno.io "p05-07-disallow-privileged" deleted
+clusterpolicy.kyverno.io "p05-07-verify-signed-images" deleted
+
+$ kubectl delete namespace p05-07-signed --wait=true
+namespace "p05-07-signed" deleted
+
+$ helm uninstall kyverno --namespace kyverno --wait
+Error: resource Job/kyverno/kyverno-scale-to-zero not ready. status: InProgress, message: Job in progress
+context deadline exceeded
+
+$ kubectl get validatingwebhookconfigurations,mutatingwebhookconfigurations -o name | grep -i kyverno
+validatingwebhookconfiguration.admissionregistration.k8s.io/kyverno-cel-exception-validating-webhook-cfg
+validatingwebhookconfiguration.admissionregistration.k8s.io/kyverno-exception-validating-webhook-cfg
+validatingwebhookconfiguration.admissionregistration.k8s.io/kyverno-global-context-validating-webhook-cfg
+validatingwebhookconfiguration.admissionregistration.k8s.io/kyverno-policy-validating-webhook-cfg
+validatingwebhookconfiguration.admissionregistration.k8s.io/kyverno-resource-validating-webhook-cfg
+mutatingwebhookconfiguration.admissionregistration.k8s.io/kyverno-policy-mutating-webhook-cfg
+mutatingwebhookconfiguration.admissionregistration.k8s.io/kyverno-resource-mutating-webhook-cfg
+mutatingwebhookconfiguration.admissionregistration.k8s.io/kyverno-verify-mutating-webhook-cfg
+
+$ kubectl get validatingwebhookconfigurations,mutatingwebhookconfigurations -o name | grep -i kyverno | xargs kubectl delete --ignore-not-found
+validatingwebhookconfiguration.admissionregistration.k8s.io "kyverno-cel-exception-validating-webhook-cfg" deleted
+validatingwebhookconfiguration.admissionregistration.k8s.io "kyverno-exception-validating-webhook-cfg" deleted
+validatingwebhookconfiguration.admissionregistration.k8s.io "kyverno-global-context-validating-webhook-cfg" deleted
+validatingwebhookconfiguration.admissionregistration.k8s.io "kyverno-policy-validating-webhook-cfg" deleted
+validatingwebhookconfiguration.admissionregistration.k8s.io "kyverno-resource-validating-webhook-cfg" deleted
+mutatingwebhookconfiguration.admissionregistration.k8s.io "kyverno-policy-mutating-webhook-cfg" deleted
+mutatingwebhookconfiguration.admissionregistration.k8s.io "kyverno-resource-mutating-webhook-cfg" deleted
+mutatingwebhookconfiguration.admissionregistration.k8s.io "kyverno-verify-mutating-webhook-cfg" deleted
+
+$ kubectl get crd -o name | grep -E 'kyverno\.io|wgpolicyk8s\.io' | xargs kubectl delete --wait=true
+customresourcedefinition.apiextensions.k8s.io "cleanuppolicies.kyverno.io" deleted
+customresourcedefinition.apiextensions.k8s.io "clustercleanuppolicies.kyverno.io" deleted
+customresourcedefinition.apiextensions.k8s.io "clusterephemeralreports.reports.kyverno.io" deleted
+customresourcedefinition.apiextensions.k8s.io "clusterpolicies.kyverno.io" deleted
+customresourcedefinition.apiextensions.k8s.io "clusterpolicyreports.wgpolicyk8s.io" deleted
+customresourcedefinition.apiextensions.k8s.io "deletingpolicies.policies.kyverno.io" deleted
+customresourcedefinition.apiextensions.k8s.io "ephemeralreports.reports.kyverno.io" deleted
+customresourcedefinition.apiextensions.k8s.io "generatingpolicies.policies.kyverno.io" deleted
+customresourcedefinition.apiextensions.k8s.io "globalcontextentries.kyverno.io" deleted
+customresourcedefinition.apiextensions.k8s.io "imagevalidatingpolicies.policies.kyverno.io" deleted
+customresourcedefinition.apiextensions.k8s.io "mutatingpolicies.policies.kyverno.io" deleted
+customresourcedefinition.apiextensions.k8s.io "namespaceddeletingpolicies.policies.kyverno.io" deleted
+customresourcedefinition.apiextensions.k8s.io "namespacedgeneratingpolicies.policies.kyverno.io" deleted
+customresourcedefinition.apiextensions.k8s.io "namespacedimagevalidatingpolicies.policies.kyverno.io" deleted
+customresourcedefinition.apiextensions.k8s.io "namespacedmutatingpolicies.policies.kyverno.io" deleted
+customresourcedefinition.apiextensions.k8s.io "namespacedvalidatingpolicies.policies.kyverno.io" deleted
+customresourcedefinition.apiextensions.k8s.io "policies.kyverno.io" deleted
+customresourcedefinition.apiextensions.k8s.io "policyexceptions.kyverno.io" deleted
+customresourcedefinition.apiextensions.k8s.io "policyexceptions.policies.kyverno.io" deleted
+customresourcedefinition.apiextensions.k8s.io "policyreports.wgpolicyk8s.io" deleted
+customresourcedefinition.apiextensions.k8s.io "updaterequests.kyverno.io" deleted
+customresourcedefinition.apiextensions.k8s.io "validatingpolicies.policies.kyverno.io" deleted
+
+$ kubectl delete namespace kyverno --wait=true
+namespace "kyverno" deleted
+
+$ kubectl get crd -o name | grep -cE 'kyverno\.io|wgpolicyk8s\.io'
+0
+
+$ kubectl get validatingwebhookconfigurations,mutatingwebhookconfigurations -o name | grep -ci kyverno
+8
+
+control plane restarts: 77 (at the start of this run: 77)
+
+## cleanup
+
+--- invocation 12: STEPS="F6 F7" ---
+## mode: full, on the kind cluster LAB_CONTEXT names; Kyverno and Gatekeeper are installed in turn
+## step 0: the tools this run used
+$ kubectl version
+helm version --short
+cosign version | grep GitVersion
+opa version | head -1
+conftest --version | head -1
+terraform version | head -1
+Client Version: v1.37.2
+Kustomize Version: v5.8.1
+Server Version: v1.37.0
+v4.1.4+g05fa379
+GitVersion:    v3.1.4
+Version: 1.22.0
+Conftest: 0.71.1
+Terraform v1.14.8
+
+## step F6: Gatekeeper, installed with the chart pinned and the namespace labelled
+$ kubectl -n p05-07-kyverno get pod escape-node -o name
+pod/escape-node
+
+$ helm repo add gatekeeper https://open-policy-agent.github.io/gatekeeper/charts --force-update
+"gatekeeper" has been added to your repositories
+
+$ helm show chart gatekeeper/gatekeeper --version 3.23.1 | grep -E '^(name|version|appVersion|kubeVersion):'
+appVersion: v3.23.1
+name: gatekeeper
+version: 3.23.1
+
+$ kubectl create namespace gatekeeper-system
+namespace/gatekeeper-system created
+
+$ kubectl label namespace gatekeeper-system pod-security.kubernetes.io/enforce=restricted
+namespace/gatekeeper-system labeled
+
+$ helm upgrade --install gatekeeper gatekeeper/gatekeeper --version 3.23.1 --namespace gatekeeper-system --set replicas=1
+Release "gatekeeper" does not exist. Installing it now.
+NAME: gatekeeper
+LAST DEPLOYED: Sat Oct 31 15:40:55 2026
+NAMESPACE: gatekeeper-system
+STATUS: deployed
+REVISION: 1
+DESCRIPTION: Install complete
+TEST SUITE: None
+
+every Deployment in gatekeeper-system is available
+
+$ kubectl -n gatekeeper-system get deploy
+NAME                            READY   UP-TO-DATE   AVAILABLE   AGE
+gatekeeper-audit                1/1     1            1           2m30s
+gatekeeper-controller-manager   1/1     1            1           2m30s
+
+$ kubectl get validatingwebhookconfigurations,mutatingwebhookconfigurations -o name | grep gatekeeper | sort
+mutatingwebhookconfiguration.admissionregistration.k8s.io/gatekeeper-mutating-webhook-configuration
+validatingwebhookconfiguration.admissionregistration.k8s.io/gatekeeper-validating-webhook-configuration
+
+control plane restarts: 81 (at the start of this run: 81)
+
+## step F7: the same rule in Rego: dryrun reports the Pod, deny refuses the next one
+$ kubectl apply -f gatekeeper-template.yaml
+constrainttemplate.templates.gatekeeper.sh/p05noprivileged created
+
+$ kubectl wait --for=condition=Established crd/p05noprivileged.constraints.gatekeeper.sh --timeout=120s
+customresourcedefinition.apiextensions.k8s.io/p05noprivileged.constraints.gatekeeper.sh condition met
+
+$ kubectl apply -f gatekeeper-constraint.yaml
+p05noprivileged.constraints.gatekeeper.sh/p05-no-privileged created
+
+## waiting for the Gatekeeper audit to list the Pod that Kyverno admitted in Audit
+$ kubectl get p05noprivileged p05-no-privileged -o jsonpath='{.spec.enforcementAction}{" "}{.status.totalViolations}{"\n"}'
+dryrun 1
+
+$ kubectl get p05noprivileged p05-no-privileged -o jsonpath='{.status.violations[0].message}{"\n"}'
+BK-POL-001 container app runs privileged
+
+$ kubectl apply -f escape-node-2.yaml
+pod/escape-node-2 created
+
+$ kubectl delete pod escape-node-2 -n p05-07-kyverno --wait=true
+pod "escape-node-2" deleted from p05-07-kyverno namespace
+
+$ kubectl patch p05noprivileged p05-no-privileged --type merge -p '{"spec":{"enforcementAction":"deny"}}'
+p05noprivileged.constraints.gatekeeper.sh/p05-no-privileged patched
+
+$ kubectl apply -f escape-node-2.yaml; echo "apply exit=$?"
+Error from server (Forbidden): error when creating "escape-node-2.yaml": admission webhook "validation.gatekeeper.sh" denied the request: [p05-no-privileged] BK-POL-001 container app runs privileged
+apply exit=1
+
+$ kubectl apply -f compliant-2.yaml
+pod/compliant-2 created
+
+$ kubectl -n p05-07-kyverno get pods -o name
+pod/compliant
+pod/compliant-2
+pod/escape-node
+
+control plane restarts: 81 (at the start of this run: 81)
+
+## cleanup
+
+--- invocation 13: STEPS="F8" ---
+## mode: full, on the kind cluster LAB_CONTEXT names; Kyverno and Gatekeeper are installed in turn
+## step 0: the tools this run used
+$ kubectl version
+helm version --short
+cosign version | grep GitVersion
+opa version | head -1
+conftest --version | head -1
+terraform version | head -1
+Client Version: v1.37.2
+Kustomize Version: v5.8.1
+Server Version: v1.37.0
+v4.1.4+g05fa379
+GitVersion:    v3.1.4
+Version: 1.22.0
+Conftest: 0.71.1
+Terraform v1.14.8
+
+## step F8: remove Gatekeeper, its CRDs and its webhook configurations, then the lab namespaces
+$ kubectl delete p05noprivileged p05-no-privileged
+p05noprivileged.constraints.gatekeeper.sh "p05-no-privileged" deleted
+
+$ kubectl delete constrainttemplate p05noprivileged
+constrainttemplate.templates.gatekeeper.sh "p05noprivileged" deleted
+
+$ helm uninstall gatekeeper --namespace gatekeeper-system --wait --timeout 4m
+release "gatekeeper" uninstalled
+
+$ kubectl delete namespace gatekeeper-system --wait=true
+namespace "gatekeeper-system" deleted
+
+$ kubectl get validatingwebhookconfigurations,mutatingwebhookconfigurations -o name | grep -iE 'gatekeeper' | xargs kubectl delete --ignore-not-found
+
+$ kubectl get crd -o name | grep -E 'gatekeeper\.sh' | xargs kubectl delete --wait=true
+customresourcedefinition.apiextensions.k8s.io "assign.mutations.gatekeeper.sh" deleted
+customresourcedefinition.apiextensions.k8s.io "assignimage.mutations.gatekeeper.sh" deleted
+customresourcedefinition.apiextensions.k8s.io "assignmetadata.mutations.gatekeeper.sh" deleted
+customresourcedefinition.apiextensions.k8s.io "configpodstatuses.status.gatekeeper.sh" deleted
+customresourcedefinition.apiextensions.k8s.io "configs.config.gatekeeper.sh" deleted
+customresourcedefinition.apiextensions.k8s.io "connectionpodstatuses.status.gatekeeper.sh" deleted
+customresourcedefinition.apiextensions.k8s.io "connections.connection.gatekeeper.sh" deleted
+customresourcedefinition.apiextensions.k8s.io "constraintpodstatuses.status.gatekeeper.sh" deleted
+customresourcedefinition.apiextensions.k8s.io "constrainttemplatepodstatuses.status.gatekeeper.sh" deleted
+customresourcedefinition.apiextensions.k8s.io "constrainttemplates.templates.gatekeeper.sh" deleted
+customresourcedefinition.apiextensions.k8s.io "expansiontemplate.expansion.gatekeeper.sh" deleted
+customresourcedefinition.apiextensions.k8s.io "expansiontemplatepodstatuses.status.gatekeeper.sh" deleted
+customresourcedefinition.apiextensions.k8s.io "modifyset.mutations.gatekeeper.sh" deleted
+customresourcedefinition.apiextensions.k8s.io "mutatorpodstatuses.status.gatekeeper.sh" deleted
+customresourcedefinition.apiextensions.k8s.io "providerpodstatuses.status.gatekeeper.sh" deleted
+customresourcedefinition.apiextensions.k8s.io "providers.externaldata.gatekeeper.sh" deleted
+customresourcedefinition.apiextensions.k8s.io "syncsets.syncset.gatekeeper.sh" deleted
+
+$ kubectl get clusterrole,clusterrolebinding -o name | grep -iE 'gatekeeper' | xargs kubectl delete --ignore-not-found
+
+$ kubectl delete namespace p05-07-kyverno --wait=true
+namespace "p05-07-kyverno" deleted
+
+## nothing of either engine remains
+$ kubectl get crd -o name | grep -cE 'kyverno\.io|wgpolicyk8s\.io|gatekeeper\.sh'
+0
+
+$ kubectl get validatingwebhookconfigurations,mutatingwebhookconfigurations -o name | grep -ciE 'kyverno|gatekeeper'
+0
+
+$ kubectl get clusterrole,clusterrolebinding -o name | grep -ciE 'kyverno|gatekeeper'
+0
+
+$ kubectl get namespace -o name | grep -cE 'namespace/(kyverno|gatekeeper-system|p05-07-)'
+0
+
+control plane restarts: 81 (at the start of this run: 81)
+
+## cleanup
+
+--- invocation 14: STEPS="F1 F4" ---
+## mode: full, on the kind cluster LAB_CONTEXT names; Kyverno and Gatekeeper are installed in turn
+## step 0: the tools this run used
+$ kubectl version
+helm version --short
+cosign version | grep GitVersion
+opa version | head -1
+conftest --version | head -1
+terraform version | head -1
+Client Version: v1.37.2
+Kustomize Version: v5.8.1
+Server Version: v1.37.0
+v4.1.4+g05fa379
+GitVersion:    v3.1.4
+Version: 1.22.0
+Conftest: 0.71.1
+Terraform v1.14.8
+
+## step F1: Kyverno, installed with the chart pinned and the namespace labelled
+$ helm repo add kyverno https://kyverno.github.io/kyverno/ --force-update
+"kyverno" has been added to your repositories
+
+$ helm show chart kyverno/kyverno --version 3.9.2 | grep -E '^(name|version|appVersion|kubeVersion):'
+appVersion: v1.19.2
+kubeVersion: '>=1.25.0-0'
+name: kyverno
+version: 3.9.2
+
+$ kubectl create namespace kyverno
+namespace/kyverno created
+
+$ kubectl label namespace kyverno pod-security.kubernetes.io/enforce=restricted
+namespace/kyverno labeled
+
+$ helm upgrade --install kyverno kyverno/kyverno --version 3.9.2 --namespace kyverno --set admissionController.replicas=1 --set reportsController.replicas=1 --set backgroundController.enabled=false --set cleanupController.enabled=false --set features.generateValidatingAdmissionPolicy.enabled=false --set features.validatingAdmissionPolicyReports.enabled=false --set-string 'admissionController.dnsConfig.options[0].name=ndots' --set-string 'admissionController.dnsConfig.options[0].value=1'
+Release "kyverno" does not exist. Installing it now.
+NAME: kyverno
+LAST DEPLOYED: Sat Oct 31 15:48:05 2026
+NAMESPACE: kyverno
+STATUS: deployed
+REVISION: 1
+DESCRIPTION: Install complete
+NOTES:
+Chart version: 3.9.2
+Kyverno version: v1.19.2
+
+Thank you for installing kyverno! Your release is named kyverno.
+
+The following components have been installed in your cluster:
+- CRDs
+- Admission controller
+- Reports controller
+
+
+⚠️  WARNING: Setting the admission controller replica count below 2 means Kyverno is not running in high availability mode.
+
+
+⚠️  WARNING: PolicyExceptions are disabled by default. To enable them, set '--enablePolicyException' to true.
+⚠️  WARNING: The legacy kyverno.io policy types are deprecated and will be removed in a future release. Migrate to their policies.kyverno.io replacements:
+    - ClusterPolicy / Policy → ValidatingPolicy, MutatingPolicy, GeneratingPolicy, ImageValidatingPolicy (and their namespaced variants)
+    - ClusterCleanupPolicy / CleanupPolicy → DeletingPolicy / NamespacedDeletingPolicy
+    - PolicyException (kyverno.io) → PolicyException (policies.kyverno.io)
+    See https://kyverno.io/docs/guides/migration-to-cel/ for the migration guide.
+
+💡 Note: There is a trade-off when deciding which approach to take regarding Namespace exclusions. Please see the documentation at https://kyverno.io/docs/installation/#security-vs-operability to understand the risks.
+
+every Deployment in kyverno is available
+
+$ kubectl -n kyverno get deploy
+NAME                           READY   UP-TO-DATE   AVAILABLE   AGE
+kyverno-admission-controller   1/1     1            1           4m
+kyverno-reports-controller     1/1     1            1           4m
+
+$ kubectl get validatingwebhookconfigurations,mutatingwebhookconfigurations -o name | grep kyverno | sort
+mutatingwebhookconfiguration.admissionregistration.k8s.io/kyverno-policy-mutating-webhook-cfg
+mutatingwebhookconfiguration.admissionregistration.k8s.io/kyverno-resource-mutating-webhook-cfg
+mutatingwebhookconfiguration.admissionregistration.k8s.io/kyverno-verify-mutating-webhook-cfg
+validatingwebhookconfiguration.admissionregistration.k8s.io/kyverno-cel-exception-validating-webhook-cfg
+validatingwebhookconfiguration.admissionregistration.k8s.io/kyverno-exception-validating-webhook-cfg
+validatingwebhookconfiguration.admissionregistration.k8s.io/kyverno-global-context-validating-webhook-cfg
+validatingwebhookconfiguration.admissionregistration.k8s.io/kyverno-policy-validating-webhook-cfg
+validatingwebhookconfiguration.admissionregistration.k8s.io/kyverno-resource-validating-webhook-cfg
+
+control plane restarts: 81 (at the start of this run: 81)
+
+## step F4: verifyImages: the signature and the workflow identity are checked, not only the digest
+$ kubectl kustomize guide/examples/bookstore/kustomize/overlays/prod | grep -o 'ghcr.io/abd-ulbasit/bookstore-catalog@sha256:[0-9a-f]*' | sort -u
+ghcr.io/abd-ulbasit/bookstore-catalog@sha256:eaa26ada0a2e1575026a5e71e74572ed0bfdde80f50012e91a7be28f0de16ced
+
+$ DOCKER_CONFIG=$(mktemp -d) cosign verify --certificate-identity 'https://github.com/abd-ulbasit/bookstore-kubernetes-guide/.github/workflows/bookstore-pipeline.yml@refs/heads/main' --certificate-oidc-issuer https://token.actions.githubusercontent.com ghcr.io/abd-ulbasit/bookstore-catalog@sha256:eaa26ada0a2e1575026a5e71e74572ed0bfdde80f50012e91a7be28f0de16ced >/dev/null 2>verify.err; echo "cosign verify exit=$?"; grep -E '^(Verification for|  - )' verify.err
+cosign verify exit=0
+Verification for ghcr.io/abd-ulbasit/bookstore-catalog@sha256:eaa26ada0a2e1575026a5e71e74572ed0bfdde80f50012e91a7be28f0de16ced --
+  - The cosign claims were validated
+  - Existence of the claims in the transparency log was verified offline
+  - The code-signing certificate was verified using trusted certificate authority certificates
+
+$ kubectl create namespace p05-07-signed
+namespace/p05-07-signed created
+
+$ kubectl -n p05-07-signed get serviceaccount default -o name
+serviceaccount/default
+
+$ kubectl apply -f policy-verify-signed.yaml
+Warning: kyverno.io/v1 ClusterPolicy is deprecated and will be removed in a future release; migrate to ValidatingPolicy, MutatingPolicy, GeneratingPolicy or ImageValidatingPolicy (policies.kyverno.io), see https://kyverno.io/docs/guides/migration-to-cel/
+clusterpolicy.kyverno.io/p05-07-verify-signed-images created
+
+$ kubectl wait --for=condition=Ready clusterpolicy/p05-07-verify-signed-images --timeout=120s
+Warning: kyverno.io/v1 ClusterPolicy is deprecated and will be removed in a future release; migrate to ValidatingPolicy, MutatingPolicy, GeneratingPolicy or ImageValidatingPolicy (policies.kyverno.io), see https://kyverno.io/docs/guides/migration-to-cel/
+clusterpolicy.kyverno.io/p05-07-verify-signed-images condition met
+
+$ kubectl apply -f catalog-signed.yaml
+pod/catalog created
+
+$ kubectl -n p05-07-signed get pod catalog -o jsonpath='{.metadata.annotations.kyverno\.io/verify-images}{"\n"}'
+{"ghcr.io/abd-ulbasit/bookstore-catalog@sha256:eaa26ada0a2e1575026a5e71e74572ed0bfdde80f50012e91a7be28f0de16ced":"pass"}
+
+$ kubectl -n kyverno get pod -l app.kubernetes.io/component=admission-controller -o jsonpath='{.items[0].status.initContainerStatuses[0].imageID}{"\n"}'
+reg.kyverno.io/kyverno/kyvernopre@sha256:27f3cc52e628559b56d08363b85316819802086c9808606914f7805a244148f4
+
+$ DOCKER_CONFIG=$(mktemp -d) cosign verify --certificate-identity-regexp '.*' --certificate-oidc-issuer-regexp '.*' reg.kyverno.io/kyverno/kyvernopre@sha256:27f3cc52e628559b56d08363b85316819802086c9808606914f7805a244148f4 >/dev/null 2>verify-unsigned.err; echo "cosign verify exit=$?"; head -n 1 verify-unsigned.err
+cosign verify exit=10
+Error: no signatures found
+
+$ kubectl apply -f unsigned.yaml; echo "apply exit=$?"
+Error from server: error when creating "unsigned.yaml": admission webhook "mutate.kyverno.svc-fail" denied the request: 
+
+resource Pod/p05-07-signed/unsigned was blocked due to the following policies 
+
+p05-07-verify-signed-images:
+  signed-by-the-pipeline: 'failed to verify image reg.kyverno.io/kyverno/kyvernopre@sha256:27f3cc52e628559b56d08363b85316819802086c9808606914f7805a244148f4: .attestors[0].entries[0].keyless: sigstore bundle verification failed: no matching signatures found'
+apply exit=1
+
+$ kubectl -n p05-07-signed get pods -o name
+pod/catalog
+
+control plane restarts: 81 (at the start of this run: 81)
+
+## cleanup
+
+--- invocation 15: STEPS="F5" ---
+## mode: full, on the kind cluster LAB_CONTEXT names; Kyverno and Gatekeeper are installed in turn
+## step 0: the tools this run used
+$ kubectl version
+helm version --short
+cosign version | grep GitVersion
+opa version | head -1
+conftest --version | head -1
+terraform version | head -1
+Client Version: v1.37.2
+Kustomize Version: v5.8.1
+Server Version: v1.37.0
+v4.1.4+g05fa379
+GitVersion:    v3.1.4
+Version: 1.22.0
+Conftest: 0.71.1
+Terraform v1.14.8
+
+## step F5: remove Kyverno, its CRDs and its webhook configurations
+$ kubectl delete clusterpolicy p05-07-disallow-privileged p05-07-verify-signed-images --ignore-not-found
+Warning: kyverno.io/v1 ClusterPolicy is deprecated and will be removed in a future release; migrate to ValidatingPolicy, MutatingPolicy, GeneratingPolicy or ImageValidatingPolicy (policies.kyverno.io), see https://kyverno.io/docs/guides/migration-to-cel/
+clusterpolicy.kyverno.io "p05-07-verify-signed-images" deleted
+
+$ kubectl delete namespace p05-07-signed --ignore-not-found --wait=true
+namespace "p05-07-signed" deleted
+
+$ helm uninstall kyverno --namespace kyverno --wait --timeout 4m
+Error: warning: Hook pre-delete kyverno/templates/hooks/pre-delete-scale-to-zero.yaml failed: etcdserver: request timed out
+
+$ kubectl delete namespace kyverno --wait=true
+Error from server (Timeout): Timeout: request did not complete within requested timeout - context deadline exceeded
+
+$ kubectl get validatingwebhookconfigurations,mutatingwebhookconfigurations -o name | grep -iE 'kyverno' | xargs kubectl delete --ignore-not-found
+Unable to connect to the server: EOF
+E1031 15:55:08.107030    6333 memcache.go:381] "Couldn't get current server API group list" err="Get \"https://127.0.0.1:<api-port>/api?timeout=32s\": EOF"
+E1031 15:55:18.367075    6333 memcache.go:381] "Couldn't get current server API group list" err="Get \"https://127.0.0.1:<api-port>/api?timeout=32s\": EOF"
+E1031 15:55:29.018923    6333 memcache.go:381] "Couldn't get current server API group list" err="Get \"https://127.0.0.1:<api-port>/api?timeout=32s\": EOF"
+E1031 15:55:39.663384    6333 memcache.go:381] "Couldn't get current server API group list" err="Get \"https://127.0.0.1:<api-port>/api?timeout=32s\": EOF"
+E1031 15:55:50.313794    6333 memcache.go:381] "Couldn't get current server API group list" err="Get \"https://127.0.0.1:<api-port>/api?timeout=32s\": EOF"
+Unable to connect to the server: EOF
+
+$ kubectl get crd -o name | grep -E 'kyverno\.io|wgpolicyk8s\.io' | xargs kubectl delete --wait=true
+Error from server (Forbidden): customresourcedefinitions.apiextensions.k8s.io is forbidden: User "kubernetes-admin" cannot list resource "customresourcedefinitions" in API group "apiextensions.k8s.io" at the cluster scope
+
+$ kubectl get clusterrole,clusterrolebinding -o name | grep -iE 'kyverno' | xargs kubectl delete --ignore-not-found
+Error from server (Forbidden): clusterroles.rbac.authorization.k8s.io is forbidden: User "kubernetes-admin" cannot list resource "clusterroles" in API group "rbac.authorization.k8s.io" at the cluster scope
+Error from server (Forbidden): clusterrolebindings.rbac.authorization.k8s.io is forbidden: User "kubernetes-admin" cannot list resource "clusterrolebindings" in API group "rbac.authorization.k8s.io" at the cluster scope
+
+## nothing of Kyverno remains
+$ kubectl get crd -o name | grep -cE 'kyverno\.io|wgpolicyk8s\.io'
+Error from server (Forbidden): customresourcedefinitions.apiextensions.k8s.io is forbidden: User "kubernetes-admin" cannot list resource "customresourcedefinitions" in API group "apiextensions.k8s.io" at the cluster scope
+0
+
+$ kubectl get validatingwebhookconfigurations,mutatingwebhookconfigurations -o name | grep -ci kyverno
+Error from server (Forbidden): validatingwebhookconfigurations.admissionregistration.k8s.io is forbidden: User "kubernetes-admin" cannot list resource "validatingwebhookconfigurations" in API group "admissionregistration.k8s.io" at the cluster scope
+Error from server (Forbidden): mutatingwebhookconfigurations.admissionregistration.k8s.io is forbidden: User "kubernetes-admin" cannot list resource "mutatingwebhookconfigurations" in API group "admissionregistration.k8s.io" at the cluster scope
+0
+
+$ kubectl get clusterrole,clusterrolebinding -o name | grep -ci kyverno
+Error from server (Forbidden): clusterroles.rbac.authorization.k8s.io is forbidden: User "kubernetes-admin" cannot list resource "clusterroles" in API group "rbac.authorization.k8s.io" at the cluster scope
+Error from server (Forbidden): clusterrolebindings.rbac.authorization.k8s.io is forbidden: User "kubernetes-admin" cannot list resource "clusterrolebindings" in API group "rbac.authorization.k8s.io" at the cluster scope
+0
+
+$ kubectl get namespace -o name | grep -c 'namespace/kyverno$'
+Error from server (Forbidden): namespaces is forbidden: User "kubernetes-admin" cannot list resource "namespaces" in API group "" at the cluster scope
+0
+
+control plane restarts: 0 (at the start of this run: 81)
+
+## cleanup
+
+--- invocation 16: STEPS="F1 F4" ---
+## mode: full, on the kind cluster LAB_CONTEXT names; Kyverno and Gatekeeper are installed in turn
+## step 0: the tools this run used
+$ kubectl version
+helm version --short
+cosign version | grep GitVersion
+opa version | head -1
+conftest --version | head -1
+terraform version | head -1
+Client Version: v1.37.2
+Kustomize Version: v5.8.1
+Server Version: v1.37.0
+v4.1.4+g05fa379
+GitVersion:    v3.1.4
+Version: 1.22.0
+Conftest: 0.71.1
+Terraform v1.14.8
+
+## step F1: Kyverno, installed with the chart pinned and the namespace labelled
+$ helm repo add kyverno https://kyverno.github.io/kyverno/ --force-update
+"kyverno" has been added to your repositories
+
+$ helm show chart kyverno/kyverno --version 3.9.2 | grep -E '^(name|version|appVersion|kubeVersion):'
+appVersion: v1.19.2
+kubeVersion: '>=1.25.0-0'
+name: kyverno
+version: 3.9.2
+
+$ kubectl create namespace kyverno
+namespace/kyverno created
+
+$ kubectl label namespace kyverno pod-security.kubernetes.io/enforce=restricted
+namespace/kyverno labeled
+
+$ helm upgrade --install kyverno kyverno/kyverno --version 3.9.2 --namespace kyverno --set admissionController.replicas=1 --set reportsController.replicas=1 --set backgroundController.enabled=false --set cleanupController.enabled=false --set features.generateValidatingAdmissionPolicy.enabled=false --set features.validatingAdmissionPolicyReports.enabled=false --set-string 'admissionController.dnsConfig.options[0].name=ndots' --set-string 'admissionController.dnsConfig.options[0].value=1'
+Release "kyverno" does not exist. Installing it now.
+NAME: kyverno
+LAST DEPLOYED: Sat Oct 31 15:58:42 2026
+NAMESPACE: kyverno
+STATUS: deployed
+REVISION: 1
+DESCRIPTION: Install complete
+NOTES:
+Chart version: 3.9.2
+Kyverno version: v1.19.2
+
+Thank you for installing kyverno! Your release is named kyverno.
+
+The following components have been installed in your cluster:
+- CRDs
+- Admission controller
+- Reports controller
+
+
+⚠️  WARNING: Setting the admission controller replica count below 2 means Kyverno is not running in high availability mode.
+
+
+⚠️  WARNING: PolicyExceptions are disabled by default. To enable them, set '--enablePolicyException' to true.
+⚠️  WARNING: The legacy kyverno.io policy types are deprecated and will be removed in a future release. Migrate to their policies.kyverno.io replacements:
+    - ClusterPolicy / Policy → ValidatingPolicy, MutatingPolicy, GeneratingPolicy, ImageValidatingPolicy (and their namespaced variants)
+    - ClusterCleanupPolicy / CleanupPolicy → DeletingPolicy / NamespacedDeletingPolicy
+    - PolicyException (kyverno.io) → PolicyException (policies.kyverno.io)
+    See https://kyverno.io/docs/guides/migration-to-cel/ for the migration guide.
+
+💡 Note: There is a trade-off when deciding which approach to take regarding Namespace exclusions. Please see the documentation at https://kyverno.io/docs/installation/#security-vs-operability to understand the risks.
+
+STOP: the control plane restarted (84 to 86)
+## cleanup
+run failed or stopped (exit 3): removing both engines
+nothing of either engine remains
 
