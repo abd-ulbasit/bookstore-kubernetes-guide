@@ -24,8 +24,8 @@
 
 The bookstore-platform tree at
 [`../examples/bookstore-platform/terraform/`](../examples/bookstore-platform/terraform/)
-ships an opt-in supply-chain stack: ECR scanning is on by default
-(basic mode, free), and the
+ships an opt-in supply-chain stack. It creates no ECR repositories and no
+ECR scan settings, so ECR scanning stays off until Step 1 turns it on. The
 [`kyverno-image-signing.tf`](../examples/bookstore-platform/terraform/kyverno-image-signing.tf)
 resource installs Kyverno + a `verifyImages` ClusterPolicy when
 `var.enable_image_signing = true`. The policy ships in **Audit mode**
@@ -148,14 +148,14 @@ is a manifest list pointing at per-arch manifests. cosign signs
 - `cosign sign --recursive <IMAGE>:<TAG>` signs the manifest list
   **and** each per-arch entry's digest.
 
-Kyverno's verification has to match. The bookstore tree's policy
-verifies on the digest the cluster actually pulls — which is the
-per-arch entry's digest, **not** the manifest list digest. So you
-either sign with `--recursive` (one cosign command, signs everything)
-or configure `verifyImages` to verify the manifest list digest
-(more brittle). `--recursive` is the right discipline. 07.03 builds
-one platform, so its plain `cosign sign` covers the only digest it
-pushes; the ECR build in step 3 builds two, so it signs recursively.
+Kyverno checks the digest the Pod names, and admission runs before the
+scheduler picks a node. A Pod that pins the manifest list digest is
+therefore checked against the signature on that digest, and the node's
+architecture plays no part in the admission check. `--recursive` is
+defense in depth: each platform entry also carries a signature, so a
+tool that verifies one platform entry finds one too. 07.03 builds one
+platform, so its plain `cosign sign` covers the only digest it pushes;
+the ECR build in step 3 builds two, so it signs recursively.
 
 **SLSA framework levels — what each means, what most teams reach.**
 
@@ -376,10 +376,12 @@ opens an incident ticket within minutes.
 ### 3. Sign and attest in CI
 
 Run the signing job after the build, once the image is in ECR. Its
-shape matches the sign job in [07.03](../07-delivery/03-cicd-pipeline.md),
-with three ECR-specific differences: it logs in to ECR, it builds two
-platforms (so it signs recursively), and it names the ECR repository.
-The job takes only `id-token: write` for the signature. The
+shape follows the sign job in [07.03](../07-delivery/03-cicd-pipeline.md).
+It differs in three ways: it logs in to ECR, it builds two platforms (so
+it signs recursively), and it names the ECR repository. 07.03 runs Syft in
+its own job and passes the SBOM on as an artifact. This job installs Syft
+in place with a pinned action, at the version 07.03's scanner runs. The
+job takes only `id-token: write` for the signature. The
 `attestations: write` permission is for the provenance statement.
 
 ```yaml
@@ -399,7 +401,7 @@ jobs:
           role-to-assume: arn:aws:iam::<ACCOUNT-ID>:role/<GHA-OIDC-ROLE>
           aws-region: <REGION>
       - id: ecr
-        uses: aws-actions/amazon-ecr-login@v2
+        uses: aws-actions/amazon-ecr-login@03f1aad4c6c7ffd436567f42f9384779290529bd # v2
       - id: build
         uses: docker/build-push-action@c3c9e263c25d99ce0380d002d59b67737d91b0dc # v7.4.0
         with:
@@ -407,11 +409,14 @@ jobs:
           push: true
           tags: ${{ steps.ecr.outputs.registry }}/bookstore-catalog:${{ github.sha }}
       - uses: sigstore/cosign-installer@6f9f17788090df1f26f669e9d70d6ae9567deba6 # v4.1.2
+      - uses: anchore/sbom-action/download-syft@66cbf4bc1f1c0d2edc94016e65bc221b6bb0ad6c # v0.24.3
+        with:
+          syft-version: v1.55.0
       - name: SBOM, sign the digest, attest the SBOM
         env:
           REF: ${{ steps.ecr.outputs.registry }}/bookstore-catalog@${{ steps.build.outputs.digest }}
         run: |
-          # The syft that 07.03's sbom job runs. Install it the same way.
+          # syft comes from the download-syft step above.
           syft "$REF" -o cyclonedx-json > sbom.cdx.json
           cosign sign --yes --recursive "$REF"   # every per-arch entry
           cosign attest --yes --type cyclonedx --predicate sbom.cdx.json "$REF"
@@ -495,7 +500,11 @@ terraform apply
 This installs Kyverno (chart 3.3.4, which runs Kyverno 1.13.2) and the
 `require-signed-images` ClusterPolicy in **Audit mode**. The failure
 action sits on the `verifyImages` entry, because the spec-level
-`validationFailureAction` field is deprecated in Kyverno 1.13. Verify:
+`validationFailureAction` field is deprecated in Kyverno 1.13. While the
+action is Audit, the same entry sets `mutateDigest` to false: Kyverno 1.13
+rejects `mutateDigest: true` with an Audit failure action, and the policy
+create fails. The Terraform sets `mutateDigest` to true only when the
+variable is `Enforce`, so Step 7 turns it on together with Enforce. Verify:
 
 ```bash
 kubectl get clusterpolicy require-signed-images \
@@ -543,6 +552,9 @@ image_signing_validation_failure_action = "Enforce"
 terraform apply
 ```
 
+The same apply sets `mutateDigest` to true on the entry, so admitted Pods
+pin the verified digest.
+
 Do not patch the live ClusterPolicy. The next apply would revert the
 patch, and a JSON merge patch on `spec.rules` replaces the whole
 array rather than one field. From this point on, any Pod whose image
@@ -582,8 +594,22 @@ cosign verify-attestation \
 
 This step fails on purpose. The Pod below meets the baseline, and its
 only problem is that no signature from the pipeline identity covers
-its image. It uses the guide's locally built catalog image, which CI
-never signed.
+its image. The image is the locally built catalog image, pushed to your
+ECR under a tag that CI never signs. The policy's `imageReferences` cover
+your ECR registry, so Kyverno evaluates this image. An image from a public
+registry, or one that only exists in a local cluster, is outside the
+policy's scope (see the production notes).
+
+Push the image under the demo tag first:
+
+```bash
+docker tag bookstore/catalog:dev \
+  <ACCOUNT-ID>.dkr.ecr.<REGION>.amazonaws.com/bookstore-catalog:unsigned-demo
+aws ecr get-login-password --region <REGION> \
+  | docker login --username AWS --password-stdin \
+    <ACCOUNT-ID>.dkr.ecr.<REGION>.amazonaws.com
+docker push <ACCOUNT-ID>.dkr.ecr.<REGION>.amazonaws.com/bookstore-catalog:unsigned-demo
+```
 
 ```yaml
 apiVersion: v1
@@ -601,7 +627,7 @@ spec:
       type: RuntimeDefault
   containers:
     - name: app
-      image: bookstore/catalog:dev   # built locally; never signed by CI
+      image: <ACCOUNT-ID>.dkr.ecr.<REGION>.amazonaws.com/bookstore-catalog:unsigned-demo   # never signed by CI
       imagePullPolicy: IfNotPresent
       securityContext:
         allowPrivilegeEscalation: false
@@ -628,8 +654,9 @@ kubectl -n bookstore get policyreport
 ```
 
 In Audit mode the Pod is admitted, and a PolicyReport records the
-failure. In Enforce mode the admission webhook refuses it. Illustrative
-message (not captured from a run):
+failure after a short delay. In Enforce mode the admission webhook refuses
+the Pod, so no Pod is created. Illustrative message (not captured from a
+run):
 
 ```text
 Error from server: admission webhook "validate.kyverno.svc-fail" denied the
@@ -731,10 +758,11 @@ by `myorg/api:v1.2.3` after a registry compromise gets you whatever
 the attacker pointed the tag at. **Pulling by digest**
 (`myorg/api:v1.2.3@sha256:abc...`) gets you exactly the bytes whose
 hash is `abc...` — content-addressed, cryptographically anchored.
-The Kyverno policy's `mutateDigest: true` rewrites tag references
-to digest references at admission time; once admitted, the Pod's
-image reference is a digest, and the kubelet pulls that exact
-content.
+With Enforce, the Kyverno policy's `mutateDigest: true` rewrites tag
+references to digest references at admission time; once admitted, the
+Pod's image reference is a digest, and the kubelet pulls that exact
+content. In Audit, `mutateDigest` is false and the reference is left
+as written (Step 5).
 
 ## Production notes
 
@@ -793,16 +821,18 @@ content.
 > offline-verification setup, which Sigstore docs cover at
 > <https://docs.sigstore.dev/cosign/system_config/airgapped/>.
 
-> **In production:** Public-image policy. Pods running public-image
-> dependencies (Postgres, Redis, Kafka — every helm chart's images)
-> are **not** signed by your CI. The Kyverno policy's `exclude`
-> list (kube-system, kyverno, falco, velero, argocd, bookstore-
-> platform-system) covers the platform layer; for application
-> workloads pulling public images, either (a) mirror to your ECR
-> + re-sign, or (b) add the source namespace to `exclude`, or
-> (c) use a separate Kyverno rule that allow-lists specific public
-> registries (`docker.io/library/*`, `quay.io/cncf/*`). Pattern
-> (a) is the right answer for high-assurance; (b/c) for
+> **In production:** Public-image scope. This policy's
+> `imageReferences` cover only your ECR registry, so Kyverno never
+> evaluates a Pod whose image comes from a public registry. Postgres,
+> Redis, Kafka and the images in other charts are not signed by your
+> CI, and this policy neither checks nor refuses them. The `exclude`
+> list only keeps the platform namespaces out of the ECR check. Give
+> public images their own decision: (a) mirror each image to your ECR
+> and sign the mirror in CI, which brings it under this policy; (b) add
+> a second `verifyImages` entry for the public registry, keyed to the
+> publisher's signing identity where the publisher signs its images; or
+> (c) leave them out of scope and say so in the threat model. Pattern (a)
+> is the right answer for high-assurance; (c) is the honest choice for
 > teaching environments.
 
 ## Quick Reference
@@ -876,7 +906,7 @@ spec:
                     issuer: "https://token.actions.githubusercontent.com"
                     # Exact signer: workflow file + ref. Not a regex.
                     subject: "https://github.com/<ORG>/<REPO>/.github/workflows/bookstore-pipeline.yml@refs/heads/main"
-          mutateDigest: true
+          mutateDigest: false                  # true only with Enforce (Kyverno 1.13)
           required: true
           verifyDigest: true
 ```
@@ -920,17 +950,17 @@ eight are yes):
 
    </details>
 
-3. **A team flips Kyverno's `verifyImages` ClusterPolicy to Enforce on a Friday afternoon. By Monday morning, half the cluster's pods are `ImagePullBackOff` with admission errors. What was missed?**
+3. **A team flips Kyverno's `verifyImages` ClusterPolicy to Enforce on a Friday afternoon. By Monday morning, Deployments in an ECR-backed namespace have no running Pods, and their ReplicaSets report admission errors. What was missed?**
    <details><summary>Show answer</summary>
 
-   The 2-4 week Audit observation window. Audit mode logs would have surfaced the long tail of unsigned images: third-party Helm charts (the LB Controller, Karpenter, metrics-server) pulling public images with no cosign signature, AWS-shipped addon images, ECR Public images for cluster-system workloads. Production-ready supply chain has an explicit **exception list** in the policy for these (typically by image-registry-prefix match), and the team has triaged the Audit findings into "fix the signing" vs "add to exception" before flipping to Enforce. Friday-afternoon Enforce flips without that triage cycle are the canonical incident the chapter warns about.
+   The 2-4 week Audit observation window. The PolicyReports would have listed every ECR image without a signature from the pipeline identity: images pushed before CI signed, and images pushed by hand. Enforce rejects those Pods at creation, so the controllers report `FailedCreate` admission errors rather than `ImagePullBackOff`. The team should have triaged each Audit finding into "fix the signing" or "narrow the scope" before flipping. Note what the policy does not do: its `imageReferences` cover only the ECR registry, so public-registry images in Helm charts are never checked, and an Enforce flip does not refuse them.
 
    </details>
 
-4. **Hands-on extension — build a multi-arch image with `docker buildx --platform linux/amd64,linux/arm64`, then sign only with `cosign sign <image>` (no `--recursive`). Pull on an arm64 node with Kyverno verifyImages enforcing.**
+4. **Hands-on extension: build a multi-arch image with `docker buildx --platform linux/amd64,linux/arm64`, sign only the manifest list with `cosign sign <image>@sha256:<LIST-DIGEST>` (no `--recursive`), then create a Pod that pins that list digest and run it with the policy in Enforce.**
    <details><summary>What you should see (expected, not run)</summary>
 
-   The pull on the arm64 node fails admission because cosign signed only the top-level manifest list, not the per-architecture entries. Kyverno's `verifyImages` walks to the platform-specific image entry that's actually being pulled and looks for a signature on *that*; finding none, it rejects. The fix: `cosign sign --recursive <image>` signs every per-architecture entry in the manifest list. The Graviton chapter's discipline reaches in here: multi-arch + signing requires `--recursive` or you build a cluster that runs fine on x86 and rejects every arm64 pull silently.
+   The Pod is admitted, and it can start on an arm64 or an amd64 node. Admission checks the digest the Pod names, and it runs before the scheduler picks a node, so the node's architecture is not part of the check. The signature on the list digest verifies. The per-architecture signatures from `cosign sign --recursive` are defense in depth: they matter to a tool that verifies one platform entry, and this admission check does not need them. Whether a Pod that pins a per-architecture digest is checked against that entry's own signature is worth testing on your Kyverno version before you rely on it.
 
    </details>
 
