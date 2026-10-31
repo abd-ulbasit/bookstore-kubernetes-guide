@@ -7,7 +7,9 @@
 # Usage:
 #   ./bootstrap-state.sh <BUCKET-NAME> [REGION] [KMS-KEY-ARN]
 #
-# Idempotent: re-running on an existing bucket is a no-op (verifies settings).
+# Idempotent: re-running with the same arguments verifies and re-applies the
+# settings. Omitting the KMS key ARN on a bucket that uses SSE-KMS switches
+# its default back to SSE-S3.
 #
 # What it creates:
 #   - S3 bucket with versioning enabled (state history)
@@ -21,7 +23,7 @@
 #
 # What it does NOT create:
 #   - DynamoDB lock table — not needed with use_lockfile = true (GA from
-#     Terraform 1.11, experimental in 1.10)
+#     Terraform 1.11, introduced in 1.10)
 #   - The KMS key itself. Create it separately and pass its ARN.
 #
 # Why SSE-KMS matters for STATE specifically: with SSE-S3, anyone with
