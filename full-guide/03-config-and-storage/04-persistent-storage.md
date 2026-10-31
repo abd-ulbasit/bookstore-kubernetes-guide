@@ -8,7 +8,7 @@
 > volume.
 
 **Estimated time:** ~30 min read · ~60 min hands-on
-**Prerequisites:** [Part 03 ch.03](03-volumes.md) — Pod-lifetime volume basics · [Part 01 ch.05](../01-core-workloads/05-statefulsets.md) — StatefulSets use `volumeClaimTemplates` · [Part 01 ch.01](../01-core-workloads/01-pods.md#baseline) — the baseline this chapter reuses
+**Prerequisites:** [Part 03 ch.03](03-volumes.md): Pod-lifetime volume basics · [Part 01 ch.05](../01-core-workloads/05-statefulsets.md): StatefulSets use `volumeClaimTemplates` · [Part 01 ch.01](../01-core-workloads/01-pods.md#baseline): the baseline this chapter reuses
 **You'll know after this:** • trace the PV/PVC bind lifecycle and explain `WaitForFirstConsumer` · • choose access modes and a reclaim policy for data you cannot lose · • say who may create a PersistentVolume, and why that is a security decision · • show a non-root Pod writing to a volume, and say what `fsGroup` did and did not do here · • list what a `Retain` volume leaves behind after its claim is deleted
 
 <!-- tags: storage, persistent-storage, pv-pvc, storageclass, csi, reclaim-policy, fsgroup -->
@@ -71,7 +71,8 @@ node. The threats below belong to storage, not to the Pod.
 |---|---|---|
 | A tenant creates a PV that names a directory on a node, then claims it | [No `create` on PersistentVolumes](#refusal): a namespaced Role grants claims only | [03.03](03-volumes.md) for `hostPath`; [05.01](../05-security/01-authn-authz-rbac.md) for RBAC |
 | A deleted claim leaves its data on a `Retain` volume, where the next claimant or an operator can read it | [A reclaim policy chosen per data class](#reclaim), and a runbooked cleanup | [08.02](../08-day-2-operations/02-backup-and-dr.md) for backup |
-| Data on a cloud disk is readable by whoever obtains the disk | [An encrypted StorageClass](#encryption), set on the driver. Cited, not run here | Encryption at rest and KMS: 05.04 <!-- link-later: 05.04 --> |
+| Data on a cloud disk is readable by whoever obtains the disk | [An encrypted StorageClass](#encryption), set on the driver. Cited, not run here | Etcd encryption, a separate control: 05.04 <!-- link-later: 05.04 --> |
+| A tenant that can create or patch a StorageClass chooses the provisioner, the parameters and the reclaim policy for every claim, or changes the default class | [No `create` or `patch` on storageclasses](#refusal), checked with `can-i` in step 3 | [05.01](../05-security/01-authn-authz-rbac.md) for RBAC |
 | A non-root process cannot write its volume, so the fix becomes running as root | [`fsGroup` with a non-root UID](#fsgroup), with the volume's owner and mode checked from inside the Pod | [01.01](../01-core-workloads/01-pods.md#baseline-fsgroup) |
 
 Pod Security admission does not catch the first threat. The `restricted` level
@@ -226,8 +227,12 @@ DirectoryOrCreate
 The default class is `Delete` and `WaitForFirstConsumer`. The PV is a
 `hostPath` of type `DirectoryOrCreate`: a directory on the node that the
 provisioner makes for the claim. Under `Delete`, the disk goes when its claim
-goes. That is the default you must change for data of
-record. Step 4 shows what `Retain` does instead.
+goes. The Bookstore's Postgres claim takes this class, because
+`20-postgres-statefulset.yaml` names no `storageClassName`, and the
+`bookstore-local` class in `17-` is `Delete` too. So on this cluster a deleted
+claim takes the database's data with it. The rest of this chapter warns against
+that for data of record. Step 4 shows what `Retain` does instead, and the Quick
+Reference gives the field to set on the class that holds the database.
 
 ### 2. Non-root against a real volume, with fsGroup {#fsgroup}
 
@@ -252,12 +257,15 @@ while the next probe runs.
 
 `fsGroup` adds a GID to the processes' supplementary groups and asks the
 kubelet to set the group owner of the volume's contents to that GID. The
-upstream description is that "by default, Kubernetes recursively changes
-ownership and permissions of a volume's contents to match the Pod's `fsGroup`"
+upstream text reads "By default, Kubernetes recursively changes ownership and
+permissions for the contents of each volume to match the fsGroup specified in a
+Pod's securityContext when that volume is mounted"
 ([Configure a Security Context](https://kubernetes.io/docs/tasks/configure-pod-container/security-context/)).
 A probe shows what happens on this cluster. It is a baseline Pod that mounts a
-claim from the `bookstore-local` class in [`17-storageclass.yaml`](../examples/bookstore/raw-manifests/17-storageclass.yaml),
-which uses `Delete`. The busybox image has no user 10001, so `id` prints only numbers.
+claim from the `bookstore-local` class in
+[`17-storageclass.yaml`](../examples/bookstore/raw-manifests/17-storageclass.yaml),
+which uses `Delete`. The busybox image has no user 10001, so `id` prints only
+numbers.
 
 ```sh
 kubectl apply -f - <<'EOF'
@@ -297,7 +305,7 @@ spec:
       type: RuntimeDefault
   containers:
     - name: probe
-      image: busybox@sha256:73aaf090f3d85aa34ee199857f03fa3a95c8ede2ffd4cc2cdb5b94e566b11662  # busybox:1.36.1
+      image: busybox@sha256:73aaf090f3d85aa34ee199857f03fa3a95c8ede2ffd4cc2cdb5b94e566b11662  # busybox:1.36
       command: ["sleep", "3600"]
       securityContext:
         allowPrivilegeEscalation: false
@@ -320,7 +328,8 @@ spec:
       persistentVolumeClaim:
         claimName: probe-data
     - name: tmp
-      emptyDir: {}
+      emptyDir:
+        sizeLimit: 16Mi
 EOF
 kubectl wait --for=condition=Ready pod/fsgroup-probe -n bookstore --timeout=600s
 kubectl exec -n bookstore fsgroup-probe -- \
@@ -370,7 +379,7 @@ spec:
       type: RuntimeDefault
   containers:
     - name: probe
-      image: busybox@sha256:73aaf090f3d85aa34ee199857f03fa3a95c8ede2ffd4cc2cdb5b94e566b11662  # busybox:1.36.1
+      image: busybox@sha256:73aaf090f3d85aa34ee199857f03fa3a95c8ede2ffd4cc2cdb5b94e566b11662  # busybox:1.36
       command: ["sleep", "3600"]
       securityContext:
         allowPrivilegeEscalation: false
@@ -393,7 +402,8 @@ spec:
       persistentVolumeClaim:
         claimName: probe-data
     - name: tmp
-      emptyDir: {}
+      emptyDir:
+        sizeLimit: 16Mi
 EOF
 kubectl wait --for=condition=Ready pod/plain-probe -n bookstore --timeout=600s
 kubectl exec -n bookstore plain-probe -- sh -c 'id; touch /data/plain.txt; ls -ln /data'
@@ -479,16 +489,22 @@ EOF
 kubectl auth can-i create persistentvolumeclaims -n bookstore --as=system:serviceaccount:bookstore:storage-tenant
 kubectl auth can-i create persistentvolumes --as=system:serviceaccount:bookstore:storage-tenant
 kubectl auth can-i get storageclasses --as=system:serviceaccount:bookstore:storage-tenant
+kubectl auth can-i create storageclasses --as=system:serviceaccount:bookstore:storage-tenant
+kubectl auth can-i patch storageclasses --as=system:serviceaccount:bookstore:storage-tenant
 ```
 
 <!-- gate: output -->
 ```text
 yes
-# ...
 Warning: resource 'persistentvolumes' is not namespace scoped
 
 no
-# ...
+Warning: resource 'storageclasses' is not namespace scoped in group 'storage.k8s.io'
+
+no
+Warning: resource 'storageclasses' is not namespace scoped in group 'storage.k8s.io'
+
+no
 Warning: resource 'storageclasses' is not namespace scoped in group 'storage.k8s.io'
 
 no
@@ -525,7 +541,22 @@ Error from server (Forbidden): error when creating "STDIN": persistentvolumes is
 The control is the Role. It has no verb on `persistentvolumes`, and the
 ClusterRole that could grant one is not bound to this tenant. The tenant can
 still claim storage in its own namespace, and that is the right amount of
-access for a workload that needs a disk.
+access for a workload that needs a disk, with the clone caveat below.
+
+The `storageclasses` lines matter as much as the PV line. A tenant that can
+create or patch a StorageClass picks the provisioner, `reclaimPolicy` and
+`parameters` for every claim, or changes which class is the default. `get`
+alone does not show that, so both `create` and `patch` must answer `no`.
+
+Create on PVCs is also a clone path. A claim whose `dataSource` names another
+PVC copies that claim, and the source must be in the same namespace
+([PVC data sources](https://kubernetes.io/docs/concepts/storage/volume-pvc-datasource/)).
+This Role is bound in `bookstore`, where `data-postgres-0` holds the database.
+On a driver that supports cloning, this tenant could copy the database's
+volume. The steps bind it there only because `bookstore` is the chapter's one
+namespace. For a real tenant, bind the Role in a namespace that holds no
+database data. Create on PVCs in the database's namespace belongs to the restore
+runbook identity, not to a workload ([ch.05](05-stateful-data-patterns.md)).
 
 ### 4. Reclaim: Retain keeps the disk, and nothing scrubs it {#reclaim}
 
@@ -575,7 +606,7 @@ spec:
       type: RuntimeDefault
   containers:
     - name: writer
-      image: busybox@sha256:73aaf090f3d85aa34ee199857f03fa3a95c8ede2ffd4cc2cdb5b94e566b11662  # busybox:1.36.1
+      image: busybox@sha256:73aaf090f3d85aa34ee199857f03fa3a95c8ede2ffd4cc2cdb5b94e566b11662  # busybox:1.36
       command: ["sleep", "3600"]
       securityContext:
         allowPrivilegeEscalation: false
@@ -598,7 +629,8 @@ spec:
       persistentVolumeClaim:
         claimName: retain-demo
     - name: tmp
-      emptyDir: {}
+      emptyDir:
+        sizeLimit: 16Mi
 EOF
 kubectl wait --for=condition=Ready pod/retain-writer -n bookstore --timeout=600s
 kubectl exec -n bookstore retain-writer -- sh -c 'echo "order 1042 shipped" > /data/note.txt && cat /data/note.txt'
@@ -676,7 +708,7 @@ spec:
       type: RuntimeDefault
   containers:
     - name: reader
-      image: busybox@sha256:73aaf090f3d85aa34ee199857f03fa3a95c8ede2ffd4cc2cdb5b94e566b11662  # busybox:1.36.1
+      image: busybox@sha256:73aaf090f3d85aa34ee199857f03fa3a95c8ede2ffd4cc2cdb5b94e566b11662  # busybox:1.36
       command: ["sleep", "3600"]
       securityContext:
         allowPrivilegeEscalation: false
@@ -699,7 +731,8 @@ spec:
       persistentVolumeClaim:
         claimName: retain-reader
     - name: tmp
-      emptyDir: {}
+      emptyDir:
+        sizeLimit: 16Mi
 EOF
 kubectl wait --for=condition=Ready pod/retain-reader-pod -n bookstore --timeout=600s
 kubectl exec -n bookstore retain-reader-pod -- cat /data/note.txt
@@ -784,21 +817,22 @@ kubectl delete storageclass bookstore-retain
 - **CSI architecture.** Storage is out of tree, through the Container Storage
   Interface. A driver ships a **controller** Deployment with sidecars
   (**external-provisioner**, **external-attacher**, **external-snapshotter**,
-  **external-resizer**) and a per-node **DaemonSet** node plugin that formats and
-  mounts the volume. **`CSIDriver`** advertises capabilities. **`CSINode`**
+  **external-resizer**) and a per-node **DaemonSet** node plugin that formats
+  and mounts the volume. **`CSIDriver`** advertises capabilities. **`CSINode`**
   records per-node topology for the scheduler. The kubelet reaches the backend
   only through the node plugin.
 - **Resizing.** `allowVolumeExpansion: true` on the class lets a claim be grown,
   and whether the driver can grow a volume while its Pod runs is the driver's
-  capability. Size for expansion, not migration, and alert before a volume fills.
+  capability. Size for expansion, not migration, and alert before a volume
+  fills.
 - **StatefulSet claims.** The StatefulSet controller creates **one PVC per
   ordinal** from the template, and a deleted Pod does not delete its PVC. These
   claims **outlive the StatefulSet** by default. Upstream, with the default
   policy, the PVCs "are not affected when their Pod is deleted". The
   `persistentVolumeClaimRetentionPolicy` field sets `whenDeleted` and
   `whenScaled` to `Retain` (the default) or `Delete`. Upstream, the policies
-  "only apply when Pods are being removed due to the StatefulSet being deleted or
-  scaled down". Set `Delete` only when the data should go on scale-down or
+  "only apply when Pods are being removed due to the StatefulSet being deleted
+  or scaled down". Set `Delete` only when the data should go on scale-down or
   delete, and set the field explicitly so the choice is written down.
 - **VolumeSnapshot.** A driver that supports snapshots exposes a
   `VolumeSnapshot`, a point-in-time copy governed by a `VolumeSnapshotClass`. A
@@ -833,6 +867,8 @@ kubectl get storageclass                                      # provisioner, bin
 kubectl get pvc <PVC> -n <NS> -o jsonpath='{.spec.volumeName}{"\n"}'
 kubectl get pv <PV> -o custom-columns=NAME:.metadata.name,RECLAIM:.spec.persistentVolumeReclaimPolicy,STATUS:.status.phase,CLAIM:.spec.claimRef.name
 kubectl auth can-i create persistentvolumes --as=system:serviceaccount:<NS>:<SA>   # expect "no"
+kubectl auth can-i create storageclasses --as=system:serviceaccount:<NS>:<SA>      # expect "no"
+kubectl auth can-i patch storageclasses --as=system:serviceaccount:<NS>:<SA>       # expect "no"
 kubectl wait --for=delete pv/<PV> --timeout=600s              # Delete reclaim runs after the claim goes
 ```
 
@@ -863,13 +899,14 @@ persistentVolumeClaimRetentionPolicy:
 Checklist:
 
 - [ ] Need is Pod-independent durability (else a [ch.03](03-volumes.md) volume)
-- [ ] `reclaimPolicy: Retain` for data whose loss is catastrophic, with a runbook
-      for the manual cleanup
+- [ ] `reclaimPolicy: Retain` for data whose loss is catastrophic, with a
+      runbook for the manual cleanup
 - [ ] `volumeBindingMode: WaitForFirstConsumer` for zonal disks
 - [ ] Only operators can create PersistentVolumes; tenants hold claims only
 - [ ] No available PV that a tenant can name with `volumeName`
 - [ ] Access mode supported by the backend (RWX needs a shared filesystem)
-- [ ] Volume encryption set on the StorageClass, on a cloud driver, and verified there
+- [ ] Volume encryption set on the StorageClass, on a cloud driver, and
+      verified there
 - [ ] StatefulSet `persistentVolumeClaimRetentionPolicy` set deliberately
 
 ## Test your understanding

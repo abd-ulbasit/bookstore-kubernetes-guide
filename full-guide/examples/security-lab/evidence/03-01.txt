@@ -1,4 +1,5 @@
 # Transcript for 03-config-and-storage/01-configmaps.md, hands-on steps 1 to 6.
+# Cluster and node names are redacted here as <cluster> and <node>.
 # Tier A: a kind cluster on a lab machine, Kubernetes v1.37.0 node, kubectl v1.37.2.
 # Recorded by running the chapter's commands in order. The lab cluster is shared,
 # so the run used the scratch namespace p03-01-cfg where the chapter says bookstore:
@@ -9,7 +10,7 @@
 ## Setup: the earlier chapters' Bookstore objects in a scratch namespace
 $ kubectl get nodes
 NAME                     STATUS   ROLES           AGE   VERSION
-sf-pilot-control-plane   Ready    control-plane   9h    v1.37.0
+<node>   Ready    control-plane   9h    v1.37.0
 $ kubectl apply -f 00-namespace.yaml
 namespace/p03-01-cfg created
 resourcequota/bookstore-quota created

@@ -1,5 +1,6 @@
 # Transcript for 03-config-and-storage/03-volumes.md, hands-on steps 1 to 8.
-# Tier A: a kind cluster (sf-pilot), Kubernetes v1.37.0 node, kubectl v1.37.2.
+# Cluster and node names are redacted here as <cluster> and <node>.
+# Tier A: a kind cluster (<cluster>), Kubernetes v1.37.0 node, kubectl v1.37.2.
 # Recorded by running the chapter's commands in order from full-guide/, in the
 # scratch namespace p03-volumes, which was deleted at the end of the run.
 # The first run's creds-denied step timed out before its Pod ran (the lab host
