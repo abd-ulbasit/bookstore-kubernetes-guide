@@ -10,7 +10,7 @@
 # opentelemetry-operator 0.115.0 (operator 0.153.0). Collector:
 # opentelemetry-collector-contrib 0.153.0, pinned by digest on GHCR.
 # Server dry runs and config validation only. Nothing was installed:
-# heavy_lock was busy, so Prometheus, Grafana, Tempo, Loki, the OTel
+# install_lock was busy, so Prometheus, Grafana, Tempo, Loki, the OTel
 # operator and the collector did not run.
 # What did not work the first time: the tag 0.115.0 of the collector
 # image is not on Docker Hub (the 404 below), so the pinned image is the
@@ -21,8 +21,8 @@
 # answered EOF twice and Forbidden once; those lines are kept verbatim.
 # The namespace labels were already in place from an earlier step of
 # the same session, and the final delete removed the namespaces.
-$ echo 'heavy_lock: busy when this run started, so no heavy install ran. Charts were rendered and server dry-run only.'
-heavy_lock: busy when this run started, so no heavy install ran. Charts were rendered and server dry-run only.
+$ echo 'install_lock: busy when this run started, so no heavy install ran. Charts were rendered and server dry-run only.'
+install_lock: busy when this run started, so no heavy install ran. Charts were rendered and server dry-run only.
 $ helm show chart prometheus-community/kube-prometheus-stack --version 62.7.0 | grep -E '^(name|version|appVersion):'
 appVersion: v0.76.1
 name: kube-prometheus-stack
