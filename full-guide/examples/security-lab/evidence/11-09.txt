@@ -256,3 +256,20 @@ $ TOKEN=$(kubectl -n p11-09-perf create token pprof-reader --duration=600s)   # 
 $ docker exec -e TOKEN="$TOKEN" sf-pilot-control-plane sh -c 'curl -s -o /dev/null -w "%{http_code}\n" --cacert /etc/kubernetes/pki/ca.crt -H "Authorization: Bearer $TOKEN" https://127.0.0.1:6443/debug/pprof/heap'
 200
 [exit 0]
+
+## cleanup (resumed pass, apiserver answering)
+$ kubectl delete clusterrolebinding p11-09-pprof-reader --ignore-not-found
+clusterrolebinding.rbac.authorization.k8s.io "p11-09-pprof-reader" deleted
+[exit 0]
+$ kubectl delete clusterrole p11-09-pprof-reader --ignore-not-found
+clusterrole.rbac.authorization.k8s.io "p11-09-pprof-reader" deleted
+[exit 0]
+$ kubectl delete namespace p11-09-perf --ignore-not-found --wait=false
+namespace "p11-09-perf" deleted
+[exit 0]
+$ kubectl get ns p11-09-perf   # 15 seconds after the delete
+p11-09-perf   Terminating   12m
+[exit 0]
+$ kubectl get clusterrole p11-09-pprof-reader
+Error from server (NotFound): clusterroles.rbac.authorization.k8s.io "p11-09-pprof-reader" not found
+[exit 1]
