@@ -1,0 +1,145 @@
+# Transcript for 07-delivery/01-packaging-helm.md. Steps 0 to 2c and step 4
+# are the checks the chapter prints: lint, render counts, the values schema,
+# the provenance and scan of a third-party chart, and the plaintext Secret in
+# the render. Step 3 holds the install attempts that failed before the
+# namespace change in the chapter; they are kept as they ran. The cluster
+# stopped answering the admin identity during step 3 (see the note at the end),
+# so nothing after the install is captured.
+# Lab: one Linux host running a kind v0.33.0 cluster named sf-pilot (a
+# Kubernetes v1.37.0 node, the cluster is shared with other chapters), kubectl
+# v1.37.2, Helm v3.22.1 (the chapter's pin), trivy v0.76.1, cosign on the
+# author's workstation. Helm and kubectl run from the author's workstation
+# against the cluster through a tunnel.
+# Recorded by running the chapter's commands in order from full-guide/, with
+# these substitutions, all named here: (1) the chart's namespace bookstore is
+# p07-01-bookstore and the verification namespace bs-verify is p07-01-verify,
+# as the captured runs use p07-<chapter> names; (2) the three hostnames the
+# chart builds from bookstore (database.host, catalogConfig REDIS_ADDR and
+# paymentsWorker amqpUrl) are set to the lab namespace in lab-values.yaml, and
+# every helm command passes that file; (3) priorityClasses.create=false,
+# because the cluster-scoped bookstore-* PriorityClasses already exist on the
+# lab cluster and the chart does not adopt objects it does not own; (4) the
+# cluster was not recreated and the four bookstore/*:dev images were already
+# loaded. The cluster and node names are shown as the lab has them. Terminal
+# colour codes are removed. Nothing else is edited.
+## step 0: tools and cluster
+$ helm version --short
+v3.22.1+gd6c1a0e
+$ kubectl version --client=true -o yaml | grep gitVersion
+  gitVersion: v1.37.2
+$ kubectl config current-context
+kind-sf-pilot
+$ kubectl get nodes -o wide | cut -c1-120
+NAME                     STATUS   ROLES           AGE   VERSION   INTERNAL-IP   EXTERNAL-IP   OS-IMAGE                  
+sf-pilot-control-plane   Ready    control-plane   12h   v1.37.0   172.18.0.2    <none>        Debian GNU/Linux 13 (trixi
+$ kubectl get ns p07-01-bookstore p07-01-verify 2>&1 | tail -n 2
+Error from server (NotFound): namespaces "p07-01-bookstore" not found
+Error from server (NotFound): namespaces "p07-01-verify" not found
+## step 1: lint and render
+$ helm lint examples/bookstore/helm/bookstore
+==> Linting examples/bookstore/helm/bookstore
+[INFO] Chart.yaml: icon is recommended
+
+1 chart(s) linted, 0 chart(s) failed
+$ helm template bookstore examples/bookstore/helm/bookstore -n bookstore | grep -c "^kind:"
+49
+$ helm template bookstore examples/bookstore/helm/bookstore -n bookstore | kubectl apply --dry-run=client -f - 2>&1 | grep -c "created (dry run)"
+46
+$ helm template bookstore examples/bookstore/helm/bookstore -n bookstore | kubectl apply --dry-run=client -f - 2>&1 | grep -c "no matches for kind"
+0
+## step 2: values that cannot weaken the baseline
+$ helm template bookstore examples/bookstore/helm/bookstore -n bookstore --set securityProfiles.goService.container.allowPrivilegeEscalation=true | head -n 1
+Error: values don't meet the specifications of the schema(s) in the following chart(s):
+bookstore:
+- at '/securityProfiles/goService/container/allowPrivilegeEscalation': value must be false
+
+$ helm template bookstore examples/bookstore/helm/bookstore -n bookstore --set securityProfiles.uid999RW.container.readOnlyRootFilesystem=false | head -n 1
+Error: values don't meet the specifications of the schema(s) in the following chart(s):
+bookstore:
+- at '/securityProfiles/uid999RW/container/readOnlyRootFilesystem': value must be true
+
+$ helm template bookstore examples/bookstore/helm/bookstore -n bookstore --set securityProfiles.goService.pod.runAsUser=0 | head -n 1
+Error: values don't meet the specifications of the schema(s) in the following chart(s):
+bookstore:
+- at '/securityProfiles/goService/pod/runAsUser': minimum: got 0, want 1
+
+$ helm template bookstore examples/bookstore/helm/bookstore -n bookstore --set securityProfiles.goService.container.allowPrivilegeEscalation=true 2>&1 | tail -n 3
+bookstore:
+- at '/securityProfiles/goService/container/allowPrivilegeEscalation': value must be false
+
+## step 2b: provenance
+$ helm show chart oci://ghcr.io/argoproj/argo-helm/argo-cd --version 10.11.6 | grep -E "^(version|appVersion):"
+Pulled: ghcr.io/argoproj/argo-helm/argo-cd:10.11.6
+Digest: sha256:90f462a0695121f65a71cd053619f80023b4efef6bc211f750ffcaaa1628b5b6
+appVersion: v3.5.6
+version: 10.11.6
+$ helm pull oci://ghcr.io/argoproj/argo-helm/argo-cd --version 10.11.6 --destination "$(mktemp -d)"
+Pulled: ghcr.io/argoproj/argo-helm/argo-cd:10.11.6
+Digest: sha256:90f462a0695121f65a71cd053619f80023b4efef6bc211f750ffcaaa1628b5b6
+$ helm show chart oci://ghcr.io/argoproj/argo-helm/argo-cd@sha256:90f462a0695121f65a71cd053619f80023b4efef6bc211f750ffcaaa1628b5b6 | grep -E "^(version|appVersion):"
+Pulled: ghcr.io/argoproj/argo-helm/argo-cd@sha256:90f462a0695121f65a71cd053619f80023b4efef6bc211f750ffcaaa1628b5b6
+Digest: sha256:90f462a0695121f65a71cd053619f80023b4efef6bc211f750ffcaaa1628b5b6
+appVersion: v3.5.6
+version: 10.11.6
+$ cosign verify --certificate-oidc-issuer https://token.actions.githubusercontent.com --certificate-identity-regexp "https://github.com/argoproj/argo-helm/.*" ghcr.io/argoproj/argo-helm/argo-cd@sha256:90f462a0695121f65a71cd053619f80023b4efef6bc211f750ffcaaa1628b5b6
+Error: no signatures found
+error during command execution: no signatures found
+## step 2c: render and scan a third-party chart before install
+$ mkdir -p review && helm template argo-cd oci://ghcr.io/argoproj/argo-helm/argo-cd@sha256:90f462a0695121f65a71cd053619f80023b4efef6bc211f750ffcaaa1628b5b6 -n argocd > review/argo-cd.yaml && grep -c "^kind:" review/argo-cd.yaml
+Pulled: ghcr.io/argoproj/argo-helm/argo-cd@sha256:90f462a0695121f65a71cd053619f80023b4efef6bc211f750ffcaaa1628b5b6
+Digest: sha256:90f462a0695121f65a71cd053619f80023b4efef6bc211f750ffcaaa1628b5b6
+59
+$ timeout 300 trivy config --quiet --severity HIGH,CRITICAL review | grep -E "^(Total|Failures|review/)|Tests:"
+Tests: 47 (SUCCESSES: 35, FAILURES: 12)
+Failures: 12 (HIGH: 7, CRITICAL: 5)
+## step 3: install the release
+$ helm install bookstore examples/bookstore/helm/bookstore -n p07-01-bookstore --create-namespace -f lab-values.yaml --wait --timeout 10m
+Error: INSTALLATION FAILED: 1 error occurred:
+	* namespaces "p07-01-bookstore" already exists
+
+
+$ kubectl delete namespace p07-01-bookstore --wait=true --timeout=180s
+namespace "p07-01-bookstore" deleted
+error: timed out waiting for the condition on namespaces/p07-01-bookstore
+$ helm install bookstore examples/bookstore/helm/bookstore -n p07-01-bookstore -f lab-values.yaml --wait --timeout 10m
+Error: INSTALLATION FAILED: cannot re-use a name that is still in use
+$ helm uninstall bookstore -n p07-01-bookstore 2>&1 | tail -n 1
+Error: uninstall: Release not loaded: bookstore: release: not found
+$ helm install bookstore examples/bookstore/helm/bookstore -n p07-01-bookstore -f lab-values.yaml --wait --timeout 10m
+Error: INSTALLATION FAILED: create: failed to create: namespaces "p07-01-bookstore" not found
+$ kubectl get ns p07-01-bookstore --no-headers 2>&1
+Error from server (NotFound): namespaces "p07-01-bookstore" not found
+$ helm install bookstore examples/bookstore/helm/bookstore -n p07-01-bookstore -f lab-values.yaml --wait --timeout 10m
+Error: INSTALLATION FAILED: create: failed to create: namespaces "p07-01-bookstore" not found
+## step 3 (retry, the lab namespace is created and labelled first)
+$ kubectl create namespace p07-01-bookstore
+Unable to connect to the server: EOF
+$ kubectl label namespace p07-01-bookstore pod-security.kubernetes.io/enforce=restricted pod-security.kubernetes.io/audit=restricted pod-security.kubernetes.io/warn=restricted
+Error from server (Forbidden): namespaces "p07-01-bookstore" is forbidden: User "kubernetes-admin" cannot get resource "namespaces" in API group "" in the namespace "p07-01-bookstore"
+$ helm install bookstore examples/bookstore/helm/bookstore -n p07-01-bookstore --set namespace.create=false -f lab-values.yaml --wait --timeout 10m
+Error: INSTALLATION FAILED: Kubernetes cluster unreachable: unknown
+
+# Stopped here. From about 08:04 PKT the admin identity in the lab kubeconfig
+# was denied on every API call (`Forbidden: User "kubernetes-admin" cannot
+# ...`), including reads of /version, namespaces and the cluster-wide RBAC
+# objects. The author did not change RBAC or any cluster-scoped object and
+# did not look for another identity. The namespace p07-01-bookstore was
+# deleted in the cleanup above and was not re-created. Steps that need the
+# cluster (the install itself, `helm get values`, the release Secret, the
+# upgrade and rollback, the server dry-run into a restricted namespace and
+# the operator toggles) are therefore not in this transcript. The chapter
+# marks their output as illustrative.
+## step 4: what the render puts in plain text (no cluster needed)
+$ helm template bookstore examples/bookstore/helm/bookstore -n bookstore | grep -n "POSTGRES_PASSWORD:"
+603:  POSTGRES_PASSWORD: "devpassword"
+$ helm template bookstore examples/bookstore/helm/bookstore -n bookstore -f examples/bookstore/helm/bookstore/values-prod.yaml | grep -A1 "^kind: Secret" | grep "name:"
+$ helm template bookstore examples/bookstore/helm/bookstore -n bookstore -f examples/bookstore/helm/bookstore/values-prod.yaml | grep -c "^  name: db-credentials$"
+0
+$ helm template bookstore examples/bookstore/helm/bookstore -n bookstore -f examples/bookstore/helm/bookstore/values-prod.yaml | grep -c "guest:guest"
+2
+$ helm template bookstore examples/bookstore/helm/bookstore -n bookstore -f examples/bookstore/helm/bookstore/values-prod.yaml | grep -A3 "^kind: Secret" | grep "  name:"
+  name: rabbitmq-conn
+$ helm template bookstore examples/bookstore/helm/bookstore -n bookstore -f examples/bookstore/helm/bookstore/values-prod.yaml | grep -c "^kind: Secret"
+1
+$ helm template bookstore examples/bookstore/helm/bookstore -n bookstore | grep -c "^kind: Secret"
+1

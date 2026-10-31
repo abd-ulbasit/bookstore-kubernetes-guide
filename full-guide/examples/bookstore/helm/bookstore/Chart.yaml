@@ -23,7 +23,7 @@ type: application
 # Chart version (SemVer) — the version of THIS packaging. Bump on any chart
 # change (templates/values), independent of the app. appVersion tracks the
 # Bookstore app image tag (the :dev tag the guide builds in Part 00 ch.02).
-version: 0.1.0
+version: 0.1.1
 appVersion: "dev"
 
 # The chart only renders objects available in Kubernetes v1.30+ (native

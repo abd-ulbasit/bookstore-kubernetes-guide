@@ -15,9 +15,16 @@ Helm](../../../../07-delivery/01-packaging-helm.md).
 ## TL;DR
 
 ```sh
-# From the guide repo root (full-guide/), with the 4 images kind-loaded:
+# From the guide repo root (full-guide/), with the 4 images kind-loaded.
+# Helm cannot install the chart's own Namespace object, so create the
+# namespace first with the PSA labels (the chapter explains why).
+kubectl create namespace bookstore
+kubectl label namespace bookstore \
+  pod-security.kubernetes.io/enforce=restricted \
+  pod-security.kubernetes.io/audit=restricted \
+  pod-security.kubernetes.io/warn=restricted
 helm install bookstore ./examples/bookstore/helm/bookstore \
-  -n bookstore --create-namespace
+  -n bookstore --set namespace.create=false
 helm status  bookstore -n bookstore
 helm uninstall bookstore -n bookstore
 ```
@@ -28,7 +35,7 @@ behind a toggle that defaults **off** where the CRD is not built in.
 ## Install / upgrade / uninstall
 
 ```sh
-helm install  bookstore ./examples/bookstore/helm/bookstore -n bookstore --create-namespace
+helm install  bookstore ./examples/bookstore/helm/bookstore -n bookstore --set namespace.create=false   # namespace pre-created and labelled
 helm upgrade  bookstore ./examples/bookstore/helm/bookstore -n bookstore -f values-staging.yaml
 helm rollback bookstore 1 -n bookstore
 helm uninstall bookstore -n bookstore        # PriorityClasses are kept (resource-policy: keep)

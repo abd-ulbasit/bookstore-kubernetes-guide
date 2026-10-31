@@ -27,10 +27,13 @@ fullnameOverride: ""
 # Namespace (raw-manifests 00-namespace.yaml)
 # ---------------------------------------------------------------------------
 # The bookstore namespace ENFORCES Pod Security Admission `restricted` (plus
-# audit+warn). `helm install --create-namespace` makes the bare namespace;
-# this chart also templates the Namespace object so the PSA labels +
-# ResourceQuota + LimitRange travel WITH the release. Set namespace.create
-# false if your platform pre-creates (and pre-labels) the namespace via GitOps.
+# audit+warn). The default (create: true) renders the Namespace object so
+# `helm template` shows the complete app (49 objects). `helm install` cannot
+# use it: Helm stores the release record in the namespace before it applies
+# anything, and `--create-namespace` collides with the chart's own Namespace.
+# Create the namespace with the PSA labels first and install with
+# namespace.create=false. ResourceQuota and LimitRange follow their own
+# toggles either way.
 namespace:
   create: true
   name: bookstore
