@@ -248,6 +248,7 @@ Markdown source is authoritative.
 - [05 — Node components](00-foundations/05-node-components.md)
 - [06 — The declarative API model](00-foundations/06-declarative-api-model.md)
 - [07 — Local cluster setup](00-foundations/07-local-cluster-setup.md)
+- [08 - Security foundations](00-foundations/08-security-foundations.md)
 
 ### Part 01 — Core Workloads
 - [01 — Pods](01-core-workloads/01-pods.md)
@@ -280,10 +281,17 @@ Markdown source is authoritative.
 - [03 — Priority and preemption](04-scheduling/03-priority-and-preemption.md)
 
 ### Part 05 — Security
+- [00 - The attacker's view](05-security/00-the-attackers-view.md)
 - [01 — Authentication, authorization, RBAC](05-security/01-authn-authz-rbac.md)
-- [02 — Pod security](05-security/02-pod-security.md)
+- [02 - Pod security and container escape](05-security/02-pod-security.md)
 - [03 — Supply chain security](05-security/03-supply-chain.md)
-- [04 — Secrets and cluster hardening](05-security/04-secrets-and-cluster-hardening.md)
+- [04 - Secrets at rest and in use](05-security/04-secrets-and-cluster-hardening.md)
+- [05 - Kernel isolation: seccomp, AppArmor, SELinux, sandboxed runtimes](05-security/05-kernel-isolation.md)
+- [06 - Control plane and node hardening](05-security/06-control-plane-and-node-hardening.md)
+- [07 - Admission control and policy as code](05-security/07-admission-control-and-policy-as-code.md)
+- [08 - Audit logs, runtime detection and incident response](05-security/08-audit-detection-and-incident-response.md)
+- [09 - Running security on a platform team](05-security/09-running-security-on-a-platform-team.md)
+- [10 - Capstone: attack and harden the bookstore](05-security/10-capstone-attack-and-harden-the-bookstore.md)
 
 ### Part 06 — Production Readiness
 - [01 — Observability: metrics](06-production-readiness/01-observability-metrics.md)
@@ -443,6 +451,15 @@ Markdown source is authoritative.
 - [C — YAML and API conventions](appendix/C-yaml-and-api-conventions.md)
 - [D — Further reading](appendix/D-further-reading.md)
 - [E — Learning paths](appendix/E-learning-paths.md)
+- [F - Concept map, tag index, and reading paths](appendix/F-concept-map.md)
+
+### Parts 16 and 17: outlines
+
+These two Parts hold a plan and no chapters yet. Their labs wait: no chapter
+is written before its lab has run against a real cluster.
+
+- [Part 16: GKE in production, A to Z](16-gke-in-production-a-to-z/README.md)
+- [Part 17: Running the ML platform on GKE](17-ml-platform-on-gke/README.md)
 
 ### Example app & manifests
 - [`examples/bookstore/app/`](examples/bookstore/app/README.md) — service source + Dockerfiles

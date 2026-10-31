@@ -12,16 +12,16 @@
 
 A standalone, hands-on Kubernetes learning guide that takes you from container
 fundamentals to running multi-region production platforms across
-**16 Parts / 115 chapters**, all anchored on one evolving microservices
+**16 Parts / 123 chapters**, all anchored on one evolving microservices
 application — *Bookstore*. Concepts compound instead of resetting per topic:
 every chapter's hands-on section advances the *same* app.
 
 This README is for anyone who lands on the repo on GitHub. The reading
 experience is the live site above; everything below is just orientation.
 
-## Status: being rewritten security-first
+## Status: rewritten security-first
 
-The guide is being rewritten so that every manifest it shows is secure from
+The guide was rewritten so that every manifest it shows is secure from
 the first one: a non-root user, a read-only root filesystem, no privilege
 escalation, no capabilities and a seccomp profile, in a namespace that
 enforces the `restricted` Pod Security level. The reader never learns a
@@ -30,25 +30,23 @@ habit that a later chapter reverses. The reasoning is in
 chapter follows are in [`docs/security-first-authoring.md`](docs/security-first-authoring.md),
 and the targets are Kubernetes 1.37 and kind v0.33.0.
 
-**Done so far.** Part 00 Foundations, Part 01 Core workloads, Part 02
-Networking, Part 03 Configuration and storage, and Part 10 Cloud and managed
-Kubernetes are rewritten, thirty-three chapters in all, and two chapters from
-other Parts are too. CI fails a pull request that breaks any of them:
+**Done.** Parts 00 to 15 are rewritten and enforced: 123 chapters, from
+[00.01 Why Kubernetes](full-guide/00-foundations/01-why-kubernetes.md) to
+[15.12 Capstone: the first 90 days](full-guide/15-day-to-day-production-ops/12-capstone-first-90-days.md).
+CI fails a pull request that breaks any of them. The list is
+[`.github/security-gates-enforced.txt`](.github/security-gates-enforced.txt).
+The appendix (A to F) is rewritten too. It holds no manifest for the
+manifest gates to judge, so it is not on that list, and the lab-evidence
+gate still checks its lab records.
 
-- [00.01 Why Kubernetes](full-guide/00-foundations/01-why-kubernetes.md) through [00.08 Security foundations](full-guide/00-foundations/08-security-foundations.md), with the living threat model in [`examples/bookstore/THREAT-MODEL.md`](full-guide/examples/bookstore/THREAT-MODEL.md) that 00.08 teaches;
-- [01.01 Pods](full-guide/01-core-workloads/01-pods.md) through [01.08 Deployment strategies](full-guide/01-core-workloads/08-deployment-strategies.md), the baseline from the first manifest in 01.01;
-- [02.01 The networking model](full-guide/02-networking/01-networking-model.md) through [02.06 Network policies](full-guide/02-networking/06-network-policies.md), with the lab output captured on kind clusters;
-- [03.01 ConfigMaps](full-guide/03-config-and-storage/01-configmaps.md) through [03.05 Stateful data patterns](full-guide/03-config-and-storage/05-stateful-data-patterns.md), with the lab output captured on a kind cluster;
-- [05.02 Pod security](full-guide/05-security/02-pod-security.md), with the attacks run on a lab cluster;
-- [07.03 The CI/CD pipeline](full-guide/07-delivery/03-cicd-pipeline.md), the pipeline the example services use;
-- [10.01 The managed Kubernetes model](full-guide/10-cloud-and-managed-kubernetes/01-managed-kubernetes-model.md) through [10.06 Node autoscaling, cost & multi-cloud](full-guide/10-cloud-and-managed-kubernetes/06-node-autoscaling-cost-multicloud.md), with every workload manifest on the baseline from 01.01.
+No cluster was created on AWS or GCP during the rewrite. The cloud
+chapters in Parts 10 and 14 validate their Terraform offline and mark the
+cloud steps as cited, not run.
 
-**Everything else** is still the earlier text. Its manifests do not all pass
-the new gates yet, and the run summary of the `security-gates` workflow
-lists which chapters fail and why. A chapter joins the enforced list in
-[`.github/security-gates-enforced.txt`](.github/security-gates-enforced.txt)
-in the pull request that finishes it. Until a Part is rewritten, treat its
-manifests as teaching sketches and read them against the baseline in 01.01.
+**Not done.** Parts 16 and 17 are outlines: GKE in production, and the ML
+platform on GKE. They hold a plan and no chapters yet. Their labs wait,
+because no chapter is written before its lab has run against a real
+cluster. Their pages say what has been run so far.
 
 ## Try the hands-on, zero setup
 
@@ -65,8 +63,10 @@ both just work. Config: [`.devcontainer/`](.devcontainer/).
 
 | Path | Contents |
 |---|---|
-| `full-guide/00-foundations/` … `15-day-to-day-production-ops/` | The chapters themselves (115 of them). Each one has a per-chapter learning-metadata block, a self-assessment section with collapsible answers, and runnable hands-on steps that touch the example trees below. |
+| `full-guide/00-foundations/` … `15-day-to-day-production-ops/` | The chapters themselves (123 of them). Each one has a per-chapter learning-metadata block, a self-assessment section with collapsible answers, and runnable hands-on steps that touch the example trees below. |
 | `full-guide/appendix/` | A–F: glossary, cheat sheets, reading paths, **concept map + tag index** |
+| `full-guide/16-gke-in-production-a-to-z/`, `full-guide/17-ml-platform-on-gke/` | Outlines for the GKE Parts, with no chapters yet. Their labs wait |
+| `full-guide/examples/security-lab/` | The lab scripts and the captured transcripts (`evidence/`) that the chapters quote and CI checks |
 | `full-guide/examples/bookstore/` | Canonical example tree — runs on **kind/k3d** locally, no cloud needed (Parts 02–08) |
 | `full-guide/examples/bookstore-platform/` | Platform v2 — multi-tenant, GitOps, Keycloak + IRSA + Istio (Parts 12–13) |
 | `full-guide/examples/bookstore-platform/terraform/` | EKS infrastructure as Terraform — **live-smoke-tested** on AWS EKS 1.35 in `ap-south-1` on 2026-05-20; now defaults to EKS 1.37 with Karpenter 1.15.1, smoke test not yet re-run (Part 14) |
