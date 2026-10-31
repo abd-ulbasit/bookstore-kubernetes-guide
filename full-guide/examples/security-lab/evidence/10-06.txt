@@ -75,3 +75,7 @@ ensure CRDs are installed first
 $ kubectl delete namespace p10-06-scale p10-06-karpenter
 namespace "p10-06-scale" deleted
 namespace "p10-06-karpenter" deleted
+
+## step 1: allocatable CPU on the lab node (run 2026-10-31)
+$ kubectl get nodes -o jsonpath='{.items[*].status.allocatable.cpu}{"\n"}'
+4

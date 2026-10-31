@@ -127,7 +127,7 @@ DB is highly available across AZs" is the cloud-storage incident.
 | Volume data readable under a provider default key that the workload owner does not choose | Encrypted StorageClass with a customer-managed key: `kmsKeyId` (EBS), `disk-encryption-kms-key` (GKE), `diskEncryptionSetID` (AKS) | Key choice and KMS policy: [05.04](../05-security/04-secrets-and-cluster-hardening.md). Who may use the key: [10.03](03-cloud-identity.md) |
 | A snapshot copied or shared outside the owner, carrying the whole data set | The snapshot keeps the volume's key, is shared with named accounts only, and is never public (AWS refuses public sharing of encrypted snapshots) | Account sharing: [10.03](03-cloud-identity.md). Snapshot runbook: [08.02](../08-day-2-operations/02-backup-and-dr.md) |
 | A `VolumeSnapshotContent` that names a storage snapshot the namespace does not own | Pre-provisioned `VolumeSnapshotContent` is an administrator's object; the snapshot Role in step 6 grants no access to it | Cluster RBAC: [05.01](../05-security/01-authn-authz-rbac.md) |
-| An RWX file share mounted by Pods that should not reach it | Pick the tier on purpose, and limit the mount to the namespace's network | NetworkPolicy: [02.06](../02-networking/06-network-policies.md). Private endpoints: [10.04](04-cloud-networking-and-load-balancing.md) |
+| An RWX file share mounted by Pods that should not reach it | Pick the tier on purpose, and scope the share with the provider's own controls (How it works): mount-target security groups and access points, export rules, or network rules and a private endpoint | Pod NetworkPolicy does not govern node-side mounts ([02.06](../02-networking/06-network-policies.md)). Private endpoints: [10.04](04-cloud-networking-and-load-balancing.md) |
 | A static key for the bucket that backups or exports write to | Federated identity: the Pod's ServiceAccount assumes a role, and no key sits in a Secret | [10.03](03-cloud-identity.md). The backup bucket: [08.02](../08-day-2-operations/02-backup-and-dr.md) |
 
 Reviewing who used the key or the snapshot afterwards is audit logging
@@ -229,6 +229,19 @@ eksctl create addon --cluster $CLUSTER_NAME --name aws-ebs-csi-driver \
 kubectl get csidrivers          # ebs.csi.aws.com / pd.csi.storage.gke.io / disk.csi.azure.com
 ```
 
+The EBS add-on installs into `kube-system`, the namespace the cluster's own
+components use. This guide sets no Pod Security label on `kube-system`, so the
+driver is admitted there at whatever level the cluster gives that namespace.
+The node plugin needs `privileged`, because it formats and mounts block devices
+on the host. The chart default for that container is `privileged: true`
+(`node.containerSecurityContext` in the aws-ebs-csi-driver chart 2.67.2, read
+with `helm show values` on 2026-10-31). The managed add-on keeps its own
+defaults, and the pinned-Helm alternative keeps the chart's. This chapter sets
+no security values on either. No registry exception is recorded for this
+namespace, because the registry lists only namespaces this guide labels above
+`restricted`. Labelling `kube-system` `restricted` would stop the node plugin,
+so keep it unlabelled.
+
 ### 2. A cloud StorageClass for Postgres (the [Part 03 ch.04](../03-config-and-storage/04-persistent-storage.md) object, cloud `parameters`)
 
 A `StorageClass` is **built-in Kubernetes** (no CRD — it dry-runs cleanly
@@ -305,8 +318,10 @@ kubectl get pv -o custom-columns=\
 kubectl get pod postgres-0 -n bookstore -o jsonpath='{.spec.nodeName}{"\n"}'
 kubectl get node <THAT-NODE> -L topology.kubernetes.io/zone   # = the PV's zone
 # CONSEQUENCE: postgres-0 can ONLY ever schedule in that zone. Simulate AZ
-# loss (cordon every node in that zone) and postgres-0 goes Pending — the
-# zonal disk is in the (now unreachable) AZ; it CANNOT reschedule elsewhere.
+# loss: cordon every node in that zone, then delete postgres-0. Cordon only
+# marks a node unschedulable and leaves its running Pods in place, so the
+# delete is what moves the Pod. The replacement goes Pending: the zonal disk is
+# in the (now unreachable) AZ, and it CANNOT reschedule elsewhere.
 # Recovery is NOT "reschedule" — it is RESTORE the data to a new disk in
 # another AZ (Velero/snapshot — Part 08 ch.02). A single-replica StatefulSet
 # on a zonal disk is durable, NOT AZ-highly-available.
@@ -564,6 +579,18 @@ of the snapshot identity.
   RDBMS). The Bookstore Postgres stays on **block RWO**; RWX is the tool only
   if a shared-file need appears.
 
+  Who may mount a share is set by the provider, not by Pod NetworkPolicy. The
+  kubelet and the CSI node plugin make the mount on the node, so a Pod policy
+  never sees it. Scope the share with the provider's controls. On EFS, the
+  security groups on each mount target filter the NFS clients, and access
+  points fix the user and the root directory a mount gets ([EFS access
+  points][efs-ap]). On Filestore, export rules name the IP ranges that may
+  mount the share ([Filestore access control][fs-access]). On Azure Files, virtual
+  network rules and IP rules decide which clients reach the public endpoint,
+  and a private endpoint with public network access disabled keeps the share
+  private ([Azure Files networking][az-files-net]). These controls are cited
+  here, not run.
+
 - **Encryption with a customer-managed key is a dependency, not a switch.**
   The class names the key (see the StorageClass above), and the provider holds
   the key under its key policy. Azure documents that disk I/O starts to fail
@@ -632,7 +659,7 @@ of the snapshot identity.
 
 > **In production: size for online expansion, not migration; monitor PV
 > usage.** Set `allowVolumeExpansion: true` and confirm the cloud CSI driver
-> resizes **online**, as its docs state — growing the Bookstore
+> resizes **online**, as its docs state. Growing the Bookstore
 > Postgres volume is then a one-line PVC patch with no downtime. Alert on PV
 > capacity **before** full ([Part 06
 > ch.01](../06-production-readiness/01-observability-metrics.md)) — a full DB
@@ -650,8 +677,9 @@ of the snapshot identity.
 > ch.02](../08-day-2-operations/02-backup-and-dr.md)).
 
 > **In production: RWX needs file storage; never put a DB on NFS.** If a
-> shared-file need appears (uploaded assets), use EFS/Filestore/Azure Files
-> (regional, RWX, no AZ pin). Keep the Bookstore Postgres on **block RWO** —
+> shared-file need appears (uploaded assets), use EFS, Filestore or Azure
+> Files, and pick the tier for its failure domain (Diagram B shows the zonal
+> and regional tiers). Keep the Bookstore Postgres on **block RWO** —
 > NFS consistency/latency is unsuitable for a RDBMS data directory ([Part 03
 > ch.04](../03-config-and-storage/04-persistent-storage.md) access-mode
 > matrix).
@@ -743,7 +771,7 @@ Checklist:
 2. **Your Postgres StatefulSet Pod-0 was running on a node in `us-east-1a`. The node died and the Pod is now Pending with a "node affinity / volume affinity" error. What happened and what are your options?**
    <details><summary>Show answer</summary>
 
-   The Pod's PVC is bound to an EBS volume in `us-east-1a`. The Pod can only be scheduled to a node in `us-east-1a`, and right now there is no such node (the autoscaler hasn't replaced it yet, or the AZ has zero healthy nodes). Options: (a) wait — Cluster Autoscaler/Karpenter spins up a new node in `us-east-1a` and the Pod reschedules; (b) if the AZ is actually down, you must restore from a snapshot into a different AZ — the original disk is unreachable; (c) longer-term, use a regional persistent disk on GKE or a RWX file system if the workload tolerates it, or run an operator (CloudNativePG) that handles failover by promoting a replica in a healthy AZ.
+   The Pod's PVC is bound to an EBS volume in `us-east-1a`. The Pod can only be scheduled to a node in `us-east-1a`, and right now there is no such node (the autoscaler hasn't replaced it yet, or the AZ has zero healthy nodes). Options: (a) wait — Cluster Autoscaler/Karpenter spins up a new node in `us-east-1a` and the Pod reschedules; (b) if the AZ is actually down, you must restore from a snapshot into a different AZ — the original disk is unreachable; (c) longer-term, use a regional persistent disk on GKE, or run an operator (CloudNativePG) that handles failover by promoting a replica in a healthy AZ.
 
    </details>
 
@@ -808,3 +836,7 @@ Checklist:
   <https://learn.microsoft.com/en-us/azure/virtual-machines/disk-encryption>;
   Filestore service tiers
   <https://docs.cloud.google.com/filestore/docs/service-tiers>.
+
+[efs-ap]: https://docs.aws.amazon.com/efs/latest/ug/efs-access-points.html
+[fs-access]: https://docs.cloud.google.com/filestore/docs/access-control
+[az-files-net]: https://learn.microsoft.com/en-us/azure/storage/files/storage-files-networking-overview
