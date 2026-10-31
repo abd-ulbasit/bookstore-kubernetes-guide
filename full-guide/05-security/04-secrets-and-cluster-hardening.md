@@ -1,481 +1,854 @@
-# 04 — Secrets and cluster hardening
+# 04: Secrets at rest and in use
 
-> Encryption-at-rest in depth (`EncryptionConfiguration`: identity / aescbc /
-> aesgcm / secretbox / KMS v2 envelope, key rotation & re-encrypt, where it's
-> wired); **audit logging** (stages, levels, first-match rule ordering,
-> backends, noise control); **CIS Benchmark / kube-bench**; apiserver/kubelet/
-> etcd hardening flags — and a Bookstore **STRIDE-lite threat model** mapping
-> every mitigation back to the chapter that delivered it.
+> A Secret is base64 until something encrypts it, and encryption changes only
+> what etcd stores. This chapter follows one Secret on kind clusters: its
+> plaintext in etcd, its encrypted form under an `EncryptionConfiguration`, a
+> key rotation, and then the in-use side, where a Pod sees the value as an
+> environment variable or as a mounted file, and the two behave differently.
 
-**Estimated time:** ~30 min read · ~60 min hands-on
-**Prerequisites:** [Part 03 ch.02](../03-config-and-storage/02-secrets.md) — Secret is base64, not encrypted · [Part 05 ch.01](01-authn-authz-rbac.md) — RBAC is what audit logs replay · [Part 00 ch.04](../00-foundations/04-control-plane-deep-dive.md) — etcd, the apiserver and the request pipeline
-**You'll know after this:** • configure `EncryptionConfiguration` with KMS v2 envelope encryption and rotate keys · • turn on audit logging with the right stage, level and policy ordering · • run kube-bench against a cluster and read the CIS Benchmark findings · • harden apiserver, kubelet and etcd with the standard flag set · • map every Bookstore threat (STRIDE-lite) back to the control that mitigates it
+**Estimated time:** ~30 min read · ~60 min hands-on (the lab is scripted, and
+its first cluster takes about ten minutes to start on a slow disk)
+**Prerequisites:** [Part 03 ch.02](../03-config-and-storage/02-secrets.md):
+a Secret is base64, not encrypted · [Part 05 ch.01](01-authn-authz-rbac.md):
+who may ask the API for a Secret ·
+[Part 00 ch.04](../00-foundations/04-control-plane-deep-dive.md): etcd and the
+apiserver's request pipeline
+**You'll know after this:** • write an `EncryptionConfiguration`, enable it on
+a cluster that already holds data, and rewrite that data under the new key •
+rotate an encryption key without leaving data unreadable • say what an
+environment variable exposes that a mounted file does not • keep a
+Secret-backed cache off the node's disk
 
 <!-- tags: security, secrets, secrets-rotation, day-2 -->
 
 ## Why this exists
 
-[Part 03 ch.02](../03-config-and-storage/02-secrets.md) established the Secret
-object and proved the core danger: a Secret is **base64, not encrypted** —
-anyone with etcd access or an etcd backup reads every credential. It explicitly
-deferred *operationalizing* the protection to here. This chapter does that, and
-widens the lens from "the Secret object" to **the cluster the Secret lives
-in**: the API server, etcd, the kubelet, the audit trail, and benchmark-driven
-hardening.
+[03.02](../03-config-and-storage/02-secrets.md) established the Secret object
+and proved its core danger: a Secret is **base64, not encrypted**. Anyone who
+can read etcd, or an etcd backup, reads every credential in it. 03.02 deferred
+the fix to this chapter.
 
-This is also the chapter that **ties Part 05 together**. Security is not one
-control; it is layers, and a layer you can't *see being bypassed* is only half
-a control. Encryption-at-rest protects the data; **audit logging** is the
-flight recorder that tells you when RBAC ([ch.01](01-authn-authz-rbac.md)),
-PSA ([ch.02](02-pod-security.md)), or image policy
-([ch.03](03-supply-chain.md)) was exercised or attacked. The closing threat
-model makes the defense-in-depth explicit. This deepens the [Secure
-Configuration](#further-reading)/Admission concerns into cluster hardening.
+A Secret's value is exposed in two places, so this chapter covers both. **At
+rest**, the bytes sit in etcd, and the apiserver can encrypt them. That half
+needs an apiserver flag and a file on the control plane. **In use**, the
+kubelet hands the value to a Pod, and from then on anything that can read the
+container's environment or its files can read the value too. RBAC decides who
+may ask the API for a Secret. The Pod's spec decides what the container does
+with the answer.
+
+The flags and the transport that protect etcd belong to
+[Part 05 ch.06](06-control-plane-and-node-hardening.md). The audit trail that
+records Secret reads belongs to
+[Part 05 ch.08](08-audit-detection-and-incident-response.md). The threat model
+over the whole Bookstore is Part 00 ch.08 <!-- link-later: 00.08 -->.
 
 ## Mental model
 
-Think in **layers around the data, plus a recorder watching all of them**:
+Think about the two places a value exists, and the one place it gets copied.
 
-- **Encryption at rest** — the API server encrypts Secrets *before* they hit
-  etcd, so a stolen etcd file (or backup) is ciphertext. It is an
-  **apiserver-level config** (`EncryptionConfiguration` + a flag), *not* a
-  `kubectl apply` object, and it does **nothing** about an attacker with `get
-  secrets` RBAC or `pods/exec` — those are [ch.01](01-authn-authz-rbac.md)
-  controls. It specifically defeats the **etcd-at-rest / etcd-backup** threat.
-- **Audit logging** — every request the API server processes can produce a
-  structured record (who, verb, resource, decision, when). It is the only way
-  to answer "*who* deleted prod / read that Secret / changed RBAC". Also
-  apiserver-level config (a `Policy` file + a backend), tuned by **stage**,
-  **level**, and **first-match rule order** to capture signal without drowning
-  in noise.
-- **Hardening the surfaces** — the API server, kubelet, and etcd each have
-  flags that, set wrong, hand over the cluster (anonymous auth, read-only
-  kubelet port, no etcd TLS). **CIS Benchmark / kube-bench** is the checklist
-  that finds these.
-- **Threat model** — enumerate how the Bookstore could be attacked and confirm
-  each path has an owning mitigation in a specific chapter. No orphan threats.
+- **At rest, in etcd.** The apiserver encrypts a Secret on the way into etcd
+  and decrypts it on the way out. Writes go through the first provider in an
+  `EncryptionConfiguration`, and reads try each provider that matches the
+  stored bytes. This is apiserver configuration: a flag and a file on each
+  control-plane node, not a `kubectl apply` object. It defeats one threat, a
+  reader of etcd's files or backups. It does nothing about `get secrets`
+  through the API or `pods/exec` into a Pod. Both go through the decrypting
+  apiserver, as designed.
+- **In use, through the API.** RBAC decides who may read a Secret. The
+  [Secret documentation](https://kubernetes.io/docs/concepts/configuration/secret/)
+  says that granting `list` or `watch` on Secrets "allows a subject to read all
+  Secret data in that namespace, not only the Secrets explicitly referenced by
+  its Pods."
+- **In use, inside the Pod.** The kubelet gives a Pod the value in one of two
+  forms. An environment variable is set when the container starts and is
+  inherited by every process the container starts after that. A mounted file
+  is copied into a `tmpfs`, which the kubelet keeps up to date when the Secret
+  changes and which goes away with the Pod.
+- **On the node.** What a container writes to a volume can outlive it. An
+  `emptyDir` on the default medium is stored on the node's own filesystem.
+
+## Threats and controls
+
+Each row is a way a Secret's value leaks, the control this chapter teaches, and
+where the topic goes deeper.
+
+| Threat | Control this chapter teaches | Where it goes deeper |
+|---|---|---|
+| Someone reads etcd, or an etcd backup, and every Secret is readable | `EncryptionConfiguration`: the apiserver encrypts a Secret before it reaches etcd | [11.05](../11-advanced-production-patterns/05-secrets-at-scale.md), [15.05](../15-day-to-day-production-ops/05-production-secrets-vault-eso.md) |
+| The key sits on the control plane next to the data it protects | KMS v2: the key-encryption key stays in an external KMS. Cited, not run here | [11.05](../11-advanced-production-patterns/05-secrets-at-scale.md) |
+| A key that never changes outlives everyone who ever held it | Rotation: a new key encrypts, every Secret is rewritten, then the old key is dropped | [11.05](../11-advanced-production-patterns/05-secrets-at-scale.md) |
+| An environment variable is copied into every process the container starts and is fixed until the Pod restarts | A mounted file, read-only, with `defaultMode: 0440` and `fsGroup` | [03.02](../03-config-and-storage/02-secrets.md) |
+| A cache in an `emptyDir` on the node's disk keeps the plaintext after the app is done with it | `emptyDir` with `medium: Memory` and a `sizeLimit` | [03.03](../03-config-and-storage/03-volumes.md) |
+
+RBAC on Secrets, which is the threat of a subject with `list` or `watch`
+reading every value in a namespace, is taught in
+[03.02](../03-config-and-storage/02-secrets.md) and
+[Part 05 ch.01](01-authn-authz-rbac.md). This chapter does not repeat it.
 
 ## Diagrams
 
-### Audit event flow: request → stages → policy → backend (Mermaid)
+### Where a Secret's value goes (Mermaid)
 
 ```mermaid
 flowchart LR
-    req["API request<br/>(post authN + authZ)"]
-    st["Stages:<br/>RequestReceived -> ResponseStarted<br/>-> ResponseComplete (-> Panic)"]
-    pol{"Audit Policy<br/>FIRST matching rule<br/>(by user/verb/resource/ns)"}
-    none["level: None<br/>(drop — noise control)"]
-    meta["level: Metadata<br/>(who/what/decision)"]
-    body["level: Request /<br/>RequestResponse<br/>(+ object bodies)"]
-    back["Backend:<br/>log file  OR  webhook -> SIEM"]
-    sink[("audit.log /<br/>external store")]
+    client["kubectl or a controller<br/>(needs get, list or watch)"]
+    api["kube-apiserver<br/>authN, authZ, admission"]
+    enc["encryption provider<br/>first key encrypts writes"]
+    etcd[("etcd<br/>k8s:enc:aesgcm:v1:key1:...")]
+    kubelet["kubelet on the node"]
+    pod["Pod<br/>tmpfs file or env var"]
 
-    req --> st --> pol
-    pol -- "matches a None rule" --> none
-    pol -- "matches a Metadata rule" --> meta --> back
-    pol -- "matches a Request* rule" --> body --> back
-    back --> sink
-    none -. "nothing emitted" .-> sink
+    client -->|create or get| api
+    api -->|write| enc
+    enc --> etcd
+    etcd -.->|read| enc
+    enc -.->|decrypt| api
+    api -->|Secret for a Pod| kubelet --> pod
 ```
 
-### Defense-in-depth layers (ASCII)
+## The lab: one Secret, from plaintext to rotated key
 
-```
-                Bookstore — concentric controls (outer = first to cross)
- ┌──────────────────────────────────────────────────────────────────────────┐
- │ Supply chain   scan + SBOM + sign + admission (Kyverno)        → ch.03   │
- │ ┌──────────────────────────────────────────────────────────────────────┐ │
- │ │ Identity/AuthZ  TLS + authN + RBAC least-priv + per-svc SA  → ch.01  │ │
- │ │ ┌──────────────────────────────────────────────────────────────────┐ │ │
- │ │ │ Network    default-deny NetworkPolicy, both-ends allow → Part 02 │ │ │
- │ │ │ ┌──────────────────────────────────────────────────────────────┐ │ │ │
- │ │ │ │ Pod      restricted PSA: non-root, drop ALL, seccomp → ch.02 │ │ │ │
- │ │ │ │ ┌──────────────────────────────────────────────────────────┐ │ │ │ │
- │ │ │ │ │ Data     Secret + ENCRYPTION AT REST (KMS) → Part03+here │ │ │ │ │
- │ │ │ │ │          etcd TLS + isolated; backups encrypted          │ │ │ │ │
- │ │ │ │ └──────────────────────────────────────────────────────────┘ │ │ │ │
- │ │ │ └──────────────────────────────────────────────────────────────┘ │ │ │
- │ │ └──────────────────────────────────────────────────────────────────┘ │ │
- │ └──────────────────────────────────────────────────────────────────────┘ │
- │  AUDIT LOG records every layer being exercised/attacked   → here         │
- └──────────────────────────────────────────────────────────────────────────┘
-```
+> **Lab 05.04 (tier A).** Two kind runs on a Linux lab host, with kind v0.33.0,
+> Kubernetes v1.37.0 nodes, kubectl v1.37.0 and etcd 3.7.0 inside the node.
+> It has not been run on macOS. The script is
+> [`labs/05-04.sh`](../examples/security-lab/labs/05-04.sh), and the recorded
+> transcript is [`evidence/05-04.txt`](../examples/security-lab/evidence/05-04.txt).
+> **Run it only against kind clusters you own.** With `MODE=all` (the default)
+> it creates a throwaway cluster, runs steps 1 to 10 on it, and deletes it.
+> With `MODE=inuse` it runs steps 9 to 11 on another kind cluster you own, in a
+> namespace of its own, and deletes that namespace. Steps 1 to 8 need an
+> apiserver flag and a host directory, so they need the throwaway cluster.
+> What did not work the first time is recorded at the end of the lab.
 
-## Hands-on with the Bookstore
+The commands here use the names `secrets-lab` for the namespace and
+`lab-secrets` for the cluster. The captured output came from a cluster named
+`p05-enc`, with a namespace named `p05-04-secrets`, so the output blocks show
+those names, and the node is `p05-enc-control-plane`. The transcript header
+records the substitution.
 
-**Assumed working directory: the guide repo root (`full-guide/`).** Two of the
-three artifacts here are **apiserver-level files**, *not* `kubectl apply`
-objects — they are shown as concrete files under
-[`examples/bookstore/cluster/`](../examples/bookstore/cluster/) with how they'd
-be wired at cluster creation. The threat-model step is analysis over the
-cumulative manifests.
+Every etcd read in the lab runs inside the kind node. A kind node is a
+container on the Docker host, not a separate machine, and it shares the host's
+kernel. Nothing in the lab reaches past the node's files and processes. The
+Pods in steps 9 and 10 pass the baseline, so no manifest in this chapter needs
+the insecure-on-purpose marker.
 
-### 1. `EncryptionConfiguration` — make etcd ciphertext (apiserver-level)
+### 1. A cluster whose apiserver loads an encryption config
 
-New file
-[`examples/bookstore/cluster/encryption-config.yaml`](../examples/bookstore/cluster/encryption-config.yaml).
-**This never goes through the API.** kube-apiserver consumes it via
-`--encryption-provider-config=<FILE>`. Core shape:
+kind has no documented recipe for an encryption config, so this lab works one
+out. It has two parts. An `extraMounts` entry puts a host directory at
+`/etc/kubernetes/enc` inside the node container. A `kubeadmConfigPatches` entry
+adds the apiserver flags and a `hostPath` volume, so the static Pod can read
+the directory. The apiserver starts with an `identity` provider, which encrypts
+nothing. The flags are on, and no data has changed yet.
 
 ```yaml
-apiVersion: apiserver.config.k8s.io/v1
-kind: EncryptionConfiguration
+# Fragment of the kind config: the ClusterConfiguration patch. It has no kind:
+# line, so it reads as a fragment, not a manifest.
+apiServer:
+  extraArgs:
+    - name: encryption-provider-config
+      value: /etc/kubernetes/enc/encryption-config.yaml
+    - name: encryption-provider-config-automatic-reload
+      value: "true"
+  extraVolumes:
+    - name: encryption
+      hostPath: /etc/kubernetes/enc
+      mountPath: /etc/kubernetes/enc
+      readOnly: true
+      pathType: DirectoryOrCreate
+```
+
+```yaml
+# Fragment: the node entry that mounts the host directory into the node.
+nodes:
+  - role: control-plane
+    extraMounts:
+      - hostPath: /tmp/secrets-lab-enc
+        containerPath: /etc/kubernetes/enc
+        readOnly: true
+```
+
+The script also raises kubeadm's health-check timeouts. On the lab host the
+control plane took about ten minutes to start, because etcd and the apiserver
+restarted until the disk answered. The
+[encryption page](https://kubernetes.io/docs/tasks/administer-cluster/encrypt-data/)
+says that with `--encryption-provider-config-automatic-reload=true` the
+apiserver polls the file every minute. The lab waits for the encryption metrics
+to change, so it never sleeps for a fixed time.
+
+<!-- gate: output -->
+```
+kind v0.33.0 go1.26.7 linux/amd64
+```
+
+<!-- gate: output -->
+```
+Client Version: v1.37.0
+Kustomize Version: v5.8.1
+Server Version: v1.37.0
+```
+
+<!-- gate: output -->
+```
+apiVersion: kubeadm.k8s.io/v1beta4
+apiVersion: kubeadm.k8s.io/v1beta4
+apiVersion: kubeadm.k8s.io/v1beta4
+apiVersion: kubelet.config.k8s.io/v1beta1
+--encryption-provider-config=/etc/kubernetes/enc/encryption-config.yaml
+--encryption-provider-config-automatic-reload=true
+```
+
+The metrics present at start, and the etcd client version inside the node:
+
+<!-- gate: output -->
+```
+apiserver_encryption_config_controller_last_config_info{apiserver_id_hash="sha256:df5695c37bf9404c5455b2f50853064cda3207
+etcdctl version: 3.7.0
+API version: 3.7
+```
+
+### 2. An old Secret, before anything is encrypted
+
+The namespace enforces `restricted`, so every Pod later in the lab carries the
+baseline. The Secret is made with the same command a developer would use.
+
+```sh
+kubectl create namespace secrets-lab
+kubectl label namespace secrets-lab pod-security.kubernetes.io/enforce=restricted pod-security.kubernetes.io/audit=restricted pod-security.kubernetes.io/warn=restricted
+kubectl create secret generic db-credentials -n secrets-lab --from-literal=password=lab-marker-0f3c9a
+```
+
+The password is a lab marker, not a credential. It is a fixed string so the
+lab can search for it in etcd.
+
+<!-- gate: output -->
+```
+namespace/p05-04-secrets created
+namespace/p05-04-secrets labeled
+secret/db-credentials created
+```
+
+### 3. The API returns the value, because base64 is not encryption
+
+```sh
+kubectl get secret db-credentials -n secrets-lab -o jsonpath='{.data.password}'; echo
+kubectl get secret db-credentials -n secrets-lab -o jsonpath='{.data.password}' | base64 -d; echo
+```
+
+<!-- gate: output -->
+```
+bGFiLW1hcmtlci0wZjNjOWE=
+lab-marker-0f3c9a
+```
+
+The first line is what the API stores and returns: base64 of the value. The
+second decodes it. Anyone with `get` on the Secret reads the password this way,
+and so does anyone who can read the raw bytes in etcd.
+
+### 4. Attack view: read the Secret out of etcd, from inside the node
+
+This is the view of someone holding the data directory or a backup, with a
+shell on the node. The lab reads etcd through the etcd container's own
+`etcdctl`, with the client certificates the node already holds:
+
+```sh
+etcd_ctl() {
+  local id
+  id=$(docker exec "$NODE" crictl ps -q --label io.kubernetes.container.name=etcd | head -n 1)
+  docker exec "$NODE" crictl exec "$id" etcdctl \
+    --endpoints=https://127.0.0.1:2379 \
+    --cacert=/etc/kubernetes/pki/etcd/ca.crt \
+    --cert=/etc/kubernetes/pki/etcd/server.crt \
+    --key=/etc/kubernetes/pki/etcd/server.key "$@"
+}
+etcd_get() {
+  etcd_ctl get "/registry/secrets/secrets-lab/$1" --print-value-only
+}
+etcd_get db-credentials > db.raw
+head -c 4 db.raw | od -An -c
+grep -a -o 'lab-marker-[0-9a-f]*' db.raw
+```
+
+<!-- gate: output -->
+```
+   k   8   s  \0
+lab-marker-0f3c9a
+```
+
+The first four bytes are `k8s` and a NUL byte: the Kubernetes protobuf envelope
+with no encryption prefix. The value is there as plain text, in the file a
+backup would hold.
+
+### 5. Enable encryption: an aesgcm key encrypts new writes
+
+The config lists one `aesgcm` provider with a random 32-byte key, and
+`identity` last. The first provider encrypts writes. `identity` stays last so
+that the plaintext already in etcd still reads. The script writes the file
+under a temporary name and renames it into place, so the apiserver never reads
+half a file. The file is mode `0600`.
+
+```sh
+head -c 32 /dev/urandom | base64 | tr -d '\n' >key1
+# the script then writes the file and waits for the apiserver to reload it
+sed 's/secret: .*/secret: <redacted>/' "$ENC_DIR/encryption-config.yaml"
+```
+
+The file has the shape below. It is not a Kubernetes object, so there is no
+`kubectl apply` step: the apiserver reads it from disk.
+
+```yaml
+# Fragment: the file the apiserver reads. It is not a Kubernetes object, so
+# it has no kind: line, and kubectl never applies it.
 resources:
-  - resources: ["secrets"]                 # encrypt Secret objects
+  - resources: ["secrets"]
     providers:
-      - kms:                                # PREFERRED: envelope encryption
-          apiVersion: v2
-          name: bookstore-kms
-          endpoint: unix:///var/run/kmsplugin/socket.sock
-          timeout: 3s
-      - aesgcm:                             # fallback: local AES-GCM key
-          keys: [ { name: key1, secret: <BASE64-32-BYTE-KEY> } ]
-      - identity: {}                        # MUST be last (reads legacy plaintext)
+      - aesgcm:
+          keys:
+            - name: key1
+              secret: <base64 of 32 random bytes>
+      - identity: {}
 ```
 
-It is **not dry-run as a Kubernetes object** (it has no API kind); validate it
-as YAML only:
-
-```sh
-# from the repo root (full-guide/)
-ruby -ryaml -e 'YAML.load_file(ARGV[0]); puts "valid YAML"' \
-  examples/bookstore/cluster/encryption-config.yaml
+<!-- gate: output -->
 ```
-
-How it's wired (conceptual — you don't run this on the local lab): place the
-file on every control-plane node (root-only, `0600`), add
-`--encryption-provider-config=…` (+ `--encryption-provider-config-automatic-reload=true`)
-to the kube-apiserver static Pod (kubeadm: edit
-`/etc/kubernetes/manifests/kube-apiserver.yaml`; **kind**:
-`kubeadmConfigPatches` + `extraMounts` in the cluster config). **Provider
-order:** the *first* provider encrypts on write; *all* are tried on read;
-`identity` is no-encryption and must stay **last** until every existing Secret
-is re-encrypted. **Key rotation / first-time adoption** requires rewriting
-existing Secrets so they pick up the new key/provider:
-
-```sh
-# After enabling encryption (or rotating the key): re-encrypt every Secret by
-# reading and replacing it (the apiserver re-writes it through the new provider).
-kubectl get secrets -A -o json | kubectl replace -f -
-#   Until you do this, OLD Secrets remain in their old (or plaintext) form in
-#   etcd — enabling encryption does NOT retroactively encrypt existing data.
-```
-
-**Threat model:** this protects **etcd at rest and etcd backups** only. KMS v2
-**envelope** encryption is preferred (the data key is wrapped by a key in an
-external KMS the apiserver never holds in clear); a local `aesgcm`/`secretbox`
-key is better than nothing but sits on the control plane (useless if that node
-is compromised). `aescbc` is legacy/weaker — prefer `aesgcm` or KMS.
-
-### 2. `audit-policy.yaml` — the flight recorder (apiserver-level)
-
-New file
-[`examples/bookstore/cluster/audit-policy.yaml`](../examples/bookstore/cluster/audit-policy.yaml),
-consumed via `--audit-policy-file=<FILE>` (+ a backend). Also **not** a
-`kubectl` object. It is **first-match** — specific high-value/low-noise rules
-first, a cheap catch-all last:
-
-```yaml
-apiVersion: audit.k8s.io/v1
-kind: Policy
-omitStages: ["RequestReceived"]            # halve volume; outcome is at Complete
-rules:
-  - level: Metadata                        # WHO touched Secrets — never the body
-    resources: [ { group: "", resources: ["secrets","configmaps"] } ]
-    namespaces: ["bookstore","kube-system"]
-  - level: RequestResponse                 # full detail on RBAC changes
-    resources: [ { group: "rbac.authorization.k8s.io",
-                   resources: ["roles","clusterroles","rolebindings","clusterrolebindings"] } ]
-  - level: Request                         # exec/attach/portforward = exfil path
-    resources: [ { group: "", resources: ["pods/exec","pods/attach","pods/portforward"] } ]
-  - level: None                            # noise control: drop chatter
-    verbs: ["get","list","watch"]
-    resources: [ { group: "", resources: ["events","endpoints"] } ]
-  - level: Metadata                        # catch-all LAST (cheap, nothing invisible)
-```
-
-```sh
-ruby -ryaml -e 'YAML.load_file(ARGV[0]); puts "valid YAML"' \
-  examples/bookstore/cluster/audit-policy.yaml
-```
-
-**Stages**: `RequestReceived` (arrival) → `ResponseStarted` (long-running, e.g.
-watch) → `ResponseComplete` (the one to keep) → `Panic`; drop noisy stages with
-`omitStages`. **Levels**: `None` (skip) < `Metadata` (who/what/decision, no
-bodies — the safe default; **never** higher for Secrets, or you'd log the
-secret) < `Request` (+ request body) < `RequestResponse` (+ both bodies —
-heaviest; reserve for RBAC-like high-value, low-volume events). **Backends**: a
-**log** file (`--audit-log-path`, with `--audit-log-max{age,backup,size}`
-rotation) or a **webhook** (`--audit-webhook-config-file`) shipping to a SIEM.
-Wired the same way as the encryption config (kubeadm static-Pod flags +
-hostPath; managed clusters expose it as EKS control-plane logs / GKE Cloud
-Audit Logs / AKS diagnostic settings — see production notes).
-
-### 3. CIS Benchmark with kube-bench
-
-The **CIS Kubernetes Benchmark** is the community hardening standard;
-**kube-bench** checks a cluster against it (apiserver/kubelet/etcd flags, file
-perms, RBAC defaults). Run it as a Job from the official public image:
-
-```sh
-# Public image; runs the checks against THIS node's control-plane config.
-kubectl apply -f https://raw.githubusercontent.com/aquasecurity/kube-bench/main/job.yaml
-kubectl wait --for=condition=complete job/kube-bench --timeout=120s
-kubectl logs job/kube-bench | sed -n '1,40p'
-#   → [PASS]/[FAIL]/[WARN] per CIS control with remediation text. On kind many
-#   controls are N/A or differ (it is not a hardened distro) — the VALUE is the
-#   remediation guidance you apply on a real control plane, not the kind score.
-kubectl delete job kube-bench
-```
-
-### 4. The Bookstore threat model (STRIDE-lite) — every mitigation has a home
-
-Walk the **STRIDE** categories over the Bookstore and map each to the chapter
-that delivered the control (no orphan threats):
-
-```
- THREAT (STRIDE)                         MITIGATION                       WHERE
- ─────────────────────────────────────── ──────────────────────────────── ─────
- Spoofing — fake client / pod identity   TLS + authN; per-service SA;     ch.01
-                                          bound/projected SA tokens
- Tampering — run a modified image         scan + SBOM + Cosign verify +   ch.03
-                                          digest pin + Kyverno admission
- Tampering — modify a running container   readOnlyRootFS; drop ALL caps;  ch.02
-                                          no-priv-escalation (restricted)
- Repudiation — "who did this?"            audit logging (RBAC=full body;  here
-                                          exec/secrets recorded)
- Info disclosure — read DB creds          Secret (not CM) + ENCRYPTION-   Part03
-   from etcd / a backup                    AT-REST (KMS); etcd TLS         + here
- Info disclosure — over-broad reader      least-priv RBAC; no get secrets; ch.01
-                                          exec/attach locked with secrets
- Info disclosure — sniff pod traffic      default-deny NetworkPolicy;     Part02
-                                          both-ends allow only            (+TLS)
- DoS — noisy neighbour exhausts node      requests/limits, QoS;           Part01
-                                          ResourceQuota/LimitRange         ch.03
- DoS — workload starves critical tier     PriorityClass ladder;           Part04
-                                          preemption order
- Elevation — container -> node/root       PSA restricted; seccomp         ch.02
-                                          RuntimeDefault; no privileged
- Elevation — escalate via RBAC            no escalate/bind/impersonate;   ch.01
-                                          RBAC-change auditing             + here
- Elevation — bypass it all via etcd       etcd peer/client TLS, isolated  here
-                                          network, encryption at rest
-```
-
-Every row terminates in a chapter — that *is* defense in depth: no single
-control is trusted, and there is no threat without an owner.
-
-> **Lineage.** This closes Part 05. Encryption-at-rest finishes what
-> [Part 03 ch.02](../03-config-and-storage/02-secrets.md) deliberately
-> deferred; audit logging records the [ch.01](01-authn-authz-rbac.md) authZ
-> decisions and [ch.02](02-pod-security.md) PSA outcomes; the threat model
-> references [Part 02 ch.06](../02-networking/06-network-policies.md) and
-> [Part 04 ch.03](../04-scheduling/03-priority-and-preemption.md). Backup/DR
-> for etcd itself is [Part 08 ch.02](../08-day-2-operations/02-backup-and-dr.md).
-
-## How it works under the hood
-
-- **Where encryption sits in the write path.** A Secret write traverses authN
-  → authZ → admission → *then*, just before the etcd `Put`, the API server runs
-  the configured encryption provider over the serialized object. Reads run it
-  in reverse. So it's transparent to clients (kubelet still gets plaintext,
-  subject to RBAC) and **only** changes the bytes on disk in etcd. This is why
-  it does nothing against `get secrets` or `pods/exec` — those go through the
-  decrypting API server legitimately.
-- **Provider semantics.** `identity` = passthrough (no crypto). `secretbox`
-  (NaCl) and `aesgcm` are AEAD with a **local** key embedded in the config
-  (32-byte, base64) — fast, but the key lives on the control plane.
-  `aescbc` is **weaker (no AEAD/integrity protection); not recommended —
-  prefer `aesgcm` or `secretbox`** (it is not formally deprecated, but there
-  is no reason to choose it for new config). **`kms` v2** is **envelope
-  encryption**: the API server encrypts
-  with a per-write data-encryption key (DEK), the DEK is wrapped by a
-  key-encryption key (KEK) held in an external KMS/HSM the API server never
-  sees in clear; KEK rotation doesn't require rewriting data, and a compromised
-  control-plane disk yields only wrapped DEKs. v2 also caches DEKs for
-  performance and supports health/status checks. **Adoption is not
-  retroactive** — existing Secrets stay in their old form until rewritten
-  (`kubectl get secrets -A -o json | kubectl replace -f -`), which is the
-  single most-missed step.
-- **Audit pipeline internals.** The API server evaluates the **Policy** against
-  each request and emits events at the configured **stages**; matching is
-  **first rule wins**, so ordering *is* the policy. Events go to the backend
-  **asynchronously** (a buffered, batched writer for the log/webhook) so
-  auditing doesn't block request latency — but the buffer can drop under
-  extreme load, which is itself why aggressive `level: None` noise rules
-  matter (less volume = fewer drops + lower cost). Secrets/ConfigMaps must be
-  `Metadata` (logging the body would write the cleartext into the audit log —
-  a classic self-inflicted leak).
-- **API server hardening flags (what to verify).**
-  `--anonymous-auth=false` (no unauthenticated requests),
-  `--authorization-mode=Node,RBAC` (never `AlwaysAllow`),
-  `--profiling=false` (no pprof surface),
-  `--audit-policy-file` + `--audit-log-*` (auditing on),
-  `--encryption-provider-config` (Secrets encrypted),
-  `--service-account-key-file`/`--service-account-signing-key-file` (proper SA
-  token signing), strong TLS (`--tls-cipher-suites`, modern min version),
-  `--request-timeout` and `--max-requests-inflight` (DoS resilience). kube-bench
-  checks these against CIS.
-- **kubelet hardening.** `--anonymous-auth=false` and
-  `--authorization-mode=Webhook` (the kubelet API itself needs authN/authZ —
-  an open kubelet is full node compromise), **`--read-only-port=0`** (the
-  legacy unauthenticated read-only port leaks pod/node data — disable it),
-  `--protect-kernel-defaults=true`, `--tls-cert-file`/rotation
-  (`--rotate-certificates`, `--rotate-server-certificates`),
-  `--make-iptables-util-chains=true`. The kubelet runs as root on the node, so
-  its API is a prime target.
-- **etcd security.** etcd **bypasses RBAC entirely** — raw etcd access is raw
-  access to every object incl. Secrets ([Part 00 ch.04](../00-foundations/04-control-plane-deep-dive.md)).
-  So: mutual **TLS** for client→etcd *and* peer→peer
-  (`--cert-file`/`--key-file`/`--peer-*`/`--trusted-ca-file`), etcd reachable
-  **only** from the API server on an isolated network/firewall, data dir
-  perms locked, **encryption at rest** so even an etcd snapshot file is
-  ciphertext, and snapshots stored encrypted off-cluster (restore-tested —
-  [Part 08 ch.02](../08-day-2-operations/02-backup-and-dr.md)). External-etcd
-  topology isolates this surface further
-  ([Part 00 ch.04](../00-foundations/04-control-plane-deep-dive.md)).
-- **CIS Benchmark / kube-bench.** The CIS benchmark codifies the above into
-  numbered, remediable controls (control-plane configs, etcd, kubelet, policies
-  like "minimize the admission of privileged containers" — which PSA ch.02
-  satisfies). kube-bench runs the checks; the output's *remediation text* is
-  the value (it tells you the exact flag/file to change). Treat a passing
-  kube-bench as a baseline, not a finish line.
-
-## Production notes
-
-> **In production:** **enable Secret encryption at rest with KMS v2** and
-> rotate the KEK on a schedule; remember to **re-encrypt existing Secrets**
-> after enabling/rotating (`kubectl get secrets -A -o json | kubectl replace -f -`) or old data stays unprotected. Without this, etcd and *every etcd
-> backup* hold credentials in reversible base64.
-
-> **In production:** **turn on audit logging** with a policy like this one
-> (Metadata for Secrets, full body for RBAC changes, exec/attach always),
-> ship it to a SIEM via the webhook backend, and **alert** on RBAC mutations,
-> `pods/exec`, and PSA `audit` violations. An attack you can't see in the
-> audit log is an attack you only learn about from the breach report.
-
-> **In production:** run **kube-bench (CIS)** in CI/periodically and drive the
-> FAILs to zero (or documented exceptions): `--anonymous-auth=false`,
-> `--authorization-mode=Node,RBAC`, kubelet `--read-only-port=0`,
-> `--profiling=false`, etcd TLS + isolation, certificate rotation. These are
-> the cheap, high-impact flags attackers look for first.
-
-> **In production:** **isolate and TLS etcd** (client *and* peer), restrict it
-> to the API server, and treat snapshots as crown-jewel data — encrypted, off
-> cluster, restore-rehearsed. Raw etcd access bypasses RBAC, PSA, and admission
-> *entirely*; it is the one place all of Part 05 can be skipped.
-
-> **In production (managed — EKS/GKE/AKS):** you do **not** edit the API
-> server. **EKS**: KMS envelope encryption for Secrets (opt-in) + control-plane
-> audit logs to CloudWatch. **GKE**: Application-layer Secrets Encryption
-> (Cloud KMS) + Cloud Audit Logs (Data Access logs are opt-in and the
-> security-relevant ones). **AKS**: KMS etcd encryption + diagnostic settings
-> to Log Analytics. All are off/limited by default — turning them on is your
-> job; the provider hardens the rest of the control plane.
-
-## Quick Reference
-
-```sh
-# Validate apiserver-level files as YAML (NOT k8s objects) — repo-root paths:
-ruby -ryaml -e 'YAML.load_file(ARGV[0]); puts "valid"' \
-  examples/bookstore/cluster/encryption-config.yaml
-ruby -ryaml -e 'YAML.load_file(ARGV[0]); puts "valid"' \
-  examples/bookstore/cluster/audit-policy.yaml
-kubectl get secrets -A -o json | kubectl replace -f -      # re-encrypt after enable/rotate
-kubectl get --raw=/livez?verbose                           # apiserver health (ch.04 P00)
-# kube-bench (CIS) — public-image Job:
-kubectl apply -f https://raw.githubusercontent.com/aquasecurity/kube-bench/main/job.yaml
-kubectl logs job/kube-bench                                # PASS/FAIL + remediation
-# apiserver/kubelet flags to verify on a real node (NOT on managed):
-#   --anonymous-auth=false  --authorization-mode=Node,RBAC  --profiling=false
-#   --encryption-provider-config=…  --audit-policy-file=…  kubelet --read-only-port=0
-```
-
-Minimal hardening shapes:
-
-```yaml
-# encryption (apiserver --encryption-provider-config) — KMS preferred
+apiserver reloaded the encryption config
+apiserver_encryption_config_controller_automatic_reload_last_timestamp_seconds{apiserver_id_hash="sha256:df5695c37bf9404c5455b2f50853064cda3207ab78268df5267439d
+apiserver_encryption_config_controller_automatic_reloads_total{apiserver_id_hash="sha256:df5695c37bf9404c5455b2f50853064cda3207ab78268df5267439dff1c7a30c",statu
+apiserver_encryption_config_controller_last_config_info{apiserver_id_hash="sha256:df5695c37bf9404c5455b2f50853064cda3207ab78268df5267439dff1c7a30c",hash="sha256
 apiVersion: apiserver.config.k8s.io/v1
 kind: EncryptionConfiguration
 resources:
   - resources: ["secrets"]
     providers:
-      - kms: { apiVersion: v2, name: k, endpoint: unix:///run/kms.sock }
-      - identity: {}                 # last; remove after re-encrypting
----
-# audit (apiserver --audit-policy-file) — first match wins
-apiVersion: audit.k8s.io/v1
-kind: Policy
-omitStages: ["RequestReceived"]
-rules:
-  - level: Metadata
-    resources: [ { group: "", resources: ["secrets"] } ]   # never a higher level
-  - level: RequestResponse
-    resources: [ { group: "rbac.authorization.k8s.io", resources: ["clusterrolebindings"] } ]
-  - level: Metadata                  # catch-all last
+      - aesgcm:
+          keys:
+            - name: key1
+              secret: <redacted>
+      - identity: {}
+```
+
+The reload counter appears in the metrics only after the first reload, so the
+script does not wait on one counter by name. It waits for the encryption
+metrics to change, and the output shows the reload's own lines.
+
+### 6. A new Secret is encrypted, and the old one is not
+
+```sh
+kubectl create secret generic new-credentials -n secrets-lab --from-literal=password=lab-new-7e2d41
+etcd_get new-credentials > new.raw
+grep -a -o 'k8s:enc:[a-z]*:v1:[a-z0-9]*:' new.raw
+grep -a -c 'lab-new-7e2d41' new.raw
+etcd_get db-credentials > db.raw
+grep -a -c 'lab-marker-0f3c9a' db.raw
+```
+
+<!-- gate: output -->
+```
+secret/new-credentials created
+k8s:enc:aesgcm:v1:key1:
+0
+1
+```
+
+The prefix `k8s:enc:aesgcm:v1:key1:` names the provider and the key that wrote
+the value, and the plaintext count for the new Secret is zero. The old Secret
+still holds its plaintext, because enabling encryption is not retroactive. The
+apiserver encrypts on write, and the old bytes stay where they are until the
+Secret is written again.
+
+### 7. Rewrite every Secret, so each one is encrypted
+
+The Kubernetes encryption page gives this command for the rewrite, and says
+that enabling encryption is not enough without it: existing objects keep their
+old form until they are written again.
+
+```sh
+kubectl get secrets --all-namespaces -o json | kubectl replace -f - | grep -c replaced
+etcd_get db-credentials > db.raw
+grep -a -c 'lab-marker-0f3c9a' db.raw
+grep -a -o 'k8s:enc:[a-z]*:v1:[a-z0-9]*:' db.raw
+```
+
+<!-- gate: output -->
+```
+3
+0
+k8s:enc:aesgcm:v1:key1:
+```
+
+Each Secret is read and written back, so the apiserver stores it under the
+first provider. The count of `replaced` lines is the number of Secrets in the
+cluster, and once the plaintext count is zero, the old plaintext is gone from
+etcd.
+
+### 8. Rotate: the new key encrypts, the old key still decrypts, then goes
+
+The rotation order follows the Kubernetes encryption page. The new key goes in
+first, as the encrypting key. The old key stays second so it can still read the
+data it wrote. Then every Secret is rewritten under the new key. Only then is
+the old key removed.
+
+```sh
+head -c 32 /dev/urandom | base64 | tr -d '\n' >key2
+# the script writes key2 first, then key1, and waits for the reload
+kubectl get secrets --all-namespaces -o json | kubectl replace -f - | grep -c replaced
+etcd_get db-credentials > db.raw
+grep -a -o 'k8s:enc:[a-z]*:v1:[a-z0-9]*:' db.raw
+# the script then writes key2 alone, and waits for the reload again
+kubectl get secret db-credentials -n secrets-lab -o jsonpath='{.data.password}' | base64 -d; echo
+```
+
+<!-- gate: output -->
+```
+apiserver reloaded the encryption config
+apiserver_encryption_config_controller_automatic_reload_last_timestamp_seconds{apiserver_id_hash="sha256:df5695c37bf9404c5455b2f50853064cda3207ab78268df5267439d
+apiserver_encryption_config_controller_automatic_reloads_total{apiserver_id_hash="sha256:df5695c37bf9404c5455b2f50853064cda3207ab78268df5267439dff1c7a30c",statu
+apiserver_encryption_config_controller_last_config_info{apiserver_id_hash="sha256:df5695c37bf9404c5455b2f50853064cda3207ab78268df5267439dff1c7a30c",hash="sha256
+3
+k8s:enc:aesgcm:v1:key2:
+```
+
+The prefix changes from `key1` to `key2`, so the rewrite has moved every Secret
+to the new key. After `key1` is dropped, the value still decrypts, because
+nothing is stored under `key1` any more.
+
+<!-- gate: output -->
+```
+apiserver reloaded the encryption config
+apiserver_encryption_config_controller_automatic_reload_last_timestamp_seconds{apiserver_id_hash="sha256:df5695c37bf9404c5455b2f50853064cda3207ab78268df5267439d
+apiserver_encryption_config_controller_automatic_reloads_total{apiserver_id_hash="sha256:df5695c37bf9404c5455b2f50853064cda3207ab78268df5267439dff1c7a30c",statu
+apiserver_encryption_config_controller_last_config_info{apiserver_id_hash="sha256:df5695c37bf9404c5455b2f50853064cda3207ab78268df5267439dff1c7a30c",hash="sha256
+lab-marker-0f3c9a
+```
+
+The Kubernetes page's procedure restarts every apiserver at two points. With
+the automatic reload flag set, the file change is enough, and the lab restarts
+nothing. Keep the backup step. The page says that losing every copy of a key
+means losing every resource encrypted under it, so a key is removed only after
+the rewrite and after a tested backup.
+
+### 9. In use: an environment variable against a mounted file
+
+The app ServiceAccount does not mount a token, and neither Pod calls the API.
+`app-env` reads the password from an environment variable. `app-file` reads it
+from a file the kubelet mounts. Both carry the baseline. They use the namespace
+and the `db-credentials` Secret from step 2.
+
+```yaml
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: app
+  namespace: secrets-lab
+automountServiceAccountToken: false
+```
+
+```yaml
+apiVersion: v1
+kind: Pod
+metadata:
+  name: app-env
+  namespace: secrets-lab
+spec:
+  serviceAccountName: app
+  automountServiceAccountToken: false
+  securityContext:
+    runAsNonRoot: true
+    runAsUser: 65532
+    runAsGroup: 65532
+    seccompProfile:
+      type: RuntimeDefault
+  containers:
+    - name: app
+      image: busybox@sha256:73aaf090f3d85aa34ee199857f03fa3a95c8ede2ffd4cc2cdb5b94e566b11662  # busybox:1.36
+      command: ["sleep", "3600"]
+      env:
+        - name: DB_PASSWORD
+          valueFrom:
+            secretKeyRef:
+              name: db-credentials
+              key: password
+      securityContext:
+        allowPrivilegeEscalation: false
+        readOnlyRootFilesystem: true
+        capabilities:
+          drop: ["ALL"]
+      resources:
+        requests: {cpu: 10m, memory: 16Mi}
+        limits: {memory: 64Mi}
+      volumeMounts:
+        - name: tmp
+          mountPath: /tmp
+  volumes:
+    - name: tmp
+      emptyDir: {}
+```
+
+```yaml
+apiVersion: v1
+kind: Pod
+metadata:
+  name: app-file
+  namespace: secrets-lab
+spec:
+  serviceAccountName: app
+  automountServiceAccountToken: false
+  securityContext:
+    runAsNonRoot: true
+    runAsUser: 65532
+    runAsGroup: 65532
+    fsGroup: 65532
+    seccompProfile:
+      type: RuntimeDefault
+  containers:
+    - name: app
+      image: busybox@sha256:73aaf090f3d85aa34ee199857f03fa3a95c8ede2ffd4cc2cdb5b94e566b11662  # busybox:1.36
+      command: ["sleep", "3600"]
+      securityContext:
+        allowPrivilegeEscalation: false
+        readOnlyRootFilesystem: true
+        capabilities:
+          drop: ["ALL"]
+      resources:
+        requests: {cpu: 10m, memory: 16Mi}
+        limits: {memory: 64Mi}
+      volumeMounts:
+        - name: creds
+          mountPath: /etc/creds
+          readOnly: true
+        - name: tmp
+          mountPath: /tmp
+        - name: cache
+          mountPath: /cache
+        - name: scratch
+          mountPath: /scratch
+  volumes:
+    - name: creds
+      secret:
+        secretName: db-credentials
+        defaultMode: 0440
+        items:
+          - key: password
+            path: password
+    - name: tmp
+      emptyDir: {}
+    - name: cache
+      emptyDir: {}
+    - name: scratch
+      emptyDir:
+        medium: Memory
+        sizeLimit: 8Mi
+```
+
+`defaultMode: 0440` gives the file read access for its owner and its group, and
+`fsGroup` sets that group to 65532, the Pod's own group. The app reads the file
+through its group, and other users have no read access to it.
+
+```sh
+kubectl apply -f app.yaml
+kubectl wait --for=condition=Ready pod/app-env pod/app-file -n secrets-lab --timeout=180s
+kubectl exec -n secrets-lab app-env -- sh -c 'tr "\0" "\n" </proc/1/environ | grep DB_PASSWORD'
+kubectl exec -n secrets-lab app-file -- ls -lL /etc/creds/password
+kubectl exec -n secrets-lab app-file -- cat /etc/creds/password; echo
+kubectl exec -n secrets-lab app-file -- sh -c "grep '/etc/creds ' /proc/mounts | cut -d ' ' -f 3"
+```
+
+<!-- gate: output -->
+```
+serviceaccount/app created
+pod/app-env created
+pod/app-file created
+pod/app-env condition met
+pod/app-file condition met
+DB_PASSWORD=lab-marker-0f3c9a
+-r--r-----    1 root     65532           17 Oct 31 04:19 /etc/creds/password
+lab-marker-0f3c9a
+tmpfs
+```
+
+Two things stand out. The environment variable is in `/proc/1/environ`, which
+the container's own user can read, so every process the container starts
+inherits it. The file is a group-readable `tmpfs` file, and it leaves the
+container when the Pod goes.
+
+Now rotate the value and watch both forms:
+
+```sh
+new=$(printf '%s' lab-marker-rotated | base64 | tr -d '\n')
+kubectl patch secret db-credentials -n secrets-lab --type merge -p "{\"data\":{\"password\":\"$new\"}}"
+for i in $(seq 1 60); do kubectl exec -n secrets-lab app-file -- cat /etc/creds/password 2>/dev/null | grep -q rotated && break; sleep 5; done
+kubectl exec -n secrets-lab app-file -- cat /etc/creds/password; echo
+kubectl exec -n secrets-lab app-env -- sh -c 'tr "\0" "\n" </proc/1/environ | grep DB_PASSWORD'
+```
+
+<!-- gate: output -->
+```
+secret/db-credentials patched
+lab-marker-rotated
+DB_PASSWORD=lab-marker-0f3c9a
+```
+
+The mounted file follows the Secret. The kubelet rewrites it after a delay, and
+the [Secret page](https://kubernetes.io/docs/concepts/configuration/secret/)
+calls the update eventually consistent: the kubelet sync period plus a cache
+delay. The environment variable does not follow. It is read once, when the
+container starts, and only a restart changes it. An app that must see
+rotations has to read a file, and has to reread it.
+
+### 10. Where an emptyDir lives on the node
+
+The `cache` volume is an `emptyDir` on the default medium. The `scratch` volume
+is `medium: Memory`. The app copies the password into both, and the check looks
+at them from the node.
+
+```sh
+kubectl exec -n secrets-lab app-file -- sh -c 'cp /etc/creds/password /cache/password && cp /etc/creds/password /scratch/password'
+uid=$(kubectl get pod -n secrets-lab app-file -o jsonpath='{.metadata.uid}')
+docker exec "$NODE" cat "/var/lib/kubelet/pods/$uid/volumes/kubernetes.io~empty-dir/cache/password"; echo
+docker exec "$NODE" stat -f -c '%T %n' "/var/lib/kubelet/pods/$uid/volumes/kubernetes.io~empty-dir/cache" "/var/lib/kubelet/pods/$uid/volumes/kubernetes.io~empty-dir/scratch"
+```
+
+<!-- gate: output -->
+```
+lab-marker-rotated
+xfs /var/lib/kubelet/pods/df8a04a1-3cb9-46b1-876a-2c45c7fc5180/volumes/kubernetes.io~empty-dir/cache
+tmpfs /var/lib/kubelet/pods/df8a04a1-3cb9-46b1-876a-2c45c7fc5180/volumes/kubernetes.io~empty-dir/scratch
+```
+
+The default `emptyDir` holds the plaintext on the node's own filesystem, which
+here is `xfs`. It survives container restarts and goes with the Pod. The
+[volumes page](https://kubernetes.io/docs/concepts/storage/volumes/#emptydir)
+says the default medium is whatever backs the node, and that with
+`medium: Memory` Kubernetes mounts a tmpfs whose files "count against the
+memory limit of the container that wrote them." The `scratch` copy is in RAM,
+and the Pod's 64Mi limit bounds it. The page does not say how `sizeLimit` is
+enforced on a Memory-backed volume, so the lab does not claim a result for it.
+
+### 11. Clean up
+
+With `MODE=all` the script deletes the throwaway cluster, and the trap removes
+its temporary directories. With `MODE=inuse` it deletes the namespace it made.
+
+```sh
+kind delete cluster --name lab-secrets
+kubectl delete namespace secrets-lab
+```
+
+<!-- gate: output -->
+```
+namespace "p05-04-secrets" deleted
+```
+
+On a healthy host the first line prints `Deleting cluster "p05-enc" ...` and
+returns. The run here printed an error instead, and the next section records
+it.
+
+## What did not work the first time
+
+- **The control plane was slow to start.** The first cluster took about ten
+  minutes to start. The apiserver crashed and restarted until etcd answered,
+  because the disk was saturated. The script raises kubeadm's timeouts for this
+  reason.
+- **Steps 9 and 10 ran out of time on the throwaway cluster.** The Pods never
+  became Ready while the host's disk was busy, and the apiserver restarted
+  under the next commands:
+
+<!-- gate: output -->
+```
+timed out waiting for the condition on pods/app-env
+timed out waiting for the condition on pods/app-file
+error: unable to upgrade connection: container not found ("app")
+```
+
+  The in-use steps were run again on a second kind cluster, and the output
+  blocks above come from that second run. Steps 9 and 10 need no apiserver
+  flag, so `MODE=inuse` can run them on any kind cluster you own.
+- **Step 11 could not delete the throwaway cluster.** The container refused to
+  stop under the same load, and the delete printed this error:
+
+<!-- gate: output -->
+```
+ERROR: failed to delete cluster "p05-enc": failed to delete nodes: command "docker rm -f -v p05-enc-control-plane" failed with error: exit status 1
+```
+
+  The cluster was gone when the host freed up. A rerun needs the host to be
+  quiet, or a longer wait before the delete.
+
+## What the lab did not show
+
+The lab uses an `aesgcm` key held on the node, so the key sits next to the data
+it protects. The Kubernetes encryption page says a locally stored key "only
+moderately improves your security posture, compared to no encryption". The
+production shape is KMS v2. In that provider, the apiserver calls a plugin over
+a socket, and each write uses a data-encryption key generated from a seed. The
+page says the seed rotates whenever the key-encryption key does. A KMS plugin
+needs a key held outside the cluster, which a kind cluster cannot provide.
+**Not run here:** the KMS v2 path is cited to the upstream page, and its
+operation is covered in
+[11.05](../11-advanced-production-patterns/05-secrets-at-scale.md).
+
+The lab also ran on one control-plane node. The page requires the encryption
+file to match on every control-plane node, which a single-node lab does not
+test.
+
+## How it works under the hood
+
+- **The write and read path.** A Secret write passes authN, authZ and admission,
+  then the encryption provider, then etcd. A read runs the same path in reverse.
+  Clients see the decrypted value, so encryption does not change what RBAC
+  allows.
+- **The prefix.** `k8s:enc:aesgcm:v1:key1:` records the provider and key that
+  wrote the value. On read, each provider whose prefix matches the stored bytes
+  attempts decryption. That is why old plaintext, `key1` data and `key2` data
+  can coexist in etcd while the rewrite runs.
+- **Provider strength, from the upstream table.** `aescbc` is weak, and not
+  recommended because of padding-oracle attacks. `aesgcm` is not recommended
+  except with an automated key rotation scheme, and its key must be rotated
+  every 200,000 writes. `secretbox` is strong, but it uses newer technology that
+  some environments review closely. Each local key sits on the control-plane
+  host, so it protects against an etcd or backup reader but not a host
+  compromise.
+- **Reload.** The apiserver polls the file about once a minute, and the metrics
+  above show each reload.
+- **Mounted files.** The kubelet writes them to a `tmpfs` and removes them with
+  the Pod. Updates follow the Secret under the `Watch` cache strategy. A
+  container that mounts a Secret through `subPath` gets no automatic updates.
+- **Listing and privilege.** `list` and `watch` on Secrets read every Secret in
+  the namespace, and the Secret page says so. A container running
+  `privileged: true` on a node can reach Secrets used on that node. Both are
+  RBAC and admission questions, covered in Part 05 ch.01 and ch.02.
+
+## Production notes
+
+> **In production:** encrypt Secrets at rest with a KMS provider, so the
+> key-encryption key lives outside the cluster. Rewrite existing Secrets after
+> enabling or rotating, keep a tested backup of every key, and remove a key only
+> after the rewrite. The operational detail is in
+> [11.05](../11-advanced-production-patterns/05-secrets-at-scale.md) and
+> [15.05](../15-day-to-day-production-ops/05-production-secrets-vault-eso.md).
+
+> **In production (managed clusters):** managed control planes offer their own
+> Secret encryption options, and the provider decides the key and the setup.
+> Check which one your cluster uses, and turn on the KMS-backed option if it is
+> off. [Part 10 ch.01](../10-cloud-and-managed-kubernetes/01-managed-kubernetes-model.md)
+> covers the managed model.
+
+> **In production:** do not depend on environment variables for a credential
+> that rotates. Mount it as a file, and have the app reread the file. Keep the
+> variables for values that never change.
+
+## Quick Reference
+
+```sh
+# Inside the node: which provider and key wrote a Secret.
+etcd_get db-credentials | grep -a -o 'k8s:enc:[a-z]*:v1:[a-z0-9]*:'
+# After enabling or rotating: rewrite every Secret under the first key.
+kubectl get secrets --all-namespaces -o json | kubectl replace -f -
+```
+
+Secure forms only:
+
+```yaml
+# Fragment: a Secret mounted as a read-only file, readable by the Pod's group.
+spec:
+  securityContext:
+    fsGroup: 65532
+  volumes:
+    - name: creds
+      secret:
+        secretName: db-credentials
+        defaultMode: 0440
+        items:
+          - key: password
+            path: password
 ```
 
 Checklist:
 
-- [ ] Secret **encryption at rest** enabled (KMS v2 preferred); existing Secrets re-encrypted
-- [ ] Encryption key/KEK rotation procedure defined and rehearsed
-- [ ] **Audit logging** on: Metadata for Secrets, full body for RBAC, exec/attach captured
-- [ ] Audit shipped off-box (webhook→SIEM); alerts on RBAC change / exec / PSA audit
-- [ ] kube-bench (CIS) run; FAILs remediated or explicitly accepted
-- [ ] `--anonymous-auth=false`, `--authorization-mode=Node,RBAC`, `--profiling=false`
-- [ ] kubelet `--read-only-port=0`, `--anonymous-auth=false`, cert rotation on
-- [ ] etcd client+peer TLS, network-isolated, snapshots encrypted + restore-tested
-- [ ] Threat model reviewed: every threat maps to an owning control/chapter
+- [ ] Secrets encrypted at rest, with a KMS provider where the cluster allows
+- [ ] Every existing Secret rewritten after enabling and after each rotation
+- [ ] A rotation procedure written down, with a tested key backup
+- [ ] No `list` or `watch` on Secrets for workloads; `get` with `resourceNames`
+- [ ] `automountServiceAccountToken: false` on every Pod that makes no API call
+- [ ] Secret values as read-only files: `defaultMode: 0440` and `fsGroup`
+- [ ] Environment variables only for values that never rotate
+- [ ] Secret caches on an `emptyDir` with `medium: Memory` and a `sizeLimit`
 
 ## Test your understanding
 
-> Try each before opening the answer drawer. The act of trying is the exercise; the answer is the check.
+> Try each before opening the answer drawer. The act of trying is the exercise;
+> the answer is the check.
 
-1. **Encryption-at-rest is enabled with KMS v2. Does that mean a developer with `get secrets` RBAC sees ciphertext when they run `kubectl get secret db-credentials -o yaml`? Why or why not?**
+1. **Encryption at rest is on, with KMS v2. A developer with `get` on Secrets
+   runs `kubectl get secret db-credentials -o yaml`. What do they see?**
    <details><summary>Show answer</summary>
 
-   No — they see the **base64-decoded plaintext** as always. Encryption-at-rest only protects the data **on disk in etcd** (and in etcd backups): the apiserver encrypts on write and decrypts on read. The threat model defeated is "attacker steals an etcd snapshot or accesses the etcd disk"; RBAC is still what gates `get secrets` for live API calls. See §Mental model: "It does *nothing* about an attacker with `get secrets` RBAC."
+   They see the base64 of the plaintext, as before. Encryption at rest acts on
+   the bytes stored in etcd. The apiserver decrypts on read for any caller the
+   RBAC allows. The threat it removes is a reader of etcd files or backups. RBAC
+   still decides who gets the value through the API.
 
    </details>
 
-2. **You enable encryption-at-rest in `EncryptionConfiguration` with the new KMS provider listed *second* (identity first). You restart the apiserver and run `kubectl get secrets -A`. New Secrets are encrypted, but old ones aren't. Explain in one sentence why, and what one command re-encrypts everything.**
+2. **You list `identity` first and an `aesgcm` provider second, then restart
+   the apiserver and create a new Secret. What is stored, and what makes the old
+   Secrets encrypted?**
    <details><summary>Show answer</summary>
 
-   The **first** provider listed is used for *writes*; further providers are tried on *reads* (decrypt). With `identity` listed first, new writes go to plaintext; only when KMS is first do new writes get encrypted, and you must rewrite each existing object to re-encrypt it: `kubectl get secrets -A -o json | kubectl replace -f -` reads each Secret and writes it back, which re-encrypts under the current first provider. Then `identity` can be removed.
+   The first provider writes, so `identity` stores the new Secret as plaintext.
+   Only a provider listed first encrypts writes. The restart does not rewrite
+   the old Secrets either. Put the encrypting key first, then run
+   `kubectl get secrets --all-namespaces -o json | kubectl replace -f -` to
+   rewrite every Secret under it. Keep `identity` last until nothing is stored
+   as plaintext.
 
    </details>
 
-3. **Audit-log size is exploding (~5GB/day) because Level: RequestResponse is set on everything. The SRE wants to drop to Level: Metadata everywhere. What do you push back on, and what's the correct policy shape?**
+3. **You are rotating a key. Why must the old key stay in the config until
+   every Secret is rewritten, and why must the new key come first?**
    <details><summary>Show answer</summary>
 
-   Blanket Metadata loses forensic value where it matters most. **First-match wins** — order rules so noisy resources (`events`, leader-election ConfigMaps, kubelet health) are `level: None` *early*, security-sensitive resources (`secrets`, `rbac/*`, `pods/exec`) keep `RequestResponse` (or `Request` for Secrets — never `RequestResponse` because the request body contains the secret value), and a catch-all `Metadata` lands at the end. Drop noise, keep the security forensics. See the audit-policy skeleton in §Quick Reference.
+   The new key goes first so new writes use it. The old key stays so it can
+   still decrypt the data it wrote before the rewrite. Remove it only after the
+   rewrite and a tested backup. Removing it before the rewrite leaves objects
+   that no configured key can read.
 
    </details>
 
-4. **Hands-on extension — read your own audit. Run `kubectl edit clusterrolebinding cluster-admin` (just to open and quit), then `kubectl get pod -n kube-system`. With audit logging on Metadata + RBAC at RequestResponse, what would each event look like in the log, and which one should fire an alert?**
-   <details><summary>What you should see</summary>
+4. **A Pod gets `DB_PASSWORD` from a Secret as an environment variable. The
+   password is rotated. What does the process see, and what would you change?**
+   <details><summary>Show answer</summary>
 
-   The `get pod` event is one Metadata line: `user`, `verb: list`, `resource: pods`, `responseStatus.code: 200`. The `kubectl edit` opens a Metadata-only event for the GET *plus* — if you'd saved — a full RequestResponse event with the full ClusterRoleBinding body in `requestObject` and `responseObject`. The second category (any `update`/`patch`/`create` on `rbac.authorization.k8s.io`) is exactly what your SIEM should alert on: "RBAC changed at 02:14 by user X" is the answer to most "how did the cluster get compromised?" investigations.
+   The process keeps the old value until the container restarts, because the
+   variable is read at start. The lab showed this: after the patch,
+   `/proc/1/environ` still held the old value while the mounted file held the
+   new one. Mount the Secret as a file instead, and have the app reread it. The
+   variable also sits in `/proc/1/environ`, where every process the container
+   starts can read it, which a mounted file does not do.
 
    </details>
 
-5. **A consultant runs kube-bench against your EKS cluster and reports 47 FAILs on "API server flags". Some are legitimate, but most look like control-plane checks. What do you actually need to act on, and what do you defer?**
+5. **The `reader` identity holds `list` on Secrets in a namespace. Why does
+   adding `resourceNames` not stop it from reading every Secret?**
    <details><summary>Show answer</summary>
 
-   On managed EKS the control plane (apiserver, scheduler, controller-manager, etcd) is **owned by AWS** — you cannot set `--anonymous-auth=false` because you don't run the apiserver. Those FAILs are informational; act on **node-side** controls (kubelet `--read-only-port=0`, `--anonymous-auth=false`, kernel hardening) and **workload-side** controls (RBAC, PSA, NetworkPolicy, audit-log destination). Document the control-plane FAILs as "managed-cloud accepted, owner: AWS" rather than chasing them. kube-bench was designed for self-managed; map it carefully on managed platforms.
+   A `list` request asks for the whole collection and names no object, so a name
+   in the rule has nothing to match. Grant `get` with `resourceNames` for the
+   Secrets the workload needs, and do not grant `list` or `watch` at all. The
+   Secret documentation says that granting `list` or `watch` on Secrets allows a
+   subject to read all Secret data in the namespace.
 
    </details>
 
 ## Further reading
 
-- **Rosso et al., _Production Kubernetes_, ch.7 — "Secret Management"** (encryption
-  at rest, KMS, rotation) **and ch.8 — "Admission Control"** (policy-driven
-  hardening) — the production operationalization of this chapter.
-- **Ibryam & Huß, _Kubernetes Patterns_ 2e, ch.25 — _Secure Configuration_**,
-  read alongside the **CIS Kubernetes Benchmark** (the canonical hardening
-  checklist kube-bench implements).
+- Rosso et al., _Production Kubernetes_, ch.7 "Secret Management" (encryption
+  at rest, KMS, rotation): the production operationalization of this chapter.
+- Ibryam & Huß, _Kubernetes Patterns_ 2e, ch.25 _Secure Configuration_.
 - Official:
-  <https://kubernetes.io/docs/tasks/administer-cluster/encrypt-data/>,
-  <https://kubernetes.io/docs/tasks/debug/debug-cluster/audit/>, and the
-  security checklist
-  <https://kubernetes.io/docs/concepts/security/security-checklist/>.
+  <https://kubernetes.io/docs/tasks/administer-cluster/encrypt-data/>
+  (encryption at rest, rotation, the `replace` rewrite, automatic reload),
+  <https://kubernetes.io/docs/concepts/configuration/secret/> (Secret volumes on
+  `tmpfs`, `list` and `watch` exposure, eventual consistency), and
+  <https://kubernetes.io/docs/concepts/storage/volumes/#emptydir> (the emptyDir
+  mediums and memory accounting).
