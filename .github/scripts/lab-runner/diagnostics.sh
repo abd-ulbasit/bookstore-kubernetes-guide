@@ -20,6 +20,13 @@ out=$1
   kubectl get pods -A --no-headers 2>/dev/null \
     | awk '{split($3,a,"/")} ($4=="Completed") {next} ($4!="Running" || a[1]!=a[2]) {print $1, $2, $3, $4}'
   echo
+  echo "== CoreDNS"
+  kubectl -n kube-system get pods -l k8s-app=kube-dns -o wide
+  kubectl -n kube-system logs -l k8s-app=kube-dns --tail=30 2>&1
+  echo
+  echo "== KEDA operator, last lines about the scaler (broker URLs masked)"
+  kubectl -n keda logs deploy/keda-operator --tail=40 2>&1 | sed 's|amqp://[^@]*@|amqp://REDACTED@|g' | cut -c1-400
+  echo
   echo "== recent warning events"
   kubectl get events -A --field-selector type=Warning --sort-by=.lastTimestamp 2>&1 | tail -60
   echo
