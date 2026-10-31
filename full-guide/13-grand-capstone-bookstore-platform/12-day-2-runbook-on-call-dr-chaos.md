@@ -289,14 +289,15 @@ Warning: would violate PodSecurity "restricted:latest": allowPrivilegeEscalation
 deployment.apps/chaos-controller-manager created (server dry run)
 ```
 
-The output in this chapter came from a kind cluster named `sf-pilot`, and its
-namespaces had lab names (`p13-12-chaos-mesh` and `p13-12-experiments`). The
-output is verbatim, so it keeps those names. The first Warning line is Pod
-Security admission reporting what `restricted` would refuse in the daemon, and
-the `privileged` label is what lets the daemon through. The second Warning is
-the controller manager. The chart sets its seccomp profile, but the container
-still lacks `allowPrivilegeEscalation: false`, a dropped capability set and
-`runAsNonRoot`, as the section above explains.
+The output in this chapter came from a kind cluster named `sf-pilot`. Its
+experiments namespace had a lab name, `p13-12-experiments`, and the output
+below that names it keeps it. The captured run's Chaos Mesh namespace had a
+lab name too; the transcript shows it as `chaos-mesh`. The first Warning line
+is Pod Security admission reporting what `restricted` would refuse in the
+daemon, and the `privileged` label is what lets the daemon through. The second
+Warning is the controller manager. The chart sets its seccomp profile, but the
+container still lacks `allowPrivilegeEscalation: false`, a dropped capability
+set and `runAsNonRoot`, as the section above explains.
 
 ### 1. Apply the runbook tree
 

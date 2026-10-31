@@ -76,6 +76,7 @@ exceptions:
     upstream: https://kubernetes.io/docs/concepts/security/pod-security-standards/
     chapter: 06-production-readiness/01-observability-metrics.md
     expires: 2027-10-31
+
   - namespace: crossplane-system
     level: baseline
     reason: >-
@@ -101,17 +102,6 @@ exceptions:
     chapter: 13-grand-capstone-bookstore-platform/04-real-auth-keycloak-irsa-istio-jwt.md
     expires: 2027-06-30
 
-  - namespace: p13-02-crossplane
-    level: baseline
-    reason: >-
-      The captured run for 13.02 labelled a stand-in for crossplane-system, the
-      namespace this chapter's Crossplane install uses, at the same levels. The
-      run deleted it at the end, and the transcript records the substitution.
-      The reason is the one given for crossplane-system.
-    upstream: https://github.com/crossplane/crossplane/blob/v2.4.3/internal/controller/pkg/runtime/runtime.go
-    chapter: 13-grand-capstone-bookstore-platform/02-tenancy-and-crossplane-onboarding.md
-    expires: 2027-06-30
-
   - namespace: chaos-mesh
     level: privileged
     reason: >-
@@ -121,17 +111,6 @@ exceptions:
       forbids host namespaces and privileged containers, so only privileged
       admits the daemon. The controller manager and the DNS server share the
       namespace. The experiments run in a restricted namespace of their own.
-    upstream: https://github.com/chaos-mesh/chaos-mesh/blob/v2.7.0/helm/chaos-mesh/values.yaml
-    chapter: 13-grand-capstone-bookstore-platform/12-day-2-runbook-on-call-dr-chaos.md
-    expires: 2027-06-30
-
-  - namespace: p13-12-chaos-mesh
-    level: privileged
-    reason: >-
-      The captured run for 13.12 labelled a stand-in for chaos-mesh, the
-      namespace this chapter's Chaos Mesh install uses, at the same level. The
-      run deleted it at the end, and the transcript records the substitution.
-      The reason is the one given for chaos-mesh.
     upstream: https://github.com/chaos-mesh/chaos-mesh/blob/v2.7.0/helm/chaos-mesh/values.yaml
     chapter: 13-grand-capstone-bookstore-platform/12-day-2-runbook-on-call-dr-chaos.md
     expires: 2027-06-30

@@ -140,7 +140,7 @@ not something these chapters deliver.
 | One tenant exhausts the cluster | ResourceQuota and LimitRange composed per tenant | [01.03](../01-core-workloads/03-resources-and-qos.md) |
 | A tenant name lands on a platform namespace | The XRD refuses reserved names (Hands-on section 3) | This chapter |
 | A tenant pod runs privileged | Tenant namespace labelled `restricted` | [05.02](../05-security/02-pod-security.md) |
-| The Crossplane provider credential is stolen or over-used | Provider ServiceAccount bound to a named ClusterRole, never cluster-admin, and a ValidatingAdmissionPolicy that confines its RoleBindings to tenant namespaces (Hands-on section 1) | [05.01](../05-security/01-authn-authz-rbac.md) |
+| The Crossplane provider credential is stolen or over-used | Provider ServiceAccount with a fixed name, bound to a named ClusterRole, never cluster-admin, and a ValidatingAdmissionPolicy that matches that one identity and confines its RoleBindings to tenant namespaces (Hands-on section 1) | [05.01](../05-security/01-authn-authz-rbac.md) |
 
 ## Diagrams
 
@@ -298,13 +298,23 @@ helm install crossplane crossplane-stable/crossplane \
   --version "$CROSSPLANE_CHART_VERSION" \
   -n crossplane-system -f crossplane-values.yaml --wait
 
-# provider-kubernetes — lets the Composition manage in-cluster objects.
+# provider-kubernetes lets the Composition manage in-cluster objects. The
+# DeploymentRuntimeConfig gives its pod a ServiceAccount with a fixed name; the
+# RBAC and the admission policy below both name that one identity.
 kubectl apply -f - <<EOF
+apiVersion: pkg.crossplane.io/v1beta1
+kind: DeploymentRuntimeConfig
+metadata: { name: provider-kubernetes }
+spec:
+  serviceAccountTemplate:
+    metadata: { name: provider-kubernetes }
+---
 apiVersion: pkg.crossplane.io/v1
 kind: Provider
 metadata: { name: provider-kubernetes }
 spec:
   package: xpkg.crossplane.io/crossplane-contrib/provider-kubernetes@${PROV_KUBERNETES_DIGEST}
+  runtimeConfigRef: { name: provider-kubernetes }
 EOF
 kubectl wait --for=condition=Healthy provider/provider-kubernetes --timeout=300s
 
@@ -338,9 +348,8 @@ The values file adds those to both chart Deployments, `crossplane` and
 `crossplane-rbac-manager`, and to their pods. Render the two Deployments with
 those values and dry-run them in a namespace labelled `restricted`. The output
 block below is captured from a lab run on a cluster with a different name. That
-run used a stand-in namespace, `p13-02-restricted`, for `crossplane-values-check`,
-and a stand-in tenant-admin role with pods and secrets rules, so the names show
-in the output:
+run used a stand-in namespace, `p13-finish-restricted`, for
+`crossplane-values-check`:
 
 ```sh
 helm template crossplane crossplane-stable/crossplane \
@@ -369,17 +378,33 @@ profile. Those pods are what the `crossplane-system` entry in
 need the exception.
 
 The provider's ServiceAccount is the most valuable credential in this
-chapter: it creates every tenant namespace and binds roles inside them. Give
-it the kinds the Composition stamps, then scope where it may use them. The
-ClusterRole below is bound cluster-wide, so a policy has to narrow it. The `bind` rule
-matters. Kubernetes refuses a RoleBinding to a ClusterRole unless the creator
-holds that role's permissions or holds `bind` on it.
+chapter: it creates every tenant namespace and binds roles inside them. The
+grant and the restriction on it must name the same identity, so the identity
+has a fixed name. Left alone, Crossplane names the ServiceAccount after the
+package revision, and that name changes with each upgrade. A grant or a
+policy written against a pattern of generated names fails open the first time
+the pod runs under a name the pattern does not cover. The
+`DeploymentRuntimeConfig` in the install block sets
+`serviceAccountTemplate.metadata.name`, and Crossplane creates the
+ServiceAccount with that name in its own namespace. The Crossplane v2.4.3
+source shows this:
+[`runtime.go`](https://github.com/crossplane/crossplane/blob/v2.4.3/internal/controller/pkg/runtime/runtime.go)
+falls back to the revision name only when the template leaves the name empty.
+Once the provider is Healthy, confirm that its pod runs as that
+ServiceAccount. The answer should be `provider-kubernetes`. The lab run could
+not capture it, because the lab has no Crossplane:
 
 ```sh
-PROV_SA=$(kubectl -n crossplane-system get pods \
+kubectl -n crossplane-system get pods \
   -l pkg.crossplane.io/provider=provider-kubernetes \
-  -o jsonpath='{.items[0].spec.serviceAccountName}')
+  -o jsonpath='{.items[0].spec.serviceAccountName}{"\n"}'
 ```
+
+Give that identity the kinds the Composition stamps, then scope where it may
+use them. The ClusterRole below is bound cluster-wide, so a policy has to
+narrow it. The `bind` rule matters. Kubernetes refuses a RoleBinding to a
+ClusterRole unless the creator holds that role's permissions or holds `bind`
+on it. The binding below names that one ServiceAccount and nothing wider.
 
 ```sh
 kubectl apply -f - <<EOF
@@ -406,7 +431,7 @@ rules:
 EOF
 kubectl create clusterrolebinding bookstore-platform-provider-kubernetes \
   --clusterrole=bookstore-platform-provider-kubernetes \
-  --serviceaccount=crossplane-system:"${PROV_SA}"
+  --serviceaccount=crossplane-system:provider-kubernetes
 ```
 
 Check the direct grants. The first two answers are what the Composition needs;
@@ -414,7 +439,7 @@ the other three are refused. These rows test direct grants only, so the bind
 path is tested after the policy below:
 
 ```sh
-PROV="system:serviceaccount:crossplane-system:${PROV_SA}"
+PROV="system:serviceaccount:crossplane-system:provider-kubernetes"
 kubectl auth can-i create namespaces --as="$PROV"
 kubectl auth can-i create networkpolicies -n bookstore-platform-acme-books --as="$PROV"
 kubectl auth can-i get secrets -n bookstore-platform-acme-books --as="$PROV"
@@ -438,7 +463,9 @@ no
 ```
 
 Without the `bind` rule, the provider's RoleBinding step fails. The captured
-run removed that rule and dry-ran the tenant RoleBinding as the provider:
+run removed that rule and dry-ran the tenant RoleBinding as the provider. It
+used a stand-in tenant-admin role with rules on pods and secrets, so that the
+refusal lists what the provider lacks:
 
 ```sh
 kubectl create rolebinding bookstore-tenant-admin -n bookstore-platform-acme-books \
@@ -449,7 +476,7 @@ kubectl create rolebinding bookstore-tenant-admin -n bookstore-platform-acme-boo
 
 <!-- gate: output -->
 ```text
-error: failed to create rolebinding: rolebindings.rbac.authorization.k8s.io "bookstore-tenant-admin" is forbidden: user "system:serviceaccount:p13-02-crossplane:provider-kubernetes" (groups=["system:serviceaccounts" "system:serviceaccounts:p13-02-crossplane" "system:authenticated"]) is attempting to grant RBAC permissions not currently held:
+error: failed to create rolebinding: rolebindings.rbac.authorization.k8s.io "bookstore-tenant-admin" is forbidden: user "system:serviceaccount:crossplane-system:provider-kubernetes" (groups=["system:serviceaccounts" "system:serviceaccounts:crossplane-system" "system:authenticated"]) is attempting to grant RBAC permissions not currently held:
 {APIGroups:[""], Resources:["pods"], Verbs:["get" "list" "watch" "create"]}
 {APIGroups:[""], Resources:["secrets"], Verbs:["get" "list" "watch" "create"]}
 ```
@@ -462,9 +489,15 @@ provider may bind. Without a scope, a RoleBinding to tenant-admin in
 `kube-system` passes both the `rolebindings` rule and the `bind` rule, and the
 bound role then reads that namespace's Secrets. The `can-i` rows above test
 direct grants, so they do not show that path. The policy below closes it. It
-matches the provider's identity, any ServiceAccount named `provider-kubernetes`,
-and allows its RoleBindings only in tenant namespaces, only to
-`bookstore-platform-tenant-admin`. It also limits its namespace updates and
+matches exactly one identity,
+`system:serviceaccount:crossplane-system:provider-kubernetes`. That is the
+ServiceAccount the `DeploymentRuntimeConfig` names and the only subject of the
+ClusterRoleBinding, so the grant and the restriction name the same identity.
+The match is an equality test on the full user name, not a pattern. If the
+`DeploymentRuntimeConfig` name ever changes, the binding stops reaching the
+pod and the provider loses its rights; it does not keep them unrestricted. The
+policy allows the provider's RoleBindings only in tenant namespaces, and only
+to `bookstore-platform-tenant-admin`. It also limits its namespace updates and
 deletes to tenant namespaces. The policy file is
 [`provider-scope-policy.yaml`](../examples/bookstore-platform/crossplane/provider-scope-policy.yaml).
 
@@ -477,7 +510,7 @@ the tenant label that the Composition stamps, and one does not. The lab run
 created both namespaces for the test and deleted them at the end:
 
 ```sh
-PROV="system:serviceaccount:crossplane-system:${PROV_SA}"
+PROV="system:serviceaccount:crossplane-system:provider-kubernetes"
 kubectl create rolebinding bookstore-tenant-admin -n bookstore-platform-untenanted \
   --clusterrole=bookstore-platform-tenant-admin \
   --group=oidc:tenant-acme-books-admins --dry-run=server --as="$PROV"
@@ -497,14 +530,59 @@ error: failed to create rolebinding: rolebindings.rbac.authorization.k8s.io "boo
 # ...
 rolebinding.rbac.authorization.k8s.io/bookstore-tenant-admin created (server dry run)
 # ...
-The namespaces "p13-02-untenanted" is invalid: : ValidatingAdmissionPolicy 'bookstore-platform-provider-scope' with binding 'bookstore-platform-provider-scope' denied request: The provider may update or delete only tenant namespaces.
+The namespaces "p13-finish-untenanted" is invalid: : ValidatingAdmissionPolicy 'bookstore-platform-provider-scope' with binding 'bookstore-platform-provider-scope' denied request: The provider may update or delete only tenant namespaces.
 # ...
-namespace/p13-02-tenant labeled (server dry run)
+namespace/p13-finish-tenant labeled (server dry run)
 ```
 
 The first and third calls are refused by the policy even though the RBAC rules
 allow them. The second and fourth pass. The lab's stand-in namespaces are
-named `p13-02-untenanted` and `p13-02-tenant` in the output above.
+named `p13-finish-untenanted` and `p13-finish-tenant` in the output above.
+
+One more check shows why the binding must stay on a single subject. It is a
+deliberate step, not part of the install. It binds the same ClusterRole to two
+other names: a generated-looking name in `crossplane-system`, and the same
+name in another namespace. It then dry-runs the refused RoleBinding as each.
+The policy matches neither, so both pass. The step bound them by hand; nothing
+else in this chapter does. Delete the binding afterwards. The lab run named it
+`p13-finish-lookalike`:
+
+```sh
+kubectl create clusterrolebinding lookalike-check \
+  --clusterrole=bookstore-platform-provider-kubernetes \
+  --serviceaccount=crossplane-system:provider-kubernetes-abc123 \
+  --serviceaccount=other:provider-kubernetes
+kubectl create rolebinding bookstore-tenant-admin -n bookstore-platform-untenanted \
+  --clusterrole=bookstore-platform-tenant-admin \
+  --group=oidc:tenant-acme-books-admins --dry-run=server \
+  --as=system:serviceaccount:crossplane-system:provider-kubernetes-abc123
+kubectl create rolebinding bookstore-tenant-admin -n bookstore-platform-untenanted \
+  --clusterrole=bookstore-platform-tenant-admin \
+  --group=oidc:tenant-acme-books-admins --dry-run=server \
+  --as=system:serviceaccount:other:provider-kubernetes
+kubectl delete clusterrolebinding lookalike-check
+```
+
+<!-- gate: output -->
+```text
+rolebinding.rbac.authorization.k8s.io/bookstore-tenant-admin created (server dry run)
+# ...
+rolebinding.rbac.authorization.k8s.io/bookstore-tenant-admin created (server dry run)
+```
+
+Both calls pass, in the namespace without the tenant label. That is the
+failure the earlier prefix match allowed whenever a ServiceAccount under
+another name held the role. Keep the binding on `provider-kubernetes` alone,
+and treat any second subject on that ClusterRole as a change to this policy as
+well.
+
+The two `Provider` and `DeploymentRuntimeConfig` objects in the install block
+were not run on a cluster. The lab has no Crossplane, so a server dry run
+refuses both kinds for want of their CRDs. The captured run checked the two
+manifests against the CRD schemas at Crossplane v2.4.3 instead, with a local
+script, and a misspelt field and a wrong type each fail that check. A schema
+check shows the manifests are well formed. It does not show the pod running
+as `provider-kubernetes`; the `jsonpath` check above does, on a real install.
 
 ### 2. Apply the XRD + Composition
 
@@ -867,7 +945,11 @@ Checklist (a tenant is correctly onboarded when all five are yes):
    read the Secrets there. The `can-i` rows test direct grants and do not show
    that path. The `bookstore-platform-provider-scope` policy closes it: the
    provider's RoleBindings go only into tenant namespaces, and only to
-   tenant-admin. Cluster-admin would add every other verb on every namespace,
+   tenant-admin. The policy matches the one ServiceAccount the binding names,
+   `crossplane-system:provider-kubernetes`, which the
+   `DeploymentRuntimeConfig` fixes. A prefix match on generated names would
+   leave any ServiceAccount outside the pattern holding the role without the
+   restriction. Cluster-admin would add every other verb on every namespace,
    including direct reads of every Secret.
 
    </details>
