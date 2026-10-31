@@ -23,9 +23,9 @@
 apiVersion: kustomize.config.k8s.io/v1alpha1
 kind: Component
 images:
-- name: bookstore/catalog
-  newName: registry.example.com/bookstore/catalog
-  newTag: 1.0.0
+- digest: sha256:eaa26ada0a2e1575026a5e71e74572ed0bfdde80f50012e91a7be28f0de16ced
+  name: bookstore/catalog
+  newName: ghcr.io/abd-ulbasit/bookstore-catalog
 - name: bookstore/orders
   newName: registry.example.com/bookstore/orders
   newTag: 1.0.0
