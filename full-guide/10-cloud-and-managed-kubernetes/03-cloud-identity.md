@@ -74,7 +74,7 @@ JWT; the cloud is told to trust that signer and hand back temporary
 credentials scoped to exactly X/Y. No shared, no static, no node-wide.**
 
 - **The cluster is an OIDC provider.** A managed cluster exposes an **OIDC
-  issuer URL** with a public JWKS (set at create time —
+  issuer URL** with a public JWKS (enabled before workloads need it, see
   [ch.02](02-provisioning-and-iac.md): `eksctl … withOIDC` /
   `--workload-pool` / `--enable-oidc-issuer`). The kubelet projects a
   **ServiceAccount token** into the Pod that is *signed by the cluster*,
@@ -92,8 +92,8 @@ credentials scoped to exactly X/Y. No shared, no static, no node-wide.**
   Pod reads the projected token off disk, asks the cloud token service for
   credentials, and gets back **short-lived credentials for that one role**
   with **that role's least-privilege policy** (for example `s3:GetObject` on
-  exactly `arn:aws:s3:::your-org-book-covers/*`). They expire and the SDK
-  refreshes them. No key is ever stored.
+  the objects under `covers/` in `your-org-book-covers`). They expire and the
+  SDK refreshes them. No key is ever stored.
 - **It is per-ServiceAccount, therefore per-workload.** Because the boundary
   is the SA's `sub` claim, **`catalog-sa` and `orders-sa` get different cloud
   roles** with different policies: the [Part 05
@@ -230,16 +230,20 @@ kubectl get secrets -n bookstore        # db-credentials (DEMO) only; NO cloud k
 The `automountServiceAccountToken: false` line is a baseline field: it stops
 the kubelet mounting the default API token. The
 [baseline](../01-core-workloads/01-pods.md#baseline-service-account) explains
-it. It does not block the cloud identity below, which uses its own projected
-token. Step 3 checks that with a dry run.
+it. Whether the IRSA webhook still adds its projected token with this
+setting is checked on your cluster at 2a. Step 3 checks only the stored
+fields of a Pod with that token shape, with a dry run. It does not test the
+webhook.
 
 The objective: add bucket read for `catalog` **without** ever introducing a
 cloud key into that list.
 
 ### 2a. EKS — IRSA (OIDC provider, role trust and SA annotation)
 
-The cluster's OIDC provider was registered at create time
-([ch.02](02-provisioning-and-iac.md): `iam.withOIDC: true`). Create an IAM
+The cluster's OIDC provider has to exist before the role can trust it.
+[ch.02](02-provisioning-and-iac.md) creates it with `iam.withOIDC: true`, and
+`eksctl utils associate-iam-oidc-provider` adds it to a cluster that lacks one.
+Create an IAM
 role whose **trust policy** federates the cluster issuer for *exactly*
 `catalog-sa`, attach a least-privilege bucket policy, then annotate the SA:
 
@@ -264,7 +268,7 @@ aws iam create-role --role-name bookstore-catalog-s3 \
 aws iam put-role-policy --role-name bookstore-catalog-s3 \
   --policy-name read-covers --policy-document '{"Version":"2012-10-17",
    "Statement":[{"Effect":"Allow","Action":["s3:GetObject"],
-   "Resource":"arn:aws:s3:::your-org-book-covers/*"}]}'
+   "Resource":"arn:aws:s3:::your-org-book-covers/covers/*"}]}'
 ```
 
 The only Kubernetes-side change is the annotation. The manifest below is the
@@ -289,9 +293,20 @@ automountServiceAccountToken: false
 
 ```sh
 kubectl apply -f catalog-sa-irsa.yaml
+# The catalog container runs as UID and GID 65532, so it needs fsGroup to read
+# the token file that the webhook projects (the note below explains).
+kubectl patch deployment catalog -n bookstore --type merge \
+  -p '{"spec":{"template":{"spec":{"securityContext":{"fsGroup":65532}}}}}'
 kubectl rollout restart deployment/catalog -n bookstore   # new Pods get the token
 # The app code is UNCHANGED, and there is STILL no key in any Secret.
 ```
+
+The IRSA webhook README says that a non-root container needs `fsGroup` set in
+its `securityContext` to reach the token file (cited, checked 2026-10-31). The
+canonical `catalog` Deployment runs as 65532 with no `fsGroup`, so the patch
+adds one. The value matches the `runAsGroup` of 65532 that the probe in step 3
+sets. [01.01](../01-core-workloads/01-pods.md#baseline-fsgroup) explains when a
+volume needs `fsGroup`, and a projected token volume is one such case.
 
 The IRSA webhook adds a projected token and the variables the AWS SDKs read
 for web identity, to Pods that use an annotated ServiceAccount. The IRSA pages
@@ -300,6 +315,10 @@ checked for this chapter do not say how the webhook behaves when
 works either way. Keep the setting, restart the Pods, and confirm on your EKS
 cluster that a catalog Pod has the web identity variables and a token file. If
 it does not, the setting needs a reviewed exception, not a silent change.
+
+The catalog Pods also need egress to STS and S3. The Bookstore's default-deny
+egress blocks that path, so add the rule in the NetworkPolicy section below
+before you rely on the role.
 
 ### 2b. EKS — Pod Identity (an association, no annotation)
 
@@ -320,7 +339,7 @@ aws iam create-role --role-name bookstore-catalog-s3-podid \
 aws iam put-role-policy --role-name bookstore-catalog-s3-podid \
   --policy-name read-covers --policy-document '{"Version":"2012-10-17",
    "Statement":[{"Effect":"Allow","Action":["s3:GetObject"],
-   "Resource":"arn:aws:s3:::your-org-book-covers/*"}]}'
+   "Resource":"arn:aws:s3:::your-org-book-covers/covers/*"}]}'
 
 # The agent runs on every node, in kube-system. The node role must allow
 # eks-auth:AssumeRoleForPodIdentity; the AWS managed policy
@@ -352,7 +371,7 @@ documents. The annotation belongs to that method.
 gcloud iam service-accounts create bookstore-catalog
 gcloud storage buckets add-iam-policy-binding gs://your-org-book-covers \
   --member="serviceAccount:bookstore-catalog@$PROJECT.iam.gserviceaccount.com" \
-  --role="roles/storage.objectViewer"          # READ ONLY, this bucket
+  --role="roles/storage.objectViewer"          # a predefined read-only role on this bucket
 gcloud iam service-accounts add-iam-policy-binding \
   bookstore-catalog@$PROJECT.iam.gserviceaccount.com \
   --role roles/iam.workloadIdentityUser \
@@ -363,7 +382,9 @@ kubectl annotate sa catalog-sa -n bookstore \
 
 Both the IAM binding and the annotation are required for this method. The
 member name `PROJECT.svc.id.goog[NS/KSA]` names the cluster's workload identity
-pool and the one ServiceAccount inside it.
+pool and the one ServiceAccount inside it. `roles/storage.objectViewer` is a
+predefined role, not one action: it also lets the account list the bucket's
+objects.
 
 ### 2d. Microsoft Entra Workload ID on AKS (a federated credential)
 
@@ -422,6 +443,7 @@ spec:
     runAsNonRoot: true
     runAsUser: 65532
     runAsGroup: 65532
+    fsGroup: 65532
     seccompProfile:
       type: RuntimeDefault
   containers:
@@ -475,9 +497,9 @@ aws-iam-token sts.amazonaws.com
 ```
 
 The stored Pod has no default token volume, and it has the projected token
-with the STS audience. The dry run does not show a token file inside a running
-container. That needs a Pod that runs on your cluster, and the lab did not run
-one.
+with the STS audience. The probe also sets `fsGroup`, as 2a explains. The dry
+run does not show a token file inside a running container. That needs a Pod
+that runs on your cluster, and the lab did not run one.
 
 **The deliberate failure.** Save a copy as `catalog-hostnet-probe.yaml`, with
 `name: catalog-hostnet-probe` and `hostNetwork: true` added under `spec:`.
@@ -494,24 +516,30 @@ Error from server (Forbidden): error when creating "STDIN": pods "catalog-hostne
 
 A Pod on the host network shares the node's network namespace. The IRSA guide
 notes that such Pods always have IMDS access, although the SDKs use IRSA
-credentials when IRSA is enabled (cited in Further reading). The Pod Security
-Standards forbid host namespaces at the baseline level, and the restricted
-level builds on the baseline (cited). That is why the namespace label in the baseline matters: it refuses
+credentials when IRSA is enabled (checked 2026-10-31, cited in Further
+reading). The Pod Security Standards forbid host namespaces at the baseline
+level, and the restricted level builds on the baseline (checked 2026-10-31,
+cited). That is why the namespace label in the baseline matters: it refuses
 the Pod that would skip the metadata controls below.
 
 **The other ServiceAccount.** `orders-sa` has no cloud annotation, association
 or binding, so its Pods get no cloud identity from this chapter:
 
 ```sh
-kubectl get sa orders-sa -n bookstore -o yaml | grep -c -E 'role-arn|gcp-service-account|client-id' || true
+kubectl get sa orders-sa -n bookstore -o name; \
+  kubectl get sa orders-sa -n bookstore -o yaml | \
+  grep -c -E 'role-arn|gcp-service-account|client-id' || true
 ```
 
 <!-- gate: output -->
 ```
+serviceaccount/orders-sa
 0
 ```
 
-A count of `0` means none of the three ServiceAccount annotations is set. A
+The first command fails if `orders-sa` does not exist. Step 1 applied the
+ServiceAccounts, so it does. A count of `0` then means none of the three
+ServiceAccount annotations is set. A
 Pod Identity association is not stored in the cluster, so check those in the
 EKS console or with the AWS CLI for the cluster. A compromised `catalog` Pod can
 use only `catalog`'s role, which allows `s3:GetObject` on one bucket prefix:
@@ -555,12 +583,22 @@ aws ec2 modify-instance-metadata-options --instance-id <instance-id> \
   --http-tokens required --http-put-response-hop-limit 1
 ```
 
-Put the same settings in the launch template for managed node groups, so that
-new nodes match. Do not turn instance metadata off: node components rely on it
-(cited). The eksctl and CloudFormation node templates set the hop limit to 2 so
-that Pods can reach IMDS through the extra hop (cited). A node built from those
-templates stays open to Pods until you change this. Requiring IMDSv2 also means
-that IMDSv1 requests fail, so check that your agents use IMDSv2 first (cited).
+Before you lower the hop limit, move the Pods that still read the node role onto
+their own identity. The EKS best practices guide warns that blocking instance
+metadata stops Pods that do not use IRSA or Pod Identity from inheriting the
+node role (checked 2026-10-31, cited). The EBS CSI driver and the AWS Load
+Balancer Controller are the usual cases. [ch.05](05-cloud-storage-and-data.md)
+and [ch.04](04-cloud-networking-and-load-balancing.md) give each one an IRSA
+role, so their AWS calls no longer depend on the node role. Then put the same
+settings in the launch template for managed node groups, so that new nodes
+match. Do not turn instance metadata off: node components rely on it (cited).
+The eksctl and CloudFormation node templates set the hop limit to 2, so that
+Pods can reach IMDS through the extra hop (cited). A node built from those
+templates stays open to Pods until you change this. The eksctl config in
+[ch.02](02-provisioning-and-iac.md) sets `disablePodIMDS: true` for this
+reason, and its Terraform module writes the hop limit of 1 out. Requiring IMDSv2
+also means that IMDSv1 requests fail, so check that your agents use IMDSv2
+first (cited).
 
 ### GKE: the metadata server and concealment
 
@@ -584,21 +622,34 @@ cluster whose network plugin enforces policy. The Kubernetes docs say a
 NetworkPolicy with no enforcing controller has no effect (cited). A
 NetworkPolicy has no deny rule: policies only add allowed flows, and a namespace
 that has a default-deny egress policy reaches a destination only if a rule
-allows it ([02.06](../02-networking/06-network-policies.md)). Where a policy has
-to allow broad egress, add the metadata address to the `except` list of the
-`ipBlock`:
+allows it ([02.06](../02-networking/06-network-policies.md)). The catalog Pods
+are in that position. Rule 7 of the Bookstore's `60-networkpolicy.yaml` allows
+them egress to PostgreSQL, Redis and RabbitMQ, and rule 2 allows DNS. The STS
+and S3 calls are blocked until a rule allows them. Add these rules to the
+catalog egress, owned by [02.06](../02-networking/06-network-policies.md):
 
 ```yaml
-# A fragment of an egress rule, for a policy that allows broad egress.
-to:
-  - ipBlock:
-      cidr: 0.0.0.0/0
-      except:
-        - 169.254.169.254/32
+# A fragment, not a manifest: rules to add to the catalog egress.
+- to:
+    - ipBlock:
+        cidr: 0.0.0.0/0
+        except:
+          - 169.254.169.254/32   # the instance metadata address stays out
+  ports:
+    - { protocol: TCP, port: 443 }   # STS and S3
+- to:
+    - ipBlock:
+        cidr: 169.254.170.23/32   # the EKS Pod Identity agent
+  ports:
+    - { protocol: TCP, port: 80 }
 ```
 
-The EKS Pod Identity agent listens on `169.254.170.23`, not on the metadata
-address. So a block on `169.254.169.254` leaves Pod Identity working (cited).
+The 443 rule is broad because a NetworkPolicy matches IP blocks, not DNS
+names, and the STS and S3 addresses are not fixed. The VPC endpoints in
+[14.08](../14-eks-in-production-a-to-z/08-vpc-endpoints-and-egress.md) narrow
+it. The metadata address stays excluded in the first rule. The EKS Pod Identity
+agent listens on `169.254.170.23`, not on the metadata address, so the second
+rule reaches it on port 80 (cited, checked 2026-10-31).
 
 ## How it works under the hood
 
@@ -619,10 +670,17 @@ address. So a block on `169.254.169.254` leaves Pod Identity working (cited).
   and that `sub` equals `system:serviceaccount:<NS>:<SA>`. A wrong namespace, a
   misspelt ServiceAccount, a missing OIDC provider or the wrong audience makes
   the exchange fail. The STS API documents `InvalidIdentityToken` for a token
-  it cannot validate, and `IDPRejectedClaim` for a claim the provider rejected
-  (cited). A trust condition that does not match is a refused assume-role call,
-  not a weaker credential. When a Pod reports that it has no identity, check
-  the trust object first.
+  it cannot validate, and `IDPRejectedClaim` for a claim the identity provider
+  rejected (checked 2026-10-31, cited). A missing OIDC provider, or an audience
+  that the provider's client ID list does not contain, also gives
+  `InvalidIdentityToken`, so the provider's settings in IAM are the place to
+  look for those. A `sub` or `aud` condition in the role's trust policy that
+  does not match gives a different error: AccessDenied, with a message that
+  names the action (`sts:AssumeRoleWithWebIdentity`) and not the condition.
+  Compare the trust policy's conditions with the token's claims, and read the
+  CloudTrail event for the call. A trust condition that does not match is a
+  refused assume-role call, not a weaker credential. When a Pod reports that it
+  has no identity, check the trust object first.
 - **Credentials leave an audit trail that names the ServiceAccount.** An
   `AssumeRoleWithWebIdentity` call can write a CloudTrail entry that includes
   the token's subject, so the trail shows which ServiceAccount assumed the role
@@ -635,13 +693,16 @@ address. So a block on `169.254.169.254` leaves Pod Identity working (cited).
   one hour (cited), up to the role's maximum. There is **no secret at rest**
   (nothing to encrypt, leak, commit, or rotate), the **blast radius is one
   workload's role**, and **revocation is quick** (delete the trust,
-  association, binding or credential; there is no key to hunt down). This is why [Part 05
-  ch.04](../05-security/04-secrets-and-cluster-hardening.md)'s "no long-lived
-  secrets" principle holds here by architecture, not by policy.
+  association, binding or credential; there is no key to hunt down). This is
+  why [Part 05 ch.04](../05-security/04-secrets-and-cluster-hardening.md)'s
+  "no long-lived secrets" principle holds here by architecture, not by policy.
 - **The node's role is a second, shared identity.** The node's instance role is
   also an IAM principal. Its path to Pods is closed by the metadata section
-  above. Keep the node role to what the kubelet, the CNI and the CSI driver
-  need, and never add a workload's permissions to it.
+  above. Keep the node role to what the node components need: the kubelet's
+  bootstrap permissions and the CNI's networking permissions, which the AWS
+  managed worker node policies cover (cited). Controllers such as the EBS CSI
+  driver and the Load Balancer Controller take their own IRSA or Pod Identity
+  roles, and no workload's permissions go on the node role.
 - **IRSA vs Pod Identity, mechanically.** IRSA: an IAM **OIDC provider** per
   cluster, a per-role **trust policy** with `sub`/`aud` conditions, and a
   webhook that acts on the ServiceAccount's `role-arn` annotation. Pod
@@ -723,8 +784,9 @@ automountServiceAccountToken: false
 ```
 
 The IAM role, Google service account or identity carries a least-privilege
-policy: one action on one resource. Trust is scoped to
-`system:serviceaccount:<NS>:<APP>-sa`. No key is stored anywhere.
+policy: the narrowest read action or role, on the narrowest resource the
+provider allows. Trust is scoped to `system:serviceaccount:<NS>:<APP>-sa`.
+No key is stored anywhere.
 
 Checklist:
 
@@ -732,13 +794,15 @@ Checklist:
       identity only
 - [ ] Trust, association or binding scoped to the **exact**
       `system:serviceaccount:<NS>:<SA>` and the **exact** audience
-- [ ] The role, GSA or identity policy is **least-privilege** (one action,
-      one resource), not `*`
+- [ ] The role, GSA or identity policy is **least-privilege** (the narrowest
+      read action or role, on the narrowest resource), not `*`
 - [ ] **One SA per workload** ([Part 05 ch.01](../05-security/01-authn-authz-rbac.md));
       annotate only those that need cloud
-- [ ] OIDC issuer enabled **at cluster create** ([ch.02](02-provisioning-and-iac.md));
-      for IRSA the webhook fires after a Pod restart, and the automount setting
-      is confirmed on your cluster
+- [ ] OIDC issuer enabled before any workload needs it
+      ([ch.02](02-provisioning-and-iac.md)) for IRSA, GKE and Entra; Pod
+      Identity needs none. For IRSA the webhook
+      fires after a Pod restart, and the automount setting is confirmed on your
+      cluster
 - [ ] Entra Pods carry the `azure.workload.identity/use` label; Pod Identity
       associations exist in the AWS API
 - [ ] **AWS:** IMDSv2 required and hop limit 1 on the node template and the
@@ -764,7 +828,7 @@ Checklist:
 2. **The `catalog` Pod has a web identity token file and the variables the SDK reads, but its calls fail with an error from STS. What three things do you check?**
    <details><summary>Show answer</summary>
 
-   (1) Does the trust policy's `sub` condition equal `system:serviceaccount:bookstore:catalog-sa`? A namespace or ServiceAccount typo is the most common cause. (2) Does the `aud` condition equal `sts.amazonaws.com`, the audience the token carries? (3) Is the OIDC provider registered in IAM for this cluster's issuer URL? A cluster recreated without re-registering the issuer fails here. Each one is a denied assume-role call, which is the safe failure: the Pod gets no credentials rather than a broader ones.
+   (1) Does the trust policy's `sub` condition equal `system:serviceaccount:bookstore:catalog-sa`? A namespace or ServiceAccount typo is the most common cause. (2) Does the `aud` condition equal `sts.amazonaws.com`, the audience the token carries? (3) Is the OIDC provider registered in IAM for this cluster's issuer URL? A cluster recreated without re-registering the issuer fails here. Each one is a denied assume-role call, which is the safe failure: the Pod gets no credentials rather than a broader ones. The AccessDenied message does not name the condition, so compare each one with the token's claims.
 
    </details>
 
@@ -778,7 +842,7 @@ Checklist:
 4. **Hands-on, against an AWS account you own: create the IRSA role from 2a, annotate the SA, and check that `aws s3 ls` works from a Pod. Then change the `aud` condition in the trust policy to `wrong-audience`. What do you see?**
    <details><summary>What you should see</summary>
 
-   The Pod still has a token file, and the token is still issued. STS refuses the assume-role call, because the trust condition on `aud` no longer matches the token. The SDK reports an error from STS, and the error names the failed check. The exact text varies, so read it rather than match a string from this page. The lesson: the audience is part of the trust contract, not a free string.
+   The Pod still has a token file, and the token is still issued. STS refuses the assume-role call, because the trust condition on `aud` no longer matches the token. The SDK reports AccessDenied for `sts:AssumeRoleWithWebIdentity`, and that message does not name the failed condition. Compare the trust policy's conditions with the token's claims, and read the CloudTrail event for the call. The lesson: the audience is part of the trust contract, not a free string.
 
    </details>
 

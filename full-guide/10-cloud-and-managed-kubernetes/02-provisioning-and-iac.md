@@ -95,10 +95,10 @@ is your job, not the provider's.
 
 | Threat | Control in this chapter | Goes deeper |
 |---|---|---|
-| Secrets in state. State and plan files hold values in plain text, and `sensitive = true` only hides them from CLI output. | An encrypted, locked backend that only the provisioning role can read and write, and a saved plan handled as a secret. | [14.01](../14-eks-in-production-a-to-z/01-terraform-state-in-production.md), [14.07](../14-eks-in-production-a-to-z/07-infrastructure-cicd-and-drift.md) |
+| Secrets in state. State and plan files hold values in plain text, and `sensitive = true` only hides them from CLI output. | An encrypted, locked backend (`encrypt` and `use_lockfile`) in the root module. Who may read the state bucket is a bucket-policy decision, and a saved plan is handled as a secret. | [14.01](../14-eks-in-production-a-to-z/01-terraform-state-in-production.md), [14.07](../14-eks-in-production-a-to-z/07-infrastructure-cicd-and-drift.md) |
 | Unpinned providers and modules. A floating version can change the cluster's shape on the next `apply`. | Exact pins in the HCL and a committed `.terraform.lock.hcl` that records the provider hashes. | [14.07](../14-eks-in-production-a-to-z/07-infrastructure-cicd-and-drift.md) |
-| Drift and unreviewed change. A console edit, or an apply nobody read. | `terraform plan -out` reviewed before `apply`, and a scheduled drift check. | [14.07](../14-eks-in-production-a-to-z/07-infrastructure-cicd-and-drift.md) |
-| An over-broad provisioning identity. A role that can create or change anything in the account. | A scoped role for the pipeline, and no cluster-admin access for the identity that runs Terraform. | [10.03](03-cloud-identity.md) |
+| Drift and unreviewed change. A console edit, or an apply nobody read. | `terraform plan -out` reviewed before `apply`, and a drift check that exits 2 when the plan has changes (step 2). | [14.07](../14-eks-in-production-a-to-z/07-infrastructure-cicd-and-drift.md) |
+| An over-broad provisioning identity. A role that can create or change anything in the account. | No cluster-admin access for the identity that runs Terraform (`enable_cluster_creator_admin_permissions = false`), with named access entries instead (step 2). | [10.03](03-cloud-identity.md), [14.07](../14-eks-in-production-a-to-z/07-infrastructure-cicd-and-drift.md) for the pipeline's scoped role |
 
 The public endpoint and the network path to it belong to
 [10.04](04-cloud-networking-and-load-balancing.md). The root module below sets
@@ -206,11 +206,12 @@ vpc:
     publicAccess: false           # no internet endpoint; the path is 10.04's
 availabilityZones: [us-east-1a, us-east-1b, us-east-1c]   # multi-AZ (ch.01)
 iam:
-  withOIDC: true                  # OIDC provider for IRSA (ch.03), at create
+  withOIDC: true                  # OIDC provider for IRSA (ch.03); enable before workloads need it
 managedNodeGroups:
   - name: ng-stateless
     instanceType: m6i.large
     privateNetworking: true       # nodes in private subnets
+    disablePodIMDS: true          # Pods off the host network get no instance metadata (03)
     minSize: 2
     maxSize: 6                    # the autoscaling-group bounds (ch.06)
     desiredCapacity: 3
@@ -337,6 +338,11 @@ variable "private_subnet_ids" {
   description = "Private subnets, one or more per Availability Zone"
 }
 
+variable "admin_role_arn" {
+  type        = string
+  description = "The IAM role that administers the cluster, for example an IAM Identity Center admin role"
+}
+
 module "eks" {
   source  = "terraform-aws-modules/eks/aws"
   version = "21.29.0"
@@ -350,8 +356,21 @@ module "eks" {
   endpoint_public_access = false
 
   # The identity that runs Terraform gets no cluster-admin access entry.
-  # Grant cluster access to named roles instead.
+  # The named admin role below gets access instead.
   enable_cluster_creator_admin_permissions = false
+
+  # Named access: the admin role gets the EKS cluster-admin access policy.
+  access_entries = {
+    admin = {
+      principal_arn = var.admin_role_arn
+      policy_associations = {
+        admin = {
+          policy_arn   = "arn:aws:eks::aws:cluster-access-policy/AmazonEKSClusterAdminPolicy"
+          access_scope = { type = "cluster" }
+        }
+      }
+    }
+  }
 
   # Creates the OIDC provider that IAM roles for ServiceAccounts need.
   enable_irsa = true
@@ -366,6 +385,15 @@ module "eks" {
 
       update_config = {
         max_unavailable_percentage = 33
+      }
+
+      # The module's defaults, written out for review: IMDSv2 is required and
+      # the hop limit is 1, so a Pod cannot reach the node role's credentials
+      # through instance metadata (03 explains what this blocks).
+      metadata_options = {
+        http_endpoint               = "enabled"
+        http_tokens                 = "required"
+        http_put_response_hop_limit = 1
       }
     }
   }
@@ -383,18 +411,30 @@ Terraform 1.14.8 and Trivy 0.76.1:
 terraform fmt -check                  # formatting is part of review
 terraform init -backend=false         # pinned providers and module, no state
 terraform validate                    # pure HCL check
-trivy config --tf-exclude-downloaded-modules --severity HIGH,CRITICAL .
+trivy config --tf-exclude-downloaded-modules --skip-dirs .terraform \
+  --severity HIGH,CRITICAL .
 ```
 
-All four passed. `fmt` and `validate` report no problems, and Trivy reports no
-findings on the root module. Trivy's one CRITICAL sits upstream. Scan the
-downloaded module too (drop `--tf-exclude-downloaded-modules`) and it reports
-AWS-0104 on the module's node security group rule, which allows all egress to
-`0.0.0.0/0`. The module creates that rule by default
-([AVD-AWS-0104](https://avd.aquasec.com/misconfig/aws-0104)). Restricting node
-egress depends on how nodes reach the image registry and AWS APIs, which is the
-design in [14.08](../14-eks-in-production-a-to-z/08-vpc-endpoints-and-egress.md).
-Until you make that choice, record that you accepted the finding, and why.
+`fmt` and `validate` report no problems, and the root module scan is clean.
+The `--skip-dirs .terraform` flag matters. After `init`, the downloaded module
+ships example Kubernetes manifests under `.terraform/modules/eks/examples`.
+Trivy reads those as YAML, so without the flag it reports HIGH findings
+(KSV-0014 and KSV-0118) on an example Deployment that the root module does not
+contain. Scan the downloaded module separately, skipping only its examples:
+
+```sh
+trivy config --skip-dirs .terraform/modules/eks/examples --severity HIGH,CRITICAL .
+```
+
+That scan reports one CRITICAL, AWS-0104, on the module's node security group
+rule, which allows all egress to `0.0.0.0/0`. The module creates that rule by
+default ([AVD-AWS-0104](https://avd.aquasec.com/misconfig/aws-0104)).
+Restricting node egress depends on how nodes reach the image registry and AWS
+APIs, which is the design in
+[14.08](../14-eks-in-production-a-to-z/08-vpc-endpoints-and-egress.md). Until
+you make that choice, accept the finding on purpose: put it in your exceptions
+registry with its reason, its chapter and an expiry within 12 months, and
+remove the entry when the egress design is in place.
 
 The cloud steps follow. They are cited, not run:
 
@@ -402,6 +442,7 @@ The cloud steps follow. They are cited, not run:
 terraform init                        # configures the S3 backend
 terraform plan -out tf.plan           # the reviewable diff: desired vs real
 terraform apply tf.plan               # applies exactly the plan you reviewed
+terraform plan -detailed-exitcode -input=false  # scheduled drift check: 0 none, 2 drift, 1 error
 aws eks update-kubeconfig --name $CLUSTER_NAME --region us-east-1
 ```
 
@@ -415,7 +456,9 @@ so the bucket and any saved plan need the same access rules. The provider and
 module pins are exact, and `terraform init` writes `.terraform.lock.hcl`, which
 you commit so every run gets the same provider hashes. The module sets
 `endpoint_public_access = false`, so the control plane is reachable only from
-inside the VPC. The `kubectl` steps below run from a host there.
+inside the VPC. The `kubectl` steps below run from a host there. Without an
+access entry the cluster has no Kubernetes admin principal, so those steps fail
+with Unauthorized. `admin_role_arn` names the role that gets access.
 
 `terraform plan` is the cluster-level analogue of `helm diff` / `kubectl
 --dry-run`: **review the infrastructure change before it happens**. The checks
@@ -546,10 +589,11 @@ kubectl delete cluster bookstore        # CAPI controllers tear down the cloud i
   lost-cluster-tracking incident; production uses a **remote backend**
   (S3 with a lock file via `use_lockfile`, GCS or Azure Blob) so the team
   shares one state and concurrent applies are serialised. `plan` is the diff
-  (desired vs state vs real); `destroy` removes exactly what state records — *exact* teardown,
-  unlike a manual click-sweep. **Modules** are parameterised cluster
-  definitions (the IaC analogue of a Helm chart / Kustomize base) so dev/
-  staging/prod/region clusters are one definition with different variables.
+  (desired vs state vs real); `destroy` removes exactly what state records,
+  *exact* teardown, unlike a manual click-sweep. **Modules** are
+  parameterised cluster definitions (the IaC analogue of a Helm chart /
+  Kustomize base) so dev/staging/prod/region clusters are one definition with
+  different variables.
 - **Cluster API: the controller pattern applied to clusters.** CAPI is the
   [Part 08 ch.05](../08-day-2-operations/05-operators-and-crds.md) operator
   idea pointed at infrastructure. A **management cluster** runs the **core**
@@ -591,8 +635,8 @@ kubectl delete cluster bookstore        # CAPI controllers tear down the cloud i
 > Use a **remote, locked, versioned, encrypted** backend (S3 with
 > `use_lockfile`, GCS or Azure Blob); never local state for a team; restrict
 > who can `apply`; gate `apply` behind a reviewed `plan` (Atlantis / Terraform
-> Cloud / a CI plan comment). A corrupted or lost state file detaches Terraform from reality —
-> treat it with the same care as etcd ([Part 08 ch.02](../08-day-2-operations/02-backup-and-dr.md)).
+> Cloud / a CI plan comment). A corrupted or lost state file detaches
+> Terraform from reality. Treat it with the same care as etcd ([Part 08 ch.02](../08-day-2-operations/02-backup-and-dr.md)).
 
 > **In production: size node groups for AZ failure and surge upgrades.** Spread
 > node pools across AZs ([ch.01](01-managed-kubernetes-model.md)); set
@@ -661,9 +705,9 @@ apiVersion: eksctl.io/v1alpha5
 kind: ClusterConfig
 metadata: { name: bookstore, region: us-east-1, version: "1.37" }
 vpc: { clusterEndpoints: { privateAccess: true, publicAccess: false } }
-iam: { withOIDC: true }                 # REQUIRED for IRSA (ch.03)
+iam: { withOIDC: true }                 # for IRSA (ch.03); enable before workloads need it
 managedNodeGroups:
-  - { name: ng1, instanceType: m6i.large, privateNetworking: true, minSize: 2, maxSize: 6, desiredCapacity: 3 }
+  - { name: ng1, instanceType: m6i.large, privateNetworking: true, disablePodIMDS: true, minSize: 2, maxSize: 6, desiredCapacity: 3 }
 ```
 
 ```hcl
@@ -707,8 +751,9 @@ Checklist:
       its reason
 - [ ] Node pools **AZ-spread**, `maxUnavailable` set so an upgrade honors
       **PDBs** ([Part 06 ch.05](../06-production-readiness/05-reliability-and-disruptions.md))
-- [ ] OIDC enabled at create time (`withOIDC` / `--workload-pool` /
-      `--enable-oidc-issuer`) so [ch.03](03-cloud-identity.md) identity works
+- [ ] OIDC issuer enabled before a workload needs it (`withOIDC` /
+      `--workload-pool` / `--enable-oidc-issuer`) for IRSA, GKE and Entra
+      ([ch.03](03-cloud-identity.md)); Pod Identity needs none
 - [ ] **Teardown by the same code path** + an orphan sweep (LBs/disks/
       snapshots/EIPs); resources tagged owner/TTL; cost-anomaly alert on
 - [ ] The **Bookstore manifests are unchanged** on the provisioned cluster
@@ -739,7 +784,7 @@ Checklist:
 
    </details>
 
-4. **A node-pool surge upgrade with `maxSurge: 1, maxUnavailable: 0` is stuck — the new node never goes Ready and the old one cannot be drained. What three things do you check?**
+4. **A managed node group upgrade with `maxUnavailablePercentage: 33` is stuck: a replacement node never goes Ready, and an old node cannot be drained. What three things do you check?**
    <details><summary>Show answer</summary>
 
    First, the new node's bootstrap logs — `aws ec2 get-console-output` or the equivalent — is the image pulling, is the kubelet starting, is the node joining? Second, a PDB on the old node's Pods that blocks the drain. The Bookstore's catalog PDB sets `minAvailable: 2`, so with only two ready replicas no eviction is allowed. Third, a stuck PreStop or terminationGracePeriodSeconds set too high causing eviction timeouts. The pattern is "new node won't come up" XOR "old node won't go down" — instrument both sides.

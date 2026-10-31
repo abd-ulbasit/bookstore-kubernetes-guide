@@ -377,11 +377,14 @@ and Layers 2 (Git) + 3 (the Postgres PVC, via Velero/CSI snapshot) stay
   schedule, at any time, with no notice before the update. GKE gives at least
   14 months of standard support and up to 24 with its Extended channel, which
   carries an extra per-cluster fee. AKS gives 12 months of community support,
-  and LTS adds a year on the Premium tier, which you must opt into. After a
-  60-day grace period AKS upgrades an out-of-support cluster itself. It
+  and LTS adds a year on the Premium tier, which you must opt into. From
+  1 June 2027, AKS upgrades a cluster that stays on an unsupported version
+  after a 60-day grace period (AKS supported versions, checked 2026-10-31,
+  cited). It
   notifies you first, but that upgrade ignores your maintenance window, does
   not stop for deprecated APIs, and can override a PDB that blocks a node
-  drain. A cluster you "never touch" therefore *still* moves, which is why the
+  drain. A cluster you "never touch" can therefore *still* move, which is why
+  the
   [Part 08 ch.01](../08-day-2-operations/01-cluster-lifecycle.md) deprecated-API
   audit (`pluto`/`kubent`, `apiserver_requested_deprecated_apis`) is *more*
   important on managed, not less. The Bookstore is deliberately clean here
@@ -391,8 +394,8 @@ and Layers 2 (Git) + 3 (the Postgres PVC, via Velero/CSI snapshot) stay
 - **Zonal vs regional control plane, and node spread, are *separate*
   decisions.** A multi-AZ control plane (the usual production choice: EKS
   always; GKE *regional* clusters; AKS on the Standard tier where the region
-  has zones) survives a single-AZ outage *for the API*. It does **nothing** for your
-  workloads unless your **node pools are also AZ-spread** and your stateful
+  has zones) survives a single-AZ outage *for the API*. It does **nothing** for
+  your workloads unless your **node pools are also AZ-spread** and your stateful
   Pods tolerate the zonal-disk pin ([ch.05](05-cloud-storage-and-data.md)).
   The Bookstore's existing `topologySpreadConstraints` and
   `podAntiAffinity` ([Part 04 ch.02](../04-scheduling/02-affinity-taints-topology.md))
@@ -440,8 +443,9 @@ and Layers 2 (Git) + 3 (the Postgres PVC, via Velero/CSI snapshot) stay
 
 > **In production: plan the upgrade cadence — the version window is shorter
 > than you think.** A minor leaves standard provider support in 12 to 14
-> months (later only if you pay for extended support or LTS), and you *will*
-> be force-upgraded if you drift. Run the
+> months (later only if you pay for extended support or LTS), and a provider
+> may upgrade a cluster that stays out of support. EKS does so when its window
+> closes, on its own schedule; AKS does so from 1 June 2027. Run the
 > [Part 08 ch.01](../08-day-2-operations/01-cluster-lifecycle.md) deprecated-API
 > audit on a schedule, keep manifests/charts/GitOps on GA APIs (the Bookstore
 > does), stagger control-plane then node-pool upgrades within a maintenance
