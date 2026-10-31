@@ -131,12 +131,12 @@ graph LR
         psa["Pod Security Admission, escape, user namespaces (05.02)"]
         supply["Supply chain, SBOM, signing (05.03)"]
         secrets["Secrets at rest and KMS (05.04)"]
-        sandbox["seccomp, AppArmor, SELinux, RuntimeClass (05.05)"]
+        sandbox["Kernel isolation (05.05)"]
         hard["Control plane and node hardening, CIS (05.06)"]
-        admit["Admission policy as code (05.07)"]
-        detect["Audit logs, Falco, Tetragon, response (05.08)"]
-        vuln["Vulnerability management (05.09)"]
-        capstone["Capstone attack and harden (05.10)"]
+        admit["Admission control and policy as code (05.07)"]
+        detect["Audit logs and runtime detection (05.08)"]
+        vuln["Running security on a platform team (05.09)"]
+        capstone["Capstone: attack and harden the bookstore (05.10)"]
     end
 
     %% Part 06 — production readiness
@@ -707,7 +707,7 @@ roughly cheapest-fix-first to hardest-fix-last.
 
 **You'll be ready to:** know where every dollar in your K8s bill goes and have the levers to push at least three of them.
 
-### Path 4 — Security top-to-bottom (estimate pending Part 05)
+### Path 4 — Security top-to-bottom (estimate pending Part 05) <!-- link-later: 05.10 -->
 
 From the attacker's first foothold to a cluster that detects and contains
 it. Part 05 carries the path; the last rows show where each control runs in

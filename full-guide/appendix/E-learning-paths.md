@@ -2,9 +2,9 @@
 
 > Ordered ways through **this guide**. Every link is a real chapter in this
 > repository; the guide is standalone, so these map *its* chapters — they do not
-> assume any other notes. Four paths: a one-week **Fast track**, the full
-> **Zero-to-production** arc, a **Security and DevSecOps** path, and a
-> **Platform/SRE/ops** track. Each path lists ordered chapter links, a one-line
+> assume any other notes. Three paths: a one-week **Fast track**, the full
+> **Zero-to-production** arc, and a **Platform/SRE/ops** track. The security
+> route is Appendix F, Path 4. Each path lists ordered chapter links, a one-line
 > "why this order", what it honestly **skips**, and ends at the same finish
 > line: the
 > [end-to-end Bookstore](../09-end-to-end-bookstore/01-bookstore-end-to-end.md)
@@ -76,57 +76,14 @@ local cluster.
 **Why this order:** it is the dependency order of the system itself — you cannot
 secure or deliver a workload you cannot yet run, observe, or place. **Skips:**
 nothing — this is the complete path. Total ≈ **56–85 hours** of focused,
-hands-on study, not counting the link-later chapters, which are not timed yet
-(less if you skip the under-the-hood and `In production:` sections; those are
-the production-relevant parts, so don't skip them if you're going to
-production).
+hands-on study, not counting the link-later chapters <!-- link-later: 05.10 -->,
+which are not timed yet (less if you skip the under-the-hood and
+`In production:` sections; those are the production-relevant parts, so don't
+skip them if you're going to production).
 
 ---
 
-## Path 3: Security and DevSecOps
-
-For engineers who already run workloads and need to harden them, prove each
-control works, and enforce it in the delivery pipeline. It assumes Parts 00
-to 03. Read the baseline (row 2) before the rest: every manifest in the
-chapters below carries it.
-
-| # | Chapter | Why here |
-|---|---|---|
-| 1 | 00.08: Security foundations <!-- link-later: 00.08 --> | Threat model, trust boundaries and the exceptions process |
-| 2 | [01-core-workloads/01: Pods, the baseline](../01-core-workloads/01-pods.md#baseline) | Every field of the baseline, explained once |
-| 3 | [00-foundations/02: Containers and images](../00-foundations/02-containers-and-images.md) | What a base image adds to your attack surface |
-| 4 | [02-networking/06: Network policies](../02-networking/06-network-policies.md) | Default deny, then explicit allows |
-| 5 | 05.00: Attacker view <!-- link-later: 05.00 --> | How an attacker reaches a cluster, and the threats Part 05 answers |
-| 6 | [05-security/01: Authn, authz, RBAC](../05-security/01-authn-authz-rbac.md) | Who may do what; least privilege for every identity |
-| 7 | [05-security/02: Pod security](../05-security/02-pod-security.md) | The `restricted` level and the container escape paths it closes |
-| 8 | [05-security/03: Supply chain](../05-security/03-supply-chain.md) | Pinned images and manifest scanning |
-| 9 | [05-security/04: Secrets at rest and in use](../05-security/04-secrets-and-cluster-hardening.md) | Encryption at rest and KMS, the keys behind the secrets |
-| 10 | 05.05: Seccomp, AppArmor, SELinux and RuntimeClass <!-- link-later: 05.05 --> | Runtime isolation beyond the pod spec |
-| 11 | 05.06: Control plane and node hardening <!-- link-later: 05.06 --> | CIS benchmarks and kube-bench |
-| 12 | 05.07: Admission control <!-- link-later: 05.07 --> | Policy as code at the API server |
-| 13 | 05.08: Audit logs and detection <!-- link-later: 05.08 --> | Audit logs, Falco, Tetragon and incident response |
-| 14 | 05.09: Vulnerability management <!-- link-later: 05.09 --> | Findings, triage and fixes |
-| 15 | 05.10: Part 05 capstone <!-- link-later: 05.10 --> | The controls working together on one platform |
-| 16 | [07-delivery/03: CI/CD pipeline](../07-delivery/03-cicd-pipeline.md) | The pipeline that runs each stage on every change |
-| 17 | [08-day-2-operations/03: Troubleshooting playbook](../08-day-2-operations/03-troubleshooting-playbook.md) | Debugging without weakening the controls |
-| 18 | [09-end-to-end-bookstore/01: Bookstore end-to-end](../09-end-to-end-bookstore/01-bookstore-end-to-end.md) | Section (h) verifies the posture of the whole platform |
-
-**Why this order:** the threat model and the baseline come first, so every
-control is judged against the same workload. Part 05 then runs from the
-attacker's view through identity, pods, images and secrets to runtime,
-cluster, admission and detection. The pipeline comes last because it runs
-those checks on every change.
-
-**Skips (be honest):** the cloud form of each control, such as managed
-identity and cloud KMS. Read the production counterparts after this path:
-[10.03 cloud identity](../10-cloud-and-managed-kubernetes/03-cloud-identity.md),
-[14.13 runtime defense](../14-eks-in-production-a-to-z/13-runtime-defense-and-container-security.md)
-and [15.05 production secrets](../15-day-to-day-production-ops/05-production-secrets-vault-eso.md).
-Application-author depth (Jobs, probes, config ergonomics) is Path 1 or 2.
-
----
-
-## Path 4 — Platform / SRE / Ops track (Parts 04–08 emphasis)
+## Path 3 — Platform / SRE / Ops track (Parts 04–08 emphasis)
 
 For engineers who already run apps and need the *operate-at-scale* skills:
 scheduling, security posture, observability, delivery automation, and day-2.
@@ -145,8 +102,8 @@ hangs off it).
 | 7 | [05-security/02 — Pod security](../05-security/02-pod-security.md) | PSA `restricted` as the cluster floor |
 | 8 | [05-security/04: Secrets at rest and in use](../05-security/04-secrets-and-cluster-hardening.md) | Encryption at rest and KMS |
 | 9 | 05.06: Control plane and node hardening <!-- link-later: 05.06 --> | CIS benchmarks on the nodes you run |
-| 10 | 05.07: Admission control <!-- link-later: 05.07 --> | Policy as code, enforced for every team |
-| 11 | 05.08: Audit logs and detection <!-- link-later: 05.08 --> | What the platform records and alerts on |
+| 10 | 05.07: Admission control and policy as code <!-- link-later: 05.07 --> | Policy as code, enforced for every team |
+| 11 | 05.08: Audit logs, runtime detection and incident response <!-- link-later: 05.08 --> | What the platform records and alerts on |
 | 12 | [06-production-readiness/01 — Observability: metrics](../06-production-readiness/01-observability-metrics.md) | You cannot operate what you cannot see |
 | 13 | [06-production-readiness/02 — Logging](../06-production-readiness/02-logging.md) | Centralized logs |
 | 14 | [06-production-readiness/03 — Tracing](../06-production-readiness/03-tracing.md) | Cross-service latency/failure |
@@ -178,8 +135,8 @@ assumes you can already write a workload and focuses on running fleets of them.
 ```text
  Just need to deploy something soon ............ Path 1 (Fast track)
  Learning Kubernetes properly, end to end ...... Path 2 (Zero-to-production) ← the default
- Securing workloads or delivery pipelines ...... Path 3 (Security and DevSecOps)
- Platform/SRE building & operating clusters ... Path 4 (Platform/SRE/ops)
+ Platform/SRE building & operating clusters ... Path 3 (Platform/SRE/ops)
+ Securing workloads or delivery pipelines ...... Appendix F, Path 4 (Security)
 ```
 
 Every path finishes at the **[end-to-end Bookstore](../09-end-to-end-bookstore/01-bookstore-end-to-end.md)** —
