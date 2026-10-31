@@ -110,7 +110,7 @@ chapter teaches and where the topic goes deeper.
 
 | Threat | Control taught here | Goes deeper in |
 |---|---|---|
-| A container escape on a shared node reaches another tenant | None inside a namespace. The chapter names the gap; node isolation and sandboxed runtimes close it | [04.02](../04-scheduling/02-affinity-taints-topology.md) for node isolation; sandboxed runtimes in chapter 05.05 <!-- link-later: 05.05 --> |
+| A container escape on a shared node reaches another tenant | None inside a namespace. The chapter names the gap; node isolation and sandboxed runtimes close it | [04.02](../04-scheduling/02-affinity-taints-topology.md) for node isolation; sandboxed runtimes in chapter [05.05](../05-security/05-kernel-isolation.md) |
 | A tenant raises its own quota, or takes cluster-wide power | A namespaced Role and RoleBinding, with no verbs on `resourcequotas` or `limitranges` | [05.01](../05-security/01-authn-authz-rbac.md) |
 | A noisy tenant starves the others of CPU and memory | ResourceQuota caps the namespace total; LimitRange bounds each container. Step 3 shows a Pod refused over each | [01.03](../01-core-workloads/03-resources-and-qos.md); [04.03](../04-scheduling/03-priority-and-preemption.md) |
 | A noisy tenant floods the API server | Not closed here: quota does not count API requests | [11.03](../11-advanced-production-patterns/03-api-priority-and-fairness.md) |
@@ -670,11 +670,11 @@ kind delete cluster --name bookstore
 - **Choosing the regime by threat model.** The escalation ladder runs from
   node isolation (taints/affinity or dedicated node pools, so tenants don't
   share a kernel; [Part 04 ch.02](../04-scheduling/02-affinity-taints-topology.md))
-  to sandboxed runtimes (gVisor, Kata; chapter 05.05
-  <!-- link-later: 05.05 -->), then to a virtual control plane per tenant
-  (vCluster, with its own API server and CRDs), and finally to separate
-  clusters, the only complete boundary. Each step costs more to run. Choose by
-  threat model, not by Pod count.
+  to sandboxed runtimes (gVisor, Kata; chapter
+  [05.05](../05-security/05-kernel-isolation.md)), then to a virtual control
+  plane per tenant (vCluster, with its own API server and CRDs), and finally
+  to separate clusters, the only complete boundary. Each step costs more to
+  run. Choose by threat model, not by Pod count.
 - **vCluster, Capsule and HNC: what they actually do.** **vCluster** runs a
   *virtual* Kubernetes API server (with its own etcd or k3s) for the tenant
   inside a host namespace. The tenant gets what looks like a whole cluster,

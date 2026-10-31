@@ -116,7 +116,7 @@ and the chapter that owns the topic.
 | A Pod passes the scanner and then fails on a read-only root filesystem | Every workload carries the baseline, and the readiness waits in (d) check it | [01.01](../01-core-workloads/01-pods.md) |
 | A demo override left live becomes the state | The kind-only image override is reverted in the working tree, and the prod render drops the demo Secret (d). A running cluster keeps the kind images until the next sync | [07.04](../07-delivery/04-gitops-argocd.md) |
 | A Pod outside the edge reaches the data tier | A bookstore Pod with no allow rule is refused on its way to Postgres (e) | [02.06](../02-networking/06-network-policies.md) |
-| An image other than the signed digest reaches prod | Check that the release workflow signed the pinned catalog digest before the apply (d). Admission-time enforcement is in [05.03](../05-security/03-supply-chain.md) and <!-- link-later: 05.07 -->05.07 | [07.03](../07-delivery/03-cicd-pipeline.md) |
+| An image other than the signed digest reaches prod | Check that the release workflow signed the pinned catalog digest before the apply (d). Admission-time enforcement is in [05.03](../05-security/03-supply-chain.md) and [05.07](../05-security/07-admission-control-and-policy-as-code.md) | [07.03](../07-delivery/03-cicd-pipeline.md) |
 | An exception reused by another namespace | One registry entry per namespace, with a reason and an expiry (c) | [00.08](../00-foundations/08-security-foundations.md) |
 | A restore returns objects without their data | Check the rows after a restore, not the Pod status (j) | [08.02](../08-day-2-operations/02-backup-and-dr.md) |
 
@@ -454,7 +454,9 @@ run.**
 
 **5) Kyverno, policy.** Label `kyverno` `restricted`, then install with
 `--version "$KYVERNO_CHART_VERSION"`. The policy set and its Audit report belong
-to <!-- link-later: 05.07 -->05.07. **Cited, not run.** The chart version is
+to
+[05.07](../05-security/07-admission-control-and-policy-as-code.md).
+**Cited, not run.** The chart version is
 checked against its repository with `helm show chart`, which was run below.
 The install is not run. Kyverno's upstream documentation is at
 <https://kyverno.io/docs/>, and this chart ships Kyverno v1.19.2.
@@ -571,7 +573,7 @@ first and covers the registry pin. On kind the apply uses the local `:dev`
 images from the override above, so this check does not cover the images the
 kind run serves. Admission-time enforcement, which refuses an unsigned image
 inside the cluster, is in [05.03](../05-security/03-supply-chain.md) and
-<!-- link-later: 05.07 -->05.07.
+[05.07](../05-security/07-admission-control-and-policy-as-code.md).
 
 ```sh
 set -o pipefail
@@ -879,7 +881,9 @@ worker nodes, and the lab has one, so none of these ran here.
 Two checks ([Part 05](../05-security/02-pod-security.md)) ran in the lab:
 restricted admission refuses a privileged Pod, and the catalog ServiceAccount
 holds only the rights it needs. The policy engine's report on the workloads
-belongs to <!-- link-later: 05.07 -->05.07 and is not run here.
+belongs to
+[05.07](../05-security/07-admission-control-and-policy-as-code.md) and is not
+run here.
 
 **Admission refuses a privileged Pod.** This is a deliberate action. The Pod
 asks for `privileged: true` in a restricted namespace. A server-side dry run

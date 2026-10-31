@@ -2,9 +2,9 @@
 
 > A topic → resource map: for each Part of this guide, the most relevant
 > chapter(s) from the reference library plus 1–3 curated official-docs links.
-> The book chapters here are the ones each guide chapter cites. A row marked
-> link-later is a plan, checked when its chapter lands. This guide is **standalone**. These are for going
-> *deeper* on what a chapter already taught, not prerequisites.
+> The book chapters here are the ones each guide chapter cites. This guide is
+> **standalone**. These are for going *deeper* on what a chapter already
+> taught, not prerequisites.
 
 This is a reference (no nine-section anatomy). Each chapter of the guide also
 ends with its own specific citation + official URL; this appendix is the
@@ -46,7 +46,7 @@ components, the declarative API model, local cluster setup.
 | [05 — Node components](../00-foundations/05-node-components.md) | L ch.2, ch.3 | R ch.3 (Container Runtime) |
 | [06 — The declarative API model](../00-foundations/06-declarative-api-model.md) | L ch.4 (Introducing Kubernetes API objects) | KP ch.3 (Declarative Deployment) |
 | [07 — Local cluster setup](../00-foundations/07-local-cluster-setup.md) | P ch.3; L ch.3 | official docs (below) |
-| 08: Security foundations <!-- link-later: 00.08 --> | NIST SP 800-190 (below) | Kubernetes security checklist (below) |
+| [08 — Security foundations](../00-foundations/08-security-foundations.md) | NIST SP 800-190 (below) | Kubernetes security checklist (below) |
 
 Official docs:
 - Kubernetes components & architecture — <https://kubernetes.io/docs/concepts/overview/components/>

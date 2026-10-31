@@ -208,7 +208,7 @@ your browser's find for a specific term; **bold** is the headword.
 | **Audit logging** | The apiserver's structured record of every request (who/what/verdict); how RBAC/PSA decisions are reviewed and alarmed on. | [05.08 audit logs and runtime detection](../05-security/08-audit-detection-and-incident-response.md) |
 | **CIS Benchmark** | A consensus security configuration baseline for Kubernetes used to harden the cluster. | [05.06 control plane and node hardening](../05-security/06-control-plane-and-node-hardening.md) |
 | **Cluster hardening** | Reducing cluster attack surface: encryption at rest, audit, restricted RBAC, network policy, no `system:masters` sprawl. | [05.06 control plane and node hardening](../05-security/06-control-plane-and-node-hardening.md) |
-| **exceptions registry** | The guide's one record of every exception to the baseline or to a Pod Security level. Each entry gives a reason, a chapter and an expiry no more than 12 months out. | 00.08 security foundations <!-- link-later: 00.08 --> |
+| **exceptions registry** | The guide's one record of every exception to the baseline or to a Pod Security level. Each entry gives a reason, a chapter and an expiry no more than 12 months out. | [00.08 security foundations](../00-foundations/08-security-foundations.md) |
 
 ## Production readiness — observability, scaling, reliability
 

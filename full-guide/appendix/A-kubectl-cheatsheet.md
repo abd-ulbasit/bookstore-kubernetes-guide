@@ -341,7 +341,8 @@ Error from server (Forbidden): pods "node-debugger-sf-pilot-control-plane-sxs6m"
 ```
 
 Run node debugging only in a namespace the guide registers at privileged, with
-its reason recorded in the exceptions registry (<!-- link-later: 00.08 -->).
+its reason recorded in the exceptions registry
+([00.08](../00-foundations/08-security-foundations.md)).
 See [08.03](../08-day-2-operations/03-troubleshooting-playbook.md) for the
 per-symptom debugging tree and [05.02](../05-security/02-pod-security.md) for
 PSA.
@@ -578,7 +579,7 @@ way. Read the chapter; keep this page for the syntax.
 | `apply -k`, `kustomize`, `diff -k` | [07-delivery/02: Packaging with Kustomize](../07-delivery/02-packaging-kustomize.md) |
 | `cordon`/`drain`/`uncordon`, version skew | [08-day-2-operations/01: Cluster lifecycle](../08-day-2-operations/01-cluster-lifecycle.md) |
 | **`kubectl debug` (distroless, `--profile=restricted`)**, the per-symptom tree | [08-day-2-operations/03: Troubleshooting playbook](../08-day-2-operations/03-troubleshooting-playbook.md) |
-| `debug node` (host namespaces) and the exceptions a debug namespace needs | Part [05.06](../05-security/06-control-plane-and-node-hardening.md), node hardening; 00.08, the exceptions registry <!-- link-later: 00.08 --> |
+| `debug node` (host namespaces) and the exceptions a debug namespace needs | Part [05.06](../05-security/06-control-plane-and-node-hardening.md), node hardening; [00.08](../00-foundations/08-security-foundations.md), the exceptions registry |
 | Namespaces, ResourceQuota, `create quota` | [08-day-2-operations/04: Multi-tenancy and namespaces](../08-day-2-operations/04-multi-tenancy-and-namespaces.md) |
 | CRDs/operators, `api-resources` for CRD discovery | [08-day-2-operations/05: Operators and CRDs](../08-day-2-operations/05-operators-and-crds.md) |
 | The full bootstrap order & `kubectl wait` gating | [09-end-to-end-bookstore/01: Bookstore end-to-end](../09-end-to-end-bookstore/01-bookstore-end-to-end.md) |
