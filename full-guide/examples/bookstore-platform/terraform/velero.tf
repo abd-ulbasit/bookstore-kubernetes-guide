@@ -11,8 +11,9 @@
 #   - Selective restore (one namespace, one label-selected set of resources)
 #     to a different cluster or the same cluster.
 #
-# Cost: ~$5-15/month for a small cluster with a 30-day retention. S3 storage
-# at $0.023/GB-month + EBS snapshot at $0.05/GB-month, both incremental.
+# Cost follows backup size and retention. Current prices: the S3 and EBS
+# pricing pages (https://aws.amazon.com/s3/pricing/,
+# https://aws.amazon.com/ebs/pricing/). EBS snapshots are incremental.
 #
 # Backup of WORKLOAD data still requires the workload to be quiesced or
 # crash-consistent (CNPG handles this for Postgres via WAL; Velero hooks
@@ -38,6 +39,8 @@ resource "aws_s3_bucket" "velero" {
   tags = local.common_tags
 }
 
+# Versioning only. Object Lock is not set here; the Velero chapter explains
+# what it adds and why it is a decision for the backup owner.
 resource "aws_s3_bucket_versioning" "velero" {
   count = var.enable_velero ? 1 : 0
 
@@ -48,6 +51,35 @@ resource "aws_s3_bucket_versioning" "velero" {
   }
 }
 
+# Customer-managed key. Backups hold Secret objects as plain JSON, so the key
+# policy, not an AWS-managed key, decides who can decrypt them.
+resource "aws_kms_key" "velero" {
+  count = var.enable_velero ? 1 : 0
+
+  description         = "${local.name_prefix} Velero backup bucket"
+  enable_key_rotation = true
+  policy              = data.aws_iam_policy_document.velero_key[0].json
+  tags                = local.common_tags
+}
+
+data "aws_iam_policy_document" "velero_key" {
+  count = var.enable_velero ? 1 : 0
+
+  # Account administration only. Decrypt is granted by IAM to the Velero role
+  # (velero_perms below); no other principal is named here.
+  statement {
+    sid       = "AccountKeyAdministration"
+    effect    = "Allow"
+    actions   = ["kms:*"]
+    resources = ["*"]
+
+    principals {
+      type        = "AWS"
+      identifiers = ["arn:${data.aws_partition.current.partition}:iam::${data.aws_caller_identity.current.account_id}:root"]
+    }
+  }
+}
+
 resource "aws_s3_bucket_server_side_encryption_configuration" "velero" {
   count = var.enable_velero ? 1 : 0
 
@@ -55,7 +87,8 @@ resource "aws_s3_bucket_server_side_encryption_configuration" "velero" {
 
   rule {
     apply_server_side_encryption_by_default {
-      sse_algorithm = "aws:kms"
+      sse_algorithm     = "aws:kms"
+      kms_master_key_id = aws_kms_key.velero[0].arn
     }
     bucket_key_enabled = true
   }
@@ -207,15 +240,11 @@ data "aws_iam_policy_document" "velero_perms" {
     resources = ["*"]
   }
 
-  # ──── EBS lifecycle scoped to Velero-tagged volumes/snapshots ──────────
-  # Velero's velero-plugin-for-aws tags every snapshot it creates with
-  # `velero.io/backup` (the backup name) and `velero.io/restore` (on
-  # restore-time snapshots). We require that any DeleteSnapshot / DeleteVolume
-  # is only authorized when the target resource carries the tag — this
-  # prevents the role being used to wipe non-Velero snapshots/volumes.
-  #
-  # CreateSnapshot / CreateVolume use ResourceTag aws:RequestTag/...
-  # condition: the IAM request must propose the tag at create-time.
+  # ──── EBS lifecycle scoped to Velero-created snapshots and volumes ─────
+  # The AWS plugin tags each snapshot with velero.io/backup = <backup name>
+  # and velero.io/pv = <PV name> (plugin source: volume_snapshotter.go).
+  # The value is the backup name, not "true", so the conditions test that
+  # the key is present (StringLike "*").
   statement {
     actions = [
       "ec2:DeleteSnapshot",
@@ -224,15 +253,14 @@ data "aws_iam_policy_document" "velero_perms" {
     resources = ["*"]
 
     condition {
-      test     = "StringEquals"
+      test     = "StringLike"
       variable = "ec2:ResourceTag/velero.io/backup"
-      values   = ["true"]
+      values   = ["*"]
     }
   }
 
-  # CreateSnapshot / CreateVolume — require the tag at request time so the
-  # role can only create snapshots that will be subject to the
-  # ResourceTag-scoped Delete above.
+  # Create only with the tag in the request, so everything this role creates
+  # can be deleted by the statement above.
   statement {
     actions = [
       "ec2:CreateSnapshot",
@@ -241,26 +269,56 @@ data "aws_iam_policy_document" "velero_perms" {
     resources = ["*"]
 
     condition {
-      test     = "StringEquals"
+      test     = "StringLike"
       variable = "aws:RequestTag/velero.io/backup"
-      values   = ["true"]
+      values   = ["*"]
     }
   }
 
-  # CreateTags — limited to the tag key Velero uses. Without this, the role
-  # could write arbitrary tags onto any EC2 resource, defeating the scoping
-  # above.
+  # Tags only as part of creating a snapshot or volume. AWS evaluates
+  # ec2:CreateTags for tag-on-create, and ec2:CreateAction names the create
+  # call, so the role cannot tag existing resources.
   statement {
     actions   = ["ec2:CreateTags"]
     resources = ["*"]
 
     condition {
-      test     = "ForAllValues:StringEquals"
-      variable = "aws:TagKeys"
-      values = [
-        "velero.io/backup",
-        "velero.io/restore",
-      ]
+      test     = "StringEquals"
+      variable = "ec2:CreateAction"
+      values   = ["CreateSnapshot", "CreateVolume"]
+    }
+  }
+
+  # Backup bucket key: Velero encrypts uploads and decrypts reads.
+  statement {
+    actions = [
+      "kms:Decrypt",
+      "kms:DescribeKey",
+      "kms:GenerateDataKey*",
+    ]
+    resources = [aws_kms_key.velero[0].arn]
+  }
+
+  # Restores create volumes from encrypted snapshots, which needs the EBS
+  # volume key (gp3-storageclass.tf) for these actions.
+  statement {
+    actions = [
+      "kms:Decrypt",
+      "kms:DescribeKey",
+      "kms:GenerateDataKeyWithoutPlaintext",
+      "kms:ReEncrypt*",
+    ]
+    resources = [aws_kms_key.ebs.arn]
+  }
+
+  statement {
+    actions   = ["kms:CreateGrant"]
+    resources = [aws_kms_key.ebs.arn]
+
+    condition {
+      test     = "Bool"
+      variable = "kms:GrantIsForAWSResource"
+      values   = ["true"]
     }
   }
 }
@@ -318,11 +376,33 @@ resource "helm_release" "velero" {
   values = [
     yamlencode({
       # Velero needs an AWS plugin for object storage + EBS snapshot integration.
+      # v1.14.x pairs with Velero 1.18.x (plugin README compatibility table).
+      # Init containers are checked by restricted too, so each one carries its own
+      # securityContext. The plugin image is FROM scratch with USER 65532:65532.
       initContainers = [
         {
           name            = "velero-plugin-for-aws"
-          image           = "velero/velero-plugin-for-aws:v1.10.0"
+          image           = "velero/velero-plugin-for-aws:v1.14.4"
           imagePullPolicy = "IfNotPresent"
+          securityContext = {
+            runAsNonRoot             = true
+            runAsUser                = 65532
+            runAsGroup               = 65532
+            allowPrivilegeEscalation = false
+            readOnlyRootFilesystem   = true
+            capabilities = {
+              drop = ["ALL"]
+            }
+          }
+          resources = {
+            requests = {
+              cpu    = "10m"
+              memory = "16Mi"
+            }
+            limits = {
+              memory = "64Mi"
+            }
+          }
           volumeMounts = [
             {
               mountPath = "/target"
@@ -362,6 +442,8 @@ resource "helm_release" "velero" {
           annotations = {
             "eks.amazonaws.com/role-arn" = aws_iam_role.velero[0].arn
           }
+          # Velero calls the API, so its dedicated ServiceAccount keeps the token.
+          automountServiceAccountToken = true
         }
       }
 
@@ -370,12 +452,15 @@ resource "helm_release" "velero" {
         useSecret = false
       }
 
-      # Restricted-compliant security context.
+      # Restricted-compliant. The UID and GID are the ones the images declare:
+      # velero/velero ends with USER cnb:cnb, which is 1002:1000 in the Paketo
+      # run image it is built on. fsGroup is for the IRSA token volume (see the
+      # chart's values.yaml note on AWS IAM Roles for Service Accounts).
       podSecurityContext = {
         runAsNonRoot = true
-        runAsUser    = 65534
-        runAsGroup   = 65534
-        fsGroup      = 65534
+        runAsUser    = 1002
+        runAsGroup   = 1000
+        fsGroup      = 1000
         seccompProfile = {
           type = "RuntimeDefault"
         }
@@ -385,7 +470,8 @@ resource "helm_release" "velero" {
         allowPrivilegeEscalation = false
         readOnlyRootFilesystem   = true
         runAsNonRoot             = true
-        runAsUser                = 65534
+        runAsUser                = 1002
+        runAsGroup               = 1000
         capabilities = {
           drop = ["ALL"]
         }
@@ -464,11 +550,6 @@ resource "kubectl_manifest" "velero_daily_schedule" {
         ]
         snapshotVolumes          = true
         defaultVolumesToFsBackup = false
-        # CSI snapshot timeout. Default is 10m, which is too tight for PVCs
-        # larger than ~50 GiB on EBS (snapshot completion is proportional to
-        # block-store size + change rate). 30m gives ample headroom for the
-        # PVC sizes we expect; bump higher for very large stateful workloads.
-        csiSnapshotTimeout = "30m"
       }
     }
   })

@@ -1,11 +1,16 @@
 # 14.14 — Backup and restore with Velero
 
-> **EKS manages etcd snapshots for you. AWS Backup snapshots EBS
-> volumes. RDS has point-in-time recovery. S3 has versioning. None of
-> them, individually or together, will restore a deleted ConfigMap, a
-> mangled Helm release, a TenantClaim CR that someone `kubectl delete`d
+> **[EKS](https://docs.aws.amazon.com/eks/latest/userguide/what-is-eks.html)
+> runs the Kubernetes control plane for you. [AWS
+> Backup](https://docs.aws.amazon.com/aws-backup/latest/devguide/whatisbackup.html)
+> covers EBS volumes and EKS persistent storage. RDS has
+> [point-in-time recovery](https://docs.aws.amazon.com/AmazonRDS/latest/UserGuide/USER_PIT.html),
+> and S3 has [versioning](https://docs.aws.amazon.com/AmazonS3/latest/userguide/Versioning.html).
+> Those services each cover one layer. None of them is a restore path for
+> a mangled Helm release, a Kyverno policy that someone `kubectl delete`d
 > by accident, or a Namespace someone wiped while testing the GitOps
-> reconciler.** Velero is the Kubernetes-shaped backup tool: it
+> reconciler, unless you have checked its Kubernetes scope yourself.**
+> Velero is the Kubernetes-shaped backup tool: it
 > snapshots **API objects + the PVs those objects reference** to S3,
 > on schedule, and can restore a single namespace, a label-selected
 > subset, or the whole cluster — to the same cluster after corruption,
@@ -18,7 +23,7 @@
 **Estimated time:** ~30 min read · ~90 min hands-on
 **Prerequisites:** [Part 08 ch.02](../08-day-2-operations/02-backup-and-dr.md) — backup discipline framing · [Part 14 ch.04](./04-storage-classes-and-ebs.md) — EBS volumes whose snapshots Velero coordinates · [Part 13 ch.01](../13-grand-capstone-bookstore-platform/01-bookstore-2-from-toy-to-platform.md) — bookstore namespaces that need cluster-shaped backup
 
-**You'll know after this:** • understand why etcd snapshots + EBS snapshots + RDS PITR together still leave Kubernetes-shaped state unbacked up · • configure Velero schedules that snapshot API objects + the PVs they reference to S3 · • restore a single namespace, a label-selected subset, or a whole cluster from a Velero backup · • rehearse restore-to-new-cluster as a cluster-migration tool · • know the honest list of what Velero CAN'T back up (RDS data, S3 buckets, IAM) and how Part 14.17 covers it
+**You'll know after this:** • understand why EBS snapshots + RDS PITR together still leave Kubernetes-shaped state unbacked up · • configure Velero schedules that snapshot API objects + the PVs they reference to S3 · • restore a single namespace, a label-selected subset, or a whole cluster from a Velero backup · • rehearse restore-to-new-cluster as a cluster-migration tool · • know the honest list of what Velero CAN'T back up (RDS data, S3 buckets, IAM) and how Part 14.17 covers it
 
 <!-- tags: velero, dr, day-2, eks, storage -->
 
@@ -44,21 +49,21 @@ Three things every Kubernetes team eventually loses without backups:
 - **A PV's data.** A `helm uninstall` on a chart that owns CNPG with
   `reclaimPolicy: Delete` destroys the EBS volume. The data is gone.
   EBS snapshots taken by AWS Backup outside Kubernetes catch this if
-  the schedule is right; Velero's CSI snapshot integration captures
-  it from inside Kubernetes.
+  the schedule is right; Velero's snapshot integration captures it
+  from inside Kubernetes.
 - **A CRD instance.** A `kubectl delete kyvernopolicy require-labels`
   deletes the policy. The cluster is now permitting unlabeled
-  workloads. AWS-side backups don't see CRD instances; only Velero
-  (or `etcdctl` snapshots on EKS — *which AWS doesn't expose to you*)
-  captures them.
+  workloads. AWS-side EBS and RDS backups don't hold CRD instances.
+  Velero captures them. EKS runs etcd for you, so there is no
+  `etcdctl` snapshot to take.
 
 [Part 08 ch.02](../08-day-2-operations/02-backup-and-dr.md) introduced
 Velero in the abstract: the three state layers (etcd / app desired
 state / PV data), the three corresponding backups, the restore-test
 discipline. That chapter ran Velero against a kind cluster with MinIO
 as the object store. This chapter is the **EKS-specific overlay**:
-IRSA wires Velero to S3 + EBS without a static credential, the CSI
-snapshotter handles the EBS volume side, and the schedule discipline
+IRSA wires Velero to S3 + EBS without a static credential, the AWS
+plugin handles the EBS volume side, and the schedule discipline
 sits alongside the AWS-side billing reality.
 
 > **In production:** A backup that has never been **restore-tested**
@@ -83,73 +88,76 @@ the operation.**
 The four concepts:
 
 - **`BackupStorageLocation` (BSL) — where backup metadata + objects
-  live.** A namespaced CR pointing at an object-storage bucket. Phase
-  14-R configures one BSL named `default` against the
+  live.** A namespaced CR pointing at an object-storage bucket. The
+  example configures one BSL named `default` against the
   `<cluster>-velero-backups-<account-suffix>` S3 bucket (created by
-  Terraform, KMS-encrypted, versioned, lifecycle-managed). Velero
-  writes one *prefix* per backup: `backups/<NAME>/`. Inside it:
-  `velero-backup.json` (the backup manifest), per-resource tarballs
-  (`resource-list/configmaps.tar.gz`, etc.), `velero-backup-metadata`
-  (CRD versions, K8s server version, etc.), and `restic/kopia/`
-  subdirectories if file-level PV backup is enabled.
+  Terraform, encrypted with a customer-managed KMS key, versioned,
+  lifecycle-managed). Velero writes one *prefix* per backup:
+  `backups/<NAME>/`. Inside it: `velero-backup.json` (the backup
+  manifest), `<NAME>.tar.gz` (every object the backup includes, Secrets
+  among them, as JSON), `<NAME>-resource-list.json.gz` (the resources
+  selected), `<NAME>-volumesnapshots.json.gz` (the EBS snapshot IDs),
+  and `<NAME>-logs.gz`. File-system backup data goes under `kopia/`
+  when enabled.
 - **`VolumeSnapshotLocation` (VSL) — how PV snapshots are taken.**
-  Also a namespaced CR. Phase 14-R configures the AWS provider VSL
-  pointing at the cluster's region. When a backup includes a PVC,
-  Velero asks the CSI driver (via VolumeSnapshot CRs in
-  snapshot.storage.k8s.io/v1) to take a CSI snapshot — which on
-  EBS-CSI translates to `ec2:CreateSnapshot`. The snapshot ID is
-  recorded in the backup metadata; restore creates a new EBS volume
-  from the snapshot.
+  Also a namespaced CR. The example configures the AWS provider VSL
+  pointing at the cluster's region. For each EBS-backed PV in a backup,
+  the AWS plugin calls `ec2:CreateSnapshot` with Velero's IRSA role and
+  records the snapshot ID in the backup's volumesnapshots file. Restore
+  calls `ec2:CreateVolume` from that ID. This is the native path, not
+  the [CSI path](https://github.com/vmware-tanzu/velero/blob/v1.18.2/site/content/docs/main/csi.md),
+  which needs the `EnableCSI` feature flag and a VolumeSnapshotClass
+  labelled `velero.io/csi-volumesnapshot-class`. The example sets
+  neither.
 - **`Schedule` — when to back up.** A CR with a cron-string + a
-  `BackupSpec` template. Phase 14-R's default `Schedule` is
+  `BackupSpec` template. The example's default `Schedule` is
   `nightly-cluster-backup`, runs at 02:00 UTC daily, retains 30
   days, includes every namespace except the EKS-managed ones
   (`kube-system`, `kube-public`, `kube-node-lease`), snapshot
-  volumes via CSI. The Schedule controller materialises a `Backup`
+  volumes with the AWS plugin. The Schedule controller materialises a `Backup`
   CR each time the cron fires.
 - **`Restore` — apply a backup back to a cluster.** A CR identifying
   a backup name and (optionally) selectors (namespaces, label
   selector, resource types). The Restore controller reads the
   backup's S3 prefix, recreates the API objects (with optional
-  remapping like `namespace-mapping`), recreates PVCs (and the
-  controller asks the CSI driver to provision new PVs from the
-  recorded snapshot IDs).
+  remapping like `namespace-mapping`), recreates PVCs, and the AWS
+  plugin creates EBS volumes from the recorded snapshot IDs.
 
-**The CSI snapshot path vs the file-level backup path.** Velero on
+**The native snapshot path vs the file-level backup path.** Velero on
 EKS has two ways to back up PV data:
 
-1. **CSI VolumeSnapshot (the default in Phase 14-R).** Works when the
-   StorageClass's CSI driver supports snapshots — EBS-CSI does, with
-   the `ebs-csi-default` VolumeSnapshotClass. Fast (snapshots happen
-   at the block-store level), efficient (incremental — only changed
-   blocks are billed after the first), and the snapshots are
-   region-scoped (cross-AZ restore is just specifying the target
-   AZ).
+1. **Native EBS snapshot (the example's default).** The AWS plugin
+   snapshots EBS volumes itself, through the VSL. Snapshots are
+   incremental (only changed blocks are billed after the first) and
+   region-scoped. The plugin handles EBS volumes only. For a PV on
+   another CSI driver, such as EFS, it logs `Unable to handle CSI
+   driver` and takes no snapshot.
 
-2. **File-system backup with Kopia or Restic (opt-in via
-   `defaultVolumesToFsBackup: true` or per-PVC annotation).** A
-   Velero node-agent DaemonSet mounts each PV and runs a Kopia (or
-   Restic) backup — copying file contents into a deduplicated
-   repository inside the same S3 bucket as the metadata. Works for
-   **any** PV regardless of CSI snapshot support — including
-   EFS-backed PVs (which EBS-CSI can't snapshot because EFS isn't an
-   EBS volume), GCS-CSI on EKS, or third-party CSI drivers without
-   snapshot implementations.
+2. **File-system backup with Kopia (opt-in via
+   `defaultVolumesToFsBackup: true` or the pod annotation
+   `backup.velero.io/backup-volumes`).** A Velero node-agent DaemonSet
+   mounts each PV's files and copies them into a deduplicated
+   repository under `kopia/` in the same S3 bucket. This works for any
+   PV, EFS included. The node-agent runs as root with host paths, which
+   restricted forbids, so the example does not deploy it. Turning it on
+   needs a namespace exception with its reason.
 
 **Trade-offs:**
 
 | Path | Speed | Cost | Coverage | When to use |
 |---|---|---|---|---|
-| **CSI snapshot** | Seconds (block-store) | EBS snapshot pricing ($0.05/GB-mo of unique blocks) | EBS PVs only | Default. Phase 14-R's path. |
-| **Kopia/Restic file backup** | Minutes-to-hours (file scan) | S3 storage only ($0.023/GB) | Any mounted PV | EFS-backed PVs, cross-CSI portability, or when you want a single deduplicated repo. |
+| **Native EBS snapshot** | Done by EBS, no file scan | EBS snapshot pricing (see the EBS pricing page) | EBS PVs only | Default in the example. |
+| **Kopia file backup** | Slower: file scan and upload | S3 storage for the repository | Any mounted PV | EFS-backed PVs, or one deduplicated repository. Needs a node-agent that runs as root. |
+| **CSI snapshot** (not configured) | Block-store snapshot | EBS snapshot pricing | Snapshot-capable CSI drivers | Needs `EnableCSI` and a labelled VolumeSnapshotClass. |
 
-Phase 14-R's default is **CSI snapshot** (`defaultVolumesToFsBackup:
-false` in the Schedule). The Bookstore Platform's stateful workloads
-(CNPG, Loki, Tempo, Prometheus) all run on EBS-backed gp3 PVs (Phase
-14-R's `gp3-storageclass.tf`), which CSI snapshots handle natively.
+The example's default is the native EBS snapshot
+(`defaultVolumesToFsBackup: false` in the Schedule). The Bookstore
+Platform's stateful workloads (CNPG, Loki, Tempo, Prometheus) run on
+EBS-backed gp3 PVs (`gp3-storageclass.tf`), which the native path
+snapshots.
 
-**Backup retention math (the 23-backup pattern).** A textbook
-retention scheme used across the operations industry:
+**Backup retention math (the 23-backup pattern).** One common
+retention scheme:
 
 ```text
 - 7 daily backups  (one per day for the last week)
@@ -160,10 +168,11 @@ retention scheme used across the operations industry:
 ```
 
 The point: **23 backups, not 365**. A daily-only-with-365-day-TTL
-policy holds 365 backups; the storage cost is 16x the 23-backup
-scheme for marginal extra recovery granularity. The 23-backup scheme
-is the FinOps-aware default — for a 200 GB cluster snapshot, the
-math:
+policy holds 365 backups, for marginal extra recovery granularity. The
+23-backup scheme is a cost-aware choice. The example assumes a 200 GB
+base, 5 GB changed per day, and the EBS list price of $0.05 per
+GB-month (checked 2026-10-31 on the EBS pricing page, so check your
+region). The figures are illustrative, not measured:
 
 ```text
 First daily snapshot:        200 GB unique blocks * $0.05/GB-mo  = $10.00/mo
@@ -174,9 +183,10 @@ First daily snapshot:        200 GB unique blocks * $0.05/GB-mo  = $10.00/mo
                                                        Total      ~$39.50/mo
 ```
 
-vs ~$300/mo for daily-only-365-day. The 23-backup scheme is a hard
-default in `velero.tf`'s schedule comments; production forks should
-implement it with three `Schedule` CRs each with its own `ttl`.
+Under the same assumptions, a daily-only scheme with a 365-day TTL keeps
+364 deltas: 200 + 364 × 5 = 2,020 GB, about $101/mo, roughly 2.6 times
+the 23-backup scheme. `velero.tf` keeps one 30-day Schedule. Section 7
+shows the three-Schedule form.
 
 **The hooks pattern (application-consistent backups).** A naive PV
 snapshot is **crash-consistent**: the snapshot captures the volume's
@@ -212,13 +222,12 @@ back up:
 - **IAM roles + policies.** Terraform state IS the IAM backup; the
   S3 backend (Phase 14a, ch.14.01) is what protects this. Velero
   has no IAM API access.
-- **EKS cluster control-plane state itself.** EKS-managed etcd
-  snapshots are taken by AWS, BUT **AWS doesn't expose them to
-  you**. You cannot download them. The Velero backup of API objects
-  is your only export-able snapshot of cluster state.
-- **EFS file content.** EFS is not block storage; EBS-CSI snapshots
-  can't see it. Use Kopia/Restic file backup mode for EFS PVs, OR
-  EFS-native AWS Backup integration.
+- **EKS cluster control-plane state itself.** EKS runs the control
+  plane and its etcd. Velero backs up the API objects in your
+  namespaces, not the control plane.
+- **EFS file content.** EFS is not block storage, so the native EBS
+  snapshot cannot see it. Use Kopia file backup mode for EFS PVs, OR
+  an EFS backup through AWS Backup.
 - **EBS volumes attached to Pods that Velero doesn't know about.**
   Manually-attached volumes (via `kubectl run` with explicit
   `volumeMounts` not backed by a PVC) are invisible.
@@ -241,6 +250,46 @@ GitOps anyway" loses the bookstore-managed CRDs (the Kyverno
 exceptions, the OpenCost Allocations) that **aren't** in GitOps.
 Audit the exclusion list with eyes-on; default to inclusion.
 
+## Threats and controls
+
+| Threat | Control in this chapter | Goes deeper |
+|---|---|---|
+| Backup objects hold Secret values as JSON, so reading the objects reads the Secrets | Customer-managed KMS key; the Velero role gets decrypt; the bucket refuses plain HTTP and public access | [08.02](../08-day-2-operations/02-backup-and-dr.md) |
+| A Restore copies another namespace's Secrets into one the restorer can read | Create on `restores.velero.io` for platform admins only | [08.02](../08-day-2-operations/02-backup-and-dr.md) |
+| The Velero server runs as cluster-admin, so compromising it reads every Secret | Restricted pod in its own namespace; no static AWS key (IRSA, `credentials.useSecret = false`) | [14.03](./03-eks-addon-management.md) |
+| Someone with bucket rights deletes or overwrites backups | Versioning on; Object Lock not set (see below) | [08.02](../08-day-2-operations/02-backup-and-dr.md) |
+| The Velero role snapshots or deletes EBS volumes it did not create | Create and delete conditions on the `velero.io/backup` tag key | [14.03](./03-eks-addon-management.md) |
+
+The chart's cluster-admin binding stays on, because restores create any
+kind. Limit who can reach the `velero` namespace and who can create
+Backup or Restore objects instead.
+
+**What a backup holds, and who can read it.** Each backup stores the
+Secrets it selects, in plain JSON inside `<NAME>.tar.gz`. Three rules
+decide who can read them:
+
+- **Read needs two grants.** Reading an object needs `s3:GetObject` and
+  `kms:Decrypt` on the key. `velero.tf` grants both to the Velero role.
+  Any principal that IAM grants `kms:Decrypt` on that key can read the
+  backups too, so review that grant the way you review access to a
+  Secret.
+- **A restore is a read.** A user who can create a Restore can copy the
+  Secrets of any backed-up namespace into a namespace where they already
+  read Secrets. Velero writes with its own ServiceAccount, so the user's
+  RBAC does not stop the copy.
+- **Encryption at rest, and TLS in transit.** SSE-KMS encrypts the
+  objects at rest, and the bucket policy refuses requests that are not
+  TLS. The example's EBS volumes use the EBS key, so restores need KMS
+  grants on that key, which `velero.tf` adds.
+
+Object Lock is not set. Versioning keeps the old version of an
+overwritten or deleted object, but a version can still be deleted for
+good. Object Lock adds a retention period. In compliance mode, no user,
+including the account root user, can delete a version before its
+retain-until date ([S3 Object Lock](https://docs.aws.amazon.com/AmazonS3/latest/userguide/object-lock.html)).
+Whether a backup owner needs that is a decision to record, because it
+also blocks your own cleanup.
+
 ## Diagrams
 
 ### Diagram A — Velero backup flow (Mermaid)
@@ -252,17 +301,16 @@ flowchart TB
     bk["Velero creates a Backup CR<br/>backup-202605200200"]
     velero["Velero server pod<br/>(velero ns)<br/>reads Backup CR"]
     api["For each included namespace,<br/>list resources via K8s API<br/>(Deployments, ConfigMaps, ...)"]
-    s3meta["S3: backups/backup-.../<br/>velero-backup.json<br/>resource-list/*.tar.gz<br/>(API metadata)"]
-    csi["For each PVC,<br/>create a VolumeSnapshot CR<br/>(snapshot.storage.k8s.io/v1)"]
-    ebs["EBS-CSI external-snapshotter<br/>calls ec2:CreateSnapshot<br/>(via Velero IRSA role)"]
-    snap["EBS snapshot<br/>snap-0123abc<br/>(region-scoped, S3-backed)"]
-    s3snapref["S3: backups/backup-.../<br/>volumesnapshots.tar.gz<br/>(snapshot IDs recorded)"]
+    s3meta["S3: backups/backup-.../<br/>velero-backup.json<br/>backup-....tar.gz<br/>(API objects, Secrets included)"]
+    csi["For each EBS-backed PV,<br/>AWS plugin calls<br/>ec2:CreateSnapshot<br/>(via Velero IRSA role)"]
+    snap["EBS snapshot<br/>snap-0123abc<br/>(region-scoped)"]
+    s3snapref["S3: backups/backup-.../<br/>backup-...-volumesnapshots.json.gz<br/>(snapshot IDs recorded)"]
     pd["Backup phase: InProgress -> Completed<br/>(or Failed; PartiallyFailed)"]
     obs["BackupStatus visible via<br/>kubectl get backup -n velero<br/>or velero backup describe"]
 
     sched --> cron --> bk --> velero
     velero --> api --> s3meta
-    velero --> csi --> ebs --> snap --> s3snapref
+    velero --> csi --> snap --> s3snapref
     s3meta --> pd
     s3snapref --> pd
     pd --> obs
@@ -274,12 +322,12 @@ flowchart TB
 ### Diagram B — Backup retention math (ASCII)
 
 ```text
-RETENTION SCHEME           BACKUPS HELD   STORAGE (200 GB cluster)   $/mo
+RETENTION SCHEME           BACKUPS HELD   STORAGE (200 GB base)      $/mo
 ─────────────────────────  ──────────────  ─────────────────────────  ────────
 Daily, 7-day TTL                   7        ~230 GB                  $11.50
-Daily, 30-day TTL                 30        ~150 GB (5 GB/day delta) $7.50
-Daily, 365-day TTL               365        ~1,650 GB                $82.50
-23-backup scheme (recommended)    23        ~790 GB                  $39.50
+Daily, 30-day TTL                 30        ~345 GB                  $17.25
+Daily, 365-day TTL               365        ~2,020 GB                $101.00
+23-backup scheme                  23        ~790 GB                  $39.50
 ─────────────────────────  ──────────────  ─────────────────────────  ────────
 
 23-BACKUP SCHEME BREAKDOWN (Velero + 3 Schedule CRs):
@@ -297,11 +345,15 @@ EBS SNAPSHOT INCREMENTAL MATH:
                                                               ─────────
                                                        Total:   $39.50/mo
 
-  Compare: daily-365-day = $82.50/mo for marginal extra granularity.
+  Compare: daily-365-day = $101.00/mo for marginal extra granularity.
+  Assumptions: 5 GB changed per day; illustrative, not measured.
 ─────────────────────────  ──────────────  ─────────────────────────  ────────
 ```
 
 ## Hands-on with the Bookstore Platform
+
+Output blocks in this section are illustrative. They were not captured
+from a run.
 
 ### 0. Prerequisites
 
@@ -309,7 +361,8 @@ EBS SNAPSHOT INCREMENTAL MATH:
 - `kubectl` configured for the cluster.
 - `velero` CLI installed (`brew install velero` or grab a release from
   <https://github.com/vmware-tanzu/velero/releases>; this chapter
-  uses Velero 1.14.x to match `velero_chart_version` 7.2.x).
+  uses Velero 1.18.x, the app version of the chart `velero.tf` pins
+  (`velero_chart_version` 12.2.2).
 - AWS CLI configured to inspect the S3 bucket + EC2 snapshots.
 
 The Terraform shipping this is in
@@ -395,8 +448,8 @@ Key fields:
   needs investigation.
 - `Total items to be backed up: NNN` — every resource the K8s API
   returned for this namespace.
-- `Volume snapshots: N of N completed` — every PVC in the namespace
-  got a CSI VolumeSnapshot.
+- `Volume snapshots: N of N completed`: every EBS-backed PV in the
+  namespace got an EBS snapshot.
 - `Backup format version: 1.1.0` — Velero's metadata version.
 
 ### 3. Inspect what landed in S3
@@ -418,18 +471,19 @@ Files you'll see:
 
 - `velero-backup.json` — the backup manifest (which namespaces, which
   resources, the time, the status).
-- `resource-list/<resource>.tar.gz` — one tarball per Kubernetes
-  resource type containing all the YAML manifests.
-- `volumesnapshots.tar.gz` — the VolumeSnapshot CR exports.
-- `csi-volumesnapshotcontents.tar.gz` — the VolumeSnapshotContent
-  exports (the cluster-scoped binding objects).
+- `<NAME>.tar.gz`: every object the backup includes, as JSON. Secrets
+  are in this file.
+- `<NAME>-resource-list.json.gz`: the resources the backup selected.
+- `<NAME>-volumesnapshots.json.gz`: the EBS snapshot IDs for the PVs.
 
-For the curious:
+For the curious, list the contents tarball. It holds the Secrets too,
+so copying it to a laptop puts plaintext Secret values on disk. Delete
+the copy when you are done.
 
 ```bash
-aws s3 cp "s3://$BUCKET/backups/$BACKUP_NAME/resource-list/configmaps.tar.gz" /tmp/cm.tar.gz
-tar tzf /tmp/cm.tar.gz | head -5
-# resource-list/configmaps/bookstore/payments-config.yaml etc.
+aws s3 cp "s3://$BUCKET/backups/$BACKUP_NAME/$BACKUP_NAME.tar.gz" /tmp/backup.tar.gz
+tar tzf /tmp/backup.tar.gz | head -5
+rm /tmp/backup.tar.gz
 ```
 
 ### 4. Inspect the EBS snapshots Velero created
@@ -437,8 +491,8 @@ tar tzf /tmp/cm.tar.gz | head -5
 ```bash
 aws ec2 describe-snapshots \
   --owner-ids self \
-  --filters "Name=tag:velero.io/backup,Values=true" \
-  --query 'Snapshots[].[SnapshotId,VolumeId,VolumeSize,State,Tags[?Key==`velero.io/backup-name`].Value | [0]]' \
+  --filters "Name=tag-key,Values=velero.io/backup" \
+  --query 'Snapshots[].[SnapshotId,VolumeId,VolumeSize,State,Tags[?Key==`velero.io/backup`].Value | [0]]' \
   --output table
 ```
 
@@ -457,10 +511,10 @@ Expected:
 
 Two things to confirm:
 
-- Snapshots are tagged `velero.io/backup=true` — this is the IAM-scoping
-  hook (Phase 14-R's `velero.tf` `ec2:DeleteSnapshot` requires this
-  tag).
-- `State: completed` — AWS finished copying changed blocks to S3.
+- Snapshots carry a `velero.io/backup` tag whose value is the backup
+  name, plus `velero.io/pv`. `velero.tf` checks the key, not the value,
+  before it allows a delete.
+- `State: completed`: the snapshot is complete.
 
 ### 5. Run a restore drill — destroy + restore
 
@@ -526,7 +580,7 @@ Verify the data is the snapshot data (not empty volumes):
 
 ```bash
 # Find a CNPG pod and query for a known row:
-CNPG=$(kubectl -n bookstore get pod -l postgresql=bookstore-db -o jsonpath='{.items[0].metadata.name}')
+CNPG=$(kubectl -n bookstore get pod -l cnpg.io/cluster=bookstore-db,cnpg.io/instanceRole=primary -o jsonpath='{.items[0].metadata.name}')
 kubectl -n bookstore exec "$CNPG" -- psql -U postgres -d bookstore \
   -c "SELECT count(*) FROM books;"
 # Expected: the row count from before deletion.
@@ -558,13 +612,13 @@ kubectl -n velero get schedule nightly-cluster-backup -o yaml | head -40
 
 The schedule spec mirrors the Terraform `velero.tf`'s schedule
 config — `excludedNamespaces`, `snapshotVolumes: true`, `ttl: 720h`
-(30 days), `csiSnapshotTimeout: 30m`.
+(30 days).
 
 ### 7. Implement the 23-backup retention scheme (production extension)
 
 The default schedule is daily-with-30-day-TTL (30 backups). To
 implement 23-backup, replace it with three Schedules. Save as
-`/tmp/velero-23-scheme.yaml`:
+`velero-23-scheme.yaml`:
 
 ```yaml
 ---
@@ -583,7 +637,6 @@ spec:
       - kube-public
       - kube-node-lease
     snapshotVolumes: true
-    csiSnapshotTimeout: "30m"
     storageLocation: default
     volumeSnapshotLocations: [default]
 ---
@@ -602,7 +655,6 @@ spec:
       - kube-public
       - kube-node-lease
     snapshotVolumes: true
-    csiSnapshotTimeout: "30m"
     storageLocation: default
     volumeSnapshotLocations: [default]
 ---
@@ -621,7 +673,6 @@ spec:
       - kube-public
       - kube-node-lease
     snapshotVolumes: true
-    csiSnapshotTimeout: "30m"
     storageLocation: default
     volumeSnapshotLocations: [default]
 ```
@@ -631,7 +682,7 @@ spec:
 kubectl -n velero delete schedule nightly-cluster-backup
 
 # Apply the three-tier:
-kubectl apply -f /tmp/velero-23-scheme.yaml
+kubectl apply -f velero-23-scheme.yaml
 
 # Confirm:
 velero schedule get
@@ -648,16 +699,19 @@ CNPG's own `Backup` CRD is the production-grade backup; Velero's
 pre-backup hook is the lightweight companion for the cases where
 you want a CHECKPOINT before snapshotting.
 
-Annotate the CNPG primary Pod via the Cluster resource (CNPG
-propagates the annotation to its Pods):
+Set the hook as inherited metadata on the Cluster. CNPG passes
+`spec.inheritedMetadata` to the objects it creates for the Cluster,
+Pods included. Velero reads the hook from the Pod:
 
 ```bash
 kubectl -n bookstore patch cluster bookstore-db --type=merge -p '{
-  "metadata": {
-    "annotations": {
-      "pre.hook.backup.velero.io/container": "postgres",
-      "pre.hook.backup.velero.io/command": "[\"/bin/sh\",\"-c\",\"psql -U postgres -c CHECKPOINT\"]",
-      "pre.hook.backup.velero.io/timeout": "1m"
+  "spec": {
+    "inheritedMetadata": {
+      "annotations": {
+        "pre.hook.backup.velero.io/container": "postgres",
+        "pre.hook.backup.velero.io/command": "[\"/bin/sh\",\"-c\",\"psql -U postgres -c CHECKPOINT\"]",
+        "pre.hook.backup.velero.io/timeout": "1m"
+      }
     }
   }
 }'
@@ -673,8 +727,9 @@ velero backup create bookstore-consistent-$(date +%Y%m%d-%H%M) \
   --wait
 ```
 
-The hook's exit code is part of the backup result; if the hook
-fails, the backup status is `PartiallyFailed`. For CNPG specifically,
+The hook's default `on-error` is `Fail`, so a failing command marks the
+backup as failed or partially failed. Check the phase. For CNPG
+specifically,
 the **canonical** answer is CNPG's `Backup`/`ScheduledBackup` CRDs,
 which manage WAL streaming for true PITR; this hook pattern is the
 lightweight insurance for *other* stateful workloads where you
@@ -683,11 +738,11 @@ don't have a built-in backup CRD.
 ### 9. Clean up the test backups
 
 ```bash
-# Delete old test backups (Velero deletes the underlying snapshots
-# via the ec2:DeleteSnapshot IRSA permission scoped to
-# velero.io/backup tagged resources).
-velero backup delete bookstore-test-* --confirm
-velero backup delete bookstore-consistent-* --confirm
+# Delete old test backups. Velero also deletes their EBS snapshots,
+# through the ec2:DeleteSnapshot permission scoped to the
+# velero.io/backup tag key. The shell cannot expand the backup names,
+# so filter them with jq.
+velero backup get -o json | jq -r '.items[].metadata.name | select(startswith("bookstore-test-") or startswith("bookstore-consistent-"))' | xargs -n1 velero backup delete --confirm
 ```
 
 To remove Velero entirely, set `enable_velero = false` and
@@ -722,51 +777,46 @@ The Velero server's controllers reconcile a set of CRDs:
   deletes the ones whose age exceeds `ttl`, then deletes the
   underlying snapshots via the AWS plugin.
 
-**The CSI snapshot path in detail.** When Velero backs up a PVC, the
-Velero controller creates a VolumeSnapshot CR. The CSI
-external-snapshotter sidecar (part of the EBS-CSI deployment, not
-Velero) watches VolumeSnapshot CRs and calls the CSI
-`CreateSnapshot` RPC on the EBS-CSI controller. The EBS-CSI driver
-calls AWS's `ec2:CreateSnapshot` API. AWS returns a snapshot ID;
-the snapshotter records it in a VolumeSnapshotContent CR (the
-cluster-scoped binding). Velero waits for the `ReadyToUse: true`
-status on the VolumeSnapshot CR (which AWS sets once the changed
-blocks have been copied to S3), then records the snapshot ID in
-the backup metadata.
+**The native snapshot path in detail.** For each PV the backup selects,
+Velero's backup controller calls the AWS plugin's volume snapshotter.
+The plugin copies the volume's tags to the snapshot, adds Velero's
+tags (`velero.io/backup`, `velero.io/pv`) and the backup's labels, and
+calls `ec2:CreateSnapshot`. It returns the snapshot ID, which Velero
+writes to the backup's volumesnapshots file. No Kubernetes
+VolumeSnapshot object is created on this path.
 
-**Restore from CSI snapshot.** When Velero restores a PVC, it
-creates a new PVC pointing at a new VolumeSnapshot+VolumeSnapshotContent
-pair built from the recorded snapshot ID. The CSI driver provisions
-a new EBS volume from the snapshot (a regular `ec2:CreateVolume`
-call with `SnapshotId`); the volume is attached, the Pod's container
-starts, the data is there.
+**Restore from a native snapshot.** Restore reads the snapshot ID from
+the backup. The plugin describes the snapshot and calls
+`ec2:CreateVolume` with the snapshot ID, copying the snapshot's tags to
+the new volume. The volume is attached and the Pod's container starts
+with the data. An encrypted volume also needs the KMS grants described
+below.
 
-**The IRSA permissions Phase 14-R grants Velero.** The
-`velero.tf` `aws_iam_role_policy.velero` document scopes the role
-to:
+**The IRSA permissions in `velero.tf`.** The `aws_iam_policy.velero`
+document scopes the role to:
 
 - **S3:** `s3:GetObject`, `s3:DeleteObject`, `s3:PutObject`,
-  `s3:AbortMultipartUpload`, `s3:ListMultipartUploadParts` — on the
-  bucket only.
-- **EC2 Describe:** `ec2:DescribeVolumes`, `ec2:DescribeSnapshots`
-  on `*` (AWS Describe APIs don't support resource-level
-  conditions — this is by AWS-API design).
-- **EC2 Lifecycle:** `ec2:DeleteSnapshot`, `ec2:DeleteVolume`
-  conditioned on `ec2:ResourceTag/velero.io/backup = true` — Velero
-  can only delete snapshots/volumes it tagged.
-- **EC2 Create:** `ec2:CreateSnapshot`, `ec2:CreateVolume`
-  conditioned on `aws:RequestTag/velero.io/backup = true` — every
-  create must propose the tag, so subsequent deletes can find the
-  tag for the IAM condition.
-- **EC2 Tagging:** `ec2:CreateTags` conditioned on `aws:TagKeys`
-  in `[velero.io/backup, velero.io/restore]` — Velero can only set
-  the two tag keys it uses.
+  `s3:AbortMultipartUpload`, `s3:ListMultipartUploadParts` on the
+  bucket's objects, and `s3:ListBucket` on the bucket.
+- **EC2 Describe:** `ec2:DescribeVolumes` and `ec2:DescribeSnapshots`
+  on `*`.
+- **EC2 Lifecycle:** `ec2:DeleteSnapshot` and `ec2:DeleteVolume` only
+  when the target has a `velero.io/backup` tag key, whatever its value.
+- **EC2 Create:** `ec2:CreateSnapshot` and `ec2:CreateVolume` only when
+  the request carries that key, so everything the role creates can be
+  deleted by the statement above.
+- **EC2 Tagging:** `ec2:CreateTags` only when `ec2:CreateAction` names a
+  snapshot or volume create, so the role cannot tag existing resources.
+- **KMS:** decrypt and data-key actions on the backup bucket key, and
+  on the EBS key for restores from encrypted snapshots. `CreateGrant` is
+  allowed only for grants AWS creates on the role's behalf.
 
-This **tag-based isolation** is the production-grade IAM pattern:
-the IRSA role can act on resources it owns, can't touch resources
-owned by anyone else, and the condition on `aws:RequestTag`
-prevents the role from creating resources without the
-distinguishing tag.
+The tag scoping limits what the role can delete. It does not limit what
+the role can read. The role can still snapshot any EBS volume in the
+account, because the create statement does not name a source volume.
+Narrowing that is a production step. These conditions were checked
+against the tag names in the plugin source. This example has not been
+run against an AWS account.
 
 **Backup garbage collection.** Velero's GC controller scans Backup
 CRs every hour by default; backups past their TTL are deleted (the
@@ -780,16 +830,15 @@ backups that for some reason weren't garbage-collected (e.g., a
 broken Velero install).
 
 **The Kopia file-system backup path (if enabled).** When a backup
-includes `defaultVolumesToFsBackup: true` (not Phase 14-R's
-default), Velero's node-agent DaemonSet mounts each PV's
+includes `defaultVolumesToFsBackup: true` (not the example's default),
+Velero's node-agent DaemonSet mounts each PV's
 filesystem and runs `kopia snapshot` against it. Kopia is a
 deduplicated, encrypted file-backup tool; its repository lives in
 the same S3 bucket as Velero's metadata (under a `kopia/` prefix).
 A restore via Kopia path reverses the operation — Velero asks the
 node-agent to mount a fresh PV, runs `kopia restore`, and the data
-is in the new volume. Slower than CSI snapshot (file scan + S3
-write per file) but works on any PV regardless of CSI snapshot
-support.
+is in the new volume. Slower than the native snapshot (file scan and
+S3 write per file), but it works on any PV.
 
 ## Production notes
 
@@ -803,15 +852,6 @@ support.
 > dedicated `restore-test-<DATE>` namespace, runs a `velero restore`,
 > verifies a known-good query, and tears down.
 
-> **In production:** The **backup-encryption** discipline. Phase
-> 14-R's S3 bucket is SSE-KMS encrypted with `bucket_key_enabled = true`
-> (the bucket-level KMS data key cache; reduces KMS API call cost ~99%
-> for high-write workloads). EBS snapshots are encrypted with the
-> source volume's KMS key. Both are at-rest encryption. In flight,
-> Velero talks to S3 via HTTPS (the bucket policy's
-> `DenyInsecureTransport` enforces it). The full path is end-to-end
-> encrypted; no plaintext backup data ever crosses a network.
-
 > **In production:** **Cross-region backup copy** is a Phase 14-R
 > gap. The bucket is single-region; a region-loss event (AWS region
 > down for the duration of the recovery you need) means the backup
@@ -819,20 +859,20 @@ support.
 > Replication (CRR) onto a peer-region bucket. The CRR config goes
 > into the bucket's replication-configuration; the destination
 > bucket lives in a second region (e.g., us-east-1 primary +
-> us-west-2 DR). The cost: outbound region-transfer ($0.02/GB for
-> cross-region) + duplicate storage. Worth it for production; an
+> us-west-2 DR). The cost: cross-region data transfer and duplicate
+> storage, both billed. Worth it for production; an
 > opt-in in any fork. Chapter 14.17 covers the cross-region DR
 > pattern in detail.
 
-> **In production:** **Backup retention math.** Phase 14-R's
-> default (daily-30d, 30 backups) is the simple starting point. The
-> 23-backup scheme (7-daily + 4-weekly + 12-monthly) is the FinOps
-> default — 23 backups, ~$40/mo for a 200 GB cluster. For
+> **In production:** **Backup retention math.** The example's default
+> (daily-30d, 30 backups) is the simple starting point. The 23-backup
+> scheme (7-daily + 4-weekly + 12-monthly) is the cost-aware option: 23
+> backups, about $40/mo under the illustrative assumptions above. For
 > compliance regimes (HIPAA, PCI-DSS, GDPR) that require 7-year
-> retention, the math changes — annual snapshots get long retention
-> but the storage class transitions to Glacier Deep Archive
-> ($0.00099/GB-mo). Plan retention against the compliance regime,
-> not against gut feel.
+> retention, the math changes. The EBS pricing page lists an archive
+> tier at $0.0125 per GB-month (list price, checked 2026-10-31), but
+> check its restore time before you rely on it. Plan retention against
+> the compliance regime, not against gut feel.
 
 > **In production:** **Velero is one of three backup layers.** The
 > full production-grade backup story is **Velero (K8s + EBS PVs) +
@@ -900,14 +940,14 @@ velero backup delete <NAME> --confirm
 
 # List EBS snapshots Velero created.
 aws ec2 describe-snapshots --owner-ids self \
-  --filters "Name=tag:velero.io/backup,Values=true" \
+  --filters "Name=tag-key,Values=velero.io/backup" \
   --query 'Snapshots[].[SnapshotId,VolumeSize,State]'
 
 # Check the BackupStorageLocation status.
 velero backup-location get
 ```
 
-Backup checklist (the production setup is right when all six are yes):
+Backup checklist (the production setup is right when all seven are yes):
 
 - [ ] Velero installed via `enable_velero = true`; BSL `default` is
       `Available`.
@@ -916,9 +956,10 @@ Backup checklist (the production setup is right when all six are yes):
       in effect.)
 - [ ] Restore drill executed within the last 90 days; documented in
       a runbook with the verified-good query result.
-- [ ] S3 bucket has versioning + KMS encryption + lifecycle to
-      Glacier-IR + `DenyInsecureTransport` policy.
-- [ ] EBS snapshots tagged `velero.io/backup=true`; AWS account has
+- [ ] S3 bucket has versioning + a customer-managed KMS key + lifecycle
+      to Glacier-IR + `DenyInsecureTransport` policy.
+- [ ] Object Lock decision recorded: set, or left off with a reason.
+- [ ] EBS snapshots carry the `velero.io/backup` tag; AWS account has
       EBS snapshot quota headroom for the expected backup count.
 - [ ] Cross-region replication configured (production tier) — bucket
       replicates to a peer-region bucket; recovery is possible from
@@ -928,10 +969,10 @@ Backup checklist (the production setup is right when all six are yes):
 
 > Try each before opening the answer drawer. The act of trying is the exercise; the answer is the check.
 
-1. **EKS manages etcd snapshots, AWS Backup snapshots EBS volumes, RDS has PITR, S3 has versioning. What does Velero add that none of those provide?**
+1. **EKS runs the control plane, AWS Backup snapshots EBS volumes, RDS has PITR, S3 has versioning. What does Velero add that none of those provide?**
    <details><summary>Show answer</summary>
 
-   Velero snapshots **Kubernetes API objects** — ConfigMaps, Secrets, Deployments, CRDs (Kyverno policies, Argo CD Applications, OpenCost Allocations) — that aren't visible to EBS or RDS or S3. EKS's etcd snapshots exist but AWS doesn't expose them to you (you cannot download them); they protect AWS, not you. AWS Backup snapshots EBS volumes but doesn't know which PVC owned a deleted volume, doesn't capture the resources that referenced it, and can't restore "the bookstore namespace as it was 6 hours ago." Velero ties API objects + the PVs they reference into a backup unit, so you can restore a namespace, a label-selected subset, or the whole cluster.
+   Velero snapshots **Kubernetes API objects**: ConfigMaps, Secrets, Deployments, CRDs (Kyverno policies, Argo CD Applications, OpenCost Allocations). EBS snapshots and RDS point-in-time recovery do not cover those. EKS runs the control plane, so there is no etcd backup of your own to restore from. Velero ties API objects + the PVs they reference into a backup unit, so you can restore a namespace, a label-selected subset, or the whole cluster. AWS Backup has EKS support too; check its scope yourself, since this chapter does not test it.
 
    </details>
 
@@ -945,14 +986,21 @@ Backup checklist (the production setup is right when all six are yes):
 3. **A team excludes the `bookstore` namespace from the backup Schedule because "it's all in GitOps anyway." Three months later they need to restore. What's missing and why does the chapter call this the canonical exclusion-list trap?**
    <details><summary>Show answer</summary>
 
-   GitOps stores the *desired* state — the Application manifests, Helm values, Kustomize overlays. It does **not** store cluster-managed state that the controllers create dynamically: Kyverno PolicyExceptions, OpenCost Allocations, CNPG's TenantClaim references with internal metadata, Velero's own Backup CRs, any CR a controller creates but doesn't put back in Git. Excluding the namespace skips all of these. The chapter's discipline: default to inclusion, audit the exclusion list with eyes-on, and remember that "we have GitOps" doesn't replace backup — it covers a different layer.
+   GitOps stores the *desired* state: the Application manifests, Helm values, Kustomize overlays. It does **not** store cluster-managed state that the controllers create dynamically: Kyverno PolicyExceptions, OpenCost Allocations, Velero's own Backup CRs, any CR a controller creates but doesn't put back in Git. Excluding the namespace skips all of these. The chapter's discipline: default to inclusion, audit the exclusion list with eyes-on, and remember that "we have GitOps" doesn't replace backup — it covers a different layer.
 
    </details>
 
-4. **Hands-on extension — take a Velero backup with `defaultVolumesToFsBackup: false` (CSI snapshot path), then attach an EFS-backed PVC and try the same. Observe.**
+4. **Hands-on extension: take a Velero backup with `defaultVolumesToFsBackup: false` (native snapshot path), then attach an EFS-backed PVC and try the same. Observe.**
    <details><summary>What you should see</summary>
 
-   The CSI snapshot path works for EBS-backed PVCs — Velero asks the EBS-CSI driver to take a CSI snapshot, EBS does the block-store snapshot in seconds. But for the EFS-backed PVC, the CSI snapshot fails or is silently skipped (EFS-CSI doesn't implement CSI VolumeSnapshot — EFS isn't block storage). The fix is per-PVC annotation `backup.velero.io/backup-volumes-includes` to use Kopia/Restic file-level backup mode for the EFS PVC; the rest stays on CSI snapshots. The chapter's lesson: pick the right backup path per CSI driver; mixed clusters need both modes selectively.
+   The native path snapshots the EBS-backed PVCs through the AWS plugin. For the EFS-backed PVC, the plugin logs `Unable to handle CSI driver` and takes no snapshot, so that PVC's data is not in the backup. The fix is file-system backup for that pod: the annotation `backup.velero.io/backup-volumes` naming the EFS volume. That needs a node-agent, which the example does not deploy, and which runs as root with host paths. Adding it means a namespace exception with its reason. The lesson: pick the path per storage driver.
+
+   </details>
+
+5. **A developer has `create` on `restores.velero.io` in their team namespace. The backup holds a `payments` namespace. They run `velero restore create --from-backup <NAME> --include-namespaces=payments --namespace-mappings payments:team-x`. What can they read afterwards, and what stops it?**
+   <details><summary>Show answer</summary>
+
+   The `payments` Secrets are restored into `team-x`, where the developer already reads Secrets. Velero performs the write with its own cluster-admin ServiceAccount, so the developer's RBAC never applies to the copy. What stops it is policy: create on Restore objects belongs to platform admins. Restore rights are read rights on every Secret in the backup, so keep them there, and keep Backup creation there too.
 
    </details>
 
@@ -971,8 +1019,14 @@ Backup checklist (the production setup is right when all six are yes):
   deduplicated file-backup tool Velero uses for file-system
   backup mode).
 - **AWS EBS snapshot pricing**
-  <https://aws.amazon.com/ebs/pricing/>; the AWS-side reference
-  for the $0.05/GB-month-of-unique-blocks math this chapter cites.
+  <https://aws.amazon.com/ebs/pricing/>; the list price the
+  illustrative retention math uses (checked 2026-10-31).
+- **Velero file-system backup and CSI docs** (v1.18.2)
+  <https://github.com/vmware-tanzu/velero/blob/v1.18.2/site/content/docs/main/file-system-backup.md>
+  and <https://github.com/vmware-tanzu/velero/blob/v1.18.2/site/content/docs/main/csi.md>.
+- **S3 Object Lock** and **EBS encryption requirements**:
+  <https://docs.aws.amazon.com/AmazonS3/latest/userguide/object-lock.html> and
+  <https://docs.aws.amazon.com/ebs/latest/userguide/ebs-encryption-requirements.html>.
 - **CNPG Backup CRD documentation**
   <https://cloudnative-pg.io/documentation/current/backup_recovery/>;
   for Postgres workloads, this is the production-grade application-
