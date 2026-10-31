@@ -39,11 +39,17 @@ run() {
 
 work=$(mktemp -d) || exit 1
 ENC_DIR=$(mktemp -d "${TMPDIR:-/tmp}/secrets-lab-enc.XXXXXX") || exit 1
+# created becomes 1 only after this run has made the cluster (MODE=all) or the
+# namespace (MODE=inuse). A refusal, a bad MODE or a missing context exits
+# before that, so the trap deletes nothing that the run did not make.
+created=0
 cleanup() {
-  if [ "$MODE" = all ]; then
-    kind delete cluster --name "$CLUSTER" >/dev/null 2>&1
-  else
-    kubectl delete namespace "$NS" --ignore-not-found >/dev/null 2>&1
+  if [ "$created" = 1 ]; then
+    if [ "$MODE" = all ]; then
+      kind delete cluster --name "$CLUSTER" >/dev/null 2>&1
+    else
+      kubectl delete namespace "$NS" --ignore-not-found >/dev/null 2>&1
+    fi
   fi
   rm -rf "$ENC_DIR" "$work"
 }
@@ -76,19 +82,23 @@ esac
 # apiserver reloads. The first key encrypts new writes and every key decrypts.
 # With no keys, the file holds identity only: the flag is on, nothing is
 # encrypted. identity stays last so that plaintext already in etcd still reads.
+# Step 8b sets PLAINTEXT_FALLBACK=0 once every Secret is encrypted, which
+# drops identity so the apiserver refuses any plaintext value it finds.
 write_config() {
   local out="$ENC_DIR/encryption-config.yaml.new" pair
   {
     printf '%s\n' 'apiVersion: apiserver.config.k8s.io/v1' 'kind: EncryptionConfiguration' \
       'resources:' '  - resources: ["secrets"]' '    providers:'
     if [ $# -gt 0 ]; then
-      printf '%s\n' '      - aesgcm:' '          keys:'
+      printf '%s\n' '      - secretbox:' '          keys:'
       for pair in "$@"; do
         printf '            - name: %s\n              secret: %s\n' \
           "${pair%%=*}" "$(cat "${pair#*=}")"
       done
     fi
-    printf '%s\n' '      - identity: {}'
+    if [ "${PLAINTEXT_FALLBACK:-1}" = 1 ]; then
+      printf '%s\n' '      - identity: {}'
+    fi
   } >"$out" && chmod 0600 "$out" && mv "$out" "$ENC_DIR/encryption-config.yaml"
 }
 
@@ -131,6 +141,19 @@ etcd_ctl() {
 # etcd_get NAME prints the raw bytes etcd holds for Secret NAME in $NS.
 etcd_get() {
   etcd_ctl get "/registry/secrets/$NS/$1" --print-value-only
+}
+
+# etcd_put KEY reads a value on stdin and writes it to KEY. Step 8b uses it to
+# write a deliberately plaintext copy of a Secret, so the caller must redirect
+# stdin from a file: an open stdin would hold the container's input open.
+etcd_put() {
+  local id
+  id=$(docker exec "$NODE" crictl ps -q --label io.kubernetes.container.name=etcd | head -n 1)
+  docker exec -i "$NODE" crictl exec -i "$id" etcdctl \
+    --endpoints=https://127.0.0.1:2379 \
+    --cacert=/etc/kubernetes/pki/etcd/ca.crt \
+    --cert=/etc/kubernetes/pki/etcd/server.crt \
+    --key=/etc/kubernetes/pki/etcd/server.key put "$1"
 }
 
 if [ "$MODE" = all ]; then
@@ -179,6 +202,11 @@ run <<'CMD'
 kind version
 kind create cluster --name lab-secrets --config kind.yaml --kubeconfig kubeconfig --wait 600s
 CMD
+if ! kind get clusters 2>/dev/null | grep -qx "$CLUSTER"; then
+  echo "kind did not create cluster $CLUSTER" >&2
+  exit 1
+fi
+created=1
 run <<'CMD'
 kubectl version
 kubectl get nodes -o custom-columns=NAME:.metadata.name,KUBELET:.status.nodeInfo.kubeletVersion,RUNTIME:.status.nodeInfo.containerRuntimeVersion
@@ -205,11 +233,12 @@ CMD
 echo '## step 4: attack: the same Secret in etcd, read from inside the kind node'
 run <<'CMD'
 etcd_get db-credentials > db.raw
+cp db.raw plain-db.raw
 head -c 4 db.raw | od -An -c
 grep -a -o 'lab-marker-[0-9a-f]*' db.raw
 CMD
 
-echo '## step 5: enable encryption: an aesgcm key encrypts new writes'
+echo '## step 5: enable encryption: a secretbox key encrypts new writes'
 run <<'CMD'
 head -c 32 /dev/urandom | base64 | tr -d '\n' >key1
 apply_config key1=key1
@@ -234,15 +263,29 @@ grep -a -c 'lab-marker-0f3c9a' db.raw
 grep -a -o 'k8s:enc:[a-z]*:v1:[a-z0-9]*:' db.raw
 CMD
 
-echo '## step 8: rotate. key2 encrypts new writes, key1 still decrypts, then key1 goes'
+# Step 8 follows the upstream order in two phases. Phase one adds key2 as the
+# second key, so every apiserver can decrypt it before any apiserver writes
+# with it. Phase two makes key2 first, rewrites every Secret, then drops key1.
+echo '## step 8: rotate in two phases. key2 is added second, then made first, then key1 goes'
 run <<'CMD'
 head -c 32 /dev/urandom | base64 | tr -d '\n' >key2
+apply_config key1=key1 key2=key2
 apply_config key2=key2 key1=key1
 kubectl get secrets --all-namespaces -o json | kubectl replace -f - | grep -c replaced
 etcd_get db-credentials > db.raw
 grep -a -o 'k8s:enc:[a-z]*:v1:[a-z0-9]*:' db.raw
 apply_config key2=key2
 kubectl get secret db-credentials -n secrets-lab -o jsonpath='{.data.password}' | base64 -d; echo
+CMD
+
+echo '## step 8b: prevent plain text retrieval. identity goes, and a plaintext copy fails to read'
+run <<'CMD'
+PLAINTEXT_FALLBACK=0 apply_config key2=key2
+grep -a -c 'lab-marker-0f3c9a' plain-db.raw
+etcd_put /registry/secrets/secrets-lab/plaintext-check < plain-db.raw
+kubectl get secret plaintext-check -n secrets-lab 2>&1 | cut -c1-160
+kubectl get secret db-credentials -n secrets-lab -o jsonpath='{.data.password}' | base64 -d; echo
+etcd_ctl del /registry/secrets/secrets-lab/plaintext-check
 CMD
 fi
 
@@ -355,11 +398,17 @@ kubectl label namespace secrets-lab pod-security.kubernetes.io/enforce=restricte
 for i in $(seq 1 60); do kubectl get serviceaccount default -n secrets-lab >/dev/null 2>&1 && break; sleep 1; done
 kubectl create secret generic db-credentials -n secrets-lab --from-literal=password=lab-marker-0f3c9a
 CMD
+if ! kubectl get namespace "$NS" >/dev/null 2>&1; then
+  echo "could not create namespace $NS" >&2
+  exit 1
+fi
+created=1
 fi
 run <<'CMD'
 kubectl apply -f app.yaml
 kubectl wait --for=condition=Ready pod/app-env pod/app-file -n secrets-lab --timeout=180s
 kubectl exec -n secrets-lab app-env -- sh -c 'tr "\0" "\n" </proc/1/environ | grep DB_PASSWORD'
+kubectl exec -n secrets-lab app-env -- sh -c 'echo "exec session: $DB_PASSWORD"'
 kubectl exec -n secrets-lab app-file -- ls -lL /etc/creds/password
 kubectl exec -n secrets-lab app-file -- cat /etc/creds/password; echo
 kubectl exec -n secrets-lab app-file -- sh -c "grep '/etc/creds ' /proc/mounts | cut -d ' ' -f 3"
@@ -376,8 +425,11 @@ echo '## step 10: where an emptyDir lives on the node'
 run <<'CMD'
 kubectl exec -n secrets-lab app-file -- sh -c 'cp /etc/creds/password /cache/password && cp /etc/creds/password /scratch/password'
 uid=$(kubectl get pod -n secrets-lab app-file -o jsonpath='{.metadata.uid}')
-docker exec "$NODE" cat "/var/lib/kubelet/pods/$uid/volumes/kubernetes.io~empty-dir/cache/password"; echo
-docker exec "$NODE" stat -f -c '%T %n' "/var/lib/kubelet/pods/$uid/volumes/kubernetes.io~empty-dir/cache" "/var/lib/kubelet/pods/$uid/volumes/kubernetes.io~empty-dir/scratch"
+node=$(kubectl get pod -n secrets-lab app-file -o jsonpath='{.spec.nodeName}')
+docker exec "$node" cat "/var/lib/kubelet/pods/$uid/volumes/kubernetes.io~empty-dir/cache/password"; echo
+docker exec "$node" stat -f -c '%T %n' "/var/lib/kubelet/pods/$uid/volumes/kubernetes.io~empty-dir/cache" "/var/lib/kubelet/pods/$uid/volumes/kubernetes.io~empty-dir/scratch"
+kubectl exec -n secrets-lab app-file -- df -k /scratch
+kubectl exec -n secrets-lab app-file -- sh -c 'dd if=/dev/zero of=/scratch/fill bs=1048576 count=16 2>&1 | tail -n 2; rm -f /scratch/fill'
 CMD
 
 if [ "$MODE" = all ]; then
