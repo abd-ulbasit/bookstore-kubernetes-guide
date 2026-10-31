@@ -83,7 +83,7 @@ Seven checks, each one a claim the guide makes, proven against the real
 cluster before the guide makes it: nodes Ready and of the right type, the spot
 label, a workload scheduling across both nodes, the Workload Identity metadata
 server answering, a PVC binding, and cordon plus drain rescheduling pods. That
-last one is the whole reason to leave the single-node k3s box.
+last one is the whole reason to leave a single-node local cluster.
 
 ## Prerequisites, learned the hard way
 

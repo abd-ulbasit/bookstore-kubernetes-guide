@@ -41,7 +41,7 @@ review that can take days:
   can still run a two-worker `PyTorchJob` by time-slicing the single GPU or
   putting one worker on CPU. That demonstrates rendezvous and is explicitly
   **not** distributed training across nodes. Keep the distinction; blurring it
-  is the fastest way to lose an ML platform interview.
+  overstates what the lab proved.
 - **G8** is more interesting with two nodes, though single-node preemption
   still teaches the lesson.
 

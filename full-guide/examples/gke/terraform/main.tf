@@ -99,8 +99,8 @@ resource "google_container_cluster" "lab" {
   }
 
   # Workload Identity is the GCP equivalent of EKS IRSA: pods authenticate as
-  # Google service accounts without a static key on disk. This is the single
-  # most transferable GKE-specific concept for a platform interview.
+  # Google service accounts without a static key on disk. It is the
+  # GKE-specific concept that carries over to other clouds best.
   workload_identity_config {
     workload_pool = "${var.project_id}.svc.id.goog"
   }
