@@ -267,21 +267,24 @@ There is no `--create-namespace`: the base **includes** the `Namespace`
 object, so the PSA `restricted` labels + ResourceQuota + LimitRange travel with
 the apply. Kustomize emits an ordered stream (namespace and cluster-scoped
 kinds first), so a single `apply` lands without "namespace not found" races.
-Watch it converge:
+Watch it converge. The comments show the results to expect. The lab run did
+not reach this step, so none of this output is captured:
 
 ```sh
 kubectl get pods -n bookstore -w
-# postgres-0 Running; catalog/orders/storefront/payments-worker/redis/rabbitmq Ready
+# Expected: postgres-0 Running; catalog/orders/storefront/payments-worker/redis/rabbitmq Ready
 kubectl get job db-migrate -n bookstore         # the schema migration Job (Completed)
 kubectl logs job/db-migrate -n bookstore        # "migration complete"
 ```
 
-Confirm the namespace really enforces `restricted` and the pods were admitted:
+Confirm the namespace really enforces `restricted` and the pods were admitted.
+Illustrative output (not captured in the lab run): the comments show the
+expected results.
 
 ```sh
 kubectl get ns bookstore -o jsonpath='{.metadata.labels}' | tr ',' '\n' | grep pod-security
-# pod-security.kubernetes.io/enforce:restricted ... (audit + warn too)
-kubectl get pods -n bookstore        # all Running — restricted did NOT reject our pods
+# Expected: pod-security.kubernetes.io/enforce:restricted ... (audit + warn too)
+kubectl get pods -n bookstore        # Expected: all Running, with no admission refusals
 ```
 
 The dev overlay rendered **45** objects: the base's 49 minus the HPA and the
@@ -633,9 +636,10 @@ kubectl kustomize "https://github.com/abd-ulbasit/bookstore-kubernetes-guide//fu
 A branch or a tag is a name that can move. The same URL can render a different
 base after the next push, and that change never passes through your review. A
 full commit SHA does not move. Get the SHA you reviewed with
-`git ls-remote <repo-url> refs/heads/main`, and pin that. Argo CD takes the
-same rule in `targetRevision` ([07.04](04-gitops-argocd.md)). Scan a remote
-base's render the way step 5 scans your own.
+`git ls-remote <repo-url> refs/heads/main`, and pin that. Argo CD can also
+sync a fixed commit, but the prod Application in [07.04](04-gitops-argocd.md)
+tracks `main`, so a sync deploys whatever `main` holds at that moment. Scan a
+remote base's render the way step 5 scans your own.
 
 ### 8. Promote one image pin, and read the diff
 
@@ -746,15 +750,18 @@ This cluster has neither the KEDA nor the Prometheus Operator CRDs, so the
 client dry-run cannot map those kinds. That is **expected and correct**. The
 component's objects are schema-correct, but the **CRD must exist first**.
 Every built-in object still validates; only the component's kinds report
-`no matches`. Install the operator with **Helm / the official stable manifest**
-(never a `releases/latest/download/<PINNED-FILE>.yaml` URL — it 404s when a new
-release ships), then the same component applies cleanly. Pin the chart version
-you checked (`helm show chart kedacore/keda` reports 2.21.0 at the time of
-writing):
+`no matches`. Install the operator as [ch.01](01-packaging-helm.md) describes, then the same
+component applies cleanly. That chapter also explains why a release-asset URL
+is not an install path. For KEDA, create and label the namespace first, and
+pin the tarball by the SHA-256 in the repository index (version 2.21.0 at the
+time of writing):
 
 ```sh
-helm repo add kedacore https://kedacore.github.io/charts && helm repo update
-helm install keda kedacore/keda -n keda --create-namespace --version 2.21.0 --wait
+kubectl create namespace keda
+kubectl label namespace keda pod-security.kubernetes.io/enforce=restricted
+curl -fsSLO https://kedacore.github.io/charts/keda-2.21.0.tgz
+echo "a7da56bf41a33dad9d2fc82a6fdecee552fff947d80bf1e1dbcf4db0f9e26dee  keda-2.21.0.tgz" | shasum -a 256 -c -
+helm install keda ./keda-2.21.0.tgz -n keda --wait
 kubectl apply -k examples/bookstore/kustomize/overlays/dev   # ScaledObject now applies
 kubectl get scaledobject,hpa -n bookstore                    # KEDA created the managed HPA
 ```
@@ -765,8 +772,8 @@ and its own `kustomization.yaml` header): `servicemonitor`/`prometheusRule`
 need `kube-prometheus-stack`; `gateway` needs the Gateway API CRDs + a
 controller and **swaps the Ingress out** (the structural analog of the chart's
 mutually-exclusive `ingress`/`gateway` `fail` — there is never a double bind);
-`kyverno` needs Kyverno (its `ClusterPolicy` is deliberately **Audit**, never
-Enforce — Enforce would reject the guide's own `:dev` images); `snapshot`
+`kyverno` needs Kyverno, and its `ClusterPolicy` stays in **Audit** for the
+reason [ch.01](01-packaging-helm.md) gives; `snapshot`
 needs the external-snapshotter CRDs + a snapshot-capable CSI driver. `canary`
 needs **no** CRD — it swaps the single `catalog` Deployment for the
 stable/canary pair (manual replica-ratio canary; the automated, metric-gated
@@ -816,8 +823,9 @@ pipeline** — there is no templating step anywhere in it:
    `--load-restrictor LoadRestrictionsNone`, so a `../../raw-manifests`
    reference would make `kubectl apply -k` (and Argo CD / Flux, which also
    default to the restricted loader) fail. Vendoring keeps the tree
-   self-contained and flag-free; the equivalence check (below) guarantees the
-   copies have not drifted.
+   self-contained and flag-free. The copies match their raw originals byte for
+   byte (check with `cmp`), and the Equivalence paragraph below shows that the
+   render matches the Helm chart.
 3. **Generators** run: `configMapGenerator` / `secretGenerator` synthesise a
    ConfigMap/Secret from literals/files/env and append a **content-hash suffix**
    to the name (`catalog-config-7h8f9…`), then **rewrite every reference** to
@@ -956,12 +964,12 @@ plugin**; Kustomize also supports out-of-tree plugins, deliberately unused here
 output" cost Kustomize exists to avoid).
 
 **Equivalence (why "the base equals the app" is true, not aspirational).** The
-base's 19 files are copies of the in-scope `raw-manifests/*.yaml`. Sixteen are
-byte-identical. Three differ only in comments, and one of those also differs in
-content: the postgres copy lacks the liveness probe's `failureThreshold: 12`
-that the raw file sets, so the copy's liveness probe uses the default instead.
-That is a defect in the copy. The fix is one line in
-`base/20-postgres-statefulset.yaml`. `kubectl kustomize base` emits the **same
+base's 19 files are copies of the in-scope `raw-manifests/*.yaml`, and all 19
+are byte-identical to their originals (`cmp`-verified). Earlier copies had
+drifted: the postgres copy lacked the liveness probe's `failureThreshold: 12`
+that the raw file sets for a slow first start, so that probe ran on the
+default of three failures. The copies were re-vendored, so every overlay now
+runs postgres with the 12-failure liveness probe. `kubectl kustomize base` emits the **same
 `(kind, name, namespace)` set as `helm template` with default values — 49
 objects**. `staging` renders that **identical 49-set**; `dev` is 45 (−HPA −3
 PDB, the documented dev knobs); `prod` is 48 (−demo Secret, the documented prod
@@ -1107,16 +1115,22 @@ them, and they differ in *who is the outer tool*:
   chart's `values` cannot express:
 
   ```sh
+  #!/usr/bin/env sh
   # post-renderer.sh: Helm pipes the rendered manifests to this on stdin.
   # The last-mile overlay lists all.yaml under resources:.
-  #!/usr/bin/env sh
   set -eu
   work=$(mktemp -d)
   trap 'rm -rf "$work"' EXIT
   cp -R /path/to/last-mile-overlay "$work/overlay"
   cat > "$work/overlay/all.yaml"
   kustomize build "$work/overlay"
+  ```
 
+  Make the script executable with `chmod +x post-renderer.sh`, because Helm
+  runs it directly and the first line tells the shell which interpreter to use.
+  Then install through it:
+
+  ```sh
   helm install bookstore ./chart --post-renderer ./post-renderer.sh
   ```
 
@@ -1168,13 +1182,12 @@ labels:
 namespace: bookstore                 # base-level; kept across envs (DNS coherence)
 replicas:
   - { name: catalog, count: 4 }      # counts via transformer, not edited YAML
-images:                              # prod: a digest, written by promotion (step 8)
-  - { name: bookstore/catalog, newName: ghcr.io/abd-ulbasit/bookstore-catalog, digest: "sha256:eaa26ada0a2e1575026a5e71e74572ed0bfdde80f50012e91a7be28f0de16ced" }
 patches:
   - target: { kind: HorizontalPodAutoscaler, name: catalog }
     patch: |                          # JSON6902: surgical field edits
       - { op: replace, path: /spec/maxReplicas, value: 12 }
 components:
+  - images                            # prod: digest pins, written by promotion (step 8), kept in a Component
   - ../../components/servicemonitor   # opt-in CRD-backed extra (analog of a Helm toggle)
 ```
 

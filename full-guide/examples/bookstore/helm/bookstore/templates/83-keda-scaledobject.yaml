@@ -12,6 +12,7 @@
 */}}
 {{- if .Values.keda.enabled }}
 {{- $k := .Values.keda }}
+{{- if $k.connectionSecret.create }}
 apiVersion: v1
 kind: Secret
 metadata:
@@ -22,6 +23,7 @@ metadata:
 type: Opaque
 stringData:
   host: {{ $k.amqpHost | quote }}
+{{- end }}
 ---
 apiVersion: keda.sh/v1alpha1
 kind: TriggerAuthentication

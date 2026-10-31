@@ -630,6 +630,11 @@ keda:
   # Secret is base64, not encrypted; in production this comes from External
   # Secrets / Sealed Secrets / Vault, never from values.yaml.
   connectionSecretName: rabbitmq-conn
+  # create: true renders the demo Secret above. Set create: false in production
+  # and supply a Secret of the SAME NAME out of band (External Secrets, Sealed
+  # Secrets or Vault), exactly as dbCredentials.create does for db-credentials.
+  connectionSecret:
+    create: true
   # DEMO-ONLY — never a real/committed credential (stock guest:guest).
   amqpHost: "amqp://guest:guest@rabbitmq.bookstore.svc.cluster.local:5672/"
   pollingInterval: 15
