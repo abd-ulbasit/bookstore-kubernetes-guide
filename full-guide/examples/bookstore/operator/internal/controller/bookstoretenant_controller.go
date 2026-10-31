@@ -9,7 +9,7 @@
 //	owner references -> write .status (conditions + observedGeneration) ->
 //	return (requeue on transient error).
 //
-// Every child is restricted-PodSecurity-compliant (runAsNonRoot, UID 65532,
+// Every child is restricted-PodSecurity-compliant (runAsNonRoot, UID 65535,
 // drop ALL, seccomp RuntimeDefault, read-only root FS) so it admits into the
 // PodSecurity `restricted` tenant namespace the controller itself labels.
 package controller
@@ -67,7 +67,9 @@ var resourceProfiles = map[string]resourceProfile{
 
 // tenantImage is a tiny PUBLIC image (the same one Part 00 ch.04 uses for the
 // reconcile demo) so the reconciled workload pulls anywhere with no kind load.
-const tenantImage = "registry.k8s.io/pause:3.9"
+// It is pinned by the digest of its multi-platform index (tag 3.9); the image
+// declares user 65535:65535 on linux/amd64.
+const tenantImage = "registry.k8s.io/pause:3.9@sha256:7031c1b283388d2c2e09b57badb803c05ebed362dc88d84b480cc47f72a21097"
 
 // BookstoreTenantReconciler reconciles a BookstoreTenant object.
 type BookstoreTenantReconciler struct {
@@ -81,19 +83,21 @@ type BookstoreTenantReconciler struct {
 // kinds it creates, plus its own CR + status + finalizers. Nothing cluster-wide
 // beyond namespaces (it must create the tenant namespace).
 //
-// Two verbs exist for clusters that enable the OwnerReferencesPermissionEnforcement
-// admission plugin. `update` on bookstoretenants/finalizers lets the operator
-// set blockOwnerDeletion on the ownerReferences it writes. `delete` on
-// namespaces lets it change ownerReferences on an EXISTING namespace (for
-// example one an earlier operator version created without an owner); the
-// reconcile path never deletes a namespace itself, the garbage collector does.
+// The markers grant only what the reconcile path calls, and nothing it does
+// not call. Reads come from the informer cache, which needs list and watch on
+// every kind it caches. The operator never deletes anything: the garbage
+// collector removes the tenant Namespace and its children when the CR goes,
+// using its own privileges. The finalizer write needs `update` on the
+// finalizers subresource, because the OwnerReferencesPermissionEnforcement
+// admission plugin checks that verb before it accepts a blockOwnerDeletion
+// reference. Patch is not granted: CreateOrUpdate writes with Update.
 //
-// +kubebuilder:rbac:groups=bookstore.example.com,resources=bookstoretenants,verbs=get;list;watch;create;update;patch;delete
-// +kubebuilder:rbac:groups=bookstore.example.com,resources=bookstoretenants/status,verbs=get;update;patch
+// +kubebuilder:rbac:groups=bookstore.example.com,resources=bookstoretenants,verbs=get;list;watch;update
+// +kubebuilder:rbac:groups=bookstore.example.com,resources=bookstoretenants/status,verbs=update
 // +kubebuilder:rbac:groups=bookstore.example.com,resources=bookstoretenants/finalizers,verbs=update
-// +kubebuilder:rbac:groups=core,resources=namespaces,verbs=get;list;watch;create;update;patch;delete
-// +kubebuilder:rbac:groups=core,resources=configmaps;services,verbs=get;list;watch;create;update;patch;delete
-// +kubebuilder:rbac:groups=apps,resources=deployments,verbs=get;list;watch;create;update;patch;delete
+// +kubebuilder:rbac:groups=core,resources=namespaces,verbs=get;list;watch;create;update
+// +kubebuilder:rbac:groups=core,resources=configmaps;services,verbs=get;list;watch;create;update
+// +kubebuilder:rbac:groups=apps,resources=deployments,verbs=get;list;watch;create;update
 // +kubebuilder:rbac:groups=events.k8s.io,resources=events,verbs=create;patch
 
 // Reconcile is the level-triggered loop. It is idempotent: calling it on an
@@ -279,10 +283,14 @@ func (r *BookstoreTenantReconciler) reconcileDeployment(ctx context.Context, t *
 		dep.Spec.Selector = &metav1.LabelSelector{MatchLabels: labels}
 		dep.Spec.Template.ObjectMeta.Labels = labels
 		dep.Spec.Template.Spec = corev1.PodSpec{
-			// restricted-PodSecurity pod-level securityContext.
+			// The tenant Pod calls no API, so it gets no ServiceAccount token.
+			AutomountServiceAccountToken: ptrBool(false),
+			// restricted-PodSecurity pod-level securityContext. The UID and GID
+			// are the ones the pause image declares (65535:65535).
 			SecurityContext: &corev1.PodSecurityContext{
 				RunAsNonRoot:   ptrBool(true),
-				RunAsUser:      ptrInt64(65532),
+				RunAsUser:      ptrInt64(65535),
+				RunAsGroup:     ptrInt64(65535),
 				SeccompProfile: &corev1.SeccompProfile{Type: corev1.SeccompProfileTypeRuntimeDefault},
 			},
 			// NOTE: no liveness/readiness probes here ON PURPOSE —
@@ -313,6 +321,11 @@ func (r *BookstoreTenantReconciler) reconcileDeployment(ctx context.Context, t *
 					Capabilities:             &corev1.Capabilities{Drop: []corev1.Capability{"ALL"}},
 					SeccompProfile:           &corev1.SeccompProfile{Type: corev1.SeccompProfileTypeRuntimeDefault},
 				},
+				VolumeMounts: []corev1.VolumeMount{{Name: "tmp", MountPath: "/tmp"}},
+			}},
+			Volumes: []corev1.Volume{{
+				Name:         "tmp",
+				VolumeSource: corev1.VolumeSource{EmptyDir: &corev1.EmptyDirVolumeSource{}},
 			}},
 		}
 		return controllerutil.SetControllerReference(t, dep, r.Scheme)

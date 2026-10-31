@@ -40,12 +40,14 @@ envtest: $(LOCALBIN) ## Install setup-envtest (pinned).
 	test -s $(ENVTEST) || GOBIN=$(LOCALBIN) go install sigs.k8s.io/controller-runtime/tools/setup-envtest@$(ENVTEST_VERSION)
 
 .PHONY: manifests
-manifests: controller-gen ## Generate CRDs, RBAC and webhook YAML into config/.
-	$(CONTROLLER_GEN) rbac:roleName=manager-role crd webhook \
+manifests: controller-gen ## Generate the CRD schema and RBAC role into config/.
+	# config/webhook is not generated: its namespaceSelector, timeouts and
+	# cert-manager annotation are kept by hand, and controller-gen would
+	# overwrite them. The CRD's conversion settings live in config/crd/patches.
+	$(CONTROLLER_GEN) rbac:roleName=bookstore-operator-manager-role crd \
 		paths="./api/..." paths="./internal/..." \
 		output:crd:artifacts:config=config/crd \
-		output:rbac:artifacts:config=config/rbac \
-		output:webhook:artifacts:config=config/webhook
+		output:rbac:artifacts:config=config/rbac
 
 .PHONY: generate
 generate: controller-gen ## Regenerate zz_generated.deepcopy.go.

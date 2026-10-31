@@ -1,9 +1,10 @@
 // Command manager is the BookstoreTenant operator + admission-webhook binary.
 //
 // One controller-runtime Manager hosts: the BookstoreTenant controller (the
-// reconcile loop), the conversion webhook (v1alpha1 <-> v1beta1 hub, wired by
-// registering both API versions on the scheme), and the Pod admission webhooks
-// (mutating + validating). It serves /healthz, /readyz and the webhook TLS
+// reconcile loop), the conversion webhook (v1alpha1 <-> v1beta1 hub: both
+// versions on the scheme, and a webhook builder for the hub that serves
+// /convert), and the Pod admission webhooks (mutating + validating). It serves
+// /healthz, /readyz and the webhook TLS
 // server, and uses leader election so a multi-replica Deployment runs exactly
 // one active reconciler (HA without doing work twice — Part 00 ch.04).
 //
@@ -38,9 +39,9 @@ var (
 
 func init() {
 	utilruntime.Must(clientgoscheme.AddToScheme(scheme))
-	// Registering BOTH versions on the scheme is what makes the conversion
-	// webhook work: the apiserver calls /convert and controller-runtime uses
-	// the hub (v1beta1) + the spoke's ConvertTo/ConvertFrom.
+	// Registering BOTH versions on the scheme lets controller-runtime convert
+	// between them: the hub (v1beta1) plus the spoke's ConvertTo/ConvertFrom.
+	// The scheme alone does not serve /convert; the webhook builder below does.
 	utilruntime.Must(bookstorev1alpha1.AddToScheme(scheme))
 	utilruntime.Must(bookstorev1beta1.AddToScheme(scheme))
 }
@@ -89,6 +90,16 @@ func main() {
 		Recorder: mgr.GetEventRecorder("bookstoretenant-controller"),
 	}).SetupWithManager(mgr); err != nil {
 		setupLog.Error(err, "unable to create controller", "controller", "BookstoreTenant")
+		os.Exit(1)
+	}
+
+	// Conversion webhook. controller-runtime serves /convert only when a
+	// webhook builder registers the hub type; the scheme registration above is
+	// not enough, and the apiserver's CRD conversion call would get a 404. This
+	// is deliberately outside the ENABLE_WEBHOOKS check: the CRD's conversion
+	// strategy needs /convert whether or not the Pod admission webhooks run.
+	if err = ctrl.NewWebhookManagedBy(mgr, &bookstorev1beta1.BookstoreTenant{}).Complete(); err != nil {
+		setupLog.Error(err, "unable to register conversion webhook", "type", "BookstoreTenant")
 		os.Exit(1)
 	}
 

@@ -14,12 +14,13 @@
 > **v1alpha1→v1beta1 conversion webhook** (hub/spoke), **envtest** unit tests,
 > RBAC markers, and packaging (Helm/OLM overview) — real controller-runtime Go
 > in [`examples/bookstore/operator/`](../examples/bookstore/operator/README.md),
-> `go vet`-clean and `docker build`-clean, explicitly **contrasted** with
+> `go vet`-clean and passing its envtest suite, explicitly **contrasted** with
 > "consuming an operator" so this deepens [Part 08
 > ch.05](../08-day-2-operations/05-operators-and-crds.md) rather than repeating
 > it.
 
 **Estimated time:** ~60 min read · half-day hands-on
+**Lab tier:** A (kind). Run the lab only against a cluster you own.
 **Prerequisites:** [Part 08 ch.05](../08-day-2-operations/05-operators-and-crds.md) — consumer-side operator pattern this chapter deepens to producer side · [Part 11 ch.01](01-admission-webhooks.md) — webhook plumbing reused for the conversion webhook
 **You'll know after this:** • lay out a Kubebuilder project (PROJECT, api/, internal/controller/, config/) · • write a level-triggered, idempotent reconcile loop with owner references · • use finalizers + status conditions + observedGeneration + Events correctly · • build a v1alpha1→v1beta1 conversion webhook (hub/spoke) · • write envtest unit tests against an embedded apiserver
 
@@ -123,6 +124,16 @@ reconciled workload is a public `pause` image — the *machinery* is the lesson,
 not the payload) precisely so the production-grade scaffolding is visible
 without a distracting domain.
 
+## Threats and controls
+
+| Threat | Control in this chapter | Deeper |
+|---|---|---|
+| E8: the controller's own RBAC grant is wider than its reconcile loop, so a compromised operator acts anywhere the grant reaches | Markers grant only the verbs the loop calls, and the generated role is read before it ships ([RBAC](#3-rbac-the-markers-the-role-and-a-wide-marker)) | [Part 05 ch.01](../05-security/01-authn-authz-rbac.md) for RBAC; the namespace scope left over is 05.07 <!-- link-later: 05.07 --> |
+
+The webhook threats (T5, E7, EP9) belong to [11.01](01-admission-webhooks.md).
+The tenant Pod the operator emits holds the
+[01.01 baseline](../01-core-workloads/01-pods.md#baseline).
+
 ## Diagrams
 
 ### Diagram A — the reconcile loop: watch → queue → reconcile(diff→act) → status (Mermaid)
@@ -153,7 +164,7 @@ flowchart TB
     subgraph world["bookstore-tenant-acme namespace (PSA restricted, operator-created, ownerRef -> CR)"]
       cm["ConfigMap tenant-config<br/>(ownerRef -> CR; GC'd on delete)"]
       svc["Service tenant"]
-      dep["Deployment tenant<br/>(restricted SC: runAsNonRoot,<br/>UID 65532, drop ALL, RO root FS)"]
+      dep["Deployment tenant<br/>(restricted SC: runAsNonRoot,<br/>UID 65535, drop ALL, RO root FS)"]
     end
 ```
 
@@ -186,8 +197,9 @@ flowchart TB
  │   │   └── bookstoretenant_controller_test.go   behavioural tests
  │   └── webhook/v1/         (ch.01) mutating + validating Pod webhooks
  └── config/
-     ├── crd/                the CRD (scope: Cluster, conversion: Webhook, v1beta1 storage)
-     ├── rbac/               LEAST-PRIVILEGE manager Role/Binding/SA (from markers)
+     ├── crd/                the CRD (scope: Cluster, v1beta1 storage); patches/ add
+     │                       the conversion webhook and CA injection
+     ├── rbac/               ClusterRole from markers, leader-election Role, bindings, SA
      ├── manager/            restricted-compliant manager Deployment + own ns
      ├── webhook/            (ch.01) Mutating/ValidatingWebhookConfiguration
      ├── certmanager/        serving cert (cert-manager) for the webhooks
@@ -210,12 +222,13 @@ It does **not** modify any canonical Bookstore manifest, Helm chart, Kustomize
 overlay, the `operators/cnpg-*` files, or any other `examples/bookstore/**`
 file — purely additive, the Gateway-vs-Ingress / CloudNativePG precedent.
 
-We will: (0) read the Kubebuilder layout + how it was scaffolded; (1) the API
-types + `make manifests generate`; (2) build & **vet** & **envtest** the
-controller (no cluster); (3) run it against a kind cluster and watch a
-`BookstoreTenant` reconcile, self-heal, and finalize; (4) the
-v1alpha1→v1beta1 **conversion webhook** in action; (5) the CRD-intrinsic
-dry-run note; (6) packaging.
+We will: (0) read the Kubebuilder layout and how it was scaffolded; (1) the API
+types and `make manifests generate`; (2) build, **vet** and **envtest** the
+controller (no cluster); (3) read the RBAC the markers generate, and what a
+wide marker would grant; (4) install it on a kind cluster and watch a
+`BookstoreTenant` reconcile, self-heal and finalize; (5) the
+v1alpha1→v1beta1 **conversion webhook** in action; (6) the CRD-intrinsic
+dry-run note; (7) packaging.
 
 ### 0. The Kubebuilder project (how it is laid out and scaffolded)
 
@@ -278,18 +291,19 @@ webhook YAML from the markers and the `zz_generated.deepcopy.go`:
 ```sh
 cd examples/bookstore/operator
 make manifests generate    # fetches PINNED controller-gen into ./bin, regenerates
-                           #   config/crd/..., config/rbac/role.yaml,
-                           #   config/webhook/manifests.yaml, api/*/zz_generated.deepcopy.go
+                           #   config/crd/bookstore.example.com_bookstoretenants.yaml,
+                           #   config/rbac/role.yaml, api/*/zz_generated.deepcopy.go
 git status --porcelain config/ api/   # (should be unchanged — committed == generated)
 cd ../../..
 ```
 
-> **The committed `config/**` and `zz_generated.deepcopy.go` are the exact
-> equivalent of `make manifests generate` output**, committed so `go vet` /
-> `docker build` are green on a machine without `controller-gen`.
-> `make manifests generate` regenerates them in place (no diff). This is the same
-> "tooling is pinned and fetched on demand; output is committed" stance as the
-> guide's other pinned-tool installs.
+> **The committed CRD, RBAC role and deepcopy files are controller-gen output,
+> so `make manifests generate` leaves them unchanged, and `go vet` runs on a
+> machine without `controller-gen`.** The webhook manifests in `config/webhook/`
+> are not generated: controller-gen cannot write their `namespaceSelector`,
+> timeouts or cert-manager annotation, so the Makefile does not run it. The
+> CRD's conversion stanza and CA injection live in `config/crd/patches/`, which
+> kustomize applies after generation, so regenerating the schema keeps them.
 
 ### 2. Build, vet, and envtest the controller (no cluster needed)
 
@@ -299,7 +313,7 @@ The controller is real controller-runtime Go, built distroless exactly like
 ```sh
 cd examples/bookstore/operator
 go vet ./...                                   # passes clean
-docker build -t bookstore/operator:dev .       # distroless static nonroot (~51 MB manager)
+docker build -t bookstore/operator:dev .       # distroless static nonroot, base images pinned by digest
 ```
 
 [`internal/controller/bookstoretenant_controller.go`](../examples/bookstore/operator/internal/controller/bookstoretenant_controller.go)
@@ -338,7 +352,7 @@ func (r *BookstoreTenantReconciler) Reconcile(ctx context.Context, req ctrl.Requ
 ```
 
 The reconciled children are **restricted-PSA-compliant** (the Deployment sets
-`runAsNonRoot`, UID 65532, `allowPrivilegeEscalation: false`, `drop: ["ALL"]`,
+`runAsNonRoot`, UID 65535, `allowPrivilegeEscalation: false`, `drop: ["ALL"]`,
 seccomp `RuntimeDefault`, read-only root FS) so they admit into the
 `restricted` tenant namespace the controller itself labels — the [Part 05
 ch.02](../05-security/02-pod-security.md) posture, now *emitted by your
@@ -354,6 +368,22 @@ so no Pods actually run) — far more faithful than a fake client:
 ```sh
 make test     # wraps: setup-envtest (PINNED) downloads apiserver+etcd;
               #   KUBEBUILDER_ASSETS=... go test ./... -coverprofile cover.out
+```
+
+The author's run fetched the 1.37.0 envtest binaries with `setup-envtest` and
+ran the suite without a skip. Its verbose output ends like this:
+
+```sh
+KUBEBUILDER_ASSETS=<the setup-envtest directory for 1.37.0> \
+  go test -count=1 -v ./internal/controller/ | grep -a -E '^(=== RUN|--- |PASS|FAIL|ok)'
+```
+
+<!-- gate: output -->
+```text
+=== RUN   TestControllers
+--- PASS: TestControllers (6.93s)
+PASS
+# ...
 ```
 
 [`bookstoretenant_controller_test.go`](../examples/bookstore/operator/internal/controller/bookstoretenant_controller_test.go)
@@ -372,7 +402,153 @@ child `generation` unchanged); `.status` carries `observedGeneration` + a
 > are the reproducible checks; the chapter is honest that the *behavioural*
 > assertions need the envtest control plane.
 
-### 3. Run it against a cluster — reconcile, self-heal, finalize
+### 3. RBAC: the markers, the role and a wide marker
+
+The markers are the operator's permissions, so a reviewer should read them
+first. Each `+kubebuilder:rbac` line becomes rules in
+`config/rbac/role.yaml`, and the operator holds exactly those rules. Each verb
+is there because the reconcile path calls it:
+
+- **Reads** come from the informer cache, which lists and watches every kind
+  it caches. The CR and its child kinds get `get`, `list` and `watch`.
+- **Writes** go through `CreateOrUpdate`, which calls `Update`. So `create` and
+  `update` are granted, and `patch` is not.
+- **Deletes** are not granted. The operator never deletes anything. The
+  garbage collector removes the tenant Namespace and its children when the CR
+  goes, using its own rights.
+- **The finalizer** write needs `update` on `bookstoretenants/finalizers`. The
+  `OwnerReferencesPermissionEnforcement` admission plugin checks that verb
+  before it accepts a `blockOwnerDeletion` owner reference, so a cluster that
+  enables the plugin needs it for the owner references this operator writes.
+  The admission controllers reference describes the plugin:
+  <https://kubernetes.io/docs/reference/access-authn-authz/admission-controllers/>.
+
+Regenerate the role from the markers and read it:
+
+```sh
+cd examples/bookstore/operator
+make manifests
+cat config/rbac/role.yaml
+```
+
+<!-- gate: output -->
+```text
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: bookstore-operator-manager-role
+rules:
+- apiGroups:
+  - ""
+  resources:
+  - configmaps
+  - namespaces
+  - services
+  verbs:
+  - create
+  - get
+  - list
+  - update
+  - watch
+- apiGroups:
+  - apps
+  resources:
+  - deployments
+  verbs:
+  - create
+  - get
+  - list
+  - update
+  - watch
+- apiGroups:
+  - bookstore.example.com
+  resources:
+  - bookstoretenants
+  verbs:
+  - get
+  - list
+  - update
+  - watch
+- apiGroups:
+  - bookstore.example.com
+  resources:
+  - bookstoretenants/finalizers
+  - bookstoretenants/status
+  verbs:
+  - update
+- apiGroups:
+  - events.k8s.io
+  resources:
+  - events
+  verbs:
+  - create
+  - patch
+```
+
+Now replace the reconciler's markers with one that asks for everything. Do this
+in a scratch copy, not in the tree:
+
+```go
+// +kubebuilder:rbac:groups=*,resources=*,verbs=*
+```
+
+Regenerating the copy gives this ClusterRole:
+
+<!-- gate: output -->
+```text
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: bookstore-operator-manager-role
+rules:
+- apiGroups:
+  - '*'
+  resources:
+  - '*'
+  verbs:
+  - '*'
+```
+
+That one line grants every verb on every kind in every API group, Secrets and
+RoleBindings included. The escalation check that normally stops a principal
+from granting more than it holds does not stop this one, because the operator
+holds everything. It can bind itself, or anyone, to `cluster-admin`.
+
+Narrow verbs do not narrow where a grant applies, though. A ClusterRole applies
+in every namespace. Even the markers above leave a compromised operator able to
+create a Deployment in `kube-system`. The lab checks three questions as the
+operator's ServiceAccount:
+
+```sh
+kubectl auth can-i delete namespaces --as=system:serviceaccount:bookstore-operator-system:bookstore-operator-controller-manager
+kubectl auth can-i get secrets -n kube-system --as=system:serviceaccount:bookstore-operator-system:bookstore-operator-controller-manager
+kubectl auth can-i create deployments -n kube-system --as=system:serviceaccount:bookstore-operator-system:bookstore-operator-controller-manager
+```
+
+<!-- gate: output -->
+```text
+Warning: resource 'namespaces' is not namespace scoped
+no
+# ...
+no
+# ...
+yes
+```
+
+The third answer is the residual grant to act on. The reconciler writes only
+into namespaces it created, because their names are built from
+`spec.tenantName`, but RBAC does not say so. Two controls would narrow it. A
+namespaced Role and RoleBinding per tenant would replace the cluster-wide
+Deployment and ConfigMap grants, at the cost of letting the operator create
+RoleBindings, which is its own escalation path. A ValidatingAdmissionPolicy
+could refuse the operator's writes outside `bookstore-tenant-*` names. Policy as
+code is the subject of 05.07 <!-- link-later: 05.07 -->. This chapter keeps
+the ClusterRole, because the reconciler must create the cluster-scoped
+Namespace it owns, and no namespaced grant can do that.
+
+### 4. Install it on a cluster: reconcile, self-heal, finalize
 
 ```sh
 kind create cluster --name bookstore
@@ -381,10 +557,9 @@ docker build -t bookstore/operator:dev .
 cd ../../..
 kind load docker-image bookstore/operator:dev --name bookstore
 
-# Install the CRD, then deploy the operator (manager + RBAC + leader election).
-# cert-manager is only needed for the WEBHOOKS (ch.01); for the controller-only
-# path here, install the CRD + run the manager with webhooks disabled, OR
-# install cert-manager (ch.01 step 2) and use config/default as-is.
+# Install the CRD, then deploy the operator: manager, RBAC, leader election and
+# the webhook configurations. config/default also holds cert-manager objects,
+# so cert-manager must be installed first (11.01 step 2).
 make -C examples/bookstore/operator install         # kustomize build config/crd | kubectl apply
 kubectl apply -k examples/bookstore/operator/config/default
 kubectl -n bookstore-operator-system rollout status deploy/bookstore-operator-controller-manager
@@ -400,82 +575,298 @@ kubectl get ns bookstore-tenant-acme -o jsonpath='{.metadata.ownerReferences[0].
 kubectl get deploy tenant -n bookstore-tenant-acme -o jsonpath='{.metadata.ownerReferences[0].kind}'   # BookstoreTenant
 ```
 
+`config/default` also applies the operator's own Deployment. It is an ordinary
+workload and carries the baseline, with the one exception the baseline allows:
+it keeps its ServiceAccount token, because it calls the API, and it has a
+dedicated ServiceAccount
+([01.01](../01-core-workloads/01-pods.md#baseline-service-account)).
+Its webhook Secret is the only volume, mounted read-only:
+
+```yaml
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: bookstore-operator-controller-manager
+  namespace: bookstore-operator-system
+  labels:
+    app.kubernetes.io/name: bookstore-operator
+    control-plane: controller-manager
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      control-plane: controller-manager
+  template:
+    metadata:
+      labels:
+        control-plane: controller-manager
+    spec:
+      serviceAccountName: bookstore-operator-controller-manager
+      # The manager calls the API, so it needs its token. It has its own
+      # ServiceAccount, which is the condition for keeping the token mounted.
+      automountServiceAccountToken: true
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 65532
+        runAsGroup: 65532
+        seccompProfile:
+          type: RuntimeDefault
+      containers:
+        - name: manager
+          image: bookstore/operator:dev
+          imagePullPolicy: IfNotPresent
+          args:
+            - --leader-elect
+            - --health-probe-bind-address=:8081
+          ports:
+            - name: webhook
+              containerPort: 9443
+              protocol: TCP
+          livenessProbe:
+            httpGet: { path: /healthz, port: 8081 }
+            initialDelaySeconds: 15
+            periodSeconds: 20
+          readinessProbe:
+            httpGet: { path: /readyz, port: 8081 }
+            initialDelaySeconds: 5
+            periodSeconds: 10
+          resources:
+            requests: { cpu: 10m, memory: 64Mi }
+            limits: { cpu: 200m, memory: 128Mi }
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            runAsNonRoot: true
+            capabilities:
+              drop: ["ALL"]
+            seccompProfile:
+              type: RuntimeDefault
+          volumeMounts:
+            - name: webhook-certs
+              mountPath: /tmp/k8s-webhook-server/serving-certs
+              readOnly: true
+      volumes:
+        # cert-manager (or the documented self-signed flow) provides this
+        # Secret; the controller-runtime webhook server reads its TLS cert from
+        # the default path /tmp/k8s-webhook-server/serving-certs.
+        - name: webhook-certs
+          secret:
+            secretName: bookstore-operator-webhook-cert
+            optional: true
+      terminationGracePeriodSeconds: 10
+```
+
+> **Shared clusters.** The webhook configurations intercept Pod creation in
+> every namespace that their selectors do not exclude. Apply them only to a
+> cluster you own.
+>
+> **No cert-manager? Use the self-signed flow in
+> [11.01](01-admission-webhooks.md) for the same objects.** The lab cluster had
+> no cert-manager. Its run created a self-signed serving certificate, stored it
+> in the webhook Secret, put its CA in the CRD's `caBundle`, and applied the
+> Service from `config/webhook/manifests.yaml` by itself. It did not apply the
+> webhook configurations, for the shared-cluster reason above. Its transcript
+> is `full-guide/examples/security-lab/evidence/11-02.txt`.
+
 > **Installed an earlier, namespaced revision of this CRD?** `spec.scope` is
 > immutable, so `make install` over it fails. Delete the old CRD first
 > (`kubectl delete crd bookstoretenants.bookstore.example.com`, which deletes
 > every `BookstoreTenant`), then install; see the [operator
 > README](../examples/bookstore/operator/README.md).
 
-**Status + Events** (observed state + the narration `kubectl describe` shows):
+**Check the reconcile.** The CR reports `Ready`, and its namespace carries
+the `restricted` label and an owner reference to the CR:
 
 ```sh
-kubectl get bookstoretenant acme -o jsonpath='{.status}' | python3 -m json.tool
-#   "observedGeneration": 1, "namespace": "bookstore-tenant-acme",
-#   "phase": "Ready", "conditions": [ { "type":"Ready","status":"True",... } ]
-kubectl describe bookstoretenant acme | sed -n '/Events:/,$p'
-#   Normal  Reconciled  ... tenant "acme" reconciled into namespace "bookstore-tenant-acme"
+kubectl get bookstoretenant acme -o jsonpath='{.status.phase}'; echo
 ```
 
-**Self-healing (level-triggered).** Delete a child; the `Owns()` watch
-re-enqueues the CR and the loop recreates it — no special "repair" path, just
-the loop closing a gap (the [Part 00
-ch.06](../00-foundations/06-declarative-api-model.md) principle, your code):
+<!-- gate: output -->
+```text
+Ready
+```
+
+```sh
+kubectl get ns bookstore-tenant-acme -o jsonpath='{.metadata.labels.pod-security\.kubernetes\.io/enforce}'; echo
+```
+
+<!-- gate: output -->
+```text
+restricted
+```
+
+```sh
+kubectl get ns bookstore-tenant-acme -o jsonpath='{.metadata.ownerReferences[0].kind}'; echo
+```
+
+<!-- gate: output -->
+```text
+BookstoreTenant
+```
+
+```sh
+kubectl get deploy,svc,cm -n bookstore-tenant-acme -o name
+```
+
+<!-- gate: output -->
+```text
+deployment.apps/tenant
+service/tenant
+configmap/kube-root-ca.crt
+configmap/tenant-config
+```
+
+The tenant Deployment carries the baseline. Its Pod takes no ServiceAccount
+token, and it runs as UID 65535, the UID the pause image declares. Its owner
+reference points at the CR:
+
+```sh
+kubectl get deploy tenant -n bookstore-tenant-acme -o jsonpath='{.metadata.ownerReferences[0].kind} {.spec.template.spec.automountServiceAccountToken} {.spec.template.spec.securityContext.runAsUser}'; echo
+```
+
+<!-- gate: output -->
+```text
+BookstoreTenant false 65535
+```
+
+**Generation and status.** `observedGeneration` equals `generation` once the
+controller has processed the current spec:
+
+```sh
+kubectl get bookstoretenant acme -o jsonpath='{.metadata.generation} {.status.observedGeneration}'; echo
+```
+
+<!-- gate: output -->
+```text
+1 1
+```
+
+The Events narrate the same reconcile for `kubectl describe`. A cluster-scoped
+object's events live in the `default` namespace, so filter them by name there:
+
+```sh
+kubectl get events -n default --field-selector involvedObject.name=acme -o custom-columns=REASON:.reason,TYPE:.type
+```
+
+<!-- gate: output -->
+```text
+REASON       TYPE
+Reconciled   Normal
+```
+
+**Self-healing (level-triggered).** Delete a child. The `Owns()` watch
+re-enqueues the CR, and the loop recreates the child. No special repair path
+runs; the loop closes the gap
+([Part 00 ch.06](../00-foundations/06-declarative-api-model.md)):
 
 ```sh
 kubectl delete deploy tenant -n bookstore-tenant-acme
-kubectl get deploy tenant -n bookstore-tenant-acme -w   # controller recreates it within seconds
+for i in $(seq 1 60); do kubectl get deploy tenant -n bookstore-tenant-acme >/dev/null 2>&1 && break; sleep 2; done
+kubectl get deploy tenant -n bookstore-tenant-acme -o name
 ```
 
-**Bump the spec → `observedGeneration` proves the controller caught up:**
+<!-- gate: output -->
+```text
+deployment.apps/tenant
+```
+
+**Bump the spec.** Editing `.spec` moves `generation` to 2. The status catches
+up once the controller has reconciled the change:
 
 ```sh
 kubectl patch bookstoretenant acme --type=merge -p '{"spec":{"replicas":3}}'
+for i in $(seq 1 60); do [ "$(kubectl get bookstoretenant acme -o jsonpath='{.status.observedGeneration}')" = 2 ] && break; sleep 2; done
 kubectl get bookstoretenant acme -o jsonpath='{.metadata.generation} {.status.observedGeneration}'; echo
-#   2 2   (equal -> status reflects THIS spec; if it lagged you'd see "2 1")
-kubectl get deploy tenant -n bookstore-tenant-acme -o jsonpath='{.spec.replicas}'; echo   # 3
 ```
 
-**Delete: the finalizer runs, then GC takes the namespace.** Delete the CR;
-the apiserver only sets `deletionTimestamp` until the controller runs
-`finalizeTenant` and removes the finalizer. Once the CR is gone, the garbage
-collector deletes everything that carries an `ownerReference` to it: the
-tenant **Namespace** (a cluster-scoped CR can own a cluster-scoped Namespace;
-a namespaced one could not) and, with it, the ConfigMap, Service and
-Deployment. This operator's `finalizeTenant` has no cluster work left to do
-because GC covers it all, so it only emits a terminal Event; it stays as the
-hook where teardown GC cannot reach (an external system) would go:
+<!-- gate: output -->
+```text
+2 2
+```
 
 ```sh
-kubectl delete bookstoretenant acme &              # blocks on the finalizer
-kubectl get bookstoretenant acme -o jsonpath='{.metadata.deletionTimestamp} {.metadata.finalizers}'; echo
-#   2026-...Z [bookstore.example.com/tenant-finalizer]   ← object kept until finalizer cleared
-wait                                               # finalizer ran; CR gone
-kubectl wait --for=delete ns/bookstore-tenant-acme --timeout=120s   # GC removes the namespace...
-kubectl get deploy,svc,cm -n bookstore-tenant-acme                  # ...and everything in it
-# No `kubectl delete ns` needed: the Namespace's ownerReference to the
-# BookstoreTenant is what makes GC delete it.
+kubectl get deploy tenant -n bookstore-tenant-acme -o jsonpath='{.spec.replicas}'; echo
 ```
 
-### 4. The conversion webhook — v1alpha1 ⇄ v1beta1 hub
+<!-- gate: output -->
+```text
+3
+```
 
-> **Prerequisite — the conversion webhook needs a running, cert-backed
-> `/convert`.** `conversion.strategy: Webhook` makes the apiserver call the
-> operator's `/convert` endpoint over TLS for *every* read/write of a
-> non-storage version. If you took the **"webhooks disabled" path in step 3**
-> (no cert-manager, manager run with `ENABLE_WEBHOOKS=false`), `/convert` is
-> not served and the v1alpha1 apply/read-back below **fails** with a webhook/
-> certificate error. Before this step you must **install cert-manager
-> ([ch.01](01-admission-webhooks.md) step 2)** and **re-apply
-> `config/default`** so the manager serves `/convert` with a valid serving
-> cert (`kubectl -n bookstore-operator-system rollout status deploy/bookstore-operator-controller-manager` green, and
-> `kubectl get certificate -n bookstore-operator-system` Ready).
+**Delete: the finalizer holds the CR, then garbage collection takes the
+namespace.** Scaling the controller to zero first stops the finalizer from
+running, so the deletion stays pending. Do this only on a cluster you own. A
+CR whose controller is gone stays `Terminating` until the controller returns.
+
+```sh
+kubectl -n bookstore-operator-system scale deploy/bookstore-operator-controller-manager --replicas=0
+kubectl delete bookstoretenant acme --wait=false
+kubectl get bookstoretenant acme -o jsonpath='{.metadata.deletionTimestamp} {.metadata.finalizers}'; echo
+```
+
+<!-- gate: output -->
+```text
+2026-10-31T05:32:17Z ["bookstore.example.com/tenant-finalizer"]
+```
+
+The CR is still there, and so are the children it owns, because the garbage
+collector waits for the CR to go:
+
+```sh
+kubectl get deploy,cm -n bookstore-tenant-acme -o name
+```
+
+<!-- gate: output -->
+```text
+deployment.apps/tenant
+configmap/kube-root-ca.crt
+configmap/tenant-config
+```
+
+Scale the controller back up. It runs `finalizeTenant`, removes the finalizer,
+and the garbage collector deletes the Namespace and everything in it:
+
+```sh
+kubectl -n bookstore-operator-system scale deploy/bookstore-operator-controller-manager --replicas=1
+kubectl -n bookstore-operator-system rollout status deploy/bookstore-operator-controller-manager --timeout=300s
+kubectl wait --for=delete bookstoretenant/acme --timeout=240s
+kubectl wait --for=delete namespace/bookstore-tenant-acme --timeout=300s
+```
+
+<!-- gate: output -->
+```text
+deployment "bookstore-operator-controller-manager" successfully rolled out
+```
+
+The controller logs the finalizer run as `finalizing tenant` and then records a
+`Finalized` event. Once the namespace is gone, `kubectl get ns
+bookstore-tenant-acme` returns NotFound.
+
+
+### 5. The conversion webhook: v1alpha1 ⇄ v1beta1 hub
+
+> **Prerequisite: `/convert` must be served, over TLS the apiserver trusts.**
+> `conversion.strategy: Webhook` makes the apiserver call the operator's
+> `/convert` for every read or write of a non-storage version. Two things must
+> hold. The manager registers the route, through the webhook builder call in
+> `cmd/main.go`, and logs `Conversion webhook enabled` at startup. And the
+> CRD's `caBundle` must trust the serving certificate. With cert-manager, the
+> `cert-manager.io/inject-ca-from` annotation in `config/crd/patches/` fills it
+> in. Without cert-manager, the self-signed flow in
+> [11.01](01-admission-webhooks.md) sets it by hand.
+
+```sh
+kubectl -n bookstore-operator-system logs deploy/bookstore-operator-controller-manager --tail=300 | grep -E 'Conversion webhook'
+```
+
+On the lab, that grep returned one line, `Conversion webhook enabled`, for the `v1beta1` kind. The manager logs it at startup, so a missing route shows up here before any conversion is tried.
 
 The CRD declares `conversion.strategy: Webhook` with `v1beta1` as storage;
 [`api/v1alpha1/bookstoretenant_conversion.go`](../examples/bookstore/operator/api/v1alpha1/bookstoretenant_conversion.go)
 implements the spoke side (`ConvertTo`/`ConvertFrom` map `size`⇄`tier`). Apply
-the **same tenant in the old `v1alpha1` shape** and read it back — the
-apiserver stores it as `v1beta1` and returns whichever version you ask for, via
-the operator's `/convert` endpoint (cert-manager-served, [ch.01](01-admission-webhooks.md)):
+the **same tenant in the old `v1alpha1` shape** and read it back. The apiserver
+stores it as `v1beta1` and returns whichever version you ask for, through the
+operator's `/convert` endpoint:
 
 ```sh
 kubectl apply -f - <<'EOF'
@@ -485,10 +876,27 @@ metadata: { name: acme-legacy }
 spec: { tenantName: acme-legacy, replicas: 2, size: m }     # v1alpha1: size=m
 EOF
 kubectl get bookstoretenant.v1beta1.bookstore.example.com acme-legacy -o jsonpath='{.spec.tier}'; echo
-#   medium       ← stored as the hub; size:"m" -> tier:"medium" via ConvertTo
+```
+
+<!-- gate: output -->
+```text
+medium
+```
+
+```sh
 kubectl get bookstoretenant.v1alpha1.bookstore.example.com acme-legacy -o jsonpath='{.spec.size}'; echo
-#   m            ← read back as v1alpha1; hub -> size via ConvertFrom (round-trips)
+kubectl get bookstoretenant.v1alpha1.bookstore.example.com acme-legacy -o jsonpath='{.spec.replicas}'; echo
 kubectl delete bookstoretenant acme-legacy
+```
+
+<!-- gate: output -->
+```text
+m
+```
+
+<!-- gate: output -->
+```text
+2
 ```
 
 That round-trip *is* the hub-and-spoke contract: one storage shape, N−1 spoke
@@ -496,16 +904,22 @@ conversions, the apiserver routing everything through the hub — the
 controller-internals analog of the built-in API deprecation path ([Part 08
 ch.01](../08-day-2-operations/01-cluster-lifecycle.md)).
 
-### 5. The CRD-intrinsic dry-run (documented, like every prior CRD object)
+### 6. The CRD-intrinsic dry-run (documented, like every prior CRD object)
 
 `BookstoreTenant` is a CRD from *this* operator. On a cluster **without** the
-CRD installed:
+CRD installed, a client dry-run of the sample fails. The lab run recorded this
+with the CRD absent:
 
 ```sh
 kubectl apply --dry-run=client -f examples/bookstore/operator/config/samples/bookstore_v1beta1_bookstoretenant.yaml
-# error: resource mapping not found ... no matches for kind "BookstoreTenant"
-#   in version "bookstore.example.com/v1beta1" ... ensure CRDs are installed first
-# (same for the v1alpha1 sample)
+```
+
+<!-- gate: output -->
+```text
+resource mapping not found for name: "acme" namespace: "" from "full-guide/examples/bookstore/operator/config/samples/bookstore_v1beta1_bookstoretenant.yaml": no matches for kind "BookstoreTenant" in version "bookstore.example.com/v1beta1"
+ensure CRDs are installed first
+resource mapping not found for name: "acme-legacy" namespace: "" from "full-guide/examples/bookstore/operator/config/samples/bookstore_v1beta1_bookstoretenant.yaml": no matches for kind "BookstoreTenant" in version "bookstore.example.com/v1alpha1"
+ensure CRDs are installed first
 ```
 
 That is **expected and correct** — the *exact* precedent of
@@ -519,7 +933,8 @@ note in their headers (and [ch.01](01-admission-webhooks.md) for the webhook
 side). After `make install`, the sample applies and the controller reconciles
 it.
 
-### 6. Packaging the operator
+
+### 7. Packaging the operator
 
 The deployable unit = CRD + RBAC + the manager Deployment + (webhooks +
 cert). Two common distributions:
@@ -596,10 +1011,14 @@ kind delete cluster --name bookstore
 - **Conversion is hub-and-spoke, served by the operator.** The CRD's
   `conversion.strategy: Webhook` points the apiserver at the operator's
   `/convert` (TLS, same cert machinery as [ch.01](01-admission-webhooks.md)).
-  Registering **both** API versions on the manager's scheme + the v1beta1
-  `Hub()` + the v1alpha1 `ConvertTo`/`ConvertFrom` is all controller-runtime
-  needs: it converts spoke→hub→spoke automatically, so adding `v1`/`v2` later
-  is N−1 more conversion funcs, not N². The **storage version**
+  Registering **both** API versions on the manager's scheme, with the v1beta1
+  `Hub()` and the v1alpha1 `ConvertTo`/`ConvertFrom`, gives controller-runtime
+  the conversions: it converts spoke→hub→spoke automatically, so adding
+  `v1`/`v2` later is N−1 more conversion funcs, not N². The scheme alone does
+  not serve anything. A webhook builder for the hub registers the `/convert`
+  route (`ctrl.NewWebhookManagedBy(mgr, &BookstoreTenant{}).Complete()` in
+  `cmd/main.go`). Without that call the apiserver's conversion request gets a
+  404, and every read or write of `v1alpha1` fails. The **storage version**
   (`+kubebuilder:storageversion`) is what etcd holds and what a `status`
   controller writes — picking it deliberately (and migrating it carefully) is
   the same discipline as a built-in API graduating
@@ -623,8 +1042,8 @@ kind delete cluster --name bookstore
 > gets: **leader election** for HA, **bounded reconcile** (small
 > `RequeueAfter`, rate-limited work-queue, never an unbounded hot loop — see
 > [ch.03](03-api-priority-and-fairness.md)), **tested idempotency** (envtest),
-> **least-privilege RBAC** (the marker-generated Role, reviewed — an operator
-> is broad-by-default *only if you let it be*), and a versioned API.
+> **least-privilege RBAC** (section 3 shows the markers and what a wide one
+> grants), and a versioned API.
 
 > **In production: version the CRD deliberately and never break stored
 > objects.** Add fields **optional with defaults**; never remove/repurpose a
@@ -786,6 +1205,23 @@ Checklist:
 
    </details>
 
+6. **A teammate changes one marker to `verbs=*` so the operator "never fails
+   with forbidden". What does the generated ClusterRole now grant, and which
+   verbs does the reconcile path need?**
+   <details><summary>Show answer</summary>
+
+   The ClusterRole grants every verb on the resources in that marker. If the
+   marker names `namespaces`, the operator can now delete any Namespace in the
+   cluster, and the operator never needs to delete one, because the garbage
+   collector does that with its own rights. The reconcile path needs `get`,
+   `list` and `watch` (the cache), `create` and `update` on the children, and
+   `update` on the status and finalizers subresources. A forbidden error is
+   the RBAC working: it names the missing verb, and the fix is that verb, not a
+   wildcard. Check the grant with `kubectl auth can-i ... --as=system:serviceaccount:<ns>:<sa>`
+   and read `config/rbac/role.yaml` after each marker change.
+
+   </details>
+
 ## Further reading
 
 - **Ibryam & Huß, _Kubernetes Patterns_ 2e — *Controller* (ch.27) and
@@ -800,4 +1236,7 @@ Checklist:
   CustomResourceDefinitions / versions & conversion
   <https://kubernetes.io/docs/tasks/extend-kubernetes/custom-resources/custom-resource-definition-versioning/>,
   and the operator pattern
-  <https://kubernetes.io/docs/concepts/extend-kubernetes/operator/>.
+  <https://kubernetes.io/docs/concepts/extend-kubernetes/operator/>, and the
+  admission controllers reference, which describes
+  `OwnerReferencesPermissionEnforcement`
+  <https://kubernetes.io/docs/reference/access-authn-authz/admission-controllers/>.
