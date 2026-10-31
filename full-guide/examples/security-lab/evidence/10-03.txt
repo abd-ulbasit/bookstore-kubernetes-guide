@@ -35,3 +35,33 @@ $ kubectl get sa orders-sa -n p10-03-bookstore -o yaml | grep -c -E 'role-arn|gc
 0
 $ kubectl delete namespace p10-03-bookstore --wait=true
 namespace "p10-03-bookstore" deleted
+# Re-run on 2026-10-31 after the review fixes to the chapter. The same
+# Kubernetes steps, with the lab files taken from the chapter's YAML blocks:
+# the probe now sets fsGroup, and the orders-sa check first prints the name
+# of the ServiceAccount, so a 0 cannot mean the ServiceAccount is missing.
+$ kubectl config current-context
+kind-sf-pilot
+$ kubectl get namespace p10-03-bookstore -o name || true
+Error from server (NotFound): namespaces "p10-03-bookstore" not found
+$ sed -e 's/bookstore/p10-03-bookstore/g' full-guide/examples/bookstore/raw-manifests/00-namespace.yaml | kubectl apply -f -
+namespace/p10-03-bookstore created
+resourcequota/p10-03-bookstore-quota created
+limitrange/p10-03-bookstore-limits created
+$ sed -e 's/bookstore/p10-03-bookstore/g' full-guide/examples/bookstore/raw-manifests/05-serviceaccounts-rbac.yaml | kubectl apply -f - > /dev/null && echo 'serviceaccounts and RBAC from 05 applied'
+serviceaccounts and RBAC from 05 applied
+$ kubectl get sa catalog-sa -n p10-03-bookstore -o jsonpath='{.automountServiceAccountToken}{"\n"}'
+false
+$ kubectl get secrets -n p10-03-bookstore -o jsonpath='{range .items[*]}{.metadata.name}{"\n"}{end}'
+$ sed -e 's/namespace: bookstore/namespace: p10-03-bookstore/' lab/catalog-sa-irsa.yaml | kubectl apply -f -
+serviceaccount/catalog-sa configured
+$ sed -e 's/namespace: bookstore/namespace: p10-03-bookstore/' lab/probe.yaml | kubectl apply --dry-run=server -f - -o jsonpath='{.spec.automountServiceAccountToken}{"\n"}{range .spec.volumes[*]}{.name}{" "}{.projected.sources[0].serviceAccountToken.audience}{"\n"}{end}'
+false
+tmp 
+aws-iam-token sts.amazonaws.com
+$ sed -e 's/namespace: bookstore/namespace: p10-03-bookstore/' lab/hostnet.yaml | kubectl apply --dry-run=server -f - || true
+Error from server (Forbidden): error when creating "STDIN": pods "catalog-hostnet-probe" is forbidden: violates PodSecurity "restricted:latest": host namespaces (hostNetwork=true)
+$ kubectl get sa orders-sa -n p10-03-bookstore -o name; kubectl get sa orders-sa -n p10-03-bookstore -o yaml | grep -c -E 'role-arn|gcp-service-account|client-id' || true
+serviceaccount/orders-sa
+0
+$ kubectl delete namespace p10-03-bookstore --wait=true
+namespace "p10-03-bookstore" deleted
