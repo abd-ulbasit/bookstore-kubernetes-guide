@@ -13,6 +13,7 @@ import (
 	"encoding/json"
 	"errors"
 	"log/slog"
+	"net"
 	"net/http"
 	"os"
 	"os/signal"
@@ -20,6 +21,7 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/jackc/pgx/v5/pgconn"
 	"github.com/jackc/pgx/v5/pgxpool"
 	"github.com/prometheus/client_golang/prometheus"
 	"github.com/prometheus/client_golang/prometheus/promauto"
@@ -69,7 +71,8 @@ func main() {
 	if dsn := os.Getenv("DB_DSN"); dsn != "" {
 		pool, err := pgxpool.New(ctx, dsn)
 		if err != nil {
-			log.Error("connect postgres", "err", err)
+			// Log the class, never the driver's text: that text quotes the DSN.
+			log.Error("connect postgres", "error_class", errClass(err))
 			os.Exit(1)
 		}
 		a.db = pool
@@ -256,4 +259,21 @@ func newLogger(level string) *slog.Logger {
 		lvl = slog.LevelInfo
 	}
 	return slog.New(slog.NewJSONHandler(os.Stdout, &slog.HandlerOptions{Level: lvl}))
+}
+
+// errClass names the kind of a Postgres setup failure without the driver's
+// text, which quotes the DSN. It returns dsn_parse, timeout, network or other.
+func errClass(err error) string {
+	var parse *pgconn.ParseConfigError
+	var netErr net.Error
+	switch {
+	case errors.As(err, &parse):
+		return "dsn_parse"
+	case errors.Is(err, context.DeadlineExceeded):
+		return "timeout"
+	case errors.As(err, &netErr):
+		return "network"
+	default:
+		return "other"
+	}
 }

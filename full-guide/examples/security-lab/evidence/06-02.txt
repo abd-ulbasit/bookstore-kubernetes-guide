@@ -25,6 +25,10 @@
 #   created the orders table. The script now applies the example migrate Job.
 # - The planted DSN host was a dotted name, which the evidence check reads as an
 #   e-mail address. It is now localhost, which parses the same way in this run.
+# - The dsn-demo log line in step 2 was recorded again after orders and catalog
+#   changed to log an error class and not the driver's text. Only that line was
+#   replaced. It comes from the same Pod, run with the rebuilt orders image in a
+#   separate lab namespace. The first run's line carried the driver's message.
 #
 ## step 0: start from a clean slate; refuse if a chart object of the same name exists
 clean
@@ -108,7 +112,7 @@ $ kubectl apply -f dsn-demo.yaml
 pod/dsn-demo created
 
 $ kubectl -n p06-02-bookstore logs dsn-demo --tail=3
-{"time":"2026-10-31T02:05:57.164867808Z","level":"ERROR","msg":"connect postgres","err":"cannot parse `postgres://app:xxxxxx@localhost:5432/books`: failed to parse as URL (invalid URL escape \"%zz\")"}
+{"time":"2026-10-31T14:14:05.407565098Z","level":"ERROR","msg":"connect postgres","error_class":"dsn_parse"}
 
 ## step 4: the logging namespace, the agent RBAC and its network policy
 $ kubectl apply -f 00-logging-namespace.yaml -f 01-agent-rbac.yaml -f 02-logging-netpol.yaml
