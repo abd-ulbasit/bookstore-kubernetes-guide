@@ -48,7 +48,8 @@ storefront.bookstore.example.com."
 8. curl storefront, hit catalog, observe                    (5 sec)
 9. Realise the bug is elsewhere; goto 1.
 
-Total cycle: ~6 minutes per single-line change.
+Total cycle: several minutes per single-line change. The step times
+above are illustrative, not measured.
 ```
 
 **This is the inner-loop tax**, and Kubernetes-at-scale platforms
@@ -113,10 +114,11 @@ The three strategies + trade-offs:
 - **Strategy 1 — Traffic re-routing (Telepresence / Mirrord).**
   - **Fidelity:** HIGHEST. The laptop process runs in the cluster's
     network namespace (effectively), sees real Service DNS, gets
-    real Pod-to-Pod traffic, can read real ConfigMaps + Secrets via
-    the projected ServiceAccount token mount.
+    real Pod-to-Pod traffic, can read the target's environment and
+    mounted files, including values that come from Secrets (see
+    Threats and controls).
   - **Iteration:** FASTEST. No build; the laptop process is the
-    Go binary that just compiled in 2 seconds.
+    Go binary that just compiled.
   - **Isolation:** LOW. Re-routing real traffic to a laptop process
     affects every caller of the Service. Telepresence supports
     *intercepts* with header-based selectors (only requests with
@@ -128,8 +130,9 @@ The three strategies + trade-offs:
     that runs in production; the local debug experience is the same
     as production runtime behavior.
   - **Iteration:** MEDIUM. Build time + image push + Pod restart
-    + readiness probe = 30s-3min per cycle, depending on language
-    + image-size + cluster topology. *Skaffold's sync mode* shaves
+    + readiness probe per cycle, depending on language, image size
+    and cluster topology. No figure is claimed here. *Skaffold's sync
+    mode* shaves
     the build step for interpreted languages (copies the file
     directly into the running container; no rebuild).
   - **Isolation:** HIGH. Each developer has their own namespace (or
@@ -151,7 +154,7 @@ The three strategies + trade-offs:
 | Iterating on UI / frontend that needs cluster API responses | Skaffold (sync mode) | Fast inner-loop; UI iterates faster than backend |
 | New hire onboarding on day 1 | Devcontainers | Zero local tool installation; same as the rest of the team in ~5 min |
 | Debugging a webhook (Stripe, GitHub) that fires once per real event | Telepresence (intercept by header) | The real webhook fires; only the labeled request hits the laptop |
-| Running integration tests against the cluster | Skaffold + `skaffold test` | Deploys real images; runs e2e tests; tears down |
+| Integration tests against the cluster | Skaffold deploys the real image; your test runner runs the tests | Deploys real images; tears down on exit |
 | Pair-debugging with a teammate | Telepresence (selective intercept) | Both developers can intercept different request types simultaneously |
 
 **The Telepresence intercept model.** Telepresence works in two
@@ -168,9 +171,11 @@ modes:
    requests matching a header selector (e.g., `x-telepresence-id:
    alice`).
 
-The personal-intercept mode is the production-friendly default:
-real users keep getting the real Pod; alice's curl with the
-matching header hits her laptop.
+The personal-intercept mode is the safer default on a shared cluster:
+real users keep getting the real Pod, and alice's curl with the
+matching header hits her laptop. The header is a routing selector,
+not authentication. Anything that can reach the Service and set the
+header reaches the laptop, so reachability is the real boundary.
 
 **The Mirrord approach.** Mirrord's twist: it doesn't install a
 sidecar; it injects an init container that re-routes the *target
@@ -181,7 +186,9 @@ process; mirrord makes its syscalls land in the cluster.
 Sub-options: *steal mode* (the laptop process gets all traffic;
 the real Pod is bypassed) vs *mirror mode* (the laptop process
 gets a copy of the traffic but doesn't reply; the real Pod still
-serves users — useful for debugging without affecting prod).
+serves users). Mirror mode protects availability, not data: the
+laptop still receives real request bodies, so it is no fit for
+production traffic.
 
 **The Skaffold workflow.** A `skaffold.yaml` declares:
 
@@ -194,8 +201,7 @@ serves users — useful for debugging without affecting prod).
   rebuild.
 
 `skaffold dev` watches the source tree; on save, it rebuilds the
-image (or syncs files), pushes to the registry (or uses
-`buildOnCluster` to skip the registry round-trip), and triggers
+image (or syncs files), pushes to the registry, and triggers
 a Pod restart. The dev's terminal shows aggregated logs from all
 deployed Pods.
 
@@ -224,11 +230,24 @@ intercept and prod traffic is a foot-gun.** Connecting global
 intercept against a Service in production sends real user
 traffic to your laptop — the laptop misses requests during a
 shutdown, slows them down, or returns errors if the laptop
-process panics. The default policy: **never global-intercept
-prod**. Personal intercept (with a header selector) is the only
-prod-safe mode. Most platforms apply this at the cluster level
-via a Telepresence policy CR that requires the personal-intercept
-header for any service in the `prod-*` namespace.
+process panics. The default policy: **do not intercept production
+services at all.** A personal intercept still hands the matching
+requests, and their bodies, to a laptop. Install the Traffic Manager
+only in dev clusters, so production has nothing to intercept through.
+
+## Threats and controls
+
+| Threat | Control | Goes deeper |
+|---|---|---|
+| Global intercept or steal mode sends production traffic to a laptop | Never intercept production; Traffic Manager only in dev clusters | [08.04](../08-day-2-operations/04-multi-tenancy-and-namespaces.md) |
+| Anything that reaches the Service and sets the intercept header reaches a laptop | Default-deny NetworkPolicy in the dev namespace, so only platform callers reach the Service | [02.06](../02-networking/06-network-policies.md) |
+| A caller with `pods/portforward` in the namespace receives the intercepted container's environment, including Secret values | Intercept only dev namespaces that hold test keys; set `security.authorization.requiredGrant` explicitly in the chart | [05.01](../05-security/01-authn-authz-rbac.md), [Telepresence RBAC](https://telepresence.io/docs/reference/rbac) |
+| Developer RBAC wider than one namespace | One Role per developer in their namespace; no Secret reads elsewhere; `restricted` refuses a privileged Pod | [05.01](../05-security/01-authn-authz-rbac.md), [Pod Security Standards](https://kubernetes.io/docs/concepts/security/pod-security-standards/) |
+| Long-lived cloud keys in the dev container | No `~/.aws` bind mount; `aws sso login` in the container; kubeconfig uses the exec plugin, with no static token | [05.04](../05-security/04-secrets-and-cluster-hardening.md) |
+| A privileged feature in the dev container | Docker-in-Docker left out: its feature runs the container privileged | [the feature's `privileged` setting](https://github.com/devcontainers/features/blob/main/src/docker-in-docker/devcontainer-feature.json) |
+
+The inner-loop tools widen what a developer can reach, so each row
+above is a rule the platform enforces, not a habit the developer keeps.
 
 ## Diagrams
 
@@ -261,6 +280,9 @@ flowchart TB
 ### Diagram B — Inner-loop strategy trade-off matrix (ASCII)
 
 ```text
+(Timings are illustrative, not measured. A header selects requests;
+it does not authenticate them.)
+
 STRATEGY            FIDELITY    ITERATION TIME    ISOLATION   PROD-SAFE
                                 (save -> effect)
 ─────────────────  ──────────  ────────────────  ──────────  ──────────────
@@ -268,13 +290,13 @@ Telepresence       HIGH        ~5 seconds         LOW         ONLY with
   global intercept                                            personal-intercept
                                                               header selector
 ─────────────────  ──────────  ────────────────  ──────────  ──────────────
-Telepresence       HIGH        ~5 seconds         HIGH        YES (personal
+Telepresence       HIGH        ~5 seconds         HIGH        LIMITED (personal
   personal                                                    intercept by
   intercept                                                   header)
 ─────────────────  ──────────  ────────────────  ──────────  ──────────────
 Mirrord steal      HIGH        ~5 seconds         LOW         NO
 ─────────────────  ──────────  ────────────────  ──────────  ──────────────
-Mirrord mirror     MEDIUM      ~5 seconds         HIGH        YES (one-way
+Mirrord mirror     MEDIUM      ~5 seconds         HIGH        NO for data (one-way
                    (no replies                                copy; real Pod
                     seen)                                     still serves)
 ─────────────────  ──────────  ────────────────  ──────────  ──────────────
@@ -313,14 +335,15 @@ INNER-LOOP RECOMMENDATION BY PERSONA:
   ```bash
   kubectl create namespace bookstore-dev-alice
   kubectl label ns bookstore-dev-alice \
-    pod-security.kubernetes.io/enforce=restricted
+    pod-security.kubernetes.io/enforce=restricted \
+    pod-security.kubernetes.io/audit=restricted \
+    pod-security.kubernetes.io/warn=restricted
   ```
 
 - The bookstore payments-gateway service's source code locally:
   `examples/bookstore-platform/app/payments-gateway/` (Go).
-  (For this hands-on we use the `payments-gateway` service since the
-  bookstore-platform tree doesn't ship a separate `catalog` service yet —
-  see Part 13 ch.01 for the v1↔v2 service map.)
+  (This hands-on uses `payments-gateway` because it has its own
+  Dockerfile and manifests in that directory.)
 
 The Phase 14-R Terraform doesn't install the inner-loop tools
 (Telepresence, Skaffold, Tilt) cluster-wide because they're
@@ -338,6 +361,7 @@ skaffold version
 # Telepresence (CLI + Helm-installed cluster-side daemon).
 brew install telepresenceio/telepresence/telepresence-oss
 telepresence version
+# 2.25.0 or later: the --http-header filter in 2.3 needs it.
 
 # Tilt (alternative to Skaffold).
 brew install tilt-dev/tap/tilt
@@ -358,14 +382,15 @@ telepresence helm install
 
 telepresence connect
 # Sets up the VPN tunnel from your laptop into the cluster.
-# Your laptop now resolves bookstore.svc.cluster.local DNS;
+# Your laptop now resolves cluster DNS names such as
+# payments-gateway.bookstore-dev-alice.svc.cluster.local;
 # Service ClusterIPs are reachable.
 ```
 
-Test:
+Test once 2.2 has deployed the Service:
 
 ```bash
-curl http://payments-gateway.bookstore-dev-alice:8080/health
+curl http://payments-gateway.bookstore-dev-alice:8080/healthz
 # Returns the response from the deployed payments-gateway Pod.
 ```
 
@@ -374,9 +399,23 @@ routing purposes.
 
 #### 2.2 Deploy a baseline payments-gateway Pod to intercept
 
+Run this from `examples/bookstore-platform/app/payments-gateway/`,
+where the Skaffold file in 3.1 lives. The manifest carries the
+[baseline](../01-core-workloads/01-pods.md#baseline). The image runs
+as UID 65532 (its Dockerfile's `USER`), and the resource values match
+the example's own
+[Deployment](../examples/bookstore-platform/app/payments-gateway/deployment.yaml).
+
 ```bash
-# Apply a vanilla deployment of the payments-gateway service for alice's namespace.
-cat <<EOF | kubectl apply -f -
+mkdir -p dev
+cat > dev/payments-gateway.yaml <<'EOF'
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: payments-gateway
+  namespace: bookstore-dev-alice
+automountServiceAccountToken: false
+---
 apiVersion: apps/v1
 kind: Deployment
 metadata:
@@ -390,18 +429,29 @@ spec:
     metadata:
       labels: { app: payments-gateway }
     spec:
+      serviceAccountName: payments-gateway
+      automountServiceAccountToken: false
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 65532
+        runAsGroup: 65532
+        seccompProfile: { type: RuntimeDefault }
       containers:
         - name: payments-gateway
           image: <YOUR-ECR>/bookstore/payments-gateway:v1.0.0
           ports: [{ containerPort: 8080, name: http }]
-          # Standard restricted-PSA security context (Part 05 ch.02).
           securityContext:
             allowPrivilegeEscalation: false
             readOnlyRootFilesystem: true
-            runAsNonRoot: true
-            runAsUser: 65534
             capabilities: { drop: [ALL] }
-            seccompProfile: { type: RuntimeDefault }
+          resources:
+            requests: { cpu: 50m, memory: 64Mi }
+            limits: { cpu: 250m, memory: 128Mi }
+          volumeMounts:
+            - { name: tmp, mountPath: /tmp }
+      volumes:
+        - name: tmp
+          emptyDir: {}
 ---
 apiVersion: v1
 kind: Service
@@ -413,6 +463,7 @@ spec:
   ports: [{ port: 8080, targetPort: http }]
 EOF
 
+kubectl apply -f dev/payments-gateway.yaml
 kubectl -n bookstore-dev-alice wait pod -l app=payments-gateway --for=condition=Ready --timeout=120s
 ```
 
@@ -425,7 +476,7 @@ telepresence intercept payments-gateway \
   --http-header=x-dev=alice
 ```
 
-Expected:
+Expected output (illustrative, not captured):
 
 ```text
 Using Deployment payments-gateway
@@ -442,25 +493,29 @@ Using Deployment payments-gateway
 
 ```bash
 cd examples/bookstore-platform/app/payments-gateway
-go run ./cmd/payments-gateway
-# The Go binary listens on localhost:8080.
+go run .
+# The Go binary listens on port 8080 (PORT defaults to 8080).
 ```
+
+Leave `STRIPE_KEY` unset. The health routes start without it, and
+copying the cluster's Secret into your shell is the developer-secrets
+threat in the table above. A charge request needs a Stripe test-mode
+key from your own sandbox, never a live key.
 
 #### 2.5 Verify the intercept
 
 ```bash
 # Request WITHOUT the header — hits the deployed Pod:
-curl http://payments-gateway.bookstore-dev-alice:8080/health
+curl http://payments-gateway.bookstore-dev-alice:8080/healthz
 # Response from the deployed Pod (production-shape).
 
 # Request WITH the header — hits alice's laptop:
-curl -H 'x-dev: alice' http://payments-gateway.bookstore-dev-alice:8080/health
+curl -H 'x-dev: alice' http://payments-gateway.bookstore-dev-alice:8080/healthz
 # Response from the laptop's Go binary; alice sees the request in her terminal.
 ```
 
-Now edit `cmd/payments-gateway/main.go`, rerun `go run`, request with the
-header — the new behavior is immediately visible. Iteration is
-~5 seconds (compile + restart).
+Now edit `main.go`, rerun `go run .`, and request with the header. The
+change shows up after a local compile and restart, with no image build.
 
 #### 2.6 Leave the intercept
 
@@ -476,10 +531,13 @@ longer in the loop.
 
 #### 3.1 Author a skaffold.yaml
 
-In `app/payments-gateway/`, save as `skaffold.yaml`:
+In `app/payments-gateway/`, save as `skaffold.yaml`. It builds the
+image and applies the manifest from 2.2. The image name here must
+match the one in that manifest, because Skaffold swaps in the tag it
+builds.
 
 ```yaml
-apiVersion: skaffold/v4beta11
+apiVersion: skaffold/v4beta14
 kind: Config
 metadata:
   name: payments-gateway
@@ -489,48 +547,30 @@ build:
       docker:
         dockerfile: Dockerfile
 deploy:
-  helm:
-    releases:
-      - name: payments-gateway
-        chartPath: ../../helm/payments-gateway
-        namespace: bookstore-dev-alice
-        valuesFiles: [values-dev.yaml]
-        setValues:
-          image.repository: <YOUR-ECR>/bookstore/payments-gateway
-profiles:
-  - name: sync
-    build:
-      artifacts:
-        - image: <YOUR-ECR>/bookstore/payments-gateway
-          sync:
-            manual:
-              - src: 'cmd/**/*.go'
-                dest: /app/cmd
-              - src: 'internal/**/*.go'
-                dest: /app/internal
+  kubectl:
+    manifests:
+      - dev/payments-gateway.yaml
 ```
 
 #### 3.2 Run the dev loop
 
 ```bash
-skaffold dev --profile=sync
+skaffold dev
 ```
 
 Skaffold:
 
-1. Builds `bookstore/payments-gateway:<HASH>`.
-2. Pushes to ECR (or uses `--build-on-cluster` for in-cluster build).
-3. Applies the Helm chart to `bookstore-dev-alice`.
+1. Builds the image with a content-hash tag.
+2. Pushes it to the registry the image name points at (ECR here).
+3. Applies `dev/payments-gateway.yaml` with the new tag.
 4. Streams logs from the new Pod.
-5. Watches `cmd/**/*.go` + `internal/**/*.go`.
+5. Watches the source tree and repeats 1 to 4 on change.
 
-On every save, the new file is `kubectl cp`'d into the running
-container (sync mode). For changes that need a real rebuild (Dockerfile
-edits, `go.mod` changes), Skaffold falls back to full build + push +
-restart automatically.
-
-The terminal shows logs from the deployed Pod; the iteration cycle
-is 2-5 seconds for synced files, 30-90 seconds for a real rebuild.
+Sync mode does not apply to this service. It copies changed files into
+a running container, which suits interpreted code. This service is a
+compiled Go binary on a distroless, read-only image with no toolchain,
+so every save runs a full build, push and restart. Measure your own
+cycle; this chapter does not claim a figure for it.
 
 #### 3.3 Tear down
 
@@ -542,23 +582,11 @@ deployed resources automatically (deletes the Helm release).
 Save as `app/payments-gateway/Tiltfile`:
 
 ```python
-# Tiltfile — the payments-gateway service inner-loop.
+# Tiltfile: the payments-gateway service inner loop.
 allow_k8s_contexts(['arn:aws:eks:<REGION>:<ACCOUNT-ID>:cluster/bookstore-eks'])
-load('ext://restart_process', 'docker_build_with_restart')
 
-docker_build_with_restart(
-  '<YOUR-ECR>/bookstore/payments-gateway',
-  '.',
-  entrypoint=['./payments-gateway'],
-  dockerfile='Dockerfile',
-  live_update=[
-    sync('./cmd', '/app/cmd'),
-    sync('./internal', '/app/internal'),
-    run('go build -o /app/payments-gateway ./cmd/payments-gateway', trigger=['./cmd', './internal']),
-  ],
-)
-
-k8s_yaml(helm('../../helm/payments-gateway', namespace='bookstore-dev-alice'))
+docker_build('<YOUR-ECR>/bookstore/payments-gateway', '.', dockerfile='Dockerfile')
+k8s_yaml('dev/payments-gateway.yaml')
 k8s_resource('payments-gateway', port_forwards='8080:8080')
 ```
 
@@ -568,10 +596,13 @@ Run:
 tilt up
 ```
 
-Tilt opens a browser at <http://localhost:10350> showing the build +
-deploy + log streams for every configured resource. The `live_update`
-sync + rebuild pattern is faster than full image push when you
-control the Dockerfile.
+Tilt opens a browser at <http://localhost:10350> showing the build,
+deploy and log streams for every configured resource.
+`allow_k8s_contexts` stops Tilt from deploying to any other kubeconfig
+context, which matters when a production context sits in the same file.
+`live_update` does not apply to this service. It runs commands inside
+the running container, and this image has no toolchain and a read-only
+root filesystem.
 
 Stop:
 
@@ -588,20 +619,15 @@ In the bookstore-platform repo root, save as `.devcontainer/devcontainer.json`:
 ```json
 {
   "name": "Bookstore Platform Dev",
-  "image": "mcr.microsoft.com/devcontainers/go:1-1.23-bookworm",
+  "image": "mcr.microsoft.com/devcontainers/go:1.26-bookworm@sha256:f848c0d10256ec05e45b0d84a7f3eb1cf33ec1f6c6b4a596ae66aa081018b6ff",
   "features": {
     "ghcr.io/devcontainers/features/kubectl-helm-minikube:1": {
-      "version": "latest",
-      "helm": "latest",
+      "version": "1.37.2",
+      "helm": "3.22.1",
       "minikube": "none"
     },
-    "ghcr.io/devcontainers/features/aws-cli:1": {},
-    "ghcr.io/devcontainers/features/docker-in-docker:2": {}
+    "ghcr.io/devcontainers/features/aws-cli:1": {}
   },
-  "postCreateCommand": "curl -sSL https://github.com/GoogleContainerTools/skaffold/releases/latest/download/skaffold-linux-amd64 -o /usr/local/bin/skaffold && chmod +x /usr/local/bin/skaffold && curl -sSL https://app.getambassador.io/download/tel2oss/releases/download/v2.20.0/telepresence-linux-amd64 -o /usr/local/bin/telepresence && chmod +x /usr/local/bin/telepresence",
-  "mounts": [
-    "source=${localEnv:HOME}/.aws,target=/home/vscode/.aws,type=bind"
-  ],
   "customizations": {
     "vscode": {
       "extensions": [
@@ -620,16 +646,25 @@ In VS Code: `Cmd-Shift-P` → **"Reopen in Container"**. VS Code
 builds the image (first time only), starts the container, mounts
 the workspace, and attaches the editor. The dev container has:
 
-- Go 1.23.
-- `kubectl` + `helm` + `skaffold` + `telepresence` pre-installed.
-- `aws-cli` (the host's `~/.aws` is bind-mounted; AWS credentials
-  work).
+- Go 1.26, the version `go.mod` requires. The image is pinned by
+  digest, and the tag `1.26-bookworm` is in the reference.
+- `kubectl` 1.37.2 and `helm` 3.22.1, the Part's pins.
+- `aws-cli`. Sign in with `aws sso login` inside the container. The
+  host's `~/.aws` is not mounted, because the mount would expose every
+  profile and cached token to the container.
 - VS Code extensions (Go, Kubernetes, YAML).
 
-The developer's laptop has **only VS Code installed**. Every other
-tool runs inside the container. The container can be local
-(VS Code's local dev-container feature) or remote (VS Code Remote
-SSH attached to a Pod in EKS).
+It has no Docker daemon, by design. Docker-in-Docker is left out
+because its feature runs the container privileged, so builds go to a
+remote or in-cluster builder (see the Skaffold documentation's build
+environments). Skaffold and Telepresence are not in the image; install
+them from their own pages at pinned versions. Use Telepresence 2.25.0
+or later, the first release with the `--http-header` filter that 2.3
+uses.
+
+The laptop needs VS Code. The container can be local (VS Code's local
+dev-container feature) or remote (VS Code Remote SSH attached to a Pod
+in EKS).
 
 For the EKS-remote pattern, the dev container is itself a
 StatefulSet in `bookstore-dev-alice` (one StatefulSet per developer
@@ -642,7 +677,10 @@ A scaffolder template (Backstage, ch.13.11) creates:
 
 - The developer namespace (`bookstore-dev-<USERNAME>`).
 - A dev-container Pod (or StatefulSet) running in that namespace.
-- A `kubeconfig` configured for the developer's IAM identity.
+- A `kubeconfig` for the developer's IAM identity, created with
+  [`aws eks update-kubeconfig`](https://docs.aws.amazon.com/eks/latest/userguide/create-kubeconfig.html).
+  It runs `aws eks get-token` as an exec plugin, so it holds no static
+  token.
 - A `.devcontainer/devcontainer.json` in the service repo
   pre-configured to attach to the cluster-side container.
 
@@ -664,15 +702,16 @@ The composition of Phase 13/14 patterns that hits the 5-minute mark:
    - Clicks the "Onboard new engineer" scaffolder template.
    - Form: name, team, GitHub username, email.
 
-2. Backstage scaffolder runs (~2 minutes):
+2. Backstage scaffolder runs (illustrative timing):
    - Creates an AWS IAM identity (federated via Keycloak/SSO).
    - Creates a Kubernetes namespace bookstore-dev-<USERNAME>.
    - Applies a NetworkPolicy isolating that namespace.
-   - Creates an OPA/Kyverno exception (developer namespaces get
-     baseline PSA, not restricted, because dev iteration uses
-     unsigned images).
+   - Labels the namespace `restricted`. Unsigned dev images are an
+     image-policy question for [14.12](./12-supply-chain-security.md),
+     not a reason to lower Pod Security.
    - Creates a dev-container StatefulSet running in the namespace.
-   - Pushes a per-user kubeconfig to a Secrets Manager entry.
+   - Writes a per-user kubeconfig that uses the exec plugin, so it
+     holds no static token.
    - Commits a `catalog-info.yaml` for the new developer to
      Backstage's catalog repo (so they show up in the org chart).
 
@@ -743,8 +782,9 @@ laptop's mirrord CLI:
 1. Reads the target Pod's spec (via the K8s API).
 2. Launches a small DaemonSet of `mirrord-agent` Pods (one per node)
    in the cluster (or reuses existing ones).
-3. The mirrord-agent Pods run in the same node's network +
-   PID namespace as the target Pod (privileged-ish, like Falco).
+3. The mirrord-agent Pods work against the target Pod's network and
+   process view. Check the agent chart's security settings before it
+   runs in a namespace that enforces `restricted`.
 4. The local binary runs with a mirrord library injected via
    `LD_PRELOAD` (Linux) — every syscall the binary makes (`socket`,
    `connect`, `accept`, `open`, etc.) is intercepted by the library
@@ -805,8 +845,9 @@ cluster-hosted pattern uses a StatefulSet per developer with:
 
 - A PVC for the workspace (so unsaved work survives Pod restart).
 - A PVC for the build cache (Go module cache, Docker layer cache).
-- A `kubectl` RBAC binding for the developer's namespace + a
-  read-only binding for the platform's shared namespaces.
+- A `kubectl` RBAC binding for the developer's namespace, plus
+  read-only access to workloads and Services in shared namespaces,
+  with no Secrets.
 - VS Code Remote-SSH or OpenVSCode-Server exposes the Pod over
   the network (through a per-user Ingress with OIDC auth).
 
@@ -818,14 +859,9 @@ Backstage form is the only thing the engineer interacts with.
 ## Production notes
 
 > **In production:** **Inner-loop tools live in dev environments,
-> not prod.** Telepresence intercepts against prod namespaces are
-> the classic foot-gun: a developer's intercept routes real
-> customer traffic to their laptop; the laptop crashes; customers
-> see 5xx. The platform's defence: a Telepresence policy that
-> requires `--http-header` (personal intercept) for any service in
-> a `prod-*` namespace, OR (better) installs Traffic Manager only
-> in dev clusters and forbids it in prod. Make the policy
-> enforceable via OPA/Kyverno admission.
+> not prod.** Check on each audit that Traffic Manager is absent
+> from every production cluster. The threat and its controls are in
+> Threats and controls above.
 
 > **In production:** **Per-developer namespaces are the right
 > isolation primitive.** A shared `dev` namespace where every
@@ -848,20 +884,17 @@ Backstage form is the only thing the engineer interacts with.
 > **In production:** **The dev-container image is a platform
 > artifact.** A dev-container image with the wrong Go version, an
 > outdated kubectl, or a missing tool causes every onboarded
-> engineer to debug for 30 minutes. The platform team builds the
-> dev-container image in CI (the same supply-chain rigor as prod
-> images: scan, sign, retag), and the `.devcontainer/devcontainer.json`
+> engineer to lose time. The platform team builds the dev-container
+> image in CI under the same supply-chain controls as prod images
+> (see [14.12](./12-supply-chain-security.md)), and the
+> `.devcontainer/devcontainer.json`
 > pins a specific image digest. Updates flow through PR review;
 > regressions are caught before they hit any developer.
 
-> **In production:** **Skaffold's `--build-on-cluster` flag** uses
-> the cluster's worker nodes for image builds (Kaniko in-pod).
-> Faster than the round-trip to ECR for big images + slow uplinks,
-> and the build environment matches production. The trade-off: the
-> cluster pays the CPU cost; configure Karpenter to scale a `dev-
-> build` NodePool for these workloads + scale it back to zero when
-> idle. For organizations with a remote workforce, the in-cluster
-> build path is often faster than push-to-ECR.
+> **In production:** **Run in-cluster builders in a dev namespace
+> with its own quota.** A builder runs whatever Dockerfile it is
+> given, so keep it away from workload namespaces. Skaffold's
+> documentation covers the in-cluster build setup.
 
 > **In production:** **The DX feedback loop matters.** Every quarter,
 > survey engineers: "How long is your inner loop?" "Which tool do
@@ -883,27 +916,19 @@ Backstage form is the only thing the engineer interacts with.
 ## Quick Reference
 
 ```bash
-# Telepresence — connect, intercept, leave.
-telepresence helm install                # one-time per cluster
+# Telepresence: connect, intercept, leave (2.25.0 or later).
+telepresence helm install                # one-time per dev cluster
 telepresence connect                     # per-laptop session
 telepresence intercept <SERVICE> \
   --namespace=<DEV-NS> \
   --port=8080:8080 \
-  --http-header=x-dev=<USERNAME>         # personal intercept (prod-safe)
-go run ./cmd/<SERVICE>                   # laptop process now in the loop
+  --http-header=x-dev=<USERNAME>         # personal intercept, dev only
+go run .                                 # laptop process now in the loop
 telepresence leave <INTERCEPT-NAME>
 telepresence quit
 
-# Mirrord — exec a binary with cluster I/O.
-mirrord exec --target pod/<TARGET-POD> -n <DEV-NS> -- ./my-binary
-# Or with steal mode (NOT prod-safe):
-mirrord exec --target pod/<TARGET-POD> -n <DEV-NS> --steal -- ./my-binary
-
 # Skaffold — file-watch-rebuild-deploy.
-skaffold dev                              # default: rebuild per change
-skaffold dev --profile=sync               # sync mode (no rebuild for synced files)
-skaffold dev --build-on-cluster           # in-cluster builds via Kaniko
-skaffold test                             # run e2e tests against deployed pods
+skaffold dev                              # rebuild and redeploy on each change
 
 # Tilt — alternative inner-loop tool.
 tilt up                                   # launch the dev loop + browser UI
@@ -925,8 +950,7 @@ Developer-experience checklist (the platform is delivering DX when all six are y
 - [ ] The dev-container image is built in CI, scanned, signed, and
       pinned by digest in `.devcontainer/devcontainer.json`.
 - [ ] Telepresence Traffic Manager installed in dev cluster(s) only;
-      personal-intercept enforced via policy for any near-prod
-      service.
+      intercept rights granted per dev namespace through RBAC.
 - [ ] At least one of Skaffold / Tilt has a working `skaffold dev`
       / `tilt up` recipe per service (in the service's repo).
 - [ ] The "new engineer onboarding" Backstage template provisions a
@@ -940,17 +964,17 @@ Developer-experience checklist (the platform is delivering DX when all six are y
 
 > Try each before opening the answer drawer. The act of trying is the exercise; the answer is the check.
 
-1. **The chapter calls the GitOps-cycle inner loop a "compounding developer-velocity tax." Why is the 6-minute number worse than it sounds?**
+1. **The chapter calls the GitOps-cycle inner loop a "compounding developer-velocity tax." Why is the illustrative 6-minute round trip worse than it sounds?**
    <details><summary>Show answer</summary>
 
-   A 6-minute round trip per save-and-test cycle means a developer doing 30-50 iterations a day (a normal debug session for a real bug) spends 3-5 hours just *waiting*. Multiply by 10 engineers and the team loses 30-50 person-hours per day to inner-loop friction. That's worse than it sounds because it also shapes *what the engineers attempt* — they avoid riskier experiments (refactors, exploratory rewrites) because the cycle time makes failure expensive. The compounding effect is the team architecting around the friction instead of doing the right thing.
+   Take the illustrative 6-minute round trip per save-and-test cycle. A developer doing 30-50 iterations a day (a normal debug session for a real bug) spends 3-5 hours just *waiting*. Multiply by 10 engineers and the team loses 30-50 person-hours per day to inner-loop friction. That's worse than it sounds because it also shapes *what the engineers attempt* — they avoid riskier experiments (refactors, exploratory rewrites) because the cycle time makes failure expensive. The compounding effect is the team architecting around the friction instead of doing the right thing.
 
    </details>
 
 2. **A developer needs to debug an interaction between the payments service and a real Stripe webhook. Skaffold or Telepresence with intercept — which fits better, and why?**
    <details><summary>Show answer</summary>
 
-   Telepresence with header-based intercept. Stripe webhooks fire once per real event — re-creating that side effect repeatedly to test Skaffold's redeploy is impractical. With Telepresence, the developer registers an intercept selecting requests with a specific header (`x-dev: alice`), runs the laptop process as a "personal intercept," and triggers a real Stripe test event tagged with that header; the real webhook lands at the laptop. Other developers can hit the same service without their traffic being intercepted. Skaffold's rebuild-redeploy is the wrong shape because each iteration would require re-firing the webhook, and the dev cluster has only one canonical webhook endpoint.
+   Telepresence, with a personal intercept, for requests you send yourself. A header such as `x-dev: alice` selects them, and other developers' traffic is untouched. A third-party webhook is a poor fit for that: Stripe's delivery carries no custom header, so the intercept cannot select it. For the real delivery, forward Stripe's test events from its CLI to a dev endpoint your laptop serves. Skaffold's rebuild-redeploy is the wrong shape here too, because each iteration would re-fire the event.
 
    </details>
 
@@ -964,7 +988,7 @@ Developer-experience checklist (the platform is delivering DX when all six are y
 4. **Hands-on extension — run `skaffold dev` on the catalog service against a dev namespace. Edit `catalog.go`, save, and measure the rebuild-to-redeploy cycle.**
    <details><summary>What you should see</summary>
 
-   With Skaffold's sync mode for Go: file save → local Go build (~2s for incremental) → image rebuild (~30s if not cached, ~5s if Docker layers cached) → image push (~5s on local registry, slower for ECR) → Skaffold patches the Deployment with the new tag → Pod restart (~5-10s readiness) → visible in cluster. Total ~15-30s for a cached path; without caching, the first cycle is 60-90s. Compare to the 6-minute GitOps cycle the chapter opens with — the inner-loop tooling collapses iteration to roughly an order of magnitude faster without bypassing the production safety mechanisms.
+   There is no sync mode for this service. The Go binary is compiled into a distroless, read-only image, so each save runs a full build, push and Pod restart. Measure the cycle on your own machine and registry. The lever is layer caching: the steps that copy unchanged modules should stay cached, so only the compile and the copy repeat. The point matches the chapter's: the inner loop gets shorter without skipping the image production runs.
 
    </details>
 
@@ -982,7 +1006,7 @@ Developer-experience checklist (the platform is delivering DX when all six are y
 - **Skaffold documentation**
   <https://skaffold.dev/docs/>; the canonical Skaffold reference,
   including the schema reference for `skaffold.yaml`, the sync
-  modes, and the `--build-on-cluster` flag this chapter cites.
+  modes, and the in-cluster build environment this chapter points to.
 - **Tilt documentation**
   <https://docs.tilt.dev/>; the canonical Tilt reference, including
   the Tiltfile DSL + the `live_update` pattern.
@@ -994,6 +1018,13 @@ Developer-experience checklist (the platform is delivering DX when all six are y
   <https://code.visualstudio.com/docs/devcontainers/containers>;
   the editor-side integration for the Dev Container spec; the most
   common entry point for the Devcontainer pattern.
+- **Telepresence RBAC reference**
+  <https://telepresence.io/docs/reference/rbac>; the intercept
+  authorization default, the `pods/portforward` check, and the
+  `security.authorization.requiredGrant` chart setting.
+- **Create a kubeconfig with `aws eks update-kubeconfig`**
+  <https://docs.aws.amazon.com/eks/latest/userguide/create-kubeconfig.html>;
+  the exec-plugin kubeconfig that 5.3 relies on.
 - **Cross-ref: Backstage scaffolder (Part 13 ch.11)**
   [`../13-grand-capstone-bookstore-platform/11-backstage-developer-portal-idp.md`](../13-grand-capstone-bookstore-platform/11-backstage-developer-portal-idp.md)
   — the "5-minute onboarding" pattern is built on the scaffolder
