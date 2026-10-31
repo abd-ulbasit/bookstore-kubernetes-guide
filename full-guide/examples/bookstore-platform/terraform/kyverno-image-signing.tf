@@ -24,7 +24,7 @@
 #   - With keyless cosign signatures, only images signed by an OIDC identity
 #     matching the configured issuer + subject can run.
 #
-# Default validationFailureAction: Audit. This is deliberate, and it means
+# Default failureAction: Audit. This is deliberate, and it means
 # this policy BLOCKS NOTHING until you change it:
 #   - "Audit" warns in the Kyverno policy-report CRD but DOES NOT BLOCK Pod
 #     creation. Use this until your CI is reliably signing images and you've
@@ -34,8 +34,9 @@
 #     Terraform). Narrow image_signing_image_references first, or every
 #     third-party image in a non-excluded namespace is rejected.
 #
-# Excluded namespaces (kube-system, kyverno, falco, velero, bookstore-
-# platform-system) are skipped because their images aren't signed by you.
+# Excluded namespaces (kube-system, kube-public, kube-node-lease, kyverno,
+# falco, velero, argocd, bookstore-platform-system) are skipped because
+# their images aren't signed by you.
 ################################################################################
 
 ################################################################################
@@ -197,9 +198,8 @@ resource "kubectl_manifest" "require_signed_images_policy" {
       }
     }
     spec = {
-      validationFailureAction = var.image_signing_validation_failure_action
-      background              = true
-      webhookTimeoutSeconds   = 30
+      background            = true
+      webhookTimeoutSeconds = 30
 
       rules = [
         {
@@ -252,9 +252,12 @@ resource "kubectl_manifest" "require_signed_images_policy" {
                   ]
                 },
               ]
-              # In Audit mode a missing or mismatched signature surfaces as a
-              # policy-report warning instead of a Pod creation rejection.
-              mutateDigest = true
+              # Audit records a missing or mismatched signature in a policy
+              # report; Enforce rejects the Pod. Kyverno 1.13 (chart 3.3.x)
+              # reads the failure action here; the spec-level field is
+              # deprecated.
+              failureAction = var.image_signing_validation_failure_action
+              mutateDigest  = true
               required     = true
               verifyDigest = true
             },
