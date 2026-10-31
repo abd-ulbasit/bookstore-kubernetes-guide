@@ -7,11 +7,38 @@ versions follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 ## [Unreleased]
 
 ### Added
+- `security-gates.yml`: the security-first gates on real GitHub runners. The
+  gate unit tests, G1+G2 over the whole guide, G1+G3 against a kind
+  v0.33.0 cluster, the registry gate (G5), the lab-evidence gate (G7) and G4,
+  the runtime gate, which deploys the Bookstore five ways (raw manifests, the
+  Helm chart, each Kustomize overlay) into `restricted` namespaces and waits
+  for every workload. Chapter failures are report mode except the chapters
+  in `.github/security-gates-enforced.txt`.
+- `bookstore-release.yml`: dispatch one service through the reusable
+  pipeline with publish on (signing, provenance, SBOM attestation) and open a
+  promotion PR. Default branch only.
+- ADR 0009: security-first, no unlearning, one exceptions registry (which
+  extends ADR 0005), the gates, Kubernetes 1.37 and no clusters on AWS or GCP
+  during the rewrite.
 - Real working `app/catalog/` Go service (Postgres-backed, instrumented,
   tested, benchmarked) — promotion from the Phase 16 stub.
 - `BENCHMARKS.md` with k6 latency results against `catalog/`.
 
 ### Changed
+- `SECURITY-SCAN.md` is rewritten around the exceptions registry
+  (`.trivyignore.yaml` and `security/namespace-exceptions.yaml`). It corrects
+  the platform RBAC count, the Backstage entry and the "permissive examples"
+  principle, and records what a real pipeline run has and has not proved.
+- README says the guide is being rewritten security-first and which chapters
+  are done.
+- The Bookstore NetworkPolicies let the app reach its own data tier. They
+  admitted only catalog to postgres and nobody to redis, so orders, the
+  migration Job and the catalog cache timed out on a cluster that enforces
+  policy (kind v0.33.0's kindnet does). `allow-catalog-to-postgres` becomes
+  `allow-data-tier-ingress`; the count stays at 10.
+- The production overlay and `values-prod.yaml` size the namespace quota to
+  their own replicas. The dev-shaped quota refused postgres and the
+  migration Job.
 - **Kubernetes 1.37 is now the target version** (was 1.35, which reaches
   end of life on 2027-02-28). Toolchain pins move with it: kubectl
   1.37.2, Helm 3.22.1, kind v0.33.0 (default node image
