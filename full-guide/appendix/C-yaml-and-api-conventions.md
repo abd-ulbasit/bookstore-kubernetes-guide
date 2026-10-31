@@ -4,10 +4,10 @@
 > on: **YAML** (and its footguns) and the **Kubernetes API conventions**
 > (GVK/GVR, `spec`/`status`, labels vs annotations, the immutable-`selector`
 > rule, optimistic concurrency, finalizers/ownerReferences, the
-> alpha/beta/stable + deprecation policy, Server-Side Apply, and CRDs). Current
-> for Kubernetes **v1.30+**, up to this guide's **v1.37** target. This is
-> reference material — it does **not** follow the nine-section chapter
-> anatomy; it cross-links the chapter that *teaches* each topic in depth.
+> alpha/beta/stable + deprecation policy, Server-Side Apply, and CRDs). Written
+> for Kubernetes **1.37**, the version this guide targets. This is reference
+> material — it does **not** follow the nine-section chapter anatomy; it
+> cross-links the chapter that *teaches* each topic in depth.
 
 ---
 
@@ -49,9 +49,28 @@ every "the file looks right but the object is wrong" bug is one of these.
   with nothing after it is `null`, not `""` — which differs from an empty map
   `{}` or empty string `""`. For "present but empty" use `{}`, `[]`, or `""`
   explicitly.
-- **The empty-map vs null distinction matters in Kubernetes.** `securityContext:`
-  (null) is *unset*; `securityContext: {}` is *present and empty* — and for some
-  fields the difference changes defaulting/admission behavior. Be explicit.
+- **Null and empty hold no control.** `securityContext:` with nothing under it
+  is `null`, and `securityContext: {}` is an empty map. Neither sets a field,
+  so neither hardens a Pod. A `restricted` namespace refuses the Pod in either
+  form ([Pod Security
+  Standards](https://kubernetes.io/docs/concepts/security/pod-security-standards/)).
+  A key that is present is not a control. Write the fields out, as the
+  [baseline](../01-core-workloads/01-pods.md#baseline) does.
+
+The client dry run misses the Norway problem, and the server catches it. This
+is a deliberate failure: a ConfigMap whose `data` holds an unquoted `yes`.
+
+```sh
+kubectl apply --dry-run=client -f cm-yes.yaml -n bookstore
+kubectl apply --dry-run=server -f cm-yes.yaml -n bookstore
+```
+
+<!-- gate: output -->
+```text
+configmap/cm-yes created (dry run)
+# ...
+Error from server (BadRequest): error when creating "cm-yes.yaml": ConfigMap in version "v1" cannot be handled as a ConfigMap: json: cannot unmarshal bool into Go struct field ConfigMap.data of type string
+```
 
 ### Multi-line strings: `|` vs `>` and chomping
 
@@ -105,14 +124,22 @@ emits one ordered multi-doc stream.
 ### Quick YAML self-check
 
 ```sh
-kubectl apply --dry-run=client -f manifest.yaml      # parse + local schema validate (no cluster)
+kubectl apply --dry-run=client -f manifest.yaml      # parse and check the schema, no write
 kubectl apply --dry-run=server -f manifest.yaml      # + full apiserver admission (incl. PSA)
 ```
+
+The client run still reads the API schema from the cluster, so it fails
+without one, and it misses the type errors the server reports, as the boolean
+example above shows. Read the server's warnings as well. A `restricted`
+namespace warns about a Deployment rather than refusing it, because the Pods
+the Deployment would create are the ones refused
+([01.01](../01-core-workloads/01-pods.md#baseline-namespace)).
 
 > **Convention used throughout the guide:** quote ambiguous scalars (versions,
 > tags, booleans-as-strings, all-digit strings), use `|-` for single-line secret
 > values, 2-space indentation, one concern per document, and validate every file
-> with `--dry-run` before it enters Git.
+> with `--dry-run=server` before it enters Git. Every workload carries the
+> [security baseline](../01-core-workloads/01-pods.md#baseline).
 
 ---
 
@@ -124,10 +151,8 @@ server*, not stylistic. The conceptual home for all of this is
 
 ### `apiVersion`, group/version, GVK and GVR
 
-```yaml
-apiVersion: apps/v1        # <GROUP>/<VERSION>   (core group = "" → just "v1")
-kind: Deployment           # GVK = (apps, v1, Deployment)
-```
+An `apiVersion` such as `apps/v1` names a group and a version. Paired with a
+`kind` such as `Deployment`, it is the GVK `(apps, v1, Deployment)`.
 
 - **Group** versions an area of the API: `apps/v1`, `networking.k8s.io/v1`,
   `batch/v1`, `rbac.authorization.k8s.io/v1`, `autoscaling/v2`, `policy/v1`. The
@@ -178,9 +203,9 @@ metadata:
 ```
 
 - **Labels** are identifying key/values **meant for selection** (Services,
-  ReplicaSets, NetworkPolicies, HPAs select on them). Keep them stable and
-  intentional. **Rule of thumb: if something selects on it, it's a label;
-  otherwise it's an annotation.**
+  ReplicaSets, NetworkPolicies and PodDisruptionBudgets select on them). Keep
+  them stable and intentional. **Rule of thumb: if something selects on it,
+  it's a label; otherwise it's an annotation.**
 - **Annotations** are arbitrary non-identifying metadata (build SHA,
   change-cause, controller config, checksums). **You cannot select on
   annotations.**
@@ -203,18 +228,22 @@ metadata:
 
 ### The immutable-`selector` rule (a real outage)
 
-`Deployment`/`StatefulSet`/`ReplicaSet` `.spec.selector` and a `Service`'s
-`.spec.selector` are **immutable after creation** — the API server rejects any
-change:
+`Deployment`, `StatefulSet` and `ReplicaSet` `.spec.selector` are **immutable
+after creation**, and the API server rejects any change. This deliberate
+failure patches a Deployment's selector and its pod template labels together:
 
-```
-Deployment.apps "catalog" is invalid: spec.selector:
-  Invalid value: ...: field is immutable
+```sh
+kubectl patch deployment catalog -n bookstore --type merge -p '{"spec":{"selector":{"matchLabels":{"app":"catalog-v2"}},"template":{"metadata":{"labels":{"app":"catalog-v2"}}}}}'
 ```
 
-Once that happens the rollout is **wedged** until the workload is deleted and
-recreated (downtime). The two ways the guide teaches you to trip this — and
-avoid it:
+<!-- gate: output -->
+```text
+The Deployment "catalog" is invalid: spec.selector: Invalid value: {"matchLabels":{"app":"catalog-v2"}}: field is immutable
+```
+
+The update is refused, so the new spec never rolls out. Changing the selector
+means deleting and recreating the workload, which causes downtime. The two
+ways the guide teaches you to trip this — and avoid it:
 
 - **Kustomize `commonLabels` footgun.** The legacy `commonLabels:` transformer
   injects its labels into `metadata.labels` **and into `spec.selector` and the
@@ -329,11 +358,12 @@ kubectl convert -f old.yaml --output-version apps/v1   # `kubectl convert` plugi
 ## The universal object skeleton
 
 Every kind you will ever write fits this; everything above is a refinement of
-it:
+it. Name the kind on a `kind:` line between `apiVersion` and `metadata`. The
+skeleton leaves that line out, because a placeholder kind is not a manifest a
+reader can apply:
 
 ```yaml
 apiVersion: <GROUP>/<VERSION>   # GVK — core group is just a version, e.g. v1
-kind: <Kind>
 metadata:
   name: <NAME>                  # identity within (namespace, kind)
   namespace: <NS>               # namespaced kinds only
@@ -342,6 +372,49 @@ metadata:
 spec: { }                       # DESIRED state — you author this
 # status: OBSERVED — written by the owning controller/kubelet, NEVER by you
 ```
+
+---
+
+## The canonical workload spec
+
+Every workload in this guide carries the same `spec` fields, and the
+[security baseline](../01-core-workloads/01-pods.md#baseline) explains each
+one. The block below is copied from that section, and the two must stay
+identical:
+
+```yaml
+spec:
+  serviceAccountName: catalog-sa
+  automountServiceAccountToken: false
+  securityContext:
+    runAsNonRoot: true
+    runAsUser: 65532
+    runAsGroup: 65532
+    seccompProfile:
+      type: RuntimeDefault
+  containers:
+    - name: catalog
+      image: bookstore/catalog:dev
+      securityContext:
+        allowPrivilegeEscalation: false
+        readOnlyRootFilesystem: true
+        capabilities:
+          drop: ["ALL"]
+      resources:
+        requests: { cpu: 50m, memory: 64Mi }
+        limits: { memory: 128Mi }
+      volumeMounts:
+        - name: tmp
+          mountPath: /tmp
+  volumes:
+    - name: tmp
+      emptyDir: {}
+```
+
+Put the object's `apiVersion`, `kind` and `metadata` around it. Pin a
+third-party image by digest, as
+[01.01](../01-core-workloads/01-pods.md#baseline-image-digest) explains. The
+Bookstore images keep the tag their build produced.
 
 ---
 
@@ -358,6 +431,9 @@ spec: { }                       # DESIRED state — you author this
 | YAML + the `commonLabels` immutable-selector footgun in Kustomize | [07-delivery/02 — Packaging with Kustomize](../07-delivery/02-packaging-kustomize.md) |
 | Finding/replacing removed APIs across a cluster upgrade | [08-day-2-operations/01 — Cluster lifecycle](../08-day-2-operations/01-cluster-lifecycle.md) |
 | Finalizers, ownerReferences, CRDs, structural schema, conversion | [08-day-2-operations/05 — Operators and CRDs](../08-day-2-operations/05-operators-and-crds.md) |
+| The security baseline written into a workload | [01.01, Pods](../01-core-workloads/01-pods.md#baseline) |
+| Scanning manifests before they are applied | [05.03, Supply chain](../05-security/03-supply-chain.md) |
+| Admission policy as code | 05.07 <!-- link-later: 05.07 --> |
 
 See also: **[Appendix A — kubectl cheatsheet](A-kubectl-cheatsheet.md)** (the
 commands), **[Appendix B — Glossary](B-glossary.md)** (every term above
