@@ -1,0 +1,325 @@
+# Transcript for full-guide/01-core-workloads/02-health-and-lifecycle.md.
+# Tier A: a kind cluster named sf-pilot on one Linux lab host, with a
+# Kubernetes v1.37.0 node and a kubectl v1.37.2 client. The cluster is shared
+# with other workers, so this run used its own namespace, p01-02-bookstore,
+# where the chapter prints bookstore. No other namespace was used.
+# Commands run from full-guide/ with the kubectl context's default namespace
+# set to p01-02-bookstore, so the chapter's commands without -n land there.
+# Manifests that the chapter applies with -f FILE are shown in full where the
+# run applied them from a heredoc. The namespace and ServiceAccount setup
+# applies 00-namespace.yaml and 05-serviceaccounts-rbac.yaml with the
+# namespace name rewritten to p01-02-bookstore.
+# The sidecar Pod was applied with its memory request at 16Mi, the value the
+# LimitRange minimum requires. Before that change the 8Mi request was refused,
+# see the check at the start of the setup section.
+# Timings are wall-clock seconds from the run script, labelled "elapsed".
+# The two /proc/1/status lines have a tab after the field name. The transcript
+# shows that tab as one space, because the evidence gate expands tabs in the
+# chapter's blocks. No other character on those lines is changed.
+# context: kind-sf-pilot
+$ kubectl version
+Client Version: v1.37.2
+Kustomize Version: v5.8.1
+Server Version: v1.37.0
+$ sed -e 's/^  name: bookstore$/  name: p01-02-bookstore/' -e 's/namespace: bookstore$/namespace: p01-02-bookstore/' examples/bookstore/raw-manifests/00-namespace.yaml | kubectl apply -f -
+namespace/p01-02-bookstore created
+resourcequota/bookstore-quota created
+limitrange/bookstore-limits created
+$ sed -e 's/namespace: bookstore$/namespace: p01-02-bookstore/' examples/bookstore/raw-manifests/05-serviceaccounts-rbac.yaml | kubectl apply -f -
+serviceaccount/catalog-sa created
+serviceaccount/storefront-sa created
+serviceaccount/orders-sa created
+serviceaccount/payments-worker-sa created
+serviceaccount/postgres-sa created
+serviceaccount/redis-sa created
+serviceaccount/rabbitmq-sa created
+serviceaccount/migrate-sa created
+role.rbac.authorization.k8s.io/catalog-config-reader created
+rolebinding.rbac.authorization.k8s.io/catalog-config-reader-binding created
+## check: the 8Mi request the file had before this change, against the LimitRange
+$ sed -e 's/memory: 16Mi                # at the namespace LimitRange min (01.03)/memory: 8Mi/' examples/bookstore/raw-manifests/02-catalog-pod-sidecar.yaml | kubectl apply --dry-run=server -f -
+Error from server (Forbidden): error when creating "STDIN": pods "catalog" is forbidden: minimum memory usage per Container is 16Mi, but request is 8Mi
+## step 1: read the probes and apply the sidecar Pod
+$ kubectl apply -f examples/bookstore/raw-manifests/02-catalog-pod-sidecar.yaml
+pod/catalog created
+$ kubectl wait --for=condition=Ready pod/catalog --timeout=300s
+pod/catalog condition met
+$ kubectl describe pod catalog | grep -E '^ +(Liveness|Readiness|Startup):'
+    Liveness:   http-get http://:http/healthz delay=0s timeout=2s period=10s successThreshold=1 failureThreshold=3
+    Readiness:  http-get http://:http/readyz delay=0s timeout=2s period=5s successThreshold=1 failureThreshold=3
+    Startup:    http-get http://:http/healthz delay=0s timeout=1s period=5s successThreshold=1 failureThreshold=30
+$ kubectl get pod catalog -o jsonpath='{range .status.conditions[*]}{.type}={.status}{"\n"}{end}'
+PodReadyToStartContainers=True
+Initialized=True
+Ready=True
+ContainersReady=True
+PodScheduled=True
+## step 2: readiness and the conditions
+$ kubectl get pod catalog -o jsonpath='{range .status.conditions[*]}{.type}={.status}{"\n"}{end}'
+PodReadyToStartContainers=True
+Initialized=True
+Ready=True
+ContainersReady=True
+PodScheduled=True
+$ kubectl describe pod catalog | grep -A2 -i 'startup\|liveness\|readiness' | head
+    Liveness:   http-get http://:http/healthz delay=0s timeout=2s period=10s successThreshold=1 failureThreshold=3
+    Readiness:  http-get http://:http/readyz delay=0s timeout=2s period=5s successThreshold=1 failureThreshold=3
+    Startup:    http-get http://:http/healthz delay=0s timeout=1s period=5s successThreshold=1 failureThreshold=30
+    Environment:
+      PORT:  8080
+## probe endpoints: a client Pod in the same namespace, with no NetworkPolicy
+$ kubectl apply -f - <<'EOF'
+apiVersion: v1
+kind: Pod
+metadata:
+  name: probe-client
+  labels:
+    app: probe-client
+spec:
+  serviceAccountName: storefront-sa
+  automountServiceAccountToken: false
+  securityContext:
+    runAsNonRoot: true
+    runAsUser: 65532
+    runAsGroup: 65532
+    seccompProfile:
+      type: RuntimeDefault
+  containers:
+    - name: client
+      image: busybox@sha256:73aaf090f3d85aa34ee199857f03fa3a95c8ede2ffd4cc2cdb5b94e566b11662
+      command: ["sleep", "3600"]
+      securityContext:
+        allowPrivilegeEscalation: false
+        readOnlyRootFilesystem: true
+        capabilities:
+          drop: ["ALL"]
+      resources:
+        requests: { cpu: 10m, memory: 16Mi }
+        limits: { memory: 32Mi }
+EOF
+pod/probe-client created
+$ kubectl wait --for=condition=Ready pod/probe-client --timeout=300s
+pod/probe-client condition met
+$ IP=$(kubectl get pod catalog -o jsonpath='{.status.podIP}')
+$ echo $IP
+10.244.0.95
+$ kubectl exec probe-client -- sh -c 'for p in /healthz /readyz /metrics /books; do wget -S -q -O /dev/null http://10.244.0.95:8080$p 2>&1 | head -1; echo "  $p"; done'
+  HTTP/1.1 200 OK
+  /healthz
+  HTTP/1.1 200 OK
+  /readyz
+  HTTP/1.1 200 OK
+  /metrics
+  HTTP/1.1 200 OK
+  /books
+## the signal masks of the sidecar PID 1
+$ kubectl exec catalog -c log-sidecar -- grep -E 'SigIgn|SigCgt' /proc/1/status
+SigIgn: 0000000000000004
+SigCgt: 0000000000010002
+## a probe that cannot run, a refused dependency and a preStop that cannot run
+$ kubectl apply -f - <<'EOF'
+apiVersion: v1
+kind: Pod
+metadata:
+  name: catalog-lab
+  labels:
+    app: catalog-lab
+spec:
+  serviceAccountName: catalog-sa
+  automountServiceAccountToken: false
+  securityContext:
+    runAsNonRoot: true
+    runAsUser: 65532
+    runAsGroup: 65532
+    seccompProfile:
+      type: RuntimeDefault
+  containers:
+    - name: catalog
+      image: bookstore/catalog:dev
+      imagePullPolicy: IfNotPresent
+      ports:
+        - name: http
+          containerPort: 8080
+      env:
+        - name: REDIS_ADDR            # nothing listens on port 1: the dial is refused
+          value: "127.0.0.1:1"
+      securityContext:
+        allowPrivilegeEscalation: false
+        readOnlyRootFilesystem: true
+        capabilities:
+          drop: ["ALL"]
+      resources:
+        requests: { cpu: 50m, memory: 64Mi }
+        limits: { memory: 128Mi }
+      readinessProbe:
+        httpGet: { path: /readyz, port: http }
+        periodSeconds: 5
+      livenessProbe:
+        exec:
+          command: ["/bin/sh", "-c", "true"]   # the image has no shell
+        periodSeconds: 5
+      lifecycle:
+        preStop:
+          exec:
+            command: ["/bin/sleep", "5"]       # the image has no coreutils
+      volumeMounts:
+        - name: tmp
+          mountPath: /tmp
+  volumes:
+    - name: tmp
+      emptyDir: {}
+EOF
+pod/catalog-lab created
+$ kubectl get pod catalog-lab
+NAME          READY   STATUS    RESTARTS   AGE
+catalog-lab   0/1     Running   0          91s
+$ kubectl get pod catalog-lab -o jsonpath='{.status.containerStatuses[0].restartCount}{"\n"}'
+0
+$ kubectl get pod catalog-lab -o jsonpath='{range .status.conditions[*]}{.type}={.status}{"\n"}{end}'
+PodReadyToStartContainers=True
+Initialized=True
+Ready=False
+ContainersReady=False
+PodScheduled=True
+$ kubectl logs catalog-lab -c catalog | grep readyz
+{"time":"2026-10-31T00:21:31.459458262Z","level":"WARN","msg":"readyz: redis not ready","err":"dial tcp 127.0.0.1:1: connect: connection refused"}
+{"time":"2026-10-31T00:21:32.465196901Z","level":"WARN","msg":"readyz: redis not ready","err":"dial tcp 127.0.0.1:1: connect: connection refused"}
+{"time":"2026-10-31T00:21:37.500470369Z","level":"WARN","msg":"readyz: redis not ready","err":"dial tcp 127.0.0.1:1: connect: connection refused"}
+{"time":"2026-10-31T00:21:42.430992441Z","level":"WARN","msg":"readyz: redis not ready","err":"dial tcp 127.0.0.1:1: connect: connection refused"}
+{"time":"2026-10-31T00:21:47.484516485Z","level":"WARN","msg":"readyz: redis not ready","err":"dial tcp 127.0.0.1:1: connect: connection refused"}
+{"time":"2026-10-31T00:21:52.475521518Z","level":"WARN","msg":"readyz: redis not ready","err":"dial tcp 127.0.0.1:1: connect: connection refused"}
+{"time":"2026-10-31T00:21:57.492715042Z","level":"WARN","msg":"readyz: redis not ready","err":"dial tcp 127.0.0.1:1: connect: connection refused"}
+{"time":"2026-10-31T00:22:02.47729584Z","level":"WARN","msg":"readyz: redis not ready","err":"dial tcp 127.0.0.1:1: connect: connection refused"}
+{"time":"2026-10-31T00:22:07.476075004Z","level":"WARN","msg":"readyz: redis not ready","err":"dial tcp 127.0.0.1:1: connect: connection refused"}
+{"time":"2026-10-31T00:22:12.485674346Z","level":"WARN","msg":"readyz: redis not ready","err":"dial tcp 127.0.0.1:1: connect: connection refused"}
+{"time":"2026-10-31T00:22:17.490830527Z","level":"WARN","msg":"readyz: redis not ready","err":"dial tcp 127.0.0.1:1: connect: connection refused"}
+{"time":"2026-10-31T00:22:22.502322864Z","level":"WARN","msg":"readyz: redis not ready","err":"dial tcp 127.0.0.1:1: connect: connection refused"}
+{"time":"2026-10-31T00:22:27.477178974Z","level":"WARN","msg":"readyz: redis not ready","err":"dial tcp 127.0.0.1:1: connect: connection refused"}
+{"time":"2026-10-31T00:22:32.475343508Z","level":"WARN","msg":"readyz: redis not ready","err":"dial tcp 127.0.0.1:1: connect: connection refused"}
+{"time":"2026-10-31T00:22:37.437668003Z","level":"WARN","msg":"readyz: redis not ready","err":"dial tcp 127.0.0.1:1: connect: connection refused"}
+{"time":"2026-10-31T00:22:42.489891073Z","level":"WARN","msg":"readyz: redis not ready","err":"dial tcp 127.0.0.1:1: connect: connection refused"}
+{"time":"2026-10-31T00:22:47.487484897Z","level":"WARN","msg":"readyz: redis not ready","err":"dial tcp 127.0.0.1:1: connect: connection refused"}
+{"time":"2026-10-31T00:22:52.477540813Z","level":"WARN","msg":"readyz: redis not ready","err":"dial tcp 127.0.0.1:1: connect: connection refused"}
+{"time":"2026-10-31T00:22:53.438211403Z","level":"WARN","msg":"readyz: redis not ready","err":"dial tcp 127.0.0.1:1: connect: connection refused"}
+$ kubectl describe pod catalog-lab | sed -n '/^Events:/,$p'
+Events:
+  Type     Reason     Age                 From               Message
+  ----     ------     ----                ----               -------
+  Normal   Scheduled  91s                 default-scheduler  Successfully assigned p01-02-bookstore/catalog-lab to sf-pilot-control-plane
+  Normal   Pulled     87s                 kubelet            spec.containers{catalog}: Container image "bookstore/catalog:dev" already present on machine and can be accessed by the pod
+  Normal   Created    86s                 kubelet            spec.containers{catalog}: Container created
+  Normal   Started    86s                 kubelet            spec.containers{catalog}: Container started
+  Warning  Unhealthy  85s                 kubelet            spec.containers{catalog}: Liveness probe errored and resulted in unknown state: rpc error: code = Unknown desc = failed to exec in container: failed to start exec "52e836152a562f94d8108cb690a79eb909722ca69dcbd019ecacc77adb0c284c": OCI runtime exec failed: exec failed: unable to start container process: exec: "/bin/sh": stat /bin/sh: no such file or directory
+  Warning  Unhealthy  80s                 kubelet            spec.containers{catalog}: Liveness probe errored and resulted in unknown state: rpc error: code = Unknown desc = failed to exec in container: failed to start exec "aa29bb10436da869ea08ee48637ae020204e578e52a3075aa45535e68e0b46d5": OCI runtime exec failed: exec failed: unable to start container process: exec: "/bin/sh": stat /bin/sh: no such file or directory
+  Warning  Unhealthy  75s                 kubelet            spec.containers{catalog}: Liveness probe errored and resulted in unknown state: rpc error: code = Unknown desc = failed to exec in container: failed to start exec "d6862d27fe57b49d0d93dd3ea67484963ab2a9920d5db57db5b808e376c8b44b": OCI runtime exec failed: exec failed: unable to start container process: exec: "/bin/sh": stat /bin/sh: no such file or directory
+  Warning  Unhealthy  70s                 kubelet            spec.containers{catalog}: Liveness probe errored and resulted in unknown state: rpc error: code = Unknown desc = failed to exec in container: failed to start exec "98c43e303859db73ca08e9a7ca12e0b227632d887da8a8cbc10f88642280c5db": OCI runtime exec failed: exec failed: unable to start container process: exec: "/bin/sh": stat /bin/sh: no such file or directory
+  Warning  Unhealthy  65s                 kubelet            spec.containers{catalog}: Liveness probe errored and resulted in unknown state: rpc error: code = Unknown desc = failed to exec in container: failed to start exec "a249b485e4467a49591ef49e0ede65783a43806ba2cde2ee859ed460f2b3381e": OCI runtime exec failed: exec failed: unable to start container process: exec: "/bin/sh": stat /bin/sh: no such file or directory
+  Warning  Unhealthy  60s                 kubelet            spec.containers{catalog}: Liveness probe errored and resulted in unknown state: rpc error: code = Unknown desc = failed to exec in container: failed to start exec "dcebef549a8b963d889ebdc7751a63af7cbd180c1313c3938822f414865818e7": OCI runtime exec failed: exec failed: unable to start container process: exec: "/bin/sh": stat /bin/sh: no such file or directory
+  Warning  Unhealthy  55s                 kubelet            spec.containers{catalog}: Liveness probe errored and resulted in unknown state: rpc error: code = Unknown desc = failed to exec in container: failed to start exec "e6db87e8fd3802a2c0e1693531eee4b87a2164298714f0a4a327abbeeff45e14": OCI runtime exec failed: exec failed: unable to start container process: exec: "/bin/sh": stat /bin/sh: no such file or directory
+  Warning  Unhealthy  50s                 kubelet            spec.containers{catalog}: Liveness probe errored and resulted in unknown state: rpc error: code = Unknown desc = failed to exec in container: failed to start exec "d03c3d0d7d900053e875e6e15b1410f97f54db2d7cad49795903e15d4f09843a": OCI runtime exec failed: exec failed: unable to start container process: exec: "/bin/sh": stat /bin/sh: no such file or directory
+  Warning  Unhealthy  45s (x10 over 86s)  kubelet            spec.containers{catalog}: Readiness probe failed: HTTP probe failed with statuscode: 503
+  Warning  Unhealthy  30s (x7 over 45s)   kubelet            spec.containers{catalog}: (combined from similar events): Readiness probe failed: HTTP probe failed with statuscode: 503
+## delete with the failing preStop hook
+$ date -u +%FT%TZ
+2026-10-31T00:23:01Z
+$ kubectl delete pod catalog-lab
+pod "catalog-lab" deleted from p01-02-bookstore namespace
+elapsed 21s
+$ kubectl logs -f catalog-lab -c catalog --timestamps   # captured while the Pod was deleted
+2026-10-31T00:21:31.273447503Z {"time":"2026-10-31T00:21:31.273270409Z","level":"INFO","msg":"DB_DSN unset; serving in-memory sample books"}
+2026-10-31T00:21:31.273492168Z {"time":"2026-10-31T00:21:31.273407124Z","level":"INFO","msg":"redis cache configured","addr":"127.0.0.1:1"}
+2026-10-31T00:21:31.273735529Z {"time":"2026-10-31T00:21:31.273592575Z","level":"INFO","msg":"catalog listening","addr":":8080"}
+2026-10-31T00:21:31.459682704Z {"time":"2026-10-31T00:21:31.459458262Z","level":"WARN","msg":"readyz: redis not ready","err":"dial tcp 127.0.0.1:1: connect: connection refused"}
+2026-10-31T00:21:32.465351555Z {"time":"2026-10-31T00:21:32.465196901Z","level":"WARN","msg":"readyz: redis not ready","err":"dial tcp 127.0.0.1:1: connect: connection refused"}
+2026-10-31T00:21:37.500569978Z {"time":"2026-10-31T00:21:37.500470369Z","level":"WARN","msg":"readyz: redis not ready","err":"dial tcp 127.0.0.1:1: connect: connection refused"}
+2026-10-31T00:21:42.431100115Z {"time":"2026-10-31T00:21:42.430992441Z","level":"WARN","msg":"readyz: redis not ready","err":"dial tcp 127.0.0.1:1: connect: connection refused"}
+2026-10-31T00:21:47.484770534Z {"time":"2026-10-31T00:21:47.484516485Z","level":"WARN","msg":"readyz: redis not ready","err":"dial tcp 127.0.0.1:1: connect: connection refused"}
+2026-10-31T00:21:52.475664294Z {"time":"2026-10-31T00:21:52.475521518Z","level":"WARN","msg":"readyz: redis not ready","err":"dial tcp 127.0.0.1:1: connect: connection refused"}
+2026-10-31T00:21:57.492928644Z {"time":"2026-10-31T00:21:57.492715042Z","level":"WARN","msg":"readyz: redis not ready","err":"dial tcp 127.0.0.1:1: connect: connection refused"}
+2026-10-31T00:22:02.477591583Z {"time":"2026-10-31T00:22:02.47729584Z","level":"WARN","msg":"readyz: redis not ready","err":"dial tcp 127.0.0.1:1: connect: connection refused"}
+2026-10-31T00:22:07.476918885Z {"time":"2026-10-31T00:22:07.476075004Z","level":"WARN","msg":"readyz: redis not ready","err":"dial tcp 127.0.0.1:1: connect: connection refused"}
+2026-10-31T00:22:12.485991128Z {"time":"2026-10-31T00:22:12.485674346Z","level":"WARN","msg":"readyz: redis not ready","err":"dial tcp 127.0.0.1:1: connect: connection refused"}
+2026-10-31T00:22:17.491288051Z {"time":"2026-10-31T00:22:17.490830527Z","level":"WARN","msg":"readyz: redis not ready","err":"dial tcp 127.0.0.1:1: connect: connection refused"}
+2026-10-31T00:22:22.503160253Z {"time":"2026-10-31T00:22:22.502322864Z","level":"WARN","msg":"readyz: redis not ready","err":"dial tcp 127.0.0.1:1: connect: connection refused"}
+2026-10-31T00:22:27.477313501Z {"time":"2026-10-31T00:22:27.477178974Z","level":"WARN","msg":"readyz: redis not ready","err":"dial tcp 127.0.0.1:1: connect: connection refused"}
+2026-10-31T00:22:32.475478207Z {"time":"2026-10-31T00:22:32.475343508Z","level":"WARN","msg":"readyz: redis not ready","err":"dial tcp 127.0.0.1:1: connect: connection refused"}
+2026-10-31T00:22:37.437923136Z {"time":"2026-10-31T00:22:37.437668003Z","level":"WARN","msg":"readyz: redis not ready","err":"dial tcp 127.0.0.1:1: connect: connection refused"}
+2026-10-31T00:22:42.490232174Z {"time":"2026-10-31T00:22:42.489891073Z","level":"WARN","msg":"readyz: redis not ready","err":"dial tcp 127.0.0.1:1: connect: connection refused"}
+2026-10-31T00:22:47.487868136Z {"time":"2026-10-31T00:22:47.487484897Z","level":"WARN","msg":"readyz: redis not ready","err":"dial tcp 127.0.0.1:1: connect: connection refused"}
+2026-10-31T00:22:52.477668058Z {"time":"2026-10-31T00:22:52.477540813Z","level":"WARN","msg":"readyz: redis not ready","err":"dial tcp 127.0.0.1:1: connect: connection refused"}
+2026-10-31T00:22:53.438359943Z {"time":"2026-10-31T00:22:53.438211403Z","level":"WARN","msg":"readyz: redis not ready","err":"dial tcp 127.0.0.1:1: connect: connection refused"}
+2026-10-31T00:22:58.448681020Z {"time":"2026-10-31T00:22:58.448425945Z","level":"WARN","msg":"readyz: redis not ready","err":"dial tcp 127.0.0.1:1: connect: connection refused"}
+2026-10-31T00:23:03.016387967Z {"time":"2026-10-31T00:23:03.008191309Z","level":"WARN","msg":"readyz: redis not ready","err":"dial tcp 127.0.0.1:1: connect: connection refused"}
+2026-10-31T00:23:03.047613548Z {"time":"2026-10-31T00:23:03.047500122Z","level":"INFO","msg":"shutdown signal received","signal":"terminated"}
+2026-10-31T00:23:03.048009933Z {"time":"2026-10-31T00:23:03.047617263Z","level":"INFO","msg":"shutdown complete"}
+$ kubectl get events --watch --field-selector involvedObject.name=catalog-lab   # captured during the delete
+LAST SEEN   TYPE      REASON      OBJECT            MESSAGE
+96s         Normal    Scheduled   pod/catalog-lab   Successfully assigned p01-02-bookstore/catalog-lab to sf-pilot-control-plane
+92s         Normal    Pulled      pod/catalog-lab   Container image "bookstore/catalog:dev" already present on machine and can be accessed by the pod
+91s         Normal    Created     pod/catalog-lab   Container created
+91s         Normal    Started     pod/catalog-lab   Container started
+50s         Warning   Unhealthy   pod/catalog-lab   Readiness probe failed: HTTP probe failed with statuscode: 503
+90s         Warning   Unhealthy   pod/catalog-lab   Liveness probe errored and resulted in unknown state: rpc error: code = Unknown desc = failed to exec in container: failed to start exec "52e836152a562f94d8108cb690a79eb909722ca69dcbd019ecacc77adb0c284c": OCI runtime exec failed: exec failed: unable to start container process: exec: "/bin/sh": stat /bin/sh: no such file or directory
+85s         Warning   Unhealthy   pod/catalog-lab   Liveness probe errored and resulted in unknown state: rpc error: code = Unknown desc = failed to exec in container: failed to start exec "aa29bb10436da869ea08ee48637ae020204e578e52a3075aa45535e68e0b46d5": OCI runtime exec failed: exec failed: unable to start container process: exec: "/bin/sh": stat /bin/sh: no such file or directory
+80s         Warning   Unhealthy   pod/catalog-lab   Liveness probe errored and resulted in unknown state: rpc error: code = Unknown desc = failed to exec in container: failed to start exec "d6862d27fe57b49d0d93dd3ea67484963ab2a9920d5db57db5b808e376c8b44b": OCI runtime exec failed: exec failed: unable to start container process: exec: "/bin/sh": stat /bin/sh: no such file or directory
+75s         Warning   Unhealthy   pod/catalog-lab   Liveness probe errored and resulted in unknown state: rpc error: code = Unknown desc = failed to exec in container: failed to start exec "98c43e303859db73ca08e9a7ca12e0b227632d887da8a8cbc10f88642280c5db": OCI runtime exec failed: exec failed: unable to start container process: exec: "/bin/sh": stat /bin/sh: no such file or directory
+70s         Warning   Unhealthy   pod/catalog-lab   Liveness probe errored and resulted in unknown state: rpc error: code = Unknown desc = failed to exec in container: failed to start exec "a249b485e4467a49591ef49e0ede65783a43806ba2cde2ee859ed460f2b3381e": OCI runtime exec failed: exec failed: unable to start container process: exec: "/bin/sh": stat /bin/sh: no such file or directory
+65s         Warning   Unhealthy   pod/catalog-lab   Liveness probe errored and resulted in unknown state: rpc error: code = Unknown desc = failed to exec in container: failed to start exec "dcebef549a8b963d889ebdc7751a63af7cbd180c1313c3938822f414865818e7": OCI runtime exec failed: exec failed: unable to start container process: exec: "/bin/sh": stat /bin/sh: no such file or directory
+60s         Warning   Unhealthy   pod/catalog-lab   Liveness probe errored and resulted in unknown state: rpc error: code = Unknown desc = failed to exec in container: failed to start exec "e6db87e8fd3802a2c0e1693531eee4b87a2164298714f0a4a327abbeeff45e14": OCI runtime exec failed: exec failed: unable to start container process: exec: "/bin/sh": stat /bin/sh: no such file or directory
+55s         Warning   Unhealthy   pod/catalog-lab   Liveness probe errored and resulted in unknown state: rpc error: code = Unknown desc = failed to exec in container: failed to start exec "d03c3d0d7d900053e875e6e15b1410f97f54db2d7cad49795903e15d4f09843a": OCI runtime exec failed: exec failed: unable to start container process: exec: "/bin/sh": stat /bin/sh: no such file or directory
+35s         Warning   Unhealthy   pod/catalog-lab   (combined from similar events): Readiness probe failed: HTTP probe failed with statuscode: 503
+1s          Normal    Killing     pod/catalog-lab   Stopping container catalog
+                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                              1s          Normal    Killing     pod/catalog-lab   Stopping container catalog
+                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                         1s          Normal    Killing     pod/catalog-lab   Stopping container catalog
+$ kubectl get events --field-selector involvedObject.name=catalog-lab --sort-by=.lastTimestamp
+LAST SEEN   TYPE      REASON      OBJECT            MESSAGE
+118s        Normal    Scheduled   pod/catalog-lab   Successfully assigned p01-02-bookstore/catalog-lab to sf-pilot-control-plane
+114s        Normal    Pulled      pod/catalog-lab   Container image "bookstore/catalog:dev" already present on machine and can be accessed by the pod
+113s        Normal    Created     pod/catalog-lab   Container created
+113s        Normal    Started     pod/catalog-lab   Container started
+112s        Warning   Unhealthy   pod/catalog-lab   Liveness probe errored and resulted in unknown state: rpc error: code = Unknown desc = failed to exec in container: failed to start exec "52e836152a562f94d8108cb690a79eb909722ca69dcbd019ecacc77adb0c284c": OCI runtime exec failed: exec failed: unable to start container process: exec: "/bin/sh": stat /bin/sh: no such file or directory
+107s        Warning   Unhealthy   pod/catalog-lab   Liveness probe errored and resulted in unknown state: rpc error: code = Unknown desc = failed to exec in container: failed to start exec "aa29bb10436da869ea08ee48637ae020204e578e52a3075aa45535e68e0b46d5": OCI runtime exec failed: exec failed: unable to start container process: exec: "/bin/sh": stat /bin/sh: no such file or directory
+102s        Warning   Unhealthy   pod/catalog-lab   Liveness probe errored and resulted in unknown state: rpc error: code = Unknown desc = failed to exec in container: failed to start exec "d6862d27fe57b49d0d93dd3ea67484963ab2a9920d5db57db5b808e376c8b44b": OCI runtime exec failed: exec failed: unable to start container process: exec: "/bin/sh": stat /bin/sh: no such file or directory
+97s         Warning   Unhealthy   pod/catalog-lab   Liveness probe errored and resulted in unknown state: rpc error: code = Unknown desc = failed to exec in container: failed to start exec "98c43e303859db73ca08e9a7ca12e0b227632d887da8a8cbc10f88642280c5db": OCI runtime exec failed: exec failed: unable to start container process: exec: "/bin/sh": stat /bin/sh: no such file or directory
+92s         Warning   Unhealthy   pod/catalog-lab   Liveness probe errored and resulted in unknown state: rpc error: code = Unknown desc = failed to exec in container: failed to start exec "a249b485e4467a49591ef49e0ede65783a43806ba2cde2ee859ed460f2b3381e": OCI runtime exec failed: exec failed: unable to start container process: exec: "/bin/sh": stat /bin/sh: no such file or directory
+87s         Warning   Unhealthy   pod/catalog-lab   Liveness probe errored and resulted in unknown state: rpc error: code = Unknown desc = failed to exec in container: failed to start exec "dcebef549a8b963d889ebdc7751a63af7cbd180c1313c3938822f414865818e7": OCI runtime exec failed: exec failed: unable to start container process: exec: "/bin/sh": stat /bin/sh: no such file or directory
+82s         Warning   Unhealthy   pod/catalog-lab   Liveness probe errored and resulted in unknown state: rpc error: code = Unknown desc = failed to exec in container: failed to start exec "e6db87e8fd3802a2c0e1693531eee4b87a2164298714f0a4a327abbeeff45e14": OCI runtime exec failed: exec failed: unable to start container process: exec: "/bin/sh": stat /bin/sh: no such file or directory
+77s         Warning   Unhealthy   pod/catalog-lab   Liveness probe errored and resulted in unknown state: rpc error: code = Unknown desc = failed to exec in container: failed to start exec "d03c3d0d7d900053e875e6e15b1410f97f54db2d7cad49795903e15d4f09843a": OCI runtime exec failed: exec failed: unable to start container process: exec: "/bin/sh": stat /bin/sh: no such file or directory
+72s         Warning   Unhealthy   pod/catalog-lab   Readiness probe failed: HTTP probe failed with statuscode: 503
+57s         Warning   Unhealthy   pod/catalog-lab   (combined from similar events): Readiness probe failed: HTTP probe failed with statuscode: 503
+22s         Normal    Killing     pod/catalog-lab   Stopping container catalog
+## step 3: follow the logs and delete with the default grace period
+$ date -u +%FT%TZ
+2026-10-31T00:23:28Z
+$ kubectl delete pod catalog
+pod "catalog" deleted from p01-02-bookstore namespace
+elapsed 35s
+$ kubectl logs -f catalog -c catalog --timestamps   # captured during the delete
+2026-10-31T00:21:05.311670706Z {"time":"2026-10-31T00:21:05.311448547Z","level":"INFO","msg":"DB_DSN unset; serving in-memory sample books"}
+2026-10-31T00:21:05.312162195Z {"time":"2026-10-31T00:21:05.311740066Z","level":"INFO","msg":"catalog listening","addr":":8080"}
+2026-10-31T00:23:34.442587502Z {"time":"2026-10-31T00:23:34.404095692Z","level":"INFO","msg":"shutdown signal received","signal":"terminated"}
+2026-10-31T00:23:34.442624444Z {"time":"2026-10-31T00:23:34.404275734Z","level":"INFO","msg":"shutdown complete"}
+## question 5: re-apply the file, then force-delete
+$ kubectl apply -f examples/bookstore/raw-manifests/02-catalog-pod-sidecar.yaml
+pod/catalog created
+$ kubectl wait --for=condition=Ready pod/catalog --timeout=300s
+pod/catalog condition met
+$ date -u +%FT%TZ
+2026-10-31T00:24:45Z
+$ kubectl delete pod catalog --grace-period=0 --force
+Warning: Immediate deletion does not wait for confirmation that the running resource has been terminated. The resource may continue to run on the cluster indefinitely.
+pod "catalog" force deleted from p01-02-bookstore namespace
+elapsed 1s
+$ kubectl logs -f catalog -c catalog --timestamps   # captured during the force delete
+2026-10-31T00:24:38.727606899Z {"time":"2026-10-31T00:24:38.727223674Z","level":"INFO","msg":"DB_DSN unset; serving in-memory sample books"}
+2026-10-31T00:24:38.728023435Z {"time":"2026-10-31T00:24:38.727509484Z","level":"INFO","msg":"catalog listening","addr":":8080"}
+2026-10-31T00:24:47.460567907Z {"time":"2026-10-31T00:24:47.459501804Z","level":"INFO","msg":"shutdown signal received","signal":"terminated"}
+2026-10-31T00:24:47.461993099Z {"time":"2026-10-31T00:24:47.459633928Z","level":"INFO","msg":"shutdown complete"}
+## cleanup
+$ kubectl delete pod probe-client catalog-lab --now --ignore-not-found
+pod "probe-client" deleted from p01-02-bookstore namespace
+$ kubectl get pods
+No resources found in p01-02-bookstore namespace.
+$ kubectl delete namespace p01-02-bookstore --wait=true --timeout=300s
+namespace "p01-02-bookstore" deleted
+LABDONE

@@ -389,7 +389,11 @@ spec:
 The image runs as UID 101, which its Dockerfile declares with `USER 101`, so
 `runAsUser` names that number. Storefront has no `startupProbe`. It has no slow
 boot to wait for, so its liveness probe runs from the start. catalog keeps one
-because it waits on Postgres.
+as a boot margin, carried over from [01.02](02-health-and-lifecycle.md). Its
+startup probe calls `/healthz`, which answers once the process listens, and the
+catalog creates its Postgres pool without connecting, so the startup probe does
+not wait for the database. Postgres gates readiness instead: `/readyz` answers
+`503` until the database answers a ping, and the Pod gets no traffic until then.
 
 Apply the chain in order, from the repo root (`full-guide/`). Each step waits
 for what the next one needs.
@@ -401,7 +405,8 @@ kubectl apply -f examples/bookstore/raw-manifests/15-catalog-config.yaml
 kubectl apply -f examples/bookstore/raw-manifests/16-db-credentials.yaml
 kubectl apply -f examples/bookstore/raw-manifests/35-priorityclasses.yaml
 kubectl apply -f examples/bookstore/raw-manifests/20-postgres-statefulset.yaml
-kubectl rollout status statefulset/postgres -n bookstore --timeout=300s
+kubectl rollout status statefulset/postgres -n bookstore --timeout=600s
+kubectl exec -n bookstore postgres-0 -- sh -c 'until psql -U bookstore -d bookstore -tAc "select 1" >/dev/null 2>&1; do sleep 2; done; echo database bookstore is ready'
 kubectl apply -f examples/bookstore/raw-manifests/21-db-migrate-job.yaml   # schema
 kubectl wait --for=condition=complete job/db-migrate -n bookstore --timeout=180s
 kubectl apply -f examples/bookstore/raw-manifests/12-redis.yaml

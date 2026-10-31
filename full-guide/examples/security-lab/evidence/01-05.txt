@@ -3,7 +3,10 @@
 # Kubernetes v1.37.0 node and a kubectl v1.37.2 client. The cluster is shared
 # with other workers, so this run used its own namespace, p01-05-bookstore,
 # where the chapter prints bookstore. No other namespace was used.
-# Recorded by running the chapter's commands in order from full-guide/.
+# Recorded by running the chapter's commands in order from full-guide/, from
+# an empty namespace. The setup section below stands in for 01.01, 01.03 and
+# 01.04, which create these objects in a fuller run. So the apply in step 1
+# prints created here, where a reader who followed 01.04 sees unchanged.
 # `ren FILE` is a shell helper, not a command: it runs sed to rename
 # `namespace: bookstore` and the Namespace name in FILE, then pipes the result
 # to kubectl apply. The repo manifests were not edited by the run. Every other

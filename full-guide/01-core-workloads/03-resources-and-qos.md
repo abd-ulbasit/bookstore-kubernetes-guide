@@ -55,10 +55,12 @@ Two numbers per resource, per container, with different jobs:
 That difference decides which limits are denial-of-service controls. The
 memory limit is the essential one: it is the only per-container bound on
 memory, so it is the one that stops a leak from taking memory the neighbours
-hold. The CPU limit is optional. Without it, a spinning container uses idle
-CPU and gives it back when a neighbour needs it, because its request keeps its
-share. A CPU limit buys a fixed ceiling at the cost of throttling, and the
-Production notes weigh that cost.
+hold. The CPU limit is optional for a Pod. Without it, a spinning container
+uses idle CPU and gives it back when a neighbour needs it, because its request
+keeps its share. A CPU limit buys a fixed ceiling at the cost of throttling,
+and the Production notes weigh that cost. The namespace in this chapter settles
+that choice for the Bookstore: its quota caps `limits.cpu`, so every container
+gets a CPU limit, its own or the LimitRange default. Step 1 shows why.
 
 From the gap between requests and limits Kubernetes derives a QoS class for
 each Pod: `Guaranteed`, `Burstable` or `BestEffort`. The class decides the
@@ -76,8 +78,8 @@ column says where the topic goes deeper.
 | One namespace takes the cluster's CPU and memory | [`ResourceQuota`](#1-create-the-namespace-quota-and-limit-range) on requests and limits | [08.04](../08-day-2-operations/04-multi-tenancy-and-namespaces.md) |
 | A controller bug creates Pods without end | `pods` in the same `ResourceQuota` | [08.04](../08-day-2-operations/04-multi-tenancy-and-namespaces.md) |
 | One container asks for more than any node should give, or for nothing | [`LimitRange`](#1-create-the-namespace-quota-and-limit-range) `max`, `min` and defaults | [08.04](../08-day-2-operations/04-multi-tenancy-and-namespaces.md) |
-| A process fills the node's disk through a scratch volume | `sizeLimit` on an `emptyDir` | [03.03](../03-config-and-storage/03-volumes.md) |
-| A CPU loop slows its neighbours | A CPU request, which sets their shares; a CPU limit only if you accept throttling | [06.01](../06-production-readiness/01-observability-metrics.md) for throttling metrics |
+| A process fills the node's disk through a scratch volume | A `sizeLimit` on each disk-backed `emptyDir` in the Deployments, StatefulSets and Jobs from [ch.04](04-replicasets-and-deployments.md) on. The single-Pod seeds from [01.01](01-pods.md) and [01.02](02-health-and-lifecycle.md) leave it unset | [03.03](../03-config-and-storage/03-volumes.md) |
+| A CPU loop slows its neighbours | A CPU request, which sets their shares. A CPU limit only if you accept throttling, and this namespace's quota requires one (step 1) | [06.01](../06-production-readiness/01-observability-metrics.md) for throttling metrics |
 
 Two threats sit outside the controls of this chapter. A process that forks
 without end is held back by a PID limit, a kubelet setting
@@ -201,12 +203,22 @@ omits one, `defaultRequest` becomes its request, and `max` and `min` bound what
 a container may ask for. With a `requests.*` or `limits.*` quota in force, the
 API server also requires every container to set the matching field, because it
 cannot count a container it cannot see. The defaults are what let a container
-omit them without a refusal.
+omit them without a refusal. This quota caps `limits.cpu`, so the rule covers
+CPU too. A container that omits its CPU limit gets the `default` of 500m, and a
+container that sets one, as every manifest below does, keeps it.
 
 ```sh
 kubectl apply -f examples/bookstore/raw-manifests/00-namespace.yaml
 kubectl describe resourcequota bookstore-quota -n bookstore
 kubectl describe limitrange bookstore-limits -n bookstore
+```
+
+<!-- gate: output -->
+```text
+Type        Resource  Min   Max  Default Request  Default Limit  Max Limit/Request Ratio
+----        --------  ---   ---  ---------------  -------------  -----------------------
+Container   cpu       10m   2    100m             500m           -
+Container   memory    16Mi  1Gi  128Mi            256Mi          -
 ```
 
 The single-Pod files from Part 00 and 01.01 carry no `namespace:` field, so
@@ -314,12 +326,41 @@ kubectl get pod memhog -n bookstore -o jsonpath='{.status.containerStatuses[0].s
 kubectl describe resourcequota bookstore-quota -n bookstore
 ```
 
+<!-- gate: output -->
+```text
+NAME       READY   STATUS      RESTARTS   AGE
+memhog     0/1     OOMKilled   0          12s
+cpu-fill   1/1     Running     0          11s
+```
+
 `memhog` ends as `OOMKilled` with exit code 137, the code of a process the
 kernel killed with SIGKILL. The kill took only `memhog`'s container: `cpu-fill`,
 in the same namespace, kept running. `memhog` is `Burstable`, because its
 requests and limits differ.
-The quota now counts 1500m of `requests.cpu` for `cpu-fill`, which is
-running, or pending on a small machine. Either way the quota counts it.
+
+<!-- gate: output -->
+```text
+Burstable
+```
+
+<!-- gate: output -->
+```text
+137
+```
+
+The quota counts both Pods while `memhog` is still there. It holds 1550m of
+`requests.cpu`: 1500m for `cpu-fill` and 50m for `memhog`.
+
+<!-- gate: output -->
+```text
+Resource         Used   Hard
+--------         ----   ----
+limits.cpu       1750m  4
+limits.memory    256Mi  4Gi
+pods             2      30
+requests.cpu     1550m  2
+requests.memory  128Mi  2Gi
+```
 
 A container that omits `resources` is not refused. It gets the `LimitRange`
 defaults instead: in this namespace, a 256Mi memory limit and a 128Mi request.
@@ -389,12 +430,18 @@ spec:
 EOF
 ```
 
+<!-- gate: output -->
+```text
+Error from server (Forbidden): error when creating "STDIN": pods "too-big" is forbidden: maximum memory usage per Container is 1Gi, but limit is 1536Mi
+Error from server (Forbidden): error when creating "STDIN": pods "too-much" is forbidden: exceeded quota: bookstore-quota, requested: requests.cpu=800m, used: requests.cpu=1550m, limited: requests.cpu=2
+```
+
 The first Pod fails the `LimitRange`: its memory limit is above the 1Gi `max`,
 and the message says `maximum memory usage per Container is 1Gi, but limit is
 1536Mi`. That refusal does not depend on quota room, because the check is per
 container. The second Pod fits the `LimitRange` on its own. It fails the quota
-because `cpu-fill` already holds 1500m of the namespace's 2 cores, and the
-message names the quota, the amount requested and the amount in use.
+because `cpu-fill` and `memhog` already hold 1550m of the namespace's 2 cores,
+and the message names the quota, the amount requested and the amount in use.
 
 Clean up the two Pods. The quota and the limits stay, and the rest of the guide
 runs under them.
@@ -532,13 +579,15 @@ Checklist:
 
 - [ ] Every container sets a memory `request` and a memory `limit`
 - [ ] Every container sets a CPU `request`; a CPU `limit` only when
-  throttling is measured and accepted
+  throttling is measured and accepted, or when a namespace quota caps
+  `limits.cpu`
 - [ ] Intended QoS chosen: `Guaranteed` for what must not be evicted,
   `Burstable` for stateless APIs
 - [ ] No accidental `BestEffort` for anything that matters
 - [ ] Tenant namespace has a `ResourceQuota` (requests, limits and `pods`)
   and a `LimitRange`
-- [ ] Every writable `emptyDir` has a `sizeLimit`
+- [ ] Every disk-backed `emptyDir` in a Deployment, StatefulSet or Job has a
+  `sizeLimit`
 - [ ] Requests derived from measured usage, not guessed
 
 ## Test your understanding
@@ -576,7 +625,7 @@ Checklist:
 5. **Hands-on extension: in `bookstore`, with the quota and `LimitRange` from step 1, a Pod asks for a 1536Mi memory limit. Which control refuses it, what is the message, and does room in the quota matter?**
    <details><summary>What you should see</summary>
 
-   The `LimitRange` refuses it: `maximum memory usage per Container is 1Gi, but limit is 1536Mi`. The refusal does not depend on quota room, because the check is per container and it refuses even when the namespace has room to spare. A request of 800m CPU against 1500m already in use in a 2-core namespace is refused by the quota instead, with the message `exceeded quota`, as step 3 shows.
+   The `LimitRange` refuses it: `maximum memory usage per Container is 1Gi, but limit is 1536Mi`. The refusal does not depend on quota room, because the check is per container and it refuses even when the namespace has room to spare. A request of 800m CPU against 1550m already in use in a 2-core namespace is refused by the quota instead, with the message `exceeded quota`, as step 3 shows.
 
    </details>
 

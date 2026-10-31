@@ -8,8 +8,8 @@
 #
 # Same `catalog` object as 01-catalog-pod.yaml (Part 00), evolved by ONE idea:
 # a second container co-located in the Pod. It is declared the MODERN way — a
-# NATIVE SIDECAR: an initContainer with `restartPolicy: Always` (GA in
-# Kubernetes 1.29+, target here is v1.30+). The kubelet then:
+# NATIVE SIDECAR: an initContainer with `restartPolicy: Always` (Beta in
+# Kubernetes 1.29, GA in 1.33; the target here is v1.30+). The kubelet then:
 #   * starts it BEFORE the app container,
 #   * keeps it running ALONGSIDE the app for the Pod's whole life,
 #   * stops it AFTER the app on shutdown,
@@ -71,7 +71,7 @@ spec:
       resources:
         requests:
           cpu: 10m
-          memory: 16Mi                # the namespace LimitRange minimum
+          memory: 16Mi                # at the namespace LimitRange min (01.03)
         limits:
           memory: 32Mi
       volumeMounts:
@@ -125,8 +125,8 @@ spec:
       # --- Lifecycle: graceful drain (ch.02) -----------------------------
       lifecycle:
         preStop:
-          # NATIVE sleep handler (Beta/on-by-default 1.30, GA 1.33). Runs
-          # BEFORE SIGTERM; bridges the endpoint-removal race so no new
+          # NATIVE sleep handler (Beta and on by default in 1.30, GA in 1.34).
+          # Runs BEFORE SIGTERM; bridges the endpoint-removal race so no new
           # request arrives during the app's own in-flight drain. NOT `exec`:
           # the catalog image is gcr.io/distroless/static:nonroot — no shell
           # AND no coreutils, so `/bin/sh` and `/bin/sleep` are both absent;

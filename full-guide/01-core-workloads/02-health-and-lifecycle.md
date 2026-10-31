@@ -128,7 +128,7 @@ where `catalog-sa` exists. The Pod is the one from [ch.01](01-pods.md),
 [`02-catalog-pod-sidecar.yaml`](../examples/bookstore/raw-manifests/02-catalog-pod-sidecar.yaml).
 That file already carries the probes and the `preStop` hook this chapter
 explains. You will read them, apply the file and watch what they do. No step
-adds a field.
+changes a field in that file.
 
 The catalog app implements the routes the probes call. Its source is
 [`catalog/main.go`](../examples/bookstore/app/catalog/main.go). `GET /healthz`
@@ -178,9 +178,17 @@ kubectl describe pod catalog | grep -E '^ +(Liveness|Readiness|Startup):'
 kubectl get pod catalog -o jsonpath='{range .status.conditions[*]}{.type}={.status}{"\n"}{end}'
 ```
 
-The describe lines show the timing each probe runs with, such as
-`period=10s` and `failureThreshold=3` for liveness. `Ready` becomes true once
-the startup probe has passed and the readiness probe has succeeded.
+<!-- gate: output -->
+```text
+    Liveness:   http-get http://:http/healthz delay=0s timeout=2s period=10s successThreshold=1 failureThreshold=3
+    Readiness:  http-get http://:http/readyz delay=0s timeout=2s period=5s successThreshold=1 failureThreshold=3
+    Startup:    http-get http://:http/healthz delay=0s timeout=1s period=5s successThreshold=1 failureThreshold=30
+```
+
+The describe lines show the timing each probe runs with. The liveness line
+shows `period=10s` and `failureThreshold=3`, and the readiness line shows its
+own period. `Ready` becomes true once the startup probe has passed and the
+readiness probe has succeeded.
 
 ### 2. Watch readiness gate traffic (without restarting)
 
@@ -195,16 +203,126 @@ kubectl get pod catalog \
 kubectl describe pod catalog | grep -A2 -i 'startup\|liveness\|readiness' | head
 ```
 
-When the DB *is* added in [Part 03](../03-config-and-storage/02-secrets.md),
-`/readyz` will flip to `503` until Postgres is reachable — the Pod will run but
-receive no traffic, exactly the readiness contract, with **no restart**.
+<!-- gate: output -->
+```text
+PodReadyToStartContainers=True
+Initialized=True
+Ready=True
+ContainersReady=True
+PodScheduled=True
+```
 
-We checked the failure path on a throwaway Pod with `REDIS_ADDR` set to a port
-that refuses connections. `/readyz` answered `503`, the Pod stayed
-`Ready=False` with zero restarts, and the app logged `readyz: redis not ready`
-with the dial error. The dial error went to the log and not into the probe's
-response, which is the behavior the [probe endpoints](#probe-endpoints)
-section depends on.
+The Part 01 Deployments in [01.04](04-replicasets-and-deployments.md) set
+`DB_DSN`, so their `/readyz` answers `503` until Postgres is reachable. Those
+Pods run but receive no traffic, which is the readiness contract, with **no
+restart**. This single Pod has no DSN, so it stays at `200`.
+
+The failure path needs a dependency that is down. The throwaway Pod below is
+the catalog container with `REDIS_ADDR` set to `127.0.0.1:1`, a port that
+nothing listens on, so the cache dial is refused. It also has an `exec`
+liveness probe and an `exec` `preStop` hook. The sections below explain why
+those fail, so one Pod covers all three cases.
+
+```sh
+kubectl apply -f - <<'EOF'
+apiVersion: v1
+kind: Pod
+metadata:
+  name: catalog-lab
+  labels:
+    app: catalog-lab
+spec:
+  serviceAccountName: catalog-sa
+  automountServiceAccountToken: false
+  securityContext:
+    runAsNonRoot: true
+    runAsUser: 65532
+    runAsGroup: 65532
+    seccompProfile:
+      type: RuntimeDefault
+  containers:
+    - name: catalog
+      image: bookstore/catalog:dev
+      imagePullPolicy: IfNotPresent
+      ports:
+        - name: http
+          containerPort: 8080
+      env:
+        - name: REDIS_ADDR            # nothing listens on port 1: the dial is refused
+          value: "127.0.0.1:1"
+      securityContext:
+        allowPrivilegeEscalation: false
+        readOnlyRootFilesystem: true
+        capabilities:
+          drop: ["ALL"]
+      resources:
+        requests: { cpu: 50m, memory: 64Mi }
+        limits: { memory: 128Mi }
+      readinessProbe:
+        httpGet: { path: /readyz, port: http }
+        periodSeconds: 5
+      livenessProbe:
+        exec:
+          command: ["/bin/sh", "-c", "true"]   # the image has no shell
+        periodSeconds: 5
+      lifecycle:
+        preStop:
+          exec:
+            command: ["/bin/sleep", "5"]       # the image has no coreutils
+      volumeMounts:
+        - name: tmp
+          mountPath: /tmp
+  volumes:
+    - name: tmp
+      emptyDir: {}
+EOF
+kubectl get pod catalog-lab
+kubectl get pod catalog-lab -o jsonpath='{range .status.conditions[*]}{.type}={.status}{"\n"}{end}'
+kubectl logs catalog-lab -c catalog | grep readyz
+kubectl describe pod catalog-lab | sed -n '/^Events:/,$p'
+```
+
+The Pod needs a minute or so before the probes have run, so read the results
+after that:
+
+<!-- gate: output -->
+```text
+NAME          READY   STATUS    RESTARTS   AGE
+catalog-lab   0/1     Running   0          91s
+```
+
+<!-- gate: output -->
+```text
+PodReadyToStartContainers=True
+Initialized=True
+Ready=False
+ContainersReady=False
+PodScheduled=True
+```
+
+<!-- gate: output -->
+```text
+{"time":"2026-10-31T00:21:31.459458262Z","level":"WARN","msg":"readyz: redis not ready","err":"dial tcp 127.0.0.1:1: connect: connection refused"}
+```
+
+<!-- gate: output -->
+```text
+  Warning  Unhealthy  45s (x10 over 86s)  kubelet            spec.containers{catalog}: Readiness probe failed: HTTP probe failed with statuscode: 503
+```
+
+
+`/readyz` answers `503`, and the Pod stays `0/1` with zero restarts. The app
+logs `readyz: redis not ready` with the dial error. That error goes to the log
+and not into the probe's response, which is the behavior the
+[probe endpoints](#probe-endpoints) section depends on. The Events record the
+failing readiness probe, and the container keeps running.
+
+Deleting this Pod runs its `preStop` hook, which the
+[lifecycle section](#lifecycle-hooks) examines:
+
+```sh
+kubectl delete pod catalog-lab
+```
 
 ### 3. Observe graceful termination
 
@@ -215,36 +333,66 @@ kubectl logs -f catalog -c catalog &
 time kubectl delete pod catalog
 ```
 
-The app logs `shutdown signal received` about five seconds after the delete
-starts. That gap is the `preStop` sleep, which runs before `SIGTERM`. The app
-then logs `shutdown complete` within milliseconds, because no request is in
-flight, and returns from `main`. The delete does not finish there. In our first
-run, `kubectl delete` returned after about 36 seconds, so the Pod waited out
-most of its grace period after the app had exited.
+The app logs `shutdown signal received` about six seconds after the delete
+starts, in the run recorded in
+[the transcript](../examples/security-lab/evidence/01-02.txt). Five of those
+seconds are the `preStop` sleep, which runs before `SIGTERM`. The app then logs
+`shutdown complete` within milliseconds, because no request is in flight, and
+returns from `main`. The delete does not finish there. The same run's
+`kubectl delete` returned after 35 seconds, because the Pod is not gone until
+every container has stopped, and the `log-sidecar` is one of them.
+
+<!-- gate: output -->
+```text
+2026-10-31T00:23:34.442587502Z {"time":"2026-10-31T00:23:34.404095692Z","level":"INFO","msg":"shutdown signal received","signal":"terminated"}
+2026-10-31T00:23:34.442624444Z {"time":"2026-10-31T00:23:34.404275734Z","level":"INFO","msg":"shutdown complete"}
+```
 
 The cause is the `log-sidecar`. It runs a `sh` loop as PID 1 in its own
 container. Nothing in that container installs a `SIGTERM` handler, and the
 kernel does not apply the default `SIGTERM` action to PID 1, so the signal does
 nothing. The kubelet waits out the grace period and then kills the container.
-You can read the signal masks from inside it:
+The signal masks show it. You can read them from inside the container:
 
 ```sh
 kubectl exec catalog -c log-sidecar -- grep -E 'SigIgn|SigCgt' /proc/1/status
 ```
 
-`SigCgt` lists the signals the process catches. In these masks, signal 15
-(`SIGTERM`) is bit 14, and that bit is not set. The raw manifest keeps this
-sidecar as shipped, so a delete takes the full grace period. A container that
-must stop promptly needs a shell that traps `SIGTERM`, or a binary that handles
-it. The rule applies to every container in the Pod, not only the app.
+<!-- gate: output -->
+```text
+SigIgn:	0000000000000004
+SigCgt:	0000000000010002
+```
+
+Each mask is a set of bits, where bit n-1 stands for signal n. `SigCgt` has the
+bits for `SIGINT` (2) and `SIGCHLD` (17), the two signals the shell catches.
+`SigIgn` has the bit for `SIGQUIT` (3). Bit 14 is `SIGTERM` (15), and it is
+clear in both masks, so the shell neither catches nor ignores it. A signal with
+no handler and no ignore setting takes its default action, and for PID 1 the
+kernel does not apply that action, so `SIGTERM` is dropped. The raw manifest
+keeps this sidecar as shipped, so a delete takes the full grace period. A
+container that must stop promptly needs a shell that traps `SIGTERM`, or a
+binary that handles it. The rule applies to every container in the Pod, not
+only the app.
 
 `--force` is not a hard kill. `kubectl delete pod catalog --grace-period=0
 --force` removes the Pod from the API at once, and the upstream docs warn that
 the containers may keep running. On the node they still get a short grace
-period. In our run the app received `SIGTERM` about two seconds after the force
-delete and logged both shutdown lines. Reserve `--force` for a Pod that is
-stuck, and expect its containers to be alive for a while after the command
-returns.
+period. In the same run the command returned after one second, and the app
+received `SIGTERM` about three seconds after the force delete, logged both
+shutdown lines and exited. Reserve `--force` for a Pod that is stuck, and expect
+its containers to be alive for a while after the command returns.
+
+<!-- gate: output -->
+```text
+Warning: Immediate deletion does not wait for confirmation that the running resource has been terminated. The resource may continue to run on the cluster indefinitely.
+```
+
+<!-- gate: output -->
+```text
+2026-10-31T00:24:47.460567907Z {"time":"2026-10-31T00:24:47.459501804Z","level":"INFO","msg":"shutdown signal received","signal":"terminated"}
+2026-10-31T00:24:47.461993099Z {"time":"2026-10-31T00:24:47.459633928Z","level":"INFO","msg":"shutdown complete"}
+```
 
 ## Probe handlers and every parameter
 
@@ -286,14 +434,21 @@ The three probe **kinds** use the same fields but mean different things:
   not-yet-ready new Pods.
 
 **`exec` runs without a shell.** The API reference says the `exec` command is
-run directly, and that a shell is needed for shell syntax
-([Pod API reference](https://kubernetes.io/docs/reference/kubernetes-api/workload-resources/pod-v1/)).
+run directly, and that a shell is needed for shell syntax ([Pod API
+reference](https://kubernetes.io/docs/reference/kubernetes-api/workload-resources/pod-v1/)).
 So an `exec` probe needs a program in the image, and a shell if it uses shell
-syntax. The Bookstore image has neither. We ran an `exec` liveness probe
-against the catalog image on the lab cluster. The kubelet logged `Liveness probe
-errored and resulted in unknown state` with `/bin/sh: no such file or directory`,
-and the container kept running with no restarts. A probe that cannot start
-its command is not a failed check, so it protects nothing while it stays
+syntax. The Bookstore image has neither. The `catalog-lab` Pod in step 2 has
+an `exec` liveness probe that runs `/bin/sh`, and its Events show what the
+kubelet does with it:
+
+<!-- gate: output -->
+```text
+  Warning  Unhealthy  85s                 kubelet            spec.containers{catalog}: Liveness probe errored and resulted in unknown state: rpc error: code = Unknown desc = failed to exec in container: failed to start exec "52e836152a562f94d8108cb690a79eb909722ca69dcbd019ecacc77adb0c284c": OCI runtime exec failed: exec failed: unable to start container process: exec: "/bin/sh": stat /bin/sh: no such file or directory
+```
+
+The probe errors on every period, and the message ends with `no such file or
+directory`. The container keeps running with no restarts. A probe that cannot
+start its command is not a failed check, so it protects nothing while it stays
 broken. The Bookstore uses `httpGet` for that reason.
 
 ## Probe endpoints are open to the network {#probe-endpoints}
@@ -303,10 +458,62 @@ The kubelet sends a plain `GET` to the probe path, as the
 describes, and it sends no credentials. The `httpGet` action has fields for the
 path, port, scheme, host and headers, and none for a token. A header that
 carried a secret would sit in the Pod spec, where anyone who can read Pods can
-see it, so the probe path stays open by design. Everything else on the same port is open too. The catalog serves
-`/healthz`, `/readyz`, `/metrics` and `/books` on `:8080` with no
-authentication. We checked from a Pod in the same namespace, with no
-NetworkPolicy in that namespace, and all four answered.
+see it, so the probe path stays open by design. Everything else on the same
+port is open too. The catalog serves `/healthz`, `/readyz`, `/metrics` and
+`/books` on `:8080` with no authentication.
+
+A client Pod in the same namespace shows it. The client runs as
+`storefront-sa`, and the namespace has no NetworkPolicy, so the client reaches
+the catalog on all four routes:
+
+```sh
+kubectl apply -f - <<'EOF'
+apiVersion: v1
+kind: Pod
+metadata:
+  name: probe-client
+  labels:
+    app: probe-client
+spec:
+  serviceAccountName: storefront-sa
+  automountServiceAccountToken: false
+  securityContext:
+    runAsNonRoot: true
+    runAsUser: 65532
+    runAsGroup: 65532
+    seccompProfile:
+      type: RuntimeDefault
+  containers:
+    - name: client
+      image: busybox@sha256:73aaf090f3d85aa34ee199857f03fa3a95c8ede2ffd4cc2cdb5b94e566b11662
+      command: ["sleep", "3600"]
+      securityContext:
+        allowPrivilegeEscalation: false
+        readOnlyRootFilesystem: true
+        capabilities:
+          drop: ["ALL"]
+      resources:
+        requests: { cpu: 10m, memory: 16Mi }
+        limits: { memory: 32Mi }
+EOF
+kubectl wait --for=condition=Ready pod/probe-client --timeout=120s
+IP=$(kubectl get pod catalog -o jsonpath='{.status.podIP}')
+kubectl exec probe-client -- sh -c "for p in /healthz /readyz /metrics /books; do wget -S -q -O /dev/null http://$IP:8080\$p 2>&1 | head -1; echo \"  \$p\"; done"
+```
+
+<!-- gate: output -->
+```text
+  HTTP/1.1 200 OK
+  /healthz
+  HTTP/1.1 200 OK
+  /readyz
+  HTTP/1.1 200 OK
+  /metrics
+  HTTP/1.1 200 OK
+  /books
+```
+
+Each route answers `200`, and the client holds no credential for the catalog.
 
 What the endpoints reveal:
 
@@ -322,7 +529,11 @@ What the endpoints reveal:
 The controls, from the simplest to the strongest:
 
 1. Keep probe bodies to a status word. Never return an error string or a DSN
-   from a probe; log it instead. The catalog already does this.
+   from a probe; log it instead. The catalog does not do this yet. Its
+   `/readyz` handler returns `db unavailable` or `cache unavailable` (see
+   [`catalog/main.go`](../examples/bookstore/app/catalog/main.go)), which names
+   the dependency. Changing the body is an app change, and
+   [question 6](#test-your-understanding) works through it.
 2. Keep the probe and metrics paths off public routes. Check every Ingress or
    Gateway rule that matches a prefix, because a rule for `/` on the public host
    reaches `/healthz` too. [Part 02 ch.04](../02-networking/04-ingress.md)
@@ -361,9 +572,10 @@ The controls, from the simplest to the strongest:
 > Bookstore Go images are `gcr.io/distroless/static:nonroot`, which contain
 > *only* the app binary — no shell **and no coreutils**, so neither `/bin/sh`
 > nor `/bin/sleep` exists. An `exec` preStop pointing at a missing binary
-> fails. The kubelet records a `FailedPreStopHook` event and sends `SIGTERM`
-> with no delay, so the drain is skipped and the event is the only trace. In
-> our lab run, a delete with that hook finished in about 2 seconds, not 5.
+> fails at once. In the `catalog-lab` run the app received `SIGTERM` about two
+> seconds after the delete started, so the five-second hook did not delay it.
+> The Events show `Stopping container catalog` and no `FailedPreStopHook`
+> entry, so the missing delay is the only sign of the failed hook.
 >
 > The native **`lifecycle.preStop.sleep`** handler (Beta and on by default in
 > 1.30, **GA in 1.34**, well before this guide's v1.37 target)
@@ -405,9 +617,10 @@ drain. Every container in the Pod shares this one budget, sidecars included.
   depends on it being PID 1 (or a proper init forwarding signals). Distroless
   static images run your binary as PID 1, so the Go `signal.Notify` handler
   fires directly — which is why the Bookstore drains cleanly. The
-  `log-sidecar` is a shell loop that is PID 1 in its own container, and the
-  shell ignores `SIGTERM`, so that container waits out the grace period (see
-  step 3).
+  `log-sidecar` is a shell loop that is PID 1 in its own container. The shell
+  has no `SIGTERM` handler, and the kernel gives PID 1 no default action for a
+  signal it has no handler for, so the signal does nothing and that container
+  waits out the grace period (see step 3).
 - **Startup gates the other two probes.** Until the startup probe succeeds once,
   the kubelet does not run liveness or readiness for that container, so a slow
   boot cannot be mistaken for a liveness failure. After the startup probe has
@@ -528,7 +741,15 @@ Checklist:
 5. **Hands-on extension: follow the catalog's logs, delete the Pod normally, and time the delete. Then re-apply the file and repeat with `--grace-period=0 --force`. What do the logs show in each case, and why does the normal delete last longer than the app's own shutdown?**
    <details><summary>What you should see</summary>
 
-   Normally, `shutdown signal received` comes about five seconds after the delete starts, which is the `preStop` sleep, and then `shutdown complete`. The delete lasts until the grace period ends, because the `log-sidecar` shell ignores `SIGTERM` and the kubelet kills it at the end (see §3. Observe graceful termination). With `--force`, the Pod leaves the API at once, but the containers still get a short grace period, so the app logs both shutdown lines a couple of seconds later. The app drains because it receives `SIGTERM`, and `--force` is not a hard kill.
+   Normally, `shutdown signal received` comes a few seconds after the delete
+   starts, after the five-second `preStop` sleep, and then `shutdown
+   complete`. The delete lasts until the Pod is gone, which waits on the
+   `log-sidecar`: it has no `SIGTERM` handler, so the signal does nothing, and
+   the kubelet kills it when the grace period ends (see §3. Observe graceful
+   termination). With `--force`, the Pod leaves the API at once, but the
+   containers still get a short grace period, so the app logs both shutdown
+   lines a few seconds later. The app drains because it receives `SIGTERM`,
+   and `--force` is not a hard kill.
 
    </details>
 
