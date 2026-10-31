@@ -777,8 +777,8 @@ spec:
 apiVersion: v1
 kind: ServiceAccount
 metadata:
-  name: <NAME>
-  namespace: <TENANT-NS>
+  name: catalog-irsa-sa
+  namespace: bookstore-platform-acme-books
   annotations:
     eks.amazonaws.com/role-arn: "arn:aws:iam::<ACCOUNT-ID>:role/<IAM-ROLE>"
     eks.amazonaws.com/audience: "sts.amazonaws.com"
