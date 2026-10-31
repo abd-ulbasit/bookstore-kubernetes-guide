@@ -11,6 +11,7 @@
 # directory enforces everything under it, example trees included.
 # Remove a line only if the chapter is deleted or renamed.
 
+00-foundations/
 01-core-workloads/01-pods.md
 01-core-workloads/
 05-security/02-pod-security.md

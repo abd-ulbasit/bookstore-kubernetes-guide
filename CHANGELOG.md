@@ -105,6 +105,9 @@ versions follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 - Part 10 Cloud and managed Kubernetes (10.01 to 10.06) is rewritten
   security-first, and `10-cloud-and-managed-kubernetes/` joins the enforced
   list.
+- Part 00 Foundations (00.01 to 00.08) is rewritten security-first, with 00.08
+  Security foundations and the threat model in `examples/bookstore/THREAT-MODEL.md`;
+  `00-foundations/` joins the enforced list.
 
 ### Fixed
 - Standalone EKS add-ons (kube-proxy, CoreDNS, EBS CSI) now follow
