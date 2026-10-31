@@ -6,8 +6,8 @@
 # run on the shared cluster. Manifest copies differ only in namespace names,
 # and the values file copy differs from the chapter only in namespace names and
 # comments.
-# Heavy lock: Parts A and B ran while another worker held heavy_lock, so they did
-# NOT install Traefik. Parts C and D installed Traefik under heavy_lock on this
+# Shared lock: Parts A and B ran while another worker held the shared lock, so they did
+# NOT install Traefik. Parts C and D installed Traefik under the shared lock on this
 # cluster and captured routing through it.
 # The transcript is redacted: another release's namespace name is shown as
 # <other-release-namespace>, and local paths are shown as kubectl and helm.
@@ -344,7 +344,7 @@ Update Complete. ⎈Happy Helming!⎈
 $ kubectl apply --dry-run=server -f 00-traefik-namespace.yaml
 namespace/p02-traefik unchanged (server dry run)
 
-# Part C: the first recorded run under heavy_lock, with the fixed values. Its
+# Part C: the first recorded run under the shared lock, with the fixed values. Its
 # dry run is the pre-install check; the install and checks after it come from
 # the same session. Another release on the shared cluster held the IngressClass
 # name during the second-release check, so that refusal names it as
@@ -1008,7 +1008,7 @@ Error from server (NotFound): ingressclasses.networking.k8s.io "traefik" not fou
 # ===== run 3: the tree's Ingress files against Traefik, after the tree moved to Traefik =====
 # Tier A, the same cluster and tool versions as above: kind node on Kubernetes
 # v1.37.0, kubectl v1.37.2, helm v4.1.4, chart traefik/traefik 42.2.0 (app
-# v3.7.16), installed under the heavy lock with the chapter's values file and
+# v3.7.16), installed under the shared lock with the chapter's values file and
 # namespace manifest. Names differ from the chapter's only in the namespaces:
 # p02-finish-np for bookstore and p02-finish-traefik for traefik, including the
 # two watch lists and defaultTLSResourcesNamespace in the values file and the

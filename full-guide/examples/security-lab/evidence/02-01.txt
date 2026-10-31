@@ -272,7 +272,7 @@ $ CAT_IP=$(kubectl get pod -n p02-01-bookstore -l app=catalog -o jsonpath="{.ite
 $ docker exec <node-name> sh -c 'ip -br link | awk "/^(cni|br)/{n++} END{print n+0}"'
 0
 [exit 0]
-$ ssh thinkpad '~/.local/bin/kind-v0.33.0 version'
+$ ssh lab-host '~/.local/bin/kind-v0.33.0 version'
 kind v0.33.0 go1.26.7 linux/amd64
 [exit 0]
 $ kubectl get nodes -o custom-columns='NAME:.metadata.name,IP:.status.addresses[0].address'
