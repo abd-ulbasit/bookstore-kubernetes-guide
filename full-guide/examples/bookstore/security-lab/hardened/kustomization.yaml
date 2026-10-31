@@ -1,0 +1,24 @@
+# The capstone's hardened bookstore overlay. Every Part 05 control the
+# capstone applies is here, and nothing that the vulnerable overlay weakens:
+#
+#   namespace label enforce=restricted   02 (the base already carries it)
+#   no Role that lets catalog-sa create Pods, and no Secret read for
+#                                        payments-worker-sa   01 and 04
+#   a digest for every third-party image 03 and 07 (the admission rule below)
+#   RuntimeDefault seccomp, non-root, no capabilities, read-only root
+#                                        02 and 05 (the base already carries them)
+#
+# The one thing the base does not give is the admission rule in
+# 90-admission.yaml. The cluster is shared, so the policy is cluster-scoped
+# and bound to p05-capstone only.
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+
+namespace: p05-capstone
+
+resources:
+  - ../../kustomize/base
+  - 90-admission.yaml
+
+components:
+  - ../components/capstone

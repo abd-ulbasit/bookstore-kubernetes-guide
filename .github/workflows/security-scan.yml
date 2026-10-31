@@ -90,7 +90,9 @@ jobs:
           # runs that on every pull request. Listed here, they showed up as
           # new HIGH alerts (KSV-0014, KSV-0118) and failed the PR's Trivy
           # check for findings that are the whole point of the files.
-          skip-dirs: 'node_modules,.terraform,site,full-guide/examples/bookstore/ci/fixtures,.github/scripts/gates/fixtures'
+          # The capstone's vulnerable overlay is broken on purpose as well
+          # (05.10).
+          skip-dirs: 'node_modules,.terraform,site,full-guide/examples/bookstore/ci/fixtures,.github/scripts/gates/fixtures,full-guide/examples/bookstore/security-lab/vulnerable'
 
       - name: Upload Trivy SARIF to GitHub Security
         uses: github/codeql-action/upload-sarif@9b3254085494b55a0f7c4c2b3d2d52cc712ce370 # v4.39.1
