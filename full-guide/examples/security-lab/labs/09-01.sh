@@ -134,26 +134,31 @@ for i in $(seq 1 60); do
   [ "$have" -ge "$want" ] && break
   sleep 3
 done
+# A new cluster still holds the CSRs of the nodes' own client certificates,
+# which are Approved already. Only the serving requests are checked and
+# approved: they are the ones with this signer.
 run <<'CMD'
-for c in $(kubectl get csr -o name); do
+kubectl get csr --field-selector spec.signerName=kubernetes.io/kubelet-serving
+CMD
+run <<'CMD'
+for c in $(kubectl get csr --field-selector spec.signerName=kubernetes.io/kubelet-serving -o name); do
   u=$(kubectl get "$c" -o jsonpath='{.spec.username}')
   s=$(kubectl get "$c" -o jsonpath='{.spec.request}' | base64 -d | openssl req -noout -text | grep -A1 'Alternative Name' | tail -1 | sed 's/^ *//')
   echo "${c#*/} $u $s"
 done
 CMD
-# Approve only a request from the node it names, for the kubelet-serving signer.
+# Approve only a request from the node it names.
 ok=1
-for c in $(kubectl get csr -o name); do
+for c in $(kubectl get csr --field-selector spec.signerName=kubernetes.io/kubelet-serving -o name); do
   u=$(kubectl get "$c" -o jsonpath='{.spec.username}')
   kubectl get nodes -o name | sed 's|node/||' | grep -qx "${u#system:node:}" || ok=0
-  [ "$(kubectl get "$c" -o jsonpath='{.spec.signerName}')" = kubernetes.io/kubelet-serving ] || ok=0
 done
 [ "$ok" = 1 ] || { echo "stopping: a certificate request does not come from a node" >&2; exit 3; }
 run <<'CMD'
-kubectl certificate approve $(kubectl get csr -o name)
+kubectl certificate approve $(kubectl get csr --field-selector spec.signerName=kubernetes.io/kubelet-serving -o name)
 CMD
 for i in $(seq 1 60); do
-  cert=$(kubectl get csr -o jsonpath='{range .items[*]}{.status.certificate}{"\n"}{end}' 2>/dev/null | grep -c .)
+  cert=$(kubectl get csr --field-selector spec.signerName=kubernetes.io/kubelet-serving -o jsonpath='{range .items[*]}{.status.certificate}{"\n"}{end}' 2>/dev/null | grep -c .)
   [ "$cert" -ge "$want" ] && break
   sleep 3
 done
@@ -407,6 +412,18 @@ summary "GET /api/books through Traefik with the prefix strip: HTTP $code"
 [ "$code" = 200 ] || fail=1
 run <<'CMD'
 kubectl -n bookstore get middleware.traefik.io rewrite-api-prefix -o jsonpath='{.spec.replacePathRegex}{"\n"}'
+CMD
+echo '## runner step (e): the edge does not deliver /metrics to the app (06.01 section 4)'
+run <<'CMD'
+for p in /metrics /api/books/metrics /api/orders/metrics; do
+  curl -sk -o /dev/null -w "%{http_code} $p\n" -H 'Host: bookstore.example.com' "https://localhost$p"
+done
+CMD
+run <<'CMD'
+for p in /metrics /api/books/metrics; do
+  printf '%s go_info lines: ' "$p"
+  curl -sk -H 'Host: bookstore.example.com' "https://localhost$p" | grep -c '^go_info'
+done
 CMD
 chapter_block "$ch09" 'name: edge-client' > edge-client.yaml
 chapter_block "$ch09" 'name: npblock' > npblock.yaml

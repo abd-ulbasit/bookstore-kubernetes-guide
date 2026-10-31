@@ -127,7 +127,7 @@ CMD
 run <<'CMD'
 kubectl -n node-exporter get daemonset -o jsonpath='{.items[0].metadata.name} hostNetwork={.items[0].spec.template.spec.hostNetwork} hostPID={.items[0].spec.template.spec.hostPID}{"\n"}'
 CMD
-notready=$(kubectl get pods -A --no-headers 2>/dev/null | awk '$3 != "Running" && $3 != "Completed" {print $2 " " $3}' | tr '\n' ';')
+notready=$(kubectl get pods -A --no-headers 2>/dev/null | awk '$4 != "Running" && $4 != "Completed" {print $2 " " $4}' | tr '\n' ';')
 if [ -z "$notready" ]; then summary "every Pod in the cluster is Running or Completed"; else summary "Pods not Running: $notready"; fail=1; fi
 
 echo '## runner step 4: Prometheus and Grafana through port-forwards'

@@ -145,12 +145,15 @@ CMD
     [ "$have" -ge "$want" ] && break
     sleep 3
   done
+  # A new cluster still holds the CSRs of the nodes' own client certificates,
+  # which are Approved already. Only the serving requests are listed, checked
+  # and approved: they are the ones with this signer.
   run <<'CMD'
-kubectl get csr
+kubectl get csr --field-selector spec.signerName=kubernetes.io/kubelet-serving
 CMD
   echo '## step 0d: check each request before approving it'
   run <<'CMD'
-for c in $(kubectl get csr -o name); do
+for c in $(kubectl get csr --field-selector spec.signerName=kubernetes.io/kubelet-serving -o name); do
   u=$(kubectl get "$c" -o jsonpath='{.spec.username}')
   s=$(kubectl get "$c" -o jsonpath='{.spec.request}' | base64 -d | openssl req -noout -text | grep -A1 'Alternative Name' | tail -1 | sed 's/^ *//')
   echo "${c#*/} $u $s"
@@ -158,24 +161,22 @@ done
 CMD
   # Approve only if every request came from the node it names.
   ok=1
-  for c in $(command kubectl get csr -o name); do
+  for c in $(command kubectl get csr --field-selector spec.signerName=kubernetes.io/kubelet-serving -o name); do
     u=$(command kubectl get "$c" -o jsonpath='{.spec.username}')
     n=${u#system:node:}
     nodes | grep -qx "$n" || ok=0
-    [ "$(command kubectl get "$c" -o jsonpath='{.spec.signerName}')" = kubernetes.io/kubelet-serving ] || ok=0
   done
   [ "$ok" = 1 ] || { echo 'stopping: a request does not come from a node' >&2; exit 3; }
   run <<'CMD'
-kubectl certificate approve $(kubectl get csr -o name)
+kubectl certificate approve $(kubectl get csr --field-selector spec.signerName=kubernetes.io/kubelet-serving -o name)
 CMD
   for i in $(seq 1 60); do
-    have=$(command kubectl get csr -o jsonpath='{range .items[*]}{.status.conditions[*].type}{"\n"}{end}' 2>/dev/null | grep -c 'Approved')
-    cert=$(command kubectl get csr -o jsonpath='{range .items[*]}{.status.certificate}{"\n"}{end}' 2>/dev/null | grep -c .)
+    cert=$(command kubectl get csr --field-selector spec.signerName=kubernetes.io/kubelet-serving -o jsonpath='{range .items[*]}{.status.certificate}{"\n"}{end}' 2>/dev/null | grep -c .)
     [ "$cert" -ge "$want" ] && break
     sleep 3
   done
   run <<'CMD'
-kubectl get csr
+kubectl get csr --field-selector spec.signerName=kubernetes.io/kubelet-serving
 CMD
 
   echo '## step 0e: metrics-server serves, with verification still on'
@@ -396,7 +397,7 @@ for n in $(kubectl get nodes -o name | sed 's|node/||'); do
 done
 CMD
   run <<'CMD'
-kubectl delete csr --all
+kubectl delete csr --field-selector spec.signerName=kubernetes.io/kubelet-serving
 CMD
   echo '## cleanup check'
   run <<'CMD'
