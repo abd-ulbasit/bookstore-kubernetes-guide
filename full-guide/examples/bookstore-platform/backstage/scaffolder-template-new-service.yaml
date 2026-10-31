@@ -1,20 +1,17 @@
-# Bookstore Platform v2 — Part 13 ch.11: the Backstage Scaffolder
+# Bookstore Platform v2 - Part 13 ch.11: the Backstage Scaffolder
 # Template "New Bookstore microservice". A developer fills the form;
-# the template creates a new GitHub repo + skeleton Go service +
-# Helm chart + ArgoCD Application + BookstoreTenant claim (if a new
-# tenant), all in one submission.
+# the template creates a new GitHub repo with a skeleton Go service,
+# a Helm chart and an Argo CD Application inside an existing tenant.
+# The tenant itself is onboarded by the platform team (Part 13 ch.02).
 #
 # v1 had no scaffolder; the v2 "5-minute new microservice" UX hangs
 # on this template.
 #
-# The template is a Backstage CRD-like object — it lives in the
-# Backstage catalog, NOT the Kubernetes API. Applied via the
-# Backstage catalog API (Backstage reads it from a GitHub URL
-# referenced in app-config.yaml's `catalog.locations`).
-#
-# This file is committed to the repo at
-# /catalog/scaffolder-template-new-service.yaml; the app-config
-# references it via `catalog.locations`.
+# The template is a Backstage catalog entity, NOT a Kubernetes object.
+# The platform location in app-config.yaml (catalog.locations, with its
+# own rules that allow Template) is the only source that may register
+# it. A template from an ordinary repo would run with the backend's
+# identity, so repos may not supply templates.
 #
 # Apply: NEVER via kubectl. Backstage's catalog ingests it.
 ---
@@ -26,7 +23,7 @@ metadata:
   description: |
     Create a new microservice on the Bookstore Platform. Generates a
     skeleton Go service + Dockerfile + Helm chart + catalog-info.yaml
-    + an Argo CD Application + (if new) a BookstoreTenant claim.
+    + an Argo CD Application in an existing tenant.
   tags:
     - bookstore-platform
     - golden-path
@@ -57,7 +54,9 @@ spec:
         owner:
           title: Owning team
           type: string
-          description: Group entity ref (e.g. group:team-payments).
+          description: |
+            Group entity ref (e.g. group:team-payments). The policy
+            must accept only a group the submitter belongs to.
           ui:field: OwnerPicker
           ui:options:
             allowedKinds: [Group]
@@ -82,15 +81,17 @@ spec:
           default: "go"
 
     - title: Tenant placement
+      required:
+        - tenant
       properties:
         tenant:
           title: Tenant slug
           type: string
           description: |
-            Existing tenant slug (e.g. acme-books) — the service
-            deploys into bookstore-platform-<TENANT>. Leave blank
-            for the shared bookstore-platform namespace.
-          pattern: "^([a-z][a-z0-9-]{2,30})?$"
+            An existing tenant (e.g. acme-books). The service deploys
+            into bookstore-platform-<TENANT>. The form cannot create or
+            change a tenant.
+          pattern: "^[a-z][a-z0-9-]{2,30}$"
 
   steps:
     # 1. Clone the skeleton repo + render placeholders.
@@ -107,7 +108,8 @@ spec:
           port: ${{ parameters.port }}
           tenant: ${{ parameters.tenant }}
 
-    # 2. Create the GitHub repo + push the initial commit.
+    # 2. Create the GitHub repo + push the initial commit to main, then
+    # protect main so changes need a code-owner review.
     - id: publish
       name: Publish to GitHub
       action: publish:github
@@ -120,24 +122,10 @@ spec:
         repoVisibility: private
         requireCodeOwnerReviews: true
 
-    # 3. Create the BookstoreTenant claim (if a new tenant).
-    - id: tenant-claim
-      name: Apply BookstoreTenant claim
-      if: ${{ parameters.tenant != "" }}
-      action: kubernetes:apply
-      input:
-        clusterRef: bookstore-platform-us-east
-        manifest: |
-          apiVersion: platform.bookstore-platform.example.com/v1alpha1
-          kind: BookstoreTenant
-          metadata:
-            name: ${{ parameters.tenant }}
-          spec:
-            parameters:
-              tenant: ${{ parameters.tenant }}
-              region: us-east
-
-    # 4. Apply an Argo CD Application that points at the new repo.
+    # 3. Apply an Argo CD Application that points at the new repo. The
+    # bookstore-tenants project limits it to bookstore-platform-* namespaces
+    # and repositories. CreateNamespace is off: the tenant's namespace must
+    # already exist, with the labels and policies the tenant claim gives it.
     - id: argocd-app
       name: Register Argo CD Application
       action: kubernetes:apply
@@ -150,7 +138,7 @@ spec:
             name: bookstore-${{ parameters.name }}-us-east
             namespace: argocd
           spec:
-            project: default
+            project: bookstore-tenants
             source:
               repoURL: https://github.com/your-org/bookstore-platform-${{ parameters.name }}
               path: helm
@@ -159,13 +147,13 @@ spec:
                 releaseName: ${{ parameters.name }}
             destination:
               server: https://kubernetes.default.svc
-              namespace: bookstore-platform-${{ parameters.tenant or 'shared' }}
+              namespace: bookstore-platform-${{ parameters.tenant }}
             syncPolicy:
               automated: { prune: true, selfHeal: true }
-              syncOptions: [CreateNamespace=true, ServerSideApply=true]
+              syncOptions: [ServerSideApply=true]
 
-    # 5. Register the new repo with Backstage's Catalog so it appears
-    # in the UI immediately (does not wait for the 5-minute discovery).
+    # 4. Register the new repo with Backstage's Catalog so it appears
+    # in the UI immediately (does not wait for the next discovery run).
     - id: register
       name: Register in catalog
       action: catalog:register

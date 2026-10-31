@@ -1,0 +1,63 @@
+# Bookstore Platform v2 - Part 13 ch.11: who may reach Backstage and its
+# database. Ingress is closed by default. Backstage takes traffic only from
+# the Istio gateway in istio-system, and Postgres takes traffic only from
+# Backstage. Egress stays open here: Backstage calls GitHub, Keycloak, Argo
+# CD, PagerDuty and the Kubernetes API, whose addresses differ per cluster.
+#
+# Enforcement needs a CNI that enforces NetworkPolicy (Part 00 ch.07).
+#
+# Apply:
+#   kubectl apply -f examples/bookstore-platform/backstage/networkpolicy.yaml
+---
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: backstage-default-deny-ingress
+  namespace: backstage
+  labels:
+    app.kubernetes.io/part-of: bookstore-platform
+spec:
+  podSelector: {}
+  policyTypes: ["Ingress"]
+---
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: backstage-allow-gateway
+  namespace: backstage
+  labels:
+    app.kubernetes.io/part-of: bookstore-platform
+spec:
+  podSelector:
+    matchLabels:
+      app.kubernetes.io/component: backstage
+  policyTypes: ["Ingress"]
+  ingress:
+    - from:
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: istio-system
+      ports:
+        - protocol: TCP
+          port: 7007
+---
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: backstage-allow-postgres
+  namespace: backstage
+  labels:
+    app.kubernetes.io/part-of: bookstore-platform
+spec:
+  podSelector:
+    matchLabels:
+      app.kubernetes.io/name: postgresql
+  policyTypes: ["Ingress"]
+  ingress:
+    - from:
+        - podSelector:
+            matchLabels:
+              app.kubernetes.io/component: backstage
+      ports:
+        - protocol: TCP
+          port: 5432

@@ -7,11 +7,10 @@
 # in Backstage. Each service repo's docs/ directory carries an
 # mkdocs.yml that inherits from this base.
 #
-# This file is a ConfigMap shipped to the Backstage namespace; the
-# TechDocs backend reads it; the techdocs-cli (run in CI per repo)
-# also reads it.
+# Nothing in the cluster reads this ConfigMap. Its two keys are the source
+# for the MkDocs files in the scaffolder skeleton, so keep the two in step.
 #
-# Apply:
+# Apply (optional, to keep a copy in the namespace):
 #   kubectl apply -f examples/bookstore-platform/backstage/tech-docs-config.yaml
 ---
 apiVersion: v1

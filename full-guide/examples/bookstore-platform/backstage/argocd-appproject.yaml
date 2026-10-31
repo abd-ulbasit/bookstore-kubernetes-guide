@@ -1,0 +1,25 @@
+# Bookstore Platform v2 - Part 13 ch.11: the Argo CD project for the Applications
+# that the scaffolder creates. A form submission can deploy only into
+# bookstore-platform-* namespaces, from the org's bookstore-platform-*
+# repositories, and it cannot create cluster-scoped objects. A project that
+# names no limits accepts every repository and destination, so the template
+# must not use the default project.
+#
+# Apply:
+#   kubectl apply -f examples/bookstore-platform/backstage/argocd-appproject.yaml
+apiVersion: argoproj.io/v1alpha1
+kind: AppProject
+metadata:
+  name: bookstore-tenants
+  namespace: argocd
+  labels:
+    app.kubernetes.io/part-of: bookstore-platform
+    app.kubernetes.io/component: developer-portal
+spec:
+  description: Services scaffolded by the new-bookstore-service template.
+  sourceRepos:
+    - https://github.com/your-org/bookstore-platform-*
+  destinations:
+    - server: https://kubernetes.default.svc
+      namespace: bookstore-platform-*
+  clusterResourceWhitelist: []

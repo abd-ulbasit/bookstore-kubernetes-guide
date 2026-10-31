@@ -1,0 +1,161 @@
+# Transcript for 13-grand-capstone-bookstore-platform/11-backstage-developer-portal-idp.md, the
+# token-scope checks and the restricted dry-run of the chapter's Backstage and
+# Postgres pods (hands-on section 7). The last run's negative control (section 5)
+# was refused for a missing default ServiceAccount, not by PodSecurity, so it is
+# not evidence for the restricted profile and the chapter does not cite it.
+# Lab cluster: a kind cluster on Kubernetes v1.37, kubectl client v1.37.2. The
+# cluster and node names are as the lab printed them. The chapter prints the
+# reader's names; this run used these stand-ins: namespace backstage is
+# p13-11-backstage, namespace argocd is p13-11-argocd, the ClusterRole and
+# ClusterRoleBinding backstage-catalog-reader are p13-11-backstage-catalog-reader.
+# The rbac.yaml and backstage-application.yaml values are read from the
+# repository with those names substituted, so the grants are the chapter's.
+# The Backstage image is not built and the Argo CD Application is not applied:
+# the lab has no Argo CD and no Backstage image. The chart is rendered with
+# helm template and its pod templates are dry-run against restricted, which
+# creates nothing. The helper that copies each pod template into a Pod is not
+# committed. It adds a data emptyDir to the StatefulSet only, because the claim
+# template supplies that volume at run time.
+# The ExternalSecret and AppProject manifests were not dry-run, because the lab
+# has no External Secrets or Argo CD CRDs.
+# Recorded by running the commands below in order. Section 7 attempts to delete
+# every object this run created. Two cluster-scoped deletes were refused and the
+# identity could no longer read cluster-scoped objects, so the leftovers are
+# listed in the chapter's review notes, not verified gone here.
+## 1. Cluster, client and chart
+$ kubectl version --client
+Client Version: v1.37.2
+Kustomize Version: v5.8.1
+$ kubectl config current-context
+kind-sf-pilot
+$ kubectl get nodes -o name
+node/sf-pilot-control-plane
+$ helm search repo backstage/backstage --version 2.6.0
+NAME               	CHART VERSION	APP VERSION	DESCRIPTION                                       
+backstage/backstage	2.6.0        	           	A Helm chart for deploying a Backstage application
+
+## 2. Namespaces, labelled before anything runs in them
+$ kubectl create namespace p13-11-backstage
+namespace/p13-11-backstage created
+$ kubectl label namespace p13-11-backstage pod-security.kubernetes.io/enforce=restricted pod-security.kubernetes.io/enforce-version=latest pod-security.kubernetes.io/audit=restricted pod-security.kubernetes.io/audit-version=latest pod-security.kubernetes.io/warn=restricted pod-security.kubernetes.io/warn-version=latest
+namespace/p13-11-backstage labeled
+$ kubectl create namespace p13-11-argocd
+namespace/p13-11-argocd created
+$ kubectl -n p13-11-backstage create serviceaccount backstage
+serviceaccount/backstage created
+$ kubectl -n p13-11-backstage create serviceaccount backstage-postgresql
+serviceaccount/backstage-postgresql created
+$ kubectl -n p13-11-backstage patch serviceaccount backstage-postgresql -p '{"automountServiceAccountToken": false}'
+serviceaccount/backstage-postgresql patched
+
+## 3. Grants from rbac.yaml, with the lab names substituted
+$ sed -e 's/namespace: backstage$/namespace: p13-11-backstage/' -e 's/namespace: argocd$/namespace: p13-11-argocd/' -e 's/name: backstage-catalog-reader/name: p13-11-backstage-catalog-reader/' full-guide/examples/bookstore-platform/backstage/rbac.yaml | kubectl apply -f -
+clusterrole.rbac.authorization.k8s.io/p13-11-backstage-catalog-reader created
+clusterrolebinding.rbac.authorization.k8s.io/p13-11-backstage-catalog-reader created
+role.rbac.authorization.k8s.io/backstage-scaffolder created
+rolebinding.rbac.authorization.k8s.io/backstage-scaffolder created
+
+## 4. What the backstage ServiceAccount may do
+$ kubectl auth can-i --list -n p13-11-backstage --as=system:serviceaccount:p13-11-backstage:backstage
+Resources                                       Non-Resource URLs                      Resource Names   Verbs
+selfsubjectreviews.authentication.k8s.io        []                                     []               [create]
+selfsubjectaccessreviews.authorization.k8s.io   []                                     []               [create]
+selfsubjectrulesreviews.authorization.k8s.io    []                                     []               [create]
+pods                                            []                                     []               [get list watch]
+services                                        []                                     []               [get list watch]
+deployments.apps                                []                                     []               [get list watch]
+replicasets.apps                                []                                     []               [get list watch]
+clustertrustbundles.certificates.k8s.io         []                                     []               [get list watch]
+                                                [/.well-known/openid-configuration/]   []               [get]
+                                                [/.well-known/openid-configuration]    []               [get]
+                                                [/api/*]                               []               [get]
+                                                [/api]                                 []               [get]
+                                                [/apis/*]                              []               [get]
+                                                [/apis]                                []               [get]
+                                                [/healthz]                             []               [get]
+                                                [/healthz]                             []               [get]
+                                                [/livez]                               []               [get]
+                                                [/livez]                               []               [get]
+                                                [/openapi/*]                           []               [get]
+                                                [/openapi]                             []               [get]
+                                                [/openid/v1/jwks/]                     []               [get]
+                                                [/openid/v1/jwks]                      []               [get]
+                                                [/readyz]                              []               [get]
+                                                [/readyz]                              []               [get]
+                                                [/version/]                            []               [get]
+                                                [/version/]                            []               [get]
+                                                [/version]                             []               [get]
+                                                [/version]                             []               [get]
+$ kubectl auth can-i get secrets -n p13-11-backstage --as=system:serviceaccount:p13-11-backstage:backstage
+no
+$ kubectl auth can-i create deployments.apps -n p13-11-backstage --as=system:serviceaccount:p13-11-backstage:backstage
+no
+$ kubectl auth can-i --list -n p13-11-argocd --as=system:serviceaccount:p13-11-backstage:backstage
+Resources                                       Non-Resource URLs                      Resource Names   Verbs
+applications.argoproj.io                        []                                     []               [create get patch]
+selfsubjectreviews.authentication.k8s.io        []                                     []               [create]
+selfsubjectaccessreviews.authorization.k8s.io   []                                     []               [create]
+selfsubjectrulesreviews.authorization.k8s.io    []                                     []               [create]
+pods                                            []                                     []               [get list watch]
+services                                        []                                     []               [get list watch]
+deployments.apps                                []                                     []               [get list watch]
+replicasets.apps                                []                                     []               [get list watch]
+clustertrustbundles.certificates.k8s.io         []                                     []               [get list watch]
+                                                [/.well-known/openid-configuration/]   []               [get]
+                                                [/.well-known/openid-configuration]    []               [get]
+                                                [/api/*]                               []               [get]
+                                                [/api]                                 []               [get]
+                                                [/apis/*]                              []               [get]
+                                                [/apis]                                []               [get]
+                                                [/healthz]                             []               [get]
+                                                [/healthz]                             []               [get]
+                                                [/livez]                               []               [get]
+                                                [/livez]                               []               [get]
+                                                [/openapi/*]                           []               [get]
+                                                [/openapi]                             []               [get]
+                                                [/openid/v1/jwks/]                     []               [get]
+                                                [/openid/v1/jwks]                      []               [get]
+                                                [/readyz]                              []               [get]
+                                                [/readyz]                              []               [get]
+                                                [/version/]                            []               [get]
+                                                [/version/]                            []               [get]
+                                                [/version]                             []               [get]
+                                                [/version]                             []               [get]
+
+## 5. The chart rendered with the Application's values, dry-run against restricted
+$ $PY -c "import sys,yaml; d=[x for x in yaml.safe_load_all(open(sys.argv[1])) if x and x.get(\"kind\")==\"Application\"][0]; sys.stdout.write(d[\"spec\"][\"source\"][\"helm\"][\"values\"])" full-guide/examples/bookstore-platform/backstage/backstage-application.yaml > $WORK/values.yaml
+$ helm template backstage backstage/backstage --version 2.6.0 -n p13-11-backstage -f $WORK/values.yaml > $WORK/rendered.yaml
+$ $PY $WORKTMP/pod-from-render.py $WORK/rendered.yaml $WORK
+pods written: backstage-check, postgresql-check
+$ kubectl -n p13-11-backstage apply --dry-run=server -f $WORK/backstage-check.yaml
+pod/backstage-check created (server dry run)
+$ kubectl -n p13-11-backstage apply --dry-run=server -f $WORK/postgresql-check.yaml
+pod/postgresql-check created (server dry run)
+$ printf 'apiVersion: v1\nkind: Pod\nmetadata:\n  name: root-check\nspec:\n  containers:\n    - name: app\n      image: example.invalid/app:1\n' | kubectl -n p13-11-backstage apply --dry-run=server -f -
+Error from server (Forbidden): error when creating "STDIN": pods "root-check" is forbidden: error looking up service account p13-11-backstage/default: serviceaccount "default" not found
+
+## 6. Server dry-run of the other manifests the reader applies
+$ sed -e 's/namespace: backstage$/namespace: p13-11-backstage/' full-guide/examples/bookstore-platform/backstage/networkpolicy.yaml | kubectl apply --dry-run=server -f -
+networkpolicy.networking.k8s.io/backstage-default-deny-ingress created (server dry run)
+networkpolicy.networking.k8s.io/backstage-allow-gateway created (server dry run)
+networkpolicy.networking.k8s.io/backstage-allow-postgres created (server dry run)
+$ sed -e 's/namespace: backstage$/namespace: p13-11-backstage/' full-guide/examples/bookstore-platform/backstage/app-config.yaml | kubectl apply --dry-run=server -f -
+configmap/backstage-app-config created (server dry run)
+$ sed -e 's/namespace: backstage$/namespace: p13-11-backstage/' full-guide/examples/bookstore-platform/backstage/tech-docs-config.yaml | kubectl apply --dry-run=server -f -
+configmap/backstage-techdocs-config created (server dry run)
+
+## 7. Clean up what this run created
+$ kubectl delete namespace p13-11-backstage p13-11-argocd --wait=true
+namespace "p13-11-backstage" deleted
+namespace "p13-11-argocd" deleted
+E1031 09:00:37.853104   24855 reflector.go:227] "Failed to watch" err="namespaces \"p13-11-backstage\" is forbidden: User \"kubernetes-admin\" cannot watch resource \"namespaces\" in API group \"\" at the cluster scope - error from a previous attempt: EOF" reflector="k8s.io/client-go/tools/watch/informerwatcher.go:162" type="*unstructured.Unstructured"
+E1031 09:00:39.422652   24855 reflector.go:227] "Failed to watch" err="failed to list *unstructured.Unstructured: namespaces \"p13-11-backstage\" is forbidden: User \"kubernetes-admin\" cannot list resource \"namespaces\" in API group \"\" at the cluster scope" reflector="k8s.io/client-go/tools/watch/informerwatcher.go:162" type="*unstructured.Unstructured"
+E1031 09:00:41.265010   24855 reflector.go:227] "Failed to watch" err="failed to list *unstructured.Unstructured: namespaces \"p13-11-backstage\" is forbidden: User \"kubernetes-admin\" cannot list resource \"namespaces\" in API group \"\" at the cluster scope" reflector="k8s.io/client-go/tools/watch/informerwatcher.go:162" type="*unstructured.Unstructured"
+E1031 09:00:46.512239   24855 reflector.go:227] "Failed to watch" err="failed to list *unstructured.Unstructured: namespaces \"p13-11-backstage\" is forbidden: User \"kubernetes-admin\" cannot list resource \"namespaces\" in API group \"\" at the cluster scope" reflector="k8s.io/client-go/tools/watch/informerwatcher.go:162" type="*unstructured.Unstructured"
+$ kubectl delete clusterrolebinding p13-11-backstage-catalog-reader
+Error from server (Forbidden): clusterrolebindings.rbac.authorization.k8s.io "p13-11-backstage-catalog-reader" is forbidden: User "kubernetes-admin" cannot delete resource "clusterrolebindings" in API group "rbac.authorization.k8s.io" at the cluster scope
+$ kubectl delete clusterrole p13-11-backstage-catalog-reader
+Error from server (Forbidden): clusterroles.rbac.authorization.k8s.io "p13-11-backstage-catalog-reader" is forbidden: User "kubernetes-admin" cannot delete resource "clusterroles" in API group "rbac.authorization.k8s.io" at the cluster scope
+$ kubectl get namespaces -o name | grep -c p13-11
+Error from server (Forbidden): namespaces is forbidden: User "kubernetes-admin" cannot list resource "namespaces" in API group "" at the cluster scope
+0
