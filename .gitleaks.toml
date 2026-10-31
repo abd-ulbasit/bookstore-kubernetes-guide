@@ -126,3 +126,14 @@ paths = [
 ]
 regexTarget = "line"
 regexes = ['''password":"(7730ffa41f0d708a84e727c70bd6c031|NzczMGZmYTQxZjBkNzA4YTg0ZTcyN2M3MGJkNmMwMzE=|YmI5YWIzNDhhM2FkMTVlZDRiNjcwMjE1YWZmY2U0NWY=|bb9ab348a3ad15ed4b670215affce45f)"''']
+
+[[allowlists]]
+description = """The 12.03 transcript prints the command `kubectl api-resources \
+--api-group=scheduling.k8s.io`, and the generic-api-key rule reads the group \
+name after `api-group=` as a key value. It is an API group name, not a \
+credential. Pinned to the rule, the one transcript and the exact command line."""
+targetRules = ["generic-api-key"]
+condition = "AND"
+paths = ['''^full-guide/examples/security-lab/evidence/12-03\.txt$''']
+regexTarget = "line"
+regexes = ['''(?m)^\$ kubectl api-resources --api-group=scheduling\.k8s\.io$''']
