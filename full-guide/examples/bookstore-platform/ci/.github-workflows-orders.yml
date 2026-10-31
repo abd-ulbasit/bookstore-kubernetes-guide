@@ -40,16 +40,13 @@ on:
       - '.github/workflows/orders.yml'
 
 permissions:
-  id-token: write
   contents: read
-  packages: read
 
 concurrency:
   group: orders-ci-${{ github.ref }}
   cancel-in-progress: true
 
 env:
-  GO_VERSION: '1.23'
   SERVICE: orders
   WORKING_DIR: app/orders
   COVERAGE_THRESHOLD: '70'
@@ -62,17 +59,19 @@ jobs:
   lint-test:
     name: lint + unit test (coverage gated)
     runs-on: ubuntu-latest
+    permissions:
+      contents: read
     defaults:
       run:
         working-directory: ${{ env.WORKING_DIR }}
     steps:
       - name: Checkout
-        uses: actions/checkout@v4
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 
       - name: Setup Go
-        uses: actions/setup-go@v5
+        uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
         with:
-          go-version: ${{ env.GO_VERSION }}
+          go-version-file: ${{ env.WORKING_DIR }}/go.mod
           cache: true
           cache-dependency-path: ${{ env.WORKING_DIR }}/go.sum
 
@@ -83,9 +82,9 @@ jobs:
         run: go vet ./...
 
       - name: golangci-lint
-        uses: golangci/golangci-lint-action@v6
+        uses: golangci/golangci-lint-action@ba0d7d2ec06a0ea1cb5fa41b2e4a3ab91d21278a # v9.3.0
         with:
-          version: v1.61.0
+          version: v2.15.0
           working-directory: ${{ env.WORKING_DIR }}
           args: --timeout=5m
 
@@ -115,7 +114,7 @@ jobs:
             'BEGIN { if (c+0 < t+0) { exit 1 } }'
 
       - name: Upload coverage
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: coverage-${{ env.SERVICE }}
           path: ${{ env.WORKING_DIR }}/coverage.out
@@ -129,10 +128,12 @@ jobs:
   integration-test:
     name: integration test (DB + broker)
     runs-on: ubuntu-latest
+    permissions:
+      contents: read
     needs: lint-test
     services:
       postgres:
-        image: postgres:16-alpine
+        image: postgres@sha256:0cefaabd882e42bcb2a2f3dc56d3ce4770560ba62fd7f197f1a2e008fd5731ab # 16-alpine
         env:
           POSTGRES_USER: orders
           POSTGRES_PASSWORD: orders
@@ -148,7 +149,7 @@ jobs:
         # Management image so the test can introspect queue depth via
         # the HTTP API if needed (handy for assertions like "did we
         # actually publish?").
-        image: rabbitmq:3.13-management-alpine
+        image: rabbitmq@sha256:606d8c0d6b3c18d1da9afc53bc7cdb2a8d5486df91b5a9830e9e07626c9ae281 # 3.13-management-alpine
         ports:
           - 5672:5672
           - 15672:15672
@@ -165,17 +166,14 @@ jobs:
       AMQP_URL: amqp://guest:guest@localhost:5672/
     steps:
       - name: Checkout
-        uses: actions/checkout@v4
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 
       - name: Setup Go
-        uses: actions/setup-go@v5
+        uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
         with:
-          go-version: ${{ env.GO_VERSION }}
+          go-version-file: ${{ env.WORKING_DIR }}/go.mod
           cache: true
           cache-dependency-path: ${{ env.WORKING_DIR }}/go.sum
-
-      - name: Run schema migration
-        run: go run ./cmd/migrate
 
       - name: go test (integration)
         run: go test -tags=integration -race -count=1 -timeout=8m ./...
@@ -186,17 +184,20 @@ jobs:
   scan:
     name: trivy scan
     runs-on: ubuntu-latest
+    permissions:
+      contents: read
     needs: integration-test
     defaults:
       run:
         working-directory: ${{ env.WORKING_DIR }}
     steps:
       - name: Checkout
-        uses: actions/checkout@v4
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 
       - name: Trivy fs
-        uses: aquasecurity/trivy-action@0.28.0
+        uses: aquasecurity/trivy-action@ed142fd0673e97e23eac54620cfb913e5ce36c25 # v0.36.0
         with:
+          version: 'v0.76.1'
           scan-type: fs
           scan-ref: ${{ env.WORKING_DIR }}
           severity: HIGH,CRITICAL
@@ -211,43 +212,48 @@ jobs:
   build-sign-push:
     name: build + sign + push
     runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      id-token: write
     needs: scan
     if: github.event_name == 'push' && github.ref == 'refs/heads/main'
     outputs:
       digest: ${{ steps.build.outputs.digest }}
     steps:
       - name: Checkout
-        uses: actions/checkout@v4
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 
       - name: Configure AWS credentials via OIDC
-        uses: aws-actions/configure-aws-credentials@v4
+        uses: aws-actions/configure-aws-credentials@7474bc4690e29a8392af63c5b98e7449536d5c3a # v4.3.1
         with:
           role-to-assume: ${{ secrets.AWS_ROLE_ARN_ECR }}
           aws-region: ${{ vars.AWS_REGION || 'ap-south-1' }}
           audience: sts.amazonaws.com
 
       - name: Login to ECR
-        uses: aws-actions/amazon-ecr-login@v2
+        uses: aws-actions/amazon-ecr-login@03f1aad4c6c7ffd436567f42f9384779290529bd # v2.1.7
 
       - name: Set up QEMU
-        uses: docker/setup-qemu-action@v3
+        uses: docker/setup-qemu-action@c7c53464625b32c7a7e944ae62b3e17d2b600130 # v3.7.0
         with:
           platforms: arm64
 
       - name: Set up Docker Buildx
-        uses: docker/setup-buildx-action@v3
+        uses: docker/setup-buildx-action@8d2750c68a42422c14e847fe6c8ac0403b4cbd6f # v3.12.0
 
       - name: Install cosign
-        uses: sigstore/cosign-installer@v3
+        uses: sigstore/cosign-installer@6f9f17788090df1f26f669e9d70d6ae9567deba6 # v4.1.2
         with:
-          cosign-release: 'v2.4.1'
+          cosign-release: 'v3.1.4'
 
       - name: Install syft
-        uses: anchore/sbom-action/download-syft@v0.17.7
+        uses: anchore/sbom-action/download-syft@66cbf4bc1f1c0d2edc94016e65bc221b6bb0ad6c # v0.24.3
+        with:
+          syft-version: v1.55.0
 
       - name: Build + push
         id: build
-        uses: docker/build-push-action@v6
+        uses: docker/build-push-action@10e90e3645eae34f1e60eeb005ba3a3d33f178e8 # v6.19.2
         with:
           context: ${{ env.WORKING_DIR }}
           file: ${{ env.WORKING_DIR }}/Dockerfile
@@ -262,8 +268,9 @@ jobs:
           cache-to: type=gha,mode=max,scope=orders
 
       - name: Trivy — scan pushed image
-        uses: aquasecurity/trivy-action@0.28.0
+        uses: aquasecurity/trivy-action@ed142fd0673e97e23eac54620cfb913e5ce36c25 # v0.36.0
         with:
+          version: 'v0.76.1'
           image-ref: ${{ vars.ECR_REGISTRY }}/bookstore/${{ env.SERVICE }}@${{ steps.build.outputs.digest }}
           severity: HIGH,CRITICAL
           exit-code: '1'
@@ -278,7 +285,7 @@ jobs:
         env:
           COSIGN_YES: 'true'
         run: |
-          cosign sign --yes \
+          cosign sign --yes --recursive \
             "${{ vars.ECR_REGISTRY }}/bookstore/${{ env.SERVICE }}@${{ steps.build.outputs.digest }}"
 
       - name: Cosign attest SBOM
@@ -291,7 +298,7 @@ jobs:
 
       - name: Upload digest artifact
         run: echo "${{ steps.build.outputs.digest }}" > digest.txt
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: digest-${{ env.SERVICE }}
           path: digest.txt
@@ -301,37 +308,47 @@ jobs:
   ############################################################################
   # 5. update-gitops-pr — separate PR per service so a `git revert` rolls
   #    back ONE service, not the whole sync. One-PR-per-service is the
-  #    atomic-rollback discipline; Part 15 ch.07 (parallel phase 15c)
+  #    atomic-rollback discipline; Part 15 ch.07
   #    explores the rollback playbook in depth.
   ############################################################################
   update-gitops-pr:
     name: open gitops PR
     runs-on: ubuntu-latest
+    permissions:
+      contents: read
     needs: build-sign-push
     if: github.event_name == 'push' && github.ref == 'refs/heads/main'
     steps:
       - name: Checkout GitOps repo
-        uses: actions/checkout@v4
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           repository: ${{ vars.GITOPS_REPO }}
           token: ${{ secrets.GITOPS_PR_TOKEN }}
           path: gitops
+          persist-credentials: false
 
       - name: Download digest artifact
-        uses: actions/download-artifact@v4
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
         with:
           name: digest-${{ env.SERVICE }}
           path: .
 
-      - name: Install kustomize
+      - name: Install kustomize (PINNED, checked against its SHA-256)
+        # Kustomize v5.8.1 is the version kubectl v1.37.2 embeds. The digest is
+        # the release's own checksums.txt entry. Never the master installer.
         run: |
-          KUSTOMIZE_VERSION=v5.5.0
-          curl -fsSL -o /tmp/kustomize.tar.gz \
-            "https://github.com/kubernetes-sigs/kustomize/releases/download/kustomize/${KUSTOMIZE_VERSION}/kustomize_${KUSTOMIZE_VERSION}_linux_amd64.tar.gz"
-          tar -xzf /tmp/kustomize.tar.gz -C /usr/local/bin
-          kustomize version
+          KUSTOMIZE_VERSION=v5.8.1
+          KUSTOMIZE_SHA256=029a7f0f4e1932c52a0476cf02a0fd855c0bb85694b82c338fc648dcb53a819d
+          curl -fsSL -o "$RUNNER_TEMP/kustomize.tar.gz" \
+            "https://github.com/kubernetes-sigs/kustomize/releases/download/kustomize%2F${KUSTOMIZE_VERSION}/kustomize_${KUSTOMIZE_VERSION}_linux_amd64.tar.gz"
+          echo "${KUSTOMIZE_SHA256}  $RUNNER_TEMP/kustomize.tar.gz" | sha256sum -c -
+          mkdir -p "$RUNNER_TEMP/bin"
+          tar -xzf "$RUNNER_TEMP/kustomize.tar.gz" -C "$RUNNER_TEMP/bin" kustomize
+          echo "$RUNNER_TEMP/bin" >> "$GITHUB_PATH"
+          "$RUNNER_TEMP/bin/kustomize" version
 
       - name: Bump dev overlay digest
+        id: bump
         run: |
           DIGEST="$(cat digest.txt)"
           if [ -z "$DIGEST" ] || ! echo "$DIGEST" | grep -q '^sha256:'; then
@@ -341,9 +358,10 @@ jobs:
           cd gitops/kustomize/overlays/dev
           kustomize edit set image \
             "bookstore/${{ env.SERVICE }}=${{ vars.ECR_REGISTRY }}/bookstore/${{ env.SERVICE }}@${DIGEST}"
+          echo "digest=${DIGEST}" >> "$GITHUB_OUTPUT"
 
       - name: Create PR
-        uses: peter-evans/create-pull-request@v7
+        uses: peter-evans/create-pull-request@22a9089034f40e5a961c8808d113e2c98fb63676 # v7.0.11
         with:
           path: gitops
           token: ${{ secrets.GITOPS_PR_TOKEN }}

@@ -30,7 +30,7 @@
 #
 # REQUIREMENTS (preflight-checked below):
 #
-#   - cosign v2.x          (https://docs.sigstore.dev/cosign/installation/)
+#   - cosign v3.x          (CI pins v3.1.4; https://docs.sigstore.dev/cosign/installation/)
 #   - syft  v1.x           (https://github.com/anchore/syft#installation)
 #   - docker / podman      (for image pull only; not used for build)
 #   - an OIDC-capable browser session if running this interactively (the
@@ -120,7 +120,7 @@ syft "$IMAGE_REF" -o spdx-json > "$SBOM_FILE"
 echo "    SBOM size: $(wc -c < "$SBOM_FILE") bytes"
 
 # --- 2. Sign (keyless) -------------------------------------------------------
-# cosign v2 enables keyless by default when no --key is passed. The OIDC
+# cosign signs keyless when no --key is passed. The OIDC
 # flow:
 #   - interactive: opens a browser to the configured issuer (default
 #     https://oauth2.sigstore.dev/auth, which federates to GitHub/Google/
@@ -138,8 +138,8 @@ echo "==> cosign sign (keyless) ..."
 COSIGN_YES=true \
   cosign sign \
     --yes \
-    --output-signature "${BUNDLE_FILE%.bundle}.sig" \
-    --output-certificate "${BUNDLE_FILE%.bundle}.cert" \
+    --recursive \
+    --bundle "$BUNDLE_FILE" \
     "$IMAGE_REF"
 
 # --- 3. Attest SBOM ----------------------------------------------------------
@@ -152,25 +152,23 @@ COSIGN_YES=true \
     "$IMAGE_REF"
 
 # --- 4. Verify -------------------------------------------------------------------
-# Verify with a deliberately loose identity match in this local flow — the
-# operator's email/issuer varies. Production verification (Kyverno's
-# verifyImages rule) is tight: --certificate-identity-regexp matches the
-# specific workflow ref, --certificate-oidc-issuer is locked to
-# token.actions.githubusercontent.com. Part 15 ch.03 shows the production
-# pattern; this is the operator-friendly local smoke test.
-echo "==> Verifying signature (operator-loose; CI/Kyverno uses tight match)"
+# Verify against the identity you expect. Never match '.*': a pattern that
+# accepts every signer proves nothing. CI signs as the workflow; a laptop run
+# signs as your own OIDC identity. Production verification (Kyverno's
+# verifyImages rule) matches the workflow ref. Part 15 ch.03 shows it.
+: "${CERT_IDENTITY:?set CERT_IDENTITY to the signing identity you expect}"
+: "${CERT_OIDC_ISSUER:?set CERT_OIDC_ISSUER to the issuer that signed it}"
+echo "==> Verifying signature against ${CERT_IDENTITY}"
 cosign verify \
-  --certificate-identity-regexp '.*' \
-  --certificate-oidc-issuer-regexp '.*' \
-  "$IMAGE_REF" \
-  | head -c 2000
-echo
-echo "    (full attestation chain available via 'cosign verify-attestation')"
+  --certificate-identity "$CERT_IDENTITY" \
+  --certificate-oidc-issuer "$CERT_OIDC_ISSUER" \
+  "$IMAGE_REF" > /dev/null
+echo "    Verified. Attestations: cosign verify-attestation --type spdxjson"
 
 echo "==> Done."
 echo "    Signed:        $IMAGE_REF"
 echo "    SBOM:          $SBOM_FILE"
-echo "    Bundle pieces: ${BUNDLE_FILE%.bundle}.sig / .cert"
+echo "    Bundle:        $BUNDLE_FILE"
 echo
 echo "    Next: in CI, the same flow runs with the workflow's OIDC identity"
 echo "    and Kyverno (Part 15 ch.03) verifies against THAT identity at"
