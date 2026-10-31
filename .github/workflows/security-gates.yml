@@ -317,7 +317,10 @@ jobs:
           failed=0
           for transcript in full-guide/examples/security-lab/evidence/*.txt; do
             base="$(basename "$transcript" .txt)"
-            chapters=(full-guide/"${base%%-*}"-*/"${base#*-}"-*.md)
+            case "$base" in
+              ap-*) chapters=(full-guide/appendix/"${base#ap-}"-*.md) ;;
+              *) chapters=(full-guide/"${base%%-*}"-*/"${base#*-}"-*.md) ;;
+            esac
             if [ "${#chapters[@]}" -ne 1 ]; then
               echo "::error::${transcript} names ${#chapters[@]} chapters (${chapters[*]:-none}); it must name exactly one"
               failed=$((failed + 1))

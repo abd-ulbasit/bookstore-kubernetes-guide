@@ -34,9 +34,9 @@ open to contributions.
 
 ## What this guide isn't
 
-- A certification cram sheet. (Cheat-sheet content lives in
+- A cheat sheet. (Cheat-sheet content lives in
   [Appendix A](appendix/A-kubectl-cheatsheet.md); the guide as a whole is
-  about durable mental models, not exam tricks.)
+  about durable mental models.)
 - An opinion-free survey of every CNCF project. The guide opinionatedly
   picks **one** tool per concern and explains the trade-offs. The reader
   who wants a comparison shop should look elsewhere.

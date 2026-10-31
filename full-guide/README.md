@@ -29,8 +29,7 @@ chapter's hands-on section advances the *same* app.
 
 Anyone comfortable with the command line and basic Linux/HTTP who wants a
 single, coherent path from "what is a container?" to "I can run, deliver, and
-operate a multi-service app in production". Also useful as structured
-preparation for CKA/CKAD/CKS (see [appendix E](appendix/E-learning-paths.md)).
+operate a multi-service app in production".
 
 > **This guide is standalone.** It is intentionally **not linked to any other
 > `.md` files** in this repository (those are separate advanced/internals
@@ -467,7 +466,7 @@ Markdown source is authoritative.
 ## How to use this guide
 
 Read the parts in order — each builds on the last, and the Bookstore manifests
-are cumulative. If you only have a week, or you're targeting a certification,
+are cumulative. If you only have a week, or you have a role in mind,
 [appendix E](appendix/E-learning-paths.md) gives ordered fast-track and
-exam-oriented paths. Keep [appendix A](appendix/A-kubectl-cheatsheet.md) and
+platform paths. Keep [appendix A](appendix/A-kubectl-cheatsheet.md) and
 [appendix B](appendix/B-glossary.md) open as you work.
