@@ -5,13 +5,14 @@
 #
 # What Falco watches:
 #   - Syscalls via eBPF (file opens, exec, network connects, mounts).
-#   - The Kubernetes audit log (if you wire it via webhook — TODO below).
-#   - Compares observed behavior against a ruleset (default Falco rules cover
-#     ~200 known-bad patterns: shell-in-container, sensitive-file-reads,
-#     unexpected-egress, container-escape attempts).
+#   - The Kubernetes audit log: not wired here (see the note at the end of
+#     the Helm values).
+#   - Compares observed behavior against a ruleset (the default rules cover
+#     shell-in-container, sensitive-file reads, unexpected egress and
+#     container-escape attempts).
 #
-# Cost: ~$0 in AWS bill (Falco runs on existing nodes). Some perf overhead
-# (single-digit % CPU per node).
+# Cost: no AWS charge for Falco itself. It uses node CPU and memory, set by
+# the resources block below.
 #
 # ────────────────────────────────────────────────────────────────────────────
 # CHART-VALUES VERIFICATION
@@ -20,20 +21,21 @@
 #   - driver.kind                       — selects the eBPF driver
 #   - containerSecurityContext.*        — container-level (privileged, runAsUser)
 #   - podSecurityContext.*              — pod-level (rarely needed for Falco)
-#   - falco.hostNetwork / falco.hostPID — namespaced under `falco`, not top-level
 #   - falcoctl.*                        — sub-chart for rule lifecycle
 #   - serviceAccount.annotations        — IRSA via eks.amazonaws.com/role-arn
-# These match the chart's templates/daemonset.yaml exactly. To re-verify:
-#   helm template falcosecurity/falco --version 4.13.0 --debug \
-#     | grep -A2 'hostNetwork\|hostPID\|privileged'
+# To re-verify the privilege the rendered DaemonSet gets:
+#   helm template falcosecurity/falco --version 4.13.0 \
+#     --set driver.kind=modern_ebpf | grep -n 'privileged\|hostPID\|hostNetwork'
 # ────────────────────────────────────────────────────────────────────────────
 #
 # ────────────────────────────────────────────────────────────────────────────
-# PSA EXCEPTION — Falco's eBPF driver requires CAP_BPF + CAP_PERFMON to load
-# the kernel eBPF programs that hook syscalls. Other PSA-restricted constraints
-# (runAsNonRoot, readOnlyRootFilesystem) can be honored, but the capability
-# requirement means the falco namespace runs PSA enforce=privileged. This is
-# the ONLY privileged namespace in this Terraform tree; documented loudly here.
+# PSA EXCEPTION: the falco namespace runs PSA enforce=privileged. The chart
+# runs the container privileged (containerSecurityContext below) and mounts
+# host paths, among them the runtime sockets. The least-privileged option,
+# driver.modernEbpf.leastPrivileged, swaps privileged for CAP_BPF, CAP_PERFMON,
+# CAP_SYS_RESOURCE and CAP_SYS_PTRACE, but restricted allows no capability
+# beyond NET_BIND_SERVICE and no hostPath, so the namespace stays privileged
+# either way. This is the ONLY privileged namespace in this Terraform tree.
 # ────────────────────────────────────────────────────────────────────────────
 ################################################################################
 
@@ -125,8 +127,8 @@ resource "aws_iam_role_policy_attachment" "falco_publish" {
 
 ################################################################################
 # Optional SNS forwarding — if falco_alert_email is set, create an SNS topic
-# and a subscription. Falco's chart can emit alerts to a webhook; we expose
-# the SNS topic ARN through values + leave the http-output wiring to the user.
+# and a subscription. Falco's chart can emit alerts to a webhook, but this
+# file does not configure that output; the wiring is left to the user.
 ################################################################################
 resource "aws_sns_topic" "falco_alerts" {
   count = var.enable_falco && trimspace(var.falco_alert_email) != "" ? 1 : 0
@@ -215,15 +217,9 @@ resource "helm_release" "falco" {
       tty = false
 
       # ──── Falco engine config (the `falco` key maps to falco.yaml fields).
-      # hostNetwork + hostPID live HERE in chart 4.13.x — they're the daemonset's
-      # pod-spec flags, not top-level chart values. (Verified against the
-      # chart's templates/daemonset.yaml.)
+      # falco.* keys are written to falco.yaml. No host namespace is set: the
+      # chart 4.13.x DaemonSet runs in the pod's own network and PID namespaces.
       falco = {
-        # Listen on the host's network + see all host processes — needed to
-        # correlate syscalls to container IDs across cgroups.
-        hostNetwork = true
-        hostPID     = true
-
         # Machine-readable output for SIEM ingestion.
         json_output                  = true
         json_include_output_property = true
@@ -236,7 +232,9 @@ resource "helm_release" "falco" {
         log_stderr = true
 
         # Tune to your noise level. "warning" is the typical signal/noise
-        # sweet spot; "notice" is verbose; "informational" is firehose.
+        # sweet spot; "notice" is verbose; "info" is firehose. Rules below
+        # the floor do not load, so NOTICE rules such as Terminal shell in
+        # container stay off at "warning".
         priority = "warning"
       }
 
@@ -263,9 +261,9 @@ resource "helm_release" "falco" {
 
       # ──── containerSecurityContext (container-level) ──────────────────────
       # Falco's eBPF driver needs to load kernel programs. The chart's
-      # container has `privileged: true` by default on the daemonset; we
-      # set it explicitly so the intent is in code (not an implicit default).
-      # runAsUser: 0 is required — the kernel won't load eBPF from non-root.
+      # container runs privileged by default; we set it explicitly so the
+      # intent is in code. See the PSA EXCEPTION note at the top.
+      # runAsUser = 0 pins UID 0 explicitly.
       containerSecurityContext = {
         privileged = true
         runAsUser  = 0
@@ -282,9 +280,10 @@ resource "helm_release" "falco" {
       }
 
       # ──── ServiceAccount — IRSA wiring (only when alerting is enabled) ────
-      # When falco_alert_email is set, Falco's pod publishes to SNS via the
-      # IRSA role we created above. When alerting is off, the annotations
-      # map is empty (no IRSA needed for stdout-only Falco).
+      # When falco_alert_email is set, the service account carries the IRSA
+      # role that can publish to the alerts topic. Nothing here makes Falco
+      # publish; the output that does is yours to add (14.13, step 7). When
+      # alerting is off, the annotations map is empty.
       serviceAccount = {
         create = true
         name   = "falco"
@@ -304,11 +303,9 @@ resource "helm_release" "falco" {
         }
       }
 
-      # K8s audit integration — Falco watches the audit log for control-plane
-      # actions (a privileged "kubectl exec into a pod in kube-system", etc).
-      auditLog = {
-        enabled = true
-      }
+      # No Kubernetes audit source is set here. The chart 4.13.x values have
+      # no auditLog key, and the k8saudit plugin needs audit events sent to a
+      # webhook. EKS writes its audit log to CloudWatch Logs; see 14.13.
     }),
   ]
 

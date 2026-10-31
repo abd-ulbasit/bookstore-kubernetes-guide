@@ -17,12 +17,13 @@ exceptions:
   - namespace: falco
     level: privileged
     reason: >-
-      The Falco DaemonSet needs CAP_BPF, CAP_PERFMON and CAP_SYS_ADMIN to attach
-      its modern eBPF driver (the chapter lists them), and falco.tf notes host PID
-      and network access too. The restricted profile lets a container add back
-      only NET_BIND_SERVICE. The chapter calls it the only privileged namespace
-      in the bookstore-platform tree.
-    upstream: https://falco.org/docs/setup/container/
+      The Falco DaemonSet runs its container privileged, as the chart does by
+      default, and mounts host paths, among them the runtime sockets. The
+      least-privileged mode swaps privileged for CAP_BPF, CAP_PERFMON,
+      CAP_SYS_RESOURCE and CAP_SYS_PTRACE, and restricted allows neither form:
+      it adds back only NET_BIND_SERVICE and forbids hostPath. The chapter calls
+      it the only privileged namespace in the bookstore-platform Terraform tree.
+    upstream: https://falco.org/docs/concepts/event-sources/kernel/
     chapter: 14-eks-in-production-a-to-z/13-runtime-defense-and-container-security.md
     expires: 2027-06-30
 
@@ -49,12 +50,14 @@ exceptions:
     chapter: 05-security/02-pod-security.md
     expires: 2027-06-30
 
-  - namespace: runtime-test
-    level: baseline
+  - namespace: kube-system
+    level: privileged
     reason: >-
-      The Falco test Pod runs a busybox image as root with no securityContext,
-      which restricted rejects and baseline admits. It only reads /etc/shadow to
-      trigger a Falco rule. The namespace is throwaway and the chapter deletes it.
+      The Cilium agent DaemonSet uses host networking, hostPath mounts,
+      capabilities such as NET_ADMIN and SYS_ADMIN, and Unconfined seccomp and
+      AppArmor profiles in the chart's default render. The baseline level forbids
+      each of these, so the namespace carries the privileged level. The Cilium
+      operator shares the namespace and runs with hostNetwork by chart default.
     upstream: https://kubernetes.io/docs/concepts/security/pod-security-standards/
-    chapter: 14-eks-in-production-a-to-z/13-runtime-defense-and-container-security.md
+    chapter: 14-eks-in-production-a-to-z/15-cilium-ebpf-on-eks.md
     expires: 2027-06-30

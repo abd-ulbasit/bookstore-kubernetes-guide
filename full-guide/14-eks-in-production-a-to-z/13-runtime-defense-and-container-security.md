@@ -6,17 +6,17 @@
 > spawned, a sensitive file being read, an unexpected outbound TCP
 > connection.** Runtime defense is the layer that watches the kernel
 > itself: **Falco** + **Tetragon** for syscall-level rules,
-> **GuardDuty for EKS Protection** for AWS-side cluster + flow log
-> anomalies, and the alerting glue (SNS → PagerDuty → human) that
-> closes the loop from "syscall fired" to "engineer triaging on
-> their laptop." Falco's namespace is the **one** privileged PSA
-> namespace in the tree precisely because the eBPF driver needs
-> kernel capabilities that `restricted` can't grant.
+> **GuardDuty** for AWS-side detections, and the alerting glue (SNS →
+> PagerDuty → human) that closes the loop from "syscall fired" to
+> "engineer triaging on their laptop." Falco's namespace is the **one**
+> privileged PSA namespace in the bookstore-platform Terraform tree,
+> because its eBPF driver needs capabilities and host paths that
+> `restricted` does not allow.
 
 **Estimated time:** ~30 min read · ~90 min hands-on
-**Prerequisites:** [Part 05 ch.02](../05-security/02-pod-security.md) — PSA stops bad Pod specs but not syscalls · [Part 14 ch.12](./12-supply-chain-security.md) — admission stops bad images but not behavior · [Part 13 ch.06](../05-security/03-supply-chain.md) — bookstore security baseline you'll extend
+**Prerequisites:** [Part 05 ch.02](../05-security/02-pod-security.md): PSA stops bad Pod specs but not syscalls · [Part 14 ch.12](./12-supply-chain-security.md): admission stops bad images but not behavior · [Part 05 ch.03](../05-security/03-supply-chain.md): image signing and SBOMs
 
-**You'll know after this:** • understand why admission + PSA + signing leave runtime as the unwatched layer · • deploy Falco + Tetragon for syscall-level rules and know why their namespace must be privileged-PSA · • enable GuardDuty for EKS Protection (control-plane + flow-log anomalies) and route findings · • configure SNS → PagerDuty alerting so a syscall trigger ends with an engineer on their laptop · • triage a Falco alert end-to-end (rule match → Pod → workload → owner → containment decision)
+**You'll know after this:** • understand why admission + PSA + signing leave runtime as the unwatched layer · • deploy Falco and know why its namespace must run at privileged PSA · • know what GuardDuty EKS Protection covers and what it costs after the trial · • configure SNS → PagerDuty alerting so a syscall trigger ends with an engineer on their laptop · • triage a Falco alert end-to-end (rule match → Pod → workload → owner → containment decision)
 
 <!-- tags: runtime-defense, falco, security, day-2, cloud -->
 
@@ -25,10 +25,10 @@
 [Part 05 ch.02](../05-security/02-pod-security.md) shipped Pod
 Security Admission. [Part 05 ch.03](../05-security/03-supply-chain.md)
 shipped image signing + SBOMs + Trivy. The bookstore-platform tree
-deepened both with Phase 14-R's `kyverno-image-signing.tf`
-ClusterPolicy. Those three layers — admission + image provenance +
-signing — answer the question *"what can land in my cluster?"* with
-high confidence.
+deepened both with its `kyverno-image-signing.tf` ClusterPolicy
+([14.12](./12-supply-chain-security.md)). Those three layers, admission +
+image provenance + signing, answer the question *"what can land in my
+cluster?"* with high confidence.
 
 They cannot answer the question *"what is my cluster doing *right now*?"*
 
@@ -48,8 +48,9 @@ A signed, scanned, admission-passed image can still:
 - **Reach for credentials it shouldn't.** A confused-deputy bug in a
   Go service makes it read
   `/var/run/secrets/eks.amazonaws.com/serviceaccount/token` (the IRSA
-  projected token) when no legitimate code path should. Runtime
-  defense sees the file-open syscall and fires.
+  projected token) when no legitimate code path should. Falco sees the
+  file open, but its default rules do not name that path, so catching
+  this takes a custom rule.
 - **Spawn a shell.** Web shells (a malicious request that causes the
   application to `exec /bin/sh`) are still one of the top attack
   patterns in 2026. The image is correct; the running process is
@@ -57,23 +58,22 @@ A signed, scanned, admission-passed image can still:
 
 The threat model post-admission is **container escape, privilege
 escalation, lateral movement, cryptojacking, credential theft, web
-shells**. Phase 14-R shipped [`falco.tf`](../examples/bookstore-platform/terraform/falco.tf)
-gated by `var.enable_falco = false` — off by default precisely because
-runtime defense adds a per-node eBPF agent that needs serious
-privilege (CAP_BPF + CAP_PERFMON + CAP_SYS_ADMIN), a privileged-PSA
-namespace, and an alert pipeline you actually intend to read at 3am.
-Off-by-default until you wire all three is the honest default.
+shells**. The bookstore-platform tree ships [`falco.tf`](../examples/bookstore-platform/terraform/falco.tf)
+gated by `var.enable_falco = false`. It is off by default because runtime
+defense adds a per-node eBPF agent that needs serious privilege, a
+privileged-PSA namespace, and an alert pipeline you actually intend to
+read at 3am. Off-by-default until you wire all three is the honest
+default.
 
-The complementary layer is **GuardDuty for EKS Protection**, AWS's
-managed threat-detection service. GuardDuty ingests **cluster audit
-logs** (the same audit log Falco watches for control-plane events)
-+ **VPC flow logs** (which Falco doesn't see) + **DNS query logs**
-+ **EKS-specific runtime signals** (with the optional Runtime
-Monitoring tier). It can't replace Falco's syscall-level depth, but
-it catches AWS-side patterns Falco can't see: a node IP suddenly
-talking to a known C2 IP, a Pod making DNS lookups for a domain in
-the threat-intel feed, an `aws sts get-caller-identity` call from
-inside a Pod that has no legitimate AWS API usage.
+The complementary layer is **GuardDuty**, AWS's managed threat-detection
+service. GuardDuty analyses CloudTrail management events, VPC flow logs
+and Route 53 Resolver DNS logs without extra setup. EKS Protection adds
+the EKS audit log, and Runtime Monitoring adds an agent on the nodes;
+both are paid after a 30-day free trial. It can't replace Falco's
+syscall-level depth, but it catches AWS-side patterns Falco can't see:
+a node IP talking to a known malicious address, a DNS lookup for a
+domain on its threat-intel list, or unusual AWS API calls in CloudTrail,
+including calls made from outside the cluster with a stolen token.
 
 [Part 11 ch.05](../11-advanced-production-patterns/05-secrets-at-scale.md)
 discussed credential theft prevention from the secrets-storage side.
@@ -92,60 +92,53 @@ attempting to use it suspiciously?
 
 **Three runtime-defense layers compose on EKS: kernel-level syscall
 visibility (Falco / Tetragon eBPF agents), cluster-level audit log
-analysis (Falco's audit-log integration + GuardDuty's EKS Audit Log
-Monitoring), and AWS-network-level anomaly detection (GuardDuty's
-VPC flow log + DNS analysis). Each catches a different class of
-attack; together they answer "what is happening at runtime" from
+analysis (GuardDuty's EKS Audit Log Monitoring, plus Falco's audit
+source where you wire one), and AWS-network-level anomaly detection
+(GuardDuty's flow log and DNS analysis). Each catches a different class
+of attack; together they answer "what is happening at runtime" from
 three angles.**
 
 The three layers:
 
-- **Layer 1 — Kernel syscall visibility (Falco / Tetragon).** A
+- **Layer 1: Kernel syscall visibility (Falco / Tetragon).** A
   per-node DaemonSet running an eBPF program attached to syscall
   tracepoints. Every `execve`, `openat`, `connect`, `mount`,
   `setuid` flows past the eBPF probe; the agent matches the syscall
-  + arguments against a ruleset and emits an alert on match. The
-  matching is **per-syscall, in the kernel, with no userspace
-  context-switch** for non-matching events — the overhead is
-  single-digit percent CPU per node even under sustained syscall
-  load. The Phase 14-R `falco.tf` uses `driver.kind: modern_ebpf`
-  which is the kernel >= 5.8 path; the AL2023 EKS-optimized AMI
-  ships kernel 6.x, so the modern-eBPF path is the default
-  supported road.
-- **Layer 2 — Cluster audit log analysis (Falco + GuardDuty EKS
-  Audit).** The Kubernetes API server's audit log records every
-  authenticated API call: who, what, when, what resource. Falco's
-  `auditLog.enabled = true` consumes the audit log; rules can match
-  patterns like *"`kubectl exec` into a Pod in `kube-system`"*,
-  *"creation of a ServiceAccount in `kube-system`"*, or *"`exec`
-  into a Pod by a user not in the SRE Group"*. GuardDuty for EKS
-  Audit Log Monitoring does the same thing AWS-side with managed
-  threat intelligence — patterns like *"unusual user agent"* or
-  *"suspicious GeoIP"* that need AWS's threat intel feed to be
-  meaningful.
-- **Layer 3 — AWS-network-level anomaly detection (GuardDuty
-  Runtime + VPC Flow + DNS).** Falco doesn't see VPC flow logs, DNS
-  query logs, or AWS API calls that originate from outside the
-  cluster's Pods (e.g., a stolen IRSA token used from an attacker
-  laptop). GuardDuty does. GuardDuty's EKS Runtime Monitoring (the
-  optional paid add-on) installs an AWS-managed eBPF agent that's
-  similar in shape to Falco but uses AWS's threat-intel-backed
-  ruleset and integrates findings into the GuardDuty/Security Hub
-  pane.
+  + arguments against a ruleset and emits an alert on match.
+  `falco.tf` sets `driver.kind = "modern_ebpf"`, a driver that loads no
+  kernel module and needs kernel 5.8 or later (see the driver comment in
+  `falco.tf`).
+- **Layer 2: Cluster audit log analysis (GuardDuty + Falco's audit
+  source).** The Kubernetes API server's audit log records every
+  authenticated API call: who, what, when, what resource. Falco reads
+  those events through its `k8saudit` plugin, which expects audit events
+  delivered to a webhook. `falco.tf` does not wire that (its header
+  leaves it as a TODO), and EKS writes its audit log to CloudWatch Logs
+  when control plane logging is on. On these clusters the audit-log layer
+  is therefore GuardDuty's EKS Audit Log Monitoring, which runs AWS-managed
+  detections over the audit stream.
+- **Layer 3: AWS-network-level anomaly detection (GuardDuty + VPC Flow +
+  DNS).** Falco doesn't see VPC flow logs, DNS query logs, or AWS API
+  calls that originate from outside the cluster's Pods (e.g., a stolen
+  IRSA token used from an attacker laptop). GuardDuty does, for the EC2
+  instances behind your nodes. Its optional Runtime Monitoring tier runs
+  an AWS-managed agent on the nodes and reports runtime events to
+  GuardDuty.
 
-**Falco vs Tetragon vs GuardDuty Runtime — the trade-off matrix:**
+**Falco vs Tetragon vs GuardDuty Runtime Monitoring: the trade-off matrix:**
 
-| Tool | Source | Overhead | Strength | When to use |
-|---|---|---|---|---|
-| **Falco** | CNCF (open-source, Sysdig origin) | Single-digit % CPU | Mature ruleset, large community, JSON output for any SIEM | Default starting point; works on any K8s |
-| **Tetragon** | CNCF (Cilium ecosystem) | Lower than Falco (kernel-event granularity, not syscall scan) | Deep Cilium integration, kernel-aware filtering | If you're already running Cilium (see ch.14.15) |
-| **GuardDuty Runtime** | AWS (managed) | Same as Falco (eBPF agent) | Zero-ops, AWS threat-intel built in, Security Hub integration | If you want a managed runtime layer; cost: ~$1/vCPU/month |
+| Tool | Source | Strength | When to use |
+|---|---|---|---|
+| **Falco** | CNCF (open-source, Sysdig origin) | Large rule set, JSON output for any SIEM, rules you own | Default starting point; works on any K8s |
+| **Tetragon** | Cilium project (CNCF) | Filters in the kernel with `TracingPolicy` objects | If you already run Cilium (see [14.15](./15-cilium-ebpf-on-eks.md)) |
+| **GuardDuty Runtime Monitoring** | AWS (managed) | AWS-managed detections, findings in GuardDuty and Security Hub | When Falco tuning costs more than the per-vCPU charge |
 
-You can run **Falco + GuardDuty Runtime simultaneously** — they don't
-conflict (different eBPF program slots), and they catch different
-classes of issues. The combined cost is ~$1/vCPU/month for the
-GuardDuty side; Falco is free aside from the per-node CPU/memory
-overhead.
+Falco costs the node CPU and memory in its resource requests. GuardDuty
+bills per unit after its 30-day trial; the rates are on the
+[GuardDuty pricing page](https://aws.amazon.com/guardduty/pricing/).
+A practical order: Falco first, GuardDuty EKS Audit Log Monitoring from
+day one, and Runtime Monitoring only if Falco tuning becomes the
+bottleneck.
 
 **The Falco rules engine.** A Falco rule has four parts:
 
@@ -154,45 +147,47 @@ overhead.
 - **Rule:** a `condition` (boolean expression over syscall events) +
   an `output` (the alert message format) + `priority` (debug, info,
   notice, warning, error, critical, alert, emergency).
-- **Override:** the upstream Falco rules ship hundreds of canonical
+- **Override:** the upstream Falco rules ship a large set of canonical
   detections; an override lets you tune a specific rule's priority,
   output, or condition for your environment without forking the
   ruleset.
 
-The Phase 14-R `falco.tf` sets `falco.priority = "warning"` — the
-signal/noise sweet spot. `notice` is verbose (you'll see warnings on
-legitimate ops). `info` is firehose territory (every `execve` in
-every container).
+`falco.tf` sets `falco.priority = "warning"`. The chart documents this
+setting as a minimum: rules at that level or more severe load, and the
+rest do not ([chart values](https://github.com/falcosecurity/charts/blob/master/charts/falco/values.yaml)
+in `helm show values falcosecurity/falco --version 4.13.0`). A NOTICE
+rule such as *Terminal shell in container* therefore does not run.
+`notice` is verbose (you'll see warnings on legitimate ops); `info` is
+firehose territory (every `execve` in every container).
 
 **Privileged-PSA exception.** Falco's eBPF driver loads a kernel eBPF
-program. The Linux capabilities required:
-
-- `CAP_BPF` — load the eBPF program.
-- `CAP_PERFMON` — attach to perf events (the tracepoint mechanism).
-- `CAP_SYS_ADMIN` — attach to syscall tracepoints (the kernel
-  protects this surface; SYS_ADMIN is required even on modern
-  kernels for syscall tracepoint attachment).
-
-The PSA `restricted` profile **forbids** all three. The PSA
-`privileged` profile permits them. The Phase 14-R `falco`
-namespace is therefore labelled `pod-security.kubernetes.io/enforce=privileged`
-— the **only** privileged namespace in the bookstore-platform tree.
-The chapter header in `falco.tf` documents this exception loudly.
+program. The chart runs the container privileged by default, and
+`falco.tf` sets `privileged = true` explicitly. The chart's
+least-privileged option, `driver.modernEbpf.leastPrivileged`, replaces
+privileged with four capabilities: `CAP_BPF`, `CAP_PERFMON`,
+`CAP_SYS_RESOURCE` and `CAP_SYS_PTRACE`. The DaemonSet also mounts host
+paths, among them `/etc`, `/usr`, `/lib/modules` and the container runtime
+sockets. The PSA `restricted` profile
+forbids privileged containers, allows no capability beyond
+`NET_BIND_SERVICE`, and forbids hostPath volumes
+([Pod Security Standards](https://kubernetes.io/docs/concepts/security/pod-security-standards/)).
+Either form therefore needs the `falco` namespace at `privileged`. The
+namespace is labelled `pod-security.kubernetes.io/enforce=privileged`, it
+is the only privileged namespace in the bookstore-platform Terraform tree,
+and `security/namespace-exceptions.yaml` records it with its reason and
+expiry.
 
 **The alert pipeline.** A Falco rule firing produces:
 
-1. **JSON to stdout** — every Falco Pod's `kubectl logs` output is
-   JSON-formatted alerts; CloudWatch Logs ingests them (Phase 14-R
-   `addons.tf` configures Fluent Bit or similar log forwarding).
-2. **HTTP output to a webhook** (optional; not in 14-R's default
-   wiring, but documented in the `falco.tf` comments) — Falco can
-   POST alerts to any HTTP endpoint. SNS Topic via Lambda or direct
-   to PagerDuty's Events API.
-3. **SNS topic** (Phase 14-R wires this *via the IRSA role* when
-   `falco_alert_email` is set) — Falco's IRSA role has
-   `sns:Publish` on the `${cluster}-falco-alerts` SNS topic; the
-   topic forwards to email (the var-gated email subscription) +
-   any other SNS subscribers (PagerDuty, Slack, Lambda).
+1. **JSON to stdout.** `falco.tf` sets `json_output`, so each Falco
+   Pod's container log is JSON. The cluster's log pipeline carries it to
+   CloudWatch Logs ([14.05](./05-logging-and-metrics-cost.md)).
+2. **HTTP output** (optional). Falco can POST alerts to an HTTP endpoint
+   through `http_output`. `falco.tf` does not set it.
+3. **SNS topic.** When `falco_alert_email` is set, `falco.tf` creates the
+   topic, an email subscription and an IRSA role that can only
+   `sns:Publish` to that topic. The role alone does not make Falco publish;
+   you add the output that does (step 7 of the hands-on).
 
 The bookstore-platform tree's default is **stdout-only**. Production
 forks should wire SNS → PagerDuty via the AWS Events Source for
@@ -201,14 +196,27 @@ patterns).
 
 The trap to keep in view: **Falco's default rules are noisy on
 day 1**. A fresh install fires on legitimate ops: `kubectl exec`
-into Pods is common during debugging; `apt-get install` in a build
-container fires the `Package Management Process` rule; CronJobs
-firing in `kube-system` fire several rules per minute. **The first
+into Pods is common during debugging; package managers in a build
+container trip the package-management rules; CronJobs in `kube-system`
+trip several rules per minute. **The first
 production-grade Falco operation is rule tuning** — adding
 `exception` clauses (or `override` rules) for the noise sources,
 not silencing the rule entirely. A team that doesn't tune for a
 week ends up disabling alerts; a team that tunes for a week ends
 up with a high-signal alert stream.
+
+## Threats and controls
+
+| Threat | Control in this chapter | Deeper |
+|---|---|---|
+| Unexpected process or shell in a container (cryptomining, web shell) | Falco rules at warning and above, routed to an alert pipeline (hands-on steps 3 to 5, 7) | 05.08 <!-- link-later: 05.08 -->, [15.10](../15-day-to-day-production-ops/10-incident-response-and-on-call.md) |
+| Credential read from a file (IRSA token, mounted secret) | Falco sensitive-file rule, and a custom rule for paths the defaults miss (steps 3, 6) | [14.03](./03-eks-addon-management.md) for IRSA scoping |
+| Container escape or activity directly on the node | Triage order: evidence first, then node replacement (Triage section) | [15.10](../15-day-to-day-production-ops/10-incident-response-and-on-call.md) |
+| Control-plane misuse, such as `kubectl exec` into kube-system | GuardDuty EKS Audit Log Monitoring (step 8) | [14.05](./05-logging-and-metrics-cost.md) for audit log retention |
+
+Image provenance is the earlier layer: see [14.12](./12-supply-chain-security.md)
+and [05.03](../05-security/03-supply-chain.md). This chapter starts after
+admission has passed.
 
 ## Diagrams
 
@@ -222,62 +230,32 @@ flowchart TB
     ebpf["Falco eBPF program<br/>(running in kernel space)<br/>captures syscall + args"]
     falco["Falco agent DaemonSet<br/>(falco ns, privileged PSA)<br/>matches against ruleset"]
     rule["Rule match:<br/>Read sensitive file untrusted<br/>priority: WARNING"]
-    json["JSON alert to stdout<br/>+ HTTP POST to SNS topic<br/>(IRSA sns:Publish)"]
-    sns["SNS topic:<br/>bookstore-falco-alerts"]
-    pd["PagerDuty Events API<br/>(via SNS->Lambda or<br/>SNS->HTTPS subscription)"]
+    json["JSON alert to stdout"]
+    sns["SNS topic<br/>(falco.tf, when alerting is on)"]
+    pd["PagerDuty<br/>(via its SNS integration)"]
     eng["On-call engineer's phone<br/>vibrates at 3am"]
-    cw["CloudWatch Logs<br/>(falco namespace log group)<br/>permanent audit trail"]
+    cw["CloudWatch Logs<br/>(cluster log pipeline)<br/>permanent audit trail"]
 
     pod --> syscall --> kernel --> ebpf --> falco --> rule --> json
-    json --> sns --> pd --> eng
     json --> cw
+    json -.->|"output you add (step 7)"| sns --> pd --> eng
 
     note["Triage flow:<br/>1. kubectl logs falco-* (find rule)<br/>2. kubectl describe pod TARGET<br/>3. kubectl exec for evidence<br/>4. cordon node + isolate Pod<br/>5. postmortem"]
     eng -.-> note
 ```
 
-### Diagram B — Falco vs Tetragon vs GuardDuty coverage matrix (ASCII)
-
-```text
-ATTACK PATTERN                          FALCO   TETRAGON   GD-RT    GD-EKS-AUDIT   GD-VPC-FLOW
-                                        eBPF    eBPF       eBPF     audit-log      flow-log
-─────────────────────────────────────  ──────  ─────────  ──────   ─────────────  ────────────
-Shell in container                      YES     YES        YES      NO             NO
-Sensitive file read (e.g., /etc/shadow) YES     YES        YES      NO             NO
-Container escape via /proc/self/root    YES     YES        YES      NO             NO
-Privilege escalation (setuid)           YES     YES        YES      NO             NO
-Unexpected outbound connect             YES     YES        YES      NO             FLOW-level
-DNS query to known-bad domain           rule-tune YES      YES      NO             NO
-Cryptojacking process (xmrig)           YES     YES        YES      NO             NO
-kubectl exec into kube-system Pod       audit   audit      audit    YES            NO
-Unauthorized ServiceAccount creation    audit   audit      audit    YES            NO
-Node IP -> C2 IP traffic                NO      NO         NO       NO             YES
-Stolen IRSA token used from outside     NO      NO         NO       limited        IP-level
-DNS exfiltration                        rule    rule       rule     NO             flow-only
-Suspicious GeoIP                        NO      NO         NO       YES            YES
-─────────────────────────────────────  ──────  ─────────  ──────   ─────────────  ────────────
-Default ruleset coverage out-of-box     200+    100+       AWS      AWS            AWS
-Cost (per node, monthly)                $0      $0         ~$1/vCPU $0 (free tier) ~$1/1M flow records
-Operational burden                      HIGH    HIGH       LOW      LOW            LOW
-                                        (rule-  (rule-
-                                         tune)   tune)
-
-RECOMMENDATION FOR BOOKSTORE-PLATFORM:
-  PHASE 1 (week 1):     Falco (Phase 14-R) + GuardDuty (Free Trial 30d, then EKS Audit only).
-  PHASE 2 (week 2-4):   Tune Falco rules; review GuardDuty findings; iterate.
-  PHASE 3 (month 2+):   GuardDuty Runtime Monitoring (paid) if Falco rule-tune is unsustainable.
-```
-
 ## Hands-on with the Bookstore Platform
+
+Output blocks in this section are illustrative. They show what to look
+for; this chapter's run did not capture them. The commands match chart
+4.13.0, the version `falco.tf` pins.
 
 ### 0. Prerequisites
 
 - The bookstore-platform tree applied with `enable_falco = true`.
-- A throwaway namespace `runtime-test` (PSA `baseline`, not
-  `restricted` — we'll intentionally do "bad" things).
 - `kubectl` configured for the cluster.
-- (Optional, but recommended) `falco_alert_email` set so SNS sends
-  email on alert.
+- (Optional, but recommended) `falco_alert_email` set so SNS has a
+  subscriber once you add the output in step 7.
 
 The Terraform shipping this is in
 [`../examples/bookstore-platform/terraform/falco.tf`](../examples/bookstore-platform/terraform/falco.tf).
@@ -287,16 +265,16 @@ PSA-privileged exception and the IRSA scoping.
 ### 1. Confirm Falco landed
 
 ```bash
-kubectl -n falco get pods
+kubectl -n falco get pods -l app.kubernetes.io/name=falco
 ```
 
-Expected:
+Illustrative output:
 
 ```text
 NAME                READY   STATUS    RESTARTS   AGE
-falco-abcde         1/1     Running   0          3m
-falco-fghij         1/1     Running   0          3m
-falco-klmno         1/1     Running   0          3m
+falco-abcde         2/2     Running   0          3m
+falco-fghij         2/2     Running   0          3m
+falco-klmno         2/2     Running   0          3m
 ```
 
 One Pod per node (DaemonSet). Verify the namespace is PSA-`privileged`:
@@ -306,89 +284,127 @@ kubectl get ns falco -o jsonpath='{.metadata.labels.pod-security\.kubernetes\.io
 # expected: privileged
 ```
 
-If that returns `restricted` or empty, Falco wouldn't have come up —
-the eBPF driver needs CAP_BPF/CAP_PERFMON which `restricted`
-forbids. This is the documented exception in `falco.tf`'s file
-header.
+If that returns `restricted` or empty, the Falco Pods are refused:
+`restricted` forbids the privileged container and host paths the
+DaemonSet needs. The exception is documented in `falco.tf`'s file header.
 
 ### 2. Inspect the loaded ruleset
 
 ```bash
-kubectl -n falco exec -it $(kubectl -n falco get pod -l app.kubernetes.io/name=falco -o jsonpath='{.items[0].metadata.name}') \
-  -- falco --list 2>/dev/null | head -20
+FALCO_POD=$(kubectl -n falco get pod -l app.kubernetes.io/name=falco -o jsonpath='{.items[0].metadata.name}')
+kubectl -n falco exec "$FALCO_POD" -c falco -- falco -L | grep -i 'sensitive\|shell'
 ```
 
-Expected (truncated):
-
-```text
-Rule: Read sensitive file untrusted
-Rule: Run shell untrusted
-Rule: Write below binary dir
-Rule: Write below root
-Rule: Modify binary dirs
-Rule: Mkdir binary dirs
-Rule: Change thread namespace
-Rule: Write below etc
-Rule: Create files below dev
-Rule: Read shell configuration file
-...
-```
-
-`falco --list` shows the active rules. Falco ships ~200 rules
-out-of-the-box; the count varies by chart version + which
-`falcoctl` rule packs are enabled (default ruleset only, in 14-R's
-config).
-
-### 3. Trigger a benign-but-detectable rule
-
-A `cat /etc/shadow` from inside a container is the canonical
-*Read sensitive file untrusted* trigger. Run it in `runtime-test`
-(a deliberately permissive namespace):
+`falco -L` prints the name and description of every loaded rule
+([CLI source](https://github.com/falcosecurity/falco/blob/master/userspace/falco/app/options.cpp)).
+`falco -l '<RULE>'` prints one rule's description, but not its condition.
+The condition lives in the rules file, so read it there:
 
 ```bash
-kubectl create namespace runtime-test \
-  --dry-run=client -o yaml | kubectl apply -f -
+kubectl -n falco exec "$FALCO_POD" -c falco -- \
+  grep -n -A12 'rule: Terminal shell in container' /etc/falco/falco_rules.yaml
+```
 
-kubectl label ns runtime-test \
-  pod-security.kubernetes.io/enforce=baseline --overwrite
+### 3. Trigger a sensitive-file read (secure form)
 
-cat <<EOF | kubectl apply -f -
+The rule `Read sensitive file untrusted` matches a read that succeeds.
+A non-root Pod may not be able to open the real `/etc/shadow`, so this
+step mounts a decoy ConfigMap over that path. The Pod runs under
+`restricted`. The Pod carries the [baseline](../01-core-workloads/01-pods.md#baseline)
+in full. The one addition is the `decoy` volume, which mounts the
+ConfigMap key `shadow` read-only over `/etc/shadow` with `subPath`, so the
+non-root process reads a harmless file at the path the rule watches.
+The Pod names UID 65534 (`nobody`), so `runAsNonRoot` has a number to check.
+
+```yaml
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: runtime-test
+  labels:
+    pod-security.kubernetes.io/enforce: restricted
+    pod-security.kubernetes.io/audit: restricted
+    pod-security.kubernetes.io/warn: restricted
+```
+
+```yaml
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: decoy-shadow
+  namespace: runtime-test
+data:
+  shadow: "decoy file for the Falco lab, not a credential\n"
+```
+
+```yaml
 apiVersion: v1
 kind: Pod
 metadata:
-  name: cat-shadow
+  name: sensitive-read
   namespace: runtime-test
 spec:
-  restartPolicy: Never
+  automountServiceAccountToken: false
+  securityContext:
+    runAsNonRoot: true
+    runAsUser: 65534
+    runAsGroup: 65534
+    seccompProfile:
+      type: RuntimeDefault
   containers:
-    - name: shell
-      image: public.ecr.aws/docker/library/busybox:1.36
-      command: ["sh", "-c", "cat /etc/shadow || true; sleep 5"]
-EOF
+    - name: app
+      image: public.ecr.aws/docker/library/busybox@sha256:73aaf090f3d85aa34ee199857f03fa3a95c8ede2ffd4cc2cdb5b94e566b11662 # busybox:1.36
+      command: ["sh", "-c", "cat /etc/shadow; sleep 3600"]
+      securityContext:
+        allowPrivilegeEscalation: false
+        readOnlyRootFilesystem: true
+        capabilities:
+          drop: ["ALL"]
+      resources:
+        requests:
+          cpu: 10m
+          memory: 16Mi
+        limits:
+          memory: 64Mi
+      volumeMounts:
+        - name: tmp
+          mountPath: /tmp
+        - name: decoy
+          mountPath: /etc/shadow
+          subPath: shadow
+          readOnly: true
+  volumes:
+    - name: tmp
+      emptyDir: {}
+    - name: decoy
+      configMap:
+        name: decoy-shadow
 ```
 
-Wait for the Pod to complete:
+Save the three objects in one file, separated by `---`, then apply it and
+check that the read succeeded:
 
 ```bash
-kubectl -n runtime-test wait pod/cat-shadow --for=condition=Ready --timeout=30s || true
-sleep 8
+kubectl apply -f runtime-test.yaml
+kubectl -n runtime-test wait pod/sensitive-read --for=condition=Ready --timeout=60s
+kubectl -n runtime-test logs sensitive-read
 ```
+
+The logs print the decoy line, which shows the read succeeded.
 
 ### 4. Read the Falco alert
 
 ```bash
-# Pull alerts from every Falco Pod (the relevant one is on the same node
-# as cat-shadow, but checking all is robust):
 for p in $(kubectl -n falco get pod -l app.kubernetes.io/name=falco -o name); do
   echo "==== $p ===="
-  kubectl -n falco logs "$p" --tail=200 | grep -i "shadow" || true
+  kubectl -n falco logs "$p" -c falco --tail=200 | grep -i "shadow" || true
 done
 ```
 
-Expected (one JSON line per alert):
+Illustrative output (one JSON line per alert):
 
 ```text
-{"output":"... Read sensitive file untrusted (file=/etc/shadow ...)","priority":"Warning","rule":"Read sensitive file untrusted","time":"...","output_fields":{"container.id":"<HEX>","container.image.repository":"public.ecr.aws/docker/library/busybox","fd.name":"/etc/shadow","proc.name":"cat","user.uid":0}}
+{"output":"... Read sensitive file untrusted (file=/etc/shadow ...)","priority":"Warning","rule":"Read sensitive file untrusted","time":"...","output_fields":{"container.id":"<HEX>","container.image.repository":"public.ecr.aws/docker/library/busybox","fd.name":"/etc/shadow","proc.name":"cat","user.uid":65534}}
 ```
 
 Five facts the alert tells you:
@@ -399,42 +415,23 @@ Five facts the alert tells you:
 - **proc.name** — `cat` (which process inside the container).
 - **fd.name** — `/etc/shadow` (which file).
 
-If you have `falco_alert_email` configured, an email arrives at the
-configured address with the alert JSON in the body (SNS-formatted).
+Falco writes the alert to stdout. Email arrives only after you add the
+output in step 7.
 
-### 5. Trigger a shell-in-container alert
+### 5. Trigger a shell in a container
 
-The other canonical rule — *Terminal shell in container* — fires
-on `kubectl exec` into a Pod when an interactive shell is the
-target.
+The other canonical rule, *Terminal shell in container*, fires on
+`kubectl exec` into a Pod when an interactive shell is the target. The
+rule is NOTICE, so with `falco.tf` as written (priority `warning`) it does
+not run and this step shows nothing:
 
 ```bash
-# Create a long-running test pod:
-cat <<EOF | kubectl apply -f -
-apiVersion: v1
-kind: Pod
-metadata:
-  name: longrun
-  namespace: runtime-test
-spec:
-  containers:
-    - name: shell
-      image: public.ecr.aws/docker/library/busybox:1.36
-      command: ["sh", "-c", "sleep 3600"]
-EOF
-
-kubectl -n runtime-test wait pod/longrun --for=condition=Ready --timeout=30s
-
-# Exec into it (this is the trigger):
-kubectl -n runtime-test exec longrun -- sh -c "echo hi from inside"
-
-# Wait + check alerts:
-sleep 5
-kubectl -n falco logs -l app.kubernetes.io/name=falco --tail=200 \
-  | grep -i 'shell\|terminal' | tail -5
+kubectl -n runtime-test exec -it sensitive-read -- sh
+# type exit to leave the shell
 ```
 
-Expected alert (truncated): `Terminal shell in container ... proc.name=sh`.
+To see the alert, set `falco.priority = "notice"` in a test copy of
+`falco.tf`, apply it, repeat the command, and set the value back.
 
 This is the alert that fires in production when an attacker (or a
 human operator) `exec`s into a workload Pod. The production runbook
@@ -449,88 +446,60 @@ The legitimate-shell case is *team-sre exec'ing into kube-system
 debug Pods* — happens daily, fires on every exec, drowns the
 signal. The right fix is an **exception**, not deletion.
 
-Pull the rule definition:
-
-```bash
-kubectl -n falco exec -it $(kubectl -n falco get pod -l app.kubernetes.io/name=falco -o jsonpath='{.items[0].metadata.name}') \
-  -- falco --describe 'Terminal shell in container'
-```
-
-The rule's condition includes `not user_known_shell_in_container_conditions`.
-The override is to populate that exception list — done via a
-Kubernetes ConfigMap mounted into the Falco Pod (the Helm chart's
-`customRules` value, not shipped by 14-R's default config).
-
-A minimal customRules snippet you'd add to the `falco.tf` Helm
-values (commented in 14-R; uncomment to apply):
+The rule's condition includes `not user_expected_terminal_shell_in_container_conditions`.
+The upstream rules define that macro as `(never_true)`, so the exception
+list is empty by default. Populate it in a custom rules file. The chart
+mounts `customRules` into `/etc/falco/rules.d`, which loads after the
+default rules file. `falco.tf` does not set `customRules` yet, so add this
+to the `helm_release` values and apply:
 
 ```yaml
 customRules:
-  custom-rules.yaml: |-
-    - macro: user_known_shell_in_container_conditions
-      condition: >
-        (container.image.repository in (kubectl_debug_images))
-        or (k8s.ns.name = "kube-system" and k8s.user.name in (sre_team_users))
+  sre-exceptions.yaml: |-
     - list: kubectl_debug_images
       items: ["nicolaka/netshoot", "registry.k8s.io/e2e-test-images/agnhost"]
-    - list: sre_team_users
-      items: ["alice@example.com", "bob@example.com"]
+    - macro: user_expected_terminal_shell_in_container_conditions
+      condition: or (k8s.ns.name = "kube-system" and container.image.repository in (kubectl_debug_images))
+      override:
+        condition: append
 ```
 
-After applying, the rule fires only on shells that **don't** match
-the exception. The unknown-user-exec on a workload Pod still fires;
-the SRE-exec on a kube-system debug Pod doesn't.
+`override: condition: append` adds the clause to the macro's default. The
+leading `or` is required, and the [Falco overriding docs](https://falco.org/docs/concepts/rules/overriding/)
+use the same form.
 
-### 7. Wire the SNS->PagerDuty bridge (production wiring sketch)
+After applying, an exec into a workload Pod still fires. An exec into a
+kube-system Pod whose image is on the list does not.
 
-The Phase 14-R `falco.tf` creates an SNS topic when
-`falco_alert_email` is set. To route SNS to PagerDuty's Events API,
-PagerDuty offers an AWS-managed Events Source: from the PagerDuty
-service config, "Add Integration → AWS SNS → copy integration URL"
-gives you an `events.pagerduty.com` URL.
+### 7. Wire the SNS → PagerDuty bridge
 
-Subscribe SNS to it (one-time, outside Terraform):
+`falco.tf` creates the alerts topic, the email subscription and the IRSA
+role when `falco_alert_email` is set. It does not configure Falco to publish
+to the topic. The output that does is yours to add: an `http_output`
+pointed at an endpoint you control that forwards to SNS, or the CloudWatch
+Logs path. Once alerts reach the topic, subscribe the endpoint PagerDuty
+gives you when you add its Amazon SNS integration to the service. Then a
+Falco alert becomes a PagerDuty incident.
 
-```bash
-TOPIC_ARN=$(aws sns list-topics \
-  --query 'Topics[?contains(TopicArn,`falco-alerts`)].TopicArn' \
-  --output text)
-PD_URL=https://events.pagerduty.com/integration/<INTEGRATION-KEY>/enqueue
+### 8. Enable GuardDuty EKS Protection
 
-aws sns subscribe \
-  --topic-arn "$TOPIC_ARN" \
-  --protocol https \
-  --notification-endpoint "$PD_URL"
-```
-
-Now any Falco alert → SNS → PagerDuty incident. PagerDuty's
-deduplication groups same-rule alerts; the on-call engineer sees
-one incident per rule, not per alert.
-
-### 8. Enable GuardDuty for EKS Protection
-
-GuardDuty doesn't ship in Phase 14-R's main tree (it's account-scope,
-covered by the `account-baseline/` directory and ch.14.17). Enable
-it manually for a quick demo:
+GuardDuty is account-scoped, so the account controls live in the account
+baseline ([14.17](./17-cross-region-dr-account-baseline-90-day-runbook.md)).
+For a quick try in one Region:
 
 ```bash
-# Enable GuardDuty in the cluster's region:
-aws guardduty create-detector --enable
-
-# Enable EKS Audit Log Monitoring (free):
+aws guardduty create-detector --enable   # skip if a detector already exists
 DETECTOR_ID=$(aws guardduty list-detectors --query 'DetectorIds[0]' --output text)
 aws guardduty update-detector \
   --detector-id "$DETECTOR_ID" \
   --features Name=EKS_AUDIT_LOGS,Status=ENABLED
 ```
 
-After ~15 minutes GuardDuty starts emitting findings to the
-GuardDuty console + (if Security Hub is enabled) Security Hub. The
-free tier covers Audit Log Monitoring; EKS Runtime Monitoring is
-paid (~$1/vCPU/month).
-
-For production, the right wiring is **Terraform in
-`account-baseline/`** (ch.14.17 covers the account-wide pattern).
+EKS Protection reads its own copy of the audit log, so control plane
+logging is not needed for detection. Turn control plane logging on only if
+you want the events in your account. The first 30 days are a free trial;
+after that, GuardDuty bills for the audit events it analyses. Runtime
+Monitoring is a separate, paid choice.
 
 ### 9. Clean up
 
@@ -538,116 +507,76 @@ For production, the right wiring is **Terraform in
 kubectl delete namespace runtime-test
 ```
 
-To remove Falco entirely, set `enable_falco = false` and
-`terraform apply`. The IAM role + SNS topic destroy cleanly because
-14-R's lifecycle order is namespace-Helm-IRSA-SNS in the right
-sequence.
+Deleting the namespace removes the Pod and the decoy ConfigMap. To remove
+Falco, set `enable_falco = false` and apply; Terraform removes the Helm
+release and the resources it created.
+
+## Triage a runtime alert
+
+The on-call's first move is **capture before the Pod dies**. Evidence
+comes first because containment destroys it. The order:
+
+1. **Identify the Pod and workload** from the alert's fields
+   (`k8s.ns.name`, `k8s.pod.name`).
+2. **Find the owner**: the GitOps repo's CODEOWNERS or the workload's
+   `team` label.
+3. **Capture evidence**, then contain. Capture the Pod's state, its
+   previous logs, its processes and its connections:
+
+   ```bash
+   kubectl get pod <TARGET> -n <NS> -o yaml > /tmp/pod-state.yaml
+   kubectl logs <TARGET> -n <NS> --previous --tail=1000 > /tmp/pod-logs.txt
+   kubectl exec <TARGET> -n <NS> -- ps -ef > /tmp/pod-ps.txt
+   kubectl exec <TARGET> -n <NS> -- ss -anptu > /tmp/pod-net.txt
+   ```
+
+   The `exec` lines need `ps` and `ss` in the image. Then isolate the Pod
+   with a deny-all NetworkPolicy that selects its labels. Deleting it
+   evicts the process, and the controller starts a replacement.
+4. **Escalate on recurrence.** If the alert fires again on the
+   replacement Pod, the image is suspect, not one instance. Roll back
+   ([15.07](../15-day-to-day-production-ops/07-rollback-playbook.md)).
+5. **Close with a postmortem** that has a named owner.
+
+The default rules' `container` macro is `container.id != host`, so most
+rules fire only for in-container activity. Activity on the node itself
+needs host-scope rules. Treat a node-level alert as the "drop everything"
+case: page everyone, cordon the node, snapshot its volume, and take it out
+of service. The recovery is **node replacement**, not Pod restart.
 
 ## How it works under the hood
 
-**The eBPF tracepoint path.** When a process in a container executes
-`open("/etc/shadow", O_RDONLY)`, the kernel processes the syscall
-through `do_sys_openat2`. That function has a **syscall tracepoint**
-attached — `sys_enter_openat`. The kernel checks: any eBPF programs
-attached to this tracepoint? Falco's eBPF program is attached. The
-program runs in kernel space, with access to the syscall arguments
-(filename, flags, etc.) + the calling process's context (PID, UID,
-cgroup, container.id derived from cgroup). The program writes an
-event record to a kernel ring buffer (a perf buffer or BPF ring
-buffer). Falco's userspace agent reads from the ring buffer, applies
-its rules, and emits alerts.
+**The event path.** The Falco driver captures the syscalls the rules need
+and hands them to Falco's userspace engine. The engine adds the container
+and Kubernetes metadata it can resolve, evaluates the rules, and writes
+each match as an alert. Because the rules run in userspace, a condition is
+ordinary text in the rules file.
 
-The reason this is **fast**: the kernel-space filter step happens
-**before** any context switch to userspace. If the event doesn't
-match any rule (the vast majority), the kernel ring buffer never
-fills with that event — it's filtered in-kernel. Only matching
-events cross the kernel-userspace boundary, where Falco's userspace
-agent processes them at the rate of rule-firings, not at the rate of
-all syscalls. For a busy node doing 100k syscalls/sec, Falco might
-process 10-100 events/sec.
+**The rules engine.** Falco is a streaming event processor. A rule's
+condition is a boolean expression over an event's fields, such as
+`proc.name`, `fd.name`, `container.image.repository` and `k8s.ns.name`.
+Falco watches the Kubernetes API for Pod and Namespace metadata to fill the
+`k8s.*` fields. Broad conditions match almost everything, so tuning starts
+there.
 
-**Why CAP_SYS_ADMIN.** The Linux kernel protects tracepoint
-attachment behind capabilities. Reading syscall data (filenames,
-arguments) leaks information about other containers on the same
-node — a tenant container could observe another tenant's syscalls if
-it had tracepoint access. Therefore `CAP_PERFMON` (since kernel 5.8)
-gates perf-event-based observation, and `CAP_BPF` gates eBPF program
-loading. For syscall **tracepoints** specifically, the kernel still
-requires `CAP_SYS_ADMIN` in practice on most production kernels —
-the cleaner CAP_BPF + CAP_PERFMON split was a 5.8 kernel addition,
-but full coverage of syscall tracepoint attachment landed gradually
-through 5.8-5.13. AL2023's 6.x kernel honors the split, but
-defensive Helm charts still request CAP_SYS_ADMIN for compatibility.
+**The Tetragon approach.** Tetragon attaches to kernel events in a similar
+way but filters them inside the kernel with `TracingPolicy` objects, so its
+userspace agent receives fewer events. Its filters are less expressive than
+Falco's rule language. For clusters on Cilium ([14.15](./15-cilium-ebpf-on-eks.md)),
+it is the natural sibling; for standalone runtime defense, Falco is the more
+established choice.
 
-**The Falco rules engine.** Internally Falco is a streaming event
-processor: events flow in from the eBPF buffer (or other sources —
-the K8s audit-log webhook source feeds the same engine). The rules
-engine is a boolean expression evaluator over an event's fields.
-Field references like `proc.name`, `fd.name`, `container.image.repository`,
-`k8s.ns.name` are extracted from the event + cgroup hierarchy +
-Kubernetes annotation enrichment (Falco watches the K8s API for
-Pod/Namespace metadata, indexes by container ID, joins to events).
-Rules are compiled into bytecode for fast evaluation. The rule with
-the deepest match (longest condition expression) wins; the rule's
-`output` template fills in event fields and emits the alert.
+**GuardDuty's detections.** GuardDuty runs AWS-managed detections over the
+audit log and the other sources it reads. Audit-log analysis needs no agent.
+Runtime Monitoring adds an AWS-managed agent on the nodes. The finding types
+are listed on the
+[EKS Protection page](https://docs.aws.amazon.com/guardduty/latest/ug/kubernetes-protection.html).
 
-**JSON output + stdout collection.** Falco's JSON output goes to its
-stdout. The Falco DaemonSet's Pods log to kubelet, which forwards
-logs to Fluent Bit (or the EKS-managed log forwarder), which ships
-to CloudWatch Logs. The CloudWatch log group `/aws/eks/<cluster>/falco`
-(or whatever Phase 14-R's log forwarder configured) accumulates the
-permanent audit trail. CloudWatch Logs Insights can query the JSON
-events; subscription filters fanout to Lambda / Kinesis / a SIEM.
+**When to pay for Runtime Monitoring.** When Falco's rule tuning costs more
+engineering time than the per-vCPU charge. Stay with Falco when you want full
+control of the ruleset and no per-vCPU bill.
 
-**The SNS+IRSA path for direct webhook output.** Falco's HTTP output
-posts an alert JSON to a configured URL. The `falco.tf` IRSA role
-has `sns:Publish` scoped to the `${cluster}-falco-alerts` topic; a
-custom Falco `http_output.url = https://<sns-endpoint>` (after a
-sidecar transforms Falco's JSON to SNS's PublishInput JSON, since
-SNS doesn't accept arbitrary JSON directly) sends alerts straight
-to SNS. The simpler production wiring is **Falco → CloudWatch Logs
-→ subscription filter → Lambda → SNS** (CloudWatch Logs is the
-ingestion path, Lambda transforms + publishes). Either pattern
-works; the CloudWatch-Logs path is more debuggable and pays the
-CloudWatch Logs ingest charge ($0.50/GB) plus Lambda invocations.
-
-**Tetragon's lower-overhead approach.** Tetragon uses **kernel
-events** (e.g., `tracepoint:syscalls:sys_enter_openat`,
-`kprobe:do_sys_openat2`) in a similar way to Falco, but with an
-emphasis on **in-kernel filtering**: Tetragon's policies (called
-`TracingPolicy`) compile expressive filters into eBPF programs that
-run in-kernel. Where Falco's eBPF program captures the event and
-sends it to userspace for rule matching, Tetragon's eBPF program
-does more filtering in-kernel — the userspace agent receives fewer
-events. The trade-off: Tetragon's filters are less expressive than
-Falco's full rule language (no string-pattern matching across the
-event stream), but the events that do cross the boundary already
-matter. For organizations on Cilium (ch.14.15), Tetragon is the
-natural sibling; for standalone runtime defense, Falco is the more
-mature standalone choice.
-
-**GuardDuty for EKS audit log monitoring.** AWS subscribes to the
-EKS control plane audit log (which Phase 14-R's `eks.tf` already
-enables under `cluster_enabled_log_types = ["api","audit",...]`).
-GuardDuty's managed analyzer runs threat-intel-backed pattern
-matching: unusual user agents, anomalous API call patterns,
-suspicious GeoIP source IPs for `kubectl exec` events, calls to
-`exec` on `kube-system` Pods by users not previously seen. Findings
-land in the GuardDuty console + Security Hub (if enabled) + EventBridge
-(for routing to SNS/Lambda/etc). The integration is **zero-ops** —
-no agent to install; AWS handles the analysis.
-
-**GuardDuty for EKS Runtime Monitoring (paid).** AWS installs an
-AWS-managed eBPF agent (the GuardDuty agent) as a DaemonSet in
-`amazon-guardduty` namespace. It runs the same kind of syscall +
-process + network watch Falco runs, but with AWS's threat-intel
-ruleset. Cost is ~$0.20-1.00 per vCPU per month (varies by region +
-data volume). When to enable: when Falco rule-tuning is more
-operational burden than the engineering time you can give it. When
-to stick with Falco: when you want full ruleset control + rule-tune
-discipline + no per-vCPU bill.
-
-## Production notes
+## Operating notes
 
 > **In production:** Falco's default ruleset is a *starting point*,
 > not a steady-state config. The first month is heavy rule-tuning:
@@ -670,10 +599,10 @@ discipline + no per-vCPU bill.
 > postmortem (false-positive → tune rule; true-positive → escalate).
 
 > **In production:** Falco's alert JSON is the forensic record.
-> Forwarded to CloudWatch Logs with a long retention window (180-365
-> days for compliance), it's the source for the post-incident
-> question *"when did this start happening?"* and *"how many other
-> Pods exhibited the same pattern in the prior week?"* CloudWatch
+> Forward it to CloudWatch Logs and keep it for the retention your audit
+> requires ([14.05](./05-logging-and-metrics-cost.md)). It is the source for the
+> post-incident question *"when did this start happening?"* and *"how many
+> other Pods exhibited the same pattern in the prior week?"* CloudWatch
 > Logs Insights queries the JSON natively:
 >
 > ```text
@@ -682,55 +611,14 @@ discipline + no per-vCPU bill.
 > | stats count() by output_fields.container.image.repository
 > ```
 
-> **In production:** GuardDuty's free tier (EKS Audit Log Monitoring)
-> is **always worth enabling** — it costs zero, ingests the
-> already-enabled audit log, and catches AWS-side patterns Falco
-> can't. The paid tier (Runtime Monitoring) is worth it when Falco's
-> rule-tuning burden exceeds the team's engineering budget. The
-> two-layer pattern (Falco for syscall depth + GuardDuty for
-> AWS-side patterns) is the production-grade default.
+> **In production:** GuardDuty's 30-day trial costs nothing. After it,
+> EKS Protection keeps billing for the audit events it analyses, so decide
+> that on purpose and name the cost owner in the runbook. Runtime
+> Monitoring is a second, paid decision.
 
-> **In production:** Evidence collection. When a runtime alert
-> fires, the on-call's first move is *capture before the Pod
-> dies*. The standard sequence:
->
-> ```bash
-> # 1. Capture Pod state + last container logs.
-> kubectl get pod <TARGET> -n <NS> -o yaml > /tmp/pod-state.yaml
-> kubectl logs <TARGET> -n <NS> --previous --tail=1000 > /tmp/pod-logs.txt
->
-> # 2. Capture process list inside the Pod (if still alive).
-> kubectl exec <TARGET> -n <NS> -- ps -ef > /tmp/pod-ps.txt
->
-> # 3. Capture network connections.
-> kubectl exec <TARGET> -n <NS> -- ss -anptu > /tmp/pod-net.txt
->
-> # 4. Capture filesystem snapshot of suspicious paths.
-> kubectl exec <TARGET> -n <NS> -- tar c /tmp /var/tmp \
->   > /tmp/pod-fs.tar
->
-> # 5. NOW cordon the node + isolate the Pod by adding a deny-all
-> #    NetworkPolicy targeting the Pod's labels.
-> ```
->
-> Evidence-then-isolation is the order; the reverse loses data.
-
-> **In production:** Container escape is the **rarest but worst**
-> attack class. The default ruleset's `container.id != "host"`
-> check ensures the alert fires for *in-container* activity; if
-> Falco fires with `container.id = host`, an attacker has escaped
-> the container boundary and is operating on the node directly.
-> This is the "drop everything" alert — page everyone, cordon the
-> node, snapshot the node's volume, take the node out of service.
-> The recovery is **node replacement**, not Pod restart.
-
-> **In production:** Falco's per-node overhead is ~5% CPU + 200 MB
-> memory under normal load. On a Karpenter-managed cluster with
-> mixed instance types, the absolute CPU budget varies — a t3.medium
-> (2 vCPU) loses 0.1 vCPU; an m7g.4xlarge (16 vCPU) loses 0.8 vCPU.
-> The `resources.limits` in 14-R's `falco.tf` is `cpu: 1, memory: 1Gi`
-> — generous for the worst-case node. Right-size after a week of
-> production data with VPA recommendations.
+> **In production:** `falco.tf` requests 100m CPU and 512Mi memory, with
+> limits of 1 CPU and 1Gi. Measure the real use on your node sizes, then
+> adjust these values.
 
 ## Quick Reference
 
@@ -739,30 +627,28 @@ discipline + no per-vCPU bill.
 kubectl -n falco get pods -l app.kubernetes.io/name=falco
 
 # Tail the alert stream from all Falco Pods.
-kubectl -n falco logs -l app.kubernetes.io/name=falco -f --tail=10
+kubectl -n falco logs -l app.kubernetes.io/name=falco -c falco -f --tail=10
 
-# List all loaded rules.
-kubectl -n falco exec <FALCO-POD> -- falco --list
-
-# Describe a specific rule (condition + output).
-kubectl -n falco exec <FALCO-POD> -- falco --describe '<RULE-NAME>'
+# List loaded rules, then read one rule's condition from the rules file.
+FALCO_POD=$(kubectl -n falco get pod -l app.kubernetes.io/name=falco -o jsonpath='{.items[0].metadata.name}')
+kubectl -n falco exec "$FALCO_POD" -c falco -- falco -L
+kubectl -n falco exec "$FALCO_POD" -c falco -- grep -n -A12 'rule: <RULE-NAME>' /etc/falco/falco_rules.yaml
 
 # Search alerts by rule name (CloudWatch Logs Insights query).
 fields @timestamp, output_fields.container.image.repository, rule
 | filter rule = "<RULE-NAME>"
 | stats count() by output_fields.container.image.repository
 
-# Trigger a benign Falco alert for testing.
-kubectl run cat-shadow --image=public.ecr.aws/docker/library/busybox:1.36 \
-  --restart=Never --rm -i --tty -- cat /etc/shadow
+# Exercise the sensitive-file rule with the secure test Pod.
+kubectl -n runtime-test exec sensitive-read -- cat /etc/shadow
 
-# Enable GuardDuty EKS Audit Log Monitoring (free).
-aws guardduty create-detector --enable
+# Enable GuardDuty EKS Audit Log Monitoring (30-day trial, then billed).
+aws guardduty create-detector --enable   # skip if a detector exists
 DET=$(aws guardduty list-detectors --query 'DetectorIds[0]' --output text)
 aws guardduty update-detector --detector-id "$DET" \
   --features Name=EKS_AUDIT_LOGS,Status=ENABLED
 
-# List GuardDuty findings (newest first).
+# List GuardDuty findings updated in the last day.
 aws guardduty list-findings --detector-id "$DET" \
   --finding-criteria '{"Criterion":{"updatedAt":{"GreaterThan":'$(($(date +%s%3N) - 86400000))'}}}'
 
@@ -776,16 +662,15 @@ kubectl exec <TARGET> -n <NS> -- ss -anptu > /tmp/pod-net.txt
 Runtime-defense checklist (the production setup is right when all six are yes):
 
 - [ ] Falco DaemonSet running on every node (`enable_falco = true`).
-- [ ] `falco` namespace labelled PSA `enforce=privileged` — the only
-      privileged namespace.
-- [ ] Falco IRSA role has `sns:Publish` to the alerts topic and
-      *only* that topic.
-- [ ] SNS topic forwards to PagerDuty (or your incident-management
-      system) — alerts page the on-call within minutes.
-- [ ] CloudWatch Logs retention for Falco alerts >= 180 days
-      (compliance baseline; 365 days for regulated workloads).
-- [ ] GuardDuty for EKS Audit Log Monitoring enabled (free tier).
-      Production accounts also enable Runtime Monitoring (paid).
+- [ ] `falco` namespace labelled PSA `enforce=privileged`, and no other
+      privileged namespace in the Terraform tree.
+- [ ] Falco's IRSA role has `sns:Publish` to the alerts topic and *only*
+      that topic, and the output that uses it is wired (step 7).
+- [ ] The alerts reach on-call: a tested page from PagerDuty, not just an
+      email.
+- [ ] Falco alert logs are kept for the retention your audit requires.
+- [ ] GuardDuty EKS Protection is enabled, and someone owns its bill after
+      the trial.
 
 ## Test your understanding
 
@@ -798,24 +683,24 @@ Runtime-defense checklist (the production setup is right when all six are yes):
 
    </details>
 
-2. **Falco fires the rule "Shell spawned by web service" at 03:14. PagerDuty pages you. Walk through the chapter's triage runbook.**
+2. **Falco fires *Read sensitive file untrusted* on a web Pod at 03:14. PagerDuty pages you. Walk through the triage section.**
    <details><summary>Show answer</summary>
 
-   (1) Identify the Pod and workload from the alert's labels (`k8s.pod.name`, `k8s.namespace`); (2) check who owns the workload (the GitOps repo's CODEOWNERS or the workload's `team` label); (3) decide containment — for a confirmed shell exec on a webserver Pod, `kubectl delete pod <name>` evicts it (workload controller spawns a replacement, attacker loses persistence); (4) preserve evidence — `kubectl exec -- ps auxf` and the Falco alert JSON go into the incident channel; (5) escalate if the alert recurs on the replacement Pod (it indicates the image itself is compromised, not just one instance) — at that point the rollback playbook (15.07) kicks in. The runbook ends with a postmortem owner assigned and a 5-day clock to draft.
+   (1) Identify the Pod and workload from the alert's fields (`k8s.pod.name`, `k8s.ns.name`); (2) find the owner from the GitOps repo's CODEOWNERS or the workload's `team` label; (3) capture evidence first (Pod state, previous logs, `ps`, `ss`), then isolate the Pod or delete it, since a replacement comes up without the attacker's process; (4) if the alert fires again on the replacement, the image is suspect, so roll back ([15.07](../15-day-to-day-production-ops/07-rollback-playbook.md)); (5) the runbook ends with a postmortem that has a named owner.
 
    </details>
 
-3. **You install Falco and the cluster starts running a noticeable percentage hotter on CPU. The team wants to disable it. What's the better answer and why?**
+3. **You install Falco and the cluster starts running a noticeably hotter on CPU. The team wants to disable it. What's the better answer and why?**
    <details><summary>Show answer</summary>
 
-   Tune, don't disable. Falco's overhead is single-digit % CPU at default rules — if a cluster is running noticeably hotter, the noise is usually in the ruleset (rules that match on common syscalls without specific filters), not the eBPF probe itself. Audit the rule list, mute the ones that aren't actionable for your environment (e.g., disable the "shell spawned by container" rule for tenants whose images intentionally include shells, or tighten the rule to exclude specific images). The chapter's discipline: every Falco rule has a runbook anchor and an owner; rules that don't are tech debt, not runtime defense. Disabling Falco trades observability for CPU — that's the wrong trade.
+   Measure first, then tune. Falco's cost is the node CPU and memory in its resource requests, and that cost grows with how many rules match common syscalls. If the cluster is hotter, the noise is usually in the ruleset, not the eBPF probe itself. Audit the rule list and mute the rules that are not actionable for your environment, for example by adding an exception for a tenant whose images intentionally include shells, or by tightening the rule. The chapter's discipline: every Falco rule has a runbook anchor and an owner; rules that don't are tech debt, not runtime defense. Disabling Falco trades observability for CPU, which is the wrong trade.
 
    </details>
 
-4. **Hands-on extension — `kubectl exec` into a bookstore Pod and run `cat /var/run/secrets/eks.amazonaws.com/serviceaccount/token`. What does Falco do?**
+4. **Hands-on extension: `kubectl exec` into a test Pod and run `cat` on the IRSA token path. What does Falco do?**
    <details><summary>What you should see</summary>
 
-   The default Falco ruleset includes "Read sensitive file untrusted" — the IRSA token path matches. An alert fires within ~1 second of the read syscall; the alert lands in the configured sink (SNS → PagerDuty if wired, stdout otherwise). The Pod's process and command line are captured. This is the canonical "confused deputy" detection — legitimate code in the Pod uses the AWS SDK which reads the token at startup once; a `kubectl exec` cat of the same file is unusual and worth knowing. If the alert is too noisy for your team's exec workflow, the rule has an exception list — but the chapter argues most teams find this rule worth keeping.
+   Nothing, with the default rules. The upstream sensitive-file list is `/etc/shadow`, `/etc/sudoers`, `/etc/pam.conf` and `/etc/security/pwquality.conf`, plus the `/etc/sudoers.d` and `/etc/pam.d` directories, and the IRSA token path is not among them. To catch it, add a custom rule for that path, in the same `customRules` form as step 6. Run the test only in a throwaway namespace, not against a bookstore workload.
 
    </details>
 
@@ -825,6 +710,12 @@ Runtime-defense checklist (the production setup is right when all six are yes):
   <https://falco.org/docs/>; the canonical Falco reference,
   including the rule language, the eBPF driver options, and the
   alert output formats this chapter walks.
+- **Falco overriding rules**
+  <https://falco.org/docs/concepts/rules/overriding/>; the `override`
+  and `append` syntax used in step 6.
+- **Falco kernel event sources**
+  <https://falco.org/docs/concepts/event-sources/kernel/>; the driver
+  options, including the least-privileged mode for modern eBPF.
 - **Falco rules repository**
   <https://github.com/falcosecurity/rules>; the upstream rule
   packs (default `falco_rules.yaml` + the `application_rules.yaml`
@@ -835,13 +726,18 @@ Runtime-defense checklist (the production setup is right when all six are yes):
   story this chapter contrasts with Falco.
 - **AWS GuardDuty for EKS Protection**
   <https://docs.aws.amazon.com/guardduty/latest/ug/kubernetes-protection.html>;
-  the AWS-side documentation for both the EKS Audit Log Monitoring
-  (free) and EKS Runtime Monitoring (paid) tiers this chapter covers.
-- **Rosso, *Production Kubernetes* — *Cluster Hardening***;
-  the chapter's runtime-defense thinking is in line with Rosso's
-  hardening + day-2 chapter, particularly the "what to do when an
-  alert fires" runbook discipline this chapter's production notes
-  borrow from.
+  the AWS-side documentation for EKS Audit Log Monitoring and EKS Runtime
+  Monitoring, including the 30-day trial and the finding types.
+- **AWS GuardDuty foundational data sources**
+  <https://docs.aws.amazon.com/guardduty/latest/ug/guardduty_data-sources.html>;
+  CloudTrail management events, VPC flow logs and DNS logs, which
+  GuardDuty analyses without extra setup.
+- **AWS GuardDuty pricing**
+  <https://aws.amazon.com/guardduty/pricing/>; the billing units for each
+  protection plan.
+- **Kubernetes Pod Security Standards**
+  <https://kubernetes.io/docs/concepts/security/pod-security-standards/>;
+  what `restricted` and `privileged` allow.
 - **NIST SP 800-190 — Application Container Security Guide**
   <https://csrc.nist.gov/publications/detail/sp/800-190/final>; the
   US government guidance on container security including runtime
