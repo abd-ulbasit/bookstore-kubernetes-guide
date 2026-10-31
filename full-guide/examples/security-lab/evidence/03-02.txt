@@ -5,10 +5,11 @@
 # The lab used its own namespace, p03-02-secrets. The chapter names the
 # bookstore namespace and applies the same files. Lines that name the lab
 # namespace are kept as captured.
-# The db-credentials value was generated when the script started and written
-# into 16-db-credentials.yaml in place of the demo literal. The script never
-# prints it: where a check needs the value, the transcript shows a count, a
-# length, a key name or a checksum.
+# Step 2 applied the 03.01 Secret, db-credentials, with its demo literal. It
+# then applied a second Secret, db-credentials-generated, whose value was
+# generated when the script started and written into the manifest by sed. The
+# script never prints that value: where a check needs it, the transcript shows
+# a count, a length, a key name or a checksum.
 ## step 0: versions and a clean start
 $ kubectl version
 Client Version: v1.37.2
@@ -26,21 +27,25 @@ serviceaccount/secret-reader created
 serviceaccount/secret-lister created
 serviceaccount/pod-creator created
 
-## step 2: the db-credentials Secret, with a value generated now
-$ PW=$(openssl rand -hex 16)   # generated now, never printed
-$ sed -e 's/devpassword/$PW/' -e 's/namespace: bookstore/namespace: p03-02-secrets/' examples/bookstore/raw-manifests/16-db-credentials.yaml | kubectl apply -f -
+## step 2: the 03.01 Secret, then a second Secret with a value generated now
+$ sed -e 's/namespace: bookstore/namespace: p03-02-secrets/' examples/bookstore/raw-manifests/16-db-credentials.yaml | kubectl apply -f -   # 03.01's Secret, demo literal
 secret/db-credentials created
-$ kubectl get secret db-credentials -n p03-02-secrets -o jsonpath='{.data.POSTGRES_DB}'; echo
+$ kubectl get secret db-credentials -n p03-02-secrets -o name
+secret/db-credentials
+$ PW=$(openssl rand -hex 16)   # generated now, never printed
+$ sed -e 's/devpassword/$PW/' -e 's/name: db-credentials/name: db-credentials-generated/' -e 's/namespace: bookstore/namespace: p03-02-secrets/' examples/bookstore/raw-manifests/16-db-credentials.yaml | kubectl apply -f -
+secret/db-credentials-generated created
+$ kubectl get secret db-credentials-generated -n p03-02-secrets -o jsonpath='{.data.POSTGRES_DB}'; echo
 Ym9va3N0b3Jl
-$ kubectl get secret db-credentials -n p03-02-secrets -o jsonpath='{.data.POSTGRES_DB}' | base64 -d; echo
+$ kubectl get secret db-credentials-generated -n p03-02-secrets -o jsonpath='{.data.POSTGRES_DB}' | base64 -d; echo
 bookstore
-$ kubectl get secret db-credentials -n p03-02-secrets -o jsonpath='{.data.POSTGRES_PASSWORD}' | base64 -d | wc -c | tr -d ' '
+$ kubectl get secret db-credentials-generated -n p03-02-secrets -o jsonpath='{.data.POSTGRES_PASSWORD}' | base64 -d | wc -c | tr -d ' '
 32
 $ decoded POSTGRES_PASSWORD equals $PW (compared, not printed)
 yes
-$ kubectl get secret db-credentials -n p03-02-secrets -o jsonpath='{.metadata.annotations.kubectl\.kubernetes\.io/last-applied-configuration}' | grep -c stringData
+$ kubectl get secret db-credentials-generated -n p03-02-secrets -o jsonpath='{.metadata.annotations.kubectl\.kubernetes\.io/last-applied-configuration}' | grep -c stringData
 1
-$ kubectl get secret db-credentials -n p03-02-secrets -o jsonpath='{...last-applied-configuration}' | grep -c "$PW"   # the generated value, counted not printed
+$ kubectl get secret db-credentials-generated -n p03-02-secrets -o jsonpath='{...last-applied-configuration}' | grep -c "$PW"   # the generated value, counted not printed
 1
 $ grep -n 'password=$(POSTGRES_PASSWORD)' examples/bookstore/raw-manifests/10-catalog-deploy.yaml examples/bookstore/raw-manifests/14-orders-deploy.yaml
 examples/bookstore/raw-manifests/10-catalog-deploy.yaml:164:              value: "host=postgres.bookstore.svc.cluster.local port=5432 user=$(POSTGRES_USER) password=$(POSTGRES_PASSWORD) dbname=$(POSTGRES_DB) sslmode=disable"
@@ -50,7 +55,7 @@ examples/bookstore/raw-manifests/14-orders-deploy.yaml:109:              value: 
 $ kubectl apply -f -   # Role db-credentials-reader and its RoleBinding in p03-02-secrets
 role.rbac.authorization.k8s.io/db-credentials-reader created
 rolebinding.rbac.authorization.k8s.io/db-credentials-reader created
-$ kubectl auth can-i get secret/db-credentials -n p03-02-secrets --as=system:serviceaccount:p03-02-secrets:secret-reader
+$ kubectl auth can-i get secret/db-credentials-generated -n p03-02-secrets --as=system:serviceaccount:p03-02-secrets:secret-reader
 yes
 $ kubectl auth can-i get secret/other-creds -n p03-02-secrets --as=system:serviceaccount:p03-02-secrets:secret-reader
 no
@@ -62,8 +67,8 @@ $ kubectl auth can-i create secrets -n p03-02-secrets --as=system:serviceaccount
 no
 $ kubectl get secrets -n p03-02-secrets --as=system:serviceaccount:p03-02-secrets:secret-reader -o name
 Error from server (Forbidden): secrets is forbidden: User "system:serviceaccount:p03-02-secrets:secret-reader" cannot list resource "secrets" in API group "" in the namespace "p03-02-secrets"
-$ kubectl get secrets -n p03-02-secrets --as=system:serviceaccount:p03-02-secrets:secret-reader --field-selector metadata.name=db-credentials -o name
-secret/db-credentials
+$ kubectl get secrets -n p03-02-secrets --as=system:serviceaccount:p03-02-secrets:secret-reader --field-selector metadata.name=db-credentials-generated -o name
+secret/db-credentials-generated
 $ kubectl create secret generic extra -n p03-02-secrets --from-literal=k=v --as=system:serviceaccount:p03-02-secrets:secret-reader
 error: failed to create secret secrets is forbidden: User "system:serviceaccount:p03-02-secrets:secret-reader" cannot create resource "secrets" in API group "" in the namespace "p03-02-secrets"
 
@@ -76,7 +81,7 @@ $ kubectl get secrets -n p03-02-secrets --as=system:serviceaccount:p03-02-secret
 "POSTGRES_PASSWORD"
 "POSTGRES_USER"
 
-## step 5: a Pod that may only create Pods reads the Secret
+## step 5: a subject that may only create Pods reads the Secret through a Pod
 $ kubectl apply -f -   # Role pod-creator (create pods) and its RoleBinding in p03-02-secrets
 role.rbac.authorization.k8s.io/pod-creator created
 rolebinding.rbac.authorization.k8s.io/pod-creator created
@@ -84,12 +89,12 @@ $ kubectl auth can-i create pods -n p03-02-secrets --as=system:serviceaccount:p0
 yes
 $ kubectl auth can-i get secrets -n p03-02-secrets --as=system:serviceaccount:p03-02-secrets:pod-creator
 no
-$ kubectl apply -f -   # secret-reveal: runs as pod-creator, mounts db-credentials, prints checksums
+$ kubectl create -f - --as=system:serviceaccount:p03-02-secrets:pod-creator   # secret-reveal: created by pod-creator, mounts db-credentials-generated, prints checksums
 pod/secret-reveal created
 $ kubectl wait pod/secret-reveal -n p03-02-secrets --for='jsonpath={.status.phase}=Succeeded' --timeout=300s
 pod/secret-reveal condition met
 $ kubectl logs secret-reveal -n p03-02-secrets
-5a40a4a0c10e4630b75eb7bb63b6787d58cb989785d7cd1bda6e7401aac7cd14  /creds/POSTGRES_PASSWORD
+8975cb8f1ad5d41046739ae649557b8f24f4f29acacdfcf71d9cce756dfc525f  /creds/POSTGRES_PASSWORD
 POSTGRES_DB
 POSTGRES_PASSWORD
 POSTGRES_USER
@@ -98,18 +103,20 @@ yes
 $ kubectl delete pod secret-reveal -n p03-02-secrets --now
 pod "secret-reveal" deleted from p03-02-secrets namespace
 
-## step 6: the Secret as files, and the mode an inspection Pod sees
-$ kubectl apply -f -   # secret-files: runs as secret-reader, mounts db-credentials with defaultMode 0440 and fsGroup 65532
+## step 6: the Secret as files, the mode an inspection Pod sees, and exec
+$ kubectl apply -f -   # secret-files: runs as secret-reader, mounts db-credentials-generated with defaultMode 0440 and fsGroup 65532, then sleeps
 pod/secret-files created
-$ kubectl wait pod/secret-files -n p03-02-secrets --for='jsonpath={.status.phase}=Succeeded' --timeout=300s
+$ kubectl wait pod/secret-files -n p03-02-secrets --for=condition=Ready --timeout=300s
 pod/secret-files condition met
 $ kubectl logs secret-files -n p03-02-secrets
 uid=65532 gid=65532 groups=65532
 total 12
--r--r-----    1 0        65532            9 Oct 31 02:02 POSTGRES_DB
--r--r-----    1 0        65532           32 Oct 31 02:02 POSTGRES_PASSWORD
--r--r-----    1 0        65532            9 Oct 31 02:02 POSTGRES_USER
+-r--r-----    1 0        65532            9 Oct 31 02:27 POSTGRES_DB
+-r--r-----    1 0        65532           32 Oct 31 02:27 POSTGRES_PASSWORD
+-r--r-----    1 0        65532            9 Oct 31 02:27 POSTGRES_USER
 tmpfs /etc/creds tmpfs ro,relatime,size=65536k,inode64,noswap 0 0
+$ kubectl exec secret-files -n p03-02-secrets -- sh -c 'wc -c < /etc/creds/POSTGRES_PASSWORD'
+32
 $ kubectl delete pod secret-files -n p03-02-secrets --now
 pod "secret-files" deleted from p03-02-secrets namespace
 
@@ -127,8 +134,8 @@ secret "immutable-demo" deleted from p03-02-secrets namespace
 $ gitleaks version
 8.30.1
 $ gitleaks dir --config ../.gitleaks.toml --no-banner --no-color --redact examples/bookstore/raw-manifests
-7:02AM INF scanned ~162680 bytes (162.68 KB) in 24.5ms
-7:02AM INF no leaks found
+7:27AM INF scanned ~162680 bytes (162.68 KB) in 18.8ms
+7:27AM INF no leaks found
 
 ## step 9: clean up
 $ kubectl delete namespace p03-02-secrets --wait=true
