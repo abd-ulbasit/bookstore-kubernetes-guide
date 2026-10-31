@@ -9,20 +9,21 @@ The two identity planes from 13.04, expressed as YAML:
 
 | File | Kind(s) | Purpose |
 |------|---------|---------|
-| `request-authentication.yaml` | `RequestAuthentication` × 2 | Verify Keycloak JWT at gateway + per-workload (Istio). |
-| `authorization-policy.yaml` | `AuthorizationPolicy` × 3 | Enforce "JWT required for `/api/*`", allow public static, deny everything else. |
-| `keycloak-realm-import.cm.yaml` | `ConfigMap` | Realm definition mounted into Keycloak on first boot (clients, roles, groups, tenant claim mapper). |
+| `request-authentication.yaml` | `RequestAuthentication` × 1 | Verify the Keycloak JWT at the gateway: issuer, JWKS over HTTPS, audiences. |
+| `authorization-policy.yaml` | `AuthorizationPolicy` × 2 | Allow public static paths; require a verified principal and a `tenant` claim for `/api/*`. Anything else is denied by default. |
+| `keycloak-realm-import.cm.yaml` | `ConfigMap` | Realm definition imported on first start: clients, audience and tenant mappers, groups, token lifetimes. No literal secrets. |
 | `sample-serviceaccount-irsa.yaml` | `ServiceAccount` | EKS-IRSA annotation pattern (GKE/AKS equivalents commented). |
 
 ## Apply order
 
 ```sh
-# Prereqs: Istio installed (Part 11 ch.04; pinned-Helm). Keycloak installed
-# via Bitnami chart (pinned). cert-manager installed for TLS at the gateway.
+# Prereqs: Istio installed (13.04 step 1). Argo CD installed. cert-manager
+# installed for TLS at the gateway. The keycloak namespace is labelled and
+# holds the three Secrets from 13.04 step 2.
 
+kubectl apply -f examples/bookstore-platform/argocd/application-keycloak.yaml
+# Argo CD syncs the chart and mounts the realm-import ConfigMap below.
 kubectl apply -f examples/bookstore-platform/auth/keycloak-realm-import.cm.yaml
-# Then helm install / upgrade Keycloak with the realm-import ConfigMap mounted
-# (see 13.04 Hands-on for the helm values block).
 
 kubectl apply -f examples/bookstore-platform/auth/request-authentication.yaml
 kubectl apply -f examples/bookstore-platform/auth/authorization-policy.yaml

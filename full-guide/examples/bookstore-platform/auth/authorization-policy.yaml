@@ -1,23 +1,28 @@
-# Bookstore Platform v2 — Part 13 ch.04: the AuthorizationPolicy that
-# ENFORCES "a valid Keycloak JWT is required for /api/*". RequestAuthentication
+# Bookstore Platform v2 — Part 13 ch.04: the AuthorizationPolicies that
+# ENFORCE "a valid Keycloak JWT is required for /api/*". RequestAuthentication
 # verifies; AuthorizationPolicy enforces. Both are needed.
 #
-# Three policies, evaluated in order at the gateway:
-#   1. allow-public-static   /static/* and /healthz — public, no JWT needed.
-#   2. require-jwt-api       /api/* — must have a JWT whose `iss` matches the
-#                            Keycloak realm; tenant header derived from claim.
-#   3. deny-all              everything else — explicit deny is the safety net.
+# Two ALLOW policies select the gateway:
+#   1. allow-public-static   /static/*, /healthz, /favicon.ico — GET, no JWT.
+#   2. require-jwt-api       /api/* — a request principal, which exists only
+#                            when a verified JWT is present, and a non-empty
+#                            `tenant` claim.
 #
-# Policy precedence is "DENY before ALLOW", and within the same action evaluated
-# in name order; the explicit names below are stable across the gateway.
+# Default deny comes from the ALLOW policies themselves. Once any ALLOW policy
+# selects the gateway, a request that matches none of them is denied. Istio
+# documents this as "equivalent to setting a default of deny ... if the action
+# is ALLOW". A DENY policy is not needed, and one with an empty rule would deny
+# every request, including the two above: an empty rule always matches, and DENY
+# is evaluated first.
 #
-# WHY a separate `deny-all`: with Istio, the absence of any matching ALLOW
-# means "allowed by default". The explicit deny converts that to "default
-# deny" — the same Part 02 ch.06 NetworkPolicy lesson, applied at L7.
+# What the client sees:
+#   no token on /api/*        403 (the policy requires a principal)
+#   invalid or expired token  401 (RequestAuthentication rejects it)
+#   valid token               not 401 or 403: the policy let it through
 #
-# Tenant routing: a `when` clause asserts the `tenant` claim matches the
-# Host header's tenant prefix (e.g. acme.bookstore-platform.example.com -> the
-# JWT MUST carry tenant=acme). Cross-tenant header smuggling is blocked here.
+# The `tenant` condition checks that the claim is present and non-empty. It
+# does not compare the claim with the Host header; that comparison needs its
+# own policy and is not part of this chapter.
 #
 # !!! CRD-INTRINSIC DRY-RUN
 #   `AuthorizationPolicy` is `security.istio.io/v1` — an Istio CRD.
@@ -60,32 +65,15 @@ spec:
   action: ALLOW
   rules:
     - from:
-        # requestPrincipals = "issuer/subject"; "*" requires a valid JWT
-        # of ANY recognised issuer (i.e. one declared in a matching
-        # RequestAuthentication). Combined with the jwt issuer pin in
-        # request-authentication.yaml this means "must be a valid token
-        # from the Keycloak realm".
+        # requestPrincipals = "issuer/subject"; "*" matches any non-empty
+        # principal, so the request must carry a token that
+        # RequestAuthentication has verified.
         - source:
             requestPrincipals: ["*"]
       to:
         - operation:
             paths: ["/api/*"]
       when:
-        # The `tenant` custom claim MUST be non-empty.
+        # The `tenant` custom claim MUST be present and non-empty.
         - key: request.auth.claims[tenant]
           notValues: [""]
----
-apiVersion: security.istio.io/v1
-kind: AuthorizationPolicy
-metadata:
-  name: deny-all
-  namespace: istio-system
-  labels:
-    app.kubernetes.io/part-of: bookstore-platform
-spec:
-  selector:
-    matchLabels:
-      istio: ingressgateway
-  action: DENY
-  rules:
-    - {}   # match all; DENY takes precedence over ALLOW; combined with the ALLOW rules above this gives a true default-deny posture
