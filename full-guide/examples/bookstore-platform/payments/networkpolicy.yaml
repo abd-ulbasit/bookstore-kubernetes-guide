@@ -5,7 +5,10 @@
 #   - outbox-publisher, payments-worker and payments-webhook-receiver reach the
 #     Kafka TLS listener in kafka-system (port 9093).
 #   - outbox-publisher reaches Postgres (CNPG) in cnpg-system.
-#   - payments-worker reaches payments-gateway, the only /charge caller.
+#   - payments-worker reaches payments-gateway, the only /charge caller. Two
+#     policies make that flow: the gateway admits the worker (ingress), and the
+#     worker may reach the gateway (egress), because default-deny-all also
+#     denies egress.
 #   - The webhook receiver is reached through the bookstore-platform-edge Gateway.
 #   - payments-gateway reaches stripe-mock in lab, and Stripe's API in production.
 #
@@ -98,6 +101,29 @@ spec:
       ports:
         - protocol: TCP
           port: 5432
+---
+# The worker's side of the /charge call. The default deny blocks egress too, so
+# the gateway's ingress allow below is not enough on its own.
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: allow-worker-egress-to-gateway
+  namespace: bookstore-platform-payments
+  labels:
+    app.kubernetes.io/part-of: bookstore-platform
+spec:
+  podSelector:
+    matchLabels:
+      app: payments-worker
+  policyTypes: ["Egress"]
+  egress:
+    - to:
+        - podSelector:
+            matchLabels:
+              app: payments-gateway
+      ports:
+        - protocol: TCP
+          port: 8080
 ---
 # Only payments-worker calls the gateway's /charge endpoint.
 apiVersion: networking.k8s.io/v1

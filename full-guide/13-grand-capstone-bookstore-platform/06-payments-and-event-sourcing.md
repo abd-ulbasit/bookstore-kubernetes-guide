@@ -116,7 +116,7 @@ idempotency key, backed by the worker's table.
 | Card data, keys or customer details reach a log or an event | Events carry ids and amounts only. The gateway holds the Stripe key and logs ids and status, never a body | [13.09](../13-grand-capstone-bookstore-platform/09-observability-otel-tempo-loki-prometheus-grafana.md) for telemetry |
 | A workload writes a topic it does not own | One `KafkaUser` per workload, a TLS client certificate and simple ACLs | [13.05](../13-grand-capstone-bookstore-platform/05-search-and-product-discovery.md) for the listener |
 | A workload reads rows its role should not | One DSN per database role, and grants in `outbox-ddl.sql` | [03.05](../03-config-and-storage/05-stateful-data-patterns.md) |
-| Any Pod in the namespace can call `/charge` | `payments/networkpolicy.yaml` admits only `payments-worker` to the gateway, and default-deny covers the rest of the namespace. The lab's probe is admitted for the walk-through only | [02.06](../02-networking/06-network-policies.md) |
+| Any Pod in the namespace can call `/charge` | `payments/networkpolicy.yaml` admits only `payments-worker` to the gateway, and default-deny covers the rest of the namespace. A lab probe on stand-in pods showed the worker admitted and another pod refused (step 4). The lab's webhook probe is admitted for the walk-through only | [02.06](../02-networking/06-network-policies.md) |
 
 ## Diagrams
 
@@ -293,6 +293,37 @@ writes it. Each Kafka client's Secret is named after its KafkaUser, and the
 ESO SecretStore reads those three Secrets from `kafka-system` through the Role
 in `kafka-users.yaml`. Skip `payments-webhook-authz.yaml` on a cluster without
 Istio. Its CRD does not exist there.
+
+The default deny in `networkpolicy.yaml` covers egress as well as ingress, so a
+call from the worker to the gateway needs two allows: the gateway admits the
+worker, and the worker may reach the gateway. An earlier version of the file
+had only the first, and the lab probe below showed the worker blocked. The
+captured probe applied the file to stand-in pods on kind, in a throwaway
+namespace named `p13-finish-pay`. The CNI there, kindnet, enforced the
+policies. A gateway pod served port 8080, and one `payments-worker` pod and one
+unrelated pod each made a request to it:
+
+```sh
+GW_IP=$(kubectl -n bookstore-platform-payments get pod -l app=payments-gateway \
+  -o jsonpath='{.items[0].status.podIP}')
+kubectl -n bookstore-platform-payments exec deploy/payments-worker -- \
+  wget -q -T 4 -O /dev/null "http://${GW_IP}:8080/"
+```
+
+<!-- gate: output -->
+```text
+reached
+# ...
+wget: download timed out
+blocked
+```
+
+The first line is the worker, which the policies admit. The last two lines are
+the unrelated pod, which they refuse. The lab used `busybox` stand-ins rather
+than the chapter's workloads, which need Strimzi, CNPG and ESO, so this shows
+the two policies work on the pod labels and port they select. It does not
+exercise the Kafka, Postgres or webhook allows in the same file, which were
+checked by reading, not by traffic.
 
 ### 5. Walk an order through the full loop
 

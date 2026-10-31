@@ -11,11 +11,13 @@
 
 ## Why this exists
 
-The v1 Bookstore ran behind an Ingress controller, ingress-nginx, which is
-[retired upstream](https://github.com/kubernetes/ingress-nginx) (best-effort
-maintenance ended in March 2026). That is the right shape for the v1 lesson
-(Part 02 ch.04 Ingress; Part 09's end-to-end capstone wiring). It is the
-**wrong shape for real e-commerce** in three specific ways:
+The v1 Bookstore runs behind an Ingress controller, Traefik, which
+[Part 02 ch.04](../02-networking/04-ingress.md) installs in place of
+ingress-nginx. ingress-nginx is
+[retired upstream](https://github.com/kubernetes/ingress-nginx): its
+repository was archived in March 2026. An Ingress controller is the right
+shape for the v1 lesson (Part 02 ch.04 Ingress; Part 09's end-to-end capstone
+wiring). It is the **wrong shape for real e-commerce** in three specific ways:
 
 1. **No WAF.** A vanilla Ingress passes whatever the attacker sends.
    Common attacks — SQL injection (`?q=1' OR '1'='1`), XSS
@@ -42,8 +44,8 @@ The chapter ships:
 - **Gateway API** at the entry — the standardised replacement for
   Ingress, GA since Gateway API v1.0 (October 2023); it ships as CRDs
   you install separately, not tied to a Kubernetes minor. Replaces the
-  `kubernetes.io/ingress.class: nginx` annotation soup with a typed
-  `Gateway` + `HTTPRoute` resource pair.
+  controller-specific Ingress annotations with a typed `Gateway` +
+  `HTTPRoute` resource pair.
 - **Coraza**: the Go-native ModSecurity-compatible WAF, loaded as an
   Envoy WASM filter (an Istio `WasmPlugin`) on the gateway. Runs OWASP
   Core Rule Set v4 (sql-injection, xss, command-injection, path-traversal,

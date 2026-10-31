@@ -18,6 +18,12 @@
 # template supplies that volume at run time.
 # The ExternalSecret and AppProject manifests were not dry-run, because the lab
 # has no External Secrets or Argo CD CRDs.
+# Sections 3 and 4 were recorded when rbac.yaml still granted patch on
+# Applications. The grant has since dropped it; section 8 re-checks the file as it
+# is now, under the names p13-finish-backstage and p13-finish-argocd.
+# Section 8 also renders the current Bitnami postgresql chart with a read-only
+# root filesystem, to show which paths that chart mounts as emptyDir. The
+# chapter's Postgres image was not started in the lab.
 # Recorded by running the commands below in order. Section 7 attempts to delete
 # every object this run created. Two cluster-scoped deletes were refused and the
 # identity could no longer read cluster-scoped objects, so the leftovers are
@@ -159,3 +165,36 @@ Error from server (Forbidden): clusterroles.rbac.authorization.k8s.io "p13-11-ba
 $ kubectl get namespaces -o name | grep -c p13-11
 Error from server (Forbidden): namespaces is forbidden: User "kubernetes-admin" cannot list resource "namespaces" in API group "" at the cluster scope
 0
+
+## 8. The Applications grant as it is now, and the Bitnami read-only mounts
+$ kubectl create namespace p13-finish-backstage; kubectl create namespace p13-finish-argocd
+namespace/p13-finish-backstage created
+namespace/p13-finish-argocd created
+$ sed -e s/namespace: backstage$/namespace: p13-finish-backstage/ -e s/namespace: argocd$/namespace: p13-finish-argocd/ -e s/name: backstage-catalog-reader/name: p13-finish-backstage-catalog-reader/ examples/bookstore-platform/backstage/rbac.yaml | kubectl apply -f -
+clusterrole.rbac.authorization.k8s.io/p13-finish-backstage-catalog-reader created
+clusterrolebinding.rbac.authorization.k8s.io/p13-finish-backstage-catalog-reader created
+role.rbac.authorization.k8s.io/backstage-scaffolder created
+rolebinding.rbac.authorization.k8s.io/backstage-scaffolder created
+$ kubectl auth can-i --list -n p13-finish-argocd --as=system:serviceaccount:p13-finish-backstage:backstage | head -3
+Resources                                       Non-Resource URLs                      Resource Names   Verbs
+applications.argoproj.io                        []                                     []               [create get]
+selfsubjectreviews.authentication.k8s.io        []                                     []               [create]
+$ kubectl auth can-i patch applications.argoproj.io -n p13-finish-argocd --as=system:serviceaccount:p13-finish-backstage:backstage
+Warning: the server doesn't have a resource type 'applications' in group 'argoproj.io'
+
+no
+$ kubectl delete namespace p13-finish-backstage p13-finish-argocd
+namespace "p13-finish-backstage" deleted
+namespace "p13-finish-argocd" deleted
+$ kubectl delete clusterrolebinding,clusterrole p13-finish-backstage-catalog-reader
+clusterrolebinding.rbac.authorization.k8s.io "p13-finish-backstage-catalog-reader" deleted
+clusterrole.rbac.authorization.k8s.io "p13-finish-backstage-catalog-reader" deleted
+$ helm template pg oci://registry-1.docker.io/bitnamicharts/postgresql --set primary.containerSecurityContext.readOnlyRootFilesystem=true | grep -E "chart: postgresql-|mountPath" | sort -u
+mountPath: /bitnami/postgresql
+mountPath: /dev/shm
+mountPath: /opt/bitnami/postgresql/conf
+mountPath: /opt/bitnami/postgresql/secrets/
+mountPath: /opt/bitnami/postgresql/tmp
+mountPath: /tmp
+helm.sh/chart: postgresql-18.12.16
+helm.sh/chart: postgresql-18.12.16

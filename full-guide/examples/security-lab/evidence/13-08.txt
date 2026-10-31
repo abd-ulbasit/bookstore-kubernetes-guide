@@ -83,3 +83,32 @@ core checks failing (KSV-0012, KSV-0014, KSV-0001, KSV-0003, KSV-0030): none
 $ kubectl delete namespace p13-08-ml
 namespace "p13-08-ml" deleted
 
+
+## section 6: the ml NetworkPolicies and the EventBus (added after review)
+# The chapter's bookstore-platform-ml namespace runs as p13-finish-ml, created
+# and deleted by this section. The Argo Events CRDs are not installed on the lab
+# cluster, so the EventBus cannot be dry-run there. Its field names are checked
+# against the Go types of Argo Events v1.8.0, with a script that reads the json
+# tags. That shows the names exist. It does not show the EventBus starts. No
+# policy was applied to a running workload and no EventSource or Sensor ran.
+$ kubectl create namespace p13-finish-ml
+namespace/p13-finish-ml created
+$ sed s/bookstore-platform-ml/p13-finish-ml/g examples/bookstore-platform/ml/networkpolicy.yaml | kubectl apply --dry-run=server -f -
+networkpolicy.networking.k8s.io/default-deny-all created (server dry run)
+networkpolicy.networking.k8s.io/allow-dns-egress created (server dry run)
+networkpolicy.networking.k8s.io/allow-same-namespace created (server dry run)
+networkpolicy.networking.k8s.io/allow-kafka-tls created (server dry run)
+networkpolicy.networking.k8s.io/allow-mlflow-tracking created (server dry run)
+networkpolicy.networking.k8s.io/allow-api-and-object-store-egress created (server dry run)
+$ sed s/bookstore-platform-ml/p13-finish-ml/g examples/bookstore-platform/ml/eventbus.yaml | kubectl apply --dry-run=server -f -
+error: resource mapping not found for name: "default" namespace: "p13-finish-ml" from "STDIN": no matches for kind "EventBus" in version "argoproj.io/v1alpha1"
+ensure CRDs are installed first
+$ python gotype_check.py <argo-events-v1.8.0-go-types> examples/bookstore-platform/ml/eventbus.yaml
+spec.jetstream against JetStreamBus: 7 keys checked, 0 not in the Go type
+spec.jetstream.containerTemplate against ContainerTemplate: 1 keys checked, 0 not in the Go type
+spec.jetstream.reloaderContainerTemplate against ContainerTemplate: 1 keys checked, 0 not in the Go type
+spec.jetstream.metricsContainerTemplate against ContainerTemplate: 1 keys checked, 0 not in the Go type
+spec.jetstream.persistence against PersistenceStrategy: 2 keys checked, 0 not in the Go type
+control, containerTemplates misspelt: 3 keys checked, 1 not in the Go type: containerTemplates
+$ kubectl delete namespace p13-finish-ml
+namespace "p13-finish-ml" deleted
