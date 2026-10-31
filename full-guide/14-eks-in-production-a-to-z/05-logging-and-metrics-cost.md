@@ -1,19 +1,20 @@
 # 14.05 — Logging & metrics cost discipline
 
 > CloudWatch Logs charges **$0.50/GB ingested** plus **$0.03/GB-month
-> stored**, and a single chatty controller emitting debug logs into a
-> log group with **no retention cap** is the canonical "the cluster
-> cost more than the application this month" incident; the discipline
+> stored** (US East (N. Virginia) rates), and a single chatty controller
+> emitting debug logs into a log group with **no retention cap** is how
+> a cluster ends up costing more than its application. The discipline
 > is retention caps, cardinality control, Loki-vs-CloudWatch trade-offs,
-> and the three cost levers (sample, scrub, retain) every platform
-> needs to know about before the bill arrives.
+> and the three cost levers (sample, scrub, retain). The control-plane
+> audit log is the exception: it is security evidence, so its retention
+> follows your investigation window and it is never sampled.
 
 **Estimated time:** ~30 min read · ~60 min hands-on
-**Prerequisites:** [Part 14 ch.02](./02-eks-cluster-lifecycle.md) — EKS control-plane log streams enabled on the cluster · [Part 10 ch.05](../06-production-readiness/01-observability-metrics.md) — CloudWatch + Loki wiring you now must cost-tune · [Part 11 ch.04](../06-production-readiness/06-capacity-and-cost.md) — generic observability cost framing
+**Prerequisites:** [Part 14 ch.02](./02-eks-cluster-lifecycle.md) — EKS control-plane log streams enabled on the cluster · [Part 06 ch.01](../06-production-readiness/01-observability-metrics.md) and [Part 06 ch.02](../06-production-readiness/02-logging.md) — the metrics and logging wiring you now must cost-tune · [Part 06 ch.06](../06-production-readiness/06-capacity-and-cost.md) — generic observability cost framing
 
-**You'll know after this:** • understand CloudWatch Logs pricing ($0.50/GB ingest + $0.03/GB-month store) and where the runaway-cost incident lives · • set retention caps on every log group, including EKS control-plane streams · • choose between CloudWatch vs Loki for app logs based on access pattern · • apply the three cost levers (sample, scrub, retain) before the bill arrives · • debug metrics-cardinality blowups (label explosions, Prometheus series spikes) in production
+**You'll know after this:** • understand CloudWatch Logs pricing ($0.50/GB ingest + $0.03/GB-month store) and where the runaway-cost incident lives · • set retention on every log group, with the audit window chosen as evidence, not cost · • choose between CloudWatch vs Loki for app logs based on access pattern · • apply the three cost levers (sample, scrub, retain) before the bill arrives · • debug metrics-cardinality blowups (label explosions, Prometheus series spikes) in production
 
-<!-- tags: observability, cost, finops, cloud, day-2 -->
+<!-- tags: observability, cost, finops, cloud, day-2, security, audit -->
 
 ## Why this exists
 
@@ -21,35 +22,37 @@ The bookstore-platform tree at
 [`../examples/bookstore-platform/terraform/`](../examples/bookstore-platform/terraform/)
 turns on **five** EKS control-plane log streams in
 [`eks.tf`](../examples/bookstore-platform/terraform/eks.tf) (`api`,
-`audit`, `authenticator`, `controllerManager`, `scheduler`) and the
-AWS Load Balancer Controller + Karpenter Helm releases each create
-their own application log groups. On a quiet day this generates a few
-hundred megabytes; on a busy day with a misbehaving controller in a
-hot reconcile loop, a single log group can ingest **5-10 GB in 24 hours**.
+`audit`, `authenticator`, `controllerManager`, `scheduler`). EKS writes
+them to one log group, `/aws/eks/<CLUSTER>/cluster`. Controllers such as
+the AWS Load Balancer Controller and Karpenter log to stdout, so their
+volume reaches CloudWatch only through a log agent
+([Part 06 ch.02](../06-production-readiness/02-logging.md)). A quiet
+cluster produces modest volume; a controller in a hot reconcile loop can
+multiply it. The volumes in this chapter are illustrative. Step 3
+measures yours.
 
 Run that for a year with no retention cap and the math is unforgiving:
 
-- 5 GB/day ingestion at $0.50/GB = $2.50/day = **$913/year** in
-  ingestion charges *per log group*.
+- Illustrative 5 GB/day ingestion at $0.50/GB = $2.50/day = **$913/year**
+  in ingestion charges *per log group*.
 - Stored forever at $0.03/GB-month with 5 GB/day accumulation = 1.8
   TB after one year = **$54/month and rising** in storage charges
   *per log group*.
 
-Multiply by the ~10 log groups an EKS-deployed platform typically
-creates (control plane + LB controller + Karpenter + CoreDNS + each
-managed addon + application namespaces shipped to CloudWatch via
-Fluent Bit) and "CloudWatch ate my budget" stops being a meme. It is
-the most common AWS bill-shock the bookstore platform owners hit
-between cluster-up and the first finance review.
+Multiply that by every log group the platform creates (control plane,
+add-ons and application namespaces shipped to CloudWatch through Fluent
+Bit) and "CloudWatch ate my budget" stops being a meme. It is a common
+AWS bill surprise between cluster-up and the first finance review.
 
-Phase 14-R closed the obvious gap: `eks.tf` line 51 sets
-`cloudwatch_log_group_retention_in_days = var.cloudwatch_log_group_retention_in_days`
-(default 30 days) on the EKS module, which propagates retention to
-`/aws/eks/<CLUSTER>/cluster`. That single variable converts the
-unbounded-growth scenario to a bounded one: at 30-day retention, the
-storage line stops growing after a month and stabilizes at
-`5 GB/day x 30 days x $0.03/GB-month = $4.50/month` per log group —
-real money but predictable.
+The example closes the obvious gap. `eks.tf` passes
+`var.cloudwatch_log_group_retention_in_days` (default 30 days, in
+`variables.tf`) to the EKS module, which applies it to
+`/aws/eks/<CLUSTER>/cluster`. At 30 days the storage line stops growing
+after a month and stabilizes at the illustrative
+`5 GB/day x 30 days x $0.03/GB-month = $4.50/month` per log group.
+That one group also holds the audit stream, so the same 30 days applies
+to audit evidence. That is an operational default, not an audit
+decision. See Threats and controls below.
 
 But retention is only the first lever. The other two — **sampling**
 (drop high-volume low-value logs at the source) and **scrubbing**
@@ -66,16 +69,15 @@ recording rules, label discipline). This chapter is the EKS-specific
 worth scraping, and where the bill explodes if you don't watch the
 cardinality.
 
-> **In production:** Every log group an EKS cluster creates must have
-> a retention cap set within the first 24 hours of the cluster's life.
-> A log group with no `retention_in_days` set on the AWS side defaults
-> to **Never expire** — and AWS has no "delete after a year" policy
-> on top of that. A team that creates 10 unbounded log groups in
-> January discovers in December that they've paid $600 in storage
-> for logs nobody has read since February. The bookstore-platform
-> tree's `cloudwatch_log_group_retention_in_days = 30` is the
-> opinionated default; tighten to 7 for dev clusters, loosen to 90
-> or 365 for compliance audits.
+> **In production:** Set a retention value on every log group an EKS
+> cluster creates within the first 24 hours of the cluster's life. A
+> log group with no `retention_in_days` on the AWS side defaults to
+> **Never expire**, and nothing expires it later. A team that leaves
+> ten groups unbounded in January can find in December that it has paid
+> for logs nobody has read since February (illustrative). The example's
+> `cloudwatch_log_group_retention_in_days = 30` is an operational
+> default: tighten it to 7 for dev clusters, and set the audit window
+> from your evidence requirement, which may be longer.
 
 ## Mental model
 
@@ -85,26 +87,26 @@ price). Three levers reduce each term: sample at the source, scrub
 at the boundary, cap retention at the sink. Choose the right tool
 per workload class — CloudWatch for the control plane, Loki/Mimir
 for the application plane, Prometheus for metrics with disciplined
-cardinality.**
+cardinality.** Control-plane audit logs are the exception: they are not
+sampled, and their retention is a security decision.
 
 The four dimensions of observability cost on EKS:
 
 - **CloudWatch Logs — the EKS default, the bill default.**
   AWS-managed, no operational burden, but priced for managed
-  convenience: $0.50/GB ingested + $0.03/GB-month stored. Every
-  EKS control-plane log stream (`api`, `audit`, etc.) lands in
-  CloudWatch by default. The audit log alone can hit several GB/day
-  on a cluster with chatty operators. Use for: control plane,
-  compliance retention, occasional debug. Don't use for: every Pod's
-  stdout (too expensive at scale).
+  convenience: $0.50/GB ingested + $0.03/GB-month stored. EKS sends
+  control-plane logs here once you enable each type (they are off by
+  default). On a busy cluster the `audit` stream can be a large share
+  of that volume. Use for: control plane, audit evidence, occasional
+  debug. Don't use for: every Pod's stdout (too expensive at scale).
 - **Loki — the in-cluster cost-efficient alternative.** Self-hosted,
   S3-backed object store, index-on-label (not on log content),
-  significantly cheaper at scale (single-digit cents per GB stored
-  on S3 vs $0.03/GB-month CloudWatch storage), but operationally
-  heavier (you run the Loki Helm release; you manage compaction; you
-  set up Grafana dashboards). Break-even is around 100 GB/month of
-  ingested logs — below that, CloudWatch's managed convenience wins;
-  above that, Loki pays for itself within a quarter.
+  cheaper at scale (S3 storage is priced per GB-month below
+  CloudWatch's storage rate), but operationally heavier (you run the
+  Loki Helm release; you manage compaction; you set up Grafana
+  dashboards). Break-even depends on volume and on the operating time
+  Loki costs you, so the table below is a starting point, not a
+  measured break-even.
 - **Prometheus + cardinality.** Metrics are cheap per scrape, but
   **cardinality** (the number of unique label combinations) is the
   cost trap. A metric `http_requests_total` with three labels (5
@@ -118,36 +120,49 @@ The four dimensions of observability cost on EKS:
   1. **Sample at the source.** Drop debug logs in production; emit
      INFO and above. For metrics, scrape at 30s not 5s for non-SLO
      metrics. For traces, sample 1% of traffic + 100% of errors.
-     Reduces ingestion 10-100x.
+     Reduces ingestion by a large multiple, depending on what the app emits.
   2. **Scrub at the boundary.** Strip PII, drop high-cardinality
      fields, redact secrets. A Fluent Bit filter that drops the
      `authorization` header out of every request log costs nothing
      and cuts the compliance-audit-scope drastically.
-  3. **Cap retention at the sink.** 30 days for operational, 90
-     for compliance, 7 for dev. The retention cap is the *cheapest*
-     lever (one Terraform variable) and the *highest* dollar-impact
-     for retained storage; it does not reduce ingestion cost.
+  3. **Cap retention at the sink.** Operational groups get a short
+     window (the example uses 30 days). Audit evidence gets the window
+     your investigations and compliance owner require, which can be
+     longer. The retention setting is one Terraform variable, and it
+     does not reduce ingestion cost.
 
-**CloudWatch vs Loki — the break-even chart.** A simple decision
-chart for the application logging pipeline:
+**CloudWatch vs Loki.** A starting point for the application logging
+pipeline, not a measured break-even:
 
 | Volume | Pick | Why |
 |---|---|---|
 | < 10 GB/month | CloudWatch | Managed; the ops time saved exceeds the cost differential. |
 | 10-100 GB/month | Either | Decision is operational maturity, not cost. |
 | > 100 GB/month | Loki on S3 | Cost differential exceeds Loki operational overhead. |
-| Compliance-bound logs (audit) | CloudWatch | The 7-year retention story is easier; AWS handles the lifecycle. |
+| Control-plane audit logs | CloudWatch | EKS writes them there; keep a longer copy elsewhere (Production notes). |
 | Bursty application stdout | Loki | The cost-spike is bounded by your S3 storage class. |
 
-The trap to keep in view: **the audit log goes to CloudWatch
-forever unless you cap it**. The EKS `audit` log stream captures
-every API request — `kubectl get pods` from a developer, every
-controller's reconcile-loop list-watch, every Argo CD sync. A busy
-cluster can emit 1-2 GB/day of audit. At default unbounded retention,
-that's 30 GB after a month, 365 GB after a year, accumulating
-forever. The 30-day cap turns this into a manageable line item;
-extend to 90 or 365 only when the compliance team has signed off on
-the bill.
+The trap to keep in view: **the audit log is evidence, so the question
+is not only what it costs.** The EKS `audit` stream records API requests:
+developer `kubectl` calls, controller list-watches, Argo CD syncs. A 30-day
+group cap is an operational default that can expire events before an
+investigation starts. Sampling or excluding audit events hides exactly
+the activity you would later need. Cost is handled by fixing the noisy
+caller and by keeping a tiered copy of the audit window, not by dropping
+events.
+
+## Threats and controls
+
+The control-plane audit log is a security source. These are the threats
+this chapter covers and where each control lives.
+
+| Threat | Control in this chapter | Deeper |
+|---|---|---|
+| An identity with log-admin rights shortens retention or deletes the group, erasing evidence | Set retention in Terraform, so the apply role owns it. Deny `logs:PutRetentionPolicy`, `logs:DeleteLogGroup` and `logs:DeleteLogStream` to every other principal. Keep a copy in an Object Lock bucket (Production notes). | [Part 14 ch.03](03-eks-addon-management.md), [Part 14 ch.07](07-infrastructure-cicd-and-drift.md) |
+| The audit stream stops. Delivery is best effort, so the gap goes unseen | Alarm on missing ingestion as well as high volume (step 5) | Part 05 ch.08 <!-- link-later: 05.08 --> |
+| A broad audit-policy exclusion hides a compromised identity's reads | Do not exclude audit events. Cut volume at the noisy caller (step 4). | Part 05 ch.08 <!-- link-later: 05.08 --> |
+| Logs carry secrets or personal data, and everyone with console access reads them | Scrub at the boundary, and limit who can read the groups | [Part 06 ch.02](../06-production-readiness/02-logging.md) |
+| Loki with `auth_enabled: false` lets any pod that reaches the gateway read every app log | A NetworkPolicy that admits only Fluent Bit and Grafana (step 6) | [Part 02 ch.06](../02-networking/06-network-policies.md) |
 
 ## Diagrams
 
@@ -197,6 +212,9 @@ flowchart LR
 
 ### Diagram B — cost-lever leverage table (ASCII)
 
+The ranges are illustrative, from the three-lever model. They are not
+measurements.
+
 ```text
 LEVER             COST IMPACT       LATENCY TO SAVINGS    OPS OVERHEAD     EXAMPLE
 ────────────────  ────────────────  ────────────────────  ───────────────  ──────────────────────────────
@@ -212,8 +230,8 @@ Cardinality drop  100x metrics     Immediate              App-side label   Remov
                   storage                                  scrubbing       http_requests_total
 ────────────────  ────────────────  ────────────────────  ───────────────  ──────────────────────────────
 Order of attack:
-  1. Cap retention (easiest, biggest stored-cost win)
-  2. Drop debug logs in production (90% of stdout volume)
+  1. Cap operational retention (not the audit window; see Threats and controls)
+  2. Drop debug logs in production (often most of stdout volume)
   3. Drop high-cardinality labels in metrics (Prometheus survives, you save TBs)
   4. Migrate apps to Loki if you're > 100 GB/month
 ```
@@ -224,7 +242,8 @@ Order of attack:
 
 - The bookstore-platform tree applied; cluster reachable via `kubectl`.
 - AWS CLI v2 configured with permissions to read CloudWatch + Cost
-  Explorer.
+  Explorer. The steps that change retention or delete groups need the
+  logging owner's role, not a reader's.
 - A baseline: at least 48 hours of cluster activity so the log
   groups have some volume to inspect.
 
@@ -242,7 +261,7 @@ aws logs describe-log-groups \
   --output table
 ```
 
-Sample output:
+Illustrative output (not captured in a lab run):
 
 ```text
 -------------------------------------------------------------------------
@@ -254,9 +273,11 @@ Sample output:
 +-----------------------------------------+-----------+-----------------+
 ```
 
-Confirm `retention = 30`. If `retention = null`, the log group is
-**never-expire** — the cluster was deployed without the Phase 14-R
-retention variable set; fix it immediately:
+Confirm `retention = 30`. The 30 is the example default. This group
+also holds the audit stream, so set the value your audit window requires
+(see Production notes for keeping a longer copy). If `retention = null`,
+the log group is **never-expire**, and the cluster was deployed without
+the retention variable set. Fix it immediately:
 
 ```bash
 aws logs put-retention-policy \
@@ -268,23 +289,26 @@ aws logs put-retention-policy \
 ### 2. Discover the unbounded log groups Terraform didn't create
 
 ```bash
-# AWS Load Balancer Controller, Karpenter, addon log groups — auto-created
-# by the controllers, NOT managed by Terraform. They often default to
-# never-expire.
+# Log groups that your log agent and add-ons create, outside Terraform.
+# They often default to never-expire.
 aws logs describe-log-groups \
   --region "$REGION" \
   --query 'logGroups[?retentionInDays==null].logGroupName' \
   --output table
 ```
 
-Any log group in this list is bleeding money. Cap them:
+Each group in this list has no expiry. Decide each one before you cap it:
+a group that holds audit evidence needs its own window, not 30 days. The
+name filter below is a guard, not a classification, so read the list
+first. Then cap the rest:
 
 ```bash
-# Bulk cap every unmanaged log group to 30 days.
+# Bulk cap unmanaged log groups to 30 days, skipping audit-named groups.
 aws logs describe-log-groups \
   --region "$REGION" \
   --query 'logGroups[?retentionInDays==null].logGroupName' \
   --output text | \
+grep -v -E 'audit|evidence' | \
 while read -r LG; do
   echo "Capping $LG to 30 days..."
   aws logs put-retention-policy \
@@ -297,9 +321,10 @@ done
 Production note: the cap-script is a one-shot. The *durable* fix is
 either a Terraform resource per log group (verbose but explicit) or
 a `aws_cloudwatch_log_group` Terraform resource with a wildcard +
-`for_each` that the addon discovers. Most teams pick the script-on-a-
-cron approach (run weekly via the drift-check workflow in Part 14
-ch.07, Phase 14b).
+`for_each` that the addon discovers. A common shortcut is a script on
+a schedule, run weekly by the drift check in
+[Part 14 ch.07](07-infrastructure-cicd-and-drift.md). Run the cap with
+the logging owner's role, since that role can shorten evidence windows.
 
 ### 3. Measure ingestion volume per log group
 
@@ -324,9 +349,9 @@ aws cloudwatch get-metric-statistics \
 
 Each `Sum` is bytes ingested that day; divide by `1024^3` for GB.
 Multiply by $0.50/GB to estimate the daily ingestion line on the bill.
-A healthy bookstore-platform cluster runs at ~200-500 MB/day per log
-group; sustained values above 2 GB/day indicate a controller in a hot
-reconcile loop and demand investigation.
+Record a 7-day baseline per log group. A sustained step above that
+baseline is the signal to investigate, usually a controller in a hot
+reconcile loop.
 
 ### 4. Find the chatty controller
 
@@ -341,17 +366,21 @@ aws logs describe-log-streams \
   --query 'logStreams[].{name:logStreamName,size:storedBytes}' \
   --output table
 
-# Tail the audit log for one minute to spot the chatty caller.
+# Tail the audit stream for one minute to spot the chatty caller.
+# --format short prints the message after a timestamp; sed strips that
+# prefix, and jq skips any line that is not JSON.
 aws logs tail "/aws/eks/$CLUSTER/cluster" \
   --region "$REGION" \
   --since 1m \
+  --log-stream-name-prefix kube-apiserver-audit \
   --filter-pattern '{ $.user.username = "*" }' \
   --format short | \
-  jq -r 'select(.user) | .user.username' | \
+  sed 's/^[^{]*//' | \
+  jq -R -r 'fromjson? | .user.username // empty' | \
   sort | uniq -c | sort -rn | head
 ```
 
-Sample output:
+Illustrative output (not captured in a lab run):
 
 ```text
    8421 system:serviceaccount:karpenter:karpenter
@@ -360,10 +389,13 @@ Sample output:
      12 arn:aws:iam::<ACCOUNT_ID>:user/<USER>
 ```
 
-A normal Karpenter list-watch is high-volume but bounded; a Karpenter
-emitting 100k+ audit events per hour is in a reconcile loop and the
-fix is usually a misconfigured `NodePool` or a CRD version mismatch
-(see Part 10 ch.06's Karpenter debug runbook).
+A normal Karpenter list-watch is frequent but steady. A sudden rise in
+one caller's events points to a reconcile loop, and the usual causes are
+a misconfigured `NodePool` or a CRD version mismatch. Check the caller's
+identity before you assume the cause is benign: a caller you do not
+recognise is a security question, not a tuning one.
+[Part 10 ch.06](../10-cloud-and-managed-kubernetes/06-node-autoscaling-cost-multicloud.md)
+covers `NodePool` configuration.
 
 ### 5. Set a CloudWatch alarm on ingestion volume
 
@@ -380,41 +412,132 @@ aws cloudwatch put-metric-alarm \
   --evaluation-periods 1 \
   --threshold 5368709120 \
   --comparison-operator GreaterThanThreshold \
+  --treat-missing-data breaching \
   --dimensions Name=LogGroupName,Value="/aws/eks/$CLUSTER/cluster" \
-  --alarm-actions "$(terraform output -raw budget_alarm_sns_topic_arn 2>/dev/null || echo '')"
+  --alarm-actions "$(terraform output -raw budget_alarm_sns_topic_arn)"
 ```
 
-This alarm reuses the SNS topic that Phase 14-R's `cost-budgets.tf`
-provisions when `enable_budget_alarm = true`. If you haven't enabled
-the budget alarm yet, the topic doesn't exist; either enable it
-(Part 14 ch.06 walks through that) or create an SNS topic explicitly
-for log-volume alerts.
+`--treat-missing-data breaching` makes a day with no ingestion alarm
+too. A silent audit pipeline is a gap in evidence, and a volume threshold
+alone never sees it. The alarm reuses the SNS topic that `cost-budgets.tf`
+provisions when `enable_budget_alarm = true`. The output is null until
+you enable it. Either enable it ([Part 14 ch.06](06-cost-guardrails.md))
+or create an SNS topic for log-volume alerts.
 
 ### 6. Migrate application logs to Loki
 
 The application namespaces in the bookstore-platform tree currently
-ship to CloudWatch via the EKS-default Fluent Bit DaemonSet. For
-non-compliance-bound app logs, route them to Loki instead:
+ship to CloudWatch through the Fluent Bit DaemonSet from
+[Part 06 ch.02](../06-production-readiness/02-logging.md). For high-volume
+application logs, route them to Loki instead:
+
+Install Loki first. Create its namespace with the Pod Security label
+before the install. `--create-namespace` cannot set labels, and the
+chart's pods must be admitted under `restricted`. Save this as
+`logging-namespace.yaml`:
+
+```yaml
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: logging
+  labels:
+    pod-security.kubernetes.io/enforce: restricted
+    pod-security.kubernetes.io/enforce-version: v1.37
+    pod-security.kubernetes.io/audit: restricted
+    pod-security.kubernetes.io/warn: restricted
+```
+
+Save the values below as `loki-values.yaml`. Replace the placeholders
+with your two bucket names, the region and the IAM role ARN for the
+`loki` ServiceAccount.
+
+```yaml
+deploymentMode: SingleBinary
+singleBinary:
+  replicas: 1
+read:
+  replicas: 0
+write:
+  replicas: 0
+backend:
+  replicas: 0
+minio:
+  enabled: false
+chunksCache:
+  enabled: false
+resultsCache:
+  enabled: false
+lokiCanary:
+  enabled: false
+test:
+  enabled: false
+sidecar:
+  rules:
+    enabled: false
+loki:
+  auth_enabled: false
+  podSecurityContext:
+    seccompProfile:
+      type: RuntimeDefault
+  schemaConfig:
+    configs:
+      - from: "2024-04-01"
+        store: tsdb
+        object_store: s3
+        schema: v13
+        index:
+          prefix: index_
+          period: 24h
+  storage:
+    type: s3
+    bucketNames:
+      chunks: <LOKI_CHUNKS_BUCKET>
+      ruler: <LOKI_RULER_BUCKET>
+    s3:
+      region: <REGION>
+gateway:
+  podSecurityContext:
+    seccompProfile:
+      type: RuntimeDefault
+serviceAccount:
+  automountServiceAccountToken: false
+  annotations:
+    eks.amazonaws.com/role-arn: <LOKI_ROLE_ARN>
+```
+
+The values follow the baseline where the chart exposes a field. The Pods
+run as non-root with a `RuntimeDefault` seccomp profile, which
+`restricted` requires. The rules sidecar is off because this install
+does not use Loki rules, and that sidecar needs API access. The `loki`
+ServiceAccount does not mount an API token. The IRSA annotation gives
+Loki S3 access through a role from [Part 14 ch.03](03-eks-addon-management.md),
+and that role should reach only these two buckets. `auth_enabled: false`
+turns off tenant headers, not authentication. Any pod that reaches
+`loki-gateway` can read every stream, so the NetworkPolicy in
+[Part 02 ch.06](../02-networking/06-network-policies.md) must admit only
+the Fluent Bit and Grafana pods.
+
+Render the chart against the namespace before you install. A
+`restricted` violation appears as a PodSecurity warning in this dry-run:
 
 ```sh
-# Install Loki (pinned) for the cost-efficient ingestion path.
-LOKI_VERSION="6.18.0"
-
+kubectl apply -f logging-namespace.yaml
 helm repo add grafana https://grafana.github.io/helm-charts
 helm repo update
 
+# Chart 6.18.0 (Loki app 3.2.0), confirmed in the Grafana repo on 2026-10-31.
+LOKI_VERSION="6.18.0"
+helm template loki grafana/loki --version "$LOKI_VERSION" -n logging \
+  -f loki-values.yaml | kubectl apply --dry-run=server -n logging -f -
+
 helm install loki grafana/loki \
   --version "$LOKI_VERSION" \
-  -n logging --create-namespace --wait \
-  --set 'loki.auth_enabled=false' \
-  --set 'loki.storage.type=s3' \
-  --set "loki.storage.s3.bucketnames=<LOKI_BUCKET_NAME>" \
-  --set "loki.storage.s3.region=$REGION" \
-  --set 'singleBinary.replicas=1' \
-  --set 'minio.enabled=false'
+  -n logging --wait \
+  -f loki-values.yaml
 
-# Update Fluent Bit to route the apps namespaces to Loki, control plane
-# remains on CloudWatch. The config map (excerpt):
+# Route app namespaces to Loki and kube-system pod logs to CloudWatch.
+# Excerpt to add to your existing fluent-bit.conf:
 cat <<EOF
 [OUTPUT]
     Name        loki
@@ -433,16 +556,17 @@ cat <<EOF
 EOF
 ```
 
-The split (apps to Loki, system to CloudWatch) is the canonical
-cost-driven shape: apps generate 90%+ of the volume and have soft
-retention requirements; system logs are low-volume but audit-bound.
+This split sends apps to Loki and kube-system pod logs to CloudWatch. Apps
+usually generate most of the volume and have shorter retention needs. The
+control-plane audit stream stays in its EKS group, outside this split.
 
 ### 7. Audit the metrics cardinality before it explodes
 
 ```bash
 # In a Prometheus-equipped cluster (Part 06 ch.01), find the top-N
 # highest-cardinality metrics.
-kubectl -n prometheus-system port-forward svc/kube-prometheus-stack-prometheus 9090:9090 &
+# In a second terminal, keep this port-forward running:
+kubectl -n prometheus-system port-forward svc/kube-prometheus-stack-prometheus 9090:9090
 
 # topk(10, count by (__name__)({__name__=~".+"}))
 curl -s 'http://localhost:9090/api/v1/query' \
@@ -450,7 +574,7 @@ curl -s 'http://localhost:9090/api/v1/query' \
   jq -r '.data.result[] | "\(.value[1]) series  \(.metric.__name__)"' | sort -rn | head
 ```
 
-Sample output:
+Illustrative output (not captured in a lab run):
 
 ```text
  1842000 series  http_requests_total
@@ -469,7 +593,8 @@ curl -s 'http://localhost:9090/api/v1/query' \
   jq '.data.result | length'
 ```
 
-A `route` label with 50,000+ unique values is the smoking gun — the
+A `route` label whose value count keeps rising with traffic is the
+smoking gun — the
 application is exporting one series per *exact URL path* instead of
 per *route template* (`/users/123` vs `/users/{id}`). The fix lives
 in the app's metrics exporter; Prometheus cannot fix this at scrape
@@ -478,16 +603,17 @@ time.
 ## How it works under the hood
 
 **CloudWatch Logs pricing — the per-byte math.** AWS charges in two
-dimensions:
+dimensions. The rates are those in the US East (N. Virginia) worked
+examples on the [CloudWatch pricing page](https://aws.amazon.com/cloudwatch/pricing/),
+checked on 2026-10-31. Other regions differ, so check yours.
 
-- **Ingestion** — $0.50/GB at GA prices (us-east-1; other regions are
-  the same or +5-10%). Calculated on the *raw* JSON event size at
-  ingest time. Compression at storage is on top; you do not benefit
-  from your application emitting compact log lines except for the
-  ingestion-byte-count.
-- **Storage** — $0.03/GB-month on the *post-compression* footprint.
-  CloudWatch compresses on store (~7-10x typical). A 30 GB ingestion
-  in a month leaves ~3-4 GB on disk; storage cost is on the 3-4 GB.
+- **Ingestion:** $0.50/GB. Each log event is billed when it is
+  ingested, so a verbose line costs when it is written, before any
+  retention applies.
+- **Storage:** $0.03/GB-month for as long as the retention window keeps
+  the data. The pricing page does not say whether storage is billed on
+  compressed or uncompressed size, so this chapter does not model a
+  compression ratio.
 
 The cost formula for a single log group, simplified:
 
@@ -496,61 +622,53 @@ month_cost = ingest_GB * 0.50         # one-shot ingestion
            + stored_GB * 0.03         # per month, for the retention window
 ```
 
-For the EKS audit log at 2 GB/day raw, 30-day retention:
+For an illustrative audit stream of 2 GB/day, with no compression assumed:
 
 ```
 ingest = 60 GB/month * 0.50 = $30/month
-stored = ~8 GB on disk * 0.03 = $0.24/month
-total  = ~$30.24/month
+stored = 60 GB * 0.03       = $1.80/month    (30-day window)
+stored = 730 GB * 0.03      = $21.90/month   (365-day window)
 ```
 
-The ingestion line dominates; storage is round-off. **The leverage
-is in reducing ingestion volume** (sampling, scrubbing); retention
-caps only constrain the stored term.
+At 30 days the ingestion line dominates. A 365-day window changes that,
+because the stored line grows with the window. The audit window is a
+cost decision too, and it should be set on evidence grounds first.
+Sampling and scrubbing reduce application volume. They never cut audit
+events.
 
 **The "Never expire" default explained.** CloudWatch log groups are
 created with `retentionInDays = null` unless explicitly set. AWS does
 not impose a global retention; you pay storage forever. This is by
 design (some workloads need 7-year retention), but it is also the
-single most common cost trap. The `retentionInDays` API field is the
-one knob; setting it to a number (`1`, `7`, `30`, `90`, `365`, etc.)
-schedules a background job that deletes events older than the cap.
-The deletion is asynchronous (AWS sometimes takes 24-72 hours after
-the cap elapses to actually delete), but the billing aligns with the
-cap immediately.
+common cost trap. The `retentionInDays` API field is the one knob;
+setting it to a number (`1`, `7`, `30`, `90`, `365`, etc.) sets how long
+events are kept.
 
 **Loki's cost shape — S3 economics.** Loki stores log "chunks"
 (compressed batches of N MB of logs from M streams) and an index
 that maps `{labels}` to chunk references. Both go to S3 by default:
 
-- **S3 Standard storage** — $0.023/GB-month for the first 50 TB.
-- **S3 Standard-IA** — $0.0125/GB-month for objects rarely accessed
-  (lifecycle to IA after 30 days saves ~50% on aging data).
+- **S3 storage classes.** Storage is billed per GB-month and by class.
+  Standard-IA has a 30-day minimum storage duration and a retrieval fee.
+  Archive classes need a restore before the objects can be read
+  ([S3 storage classes](https://docs.aws.amazon.com/AmazonS3/latest/userguide/storage-class-intro.html)).
+  Check the [S3 pricing page](https://aws.amazon.com/s3/pricing/) for
+  your region's rates.
 - **S3 Intelligent-Tiering** — automatic; recommended for unknown
   access patterns.
 
-A Loki deployment ingesting 100 GB/month and retaining 30 days
-costs approximately:
-
-```
-S3 standard storage: 100 GB * 0.023 = $2.30/month
-PUT requests: ~1M * $0.005/1K = $5/month
-GET requests on query: ~100k * $0.0004/1K = $0.04/month
-Compute (Loki itself in-cluster): 0.5 CPU + 1 GB RAM = ~$15/month
-Total: ~$22/month
-```
-
-vs CloudWatch at the same volume: `100 * 0.50 = $50/month` ingestion
-alone, plus storage. Loki breaks even at ~20 GB/month ingestion and
-saves significant money above 100 GB.
+The Loki bill has three parts: stored GB times the class rate, requests,
+and the in-cluster compute Loki adds. At 100 GB/month ingested, CloudWatch
+ingestion alone is `100 * 0.50 = $50/month` before storage. Put Loki's S3
+and compute costs next to that number before you choose.
 
 **Prometheus cardinality — why one label can break everything.**
 Prometheus's TSDB stores one *series* per unique label-combination.
 Each series carries: a 16-byte hash, a label-name+value-pair-set, and
-a chunk-pointer array. The fixed-cost-per-series is roughly **3 KB
-in RAM** + several hundred bytes on disk; 1 million series therefore
-costs ~3 GB RAM and ~500 MB disk per day. Crossing 10 million
-series typically OOMs the Prometheus Pod.
+a chunk-pointer array. Memory and disk grow with the number of
+series, so a label that multiplies series multiplies both. Size
+Prometheus from your own `prometheus_tsdb_head_series` value, not from a
+per-series rule of thumb.
 
 The cardinality killers in order:
 
@@ -588,17 +706,19 @@ metrics.
 
 ## Production notes
 
-> **In production:** Cap retention on every log group within 24 hours
-> of the cluster's first apply, including the AWS-managed ones the
-> EKS service auto-creates (LB controller, addon logs). The
+> **In production:** Set retention on every log group within 24 hours
+> of the cluster's first apply, including groups an agent creates for
+> add-on logs. The
 > `aws logs describe-log-groups --query 'logGroups[?retentionInDays==null]'`
-> query is the canonical drift check — schedule it weekly via the
-> Phase 14b ch.07 drift workflow and alert on any never-expire group.
+> query is the drift check. Run it weekly from the drift workflow in
+> [14.07](07-infrastructure-cicd-and-drift.md), and alert on any group
+> that never expires, audit groups included.
 
 > **In production:** Drop debug logs in production at the application
-> level, not at the Fluent Bit level. The Bookstore Go services use
-> structured logging with a `LOG_LEVEL=info` env in production
-> manifests; the Helm chart's `values-prod.yaml` enforces it. A
+> level, not at the Fluent Bit level. The example workloads set
+> `LOG_LEVEL` to `info` per manifest (see
+> `examples/bookstore-platform/payments/payments-worker.yaml`), so a
+> production policy should enforce it. A
 > developer setting `LOG_LEVEL=debug` to chase a bug in production
 > burns money for every second they forget to revert; a CI policy that
 > rejects PRs setting debug in production manifests is the durable
@@ -613,52 +733,57 @@ metrics.
 > belongs on logs (Fluent Bit sends it to Loki + CloudWatch) and
 > traces (Tempo), never on metrics.
 
-> **In production:** The Karpenter audit-log volume problem. Karpenter
-> aggressively list-watches `Node`, `NodeClaim`, `Pod` resources;
-> every list-watch is an audit event. A cluster with 200 nodes can
-> easily emit 5-10 GB/day of audit just from Karpenter's reconcile
-> traffic. The mitigation is an audit-policy that excludes specific
-> system service accounts from audit logging — file an exclusion for
-> `system:serviceaccount:karpenter:karpenter` on `get`/`list`/`watch`
-> verbs against `nodes`/`nodeclaims`/`pods`. EKS exposes this via
-> the `cluster.audit_policy` field on newer cluster versions; check
-> what your version supports.
+> **In production:** Do not fix audit volume by excluding a controller's
+> reads. Karpenter list-watches `Node`, `NodeClaim` and `Pod`, so its
+> reads appear as frequent audit events. Those same reads are what you
+> would need if its credentials were abused, so an exclusion trades the
+> noise for a blind spot. Fix the reconcile loop first (see
+> [Part 10 ch.06](../10-cloud-and-managed-kubernetes/06-node-autoscaling-cost-multicloud.md)).
+> The EKS control-plane logging page documents no setting for the audit
+> policy, so this chapter does not assume one
+> ([EKS control plane logs](https://docs.aws.amazon.com/eks/latest/userguide/control-plane-logs.html)).
 
-> **In production:** S3 lifecycle on Loki chunks is non-optional. A
-> Loki bucket without `transition to Standard-IA after 30 days +
-> Glacier Deep Archive after 90 days + delete after 365 days` retains
-> every chunk at standard storage indefinitely. The Helm chart
-> documentation calls this out; the practice often slips. The
-> `examples/bookstore-platform/terraform/loki.tf` (if you've added
-> Loki via Terraform) should include an
-> `aws_s3_bucket_lifecycle_configuration` resource explicitly.
+> **In production:** Put a lifecycle rule on the Loki bucket. Without one,
+> every chunk stays in S3 Standard until someone deletes it. A rule that
+> moves chunks to Standard-IA after 30 days and expires them after your
+> retention window is a sensible start. Do not move Loki chunks to a
+> Glacier class: Loki reads them directly, and archived objects must be
+> restored before they can be read
+> ([S3 storage classes](https://docs.aws.amazon.com/AmazonS3/latest/userguide/storage-class-intro.html)).
+> The example tree has no Loki Terraform. If you manage the bucket with
+> Terraform, add the `aws_s3_bucket_lifecycle_configuration` resource
+> yourself, and keep the bucket private and encrypted.
 
 > **In production:** Cardinality alerting beats post-hoc forensics.
-> Prometheus's own `prometheus_tsdb_head_series` metric exposes the
-> total series count; alarm on rapid growth (`rate(...[1h]) > 10000`)
-> and you catch a new label rollout before the TSDB fills. The
-> bookstore-platform's
-> `examples/bookstore-platform/cost/opencost-tenant-aggregations.yaml`
-> includes a `PrometheusCardinalityHigh` alert as a template — copy
-> it to your cluster's PrometheusRule.
+> Prometheus exposes the head series count as `prometheus_tsdb_head_series`.
+> Alert on a sustained rate of increase, with the threshold taken from
+> your own baseline, and you catch a new label rollout before the TSDB
+> fills. The example's `opencost-tenant-aggregations.yaml` has cost
+> alerts but no cardinality alert, so write one.
 
-> **In production:** Compliance retention is a different problem
-> from operational retention. Audit logs that an auditor asks for
-> in year 7 are a separate stream from the operational logs you
-> read this week. The pattern: 30-day operational retention in
-> CloudWatch, plus a once-daily S3 export of the audit log group to
-> a separate, cheap, write-once bucket with 7-year retention. AWS
-> exposes this via the CloudWatch Logs `aws logs create-export-task`
-> API or via subscription filters to Kinesis Firehose to S3.
+> **In production:** Evidence that an auditor asks for later is a
+> separate copy from the logs you read this week. Keep the group at its
+> operational window, and send a copy of the audit events elsewhere with
+> a subscription filter to Kinesis Data Firehose, which writes to an S3
+> bucket. Turn on S3 Object Lock in compliance mode on that bucket, so no
+> principal, root included, can delete a version before its retain-until
+> date. Test the retention period in governance mode first, because
+> compliance mode cannot be undone. Don't use `create-export-task` as a
+> daily archive. AWS recommends subscriptions for continuous archive, and
+> an export is one asynchronous batch
+> ([CreateExportTask](https://docs.aws.amazon.com/AmazonCloudWatchLogs/latest/APIReference/API_CreateExportTask.html);
+> [S3 Object Lock](https://docs.aws.amazon.com/AmazonS3/latest/userguide/object-lock.html)).
+> Choose the retention with your compliance owner, and write it down.
 
 ## Quick Reference
 
 ```bash
-# Cap retention on every unmanaged log group (drift script).
+# Cap unmanaged log groups after review, skipping audit-named groups (drift script).
 aws logs describe-log-groups \
   --region "$REGION" \
   --query 'logGroups[?retentionInDays==null].logGroupName' \
   --output text | \
+grep -v -E 'audit|evidence' | \
 while read -r LG; do
   aws logs put-retention-policy --region "$REGION" \
     --log-group-name "$LG" --retention-in-days 30
@@ -684,41 +809,40 @@ aws cloudwatch put-metric-alarm --alarm-name "${CLUSTER}-log-volume-high" \
   --dimensions Name=LogGroupName,Value="/aws/eks/$CLUSTER/cluster"
 ```
 
-Minimal skeleton — Fluent Bit OUTPUT config that splits apps to Loki +
-system to CloudWatch:
+Minimal skeleton: the OUTPUT fragment that splits apps to Loki and
+kube-system pod logs to CloudWatch. It is a fragment, not a manifest. Add
+it to your existing `fluent-bit.conf` rather than applying it on its own:
 
-```yaml
-# fluent-bit-config.yaml — excerpt
-apiVersion: v1
-kind: ConfigMap
-metadata:
-  name: <NAME>
-  namespace: logging
-data:
-  fluent-bit.conf: |
-    [OUTPUT]
-        Name        loki
-        Match       kube.var.log.containers.*_bookstore-platform-*_*.log
-        host        loki-gateway.logging.svc.cluster.local
-        labels      cluster=<CLUSTER_NAME>,job=fluent-bit
+```text
+[OUTPUT]
+    Name        loki
+    Match       kube.var.log.containers.*_bookstore-platform-*_*.log
+    host        loki-gateway.logging.svc.cluster.local
+    port        80
+    labels      cluster=<CLUSTER_NAME>,job=fluent-bit
 
-    [OUTPUT]
-        Name        cloudwatch_logs
-        Match       kube.var.log.containers.*_kube-system_*.log
-        region      <REGION>
-        log_group_name /aws/eks/<CLUSTER>/system
-        log_retention_days 30
-        auto_create_group true
+[OUTPUT]
+    Name        cloudwatch_logs
+    Match       kube.var.log.containers.*_kube-system_*.log
+    region      <REGION>
+    log_group_name /aws/eks/<CLUSTER>/system
+    log_stream_prefix fluentbit-
+    log_retention_days 30
+    auto_create_group true
 ```
 
-Cost-discipline checklist (the bill is bounded when all six are yes):
+Cost-and-evidence checklist (the bill and the evidence are both bounded
+when all seven are yes):
 
-- [ ] Every log group has `retentionInDays` set (no never-expire).
-- [ ] The control-plane audit log is < 5 GB/day (alarm if exceeded).
-- [ ] Application logs > 100 GB/month route to Loki, not CloudWatch.
+- [ ] Every log group has `retentionInDays` set on purpose (no never-expire).
+- [ ] The audit window is written down with the security owner, and the
+      group's retention is at least that long.
+- [ ] The audit stream is never sampled or excluded, and an alarm fires on
+      a volume jump or on no ingestion.
+- [ ] High-volume application logs route to Loki, not CloudWatch.
 - [ ] No metric carries `user_id`, `request_id`, or `trace_id` labels.
 - [ ] Production app log level is INFO (never DEBUG outside dev).
-- [ ] Compliance-bound logs export daily to a separate 7-year bucket.
+- [ ] Audit copies go to an Object Lock bucket, not only to a separate bucket.
 
 ## Test your understanding
 
@@ -727,14 +851,14 @@ Cost-discipline checklist (the bill is bounded when all six are yes):
 1. **What are the three cost levers (sample, scrub, retain) and in what order do they have the most leverage?**
    <details><summary>Show answer</summary>
 
-   **Sample at the source** has the highest ingestion-cost leverage — dropping DEBUG logs in prod or scraping at 30s instead of 5s reduces ingestion 10-100x. **Scrub at the boundary** strips PII / high-cardinality fields before they cross an ingestion boundary; bounded cost saving but huge compliance-scope reduction. **Cap retention at the sink** is the cheapest lever (one Terraform variable) and the highest dollar-impact for *storage* costs but doesn't reduce ingestion. Order matters: sample first (kills volume), scrub second (kills compliance scope), retain third (caps the accumulator).
+   **Sample at the source** has the highest ingestion-cost leverage — dropping DEBUG logs in prod or scraping at 30s instead of 5s can cut ingestion by a large multiple, depending on what the app emits. Audit events are the exception: sample nothing there. **Scrub at the boundary** strips PII / high-cardinality fields before they cross an ingestion boundary; bounded cost saving but huge compliance-scope reduction. **Cap retention at the sink** is the cheapest lever (one Terraform variable) and the highest dollar-impact for *storage* costs but doesn't reduce ingestion. Order matters: sample first (kills volume), scrub second (kills compliance scope), retain third (caps the accumulator).
 
    </details>
 
 2. **Finance flags a CloudWatch bill of $400/month for one cluster. You inherit it, run `aws logs describe-log-groups`, and see 12 log groups with `retentionInDays: null`. What do you do first, and what's the trap with rushing the fix?**
    <details><summary>Show answer</summary>
 
-   The unbounded log groups have been accumulating since cluster creation — storage cost dominates ingestion at this point. The fix is to set `retention_in_days` (via Terraform if managed, `aws logs put-retention-policy` if not) for each group; AWS will then begin expiring logs older than the cap on the next cycle. The trap: if any of those logs are compliance-bound (audit logs for SOC2/HIPAA), you can't just slap 7-day retention on them — coordinate with the compliance team, set the audit log to 90/365 days, and route a daily export to a cheaper S3 lifecycle-managed bucket. The bill drops within days; the compliance posture stays intact.
+   The unbounded log groups have been accumulating since cluster creation — storage cost dominates ingestion at this point. The fix is to set `retention_in_days` (via Terraform if managed, `aws logs put-retention-policy` if not) for each group; AWS will then begin expiring logs older than the cap on the next cycle. The trap: if any of those logs are compliance-bound (audit logs for SOC2/HIPAA), you can't just slap 7-day retention on them — coordinate with the compliance team, set the audit log to 90/365 days, and route a daily export to a cheaper S3 lifecycle-managed bucket. The bill falls as old data expires; the compliance posture stays intact.
 
    </details>
 
@@ -745,10 +869,18 @@ Cost-discipline checklist (the bill is bounded when all six are yes):
 
    </details>
 
-4. **Hands-on extension — at midnight, set the `audit` log stream's retention to `Never expire` (just to see), then run a `kubectl get pods --all-namespaces -w` for 30 minutes. Check ingestion the next day.**
-   <details><summary>What you should see</summary>
+4. **An attacker with `logs:PutRetentionPolicy` sets the audit group's retention to one day. What evidence is lost, and which controls stop it?**
+   <details><summary>Show answer</summary>
 
-   The `watch` is a continuous list-watch against the apiserver; every event lands in the audit log. 30 minutes of watching with a busy cluster easily produces 50-100 MB of audit-log volume — at $0.50/GB ingested that's $0.025-$0.05 from one operator's terminal. Multiply by every Argo CD controller's reconcile-loop list-watch, every Karpenter scheduler watch, every Falco rule watcher running on the cluster 24/7, and you understand why the audit log alone can hit several GB/day. Re-cap retention to 30 days when done.
+   Events older than the new one-day window become eligible for deletion,
+   so the evidence from earlier investigations goes on the next expiry.
+   The change is itself an API call, which CloudTrail records as a
+   management event if your trail covers CloudWatch Logs. The controls
+   are preventive first: deny the retention and delete actions to every
+   principal except the apply role, which sets retention in Terraform.
+   Second, keep a copy in an S3 bucket with Object Lock, which the
+   attacker's retention change cannot reach. The first control is in
+   Threats and controls, and the copy is in Production notes.
 
    </details>
 
@@ -780,3 +912,12 @@ Cost-discipline checklist (the bill is bounded when all six are yes):
   <https://aws.amazon.com/blogs/mt/optimizing-amazon-cloudwatch-logs-costs/>;
   the AWS-team-authored complement to this chapter's "three levers"
   framing.
+- **AWS: EKS control plane logging**
+  <https://docs.aws.amazon.com/eks/latest/userguide/control-plane-logs.html>;
+  the log types, the default-off setting and best-effort delivery.
+- **AWS: S3 Object Lock**
+  <https://docs.aws.amazon.com/AmazonS3/latest/userguide/object-lock.html>;
+  write-once retention for the audit copy.
+- **AWS: CloudWatch Logs CreateExportTask**
+  <https://docs.aws.amazon.com/AmazonCloudWatchLogs/latest/APIReference/API_CreateExportTask.html>;
+  why an export is not a continuous archive.
