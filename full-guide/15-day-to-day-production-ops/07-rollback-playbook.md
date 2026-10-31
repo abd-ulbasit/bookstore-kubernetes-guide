@@ -62,10 +62,10 @@ runbook discipline applies; this chapter adds the rollback-specific
 runbooks to the tree.
 
 > **In production:** Without this chapter, the team has Argo Rollouts'
-> auto-rollback for ~30% of regressions and ad-hoc Slack-driven
-> recovery for the other 70%. Ad-hoc recovery means: longer outages,
-> data loss from picking the wrong tool, postmortems that name the
-> tooling gap that already had an obvious fix.
+> auto-rollback for the regressions a canary catches, and ad-hoc,
+> Slack-driven recovery for the rest. Ad-hoc recovery means: longer
+> outages, data loss from picking the wrong tool, postmortems that name
+> the tooling gap that already had an obvious fix.
 
 ## Mental model
 
@@ -82,17 +82,19 @@ common rollback failure mode.
     minutes. **Risk**: a forward-only DB migration makes this layer
     insufficient (see the footgun).
   - **Data.** The binary is fine; the config is fine; some mutation
-    in Postgres / S3 / a whole namespace is wrong. **Tool**: CNPG
-    `Recovery` CR with WAL replay, S3 object-version restore, Velero
-    restore. **RTO**: 5 minutes to 4 hours depending on data size +
-    PV count. **Risk**: customer-visible downtime + lost writes
-    between bad mutation and recovery cut-over.
+    in Postgres / S3 / a whole namespace is wrong. **Tool**: a new CNPG
+    Cluster bootstrapped from a backup and its WAL, S3 object-version
+    restore, Velero restore. **RTO**: 5 minutes to 4 hours depending on
+    data size + PV count. **Risk**: customer-visible downtime + lost
+    writes between bad mutation and recovery cut-over.
   - **Config.** The binary is fine; the data is fine; a Helm values
     edit, a Kustomize patch, a NetworkPolicy, a Crossplane
     Composition revision is wrong. **Tool**: git-revert the bad PR +
     Argo CD sync. **RTO**: 2 to 10 minutes (the PR review is the
     bottleneck). **Risk**: Argo CD auto-sync fighting the manual
-    revert if the PR doesn't merge cleanly.
+    revert if the PR doesn't merge cleanly. The RTO figures are example
+    targets, not measurements: the monthly drill replaces them with
+    measured numbers.
 - **The decision tree.** The on-call's first 60 seconds is **not**
   "let me dig into the symptom"; it's **"which LAYER is this?"**.
   The decision is symptom-driven (see Diagram A). The full tree
@@ -124,11 +126,12 @@ common rollback failure mode.
     the regression is mild; the team bets it won't get worse before
     the next deploy. Sometimes correct; usually a postmortem with
     the action item "we should have rolled back immediately".
-  - **The discipline**: pre-stage the stable RS with `minReadySeconds:
-    0` + `progressDeadlineSeconds: 600` so the abort doesn't trigger
-    capacity issues. The Bookstore Platform's catalog Rollout
-    keeps `maxUnavailable: 0` on the stable RS during canary
-    (it's never scaled down below 100%; the canary is **additive**).
+  - **The discipline**: keep the stable RS at full size for the whole
+    canary, so an abort moves no traffic onto a stable that is still
+    scaling. The catalog Rollout in
+    `examples/bookstore/argocd/rollouts/catalog-rollout.yaml` does this
+    with `maxUnavailable: 0` and a canary `maxSurge`; the canary is
+    **additive**.
 - **Monthly rollback drills.** Without exercise, every rollback
   runbook is stale within 90 days. The Bookstore Platform's monthly
   DR drill ([Part 13 ch.12](../13-grand-capstone-bookstore-platform/12-day-2-runbook-on-call-dr-chaos.md))
@@ -159,6 +162,16 @@ future, not a fix.
 > tool affordable. A team that needs rollback every week has a CI
 > investment problem, not a rollback problem.
 
+## Threats and controls
+
+A rollback redeploys an older release, so its threats are what that release
+carries back into the cluster.
+
+| Threat | Control | Deeper |
+|---|---|---|
+| The target digest now fails verification, or carries a fixable CRITICAL or HIGH CVE that the current digest does not have | Roll back to a digest, never a tag. Verify its signature and scan it before the rollback starts (the checks in step 2). On a failure, stop and roll forward to a patched, signed digest, or flip a flag | [15.04](04-multi-environment-promotion.md) for digest promotion, [15.03](03-image-signing-and-provenance.md) for signing, [05.03](../05-security/03-supply-chain.md) for the concept |
+| A data restore brings back a Secret that was rotated after the backup, so an old credential works again | Secrets come from the store through ESO, which overwrites a restored Secret with the current value. A backup that held an exposed credential starts a rotation, not a restore | [15.05](05-production-secrets-vault-eso.md) for stores and rotation, [05.04](../05-security/04-secrets-and-cluster-hardening.md) for the concept |
+
 ## Diagrams
 
 ### Diagram A — the rollback decision tree (Mermaid)
@@ -176,6 +189,7 @@ flowchart TD
     rb_code["CODE rollback<br/>code-rollback-argocd / rollouts / helm.md"]
     rb_config["CONFIG rollback<br/>config-rollback-argocd-app.md"]
     rb_data["DATA rollback FIRST<br/>data-rollback-postgres-pitr.md<br/>(then code rollback)"]
+    sec{"Target digest verifies and<br/>adds no fixable CRITICAL or HIGH CVE?"}
     other{"Symptom WITHOUT a deploy?"}
     cust_data{"Customer-uploaded S3<br/>object missing?"}
     ns_gone{"Whole namespace<br/>missing?"}
@@ -194,8 +208,10 @@ flowchart TD
     what -->|"values / patch"| config
 
     code --> schema
-    schema -->|"NO"| rb_code
+    schema -->|"NO"| sec
     schema -->|"YES"| rb_data
+    sec -->|"yes"| rb_code
+    sec -->|"no: flip the flag or roll forward"| flagged
 
     config --> rb_config
 
@@ -216,9 +232,9 @@ CODE                  bad binary; data fine; config fine         argocd app roll
                                                                    abort | undo
                                                                  helm rollback               1-3m
 ─────────────────     ────────────────────────────────────────   ─────────────────────       ───────────
-DATA                  bad data in Postgres                       CNPG Recovery CR            15-90m
-                      bad data in S3                             aws s3api copy-object       2-10m
-                                                                   (delete-marker)
+DATA                  bad data in Postgres                       new CNPG Cluster (recovery) 15-90m
+                      bad data in S3                             aws s3api delete-object     2-10m
+                                                                   (the delete-marker version)
                       whole namespace gone                       velero restore create       5-30m
 ─────────────────     ────────────────────────────────────────   ─────────────────────       ───────────
 CONFIG                bad Helm values / Kustomize patch          git revert + argocd sync    2-10m
@@ -231,6 +247,9 @@ PRE-FLIGHT (every rollback):
   2. Did the bad release include a forward-only DB migration? (if yes:
      DATA rollback FIRST; CODE rollback alone corrupts data)
   3. What's the blast radius? One tenant / one region / cluster-wide?
+  4. Does the target digest verify, and does it carry no fixable CRITICAL
+     or HIGH CVE that the current digest lacks? If not, flip the flag or
+     roll forward.
 ```
 
 ### Diagram C — the expand-contract migration that makes rollback safe (Mermaid)
@@ -254,16 +273,20 @@ flowchart LR
 
 ## Hands-on with the Bookstore Platform
 
-We exercise the three layers against the Bookstore Platform's catalog
+We walk the three layers against the Bookstore Platform's catalog
 service. The order: (1) prerequisites; (2) walk the decision tree
 through a simulated regression; (3) execute a code rollback (Argo
 Rollouts); (4) execute a data rollback (CNPG PITR — dry-run);
 (5) execute a config rollback (Argo CD git-revert).
 
+The output after `#` in these blocks is illustrative: it describes a
+made-up incident, not a captured run. Steps that call AWS are reference
+only and were not run for this chapter.
+
 ### 0. Prerequisites — runbooks, Argo CD, Argo Rollouts, Velero
 
 ```sh
-# The runbook tree (created in this chapter — Phase 15c artifacts):
+# The runbook tree, one file per runbook:
 ls examples/bookstore-platform/rollback/
 # README.md
 # code-rollback-argocd.md
@@ -296,7 +319,7 @@ kubectl -n cnpg-system get pods
 # Region: us-east; Tenant: acme-books; p99 = 1.2s
 
 # Step 1 (60s): when did the last deploy land?
-argocd app history bookstore-catalog-us-east --limit 3
+argocd app history bookstore-catalog-us-east | head -4
 # ID  DATE                      REVISION  SOURCE
 # 42  2026-05-20 14:22:13 UTC   d8f3c2a   image-tag bump only
 # 41  2026-05-20 11:08:51 UTC   a1b2c3d   no changes
@@ -304,8 +327,8 @@ argocd app history bookstore-catalog-us-east --limit 3
 
 # 42 landed 5 min before the alert. STRONG signal.
 
-# Step 2 (60s): could a flag flip mitigate?
-curl -sk https://flagsmith.bookstore-platform.example.com/api/v1/flags/?key=catalog_v2_search_engine
+# Step 2 (60s): could a flag flip mitigate? Check the flag service
+# (ch.08) for the flag the release touched.
 # The bad release enabled meilisearch_v1 for acme-books. A flag flip
 # to legacy_postgres_ilike would mitigate.
 
@@ -314,6 +337,34 @@ curl -sk https://flagsmith.bookstore-platform.example.com/api/v1/flags/?key=cata
 ```
 
 ### 2. Execute a code rollback — the Argo Rollouts path
+
+Before a rollback that deploys an older digest, check that digest. An
+undo, an Argo CD rollback, a Helm rollback or a git revert all deploy it
+again. An abort keeps the stable ReplicaSet that already runs, so it
+pulls nothing new. Name the image by digest, because a tag can move
+([15.04](04-multi-environment-promotion.md)).
+
+```sh
+# The target digest, from the Git revision you roll back to.
+git -C ./bookstore-platform-config show <TARGET-SHA>:<PATH-TO-ROLLOUT> \
+  | grep 'image:'
+#   image: ghcr.io/acme/catalog@sha256:<TARGET-DIGEST>
+
+# The signature, bound to the workflow that built it (15.03).
+cosign verify \
+  --certificate-identity <WORKFLOW-SUBJECT> \
+  --certificate-oidc-issuer <OIDC-ISSUER> \
+  ghcr.io/acme/catalog@<TARGET-DIGEST>
+
+# Fixable CRITICAL or HIGH CVEs. Exit 1 means the target has one: compare
+# it with the current digest before you decide.
+trivy image --ignore-unfixed --severity CRITICAL,HIGH --exit-code 1 \
+  ghcr.io/acme/catalog@<TARGET-DIGEST>
+```
+
+A failed signature means the digest is not what CI built. A CVE means the
+rollback ships it again. Stop, and roll forward to a patched, signed digest
+or flip the flag. Record the decision in the incident.
 
 ```sh
 # Walk through code-rollback-rollouts.md. The catalog service is a
@@ -326,23 +377,23 @@ kubectl argo rollouts get rollout catalog \
 #                ghcr.io/acme/catalog:v1.5.1 (canary)
 
 # AnalysisRun status?
-kubectl -n bookstore-platform-acme-books get analysisrun \
-  -l rollouts-pod-template-hash=$(kubectl argo rollouts get rollout catalog \
-    -n bookstore-platform-acme-books -o json \
-    | jq -r '.status.currentPodHash')
+kubectl -n bookstore-platform-acme-books get analysisruns
 
 # If the AnalysisRun caught it, the rollout is already Degraded; the
 # controller already scaled canary RS to 0. Otherwise:
 
 kubectl argo rollouts abort catalog -n bookstore-platform-acme-books
 # rollout 'catalog' aborted
+# The abort keeps the new image in spec.template. The git revert in
+# step 4 is what keeps a later sync from bringing it back.
 
 # Wait for stable.
 kubectl argo rollouts get rollout catalog \
   -n bookstore-platform-acme-books -w
 
 # Verify metric recovery.
-kubectl -n monitoring exec -ti prom-stack-kube-prom-prometheus-0 -- \
+kubectl -n prometheus-system exec -ti \
+  prometheus-kube-prometheus-stack-prometheus-0 -- \
   promtool query instant http://localhost:9090 \
   'histogram_quantile(0.99, sum by (le) (rate(http_request_duration_seconds_bucket{service="catalog"}[5m])))'
 # Expect: drops below 0.5 within 2-3 minutes.
@@ -363,32 +414,64 @@ kubectl -n cnpg-system get clusters
 
 # Step 3: confirm PITR is even possible for this target.
 kubectl -n cnpg-system get cluster bookstore-platform-cnpg-orders \
-  -o jsonpath='{.status.firstRecoverabilityPoint}{"\n"}'
-# 2026-05-15T12:00:00Z
-# If target > firstRecoverabilityPoint -> PITR is possible.
+  -o jsonpath='{.status.firstRecoverabilityPointByMethod}{"\n"}'
+# {"plugin":"2026-05-15T12:00:00Z"}
+# If target > that timestamp -> PITR is possible.
 
-# Step 4 (DRY-RUN; do NOT apply): the Recovery YAML.
-cat <<EOF > /tmp/recovery-dry-run.yaml
+```
+
+The recovery Cluster assumes the source backs up through the Barman Cloud
+plugin. The examples in this guide still use the native `barmanObjectStore`
+method, which CloudNativePG deprecated in 1.26 and removes in 1.32. Move the
+backups to the plugin before you rely on this path.
+
+**Step 4 is a dry run.** Save this Cluster as `recovery-cluster.yaml`:
+
+```yaml
 apiVersion: postgresql.cnpg.io/v1
 kind: Cluster
 metadata:
-  name: bookstore-platform-cnpg-orders-recovered-dryrun
+  name: orders-recovered
   namespace: cnpg-system
 spec:
-  instances: 1                  # dry-run: 1 instance; prod = 3
-  storage: { size: 100Gi, storageClass: gp3-encrypted }
+  instances: 1                 # dry run: one instance; production runs three
+  seccompProfile:
+    type: RuntimeDefault
+  podSecurityContext:          # merged with the operator's defaults
+    runAsNonRoot: true
+    runAsUser: 26              # the postgres user in the CloudNativePG image
+    runAsGroup: 26
+    fsGroup: 26
+  securityContext:
+    allowPrivilegeEscalation: false
+    readOnlyRootFilesystem: true
+    capabilities:
+      drop: ["ALL"]
+  storage:
+    size: 100Gi
+    storageClass: <encrypted-storage-class>
   bootstrap:
     recovery:
-      source: bookstore-platform-cnpg-orders-cold
-      recoveryTarget: { targetTime: "2026-05-20 13:43:00.000000+00" }
-  externalClusters: [...]
-EOF
-
-# Validate the YAML (don't apply):
-kubectl apply --dry-run=server -f /tmp/recovery-dry-run.yaml
-# The full procedure (apply + cut over) is in
-# data-rollback-postgres-pitr.md.
+      source: orders-cold
+      recoveryTarget:
+        targetTime: "2026-05-20 13:43:00.000000+00"
+  externalClusters:
+    - name: orders-cold
+      plugin:
+        name: barman-cloud.cloudnative-pg.io
+        parameters:
+          barmanObjectName: orders-backup   # the ObjectStore with the backups
+          serverName: bookstore-platform-cnpg-orders
 ```
+
+```sh
+kubectl apply --dry-run=server -f recovery-cluster.yaml
+```
+
+The dry run needs the CloudNativePG CRDs. Without them it fails with
+`no matches for kind`. This chapter did not run it: the manifest was checked
+against the Cluster schema in the CloudNativePG repository instead. The full
+procedure (apply and cut over) is in data-rollback-postgres-pitr.md.
 
 ### 4. The config-rollback exercise — `git revert` + Argo CD sync
 
@@ -407,9 +490,11 @@ git -C ./bookstore-platform-config push origin revert-resourcequota
 gh pr create --title "Revert: catalog ResourceQuota cpu cap" \
   --body "Reverts a1b2c3d (caused evictions)."
 
-# Step 3: merge (admin-merge if P0; standard if P1).
+# Step 3: get the revert reviewed and merged. A P0 gets the fast review
+# path. Breakglass merges belong to 15.09, not to this step.
 
-# Step 4: Argo CD picks up auto-sync in <60s.
+# Step 4: Argo CD picks up the new commit on its next refresh, or sooner
+# through a webhook.
 argocd app get bookstore-platform-tenant-acme-books
 # Sync Status: Synced from <revert-SHA>
 
@@ -420,32 +505,12 @@ kubectl -n bookstore-platform-acme-books describe resourcequota
 
 ### 5. The monthly drill
 
-Add to the platform's monthly DR cadence (Part 13 ch.12):
-
-```sh
-# Add a rollback exercise to the script.
-cat >> examples/bookstore-platform/runbooks/dr-drill-script.sh <<'EOF'
-
-# Monthly rollback drill: pick ONE runbook, exercise it in a non-prod
-# tenant, time the three phases (detect / decide / mitigate), record
-# the result in dr-drill-YYYY-MM.md.
-
-exercise_runbook() {
-  local target=$1
-  echo "[$(date +%T)] DRILL: exercising $target"
-  case "$target" in
-    code-rollback-rollouts)
-      bash exercises/exercise-rollouts-abort.sh ;;
-    data-rollback-postgres-pitr)
-      bash exercises/exercise-pitr-dry-run.sh ;;
-    config-rollback-argocd-app)
-      bash exercises/exercise-config-revert.sh ;;
-    data-rollback-velero)
-      bash exercises/exercise-velero-restore.sh ;;
-  esac
-}
-EOF
-```
+Add the rollback runbooks to the monthly DR cadence (Part 13 ch.12). Each
+month, pick one runbook, exercise it in a non-prod tenant, time detection,
+decision and mitigation, and record the three numbers in a dated drill note.
+`dr-drill-script.sh` writes that note for the regional drill. The rollback
+drills write theirs by hand, because the example tree has no exercise
+scripts for them yet.
 
 ## How it works under the hood
 
@@ -453,8 +518,8 @@ EOF
 
 The **code** layer rolls back what's on the running Pods. Argo CD
 `app rollback` re-syncs the Application against a previous Application
-revision (history record); the manifests + the image tag from that
-revision get applied; the Deployment / Rollout controller rolls Pods
+revision (history record); the manifests and the image reference from
+that revision get applied; the Deployment / Rollout controller rolls Pods
 to the old image. **Argo Rollouts** `abort` is faster than `app
 rollback` because the stable ReplicaSet is **already alive** — the
 abort scales the canary RS to 0 and the stable to full count. **Helm
@@ -510,8 +575,8 @@ break is a deliberate, audited decision".
 **Peak-traffic abort capacity planning.** The Bookstore Platform's
 Rollout strategy keeps the stable RS at 100% throughout the canary
 (the canary is **additive**, not replacing). The cluster therefore
-needs **canary-percentage** extra capacity during a canary
-(typically 10-25%). Cluster autoscaler + Karpenter cover this on EKS
+needs spare capacity for the canary's share of replicas while the canary
+runs. Cluster autoscaler + Karpenter cover this on EKS
 (Part 14 ch.09); on resource-constrained kind clusters, the canary
 is sized smaller. The capacity preserves the **abort safety**: an
 abort doesn't scale up stable; stable is already at 100%.
@@ -529,8 +594,8 @@ abort doesn't scale up stable; stable is already at 100%.
 
 > **In production:** **The "rollback during peak" judgement call.**
 > A regression noticed at 14:00 UTC (US peak); the choice is
-> rollback-now (5 min of capacity-shift brown-out) or hold-until-off-
-> hours (3 hours of degraded service). The default: **rollback-now
+> rollback-now (a brief capacity-shift brown-out) or hold-until-off-
+> hours (hours of degraded service). The default: **rollback-now
 > for any P0 / P1**; **hold-until-off-hours for P2 only**. The
 > conservative move (rollback) tends to look reckless in the moment
 > and correct in the postmortem; the reckless move (hold) tends to
@@ -547,8 +612,7 @@ abort doesn't scale up stable; stable is already at 100%.
 
 > **In production:** **The "we'll roll forward instead" anti-pattern.**
 > The pressure during an incident is to ship a hotfix forward
-> (5 minutes of CI + the fix is "done") rather than roll back
-> (2 minutes; the bad commit is still in HEAD). Roll-forward feels
+> (a CI run, and the fix is "done") rather than roll back. Roll-forward feels
 > productive; rollback feels like failure. **Discipline**: rollback
 > first, always; the hotfix (if any) follows as a CLEAN PR after the
 > regression is mitigated. The "rolled forward and the hotfix had
@@ -562,7 +626,7 @@ abort doesn't scale up stable; stable is already at 100%.
 > none`, finishes with a git-revert PR + `argocd app set --sync-
 > policy automated`. The discipline trades operator-attention for
 > a clean GitOps state; without it, the cluster looks rolled-back
-> for ~60 seconds before auto-sync reapplies the bad revision.
+> for a short window before auto-sync reapplies the bad revision.
 
 > **In production we did not build:** automated rollback-decision
 > support (a controller that reads symptoms and recommends a layer)
@@ -579,6 +643,12 @@ abort doesn't scale up stable; stable is already at 100%.
 ## Quick Reference
 
 ```sh
+# CODE: check the target digest first (any rollback that deploys an older one)
+cosign verify --certificate-identity <SUBJECT> \
+  --certificate-oidc-issuer <ISSUER> <IMAGE>@<DIGEST>
+trivy image --ignore-unfixed --severity CRITICAL,HIGH --exit-code 1 \
+  <IMAGE>@<DIGEST>
+
 # CODE — Argo CD
 argocd app set <APP> --sync-policy none
 argocd app rollback <APP> <HISTORY_ID>
@@ -593,8 +663,9 @@ kubectl argo rollouts get   <ROLLOUT> -n <NS> -w       # verify
 helm history <RELEASE> -n <NS>
 helm rollback <RELEASE> <REVISION> -n <NS> --wait --timeout 5m
 
-# DATA — Postgres PITR (CNPG)
-kubectl apply -f - <<<'(see data-rollback-postgres-pitr.md Step 3b)'
+# DATA: Postgres PITR (CNPG); the full procedure is in
+# data-rollback-postgres-pitr.md
+kubectl apply --dry-run=server -f recovery-cluster.yaml
 # Watch:
 kubectl -n cnpg-system get clusters <RECOVERED> -w
 
@@ -639,7 +710,7 @@ Drill them monthly.
 3. **A canary catches a regression at 50%. The on-call has two options: abort immediately (capacity event as stable scales up) or hold and observe. What's the chapter's stance, and what's the prevention?**
    <details><summary>Show answer</summary>
 
-   Abort immediately is the safe move; hold-and-observe is "usually a postmortem with the action item 'we should have rolled back immediately.'" The capacity-event risk is real — if stable was scaled down to 50% to make room for the canary, scaling back up to 100% is a sudden burst. The chapter's prevention: keep stable RS at 100% during canary (`maxUnavailable: 0`), making the canary purely *additive*. The catalog Rollout in the example tree uses this pattern — the canary is extra capacity, not a replacement; aborting at 50% just scales the canary RS to zero without touching stable. The trade-off: 1.5x resources during canary, but rollback is instant and capacity-event-free.
+   Abort immediately is the safe move; hold-and-observe is "usually a postmortem with the action item 'we should have rolled back immediately.'" The capacity-event risk is real — if stable was scaled down to 50% to make room for the canary, scaling back up to 100% is a sudden burst. The chapter's prevention: keep stable RS at 100% during canary (`maxUnavailable: 0`), making the canary purely *additive*. The catalog Rollout in the example tree uses this pattern — the canary is extra capacity, not a replacement; aborting at 50% just scales the canary RS to zero without touching stable. The trade-off: spare capacity for the canary, in exchange for an abort that is instant and moves no traffic onto a scaling stable.
 
    </details>
 
@@ -657,26 +728,38 @@ Drill them monthly.
 
    </details>
 
+6. **The on-call wants to roll back to last week's digest. `cosign verify`
+   passes for it, and `trivy image --ignore-unfixed` reports a fixable
+   CRITICAL CVE that the current digest does not have. Should the rollback
+   go ahead?**
+   <details><summary>Show answer</summary>
+
+   Not as it stands. A valid signature shows that the expected workflow built
+   the digest. It says nothing about what the digest contains, so the rollback
+   would put a known CVE back into service. Stop it. Flip the flag behind the
+   regression if one exists, or roll forward to a patched digest that the same
+   workflow built and signed. Record the decision in the incident. If the team
+   accepts the CVE for a rollback anyway, that is a security decision with an
+   owner and an expiry, and it goes in the postmortem.
+
+   </details>
+
 ## Further reading
 
-- **[Argo CD docs — "Rollbacks"](https://argo-cd.readthedocs.io/en/stable/user-guide/auto_sync/#temporarily-toggling-auto-sync)** —
-  the official "disable auto-sync; rollback; revert; re-enable"
-  pattern this chapter codifies.
-- **[Argo Rollouts docs — "Aborts & Rollbacks"](https://argo-rollouts.readthedocs.io/en/stable/features/restart/#abort-a-rollout)** —
-  the canonical `abort` / `undo` reference.
+- **[Argo CD docs — auto-sync](https://argo-cd.readthedocs.io/en/stable/user-guide/auto_sync/)** —
+  how auto-sync is switched off and on, which the rollback steps depend on.
+- **[`kubectl argo rollouts abort`](https://github.com/argoproj/argo-rollouts/blob/master/docs/generated/kubectl-argo-rollouts/kubectl-argo-rollouts_abort.md)** —
+  reverts the steps and keeps the new version in `spec.template`, so a Git
+  revert must follow it.
 - **[Helm docs — `helm rollback`](https://helm.sh/docs/helm/helm_rollback/)** —
   the release ledger + rollback semantics + the CRDs-not-rolled-back
   footgun.
-- **[CloudNativePG — "Recovery"](https://cloudnative-pg.io/documentation/current/recovery/)** —
-  the `Recovery` CR + WAL replay + `targetTime` / `targetXID` /
-  `targetName` reference.
+- **[CloudNativePG — "Recovery"](https://cloudnative-pg.io/docs/current/recovery)** —
+  recovery as a bootstrap method, the `recoveryTarget` options, and the
+  deprecation of native Barman Cloud in 1.26.
 - **[Velero — "Restore"](https://velero.io/docs/main/restore-reference/)** —
-  restore-volumes; restore-policy; namespace-mappings; storage-class-
-  mappings.
+  restore flags, including the resource filters and volume restore.
 - **[Google SRE Book ch.16 — "Tracking Outages"](https://sre.google/sre-book/tracking-outages/)** —
   the postmortem-after-rollback discipline this chapter assumes.
 - **[Martin Fowler — "Parallel Change" (expand-contract)](https://martinfowler.com/bliki/ParallelChange.html)** —
   the schema-migration pattern that makes rollback safe.
-- **[Aaron Patterson — "We Are Going to Be OK"](https://railsconf2019.confbookmark.com/talks/we-are-going-to-be-ok)** —
-  the deep "production database migrations" talk; the source of much
-  of this chapter's footgun list.
