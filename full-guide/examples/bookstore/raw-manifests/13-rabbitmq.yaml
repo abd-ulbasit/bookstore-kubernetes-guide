@@ -20,8 +20,10 @@
 # 999, and back /var/lib/rabbitmq with an emptyDir the kubelet chowns to 999.
 # drop ALL + no-privilege-escalation + runAsNonRoot + seccomp RuntimeDefault =
 # restricted. The rest of the Part 01 ch.01 baseline holds too: the image is
-# pinned by digest and the root FS is read-only. `restricted` asks for neither,
-# and labs/05-02.sh in examples/security-lab shows the broker booting this way.
+# pinned by digest and the root FS is read-only. `restricted` asks for neither.
+# labs/05-02.sh in examples/security-lab applies this file under restricted and
+# records the broker reaching Ready. The startupProbe below covers the broker's
+# boot, which runs longer than the liveness probe's first failures allow.
 #
 # Requires:
 #   kubectl apply -f examples/bookstore/raw-manifests/00-namespace.yaml
@@ -95,13 +97,16 @@ spec:
             tcpSocket: { port: amqp }
             initialDelaySeconds: 30
             periodSeconds: 15
+          # RabbitMQ sets its memory alarm from the container limit. At 512Mi, a
+          # boot on a busy lab host raised the alarm and the port stayed closed
+          # for the whole rollout wait. At 1Gi the same boot reached Ready.
           resources:
             requests:
               cpu: 100m
               memory: 256Mi
             limits:
               cpu: 500m
-              memory: 512Mi
+              memory: 1Gi
           # --- Part 05 ch.02: Mnesia DB + Erlang cookie dir on an emptyDir
           # (chowned to fsGroup 999). Ephemeral — matches "no persistence".
           volumeMounts:

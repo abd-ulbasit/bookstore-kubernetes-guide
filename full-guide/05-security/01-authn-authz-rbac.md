@@ -1,4 +1,4 @@
-# 01 — Authentication, authorization, RBAC
+# 01: Authentication, authorization, RBAC
 
 > The full API request gauntlet: TLS → **authentication** (who are you?) →
 > **authorization** (may you?) → **admission** (mutate then validate) → etcd;
@@ -10,8 +10,8 @@
 > services get their own identities.
 
 **Estimated time:** ~45 min read · ~90 min hands-on, including the lab
-**Prerequisites:** [Part 00 ch.04](../00-foundations/04-control-plane-deep-dive.md) — the API request pipeline (authn → authz → admission) · [Part 00 ch.06](../00-foundations/06-declarative-api-model.md) — apiVersion/Kind and resource verbs · [Part 03 ch.02](../03-config-and-storage/02-secrets.md) — ServiceAccount tokens land as projected volumes
-**You'll know after this:** • distinguish authentication, authorization and admission as separate stages · • create ServiceAccounts and bind them to least-privilege Roles/ClusterRoles · • read RBAC verbs, resources and resourceNames to predict whether a request is allowed · • use `kubectl auth can-i` and impersonation to debug access denials · • replace the default ServiceAccount with per-workload identities across the Bookstore
+**Prerequisites:** [Part 00 ch.04](../00-foundations/04-control-plane-deep-dive.md): the API request pipeline (authn → authz → admission) · [Part 00 ch.06](../00-foundations/06-declarative-api-model.md), apiVersion/Kind and resource verbs · [Part 03 ch.02](../03-config-and-storage/02-secrets.md), ServiceAccount tokens land as projected volumes
+**You'll know after this:** • distinguish authentication, authorization and admission as separate stages · • create ServiceAccounts and bind them to least-privilege Roles/ClusterRoles · • read RBAC verbs, resources and resourceNames to predict whether a request is allowed · • use `kubectl auth can-i` and impersonation to debug access denials · • give each Bookstore workload its own ServiceAccount, and grant it only what it needs
 
 <!-- tags: security, rbac, foundations, core-objects, day-2 -->
 
@@ -36,12 +36,13 @@ runs a fixed pipeline. That chapter named the stages; this one **operates**
 them, because every access-control bug and every "why can this pod do that?"
 question is answered inside this pipeline.
 
-The Bookstore has shipped happily so far on an unstated assumption: every
-workload runs as the namespace's **`default` ServiceAccount**, which on a fresh
-cluster can do almost nothing — *by luck, not design*. That is exactly the
-anti-pattern: a shared, ambient identity whose permissions nobody reviewed. A
-catalog Pod that is compromised should not be able to read the database Secret,
-list every Pod, or — worst — modify RBAC. To make "least privilege" real you
+A workload that runs under a shared, ambient identity, such as the namespace's
+**`default` ServiceAccount**, gets whatever that identity was granted, and
+nobody reviewed the grant. On a fresh cluster that grant is almost nothing, by
+default and not by design. A catalog Pod that is compromised should not be able
+to read the database Secret, list every Pod, or, worst of all, modify RBAC. The
+Bookstore therefore gives each workload its own ServiceAccount, and this chapter
+decides what RBAC may grant each one. To make "least privilege" real you
 must know precisely **who a request is, how that is decided, and how
 permissions are granted and scoped**. This is the [Access
 Control](#further-reading) pattern.
@@ -51,24 +52,24 @@ Control](#further-reading) pattern.
 Think of the API server as a **secure building with three checkpoints in a
 fixed order**, and you never reach the next one until you clear the current:
 
-1. **Authentication — the ID check at the door.** "Prove who you are."
+1. **Authentication: the ID check at the door.** "Prove who you are."
    Kubernetes itself has **no user database**: identity is *asserted by a
    trusted authenticator* (a client certificate signed by the cluster CA, a
    ServiceAccount bearer token, an OIDC token from your IdP). Output: a
    username + groups, or `401`. A *human* "user" is just a string the
    authenticator vouches for; there is no `User` object you can `kubectl get`.
-2. **Authorization — the access list.** "You are `alice` / this Pod's SA — are
+2. **Authorization: the access list.** "You are `alice` / this Pod's SA: are
    you allowed to *create pods in namespace bookstore*?" One or more
-   authorizers (Node, **RBAC**, ABAC, Webhook) vote; they are **OR'd** — the
-   first to say *allow* wins; if none allow, `403`.
-3. **Admission — the inspector.** Already-authorized requests are first
+   authorizers (Node, **RBAC**, ABAC, Webhook) are consulted in order. The first
+   to say *allow* or *deny* decides; if none allows, `403`.
+3. **Admission: the inspector.** Already-authorized requests are first
    *mutated* (defaulting, webhooks, sidecar injection) **then** *validated*
-   (schema, then validating webhooks/policy — PSA, Kyverno). Only a request
+   (schema, then validating webhooks/policy, PSA, Kyverno). Only a request
    that survives all three is converted to storage form and written to etcd.
 
 Two invariants to keep: **mutate-before-validate is fixed** (a validating
 policy always sees the final object), and **the API server is the sole etcd
-client** (so this gauntlet is the *only* place anything is enforced — raw etcd
+client** (so this gauntlet is the *only* place anything is enforced, raw etcd
 access bypasses all of it, which is why etcd access ≈ cluster-admin).
 
 ## Threats and controls
@@ -146,7 +147,7 @@ the `bookstore` namespace ([Part 01 ch.03](../01-core-workloads/03-resources-and
 This chapter adds **`05-serviceaccounts-rbac.yaml`** (numbered `05-` so a
 whole-dir apply creates the identities right after the namespace and *before*
 any workload that references them) and wires `serviceAccountName` +
-`automountServiceAccountToken: false` into the workloads — purely additive
+`automountServiceAccountToken: false` into the workloads, purely additive
 edits; every prior field (config, Secret-built `DB_DSN`, probes, `preStop`
 sleep, volumes, labels, the Part 04 scheduling layer) is unchanged.
 
@@ -155,7 +156,7 @@ sleep, volumes, labels, the Part 04 scheduling layer) is unchanged.
 ```sh
 # AuthN: who does the API server think YOU are (from your kubeconfig)?
 kubectl auth whoami
-# AuthZ stage, directly — the SubjectAccessReview API behind `can-i`:
+# AuthZ stage, directly: the SubjectAccessReview API behind `can-i`:
 kubectl auth can-i create pods -n bookstore
 kubectl auth can-i 'delete' clusterroles            # almost certainly: no
 # What can the *default* SA in bookstore do? (the ambient identity so far)
@@ -170,8 +171,8 @@ New file
 [`examples/bookstore/raw-manifests/05-serviceaccounts-rbac.yaml`](../examples/bookstore/raw-manifests/05-serviceaccounts-rbac.yaml).
 It defines one ServiceAccount per workload and *one* tiny Role. The design
 decision: **the Go services and the stock images never call kube-apiserver**
-(verified in [`app/catalog/main.go`](../examples/bookstore/app/catalog/main.go)
-— it talks to Postgres/Redis, never the Kubernetes API). So the correct least
+(verified in [`app/catalog/main.go`](../examples/bookstore/app/catalog/main.go):
+it talks to Postgres/Redis, never the Kubernetes API). So the correct least
 privilege is **no API permissions and no mounted token at all**:
 
 ```yaml
@@ -196,9 +197,10 @@ subjects: [ { kind: ServiceAccount, name: catalog-sa, namespace: bookstore } ]
 roleRef: { kind: Role, name: catalog-config-reader, apiGroup: rbac.authorization.k8s.io }
 ```
 
-`storefront-sa`, `orders-sa`, `postgres-sa`, `redis-sa`, `rabbitmq-sa` and the
+`storefront-sa`, `orders-sa`, `payments-worker-sa`, `postgres-sa`, `redis-sa`,
+`rabbitmq-sa` and the
 batch `migrate-sa` (shared by the `db-migrate` Job and `cleanup` CronJob) get
-**no** binding — with no RoleBinding/ClusterRoleBinding naming them, RBAC
+**no** binding: with no RoleBinding/ClusterRoleBinding naming them, RBAC
 denies them everything, which is exactly right for a workload that never calls
 the API. There is **one SA per workload and no Bookstore Pod uses the
 namespace `default` SA**. The `catalog` Role is a deliberately minimal
@@ -231,25 +233,27 @@ each gain two fields in `template.spec` (nothing else changes):
       # ...all prior fields (scheduling layer, containers, volumes) unchanged...
 ```
 
-The **same two fields are added to every other Bookstore workload** in the
-namespace as well — `12-redis.yaml` (`redis-sa`), `13-rabbitmq.yaml`
-(`rabbitmq-sa`), the manual-canary `30-catalog-canary.yaml` (`catalog-sa`,
-both stable+canary templates), and the `postgres:16` DB batch jobs
-`21-db-migrate-job.yaml` / `22-cleanup-cronjob.yaml` (the shared `migrate-sa`).
-No Bookstore Pod is left on the `default` ServiceAccount. The four blocks above
-show the pattern. The repository files carry the same two fields in each
-workload, and the file is the reference for the rest.
+The **same two fields appear in every other Bookstore workload** in the
+namespace: `11-storefront-deploy.yaml` (`storefront-sa`),
+`14-orders-deploy.yaml` (`orders-sa`), `19-payments-worker-deploy.yaml`
+(`payments-worker-sa`), `12-redis.yaml` (`redis-sa`), `13-rabbitmq.yaml`
+(`rabbitmq-sa`), the manual-canary `30-catalog-canary.yaml` (`catalog-sa`, in
+both the stable and canary templates), `20-postgres-statefulset.yaml`
+(`postgres-sa`), and the `postgres:16` DB batch jobs `21-db-migrate-job.yaml`
+and `22-cleanup-cronjob.yaml` (the shared `migrate-sa`). No Bookstore Pod is
+left on the `default` ServiceAccount. The four blocks above show the pattern.
+The repository files carry the same two fields in each workload, and the file
+is the reference for the rest.
 
-(The per-workload `securityContext` *fields* are added to these manifests in
-[ch.02](02-pod-security.md); this chapter's manifest edits are identity only.
-Note this is distinct from the namespace's PSA `restricted` *labels*, which
-are already present in the shared `00-namespace.yaml` you applied above —
-ch.02 explains them, but they are enforcing from the first apply, hence the
-restricted-shaped debug pod earlier.) Apply the prerequisites then the
-workload:
+(The per-workload `securityContext` fields are already in these manifests, and
+[ch.02](02-pod-security.md) explains them. This chapter's manifest edits are
+identity only. The namespace's PSA `restricted` *labels* sit in the shared
+`00-namespace.yaml` you applied above. ch.02 explains them too, and they
+enforce from the first apply, which is why the debug pod earlier is
+restricted-shaped.) Apply the prerequisites then the workload:
 
 ```sh
-# from the repo root (full-guide/) — prerequisite chain, in order
+# from the repo root (full-guide/): prerequisite chain, in order
 kubectl apply -f examples/bookstore/raw-manifests/00-namespace.yaml
 kubectl apply -f examples/bookstore/raw-manifests/05-serviceaccounts-rbac.yaml
 kubectl apply -f examples/bookstore/raw-manifests/15-catalog-config.yaml
@@ -267,44 +271,51 @@ kubectl apply -f examples/bookstore/raw-manifests/10-catalog-deploy.yaml
 kubectl rollout status deployment/catalog -n bookstore
 ```
 
-### 4. Prove the least privilege — and prove the token is gone
+### 4. Prove the least privilege, and prove the token is gone
 
 ```sh
 # catalog-sa can GET its one ConfigMap by name, and NOTHING else:
 kubectl auth can-i get configmap/catalog-config \
-  -n bookstore --as=system:serviceaccount:bookstore:catalog-sa     # yes
+  -n bookstore --as=system:serviceaccount:bookstore:catalog-sa
 kubectl auth can-i list configmaps \
-  -n bookstore --as=system:serviceaccount:bookstore:catalog-sa     # no
+  -n bookstore --as=system:serviceaccount:bookstore:catalog-sa
 kubectl auth can-i get secret/db-credentials \
-  -n bookstore --as=system:serviceaccount:bookstore:catalog-sa     # no
+  -n bookstore --as=system:serviceaccount:bookstore:catalog-sa
 kubectl auth can-i --list \
-  -n bookstore --as=system:serviceaccount:bookstore:orders-sa      # ~nothing
+  -n bookstore --as=system:serviceaccount:bookstore:orders-sa
 
-# The token is genuinely not projected. catalog is distroless (no shell) —
-# inspect from an EPHEMERAL public-image Pod using the SAME ServiceAccount.
-# IMPORTANT: `bookstore` already enforces PSA `restricted` (it is baked into
-# the single canonical 00-namespace.yaml from the start — the labels and the
-# full reasoning are ch.02's topic, but the file carries them now, so this
-# applies HERE too). Therefore EVERY ad-hoc debug Pod you run in `bookstore`
-# must itself be restricted-compliant or PSA rejects it before it starts —
-# busybox/curl/netshoot all run fine under this securityContext, so set it:
-kubectl run sa-peek -n bookstore --restart=Never -i --rm \
-  --overrides='{"spec":{"serviceAccountName":"catalog-sa",
-    "automountServiceAccountToken":false,
-    "securityContext":{"runAsNonRoot":true,"runAsUser":65532,
-      "seccompProfile":{"type":"RuntimeDefault"}},
-    "volumes":[{"name":"tmp","emptyDir":{}}],
-    "containers":[{"name":"sa-peek",
-      "image":"busybox@sha256:73aaf090f3d85aa34ee199857f03fa3a95c8ede2ffd4cc2cdb5b94e566b11662",
-      "securityContext":{"allowPrivilegeEscalation":false,
-        "readOnlyRootFilesystem":true,"capabilities":{"drop":["ALL"]}},
-      "volumeMounts":[{"name":"tmp","mountPath":"/tmp"}],
-      "command":["sh","-c","ls /var/run/secrets/kubernetes.io/serviceaccount 2>&1 || echo NO-TOKEN-MOUNTED"]}]}}'
-#   Expected, not captured in this lab: NO-TOKEN-MOUNTED. The SA exists, but
-#   no API credential is in the Pod.
-#   (`--as` is impersonation: it needs RBAC to impersonate; cluster-admin
-#    kubeconfigs have it. It's the canonical way to audit another identity.)
+# The token is not projected. Run a Pod as the same ServiceAccount, with the
+# restricted securityContext the namespace requires. `--image` names the
+# busybox image, and the overrides set the rest of the Pod.
+kubectl run sa-peek -n bookstore --image=busybox@sha256:73aaf090f3d85aa34ee199857f03fa3a95c8ede2ffd4cc2cdb5b94e566b11662 --restart=Never -i --rm </dev/null \
+  --overrides='{"spec":{"serviceAccountName":"catalog-sa","automountServiceAccountToken":false,"securityContext":{"runAsNonRoot":true,"runAsUser":65532,"runAsGroup":65532,"seccompProfile":{"type":"RuntimeDefault"}},"volumes":[{"name":"tmp","emptyDir":{}}],"containers":[{"name":"sa-peek","image":"busybox@sha256:73aaf090f3d85aa34ee199857f03fa3a95c8ede2ffd4cc2cdb5b94e566b11662","securityContext":{"allowPrivilegeEscalation":false,"readOnlyRootFilesystem":true,"capabilities":{"drop":["ALL"]}},"resources":{"requests":{"cpu":"10m","memory":"16Mi"},"limits":{"memory":"32Mi"}},"volumeMounts":[{"name":"tmp","mountPath":"/tmp"}],"command":["sh","-c","ls /var/run/secrets/kubernetes.io/serviceaccount 2>&1 || echo NO-TOKEN-MOUNTED"]}]}}'
 ```
+
+<!-- gate: output -->
+```text
+yes
+no
+no
+Resources                                       Non-Resource URLs                      Resource Names   Verbs
+selfsubjectreviews.authentication.k8s.io        []                                     []               [create]
+# ...
+```
+
+The first three lines are the `can-i` answers. The fourth prints the rules
+`orders-sa` holds, and the rows after the header are the discovery rules every
+authenticated identity has. The `sa-peek` Pod prints `NO-TOKEN-MOUNTED`:
+
+<!-- gate: output -->
+```text
+ls: /var/run/secrets/kubernetes.io/serviceaccount: No such file or directory
+NO-TOKEN-MOUNTED
+# ...
+pod "sa-peek" deleted from p05-01-bookstore namespace
+```
+
+The captured output comes from the lab's own namespace, `p05-01-bookstore`,
+which the lab creates from the same manifests. The commands above name the
+`bookstore` namespace you applied earlier in this chapter.
 
 > **Why these `--overrides` (a teaching point, not a workaround).** This guide
 > uses **one canonical `00-namespace.yaml`**, and it carries the
@@ -312,7 +323,7 @@ kubectl run sa-peek -n bookstore --restart=Never -i --rm \
 > apply (the mechanics and rationale are [ch.02](02-pod-security.md)'s subject;
 > the file is shared, not duplicated per chapter). A practical consequence
 > lands *here*, in ch.01: the moment you `kubectl apply 00-namespace.yaml`,
-> **any** Pod in `bookstore` — including a throwaway `kubectl run` debug Pod —
+> **any** Pod in `bookstore`, including a throwaway `kubectl run` debug Pod,
 > must satisfy `restricted` or admission rejects it. So every ephemeral pod in
 > the Part 05 hands-on includes the restricted `securityContext` shown above
 > (`runAsNonRoot`, `runAsUser`, `seccompProfile: RuntimeDefault`,
@@ -324,18 +335,17 @@ kubectl run sa-peek -n bookstore --restart=Never -i --rm \
 > included.
 
 > **Lineage / forward refs.** This chapter establishes *identity* and *RBAC*.
-> [ch.02](02-pod-security.md) **owns and explains** the `restricted` PSA
-> labels and the workloads' `securityContext` — those labels live in the
-> single shared `00-namespace.yaml` and are already in force the moment you
-> apply it (which is why the debug pod above is restricted-shaped); ch.02 is
-> where the *why* and *how* are taught, not where they are first switched on.
+> [ch.02](02-pod-security.md) explains the `restricted` PSA labels and the
+> `securityContext` fields the workloads carry. The labels live in the single
+> shared `00-namespace.yaml` and are in force the moment you apply it, which
+> is why the debug pod above is restricted-shaped.
 > [ch.03](03-supply-chain.md) covers images and supply chain. Admission
 > **policy** at the validating stage you saw above is chapter 05.07, and the
 > **audit trail** of every authN/authZ decision made here is chapter 05.08:
 > <!-- link-later: 05.07 --> <!-- link-later: 05.08 -->
 > [ch.04](04-secrets-and-cluster-hardening.md) covers Secret encryption at rest.
 > RBAC on `secrets` was introduced in
-> [Part 03 ch.02](../03-config-and-storage/02-secrets.md) — this chapter is the
+> [Part 03 ch.02](../03-config-and-storage/02-secrets.md), this chapter is the
 > general model behind it.
 
 ## Lab: escalation paths, attack and harden
@@ -359,11 +369,12 @@ ordinary. Each path checks what its identity can do, uses the grant, removes or
 narrows it, and then repeats the step. Each identity has a kubeconfig with one
 token and no admin credential.
 
-Every path goes through the API server except path E, which reaches the kubelet.
-A kind node is a container that shares the kernel of the Linux host running it,
-and its kubelet is one process inside that container. The lab touches that
-kubelet and the Pods in `p05-rbac`, and nothing else. The Secret values are
-dummies, and no token is printed.
+Every path goes through the API server. Path E reaches the kubelet through the
+API server's `nodes/proxy` subresource, so the API server's authorization
+decides it too. A kind node is a container that shares the kernel of the Linux
+host running it, and its kubelet is one process inside that container. The lab
+touches that kubelet and the Pods in `p05-rbac`, and nothing else. The Secret
+values are dummies, and no token is printed.
 
 ### Path A: a Pod or a Deployment borrows a ServiceAccount
 
@@ -393,7 +404,7 @@ spec:
   serviceAccountName: p05-deployer
   containers:
     - name: borrow
-      image: curlimages/curl@sha256:58adaa4e8dca9c988bae2aba4ab3434a0bb2da16bbe3f92dec39ec7785166777
+      image: curlimages/curl@sha256:58adaa4e8dca9c988bae2aba4ab3434a0bb2da16bbe3f92dec39ec7785166777  # curlimages/curl:8.22.0
       command: ["sh", "-c"]
       args:
         - |
@@ -559,9 +570,9 @@ error: failed to create rolebinding: rolebindings.rbac.authorization.k8s.io "p05
 
 ### Path D: `impersonate` runs a request as another identity
 
-`p05-impersonator` may impersonate `p05-deployer`, and nothing else. Impersonation
-applies the target's rights for one call, so the caller needs no Secret access
-of its own:
+`p05-impersonator` may impersonate `p05-deployer`, and nothing else.
+Impersonation applies the target's rights for one call, so the caller needs no
+Secret access of its own:
 
 ```yaml
 rules:
@@ -598,25 +609,29 @@ rules:
   - {apiGroups: [""], resources: ["nodes/proxy"], verbs: ["get", "create"]}
 ```
 
-`get` sends GET requests through the API server to the kubelet, which lists the
-Pods on the node. `create` sends POST requests, and the kubelet's run endpoint
-executes a command in a container. That request reaches the kubelet on the API
-server's own connection, so the caller's `pods/exec` permission is never
-checked.
+The lab lists the kubelet's Pods with `get`, which sends a GET request through
+the API server to the kubelet. It runs a command with `create`, which sends a
+POST to the kubelet's run endpoint, and the kubelet executes the command in a
+container. That request reaches the kubelet on the API server's own connection,
+so the caller's `pods/exec` permission is never checked. The
+[kubelet authorization page](https://kubernetes.io/docs/reference/access-authn-authz/kubelet-authn-authz/)
+warns that `get` on `nodes/proxy` is not read-only: it also authorizes running
+commands in any container through the WebSocket endpoints. A grant of `get`
+alone is therefore already dangerous.
 
 <!-- gate: output -->
 ```text
 yes
 no
-      36
+      29
 # ...
 DB_PASSWORD=p05-lab-only-password
 ```
 
-The first two lines answer `auth can-i get nodes --subresource=proxy` (yes) and
-`auth can-i create pods --subresource=exec` (no). The count is the number of Pods
-the kubelet listed across namespaces, and the last line is the victim's
-environment.
+The first two lines answer `auth can-i get nodes --subresource=proxy` (yes)
+and `auth can-i create pods --subresource=exec` (no). The count is the number
+of Pods the kubelet listed across namespaces, and the last line is the
+victim's environment.
 
 **Harden.** Grant only what a dashboard reads, `nodes` get and list, and no
 proxy. Both kubelet calls are refused:
@@ -694,7 +709,7 @@ certificatesigningrequest.certificates.k8s.io/p05-impostor-csr created
 certificatesigningrequest.certificates.k8s.io/p05-impostor-csr approved
 # ...
 subject=O=p05-readers, CN=p05-impostor
-notAfter=Oct 30 23:07:06 2026 GMT
+notAfter=Oct 31 07:02:17 2026 GMT
 Username                                            p05-impostor
 Groups                                              [p05-readers system:authenticated]
 p05-lab-only-password
@@ -735,31 +750,36 @@ no lab-owned cluster objects left
 ```
 
 **Not run here.** The lab does not show a CSR for `O=system:masters` (refused by
-default by `CertificateSubjectRestriction`, cited above), a kubelet exec with
+default by `CertificateSubjectRestriction`, cited in the `system:masters`
+bullet above), a kubelet exec with
 cluster-admin rights, or any audit record. Those belong to other chapters or
 are cited to upstream.
 
 ## How it works under the hood
 
-### Authentication — every credential is "asserted identity"
+### Authentication: every credential is "asserted identity"
 
 The API server runs configured authenticators **in order**; the first to
 positively identify the request wins, producing a `user.Info` (a username
-string + a set of group strings). Kubernetes stores **no** user records — it
+string + a set of group strings). Kubernetes stores **no** user records: it
 *trusts the authenticator*. The common ones:
 
 - **X.509 client certificates.** The client presents a TLS cert signed by the
   cluster CA; `CN` → username, `O` (organization) → groups. This is how admin
   kubeconfigs and kubelets authenticate. Revocation is awkward (no CRL by
-  default) — short-lived certs or another method is preferred for humans.
+  default), short-lived certs or another method is preferred for humans.
 - **ServiceAccount tokens (the workload identity).** A signed JWT whose subject
   is `system:serviceaccount:<NS>:<NAME>` with groups
   `system:serviceaccounts` and `system:serviceaccounts:<NS>`. Modern clusters
   issue **bound, projected** tokens via the **TokenRequest** API: the kubelet
-  mounts a short-lived token that is *audience-scoped*, *time-limited*, **and
-  bound to the Pod object** (it is invalidated when the Pod is deleted) and
-  auto-rotated before expiry. The legacy model — a permanent token in a
-  `Secret` auto-created per SA — is **deprecated and off by default** (no
+  mounts a token that is *audience-scoped* and **bound to the Pod object** (it
+  is invalidated when the Pod is deleted). The kubelet asks for a token of about
+  an hour and refreshes it before it expires. The API server's default
+  `--service-account-extend-token-expiration` then raises the token's `exp`
+  claim to one year, so the Pod's token in
+  [00](00-the-attackers-view.md) lasts a year. Treat an automounted token as a
+  long-lived credential. The legacy model, a permanent token in a
+  `Secret` auto-created per SA, is **deprecated and off by default** (no
   auto-created token Secret in current Kubernetes); a never-expiring token is a
   standing liability. `automountServiceAccountToken: false` (set on both the SA
   and the podSpec in the Bookstore) stops even the projected token from being
@@ -768,7 +788,7 @@ string + a set of group strings). Kubernetes stores **no** user records — it
   taught in [10.03](../10-cloud-and-managed-kubernetes/03-cloud-identity.md).
 - **OIDC.** For *humans*: the API server validates an ID token from your
   identity provider (`--oidc-issuer-url` etc.); claims map to username/groups.
-  This is how real clusters do SSO — there is still no User object, just a
+  This is how real clusters do SSO, there is still no User object, just a
   trusted issuer. Human SSO is built in
   [13.04](../13-grand-capstone-bookstore-platform/04-real-auth-keycloak-irsa-istio-jwt.md).
   Bind IdP groups to RBAC rather than individuals, so access follows directory
@@ -779,14 +799,15 @@ string + a set of group strings). Kubernetes stores **no** user records — it
 
 `kubectl auth whoami` shows the result of this stage for *your* kubeconfig.
 
-### Authorization — OR of authorizers, RBAC the workhorse
+### Authorization: chain of authorizers, RBAC the workhorse
 
 After identity, the configured authorizers (`--authorization-mode`) are
-consulted **in order and OR'd** — any *allow* permits the request; an explicit
-*no opinion* falls through to the next; only if none allow is it `403`. The
+consulted **in order**. An *allow* or an explicit *deny* from one of them is
+final, and the later ones are not asked. An authorizer with *no opinion* falls
+through to the next. If none of them allows, the request gets `403`. The
 typical chain is `Node,RBAC` (kubelets are authorized by the **Node**
 authorizer; everything else by **RBAC**). Other modes: **ABAC** (static
-attribute file — legacy), **Webhook** (external decision — how cloud IAM is
+attribute file, legacy), **Webhook** (external decision: how cloud IAM is
 bolted on). **RBAC** is the one you author:
 
 - A **Role** (namespaced) / **ClusterRole** (cluster-scoped or a reusable
@@ -802,25 +823,30 @@ bolted on). **RBAC** is the one you author:
   neither.
 - A **RoleBinding** grants a Role *or* a ClusterRole **within one namespace**;
   a **ClusterRoleBinding** grants a ClusterRole **cluster-wide**. (A
-  ClusterRole bound by a RoleBinding applies only in that binding's namespace —
-  the standard way to reuse a permission template per-namespace.)
-- RBAC is **purely additive — there are no deny rules.** A subject's effective
+  ClusterRole bound by a RoleBinding applies only in that binding's namespace.
+  This is the standard way to reuse a permission template per-namespace.)
+- RBAC is **purely additive: there are no deny rules.** A subject's effective
   permission is the **union** of every binding that names it (directly or via a
   group). "Restricting" something means *not granting it* (and ensuring no
-  other binding grants it) — there is no override. This is why over-broad
+  other binding grants it), there is no override. This is why over-broad
   default bindings are dangerous: you can't subtract them, only avoid/remove.
 - **The `system:masters` super-group bypasses RBAC entirely.** Any request
   whose authenticated groups include `system:masters` is granted
   *unconditional* cluster-admin by a hard-coded authorizer that runs *before*
-  RBAC — **no RoleBinding is involved and none can revoke it** (RBAC has no
-  deny rules, so you cannot "restrict" `system:masters`). The kubeadm-generated
-  admin client certificate is exactly `O=system:masters` (that's why it is
-  all-powerful). The `CertificateSubjectRestriction` admission plugin, on by
-  default, refuses a CSR that asks for `system:masters` (cited, not run in this
-  chapter's lab). The main mitigation is **not issuing** certs/tokens that
-  carry that group: treat the `system:masters` kubeconfig as a break-glass
-  credential, keep it offline, and give humans/automation narrowly-bound
-  identities instead.
+  RBAC, **no RoleBinding is involved and none can revoke it** (RBAC has no
+  deny rules, so you cannot "restrict" `system:masters`). Since kubeadm v1.29
+  the admin kubeconfig carries `O=kubeadm:cluster-admins`, which a
+  ClusterRoleBinding maps to `cluster-admin`. Only
+  `/etc/kubernetes/super-admin.conf` carries `O=system:masters` ([kubeadm
+  implementation
+  details](https://kubernetes.io/docs/reference/setup-tools/kubeadm/implementation-details/)).
+  The `CertificateSubjectRestriction` admission plugin, on by default, refuses
+  a CSR that asks for `system:masters` ([admission
+  controllers](https://kubernetes.io/docs/reference/access-authn-authz/admission-controllers/#CertificateSubjectRestriction));
+  the lab does not run that refusal. The main mitigation is **not issuing**
+  certs/tokens that carry that group: treat the `system:masters` kubeconfig as
+  a break-glass credential, keep it offline, and give humans/automation
+  narrowly-bound identities instead.
 - **`escalate` and `bind`.** The API refuses to write a Role that grants rules
   the writer does not hold, unless the writer holds `escalate` on roles. It
   refuses a RoleBinding to a role the binder does not hold, unless the binder
@@ -837,8 +863,11 @@ bolted on). **RBAC** is the one you author:
   controller creates the Pod with the controller's rights. Removing `create` on
   pods alone therefore stops nothing (path A).
 - **`nodes/proxy`.** `get` lets a caller send GET requests through the API
-  server to the kubelet on a node. `create` lets it send POST requests, which
-  include the kubelet's run endpoint, a command inside a container. That request
+  server to the kubelet on a node, and the
+  [kubelet authorization](https://kubernetes.io/docs/reference/access-authn-authz/kubelet-authn-authz/)
+  page treats `get` as enough to run commands in a container through the
+  WebSocket endpoints. `create` lets it send POST requests, which include the
+  kubelet's run endpoint, a command inside a container. That request
   reaches the kubelet on the API server's own connection, so the caller's
   `pods/exec` permission is never checked (path E).
 - **`list` and `watch` with names.** A list or watch is name-scoped only when
@@ -861,7 +890,7 @@ bolted on). **RBAC** is the one you author:
   ClusterRoles wire up the control plane itself.
 
 `kubectl auth can-i <VERB> <RESOURCE> [--as=<USER_OR_SA>] [-n ns]` runs a
-**SubjectAccessReview** — it asks the *real* authorizer, so it's the
+**SubjectAccessReview**, it asks the *real* authorizer, so it's the
 authoritative audit tool (and `--list` enumerates everything an identity can
 do). `--as` / `--as-group` is **impersonation**, itself an RBAC-gated power
 (`impersonate` verb): cluster-admins can act as any subject to test policy
@@ -879,13 +908,13 @@ approve a CSR for this signer. Path G shows the refusal: *user not permitted to
 approve requests with signerName*.
 
 The signer is never auto-approved by the controller manager, so approval is
-always a deliberate act by a holder of that grant. A signed certificate is valid
-until its expiry. The lab sets `expirationSeconds: 900`, which the signer
-honours within the cluster's own limit. Removing the RBAC the certificate's identity
-holds is the one control that ends its power early: the CSR page does not
-describe revoking an issued certificate.
+always a deliberate act by a holder of that grant. A signed certificate is
+valid until its expiry. The lab sets `expirationSeconds: 900`, which the
+signer honours within the cluster's own limit. Removing the RBAC the
+certificate's identity holds is the one control that ends its power early: the
+CSR page does not describe revoking an issued certificate.
 
-### Admission — the last word (covered next, anchored here)
+### Admission: the last word (covered next, anchored here)
 
 Authorized requests are then **mutated** (built-in plugins like
 `ServiceAccount`, `LimitRanger`, `DefaultStorageClass`, plus mutating webhooks)
@@ -942,25 +971,29 @@ Checklist:
 
 - [ ] Every workload has a **dedicated** ServiceAccount (never `default`)
 - [ ] `automountServiceAccountToken: false` where the app doesn't call the API
-- [ ] Roles grant the **minimum** verbs; `resourceNames` + `get` over blanket `list`
+- [ ] Roles grant the **minimum** verbs; `resourceNames` + `get` over blanket
+  `list`
 - [ ] **No** `get/list` on Secrets unless strictly required; name the one Secret
 - [ ] No `escalate`, `bind` or `impersonate` outside the platform team
 - [ ] No `nodes/proxy` for a person or a dashboard
-- [ ] No `create` on pods, or on any object with a pod template, for identities that do not deploy
+- [ ] No `create` on pods, or on any object with a pod template, for
+  identities that do not deploy
 - [ ] No `approve` on `kubernetes.io/kube-apiserver-client` for any workload
-- [ ] `Role`+`RoleBinding` per namespace; `ClusterRoleBinding` only when cluster-wide
+- [ ] `Role`+`RoleBinding` per namespace; `ClusterRoleBinding` only when
+  cluster-wide
 - [ ] Reuse aggregated `view`/`edit`/`admin`; mind that `edit` reads Secrets
-- [ ] `kubectl auth can-i --list --as=…` run for each SA (verified least privilege)
+- [ ] `kubectl auth can-i --list --as=…` run for each SA (verified least
+  privilege)
 - [ ] Auditing of RBAC changes, `exec` and `impersonate` in place (<!-- link-later: 05.08 --> chapter 05.08)
 
 ## Test your understanding
 
 > Try each before opening the answer drawer. The act of trying is the exercise; the answer is the check.
 
-1. **There is no `User` object in Kubernetes — so where does the username come from when `alice` runs `kubectl get pods`, and how does the cluster decide which RBAC bindings apply?**
+1. **There is no `User` object in Kubernetes: so where does the username come from when `alice` runs `kubectl get pods`, and how does the cluster decide which RBAC bindings apply?**
    <details><summary>Show answer</summary>
 
-   The authenticator (client cert signed by the cluster CA, an OIDC token from the IdP, a bearer token, etc.) **asserts** a username + groups; Kubernetes itself stores no user database. RBAC then matches those strings against `subjects:` in `RoleBinding`/`ClusterRoleBinding` — see §Mental model. That is why binding to *groups* (`oidc:platform-team`) is preferred over individuals: identity follows your IdP, not in-cluster YAML.
+   The authenticator (client cert signed by the cluster CA, an OIDC token from the IdP, a bearer token, etc.) **asserts** a username + groups; Kubernetes itself stores no user database. RBAC then matches those strings against `subjects:` in `RoleBinding`/`ClusterRoleBinding`: see §Mental model. That is why binding to *groups* (`oidc:platform-team`) is preferred over individuals: identity follows your IdP, not in-cluster YAML.
 
    </details>
 
@@ -974,7 +1007,7 @@ Checklist:
 3. **A teammate suggests giving the `payments-worker` SA `verbs: ["get","list"]` on `secrets` "so it can read its DB password". Why is this a code smell, and what's the right shape?**
    <details><summary>Show answer</summary>
 
-   `list secrets` reads *every* Secret in the namespace, not just one — a compromised payments-worker now exfiltrates every credential. The right shape is `verbs: ["get"]` with `resourceNames: ["payments-db-credentials"]` (a single named Secret), or — far better — mount the Secret as a file/env and set `automountServiceAccountToken: false` so the SA needs no `secrets` permission at all. Better still: use IRSA/Workload Identity to skip Kubernetes Secrets entirely.
+   `list secrets` reads *every* Secret in the namespace, not just one, a compromised payments-worker now exfiltrates every credential. The right shape is `verbs: ["get"]` with `resourceNames: ["payments-db-credentials"]` (a single named Secret), or, far better, mount the Secret as a file/env and set `automountServiceAccountToken: false` so the SA needs no `secrets` permission at all. Better still: use IRSA/Workload Identity to skip Kubernetes Secrets entirely.
 
    </details>
 
@@ -988,7 +1021,7 @@ Checklist:
 5. **You discover a `ClusterRoleBinding` that binds `cluster-admin` to `system:authenticated`. Explain in one sentence why this is catastrophic, and what the cluster effectively becomes.**
    <details><summary>Show answer</summary>
 
-   `system:authenticated` is *any* successfully-authenticated principal — every ServiceAccount, every human, every webhook with a valid token — so the binding silently makes the cluster a single-tenant cluster-admin free-for-all where any compromised Pod becomes cluster-admin. RBAC misconfiguration is the most common path to "from container breakout to full cluster compromise"; this is precisely why audit logs (<!-- link-later: 05.08 --> chapter 05.08) must alert on RBAC changes.
+   `system:authenticated` is *any* successfully-authenticated principal, every ServiceAccount, every human, every webhook with a valid token, so the binding silently makes the cluster a single-tenant cluster-admin free-for-all where any compromised Pod becomes cluster-admin. RBAC misconfiguration is the most common path to "from container breakout to full cluster compromise"; this is precisely why audit logs (<!-- link-later: 05.08 --> chapter 05.08) must alert on RBAC changes.
 
    </details>
 
@@ -1001,10 +1034,10 @@ Checklist:
 
 ## Further reading
 
-- **Ibryam & Huß, _Kubernetes Patterns_ 2e, ch.26 — _Access Control_** — the
+- **Ibryam & Huß, _Kubernetes Patterns_ 2e, ch.26: _Access Control_**, the
   authentication/authorization/admission model and least-privilege RBAC as a
   pattern.
-- **Rosso et al., _Production Kubernetes_, ch.10 — "Identity"** — workload and
+- **Rosso et al., _Production Kubernetes_, ch.10: "Identity"**, workload and
   human identity, token mechanics, and cloud-IAM bridging in production; pair
   with **Lukša, _Kubernetes in Action_ 2e** securing-the-API-server material.
 - Official:

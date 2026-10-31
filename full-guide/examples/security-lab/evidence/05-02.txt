@@ -1,7 +1,7 @@
 # Transcript for 05-security/02-pod-security.md.
 # Tier A: kind on a Linux host, node v1.37.0.
 # Recorded by running labs/05-02.sh against a kind cluster the lab owns.
-# The cluster name is shown as `lab`.
+# The output is not redacted: the node is the lab cluster's own, sf-pilot-control-plane.
 ## versions and the node
 $ kubectl version
 Client Version: v1.37.2
@@ -9,7 +9,7 @@ Kustomize Version: v5.8.1
 Server Version: v1.37.0
 $ kubectl get nodes -o custom-columns=NAME:.metadata.name,KUBELET:.status.nodeInfo.kubeletVersion,KERNEL:.status.nodeInfo.kernelVersion,RUNTIME:.status.nodeInfo.containerRuntimeVersion,OS:.status.nodeInfo.osImage
 NAME                     KUBELET   KERNEL             RUNTIME              OS
-lab-control-plane   v1.37.0   7.0.0-38-generic   containerd://2.3.4   Debian GNU/Linux 13 (trixie)
+sf-pilot-control-plane   v1.37.0   7.0.0-38-generic   containerd://2.3.4   Debian GNU/Linux 13 (trixie)
 ## namespaces
 $ kubectl create namespace p05-02-attack
 namespace/p05-02-attack created
@@ -54,8 +54,8 @@ $ kubectl exec -n p05-02-attack escape-privileged -- sh -c 'ps -o pid,args | hea
 PID   COMMAND
     1 sleep 3600
    20 sh -c ps -o pid,args | head -5
-   26 ps -o pid,args
-   27 head -5
+   27 ps -o pid,args
+   28 head -5
 $ kubectl exec -n p05-02-attack escape-privileged -- sh -c 'echo devices in privileged: $(ls /dev | wc -l)'
 devices in privileged: 229
 $ kubectl exec -n p05-02-attack victim -- sh -c 'echo devices in default: $(ls /dev | wc -l)'
@@ -90,7 +90,7 @@ stat -c "%a %U %n" /host/etc/kubernetes/pki/ca.key
 head -c 10 /host/etc/kubernetes/pki/ca.key; echo'
 0
 CapEff: 0000000000000000
-lab-control-plane
+sf-pilot-control-plane
 600 root /host/etc/kubernetes/pki/ca.key
 -----BEGIN
 $ kubectl apply -f escape-hostpath-nonroot.yaml
@@ -105,7 +105,7 @@ stat -c "%a %U %n" /host/etc/kubernetes/pki/ca.key
 head -c 10 /host/etc/kubernetes/pki/ca.key; echo'
 65532
 CapEff: 0000000000000000
-lab-control-plane
+sf-pilot-control-plane
 600 root /host/etc/kubernetes/pki/ca.key
 head: /host/etc/kubernetes/pki/ca.key: Permission denied
 
@@ -119,15 +119,15 @@ R=unix:///run/containerd/containerd.sock
 echo "containers visible: $(crictl -r $R ps -q 2>/dev/null | wc -l)"
 crictl -r $R ps --name kube-apiserver -o table 2>/dev/null |
   grep -o "kube-apiserver-[a-z0-9-]*"'
-containers visible: 33
-kube-apiserver-lab-control-plane
+containers visible: 24
+kube-apiserver-sf-pilot-control-plane
 ## privileged with hostPID: the node's namespaces, and a write into a neighbour
 $ kubectl apply -f escape-node.yaml
 pod/escape-node created
 $ kubectl wait --for=condition=Ready pod/escape-node -n p05-02-attack --timeout=120s
 pod/escape-node condition met
 $ kubectl exec -n p05-02-attack escape-node -- nsenter -t 1 -m -- cat /etc/hostname
-lab-control-plane
+sf-pilot-control-plane
 $ kubectl exec -n p05-02-attack escape-node -- nsenter -t 1 -m -- ls -l /etc/kubernetes/super-admin.conf
 -rw------- 1 root root 5666 Oct 30 14:28 /etc/kubernetes/super-admin.conf
 $ kubectl exec -n p05-02-attack escape-node -- nsenter -t 1 -m -- runc --version | head -1
@@ -138,7 +138,7 @@ set -- $VPID
 [ $# = 1 ] || { echo "victim not unique: $VPID"; exit 1; }
 echo "victim pid $VPID"
 cp /bin/busybox /proc/$VPID/root/tmp/busybox && echo "copied to /tmp/busybox"'
-victim pid 165360
+victim pid 867048
 copied to /tmp/busybox
 $ kubectl exec -n p05-02-attack victim -- /tmp/busybox id
 uid=0(root) gid=0(root) groups=0(root),10(wheel)
@@ -176,8 +176,8 @@ set -- $VPID
 [ $# = 1 ] || { echo "victim not unique: $VPID"; exit 1; }
 echo "victim pid $VPID"
 cp /bin/busybox /proc/$VPID/root/usr/bin/implant && echo "copied to /usr/bin/implant"'
-victim pid 174572
-cp: can't create '/proc/174572/root/usr/bin/implant': Read-only file system
+victim pid 868993
+cp: can't create '/proc/868993/root/usr/bin/implant': Read-only file system
 command terminated with exit code 1
 $ kubectl exec -n p05-02-attack escape-node -- sh -c '
 VPID=$(ps -o pid,args | awk "\$2==\"sleep\" && \$3==\"1800\" {print \$1}")
@@ -185,7 +185,7 @@ set -- $VPID
 [ $# = 1 ] || { echo "victim not unique: $VPID"; exit 1; }
 echo "victim pid $VPID"
 cp /bin/busybox /proc/$VPID/root/tmp/id && echo "copied to /tmp/id"'
-victim pid 174572
+victim pid 868993
 copied to /tmp/id
 $ kubectl exec -n p05-02-restricted victim -- /tmp/id
 uid=65532 gid=65532 groups=65532
@@ -197,8 +197,8 @@ pod/userns-probe created
 $ kubectl wait --for=condition=Ready pod/userns-probe -n p05-02-restricted --timeout=60s
 error: timed out waiting for the condition on pods/userns-probe
 $ kubectl get events -n p05-02-restricted --field-selector involvedObject.name=userns-probe --sort-by=.lastTimestamp | tail -2
-37s         Warning   FailedCreatePodSandBox   pod/userns-probe   Failed to create pod sandbox: rpc error: code = Unknown desc = failed to start sandbox "b03ba5c4c0b8f9c23302fd6b7358a8132268bea422bd33aeac80f0a2b6b994bf": failed to create containerd task: failed to create shim task: OCI runtime create failed: runc create failed: unable to start container process: error during container init: error mounting "sysfs" to rootfs at "/sys": mount src=sysfs, dst=/sys, dstFd=/proc/thread-self/fd/11, flags=MS_RDONLY|MS_NOSUID|MS_NODEV|MS_NOEXEC: operation not permitted
-9s          Warning   FailedCreatePodSandBox   pod/userns-probe   Failed to create pod sandbox: rpc error: code = Unknown desc = failed to start sandbox "15bbde8e47347523f15cb87117e4858c2b76069261aa78aae35b8055fd51b74e": failed to create containerd task: failed to create shim task: OCI runtime create failed: runc create failed: unable to start container process: error during container init: error mounting "sysfs" to rootfs at "/sys": mount src=sysfs, dst=/sys, dstFd=/proc/thread-self/fd/11, flags=MS_RDONLY|MS_NOSUID|MS_NODEV|MS_NOEXEC: operation not permitted
+28s         Warning   FailedCreatePodSandBox   pod/userns-probe   Failed to create pod sandbox: rpc error: code = Unknown desc = failed to start sandbox "1ec1897fb7dc4140f53d3ffcb0cdea23664aebaab3a724216daf19deaf3127d0": failed to create containerd task: failed to create shim task: OCI runtime create failed: runc create failed: unable to start container process: error during container init: error mounting "sysfs" to rootfs at "/sys": mount src=sysfs, dst=/sys, dstFd=/proc/thread-self/fd/11, flags=MS_RDONLY|MS_NOSUID|MS_NODEV|MS_NOEXEC: operation not permitted
+12s         Warning   FailedCreatePodSandBox   pod/userns-probe   Failed to create pod sandbox: rpc error: code = Unknown desc = failed to start sandbox "500d252cb2bab574b62239661fff8c05c21b2e837a8b12f7d54c0dff5aae8c50": failed to create containerd task: failed to create shim task: OCI runtime create failed: runc create failed: unable to start container process: error during container init: error mounting "sysfs" to rootfs at "/sys": mount src=sysfs, dst=/sys, dstFd=/proc/thread-self/fd/11, flags=MS_RDONLY|MS_NOSUID|MS_NODEV|MS_NOEXEC: operation not permitted
 ## baseline and restricted, one namespace each
 $ kubectl apply -f victim-baseline.yaml
 Warning: would violate PodSecurity "restricted:latest": allowPrivilegeEscalation != false (container "app" must set securityContext.allowPrivilegeEscalation=false), unrestricted capabilities (container "app" must set securityContext.capabilities.drop=["ALL"]), runAsNonRoot != true (pod or container "app" must set securityContext.runAsNonRoot=true), seccompProfile (pod or container "app" must set securityContext.seccompProfile.type to "RuntimeDefault" or "Localhost")
@@ -263,14 +263,21 @@ Waiting for deployment "redis" rollout to finish: 0 of 1 updated replicas are av
 deployment "redis" successfully rolled out
 $ kubectl rollout status -n p05-02-bookstore deployment/rabbitmq --timeout=300s
 Waiting for deployment "rabbitmq" rollout to finish: 0 of 1 updated replicas are available...
-error: timed out waiting for the condition
+deployment "rabbitmq" successfully rolled out
+$ kubectl get pods -n p05-02-bookstore -l app=rabbitmq -o custom-columns=NAME:.metadata.name,READY:.status.containerStatuses[0].ready,RESTARTS:.status.containerStatuses[0].restartCount
+NAME                        READY   RESTARTS
+rabbitmq-64d9d7659b-r4q2c   true    0
+$ kubectl logs -n p05-02-bookstore deployment/rabbitmq | grep -o -e 'Time to start RabbitMQ: [0-9]* ms' -e 'Server startup complete; [0-9]* plugins started'
+Server startup complete; 5 plugins started
+Time to start RabbitMQ: 47061 ms
 $ kubectl rollout status -n p05-02-bookstore statefulset/postgres --timeout=180s
 partitioned roll out complete: 1 new pods have been updated...
 $ kubectl exec -n p05-02-bookstore deployment/redis -- sh -c 'id; touch /usr/bin/backdoor || true'
 uid=999(redis) gid=999(redis) groups=999(redis)
 touch: cannot touch '/usr/bin/backdoor': Read-only file system
 $ kubectl exec -n p05-02-bookstore deployment/rabbitmq -- sh -c 'id; touch /usr/bin/backdoor || true'
-error: Internal error occurred: Internal error occurred: error executing command in container: failed to exec in container: failed to load task: context deadline exceeded
+uid=999(rabbitmq) gid=999(rabbitmq) groups=999(rabbitmq)
+touch: cannot touch '/usr/bin/backdoor': Read-only file system
 $ kubectl exec -n p05-02-bookstore statefulset/postgres -- sh -c 'id; touch /usr/bin/backdoor || true'
 uid=999(postgres) gid=999(postgres) groups=999(postgres),101(ssl-cert)
 touch: cannot touch '/usr/bin/backdoor': Read-only file system
@@ -281,4 +288,3 @@ namespace "p05-02-baseline" deleted
 namespace "p05-02-restricted" deleted
 namespace "p05-02-bookstore" deleted
 namespace "p05-02-unlabelled" deleted
-error: timed out waiting for the condition on namespaces/p05-02-bookstore

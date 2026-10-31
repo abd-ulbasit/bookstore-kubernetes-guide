@@ -118,8 +118,11 @@ chapter stays with reconnaissance.
 
 > **Lab 05.00 (tier A).** Recorded on a kind cluster: Kubernetes v1.37.0 node,
 > kubectl v1.37.2, containerd v2.3.4. The node reports kernel 7.0.0 on a Linux
-> lab host, and the cluster and every Pod ran on that host. kubectl ran from a
-> macOS workstation over a tunnel to the API server. The script is
+> lab host, and the cluster and every Pod ran on that host. The lab cluster is
+> named `sf-pilot`, so the captured output shows its node as
+> `sf-pilot-control-plane`. A kind cluster you create has its own name. The
+> lab's namespaces carry a `p05-` prefix, and the prose names them by role. The
+> script is
 > [`labs/05-00.sh`](../examples/security-lab/labs/05-00.sh) and the recorded run
 > is [`evidence/05-00.txt`](../examples/security-lab/evidence/05-00.txt). The
 > attacker's tools come from `curlimages/curl:8.22.0` and the ledger runs
@@ -564,6 +567,7 @@ a client certificate: the workstation's own certificate would authenticate as
 the lab's administrator and hide the result.
 
 ```sh
+server=$(kubectl config view --minify -o jsonpath='{.clusters[0].cluster.server}')
 kubectl exec -n p05-recon-app checkout -- cat /var/run/secrets/kubernetes.io/serviceaccount/token > token.txt
 kubectl exec -n p05-recon-app checkout -- cat /var/run/secrets/kubernetes.io/serviceaccount/ca.crt > ca.crt
 kubectl config set-cluster lab --server="$server" --certificate-authority=ca.crt --embed-certs=true --kubeconfig=stolen.kubeconfig
@@ -977,12 +981,12 @@ plugin. A plugin that does not enforce policy lets every connection through,
 so the denied probes in steps 16 and 17 belong in any cluster's acceptance
 test.
 
-Operating these controls on a cloud is the subject of Parts 10, 11, 13, 14, and
-15. Part 05 teaches the mechanism. [Chapter 10.03](../10-cloud-and-managed-kubernetes/03-cloud-identity.md)
+Operating these controls on a cloud is the subject of Parts 10, 11, 13, 14,
+and 15. Part 05 teaches the mechanism.
+[Chapter 10.03](../10-cloud-and-managed-kubernetes/03-cloud-identity.md)
 covers how a workload gets cloud identity without a node-wide credential,
 which is the design that removes the metadata problem. Service-to-service
-authentication is in
-[Part 11](../11-advanced-production-patterns/04-service-mesh.md).
+authentication is in [Part 11](../11-advanced-production-patterns/04-service-mesh.md).
 
 ## Quick Reference
 
