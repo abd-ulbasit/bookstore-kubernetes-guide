@@ -178,12 +178,16 @@ The pipeline is two workflow files and one script:
   container image **pinned by digest**. The workflow calls it and so do you,
   so the command on your laptop is the command in CI.
 
-> **Honesty note.** Push, keyless signing, CodeQL, the promotion PR,
-> Dependabot, Harden-Runner and Scorecard need a registry, GitHub's OIDC,
-> GitHub's API or GitHub's runners. They are real, valid steps that this
+> **Honesty note.** The guide's own pull-request CI runs four things that no
+> laptop can: CodeQL, the ZAP baseline on a kind cluster, Harden-Runner in
+> audit mode, and the permission ceiling. Each is reported where it appears
+> below. Push, keyless signing, the SBOM attestation, provenance, the
+> promotion PR and Scorecard need a registry, GitHub's OIDC token or the
+> default branch. The release workflow `bookstore-release.yml` is how they run,
+> and it has not been dispatched yet, so they are real, valid steps that this
 > chapter **reads, not runs**, and the `if:` that lets `sign` run is read the
-> same way. Every other stage runs below. `<OWNER>` stands for your GitHub
-> user or organization.
+> same way. Dependabot is not run either. Every other stage runs below.
+> `<OWNER>` stands for your GitHub user or organization.
 
 ### 0. The scanner runner
 
@@ -360,7 +364,8 @@ the Bookstore's own rules,
 local files that need no network or account. **gosec** knows Go's pitfalls
 (weak hashes, shell calls, missing server timeouts). **CodeQL** follows data
 across functions, which the other two cannot; it runs only on GitHub's
-runners, and the job counts its SARIF so a fork PR still gets the gate.
+runners, and the job counts its SARIF so a fork PR still gets the gate. It
+has run there for each Go service (CodeQL CLI 2.27.3) and reported no results.
 
 ```sh
 $scan semgrep examples/bookstore/app
@@ -683,9 +688,10 @@ scan.sh: control ok, expiry reported lapsed on 2020-01-01 on full-guide/examples
 scan.sh: control ok, expiry reported no Revisit by DATE on full-guide/examples/bookstore/ci/fixtures/vulnerable/exceptions.conf
 ```
 
-Two more tools sit in the pipeline's jobs, and neither gates the build. This
-chapter does not run them either; what is said about them here comes from
-their documentation.
+Two more tools sit in the pipeline's jobs, and neither gates the build.
+Harden-Runner has run in the guide's own CI. Scorecard has not, because it
+runs only on the default branch. What is said about both of them here comes
+from their documentation, except where it says a run showed it.
 
 - **Harden-Runner** is the first step of every job, in `egress-policy: audit`.
   Per its [documentation](https://docs.stepsecurity.io/harden-runner), audit
@@ -696,8 +702,11 @@ their documentation.
   afterwards, if you look. What limits the damage a stolen token can do is
   the narrow `permissions` and the SHA pins, not this. Its `block` mode
   refuses every host that is not in `allowed-endpoints`, and that list has to
-  come from recorded runs of your own jobs. This chapter has none to take it
-  from, so it ships in `audit`; once you have a few green runs, the switch is:
+  come from recorded runs of your own jobs. A run showed why: in the ZAP job
+  the audit log recorded ZAP's Java process resolving `news.zaproxy.org`,
+  `cfu.zaproxy.org` and `tel.zaproxy.org`, hosts a block-mode list would have
+  to carry or ZAP's own options would have to switch off. The pipeline ships
+  in `audit`; once you have a few green runs, the switch is:
 
   ```yaml
   - uses: step-security/harden-runner@<SHA> # <release>
@@ -913,7 +922,11 @@ still be believed.
 - **Permissions are narrowed twice.** The reusable workflow starts from
   `permissions: {}` and each job asks for what it needs; the caller's job sets
   the ceiling, and GitHub checks it even for skipped jobs. `id-token: write`
-  therefore exists only on `sign`.
+  therefore exists only on `sign`. A throwaway workflow showed the check: it
+  called this pipeline with `publish: false` and a ceiling of `contents: read`
+  and `actions: read`, and GitHub refused to start the run
+  (`startup_failure`) because `sign`, though skipped, asks for more. The same
+  call with `packages`, `id-token` and `attestations` write started normally.
 - **No layer cache in the publishing workflow.** A cache restored from an
   earlier run is input no reviewer saw, and zizmor's `cache-poisoning` audit
   warns about cache reads in release workflows. The build starts cold and is
