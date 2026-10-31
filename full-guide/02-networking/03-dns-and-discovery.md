@@ -67,7 +67,7 @@ teaches and the chapter that decides the rest.
 |---|---|---|
 | Any Pod resolves any Service name in any namespace, and an SRV query lists its named ports. | Treat a Service name as visible to the whole cluster: no secrets or internal detail in names. A lookup is not access. | [ch.06](06-network-policies.md) decides who may connect |
 | NXDOMAIN and an answer differ, so a caller can test names one at a time and map the cluster. | Step 4 shows the oracle. Egress rules (ch.06) can deny port 53 for a Pod, which stops the lookup itself, on a CNI that enforces them. | [ch.06](06-network-policies.md) |
-| A Pod sets `dnsPolicy: None` and its own `dnsConfig.nameservers`, so its lookups go to a resolver the manifest chooses. | Reader Pods keep `ClusterFirst`. The `dnsConfig` here sets only `ndots`. The admission rule is not taught here. | 05.07 <!-- link-later: 05.07 --> |
+| A Pod sets `dnsPolicy: None` and its own `dnsConfig.nameservers`, so its lookups go to a resolver the manifest chooses. | Reader Pods keep `ClusterFirst`. The `dnsConfig` here sets only `ndots`. The admission rule is not taught here. | [05.07](../05-security/07-admission-control-and-policy-as-code.md) |
 | Write access to the `coredns` ConfigMap in `kube-system` changes DNS for every Pod. | Not taught here. Restrict who can write it. | [05.01](../05-security/01-authn-authz-rbac.md) |
 | One CoreDNS Deployment answers for every Pod. A crash or a flood of queries stops name lookups cluster-wide. | HA and headroom in the production notes. Egress rules must still allow it. | [ch.06](06-network-policies.md) |
 

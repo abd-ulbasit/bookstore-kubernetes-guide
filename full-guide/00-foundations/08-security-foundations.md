@@ -72,10 +72,10 @@ appear here. The system threats each have their own chapter.
 
 | Threat | Control taught here | Goes deeper |
 |---|---|---|
-| A threat model written once and never updated describes a cluster that no longer exists. | The model is a file in the repository. A change to a workload changes the model in the same pull request. | `examples/bookstore/THREAT-MODEL.md`, and 05.00 <!-- link-later: 05.00 --> |
-| An insecure example copied into a real namespace. | Insecure blocks appear only in Part 05 labs and the capstone overlay. The gates fail any other placement, in both directions. | 05.00 <!-- link-later: 05.00 --> |
+| A threat model written once and never updated describes a cluster that no longer exists. | The model is a file in the repository. A change to a workload changes the model in the same pull request. | `examples/bookstore/THREAT-MODEL.md`, and [05.00](../05-security/00-the-attackers-view.md) |
+| An insecure example copied into a real namespace. | Insecure blocks appear only in Part 05 labs and the capstone overlay. The gates fail any other placement, in both directions. | [05.00](../05-security/00-the-attackers-view.md) |
 | A control listed in the model that nothing enforces. | Each row states a status: `baseline`, `review`, `cluster` or `open`. A `baseline` field is one that admission or the static gate tests. A `review` field is one that only a reader checks. The table under "The baseline answers specific threats" names the enforcer of each field. | Section "The baseline answers specific threats" |
-| An exception with no reason and no expiry lives forever. | One registry. Each entry records a reason, the chapter that explains it, and an expiry within 12 months. | 05.09 <!-- link-later: 05.09 --> |
+| An exception with no reason and no expiry lives forever. | One registry. Each entry records a reason, the chapter that explains it, and an expiry within 12 months. | [05.09](../05-security/09-running-security-on-a-platform-team.md) |
 
 ## What the bookstore protects
 
@@ -147,7 +147,7 @@ full list, with IDs, is in `THREAT-MODEL.md`.
 |---|---|---|---|---|
 | S | Spoofing | A Pod calls the API as another identity (S1) | Its own ServiceAccount, `automountServiceAccountToken: false` | review |
 | T | Tampering | A process rewrites its own image (T1) | `readOnlyRootFilesystem: true`, writable `emptyDir` for `/tmp` | baseline |
-| R | Repudiation | An apply leaves no record of who made it (RP1) | API server audit policy | open until 05.08 <!-- link-later: 05.08 --> |
+| R | Repudiation | An apply leaves no record of who made it (RP1) | API server audit policy | open until [05.08](../05-security/08-audit-detection-and-incident-response.md) |
 | I | Information disclosure | A Secret read straight from etcd (I1) | Encryption at rest, and only the API server reaches etcd | cluster |
 | D | Denial of service | One Pod exhausts a node's memory (D1) | Requests and a memory limit | review |
 | E | Elevation of privilege | A root process reaches host resources (E1) | `runAsNonRoot: true`, UID 65532 | baseline |

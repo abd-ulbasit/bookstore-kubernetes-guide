@@ -130,8 +130,8 @@ carries are explained once, in the
 | A long-lived cloud key in a Secret, environment variable or file is copied and reused | Federation: no key is stored; credentials come from a projected token and expire | Token lifetimes and projection: [05.01](../05-security/01-authn-authz-rbac.md) |
 | A Pod takes the node's cloud role through the instance metadata service | Per-ServiceAccount roles; IMDSv2 with hop limit 1 on AWS; metadata concealment and Workload Identity Federation on GKE; a NetworkPolicy egress rule that leaves the metadata address out | The NetworkPolicy block: [02.06](../02-networking/06-network-policies.md) |
 | A token from another ServiceAccount, namespace or audience is accepted | Exact `sub`, `aud` and issuer conditions on every trust object | Mental model and How it works, below |
-| A cloud role grants wildcard actions or resources | One action on one resource per role; trust and policy changes reviewed like RBAC | Review of cloud permissions: 05.09 <!-- link-later: 05.09 --> |
-| A removed workload keeps cloud access after its manifests are gone | Delete the trust object: role trust, association, binding or federated credential | Audit of who assumed which role: 05.08 <!-- link-later: 05.08 --> |
+| A cloud role grants wildcard actions or resources | One action on one resource per role; trust and policy changes reviewed like RBAC | Review of cloud permissions: [05.09](../05-security/09-running-security-on-a-platform-team.md) |
+| A removed workload keeps cloud access after its manifests are gone | Delete the trust object: role trust, association, binding or federated credential | Audit of who assumed which role: [05.08](../05-security/08-audit-detection-and-incident-response.md) |
 
 ## Diagrams
 
@@ -684,8 +684,8 @@ rule reaches it on port 80 (cited, checked 2026-10-31).
 - **Credentials leave an audit trail that names the ServiceAccount.** An
   `AssumeRoleWithWebIdentity` call can write a CloudTrail entry that includes
   the token's subject, so the trail shows which ServiceAccount assumed the role
-  (cited). Use the trail for review. The audit practice itself is 05.08
-  <!-- link-later: 05.08 -->.
+  (cited). Use the trail for review. The audit practice itself is
+  [05.08](../05-security/08-audit-detection-and-incident-response.md).
 - **Why this beats a static key, structurally.** A static key is a *bearer
   secret*: possession is access, forever, from anywhere. A federated credential
   is *minted on demand from an identity the cluster vouches for, scoped to one

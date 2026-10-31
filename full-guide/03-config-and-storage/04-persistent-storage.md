@@ -71,7 +71,7 @@ node. The threats below belong to storage, not to the Pod.
 |---|---|---|
 | A tenant creates a PV that names a directory on a node, then claims it | [No `create` on PersistentVolumes](#refusal): a namespaced Role grants claims only | [03.03](03-volumes.md) for `hostPath`; [05.01](../05-security/01-authn-authz-rbac.md) for RBAC |
 | A deleted claim leaves its data on a `Retain` volume, where the next claimant or an operator can read it | [A reclaim policy chosen per data class](#reclaim), and a runbooked cleanup | [08.02](../08-day-2-operations/02-backup-and-dr.md) for backup |
-| Data on a cloud disk is readable by whoever obtains the disk | [An encrypted StorageClass](#encryption), set on the driver. Cited, not run here | Etcd encryption, a separate control: 05.04 <!-- link-later: 05.04 --> |
+| Data on a cloud disk is readable by whoever obtains the disk | [An encrypted StorageClass](#encryption), set on the driver. Cited, not run here | Etcd encryption, a separate control: [05.04](../05-security/04-secrets-and-cluster-hardening.md) |
 | A tenant that can create or patch a StorageClass chooses the provisioner, the parameters and the reclaim policy for every claim, or changes the default class | [No `create` or `patch` on storageclasses](#refusal), checked with `can-i` in step 3 | [05.01](../05-security/01-authn-authz-rbac.md) for RBAC |
 | A non-root process cannot write its volume, so the fix becomes running as root | [`fsGroup` with a non-root UID](#fsgroup), with the volume's owner and mode checked from inside the Pod | [01.01](../01-core-workloads/01-pods.md#baseline-fsgroup) |
 
@@ -858,7 +858,7 @@ parameters:
 This is **not run here**. kind's `rancher.io/local-path` provisioner has no
 encryption parameter, so a lab on kind cannot show that the disk is encrypted,
 and this chapter does not claim it is. Encryption of objects in etcd is a
-different control, 05.04 <!-- link-later: 05.04 -->.
+different control, [05.04](../05-security/04-secrets-and-cluster-hardening.md).
 
 ## Quick Reference
 

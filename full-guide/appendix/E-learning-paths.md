@@ -67,7 +67,7 @@ local cluster.
 | **02 Networking** | [01](../02-networking/01-networking-model.md) · [02](../02-networking/02-services.md) · [03](../02-networking/03-dns-and-discovery.md) · [04](../02-networking/04-ingress.md) · [05](../02-networking/05-gateway-api.md) · [06](../02-networking/06-network-policies.md) | 6–9 h | Model → Services → DNS → edge (Ingress/Gateway) → segmentation |
 | **03 Config & Storage** | [01](../03-config-and-storage/01-configmaps.md) · [02](../03-config-and-storage/02-secrets.md) · [03](../03-config-and-storage/03-volumes.md) · [04](../03-config-and-storage/04-persistent-storage.md) · [05](../03-config-and-storage/05-stateful-data-patterns.md) | 5–8 h | Config → secrets → volumes → PV/PVC → operating stateful data |
 | **04 Scheduling** | [01](../04-scheduling/01-scheduler-and-nodes.md) · [02](../04-scheduling/02-affinity-taints-topology.md) · [03](../04-scheduling/03-priority-and-preemption.md) | 3–5 h | How placement is decided → steering it → priority/preemption |
-| **05 Security** | 05.00 <!-- link-later: 05.00 --> · [01](../05-security/01-authn-authz-rbac.md) · [02](../05-security/02-pod-security.md) · [03](../05-security/03-supply-chain.md) · [04](../05-security/04-secrets-and-cluster-hardening.md) · 05.05 <!-- link-later: 05.05 --> · 05.06 <!-- link-later: 05.06 --> · 05.07 <!-- link-later: 05.07 --> · 05.08 <!-- link-later: 05.08 --> · 05.09 <!-- link-later: 05.09 --> · 05.10 <!-- link-later: 05.10 --> | 6–9 h (01–04) | Attacker view → identity/RBAC → pod hardening (PSA) → supply chain → secrets → runtime isolation → cluster hardening → admission → detection → vulnerability management → capstone |
+| **05 Security** | [05.00](../05-security/00-the-attackers-view.md) · [01](../05-security/01-authn-authz-rbac.md) · [02](../05-security/02-pod-security.md) · [03](../05-security/03-supply-chain.md) · [04](../05-security/04-secrets-and-cluster-hardening.md) · [05.05](../05-security/05-kernel-isolation.md) · [05.06](../05-security/06-control-plane-and-node-hardening.md) · [05.07](../05-security/07-admission-control-and-policy-as-code.md) · [05.08](../05-security/08-audit-detection-and-incident-response.md) · [05.09](../05-security/09-running-security-on-a-platform-team.md) · [05.10](../05-security/10-capstone-attack-and-harden-the-bookstore.md) | 6–9 h (01–04) | Attacker view → identity/RBAC → pod hardening (PSA) → supply chain → secrets → runtime isolation → cluster hardening → admission → detection → vulnerability management → capstone |
 | **06 Production Readiness** | [01](../06-production-readiness/01-observability-metrics.md) · [02](../06-production-readiness/02-logging.md) · [03](../06-production-readiness/03-tracing.md) · [04](../06-production-readiness/04-autoscaling.md) · [05](../06-production-readiness/05-reliability-and-disruptions.md) · [06](../06-production-readiness/06-capacity-and-cost.md) | 7–10 h | See it (metrics/logs/traces) → scale it → keep it reliable → afford it |
 | **07 Delivery** | [01](../07-delivery/01-packaging-helm.md) · [02](../07-delivery/02-packaging-kustomize.md) · [03](../07-delivery/03-cicd-pipeline.md) · [04](../07-delivery/04-gitops-argocd.md) · [05](../07-delivery/05-progressive-delivery.md) | 7–10 h | Package (Helm/Kustomize) → CI/CD → GitOps → progressive delivery |
 | **08 Day-2 Operations** | [01](../08-day-2-operations/01-cluster-lifecycle.md) · [02](../08-day-2-operations/02-backup-and-dr.md) · [03](../08-day-2-operations/03-troubleshooting-playbook.md) · [04](../08-day-2-operations/04-multi-tenancy-and-namespaces.md) · [05](../08-day-2-operations/05-operators-and-crds.md) | 6–9 h | Lifecycle/upgrades → backup/DR → troubleshooting → multi-tenancy → operators |
@@ -76,8 +76,10 @@ local cluster.
 **Why this order:** it is the dependency order of the system itself — you cannot
 secure or deliver a workload you cannot yet run, observe, or place. **Skips:**
 nothing. This is the complete path. Total ≈ **56–85 hours** of focused,
-hands-on study, not counting the link-later chapters <!-- link-later: 05.10 -->,
-which are not timed yet (less if you skip the under-the-hood and
+hands-on study, not counting [05.00](../05-security/00-the-attackers-view.md)
+and [05.05](../05-security/05-kernel-isolation.md) to
+[05.10](../05-security/10-capstone-attack-and-harden-the-bookstore.md), which
+are not timed yet (less if you skip the under-the-hood and
 `In production:` sections; those are the production-relevant parts, so don't
 skip them if you're going to production).
 
@@ -101,9 +103,9 @@ hangs off it).
 | 6 | [05-security/01 — Authn, authz, RBAC](../05-security/01-authn-authz-rbac.md) | Least-privilege is platform table stakes |
 | 7 | [05-security/02 — Pod security](../05-security/02-pod-security.md) | PSA `restricted` as the cluster floor |
 | 8 | [05-security/04: Secrets at rest and in use](../05-security/04-secrets-and-cluster-hardening.md) | Encryption at rest and KMS |
-| 9 | 05.06: Control plane and node hardening <!-- link-later: 05.06 --> | CIS benchmarks on the nodes you run |
-| 10 | 05.07: Admission control and policy as code <!-- link-later: 05.07 --> | Policy as code, enforced for every team |
-| 11 | 05.08: Audit logs, runtime detection and incident response <!-- link-later: 05.08 --> | What the platform records and alerts on |
+| 9 | [05.06](../05-security/06-control-plane-and-node-hardening.md): Control plane and node hardening | CIS benchmarks on the nodes you run |
+| 10 | [05.07](../05-security/07-admission-control-and-policy-as-code.md): Admission control and policy as code | Policy as code, enforced for every team |
+| 11 | [05.08](../05-security/08-audit-detection-and-incident-response.md): Audit logs, runtime detection and incident response | What the platform records and alerts on |
 | 12 | [06-production-readiness/01 - Observability: metrics](../06-production-readiness/01-observability-metrics.md) | You cannot operate what you cannot see |
 | 13 | [06-production-readiness/02 - Logging](../06-production-readiness/02-logging.md) | Centralized logs |
 | 14 | [06-production-readiness/03 - Tracing](../06-production-readiness/03-tracing.md) | Cross-service latency/failure |

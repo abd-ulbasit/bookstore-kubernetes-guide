@@ -424,7 +424,7 @@ Bookstore images keep the tag their build produced.
 | Finalizers, ownerReferences, CRDs, structural schema, conversion | [08-day-2-operations/05 — Operators and CRDs](../08-day-2-operations/05-operators-and-crds.md) |
 | The security baseline written into a workload | [01.01, Pods](../01-core-workloads/01-pods.md#baseline) |
 | Scanning manifests before they are applied | [05.03, Supply chain](../05-security/03-supply-chain.md) |
-| Admission policy as code | 05.07 <!-- link-later: 05.07 --> |
+| Admission policy as code | [05.07](../05-security/07-admission-control-and-policy-as-code.md) |
 
 See also: **[Appendix A — kubectl cheatsheet](A-kubectl-cheatsheet.md)** (the
 commands), **[Appendix B — Glossary](B-glossary.md)** (every term above

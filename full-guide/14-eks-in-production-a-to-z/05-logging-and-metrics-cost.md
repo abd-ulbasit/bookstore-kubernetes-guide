@@ -159,8 +159,8 @@ this chapter covers and where each control lives.
 | Threat | Control in this chapter | Deeper |
 |---|---|---|
 | An identity with log-admin rights shortens retention or deletes the group, erasing evidence | Set retention in Terraform, so the apply role owns it. A service control policy (below the table) denies `logs:PutRetentionPolicy`, `logs:DeleteLogGroup` and `logs:DeleteLogStream` to every principal except that role. Keep a copy in an Object Lock bucket (Production notes). | [Part 14 ch.03](03-eks-addon-management.md), [Part 14 ch.07](07-infrastructure-cicd-and-drift.md) |
-| The audit stream stops. Delivery is best effort, so the gap goes unseen | Alarm on missing ingestion as well as high volume (step 5) | Part 05 ch.08 <!-- link-later: 05.08 --> |
-| A broad audit-policy exclusion hides a compromised identity's reads | Do not exclude audit events. Cut volume at the noisy caller (step 4). | Part 05 ch.08 <!-- link-later: 05.08 --> |
+| The audit stream stops. Delivery is best effort, so the gap goes unseen | Alarm on missing ingestion as well as high volume (step 5) | [Part 05 ch.08](../05-security/08-audit-detection-and-incident-response.md) |
+| A broad audit-policy exclusion hides a compromised identity's reads | Do not exclude audit events. Cut volume at the noisy caller (step 4). | [Part 05 ch.08](../05-security/08-audit-detection-and-incident-response.md) |
 | Logs carry secrets or personal data, and everyone with console access reads them | Scrub at the boundary, and limit who can read the groups | [Part 06 ch.02](../06-production-readiness/02-logging.md) |
 | Loki with `auth_enabled: false` lets any pod that reaches the gateway read every app log | A NetworkPolicy that admits only Fluent Bit and Grafana (step 6) | [Part 02 ch.06](../02-networking/06-network-policies.md) |
 

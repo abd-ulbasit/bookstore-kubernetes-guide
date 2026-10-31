@@ -212,7 +212,7 @@ apply prevents three hours of incident recovery.
 | A console or out-of-band change goes unnoticed | Nightly `plan -refresh-only`, then CloudTrail | |
 | Misconfigured Terraform is merged | Not enforced by this pipeline. It runs no IaC scanner. A blocking scanner fails on the tree's CRITICAL `trivy config` findings (for example a public API CIDR and unrestricted egress), so accept those with reasons before you add one | [05.03](../05-security/03-supply-chain.md) |
 | A pipeline action is swapped for another version | Actions pinned by full commit SHA | [14.12](./12-supply-chain-security.md) |
-| A plan that breaks policy is applied | Not enforced by this pipeline. It runs no policy check on the saved plan | 05.07 <!-- link-later: 05.07 --> |
+| A plan that breaks policy is applied | Not enforced by this pipeline. It runs no policy check on the saved plan | [05.07](../05-security/07-admission-control-and-policy-as-code.md) |
 
 ## Diagrams
 

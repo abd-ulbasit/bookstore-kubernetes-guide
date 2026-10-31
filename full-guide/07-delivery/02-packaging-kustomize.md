@@ -109,7 +109,7 @@ way that diff, or what it points at, can make the app less safe.
 
 | Threat | Control taught here | Goes deeper |
 |---|---|---|
-| A patch removes a hardening field the base sets, and nobody reviews that line | Judge each render: `trivy config` on the rendered output, plus a `restricted` server dry run. The dry run alone misses fields `restricted` does not check | [01.01](../01-core-workloads/01-pods.md#baseline); blocking policy at admission is 05.07 <!-- link-later: 05.07 --> |
+| A patch removes a hardening field the base sets, and nobody reviews that line | Judge each render: `trivy config` on the rendered output, plus a `restricted` server dry run. The dry run alone misses fields `restricted` does not check | [01.01](../01-core-workloads/01-pods.md#baseline); blocking policy at admission is [05.07](../05-security/07-admission-control-and-policy-as-code.md) |
 | A remote base changes under an overlay that was reviewed | Pin the remote base to a full commit SHA in `?ref=`, never a branch or tag name | [07.04](04-gitops-argocd.md), [05.03](../05-security/03-supply-chain.md) |
 | A `secretGenerator` writes a secret value into the render, and the render reaches a log or an artifact | No literal values in a generator in Git; treat the render as secret material; prod gets its Secret out of band | [03.02](../03-config-and-storage/02-secrets.md), [15.05](../15-day-to-day-production-ops/05-production-secrets-vault-eso.md) |
 | An opt-in component adds a Secret, a copy of data or an exposure, or removes a control the base has | Name what each component adds and removes, in the components step, and judge its render like any other | this chapter |

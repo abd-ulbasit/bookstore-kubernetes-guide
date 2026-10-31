@@ -265,7 +265,7 @@ staying around.
 |---|---|---|
 | A pod reaches an HTTP method or path its caller should not use | CiliumNetworkPolicy with HTTP rules (section 3) | [02.06](../02-networking/06-network-policies.md) for L3/L4 policy |
 | A workload calls a host it should never reach, named by DNS | `toFQDNs` egress allowlist, with the kube-dns exception | [14.08](08-vpc-endpoints-and-egress.md) for VPC egress |
-| The CNI agent is a host-level process with extra capabilities | `kube-system` labelled privileged and registered as an exception | Runtime detection, Part 05 chapter 05.08 <!-- link-later: 05.08 -->; [14.13](13-runtime-defense-and-container-security.md) |
+| The CNI agent is a host-level process with extra capabilities | `kube-system` labelled privileged and registered as an exception | Runtime detection, Part 05 [chapter 05.08](../05-security/08-audit-detection-and-incident-response.md); [14.13](13-runtime-defense-and-container-security.md) |
 | A running-cluster migration leaves two CNIs and mixed policy | Drain in sequence, with a Velero backup first | [14.14](14-backup-and-restore-velero.md) |
 | Hubble flow data (pod names, HTTP paths) reaches someone outside the cluster | The Hubble relay and UI stay `ClusterIP`, the chart default, and are reached by port-forward or `cilium hubble ui` (section 4); no LoadBalancer or Ingress in front of them | [Hubble setup](https://docs.cilium.io/en/stable/observability/hubble/setup/), [14.05](05-logging-and-metrics-cost.md) for log retention |
 

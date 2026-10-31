@@ -670,7 +670,7 @@ strictly "deny by selection, allow by addition" (a whitelist).
 > selector and template labels in lockstep
 > ([Part 01 ch.04](../01-core-workloads/04-replicasets-and-deployments.md)), and
 > let an admission rule reject Pods without the labels your policies select
-> (Part 05 ch.07, <!-- link-later: 05.07 -->).
+> ([Part 05 ch.07](../05-security/07-admission-control-and-policy-as-code.md)).
 >
 > **Policy and DNS names are different layers.** CoreDNS resolves
 > `postgres.bookstore.svc.cluster.local` from any namespace. Only NetworkPolicy

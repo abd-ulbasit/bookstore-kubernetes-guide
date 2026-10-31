@@ -578,8 +578,8 @@ kubectl delete configmap catalog-config-v1 -n bookstore
   `optional: true` only for genuinely optional tunables.
 - **Who can read it.** RBAC is the only read control on the object. ConfigMaps
   give no secrecy or encryption of their own (step 3 shows the grants). Whether
-  the object is encrypted in etcd is a cluster setting, covered in 05.04
-  <!-- link-later: 05.04 -->.
+  the object is encrypted in etcd is a cluster setting, covered in
+  [05.04](../05-security/04-secrets-and-cluster-hardening.md).
 
 ## Production notes
 

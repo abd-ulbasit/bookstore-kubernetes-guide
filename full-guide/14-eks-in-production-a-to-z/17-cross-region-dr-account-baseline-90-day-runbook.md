@@ -230,10 +230,10 @@ introduced this discipline; this chapter applies it to cross-region.
 
 | Threat | Control in this chapter | Goes deeper |
 |---|---|---|
-| Account-level logging or detection is turned off or drifts | CloudTrail as the audit record. GuardDuty finding `Stealth:IAMUser/CloudTrailLoggingDisabled` fires on a trail deletion or update when GuardDuty is on. This tree has no alarm on `StopLogging` or `DeleteTrail` | 05.09 <!-- link-later: 05.09 --> |
-| The audit log is read, changed or deleted without cause | KMS encryption, TLS-only requests, and log file integrity validation (`enable_log_file_validation = true`), which detects modified, deleted or forged files. Versioning does not stop a delete, and noncurrent versions expire after 365 days. This tree sets no Object Lock | 05.09 <!-- link-later: 05.09 --> |
-| Public or cross-account access goes unnoticed | IAM Access Analyzer external access findings | 05.09 <!-- link-later: 05.09 --> |
-| Cloud posture slips from its benchmark unseen | Prowler, read-only, with failures triaged | 05.09 <!-- link-later: 05.09 --> |
+| Account-level logging or detection is turned off or drifts | CloudTrail as the audit record. GuardDuty finding `Stealth:IAMUser/CloudTrailLoggingDisabled` fires on a trail deletion or update when GuardDuty is on. This tree has no alarm on `StopLogging` or `DeleteTrail` | [05.09](../05-security/09-running-security-on-a-platform-team.md) |
+| The audit log is read, changed or deleted without cause | KMS encryption, TLS-only requests, and log file integrity validation (`enable_log_file_validation = true`), which detects modified, deleted or forged files. Versioning does not stop a delete, and noncurrent versions expire after 365 days. This tree sets no Object Lock | [05.09](../05-security/09-running-security-on-a-platform-team.md) |
+| Public or cross-account access goes unnoticed | IAM Access Analyzer external access findings | [05.09](../05-security/09-running-security-on-a-platform-team.md) |
+| Cloud posture slips from its benchmark unseen | Prowler, read-only, with failures triaged | [05.09](../05-security/09-running-security-on-a-platform-team.md) |
 | A failover fires on a false signal, or a guard is skipped | Do-not-failover guards in Phase 1; only the failover role may change health checks or record sets, and CloudTrail alerts on those calls (Phase 2) | This chapter |
 | The DR copy of a backup cannot be read, because its key is missing in the DR region | S3 CRR opt-in for SSE-KMS objects, a DR-region KMS key, and `kms:Decrypt` for the DR cluster's Velero role on that key (S3 CRR paragraph under How it works) | This chapter |
 

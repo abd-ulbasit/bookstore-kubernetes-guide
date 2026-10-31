@@ -146,17 +146,17 @@ and runtime detection, and vulnerability management.
 
 | Guide chapter | Primary | Secondary |
 |---|---|---|
-| 00: The attacker's view <!-- link-later: 05.00 --> | MITRE ATT&CK for Containers (below) | Microsoft Threat Matrix for Kubernetes; OWASP Kubernetes Top Ten (below) |
+| [00: The attacker's view](../05-security/00-the-attackers-view.md) | MITRE ATT&CK for Containers (below) | Microsoft Threat Matrix for Kubernetes; OWASP Kubernetes Top Ten (below) |
 | [01 — Authn, authz, RBAC](../05-security/01-authn-authz-rbac.md) | KP ch.26 (Access Control) | R ch.10 (Identity); L securing-the-API-server material |
 | [02 — Pod security](../05-security/02-pod-security.md) | KP ch.23 (Process Containment) | R ch.8 (Admission Control); official docs (Pod Security Standards) |
 | [03 — Supply chain](../05-security/03-supply-chain.md) | R ch.15 (Software Supply Chain) | KP ch.30 (Image Builder); official docs (Kyverno/Cosign) |
 | [04 - Secrets at rest and in use](../05-security/04-secrets-and-cluster-hardening.md) | R ch.7 (Secret Management) | KP ch.25 (Secure Configuration) |
-| 05: Kernel isolation: seccomp, AppArmor, SELinux, sandboxed runtimes <!-- link-later: 05.05 --> | KP ch.23 (Process Containment) | seccomp and AppArmor docs (below) |
-| 06: Control plane and node hardening <!-- link-later: 05.06 --> | L securing-the-API-server material | CIS Kubernetes Benchmark (below) |
-| 07: Admission control and policy as code <!-- link-later: 05.07 --> | R ch.8 (Admission Control) | Kyverno docs (below) |
-| 08: Audit logs, runtime detection and incident response <!-- link-later: 05.08 --> | R ch.9 (Observability) | auditing, Falco and Tetragon docs (below) |
-| 09: Running security on a platform team <!-- link-later: 05.09 --> | R ch.15 (Software Supply Chain) | OWASP Kubernetes Top Ten; CISA alert on the NSA and CISA guide; NIST SP 800-190 (all below) |
-| 10: Capstone: attack and harden the bookstore <!-- link-later: 05.10 --> | none; it draws on the Part 05 chapters above | none |
+| [05: Kernel isolation: seccomp, AppArmor, SELinux, sandboxed runtimes](../05-security/05-kernel-isolation.md) | KP ch.23 (Process Containment) | seccomp and AppArmor docs (below) |
+| [06: Control plane and node hardening](../05-security/06-control-plane-and-node-hardening.md) | L securing-the-API-server material | CIS Kubernetes Benchmark (below) |
+| [07: Admission control and policy as code](../05-security/07-admission-control-and-policy-as-code.md) | R ch.8 (Admission Control) | Kyverno docs (below) |
+| [08: Audit logs, runtime detection and incident response](../05-security/08-audit-detection-and-incident-response.md) | R ch.9 (Observability) | auditing, Falco and Tetragon docs (below) |
+| [09: Running security on a platform team](../05-security/09-running-security-on-a-platform-team.md) | R ch.15 (Software Supply Chain) | OWASP Kubernetes Top Ten; CISA alert on the NSA and CISA guide; NIST SP 800-190 (all below) |
+| [10: Capstone: attack and harden the bookstore](../05-security/10-capstone-attack-and-harden-the-bookstore.md) | none; it draws on the Part 05 chapters above | none |
 
 Official docs:
 - Authentication & authorization (RBAC) — <https://kubernetes.io/docs/reference/access-authn-authz/rbac/>

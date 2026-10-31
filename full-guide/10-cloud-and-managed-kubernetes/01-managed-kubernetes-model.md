@@ -122,7 +122,7 @@ babysit etcd.
 |---|---|---|
 | Misreading who secures a layer, so a gap has no owner | The split per provider in [Who secures what](#who-secures-what) | RBAC: [Part 05 ch.01](../05-security/01-authn-authz-rbac.md) |
 | An API endpoint open to the internet by default | Check the endpoint access setting on day one, since EKS starts public | [10.04](04-cloud-networking-and-load-balancing.md) |
-| Secrets read with no record of who read them | Know what the provider encrypts, and turn on the logs that are yours | KMS: [Part 05 ch.04](../05-security/04-secrets-and-cluster-hardening.md); audit: Part 05 ch.08 <!-- link-later: 05.08 --> |
+| Secrets read with no record of who read them | Know what the provider encrypts, and turn on the logs that are yours | KMS: [Part 05 ch.04](../05-security/04-secrets-and-cluster-hardening.md); audit: [Part 05 ch.08](../05-security/08-audit-detection-and-incident-response.md) |
 | An out-of-support minor that the provider upgrades for you | Track each end-of-support date and upgrade on your own schedule | [Part 08 ch.01](../08-day-2-operations/01-cluster-lifecycle.md) |
 
 ## Who secures what

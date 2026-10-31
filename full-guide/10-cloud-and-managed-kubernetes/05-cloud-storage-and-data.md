@@ -131,7 +131,8 @@ DB is highly available across AZs" is the cloud-storage incident.
 | A static key for the bucket that backups or exports write to | Federated identity: the Pod's ServiceAccount assumes a role, and no key sits in a Secret | [10.03](03-cloud-identity.md). The backup bucket: [08.02](../08-day-2-operations/02-backup-and-dr.md) |
 
 Reviewing who used the key or the snapshot afterwards is audit logging
-(<!-- link-later: 05.08 -->05.08, not written yet) and the provider's own logs
+([05.08](../05-security/08-audit-detection-and-incident-response.md), not
+written yet) and the provider's own logs
 (CloudTrail, below).
 
 ## Diagrams
