@@ -1,0 +1,43 @@
+# Bookstore Kustomize COMPONENT: traefik-rewrite (Traefik's /api prefix strip).
+#
+# The base Ingress (50-ingress.yaml) is the portable form: class `traefik`,
+# `Prefix` paths, no controller annotation. The storefront calls /api/books
+# and /api/orders but the services serve /books and /orders, so the edge has
+# to strip the /api prefix. Traefik does that with a Middleware (a custom
+# resource), which is why it is a component and not part of the base: the base
+# stays free of CRD kinds (zero `no matches for kind` on a plain cluster) and
+# its object count does not change.
+#
+# This component (a) adds the Middleware and (b) patches the base Ingress with
+# the annotation that attaches it. It leaves the Ingress's name, rules and TLS
+# alone, so an overlay's host patch still applies. The result equals
+# raw-manifests/50-ingress-traefik.yaml.
+#
+# !!! CRD PREREQUISITE. traefik.io/v1alpha1 Middleware is installed by the
+# Traefik chart (ch.04 step 2). Without it a client dry-run prints
+# `no matches for kind "Middleware"` for the one added object; that is
+# expected. The annotation value is <namespace>-<name>@kubernetescrd, and the
+# namespace is `bookstore` in every overlay of this tree.
+#
+# Enable by adding to an overlay's `components:` list:
+#   components:
+#     - ../../components/traefik-rewrite
+apiVersion: kustomize.config.k8s.io/v1alpha1
+kind: Component
+
+resources:
+  - 50-ingress-traefik-middleware.yaml
+
+patches:
+  - target:
+      group: networking.k8s.io
+      version: v1
+      kind: Ingress
+      name: bookstore
+    patch: |
+      apiVersion: networking.k8s.io/v1
+      kind: Ingress
+      metadata:
+        name: bookstore
+        annotations:
+          traefik.ingress.kubernetes.io/router.middlewares: bookstore-rewrite-api-prefix@kubernetescrd

@@ -109,15 +109,15 @@ patches:
           - host: bookstore.dev.local
             http:
               paths:
-                - path: /api/books(/|$)(.*)
-                  pathType: ImplementationSpecific
+                - path: /api/books
+                  pathType: Prefix
                   backend:
                     service:
                       name: catalog
                       port:
                         number: 80
-                - path: /api/orders(/|$)(.*)
-                  pathType: ImplementationSpecific
+                - path: /api/orders
+                  pathType: Prefix
                   backend:
                     service:
                       name: orders

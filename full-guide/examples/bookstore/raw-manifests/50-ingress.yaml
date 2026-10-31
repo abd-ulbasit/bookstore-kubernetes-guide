@@ -1,15 +1,29 @@
 # Bookstore — Part 02 ch.04 "Ingress": one external entrypoint, TLS-terminated.
 #
 # Ingress is L7 HTTP routing into the cluster: host + path rules map to the
-# in-cluster Services from 40-services.yaml. An Ingress CONTROLLER
-# (ingress-nginx here) watches Ingress objects and programs a reverse proxy;
-# the Ingress object alone does nothing without a controller (see ch.04).
+# in-cluster Services from 40-services.yaml. An Ingress CONTROLLER (Traefik in
+# ch.04) watches Ingress objects and programs a reverse proxy; the Ingress
+# object alone does nothing without a controller (see ch.04).
 #
 # Routing (host bookstore.localdev.me — *.localdev.me resolves to 127.0.0.1,
 # convenient for local kind; swap for your domain in production):
-#   /            -> storefront:80   (the UI; default-ish catch-all path)
-#   /api/books   -> catalog:80      (rewritten to /books   on the backend)
-#   /api/orders  -> orders:80       (rewritten to /orders  on the backend)
+#   /            -> storefront:80   (the UI; catch-all)
+#   /api/books   -> catalog:80
+#   /api/orders  -> orders:80
+# This file is the PORTABLE form: class `traefik`, `Prefix` paths only, no
+# controller-specific annotation, so any controller reads it the same way.
+#
+# One thing it cannot express. The storefront calls /api/books and
+# /api/orders (app/storefront/index.html), but the services serve /books and
+# /orders (app/catalog/main.go, app/orders/main.go). A request that reaches
+# them as /api/books is a 404, so something at the edge must strip the /api
+# prefix. Traefik does it with a Middleware, a custom resource, so it lives in
+# 50-ingress-traefik.yaml (this Ingress plus the Middleware and the annotation
+# that attaches it). The Helm chart (ingress.traefikRewrite.enabled) and the
+# Kustomize `traefik-rewrite` component carry the same pair, off by default
+# because a Middleware needs the Traefik CRDs and the default render stays
+# free of CRD kinds.
+#
 # TLS is terminated at the Ingress using a Secret holding a cert+key. For
 # local use, generate a self-signed cert (see ch.04 hands-on) and create the
 # Secret `bookstore-tls`; in production this is cert-manager/ACME.
@@ -21,7 +35,7 @@
 #
 # Requires:
 #   kubectl apply -f examples/bookstore/raw-manifests/40-services.yaml
-#   # ingress-nginx installed (ch.04 documents the public manifest + kind notes)
+#   # Traefik installed under `restricted` (ch.04 step 2), class `traefik`
 #   # TLS Secret (ch.04):
 #   #   openssl req -x509 -nodes -days 365 -newkey rsa:2048 \
 #   #     -keyout tls.key -out tls.crt -subj "/CN=bookstore.localdev.me" \
@@ -38,14 +52,8 @@ metadata:
   namespace: bookstore
   labels:
     app.kubernetes.io/part-of: bookstore
-  annotations:
-    # Strip the /api/<svc> prefix so the backend sees its own route
-    # (catalog serves /books, not /api/books). This annotation is
-    # ingress-nginx-specific; other controllers express rewrite differently
-    # (a portability limit ch.05 motivates Gateway API to solve).
-    nginx.ingress.kubernetes.io/rewrite-target: /$2
 spec:
-  ingressClassName: nginx           # which controller owns this Ingress
+  ingressClassName: traefik         # which controller owns this Ingress
   tls:
     - hosts:
         - bookstore.localdev.me
@@ -54,15 +62,15 @@ spec:
     - host: bookstore.localdev.me
       http:
         paths:
-          - path: /api/books(/|$)(.*)
-            pathType: ImplementationSpecific   # regex capture (ingress-nginx)
+          - path: /api/books
+            pathType: Prefix
             backend:
               service:
                 name: catalog
                 port:
                   number: 80
-          - path: /api/orders(/|$)(.*)
-            pathType: ImplementationSpecific
+          - path: /api/orders
+            pathType: Prefix
             backend:
               service:
                 name: orders

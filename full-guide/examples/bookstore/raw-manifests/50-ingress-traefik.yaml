@@ -1,0 +1,78 @@
+# Bookstore, Part 02 ch.04 step 6: the Ingress with Traefik's path rewrite.
+#
+# 50-ingress.yaml routes /api/books to catalog and /api/orders to orders, but
+# the services serve /books and /orders (app/catalog/main.go,
+# app/orders/main.go), so a request that keeps its /api prefix is a 404. This
+# file adds the one Traefik-specific piece: a Middleware that rewrites
+# /api/books/... to /books/... and /api/orders/... to /orders/..., and the
+# annotation that attaches it to the Ingress. The annotation value is
+# <namespace>-<name>@kubernetescrd.
+#
+# Apply this file INSTEAD of 50-ingress.yaml (both name the same Ingress, so
+# applying one after the other changes the Ingress, it does not add a second).
+# It needs the Traefik CRDs, which the Traefik chart installs (ch.04 step 2);
+# without them the Middleware is refused and `no matches for kind` is the
+# expected message. It is not part of the Helm and Kustomize default renders
+# for that reason: ingress.traefikRewrite.enabled in the chart and the
+# `traefik-rewrite` Kustomize component carry the same Middleware and
+# annotation when you opt in.
+#
+# Requires:
+#   kubectl apply -f examples/bookstore/raw-manifests/40-services.yaml
+#   # Traefik installed under `restricted`, class `traefik`, and watching the
+#   # bookstore namespace for CRDs (ch.04 step 2); TLS Secret bookstore-tls
+# Apply:
+#   kubectl apply -f examples/bookstore/raw-manifests/50-ingress-traefik.yaml
+#   kubectl get middleware,ingress -n bookstore
+apiVersion: traefik.io/v1alpha1
+kind: Middleware
+metadata:
+  name: rewrite-api-prefix
+  namespace: bookstore
+  labels:
+    app.kubernetes.io/part-of: bookstore
+spec:
+  replacePathRegex:
+    regex: "^/api/(books|orders)(.*)"
+    replacement: "/$1$2"
+---
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: bookstore
+  namespace: bookstore
+  labels:
+    app.kubernetes.io/part-of: bookstore
+  annotations:
+    traefik.ingress.kubernetes.io/router.middlewares: bookstore-rewrite-api-prefix@kubernetescrd
+spec:
+  ingressClassName: traefik          # which controller owns this Ingress
+  tls:
+    - hosts:
+        - bookstore.localdev.me
+      secretName: bookstore-tls      # the Secret from step 4
+  rules:
+    - host: bookstore.localdev.me
+      http:
+        paths:
+          - path: /api/books
+            pathType: Prefix
+            backend:
+              service:
+                name: catalog
+                port:
+                  number: 80
+          - path: /api/orders
+            pathType: Prefix
+            backend:
+              service:
+                name: orders
+                port:
+                  number: 80
+          - path: /
+            pathType: Prefix
+            backend:
+              service:
+                name: storefront
+                port:
+                  number: 80

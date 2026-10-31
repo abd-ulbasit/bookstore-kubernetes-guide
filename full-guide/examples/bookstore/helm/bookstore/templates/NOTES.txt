@@ -19,11 +19,19 @@ Check it:
   kubectl get job db-migrate -n {{ include "bookstore.namespace" . }}   # the hook
 
 {{ if .Values.ingress.enabled -}}
-Reach the app (Ingress): you still need an ingress-nginx controller AND the
-TLS Secret `{{ .Values.ingress.tls.secretName }}` (this chart does NOT generate
-the cert). With *.localdev.me -> 127.0.0.1 and the controller exposed:
+Reach the app (Ingress): you still need the Traefik controller (class
+`{{ .Values.ingress.className }}`, Part 02 ch.04) AND the TLS Secret
+`{{ .Values.ingress.tls.secretName }}` (this chart does NOT generate the cert).
+With *.localdev.me -> 127.0.0.1 and the controller exposed:
   curl -k https://{{ .Values.ingress.host }}/                 # storefront UI
-  curl -k https://{{ .Values.ingress.host }}/api/books        # catalog
+{{- if .Values.ingress.traefikRewrite.enabled }}
+  curl -k https://{{ .Values.ingress.host }}/api/books        # catalog (prefix stripped by the Middleware)
+{{- else }}
+The services serve /books and /orders, so /api/books and /api/orders are a 404
+until the edge strips the /api prefix. For Traefik, set
+ingress.traefikRewrite.enabled=true (it adds a Middleware, which needs the
+Traefik CRDs).
+{{- end }}
 {{ end -}}
 
 CRD-backed extras (OFF by default — turning one ON requires its operator/CRDs;

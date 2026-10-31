@@ -56,6 +56,7 @@ the toggles and image blocks. Highlights:
 | `migrationJob.enabled` | `true` | DB migrate Job as a **post-install/post-upgrade hook** (after the StatefulSet) |
 | `cleanupCronJob.enabled` | `true` | Nightly cleanup CronJob (a normal release object) |
 | `ingress.enabled` | `true` | Ingress edge (built-in API) — **XOR** `gateway` |
+| `ingress.traefikRewrite.enabled` | `false` | Traefik Middleware that strips `/api` (CRD) plus the annotation that attaches it; the services serve `/books` and `/orders` |
 | `gateway.enabled` | `false` | Gateway API edge (CRD) — **XOR** `ingress` |
 | `networkPolicy.enabled` | `true` | All 10 NetworkPolicies (enforcement needs a policy CNI) |
 | `hpa.enabled` | `true` | catalog HPA (built-in `autoscaling/v2`) |
@@ -85,7 +86,8 @@ CRD/operator below or the API server rejects it with `no matches for kind ...`
 |---|---|---|
 | `serviceMonitor.enabled` / `prometheusRule.enabled` | Prometheus Operator CRDs | `helm install kube-prometheus-stack prometheus-community/kube-prometheus-stack -n monitoring --create-namespace` |
 | `keda.enabled` | KEDA CRDs + operator | `helm install keda kedacore/keda -n keda --create-namespace` |
-| `gateway.enabled` | Gateway API CRDs + a controller | Gateway API v1.7.0 standard CRDs + Traefik with its Gateway provider (`gateway.controllerName` defaults to `traefik.io/gateway-controller`; change it for another implementation) |
+| `ingress.traefikRewrite.enabled` | Traefik CRDs (`traefik.io/v1alpha1` Middleware) | The Traefik chart installs them (Part 02 ch.04 step 2) |
+| `gateway.enabled` | Gateway API CRDs + a controller | Gateway API standard CRDs + Traefik with its Gateway provider (Part 02 ch.05 step 1 gives the install and the CRD version; `gateway.controllerName` defaults to `traefik.io/gateway-controller`; change it for another implementation) |
 | `kyverno.enabled` | Kyverno | `helm install kyverno kyverno/kyverno -n kyverno --create-namespace` |
 | `snapshot.enabled` | external-snapshotter CRDs + controller + a snapshot-capable CSI driver | (cloud disk CSI / csi-hostpath-driver) |
 
