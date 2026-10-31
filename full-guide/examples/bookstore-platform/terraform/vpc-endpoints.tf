@@ -9,9 +9,10 @@
 #     data processed.
 #   - NAT alternative: $0.045/hr per NAT + $0.045/GB data processed.
 #
-#   Break-even is around 50 GB/month of NAT data. Pulling 5 GB of ECR images
-#   per cluster reboot adds up fast; cross-AZ DataDog/observability exports do
-#   too. For a long-lived cluster, endpoints almost always pay off.
+#   Break-even is per interface endpoint. Each one costs about $7.30/month per
+#   AZ, so it pays off once the traffic it moves off NAT exceeds about 208 GB
+#   per month per AZ (about 625 GB/month across 3 AZs). The S3 gateway
+#   endpoint is free and has no break-even.
 #
 # Endpoints created when enabled:
 #   - com.amazonaws.<region>.s3 (gateway)

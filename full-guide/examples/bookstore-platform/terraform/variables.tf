@@ -310,7 +310,7 @@ variable "budget_alarm_email" {
 ################################################################################
 
 variable "enable_vpc_endpoints" {
-  description = "Create VPC endpoints (S3 gateway + ECR/STS/EC2/Logs/KMS interfaces) to keep east-west traffic off NAT. Each interface endpoint costs ~$0.01/hr per AZ + $0.01/GB data. Break-even vs NAT data charges is ~50 GB/month of pulled images + AWS API."
+  description = "Create VPC endpoints (S3 gateway + ECR/STS/EC2/Logs/KMS interfaces) to keep AWS API and image traffic off NAT. Each interface endpoint costs ~$0.01/hr per AZ + $0.01/GB data, so it breaks even at about 208 GB/month of traffic moved off NAT per AZ."
   type        = bool
   default     = false
 }
