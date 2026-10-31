@@ -1,0 +1,1 @@
+time="2026-10-31 10:27:44" level=fatal msg="cluster config found but cannot reach API server: Get \"https://127.0.0.1:1/version\": dial tcp 127.0.0.1:1: connect: connection refused" file="config.go:357"

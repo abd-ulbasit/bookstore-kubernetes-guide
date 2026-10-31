@@ -90,6 +90,7 @@ guide yet). Part 00 ch.08 names the enforcer of each baseline field.
 | S1 | A Pod calls the API as another identity | Its own ServiceAccount, with `automountServiceAccountToken: false` | review | 01.01, `#baseline-service-account` |
 | S2 | A stolen kubeconfig acts as an operator | Authentication at the API server, RBAC, short-lived credentials | cluster | 05.01 |
 | S3 | A Pod impersonates another Pod on the network | Default-deny NetworkPolicy, then explicit allows | cluster | 02.06 |
+| S7 | A workload logs in to Vault as another workload's identity | Vault Kubernetes auth role bound to one ServiceAccount name and one namespace, with a read-only policy | later | 11.05, section 4 |
 | S6 | A Pod copies a label such as `app: storefront` and is trusted as that workload | Mesh authorization by SPIFFE identity from its ServiceAccount, with default-deny at the waypoint | later | 11.04 (`40-authz-default-deny.yaml`); workload X.509 identity 05.01 |
 | S8 | The hub holds a token for every member, so one leaked token reaches that member's API | One ServiceAccount per member in its own namespace, a Role in the workload namespace only, and a token that lasts 24 hours | review | 11.06, Fleet credentials |
 
@@ -117,6 +118,7 @@ guide yet). Part 00 ch.08 names the enforcer of each baseline field.
 | I2 | A broad RBAC grant reads Secrets | One ServiceAccount and one narrow Role per workload | cluster | 05.01 |
 | I3 | A caller reads Pod specs or runs commands through the kubelet | Anonymous kubelet auth off, webhook authorization | cluster | 05.06 <!-- link-later: 05.06 --> |
 | I4 | Application code reads a mounted ServiceAccount token | `automountServiceAccountToken: false` | review | 01.01, `#baseline-service-account` |
+| I6 | A static database password, read from Git or a Secret, stays valid until someone rotates it | Dynamic credentials: Vault mints a lease-bound Postgres role per read, through a `VaultDynamicSecret` generator | later | 11.05, section 5 |
 | I5 | A Pod on the network reads the traffic of an edge that policy allows | Strict mTLS between meshed workloads, so plaintext never crosses the pod network | later | 11.04 (`10-peerauthentication-strict-mtls.yaml`); NetworkPolicy 02.06 still applies underneath |
 | I7 | Clear etcd traffic: a host on the path reads Secrets off etcd traffic, or a client talks to etcd with no certificate | Peer and client TLS, with client certificates required (`--client-cert-auth`, `--peer-client-cert-auth`); port 2379 reached only from control-plane nodes | cluster | 11.08, `#threats-and-controls`; 05.04; 05.06 <!-- link-later: 05.06 --> |
 
@@ -139,9 +141,9 @@ guide yet). Part 00 ch.08 names the enforcer of each baseline field.
 | E5 | An unpatched runtime lets a container escape, as with CVE-2024-21626 | A patched containerd and runc on every node | cluster | 05.06 <!-- link-later: 05.06 --> |
 | E6 | An RBAC grant lets a workload create a privileged Pod | Narrow RBAC, and `restricted` on the namespace | cluster | 05.01; 05.02 |
 | E7 | A mutation adds privilege the Pod did not ask for | A mutating webhook sets only restrictive fields, and only when absent; a validating check runs after it | review | 11.01, `#mental-model` |
-| E8 | A controller's own RBAC grant lets a compromised operator act beyond its reconcile loop | Markers grant only the verbs the reconcile path calls, no delete and no wildcard; the generated role is read before it ships | review | 11.02, RBAC markers |
 | E9 | The chaos daemon runs privileged on every node, so a compromised daemon reaches the node. The controller can also delete Pods outside the workload under test | The daemon alone is privileged, in its own namespace enforced at `privileged` with audit and warn at `restricted`, and registered; the controller is namespace-scoped (`clusterScoped: false`); optional features are off | review | 11.07, `#threats-and-controls` |
 | E10 | The provider's ServiceAccount holds more rights than the recipe needs, so a compromised provider, or a bad change to the recipe, reaches objects in every namespace | RBAC named to the kinds the recipe writes; the `bind` verb on the built-in `view` ClusterRole only; no `cluster-admin` binding; a requester Role limited to the request namespace | cluster | 11.10, `#threats-and-controls` |
+| E8 | A controller's own RBAC grant lets a compromised operator act beyond its reconcile loop | Markers grant only the verbs the reconcile path calls, no delete and no wildcard; the generated role is read before it ships | review | 11.02, RBAC markers |
 
 ## Attacker goals
 
@@ -156,7 +158,7 @@ guide uses it as a map of goals, not as a checklist of techniques.
 | Privilege Escalation | Root in a container, a setuid binary, a capability, a privileged Pod, or escape to the host (escape-to-host, T1611) | E1 to E5 |
 | Stealth | A change that leaves no audit record or avoids review | RP1, T3 |
 | Defense Impairment | A policy, gate or NetworkPolicy switched off | T3, S3, E4 |
-| Credential Access | A Secret, a mounted token or etcd read directly | I1, I2, I4, S2, S8 |
+| Credential Access | A Secret, a mounted token or etcd read directly | I1, I2, I4, I6, S2, S7, S8 |
 | Discovery | Listing Pods or reaching the kubelet from inside the cluster | I3, S1 |
 | Lateral Movement | Pod to Pod, or namespace to namespace | S3, TB9 |
 | Impact | Corrupted or deleted records, exhausted resources | A1, D1, D2 |

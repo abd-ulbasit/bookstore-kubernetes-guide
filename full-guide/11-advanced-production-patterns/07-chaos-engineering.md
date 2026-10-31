@@ -371,7 +371,7 @@ kubectl get namespaces chaos-mesh bookstore \
 ```text
 NAME               STATUS   AGE   ENFORCE      AUDIT        WARN
 p11-07-bookstore   Active   1s    restricted   restricted   restricted
-p11-07-chaos       Active   0s    privileged   restricted   restricted
+chaos-mesh       Active   0s    privileged   restricted   restricted
 ```
 
 Why `privileged` and not a lower level. The chaos daemon sets `hostPID: true`,

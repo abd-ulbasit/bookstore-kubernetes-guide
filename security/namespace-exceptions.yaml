@@ -155,13 +155,3 @@ exceptions:
     chapter: 11-advanced-production-patterns/07-chaos-engineering.md
     expires: 2027-06-30
 
-  - namespace: p11-07-chaos
-    level: privileged
-    reason: >-
-      The lab run of Part 11 ch.07 labelled its chaos namespace under the lab's
-      name, in place of chaos-mesh, so the transcript's label needs an entry. The
-      namespace has the same privileged daemon and the same reason as chaos-mesh
-      above. The lab deleted it after the run.
-    upstream: https://github.com/chaos-mesh/chaos-mesh/blob/v2.8.7/helm/chaos-mesh/values.yaml
-    chapter: 11-advanced-production-patterns/07-chaos-engineering.md
-    expires: 2027-06-30
