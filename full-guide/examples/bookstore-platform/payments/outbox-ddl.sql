@@ -1,10 +1,10 @@
--- Bookstore Platform v2 — Part 13 ch.06: the outbox table DDL. The orders-
+-- Bookstore Platform v2: Part 13 ch.06: the outbox table DDL. The orders-
 -- service writes (order_row, outbox_row) in ONE transaction; the outbox-
 -- publisher Deployment reads ready rows and ships them to Kafka.
 --
 -- This is the "transactional outbox" pattern (Debezium calls it the "outbox
--- pattern"; same shape). The atomicity guarantee comes from Postgres — both
--- inserts are in the same transaction, both commit or neither does — and
+-- pattern"; same shape). The atomicity guarantee comes from Postgres: both
+-- inserts are in the same transaction, both commit or neither does: and
 -- avoids 2PC across the application + Kafka.
 --
 -- Applied via CNPG migration job, or by the Crossplane BookstoreTenant
@@ -51,5 +51,23 @@ CREATE INDEX IF NOT EXISTS outbox_unpublished_idx
 
 -- Retention: in production a cron job archives rows older than 30 days to
 -- cold storage and deletes them here. The chapter calls out the
--- alternative: never delete (audit-grade event log) — pick based on the
+-- alternative: never delete (audit-grade event log): pick based on the
 -- regulatory regime.
+
+-- The payments table is the payments-worker's replay guard (app/events/
+-- payments.go): one row per order event, written after the gateway charged.
+-- It outlives Stripe's 24-hour Idempotency-Key window.
+CREATE TABLE IF NOT EXISTS bookstore_platform.payments (
+    event_id          uuid        NOT NULL PRIMARY KEY,
+    payment_intent_id text        NOT NULL,
+    status            text        NOT NULL,
+    created_at        timestamptz NOT NULL DEFAULT now()
+);
+
+-- Least privilege. Each workload connects as its own role (the DSNs come from
+-- separate ExternalSecrets). The roles are created by the CNPG Cluster's
+-- managed roles. The publisher reads and marks outbox rows. The worker reads
+-- and inserts payments rows, and cannot touch the outbox.
+GRANT USAGE ON SCHEMA bookstore_platform TO outbox, payments_worker;
+GRANT SELECT, UPDATE ON bookstore_platform.outbox TO outbox;
+GRANT SELECT, INSERT ON bookstore_platform.payments TO payments_worker;

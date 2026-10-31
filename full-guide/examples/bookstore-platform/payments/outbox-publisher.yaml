@@ -1,22 +1,20 @@
-# Bookstore Platform v2 — Part 13 ch.06: the outbox publisher. Reads the
-# `outbox` table in Postgres, publishes each row to Kafka's `orders.placed`
-# topic, marks the row published. Together with the orders-service writing
-# (order_row, outbox_row) in ONE transaction this gives at-least-once
-# delivery without 2PC.
+# Bookstore Platform v2: Part 13 ch.06: the outbox publisher. Reads the
+# `outbox` table in Postgres and publishes each row to Kafka's `orders.placed`
+# topic, then marks the row published. The orders-service writes the order row
+# and the outbox row in ONE transaction, which gives at-least-once delivery
+# without 2PC.
 #
-# A small Go service — `bookstore-platform/outbox-publisher:dev` — implements
-# the loop. The source lives at ../app/events/main.go (the `events` service
-# is the dispatcher that handles outbox publishing + payment-event consumption
-# in one process; this Deployment runs the same image with EVENTS_MODE=outbox).
+# The image bookstore-platform/events:dev runs the loop with EVENTS_MODE=outbox
+# (source: ../app/events/outbox.go).
 #
 # Production-shape details enforced here:
-#   - Three replicas. Each holds a distinct postgres advisory lock so only
-#     ONE publisher is active per topic at any time (the others stand by);
-#     this gives crash-failover without duplicate writes.
-#   - At-least-once delivery (acks=all); consumer dedupes on event_id.
-#     Every outbox row has a UUID `event_id` carried as the Kafka message
-#     key; the consumer's dedupe table is the source of truth.
-#   - PSA: restricted; non-root; distroless.
+#   - Three replicas share the outbox. Each batch is claimed with
+#     FOR UPDATE SKIP LOCKED, so no row is published by two replicas at once.
+#   - TLS to the cluster listener, as the outbox-publisher KafkaUser. Its ACL
+#     allows Write on orders.placed and nothing else (kafka-users.yaml).
+#   - The database password arrives from ESO (stripe-eso-externalsecret.yaml).
+#     This Pod holds no literal Secret.
+#   - At-least-once delivery (acks=all); consumers dedupe on event_id.
 #
 # Apply:
 #   kubectl apply -f examples/bookstore-platform/payments/outbox-publisher.yaml
@@ -71,7 +69,6 @@ spec:
         runAsNonRoot: true
         runAsUser: 65532
         runAsGroup: 65532
-        fsGroup: 65532
         seccompProfile:
           type: RuntimeDefault
       containers:
@@ -82,7 +79,9 @@ spec:
             - name: EVENTS_MODE
               value: "outbox"
             - name: KAFKA_BROKERS
-              value: "bookstore-platform-kafka-kafka-bootstrap.kafka-system.svc.cluster.local:9092"
+              value: "bookstore-platform-kafka-kafka-bootstrap.kafka-system.svc.cluster.local:9093"
+            - name: KAFKA_TLS_DIR
+              value: "/etc/kafka/tls"
             - name: KAFKA_TOPIC_ORDERS_PLACED
               value: "orders.placed"
             - name: DB_DSN
@@ -102,7 +101,6 @@ spec:
               cpu: 100m
               memory: 128Mi
             limits:
-              cpu: 500m
               memory: 256Mi
           livenessProbe:
             httpGet:
@@ -121,16 +119,15 @@ spec:
             readOnlyRootFilesystem: true
             capabilities:
               drop: ["ALL"]
----
-apiVersion: v1
-kind: Secret
-metadata:
-  name: outbox-publisher-db
-  namespace: bookstore-platform-payments
-  labels:
-    app.kubernetes.io/part-of: bookstore-platform
-    bookstore-platform.example.com/placeholder: "true"
-type: Opaque
-stringData:
-  # Placeholder; real wiring via ESO + Vault (Part 11 ch.05).
-  dsn: "postgres://outbox:REPLACE-ME-VIA-ESO-NOT-IN-SOURCE@bookstore-platform-cnpg-rw.cnpg-system.svc.cluster.local:5432/bookstore_platform?sslmode=require"
+          volumeMounts:
+            - name: tmp
+              mountPath: /tmp
+            - name: kafka-tls
+              mountPath: /etc/kafka/tls
+              readOnly: true
+      volumes:
+        - name: tmp
+          emptyDir: {}
+        - name: kafka-tls
+          secret:
+            secretName: outbox-publisher-kafka

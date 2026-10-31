@@ -1,16 +1,16 @@
-# Bookstore Platform v2 — Part 13 ch.06: the Istio AuthorizationPolicy that
+# Bookstore Platform v2: Part 13 ch.06: the Istio AuthorizationPolicy that
 # permits Stripe to POST /stripe/webhook PUBLIC (no JWT) while still requiring
 # the Stripe-Signature header to be present (defence in depth; the signature
 # verification inside the binary is the real check). Health probes get a
 # narrow allow as well.
 #
 # Split into its own file from `payments-webhook-receiver.yaml` because Istio
-# CRDs cause a client dry-run on the combined manifest to exit non-zero —
+# CRDs cause a client dry-run on the combined manifest to exit non-zero :
 # the AuthorizationPolicy is `security.istio.io/v1` and `--dry-run=client`
 # without Istio installed errors on it. Keeping the Deployment + Service
 # +Secret in the receiver file lets that file dry-run cleanly.
 #
-# !!! CRD-INTRINSIC DRY-RUN — AuthorizationPolicy (Istio)
+# !!! CRD-INTRINSIC DRY-RUN: AuthorizationPolicy (Istio)
 #   `AuthorizationPolicy` is `security.istio.io/v1`. WITHOUT Istio:
 #     no matches for kind "AuthorizationPolicy" in version "security.istio.io/v1"
 #   EXPECTED. After Istio is installed this applies.

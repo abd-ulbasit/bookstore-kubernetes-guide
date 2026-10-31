@@ -1,7 +1,11 @@
-# Bookstore Platform v2 — Part 13 ch.06: the payments-gateway Deployment
+# Bookstore Platform v2: Part 13 ch.06: the payments-gateway Deployment
 # (PAYMENTS_MODE=gateway). The webhook-receiver variant uses the SAME image
-# with PAYMENTS_MODE=webhook-receiver — see
+# with PAYMENTS_MODE=webhook-receiver: see
 # ../../payments/payments-webhook-receiver.yaml.
+#
+# The Stripe key comes from the stripe-api-key Secret that ESO writes from
+# Vault (../../payments/stripe-eso-externalsecret.yaml). No literal Secret
+# lives in this file.
 #
 # Apply:
 #   kubectl apply -f examples/bookstore-platform/app/payments-gateway/deployment.yaml
@@ -42,7 +46,6 @@ spec:
         runAsNonRoot: true
         runAsUser: 65532
         runAsGroup: 65532
-        fsGroup: 65532
         seccompProfile:
           type: RuntimeDefault
       containers:
@@ -52,8 +55,8 @@ spec:
           env:
             - { name: PAYMENTS_MODE, value: "gateway" }
             - { name: PORT,          value: "8080" }
-            # STRIPE_API_BASE empty in production (real Stripe);
-            # set to http://stripe-mock:12111 on kind for sandbox tests.
+            # STRIPE_API_BASE stays empty against real Stripe. On the lab it
+            # points at stripe-mock (payments/stripe-mock.yaml).
             - { name: STRIPE_API_BASE, value: "" }
             - name: STRIPE_KEY
               valueFrom:
@@ -67,7 +70,6 @@ spec:
               cpu: 50m
               memory: 64Mi
             limits:
-              cpu: 250m
               memory: 128Mi
           livenessProbe:
             httpGet: { path: /healthz, port: 8080 }
@@ -84,17 +86,9 @@ spec:
             readOnlyRootFilesystem: true
             capabilities:
               drop: ["ALL"]
----
-# Placeholder Secret — REPLACE via ESO + Vault
-# (../../payments/stripe-eso-externalsecret.yaml).
-apiVersion: v1
-kind: Secret
-metadata:
-  name: stripe-api-key
-  namespace: bookstore-platform-payments
-  labels:
-    app.kubernetes.io/part-of: bookstore-platform
-    bookstore-platform.example.com/placeholder: "true"
-type: Opaque
-stringData:
-  api-key: "sk_test_REPLACE-ME-VIA-ESO-NOT-IN-SOURCE"
+          volumeMounts:
+            - name: tmp
+              mountPath: /tmp
+      volumes:
+        - name: tmp
+          emptyDir: {}

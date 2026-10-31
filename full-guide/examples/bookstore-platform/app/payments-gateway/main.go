@@ -4,7 +4,7 @@
 // IdempotencyKey) and "webhook-receiver" (POST /stripe/webhook ->
 // verify Stripe-Signature -> publish payment_intent.succeeded to
 // `payments.completed` or payment_intent.payment_failed to
-// `payments.failed`). Intentionally small (<=200 lines).
+// `payments.failed`). KAFKA_TLS_DIR names the KafkaUser secret for TLS.
 package main
 
 import (
@@ -47,7 +47,7 @@ func main() {
 		stripeKey:      os.Getenv("STRIPE_KEY"),
 		stripeAPIBase:  os.Getenv("STRIPE_API_BASE"),
 		webhookSecret:  os.Getenv("STRIPE_WEBHOOK_SECRET"),
-		kafkaBrokers:   strings.Split(envOr("KAFKA_BROKERS", "bookstore-platform-kafka-kafka-bootstrap.kafka-system.svc.cluster.local:9092"), ","),
+		kafkaBrokers:   strings.Split(envOr("KAFKA_BROKERS", "bookstore-platform-kafka-kafka-bootstrap.kafka-system.svc.cluster.local:9093"), ","),
 		topicCompleted: envOr("KAFKA_TOPIC_PAYMENTS_COMPLETED", "payments.completed"),
 		topicFailed:    envOr("KAFKA_TOPIC_PAYMENTS_FAILED", "payments.failed"),
 	}
@@ -60,12 +60,18 @@ func main() {
 		stripe.SetBackend(stripe.APIBackend, stripe.GetBackendWithConfig(stripe.APIBackend, &stripe.BackendConfig{URL: stripe.String(cfg.stripeAPIBase)}))
 	}
 
-	// Webhook mode initializes Kafka writers; gateway mode does not.
+	// Webhook mode initializes Kafka writers; gateway mode does not. The
+	// writers speak TLS when KAFKA_TLS_DIR names the KafkaUser secret.
 	var pub *webhookPublisher
 	if cfg.mode == "webhook-receiver" {
+		tlsCfg, err := kafkaTLSFromEnv()
+		if err != nil {
+			log.Error("kafka tls", "err", err)
+			os.Exit(1)
+		}
 		pub = &webhookPublisher{
-			completed: &kafka.Writer{Addr: kafka.TCP(cfg.kafkaBrokers...), Topic: cfg.topicCompleted, Balancer: &kafka.Hash{}, RequiredAcks: kafka.RequireAll},
-			failed:    &kafka.Writer{Addr: kafka.TCP(cfg.kafkaBrokers...), Topic: cfg.topicFailed, Balancer: &kafka.Hash{}, RequiredAcks: kafka.RequireAll},
+			completed: &kafka.Writer{Addr: kafka.TCP(cfg.kafkaBrokers...), Topic: cfg.topicCompleted, Balancer: &kafka.Hash{}, RequiredAcks: kafka.RequireAll, Transport: &kafka.Transport{TLS: tlsCfg}},
+			failed:    &kafka.Writer{Addr: kafka.TCP(cfg.kafkaBrokers...), Topic: cfg.topicFailed, Balancer: &kafka.Hash{}, RequiredAcks: kafka.RequireAll, Transport: &kafka.Transport{TLS: tlsCfg}},
 		}
 		defer pub.completed.Close()
 		defer pub.failed.Close()
@@ -75,7 +81,11 @@ func main() {
 	mux.HandleFunc("GET /healthz", func(w http.ResponseWriter, _ *http.Request) { _, _ = w.Write([]byte(`{"status":"ok"}`)) })
 	mux.HandleFunc("GET /readyz", func(w http.ResponseWriter, _ *http.Request) { _, _ = w.Write([]byte(`{"status":"ready"}`)) })
 	mux.HandleFunc("POST /charge", handleCharge(log))
-	mux.HandleFunc("POST /stripe/webhook", handleWebhook(cfg, pub, log))
+	if cfg.mode == "webhook-receiver" {
+		// Only the receiver serves the webhook: in gateway mode there is no
+		// publisher, so the route does not exist.
+		mux.HandleFunc("POST /stripe/webhook", handleWebhook(cfg, pub, log))
+	}
 
 	srv := &http.Server{Addr: ":" + cfg.port, Handler: mux, ReadHeaderTimeout: 5 * time.Second}
 	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
@@ -102,12 +112,15 @@ func main() {
 }
 
 // handleCharge invokes Stripe PaymentIntents for an order. event_id from
-// Kafka becomes Stripe's IdempotencyKey — the same Kafka message arriving
+// Kafka becomes Stripe's IdempotencyKey: the same Kafka message arriving
 // twice produces the same Stripe charge at most once.
 func handleCharge(log *slog.Logger) http.HandlerFunc {
 	type req struct {
-		EventID, OrderID, Currency, Customer string
-		Amount                               int64 `json:"amount_cents"`
+		EventID  string `json:"event_id"`
+		OrderID  string `json:"order_id"`
+		Currency string `json:"currency"`
+		Customer string `json:"customer_id"`
+		Amount   int64  `json:"amount_cents"`
 	}
 	return func(w http.ResponseWriter, r *http.Request) {
 		var p req
@@ -128,6 +141,13 @@ func handleCharge(log *slog.Logger) http.HandlerFunc {
 		params.AddMetadata("order_id", p.OrderID)
 		pi, err := paymentintent.New(params)
 		if err != nil {
+			// A declined card is final: 402 tells the worker not to retry.
+			// Any other Stripe failure is a 502, which the worker retries.
+			var se *stripe.Error
+			if errors.As(err, &se) && se.Type == stripe.ErrorTypeCard {
+				writeErr(w, http.StatusPaymentRequired, "card declined")
+				return
+			}
 			log.Error("stripe call failed", "err", err, "event_id", p.EventID)
 			writeErr(w, http.StatusBadGateway, "stripe call failed")
 			return
@@ -138,8 +158,8 @@ func handleCharge(log *slog.Logger) http.HandlerFunc {
 }
 
 // handleWebhook verifies Stripe-Signature BEFORE doing anything else.
-// On a verified event it publishes to Kafka — payments.completed on
-// success, payments.failed on failure — then 200s Stripe. Other event
+// On a verified event it publishes to Kafka: payments.completed on
+// success, payments.failed on failure: then 200s Stripe. Other event
 // types are logged and acked without publishing. A Kafka write failure
 // returns 500 so Stripe retries.
 func handleWebhook(cfg config, pub *webhookPublisher, log *slog.Logger) http.HandlerFunc {

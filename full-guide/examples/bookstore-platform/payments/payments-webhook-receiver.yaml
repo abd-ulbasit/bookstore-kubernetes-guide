@@ -1,18 +1,17 @@
-# Bookstore Platform v2 — Part 13 ch.06: the Stripe webhook receiver. Stripe
-# POSTs `payment_intent.succeeded` / `payment_intent.payment_failed` /
-# `charge.refunded` events to a public URL we declare in the Stripe dashboard.
-# This service:
+# Bookstore Platform v2: Part 13 ch.06: the Stripe webhook receiver. Stripe
+# POSTs `payment_intent.succeeded` and `payment_intent.payment_failed` events
+# to a public URL declared in the Stripe dashboard. This service:
 #   1. Accepts the POST.
-#   2. Verifies the Stripe-Signature header (HMAC of the raw body + the
-#      webhook secret) — REJECTS if the signature does not match.
-#   3. Publishes the decoded event to Kafka (payments.completed on success;
-#      payments.failed on failure — saga compensation path).
-#   4. Returns 200 to Stripe (Stripe retries on non-200; idempotent path).
+#   2. Verifies the Stripe-Signature header (HMAC of the raw body and a
+#      timestamp, keyed by the webhook secret). A body that fails is refused
+#      before it is parsed.
+#   3. Publishes the verified event to Kafka: payments.completed on success,
+#      payments.failed on failure (the saga's compensation path).
+#   4. Returns 200 to Stripe, so Stripe stops retrying.
 #
-# Path is PUBLIC by intent — Stripe must reach it without our JWT. The
-# Istio AuthorizationPolicy that gates the public path lives in
-# `payments-webhook-authz.yaml` (split out so this file dry-runs cleanly
-# without Istio installed).
+# Path is PUBLIC by intent: Stripe must reach it without our JWT. The Istio
+# AuthorizationPolicy that admits it is payments-webhook-authz.yaml, split out
+# so this file dry-runs without Istio installed.
 #
 # Apply (after applying payments-webhook-authz.yaml when Istio is present):
 #   kubectl apply -f examples/bookstore-platform/payments/payments-webhook-receiver.yaml
@@ -53,23 +52,23 @@ spec:
         runAsNonRoot: true
         runAsUser: 65532
         runAsGroup: 65532
-        fsGroup: 65532
         seccompProfile:
           type: RuntimeDefault
       containers:
         - name: payments-gateway
           image: bookstore-platform/payments-gateway:dev
           imagePullPolicy: IfNotPresent
-          # Run the SAME payments-gateway binary in webhook-receiver mode.
-          # The binary chooses based on PAYMENTS_MODE; both the gateway
-          # path (POST /charge) and the webhook path (POST /stripe/webhook)
-          # live in one binary so there is one Stripe SDK initialisation
-          # and one set of metrics.
+          # The SAME payments-gateway binary, run in webhook-receiver mode.
+          # Both the gateway path (POST /charge) and the webhook path
+          # (POST /stripe/webhook) live in one binary, so there is one Stripe
+          # SDK initialisation and one set of metrics.
           env:
             - name: PAYMENTS_MODE
               value: "webhook-receiver"
             - name: KAFKA_BROKERS
-              value: "bookstore-platform-kafka-kafka-bootstrap.kafka-system.svc.cluster.local:9092"
+              value: "bookstore-platform-kafka-kafka-bootstrap.kafka-system.svc.cluster.local:9093"
+            - name: KAFKA_TLS_DIR
+              value: "/etc/kafka/tls"
             - name: KAFKA_TOPIC_PAYMENTS_COMPLETED
               value: "payments.completed"
             - name: KAFKA_TOPIC_PAYMENTS_FAILED
@@ -91,7 +90,6 @@ spec:
               cpu: 100m
               memory: 128Mi
             limits:
-              cpu: 500m
               memory: 256Mi
           livenessProbe:
             httpGet:
@@ -110,6 +108,18 @@ spec:
             readOnlyRootFilesystem: true
             capabilities:
               drop: ["ALL"]
+          volumeMounts:
+            - name: tmp
+              mountPath: /tmp
+            - name: kafka-tls
+              mountPath: /etc/kafka/tls
+              readOnly: true
+      volumes:
+        - name: tmp
+          emptyDir: {}
+        - name: kafka-tls
+          secret:
+            secretName: payments-webhook-receiver-kafka
 ---
 apiVersion: v1
 kind: Service
@@ -126,16 +136,3 @@ spec:
     - name: http
       port: 8080
       targetPort: 8080
----
-# Placeholder webhook secret — REPLACE via ESO + Vault.
-apiVersion: v1
-kind: Secret
-metadata:
-  name: stripe-webhook-secret
-  namespace: bookstore-platform-payments
-  labels:
-    app.kubernetes.io/part-of: bookstore-platform
-    bookstore-platform.example.com/placeholder: "true"
-type: Opaque
-stringData:
-  webhook-secret: "whsec_REPLACE-ME-VIA-ESO-NOT-IN-SOURCE"
