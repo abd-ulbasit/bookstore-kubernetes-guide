@@ -5,9 +5,9 @@
 # two namespaces, `cnpg-system` and `bookstore` (set NS_CNPG and NS_BOOK to
 # rename them), and deletes both at the end. It installs nothing. It reads the
 # RBAC and the CRD schema that the CloudNativePG chart renders, has the API
-# server dry-run the chart's CRDs and operator objects, and shows the
-# restricted namespace refusing a privileged Pod while admitting the migration
-# Pod from chapter 05. Server-side dry runs store nothing.
+# server dry-run the chart's CRDs, operator objects, migration Pod and network
+# policies, and admits the migration Pod from chapter 05 in the restricted
+# namespace. Server-side dry runs store nothing.
 #
 # The operator install, the Cluster, the failover and the DB_DSN rewire are
 # chapter steps you run yourself. They are not in this script.
@@ -19,6 +19,8 @@ CHART=0.29.1
 # Operator image (chart appVersion 1.30.1), pinned by digest.
 OP_TAG='1.30.1@sha256:923c267ec29636db3bee20f993d0ec4973fa22998e1adad37da79e4d32b5bc07'
 PG_IMAGE='ghcr.io/cloudnative-pg/postgresql:16.10-minimal-trixie@sha256:294fd7631f8d66fa54bf6ffa2948af685a20fb695fe748a6bafa71c42f1233b7'
+# Operator resources: requests and a memory limit, as the baseline requires.
+OP_RES='--set resources.requests.cpu=100m --set resources.requests.memory=100Mi --set resources.limits.memory=200Mi'
 
 # Read a command from stdin, print it exactly as it runs, then run it.
 run() { local cmd; cmd=$(cat); printf '$ %s\n' "$cmd"; eval "$cmd" 2>&1; echo; }
@@ -44,6 +46,13 @@ nsrender() {
   sed -e "s/^  name: bookstore\$/  name: $NS_BOOK/" \
       -e "s/namespace: bookstore\$/namespace: $NS_BOOK/" \
       -e "s/bookstore\.svc/$NS_BOOK.svc/g" "$1"
+}
+
+# The network policy file names both namespaces. Both are renamed here.
+npr() {
+  sed -e "s/namespace: bookstore\$/namespace: $NS_BOOK/" \
+      -e "s/namespace: cnpg-system\$/namespace: $NS_CNPG/" \
+      -e "s/metadata.name: cnpg-system\$/metadata.name: $NS_CNPG/" "$1"
 }
 
 helm repo add cnpg https://cloudnative-pg.github.io/charts >/dev/null 2>&1
@@ -93,6 +102,7 @@ run <<'CMD'
 helm template cnpg cnpg/cloudnative-pg --version "$CHART" --namespace "$NS_CNPG" --set config.clusterWide=false --show-only templates/rbac.yaml > rbac-namespaced.yaml
 awk '/^kind: ClusterRole$/{on=1} /^---$/{on=0} on' rbac-namespaced.yaml | grep -c '^  - secrets$'
 grep -c '^kind: Role$' rbac-namespaced.yaml
+helm template cnpg cnpg/cloudnative-pg --version "$CHART" --namespace "$NS_CNPG" --set config.clusterWide=false --show-only templates/deployment.yaml | grep -A1 'name: WATCH_NAMESPACE'
 CMD
 
 echo '## step 5: the CRD schema the chart renders: the privileged field and the enum'
@@ -117,11 +127,13 @@ run <<'CMD'
 nsrender "$bk/operators/cnpg-cluster.yaml" | kubectl apply --dry-run=client -f -
 CMD
 
-echo '## step 8: the Bookstore namespace with its quota, labelled restricted'
+echo '## step 8: the Bookstore namespace, then its ServiceAccounts, labelled restricted'
 run <<'CMD'
 nsrender "$bk/raw-manifests/00-namespace.yaml" | kubectl apply -f -
 for i in $(seq 1 60); do kubectl get serviceaccount default -n "$NS_BOOK" >/dev/null 2>&1 && break; sleep 1; done
 kubectl get serviceaccount default -n "$NS_BOOK" --no-headers
+nsrender "$bk/raw-manifests/05-serviceaccounts-rbac.yaml" | kubectl apply -f -
+kubectl get serviceaccount migrate-sa -n "$NS_BOOK" --no-headers
 CMD
 
 cat > migrate.yaml <<EOF
@@ -130,12 +142,15 @@ kind: Pod
 metadata:
   name: db-migrate-cnpg
   namespace: $NS_BOOK
+  labels:
+    app: db-migrate
 spec:
   restartPolicy: Never
+  serviceAccountName: migrate-sa
   automountServiceAccountToken: false
   securityContext:
     runAsNonRoot: true
-    runAsUser: 26
+    runAsUser: 26                  # match the instance's pod-level UID (step 5)
     runAsGroup: 26
     seccompProfile:
       type: RuntimeDefault
@@ -173,22 +188,23 @@ spec:
       emptyDir: {}
 EOF
 
-echo '## step 9: the restricted namespace refuses a privileged Pod (deliberate)'
-run <<'CMD'
-kubectl run privileged-probe -n "$NS_BOOK" --image="$PG_IMAGE" --restart=Never --dry-run=server --overrides='{"spec":{"containers":[{"name":"privileged-probe","image":"'"$PG_IMAGE"'","securityContext":{"privileged":true}}]}}'
-CMD
-
-echo '## step 10: the same namespace admits the migration Pod from chapter 05'
+echo '## step 9: the same namespace admits the migration Pod from chapter 05'
 run <<'CMD'
 kubectl apply --dry-run=server -f migrate.yaml
 CMD
 
-echo '## step 11: the operator objects, with the image pinned by digest, dry-run into the restricted namespace'
+echo '## step 10: the operator objects, with the image pinned by digest and resources set, dry-run into the restricted namespace'
 run <<'CMD'
-helm template cnpg cnpg/cloudnative-pg --version "$CHART" --namespace "$NS_CNPG" --set image.tag="$OP_TAG" --show-only templates/deployment.yaml > operator-deploy.yaml
+helm template cnpg cnpg/cloudnative-pg --version "$CHART" --namespace "$NS_CNPG" --set image.tag="$OP_TAG" $OP_RES --show-only templates/deployment.yaml > operator-deploy.yaml
 grep -m1 'image:' operator-deploy.yaml
-helm template cnpg cnpg/cloudnative-pg --version "$CHART" --namespace "$NS_CNPG" --set image.tag="$OP_TAG" --show-only templates/rbac.yaml --show-only templates/config.yaml --show-only templates/deployment.yaml --show-only templates/service.yaml > operator.yaml
+awk '/^        resources:/{on=1} /^        securityContext:/{on=0} on' operator-deploy.yaml
+helm template cnpg cnpg/cloudnative-pg --version "$CHART" --namespace "$NS_CNPG" --set image.tag="$OP_TAG" $OP_RES --show-only templates/rbac.yaml --show-only templates/config.yaml --show-only templates/deployment.yaml --show-only templates/service.yaml > operator.yaml
 kubectl apply --dry-run=server -n "$NS_CNPG" -f operator.yaml
+CMD
+
+echo '## step 11: the network policies, renamed to the lab namespaces, dry-run on the server'
+run <<'CMD'
+npr "$bk/operators/cnpg-networkpolicy.yaml" | kubectl apply --dry-run=server -f -
 CMD
 
 echo '## step 12: delete the namespaces this lab created'

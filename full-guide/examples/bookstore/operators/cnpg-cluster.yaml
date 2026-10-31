@@ -16,7 +16,8 @@
 #
 # No backup stanza here. Continuous WAL archiving needs a real bucket and its
 # credentials. An archive that cannot write holds WAL on the data volume until
-# it fills. Chapter 08.02 covers backup and restore.
+# it fills. This chapter does not teach WAL archiving or PITR. The CloudNativePG
+# backup documentation covers both.
 apiVersion: postgresql.cnpg.io/v1
 kind: Cluster
 metadata:
@@ -64,7 +65,14 @@ spec:
     limits:
       memory: 512Mi
 
-  # Creates a PodMonitor. That type comes from the Prometheus Operator's
-  # CRDs (Part 06), so set this to false on a cluster without them.
+  # Deprecated upstream, and due for removal. Off here: write a PodMonitor by
+  # hand to scrape the instances (Part 06).
   monitoring:
-    enablePodMonitor: true
+    enablePodMonitor: false
+
+  # Labels every object the operator generates inherits, including the
+  # instance Pods. cnpg-networkpolicy.yaml selects instances by app: postgres,
+  # which the Cluster's own labels do not reach.
+  inheritedMetadata:
+    labels:
+      app: postgres

@@ -1,0 +1,89 @@
+# Bookstore: Part 08 ch.05 "Operators and CRDs". Network policy for the
+# CloudNativePG data tier. Apply it after the Cluster in cnpg-cluster.yaml is
+# created. It touches the bookstore namespace and cnpg-system.
+#
+# The Cluster's app: postgres label reaches every instance Pod through
+# spec.inheritedMetadata in cnpg-cluster.yaml, so app: postgres selects the
+# instances. The rules are the part of raw-manifests/60-networkpolicy.yaml that
+# the CNPG tier needs, plus the operator's own paths:
+#   - the operator reaches each instance on 8000 (status) and 5432 (PostgreSQL),
+#     as the CloudNativePG networking docs require
+#   - instances stream replication to each other on 5432
+#   - catalog, orders and the migrate Pod reach the instances on 5432
+#   - the API server reaches the operator webhook on 9443
+#
+# Not covered here: a default-deny for the whole namespace, the instance
+# manager's egress to the API server, and the metrics ports (operator 8080,
+# instance 9187). A scrape of those ports needs its own rule from the
+# monitoring namespace. Enforcement needs a CNI that enforces NetworkPolicy.
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: cnpg-instances-default-deny
+  namespace: bookstore
+  labels:
+    app.kubernetes.io/part-of: bookstore
+spec:
+  podSelector:
+    matchLabels:
+      app: postgres
+  policyTypes: ["Ingress"]
+---
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: cnpg-instances-allow
+  namespace: bookstore
+  labels:
+    app.kubernetes.io/part-of: bookstore
+spec:
+  podSelector:
+    matchLabels:
+      app: postgres
+  policyTypes: ["Ingress"]
+  ingress:
+    # The operator: status on 8000, PostgreSQL on 5432.
+    - from:
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: cnpg-system
+          podSelector:
+            matchLabels:
+              app.kubernetes.io/name: cloudnative-pg
+      ports:
+        - { protocol: TCP, port: 8000 }
+        - { protocol: TCP, port: 5432 }
+    # Streaming replication between instances, and the Bookstore clients.
+    - from:
+        - podSelector:
+            matchLabels:
+              app: postgres
+        - podSelector:
+            matchLabels:
+              app: catalog
+        - podSelector:
+            matchLabels:
+              app: orders
+        - podSelector:
+            matchLabels:
+              app: db-migrate
+      ports:
+        - { protocol: TCP, port: 5432 }
+---
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: cnpg-operator-allow-webhook
+  namespace: cnpg-system
+  labels:
+    app.kubernetes.io/part-of: bookstore
+spec:
+  podSelector:
+    matchLabels:
+      app.kubernetes.io/name: cloudnative-pg
+  policyTypes: ["Ingress"]
+  ingress:
+    # The API server is not a Pod, so this rule names no peer and admits
+    # any source on the webhook port only.
+    - ports:
+        - { protocol: TCP, port: 9443 }
