@@ -7,13 +7,22 @@ versions follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 ## [Unreleased]
 
 ### Added
+- `examples/security-lab/kind/cluster-restricted-default.yaml`, with
+  `pod-security-admission.yaml`: a kind cluster whose API server makes Pod
+  Security `restricted` the cluster-wide default for enforce, audit and warn,
+  with `kube-system`, `kube-public`, `kube-node-lease` and `local-path-storage`
+  exempt. Chapter 00.07 builds its cluster from it and shows an unlabelled
+  namespace refusing a privileged Pod while CoreDNS and the storage provisioner
+  keep working. The runtime gate builds its cluster from the same file.
 - `security-gates.yml`: the security-first gates on real GitHub runners. The
   gate unit tests, G1+G2 over the whole guide, G1+G3 against a kind
   v0.33.0 cluster, the registry gate (G5), the lab-evidence gate (G7) and G4,
   the runtime gate, which deploys the Bookstore five ways (raw manifests, the
   Helm chart, each Kustomize overlay) into `restricted` namespaces and waits
-  for every workload. Chapter failures are report mode except the chapters
-  in `.github/security-gates-enforced.txt`.
+  for every workload. A chapter that fails a gate fails the job. Only Parts 16
+  and 17, outlines whose labs wait, are report only
+  (`.github/security-gates-report-only.txt`), and
+  `.github/security-gates-enforced.txt` lists what the gates must have read.
 - `bookstore-release.yml`: dispatch one service through the reusable
   pipeline with publish on (signing, provenance, SBOM attestation) and open a
   promotion PR. Default branch only.

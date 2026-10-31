@@ -47,13 +47,15 @@ spec:
   default-deny NetworkPolicy plus explicit allows.
 - **User namespaces.** `hostUsers: false` joins the baseline only once it is
   verified on kind on Linux and macOS hosts. Until then 05.02 teaches it.
-- **Cluster.** 00.07 builds a kind cluster whose default CNI enforces
-  NetworkPolicy. It does not yet set `restricted` as the cluster-wide default:
-  it runs plain `kind create cluster`, and Pod Security applies per namespace,
-  through labels. The cluster-wide default is a follow-up that lands last, after
-  every Part complies. Every Part is now enforced, so what remains is the
-  change itself: a kind config that mounts an AdmissionConfiguration for the
-  PodSecurity plugin, and a check that a bare Pod in a new namespace is refused.
+- **Cluster.** 00.07 builds a kind cluster from
+  `examples/security-lab/kind/cluster-restricted-default.yaml`. Its default CNI
+  enforces NetworkPolicy, and an AdmissionConfiguration for the PodSecurity
+  plugin makes `restricted` the cluster-wide default for enforce, audit and
+  warn. Only `kube-system`, `kube-public`, `kube-node-lease` and
+  `local-path-storage` are exempt. Namespaces still carry their own labels:
+  the default is the last line of defence for a namespace nobody labelled, and
+  an exception is still a label with a registry entry. The runtime gate builds
+  its cluster from the same config.
 
 ## 2. The chapter contract
 

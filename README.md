@@ -33,11 +33,21 @@ and the targets are Kubernetes 1.37 and kind v0.33.0.
 **Done.** Parts 00 to 15 are rewritten and enforced: 123 chapters, from
 [00.01 Why Kubernetes](full-guide/00-foundations/01-why-kubernetes.md) to
 [15.12 Capstone: the first 90 days](full-guide/15-day-to-day-production-ops/12-capstone-first-90-days.md).
-CI fails a pull request that breaks any of them. The list is
-[`.github/security-gates-enforced.txt`](.github/security-gates-enforced.txt).
-The appendix (A to F) is rewritten too. It holds no manifest for the
-manifest gates to judge, so it is not on that list, and the lab-evidence
-gate still checks its lab records.
+CI fails a pull request that breaks any of them, and it fails one that
+breaks the appendix or an example tree. The only paths allowed to fail without
+failing the job are Parts 16 and 17, listed in
+[`.github/security-gates-report-only.txt`](.github/security-gates-report-only.txt).
+[`.github/security-gates-enforced.txt`](.github/security-gates-enforced.txt)
+names what the gates must have read, so a Part cannot drop out unnoticed. The
+appendix (A to F) is rewritten too. It holds no manifest for the manifest
+gates to judge, so it is not on that list, and the lab-evidence gate still
+checks its lab records.
+
+The reader's cluster starts with Pod Security `restricted` as its
+cluster-wide default
+([00.07](full-guide/00-foundations/07-local-cluster-setup.md)). A namespace
+that nobody labelled refuses a privileged Pod. Each namespace still carries
+its own labels, and the default is the last line of defence behind them.
 
 No cluster was created on AWS or GCP during the rewrite. The cloud
 chapters in Parts 10 and 14 validate their Terraform offline and mark the
@@ -73,7 +83,7 @@ both just work. Config: [`.devcontainer/`](.devcontainer/).
 | `full-guide/examples/bookstore-platform/terraform-account-baseline/` | AWS-account-wide guardrails (CloudTrail, Security Hub, GuardDuty, IAM Access Analyzer) |
 | [`docs/adr/`](docs/adr/) | Architecture Decision Records — the load-bearing technical decisions, why they were made, and the trade-offs |
 | [`docs/lessons-from-smoke-test.md`](docs/lessons-from-smoke-test.md) | Post-mortem of running this guide's Terraform against real EKS — what broke, why, and the five fixes that became Tier-1 defaults |
-| `.github/workflows/` | `docs` (builds + deploys the site, validates every mermaid block) + `example-trees-check` (Helm/Kustomize counts, Terraform fmt+validate, host-path hygiene) + `secret-scan` (gitleaks over the full history, every PR) + `link-check` (external URL rot) + `security-scan` (Trivy incl. every Terraform root, govulncheck over every discovered Go module — triage in [`SECURITY-SCAN.md`](SECURITY-SCAN.md)) + `security-gates` (the baseline, registry, evidence and runtime gates on every chapter and example; the enforced list is `.github/security-gates-enforced.txt`) + `bookstore-pipeline` (the reusable Bookstore delivery pipeline of Part 07 ch.03) + `bookstore-pipeline-check` (runs that pipeline on every service change and plants a flaw for each scanner) + `bookstore-release` (publishes one service by hand) |
+| `.github/workflows/` | `docs` (builds + deploys the site, validates every mermaid block) + `example-trees-check` (Helm/Kustomize counts, Terraform fmt+validate, host-path hygiene) + `secret-scan` (gitleaks over the full history, every PR) + `link-check` (external URL rot) + `security-scan` (Trivy incl. every Terraform root, govulncheck over every discovered Go module — triage in [`SECURITY-SCAN.md`](SECURITY-SCAN.md)) + `security-gates` (the baseline, registry, evidence and runtime gates on every chapter and example; a chapter that fails a gate fails the job, except the outlines in `.github/security-gates-report-only.txt`) + `bookstore-pipeline` (the reusable Bookstore delivery pipeline of Part 07 ch.03) + `bookstore-pipeline-check` (runs that pipeline on every service change and plants a flaw for each scanner) + `bookstore-release` (publishes one service by hand) |
 
 ## Reading paths by role
 

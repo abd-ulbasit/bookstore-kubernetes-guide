@@ -1,0 +1,15 @@
+# Outlines whose security gates report and do not block
+# (.github/workflows/security-gates.yml).
+#
+# Every other chapter that fails a gate fails the job. These two Parts are
+# outlines: each holds a README and no chapter, and their labs wait until the
+# chapters are written. A failure under them is listed in the run summary and
+# does not fail the job. Remove a line when the Part has chapters whose labs
+# have run, and add the Part to .github/security-gates-enforced.txt in the
+# same pull request.
+#
+# One path per line, relative to full-guide/. A directory covers everything
+# under it.
+
+16-gke-in-production-a-to-z/
+17-ml-platform-on-gke/

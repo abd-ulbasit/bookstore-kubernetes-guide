@@ -14,16 +14,22 @@ name: security-gates
 #   runtime     G4: deploys the Bookstore five ways into `restricted`
 #               namespaces on kind and waits for every workload
 #
-# REPORT MODE. Most of the guide is not rewritten yet, so most chapters still
-# fail G2 and G3. A chapter that fails is listed in the run summary and does
-# not fail the job, unless it is named in .github/security-gates-enforced.txt.
-# An enforced chapter that fails any gate, or that no gate reports on, fails
-# the job. A gate that cannot trust itself (exit 2) always fails it. Add a
-# chapter to the enforced list in the pull request that finishes it.
+# WHOLE GUIDE. Every Part from 00 to 15 passes G2 and G3, so a chapter that
+# fails either gate fails the job. The exception is Parts 16 and 17, outlines
+# whose labs wait: .github/security-gates-report-only.txt names them, and a
+# failure there is listed in the run summary without failing the job. The
+# appendix holds no manifest, so it has nothing to fail, and a failure there
+# would fail the job. A path in .github/security-gates-enforced.txt that no
+# report mentions fails the job too, so a Part cannot drop out unnoticed. A
+# gate that cannot trust itself (exit 2) always fails it. The unit tests, the
+# registry, the evidence check and the runtime gate fail the job as well.
 #
-# Only the chapter gates are in report mode. The unit tests, the registry,
-# the evidence check and the runtime gate always fail the job: they judge
-# things that are already finished.
+# The runtime job builds its kind cluster from the config chapter 00.07 gives
+# the reader, examples/security-lab/kind/cluster-restricted-default.yaml, so
+# the Bookstore deploys under the cluster-wide restricted default. It first
+# checks that an unlabelled namespace refuses a privileged Pod. The admission
+# job keeps a stock cluster. G3 labels each namespace it judges against, so
+# its verdicts do not depend on a cluster default.
 #
 # Trivy is installed from its release tarball, checked against the SHA-256
 # below. Resolve a new version's checksum from the release's checksums file,
@@ -38,6 +44,7 @@ on:
       - 'full-guide/**'
       - '.github/scripts/gates/**'
       - '.github/security-gates-enforced.txt'
+      - '.github/security-gates-report-only.txt'
       - '.github/workflows/security-gates.yml'
       - '.trivyignore.yaml'
       - 'security/**'
@@ -48,6 +55,7 @@ on:
       - 'full-guide/**'
       - '.github/scripts/gates/**'
       - '.github/security-gates-enforced.txt'
+      - '.github/security-gates-report-only.txt'
       - '.github/workflows/security-gates.yml'
       - '.trivyignore.yaml'
       - 'security/**'
@@ -215,7 +223,7 @@ jobs:
           if-no-files-found: warn
 
   chapters:
-    name: chapters (enforced list, report mode for the rest)
+    name: chapters (whole guide, outlines report only)
     needs: [static, admission]
     if: always() && !cancelled()
     runs-on: ubuntu-latest
@@ -252,6 +260,7 @@ jobs:
             --gate "G2:static:reports/gate-report-static/static.json:${STATIC_EXIT}" \
             --gate "G3:admission:reports/gate-report-admission/admission.json:${ADMISSION_EXIT}" \
             --enforced .github/security-gates-enforced.txt \
+            --report-only .github/security-gates-report-only.txt \
             --out chapter-summary.md
           cat chapter-summary.md >> "$GITHUB_STEP_SUMMARY"
 
@@ -308,7 +317,7 @@ jobs:
       - run: pip install "pyyaml==${PYYAML_VERSION}"
       # A transcript is named PART-CHAPTER.txt, for example 05-02.txt for
       # 05-security/02-pod-security.md. A transcript means the chapter's lab
-      # has run, so its output blocks must match it, with no report mode.
+      # has run, so its output blocks must match it.
       - name: Every chapter that has a transcript
         run: |
           set -euo pipefail
@@ -405,11 +414,38 @@ jobs:
           pattern: runtime-image-*
           merge-multiple: true
           path: image-in
+      # kind-action only installs kind here. The cluster comes from the config
+      # chapter 00.07 gives the reader, created from full-guide/ because the
+      # config's mount path is relative to it. It pins the same node image as
+      # KIND_NODE_IMAGE and sets restricted as the cluster-wide default.
       - uses: helm/kind-action@1544676c07bb3570fcb70166beaa07c4528fd4aa # v1.15.1
         with:
           version: v0.33.0
-          node_image: ${{ env.KIND_NODE_IMAGE }}
           cluster_name: runtime
+          install_only: true
+      - name: Create the cluster from the chapter 00.07 config
+        working-directory: full-guide
+        run: |
+          set -euo pipefail
+          kind create cluster --name runtime --wait 120s \
+            --config examples/security-lab/kind/cluster-restricted-default.yaml
+      - name: An unlabelled namespace refuses a privileged Pod
+        run: |
+          set -euo pipefail
+          kubectl create namespace default-check
+          until kubectl -n default-check get serviceaccount default >/dev/null 2>&1; do sleep 1; done
+          if out="$(kubectl run privileged-probe -n default-check --restart=Never --privileged \
+              --image=busybox@sha256:a7dbc319b1438115a207e11930dc4bb3e643dcb3ec0bdd694bb36cd8fad289ec \
+              -- sleep 3600 2>&1)"; then
+            echo "::error::an unlabelled namespace admitted a privileged Pod: ${out}"
+            exit 1
+          fi
+          echo "${out}"
+          echo "${out}" | grep --quiet 'violates PodSecurity "restricted:latest"' || {
+            echo "::error::the Pod was refused, but not by Pod Security"
+            exit 1
+          }
+          kubectl delete namespace default-check
       - name: Load the four images into the cluster
         id: load
         env:

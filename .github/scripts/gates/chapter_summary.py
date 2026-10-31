@@ -1,16 +1,20 @@
 #!/usr/bin/env python3
 """Turn gate reports into a per-chapter summary and the job's verdict.
 
-The guide is being rewritten Part by Part, so most chapters still fail the
-security gates. A pull request must not stay red until the last chapter is
-done, and it must not hide a chapter that already passes from regressing.
-This script holds that line:
+The whole guide is held to the security gates. Parts 00 to 15 and the example
+trees all pass them, so a chapter that fails any gate fails the job. Two files
+tune that rule, and each lists one path per line, relative to full-guide/, for
+example `01-core-workloads/01-pods.md`. A directory (or an example tree) names
+everything under it. `#` starts a comment.
 
-* A chapter listed in the enforced file fails the job when any gate reports
-  a failure for it, or when no report mentions it at all (it was renamed or
-  never checked).
-* Any other chapter is in report mode: its failures are listed in the
-  summary and do not fail the job.
+* The enforced file names what the gates must have read. An entry that no
+  report mentions fails the job (it was renamed, or never checked), so a Part
+  cannot drop out of the gates without anyone noticing. A chapter with no
+  manifest, such as the appendix, stays off this list, because no report would
+  ever mention it.
+* The report-only file names the outlines whose labs have not run yet, Parts
+  16 and 17. A failure there is listed in the summary and does not fail the
+  job. Every other chapter that fails a gate fails the job, listed or not.
 * A gate that exited 2 could not trust itself, so it always fails the job.
   So does a gate that exited 1 while no report row explains the failure.
 
@@ -18,13 +22,10 @@ Reports are the JSON files `static_gate.py` and `admission_gate.py` write
 with `--report`. A gate is named `NAME:KIND:REPORT:EXIT`, where KIND is
 `static` or `admission` and EXIT is the gate's own exit code.
 
-The enforced file lists one path per line, relative to full-guide/, for
-example `01-core-workloads/01-pods.md`. A directory (or an example tree)
-enforces everything under it. `#` starts a comment.
-
-Exit codes: 0 nothing enforced failed, 1 an enforced chapter failed or a
-gate failed without a reason in its report, 2 the inputs cannot be trusted
-(a missing report, an enforced path that does not exist).
+Exit codes: 0 no chapter outside the report-only list failed, 1 such a
+chapter failed, an enforced entry was never read, or a gate failed without a
+reason in its report, 2 the inputs cannot be trusted (a missing report, a
+listed path that does not exist).
 """
 
 from __future__ import annotations
@@ -97,9 +98,10 @@ def parse_gate(spec: str) -> Gate:
     return Gate(name, kind, int(code), rows)
 
 
-def read_enforced(path: Path, root: Path) -> list[str]:
+def read_entries(path: Path, root: Path, what: str) -> list[str]:
+    """Read a list file of paths under root; a missing file or path means the inputs cannot be trusted."""
     if not path.is_file():
-        raise InputError(f"the enforced list {path} does not exist")
+        raise InputError(f"the {what} list {path} does not exist")
     entries = []
     for number, raw in enumerate(path.read_text(encoding="utf-8").splitlines(), 1):
         line = raw.split("#", 1)[0].strip()
@@ -132,9 +134,14 @@ def collect(gates: list[Gate]) -> Outcome:
     return out
 
 
-def verdict(outcome: Outcome, enforced: list[str]) -> tuple[int, list[str], list[str], list[str]]:
-    """Return the exit code, the enforced failures, the unchecked entries and the notes."""
-    broken = [c for c in outcome.failing if any(covers(e, c) for e in enforced)]
+def verdict(
+    outcome: Outcome, enforced: list[str], report_only: list[str]
+) -> tuple[int, list[str], list[str], list[str]]:
+    """Return the exit code, the blocking failures, the unchecked entries and the notes.
+
+    A failing chapter blocks unless a report-only entry covers it.
+    """
+    broken = [c for c in outcome.failing if not any(covers(r, c) for r in report_only)]
     unchecked = [e for e in enforced if not any(covers(e, c) for c in outcome.seen)]
     notes = [f"gate {n} aborted (exit 2): it could not trust itself" for n in outcome.aborted]
     notes += [f"gate {n} failed but its report names no failing block" for n in outcome.unexplained]
@@ -142,16 +149,25 @@ def verdict(outcome: Outcome, enforced: list[str]) -> tuple[int, list[str], list
     return code, sorted(broken), unchecked, notes
 
 
-def render(outcome: Outcome, enforced: list[str], code: int, broken: list[str], unchecked: list[str], notes: list[str]) -> str:
+def render(
+    outcome: Outcome,
+    enforced: list[str],
+    report_only_entries: list[str],
+    code: int,
+    broken: list[str],
+    unchecked: list[str],
+    notes: list[str],
+) -> str:
     lines = ["## Security gates, per chapter", ""]
     report_only = sorted(c for c in outcome.failing if c not in broken)
     lines.append(
         f"{len(outcome.seen)} chapters and example trees were read; "
         f"{len(outcome.failing)} fail at least one gate; "
-        f"{len(enforced)} entries are enforced."
+        f"{len(enforced)} entries must be read; "
+        f"{len(report_only_entries)} are report only."
     )
     lines.append("")
-    lines += ["### Enforced", "", "| Entry | Result |", "|---|---|"]
+    lines += ["### Must be read", "", "| Entry | Result |", "|---|---|"]
     for entry in enforced:
         bad = [c for c in broken if covers(entry, c)]
         if entry in unchecked:
@@ -164,7 +180,7 @@ def render(outcome: Outcome, enforced: list[str], code: int, broken: list[str], 
     if not enforced:
         lines.append("| (none) | |")
     lines.append("")
-    for title, chapters in (("Failing and enforced", broken), ("Failing, report mode only", report_only)):
+    for title, chapters in (("Failing", broken), ("Failing, report only (outline, lab not run)", report_only)):
         lines += [f"### {title}", ""]
         if not chapters:
             lines += ["None.", ""]
@@ -185,6 +201,7 @@ def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description=__doc__.split("\n\n")[0])
     parser.add_argument("--gate", action="append", default=[], metavar="NAME:KIND:REPORT:EXIT")
     parser.add_argument("--enforced", required=True, type=Path)
+    parser.add_argument("--report-only", type=Path, help="outlines whose failures are listed and do not fail the job")
     parser.add_argument("--root", default=Path(GUIDE_ROOT), type=Path)
     parser.add_argument("--out", type=Path, help="write the Markdown summary here as well")
     args = parser.parse_args(argv)
@@ -192,13 +209,14 @@ def main(argv: list[str] | None = None) -> int:
         if not args.gate:
             raise InputError("no --gate given, so there is nothing to summarise")
         gates = [parse_gate(spec) for spec in args.gate]
-        enforced = read_enforced(args.enforced, args.root)
+        enforced = read_entries(args.enforced, args.root, "enforced")
+        report_only = read_entries(args.report_only, args.root, "report-only") if args.report_only else []
     except InputError as exc:
         print(f"chapter summary aborted: {exc}", file=sys.stderr)
         return 2
     outcome = collect(gates)
-    code, broken, unchecked, notes = verdict(outcome, enforced)
-    text = render(outcome, enforced, code, broken, unchecked, notes)
+    code, broken, unchecked, notes = verdict(outcome, enforced, report_only)
+    text = render(outcome, enforced, report_only, code, broken, unchecked, notes)
     print(text)
     if args.out:
         args.out.parent.mkdir(parents=True, exist_ok=True)

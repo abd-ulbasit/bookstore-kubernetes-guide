@@ -1,15 +1,19 @@
-# Chapters the security gates enforce (.github/workflows/security-gates.yml).
+# What the security gates must have read (.github/workflows/security-gates.yml).
 #
-# The guide is being rewritten security-first, Part by Part. Until a chapter
-# is rewritten it still fails the gates, and a pull request cannot stay red
-# for months. So the gates run in report mode: a chapter that fails is listed
-# in the run summary and does not fail the job. A chapter named here is
-# different. If it fails any gate, or no gate reports on it, the job fails.
+# The whole guide is held to the gates: a chapter that fails any of them fails
+# the job, and that needs no entry here. This file does a different job. Each
+# line names a chapter, a Part or an example tree, and the job fails if no gate
+# report mentions it. A Part that was renamed, or whose manifests stopped being
+# extracted, would otherwise drop out of the gates without a failure anywhere.
 #
-# Add a chapter in the pull request that finishes it, so the chapter can
-# never regress after that. One path per line, relative to full-guide/. A
-# directory enforces everything under it, example trees included.
-# Remove a line only if the chapter is deleted or renamed.
+# Every Part from 00 to 15 is listed, with the example trees. The appendix is
+# not, because it holds no manifest and no report would ever mention it. A
+# failure in the appendix still fails the job. Parts 16 and 17 are outlines
+# whose labs wait; .github/security-gates-report-only.txt names them.
+#
+# One path per line, relative to full-guide/. A directory covers everything
+# under it, example trees included. Remove a line only if the chapter is
+# deleted or renamed.
 
 00-foundations/
 01-core-workloads/01-pods.md

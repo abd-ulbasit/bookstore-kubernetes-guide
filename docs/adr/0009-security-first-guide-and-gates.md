@@ -86,13 +86,17 @@ run on real GitHub runners.** The shape of the change:
    | G7 | every output block in a chapter appears in its lab transcript | `evidence` job |
    | G9 | the Bookstore delivery pipeline runs against the example services | `bookstore-pipeline-check.yml` |
 
-   The chapter gates (G2, G3) run in report mode while the rewrite is in
-   progress. A chapter that fails is listed in the run summary and does not
-   fail the job, unless it is named in `.github/security-gates-enforced.txt`.
-   A chapter is added to that list in the pull request that finishes it, so
-   it cannot regress. A gate that cannot trust itself exits 2 and always
-   fails the job. The unit tests, the registry, the evidence check and the
-   runtime gate never run in report mode.
+   The chapter gates (G2, G3) ran in report mode while the rewrite was in
+   progress: a failing chapter was listed in the run summary and failed the
+   job only if `.github/security-gates-enforced.txt` named it, and a chapter
+   joined that list in the pull request that finished it. Every Part from 00
+   to 15 now passes, so a chapter that fails a gate fails the job. Only the
+   outlines named in `.github/security-gates-report-only.txt` (Parts 16 and 17,
+   whose labs wait) may fail without failing it. The enforced file now lists
+   what the gates must have read, so a Part cannot drop out unnoticed. A gate
+   that cannot trust itself exits 2 and always fails the job. The unit tests,
+   the registry, the evidence check and the runtime gate never ran in report
+   mode.
 
 5. **Target Kubernetes 1.37.** The toolchain is pinned to kind v0.33.0 with
    the `kindest/node` 1.37.0 image by digest, kubectl 1.37.2 and Helm
@@ -121,14 +125,16 @@ run on real GitHub runners.** The shape of the change:
   hide that behind "omitted for brevity".
 * **Bad:** the gates cost CI time. The runtime gate builds four images and
   starts one kind cluster per deployment form, and G3 starts another.
-* **Bad:** report mode means a red chapter does not turn the PR red. The
-  enforced list is how that is kept honest, and it is only as good as the
-  habit of extending it.
+* **Bad:** while the rewrite ran, report mode meant a red chapter did not turn
+  the PR red, and the enforced list was only as good as the habit of extending
+  it. That ended when Parts 00 to 15 all passed. Parts 16 and 17 are the one
+  place a failure still only reports.
 * **Follow-ups:**
-  * The cluster-wide `restricted` default lands last, after every Part
-    complies (chapter 00.07). Every Part is now on the enforced list, and the
-    default is still not set: 00.07 runs a plain `kind create cluster`, and
-    Pod Security applies per namespace, through labels.
+  * Done: the cluster-wide `restricted` default landed last, after every Part
+    complied. Chapter 00.07 builds its kind cluster from
+    `examples/security-lab/kind/cluster-restricted-default.yaml`, which mounts
+    an AdmissionConfiguration for the PodSecurity plugin, and the runtime gate
+    builds its cluster from the same file. Namespaces keep their own labels.
   * `hostUsers: false` joins the baseline only when it is verified on kind
     on Linux and macOS hosts.
   * The pipeline's signing, provenance and promotion steps are proven by
@@ -144,8 +150,9 @@ run on real GitHub runners.** The shape of the change:
   appendix is where exceptions go to be forgotten.
 * **Fail the build on any chapter that fails a gate, from day one.** The
   pull request would stay red until the last chapter was rewritten, and a
-  red PR gets ignored. Report mode with an enforced list gives the guard
-  without the noise.
+  red PR gets ignored. Report mode with an enforced list gave the guard
+  without the noise while the rewrite ran, and it ended once every Part
+  passed.
 * **Trust Trivy's own `.trivyignore.yaml` handling.** Trivy v0.76.1 marks
   the feature experimental and does not load the file by itself, so G5
   reads it and applies only sound, unexpired entries.
