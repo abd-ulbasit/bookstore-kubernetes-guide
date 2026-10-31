@@ -7,11 +7,13 @@
 # that direction is permitted.
 #
 # !!! CNI REQUIREMENT !!!  NetworkPolicy is enforced by the CNI, not the API
-# server. The default CNI of kind v0.33.0 (kindnet) enforces it: the runtime
-# gate (G4) deploys these policies on that cluster, and an edge with no allow
-# shows up as a connection timeout. A CNI that does not enforce (an older kind,
-# a managed cluster without its policy plugin) accepts these objects and
-# ignores them, which looks the same until something depends on them.
+# server. kind's default CNI, kindnet, enforces it since kind v0.24.0, so no
+# Calico or Cilium is needed on kind. The runtime gate (G4) deploys these
+# policies on kind v0.33.0, and an edge with no allow shows up as a connection
+# timeout. The engine's start line is only a start check: a denied request
+# proves enforcement (ch.06 step 0). A CNI without a policy engine (a managed
+# cluster with its policy setting off, an older kind) accepts these objects and
+# enforces nothing, which looks the same until something depends on them.
 #
 # !!! DNS EGRESS !!!  default-deny egress also blocks DNS. Every Pod that
 # resolves a Service name needs egress to kube-dns/CoreDNS (UDP+TCP 53) or the
@@ -30,7 +32,7 @@
 #   rabbitmq   app: rabbitmq   (13-)  payments-worker app: payments-worker (19-)
 #   redis      app: redis      (12-)  db-migrate      app: db-migrate     (21-)
 #   cleanup    app: cleanup    (22-)
-#   ingress-nginx + monitoring namespaces matched by ns label below
+#   traefik + monitoring namespaces matched by ns label below
 #
 # Part 06 ch.04 increment (additive — all 8 prior policies are unchanged
 # except rule 6, which GAINS payments-worker as an allowed source; two new
@@ -49,7 +51,7 @@
 # Requires (objects to enforce against):
 #   kubectl apply -f examples/bookstore/raw-manifests/00-namespace.yaml
 #   kubectl apply -f examples/bookstore/raw-manifests/{10,11,13,14,19,20}-*.yaml
-#   # a policy-enforcing CNI (Calico/Cilium) for ENFORCEMENT (ch.06)
+#   # a policy-enforcing CNI for ENFORCEMENT (kindnet on kind, ch.06 step 0)
 # Apply:
 #   kubectl apply -f examples/bookstore/raw-manifests/60-networkpolicy.yaml
 #   kubectl get networkpolicy -n bookstore
@@ -94,11 +96,11 @@ spec:
         - { protocol: UDP, port: 53 }
         - { protocol: TCP, port: 53 }
 ---
-# 3) ingress-nginx (or the Gateway controller) -> storefront / catalog /
-#    orders. The controller lives in its own namespace; allow it to reach the
-#    three HTTP-fronted tiers on 8080. Namespace match uses the immutable
-#    kubernetes.io/metadata.name label (= the controller's namespace; adjust
-#    if you installed it elsewhere in ch.04/05).
+# 3) Traefik (the ingress controller of ch.04 and ch.05) -> storefront /
+#    catalog / orders. Traefik lives in its own namespace; allow it to reach
+#    the three HTTP-fronted tiers on 8080. Namespace match uses the immutable
+#    kubernetes.io/metadata.name label (= the traefik namespace; adjust if you
+#    installed the controller elsewhere).
 apiVersion: networking.k8s.io/v1
 kind: NetworkPolicy
 metadata:
@@ -117,7 +119,7 @@ spec:
     - from:
         - namespaceSelector:
             matchLabels:
-              kubernetes.io/metadata.name: ingress-nginx
+              kubernetes.io/metadata.name: traefik
       ports:
         - { protocol: TCP, port: 8080 }
 ---

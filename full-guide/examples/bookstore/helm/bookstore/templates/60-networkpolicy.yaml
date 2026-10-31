@@ -2,9 +2,10 @@
   All 10 NetworkPolicies (raw-manifests 60-networkpolicy.yaml): flip the ns to
   default-DENY then ALLOW only the edges the app needs. NetworkPolicy is a
   built-in kind so this defaults ON (networkPolicy.enabled). ENFORCEMENT needs
-  a CNI that implements it: the default CNI of kind v0.33.0 (kindnet) does, and
-  the runtime gate relies on that. Namespace names (kube-system / ingress-nginx
-  / monitoring) are parameterized for portability.
+  a CNI that implements it: kind's default CNI, kindnet, does since kind
+  v0.24.0 (no Calico needed), and the runtime gate relies on that. A denied
+  request proves enforcement (ch.06 step 0). Namespace names (kube-system /
+  traefik / monitoring) are parameterized for portability.
 */}}
 {{- if .Values.networkPolicy.enabled }}
 {{- $np := .Values.networkPolicy }}
@@ -45,7 +46,7 @@ spec:
         - { protocol: UDP, port: 53 }
         - { protocol: TCP, port: 53 }
 ---
-# 3) ingress-nginx (or the Gateway controller) -> storefront/catalog/orders.
+# 3) Traefik -> storefront/catalog/orders.
 apiVersion: networking.k8s.io/v1
 kind: NetworkPolicy
 metadata:

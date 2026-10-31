@@ -1,3 +1,290 @@
+# Transcript for 02-networking/06-network-policies.md, hands-on steps 0 to 6 and the controller request.
+# Tier A: a kind v0.33.0 cluster on a lab host, one control-plane node on
+# Kubernetes v1.37.0, kindnetd image kindest/kindnetd:v20260820-69b56db7,
+# kubectl v1.37.2. The cluster is shared with other lab workers.
+#
+# Run 2 is the record for the chapter's captured blocks. It issues the chapter's
+# commands in order, with the namespaces renamed in a scratch copy: p02-06-bookstore
+# and p02-06-traefik (the chapter's bookstore and traefik). The manifests are the
+# repository files, renamed the same way in the scratch copy. The chapter's
+# heredocs (the probe, the default deny and the scratch policy) were written to
+# files and applied with -f; the YAML is the chapter's.
+# Step 3's controller request needs an edge: run 2 installs the ch.04 Traefik
+# release with the ch.04 values, the ch.04 TLS Secret and the ch.04 Ingress file
+# (50-ingress-traefik.yaml, its Middleware included) before step 1.
+# The migration job (ch.04 step 3) runs after Postgres is Ready, as ch.04 orders
+# it. The controller request returns HTTP 200 only with the migrated table.
+# The step 0 kindnet and CoreDNS lines carry the pod ages of this run.
+# Both the first and the second driver run were stopped before this run and
+# left no record here: the first applied the migration job out of order, the
+# second showed heredocs as stdin pipes that the run did not use.
+#
+# Run 1 follows, as recorded before the chapter fixes. It applied the redis pair
+# after the file (the file had no redis rule then) and labelled the probe
+# payments-worker in step 6. The chapter no longer does either.
+
+# run 2 (after the chapter fixes): ch.06 steps 0 to 6, the controller request, cleanup
+$ kubectl get ns -o name | grep p02-06 || echo 'no p02-06 namespaces'
+no p02-06 namespaces
+# the cluster-scoped traefik IngressClass and NodePorts 30080 and 30443 were free before this run
+$ kubectl -n kube-system get daemonset kindnet
+NAME      DESIRED   CURRENT   READY   UP-TO-DATE   AVAILABLE   NODE SELECTOR            AGE
+kindnet   1         1         1       1            1           kubernetes.io/os=linux   11h
+$ kubectl -n kube-system logs ds/kindnet | grep "Policy engine is ready"
+I1030 14:30:08.306411       1 controller.go:185] "Policy engine is ready."
+$ kubectl -n kube-system get pods -l k8s-app=kube-dns
+NAME                       READY   STATUS    RESTARTS   AGE
+coredns-559f6c778d-77g29   1/1     Running   0          11h
+coredns-559f6c778d-xmmqq   1/1     Running   0          11h
+$ kubectl apply -f 00-namespace.yaml -f 05-serviceaccounts-rbac.yaml -f 15-catalog-config.yaml -f 16-db-credentials.yaml -f 20-postgres-statefulset.yaml
+namespace/p02-06-bookstore created
+resourcequota/bookstore-quota created
+limitrange/bookstore-limits created
+serviceaccount/catalog-sa created
+serviceaccount/storefront-sa created
+serviceaccount/orders-sa created
+serviceaccount/payments-worker-sa created
+serviceaccount/postgres-sa created
+serviceaccount/redis-sa created
+serviceaccount/rabbitmq-sa created
+serviceaccount/migrate-sa created
+role.rbac.authorization.k8s.io/catalog-config-reader created
+rolebinding.rbac.authorization.k8s.io/catalog-config-reader-binding created
+configmap/catalog-config created
+secret/db-credentials created
+service/postgres created
+statefulset.apps/postgres created
+$ kubectl rollout status statefulset/postgres -n p02-06-bookstore --timeout=300s
+Waiting for 1 pods to be ready...
+partitioned roll out complete: 1 new pods have been updated...
+$ kubectl apply -f 21-db-migrate-job.yaml
+job.batch/db-migrate created
+$ kubectl wait --for=condition=complete job/db-migrate -n p02-06-bookstore --timeout=300s
+job.batch/db-migrate condition met
+$ kubectl apply -f 12-redis.yaml -f 10-catalog-deploy.yaml -f 11-storefront-deploy.yaml -f 14-orders-deploy.yaml -f 13-rabbitmq.yaml -f 40-services.yaml
+deployment.apps/redis created
+deployment.apps/catalog created
+deployment.apps/storefront created
+deployment.apps/orders created
+deployment.apps/rabbitmq created
+service/catalog created
+service/storefront created
+service/orders created
+service/redis created
+service/rabbitmq created
+service/payments-worker created
+$ kubectl rollout status deploy/catalog -n p02-06-bookstore --timeout=300s
+Waiting for deployment "catalog" rollout to finish: 0 of 3 updated replicas are available...
+Waiting for deployment "catalog" rollout to finish: 1 of 3 updated replicas are available...
+Waiting for deployment "catalog" rollout to finish: 2 of 3 updated replicas are available...
+deployment "catalog" successfully rolled out
+$ kubectl rollout status deploy/redis -n p02-06-bookstore --timeout=300s
+deployment "redis" successfully rolled out
+$ kubectl apply -f 00-traefik-namespace.yaml
+namespace/p02-06-traefik created
+$ helm install traefik traefik/traefik --version 42.2.0 --namespace p02-06-traefik -f traefik-values.yaml --wait --timeout 5m
+NAME: traefik
+LAST DEPLOYED: Sat Oct 31 06:53:48 2026
+NAMESPACE: p02-06-traefik
+STATUS: deployed
+REVISION: 1
+DESCRIPTION: Install complete
+TEST SUITE: None
+NOTES:
+traefik with docker.io/traefik:v3.7.16@sha256:1336e85aaed293bd63d005086e0dd013b04078b26aaeb1c18b26a2f928af7e65 has been deployed successfully on p02-06-traefik namespace!
+$ kubectl create secret tls bookstore-tls -n p02-06-bookstore --cert=tls.crt --key=tls.key
+secret/bookstore-tls created
+$ kubectl apply -f 50-ingress-traefik.yaml
+middleware.traefik.io/rewrite-api-prefix created
+ingress.networking.k8s.io/bookstore created
+$ cat > probe.yaml <<'EOF2'
+apiVersion: v1
+kind: Pod
+metadata:
+  name: probe
+  namespace: p02-06-bookstore
+  labels:
+    app: storefront
+spec:
+  serviceAccountName: storefront-sa
+  automountServiceAccountToken: false
+  securityContext:
+    runAsNonRoot: true
+    runAsUser: 100
+    runAsGroup: 101
+    seccompProfile:
+      type: RuntimeDefault
+  containers:
+    - name: probe
+      image: curlimages/curl@sha256:8addc281f0ea517409209f76832b6ddc2cabc3264feb1ebbec2a2521ffad24e4
+      command: ["sleep", "3600"]
+      securityContext:
+        allowPrivilegeEscalation: false
+        readOnlyRootFilesystem: true
+        capabilities:
+          drop: ["ALL"]
+      resources:
+        requests: { cpu: 10m, memory: 16Mi }
+        limits: { memory: 64Mi }
+      volumeMounts:
+        - name: tmp
+          mountPath: /tmp
+  volumes:
+    - name: tmp
+      emptyDir: {}
+EOF2
+kubectl apply -f probe.yaml
+pod/probe created
+$ kubectl wait --for=condition=Ready pod/probe -n p02-06-bookstore --timeout=90s
+pod/probe condition met
+$ CATALOG_IP=$(kubectl get pod -n p02-06-bookstore -l app=catalog -o jsonpath='{.items[0].status.podIP}'); echo $CATALOG_IP
+10.244.0.158
+$ kubectl exec -n p02-06-bookstore probe -- curl -sS --max-time 5 http://$CATALOG_IP:8080/healthz
+{"status":"ok"}
+$ cat > deny.yaml <<'EOF2'
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata: { name: default-deny-all, namespace: p02-06-bookstore }
+spec:
+  podSelector: {}
+  policyTypes: ["Ingress", "Egress"]
+---
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata: { name: allow-dns-egress, namespace: p02-06-bookstore }
+spec:
+  podSelector: {}
+  policyTypes: ["Egress"]
+  egress:
+    - to:
+        - namespaceSelector: { matchLabels: { kubernetes.io/metadata.name: kube-system } }
+          podSelector:        { matchLabels: { k8s-app: kube-dns } }
+      ports:
+        - { protocol: UDP, port: 53 }
+        - { protocol: TCP, port: 53 }
+EOF2
+kubectl apply -f deny.yaml
+networkpolicy.networking.k8s.io/default-deny-all created
+networkpolicy.networking.k8s.io/allow-dns-egress created
+$ kubectl exec -n p02-06-bookstore probe -- curl -sS --max-time 5 http://$CATALOG_IP:8080/healthz
+curl: (28) Connection timed out after 5002 milliseconds
+command terminated with exit code 28
+$ kubectl apply -f examples/bookstore/raw-manifests/60-networkpolicy.yaml
+networkpolicy.networking.k8s.io/default-deny-all configured
+networkpolicy.networking.k8s.io/allow-dns-egress configured
+networkpolicy.networking.k8s.io/allow-ingress-to-http-tiers created
+networkpolicy.networking.k8s.io/allow-storefront-to-apis created
+networkpolicy.networking.k8s.io/allow-catalog-to-postgres created
+networkpolicy.networking.k8s.io/allow-orders-to-rabbitmq created
+networkpolicy.networking.k8s.io/allow-backend-egress created
+networkpolicy.networking.k8s.io/allow-storefront-egress created
+networkpolicy.networking.k8s.io/allow-payments-worker-egress created
+networkpolicy.networking.k8s.io/allow-monitoring-scrape created
+networkpolicy.networking.k8s.io/allow-catalog-to-redis created
+networkpolicy.networking.k8s.io/allow-catalog-egress-redis created
+$ kubectl exec -n p02-06-bookstore probe -- curl -sS --max-time 5 http://$CATALOG_IP:8080/healthz
+{"status":"ok"}
+$ kubectl get pods -n p02-06-bookstore -l app=catalog
+NAME                       READY   STATUS    RESTARTS   AGE
+catalog-5469f6cfbf-5m5kq   1/1     Running   0          88s
+catalog-5469f6cfbf-kp7s8   1/1     Running   0          88s
+catalog-5469f6cfbf-vw2zb   1/1     Running   0          88s
+$ kubectl delete networkpolicy allow-storefront-egress -n p02-06-bookstore
+networkpolicy.networking.k8s.io "allow-storefront-egress" deleted from p02-06-bookstore namespace
+$ kubectl exec -n p02-06-bookstore probe -- curl -sS --max-time 5 http://$CATALOG_IP:8080/healthz
+curl: (28) Connection timed out after 5001 milliseconds
+command terminated with exit code 28
+$ kubectl apply -f examples/bookstore/raw-manifests/60-networkpolicy.yaml
+networkpolicy.networking.k8s.io/default-deny-all unchanged
+networkpolicy.networking.k8s.io/allow-dns-egress unchanged
+networkpolicy.networking.k8s.io/allow-ingress-to-http-tiers unchanged
+networkpolicy.networking.k8s.io/allow-storefront-to-apis unchanged
+networkpolicy.networking.k8s.io/allow-catalog-to-postgres unchanged
+networkpolicy.networking.k8s.io/allow-orders-to-rabbitmq unchanged
+networkpolicy.networking.k8s.io/allow-backend-egress unchanged
+networkpolicy.networking.k8s.io/allow-storefront-egress created
+networkpolicy.networking.k8s.io/allow-payments-worker-egress unchanged
+networkpolicy.networking.k8s.io/allow-monitoring-scrape unchanged
+networkpolicy.networking.k8s.io/allow-catalog-to-redis unchanged
+networkpolicy.networking.k8s.io/allow-catalog-egress-redis unchanged
+$ kubectl port-forward -n p02-06-traefik svc/traefik 8443:443 &
+PF=$!
+sleep 2
+curl -sS --cacert tls.crt --resolve bookstore.localdev.me:8443:127.0.0.1 https://bookstore.localdev.me:8443/api/books -w '\nHTTP %{http_code}\n'
+kill $PF
+Forwarding from 127.0.0.1:8443 -> 8443
+Forwarding from [::1]:8443 -> 8443
+Handling connection for 8443
+[]
+HTTP 200
+$ kubectl delete networkpolicy allow-dns-egress -n p02-06-bookstore
+networkpolicy.networking.k8s.io "allow-dns-egress" deleted from p02-06-bookstore namespace
+$ kubectl exec -n p02-06-bookstore probe -- curl -sS --max-time 5 http://catalog.p02-06-bookstore.svc.cluster.local/healthz
+curl: (28) Resolving timed out after 5001 milliseconds
+command terminated with exit code 28
+$ kubectl apply -f examples/bookstore/raw-manifests/60-networkpolicy.yaml
+networkpolicy.networking.k8s.io/default-deny-all unchanged
+networkpolicy.networking.k8s.io/allow-dns-egress created
+networkpolicy.networking.k8s.io/allow-ingress-to-http-tiers unchanged
+networkpolicy.networking.k8s.io/allow-storefront-to-apis unchanged
+networkpolicy.networking.k8s.io/allow-catalog-to-postgres unchanged
+networkpolicy.networking.k8s.io/allow-orders-to-rabbitmq unchanged
+networkpolicy.networking.k8s.io/allow-backend-egress unchanged
+networkpolicy.networking.k8s.io/allow-storefront-egress unchanged
+networkpolicy.networking.k8s.io/allow-payments-worker-egress unchanged
+networkpolicy.networking.k8s.io/allow-monitoring-scrape unchanged
+networkpolicy.networking.k8s.io/allow-catalog-to-redis unchanged
+networkpolicy.networking.k8s.io/allow-catalog-egress-redis unchanged
+$ kubectl label pod probe -n p02-06-bookstore app=intruder --overwrite
+pod/probe labeled
+$ kubectl exec -n p02-06-bookstore probe -- curl -sS --max-time 5 http://$CATALOG_IP:8080/healthz
+curl: (28) Connection timed out after 5002 milliseconds
+command terminated with exit code 28
+$ kubectl label pod probe -n p02-06-bookstore app=storefront --overwrite
+pod/probe labeled
+$ cat > scratch-egress.yaml <<'EOF2'
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata: { name: scratch-https-except-metadata, namespace: p02-06-bookstore }
+spec:
+  podSelector:
+    matchLabels: { app: scratch-egress }
+  policyTypes: ["Egress"]
+  egress:
+    - to:
+        - ipBlock:
+            cidr: 0.0.0.0/0
+            except: ["169.254.169.254/32"]   # cloud instance metadata
+      ports: [ { protocol: TCP, port: 443 } ]
+EOF2
+kubectl apply -f scratch-egress.yaml
+networkpolicy.networking.k8s.io/scratch-https-except-metadata created
+$ kubectl label pod probe -n p02-06-bookstore app=scratch-egress --overwrite
+pod/probe labeled
+$ GW=$(docker network inspect kind -f '{{range .IPAM.Config}}{{println .Gateway}}{{end}}' | grep '\.'); echo "$GW"
+172.18.0.1
+$ kubectl exec -n p02-06-bookstore probe -- curl -sS --max-time 5 https://$GW:443/
+curl: (7) Failed to connect to 172.18.0.1 port 443 after 0 ms: Could not connect to server
+command terminated with exit code 7
+$ sed "s#169.254.169.254/32#$GW/32#" scratch-egress.yaml | kubectl apply -f -
+networkpolicy.networking.k8s.io/scratch-https-except-metadata configured
+$ kubectl exec -n p02-06-bookstore probe -- curl -sS --max-time 5 https://$GW:443/
+curl: (28) Connection timed out after 5002 milliseconds
+command terminated with exit code 28
+$ kubectl delete networkpolicy scratch-https-except-metadata -n p02-06-bookstore
+networkpolicy.networking.k8s.io "scratch-https-except-metadata" deleted from p02-06-bookstore namespace
+$ kubectl label pod probe -n p02-06-bookstore app=storefront --overwrite
+pod/probe labeled
+$ kubectl delete pod probe -n p02-06-bookstore
+pod "probe" deleted from p02-06-bookstore namespace
+$ helm uninstall traefik -n p02-06-traefik
+release "traefik" uninstalled
+$ kubectl delete namespace p02-06-bookstore p02-06-traefik
+namespace "p02-06-bookstore" deleted
+namespace "p02-06-traefik" deleted
+# end of run 2
+
+# ===== run 1, as recorded before the chapter fixes =====
 # Transcript for 02-networking/06-network-policies.md, hands-on steps 0 to 6.
 # Tier A: a kind v0.33.0 cluster on a lab host, one control-plane node on
 # Kubernetes v1.37.0, kindnetd image kindest/kindnetd:v20260820-69b56db7,

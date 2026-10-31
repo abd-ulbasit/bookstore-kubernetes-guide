@@ -5,8 +5,9 @@
 # kube-proxy routing, and NetworkPolicy egress rules have a concrete target.
 # It is intentionally minimal: official `redis:7`, no persistence, no auth.
 # Durable storage / config for redis is Part 03 (Config & Storage); HA is
-# Part 03 ch.05. Until then catalog runs with REDIS_ADDR UNSET (it degrades
-# gracefully — see app/catalog/main.go), so this is wiring, not a hard dep.
+# Part 03 ch.05. catalog reads REDIS_ADDR (15-catalog-config.yaml), and its
+# readiness check pings Redis, so from Part 02 ch.06 on this Service is a hard
+# dependency for catalog's Ready state.
 #
 # Part 05 ch.02 (Pod Security) increment: the `bookstore` namespace enforces
 # the PSA `restricted` standard (00-namespace.yaml), which gates EVERY pod in

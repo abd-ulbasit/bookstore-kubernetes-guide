@@ -1,5 +1,224 @@
 # Transcript for 02-networking/05-gateway-api.md, steps 1 to 4.
 # Tier A: kind cluster sf-pilot on a Linux lab host, node image Kubernetes
+# v1.37.0 (kind v0.33.0), kubectl v1.37.2, Helm 4.1.4. Traefik chart 42.2.0,
+# app v3.7.16, pinned by digest sha256:1336e85a...
+#
+# Run 2 is the record for the chapter's captured blocks. It issues the chapter's
+# commands in order: the ch.04 install with the ch.04 values, then the ch.05
+# upgrade with traefik-gateway-values.yaml added as a second values file, then
+# steps 2 to 4 and the cleanup. Manifests are the repository files, and the
+# fences of 04-ingress.md and 05-gateway-api.md, with the namespaces renamed in
+# a scratch copy: p02-05b-bookstore, p02-05b-traefik, p02-05b-team-a and
+# p02-05b-team-b (the chapter's bookstore, traefik, team-a and team-b). The
+# b marks a second set of names: three p02-05- namespaces from earlier attempts
+# stayed in Terminating, because another lab worker's metrics.k8s.io APIService
+# had no endpoints and blocked namespace discovery. The first line of run 2
+# still lists those stuck names. Nothing of run 2 was in them.
+# The Gateway API CRDs (standard-install v1.7.0) were installed before run 2 and
+# were left in place: they are cluster-scoped and the cluster is shared. The
+# apply therefore reports them unchanged.
+# The TLS pair was generated in a scratch directory outside the repository. The
+# key is not in this transcript. Requests go to the kind node's NodePort from
+# inside the node, as run 1 did, and the chapter's sentence on that stays true.
+# The NodePort requests use the node's address on the kind network.
+#
+# Run 1 follows, as recorded before the chapter's fixes. Its helm install used a
+# values file without the ch.04 settings, and the chart refused its first
+# values file. The notes below stay as recorded.
+# Run 1 holds the stage before Traefik was installed (the Gateway reports Pending);
+# the chapter's step 5 answer quotes that output.
+
+# run 2 (after the chapter fixes): steps 1 to 4 of ch.05 and cleanup
+$ kubectl get ns -o name | grep p02-05 || echo 'no p02-05 namespaces'
+namespace/p02-05-bookstore
+namespace/p02-05-team-a
+namespace/p02-05-team-b
+namespace/p02-05-traefik
+# the cluster-scoped traefik IngressClass and NodePorts 30080 and 30443 were free before this run
+$ kubectl apply -f https://github.com/kubernetes-sigs/gateway-api/releases/download/v1.7.0/standard-install.yaml
+customresourcedefinition.apiextensions.k8s.io/backendtlspolicies.gateway.networking.k8s.io unchanged
+customresourcedefinition.apiextensions.k8s.io/gatewayclasses.gateway.networking.k8s.io unchanged
+customresourcedefinition.apiextensions.k8s.io/gateways.gateway.networking.k8s.io unchanged
+customresourcedefinition.apiextensions.k8s.io/grpcroutes.gateway.networking.k8s.io unchanged
+customresourcedefinition.apiextensions.k8s.io/httproutes.gateway.networking.k8s.io unchanged
+customresourcedefinition.apiextensions.k8s.io/listenersets.gateway.networking.k8s.io unchanged
+customresourcedefinition.apiextensions.k8s.io/referencegrants.gateway.networking.k8s.io unchanged
+customresourcedefinition.apiextensions.k8s.io/tcproutes.gateway.networking.k8s.io unchanged
+customresourcedefinition.apiextensions.k8s.io/tlsroutes.gateway.networking.k8s.io unchanged
+customresourcedefinition.apiextensions.k8s.io/udproutes.gateway.networking.k8s.io unchanged
+validatingadmissionpolicy.admissionregistration.k8s.io/safe-upgrades.gateway.networking.k8s.io configured
+validatingadmissionpolicybinding.admissionregistration.k8s.io/safe-upgrades.gateway.networking.k8s.io configured
+$ kubectl get crd | grep gateway.networking.k8s.io
+backendtlspolicies.gateway.networking.k8s.io   Namespaced   v1(storage)           2026-10-31T01:02:23Z
+gatewayclasses.gateway.networking.k8s.io       Cluster      v1(storage),v1beta1   2026-10-31T01:02:23Z
+gateways.gateway.networking.k8s.io             Namespaced   v1(storage),v1beta1   2026-10-31T01:02:23Z
+grpcroutes.gateway.networking.k8s.io           Namespaced   v1(storage)           2026-10-31T01:02:24Z
+httproutes.gateway.networking.k8s.io           Namespaced   v1(storage),v1beta1   2026-10-31T01:02:25Z
+listenersets.gateway.networking.k8s.io         Namespaced   v1(storage)           2026-10-31T01:02:25Z
+referencegrants.gateway.networking.k8s.io      Namespaced   v1,v1beta1(storage)   2026-10-31T01:02:26Z
+tcproutes.gateway.networking.k8s.io            Namespaced   v1(storage)           2026-10-31T01:02:27Z
+tlsroutes.gateway.networking.k8s.io            Namespaced   v1(storage)           2026-10-31T01:02:29Z
+udproutes.gateway.networking.k8s.io            Namespaced   v1(storage)           2026-10-31T01:02:30Z
+$ kubectl get crd httproutes.gateway.networking.k8s.io -o jsonpath='{.metadata.annotations.gateway\.networking\.k8s\.io/channel}{"\n"}'
+standard
+$ kubectl apply -f 00-traefik-namespace.yaml
+namespace/p02-05b-traefik created
+$ helm repo add traefik https://traefik.github.io/charts
+"traefik" already exists with the same configuration, skipping
+$ helm repo update traefik
+Hang tight while we grab the latest from your chart repositories...
+...Successfully got an update from the "traefik" chart repository
+Update Complete. ⎈Happy Helming!⎈
+$ helm install traefik traefik/traefik --version 42.2.0 --namespace p02-05b-traefik -f traefik-values.yaml --wait --timeout 5m
+NAME: traefik
+LAST DEPLOYED: Sat Oct 31 06:41:26 2026
+NAMESPACE: p02-05b-traefik
+STATUS: deployed
+REVISION: 1
+DESCRIPTION: Install complete
+TEST SUITE: None
+NOTES:
+traefik with docker.io/traefik:v3.7.16@sha256:1336e85aaed293bd63d005086e0dd013b04078b26aaeb1c18b26a2f928af7e65 has been deployed successfully on p02-05b-traefik namespace!
+$ kubectl apply -f 00-namespace.yaml -f 05-serviceaccounts-rbac.yaml -f 15-catalog-config.yaml -f 16-db-credentials.yaml -f 20-postgres-statefulset.yaml
+namespace/p02-05b-bookstore created
+resourcequota/bookstore-quota created
+limitrange/bookstore-limits created
+serviceaccount/catalog-sa created
+serviceaccount/storefront-sa created
+serviceaccount/orders-sa created
+serviceaccount/payments-worker-sa created
+serviceaccount/postgres-sa created
+serviceaccount/redis-sa created
+serviceaccount/rabbitmq-sa created
+serviceaccount/migrate-sa created
+role.rbac.authorization.k8s.io/catalog-config-reader created
+rolebinding.rbac.authorization.k8s.io/catalog-config-reader-binding created
+configmap/catalog-config created
+secret/db-credentials created
+service/postgres created
+statefulset.apps/postgres created
+$ kubectl rollout status statefulset/postgres -n p02-05b-bookstore --timeout=300s
+Waiting for 1 pods to be ready...
+partitioned roll out complete: 1 new pods have been updated...
+$ kubectl apply -f 21-db-migrate-job.yaml
+job.batch/db-migrate created
+$ kubectl wait --for=condition=complete job/db-migrate -n p02-05b-bookstore --timeout=300s
+job.batch/db-migrate condition met
+$ kubectl apply -f 12-redis.yaml -f 10-catalog-deploy.yaml -f 11-storefront-deploy.yaml -f 14-orders-deploy.yaml -f 40-services.yaml
+deployment.apps/redis created
+deployment.apps/catalog created
+deployment.apps/storefront created
+deployment.apps/orders created
+service/catalog created
+service/storefront created
+service/orders created
+service/redis created
+service/rabbitmq created
+service/payments-worker created
+$ kubectl rollout status deploy/catalog -n p02-05b-bookstore --timeout=300s
+Waiting for deployment "catalog" rollout to finish: 0 of 3 updated replicas are available...
+Waiting for deployment "catalog" rollout to finish: 1 of 3 updated replicas are available...
+Waiting for deployment "catalog" rollout to finish: 2 of 3 updated replicas are available...
+deployment "catalog" successfully rolled out
+$ kubectl create secret tls bookstore-tls -n p02-05b-bookstore --cert=tls.crt --key=tls.key
+secret/bookstore-tls created
+$ helm upgrade --install traefik traefik/traefik --version 42.2.0 --namespace p02-05b-traefik --values traefik-values.yaml --values traefik-gateway-values.yaml --wait --timeout 5m
+Release "traefik" has been upgraded. Happy Helming!
+NAME: traefik
+LAST DEPLOYED: Sat Oct 31 06:43:55 2026
+NAMESPACE: p02-05b-traefik
+STATUS: deployed
+REVISION: 2
+DESCRIPTION: Upgrade complete
+TEST SUITE: None
+NOTES:
+traefik with docker.io/traefik:v3.7.16@sha256:1336e85aaed293bd63d005086e0dd013b04078b26aaeb1c18b26a2f928af7e65 has been deployed successfully on p02-05b-traefik namespace!
+
+⚠️ DEPRECATION WARNING: Gateway API CRDs will no longer be shipped with this chart in a future major version.
+You will need to install them yourself before deploying Traefik v3.7:
+  kubectl apply -f https://github.com/kubernetes-sigs/gateway-api/releases/download/v1.5.1/standard-install.yaml
+$ kubectl get gatewayclass traefik -o jsonpath='{.spec.controllerName}{"\n"}'
+traefik.io/gateway-controller
+$ kubectl get gatewayclass traefik -o jsonpath='{.status.conditions[?(@.type=="Accepted")].status}{"\n"}'
+True
+$ kubectl apply -f 51-gateway.yaml
+gatewayclass.gateway.networking.k8s.io/bookstore-gtw created
+gateway.gateway.networking.k8s.io/bookstore created
+httproute.gateway.networking.k8s.io/bookstore created
+$ kubectl get gateway,httproute -n p02-05b-bookstore
+NAME                                          CLASS           ADDRESS   PROGRAMMED   AGE
+gateway.gateway.networking.k8s.io/bookstore   bookstore-gtw             True         0s
+
+NAME                                            HOSTNAMES                   AGE
+httproute.gateway.networking.k8s.io/bookstore   ["bookstore.localdev.me"]   0s
+$ kubectl get gateway bookstore -n p02-05b-bookstore -o jsonpath='{range .status.conditions[*]}{.type}={.status}{"\n"}{end}'
+Accepted=True
+Programmed=True
+$ kubectl get httproute bookstore -n p02-05b-bookstore -o jsonpath='{range .status.parents[0].conditions[*]}{.type}={.status}{"\n"}{end}'
+Accepted=True
+ResolvedRefs=True
+$ kubectl get gateway bookstore -n p02-05b-bookstore -o jsonpath='{range .status.listeners[*]}{.name}: {range .conditions[*]}{.type}={.status} {end}{"\n"}{end}'
+https: Accepted=True ResolvedRefs=True Programmed=True 
+$ docker exec sf-pilot-control-plane sh -c 'echo | openssl s_client -connect 172.18.0.2:30443 -servername bookstore.localdev.me 2>/dev/null | openssl x509 -noout -subject -ext subjectAltName'
+subject=CN=bookstore.localdev.me
+X509v3 Subject Alternative Name: 
+    DNS:bookstore.localdev.me
+$ docker exec sf-pilot-control-plane curl -sS --cacert /tmp/tls.crt --resolve bookstore.localdev.me:30443:172.18.0.2 https://bookstore.localdev.me:30443/api/books -w '\nHTTP %{http_code}\n'
+[]
+HTTP 200
+$ kubectl patch gateway bookstore -n p02-05b-bookstore --type=json -p='[{"op": "replace", "path": "/spec/listeners/0/allowedRoutes/namespaces", "value": {"from": "Selector", "selector": {"matchLabels": {"bookstore-routes": "allowed"}}}}]'
+gateway.gateway.networking.k8s.io/bookstore patched
+$ kubectl get httproute bookstore -n p02-05b-bookstore -o jsonpath='{range .status.parents[0].conditions[*]}{.type}={.status} {.reason}{"\n"}{end}'
+Accepted=False NotAllowedByListeners
+ResolvedRefs=True ResolvedRefs
+$ kubectl label namespace p02-05b-bookstore bookstore-routes=allowed
+namespace/p02-05b-bookstore labeled
+$ kubectl get httproute bookstore -n p02-05b-bookstore -o jsonpath='{range .status.parents[0].conditions[*]}{.type}={.status} {.reason}{"\n"}{end}'
+Accepted=True Accepted
+ResolvedRefs=True ResolvedRefs
+$ kubectl apply -f team-a.yaml
+namespace/p02-05b-team-a created
+httproute.gateway.networking.k8s.io/team-a-books created
+$ kubectl get httproute team-a-books -n p02-05b-team-a -o jsonpath='{range .status.parents[0].conditions[*]}{.type}={.status} {.reason}{"\n"}{end}'
+Accepted=True Accepted
+ResolvedRefs=False RefNotPermitted
+$ kubectl apply -f team-b.yaml
+namespace/p02-05b-team-b created
+httproute.gateway.networking.k8s.io/takeover created
+$ kubectl get httproute takeover -n p02-05b-team-b -o jsonpath='{range .status.parents[0].conditions[*]}{.type}={.status} {.reason}{"\n"}{end}'
+Accepted=False NotAllowedByListeners
+ResolvedRefs=False RefNotPermitted
+$ kubectl apply -f referencegrant.yaml
+referencegrant.gateway.networking.k8s.io/team-a-to-catalog created
+$ kubectl wait httproute team-a-books -n p02-05b-team-a --for=jsonpath='{.status.parents[0].conditions[?(@.type=="ResolvedRefs")].status}'=True --timeout=60s
+httproute.gateway.networking.k8s.io/team-a-books condition met
+$ kubectl get httproute team-a-books -n p02-05b-team-a -o jsonpath='{range .status.parents[0].conditions[*]}{.type}={.status} {.reason}{"\n"}{end}'
+Accepted=True Accepted
+ResolvedRefs=True ResolvedRefs
+$ docker exec sf-pilot-control-plane curl -sS --cacert /tmp/tls.crt --resolve bookstore.localdev.me:30443:172.18.0.2 https://bookstore.localdev.me:30443/team-a/books -w '\nHTTP %{http_code}\n'
+[]
+HTTP 200
+$ kubectl delete referencegrant team-a-to-catalog -n p02-05b-bookstore
+referencegrant.gateway.networking.k8s.io "team-a-to-catalog" deleted from p02-05b-bookstore namespace
+$ kubectl get httproute team-a-books -n p02-05b-team-a -o jsonpath='{range .status.parents[0].conditions[*]}{.type}={.status} {.reason}{"\n"}{end}'
+Accepted=True Accepted
+ResolvedRefs=False RefNotPermitted
+$ kubectl delete namespace p02-05b-team-a p02-05b-team-b
+namespace "p02-05b-team-a" deleted
+namespace "p02-05b-team-b" deleted
+$ helm uninstall traefik -n p02-05b-traefik
+release "traefik" uninstalled
+$ kubectl delete gatewayclass bookstore-gtw
+gatewayclass.gateway.networking.k8s.io "bookstore-gtw" deleted
+$ kubectl delete namespace p02-05b-traefik p02-05b-bookstore
+namespace "p02-05b-traefik" deleted
+namespace "p02-05b-bookstore" deleted
+# the Gateway API CRDs stay installed: the cluster is shared, and they are cluster-scoped
+# end of run 2
+
+# ===== run 1, as recorded before the chapter fixes =====
+# Transcript for 02-networking/05-gateway-api.md, steps 1 to 4.
+# Tier A: kind cluster sf-pilot on a Linux lab host, node image Kubernetes
 # v1.37.0 (kind v0.33.0), kubectl v1.37.2, Helm 4.1.4. The lab host has no
 # host port mapping, so the NodePorts are reached from inside the node container
 # with docker exec, and the kubectl commands run from the author's shell.
