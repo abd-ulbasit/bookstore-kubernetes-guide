@@ -263,7 +263,8 @@ A kind configuration would have to set that up, and this lab cluster does not
 have one. A second pass meant to build such a cluster and did not start,
 because the lab host's container engine did not answer an image listing within
 three minutes. So the route is cited here and was not run, and on kind this
-chapter stops at the refusal. Until metrics-server
+chapter stops at the refusal. [Chapter 04 step 0](04-autoscaling.md) runs the
+route on a three-node kind cluster. Until metrics-server
 serves, `kubectl get apiservice v1beta1.metrics.k8s.io` reports `False
 (MissingEndpoints)`, and the HPA in [ch.04](04-autoscaling.md) has no resource
 metrics on this cluster.
