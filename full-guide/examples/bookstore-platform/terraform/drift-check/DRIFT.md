@@ -30,8 +30,8 @@ reconciling would do.
 
 Two kinds of exit `2` are not a person changing something:
 
-- **AWS-side updates.** An EKS platform-version bump or a managed add-on
-  update shows up too. Step 2 covers telling them apart.
+- **AWS-side updates.** An EKS platform-version bump, or an add-on version
+  changed through the API, shows up too. Step 2 covers telling them apart.
 - **Runner-local files.** `local_file.kubeconfig` writes
   `./kubeconfig.yaml` next to whoever applied. A fresh CI runner never
   has it, so refresh always reports it deleted. CI and the nightly check
@@ -59,7 +59,10 @@ The fastest signal: look at the **resource type**.
 - **`aws_iam_role`, `aws_iam_role_policy_attachment`** — someone hand-attached a policy in the console.
 - **`aws_security_group_rule`, `aws_security_group`** — usually a console-edit to "fix" an outage by opening a port. Investigate even if the change is technically benign.
 - **`kubectl_manifest.<name>` (StorageClass / NodePool / EC2NodeClass)** — someone `kubectl applied` against the cluster.
-- **`aws_eks_addon.<name>`** — EKS auto-updated an addon (rare; only happens on managed addons set to `AUTO`).
+- **`aws_eks_addon.<name>`**: the add-on version changed. EKS does not
+  update a standalone add-on by itself
+  ([EKS docs](https://docs.aws.amazon.com/eks/latest/userguide/updating-an-add-on.html)),
+  so a person or a script ran an update. Check CloudTrail below.
 - **`module.eks.aws_eks_cluster.this`** — somebody changed cluster-version, logging, or endpoint config from the console.
 - **`module.vpc.*`** — usually safe (someone added a tag from a different tool).
 
@@ -73,7 +76,8 @@ aws cloudtrail lookup-events \
   --start-time "$(date -u -d '1 day ago' +%Y-%m-%dT%H:%M:%SZ)"
 ```
 
-(If you don't have CloudTrail enabled — `../terraform-account-baseline/cloudtrail.tf` — turn it on. This is exactly the question CloudTrail answers.)
+(If CloudTrail is not enabled for the account, turn it on. This is
+exactly the question CloudTrail answers.)
 
 ---
 
@@ -137,7 +141,8 @@ After remediation:
     - Is the console action documented anywhere? If not, document it.
     - Could the action have been done through Terraform? If yes, why wasn't it?
     - Does the IAM role used to take the action need narrower permissions?
-4. **If the drift was caused by a tool** (auto-rotation, EKS managed addon updates, AWS service migrations), decide:
+4. **If the drift was caused by a tool** (auto-rotation, an add-on
+   version changed through the API, AWS service migrations), decide:
     - Should Terraform stop managing that attribute? Use `lifecycle.ignore_changes`.
     - Or should the tool be configured differently? (Often the tool is right; the `.tf` is wrong.)
 
@@ -148,27 +153,21 @@ After remediation:
 Some attributes change out-of-band by design. Ignore them rather than fight them:
 
 ```hcl
-resource "aws_eks_addon" "vpc_cni" {
+resource "aws_autoscaling_group" "node" {
   # …
   lifecycle {
     ignore_changes = [
-      # EKS-managed version updates flow in via the EKS plane, not us.
-      addon_version,
-    ]
-  }
-}
-
-resource "aws_autoscaling_group" "karpenter_pool" {
-  # …
-  lifecycle {
-    ignore_changes = [
-      # Karpenter manipulates desired_capacity directly; if you let TF
-      # reconcile it, you'll fight Karpenter forever.
+      # A Cluster Autoscaler owns the desired count (EKS docs:
+      # https://docs.aws.amazon.com/eks/latest/userguide/cluster-autoscaler.html).
       desired_capacity,
     ]
   }
 }
 ```
+
+Do not ignore `addon_version`. `addons.tf` pins each add-on to EKS's
+default build for the cluster version, so a version change is a reviewed
+edit in code, not drift to hide.
 
 When in doubt, **start strict** (no ignore_changes) and add them as you find drift you can't or won't fix. A drift alert that's noise gets ignored; an ignore_changes that hides a real issue is worse.
 
@@ -186,4 +185,4 @@ When in doubt, **start strict** (no ignore_changes) and add them as you find dri
 
 - **Cluster teardown failure**: see `../cleanup-verify.sh` and the main README §9.
 - **Karpenter nodes won't drain**: see Part 10 ch.06.
-- **Argo CD sync errors**: see Part 12 ch.04.
+- **Argo CD sync errors**: see Part 07 ch.04.

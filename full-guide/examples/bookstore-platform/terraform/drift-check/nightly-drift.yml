@@ -24,8 +24,9 @@
 #
 # What exit code 2 means: some resource in state no longer matches what
 # refresh reads back. That is drift, but not always a problem: an AWS-side
-# update (an EKS platform-version bump, a managed add-on update) counts
-# too, and DRIFT.md Step 2 is how to tell them apart. It is NOT a reliable
+# update (an EKS platform-version bump, or an add-on version changed
+# through the API) counts too, and DRIFT.md Step 2 is how to tell them
+# apart. It is NOT a reliable
 # signal for anything that lives on the machine that ran the last apply,
 # because a fresh runner never has it. In this tree that is
 # local_file.kubeconfig, which is why TF_VAR_write_kubeconfig is false
@@ -52,8 +53,8 @@
 # never needs write access, so it must never use the apply role.
 #
 # Why nightly? Drift accumulates from console actions, out-of-band Terraform
-# runs, IAM-policy auto-rotation, EBS auto-grow, ASG re-creations after
-# instance failures. You want to catch it before the next deploy compounds it.
+# runs and AWS-side changes. You want to catch it before the next deploy
+# compounds it.
 ################################################################################
 
 name: terraform-drift-check

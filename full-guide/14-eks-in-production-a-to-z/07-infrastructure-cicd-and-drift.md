@@ -8,7 +8,7 @@
 > the state in code matching the state in cloud.
 
 **Estimated time:** ~30 min read · ~90 min hands-on
-**Prerequisites:** [Part 14 ch.01](./01-terraform-state-in-production.md) — remote state with locking required for CI · [Part 14 ch.02](./02-eks-cluster-lifecycle.md) — upgrade flow that CI must drive · [Part 12 ch.01](../07-delivery/04-gitops-argocd.md) — plan-on-PR pattern from app delivery
+**Prerequisites:** [Part 14 ch.01](./01-terraform-state-in-production.md) — remote state with locking required for CI · [Part 14 ch.02](./02-eks-cluster-lifecycle.md) — upgrade flow that CI must drive · [Part 07 ch.03](../07-delivery/03-cicd-pipeline.md) — the CI pipeline pattern from app delivery
 
 **You'll know after this:** • configure GitHub Actions with OIDC trust to AWS (no long-lived access keys) · • implement the plan-on-PR, apply-on-merge shape every EKS Terraform tree should reach within its first month · • run nightly `terraform plan -refresh-only -detailed-exitcode` drift checks and act on exit code 2 · • follow the reconciliation runbook when "someone changed it in the console" · • debug a stuck CI apply by inspecting the S3 lock and recovering safely
 
@@ -44,7 +44,7 @@ durable failures:
    console last Tuesday is what's *in AWS*. They drift apart
    silently until the next apply blows up.
 
-Phase 14-R shipped the production shape:
+The tree ships the production shape:
 [`.github/workflows/terraform.yml`](../examples/bookstore-platform/terraform/.github/workflows/terraform.yml)
 runs a speculative `terraform plan` on every PR (the plan in the
 job summary, for code review; full text only on a private repo). On every merge to `main` it plans
@@ -67,8 +67,8 @@ without making it worse.
 
 [Part 07 ch.03](../07-delivery/03-cicd-pipeline.md) introduced
 application-level CI/CD (build, test, push, deploy a microservice).
-[Part 14 ch.01](01-terraform-state-in-production.md) (Phase 14a)
-established the remote-state backend that infrastructure CI/CD
+[Part 14 ch.01](01-terraform-state-in-production.md) established the
+remote-state backend that infrastructure CI/CD
 depends on. This chapter is the **infrastructure** CI/CD layer:
 how Terraform itself flows through PR → review → merge → apply,
 and how drift is policed.
@@ -76,9 +76,9 @@ and how drift is policed.
 > **In production:** Long-lived AWS access keys in any CI system
 > are the number-one preventable security incident. The fix is
 > not rotation (still leaks; rotation is post-hoc). The fix is
-> OIDC trust: GitHub/GitLab/CircleCI mint a short-lived (10-15
-> minute) JWT per workflow run; STS exchanges it for credentials
-> that exist only for that run. No secrets to rotate, no keys to
+> OIDC trust: GitHub/GitLab/CircleCI mint a short-lived JWT per
+> workflow run; STS exchanges it for credentials that exist only
+> for that run. No secrets to rotate, no keys to
 > leak. The bookstore-platform's `.github/workflows/terraform.yml`
 > uses this in every job (the `aws-actions/configure-aws-credentials`
 > steps, SHA-pinned), each job assuming the role trusted for its own
@@ -127,8 +127,8 @@ The five-pattern landscape:
 - **Pattern 5 — Spacelift / Env0 / Terraform Cloud.** Managed
   Terraform-as-a-Service. Policy-as-code, drift detection, run
   history, state management — all included. **Most polished** but
-  also **most expensive** ($120-300/user/month at production
-  scale). Use for: orgs that want to outsource Terraform
+  also **most expensive** per user, so compare current vendor
+  pricing. Use for: orgs that want to outsource Terraform
   infrastructure entirely; orgs with strict compliance that need
   the audit features the SaaS vendors provide.
 
@@ -168,18 +168,20 @@ assumed by a PR plan. The usual "fix" is to loosen the trust to
 right fix is **two roles**. A PR plan runs the PR's code: provider
 plugins, `external` and `http` data sources, module code, all with
 the job's credentials. So the plan role must be one you are willing to
-give anyone who can push a branch, which means read-only. Fork PRs get
-no OIDC token at all. (Repositories created, renamed or transferred
-after 2026-07-15 present an immutable form,
-`repo:<OWNER>@<OWNER_ID>/<REPO>@<REPO_ID>:...`. Pin whatever your
-token actually carries.)
+give anyone who can push a branch, which means read-only. Without
+`id-token: write` a run cannot request an OIDC token at all
+([OIDC reference](https://docs.github.com/en/actions/reference/security/oidc)).
+Repositories created after July 15, 2026 use the immutable form
+`repo:<OWNER>@<OWNER_ID>/<REPO>@<REPO_ID>:...`; older ones keep the
+old form unless they opt in. Pin whatever your token carries.
 
 **Drift detection — the three patterns:**
 
 | Pattern | Tool | When |
 |---|---|---|
 | Scheduled `terraform plan -refresh-only -detailed-exitcode` | GitHub Actions cron / Jenkins | The simplest and most universal; the Bookstore Platform's `drift-check/nightly-drift.yml` ships this. |
-| `driftctl` | OSS CLI, ex-CloudSkiff | Stronger because it scans the cloud for resources Terraform doesn't manage at all — catches the "someone created a resource by hand" case. |
+| `driftctl` | OSS CLI, ex-CloudSkiff | Stronger because it scans the cloud for resources Terraform doesn't manage at all — catches the "someone created a resource by hand" case. Its README says
+it is in maintenance mode. |
 | AWS Config + custom rules | AWS Config service | Cloud-native; useful when the org already uses Config for compliance; aligns drift with the compliance posture. |
 
 Each catches a different drift class: `plan -refresh-only`
@@ -189,12 +191,25 @@ on either*. A mature platform runs all three.
 
 The trap to keep in view: **applying through a drift fix without
 understanding the cause makes things worse**. The DRIFT.md
-runbook's Step 3a-3d (Phase 14-R) covers this; the canonical
+runbook's Step 3a-3d covers this; the canonical
 mistake is: drift detected → engineer panics → `terraform apply`
 without reading → Terraform "fixes" the drift by *reverting* a
 hand-edit that was actually intentional (the SG rule someone
 opened to fix an outage). Three minutes of investigation before
 apply prevents three hours of incident recovery.
+
+## Threats and controls
+
+| Threat | Control | Deeper |
+|---|---|---|
+| A long-lived cloud key in CI leaks or outlives its job | OIDC: a token per run, exchanged for STS credentials of one hour | |
+| A branch, fork or other environment assumes the apply role | Each role pins `sub` to its environments with `StringEquals`; the plan role is read-only | |
+| An unreviewed change is applied | Apply the saved plan from `plan-main`, behind `production` reviewers | |
+| Plan output or artifacts expose account data | Plan text goes to a file; private repository; one-day artifact retention | |
+| A console or out-of-band change goes unnoticed | Nightly `plan -refresh-only`, then CloudTrail | |
+| Misconfigured Terraform is merged | Static analysis of the tree before merge; this pipeline does not run it yet | [05.03](../05-security/03-supply-chain.md) |
+| A pipeline action is swapped for another version | Actions pinned by full commit SHA | [14.12](./12-supply-chain-security.md) |
+| A plan that breaks policy is applied | Policy checks on the saved plan, not in this pipeline yet | 05.07 <!-- link-later: 05.07 --> |
 
 ## Diagrams
 
@@ -240,10 +255,10 @@ DRIFT SOURCE                    EXAMPLES                                   CAUGH
 ──────────────────────────────  ─────────────────────────────────────────  ──────────────────────────────
 Console edit (human)            SG rule opened to "fix prod"               plan -refresh-only (next run)
                                                                             CloudTrail (who + when)
-AWS auto-update                 EKS addon auto-upgrade                     plan -refresh-only
-                                                                            (lifecycle ignore_changes is the fix)
-Tool side-effect                Karpenter desired_capacity on ASG          plan -refresh-only
-                                                                            (lifecycle ignore_changes)
+Add-on version changed by API   aws eks update-addon run by hand or a      plan -refresh-only
+                                script (EKS never updates add-ons alone)   (pin addon_version in code)
+Autoscaler side-effect          Cluster Autoscaler sets an ASG's desired   plan -refresh-only
+                                capacity                                   (ignore_changes for that count only)
 Unmanaged resource              IAM user created by an old script          driftctl scan
                                                                             (terraform won't see it)
 Compliance violation            S3 bucket made public via console          AWS Config custom rule
@@ -280,30 +295,29 @@ aws iam create-open-id-connect-provider \
 aws iam list-open-id-connect-providers
 ```
 
-The thumbprint is the SHA-1 of GitHub's TLS CA certificate. AWS used
-to require it; modern AWS regions skip the validation if the issuer
-URL is known. The value above is the documented one (rotates
-infrequently); if AWS errors out, fetch the current thumbprint from
-the AWS GitHub OIDC docs.
+The thumbprint is only a fallback. IAM checks the issuer's TLS
+certificate against its trusted root CAs first, and uses the
+thumbprint when it must ([IAM OIDC docs](https://docs.aws.amazon.com/IAM/latest/UserGuide/id_roles_providers_create_oidc.html)).
+If the call rejects the value above, take a current one from those
+docs.
 
 ### 2. Create the two IAM roles
 
 Two roles, because a PR plan runs the PR's code (see *Mental model*):
 
 - **`github-actions-terraform-plan`**: read-only, trusted only from the
-  `terraform-plan` GitHub environment. Both the PR plan and the
-  post-merge plan use it.
+  `terraform-plan` and `terraform-drift` GitHub environments. The PR
+  plan, the post-merge plan and the nightly drift check use it.
 - **`github-actions-terraform-apply`**: can change the account, trusted
   only from the `production` environment, which has required reviewers.
 
 ```bash
-# One trust policy per role, each pinned to ONE environment with
-# StringEquals. A job that declares `environment: X` presents
-# sub = repo:<ORG>/<REPO>:environment:X. Check what your repo's token
-# actually carries: repos created/renamed/transferred after 2026-07-15
-# use repo:<OWNER>@<OWNER_ID>/<REPO>@<REPO_ID>:environment:X.
-for env in terraform-plan production; do
-cat <<EOF > "trust-${env}.json"
+# Each trust policy pins `sub` with StringEquals to its own environments.
+# A job that declares `environment: X` presents
+# sub = repo:<ORG>/<REPO>:environment:X. Repositories created after
+# July 15, 2026 present repo:<OWNER>@<OWNER_ID>/<REPO>@<REPO_ID>:...
+# instead, so check the sub your token carries before you pin it.
+cat <<EOF > trust-terraform-plan.json
 {
   "Version": "2012-10-17",
   "Statement": [{
@@ -315,13 +329,34 @@ cat <<EOF > "trust-${env}.json"
     "Condition": {
       "StringEquals": {
         "token.actions.githubusercontent.com:aud": "sts.amazonaws.com",
-        "token.actions.githubusercontent.com:sub": "repo:<GITHUB_ORG>/<GITHUB_REPO>:environment:${env}"
+        "token.actions.githubusercontent.com:sub": [
+          "repo:<GITHUB_ORG>/<GITHUB_REPO>:environment:terraform-plan",
+          "repo:<GITHUB_ORG>/<GITHUB_REPO>:environment:terraform-drift"
+        ]
       }
     }
   }]
 }
 EOF
-done
+
+cat <<EOF > trust-production.json
+{
+  "Version": "2012-10-17",
+  "Statement": [{
+    "Effect": "Allow",
+    "Principal": {
+      "Federated": "arn:aws:iam::<AWS_ACCOUNT_ID>:oidc-provider/token.actions.githubusercontent.com"
+    },
+    "Action": "sts:AssumeRoleWithWebIdentity",
+    "Condition": {
+      "StringEquals": {
+        "token.actions.githubusercontent.com:aud": "sts.amazonaws.com",
+        "token.actions.githubusercontent.com:sub": "repo:<GITHUB_ORG>/<GITHUB_REPO>:environment:production"
+      }
+    }
+  }]
+}
+EOF
 
 aws iam create-role --role-name github-actions-terraform-plan \
   --assume-role-policy-document file://trust-terraform-plan.json
@@ -350,7 +385,7 @@ aws iam put-role-policy --role-name github-actions-terraform-plan \
 # state read/write and .tflock put/delete, and, for an SSE-KMS state
 # bucket, kms:Decrypt + kms:GenerateDataKey on the state key, because
 # writing state and the .tflock object encrypts them). IAM Access Analyzer
-# can generate that policy from the CloudTrail of a sandbox apply.
+# can generate that policy from up to 90 days of CloudTrail events.
 aws iam attach-role-policy --role-name github-actions-terraform-apply \
   --policy-arn arn:aws:iam::aws:policy/AdministratorAccess
 ```
@@ -389,12 +424,13 @@ apply role).
 
 ### 3. Configure the GitHub repo
 
-Create two environments in **Settings → Environments**:
+Create three environments in **Settings → Environments**:
 
 | Environment | Protection rules |
 |---|---|
 | `terraform-plan` | optional required reviewers (add them if people outside your team can push branches) |
 | `production` | **required reviewers**, deployment branches = `main` only, prevent self-review |
+| `terraform-drift` | deployment branches = `main` only; no reviewers, because nobody approves at 03:00 (section 6) |
 
 Then two repository variables. Each is the role a job assumes *and* a
 Terraform input: the workflow's `env:` block passes both ARNs to
@@ -452,8 +488,10 @@ In the GitHub Actions tab, the `plan-pr` job runs in the
 - `terraform init -lockfile=readonly` installs exactly the committed
   provider versions and hashes.
 - `terraform plan -lock=false` runs against the actual cloud. The plan
-  text goes to a file, not the job log. On a private repository the
-  job summary shows the full plan; on a public one it lists resource
+  takes no state lock, so the read-only role never writes the lock
+  object. The plan text goes to a file, not the job log. On a private
+  repository the job summary shows the full plan; on a public one it
+  lists resource
   addresses and actions only (see *A saved plan is a secret*).
 
 This plan is **speculative**. **A reviewer reads it before approving
@@ -526,8 +564,8 @@ trigger logic:
     workflow fails so on-call notices.
   - `2` — refresh found a difference between state and the real
     resources; the workflow proceeds. (Both workflows set
-    `write_kubeconfig = false`, so the runner-local `kubeconfig.yaml`
-    is not one of them. See *How it works under the hood*.)
+    `write_kubeconfig = false`, so a runner-local `kubeconfig.yaml`
+    never shows up as drift. See *How it works under the hood*.)
 
 On exit code 2, a second job, which holds `issues: write` and no
 cloud credentials, uses `actions/github-script` to either:
@@ -555,7 +593,8 @@ detail locally with the same command.
 # Add tag: Drift = test
 # (or any tag the Terraform doesn't set)
 
-# Next morning, the nightly-drift workflow runs and creates an issue:
+# Next morning, the nightly-drift workflow opens an issue. Illustrative,
+# not captured from a run:
 # Title: "Drift detected on 2026-05-22"
 # Body: lists the drifted address (the cluster security group).
 
@@ -624,40 +663,41 @@ cluster it manages) earns its keep only at scale.
 classic example: an IAM user created by an old console script, an
 S3 bucket spun up "temporarily" two years ago. Terraform's plan
 ignores anything not in its state; `driftctl` scans the cloud and
-reports.
+reports. Its README says the project is in maintenance mode
+([driftctl](https://github.com/snyk/driftctl)), so run it only where
+a team already relies on it.
 
 ```bash
-# Install driftctl
-brew install driftctl
-# Or: curl -L https://github.com/snyk/driftctl/releases/latest/download/driftctl_darwin_amd64 -o driftctl && chmod +x driftctl
-
 # Scan against the bookstore-platform state.
 driftctl scan \
   --from tfstate+s3://<TFSTATE_BUCKET_NAME>/bookstore-platform/terraform.tfstate \
   --output 'json://drift.json' \
   --quiet
 
-# Result: a JSON report with three categories — managed/in-sync,
-# managed/drifted, unmanaged. The "unmanaged" list is the audit.
+# The "unmanaged" list in the JSON report is the audit.
 jq '.summary' drift.json
-# {
-#   "total_resources": 124,
-#   "total_changed": 0,
-#   "total_unmanaged": 7,    # <-- what driftctl finds, plan misses
-#   "total_missing": 0
-# }
 ```
 
-A weekly CI job that runs `driftctl scan` and posts the unmanaged
-list to a Slack channel is the durable defense. The `drift-check/`
-subdirectory ships a stub for this; uncomment and configure for
-your repo.
+Illustrative output, not captured from a run:
+
+```text
+{
+  "total_resources": 124,
+  "total_changed": 0,
+  "total_unmanaged": 7,
+  "total_missing": 0
+}
+```
+
+A weekly CI job that runs the scan and posts the unmanaged list to a
+Slack channel covers what the nightly plan cannot see.
 
 ## How it works under the hood
 
 **OIDC — the cryptographic exchange in detail.** Three trust steps:
 
-1. **GitHub mints a JWT**. The token's payload carries claims:
+1. **GitHub mints a JWT**. The payload carries claims (illustrative
+   values, not a real token):
    ```json
    {
      "iss": "https://token.actions.githubusercontent.com",
@@ -683,7 +723,7 @@ your repo.
      condition.
    - If all checks pass, calls `AssumeRoleWithWebIdentity` internally.
 
-3. **STS returns short-lived credentials**. Default lifetime: 1 hour.
+3. **STS returns short-lived credentials**. Default lifetime: 1 hour ([STS API reference](https://docs.aws.amazon.com/STS/latest/APIReference/API_AssumeRoleWithWebIdentity.html)).
    The credentials are temporary — `AccessKeyId` + `SecretAccessKey`
    + `SessionToken`. The workflow uses them via the standard AWS
    SDK env-var mechanism (the `configure-aws-credentials` action
@@ -755,8 +795,8 @@ A drift alarm that fires on the first is noise, and noise gets muted.
 `terraform plan -refresh-only` compares state with the real cloud and
 ignores the configuration, so unapplied code never trips it: its exit
 code 2 means something outside Terraform changed. Usually a person,
-sometimes AWS (an EKS platform-version bump, a managed add-on update),
-which DRIFT.md Step 2 triages. Unapplied code is the apply workflow's
+sometimes AWS (an EKS platform-version bump), which DRIFT.md Step 2
+triages. Unapplied code is the apply workflow's
 business. The price: `-refresh-only` cannot see resources that were
 never in state (that is `driftctl`), and accepting drift into code also
 needs a `terraform apply -refresh-only` to update state (DRIFT.md
@@ -787,11 +827,10 @@ customization pays for itself.
 "Terraform as a managed service": you push code, they run the plan,
 they offer a UI to review and approve, they apply on approval. The
 appeal: drift detection, run history, policy-as-code (Sentinel /
-OPA), state encryption, audit logs — all included. The cost: $10-50
-per user/month for Terraform Cloud's "Standard" tier; $30-100+ for
-Spacelift's commercial tiers. At 20+ engineers, the per-user fee
-becomes material; at 5 engineers, it's noise compared to
-engineering time saved.
+OPA), state encryption, audit logs — all included. The cost is per
+user and changes, so check each vendor's pricing page. At 20+
+engineers, the per-user fee becomes material; at 5 engineers, it's
+noise compared to engineering time saved.
 
 ## Production notes
 
@@ -841,8 +880,9 @@ engineering time saved.
 
 > **In production:** The `lifecycle.ignore_changes` knob is a
 > double-edged sword. It silences known false-positive drift
-> (EKS auto-updating addon versions, Karpenter manipulating ASG
-> capacity), but it also silences *real* drift on the same
+> (a [Cluster Autoscaler](https://docs.aws.amazon.com/eks/latest/userguide/cluster-autoscaler.html)
+> setting an ASG's desired capacity), but it also silences *real*
+> drift on the same
 > attributes. The
 > [`drift-check/DRIFT.md`](../examples/bookstore-platform/terraform/drift-check/DRIFT.md)
 > runbook's "Common ignore_changes patterns" section lists the
@@ -852,7 +892,8 @@ engineering time saved.
 > three months ago.
 
 > **In production:** State backups before destructive applies.
-> The S3 backend's versioning (Part 14 ch.01) is automatic, but
+> The state bucket's versioning (set up by `bootstrap-state.sh`, Part
+> 14 ch.01) keeps history, but
 > for a high-risk apply (a migration that touches the EKS cluster
 > resource itself, for example), explicitly snapshot:
 > `terraform state pull > tfstate.<DATE>.json` before running
@@ -868,7 +909,8 @@ aws iam create-open-id-connect-provider \
   --client-id-list sts.amazonaws.com \
   --thumbprint-list 6938fd4d98bab03faadb97b34396831e3780aea1
 
-# Two roles, each trusting ONE environment (sub = ...:environment:<NAME>).
+# Plan role trusts terraform-plan and terraform-drift; apply role trusts
+# production (sub = ...:environment:<NAME>).
 aws iam create-role --role-name github-actions-terraform-plan \
   --assume-role-policy-document file://trust-terraform-plan.json
 aws iam attach-role-policy --role-name github-actions-terraform-plan \
@@ -906,12 +948,13 @@ env:                                 # eks.tf CI mode, same for every job
   TF_VAR_enable_cluster_creator_admin_permissions: 'false'
   TF_VAR_terraform_apply_role_arn: ${{ vars.TF_APPLY_ROLE_ARN }}
   TF_VAR_terraform_plan_role_arn: ${{ vars.TF_PLAN_ROLE_ARN }}
+  TF_VAR_write_kubeconfig: 'false'
 
 jobs:
   plan-main:                         # read-only role, saved plan
     if: github.event_name == 'push' && github.ref == 'refs/heads/main'
     environment: terraform-plan      # sub = ...:environment:terraform-plan
-    permissions: { contents: read, id-token: write }
+    permissions: { contents: read, id-token: write }  # id-token: the OIDC token
     outputs: { has_changes: '${{ steps.plan.outputs.has_changes }}' }
     steps:
       # checkout, setup-terraform, configure-aws-credentials
@@ -936,8 +979,8 @@ jobs:
 CI/CD-readiness checklist (production-shape when all seven are yes):
 
 - [ ] AWS OIDC identity provider created; two roles (read-only plan,
-      apply), each trust policy pinned with `StringEquals` to exactly
-      one environment; no `StringLike` wildcards. `eks.tf` runs in CI
+      apply), each trust policy pinned with `StringEquals` to its own
+      environments; no `StringLike` wildcards. `eks.tf` runs in CI
       mode: creator entry off, the apply role named as cluster-admin and
       KMS key administrator.
 - [ ] A remote backend is committed, and CI refuses to run without
@@ -962,7 +1005,7 @@ CI/CD-readiness checklist (production-shape when all seven are yes):
 1. **Why does the chapter argue OIDC trust replaces (rather than improves) long-lived AWS access keys in CI?**
    <details><summary>Show answer</summary>
 
-   Long-lived access keys are a credential that exists *outside the run* — stored in GitHub Secrets, copied to dev laptops, sometimes screenshot accidentally. Rotation is post-hoc: by the time you rotate, the leaked key might already have been used. OIDC trust mints a short-lived JWT *per workflow run*, exchanged for STS credentials that live ~1 hour and only inside the runner's environment. There's nothing static to rotate, nothing to leak. The IAM role's trust policy uses `StringEquals` against the GitHub `sub` claim (repo + environment, or repo + branch), so a token minted for any other repo, branch or environment is rejected; fork PRs do not get an OIDC token at all.
+   Long-lived access keys are a credential that exists *outside the run* — stored in GitHub Secrets, copied to dev laptops, sometimes screenshot accidentally. Rotation is post-hoc: by the time you rotate, the leaked key might already have been used. OIDC trust mints a short-lived JWT *per workflow run*, exchanged for STS credentials that live ~1 hour and only inside the runner's environment. There's nothing static to rotate, nothing to leak. The IAM role's trust policy uses `StringEquals` against the GitHub `sub` claim (repo + environment, or repo + branch), so a token minted for any other repo, branch or environment is rejected; a run without `id-token: write` cannot request one.
 
    </details>
 
@@ -1004,7 +1047,7 @@ CI/CD-readiness checklist (production-shape when all seven are yes):
 - **driftctl**
   <https://github.com/snyk/driftctl>; the unmanaged-resource scanner;
   the complement to `terraform plan -refresh-only` that catches
-  drift the plan can't see.
+  drift the plan can't see. Its README says it is in maintenance mode.
 - **HashiCorp — Terraform Cloud**
   <https://developer.hashicorp.com/terraform/cloud-docs>; the SaaS
   variant of Pattern 5, including the run-history + policy-as-code
@@ -1015,3 +1058,18 @@ CI/CD-readiness checklist (production-shape when all seven are yes):
 - **AWS — IAM roles for service accounts vs OIDC for CI**
   <https://docs.aws.amazon.com/IAM/latest/UserGuide/id_roles_providers_oidc.html>;
   the underlying IAM federation mechanism that OIDC builds on.
+- **Update an Amazon EKS add-on**
+  <https://docs.aws.amazon.com/eks/latest/userguide/updating-an-add-on.html>;
+  EKS does not update an add-on when new versions ship. You start it.
+- **GitHub OIDC reference**
+  <https://docs.github.com/en/actions/reference/security/oidc>; the `sub`
+  formats, the immutable subject form and the `id-token` permission.
+- **AWS: creating an IAM OIDC identity provider**
+  <https://docs.aws.amazon.com/IAM/latest/UserGuide/id_roles_providers_create_oidc.html>;
+  how IAM checks the issuer's certificate.
+- **AWS STS: AssumeRoleWithWebIdentity**
+  <https://docs.aws.amazon.com/STS/latest/APIReference/API_AssumeRoleWithWebIdentity.html>;
+  the one-hour default session and its limits.
+- **IAM Access Analyzer policy generation**
+  <https://docs.aws.amazon.com/IAM/latest/UserGuide/access-analyzer-policy-generation.html>;
+  builds a policy template from up to 90 days of CloudTrail events.

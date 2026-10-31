@@ -73,6 +73,7 @@
 #      environment, not the branch:
 #
 #        plan role   sub = repo:GITHUB_ORG/GITHUB_REPO:environment:terraform-plan
+#                    and sub = ...:environment:terraform-drift (nightly-drift.yml)
 #        apply role  sub = repo:GITHUB_ORG/GITHUB_REPO:environment:production
 #
 #      Example trust policy for the apply role (replace AWS_ACCOUNT,
@@ -96,9 +97,9 @@
 #      }
 #
 #      Check the `sub` your repo actually presents before you trust it.
-#      Repositories created, renamed or transferred after 2026-07-15 get the
-#      immutable form repo:OWNER@OWNER_ID/REPO@REPO_ID:environment:...;
-#      older ones keep repo:OWNER/REPO:... . Pin whichever your token
+#      Repositories created after July 15, 2026 get the immutable form
+#      repo:OWNER@OWNER_ID/REPO@REPO_ID:environment:...; older ones keep
+#      repo:OWNER/REPO:... unless they opt in. Pin whichever your token
 #      carries, exactly, with StringEquals. Never use StringLike
 #      "repo:ORG/REPO:*", which lets any branch, environment or PR assume
 #      the role.
@@ -161,9 +162,9 @@
 # sources (including `external` and `http`) and module code from the PR
 # branch, with whatever credentials the job holds. Whoever can push a branch
 # can therefore use the plan role. That is why it is read-only and why it
-# is a different role from apply. Pull requests from forks do not receive an
-# OIDC token at all, so plan-pr cannot assume the role for them. It fails
-# at the credentials step, which is the safe outcome.
+# is a different role from apply. Without `id-token: write` a run cannot
+# request an OIDC token. If a fork's run cannot request one, plan-pr fails at
+# the credentials step, which is the safe outcome.
 #
 # PLAN ARTIFACTS CONTAIN SECRETS. A saved plan holds every attribute value
 # in cleartext, sensitive ones included. Artifacts are readable by anyone
