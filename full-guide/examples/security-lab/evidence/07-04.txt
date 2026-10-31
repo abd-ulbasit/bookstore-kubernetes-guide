@@ -120,7 +120,7 @@ $ kubectl get --raw /readyz 2>&1 | head -2
 ok
 $ kubectl get ns p07-04-argocd --no-headers 2>&1 | tail -1
 p07-04-argocd   Active   16m
-$ heavy_lock   # the heavy-install lock was taken again before any heavy step
+$ lab_lock   # the lab install lock was taken again before any heavy step
 LOCK_ACQUIRED
 $ kubectl -n p07-04-argocd get pods,jobs 2>&1 | head -8
 NAME                                 READY   STATUS             RESTARTS      AGE
@@ -226,7 +226,7 @@ $ kubectl get crd 2>&1 | grep -c argoproj
 1
 $ kubectl get clusterrole 2>&1 | grep -c argocd
 0
-$ heavy_unlock   # the lock was released with the lab objects still terminating
+$ lab_unlock   # the lock was released with the lab objects still terminating
 LOCK_RELEASED
 $ kubectl -n p07-04-argocd get appprojects -o name 2>&1 | tail -3
 appproject.argoproj.io/bookstore
