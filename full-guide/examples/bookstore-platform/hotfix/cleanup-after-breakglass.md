@@ -2,8 +2,8 @@
 
 > When to reach for this: a P0 incident invoked the `breakglass-
 > emergency` IAM role (`breakglass-iam-policy.json`). The role is
-> time-limited (1 hour TTL via Vault); the credentials auto-rotate at
-> expiry. **But** the side effects of what the breakglass user DID
+> time-limited (1 hour TTL via Vault); the credentials expire at
+> the TTL. **But** the side effects of what the breakglass user DID
 > persist beyond the session. This runbook is the **24-hour cleanup
 > checklist** the platform-team must complete BEFORE the postmortem
 > is signed off.
@@ -15,10 +15,9 @@
 
 ## When this runbook fires
 
-- Any time the `breakglass-emergency` role is assumed via Vault's
-  AWS auth method. Vault posts an audit event; the v2 alerting wires
-  `VaultBreakglassRoleAssumed` to PagerDuty + `#bookstore-platform-
-  audit`. The runbook's clock starts at session start.
+- Any time the `breakglass-emergency` role is assumed through Vault's
+  AWS secrets engine. Vault's audit log records the request; the alert
+  that pages on it is a rule the platform builds (this guide ships none). The runbook's clock starts at session start.
 
 ## The 24-hour clock
 
@@ -35,8 +34,7 @@ The cleanup is divided into three windows:
 ## Step 1 — Capture the session log (during hour 0-1)
 
 While invoking breakglass, the responder runs a side-channel session
-log (a Slack thread or a session-recording tool; the v2 platform uses
-the `gh-actions/log-session` job):
+log (a Slack thread or a session-recording tool):
 
 ```text
 Slack thread in #bookstore-platform-status:
@@ -55,7 +53,7 @@ better than CloudTrail because it captures intent.
 ## Step 2 — Verify session expiry (hour 1-2)
 
 ```sh
-# The Vault AWS auth method auto-rotates credentials at TTL expiry.
+# The STS credentials from the Vault AWS secrets engine expire at the TTL.
 # Confirm the access-key associated with the breakglass session is
 # now disabled.
 
@@ -163,7 +161,7 @@ aws iam delete-user --user-name <NAME>
 ANY secret the breakglass session could have READ is treated as
 compromised. The mitigation: rotate.
 
-The Bookstore Platform's secret-rotation triggers via the v2 Vault
+The Bookstore Platform's secret-rotation triggers via its Vault
 rotation cycle (`examples/bookstore-platform/vault/`); rotate the
 following:
 
