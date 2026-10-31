@@ -786,6 +786,51 @@ a port-forward, not an Ingress:
 kubectl port-forward -n opencost svc/opencost 9090:9090
 ```
 
+## How it works under the hood
+
+- **Requests are the cost lever, not usage.** The scheduler's
+  `NodeResourcesFit` admits a Pod only if `Σ requests ≤ node Allocatable`
+  ([Part 01 ch.03](../01-core-workloads/03-resources-and-qos.md)); it *never*
+  looks at live usage. So a cluster's node count (hence cloud bill, via the
+  autoscaler [ch.04](04-autoscaling.md)) is driven by the **sum of requests**.
+  Over-requesting inflates the bill even at 0% CPU; this is why right-sizing
+  requests is the single highest-leverage cost action.
+- **The VPA recommender's model.** It ingests usage history (metrics-server +,
+  optionally, a Prometheus backfill), maintains a decaying histogram per
+  container, and emits `target` (≈ a high percentile of CPU/memory),
+  `lowerBound`, `upperBound`. In `Off` it only writes these to the VPA status;
+  in `Auto`/`Recreate` the updater evicts out-of-bounds Pods and the admission
+  webhook rewrites requests on recreation (the classic VPA restart-to-resize).
+- **Why throttling appears at low average CPU.** A CPU *limit* is a CFS quota
+  per ~100ms period; a bursty handler can exhaust the quota *within* a period
+  and be descheduled until the next one. p99 latency spikes while the
+  *average* over a minute looks idle ([Part 01
+  ch.03](../01-core-workloads/03-resources-and-qos.md)).
+  `container_cpu_cfs_throttled_periods_total / ..._periods_total` is the
+  ground truth; a non-zero ratio at low utilization is the canonical "remove/
+  raise the CPU limit" signal, exactly what section 1 found for catalog.
+- **Quota & LimitRange are the enforcement points.** `LimitRange` is a
+  *mutating + validating* admission step (injects defaults, rejects out of
+  `min/max`); `ResourceQuota` is a *validating* step (rejects if namespace
+  request/limit totals exceed `hard`); both come from [Part 01
+  ch.03](../01-core-workloads/03-resources-and-qos.md). They are why a
+  right-sizing change is *safe to roll out*: a fat-fingered request is refused
+  at the API server, not discovered when the node OOMs.
+- **Bin-packing & overcommit economics.** Utilization = Σ usage ÷ Σ
+  allocatable. Setting `limits > requests` (Burstable) overcommits a node on
+  purpose: cheap when workloads' peaks are uncorrelated, dangerous when they
+  align (correlated spikes → node saturation → eviction by QoS order, [Part 01
+  ch.03](../01-core-workloads/03-resources-and-qos.md)). The FinOps goal is
+  the highest utilization that still leaves headroom for the *correlated*
+  peak, then absorbing the rest with the HPA/KEDA + node autoscaler
+  ([ch.04](04-autoscaling.md)).
+- **OpenCost's allocation math.** It periodically reads each Pod's
+  requests/usage (from the metrics pipeline) and node prices (cloud billing
+  API, or a static price sheet), and allocates cost to namespace/workload/
+  label by the resource it reserved, turning the abstract requests-vs-usage
+  gap into a currency number a team owns. The model is provider-neutral; only
+  the price source differs by cloud.
+
 ## Production notes
 
 > **In production:** right-size from **measured data on every workload**, not
