@@ -14,8 +14,8 @@
 - cap every `emptyDir` with a `sizeLimit`, and use `medium: Memory` for
   sensitive scratch
 - explain why `restricted` refuses `hostPath`
-- set `defaultMode` and `fsGroup` so a Secret file is read by the app and by
-  no other process
+- set `defaultMode` and `fsGroup` so a Secret file is readable by the app's
+  group, and check its owner, group and mode from inside the Pod
 - inject Pod metadata into a container with the downwardAPI
 
 <!-- tags: storage, volumes, emptydir, hostpath, projected-volumes, downwardapi -->
@@ -72,7 +72,7 @@ list that the guide refuses, and its threats are set out below.
 | A `hostPath` volume reaches a path on the node. Writable, the Pod can change files there. Read-only, it still reads whatever the node's file modes allow, and a mount of `/` can end in a node takeover | No `hostPath` in an application Pod. `restricted` refuses it, shown [in step 7](#refuse-hostpath) | [05.02](../05-security/02-pod-security.md) runs the escape |
 | A writable path with no cap fills the node's disk, and every Pod on that node suffers | `emptyDir` with a `sizeLimit` on every writable path | [01.03](../01-core-workloads/03-resources-and-qos.md) for memory limits |
 | Sensitive scratch data stays on node disk after the app is done with it | `medium: Memory` with a `sizeLimit`: tmpfs, held in RAM, never written to disk | [03.02](02-secrets.md) |
-| A Secret file is readable by a process that does not need it | `defaultMode: 0440` with `fsGroup`, so only the app's group can read the file | [03.02](02-secrets.md); etcd encryption in [05.04](../05-security/04-secrets-and-cluster-hardening.md) |
+| A Secret file is readable by a process that does not need it | `defaultMode: 0440` with `fsGroup`, so the file's group is the app's group. Step 6 checks the mode from inside the Pod, for the app only | [03.02](02-secrets.md); etcd encryption in [05.04](../05-security/04-secrets-and-cluster-hardening.md) |
 | A writable root filesystem lets an attacker rewrite the image | [`readOnlyRootFilesystem`](../01-core-workloads/01-pods.md#baseline-read-only-root), with an `emptyDir` for each writable path | [05.02](../05-security/02-pod-security.md) |
 
 The rows are specific to volumes. The rest of the Pod's surface is in [ch.01
@@ -514,8 +514,8 @@ pod "disk-fill" deleted from p03-volumes namespace
 
 The Pod's `reason` is `Evicted`, and its message names the limit. The `STATUS`
 column shows `Error`, because the container was stopped. The kubelet checks
-usage periodically, so the eviction comes some time after the write. In this
-run the Pod also spent most of its time waiting to start on a loaded node.
+usage periodically, so the eviction comes some time after the write. On a busy
+node, the Pod can also spend time waiting to start.
 
 In memory, the cap is enforced by the filesystem. `medium: Memory` is tmpfs,
 and the kubelet sizes it to `sizeLimit`. A write past the size fails, and the
@@ -762,7 +762,10 @@ tmpfs /run/identity tmpfs ro,relatime,size=65536k,inode64,noswap 0 0
 
 `ls -lnL` follows the symlinks, so it shows the real files. Both files are
 owned by root and read by group 65532, which is the `fsGroup`. The app reads
-its token as uid 65532 through that group, and nothing else gets read access.
+its token as uid 65532 through that group. This output shows the owner, the
+group and the mode. It runs no second reader, so it does not show another UID
+being refused. The mode gives other users no read access, but root bypasses
+file modes, and any process in the `fsGroup` can read the file.
 The projected identity file has the same mode, because `defaultMode` applies
 to every source in the `projected` volume.
 
@@ -775,12 +778,14 @@ to every source in the `projected` volume.
 
 A `hostPath` volume mounts a path from the node into the Pod. Mounting `/`
 hands the Pod the node's filesystem. Read-only, the Pod reads whatever the
-node's file modes allow. Writable, it can change the node: on a kubeadm
-cluster the kubelet runs each manifest in `/etc/kubernetes/manifests` as a
-static Pod, so a writable `/` can start a privileged Pod on the node. The full
-escape is in [05.02](../05-security/02-pod-security.md). The control here is
-that `restricted` refuses the volume type, whatever the path and whatever the
-mount mode.
+node's file modes allow. Writable, it can change the node. The kubelet scans
+`/etc/kubernetes/manifests` and runs each Pod file it finds there as a static
+Pod ([static Pods](https://kubernetes.io/docs/tasks/configure-pod-container/static-pod/)),
+so a writable `/` can add a Pod to the node. This chapter does not run that
+write. The read side of the same risk is in
+[05.02](../05-security/02-pod-security.md). The control here is that
+`restricted` refuses the volume type, whatever the path and whatever the mount
+mode.
 
 The command below fails on purpose, so that you recognise the refusal. It
 carries every other baseline field, so the volume is the only violation. It
@@ -859,13 +864,16 @@ namespace "p03-volumes" deleted
   disk. Their default file mode is `0644`, which the API reference gives as
   the default: any user in the container can read them. Step 6 sets a narrower
   mode.
-- **`downwardAPI`.** Exposes fields of the Pod's own spec and status:
-  `metadata.name`, `namespace`, `uid`, `labels` and `annotations`,
-  `spec.nodeName` and `serviceAccountName`, `status.podIP` and `hostIP`, and
-  the container's resource fields (`limits.cpu`, `limits.memory`,
-  `requests.*`). CPU is reported in whole cores, rounded up, and memory in
-  bytes. Labels and annotations in the volume form update when they change,
-  the same as ConfigMap volumes. The env form is a snapshot taken at start.
+- **`downwardAPI`.** Exposes fields of the Pod's own spec and status. A volume
+  `fieldRef` takes `metadata.name`, `namespace`, `uid`, `labels` and
+  `annotations`, and the container's resource fields (`limits.cpu`,
+  `limits.memory`, `requests.*`). `spec.nodeName`, `spec.serviceAccountName`,
+  `status.podIP` and `status.hostIP` are available only as environment
+  variables, not as a volume `fieldRef`
+  ([downward API](https://kubernetes.io/docs/concepts/workloads/pods/downward-api/)).
+  CPU is reported in whole cores, rounded up, and memory in bytes. Labels and
+  annotations in the volume form update when they change, the same as ConfigMap
+  volumes. The env form is a snapshot taken at start.
 - **`projected`.** Combines `configMap`, `secret`, `downwardAPI` and
   `serviceAccountToken` sources into one directory. `defaultMode` applies to
   every file the volume projects, and step 6 uses it. The

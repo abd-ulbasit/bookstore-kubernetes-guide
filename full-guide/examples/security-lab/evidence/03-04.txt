@@ -1,4 +1,5 @@
 # Transcript for 03-config-and-storage/04-persistent-storage.md.
+# Cluster and node names are redacted here as <cluster> and <node>.
 # Tier A: a kind cluster, Kubernetes v1.37.0 node, kubectl v1.37.2.
 # The shared lab cluster allows only p03- namespaces, so every bookstore
 # namespace in the chapter ran as p03-04-storage. Object names, labels and
@@ -8,7 +9,7 @@
 # volume. Those runs were stopped and their objects removed. The final
 # section ran after the lab control plane's scheduler was healthy again.
 ## setup
-# Lab transcript for 03.04 persistent storage. Tier A: kind v1.37.0 cluster sf-pilot.
+# Lab transcript for 03.04 persistent storage. Tier A: kind v1.37.0 cluster <cluster>.
 # The shared lab cluster allows only p03- namespaces, so the Bookstore objects run in p03-04-storage. The commands are otherwise the chapter's.
 $ kubectl version
 Client Version: v1.37.2
@@ -49,10 +50,10 @@ $ kubectl get pvc -n p03-04-storage
 NAME              STATUS   VOLUME                                     CAPACITY   ACCESS MODES   STORAGECLASS   VOLUMEATTRIBUTESCLASS   AGE
 data-postgres-0   Bound    pvc-cb954671-1cb9-4739-8edf-f352352b702b   1Gi        RWO            standard       <unset>                 6m41s
 ## chapter steps 0 to 4
-# Lab transcript for 03.04 persistent storage. Tier A: kind v1.37.0 cluster sf-pilot.
+# Lab transcript for 03.04 persistent storage. Tier A: kind v1.37.0 cluster <cluster>.
 # The shared lab cluster allows only p03- namespaces, so every bookstore namespace in the chapter runs as p03-04-storage. Object names, labels and the Postgres example are the chapter's.
 $$ kubectl get nodes -o 'jsonpath={.items[0].metadata.name}'
-$ NODE=sf-pilot-control-plane
+$ NODE=<node>
 $ kubectl exec -n p03-04-storage postgres-0 -- sh -c 'id; stat -c "%u:%g %a %n" /var/lib/postgresql/data /var/lib/postgresql/data/pgdata'
 uid=999(postgres) gid=999(postgres) groups=999(postgres),101(ssl-cert)
 0:0 777 /var/lib/postgresql/data
@@ -81,7 +82,7 @@ uid=10001 gid=10001 groups=10001
 10001:10001 644 /data/fsgroup.txt
 $$ kubectl get pvc probe-data -n p03-04-storage -o 'jsonpath={.spec.volumeName}'
 $ PV=pvc-cd80183c-24ef-4ec2-9e0b-c631fe20e29a
-$ docker exec sf-pilot-control-plane sh -c 'stat -c '\''%u:%g %a'\'' /var/local-path-provisioner/pvc-cd80183c-24ef-4ec2-9e0b-c631fe20e29a_*'
+$ docker exec <node> sh -c 'stat -c '\''%u:%g %a'\'' /var/local-path-provisioner/pvc-cd80183c-24ef-4ec2-9e0b-c631fe20e29a_*'
 0:0 777
 $ kubectl delete pod fsgroup-probe -n p03-04-storage --now
 pod "fsgroup-probe" deleted from p03-04-storage namespace
@@ -94,7 +95,7 @@ uid=10001 gid=10001 groups=10001
 total 0
 -rw-r--r--    1 10001    10001            0 Oct 31 00:15 fsgroup.txt
 -rw-r--r--    1 10001    10001            0 Oct 31 00:15 plain.txt
-$ docker exec sf-pilot-control-plane sh -c 'stat -c '\''%u:%g %a'\'' /var/local-path-provisioner/pvc-cd80183c-24ef-4ec2-9e0b-c631fe20e29a_*'
+$ docker exec <node> sh -c 'stat -c '\''%u:%g %a'\'' /var/local-path-provisioner/pvc-cd80183c-24ef-4ec2-9e0b-c631fe20e29a_*'
 0:0 777
 $ kubectl delete pod plain-probe -n p03-04-storage --now
 pod "plain-probe" deleted from p03-04-storage namespace
@@ -102,7 +103,7 @@ $ kubectl delete pvc probe-data -n p03-04-storage --wait=true
 persistentvolumeclaim "probe-data" deleted from p03-04-storage namespace
 $ kubectl wait --for=delete pv/pvc-cd80183c-24ef-4ec2-9e0b-c631fe20e29a --timeout=600s
 persistentvolume/pvc-cd80183c-24ef-4ec2-9e0b-c631fe20e29a condition met
-$ docker exec sf-pilot-control-plane sh -c 'ls /var/local-path-provisioner/pvc-cd80183c-24ef-4ec2-9e0b-c631fe20e29a_* 2>/dev/null || echo directory removed'
+$ docker exec <node> sh -c 'ls /var/local-path-provisioner/pvc-cd80183c-24ef-4ec2-9e0b-c631fe20e29a_* 2>/dev/null || echo directory removed'
 directory removed
 $ kubectl apply -f -
 serviceaccount/storage-tenant created
@@ -141,7 +142,7 @@ persistentvolume/pvc-e2dc96a6-a2d0-45b8-b852-2e64ac423f28 condition met
 $ kubectl get pv pvc-e2dc96a6-a2d0-45b8-b852-2e64ac423f28 -o custom-columns=NAME:.metadata.name,RECLAIM:.spec.persistentVolumeReclaimPolicy,STATUS:.status.phase,CLAIM:.spec.claimRef.name
 NAME                                       RECLAIM   STATUS     CLAIM
 pvc-e2dc96a6-a2d0-45b8-b852-2e64ac423f28   Retain    Released   retain-demo
-$ docker exec sf-pilot-control-plane sh -c 'cat /var/local-path-provisioner/pvc-e2dc96a6-a2d0-45b8-b852-2e64ac423f28_*/note.txt'
+$ docker exec <node> sh -c 'cat /var/local-path-provisioner/pvc-e2dc96a6-a2d0-45b8-b852-2e64ac423f28_*/note.txt'
 order 1042 shipped
 $ kubectl patch pv pvc-e2dc96a6-a2d0-45b8-b852-2e64ac423f28 --type=json -p '[{"op":"remove","path":"/spec/claimRef"}]'
 persistentvolume/pvc-e2dc96a6-a2d0-45b8-b852-2e64ac423f28 patched
@@ -163,10 +164,10 @@ $ kubectl wait '--for=jsonpath={.status.phase}=Released' pv/pvc-e2dc96a6-a2d0-45
 persistentvolume/pvc-e2dc96a6-a2d0-45b8-b852-2e64ac423f28 condition met
 $ kubectl delete pv pvc-e2dc96a6-a2d0-45b8-b852-2e64ac423f28
 persistentvolume "pvc-e2dc96a6-a2d0-45b8-b852-2e64ac423f28" deleted
-$ docker exec sf-pilot-control-plane sh -c 'ls /var/local-path-provisioner/pvc-e2dc96a6-a2d0-45b8-b852-2e64ac423f28_* 2>/dev/null || echo directory removed'
+$ docker exec <node> sh -c 'ls /var/local-path-provisioner/pvc-e2dc96a6-a2d0-45b8-b852-2e64ac423f28_* 2>/dev/null || echo directory removed'
 note.txt
-$ docker exec sf-pilot-control-plane sh -c 'rm -rf /var/local-path-provisioner/pvc-e2dc96a6-a2d0-45b8-b852-2e64ac423f28_*'
-$ docker exec sf-pilot-control-plane sh -c 'ls /var/local-path-provisioner/pvc-e2dc96a6-a2d0-45b8-b852-2e64ac423f28_* 2>/dev/null || echo directory removed'
+$ docker exec <node> sh -c 'rm -rf /var/local-path-provisioner/pvc-e2dc96a6-a2d0-45b8-b852-2e64ac423f28_*'
+$ docker exec <node> sh -c 'ls /var/local-path-provisioner/pvc-e2dc96a6-a2d0-45b8-b852-2e64ac423f28_* 2>/dev/null || echo directory removed'
 directory removed
 $ kubectl delete rolebinding claim-volumes -n p03-04-storage
 rolebinding.rbac.authorization.k8s.io "claim-volumes" deleted from p03-04-storage namespace
@@ -183,3 +184,88 @@ RUN-DONE
 $ PV=$(kubectl get pvc data-postgres-0 -n p03-04-storage -o jsonpath='{.spec.volumeName}')
 $ kubectl get pv "$PV" -o jsonpath='{.spec.hostPath.type}'
 DirectoryOrCreate
+## fix pass: the chapter's steps 2 to 4 re-run in p03-04-storage
+# Run after the probe Pods gained sizeLimit and the StorageClass checks were added.
+# Each chapter shell block ran in order with bookstore replaced by p03-04-storage
+# (StorageClass names kept). Output is raw. '## chapter block NN' marks a block.
+## fix pass: chapter 03.04 steps 2 to 4, namespace bookstore replaced by p03-04-storage; StorageClass names kept
+namespace/p03-04-storage created
+namespace/p03-04-storage labeled
+## chapter block 02
+serviceaccount/storage-probe created
+persistentvolumeclaim/probe-data created
+pod/fsgroup-probe created
+pod/fsgroup-probe condition met
+uid=10001 gid=10001 groups=10001
+0:0 777 /data
+10001:10001 644 /data/fsgroup.txt
+0:0 777
+## chapter block 03
+pod "fsgroup-probe" deleted from p03-04-storage namespace
+pod/plain-probe created
+pod/plain-probe condition met
+uid=10001 gid=10001 groups=10001
+total 0
+-rw-r--r--    1 10001    10001            0 Oct 31 00:59 fsgroup.txt
+-rw-r--r--    1 10001    10001            0 Oct 31 00:59 plain.txt
+0:0 777
+## chapter block 04
+pod "plain-probe" deleted from p03-04-storage namespace
+persistentvolumeclaim "probe-data" deleted from p03-04-storage namespace
+persistentvolume/pvc-1dae0463-8d9f-4009-86bf-750cd110afbb condition met
+directory removed
+## chapter block 05
+serviceaccount/storage-tenant created
+role.rbac.authorization.k8s.io/claim-volumes created
+rolebinding.rbac.authorization.k8s.io/claim-volumes created
+yes
+Warning: resource 'persistentvolumes' is not namespace scoped
+
+no
+Warning: resource 'storageclasses' is not namespace scoped in group 'storage.k8s.io'
+
+no
+Warning: resource 'storageclasses' is not namespace scoped in group 'storage.k8s.io'
+
+no
+Warning: resource 'storageclasses' is not namespace scoped in group 'storage.k8s.io'
+
+no
+## chapter block 06
+Error from server (Forbidden): error when creating "STDIN": persistentvolumes is forbidden: User "<tenant>" cannot create resource "persistentvolumes" in API group "" at the cluster scope
+## chapter block 07
+storageclass.storage.k8s.io/bookstore-retain created
+persistentvolumeclaim/retain-demo created
+pod/retain-writer created
+pod/retain-writer condition met
+order 1042 shipped
+pod "retain-writer" deleted from p03-04-storage namespace
+persistentvolumeclaim "retain-demo" deleted from p03-04-storage namespace
+persistentvolume/pvc-b6f2fdbd-df27-4c41-b7bd-f9c82791abbf condition met
+NAME                                       RECLAIM   STATUS     CLAIM
+pvc-b6f2fdbd-df27-4c41-b7bd-f9c82791abbf   Retain    Released   retain-demo
+order 1042 shipped
+## chapter block 08
+persistentvolume/pvc-b6f2fdbd-df27-4c41-b7bd-f9c82791abbf patched
+NAME                                       RECLAIM   STATUS      CLAIM
+pvc-b6f2fdbd-df27-4c41-b7bd-f9c82791abbf   Retain    Available   <none>
+## chapter block 09
+persistentvolumeclaim/retain-reader created
+pod/retain-reader-pod created
+pod/retain-reader-pod condition met
+order 1042 shipped
+## chapter block 10
+pod "retain-reader-pod" deleted from p03-04-storage namespace
+persistentvolumeclaim "retain-reader" deleted from p03-04-storage namespace
+persistentvolume/pvc-b6f2fdbd-df27-4c41-b7bd-f9c82791abbf condition met
+persistentvolume "pvc-b6f2fdbd-df27-4c41-b7bd-f9c82791abbf" deleted
+note.txt
+directory removed
+## chapter block 11
+rolebinding.rbac.authorization.k8s.io "claim-volumes" deleted from p03-04-storage namespace
+role.rbac.authorization.k8s.io "claim-volumes" deleted from p03-04-storage namespace
+serviceaccount "storage-tenant" deleted from p03-04-storage namespace
+serviceaccount "storage-probe" deleted from p03-04-storage namespace
+storageclass.storage.k8s.io "bookstore-retain" deleted
+namespace "p03-04-storage" deleted
+## fix pass done

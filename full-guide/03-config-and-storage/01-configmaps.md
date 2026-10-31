@@ -204,10 +204,10 @@ chapter's increment is the ConfigMap wiring.
 The database comes first. The catalog's `/readyz` pings Postgres, so the
 Deployment does not go Ready without it. `10-catalog-deploy.yaml` reads three
 database keys from the `db-credentials` Secret with `secretKeyRef`, and builds
-`DB_DSN` from them. `16-db-credentials.yaml` holds a demo-only password, which
-is there so the Deployment can start. [ch.02](02-secrets.md) replaces it with
-a Secret. Nothing in this chapter depends on its value, so do not copy it
-anywhere.
+`DB_DSN` from them. `16-db-credentials.yaml` is the `Secret` that
+[ch.02](02-secrets.md) creates. Its password is demo-only, and it is there so
+the Deployment can start. Nothing in this chapter depends on its value, so do
+not copy it anywhere.
 
 ```sh
 # from the repo root (full-guide/)
@@ -226,11 +226,11 @@ job.batch/db-migrate condition met
 ```
 
 The two `rollout status` commands wait for readiness, and they can take
-minutes on a small cluster. The lab run for this chapter hit both timeouts on
-a busy shared node: Postgres took several minutes to finish its first start,
-and the catalog's readiness probe, which pings Postgres, returned HTTP 503
-while it waited. `rollout status` exits non-zero when its timeout passes. Run
-`kubectl get pods -n bookstore` to see where each Pod stands. The Deployment's
+minutes on a small cluster. On a busy node, Postgres can take several minutes
+to finish its first start, and the catalog's readiness probe, which pings
+Postgres, can return HTTP 503 while it waits. `rollout status` exits non-zero
+when its timeout passes. Run `kubectl get pods -n bookstore` to see where each
+Pod stands. The Deployment's
 spec, which is what this chapter checks, is the same either way.
 
 Catalog is distroless and has no shell, so inspect the rendered Pod spec
