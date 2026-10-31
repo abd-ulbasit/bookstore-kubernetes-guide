@@ -1079,4 +1079,4 @@ Deleting cluster "p05-08" ...
 Deleted nodes: ["p05-08-control-plane"]
 $ kind get clusters
 sf-pilot
-sf-sched
+other-cluster
