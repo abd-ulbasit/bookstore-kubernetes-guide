@@ -36,6 +36,18 @@ versions follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   migration Job and the catalog cache timed out on a cluster that enforces
   policy (kind v0.33.0's kindnet does). `allow-catalog-to-postgres` becomes
   `allow-data-tier-ingress`; the count stays at 10.
+- The Bookstore Ingress moves from the retired ingress-nginx to Traefik, the
+  controller Part 02 ch.04 installs. `50-ingress.yaml` (raw, Kustomize base,
+  Helm template) is the portable form: class `traefik`, `Prefix` paths, no
+  annotation. The services serve `/books` and `/orders` while the UI calls
+  `/api/books` and `/api/orders`, so the prefix has to be stripped at the
+  edge, and Traefik does that with a Middleware, which is a custom resource.
+  It ships as `50-ingress-traefik.yaml`, the Helm value
+  `ingress.traefikRewrite.enabled` and the Kustomize component
+  `traefik-rewrite`, all off in the default renders. The ADR 0007 counts hold:
+  Helm 49, Kustomize 45, 49 and 48. The NetworkPolicy header says kindnet
+  enforces policy since kind v0.24.0, and the Helm value
+  `networkPolicy.ingressControllerNamespace` defaults to `traefik`.
 - The production overlay and `values-prod.yaml` size the namespace quota to
   their own replicas. The dev-shaped quota refused postgres and the
   migration Job.

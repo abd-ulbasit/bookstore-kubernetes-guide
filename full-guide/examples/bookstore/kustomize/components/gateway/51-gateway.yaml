@@ -13,10 +13,11 @@
 # ===========================================================================
 #
 # Gateway API is CRD-installed, NOT built into Kubernetes. The Gateway API
-# v1.7.0 standard-channel CRDs and the Traefik controller (its Gateway provider
-# enabled) must be installed first (ch.05 documents both). A client-side dry-run
-# only needs the CRDs registered; --validate=false (used in the whole-dir
-# dry-run report) tolerates their absence.
+# standard-channel CRDs and the Traefik controller (its Gateway provider
+# enabled) must be installed first (ch.05 documents both, with the CRD version
+# Traefik documents and the one the lab ran). A client-side dry-run only needs
+# the CRDs registered; --validate=false (used in the whole-dir dry-run report)
+# tolerates their absence.
 #
 # Role-oriented split (ch.05): GatewayClass + Gateway are INFRA-team owned
 # (the listener, TLS, the L4/L7 entrypoint); HTTPRoute is APP-team owned (how

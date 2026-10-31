@@ -554,13 +554,19 @@ canary:
 # They are MUTUALLY EXCLUSIVE; NOTES.txt + _helpers warn if both are enabled.
 ingress:
   enabled: true
-  className: nginx
+  className: traefik              # Traefik is the controller of Part 02 ch.04
   host: bookstore.localdev.me
   tls:
     enabled: true
     secretName: bookstore-tls
-  annotations:
-    nginx.ingress.kubernetes.io/rewrite-target: /$2
+  annotations: {}                 # portable form: no controller annotation
+  # The services serve /books and /orders; the UI calls /api/books and
+  # /api/orders. Traefik strips the prefix with a Middleware (a CRD, so OFF by
+  # default like the other CRD-backed extras; it needs the Traefik chart's
+  # CRDs). ON adds the Middleware and the annotation that attaches it.
+  traefikRewrite:
+    enabled: false
+    name: rewrite-api-prefix
 
 gateway:
   enabled: false
@@ -577,7 +583,7 @@ gateway:
     secretName: bookstore-tls
 
 # ---------------------------------------------------------------------------
-# NetworkPolicies (raw-manifests 60-networkpolicy.yaml): all 12
+# NetworkPolicies (raw-manifests 60-networkpolicy.yaml): all 10
 # ---------------------------------------------------------------------------
 # NetworkPolicy is a built-in kind, so this defaults ON. Enforcement needs a
 # policy engine in the CNI: kindnet has one from kind v0.24.0 on (ch.06 step

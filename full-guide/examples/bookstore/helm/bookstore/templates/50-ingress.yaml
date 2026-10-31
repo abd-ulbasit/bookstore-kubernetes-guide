@@ -3,25 +3,52 @@
   (networking.k8s.io is a built-in API, so a plain `helm install` renders and
   applies this with no extra CRDs). MUTUALLY EXCLUSIVE with the Gateway stack:
   bookstore.validateEdge fails the render if both ingress.enabled and
-  gateway.enabled are true. Still needs an Ingress CONTROLLER (ingress-nginx)
-  installed to actually serve traffic, and the bookstore-tls Secret for TLS
-  (the chart does NOT generate the cert — see NOTES.txt / ch.01 hands-on).
-  The rewrite annotation is ingress-nginx-specific (a portability limit that
-  motivates the Gateway alternative).
+  gateway.enabled are true. Still needs an Ingress CONTROLLER (Traefik, class
+  `traefik`, Part 02 ch.04) installed to actually serve traffic, and the
+  bookstore-tls Secret for TLS (the chart does NOT generate the cert — see
+  NOTES.txt / ch.01 hands-on).
+  The Ingress is the portable form: `Prefix` paths, no controller annotation.
+  The services serve /books and /orders while the UI calls /api/books and
+  /api/orders, so the edge must strip the /api prefix. Traefik does that with
+  a Middleware (a custom resource), rendered only when
+  ingress.traefikRewrite.enabled is true, together with the annotation that
+  attaches it (raw-manifests 50-ingress-traefik.yaml). It defaults OFF like
+  every CRD-backed extra, so the default render has no CRD kind and keeps its
+  object count. The annotation value is <namespace>-<name>@kubernetescrd.
 */}}
 {{- include "bookstore.validateEdge" . -}}
 {{- if .Values.ingress.enabled }}
 {{- $i := .Values.ingress }}
+{{- $ns := include "bookstore.namespace" . }}
+{{- if $i.traefikRewrite.enabled }}
+apiVersion: traefik.io/v1alpha1
+kind: Middleware
+metadata:
+  name: {{ $i.traefikRewrite.name }}
+  namespace: {{ $ns }}
+  labels:
+    {{- include "bookstore.commonLabels" . | nindent 4 }}
+spec:
+  replacePathRegex:
+    regex: "^/api/(books|orders)(.*)"
+    replacement: "/$1$2"
+---
+{{- end }}
 apiVersion: networking.k8s.io/v1
 kind: Ingress
 metadata:
   name: bookstore
-  namespace: {{ include "bookstore.namespace" . }}
+  namespace: {{ $ns }}
   labels:
     {{- include "bookstore.commonLabels" . | nindent 4 }}
-  {{- with $i.annotations }}
+  {{- if or $i.annotations $i.traefikRewrite.enabled }}
   annotations:
+    {{- with $i.annotations }}
     {{- toYaml . | nindent 4 }}
+    {{- end }}
+    {{- if $i.traefikRewrite.enabled }}
+    traefik.ingress.kubernetes.io/router.middlewares: {{ $ns }}-{{ $i.traefikRewrite.name }}@kubernetescrd
+    {{- end }}
   {{- end }}
 spec:
   ingressClassName: {{ $i.className }}
@@ -35,15 +62,15 @@ spec:
     - host: {{ $i.host }}
       http:
         paths:
-          - path: /api/books(/|$)(.*)
-            pathType: ImplementationSpecific
+          - path: /api/books
+            pathType: Prefix
             backend:
               service:
                 name: catalog
                 port:
                   number: {{ .Values.catalog.service.port }}
-          - path: /api/orders(/|$)(.*)
-            pathType: ImplementationSpecific
+          - path: /api/orders
+            pathType: Prefix
             backend:
               service:
                 name: orders

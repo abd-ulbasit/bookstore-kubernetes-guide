@@ -1,0 +1,14 @@
+# The Middleware of raw-manifests/50-ingress-traefik.yaml, on its own: the
+# annotation that attaches it is a patch in this component's kustomization.yaml.
+# Traefik's CRDs must exist (the Traefik chart installs them, ch.04 step 2).
+apiVersion: traefik.io/v1alpha1
+kind: Middleware
+metadata:
+  name: rewrite-api-prefix
+  namespace: bookstore
+  labels:
+    app.kubernetes.io/part-of: bookstore
+spec:
+  replacePathRegex:
+    regex: "^/api/(books|orders)(.*)"
+    replacement: "/$1$2"

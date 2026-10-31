@@ -11,14 +11,14 @@
 # so the same invariant holds structurally — there is never a double bind).
 #
 # !!! CRD PREREQUISITE. Gateway API (gateway.networking.k8s.io/v1) is NOT
-# built into Kubernetes — the Gateway/HTTPRoute CRDs + a controller (Envoy
-# Gateway, Cilium, Istio, ...; not ingress-nginx) must be
+# built into Kubernetes — the Gateway/HTTPRoute CRDs + a controller (Traefik
+# here; Envoy Gateway, Cilium or Istio also implement it) must be
 # installed first. Without the CRDs, a client dry-run of an overlay including
 # this component prints `no matches for kind "Gateway"` / `"HTTPRoute"` /
 # `"GatewayClass"` — EXPECTED and correct (objects are schema-valid). Install
-# the v1.7.0 standard channel CRDs, then the Traefik controller with its
-# Gateway provider enabled (ch.05 step 1):
-#   kubectl apply -f https://github.com/kubernetes-sigs/gateway-api/releases/download/v1.7.0/standard-install.yaml
+# the standard channel CRDs, then the Traefik controller with its Gateway
+# provider enabled. Part 02 ch.05 step 1 has the install command and says
+# which CRD version Traefik documents and which one the lab ran.
 # The vendored GatewayClass names `controllerName: traefik.io/gateway-controller`,
 # the value the Traefik chart uses. A different Gateway controller needs its
 # own controllerName here.
