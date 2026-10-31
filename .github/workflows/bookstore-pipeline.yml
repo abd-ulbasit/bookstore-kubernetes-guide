@@ -181,6 +181,10 @@ jobs:
         with:
           category: /language:go/service:${{ inputs.service }}
           upload: never
+          # The database upload needs security-events: write, which this job
+          # does not have. The first release run retried it four times, nearly
+          # two minutes, and ended in a red error annotation on a green job.
+          upload-database: false
           output: codeql-results
       - name: Fail on CodeQL results
         if: steps.lang.outputs.go == 'true'
