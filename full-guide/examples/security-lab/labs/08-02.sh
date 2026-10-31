@@ -1,18 +1,20 @@
 #!/usr/bin/env bash
-# Lab 08.02: backup security and the Velero objects, checked on a kind cluster.
-# Tier A (kind), with the Velero controller and node agent not run.
+# Lab 08.02: backup security and the Velero install, checked on a kind cluster.
+# Tier A (kind). The Velero controller runs; a backup and a restore do not.
 #
 # Run this ONLY against a kind cluster you own, from any directory, and only
 # while you hold the shared heavy-install lock: the script installs the Velero
-# CRDs (cluster-scoped) and removes them at the end. It creates its own
+# chart, which creates cluster-scoped objects (the velero.io CRDs and a
+# ClusterRoleBinding), and removes them at the end. It creates its own
 # namespaces with a p08-02- prefix, applies the chapter's own Namespace,
-# NetworkPolicy and RBAC blocks with that prefix, reads a generated demo value
-# back the way a backup stores it, and deletes everything it created.
+# LimitRange, NetworkPolicy and RBAC blocks with that prefix, installs the chart
+# with the chapter's default (CSI snapshot) values against a placeholder object
+# store that does not resolve, reads the running Deployment back, checks the
+# node-agent exception with a server dry run, reads a generated demo value back
+# the way a backup stores it, and deletes everything it created.
 #
-# It does not install the Velero controller, the node agent or an object store.
-# The script renders the pinned chart with the chapter's security values, checks
-# what the render produces, and asks the API server to validate the three Velero
-# objects against the CRDs with strict server-side validation.
+# It does not run an object store, a snapshot-capable CSI driver, a backup or a
+# restore, and it does not apply the chapter's privileged exception namespace.
 set +e
 
 PY="${PY:-python3}"
@@ -33,6 +35,14 @@ case "$ctx" in
   *) echo "refusing to run: kubectl context '$ctx' is not a kind cluster" >&2; exit 2 ;;
 esac
 
+# The chart's objects are cluster-scoped, so refuse to start over somebody
+# else's Velero.
+if kubectl get crd -o name 2>/dev/null | grep -q '\.velero\.io$' \
+   || kubectl get clusterrolebinding velero-server >/dev/null 2>&1; then
+  echo "refusing to run: this cluster already has Velero objects" >&2
+  exit 2
+fi
+
 # Read a command from stdin, print it exactly as it runs, then run it.
 run() { local cmd; cmd=$(cat); printf '$ %s\n' "$cmd"; eval "$cmd" 2>&1; echo; }
 
@@ -48,45 +58,53 @@ retry_cmd() {
   printf '%s\n' "$out"
 }
 
-# Apply the manifest on stdin, retrying while the API server is busy.
-apply_retry() {
-  local manifest
-  manifest="$(cat)"
-  printf '%s\n' "$manifest" | retry_cmd kubectl apply -f -
-}
-
 # Print the chapter's YAML blocks that contain $1, with the reader's namespace
 # names replaced by the lab's, so the lab applies the chapter's own manifests.
+# With "first" as $2, print only the first matching block.
 chapter_yaml() {
-  "$PY" -I - "$CHAPTER" "$1" "$NS_VELERO" <<'PYEOF'
+  "$PY" -I - "$CHAPTER" "$1" "$NS_VELERO" "${2:-all}" <<'PYEOF'
 import re, sys
 text = open(sys.argv[1], encoding="utf-8").read()
-needle, lab_ns = sys.argv[2], sys.argv[3]
+needle, lab_ns, mode = sys.argv[2], sys.argv[3], sys.argv[4]
 for block in re.findall(r"```yaml\n(.*?)```", text, re.S):
     if needle in block:
         block = re.sub(r"(?m)^(\s*namespace: )velero$", r"\g<1>" + lab_ns, block)
         block = re.sub(r"(?m)^(kind: Namespace\nmetadata:\n  name: )velero$", r"\g<1>" + lab_ns, block)
         print(block.rstrip())
         print("---")
+        if mode == "first":
+            break
 PYEOF
 }
 
 echo "# Transcript for 08-day-2-operations/02-backup-and-dr.md, lab steps 1 to 9."
-echo "# Tier A: a kind cluster on Kubernetes v1.37.0, kubectl v1.37.2."
+echo "# Tier A: a kind cluster on Kubernetes v1.37.0, kubectl v1.37.2, Helm v4.1.4."
 echo "# Recorded by running examples/security-lab/labs/08-02.sh."
 echo "# The output in the chapter came from a lab cluster with a different name, and"
 echo "# its namespaces carried the p08-02- prefix. The commands in the chapter use the"
 echo "# reader's names (bookstore, velero); this transcript shows the lab's names,"
 echo "# and the substitution is made only where the script builds a manifest."
+echo "# The chapter's velero namespace is restricted on its default path, so the lab"
+echo "# name p08-02-velero carries no label above restricted and needs no entry in"
+echo "# the exceptions registry. The chapter's privileged exception namespace is not"
+echo "# applied here."
 echo "#"
-echo "# Not run: the Velero controller, the node agent, an object store, a backup and"
-echo "# a restore. The Velero CRDs were installed under the shared heavy-install lock"
-echo "# and removed at the end (step 9). The chart was rendered, not installed."
+echo "# Run: the Velero chart on the CSI snapshot path, in a restricted namespace,"
+echo "# with a placeholder object store that does not resolve. The controller and"
+echo "# its plugin ran and reported the storage location unavailable. The chart's"
+echo "# CRD job ran in the same namespace. The node-agent exception was only"
+echo "# dry-run, never installed."
+echo "# Not run: an object store, a snapshot-capable CSI driver, a backup and a"
+echo "# restore. The cluster's storage class cannot take snapshots. The lab held"
+echo "# the shared heavy-install lock and removed the chart, the CRDs and the"
+echo "# cluster-scoped objects at the end (step 9)."
 echo "#"
 echo "# What did not work the first time: the probe Pod needs the namespace's default"
 echo "# ServiceAccount, which appeared a few seconds late, so the script waits for it."
 echo "# The Velero image has no shell, so the probe mounts the image as a volume (the"
 echo "# image-volume feature, which this cluster has) and reads /etc/passwd from it."
+echo "# The chart's one-shot CRD job has no resources value, so the namespace's"
+echo "# LimitRange supplies its requests and memory limit."
 echo "#"
 
 echo "## step 1: pins, checked against the registries and the chart repository"
@@ -100,11 +118,11 @@ run <<'CMD'
 timeout 120 docker buildx imagetools inspect velero/velero-plugin-for-aws:v1.14.4 --format '{{.Manifest.Digest}}'
 CMD
 
-echo "## step 2: the user the Velero image runs as, read from its /etc/passwd"
+echo "## step 2: the restricted namespace, and the user the Velero image runs as"
 kubectl delete namespace "$NS_VELERO" --ignore-not-found --wait=true >/dev/null 2>&1
 run <<CMD
 kubectl apply -f - <<'YAML'
-$(chapter_yaml "kind: Namespace" | sed -n '1,/^---$/p' | sed '$d')
+$(chapter_yaml "kind: Namespace" first | sed '$d')
 YAML
 CMD
 for i in $(seq 1 150); do kubectl get sa default -n "$NS_VELERO" >/dev/null 2>&1 && break; sleep 2; done
@@ -154,7 +172,101 @@ kubectl logs uid-probe -n p08-02-velero
 kubectl delete pod uid-probe -n p08-02-velero --now
 CMD
 
-echo "## step 3: the chapter's NetworkPolicy and restorer RBAC blocks"
+echo "## step 3: install the chart on the CSI snapshot path"
+run <<'CMD'
+umask 077
+CREDS_FILE="$(mktemp)"
+printf '[default]\naws_access_key_id=%s\naws_secret_access_key=%s\n' lab-placeholder lab-placeholder > "$CREDS_FILE"
+kubectl create secret generic velero-cloud-credentials -n p08-02-velero --from-file=cloud="$CREDS_FILE"
+rm -f "$CREDS_FILE"
+CMD
+VELERO_CHART_VERSION=12.2.2
+VELERO_IMAGE_DIGEST=sha256:c89fb5b6d1fd6afd368e0f483e6f5555fd62851a1eada8ac5c72482e674ca17b
+VELERO_AWS_PLUGIN=docker.io/velero/velero-plugin-for-aws@sha256:c85a7fa803569e3128c33e4f5766f84ab156c8d171c9f1dd2715581d45ce98fa
+VELERO_BUCKET=example
+VELERO_REGION=us-east-1
+VELERO_S3_URL=https://s3.example.com
+export VELERO_CHART_VERSION VELERO_IMAGE_DIGEST VELERO_AWS_PLUGIN VELERO_BUCKET VELERO_REGION VELERO_S3_URL
+run <<'CMD'
+helm install velero vmware-tanzu/velero -n p08-02-velero \
+  --version "$VELERO_CHART_VERSION" --wait \
+  --set image.digest="$VELERO_IMAGE_DIGEST" \
+  --set-json 'initContainers=[{"name":"velero-plugin-for-aws","image":"'"$VELERO_AWS_PLUGIN"'","imagePullPolicy":"IfNotPresent","securityContext":{"allowPrivilegeEscalation":false,"readOnlyRootFilesystem":true,"capabilities":{"drop":["ALL"]}},"volumeMounts":[{"mountPath":"/target","name":"plugins"}]}]' \
+  --set-json 'podSecurityContext={"runAsNonRoot":true,"runAsUser":1002,"runAsGroup":1000,"seccompProfile":{"type":"RuntimeDefault"}}' \
+  --set-json 'containerSecurityContext={"allowPrivilegeEscalation":false,"readOnlyRootFilesystem":true,"capabilities":{"drop":["ALL"]}}' \
+  --set resources.requests.cpu=500m \
+  --set resources.requests.memory=128Mi \
+  --set resources.limits.memory=512Mi \
+  --set configuration.features=EnableCSI \
+  --set deployNodeAgent=false \
+  --set snapshotsEnabled=false \
+  --set 'configuration.backupStorageLocation[0].name=default' \
+  --set 'configuration.backupStorageLocation[0].provider=aws' \
+  --set "configuration.backupStorageLocation[0].bucket=$VELERO_BUCKET" \
+  --set "configuration.backupStorageLocation[0].config.region=$VELERO_REGION" \
+  --set "configuration.backupStorageLocation[0].config.s3Url=$VELERO_S3_URL" \
+  --set 'configuration.backupStorageLocation[0].config.s3ForcePathStyle=true' \
+  --set credentials.existingSecret=velero-cloud-credentials
+CMD
+run <<'CMD'
+kubectl -n p08-02-velero rollout status deploy/velero --timeout=120s
+kubectl -n p08-02-velero get pods
+CMD
+# The storage location validates on a timer. Wait for the first verdict.
+for i in $(seq 1 60); do
+  [ -n "$(kubectl -n "$NS_VELERO" get backupstoragelocation default -o jsonpath='{.status.phase}' 2>/dev/null)" ] && break
+  sleep 3
+done
+run <<'CMD'
+kubectl -n p08-02-velero get backupstoragelocation
+CMD
+run <<'CMD'
+kubectl -n p08-02-velero get deploy,daemonset
+CMD
+
+echo "## step 4: what is running, read back from the live objects"
+run <<'CMD'
+kubectl -n p08-02-velero get deploy velero -o jsonpath='{range .spec.template.spec.containers[*]}{.name}{" resources: "}{.resources}{"\n"}{end}'
+kubectl -n p08-02-velero get pod -l name=velero -o jsonpath='{range .items[0].spec.initContainers[*]}{.name}{" resources (from the LimitRange): "}{.resources}{"\n"}{end}'
+kubectl -n p08-02-velero get deploy velero -o jsonpath='pod securityContext: {.spec.template.spec.securityContext}{"\n"}'
+kubectl -n p08-02-velero get deploy velero -o jsonpath='container securityContext: {.spec.template.spec.containers[0].securityContext}{"\n"}'
+kubectl -n p08-02-velero get deploy velero -o jsonpath='server args: {.spec.template.spec.containers[0].args}{"\n"}'
+CMD
+run <<'CMD'
+kubectl -n p08-02-velero logs deploy/velero -c velero | grep 'Starting Velero server' | sed -E 's/.*msg="(Starting Velero server v[0-9.]+).*/\1/'
+CMD
+run <<'CMD'
+kubectl get crd -o name | grep -c '\.velero\.io$'
+CMD
+
+echo "## step 5: the node-agent exception, asked of the API server with a dry run"
+run <<'CMD'
+helm template velero vmware-tanzu/velero -n p08-02-velero --version 12.2.2 --show-only templates/node-agent-daemonset.yaml \
+  --set image.digest=sha256:c89fb5b6d1fd6afd368e0f483e6f5555fd62851a1eada8ac5c72482e674ca17b \
+  --set deployNodeAgent=true --set snapshotsEnabled=false --set configuration.features=EnableCSI \
+  --set credentials.existingSecret=velero-cloud-credentials \
+  --set-json 'nodeAgent.podSecurityContext={"runAsUser":0,"seccompProfile":{"type":"RuntimeDefault"}}' \
+  --set-json 'nodeAgent.containerSecurityContext={"allowPrivilegeEscalation":false}' \
+  --set nodeAgent.resources.requests.cpu=500m \
+  --set nodeAgent.resources.requests.memory=512Mi \
+  --set nodeAgent.resources.limits.memory=1Gi \
+  | kubectl apply --dry-run=server -f -
+CMD
+run <<'CMD'
+helm template velero vmware-tanzu/velero -n p08-02-velero --version 12.2.2 --show-only templates/node-agent-daemonset.yaml \
+  --set image.digest=sha256:c89fb5b6d1fd6afd368e0f483e6f5555fd62851a1eada8ac5c72482e674ca17b \
+  --set deployNodeAgent=true --set snapshotsEnabled=false --set configuration.features=EnableCSI \
+  --set credentials.existingSecret=velero-cloud-credentials \
+  --set nodeAgent.disableHostPath=true \
+  --set-json 'nodeAgent.podSecurityContext={"runAsUser":0,"seccompProfile":{"type":"RuntimeDefault"}}' \
+  --set-json 'nodeAgent.containerSecurityContext={"allowPrivilegeEscalation":false}' \
+  --set nodeAgent.resources.requests.cpu=500m \
+  --set nodeAgent.resources.requests.memory=512Mi \
+  --set nodeAgent.resources.limits.memory=1Gi \
+  | kubectl apply --dry-run=server -f -
+CMD
+
+echo "## step 6: the chapter's NetworkPolicy and restorer RBAC blocks, and the restore grant"
 run <<CMD
 kubectl apply -f - <<'YAML'
 $(chapter_yaml "name: default-deny-all")
@@ -165,43 +277,13 @@ kubectl apply -f - <<'YAML'
 $(chapter_yaml "kind: Role")
 YAML
 CMD
-
-echo "## step 4: the chart rendered with the chapter's security values, and its CRDs installed"
-run <<'CMD'
-helm template velero vmware-tanzu/velero -n velero --version 12.2.2 \
-  --set image.digest=sha256:c89fb5b6d1fd6afd368e0f483e6f5555fd62851a1eada8ac5c72482e674ca17b \
-  --set-json 'podSecurityContext={"runAsNonRoot":true,"runAsUser":1002,"runAsGroup":1000,"seccompProfile":{"type":"RuntimeDefault"}}' \
-  --set-json 'containerSecurityContext={"allowPrivilegeEscalation":false,"readOnlyRootFilesystem":true,"capabilities":{"drop":["ALL"]}}' \
-  --set deployNodeAgent=true --set snapshotsEnabled=false \
-  --set credentials.existingSecret=velero-cloud-credentials \
-  --set 'configuration.backupStorageLocation[0].name=default' \
-  --set 'configuration.backupStorageLocation[0].provider=aws' \
-  --set 'configuration.backupStorageLocation[0].bucket=example' \
-  --set 'configuration.backupStorageLocation[0].config.region=us-east-1' \
-  --set 'configuration.backupStorageLocation[0].config.s3Url=https://s3.example.com' \
-  --set 'configuration.backupStorageLocation[0].config.s3ForcePathStyle=true' \
-  --include-crds > velero-render.yaml && echo "rendered $(grep -c '^kind:' velero-render.yaml) objects"
-CMD
-run <<'CMD'
-"$PY" -I - velero-render.yaml <<'PYEOF'
-import sys, yaml
-docs = [d for d in yaml.safe_load_all(open(sys.argv[1])) if d]
-crds = [d for d in docs if d.get("kind") == "CustomResourceDefinition"]
-with open("velero-crds.yaml", "w") as f:
-    yaml.safe_dump_all(crds, f)
-print(f"{len(crds)} CustomResourceDefinitions written")
-PYEOF
-retry_cmd kubectl apply -f velero-crds.yaml
-CMD
-
-echo "## step 5: the restore grant, asked of the API server"
 run <<'CMD'
 kubectl auth can-i create restores.velero.io -n p08-02-velero --as=alice
 kubectl auth can-i create restores.velero.io -n p08-02-velero --as=alice --as-group=velero-restorers
 kubectl auth can-i get secrets -n p08-02-bookstore --as=alice --as-group=velero-restorers
 CMD
 
-echo "## step 6: a generated value in a Secret, read back as a backup stores it"
+echo "## step 7: a generated value in a Secret, read back as a backup stores it"
 run <<CMD
 retry_cmd kubectl create namespace $NS_BOOK
 retry_cmd kubectl label namespace $NS_BOOK pod-security.kubernetes.io/enforce=restricted
@@ -214,25 +296,6 @@ kubectl get secret db-demo -n $NS_BOOK -o jsonpath='{.data}'; echo
 CMD
 run <<CMD
 kubectl get secret db-demo -n $NS_BOOK -o jsonpath='{.data.password}' | base64 -d; echo
-CMD
-
-echo "## step 7: the Velero Deployment in the render, with the chapter's security values"
-run <<'CMD'
-"$PY" -I - velero-render.yaml <<'PYEOF'
-import sys, yaml
-for doc in yaml.safe_load_all(open(sys.argv[1])):
-    if not doc or doc.get("kind") != "Deployment" or doc["metadata"]["name"] != "velero":
-        continue
-    pod = doc["spec"]["template"]["spec"]
-    c = pod["containers"][0]
-    sc = pod["securityContext"]
-    cs = c["securityContext"]
-    print("image:", c["image"])
-    print("pod securityContext: runAsNonRoot=%s runAsUser=%s runAsGroup=%s seccomp=%s" % (
-        sc["runAsNonRoot"], sc["runAsUser"], sc["runAsGroup"], sc["seccompProfile"]["type"]))
-    print("container securityContext: allowPrivilegeEscalation=%s readOnlyRootFilesystem=%s drop=%s" % (
-        cs["allowPrivilegeEscalation"], cs["readOnlyRootFilesystem"], ",".join(cs["capabilities"]["drop"])))
-PYEOF
 CMD
 
 echo "## step 8: the three Velero objects, validated by the API server with strict field checks"
@@ -259,8 +322,16 @@ kubectl apply --dry-run=server --validate=strict -f restore-typo.yaml
 CMD
 
 echo "## step 9: delete what this lab created"
-retry_cmd kubectl delete -f velero-crds.yaml --ignore-not-found --wait=true >/dev/null
+run <<'CMD'
+helm uninstall velero -n p08-02-velero
+CMD
+run <<'CMD'
+kubectl get crd -o name | grep '\.velero\.io$' | xargs -r kubectl delete
+CMD
 run <<CMD
 retry_cmd kubectl delete namespace $NS_BOOK $NS_VELERO --wait=true --timeout=240s
+CMD
+run <<'CMD'
+kubectl get crd,clusterrole,clusterrolebinding -o name | grep -i velero || echo "no velero cluster objects left"
 CMD
 echo "# lab 08-02 finished"

@@ -4,9 +4,10 @@
 # Run this ONLY against a kind cluster you own, from the guide's full-guide/
 # directory. It creates two namespaces: p08-03-bookstore, which gets the chapter's
 # Bookstore files with only the namespace name and its DNS names replaced, and
-# p08-03-node-debug, a privileged namespace for the node-level step. Both are
-# deleted at the end. The chapter names the bookstore and node-debug namespaces;
-# this script applies the same files.
+# node-debug, the chapter's own privileged namespace for the node-level step. It
+# refuses to start if node-debug exists, so it never touches one it did not
+# create. Both are deleted at the end. The chapter names the bookstore and
+# node-debug namespaces; this script applies the same files.
 #
 # Three failures are induced on the lab's catalog Deployment: a bad image tag,
 # a malformed database DSN and a failing readiness probe. Each one is reverted.
@@ -21,7 +22,7 @@ set +e
 
 K="${KUBECTL:-kubectl}"
 NS=p08-03-bookstore
-NN=p08-03-node-debug
+NN=node-debug
 MANI=examples/bookstore/raw-manifests
 DBG='busybox:1.36@sha256:73aaf090f3d85aa34ee199857f03fa3a95c8ede2ffd4cc2cdb5b94e566b11662'
 WORK=$(mktemp -d)
@@ -32,6 +33,11 @@ case "$ctx" in
   kind-*) ;;
   *) echo "refusing to run: kubectl context '$ctx' is not a kind cluster" >&2; exit 2 ;;
 esac
+
+if "$K" get namespace "$NN" >/dev/null 2>&1; then
+  echo "refusing to run: namespace $NN already exists and is not this lab's" >&2
+  exit 2
+fi
 
 # Print a command the way a reader would type it, then run it.
 show() { printf '$ %s\n' "$*"; }
@@ -67,8 +73,8 @@ echo "# kind load (the four Bookstore images were already loaded), the NetworkPo
 echo "# branch (the chapter's diagnosis is not induced in this run) and an OOMKilled"
 echo "# drill (the bookstore LimitRange sets a 16Mi memory floor)."
 echo "# The node-level step (step 11) used a second namespace, $NN, labelled"
-echo "# privileged and registered in security/namespace-exceptions.yaml under the"
-echo "# name node-debug. The chapter's manifest names it node-debug."
+echo "# privileged and registered in security/namespace-exceptions.yaml. It is the"
+echo "# chapter's own namespace, and the script refuses to start if it exists."
 echo "# The debug image is busybox:1.36 pinned by digest. The digest matches the"
 echo "# registry manifest for busybox:1.36, checked with docker buildx imagetools"
 echo "# inspect before the run."
@@ -209,7 +215,7 @@ cat > "$WORK/node-ns.yaml" <<EOF
 apiVersion: v1
 kind: Namespace
 metadata:
-  name: p08-03-node-debug
+  name: node-debug
   labels:
     pod-security.kubernetes.io/enforce: privileged
     pod-security.kubernetes.io/enforce-version: latest

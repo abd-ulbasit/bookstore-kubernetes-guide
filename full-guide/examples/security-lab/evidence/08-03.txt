@@ -9,9 +9,13 @@
 # kind load (the four Bookstore images were already loaded), the NetworkPolicy
 # branch (the chapter's diagnosis is not induced in this run) and an OOMKilled
 # drill (the bookstore LimitRange sets a 16Mi memory floor).
-# The node-level step (step 11) used a second namespace, p08-03-node-debug, labelled
-# privileged and registered in security/namespace-exceptions.yaml under the
-# name node-debug. The chapter's manifest names it node-debug.
+# The node-level step (step 11) used a second namespace, labelled privileged.
+# The lab ran it as p08-03-node-debug and it appears below as node-debug, the
+# chapter's name for it: the exceptions registry reads Pod Security labels from
+# the lab's files, and it registers the chapter's namespace, not a lab name.
+# That one rename is the only edit to the recorded lines. The lab script now
+# creates the namespace under the chapter's name and refuses to start if a
+# namespace of that name exists.
 # The debug image is busybox:1.36 pinned by digest. The digest matches the
 # registry manifest for busybox:1.36, checked with docker buildx imagetools
 # inspect. This header was reworded after the run to state that check; the
@@ -220,15 +224,15 @@ deployment "catalog" successfully rolled out
 $ kubectl debug node/sf-pilot-control-plane -n p08-03-bookstore --profile=sysadmin --image=busybox:1.36@sha256:73aaf090f3d85aa34ee199857f03fa3a95c8ede2ffd4cc2cdb5b94e566b11662   # the same Pod, in restricted
 Creating debugging pod node-debugger-sf-pilot-control-plane-qqwxf with container debugger on node sf-pilot-control-plane.
 Error from server (Forbidden): pods "node-debugger-sf-pilot-control-plane-qqwxf" is forbidden: violates PodSecurity "restricted:latest": host namespaces (hostNetwork=true, hostPID=true, hostIPC=true), privileged (container "debugger" must not set securityContext.privileged=true), allowPrivilegeEscalation != false (container "debugger" must set securityContext.allowPrivilegeEscalation=false), unrestricted capabilities (container "debugger" must set securityContext.capabilities.drop=["ALL"]), restricted volume types (volume "host-root" uses restricted volume type "hostPath"), runAsNonRoot != true (pod or container "debugger" must set securityContext.runAsNonRoot=true), seccompProfile (pod or container "debugger" must set securityContext.seccompProfile.type to "RuntimeDefault" or "Localhost")
-$ kubectl apply -f node-debug-namespace.yaml   # namespace p08-03-node-debug
-namespace/p08-03-node-debug created
-$ kubectl debug node/sf-pilot-control-plane -n p08-03-node-debug --profile=sysadmin --image=busybox:1.36@sha256:73aaf090f3d85aa34ee199857f03fa3a95c8ede2ffd4cc2cdb5b94e566b11662
+$ kubectl apply -f node-debug-namespace.yaml   # namespace node-debug
+namespace/node-debug created
+$ kubectl debug node/sf-pilot-control-plane -n node-debug --profile=sysadmin --image=busybox:1.36@sha256:73aaf090f3d85aa34ee199857f03fa3a95c8ede2ffd4cc2cdb5b94e566b11662
 Creating debugging pod node-debugger-sf-pilot-control-plane-2ztjk with container debugger on node sf-pilot-control-plane.
 Warning: would violate PodSecurity "restricted:latest": host namespaces (hostNetwork=true, hostPID=true, hostIPC=true), privileged (container "debugger" must not set securityContext.privileged=true), allowPrivilegeEscalation != false (container "debugger" must set securityContext.allowPrivilegeEscalation=false), unrestricted capabilities (container "debugger" must set securityContext.capabilities.drop=["ALL"]), restricted volume types (volume "host-root" uses restricted volume type "hostPath"), runAsNonRoot != true (pod or container "debugger" must set securityContext.runAsNonRoot=true), seccompProfile (pod or container "debugger" must set securityContext.seccompProfile.type to "RuntimeDefault" or "Localhost")
-$ kubectl get pods -n p08-03-node-debug -o wide
+$ kubectl get pods -n node-debug -o wide
 NAME                                         READY   STATUS              RESTARTS   AGE   IP           NODE                     NOMINATED NODE   READINESS GATES
 node-debugger-sf-pilot-control-plane-2ztjk   0/1     ContainerCreating   0          1s    172.18.0.2   sf-pilot-control-plane   <none>           <none>
-$ kubectl get pod/node-debugger-sf-pilot-control-plane-2ztjk -n p08-03-node-debug -o jsonpath='hostPID={.spec.hostPID} hostNetwork={.spec.hostNetwork} hostIPC={.spec.hostIPC} node={.spec.nodeName}'
+$ kubectl get pod/node-debugger-sf-pilot-control-plane-2ztjk -n node-debug -o jsonpath='hostPID={.spec.hostPID} hostNetwork={.spec.hostNetwork} hostIPC={.spec.hostIPC} node={.spec.nodeName}'
 hostPID=true hostNetwork=true hostIPC=true node=sf-pilot-control-plane
 
 ## step 12: back to known-good, then delete the namespaces
@@ -245,5 +249,5 @@ $ kubectl get deploy catalog -n p08-03-bookstore -o jsonpath='{.spec.template.sp
 bookstore/catalog:dev
 $ kubectl delete namespace p08-03-bookstore --wait --timeout=300s
 namespace "p08-03-bookstore" deleted
-$ kubectl delete namespace p08-03-node-debug --wait --timeout=300s
-namespace "p08-03-node-debug" deleted
+$ kubectl delete namespace node-debug --wait --timeout=300s
+namespace "node-debug" deleted
