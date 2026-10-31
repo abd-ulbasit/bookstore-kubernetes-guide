@@ -12,11 +12,12 @@
 # in the same plan.
 #
 # vpc-cni lives inside module.eks.cluster_addons (see eks.tf) with
-# before_compute = true, so it's installed before the managed node group
-# launches its EC2 instances; the module does the same default-build lookup
-# for it. The module keeps before_compute addons in
-# aws_eks_addon.before_compute, not aws_eks_addon.this. The `moved` block
-# migrates existing state from the old aws_eks_addon.vpc_cni resource
+# before_compute = true. The module does the same default-build lookup for
+# it and keeps before_compute addons in aws_eks_addon.before_compute, not
+# aws_eks_addon.this. The module adds no dependency between those addons and
+# the node groups, so their order is a timer, not a guarantee. The
+# `moved` block migrates existing state from the old aws_eks_addon.vpc_cni
+# resource
 # (pre-Phase 14) to that address, so the addon is never destroyed and
 # re-created. New users won't notice. Existing users get no replacement; if
 # their installed vpc-cni build is not the default for the cluster's
@@ -44,9 +45,9 @@ resource "aws_eks_addon" "kube_proxy" {
   addon_version               = data.aws_eks_addon_version.default["kube-proxy"].version
   resolve_conflicts_on_update = "OVERWRITE"
   resolve_conflicts_on_create = "OVERWRITE"
-  # On destroy, remove the addon — don't leave dangling state. The default
-  # `null` would leave the addon attached to the cluster after Terraform
-  # forgets it, surfacing as drift on the next plan.
+  # preserve = false is the provider default for a standalone resource. It is
+  # set here so the intent is explicit: destroy removes the add-on software.
+  # The EKS module defaults to preserve = true, so eks.tf sets it.
   preserve = false
 
   tags = local.common_tags
