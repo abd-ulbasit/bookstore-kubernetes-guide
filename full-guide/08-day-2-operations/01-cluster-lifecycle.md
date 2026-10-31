@@ -234,7 +234,10 @@ sf-sched-worker2         v1.37.0   containerd://2.3.4   <none>
 ### 2. Write the drill's manifests
 
 The drill needs a namespace, a workload and a PodDisruptionBudget. The
-namespace is restricted, and the workload carries the baseline: a dedicated
+namespace is restricted and default-deny, as the baseline asks of every
+namespace from [02.06](../02-networking/06-network-policies.md) on. The pause
+container makes no network calls, so denying all traffic costs it nothing. The
+workload carries the baseline: a dedicated
 ServiceAccount that does not mount a token, the pod-level and container-level
 hardening fields, and a writable `/tmp` from an `emptyDir`. The container is the
 Kubernetes pause image, which holds a Pod's namespaces and runs nothing else.
@@ -252,6 +255,15 @@ metadata:
     pod-security.kubernetes.io/enforce: restricted
     pod-security.kubernetes.io/audit: restricted
     pod-security.kubernetes.io/warn: restricted
+---
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: default-deny-all
+  namespace: drain-demo
+spec:
+  podSelector: {}
+  policyTypes: ["Ingress", "Egress"]
 ```
 
 ```yaml
@@ -321,8 +333,8 @@ spec:
       app: drain-demo
 ```
 
-Save the three documents as `namespace.yaml`, `workload.yaml` and `pdb.yaml`,
-then create the namespace:
+Save the three blocks as `namespace.yaml` (the namespace and its policy),
+`workload.yaml` and `pdb.yaml`, then create the namespace and the policy:
 
 ```sh
 kubectl apply -f namespace.yaml
@@ -331,6 +343,7 @@ kubectl apply -f namespace.yaml
 <!-- gate: output -->
 ```
 namespace/p08-01-drain created
+networkpolicy.networking.k8s.io/default-deny-all created
 ```
 
 ### 3. Audit the APIs before the upgrade
@@ -410,7 +423,6 @@ deployment.apps/drain-demo created
 # ...
 poddisruptionbudget.policy/drain-demo created
 # ...
-Waiting for deployment "drain-demo" rollout to finish: 0 out of 2 new replicas have been updated...
 Waiting for deployment "drain-demo" rollout to finish: 0 of 2 updated replicas are available...
 Waiting for deployment "drain-demo" rollout to finish: 1 of 2 updated replicas are available...
 deployment "drain-demo" successfully rolled out
@@ -419,15 +431,14 @@ deployment "drain-demo" successfully rolled out
 <!-- gate: output -->
 ```
 NAME                          NODE               PHASE
-drain-demo-7549c4bbd6-5sh9l   sf-sched-worker2   Running
-drain-demo-7549c4bbd6-g99pz   sf-sched-worker2   Running
+drain-demo-7549c4bbd6-5bq79   sf-sched-worker    Running
+drain-demo-7549c4bbd6-nn5qk   sf-sched-worker2   Running
 ```
 
 ### 4. Drain a worker under a PodDisruptionBudget
 
-Drain the worker that runs the drill's replicas. Pick a worker that carries no
-`NoSchedule` taint for workloads you do not own, because the replicas have to
-land on it. `--pod-selector` limits the drain to this drill's Pods, so other
+Drain a worker that runs one of the drill's replicas. The listing above shows
+which. `--pod-selector` limits the drain to this drill's Pods, so other
 workloads on the node are left alone. Cordon first so that nothing new lands on
 the node, then drain. Replace `<worker>` with the node name:
 
@@ -443,19 +454,17 @@ node/sf-sched-worker2 cordoned
 
 $ kubectl drain sf-sched-worker2 --ignore-daemonsets --delete-emptydir-data --pod-selector app=drain-demo --timeout=45s
 node/sf-sched-worker2 already cordoned
-evicting pod p08-01-drain/drain-demo-7549c4bbd6-g99pz
-evicting pod p08-01-drain/drain-demo-7549c4bbd6-5sh9l
-error when evicting pods/"drain-demo-7549c4bbd6-g99pz" -n "p08-01-drain" (will retry after 5s): Cannot evict pod as it would violate the pod's disruption budget.
-error when evicting pods/"drain-demo-7549c4bbd6-5sh9l" -n "p08-01-drain" (will retry after 5s): Cannot evict pod as it would violate the pod's disruption budget.
+evicting pod p08-01-drain/drain-demo-7549c4bbd6-nn5qk
+error when evicting pods/"drain-demo-7549c4bbd6-nn5qk" -n "p08-01-drain" (will retry after 5s): Cannot evict pod as it would violate the pod's disruption budget.
 # ...
 There are pending nodes to be drained:
  sf-sched-worker2
-error when evicting pods/"drain-demo-7549c4bbd6-g99pz" -n "p08-01-drain": global timeout reached: 45s
-error when evicting pods/"drain-demo-7549c4bbd6-5sh9l" -n "p08-01-drain": global timeout reached: 45s
+error when evicting pods/"drain-demo-7549c4bbd6-nn5qk" -n "p08-01-drain": global timeout reached: 45s
 ```
 
-The drain is refused, and it does not fail open. The budget requires both
-replicas, so evicting either one would break it. The eviction API says no, and
+The drain is refused, and it does not fail open. The worker runs one replica,
+and the budget requires both, so evicting it would break the budget. The
+eviction API says no, and
 `kubectl` keeps retrying until the global timeout. That waiting is what a node
 upgrade relies on: a drain holds back rather than taking every replica down at
 once. The eviction retries are shown above, condensed with `# ...`.
@@ -464,9 +473,8 @@ The drill's budget cannot be satisfied as written. With `replicas: 2` and
 `minAvailable: 2`, the budget allows no disruption at all, however much
 capacity the cluster has, so adding a worker cannot unblock this drain. Two
 changes can: lower `minAvailable`, or run three replicas so that one may be
-evicted. The lab's only worker also carries a taint, so the replacement could
-not run there either. That is a property of this lab, not the cause. Read the budget with `kubectl get pdb`, which shows how
-many disruptions the cluster currently allows:
+evicted. Read the budget with `kubectl get pdb`, which shows how many
+disruptions the cluster currently allows:
 
 ```sh
 kubectl get pdb drain-demo -n drain-demo
@@ -476,7 +484,7 @@ kubectl get pdb drain-demo -n drain-demo
 ```
 $ kubectl get pdb drain-demo -n p08-01-drain
 NAME         MIN AVAILABLE   MAX UNAVAILABLE   ALLOWED DISRUPTIONS   AGE
-drain-demo   2               N/A               0                     68s
+drain-demo   2               N/A               0                     52s
 ```
 
 `ALLOWED DISRUPTIONS` is 0. Put the worker back in service, and confirm that
