@@ -448,3 +448,165 @@ payments-worker-sa patch-hpa: no
 orders-sa patch-hpa: no
 orders-sa update-deployment-scale: no
 E1031 06:38:36.367186   76059 reflector.go:227] "Failed to watch" err="namespaces \"p06-04-keda\" is forbidden: User \"kubernetes-admin\" cannot watch resource \"namespaces\" in API group \"\" at the cluster scope" reflector="k8s.io/client-go/tools/watch/informerwatcher.go:162" type="*unstructured.Unstructured"
+
+## re-run for the CPU-only HPA, the pinned KEDA install and the scaler user
+# Same cluster, namespace p06-04-bookstore again (the first run's namespace was deleted).
+# The bring-up below stopped once when the API connection dropped during the
+# RabbitMQ rollout. It was checked and the bring-up carried on; the objects
+# were already created, so nothing was applied twice.
+# The apiservice v1beta1.metrics.k8s.io was not registered on this run, so
+# kubectl top reported the Metrics API as unavailable.
+## step 0 and step 2 (bring-up and CPU-only HPA)
+$ kubectl apply -f 19-payments-worker-deploy.yaml
+deployment.apps/payments-worker created
+Waiting for deployment spec update to be observed...
+Waiting for deployment "payments-worker" rollout to finish: 0 out of 1 new replicas have been updated...
+Waiting for deployment "payments-worker" rollout to finish: 0 of 1 updated replicas are available...
+deployment "payments-worker" successfully rolled out
+networkpolicy.networking.k8s.io/default-deny-all created
+networkpolicy.networking.k8s.io/allow-dns-egress created
+networkpolicy.networking.k8s.io/allow-ingress-to-http-tiers created
+networkpolicy.networking.k8s.io/allow-storefront-to-apis created
+networkpolicy.networking.k8s.io/allow-data-tier-ingress created
+networkpolicy.networking.k8s.io/allow-orders-to-rabbitmq created
+networkpolicy.networking.k8s.io/allow-backend-egress created
+networkpolicy.networking.k8s.io/allow-storefront-egress created
+networkpolicy.networking.k8s.io/allow-payments-worker-egress created
+networkpolicy.networking.k8s.io/allow-monitoring-scrape created
+horizontalpodautoscaler.autoscaling/catalog created
+## step 2 status
+horizontalpodautoscaler.autoscaling/catalog created
+NAME      REFERENCE            TARGETS              MINPODS   MAXPODS   REPLICAS   AGE
+catalog   Deployment/catalog   cpu: <unknown>/70%   2         6         3          0s
+Name:                                                  catalog
+Namespace:                                             p06-04-bookstore
+Labels:                                                app=catalog
+                                                       app.kubernetes.io/part-of=bookstore
+Annotations:                                           <none>
+CreationTimestamp:                                     Sat, 31 Oct 2026 07:44:44 +0500
+Reference:                                             Deployment/catalog
+Metrics:                                               ( current / target )
+  resource cpu on pods  (as a percentage of request):  <unknown> / 70%
+Min replicas:                                          2
+Max replicas:                                          6
+Behavior:
+  Scale Up:
+    Stabilization Window: 60 seconds
+    Select Policy: Max
+    Policies:
+      - Type: Percent  Value: 100  Period: 60 seconds
+      - Type: Pods     Value: 2    Period: 60 seconds
+  Scale Down:
+    Stabilization Window: 300 seconds
+    Select Policy: Max
+    Policies:
+      - Type: Percent  Value: 50  Period: 60 seconds
+Deployment pods:       3 current / 0 desired
+Conditions:
+  Type           Status  Reason                   Message
+  ----           ------  ------                   -------
+  AbleToScale    True    SucceededGetScale        the HPA controller was able to get the target's current scale
+  ScalingActive  False   FailedGetResourceMetric  the HPA was unable to compute the replica count: failed to get cpu utilization: unable to get metrics for resource cpu: unable to fetch metrics from resource metrics API: the server could not find the requested resource (get pods.metrics.k8s.io)
+Events:
+  Type     Reason                        Age   From                       Message
+  ----     ------                        ----  ----                       -------
+  Warning  FailedGetResourceMetric       10s   horizontal-pod-autoscaler  failed to get cpu utilization: unable to get metrics for resource cpu: unable to fetch metrics from resource metrics API: the server could not find the requested resource (get pods.metrics.k8s.io)
+  Warning  FailedComputeMetricsReplicas  10s   horizontal-pod-autoscaler  invalid metrics (1 invalid out of 1), first error is: failed to get cpu resource metric value: failed to get cpu utilization: unable to get metrics for resource cpu: unable to fetch metrics from resource metrics API: the server could not find the requested resource (get pods.metrics.k8s.io)
+## step 2 RBAC checks (the first check was re-run with the namespace written out)
+$ kubectl auth can-i patch horizontalpodautoscalers -n p06-04-bookstore --as=system:serviceaccount:p06-04-bookstore:catalog-sa
+no
+$ kubectl auth can-i patch horizontalpodautoscalers -n p06-04-bookstore --as=system:serviceaccount:p06-04-bookstore:payments-worker-sa
+no
+$ kubectl auth can-i update deployments/scale -n p06-04-bookstore --as=system:serviceaccount:p06-04-bookstore:orders-sa
+no
+$ kubectl auth can-i patch horizontalpodautoscalers -n p06-04-bookstore
+yes
+$ kubectl scale deployment/catalog -n p06-04-bookstore --replicas=40
+deployment.apps/catalog scaled
+$ kubectl get deployment catalog -n p06-04-bookstore
+NAME      READY   UP-TO-DATE   AVAILABLE   AGE
+catalog   3/6     6            3           7m50s
+$ kubectl get events -n p06-04-bookstore --field-selector reason=FailedCreate --sort-by=.lastTimestamp | tail -3
+24s         Warning   FailedCreate   replicaset/catalog-d994db675   Error creating: pods "catalog-d994db675-v7zqs" is forbidden: exceeded quota: bookstore-quota, requested: limits.cpu=250m, used: limits.cpu=3950m, limited: limits.cpu=4
+24s         Warning   FailedCreate   replicaset/catalog-d994db675   Error creating: pods "catalog-d994db675-jt8vk" is forbidden: exceeded quota: bookstore-quota, requested: limits.cpu=250m, used: limits.cpu=3950m, limited: limits.cpu=4
+22s         Warning   FailedCreate   replicaset/catalog-d994db675   (combined from similar events): Error creating: pods "catalog-d994db675-sdx6z" is forbidden: exceeded quota: bookstore-quota, requested: limits.cpu=250m, used: limits.cpu=3950m, limited: limits.cpu=4
+$ kubectl scale deployment/catalog -n p06-04-bookstore --replicas=3
+deployment.apps/catalog scaled
+## step 3 KEDA render, pinned images and restricted dry run
+$ kubectl create namespace p06-04-keda
+namespace/p06-04-keda created
+$ kubectl label namespace p06-04-keda pod-security.kubernetes.io/enforce=restricted pod-security.kubernetes.io/audit=restricted pod-security.kubernetes.io/warn=restricted
+namespace/p06-04-keda labeled
+$ kubectl apply --server-side --dry-run=server -f keda-render.yaml
+serviceaccount/keda-operator serverside-applied (server dry run)
+serviceaccount/keda-metrics-server serverside-applied (server dry run)
+serviceaccount/keda-webhook serverside-applied (server dry run)
+customresourcedefinition.apiextensions.k8s.io/cloudeventsources.eventing.keda.sh serverside-applied (server dry run)
+customresourcedefinition.apiextensions.k8s.io/clustercloudeventsources.eventing.keda.sh serverside-applied (server dry run)
+customresourcedefinition.apiextensions.k8s.io/clustertriggerauthentications.keda.sh serverside-applied (server dry run)
+customresourcedefinition.apiextensions.k8s.io/scaledjobs.keda.sh serverside-applied (server dry run)
+customresourcedefinition.apiextensions.k8s.io/scaledobjects.keda.sh serverside-applied (server dry run)
+customresourcedefinition.apiextensions.k8s.io/triggerauthentications.keda.sh serverside-applied (server dry run)
+clusterrole.rbac.authorization.k8s.io/keda-operator serverside-applied (server dry run)
+clusterrole.rbac.authorization.k8s.io/keda-operator-minimal-cluster-role serverside-applied (server dry run)
+clusterrole.rbac.authorization.k8s.io/keda-operator-external-metrics-reader serverside-applied (server dry run)
+clusterrole.rbac.authorization.k8s.io/keda-operator-webhook serverside-applied (server dry run)
+clusterrolebinding.rbac.authorization.k8s.io/keda-operator serverside-applied (server dry run)
+clusterrolebinding.rbac.authorization.k8s.io/keda-operator-minimal serverside-applied (server dry run)
+clusterrolebinding.rbac.authorization.k8s.io/keda-operator-system-auth-delegator serverside-applied (server dry run)
+clusterrolebinding.rbac.authorization.k8s.io/keda-operator-hpa-controller-external-metrics serverside-applied (server dry run)
+clusterrolebinding.rbac.authorization.k8s.io/keda-operator-webhook serverside-applied (server dry run)
+role.rbac.authorization.k8s.io/keda-operator-certs serverside-applied (server dry run)
+rolebinding.rbac.authorization.k8s.io/keda-operator-certs serverside-applied (server dry run)
+rolebinding.rbac.authorization.k8s.io/keda-operator-auth-reader serverside-applied (server dry run)
+service/keda-operator serverside-applied (server dry run)
+service/keda-operator-metrics-apiserver serverside-applied (server dry run)
+service/keda-admission-webhooks serverside-applied (server dry run)
+deployment.apps/keda-operator serverside-applied (server dry run)
+deployment.apps/keda-operator-metrics-apiserver serverside-applied (server dry run)
+deployment.apps/keda-admission-webhooks serverside-applied (server dry run)
+apiservice.apiregistration.k8s.io/v1beta1.external.metrics.k8s.io serverside-applied (server dry run)
+validatingwebhookconfiguration.admissionregistration.k8s.io/keda-admission serverside-applied (server dry run)
+$ kubectl apply --server-side --dry-run=server -f keda-render.yaml 2>&1 | grep -ci PodSecurity
+0
+$ kubectl apply --server-side --dry-run=server -f control-privileged.yaml
+Warning: would violate PodSecurity "restricted:latest": privileged (container "app" must not set securityContext.privileged=true), allowPrivilegeEscalation != false (container "app" must set securityContext.allowPrivilegeEscalation=false), unrestricted capabilities (container "app" must set securityContext.capabilities.drop=["ALL"]), runAsNonRoot != true (pod or container "app" must set securityContext.runAsNonRoot=true), seccompProfile (pod or container "app" must set securityContext.seccompProfile.type to "RuntimeDefault" or "Localhost")
+deployment.apps/psa-control serverside-applied (server dry run)
+## step 3 scaler user (password generated, never printed)
+$ PW=$(openssl rand -hex 24)
+$ kubectl -n p06-04-bookstore exec deploy/rabbitmq -- rabbitmqctl add_user keda-scaler "$PW"
+Adding user "keda-scaler" ...
+Done. Don't forget to grant the user permissions to some virtual hosts! See 'rabbitmqctl help set_permissions' to learn more.
+$ kubectl -n p06-04-bookstore exec deploy/rabbitmq -- rabbitmqctl set_permissions -p / keda-scaler '^$' '^$' '^orders$'
+Setting permissions for user "keda-scaler" in vhost "/" ...
+$ kubectl -n p06-04-bookstore exec deploy/rabbitmq -- rabbitmqctl list_user_permissions keda-scaler
+Listing permissions for user "keda-scaler" ...
+vhost	configure	write	read
+/	^$	^$	^orders$
+$ kubectl -n p06-04-bookstore create secret generic rabbitmq-conn --from-literal=host="amqp://keda-scaler:<generated>@rabbitmq.p06-04-bookstore.svc.cluster.local:5672/"
+secret/rabbitmq-conn created
+$ helm template keda kedacore/keda --version 2.21.0 --namespace keda -f keda-values.yaml --include-crds | grep -E "image: .*ghcr.io/kedacore"
+          image: "ghcr.io/kedacore/keda:2.21.0@sha256:81fe6547ce8d1cc29273f887b76507e9b853e5bc1f875ec23fe60061a38ed809"
+          image: "ghcr.io/kedacore/keda-metrics-apiserver:2.21.0@sha256:255375037fe592732eeb554743aae360c2da88cf0b9b1258d0a987ef885f0881"
+          image: "ghcr.io/kedacore/keda-admission-webhooks:2.21.0@sha256:e1969628cca6123e32eea13c47c75817091af2657fa68d9d0d58a8620d1b75b1"
+## step 0 metrics APIService
+$ kubectl get apiservice v1beta1.metrics.k8s.io
+Error from server (NotFound): apiservices.apiregistration.k8s.io "v1beta1.metrics.k8s.io" not found
+$ kubectl top nodes
+error: Metrics API not available
+## step 3 pinned render, restricted dry run (repeat with the values file)
+$ helm template keda kedacore/keda --version 2.21.0 --namespace p06-04-keda -f keda-values.yaml --include-crds > keda-render-pinned.yaml
+$ kubectl apply --server-side --dry-run=server -f keda-render-pinned.yaml 2>&1 | grep -c "server dry run"
+29
+$ kubectl apply --server-side --dry-run=server -f keda-render-pinned.yaml 2>&1 | grep -ci podsecurity
+0
+$ helm template keda kedacore/keda --version 2.21.0 --namespace p06-04-keda -f keda-values.yaml --include-crds | grep -E "image: .*ghcr.io/kedacore"
+          image: "ghcr.io/kedacore/keda:2.21.0@sha256:81fe6547ce8d1cc29273f887b76507e9b853e5bc1f875ec23fe60061a38ed809"
+          image: "ghcr.io/kedacore/keda-metrics-apiserver:2.21.0@sha256:255375037fe592732eeb554743aae360c2da88cf0b9b1258d0a987ef885f0881"
+          image: "ghcr.io/kedacore/keda-admission-webhooks:2.21.0@sha256:e1969628cca6123e32eea13c47c75817091af2657fa68d9d0d58a8620d1b75b1"
+
+## permissions as JSON, for the chapter's output block (no tab characters)
+$ kubectl -n p06-04-bookstore exec deploy/rabbitmq -- rabbitmqctl list_user_permissions keda-scaler --formatter json
+[
+{"vhost":"/","configure":"^$","write":"^$","read":"^orders$"}
+]

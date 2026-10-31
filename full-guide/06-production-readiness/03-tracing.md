@@ -88,7 +88,7 @@ contents. These threats belong to tracing. Log lines belong to
 | Threat | Control taught here | Goes deeper |
 |---|---|---|
 | A span attribute holds personal data or a token, and the trace store keeps it for everyone who can query traces | The app puts IDs in attributes, not values. The Collector deletes known keys and redacts matching values before export: [the pipeline](#collector-pipeline) | [03.02](../03-config-and-storage/02-secrets.md) for secret handling, [06.02](02-logging.md) for logs |
-| Any Pod in the cluster can send spans. The OTLP receiver accepts any sender that can reach it, so a neighbour can flood the Collector or plant fake spans | [A NetworkPolicy that admits only the services that emit spans](#netpol) | [02.06](../02-networking/06-network-policies.md) |
+| Any Pod in the cluster can send spans. The OTLP receiver accepts any sender that can reach it, so a neighbour can flood the Collector or plant fake spans | [A NetworkPolicy that admits only Pods labelled as the services that emit spans](#netpol) | [02.06](../02-networking/06-network-policies.md) |
 | Spans cross the pod network in cleartext, so anything that can observe that traffic reads them | [TLS on the OTLP receivers and on the Collector-to-Tempo hop](#tracing-namespace) | [11.04](../11-advanced-production-patterns/04-service-mesh.md) for workload mTLS |
 | A caller outside the cluster sends its own `traceparent` or `baggage`, and that context reaches every service the request touches | [Start a new trace at the public edge, and propagate only the trace context](#propagation) | This chapter. [13.07](../13-grand-capstone-bookstore-platform/07-edge-gateway-waf-rate-limiting.md) covers the edge itself |
 
@@ -96,6 +96,11 @@ The Collector is a backstop, not the first line. A service should not write
 a value into an attribute at all. The Collector's rules catch only the keys
 and patterns they name, so a new field needs a rule before it can be
 trusted.
+
+The NetworkPolicy trusts the `app` label, which any Pod that can set its own
+labels can change. It stops neighbours from sending spans, but a workload in
+the namespace that lies about its label gets through. Step 4 flips the label
+to show both directions.
 
 ## Diagrams
 
@@ -297,6 +302,10 @@ helm install tempo grafana/tempo --version 1.24.4 \
   --namespace tracing -f tempo-values.yaml --wait
 ```
 
+Helm prints `level=WARN msg="this chart is deprecated"` for this chart. It
+still installs and renders, which is why this chapter pins it. Check the
+chart's repository for a replacement before you keep it on a cluster you run.
+
 The Collector takes the values file below. Save it as `otel-values.yaml`:
 
 ```yaml
@@ -373,7 +382,13 @@ config:
           type: probabilistic
           probabilistic: { sampling_percentage: 5 }
     redaction:
-      allow_all_keys: true
+      allow_all_keys: false         # drop every key the list does not name
+      allowed_keys:
+        - service.name
+        - http.route
+        - http.method
+        - order.id
+        - note
       blocked_values:
         - '\b4[0-9]{3}[ -]?[0-9]{4}[ -]?[0-9]{4}[ -]?[0-9]{4}\b'
         - 'Bearer [A-Za-z0-9._~+/=-]+'
@@ -413,8 +428,8 @@ kubectl get pods -n tracing
 <!-- gate: output -->
 ```
 NAME                                                      READY   STATUS    RESTARTS   AGE
-otel-collector-opentelemetry-collector-845d6f9dfc-dnkjs   1/1     Running   0          27m
-tempo-0                                                   1/1     Running   0          27m
+otel-collector-opentelemetry-collector-786d98f47b-2qmcm   1/1     Running   0          85s
+tempo-0                                                   1/1     Running   0          37m
 ```
 
 Both Pods should reach `1/1 Running`. The Collector now listens for OTLP on
@@ -437,12 +452,16 @@ values file runs these processors, in this order:
 - `tail_sampling` holds each trace for `decision_wait` and then keeps every
   trace with an error, every trace over 500 ms, and 5% of the rest. It needs
   the whole trace, so only the Collector can run it.
-- `redaction` replaces any attribute value matching a `blocked_values`
-  pattern with `****`, the processor's default masking string. The two
+- `redaction` removes every attribute whose key is not in `allowed_keys`.
+  Then it replaces any remaining value that matches a `blocked_values`
+  pattern with `****`, the processor's default masking string. The allow-list
+  runs first, so an unlisted key never reaches the value patterns. The two
   patterns here match a card-number shape and a bearer token wherever they
-  appear.
-- `attributes` deletes the keys it lists. A span has no use for a customer
-  name, a SQL statement or an Authorization header.
+  appear inside a kept key.
+- `attributes` deletes the keys it lists. The allow-list already drops them,
+  so this is a second guard: a span has no use for a customer name, a SQL
+  statement or an Authorization header, and a later edit to the allow-list
+  must not bring them back.
 - `batch` amortises the export.
 
 Scrubbing runs after sampling, so the sampling policies see the unscrubbed
@@ -574,11 +593,11 @@ kubectl get networkpolicy -n tracing
 <!-- gate: output -->
 ```
 NAME                                     POD-SELECTOR                                     AGE
-allow-collector-and-grafana-into-tempo   app.kubernetes.io/name=tempo                     1s
-allow-collector-egress-to-tempo          app.kubernetes.io/name=opentelemetry-collector   3s
-allow-dns-egress                         <none>                                           8s
-allow-spans-into-collector               app.kubernetes.io/name=opentelemetry-collector   5s
-default-deny-all                         <none>                                           10s
+allow-collector-and-grafana-into-tempo   app.kubernetes.io/name=tempo                     0s
+allow-collector-egress-to-tempo          app.kubernetes.io/name=opentelemetry-collector   0s
+allow-dns-egress                         <none>                                           0s
+allow-spans-into-collector               app.kubernetes.io/name=opentelemetry-collector   0s
+default-deny-all                         <none>                                           0s
 ```
 
 Tempo's Service still lists the Jaeger and OpenCensus ports, and Tempo still
@@ -691,8 +710,11 @@ text:
 }
 ```
 
+Save the JSON block above as `span.json` in the same directory.
+
 ```sh
 kubectl apply -f span-sender.yaml
+kubectl wait --for=condition=Ready pod/span-sender -n bookstore --timeout=120s
 kubectl cp span.json bookstore/span-sender:/tmp/span.json
 kubectl exec -n bookstore span-sender -- curl -sS --max-time 10 \
   --cacert /etc/otel/ca/ca.crt -H 'Content-Type: application/json' \
@@ -753,16 +775,68 @@ kill %1
 "stringValue":"refund for card ****"
 ```
 
-The customer name and the Authorization header are gone, and the card number
-in `note` is masked. The Collector did all three, before Tempo stored
-anything. This lab resent the span on purpose while testing, so the trace
+The customer name and the Authorization header are gone. The `note` value keeps
+its text, with the card number masked. The Collector did all of this, before
+Tempo stored anything. This lab resent the span on purpose while testing, so the trace
 holds several identical copies. A real service sends each span once.
 
-Tempo still listens on Jaeger ingest ports. This probe shows that a Pod in
-`bookstore` cannot reach one of them, port 14250:
+Tempo still listens on Jaeger ingest ports. The probe below runs from a Pod
+in a `probe` namespace of its own. That namespace has no NetworkPolicy, so the
+Pod's egress is open, and only Tempo's ingress rules decide whether the
+connection gets in. Port 14250 is not in them.
 
 ```sh
-kubectl exec -n bookstore span-sender -- sh -c 'nc -z -w 5 tempo.tracing.svc.cluster.local 14250; echo "nc exit $?"'
+kubectl apply -f - <<'EOF'
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: probe
+  labels:
+    pod-security.kubernetes.io/enforce: restricted
+    pod-security.kubernetes.io/warn: restricted
+EOF
+```
+
+Save this Pod as `probe.yaml`:
+
+```yaml
+apiVersion: v1
+kind: Pod
+metadata:
+  name: probe
+  namespace: probe
+spec:
+  automountServiceAccountToken: false
+  securityContext:
+    runAsNonRoot: true
+    runAsUser: 100
+    runAsGroup: 101
+    seccompProfile:
+      type: RuntimeDefault
+  containers:
+    - name: probe
+      image: curlimages/curl@sha256:d9b4541e214bcd85196d6e92e2753ac6d0ea699f0af5741f8c6cccbfcf00ef4b # curlimages/curl:8.10.1
+      command: ["sleep", "3600"]
+      securityContext:
+        allowPrivilegeEscalation: false
+        readOnlyRootFilesystem: true
+        capabilities:
+          drop: ["ALL"]
+      resources:
+        requests: { cpu: 10m, memory: 16Mi }
+        limits: { memory: 64Mi }
+      volumeMounts:
+        - name: tmp
+          mountPath: /tmp
+  volumes:
+    - name: tmp
+      emptyDir: {}
+```
+
+```sh
+kubectl apply -f probe.yaml
+kubectl wait --for=condition=Ready pod/probe -n probe --timeout=120s
+kubectl exec -n probe probe -- sh -c 'nc -z -w 5 tempo.tracing.svc.cluster.local 14250; echo "nc exit $?"'
 ```
 
 <!-- gate: output -->
@@ -778,11 +852,11 @@ kubectl logs -n tracing tempo-0 | grep "Starting .*server"
 
 <!-- gate: output -->
 ```
-ts=2026-10-31T01:27:15Z level=info msg="Starting GRPC server" component=tempo endpoint=0.0.0.0:4317
-ts=2026-10-31T01:27:15Z level=info msg="Starting UDP server for Binary Thrift" component=tempo endpoint=0.0.0.0:6832
-ts=2026-10-31T01:27:15Z level=info msg="Starting UDP server for Compact Thrift" component=tempo endpoint=0.0.0.0:6831
-ts=2026-10-31T01:27:15Z level=info msg="Starting HTTP server for Jaeger Thrift" component=tempo endpoint=0.0.0.0:14268
-ts=2026-10-31T01:27:15Z level=info msg="Starting gRPC server for Jaeger Protobuf" component=tempo endpoint=0.0.0.0:14250
+ts=2026-10-31T03:02:29Z level=info msg="Starting GRPC server" component=tempo endpoint=0.0.0.0:4317
+ts=2026-10-31T03:02:29Z level=info msg="Starting UDP server for Binary Thrift" component=tempo endpoint=0.0.0.0:6832
+ts=2026-10-31T03:02:29Z level=info msg="Starting UDP server for Compact Thrift" component=tempo endpoint=0.0.0.0:6831
+ts=2026-10-31T03:02:29Z level=info msg="Starting HTTP server for Jaeger Thrift" component=tempo endpoint=0.0.0.0:14268
+ts=2026-10-31T03:02:29Z level=info msg="Starting gRPC server for Jaeger Protobuf" component=tempo endpoint=0.0.0.0:14250
 ```
 
 ### 6. How the Go services would emit spans (illustrative) {#propagation}
@@ -835,7 +909,8 @@ environment.
    and payments-worker reads it on consume. That turns span D and span E into
    one trace across the queue, the dashed link in the diagram. Once a service
    emits spans, its egress rule in `60-networkpolicy.yaml` also needs port 4318
-   toward the `tracing` namespace. The example has no such rule yet.
+   toward the `tracing` namespace. The example has that rule: `allow-span-egress` admits storefront, orders and
+payments-worker to the Collector on 4318 and nothing else.
 
 With that, a checkout produces the span tree shown above; in Grafana →
 Explore → Tempo you would search by trace ID (or by service/duration) and see
@@ -904,8 +979,11 @@ The payoff of one shared `trace_id`:
 > **In production:** use **tail-based sampling** (keep 100% of error/slow
 > traces, a few % of the rest). Head sampling at, say, 1% throws away 99% of
 > traces *including the one that explains the incident*. Tail sampling costs
-> Collector memory (it buffers per trace) — size it deliberately and run the
-> Collector as its own scalable Deployment.
+> Collector memory, because it buffers each trace. Size it deliberately. One
+> Collector sees whole traces. Several replicas split a trace's spans across
+> instances, so tail sampling then needs a trace-ID load-balancing tier in
+> front, as the [tail sampling README](https://github.com/open-telemetry/opentelemetry-collector-contrib/blob/main/processor/tailsamplingprocessor/README.md)
+> describes: all spans of a trace must reach the same instance.
 
 > **In production:** **propagate context across async boundaries.** The
 > orders → RabbitMQ → payments-worker hop only stays one trace if the trace
@@ -963,7 +1041,7 @@ Checklist:
 - [ ] Backend endpoint via `OTEL_EXPORTER_OTLP_ENDPOINT` only (no coupling), over `https://` with the CA mounted
 - [ ] Tail sampling in the Collector (keep errors/slow), not 1% head sampling
 - [ ] `trace_id` on log lines + exemplars on latency histograms
-- [ ] `tracing` is `restricted`; NetworkPolicy admits only the services that emit spans
+- [ ] `tracing` is `restricted`; NetworkPolicy admits only Pods labelled as the services that emit spans
 - [ ] No personal data or tokens in attributes; a new field gets a redaction rule before it ships
 
 ## Test your understanding
@@ -1008,7 +1086,7 @@ Checklist:
 6. **A developer adds the customer's email address to a new span attribute named `contact`. The Collector rules in this chapter are unchanged. Does the address reach Tempo, and what should change?**
    <details><summary>Show answer</summary>
 
-   It reaches Tempo. The `attributes` processor deletes only the keys it names (`user.name`, `db.statement`, and the Authorization and cookie headers). The `redaction` processor matches only the card-number and bearer-token patterns. An email address matches neither, so it passes. Two changes are needed. The service should not write the address into a span at all; an order ID serves the same purpose. The Collector should also get a rule for the new key, or a pattern for the value, so a slip is caught there. For a stronger default, set `redaction` to `allow_all_keys: false` with an `allowed_keys` list, which drops every key the list does not name. The cost is keeping that list current.
+   No. The `contact` key is not in the `allowed_keys` list, so the `redaction` processor removes the attribute before it checks any value, and the address never leaves the Collector. The list is written to fail closed: a key nobody names is dropped. The cost is keeping the list current, so a service that needs a new attribute adds its key on purpose. The list does not inspect values under the keys it keeps. A developer who writes the address into `note` would still pass it through, because `note` is kept and the email pattern is not in `blocked_values`. So the service should not write the address into a span at all; an order ID serves the same purpose.
 
    </details>
 
