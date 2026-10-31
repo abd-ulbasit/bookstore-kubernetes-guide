@@ -1,15 +1,21 @@
-# Bookstore Platform v2 — Part 13 ch.07: the edge CA. cert-manager creates a
-# self-signed root, keeps its key in the edge-ca Secret in the cert-manager
-# namespace, and signs the gateway's serving certificate with it. Clients
-# trust edge-ca.crt, exported once in ch.13.07 step 2, and never use -k.
+# Bookstore Platform v2: Part 13 ch.07: the edge CA. cert-manager creates a
+# self-signed root and keeps its key in the edge-ca Secret in the
+# bookstore-platform namespace. The CA is a namespaced Issuer, so only
+# Certificates in bookstore-platform can be signed with it. A ClusterIssuer
+# would let a Certificate in any namespace use the same key. The gateway's
+# serving certificate is signed by that CA. Clients trust edge-ca.crt, exported
+# once in ch.13.07 step 2, and never use -k.
 #
-# Apply after cert-manager is installed and its namespace is labelled
-# restricted (ch.13.07 step 2):
+# Who can read the edge-ca Secret can copy the key, so limit Secret reads in
+# bookstore-platform to the platform team (Part 05 ch.04).
+#
+# Apply after cert-manager is installed (ch.13.07 step 2):
 #   kubectl apply -f examples/bookstore-platform/edge/edge-ca.yaml
 apiVersion: cert-manager.io/v1
-kind: ClusterIssuer
+kind: Issuer
 metadata:
   name: edge-selfsigned
+  namespace: bookstore-platform
   labels:
     app.kubernetes.io/part-of: bookstore-platform
 spec:
@@ -19,7 +25,7 @@ apiVersion: cert-manager.io/v1
 kind: Certificate
 metadata:
   name: edge-ca
-  namespace: cert-manager
+  namespace: bookstore-platform
   labels:
     app.kubernetes.io/part-of: bookstore-platform
 spec:
@@ -33,13 +39,14 @@ spec:
     size: 256
   issuerRef:
     name: edge-selfsigned
-    kind: ClusterIssuer
+    kind: Issuer
     group: cert-manager.io
 ---
 apiVersion: cert-manager.io/v1
-kind: ClusterIssuer
+kind: Issuer
 metadata:
   name: edge-ca
+  namespace: bookstore-platform
   labels:
     app.kubernetes.io/part-of: bookstore-platform
 spec:
@@ -73,5 +80,5 @@ spec:
     - key encipherment
   issuerRef:
     name: edge-ca
-    kind: ClusterIssuer
+    kind: Issuer
     group: cert-manager.io

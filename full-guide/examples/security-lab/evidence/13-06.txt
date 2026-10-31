@@ -187,3 +187,25 @@ $ kubectl version
 Server Version: v1.37.0
 $ kubectl get nodes -o wide --no-headers
 sf-pilot-control-plane Ready v1.37.0
+
+## step 12 the chapter's Python signer, checked against the step 6 signature
+# Run on the workstation with Python 3.12, not on the lab cluster, using the
+# step 6 test secret, timestamp and body. The value matches the v1= signature
+# the openssl form produced in step 6, so the chapter's form signs the same way.
+$ printf '%s\n%s.%s' "$WEBHOOK_SECRET" "$TS" "$BODY" | python3 -c 'import hashlib, hmac, sys; key, msg = sys.stdin.read().split("\n", 1); print(hmac.new(key.encode(), msg.encode(), hashlib.sha256).hexdigest())'
+5570d1209b5d9b87c194f16de383dcd0306997258b3fceb5ee685ae61862ec46
+
+## step 13 the step 7 dry runs with the whole worker file (rerun after the chapter changed step 7)
+$ sed s/bookstore-platform-payments/p13-06-payments/g examples/bookstore-platform/payments/outbox-publisher.yaml | awk 'BEGIN{n=0} /^---$/{n++; next} n==1' | kubectl apply -f -
+namespace/p13-06-payments created
+$ kubectl get namespace p13-06-payments --show-labels
+NAME              STATUS   AGE   LABELS
+p13-06-payments   Active   0s    app.kubernetes.io/part-of=bookstore-platform,bookstore-platform.example.com/scope=payments,kubernetes.io/metadata.name=p13-06-payments,pod-security.kubernetes.io/audit-version=latest,pod-security.kubernetes.io/audit=restricted,pod-security.kubernetes.io/enforce-version=latest,pod-security.kubernetes.io/enforce=restricted,pod-security.kubernetes.io/warn-version=latest,pod-security.kubernetes.io/warn=restricted
+$ sed s/bookstore-platform-payments/p13-06-payments/g examples/bookstore-platform/payments/outbox-publisher.yaml | awk '/^---/{n++} n>=2' | kubectl apply --dry-run=server -f -
+serviceaccount/outbox-publisher created (server dry run)
+deployment.apps/outbox-publisher created (server dry run)
+$ sed s/bookstore-platform-payments/p13-06-payments/g examples/bookstore-platform/payments/payments-worker.yaml | kubectl apply --dry-run=server -f -
+serviceaccount/payments-worker created (server dry run)
+deployment.apps/payments-worker created (server dry run)
+$ kubectl delete namespace p13-06-payments --timeout=240s
+namespace "p13-06-payments" deleted

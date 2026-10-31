@@ -111,12 +111,12 @@ idempotency key, backed by the worker's table.
 | Threat | Control taught here | Goes deeper |
 |---|---|---|
 | A forged webhook marks an order paid | The `Stripe-Signature` check runs before the body is parsed. The webhook secret comes from Vault through ESO | [13.04](../13-grand-capstone-bookstore-platform/04-real-auth-keycloak-irsa-istio-jwt.md) for workload identity, [11.05](../11-advanced-production-patterns/05-secrets-at-scale.md) for secret delivery |
-| A captured webhook is replayed | The signed timestamp must fall inside the SDK's five-minute tolerance. A dedupe on `event.id` is production work (see Production notes) | [Stripe's webhook guide](https://docs.stripe.com/webhooks) |
+| A captured webhook is replayed | The only control here is the signed timestamp's five-minute tolerance. A replay inside that window passes the signature check and publishes again. This chapter does not dedupe on `event.id` (see Production notes) | [Stripe's webhook guide](https://docs.stripe.com/webhooks) |
 | A retry or a replay charges the customer twice | Stripe's `Idempotency-Key` from `event_id` for at least 24 hours, then the `payments` table, which has no expiry | [How it works](#how-it-works-under-the-hood) |
 | Card data, keys or customer details reach a log or an event | Events carry ids and amounts only. The gateway holds the Stripe key and logs ids and status, never a body | [13.09](../13-grand-capstone-bookstore-platform/09-observability-otel-tempo-loki-prometheus-grafana.md) for telemetry |
 | A workload writes a topic it does not own | One `KafkaUser` per workload, a TLS client certificate and simple ACLs | [13.05](../13-grand-capstone-bookstore-platform/05-search-and-product-discovery.md) for the listener |
 | A workload reads rows its role should not | One DSN per database role, and grants in `outbox-ddl.sql` | [03.05](../03-config-and-storage/05-stateful-data-patterns.md) |
-| Any Pod in the namespace can call `/charge` | Not controlled in this chapter. The next control is a NetworkPolicy that admits only `payments-worker` | [02.06](../02-networking/06-network-policies.md) |
+| Any Pod in the namespace can call `/charge` | `payments/networkpolicy.yaml` admits only `payments-worker` to the gateway, and default-deny covers the rest of the namespace. The lab's probe is admitted for the walk-through only | [02.06](../02-networking/06-network-policies.md) |
 
 ## Diagrams
 
@@ -170,21 +170,9 @@ simple authorization, and the topics are live. CNPG from ch.13.03 is the
 Postgres backend. Every workload in this chapter carries the
 [security baseline](../01-core-workloads/01-pods.md#baseline).
 
-The example's orders-service is v1 and writes no outbox row, and the
-example has no consumer for `payments.completed`. Steps 5 and 6 below say
-where the hands-on sets a row by hand in their place.
-
-## Hands-on with the Bookstore Platform
-
-Assumes ch.13.05 ran: Strimzi, the Kafka cluster with its TLS listener and
-simple authorization, and the topics are live. CNPG from ch.13.03 is the
-Postgres backend. Every workload in this chapter carries the
-[security baseline](../01-core-workloads/01-pods.md#baseline).
-
 Two kinds of step need more than a single kind cluster. The order walk-through
 in step 5 needs Strimzi, CNPG and ESO, so its output is illustrative. Steps 6
-and 7 need only the gateway, the webhook receiver, stripe-mock and a probe
-Pod,
+and 7 need only the gateway, the webhook receiver, stripe-mock and a probe Pod,
 so the lab run captured them. The captured output came from a lab cluster
 named differently from this chapter's example. The lab used the namespace
 `p13-06-payments` in place of `bookstore-platform-payments`, and the
@@ -292,6 +280,7 @@ kubectl apply -f examples/bookstore-platform/payments/payments-webhook-receiver.
 kubectl apply -f examples/bookstore-platform/payments/payments-webhook-authz.yaml
 kubectl apply -f examples/bookstore-platform/app/payments-gateway/deployment.yaml
 kubectl apply -f examples/bookstore-platform/app/payments-gateway/service.yaml
+kubectl apply -f examples/bookstore-platform/payments/networkpolicy.yaml
 
 kubectl -n bookstore-platform-payments rollout status deployment/outbox-publisher
 kubectl -n bookstore-platform-payments rollout status deployment/payments-worker
@@ -419,7 +408,12 @@ the body, keyed by the webhook secret from step 3. The body carries
 read -rs WEBHOOK_SECRET
 BODY='{"id":"evt_lab_1","object":"event","api_version":"2023-10-16","type":"payment_intent.succeeded","data":{"object":{"id":"pi_lab_1","metadata":{"order_id":"order-001"}}}}'
 TS=$(date +%s)
-SIG=$(printf '%s.%s' "$TS" "$BODY" | openssl dgst -sha256 -hmac "$WEBHOOK_SECRET" | awk '{print $2}')
+# The secret reaches Python on stdin, so it never appears in the process list.
+SIG=$(printf '%s\n%s.%s' "$WEBHOOK_SECRET" "$TS" "$BODY" | python3 -c '
+import hashlib, hmac, sys
+key, msg = sys.stdin.read().split("\n", 1)
+print(hmac.new(key.encode(), msg.encode(), hashlib.sha256).hexdigest())')
+unset WEBHOOK_SECRET
 kubectl -n bookstore-platform-payments exec webhook-probe -- \
   curl -s -w ' status=%{http_code}\n' -X POST -H 'Content-Type: application/json' \
   -H "Stripe-Signature: t=$TS,v1=$SIG" -d "$BODY" \
@@ -487,15 +481,16 @@ kubectl -n bookstore-platform-payments exec webhook-probe -- \
 
 ### 7. Check the workloads under the restricted profile
 
-The awk keeps the documents after the Namespace, so a dry run does not touch
-the namespace's labels. The API server applies the restricted profile to each
-Pod in the dry run.
+The awk in the first command drops the Namespace document at the top of
+`outbox-publisher.yaml`, so the dry run does not touch the namespace's labels.
+`payments-worker.yaml` has no Namespace, so the second command dry-runs the
+whole file. The API server applies the restricted profile to each Pod in the
+dry run.
 
 ```sh
 awk '/^---/{n++} n>=2' examples/bookstore-platform/payments/outbox-publisher.yaml \
   | kubectl apply --dry-run=server -f -
-awk '/^---/{n++} n>=2' examples/bookstore-platform/payments/payments-worker.yaml \
-  | kubectl apply --dry-run=server -f -
+kubectl apply --dry-run=server -f examples/bookstore-platform/payments/payments-worker.yaml
 ```
 
 <!-- gate: output -->
@@ -508,6 +503,7 @@ deployment.apps/outbox-publisher created (server dry run)
 <!-- gate: output -->
 
 ```text
+serviceaccount/payments-worker created (server dry run)
 deployment.apps/payments-worker created (server dry run)
 ```
 
@@ -629,7 +625,7 @@ DNS, which the ch.13.03 DR drill flips to the new writer.
 
 > **In production:** **Dedupe the webhook receiver too.** Stripe redelivers
 > a webhook when the receiver is down or slow. This chapter's receiver does
-> not dedupe on `event.id` yet. Production adds a table keyed on `event.id`
+> not dedupe on `event.id`. Production adds a table keyed on `event.id`
 > and answers a duplicate with 200. Stripe stops retrying on any 2xx, so 200
 > is the right reply to an event already seen.
 

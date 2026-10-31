@@ -246,9 +246,13 @@ spec:
     camel.sink.url: "http://meilisearch.bookstore-platform-search.svc.cluster.local:7700/indexes/books-acme-books/documents"
     camel.sink.httpMethod: POST
     # The sink authenticates with its scoped key (documents.add on books-*),
-    # never the master key. Without this header every write returns 401 and
-    # the index stays empty.
-    camel.component.http.httpClientConfigurer: "header=Content-Type=application/json&header=Authorization=Bearer ${dir:/opt/kafka/external-configuration/meili-sink:api-key}"
+    # never the master key. authMethod and authBearerToken make the HTTP
+    # component send `Authorization: Bearer <token>` on each request. Without
+    # that header every write returns 401 and the index stays empty. The token
+    # is read from the mounted file at start-up, so the value is not in the
+    # connector spec.
+    camel.sink.endpoint.authMethod: Bearer
+    camel.sink.endpoint.authBearerToken: "${dir:/opt/kafka/external-configuration/meili-sink:api-key}"
     key.converter: org.apache.kafka.connect.json.JsonConverter
     value.converter: org.apache.kafka.connect.json.JsonConverter
     camel.component.http.connectionRequestTimeout: 5000

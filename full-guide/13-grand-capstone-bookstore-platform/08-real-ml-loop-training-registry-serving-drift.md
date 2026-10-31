@@ -119,8 +119,8 @@ does not state it.
 | Threat | Control in this chapter | Goes deeper in |
 |---|---|---|
 | A tampered `model.joblib` runs code when the predictor loads it | Restricted predictor pod with no token; write access to the artifact bucket granted to the training identity only | Part 12 ch.06 (serving) |
-| Unreviewed promotion to production | Training moves the `staging` alias only; `production` moves in a reviewed change | 13.11 (approval flow) |
-| Forged or flooding drift events trigger retrains | Per-principal KafkaUser ACLs on the TLS listener; the Sensor filters on `p_value` and holds a Role for Workflows only | 13.05 (Kafka ACLs), 13.12 (runbook) |
+| Unreviewed promotion to production | Training moves the `staging` alias only. This guide does not ship the reviewed change that moves `production`; the lab's hands-on move is unreviewed (step 5) | Production notes |
+| Forged or flooding drift events trigger retrains | Per-principal KafkaUser ACLs on the TLS listener; the Sensor filters on `p_value`, allows one retrain an hour, and holds a Role for Workflows only | 13.05 (Kafka ACLs), 13.12 (runbook) |
 | Anyone who reaches MLflow rewrites the registry | MLflow basic auth on; both credentials synced from Vault by ESO | 13.06 (ESO), 13.04 (identity) |
 
 This chapter does not sign artifacts. Check that the predictor cannot write
@@ -241,8 +241,12 @@ helm install argo-events argo/argo-events \
   -n argo-events -f "$ML/argo-events-values.yaml" --wait
 ```
 
-(KServe + Knative + cert-manager are assumed installed from the Part 12
-ch.06 hands-on; if not, follow that chapter first.)
+(KServe and Knative are assumed installed from the Part 12 ch.06 hands-on.
+cert-manager comes from ch.13.07 step 2, at v1.21.3 in the `cert-manager`
+namespace. Part 12 ch.06 installs cert-manager under the same release name at
+another version, so skip that install when 13.07 has run. A second `helm
+install` under that name fails with "cannot re-use a name that is still in
+use".)
 
 ### 2. Install MLflow
 
@@ -263,9 +267,10 @@ version: 0.10.0
 
 The two credentials come from the ESO-managed `mlflow-credentials` Secret.
 The chart needs both as values and copies them into Secrets it owns, so
-they reach the cluster, but neither Git nor the values file holds them. The
-`--set-string` arguments put them on the command line; run this with shell
-history off.
+they reach the cluster, but neither Git nor the values file holds them. A
+`--set-string` argument would put a password in the process list, so the
+commands below write each value to a private file and pass the file with
+`--set-file`. The directory is deleted after the install.
 
 ```sh
 kubectl create namespace mlflow
@@ -273,16 +278,23 @@ kubectl label namespace mlflow pod-security.kubernetes.io/enforce=restricted
 kubectl apply -f "$ML/mlflow-credentials.yaml"
 kubectl -n mlflow wait --for=condition=Ready externalsecret/mlflow-credentials --timeout=120s
 
+MLFLOW_VALUES="$(mktemp -d)"
+chmod 700 "$MLFLOW_VALUES"
+kubectl -n mlflow get secret mlflow-credentials -o jsonpath='{.data.postgres-password}' | base64 -d > "$MLFLOW_VALUES/postgres-password"
+kubectl -n mlflow get secret mlflow-credentials -o jsonpath='{.data.admin-password}' | base64 -d > "$MLFLOW_VALUES/admin-password"
+chmod 600 "$MLFLOW_VALUES"/*
+
 helm install mlflow community-charts/mlflow \
   --version "$MLFLOW_CHART_VERSION" \
   -n mlflow -f "$ML/mlflow-values.yaml" --wait \
-  --set-string "backendStore.postgres.password=$(kubectl -n mlflow get secret mlflow-credentials -o jsonpath='{.data.postgres-password}' | base64 -d)" \
-  --set-string "auth.adminPassword=$(kubectl -n mlflow get secret mlflow-credentials -o jsonpath='{.data.admin-password}' | base64 -d)"
+  --set-file "backendStore.postgres.password=$MLFLOW_VALUES/postgres-password" \
+  --set-file "auth.adminPassword=$MLFLOW_VALUES/admin-password"
+
+rm -rf "$MLFLOW_VALUES"
 ```
 
 `mlflow-application.yaml` is the GitOps shape of the same install. It leaves
 both credentials empty, so a secret-aware Argo CD plugin has to supply them.
-```
 
 Why community-charts/mlflow (not bitnami/mlflow): community-charts is
 upstream-aligned + actively maintained; bitnami packages add the
@@ -292,17 +304,26 @@ cluster-wide. Pick one; the platform v2 picks community-charts.
 Verify:
 
 ```sh
-ADMIN_PASSWORD="$(kubectl -n mlflow get secret mlflow-credentials -o jsonpath='{.data.admin-password}' | base64 -d)"
+# The admin credential goes in a 0600 curl config file, not in the argument list.
+MLFLOW_AUTH="$(mktemp)"
+chmod 600 "$MLFLOW_AUTH"
+printf 'user = "mlflow-admin:%s"\n' "$(kubectl -n mlflow get secret mlflow-credentials -o jsonpath='{.data.admin-password}' | base64 -d)" > "$MLFLOW_AUTH"
 kubectl -n mlflow port-forward svc/mlflow 5000:5000 >/dev/null 2>&1 &
 sleep 3
-curl -s -u "mlflow-admin:$ADMIN_PASSWORD" http://localhost:5000/api/2.0/mlflow/registered-models/list | jq .
+curl -s -K "$MLFLOW_AUTH" http://localhost:5000/api/2.0/mlflow/registered-models/list | jq .
 # Illustrative output, not captured:
 # {"registered_models":[]}
+
+# Deliberate denial: the same call without the credential is refused. Expect a
+# status other than 200.
+curl -s -o /dev/null -w '%{http_code}\n' http://localhost:5000/api/2.0/mlflow/registered-models/list
 ```
 
 ### 3. Apply the training Workflow + serving InferenceService + drift detector + retrain trigger
 
 ```sh
+kubectl apply -f examples/bookstore-platform/ml/networkpolicy.yaml
+kubectl apply -f examples/bookstore-platform/ml/eventbus.yaml
 kubectl apply -f examples/bookstore-platform/ml/kafka-users.yaml
 kubectl apply -f examples/bookstore-platform/ml/training-rbac.yaml
 kubectl apply -f examples/bookstore-platform/ml/training-workflow.yaml
@@ -353,7 +374,7 @@ After the run completes:
 
 ```sh
 # MLflow logged the run + registered the new model version
-curl -s -u "mlflow-admin:$ADMIN_PASSWORD" http://localhost:5000/api/2.0/mlflow/registered-models/get?name=recommender | jq .
+curl -s -K "$MLFLOW_AUTH" http://localhost:5000/api/2.0/mlflow/registered-models/get?name=recommender | jq .
 # {
 #   "registered_model": {
 #     "name": "recommender",
@@ -376,14 +397,14 @@ The lab version runs the same calls by hand, with the admin credential:
 ```sh
 # Lab only. In production these calls run in a reviewed Workflow under its
 # own identity (see Production notes).
-curl -s -u "mlflow-admin:$ADMIN_PASSWORD" -X POST \
+curl -s -K "$MLFLOW_AUTH" -X POST \
   "http://localhost:5000/api/2.0/mlflow/registered-models/alias" \
   -H "Content-Type: application/json" \
   -d '{"name":"recommender","alias":"production","version":"1"}'
 
 # Write the production version's artifact path into the InferenceService.
 # Moving the alias alone changes nothing in serving.
-ARTIFACT_URI="$(curl -s -u "mlflow-admin:$ADMIN_PASSWORD" \
+ARTIFACT_URI="$(curl -s -K "$MLFLOW_AUTH" \
   "http://localhost:5000/api/2.0/mlflow/model-versions/get-download-uri?name=recommender&version=1" | jq -r .artifact_uri)"
 kubectl -n bookstore-platform-ml patch inferenceservice recommender --type merge \
   -p "{\"spec\":{\"predictor\":{\"model\":{\"storageUri\":\"$ARTIFACT_URI\"}}}}"
@@ -393,11 +414,17 @@ kubectl -n bookstore-platform-ml patch inferenceservice recommender --type merge
 
 `edge-ca.crt` is the edge CA that 13.07 exports once. The loop checks the
 edge's certificate against that CA; it does not skip the check with `-k`.
+The tenant token stays out of the argument list: it goes in a 0600 curl
+config file.
 
 ```sh
+JWT_AUTH="$(mktemp)"
+chmod 600 "$JWT_AUTH"
+printf 'header = "Authorization: Bearer %s"\n' "$JWT" > "$JWT_AUTH"
+
 # Recommendations API (assumes ch.13.08's app/recommendations/ is deployed)
 for i in $(seq 1 1100); do
-  curl -s --cacert edge-ca.crt -H "Authorization: Bearer $JWT" \
+  curl -s --cacert edge-ca.crt -K "$JWT_AUTH" \
     -X POST \
     -H "Content-Type: application/json" \
     -d "{\"user_id\":\"u-$i\",\"features\":[0.5,0.3,0.2]}" \
@@ -413,7 +440,7 @@ done
 ```sh
 # Send 200 predictions with shifted features (drift the distribution)
 for i in $(seq 1 200); do
-  curl -s --cacert edge-ca.crt -H "Authorization: Bearer $JWT" \
+  curl -s --cacert edge-ca.crt -K "$JWT_AUTH" \
     -X POST \
     -H "Content-Type: application/json" \
     -d "{\"user_id\":\"u-d-$i\",\"features\":[5.0,3.0,2.0]}" \
@@ -502,7 +529,9 @@ promotion is intentionally a human gate. Three patterns:
    developer portal kicks off the same Workflow with a documented
    approver chain. **Most user-friendly; most overhead.**
 
-The platform v2 ships (2); (3) is covered in ch.13.11.
+This guide ships none of the three as a reviewed path. Step 5 moves the
+alias by hand with the admin credential, which is the unreviewed path that
+pattern 2 replaces. Pattern 3 is not wired to model promotion in ch.13.11.
 
 ## Production notes
 
@@ -530,10 +559,11 @@ The platform v2 ships (2); (3) is covered in ch.13.11.
 > windows** — store a reference distribution per month or per
 > business-event-context; the drift test compares against the
 > matching context window. (2) **Rate-limit the retrain** — the
-> Sensor's filter ignores drift events within 6 hours of the last
-> retrain. (3) **Two-stage drift** — only retrain when KS drift
-> persists for >24 hours, not on a single window. The chapter's
-> Sensor ships (2); (1) + (3) are production-graduates.
+> Sensor's trigger allows one Workflow an hour (`rateLimit`). (3)
+> **Two-stage drift**: only retrain when KS drift persists for more
+> than 24 hours, not on a single window. The chapter's Sensor ships
+> (2). Seasonal reference windows (1) and two-stage drift (3) are not
+> built in this chapter.
 
 > **In production:** **Model rollback when canary fails.** A KServe
 > canary that fails its metric gate must roll back fast. The flow:
@@ -589,7 +619,7 @@ kubectl apply -f examples/bookstore-platform/ml/argo-events-drift-trigger.yaml
 # Submit a training run
 argo submit --from workflowtemplate/recommender-train -n bookstore-platform-ml
 
-# Promote staging -> production: a reviewed change (PROD), Hands-on step 5 (lab)
+# Promote staging -> production: lab only, Hands-on step 5. A reviewed change is not shipped here.
 ```
 
 The full manifests, with the baseline, are in
@@ -658,9 +688,10 @@ Checklist (the ML loop closed when all seven are yes):
    so write access to that bucket is the control that matters, and only the
    training identity should hold it. The predictor pod stays restricted and
    tokenless, which limits what injected code can reach, but it does not stop
-   it. The `production` alias moves in a reviewed change, so a training run
-   alone cannot send a model to traffic. The reviewer approves the version and
-   the `storageUri` diff together.
+   it. The training run moves only the `staging` alias. In this guide the
+   `production` alias moves by hand (step 5), and the reviewed change that
+   would approve the version and the `storageUri` diff together is not
+   shipped.
 
    </details>
 

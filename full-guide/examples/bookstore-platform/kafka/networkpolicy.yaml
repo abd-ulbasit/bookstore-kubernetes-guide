@@ -1,0 +1,168 @@
+# Bookstore Platform v2: Part 13 ch.05: NetworkPolicies for kafka-system.
+# The namespace denies traffic by default. The allows admit the TLS listener
+# (9093) for the clients in the search, payments and ml namespaces, plus the
+# traffic Strimzi needs between its own pods.
+#
+# The Strimzi operator needs the Kubernetes API. Its egress rule admits any
+# address on 443 and 6443, so narrow it to the API server's address in
+# production.
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: default-deny-all
+  namespace: kafka-system
+  labels:
+    app.kubernetes.io/part-of: bookstore-platform
+spec:
+  podSelector: {}
+  policyTypes: ["Ingress", "Egress"]
+---
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: allow-dns-egress
+  namespace: kafka-system
+  labels:
+    app.kubernetes.io/part-of: bookstore-platform
+spec:
+  podSelector: {}
+  policyTypes: ["Egress"]
+  egress:
+    - to:
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: kube-system
+          podSelector:
+            matchLabels:
+              k8s-app: kube-dns
+      ports:
+        - protocol: UDP
+          port: 53
+        - protocol: TCP
+          port: 53
+---
+# Clients reach the TLS listener of the Kafka cluster.
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: allow-kafka-tls-clients
+  namespace: kafka-system
+  labels:
+    app.kubernetes.io/part-of: bookstore-platform
+spec:
+  podSelector:
+    matchLabels:
+      strimzi.io/cluster: bookstore-platform-kafka
+  policyTypes: ["Ingress"]
+  ingress:
+    - from:
+        - namespaceSelector:
+            matchExpressions:
+              - key: kubernetes.io/metadata.name
+                operator: In
+                values: ["bookstore-platform-payments", "bookstore-platform-ml"]
+        - podSelector:
+            matchLabels:
+              strimzi.io/cluster: bookstore-platform-kafka
+        - podSelector:
+            matchLabels:
+              strimzi.io/cluster: bookstore-platform-connect
+      ports:
+        - protocol: TCP
+          port: 9093
+---
+# Strimzi's own pods talk to each other: brokers, controllers and the entity
+# operator. The Connect workers reach the brokers on the same port.
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: allow-strimzi-internal
+  namespace: kafka-system
+  labels:
+    app.kubernetes.io/part-of: bookstore-platform
+spec:
+  podSelector:
+    matchExpressions:
+      - key: strimzi.io/cluster
+        operator: In
+        values: ["bookstore-platform-kafka", "bookstore-platform-connect"]
+  policyTypes: ["Ingress", "Egress"]
+  ingress:
+    - from:
+        - podSelector:
+            matchLabels:
+              strimzi.io/cluster: bookstore-platform-kafka
+        - podSelector:
+            matchLabels:
+              strimzi.io/cluster: bookstore-platform-connect
+  egress:
+    - to:
+        - podSelector:
+            matchLabels:
+              strimzi.io/cluster: bookstore-platform-kafka
+        - podSelector:
+            matchLabels:
+              strimzi.io/cluster: bookstore-platform-connect
+      ports:
+        - protocol: TCP
+          port: 9093
+        - protocol: TCP
+          port: 9091
+---
+# The Connect workers reach Postgres (CDC source) and Meilisearch (sink).
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: allow-connect-egress
+  namespace: kafka-system
+  labels:
+    app.kubernetes.io/part-of: bookstore-platform
+spec:
+  podSelector:
+    matchLabels:
+      strimzi.io/cluster: bookstore-platform-connect
+  policyTypes: ["Egress"]
+  egress:
+    - to:
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: cnpg-system
+          podSelector:
+            matchLabels:
+              cnpg.io/cluster: bookstore-platform-cnpg
+      ports:
+        - protocol: TCP
+          port: 5432
+    - to:
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: bookstore-platform-search
+          podSelector:
+            matchLabels:
+              app: meilisearch
+      ports:
+        - protocol: TCP
+          port: 7700
+---
+# The Strimzi operator reconciles the custom resources through the API server.
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: allow-operator-api-egress
+  namespace: kafka-system
+  labels:
+    app.kubernetes.io/part-of: bookstore-platform
+spec:
+  podSelector:
+    matchLabels:
+      name: strimzi-cluster-operator
+  policyTypes: ["Egress"]
+  egress:
+    - to:
+        - ipBlock:
+            cidr: 0.0.0.0/0
+      ports:
+        - protocol: TCP
+          port: 443
+        - protocol: TCP
+          port: 6443

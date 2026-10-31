@@ -1,0 +1,88 @@
+# Bookstore Platform v2: Part 13 ch.07: the JWT policies for the Gateway API
+# edge. They are copies of the ch.13.04 policies, scoped to the Gateway API
+# pods. Those policies select the classic ingress gateway in istio-system.
+# The pods for bookstore-platform-edge run in bookstore-platform and carry the
+# label gateway.networking.k8s.io/gateway-name=bookstore-platform-edge. An
+# Istio policy selects only pods in its own namespace, so the copies live in
+# bookstore-platform.
+#
+# The RequestAuthentication also copies the verified `tenant` claim to the
+# x-tenant header. The rate-limit route reads that header as its tenant key.
+#
+# !!! CRD-INTRINSIC DRY-RUN
+#   These are `security.istio.io/v1` objects. WITHOUT Istio installed a client
+#   dry-run prints:
+#     no matches for kind "RequestAuthentication" in version "security.istio.io/v1"
+#   EXPECTED. After Istio is installed this applies cleanly.
+#
+# Apply after the Gateway (ch.13.07 step 2):
+#   kubectl apply -f examples/bookstore-platform/edge/jwt-policies.yaml
+apiVersion: security.istio.io/v1
+kind: RequestAuthentication
+metadata:
+  name: edge-keycloak
+  namespace: bookstore-platform
+  labels:
+    app.kubernetes.io/part-of: bookstore-platform
+spec:
+  selector:
+    matchLabels:
+      gateway.networking.k8s.io/gateway-name: bookstore-platform-edge
+  jwtRules:
+    - issuer: "https://keycloak.bookstore-platform.example.com/realms/bookstore-platform"
+      jwksUri: "https://keycloak.bookstore-platform.example.com/realms/bookstore-platform/protocol/openid-connect/certs"
+      audiences:
+        - storefront-web
+        - admin-portal
+      forwardOriginalToken: true
+      outputPayloadToHeader: x-jwt-payload
+      outputClaimToHeaders:
+        - header: x-tenant
+          claim: tenant
+---
+# Default deny comes from the ALLOW policies. Once an ALLOW policy selects the
+# gateway, a request that matches neither is denied (see ch.13.04).
+apiVersion: security.istio.io/v1
+kind: AuthorizationPolicy
+metadata:
+  name: allow-public-static
+  namespace: bookstore-platform
+  labels:
+    app.kubernetes.io/part-of: bookstore-platform
+spec:
+  selector:
+    matchLabels:
+      gateway.networking.k8s.io/gateway-name: bookstore-platform-edge
+  action: ALLOW
+  rules:
+    - to:
+        - operation:
+            methods: ["GET"]
+            paths: ["/static/*", "/healthz", "/favicon.ico"]
+---
+apiVersion: security.istio.io/v1
+kind: AuthorizationPolicy
+metadata:
+  name: require-jwt-api
+  namespace: bookstore-platform
+  labels:
+    app.kubernetes.io/part-of: bookstore-platform
+spec:
+  selector:
+    matchLabels:
+      gateway.networking.k8s.io/gateway-name: bookstore-platform-edge
+  action: ALLOW
+  rules:
+    - from:
+        # requestPrincipals = "issuer/subject"; "*" matches any non-empty
+        # principal, so the request must carry a token that
+        # RequestAuthentication has verified.
+        - source:
+            requestPrincipals: ["*"]
+      to:
+        - operation:
+            paths: ["/api/*"]
+      when:
+        # The `tenant` custom claim MUST be present and non-empty.
+        - key: request.auth.claims[tenant]
+          notValues: [""]

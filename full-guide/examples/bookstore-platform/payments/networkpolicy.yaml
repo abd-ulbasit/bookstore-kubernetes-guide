@@ -1,0 +1,198 @@
+# Bookstore Platform v2: Part 13 ch.06: NetworkPolicies for the payments
+# namespace. The namespace denies all traffic by default. The allows below admit
+# only the flows the chapter's workloads need.
+#
+#   - outbox-publisher, payments-worker and payments-webhook-receiver reach the
+#     Kafka TLS listener in kafka-system (port 9093).
+#   - outbox-publisher reaches Postgres (CNPG) in cnpg-system.
+#   - payments-worker reaches payments-gateway, the only /charge caller.
+#   - The webhook receiver is reached through the bookstore-platform-edge Gateway.
+#   - payments-gateway reaches stripe-mock in lab, and Stripe's API in production.
+#
+# Lab only: the webhook-probe allow at the end is for the chapter's walk-through.
+# Delete that policy before production.
+#
+# A NetworkPolicy takes effect only on a CNI that enforces it. Check your
+# cluster's CNI before you rely on these objects.
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: default-deny-all
+  namespace: bookstore-platform-payments
+  labels:
+    app.kubernetes.io/part-of: bookstore-platform
+spec:
+  podSelector: {}
+  policyTypes: ["Ingress", "Egress"]
+---
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: allow-dns-egress
+  namespace: bookstore-platform-payments
+  labels:
+    app.kubernetes.io/part-of: bookstore-platform
+spec:
+  podSelector: {}
+  policyTypes: ["Egress"]
+  egress:
+    - to:
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: kube-system
+          podSelector:
+            matchLabels:
+              k8s-app: kube-dns
+      ports:
+        - protocol: UDP
+          port: 53
+        - protocol: TCP
+          port: 53
+---
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: allow-kafka-clients
+  namespace: bookstore-platform-payments
+  labels:
+    app.kubernetes.io/part-of: bookstore-platform
+spec:
+  podSelector:
+    matchExpressions:
+      - key: app
+        operator: In
+        values: ["outbox-publisher", "payments-worker", "payments-webhook-receiver"]
+  policyTypes: ["Egress"]
+  egress:
+    - to:
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: kafka-system
+          podSelector:
+            matchLabels:
+              strimzi.io/cluster: bookstore-platform-kafka
+      ports:
+        - protocol: TCP
+          port: 9093
+---
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: allow-outbox-to-postgres
+  namespace: bookstore-platform-payments
+  labels:
+    app.kubernetes.io/part-of: bookstore-platform
+spec:
+  podSelector:
+    matchLabels:
+      app: outbox-publisher
+  policyTypes: ["Egress"]
+  egress:
+    - to:
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: cnpg-system
+          podSelector:
+            matchLabels:
+              cnpg.io/cluster: bookstore-platform-cnpg
+      ports:
+        - protocol: TCP
+          port: 5432
+---
+# Only payments-worker calls the gateway's /charge endpoint.
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: allow-worker-to-gateway
+  namespace: bookstore-platform-payments
+  labels:
+    app.kubernetes.io/part-of: bookstore-platform
+spec:
+  podSelector:
+    matchLabels:
+      app: payments-gateway
+  policyTypes: ["Ingress"]
+  ingress:
+    - from:
+        - podSelector:
+            matchLabels:
+              app: payments-worker
+      ports:
+        - protocol: TCP
+          port: 8080
+---
+# Stripe traffic reaches the webhook receiver through the edge Gateway.
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: allow-edge-to-webhook
+  namespace: bookstore-platform-payments
+  labels:
+    app.kubernetes.io/part-of: bookstore-platform
+spec:
+  podSelector:
+    matchLabels:
+      app: payments-webhook-receiver
+  policyTypes: ["Ingress"]
+  ingress:
+    - from:
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: bookstore-platform
+          podSelector:
+            matchLabels:
+              gateway.networking.k8s.io/gateway-name: bookstore-platform-edge
+      ports:
+        - protocol: TCP
+          port: 8080
+---
+# The gateway reaches Stripe's API on 443. The rule admits any address, so
+# narrow it to Stripe's published ranges or an egress proxy in production.
+# In the lab the gateway reaches stripe-mock on port 12111 in this namespace.
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: allow-gateway-egress
+  namespace: bookstore-platform-payments
+  labels:
+    app.kubernetes.io/part-of: bookstore-platform
+spec:
+  podSelector:
+    matchLabels:
+      app: payments-gateway
+  policyTypes: ["Egress"]
+  egress:
+    - to:
+        - podSelector:
+            matchLabels:
+              app: stripe-mock
+      ports:
+        - protocol: TCP
+          port: 12111
+    - to:
+        - ipBlock:
+            cidr: 0.0.0.0/0
+      ports:
+        - protocol: TCP
+          port: 443
+---
+# LAB ONLY: the chapter's probe Pod sends signed webhooks and /charge calls
+# from inside the namespace. Delete this policy before production.
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: lab-allow-webhook-probe
+  namespace: bookstore-platform-payments
+  labels:
+    app.kubernetes.io/part-of: bookstore-platform
+spec:
+  podSelector: {}
+  policyTypes: ["Ingress"]
+  ingress:
+    - from:
+        - podSelector:
+            matchLabels:
+              app.kubernetes.io/component: webhook-probe
+      ports:
+        - protocol: TCP
+          port: 8080

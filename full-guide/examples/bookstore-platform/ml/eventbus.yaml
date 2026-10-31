@@ -1,0 +1,51 @@
+# Bookstore Platform v2: Part 13 ch.08: the EventBus for the drift loop.
+# Argo Events runs the EventSource and the Sensor on an EventBus in their
+# namespace, and neither starts without one. This EventBus is JetStream, with
+# the restricted securityContext on every container it creates.
+#
+# The version must appear in the argo-events-controller-config ConfigMap of the
+# Argo Events release the chapter installs (chart 2.4.0, Argo Events v1.8.0),
+# which lists 2.9.12.
+#
+# The lab did not run this EventBus. The admission gate checks the object
+# against the restricted profile. The controller creates the StatefulSet, so
+# the gate does not dry-run its Pods.
+apiVersion: argoproj.io/v1alpha1
+kind: EventBus
+metadata:
+  name: default
+  namespace: bookstore-platform-ml
+  labels:
+    app.kubernetes.io/part-of: bookstore-platform
+spec:
+  jetstream:
+    version: "2.9.12"
+    replicas: 3
+    securityContext:
+      runAsNonRoot: true
+      runAsUser: 65532
+      runAsGroup: 65532
+      fsGroup: 65532
+      seccompProfile:
+        type: RuntimeDefault
+    containerTemplate:
+      securityContext:
+        allowPrivilegeEscalation: false
+        readOnlyRootFilesystem: true
+        capabilities:
+          drop: ["ALL"]
+    reloaderContainerTemplate:
+      securityContext:
+        allowPrivilegeEscalation: false
+        readOnlyRootFilesystem: true
+        capabilities:
+          drop: ["ALL"]
+    metricsContainerTemplate:
+      securityContext:
+        allowPrivilegeEscalation: false
+        readOnlyRootFilesystem: true
+        capabilities:
+          drop: ["ALL"]
+    persistence:
+      accessMode: ReadWriteOnce
+      volumeSize: 1Gi
