@@ -76,7 +76,7 @@ Three metric *sources* you will always run, answering different questions:
 | Threat | Control in this chapter | Deeper |
 |---|---|---|
 | Anyone who can reach the metrics port reads route names, traffic and the Go version | A NetworkPolicy admits only the Prometheus pods to `:8080` (section 4) | [02.06](../02-networking/06-network-policies.md) |
-| A public route forwards `/metrics` to the app | No Ingress or Gateway rule may match it (section 4 shows one that does) | [02.04](../02-networking/04-ingress.md), [02.05](../02-networking/05-gateway-api.md) |
+| A public route forwards `/metrics` to the app | No Ingress or Gateway rule may deliver it to catalog (section 4 checks the Bookstore's rules and the paths they produce) | [02.04](../02-networking/04-ingress.md), [02.05](../02-networking/05-gateway-api.md) |
 | node-exporter needs host networking and host paths, which the baseline forbids | `monitoring` is labelled `privileged`, registered as an exception, with host PID off | [05.02](../05-security/02-pod-security.md) |
 | A Grafana admin password written into a values file or manifest | `grafana.admin.existingSecret`: the password lives in a Secret you create | [03.02](../03-config-and-storage/02-secrets.md) |
 | Personal data or secrets reaching the TSDB through labels | Labels stay bounded (`handler`, `code`); log redaction is in [06.02](02-logging.md) | [06.02](02-logging.md) |
@@ -568,17 +568,49 @@ metrics port that only Prometheus can reach, or a layer-7 policy that matches
 the path. This chapter builds neither: catalog serves its metrics on the same
 port as its API, so the lock above is the only control on that port.
 
-> **The public route.** No Ingress or Gateway rule may send `/metrics` to the
-> app. The Gateway example in [02.05](../02-networking/05-gateway-api.md) meets
-> this: its prefix rewrite turns `/api/books/metrics` into `/books/metrics`,
-> which catalog does not serve. The Ingress example in
-> [02.04](../02-networking/04-ingress.md) does not. Its path
-> `/api/books(/|$)(.*)` keeps the suffix, and `rewrite-target: /$2` would turn
-> `/api/books/metrics` into `/metrics`
-> ([ingress-nginx rewrite](https://kubernetes.github.io/ingress-nginx/examples/rewrite/)).
-> The Ingress example in [02.04](../02-networking/04-ingress.md) does not follow
-> this rule. Its rewrite keeps the suffix, so that example would route `/metrics`
-> to catalog. Do not apply that example where `/metrics` must stay private.
+**The public route.** No Ingress or Gateway rule may send `/metrics` to the
+app, and the edge the guide builds keeps that rule. Check it against the
+manifests, not against memory. The Ingress in
+[02.04](../02-networking/04-ingress.md) has three `Prefix` paths: `/api/books`
+to catalog, `/api/orders` to orders and `/` to storefront. Its optional
+Traefik Middleware rewrites `^/api/(books|orders)(.*)` to `/$1$2`, so the
+output always starts with `/books` or `/orders` and no input can produce
+`/metrics`. Without the Middleware the path reaches catalog unchanged, as
+`/api/books/metrics`. The Gateway in [02.05](../02-networking/05-gateway-api.md)
+rewrites the prefix `/api/books` to `/books`, which gives the same result. A
+request for `/metrics` on the public host matches only the `/` path, so it
+reaches storefront, which serves its page. Neither rewrite lands on a route
+catalog has: it answers `GET /metrics` at the root and `GET /books` as an exact
+path ([Go `ServeMux` patterns](https://pkg.go.dev/net/http#hdr-Patterns-ServeMux)),
+so `/books/metrics` and `/api/books/metrics` are both not found.
+
+No Traefik ran on the lab cluster for this chapter, so no request went through
+the edge. The edge half above is read from the manifests. The catalog half
+ran: the lab sent the three paths below to a build of `app/catalog` on a
+workstation, which serves the same routes as the Pod. On your cluster, send
+the same paths to the Service through a port-forward:
+
+```sh
+kubectl -n bookstore port-forward svc/catalog 18080:80 &
+for p in /metrics /books/metrics /api/books/metrics; do
+  curl -s -o /dev/null -w "%{http_code} $p\n" "http://localhost:18080$p"
+done
+kill %1
+```
+
+<!-- gate: output -->
+```
+200 /metrics
+404 /books/metrics
+404 /api/books/metrics
+```
+
+Only the first path is the real endpoint, and the edge has no way to produce
+it. The change that would break that is a rewrite that drops `/books`, such as
+a `stripPrefix` of `/api/books`, which turns `/api/books/metrics` into
+`/metrics`. Repeat the loop after any change to a route or a Middleware, and
+request `/metrics` through the public host as well, to confirm that the edge
+answers with storefront's page and not with the metrics body.
 
 ### 5. Query the Bookstore with PromQL
 
@@ -831,12 +863,17 @@ Checklist:
    <details><summary>Show answer</summary>
 
    Say no. `/metrics` has no authentication, and it reveals the Go version,
-   the route names and the traffic per route. A route that keeps the suffix
-   hands the endpoint to anyone who can reach the host. Give the dashboard
-   team Grafana, which has its own login, and keep the scrape inside the
-   cluster. Before approving any route, check every Ingress and Gateway rule
-   for a path that could match `/metrics`, including suffix captures such as
-   `(.*)` and their rewrites.
+   the route names and the traffic per route. The Bookstore's Ingress already
+   matches `/api/books/metrics`, because `/api/books` is a `Prefix` path, but
+   catalog answers 404 to it, both with the Middleware (`/books/metrics`) and
+   without it (`/api/books/metrics`). The teammate's request is therefore a
+   request to add a rewrite whose output is `/metrics`, and that is the change
+   to refuse. Give the dashboard team
+   Grafana, which has its own login, and keep the scrape inside the cluster.
+   Before approving any route or Middleware, work out what path catalog would
+   receive for `/api/books/metrics`, including `stripPrefix` Middlewares and
+   regex captures such as `(.*)`, and send that request to catalog to see the
+   status.
 
    </details>
 

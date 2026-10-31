@@ -76,14 +76,3 @@ exceptions:
     upstream: https://kubernetes.io/docs/concepts/security/pod-security-standards/
     chapter: 06-production-readiness/01-observability-metrics.md
     expires: 2027-10-31
-
-  - namespace: p06-01-monitoring
-    level: privileged
-    reason: >-
-      The lab run of the 06.01 monitoring namespace under its lab name, with
-      the same node-exporter exception as monitoring. The lab deleted the
-      namespace at the end of the run, and the chapter's own namespace is
-      monitoring.
-    upstream: https://kubernetes.io/docs/concepts/security/pod-security-standards/
-    chapter: 06-production-readiness/01-observability-metrics.md
-    expires: 2027-10-31
