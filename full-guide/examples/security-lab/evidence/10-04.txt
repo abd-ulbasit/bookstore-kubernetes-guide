@@ -1,0 +1,61 @@
+# Transcript for 10-cloud-and-managed-kubernetes/04-cloud-networking-and-load-balancing.md
+# Tier A: a kind cluster, Kubernetes v1.37.0 node, kubectl v1.37.2.
+# The cluster is a kind cluster named sf-pilot, whose node is sf-pilot-control-plane.
+# The output is verbatim from that lab cluster. The chapter prints the namespace
+# `bookstore`; this run used the throwaway namespace p10-04-expose, labelled
+# pod-security.kubernetes.io/enforce=restricted as the Bookstore namespace is.
+# Command text is shown as it was run, with the manifest path shortened to
+# storefront-lb.yaml. The manifest is the chapter's storefront-lb Service with
+# the namespace set to p10-04-expose and the comments removed.
+# What did not work the first time: calls to the lab API timed out. The
+# kube-apiserver container was not running when checked, a new one started
+# during the check, and the cause was not traced. Deleting the namespace then
+# waited on a discovery failure for metrics.k8s.io/v1beta1, a stale aggregated
+# group with no APIService object. The namespace was removed once the API
+# answered again.
+
+$ kubectl create namespace p10-04-expose
+namespace/p10-04-expose created
+$ kubectl label namespace p10-04-expose pod-security.kubernetes.io/enforce=restricted pod-security.kubernetes.io/enforce-version=latest
+namespace/p10-04-expose labeled
+$ kubectl apply -f storefront-lb.yaml
+service/storefront-lb created
+$ kubectl get svc storefront-lb -n p10-04-expose -o wide
+NAME            TYPE           CLUSTER-IP      EXTERNAL-IP   PORT(S)   AGE   SELECTOR
+storefront-lb   LoadBalancer   10.96.114.109   <pending>     80/TCP    6s    app=storefront
+$ kubectl get svc storefront-lb -n p10-04-expose -o jsonpath='{.spec.loadBalancerSourceRanges}{"\n"}{.spec.allocateLoadBalancerNodePorts}{"\n"}'
+["10.0.0.0/16"]
+false
+$ kubectl describe svc storefront-lb -n p10-04-expose
+Name:                        storefront-lb
+Namespace:                   p10-04-expose
+Labels:                      <none>
+Annotations:                 service.beta.kubernetes.io/aws-load-balancer-nlb-target-type: ip
+                             service.beta.kubernetes.io/aws-load-balancer-scheme: internal
+                             service.beta.kubernetes.io/aws-load-balancer-type: external
+                             service.beta.kubernetes.io/load-balancer-source-ranges: 10.0.0.0/16
+Selector:                    app=storefront
+Type:                        LoadBalancer
+IP Family Policy:            SingleStack
+IP Families:                 IPv4
+IP:                          10.96.114.109
+IPs:                         10.96.114.109
+Port:                        http  80/TCP
+TargetPort:                  http/TCP
+Endpoints:                   
+Session Affinity:            None
+External Traffic Policy:     Cluster
+Internal Traffic Policy:     Cluster
+LoadBalancer Source Ranges:  10.0.0.0/16
+Events:                      <none>
+$ kubectl get endpoints storefront-lb -n p10-04-expose
+Warning: v1 Endpoints is deprecated in v1.33+; use discovery.k8s.io/v1 EndpointSlice
+NAME            ENDPOINTS   AGE
+storefront-lb   <none>      9s
+$ kubectl delete namespace p10-04-expose --wait=true
+namespace "p10-04-expose" deleted
+E1031 06:10:55.673098   64644 reflector.go:227] "Failed to watch" err="namespaces \"p10-04-expose\" is forbidden: User \"kubernetes-admin\" cannot watch resource \"namespaces\" in API group \"\" at the cluster scope - error from a previous attempt: EOF" reflector="k8s.io/client-go/tools/watch/informerwatcher.go:162" type="*unstructured.Unstructured"
+$ kubectl get ns p10-04-expose
+Error from server (NotFound): namespaces "p10-04-expose" not found
+$ kubectl get ns p10-04-expose
+Error from server (NotFound): namespaces "p10-04-expose" not found

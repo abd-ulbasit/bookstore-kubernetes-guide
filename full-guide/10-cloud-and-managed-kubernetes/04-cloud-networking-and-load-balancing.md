@@ -16,8 +16,8 @@
 > [`51-gateway.yaml`](../examples/bookstore/raw-manifests/51-gateway.yaml).
 
 **Estimated time:** ~60 min read · ~90 min hands-on
-**Prerequisites:** [Part 02 ch.01](../02-networking/01-networking-model.md) — networking model this chapter maps onto cloud CNIs · [Part 02 ch.05](../02-networking/05-gateway-api.md) — Gateway API contrasted with cloud LB annotations
-**You'll know after this:** • compare AWS VPC CNI / Cilium / GKE / AKS CNIs and their NetworkPolicy support · • diagnose Pod-IP exhaustion and apply prefix delegation as the fix · • wire AWS Load Balancer Controller for NLB (L4) and ALB (L7) traffic · • configure ExternalDNS to keep DNS records in sync with Service/Ingress changes · • choose between cloud-LB annotations and Gateway API for a given exposure
+**Prerequisites:** [Part 02 ch.01](../02-networking/01-networking-model.md): networking model this chapter maps onto cloud CNIs · [Part 02 ch.05](../02-networking/05-gateway-api.md): Gateway API contrasted with cloud LB annotations · [ch.03](03-cloud-identity.md): workload identity for the controllers
+**You'll know after this:** • compare AWS VPC CNI / Cilium / GKE / AKS CNIs and their NetworkPolicy support · • diagnose Pod-IP exhaustion and apply prefix delegation as the fix · • wire AWS Load Balancer Controller for NLB (L4) and ALB (L7) traffic · • restrict the API server endpoint and each load balancer to the networks that need them · • configure ExternalDNS to keep DNS records in sync with Service/Ingress changes · • choose between cloud-LB annotations and Gateway API for a given exposure
 
 <!-- tags: cloud, networking, cilium, vpc-cni, eks, aks -->
 
@@ -34,8 +34,8 @@ exactly where cloud networking incidents come from:
    noted a `LoadBalancer` Service stays `<pending>` with no cloud. On a cloud
    it provisions a *real, billed* load balancer — and one per Service unless
    you front them with an Ingress/Gateway ([Part 02 ch.04](../02-networking/04-ingress.md)).
-   Getting the *type* and the *annotations* right is the difference between an
-   internet-facing NLB and an accidental public database.
+   Getting the *type*, the *scheme* and the *source ranges* right is the
+   difference between an internal NLB and an accidental public database.
 2. **Pod IPs come from the VPC now, and you can run out.** kind's Pod CIDR is
    imaginary. AWS's **VPC CNI** gives every Pod a **real routable VPC IP** out
    of your subnets — so subnet sizing, ENI limits, and **IP exhaustion** are
@@ -43,21 +43,26 @@ exactly where cloud networking incidents come from:
 3. **NetworkPolicy can be a silent no-op — again, but for cloud reasons.**
    [Part 02 ch.06](../02-networking/06-network-policies.md) hammered "the CNI
    must enforce policy or it does nothing". On managed clusters the *default*
-   CNI may not enforce — `60-networkpolicy.yaml` would apply and protect
-   nothing unless you enabled the right dataplane.
+   CNI may not enforce: enforcement is a separate switch, so
+   `60-networkpolicy.yaml` applies cleanly and protects nothing until the right
+   dataplane or add-on is on.
+4. **The control plane is reachable from the internet unless you close it.**
+   EKS creates a public API endpoint by default, AKS gives the API server a
+   public IP by default, and a GKE control plane accepts any external address
+   until authorised networks are set. The API server is the most powerful door
+   in the cluster, so its exposure is the first decision, not the last.
 
 This chapter is the cloud refraction of Part 02: the same Services/Ingress/
 Gateway/NetworkPolicy objects (**unchanged** — that is the point), wired into
 the cloud's VPC, CNI, and load balancers. The reference is *Production
 Kubernetes* (Pod Networking / Service Routing).
 
-> **This chapter needs a real cloud account.** Cloud LBs, the VPC CNI, and
-> ExternalDNS act on real cloud APIs — not reproducible on kind. Per the
-> [ch.01](01-managed-kubernetes-model.md) honesty pattern: every provider
-> command/annotation is **exact and correct**; the **Bookstore Service/Ingress/
-> Gateway objects are unchanged and dry-runnable on kind** (proven below) and
-> byte-identical on cloud — only the *cloud LB/DNS/CNI behaviour* needs the
-> account. No output faked; placeholders only.
+> **Nothing in this chapter runs on a cloud.** Load balancer, DNS and CNI
+> behaviour is cited from each provider's documentation (checked 2026-10-31,
+> links under Further reading), not run. What runs is on the kind lab cluster:
+> the dry-runs that show the Bookstore objects are unchanged, and one Service
+> that shows what a cloud controller is asked to build. Placeholders only: no
+> account IDs, certificate ARNs or public addresses.
 
 ## Mental model
 
@@ -108,6 +113,19 @@ The trap to hold onto: **the Bookstore's `40-services.yaml`/`50-ingress.yaml`/
 "the object" with "the cloud thing the controller built from it" is the source
 of most cloud-networking confusion (and orphaned-LB bills).
 
+## Threats and controls
+
+| Threat | Control in this chapter | Goes deeper |
+|---|---|---|
+| The API server answers the whole internet | A private endpoint, or a public endpoint limited to authorised networks (Hands-on step 1) | Who may act once connected: [ch.03](03-cloud-identity.md), [05.01](../05-security/01-authn-authz-rbac.md) |
+| A `type: LoadBalancer` Service exposes an internal workload | An internal scheme chosen on purpose, and source ranges on any public one (Hands-on step 3) | The Pod-level rules behind it: [Part 02 ch.06](../02-networking/06-network-policies.md) |
+| Nodes with public IPs are reachable directly | Private nodes, with egress through NAT (Mental model) | Egress rules: [Part 02 ch.06](../02-networking/06-network-policies.md) |
+| A NetworkPolicy is accepted but never enforced | Turn on the enforcer and prove a denied connection is refused (How it works) | [Part 02 ch.06](../02-networking/06-network-policies.md) |
+
+Only threats specific to cloud exposure are listed. The baseline for the
+workloads behind these Services is in
+[01.01](../01-core-workloads/01-pods.md#baseline).
+
 ## Diagrams
 
 ### Diagram A — internet → cloud LB → controller → Service → Pod (Mermaid)
@@ -121,7 +139,7 @@ flowchart TB
     dns["Cloud DNS (Route53/Cloud DNS/Azure DNS)<br/>record written by ExternalDNS"]
 
     subgraph cloud["Cloud VPC (your account)"]
-        lb["Cloud Load Balancer<br/>ALB (Ingress) / NLB (Service type=LB)<br/>provisioned by the LB CONTROLLER<br/>from the unchanged Bookstore object"]
+        lb["Cloud Load Balancer<br/>ALB (Ingress) / NLB (Service type=LB)<br/>provisioned by the LB CONTROLLER<br/>from the unchanged Bookstore object<br/>scheme is a choice: internal or internet-facing"]
         subgraph k8s["Managed Kubernetes cluster"]
             ctrl["AWS LB Controller / GKE / AGIC<br/>(watches Ingress/Service,<br/>programs the cloud LB)"]
             subgraph ns["bookstore namespace (unchanged manifests)"]
@@ -161,11 +179,12 @@ flowchart TB
                           Envoy/Cilium GW
   ─────────────────────────────────────────────────────────────────────────
   KEY ANNOTATIONS (provider-specific = lock-in; Gateway API = portable):
-   internal-only :  service.beta.kubernetes.io/aws-load-balancer-internal:"true"
-                    networking.gke.io/load-balancer-type:"Internal"
-                    service.beta.kubernetes.io/azure-load-balancer-internal:"true"
-   direct-to-Pod :  AWS  alb/nlb-target-type: ip  | GKE: NEG (container-native,
-                    default for many)             | AKS: similar via annotations
+   internal      :  AWS  aws-load-balancer-scheme: "internal" (also the default)
+                    GKE  spec.loadBalancerClass: networking.gke.io/l4-regional-internal
+                    AKS  service.beta.kubernetes.io/azure-load-balancer-internal:"true"
+   direct-to-Pod :  AWS  alb.ingress.kubernetes.io/target-type: ip (Ingress)
+                    AWS  aws-load-balancer-nlb-target-type: ip (Service)
+                    GKE  NEG (container-native) | AKS  cloud-provider-azure annotations
    TLS cert      :  AWS ACM ARN | GKE ManagedCertificate | AKS Key Vault/AGIC
    DNS name      :  external-dns.alpha.kubernetes.io/hostname (ExternalDNS, all)
 
@@ -177,16 +196,61 @@ flowchart TB
 ## Hands-on with the Bookstore
 
 **Assumed working directory: the guide repo root (`full-guide/`).** This
-chapter adds **no manifests** and **does not edit**
+chapter edits **none** of
 [`40-services.yaml`](../examples/bookstore/raw-manifests/40-services.yaml),
 [`50-ingress.yaml`](../examples/bookstore/raw-manifests/50-ingress.yaml),
 [`51-gateway.yaml`](../examples/bookstore/raw-manifests/51-gateway.yaml), or
 [`60-networkpolicy.yaml`](../examples/bookstore/raw-manifests/60-networkpolicy.yaml).
-It shows how those *unchanged* objects expose `storefront` on a cloud LB with
-a real hostname. **Illustrative** (cloud account needed); the dry-run that
-proves the objects are unchanged is **runnable on kind now**.
+Cloud settings go in overlays. The overlays are **illustrative** and need a
+cloud account to run, so only the kind steps were run.
 
-### 1. Install the cloud LB controller + ExternalDNS (Helm, pinned)
+The manifests here are Services, Ingress and NetworkPolicy objects with no pod
+template, so the workload baseline
+([01.01](../01-core-workloads/01-pods.md#baseline)) has nothing to attach to.
+Overlays are fragments that a Kustomize patch or Helm value merges into the
+canonical object. The one complete manifest the reader applies is the
+`storefront-lb` Service in step 3.
+
+### 1. Set who can reach the API server
+
+The API server endpoint belongs to the cluster, not to a Service, so it is set
+first. Each cloud offers two controls: a **private endpoint**, reachable only
+from the VPC or a connected network, and a list of **authorised networks** for
+the public endpoint. The settings below are cited, not run.
+
+- **EKS.** New clusters have the public endpoint on and the private endpoint
+  off ([EKS endpoint access][eks-endpoint]). Turn the public endpoint off for
+  a cluster that CI and operators reach over a connected network. If you keep
+  it, the public access CIDRs restrict it. They do not touch the private
+  endpoint. EKS recommends enabling the private endpoint too, or including the
+  addresses that nodes use to reach the public one. The cluster security group
+  guards the private endpoint.
+- **GKE.** `--enable-private-nodes` gives nodes no external IP addresses.
+  `--enable-private-endpoint` turns off the external endpoint. Without
+  `--enable-master-authorized-networks` and `--master-authorized-networks`, the
+  control plane accepts any external address. Private nodes need Cloud NAT for
+  outbound internet access ([GKE private clusters][gke-private]).
+- **AKS.** `--enable-private-cluster` puts the API server behind a private
+  endpoint in the cluster's virtual network
+  ([AKS private clusters][aks-private]).
+  Authorised IP ranges limit only the public API server, so they do not apply
+  to a private cluster. They need the Standard load balancer, allow up to 200
+  ranges, and take up to two minutes to take effect
+  ([AKS authorised ranges][aks-ip-ranges]).
+
+Before you tighten any of these, confirm that your CI runners and admin
+networks are on the list, or you lock yourself out. A sketch of the AKS
+restriction, with a placeholder for your admin range:
+
+```sh
+# AKS, cited and not run: limit the public API server to one network.
+az aks update \
+  --resource-group $RESOURCE_GROUP \
+  --name $CLUSTER_NAME \
+  --api-server-authorized-ip-ranges $ADMIN_CIDR
+```
+
+### 2. Install the cloud LB controller + ExternalDNS (Helm, pinned)
 
 Per the guide's hard rule — **add-ons via Helm with a pinned chart version,
 never `kubectl apply -f .../releases/latest/download/<PINNED-FILE>.yaml`**
@@ -194,11 +258,14 @@ never `kubectl apply -f .../releases/latest/download/<PINNED-FILE>.yaml`**
 for KEDA, kube-prometheus-stack, Velero):
 
 ```sh
+# Chart versions are the current releases from `helm show chart`, checked
+# 2026-10-31. Run `helm show chart` again before you copy them.
+
 # AWS Load Balancer Controller (lead path). It needs an IRSA role (ch.03) so
 # the controller Pod can call ELB APIs with NO static key:
 helm repo add eks https://aws.github.io/eks-charts && helm repo update
 helm install aws-load-balancer-controller eks/aws-load-balancer-controller \
-  -n kube-system --version 1.9.2 \
+  -n kube-system --version 3.6.2 \
   --set clusterName=$CLUSTER_NAME \
   --set serviceAccount.create=true \
   --set serviceAccount.annotations."eks\.amazonaws\.com/role-arn"=arn:aws:iam::123456789012:role/aws-lb-controller
@@ -207,23 +274,24 @@ helm install aws-load-balancer-controller eks/aws-load-balancer-controller \
 
 # ExternalDNS (writes Route53 records from Ingress/Service hosts), also IRSA:
 helm repo add external-dns https://kubernetes-sigs.github.io/external-dns/ && helm repo update
-helm install external-dns external-dns/external-dns -n kube-system --version 1.15.0 \
+# txtOwnerId names this instance in a TXT "registry" record. It is mandatory
+# when more than one ExternalDNS shares a zone, and it lets policy=sync delete
+# only the records this instance created. The chart requires policy and gives
+# it no default, so it is set explicitly.
+helm install external-dns external-dns/external-dns -n kube-system --version 1.23.0 \
   --set provider=aws \
   --set "domainFilters[0]=your-org.com" \
   --set policy=sync \
   --set "txtOwnerId=$CLUSTER_NAME" \
-  `# txtOwnerId tags a TXT "registry" record so THIS ExternalDNS only manages` \
-  `# records it created — mandatory when >1 ExternalDNS / cluster shares a` \
-  `# zone, and what makes policy=sync safely DELETE stale records (not others')` \
   --set serviceAccount.annotations."eks\.amazonaws\.com/role-arn"=arn:aws:iam::123456789012:role/external-dns
 ```
 
 GKE/AKS equivalents: GKE's Ingress/Gateway controllers are built in (no
-controller to install — annotate the object); AKS uses **AGIC**
-(`az aks enable-addons --addons ingress-appgw`) or ingress-nginx; ExternalDNS
-installs the same way with `provider=google`/`azure`.
+controller to install; annotate the object); AKS uses the **App Gateway
+Ingress Controller (AGIC)** add-on or ingress-nginx; ExternalDNS installs the
+same way with `provider=google` or `provider=azure`.
 
-### 2. The unchanged Bookstore objects + cloud annotations (as an overlay)
+### 3. The unchanged Bookstore objects + cloud annotations (as an overlay)
 
 The Bookstore's edge is already
 [`50-ingress.yaml`](../examples/bookstore/raw-manifests/50-ingress.yaml) (or
@@ -234,67 +302,108 @@ as an *illustrative overlay*, **canonical files unedited** (this is what a
 prod Kustomize overlay patch or a Helm value would inject):
 
 ```yaml
-# illustrative — what the EXISTING Ingress needs on AWS (overlay/patch only;
-# 50-ingress.yaml itself is NOT modified — Part 02 ch.04 owns it):
-apiVersion: networking.k8s.io/v1
-kind: Ingress
+# illustrative overlay fragment: a Kustomize patch or a Helm value merges it
+# into the EXISTING Ingress from 50-ingress.yaml. The base file is not
+# modified. The fragment has no kind of its own, so nothing applies it alone.
 metadata:
-  name: bookstore                       # the SAME object as 50-ingress.yaml
-  namespace: bookstore
   annotations:
-    alb.ingress.kubernetes.io/scheme: internet-facing
-    alb.ingress.kubernetes.io/target-type: ip            # direct to Pod (VPC CNI)
+    alb.ingress.kubernetes.io/scheme: internet-facing   # a choice: the default is internal
+    alb.ingress.kubernetes.io/target-type: ip           # direct to Pod (VPC CNI)
     alb.ingress.kubernetes.io/certificate-arn: arn:aws:acm:us-east-1:123456789012:certificate/abcd
     alb.ingress.kubernetes.io/listen-ports: '[{"HTTPS":443}]'
+    # 0.0.0.0/0 and ::/0 are the defaults, and they fit a public storefront.
+    # Narrow them for an Ingress that only admins should reach.
+    alb.ingress.kubernetes.io/inbound-cidrs: '0.0.0.0/0,::/0'
     external-dns.alpha.kubernetes.io/hostname: bookstore.your-org.com   # ExternalDNS
 spec:
   ingressClassName: alb                  # the cloud controller (NOT nginx) owns it
-  # rules: IDENTICAL host/path → storefront/catalog/orders as 50-ingress.yaml
+  # routing rules: unchanged from 50-ingress.yaml (same hosts and paths)
 ```
 
-For a pure L4 exposure of just `storefront` (no L7 routing), the
-`type: LoadBalancer` form — *one cloud LB, billed*, which is exactly why the
-Bookstore prefers the shared Ingress above:
+```sh
+# Cited, not run: needs a cloud account. Applying the overlay makes the
+# controller provision an ALB, and ExternalDNS writes bookstore.your-org.com
+# to point at it.
+kubectl get ingress bookstore -n bookstore     # ADDRESS = the ALB DNS name
+kubectl describe ingress bookstore -n bookstore  # events: ALB provisioned/programmed
+# ExternalDNS log shows the Route53 upsert; then:
+curl https://bookstore.your-org.com/api/books   # internet -> ALB -> catalog
+```
+
+For a pure L4 exposure of just `storefront` (no L7 routing), the Service
+`type: LoadBalancer` form is the alternative. It gets one cloud load balancer
+and one bill per Service, which is why the Bookstore prefers the shared
+Ingress above. The manifest below is complete, and it is the one manifest in
+this chapter that you apply. It is internal on purpose. A public NLB is one
+changed annotation away, and that change is a decision you make, not a default.
+Save it as `storefront-lb.yaml`.
 
 ```yaml
-# illustrative — Service type=LoadBalancer for storefront (one NLB, one bill).
-# These `service.beta.kubernetes.io/aws-load-balancer-*` annotations are the
-# AWS LOAD BALANCER CONTROLLER v2 NLB style (type=external + nlb-target-type=ip
-# = a direct-to-Pod NLB). This is a DIFFERENT system from BOTH:
-#   • the `alb.ingress.kubernetes.io/*` Ingress→ALB style in step 2 (L7,
-#     IngressClass=alb), and
-#   • the legacy in-tree cloud-provider Classic-ELB (no LB Controller; old
-#     `service.beta.kubernetes.io/aws-load-balancer-*` semantics differ).
-# Do NOT mix the three on one object. This snippet is illustrative of the
-# one-cloud-LB-PER-Service pattern the guide advises AGAINST — the Bookstore
-# uses the single shared Ingress (50-) / Gateway (51-) above instead; it is
-# shown only so the type=LoadBalancer path is concrete.
 apiVersion: v1
 kind: Service
 metadata:
   name: storefront-lb
   namespace: bookstore
   annotations:
-    service.beta.kubernetes.io/aws-load-balancer-type: external          # AWS LB Controller v2 (NOT in-tree ELB)
-    service.beta.kubernetes.io/aws-load-balancer-nlb-target-type: ip      # direct-to-Pod NLB
-    service.beta.kubernetes.io/aws-load-balancer-scheme: internet-facing
-    external-dns.alpha.kubernetes.io/hostname: shop.your-org.com
+    service.beta.kubernetes.io/aws-load-balancer-type: external
+    service.beta.kubernetes.io/aws-load-balancer-nlb-target-type: ip
+    service.beta.kubernetes.io/aws-load-balancer-scheme: internal
+    service.beta.kubernetes.io/load-balancer-source-ranges: 10.0.0.0/16
 spec:
   type: LoadBalancer
-  selector: { app: storefront }          # same selector as 40-services.yaml's storefront
-  ports: [ { port: 443, targetPort: 8080 } ]
+  loadBalancerSourceRanges:
+    - 10.0.0.0/16                       # the clients allowed through: replace
+  allocateLoadBalancerNodePorts: false  # the NLB targets Pod IPs directly
+  selector:
+    app: storefront                     # same selector as 40-services.yaml
+  ports:
+    - name: http
+      port: 80
+      targetPort: http                  # -> container's named port 8080
 ```
+
+- `aws-load-balancer-type: external` hands the Service to the AWS Load Balancer
+  Controller instead of the in-tree provider. Do not add it to a Service that
+  already exists ([AWS Service annotations][aws-lb-svc]).
+- `aws-load-balancer-scheme: internal` keeps the NLB private. The controller
+  defaults to internal too, so the line records the decision. Internet-facing
+  would expose every port in `spec.ports` to the internet, filtered only by the
+  source ranges.
+- `loadBalancerSourceRanges` is the Kubernetes field for the client CIDRs
+  allowed through, and the AWS annotation sets the same control. The AWS
+  default is `0.0.0.0/0`, so setting it is what narrows access. On AKS the
+  check runs before traffic is rewritten, so the rule sees the client address
+  ([AKS network policies][aks-netpol]).
+- `allocateLoadBalancerNodePorts: false` stops Kubernetes from opening a
+  NodePort on every node for each Service port. By default it does. Turn it
+  off only when the load balancer sends traffic straight to Pods, as
+  `target-type: ip` does ([Kubernetes Services][k8s-svc]).
+
+The output below was captured on the lab cluster, a kind cluster with a
+different name, in a throwaway namespace named `p10-04-expose`. The commands
+here use `bookstore`. kind has no cloud controller, so nothing provisions a
+load balancer. The run shows that the API stores the source range and the
+missing NodePort, and that the Service stays `<pending>`.
 
 ```sh
-# On the cloud cluster, applying the Ingress overlay makes the controller
-# provision an ALB and ExternalDNS write bookstore.your-org.com -> the ALB:
-kubectl get ingress bookstore -n bookstore     # ADDRESS = the ALB DNS name
-kubectl describe ingress bookstore -n bookstore  # events: ALB provisioned/programmed
-# ExternalDNS log shows the Route53 upsert; then:
-curl -k https://bookstore.your-org.com/api/books   # internet -> ALB -> catalog
+kubectl apply -f storefront-lb.yaml
+kubectl get svc storefront-lb -n bookstore -o wide
+kubectl get svc storefront-lb -n bookstore -o jsonpath='{.spec.loadBalancerSourceRanges}{"\n"}{.spec.allocateLoadBalancerNodePorts}{"\n"}'
 ```
 
-### 3. Prove the Bookstore objects are unchanged (RUNNABLE on kind now)
+<!-- gate: output -->
+```
+NAME            TYPE           CLUSTER-IP      EXTERNAL-IP   PORT(S)   AGE   SELECTOR
+storefront-lb   LoadBalancer   10.96.114.109   <pending>     80/TCP    6s    app=storefront
+```
+
+<!-- gate: output -->
+```
+["10.0.0.0/16"]
+false
+```
+
+### 4. Prove the Bookstore objects are unchanged (RUNNABLE on kind now)
 
 The deliverable of the whole guide — the network objects are portable; only
 the cloud wiring is added. Verify the canonical files are pure GA Kubernetes
@@ -306,7 +415,7 @@ kubectl apply --dry-run=client -f examples/bookstore/raw-manifests/40-services.y
 kubectl apply --dry-run=client -f examples/bookstore/raw-manifests/50-ingress.yaml
 kubectl apply --dry-run=client -f examples/bookstore/raw-manifests/60-networkpolicy.yaml
 #   all: "<OBJ> created (dry run)" — built-in kinds, ZERO cloud-specific fields
-#   in the canonical files. The cloud annotations/IngressClass in step 2 are an
+#   in the canonical files. The cloud annotations/IngressClass in step 3 are an
 #   OVERLAY (a prod Kustomize patch / Helm value), never baked into the base.
 # (51-gateway.yaml is CRD-backed — `no matches for kind "Gateway"` until the
 #  Gateway API CRDs are installed: the intrinsic behaviour Part 02 ch.05
@@ -318,11 +427,11 @@ kubectl apply --dry-run=client -f examples/bookstore/raw-manifests/60-networkpol
 > the Gateway-API [`51-gateway.yaml`](../examples/bookstore/raw-manifests/51-gateway.yaml))
 > — *no app change, no Service-type change, no edit to those files*; cloud
 > behaviour is added via annotations in a prod overlay. The ALB/Route53
-> provisioning needs a cloud account (illustrative); the proof that the
-> objects are unchanged is the kind dry-run above (runnable). On a real
-> cluster, also keep [Part 02 ch.06](../02-networking/06-network-policies.md)'s
-> `60-networkpolicy.yaml` in force — but first ensure the cloud CNI *enforces*
-> it (step below).
+> provisioning is cited, not run. The proof that the objects are unchanged is
+> the kind dry-run above. On a real cluster, also keep
+> [Part 02 ch.06](../02-networking/06-network-policies.md)'s
+> `60-networkpolicy.yaml` in force, and first confirm the cloud CNI enforces
+> it (see How it works).
 
 ## How it works under the hood
 
@@ -365,13 +474,24 @@ kubectl apply --dry-run=client -f examples/bookstore/raw-manifests/60-networkpol
   object — the [Part 02 ch.04](../02-networking/04-ingress.md) "annotation
   string-soup, controller-specific" problem, at cloud scale, and the strongest
   argument for **Gateway API** ([Part 02 ch.05](../02-networking/05-gateway-api.md)).
+- **Security groups are the second layer.** The AWS Load Balancer Controller
+  creates a security group for each load balancer unless you name one. The
+  `inbound-cidrs` annotation (Ingress) and the source-range annotation (Service)
+  limit who may reach it. Naming your own groups with
+  `alb.ingress.kubernetes.io/security-groups` or
+  `service.beta.kubernetes.io/aws-load-balancer-security-groups` makes
+  `manage-backend-security-group-rules` default to false, so set it to true
+  explicitly if the controller should keep the backend rules current. Once you
+  name security groups, `inbound-cidrs` is ignored. The EKS cluster security
+  group is a third, separate control, and it guards the private endpoint from
+  step 1 ([AWS Ingress annotations][aws-lb-ing]).
 - **GKE container-native LB (NEG) and AKS AGIC.** GKE's built-in Ingress
   programs **Google Cloud Load Balancing**; **container-native load
   balancing** via **Network Endpoint Groups (NEGs)** registers **Pod
   endpoints directly** in the LB backend (GKE's equivalent of `target-type:
-  ip` — better health-checking and traffic distribution than the old
-  NodePort path, and the default for many GKE setups). AKS uses the **App
-  Gateway Ingress Controller (AGIC)** to drive an Azure Application Gateway
+  ip`: better health-checking and traffic distribution than the old
+  NodePort path). AKS uses the **App Gateway Ingress Controller (AGIC)** to
+  drive an Azure Application Gateway
   from Ingress objects, or ingress-nginx behind an Azure L4 LB. Same pattern
   everywhere: a controller turns the **unchanged** Ingress object into the
   cloud's L7 LB; only the `IngressClass`/annotations differ.
@@ -387,6 +507,22 @@ kubectl apply --dry-run=client -f examples/bookstore/raw-manifests/60-networkpol
   precisely so the cloud edge can be the portable one — the app-facing
   Gateway/HTTPRoute objects don't change between clouds; only the
   `GatewayClass`/`controllerName` does.
+- **A NetworkPolicy is only as real as its enforcer.** The API accepts the
+  object either way. On EKS, the VPC CNI enforces standard and admin network
+  policies from version 1.21.0. A third-party engine such as Calico or Cilium
+  also works, but it must not manage the same policies as the VPC CNI
+  ([EKS network policies][eks-vpc-cni-netpol]). On GKE Standard, enforcement is
+  two settings, the NetworkPolicy add-on and enforcement on the nodes, and the
+  add-on alone enforces nothing. Dataplane V2 enforces with no separate switch
+  ([GKE network policy][gke-netpol]). On AKS, `--network-policy` chooses the
+  engine (azure, calico or cilium), at creation or later with `az aks update`.
+  Azure's own Linux policy manager retires on 2028-09-30, and AKS recommends
+  Cilium for new clusters ([AKS network policies][aks-netpol]). Confirm the
+  enforcer, then prove that a denied connection is refused, as taught in
+  [Part 02 ch.06](../02-networking/06-network-policies.md). Source-IP rewriting
+  can also stop a policy from matching traffic that arrives through a
+  LoadBalancer Service, so filter that traffic with
+  `spec.loadBalancerSourceRanges`, which runs before the rewrite.
 - **ExternalDNS, mechanically.** A controller that watches Ingresses/Services
   carrying a hostname (the `external-dns.alpha.kubernetes.io/hostname`
   annotation, or the Ingress `host`) and reconciles **DNS records** in the
@@ -399,8 +535,8 @@ kubectl apply --dry-run=client -f examples/bookstore/raw-manifests/60-networkpol
   managed A/CNAME gets a companion TXT record stamped with that owner id, so
   an ExternalDNS instance only mutates/deletes records *it* created — which is
   what makes `policy=sync` (prune stale records) safe and multi-instance /
-  multi-cluster sharing a zone correct (omit it and instances fight or delete
-  each other's records).
+  multi-cluster sharing a zone correct (the default owner id is `default`, so
+  instances that keep it can delete each other's records).
 - **Private clusters and the egress path.** A *private* cluster has nodes with
   **no public IPs** and a **private API endpoint**. Pod→internet egress goes
   through a **NAT gateway** (a billed, throughput-bounded resource); the
@@ -433,15 +569,11 @@ kubectl apply --dry-run=client -f examples/bookstore/raw-manifests/60-networkpol
 > ([ch.06](06-node-autoscaling-cost-multicloud.md)) in the IP plan. GKE/AKS:
 > size alias-IP/CNI ranges the same way.
 
-> **In production: verify the managed CNI actually ENFORCES NetworkPolicy.**
-> [Part 02 ch.06](../02-networking/06-network-policies.md)'s caveat is a cloud
-> caveat too. **EKS**: the VPC CNI needs the **network policy agent enabled**
-> (or run Calico/Cilium). **GKE**: enable **Dataplane V2** (Cilium) or Network
-> Policy. **AKS**: choose **Azure/Calico/Cilium** policy *at cluster
-> creation*. Otherwise the Bookstore's `60-networkpolicy.yaml` applies and
-> protects nothing — a cluster that *looks* segmented but isn't is worse than
-> a known-open one. Add a CI test that a forbidden connection is actually
-> refused.
+> **In production: prove the enforcer in CI.** The enforcement settings for
+> each cloud are under How it works. Add a test that a forbidden connection is
+> refused, and run it on every cluster change. A cluster that looks segmented
+> but is not is worse than a known-open one
+> ([Part 02 ch.06](../02-networking/06-network-policies.md)).
 
 > **In production: prefer direct-to-Pod LB targeting (IP target-type / NEG).**
 > `target-type: ip` (AWS) and container-native LB / **NEGs** (GKE) register
@@ -481,51 +613,56 @@ kubectl apply --dry-run=client -f examples/bookstore/raw-manifests/60-networkpol
 ```sh
 # Add-ons via Helm, PINNED (never releases/latest/download/<PINNED>.yaml):
 helm install aws-load-balancer-controller eks/aws-load-balancer-controller \
-  -n kube-system --version 1.9.2 --set clusterName=$CLUSTER_NAME ...   # IRSA SA (ch.03)
-helm install external-dns external-dns/external-dns -n kube-system --version 1.15.0 \
-  --set provider=aws --set domainFilters[0]=your-org.com ...
+  -n kube-system --version 3.6.2 --set clusterName=$CLUSTER_NAME ...   # IRSA SA (ch.03)
+helm install external-dns external-dns/external-dns -n kube-system --version 1.23.0 \
+  --set provider=aws --set "domainFilters[0]=your-org.com" --set policy=sync ...
 
 # Inspect the cloud edge (managed cluster):
 kubectl get ingress -n <NS>                 # ADDRESS = the cloud LB DNS name
 kubectl describe ingress <ING> -n <NS>      # events: LB provisioned/programmed
-kubectl get svc -n <NS> -o wide             # type=LoadBalancer EXTERNAL-IP = LB
+kubectl get svc -n <NS> -o wide             # EXTERNAL-IP = LB; NodePort shows unless disabled
 kubectl get nodes -L topology.kubernetes.io/zone   # LB targets AZ-spread?
 
-# Does the CNI ENFORCE policy? (Part 02 ch.06 caveat, cloud edition)
+# Is an enforcer running? A running agent is not proof: prove a denied
+# connection instead (Part 02 ch.06).
 kubectl get pods -n kube-system | grep -Ei 'aws-node|calico|cilium|azure-cni'
 
 # Prove the Bookstore network objects are UNCHANGED (RUNNABLE on kind):
 kubectl apply --dry-run=client -f examples/bookstore/raw-manifests/50-ingress.yaml
 ```
 
-Minimal cloud-edge overlay skeleton (annotations on the **unchanged** object):
+Minimal cloud-edge overlay fragment (annotations on the **unchanged** object,
+with no kind):
 
 ```yaml
-apiVersion: networking.k8s.io/v1
-kind: Ingress
 metadata:
-  name: <APP>                              # the SAME Ingress as Part 02 ch.04
-  namespace: <NS>
   annotations:
-    alb.ingress.kubernetes.io/scheme: internet-facing       # AWS (GKE/AKS differ)
+    alb.ingress.kubernetes.io/scheme: internal              # internet-facing only on purpose
     alb.ingress.kubernetes.io/target-type: ip               # direct-to-Pod
     alb.ingress.kubernetes.io/certificate-arn: <ACM-ARN>    # cloud-managed TLS
     external-dns.alpha.kubernetes.io/hostname: <HOST>       # ExternalDNS
 spec:
   ingressClassName: alb                    # the CLOUD controller (not nginx)
-  # rules: IDENTICAL to the base Ingress — routing does not change on cloud
+  # routing rules: unchanged from the base Ingress
 ```
 
 Checklist:
 
+- [ ] API server **private**, or public with **authorised networks**; nodes
+      private with NAT egress (Hands-on step 1)
+- [ ] Load balancers **internal by default**; internet-facing and source
+      ranges set on purpose; `allocateLoadBalancerNodePorts: false` where the
+      LB targets Pods
 - [ ] Edge is a **shared Ingress/Gateway**, not N `type: LoadBalancer`
       Services; the LB is **deleted before the cluster** (no orphan bill)
 - [ ] LB controller + ExternalDNS installed via **pinned Helm**, using
       **workload identity** ([ch.03](03-cloud-identity.md)) — no static key
 - [ ] **VPC CIDRs / Pod density planned** (prefix delegation; subnet sizing) —
       no `Pending`-for-no-IP at scale
-- [ ] Managed CNI **actually enforces** `60-networkpolicy.yaml` (VPC-CNI agent
-      / Dataplane V2 / Azure-Calico-Cilium) — CI-tested ([Part 02 ch.06](../02-networking/06-network-policies.md))
+- [ ] Managed CNI **actually enforces** `60-networkpolicy.yaml` (VPC CNI
+      1.21.0 or later, Dataplane V2, or an AKS `--network-policy` engine),
+      proven by a refused connection in CI
+      ([Part 02 ch.06](../02-networking/06-network-policies.md))
 - [ ] **Direct-to-Pod** LB targeting (IP target-type / NEG) + PDBs for graceful
       target draining ([Part 06 ch.05](../06-production-readiness/05-reliability-and-disruptions.md))
 - [ ] Edge standardised on **Gateway API** for portability where possible
@@ -542,28 +679,28 @@ Checklist:
 1. **Why does AWS VPC CNI assign one VPC IP per Pod, and what's the operational consequence?**
    <details><summary>Show answer</summary>
 
-   Each Pod gets a real, routable VPC IP allocated from the ENI/secondary-IP pool attached to its node. The benefit is native VPC routing — no overlay, no encapsulation, security groups can match Pods directly. The consequence is **IP exhaustion**: m5.large nodes only support a fixed number of secondary IPs per ENI, so a node has a hard Pod-IP cap regardless of CPU/memory. The fix is **prefix delegation** — IPv4 /28 blocks per ENI instead of single IPs — which raises the Pod density ceiling by ~16x.
+   Each Pod gets a real, routable VPC IP allocated from the ENI/secondary-IP pool attached to its node. The benefit is native VPC routing: no overlay, no encapsulation, security groups can match Pods directly. The consequence is **IP exhaustion**: m5.large nodes only support a fixed number of secondary IPs per ENI, so a node has a hard Pod-IP cap regardless of CPU/memory. The fix is **prefix delegation**: each ENI slot holds an IPv4 /28 block of 16 addresses instead of one.
 
    </details>
 
 2. **Your `Service type=LoadBalancer` provisioned an ELB Classic, but you wanted an NLB with Pod-IP targets (not node-IP). What changes?**
    <details><summary>Show answer</summary>
 
-   You need (a) the AWS Load Balancer Controller installed (the in-tree cloud-provider creates Classic ELBs by default), (b) annotations `service.beta.kubernetes.io/aws-load-balancer-type: external` and `aws-load-balancer-nlb-target-type: ip`, and (c) `aws-load-balancer-scheme` to be `internet-facing` or `internal`. The `ip` target type means the NLB targets Pod IPs via VPC CNI directly, skipping kube-proxy and the node-port hop — that's the L4 path you actually want for low-latency workloads.
+   You need (a) the AWS Load Balancer Controller to reconcile the Service. On current versions its mutating webhook sets the load balancer class for new Services, and the controller docs warn against adding the type annotation to an existing one. (b) The annotations `service.beta.kubernetes.io/aws-load-balancer-type: external` and `aws-load-balancer-nlb-target-type: ip`. (c) A deliberate `aws-load-balancer-scheme`. The controller defaults to `internal`, so set `internet-facing` only when the NLB should be public. The `ip` target type registers Pod IPs directly, which skips the node-port hop.
 
    </details>
 
 3. **You apply `NetworkPolicy` to deny ingress to `catalog`, but traffic from `storefront` still works on GKE. What is happening?**
    <details><summary>Show answer</summary>
 
-   The cluster's CNI does not enforce NetworkPolicy by default. GKE standard clusters with kubenet, or AKS with kubenet, will accept the resource but never enforce it. The fix is to enable dataplane v2 (Cilium-based) on GKE, Azure CNI Powered by Cilium on AKS, or install Calico/Cilium as the enforcer. The lesson: NetworkPolicy is an API; the enforcer is the CNI, and `kubectl apply` succeeding tells you nothing about whether the policy is actually enforced.
+   Enforcement is a separate setting. On GKE Standard the NetworkPolicy add-on and enforcement on the nodes must both be on, and enabling only the add-on enforces nothing. The fix is to enable Dataplane V2, which enforces with no separate switch, or to turn on both settings. The lesson: `kubectl apply` accepting the object says nothing about enforcement, so prove it with a connection that must be refused. On AKS the same check applies, because the engine is set with `--network-policy`.
 
    </details>
 
 4. **Hands-on: install ExternalDNS in dry-run mode against your hosted zone, deploy a `Service type=LoadBalancer` with an `external-dns.alpha.kubernetes.io/hostname` annotation, and watch the controller logs. Now delete the Service. What DNS record state do you see?**
    <details><summary>What you should see</summary>
 
-   ExternalDNS reconciles a Route53 A/ALIAS record pointing at the LB's DNS name when the Service is created. When the Service is deleted, ExternalDNS removes the record (assuming `--policy=sync`, the default). If you set `--policy=upsert-only`, the record will be orphaned and you'll need a manual cleanup. The pattern matters because orphaned DNS records pointing at recycled LBs is a classic phishing/hijack vector — make sure your DNS lifecycle matches your Service lifecycle.
+   ExternalDNS reconciles a Route53 A/ALIAS record pointing at the LB's DNS name when the Service is created. When the Service is deleted, `--policy=sync` removes the record. The chart requires `policy` and gives it no default, so the choice is explicit. With `--policy=upsert-only`, the record stays and needs a manual cleanup. The pattern matters because orphaned DNS records pointing at recycled LBs is a classic phishing/hijack vector: make sure your DNS lifecycle matches your Service lifecycle.
 
    </details>
 
@@ -571,6 +708,13 @@ Checklist:
    <details><summary>Show answer</summary>
 
    Gateway API gives you a portable, cloud-neutral abstraction for north-south traffic (works on EKS, GKE, AKS, on-prem with NGINX/Envoy/Istio) and separates concerns: cluster operator owns `GatewayClass`/`Gateway`, app team owns `HTTPRoute`. The ALB annotation soup is AWS-specific and bleeds infrastructure concerns into app YAML. Choose Gateway API when portability or role separation matters; stick with annotations when you need an ALB-specific feature (e.g. WAF integration, Cognito auth) that Gateway API does not yet abstract. See [Part 02 ch.05](../02-networking/05-gateway-api.md).
+
+   </details>
+
+6. **Your EKS cluster has the public endpoint on, with the public access CIDRs set to your office range. CI runners outside that range time out on `kubectl`. A colleague proposes turning on private endpoint access and leaving the rest alone. Will that fix CI, and what is the safer fix?**
+   <details><summary>Show answer</summary>
+
+   No. The private endpoint answers only from inside the VPC or a connected network, so runners on the internet still cannot reach it. The public access CIDRs change only the public endpoint, so the choice is to add the runners' egress range, which widens exposure, or to run CI inside the VPC or a connected network and turn public access off. The safer fix is the second: then nothing outside the VPC can reach the API.
 
    </details>
 
@@ -592,3 +736,35 @@ Checklist:
   <https://learn.microsoft.com/en-us/azure/aks/concepts-network>, ExternalDNS
   <https://kubernetes-sigs.github.io/external-dns/>, and Cilium
   <https://docs.cilium.io/>.
+- Cited for the cloud behaviour in this chapter, checked 2026-10-31:
+  [EKS cluster endpoint access][eks-endpoint],
+  [EKS network policies with the VPC CNI][eks-vpc-cni-netpol],
+  [GKE private clusters][gke-private],
+  [GKE internal load balancing][gke-internal-lb],
+  [GKE network policy][gke-netpol],
+  [AKS private clusters][aks-private],
+  [AKS authorised IP ranges][aks-ip-ranges],
+  [AKS internal load balancers][aks-internal],
+  [AKS standard load balancer][aks-lb-standard],
+  [AKS network policies][aks-netpol],
+  [AWS Load Balancer Controller Service annotations][aws-lb-svc],
+  [AWS Load Balancer Controller Ingress annotations][aws-lb-ing],
+  [ExternalDNS flags][external-dns-flags],
+  [Kubernetes Services][k8s-svc], and
+  [creating an external load balancer][k8s-lb-svc].
+
+[eks-endpoint]: https://docs.aws.amazon.com/eks/latest/userguide/cluster-endpoint.html
+[eks-vpc-cni-netpol]: https://docs.aws.amazon.com/eks/latest/userguide/cni-network-policy.html
+[gke-private]: https://docs.cloud.google.com/kubernetes-engine/docs/how-to/private-clusters
+[gke-internal-lb]: https://docs.cloud.google.com/kubernetes-engine/docs/how-to/internal-load-balancing
+[gke-netpol]: https://docs.cloud.google.com/kubernetes-engine/docs/how-to/network-policy
+[aks-private]: https://learn.microsoft.com/en-us/azure/aks/private-clusters
+[aks-ip-ranges]: https://learn.microsoft.com/en-us/azure/aks/api-server-authorized-ip-ranges
+[aks-internal]: https://learn.microsoft.com/en-us/azure/aks/internal-lb
+[aks-lb-standard]: https://learn.microsoft.com/en-us/azure/aks/load-balancer-standard
+[aks-netpol]: https://learn.microsoft.com/en-us/azure/aks/use-network-policies
+[aws-lb-svc]: https://kubernetes-sigs.github.io/aws-load-balancer-controller/latest/guide/service/annotations/
+[aws-lb-ing]: https://kubernetes-sigs.github.io/aws-load-balancer-controller/latest/guide/ingress/annotations/
+[external-dns-flags]: https://kubernetes-sigs.github.io/external-dns/latest/docs/flags/
+[k8s-svc]: https://kubernetes.io/docs/concepts/services-networking/service/
+[k8s-lb-svc]: https://kubernetes.io/docs/tasks/access-application-cluster/create-external-load-balancer/
