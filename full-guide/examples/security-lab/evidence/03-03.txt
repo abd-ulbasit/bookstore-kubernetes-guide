@@ -1,0 +1,151 @@
+# Transcript for 03-config-and-storage/03-volumes.md, hands-on steps 1 to 8.
+# Tier A: a kind cluster (sf-pilot), Kubernetes v1.37.0 node, kubectl v1.37.2.
+# Recorded by running the chapter's commands in order from full-guide/, in the
+# scratch namespace p03-volumes, which was deleted at the end of the run.
+# The first run's creds-denied step timed out before its Pod ran (the lab host
+# was loaded). That step was re-run in full, and the chapter quotes the re-run
+# for creds-denied and for the hostPath refusal, which the re-run sent with the
+# chapter's multi-line command. Every other block the chapter quotes comes from
+# the first run. Both attempts stay in this file as they happened.
+## clean start
+$ kubectl delete namespace p03-volumes --ignore-not-found --wait=true
+## step 1: the catalog's volumes, read from the file
+$ kubectl apply --dry-run=client -f examples/bookstore/raw-manifests/10-catalog-deploy.yaml -o jsonpath={.spec.template.spec.volumes[*].name}
+scratch podinfo
+$ kubectl apply --dry-run=client -f examples/bookstore/raw-manifests/10-catalog-deploy.yaml -o jsonpath=sizeLimit
+64Mi
+## step 2: scratch namespace and its ServiceAccount
+$ kubectl apply -f - (namespace p03-volumes, ServiceAccount inspect-sa)
+namespace/p03-volumes created
+serviceaccount/inspect-sa created
+## step 3: downwardAPI self-awareness
+$ kubectl apply -f - (dapi-peek)
+pod/dapi-peek created
+$ kubectl wait pod/dapi-peek -n p03-volumes --for=jsonpath={.status.phase}=Succeeded --timeout=300s
+pod/dapi-peek condition met
+$ kubectl logs dapi-peek -n p03-volumes
+NAME=dapi-peek
+NS=p03-volumes
+LABELS=app="inspect"
+CPU_LIMIT=1
+$ kubectl delete pod dapi-peek -n p03-volumes
+pod "dapi-peek" deleted from p03-volumes namespace
+## step 4: emptyDir across a container restart, then a new Pod
+$ kubectl apply -f ed-demo.yaml
+pod/ed-demo created
+$ kubectl wait pod/ed-demo -n p03-volumes --for=jsonpath={.status.containerStatuses[0].restartCount}=1 --timeout=300s
+pod/ed-demo condition met
+$ kubectl logs ed-demo -n p03-volumes --previous -c main
+first run: no marker
+$ kubectl logs ed-demo -n p03-volumes -c main
+after restart: note=hello-from-init, marker present
+$ kubectl get pod ed-demo -n p03-volumes
+NAME      READY   STATUS    RESTARTS       AGE
+ed-demo   1/1     Running   1 (106s ago)   3m34s
+$ kubectl delete pod ed-demo -n p03-volumes --now
+pod "ed-demo" deleted from p03-volumes namespace
+$ kubectl apply -f ed-demo.yaml (second Pod, same spec)
+pod/ed-demo created
+$ kubectl wait pod/ed-demo -n p03-volumes --for=jsonpath={.status.containerStatuses[0].restartCount}=1 --timeout=300s
+pod/ed-demo condition met
+$ kubectl logs ed-demo -n p03-volumes --previous -c main
+first run: no marker
+$ kubectl logs ed-demo -n p03-volumes -c main
+after restart: note=hello-from-init, marker present
+$ kubectl delete pod ed-demo -n p03-volumes --now
+pod "ed-demo" deleted from p03-volumes namespace
+## step 5: sizeLimit on disk (eviction) and in memory (ENOSPC)
+$ kubectl apply -f - (disk-fill)
+pod/disk-fill created
+$ kubectl wait pod/disk-fill -n p03-volumes --for=jsonpath={.status.reason}=Evicted --timeout=300s
+pod/disk-fill condition met
+$ kubectl get pod disk-fill -n p03-volumes
+NAME        READY   STATUS   RESTARTS   AGE
+disk-fill   0/1     Error    0          4m34s
+$ kubectl get pod disk-fill -n p03-volumes -o jsonpath=message
+Usage of EmptyDir volume "scratch" exceeds the limit "16Mi". 
+$ kubectl delete pod disk-fill -n p03-volumes --now
+pod "disk-fill" deleted from p03-volumes namespace
+$ kubectl apply -f - (ram-fill)
+pod/ram-fill created
+$ kubectl wait pod/ram-fill -n p03-volumes --for=condition=Ready --timeout=300s
+pod/ram-fill condition met
+$ kubectl logs ram-fill -n p03-volumes
+Filesystem                Size      Used Available Use% Mounted on
+tmpfs                    16.0M         0     16.0M   0% /scratch
+dd: error writing '/scratch/fill': No space left on device
+17+0 records in
+16+0 records out
+16777216 bytes (16.0MB) copied, 0.011741 seconds, 1.3GB/s
+dd exit=1
+$ kubectl delete pod ram-fill -n p03-volumes --now
+pod "ram-fill" deleted from p03-volumes namespace
+## step 6: Secret volumes, defaultMode and fsGroup
+$ kubectl apply -f - (demo-creds Secret)
+secret/demo-creds created
+$ kubectl apply -f - (creds-denied)
+pod/creds-denied created
+$ kubectl wait pod/creds-denied -n p03-volumes --for=jsonpath={.status.phase}=Failed --timeout=300s
+error: timed out waiting for the condition on pods/creds-denied
+$ kubectl logs creds-denied -n p03-volumes
+$ kubectl get pod creds-denied -o jsonpath defaultMode
+256
+$ kubectl delete pod creds-denied -n p03-volumes --now
+pod "creds-denied" deleted from p03-volumes namespace
+$ kubectl apply -f - (creds-fixed)
+pod/creds-fixed created
+$ kubectl wait pod/creds-fixed -n p03-volumes --for=jsonpath={.status.phase}=Succeeded --timeout=300s
+pod/creds-fixed condition met
+$ kubectl logs creds-fixed -n p03-volumes
+uid=65532 gid=65532 groups=65532
+/creds:
+total 4
+-r--r-----    1 0        65532           15 Oct 31 00:13 token
+
+/run/identity:
+total 8
+-r--r-----    1 0        65532           11 Oct 31 00:13 pod_name
+-r--r-----    1 0        65532           15 Oct 31 00:13 token
+demo-only-value
+creds-fixed
+tmpfs /creds tmpfs ro,relatime,size=65536k,inode64,noswap 0 0
+tmpfs /run/identity tmpfs ro,relatime,size=65536k,inode64,noswap 0 0
+$ kubectl get pod creds-fixed -o jsonpath defaultMode
+288 288
+$ kubectl delete pod creds-fixed -n p03-volumes --now
+pod "creds-fixed" deleted from p03-volumes namespace
+## step 7: hostPath is refused (deliberate failure, dry run)
+$ kubectl run hostpath-probe --dry-run=server (hostPath at /)
+Error from server (Forbidden): pods "hostpath-probe" is forbidden: violates PodSecurity "restricted:latest": restricted volume types (volume "nodefs" uses restricted volume type "hostPath")
+$ kubectl get pods -n p03-volumes
+No resources found in p03-volumes namespace.
+## cleanup
+$ kubectl delete namespace p03-volumes --wait=true
+namespace "p03-volumes" deleted
+## re-run of step 2 (namespace) and step 6 creds-denied (first attempt timed out before the Pod ran)
+$ kubectl apply -f - (namespace p03-volumes, ServiceAccount inspect-sa)
+namespace/p03-volumes created
+serviceaccount/inspect-sa created
+$ kubectl apply -f - (demo-creds Secret)
+secret/demo-creds created
+$ kubectl apply -f - (creds-denied)
+pod/creds-denied created
+$ kubectl wait pod/creds-denied -n p03-volumes --for=jsonpath={.status.phase}=Failed --timeout=600s
+pod/creds-denied condition met
+$ kubectl logs creds-denied -n p03-volumes
+uid=65532 gid=65532 groups=65532
+total 4
+-r--------    1 0        0               15 Oct 31 00:15 token
+cat: can't open '/creds/token': Permission denied
+$ kubectl get pod creds-denied -n p03-volumes -o jsonpath defaultMode
+256
+$ kubectl delete pod creds-denied -n p03-volumes --now
+pod "creds-denied" deleted from p03-volumes namespace
+## re-run of step 7: the hostPath command exactly as the chapter prints it
+$ kubectl run hostpath-probe (chapter form, multi-line)
+Error from server (Forbidden): pods "hostpath-probe" is forbidden: violates PodSecurity "restricted:latest": restricted volume types (volume "nodefs" uses restricted volume type "hostPath")
+$ kubectl get pods -n p03-volumes
+No resources found in p03-volumes namespace.
+## cleanup of the re-run
+$ kubectl delete namespace p03-volumes --wait=true
+namespace "p03-volumes" deleted
