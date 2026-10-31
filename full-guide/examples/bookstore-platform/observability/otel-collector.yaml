@@ -207,6 +207,8 @@ spec:
             action: delete
           - key: http.request.header.x-api-key
             action: delete
+          - key: http.response.header.set-cookie
+            action: delete
       # Tail-based sampling — keep 100% of errors, 100% of slow,
       # 1% of fast healthy. Reduces trace volume ~100x.
       tail_sampling:

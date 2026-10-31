@@ -104,13 +104,12 @@ is the recipe; the claim is the input; Crossplane is the reconciler.**
   that would bind the tenant namespace to an image-signature check. It
   stays commented: this chapter installs no Kyverno.
   [05.03](../05-security/03-supply-chain.md) covers signature checks.
-- **The Backstage scaffolder is the developer-facing input.** A platform
-  team running `kubectl apply -f tenant-claim.yaml` is fine for week 1.
-  By month 3 the tenant-onboarding form is a Backstage scaffolder
-  template (13.11) that *generates* the claim + opens a PR — same paved
-  road, prettier door. This chapter writes the Workflow that the
-  scaffolder will eventually call; the actual Backstage install lives in
-  13.11.
+- **Tenant onboarding stays with the platform team.** A platform team
+  member running `kubectl apply -f tenant-claim.yaml` is the path in this
+  chapter. The Backstage form in 13.11 creates a service inside a tenant that
+  already exists. It cannot create a tenant. This chapter writes the Workflow
+  that renders the claim and opens a PR for a platform reviewer, and the
+  platform team starts it. The Backstage install itself lives in 13.11.
 
 The trap to keep in view: **the BookstoreTenant API is the platform's
 public face**. Every field is a permanent commitment — once `tier:
@@ -600,10 +599,11 @@ Composition is the only producer; drift heals automatically.
 
 ### 5. The Backstage scaffolder hook (Workflow Template; install lives in 13.11)
 
-Backstage runs in 13.11. Its scaffolder calls an **Argo Workflow Template**
-when a developer fills the "onboard a tenant" form. The Workflow renders the
-`BookstoreTenant` YAML and, on a real install, opens a PR against the
-platform's Git repo. The template needs Argo Workflows, which 13.08 installs.
+Backstage runs in 13.11, but its form does not onboard tenants: that form
+creates a service inside an existing tenant. The **Argo Workflow Template**
+below is started by the platform team, for a tenant request that a reviewer
+has accepted. The Workflow renders the `BookstoreTenant` YAML and, on a real
+install, opens a PR against the platform's Git repo for approval. The template needs Argo Workflows, which 13.08 installs.
 This chapter shows the step graph only, as a fragment to read, not apply:
 
 ```yaml
@@ -849,10 +849,10 @@ Checklist (a tenant is correctly onboarded when all five are yes):
 
    </details>
 
-5. **Hands-on: wire the Crossplane `BookstoreTenant` into a Backstage Software Template so a developer fills out a form and gets a tenant. What's the boundary between the form, the template render, and the XR?**
+5. **Hands-on: a platform team member starts the onboarding Workflow for an accepted tenant request. What's the boundary between the request, the render, the reviewed PR, and the XR? Why can't a developer's Backstage form do this step?**
    <details><summary>What you should see</summary>
 
-   The Backstage scaffolder template defines a form (Tenant name, tier, region, contact email). When submitted, the template renders a YAML manifest (`apiVersion: platform.bookstore.example.com/v1alpha1, kind: BookstoreTenant`) and opens a PR against the GitOps repo. The PR merges → Argo CD picks up the new file → applies the XR → Crossplane composes the namespace + RBAC + quota + Postgres + ... → tenant is live. Backstage handles UX + PR; Argo CD handles deploy; Crossplane handles infrastructure reconciliation. Each tool owns one layer; the boundaries are clean. See [Part 13 ch.11](11-backstage-developer-portal-idp.md).
+   A platform team member starts the Workflow for a tenant request that a reviewer has accepted (Tenant name, tier, region, contact email). The Workflow renders a YAML manifest (`apiVersion: platform.bookstore.example.com/v1alpha1, kind: BookstoreTenant`) and opens a PR against the GitOps repo. A reviewer approves the PR. The merge → Argo CD picks up the new file → applies the XR → Crossplane composes the namespace + RBAC + quota + Postgres + ... → tenant is live. The request is the input; the reviewed PR is the approval; Argo CD handles deploy; Crossplane handles infrastructure reconciliation. A developer's Backstage form in [Part 13 ch.11](11-backstage-developer-portal-idp.md) creates services inside a tenant and does not reach this step.
 
    </details>
 

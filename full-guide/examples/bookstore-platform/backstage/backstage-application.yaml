@@ -139,11 +139,19 @@ spec:
                 emptyDir: {}
               - name: run
                 emptyDir: {}
+              - name: bitnami-conf
+                emptyDir: {}
+              - name: bitnami-tmp
+                emptyDir: {}
             extraVolumeMounts:
               - name: tmp
                 mountPath: /tmp
               - name: run
                 mountPath: /var/run/postgresql
+              - name: bitnami-conf
+                mountPath: /opt/bitnami/postgresql/conf
+              - name: bitnami-tmp
+                mountPath: /opt/bitnami/postgresql/tmp
         service:
           type: ClusterIP
           ports:

@@ -132,9 +132,9 @@ trusting."
 | Threat | Control in this chapter | Deeper |
 |---|---|---|
 | Break-glass admin access outlives the incident | Humans bind `bookstore-platform-admin` only through the gate in hands-on section 6: a named binding, an expiry annotation, and removal at exit | [05.01](../05-security/01-authn-authz-rbac.md) |
-| A chaos fault reaches past the service it targets | One namespace and `mode: one` per experiment, a stated duration, and game-days in staging only | [11.07](../11-advanced-production-patterns/07-chaos-engineering.md) |
+| A chaos fault reaches past the service it targets | One namespace and `mode: one` per experiment, a stated duration, faults admitted only in namespaces annotated `chaos-mesh.org/inject=enabled`, and the game-day Workflow created only in a staging cluster | [11.07](../11-advanced-production-patterns/07-chaos-engineering.md) |
 | The chaos daemon runs privileged on every node | `privileged` is set on the `chaos-mesh` namespace alone; the experiments namespace stays `restricted` | [05.02](../05-security/02-pod-security.md) |
-| A failover serves traffic from data nobody measured | The drill scores RTO, RPO and a checkout check after cutover, and passes only when all three meet target | [08.02](../08-day-2-operations/02-backup-and-dr.md) |
+| A failover serves traffic from data nobody measured | The drill scores RTO and RPO, where RPO is the replication lag read just before promotion (an upper bound, not a count of lost writes), and passes only when the promoted primary accepts a write | [08.02](../08-day-2-operations/02-backup-and-dr.md) |
 
 ## Diagrams
 
@@ -240,8 +240,20 @@ helm install chaos-mesh chaos-mesh/chaos-mesh \
   -n chaos-mesh --wait \
   --set 'chaosDaemon.runtime=containerd' \
   --set 'chaosDaemon.socketPath=/run/containerd/containerd.sock' \
-  --set 'dashboard.create=false'
+  --set 'dashboard.create=false' \
+  --set 'controllerManager.enableFilterNamespace=true' \
+  --set 'controllerManager.securityContext.seccompProfile.type=RuntimeDefault'
 ```
+
+The two `controllerManager` values narrow the controller. With
+`enableFilterNamespace`, only pods in namespaces annotated
+`chaos-mesh.org/inject=enabled` can be injected, so a fault reaches a
+namespace only after someone opts it in. The chart exposes one pod-level
+`securityContext` for the controller manager and no container-level one. This
+chapter sets the seccomp profile there. It does not set `runAsNonRoot`,
+because the image runs as root with no `USER`, and the container-level fields
+(`allowPrivilegeEscalation` and the dropped capabilities) have no chart value.
+The dry run below shows the warnings that remain.
 
 The chart defaults to `chaosDaemon.privileged: true` ([chart values at
 v2.7.0](https://github.com/chaos-mesh/chaos-mesh/blob/v2.7.0/helm/chaos-mesh/values.yaml)).
@@ -253,8 +265,8 @@ dashboard is optional and has a web surface of its own, so this chapter turns
 it off.
 
 The chapter's captured run did not install the chart, because the shared lab
-lock for heavy installs was busy. It checks the daemon with a render and
-server-side dry runs, which creates nothing:
+lock for heavy installs was busy. It checks the daemon and the controller
+manager with a render and server-side dry runs, which creates nothing:
 
 ```sh
 helm template chaos-mesh chaos-mesh/chaos-mesh --version "$CHAOS_MESH_VERSION" \
@@ -262,6 +274,8 @@ helm template chaos-mesh chaos-mesh/chaos-mesh --version "$CHAOS_MESH_VERSION" \
   --set 'chaosDaemon.runtime=containerd' \
   --set 'chaosDaemon.socketPath=/run/containerd/containerd.sock' \
   --set 'dashboard.create=false' \
+  --set 'controllerManager.enableFilterNamespace=true' \
+  --set 'controllerManager.securityContext.seccompProfile.type=RuntimeDefault' \
   --show-only templates/chaos-daemon-daemonset.yaml \
   --show-only templates/controller-manager-deployment.yaml \
   | kubectl apply --dry-run=server -f -
@@ -271,14 +285,18 @@ helm template chaos-mesh chaos-mesh/chaos-mesh --version "$CHAOS_MESH_VERSION" \
 ```text
 Warning: would violate PodSecurity "restricted:latest": host namespaces (hostPID=true), privileged (container "chaos-daemon" must not set securityContext.privileged=true), allowPrivilegeEscalation != false (container "chaos-daemon" must set securityContext.allowPrivilegeEscalation=false), unrestricted capabilities (container "chaos-daemon" must set securityContext.capabilities.drop=["ALL"]; container "chaos-daemon" must not include "SYS_PTRACE" in securityContext.capabilities.add), restricted volume types (volumes "socket-path", "sys-path", "lib-modules" use restricted volume type "hostPath"), runAsNonRoot != true (pod or container "chaos-daemon" must set securityContext.runAsNonRoot=true), seccompProfile (pod or container "chaos-daemon" must set securityContext.seccompProfile.type to "RuntimeDefault" or "Localhost")
 daemonset.apps/chaos-daemon created (server dry run)
-# ...
+Warning: would violate PodSecurity "restricted:latest": allowPrivilegeEscalation != false (container "chaos-mesh" must set securityContext.allowPrivilegeEscalation=false), unrestricted capabilities (container "chaos-mesh" must set securityContext.capabilities.drop=["ALL"]), runAsNonRoot != true (pod or container "chaos-mesh" must set securityContext.runAsNonRoot=true)
+deployment.apps/chaos-controller-manager created (server dry run)
 ```
 
 The output in this chapter came from a kind cluster named `sf-pilot`, and its
 namespaces had lab names (`p13-12-chaos-mesh` and `p13-12-experiments`). The
-output is verbatim, so it keeps those names. The Warning line is Pod Security
-admission reporting what `restricted` would refuse in the daemon, and the
-`privileged` label is what lets the daemon through.
+output is verbatim, so it keeps those names. The first Warning line is Pod
+Security admission reporting what `restricted` would refuse in the daemon, and
+the `privileged` label is what lets the daemon through. The second Warning is
+the controller manager. The chart sets its seccomp profile, but the container
+still lacks `allowPrivilegeEscalation: false`, a dropped capability set and
+`runAsNonRoot`, as the section above explains.
 
 ### 1. Apply the runbook tree
 
@@ -295,13 +313,16 @@ ls examples/bookstore-platform/runbooks/
 # chaos-experiments.yaml              <- Chaos Mesh Workflow (5 experiments)
 # postmortem-template.md              <- blameless writeup template
 
-kubectl apply -f examples/bookstore-platform/runbooks/chaos-experiments.yaml
+# Do not apply chaos-experiments.yaml in this section. Chaos Mesh starts a
+# Workflow as soon as it exists, so the game-day Workflow is created in
+# section 5 only, in a staging cluster.
 ```
 
-The file creates the `chaos-mesh-experiments` namespace, labelled
-`restricted`, and the Workflow. Until Chaos Mesh is installed, the Workflow is
-refused, and the namespace is still created. The lab ran a copy of this file
-with the namespace renamed, so the output names that copy:
+The file holds the `chaos-mesh-experiments` namespace, labelled `restricted`,
+and the Workflow. This section does not apply it. The lab ran a copy of the
+file with the namespace renamed, to show what the server does with it before
+Chaos Mesh is installed. The namespace is created and the Workflow is refused,
+because its CRD is missing. The output names that copy:
 
 <!-- gate: output -->
 ```text
@@ -400,7 +421,7 @@ bash examples/bookstore-platform/runbooks/dr-drill-script.sh \
 # [03:42] PHASE 2: promote eu-west CNPG to primary
 # [05:18] PHASE 3: update ApplicationSet target to eu-west
 # [08:33] PHASE 4: update DNS to point at eu-west
-# [12:00] PHASE 5: verify checkout against eu-west
+# [12:00] PHASE 5: verify the promoted eu-west primary accepts a write
 # [12:42] DRILL ENDED: the stub's Result line reads PASS
 #   RTO actual:        12m42s   (target: 30m)
 #   RPO actual:        3s       (target: 5m)
@@ -411,11 +432,24 @@ bash examples/bookstore-platform/runbooks/dr-drill-script.sh \
 ### 4. Run a chaos game-day experiment
 
 ```sh
-# The Chaos Mesh Workflow defines 5 experiments + a 10-min observation
-# window. Each experiment has a hypothesis and a stop rule.
-kubectl apply -f examples/bookstore-platform/runbooks/chaos-experiments.yaml
+# The experiments namespace, labelled restricted. The Workflow in
+# chaos-experiments.yaml is created in section 5, not here.
+kubectl apply -f - <<EOF
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: chaos-mesh-experiments
+  labels:
+    pod-security.kubernetes.io/enforce: restricted
+    pod-security.kubernetes.io/enforce-version: latest
+EOF
 
-# Start with the simplest experiment (pod-kill on payments-gateway)
+# Opt in each namespace this game-day may touch. With enableFilterNamespace
+# (section 0), only annotated namespaces can receive faults.
+kubectl annotate namespace bookstore-platform-acme-books chaos-mesh.org/inject=enabled
+
+# Run the first experiment by hand: pod-kill on payments-gateway. A PodChaos
+# runs once for its duration. Read its result before any Workflow.
 kubectl -n chaos-mesh-experiments create -f - <<EOF
 apiVersion: chaos-mesh.org/v1alpha1
 kind: PodChaos
@@ -447,6 +481,19 @@ cat examples/bookstore-platform/runbooks/postmortem-template.md
 ```
 
 ### 5. The quarterly chaos game-day (the 5 experiments)
+
+Creating the Workflow starts the game-day. Chaos Mesh runs its Serial entry as
+soon as the object exists, so create it in a staging cluster only, and name
+that cluster's context on the command. The topology in ch.13.03 has no staging
+cluster: it has us-east, eu-west, ap-southeast and the management cluster. Set
+`STAGING_CONTEXT` to the context of a staging cluster you run, with the same
+platform stack. Read the PodChaos result from section 4 before you create the
+Workflow.
+
+```sh
+kubectl --context "$STAGING_CONTEXT" apply \
+  -f examples/bookstore-platform/runbooks/chaos-experiments.yaml
+```
 
 The Chaos Mesh Workflow in
 `examples/bookstore-platform/runbooks/chaos-experiments.yaml` chains
@@ -500,11 +547,23 @@ kubectl annotate clusterrolebinding "breakglass-$INCIDENT" \
 ```
 
 3. At the start of each shift, and at the end of the incident, list the
-   bindings that are still open:
+   bindings that are still open, with the time each one expires:
 
 ```sh
-kubectl get clusterrolebindings -l bookstore-platform.example.com/break-glass=true
+kubectl get clusterrolebindings \
+  -l bookstore-platform.example.com/break-glass=true \
+  -o 'custom-columns=NAME:.metadata.name,SUBJECT:.subjects[0].name,EXPIRES:.metadata.annotations.bookstore-platform\.example\.com/expires-at'
 ```
+
+<!-- gate: output -->
+```text
+NAME                    SUBJECT         EXPIRES
+breakglass-p13-12-lab   lab-responder   2026-10-31T16:00:00Z
+```
+
+The lab used a throwaway binding of the `view` role, under the name
+`breakglass-p13-12-lab` in place of `breakglass-<incident-id>`. An EXPIRES time
+that has passed means the binding should already be gone.
 
 4. Delete the binding when the incident ends, and record the time in the
    postmortem.
@@ -673,6 +732,12 @@ the core operational story; deliberately deferred to follow-up work:
 - **Automatic break-glass expiry.** Kubernetes does not expire a binding,
   and this chapter builds no sweeper for expired ones. The shift check and
   the exit step carry the control until one exists.
+- **NetworkPolicy for the Chaos Mesh namespaces.** Nothing in this chapter
+  restricts which pods can reach the `chaos-mesh` and
+  `chaos-mesh-experiments` services. The platform team owns that policy.
+  Write it before the first game-day, and prove it with a denied request,
+  the way [ch.13.10](10-cost-opencost-per-tenant-finops.md) does for its
+  namespace.
 
 ## Closing the platform-v2 thread
 
@@ -757,8 +822,8 @@ helm install chaos-mesh chaos-mesh/chaos-mesh --version "$CHAOS_MESH_VERSION" \
   --set 'chaosDaemon.socketPath=/run/containerd/containerd.sock' \
   --set 'dashboard.create=false'
 
-# Apply the experiments namespace and the Workflow (after the install)
-kubectl apply -f examples/bookstore-platform/runbooks/chaos-experiments.yaml
+# Game-day only: create the Workflow in staging (it starts at once)
+kubectl --context "$STAGING_CONTEXT" apply -f examples/bookstore-platform/runbooks/chaos-experiments.yaml
 
 # Run the monthly DR drill (a dry run unless --dry-run=false is added)
 bash examples/bookstore-platform/runbooks/dr-drill-script.sh --region us-east --target-region eu-west
