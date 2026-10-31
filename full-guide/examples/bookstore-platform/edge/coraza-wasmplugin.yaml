@@ -1,0 +1,53 @@
+# Bookstore Platform v2 — Part 13 ch.07: Coraza WAF (ModSecurity-compatible)
+# loaded as a WasmPlugin on the edge gateway's Envoy. Phase AUTHN puts the
+# WAF before Istio's authn filters, so it inspects a request before the JWT
+# verifier does. The WAF blocks known-bad payloads; rate limiting and JWT
+# checks see only what passes it.
+#
+# Coraza (https://coraza.io) is the Go-native ModSecurity-compatible WAF. It
+# loads the same OWASP CRS rules. The Istio integration is the
+# coraza-proxy-wasm module, distributed as an OCI artifact.
+#
+# !!! CRD-INTRINSIC DRY-RUN
+#   `WasmPlugin` is `extensions.istio.io/v1alpha1`. WITHOUT Istio:
+#     no matches for kind "WasmPlugin" in version "extensions.istio.io/v1alpha1"
+#   EXPECTED. After Istio is installed this applies.
+#
+# The module is pinned by digest. The tag is 0.5.0 (in the comment below);
+# a new push to that tag cannot change the WAF, because the digest is fixed.
+# Rule set: OWASP Core Rule Set v4. Tune it before blocking real traffic
+# (ch.13.07 step 7).
+#
+# Apply (after the Gateway, gateway.yaml):
+#   kubectl apply -f examples/bookstore-platform/edge/coraza-wasmplugin.yaml
+apiVersion: extensions.istio.io/v1alpha1
+kind: WasmPlugin
+metadata:
+  name: coraza-waf
+  namespace: bookstore-platform
+  labels:
+    app.kubernetes.io/part-of: bookstore-platform
+    bookstore-platform.example.com/component: edge-waf
+spec:
+  # The pods Istio provisions for bookstore-platform-edge.
+  selector:
+    matchLabels:
+      gateway.networking.k8s.io/gateway-name: bookstore-platform-edge
+  # ghcr.io/corazawaf/coraza-proxy-wasm:0.5.0
+  url: oci://ghcr.io/corazawaf/coraza-proxy-wasm@sha256:2612fbda0e81a02f97c913f265468f22a740372fa36c313cb3c6021e2f526e82
+  imagePullPolicy: IfNotPresent
+  phase: AUTHN
+  pluginConfig:
+    directives_map:
+      default:
+        - "Include @recommended-conf"
+        - "Include @crs-setup-conf"
+        - "Include @owasp_crs/*.conf"
+        - "SecRuleEngine On"
+        - "SecRequestBodyAccess On"
+        - "SecAuditEngine RelevantOnly"
+        - "SecAuditLogParts ABIJDEFHZ"
+        - "SecAuditLog /tmp/coraza-audit.log"
+        - "SecAuditLogFormat JSON"
+        - "SecDefaultAction \"phase:2,deny,status:403,log,auditlog\""
+    default_directives: default

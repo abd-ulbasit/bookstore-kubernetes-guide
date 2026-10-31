@@ -11,10 +11,11 @@
 
 ## Why this exists
 
-The v1 Bookstore ran behind a vanilla NGINX Ingress. That is the right
-shape for the v1 lesson (Part 02 ch.07 Ingress fundamentals; Part 09's
-end-to-end capstone wiring). It is the **wrong shape for real
-e-commerce** in three specific ways:
+The v1 Bookstore ran behind an Ingress controller, ingress-nginx, which is
+[retired upstream](https://github.com/kubernetes/ingress-nginx) (best-effort
+maintenance ended in March 2026). That is the right shape for the v1 lesson
+(Part 02 ch.04 Ingress; Part 09's end-to-end capstone wiring). It is the
+**wrong shape for real e-commerce** in three specific ways:
 
 1. **No WAF.** A vanilla Ingress passes whatever the attacker sends.
    Common attacks — SQL injection (`?q=1' OR '1'='1`), XSS
@@ -43,12 +44,13 @@ The chapter ships:
   you install separately, not tied to a Kubernetes minor. Replaces the
   `kubernetes.io/ingress.class: nginx` annotation soup with a typed
   `Gateway` + `HTTPRoute` resource pair.
-- **Coraza** — the Go-native ModSecurity successor, loaded as an Envoy
-  WASM filter on the Istio ingress gateway. Ships OWASP Core Rule Set
-  v4 (sql-injection, xss, command-injection, path-traversal, file-
-  upload, http-protocol-violation rules).
+- **Coraza**: the Go-native ModSecurity-compatible WAF, loaded as an
+  Envoy WASM filter (an Istio `WasmPlugin`) on the gateway. Runs OWASP
+  Core Rule Set v4 (sql-injection, xss, command-injection, path-traversal,
+  file-upload, http-protocol-violation rules).
 - **Envoy local rate limiter** — in-process token-bucket per worker,
-  keyed per-tenant via the JWT claim extracted by a small Lua filter.
+  keyed per-tenant on the verified JWT claim, which ch.13.04 copies to a
+  header.
 
 > **In production:** Teams put WAF behind their CDN's WAF (Cloudflare,
 > AWS WAF, Akamai), not behind a self-hosted stack. That is the right
@@ -73,17 +75,19 @@ the application sees it.**
   - `Gateway` — a logical load-balancer. Carries listeners (port +
     protocol + TLS), addresses, and `allowedRoutes`. One per
     cluster usually; per-tenant `Gateway`s are possible but operate
-    at higher overhead.
+    at higher overhead. Istio provisions a Deployment and a Service
+    named `<gateway>-<gatewayclass>` for each one, labelled
+    `gateway.networking.k8s.io/gateway-name`; the policies here select
+    pods by that label.
   - `HTTPRoute` — how requests reaching the `Gateway` map to
     backend Services. Matches by path, header, method; routes to
     one or more backends with optional weighted split.
   Gateway API is **the** replacement for Ingress: Ingress will
   exist for backwards compatibility but no new features are being
   added. Greenfield uses Gateway API.
-- **WAF — Coraza + OWASP CRS as a WASM filter.** Coraza is the
-  ModSecurity successor: same rule format (`SecRule`), maintained
-  upstream (ModSecurity itself is in EOL). The OWASP **Core Rule
-  Set** is the canonical attack-pattern bundle:
+- **WAF, Coraza + OWASP CRS as a WASM filter.** Coraza uses the same
+  rule format as ModSecurity (`SecRule`) and is maintained upstream. The
+  OWASP **Core Rule Set** is the canonical attack-pattern bundle:
   - 920000-929999 — protocol enforcement.
   - 930000-933999 — local file inclusion + path traversal.
   - 941000-941999 — XSS.
@@ -103,27 +107,38 @@ the application sees it.**
     (extra hop per request).
   The platform v2 picks **local** because the per-tenant budget is
   per-edge-replica and the approximation is fine at the e-commerce
-  shape. The chapter walks the global variant for the case "I need
-  an exact cluster-wide budget".
-- **Filter ordering matters.** Five filters, in order:
+  shape. This chapter builds only the local variant. An exact
+  cluster-wide budget needs a global service, which is not built here.
+- **Filter ordering matters.** The request passes these stages:
   1. TLS termination (the listener does this).
-  2. **WAF (Coraza)** — block known-bad payloads.
-  3. **Rate limit** — block too-many-from-one-tenant.
-  4. **JWT authn (RequestAuthentication; ch.13.04)** — verify the
-     bearer token.
-  5. **AuthZ (AuthorizationPolicy; ch.13.04)** — require a JWT for
-     `/api/*`.
-  WAF before rate-limit because a rate-limited 429 to an attacker is
-  worse signal than a WAF 403 (the attacker learns less). Rate-limit
-  before JWT because rate-limiting on unauthenticated traffic is
-  defence in depth — a botnet that does not have a valid JWT still
-  consumes JWT-verifier CPU if it gets that far.
+  2. **WAF (Coraza)**: block known-bad payloads. The `WasmPlugin` runs
+     in phase `AUTHN`, before the JWT filter.
+  3. **JWT authn (RequestAuthentication; ch.13.04)**: verify the
+     bearer token and copy its tenant claim to `x-tenant`.
+  4. **AuthZ (AuthorizationPolicy; ch.13.04)**: require a verified
+     principal for `/api/*`.
+  5. **Rate limit**: the filter is inserted before the router, which
+     places it after the authentication and authorization filters.
+  WAF before JWT so an attack payload never reaches the verifier. The
+  rate limit comes after authentication, so only verified tenants spend
+  a budget. A botnet without a token still reaches the JWT verifier, which
+  is the cost of this order.
 
 The trap to keep in view: **WAF is noisy out of the box.** CRS v4
 trips on legitimate book titles that contain quotes, on URLs with
 plus signs in the query, on POST bodies with HTML in them. The
 chapter ships the production tuning loop: start in `DetectionOnly`
 mode, watch the audit log, build a whitelist, flip to `On`.
+
+## Threats and controls
+
+| Threat | Control in this chapter | Goes deeper in |
+|---|---|---|
+| Hostile payloads (SQL injection, XSS, path traversal) reach the app | Coraza WAF, OWASP CRS v4, blocks on anomaly score 5 | Steps 5 and 7 here |
+| Abuse volume: one tenant or a bot exhausts shared capacity | Token bucket per tenant on the verified claim; a shared default bucket for the rest | Step 6 here; quotas in 13.02 |
+| Forged or replayed tokens at the edge | Not this chapter: JWT verification and AuthZ | 13.04 |
+| The edge CA key: whoever holds it can mint certificates clients trust | cert-manager keeps the key in one Secret; clients trust only the exported `edge-ca.crt` | Step 2 here; secret handling in Part 05 ch.04 |
+| Bots that look like buyers (no token, many IPs) | Not built here: a bot-management vendor | Production notes |
 
 ## Diagrams
 
@@ -134,12 +149,12 @@ flowchart LR
     user(["Internet user"])
     cdn["(optional) CDN<br/>Cloudflare / Akamai"]
 
-    subgraph gw["Istio ingress gateway<br/>(Envoy fleet)"]
+    subgraph gw["Istio gateway pods<br/>(Envoy fleet)"]
       l1["TLS terminate<br/>(listener)"]
       l2["Coraza WAF<br/>OWASP CRS v4"]
-      l3["rate limit<br/>per-tenant bucket"]
-      l4["RequestAuthentication<br/>verify JWT (ch.13.04)"]
-      l5["AuthorizationPolicy<br/>require JWT for /api/*"]
+      l3["RequestAuthentication<br/>verify JWT (ch.13.04)"]
+      l4["AuthorizationPolicy<br/>require principal for /api/*"]
+      l5["rate limit<br/>per-tenant bucket"]
       l6["HTTPRoute<br/>route to Service"]
     end
 
@@ -147,8 +162,8 @@ flowchart LR
 
     user --> cdn --> l1 --> l2 --> l3 --> l4 --> l5 --> l6 --> svc
 
-    note["WAF 403 = known-bad payload<br/>RL 429 = too many/tenant<br/>RA 401 = no/bad JWT<br/>AZ 403 = wrong scope"]
-    l5 -.- note
+    note["WAF 403 = known-bad payload<br/>RA 401 = invalid JWT<br/>AZ 403 = no verified principal<br/>RL 429 = too many for one tenant"]
+    l4 -.- note
 ```
 
 ### Diagram B — WAF rules matrix (ASCII)
@@ -174,24 +189,27 @@ DIMENSION              LOCAL RATE LIMITER           GLOBAL RATE LIMITER (RLS)
 ─────────────────────  ───────────────────────────  ────────────────────────────
 Where                  in Envoy worker (in-process) external gRPC service
 Accuracy               approximate (per-worker)     exact (Redis-backed)
-Latency cost           ~0.1 ms                      ~1-3 ms (extra hop)
+Latency cost           in-process, no extra hop     one extra hop per request
 Operational            zero extra component         RLS Deployment + Redis
-Per-tenant key         JWT claim via Lua/WASM       same
+Per-tenant key         x-tenant from verified claim same
 When it wins           per-gateway-replica fine     need exact cluster-wide budget
 ```
 
 ## Hands-on with the Bookstore Platform
 
 Assumes ch.13.04 ran (Istio installed + JWT verify wired); ch.13.05 and
-13.06 are useful but not strictly required to run this chapter.
+13.06 are useful but not strictly required to run this chapter. Every
+output shown in this section is illustrative, not captured: this
+chapter's lab run did not install Istio.
 
 ### 1. Install the Gateway API CRDs
 
 ```sh
 kubectl config use-context kind-bookstore-platform-us-east
 
-# Standard channel (graduated APIs only)
-kubectl apply -f https://github.com/kubernetes-sigs/gateway-api/releases/download/v1.1.0/standard-install.yaml
+# Standard channel (graduated APIs only). v1.6.0 is the bundle istio.io's
+# Gateway API task installs; use the one your Istio release documents.
+kubectl apply -f https://github.com/kubernetes-sigs/gateway-api/releases/download/v1.6.0/standard-install.yaml
 
 # Verify the CRDs
 kubectl get crd | grep gateway.networking.k8s.io
@@ -201,39 +219,75 @@ kubectl get crd | grep gateway.networking.k8s.io
 # referencegrants.gateway.networking.k8s.io
 ```
 
-Istio 1.21+ ships Gateway API support enabled by default; we installed
-1.23.2 in ch.13.04 so the controller is already there.
+The Istio controller from ch.13.04 reconciles these resources.
 
-### 2. Apply the Gateway + HTTPRoutes
+### 2. Issue the edge certificate and apply the Gateway
+
+The HTTPS listener needs a certificate that clients can check. cert-manager
+signs it with an edge CA that this chapter creates, so no key sits in a
+manifest. Label the namespace first, at `restricted`:
 
 ```sh
+kubectl apply -f - <<'EOF'
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: cert-manager
+  labels:
+    pod-security.kubernetes.io/enforce: restricted
+    pod-security.kubernetes.io/enforce-version: latest
+    pod-security.kubernetes.io/audit: restricted
+    pod-security.kubernetes.io/audit-version: latest
+    pod-security.kubernetes.io/warn: restricted
+    pod-security.kubernetes.io/warn-version: latest
+EOF
+
+helm repo add jetstack https://charts.jetstack.io
+helm install cert-manager jetstack/cert-manager --version v1.21.3 \
+  --namespace cert-manager --set crds.enabled=true --wait
+```
+
+On chart v1.21.3 the defaults already meet `restricted`: the pods run
+non-root with the `RuntimeDefault` seccomp profile, and each container
+drops all capabilities and has a read-only root filesystem.
+
+```sh
+kubectl apply -f examples/bookstore-platform/edge/edge-ca.yaml
 kubectl apply -f examples/bookstore-platform/edge/gateway.yaml
 
+kubectl -n cert-manager wait --for=condition=Ready certificate/edge-ca --timeout=120s
+kubectl -n bookstore-platform wait --for=condition=Ready certificate/bookstore-platform-edge --timeout=120s
+
+# Export the CA once. Every later chapter uses --cacert edge-ca.crt.
+kubectl -n cert-manager get secret edge-ca -o jsonpath='{.data.ca\.crt}' \
+  | base64 -d > edge-ca.crt
+
 kubectl -n bookstore-platform get gateway,httproute
-# NAME                                                  CLASS   ADDRESS   PROGRAMMED   AGE
-# gateway.gateway.networking.k8s.io/bookstore-platform-edge   istio                 True         10s
+# NAME                                                        CLASS   ADDRESS   PROGRAMMED   AGE
+# gateway.gateway.networking.k8s.io/bookstore-platform-edge   istio             True         10s
 #
 # NAME                                                              HOSTNAMES   AGE
 # httproute.gateway.networking.k8s.io/bookstore-platform-public                 10s
 # httproute.gateway.networking.k8s.io/bookstore-platform-api                    10s
 # httproute.gateway.networking.k8s.io/bookstore-platform-stripe-webhook         10s
+# httproute.gateway.networking.k8s.io/bookstore-platform-redirect               10s
 ```
 
-The `Gateway` carries two listeners (HTTPS on 443, HTTP on 80); the
-HTTPS listener uses a placeholder TLS Secret which production
-replaces with a cert-manager-issued one.
+The `Gateway` has two listeners (HTTPS on 443, HTTP on 80). The HTTP
+listener serves only the redirect route. The HTTPS certificate is issued
+by the edge CA, and `allowedRoutes` admits only routes in this namespace.
 
-### 3. Apply the Coraza WAF EnvoyFilter
+### 3. Apply the Coraza WAF WasmPlugin
 
 ```sh
-kubectl apply -f examples/bookstore-platform/edge/coraza-envoy-filter.yaml
+kubectl apply -f examples/bookstore-platform/edge/coraza-wasmplugin.yaml
 
-kubectl -n istio-system get envoyfilter coraza-waf
+kubectl -n bookstore-platform get wasmplugin coraza-waf
 # NAME         AGE
 # coraza-waf   5s
 
-# Watch the Envoy worker fetch the WASM binary on first request
-kubectl -n istio-system logs -l istio=ingressgateway --tail=20 | grep -i coraza
+# The gateway pod loads the module at startup
+kubectl -n bookstore-platform logs -l gateway.networking.k8s.io/gateway-name=bookstore-platform-edge --tail=20 | grep -i coraza
 # ... wasm log: Coraza initialised; CRS rules loaded ...
 ```
 
@@ -242,43 +296,42 @@ kubectl -n istio-system logs -l istio=ingressgateway --tail=20 | grep -i coraza
 ```sh
 kubectl apply -f examples/bookstore-platform/edge/rate-limit-envoy-filter.yaml
 
-kubectl -n istio-system get envoyfilter
+kubectl -n bookstore-platform get envoyfilter
 # NAME                       AGE
-# coraza-waf                 1m
 # per-tenant-rate-limit      5s
 ```
 
 ### 5. Test the WAF (port-forward; production uses the cloud LB)
 
 ```sh
-kubectl -n istio-system port-forward svc/istio-ingressgateway 8443:443 >/dev/null 2>&1 &
+kubectl -n bookstore-platform port-forward svc/bookstore-platform-edge-istio 8443:443 >/dev/null 2>&1 &
 sleep 3
 
 # 5a — legitimate request (200)
-curl -sk -o /dev/null -w "%{http_code}\n" https://localhost:8443/static/index.html
+curl -s --cacert edge-ca.crt -o /dev/null -w "%{http_code}\n" https://localhost:8443/static/index.html
 # 200
 
 # 5b — SQL injection (403, rule 942100)
-curl -sk -o /dev/null -w "%{http_code}\n" "https://localhost:8443/api/v2/search?q=1' OR '1'='1"
+curl -s --cacert edge-ca.crt -o /dev/null -w "%{http_code}\n" "https://localhost:8443/api/v2/search?q=1' OR '1'='1"
 # 403
 
 # 5c — XSS (403, rule 941100)
-curl -sk -o /dev/null -w "%{http_code}\n" "https://localhost:8443/api/v2/search?q=<script>alert(1)</script>"
+curl -s --cacert edge-ca.crt -o /dev/null -w "%{http_code}\n" "https://localhost:8443/api/v2/search?q=<script>alert(1)</script>"
 # 403
 
 # 5d — path traversal (403, rule 930100)
-curl -sk -o /dev/null -w "%{http_code}\n" "https://localhost:8443/static/../../../etc/passwd"
+curl -s --cacert edge-ca.crt -o /dev/null -w "%{http_code}\n" "https://localhost:8443/static/../../../etc/passwd"
 # 403
 
 # 5e — known-bad user-agent (sqlmap; 403, rule 913100)
-curl -sk -o /dev/null -w "%{http_code}\n" -H "User-Agent: sqlmap/1.7" https://localhost:8443/api/v2/search?q=test
+curl -s --cacert edge-ca.crt -o /dev/null -w "%{http_code}\n" -H "User-Agent: sqlmap/1.7" https://localhost:8443/api/v2/search?q=test
 # 403
 ```
 
 Sample WAF audit log entry (from the Coraza filter):
 
 ```sh
-kubectl -n istio-system logs -l istio=ingressgateway --tail=5 | grep -i transaction
+kubectl -n bookstore-platform logs -l gateway.networking.k8s.io/gateway-name=bookstore-platform-edge --tail=5 | grep -i transaction
 # {"transaction":{"id":"...","client_ip":"127.0.0.1","request":{"uri":"/api/v2/search?q=1%27%20OR%20%271%27%3D%271","method":"GET"},
 #  "messages":[{"actionset":"deny","data":"Matched Data: \" OR \" found within ARGS:q","rule":{"id":"942100","msg":"SQL Injection Attack Detected via libinjection","severity":2}}]}
 ```
@@ -292,7 +345,7 @@ kubectl -n istio-system logs -l istio=ingressgateway --tail=5 | grep -i transact
 # Hammer the API: 105 requests in <10s. The local rate limiter is
 # 100 / 10s / tenant; the 101st onward should return 429.
 for i in $(seq 1 105); do
-  curl -sk -o /dev/null -w "%{http_code}\n" \
+  curl -s --cacert edge-ca.crt -o /dev/null -w "%{http_code}\n" \
     -H "Authorization: Bearer $JWT" \
     "https://localhost:8443/api/v2/search?q=test"
 done | sort | uniq -c
@@ -304,21 +357,25 @@ The 429 response carries `Retry-After: 10` and the `x-rate-limit:
 per-tenant` header — the client knows when to retry and the operator
 sees which budget the request hit.
 
-### 7. Tune CRS — flip a noisy rule to DetectionOnly
+### 7. Tune CRS: exclude one rule on one path
 
-A real catalog has book titles like *"Don't Make Me Think"* — the
-apostrophe trips rule 942100. The production tuning loop:
+A real catalog has book titles like *"Don't Make Me Think"*, and the
+apostrophe trips rule 942100 on any path that takes text. Tune in this
+order, and do not block on the first day:
 
-```sh
-# Update the Coraza config patch (add a SecRuleRemoveById line for 942100
-# ONLY on the catalog's request path, not the rest)
-kubectl -n istio-system get envoyfilter coraza-waf -o yaml | \
-  yq '.spec.configPatches[0].patch.value.typed_config.value.configuration.value += "\nSecRuleUpdateActionById 942100 \"phase:2,pass,log,auditlog\""' | \
-  kubectl apply -f -
+1. Set `SecRuleEngine DetectionOnly` in `pluginConfig.directives_map.default`
+   of `coraza-wasmplugin.yaml`, then apply it. Rules log but do not block.
+2. Read the audit log for about two weeks. For each rule that fires on
+   legitimate input, add an exclusion.
+3. Scope each exclusion to its path. This line removes rule 942100 for the
+   catalog routes only, and nothing else:
+
+```text
+SecRule REQUEST_URI "@beginsWith /api/v1/" "id:1000001,phase:1,pass,nolog,ctl:ruleRemoveById=942100"
 ```
 
-The chapter's Production notes lists the full tuning loop; here we
-just sketch the shape.
+4. Set `SecRuleEngine On` again, apply, and confirm the 403 in step 5b
+   still returns.
 
 ## How it works under the hood
 
@@ -334,95 +391,69 @@ just sketch the shape.
   splits, retries, timeouts. Gateway API has typed fields for all of
   these (`spec.rules[].matches[].headers`, `spec.rules[].backendRefs[].weight`,
   `spec.rules[].timeouts`).
-- **Cross-namespace routes.** An `HTTPRoute` in `tenant-ns` can target
-  a `Gateway` in `bookstore-platform` if the Gateway's
-  `allowedRoutes.namespaces.from: All` permits it (or a `ReferenceGrant`
-  is explicit). Production usually restricts via `Selector` so only
-  approved tenants can attach.
+- **Cross-namespace routes.** A `Gateway` admits routes from the
+  namespaces its `allowedRoutes` names. This chapter uses `Same`, so only
+  routes in `bookstore-platform` attach. The other direction needs a
+  `ReferenceGrant` in the target namespace: each backend namespace in
+  `gateway.yaml` grants the named Services to the edge routes, and no more.
 
-**Coraza WASM filter loading order.** Istio's EnvoyFilter `INSERT_BEFORE`
-applies a filter relative to a named anchor. The chapter's Coraza
-filter inserts BEFORE `envoy.filters.http.jwt_authn` (the JWT verifier
-ch.13.04 wired). The rate-limit filter inserts BEFORE
-`envoy.filters.http.router` (the last-stop dispatcher). Together with
-the listener-level TLS termination, the request walks the filter
-chain in the documented order.
+**Filter insertion.** An EnvoyFilter `INSERT_BEFORE` places a filter
+relative to a named anchor. The WasmPlugin uses `phase: AUTHN`, which
+places the WAF before Istio's authn filters, so it runs before the JWT
+verifier from ch.13.04. The Lua filter sits before
+`envoy.filters.http.jwt_authn`, so it strips the client's `x-tenant`
+before the verifier can set it. The rate limit sits before
+`envoy.filters.http.router`, the last stop.
 
-**The WASM binary is OCI-distributed.** The EnvoyFilter declares the
-WASM binary's HTTP URL (or `oci://` URL). Envoy pulls it on first
-request; the binary is cached on the gateway Pod's filesystem. On
-restart, Envoy re-pulls (or uses the cached copy if `--wasm-cache-dir`
-is set). Production pins the OCI digest (`oci://...@sha256:<DIGEST>`)
-so a re-tag of the upstream image cannot silently change behaviour.
+**The WASM binary is OCI-distributed.** The WasmPlugin `url` names an OCI
+image. Pin it by digest (`oci://...@sha256:<DIGEST>`), so a new push to a
+tag cannot change the behaviour that was reviewed. The example pins the
+digest of tag 0.5.0, and the tag stays in a comment.
 
 **Token-bucket vs leaky-bucket.** Envoy's local rate limiter is a
 **token bucket**: a bucket holds N tokens; each request consumes one;
 the bucket refills `tokens_per_fill` every `fill_interval`. When the
 bucket is empty, requests get 429 + `Retry-After`. The alternative —
 **leaky bucket** — accumulates incoming requests and drains them at a
-fixed rate. Envoy does not ship a leaky-bucket out of the box; the
-**sliding-window** variant (a more accurate rolling-window counter)
-is in the global RLS. Production picks token-bucket for the edge
-because the operator-visible cost ("X req / Y seconds / tenant") is
-familiar.
+fixed rate. Production picks token-bucket for the edge because the
+operator-visible cost ("X req / Y seconds / tenant") is familiar.
 
-**Per-tenant key extraction — the Lua filter (chapter ships) and the
-WASM alternative (production prefers).** The Lua filter reads the
-base64 `x-jwt-payload` header, parses out `tenant`, sets a descriptor
-the rate limiter keys on. Lua does NOT ship a base64 decoder in older
-Istio versions — the chapter's ships a regex extractor (`match` on the
-JSON text) which is correct only because Lua sees the decoded payload
-*if Envoy's RequestAuthentication is configured to output a decoded
-header* (some Istio versions do, some require WASM). The chapter walks
-both paths; production usually picks a custom WASM filter that does
-the base64 decode + parse correctly.
+**The tenant key comes from the token, not from parsing it.** ch.13.04's
+RequestAuthentication copies a verified token's `tenant` claim to the
+`x-tenant` header (`outputClaimToHeaders`). A route action reads that header
+as the descriptor key. A request with no token has no `x-tenant` and uses
+the default bucket. The Lua filter exists for one reason: a client can send
+its own `x-tenant`, and only the verified token may set it.
 
-**Filter performance.** Coraza WAF adds ~2-5 ms per request on an
-unaccelerated x86 box; the rate limiter adds ~0.1-0.5 ms. The TLS
-terminate adds 5-15 ms on the first request per session (handshake);
-zero ms on reused sessions. Total edge overhead at p99: ~10-20 ms.
-For e-commerce this is fine; for sub-10-ms-budget paths
-(real-time pricing) the platform would skip Coraza or run a stripped
-CRS.
+**Filter performance.** Measure the WAF and the TLS handshake on your own
+traffic before you set a latency budget. This chapter does not benchmark
+them. Real-time paths with a tight budget may need a smaller rule set.
 
 ## Production notes
-
-> **In production:** **OWASP CRS rule tuning.** CRS v4 is noisy. Plan
-> for two weeks of `DetectionOnly` mode after rollout: every CRS rule
-> firing is logged but not blocked; the team reviews the audit log
-> daily; false-positive rules get added to a path-specific exclusion
-> list (`SecRuleUpdateActionById <ID> "phase:2,pass,log,auditlog"`).
-> After two weeks, flip to `On`. Skip this and the first day in
-> production is a Slack flood of legitimate customers blocked.
 
 > **In production:** **Rate-limit "thundering herd" on reset.** The
 > token bucket refills at the `fill_interval` boundary; if 10,000
 > clients hit the limit at second 5 and the bucket resets at second
-> 10, all 10,000 retry simultaneously at second 10. Two mitigations:
-> (1) jitter the `Retry-After` value (some clients respect it as
-> "wait random(0, N)"); (2) the **sliding-window** variant (in global
-> RLS) smooths the retry curve. The chapter calls this out; production
-> pairs the local rate limiter with a CDN-side rate limit that's
-> sliding-window for the same effect.
+> 10, all 10,000 retry simultaneously at second 10. Jitter the
+> `Retry-After` value on the client side (some clients respect it as
+> "wait random(0, N)"). This chapter sends a fixed `10`, and it does
+> not build a global limiter that would smooth the curve.
 
 > **In production:** **WAF blocked but the attacker was legitimate**
 > — the highest-friction misconfiguration. A legitimate customer
 > types a book title with a quote; CRS 942100 fires; the request gets
-> 403; the customer's checkout breaks. Two defences: (a) the tuning
-> loop above; (b) a **trust list** for known-good clients (large
-> customers' IP ranges, the platform team's own offices) that bypass
-> CRS entirely. Maintain via a small annotation on the
-> `AuthorizationPolicy`; the chapter sketches it.
+> 403; the customer's checkout breaks. Two defences: (a) the path-scoped
+> exclusion in step 7; (b) a **trust list** for known-good clients (large
+> customers' IP ranges, the platform team's own offices) that skips the
+> WAF. This chapter does not build the trust list.
 
 > **In production:** **Bot detection — punt to a vendor.** Self-hosted
 > bot detection is a deep rabbit hole (IP reputation, browser
 > fingerprinting, behavioural scoring, CAPTCHA challenges). Real
 > platforms buy this from a vendor — Cloudflare Bot Management,
 > Akamai Bot Manager, hCaptcha Enterprise. The integration is
-> usually "the vendor sets a cookie; the WAF checks the cookie".
-> v2 sketches an EnvoyFilter that injects an hCaptcha challenge
-> when a per-IP rate spike trips a threshold; the full integration
-> is production-only.
+> usually "the vendor sets a cookie; the WAF checks the cookie". This
+> chapter builds none of it.
 
 > **In production:** **The CDN's WAF and yours run in series.** If
 > you have a CDN with a WAF (most do), it runs **before** your
@@ -445,31 +476,30 @@ CRS.
 
 ```sh
 # Gateway API CRDs
-kubectl apply -f https://github.com/kubernetes-sigs/gateway-api/releases/download/v1.1.0/standard-install.yaml
+kubectl apply -f https://github.com/kubernetes-sigs/gateway-api/releases/download/v1.6.0/standard-install.yaml
 
-# Gateway + Routes
+# Edge CA, Gateway + Routes (cert-manager installed first, step 2)
+kubectl apply -f examples/bookstore-platform/edge/edge-ca.yaml
 kubectl apply -f examples/bookstore-platform/edge/gateway.yaml
+kubectl -n cert-manager get secret edge-ca -o jsonpath='{.data.ca\.crt}' | base64 -d > edge-ca.crt
 
 # WAF + rate limit
-kubectl apply -f examples/bookstore-platform/edge/coraza-envoy-filter.yaml
+kubectl apply -f examples/bookstore-platform/edge/coraza-wasmplugin.yaml
 kubectl apply -f examples/bookstore-platform/edge/rate-limit-envoy-filter.yaml
 
 # Verify
 kubectl get gateway,httproute -A
-kubectl -n istio-system get envoyfilter
+kubectl -n bookstore-platform get wasmplugin,envoyfilter
 
 # Test (port-forward)
-kubectl -n istio-system port-forward svc/istio-ingressgateway 8443:443 >/dev/null 2>&1 &
-curl -sk "https://localhost:8443/api/v2/search?q=1' OR '1'='1"   # 403 from WAF
+kubectl -n bookstore-platform port-forward svc/bookstore-platform-edge-istio 8443:443 >/dev/null 2>&1 &
+curl -s --cacert edge-ca.crt "https://localhost:8443/api/v2/search?q=1' OR '1'='1"   # 403 from WAF
 ```
 
-Minimal skeletons:
+Minimal fragments (the full files are in `edge/`):
 
 ```yaml
-# Gateway API Gateway
-apiVersion: gateway.networking.k8s.io/v1
-kind: Gateway
-metadata: { name: <NAME>, namespace: <NS> }
+# Gateway fragment: the TLS listener and the namespace policy
 spec:
   gatewayClassName: istio
   listeners:
@@ -481,34 +511,34 @@ spec:
         certificateRefs:
           - kind: Secret
             name: <TLS-SECRET>
----
-# Gateway API HTTPRoute
-apiVersion: gateway.networking.k8s.io/v1
-kind: HTTPRoute
-metadata: { name: <NAME>, namespace: <NS> }
+      allowedRoutes:
+        namespaces:
+          from: Same
+```
+
+```yaml
+# HTTPRoute fragment: one path prefix to one Service
 spec:
   parentRefs:
     - name: <GATEWAY-NAME>
+      sectionName: https
   rules:
     - matches:
         - path: { type: PathPrefix, value: /api/v2 }
       backendRefs:
         - { name: <SVC>, port: 8080 }
----
-# Coraza WAF EnvoyFilter (sketch — full file at edge/coraza-envoy-filter.yaml)
-apiVersion: networking.istio.io/v1alpha3
-kind: EnvoyFilter
-metadata: { name: coraza-waf, namespace: istio-system }
+```
+
+```yaml
+# Coraza WAF WasmPlugin (fragment; the full file is edge/coraza-wasmplugin.yaml)
 spec:
-  workloadSelector: { labels: { istio: ingressgateway } }
-  configPatches:
-    - applyTo: HTTP_FILTER
-      match: { context: GATEWAY, listener: { filterChain: { filter: { name: envoy.filters.network.http_connection_manager, subFilter: { name: envoy.filters.http.jwt_authn } } } } }
-      patch:
-        operation: INSERT_BEFORE
-        value:
-          name: envoy.filters.http.wasm
-          # ... typed_config carrying the OCI WASM URL + OWASP CRS rules
+  selector:
+    matchLabels: { gateway.networking.k8s.io/gateway-name: <GATEWAY-NAME> }
+  url: oci://ghcr.io/corazawaf/coraza-proxy-wasm@sha256:<DIGEST>
+  phase: AUTHN
+  pluginConfig:
+    default_directives: default
+    directives_map: { default: ["Include @owasp_crs/*.conf", "SecRuleEngine On"] }
 ```
 
 WAF rule tuning checklist:
@@ -525,7 +555,8 @@ Checklist (edge wired correctly when all six are yes):
 - [ ] Coraza WASM loaded; SQL-injection curl returns 403.
 - [ ] Rate-limit fires after 100 req / 10 s / tenant; 429 includes
       `Retry-After: 10`.
-- [ ] JWT verify (ch.13.04) still works (401 without token).
+- [ ] JWT verify (ch.13.04) still works: a bad token gets 401, and no
+      token on `/api/*` gets 403.
 - [ ] WAF audit log is shipped to Loki (cross-ref 13.09).
 - [ ] CRS exclusion list documented per noisy rule, scoped to a path.
 
@@ -543,21 +574,21 @@ Checklist (edge wired correctly when all six are yes):
 2. **You enable OWASP CRS in "blocking" mode and the storefront's `/checkout` endpoint starts returning 403 for ~3% of customers. What's the staged-rollout discipline?**
    <details><summary>Show answer</summary>
 
-   The CRS in blocking mode is rule-set-too-strict for most apps day-one. Discipline: (1) **Detection-only mode** for 1-2 weeks — CRS logs would-be-blocks but doesn't enforce; you collect false-positives. (2) **Per-path exclusions** — `/checkout` may legitimately POST JSON that triggers SQL keyword rules; add `SecRuleRemoveTargetById` for those exact rules on that path. (3) **Threshold tuning** — CRS uses an anomaly score; raise the threshold for low-criticality paths. (4) **Per-tenant overrides** when a tenant's specific API legitimately triggers a rule. (5) **Then enable blocking** with the false-positive rate as a metric: alert if `coraza_blocks_total > baseline + N` during deploy. Never go straight to blocking mode in production.
+   The CRS in blocking mode is rule-set-too-strict for most apps day-one. Discipline: (1) **Detection-only mode** for 1-2 weeks: CRS logs would-be-blocks but doesn't enforce; you collect false-positives. (2) **Per-path exclusions**: `/checkout` may legitimately POST JSON that triggers SQL keyword rules; add `SecRuleRemoveTargetById` for those exact rules on that path. (3) **Threshold tuning**: CRS uses an anomaly score; raise the threshold for low-criticality paths. (4) **Per-tenant overrides** when a tenant's specific API legitimately triggers a rule. (5) **Then enable blocking** with the false-positive rate as a metric: alert when the block rate in the audit log rises above its pre-deploy baseline. Never go straight to blocking mode in production.
 
    </details>
 
 3. **Compare local rate limiting (per-Envoy) vs global rate limiting (shared service) — when do you choose each?**
    <details><summary>Show answer</summary>
 
-   **Local** (Envoy's `local_ratelimit`): each replica counts independently. If you have 10 storefront pods and a 100 req/s/tenant limit, each pod allows 100, total 1000. Simple, no coordination, no latency added. Good when (a) load is roughly balanced across pods, (b) you accept ~10x the limit at peak, (c) you don't have a shared store. **Global** (`global_ratelimit` + Redis or Envoy's RLS): all pods share a counter, hard 100 req/s/tenant total. Adds 1-5ms per request for the lookup, requires Redis, scales differently. Choose global for hard contractual limits ("tenant X gets exactly 1000 req/min"), local for noisy-neighbor protection where approximations are fine.
+   **Local** (Envoy's `local_ratelimit`): each replica counts independently. If you have 10 storefront pods and a 100 req/s/tenant limit, each pod allows 100, total 1000. Simple, no coordination, no latency added. Good when (a) load is roughly balanced across pods, (b) you accept ~10x the limit at peak, (c) you don't have a shared store. **Global** (`global_ratelimit` + Redis or Envoy's RLS): all pods share a counter, hard 100 req/s/tenant total. Adds one network hop per request for the lookup, requires Redis, scales differently. Choose global for hard contractual limits ("tenant X gets exactly 1000 req/min"), local for noisy-neighbor protection where approximations are fine.
 
    </details>
 
 4. **A tenant complains "we're getting rate-limited but our traffic spike is legitimate." What's the conversation and what's the technical answer?**
    <details><summary>Show answer</summary>
 
-   First, validate: pull OpenCost + observability for that tenant — is the spike actually 10x baseline? If yes, the limit was set too conservatively. If no, it might be a buggy retry loop on their side. Technical: (a) raise the limit for that tenant via a per-tenant CR (e.g. `RateLimitOverride` with `tenant: acme, rps: 500`); (b) move them to a higher tier with a documented higher cap; (c) implement burst capacity (`refill_rate: 100/s, burst: 500`) so legitimate spikes are absorbed. The conversation matters: rate limits are a *product feature*, not a technical guardrail. Customers should know their limits, see usage dashboards, and have a path to increase them. Surprising customers with 429s is a churn risk.
+   First, validate: pull OpenCost + observability for that tenant: is the spike actually 10x baseline? If yes, the limit was set too conservatively. If no, it might be a buggy retry loop on their side. Technical: (a) add a descriptor entry for that tenant with a higher `max_tokens`, as a reviewed change to the EnvoyFilter; (b) move them to a higher tier with a documented higher cap; (c) set `max_tokens` above `tokens_per_fill` so a legitimate spike spends stored tokens. The conversation matters: rate limits are a *product feature*, not a technical guardrail. Customers should know their limits, see usage dashboards, and have a path to increase them. Surprising customers with 429s is a churn risk.
 
    </details>
 
@@ -581,5 +612,11 @@ Checklist (edge wired correctly when all six are yes):
   v1 specification this chapter applies.
 - **Istio Gateway API support**
   <https://istio.io/latest/docs/tasks/traffic-management/ingress/gateway-api/>.
+- **Istio WasmPlugin** <https://istio.io/latest/docs/reference/config/proxy_extensions/wasm-plugin/>;
+  the phases and the `@sha256:` digest form.
+- **Istio RequestAuthentication**
+  <https://istio.io/latest/docs/reference/config/security/request_authentication/>;
+  `outputClaimToHeaders`, which step 4's tenant header depends on.
+- **cert-manager CA issuer** <https://cert-manager.io/docs/configuration/ca/>.
 - **Ibryam & Huß, _Kubernetes Patterns_ 2e — *Stateless Service*
   (ch.5)** — the request-response shape WAF + rate-limit specialise.

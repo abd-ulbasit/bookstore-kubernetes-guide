@@ -1,0 +1,77 @@
+# Bookstore Platform v2 — Part 13 ch.07: the edge CA. cert-manager creates a
+# self-signed root, keeps its key in the edge-ca Secret in the cert-manager
+# namespace, and signs the gateway's serving certificate with it. Clients
+# trust edge-ca.crt, exported once in ch.13.07 step 2, and never use -k.
+#
+# Apply after cert-manager is installed and its namespace is labelled
+# restricted (ch.13.07 step 2):
+#   kubectl apply -f examples/bookstore-platform/edge/edge-ca.yaml
+apiVersion: cert-manager.io/v1
+kind: ClusterIssuer
+metadata:
+  name: edge-selfsigned
+  labels:
+    app.kubernetes.io/part-of: bookstore-platform
+spec:
+  selfSigned: {}
+---
+apiVersion: cert-manager.io/v1
+kind: Certificate
+metadata:
+  name: edge-ca
+  namespace: cert-manager
+  labels:
+    app.kubernetes.io/part-of: bookstore-platform
+spec:
+  isCA: true
+  commonName: bookstore-platform-edge-ca
+  secretName: edge-ca
+  duration: 8760h
+  renewBefore: 720h
+  privateKey:
+    algorithm: ECDSA
+    size: 256
+  issuerRef:
+    name: edge-selfsigned
+    kind: ClusterIssuer
+    group: cert-manager.io
+---
+apiVersion: cert-manager.io/v1
+kind: ClusterIssuer
+metadata:
+  name: edge-ca
+  labels:
+    app.kubernetes.io/part-of: bookstore-platform
+spec:
+  ca:
+    secretName: edge-ca
+---
+# The serving certificate the Gateway's HTTPS listener presents. The SANs
+# cover the port-forward used in ch.13.07 step 5 and step 6.
+apiVersion: cert-manager.io/v1
+kind: Certificate
+metadata:
+  name: bookstore-platform-edge
+  namespace: bookstore-platform
+  labels:
+    app.kubernetes.io/part-of: bookstore-platform
+spec:
+  secretName: bookstore-platform-edge-cert
+  dnsNames:
+    - localhost
+  ipAddresses:
+    - 127.0.0.1
+  duration: 2160h
+  renewBefore: 360h
+  privateKey:
+    algorithm: ECDSA
+    size: 256
+    rotationPolicy: Always
+  usages:
+    - server auth
+    - digital signature
+    - key encipherment
+  issuerRef:
+    name: edge-ca
+    kind: ClusterIssuer
+    group: cert-manager.io

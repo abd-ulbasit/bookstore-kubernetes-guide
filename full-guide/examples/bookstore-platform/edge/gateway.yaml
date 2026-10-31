@@ -2,32 +2,32 @@
 # entry-point pattern — `Gateway` + `HTTPRoute` rather than the legacy
 # Ingress + ingress-controller-specific annotations.
 #
-# Gateway API is the standardised replacement for Ingress in Kubernetes
-# (graduated to GA in v1.1). It carries three semantic primitives:
+# Gateway API is the standardised replacement for Ingress in Kubernetes (GA
+# since v1.0). It carries three semantic primitives:
 #   - GatewayClass — the controller implementation (Istio, Envoy Gateway,
 #                    Contour, Cilium Gateway, etc.).
 #   - Gateway      — a logical load-balancer (listeners, addresses, TLS).
 #   - HTTPRoute    — how requests reaching the Gateway map to Services.
-# This file installs all three for the Istio implementation; Istio's
-# ingressgateway is the data-plane.
+# Istio provisions a Deployment and a Service named after the Gateway and the
+# GatewayClass (bookstore-platform-edge-istio), labelled
+# gateway.networking.k8s.io/gateway-name. The WasmPlugin and EnvoyFilters in
+# this directory select those pods by that label.
 #
 # !!! CRD-INTRINSIC DRY-RUN
 #   `Gateway` and `HTTPRoute` are `gateway.networking.k8s.io/v1` — the
 #   Gateway API standard CRDs. WITHOUT the Gateway API CRDs installed (a
 #   one-shot `kubectl apply` of the Standard channel YAML):
 #     no matches for kind "Gateway" in version "gateway.networking.k8s.io/v1"
-#   EXPECTED. Install the Gateway API CRDs + Istio (with Gateway API
-#   support enabled, which is the default since Istio 1.21):
-#     kubectl apply -f https://github.com/kubernetes-sigs/gateway-api/releases/download/v1.1.0/standard-install.yaml
+#   EXPECTED. Install the Gateway API CRDs first (ch.13.07 step 1).
 #
-# Two HTTPRoutes:
+# Two HTTPRoutes (plus a redirect and the Stripe webhook):
 #   - bookstore-platform-public — public paths, no JWT (the /static/* +
 #     /healthz + /favicon.ico set the legacy AuthorizationPolicy already
 #     covers — kept consistent here).
 #   - bookstore-platform-api    — /api/* requires JWT (paired with the
 #     existing auth/authorization-policy.yaml from ch.13.04).
 #
-# Apply (after Gateway API CRDs + Istio + ch.13.04's auth policies):
+# Apply (after the CRDs and edge-ca.yaml, ch.13.07 step 2):
 #   kubectl apply -f examples/bookstore-platform/edge/gateway.yaml
 ---
 apiVersion: gateway.networking.k8s.io/v1
@@ -51,8 +51,8 @@ metadata:
 spec:
   gatewayClassName: istio
   listeners:
-    # HTTPS listener with TLS terminated here (the certificate is a
-    # cert-manager-issued one in production; on kind, a self-signed.)
+    # HTTPS listener with TLS terminated here. The certificate comes from
+    # cert-manager (edge-ca.yaml), signed by the edge CA.
     - name: https
       protocol: HTTPS
       port: 443
@@ -61,16 +61,36 @@ spec:
         certificateRefs:
           - kind: Secret
             name: bookstore-platform-edge-cert
+      # Only routes in this namespace attach. A tenant route needs a change
+      # here, reviewed like any other edge change.
       allowedRoutes:
         namespaces:
-          from: All
+          from: Same
     - name: http
       protocol: HTTP
       port: 80
-      # HTTP listener is for the redirect-to-HTTPS HTTPRoute below.
       allowedRoutes:
         namespaces:
-          from: All
+          from: Same
+---
+# Plain HTTP only redirects. Nothing is served on port 80.
+apiVersion: gateway.networking.k8s.io/v1
+kind: HTTPRoute
+metadata:
+  name: bookstore-platform-redirect
+  namespace: bookstore-platform
+  labels:
+    app.kubernetes.io/part-of: bookstore-platform
+spec:
+  parentRefs:
+    - name: bookstore-platform-edge
+      sectionName: http
+  rules:
+    - filters:
+        - type: RequestRedirect
+          requestRedirect:
+            scheme: https
+            statusCode: 301
 ---
 # Every rule below drops x-canary-cohort. The storefront sets that header from
 # the verified session, and the catalog's VirtualService routes on it, so a
@@ -110,7 +130,8 @@ spec:
           port: 8080
 ---
 # /api/* — JWT required (enforced by the AuthorizationPolicy in
-# ../auth/authorization-policy.yaml, scoped to the istio-system gateway).
+# ../auth/authorization-policy.yaml from ch.13.04, which must select this
+# Gateway's pods as well).
 apiVersion: gateway.networking.k8s.io/v1
 kind: HTTPRoute
 metadata:
@@ -208,16 +229,51 @@ spec:
           namespace: bookstore-platform-payments
           port: 8080
 ---
-# Placeholder TLS cert — REPLACE via cert-manager (or upload a real one).
-apiVersion: v1
-kind: Secret
+# A backendRef into another namespace needs a ReferenceGrant in the target
+# namespace. Each grant names the Services the edge may reach, and nothing
+# else in the namespace.
+apiVersion: gateway.networking.k8s.io/v1
+kind: ReferenceGrant
 metadata:
-  name: bookstore-platform-edge-cert
-  namespace: bookstore-platform
+  name: edge-routes
+  namespace: bookstore-platform-acme-books
   labels:
     app.kubernetes.io/part-of: bookstore-platform
-    bookstore-platform.example.com/placeholder: "true"
-type: kubernetes.io/tls
-stringData:
-  tls.crt: "REPLACE-ME-VIA-CERT-MANAGER-NOT-IN-SOURCE"
-  tls.key: "REPLACE-ME-VIA-CERT-MANAGER-NOT-IN-SOURCE"
+spec:
+  from:
+    - group: gateway.networking.k8s.io
+      kind: HTTPRoute
+      namespace: bookstore-platform
+  to:
+    - group: ""
+      kind: Service
+      name: storefront
+    - group: ""
+      kind: Service
+      name: search
+    - group: ""
+      kind: Service
+      name: recommendations
+    - group: ""
+      kind: Service
+      name: catalog
+---
+apiVersion: gateway.networking.k8s.io/v1
+kind: ReferenceGrant
+metadata:
+  name: edge-routes
+  namespace: bookstore-platform-payments
+  labels:
+    app.kubernetes.io/part-of: bookstore-platform
+spec:
+  from:
+    - group: gateway.networking.k8s.io
+      kind: HTTPRoute
+      namespace: bookstore-platform
+  to:
+    - group: ""
+      kind: Service
+      name: payments-gateway
+    - group: ""
+      kind: Service
+      name: payments-webhook-receiver

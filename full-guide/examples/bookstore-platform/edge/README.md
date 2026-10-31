@@ -1,83 +1,70 @@
 # `edge/` — Gateway API + Coraza WAF + per-tenant rate limiting
 
 The v2 edge story (ch.13.07). Three jobs at the edge: terminate TLS +
-route, defend (WAF + rate limit), authenticate (JWT verify — ch.13.04
-already shipped this part).
+route, defend (WAF + rate limit), authenticate (JWT verify — ch.13.04).
 
 ## Files
 
-- `gateway.yaml` — Gateway API `GatewayClass` + `Gateway` + four
-  `HTTPRoute`s (public static, API v2, API v1 fallback, Stripe webhook).
-  Replaces the legacy Ingress shape v1 used.
-- `coraza-envoy-filter.yaml` — Coraza WAF as an Envoy WASM filter loaded
-  on the ingress-gateway Pod. OWASP CRS v4 rules. Blocks SQL-injection,
-  XSS, command-injection, path-traversal.
-- `rate-limit-envoy-filter.yaml` — Envoy local rate limiter EnvoyFilter
-  + a small Lua filter that extracts the `tenant` claim from
-  `x-jwt-payload` and keys the rate-limit bucket per tenant.
+- `edge-ca.yaml` — the edge CA (a cert-manager self-signed root and a CA
+  issuer) and the gateway's serving certificate. Replaces a literal Secret.
+- `gateway.yaml` — Gateway API `GatewayClass` + `Gateway`, an HTTP-to-HTTPS
+  redirect, three `HTTPRoute`s (public static, API, Stripe webhook) and the
+  `ReferenceGrant`s their backends need.
+- `coraza-wasmplugin.yaml` — Coraza WAF as an Istio `WasmPlugin` (digest
+  pinned), phase AUTHN, OWASP CRS v4. Blocks SQL injection, XSS,
+  command injection and path traversal.
+- `rate-limit-envoy-filter.yaml` — Envoy local rate limiter: a Lua filter
+  that drops a client-sent `x-tenant`, the token buckets, and the route
+  action that keys them on the verified tenant.
 
 ## Apply order
 
+Run it after ch.13.04 (Istio and the RequestAuthentication).
+
 ```sh
-# 1. Gateway API CRDs (one-shot; before Istio is fine too).
-kubectl apply -f https://github.com/kubernetes-sigs/gateway-api/releases/download/v1.1.0/standard-install.yaml
-
-# 2. Istio with Gateway API support (default since 1.21; ch.13.04 §1).
-#    (already installed if ch.13.04 ran)
-
-# 3. The Gateway + Routes
+# 1. Gateway API CRDs (ch.13.07 step 1).
+# 2. cert-manager with its namespace labelled restricted, then the edge CA
+#    and the Gateway (ch.13.07 step 2).
+kubectl apply -f examples/bookstore-platform/edge/edge-ca.yaml
 kubectl apply -f examples/bookstore-platform/edge/gateway.yaml
 
-# 4. WAF + rate limit
-kubectl apply -f examples/bookstore-platform/edge/coraza-envoy-filter.yaml
+# 3. WAF and rate limit
+kubectl apply -f examples/bookstore-platform/edge/coraza-wasmplugin.yaml
 kubectl apply -f examples/bookstore-platform/edge/rate-limit-envoy-filter.yaml
 
-# 5. Confirm
-kubectl -n istio-system get envoyfilter
-kubectl -n bookstore-platform get gateway,httproute
+# 4. Confirm
+kubectl -n bookstore-platform get gateway,httproute,wasmplugin,envoyfilter
 ```
 
-## Test the WAF
+## Test the edge
+
+Export the CA once, then reach the gateway through a port-forward:
 
 ```sh
-# Healthy request — 200
-curl -sk https://localhost:8443/static/index.html
+kubectl -n cert-manager get secret edge-ca -o jsonpath='{.data.ca\.crt}' \
+  | base64 -d > edge-ca.crt
+kubectl -n bookstore-platform port-forward svc/bookstore-platform-edge-istio 8443:443 >/dev/null 2>&1 &
 
-# SQL injection attempt — 403 (Coraza CRS rule 942100)
-curl -sk "https://localhost:8443/api/v2/search?q=1' OR '1'='1"
-
-# XSS attempt — 403 (CRS rule 941100)
-curl -sk "https://localhost:8443/api/v2/search?q=<script>alert(1)</script>"
-
-# Rate limit — 100 requests in 10s; the 101st returns 429
-for i in $(seq 1 105); do
-  curl -sk -o /dev/null -w "%{http_code}\n" \
-    -H "Authorization: Bearer $JWT" \
-    https://localhost:8443/api/v2/search?q=test
-done | sort | uniq -c
-# 100 200
-#   5 429
+curl -s --cacert edge-ca.crt -o /dev/null -w "%{http_code}\n" \
+  https://localhost:8443/static/index.html
 ```
+
+Chapter 13.07 steps 5 and 6 walk the WAF and rate-limit checks.
 
 ## Honest notes
 
-- **Coraza WASM pinning.** The chapter pins the Coraza release tag in
-  the EnvoyFilter; production pins the OCI digest
-  (`oci://...@sha256:<DIGEST>`) so a re-tag of the upstream image can't
-  silently change the WAF behaviour. The chapter walks both.
-- **CRS tuning.** CRS v4 is noisy. Out-of-the-box rule 942100 fires on
-  any URL with a single quote — many legitimate book titles trip it.
-  The chapter's Production notes flag the tuning loop (start in
-  `DetectionOnly` mode, watch the audit log, whitelist false positives,
-  flip to `On`).
-- **Lua-vs-WASM for the JWT claim extraction.** Lua is the kind-friendly
-  path. Production usually uses a custom WASM filter for performance
-  + base64-decode correctness — the chapter calls this out.
+- **Gateway pods.** A Gateway provisions its own pods, so the WAF, the rate
+  limit and (in ch.13.04) the JWT and AuthZ policies select them with
+  `gateway.networking.k8s.io/gateway-name`, not `istio: ingressgateway`.
+- **Tenant header.** The rate limit trusts `x-tenant` only when ch.13.04's
+  RequestAuthentication sets it from a verified token.
+- **CRS tuning.** CRS v4 is noisy. Start in `DetectionOnly`, review the
+  audit log, add path-scoped exclusions, then set `On` (ch.13.07 step 7).
 
 ## Cross-references
 
 - Ch.13.07 — the chapter that authors this stack.
 - `../auth/` (ch.13.04) — the JWT validation that this edge complements.
-- `../crossplane/composition-bookstoretenant.yaml` (ch.13.02) — provides
-  the per-tenant `quota` field that production wires to the rate-limit
-  descriptors (this file ships a static 100-per-10s default).
+- `../crossplane/composition-bookstoretenant.yaml` (ch.13.02) — the tenant
+  identity these buckets key on. The quota it sets is not yet wired here;
+  the buckets are the static 100-per-10s starting point.
