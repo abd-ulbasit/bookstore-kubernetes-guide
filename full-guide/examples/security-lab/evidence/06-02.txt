@@ -1,0 +1,303 @@
+# Transcript for 06-02: logging. Lab steps 0 to 10 and the cleanup.
+# Tier A: a kind cluster, Kubernetes v1.37.0 node, kubectl v1.37.2.
+# Node runtime: containerd v2.3.4. Helm v4.1.4.
+# Loki: grafana/loki chart 7.5.0, Loki 3.6.11, pinned by digest.
+# Alloy: grafana/alloy chart 1.15.0, Alloy v1.21.3, pinned by digest.
+# Host: a Linux lab host, not macOS. Recorded by running
+# examples/security-lab/labs/06-02.sh from full-guide/ with LAB_HEAVY=1.
+#
+# Namespaces: the run used p06-02-bookstore, p06-02-logging and p06-02-client.
+# The chapter prints bookstore, logging and client. The lab cluster's name is
+# not the one the chapter describes, and the output keeps the lab's own names.
+#
+# What did not work the first time:
+# - The connection to the lab cluster's API dropped during the first two attempts, so
+#   steps 1 to 3 failed with connection errors. Both attempts were discarded
+#   and this transcript is from a clean run.
+# - A namespace deletion waited on a stale API discovery entry left by another
+#   run, so the start was delayed. Nothing was forced.
+# - A ClusterRole and ClusterRoleBinding from an aborted install made step 0
+#   refuse to run. Both were removed by name after confirming their subject.
+# - The first redaction pattern did not redact. stage.replace rewrites the
+#   first capture group, so the patterns were changed to put the secret in that
+#   group, and the replacement became a constant. The run here is after that.
+# - The first orders requests returned 500 because the migrate Job had not
+#   created the orders table. The script now applies the example migrate Job.
+# - The planted DSN host was a dotted name, which the evidence check reads as an
+#   e-mail address. It is now localhost, which parses the same way in this run.
+#
+## step 0: start from a clean slate; refuse if a chart object of the same name exists
+clean
+
+## step 1: the Bookstore data and API tiers, from the example tree
+$ kubectl apply -f 00-namespace.yaml -f 05-serviceaccounts-rbac.yaml -f 15-catalog-config.yaml -f 16-db-credentials.yaml
+namespace/p06-02-bookstore created
+resourcequota/bookstore-quota created
+limitrange/bookstore-limits created
+serviceaccount/catalog-sa created
+serviceaccount/storefront-sa created
+serviceaccount/orders-sa created
+serviceaccount/payments-worker-sa created
+serviceaccount/postgres-sa created
+serviceaccount/redis-sa created
+serviceaccount/rabbitmq-sa created
+serviceaccount/migrate-sa created
+role.rbac.authorization.k8s.io/catalog-config-reader created
+rolebinding.rbac.authorization.k8s.io/catalog-config-reader-binding created
+configmap/catalog-config created
+secret/db-credentials created
+
+$ kubectl apply -f 12-redis.yaml -f 20-postgres-statefulset.yaml -f 40-services.yaml -f 60-networkpolicy.yaml
+deployment.apps/redis created
+service/postgres created
+statefulset.apps/postgres created
+service/catalog created
+service/storefront created
+service/orders created
+service/redis created
+service/rabbitmq created
+service/payments-worker created
+networkpolicy.networking.k8s.io/default-deny-all created
+networkpolicy.networking.k8s.io/allow-dns-egress created
+networkpolicy.networking.k8s.io/allow-ingress-to-http-tiers created
+networkpolicy.networking.k8s.io/allow-storefront-to-apis created
+networkpolicy.networking.k8s.io/allow-data-tier-ingress created
+networkpolicy.networking.k8s.io/allow-orders-to-rabbitmq created
+networkpolicy.networking.k8s.io/allow-backend-egress created
+networkpolicy.networking.k8s.io/allow-storefront-egress created
+networkpolicy.networking.k8s.io/allow-payments-worker-egress created
+networkpolicy.networking.k8s.io/allow-monitoring-scrape created
+
+$ kubectl apply -f 10-catalog-deploy.yaml -f 14-orders-deploy.yaml
+deployment.apps/catalog created
+deployment.apps/orders created
+
+$ kubectl -n p06-02-bookstore rollout status statefulset/postgres --timeout=240s
+kubectl -n p06-02-bookstore rollout status deploy/redis --timeout=240s
+kubectl -n p06-02-bookstore rollout status deploy/catalog --timeout=240s
+kubectl -n p06-02-bookstore rollout status deploy/orders --timeout=240s
+Waiting for 1 pods to be ready...
+partitioned roll out complete: 1 new pods have been updated...
+deployment "redis" successfully rolled out
+Waiting for deployment "catalog" rollout to finish: 0 of 3 updated replicas are available...
+Waiting for deployment "catalog" rollout to finish: 1 of 3 updated replicas are available...
+Waiting for deployment "catalog" rollout to finish: 2 of 3 updated replicas are available...
+deployment "catalog" successfully rolled out
+deployment "orders" successfully rolled out
+
+$ kubectl apply -f 21-db-migrate-job.yaml
+kubectl -n p06-02-bookstore wait --for=condition=complete job/db-migrate --timeout=240s
+job.batch/db-migrate created
+job.batch/db-migrate condition met
+
+## step 2: what the services already write to stdout
+$ kubectl -n p06-02-bookstore logs deploy/catalog --tail=2
+kubectl -n p06-02-bookstore logs deploy/orders --tail=2
+Found 3 pods, using pod/catalog-58bfcfdc9c-brvtl
+{"time":"2026-10-31T02:05:19.895838343Z","level":"WARN","msg":"readyz: postgres not ready","err":"failed to connect to `user=bookstore database=bookstore`: hostname resolving error: lookup postgres.p06-02-bookstore.svc.cluster.local on 10.96.0.10:53: no such host"}
+{"time":"2026-10-31T02:05:24.884151255Z","level":"WARN","msg":"readyz: postgres not ready","err":"failed to connect to `user=bookstore database=bookstore`: hostname resolving error: lookup postgres.p06-02-bookstore.svc.cluster.local on 10.96.0.10:53: no such host"}
+Found 2 pods, using pod/orders-546bb95ddb-qlzhp
+{"time":"2026-10-31T02:05:18.880325963Z","level":"WARN","msg":"readyz: postgres not ready","err":"failed to connect to `user=bookstore database=bookstore`: hostname resolving error: lookup postgres.p06-02-bookstore.svc.cluster.local on 10.96.0.10:53: no such host"}
+{"time":"2026-10-31T02:05:23.875739053Z","level":"WARN","msg":"readyz: postgres not ready","err":"failed to connect to `user=bookstore database=bookstore`: hostname resolving error: lookup postgres.p06-02-bookstore.svc.cluster.local on 10.96.0.10:53: no such host"}
+
+## step 3: a DSN that cannot be parsed, with a planted fake password (deliberate)
+$ kubectl -n p06-02-bookstore create secret generic dsn-demo --from-literal=PASSWORD=FAKE-PLANTED-PASSWORD
+secret/dsn-demo created
+
+$ kubectl apply -f dsn-demo.yaml
+pod/dsn-demo created
+
+$ kubectl -n p06-02-bookstore logs dsn-demo --tail=3
+{"time":"2026-10-31T02:05:57.164867808Z","level":"ERROR","msg":"connect postgres","err":"cannot parse `postgres://app:xxxxxx@localhost:5432/books`: failed to parse as URL (invalid URL escape \"%zz\")"}
+
+## step 4: the logging namespace, the agent RBAC and its network policy
+$ kubectl apply -f 00-logging-namespace.yaml -f 01-agent-rbac.yaml -f 02-logging-netpol.yaml
+namespace/p06-02-logging created
+serviceaccount/alloy created
+clusterrole.rbac.authorization.k8s.io/alloy-log-reader created
+clusterrolebinding.rbac.authorization.k8s.io/alloy-log-reader created
+networkpolicy.networking.k8s.io/default-deny-all created
+networkpolicy.networking.k8s.io/allow-dns-egress created
+networkpolicy.networking.k8s.io/allow-agent-egress created
+networkpolicy.networking.k8s.io/allow-reads-to-loki created
+
+## step 5: Loki (single binary, no tenants) and the Alloy agent, pinned by digest
+$ helm repo add grafana https://grafana.github.io/helm-charts >/dev/null 2>&1; helm repo update grafana >/dev/null 2>&1; echo repo ready
+repo ready
+
+$ helm install loki grafana/loki --version 7.5.0 --namespace p06-02-logging -f loki-values.yaml --wait --timeout 6m
+NAME: loki
+LAST DEPLOYED: Sat Oct 31 07:06:09 2026
+NAMESPACE: p06-02-logging
+STATUS: deployed
+REVISION: 1
+DESCRIPTION: Install complete
+TEST SUITE: None
+NOTES:
+***********************************************************************
+ Welcome to Grafana Loki
+ Chart version: 7.5.0
+ Chart Name: loki
+ Loki version: 3.6.16
+***********************************************************************
+
+** Please be patient while the chart is being deployed **
+
+Tip:
+
+  Watch the deployment status using the command: kubectl get pods -w --namespace p06-02-logging
+
+If pods are taking too long to schedule make sure pod affinity can be fulfilled in the current cluster.
+
+***********************************************************************
+Installed components:
+***********************************************************************
+* loki
+
+Loki has been deployed as a single binary.
+This means a single pod is handling reads and writes. You can scale that pod vertically by adding more CPU and memory resources.
+
+
+***********************************************************************
+Sending logs to Loki
+***********************************************************************
+
+You can send logs from inside the cluster using the cluster DNS:
+
+http://loki.p06-02-logging.svc.cluster.local:3100/loki/api/v1/push
+
+You can test to send data from outside the cluster by port-forwarding the gateway to your local machine:
+
+  kubectl port-forward --namespace p06-02-logging svc/loki 3100:3100 &
+
+And then using http://127.0.0.1:3100/loki/api/v1/push URL as shown below:
+
+```
+curl -H "Content-Type: application/json" -XPOST -s "http://127.0.0.1:3100/loki/api/v1/push"  \
+--data-raw "{\"streams\": [{\"stream\": {\"job\": \"test\"}, \"values\": [[\"$(date +%s)000000000\", \"fizzbuzz\"]]}]}"
+```
+
+Then verify that Loki did receive the data using the following command:
+
+```
+curl "http://127.0.0.1:3100/loki/api/v1/query_range" --data-urlencode 'query={job="test"}' | jq .data.result
+```
+
+***********************************************************************
+Connecting Grafana to Loki
+***********************************************************************
+
+If Grafana operates within the cluster, you'll set up a new Loki datasource by utilizing the following URL:
+
+http://loki.p06-02-logging.svc.cluster.local:3100/
+
+$ helm install alloy grafana/alloy --version 1.15.0 --namespace p06-02-logging -f alloy-values.yaml --wait --timeout 6m
+NAME: alloy
+LAST DEPLOYED: Sat Oct 31 07:07:15 2026
+NAMESPACE: p06-02-logging
+STATUS: deployed
+REVISION: 1
+DESCRIPTION: Install complete
+TEST SUITE: None
+NOTES:
+Welcome to Grafana Alloy!
+
+$ kubectl -n p06-02-logging get ds alloy
+kubectl -n p06-02-logging get pods
+NAME    DESIRED   CURRENT   READY   UP-TO-DATE   AVAILABLE   NODE SELECTOR   AGE
+alloy   1         1         1       1            1           <none>          65s
+NAME          READY   STATUS    RESTARTS   AGE
+alloy-s4pt6   1/1     Running   0          65s
+loki-0        1/1     Running   0          2m10s
+
+## step 6: what the agent may read, checked with the API, not by running it
+$ kubectl auth can-i get pods/log -n p06-02-bookstore --as=system:serviceaccount:p06-02-logging:alloy
+kubectl auth can-i list pods -n p06-02-bookstore --as=system:serviceaccount:p06-02-logging:alloy
+kubectl auth can-i create pods -n p06-02-bookstore --as=system:serviceaccount:p06-02-logging:alloy
+kubectl auth can-i get secrets -n p06-02-bookstore --as=system:serviceaccount:p06-02-logging:alloy
+kubectl auth can-i get pods/log -n p06-02-logging --as=system:serviceaccount:p06-02-logging:alloy
+yes
+yes
+no
+no
+yes
+
+## step 7: a planted fake token and DSN password, written by a deliberately bad app
+$ kubectl apply -f leaky-app.yaml
+pod/leaky-app created
+
+$ kubectl -n p06-02-bookstore logs leaky-app --tail=1
+{"level":"INFO","msg":"upstream call","token":"FAKE-PLANTED-TOKEN","dsn":"postgres://app:FAKE-PLANTED-PASSWORD@localhost:5432/books"}
+
+$ curl -sG http://127.0.0.1:3100/loki/api/v1/query_range --data-urlencode 'query={namespace="p06-02-bookstore", app="leaky-app"} |= "FAKE-PLANTED-PASSWORD"' --data-urlencode 'since=30m' | jq '[.data.result[].values[]] | length'
+curl -sG http://127.0.0.1:3100/loki/api/v1/query_range --data-urlencode 'query={namespace="p06-02-bookstore", app="leaky-app"} |= "FAKE-PLANTED-TOKEN"' --data-urlencode 'since=30m' | jq '[.data.result[].values[]] | length'
+0
+0
+
+$ curl -sG http://127.0.0.1:3100/loki/api/v1/query_range --data-urlencode 'query={namespace="p06-02-bookstore", app="leaky-app"} |= "REDACTED"' --data-urlencode 'since=30m' --data-urlencode 'limit=1' | jq -r '.data.result[].values[][1]'
+{"level":"INFO","msg":"upstream call","token":"[REDACTED]","dsn":"postgres://app:[REDACTED]@localhost:5432/books"}
+
+
+## step 8: the query for one request, by label and by a field of the line
+$ kubectl apply -f loadgen.yaml
+kubectl -n p06-02-bookstore wait --for=condition=complete job/loadgen --timeout=180s
+job.batch/loadgen created
+job.batch/loadgen condition met
+
+$ curl -sG http://127.0.0.1:3100/loki/api/v1/query_range --data-urlencode 'query={namespace="p06-02-bookstore", app="orders"} | json | msg="order placed"' --data-urlencode 'since=30m' --data-urlencode 'limit=3' | jq -r '.data.result[].values[][1]'
+{"time":"2026-10-31T02:09:36.603258553Z","level":"INFO","msg":"order placed","order_id":17,"book_id":1,"qty":2}
+
+{"time":"2026-10-31T02:09:36.570666227Z","level":"INFO","msg":"order placed","order_id":16,"book_id":1,"qty":2}
+
+{"time":"2026-10-31T02:09:36.54732799Z","level":"INFO","msg":"order placed","order_id":15,"book_id":1,"qty":2}
+
+
+$ curl -sG http://127.0.0.1:3100/loki/api/v1/query --data-urlencode 'query=sum by (level) (count_over_time({namespace="p06-02-bookstore", app="orders"} | json [30m]))' | jq -r '.data.result[] | "\(.metric.level) \(.value[1])"'
+INFO 23
+WARN 11
+
+## step 9: two denied paths, shown as the network policy decides them
+$ kubectl apply -f probe-client.yaml -f probe-bookstore.yaml
+pod/probe-client created
+pod/probe-bookstore created
+
+$ kubectl -n p06-02-client logs probe-client
+kubectl -n p06-02-bookstore logs probe-bookstore
+status=000
+rc=28
+status=000
+rc=28
+
+## step 10: log readers: pods/log is the reach, and it shows the raw line
+$ kubectl apply -f log-reader.yaml
+kubectl auth can-i get pods/log -n p06-02-bookstore --as=system:serviceaccount:p06-02-bookstore:log-reader
+kubectl auth can-i get pods/log -n p06-02-logging --as=system:serviceaccount:p06-02-bookstore:log-reader
+kubectl auth can-i get secrets -n p06-02-bookstore --as=system:serviceaccount:p06-02-bookstore:log-reader
+serviceaccount/log-reader created
+role.rbac.authorization.k8s.io/log-reader created
+rolebinding.rbac.authorization.k8s.io/log-reader created
+yes
+no
+no
+
+$ kubectl -n p06-02-bookstore logs leaky-app --tail=1 --as=system:serviceaccount:p06-02-bookstore:log-reader
+{"level":"INFO","msg":"upstream call","token":"FAKE-PLANTED-TOKEN","dsn":"postgres://app:FAKE-PLANTED-PASSWORD@localhost:5432/books"}
+
+## cleanup
+$ if [ "1" = 1 ]; then
+helm uninstall alloy -n p06-02-logging
+helm uninstall loki -n p06-02-logging
+fi
+kubectl delete clusterrolebinding alloy-log-reader loki-clusterrolebinding --ignore-not-found
+kubectl delete clusterrole alloy-log-reader loki-clusterrole --ignore-not-found
+kubectl delete ns p06-02-bookstore p06-02-logging p06-02-client --wait=true
+kubectl get ns -o name | grep p06-02 || echo 'no p06-02 namespaces left'
+release "alloy" uninstalled
+release "loki" uninstalled
+clusterrolebinding.rbac.authorization.k8s.io "alloy-log-reader" deleted
+clusterrole.rbac.authorization.k8s.io "alloy-log-reader" deleted
+namespace "p06-02-bookstore" deleted
+namespace "p06-02-logging" deleted
+namespace "p06-02-client" deleted
+no p06-02 namespaces left
+
