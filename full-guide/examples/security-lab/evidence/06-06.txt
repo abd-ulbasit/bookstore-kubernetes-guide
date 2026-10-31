@@ -280,3 +280,350 @@ job.batch/load-catalog created (server dry run)
 ## step 19: remove the load namespace
 $ kubectl delete namespace p06-06-load --wait=false
 namespace "p06-06-load" deleted
+
+## run 2: the checks the chapter now shows, after the review fixes
+# Run 2 used the namespaces p06-06-shop, p06-06-costs, p06-06-recommender and
+# p06-06-monitoring. The namespace p06-06-shop was created again, with only the
+# namespace name changed, so the quota names print as the chapter shows them
+# (bookstore-quota, bookstore-limits). The first quota-filler apply failed on a
+# namespace substitution and was repeated with the namespace fixed.
+# The OpenCost exporter ran with the restricted security context. It read its
+# configuration and exited at its Prometheus check, so its Pod never reached
+# Ready. The Prometheus was a stand-in: one Deployment and one Service named
+# kube-prometheus-stack-prometheus on port 9090, in p06-06-monitoring, with a
+# self-scrape job. The ch.01 stack was not installed (heavy). The exporter needs
+# that stack's scrape jobs, so the stand-in was not enough.
+# The VPA recommender was checked with helm template and a server dry run. It
+# was not installed. The port-forward and the load-objects cleanup were not run.
+# The OpenCost release, the lab namespaces and the cluster-scoped objects were
+# removed at the end of the run.
+$ sed 's/bookstore/p06-06-shop/g' ns00.yaml | kubectl apply -f -
+namespace/p06-06-shop created
+resourcequota/p06-06-shop-quota created
+limitrange/p06-06-shop-limits created
+$ sed 's/bookstore/p06-06-shop/g' spend-quota.yaml | kubectl apply -f -
+resourcequota/spend-ceiling created
+$ kubectl get ns p06-06-shop -o jsonpath='{.metadata.labels}'
+{"app.kubernetes.io/part-of":"p06-06-shop","kubernetes.io/metadata.name":"p06-06-shop","pod-security.kubernetes.io/audit":"restricted","pod-security.kubernetes.io/audit-version":"latest","pod-security.kubernetes.io/enforce":"restricted","pod-security.kubernetes.io/enforce-version":"latest","pod-security.kubernetes.io/warn":"restricted","pod-security.kubernetes.io/warn-version":"latest"}$ kubectl delete namespace p06-06-shop --wait=true --timeout=120s
+namespace "p06-06-shop" deleted
+$ sed -e 's/^  name: bookstore$/  name: p06-06-shop/' -e 's/namespace: bookstore$/namespace: p06-06-shop/' ns00.yaml | grep -n 'name:\|namespace:' | head -12
+34:  name: p06-06-shop
+53:  name: bookstore-quota
+54:  namespace: p06-06-shop
+68:  name: bookstore-limits
+69:  namespace: p06-06-shop
+$ sed -e 's/^  name: bookstore$/  name: p06-06-shop/' -e 's/namespace: bookstore$/namespace: p06-06-shop/' ns00.yaml | kubectl apply -f -
+namespace/p06-06-shop created
+resourcequota/bookstore-quota created
+limitrange/bookstore-limits created
+$ sed -e 's/namespace: bookstore$/namespace: p06-06-shop/' spend-quota.yaml | kubectl apply -f -
+resourcequota/spend-ceiling created
+$ kubectl describe resourcequota bookstore-quota -n p06-06-shop
+Name:            bookstore-quota
+Namespace:       p06-06-shop
+Resource         Used  Hard
+--------         ----  ----
+limits.cpu       0     4
+limits.memory    0     4Gi
+pods             0     30
+requests.cpu     0     2
+requests.memory  0     2Gi
+$ sed 's/bookstore/p06-06-shop/g' <repo>/full-guide/examples/bookstore/raw-manifests/05-serviceaccounts-rbac.yaml | kubectl apply -f - 2>&1 | head -12
+serviceaccount/catalog-sa created
+serviceaccount/storefront-sa created
+serviceaccount/orders-sa created
+serviceaccount/payments-worker-sa created
+serviceaccount/postgres-sa created
+serviceaccount/redis-sa created
+serviceaccount/rabbitmq-sa created
+serviceaccount/migrate-sa created
+role.rbac.authorization.k8s.io/catalog-config-reader created
+rolebinding.rbac.authorization.k8s.io/catalog-config-reader-binding created
+$ kubectl apply -f quota-filler.yaml
+Error from server (NotFound): error when creating "quota-filler.yaml": namespaces "bookstore" not found
+$ kubectl wait --for=condition=Ready pod/quota-filler -n p06-06-shop --timeout=90s
+Error from server (NotFound): pods "quota-filler" not found
+$ kubectl apply -f quota-refused.yaml
+Error from server (NotFound): error when creating "quota-refused.yaml": namespaces "bookstore" not found
+$ kubectl describe resourcequota bookstore-quota -n p06-06-shop | tail -6
+--------         ----  ----
+limits.cpu       0     4
+limits.memory    0     4Gi
+pods             0     30
+requests.cpu     0     2
+requests.memory  0     2Gi
+$ kubectl apply -f quota-filler.yaml
+Error from server (NotFound): error when creating "quota-filler.yaml": namespaces "bookstore" not found
+$ kubectl wait --for=condition=Ready pod/quota-filler -n p06-06-shop --timeout=120s
+Error from server (NotFound): pods "quota-filler" not found
+$ kubectl apply -f catalog-quota-check.yaml
+Error from server (NotFound): error when creating "catalog-quota-check.yaml": namespaces "bookstore" not found
+$ kubectl describe resourcequota bookstore-quota -n p06-06-shop | tail -6
+--------         ----  ----
+limits.cpu       0     4
+limits.memory    0     4Gi
+pods             0     30
+requests.cpu     0     2
+requests.memory  0     2Gi
+$ kubectl apply -f quota-filler.yaml
+pod/quota-filler created
+$ kubectl wait --for=condition=Ready pod/quota-filler -n p06-06-shop --timeout=120s
+pod/quota-filler condition met
+$ kubectl apply -f catalog-quota-check.yaml
+Error from server (Forbidden): error when creating "catalog-quota-check.yaml": pods "catalog-quota-check" is forbidden: exceeded quota: bookstore-quota, requested: requests.cpu=1, used: requests.cpu=1500m, limited: requests.cpu=2
+$ kubectl describe resourcequota bookstore-quota -n p06-06-shop | tail -6
+--------         ----   ----
+limits.cpu       2      4
+limits.memory    64Mi   4Gi
+pods             1      30
+requests.cpu     1500m  2
+requests.memory  64Mi   2Gi
+$ kubectl delete pod quota-filler catalog-quota-check -n p06-06-shop --ignore-not-found --wait=true
+pod "quota-filler" deleted from p06-06-shop namespace
+$ kubectl patch resourcequota spend-ceiling -n p06-06-shop --type merge -p '{"metadata":{"annotations":{"reason":"one cloud load balancer for storefront-lb, approved by the owner"}},"spec":{"hard":{"services.loadbalancers":"1","services.nodeports":"1"}}}'
+resourcequota/spend-ceiling patched
+$ kubectl apply --dry-run=server -f catalog-public.yaml
+service/catalog-public created (server dry run)
+$ kubectl patch resourcequota spend-ceiling -n p06-06-shop --type merge -p '{"metadata":{"annotations":{"reason":"restored to zero after the lab check"}},"spec":{"hard":{"services.loadbalancers":"0","services.nodeports":"0"}}}'
+resourcequota/spend-ceiling patched
+$ kubectl get resourcequota spend-ceiling -n p06-06-shop -o jsonpath='{.spec.hard}'
+{"persistentvolumeclaims":"4","requests.storage":"10Gi","services.loadbalancers":"0","services.nodeports":"0"}$ kubectl create namespace p06-06-costs
+namespace/p06-06-costs created
+$ kubectl label namespace p06-06-costs pod-security.kubernetes.io/enforce=restricted pod-security.kubernetes.io/audit=restricted pod-security.kubernetes.io/warn=restricted
+namespace/p06-06-costs labeled
+$ kubectl create secret generic opencost-cloud-integration --from-file=cloud-integration.json --namespace p06-06-costs
+secret/opencost-cloud-integration created
+$ kubectl apply -f opencost-default-deny.yaml
+networkpolicy.networking.k8s.io/default-deny created
+$ helm template opencost opencost/opencost --version 2.5.33 --namespace p06-06-costs -f opencost-values.yaml --skip-tests | kubectl apply --dry-run=server -n p06-06-costs -f -
+networkpolicy.networking.k8s.io/opencost-opencost created (server dry run)
+serviceaccount/opencost created (server dry run)
+clusterrole.rbac.authorization.k8s.io/opencost created (server dry run)
+clusterrolebinding.rbac.authorization.k8s.io/opencost created (server dry run)
+service/opencost created (server dry run)
+deployment.apps/opencost created (server dry run)
+$ helm install opencost opencost/opencost --version 2.5.33 --namespace p06-06-costs -f opencost-values.yaml
+NAME: opencost
+LAST DEPLOYED: Sat Oct 31 07:14:23 2026
+NAMESPACE: p06-06-costs
+STATUS: deployed
+REVISION: 1
+DESCRIPTION: Install complete
+TEST SUITE: None
+NOTES:
+Thank you for installing the OpenCost Helm Chart!
+
+Your release is named: opencost
+
+To verify that OpenCost is running, execute the following commands:
+
+1. Check the status of the pods:
+   kubectl get pods -l app.kubernetes.io/instance=opencost -n p06-06-costs
+
+2. Access the OpenCost UI:
+
+   If the service is only accessible within the cluster, you can use port-forwarding:
+   export SVC_NAME=opencost
+   kubectl port-forward svc/$SVC_NAME 9090 -n p06-06-costs
+
+   Alternatively, you can port-forward directly to the OpenCost pod:
+   export POD_NAME=$(kubectl get pod -l app.kubernetes.io/instance=opencost -n p06-06-costs -o jsonpath="{.items[0].metadata.name}")
+   kubectl -n p06-06-costs port-forward $POD_NAME 9090
+
+For more information, visit the OpenCost documentation:
+https://www.opencost.io/docs/
+$ kubectl wait --for=condition=Ready pod -l app.kubernetes.io/name=opencost -n p06-06-costs --timeout=240s
+$ kubectl get pods -n p06-06-costs
+NAME                        READY   STATUS             RESTARTS     AGE
+opencost-6ffc9b5796-bpknw   0/1     CrashLoopBackOff   1 (8s ago)   2m29s
+$ kubectl logs -n p06-06-costs -l app.kubernetes.io/name=opencost --tail=3 | sed 's/\x1b\[[0-9;]*m//g' | cut -c1-150
+2026-10-31T02:16:33.327626844Z INF Prometheus Client Max Concurrency set to 5
+2026-10-31T02:16:44.246177467Z FTL Failed to create Prometheus data source: failed to query prometheus at http://kube-prometheus-stack-prometheus.moni
+Troubleshooting help available at: https://www.opencost.io/docs/integrations/prometheus
+$ kubectl apply -f prom-standin.yaml
+namespace/p06-06-monitoring created
+serviceaccount/prometheus-standin created
+configmap/prometheus-standin-config created
+service/kube-prometheus-stack-prometheus created
+deployment.apps/kube-prometheus-stack-prometheus created
+$ kubectl wait --for=condition=Available deployment/kube-prometheus-stack-prometheus -n p06-06-monitoring --timeout=180s
+error: timed out waiting for the condition on pods/opencost-6ffc9b5796-bpknw
+$ kubectl get pods -n p06-06-costs
+NAME                        READY   STATUS             RESTARTS      AGE
+opencost-6ffc9b5796-bpknw   0/1     CrashLoopBackOff   3 (39s ago)   4m
+$ kubectl get svc -n p06-06-costs
+NAME       TYPE        CLUSTER-IP      EXTERNAL-IP   PORT(S)    AGE
+opencost   ClusterIP   10.96.167.208   <none>        9003/TCP   4m
+error: timed out waiting for the condition on deployments/kube-prometheus-stack-prometheus
+$ helm upgrade opencost opencost/opencost --version 2.5.33 --namespace p06-06-costs -f opencost-values.yaml
+Release "opencost" has been upgraded. Happy Helming!
+NAME: opencost
+LAST DEPLOYED: Sat Oct 31 07:20:28 2026
+NAMESPACE: p06-06-costs
+STATUS: deployed
+REVISION: 2
+DESCRIPTION: Upgrade complete
+TEST SUITE: None
+NOTES:
+Thank you for installing the OpenCost Helm Chart!
+
+Your release is named: opencost
+
+To verify that OpenCost is running, execute the following commands:
+
+1. Check the status of the pods:
+   kubectl get pods -l app.kubernetes.io/instance=opencost -n p06-06-costs
+
+2. Access the OpenCost UI:
+
+   If the service is only accessible within the cluster, you can use port-forwarding:
+   export SVC_NAME=opencost
+   kubectl port-forward svc/$SVC_NAME 9090 -n p06-06-costs
+
+   Alternatively, you can port-forward directly to the OpenCost pod:
+   export POD_NAME=$(kubectl get pod -l app.kubernetes.io/instance=opencost -n p06-06-costs -o jsonpath="{.items[0].metadata.name}")
+   kubectl -n p06-06-costs port-forward $POD_NAME 9090
+
+For more information, visit the OpenCost documentation:
+https://www.opencost.io/docs/
+timed out waiting for the condition on pods/opencost-6ffc9b5796-bpknw
+timed out waiting for the condition on pods/opencost-7c6fd4bf7d-s4zn4
+$ kubectl get pods -n p06-06-costs
+NAME                        READY   STATUS             RESTARTS     AGE
+opencost-7c6fd4bf7d-s4zn4   0/1     CrashLoopBackOff   3 (6s ago)   100s
+$ kubectl apply -f prom-standin.yaml
+namespace/p06-06-monitoring unchanged
+serviceaccount/prometheus-standin unchanged
+service/kube-prometheus-stack-prometheus unchanged
+deployment.apps/kube-prometheus-stack-prometheus unchanged
+The request is invalid: patch: Invalid value: "map[data:map[prometheus.yml:global:\n  scrape_interval: 1m\nscrape_configs:\n  - job_name: prometheus\n    static_configs:\n      - targets: [\"localhost:9090\"]\n] metadata:map[annotations:map[kubectl.kubernetes.io/last-applied-configuration:{\"apiVersion\":\"v1\",\"data\":{\"prometheus.yml\":\"global:\\n  scrape_interval: 1m\\nscrape_configs:\\n  - job_name: prometheus\\n    static_configs:\\n      - targets: [\\\"localhost:9090\\\"]\\n\"},\"kind\":\"ConfigMap\",\"metadata\":{\"annotations\":{},\"name\":\"prometheus-standin-config\",\"namespace\":\"p06-06-monitoring\"},\"scrape_configs\":[{\"job_name\":\"prometheus\",\"static_configs\":[{\"targets\":[\"localhost:9090\"]}]}]}\n]] scrape_configs:[map[job_name:prometheus static_configs:[map[targets:[localhost:9090]]]]]]": strict decoding error: unknown field "scrape_configs"
+$ kubectl rollout restart deployment/kube-prometheus-stack-prometheus -n p06-06-monitoring
+deployment.apps/kube-prometheus-stack-prometheus restarted
+deployment "kube-prometheus-stack-prometheus" successfully rolled out
+$ kubectl delete pod -n p06-06-costs -l app.kubernetes.io/name=opencost --wait=false
+pod "opencost-7c6fd4bf7d-s4zn4" deleted from p06-06-costs namespace
+error: timed out waiting for the condition on pods/opencost-7c6fd4bf7d-s4zn4
+$ kubectl get pods -n p06-06-costs
+NAME                        READY   STATUS    RESTARTS      AGE
+opencost-7c6fd4bf7d-rphjb   0/1     Running   3 (36s ago)   90s
+$ kubectl apply -f prom-config.yaml
+configmap/prometheus-standin-config configured
+$ kubectl rollout restart deployment/kube-prometheus-stack-prometheus -n p06-06-monitoring
+deployment.apps/kube-prometheus-stack-prometheus restarted
+deployment "kube-prometheus-stack-prometheus" successfully rolled out
+$ helm template opencost opencost/opencost --version 2.5.33 --namespace p06-06-costs --skip-tests | grep -c 'name: mcp-server'
+2
+$ helm template opencost opencost/opencost --version 2.5.33 --namespace p06-06-costs -f opencost-values.yaml --skip-tests | grep -c 'name: mcp-server'
+0
+$ helm template opencost opencost/opencost --version 2.5.33 --namespace p06-06-costs -f opencost-values.yaml --skip-tests | grep -n 'readOnly: true\|secretName: opencost-cloud-integration'
+335:              readOnly: true
+341:            secretName: opencost-cloud-integration
+$ helm template opencost opencost/opencost --version 2.5.33 --namespace p06-06-costs -f opencost-values.yaml --skip-tests | grep -n 'CLOUD_COST_ENABLED\|PROMETHEUS_SERVER_ENDPOINT' -A1 | head -6
+306:            - name: PROMETHEUS_SERVER_ENDPOINT
+307-              value: "http://kube-prometheus-stack-prometheus.p06-06-monitoring.svc.cluster.local:9090"
+--
+316:            - name: CLOUD_COST_ENABLED
+317-              value: "true"
+$ kubectl get svc -n p06-06-costs
+NAME       TYPE        CLUSTER-IP      EXTERNAL-IP   PORT(S)    AGE
+opencost   ClusterIP   10.96.167.208   <none>        9003/TCP   11m
+$ kubectl get networkpolicy -n p06-06-costs
+NAME                POD-SELECTOR                      AGE
+default-deny        <none>                            11m
+opencost-opencost   app.kubernetes.io/name=opencost   11m
+$ kubectl create namespace p06-06-recommender
+namespace/p06-06-recommender created
+$ kubectl label namespace p06-06-recommender pod-security.kubernetes.io/enforce=restricted pod-security.kubernetes.io/audit=restricted pod-security.kubernetes.io/warn=restricted
+namespace/p06-06-recommender labeled
+$ helm template vpa fairwinds-stable/vpa --version 5.1.0 --namespace p06-06-recommender -f vpa-values.yaml --skip-tests | grep -n 'image: \|imagePullPolicy\|memory: 1000Mi'
+327:          image: registry.k8s.io/autoscaling/vpa-recommender:1.7.1@sha256:89cea705535f9d8df6e62d5084916ec447e85d64369cfff2f7c6ac9d1cc5cd1e
+328:          imagePullPolicy: Always
+357:              memory: 1000Mi
+$ helm template vpa fairwinds-stable/vpa --version 5.1.0 --namespace p06-06-recommender -f vpa-values.yaml --include-crds --skip-tests | kubectl apply --dry-run=server -n p06-06-recommender -f -
+customresourcedefinition.apiextensions.k8s.io/verticalpodautoscalercheckpoints.autoscaling.k8s.io created (server dry run)
+customresourcedefinition.apiextensions.k8s.io/verticalpodautoscalers.autoscaling.k8s.io created (server dry run)
+serviceaccount/vpa-recommender created (server dry run)
+clusterrole.rbac.authorization.k8s.io/vpa-metrics-reader created (server dry run)
+clusterrole.rbac.authorization.k8s.io/vpa-actor created (server dry run)
+clusterrole.rbac.authorization.k8s.io/vpa-status-actor created (server dry run)
+clusterrole.rbac.authorization.k8s.io/vpa-checkpoint-actor created (server dry run)
+clusterrole.rbac.authorization.k8s.io/vpa-evictioner created (server dry run)
+clusterrole.rbac.authorization.k8s.io/vpa-target-reader created (server dry run)
+clusterrole.rbac.authorization.k8s.io/vpa-status-reader created (server dry run)
+clusterrole.rbac.authorization.k8s.io/vpa-updater-in-place created (server dry run)
+clusterrolebinding.rbac.authorization.k8s.io/vpa-metrics-reader created (server dry run)
+clusterrolebinding.rbac.authorization.k8s.io/vpa-checkpoint-actor created (server dry run)
+clusterrolebinding.rbac.authorization.k8s.io/vpa-status-actor created (server dry run)
+clusterrolebinding.rbac.authorization.k8s.io/vpa-actor created (server dry run)
+clusterrolebinding.rbac.authorization.k8s.io/vpa-target-reader-binding created (server dry run)
+deployment.apps/vpa-recommender created (server dry run)
+$ kubectl logs -n p06-06-costs -l app.kubernetes.io/name=opencost --tail=2 | sed 's/\x1b\[[0-9;]*m//g' | cut -c1-200
+2026-10-31T02:25:01.149159918Z FTL Failed to create Prometheus data source: failed to query prometheus at http://kube-prometheus-stack-prometheus.p06-06-monitoring.svc.cluster.local:9090: no running j
+Troubleshooting help available at: https://www.opencost.io/docs/integrations/prometheus
+$ helm uninstall opencost --namespace p06-06-costs
+release "opencost" uninstalled
+$ kubectl delete namespace p06-06-costs p06-06-monitoring p06-06-recommender p06-06-shop --wait=false
+namespace "p06-06-costs" deleted
+namespace "p06-06-monitoring" deleted
+namespace "p06-06-recommender" deleted
+namespace "p06-06-shop" deleted
+$ kubectl get clusterrole opencost vpa-actor 2>&1 | tail -2
+Error from server (NotFound): clusterroles.rbac.authorization.k8s.io "opencost" not found
+Error from server (NotFound): clusterroles.rbac.authorization.k8s.io "vpa-actor" not found
+$ kubectl get clusterrolebinding opencost 2>&1 | tail -1
+Error from server (NotFound): clusterrolebindings.rbac.authorization.k8s.io "opencost" not found
+$ helm template opencost opencost/opencost --version 2.5.33 --namespace opencost -f opencost-values.yaml --skip-tests | awk '/^kind: ClusterRole$/{f=1} /^---/{f=0} f' | head -40
+kind: ClusterRole
+metadata:
+  name: opencost
+  labels:
+    helm.sh/chart: opencost-2.5.33
+    app.kubernetes.io/name: opencost
+    app.kubernetes.io/instance: opencost
+    app.kubernetes.io/version: "1.121.3"
+    app.kubernetes.io/part-of: opencost
+    app.kubernetes.io/managed-by: Helm
+rules:
+  - apiGroups: [""]
+    resources:
+      - configmaps
+      - deployments
+      - nodes
+      - pods
+      - services
+      - resourcequotas
+      - replicationcontrollers
+      - limitranges
+      - persistentvolumeclaims
+      - persistentvolumes
+      - namespaces
+      - endpoints
+    verbs:
+      - get
+      - list
+      - watch
+  - apiGroups:
+      - extensions
+    resources:
+      - daemonsets
+      - deployments
+      - replicasets
+    verbs:
+      - get
+      - list
+      - watch
+  - apiGroups:
+$ helm template opencost opencost/opencost --version 2.5.33 --namespace opencost -f opencost-values.yaml --skip-tests | grep -n -A4 'secretName: opencost-cloud-integration'
+341:            secretName: opencost-cloud-integration
+342-            items:
+343-              - key: cloud-integration.json
+344-                path: cloud-integration.json
+$ helm template opencost opencost/opencost --version 2.5.33 --namespace opencost -f opencost-values.yaml --skip-tests | grep -c 'name: mcp-server'
+0
+$ helm template opencost opencost/opencost --version 2.5.33 --namespace opencost -f opencost-values.yaml --skip-tests | grep -n -A1 'CLOUD_COST_ENABLED'
+316:            - name: CLOUD_COST_ENABLED
+317-              value: "true"
+$ sed -e 's/name: quota-filler/name: catalog-quota-check/' -e 's/cpu: 1500m/cpu: 1/' quota-filler.yaml > catalog-quota-check.yaml && grep -n 'name: catalog-quota-check\|cpu: 1$' catalog-quota-check.yaml
+4:  name: catalog-quota-check
+$ helm template opencost opencost/opencost --version 2.5.33 --namespace opencost -f opencost-values.yaml --skip-tests | grep -c 'readOnlyRootFilesystem: true'
+1

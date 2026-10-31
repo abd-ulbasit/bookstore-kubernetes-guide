@@ -65,9 +65,12 @@ Three numbers per container, often wildly misaligned:
 The **requests-vs-usage gap** is the waste (or the risk). Right-sizing closes
 it deliberately:
 
-- **Memory**: set `request` ≈ steady RSS + safety margin, and (for anything
-  you can't tolerate OOMKilled) `limit == request` (Guaranteed-style: memory
-  is incompressible). Too low → OOMKill; too high → reserved RAM nobody uses.
+- **Memory**: set `request` ≈ steady RSS + safety margin. Memory is
+  incompressible, so a container over its limit is OOMKilled. Setting
+  `limit == request` stops the container from drawing memory the scheduler did
+  not reserve for it, which keeps node-level memory overcommit out of its
+  account. It does not stop an OOMKill at the limit. Too low → OOMKill; too
+  high → reserved RAM nobody uses.
 - **CPU**: set `request` ≈ a realistic busy-time average (the scheduling
   guarantee). The **CPU-limit debate** (revisited from
   [Part 01 ch.03](../01-core-workloads/03-resources-and-qos.md)): a tight CPU
@@ -76,6 +79,12 @@ it deliberately:
   memory `request==limit`, and a CPU **limit** you chose on purpose. Measure
   throttling before you tighten it. An omitted CPU limit is not "no limit"
   either, once a namespace's LimitRange sets a default.
+
+QoS class follows from the block. A Pod is Guaranteed only when every
+container sets CPU and memory request equal to limit, and even then it is the
+last Pod to be evicted under node pressure, not one that is exempt
+([Pod QoS classes][pod-qos]). The recommended block in section 2 is Burstable,
+because its CPU request and limit differ.
 
 The data is already in Prometheus. **VPA in recommendation mode** automates
 the same arithmetic (a percentile of historical usage → suggested requests).
@@ -107,7 +116,7 @@ approved. Three threats are specific to this chapter:
 |---|---|---|
 | Denial of wallet: a runaway or hostile workload asks for more CPU, memory, storage or public load balancers than the budget allows, and the autoscaler buys the nodes to serve it. | A namespace ResourceQuota on requests and on the cloud-billed objects, and a LimitRange per container. A cloud budget alert is a late, detective backstop. | Per-container limits: [01.03](../01-core-workloads/03-resources-and-qos.md). Tenant quotas: [08.04](../08-day-2-operations/04-multi-tenancy-and-namespaces.md). |
 | The OpenCost billing credential is read by anything that can read its Secret or its values file. | The key sits in a read-only Secret mount, from a file that never enters Git, under a billing-read role. Where the cloud offers workload identity, there is no key at all. | Secret handling: [03.02](../03-config-and-storage/02-secrets.md). Workload identity: [10.03](../10-cloud-and-managed-kubernetes/03-cloud-identity.md). |
-| Cost data reaches people who should not see per-team spend, and the cost tool can read most of the cluster. | A ClusterIP Service, the MCP server off, and a port-forward for the UI. Its cluster-wide read is kept in view. | Edge access and rate limiting: [13.07](../13-grand-capstone-bookstore-platform/07-edge-gateway-waf-rate-limiting.md). |
+| Cost data reaches people who should not see per-team spend, and the cost tool can read most of the cluster. | A ClusterIP Service, the MCP server and the UI off, a port-forward for the API, and a default-deny NetworkPolicy with explicit allows. Its cluster-wide read is kept in view. | Edge access and rate limiting: [13.07](../13-grand-capstone-bookstore-platform/07-edge-gateway-waf-rate-limiting.md). Network policy: [02.06](../02-networking/06-network-policies.md). |
 
 Scaling driven by someone else's load is also a cost attack.
 [ch.04](04-autoscaling.md) owns that row. The quota below is the ceiling the
@@ -162,10 +171,13 @@ recommender; (5) install OpenCost with its billing key in a Secret.
 
 The output blocks come from a lab cluster run. That cluster's node names
 differ from yours, and the run used scratch namespaces named after this
-chapter in place of `bookstore`, `vpa` and `opencost`. An output line that
-printed one of those names is elided with `# ...`. Only the namespaces, their
-ServiceAccounts and RBAC, and the spend quota were created for real. Every
-other object was checked with a server-side dry run, so no workload started.
+chapter in place of `bookstore`, `vpa`, `opencost` and `monitoring`. An output
+line that printed one of those names is elided with `# ...`. The lab created
+for real the namespaces, their ServiceAccounts and RBAC, the reader's
+`bookstore-quota` and `bookstore-limits`, the spend quota, a filler Pod that
+reserved CPU, and OpenCost with a stand-in Prometheus. The OpenCost exporter
+started and exited at its Prometheus check (section 5). The VPA recommender
+and the load Job were checked with server-side dry runs only, so neither ran.
 
 ### 0. Prerequisites (self-bootstrapping)
 
@@ -175,7 +187,8 @@ kube-prometheus-stack exactly as in [ch.01](01-observability-metrics.md)
 Right-sizing requires the [ch.01](01-observability-metrics.md) metrics plane,
 and it is the input to everything below. kube-prometheus-stack is large, so
 give it a cluster with room for it. The lab run for this chapter did not
-install it.
+install it. It used a one-Deployment Prometheus stand-in in section 5, and
+OpenCost needs the real stack's scrape jobs before it starts.
 
 ### 1. Measure catalog's real usage
 
@@ -317,6 +330,15 @@ sum(kube_pod_container_resource_requests{namespace="bookstore",container="catalo
   - sum(rate(container_cpu_usage_seconds_total{namespace="bookstore",container="catalog"}[5m]))
 ```
 
+When the run is over, remove the temporary path and the Job. The Job's
+`ttlSecondsAfterFinished` also removes it after ten minutes, but the policies
+stay until you delete them:
+
+```sh
+kubectl delete job load-catalog -n bookstore
+kubectl delete -f load-allow.yaml
+```
+
 The numbers in the rest of this section are **illustrative**. They show the
 arithmetic and are not a measured run. Suppose the load window shows catalog
 p95 CPU of about 35m per Pod, peak working-set memory of about 40Mi, and a
@@ -432,6 +454,83 @@ sed -e 's/cpu: 40m/cpu: 3/' -e 's/cpu: 500m/cpu: 4/' catalog-rightsize-check.yam
 Error from server (Forbidden): error when creating "STDIN": pods "catalog-rightsize-check" is forbidden: maximum cpu usage per Container is 2, but limit is 4
 ```
 
+The LimitRange checks one container. The namespace's ResourceQuota
+(`bookstore-quota`, from [00-namespace.yaml](../examples/bookstore/raw-manifests/00-namespace.yaml))
+caps the sum of requests across every Pod. Start a Pod that reserves 1500m of
+CPU, then ask for 1 more. The lab namespace had no other Pods, so the numbers
+in the message are this run's; yours depend on what else runs there. The
+filler is a stand-in that only sleeps:
+
+```yaml
+apiVersion: v1
+kind: Pod
+metadata:
+  name: quota-filler
+  namespace: bookstore
+spec:
+  serviceAccountName: catalog-sa
+  automountServiceAccountToken: false
+  securityContext:
+    runAsNonRoot: true
+    runAsUser: 65534
+    runAsGroup: 65534
+    seccompProfile:
+      type: RuntimeDefault
+  containers:
+    - name: filler
+      image: busybox@sha256:73aaf090f3d85aa34ee199857f03fa3a95c8ede2ffd4cc2cdb5b94e566b11662  # busybox:1.36
+      command: ["sleep", "3600"]
+      securityContext:
+        allowPrivilegeEscalation: false
+        readOnlyRootFilesystem: true
+        capabilities:
+          drop: ["ALL"]
+      resources:
+        requests: { cpu: 1500m, memory: 64Mi }
+        limits: { cpu: 2, memory: 64Mi }
+```
+
+```sh
+kubectl apply -f quota-filler.yaml
+kubectl wait --for=condition=Ready pod/quota-filler -n bookstore --timeout=120s
+sed -e 's/name: quota-filler/name: catalog-quota-check/' \
+    -e 's/cpu: 1500m/cpu: 1/' quota-filler.yaml > catalog-quota-check.yaml
+kubectl apply -f catalog-quota-check.yaml
+kubectl describe resourcequota bookstore-quota -n bookstore | tail -6
+```
+
+<!-- gate: output -->
+```text
+pod/quota-filler created
+```
+
+<!-- gate: output -->
+```text
+pod/quota-filler condition met
+```
+
+<!-- gate: output -->
+```text
+Error from server (Forbidden): error when creating "catalog-quota-check.yaml": pods "catalog-quota-check" is forbidden: exceeded quota: bookstore-quota, requested: requests.cpu=1, used: requests.cpu=1500m, limited: requests.cpu=2
+```
+
+<!-- gate: output -->
+```text
+--------         ----   ----
+limits.cpu       2      4
+limits.memory    64Mi   4Gi
+pods             1      30
+requests.cpu     1500m  2
+requests.memory  64Mi   2Gi
+```
+
+The refusal names the quota and the totals it would exceed. The filler stays
+in the namespace and counts against the quota until you remove it:
+
+```sh
+kubectl delete pod quota-filler -n bookstore
+```
+
 The load objects from section 1 passed the same check in the lab run. The
 ServiceAccount and both policies first:
 
@@ -537,12 +636,53 @@ never starts. A budget alert from your cloud (AWS Budgets and Google Cloud
 budgets both offer one) is the detective backstop. It fires after the money is
 spent. Keep it, but do not rely on it to stop a runaway.
 
+#### Raise the ceiling on purpose
+
+A real load balancer needs the ceiling raised first, and the raise should carry
+a reason. Patch the ceiling to one load balancer and one node port, then
+dry-run the Service against it. The `reason` annotation is a record of who
+approved the change and why. The quota does not enforce it:
+
+```sh
+kubectl patch resourcequota spend-ceiling -n bookstore --type merge -p \
+  '{"metadata":{"annotations":{"reason":"one cloud load balancer for storefront-lb, approved by the owner"}},"spec":{"hard":{"services.loadbalancers":"1","services.nodeports":"1"}}}'
+kubectl apply --dry-run=server -f catalog-public.yaml
+```
+
+<!-- gate: output -->
+```text
+resourcequota/spend-ceiling patched
+```
+
+<!-- gate: output -->
+```text
+service/catalog-public created (server dry run)
+```
+
+Restore the ceiling to zero when the Service is gone. The restore writes its
+own reason, so the annotation always names the last change:
+
+```sh
+kubectl patch resourcequota spend-ceiling -n bookstore --type merge -p \
+  '{"metadata":{"annotations":{"reason":"restored to zero after the check"}},"spec":{"hard":{"services.loadbalancers":"0","services.nodeports":"0"}}}'
+```
+
+<!-- gate: output -->
+```text
+resourcequota/spend-ceiling patched
+```
+
+[Part 10 ch.04](../10-cloud-and-managed-kubernetes/04-cloud-networking-and-load-balancing.md)
+shows an illustrative `storefront-lb` Service in `bookstore`. Raise the ceiling
+first, as above, before you apply any `LoadBalancer` Service in this namespace.
+
 ### 4. The VPA recommender, as a sizing tool
 
 Install the recommender in its own namespace, labelled `restricted` before the
-chart goes in. The chart's own security values already meet `restricted` for
-the recommender. With the updater and the admission controller off, the
-install can recommend, but it cannot evict or mutate a Pod.
+chart goes in. The values below pin the recommender image by digest and give
+its container a memory limit, as the baseline requires. They also turn the
+updater and the admission controller off, so the install can recommend but
+cannot evict or mutate a Pod.
 
 ```sh
 helm repo add fairwinds-stable https://charts.fairwinds.com/stable
@@ -551,9 +691,40 @@ kubectl label namespace vpa \
   pod-security.kubernetes.io/enforce=restricted \
   pod-security.kubernetes.io/audit=restricted \
   pod-security.kubernetes.io/warn=restricted
-helm install vpa fairwinds-stable/vpa --version 5.1.0 --namespace vpa \
-  --set updater.enabled=false --set admissionController.enabled=false \
-  --wait
+```
+
+Save this as `vpa-values.yaml`. The chart builds the image reference from the
+repository, a colon and the tag, so the digest follows the tag. The digest is
+the index digest of `registry.k8s.io/autoscaling/vpa-recommender:1.7.1`, read
+from the registry. The memory limit is the value the chart's own comments
+show as an example.
+
+```yaml
+updater:
+  enabled: false
+admissionController:
+  enabled: false
+recommender:
+  image:
+    # The chart appends this to the repository. The tag is 1.7.1.
+    tag: "1.7.1@sha256:89cea705535f9d8df6e62d5084916ec447e85d64369cfff2f7c6ac9d1cc5cd1e"
+  resources:
+    limits:
+      memory: 1000Mi
+```
+
+Check the image and the limit in the render:
+
+```sh
+helm template vpa fairwinds-stable/vpa --version 5.1.0 --namespace vpa \
+  -f vpa-values.yaml --skip-tests | grep -n 'image: \|imagePullPolicy\|memory: 1000Mi'
+```
+
+<!-- gate: output -->
+```text
+327:          image: registry.k8s.io/autoscaling/vpa-recommender:1.7.1@sha256:89cea705535f9d8df6e62d5084916ec447e85d64369cfff2f7c6ac9d1cc5cd1e
+328:          imagePullPolicy: Always
+357:              memory: 1000Mi
 ```
 
 The install creates cluster-scoped objects: the VPA CRDs and ClusterRoles. On
@@ -564,8 +735,7 @@ against a restricted namespace:
 
 ```sh
 helm template vpa fairwinds-stable/vpa --version 5.1.0 --namespace vpa \
-  --set updater.enabled=false --set admissionController.enabled=false \
-  --include-crds --skip-tests | kubectl apply --dry-run=server -n vpa -f -
+  -f vpa-values.yaml --include-crds --skip-tests | kubectl apply --dry-run=server -n vpa -f -
 ```
 
 <!-- gate: output -->
@@ -573,9 +743,33 @@ helm template vpa fairwinds-stable/vpa --version 5.1.0 --namespace vpa \
 customresourcedefinition.apiextensions.k8s.io/verticalpodautoscalercheckpoints.autoscaling.k8s.io created (server dry run)
 customresourcedefinition.apiextensions.k8s.io/verticalpodautoscalers.autoscaling.k8s.io created (server dry run)
 serviceaccount/vpa-recommender created (server dry run)
-# ...
+clusterrole.rbac.authorization.k8s.io/vpa-metrics-reader created (server dry run)
+clusterrole.rbac.authorization.k8s.io/vpa-actor created (server dry run)
+clusterrole.rbac.authorization.k8s.io/vpa-status-actor created (server dry run)
+clusterrole.rbac.authorization.k8s.io/vpa-checkpoint-actor created (server dry run)
+clusterrole.rbac.authorization.k8s.io/vpa-evictioner created (server dry run)
+clusterrole.rbac.authorization.k8s.io/vpa-target-reader created (server dry run)
+clusterrole.rbac.authorization.k8s.io/vpa-status-reader created (server dry run)
+clusterrole.rbac.authorization.k8s.io/vpa-updater-in-place created (server dry run)
+clusterrolebinding.rbac.authorization.k8s.io/vpa-metrics-reader created (server dry run)
+clusterrolebinding.rbac.authorization.k8s.io/vpa-checkpoint-actor created (server dry run)
+clusterrolebinding.rbac.authorization.k8s.io/vpa-status-actor created (server dry run)
+clusterrolebinding.rbac.authorization.k8s.io/vpa-actor created (server dry run)
+clusterrolebinding.rbac.authorization.k8s.io/vpa-target-reader-binding created (server dry run)
 deployment.apps/vpa-recommender created (server dry run)
 ```
+
+The chart still creates the updater's ClusterRoles, `vpa-evictioner` and
+`vpa-updater-in-place`. The values turn the updater off, so this install does
+not evict. Install the chart with the same values:
+
+```sh
+helm install vpa fairwinds-stable/vpa --version 5.1.0 --namespace vpa \
+  -f vpa-values.yaml --wait
+```
+
+The lab run stopped at the dry run and did not install the recommender, so
+this install is not captured output.
 
 The `VerticalPodAutoscaler` object needs its CRD. Before the chart is
 installed, the server refuses it, the same way it refuses the Gateway API and
@@ -629,6 +823,13 @@ apply:
 - **Use workload identity where your cloud offers it,** so there is no key to
   leak. Otherwise scope the key to billing reads and rotate it.
 
+`cloudCost.enabled: true` is what makes the exporter use the key. The chart
+sets `CLOUD_COST_ENABLED` to `"true"` and mounts the Secret into the exporter.
+With the flag at its default, `false`, the chart does not ingest cloud costs,
+and the mounted key is not used. The provider blocks in the file name the
+billing export that OpenCost queries. Their fields are in the
+[cloud-cost docs][opencost-cloud-costs].
+
 ```sh
 kubectl create namespace opencost
 kubectl label namespace opencost \
@@ -639,16 +840,38 @@ kubectl create secret generic opencost-cloud-integration \
   --from-file=cloud-integration.json --namespace opencost
 ```
 
-Save this as `opencost-values.yaml`. It turns the MCP server off (the chart
-enables it by default, on port 8081 of the same Service), sets the restricted
-container security context on the exporter and the UI, and sets the same at
-pod level. The chart's own defaults do not meet `restricted`.
+Save this as `opencost-values.yaml`. Each choice answers a check from the lab
+run:
+
+- The MCP server is off. The chart enables it by default, on port 8081 of the
+  same Service.
+- The UI is off. Its entrypoint runs `sed -i` over the JavaScript under
+  `/var/www` at every start, and a read-only root filesystem refuses that
+  write. This chapter reaches the API on port 9003 instead.
+- The exporter and the Pod run as UID 1001. Both OpenCost images declare that
+  user, and the baseline requires the UID the image declares.
+- Cloud cost ingestion is on, so the mounted key has a reader.
+- Prometheus is the ch.01 Service. The chart's default points at
+  `prometheus-server` in `prometheus-system`, which this guide does not create.
+- The chart's own NetworkPolicy is on. It allows the Prometheus path, and the
+  DNS and API server egress are added below it.
+
+The chart's own defaults do not meet `restricted`.
 
 ```yaml
 opencost:
   cloudIntegrationSecret: opencost-cloud-integration
+  cloudCost:
+    enabled: true
   mcp:
     enabled: false
+  ui:
+    enabled: false
+  prometheus:
+    internal:
+      serviceName: kube-prometheus-stack-prometheus
+      namespaceName: monitoring
+      port: 9090
   exporter:
     securityContext:
       allowPrivilegeEscalation: false
@@ -656,25 +879,44 @@ opencost:
         drop: ["ALL"]
       readOnlyRootFilesystem: true
       runAsNonRoot: true
-      runAsUser: 65534
-      seccompProfile:
-        type: RuntimeDefault
-  ui:
-    securityContext:
-      allowPrivilegeEscalation: false
-      capabilities:
-        drop: ["ALL"]
-      readOnlyRootFilesystem: true
-      runAsNonRoot: true
-      runAsUser: 65534
+      runAsUser: 1001
+      runAsGroup: 1001
       seccompProfile:
         type: RuntimeDefault
 podSecurityContext:
   runAsNonRoot: true
-  runAsUser: 65534
-  runAsGroup: 65534
+  runAsUser: 1001
+  runAsGroup: 1001
   seccompProfile:
     type: RuntimeDefault
+networkPolicies:
+  enabled: true
+  prometheus:
+    namespace: monitoring
+    port: 9090
+    labels:
+      app.kubernetes.io/name: prometheus
+      operator.prometheus.io/name: kube-prometheus-stack-prometheus
+  extraEgress:
+    # DNS, so the exporter can resolve the Service names above.
+    - to:
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: kube-system
+          podSelector:
+            matchLabels:
+              k8s-app: kube-dns
+      ports:
+        - { protocol: UDP, port: 53 }
+        - { protocol: TCP, port: 53 }
+    # The API server and the cloud price APIs. Narrow both to their
+    # addresses in production.
+    - to:
+        - ipBlock:
+            cidr: 0.0.0.0/0
+      ports:
+        - { protocol: TCP, port: 443 }
+        - { protocol: TCP, port: 6443 }
 ```
 
 Check the render against the restricted namespace before you install it:
@@ -687,8 +929,8 @@ helm template opencost opencost/opencost --version 2.5.33 --namespace opencost \
 
 <!-- gate: output -->
 ```text
+networkpolicy.networking.k8s.io/opencost-opencost created (server dry run)
 serviceaccount/opencost created (server dry run)
-configmap/opencost-ui-nginx-config created (server dry run)
 clusterrole.rbac.authorization.k8s.io/opencost created (server dry run)
 clusterrolebinding.rbac.authorization.k8s.io/opencost created (server dry run)
 service/opencost created (server dry run)
@@ -714,36 +956,125 @@ Warning: would violate PodSecurity "restricted:latest": allowPrivilegeEscalation
 deployment.apps/opencost created (server dry run)
 ```
 
+The namespace also gets the baseline's default-deny. The chart's policy
+above lists the exporter's allowed paths, and this one denies everything else
+in the namespace:
+
+```yaml
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: default-deny
+  namespace: opencost
+spec:
+  podSelector: {}
+  policyTypes: ["Ingress", "Egress"]
+```
+
+```sh
+kubectl apply -f opencost-default-deny.yaml
+```
+
+<!-- gate: output -->
+```text
+networkpolicy.networking.k8s.io/default-deny created
+```
+
 Install it with the same values:
 
 ```sh
 helm install opencost opencost/opencost --version 2.5.33 --namespace opencost \
   -f opencost-values.yaml
+kubectl get pods -n opencost
 ```
 
-OpenCost reads usage from Prometheus. Point the chart's Prometheus values at
-the server from [ch.01](01-observability-metrics.md) before you trust any
-number it prints; the chart's comments and the OpenCost docs name the keys.
+OpenCost reads usage from Prometheus, and the exporter checks that Prometheus
+when it starts. The values above point it at the ch.01 Service. Run the ch.01
+stack first, so that Prometheus has the scrape jobs OpenCost reads. The lab run
+did not have them, and the exporter did not reach Ready:
 
-Check how the render uses the credential. The Secret appears as a read-only
-volume with one item, and the render holds only the reference:
+<!-- gate: output -->
+```text
+NAME                        READY   STATUS             RESTARTS     AGE
+opencost-7c6fd4bf7d-s4zn4   0/1     CrashLoopBackOff   3 (6s ago)   100s
+```
+
+The exporter's log shows why. The lab's stand-in Prometheus answered its
+queries but had only a self-scrape job, and OpenCost exits when Prometheus has
+no running jobs:
+
+<!-- gate: output -->
+```text
+# ...
+Troubleshooting help available at: https://www.opencost.io/docs/integrations/prometheus
+```
+
+The lab did not show the state that follows a working scrape. It stopped at
+the exit, so the pod's Ready state is not captured here.
+
+Check how the render uses the credential. The Secret is a volume with one
+item, and the mount that reads it is read-only. The render holds only the
+reference, never the key:
 
 ```sh
 helm template opencost opencost/opencost --version 2.5.33 --namespace opencost \
-  -f opencost-values.yaml --skip-tests | grep -n -A3 'secretName: opencost-cloud-integration'
+  -f opencost-values.yaml --skip-tests | grep -n -A4 'secretName: opencost-cloud-integration'
 ```
 
 <!-- gate: output -->
 ```text
-418:            secretName: opencost-cloud-integration
-419-            items:
-420-              - key: cloud-integration.json
-421-                path: cloud-integration.json
+341:            secretName: opencost-cloud-integration
+342-            items:
+343-              - key: cloud-integration.json
+344-                path: cloud-integration.json
 ```
 
-The default render enables the MCP server: `grep -c 'name: mcp-server'` finds
-two matches in it, and the values file above finds none. Those two matches are
-the Service port and the container port.
+The `readOnly` flag sits on the container's volume mount, a few lines above the
+volume:
+
+```sh
+helm template opencost opencost/opencost --version 2.5.33 --namespace opencost \
+  -f opencost-values.yaml --skip-tests | grep -n 'readOnly: true\|secretName: opencost-cloud-integration'
+```
+
+<!-- gate: output -->
+```text
+335:              readOnly: true
+341:            secretName: opencost-cloud-integration
+```
+
+The exporter gets the flag as an environment variable. The chart's own
+comment says cloud cost ingestion depends on valid integration credentials,
+and this value is what switches it on:
+
+```sh
+helm template opencost opencost/opencost --version 2.5.33 --namespace opencost -f opencost-values.yaml --skip-tests | grep -n -A1 'CLOUD_COST_ENABLED'
+```
+
+<!-- gate: output -->
+```text
+316:            - name: CLOUD_COST_ENABLED
+317-              value: "true"
+```
+
+The default render enables the MCP server. `grep -c 'name: mcp-server'` counts
+two matches in it, and the same count on the values file is zero. The two
+matches are the Service port and the container port:
+
+```sh
+helm template opencost opencost/opencost --version 2.5.33 --namespace opencost --skip-tests | grep -c 'name: mcp-server'
+helm template opencost opencost/opencost --version 2.5.33 --namespace opencost -f opencost-values.yaml --skip-tests | grep -c 'name: mcp-server'
+```
+
+<!-- gate: output -->
+```text
+2
+```
+
+<!-- gate: output -->
+```text
+0
+```
 
 The chart's ClusterRole reads ConfigMaps, Pods, Nodes and more in every
 namespace. It has no rule for Secrets, so OpenCost's own identity cannot read
@@ -751,12 +1082,23 @@ the billing key through the API. Only the pod that mounts the key can read it.
 ConfigMaps are readable cluster-wide, so keep secrets out of them
 ([03.02](../03-config-and-storage/02-secrets.md)).
 
+```sh
+helm template opencost opencost/opencost --version 2.5.33 --namespace opencost \
+  -f opencost-values.yaml --skip-tests | awk '/^kind: ClusterRole$/{f=1} /^---/{f=0} f' | head -40
+```
+
 <!-- gate: output -->
 ```text
 kind: ClusterRole
 metadata:
   name: opencost
-# ...
+  labels:
+    helm.sh/chart: opencost-2.5.33
+    app.kubernetes.io/name: opencost
+    app.kubernetes.io/instance: opencost
+    app.kubernetes.io/version: "1.121.3"
+    app.kubernetes.io/part-of: opencost
+    app.kubernetes.io/managed-by: Helm
 rules:
   - apiGroups: [""]
     resources:
@@ -776,14 +1118,53 @@ rules:
       - get
       - list
       - watch
+  - apiGroups:
+      - extensions
+    resources:
+      - daemonsets
+      - deployments
+      - replicasets
+    verbs:
+      - get
+      - list
+      - watch
+  - apiGroups:
 # ...
 ```
 
-Keep the Service `ClusterIP`, which is the chart's default. Reach the UI with
-a port-forward, not an Ingress:
+Keep the Service `ClusterIP`, which is the chart's default. The UI is off, so
+the Service exposes only the API, on port 9003:
 
 ```sh
-kubectl port-forward -n opencost svc/opencost 9090:9090
+kubectl get svc -n opencost
+```
+
+<!-- gate: output -->
+```text
+NAME       TYPE        CLUSTER-IP      EXTERNAL-IP   PORT(S)    AGE
+opencost   ClusterIP   10.96.167.208   <none>        9003/TCP   11m
+```
+
+Reach the API with a port-forward, not an Ingress:
+
+```sh
+kubectl port-forward -n opencost svc/opencost 9003:9003
+```
+
+The namespace now holds both policies. This run checked that the API server
+accepts them. It did not check that traffic is denied, because the lab
+cluster's CNI was not confirmed to enforce NetworkPolicy. A CNI that does
+enforce it is what makes the default-deny bite:
+
+```sh
+kubectl get networkpolicy -n opencost
+```
+
+<!-- gate: output -->
+```text
+NAME                POD-SELECTOR                      AGE
+default-deny        <none>                            11m
+opencost-opencost   app.kubernetes.io/name=opencost   11m
 ```
 
 ## How it works under the hood
@@ -808,7 +1189,9 @@ kubectl port-forward -n opencost svc/opencost 9090:9090
   ch.03](../01-core-workloads/03-resources-and-qos.md)).
   `container_cpu_cfs_throttled_periods_total / ..._periods_total` is the
   ground truth; a non-zero ratio at low utilization is the canonical "remove/
-  raise the CPU limit" signal, exactly what section 1 found for catalog.
+  raise the CPU limit" signal. Section 1's illustrative numbers show that
+  ratio for catalog. They are not a measured run, so a real cluster has to
+  produce the ratio before the limit changes.
 - **Quota & LimitRange are the enforcement points.** `LimitRange` is a
   *mutating + validating* admission step (injects defaults, rejects out of
   `min/max`); `ResourceQuota` is a *validating* step (rejects if namespace
@@ -835,7 +1218,8 @@ kubectl port-forward -n opencost svc/opencost 9090:9090
 
 > **In production:** right-size from **measured data on every workload**, not
 > guesses or copy-paste. Memory: `request` ≈ steady RSS + margin, and
-> `limit == request` for anything that must not OOM. CPU: `request` ≈
+> `limit == request` where a container must never draw memory the node did not
+> reserve for it. That does not prevent an OOMKill at the limit. CPU: `request` ≈
 > realistic busy average; treat CPU **limits** with suspicion, and measure
 > throttling first ([Part 01
 > ch.03](../01-core-workloads/03-resources-and-qos.md)).
@@ -906,7 +1290,8 @@ Right-size recipe (per container):
 Checklist:
 
 - [ ] Requests derived from **measured** p95/peak usage, not guessed
-- [ ] Memory `request==limit` for must-not-OOM; CPU limit throttling measured
+- [ ] Memory `request==limit` where node overcommit must be avoided; CPU limit
+  throttling measured
 - [ ] VPA in **recommendation** mode used as input; never `Auto` with HPA on
   same metric
 - [ ] Namespace has ResourceQuota + LimitRange (guardrails enforce the change)
@@ -960,10 +1345,13 @@ Checklist:
    Memory is **incompressible**. Exceeding the limit triggers an OOMKill (the
    process dies, and Burstable or BestEffort Pods are evicted under pressure).
    Memory you need *must* be reserved. CPU is **compressible**. Exceeding the
-   limit throttles (slows the process), and the process still runs. So memory
-   needs request==limit for QoS Guaranteed (no eviction), while CPU can have a
-   higher limit than request (Burstable) to absorb spikes without paying for
-   unused capacity. See [Mental model](#mental-model).
+   limit throttles (slows the process), and the process still runs. So equal
+   memory request and limit keeps the container inside its reservation, which
+   limits node-level memory overcommit. It does not make the Pod Guaranteed:
+   that also needs equal CPU request and limit on every container, and even a
+   Guaranteed Pod is evicted last, not never. CPU can have a higher limit than
+   request (Burstable) to absorb spikes without paying for unused capacity. See
+   [Mental model](#mental-model).
 
    </details>
 
@@ -1031,4 +1419,5 @@ Checklist:
   and OpenCost <https://www.opencost.io/docs/>.
 
 [opencost-cloud-costs]: https://www.opencost.io/docs/configuration/#cloud-costs
+[pod-qos]: https://kubernetes.io/docs/concepts/workloads/pods/pod-qos/
 [catalog-deploy]: ../examples/bookstore/raw-manifests/10-catalog-deploy.yaml
