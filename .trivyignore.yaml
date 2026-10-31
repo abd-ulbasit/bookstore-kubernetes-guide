@@ -94,6 +94,13 @@ misconfigurations:
       - full-guide/examples/bookstore/operators/second-tenant.yaml
     statement: "The tenant admin Role manages its own Services alongside its workloads (chapter 08.04). The Role is namespaced to tenant-acme and bound only to that tenant's own identities, so the networking reach stops at its own namespace."
     expired_at: 2027-06-30
+  # The provider's ClusterRole writes NetworkPolicies in each tenant namespace
+  # (chapter 11.10, Threats and controls, E10). Trivy flags the write verbs.
+  - id: KSV-0056
+    paths:
+      - full-guide/11-advanced-production-patterns/10-platform-engineering.md
+    statement: "The provider writes NetworkPolicies to create, correct and heal the default-deny policy that each tenant namespace receives. RBAC cannot name the policies it may write, because create takes no name, so the write verbs stay. The write reaches every namespace, so the blast radius is set by the ClusterRole in step 1 of the chapter and by the admission policy that chapter 05.07 teaches."
+    expired_at: 2027-06-30
   # The Backstage ConfigMap holds only ${ENV} references; ESO supplies the values.
   - id: KSV-0109
     paths:
