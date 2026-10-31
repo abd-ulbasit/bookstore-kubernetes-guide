@@ -1,12 +1,20 @@
 # Transcript for 08-day-2-operations/05-operators-and-crds.md, lab steps 1 to 12.
 # Tier A: a kind cluster, Kubernetes v1.37.0 server, kubectl v1.37.2, Helm v4.1.4.
 # Chart cnpg/cloudnative-pg 0.29.1 (operator 1.30.1). Steps 1 to 12 only read,
-# render or dry-run: nothing was installed. Namespaces created by the run were
-# deleted at the end.
-# Recorded by running examples/security-lab/labs/08-05.sh from full-guide/ with
-# NS_CNPG=p08-05-cnpg-system and NS_BOOK=p08-05-bookstore. The chapter prints
-# cnpg-system and bookstore; the captured lines carry the prefixed names. The
-# cluster has a different name from the guide's, and the output does not show it.
+# render or dry-run: nothing was installed. The run asked for the namespaces it
+# created to be deleted at the end; step 12 shows what happened.
+# Recorded by running examples/security-lab/labs/08-05.sh from the guide's root
+# with NS_CNPG=p08-05-cnpg-system and NS_BOOK=p08-05-bookstore. The chapter
+# prints cnpg-system and bookstore; the captured lines carry the prefixed names.
+# The cluster has a different name from the guide's, and the output does not
+# show it. The chapter's step 7 command reads the Cluster file from standard
+# input, which is why that output says STDIN.
+#
+# What changed in this run: the migration Pod carries serviceAccountName
+# migrate-sa and the app: db-migrate label, and step 8 creates the Bookstore
+# ServiceAccounts first. The operator objects carry resource requests and a
+# memory limit (step 10). The network policies are dry-run (step 11). The
+# privileged Pod refusal is no longer repeated here: chapter 08.04 shows it.
 #
 # What did not work the first time: client-side apply of the chart's CRDs
 # (step 6) refuses the clusters and poolers CRDs, because the last-applied
@@ -14,6 +22,11 @@
 # accepts all eleven. A first run also dry-ran Pods before the namespace's
 # default ServiceAccount existed, which gave a ServiceAccount error instead of
 # the admission result. Step 8 now waits for that ServiceAccount.
+#
+# Step 12 timed out. Both namespaces were still Terminating about nine minutes
+# later, while other namespaces on the shared cluster were in the same state.
+# What remained in them was the lab's own ServiceAccounts, Role, RoleBinding
+# and quota.
 #
 # Not run: the operator install, the Cluster, the failover, the DB_DSN rewire
 # and the migration against a live database. The shared cluster was in use by
@@ -30,7 +43,7 @@ $ kubectl apply -f cnpg-namespace.yaml
 kubectl get namespace "$NS_CNPG" -L pod-security.kubernetes.io/enforce
 namespace/p08-05-cnpg-system created
 NAME                 STATUS   AGE   ENFORCE
-p08-05-cnpg-system   Active   1s    restricted
+p08-05-cnpg-system   Active   0s    restricted
 
 ## step 3: the ClusterRole the chart renders, read before installing
 $ helm template cnpg cnpg/cloudnative-pg --version "$CHART" --namespace "$NS_CNPG" --show-only templates/rbac.yaml > rbac.yaml
@@ -95,8 +108,11 @@ subjects:
 $ helm template cnpg cnpg/cloudnative-pg --version "$CHART" --namespace "$NS_CNPG" --set config.clusterWide=false --show-only templates/rbac.yaml > rbac-namespaced.yaml
 awk '/^kind: ClusterRole$/{on=1} /^---$/{on=0} on' rbac-namespaced.yaml | grep -c '^  - secrets$'
 grep -c '^kind: Role$' rbac-namespaced.yaml
+helm template cnpg cnpg/cloudnative-pg --version "$CHART" --namespace "$NS_CNPG" --set config.clusterWide=false --show-only templates/deployment.yaml | grep -A1 'name: WATCH_NAMESPACE'
 0
 1
+        - name: WATCH_NAMESPACE
+          value: "p08-05-cnpg-system"
 
 ## step 5: the CRD schema the chart renders: the privileged field and the enum
 $ helm template cnpg cnpg/cloudnative-pg --version "$CHART" --namespace "$NS_CNPG" --show-only templates/crds/crds.yaml > crds.yaml
@@ -145,29 +161,45 @@ $ nsrender "$bk/operators/cnpg-cluster.yaml" | kubectl apply --dry-run=client -f
 error: resource mapping not found for name: "bookstore-db" namespace: "p08-05-bookstore" from "STDIN": no matches for kind "Cluster" in version "postgresql.cnpg.io/v1"
 ensure CRDs are installed first
 
-## step 8: the Bookstore namespace with its quota, labelled restricted
+## step 8: the Bookstore namespace, then its ServiceAccounts, labelled restricted
 $ nsrender "$bk/raw-manifests/00-namespace.yaml" | kubectl apply -f -
 for i in $(seq 1 60); do kubectl get serviceaccount default -n "$NS_BOOK" >/dev/null 2>&1 && break; sleep 1; done
 kubectl get serviceaccount default -n "$NS_BOOK" --no-headers
+nsrender "$bk/raw-manifests/05-serviceaccounts-rbac.yaml" | kubectl apply -f -
+kubectl get serviceaccount migrate-sa -n "$NS_BOOK" --no-headers
 namespace/p08-05-bookstore created
 resourcequota/bookstore-quota created
 limitrange/bookstore-limits created
-default   1s
+default   23s
+serviceaccount/catalog-sa created
+serviceaccount/storefront-sa created
+serviceaccount/orders-sa created
+serviceaccount/payments-worker-sa created
+serviceaccount/postgres-sa created
+serviceaccount/redis-sa created
+serviceaccount/rabbitmq-sa created
+serviceaccount/migrate-sa created
+role.rbac.authorization.k8s.io/catalog-config-reader created
+rolebinding.rbac.authorization.k8s.io/catalog-config-reader-binding created
+migrate-sa   2s
 
-## step 9: the restricted namespace refuses a privileged Pod (deliberate)
-$ kubectl run privileged-probe -n "$NS_BOOK" --image="$PG_IMAGE" --restart=Never --dry-run=server --overrides='{"spec":{"containers":[{"name":"privileged-probe","image":"'"$PG_IMAGE"'","securityContext":{"privileged":true}}]}}'
-Error from server (Forbidden): pods "privileged-probe" is forbidden: violates PodSecurity "restricted:latest": privileged (container "privileged-probe" must not set securityContext.privileged=true), allowPrivilegeEscalation != false (container "privileged-probe" must set securityContext.allowPrivilegeEscalation=false), unrestricted capabilities (container "privileged-probe" must set securityContext.capabilities.drop=["ALL"]), runAsNonRoot != true (pod or container "privileged-probe" must set securityContext.runAsNonRoot=true), seccompProfile (pod or container "privileged-probe" must set securityContext.seccompProfile.type to "RuntimeDefault" or "Localhost")
-
-## step 10: the same namespace admits the migration Pod from chapter 05
+## step 9: the same namespace admits the migration Pod from chapter 05
 $ kubectl apply --dry-run=server -f migrate.yaml
 pod/db-migrate-cnpg created (server dry run)
 
-## step 11: the operator objects, with the image pinned by digest, dry-run into the restricted namespace
-$ helm template cnpg cnpg/cloudnative-pg --version "$CHART" --namespace "$NS_CNPG" --set image.tag="$OP_TAG" --show-only templates/deployment.yaml > operator-deploy.yaml
+## step 10: the operator objects, with the image pinned by digest and resources set, dry-run into the restricted namespace
+$ helm template cnpg cnpg/cloudnative-pg --version "$CHART" --namespace "$NS_CNPG" --set image.tag="$OP_TAG" $OP_RES --show-only templates/deployment.yaml > operator-deploy.yaml
 grep -m1 'image:' operator-deploy.yaml
-helm template cnpg cnpg/cloudnative-pg --version "$CHART" --namespace "$NS_CNPG" --set image.tag="$OP_TAG" --show-only templates/rbac.yaml --show-only templates/config.yaml --show-only templates/deployment.yaml --show-only templates/service.yaml > operator.yaml
+awk '/^        resources:/{on=1} /^        securityContext:/{on=0} on' operator-deploy.yaml
+helm template cnpg cnpg/cloudnative-pg --version "$CHART" --namespace "$NS_CNPG" --set image.tag="$OP_TAG" $OP_RES --show-only templates/rbac.yaml --show-only templates/config.yaml --show-only templates/deployment.yaml --show-only templates/service.yaml > operator.yaml
 kubectl apply --dry-run=server -n "$NS_CNPG" -f operator.yaml
         image: "ghcr.io/cloudnative-pg/cloudnative-pg:1.30.1@sha256:923c267ec29636db3bee20f993d0ec4973fa22998e1adad37da79e4d32b5bc07"
+        resources:
+          limits:
+            memory: 200Mi
+          requests:
+            cpu: 100m
+            memory: 100Mi
 serviceaccount/cnpg-cloudnative-pg created (server dry run)
 clusterrole.rbac.authorization.k8s.io/cnpg-cloudnative-pg created (server dry run)
 clusterrole.rbac.authorization.k8s.io/cnpg-cloudnative-pg-view created (server dry run)
@@ -177,12 +209,20 @@ configmap/cnpg-controller-manager-config created (server dry run)
 deployment.apps/cnpg-cloudnative-pg created (server dry run)
 service/cnpg-webhook-service created (server dry run)
 
+## step 11: the network policies, renamed to the lab namespaces, dry-run on the server
+$ npr "$bk/operators/cnpg-networkpolicy.yaml" | kubectl apply --dry-run=server -f -
+networkpolicy.networking.k8s.io/cnpg-instances-default-deny created (server dry run)
+networkpolicy.networking.k8s.io/cnpg-instances-allow created (server dry run)
+networkpolicy.networking.k8s.io/cnpg-operator-allow-webhook created (server dry run)
+
 ## step 12: delete the namespaces this lab created
 $ kubectl delete namespace "$NS_BOOK" "$NS_CNPG" --wait=true --timeout=300s
 kubectl get namespace "$NS_BOOK" "$NS_CNPG" 2>&1 | tail -n 2
 namespace "p08-05-bookstore" deleted
 namespace "p08-05-cnpg-system" deleted
-Error from server (NotFound): namespaces "p08-05-bookstore" not found
-Error from server (NotFound): namespaces "p08-05-cnpg-system" not found
+E1031 10:07:56.812811   55770 reflector.go:227] "Failed to watch" err="context deadline exceeded - error from a previous attempt: EOF" reflector="k8s.io/client-go/tools/watch/informerwatcher.go:162" type="*unstructured.Unstructured"
+error: timed out waiting for the condition on namespaces/p08-05-bookstore
+Unable to connect to the server: EOF
+Unable to connect to the server: EOF
 
 lab 08.05 finished

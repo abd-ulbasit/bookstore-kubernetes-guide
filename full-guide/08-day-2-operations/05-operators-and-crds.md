@@ -75,8 +75,8 @@ playbook for a stateful thing.**
   prints `no matches for kind` until its CRD is installed: the noun literally
   doesn't exist yet.)
 - **A controller is a reconcile loop.** It **watches** objects of some kind,
-  compares **desired** (`.spec`) to **observed** (the real world), and **acts**
-  to close the gap, then writes **observed back** (`.status`). It is
+  compares **desired** (`.spec`) to **observed** (the real world), and
+  **acts** to close the gap, then writes **observed back** (`.status`). It is
   **level-triggered** (it reconciles to the *current* desired state, not a
   *stream of edits*: it self-corrects after a missed event) and **idempotent**
   (reconciling an already-correct object is a no-op). This *is* the [Part 00
@@ -116,9 +116,10 @@ runs for you.
 
 | Threat | Control in this chapter | Deeper |
 |---|---|---|
-| The operator's ServiceAccount reads every Secret in the cluster | Read the rendered ClusterRole before you install (step 1). The default install grants Secret access in every namespace. The namespaced option removes that rule. | [05.01](../05-security/01-authn-authz-rbac.md), [11.02](../11-advanced-production-patterns/02-operator-development.md) |
-| A Cluster author makes the operator create a privileged Pod | The CRD schema accepts `privileged: true`, so schema validation cannot stop it. Pod Security `restricted` on the namespace refuses the Pod the operator would create (step 3). | [05.02](../05-security/02-pod-security.md) |
-| A custom resource names an image the platform never reviewed | Pin the operator and Postgres images by digest. For shared clusters, choose images through a `ClusterImageCatalog` the platform owns, not a free `imageName` (step 5). | [05.03](../05-security/03-supply-chain.md) |
+| The operator's ServiceAccount reads every Secret in the cluster | Read the rendered ClusterRole before you install (step 1). The default install grants Secret access in every namespace. The namespaced option removes that rule, and the lab does not use it. | [05.01](../05-security/01-authn-authz-rbac.md), [11.02](../11-advanced-production-patterns/02-operator-development.md) |
+| A Cluster author makes the operator create a privileged Pod | The CRD schema accepts `privileged: true`, so schema validation cannot stop it. Pod Security `restricted` on the namespace refuses that Pod at admission, as [08.04](04-multi-tenancy-and-namespaces.md) shows. | [05.02](../05-security/02-pod-security.md) |
+| Write access to a custom resource is superuser by another route | Restrict `clusters`, `databaseroles` and `poolers` with ordinary RBAC, and treat the Cluster annotations the same way (step 5). The operator's webhook is advisory: a Cluster writer can disable it. | [05.01](../05-security/01-authn-authz-rbac.md) |
+| A custom resource names an image the platform never reviewed | Advice, not a control in this chapter. The digest pins protect only the files you apply, and a Cluster can still name any image with `imageName`. An admission rule that rejects `imageName` and requires `imageCatalogRef` is the control. This chapter does not ship it (step 5). | [05.03](../05-security/03-supply-chain.md) |
 | Malformed or out-of-range input reaches the controller | The OpenAPI schema and its enums reject bad values at the API server, before the controller sees them (steps 2 and 6). | [11.01](../11-advanced-production-patterns/01-admission-webhooks.md) |
 
 ## Diagrams
@@ -173,14 +174,16 @@ flowchart TB
   Q3: In-cluster → use a MATURE OPERATOR, not a bigger StatefulSet
         → CloudNativePG `Cluster`  ◄── cnpg-cluster.yaml (THIS chapter)
           encodes as software: streaming replication, AUTOMATED failover,
-          WAL archiving + PITR, rolling minor upgrades, metrics
-          (see the capability levels above). DO NOT hand-build this controller.
+          rolling minor upgrades, metrics (see the capability levels above).
+          WAL archive and PITR are operator features, but this file sets no
+          backup method, so it has neither. DO NOT hand-build this controller.
 
   StatefulSet  ─────────────────────────────────────────────▶  Operator
    you ARE the DBA (manual runbooks)        the operator IS the DBA (software)
-   identity + storage, then STOPS           + failover + PITR + upgrades
+   identity + storage, then STOPS           + failover + upgrades
    1 replica = SPOF                         primary + replicas + auto-failover
-   crash-consistent snapshot only           continuous WAL → PITR (seconds RPO)
+   crash-consistent snapshot only           + WAL archive and PITR, once a
+                                              backup method is configured
 
   ON DISK: cnpg-cluster.yaml is ADDITIVE. 20-postgres-statefulset.yaml is
   KEPT unchanged (alternative, like 51-gateway vs 50-ingress). Mutually
@@ -200,15 +203,16 @@ reversibly, never by editing `10-`, `14-` or `16-`.
 > transcript is in the guide's evidence folder. That run used a cluster with a
 > different name, and its namespaces carried a run prefix, so captured lines
 > show prefixed names. The commands here use the names the chapter prints.
-> Steps 4 to 9 are reader steps with no captured output: check their results
-> on your own cluster.
+> Captured are the renders, the dry runs and the step 2 error. The install
+> itself, and steps 5 to 9, are reader steps with no captured output: check
+> their results on your own cluster.
 
 > **The honest local story.** CloudNativePG's production value is failover plus
 > WAL-archived point-in-time recovery (PITR) to an object store. This Hands-on
 > runs a real three-instance Cluster and a real failover. It leaves the backup
 > stanza out: a kind cluster has no bucket, and a WAL archive that cannot write
-> keeps WAL on the data volume until it fills. [Chapter 08.02](02-backup-and-dr.md)
-> covers backup and restore.
+> keeps WAL on the data volume until it fills. This chapter does not teach WAL
+> archiving or PITR. The production notes name the upstream docs for both.
 
 ### 0. Prerequisites: fresh cluster, images and the Bookstore namespace
 
@@ -323,8 +327,8 @@ reach is the list above: Secrets everywhere, Pods and `pods/exec` everywhere.
 The [Kubernetes RBAC reference](https://kubernetes.io/docs/reference/access-authn-authz/rbac/#restrictions-on-role-creation-or-update)
 sets out that rule.
 
-Two options narrow this. The first is the chart's `config.clusterWide=false`.
-Its ClusterRole has no Secret rule, and the chart renders one namespaced Role
+One option narrows this: the chart's `config.clusterWide=false`. Its
+ClusterRole has no Secret rule, and the chart renders one namespaced Role
 in the operator's own namespace instead:
 
 ```sh
@@ -334,28 +338,40 @@ helm template cnpg cnpg/cloudnative-pg --version 0.29.1 \
 awk '/^kind: ClusterRole$/{on=1} /^---$/{on=0} on' rbac-namespaced.yaml \
   | grep -c '^  - secrets$'
 grep -c '^kind: Role$' rbac-namespaced.yaml
+helm template cnpg cnpg/cloudnative-pg --version 0.29.1 \
+  --namespace cnpg-system --set config.clusterWide=false \
+  --show-only templates/deployment.yaml | grep -A1 'name: WATCH_NAMESPACE'
 ```
 
 <!-- gate: output -->
 ```
 0
 1
+        - name: WATCH_NAMESPACE
+          value: "p08-05-cnpg-system"
 ```
 
 The first count is the Secret rules left in the ClusterRole, and it is 0. The
-second is the namespaced Roles, and it is 1. The namespaced Role lives in
-`cnpg-system`. A namespaced install that must manage `bookstore` needs its own
-Role and RoleBinding there, plus `WATCH_NAMESPACE` set so the operator watches
-that namespace. That work is the cost of the narrower option. The lab keeps the
-cluster-wide default, and the production notes say when to pay that cost.
+second is the namespaced Roles, and it is 1. The third command shows the
+Deployment's `WATCH_NAMESPACE`: the namespaced option sets it to the operator's
+own namespace. The namespaced Role lives in `cnpg-system`. Managing `bookstore`
+that way needs a Role and RoleBinding in `bookstore`, and a `WATCH_NAMESPACE`
+that names `bookstore`. This chapter does not verify that change, so the lab
+keeps the cluster-wide default. The production notes say when to pay that cost.
 
-The chart's pod template also bounds the operator itself. Its container runs
-non-root, with a read-only root filesystem, RuntimeDefault seccomp, no
-privilege escalation and all capabilities dropped (the `containerSecurityContext`
-and `podSecurityContext` values). The Deployment does not set
-`automountServiceAccountToken`, so the token is mounted. The operator needs it
-to reach the API, and its ServiceAccount is dedicated to it. That is the case
-the [baseline](../01-core-workloads/01-pods.md#baseline) allows.
+The hands-on therefore runs two weaker forms than production, and this is the
+place that says so. The first is the cluster-wide RBAC above. The second is the
+`sslmode=require` DSN in step 7, which encrypts but does not verify the server.
+Neither is a production setting, and each is named again where it appears.
+
+The chart's pod template bounds what the operator Pod runs as. It does not
+narrow the RBAC above, and it does not set resources (step 4 does). The
+container runs non-root, with a read-only root filesystem, RuntimeDefault
+seccomp, no privilege escalation and all capabilities dropped: the
+`containerSecurityContext` and `podSecurityContext` values. The Deployment does
+not set `automountServiceAccountToken`, so the token is mounted. The operator
+needs it to reach the API, and its ServiceAccount is dedicated to it. That is
+the case the [baseline](../01-core-workloads/01-pods.md#baseline) allows.
 
 ### 2. Check the CRDs with the server before you install them
 
@@ -391,10 +407,11 @@ Admission can, and step 3 shows it. The enum accepts only `unsupervised` and
 `supervised`, and the API server enforces that on every write.
 
 Until the CRDs exist, the API server does not know the kind at all. A
-client-side dry run shows that before any install:
+client-side dry run shows that before any install. The `<` form reads the file
+from standard input, so the error names STDIN:
 
 ```sh
-kubectl apply --dry-run=client -f examples/bookstore/operators/cnpg-cluster.yaml
+kubectl apply --dry-run=client -f - < examples/bookstore/operators/cnpg-cluster.yaml
 ```
 
 <!-- gate: output -->
@@ -451,38 +468,12 @@ definitions are too large for that annotation's 256 KiB limit. Server-side
 apply writes no such annotation and accepts all eleven, so use `--server-side`
 for these CRDs.
 
-### 3. Refuse a privileged Pod at admission
+### 3. Write the migration Pod that the restricted namespace admits
 
-The operator creates Pods from the Cluster's spec. Pod Security admission on the
-namespace checks those Pods at the API server, whatever the CRD allowed. The
-Bookstore namespace from the prerequisites carries `restricted`. Dry-run a Pod
-that asks for privilege, as the admin, to see the refusal. Nothing is created.
-This is a deliberate action: the request is refused.
-
-```sh
-kubectl run privileged-probe -n bookstore --restart=Never --dry-run=server \
-  --image=ghcr.io/cloudnative-pg/postgresql:16.10-minimal-trixie@sha256:294fd7631f8d66fa54bf6ffa2948af685a20fb695fe748a6bafa71c42f1233b7 \
-  --overrides='{"spec":{"containers":[{"name":"privileged-probe","image":"ghcr.io/cloudnative-pg/postgresql:16.10-minimal-trixie@sha256:294fd7631f8d66fa54bf6ffa2948af685a20fb695fe748a6bafa71c42f1233b7","securityContext":{"privileged":true}}]}}'
-```
-
-If the dry run reports that the `default` ServiceAccount is missing, the
-namespace was created a moment ago. Wait a second and run it again.
-
-<!-- gate: output -->
-```
-Error from server (Forbidden): pods "privileged-probe" is forbidden: violates PodSecurity "restricted:latest": privileged (container "privileged-probe" must not set securityContext.privileged=true), allowPrivilegeEscalation != false (container "privileged-probe" must set securityContext.allowPrivilegeEscalation=false), unrestricted capabilities (container "privileged-probe" must set securityContext.capabilities.drop=["ALL"]), runAsNonRoot != true (pod or container "privileged-probe" must set securityContext.runAsNonRoot=true), seccompProfile (pod or container "privileged-probe" must set securityContext.seccompProfile.type to "RuntimeDefault" or "Localhost")
-```
-
-The refusal lists every rule the Pod breaks, not only privilege. The same check
-runs on the Pods CloudNativePG creates, so an instance that the Cluster asks to
-run privileged never starts in this namespace.
-
-The migration Pod that step 7 runs passes the same check. It carries the
-[baseline](../01-core-workloads/01-pods.md#baseline) in full. The fields to
-confirm for this image are the UID and the GID. Read the UID the image declares
-on a running instance, with
-`kubectl get pod <primary> -n bookstore -o jsonpath='{.spec.containers[0].securityContext.runAsUser}'`,
-and match it here before you apply the Pod:
+The migration Pod in step 7 runs the Bookstore's schema SQL against the new
+database. The namespace from the prerequisites carries `restricted`, so the Pod
+carries the [baseline](../01-core-workloads/01-pods.md#baseline) in full. Save
+this as `migrate.yaml`, then dry-run it. The dry run stores nothing:
 
 ```yaml
 apiVersion: v1
@@ -490,13 +481,16 @@ kind: Pod
 metadata:
   name: db-migrate-cnpg
   namespace: bookstore
+  labels:
+    app: db-migrate
 spec:
   restartPolicy: Never
+  serviceAccountName: migrate-sa
   automountServiceAccountToken: false
   securityContext:
     runAsNonRoot: true
-    runAsUser: 26                  # the UID the image declares: confirm it
-    runAsGroup: 26
+    runAsUser: 26                  # the instance UID, read in step 5
+    runAsGroup: 26                 # the instance GID, read in step 5
     seccompProfile:
       type: RuntimeDefault
   containers:
@@ -542,6 +536,18 @@ kubectl apply --dry-run=server -f migrate.yaml
 pod/db-migrate-cnpg created (server dry run)
 ```
 
+The Pod names `migrate-sa`, the ServiceAccount from step 0 that mounts no token
+and has no API rights. Its `app: db-migrate` label lets the network policy in
+step 5 reach the instances. [Chapter 08.04](04-multi-tenancy-and-namespaces.md)
+runs the same admission check on a privileged Pod and prints the refusal, which
+lists every rule the Pod breaks. This chapter does not repeat that refusal. The
+same check runs on the Pods CloudNativePG creates, so an instance that a
+Cluster asks to run privileged never starts in this namespace.
+
+The UID and GID in the Pod are the values the operator gives the instances.
+Step 5 reads them from a running instance, so check them there before you apply
+this Pod to a cluster you run.
+
 The [CloudNativePG security page](https://github.com/cloudnative-pg/cloudnative-pg/blob/main/docs/src/security.md)
 says the instance pods run with a read-only root filesystem, as non-root, with
 RuntimeDefault seccomp when the Cluster leaves it unset, and with privilege
@@ -554,15 +560,20 @@ for more.
 
 Dry-run the chart's objects into the restricted namespace first. Nothing is
 stored. A Pod Security violation in the operator's pod template would appear
-here as a warning, because the namespace sets `warn` to restricted:
+here as a warning, because the namespace sets `warn` to restricted. The same
+dry run sets the operator's requests and memory limit, which the baseline asks
+for:
 
 ```sh
 OP_TAG='1.30.1@sha256:923c267ec29636db3bee20f993d0ec4973fa22998e1adad37da79e4d32b5bc07'
+OP_RES='--set resources.requests.cpu=100m --set resources.requests.memory=100Mi --set resources.limits.memory=200Mi'
 helm template cnpg cnpg/cloudnative-pg --version 0.29.1 \
-  --namespace cnpg-system --set image.tag="$OP_TAG" \
-  --show-only templates/deployment.yaml | grep -m1 'image:'
+  --namespace cnpg-system --set image.tag="$OP_TAG" $OP_RES \
+  --show-only templates/deployment.yaml > operator-deploy.yaml
+grep -m1 'image:' operator-deploy.yaml
+awk '/^        resources:/{on=1} /^        securityContext:/{on=0} on' operator-deploy.yaml
 helm template cnpg cnpg/cloudnative-pg --version 0.29.1 \
-  --namespace cnpg-system --set image.tag="$OP_TAG" \
+  --namespace cnpg-system --set image.tag="$OP_TAG" $OP_RES \
   --show-only templates/rbac.yaml --show-only templates/config.yaml \
   --show-only templates/deployment.yaml --show-only templates/service.yaml \
   > operator.yaml
@@ -572,6 +583,12 @@ kubectl apply --dry-run=server -n cnpg-system -f operator.yaml
 <!-- gate: output -->
 ```
         image: "ghcr.io/cloudnative-pg/cloudnative-pg:1.30.1@sha256:923c267ec29636db3bee20f993d0ec4973fa22998e1adad37da79e4d32b5bc07"
+        resources:
+          limits:
+            memory: 200Mi
+          requests:
+            cpu: 100m
+            memory: 100Mi
 serviceaccount/cnpg-cloudnative-pg created (server dry run)
 clusterrole.rbac.authorization.k8s.io/cnpg-cloudnative-pg created (server dry run)
 clusterrole.rbac.authorization.k8s.io/cnpg-cloudnative-pg-view created (server dry run)
@@ -585,12 +602,15 @@ service/cnpg-webhook-service created (server dry run)
 No warning appears, so the operator's pod template meets the restricted rules.
 The image line carries the version and the digest together. The chart joins
 `image.tag` to the repository with a colon, which gives the reference above.
-Now install the chart, with the version pinned in the command:
+The resources block sets 100m CPU and 100Mi memory requested, with a 200Mi
+memory limit. Those are the chart's commented example values. They suit a small
+operator, not a production controller, so measure yours before you rely on them.
+Now install the chart with the same pins and the same resources:
 
 ```sh
 helm install cnpg cnpg/cloudnative-pg --version 0.29.1 \
   --namespace cnpg-system \
-  --set image.tag="$OP_TAG" \
+  --set image.tag="$OP_TAG" $OP_RES \
   --wait --timeout 5m
 kubectl -n cnpg-system rollout status deploy/cnpg-cloudnative-pg
 ```
@@ -603,13 +623,15 @@ the operator is down, existing instances keep running, but nothing fails over.
 ### 5. Apply the Cluster and read its status
 
 Create the basic-auth Secret first, with a password generated now. The Cluster
-reads it at bootstrap, and the manifest carries no password:
+reads it at bootstrap, and the manifest carries no password. Apply the network
+policy first, so the instances start under it:
 
 ```sh
 PGPASS=$(openssl rand -hex 16)
 kubectl create secret generic cnpg-app-credentials -n bookstore \
   --type=kubernetes.io/basic-auth \
   --from-literal=username=bookstore --from-literal=password="$PGPASS"
+kubectl apply -f examples/bookstore/operators/cnpg-networkpolicy.yaml
 kubectl apply -f examples/bookstore/operators/cnpg-cluster.yaml
 kubectl wait cluster/bookstore-db -n bookstore \
   --for=jsonpath='{.status.readyInstances}'=3 --timeout=420s
@@ -618,26 +640,56 @@ kubectl get svc -n bookstore -l cnpg.io/cluster=bookstore-db
 ```
 
 The file pins the Postgres image by digest and sets `enableSuperuserAccess` to
-`false`, so the operator creates no superuser Secret. The `monitoring` field
-asks for a PodMonitor, a type that comes from the Prometheus Operator's CRDs
-([Part 06](../06-production-readiness/01-observability-metrics.md)). On a cluster
-without those CRDs, set it to `false`.
+`false`, so the operator creates no superuser Secret. `monitoring` sets
+`enablePodMonitor: false`, because that field is deprecated upstream. Scrape the
+instances with a PodMonitor you write ([Part 06](../06-production-readiness/01-observability-metrics.md)).
+`inheritedMetadata` gives the label `app: postgres` to the objects the operator
+creates for the Cluster. The API reference says those are all resources related
+to the Cluster. The Cluster's own labels do not reach the instance Pods, so
+without this block the network policy selects nothing.
 
-Creating a `Cluster` is a privileged act. Once it exists, the
-operator runs the image and the settings the Cluster names. Limit who may
-create `clusters.postgresql.cnpg.io` with ordinary RBAC, as
-[Part 05 ch.01](../05-security/01-authn-authz-rbac.md) describes. On a shared
-cluster, name images through a `ClusterImageCatalog` the platform team owns
-(`spec.imageCatalogRef`) rather than a free `imageName`.
+The network policy lets the operator reach each instance on 8000 and 5432, lets
+the instances replicate to each other on 5432, and lets the catalog, orders and
+migration Pods reach the instances on 5432. The operator's webhook port, 9443,
+admits the API server. The policy adds no namespace-wide default-deny, and the
+stateless tier has no policy in this chapter. It does not allow metrics
+scrapes, so add a rule from the monitoring namespace before you scrape the
+instance port 9187 or the operator port 8080. Enforcement needs a network
+plugin that enforces NetworkPolicy.
+
+Creating a `Cluster` is a privileged act, and it is not the only one. Write
+access to `databaseroles.postgresql.cnpg.io` is equivalent to superuser on the
+clusters in its namespace, because a DatabaseRole can set `superuser: true`
+and join any role. Write access to `poolers.postgresql.cnpg.io` lets its
+`authQuery` run arbitrary SQL. A Cluster writer controls its Pods, and the
+annotations `cnpg.io/podPatch`, `cnpg.io/validation` and
+`cnpg.io/reconciliationLoop` fall under the same RBAC. Setting
+`cnpg.io/validation` to `disabled` bypasses the operator's own webhook, so
+that webhook is advisory, not a boundary. The `postInitSQL` hooks and inline
+managed roles on a Cluster also reach superuser. Grant write access to these
+three resources only to the people who run the database, with ordinary RBAC,
+as [Part 05 ch.01](../05-security/01-authn-authz-rbac.md) describes. The
+[CloudNativePG security
+page](https://github.com/cloudnative-pg/cloudnative-pg/blob/v1.30.1/docs/src/security.md)
+sets out each of these under RBAC on Custom Resources. On a shared cluster,
+the platform team owns the image rule: name images through a
+`ClusterImageCatalog` (`spec.imageCatalogRef`), and reject a free `imageName`
+with an admission rule. This chapter ships no such rule.
 
 The Services `bookstore-db-rw`, `-ro` and `-r` are CloudNativePG's names for the
 primary, the replicas and any instance. The rewire in step 7 uses `-rw`. Check
-the instance pods on your cluster as well:
+the instance Pods on your cluster as well:
 
 ```sh
 PRIMARY=$(kubectl get cluster bookstore-db -n bookstore -o jsonpath='{.status.currentPrimary}')
-kubectl get pod "$PRIMARY" -n bookstore -o jsonpath='{.spec.containers[0].securityContext}'
+kubectl get pod "$PRIMARY" -n bookstore -o jsonpath='{.spec.securityContext.runAsUser}{" "}{.spec.securityContext.runAsGroup}{"\n"}'
 ```
+
+The two numbers are the pod-level UID and GID the operator gives every instance.
+Both default to 26, and the Postgres image declares user 26. Step 3's migration
+Pod must run as the same identity, so compare the values before you apply it.
+They come from a running instance, which is why this check sits here and not in
+step 3.
 
 ### 6. Test the schema on the live Cluster
 
@@ -702,8 +754,9 @@ kubectl logs deploy/catalog -n bookstore | grep 'postgres configured'
 ```
 
 `sslmode=require` encrypts the connection but does not check the server's
-certificate. Production should verify the certificate against the operator's
-CA, which is a Secret and trust change, not a flag flip.
+certificate. The lab keeps it, for the reason step 1 gives. Production should
+use `verify-full` with the CA certificate the operator generates, mounted into
+catalog and orders: a Secret and trust change, not a flag flip.
 
 ### 8. Fail the primary over
 
@@ -792,12 +845,12 @@ Cluster is gone, as above.
   that runbook, level-triggered and always-on. It also sets the instance pods'
   `securityContext` itself, which is operational correctness encoded, not
   hand-maintained. The admission chain still judges the result.
-- **Capability Levels are a maturity claim, not a label.** L1 install only → L2
-  seamless upgrades → L3 full lifecycle (backup/restore/failover) → L4 deep
-  insights (metrics/alerts) → L5 autopilot (auto-tune/auto-remediate). Check an
-  operator's own documentation for the levels it claims, then test the ones you
-  depend on. This chapter tests failover. [Chapter 08.02](02-backup-and-dr.md)
-  covers PITR. "Use a *mature* operator" ([Part 03
+- **Capability Levels are a maturity claim, not a label.** L1 install only →
+  L2 seamless upgrades → L3 full lifecycle (backup/restore/failover) → L4 deep
+  insights (metrics/alerts) → L5 autopilot (auto-tune/auto-remediate). Check
+  an operator's own documentation for the levels it claims, then test the ones
+  you depend on. This chapter tests failover, not PITR. "Use a *mature*
+  operator" ([Part 03
   ch.05](../03-config-and-storage/05-stateful-data-patterns.md)) means pick a
   high level, because a low-level operator hands the hard parts (failover)
   back to you while still adding a controller to operate.
@@ -846,21 +899,28 @@ Cluster is gone, as above.
 > a maintenance window: not just changing a hostname.
 
 > **In production: the operator's RBAC is a standing decision.** The
-> cluster-wide default in step 1 is the right trade for a shared platform that
-> wants one operator for every namespace, and the wrong one for a cluster where
-> teams should not share a controller's Secret read. Choose it on purpose:
-> render the namespaced option, add the Role and RoleBinding each managed
-> namespace needs, and record which option you picked and why, in the same
-> review as the chart version.
+> cluster-wide default is the right trade for a shared platform that wants one
+> operator for every namespace, and the wrong one for a cluster where teams
+> should not share a controller's Secret read. Choose it on purpose: render the
+> namespaced option, add the Role and RoleBinding each managed namespace needs,
+> set `WATCH_NAMESPACE` to those namespaces, and record which option you picked
+> and why, in the same review as the chart version.
 
-> **In production: build a CRD/operator only when buying genuinely doesn't fit.**
-> The pattern (CRD + controller-runtime reconcile loop) is also how *you*
-> encode *your* org's operational knowledge (a "TenantEnvironment" CRD, a
-> certificate workflow). But **build-vs-buy strongly favours buy**: a mature
+> **In production: backup and PITR are a separate decision.** WAL archiving and
+> point-in-time recovery need a backup method and an object store with its own
+> credentials. The upstream docs recommend the Barman Cloud Plugin. The native
+> `barmanObjectStore` integration is deprecated from 1.26. Read the
+> [backup documentation](https://github.com/cloudnative-pg/cloudnative-pg/blob/v1.30.1/docs/src/backup.md)
+> and the recovery steps, and restore-test them before you rely on PITR.
+
+> **In production: build a CRD/operator only when buying genuinely doesn't
+> fit.** The pattern (CRD + controller-runtime reconcile loop) is also how
+> *you* encode *your* org's operational knowledge (a "TenantEnvironment" CRD,
+> a certificate workflow). But **build-vs-buy strongly favours buy**: a mature
 > operator is years of encoded failure-handling. Build when no operator covers
 > your domain: and then treat your controller as production software (leader
-> election for HA, bounded reconcile, tested idempotency, RBAC least-privilege,
-> the same rigor as any service).
+> election for HA, bounded reconcile, tested idempotency, RBAC
+> least-privilege, the same rigor as any service).
 
 ## Quick Reference
 
@@ -874,14 +934,18 @@ helm template cnpg cnpg/cloudnative-pg --version 0.29.1 \
   --namespace cnpg-system --show-only templates/rbac.yaml > rbac.yaml
 
 # Install an operator: pinned chart and image digest, restricted namespace
+kubectl apply -f cnpg-namespace.yaml
 helm repo add cnpg https://cloudnative-pg.github.io/charts && helm repo update cnpg
+OP_TAG='1.30.1@sha256:923c267ec29636db3bee20f993d0ec4973fa22998e1adad37da79e4d32b5bc07'
+OP_RES='--set resources.requests.cpu=100m --set resources.requests.memory=100Mi --set resources.limits.memory=200Mi'
 helm install cnpg cnpg/cloudnative-pg --version 0.29.1 \
-  --namespace cnpg-system --set image.tag="$OP_TAG" --wait
+  --namespace cnpg-system --set image.tag="$OP_TAG" $OP_RES --wait
 
 # Check CRD validation on the server (stores nothing)
 kubectl apply --dry-run=server --server-side -f crds.yaml
 
 # The Bookstore re-platform (ADDITIVE: 20-postgres-statefulset.yaml unchanged)
+kubectl apply -f examples/bookstore/operators/cnpg-networkpolicy.yaml
 kubectl apply -f examples/bookstore/operators/cnpg-cluster.yaml
 kubectl get cluster bookstore-db -n bookstore
 kubectl get svc -n bookstore -l cnpg.io/cluster=bookstore-db
@@ -910,8 +974,9 @@ Checklist:
       Pods run in a `restricted` namespace
 - [ ] The operator runs in its **own namespace**, chart **pinned**, operator
       upgrade ≠ DB upgrade, both tested
-- [ ] CNPG is **additive** (`cnpg-cluster.yaml` new; `20-postgres-statefulset.yaml`
-      unchanged on disk); the password is generated at run time, not committed
+- [ ] CNPG is **additive** (`cnpg-cluster.yaml` new;
+      `20-postgres-statefulset.yaml` unchanged on disk); the password is
+      generated at run time, not committed
 - [ ] `DB_DSN` rewire (`postgres` → `bookstore-db-rw`) is a **GitOps overlay
       change** in production, shown **reversibly** here; data move is a planned
       **migration** (backup + tested rollback: [ch.02](02-backup-and-dr.md))
@@ -958,7 +1023,7 @@ Checklist:
 6. **A Cluster manifest sets `spec.securityContext.privileged: true`, and the CRD schema accepts it. What refuses the Pod the operator would then create, and where does that check run?**
    <details><summary>Show answer</summary>
 
-   The namespace's Pod Security admission (the `restricted` level), at the API server, when the operator submits the Pod. The CRD schema only checks that `privileged` is a boolean, so it cannot judge intent. Step 3 ran the same check on a Pod with that setting and got the refusal shown in the captured output.
+   The namespace's Pod Security admission (the `restricted` level), at the API server, when the operator submits the Pod. The CRD schema only checks that `privileged` is a boolean, so it cannot judge intent. [Chapter 08.04](04-multi-tenancy-and-namespaces.md) runs that check on a Pod with that setting and prints the refusal, which lists every rule the Pod breaks.
 
    </details>
 
