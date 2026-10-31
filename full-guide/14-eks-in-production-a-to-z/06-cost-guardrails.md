@@ -19,28 +19,28 @@
 
 The bookstore-platform tree at
 [`../examples/bookstore-platform/terraform/`](../examples/bookstore-platform/terraform/)
-spends real money the moment `terraform apply` finishes: the EKS
-control plane at ~$73/month, the NAT gateway at ~$32/month, the two
-managed-node-group `t3.medium` instances at ~$60/month between them,
-plus the EBS volumes, the load balancer, the CloudWatch logs, and
-whatever Karpenter provisions on demand. An idle cluster sits at
-**~$150-200/month**; a busy one with sustained Karpenter scaling
-can hit **$500-1000/month** for the cluster itself, before
-applications add a single dollar of compute.
+spends real money the moment `terraform apply` finishes. The EKS control
+plane is $0.10 an hour, about $73 a month
+([EKS pricing](https://aws.amazon.com/eks/pricing/)). The NAT gateway is
+$0.045 an hour in the VPC pricing example region, about $33 a month before
+data charges ([VPC pricing](https://aws.amazon.com/vpc/pricing/)). The node
+group, the EBS volumes, the load balancer, the CloudWatch logs and whatever
+Karpenter provisions on demand add to that, and Karpenter's scaling decides
+how far the total moves before applications add a single dollar of compute.
 
 That's the baseline. The cost-bug shape — the one that surprises
 every team eventually — is the *new* cost line that wasn't there
 yesterday:
 
 - A PR adds an `aws_nat_gateway` per AZ in three AZs — three NAT
-  gateways at $0.045/hr each = **$97/month** new line.
+  gateways at $0.045/hr each, about **$99/month** new line.
 - A misconfigured Karpenter `NodePool` provisions an on-demand
-  `m5.24xlarge` ($4.61/hr) because the spot pool ran out of capacity
-  and the user didn't set `weight` correctly — **$3,300/month** if
-  it runs unattended for a week.
+  `m5.24xlarge` because the spot pool ran out of capacity and the user
+  didn't set `weight` correctly. Left running, it costs **thousands of
+  dollars a month**.
 - An OpenSearch domain a team spun up for "quick analytics" at
-  `r6g.4xlarge.search` x 3 nodes — **$3,500/month** that nobody on
-  the platform team knew about until the bill arrived.
+  `r6g.4xlarge.search` x 3 nodes, costing **thousands of dollars a month** that
+  nobody on the platform team knew about until the bill arrived.
 
 The platform team's job is to catch each of these before the bill,
 not after. AWS exposes three primitives for that, each operating at
@@ -48,10 +48,10 @@ a different time horizon and granularity:
 
 1. **AWS Budgets** — the alarm bell. Set a monthly cap; AWS notifies
    you at 80% (forecasted breach) and 100% (actual breach). Catches
-   the cumulative drift. Free for the first 2 budgets per account
-   ($0.02/budget/day thereafter); the bookstore-platform tree's
-   `cost-budgets.tf` (Phase 14-R) sets up one budget that lands in
-   the free tier.
+   the cumulative drift. Notification-only budgets are free
+   ([pricing](https://aws.amazon.com/aws-cost-management/aws-budgets/pricing/));
+   the bookstore-platform tree's `cost-budgets.tf` (Phase 14-R) sets up
+   one of those.
 2. **AWS Cost Explorer** — the forensic tool. Groupable by service,
    tag, AZ, account; the place where you answer "what spent the
    money?" after the alarm. No code-level setup; enabled per
@@ -65,7 +65,7 @@ a different time horizon and granularity:
 The fourth tier, often missed: **CI-time cost diff**. `infracost`
 runs `terraform plan` and produces a line-item cost diff per pull
 request. The PR that adds three NAT gateways shows up as
-`+$97/month` in the PR description; the reviewer can challenge it
+about `+$99/month` in the PR description; the reviewer can challenge it
 *before* it merges. The bookstore-platform tree's `make plan-cost`
 target wires this in.
 
@@ -83,9 +83,8 @@ chapter is the **EKS production guardrails** layer — the AWS Budgets
 > (`terraform-account-baseline/budget.tf`, on by default), not in the
 > cluster tree, so destroying a cluster cannot destroy the alarm. The
 > cluster tree's own `enable_budget_alarm = true` adds a cluster-scoped
-> budget on top; it sends a single
-> email when the monthly burn rate projects beyond 80% of the cap.
-> The budgets themselves are free (the first 2 per account). The
+> budget on top, with notifications at 80% forecast and 100% actual
+> through an SNS topic. Notification-only budgets are free. The
 > teams that learn this lesson the hard way are the ones whose first
 > AWS bill at $11,000 arrives in the company CFO's inbox before the
 > platform team has dashboards built.
@@ -112,12 +111,13 @@ The four-horizon framework:
   `plan-pr` job. **Prevents** the "we didn't know it would cost that
   much" incident.
 - **Horizon 1 — Spend-time.** OpenCost (already wired in Part 13
-  ch.10) shows the per-namespace, per-tenant cost in near-real-time
-  (5-minute lag from Prometheus scrape). Cost Explorer shows the
-  per-AWS-service cost in 24-hour lag. **Tells you** what's running
+  ch.10) shows the per-namespace, per-tenant cost from Prometheus
+  metrics, close to real time. Cost Explorer shows the per-AWS-service
+  cost, refreshed at least every 24 hours. **Tells you** what's running
   *right now* and what each pod/tenant/service is costing.
-- **Horizon 2 — Forecast-time.** AWS Budgets evaluates every ~3
-  hours and projects the monthly burn against the cap. If the burn
+- **Horizon 2: Forecast-time.** AWS Budgets updates
+  [up to three times a day](https://docs.aws.amazon.com/cost-management/latest/userguide/budgets-managing-costs.html)
+  and projects the monthly burn against the cap. If the burn
   rate at day 10 of the month projects $4,500 against a $5,000 cap,
   the forecast alarm fires at the projected 80% threshold — *before*
   the breach. **Catches** sustained-over-budget growth before
@@ -158,6 +158,14 @@ Cost Explorer, group by service, group by tag, find the new line,
 notify the owner, decide tag/kill/scale-down within 1 hour." The
 bookstore-platform tree's `cost-budgets.tf` ships the alarm; this
 chapter ships the runbook.
+
+## Threats and controls
+
+This chapter owns no threat beyond unplanned spend: the alarms here report
+spend after it happens and do not stop it, and the controls that keep an
+attacker from creating capacity belong to
+[14.07](./07-infrastructure-cicd-and-drift.md) and
+[14.17](./17-cross-region-dr-account-baseline-90-day-runbook.md).
 
 ## Diagrams
 
@@ -216,11 +224,12 @@ Forensic / audit             Cost and Usage Report      S3 daily export + Athena
                                                                                        per-resource-ARN
 ───────────────────────────  ─────────────────────────  ─────────────────────────────  ─────────────────
 Cost of each:
-  infracost                  free (CLI + CI); SaaS dashboard tier paid (not required)
-  OpenCost                   free (self-hosted compute cost only — ~0.5 CPU + 1 GB RAM)
-  Cost Explorer              free for the UI; $0.01/request to the API
-  AWS Budgets                first 2 budgets/account free; $0.02/budget/day thereafter
-  Cost and Usage Report      free to generate; S3 storage at $0.023/GB-month
+  infracost                  free plan, 1,000 CI runs a month
+  OpenCost                   free; you pay for the pods it runs in
+  Cost Explorer              console free; $0.01 per paginated API request
+  AWS Budgets                notification-only budgets free; action-enabled
+                             budgets two free, then $0.10 a day each
+  Cost and Usage Report      you pay for the S3 bucket it writes to
 ```
 
 ## Hands-on with the Bookstore Platform
@@ -263,41 +272,46 @@ The apply creates:
   notification topic, encrypted with its own customer-managed key whose
   policy lets `budgets.amazonaws.com` and `cloudwatch.amazonaws.com` use
   it. (With the AWS-managed `alias/aws/sns` key, which this tree used
-  until 2026-10-24, Budgets cannot publish at all: the subscription
-  confirms and no alarm ever arrives.)
+  until 2026-10-24, Budgets cannot publish: the
+  [Budgets grant](https://docs.aws.amazon.com/cost-management/latest/userguide/budgets-sns-policy.html)
+  cannot be added, because [you cannot change an AWS managed key's
+  policy](https://docs.aws.amazon.com/kms/latest/developerguide/concepts.html),
+  so no alarm arrives.)
 - `aws_sns_topic_subscription.budget_alarm_email` — email subscription
   to the address in `budget_alarm_email`.
 
 **AWS sends a confirmation email** within minutes; click the link to
-activate the subscription. Until you click, no emails flow. The
-confirmation URL is region-specific and time-limited (~7 days); if
-you miss it, re-trigger the subscription via the AWS console (SNS →
-Subscriptions → Resend confirmation).
+activate the subscription. Until you click, no emails flow, and SNS
+[deletes an unconfirmed email subscription after 48 hours](https://docs.aws.amazon.com/sns/latest/dg/sns-email-notifications.html).
+To resend the request, open SNS, choose Subscriptions, filter by `budget`,
+select the pending subscription and choose **Request confirmation**. If the
+48 hours have passed, run `terraform apply` again to recreate it.
 
 ### 2. Test the alarm with a forced breach
 
 A budget at $200 won't breach on a baseline cluster. To test the
-plumbing:
+plumbing, lower the cap and review the plan before you apply it:
 
 ```bash
-# Temporarily reduce the cap to a value below current spend.
-terraform apply -var-file=example.tfvars \
-  -var='monthly_budget_usd=10' -auto-approve
+terraform plan -var-file=example.tfvars \
+  -var='monthly_budget_usd=10' -out=breach-plan.tfplan
+terraform apply breach-plan.tfplan
 
-# Wait ~3 hours (Budgets evaluates on a slow cadence). The alarm will
-# fire because actual spend > $10.
+# Budgets updates up to three times a day, 8 to 12 hours apart, so wait
+# for the next update. The alarm fires if actual spend is above $10.
 # Check status via:
 aws budgets describe-budget \
   --account-id "$(aws sts get-caller-identity --query Account --output text)" \
   --budget-name "$(terraform output -raw cluster_name)-monthly-cost"
 ```
 
-After confirming the alarm fired (an email arrives within 3-6 hours
-of the breach), restore the cap:
+After confirming the alarm fired (the email follows the update that
+sees the breach), restore the cap the same way:
 
 ```bash
-terraform apply -var-file=example.tfvars \
-  -var='monthly_budget_usd=200' -auto-approve
+terraform plan -var-file=example.tfvars \
+  -var='monthly_budget_usd=200' -out=restore-plan.tfplan
+terraform apply restore-plan.tfplan
 ```
 
 ### 3. Run `infracost` against a real plan diff
@@ -307,7 +321,7 @@ pipes through `infracost`. To see it work, propose a cost-increasing
 change:
 
 ```bash
-cat <<'EOF' > /tmp/scale-up.tfvars
+cat <<'EOF' > scale-up.tfvars
 # Hypothetical: enable Graviton + VPC endpoints + Velero + Falco
 enable_vpc_endpoints  = true
 enable_graviton_pool  = true
@@ -315,16 +329,14 @@ enable_velero         = true
 enable_falco          = true
 EOF
 
-# Run the cost-aware plan (use plan-cost target so infracost picks it up).
-make plan-cost VAR_FILE=/tmp/scale-up.tfvars
-
-# OR equivalently, by hand:
-terraform plan -var-file=/tmp/scale-up.tfvars -out=tfplan.binary
+# The make plan-cost target runs the same steps with no var file, so
+# pass yours by hand:
+terraform plan -var-file=scale-up.tfvars -out=tfplan.binary
 terraform show -json tfplan.binary > tfplan.json
 infracost breakdown --path tfplan.json --show-skipped
 ```
 
-Sample output:
+Illustrative output (not captured from a run):
 
 ```text
  Name                                                Monthly Qty  Unit                   Monthly Cost
@@ -345,17 +357,17 @@ Sample output:
  OVERALL TOTAL                                                                                $51.10
 ```
 
-This output goes into the PR description via the `infracost comment`
-subcommand (the CI workflow runs `infracost comment github`); the
-reviewer sees `+$51.10/month` next to the `enable_vpc_endpoints =
-true` change and accepts the trade explicitly. The discipline is
+In a CI workflow, `infracost comment github` posts this output to the PR
+description, so the reviewer sees `+$51.10/month` next to the
+`enable_vpc_endpoints = true` change and accepts the trade explicitly. The
+tree's workflow template does not run it yet (see the production notes). The discipline is
 **no surprise cost line lands on main**.
 
 ### 4. Enable Cost Explorer + tag your resources
 
 Cost Explorer is enabled per-account, not per-resource. Through the
 AWS console: **Billing & Cost Management → Cost Explorer → Enable
-Cost Explorer**. The data backfills 12 months.
+Cost Explorer**. It shows up to 13 months of history.
 
 For tag-based grouping (the way you separate `dev` vs `prod` vs
 per-tenant cost), activate cost-allocation tags:
@@ -365,16 +377,16 @@ per-tenant cost), activate cost-allocation tags:
 aws ce list-cost-allocation-tags \
   --status Inactive --output text | head -20
 
-# Activate the tags the bookstore-platform tree adds (Environment,
-# Cluster, Tenant, etc.).
+# Activate the tags the bookstore-platform tree adds (locals.tf).
 aws ce update-cost-allocation-tags-status --cost-allocation-tags-status \
-  '[{"TagKey":"Environment","Status":"Active"},{"TagKey":"Cluster","Status":"Active"},{"TagKey":"ManagedBy","Status":"Active"}]'
+  '[{"TagKey":"Project","Status":"Active"},{"TagKey":"bookstore-platform.example.com/cluster","Status":"Active"},{"TagKey":"bookstore-platform.example.com/managed-by","Status":"Active"}]'
 ```
 
-Once activated, tags propagate to the next-day's CUR; Cost Explorer
-queries can `Group by Tag: Cluster` to slice cost per cluster.
-**Cost-allocation tag activation is not retroactive** — costs before
-the activation timestamp are unassigned.
+Once activated, tags reach Cost Explorer and the CUR within about a day,
+and Cost Explorer can group by the cluster tag to slice cost per cluster.
+Activation applies from then on. A management account can
+[backfill](https://docs.aws.amazon.com/awsaccountbilling/latest/aboutv2/cost-allocation-backfill.html)
+up to twelve months, but only for resources that carried the tag then.
 
 ### 5. Query Cost Explorer for the per-service breakdown
 
@@ -392,7 +404,7 @@ aws ce get-cost-and-usage \
   --output table | head -20
 ```
 
-Sample output:
+Illustrative output (not captured from a run):
 
 ```text
 -------------------------------------------------------------------------
@@ -446,7 +458,9 @@ EOF
 Now both the AWS-side budget (the cluster's monthly cap) and the
 in-cluster per-tenant budgets (acme-books, foo-books, etc.) fire to
 the same SNS topic and the same on-call inbox. One signal, one
-runbook (Step 7), one investigation flow.
+runbook (Step 7), one investigation flow. Give Alertmanager an IAM role,
+through [IRSA](./03-eks-addon-management.md), that can publish to this topic
+and use its key, and nothing else.
 
 ### 7. The cost-alarm runbook (the 60-minute response)
 
@@ -454,6 +468,7 @@ When the SNS topic fires:
 
 ```bash
 # Step 1 (5 min): confirm and triage.
+ACCOUNT_ID="$(aws sts get-caller-identity --query Account --output text)"
 aws budgets describe-budget --account-id "$ACCOUNT_ID" \
   --budget-name "$(terraform output -raw cluster_name)-monthly-cost" \
   --query 'Budget.{cap:BudgetLimit.Amount,actual:CalculatedSpend.ActualSpend.Amount,forecast:CalculatedSpend.ForecastedSpend.Amount}'
@@ -465,7 +480,8 @@ aws ce get-cost-and-usage \
   --metrics UnblendedCost \
   --group-by Type=DIMENSION,Key=SERVICE
 
-# Step 3 (15 min): OpenCost — what tenant?
+# Step 3 (15 min): OpenCost: what tenant? Start the port-forward first, in
+# another terminal: kubectl -n opencost port-forward svc/opencost 9003:9003
 curl -s "http://localhost:9003/allocation?window=7d&aggregate=label:bookstore-platform.example.com/tenant" \
   | jq '.data | to_entries | sort_by(.value.totalCost) | reverse | .[0:5]'
 
@@ -515,20 +531,21 @@ tenant disputes the September bill — show the exact lines").
 ## How it works under the hood
 
 **AWS Budgets — the evaluation cycle.** Budgets is *not* real-time.
-The evaluation runs roughly every **3 hours** against AWS's billing
-data, which itself has a ~24-hour lag from the actual spend event.
+[AWS updates budget data up to three times a day](https://docs.aws.amazon.com/cost-management/latest/userguide/budgets-managing-costs.html),
+8 to 12 hours apart, and the billing data behind it arrives with its own
+delay.
 The chain:
 
 1. EKS / EC2 / VPC emit billing-records as they spend (per-second
    for EC2; per-API-call for VPC NAT).
 2. AWS Billing service aggregates the records into the
    per-hour-per-resource line items.
-3. AWS Budgets reads the aggregated lines on its 3-hour cycle.
+3. AWS Budgets reads the aggregated lines at its next update.
 4. If the cap is breached (or forecast crosses 80%), Budgets calls
    the SNS topic.
 
-Worst case: an actual breach at 10am may not trigger the SNS notification
-until 1pm or later (3-hour evaluation + 24-hour billing lag). For
+Worst case: an actual breach just after an update may not notify until
+the next update, 8 to 12 hours away, plus the billing delay. For
 **runaway-cost** scenarios (a Karpenter loop spinning up
 $1,000/hour of capacity), Budgets is too slow; you want the
 CloudWatch metric alarm path (e.g., `MaximumNetworkInUtilization`
@@ -537,18 +554,16 @@ crossing a threshold) for the minute-grain signal.
 
 **Cost Explorer — the data model.** Each line is one
 `(account, service, region, AZ, tag-set, usage-type, time-bucket)`
-tuple. The UI offers up to **two grouping dimensions** at a time
-(e.g., `Group by: Service` and `Filter: Tag: Environment=prod`).
-The API (`get-cost-and-usage`) exposes the same data; you can
-script daily exports. The data has a **24-hour lag** from event
-time.
+tuple. The console can group and filter that data, and the API
+(`get-cost-and-usage`) exposes it too, so you can script daily exports.
+Cost Explorer refreshes at least once every 24 hours.
 
 **Cost and Usage Report — the authoritative record.** CUR is the
-*raw* billing record, exported daily to an S3 bucket as compressed
-Parquet (recommended) or CSV. Each row is one
+*raw* billing record, [updated at least once a day](https://docs.aws.amazon.com/cur/latest/userguide/what-is-cur.html)
+in an S3 bucket you own. Each row is one
 `(account, hour, resource-ARN, line-item-type, usage-amount, unblended-cost, ...)`
 tuple — typically several million rows per month for a non-trivial
-account. Athena reads the Parquet directly:
+account. Athena reads the report directly:
 
 ```sql
 -- Daily cost for the EKS cluster, broken out by line-item type.
@@ -584,18 +599,20 @@ against AWS pricing (catalogue prices for the dev case; Cost and
 Usage Report for the production case). The Allocation is in USD;
 each pod's cost = `(pod_cpu_requests / node_cpu_capacity * node_hourly_price) + (pod_ram_requests / node_ram_capacity * node_hourly_price)` integrated over the time window. The
 production answer wires OpenCost to AWS's CUR for exact pricing
-(catalogue is wrong by 30-60% for accounts with Savings Plans or
-Reserved Instances).
+(catalogue prices ignore the discounts from Savings Plans and Reserved
+Instances).
 
 **The 80/20 of cost optimization — the levers in order:**
 
 1. **Spot for batch.** Karpenter NodePools with
-   `spot` instances at 60-80% discount; the Bookstore Platform's
+   `spot` instances, which [AWS prices at up to 90% below
+   On-Demand](https://aws.amazon.com/aws-cost-management/pricing/); the
+   Bookstore Platform's
    ML training jobs run on spot (Part 12 ch.05). Caveat: spot
    reclaims interrupt long-running training; checkpoint discipline
    matters.
-2. **Graviton (ARM64) for stable workloads.** ~20% cheaper than
-   x86 equivalents at the same SLA. (Part 14 ch.09, Phase 14c,
+2. **Graviton (ARM64) for stable workloads.** Often less per unit of
+   work than x86 equivalents. (Part 14 ch.09, Phase 14c,
    walks the multi-arch image discipline.)
 3. **Right-sizing.** VPA recommends; you accept. A pod requesting
    1 CPU but using 100m is wasting 900m of node capacity. OpenCost
@@ -604,9 +621,6 @@ Reserved Instances).
 4. **Idle resource culling.** KEDA scale-to-zero for traffic-driven
    services (Part 09 ch.05); a midnight `CronJob` that scales
    non-prod environments to zero on weekends.
-
-The first three together typically deliver 30-50% cost reduction on
-a baseline cluster, before any architecture changes.
 
 ## Production notes
 
@@ -619,13 +633,11 @@ a baseline cluster, before any architecture changes.
 > fatigue from normal variation.
 
 > **In production:** Activate cost-allocation tags within the first
-> hour after `terraform apply`. Cost-allocation tags are *not
-> retroactive* — costs from before the activation timestamp don't
-> carry the tag, and you cannot back-fill them. A cluster running
-> for a month without tags activated has a month of un-allocable
-> spend in the CUR; nobody can attribute it to a tenant or a
-> service. The bookstore-platform tree's resources already carry
-> `Environment`, `Cluster`, `ManagedBy` tags from
+> hour after `terraform apply`. Activation applies from that point on. A
+> management account can backfill up to twelve months, but only for
+> resources that carried the tag in those months, so an unactivated month
+> is only partly recoverable. The tree's resources carry the `Project`,
+> cluster and managed-by tags from
 > [`locals.tf`](../examples/bookstore-platform/terraform/locals.tf);
 > the `aws ce update-cost-allocation-tags-status` call to activate
 > them belongs in the platform-team's day-one runbook.
@@ -663,8 +675,8 @@ a baseline cluster, before any architecture changes.
 > top`; data-transfer is per-byte-metered and shows up only in the
 > CUR. A misbehaving cross-region replication (Part 13 ch.03's
 > active-active CNPG pattern) can quietly emit hundreds of GB/day
-> of cross-region transfer at $0.02/GB; that's $60/month per 100
-> GB/day, and the OpenCost dashboard *misses it* without the CUR
+> of cross-region transfer, billed per gigabyte, and the OpenCost
+> dashboard *misses it* without the CUR
 > integration. Wire OpenCost to the CUR; alarm on `NetworkTraffic
 > per tenant > N GB/hour` in Prometheus.
 
@@ -672,7 +684,9 @@ a baseline cluster, before any architecture changes.
 > a separate spend strategy from this chapter. Once you've spent 6
 > months running steady baseline EC2 (the system pool + ~50% of
 > the average Karpenter on-demand spend), a 1-year compute Savings
-> Plan saves 20-30% on that baseline. The discipline is annual:
+> Plan discounts that baseline; AWS quotes up to 72% with Reserved
+> Instances and Savings Plans ([pricing](https://aws.amazon.com/aws-cost-management/pricing/)).
+> The discipline is annual:
 > review consumption in month 11, renew or adjust at month 12.
 > Don't enter into a 3-year SP without 12 months of usage history;
 > the lock-in cost dwarfs the discount.
@@ -680,9 +694,9 @@ a baseline cluster, before any architecture changes.
 ## Quick Reference
 
 ```bash
-# Enable AWS budget alarm (one-liner, after editing example.tfvars).
-make plan
-make up
+# Enable the cluster budget alarm, after setting its variables.
+terraform plan -var-file=example.tfvars -out=budget-plan.tfplan
+terraform apply budget-plan.tfplan
 
 # Cost diff for a proposed change (CI-time guardrail).
 make plan-cost
@@ -697,11 +711,12 @@ aws ce get-cost-and-usage \
 
 # Activate cost-allocation tags (one-time).
 aws ce update-cost-allocation-tags-status --cost-allocation-tags-status \
-  '[{"TagKey":"Environment","Status":"Active"},
-    {"TagKey":"Cluster","Status":"Active"}]'
+  '[{"TagKey":"Project","Status":"Active"},
+    {"TagKey":"bookstore-platform.example.com/cluster","Status":"Active"}]'
 
-# OpenCost per-tenant cost (Part 13.10 pattern).
-curl -s "http://opencost.opencost.svc.cluster.local:9003/allocation?window=7d&aggregate=label:bookstore-platform.example.com/tenant" \
+# OpenCost per-tenant cost (Part 13.10 pattern), with the Step 7
+# port-forward running.
+curl -s "http://localhost:9003/allocation?window=7d&aggregate=label:bookstore-platform.example.com/tenant" \
   | jq '.data'
 
 # Describe an active budget.
@@ -747,8 +762,8 @@ all six are yes):
       email subscription clicked and active.
 - [ ] `infracost` runs in CI on every Terraform PR; cost diff posted
       as a PR comment.
-- [ ] Cost-allocation tags activated (`Environment`, `Cluster`,
-      `Tenant`); next-day CUR carries them.
+- [ ] Cost-allocation tags activated (`Project` and the tree's cluster
+      tag); the CUR carries them within a day.
 - [ ] OpenCost installed and Allocation API returns per-tenant cost
       with < 1% unallocated.
 - [ ] 60-minute cost-alarm runbook documented + linked from the SNS
@@ -763,28 +778,43 @@ all six are yes):
 1. **The chapter lays out four cost-control horizons (CI-time / spend-time / forecast-time / post-mortem). Which one catches "a PR that adds 3 NAT gateways" and why are the other three not enough?**
    <details><summary>Show answer</summary>
 
-   Horizon 0 — CI-time — via `infracost diff` running against the Terraform plan in the PR workflow. It surfaces `+$97/month` (3 NAT GWs at $32/each) in the PR description before merge, where a reviewer can challenge it. Spend-time (OpenCost / Cost Explorer) only shows you the bill *after* the resources exist; forecast-time (AWS Budgets) catches it *after merge and apply* once the burn rate ticks up; post-mortem (CUR) is purely retrospective. The earlier the horizon, the cheaper the fix — a denied PR costs nothing; an alarm catches you after spend.
+   Horizon 0: CI-time, via `infracost diff` running against the Terraform plan in the PR workflow. It surfaces about `+$99/month` (3 NAT gateways at about $33 each) in the PR description before merge, where a reviewer can challenge it. Spend-time (OpenCost / Cost Explorer) only shows you the bill *after* the resources exist; forecast-time (AWS Budgets) catches it *after merge and apply* once the burn rate ticks up; post-mortem (CUR) is purely retrospective. The earlier the horizon, the cheaper the fix: a denied PR costs nothing; an alarm catches you after spend.
 
    </details>
 
 2. **You get a budget alarm at 3am: "monthly forecast 110% of cap." Cost Explorer is 24-hour lagged so the bill is yesterday's view. What's your 60-minute triage?**
    <details><summary>Show answer</summary>
 
-   Start in-cluster with OpenCost (5-minute lag from Prometheus) to identify the namespace/tenant burning the spend right now. Cross-check with `kubectl top nodes` / `kubectl get nodes -L node.kubernetes.io/instance-type` for unexpected instance shapes Karpenter provisioned (a misconfigured NodePool falling back to on-demand `m5.24xlarge` is a common offender — $3,300/month if it runs unattended a week). Then pull Cost Explorer for yesterday's per-service breakdown to confirm. If you find a runaway NodePool, scale it to zero or fix the `weight` / spot capacity provider; that's a containment first, root-cause second sequence.
+   Start in-cluster with OpenCost, which reads Prometheus, to identify the namespace/tenant burning the spend right now. Cross-check with `kubectl top nodes` / `kubectl get nodes -L node.kubernetes.io/instance-type` for unexpected instance shapes Karpenter provisioned (a misconfigured NodePool falling back to on-demand `m5.24xlarge` is a common offender , and one left running for a month costs thousands of dollars). Then pull Cost Explorer for yesterday's per-service breakdown to confirm. If you find a runaway NodePool, scale it to zero or fix the `weight` / spot capacity provider; that's a containment first, root-cause second sequence.
 
    </details>
 
 3. **A team activates cost-allocation tags but the per-tenant view shows 35% "unallocated." What's likely wrong and what does production-grade tagging discipline look like?**
    <details><summary>Show answer</summary>
 
-   Cost-allocation tags only apply to resources created **after** activation; pre-existing resources are untagged and land in "unallocated" until they're re-tagged or replaced. Production tagging discipline: (1) declare a mandatory tag set (`Environment`, `Cluster`, `Tenant`, `CostCenter`) in Terraform's `default_tags` so every resource Terraform manages gets them, (2) activate the tags in Billing → Cost allocation tags on day one of the account, (3) audit with `aws resourcegroupstaggingapi get-resources` for untagged resources monthly, (4) enforce via SCP or a Kyverno admission policy on K8s side. The "<1% unallocated" in the checklist is the target.
+   Activation applies from the activation date on, so earlier spend lands in "unallocated" unless a management account backfills the tag (up to twelve months, and only for resources that carried it). Production tagging discipline: (1) declare a mandatory tag set (`Environment`, `Cluster`, `Tenant`, `CostCenter`) in Terraform's `default_tags` so every resource Terraform manages gets them, (2) activate the tags in Billing → Cost allocation tags on day one of the account, (3) audit with `aws resourcegroupstaggingapi get-resources` for untagged resources monthly, (4) enforce via SCP or a Kyverno admission policy on K8s side. The "<1% unallocated" in the checklist is the target.
 
    </details>
 
 4. **Hands-on extension — open a PR against the bookstore-platform tree adding a single `aws_nat_gateway` per AZ in three AZs. Check the `make plan-cost` output.**
    <details><summary>What you should see</summary>
 
-   `infracost diff` outputs a per-resource cost change in the PR description: three new NAT gateways at $0.045/hr (~$32/month each) for the standing fee, plus a `Monthly cost change: +$97` summary line. If the workflow is wired correctly, the PR comment also shows the percentage change vs current monthly. That visibility is what the chapter calls "the cost change becomes a code-review concern" — the reviewer asks "do we need 3 NAT GWs or will 1 + private routes do?" *before* merge.
+   `infracost diff` outputs a per-resource cost change in the PR description: three new NAT gateways at $0.045/hr (about $33/month each), so the summary shows a monthly change of about +$99. If the workflow is wired correctly, the PR comment also shows the percentage change vs current monthly. That visibility is what the chapter calls "the cost change becomes a code-review concern". The reviewer asks "do we need 3 NAT GWs or will 1 + private routes do?" *before* merge.
+
+   </details>
+
+5. **The alarm topic's key policy grants `budgets.amazonaws.com`
+   `kms:GenerateDataKey*` and `kms:Decrypt` only under an
+   `aws:SourceAccount` condition. What does that condition prevent, and why
+   can the AWS managed key `alias/aws/sns` not carry the grant instead?**
+   <details><summary>Show answer</summary>
+
+   The condition limits the grant to Budgets requests made for this account,
+   so a Budgets service acting for another account cannot use your key (the
+   confused-deputy case). The AWS managed key's policy cannot be edited, so
+   the grant cannot be added to it, and Budgets cannot publish to a topic
+   encrypted with it. The customer managed key in the tree carries the grant
+   in its own policy.
 
    </details>
 
@@ -792,11 +822,14 @@ all six are yes):
 
 - **AWS Budgets pricing**
   <https://aws.amazon.com/aws-cost-management/aws-budgets/pricing/>;
-  the first 2 budgets/account free, $0.02/budget/day thereafter that
-  this chapter cites.
+  notification-only budgets are free; action-enabled budgets get two
+  free, then $0.10 a day each.
 - **AWS Cost Explorer**
   <https://docs.aws.amazon.com/cost-management/latest/userguide/ce-what-is.html>;
-  the enable-once + 12-month-backfill semantics + API surface.
+  the enable-once semantics, up to 13 months of history, and the API.
+- **AWS cost allocation tag backfill**
+  <https://docs.aws.amazon.com/awsaccountbilling/latest/aboutv2/cost-allocation-backfill.html>;
+  up to twelve months, management account only.
 - **AWS Cost and Usage Reports**
   <https://docs.aws.amazon.com/cur/latest/userguide/what-is-cur.html>;
   the canonical billing-line export the FinOps team will live in.
@@ -812,7 +845,7 @@ all six are yes):
   Operate maturity model this chapter and Part 13 ch.10 reference.
 - **Storment & Fuller, *Cloud FinOps* (2nd ed.) — ch.4-6**;
   the showback-vs-chargeback decision frame this chapter borrows.
-- **AWS blog — Best practices for cost optimization on EKS**
+- **AWS blog: Cost optimization for Kubernetes on AWS**
   <https://aws.amazon.com/blogs/containers/cost-optimization-for-kubernetes-on-aws/>;
-  the AWS-team complement covering spot, Graviton, right-sizing
-  patterns this chapter references at a high level.
+  the AWS-team complement covering node scaling, right-sizing requests
+  and spot, which this chapter references at a high level.
