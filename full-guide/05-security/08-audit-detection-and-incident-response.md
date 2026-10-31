@@ -5,10 +5,9 @@
 > answer four different questions: the API server audit log records who asked
 > for what, a runtime detector watches what processes do, a scanner reads what
 > running specs allow, and a runbook takes a compromised Pod out of service
-> without destroying the evidence. The lab runs the attacks and the response
-> on a lab cluster. The audit log, Falco and Trivy Operator are written
-> out and cited. Their runs are not in this chapter, and the lab header says
-> why.
+> without destroying the evidence. The lab runs the attacks, the response,
+> Falco and Trivy Operator on lab clusters. The audit log is written out and
+> cited. Its run is not in this chapter, and the lab header says why.
 
 **Estimated time:** ~40 min read · ~45 min lab (scripted, lab cluster)
 **Prerequisites:** [Part 05 ch.01](01-authn-authz-rbac.md): RBAC decides which
@@ -89,25 +88,31 @@ a run.
 
 ### Lab header
 
-- **Tier A, split.** The attack and response steps ran on a lab cluster, a kind
-  cluster with Kubernetes v1.37.0 and containerd 2.3.4 on Debian 13, on a Linux
-  lab host. The output below came from a lab cluster with a different name from
-  the one this guide uses. kubectl is v1.37.2 and helm is v4.1.4. The script is
-  [`labs/05-08.sh`](../examples/security-lab/labs/05-08.sh), run with
-  `LAB_MODE=shared`. Its recorded output is
-  [`evidence/05-08.txt`](../examples/security-lab/evidence/05-08.txt), from a
-  run on 31 October 2026.
-- **Not run.** The audit log steps, the Falco and Trivy Operator installs, and
-  the cordon step. Cordoning the only node of a lab cluster would stop other
-  workloads from scheduling, so the script skips it there. The audit steps
-  need an API server flag, which means a throwaway cluster, and the shared run
-  did not create one. The chart checks and the Trivy probe did run; their
-  sections say what they show. Nothing in this chapter says the audit log
-  recorded anything.
-- **Run only against clusters you own.** The script refuses any context that
-  is not the lab cluster in shared mode, and refuses to start while its
-  namespaces still exist or are terminating. It creates `attack` and
-  `app`, and deletes them at the end.
+- **Tier A, two recordings.** The attack and response steps ran on a one-node
+  kind cluster with Kubernetes v1.37.0 and containerd 2.3.4 on Debian 13, on a
+  Linux lab host. Falco and Trivy Operator ran on a three-node kind cluster
+  with the same versions, on the same host. Both clusters have different names
+  from the one this guide uses. kubectl is v1.37.2 and helm is v4.1.4. The
+  script is [`labs/05-08.sh`](../examples/security-lab/labs/05-08.sh), run with
+  `LAB_MODE=shared` for the first recording and `LAB_MODE=full` for the second.
+  Both recordings are in
+  [`evidence/05-08.txt`](../examples/security-lab/evidence/05-08.txt), from
+  runs on 31 October 2026. The second one ran in 15 invocations, each listed
+  in the transcript's header. The versions are Falco 0.45.2 (chart 9.2.2) with
+  Falcosidekick 2.32.0, and Trivy Operator 0.36.1 (chart 0.38.1) with Trivy
+  0.76.1.
+- **Not run.** The audit log steps, the cordon step and Tetragon. The audit
+  steps need an API server flag, which means a throwaway cluster, and neither
+  recording created one. Cordoning the only node of the one-node cluster would
+  stop other workloads from scheduling, so the shared run skips it, and the
+  full run did not do the response steps. Nothing in this chapter says the
+  audit log recorded anything.
+- **Run only against clusters you own.** In shared mode the script refuses any
+  context that is not the lab cluster, and refuses to start while its
+  namespaces still exist or are terminating. In full mode it refuses any
+  context but the one `LAB_CONTEXT` names, which must start with `kind-`. It
+  creates `attack` and `app` in shared mode, and `attack`, `app`, `falco` and
+  `trivy` in full mode, and deletes them at the end.
 - **What did not work the first time.** The throwaway cluster is the first
   problem. Its first kubeadm run timed out: the API server answered about three
   and a half minutes after the manifests were written, because etcd applies took
@@ -118,12 +123,26 @@ a run.
   while the host's load average was between 8 and 11 on four CPUs. The first
   shared run also collided with namespaces that were still terminating from
   the run before it, so the script now refuses to start over them.
+
+  The full run had three more problems. The first Falco install, with no node
+  pin, was stopped by the script when the control plane's restart count went
+  from 89 to 91 in the minutes after the install, and the script removed
+  everything it had installed. The cluster's control plane containers had
+  restarted 15, 36 and 38 times before the run began, so the cause of that
+  restart is not known. The retry pinned Falco to one worker and kept one
+  Falcosidekick replica, and no control plane container restarted again in the
+  13 invocations after it. The second problem was the first Trivy values,
+  which put two settings at the wrong level of the chart; the chart ignored
+  them without an error. The third was the first alert list, which went
+  through a helper script that readers do not have; `jq` replaced it.
 - **A kind node is a container.** Every node in this lab is a container that
   shares the host's kernel. The `hostPath: /` mount in the escape Pod shows
   the node container's root filesystem, not the lab host's. The payloads read
-  a hostname and write one marker file under `/tmp` in that container. Nothing
-  in the lab touches the machine that runs the container engine. The attack
-  Pod is not privileged, so it has no access to that machine's devices.
+  a hostname, read `/etc/shadow` in that container, and write one marker file
+  under `/tmp` in it. The one thing that reaches the host is Falco in the full
+  run: its probe is loaded into the host's kernel, which every node shares.
+  The lab removes Falco before anything else goes in. The attack Pod is not
+  privileged, so it has no access to the host's devices.
 
 ### Namespaces, identities and a victim
 
@@ -504,8 +523,9 @@ pod.yaml
 ```
 
 In production, the audit log for the Pod's requests and the Falco alerts are
-part of this capture. Both are cited in the audit and detection sections and
-were not run here.
+part of this capture. The Falco alerts for `escape-node` are in the detection
+section, and a responder would save them the same way, with `kubectl logs`.
+The audit log was not run here.
 
 **Step 3: cordon the node.** `kubectl cordon <node>` stops the scheduler from
 placing new Pods there while the investigation runs. On the lab cluster the
@@ -587,8 +607,8 @@ instead.
 
 The audit steps need a cluster whose API server writes an audit log, which
 means an API server flag. The policy below is the one the lab would install.
-It was not run on a cluster, so nothing below is evidence. The shared run did
-not create a throwaway cluster, so no audit flag was set on the cluster it
+It was not run on a cluster, so nothing below is evidence. Neither recording
+created a throwaway cluster, so no audit flag was set on the clusters they
 used.
 
 The policy's rules are checked in order, and the first match sets the level.
@@ -703,7 +723,7 @@ token and for which ServiceAccount. A `403` is a refused request, from RBAC or
 from admission, and the audit event carries that status. The lab's query was
 written for these fields. It did not run.
 
-### Detection: Falco, with Falcosidekick (not run)
+### Detection: Falco, with Falcosidekick
 
 Falco watches kernel events on each node and turns them into alerts. It sees
 what the audit log does not: a process that opens a file or starts a program
@@ -720,7 +740,8 @@ record, a reason and an expiry within twelve months, which
 
 The lab's Falco configuration selects the modern eBPF driver and turns on
 Falcosidekick with debug logging, which is the only output this lab uses. A
-real deployment sends alerts to a SIEM or a paging system instead.
+real deployment sends alerts to a SIEM or a paging system instead. The lab
+keeps one Falcosidekick replica, to stay light on a shared host.
 
 ```yaml
 apiVersion: v1
@@ -746,22 +767,109 @@ falcoctl:
     tag: "0.14.3@sha256:2230fb4802aafe09455b58d38f8f1faedd8f09f042e9a18fffd397e63488c023"
 falcosidekick:
   enabled: true
+  replicaCount: 1
   image:
     tag: "2.32.0@sha256:1976da72151850aae4436f33a5ed94bdef469f42a9b61c182b4feeb5441fb081"
   config:
     debug: true
 ```
 
+The full run used a three-node kind cluster on a host that other work shared.
+Every node of a kind cluster runs on the host's kernel, so the lab pinned
+Falco to one worker, to pull and run one instance, and pinned the lab Pod to
+the same worker, so the instance that sees its system calls is also the one
+that can name its container. It added these two fragments, with the worker's
+name for `WORKER_NODE`. A one-node cluster needs neither.
+
+```yaml
+# Fragment: added to the end of falco-values.yaml on the three-node cluster.
+nodeSelector:
+  kubernetes.io/hostname: WORKER_NODE
+```
+
+```yaml
+# Fragment: added under spec of escape-node on the three-node cluster.
+nodeSelector:
+  kubernetes.io/hostname: WORKER_NODE
+```
+
+The values pin each image by digest. The full run resolved every tag to its
+digest in the registry before it installed anything, and each matched the pin.
+The command is the same for each image; the block shows the three Falco
+images, then only the digests of Trivy Operator's two, which the chart pulls
+from its default registry:
+
+```bash
+docker buildx imagetools inspect docker.io/falcosecurity/falco:0.45.2 | grep -E '^(Name|Digest):'
+```
+
+<!-- gate: output -->
+```text
+Name:      docker.io/falcosecurity/falco:0.45.2
+Digest:    sha256:1562a643953f938e02f47319b5214d93a235f11f646d60e9b8a516fd5a64698e
+# ...
+Name:      docker.io/falcosecurity/falcoctl:0.14.3
+Digest:    sha256:2230fb4802aafe09455b58d38f8f1faedd8f09f042e9a18fffd397e63488c023
+# ...
+Name:      docker.io/falcosecurity/falcosidekick:2.32.0
+Digest:    sha256:1976da72151850aae4436f33a5ed94bdef469f42a9b61c182b4feeb5441fb081
+# ...
+Digest:    sha256:05191a514247ae644dd5cc71306a94f44faff0a6a3fa817235911b911ecebcb9
+# ...
+Digest:    sha256:790fd66d1697395d8693d1acaa1ea702406a20f109b6fc7bac8db623eca6c06c
+```
+
 ```bash
 helm repo add falcosecurity https://falcosecurity.github.io/charts
 helm install falco falcosecurity/falco --version 9.2.2 \
-  --namespace falco -f falco-values.yaml --wait --timeout 10m
+  --namespace falco -f falco-values.yaml
+kubectl get pods -n falco -o wide
+kubectl logs -n falco POD -c falco | head -30
 ```
 
-The chart version 9.2.2 carries application 0.45.2. The shared run checked
-that with `helm show chart`, and it rendered the driver settings above with
-`helm template`. The driver block alone is in `falco-driver.yaml`. Its render
-has no `privileged: true`, and it adds the four capabilities:
+The lab script does not pass `--wait`. Helm's wait cannot stop for a control
+plane that restarts, so the script polls the DaemonSet and checks the control
+plane's restart count every ten seconds, and stops if it goes up. `POD` is the
+Falco Pod's name from the listing.
+
+<!-- gate: output -->
+```text
+# ...
+NAME: falco
+# ...
+STATUS: deployed
+```
+
+<!-- gate: output -->
+```text
+NAME                                   READY   STATUS    RESTARTS   AGE   IP             NODE               NOMINATED NODE   READINESS GATES
+falco-5pxjc                            2/2     Running   0          54s   10.244.1.72    sf-sched-worker    <none>           <none>
+falco-falcosidekick-6fd47bc46f-ndbrq   1/1     Running   0          54s   10.244.2.104   sf-sched-worker2   <none>           <none>
+```
+
+<!-- gate: output -->
+```text
+Sat Oct 31 11:40:40 2026: Falco version: 0.45.2 (x86_64)
+# ...
+Sat Oct 31 11:40:40 2026: Opening 'syscall' source with modern BPF probe.
+Sat Oct 31 11:40:40 2026: One ring buffer every '2' CPUs.
+Sat Oct 31 11:40:40 2026: [libs]: Trying to open the right engine!
+Sat Oct 31 11:40:40 2026: [libs]: libpman: disabled BPF iterators (not running in the root PID namespace, or failed to determine it)
+```
+
+Falco opened its modern eBPF probe with the capabilities-only setting, from
+inside a kind node, on the host's 7.0.0-38 kernel. The probe has kernel
+requirements, which Falco's [container setup
+page](https://falco.org/docs/setup/container/) lists; it opened here, so this
+kernel met them. The log says one BPF feature
+was off, the iterators, because the container is not in the root PID
+namespace. The probe still opened. The first Falco install of the run, which
+had no node pin, was stopped by the script when the control plane restarted,
+before it printed any of this. The lab header gives that account.
+
+The chart's own check from the earlier run is still the evidence that the
+render is least-privileged. The driver block alone is in `falco-driver.yaml`.
+Its render has no `privileged: true`, and it adds the four capabilities:
 
 ```bash
 helm show chart falcosecurity/falco --version 9.2.2 | grep -E '^(version|appVersion)'
@@ -791,20 +899,182 @@ version: 9.2.2
               - SYS_PTRACE
 ```
 
-The image digests are the ones the values file pins. This chapter did not
-re-resolve them against the registry. The lab would re-run the attack after
-Falco starts, with a second `escape-node`, so Falco has a fresh Pod start to
-see. Those steps were not run, so the alert names are not shown here.
+Now the lab fires the detections. It creates `escape-node` from the attack
+section on the same worker as Falco, as the build identity does, then runs
+three commands in it. The first two use `kubectl exec -it`, which gives the
+process a terminal, as a person at a keyboard has. The first reads
+`/etc/shadow` in the image. The second runs `chroot /host`, so the same path
+now names the node's file. The third has no terminal and reads the node's file
+through the `/host` mount, as the attack section did.
 
-### Continuous scanning: Trivy Operator (not run)
+```bash
+kubectl --kubeconfig=work/builder.kubeconfig apply -f escape-node.yaml
+kubectl --kubeconfig=work/builder.kubeconfig exec -it -n attack escape-node -- \
+  sh -c 'cat /etc/shadow > /dev/null && echo shadow-read'
+kubectl --kubeconfig=work/builder.kubeconfig exec -it -n attack escape-node -- \
+  sh -c 'chroot /host cat /etc/shadow > /dev/null && echo node-shadow-read'
+kubectl --kubeconfig=work/builder.kubeconfig exec -n attack escape-node -- \
+  sh -c 'cat /host/etc/shadow > /dev/null && echo host-path-read'
+```
+
+<!-- gate: output -->
+```text
+shadow-read
+# ...
+node-shadow-read
+# ...
+host-path-read
+```
+
+All three reads succeeded. The alert list is a `jq` filter over Falco's JSON
+log, which keeps the priority, the rule and the command line. The filter is
+`alert.jq`:
+
+```text
+"\(.priority) | \(.rule) | \(.output_fields["proc.cmdline"])"
+```
+
+```bash
+kubectl logs -n falco ds/falco -c falco | grep escape-node | jq -r -f alert.jq
+```
+
+<!-- gate: output -->
+```text
+# ...
+Notice | Terminal shell in container | sh -c cat /etc/shadow > /dev/null && echo shadow-read
+Warning | Read sensitive file untrusted | cat /etc/shadow
+Notice | Terminal shell in container | sh -c chroot /host cat /etc/shadow > /dev/null && echo node-shadow-read
+Warning | Read sensitive file untrusted | cat /etc/shadow
+```
+
+Four alerts name commands the lab typed. The shell rule, "Terminal shell in
+container", fired at Notice for each of the two commands that had a terminal.
+The rule "Read sensitive file untrusted" fired at Warning for each read whose
+path was `/etc/shadow`, the image's file the first time and the node's file
+the second. Nothing in the list names the third command, which had no terminal
+and opened the file as `/host/etc/shadow`. The probable reason is the file
+name, which differs from the one the rule lists, and the missing terminal
+explains the missing shell alert. The run did not test either explanation.
+The practical reading is that a detection rule is a condition on names and
+fields, and a read that arrives by another path is not the one it describes.
+
+The elided lines at the top are three alerts at Critical, from the rule "Drop
+and execute new binary in container". Their command lines are `mount -o
+ro,bind` of files named `product_name` and `product_uuid` onto paths under
+`/sys/class/dmi/id` in the Pod's root filesystem. No lab command typed them.
+They appeared each of the three times the Pod started while Falco was
+running, before any `exec`. They are noise from this cluster that an untuned
+rule set produces, and the lab did not investigate them further.
+
+One of the alerts in full shows what Falco knows about the process:
+
+```bash
+kubectl logs -n falco ds/falco -c falco | grep 'Read sensitive file untrusted' | grep escape-node | head -1 | jq .
+```
+
+<!-- gate: output -->
+```text
+{
+  "hostname": "sf-sched-worker",
+# ...
+  "output_fields": {
+    "container.id": "14b556d74d4d",
+    "container.image.repository": "docker.io/library/busybox",
+    "container.image.tag": "b116e155074440ffd9e449559433feb4cd2341eb3554b1da1c638c976e56451d",
+    "container.name": "app",
+    "evt.time": 1793446902701698939,
+    "evt.type": "openat",
+    "fd.name": "/etc/shadow",
+    "k8s.ns.name": "attack",
+    "k8s.pod.name": "escape-node",
+    "proc.aname[2]": "containerd-shim",
+    "proc.aname[3]": null,
+    "proc.aname[4]": null,
+    "proc.cmdline": "cat /etc/shadow",
+    "proc.exepath": "/bin/cat",
+    "proc.name": "cat",
+    "proc.pname": "sh",
+    "proc.tty": 34816,
+    "user.loginuid": -1,
+    "user.name": "root",
+    "user.uid": 0
+  },
+  "priority": "Warning",
+  "rule": "Read sensitive file untrusted",
+  "source": "syscall",
+  "tags": [
+    "T1555",
+    "container",
+    "filesystem",
+    "host",
+    "maturity_stable",
+    "mitre_credential_access"
+  ],
+```
+
+The alert names the Pod, its namespace, the container, the image and the
+process tree, which is what a responder needs and the audit log cannot give.
+The image's tag field holds a hash, because the Pod's image has no tag. The
+process ran as `root` with a terminal, and `proc.pname` shows its parent was
+the `sh` that `kubectl exec` started.
+
+Falcosidekick is the fan-out. With debug logging on, it prints every event it
+receives, which is the check that the alerts left Falco:
+
+```bash
+kubectl logs -n falco deploy/falco-falcosidekick | grep -c escape-node
+kubectl logs -n falco deploy/falco-falcosidekick | grep -m1 'Sensitive file opened' | cut -c1-120
+```
+
+<!-- gate: output -->
+```text
+7
+```
+
+<!-- gate: output -->
+```text
+2026/10/31 11:41:42 [DEBUG] : Falco's payload : {"uuid":"8ff2e2ee-a0b2-4b2e-b960-37ad66a35c99","output":"11:41:42.701698
+```
+
+Seven events named the Pod: the three Critical ones and the four above. That
+matches the list, so the third command raised nothing.
+
+Falco is removed before anything else goes in, then the cluster is checked for
+what it might leave: the namespace, webhook configurations and cluster-wide
+roles.
+
+```bash
+helm uninstall falco -n falco
+kubectl delete namespace falco
+kubectl get namespace falco
+kubectl get validatingwebhookconfigurations,mutatingwebhookconfigurations -o name | grep -ci falco
+kubectl get clusterrole,clusterrolebinding -o name | grep -ci falco
+```
+
+<!-- gate: output -->
+```text
+release "falco" uninstalled
+# ...
+namespace "falco" deleted
+# ...
+Error from server (NotFound): namespaces "falco" not found
+# ...
+0
+# ...
+0
+```
+
+Both `grep -ci` counts are the number of matching lines, so `0` is the count
+of objects left. The namespace was still there after `helm uninstall`, because
+Helm did not create it, so deleting it is a separate step.
+
+### Continuous scanning: Trivy Operator
 
 Admission checks a Pod when it is created. A scanner checks the Pods that are
 already running, on a schedule and after changes. Trivy Operator writes a
 `ConfigAuditReport` for each workload's spec and a `VulnerabilityReport` for
-each image. The report for `escape-node` is expected to list the privilege and
-the `hostPath` as failing checks, which is the same finding admission refused
-for `escape-app`. The lab's query is a `jsonpath` over the failing checks. It
-did not run.
+each image. The lab installs it after Falco is gone, so that one heavy install
+at a time shares the cluster, and points it at the `attack` namespace only.
 
 ```yaml
 apiVersion: v1
@@ -817,6 +1087,7 @@ metadata:
 ```
 
 ```yaml
+targetNamespaces: attack
 podSecurityContext:
   runAsNonRoot: true
   runAsUser: 10000
@@ -829,45 +1100,70 @@ securityContext:
   readOnlyRootFilesystem: true
   capabilities:
     drop: ["ALL"]
-scanJobPodTemplatePodSecurityContext:
-  runAsNonRoot: true
-  runAsUser: 10000
-  runAsGroup: 10000
-  seccompProfile:
-    type: RuntimeDefault
 operator:
   scanJobsConcurrentLimit: 1
+  sbomGenerationEnabled: false
+  exposedSecretScannerEnabled: false
+  rbacAssessmentScannerEnabled: false
+  infraAssessmentScannerEnabled: false
+  clusterComplianceEnabled: false
+trivyOperator:
+  scanJobPodTemplatePodSecurityContext:
+    runAsNonRoot: true
+    runAsUser: 10000
+    runAsGroup: 10000
+    seccompProfile:
+      type: RuntimeDefault
 image:
   tag: "0.36.1@sha256:05191a514247ae644dd5cc71306a94f44faff0a6a3fa817235911b911ecebcb9"
 trivy:
-  tag: "0.76.1@sha256:790fd66d1697395d8693d1acaa1ea702406a20f109b6fc7bac8db623eca6c06c"
+  image:
+    tag: "0.76.1@sha256:790fd66d1697395d8693d1acaa1ea702406a20f109b6fc7bac8db623eca6c06c"
 ```
+
+`targetNamespaces` limits the operator to the lab namespace. The chart's
+default is a blank string, which selects all namespaces
+([chart values](https://github.com/aquasecurity/trivy-operator)). The
+`operator` block turns off the scanners the lab does not read and runs one
+scan job at a time. The scan jobs are separate Pods in the operator's
+namespace, and their Pod settings come from
+`trivyOperator.scanJobPodTemplatePodSecurityContext`. The first version of
+this chapter put that key at the top level and the Trivy tag under `trivy.tag`.
+The chart reads them under `trivyOperator` and `trivy.image`. Helm does not
+reject keys a chart does not use, so the render looked right and the settings
+did nothing. Reading `helm show values` found the mistake, and the values
+above are the corrected ones.
 
 ```bash
 helm repo add aqua https://aquasecurity.github.io/helm-charts/
 helm install trivy aqua/trivy-operator --version 0.38.1 \
-  --namespace trivy -f trivy-values.yaml --wait --timeout 10m
-```
-
-The chart is 0.38.1 with application 0.36.1, and the scanner is pinned to Trivy
-0.76.1, the version the guide's gates use. The namespace is labelled
-`restricted`, and the values above set the pod and container fields that level
-asks for. The shared run checked this in three steps. `helm template` rendered
-the operator's Deployment with `runAsNonRoot: true`. A server dry run then
-admitted a probe Pod that carries the operator's pod settings in a restricted
-namespace, and refused the same Pod without `runAsNonRoot`:
-
-```bash
-helm template trivy aqua/trivy-operator --version 0.38.1 --namespace trivy -f trivy-values.yaml > trivy-rendered.yaml
-grep -c 'runAsNonRoot: true' trivy-rendered.yaml
-kubectl apply -f trivy-ns.yaml
-kubectl apply --dry-run=server -f operator-probe.yaml; echo "server dry-run exit=$?"
-kubectl apply --dry-run=server -f operator-probe-root.yaml; echo "server dry-run exit=$?"
+  --namespace trivy -f trivy-values.yaml
+kubectl get pods -n trivy
 ```
 
 <!-- gate: output -->
 ```text
-1
+NAME                                       READY   STATUS     RESTARTS   AGE
+scan-vulnerabilityreport-bdd695f4b-fztzx   0/1     Init:0/1   0          14s
+trivy-trivy-operator-5b5877ddcb-dvv7t      1/1     Running    0          53s
+```
+
+The namespace enforces `restricted`, and both Pods were admitted: the operator
+and the first scan job, which was already downloading its database. That is
+the proof that the values meet the level, and it replaces the probe Pod below
+as the evidence for the operator. The probe still shows what the level
+refuses.
+
+The probe from the first recording shows what the level refuses. It is a Pod
+that carries the operator's pod settings, applied as a server dry run in a
+restricted namespace. The same Pod without `runAsNonRoot` is refused. The
+`helm template` count from that recording is not repeated, because it was
+taken on the misplaced values.
+
+```bash
+kubectl apply -f trivy-ns.yaml
+kubectl apply --dry-run=server -f operator-probe.yaml; echo "server dry-run exit=$?"
+kubectl apply --dry-run=server -f operator-probe-root.yaml; echo "server dry-run exit=$?"
 ```
 
 <!-- gate: output -->
@@ -887,16 +1183,134 @@ Error from server (Forbidden): error when creating "operator-probe-root.yaml": p
 server dry-run exit=1
 ```
 
-The probe is not the operator's own Pod, which the lab did not create. The
-scan jobs' pods take their settings from
-`scanJobPodTemplatePodSecurityContext`, and the lab did not run a scan job.
-Those two parts are not claimed here. Tetragon, the in-kernel enforcement
-option, is cited above and was not run.
+The operator wrote a `ConfigAuditReport` for `escape-node` shortly after it
+started. The query is a `jsonpath` over the failing checks:
+
+```bash
+kubectl get configauditreports -n attack
+kubectl get configauditreport pod-escape-node -n attack \
+  -o jsonpath='{range .report.checks[?(@.success==false)]}{.checkID} {.severity} {.title}{"\n"}{end}'
+```
+
+<!-- gate: output -->
+```text
+NAME              SCANNER   AGE
+pod-escape-node   Trivy     3m32s
+```
+
+<!-- gate: output -->
+```text
+AVD-KSV-0036 MEDIUM Protecting Pod service account tokens
+AVD-KSV-0030 LOW Runtime/Default Seccomp profile not set
+AVD-KSV-0118 HIGH Default security context configured
+AVD-KSV-0118 HIGH Default security context configured
+AVD-KSV-0121 HIGH Kubernetes resource with disallowed volumes mounted
+AVD-KSV-0014 HIGH Root file system is not read-only
+AVD-KSV-0106 LOW Container capabilities must only include NET_BIND_SERVICE
+AVD-KSV-0003 LOW Default capabilities: some containers do not drop all
+AVD-KSV-0012 MEDIUM Runs as root user
+AVD-KSV-0021 LOW Runs with GID <= 10000
+AVD-KSV-0018 LOW Memory not limited
+AVD-KSV-0001 MEDIUM Can elevate its own privileges
+AVD-KSV-0020 LOW Runs with UID <= 10000
+AVD-KSV-0016 LOW Memory requests not specified
+AVD-KSV-0015 LOW CPU requests not specified
+AVD-KSV-0104 MEDIUM Seccomp policies disabled
+AVD-KSV-0023 MEDIUM hostPath volumes mounted
+AVD-KSV-0004 LOW Default capabilities: some containers do not drop any
+AVD-KSV-0011 LOW CPU not limited
+```
+
+Nineteen lines, one check ID twice. The ones that match the attack are
+AVD-KSV-0023, "hostPath volumes mounted", and AVD-KSV-0121, which names
+disallowed volume types: the finding admission refused for `escape-app`, in
+another form.
+AVD-KSV-0036 flags the ServiceAccount token the Pod mounts, the token the
+attack used, and AVD-KSV-0012 and AVD-KSV-0014 flag the root user and the
+writable root filesystem. There is no check for a privileged container,
+because `escape-node` is not privileged: the privileged Pod was `escape-app`,
+which admission refused, so it never existed to scan. The scanner reports on
+what is running, so admission and the scanner see different Pods. Read the
+report as a list to work through. Most of it is spec fields that the baseline
+in [01.01](../01-core-workloads/01-pods.md) sets and this Pod leaves out on
+purpose: the user, the read-only root filesystem, capabilities, seccomp and
+resources.
+
+The scan job for the image produced a `VulnerabilityReport`:
+
+```bash
+kubectl get vulnerabilityreports -n attack -o wide
+kubectl get vulnerabilityreport pod-escape-node-app -n attack \
+  -o jsonpath='{.report.scanner.name} {.report.scanner.version}{"\n"}{.report.artifact.repository}{"\n"}'
+```
+
+<!-- gate: output -->
+```text
+NAME                  REPOSITORY        TAG       SCANNER   AGE   CRITICAL   HIGH   MEDIUM   LOW   UNKNOWN
+pod-escape-node-app   library/busybox   busybox   Trivy     16s   0          0      0        0     0
+```
+
+<!-- gate: output -->
+```text
+Trivy sha256:790fd66d1697395d8693d1acaa1ea702406a20f109b6fc7bac8db623eca6c06c
+library/busybox
+```
+
+The scan job Pod in the listing above produced the report. It counts none at
+any severity for this `busybox` image on the day of the run. That is what the
+scanner found, and the run does not show why the count is zero. The scanner's
+version field holds the pinned digest and not `0.76.1`; the run does not
+explain that either.
+
+Trivy Operator leaves more than Falco does. `helm uninstall` removed the
+release and left the operator's CRDs on the cluster, as Helm does for CRDs a
+chart installs from its `crds` directory (Helm's documentation is in Further
+reading).
+The lab deleted the namespace, then the twelve CRDs it listed, then checked
+for webhook configurations and cluster roles:
+
+```bash
+helm uninstall trivy -n trivy
+kubectl delete namespace trivy
+kubectl get crd -o name | grep aquasecurity.github.io
+kubectl get crd -o name | grep aquasecurity.github.io | xargs kubectl delete
+kubectl get validatingwebhookconfigurations,mutatingwebhookconfigurations -o name | grep -ci trivy
+kubectl get clusterrole,clusterrolebinding -o name | grep -ci trivy
+```
+
+<!-- gate: output -->
+```text
+release "trivy" uninstalled
+# ...
+namespace "p05-08-trivy" deleted
+# ...
+customresourcedefinition.apiextensions.k8s.io/clustercompliancereports.aquasecurity.github.io
+# ...
+customresourcedefinition.apiextensions.k8s.io/vulnerabilityreports.aquasecurity.github.io
+# ...
+customresourcedefinition.apiextensions.k8s.io "clustercompliancereports.aquasecurity.github.io" deleted
+# ...
+customresourcedefinition.apiextensions.k8s.io "vulnerabilityreports.aquasecurity.github.io" deleted
+# ...
+0
+# ...
+0
+```
+
+Neither tool left a webhook configuration or a cluster role. The check for a
+webhook configuration is part of every removal, because one whose controller
+is gone can block API requests, depending on its failure policy
+([11.01](../11-advanced-production-patterns/01-admission-webhooks.md)).
+
+Tetragon, the in-kernel enforcement option, was not run. It would add a second
+eBPF agent to the shared kernel and a second privileged namespace to the
+exceptions registry, and none of this chapter's claims needs it.
 
 ### Clean up
 
-The lab deletes its namespaces. Helm releases are removed first when they were
-installed, and the throwaway cluster is deleted when the script created it.
+The shared run deletes its namespaces. The full run removed each tool and its
+leftovers as it went, in the sections above, and deleted the lab's namespaces
+last. The throwaway cluster is deleted when the script created it.
 
 ```bash
 kubectl delete namespace attack app falco trivy
@@ -908,6 +1322,26 @@ kubectl delete namespace attack app falco trivy
 namespace "attack" deleted
 namespace "p05-08-app" deleted
 namespace "p05-08-trivy" deleted
+```
+
+The full run ended with the same deletion for its two namespaces, then looked
+for what the two tools could have left on the cluster. No webhook
+configuration or CRD remains:
+
+```bash
+kubectl delete namespace attack app
+kubectl get validatingwebhookconfigurations,mutatingwebhookconfigurations
+kubectl get crd
+```
+
+<!-- gate: output -->
+```text
+namespace "attack" deleted
+namespace "p05-08-app" deleted
+# ...
+No resources found
+# ...
+No resources found
 ```
 
 ## How it works under the hood
@@ -1049,6 +1483,21 @@ kubectl delete serviceaccount SA -n NAMESPACE && kubectl apply -f SA.yaml
 
    </details>
 
+4. **The lab read the node's `/etc/shadow` three ways. Falco alerted for two
+   of them and said nothing about the third. What does that tell you about
+   relying on a detector alone, and what control closes the gap?**
+   <details><summary>Show answer</summary>
+
+   A detection rule is a condition on names and fields, such as a file path or
+   a terminal. The two alerted reads used the path the rule lists, and the
+   silent one reached the same file as `/host/etc/shadow` with no terminal. A
+   detector shows that an event happened, and the absence of an alert is not
+   proof that nothing did. The control that closes the gap is the one that
+   removes the means: the `hostPath` mount that made the read possible is
+   refused at the `restricted` level, as the harden step showed.
+
+   </details>
+
 ## Further reading
 
 - Official:
@@ -1060,6 +1509,8 @@ kubectl delete serviceaccount SA -n NAMESPACE && kubectl apply -f SA.yaml
   <https://falco.org/docs/setup/container/>, and Falcosidekick,
   <https://github.com/falcosecurity/falcosidekick>.
 - Trivy Operator, <https://github.com/aquasecurity/trivy-operator>.
+- Helm, CRDs in charts,
+  <https://helm.sh/docs/chart_best_practices/custom_resource_definitions/>.
 - Tetragon, <https://tetragon.io/docs/>, for in-kernel enforcement. Not run
   here.
 - Production operation:
