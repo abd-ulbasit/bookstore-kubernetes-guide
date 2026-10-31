@@ -132,6 +132,9 @@ versions follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 - Part 14 EKS in production (14.01 to 14.17) is rewritten security-first, with threats and controls in each chapter, the Terraform validated offline and nothing run on AWS, and `14-eks-in-production-a-to-z/` joins the enforced list.
 - Appendix A to F is rewritten security-first (the kubectl cheat sheet loses
   its exam section), and `appendix/` joins the enforced list.
+- Part 06 Production readiness (06.01 to 06.06) is rewritten security-first,
+  with the 06.05 PodDisruptionBudget drain run on a three-node kind cluster,
+  and `06-production-readiness/` joins the enforced list.
 
 ### Fixed
 - Standalone EKS add-ons (kube-proxy, CoreDNS, EBS CSI) now follow
