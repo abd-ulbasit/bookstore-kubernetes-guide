@@ -38,10 +38,6 @@ on:
 
 permissions: {}
 
-concurrency:
-  group: lab-on-runner-${{ github.ref }}
-  cancel-in-progress: true
-
 defaults:
   run:
     shell: bash
@@ -86,6 +82,9 @@ jobs:
           node_image: ${{ steps.pin.outputs.node_image }}
           config: ${{ env.KIND_CONFIG }}
           cluster_name: bookstore
+          kubectl_version: v1.37.2
+      - name: Wait until every node is Ready
+        run: kubectl wait --for=condition=Ready nodes --all --timeout=300s
       - name: Load the image into the cluster
         run: kind load docker-image bookstore/catalog:dev --name bookstore
       - name: Run the lab
@@ -176,6 +175,9 @@ jobs:
           node_image: ${{ steps.pin.outputs.node_image }}
           config: ${{ env.KIND_CONFIG }}
           cluster_name: bookstore
+          kubectl_version: v1.37.2
+      - name: Wait until every node is Ready
+        run: kubectl wait --for=condition=Ready nodes --all --timeout=300s
       - name: Load the image into the cluster
         run: kind load docker-image bookstore/catalog:dev --name bookstore
       - name: Run the lab, one phase after another
@@ -293,6 +295,9 @@ jobs:
           node_image: ${{ steps.pin.outputs.node_image }}
           config: ${{ runner.temp }}/kind-capstone.yaml
           cluster_name: bookstore
+          kubectl_version: v1.37.2
+      - name: Wait until every node is Ready
+        run: kubectl wait --for=condition=Ready nodes --all --timeout=300s
       - name: Run the lab
         id: lab
         env:
