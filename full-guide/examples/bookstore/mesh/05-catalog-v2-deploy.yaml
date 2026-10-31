@@ -17,8 +17,10 @@
 # Image `bookstore/catalog:dev` is the SAME image the bootstrap already
 # `kind load`s for the four services (Part 00 ch.02 / every chapter's step 0)
 # — no extra registry/load step; `imagePullPolicy: IfNotPresent` uses the
-# kind-loaded image. It is labelled `version: v2` so 20-/21- can target it via
-# the `catalog-canary` Service while the canonical catalog stays v1.
+# kind-loaded image. Its Pods carry `app: catalog-canary`, not `app: catalog`:
+# the canonical `catalog` Service selects `app: catalog`, so a v2 Pod with that
+# label would receive the stable path's traffic too, and the 90/10 split in
+# 20-/21- would not hold. The `catalog-canary` Service selects only these Pods.
 #
 # Built-in kinds (apps/v1 Deployment + core/v1 Service): a client dry-run is
 # CLEAN with no CRDs/mesh installed — no CRD-intrinsic note needed (these are
@@ -36,7 +38,7 @@ metadata:
   name: catalog-v2
   namespace: bookstore
   labels:
-    app: catalog
+    app: catalog-canary
     version: v2
     app.kubernetes.io/part-of: bookstore
 spec:
@@ -44,12 +46,12 @@ spec:
   revisionHistoryLimit: 3
   selector:
     matchLabels:
-      app: catalog
+      app: catalog-canary
       version: v2
   template:
     metadata:
       labels:
-        app: catalog                  # same app label; `version` distinguishes v2
+        app: catalog-canary           # not `catalog`: see the header
         version: v2
         component: backend
     spec:
@@ -129,22 +131,22 @@ spec:
 ---
 # The canary v2 Service the GAMMA HTTPRoute (20-) / VirtualService (21-)
 # route a weighted fraction of in-mesh `catalog` traffic to. Selects ONLY the
-# v2 Pods (app: catalog + version: v2). The canonical `catalog` Service
-# (raw-manifests/40-services.yaml) is UNTOUCHED and still selects all
-# `app: catalog` Pods for the stable path.
+# v2 Pods (app: catalog-canary + version: v2). The canonical `catalog` Service
+# (raw-manifests/40-services.yaml) is UNTOUCHED and selects `app: catalog`,
+# which none of these Pods carry, so it keeps the stable path to v1 alone.
 apiVersion: v1
 kind: Service
 metadata:
   name: catalog-canary
   namespace: bookstore
   labels:
-    app: catalog
+    app: catalog-canary
     version: v2
     app.kubernetes.io/part-of: bookstore
 spec:
   type: ClusterIP
   selector:
-    app: catalog
+    app: catalog-canary
     version: v2                                 # ONLY the v2 Deployment's Pods
   ports:
     - name: http

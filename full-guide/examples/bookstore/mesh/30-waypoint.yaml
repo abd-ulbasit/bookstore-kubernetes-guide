@@ -27,15 +27,18 @@
 # THE PSA FOOTGUN, AMBIENT EDITION (read this — it is the chapter's core point)
 #   A waypoint is a real Deployment that Istio creates IN the `bookstore`
 #   namespace. `bookstore` is PSA `enforce: restricted`, so the waypoint Pod
-#   MUST be restricted-compliant or PSA rejects it and there is no L7. Istio's
-#   waypoint (`istio.io/v1` proxy) ships restricted-compliant by default
-#   (runAsNonRoot, non-root UID, drop ALL, seccomp RuntimeDefault) — UNLIKE a
-#   classic injected SIDECAR's init container, which historically needed
-#   NET_ADMIN and is the thing that breaks in a restricted namespace (see
-#   10-sidecar-mode-podtemplate.yaml). This is precisely WHY this guide picks
-#   AMBIENT for the PSA-restricted Bookstore: the data path (ztunnel +
-#   waypoint) is restricted-clean and lives OUTSIDE the app Pods, so enrolling
-#   the namespace never makes a single Bookstore Pod PSA-non-compliant.
+#   MUST be restricted-compliant or PSA rejects it and there is no L7. The
+#   waypoint sets runAsNonRoot, a non-root UID and drop ALL, but the istiod
+#   1.30.7 chart sets its seccompProfile only when gateways.seccompProfile is
+#   configured (the default is empty). PSA restricted refuses a Pod with no
+#   seccomp profile, so the install in the chapter sets
+#   gateways.seccompProfile.type=RuntimeDefault. Without it the waypoint is
+#   refused in this namespace. A classic injected SIDECAR's init container,
+#   by contrast, needs NET_ADMIN, which restricted refuses outright (see
+#   10-sidecar-mode-podtemplate.yaml). This is why the guide picks AMBIENT
+#   for the PSA-restricted Bookstore: the data path (ztunnel + waypoint) lives
+#   OUTSIDE the app Pods, so enrolling the namespace never changes a Bookstore
+#   Pod, and the waypoint needs only the seccomp setting above.
 #   Verify after apply:
 #     kubectl get pod -n bookstore -l gateway.networking.k8s.io/gateway-name=catalog-waypoint \
 #       -o jsonpath='{.items[0].spec.containers[0].securityContext}'

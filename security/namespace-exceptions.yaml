@@ -126,3 +126,16 @@ exceptions:
     upstream: https://strimzi.io/docs/operators/0.40.0/configuring.html
     chapter: 13-grand-capstone-bookstore-platform/05-search-and-product-discovery.md
     expires: 2027-06-30
+
+  - namespace: istio-system
+    level: privileged
+    reason: >-
+      The Istio ambient node agents need privileges that restricted and baseline
+      both refuse. istio-cni-node runs as root with NET_ADMIN, NET_RAW, SYS_ADMIN
+      and DAC_OVERRIDE and mounts hostPath volumes such as /opt/cni/bin and
+      /etc/cni/net.d. ztunnel runs as root with NET_ADMIN, SYS_ADMIN and NET_RAW.
+      The namespace holds these node agents and istiod, nothing from the
+      Bookstore.
+    upstream: https://istio.io/latest/docs/setup/additional-setup/pod-security-admission/
+    chapter: 11-advanced-production-patterns/04-service-mesh.md
+    expires: 2027-06-30
