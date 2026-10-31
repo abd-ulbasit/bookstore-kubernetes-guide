@@ -415,8 +415,9 @@ and `sink_key` from that path, and the Debezium role's password from
 `secret/bookstore-platform/acme-books/meilisearch` as `search_key`, under the
 prefix the tenant's Vault policy reads, and the tenant's SecretStore from 15.05
 fills it into the tenant namespace. The values come from files, so they stay
-out of the process list. *Illustrative: the Vault writes are not captured. Run them against the Vault
-that [Part 15 ch.05](../15-day-to-day-production-ops/05-production-secrets-vault-eso.md)
+out of the process list. *Illustrative: the Vault writes are not captured.
+Run them against the Vault that
+[Part 15 ch.05](../15-day-to-day-production-ops/05-production-secrets-vault-eso.md)
 installs.*
 
 ```sh
