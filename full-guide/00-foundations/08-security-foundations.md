@@ -202,8 +202,10 @@ Each link goes to the field's own explanation in 01.01.
 | `restricted` labels on the namespace | E4: privileged mode, host namespaces or `hostPath` | Admission, once the namespace carries the label | [01.01](../01-core-workloads/01-pods.md#baseline-namespace) |
 
 The namespace label is a control the API server enforces for every Pod in the
-namespace, whatever its author intended. Pod Security Admission at the
-`restricted` level checks:
+namespace, whatever its author intended. The cluster that
+[00.07](07-local-cluster-setup.md) builds also sets `restricted` as the
+cluster-wide default, so a namespace nobody labelled is judged at the same
+level. Pod Security Admission at the `restricted` level checks:
 
 - `allowPrivilegeEscalation` is `false`;
 - `runAsNonRoot` is `true`, set on the Pod or on each container;

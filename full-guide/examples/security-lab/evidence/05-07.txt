@@ -1844,3 +1844,44 @@ STOP: the control plane restarted (84 to 86)
 run failed or stopped (exit 3): removing both engines
 nothing of either engine remains
 
+
+## Rerun on a cluster whose Pod Security default is restricted: the labels the chapter writes
+# The runs above left open and kyverno-demo (p05-07-open and p05-07-kyverno) without a Pod
+# Security label, because their clusters had no cluster-wide default. The chapter now labels
+# both, so that its steps also run on the cluster chapter 00.07 builds. This section applied
+# the chapter's two attack Pods to a fresh kind cluster built from
+# examples/security-lab/kind/cluster-restricted-default.yaml, with the namespace names the
+# chapter uses. Each Pod is refused in a control namespace with no label and admitted in the
+# labelled one. The privileged Pod ran as a server dry run, as in the chapter.
+## control: the forgetful Pod in a namespace with no label takes the restricted default
+$ kubectl create namespace open-control
+namespace/open-control created
+$ sed 's/namespace: open/namespace: open-control/' forgetful.yaml | kubectl apply -f -
+Error from server (Forbidden): error when creating "STDIN": pods "forgetful" is forbidden: violates PodSecurity "restricted:latest": allowPrivilegeEscalation != false (container "app" must set securityContext.allowPrivilegeEscalation=false), unrestricted capabilities (container "app" must set securityContext.capabilities.drop=["ALL"]), runAsNonRoot != true (pod or container "app" must set securityContext.runAsNonRoot=true), seccompProfile (pod or container "app" must set securityContext.seccompProfile.type to "RuntimeDefault" or "Localhost")
+## the open namespace as the chapter labels it
+$ kubectl create namespace open
+namespace/open created
+$ kubectl label namespace open pod-security.kubernetes.io/enforce=baseline pod-security.kubernetes.io/audit=baseline pod-security.kubernetes.io/warn=baseline
+namespace/open labeled
+$ kubectl apply -f forgetful.yaml
+pod/forgetful created
+$ kubectl -n open get pod forgetful -o jsonpath='{.metadata.name} admitted{"\n"}'
+forgetful admitted
+## control: the privileged Pod, as a server dry run, in a namespace with no label
+$ kubectl create namespace kyverno-control
+namespace/kyverno-control created
+$ sed 's/namespace: kyverno-demo/namespace: kyverno-control/' escape-node.yaml | kubectl apply --dry-run=server -f -
+Error from server (Forbidden): error when creating "STDIN": pods "escape-node" is forbidden: violates PodSecurity "restricted:latest": privileged (container "app" must not set securityContext.privileged=true), allowPrivilegeEscalation != false (container "app" must set securityContext.allowPrivilegeEscalation=false)
+## the kyverno-demo namespace as the chapter labels it
+$ kubectl create namespace kyverno-demo
+namespace/kyverno-demo created
+$ kubectl label namespace kyverno-demo pod-security.kubernetes.io/enforce=privileged pod-security.kubernetes.io/audit=privileged pod-security.kubernetes.io/warn=privileged
+namespace/kyverno-demo labeled
+$ kubectl apply --dry-run=server -f escape-node.yaml
+pod/escape-node created (server dry run)
+## remove the four namespaces
+$ kubectl delete namespace open-control open kyverno-control kyverno-demo --wait=true --timeout=180s
+namespace "open-control" deleted
+namespace "open" deleted
+namespace "kyverno-control" deleted
+namespace "kyverno-demo" deleted

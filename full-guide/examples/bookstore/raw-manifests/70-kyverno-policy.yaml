@@ -10,8 +10,10 @@
 # Helm chart (matching the chapter's pattern — NEVER `releases/latest/download`),
 # then apply this:
 #   helm repo add kyverno https://kyverno.github.io/kyverno/ && helm repo update
+#   kubectl create namespace kyverno
+#   kubectl label namespace kyverno pod-security.kubernetes.io/enforce=restricted
 #   helm install kyverno kyverno/kyverno --version 3.9.2 \
-#       --namespace kyverno --create-namespace --wait
+#       --namespace kyverno --wait
 # Chart 3.9.2 is the version chapter 05.07 pulled and checked. Its CRD marks the
 # ClusterPolicy kind deprecated in favour of ValidatingPolicy and its siblings
 # (05.07 says so); this file keeps ClusterPolicy and uses only the fields that

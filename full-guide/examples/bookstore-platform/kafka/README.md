@@ -27,8 +27,13 @@ default on the 3.7.0 broker the cluster pins.
 # 1. Install Strimzi operator (pinned-Helm; cross-ref ch.13.05 Hands-on §1)
 STRIMZI_VERSION="0.40.0"
 helm repo add strimzi https://strimzi.io/charts/
+kubectl create namespace kafka-system
+kubectl label namespace kafka-system \
+  pod-security.kubernetes.io/enforce=baseline \
+  pod-security.kubernetes.io/audit=restricted \
+  pod-security.kubernetes.io/warn=restricted
 helm install strimzi-operator strimzi/strimzi-kafka-operator \
-  --version "$STRIMZI_VERSION" -n kafka-system --create-namespace --wait
+  --version "$STRIMZI_VERSION" -n kafka-system --wait
 
 # 2. Apply the cluster CR THEN the node pool (Strimzi requires the cluster
 #    to exist before the pool can reference it; both reach Ready together).

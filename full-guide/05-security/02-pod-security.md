@@ -83,8 +83,14 @@ it anyway, but a Pod that meets `restricted` can still write to its root
 filesystem, and the lab shows that case below.
 
 The two halves must agree. A namespace that enforces `restricted` admits only
-Pods that meet it. A namespace with no Pod Security labels admits every Pod,
-including the ones this chapter attacks. The lab uses both kinds of namespace.
+Pods that meet it. A namespace with no Pod Security labels is judged by the
+cluster's default, and a stock kind cluster's default is `privileged`, so such
+a namespace admits every Pod, including the ones this chapter attacks. The
+lab ran on a stock cluster and uses both kinds of namespace. The cluster that
+[00.07](../00-foundations/07-local-cluster-setup.md) builds sets `restricted`
+as its default, and there an unlabelled namespace behaves like a restricted
+one. The labels in this chapter do not depend on that default: each namespace
+that needs a level above `restricted` carries it explicitly.
 
 ## Threats and controls
 
@@ -960,7 +966,11 @@ deployment.apps/unhardened created (server dry run)
 
 The labelled namespace prints the warning, and the unlabelled one prints
 nothing but the object line. A clean dry run in a namespace with no labels
-means nothing.
+means nothing. That holds on the stock cluster the lab ran on. On the cluster
+[00.07](../00-foundations/07-local-cluster-setup.md) builds, the unlabelled
+namespace takes the `restricted` default and prints the same warning. The
+transcript of that chapter's lab, `evidence/00-07.txt`, records this dry run
+on that cluster.
 
 Next, the Bookstore's ServiceAccounts go into the lab namespace, so the Pods
 that name them can be admitted. Then the loop checks every workload manifest in

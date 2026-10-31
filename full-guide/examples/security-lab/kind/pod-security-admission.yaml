@@ -1,0 +1,33 @@
+# The cluster-wide Pod Security default for cluster-restricted-default.yaml.
+# The API server reads this file through --admission-control-config-file. The
+# fields follow the Kubernetes page "Apply Pod Security Standards at the
+# Cluster Level" and the PodSecurity admission configuration reference.
+#
+# A namespace that carries no pod-security.kubernetes.io label is judged by
+# the three defaults below. A label on a namespace overrides the default for
+# the mode it names. The exemptions are the namespaces kind itself needs:
+# the control plane and the CNI (kube-system), the two namespaces that hold no
+# workloads (kube-public, kube-node-lease) and the storage provisioner
+# (local-path-storage), whose helper Pods run as root.
+apiVersion: apiserver.config.k8s.io/v1
+kind: AdmissionConfiguration
+plugins:
+  - name: PodSecurity
+    configuration:
+      apiVersion: pod-security.admission.config.k8s.io/v1
+      kind: PodSecurityConfiguration
+      defaults:
+        enforce: restricted
+        enforce-version: latest
+        audit: restricted
+        audit-version: latest
+        warn: restricted
+        warn-version: latest
+      exemptions:
+        usernames: []
+        runtimeClasses: []
+        namespaces:
+          - kube-system
+          - kube-public
+          - kube-node-lease
+          - local-path-storage

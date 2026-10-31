@@ -227,12 +227,19 @@ Install Kueue before section 2. The Composition stamps a Kueue `LocalQueue`
 for each tenant, and that CRD comes from Kueue. Without it the tenant's
 `LocalQueue` cannot be created, and the claim never becomes Ready. Use the
 version that [Part 12 ch.03](../12-kubernetes-for-machine-learning/03-batch-and-gang-scheduling.md)
-pins:
+pins. Label the namespace `restricted` before the install, as that chapter
+does, because `--create-namespace` cannot set labels and would leave it to the
+cluster's default:
 
 ```sh
 KUEUE_VERSION="0.17.0"
+kubectl create namespace kueue-system
+kubectl label namespace kueue-system \
+  pod-security.kubernetes.io/enforce=restricted \
+  pod-security.kubernetes.io/audit=restricted \
+  pod-security.kubernetes.io/warn=restricted
 helm install kueue oci://registry.k8s.io/kueue/charts/kueue \
-  --version "$KUEUE_VERSION" -n kueue-system --create-namespace --wait
+  --version "$KUEUE_VERSION" -n kueue-system --wait
 ```
 
 ### 1. Install Crossplane (pinned-Helm, own namespace)

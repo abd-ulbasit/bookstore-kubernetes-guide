@@ -340,3 +340,69 @@ exceptions:
     upstream: https://kubernetes.io/docs/concepts/security/pod-security-standards/#baseline
     chapter: 12-kubernetes-for-machine-learning/04-distributed-training.md
     expires: 2027-04-30
+
+  - namespace: privileged-check
+    level: privileged
+    reason: >-
+      Chapter 00.07 labels this throwaway namespace privileged to show that an
+      explicit label overrides the cluster-wide restricted default: the same
+      privileged Pod that an unlabelled namespace refuses is admitted here. The
+      namespace keeps audit and warn at restricted, so the Pod is admitted with
+      a warning. The chapter deletes the namespace in the same step, and the
+      lab script deletes it too.
+    upstream: https://kubernetes.io/docs/concepts/security/pod-security-standards/#privileged
+    chapter: 00-foundations/07-local-cluster-setup.md
+    expires: 2027-10-31
+
+  - namespace: kyverno-demo
+    level: privileged
+    reason: >-
+      The Kyverno section of the admission chapter shows a rule that reports a
+      privileged Pod, so the Pod has to be admitted first. The Pod carries a node
+      selector that no node matches, so it stays Pending and its container never
+      starts. The namespace holds that one marked Pod and the policy report, sets
+      audit and warn to privileged too so that the demonstration stays quiet,
+      and the lab deletes it at the end. A cluster whose default is restricted,
+      as chapter 00.07 builds, refuses the Pod in an unlabelled namespace, so
+      the label is what lets the demonstration run.
+    upstream: https://kubernetes.io/docs/concepts/security/pod-security-standards/#privileged
+    chapter: 05-security/07-admission-control-and-policy-as-code.md
+    expires: 2027-10-31
+
+  - namespace: open
+    level: baseline
+    reason: >-
+      The attack section of the admission chapter applies a Pod that leaves out
+      the baseline on purpose, with no securityContext, so that a policy can
+      then mutate it. Baseline admits that Pod and restricted does not. The
+      namespace holds the marked attack Pods and Services and one Pod with the
+      full baseline, sets audit and warn to baseline too so that the attack
+      stays quiet, and the lab deletes it at the end. A cluster whose default is
+      restricted, as chapter 00.07 builds, refuses those Pods in an unlabelled
+      namespace.
+    upstream: https://kubernetes.io/docs/concepts/security/pod-security-standards/#baseline
+    chapter: 05-security/07-admission-control-and-policy-as-code.md
+    expires: 2027-10-31
+
+  - namespace: p05-07-open
+    level: baseline
+    reason: >-
+      The 05.07 lab script is the `open` namespace of the admission chapter under
+      the lab's prefix. It applies a Pod that leaves out the baseline on purpose,
+      which baseline admits and restricted does not. The script deletes the
+      namespace at the end. The registry entry for `open` gives the full reason.
+    upstream: https://kubernetes.io/docs/concepts/security/pod-security-standards/#baseline
+    chapter: 05-security/07-admission-control-and-policy-as-code.md
+    expires: 2027-10-31
+
+  - namespace: p05-07-kyverno
+    level: privileged
+    reason: >-
+      The 05.07 lab script is the `kyverno-demo` namespace of the admission
+      chapter under the lab's prefix. It holds a privileged Pod that never
+      starts, because its node selector matches no node. The script deletes the
+      namespace at the end. The registry entry for `kyverno-demo` gives the full
+      reason.
+    upstream: https://kubernetes.io/docs/concepts/security/pod-security-standards/#privileged
+    chapter: 05-security/07-admission-control-and-policy-as-code.md
+    expires: 2027-10-31

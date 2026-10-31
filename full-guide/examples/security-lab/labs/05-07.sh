@@ -151,6 +151,7 @@ CMD
 if [ "$MODE" = shared ]; then
 echo '## step 5: the attack, in a namespace with no policy'
 show "kubectl create namespace p05-07-open"
+show kubectl label namespace p05-07-open pod-security.kubernetes.io/enforce=baseline pod-security.kubernetes.io/audit=baseline pod-security.kubernetes.io/warn=baseline
 wait_sa p05-07-open
 show "kubectl -n p05-07-open get serviceaccount default -o name"
 cat > attack-service.yaml <<'YAML'
@@ -437,6 +438,7 @@ show "kubectl -n p05-07-open exec baseline -- sh -c 'ls /var/run/secrets/kuberne
 if [ "$MODE" = shared ]; then
 echo '## step 12b: the built-in validation refuses privileged with allowPrivilegeEscalation false, before any policy [shared mode]'
 show "kubectl create namespace p05-07-kyverno"
+show kubectl label namespace p05-07-kyverno pod-security.kubernetes.io/enforce=privileged pod-security.kubernetes.io/audit=privileged pod-security.kubernetes.io/warn=privileged
 wait_sa p05-07-kyverno
 cat > escape-conflict.yaml <<YAML
 # INSECURE ON PURPOSE: a privileged container. Lab cluster only.
@@ -807,6 +809,7 @@ step_F2() {
 echo '## step F2: Audit before Enforce: a privileged Pod is admitted and reported'
 ctx_check
 show "kubectl create namespace p05-07-kyverno"
+show kubectl label namespace p05-07-kyverno pod-security.kubernetes.io/enforce=privileged pod-security.kubernetes.io/audit=privileged pod-security.kubernetes.io/warn=privileged
 wait_sa p05-07-kyverno
 show "kubectl -n p05-07-kyverno get serviceaccount default -o name"
 show "kubectl apply -f policy-disallow-privileged.yaml"

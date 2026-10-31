@@ -96,7 +96,7 @@ CRD/operator below or the API server rejects it with `no matches for kind ...`
 | `keda.enabled` | KEDA CRDs + operator, and a Secret you create | Install KEDA from a pinned chart into a labelled namespace (Part 07 ch.01), then `kubectl create secret generic` the connection Secret and set `keda.connectionSecretName` |
 | `ingress.traefikRewrite.enabled` | Traefik CRDs (`traefik.io/v1alpha1` Middleware) | The Traefik chart installs them (Part 02 ch.04 step 2) |
 | `gateway.enabled` | Gateway API CRDs + a controller | Gateway API standard CRDs + Traefik with its Gateway provider (Part 02 ch.05 step 1 gives the install and the CRD version; `gateway.controllerName` defaults to `traefik.io/gateway-controller`; change it for another implementation) |
-| `kyverno.enabled` | Kyverno | `helm install kyverno kyverno/kyverno -n kyverno --create-namespace` |
+| `kyverno.enabled` | Kyverno | Label the `kyverno` namespace `restricted`, then `helm install kyverno kyverno/kyverno -n kyverno` (05.07) |
 | `snapshot.enabled` | external-snapshotter CRDs + controller + a snapshot-capable CSI driver | (cloud disk CSI / csi-hostpath-driver) |
 
 > The `release` label on the ServiceMonitor/PrometheusRule **must** match
