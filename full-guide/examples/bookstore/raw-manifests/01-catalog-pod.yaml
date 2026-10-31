@@ -57,4 +57,5 @@ spec:                          # DESIRED state (you write this; status is observ
           mountPath: /tmp      # writable paths come from emptyDir
   volumes:
     - name: tmp
-      emptyDir: {}
+      emptyDir:
+        sizeLimit: 64Mi    # every emptyDir is capped (Part 03 ch.03)

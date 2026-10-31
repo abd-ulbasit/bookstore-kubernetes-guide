@@ -66,7 +66,7 @@ manifest of your own with them.
 |---|---|---|
 | A compromised process runs as root inside the container | [`runAsNonRoot`, `runAsUser`, `runAsGroup`](#baseline-run-as) | [05.02](../05-security/02-pod-security.md) |
 | It gains more privilege than it started with: a setuid binary, a kernel capability the app never needed | [`allowPrivilegeEscalation: false`](#baseline-privilege-escalation) and [`capabilities.drop`](#baseline-capabilities) | [05.02](../05-security/02-pod-security.md) |
-| It rewrites the image's own files or drops a tool next to them | [`readOnlyRootFilesystem: true`](#baseline-read-only-root), with an `emptyDir` for each writable path | [05.02](../05-security/02-pod-security.md) |
+| It rewrites the image's own files or drops a tool next to them | [`readOnlyRootFilesystem: true`](#baseline-read-only-root), with a capped `emptyDir` for each writable path | [05.02](../05-security/02-pod-security.md) |
 | It calls a rarely used system call to attack the kernel | [`seccompProfile: RuntimeDefault`](#baseline-seccomp) | [05.02](../05-security/02-pod-security.md) |
 | It reads the mounted ServiceAccount token and calls the API server | [`automountServiceAccountToken: false` and a dedicated ServiceAccount](#baseline-service-account) | [05.01](../05-security/01-authn-authz-rbac.md) |
 | A tag is moved to different content after you reviewed it | [Pin third-party images by digest](#baseline-image-digest) | [05.03](../05-security/03-supply-chain.md) |
@@ -161,7 +161,8 @@ spec:
           mountPath: /tmp
   volumes:
     - name: tmp
-      emptyDir: {}
+      emptyDir:
+        sizeLimit: 64Mi
 ```
 
 The Pod-level `securityContext` applies to every container in the Pod, init
@@ -202,10 +203,17 @@ for both Linux and macOS hosts.
 
 `fsGroup` makes the kubelet give a volume's files a group owner and adds that
 group to the container's processes. You need it when the UID you run as
-cannot otherwise write to a volume, which can happen with a PersistentVolume
-([03.04](../03-config-and-storage/04-persistent-storage.md)). Set it to the
-same GID as `runAsGroup`. Nothing in this chapter needs it: an `emptyDir` is
-writable by any user, and step 4 lists the shared directory as `drwxrwxrwx`.
+cannot otherwise write to a volume, which can happen with a PersistentVolume.
+Whether it happens depends on the storage driver. A volume that arrives
+root-owned and not writable by your UID needs `fsGroup`. On kind, the
+`local-path` volume is writable without it, and
+[03.04 step 2](../03-config-and-storage/04-persistent-storage.md#fsgroup)
+shows a Pod with `fsGroup` and a Pod without it both writing, so a kind run
+cannot tell you whether your cloud disk needs the field. Check the volume's
+owner and mode from inside the Pod on the cluster you will run on. When a volume
+does need it, set `fsGroup` to the same GID as `runAsGroup`. Nothing in this
+chapter needs it: an `emptyDir` is writable by any user, and step 4 lists the
+shared directory as `drwxrwxrwx`.
 
 ### `seccompProfile: RuntimeDefault` {#baseline-seccomp}
 
@@ -249,6 +257,13 @@ system` on the running app. Anything the app must write gets its own
 every manifest here, and `/var/log/app` for the sidecar. An `emptyDir` is
 still writable, so an attacker can leave files there. The field protects the
 image's own files, not the volume.
+
+Give every `emptyDir` a `sizeLimit`. Without one, a runaway or hostile write
+can use the node's disk until other Pods on the node suffer. With one, the
+kubelet evicts the Pod when the volume passes the cap, as
+[03.03 step 5](../03-config-and-storage/03-volumes.md#5-size-caps-eviction-on-disk-enospc-in-memory)
+shows. The Bookstore manifests cap `/tmp` at 64Mi and the shared log directory
+at 32Mi, sizes far above what these apps write.
 
 Admission cannot tell whether the app survives a read-only root. A manifest
 can pass every policy and crash on its first write. The catalog writes
@@ -526,9 +541,11 @@ spec:
           mountPath: /var/log/app
   volumes:
     - name: tmp
-      emptyDir: {}
+      emptyDir:
+        sizeLimit: 64Mi
     - name: varlog
-      emptyDir: {}              # shared scratch dir, lives & dies with the Pod
+      emptyDir:                 # shared scratch dir, lives & dies with the Pod
+        sizeLimit: 32Mi
 ```
 
 > Why the sidecar only heartbeats here: a real log shipper (Fluent Bit, Vector)
@@ -1014,9 +1031,11 @@ spec:
         - { name: tmp, mountPath: /tmp }
   volumes:
     - name: shared
-      emptyDir: {}
+      emptyDir:
+        sizeLimit: 32Mi
     - name: tmp
-      emptyDir: {}
+      emptyDir:
+        sizeLimit: 64Mi
 ```
 
 Checklist:
@@ -1031,7 +1050,8 @@ Checklist:
   not `exec … sh`
 - [ ] Every container carries the baseline: non-root by number, no privilege
   escalation, capabilities dropped, read-only root, seccomp `RuntimeDefault`
-- [ ] Each writable path comes from an `emptyDir`, and the Pod reaches Ready
+- [ ] Each writable path comes from an `emptyDir` with a `sizeLimit`, and the
+  Pod reaches Ready
 - [ ] Its own ServiceAccount, with no token unless the app calls the API
 - [ ] Third-party images pinned by digest, tag in a comment
 - [ ] The namespace enforces `restricted`

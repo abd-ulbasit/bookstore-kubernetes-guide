@@ -144,6 +144,8 @@ spec:
   terminationGracePeriodSeconds: 30
   volumes:
     - name: tmp
-      emptyDir: {}
+      emptyDir:
+        sizeLimit: 64Mi
     - name: varlog
-      emptyDir: {}                    # shared scratch dir; lives & dies with the Pod
+      emptyDir:                       # shared scratch dir; lives & dies with the Pod
+        sizeLimit: 32Mi

@@ -274,7 +274,8 @@ spec:                          # DESIRED state (you write this; status is observ
           mountPath: /tmp      # writable paths come from emptyDir
   volumes:
     - name: tmp
-      emptyDir: {}
+      emptyDir:
+        sizeLimit: 64Mi    # every emptyDir is capped (Part 03 ch.03)
 ```
 
 Every field, and *why it is exactly this*:
@@ -318,8 +319,8 @@ Every field, and *why it is exactly this*:
   workload needs rather than rely on implicit defaults.
 
 The rest of the file is the security baseline: the ServiceAccount, the Pod and
-container `securityContext`, the `resources`, and an `emptyDir` for `/tmp`.
-This chapter does not explain each field. [Part 01
+container `securityContext`, the `resources`, and a capped `emptyDir` for
+`/tmp`. This chapter does not explain each field. [Part 01
 ch.01](../01-core-workloads/01-pods.md#baseline) explains each one against the
 threat it answers, and the first Pod you write is the time to read it. By
 family, in one sentence each:
@@ -331,7 +332,8 @@ family, in one sentence each:
 - **Container `securityContext`:** privilege escalation is off, the root
   filesystem is read-only, and every Linux capability is dropped.
 - **Resources and `/tmp`:** the container requests CPU and memory, caps its
-  memory, and gets one writable path, an `emptyDir` mounted at `/tmp`.
+  memory, and gets one writable path, an `emptyDir` mounted at `/tmp` and
+  capped by a `sizeLimit`.
 
 This Pod is bare **on purpose**: no replicas (a bare Pod has no controller
 restoring it, covered in [Part
