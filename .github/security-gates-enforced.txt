@@ -14,6 +14,7 @@
 00-foundations/
 01-core-workloads/01-pods.md
 01-core-workloads/
+03-config-and-storage/
 05-security/02-pod-security.md
 07-delivery/03-cicd-pipeline.md
 10-cloud-and-managed-kubernetes/
