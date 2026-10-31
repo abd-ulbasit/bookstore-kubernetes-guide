@@ -3,8 +3,8 @@
 # Child of the App-of-Apps root. Points Argo CD at the REAL 6b prod kustomize
 # overlay — the one CI's `bump-manifests` job (ch.03) writes signed image
 # DIGESTS into. The CI→GitOps loop closes HERE: CI commits a digest to
-# overlays/prod/images/kustomization.yaml → Argo CD detects the commit → syncs
-# prod.
+# overlays/prod/images/kustomization.yaml → Argo CD shows OutOfSync → a person
+# reviews the diff and syncs prod (no automated sync; see syncPolicy below).
 #
 # overlays/prod → 48 objects (base 49 − the demo Secret, which prod
 # $patch:deletes; a real Secret of the same name is supplied out-of-band by
@@ -37,15 +37,11 @@ spec:
   destination:
     server: https://kubernetes.default.svc
     namespace: bookstore
+  # NO `automated` block, on purpose. Argo CD shows the drift and waits. A
+  # person with the `platform-admin` role reviews the diff and runs
+  #   argocd app sync bookstore-prod
+  # So a commit to the branch is not a deploy. Only the sync is.
   syncPolicy:
-    # NOTE: prod automated sync is shown for the teaching loop (CI→Argo). Many
-    # orgs run prod with `automated` OMITTED (manual `argocd app sync` after a
-    # human approves the diff) — Argo still shows drift/OutOfSync, a human
-    # promotes. ch.04 Production notes discuss this; the field is here so the
-    # CI→GitOps demo is end-to-end.
-    automated:
-      prune: true
-      selfHeal: true
     syncOptions:
       - CreateNamespace=false      # base owns the PSA-restricted Namespace
       - ApplyOutOfSyncOnly=true
