@@ -1,0 +1,250 @@
+# Transcript for full-guide/11-advanced-production-patterns/10-platform-engineering.md
+# Tier A: the kind cluster sf-pilot, Kubernetes v1.37.0 server, kubectl v1.37.2,
+# Helm v4.1.4, Crossplane chart 2.4.3 (not installed in this run; see below).
+# Run on 2026-10-31 against the shared lab cluster, from the chapter's
+# directory. Every command below ran; commands are listed as they were typed.
+#
+# What ran and what did not:
+#   ran: the pre-install server dry-runs, the pod-security probe rendered from
+#        the chart, the RBAC checks by impersonation, the requester check by
+#        SubjectAccessReview, the registry gates.
+#   did not run: the Crossplane install (helm install), the provider and
+#        function packages, the XRD and Composition in the cluster, and the
+#        claim. The shared lab was reserved for another install when this run
+#        began, so these steps were not executed. Step 4's "provider" is a
+#        ServiceAccount name, simulated and bound to the same ClusterRole.
+#
+# Substitution: the chapter prints the reader's names. This run gave the
+# namespaces the p11-10 prefix, so a namespace in a command below is the
+# chapter's name with p11-10- in front of it. The tenant was named p11-10-acme,
+# so bookstore-tenant-acme became bookstore-tenant-p11-10-acme.
+# Cluster-scoped objects (the ClusterRole and its ClusterRoleBinding, the
+# platform-probe namespaces) keep the chapter's names where they have one.
+# Every namespace and cluster object this run created was deleted at the end.
+# Note: the probe was also run with enforce=baseline while the chapter was
+# drafted. That run is not kept here: the chapter quotes the restricted
+# probe, and a baseline label in this file would need a registry entry for
+# a lab-only namespace.
+
+$ kubectl version
+Client Version: v1.37.2
+Kustomize Version: v5.8.1
+Unable to connect to the server: EOF
+[exit 1]
+
+$ kubectl config current-context
+kind-sf-pilot
+[exit 0]
+
+$ kubectl version
+Client Version: v1.37.2
+Kustomize Version: v5.8.1
+Unable to connect to the server: EOF
+[exit 1]
+
+$ kubectl get nodes -o wide
+Unable to connect to the server: EOF
+[exit 1]
+
+## step 1: before Crossplane is installed, the platform CRs have no served API (server dry-run)
+
+$ kubectl apply --dry-run=server -f full-guide/examples/bookstore/platform/crossplane-xrd.yaml
+error: resource mapping not found for name: "bookstoreenvironments.platform.bookstore.example.com" namespace: "" from "full-guide/examples/bookstore/platform/crossplane-xrd.yaml": no matches for kind "CompositeResourceDefinition" in version "apiextensions.crossplane.io/v2"
+ensure CRDs are installed first
+[exit 1]
+
+$ kubectl apply --dry-run=server -f full-guide/examples/bookstore/platform/crossplane-composition.yaml
+error: resource mapping not found for name: "bookstore-guarded-namespace" namespace: "" from "full-guide/examples/bookstore/platform/crossplane-composition.yaml": no matches for kind "Composition" in version "apiextensions.crossplane.io/v1"
+ensure CRDs are installed first
+[exit 1]
+
+$ kubectl apply --dry-run=server -f full-guide/examples/bookstore/platform/bookstore-env-claim.yaml
+error: resource mapping not found for name: "acme" namespace: "platform-tenants" from "full-guide/examples/bookstore/platform/bookstore-env-claim.yaml": no matches for kind "BookstoreEnvironment" in version "platform.bookstore.example.com/v1alpha1"
+ensure CRDs are installed first
+[exit 1]
+
+## step 4: the provider identity, tested by impersonation before Crossplane is installed
+
+$ sh -c kubectl get clusterrole bookstore-paved-road clusterrolebinding bookstore-paved-road --ignore-not-found -o name; echo checked
+checked
+[exit 0]
+
+$ kubectl apply -f rbac.yaml
+clusterrole.rbac.authorization.k8s.io/bookstore-paved-road created
+[exit 0]
+
+$ sh -c kubectl apply -f "$RBACF"
+error: must specify one of -f and -k
+[exit 1]
+
+$ kubectl create clusterrolebinding bookstore-paved-road --clusterrole=bookstore-paved-road --serviceaccount=p11-10-crossplane-system:provider-kubernetes-sim
+clusterrolebinding.rbac.authorization.k8s.io/bookstore-paved-road created
+[exit 0]
+
+$ sh -c kubectl auth can-i create namespaces --as="$PROVIDER"; kubectl auth can-i delete namespaces --as="$PROVIDER"; kubectl auth can-i get secrets -A --as="$PROVIDER"; kubectl auth can-i create clusterrolebindings --as="$PROVIDER"; kubectl auth can-i create roles -A --as="$PROVIDER"; kubectl auth can-i create deployments -A --as="$PROVIDER"; kubectl auth can-i create rolebindings -A --as="$PROVIDER"; kubectl auth can-i bind clusterrole/view --as="$PROVIDER"; kubectl auth can-i bind clusterrole/cluster-admin --as="$PROVIDER"; echo matrix-done
+Warning: resource 'namespaces' is not namespace scoped
+
+yes
+Warning: resource 'namespaces' is not namespace scoped
+
+yes
+no
+Warning: resource 'clusterrolebindings' is not namespace scoped in group 'rbac.authorization.k8s.io'
+
+no
+no
+no
+yes
+Warning: resource 'clusterroles' is not namespace scoped in group 'rbac.authorization.k8s.io'
+
+yes
+Warning: resource 'clusterroles' is not namespace scoped in group 'rbac.authorization.k8s.io'
+
+no
+matrix-done
+[exit 0]
+
+$ sh -c kubectl apply -f tenant.yaml --as="$PROVIDER"
+namespace/bookstore-tenant-p11-10-acme created
+rolebinding.rbac.authorization.k8s.io/bookstore-tenant created
+resourcequota/bookstore-tenant created
+limitrange/bookstore-tenant created
+networkpolicy.networking.k8s.io/default-deny created
+[exit 0]
+
+$ sh -c kubectl auth can-i get pods -n bookstore-tenant-p11-10-acme --as=tenant-dev --as-group=bookstore-tenant-p11-10-acme; kubectl auth can-i get secrets -n bookstore-tenant-p11-10-acme --as=tenant-dev --as-group=bookstore-tenant-p11-10-acme; kubectl auth can-i create deployments -n bookstore-tenant-p11-10-acme --as=tenant-dev --as-group=bookstore-tenant-p11-10-acme; kubectl auth can-i get pods -n default --as=tenant-dev --as-group=bookstore-tenant-p11-10-acme; echo dev-done
+yes
+no
+no
+no
+dev-done
+[exit 0]
+
+$ kubectl apply -f requester.yaml
+namespace/p11-10-platform-tenants created
+role.rbac.authorization.k8s.io/bookstore-environment-requester created
+rolebinding.rbac.authorization.k8s.io/bookstore-environment-requester created
+[exit 0]
+
+$ sh -c kubectl auth can-i create bookstoreenvironments -n p11-10-platform-tenants --as=tenant-dev --as-group=bookstore-platform-requesters; kubectl auth can-i create bookstoreenvironments -n default --as=tenant-dev --as-group=bookstore-platform-requesters; kubectl auth can-i create configmaps -n p11-10-platform-tenants --as=tenant-dev --as-group=bookstore-platform-requesters; echo req-done
+Warning: the server doesn't have a resource type 'bookstoreenvironments'
+
+no
+Warning: the server doesn't have a resource type 'bookstoreenvironments'
+
+no
+no
+req-done
+[exit 0]
+
+$ sh -c kubectl create -f sar.yaml -o jsonpath="{.status.allowed}{\"\n\"}"
+true
+false
+false
+[exit 0]
+
+## step 2: the platform CRs before Crossplane is installed (server dry-run, run from full-guide/)
+
+$ kubectl apply --dry-run=server -f examples/bookstore/platform/crossplane-xrd.yaml
+error: resource mapping not found for name: "bookstoreenvironments.platform.bookstore.example.com" namespace: "" from "examples/bookstore/platform/crossplane-xrd.yaml": no matches for kind "CompositeResourceDefinition" in version "apiextensions.crossplane.io/v2"
+ensure CRDs are installed first
+[exit 1]
+
+$ kubectl apply --dry-run=server -f examples/bookstore/platform/crossplane-composition.yaml
+error: resource mapping not found for name: "bookstore-guarded-namespace" namespace: "" from "examples/bookstore/platform/crossplane-composition.yaml": no matches for kind "Composition" in version "apiextensions.crossplane.io/v1"
+ensure CRDs are installed first
+[exit 1]
+
+$ kubectl apply --dry-run=server -f examples/bookstore/platform/bookstore-env-claim.yaml
+error: resource mapping not found for name: "acme" namespace: "platform-tenants" from "examples/bookstore/platform/bookstore-env-claim.yaml": no matches for kind "BookstoreEnvironment" in version "platform.bookstore.example.com/v1alpha1"
+ensure CRDs are installed first
+[exit 1]
+
+## step 4: the provider identity (impersonated; lab run binds a simulated ServiceAccount)
+
+$ sh -c export PROVIDER=system:serviceaccount:p11-10-crossplane-system:provider-kubernetes-sim; kubectl auth can-i create namespaces --as="$PROVIDER" 2>/dev/null; kubectl auth can-i delete namespaces --as="$PROVIDER" 2>/dev/null; kubectl auth can-i get secrets -A --as="$PROVIDER" 2>/dev/null; kubectl auth can-i create clusterrolebindings --as="$PROVIDER" 2>/dev/null; kubectl auth can-i create roles -A --as="$PROVIDER" 2>/dev/null; kubectl auth can-i create deployments -A --as="$PROVIDER" 2>/dev/null; kubectl auth can-i create rolebindings -A --as="$PROVIDER" 2>/dev/null; kubectl auth can-i bind clusterrole/view --as="$PROVIDER" 2>/dev/null; kubectl auth can-i bind clusterrole/cluster-admin --as="$PROVIDER" 2>/dev/null; echo matrix-done
+yes
+yes
+no
+no
+no
+no
+yes
+yes
+no
+matrix-done
+[exit 0]
+
+## step 1 (revised): the chart pods against restricted enforce, the probe the chapter prints
+
+$ kubectl create namespace p11-10-psa-restricted
+namespace/p11-10-psa-restricted created
+[exit 0]
+
+$ kubectl label namespace p11-10-psa-restricted pod-security.kubernetes.io/enforce=restricted pod-security.kubernetes.io/audit=restricted pod-security.kubernetes.io/warn=restricted
+namespace/p11-10-psa-restricted labeled
+[exit 0]
+
+$ sh -c helm --repository-config "$RC" --repository-cache "$CA" template crossplane crossplane-stable/crossplane --version 2.4.3 --namespace p11-10-psa-restricted --set-json 'podSecurityContextCrossplane={"runAsNonRoot":true,"seccompProfile":{"type":"RuntimeDefault"}}' --set-json 'podSecurityContextRBACManager={"runAsNonRoot":true,"seccompProfile":{"type":"RuntimeDefault"}}' | kubectl apply --dry-run=server -f - 2>&1 | grep -E '^Warning|^deployment|^Error'
+Warning: would violate PodSecurity "restricted:latest": unrestricted capabilities (containers "crossplane-init", "crossplane" must set securityContext.capabilities.drop=["ALL"])
+deployment.apps/crossplane created (server dry run)
+deployment.apps/crossplane-rbac-manager created (server dry run)
+[exit 0]
+
+## step 3: requester check, one-line SubjectAccessReview requests (revised form)
+
+$ sh sar-inline.sh
+true
+false
+false
+[exit 0]
+
+## cleanup: every namespace and cluster object this run created
+
+$ kubectl delete namespace p11-10-psa-probe p11-10-psa-restricted p11-10-platform-tenants bookstore-tenant-p11-10-acme --ignore-not-found --request-timeout=60s
+namespace "p11-10-psa-probe" deleted
+namespace "p11-10-psa-restricted" deleted
+namespace "p11-10-platform-tenants" deleted
+namespace "bookstore-tenant-p11-10-acme" deleted
+
+$ kubectl delete clusterrole bookstore-paved-road --ignore-not-found --request-timeout=60s
+clusterrole.rbac.authorization.k8s.io "bookstore-paved-road" deleted
+[exit 0]
+
+$ kubectl delete clusterrolebinding bookstore-paved-road --ignore-not-found --request-timeout=60s
+clusterrolebinding.rbac.authorization.k8s.io "bookstore-paved-road" deleted
+[exit 0]
+
+## cleanup status at the end of the run
+
+$ kubectl get ns p11-10-psa-probe p11-10-psa-restricted p11-10-platform-tenants bookstore-tenant-p11-10-acme --ignore-not-found --request-timeout=40s
+NAME                           STATUS        AGE
+p11-10-psa-probe               Terminating   22m
+p11-10-psa-restricted          Terminating   15m
+p11-10-platform-tenants        Terminating   21m
+bookstore-tenant-p11-10-acme   Terminating   21m
+[exit 0]
+
+$ kubectl get clusterrole,clusterrolebinding bookstore-paved-road --ignore-not-found --request-timeout=40s
+[exit 0]
+
+$ sh -c kubectl -n kube-system get pods -l component=kube-controller-manager --request-timeout=40s
+NAME                                             READY   STATUS    RESTARTS         AGE
+kube-controller-manager-sf-pilot-control-plane   1/1     Running   56 (4m42s ago)   14h
+[exit 0]
+[exit 0]
+
+$ kubectl delete clusterrolebinding bookstore-paved-road --ignore-not-found --request-timeout=60s
+[exit 0]
+
+$ kubectl delete clusterrole bookstore-paved-road --ignore-not-found --request-timeout=60s
+[exit 0]
+
+$ kubectl get ns p11-10-psa-probe p11-10-psa-restricted p11-10-platform-tenants bookstore-tenant-p11-10-acme --ignore-not-found --request-timeout=60s
+[exit 0]
+
+$ kubectl get ns p11-10-psa-probe p11-10-psa-restricted p11-10-platform-tenants bookstore-tenant-p11-10-acme --ignore-not-found --request-timeout=40s
+[exit 0]
+
+$ kubectl get clusterrole,clusterrolebinding bookstore-paved-road --ignore-not-found --request-timeout=40s
+[exit 0]

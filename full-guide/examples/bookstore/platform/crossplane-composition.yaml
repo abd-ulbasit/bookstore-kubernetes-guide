@@ -3,54 +3,46 @@
 # guide's GUARDED-NAMESPACE stack. This is where "guardrails by construction"
 # is real: the developer's 2-field request can ONLY become this hardened/
 # bounded/isolated set of objects, because the Composition is the sole producer
-# (the provider's ServiceAccount has least-privilege RBAC scoped to exactly
-# these kinds — ch.10 Hands-on step 1; Part 05 ch.01).
+# and the provider's ServiceAccount is bound only to the kinds it lists
+# (ch.10 "Threats and controls", E10).
 #
 # WHAT IT PROVISIONS (= the guide's stack, Parts 01-08, made self-service):
 #   - Namespace  pod-security.kubernetes.io/enforce=restricted  (Part 05 ch.02)
-#   - Role + RoleBinding  least-privilege in-namespace            (Part 05 ch.01)
+#   - RoleBinding to the built-in ClusterRole `view`, in the tenant namespace
+#                                                 (Part 05 ch.01, read-only)
 #   - ResourceQuota + LimitRange  bounded                (Part 01 ch.03 / 08 ch.04)
 #   - NetworkPolicy  default-deny ingress+egress                  (Part 02 ch.06)
-# Each is wrapped in a provider-kubernetes `Object` (kubernetes.crossplane.io)
-# so Crossplane reconciles it CONTINUOUSLY (operator pattern, ch.02,
-# generalised — delete one by hand and it is healed back; ch.10 §3).
+# Each is wrapped in a NAMESPACED provider-kubernetes `Object`
+# (kubernetes.m.crossplane.io/v1alpha1) in the XR's own namespace, so Crossplane
+# reconciles it continuously (operator pattern, ch.02, generalised: delete one
+# by hand and it is healed back; ch.10 §3).
 #
-# CROSSPLANE COMPOSITION MODEL (current, accurate): mode: Pipeline with
-# functionRef -> function-patch-and-transform (input kind Resources). The old
-# inline spec.resources/patchSets form is superseded by this function-based
-# pipeline (verified against the Crossplane v2 composition docs). compositeTypeRef
-# points at the v2 namespaced XR from crossplane-xrd.yaml.
+# WHY NAMESPACED OBJECTS: a namespaced XR may compose only resources in its own
+# namespace (Crossplane v2 docs, composite resource definitions). The
+# cluster-scoped kubernetes.crossplane.io Object is the legacy form and is not
+# used here.
 #
-# REQUIRES (ch.10 step 1), IN THIS ORDER — the Function AND the Provider must
-# be Healthy BEFORE this Composition is applied or its pipeline never runs and
-# the XR never reconciles (the #1 Crossplane "nothing happens" footgun):
-# Crossplane installed -> provider-kubernetes installed + Healthy + a
-# ProviderConfig `default` (InjectedIdentity) -> function-patch-and-transform
-# installed + Healthy (PINNED — not :latest):
-#   kubectl apply -f - <<EOF
-#   apiVersion: pkg.crossplane.io/v1
-#   kind: Function
-#   metadata: { name: function-patch-and-transform }
-#   spec: { package: xpkg.crossplane.io/crossplane-contrib/function-patch-and-transform:v0.8.2 }
-#   EOF
-#   kubectl wait --for=condition=Healthy function/function-patch-and-transform --timeout=180s
+# WHY THE `view` ROLE, NOT A CUSTOM ROLE: a provider that creates a Role granting
+# pods, services and configmaps must already hold those permissions, or the API
+# server refuses the create (escalation check). Binding `view` needs only the
+# `bind` verb on clusterroles/view (ch.10 Hands-on, the provider ClusterRole).
 #
-# !!! CRD-INTRINSIC DRY-RUN (identical precedent to argocd/ + operator/ +
-#     multicluster/ + 18-/51-/70-/83- + cnpg-/karpenter-)
-#   `Composition` is `apiextensions.crossplane.io/v1` (a Crossplane CRD).
-#   WITHOUT Crossplane installed, a client dry-run prints:
+# REQUIRES (ch.10 Hands-on step 1), IN THIS ORDER: Crossplane installed, the
+# provider-kubernetes and function-patch-and-transform packages Healthy, and the
+# namespaced ProviderConfig `default` in the request namespace. The Function
+# must be Healthy before this Composition is applied, or its pipeline never runs.
+#
+# !!! CRD-INTRINSIC DRY-RUN (same precedent as argocd/, operator/, multicluster/)
+#   `Composition` is `apiextensions.crossplane.io/v1`, a Crossplane CRD. Before
+#   Crossplane is installed a client dry-run prints:
 #     no matches for kind "Composition" in version "apiextensions.crossplane.io/v1"
-#   EXPECTED, schema-correct — same precedent as examples/bookstore/argocd/*,
-#   operator/config/samples/* (ch.02), multicluster/10- (ch.06). After
-#   Crossplane is installed, `--dry-run=server` validates cleanly. Schema
-#   verified against the Crossplane v1 Composition spec (Pipeline mode,
-#   function-patch-and-transform Resources input) + provider-kubernetes Object.
+#   EXPECTED. Schema checked against the Crossplane v2.4.3 CRD.
 #
 # ADDITIVE: NEW file; touches no canonical Bookstore manifest, Helm chart,
 # Kustomize overlay, the operator, the argocd/ or multicluster/ trees, or any
 # existing examples/bookstore/** file.
 #
-# Apply (after the XRD — ch.10 step 3):
+# Apply (after the XRD is Established — ch.10 Hands-on step 2):
 #   kubectl apply -f examples/bookstore/platform/crossplane-composition.yaml
 apiVersion: apiextensions.crossplane.io/v1
 kind: Composition
@@ -74,18 +66,17 @@ spec:
           # --- 1. The PSA-restricted Namespace (Part 05 ch.02) ---
           - name: namespace
             base:
-              apiVersion: kubernetes.crossplane.io/v1alpha1
+              apiVersion: kubernetes.m.crossplane.io/v1alpha1
               kind: Object
               spec:
-                providerConfigRef: { name: default }
+                providerConfigRef: { kind: ProviderConfig, name: default }
                 forProvider:
                   manifest:
                     apiVersion: v1
                     kind: Namespace
                     metadata:
                       # the REAL namespace name — patched per-tenant below
-                      # (this is the manifest the provider applies; the
-                      # composed Object CR's OWN name is framework-managed,
+                      # (the composed Object's own name is framework-managed,
                       # NEVER patched — that is the footgun this avoids).
                       name: bookstore-tenant-REPLACED
                       labels:
@@ -97,9 +88,7 @@ spec:
                         pod-security.kubernetes.io/audit: restricted
                         pod-security.kubernetes.io/warn: restricted
             patches:
-              # ONLY patch the wrapped manifest's namespace name. (Do NOT patch
-              # the Object CR's metadata.name — it is framework-managed; if a
-              # stable Object name is wanted, set it in base.metadata.name.)
+              # ONLY patch the wrapped manifest's namespace name.
               - type: FromCompositeFieldPath
                 fromFieldPath: spec.tenant
                 toFieldPath: spec.forProvider.manifest.metadata.name
@@ -111,45 +100,13 @@ spec:
                 fromFieldPath: spec.forProvider.manifest.metadata.name
                 toFieldPath: status.namespace
 
-          # --- 2. Least-privilege Role (Part 05 ch.01) ---
-          - name: role
-            base:
-              apiVersion: kubernetes.crossplane.io/v1alpha1
-              kind: Object
-              spec:
-                providerConfigRef: { name: default }
-                forProvider:
-                  manifest:
-                    apiVersion: rbac.authorization.k8s.io/v1
-                    kind: Role
-                    metadata:
-                      name: bookstore-tenant
-                      namespace: bookstore-tenant-REPLACED
-                      labels: { app.kubernetes.io/part-of: bookstore }
-                    rules:
-                      # ONLY what a tenant workload needs in its own namespace —
-                      # no secrets wildcard, no cluster scope (Part 05 ch.01).
-                      - apiGroups: ["apps"]
-                        resources: ["deployments", "replicasets"]
-                        verbs: ["get", "list", "watch"]
-                      - apiGroups: [""]
-                        resources: ["pods", "services", "configmaps"]
-                        verbs: ["get", "list", "watch"]
-            patches:
-              - type: FromCompositeFieldPath
-                fromFieldPath: spec.tenant
-                toFieldPath: spec.forProvider.manifest.metadata.namespace
-                transforms:
-                  - type: string
-                    string: { fmt: "bookstore-tenant-%s", type: Format }
-
-          # --- 3. RoleBinding (binds the tenant group to the Role) ---
+          # --- 2. RoleBinding: the tenant group reads the namespace, via `view` ---
           - name: rolebinding
             base:
-              apiVersion: kubernetes.crossplane.io/v1alpha1
+              apiVersion: kubernetes.m.crossplane.io/v1alpha1
               kind: Object
               spec:
-                providerConfigRef: { name: default }
+                providerConfigRef: { kind: ProviderConfig, name: default }
                 forProvider:
                   manifest:
                     apiVersion: rbac.authorization.k8s.io/v1
@@ -159,12 +116,14 @@ spec:
                       namespace: bookstore-tenant-REPLACED
                       labels: { app.kubernetes.io/part-of: bookstore }
                     roleRef:
+                      # built-in read-only role: no Secrets, no RBAC, no exec.
+                      # The provider needs only `bind` on this one name.
                       apiGroup: rbac.authorization.k8s.io
-                      kind: Role
-                      name: bookstore-tenant
+                      kind: ClusterRole
+                      name: view
                     subjects:
                       # generic placeholder group — map to the real tenant
-                      # group/SA in your IdP (Part 05 ch.01); no real principal.
+                      # group in your IdP (Part 05 ch.01); no real principal.
                       - kind: Group
                         apiGroup: rbac.authorization.k8s.io
                         name: bookstore-tenant-REPLACED
@@ -182,13 +141,13 @@ spec:
                   - type: string
                     string: { fmt: "bookstore-tenant-%s", type: Format }
 
-          # --- 4. ResourceQuota (Part 01 ch.03 / Part 08 ch.04) ---
+          # --- 3. ResourceQuota (Part 01 ch.03 / Part 08 ch.04) ---
           - name: resourcequota
             base:
-              apiVersion: kubernetes.crossplane.io/v1alpha1
+              apiVersion: kubernetes.m.crossplane.io/v1alpha1
               kind: Object
               spec:
-                providerConfigRef: { name: default }
+                providerConfigRef: { kind: ProviderConfig, name: default }
                 forProvider:
                   manifest:
                     apiVersion: v1
@@ -214,13 +173,13 @@ spec:
                   - type: string
                     string: { fmt: "bookstore-tenant-%s", type: Format }
 
-          # --- 5. LimitRange (Part 01 ch.03) ---
+          # --- 4. LimitRange (Part 01 ch.03) ---
           - name: limitrange
             base:
-              apiVersion: kubernetes.crossplane.io/v1alpha1
+              apiVersion: kubernetes.m.crossplane.io/v1alpha1
               kind: Object
               spec:
-                providerConfigRef: { name: default }
+                providerConfigRef: { kind: ProviderConfig, name: default }
                 forProvider:
                   manifest:
                     apiVersion: v1
@@ -244,13 +203,13 @@ spec:
                   - type: string
                     string: { fmt: "bookstore-tenant-%s", type: Format }
 
-          # --- 6. NetworkPolicy: default-deny ingress+egress (Part 02 ch.06) ---
+          # --- 5. NetworkPolicy: default-deny ingress+egress (Part 02 ch.06) ---
           - name: networkpolicy-default-deny
             base:
-              apiVersion: kubernetes.crossplane.io/v1alpha1
+              apiVersion: kubernetes.m.crossplane.io/v1alpha1
               kind: Object
               spec:
-                providerConfigRef: { name: default }
+                providerConfigRef: { kind: ProviderConfig, name: default }
                 forProvider:
                   manifest:
                     apiVersion: networking.k8s.io/v1

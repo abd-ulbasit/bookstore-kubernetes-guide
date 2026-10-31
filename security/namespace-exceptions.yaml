@@ -139,3 +139,15 @@ exceptions:
     upstream: https://istio.io/latest/docs/setup/additional-setup/pod-security-admission/
     chapter: 11-advanced-production-patterns/04-service-mesh.md
     expires: 2027-06-30
+
+  - namespace: crossplane-system
+    level: baseline
+    reason: >-
+      The Crossplane chart's controller and RBAC manager pods set runAsNonRoot and
+      seccompProfile at pod level, but the chart exposes no value that drops ALL
+      capabilities on their containers. restricted refuses those pods and baseline
+      admits them. The namespace holds only Crossplane's own pods. Audit and warn
+      stay at restricted, so the gap stays visible.
+    upstream: https://kubernetes.io/docs/concepts/security/pod-security-standards/#baseline
+    chapter: 11-advanced-production-patterns/10-platform-engineering.md
+    expires: 2027-06-30

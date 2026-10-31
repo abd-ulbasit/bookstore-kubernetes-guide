@@ -31,10 +31,13 @@
 # existing examples/bookstore/** file.
 #
 # Apply (after the XRD is Established — ch.10 step 3):
-#   kubectl create namespace platform-tenants   # the request namespace
+#   # the platform-tenants Namespace, its namespaced ProviderConfig and the
+#   # requester Role come first: ch.10 Hands-on step 3 (the request namespace)
 #   kubectl apply -f examples/bookstore/platform/bookstore-env-claim.yaml
 #   kubectl get bookstoreenvironment acme -n platform-tenants   # SYNCED/READY
-#   kubectl get ns,role,resourcequota,networkpolicy -n bookstore-tenant-acme
+#   kubectl get ns bookstore-tenant-acme
+#   kubectl get rolebinding,resourcequota,limitrange,networkpolicy \
+#     -n bookstore-tenant-acme
 apiVersion: platform.bookstore.example.com/v1alpha1
 kind: BookstoreEnvironment
 metadata:

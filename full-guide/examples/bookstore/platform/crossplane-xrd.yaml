@@ -27,7 +27,8 @@
 #   Crossplane is installed, `kubectl apply --dry-run=server -f` validates
 #   cleanly and the XRD becomes a real served API (CRD
 #   bookstoreenvironments.platform.bookstore.example.com Established). Schema
-#   verified against the Crossplane v2 XRD spec (scope: Namespaced).
+#   checked against the Crossplane v2.4.3 CRD: `scope` defaults to Namespaced
+#   and the apiextensions.crossplane.io/v2 version is served.
 #
 # ADDITIVE: NEW file; touches no canonical Bookstore manifest, Helm chart,
 # Kustomize overlay, the operator, the argocd/ or multicluster/ trees, or any
