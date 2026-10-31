@@ -23,8 +23,6 @@ versions follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   and 17, outlines whose labs wait, are report only
   (`.github/security-gates-report-only.txt`), and
   `.github/security-gates-enforced.txt` lists what the gates must have read.
-  for every workload. Chapter failures are report mode except the chapters
-  in `.github/security-gates-enforced.txt`.
 - `lab-on-runner.yml`: runs the three labs that did not fit the small lab host
   on a GitHub Actions runner, on a kind v0.33.0 cluster. 06.01 installs
   kube-prometheus-stack for real (Prometheus's targets, a Grafana login refused
@@ -38,6 +36,9 @@ versions follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   the kind nodes, the KEDA operator is refused by the Bookstore's default-deny
   policy, and the Kustomize base and Helm HPA still list a Pods metric that
   nothing serves.
+- `examples/security-lab/evidence/`: the captured runner output for 06.01, 06.04
+  and 09.01. Still cited, not run: 09.01's GitOps form with a Git remote, the
+  canary release, the backup and restore, and the node drain.
 - `bookstore-release.yml`: dispatch one service through the reusable
   pipeline with publish on (signing, provenance, SBOM attestation) and open a
   promotion PR. Default branch only.
