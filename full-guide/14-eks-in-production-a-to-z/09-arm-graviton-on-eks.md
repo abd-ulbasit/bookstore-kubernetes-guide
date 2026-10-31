@@ -1,20 +1,20 @@
 # 14.09 — ARM/Graviton on EKS
 
-> **Graviton (AWS's ARM-based EC2 line) is ~20% cheaper than the
-> equivalent x86 instance with the same SLA, and a c7g/m7g/r7g node
-> looks identical to a c7i/m7i/r7i node from a Kubernetes
-> perspective** — until you try to schedule a Pod whose image only
-> ships an `amd64` manifest and discover `ImagePullBackOff: no matching
-> manifest for linux/arm64/v8`. The Graviton move is a discount with
-> one disciplinary requirement: every container image you run must be
-> **multi-arch** (or arm64-only). This chapter walks the Terraform
-> NodePool, the `docker buildx` discipline, the mixed-arch cluster
-> pattern, and the workloads where ARM is still the wrong call.
+> **AWS states that Graviton (its ARM-based EC2 line) costs up to 20%
+> less than comparable x86 instances, and a c7g/m7g/r7g node looks
+> identical to a c7i/m7i/r7i node from a Kubernetes perspective**, until
+> you schedule a Pod whose image has no arm64 entry. The pull then fails
+> with `ImagePullBackOff`. The Graviton move is a discount with one
+> requirement: every container image you run must be **multi-arch** (or
+> arm64-only), and each platform entry must be built, scanned and signed.
+> This chapter walks the Terraform NodePool, the `docker buildx`
+> discipline, the mixed-arch cluster pattern, and the workloads where ARM
+> is still the wrong call.
 
 **Estimated time:** ~30 min read · ~90 min hands-on
-**Prerequisites:** [Part 14 ch.06](./06-cost-guardrails.md) — Graviton is the largest single compute discount available · [Part 13 ch.01](../13-grand-capstone-bookstore-platform/01-bookstore-2-from-toy-to-platform.md) — bookstore tree where Karpenter manages NodePools · [Part 12 ch.06](../06-production-readiness/06-capacity-and-cost.md) — when discounts justify discipline-debt
+**Prerequisites:** [Part 14 ch.06](./06-cost-guardrails.md): cost guardrails · [Part 13 ch.01](../13-grand-capstone-bookstore-platform/01-bookstore-2-from-toy-to-platform.md): bookstore tree where Karpenter manages NodePools · [Part 06 ch.06](../06-production-readiness/06-capacity-and-cost.md): when discounts justify discipline-debt
 
-**You'll know after this:** • understand the ~20% Graviton (arm64) discount over equivalent x86 instances · • configure a Karpenter NodePool that mixes arm64 + amd64 with arch-aware taints · • build multi-arch images with `docker buildx --platform linux/amd64,linux/arm64` · • debug `ImagePullBackOff: no matching manifest for linux/arm64/v8` and resolve it via manifest list · • choose between full-Graviton migration and mixed-arch fleet based on workload constraints (GPU, vendor binaries)
+**You'll know after this:** • explain the up-to-20% Graviton (arm64) cost difference from x86 · • configure a Karpenter NodePool that mixes arm64 + amd64 with arch-aware requirements · • build multi-arch images with `docker buildx --platform linux/amd64,linux/arm64`, sign each platform, and pin the index digest · • debug an `ImagePullBackOff` caused by a missing arm64 entry, and fix it with a multi-arch manifest · • choose between full-Graviton migration and mixed-arch fleet based on workload constraints (GPU, vendor binaries)
 
 <!-- tags: graviton, cost, eks, finops, cloud -->
 
@@ -23,35 +23,30 @@
 The bookstore-platform tree at
 [`../examples/bookstore-platform/terraform/`](../examples/bookstore-platform/terraform/)
 defaults to x86 (Karpenter's `general` NodePool selects `amd64`).
-Phase 14-R shipped an **opt-in** Graviton NodePool at
+The bookstore tree ships an **opt-in** Graviton NodePool at
 [`../examples/bookstore-platform/terraform/karpenter-graviton.tf`](../examples/bookstore-platform/terraform/karpenter-graviton.tf)
 gated by `var.enable_graviton_pool = false` — off by default precisely
 because flipping it on without first verifying every workload's image
 is multi-arch is the failure mode that wastes an afternoon for any
 team that didn't do the homework.
 
-The economics are straightforward. AWS prices the Graviton 3 line
-(`c7g`, `m7g`, `r7g`) at roughly **20% less** than the equivalent
-x86 line (`c7i`, `m7i`, `r7i`) — same vCPU/memory ratios, same network
-performance tier, same EBS-Optimized throughput. For a cluster
-running 20 nodes at ~$0.10/hour ($72/month per node) that's a $288/month
-savings — real money compounding monthly. Graviton 4 (`c8g`, `m8g`,
-`r8g`) widens the gap to ~30% on some workload shapes.
+The economics are simple. AWS states that Graviton-based instances cost
+up to 20% less than comparable x86-based instances, such as `c7g` against
+`c7i` ([AWS Graviton](https://aws.amazon.com/ec2/graviton/)). The saving
+depends on size and region, so price your own fleet before you plan a
+budget.
 
-The performance story is equally uncomplicated for Go, Java, Python,
-Node, Rust, .NET — the modern language runtimes all ship native ARM
-builds. The Linux kernel on the EKS-optimized `al2023-arm64` AMI is
-the same kernel as `al2023-x86_64`; addon support (vpc-cni,
-kube-proxy, CoreDNS, EBS-CSI) is identical across architectures.
-Benchmarks vary by workload (some compute-heavy patterns favor x86
-SIMD, some memory-bandwidth-heavy patterns favor ARM's cache layout)
-but for stateless web services — exactly the bookstore platform's
-shape — Graviton matches or beats x86 within noise.
+The mainstream language runtimes (Go, Java, Python, Node, Rust, .NET)
+ship native arm64 builds. Check each EKS add-on's arm64 support before
+you run it on the pool; [14.03](./03-eks-addon-management.md) owns the
+add-ons. Benchmarks vary by workload: some compute-heavy code favors x86
+SIMD, and some memory-bound code favors ARM. Benchmark your own service
+before you assume parity.
 
 The catch is **image discipline**. A container image is a manifest
 that names one or more architecture-specific layers. A single-arch
-`amd64`-only image cannot run on an arm64 node — the kubelet's
-`ImagePullBackOff` reports `no matching manifest for linux/arm64`.
+`amd64`-only image cannot run on an arm64 node: the pull fails, the Pod
+shows `ImagePullBackOff`, and containerd reports `no match for platform`.
 The fix is to build images as **multi-arch manifests** using
 `docker buildx`: one image reference (`my-service:v1.2.3`) backed by
 both `amd64` and `arm64` layer sets, the registry serving whichever
@@ -92,25 +87,24 @@ The three layers:
   EKS-optimized `al2023@latest` AMI — which, *because* the NodePool
   pins arch=arm64, resolves to the **arm64 variant** of the same AMI
   family. One NodePool, one EC2NodeClass, the AL2023 AMI alias does
-  the right thing. The Phase 14-R Graviton NodePool is at
+  the right thing. The bookstore tree's Graviton NodePool is at
   [`karpenter-graviton.tf`](../examples/bookstore-platform/terraform/karpenter-graviton.tf).
 - **Layer 2 — Multi-arch container image.** A container image is a
   manifest. A **single-arch** manifest contains one entry pointing
   at one layer set: `linux/amd64`. A **multi-arch (multi-platform)
   manifest** is a *manifest list* (or OCI image index) with multiple
   entries, one per platform: `linux/amd64`, `linux/arm64`,
-  potentially others (`linux/arm/v7`, `linux/s390x`, ...). When the
-  kubelet pulls the image, the registry serves the manifest entry
-  matching the node's architecture. `docker buildx build
+  potentially others (`linux/arm/v7`, `linux/s390x`, ...). When a node
+  pulls the image, containerd asks the registry for the entry matching the
+  node's architecture. `docker buildx build
   --platform linux/amd64,linux/arm64 --push` builds and pushes a
   manifest list in one step.
 - **Layer 3 — Pod scheduling.** A Pod with no `nodeSelector` on
   arch gets scheduled wherever the scheduler + Karpenter decide is
-  cheapest/fittest. With the bookstore tree's Graviton NodePool
-  set to `weight: 30` (vs the `general` NodePool at `weight: 10`)
-  Karpenter prefers Graviton when both could satisfy the Pod's
-  needs — but a Pod that explicitly sets `nodeSelector:
-  kubernetes.io/arch: amd64` overrides this and stays on x86.
+  cheapest/fittest. In the bookstore tree the `spot` NodePool (weight 50)
+  is amd64, so it outranks `graviton` (weight 30, arm64) for a Pod with no
+  arch constraint. That Pod lands on amd64 spot capacity first. Pin it with
+  `nodeSelector: kubernetes.io/arch: arm64` to reach Graviton.
 
 **`docker buildx` is the only sane build path.** Building two
 images and tagging them separately (`my-service:v1.2.3-amd64`,
@@ -126,19 +120,19 @@ cross-compiles cleanly; `GOOS=linux GOARCH=arm64 go build` produces a
 working arm64 binary on an amd64 build machine. For multi-arch
 builds, `docker buildx` uses **QEMU emulation** under the hood for
 the arch the build machine doesn't natively support (or
-**multi-platform builders** that run on real ARM hardware via AWS
-Graviton CI runners — GitHub Actions has `runs-on: ubuntu-24.04-arm`
-since 2024). Native-ARM builds are 5-10x faster than QEMU-emulated;
-for serious CI volume, run native.
+**multi-platform builders** that run on real arm64 hardware). Native
+builds are much faster than emulated ones, so for serious CI volume, run
+native.
 
 **When ARM doesn't make sense — the honest list.**
 
-1. **NVIDIA CUDA workloads.** There is **no Graviton+GPU instance
-   type**. If your workload requires CUDA (training ML, GPU
-   inference at scale), you're on `g6.*` or `p5.*` — both x86.
-   Graviton is not an option for GPU-bound work. (AWS Trainium /
-   Inferentia accelerators exist on ARM-adjacent platforms but
-   they're a different programming model from CUDA.)
+1. **NVIDIA CUDA workloads.** Graviton GPU instances are narrow: AWS
+   documents G5g as Graviton2 hosts with NVIDIA T4G GPUs
+   ([G5g](https://aws.amazon.com/ec2/instance-types/g5g/)). Most CUDA work
+   (training, large GPU inference) runs on x86 GPU instances such as
+   `g6.*` or `p5.*`. Check the GPU model and your CUDA build before you
+   choose an arch. (AWS Trainium and Inferentia use the Neuron SDK, a
+   different programming model from CUDA.)
 2. **Legacy x86-only binaries.** Anything that bundles a closed-
    source vendor library compiled for `linux/amd64` (some database
    client libraries, some financial-modeling toolkits, some legacy
@@ -162,23 +156,32 @@ For everything else — the entire bookstore-platform stack, every
 mainstream microservice, every modern Go/Java/Python web service —
 Graviton works.
 
-**Mixed-arch cluster pattern.** The right pattern for a real fleet
-is **both NodePools**: the existing `general` (amd64) NodePool stays
-for legacy / single-arch images; the new `graviton` (arm64) NodePool
-takes everything that's multi-arch. Karpenter's weight controls the
-preference (`graviton.weight: 30 > general.weight: 10`), so new
-greenfield Pods land on Graviton first; legacy Pods pinned with
-`nodeSelector: kubernetes.io/arch: amd64` stay on x86. The two
-NodePools coexist; you migrate workloads one by one.
+**Mixed-arch cluster pattern.** The right pattern for a real fleet is
+**both architectures**: the existing amd64 pools stay for legacy and
+single-arch images, and the `graviton` (arm64) pool takes the multi-arch
+workloads that pin it. Weight sets preference, not eligibility. In the
+bookstore tree `spot` (50) outranks `graviton` (30), so raising Graviton's
+weight above 50 would send unpinned Pods to arm64 first. Do that only after
+the audit passes, or an amd64-only image fails to pull. You migrate
+workloads one by one.
 
 The trap to keep in view: **a Pod that lands on arm64 with an
-amd64-only image takes ~15 minutes to surface the error**. Karpenter
-launches the node, the kubelet attempts the pull, the pull fails
-with `no matching manifest for linux/arm64/v8`, the Pod's events
-record `ImagePullBackOff`, the Pod stays Pending. If you don't have
-alerts wired on `ImagePullBackOff` you'll spend an afternoon hunting
-the failure. Either fix the image (multi-arch) or fix the schedule
+amd64-only image fails only at pull time**. Karpenter
+launches the node, containerd attempts the pull, and the pull fails
+with `no match for platform`. The Pod shows `ImagePullBackOff` and stays
+Pending. Without an alert on `ImagePullBackOff`, someone hunts for the
+cause by hand. Either fix the image (multi-arch) or fix the schedule
 (pin to amd64 with `nodeSelector`). Don't leave it dangling.
+
+## Threats and controls
+
+| Threat | Control in this chapter | Goes deeper |
+|---|---|---|
+| A tag is moved to new content after review, so the arm64 layers change under a name you already trust | Pin the index digest in every manifest (`image: <REGISTRY>/...@sha256:<INDEX-DIGEST>`), not the tag | [05.03](../05-security/03-supply-chain.md), [14.12](./12-supply-chain-security.md) |
+| The arm64 entry is a separate build, so a scan or signature of the amd64 image says nothing about it | Scan each platform entry in CI, and sign the index and each platform with `cosign sign --recursive` | [14.12](./12-supply-chain-security.md), [15.03](../15-day-to-day-production-ops/03-image-signing-and-provenance.md) |
+
+These are the only threats this chapter owns. An arch mismatch is an
+availability fault, so it stays in the troubleshooting text.
 
 ## Diagrams
 
@@ -186,21 +189,21 @@ the failure. Either fix the image (multi-arch) or fix the schedule
 
 ```mermaid
 flowchart TB
-    pod["Pod created<br/>(no arch nodeSelector)"]
+    pod["Pod created<br/>(nodeSelector arch: arm64)"]
     sched["kube-scheduler<br/>+ Karpenter"]
-    nps{"Two NodePools available:<br/>general (weight 10, amd64)<br/>graviton (weight 30, arm64)"}
-    np_g["graviton NodePool selected<br/>(higher weight)"]
+    nps{"NodePools, highest weight first:<br/>spot (50, amd64)<br/>graviton (30, arm64)<br/>general (10, amd64)"}
+    np_g["graviton: the only pool the<br/>arm64 pin allows"]
     ec2["AWS launches c7g.large<br/>(arm64 Graviton)"]
     ami["EC2NodeClass<br/>amiSelectorTerms:<br/>al2023@latest<br/>arch=arm64 -> al2023-arm64 AMI"]
     kubelet["kubelet starts on node<br/>node.kubernetes.io/arch: arm64"]
     pull["Image pull:<br/>bookstore/catalog:v1.2.3"]
     reg{"Registry returns manifest list:<br/>linux/amd64 entry<br/>linux/arm64 entry"}
     layer["Registry serves arm64<br/>layer set to this kubelet"]
-    run["Pod Running on Graviton<br/>~20% cheaper than amd64"]
+    run["Pod Running on Graviton"]
 
     pod --> sched --> nps --> np_g --> ec2 --> ami --> kubelet --> pull --> reg --> layer --> run
 
-    note["If the image is single-arch amd64-only:<br/>kubelet pull fails -><br/>no matching manifest for linux/arm64 -><br/>ImagePullBackOff.<br/>Pod stays Pending until manifest fixed."]
+    note["If the image has no arm64 entry:<br/>containerd pull fails -><br/>no match for platform -><br/>ImagePullBackOff.<br/>Pod stays Pending until the image is fixed."]
     reg -.-> note
 ```
 
@@ -216,9 +219,10 @@ SINGLE-ARCH IMAGE (legacy):
          layers: [sha256:abc..., sha256:def..., ...]
 
   Pull from arm64 node:
-    kubelet asks: "what's the layer set for linux/arm64?"
+    containerd asks the index for its linux/arm64 entry.
     registry: "I only have linux/amd64."
-    kubelet: ImagePullBackOff: no matching manifest for linux/arm64/v8
+    containerd: no match for platform in manifest sha256:<DIGEST>: not found
+    kubelet: the Pod shows ImagePullBackOff
 
 MULTI-ARCH MANIFEST LIST (the goal):
   bookstore/catalog:v1.2.3
@@ -228,8 +232,8 @@ MULTI-ARCH MANIFEST LIST (the goal):
            {os: linux, arch: amd64} -> Manifest(amd64) -> layers [sha256:xyz..., ...]
            {os: linux, arch: arm64} -> Manifest(arm64) -> layers [sha256:uvw..., ...]
 
-  Pull from arm64 node: kubelet gets the arm64 entry, pulls those layers.
-  Pull from amd64 node: kubelet gets the amd64 entry, pulls those layers.
+  Pull from arm64 node: containerd gets the arm64 entry, pulls those layers.
+  Pull from amd64 node: containerd gets the amd64 entry, pulls those layers.
   ONE TAG, BOTH ARCHITECTURES, automatic.
 
 BUILD COMMAND:
@@ -256,6 +260,7 @@ INSPECT:
 - `docker` with `buildx` (Docker Desktop ships it; for CLI installs see
   [docs.docker.com/buildx/working-with-buildx](https://docs.docker.com/buildx/working-with-buildx/)).
 - An OCI registry the cluster can pull from (ECR, GHCR, Docker Hub).
+- `cosign` (Sigstore), used in step 2 to sign the image.
 
 The Graviton NodePool definition is in
 [`../examples/bookstore-platform/terraform/karpenter-graviton.tf`](../examples/bookstore-platform/terraform/karpenter-graviton.tf).
@@ -280,12 +285,13 @@ terraform plan -out=tfplan
 terraform apply tfplan
 ```
 
-Verify the NodePool exists:
+Verify the NodePool exists. The output is illustrative, not captured:
 
 ```bash
 kubectl get nodepool
 # NAME       NODECLASS   NODES   READY   AGE
 # general    default     2       True    7d
+# spot       default     1       True    7d
 # graviton   default     0       True    1m
 ```
 
@@ -311,16 +317,25 @@ docker buildx build \
 
 The build runs both architectures concurrently — amd64 on the native
 host CPU, arm64 via QEMU emulation if the host is amd64. On a
-multi-arch build runner (GitHub Actions `ubuntu-24.04-arm`, AWS
-CodeBuild Graviton, or a self-hosted Graviton CI machine), arm64
-builds run natively at full speed.
+native arm64 builder (a hosted arm64 runner in your CI provider, or a
+self-hosted Graviton machine), arm64 builds run natively.
 
-> **In production:** Set up native ARM CI runners. QEMU-emulated arm64
-> builds work for occasional one-offs; for a CI pipeline running
-> hundreds of builds/day, the emulation overhead is 5-10x slower than
-> native. GitHub Actions' `ubuntu-24.04-arm` (a Graviton-backed runner)
-> closes the gap; AWS CodeBuild's `graviton2.medium` and `graviton3.large`
-> images are the AWS-native option.
+> **In production:** Build arm64 on native arm64 builders once CI volume
+> grows. QEMU-emulated builds are fine for occasional one-offs.
+
+Once the push finishes, sign each platform, then pin the index digest.
+`--recursive` signs the index and each platform image it lists. Without
+the flag, cosign signs only the reference you name
+([cosign CLI](https://github.com/sigstore/cosign/blob/main/doc/cosign_sign.md)).
+Signing identity and the admission check belong to
+[14.12](./12-supply-chain-security.md).
+
+```bash
+cosign sign --recursive <REGISTRY>/bookstore-catalog@sha256:<INDEX-DIGEST>
+```
+
+Use the index digest from the top-level `Digest:` line in step 3, not a
+platform entry.
 
 ### 3. Verify the manifest is multi-arch
 
@@ -328,7 +343,7 @@ builds run natively at full speed.
 docker buildx imagetools inspect <REGISTRY>/bookstore-catalog:v1.2.3
 ```
 
-Expected output (truncated):
+Illustrative output, not captured (digests are placeholders):
 
 ```text
 Name:      <REGISTRY>/bookstore-catalog:v1.2.3
@@ -350,86 +365,125 @@ the build failed to produce arm64 — check the build logs.
 
 ### 4. Deploy a Pod that lands on Graviton
 
-Save as `/tmp/catalog-graviton.yaml`:
+The baseline fields below are explained in
+[Part 01 ch.01](../01-core-workloads/01-pods.md#baseline); this manifest
+carries them unchanged. Save as `catalog-graviton.yaml`:
 
 ```yaml
 apiVersion: v1
 kind: Pod
 metadata:
   name: catalog-graviton-test
-  namespace: default
+  namespace: bookstore
   labels:
     arch-test: graviton
 spec:
+  automountServiceAccountToken: false
   # Pin to arm64 so the scheduler MUST place on the Graviton NodePool.
   nodeSelector:
     kubernetes.io/arch: arm64
+  securityContext:
+    runAsNonRoot: true
+    runAsUser: 65532          # the UID the catalog image declares
+    runAsGroup: 65532
+    seccompProfile:
+      type: RuntimeDefault
   containers:
     - name: catalog
-      image: <REGISTRY>/bookstore-catalog:v1.2.3
+      # v1.2.3 index digest: it pins every platform entry.
+      image: <REGISTRY>/bookstore-catalog@sha256:<INDEX-DIGEST>
+      securityContext:
+        allowPrivilegeEscalation: false
+        readOnlyRootFilesystem: true
+        capabilities:
+          drop: ["ALL"]
       ports:
         - containerPort: 8080
       resources:
         requests: { cpu: 100m, memory: 128Mi }
         limits:   { cpu: 500m, memory: 256Mi }
+      volumeMounts:
+        - name: tmp
+          mountPath: /tmp
+  volumes:
+    - name: tmp
+      emptyDir: {}
 ```
 
 Apply:
 
 ```bash
-kubectl apply -f /tmp/catalog-graviton.yaml
-kubectl get pod catalog-graviton-test -w
-# Status: Pending -> Pending (Karpenter provisioning) -> ContainerCreating -> Running
+kubectl apply -f catalog-graviton.yaml
+kubectl get pod catalog-graviton-test -n bookstore -w
+# Illustrative status: Pending (Karpenter provisioning) -> ContainerCreating -> Running
 ```
 
-Within ~60 seconds, Karpenter notices the unschedulable Pod, launches
-a `c7g.large` (or similar Graviton 3 instance), the kubelet pulls the
-arm64 image layer, the Pod runs.
+Karpenter notices the unschedulable Pod and launches a Graviton 3
+instance, such as `c7g.large`. containerd then pulls the arm64 entry, and
+the Pod runs.
 
 Verify the node arch:
 
 ```bash
-NODE=$(kubectl get pod catalog-graviton-test -o jsonpath='{.spec.nodeName}')
+NODE=$(kubectl get pod catalog-graviton-test -n bookstore -o jsonpath='{.spec.nodeName}')
 kubectl get node "$NODE" -o jsonpath='{.metadata.labels.kubernetes\.io/arch}'
-# Output: arm64
+# Illustrative output: arm64
 
 kubectl get node "$NODE" -o jsonpath='{.metadata.labels.node\.kubernetes\.io/instance-type}'
-# Output: c7g.large (or similar Graviton 3)
+# Illustrative output: c7g.large
 ```
 
-### 5. Show what happens with a single-arch image
+### 5. Deliberate failure: a single-arch image on Graviton
 
-To prove the failure mode, deploy a Pod whose image is amd64-only
-onto the Graviton NodePool:
+This step fails on purpose, to show the failure mode. Deploy a Pod whose
+image is amd64-only onto the Graviton NodePool:
 
 ```yaml
 apiVersion: v1
 kind: Pod
 metadata:
   name: legacy-amd64-on-arm64
-  namespace: default
+  namespace: bookstore
 spec:
+  automountServiceAccountToken: false
   nodeSelector:
     kubernetes.io/arch: arm64
+  securityContext:
+    runAsNonRoot: true
+    runAsUser: 65532          # set to the UID your image declares
+    runAsGroup: 65532
+    seccompProfile:
+      type: RuntimeDefault
   containers:
     - name: shell
-      # An amd64-only image as a deliberate failure case. The :3.18
-      # tag predates Alpine's multi-arch defaults on some forks; use
-      # a deliberately single-arch image here for the demo. Most
-      # public images today are multi-arch.
+      # Any single-arch amd64 image you control. It is never meant to start.
       image: <REGISTRY>/<AMD64-ONLY-IMAGE>:<TAG>
       command: [sh, -c, "sleep 3600"]
+      securityContext:
+        allowPrivilegeEscalation: false
+        readOnlyRootFilesystem: true
+        capabilities:
+          drop: ["ALL"]
+      resources:
+        requests: { cpu: 100m, memory: 128Mi }
+        limits:   { cpu: 500m, memory: 256Mi }
+      volumeMounts:
+        - name: tmp
+          mountPath: /tmp
+  volumes:
+    - name: tmp
+      emptyDir: {}
 ```
 
 Apply and watch:
 
 ```bash
-kubectl apply -f /tmp/legacy.yaml
-kubectl describe pod legacy-amd64-on-arm64 | grep -A 3 Events
-# Events:
-#   Warning  Failed       1m (x3)  kubelet  Failed to pull image:
-#     no matching manifest for linux/arm64/v8 in the manifest list entries
-#   Warning  Failed       1m (x3)  kubelet  Error: ErrImagePull
+kubectl apply -f legacy-amd64-on-arm64.yaml
+kubectl describe pod legacy-amd64-on-arm64 -n bookstore | grep -A 3 Events
+# Illustrative events, not captured:
+#   Warning  Failed   kubelet  Failed to pull image: no match for platform in
+#     manifest sha256:<DIGEST>: not found
+#   Warning  Failed   kubelet  Error: ErrImagePull
 ```
 
 This is the failure mode you'd hit in production if you flip
@@ -438,20 +492,20 @@ multi-arch. The fix is either to multi-arch the image (preferred)
 or to pin its Pod to amd64.
 
 ```bash
-kubectl delete pod legacy-amd64-on-arm64
+kubectl delete pod legacy-amd64-on-arm64 -n bookstore
 ```
 
-### 6. Mixed-arch cluster: deploy a Deployment with both arch tolerances
+### 6. Mixed-arch cluster: a Deployment with no arch pin
 
-Most production services should be able to run on either arch. Drop
-the `nodeSelector` and let Karpenter pick the cheaper option:
+A service whose image has both arm64 and amd64 entries can run on either
+arch. Drop the `nodeSelector` and let Karpenter pick by pool weight:
 
 ```yaml
 apiVersion: apps/v1
 kind: Deployment
 metadata:
   name: catalog
-  namespace: default
+  namespace: bookstore
 spec:
   replicas: 3
   selector:
@@ -460,39 +514,56 @@ spec:
     metadata:
       labels: { app: catalog }
     spec:
-      # NO nodeSelector for arch -> Karpenter picks based on weight + cost.
-      # The bookstore-platform NodePool weights:
-      #   graviton.weight = 30  (preferred)
-      #   general.weight  = 10
-      # Karpenter places new Pods on graviton when capacity is available.
+      automountServiceAccountToken: false
+      # No arch nodeSelector: Karpenter picks by pool weight. In the bookstore
+      # tree that order is spot (50), graviton (30), then general (10).
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 65532              # the UID the catalog image declares
+        runAsGroup: 65532
+        seccompProfile:
+          type: RuntimeDefault
       containers:
         - name: catalog
-          image: <REGISTRY>/bookstore-catalog:v1.2.3
+          # v1.2.3 index digest: it pins every platform entry.
+          image: <REGISTRY>/bookstore-catalog@sha256:<INDEX-DIGEST>
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities:
+              drop: ["ALL"]
           resources:
             requests: { cpu: 100m, memory: 128Mi }
             limits:   { cpu: 500m, memory: 256Mi }
+          volumeMounts:
+            - name: tmp
+              mountPath: /tmp
+      volumes:
+        - name: tmp
+          emptyDir: {}
 ```
 
 After apply:
 
 ```bash
-kubectl get pods -l app=catalog -o wide
-# 3 Pods running. Check the node arch each landed on:
-for pod in $(kubectl get pods -l app=catalog -o name); do
-  node=$(kubectl get $pod -o jsonpath='{.spec.nodeName}')
+kubectl get pods -n bookstore -l app=catalog -o wide
+# Check the node arch each Pod landed on:
+for pod in $(kubectl get pods -n bookstore -l app=catalog -o name); do
+  node=$(kubectl get -n bookstore $pod -o jsonpath='{.spec.nodeName}')
   arch=$(kubectl get node $node -o jsonpath='{.metadata.labels.kubernetes\.io/arch}')
   echo "$pod -> $node ($arch)"
 done
 ```
 
-Expect most/all on `arm64` because the Graviton NodePool has higher
-weight; a few may land on `amd64` if Karpenter consolidates onto an
-existing node.
+Illustrative expectation, not captured: unpinned Pods go to the amd64
+spot pool first, so expect amd64 nodes here. Pods reach the arm64 pool
+only when they pin it, or when a higher-weight pool cannot take them.
+Karpenter treats lower-weight pools as the fallback
+([NodePools](https://karpenter.sh/docs/concepts/nodepools/)).
 
 ### 7. Inspect the cost saving
 
-The bookstore platform's `cost-budgets.tf` ships a tag-based AWS Cost
-Explorer query. After 24 hours of mixed workload:
+After a day of mixed workload, group cost by instance family:
 
 ```bash
 # date -d is GNU date; macOS users: replace with date -v-7d +%Y-%m-%d
@@ -503,83 +574,65 @@ aws ce get-cost-and-usage \
   --group-by Type=DIMENSION,Key=INSTANCE_TYPE_FAMILY
 ```
 
-The `c7g`/`m7g`/`r7g` lines show ~20% lower $/hour than `c7i`/`m7i`/`r7i`
-of the same vCPU/memory size. At scale (50+ nodes) the savings show
-up as a clear line in the daily Cost Explorer chart.
+Compare the `c7g`/`m7g`/`r7g` $/hour with `c7i`/`m7i`/`r7i` of the same
+size. The gap varies by size and region.
 
 ### 8. (Optional) Tear down the demo
 
 ```bash
-kubectl delete deployment catalog
-kubectl delete pod catalog-graviton-test --ignore-not-found
+kubectl delete deployment catalog -n bookstore
+kubectl delete pod catalog-graviton-test -n bookstore --ignore-not-found
 ```
 
-Karpenter consolidates the Graviton nodes back to zero within ~30
-seconds of the last Pod leaving.
+After the last Pod leaves, Karpenter removes the empty node once the
+`consolidateAfter` delay passes (30s in the bookstore tree).
 
 ## How it works under the hood
 
-**Image manifest lists (OCI image index).** The OCI spec defines two
-top-level content types: an **image manifest** (single architecture,
-contains a list of layer SHAs) and an **image index** (manifest list,
-contains references to multiple per-arch manifests). Both are JSON
-documents stored in the registry; the registry serves whichever the
-pulling client asks for via the `Accept:` HTTP header. Modern kubelets
-send `Accept: application/vnd.oci.image.index.v1+json,
-application/vnd.docker.distribution.manifest.list.v2+json,
-application/vnd.oci.image.manifest.v1+json, ...` — when the registry
-has an index, it picks the per-arch manifest matching the kubelet's
-runtime (Linux kernel reports the arch to the kubelet; the kubelet
-forwards it as an `OS:` field in the registry request).
+**Image manifest lists (OCI image index).** The OCI image index is an
+optional top-level document that points to one image manifest per platform
+([OCI image index](https://github.com/opencontainers/image-spec/blob/main/image-index.md)).
+The registry returns the index. containerd selects the entry whose platform
+matches the node, then pulls only that manifest's layers. The index digest
+identifies every platform entry at once, which is why it is the digest to
+pin.
 
 **`docker buildx` and BuildKit.** Buildx is the Docker CLI plugin that
-wraps **BuildKit** (Docker's modern build engine). BuildKit's
-`--platform` flag triggers multi-platform mode: for each platform in
-the list, BuildKit either uses a builder node matching that arch
-(native) or runs the build inside QEMU emulation. The resulting
-single-platform images are pushed to a temporary registry location,
-then a final step writes the manifest list pointing at both. The
-client sees one tag (`bookstore-catalog:v1.2.3`) backed by both
-per-arch images.
+wraps **BuildKit** (Docker's modern build engine). BuildKit's `--platform`
+flag triggers multi-platform mode: for each platform in the list, BuildKit
+either uses a builder node matching that arch (native) or runs the build
+inside QEMU emulation. BuildKit then writes an index that points at the
+per-platform images. The client sees one tag (`bookstore-catalog:v1.2.3`)
+backed by both per-arch images.
 
-**QEMU emulation cost.** `binfmt_misc` (the Linux kernel's binary-
-format dispatch) routes arm64 ELF binaries to QEMU's
-`qemu-aarch64-static` on an amd64 host. Each instruction is
-interpreted by QEMU — fast for I/O-bound work (file I/O, network
-calls) but slow for CPU-bound work (compilation, image build).
-Typical slowdown for `docker buildx` on amd64 building arm64: 5-10x.
-For a Go service that takes 20 seconds to build natively, the arm64
-emulation takes 2-3 minutes. Tolerable for occasional builds;
-painful at scale.
+**QEMU emulation cost.** `binfmt_misc` (the Linux kernel's binary-format
+dispatch) routes arm64 ELF binaries to QEMU's `qemu-aarch64-static` on an
+amd64 host. Each instruction is interpreted by QEMU, so I/O-bound work (file
+I/O, network calls) suffers less than CPU-bound work (compilation, image
+build). Measure your own build before you size CI for arm64.
 
-**Native ARM CI runners.** GitHub Actions' `ubuntu-24.04-arm` runner
-launched in GA in October 2024 — a Graviton-backed VM that runs arm64
-builds at full native speed. AWS CodeBuild's `graviton2.medium` and
-`graviton3.large` runner types do the same. A typical CI matrix
-parallelizes the two arches: one job on `ubuntu-24.04` (amd64), one on
-`ubuntu-24.04-arm`. Each builds its native arch fast; a final job
-combines them into a manifest list with `docker buildx imagetools
-create`.
+**Native arm64 CI builders.** A native arm64 builder runs arm64 builds at
+full speed, whether it is a hosted arm64 runner in your CI provider or a
+self-hosted Graviton machine. A typical CI matrix builds each arch natively
+in its own job, then a final job combines them into a manifest list with
+`docker buildx imagetools create`.
 
-**Karpenter's NodePool weight semantics.** When multiple NodePools
-satisfy a Pod's requirements, Karpenter picks the one with the
-**highest weight** that can accommodate the Pod's resource request. A
-Pod with no arch constraint matches both `general` (amd64, weight
-10) and `graviton` (arm64, weight 30); graviton wins. A Pod with
-`nodeSelector: kubernetes.io/arch: amd64` only matches `general`;
-`general` is selected regardless of weight. Weights are integers
-0-100; the bookstore tree uses 10/30/50 (general/graviton/spot) so
-the order is unambiguous.
+**Karpenter's NodePool weight semantics.** When several NodePools can
+satisfy a Pod, Karpenter uses the **highest weight** first. A lower-weight
+pool is the fallback when the top pool cannot be used, for example at its
+limits ([NodePools](https://karpenter.sh/docs/concepts/nodepools/)). A Pod
+with no arch constraint matches all three bookstore pools, so the `spot`
+pool (weight 50, amd64) wins. A Pod with `nodeSelector:
+kubernetes.io/arch: arm64` matches only `graviton`, whatever the weights.
 
-**EC2 AMI alias resolution.** The `EC2NodeClass.amiSelectorTerms`
-field accepts both explicit AMI IDs and AWS Systems Manager Parameter
-Store aliases like `al2023@latest`. When Karpenter resolves the alias
-to launch an instance, it picks the AMI matching the
-**instance type's architecture**. A c7g (arm64) gets the `al2023-
-arm64@latest` AMI; a c7i (amd64) gets the `al2023-amd64@latest` AMI.
-One alias, two resolutions, picked at instance-launch time. This is
-why the Graviton NodePool can share the `default` EC2NodeClass with
-the amd64 NodePool — the alias does the right thing.
+**EC2 AMI alias resolution.** The `EC2NodeClass.amiSelectorTerms` field
+accepts both explicit AMI IDs and AWS Systems Manager Parameter Store aliases
+like `al2023@latest`. When Karpenter resolves the alias to launch an
+instance, it picks the AMI for the **instance type's architecture**. A c7g
+(arm64) gets the arm64 AL2023 AMI, and a c7i (amd64) gets the amd64 one. One
+alias, two resolutions, picked at launch. This is why the Graviton NodePool
+can share the `default` EC2NodeClass with the amd64 NodePool: the alias does
+the right thing.
 
 **Pod scheduling: arch-aware affinity.** The kubelet on every node
 sets a built-in label `kubernetes.io/arch=<ARCH>` (amd64 or arm64).
@@ -588,13 +641,14 @@ matching that label — only arm64 nodes qualify. Without the selector,
 the scheduler tries any node; the NodePool weight determines
 preference, but a Pod that *can't* run on arm64 (its image is amd64-
 only) won't surface that as a scheduling error — it'll surface at
-**image pull time**, after the node is provisioned and the kubelet
+**image pull time**, after the node is provisioned and containerd
 attempts the pull. That's the trap.
 
-**Why `ImagePullBackOff` is the only visible signal.** The CRI
-contract is: kubelet pulls image, registry serves manifest, kubelet
-verifies the manifest matches the node's arch, kubelet unpacks
-layers. The "does the manifest match" check happens in step 3.
+**Why `ImagePullBackOff` is the only visible signal.** The kubelet asks
+containerd to pull the image over CRI. containerd matches the index's
+platform entries against the node and fails with `no match for platform`
+when none fits
+([containerd source](https://github.com/containerd/containerd/blob/main/core/images/image.go)).
 There's no admission-time check that "this Pod's image supports this
 node's architecture" — admission runs before the Pod is scheduled,
 before the node is even chosen. So a multi-arch image audit is **a
@@ -602,15 +656,6 @@ build-time discipline**, not an admission-time enforcement. Tools
 like Trivy can list a manifest's platforms; integrate that into CI.
 
 ## Production notes
-
-> **In production:** Set up native ARM CI runners. QEMU-emulated
-> multi-arch builds work fine for dozens of builds/day; at hundreds
-> of builds/day the emulation overhead is real engineering time.
-> GitHub Actions' `ubuntu-24.04-arm` (Graviton-backed runner) and AWS
-> CodeBuild's `arm-graviton3.large` image type are the AWS-native
-> options. The CI cost difference is small ($0.008/min vs
-> $0.005/min on AWS); the developer-feedback-loop difference is
-> 5-10x.
 
 > **In production:** Audit every image in the fleet for multi-arch
 > support **before** flipping `enable_graviton_pool = true`. A
@@ -621,45 +666,24 @@ like Trivy can list a manifest's platforms; integrate that into CI.
 > on the MISSING list either needs to multi-arch or its Pod needs to
 > pin `kubernetes.io/arch: amd64`.
 
-> **In production:** Do not run mixed-arch Postgres replicas in CNPG.
-> A CNPG primary on arm64 and standby on amd64 is technically
-> supported (Postgres binaries are arch-agnostic at the protocol
-> level), but the per-arch differences in WAL replay performance and
-> some extension binaries (`pg_stat_statements`, `pgvector`) can
-> create surprises during failover. Pin the full CNPG cluster to one
-> arch via `nodeSelector` until you've stress-tested cross-arch
-> failover end-to-end. The bookstore-platform's CNPG cluster runs on
-> amd64 today; moving to arm64 is a deliberate migration, not a
+> **In production:** Keep each CNPG (CloudNativePG) cluster on one
+> architecture, pinned with `nodeSelector`, until you have tested failover
+> across architectures. Check each extension binary, such as `pgvector`, for
+> arm64 support. Moving a database to arm64 is a deliberate migration, not a
 > NodePool toggle.
 
-> **In production:** GPU workloads stay on x86. There is no Graviton
-> instance with NVIDIA GPUs. ML inference on bookstore's
-> recommendations service uses `g5.xlarge` (NVIDIA A10G, x86); ML
-> training on the data team's pipelines uses `p5.*` (NVIDIA H100,
-> x86). The Graviton NodePool is for stateless web services + batch
-> compute that doesn't need CUDA. AWS Trainium / Inferentia exist on
-> ARM-adjacent platforms (`trn1`, `inf2`) for specialized ML
-> workloads — different programming model from CUDA; treat as a
-> separate decision.
+> **In production:** Keep CUDA workloads off the Graviton pool unless the
+> GPU model is one AWS documents for Graviton. AWS Trainium and Inferentia
+> use the Neuron SDK, a different programming model from CUDA, so treat them
+> as a separate decision.
 
-> **In production:** Run the `kubectl describe pod` event check on
-> any Pod in `Pending` for > 2 minutes. The two failure modes —
-> `Insufficient cpu/memory` (Karpenter needs more time to scale) and
-> `no matching manifest for linux/arm64/v8` (image not multi-arch)
-> — look similar from a `kubectl get pods` view but require entirely
-> different fixes. Wire an alert on `ImagePullBackOff` in
-> Prometheus/Alertmanager — the bookstore stack ships a rule (Phase
-> 13c ch.13.12); if you didn't ship it, write it.
-
-> **In production:** Container image signing (cosign) verifies the
-> digest **of the per-arch manifest entry the kubelet pulled**, not
-> the manifest list as a whole. So a signed multi-arch image has one
-> signature **per platform** — sign all platforms in CI, or your
-> Kyverno `verifyImages` policy will reject the arch you didn't sign.
-> The `cosign sign --recursive` flag signs every entry in the
-> manifest list in one go; that's the right shape. The supply-chain
-> chapter ([14.12](./12-supply-chain-security.md)) walks the
-> end-to-end multi-arch + signing pipeline.
+> **In production:** Run the `kubectl describe pod` event check on any Pod
+> in `Pending` for a few minutes. Two failure modes look alike in
+> `kubectl get pods` but need different fixes: `Insufficient cpu/memory`
+> (Karpenter needs more time to scale) and `no match for platform` (the image
+> has no arm64 entry). Wire an alert on `ImagePullBackOff` in
+> Prometheus/Alertmanager. The bookstore tree ships no such rule, so write
+> one.
 
 ## Quick Reference
 
@@ -675,6 +699,9 @@ docker buildx build \
   --platform linux/amd64,linux/arm64 \
   --tag <REGISTRY>/<IMAGE>:<TAG> \
   --push .
+
+# Sign the index and each platform entry, then pin the index digest.
+cosign sign --recursive <REGISTRY>/<IMAGE>@sha256:<INDEX-DIGEST>
 
 # Verify a manifest is multi-arch (both platforms present).
 docker buildx imagetools inspect <REGISTRY>/<IMAGE>:<TAG>
@@ -729,14 +756,14 @@ Graviton-readiness checklist (the cluster is ready when all six are yes):
 - [ ] CI builds multi-arch by default
       (`docker buildx build --platform linux/amd64,linux/arm64`).
 - [ ] Karpenter NodePool with `kubernetes.io/arch: arm64` requirement
-      is deployed and weighted higher than the amd64 NodePool.
+      is deployed, and its weight is set on purpose against the amd64
+      pools (spot is 50 in the bookstore tree).
 - [ ] Workloads that *cannot* run on arm64 (CUDA, vendor x86-only
       binaries) have explicit `nodeSelector: kubernetes.io/arch: amd64`.
 - [ ] Alerting wired on `ImagePullBackOff` Pod events (catches arch
       mismatches within minutes, not hours).
-- [ ] Cosign signs every platform entry in the manifest list (the
-      `--recursive` flag); Kyverno `verifyImages` accepts all signed
-      arches.
+- [ ] Each image's index and every platform entry are signed
+      (`cosign sign --recursive`), and Deployments pin the index digest.
 
 ## Test your understanding
 
@@ -745,14 +772,14 @@ Graviton-readiness checklist (the cluster is ready when all six are yes):
 1. **Why does the chapter insist on multi-arch manifests rather than separate `:tag-amd64` / `:tag-arm64` tags?**
    <details><summary>Show answer</summary>
 
-   Kubernetes pulls images by their tag without knowing the node's architecture in the pull request — the registry handles the arch resolution. A multi-arch manifest list lets one tag (`my-service:v1.2.3`) point to multiple per-architecture layer sets, and the registry serves whichever entry matches the kubelet's `linux/amd64` or `linux/arm64` request. Two separately-tagged images break this: the kubelet pulls `my-service:v1.2.3` and the registry has no way to choose. Then you have to put arch-specific tags in the Deployment, which means the same Deployment can't span architectures, which defeats the cost-arbitrage Karpenter could do.
+   Kubernetes pulls images by their tag without knowing the node's architecture in the pull request, and the registry handles the arch resolution. A multi-arch manifest list lets one tag (`my-service:v1.2.3`) point to multiple per-architecture layer sets, and containerd picks whichever entry matches the node's `linux/amd64` or `linux/arm64` platform. Two separately-tagged images break this: the kubelet pulls `my-service:v1.2.3` and the registry has no way to choose. Then you have to put arch-specific tags in the Deployment, which means the same Deployment can't span architectures, which defeats the cost-arbitrage Karpenter could do.
 
    </details>
 
-2. **You enable `var.enable_graviton_pool = true` on a Friday afternoon, and the platform's payments service goes into `ImagePullBackOff: no matching manifest for linux/arm64/v8` on Monday morning. What's the diagnosis and immediate fix?**
+2. **You enable `var.enable_graviton_pool = true` on a Friday afternoon, and the platform's payments service goes into `ImagePullBackOff` with `no match for platform` on Monday morning. What's the diagnosis and immediate fix?**
    <details><summary>Show answer</summary>
 
-   The payments image is single-arch amd64 — the build pipeline didn't run `docker buildx --platform linux/amd64,linux/arm64`. The Graviton NodePool with higher weight pulled the Pod onto an arm64 node, the pull failed. Immediate fix: add `nodeSelector: kubernetes.io/arch: amd64` to the payments Deployment to pin it back to x86 nodes while you fix the build. Then patch the CI workflow to use `docker buildx build --platform linux/amd64,linux/arm64 --push`, rebuild + push the multi-arch image, remove the nodeSelector. The chapter's discipline: audit every image with `docker manifest inspect <image> | jq '.manifests[].platform'` *before* flipping the Graviton flag in production.
+   The payments image is single-arch amd64. The build pipeline didn't run `docker buildx --platform linux/amd64,linux/arm64`. The Pod landed on an arm64 node, because it pinned arm64 or the Graviton pool outweighed spot, and the pull failed. Immediate fix: add `nodeSelector: kubernetes.io/arch: amd64` to the payments Deployment to pin it back to x86 nodes while you fix the build. Then patch the CI workflow to use `docker buildx build --platform linux/amd64,linux/arm64 --push`, rebuild + push the multi-arch image, remove the nodeSelector. The chapter's discipline: audit every image with `docker manifest inspect <image> | jq '.manifests[].platform'` *before* flipping the Graviton flag in production.
 
    </details>
 
@@ -763,19 +790,18 @@ Graviton-readiness checklist (the cluster is ready when all six are yes):
 
    </details>
 
-4. **Hands-on extension — bring up the Graviton NodePool with `weight: 30` while the `general` NodePool stays at `weight: 10`. Deploy a 10-replica multi-arch service and watch where pods land.**
-   <details><summary>What you should see</summary>
+4. **A team scans and signs only the `linux/amd64` entry of a base image, and its service also runs on arm64 nodes. What is the gap, and how does this chapter close it?**
+   <details><summary>Show answer</summary>
 
-   Karpenter prefers the higher-weighted NodePool when both could satisfy the Pod's requirements. New pods land on c7g/m7g instances (arm64), and Karpenter provisions arm64 nodes first. Older `general`-pool nodes still serve existing pods until they expire / drain; new replicas are arm64. After 720h (the `expireAfter`), the cluster is effectively all-Graviton — the ~20% discount kicks in once the rotation is complete. The lesson: weight is the cost-routing knob, not the only knob — anti-affinity, taints, and explicit nodeSelectors still override it.
+   The arm64 entry is a separate build. Nothing scanned or signed it, so its layers are unreviewed even though the tag looks verified. The chapter closes the gap in two steps: scan each platform entry in CI, and sign the index and each platform with `cosign sign --recursive`. It then pins the index digest, so the tag cannot move to different layers under a name you reviewed. The admission check that enforces those signatures is covered in 14.12.
 
    </details>
 
 ## Further reading
 
-- **AWS Graviton documentation**
-  <https://docs.aws.amazon.com/AWSEC2/latest/UserGuide/aws-graviton-processors.html>;
-  the authoritative source for instance-family lineage, supported
-  workloads, and the per-generation performance + price math.
+- **AWS Graviton**
+  <https://aws.amazon.com/ec2/graviton/>; AWS's overview and the source of
+  the "up to 20% less" comparison this chapter cites.
 - **Docker buildx multi-platform docs**
   <https://docs.docker.com/build/building/multi-platform/>; the
   upstream reference for the `--platform` flag, the OCI image-index
@@ -789,12 +815,14 @@ Graviton-readiness checklist (the cluster is ready when all six are yes):
   <https://github.com/opencontainers/image-spec/blob/main/image-index.md>;
   the standard that defines the multi-arch manifest list this chapter
   relies on.
-- **GitHub Actions ARM runners announcement**
-  <https://github.blog/changelog/2024-10-30-arm64-on-github-actions-powered-by-azure/>;
-  the milestone that made native arm64 CI runs widely available
-  outside AWS-native CI.
 - **AWS Graviton getting-started + workload-compatibility guide**
   <https://github.com/aws/aws-graviton-getting-started>; AWS's
   open-source repository with per-language porting guides and
   performance-tuning notes, including the JNI / native-library cases
   this chapter flags.
+- **cosign sign**
+  <https://github.com/sigstore/cosign/blob/main/doc/cosign_sign.md>; the
+  `--recursive` flag used in Hands-on step 2.
+- **containerd image platform matching**
+  <https://github.com/containerd/containerd/blob/main/core/images/image.go>;
+  the `no match for platform` error this chapter quotes.

@@ -3,16 +3,14 @@
 #
 # Default OFF. Enable with `enable_graviton_pool = true`.
 #
-# Why bother: c7g/m7g/r7g are 20-40% cheaper than equivalent c7i/m7i/r7i for
-# most stateless workloads, and the AL2023 EKS AMI for arm64 has the same
-# kernel + addon support as x86. The kernel-bypass perf hit you'd worry about
-# on bare ARM is irrelevant in Kubernetes — your bottleneck is the network and
-# the runtime, both of which are JITted/compiled-native on the host arch.
+# Why bother: AWS states Graviton (c7g/m7g/r7g) costs up to 20% less than
+# comparable x86 instances (c7i/m7i/r7i). Check each add-on's arm64 support
+# before you enable the pool.
 #
 # Caveats:
 #   - Container images MUST be multi-arch (built with `docker buildx --platform
 #     linux/amd64,linux/arm64`) or arm64-only. If you push amd64-only images,
-#     pods on this NodePool will ImagePullBackOff with "no matching manifest".
+#     pods on this NodePool will fail to pull with "no match for platform".
 #   - Anything that bundles a JNI native library or a non-Go binary needs an
 #     arm64 build. Most modern OCI images already publish both.
 #   - The amiSelectorTerms alias "al2023@latest" resolves to arm64 because the
