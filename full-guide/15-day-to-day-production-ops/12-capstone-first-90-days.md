@@ -176,6 +176,13 @@ two weeks, the plan slips, not the item. [Part 13 ch.12](../13-grand-capstone-bo
 introduced the "runbooks decay" rule; the analog here is **plans
 decay**.
 
+## Threats and controls
+
+| Threat | Control | Deeper |
+|---|---|---|
+| The previous owner's access outlives the handover: cluster admin, Vault, CI secrets, PagerDuty admin | Inventory every holder on Day 1. Cut privileged access at the Day 31 cutover and rotate the secrets they could read. Secondary duty needs read-only access plus break-glass. | [Part 05 ch.01](../05-security/01-authn-authz-rbac.md) (RBAC); [ch.15.05](./05-production-secrets-vault-eso.md); [ch.15.09](./09-hotfix-workflow-and-breakglass.md) |
+| Tribal shortcuts ("just `kubectl edit` it") bypass the change path | Write the change path down in Phase 1. Ship every solo change as a PR through Argo CD. Retire the shortcuts on the cutover date. | [ch.15.01](./01-pr-to-production-lifecycle.md); [ch.15.04](./04-multi-environment-promotion.md) |
+
 ## Diagrams
 
 ### Diagram A — the 90-day arc (Mermaid)
@@ -193,6 +200,7 @@ flowchart TB
     end
 
     subgraph p2["Days 31-60 — Own + Improve"]
+        o0["cut previous owner's<br/>privileged access<br/>(Day 31, ch.15.09)"]
         o1["ack synthetic page<br/>(ch.15.10)"]
         o2["write training postmortem<br/>(ch.15.10)"]
         o3["rotate one secret<br/>(ch.15.05)"]
@@ -213,10 +221,10 @@ flowchart TB
 
     start --> s1
     s1 --> s2 --> s3 --> s4 --> g1
-    g1 -->|"yes"| o1
+    g1 -->|"yes"| o0
     g1 -->|"no"| s2
 
-    o1 --> o2 --> o3 --> o4 --> g2
+    o0 --> o1 --> o2 --> o3 --> o4 --> g2
     g2 -->|"yes"| m1
     g2 -->|"no"| o4
 
@@ -237,6 +245,7 @@ Inherit    14-21     shadow on-call for one rotation          ch.15.10          
 Inherit    21-28     alert routing audit + backup audit       ch.15.10 + Part 14 ch.14  test page received; velero get backups clean
 Inherit    28-30     Day-30 review meeting                    this chapter           gate answered yes; written sign-off
 ─────       ─────    ─────────────────────────────────────    ─────────────────      ────────────────────────────────────────
+Own        31        cut previous owner's privileged access   ch.15.05 + ch.15.09    auth can-i denies their principal
 Own        31-35     ack first synthetic page solo            ch.15.10               synthetic incident closed, response < target
 Own        35-40     write first training postmortem          ch.15.10               postmortem file in runbooks/postmortems/
 Own        40-45     rotate one secret end-to-end             ch.15.05               vault rotation log + pod restart confirmed
@@ -261,7 +270,10 @@ This walks a representative team-member's first 90 days against the
 [`../examples/bookstore-platform/`](../examples/bookstore-platform/).
 The team in this hands-on consists of two engineers (the realistic
 minimum for an inheriting team); the dates are illustrative starting
-on a notional Monday.
+on a notional Monday. The cloud and cluster commands are reference
+only: none ran for this chapter. Narrated times, numbers and output are
+illustrative, and each `Expected` line states what a healthy platform
+should show, not captured output.
 
 ### Day 1 — Clone the repo; verify cluster access; meet the previous owner
 
@@ -274,7 +286,7 @@ cat README.md | less
 
 # Day 1, hour 2 — verify the inheriting team has cluster access
 # The previous owner has already added the new team's IAM principals
-# to the EKS access entries (the IAM-driven model from Part 14 ch.02).
+# to the EKS access entries (Part 14 ch.07).
 aws eks update-kubeconfig \
   --name <CLUSTER-NAME> \
   --region <REGION> \
@@ -291,7 +303,9 @@ kubectl get nodes
 # rotation, the most-frequent alerts of the last 90 days, the
 # operational lessons that AREN'T in any runbook ("the cron at
 # 02:00 UTC sometimes restarts the payments pods; harmless").
-# The new owner takes notes; nothing is acted on today.
+# The new owner takes notes, and lists every principal with cluster,
+# Vault, CI or PagerDuty admin access. Nothing is revoked today: that
+# is the Day 31 cutover.
 ```
 
 The new owner ends Day 1 with: cluster access verified, a notebook
@@ -311,23 +325,25 @@ know existed.
 # Find the most recent merged PR
 gh pr list --state merged --limit 1 \
   --json number,title,mergedAt,headRefName
-# {"number":1247,"title":"checkout: handle Stripe webhook retries",...}
+# Illustrative output (not captured): {"number":<PR-NUMBER>,"title":"...",...}
 
 # Step 1: Read the PR. What did it change? What tests were added?
-gh pr view 1247
+gh pr view <PR-NUMBER>
 
 # Step 2: Find the CI run that built the merge commit
-MERGE_SHA=$(gh pr view 1247 --json mergeCommit -q .mergeCommit.oid)
+MERGE_SHA=$(gh pr view <PR-NUMBER> --json mergeCommit -q .mergeCommit.oid)
 gh run list --commit "$MERGE_SHA"
-# Expected: lint, test, scan, build, cosign-sign, push-ecr stages
-# all green. (The CI pipeline from ch.15.02.)
+# Expected: every stage ch.15.02 defines is green, the signing step
+# included. (The CI pipeline from ch.15.02.)
 
-# Step 3: Find the image cosign signed
-COMMIT_SHORT=$(echo "$MERGE_SHA" | cut -c1-7)
-cosign verify \
-  --certificate-identity-regexp ".*" \
-  --certificate-oidc-issuer https://token.actions.githubusercontent.com \
-  <ECR-REPO>/bookstore-storefront:"$COMMIT_SHORT"
+# Step 3: Verify the signature by digest, against the exact signing
+# workflow (the pattern from ch.15.03, section 0). <DIGEST> is the
+# digest the push step printed. Do not use a wildcard identity such as
+# ".*": it would accept a signature from any workflow in any repository.
+ID="https://github.com/<OWNER>/<REPO>/.github/workflows/<PIPELINE>.yml@refs/heads/main"
+IMAGE='<ECR-REPO>/bookstore-storefront@sha256:<DIGEST>'
+cosign verify --certificate-identity "$ID" \
+  --certificate-oidc-issuer https://token.actions.githubusercontent.com "$IMAGE"
 # Expected: cosign verifies the signature; the keyless flow from
 # ch.15.03 worked.
 
@@ -344,14 +360,13 @@ kubectl -n bookstore-platform get rollouts bookstore-storefront \
 
 # Step 6: Find the AnalysisRun and its result
 kubectl -n bookstore-platform get analysisruns \
-  -l rollout=bookstore-storefront --sort-by=.metadata.creationTimestamp \
-  | tail -3
+  --sort-by=.metadata.creationTimestamp | tail -3
 # Expected: AnalysisRun(s) with phase=Successful
 
-# Step 7: Confirm the change is the rollout's stableRS today
-kubectl -n bookstore-platform describe rollout bookstore-storefront \
-  | grep -E "Current Pod Hash|Stable Pod Hash"
-# Expected: Current == Stable; the canary completed; this PR is in prod.
+# Step 7: Confirm the change is the rollout's stable ReplicaSet today
+kubectl -n bookstore-platform get rollout bookstore-storefront \
+  -o jsonpath='{.status.currentPodHash} {.status.stableRS}{"\n"}'
+# Expected: the two hashes match; the canary completed; this PR is in prod.
 ```
 
 The new owner ends Day 7 with: a complete mental model of one
@@ -370,28 +385,25 @@ referring to the docs.
 # checked-out repo, executing the commands in their own terminal
 # against a side-by-side window. The IC narrates the WHY.
 
-# Example: a page fires for "PaymentsHighLatency" mid-week.
-# The IC opens the runbook (ch.15.10):
+# Example: BookstorePaymentsFailureRate fires mid-week. The IC opens
+# the runbook (ch.15.10's shape):
 cd runbooks
-cat payments-high-latency.md
-# Step 1: Check — is it real? (60s)
-#   kubectl -n bookstore-platform top pods -l app=payments
-#   curl https://grafana.../d/payments-slo
-# Step 2: Diagnose — which dependency? (Stripe? DB? Kafka?)
-#   kubectl -n bookstore-platform logs -l app=payments --tail=200 | grep -E "error|timeout"
-# Step 3: Mitigate — circuit-break or scale?
-# Step 4: Postmortem — within 48h if P0/P1
+cat runbook-payments-failure-rate.md
+# Step 1: Check. Is the alert real? Are the payment pods Running?
+#   kubectl -n bookstore-platform get pods -l app=payments-gateway
+# Step 2: Diagnose. Is Stripe up? Then which error dominates?
+#   kubectl -n bookstore-platform logs -l app=payments-gateway --tail=200 | grep -E "error|timeout"
+# Step 3: Mitigate, with the step the runbook gives for that cause.
+# Step 4: Postmortem within 48h if P0/P1
 
 # The IC walks each step; the new owner runs each command in their
-# own terminal; the difference between the two terminals' output is
-# the conversation ("why are we filtering by error/timeout and not
-# by latency? — because the latency dashboard already told us it's
-# slow; we need to know WHY").
+# own terminal. The two terminals' output is the conversation. Why
+# check Stripe before our own logs? Because an upstream outage makes
+# our logs a red herring, and the runbook's order says so.
 
-# At the end of the rotation (Day 21), the new owner has observed
-# 3-7 pages (the bookstore-platform v2 average is ~5/week per ch.15.11),
-# each one a guided exercise through the runbook the new owner
-# will themselves use on Day 31+.
+# At the end of the rotation (Day 21), the new owner has observed the
+# pages that fired, at least three by the Phase 1 proof. Each one was
+# a guided exercise through the runbook the new owner uses from Day 31.
 ```
 
 The new owner ends the shadow week with: muscle memory for "open
@@ -410,37 +422,37 @@ the triage process** — installed by repetition.
 # the rotation. The new owner does not know the page is synthetic
 # until after they resolve it.
 
-# Day 30, T+0: page fires
+# Day 30, T+0: page fires (illustrative: the example tree has no
+# runbook for this alert, and writing one becomes an action item)
 # "PaymentsWebhookBacklog: webhook delivery queue >100 messages for 5min"
 # Severity: P2 (degraded, not down)
 
-# Day 30, T+30s: ack the page in PagerDuty
-pd-cli incident ack --id <INCIDENT-ID>
+# Day 30, T+30s: acknowledge the page in PagerDuty (UI or CLI)
 
-# Day 30, T+1m: open the runbook
-cat runbooks/payments-webhook-backlog.md
-# Step 1: Check (60s): kubectl -n bookstore-platform get pods -l app=payments-webhook
-#   Expected: all Ready
-#   Actual: one pod in CrashLoopBackOff -- the injected chaos
-# Step 2: Diagnose: kubectl logs <pod> -p
-#   Output: SIGTERM at <timestamp>; this looks like an OOMKill
-# Step 3: Mitigate: kubectl delete pod <pod> (replicas controller
-#   will recreate; the queue will drain once 3-of-3 are healthy again)
+# Day 30, T+1m: no runbook matches this alert. Open the closest one and
+# use its check order: Check, then Diagnose, then Mitigate.
+cat runbooks/runbook-payments-failure-rate.md
+kubectl -n bookstore-platform get pods -l app=payments-webhook
+# Illustrative result: one pod in CrashLoopBackOff (the injected fault)
+kubectl -n bookstore-platform logs <pod> -p
+# Illustrative output: SIGTERM at <timestamp>, which looks like an OOMKill
+# Mitigate: kubectl delete pod <pod> (the ReplicaSet recreates it; the
+# queue drains once every replica is healthy)
 
 # Day 30, T+8m: the queue drains; alert clears; incident resolved.
 
 # Day 30, T+30m: the new owner writes the first postmortem (ch.15.10's
 # template). Required even for P2 during training week.
-cp runbooks/postmortems/_TEMPLATE.md \
+mkdir -p runbooks/postmortems
+cp runbooks/postmortem-template.md \
    runbooks/postmortems/$(date -u +%Y-%m-%d)-payments-webhook-backlog.md
 $EDITOR runbooks/postmortems/$(date -u +%Y-%m-%d)-payments-webhook-backlog.md
 # Fill: Summary, Impact (~5min queue lag, no customer-visible failure),
 # Timeline (T+0 page → T+30s ack → T+1m diagnose → T+8m clear),
-# Root cause (pod OOMKilled — was it really? or chaos-injection?),
-# Action items (raise memory limit on payments-webhook? add an OOM
-# alert that fires earlier than the queue-backlog alert?),
-# Lessons (the queue-backlog alert is downstream of pod health;
-# we want both).
+# Root cause (pod OOMKilled: was it really, or chaos-injection?),
+# Action items (write the missing webhook runbook; raise the memory
+# limit? add an OOM alert that fires earlier than the backlog alert?),
+# Lessons (the backlog alert is downstream of pod health; we want both).
 
 # Day 30, T+45m: the on-call lead reveals the chaos injection.
 # The new owner learns: their triage worked end-to-end; the
@@ -453,6 +465,8 @@ action items) in `runbooks/postmortems/`; the Day-30 gate answered
 
 ### Day 60 — Lead a chaos game-day on staging
 
+This is a plan for a game-day. No such game-day ran for this chapter.
+
 ```bash
 # Day 60 is mid-Phase-3 territory in this hands-on; the new owner
 # leads (not just executes) a chaos game-day on the staging cluster.
@@ -460,17 +474,18 @@ action items) in `runbooks/postmortems/`; the Day-30 gate answered
 # available when one of three payments-gateway pods is killed."
 
 # Step 1: Document the hypothesis + safety boundary in the
-# chaos-game-day log
+# chaos-game-day log. The date is a placeholder.
 cat >> runbooks/chaos-game-days.md <<'EOF'
-## 2026-07-19 — payments-gateway pod-kill (single instance)
+## <YYYY-MM-DD>: payments-gateway pod-kill (single instance)
 
-- Hypothesis: checkout SLO (p99 < 500ms; error rate < 1%) holds
+- Hypothesis: checkout SLO (p99 under 500ms, matching the catalog
+  latency alert; error rate within the team's target) holds
   when one of three payments-gateway pods is killed for 60s.
 - Safety boundary: STAGING only; one pod max; 60s duration;
   abort if synthetic checkout fails 3x consecutively.
 - Lead: <NEW-OWNER>
 - Observer: <PEER>
-- Runbook: runbooks/payments-pod-down.md
+- Runbook: runbooks/chaos-gameday.md
 EOF
 
 # Step 2: Apply the chaos
@@ -494,19 +509,17 @@ EOF
 # LOUD; the peer observes; the synthetic checkout monitor watches
 # the SLO).
 
-# Step 4: After 5 minutes — pull up the dashboard
-# - p99 latency: 412ms (spike to 480ms during the kill window,
-#   stayed under SLO)
-# - error rate: 0.3% (briefly 0.8% during failover, never broke 1%)
-# - checkout flow: succeeded throughout
+# Step 4: After the 60s kill and 5 minutes of observation, compare the
+# dashboard with the hypothesis: p99 latency and error rate during the
+# kill window, and whether synthetic checkout kept succeeding. Record
+# the values you observe.
 
-# Step 5: Write the postmortem (yes, postmortems happen for SUCCESSFUL
-# chaos drills too — the learning is "what would have made this
-# easier?")
-$EDITOR runbooks/postmortems/2026-07-19-chaos-payments-gateway.md
-# Action items: the runbook step "check for retry storms downstream"
-# wasn't actually exercised (no retry storm fired); add a more
-# severe scenario for next quarter (kill 2 of 3 simultaneously).
+# Step 5: Write the postmortem (postmortems happen for SUCCESSFUL
+# chaos drills too; the question is "what would have made this easier?")
+$EDITOR runbooks/postmortems/<YYYY-MM-DD>-chaos-payments-gateway.md
+# Action items, if the run never exercised the runbook's retry-storm
+# step: add a more severe scenario for next quarter (kill 2 of 3
+# simultaneously).
 ```
 
 The new owner ends Day 60 with: a chaos game-day they LED (not just
@@ -972,8 +985,10 @@ mental map. Page nobody on your own.
 - [ ] **Day 1-3: Cluster access + repo clone.** `aws eks
       update-kubeconfig`; `git clone` the platform repo; read
       the top-level `README.md`; locate `runbooks/`, `ci/`,
-      `helm/`, `terraform/`. Teaches: ch.15.01 + Part 14 ch.02.
-      Proof: `kubectl get nodes` returns Ready.
+      `helm/`, `terraform/`; list every principal with cluster,
+      Vault, CI or PagerDuty admin access (revoke nothing yet).
+      Teaches: ch.15.01 + Part 14 ch.07. Proof: `kubectl get
+      nodes` returns Ready; the access list is in the wiki.
 - [ ] **Day 3-7: Trace one production PR end-to-end.** Pick the
       most-recent merged PR; walk PR → CI run → cosign signature
       → ECR image → Argo CD Application → Argo Rollout → today's
@@ -1013,6 +1028,14 @@ days to Phase 1.
 Goal: run the procedures the previous owner used to run. Make your
 first low-stakes mistakes in supervised settings.
 
+- [ ] **Day 31: Cut over privileged access.** The previous owner
+      moves to secondary. Remove their cluster-admin, Vault and CI
+      admin access, or cut it to read-only with break-glass under
+      ch.15.09. Rotate each secret they could read (ch.15.05).
+      Teaches: Part 05 ch.01, ch.15.05, ch.15.09. Proof: `kubectl
+      auth can-i delete secrets -n bookstore-platform --as
+      <PREVIOUS-OWNER>` prints `no`; the rotations are in the Vault
+      audit log.
 - [ ] **Day 31-35: Ack the first synthetic page solo.** The team
       lead injects a controlled chaos fault (a pod-kill of a non-
       critical service); the new owner acks, triages, resolves;
@@ -1044,7 +1067,7 @@ first low-stakes mistakes in supervised settings.
       flag-state transitions logged in the feature-flag
       provider's audit log.
 - [ ] **Day 55-58: Hotfix workflow rehearsal.** Walk the
-      breakglass procedure (`docs/breakglass.md`) without
+      breakglass procedure (`hotfix/HOTFIX-RUNBOOK.md`) without
       actually invoking the breakglass role; demonstrate the
       audit trail; the post-incident cleanup PR shape. Teaches:
       ch.15.09. Proof: rehearsal log in `runbooks/`.
@@ -1079,8 +1102,8 @@ into long-term operational health.
       gateway pods dies for 60s"); define the safety boundary;
       apply the Chaos Mesh CR; lead the response; write the
       postmortem (yes — even for successful drills). Teaches:
-      Part 13 ch.12 + ch.15.10. Proof: chaos CR YAML in
-      `runbooks/chaos-game-days/`; postmortem in
+      Part 13 ch.12 + ch.15.10. Proof: the game-day entry in
+      `runbooks/chaos-game-days.md`; postmortem in
       `runbooks/postmortems/`.
 - [ ] **Day 75-80: First DR drill (kind or cloud).** Follow
       [Part 14 ch.17](../14-eks-in-production-a-to-z/17-cross-region-dr-account-baseline-90-day-runbook.md)
@@ -1121,7 +1144,7 @@ Day 120 target.
   the team is the owner.
 ```
 
-### Closing checklist (the ownership story closes when all seven are yes)
+### Closing checklist (the ownership story closes when all eight are yes)
 
 - [ ] The 90-day plan above is cloned into the team's wiki;
       every checkbox has an owner; every gate has a calendared
@@ -1141,6 +1164,9 @@ Day 120 target.
 - [ ] The previous owner exits the on-call rotation on Day 90; if
       they do not, the handoff is incomplete and the plan needs
       another iteration (a written Day 120 commitment).
+- [ ] The previous owner's privileged access was cut on Day 31 and
+      the secrets they could read were rotated. The proof is the
+      denied `kubectl auth can-i` check and the Vault audit entries.
 
 ## Test your understanding
 
@@ -1181,10 +1207,10 @@ Day 120 target.
 
    </details>
 
-6. **At Day 90 the team is at "could lead onboarding without the previous owner" but the previous owner's calendar still shows weekly bookstore-platform meetings. What's the chapter's signal here and what action does it call for?**
+6. **On the Day 31 cutover the previous owner moves to secondary. On Day 60 their cluster-admin, Vault and CI tokens still work. Which control is missing, and how do you prove it is closed?**
    <details><summary>Show answer</summary>
 
-   The Day 90 gate is "could I onboard a new team member without involving the previous owner?" If YES, the previous owner exits the on-call rotation, the Slack DMs go to channels not individuals, the weekly meetings are dropped or attended optionally. If the previous owner's calendar still has bookstore-platform meetings on it at Day 91, two things are possible: (a) the gate was passed prematurely and the team isn't actually ready (run Day 120 plan), or (b) the gate was passed but the previous owner hasn't been formally released — a paperwork issue, not a competence one. The chapter calls this "the previous owner never actually leaves" failure mode — extension by inertia. The action: explicit decision at Day 90 sign-off either way; no default extension.
+   The Day 1 access inventory and the Day 31 cutover were skipped, so privileged access outlived the handover. Standing access keeps working after the person has stopped owning the system, which is the first threat in this chapter's table. The fix is to cut that access on Day 31, or cut it to read-only plus break-glass under ch.15.09, and to rotate each secret the previous owner could read. Rotation matters because a revoked token does not help if the value was copied. The proof is a denied action: `kubectl auth can-i delete secrets -n bookstore-platform --as <PREVIOUS-OWNER>` prints `no`, and the Vault audit log shows the rotations.
 
    </details>
 
@@ -1208,13 +1234,10 @@ Day 120 target.
   to the SRE Book chapter above, with the production-readiness
   review (PRR) artifacts and the engagement-completion
   checklist.
-- **Camille Fournier, *The Manager's Path*, ch. on engineering
-  leadership through operations**; the management view of
-  on-call rotation health, the postmortem culture, the cost of
-  asking senior engineers to remain the escalation path
-  indefinitely. The 90-day plan in this chapter is also a
-  manager's tool: it produces the evidence the manager needs to
-  reassign the previous owner to their next project.
+- **Camille Fournier, *The Manager's Path* (O'Reilly, 2017)**; on
+  engineering management. The Day 90 decision to reassign the
+  previous owner is a manager's call, and this plan supplies the
+  evidence for it.
 - **Charity Majors / Liz Fong-Jones / Honeycomb on
   observability-first culture** <https://www.honeycomb.io/blog>;
   the "test in production" + "ownership equals being on the
@@ -1223,16 +1246,9 @@ Day 120 target.
   chapter applies. The Honeycomb blog archive across 2020-2025
   is the single most useful body of writing on what owning a
   production system **feels like**.
-- **Rosso et al., *Production Kubernetes*, ch.16 — Day-2
-  Operations**; the operational-discipline framework this
-  chapter applies; covers the runbook-decay problem, the
-  postmortem template, the on-call-rotation patterns, and the
-  ownership-versus-operator distinction.
-- **Niall Murphy, John Looney, Murali Suriar et al., *Seeking
-  SRE*** (O'Reilly, 2018); the SRE practitioner anthology;
-  several chapters on handoff, on-call sustainability, and
-  the operational-debt problem this chapter's 90-day plan is
-  designed to defeat.
+- **David N. Blank-Edelman, ed., *Seeking SRE*** (O'Reilly,
+  2018); a practitioner anthology on running production systems
+  at scale.
 - **John Allspaw, *Etsy Debriefing Facilitation Guide*** —
   the canonical reference on running a blameless postmortem;
   the Phase 2 + Phase 3 postmortems in this chapter's plan
