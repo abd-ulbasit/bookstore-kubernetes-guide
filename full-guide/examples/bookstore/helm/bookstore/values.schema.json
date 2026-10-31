@@ -144,11 +144,7 @@
         "enabled": { "type": "boolean" },
         "minReplicaCount": { "type": "integer", "minimum": 0 },
         "maxReplicaCount": { "type": "integer", "minimum": 1 },
-        "connectionSecret": {
-          "type": "object",
-          "additionalProperties": true,
-          "properties": { "create": { "type": "boolean" } }
-        }
+        "connectionSecretName": { "type": "string" }
       }
     },
     "serviceMonitor": {

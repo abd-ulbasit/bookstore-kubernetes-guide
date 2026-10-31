@@ -214,5 +214,7 @@ kind-down: ## Delete the local 'bookstore' kind cluster.
 	kind delete cluster --name bookstore
 
 .PHONY: deploy
-deploy: ## Helm install the canonical Bookstore chart into the current kubectl context.
-	$(HELM) upgrade --install bookstore full-guide/examples/bookstore/helm/bookstore --create-namespace --namespace bookstore
+deploy: ## Helm install the Bookstore chart into the current kubectl context (creates and labels the namespace first).
+	$(KUBECTL) create namespace bookstore --dry-run=client -o yaml | $(KUBECTL) apply -f -
+	$(KUBECTL) label namespace bookstore --overwrite pod-security.kubernetes.io/enforce=restricted pod-security.kubernetes.io/audit=restricted pod-security.kubernetes.io/warn=restricted
+	$(HELM) upgrade --install bookstore full-guide/examples/bookstore/helm/bookstore --namespace bookstore --set namespace.create=false

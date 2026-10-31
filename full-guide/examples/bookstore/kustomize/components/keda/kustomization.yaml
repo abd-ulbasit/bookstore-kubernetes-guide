@@ -1,9 +1,12 @@
 # Bookstore Kustomize COMPONENT — keda (event-driven autoscaling).
 #
-# Adds the KEDA ScaledObject + TriggerAuthentication + the `rabbitmq-conn`
-# Secret (vendored byte-identical from raw-manifests/83-) so the
-# payments-worker scales on RabbitMQ queue depth and to zero when idle. Exact
-# analog of the Helm chart's `keda.enabled` toggle.
+# Adds the KEDA ScaledObject + TriggerAuthentication (vendored from
+# raw-manifests/83-, minus its demo Secret) so the payments-worker scales on
+# RabbitMQ queue depth and to zero when idle. Analog of the Helm chart's
+# `keda.enabled` toggle. It renders NO connection Secret: the
+# TriggerAuthentication names `rabbitmq-conn` (key `host`, the AMQP URL), which
+# you create before you apply, as the chart's `keda.connectionSecretName`
+# expects. raw-manifests/83- keeps its demo Secret for the Part 06 lab.
 #
 # !!! CRD PREREQUISITE — same intrinsic behaviour as raw 83- and the Helm
 # toggle. `ScaledObject`/`TriggerAuthentication` are KEDA CRDs

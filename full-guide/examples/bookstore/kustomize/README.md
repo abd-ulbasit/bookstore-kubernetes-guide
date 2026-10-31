@@ -26,7 +26,7 @@ examples/bookstore/kustomize/
 │       └── images/               # kind: Component, only the image pins; promotion edits this file
 └── components/                   # kind: Component — opt-in, each documents its CRD prereq
     ├── servicemonitor/           # + ServiceMonitor×2 + PrometheusRule   (Prometheus Operator CRDs)
-    ├── keda/                     # + ScaledObject + TriggerAuth + Secret (KEDA CRDs)
+    ├── keda/                     # + ScaledObject + TriggerAuth (KEDA CRDs)
     ├── gateway/                  # SWAPS Ingress → GatewayClass/Gateway/HTTPRoute (Gateway API CRDs)
     ├── traefik-rewrite/          # + Middleware + the annotation that strips /api    (Traefik CRDs)
     ├── kyverno/                  # + ClusterPolicy (Audit)               (Kyverno CRD; cluster-scoped)
@@ -110,7 +110,7 @@ vanilla-cluster-clean (zero `no matches for kind` on a plain cluster).
 | Component | Adds / changes | Prerequisite (install first) |
 |---|---|---|
 | `servicemonitor` | + ServiceMonitor×2, PrometheusRule | Prometheus Operator CRDs — `helm install kube-prometheus-stack prometheus-community/kube-prometheus-stack -n monitoring --create-namespace` |
-| `keda` | + ScaledObject, TriggerAuthentication, `rabbitmq-conn` Secret | KEDA — `helm install keda kedacore/keda -n keda --create-namespace` |
+| `keda` | + ScaledObject, TriggerAuthentication (names the Secret `rabbitmq-conn`, which you create; the component renders none) | KEDA, installed from a pinned chart into a labelled namespace (Part 07 ch.02 step 9) |
 | `gateway` | **SWAPS** Ingress → GatewayClass + Gateway + HTTPRoute | Gateway API CRDs + a controller (Part 02 ch.05 step 1 gives the CRD install and the Traefik Gateway provider) |
 | `traefik-rewrite` | + Middleware, and patches the base Ingress with the annotation that attaches it (the services serve `/books` and `/orders`, the UI calls `/api/...`) | Traefik CRDs, installed by the Traefik chart (Part 02 ch.04 step 2) |
 | `kyverno` | + `ClusterPolicy` (Audit-only; cluster-scoped) | Kyverno — `helm install kyverno kyverno/kyverno -n kyverno --create-namespace` |

@@ -71,7 +71,8 @@ the toggles and image blocks. Highlights:
 | `canary.enabled` | `false` | Manual canary variant — **XOR** `catalog` |
 | `serviceMonitor.enabled` | `false` | CRD (Prometheus Operator) |
 | `prometheusRule.enabled` | `false` | CRD (Prometheus Operator) |
-| `keda.enabled` | `false` | CRDs (KEDA) |
+| `keda.enabled` | `false` | CRDs (KEDA); needs `keda.connectionSecretName` |
+| `keda.connectionSecretName` | `""` | Name of an existing Secret (key `host`, the AMQP URL) that you create; the chart renders none, and the render fails if `keda.enabled` is set without it |
 | `kyverno.enabled` | `false` | CRD (Kyverno) — Audit-only policy |
 | `snapshot.enabled` | `false` | CRDs (external-snapshotter) + snapshot-capable CSI |
 
@@ -92,7 +93,7 @@ CRD/operator below or the API server rejects it with `no matches for kind ...`
 | Toggle | Needs | Install |
 |---|---|---|
 | `serviceMonitor.enabled` / `prometheusRule.enabled` | Prometheus Operator CRDs | `helm install kube-prometheus-stack prometheus-community/kube-prometheus-stack -n monitoring --create-namespace` |
-| `keda.enabled` | KEDA CRDs + operator | `helm install keda kedacore/keda -n keda --create-namespace` |
+| `keda.enabled` | KEDA CRDs + operator, and a Secret you create | Install KEDA from a pinned chart into a labelled namespace (Part 07 ch.01), then `kubectl create secret generic` the connection Secret and set `keda.connectionSecretName` |
 | `ingress.traefikRewrite.enabled` | Traefik CRDs (`traefik.io/v1alpha1` Middleware) | The Traefik chart installs them (Part 02 ch.04 step 2) |
 | `gateway.enabled` | Gateway API CRDs + a controller | Gateway API standard CRDs + Traefik with its Gateway provider (Part 02 ch.05 step 1 gives the install and the CRD version; `gateway.controllerName` defaults to `traefik.io/gateway-controller`; change it for another implementation) |
 | `kyverno.enabled` | Kyverno | `helm install kyverno kyverno/kyverno -n kyverno --create-namespace` |
@@ -110,6 +111,11 @@ because the guide is a throwaway local lab. In production set
 `dbCredentials.create=false` and provide a Secret named `db-credentials` via
 External Secrets Operator / Sealed Secrets / Vault (this is what
 `values-prod.yaml` does).
+
+The KEDA scaler's AMQP URL holds a credential too, so the chart never renders
+a Secret for it and holds no default. With `keda.enabled=true` you create a
+Secret with the key `host` yourself and name it in `keda.connectionSecretName`;
+the render fails with a message if you do not.
 
 ## Validate without a cluster
 

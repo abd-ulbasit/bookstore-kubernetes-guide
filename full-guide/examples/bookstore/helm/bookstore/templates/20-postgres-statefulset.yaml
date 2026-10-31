@@ -92,11 +92,15 @@ spec:
               command: ["pg_isready", "-U", {{ .Values.dbCredentials.POSTGRES_USER | quote }}, "-d", {{ .Values.dbCredentials.POSTGRES_DB | quote }}]
             initialDelaySeconds: 10
             periodSeconds: 5
+          # Liveness tolerates a stall of about two minutes (12 checks, 10s
+          # apart). The default three-failure window restarted the container
+          # into a slower recovery when an fsync stalled on the lab host.
           livenessProbe:
             exec:
               command: ["pg_isready", "-U", {{ .Values.dbCredentials.POSTGRES_USER | quote }}, "-d", {{ .Values.dbCredentials.POSTGRES_DB | quote }}]
             initialDelaySeconds: 30
             periodSeconds: 10
+            failureThreshold: 12
           resources:
             {{- toYaml $pg.resources | nindent 12 }}
           volumeMounts:

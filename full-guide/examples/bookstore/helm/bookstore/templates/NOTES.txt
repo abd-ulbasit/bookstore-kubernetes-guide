@@ -44,7 +44,9 @@ the CRDs are installed — same intrinsic behaviour the raw manifests document):
   - prometheusRule.enabled=false  → needs the Prometheus Operator
 {{- end }}
 {{- if not .Values.keda.enabled }}
-  - keda.enabled=false            → `helm install keda kedacore/keda -n keda --create-namespace`
+  - keda.enabled=false            → needs KEDA (Part 07 ch.01), and a Secret you create
+                                    with the key `host` (the AMQP URL), named in
+                                    keda.connectionSecretName. The chart ships none.
 {{- end }}
 {{- if not .Values.gateway.enabled }}
   - gateway.enabled=false         → needs the Gateway API CRDs + a controller

@@ -67,10 +67,9 @@ keda:
   enabled: true
   minReplicaCount: 0
   maxReplicaCount: 12
-  # Production supplies rabbitmq-conn out of band (same name), so the demo
-  # Secret with the stock guest:guest credentials is not rendered.
-  connectionSecret:
-    create: false
+  # The operator creates this Secret (key `host`, the AMQP URL) out of band.
+  # The chart renders no connection Secret and holds no credential for it.
+  connectionSecretName: rabbitmq-conn
 
 # !!! Secret comes from External Secrets Operator / Sealed Secrets / Vault,
 # NOT from this file. The chart references a Secret named `db-credentials`;

@@ -1,6 +1,8 @@
 # Bookstore — DEV environment overrides.
+#   kubectl create namespace bookstore   # label it first: Part 07 ch.01 step 2
 #   helm install bookstore ./examples/bookstore/helm/bookstore \
-#     -n bookstore --create-namespace -f examples/bookstore/helm/bookstore/values-dev.yaml
+#     -n bookstore --set namespace.create=false \
+#     -f examples/bookstore/helm/bookstore/values-dev.yaml
 #
 # Dev is the smallest footprint: one replica per tier (single-node kind),
 # debug logging, the demo Secret, NO autoscaling, NO PDBs (fewer moving parts
