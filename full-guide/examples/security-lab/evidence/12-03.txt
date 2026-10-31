@@ -5,8 +5,14 @@
 # The run used the scratch namespace p12-03-bookstore-ml where the chapter says
 # bookstore-ml. The copy of gpu-quota-probe.yaml was rewritten to that namespace
 # and nothing else changed.
-# Not in this transcript: the Kueue and JobSet installs and the gang run. Those
-# steps were not captured, and the chapter labels their output illustrative.
+# The Kueue and JobSet installs and the gang run are in the last section,
+# recorded later by examples/security-lab/labs/12-03-kueue.sh with
+# LAB_PREFIX=p12-finish: namespaces p12-finish-jobset, p12-finish-kueue and
+# p12-finish-ml stand in for jobset-system, kueue-system and bookstore-ml, and
+# the lab's Kueue objects carry p12-finish-ml where the chapter's carry
+# bookstore-ml. The charts were pinned at JobSet 0.11.1 and Kueue 0.17.0, and
+# the run took the lab's heavy-install lock. The lab removed both charts, the
+# namespaces and the CRDs at the end.
 # Commands are shown as "$ ..." lines. "[exit N]" lines give the exit code of
 # the command above them.
 $ kubectl get --raw /version
@@ -115,3 +121,114 @@ $ helm template kueue oci://registry.k8s.io/kueue/charts/kueue --version 0.17.0 
       recoveryTimeout: 3m
       timeout: 5m
     webhook:
+
+## Install run: JobSet 0.11.1 and Kueue 0.17.0, the unlabelled Job, the gang, and removal
+## step 1: neither Kueue nor JobSet is installed
+$ kubectl get crd -o name | grep -c -E 'kueue|jobset'
+0
+
+## step 2: namespaces, labelled restricted before anything is installed
+$ kubectl create namespace p12-finish-jobset
+namespace/p12-finish-jobset created
+$ kubectl create namespace p12-finish-kueue
+namespace/p12-finish-kueue created
+$ kubectl create namespace p12-finish-ml
+namespace/p12-finish-ml created
+$ kubectl label namespace p12-finish-ml app.kubernetes.io/part-of=bookstore-ml
+namespace/p12-finish-ml labeled
+
+## step 3: the pinned charts
+$ helm install jobset oci://registry.k8s.io/jobset/charts/jobset --version 0.11.1 -n p12-finish-jobset --wait (image pinned by digest)
+NAME: jobset
+NAMESPACE: p12-finish-jobset
+STATUS: deployed
+$ helm install kueue oci://registry.k8s.io/kueue/charts/kueue --version 0.17.0 -n p12-finish-kueue --wait -f examples/bookstore/ml/batch/kueue-values.yaml
+NAME: kueue
+NAMESPACE: p12-finish-kueue
+STATUS: deployed
+$ kubectl get pods -n p12-finish-jobset
+NAME                                READY   PHASE
+jobset-controller-86d78b955-ztk68   true    Running
+$ kubectl get pods -n p12-finish-kueue
+NAME                                        READY   PHASE
+kueue-controller-manager-577dfc8464-t8sx7   true    Running
+
+## step 4: the queue objects and the ServiceAccount
+$ kubectl apply -f kueue-resourceflavor.yaml (namespace p12-finish-ml)
+resourceflavor.kueue.x-k8s.io/p12-finish-ml-flavor created
+$ kubectl apply -f kueue-clusterqueue.yaml (namespace p12-finish-ml)
+clusterqueue.kueue.x-k8s.io/p12-finish-ml-cq created
+$ kubectl apply -f kueue-localqueue.yaml (namespace p12-finish-ml)
+localqueue.kueue.x-k8s.io/p12-finish-ml-lq created
+$ kubectl apply -f recommender-batch-serviceaccount.yaml (namespace p12-finish-ml)
+serviceaccount/recommender-batch created
+$ kubectl get clusterqueue p12-finish-ml-cq
+NAME               COHORT   PENDING WORKLOADS
+p12-finish-ml-cq            0
+
+## step 5: a Job with no queue label
+$ kubectl apply -f unlabelled-probe.yaml (namespace p12-finish-ml)
+job.batch/unlabelled-probe created
+$ kubectl get job unlabelled-probe -n p12-finish-ml -o jsonpath='{.spec.suspend}'
+true
+$ kubectl get pods -n p12-finish-ml -l job-name=unlabelled-probe
+No resources found in p12-finish-ml namespace.
+$ kubectl delete job unlabelled-probe -n p12-finish-ml
+job.batch "unlabelled-probe" deleted from p12-finish-ml namespace
+
+## step 6: the two-worker gang
+$ kubectl apply -f recommender-jobset.yaml (namespace p12-finish-ml)
+jobset.jobset.x-k8s.io/recommender-train created
+$ kubectl wait --for=condition=Completed jobset/recommender-train -n p12-finish-ml --timeout=240s
+jobset.jobset.x-k8s.io/recommender-train condition met
+$ kubectl get workloads.kueue.x-k8s.io -n p12-finish-ml
+NAME                             QUEUE              RESERVED IN        ADMITTED   FINISHED   AGE
+jobset-recommender-train-63e35   p12-finish-ml-lq   p12-finish-ml-cq   True       True       27s
+$ kubectl get pods -n p12-finish-ml -l app.kubernetes.io/component=recommender-train -o custom-columns=NAME:.metadata.name,PHASE:.status.phase,STARTED:.status.startTime
+NAME                                 PHASE       STARTED
+recommender-train-worker-0-0-x4zgh   Succeeded   2026-10-31T08:05:11Z
+recommender-train-worker-0-1-cnscw   Succeeded   2026-10-31T08:05:11Z
+$ kubectl get jobset recommender-train -n p12-finish-ml
+NAME                TERMINALSTATE   RESTARTS   COMPLETED   SUSPENDED   AGE
+recommender-train   Completed       0          True        false       27s
+
+## step 7: quota below what the gang needs, then restored
+$ kubectl delete jobset recommender-train -n p12-finish-ml
+jobset.jobset.x-k8s.io "recommender-train" deleted from p12-finish-ml namespace
+$ kubectl patch clusterqueue p12-finish-ml-cq (cpu nominalQuota to 0)
+clusterqueue.kueue.x-k8s.io/p12-finish-ml-cq patched
+$ kubectl apply -f recommender-jobset.yaml (namespace p12-finish-ml)
+jobset.jobset.x-k8s.io/recommender-train created
+$ kubectl get workloads.kueue.x-k8s.io -n p12-finish-ml
+NAME                             QUEUE              RESERVED IN   ADMITTED   FINISHED   AGE
+jobset-recommender-train-02aa0   p12-finish-ml-lq                                       15s
+$ kubectl get pods -n p12-finish-ml -l app.kubernetes.io/component=recommender-train
+No resources found in p12-finish-ml namespace.
+$ kubectl patch clusterqueue p12-finish-ml-cq (cpu nominalQuota back to 4)
+clusterqueue.kueue.x-k8s.io/p12-finish-ml-cq patched
+$ kubectl wait --for=condition=Completed jobset/recommender-train -n p12-finish-ml --timeout=240s
+jobset.jobset.x-k8s.io/recommender-train condition met
+
+## step 8: remove everything, CRDs included
+$ kubectl delete jobset,localqueue --all -n p12-finish-ml; kubectl delete clusterqueue,resourceflavor (the lab's two)
+jobset.jobset.x-k8s.io "recommender-train" deleted from p12-finish-ml namespace
+localqueue.kueue.x-k8s.io "p12-finish-ml-lq" deleted from p12-finish-ml namespace
+clusterqueue.kueue.x-k8s.io "p12-finish-ml-cq" deleted
+resourceflavor.kueue.x-k8s.io "p12-finish-ml-flavor" deleted
+$ helm uninstall kueue -n p12-finish-kueue; helm uninstall jobset -n p12-finish-jobset
+release "kueue" uninstalled
+release "jobset" uninstalled
+$ kubectl delete namespace p12-finish-ml p12-finish-kueue p12-finish-jobset --wait=true
+namespace "p12-finish-ml" deleted
+namespace "p12-finish-kueue" deleted
+namespace "p12-finish-jobset" deleted
+$ kubectl get crd -o name | grep -E 'kueue|jobset' (what the uninstalls left behind)
+customresourcedefinition.apiextensions.k8s.io/jobsets.jobset.x-k8s.io
+$ kubectl delete (each CRD listed above)
+customresourcedefinition.apiextensions.k8s.io "jobsets.jobset.x-k8s.io" deleted
+$ kubectl get crd -o name | grep -c -E 'kueue|jobset'
+0
+$ kubectl get validatingwebhookconfiguration,mutatingwebhookconfiguration -o name | grep -c -E 'kueue|jobset'
+0
+$ kubectl get clusterrole -o name | grep -c -E 'kueue|jobset'
+0
