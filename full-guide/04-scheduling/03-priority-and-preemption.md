@@ -226,6 +226,34 @@ kubectl get pods -n bookstore \
   | sort -k2 -n
 ```
 
+These are the shared files, and on the ch.02 cluster they meet the patches you
+made there. `kubectl apply` leaves alone a field it did not write, so postgres
+keeps the required rule from ch.02 and stays on the pool, with the shipped
+preferred rule added beside it. Catalog and storefront go back to the shipped
+hard spread, which that layout cannot meet. The old replicas keep serving, and
+one new replica of each waits Pending:
+
+```sh
+kubectl get pods -n bookstore -l 'app in (catalog,storefront)' \
+  -o custom-columns='POD:.metadata.name,NODE:.spec.nodeName,PHASE:.status.phase'
+```
+
+<!-- gate: output -->
+```text
+POD                           NODE               PHASE
+catalog-66c84f6fd6-mgrhd      sf-sched-worker2   Running
+catalog-66c84f6fd6-ptzpw      sf-sched-worker2   Running
+catalog-66c84f6fd6-rtd5z      sf-sched-worker2   Running
+catalog-dcd68944f-km5z2       <none>             Pending
+storefront-5c7b7bbc99-m29mh   sf-sched-worker2   Running
+storefront-5c7b7bbc99-z2mfx   sf-sched-worker2   Running
+storefront-79c588c766-bq4pn   <none>             Pending
+```
+
+Patch the spread again as in
+[ch.02 section 4](02-affinity-taints-topology.md#4-spread-catalog-storefront-across-nodes-ha),
+or leave the two Pods Pending: section 3 starts a fresh cluster.
+
 > A `PriorityClass` referenced by a Pod **must already exist** — the
 > `Priority` admission plugin rejects a Pod whose `priorityClassName` is
 > unknown. That is why `35-` is applied first, and why these names must match

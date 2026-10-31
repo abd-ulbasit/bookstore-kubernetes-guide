@@ -11,29 +11,38 @@
 # the first get nodes is therefore empty here, and no chapter output depends
 # on a zone.
 # The cluster is shared with other workers, so this run used its own
-# namespace, p04-finish-02, where the chapter prints bookstore. The three
-# PriorityClasses carry the prefix p04-finish-bookstore-, where the chapter
-# prints bookstore-. The pool taint key is p04-finish-dedicated, where the
+# namespace, p04-fix-02, where the chapter prints bookstore. The three
+# PriorityClasses carry the prefix p04-fix-bookstore-, where the chapter
+# prints bookstore-. The pool taint key is p04-fix-dedicated, where the
 # chapter prints dedicated, because a taint on a shared worker would hold
 # back other workers' Pods. The label node-restriction.kubernetes.io/pool
 # keeps its chapter name. The unprefixed label dedicated=database appears only
 # in a server dry run, which writes nothing. The substitutions are applied to
-# the chapter's own manifests with the sed expression shown in each command.
+# the chapter's own files with the sed expression shown in each command. The
+# kubectl patch, scale and get commands name the namespace directly.
+# The shipped postgres, catalog and storefront files are applied as they stand
+# in examples/bookstore/raw-manifests, apart from those substitutions and one
+# edit the chapter shows: replicas: 1 becomes replicas: 0 in the postgres file.
 # The images bookstore/catalog:dev and bookstore/storefront:dev were already
 # on the lab nodes, so the kind create and kind load steps were not run.
+# pool-tenant.yaml is the chapter's own manifest block saved to a file.
+# What did not work the first time: an earlier version of the shared postgres
+# file required the pool label. The runtime gate applies the shared manifests
+# to a one-node cluster, where no node carries the label, and postgres stayed
+# Pending. The shipped file prefers the pool label again, and the chapter now
+# patches the required rule into the running StatefulSet on this three-node
+# cluster. The shipped catalog and storefront files ask for a hard spread,
+# which this layout cannot meet, so the chapter shows the Pending Pods and
+# then patches the spread. This transcript is the run on the chapter as it now
+# reads, and it completed on the first attempt. Its last section runs the
+# shared files on a one-node cluster and shows both forms of the rule there.
+# Commands run from full-guide/. Node identity checks use
+# kubectl --as=system:node:<node> with server-side dry runs. They write nothing.
 # Order: the NodeRestriction refusal of the pool label runs first, before the
 # administrator sets the label, which is the order the chapter gives. A
 # refusal after the label is set would not occur, because NodeRestriction
 # refuses only a change of value, so the label refusal cannot be repeated
 # once the label exists.
-# What did not work the first time: the first postgres rollout wait timed out.
-# The lab host was under heavy load, the postgres startup probe failed twice,
-# and the lab API server restarted once, so kubectl briefly answered Forbidden
-# to kubernetes-admin. The wait was repeated and succeeded. Everything after it
-# worked on the first attempt. The failed wait is kept below.
-# pool-tenant.yaml is the chapter's own manifest block saved to a file.
-# Commands run from full-guide/. Node identity checks use
-# kubectl --as=system:node:<node> with server-side dry runs. They write nothing.
 $ kubectl config current-context
 kind-sf-sched
 $ kubectl version
@@ -41,44 +50,44 @@ Client Version: v1.37.2
 Kustomize Version: v5.8.1
 Server Version: v1.37.0
 $ kubectl get nodes
-NAME                     STATUS   ROLES           AGE    VERSION
-sf-sched-control-plane   Ready    control-plane   149m   v1.37.0
-sf-sched-worker          Ready    <none>          149m   v1.37.0
-sf-sched-worker2         Ready    <none>          149m   v1.37.0
+NAME                     STATUS   ROLES           AGE     VERSION
+sf-sched-control-plane   Ready    control-plane   3h20m   v1.37.0
+sf-sched-worker          Ready    <none>          3h20m   v1.37.0
+sf-sched-worker2         Ready    <none>          3h20m   v1.37.0
 $ kubectl get nodes -L topology.kubernetes.io/zone
-NAME                     STATUS   ROLES           AGE    VERSION   ZONE
-sf-sched-control-plane   Ready    control-plane   149m   v1.37.0   
-sf-sched-worker          Ready    <none>          149m   v1.37.0   
-sf-sched-worker2         Ready    <none>          149m   v1.37.0   
+NAME                     STATUS   ROLES           AGE     VERSION   ZONE
+sf-sched-control-plane   Ready    control-plane   3h20m   v1.37.0   
+sf-sched-worker          Ready    <none>          3h20m   v1.37.0   
+sf-sched-worker2         Ready    <none>          3h20m   v1.37.0   
 $ kubectl --as=system:node:sf-sched-worker --as-group=system:nodes label node sf-sched-worker node-restriction.kubernetes.io/pool=database --dry-run=server
 Error from server (Forbidden): nodes "sf-sched-worker" is forbidden: is not allowed to modify labels: node-restriction.kubernetes.io/pool
 $ kubectl --as=system:node:sf-sched-worker --as-group=system:nodes label node sf-sched-worker dedicated=database --dry-run=server
 node/sf-sched-worker labeled (server dry run)
 $ kubectl label node sf-sched-worker node-restriction.kubernetes.io/pool=database
 node/sf-sched-worker labeled
-$ kubectl taint node sf-sched-worker p04-finish-dedicated=database:NoSchedule
+$ kubectl taint node sf-sched-worker p04-fix-dedicated=database:NoSchedule
 node/sf-sched-worker tainted
 $ kubectl get nodes -L node-restriction.kubernetes.io/pool
-NAME                     STATUS   ROLES           AGE    VERSION   POOL
-sf-sched-control-plane   Ready    control-plane   149m   v1.37.0   
-sf-sched-worker          Ready    <none>          149m   v1.37.0   database
-sf-sched-worker2         Ready    <none>          149m   v1.37.0   
-$ kubectl --as=system:node:sf-sched-worker --as-group=system:nodes taint node sf-sched-worker p04-finish-dedicated:NoSchedule- --dry-run=server
+NAME                     STATUS   ROLES           AGE     VERSION   POOL
+sf-sched-control-plane   Ready    control-plane   3h20m   v1.37.0   
+sf-sched-worker          Ready    <none>          3h20m   v1.37.0   database
+sf-sched-worker2         Ready    <none>          3h20m   v1.37.0   
+$ kubectl --as=system:node:sf-sched-worker --as-group=system:nodes taint node sf-sched-worker p04-fix-dedicated:NoSchedule- --dry-run=server
 Error from server (Forbidden): nodes "sf-sched-worker" is forbidden: node "sf-sched-worker" is not allowed to modify taints
 $ kubectl --as=system:node:sf-sched-worker --as-group=system:nodes label node sf-sched-worker node-restriction.kubernetes.io/pool- --dry-run=server
 Error from server (Forbidden): nodes "sf-sched-worker" is forbidden: is not allowed to modify labels: node-restriction.kubernetes.io/pool
 # The dry runs above wrote nothing: the dedicated label is not on the node.
 $ kubectl get nodes -L dedicated,node-restriction.kubernetes.io/pool
-NAME                     STATUS   ROLES           AGE    VERSION   DEDICATED   POOL
-sf-sched-control-plane   Ready    control-plane   149m   v1.37.0               
-sf-sched-worker          Ready    <none>          149m   v1.37.0               database
-sf-sched-worker2         Ready    <none>          149m   v1.37.0               
+NAME                     STATUS   ROLES           AGE     VERSION   DEDICATED   POOL
+sf-sched-control-plane   Ready    control-plane   3h20m   v1.37.0               
+sf-sched-worker          Ready    <none>          3h20m   v1.37.0               database
+sf-sched-worker2         Ready    <none>          3h20m   v1.37.0               
 # Prerequisites, in the chapter order. Images bookstore/catalog:dev and bookstore/storefront:dev were already loaded on the lab nodes, so the kind load step was not run.
-$ sed -E -e 's/^  name: bookstore$/  name: p04-finish-02/' -e 's/namespace: bookstore$/namespace: p04-finish-02/' -e 's/\.bookstore\.svc/.p04-finish-02.svc/g' -e 's/bookstore-(data|critical|batch)/p04-finish-bookstore-\1/g' -e 's/key: dedicated$/key: p04-finish-dedicated/' examples/bookstore/raw-manifests/00-namespace.yaml | kubectl apply -f -
-namespace/p04-finish-02 created
+$ sed -E -e 's/^  name: bookstore$/  name: p04-fix-02/' -e 's/namespace: bookstore$/namespace: p04-fix-02/' -e 's/\.bookstore\.svc/.p04-fix-02.svc/g' -e 's/bookstore-(data|critical|batch)/p04-fix-bookstore-\1/g' -e 's/key: dedicated$/key: p04-fix-dedicated/' examples/bookstore/raw-manifests/00-namespace.yaml | kubectl apply -f -
+namespace/p04-fix-02 created
 resourcequota/bookstore-quota created
 limitrange/bookstore-limits created
-$ sed -E -e 's/^  name: bookstore$/  name: p04-finish-02/' -e 's/namespace: bookstore$/namespace: p04-finish-02/' -e 's/\.bookstore\.svc/.p04-finish-02.svc/g' -e 's/bookstore-(data|critical|batch)/p04-finish-bookstore-\1/g' -e 's/key: dedicated$/key: p04-finish-dedicated/' examples/bookstore/raw-manifests/05-serviceaccounts-rbac.yaml | kubectl apply -f -
+$ sed -E -e 's/^  name: bookstore$/  name: p04-fix-02/' -e 's/namespace: bookstore$/namespace: p04-fix-02/' -e 's/\.bookstore\.svc/.p04-fix-02.svc/g' -e 's/bookstore-(data|critical|batch)/p04-fix-bookstore-\1/g' -e 's/key: dedicated$/key: p04-fix-dedicated/' examples/bookstore/raw-manifests/05-serviceaccounts-rbac.yaml | kubectl apply -f -
 serviceaccount/catalog-sa created
 serviceaccount/storefront-sa created
 serviceaccount/orders-sa created
@@ -89,144 +98,245 @@ serviceaccount/rabbitmq-sa created
 serviceaccount/migrate-sa created
 role.rbac.authorization.k8s.io/catalog-config-reader created
 rolebinding.rbac.authorization.k8s.io/catalog-config-reader-binding created
-$ sed -E -e 's/^  name: bookstore$/  name: p04-finish-02/' -e 's/namespace: bookstore$/namespace: p04-finish-02/' -e 's/\.bookstore\.svc/.p04-finish-02.svc/g' -e 's/bookstore-(data|critical|batch)/p04-finish-bookstore-\1/g' -e 's/key: dedicated$/key: p04-finish-dedicated/' examples/bookstore/raw-manifests/15-catalog-config.yaml | kubectl apply -f -
+$ sed -E -e 's/^  name: bookstore$/  name: p04-fix-02/' -e 's/namespace: bookstore$/namespace: p04-fix-02/' -e 's/\.bookstore\.svc/.p04-fix-02.svc/g' -e 's/bookstore-(data|critical|batch)/p04-fix-bookstore-\1/g' -e 's/key: dedicated$/key: p04-fix-dedicated/' examples/bookstore/raw-manifests/15-catalog-config.yaml | kubectl apply -f -
 configmap/catalog-config created
-$ sed -E -e 's/^  name: bookstore$/  name: p04-finish-02/' -e 's/namespace: bookstore$/namespace: p04-finish-02/' -e 's/\.bookstore\.svc/.p04-finish-02.svc/g' -e 's/bookstore-(data|critical|batch)/p04-finish-bookstore-\1/g' -e 's/key: dedicated$/key: p04-finish-dedicated/' examples/bookstore/raw-manifests/16-db-credentials.yaml | kubectl apply -f -
+$ sed -E -e 's/^  name: bookstore$/  name: p04-fix-02/' -e 's/namespace: bookstore$/namespace: p04-fix-02/' -e 's/\.bookstore\.svc/.p04-fix-02.svc/g' -e 's/bookstore-(data|critical|batch)/p04-fix-bookstore-\1/g' -e 's/key: dedicated$/key: p04-fix-dedicated/' examples/bookstore/raw-manifests/16-db-credentials.yaml | kubectl apply -f -
 secret/db-credentials created
-$ sed -E -e 's/^  name: bookstore$/  name: p04-finish-02/' -e 's/namespace: bookstore$/namespace: p04-finish-02/' -e 's/\.bookstore\.svc/.p04-finish-02.svc/g' -e 's/bookstore-(data|critical|batch)/p04-finish-bookstore-\1/g' -e 's/key: dedicated$/key: p04-finish-dedicated/' examples/bookstore/raw-manifests/35-priorityclasses.yaml | kubectl apply -f -
-priorityclass.scheduling.k8s.io/p04-finish-bookstore-data created
-priorityclass.scheduling.k8s.io/p04-finish-bookstore-critical created
-priorityclass.scheduling.k8s.io/p04-finish-bookstore-batch created
-$ sed -E -e 's/^  name: bookstore$/  name: p04-finish-02/' -e 's/namespace: bookstore$/namespace: p04-finish-02/' -e 's/\.bookstore\.svc/.p04-finish-02.svc/g' -e 's/bookstore-(data|critical|batch)/p04-finish-bookstore-\1/g' -e 's/key: dedicated$/key: p04-finish-dedicated/' examples/bookstore/raw-manifests/40-services.yaml | kubectl apply -f -
+$ sed -E -e 's/^  name: bookstore$/  name: p04-fix-02/' -e 's/namespace: bookstore$/namespace: p04-fix-02/' -e 's/\.bookstore\.svc/.p04-fix-02.svc/g' -e 's/bookstore-(data|critical|batch)/p04-fix-bookstore-\1/g' -e 's/key: dedicated$/key: p04-fix-dedicated/' examples/bookstore/raw-manifests/35-priorityclasses.yaml | kubectl apply -f -
+priorityclass.scheduling.k8s.io/p04-fix-bookstore-data created
+priorityclass.scheduling.k8s.io/p04-fix-bookstore-critical created
+priorityclass.scheduling.k8s.io/p04-fix-bookstore-batch created
+$ sed -E -e 's/^  name: bookstore$/  name: p04-fix-02/' -e 's/namespace: bookstore$/namespace: p04-fix-02/' -e 's/\.bookstore\.svc/.p04-fix-02.svc/g' -e 's/bookstore-(data|critical|batch)/p04-fix-bookstore-\1/g' -e 's/key: dedicated$/key: p04-fix-dedicated/' examples/bookstore/raw-manifests/40-services.yaml | kubectl apply -f -
 service/catalog created
 service/storefront created
 service/orders created
 service/redis created
 service/rabbitmq created
 service/payments-worker created
-$ sed -E -e 's/^  name: bookstore$/  name: p04-finish-02/' -e 's/namespace: bookstore$/namespace: p04-finish-02/' -e 's/\.bookstore\.svc/.p04-finish-02.svc/g' -e 's/bookstore-(data|critical|batch)/p04-finish-bookstore-\1/g' -e 's/key: dedicated$/key: p04-finish-dedicated/' examples/bookstore/raw-manifests/12-redis.yaml | kubectl apply -f -
+$ sed -E -e 's/^  name: bookstore$/  name: p04-fix-02/' -e 's/namespace: bookstore$/namespace: p04-fix-02/' -e 's/\.bookstore\.svc/.p04-fix-02.svc/g' -e 's/bookstore-(data|critical|batch)/p04-fix-bookstore-\1/g' -e 's/key: dedicated$/key: p04-fix-dedicated/' examples/bookstore/raw-manifests/12-redis.yaml | kubectl apply -f -
 deployment.apps/redis created
-# Section 3: postgres first, then the schema Job, then catalog and storefront.
-$ sed -E -e 's/^  name: bookstore$/  name: p04-finish-02/' -e 's/namespace: bookstore$/namespace: p04-finish-02/' -e 's/\.bookstore\.svc/.p04-finish-02.svc/g' -e 's/bookstore-(data|critical|batch)/p04-finish-bookstore-\1/g' -e 's/key: dedicated$/key: p04-finish-dedicated/' examples/bookstore/raw-manifests/20-postgres-statefulset.yaml | kubectl apply -f -
+# Section 3: postgres. The StatefulSet is created with no replicas, patched, then scaled up.
+$ sed -E -e 's/^  name: bookstore$/  name: p04-fix-02/' -e 's/namespace: bookstore$/namespace: p04-fix-02/' -e 's/\.bookstore\.svc/.p04-fix-02.svc/g' -e 's/bookstore-(data|critical|batch)/p04-fix-bookstore-\1/g' -e 's/key: dedicated$/key: p04-fix-dedicated/' -e 's/^  replicas: 1 /  replicas: 0 /' examples/bookstore/raw-manifests/20-postgres-statefulset.yaml | kubectl apply -f -
 service/postgres created
 statefulset.apps/postgres created
-$ kubectl rollout status statefulset/postgres -n p04-finish-02 --timeout=240s
+$ kubectl patch statefulset postgres -n p04-fix-02 --type=json -p '[
+  {"op": "replace",
+   "path": "/spec/template/spec/affinity/nodeAffinity",
+   "value": {"requiredDuringSchedulingIgnoredDuringExecution": {
+     "nodeSelectorTerms": [{"matchExpressions": [
+       {"key": "node-restriction.kubernetes.io/pool",
+        "operator": "In", "values": ["database"]}]}]}}}]'
+statefulset.apps/postgres patched
+$ kubectl get statefulset postgres -n p04-fix-02 -o jsonpath='{.spec.template.spec.affinity.nodeAffinity}'
+{"requiredDuringSchedulingIgnoredDuringExecution":{"nodeSelectorTerms":[{"matchExpressions":[{"key":"node-restriction.kubernetes.io/pool","operator":"In","values":["database"]}]}]}}
+$ kubectl scale statefulset/postgres -n p04-fix-02 --replicas=1
+statefulset.apps/postgres scaled
+$ kubectl rollout status statefulset/postgres -n p04-fix-02 --timeout=540s
+Waiting for statefulset spec update to be observed...
 Waiting for statefulset spec update to be observed...
 Waiting for 1 pods to be ready...
 Waiting for 1 pods to be ready...
-I1031 10:10:42.250358   60617 reflector.go:664] "Warning: watch ended with error" reflector="k8s.io/client-go/tools/watch/informerwatcher.go:162" type="*unstructured.Unstructured" err="an error on the server (\"unable to decode an event from the watch stream: http2: client connection lost\") has prevented the request from succeeding"
-error: timed out waiting for the condition
-# The first rollout wait above timed out: the lab host was under heavy load, the postgres startup probe failed twice, and the lab API server restarted once. The wait is repeated below.
-$ kubectl rollout status statefulset/postgres -n p04-finish-02 --timeout=400s
-Waiting for 1 pods to be ready...
 partitioned roll out complete: 1 new pods have been updated...
-$ kubectl get pods -n p04-finish-02 -o custom-columns=POD:.metadata.name,NODE:.spec.nodeName,PHASE:.status.phase
-POD                     NODE               PHASE
-postgres-0              sf-sched-worker    Running
-redis-574bb544f-t6q94   sf-sched-worker2   Running
-$ sed -E -e 's/^  name: bookstore$/  name: p04-finish-02/' -e 's/namespace: bookstore$/namespace: p04-finish-02/' -e 's/\.bookstore\.svc/.p04-finish-02.svc/g' -e 's/bookstore-(data|critical|batch)/p04-finish-bookstore-\1/g' -e 's/key: dedicated$/key: p04-finish-dedicated/' examples/bookstore/raw-manifests/21-db-migrate-job.yaml | kubectl apply -f -
-job.batch/db-migrate created
-$ kubectl wait --for=condition=complete job/db-migrate -n p04-finish-02 --timeout=200s
-job.batch/db-migrate condition met
-$ sed -E -e 's/^  name: bookstore$/  name: p04-finish-02/' -e 's/namespace: bookstore$/namespace: p04-finish-02/' -e 's/\.bookstore\.svc/.p04-finish-02.svc/g' -e 's/bookstore-(data|critical|batch)/p04-finish-bookstore-\1/g' -e 's/key: dedicated$/key: p04-finish-dedicated/' examples/bookstore/raw-manifests/10-catalog-deploy.yaml | kubectl apply -f -
-deployment.apps/catalog created
-$ sed -E -e 's/^  name: bookstore$/  name: p04-finish-02/' -e 's/namespace: bookstore$/namespace: p04-finish-02/' -e 's/\.bookstore\.svc/.p04-finish-02.svc/g' -e 's/bookstore-(data|critical|batch)/p04-finish-bookstore-\1/g' -e 's/key: dedicated$/key: p04-finish-dedicated/' examples/bookstore/raw-manifests/11-storefront-deploy.yaml | kubectl apply -f -
-deployment.apps/storefront created
-$ kubectl rollout status deployment/catalog -n p04-finish-02 --timeout=300s
-Waiting for deployment spec update to be observed...
-Waiting for deployment spec update to be observed...
-Waiting for deployment "catalog" rollout to finish: 0 out of 3 new replicas have been updated...
-Waiting for deployment "catalog" rollout to finish: 0 of 3 updated replicas are available...
-Waiting for deployment "catalog" rollout to finish: 1 of 3 updated replicas are available...
-Waiting for deployment "catalog" rollout to finish: 2 of 3 updated replicas are available...
-deployment "catalog" successfully rolled out
-$ kubectl get pods -n p04-finish-02 -l app=catalog -o custom-columns='POD:.metadata.name,NODE:.spec.nodeName,PHASE:.status.phase'
-POD                        NODE               PHASE
-catalog-767d6fdcc4-6wxqk   sf-sched-worker2   Running
-catalog-767d6fdcc4-f6wbj   sf-sched-worker2   Running
-catalog-767d6fdcc4-hpzh5   sf-sched-worker2   Running
-# Hard spread on the same layout: the catalog template with DoNotSchedule.
-$ sed -E -e 's/^  name: bookstore$/  name: p04-finish-02/' -e 's/namespace: bookstore$/namespace: p04-finish-02/' -e 's/\.bookstore\.svc/.p04-finish-02.svc/g' -e 's/bookstore-(data|critical|batch)/p04-finish-bookstore-\1/g' -e 's/key: dedicated$/key: p04-finish-dedicated/' -e 's/whenUnsatisfiable: ScheduleAnyway/whenUnsatisfiable: DoNotSchedule/' examples/bookstore/raw-manifests/10-catalog-deploy.yaml | kubectl apply -f -
-deployment.apps/catalog configured
-$ kubectl get pods -n p04-finish-02 -l app=catalog -o custom-columns='POD:.metadata.name,NODE:.spec.nodeName,PHASE:.status.phase'
-POD                        NODE               PHASE
-catalog-646d5f4cb9-qqs92   <none>             Pending
-catalog-767d6fdcc4-6wxqk   sf-sched-worker2   Running
-catalog-767d6fdcc4-f6wbj   sf-sched-worker2   Running
-catalog-767d6fdcc4-hpzh5   sf-sched-worker2   Running
-$ kubectl get events -n p04-finish-02 --field-selector reason=FailedScheduling -o custom-columns='OBJECT:.involvedObject.name,MESSAGE:.message'
-OBJECT                     MESSAGE
-catalog-646d5f4cb9-qqs92   0/3 nodes are available: 1 node(s) didn't match pod topology spread constraints, 2 node(s) had untolerated taint(s). preemption: 0/3 nodes are available: 1 node(s) didn't match pod topology spread constraints, 2 Preemption is not helpful for scheduling.
-$ sed -E -e 's/^  name: bookstore$/  name: p04-finish-02/' -e 's/namespace: bookstore$/namespace: p04-finish-02/' -e 's/\.bookstore\.svc/.p04-finish-02.svc/g' -e 's/bookstore-(data|critical|batch)/p04-finish-bookstore-\1/g' -e 's/key: dedicated$/key: p04-finish-dedicated/' examples/bookstore/raw-manifests/10-catalog-deploy.yaml | kubectl apply -f -
-deployment.apps/catalog configured
-$ kubectl rollout status deployment/catalog -n p04-finish-02 --timeout=300s
-Waiting for deployment spec update to be observed...
-Waiting for deployment "catalog" rollout to finish: 1 old replicas are pending termination...
-deployment "catalog" successfully rolled out
-$ kubectl get pods -n p04-finish-02 -l app=catalog -o custom-columns='POD:.metadata.name,NODE:.spec.nodeName,PHASE:.status.phase'
-POD                        NODE               PHASE
-catalog-767d6fdcc4-6wxqk   sf-sched-worker2   Running
-catalog-767d6fdcc4-f6wbj   sf-sched-worker2   Running
-catalog-767d6fdcc4-hpzh5   sf-sched-worker2   Running
-# Section 4: the postgres template with its scheduling layer is applied again.
-$ sed -E -e 's/^  name: bookstore$/  name: p04-finish-02/' -e 's/namespace: bookstore$/namespace: p04-finish-02/' -e 's/\.bookstore\.svc/.p04-finish-02.svc/g' -e 's/bookstore-(data|critical|batch)/p04-finish-bookstore-\1/g' -e 's/key: dedicated$/key: p04-finish-dedicated/' examples/bookstore/raw-manifests/20-postgres-statefulset.yaml | kubectl apply -f -
-service/postgres unchanged
-statefulset.apps/postgres configured
-$ kubectl rollout status statefulset/postgres -n p04-finish-02 --timeout=300s
-partitioned roll out complete: 1 new pods have been updated...
-$ kubectl get pod postgres-0 -n p04-finish-02 -o custom-columns='POD:.metadata.name,NODE:.spec.nodeName,PHASE:.status.phase'
+$ kubectl get pod postgres-0 -n p04-fix-02 -o custom-columns='POD:.metadata.name,NODE:.spec.nodeName,PHASE:.status.phase'
 POD          NODE              PHASE
 postgres-0   sf-sched-worker   Running
-$ sed -E -e 's/namespace: bookstore$/namespace: p04-finish-02/' -e 's/key: dedicated$/key: p04-finish-dedicated/' pool-tenant.yaml | kubectl apply -f -
+$ kubectl get pv -o custom-columns='CLAIM:.spec.claimRef.name,NODE:.spec.nodeAffinity.required.nodeSelectorTerms[0].matchExpressions[0].values[0]'
+CLAIM             NODE
+data-postgres-0   sf-sched-worker
+$ sed -E -e 's/^  name: bookstore$/  name: p04-fix-02/' -e 's/namespace: bookstore$/namespace: p04-fix-02/' -e 's/\.bookstore\.svc/.p04-fix-02.svc/g' -e 's/bookstore-(data|critical|batch)/p04-fix-bookstore-\1/g' -e 's/key: dedicated$/key: p04-fix-dedicated/' examples/bookstore/raw-manifests/21-db-migrate-job.yaml | kubectl apply -f -
+job.batch/db-migrate created
+$ kubectl wait --for=condition=complete job/db-migrate -n p04-fix-02 --timeout=300s
+job.batch/db-migrate condition met
+# Section 4: the shipped catalog and storefront, with the hard spread, on this layout.
+$ sed -E -e 's/^  name: bookstore$/  name: p04-fix-02/' -e 's/namespace: bookstore$/namespace: p04-fix-02/' -e 's/\.bookstore\.svc/.p04-fix-02.svc/g' -e 's/bookstore-(data|critical|batch)/p04-fix-bookstore-\1/g' -e 's/key: dedicated$/key: p04-fix-dedicated/' examples/bookstore/raw-manifests/10-catalog-deploy.yaml | kubectl apply -f -
+deployment.apps/catalog created
+$ sed -E -e 's/^  name: bookstore$/  name: p04-fix-02/' -e 's/namespace: bookstore$/namespace: p04-fix-02/' -e 's/\.bookstore\.svc/.p04-fix-02.svc/g' -e 's/bookstore-(data|critical|batch)/p04-fix-bookstore-\1/g' -e 's/key: dedicated$/key: p04-fix-dedicated/' examples/bookstore/raw-manifests/11-storefront-deploy.yaml | kubectl apply -f -
+deployment.apps/storefront created
+$ kubectl get pods -n p04-fix-02 -l 'app in (catalog,storefront)' -o custom-columns='POD:.metadata.name,NODE:.spec.nodeName,PHASE:.status.phase'
+POD                           NODE               PHASE
+catalog-dcd68944f-9fpfv       <none>             Pending
+catalog-dcd68944f-d9skm       sf-sched-worker2   Running
+catalog-dcd68944f-xgrtx       <none>             Pending
+storefront-79c588c766-2sxk9   <none>             Pending
+storefront-79c588c766-hvrtg   sf-sched-worker2   Running
+$ kubectl get events -n p04-fix-02 --field-selector reason=FailedScheduling -o custom-columns='OBJECT:.involvedObject.name,MESSAGE:.message'
+OBJECT                        MESSAGE
+catalog-dcd68944f-9fpfv       0/3 nodes are available: 1 node(s) didn't match pod topology spread constraints, 2 node(s) had untolerated taint(s). preemption: 0/3 nodes are available: 1 node(s) didn't match pod topology spread constraints, 2 Preemption is not helpful for scheduling.
+catalog-dcd68944f-xgrtx       0/3 nodes are available: 1 node(s) didn't match pod topology spread constraints, 2 node(s) had untolerated taint(s). preemption: 0/3 nodes are available: 1 node(s) didn't match pod topology spread constraints, 2 Preemption is not helpful for scheduling.
+storefront-79c588c766-2sxk9   0/3 nodes are available: 1 node(s) didn't match pod topology spread constraints, 2 node(s) had untolerated taint(s). preemption: 0/3 nodes are available: 1 node(s) didn't match pod topology spread constraints, 2 Preemption is not helpful for scheduling.
+# The same two Deployments with the spread patched to ScheduleAnyway.
+$ for d in catalog storefront; do
+  kubectl patch deployment $d -n p04-fix-02 --type=json -p '[{"op": "replace",
+    "path": "/spec/template/spec/topologySpreadConstraints/0/whenUnsatisfiable",
+    "value": "ScheduleAnyway"}]'
+done
+deployment.apps/catalog patched
+deployment.apps/storefront patched
+$ kubectl rollout status deployment/catalog -n p04-fix-02 --timeout=400s
+Waiting for deployment "catalog" rollout to finish: 1 out of 3 new replicas have been updated...
+Waiting for deployment "catalog" rollout to finish: 1 out of 3 new replicas have been updated...
+Waiting for deployment "catalog" rollout to finish: 1 out of 3 new replicas have been updated...
+Waiting for deployment "catalog" rollout to finish: 1 out of 3 new replicas have been updated...
+Waiting for deployment "catalog" rollout to finish: 2 out of 3 new replicas have been updated...
+Waiting for deployment "catalog" rollout to finish: 2 out of 3 new replicas have been updated...
+Waiting for deployment "catalog" rollout to finish: 2 out of 3 new replicas have been updated...
+Waiting for deployment "catalog" rollout to finish: 2 out of 3 new replicas have been updated...
+Waiting for deployment "catalog" rollout to finish: 2 out of 3 new replicas have been updated...
+Waiting for deployment "catalog" rollout to finish: 2 out of 3 new replicas have been updated...
+Waiting for deployment "catalog" rollout to finish: 1 old replicas are pending termination...
+Waiting for deployment "catalog" rollout to finish: 1 old replicas are pending termination...
+deployment "catalog" successfully rolled out
+$ kubectl rollout status deployment/storefront -n p04-fix-02 --timeout=400s
+deployment "storefront" successfully rolled out
+$ kubectl get pods -n p04-fix-02 -l 'app in (catalog,storefront)' -o custom-columns='POD:.metadata.name,NODE:.spec.nodeName,PHASE:.status.phase'
+POD                           NODE               PHASE
+catalog-66c84f6fd6-mgrhd      sf-sched-worker2   Running
+catalog-66c84f6fd6-ptzpw      sf-sched-worker2   Running
+catalog-66c84f6fd6-rtd5z      sf-sched-worker2   Running
+catalog-dcd68944f-d9skm       sf-sched-worker2   Running
+storefront-5c7b7bbc99-m29mh   sf-sched-worker2   Running
+storefront-5c7b7bbc99-z2mfx   sf-sched-worker2   Running
+# Forty-five seconds later the old catalog Pod has finished terminating.
+$ kubectl get pods -n p04-fix-02 -l 'app in (catalog,storefront)' -o custom-columns='POD:.metadata.name,NODE:.spec.nodeName,PHASE:.status.phase'
+POD                           NODE               PHASE
+catalog-66c84f6fd6-mgrhd      sf-sched-worker2   Running
+catalog-66c84f6fd6-ptzpw      sf-sched-worker2   Running
+catalog-66c84f6fd6-rtd5z      sf-sched-worker2   Running
+storefront-5c7b7bbc99-m29mh   sf-sched-worker2   Running
+storefront-5c7b7bbc99-z2mfx   sf-sched-worker2   Running
+# Section 5: pool-tenant.yaml is the chapter's own manifest block saved to a file.
+$ sed -E -e 's/namespace: bookstore$/namespace: p04-fix-02/' -e 's/key: dedicated$/key: p04-fix-dedicated/' pool-tenant.yaml | kubectl apply -f -
 serviceaccount/pool-tenant-sa created
 pod/pool-tenant created
-$ kubectl wait --for=condition=Ready pod/pool-tenant -n p04-finish-02 --timeout=120s
+$ kubectl wait --for=condition=Ready pod/pool-tenant -n p04-fix-02 --timeout=240s
 pod/pool-tenant condition met
-$ kubectl get pod pool-tenant -n p04-finish-02 -o custom-columns='POD:.metadata.name,NODE:.spec.nodeName,PHASE:.status.phase'
+$ kubectl get pod pool-tenant -n p04-fix-02 -o custom-columns='POD:.metadata.name,NODE:.spec.nodeName,PHASE:.status.phase'
 POD           NODE              PHASE
 pool-tenant   sf-sched-worker   Running
-$ kubectl auth can-i create pods -n p04-finish-02 --as=system:serviceaccount:p04-finish-02:catalog-sa
+$ kubectl auth can-i create pods -n p04-fix-02 --as=system:serviceaccount:p04-fix-02:catalog-sa
 no
-$ kubectl auth can-i create deployments -n p04-finish-02 --as=system:serviceaccount:p04-finish-02:catalog-sa
+$ kubectl auth can-i create deployments -n p04-fix-02 --as=system:serviceaccount:p04-fix-02:catalog-sa
 no
-$ kubectl delete pod pool-tenant -n p04-finish-02
-pod "pool-tenant" deleted from p04-finish-02 namespace
+$ kubectl delete pod pool-tenant -n p04-fix-02
+pod "pool-tenant" deleted from p04-fix-02 namespace
 # Section 6: IgnoredDuringExecution. Remove the pool label while postgres-0 runs on the pool node.
 $ kubectl label node sf-sched-worker node-restriction.kubernetes.io/pool-
 node/sf-sched-worker unlabeled
-$ kubectl get pod postgres-0 -n p04-finish-02 -o custom-columns='POD:.metadata.name,NODE:.spec.nodeName,PHASE:.status.phase'
+$ kubectl get pod postgres-0 -n p04-fix-02 -o custom-columns='POD:.metadata.name,NODE:.spec.nodeName,PHASE:.status.phase'
 POD          NODE              PHASE
 postgres-0   sf-sched-worker   Running
+# Delete postgres-0 while no node carries the label. The StatefulSet creates a replacement.
+$ kubectl delete pod postgres-0 -n p04-fix-02
+pod "postgres-0" deleted from p04-fix-02 namespace
+$ kubectl get pod postgres-0 -n p04-fix-02 -o custom-columns='POD:.metadata.name,NODE:.spec.nodeName,PHASE:.status.phase'
+POD          NODE     PHASE
+postgres-0   <none>   Pending
+$ kubectl get events -n p04-fix-02 --field-selector reason=FailedScheduling,involvedObject.name=postgres-0 -o custom-columns='OBJECT:.involvedObject.name,MESSAGE:.message'
+OBJECT       MESSAGE
+postgres-0   0/3 nodes are available: 1 node(s) had untolerated taint(s), 2 node(s) didn't match Pod's node affinity/selector. preemption: 0/3 nodes are available: 3 Preemption is not helpful for scheduling.
 # Restore the label.
 $ kubectl label node sf-sched-worker node-restriction.kubernetes.io/pool=database
 node/sf-sched-worker labeled
+$ kubectl wait --for=condition=Ready pod/postgres-0 -n p04-fix-02 --timeout=400s
+pod/postgres-0 condition met
+$ kubectl get pod postgres-0 -n p04-fix-02 -o custom-columns='POD:.metadata.name,NODE:.spec.nodeName,PHASE:.status.phase'
+POD          NODE              PHASE
+postgres-0   sf-sched-worker   Running
 $ kubectl get nodes -L node-restriction.kubernetes.io/pool
-NAME                     STATUS   ROLES           AGE    VERSION   POOL
-sf-sched-control-plane   Ready    control-plane   159m   v1.37.0   
-sf-sched-worker          Ready    <none>          158m   v1.37.0   database
-sf-sched-worker2         Ready    <none>          158m   v1.37.0   
+NAME                     STATUS   ROLES           AGE     VERSION   POOL
+sf-sched-control-plane   Ready    control-plane   3h25m   v1.37.0   
+sf-sched-worker          Ready    <none>          3h25m   v1.37.0   database
+sf-sched-worker2         Ready    <none>          3h25m   v1.37.0   
 # Cleanup: the namespace, the three PriorityClasses, the taint and the pool label are removed.
-$ kubectl delete namespace p04-finish-02 --wait=true --timeout=300s
-namespace "p04-finish-02" deleted
-$ kubectl delete priorityclass p04-finish-bookstore-data p04-finish-bookstore-critical p04-finish-bookstore-batch
-priorityclass.scheduling.k8s.io "p04-finish-bookstore-data" deleted
-priorityclass.scheduling.k8s.io "p04-finish-bookstore-critical" deleted
-priorityclass.scheduling.k8s.io "p04-finish-bookstore-batch" deleted
-$ kubectl taint node sf-sched-worker p04-finish-dedicated:NoSchedule-
+$ kubectl delete namespace p04-fix-02 --wait=true --timeout=300s
+namespace "p04-fix-02" deleted
+$ kubectl delete priorityclass p04-fix-bookstore-data p04-fix-bookstore-critical p04-fix-bookstore-batch
+priorityclass.scheduling.k8s.io "p04-fix-bookstore-data" deleted
+priorityclass.scheduling.k8s.io "p04-fix-bookstore-critical" deleted
+priorityclass.scheduling.k8s.io "p04-fix-bookstore-batch" deleted
+$ kubectl taint node sf-sched-worker p04-fix-dedicated:NoSchedule-
 node/sf-sched-worker untainted
 $ kubectl label node sf-sched-worker node-restriction.kubernetes.io/pool-
 node/sf-sched-worker unlabeled
 $ kubectl get nodes -L node-restriction.kubernetes.io/pool
-NAME                     STATUS   ROLES           AGE    VERSION   POOL
-sf-sched-control-plane   Ready    control-plane   159m   v1.37.0   
-sf-sched-worker          Ready    <none>          159m   v1.37.0   
-sf-sched-worker2         Ready    <none>          159m   v1.37.0   
-$ kubectl get namespaces,priorityclass,nodes -o name | grep -c p04-finish
-0
+NAME                     STATUS   ROLES           AGE     VERSION   POOL
+sf-sched-control-plane   Ready    control-plane   3h27m   v1.37.0   
+sf-sched-worker          Ready    <none>          3h26m   v1.37.0   
+sf-sched-worker2         Ready    <none>          3h26m   v1.37.0   
 $ kubectl get nodes -o 'custom-columns=NAME:.metadata.name,TAINTS:.spec.taints[*].key'
 NAME                     TAINTS
 sf-sched-control-plane   node-role.kubernetes.io/control-plane
 sf-sched-worker          <none>
 sf-sched-worker2         <none>
-$ kubectl get namespaces,priorityclass,nodes -o name | grep -c p04-finish
+$ kubectl get namespaces,priorityclass,nodes,pv -o name | grep -c p04-fix
+0
+$ kubectl get pv
+No resources found
+# ---- One-node run: the shared raw manifests on the usual one-node cluster ----
+# context: kind-sf-pilot. The cluster has one node, sf-pilot-control-plane,
+# with no taint. This run used its own namespace, p04-fix-raw, where the
+# shipped files print bookstore. Files 00, 05, 16, 17 and 20 from
+# examples/bookstore/raw-manifests are applied unedited apart from that
+# substitution. The three bookstore PriorityClasses and the bookstore-local
+# StorageClass already existed on this cluster, so 17 prints unchanged and 35
+# was not applied. After postgres-0 is Ready, the same patch as section 3 of
+# the chapter replaces the preferred rule with the required one, to show the
+# required form on one node. The namespace is removed at the end.
+$ kubectl config current-context
+kind-sf-pilot
+$ kubectl get nodes
+NAME                     STATUS   ROLES           AGE   VERSION
+sf-pilot-control-plane   Ready    control-plane   15h   v1.37.0
+$ kubectl get nodes -o 'custom-columns=NAME:.metadata.name,TAINTS:.spec.taints[*].key'
+NAME                     TAINTS
+sf-pilot-control-plane   <none>
+$ sed -E -e 's/^  name: bookstore$/  name: p04-fix-raw/' -e 's/namespace: bookstore$/namespace: p04-fix-raw/' -e 's/\.bookstore\.svc/.p04-fix-raw.svc/g' examples/bookstore/raw-manifests/00-namespace.yaml | kubectl apply -f -
+namespace/p04-fix-raw created
+resourcequota/bookstore-quota created
+limitrange/bookstore-limits created
+$ sed -E -e 's/^  name: bookstore$/  name: p04-fix-raw/' -e 's/namespace: bookstore$/namespace: p04-fix-raw/' -e 's/\.bookstore\.svc/.p04-fix-raw.svc/g' examples/bookstore/raw-manifests/05-serviceaccounts-rbac.yaml | kubectl apply -f -
+serviceaccount/catalog-sa created
+serviceaccount/storefront-sa created
+serviceaccount/orders-sa created
+serviceaccount/payments-worker-sa created
+serviceaccount/postgres-sa created
+serviceaccount/redis-sa created
+serviceaccount/rabbitmq-sa created
+serviceaccount/migrate-sa created
+role.rbac.authorization.k8s.io/catalog-config-reader created
+rolebinding.rbac.authorization.k8s.io/catalog-config-reader-binding created
+$ sed -E -e 's/^  name: bookstore$/  name: p04-fix-raw/' -e 's/namespace: bookstore$/namespace: p04-fix-raw/' -e 's/\.bookstore\.svc/.p04-fix-raw.svc/g' examples/bookstore/raw-manifests/16-db-credentials.yaml | kubectl apply -f -
+secret/db-credentials created
+$ sed -E -e 's/^  name: bookstore$/  name: p04-fix-raw/' -e 's/namespace: bookstore$/namespace: p04-fix-raw/' -e 's/\.bookstore\.svc/.p04-fix-raw.svc/g' examples/bookstore/raw-manifests/17-storageclass.yaml | kubectl apply -f -
+storageclass.storage.k8s.io/bookstore-local unchanged
+$ sed -E -e 's/^  name: bookstore$/  name: p04-fix-raw/' -e 's/namespace: bookstore$/namespace: p04-fix-raw/' -e 's/\.bookstore\.svc/.p04-fix-raw.svc/g' examples/bookstore/raw-manifests/20-postgres-statefulset.yaml | kubectl apply -f -
+service/postgres created
+statefulset.apps/postgres created
+$ kubectl rollout status statefulset/postgres -n p04-fix-raw --timeout=540s
+Waiting for 1 pods to be ready...
+partitioned roll out complete: 1 new pods have been updated...
+$ kubectl get pod postgres-0 -n p04-fix-raw -o 'custom-columns=POD:.metadata.name,NODE:.spec.nodeName,READY:.status.containerStatuses[0].ready,PHASE:.status.phase'
+POD          NODE                     READY   PHASE
+postgres-0   sf-pilot-control-plane   true    Running
+$ kubectl get statefulset postgres -n p04-fix-raw -o jsonpath='{.spec.template.spec.affinity.nodeAffinity}'
+{"preferredDuringSchedulingIgnoredDuringExecution":[{"preference":{"matchExpressions":[{"key":"dedicated","operator":"In","values":["database"]}]},"weight":100}]}
+# The required form of the rule, patched into the same StatefulSet on this one-node cluster.
+$ kubectl patch statefulset postgres -n p04-fix-raw --type=json -p '[
+  {"op": "replace",
+   "path": "/spec/template/spec/affinity/nodeAffinity",
+   "value": {"requiredDuringSchedulingIgnoredDuringExecution": {
+     "nodeSelectorTerms": [{"matchExpressions": [
+       {"key": "node-restriction.kubernetes.io/pool",
+        "operator": "In", "values": ["database"]}]}]}}}]'
+statefulset.apps/postgres patched
+$ kubectl get pod postgres-0 -n p04-fix-raw -o 'custom-columns=POD:.metadata.name,NODE:.spec.nodeName,PHASE:.status.phase'
+POD          NODE     PHASE
+postgres-0   <none>   Pending
+$ kubectl get events -n p04-fix-raw --field-selector reason=FailedScheduling -o 'custom-columns=OBJECT:.involvedObject.name,MESSAGE:.message'
+OBJECT       MESSAGE
+postgres-0   0/1 nodes are available: 1 node(s) didn't match Pod's node affinity/selector. preemption: 0/1 nodes are available: 1 Preemption is not helpful for scheduling.
+# Cleanup.
+$ kubectl delete namespace p04-fix-raw --wait=true --timeout=300s
+namespace "p04-fix-raw" deleted
+$ kubectl get namespaces -o name | grep -c p04-fix
 0
