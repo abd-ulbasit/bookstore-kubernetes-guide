@@ -6,6 +6,12 @@
 # names bookstore-ml and bookstore and applies the same files. The cluster's
 # only node is named sf-pilot-control-plane; the node name is kept as captured.
 # The bearer token is written to a Secret by openssl and is never printed.
+# Steps 10 and 11 were recorded later by examples/security-lab/labs/12-06-docs.sh
+# with LAB_PREFIX=p12-finish, in a namespace named p12-finish-docs, from the
+# image bookstore/recommender-serve:p12-finish built from the current
+# examples/bookstore/ml/serve. The first try used the older :dev image, which
+# was built before predictor.py switched off the docs routes, and it answered
+# 200 on /docs, /redoc and /openapi.json. Steps 0 to 9 used that older image.
 
 ## step 0: versions and a clean start
 $ kubectl version
@@ -233,4 +239,25 @@ $ kubectl get namespace p12-06-ml p12-06-store p12-06-other
 Error from server (NotFound): namespaces "p12-06-ml" not found
 Error from server (NotFound): namespaces "p12-06-store" not found
 Error from server (NotFound): namespaces "p12-06-other" not found
+
+## step 10: the interactive docs routes without a token
+$ kubectl create namespace p12-finish-docs (restricted)
+namespace/p12-finish-docs created
+$ kubectl apply -f docs-check.yaml (one Pod: the predictor on localhost and a probe)
+pod/docs-check created
+$ kubectl wait --for=jsonpath='{.status.phase}'=Succeeded pod/docs-check -n p12-finish-docs --timeout=180s
+pod/docs-check condition met
+$ kubectl logs docs-check -n p12-finish-docs
+2026-10-31 07:53:36,487 INFO recommender loading model artifact from /tmp/model/model.joblib
+2026-10-31 07:53:36,488 INFO recommender model loaded kind=stand-in version=lab n_books=2 top_k=1
+GET /healthz without a token: 200
+GET /recommend?book_id=1 without a token: 401
+GET /docs without a token: 404
+GET /redoc without a token: 404
+GET /openapi.json without a token: 404
+GET /recommend?book_id=1 with the token: 200
+
+## step 11: cleanup of the docs step
+$ kubectl delete namespace p12-finish-docs --wait=false
+namespace "p12-finish-docs" deleted
 # end of lab 12.06
