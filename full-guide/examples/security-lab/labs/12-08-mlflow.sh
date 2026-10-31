@@ -1,23 +1,28 @@
 #!/usr/bin/env bash
-# Lab 12.08, MLflow step: the tracker with basic authentication, started once.
+# Lab 12.08, MLflow step: the tracker with basic authentication. Shows a 401
+# without credentials and a 200 with the generated admin credentials.
 #
 # Run this ONLY against a kind cluster you own, from the guide's full-guide/
 # directory, after the other 12-08 steps. Its output is appended to the
 # chapter's transcript as step 12. It creates three namespaces, all named
-# p12-08-*: p12-08-mlflow for the tracker, p12-08-ml standing in for
-# bookstore-ml (the one namespace the allow policy admits) and p12-08-store
-# for a namespace outside the allow-list. It deletes them at the end.
+# with the prefix in LAB_PREFIX (default p12-08): <prefix>-mlflow for the
+# tracker, <prefix>-ml standing in for bookstore-ml (the one namespace the
+# allow policy admits) and <prefix>-store for a namespace outside the
+# allow-list. It deletes them at the end.
 #
 # The image bookstore/mlflow-auth:dev (examples/bookstore/ml/tracking) must be
 # loaded into the cluster. The lab has no PostgreSQL, so the first start keeps
 # its database in SQLite on an emptyDir. The generated values are written to
-# files in a temporary directory and never printed.
+# files in a temporary directory and never printed. The admin password also goes
+# into a Secret in the allowed namespace, so the caller Pod can read it from its
+# environment without the lab ever echoing it.
 set +e
 
 K="${KUBECTL:-kubectl}"
-NS=p12-08-mlflow
-ML=p12-08-ml
-ST=p12-08-store
+PFX="${LAB_PREFIX:-p12-08}"
+NS="$PFX-mlflow"
+ML="$PFX-ml"
+ST="$PFX-store"
 MANI=examples/bookstore/ml/tracking/mlflow.yaml
 
 ctx=$("$K" config current-context 2>/dev/null)
@@ -31,7 +36,7 @@ trap 'rm -rf "$WORK"' EXIT
 show() { printf '$ %s\n' "$*"; }
 
 echo
-echo "## step 12: the MLflow tracker with basic authentication, started once"
+echo "## step 12: the MLflow tracker with basic authentication"
 "$K" wait --for=delete "namespace/$ML" --timeout=240s >/dev/null 2>&1
 "$K" wait --for=delete "namespace/$ST" --timeout=240s >/dev/null 2>&1
 "$K" wait --for=delete "namespace/$NS" --timeout=240s >/dev/null 2>&1
@@ -60,26 +65,52 @@ show "kubectl apply -f mlflow.yaml (the namespace, the policies, the Service and
 "$K" apply -f "$WORK/mlflow.yaml" 2>&1
 show "kubectl create secret generic mlflow-auth -n $NS (basic_auth.ini, backend-store-uri and the Flask key, generated; none printed)"
 umask 077
-printf '[mlflow]\ndefault_permission = NO_PERMISSIONS\ndatabase_uri = sqlite:////var/lib/mlflow-db/auth.db\nadmin_username = admin\nadmin_password = %s\n' "$(openssl rand -base64 24)" > "$WORK/basic_auth.ini"
+ADMIN_PW=$(openssl rand -base64 24)
+printf '[mlflow]\ndefault_permission = NO_PERMISSIONS\ndatabase_uri = sqlite:////var/lib/mlflow-db/auth.db\nadmin_username = admin\nadmin_password = %s\n' "$ADMIN_PW" > "$WORK/basic_auth.ini"
 printf 'sqlite:////var/lib/mlflow-db/tracking.db' > "$WORK/backend-store-uri"
 "$K" create secret generic mlflow-auth -n "$NS" \
   --from-file=basic_auth.ini="$WORK/basic_auth.ini" \
   --from-file=backend-store-uri="$WORK/backend-store-uri" \
   --from-literal=flask-secret-key="$(openssl rand -hex 32)" 2>&1
+show "kubectl create secret generic mlflow-client -n $ML (the admin login the caller uses; generated, not printed)"
+"$K" create secret generic mlflow-client -n "$ML" \
+  --from-literal=username=admin --from-literal=password="$ADMIN_PW" 2>&1
+unset ADMIN_PW
 show "kubectl rollout status deployment/mlflow -n $NS --timeout=300s"
 "$K" rollout status deployment/mlflow -n "$NS" --timeout=300s 2>&1
 
 cat > "$WORK/probe.py" <<'PY'
-import os, time, urllib.error, urllib.request
-url = os.environ["MLFLOW_URL"]
-last = None
-for _ in range(45):
+import base64, json, os, time, urllib.error, urllib.request
+url = os.environ["MLFLOW_URL"] + "/api/2.0/mlflow/experiments/search?max_results=10"
+tries = int(os.environ.get("PROBE_TRIES", "45"))
+user = os.environ.get("MLFLOW_USER")
+password = os.environ.get("MLFLOW_PASSWORD")
+
+
+def call(with_login):
+    req = urllib.request.Request(url)
+    if with_login:
+        token = base64.b64encode(f"{user}:{password}".encode()).decode()
+        req.add_header("Authorization", "Basic " + token)
     try:
-        r = urllib.request.urlopen(url + "/api/2.0/mlflow/experiments/search", timeout=5)
-        print("experiments/search without credentials: HTTP", r.status)
-        break
+        r = urllib.request.urlopen(req, timeout=5)
+        return r.status, r.read()
     except urllib.error.HTTPError as e:
-        print("experiments/search without credentials: HTTP", e.code)
+        return e.code, e.read()
+
+
+last = None
+for _ in range(tries):
+    try:
+        code, _body = call(False)
+        print("experiments/search without credentials: HTTP", code)
+        if user:
+            code, body = call(True)
+            if code == 200:
+                names = [e["name"] for e in json.loads(body).get("experiments", [])]
+                print("experiments/search with the admin login: HTTP", code, "experiments:", names)
+            else:
+                print("experiments/search with the admin login: HTTP", code, body[:100].decode())
         break
     except urllib.error.URLError as e:
         last = e.reason
@@ -87,9 +118,18 @@ for _ in range(45):
 else:
     print("experiments/search without credentials: failed:", type(last).__name__, str(last)[:60])
 PY
-for PAIR in "caller:$ML" "stranger:$ST"; do
+for PAIR in "caller:$ML:45" "stranger:$ST:2"; do
   POD=${PAIR%%:*}
-  PNS=${PAIR#*:}
+  REST=${PAIR#*:}
+  PNS=${REST%%:*}
+  TRIES=${REST#*:}
+  LOGIN=""
+  if [ "$POD" = caller ]; then
+    LOGIN='        - name: MLFLOW_USER
+          valueFrom: { secretKeyRef: { name: mlflow-client, key: username } }
+        - name: MLFLOW_PASSWORD
+          valueFrom: { secretKeyRef: { name: mlflow-client, key: password } }'
+  fi
   cat > "$WORK/$POD.yaml" <<EOF2
 apiVersion: v1
 kind: Pod
@@ -112,6 +152,9 @@ spec:
       env:
         - name: MLFLOW_URL
           value: "http://mlflow.$NS.svc.cluster.local:5000"
+        - name: PROBE_TRIES
+          value: "$TRIES"
+$LOGIN
       resources:
         requests: { cpu: 10m, memory: 32Mi }
         limits: { memory: 128Mi }
@@ -127,8 +170,8 @@ EOF2
   "$K" exec -i -n "$PNS" "$POD" -- python -I - < "$WORK/probe.py" 2>&1
 done
 
-show "kubectl logs deployment/mlflow -n $NS --tail=4"
-"$K" logs deployment/mlflow -n "$NS" --tail=4 2>&1 | cut -c1-160
+show "kubectl logs deployment/mlflow -n $NS (the access lines: user, request, status; client address, time and agent cut)"
+"$K" logs deployment/mlflow -n "$NS" 2>&1 | grep -E 'HTTP/1.1" [0-9]+ ' | sed -E 's/^[0-9.]+ - ([^ ]+) \[[^]]*\] ("[^"]*" [0-9]+) .*/\1 \2/'
 
 echo
 echo "## step 13: cleanup of the MLflow step"

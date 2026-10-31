@@ -18,6 +18,13 @@
 # What did not work the first time: the first run printed a local temporary
 # directory in the quota denial line. The script now runs from its own work
 # directory, and this transcript is the second run.
+# Steps 12 and 13 were recorded in a later run of
+# examples/security-lab/labs/12-08-mlflow.sh with LAB_PREFIX=p12-finish, so
+# their namespaces are p12-finish-mlflow, p12-finish-ml and p12-finish-store.
+# The first recording of step 12 answered every request with 500: MLflow 3.3.2
+# starts uvicorn unless a server option is given, and uvicorn cannot serve the
+# Flask basic-auth app. The Deployment now passes --gunicorn-opts, and this is
+# the recording of the fixed run. The image is bookstore/mlflow-auth:dev.
 $ kubectl version --client
 Client Version: v1.37.2
 $ helm version --short
@@ -76,46 +83,43 @@ namespace "p12-08-opencost" deleted
 namespace "p12-08-ml" deleted
 namespace "p12-08-mlflow" deleted
 
-## step 12: the MLflow tracker with basic authentication, started once
-$ kubectl create namespace p12-08-ml (stands in for bookstore-ml) and p12-08-store (outside the allow-list)
-namespace/p12-08-ml created
-namespace/p12-08-store created
+## step 12: the MLflow tracker with basic authentication
+$ kubectl create namespace p12-finish-ml (stands in for bookstore-ml) and p12-finish-store (outside the allow-list)
+namespace/p12-finish-ml created
+namespace/p12-finish-store created
 $ python: write the manifest with the lab namespace names (the Namespace object, the policy's namespace and the allowed namespace)
 wrote 7 documents
 $ kubectl apply -f mlflow.yaml (the namespace, the policies, the Service and the Deployment)
-namespace/p12-08-mlflow created
+namespace/p12-finish-mlflow created
 serviceaccount/mlflow created
 networkpolicy.networking.k8s.io/default-deny created
-networkpolicy.networking.k8s.io/allow-p12-08-ml created
+networkpolicy.networking.k8s.io/allow-p12-finish-ml created
 networkpolicy.networking.k8s.io/allow-tracker-egress created
 service/mlflow created
 deployment.apps/mlflow created
-$ kubectl create secret generic mlflow-auth -n p12-08-mlflow (basic_auth.ini, backend-store-uri and the Flask key, generated; none printed)
+$ kubectl create secret generic mlflow-auth -n p12-finish-mlflow (basic_auth.ini, backend-store-uri and the Flask key, generated; none printed)
 secret/mlflow-auth created
-$ kubectl rollout status deployment/mlflow -n p12-08-mlflow --timeout=300s
+$ kubectl create secret generic mlflow-client -n p12-finish-ml (the admin login the caller uses; generated, not printed)
+secret/mlflow-client created
+$ kubectl rollout status deployment/mlflow -n p12-finish-mlflow --timeout=300s
 Waiting for deployment "mlflow" rollout to finish: 0 of 1 updated replicas are available...
 deployment "mlflow" successfully rolled out
-$ kubectl apply -f caller.yaml (in p12-08-ml)
+$ kubectl apply -f caller.yaml (in p12-finish-ml)
 pod/caller created
 pod/caller condition met
-$ kubectl exec -i -n p12-08-ml caller -- python -I - < probe.py
-experiments/search without credentials: HTTP 500
-$ kubectl apply -f stranger.yaml (in p12-08-store)
+$ kubectl exec -i -n p12-finish-ml caller -- python -I - < probe.py
+experiments/search without credentials: HTTP 401
+experiments/search with the admin login: HTTP 200 experiments: ['Default']
+$ kubectl apply -f stranger.yaml (in p12-finish-store)
 pod/stranger created
 pod/stranger condition met
-$ kubectl exec -i -n p12-08-store stranger -- python -I - < probe.py
-$ kubectl logs deployment/mlflow -n p12-08-mlflow --tail=4
-  File "/usr/local/lib/python3.10/site-packages/uvicorn/middleware/asgi2.py", line 14, in __call__
-    instance = self.app(scope)
-TypeError: Flask.__call__() missing 1 required positional argument: 'start_response'
-INFO:     10.244.0.90:37156 - "GET /api/2.0/mlflow/experiments/search HTTP/1.1" 500 Internal Server Error
+$ kubectl exec -i -n p12-finish-store stranger -- python -I - < probe.py
+experiments/search without credentials: failed: TimeoutError timed out
+$ kubectl logs deployment/mlflow -n p12-finish-mlflow (the access lines: user, request, status; client address, time and agent cut)
+admin "GET /api/2.0/mlflow/experiments/search?max_results=10 HTTP/1.1" 200
 
 ## step 13: cleanup of the MLflow step
-$ kubectl delete namespace p12-08-mlflow p12-08-ml p12-08-store --wait=false
-namespace "p12-08-mlflow" deleted
-namespace "p12-08-ml" deleted
-namespace "p12-08-store" deleted
-
-## step 14: the probe from outside the allow-list, run by hand after step 12 (the scripted exec hung)
-$ kubectl exec -n p12-08-store stranger -- python -I -c "<the probe: urlopen of the experiments/search path, timeout 5>"
-failed: URLError
+$ kubectl delete namespace p12-finish-mlflow p12-finish-ml p12-finish-store --wait=false
+namespace "p12-finish-mlflow" deleted
+namespace "p12-finish-ml" deleted
+namespace "p12-finish-store" deleted

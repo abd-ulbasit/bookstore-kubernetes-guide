@@ -694,6 +694,26 @@ and the chapter sets both:
   password is read from that file, not from a `MLFLOW_AUTH_ADMIN_PASSWORD`
   variable, so the variable this section used to name does nothing.
 
+**The server option is part of the fix.** `mlflow server` starts uvicorn unless
+a server option is given, and uvicorn calls the app as ASGI. The basic-auth app
+is a Flask app, which speaks WSGI. The first run of this chapter used no option,
+and every request returned `500` with a `TypeError` from uvicorn's Flask
+adapter. The pinned image's `mlflow/server/__init__.py` shows the choice: it
+uses uvicorn unless `--gunicorn-opts` or `--waitress-opts` is set. The
+[authentication page at the v3.3.2 tag](https://github.com/mlflow/mlflow/blob/v3.3.2/docs/docs/classic-ml/auth/index.mdx)
+shows only `mlflow server --app-name basic-auth`, and does not mention the
+server option.
+The cause and the workaround come from an upstream issue instead, where an
+MLflow maintainer says the auth app was not updated when uvicorn became the
+default, and tells users to pass `--gunicorn-opts`
+([mlflow/mlflow#17324](https://github.com/mlflow/mlflow/issues/17324);
+also [#17503](https://github.com/mlflow/mlflow/issues/17503)). The manifest does
+that, with two gunicorn workers and a 60-second timeout. gunicorn is already in
+the image. MLflow prints a `FutureWarning` that recommends uvicorn, which is its
+general advice and not about this app. That issue is closed upstream. This
+chapter pins 3.3.2 and did not try a newer release, so check the release you
+run before you drop the flag.
+
 The config's default permission is `READ` for every user, so the config sets
 `NO_PERMISSIONS`. Its `database_uri` defaults to SQLite in the working
 directory, which a read-only root filesystem does not allow, so the config
@@ -731,66 +751,72 @@ rm basic_auth.ini backend-store-uri
 
 `AUTH_DB_URI` is the URI of the authentication store and `TRACKING_DB_URI` the
 URI of the tracking store, both set in the shell from your secret store and
-never written into the repository. They must differ. MLflow records each store's
-schema revision in an `alembic_version` table, so two stores in one database
-collide: the lab's first start, which used one SQLite file for both, failed the
-second migration with `Can't locate revision`. Give each store its own database
-or schema.
+never written into the repository. They must differ. In a check run for this
+chapter outside the cluster, pointing both stores at one SQLite file made the
+server's worker fail to boot (exit code 3), and the log did not say why. Give
+each store its own database or schema.
 
-The lab had no PostgreSQL. Its first start kept each store in its own SQLite file
-on an `emptyDir` volume, which the manifest marks as a lab-only mount. The lab ran
-the same manifest with the bookstore namespace named `p12-08-ml`, a namespace it
-created for that purpose, and with a namespace outside the allow-list. The
-capture below is step 12 of the lab. The Deployment rolled out under the
-restricted settings, and the server listened on port 5000 after both stores
-migrated. Every request then failed with `500`, including the request from the
-allowed namespace, so this run did not reach the `401` that this section sets
-out to show. The server log names the cause: uvicorn calls the Flask basic-auth
-app with the ASGI signature, and each request raises a `TypeError`, quoted in
-the capture. The lab found no configuration that avoids it. The request from
-outside the allow-list was stopped by the policy, as intended. The scripted
-probe from that namespace hung in `kubectl exec`, so the lab ran it once more by
-hand, and its result is step 14. The generated values are never printed.
+The lab had no PostgreSQL. It kept each store in its own SQLite file on an
+`emptyDir` volume, which the manifest marks as a lab-only mount. The lab ran
+the same manifest with namespaces of its own standing in for `bookstore-ml`,
+the one namespace the allow policy admits, and for a namespace outside the
+allow-list. Captured lines keep the lab's names: the policy line ends in the
+name that stands in for `bookstore-ml`, and the tracker's namespace ends in
+`mlflow`. The capture below is step 12 of the lab, recorded after the fix. The
+Deployment rolled out under the restricted settings. A request from the allowed
+namespace without credentials got `401`, and the same request with the
+generated admin login got `200` and the one experiment that a new store holds,
+`Default`. A request from the other namespace timed out, which is what a
+dropped packet looks like. [02.06](../02-networking/06-network-policies.md)
+shows that kind's default CNI, kindnet, has enforced NetworkPolicy since kind
+v0.24.0, and the tracker answered the allowed namespace from the same Service,
+so the timeout is the policy and not a broken tracker. The lab also created a
+Secret holding the same generated admin login in the allowed namespace, for the
+caller Pod to read. A real pipeline gets its own user with only the permissions
+it needs, not the admin. The generated values are never printed.
 
 <!-- gate: output -->
 ```text
-$ kubectl create namespace p12-08-ml (stands in for bookstore-ml) and p12-08-store (outside the allow-list)
-namespace/p12-08-ml created
-namespace/p12-08-store created
+$ kubectl create namespace p12-finish-ml (stands in for bookstore-ml) and p12-finish-store (outside the allow-list)
+namespace/p12-finish-ml created
+namespace/p12-finish-store created
 $ python: write the manifest with the lab namespace names (the Namespace object, the policy's namespace and the allowed namespace)
 wrote 7 documents
 $ kubectl apply -f mlflow.yaml (the namespace, the policies, the Service and the Deployment)
-namespace/p12-08-mlflow created
+namespace/p12-finish-mlflow created
 serviceaccount/mlflow created
 networkpolicy.networking.k8s.io/default-deny created
-networkpolicy.networking.k8s.io/allow-p12-08-ml created
+networkpolicy.networking.k8s.io/allow-p12-finish-ml created
 networkpolicy.networking.k8s.io/allow-tracker-egress created
 service/mlflow created
 deployment.apps/mlflow created
-$ kubectl create secret generic mlflow-auth -n p12-08-mlflow (basic_auth.ini, backend-store-uri and the Flask key, generated; none printed)
+$ kubectl create secret generic mlflow-auth -n p12-finish-mlflow (basic_auth.ini, backend-store-uri and the Flask key, generated; none printed)
 secret/mlflow-auth created
-$ kubectl rollout status deployment/mlflow -n p12-08-mlflow --timeout=300s
+$ kubectl create secret generic mlflow-client -n p12-finish-ml (the admin login the caller uses; generated, not printed)
+secret/mlflow-client created
+$ kubectl rollout status deployment/mlflow -n p12-finish-mlflow --timeout=300s
 Waiting for deployment "mlflow" rollout to finish: 0 of 1 updated replicas are available...
 deployment "mlflow" successfully rolled out
-$ kubectl apply -f caller.yaml (in p12-08-ml)
+$ kubectl apply -f caller.yaml (in p12-finish-ml)
 pod/caller created
 pod/caller condition met
-$ kubectl exec -i -n p12-08-ml caller -- python -I - < probe.py
-experiments/search without credentials: HTTP 500
-$ kubectl apply -f stranger.yaml (in p12-08-store)
+$ kubectl exec -i -n p12-finish-ml caller -- python -I - < probe.py
+experiments/search without credentials: HTTP 401
+experiments/search with the admin login: HTTP 200 experiments: ['Default']
+$ kubectl apply -f stranger.yaml (in p12-finish-store)
 pod/stranger created
 pod/stranger condition met
-$ kubectl exec -i -n p12-08-store stranger -- python -I - < probe.py
-$ kubectl logs deployment/mlflow -n p12-08-mlflow --tail=4
-  File "/usr/local/lib/python3.10/site-packages/uvicorn/middleware/asgi2.py", line 14, in __call__
-    instance = self.app(scope)
-TypeError: Flask.__call__() missing 1 required positional argument: 'start_response'
-INFO:     10.244.0.90:37156 - "GET /api/2.0/mlflow/experiments/search HTTP/1.1" 500 Internal Server Error
+$ kubectl exec -i -n p12-finish-store stranger -- python -I - < probe.py
+experiments/search without credentials: failed: TimeoutError timed out
+$ kubectl logs deployment/mlflow -n p12-finish-mlflow (the access lines: user, request, status; client address, time and agent cut)
+admin "GET /api/2.0/mlflow/experiments/search?max_results=10 HTTP/1.1" 200
 ```
 
-Three things are still open. The first start answered every request with `500`,
-a `TypeError` in the MLflow 3.3.2 basic-auth path, so the refusal of an
-unauthenticated request is not yet demonstrated. The artifact bucket needs its own identity, which
+The access log in the last lines shows the authenticated request under the user
+`admin`. The refused requests did not appear in that log in this run, so
+watch for failed logins at the client or at a proxy in front of the tracker, not
+in the server's access log. Two things are still open. The artifact bucket
+needs its own identity, which
 [Part 10 ch.03](../10-cloud-and-managed-kubernetes/03-cloud-identity.md)
 covers. That identity is the only reason to turn the ServiceAccount token on,
 and it would apply to this ServiceAccount alone. And the PostgreSQL and bucket
@@ -1328,7 +1354,11 @@ Checklist:
   <https://kubernetes.io/docs/concepts/workloads/controllers/job/>;
   **Pod Security Standards** <https://kubernetes.io/docs/concepts/security/pod-security-standards/>.
 - **MLflow basic authentication**: the basic HTTP auth page in the MLflow
-  repository, <https://github.com/mlflow/mlflow/blob/master/docs/docs/self-hosting/security/basic-http-auth.mdx>.
+  repository, <https://github.com/mlflow/mlflow/blob/master/docs/docs/self-hosting/security/basic-http-auth.mdx>,
+  and the page as of the pinned release,
+  <https://github.com/mlflow/mlflow/blob/v3.3.2/docs/docs/classic-ml/auth/index.mdx>.
+  The uvicorn and Flask mismatch is in
+  <https://github.com/mlflow/mlflow/issues/17324>.
 - **Karpenter disruption** (the `karpenter.sh/do-not-disrupt` annotation and
   NodePool budgets) <https://karpenter.sh/docs/concepts/disruption/>.
 - Official: **Argo Workflows** <https://argo-workflows.readthedocs.io/>;
