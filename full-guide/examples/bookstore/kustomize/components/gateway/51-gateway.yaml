@@ -12,12 +12,11 @@
 #  (dry-run does not detect the runtime hostname overlap — see ch.05).
 # ===========================================================================
 #
-# Gateway API is CRD-installed, NOT built into Kubernetes. The Gateway/
-# HTTPRoute v1 CRDs + a controller (e.g. Envoy Gateway, Cilium, Istio; not
-# ingress-nginx, which does not implement Gateway API) must be installed first
-# (ch.05 documents the public install). A client-side dry-run only needs the
-# CRDs registered; --validate=false (used in the whole-dir dry-run report)
-# tolerates their absence.
+# Gateway API is CRD-installed, NOT built into Kubernetes. The Gateway API
+# v1.7.0 standard-channel CRDs and the Traefik controller (its Gateway provider
+# enabled) must be installed first (ch.05 documents both). A client-side dry-run
+# only needs the CRDs registered; --validate=false (used in the whole-dir
+# dry-run report) tolerates their absence.
 #
 # Role-oriented split (ch.05): GatewayClass + Gateway are INFRA-team owned
 # (the listener, TLS, the L4/L7 entrypoint); HTTPRoute is APP-team owned (how
@@ -32,12 +31,10 @@
 #   kubectl get gateway,httproute -n bookstore
 ---
 # INFRA-owned: the class of controller that implements Gateways. Normally
-# pre-created by the platform team / installed by the controller; included
-# here so the stack is self-contained for the guide. controllerName is
-# implementation-specific, and this value is a PLACEHOLDER that no controller
-# claims (ingress-nginx does not implement Gateway API). Set it to the
-# controller name of the Gateway implementation you install in ch.05, e.g.
-# Envoy Gateway's gateway.envoyproxy.io/gatewayclass-controller.
+# pre-created by the platform team; included here so the stack is
+# self-contained for the guide. controllerName is the name the Traefik
+# controller claims: the chart's own GatewayClass (named traefik) carries the
+# same value, and ch.05 checks it against the running controller.
 apiVersion: gateway.networking.k8s.io/v1
 kind: GatewayClass
 metadata:
@@ -45,7 +42,7 @@ metadata:
   labels:
     app.kubernetes.io/part-of: bookstore
 spec:
-  controllerName: k8s.io/ingress-nginx
+  controllerName: traefik.io/gateway-controller
 ---
 # INFRA-owned: the actual entrypoint + listeners + TLS termination.
 apiVersion: gateway.networking.k8s.io/v1
@@ -60,7 +57,11 @@ spec:
   listeners:
     - name: https
       protocol: HTTPS
-      port: 443
+      # Traefik requires the listener port to match one of its entryPoint
+      # ports. The chart's websecure entryPoint is 8443, an unprivileged port,
+      # so the non-root Pod needs no NET_BIND_SERVICE. The Service maps client
+      # port 443 to it.
+      port: 8443
       hostname: bookstore.localdev.me
       tls:
         mode: Terminate                 # TLS terminated at the Gateway

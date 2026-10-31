@@ -35,7 +35,8 @@ spec:
   listeners:
     - name: https
       protocol: HTTPS
-      port: 443
+      # Matches Traefik's websecure entryPoint (8443); the Service maps 443 to it.
+      port: 8443
       hostname: {{ $g.host }}
       tls:
         mode: Terminate
