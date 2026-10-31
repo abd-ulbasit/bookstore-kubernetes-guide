@@ -18,9 +18,10 @@
 #   2. kubectl -n argocd get secret argocd-initial-admin-secret \
 #        -o jsonpath="{.data.password}" | base64 -d
 #   3. Log in at https://localhost:8080 as `admin`.
+#   4. Change the password, then delete argocd-initial-admin-secret.
 #
 # Production hardening (post-bootstrap):
-#   - Wire SSO (argocd-server --oidc-config); rotate the initial admin.
+#   - Wire SSO (argocd-server --oidc-config); then disable the local admin.
 #   - Expose argo-cd-server via a real Ingress + a real DNS + TLS.
 #   - Set syncPolicy.automated.prune + selfHeal on all Applications.
 ################################################################################
@@ -65,42 +66,34 @@ resource "kubernetes_namespace" "argocd" {
 }
 
 ################################################################################
-# Argo CD Helm release — pinned to var.argocd_helm_chart_version. Restricted-
-# compliant SecurityContexts on every component pod.
+# Argo CD Helm release — pinned to var.argocd_helm_chart_version.
 #
-# CHART-VALUES NOTE: The argo-cd chart (7.7.x) does NOT honor
-# `global.podSecurityContext` / `global.securityContext` for every component;
-# each component (controller, server, repoServer, applicationSet, dex, redis,
-# notifications) reads its own `<component>.podSecurityContext` and
-# `<component>.containerSecurityContext` keys. We define the restricted
-# values once in `local.argocd_secctx` and reference them per-component
-# below. This is the chart-correct shape — verified against the chart's
-# values.yaml schema for 7.7.10.
+# CHART-VALUES NOTE: argo-cd 7.7.10 has no podSecurityContext key. Pod-level
+# context comes from global.securityContext, which every component reads except
+# Redis (redis.securityContext), and container-level context comes from each
+# component's containerSecurityContext. The keys were checked against the
+# chart's templates at 7.7.10. The same values appear in the self-management
+# Application in the 14.10 chapter; the two must stay identical.
 ################################################################################
 
 locals {
-  # Pod-level restricted-compliant security context. Reused per-component.
+  # Pod-level context for every Argo CD component except Redis. 999 is the UID
+  # and GID the argocd image declares.
   argocd_pod_secctx = {
     runAsNonRoot = true
     runAsUser    = 999
     runAsGroup   = 999
-    fsGroup      = 999
     seccompProfile = {
       type = "RuntimeDefault"
     }
   }
 
-  # Container-level restricted-compliant security context. Reused per-component.
+  # Container-level context reused per component.
   argocd_container_secctx = {
     allowPrivilegeEscalation = false
     readOnlyRootFilesystem   = true
-    runAsNonRoot             = true
-    runAsUser                = 999
     capabilities = {
       drop = ["ALL"]
-    }
-    seccompProfile = {
-      type = "RuntimeDefault"
     }
   }
 
@@ -139,58 +132,103 @@ resource "helm_release" "argocd" {
 
   values = [
     yamlencode({
-      # ──── controller — the application controller ────────────────────────
-      controller = merge(local.argocd_node_pin, {
+      # Node placement and pod-level context for every component except Redis.
+      global = merge(local.argocd_node_pin, {
+        securityContext = local.argocd_pod_secctx
+      })
+
+      controller = {
         replicas                 = 1
-        podSecurityContext       = local.argocd_pod_secctx
         containerSecurityContext = local.argocd_container_secctx
-      })
+      }
 
-      # ──── server — argocd-server (UI + API) ──────────────────────────────
-      server = merge(local.argocd_node_pin, {
+      server = {
         replicas                 = 2
-        podSecurityContext       = local.argocd_pod_secctx
         containerSecurityContext = local.argocd_container_secctx
-      })
+      }
 
-      # ──── repoServer — clones Git repos + renders manifests ──────────────
-      repoServer = merge(local.argocd_node_pin, {
-        replicas                 = 2
-        podSecurityContext       = local.argocd_pod_secctx
-        containerSecurityContext = local.argocd_container_secctx
-      })
+      # The repo-server calls no Kubernetes API, so it mounts no token.
+      repoServer = {
+        replicas                     = 2
+        automountServiceAccountToken = false
+        containerSecurityContext     = local.argocd_container_secctx
+      }
 
-      # ──── applicationSet — generates per-cluster/per-env Applications ────
-      applicationSet = merge(local.argocd_node_pin, {
+      applicationSet = {
         replicas                 = 1
-        podSecurityContext       = local.argocd_pod_secctx
         containerSecurityContext = local.argocd_container_secctx
-      })
+      }
 
-      # ──── notifications — Argo CD's notification controller ──────────────
-      notifications = merge(local.argocd_node_pin, {
-        podSecurityContext       = local.argocd_pod_secctx
+      notifications = {
         containerSecurityContext = local.argocd_container_secctx
-      })
+      }
 
-      # ──── dex — OIDC provider (off by default in this stack; kept aligned
-      # in case users enable it via their own values).
-      dex = merge(local.argocd_node_pin, {
-        podSecurityContext       = local.argocd_pod_secctx
-        containerSecurityContext = local.argocd_container_secctx
-      })
+      # The Dex image declares 1001:1001, so its container overrides the pod UID.
+      dex = {
+        automountServiceAccountToken = false
+        containerSecurityContext = merge(local.argocd_container_secctx, {
+          runAsUser  = 1001
+          runAsGroup = 1001
+        })
+      }
 
-      # ──── redis — in-process cache used by all components ────────────────
-      # Redis runs as UID 999 in the chart; the restricted context matches.
-      redis = merge(local.argocd_node_pin, {
-        podSecurityContext       = local.argocd_pod_secctx
+      # Redis reads its own pod context and gets a dedicated ServiceAccount.
+      redis = {
+        automountServiceAccountToken = false
+        serviceAccount = {
+          create = true
+        }
+        securityContext = {
+          runAsNonRoot = true
+          runAsUser    = 999
+          seccompProfile = {
+            type = "RuntimeDefault"
+          }
+        }
         containerSecurityContext = local.argocd_container_secctx
-      })
+      }
     }),
   ]
 
   depends_on = [
     kubernetes_namespace.argocd,
+  ]
+}
+
+################################################################################
+# Bootstrap AppProject — the only project the root Application uses. It allows
+# no cluster-scoped kinds and lets the root create Applications and AppProjects
+# in the argocd namespace, nothing else.
+################################################################################
+resource "kubectl_manifest" "argocd_bootstrap_project" {
+  count = var.enable_argocd_bootstrap ? 1 : 0
+
+  yaml_body = yamlencode({
+    apiVersion = "argoproj.io/v1alpha1"
+    kind       = "AppProject"
+    metadata = {
+      name      = "platform-bootstrap"
+      namespace = "argocd"
+    }
+    spec = {
+      description = "Root of the App-of-Apps tree. Creates Applications and AppProjects only."
+      sourceRepos = [var.argocd_repo_url]
+      destinations = [
+        {
+          server    = "https://kubernetes.default.svc"
+          namespace = "argocd"
+        },
+      ]
+      clusterResourceWhitelist = []
+      namespaceResourceWhitelist = [
+        { group = "argoproj.io", kind = "Application" },
+        { group = "argoproj.io", kind = "AppProject" },
+      ]
+    }
+  })
+
+  depends_on = [
+    helm_release.argocd,
   ]
 }
 
@@ -215,7 +253,7 @@ resource "kubectl_manifest" "argocd_root_app" {
       finalizers = ["resources-finalizer.argocd.argoproj.io"]
     }
     spec = {
-      project = "default"
+      project = "platform-bootstrap"
 
       source = {
         repoURL = var.argocd_repo_url
@@ -251,5 +289,6 @@ resource "kubectl_manifest" "argocd_root_app" {
 
   depends_on = [
     helm_release.argocd,
+    kubectl_manifest.argocd_bootstrap_project,
   ]
 }

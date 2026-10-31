@@ -9,13 +9,13 @@
 > on subsequent syncs) from a single root **App-of-Apps** Application.
 > This chapter walks the bootstrap end-to-end on the bookstore-
 > platform tree, the App-of-Apps pattern, Argo CD's own self-management
-> trick, and the sealed-secret bootstrap that has the same problem in
+> trick, and the External Secrets bootstrap that has the same problem in
 > miniature.
 
 **Estimated time:** ~30 min read · ~90 min hands-on
-**Prerequisites:** [Part 14 ch.02](./02-eks-cluster-lifecycle.md) — fresh cluster you'll bootstrap into · [Part 12 ch.01](../07-delivery/04-gitops-argocd.md) — Argo CD + App-of-Apps fundamentals · [Part 13 ch.01](../13-grand-capstone-bookstore-platform/01-bookstore-2-from-toy-to-platform.md) — bookstore Git tree that becomes the source of truth
+**Prerequisites:** [Part 14 ch.02](./02-eks-cluster-lifecycle.md) — fresh cluster you'll bootstrap into · [Part 07 ch.04](../07-delivery/04-gitops-argocd.md) — Argo CD + App-of-Apps fundamentals · [Part 13 ch.01](../13-grand-capstone-bookstore-platform/01-bookstore-2-from-toy-to-platform.md) — bookstore Git tree that becomes the source of truth
 
-**You'll know after this:** • resolve the GitOps chicken-and-egg (Argo CD must exist before it can reconcile from Git) via Terraform one-shot install · • design an App-of-Apps root Application that pulls every other workload from Git · • configure Argo CD to manage itself on subsequent syncs · • bootstrap sealed-secrets or SealedSecret keys before any sealed material lands · • execute a full fresh-cluster bootstrap on the bookstore-platform tree from `terraform apply` to "all green"
+**You'll know after this:** • resolve the GitOps chicken-and-egg (Argo CD must exist before it can reconcile from Git) via Terraform one-shot install · • design an App-of-Apps root Application that pulls every other workload from Git · • configure Argo CD to manage itself on subsequent syncs · • give External Secrets its access through IRSA, with no static AWS key · • scope AppProjects so no Application reaches past its repos or namespaces · • execute a full fresh-cluster bootstrap on the bookstore-platform tree from `terraform apply` to "all green"
 
 <!-- tags: gitops, argo-cd, eks, platform-engineering, cloud -->
 
@@ -28,9 +28,9 @@ ships an opt-in Argo CD bootstrap at
 gated by `var.enable_argocd_bootstrap = false` — off by default
 because most teams want to control the GitOps bootstrap order
 explicitly. When you flip it on, Terraform creates the `argocd`
-namespace, installs the Argo CD Helm chart, and applies a single
-root `Application` (`root-app`) that points at your GitOps repo's
-`argocd/apps/` directory. Every other Application — for cert-manager,
+namespace, installs the Argo CD Helm chart, and applies a root
+`AppProject` (`platform-bootstrap`) and a single root `Application`
+(`root-app`) that points at your GitOps repo's `argocd/apps/` directory. Every other Application — for cert-manager,
 External Secrets Operator, Istio, the bookstore workloads, anything
 — is a child Application under that root, discovered via the
 **App-of-Apps** pattern.
@@ -69,14 +69,13 @@ managed bootstrap, and that root points at a Git directory full of
 applies them. Add a new workload? Commit a new Application manifest.
 The cluster picks it up at next sync without any out-of-band action.
 
-The **sealed-secret bootstrap** is the same chicken-and-egg with
-smaller pieces: ESO needs an OIDC trust set up (typically by
-Terraform's IRSA wiring), then ESO can pull from AWS Secrets Manager;
-but ESO's own controller credentials should be... in AWS Secrets
-Manager? Or pre-seeded by Terraform? The honest answer is "Terraform
-seeds the controller credentials in AWS Secrets Manager, ESO uses its
-IRSA role to fetch them, ESO then pulls all other secrets through the
-same path". One imperative seed; everything thereafter is GitOps.
+The **External Secrets bootstrap** is the same chicken-and-egg with
+smaller pieces. ESO needs an IRSA role
+([14.03](./03-eks-addon-management.md)) before it can read AWS Secrets
+Manager, and Terraform creates that role. ESO then authenticates with
+the role, so no static AWS key is stored in the cluster, and it pulls
+every other secret through the same path. One imperative seed;
+everything thereafter is GitOps.
 
 [Part 07 ch.04](../07-delivery/04-gitops-argocd.md) introduced
 Argo CD, Applications, and the directory-mode reconciliation in the
@@ -109,7 +108,8 @@ The three phases:
   roles, then runs the `helm_release.argocd` that installs Argo CD
   itself. The release is **pinned** (`var.argocd_helm_chart_version
   = "7.7.10"` in the bookstore tree) so subsequent applies don't
-  drift. The same Terraform applies a single `Application` CR
+  drift. The same Terraform applies one `AppProject`
+  (`platform-bootstrap`) and a single `Application` CR
   named `root-app` that points at `<argocd_repo_url>/<argocd_root_
   app_path>`. That's the entire imperative surface. Nothing else
   lives in Terraform; everything else is in Git.
@@ -156,6 +156,8 @@ cluster first).
 your-org/platform-gitops/                  <- the GitOps repo
 ├── argocd/
 │   └── apps/                              <- root-app's source path
+│       ├── project-default.yaml           <- AppProject, locked
+│       ├── project-platform.yaml          <- AppProject for children
 │       ├── app-cert-manager.yaml          <- Argo CD Application
 │       ├── app-external-secrets.yaml      <- Argo CD Application
 │       ├── app-istio.yaml                 <- Argo CD Application
@@ -179,12 +181,12 @@ its `source.repoURL` typically points back at the same Git repo, with
 `.yaml` in `argocd/apps/`, creates the matching Applications, and they
 each reconcile their own piece.
 
-**Sealed-secrets / External Secrets bootstrap.** The same pattern,
-smaller. ESO is an Argo CD child Application (`app-external-
+**External Secrets bootstrap.** The same pattern, smaller. ESO is an Argo CD child Application (`app-external-
 secrets.yaml`); its IRSA role is created by Terraform; the **AWS
 Secrets Manager secret** that holds, say, the Stripe API key is
 created out-of-band (CI, a manual `aws secretsmanager create-
-secret`, Terraform-with-a-data-source — pick one). Once ESO is
+secret`, or a Terraform resource whose value lands in state (see
+[14.01](./01-terraform-state-in-production.md)). Pick one. Once ESO is
 running, the `ExternalSecret` CR (in Git) tells ESO "pull the Stripe
 API key from `prod/stripe`"; ESO fetches and writes the K8s Secret;
 Pods consume it. The chicken-and-egg: the IRSA trust must be in
@@ -217,6 +219,20 @@ Application will re-apply its own values on the next sync and revert
 Terraform's change. The right move: change values in Git and let
 Argo CD apply them; only re-run Terraform if Argo CD itself is broken
 and can't reconcile.
+
+## Threats and controls
+
+Argo CD's own controls (SSO, RBAC, TLS) are in
+[07.04](../07-delivery/04-gitops-argocd.md) and are not repeated here.
+These are the threats the bootstrap itself creates or widens:
+
+| Threat | Control in this chapter | Deeper |
+|---|---|---|
+| A child Application reaches past its repos, namespaces and cluster kinds, because the `default` project allows all three | `platform` lists its repos, destinations and cluster kinds; `default` is emptied so nothing can use it | [07.04](../07-delivery/04-gitops-argocd.md) |
+| The local `admin` account and its initial password outlive setup | Change the password, delete `argocd-initial-admin-secret`, disable `admin` once SSO works | [07.04](../07-delivery/04-gitops-argocd.md) |
+| A repository credential grants write access, or lands in Git | Read-only, repo-scoped credential in a repository Secret that External Secrets writes | [11.05](../11-advanced-production-patterns/05-secrets-at-scale.md), [15.05](../15-day-to-day-production-ops/05-production-secrets-vault-eso.md) |
+| A commit to the GitOps repo becomes cluster state without review | Protected `main`, which the root tracks; review covers every cluster-scoped grant | [14.07](./07-infrastructure-cicd-and-drift.md) |
+| Deleting an Application deletes its workloads, Argo CD's own included | Finalizer on the root and each child; none on the self-management Application | [07.04](../07-delivery/04-gitops-argocd.md) |
 
 ## Diagrams
 
@@ -316,9 +332,9 @@ flowchart TB
   addons (cluster `Active`, nodes `Ready`).
 - A Git repository you control (GitHub / GitLab / Bitbucket) for the
   GitOps source. Public or private both work; private repos need a
-  read credential wired in Step 4.
+  read-only credential set up in step 1.
 - `kubectl` configured against the cluster.
-- The Phase 14-R `argocd-bootstrap.tf` at
+- `argocd-bootstrap.tf` at
   [`../examples/bookstore-platform/terraform/argocd-bootstrap.tf`](../examples/bookstore-platform/terraform/argocd-bootstrap.tf) —
   read it end-to-end before running anything.
 
@@ -330,11 +346,81 @@ Create a minimal directory structure in your repo:
 platform-gitops/
 └── argocd/
     └── apps/
+        ├── project-default.yaml
+        ├── project-platform.yaml
         └── app-example.yaml
 ```
 
-Where `app-example.yaml` is a deliberately-trivial Application that
-proves the App-of-Apps loop works:
+Commit two AppProjects with the example first. Both carry
+`sync-wave: "-1"`, so the root sync applies them before any Application
+that names them. `default` is emptied, which stops an Application that
+uses it by accident ([projects](https://argo-cd.readthedocs.io/en/stable/user-guide/projects/)).
+`platform` is the project every child uses, and its
+lists are the review point for what the platform may deploy.
+
+```yaml
+# argocd/apps/project-default.yaml
+apiVersion: argoproj.io/v1alpha1
+kind: AppProject
+metadata:
+  name: default
+  namespace: argocd
+  annotations:
+    argocd.argoproj.io/sync-wave: "-1"
+spec:
+  # Locked. With no repos and no destinations, no Application can sync
+  # through this project.
+  sourceRepos: []
+  destinations: []
+```
+
+```yaml
+# argocd/apps/project-platform.yaml
+apiVersion: argoproj.io/v1alpha1
+kind: AppProject
+metadata:
+  name: platform
+  namespace: argocd
+  annotations:
+    argocd.argoproj.io/sync-wave: "-1"
+spec:
+  description: Platform charts, reviewed in Git.
+  sourceRepos:
+    - https://github.com/<YOUR-ORG>/platform-gitops
+    - https://argoproj.github.io/argo-helm
+    - https://charts.jetstack.io
+    - https://stefanprodan.github.io/podinfo
+  destinations:
+    - server: https://kubernetes.default.svc
+      namespace: argocd
+    - server: https://kubernetes.default.svc
+      namespace: cert-manager
+    - server: https://kubernetes.default.svc
+      namespace: example
+  # Cluster-scoped kinds the charts in this chapter render. A
+  # ClusterRoleBinding can grant any role, so every change here gets a review.
+  clusterResourceWhitelist:
+    - group: apiextensions.k8s.io
+      kind: CustomResourceDefinition
+    - group: rbac.authorization.k8s.io
+      kind: ClusterRole
+    - group: rbac.authorization.k8s.io
+      kind: ClusterRoleBinding
+    - group: admissionregistration.k8s.io
+      kind: MutatingWebhookConfiguration
+    - group: admissionregistration.k8s.io
+      kind: ValidatingWebhookConfiguration
+  # Children cannot create Applications or AppProjects, so the tree cannot
+  # grow past what the root reviewed.
+  namespaceResourceBlacklist:
+    - group: argoproj.io
+      kind: Application
+    - group: argoproj.io
+      kind: AppProject
+```
+
+Then `app-example.yaml`, a deliberately trivial Application that proves
+the App-of-Apps loop works:
 
 ```yaml
 # argocd/apps/app-example.yaml
@@ -343,8 +429,9 @@ kind: Application
 metadata:
   name: example-podinfo
   namespace: argocd
+  finalizers: [resources-finalizer.argocd.argoproj.io]
 spec:
-  project: default
+  project: platform
   source:
     repoURL: https://stefanprodan.github.io/podinfo
     chart: podinfo
@@ -352,6 +439,18 @@ spec:
     helm:
       values: |
         replicaCount: 1
+        serviceAccount:
+          enabled: true   # a dedicated ServiceAccount, not default
+        securityContext:  # the chart has no pod-level key
+          allowPrivilegeEscalation: false
+          readOnlyRootFilesystem: true
+          runAsNonRoot: true
+          runAsUser: 100  # user app in the image's /etc/passwd
+          runAsGroup: 101
+          capabilities:
+            drop: ["ALL"]
+          seccompProfile:
+            type: RuntimeDefault
   destination:
     server: https://kubernetes.default.svc
     namespace: example
@@ -359,19 +458,38 @@ spec:
     automated:
       prune: true
       selfHeal: true
+    managedNamespaceMetadata:
+      labels:
+        pod-security.kubernetes.io/enforce: restricted
+        pod-security.kubernetes.io/audit: restricted
+        pod-security.kubernetes.io/warn: restricted
     syncOptions:
       - CreateNamespace=true
       - ServerSideApply=true
 ```
 
+The `finalizers` line makes deleting this Application remove its
+workloads. `managedNamespaceMetadata` labels the `example` namespace
+`restricted` when Argo CD creates it ([sync
+options](https://argo-cd.readthedocs.io/en/stable/user-guide/sync-options/)).
+The image comes from the chart's version pin. Digest pinning of chart
+images belongs to [14.12](./12-supply-chain-security.md).
+
 Commit and push:
 
 ```bash
 cd platform-gitops
-git add argocd/apps/app-example.yaml
-git commit -m "argocd: seed app-of-apps with podinfo example"
+git add argocd/apps/
+git commit -m "argocd: seed app-of-apps with projects and podinfo example"
 git push origin main
 ```
+
+Protect `main` with required review, because the root tracks it: a
+merge is a cluster change. For a private repository, give Argo CD a
+read-only deploy key or GitHub App scoped to this one repository. Store
+it as a Secret labelled `argocd.argoproj.io/secret-type: repository`,
+written by External Secrets from AWS Secrets Manager, so the key never
+sits in Git.
 
 ### 2. Enable the Argo CD bootstrap in Terraform
 
@@ -393,21 +511,22 @@ terraform plan -out=tfplan
 terraform apply tfplan
 ```
 
-Terraform output should show three new resources created:
+Terraform output should show these resources created, among others:
 
 - `kubernetes_namespace.argocd[0]`
 - `helm_release.argocd[0]`
+- `kubectl_manifest.argocd_bootstrap_project[0]`
 - `kubectl_manifest.argocd_root_app[0]`
 
 Wait for the Helm release to finish (`terraform apply` blocks on
 `atomic = true`; the chart's `--wait` flag means all pods must be
-`Ready`). Typical time: 3-5 minutes for a cold cluster.
+`Ready`).
 
 ### 3. Verify the Argo CD install
 
 ```bash
 kubectl -n argocd get pods
-# Expected (post-bootstrap, 7.7.x):
+# Illustrative output (7.7.x, not captured):
 # NAME                                                READY   STATUS
 # argo-cd-applicationset-controller-...               1/1     Running
 # argo-cd-application-controller-0                    1/1     Running
@@ -418,7 +537,7 @@ kubectl -n argocd get pods
 # argo-cd-server-...                                  1/1     Running
 ```
 
-Get the initial admin password (used once; rotate after first login):
+Get the initial admin password. Use it once, to sign in and change it:
 
 ```bash
 kubectl -n argocd get secret argocd-initial-admin-secret \
@@ -437,13 +556,24 @@ You should see one Application (`root-app`) — and within ~30 seconds of
 the `root-app` syncing, a second Application (`example-podinfo`)
 appears.
 
+Then close the bootstrap account. Argo CD stores the initial password in
+clear text in that Secret ([getting started](https://argo-cd.readthedocs.io/en/stable/getting_started/)), so anyone who can read Secrets in `argocd`
+can read it until the Secret is gone:
+
+1. Change the password with `argocd account update-password`.
+2. Delete the Secret:
+   `kubectl -n argocd delete secret argocd-initial-admin-secret`.
+3. After SSO works (see [07.04](../07-delivery/04-gitops-argocd.md)), set
+   `admin.enabled: "false"` in `configs.cm`. Put the same setting in the
+   Terraform values and the self-management values, so they agree.
+
 ### 4. Watch the App-of-Apps cascade
 
 ```bash
 kubectl -n argocd get applications -w
 ```
 
-Expected output (over ~60 seconds):
+Illustrative output (over ~60 seconds, not captured):
 
 ```text
 NAME              SYNC STATUS   HEALTH STATUS   REVISION
@@ -455,7 +585,7 @@ example-podinfo   Syncing       Progressing     <SHA>
 example-podinfo   Synced        Healthy         <SHA>
 ```
 
-Verify the example podinfo Pods are running:
+Verify the example podinfo Pods are running. The output is illustrative:
 
 ```bash
 kubectl -n example get pods
@@ -480,8 +610,9 @@ kind: Application
 metadata:
   name: cert-manager
   namespace: argocd
+  finalizers: [resources-finalizer.argocd.argoproj.io]
 spec:
-  project: default
+  project: platform
   source:
     repoURL: https://charts.jetstack.io
     chart: cert-manager
@@ -493,6 +624,26 @@ spec:
         global:
           leaderElection:
             namespace: cert-manager
+        # &pod and &container are YAML anchors, reused for each component.
+        securityContext: &pod
+          runAsNonRoot: true
+          runAsUser: 1000  # UID the cert-manager images declare
+          seccompProfile:
+            type: RuntimeDefault
+        containerSecurityContext: &container
+          allowPrivilegeEscalation: false
+          readOnlyRootFilesystem: true
+          capabilities:
+            drop: ["ALL"]
+        webhook:
+          securityContext: *pod
+          containerSecurityContext: *container
+        cainjector:
+          securityContext: *pod
+          containerSecurityContext: *container
+        startupapicheck:
+          securityContext: *pod
+          containerSecurityContext: *container
   destination:
     server: https://kubernetes.default.svc
     namespace: cert-manager
@@ -500,10 +651,20 @@ spec:
     automated:
       prune: true
       selfHeal: true
+    managedNamespaceMetadata:
+      labels:
+        pod-security.kubernetes.io/enforce: restricted
+        pod-security.kubernetes.io/audit: restricted
+        pod-security.kubernetes.io/warn: restricted
     syncOptions:
       - CreateNamespace=true
       - ServerSideApply=true
 ```
+
+The security fields are the
+[baseline](../01-core-workloads/01-pods.md#baseline). The keys match the
+chart templates at v1.16.2. The images declare a UID
+but no GID, so no `runAsGroup` is set.
 
 Commit + push:
 
@@ -514,7 +675,7 @@ git push origin main
 ```
 
 Within ~3 minutes (Argo CD's default reconciliation poll), the new
-Application appears:
+Application appears. The output below is illustrative:
 
 ```bash
 kubectl -n argocd get applications
@@ -535,6 +696,15 @@ it**. No `kubectl apply`, no `terraform apply`, no out-of-band action.
 
 ### 6. Self-manage Argo CD via a new Application
 
+The values below mirror Terraform's `helm_release.argocd`, key for key.
+They set the [baseline](../01-core-workloads/01-pods.md#baseline) on every
+Argo CD pod. Pod-level fields come from `global.securityContext`, and
+container fields come from each component. Dex and Redis set their own
+UID. The controller, server, ApplicationSet and notifications controllers
+call the Kubernetes API, so they keep their dedicated ServiceAccounts with
+the token mounted. The repo-server, Dex and Redis mount no token. The keys
+match the chart templates at 7.7.10.
+
 Create `argocd/apps/app-argo-cd-self.yaml`:
 
 ```yaml
@@ -543,26 +713,71 @@ kind: Application
 metadata:
   name: argo-cd
   namespace: argocd
-  # finalizer: ensures cascade delete if the Application is ever removed
-  finalizers: [resources-finalizer.argocd.argoproj.io]
+  # No finalizer: deleting this Application must not delete Argo CD itself.
 spec:
-  project: default
+  project: platform
   source:
     repoURL: https://argoproj.github.io/argo-helm
     chart: argo-cd
     targetRevision: 7.7.10  # SAME version Terraform installed
     helm:
-      # IMPORTANT: these values must match what Terraform's
-      # helm_release.argocd applied, or Argo CD will revert
-      # Terraform's pinning on its next reconcile.
+      # These values must match helm_release.argocd in argocd-bootstrap.tf
+      # key for key, or Argo CD reverts Terraform's values on its next sync.
       values: |
+        global:
+          nodeSelector:
+            bookstore-platform.example.com/pool: system
+          tolerations:
+            - key: CriticalAddonsOnly
+              operator: Equal
+              value: "true"
+              effect: NoSchedule
+          # Pod level for every component except Redis, which has its own key.
+          securityContext:
+            runAsNonRoot: true
+            runAsUser: 999   # UID the argocd image declares
+            runAsGroup: 999  # GID the argocd image declares
+            seccompProfile:
+              type: RuntimeDefault
         controller:
           replicas: 1
+          # &restricted is a YAML anchor, reused by the components below.
+          containerSecurityContext: &restricted
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities:
+              drop: ["ALL"]
         server:
           replicas: 2
+          containerSecurityContext: *restricted
         repoServer:
           replicas: 2
-        # ... add the rest from terraform's helm_release values
+          automountServiceAccountToken: false
+          containerSecurityContext: *restricted
+        applicationSet:
+          replicas: 1
+          containerSecurityContext: *restricted
+        notifications:
+          containerSecurityContext: *restricted
+        dex:
+          automountServiceAccountToken: false
+          containerSecurityContext:  # the Dex image declares 1001:1001
+            runAsUser: 1001
+            runAsGroup: 1001
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities:
+              drop: ["ALL"]
+        redis:
+          automountServiceAccountToken: false
+          serviceAccount:
+            create: true
+          securityContext:
+            runAsNonRoot: true
+            runAsUser: 999
+            seccompProfile:
+              type: RuntimeDefault
+          containerSecurityContext: *restricted
   destination:
     server: https://kubernetes.default.svc
     namespace: argocd
@@ -598,7 +813,7 @@ kubectl -n cert-manager scale deployment cert-manager --replicas=5
 
 # Wait ~30 seconds, then re-check.
 kubectl -n cert-manager get deployment cert-manager
-# REPLICAS: 1  (Argo CD reverted the manual edit)
+# Illustrative output. REPLICAS: 1  (Argo CD reverted the manual edit)
 ```
 
 The `automated: { selfHeal: true }` in the `cert-manager` Application
@@ -650,7 +865,7 @@ clean path.
   rendered output. Repo-server runs Helm/Kustomize binaries
   internally; that's where the chart-rendering CPU goes.
 - **argocd-server** — the UI + REST API. Reads the Applications
-  from the cluster's etcd; the application-controller is the only
+  through the Kubernetes API; the application-controller is the only
   thing writing to them. Server-only operations (login, port-
   forwards, syncs triggered from UI) go through this component.
 
@@ -698,27 +913,25 @@ next sync. The clean discipline: change Argo CD's version in Git
 it, then update `.tfvars` to match (so future Terraform runs don't
 revert).
 
-**Sync waves and hooks.** A common requirement: "apply the CRDs
-**first**, then the workloads that depend on them". Argo CD's
-`argocd.argoproj.io/sync-wave` annotation orders resource application
-within a single sync; lower waves apply first. So a CRD bundle gets
-`sync-wave: "-1"`; a workload that uses the CRD gets `sync-wave: "0"`.
-For App-of-Apps cascades where the root Application creates child
-Applications, sync-waves don't span Application boundaries by default;
-you sequence children by giving the first ones `sync-wave: "-1"` so
-they sync before later children.
+**Sync waves.** A common requirement: apply the CRDs **first**, then the
+workloads that depend on them. The `argocd.argoproj.io/sync-wave`
+annotation orders resources inside one sync. Lower waves apply first, and
+resources default to wave 0. The two AppProjects in step 1 use `"-1"`, so
+the root sync creates them before the Applications that name them. The
+upstream sync-waves page gives only Job examples, so the AppProject use is
+this chapter's choice and worth testing on your cluster.
 
 **The `resources-finalizer` finalizer.** Argo CD watches the
-`finalizers: [resources-finalizer.argocd.argoproj.io]` annotation on
-Applications. With it, deleting an Application **cascades** to
-deleting its managed resources (the workloads). Without it, deleting
-the Application orphans the resources (they remain in the cluster).
-The bookstore tree's root Application has this finalizer because if
-you `kubectl delete application root-app`, you want every child
-Application to delete too, and each child to delete its managed
-workloads — a clean teardown. The self-management Application
-deliberately does *not* have the finalizer; deleting it shouldn't
-delete Argo CD itself.
+`finalizers: [resources-finalizer.argocd.argoproj.io]` field on an
+Application. With it, deleting the Application **cascades** to the
+resources it manages. Without it, deleting the Application leaves those
+resources running. The App of Apps pattern needs the finalizer at each
+level ([app deletion](https://argo-cd.readthedocs.io/en/stable/user-guide/app_deletion/)).
+The root cascades to the child Applications, and each child
+cascades to its workloads, so the root and the children carry it. The
+self-management Application leaves it off on purpose, because deleting
+it should not delete Argo CD itself. A child without the finalizer is
+the gap to check: its workloads outlive it.
 
 **Server-side apply (`SSA`).** The `syncOptions: ["ServerSideApply=true"]`
 flag tells Argo CD to use **server-side apply** instead of `kubectl
@@ -727,8 +940,7 @@ went GA in Kubernetes 1.22; `kubectl apply` still uses client-side
 apply unless you pass `--server-side`. SSA cleanly tracks field ownership,
 avoiding "last-write-wins" conflicts when multiple controllers
 touch the same object. The bookstore tree uses SSA on every
-Application for the cleaner ownership model; legacy controllers
-that don't support SSA still work because Argo CD falls back.
+Application for the cleaner ownership model.
 
 ## Production notes
 
@@ -737,32 +949,6 @@ that don't support SSA still work because Argo CD falls back.
 > management Application's `targetRevision`). Both must agree. Bump
 > by changing both in the same PR; otherwise Terraform and Argo CD
 > will fight over the chart version on every apply.
-
-> **In production:** Argo CD's initial admin password is in the
-> `argocd-initial-admin-secret` Secret. **Rotate this within minutes
-> of bootstrap**. Wire SSO (OIDC) via the `argocd-cm` ConfigMap +
-> `argocd-rbac-cm` so day-to-day operators authenticate against
-> your IdP, not against the local admin. The local admin should
-> become break-glass: stored in a vault, used only when SSO is down.
-
-> **In production:** Limit the `default` AppProject's
-> `sourceRepos` + `destinations` to your real repos + clusters. The
-> default `*`/`*` is wide open — every Application can sync any
-> resource type to any namespace from any Git repo. A misconfigured
-> Application could overwrite kube-system. The fix: create custom
-> AppProjects per tenant (e.g. `bookstore`, `platform`), each
-> restricted to specific repos + destinations, and assign
-> Applications to them. The bookstore tree's `default` project is
-> the teaching-friendly default; production forks should tighten.
-
-> **In production:** Avoid `prune: true` on the self-management
-> Application. If Argo CD ever syncs against a misconfigured Git
-> revision where its own resources appear "missing" (an empty
-> manifest file, a typo in the chart name), prune-on-self-management
-> would delete Argo CD itself. The recovery is `terraform apply` to
-> re-bootstrap — possible but painful. Prune-false on the
-> self-management Application caps the worst case at "Argo CD's
-> Application is out of sync", which is visible and fixable in Git.
 
 > **In production:** Use a dedicated **management cluster** for Argo
 > CD in multi-cluster setups. The Argo CD that manages 10 clusters
@@ -805,9 +991,9 @@ terraform apply \
 # Verify Argo CD is running.
 kubectl -n argocd get pods
 
-# Get the initial admin password (rotate immediately after first login).
-kubectl -n argocd get secret argocd-initial-admin-secret \
-  -o jsonpath="{.data.password}" | base64 -d ; echo
+# Change the admin password, then delete the initial Secret.
+argocd account update-password
+kubectl -n argocd delete secret argocd-initial-admin-secret
 
 # Port-forward the Argo CD UI.
 kubectl -n argocd port-forward svc/argo-cd-server 8080:443
@@ -834,7 +1020,7 @@ metadata:
   namespace: argocd
   finalizers: [resources-finalizer.argocd.argoproj.io]
 spec:
-  project: default
+  project: platform-bootstrap
   source:
     repoURL: https://github.com/<ORG>/<REPO>
     path: argocd/apps
@@ -853,10 +1039,11 @@ spec:
       - ServerSideApply=true
 ```
 
-GitOps-bootstrap checklist (the cluster is GitOps-managed when all six are yes):
+GitOps-bootstrap checklist (GitOps-managed when every box is ticked):
 
-- [ ] Terraform creates the Argo CD Helm release + the root
-      Application; both are in `examples/bookstore-platform/terraform/`.
+- [ ] Terraform creates the Argo CD Helm release, the `platform-bootstrap`
+      AppProject and the root Application; all are in
+      `examples/bookstore-platform/terraform/`.
 - [ ] The root Application's source repo + path are correct (verify
       with `kubectl describe application root-app`).
 - [ ] Child Applications (one per workload) live in `argocd/apps/`
@@ -866,6 +1053,10 @@ GitOps-bootstrap checklist (the cluster is GitOps-managed when all six are yes):
 - [ ] An `app-argo-cd-self.yaml` exists with `prune: false`; the
       chart version in Git matches `var.argocd_helm_chart_version` in
       Terraform.
+- [ ] Child Applications use project `platform`, and `default` is
+      emptied so nothing can use it.
+- [ ] The initial admin Secret is deleted, and `admin` is disabled once
+      SSO works.
 - [ ] Git webhook is configured from the Git host to the Argo CD
       server (reconciliation in seconds, not 3-minute poll).
 
@@ -894,15 +1085,36 @@ GitOps-bootstrap checklist (the cluster is GitOps-managed when all six are yes):
 
    </details>
 
-4. **Hands-on extension — accidentally apply `kubectl delete application root-app -n argocd` on the test cluster. What happens to the child Applications and the workloads they manage?**
-   <details><summary>What you should see</summary>
+4. **Security: a commit adds `app-rogue.yaml` with `project: default` and a source repo its author controls. What does the default project allow, and what stops that Application from syncing?**
+   <details><summary>Show answer</summary>
 
-   With `cascade: false` (Argo CD's default for `kubectl delete app`), the root Application is deleted but child Applications remain. With cascade-delete (foreground propagation, or `argocd app delete root-app`), Argo CD prunes every child Application AND every workload they own — the entire cluster's workload state is gone. Recovery: re-run Terraform's `helm_release` + the `root-app` Application creation, Argo CD walks the directory again, re-creates every child Application, child Applications re-create their workloads. This is the "GitOps is the source of truth" property at work — the cluster state is recoverable from Git in minutes — but only if the GitOps repo is in fact authoritative for every workload.
+   The default project allows any source repo, any cluster and every kind,
+   so the Application could create a ClusterRoleBinding. This chapter empties
+   its `sourceRepos` and `destinations`, and Argo CD then denies any
+   Application that uses it. The root project still lets the commit create
+   the Application object, so the review of `argocd/apps/` stays a control.
+   Children in `platform` cannot create Applications at all.
 
    </details>
 
 ## Further reading
 
+- **Argo CD: Projects** <https://argo-cd.readthedocs.io/en/stable/user-guide/projects/>;
+  the default project's reach and AppProject allow-lists.
+- **Argo CD: Sync options and sync waves**
+  <https://argo-cd.readthedocs.io/en/stable/user-guide/sync-options/> and
+  <https://argo-cd.readthedocs.io/en/stable/user-guide/sync-waves/>;
+  `CreateNamespace`, `managedNamespaceMetadata` and wave order.
+- **Argo CD: Application deletion**
+  <https://argo-cd.readthedocs.io/en/stable/user-guide/app_deletion/>;
+  the finalizer and App of Apps cascades.
+- **Argo CD: Getting started and user management**
+  <https://argo-cd.readthedocs.io/en/stable/getting_started/> and
+  <https://argo-cd.readthedocs.io/en/stable/operator-manual/user-management/>;
+  the initial admin Secret and `admin.enabled`.
+- **Argo CD: Declarative setup**
+  <https://argo-cd.readthedocs.io/en/stable/operator-manual/declarative-setup/>;
+  repository Secrets.
 - **Argo CD official docs**
   <https://argo-cd.readthedocs.io/en/stable/>; the canonical
   upstream documentation — start with `getting_started.md` and the
@@ -916,14 +1128,11 @@ GitOps-bootstrap checklist (the cluster is GitOps-managed when all six are yes):
   <https://codefresh.io/learn/argo-cd/argo-cd-application-pattern-of-app-of-apps/>;
   the canonical community write-up of the pattern, with the trade-
   offs between App-of-Apps and ApplicationSet for fleet scale.
-- **Sigstore + Argo CD: image signing in the GitOps pipeline**
+- **Sigstore Cosign overview**
   <https://docs.sigstore.dev/cosign/overview/>; the supply-chain
   layer that the next chapter
   ([14.12](./12-supply-chain-security.md)) builds on top of this
   bootstrap.
-- **Ibryam & Huß, *Kubernetes Patterns* 2e — *Periodic Job* and
-  *Stateful Service***; the broader operator-pattern reasoning that
-  Argo CD's reconciliation loop generalizes.
 - **GitOps Working Group / OpenGitOps Principles**
   <https://opengitops.dev/>; the four principles (declarative,
   versioned + immutable, pulled, continuously reconciled) that this
