@@ -115,15 +115,14 @@ module "eks" {
   control_plane_subnet_ids = module.vpc.intra_subnets
 
   # Most EKS addons (kube-proxy, coredns, aws-ebs-csi-driver) live as standalone
-  # aws_eks_addon resources in addons.tf so we control IRSA wiring + ordering.
+  # aws_eks_addon resources in addons.tf so we control IRSA wiring.
   #
-  # vpc-cni is the exception: it MUST exist before the node group provisions
-  # nodes, because nodes can't join the cluster's pod network without it.
-  # `before_compute = true` makes the EKS module install vpc-cni between the
-  # control plane coming up and the managed node group launching its EC2
-  # instances. Standalone aws_eks_addon resources don't get this ordering for
-  # free — the addon and the node group are concurrent siblings, which has
-  # been observed to race in fresh-cluster bootstraps.
+  # vpc-cni is the exception: pods cannot get IPs without it, so it should be
+  # ACTIVE before the node group launches nodes. `before_compute = true` keeps
+  # the module from creating vpc-cni after the node groups, but the module adds
+  # no dependency that makes the node group wait for it. The only ordering
+  # between them is the module's timer (dataplane_wait_duration, 30s by
+  # default). The add-on chapter shows how to check it.
   cluster_addons = {
     vpc-cni = {
       addon_version               = null # the module's aws_eks_addon_version lookup picks the default

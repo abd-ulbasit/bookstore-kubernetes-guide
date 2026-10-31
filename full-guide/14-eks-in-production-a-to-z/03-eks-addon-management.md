@@ -1,18 +1,16 @@
 # 14.03 — EKS add-on management discipline
 
 > Every EKS cluster needs **four cluster-critical addons** (vpc-cni,
-> kube-proxy, CoreDNS, EBS-CSI) to boot at all; getting their lifecycle
-> right — EKS-managed vs self-managed, the `before_compute = true` flag
-> that prevents the first-boot CNI race, IRSA wiring for the addons that
-> need cloud credentials, and the `resolve_conflicts_on_update` policy
-> for upgrades — is the difference between "the cluster bootstrapped
-> cleanly" and "the cluster spent an hour in CrashLoopBackOff because
-> nodes Ready'd before the CNI was installed."
+> kube-proxy, CoreDNS, EBS-CSI) to boot at all. Getting their lifecycle
+> right means choosing EKS-managed or self-managed for each, knowing what
+> `before_compute = true` does and does not order, wiring IRSA for the
+> addons that call AWS, and setting `resolve_conflicts_on_update` on
+> purpose, so an upgrade does not overwrite a hand edit by surprise.
 
 **Estimated time:** ~30 min read · ~60 min hands-on
 **Prerequisites:** [Part 14 ch.02](./02-eks-cluster-lifecycle.md) — addon upgrade is the second leg of the upgrade dance · [Part 10 ch.02](../10-cloud-and-managed-kubernetes/02-provisioning-and-iac.md) — the EKS module that already manages the four addons · [Part 13 ch.01](../13-grand-capstone-bookstore-platform/01-bookstore-2-from-toy-to-platform.md) — the IRSA + bookstore-platform terraform context
 
-**You'll know after this:** • identify the four cluster-critical addons (vpc-cni, kube-proxy, CoreDNS, EBS-CSI) and why each must boot before workloads · • configure `before_compute = true` to prevent the first-boot CNI race · • choose between EKS-managed vs self-managed addons for each one · • wire IRSA for addons that need cloud credentials (EBS-CSI, vpc-cni) · • set `resolve_conflicts_on_update` correctly so upgrades don't clobber operator-applied patches
+**You'll know after this:** • identify the four cluster-critical addons (vpc-cni, kube-proxy, CoreDNS, EBS-CSI) and why each must boot before workloads · • configure `before_compute = true` and say what it does and does not order · • choose between EKS-managed vs self-managed addons for each one · • wire IRSA for addons that need cloud credentials (EBS-CSI, vpc-cni) · • set `resolve_conflicts_on_update` correctly so upgrades don't clobber operator-applied patches
 
 <!-- tags: eks, terraform, cloud, platform-engineering, irsa -->
 
@@ -26,14 +24,13 @@ CoreDNS). Four of those are different from the rest:
 
 1. **vpc-cni (Amazon VPC CNI plugin)** — assigns Pod IPs from VPC
    subnets. Without it, a Pod cannot get an IP, cannot be `Ready`,
-   cannot serve traffic. Nodes themselves cannot fully `Ready` until
-   the CNI assigns them a Pod IP for the node-local infrastructure
-   pods.
+   and cannot serve traffic.
 2. **kube-proxy** — implements `Service` IP routing on each node
-   (iptables or nftables rules; its IPVS mode has been deprecated
-   since v1.35, KEP-5495). Without it, ClusterIP
-   Services don't work and the cluster's internal east-west
-   networking is broken.
+   (iptables or nftables rules; the ipvs mode has been deprecated
+   since Kubernetes v1.35, per the
+   [upstream docs](https://kubernetes.io/docs/reference/networking/virtual-ips/)).
+   Without it, ClusterIP Services don't work and the cluster's
+   internal east-west networking is broken.
 3. **CoreDNS** — the cluster DNS server. Without it, Pod-to-Pod
    service discovery via DNS names fails, breaking everything that
    resolves `my-service.my-namespace.svc.cluster.local`.
@@ -51,15 +48,14 @@ Karpenter, the LB Controller, Velero, Argo CD, Cilium — are not
 EKS-managed addons; they're plain Helm releases. The line between the
 two paradigms is what this chapter is about.
 
-The single most expensive mistake a fresh EKS cluster can make is the
-**first-boot CNI race**: the EKS control plane comes up, the managed
-node group starts launching EC2 instances, the nodes report Ready
-before vpc-cni installs, scheduled pods fail to get IPs, controllers
-crashloop, the operator sees a half-broken cluster on day one. The
-`before_compute = true` flag on the vpc-cni cluster addon is the
-single line of Terraform that prevents this. Phase 14-R put it in
-[`../examples/bookstore-platform/terraform/eks.tf`](../examples/bookstore-platform/terraform/eks.tf);
-this chapter explains why.
+A fresh EKS cluster can hit the **first-boot CNI race**: the EKS control
+plane comes up, the managed node group starts launching EC2 instances,
+nodes register before vpc-cni is installed, and scheduled Pods wait for
+an IP. The bookstore tree sets `before_compute = true` on vpc-cni in
+[`../examples/bookstore-platform/terraform/eks.tf`](../examples/bookstore-platform/terraform/eks.tf),
+but that flag does not order the node group after the add-on. Terraform
+records no edge between them, and the only gap is a timer (30 seconds by
+default). This chapter explains what the flag does and how to check it.
 
 [Part 10 ch.01](../10-cloud-and-managed-kubernetes/01-managed-kubernetes-model.md)
 introduced the managed-cluster ownership boundary; this chapter
@@ -68,15 +64,15 @@ operationalizes one slice of it (the addons AWS builds and certifies).
 CNI plugins in the abstract; this chapter is the EKS-specific
 production discipline for the four addons every cluster needs.
 
-> **In production:** EKS-managed addons are the right default for the
-> four essentials. AWS ships builds patched against upstream security
-> advisories, certifies them against each K8s minor, and marks one
-> build per minor as the default: the "what works for this cluster's
-> K8s version" answer an `aws_eks_addon_version` lookup returns. (A
-> bare `addon_version = null` gets that default only once, at create
-> time; EKS does not update an add-on by itself.) Self-managing vpc-cni
-> is possible (`helm install aws-vpc-cni`) but you take on every
-> CVE-tracking and version-compatibility task AWS does for free.
+> **In production:** EKS-managed add-ons are the right default for the
+> four essentials. AWS certifies builds against each Kubernetes minor and
+> marks one build per minor as the default. An `aws_eks_addon_version`
+> lookup with `most_recent = false` returns that default. A bare
+> `addon_version = null` gets it once, at create time. EKS does not update
+> an add-on when a new build ships or after a cluster upgrade; you start
+> each update ([EKS add-on update guide](https://docs.aws.amazon.com/eks/latest/userguide/updating-an-add-on.html)).
+> Self-managing vpc-cni (`helm install aws-vpc-cni`) is possible, but you
+> then track its CVEs and version compatibility yourself.
 
 ## Mental model
 
@@ -84,9 +80,10 @@ production discipline for the four addons every cluster needs.
 the platform stack along the "what AWS builds and certifies" line. For the
 four essentials (vpc-cni, kube-proxy, CoreDNS, EBS-CSI), EKS-managed
 is the default; for everything else, self-managed (Helm/Argo CD)
-wins. The `before_compute = true` flag on the vpc-cni addon enforces
-the cluster-bootstrap ordering. IRSA roles wire addons to AWS APIs
-without storing credentials in the cluster.**
+wins. The `before_compute = true` flag on the vpc-cni addon takes it out
+of the module's ordering after the node groups, which leaves the order
+before them to a timer. IRSA roles wire addons to AWS APIs without
+storing credentials in the cluster.**
 
 The two paradigms:
 
@@ -120,34 +117,40 @@ When to pick which:
     LB Controller's IAM policy is vendored from the upstream repo at
     a pinned tag and reviewed as a diff — that's per-team customization
     beyond what the EKS catalog supports).
-  - You want lockstep with the upstream release calendar (Karpenter
-    1.6.0 ships; you want 1.6.0 in production tomorrow; you don't
-    want to wait for AWS to certify it as an EKS addon).
+  - You want lockstep with the upstream release calendar (a new
+    Karpenter release ships and you want it in production the same
+    week; you don't want to wait for AWS to certify it as an EKS
+    add-on). This Part pins Karpenter 1.15.1.
 
 **The `before_compute = true` flag.** The EKS module's `cluster_addons`
 map (in `eks.tf`, the block currently holding vpc-cni) supports a
-`before_compute` field. When set to `true`, the module enforces a
-Terraform-resource-graph dependency such that the addon is installed
-**before** the first managed node group launches its EC2 instances.
-Without it, the addon resource and the node group are sibling resources
-with no ordering — Terraform parallelizes them, the node group
-sometimes wins the race, and nodes come up CNI-less for the first
-60-120 seconds. That window is enough for the cluster's first Pod
-(CoreDNS, the LB controller's CRDs, anything scheduled to system
-nodes) to fail to schedule, the controllers to enter backoff, and the
-operator's first `kubectl get pods` to look like a broken cluster.
-`before_compute = true` fixes this for vpc-cni; the other three
-(kube-proxy, CoreDNS, EBS-CSI) don't need it (kube-proxy installs as
-a DaemonSet that comes up after CNI; CoreDNS and EBS-CSI install as
-Deployments that tolerate a brief CNI-absence).
+`before_compute` field. In `terraform-aws-modules/eks` 20.37.2, the
+version the tree's `~> 20.31` constraint resolved to when we ran
+`terraform init`, the field decides which resource creates the add-on:
 
-Standalone `aws_eks_addon.vpc_cni` (a separate resource block, not
-inside the module's `cluster_addons` map) doesn't get `before_compute`
-for free — the standalone resource is parallel to the node group, the
-race is back. The bookstore-platform tree's choice — putting vpc-cni
-inside `module.eks.cluster_addons` and the other three as standalone
-`aws_eks_addon` resources in `addons.tf` — is deliberate: vpc-cni is
-the one that needs the ordering, the others don't.
+- Without it, the entry becomes `aws_eks_addon.this`, which has
+  `depends_on` on the managed and self-managed node groups and the
+  Fargate profiles. The add-on is created after the compute.
+- With it, the entry becomes `aws_eks_addon.before_compute`, which has
+  no `depends_on`. Nothing in the module makes a node group wait for it.
+
+So the flag removes the add-on's wait for the compute. It adds no wait in
+the other direction. The node groups depend on `time_sleep.this`, which
+waits `dataplane_wait_duration` (30 seconds by default) after the control
+plane is active. The module's comment on that timer says it exists to give
+add-ons that must be configured before compute time to come up. That is a
+timing gap, not an ordering. A node that registers before vpc-cni is
+ACTIVE has no IP for its Pods until the add-on arrives. The other three
+add-ons need no ordering against the nodes: kube-proxy runs as a DaemonSet
+and affects Service routing, not Pod IPs, and CoreDNS and EBS-CSI are
+Deployments whose Pods wait for an IP and start when one is available.
+
+Standalone `aws_eks_addon.vpc_cni` (a separate resource block, not inside
+the module's `cluster_addons` map) has no edge to the node group either.
+The bookstore-platform tree's choice, putting vpc-cni inside
+`module.eks.cluster_addons` and the other three as standalone
+`aws_eks_addon` resources in `addons.tf`, keeps vpc-cni out of the
+module's post-compute wait. It does not order vpc-cni before the nodes.
 
 **IRSA for addons.** Two of the four essentials need to call AWS APIs:
 
@@ -183,34 +186,36 @@ separate fields govern this, and they fire at different moments:
   - `NONE` — Terraform errors out if the resource already exists.
     Safer for green-field installs where a pre-existing resource is
     unexpected.
-- **`resolve_conflicts_on_update`** — controls behavior when a
-  subsequent `terraform apply` conflicts with manual edits made
-  *after* the addon was first installed.
-  - `OVERWRITE` — EKS reverts the manual changes; Terraform's
-    configuration wins. The dev-cluster default; guarantees the addon
-    is always in the declared state.
-  - `PRESERVE` — manual edits stick around even after `terraform
-    apply`. The production-cluster choice when an ops engineer has
-    patched the addon in an incident and the Terraform PR to codify
-    the change hasn't landed yet.
+- **`resolve_conflicts_on_update`** — applies when EKS updates the add-on.
+  Terraform sends an update only when `addon_version`,
+  `configuration_values` or the service account role changes. A plain
+  `terraform apply` with no such change sends no update and leaves hand
+  edits in place. When an update runs, this setting decides what happens
+  to fields edited by hand.
+  - `OVERWRITE` — changed values go back to Amazon EKS defaults during
+    the update. The dev-cluster default: the declared state wins at the
+    next update.
+  - `PRESERVE` — hand edits stay through the update. The production
+    choice when an ops engineer has patched the add-on in an incident and
+    the Terraform PR to codify the change hasn't landed yet.
+  - `NONE` — EKS changes nothing, and the update can fail on a conflict.
 
-The bookstore-platform tree uses `OVERWRITE` for both as a
-sensible-default for a teaching cluster; production teams should
-flip `resolve_conflicts_on_update` to `PRESERVE` for any addon they've
-customized via `configuration_values` or manual patches.
+The bookstore-platform tree uses `OVERWRITE` for both as a default for a
+teaching cluster. A production team that patches an add-on by hand should
+set `PRESERVE` on it until the patch is in Terraform, and then keep the
+patch in `configuration_values`.
 
-**Pod Identity Agent — IRSA's replacement.** AWS released
-**EKS Pod Identity** in 2023 as a simpler alternative to IRSA. Where
-IRSA requires an OIDC provider, a trust policy with a Kubernetes
-service-account subject, and the cluster's OIDC issuer URL pinned in
-the role, Pod Identity uses a small daemonset (the Pod Identity Agent
-addon) that intercepts the AWS SDK's metadata-service call and
-returns credentials via an EKS API. For a fresh cluster, Pod Identity
-is simpler; for an existing IRSA-wired cluster, the migration is
-non-trivial (re-wire every role's trust policy). The bookstore-
-platform tree uses IRSA throughout because Phase 13's first version
-predated wide Pod Identity adoption; a green-field cluster in 2026
-could pick either.
+**Pod Identity Agent — IRSA's replacement.** **EKS Pod Identity** is a
+simpler alternative to IRSA. IRSA requires an OIDC provider, a trust
+policy with a Kubernetes service-account subject, and the cluster's OIDC
+issuer URL in the role. Pod Identity runs an agent pod on each node (the
+Pod Identity Agent add-on) and an EKS Auth API that returns credentials
+for a service account through a Pod Identity association, and the role's
+trust policy names the Pod Identity principal rather than an OIDC
+provider. For a fresh cluster Pod Identity is simpler; for an existing
+IRSA-wired cluster the migration is non-trivial (re-wire every role's
+trust policy). The bookstore-platform tree uses IRSA throughout; a
+green-field cluster could pick either.
 
 The trap to keep in view: **the conformance window**. Each addon
 version supports a *range* of K8s minors (e.g., vpc-cni
@@ -230,26 +235,32 @@ plainly: EKS versions its kube-proxy builds per minor
 kube-apiserver by at most three minors, so after three upgrades a
 frozen one has to move before the control plane can go any further.
 
+## Threats and controls
+
+| Threat | Control in this chapter | Goes deeper in |
+|---|---|---|
+| An add-on with no role of its own uses the node IAM role's permissions | One IRSA role per add-on that calls AWS, bound with `service_account_role_arn`; add-ons that make no AWS calls get none | [Part 10 ch.03](../10-cloud-and-managed-kubernetes/03-cloud-identity.md) |
+| An add-on build moves without review, for example when a default changes during an unrelated upgrade | Pin `addon_version` in staging and production; read the plan before a cluster upgrade | [14.02](02-eks-cluster-lifecycle.md) |
+| A hand edit that Terraform cannot see, or that a later update silently reverts | Declare changes in `configuration_values`; set `resolve_conflicts_on_update` on purpose | [14.07](07-infrastructure-cicd-and-drift.md) |
+
 ## Diagrams
 
 ### Diagram A — addon lifecycle on cluster bootstrap (Mermaid)
 
 ```mermaid
-flowchart TB
-    tfa["terraform apply"]
-    cp["EKS control plane up<br/>(apiserver + etcd + scheduler)"]
-    vpc["vpc-cni addon installs<br/>(cluster_addons in eks.tf<br/>with before_compute = true)"]
-    ng["Managed node group<br/>launches EC2 instances<br/>(blocked until vpc-cni Ready)"]
-    nready["Nodes Ready<br/>(kubelet up, CNI assigns IPs)"]
-    addons["kube-proxy + CoreDNS + EBS-CSI<br/>install as standalone<br/>aws_eks_addon resources"]
-    karp["Self-managed Helm:<br/>Karpenter, LB controller,<br/>metrics-server"]
-    workloads["User workloads schedule<br/>(Pods get IPs, Services route,<br/>PVCs bind, DNS resolves)"]
-
-    tfa --> cp --> vpc --> ng --> nready --> addons --> karp --> workloads
-
-    note["WITHOUT before_compute=true:<br/>node group launches in parallel<br/>with vpc-cni. Nodes Ready<br/>without CNI for 60-120s.<br/>First Pods CrashLoopBackOff."]
-    vpc -.-> note
+flowchart LR
+    tfa["terraform apply"] --> cp["EKS control plane ACTIVE"]
+    cp --> gap["time_sleep<br/>(dataplane_wait_duration, 30s default)"]
+    gap --> ng["Managed node group<br/>launches EC2 instances"]
+    ng --> reg["Nodes register"]
+    cp --> vpc["vpc-cni: aws_eks_addon.before_compute<br/>(no edge to the node group)"]
+    vpc --> cni["aws-node DaemonSet<br/>assigns Pod IPs"]
+    reg -.->|"Pods wait for an IP"| cni
+    cp --> addons["kube-proxy, CoreDNS, EBS-CSI<br/>standalone aws_eks_addon resources"]
 ```
+
+The arrows are Terraform edges in the module, plus the timer. The vpc-cni
+branch and the node group branch have no edge between them.
 
 ### Diagram B — the four essential addons and their IRSA needs (ASCII)
 
@@ -303,7 +314,7 @@ REGION="$(terraform output -raw region)"
 aws eks list-addons --cluster-name "$CLUSTER" --region "$REGION"
 ```
 
-Output:
+Illustrative output (not captured):
 
 ```text
 {
@@ -325,12 +336,12 @@ aws eks describe-addon \
   --query 'addon.{name:addonName,ver:addonVersion,status:status,role:serviceAccountRoleArn}'
 ```
 
-Output:
+Illustrative output (not captured):
 
 ```text
 {
   "name": "vpc-cni",
-  "ver": "v1.22.4-eksbuild.8",
+  "ver": "v1.23.2-eksbuild.8",
   "status": "ACTIVE",
   "role": "arn:aws:iam::<ACCOUNT-ID>:role/bookstore-platform-vpc-cni"
 }
@@ -363,30 +374,15 @@ aws eks describe-addon-versions \
   --output table
 ```
 
-Output (two rows from us-east-1 on 2026-10-29, condensed; the CLI
-prints each `status` list as a nested table):
-
-```text
------------------------------------------------------------------------
-|                        DescribeAddonVersions                        |
-+---------------------+----------+------------------------------------+
-|         ver         | default  |               status               |
-+---------------------+----------+------------------------------------+
-| v1.23.2-eksbuild.8  | None     | ["1.37","1.36","1.35","1.34",      |
-|                     |          |  "1.33","1.32","1.31"]             |
-| v1.22.4-eksbuild.8  | 1.37     | ["1.37","1.36","1.35","1.34",      |
-|                     |          |  "1.33","1.32","1.31","1.30"]      |
-+---------------------+----------+------------------------------------+
-```
-
-This is the **conformance window** in action: each addon version is
-compatible with a range of K8s minors. The `default` column shows
-which build is EKS's default for a minor: the one EKS installs when
-an add-on is created with `addon_version = null`, and the one an
-`aws_eks_addon_version` lookup with `most_recent = false` returns on
-every plan. Note that the newest build is not the default. Adding
-`--kubernetes-version 1.37` lists only the builds offered on 1.37,
-and the `status` column then shows just that minor.
+The upstream [vpc-cni page](https://docs.aws.amazon.com/eks/latest/userguide/managing-vpc-cni.html)
+lists `v1.23.2-eksbuild.8` as the latest build for Kubernetes 1.31 through
+1.37. That range is the **conformance window**: each build is offered for a
+set of minors. The `default` column marks the build EKS installs when an
+add-on is created with `addon_version = null`, and the build that an
+`aws_eks_addon_version` lookup with `most_recent = false` returns. The
+default is not always the newest build, so read the column for your
+cluster's minor rather than trusting a number from this page. Adding
+`--kubernetes-version 1.37` lists only the builds offered on 1.37.
 
 ### 4. Bump an addon to a specific version (optional — tracking usually wins)
 
@@ -412,49 +408,49 @@ Use `-target` only for surgical addon-version changes; never for
 ongoing operations. The pin lets you control upgrade timing (you bump
 CoreDNS when *you* are ready, not when EKS picks a new default).
 
-### 5. Verify the before_compute ordering
+### 5. Check what Terraform orders
 
-After a fresh `terraform apply` (or against the existing cluster's
-state), check Terraform's dependency graph:
+The graph needs only `terraform init -backend=false` and makes no AWS
+calls. An edge `"A" -> "B"` means A waits for B. Dump the apply graph and
+list the lines that mention the vpc-cni resource:
 
 ```bash
-terraform graph -type=apply | grep -A1 -E '(vpc-cni|system|eks_managed_node_group)'
+terraform init -backend=false
+terraform graph -type=apply > apply-graph.dot
+grep -F 'aws_eks_addon.before_compute' apply-graph.dot
 ```
 
-You'll see edges showing that the managed node group depends on the
-addon resource. On a fresh apply, the addon installs first, then the
-node group's EC2 instances launch — the cluster never has Ready nodes
-without CNI.
+The matching lines show the add-on's own edges, to its version lookup and
+to locals. No line points to it, so no node group waits for it. The regular
+`aws_eks_addon.this` resources do wait for the node groups, because the
+module makes them depend on the compute. That is the edge `before_compute`
+removes, and the module adds nothing in its place. A node group reaches
+`time_sleep.this`, the timer, but not `aws_eks_addon.before_compute`.
 
-### 6. Watch the resolve-conflicts policy in action
+### 6. See what a hand edit does to add-on state
 
-Hand-edit a CoreDNS configmap (the kind of thing prod ops sometimes
-do to tune resolution):
+This is a deliberate action on a cluster you own, to show what Terraform
+cannot see. Edit the CoreDNS ConfigMap by hand and change a cosmetic value:
 
 ```bash
-kubectl -n kube-system get configmap coredns -o yaml > coredns-backup.yaml
 kubectl -n kube-system edit configmap coredns
-# (change something cosmetic; save)
 ```
 
-Now run an apply:
+Run `terraform plan -target=aws_eks_addon.coredns`. Terraform reports no
+change. The provider reads the add-on through the add-on API, so the
+ConfigMap is outside what a plan sees.
 
-```bash
-terraform apply -target=aws_eks_addon.coredns
-```
+The hand edit stays until an update call runs. Terraform sends one when
+`addon_version`, `configuration_values`, the service account role or the
+Pod Identity block changes. Then `resolve_conflicts_on_update` decides the
+outcome: under `OVERWRITE` the changed values go back to Amazon EKS
+defaults, and under `PRESERVE` they stay. Revert the test edit with
+`kubectl edit` when you are done.
 
-With `resolve_conflicts_on_update = "OVERWRITE"` (the bookstore tree's
-default), your edit is wiped — EKS re-applies the upstream ConfigMap.
-With `PRESERVE`, your edit survives. The right answer is "depends on
-whether you committed the edit to Terraform"; production teams that
-take customization seriously use `PRESERVE` everywhere.
-
-Restore the original:
-
-```bash
-kubectl -n kube-system apply -f coredns-backup.yaml
-rm coredns-backup.yaml
-```
+The durable way to change CoreDNS is `configuration_values` in Terraform,
+with Corefile changes under its `corefile` key. A direct ConfigMap edit is
+overwritten at the next add-on update
+([CoreDNS add-on docs](https://docs.aws.amazon.com/eks/latest/userguide/managing-coredns.html)).
 
 ### 7. Add a new EKS-managed addon (not one of the four)
 
@@ -490,53 +486,49 @@ resource "aws_eks_addon" "pod_identity_agent" {
 ```
 
 `terraform plan` shows the new addon; `terraform apply` installs it.
-The agent runs as a DaemonSet in `kube-system`; you can then declare
-`PodIdentityAssociation` resources to map service accounts to IAM
-roles (without the OIDC-provider machinery IRSA needs).
+The agent runs one Pod per node in `kube-system`. Then create Pod Identity
+associations that map each service account to an IAM role. The agent does
+not read `service_account_role_arn`. It needs `eks-auth:AssumeRoleForPodIdentity`
+on the node role, which the managed `AmazonEKSWorkerNodePolicy` grants, and
+that action can be limited by tags
+([agent setup](https://docs.aws.amazon.com/eks/latest/userguide/pod-id-agent-setup.html)).
 
 ## How it works under the hood
 
-**The EKS addon API.** `aws eks describe-addon` returns the addon's
-configured manifest URL, the container images, the recommended IRSA
-service account, and the compatibility matrix. When you call
-`CreateAddon` (Terraform does this on `apply`), EKS fetches the
-manifests, applies them to your cluster via the apiserver, and tags
-the resulting Kubernetes objects with `eks.amazonaws.com/addon-name`
-labels. EKS doesn't run a controller in your cluster managing addons;
-it applies them once and walks away (until the next API call).
+**The EKS add-on API.** Create and update are asynchronous. `UpdateAddon`
+returns an update ID, the add-on moves from `UPDATING` back to `ACTIVE`,
+and the Terraform provider waits for that update to finish. The request
+takes `addonVersion`, `configurationValues`, `serviceAccountRoleArn` and
+`resolveConflicts`, and the version must be one that `DescribeAddonVersions`
+returns for the cluster ([API reference](https://docs.aws.amazon.com/eks/latest/APIReference/API_UpdateAddon.html)).
 
-**The `service_account_role_arn` field's mechanism.** When the field
-is set on `aws_eks_addon`, EKS patches the addon's pre-baked manifests
-to add the `eks.amazonaws.com/role-arn` annotation to the service
-account before applying. The annotation is then consumed by the
-cluster's OIDC provider (auto-created by `enable_irsa = true` in the
-EKS module): the kubelet projects a JWT into the Pod's filesystem,
-the AWS SDK detects the projection, calls `sts:AssumeRoleWithWebIdentity`
-with the JWT, and gets a temporary credential. The Pod never sees a
-long-lived AWS key — the credential is request-time and short-lived.
+**What `service_account_role_arn` does.** It binds an existing IAM role to
+the add-on's service account. The API reference requires an IAM OIDC
+provider on the cluster for this, which `enable_irsa = true` creates in the
+EKS module. The role's trust policy must name that provider and the
+add-on's service account. The Pod then gets short-lived credentials through
+a projected token, as in
+[Part 10 ch.03](../10-cloud-and-managed-kubernetes/03-cloud-identity.md).
+Left unset, the add-on uses the node IAM role's permissions instead.
 
-**`before_compute = true` mechanics.** Inside the
-`terraform-aws-modules/eks/aws` module, the `cluster_addons.<name>.before_compute`
-flag, when true, adds a Terraform `depends_on` from the managed node
-group resources to the addon resource. Terraform's resource graph
-honors the dependency: the addon's `Create` must complete before any
-node group's `Create` begins. AWS's side of the addon install — the
-fetch-and-apply sequence — typically completes in 30-60 seconds,
-faster than the node group's EC2-instance-launch sequence (~3-5
-minutes), so the ordering doesn't extend the overall apply time;
-it just makes the CNI presence guaranteed before nodes are.
+**`before_compute = true` mechanics.** In `terraform-aws-modules/eks`
+20.37.2, the flag moves the entry from `aws_eks_addon.this` to
+`aws_eks_addon.before_compute` (see `main.tf`). The `this` resources carry
+`depends_on` on the compute, so the flag removes that edge. No resource in
+the module depends on `aws_eks_addon.before_compute`. We checked this on the
+example tree: `terraform graph -type=apply` shows the node group reaching
+`time_sleep.this` and no path to the add-on, while the regular `this`
+add-ons reach the node group. The only ordering the module provides for the
+compute is the timer in `node_groups.tf`. If the order must hold, declare
+the node group in your own code with a `depends_on` on the add-on.
 
-**Why `kube-proxy` doesn't need `before_compute`.** kube-proxy
-installs as a DaemonSet — one Pod per node, scheduled by the
-DaemonSet controller after the node Joins. If kube-proxy isn't there
-yet when a node Joins, the node just doesn't route Service IPs for
-30-60 seconds. The cluster's API is reachable via the apiserver's
-direct VPC endpoint (or its public endpoint), not via a ClusterIP, so
-kubelet's API calls still work. The pods that *do* need kube-proxy to
-work — anything calling a Service by ClusterIP — backoff and retry,
-which is fine for the brief startup window. vpc-cni's absence is
-fundamentally different: a Pod without an IP can't even start its
-container's network namespace; it never gets to "retry".
+**Why `kube-proxy` doesn't need `before_compute`.** kube-proxy runs as a
+DaemonSet, one Pod per node, started after the node joins. A node without
+it has no Service routing until it starts, and Pods that call a Service by
+ClusterIP retry in the meantime. The API server is reached through its
+endpoint, not a ClusterIP, so kubelet keeps working. vpc-cni's absence is
+different: a Pod without an IP cannot start its network sandbox and stays
+in `ContainerCreating` until a CNI answers.
 
 **The conformance window's data structure.** Each addon version is
 described by a `compatibilities` list — pairs of `(clusterVersion,
@@ -548,22 +540,21 @@ the list) and "which one is the default?" (find the entry where
 minor at that moment, and a standalone `aws_eks_addon` keeps that
 build from then on; the `aws_eks_addon_version` data source asks the
 "which one is the default?" question again on every plan, which is
-how the tree's add-ons follow upgrades. When you pin a version, EKS
-validates it's in the window and rejects with a clear error if not.
+how the tree's add-ons follow upgrades. The API accepts only a version
+that `DescribeAddonVersions` returns for the cluster's minor.
 
 **Pod Identity Agent vs IRSA — the migration.** IRSA's trust policy
-references the cluster's OIDC issuer URL — a string like
-`oidc.eks.<region>.amazonaws.com/id/<HASH>`. The hash is cluster-
-specific and changes when you destroy and recreate the cluster.
-Multi-cluster teams pay this tax for every cluster (one role per
-cluster per app). Pod Identity replaces the trust policy with a
-service-side mapping (cluster + namespace + service account → role),
-without OIDC. The migration: install the Pod Identity Agent addon,
-create `PodIdentityAssociation` resources, swap the application's
-service-account-to-role wiring from the `eks.amazonaws.com/role-arn`
-annotation to the new mapping, remove the IRSA trust policy from the
-role. For an existing cluster, the migration is significant; for a
-new cluster, Pod Identity is the simpler default.
+references the cluster's OIDC issuer URL, a string like
+`oidc.eks.<region>.amazonaws.com/id/<HASH>`. Each cluster has its own
+issuer, so every IRSA role trusts one cluster's issuer, and multi-cluster
+teams repeat that trust setup for each cluster. A Pod Identity association
+maps (cluster, namespace, service account) to a role, and the trust policy
+names the Pod Identity principal instead. The migration: install the Pod
+Identity Agent add-on, create Pod Identity associations, move the
+application's wiring from the `eks.amazonaws.com/role-arn` annotation to
+the association, then remove the IRSA trust statement from the role. For an
+existing cluster the migration is significant; for a new cluster, Pod
+Identity is the simpler default.
 
 ## Production notes
 
@@ -573,37 +564,29 @@ new cluster, Pod Identity is the simpler default.
 > benefit from "the version we tested" (no surprise bump when EKS
 > rotates defaults during an unrelated upgrade). **When `addon_version`
 > tracks the default (an `aws_eks_addon_version` lookup, or `null`
-> inside the EKS module's `cluster_addons`), a Kubernetes control-plane
-> upgrade via `terraform apply` ALSO moves every addon whose default
-> build differs on the new K8s minor (kube-proxy always does) — in the
-> same apply, with no commit of its own. The plan shows the new builds
-> for the standalone lookups, but a module-managed addon such as
-> vpc-cni shows only `(known after apply)`, because the module's
-> lookup reads the cluster version that is changing; you see its new
-> build only during the apply. Mitigation: pin `addon_version` in
-> staging and production so addon bumps are explicit commits.** The
-> bookstore-platform tree tracks the default throughout because it's
-> a teaching artifact; flip to pinned in your fork. (A bare `null` on
-> a standalone `aws_eks_addon` is not tracking: the provider keeps
-> the installed build, see [ch.02](02-eks-cluster-lifecycle.md).)
+> inside the EKS module's `cluster_addons`), a control-plane upgrade
+> through Terraform also moves every addon whose default build differs
+> on the new minor, with no commit of its own. Both lookups read the
+> Kubernetes version that the same configuration sets, so read the plan
+> for the new add-on builds before you apply. Mitigation: pin
+> `addon_version` in staging and production so addon bumps are explicit
+> commits.** The bookstore-platform tree tracks the default throughout
+> because it's a teaching artifact; flip to pinned in your fork. (A bare
+> `null` on a standalone `aws_eks_addon` is not tracking: the provider
+> keeps the installed build, see [ch.02](02-eks-cluster-lifecycle.md).)
 
-> **In production:** `resolve_conflicts_on_update = "PRESERVE"` is
-> the right choice for any addon you've customized via
-> `configuration_values`. The bookstore-platform's CoreDNS is patched
-> for `nodeSelector` and `tolerations` (so it lands on the system
-> node group); the EBS-CSI is patched for the same reason. With
-> `OVERWRITE`, these customizations live in Terraform — every apply
-> reasserts them, so the policy is moot. With `PRESERVE`, manual
-> edits stick around even after a terraform apply, which is the
-> production-team behavior when an ops engineer needs to patch the
-> cluster *right now* before the Terraform PR is merged.
+> **In production:** `resolve_conflicts_on_update = "PRESERVE"` is the
+> right choice for an add-on whose live objects get edited outside
+> Terraform. The bookstore-platform's CoreDNS and EBS-CSI are patched for
+> `nodeSelector` and `tolerations` through `configuration_values`, so those
+> settings are declared in Terraform and sent on each update. A hand edit is
+> a different case: it survives only a `PRESERVE` update. That is the bridge
+> an ops engineer needs during an incident, before the Terraform PR merges.
 
-> **In production:** IRSA on every addon that needs cloud
-> credentials. The bookstore-platform tree wires
-> `service_account_role_arn` for vpc-cni and EBS-CSI; CoreDNS and
-> kube-proxy don't need it (no AWS API calls). Audit your own
-> add-ons: if the addon's manifest references AWS APIs, it needs
-> IRSA (or Pod Identity); if it doesn't, leave the field empty.
+> **In production:** audit each add-on. If its controllers call AWS APIs,
+> give it its own role (IRSA or Pod Identity). If it does not, leave the
+> field empty: an unset role falls back to the node IAM role, a broader
+> grant than most add-ons need.
 
 > **In production:** Conformance windows matter at upgrade time, not
 > install time. A tracked `addon_version` (the tree's lookup, or
@@ -617,25 +600,24 @@ new cluster, Pod Identity is the simpler default.
 > catches this: `aws eks describe-addon-versions --kubernetes-version
 > <N+1>` returns what's available for the target.
 
-> **In production:** The `before_compute = true` on vpc-cni is
-> non-negotiable. Every fresh cluster without it gets the first-boot
-> race; every team that hits it once never forgets. Phase 14-R put
-> it in the bookstore tree because the smoke test on 2026-05-20 hit
-> the race and watched it.
+> **In production:** `before_compute = true` on vpc-cni is not an
+> ordering guarantee. The timer is the only gap before the nodes (see the
+> mechanics under How it works). If a node must never register before the
+> CNI is ACTIVE, declare that node group in your own code with a
+> `depends_on` on the add-on, and check the first nodes of each new cluster.
 
 > **In production:** Pod Identity for new clusters; IRSA for
 > existing. Don't churn a working IRSA wiring just because Pod
-> Identity is newer. Migration is multi-week work for a non-trivial
-> cluster; the gain (one less OIDC provider to manage) is modest.
+> Identity is newer. Migration is real work for a cluster with many
+> IRSA roles; the gain (no per-cluster OIDC trust to maintain) is modest.
 > New green-field clusters should default to Pod Identity Agent
 > from day one.
 
-> **In production:** Custom CoreDNS plugins (the `forward` plugin
-> pointing at a corporate DNS, the `cache` plugin tuned for high
-> QPS) live in `configuration_values` on the CoreDNS addon — *not*
-> in a hand-patched ConfigMap. The Terraform-authored config
-> survives upgrades; the hand-patch gets overwritten on the next
-> `OVERWRITE` apply.
+> **In production:** Custom CoreDNS config (a `forward` plugin pointing at
+> corporate DNS, a tuned `cache` plugin) belongs under the `corefile` key of
+> `configuration_values`, not in a hand-patched ConfigMap. EKS manages that
+> ConfigMap, and a direct edit is overwritten at the next add-on update
+> ([CoreDNS add-on docs](https://docs.aws.amazon.com/eks/latest/userguide/managing-coredns.html)).
 
 ## Quick Reference
 
@@ -711,7 +693,8 @@ resource "aws_eks_addon" "kube_proxy" {
 Addon-management checklist (the cluster is healthy when all five are yes):
 
 - [ ] vpc-cni has `before_compute = true` in the EKS module's
-      `cluster_addons` map.
+      `cluster_addons` map, and you know that the order it gives is a
+      timer, not a dependency.
 - [ ] Every addon that needs AWS APIs (vpc-cni, EBS-CSI) has an IRSA
       role wired via `service_account_role_arn`.
 - [ ] Conformance window verified for the cluster's K8s minor
@@ -730,28 +713,28 @@ Addon-management checklist (the cluster is healthy when all five are yes):
 1. **What exactly does `before_compute = true` do for the vpc-cni addon, and why don't the other three essentials need it?**
    <details><summary>Show answer</summary>
 
-   It adds a Terraform resource-graph dependency that blocks the managed node group's EC2 launches until the vpc-cni addon is Ready. Without it, the node group and the addon are siblings — Terraform parallelizes them, the node group can win, and nodes Ready without a CNI for 60-120 seconds. The other three install as DaemonSets/Deployments that tolerate a brief CNI-absence (kube-proxy comes up after CNI by definition; CoreDNS and EBS-CSI are Deployments that wait for Pod IPs), so the ordering only matters for vpc-cni.
+   In `terraform-aws-modules/eks` 20.37.2 it moves the add-on from `aws_eks_addon.this` to `aws_eks_addon.before_compute`. `this` add-ons depend on the node groups, and `before_compute` add-ons do not. No resource makes a node group wait for vpc-cni. The node groups wait on a 30-second timer, which is a timing gap, not an ordering. The other three need no ordering against the nodes: kube-proxy runs as a DaemonSet and affects Service routing, not Pod IPs, and CoreDNS and EBS-CSI Pods wait for an IP and start when one is available.
 
    </details>
 
 2. **You run `terraform apply` to bump K8s from 1.36 to 1.37 with every addon tracking EKS's default build (as the bookstore tree does). Mid-apply, the LB Controller starts crashlooping. What's happening and how do you avoid this in prod?**
    <details><summary>Show answer</summary>
 
-   Tracking the default (`addon_version` from an `aws_eks_addon_version` lookup keyed on the cluster's version) moves kube-proxy, and every other managed addon whose default build differs on the new minor, in the same apply as the cluster upgrade. One of those default bumps changed an API the LB Controller (a self-managed Helm release) depended on. The chapter's discipline: pin `addon_version` to specific certified strings in staging/prod (not a tracking lookup), stage each addon bump as its own PR in a separate apply, and let dev clusters track the default to find these surprises before prod hits them.
+   Tracking the default (`addon_version` from an `aws_eks_addon_version` lookup keyed on the cluster's version) moves kube-proxy, and every other managed addon whose default build differs on the new minor, in the same plan as the cluster upgrade. One of those default bumps changed an API the LB Controller (a self-managed Helm release) depended on. The chapter's discipline: pin `addon_version` to specific certified strings in staging/prod (not a tracking lookup), stage each addon bump as its own PR in a separate apply, and let dev clusters track the default to find these surprises before prod hits them.
 
    </details>
 
-3. **An ops engineer manually edited the vpc-cni ConfigMap to add a custom `MTU` setting during an incident. Six hours later, a scheduled `terraform apply` runs and the custom setting disappears. Why and what was misconfigured?**
+3. **An ops engineer hand-edits an add-on-managed setting during an incident. Days later, a scheduled `terraform apply` shows no change, and then an add-on version bump removes the edit. Why, and what should the team have done?**
    <details><summary>Show answer</summary>
 
-   `resolve_conflicts_on_update = OVERWRITE` reverts manual edits at every `terraform apply` — EKS replaces the live state with the Terraform-declared state. The fix in production is `resolve_conflicts_on_update = PRESERVE` for any addon that's been customized (manual edits stay until the Terraform PR codifying them lands). OVERWRITE is the right default for dev clusters where you want declared state to win; PRESERVE protects the in-incident hotfix that hasn't been merged yet.
+   Terraform never saw the edit. The provider reads the add-on through the add-on API, so the apply that changed nothing left the hand edit in place. The version bump is an update call, and under `OVERWRITE` EKS sets changed values back to its defaults during that update, so the edit disappears with no Terraform diff. The missing control is review: the change belongs in a PR to `configuration_values`, and drift detection ([14.07](07-infrastructure-cicd-and-drift.md)) should flag edits nobody reviewed. While a hotfix waits for its PR, `PRESERVE` on that add-on keeps it through updates.
 
    </details>
 
-4. **Hands-on extension — create a fresh cluster with vpc-cni declared as a standalone `aws_eks_addon` resource (not inside `cluster_addons`) and watch the bootstrap. Note the timestamps of node-Ready vs CNI-Ready.**
+4. **Hands-on extension — create a fresh cluster with vpc-cni declared as a standalone `aws_eks_addon` resource (not inside `cluster_addons`) and note the timestamps of node registration and vpc-cni ACTIVE.**
    <details><summary>What you should see</summary>
 
-   The standalone resource has no `before_compute` field — it runs in parallel with the node group. Nodes report Ready before vpc-cni has installed; for the first ~60-120 seconds, any Pod scheduled to those nodes gets stuck `ContainerCreating` with `NetworkPlugin cni failed`. CoreDNS, anything in `kube-system`, the bookstore's first Pods all CrashLoopBackOff briefly. This is the first-boot CNI race the chapter exists to prevent.
+   Neither form orders vpc-cni before the node group. The standalone resource has no `before_compute` field, and the module's form has no edge to the node group either. The bootstrap order therefore depends on timing. A node that registers first has no Pod IPs until vpc-cni is ACTIVE, and Pods scheduled to it stay in `ContainerCreating` until then. Your timestamps show the gap on your cluster. The example tree does not close it; an explicit dependency does (see the mechanics under How it works).
 
    </details>
 
@@ -761,10 +744,18 @@ Addon-management checklist (the cluster is healthy when all five are yes):
   <https://docs.aws.amazon.com/eks/latest/userguide/eks-add-ons.html>;
   the authoritative reference for the addon API, the catalog, and
   what counts as an EKS-managed addon.
-- **terraform-aws-modules/eks/aws — `cluster_addons` reference**
-  <https://github.com/terraform-aws-modules/terraform-aws-eks/blob/master/docs/compute_resources.md>;
-  the module-side reference for `before_compute`, `configuration_values`,
-  and the resolve-conflicts policy.
+- **terraform-aws-modules/eks/aws 20.37.2 — `main.tf` and `node_groups.tf`**
+  <https://github.com/terraform-aws-modules/terraform-aws-eks/blob/v20.37.2/main.tf>;
+  the `aws_eks_addon.this` and `aws_eks_addon.before_compute` resources, and
+  the `time_sleep` that the node groups wait on.
+- **EKS UpdateAddon API reference**
+  <https://docs.aws.amazon.com/eks/latest/APIReference/API_UpdateAddon.html>;
+  the `resolveConflicts` values and the rule that a version comes from
+  `DescribeAddonVersions`.
+- **Kubernetes virtual IPs and version skew**
+  <https://kubernetes.io/docs/reference/networking/virtual-ips/> (the ipvs
+  deprecation) and <https://kubernetes.io/releases/version-skew-policy/>
+  (the kube-proxy rule used above).
 - **AWS EKS Pod Identity migration guide**
   <https://docs.aws.amazon.com/eks/latest/userguide/pod-identities.html>;
   the canonical reference for migrating from IRSA to Pod Identity.
@@ -776,6 +767,6 @@ Addon-management checklist (the cluster is healthy when all five are yes):
   <https://github.com/kubernetes-sigs/aws-ebs-csi-driver>; the
   upstream repo and the IAM policy template for the EBS-CSI addon's
   IRSA role.
-- **Rosso et al., *Production Kubernetes* ch.7 — Networking & Storage**;
+- **Rosso et al., *Production Kubernetes*, the networking and storage chapters**;
   the broader CNI + CSI discipline this chapter's addon management
   enforces at the EKS layer.
