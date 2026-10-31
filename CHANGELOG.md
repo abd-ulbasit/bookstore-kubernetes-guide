@@ -135,6 +135,11 @@ versions follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 - Part 06 Production readiness (06.01 to 06.06) is rewritten security-first,
   with the 06.05 PodDisruptionBudget drain run on a three-node kind cluster,
   and `06-production-readiness/` joins the enforced list.
+- Part 13 Grand capstone (13.01 to 13.12) is rewritten security-first, with
+  threats and controls in each chapter, scoped Crossplane provider RBAC,
+  TLS-only Kafka, and `13-grand-capstone-bookstore-platform/` joins the
+  enforced list. Heavy stacks were validated with `helm template` and server
+  dry runs, and nothing ran on AWS or GCP.
 
 ### Fixed
 - Standalone EKS add-ons (kube-proxy, CoreDNS, EBS CSI) now follow

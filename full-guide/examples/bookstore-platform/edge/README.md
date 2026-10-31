@@ -1,23 +1,23 @@
 # `edge/` — Gateway API + Coraza WAF + per-tenant rate limiting
 
 The v2 edge story (ch.13.07). Three jobs at the edge: terminate TLS +
-route, defend (WAF + rate limit), authenticate (JWT verify — ch.13.04).
+route, defend (WAF + rate limit), authenticate (JWT verify, ch.13.04).
 
 ## Files
 
-- `edge-ca.yaml` — the edge CA (a cert-manager self-signed root and a CA
+- `edge-ca.yaml`: the edge CA (a cert-manager self-signed root and a CA
   issuer, both namespaced in `bookstore-platform`) and the gateway's serving
   certificate. Replaces a literal Secret.
 - `jwt-policies.yaml`: copies of the ch.13.04 RequestAuthentication and the
   two AuthorizationPolicies, selecting the Gateway API pods. Also copies the
   verified `tenant` claim to `x-tenant`.
-- `gateway.yaml` — Gateway API `GatewayClass` + `Gateway`, an HTTP-to-HTTPS
+- `gateway.yaml`: Gateway API `GatewayClass` + `Gateway`, an HTTP-to-HTTPS
   redirect, three `HTTPRoute`s (public static, API, Stripe webhook) and the
   `ReferenceGrant`s their backends need.
-- `coraza-wasmplugin.yaml` — Coraza WAF as an Istio `WasmPlugin` (digest
+- `coraza-wasmplugin.yaml`: Coraza WAF as an Istio `WasmPlugin` (digest
   pinned), phase AUTHN, OWASP CRS v4. Blocks SQL injection, XSS,
   command injection and path traversal.
-- `rate-limit-envoy-filter.yaml` — Envoy local rate limiter: a Lua filter
+- `rate-limit-envoy-filter.yaml`: the Envoy local rate limiter, a Lua filter
   that drops a client-sent `x-tenant`, the token buckets, and the route
   action that keys them on the verified tenant.
 
@@ -70,6 +70,6 @@ Chapter 13.07 steps 5 and 6 walk the WAF and rate-limit checks.
 
 - Ch.13.07 — the chapter that authors this stack.
 - `../auth/` (ch.13.04) — the JWT validation that this edge complements.
-- `../crossplane/composition-bookstoretenant.yaml` (ch.13.02) — the tenant
+- `../crossplane/composition-bookstoretenant.yaml` (ch.13.02): the tenant
   identity these buckets key on. The quota it sets is not yet wired here;
   the buckets are the static 100-per-10s starting point.

@@ -78,7 +78,7 @@ Workflow). Each has:
 - **Why it matters:** cross-region calls + noisy neighbours look like
   this.
 
-### Experiment 3 — io-latency (CNPG primary data volume)
+### Experiment 3: io-latency (CNPG primary data volume)
 
 - **Hypothesis:** When I/O latency is added to the CNPG primary's data
   volume, the database's connection pool stays under 80 % usage; the

@@ -61,7 +61,7 @@ DNS routes by latency and shifts on health.**
   replication**: writes route to the primary's region; reads are local to
   each region. On primary loss, promote a standby with an explicit change
   to its cluster spec. The promotion is quick; the DNS update is slower
-  (TTL-bounded). The failover budget is "minutes", not "seconds" — be
+  (TTL-bounded). The failover budget is "minutes", not "seconds". Be
   honest.
 - **Active workload set differs slightly per region.** Storefront,
   catalog, orders, payments-gateway, events, recommendations all run
@@ -819,7 +819,7 @@ primary's data files. Its lag is the WAL it has not yet applied, and that lag
 grows with the link; asynchronous streaming does not bound it. **Logical
 replication** (Postgres's pgoutput plugin, used by Debezium) is what the
 search-index CDC in [13.05](05-search-and-product-discovery.md) uses; it
-ships row changes, not WAL bytes — a different mechanism for a different
+ships row changes, not WAL bytes: a different mechanism for a different
 purpose. CNPG supports both; the replica `Cluster` above uses physical via
 `pg_basebackup`.
 
@@ -842,7 +842,7 @@ and no split-brain from a partition that merely looks like an outage.
    expires. A short TTL on the records that need fast failover cuts the
    wait, and raises query load and cost. The distribution of "client
    refresh" is spread out; budget the 99th percentile.
-3. **Resolver caching** — many corporate and ISP resolvers hold answers
+3. **Resolver caching:** many corporate and ISP resolvers hold answers
    longer than the record's TTL. That tail is set by resolvers you do not
    control.
 
@@ -992,7 +992,7 @@ Checklist (multi-region is healthy when all six are yes):
    <details><summary>Show answer</summary>
 
 Clients holding cached DNS resolutions for the old endpoint continue hitting
-   the down region — they get connection refused or timeouts until their
+   the down region. They get connection refused or timeouts until their
    resolver re-queries. For mobile clients, DNS caching is opaque (the OS
    caches independently of TTL). For browsers, the cache is usually shorter
    than the TTL. For server-to-server (B2B integrations), JVM DNS caching
@@ -1012,7 +1012,7 @@ Sync replication means every commit waits for at least one remote replica to
    acknowledge. Each commit then pays a cross-region round trip, so the
    checkout path gets slower on every write. Throughput drops because writes
    hold longer. If the remote replica is briefly unreachable, writes block.
-   Synchronous replication trades availability for consistency — acceptable
+   Synchronous replication trades availability for consistency: acceptable
    for low-volume, high-value financial transactions, awful for high-volume
    e-commerce checkouts. The right answer is usually: async streaming with
    bounded lag + an RPO budget you accept + a tested failover.
