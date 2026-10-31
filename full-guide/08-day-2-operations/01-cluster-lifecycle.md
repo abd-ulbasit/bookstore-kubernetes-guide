@@ -140,10 +140,10 @@ sequenceDiagram
     Note over Op,N: 2. Nodes, ONE at a time (skew now apiserver=NEW, kubelet=OLD: legal, n-3)
     loop For each worker node
         Op->>N: kubectl drain node --ignore-daemonsets --delete-emptydir-data
-        N-->>W: evict Pods (eviction API HONORS the PDB; may block and retry)
+        N-->>W: evict Pods (eviction API HONORS the PDB, may block and retry)
         Op->>N: upgrade kubelet + kube-proxy, restart kubelet
         Op->>N: kubectl uncordon node
-        W-->>N: scheduler places Pods back; node now on NEW version
+        W-->>N: scheduler places Pods back, node now on NEW version
     end
 
     Note over Op,N: Never: kubelet ahead of apiserver. Never: skip a minor.
