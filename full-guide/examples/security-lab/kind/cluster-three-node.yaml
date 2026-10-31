@@ -1,0 +1,27 @@
+# kind cluster for the Part 04 scheduling chapters: one control plane and two
+# workers. Create it with:
+#
+#   kind create cluster --name bookstore --config cluster-three-node.yaml
+#
+# Run the labs only against a cluster you own. The node image is pinned by
+# digest to the Kubernetes 1.37.0 image kind v0.33.0 publishes, the same
+# digest cluster.yaml uses.
+#
+# No node is labelled or tainted here. A kubelet may not set a label under the
+# node-restriction.kubernetes.io/ prefix, and NodeRestriction refuses it, so
+# the dedicated pool label is added by an administrator once the node has
+# joined. The pool taint is added the same way, with kubectl taint.
+kind: Cluster
+apiVersion: kind.x-k8s.io/v1alpha4
+name: bookstore
+nodes:
+  - role: control-plane
+    image: kindest/node:v1.37.0@sha256:a1ed56cfb0e7b93589bdf97c8cd566405a265939e3620fc4f5de89adff580ae5
+  - role: worker
+    image: kindest/node:v1.37.0@sha256:a1ed56cfb0e7b93589bdf97c8cd566405a265939e3620fc4f5de89adff580ae5
+    labels:
+      topology.kubernetes.io/zone: zone-a
+  - role: worker
+    image: kindest/node:v1.37.0@sha256:a1ed56cfb0e7b93589bdf97c8cd566405a265939e3620fc4f5de89adff580ae5
+    labels:
+      topology.kubernetes.io/zone: zone-b

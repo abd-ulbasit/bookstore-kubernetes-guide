@@ -16,13 +16,14 @@
 # Part 04 SCHEDULING LAYER (ch.02 + ch.03 — additive only; everything above is
 # unchanged, only the three fields below were ADDED to template.spec):
 #  • ch.02 tolerations: tolerate the `dedicated=database:NoSchedule` taint so
-#    postgres MAY land on a node reserved for the data tier (ch.02 documents
-#    tainting a kind worker `dedicated=database:NoSchedule` + labelling it
-#    `dedicated=database`). A toleration only PERMITS scheduling there; it does
-#    not ATTRACT — node affinity below does the attracting.
-#  • ch.02 nodeAffinity (preferred): PREFER the node labelled
-#    `dedicated=database`. "preferred" (not "required") so postgres still
-#    schedules on a default single-node kind cluster that has no such node.
+#    postgres may land on the dedicated pool (ch.02 section 1 taints the pool
+#    node). The toleration lifts the taint's refusal. It does not attract
+#    postgres, and any Pod author can write it (ch.02 section 5).
+#  • ch.02 nodeAffinity (required): REQUIRE a node labelled
+#    node-restriction.kubernetes.io/pool=database. The label sits under the
+#    prefix NodeRestriction protects, so a kubelet cannot label itself into
+#    the pool. "required" because a preferred rule is only a score and would
+#    let postgres land on a general node.
 #  • ch.03 priorityClassName: bookstore-data (35-) — highest Bookstore tier:
 #    scheduled first, preempted last (losing it loses data).
 #
@@ -109,25 +110,24 @@ spec:
           type: RuntimeDefault
       # --- Part 04 ch.03: highest Bookstore tier (35-priorityclasses.yaml).
       priorityClassName: bookstore-data
-      # --- Part 04 ch.02: tolerate the dedicated-DB-node taint so postgres MAY
-      # be placed on a node tainted `dedicated=database:NoSchedule`. Matches the
-      # taint EXACTLY (key+value+effect); without this toleration the scheduler
-      # would never place postgres there. (Permission, not attraction.)
+      # --- Part 04 ch.02: tolerate the dedicated-pool taint. Matches the taint
+      # EXACTLY (key+value+effect). The toleration only lifts the scheduler's
+      # refusal to place postgres on a tainted node; it does not attract
+      # postgres there, and any Pod author can write the same toleration.
       tolerations:
         - key: dedicated
           operator: Equal
           value: database
           effect: NoSchedule
       affinity:
-        # --- Part 04 ch.02: PREFER the dedicated DB node (labelled
-        # dedicated=database). "preferred" so postgres still schedules on a
-        # plain single-node kind cluster with no such node/label.
+        # --- Part 04 ch.02: REQUIRE the dedicated pool node (labelled
+        # node-restriction.kubernetes.io/pool=database). Without a matching
+        # node, postgres stays Pending instead of landing on a general node.
         nodeAffinity:
-          preferredDuringSchedulingIgnoredDuringExecution:
-            - weight: 100
-              preference:
-                matchExpressions:
-                  - key: dedicated
+          requiredDuringSchedulingIgnoredDuringExecution:
+            nodeSelectorTerms:
+              - matchExpressions:
+                  - key: node-restriction.kubernetes.io/pool
                     operator: In
                     values: ["database"]
       terminationGracePeriodSeconds: 30
