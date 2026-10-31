@@ -231,7 +231,7 @@ $ docker exec -e TOKEN sf-pilot-control-plane sh -c 'curl -s -o /dev/null -w "%{
 [exit 0]
 $ docker exec -e TOKEN sf-pilot-control-plane sh -c "curl -s --cacert ... -H \"Authorization: Bearer \$TOKEN\" https://127.0.0.1:6443/debug/pprof/heap" > heap.pprof
 [exit 0] bytes=  298513 err=       0
-$ go tool pprof -top -nodecount=10 /private/tmp/claude-501/-Users-basit-projects-abd-ulbasit/f7ab4f3e-ba11-49c8-a9ec-0eeba9d1be7f/scratchpad/tmp/lab-11-09/heap.pprof 2>&1 | head -16
+$ go tool pprof -top -nodecount=10 heap.pprof 2>&1 | head -16
 File: kube-apiserver
 Build ID: 8c7e6e19a75dcdba1fefb20fc03cf40ce75d5b41
 Type: inuse_space

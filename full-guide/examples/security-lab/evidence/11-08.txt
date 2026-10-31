@@ -110,8 +110,8 @@ $ kubectl -n kube-system exec etcd-sf-pilot-control-plane -- etcd --help 2>&1 | 
 $ cd $LAB_REPO && $LAB_SCRATCH/venv/bin/python -c "import yaml; list(yaml.safe_load_all(open('full-guide/examples/bookstore/platform/ha-kind-3cp.yaml'))); print('ha-kind-3cp.yaml: valid YAML (kind Cluster config)')"
 ha-kind-3cp.yaml: valid YAML (kind Cluster config)
 [exit=0]
-$ heavy_lock
-heavy_lock exit=1
+$ install_lock
+install_lock exit=1
 === step 1: talk to etcd with its client certificates ===
 $ kubectl -n kube-system exec etcd-sf-pilot-control-plane -- etcdctl --endpoints=https://127.0.0.1:2379 --cacert=/etc/kubernetes/pki/etcd/ca.crt --cert=/etc/kubernetes/pki/etcd/server.crt --key=/etc/kubernetes/pki/etcd/server.key member list -w table
 ┌─────────────────┬─────────┬────────────────────────┬─────────────────────────┬─────────────────────────┬────────────┐
