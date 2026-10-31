@@ -1,21 +1,19 @@
-# Bookstore Platform v2 — Part 13 ch.11: an Argo CD Application that
-# installs Backstage (backstage/backstage chart) into the `backstage`
-# namespace. Backstage is the developer-portal frontend; this file
-# wires the chart, not the platform-customised image (the image is
-# built per-org from the Backstage app-cli template and pushed to
-# the org's registry).
+# Bookstore Platform v2 - Part 13 ch.11: an Argo CD Application that
+# installs Backstage (backstage/backstage chart 2.6.0) into the `backstage`
+# namespace. The image is the org's own build from the backstage-cli scaffold,
+# with the v2 plugins bundled, pushed to the org's registry.
 #
-# v1 had no Backstage; Part 11 ch.10 introduced it conceptually. v2
-# wires the install + the platform-customised image reference + the
-# Postgres backing store + the OIDC integration with Keycloak.
+# The first document labels the namespace restricted, so the pods Argo CD
+# creates are admitted only if they meet the baseline. The values set the
+# baseline on the Backstage pod and on the bundled Postgres. Chart 2.6.0 has no
+# existingConfigMap key: the app config is mounted with extraAppConfig.
 #
 # !!! CRD-INTRINSIC DRY-RUN
-#   `Application` is `argoproj.io/v1alpha1` — Argo CD CRD. WITHOUT
-#   Argo CD:
+#   `Application` is `argoproj.io/v1alpha1`, an Argo CD CRD. Without Argo CD:
 #     no matches for kind "Application" in version "argoproj.io/v1alpha1"
 #   EXPECTED.
 #
-# Apply (after Argo CD + Keycloak + a built backstage image):
+# Apply (after Argo CD, Keycloak and the built image exist):
 #   kubectl apply -f examples/bookstore-platform/backstage/backstage-application.yaml
 ---
 apiVersion: v1
@@ -54,44 +52,40 @@ spec:
     targetRevision: "2.6.0"
     helm:
       values: |
+        # A dedicated ServiceAccount. The pod token is mounted because the
+        # kubernetes plugin lists workloads; its RBAC is in rbac.yaml.
+        serviceAccount:
+          create: true
+          name: backstage
+          automountServiceAccountToken: true
         backstage:
           image:
-            # The org's customised Backstage image — built from the
-            # backstage-cli `new app` scaffold, with the v2 plugins
-            # bundled (argocd, kubernetes, prometheus, pagerduty,
-            # crossplane). Pinned tag.
+            # The org's build, tagged by the build that produced it. The image
+            # runs as the node user, UID 1000 (USER node in the scaffold).
             registry: ghcr.io
             repository: your-org/bookstore-platform-backstage
             tag: "1.31.0"
             pullPolicy: IfNotPresent
-          # The app-config.production.yaml lives in a ConfigMap
-          # (app-config.yaml in this directory). Reference it here.
-          appConfig:
-            existingConfigMap: backstage-app-config
-            key: app-config.production.yaml
-          # Env vars sourced from ESO-materialised Secrets.
-          extraEnvVars:
-            - name: POSTGRES_PASSWORD
-              valueFrom:
-                secretKeyRef:
-                  name: backstage-postgresql
-                  key: password
-            - name: GITHUB_APP_PRIVATE_KEY
-              valueFrom:
-                secretKeyRef:
-                  name: backstage-github-app
-                  key: private-key
-            - name: KEYCLOAK_CLIENT_SECRET
-              valueFrom:
-                secretKeyRef:
-                  name: backstage-keycloak
-                  key: client-secret
-          # PSA — restricted.
+          # The app config is the ConfigMap in backstage-app-config.yaml.
+          extraAppConfig:
+            - configMapRef: backstage-app-config
+              filename: app-config.production.yaml
+          # The runtime credentials come from the ESO Secret in
+          # external-secrets.yaml. The chart sets POSTGRES_PASSWORD itself,
+          # from backstage-postgresql, while the bundled Postgres is on.
+          extraEnvVarsSecrets:
+            - backstage-runtime
+          # Backstage writes temporary files; the root filesystem is read-only.
+          extraVolumes:
+            - name: tmp
+              emptyDir: {}
+          extraVolumeMounts:
+            - name: tmp
+              mountPath: /tmp
           podSecurityContext:
             runAsNonRoot: true
-            runAsUser: 65532
-            runAsGroup: 65532
-            fsGroup: 65532
+            runAsUser: 1000
+            runAsGroup: 1000
             seccompProfile:
               type: RuntimeDefault
           containerSecurityContext:
@@ -106,20 +100,50 @@ spec:
             limits:
               cpu: "1"
               memory: 1Gi
-        # The chart's bundled Postgres — fine for kind / dev.
-        # Production points at the per-region CNPG cluster instead
-        # (set postgresql.enabled=false; set backstage.appConfig
-        # database.client to point at CNPG).
+        # The chart's bundled Postgres is for kind and dev only. Production
+        # points at the per-region CNPG cluster instead: set postgresql.enabled
+        # to false and point the app config's database host at CNPG.
         postgresql:
           enabled: true
+          image:
+            # docker.io/bitnami/postgresql:15.4.0-debian-11-r10, the chart
+            # default, is not on Docker Hub any more; Bitnami kept the tag under
+            # bitnamilegacy. The digest was read from that registry.
+            registry: docker.io
+            repository: bitnamilegacy/postgresql
+            tag: 15.4.0-debian-11-r10
+            digest: sha256:86c140fd5df7eeb3d8ca78ce4503fcaaf0ff7d2e10af17aa424db7e8a5ae8734
           auth:
+            username: bn_backstage
+            database: bn_backstage
             existingSecret: backstage-postgresql
+          serviceAccount:
+            create: true
+            automountServiceAccountToken: false
           primary:
             podSecurityContext:
               enabled: true
-              runAsNonRoot: true
-              runAsUser: 1001
               fsGroup: 1001
+            containerSecurityContext:
+              enabled: true
+              runAsUser: 1001
+              runAsNonRoot: true
+              allowPrivilegeEscalation: false
+              readOnlyRootFilesystem: true
+              seccompProfile:
+                type: RuntimeDefault
+              capabilities:
+                drop: ["ALL"]
+            extraVolumes:
+              - name: tmp
+                emptyDir: {}
+              - name: run
+                emptyDir: {}
+            extraVolumeMounts:
+              - name: tmp
+                mountPath: /tmp
+              - name: run
+                mountPath: /var/run/postgresql
         service:
           type: ClusterIP
           ports:

@@ -1,0 +1,74 @@
+# Bookstore Platform v2 - Part 13 ch.11: what the Backstage ServiceAccount
+# may do. One ServiceAccount, two grants, each as narrow as its job:
+#
+#   1. Read workloads cluster-wide for the kubernetes plugin. No secrets, no
+#      writes, no exec, no logs.
+#   2. Create, read and patch Argo CD Applications in argocd, which the
+#      scaffolder's last step uses. No delete, and nothing else in argocd.
+#
+# The scaffolder cannot create tenants or touch Secrets, because its grant
+# does not reach them. Add a resource here only when a plugin needs it.
+#
+# Apply (after the ServiceAccount exists, from the Backstage chart):
+#   kubectl apply -f examples/bookstore-platform/backstage/rbac.yaml
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: backstage-catalog-reader
+  labels:
+    app.kubernetes.io/part-of: bookstore-platform
+    app.kubernetes.io/component: developer-portal
+rules:
+  - apiGroups: [""]
+    resources: ["pods", "services"]
+    verbs: ["get", "list", "watch"]
+  - apiGroups: ["apps"]
+    resources: ["deployments", "replicasets"]
+    verbs: ["get", "list", "watch"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: backstage-catalog-reader
+  labels:
+    app.kubernetes.io/part-of: bookstore-platform
+    app.kubernetes.io/component: developer-portal
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: backstage-catalog-reader
+subjects:
+  - kind: ServiceAccount
+    name: backstage
+    namespace: backstage
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: backstage-scaffolder
+  namespace: argocd
+  labels:
+    app.kubernetes.io/part-of: bookstore-platform
+    app.kubernetes.io/component: developer-portal
+rules:
+  - apiGroups: ["argoproj.io"]
+    resources: ["applications"]
+    verbs: ["create", "get", "patch"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: backstage-scaffolder
+  namespace: argocd
+  labels:
+    app.kubernetes.io/part-of: bookstore-platform
+    app.kubernetes.io/component: developer-portal
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: Role
+  name: backstage-scaffolder
+subjects:
+  - kind: ServiceAccount
+    name: backstage
+    namespace: backstage

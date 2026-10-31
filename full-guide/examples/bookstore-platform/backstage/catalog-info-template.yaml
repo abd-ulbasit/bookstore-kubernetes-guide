@@ -19,7 +19,9 @@
 # scaffolder template + a documentation reference.)
 #
 # Apply: NEVER directly. The Scaffolder copies + renders it into
-# each new service repo.
+# each new service repo. It holds the Component and API only. The System
+# belongs to the platform location: a copy in every repo would let each
+# repo rewrite it.
 ---
 apiVersion: backstage.io/v1alpha1
 kind: Component
@@ -80,12 +82,3 @@ spec:
   system: <SYSTEM>
   definition:
     $text: ./api/openapi.yaml
----
-apiVersion: backstage.io/v1alpha1
-kind: System
-metadata:
-  name: bookstore-platform
-  description: The Bookstore Platform v2 — the production e-commerce platform.
-spec:
-  owner: team-platform
-  domain: bookstore

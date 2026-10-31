@@ -52,8 +52,8 @@ introduced Backstage **as a concept** — the developer-facing surface of
 the Crossplane-shaped platform. It did not ship the install + the
 scaffolder template + the catalog seeding + the plugin wiring. This
 chapter does, and ties it back to the v2 platform: the scaffolder
-template creates a new microservice **plus** a `BookstoreTenant` claim
-(ch.13.02) **plus** an Argo CD Application **plus** a Helm chart **plus**
+template creates a new microservice **plus** an Argo CD Application in an
+existing tenant (ch.13.02 onboards tenants) **plus** a Helm chart **plus**
 a `catalog-info.yaml`, all in one form submission.
 
 > **In production:** The single biggest reason internal platforms
@@ -102,8 +102,9 @@ PagerDuty all visible per service).**
   framework lets you say "only team-payments can scaffold a new
   service in the payments domain". Plugged into Keycloak via OIDC
   (ch.13.04); group claims map to Backstage Groups; permission rules
-  match Groups to actions. v2 ships the basic shape; production
-  layers the per-Component permissions.
+  match Groups to actions. Backstage ships an allow-all policy, so the
+  policy module must replace it before any rule applies. The threats
+  below name what it must deny.
 
 The trap to keep in view: **the catalog is only as good as its
 updates**. A service that ships without a `catalog-info.yaml` is
@@ -112,6 +113,18 @@ updates**. A service that ships without a `catalog-info.yaml` is
 `catalog-info.yaml` is missing or invalid; a **CI check** in every
 service repo with the same assertion; the scaffolder generates it
 correctly the first time so the developer never sees the hook fire.
+
+## Threats and controls
+
+Backstage holds the catalog, the templates and the credentials of the tools
+it proxies, so its threats are about what it can reach.
+
+| Threat | Control in this chapter | Deeper |
+|---|---|---|
+| A repo claims another team's Component, or defines a Group, User or Template that the policy trusts | Repos add only Components, APIs and Resources. Groups, Users, Systems and Templates come from the platform location. `catalog-info.yaml` falls under the owning team's CODEOWNERS | [Part 13 ch.04](04-real-auth-keycloak-irsa-istio-jwt.md) |
+| Template runs use the backend's identity, not the submitter's | The policy denies by default. The `backstage` ServiceAccount may create, get and patch Applications in `argocd`. The `bookstore-tenants` project limits them to `bookstore-platform-*`. The form cannot create a tenant | [Part 13 ch.02](02-tenancy-and-crossplane-onboarding.md); break-glass in [ch.01](01-bookstore-2-from-toy-to-platform.md) and [ch.12](12-day-2-runbook-on-call-dr-chaos.md) |
+| Backstage tokens reach more than a viewer needs | The Argo CD token is a read-only account's. The PagerDuty key is read-only. The GitHub App holds only the permissions it needs. Credentials come from External Secrets | [Part 13 ch.06](06-payments-and-event-sourcing.md) |
+| The backend's cluster identity reads Secrets or writes workloads | The kubernetes plugin reads pods, services, Deployments and ReplicaSets, and nothing else. Hands-on section 7 checks the grants | [Part 13 ch.01](01-bookstore-2-from-toy-to-platform.md) |
 
 ## Diagrams
 
@@ -157,8 +170,8 @@ flowchart LR
     plg --> pd
     plg --> k8s
 
-    scaf -->|"opens PR"| gh
-    scaf -->|"creates claim"| xr
+    scaf -->|"creates repo"| gh
+    scaf -->|"creates Application"| argo
 ```
 
 ### Diagram B — the scaffolder flow (Mermaid)
@@ -169,21 +182,17 @@ sequenceDiagram
     participant B as Backstage Scaffolder
     participant S as Skeleton repo
     participant G as GitHub
-    participant C as Crossplane
     participant A as Argo CD
 
     D->>B: open Scaffolder, pick "New Bookstore microservice"
     B->>D: render form (name, owner, system, port, tenant)
     D->>B: submit
     B->>S: fetch:template (clone skeleton, render placeholders)
-    B->>G: publish:github (create repo, push initial commit)
-    B->>G: open PR with catalog-info.yaml + helm chart + ArgoCD app
-    B->>C: kubernetes:apply (BookstoreTenant claim)
-    C-->>B: claim reconciled (ns + RBAC + Quota + NetworkPolicy)
-    B->>A: kubernetes:apply (Application points at the new repo)
-    A-->>B: Application synced
+    B->>G: publish:github (create repo, push initial commit, protect main)
+    B->>A: kubernetes:apply (Application in the bookstore-tenants project)
+    A-->>B: Application created
     B->>D: "Service is live: <link>"
-    Note over D: One form submission. 5 minutes.
+    Note over D: One form submission. The tenant already exists.
 ```
 
 ### Diagram C — build-vs-buy matrix (ASCII)
@@ -191,7 +200,7 @@ sequenceDiagram
 ```text
 TOOL              FOSS?    SCAFFOLDER?  CATALOG?  PLUGINS?    NOTES
 ────────────────  ─────    ───────────  ────────  ──────────  ──────────────────────────────────
-Backstage         yes      yes          yes       100+        the CNCF reference, biggest comm.
+Backstage         yes      yes          yes       many        the CNCF reference, biggest comm.
 Compass           no       yes          yes       limited     Atlassian; tight with Jira/Bitbucket
 Cortex            no       yes          yes       moderate    commercial; SOC2-friendly out of box
 Port              no       yes          yes       moderate    commercial; ETL-driven catalog model
@@ -214,29 +223,27 @@ WHEN WHICH:
 ### 0. Prerequisites
 
 - ch.13.04 ran — Keycloak is up; the `backstage` client is registered.
-- ch.13.03 ran — Argo CD is up; ApplicationSet pattern works.
-- Crossplane is up; `BookstoreTenant` XRD + Composition exist (ch.13.02).
-- GitHub App configured (or PAT, dev-mode) — Backstage needs a token
-  to read repos + open PRs.
+- ch.13.03 ran — Argo CD is up, with a local account for Backstage that
+  has the `apiKey` capability and a read-only role.
+- Crossplane is up; `BookstoreTenant` XRD + Composition exist (ch.13.02),
+  and at least one tenant is onboarded.
+- A GitHub App installed on the org, with only the repository permissions
+  Backstage needs (see Tokens, below).
 
-### 1. Install Backstage (pinned-Helm)
+### 1. Install Backstage through Argo CD
+
+The Application pins chart 2.6.0. The file's first document is the namespace,
+labelled `restricted`, so the pods Argo CD creates are admitted only if they
+meet the baseline. Install with the Application, not with a separate
+`helm install`, so that one tool owns the release.
 
 ```sh
-kubectl config use-context kind-bookstore-platform-us-east
-
-BACKSTAGE_CHART_VERSION="2.6.0"
-
 helm repo add backstage https://backstage.github.io/charts
 helm repo update
+helm search repo backstage/backstage --version 2.6.0
 
-helm install backstage backstage/backstage \
-  --version "$BACKSTAGE_CHART_VERSION" \
-  -n backstage --create-namespace --wait \
-  --set 'backstage.image.registry=ghcr.io' \
-  --set 'backstage.image.repository=your-org/bookstore-platform-backstage' \
-  --set 'backstage.image.tag=1.31.0' \
-  --set 'postgresql.enabled=true' \
-  --set 'service.type=ClusterIP'
+kubectl apply -f examples/bookstore-platform/backstage/backstage-application.yaml
+kubectl -n argocd get application backstage
 ```
 
 > The Backstage Helm chart wraps a **container image you build** — the
@@ -246,7 +253,16 @@ helm install backstage backstage/backstage \
 > image; the image carries the plugins (the v2 platform: ArgoCD,
 > Prometheus, PagerDuty, Kubernetes, Crossplane).
 
-Verify:
+The values set the baseline on the pod. The ServiceAccount is dedicated, and
+its token is mounted because the kubernetes plugin lists workloads. The pod
+runs as UID 1000, the `node` user that the scaffold's Dockerfile switches to,
+with a read-only root filesystem and `/tmp` as an emptyDir. The bundled
+Postgres is for kind and dev only. The chart's default image tag is not
+published under `docker.io/bitnami`, so the Application pins the older tag
+under `bitnamilegacy` by digest. Production points at the CNPG cluster from
+ch.13.06 instead.
+
+Verify. Illustrative output, not captured (the lab has no Backstage image):
 
 ```sh
 kubectl -n backstage get pod,svc
@@ -258,28 +274,38 @@ kubectl -n backstage get pod,svc
 # service/backstage                    ClusterIP   10.96.123.45      7007/TCP
 # service/backstage-postgresql         ClusterIP   10.96.123.46      5432/TCP
 
-kubectl -n backstage port-forward svc/backstage 7007:7007 &
+kubectl -n backstage port-forward svc/backstage 7007:7007
 # Open http://localhost:7007 — sign in via Keycloak.
 ```
 
-### 2. Apply the platform Backstage manifests
+### 2. Apply the rest of the Backstage manifests
+
+Apply them in this order. Each file says what it is for.
 
 ```sh
-# The Argo CD Application that installs Backstage via Helm
-kubectl apply -f examples/bookstore-platform/backstage/backstage-application.yaml
+# Credentials from Vault, through the bookstore-platform-vault
+# ClusterSecretStore that the payments path uses (ch.06)
+kubectl apply -f examples/bookstore-platform/backstage/external-secrets.yaml
 
-# Backstage app-config.production.yaml (ConfigMap mounted into pod)
+# What the ServiceAccount may do (section 7 checks it)
+kubectl apply -f examples/bookstore-platform/backstage/rbac.yaml
+
+# Ingress closed by default; the gateway and Postgres are allowed in
+kubectl apply -f examples/bookstore-platform/backstage/networkpolicy.yaml
+
+# The Argo CD project that the scaffolder's Applications run in
+kubectl apply -f examples/bookstore-platform/backstage/argocd-appproject.yaml
+
+# The app config, mounted by the chart
 kubectl apply -f examples/bookstore-platform/backstage/app-config.yaml
 
-# Scaffolder template — the golden path
-kubectl apply -f examples/bookstore-platform/backstage/scaffolder-template-new-service.yaml
-
-# Per-service catalog-info.yaml template
-kubectl apply -f examples/bookstore-platform/backstage/catalog-info-template.yaml
-
-# MkDocs config for TechDocs
+# The MkDocs base config, kept in the namespace as a copy
 kubectl apply -f examples/bookstore-platform/backstage/tech-docs-config.yaml
 ```
+
+The scaffolder template and the catalog-info template are not applied. Backstage
+registers the template from the platform location in `catalog.locations`, and
+each service repo gets its own `catalog-info.yaml` from the skeleton.
 
 ### 3. Seed the catalog from existing services
 
@@ -287,7 +313,9 @@ Each v2 service ships a `catalog-info.yaml` (the template in
 `backstage/catalog-info-template.yaml` is the canonical form). Backstage
 discovers them via the `github-discovery` integration: scan the
 `bookstore-platform` GitHub org for any repo with a
-`catalog-info.yaml` at root.
+`catalog-info.yaml` at root. Discovery accepts only Components, APIs and
+Resources from those repos (`catalog.rules` in the app config), so a repo
+cannot define the groups or templates the policy relies on.
 
 ```yaml
 # Example catalog-info.yaml — one per service
@@ -326,7 +354,7 @@ that names it; the plugin's tab in the entity page populates.
 #   - owner: team-notifications
 #   - system: bookstore-platform
 #   - port: 8080
-#   - tenant: acme-books   (creates the BookstoreTenant claim)
+#   - tenant: acme-books   (an existing tenant, onboarded per ch.13.02)
 # Submit.
 #
 # Behind the scenes:
@@ -341,13 +369,14 @@ that names it; the plugin's tab in the entity page populates.
 #      - .github/workflows/ci.yaml
 #      - docs/index.md
 #      - mkdocs.yml
-#   5. Opens a PR titled "Initial commit: notifications service".
-#   6. Applies a BookstoreTenant claim (if a new tenant) — Crossplane
-#      reconciles ns + RBAC + Quota + NetworkPolicy.
-#   7. Applies an Argo CD Application that points at the new repo.
-#   8. Returns the link to the developer.
+#   5. Protects main, so a later change needs a code-owner review.
+#   6. Applies an Argo CD Application in the bookstore-tenants project,
+#      pointing at the new repo and deploying into
+#      bookstore-platform-acme-books.
+#   7. Registers the repo in the catalog and returns the links.
 #
-# Total elapsed time: 1-2 minutes.
+# Nothing here creates a tenant or a namespace. If acme-books does not exist,
+# the Application fails to sync; it does not create an unlabelled namespace.
 ```
 
 ### 5. Browse the catalog
@@ -381,12 +410,85 @@ mkdocs.yml
 ```sh
 # Backstage builds the docs:
 #   - on-demand: when a user opens the Docs tab, the techdocs-cli builds
-#     the site on the backend, caches it. First load: ~30s; subsequent: instant.
+#     the site on the backend and caches it. The first load is slow.
 #   - pre-built: a GitHub Action on push runs `techdocs-cli generate +
 #     publish` to S3; Backstage reads from S3. The production-shape.
 #
 # v2 ships the pre-built path; production-grade builds run in CI.
 ```
+
+### 7. Check what the Backstage identity can do
+
+The backend acts with one ServiceAccount, `backstage`, not with the rights of
+the person who signed in. `rbac.yaml` grants it two things: read on workloads
+across the cluster, and create, get and patch on Applications in `argocd`.
+List what it may do in a namespace, as the ServiceAccount sees it:
+
+```sh
+kubectl auth can-i --list -n backstage --as=system:serviceaccount:backstage:backstage
+```
+
+<!-- gate: output -->
+```text
+Resources                                       Non-Resource URLs                      Resource Names   Verbs
+selfsubjectreviews.authentication.k8s.io        []                                     []               [create]
+selfsubjectaccessreviews.authorization.k8s.io   []                                     []               [create]
+selfsubjectrulesreviews.authorization.k8s.io    []                                     []               [create]
+pods                                            []                                     []               [get list watch]
+services                                        []                                     []               [get list watch]
+deployments.apps                                []                                     []               [get list watch]
+# ...
+```
+
+Reads only, and no line for Secrets. Two writes must be refused, and they are
+the deliberate checks:
+
+```sh
+kubectl auth can-i get secrets -n backstage --as=system:serviceaccount:backstage:backstage
+kubectl auth can-i create deployments.apps -n backstage --as=system:serviceaccount:backstage:backstage
+```
+
+<!-- gate: output -->
+```text
+no
+```
+
+<!-- gate: output -->
+```text
+no
+```
+
+The `argocd` grant is the only write, and it has no delete verb:
+
+```sh
+kubectl auth can-i --list -n argocd --as=system:serviceaccount:backstage:backstage
+```
+
+<!-- gate: output -->
+```text
+Resources                                       Non-Resource URLs                      Resource Names   Verbs
+applications.argoproj.io                        []                                     []               [create get patch]
+# ...
+```
+
+The lab also rendered the chart at 2.6.0 with the Application's values and
+dry-ran the Backstage and Postgres pod templates in a `restricted` namespace.
+A dry run creates nothing. Both pods were admitted:
+
+<!-- gate: output -->
+```text
+pod/backstage-check created (server dry run)
+```
+
+<!-- gate: output -->
+```text
+pod/postgresql-check created (server dry run)
+```
+
+This output came from a lab cluster with a different name. The lab used the
+namespaces `p13-11-backstage` and `p13-11-argocd` for `backstage` and `argocd`,
+and the transcript header records that substitution. The full transcript is
+`full-guide/examples/security-lab/evidence/13-11.txt`.
 
 ## How it works under the hood
 
@@ -408,13 +510,12 @@ set of actions:
   content.
 - `publish:github:pull-request` — open a PR.
 - `catalog:register` — add the new entity to the catalog.
-- `kubernetes:apply` — apply a manifest (v2 uses this for the
-  BookstoreTenant claim + the Argo CD Application).
+- `kubernetes:apply` — apply a manifest (v2 uses this for the Argo CD
+  Application).
 - `fs:rename`, `fs:delete`, `roadiehq:utils:*` — small file ops.
 
-Plugins can add custom actions. v2 ships a `bookstore:tenant`
-action that wraps the BookstoreTenant claim with platform-specific
-defaults; the scaffolder template uses it.
+Plugins can add custom actions. The template in this chapter uses only the
+built-in ones.
 
 **TechDocs integration — `techdocs-cli`.** The CLI builds an MkDocs
 site to static HTML; uploads to S3 (or the local filesystem).
@@ -426,41 +527,46 @@ uses external for production speed.
 
 **The Argo CD plugin — the server-side proxy.** The frontend plugin
 calls `/api/proxy/argocd/api/v1/applications/<NAME>`; the Backstage
-backend's proxy forwards to the Argo CD API with a service-account
-token. The end-user does not need a personal Argo CD account; the
-proxy is the trust boundary. Same shape for the Prometheus plugin
+backend's proxy forwards to the Argo CD API with the read-only account's
+token. The end-user does not need a personal Argo CD account; the proxy
+is the trust boundary, so that account's role limits what every
+signed-in user can read. Same shape for the Prometheus plugin
 (proxies to `/api/v1/alerts`) and PagerDuty (proxies to
 `/services/<ID>/oncalls`).
 
-**Permission framework — RBAC for who can scaffold.** Backstage's
-permission framework defines `permissionResource` (the action),
-`permissionAttributes` (the target), and `permissionDecision` (allow
-/ deny). Rules are policy-as-code: a Backstage backend plugin
-implements `permissionPolicy` returning the decision per request.
-v2's policy:
-
-```typescript
-// permissionPolicy.ts (sketched)
-if (request.permission.name === "scaffolder.task.create"
-    && request.resourceRef.kind === "Template"
-    && request.resourceRef.name === "new-bookstore-service") {
-  return resourceCondition({
-    resourceType: "scaffolder-template",
-    conditions: [{ rule: "HAS_LABEL", params: { label: `team:${user.team}` } }],
-  });
-}
-```
-
-Read: "alice from team-payments can scaffold a template labelled
-`team:team-payments`; she cannot scaffold templates labelled
-`team:team-search`." Plugged into Keycloak group claims via OIDC.
+**Permission framework: who may run what.** Backstage's permission
+framework decides each request in a `permissionPolicy`, a backend module
+that the platform team writes and reviews like code. Backstage ships an
+allow-all policy, so until that module replaces it, `permission.enabled:
+true` changes nothing. The module must deny by default, and allow a template
+run only when the submitter's group is the owner the form names. Groups come
+from the Keycloak claims over OIDC (ch.13.04).
 
 **The catalog-info.yaml discovery flow.** Backstage's
 `github-discovery` config scans GitHub for repos with
 `catalog-info.yaml`; each catalog file declares one or more
 entities. Reconciliation: a Backstage worker processes the
-discovered entities every 5 minutes; new entities appear in the
+discovered entities on the provider's schedule; new entities appear in the
 catalog; deleted entities disappear; modified entities update.
+
+### Tokens and template execution
+
+Backstage holds four credentials: the GitHub App key, the Keycloak client
+secret, the Argo CD token and the PagerDuty key. Each arrives as an
+environment variable from External Secrets (`external-secrets.yaml`). The app
+config holds only `${VARIABLE}` references, so the file names the credentials
+and holds no values.
+
+Prefer a GitHub App to a personal access token. Installation tokens expire
+after an hour and carry only the permissions the App was granted. A PAT
+belongs to one person, does not expire on its own, and carries that person's
+reach. Have CI refuse any app-config change that brings a PAT back.
+
+Running a template is privilege. The backend creates the repo and the
+Application with its own identity, not the submitter's. The policy decides who
+may run the template; the RBAC and the AppProject decide what the run can
+touch. Change a template only through a reviewed pull request, because one
+edit changes what the backend does on every later run.
 
 ## Production notes
 
@@ -471,21 +577,6 @@ catalog; deleted entities disappear; modified entities update.
 > missing or invalid; (3) a CI check in every service repo
 > validates the file against the Backstage entity schema. v2
 > ships all three.
-
-> **In production:** **GitHub App > PAT.** A personal-access
-> token works in dev; production needs a GitHub App with scoped
-> permissions (read code; write commits to the platform org).
-> The App's token is rotated every hour; the PAT is rotated
-> never. Mitigation: a CI check refuses any `app-config` change
-> that re-introduces a PAT.
-
-> **In production:** **Secrets in Backstage — via ESO, not env
-> vars in the chart.** The Backstage app-config references
-> `${POSTGRES_PASSWORD}` and `${GITHUB_APP_KEY}` and
-> `${KEYCLOAK_CLIENT_SECRET}`. Each is an env var sourced from
-> a Kubernetes Secret materialised by ESO (Part 05 ch.04). The
-> chart's `extraEnvVars` block wires them. Never inline a
-> secret in the app-config ConfigMap.
 
 > **In production:** **The Scaffolder template is brittle on
 > first apply.** New templates ship with broken parameter
@@ -508,64 +599,46 @@ catalog; deleted entities disappear; modified entities update.
 > **In production:** **Backstage is a stateful app; back it up.**
 > Postgres (the catalog graph + the scaffolder task history) is
 > the state. CNPG-backed (ch.13.06) with cross-region
-> replication + a daily logical dump to S3. The state is small
-> (~MB-scale) but losing it loses the catalog history + every
+> replication + a daily logical dump to S3. The state is small,
+> but losing it loses the catalog history + every
 > running scaffolder task.
 
 ## Quick Reference
 
 ```sh
-# Pinned install
-BACKSTAGE_CHART_VERSION="2.6.0"
-
+# Install through Argo CD (chart 2.6.0), then the rest of the manifests
 helm repo add backstage https://backstage.github.io/charts
-helm install backstage backstage/backstage --version "$BACKSTAGE_CHART_VERSION" -n backstage --create-namespace --wait
-
-# Apply the platform manifests
+helm search repo backstage/backstage --version 2.6.0
 kubectl apply -f examples/bookstore-platform/backstage/backstage-application.yaml
+kubectl apply -f examples/bookstore-platform/backstage/external-secrets.yaml
+kubectl apply -f examples/bookstore-platform/backstage/rbac.yaml
+kubectl apply -f examples/bookstore-platform/backstage/networkpolicy.yaml
+kubectl apply -f examples/bookstore-platform/backstage/argocd-appproject.yaml
 kubectl apply -f examples/bookstore-platform/backstage/app-config.yaml
-kubectl apply -f examples/bookstore-platform/backstage/scaffolder-template-new-service.yaml
-kubectl apply -f examples/bookstore-platform/backstage/catalog-info-template.yaml
 kubectl apply -f examples/bookstore-platform/backstage/tech-docs-config.yaml
 ```
 
 Minimal skeletons:
 
 ```yaml
-# Backstage Scaffolder Template (sketch)
-apiVersion: scaffolder.backstage.io/v1beta3
-kind: Template
-metadata:
-  name: new-bookstore-service
-  title: "New Bookstore microservice"
-spec:
-  owner: team-platform
-  type: service
-  parameters:
-    - title: Service basics
-      properties:
-        name:    { type: string, title: "Service name" }
-        owner:   { type: string, title: "Owning team" }
-        port:    { type: integer, title: "HTTP port", default: 8080 }
-        tenant:  { type: string, title: "Tenant" }
-  steps:
-    - id: fetch
-      action: fetch:template
-      input: { url: "./skeleton", values: { name: "${{ parameters.name }}", ... } }
-    - id: publish
-      action: publish:github
-      input:
-        repoUrl: "github.com?owner=your-org&repo=bookstore-platform-${{ parameters.name }}"
-    - id: tenant
-      action: kubernetes:apply
-      input: { manifest: <BookstoreTenant claim derived from form> }
-    - id: argocd
-      action: kubernetes:apply
-      input: { manifest: <Argo CD Application pointing at the new repo> }
-    - id: register
-      action: catalog:register
-      input: { repoContentsUrl: "${{ steps.publish.output.repoContentsUrl }}" }
----
+# Fragment: the publish and Application steps of new-bookstore-service. The
+# whole template is in examples/bookstore-platform/backstage/scaffolder-template-new-service.yaml
+steps:
+  - id: publish
+    action: publish:github
+    input:
+      repoUrl: github.com?owner=your-org&repo=bookstore-platform-${{ parameters.name }}
+      protectDefaultBranch: true
+      repoVisibility: private
+      requireCodeOwnerReviews: true
+  - id: argocd
+    action: kubernetes:apply
+    input:
+      clusterRef: bookstore-platform-us-east
+      # manifest: an Application with project: bookstore-tenants
+```
+
+```yaml
 # catalog-info.yaml (Component)
 apiVersion: backstage.io/v1alpha1
 kind: Component
@@ -582,16 +655,18 @@ spec:
   system: bookstore-platform
 ```
 
-Checklist (the developer portal closed when all six are yes):
+Checklist (the developer portal closed when all seven are yes):
 
 - [ ] Backstage is installed; admin can sign in via Keycloak.
 - [ ] Software catalog seeded; every v2 service appears as a Component.
 - [ ] Scaffolder template `new-bookstore-service` exists; submitting it
-      creates a new repo + BookstoreTenant + ArgoCD Application.
+      creates a new repo and an ArgoCD Application in an existing tenant.
 - [ ] TechDocs renders for at least one service.
 - [ ] Argo CD plugin shows sync status on the Component's CI/CD tab.
-- [ ] Permission framework: a developer can scaffold templates labelled
-      with their team; not others'.
+- [ ] A deny-by-default permission policy is installed, and a developer
+      can scaffold only for their own team.
+- [ ] `kubectl auth can-i --list` (section 7) shows reads only in
+      `backstage`, and create, get and patch on Applications in `argocd`.
 
 ## Test your understanding
 
@@ -607,14 +682,21 @@ Checklist (the developer portal closed when all six are yes):
 2. **A developer scaffolds a new service from the template. What downstream side-effects should the template trigger to make the service "platform-compliant" out of the box?**
    <details><summary>Show answer</summary>
 
-   The template should: (1) Create a new git repo with `main.go` + Dockerfile + Makefile + restricted-PSA Deployment/Service. (2) Open a PR against the GitOps repo adding the new service's Argo CD `Application`. (3) Create or update a Crossplane `BookstoreTenant` (or component-level XR) for any infrastructure the service needs. (4) Register the service in the Backstage catalog (`catalog-info.yaml`). (5) Wire OpenTelemetry instrumentation, Prometheus ServiceMonitor, Grafana dashboard from a per-service template. (6) Add the team's on-call rotation. Anything not automated by the template becomes a manual chore that gets skipped — and a service skipping any of these is the "ghost service" with no dashboard, no alerts, no owner. The template is the golden path because it removes the alternatives.
+   The template should: (1) Create a new git repo with `main.go` + Dockerfile + Makefile + restricted-PSA Deployment/Service. (2) Register the new service's Argo CD `Application` in the `bookstore-tenants` project. (3) Join the service to an existing tenant. The platform team onboards tenants (ch.13.02); the template does not create them. (4) Register the service in the Backstage catalog (`catalog-info.yaml`). (5) Wire OpenTelemetry instrumentation, Prometheus ServiceMonitor, Grafana dashboard from a per-service template. (6) Add the team's on-call rotation. Anything not automated by the template becomes a manual chore that gets skipped — and a service skipping any of these is the "ghost service" with no dashboard, no alerts, no owner. The template is the golden path because it removes the alternatives.
 
    </details>
 
-3. **Your scaffolder template creates a service, but the new repo's PR fails CI because the Dockerfile uses a base image not in the allowlist. What's the right fix?**
+3. **A submitter runs the template with a tenant owned by another team. Which control stops the Application, and what is left if that control is missing?**
    <details><summary>Show answer</summary>
 
-   Don't patch the new repo's Dockerfile; fix the *template*. The template is the source of "what every new service looks like." If the template's base image is wrong, every new service inherits the same bug. Update the template to reference an allowed base image, bump its version, and re-test. Existing services with the old image either continue working (CI ratchet allows pre-existing) or get a coordinated bump PR. The discipline: templates are products; bugs in templates are bugs in the platform; treat them with the same rigor as service code.
+   The permission policy stops the run. It must deny by default and check that
+   the submitter's group owns the tenant. Backstage ships an allow-all policy,
+   so with no policy module nothing stops the run. Behind the policy, the
+   `backstage` ServiceAccount can still create and patch Applications in
+   `argocd`, and the `bookstore-tenants` project accepts any
+   `bookstore-platform-*` namespace. A missing policy therefore leaves every
+   tenant reachable from one form. The RBAC and the project limit the blast
+   radius. They do not decide ownership.
 
    </details>
 
@@ -625,10 +707,11 @@ Checklist (the developer portal closed when all six are yes):
 
    </details>
 
-5. **Hands-on: scaffold a new service via the `new-bookstore-service` template. Watch what happens in (a) the new git repo, (b) the GitOps repo, (c) Argo CD, (d) the Crossplane stack, (e) the Backstage catalog. How long is the end-to-end "developer to running pod" time?**
+5. **Hands-on: scaffold a new service via the `new-bookstore-service` template. Watch what happens in (a) the new git repo, (b) Argo CD, (c) the tenant's namespace, (d) the Backstage catalog. How long is the end-to-end "developer to running pod" time?**
    <details><summary>What you should see</summary>
 
-   Form submission → ~30s for the template to create the git repo + push the initial commit + open the GitOps PR. PR review + merge → 30-60s. Argo CD sync → ~30s for the new Application to reconcile. Crossplane onboarding (if needed) → 30-60s for the namespace + RBAC + quota. Pod schedule + start → 30-60s. End-to-end with human review in the PR: 3-10 min. End-to-end with auto-merge: 2-3 min. Compare this to the "ticket to platform team, wait two weeks" old shape — that's the value the portal delivers, measured in days saved per service per quarter.
+   Illustrative estimates, not measured on the lab. Form submission → ~30s for
+   the template to create the git repo and push the initial commit. Argo CD sync → ~30s for the new Application to reconcile. Pod schedule + start → 30-60s. The tenant must already exist; its onboarding (ch.13.02) is a separate run. Compare this to the "ticket to platform team, wait two weeks" old shape — that's the value the portal delivers, measured in days saved per service per quarter.
 
    </details>
 
