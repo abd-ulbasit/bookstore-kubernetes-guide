@@ -29,7 +29,9 @@
 # Production note:
 #   The routing keys are not in this file. The ExternalSecret
 #   `pagerduty-keys` (chapter 15.10) syncs them from Vault into the Secret
-#   the receivers read. The keys are scoped per-service in PagerDuty so a
+#   the receivers read. The ExternalSecret `slack-webhooks` (same chapter)
+#   syncs the Slack webhook that the P3 and hygiene receivers read. The
+#   operator rejects the whole configuration if either Secret is missing. The keys are scoped per-service in PagerDuty so a
 #   key leak is contained to one severity-channel. Rotate quarterly.
 # ---------------------------------------------------------------------------
 apiVersion: monitoring.coreos.com/v1beta1
@@ -312,6 +314,10 @@ spec:
             service: checkout                  # auto-fills component
             region: '{{ $labels.region }}'     # auto-fills group
             tenant: '{{ $labels.tenant }}'     # surfaced in PD details
+            # The operator routes only alerts whose namespace label equals
+            # the AlertmanagerConfig's namespace (monitoring). The sum()
+            # above drops every label, so this one must be set explicitly.
+            namespace: monitoring
           annotations:
             # ----- mandatory annotations (PagerDuty surfaces these) -----
             summary: "Checkout error rate >5 % for 5 minutes"
