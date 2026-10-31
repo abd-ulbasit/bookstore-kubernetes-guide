@@ -166,3 +166,29 @@ exceptions:
     upstream: https://kubernetes.io/docs/concepts/security/pod-security-standards/
     chapter: 08-day-2-operations/02-backup-and-dr.md
     expires: 2027-06-30
+
+  - namespace: node-debug
+    level: privileged
+    reason: >-
+      A node debugger Pod, from kubectl debug node with the sysadmin profile,
+      shares the node's host IPC, network and PID namespaces and mounts the
+      node's root filesystem through a hostPath volume. The Pod Security
+      Standards forbid host namespaces and hostPath at baseline, so only
+      privileged admits it. The namespace holds only node debugger Pods, is
+      granted to on-call only, and keeps audit and warn at restricted. The
+      chapter shows the same Pod refused in a restricted namespace.
+    upstream: https://kubernetes.io/docs/concepts/security/pod-security-standards/#privileged
+    chapter: 08-day-2-operations/03-troubleshooting-playbook.md
+    expires: 2027-06-30
+
+  - namespace: p08-03-node-debug
+    level: privileged
+    reason: >-
+      The lab for chapter 08.03 applies a privileged namespace under the lab's
+      name, with the same privileged label the chapter's node-debug namespace
+      sets, so the node debugger Pod runs against a real cluster. The script
+      deletes the namespace at the end. The chapter's own exception is the
+      node-debug entry above.
+    upstream: https://kubernetes.io/docs/concepts/security/pod-security-standards/#privileged
+    chapter: 08-day-2-operations/03-troubleshooting-playbook.md
+    expires: 2027-06-30

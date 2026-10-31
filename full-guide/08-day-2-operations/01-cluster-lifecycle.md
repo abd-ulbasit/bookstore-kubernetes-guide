@@ -14,6 +14,7 @@
 > release no longer serves.
 
 **Estimated time:** ~30 min read · ~90 min hands-on
+**Lab tier:** A (kind, a multi-node kind cluster). Run this chapter's commands only against clusters you own.
 **Prerequisites:** [Part 00 ch.04](../00-foundations/04-control-plane-deep-dive.md): what apiserver, etcd and the scheduler do, and what an upgrade actually changes · [Part 00 ch.05](../00-foundations/05-node-components.md): kubelet and kube-proxy on each node · [Part 00 ch.07](../00-foundations/07-local-cluster-setup.md): the kind cluster you'll "upgrade"
 **You'll know after this:** • compare kubeadm, managed (EKS/GKE/AKS), kind/k3d and Cluster API provisioning · • read the support window and a CVE advisory, then choose the patch target · • run a control-plane-then-nodes upgrade and respect the apiserver → controllers → kubelet order · • apply the version-skew policy (kubelet n-3, controllers n-1, kubectl ±1) safely · • audit deprecated APIs with a server dry-run and pluto/kubent before every upgrade · • drain a node under a PodDisruptionBudget and watch the budget refuse an eviction · • verify a release binary before it reaches a node
 
@@ -459,10 +460,12 @@ replicas, so evicting either one would break it. The eviction API says no, and
 upgrade relies on: a drain holds back rather than taking every replica down at
 once. The eviction retries are shown above, condensed with `# ...`.
 
-To let the drain finish, either lower `minAvailable` while another node can run
-the replacement, or add a worker with capacity. This lab did not run that path:
-with one schedulable worker, the replacement pod has nowhere to run while its
-own node is cordoned. Read the budget with `kubectl get pdb`, which shows how
+The drill's budget cannot be satisfied as written. With `replicas: 2` and
+`minAvailable: 2`, the budget allows no disruption at all, however much
+capacity the cluster has, so adding a worker cannot unblock this drain. Two
+changes can: lower `minAvailable`, or run three replicas so that one may be
+evicted. The lab's only worker also carries a taint, so the replacement could
+not run there either. That is a property of this lab, not the cause. Read the budget with `kubectl get pdb`, which shows how
 many disruptions the cluster currently allows:
 
 ```sh
@@ -564,15 +567,19 @@ upgrade page covers the steps for each minor, and it says that skipping minor
 versions is unsupported.
 
 ```sh
-# On the control-plane node
-kubeadm upgrade plan                 # current -> target; checks etcd, health, certs
-kubeadm certs check-expiration       # control-plane certificates and their dates
-kubeadm upgrade apply v1.NEXT.0      # upgrades the control plane components
-apt-get install -y kubelet=1.NEXT.0-* kubectl=1.NEXT.0-* && systemctl restart kubelet
+# On the first control-plane node: upgrade kubeadm, then the control plane
+apt-get install -y kubeadm=1.NEXT.0-*   # the package comes first
+kubeadm upgrade plan                    # current -> target; checks etcd, health, certs
+kubeadm certs check-expiration          # control-plane certificates and their dates
+kubeadm upgrade apply v1.NEXT.0         # upgrades the control plane components
+kubectl drain <CP-NODE> --ignore-daemonsets --delete-emptydir-data   # honors PDBs
+#   on the node: upgrade kubelet and kubectl; systemctl restart kubelet
+kubectl uncordon <CP-NODE>
 
 # Then each worker node, one at a time
+#   on the node: upgrade kubeadm; kubeadm upgrade node
 kubectl drain <NODE> --ignore-daemonsets --delete-emptydir-data   # honors PDBs
-#   on the node: kubeadm upgrade node; upgrade kubelet; systemctl restart kubelet
+#   on the node: upgrade kubelet; systemctl restart kubelet
 kubectl uncordon <NODE>
 kubectl get nodes -o wide            # the VERSION column converges node by node
 ```
@@ -649,7 +656,9 @@ namespace "p08-01-drain" deleted
   `apiserver_requested_deprecated_apis` metric. Alert on that metric
   ([Part 06 ch.01](../06-production-readiness/01-observability-metrics.md)). The
   policy sets the minimum time before removal, as the Mental model describes.
-  `kubectl convert` rewrites a manifest to a newer group version offline. The
+  The `kubectl-convert` plugin rewrites a manifest to a newer group version
+  offline. It ships separately from kubectl, so install it from the release page
+  and verify it as step 6 shows. The
   objects already in etcd are converted to the storage version on read. Your
   source manifests, Helm charts and GitOps repo are not converted, and they stop
   applying the moment a version is removed.
@@ -691,7 +700,7 @@ namespace "p08-01-drain" deleted
 > `kubent`, and watch `apiserver_requested_deprecated_apis`, before every
 > upgrade.
 > Migrate manifests, charts and GitOps sources off any soon-removed `apiVersion`
-> with `kubectl convert`. The alternative is the post-upgrade failure, where
+> with `kubectl-convert`. The alternative is the post-upgrade failure, where
 > CI's
 > apply suddenly fails with `no matches for kind`.
 
@@ -707,8 +716,9 @@ namespace "p08-01-drain" deleted
 > eviction API and therefore honors PDBs ([Part 06
 > ch.05](../06-production-readiness/05-reliability-and-disruptions.md)). The
 > Bookstore ships `84-pdb.yaml`. Without a budget, a drain can take down every
-> replica of a service at once. A budget only helps when the replacement can run
-> elsewhere, so size the budget and the spare capacity together. Use
+> replica of a service at once. A budget caps how many replicas may be down at once.
+> Replacements need room to run, and a budget with no spare replicas blocks
+> every drain, so size the budget and the replica count together. Use
 > `--ignore-daemonsets` (DaemonSet Pods are expected on every node) and budget
 > time: a PDB-blocked drain correctly waits, and it does not fail.
 
@@ -761,15 +771,16 @@ kubectl api-versions | sort                        # served group/versions now
 sed 's#policy/v1$#policy/v1beta1#' pdb.yaml > probe.yaml
 kubectl apply --dry-run=server -f probe.yaml       # a removed version is refused
 # pluto detect-files -d <DIR> ; kubent             # project tools: files and live cluster
-kubectl convert -f old.yaml --output-version apps/v1   # migrate a manifest
+kubectl-convert -f old.yaml --output-version apps/v1   # migrate a manifest (plugin)
 
 # CVE TRIAGE: compare the advisory's fixed versions with the Server Version above
 
 # Self-managed (kubeadm) minor upgrade: control plane FIRST, then nodes
+apt-get install -y kubeadm=1.NEXT.0-*             # upgrade kubeadm first
 kubeadm upgrade plan
 kubeadm certs check-expiration
 kubeadm upgrade apply v1.NEXT.0                    # apiserver, then the rest
-kubectl drain <NODE> --ignore-daemonsets --delete-emptydir-data --pod-selector app=<app>
+kubectl drain <NODE> --ignore-daemonsets --delete-emptydir-data
 kubeadm upgrade node ; systemctl restart kubelet ; kubectl uncordon <NODE>
 
 # Verify a release binary before it runs (cosign, from the release page)
@@ -802,7 +813,7 @@ Checklist:
       each advisory's fixed version recorded
 - [ ] **Deprecated-API audit done BEFORE the upgrade** (`pluto`/`kubent`,
       `apiserver_requested_deprecated_apis`, a server dry run); manifests,
-      charts and GitOps sources off removed `apiVersion`s (`kubectl convert`)
+      charts and GitOps sources off removed `apiVersion`s (`kubectl-convert`)
 - [ ] Upgrade **one minor at a time**; **apiserver first**, then
       controller-manager and scheduler (n-1), then kubelets
       (n-3, **never ahead**)

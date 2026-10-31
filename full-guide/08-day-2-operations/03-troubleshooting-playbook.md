@@ -13,6 +13,7 @@
 > with the method, and **reverts each** so the cluster returns to known-good.
 
 **Estimated time:** ~30 min read · ~90 min hands-on
+**Lab tier:** A (kind). Run this chapter's commands only against a kind cluster you own.
 **Prerequisites:** [Part 01 ch.02](../01-core-workloads/02-health-and-lifecycle.md): probes and lifecycle as the failure signal · [Part 06 ch.01](../06-production-readiness/01-observability-metrics.md): alerts are the trigger, and this chapter is the response · [Part 02 ch.06](../02-networking/06-network-policies.md): NetworkPolicy is one symptom in the decision tree
 **You'll know after this:** • run the observe → isolate → hypothesize → test → fix loop on a live failure · • read events, logs and `describe` output to diagnose Pending / ImagePullBackOff / CrashLoopBackOff / OOMKilled · • use `kubectl debug` ephemeral containers against distroless images without relaxing the namespace · • diagnose readiness-fail, NetworkPolicy block, PSA rejection and DNS failure separately · • explain what node-level debugging grants, and where it may run · • induce three Bookstore failures, fix each with the method, and revert to known-good
 
@@ -90,9 +91,10 @@ is how you get a shell when the container has none.**
 - **The Pod supplies part of the answer.** The catalog Pod sets
   `runAsNonRoot: true` and `runAsUser: 65532` at pod level
   ([the baseline, field by field](../01-core-workloads/01-pods.md#baseline)).
-  A container that sets no UID of its own inherits the pod-level UID, so a
-  debug container in the catalog Pod runs as 65532 even when its image, here
-  busybox, runs as root. Where a Pod has no pod-level `runAsUser`, the debug
+  A container that sets no UID of its own inherits the pod-level UID
+  ([Kubernetes security context](https://kubernetes.io/docs/tasks/configure-pod-container/security-context/)),
+  so a debug container in the catalog Pod runs as 65532 even when its image,
+  here busybox, runs as root. Where a Pod has no pod-level `runAsUser`, the debug
   container needs its own non-zero `runAsUser`, set with `--custom` (section 2).
 
 The trap to internalise: **`kubectl exec catalog -- sh` is the wrong reflex in
@@ -111,8 +113,8 @@ control this chapter teaches and where the topic goes deeper.
 |---|---|---|
 | Relaxing the namespace's Pod Security level to get a debug step through | Never relax `bookstore`. Debug under `restricted` with a restricted-shaped container, or copy the Pod inside the same namespace | [Part 05 ch.02](../05-security/02-pod-security.md) |
 | A debug container that runs as root, keeps capabilities or joins host namespaces | Restricted profile and the Pod's inherited UID; other profiles are for namespaces that register them | section 2 below |
-| Reading another container's memory and environment through the shared process namespace | The debug container runs as the target's UID with no added capabilities, so the kernel refuses other reads | section 2 below |
-| `pods/exec` and `pods/ephemeralcontainers` as hidden privilege | Grant both by RBAC to on-call only, and audit them (ephemeral containers are not logged unless the policy names them) | [Part 05 ch.01](../05-security/01-authn-authz-rbac.md); Part 05 ch.08 (audit) <!-- link-later: 05.08 --> |
+| A same-UID debug container reads the target's environment, which holds `DB_DSN` | `--target` shares the process view, so the debug container can read the target's environment. Only on-call gets `pods/ephemeralcontainers`, and each session is audited. Section 3 shows the read | section 3 below |
+| `pods/exec` and `pods/ephemeralcontainers` as hidden privilege | Grant both by RBAC to on-call only, and check that the workload's ServiceAccount has neither (section 2) | [Part 05 ch.01](../05-security/01-authn-authz-rbac.md); Part 05 ch.08 (audit) <!-- link-later: 05.08 --> |
 
 Node-level debugging has its own threat, a Pod that reaches the host itself.
 It is covered in the section on node-level debugging below.
@@ -210,34 +212,36 @@ flowchart TD
    ✓ kubectl debug -n bookstore <POD> --image=<DBG> --profile=restricted \
        --target=catalog -c debug -- sleep 3600     (ephemeral container)
    ✓ kubectl exec -it -n bookstore <POD> -c debug -- sh
-   ✓ kubectl debug -n bookstore <POD> --copy-to=dbg --set-image=catalog=<DBG>
+   ✓ kubectl debug -n bookstore <POD> --copy-to=<COPY-NAME> --set-image=catalog=<DBG>
        --profile=restricted                        (debug a COPY, same namespace)
-   ✓ kubectl debug node/<NODE> --profile=sysadmin  (node-level: see section
-       "Node-level debugging" before you run this; it is not a shell tool)
+   ✓ kubectl debug node/<NODE> -n node-debug --profile=sysadmin
+       (registered privileged namespace only; see "Node-level debugging")
 ```
 
 ## Hands-on with the Bookstore
 
 **Assumed working directory: the guide repo root (`full-guide/`).** This
-chapter adds **no** manifests. It induces failures in the **live** Bookstore
-using `kubectl set image` / `kubectl patch` / `kubectl set env`, diagnoses each
-with the method, and **reverts each** so the cluster is returned to known-good.
-It never edits `raw-manifests/*`, which stay the known-good source of truth.
+chapter adds no manifests to `examples/bookstore/raw-manifests/`. It induces
+failures in the live Bookstore with `kubectl set image`, `kubectl patch` and
+`kubectl set env`, diagnoses each with the method, and reverts each one.
 
 > **Discipline note (read this first).** Every induced failure below is applied
 > with an *imperative* command, and every one shows its **exact revert**. No
 > file under `examples/bookstore/` is modified. After the chapter the Bookstore
 > is the canonical app again, checked by a final `kubectl rollout status`.
 
-> **Illustrative output.** The output shown in the steps below is illustrative.
-> It has not been captured in a lab transcript yet. The commands are the ones
-> to run. Where a step's output decides the lesson, check your own output
-> against the description in the prose.
+> **About the output.** Each output block is from a lab run of this chapter's
+> steps, on a kind cluster whose name differs from `bookstore`. The node name in
+> the output is the lab's. The lab ran in its own namespace, so the commands
+> below use the reader's names and the output does not. A line that names the
+> lab namespace is left out of its block, and a line that reads `# ...` marks
+> each gap. Pod name suffixes differ on every run. The transcript is committed
+> at `full-guide/examples/security-lab/evidence/08-03.txt`.
 
 ### 0. Prerequisites: a cluster you own and the catalog's dependencies
 
-Create a kind cluster you own (tier A; run this only against clusters you
-own), build the catalog image, and load it:
+Create a kind cluster you own (tier A; run this only against a cluster you own),
+build the catalog image, and load it:
 
 ```sh
 kind delete cluster --name bookstore 2>/dev/null || true
@@ -281,7 +285,26 @@ payments-worker, RabbitMQ) are not needed for these failures, so this chapter
 does not apply them.
 
 The `bookstore` namespace is labelled `pod-security.kubernetes.io/enforce:
-restricted` in `00-namespace.yaml`. Every workload above passes that label.
+restricted` in `00-namespace.yaml`. Every workload above passes that label. The
+rollout of the catalog and its listing in the lab looked like this:
+
+<!-- gate: output -->
+```text
+deployment.apps/catalog created
+# ...
+Waiting for deployment "catalog" rollout to finish: 0 of 3 updated replicas are available...
+Waiting for deployment "catalog" rollout to finish: 1 of 3 updated replicas are available...
+Waiting for deployment "catalog" rollout to finish: 2 of 3 updated replicas are available...
+deployment "catalog" successfully rolled out
+# ...
+NAME                       READY   STATUS      RESTARTS   AGE
+catalog-75d4db6d88-5fl4x   1/1     Running     0          7s
+catalog-75d4db6d88-7dfb9   1/1     Running     0          7s
+catalog-75d4db6d88-hw7w4   1/1     Running     0          7s
+db-migrate-h4c2p           0/1     Completed   0          20s
+postgres-0                 1/1     Running     0          49s
+redis-574bb544f-8dzlq      1/1     Running     0          49s
+```
 
 ### 1. The distroless reality check
 
@@ -290,19 +313,27 @@ debug`:
 
 ```sh
 kubectl exec -n bookstore deploy/catalog -- sh
-# exec: "sh": executable file not found in $PATH
-# catalog is distroless (gcr.io/distroless/static:nonroot, Part 00 ch.02):
-# NO shell, NO coreutils, NO package manager. `exec ... sh` CANNOT work here.
 kubectl exec -n bookstore statefulset/postgres -- sh -c 'echo postgres has a shell'
-# postgres has a shell  ← the official postgres image is not distroless, so
-#   exec sh works there. The Bookstore is mixed: know which containers are which.
 ```
+
+The lab ran the same two commands and printed:
+
+<!-- gate: output -->
+```text
+error: Internal error occurred: Internal error occurred: error executing command in container: failed to exec in container: failed to start exec "ccc6268df62cdfbb627438b7b2ab53ba88831f0de085435efb8e4b10e12933ab": OCI runtime exec failed: exec failed: unable to start container process: exec: "sh": executable file not found in $PATH
+# ...
+postgres has a shell
+```
+
+`catalog` is distroless (`gcr.io/distroless/static:nonroot`, Part 00 ch.02): it
+has no shell, no coreutils and no package manager, so `exec ... sh` cannot run
+there. The official postgres image is not distroless, so `exec sh` works on it.
+The Bookstore is mixed, so know which container is which.
 
 The primitive that works on the distroless services is an **ephemeral
 container**. It needs a tool image, and the tool image must run as a non-root
 user under the restricted rules. This chapter uses busybox, pinned by digest.
-The digest was read from the image store of a lab cluster node and must be
-checked against the tag before you rely on it:
+Check the digest against the registry before you rely on it:
 
 ```sh
 DBG='busybox:1.36@sha256:73aaf090f3d85aa34ee199857f03fa3a95c8ede2ffd4cc2cdb5b94e566b11662'
@@ -312,39 +343,18 @@ kubectl debug -n bookstore "$POD" --image="$DBG" --profile=restricted \
 kubectl exec -it -n bookstore "$POD" -c debug -- sh
 ```
 
-Inside the shell, these work because busybox ships the applets:
-`wget -qO- http://localhost:8080/healthz` (the debug container shares the Pod's
-network namespace, so `localhost` is the catalog), `nslookup postgres` and
+Inside the shell, busybox ships the applets: `wget -qO-
+http://localhost:8080/healthz` (the debug container shares the Pod's network
+namespace, so `localhost` is the catalog), `nslookup postgres` and
 `nc -vz postgres 5432`, and `ps` (the process namespace is shared, so the
 catalog is PID 1). `--target=catalog` joins the catalog's process namespace.
-Exit the shell; the ephemeral container stays in the Pod's spec until the Pod
-is replaced, because ephemeral containers cannot be removed. Check it is there:
+Exit the shell. The ephemeral container stays in the Pod's spec until the Pod is
+replaced, because ephemeral containers cannot be removed:
 
 ```sh
 kubectl get pod -n bookstore "$POD" \
   -o jsonpath='{range .spec.ephemeralContainers[*]}{.name}{"\n"}{end}'
 ```
-
-Confirm the UID the debug container runs as. Pod-level `runAsUser: 65532`
-applies unless the container sets its own:
-
-```sh
-kubectl exec -n bookstore "$POD" -c debug -- id -u                      # 65532
-kubectl exec -n bookstore "$POD" -c debug -- sh -c \
-  "tr '\0' '\n' < /proc/1/environ | grep -c '^DB_DSN='"                  # 1
-```
-
-The second check prints the count of `DB_DSN` entries in the catalog's
-environment and never prints a value. It works only because the debug container
-runs as the catalog's UID. Linux lets a process read another process's
-environment only when it owns that process or holds `CAP_SYS_PTRACE`
-([proc(5)](https://man7.org/linux/man-pages/man5/proc.5.html)); the debug
-container has every capability dropped.
-
-> **Why not `--image=busybox` with no profile.** A bare debug container sets
-> none of the fields the restricted table asks for. Admission is expected to
-> refuse it in `bookstore`, and the error names the control that failed. Read
-> the error; do not reach for a weaker namespace.
 
 ### 2. Debug profiles and what a restricted namespace admits
 
@@ -355,7 +365,7 @@ sixth, `legacy`, as the profile used when `--profile` is omitted, and calls it
 planned for deprecation. Run `kubectl debug --help` on your own kubectl version
 to see the default it reports.
 
-| Profile | Upstream description (paraphrased) | Expected in a `restricted` namespace |
+| Profile | Upstream description (paraphrased) | Result in a `restricted` namespace |
 |---|---|---|
 | `general` | A reasonable set of generic properties | Refused: the restricted controls are not all set |
 | `baseline` | Compatible with the baseline standard | Refused: baseline is weaker than restricted |
@@ -363,26 +373,50 @@ to see the default it reports.
 | `netadmin` | Includes network administrator privileges | Refused: adds capabilities beyond the restricted set |
 | `sysadmin` | Includes system administrator (root) privileges | Refused: privileged, so it fails every restricted control |
 
-The "expected" column follows from the restricted rules (cited in the Mental
-model), not from a captured run. The upstream pages do not list the exact fields
-each profile sets, so read the container back after you add it, rather than
-trusting the table:
+The upstream pages do not list the exact fields each profile sets, so read the
+container back after you add it, rather than trusting the table. Run every
+profile against the catalog Pod:
 
 ```sh
 for p in general baseline restricted netadmin sysadmin; do
   kubectl debug -n bookstore "$POD" --image="$DBG" --profile="$p" \
     -c "dbg-$p" --target=catalog -- sleep 600
 done
-kubectl get pod -n bookstore "$POD" \
-  -o jsonpath='{range .spec.ephemeralContainers[*]}{.name}{"\n"}{end}'
+kubectl describe pod -n bookstore "$POD" | sed -n '/^Ephemeral Containers:/,/^Conditions:/p'
 ```
 
-Each refused attempt returns an admission error from the API server. The
-message names the Pod Security control the container failed, for example that
-`allowPrivilegeEscalation` is not `false`, or that capabilities are not dropped.
-An attempt that is admitted leaves a container behind. Check that the pod's
-ephemeral containers are the ones you expect, and remove nothing; delete the
-Pod's namespace or replace the Pod to clear them.
+The lab ran the loop and the describe, filtered to the container names and
+states. The four refused attempts are deliberate: the loop asks for them, to
+show what the namespace admits. Each refusal returned an admission error from
+the API server.
+The message names the Pod Security control that failed:
+
+<!-- gate: output -->
+```text
+Targeting container "catalog". If you don't see processes from this container it may be because the container runtime doesn't support this feature.
+Warning: Non-root user is configured for the entire target Pod, and some capabilities granted by debug profile may not work. Please consider using "--custom" with a custom profile that specifies "securityContext.runAsUser: 0".
+Error from server (Forbidden): pods "catalog-75d4db6d88-5fl4x" is forbidden: violates PodSecurity "restricted:latest": allowPrivilegeEscalation != false (container "dbg-general" must set securityContext.allowPrivilegeEscalation=false), unrestricted capabilities (container "dbg-general" must set securityContext.capabilities.drop=["ALL"]; container "dbg-general" must not include "SYS_PTRACE" in securityContext.capabilities.add)
+# ...
+Targeting container "catalog". If you don't see processes from this container it may be because the container runtime doesn't support this feature.
+Error from server (Forbidden): pods "catalog-75d4db6d88-5fl4x" is forbidden: violates PodSecurity "restricted:latest": allowPrivilegeEscalation != false (container "dbg-baseline" must set securityContext.allowPrivilegeEscalation=false), unrestricted capabilities (container "dbg-baseline" must set securityContext.capabilities.drop=["ALL"])
+# ...
+Targeting container "catalog". If you don't see processes from this container it may be because the container runtime doesn't support this feature.
+# ...
+Targeting container "catalog". If you don't see processes from this container it may be because the container runtime doesn't support this feature.
+Warning: Non-root user is configured for the entire target Pod, and some capabilities granted by debug profile may not work. Please consider using "--custom" with a custom profile that specifies "securityContext.runAsUser: 0".
+Error from server (Forbidden): pods "catalog-75d4db6d88-5fl4x" is forbidden: violates PodSecurity "restricted:latest": allowPrivilegeEscalation != false (container "dbg-netadmin" must set securityContext.allowPrivilegeEscalation=false), unrestricted capabilities (container "dbg-netadmin" must set securityContext.capabilities.drop=["ALL"]; container "dbg-netadmin" must not include "NET_ADMIN", "NET_RAW" in securityContext.capabilities.add)
+# ...
+Targeting container "catalog". If you don't see processes from this container it may be because the container runtime doesn't support this feature.
+Warning: Non-root user is configured for the entire target Pod, and some capabilities granted by debug profile may not work. Please consider using "--custom" with a custom profile that specifies "securityContext.runAsUser: 0".
+Error from server (Forbidden): pods "catalog-75d4db6d88-5fl4x" is forbidden: violates PodSecurity "restricted:latest": privileged (container "dbg-sysadmin" must not set securityContext.privileged=true), allowPrivilegeEscalation != false (container "dbg-sysadmin" must set securityContext.allowPrivilegeEscalation=false), unrestricted capabilities (container "dbg-sysadmin" must set securityContext.capabilities.drop=["ALL"])
+# ...
+  dbg-restricted:
+    State:          Running
+```
+
+Only `dbg-restricted` was admitted, and it is running. The other four never
+reached the Pod's spec, so they left nothing behind. The admission message is
+the check: read it, and do not reach for a weaker namespace.
 
 > **Admitted is not the same as running.** The API server checks the security
 > fields. The kubelet then checks the image user at start-up. The catalog Pod
@@ -401,22 +435,88 @@ Pod's namespace or replace the Pod to clear them.
 > Check that the merged container still carries the restricted fields, by
 > reading `spec.ephemeralContainers` back with `kubectl get pod -o yaml`.
 > A merge that drops them would be refused, so the read-back is the proof.
+> Section 3 runs this merge and reads the result.
 
 When you need to change the debug container's command, not just look at the
 process, use a copy. `--copy-to` creates a new Pod **in the same namespace**, so
 the copy is held to the same rules as the original:
 
 ```sh
-kubectl debug -n bookstore "$POD" --copy-to=catalog-debug \
+kubectl debug -n bookstore "$POD" --copy-to=<COPY-NAME> \
   --set-image=catalog="$DBG" --profile=restricted -- sleep 600
-kubectl delete pod -n bookstore catalog-debug
+kubectl delete pod -n bookstore <COPY-NAME>
 ```
 
-The copy inherits the catalog Pod's pod-level securityContext, so its busybox
-container runs as 65532 for the same reason the ephemeral container does. Delete
-the copy when you finish, since it is a second Pod that holds the same Secrets.
+Replace `<COPY-NAME>` with a name of your choosing. The copy inherits the
+catalog Pod's pod-level securityContext, so its busybox container runs as 65532
+for the same reason the ephemeral container does. Delete the copy when you
+finish, since it is a second Pod that holds the same Secrets.
 
-### 3. Induced failure A: ImagePullBackOff (and its revert)
+**Who may add an ephemeral container.** Adding one is a permission, and so is
+`exec`. Check that the workload's own ServiceAccount has neither. The lab ran
+both checks against the `catalog-sa` identity:
+
+```sh
+kubectl auth can-i create pods --subresource=ephemeralcontainers -n bookstore \
+  --as=system:serviceaccount:bookstore:catalog-sa
+kubectl auth can-i create pods --subresource=exec -n bookstore \
+  --as=system:serviceaccount:bookstore:catalog-sa
+```
+
+<!-- gate: output -->
+```text
+no
+# ...
+no
+```
+
+Both answers are `no`, as they should be. On-call people get the two
+subresources through a Role you write for them, and that Role is the control
+the Threats table names.
+
+### 3. A same-UID debug container can read the target's environment
+
+The merge from section 2 gives the debug container an explicit UID, and the
+catalog process runs as the same UID. Run the merge, then read the container
+back:
+
+```sh
+printf '%s\n' '{"securityContext":{"runAsUser":65532}}' > debug-uid.json
+kubectl debug -n bookstore "$POD" --image="$DBG" --profile=restricted \
+  --custom=debug-uid.json -c debug-uid --target=catalog -- sleep 600
+rm -f debug-uid.json
+kubectl exec -n bookstore "$POD" -c debug-uid -- sh -c 'id -u; wget -qO- http://localhost:8080/healthz; echo; tr "\0" " " < /proc/1/cmdline; echo; tr "\0" "\n" < /proc/1/environ | grep -c "^DB_DSN="'
+```
+
+The lab ran the same commands and printed:
+
+<!-- gate: output -->
+```text
+Targeting container "catalog". If you don't see processes from this container it may be because the container runtime doesn't support this feature.
+# ...
+65532
+{"status":"ok"}
+/catalog
+1
+```
+
+The first line is the UID, 65532, the same as the catalog process. The health
+check answers, and the command line shows the catalog's binary. The last line
+counts the `DB_DSN` entries in the catalog's environment. It prints a count and
+never a value, and here the count is 1. The debug container read the target's
+environment.
+
+That is the control, and it is weaker than the Threats table first implied. A
+process may read the environment of a process with the same UID, and the
+debug container has the same UID, so the kernel allows the read. Dropping every
+capability does not stop it, because owning the process is enough
+([proc(5)](https://man7.org/linux/man-pages/man5/proc.5.html)). `DB_DSN` is built
+from the `db-credentials` Secret in `10-catalog-deploy.yaml`, so it carries the
+database password. A debug session on the catalog therefore reads a secret.
+That is why the RBAC in section 2 matters, and why each session is an audit
+event.
+
+### 4. Induced failure A: ImagePullBackOff (and its revert)
 
 ```sh
 # DELIBERATE FAILURE: point catalog at a tag that does not exist.
@@ -425,23 +525,53 @@ kubectl set image deploy/catalog catalog=bookstore/catalog:nonexistent -n bookst
 # DIAGNOSE (method: observe, then describe and Events; no logs, the container never ran):
 kubectl get pods -n bookstore -l app=catalog     # the new Pod: ImagePullBackOff
 kubectl describe pod -n bookstore -l app=catalog | sed -n '/^Events:/,$p'
-#   Failed to pull image "bookstore/catalog:nonexistent": ... not found
-#   → cause: an image reference the registry cannot serve. In real life a typo,
-#     a missing tag, or a missing imagePullSecret. Events, not logs, because the
-#     container never started.
 
 # REVERT (back to the canonical image, known-good):
 kubectl set image deploy/catalog catalog=bookstore/catalog:dev -n bookstore
 kubectl rollout status deploy/catalog -n bookstore
 ```
 
+The lab ran the failure, the diagnosis and the revert, and printed:
+
+<!-- gate: output -->
+```text
+deployment.apps/catalog image updated
+# ...
+Waiting for deployment "catalog" rollout to finish: 1 out of 3 new replicas have been updated...
+error: timed out waiting for the condition
+# ...
+NAME                       READY   STATUS             RESTARTS   AGE
+catalog-59fd579fb-rsj8p    0/1     ImagePullBackOff   0          60s
+catalog-75d4db6d88-5fl4x   1/1     Running            0          76s
+catalog-75d4db6d88-7dfb9   1/1     Running            0          76s
+catalog-75d4db6d88-hw7w4   1/1     Running            0          76s
+# ...
+Events:
+  Type     Reason     Age                From               Message
+  ----     ------     ----               ----               -------
+# ...
+  Normal   BackOff    23s (x2 over 55s)  kubelet            spec.containers{catalog}: Back-off pulling image "bookstore/catalog:nonexistent"
+  Warning  Failed     23s (x2 over 55s)  kubelet            spec.containers{catalog}: Error: ImagePullBackOff
+  Normal   Pulling    10s (x3 over 58s)  kubelet            spec.containers{catalog}: Pulling image "bookstore/catalog:nonexistent"
+  Warning  Failed     8s (x3 over 56s)   kubelet            spec.containers{catalog}: Failed to pull image "bookstore/catalog:nonexistent": failed to pull and unpack image "docker.io/bookstore/catalog:nonexistent": failed to resolve reference "docker.io/bookstore/catalog:nonexistent": pull access denied, repository does not exist or may require authorization: server message: insufficient_scope: authorization failed
+  Warning  Failed     8s (x3 over 56s)   kubelet            spec.containers{catalog}: Error: ErrImagePull
+# ...
+deployment.apps/catalog image updated
+# ...
+deployment "catalog" successfully rolled out
+```
+
+The cause is an image reference the registry cannot serve. In real life it is a
+typo, a missing tag or a missing `imagePullSecret`. The Events explain it, not
+the logs, because the container never started.
+
 Notice what did not happen. With `maxUnavailable: 0` in
 `10-catalog-deploy.yaml`, the Deployment keeps the old Ready Pods serving and
 creates the new Pod one at a time. The rollout stalls and the old Pods keep
 the Service's Endpoints. The failure shows as a stuck rollout, not as an
-outage.
+outage. The three old Pods above stayed `Running`.
 
-### 4. Induced failure B: CrashLoopBackOff from a malformed DSN (and its revert)
+### 5. Induced failure B: CrashLoopBackOff from a malformed DSN (and its revert)
 
 Catalog reads `DB_DSN` once, at start-up. In `app/catalog/main.go`,
 `pgxpool.New` parses the DSN and the process exits with status 1 if parsing
@@ -458,14 +588,39 @@ kubectl get pods -n bookstore -l app=catalog     # the new Pod: CrashLoopBackOff
 CRASH=$(kubectl get pods -n bookstore -l app=catalog \
   -o jsonpath='{.items[?(@.status.containerStatuses[0].restartCount>0)].metadata.name}' | awk '{print $1}')
 kubectl logs -n bookstore "$CRASH" --previous --tail=5
-#   the "connect postgres" error from main.go, followed by the process exit
-#   → cause: configuration the app rejects at start-up. --previous shows the
-#     last crashed container, which is the one with the error.
 
 # REVERT: re-apply the canonical Deployment, which restores DB_DSN from the manifest.
 kubectl apply -f examples/bookstore/raw-manifests/10-catalog-deploy.yaml
 kubectl rollout status deploy/catalog -n bookstore
 ```
+
+The lab ran the same steps and printed:
+
+<!-- gate: output -->
+```text
+deployment.apps/catalog env updated
+# ...
+Waiting for deployment "catalog" rollout to finish: 1 out of 3 new replicas have been updated...
+Waiting for deployment "catalog" rollout to finish: 1 out of 3 new replicas have been updated...
+error: timed out waiting for the condition
+# ...
+NAME                       READY   STATUS             RESTARTS      AGE
+catalog-75d4db6d88-5fl4x   1/1     Running            0             2m18s
+catalog-75d4db6d88-7dfb9   1/1     Running            0             2m18s
+catalog-75d4db6d88-hw7w4   1/1     Running            0             2m18s
+catalog-7988d6fc7-9mm46    0/1     CrashLoopBackOff   3 (21s ago)   61s
+# ...
+deployment.apps/catalog configured
+# ...
+deployment "catalog" successfully rolled out
+```
+
+The `--previous` log holds one JSON line from the crashed container. Its message
+is the parser's complaint: the DSN cannot be parsed because `sslmode` is invalid.
+That line names the database host, so the lab's copy is left out of the block
+above. Its last clause reads `failed to configure TLS (sslmode is invalid)`.
+That is the cause, a configuration the app rejects at start-up. `--previous`
+shows the crashed container, which is the one that holds the error.
 
 The revert is an `apply`, not `kubectl set env DB_DSN-`. Removing the variable
 with `set env` deletes it from the live Deployment and does not bring back the
@@ -477,7 +632,7 @@ crash catalog: `pgxpool.New` connects lazily, so the process starts, and
 `/readyz` reports the database as unavailable. A readiness failure looks
 different from a crash, and the next section shows it.
 
-### 5. Induced failure C: readiness fails, and the Endpoints tell the rest
+### 6. Induced failure C: readiness fails, and the Endpoints tell the rest
 
 ```sh
 # DELIBERATE FAILURE: point the readiness probe at a path the app does not serve.
@@ -487,46 +642,69 @@ kubectl patch deploy/catalog -n bookstore --type=json -p='[
 # DIAGNOSE (method: Running but not Ready, then describe the probe, then Endpoints):
 kubectl get pods -n bookstore -l app=catalog     # one new Pod 0/1 READY; old Pods 1/1
 kubectl describe pod -n bookstore -l app=catalog | sed -n '/^Events:/,$p'
-#   Readiness probe failed: HTTP probe failed with statuscode: 404
 kubectl get endpoints catalog -n bookstore       # still lists the old, Ready Pods
-```
 
-The old Pods are still Ready, so they stay in the Service's Endpoints. The
-Deployment's `maxUnavailable: 0` keeps them serving while the new Pod sits at
-0/1. That is the protection working: a bad probe on a rolling update stalls the
-rollout and leaves traffic where it was. A Service with *no* Endpoints needs a
-different cause, which is the next case: every Pod that matches the selector is
-not Ready, or the selector matches no Pod (a label mismatch). Check both with
-`kubectl get pods --show-labels` and the Service selector.
-
-```sh
 # REVERT: restore the canonical readiness path, which the app serves.
 kubectl patch deploy/catalog -n bookstore --type=json -p='[
   {"op":"replace","path":"/spec/template/spec/containers/0/readinessProbe/httpGet/path","value":"/readyz"}]'
 kubectl rollout status deploy/catalog -n bookstore
 ```
 
+The lab ran the same steps and printed:
+
+<!-- gate: output -->
+```text
+deployment.apps/catalog patched
+# ...
+Waiting for deployment "catalog" rollout to finish: 1 out of 3 new replicas have been updated...
+Waiting for deployment "catalog" rollout to finish: 1 out of 3 new replicas have been updated...
+error: timed out waiting for the condition
+# ...
+NAME                       READY   STATUS    RESTARTS   AGE
+catalog-5d686cd8b-jwfxp    0/1     Running   0          60s
+catalog-75d4db6d88-5fl4x   1/1     Running   0          3m19s
+catalog-75d4db6d88-7dfb9   1/1     Running   0          3m19s
+catalog-75d4db6d88-hw7w4   1/1     Running   0          3m19s
+# ...
+Warning: v1 Endpoints is deprecated in v1.33+; use discovery.k8s.io/v1 EndpointSlice
+NAME      ENDPOINTS                                            AGE
+catalog   10.244.0.35:8080,10.244.0.36:8080,10.244.0.37:8080   4m
+# ...
+Events:
+  Type     Reason     Age                From               Message
+  ----     ------     ----               ----               -------
+# ...
+  Normal   Pulled     59s                kubelet            spec.containers{catalog}: Container image "bookstore/catalog:dev" already present on machine and can be accessed by the pod
+  Normal   Created    59s                kubelet            spec.containers{catalog}: Container created
+  Normal   Started    58s                kubelet            spec.containers{catalog}: Container started
+  Warning  Unhealthy  5s (x11 over 55s)  kubelet            spec.containers{catalog}: Readiness probe failed: HTTP probe failed with statuscode: 404
+# ...
+deployment.apps/catalog patched
+# ...
+deployment "catalog" successfully rolled out
+```
+
+The old Pods are still Ready, so they stay in the Service's Endpoints. The
+Deployment's `maxUnavailable: 0` keeps them serving while the new Pod sits at
+0/1. That is the protection working: a bad probe on a rolling update stalls the
+rollout and leaves traffic where it was. A Service with *no* Endpoints needs a
+different cause: every Pod that matches the selector is not Ready, or the
+selector matches no Pod at all (a label mismatch). Check both with
+`kubectl get pods --show-labels` and the Service selector.
+
 > **Bonus branch: NetworkPolicy block ([Part 02
 > ch.06](../02-networking/06-network-policies.md)).** With
 > `60-networkpolicy.yaml` applied, omitting the DNS-egress allow (or a
 > one-sided app allow) presents as "name resolution failed" or "connection
 > timed out" with healthy Pods and correct Endpoints. That pattern is the tell
-> that the network layer is the cause. Diagnose from a debug container in the
-> same Pod:
->
-> ```sh kubectl debug -n bookstore "$POD" --image="$DBG" --profile=restricted
-> -c netcheck --target=catalog -- sleep 600 kubectl exec -n bookstore "$POD"
-> -c netcheck -- nslookup postgres     # fails → DNS egress denied kubectl
-> exec -n bookstore "$POD" -c netcheck -- nc -vz postgres 5432  # DNS ok, this
-> fails → an allow is missing ```
->
-> NetworkPolicy needs the allow on **both** ends. Revert by re-applying the
-> whole `60-networkpolicy.yaml`, which is the whitelist-correct file. A
-> default kind CNI does not enforce NetworkPolicy, so this branch is only
-> visible on a policy-enforcing CNI ([Part 02
-> ch.06](../02-networking/06-network-policies.md)).
+> that the network layer is the cause. The lab did not induce this branch. The
+> kind cluster in [Part 00 ch.07](../00-foundations/07-local-cluster-setup.md)
+> enforces NetworkPolicy and shows a denied request there, so the branch can be
+> reproduced on that cluster. NetworkPolicy needs the allow on **both** ends.
+> Revert by re-applying the whole `60-networkpolicy.yaml`, which is the
+> whitelist-correct file.
 
-### 6. OOMKilled: diagnosed, not induced
+### 7. OOMKilled: diagnosed, not induced
 
 This chapter does not induce OOMKilled. The bookstore LimitRange sets a 16Mi
 floor on memory requests and limits (`00-namespace.yaml`), so a throwaway copy
@@ -542,18 +720,35 @@ Exit 137 is 128 + SIGKILL, the kernel's OOM killer reaping a container over its
 memory limit. The fix is to raise the limit to the real working set, which
 [Part 01 ch.03](../01-core-workloads/03-resources-and-qos.md) explains.
 
-### 7. Verify the cluster is back to known-good (the discipline check)
+### 8. Verify the cluster is back to known-good (the discipline check)
 
 ```sh
 kubectl rollout status deploy/catalog -n bookstore
 kubectl get pods -n bookstore                    # all Running and Ready, as in step 0
 kubectl get deploy catalog -n bookstore -o jsonpath='{.spec.template.spec.containers[0].image}{"\n"}'
 #   bookstore/catalog:dev   ← reverted; NO canonical manifest was ever edited
-git status --porcelain examples/bookstore/ 2>/dev/null || \
-  echo "examples/bookstore/ unchanged (induced failures were imperative only)"
+git status --porcelain -- examples/bookstore/    # prints nothing when no file changed
 kind delete cluster --name bookstore
 ```
 
+The lab ran the first three commands after its reverts and printed:
+
+<!-- gate: output -->
+```text
+NAME                       READY   STATUS        RESTARTS   AGE
+catalog-5d686cd8b-jwfxp    0/1     Terminating   0          63s
+catalog-75d4db6d88-5fl4x   1/1     Running       0          3m22s
+catalog-75d4db6d88-7dfb9   1/1     Running       0          3m22s
+catalog-75d4db6d88-hw7w4   1/1     Running       0          3m22s
+db-migrate-h4c2p           0/1     Completed     0          3m35s
+postgres-0                 1/1     Running       0          4m4s
+redis-574bb544f-8dzlq      1/1     Running       0          4m4s
+# ...
+bookstore/catalog:dev
+```
+
+The git check prints nothing when no file under `examples/bookstore/` changed.
+Any line it prints names a file that an imperative step should not have touched.
 Ephemeral containers are removed only when their Pod goes, so a Pod you debugged
 keeps them until its ReplicaSet replaces it or the cluster is deleted.
 
@@ -570,21 +765,87 @@ Treat that as what it is. The Pod reads the host filesystem and the processes
 of every container on the node, and the node's own credentials sit on that
 filesystem. A user who can create that Pod has root-equivalent access to the
 node and to every workload scheduled there, which is more than any single
-workload's Secret. That is why:
+workload's Secret. That is why the Pod runs only in a namespace you register,
+and never in `bookstore` or `default`.
 
-- The Pod must run in a namespace that admits host access, and the namespace
-  must be one you register in the exceptions registry
-  (`security/namespace-exceptions.yaml`) with a reason and an expiry. Never
-  relax `bookstore` for it. A `restricted` namespace refuses host namespaces and
-  `hostPath` volumes, so the node Pod cannot be created there at all, which is
-  the control working.
-- Grant `pods/create` for that namespace to on-call only, and treat each use
-  as a breakglass event ([Part 15
+The namespace is a dedicated one, named `node-debug`, that holds nothing but
+node debugger Pods. Its Pod Security labels are the privileged level for
+enforce, and `restricted` for audit and warn, so anything beyond the node
+debugger still shows up as a warning:
+
+```yaml
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: node-debug
+  labels:
+    pod-security.kubernetes.io/enforce: privileged
+    pod-security.kubernetes.io/enforce-version: latest
+    pod-security.kubernetes.io/audit: restricted
+    pod-security.kubernetes.io/audit-version: latest
+    pod-security.kubernetes.io/warn: restricted
+    pod-security.kubernetes.io/warn-version: latest
+```
+
+The exception is registered in `security/namespace-exceptions.yaml` as
+`node-debug`, with its reason, the Pod Security standard it relies on, this
+chapter and an expiry date. Apply the namespace, then run the node debugger in
+it. Name the namespace on every node-debug command, because the Pod lands in the
+current namespace otherwise, and the current namespace is `default` unless you
+changed it.
+
+First, the same Pod in `bookstore`, which must be refused. The lab used the node
+of its own cluster, so the node name below is the lab's:
+
+```sh
+NODE=$(kubectl get nodes -o jsonpath='{.items[0].metadata.name}')
+kubectl debug node/$NODE -n bookstore --profile=sysadmin --image="$DBG"
+```
+
+Then the registered namespace, where the same Pod is admitted:
+
+```sh
+kubectl apply -f node-debug-namespace.yaml     # the manifest above
+kubectl debug node/$NODE -n node-debug --profile=sysadmin --image="$DBG"
+kubectl get pods -n node-debug -o wide
+kubectl get pod <NODE-DEBUGGER-POD> -n node-debug \
+  -o jsonpath='hostPID={.spec.hostPID} hostNetwork={.spec.hostNetwork} hostIPC={.spec.hostIPC} node={.spec.nodeName}'
+```
+
+The lab ran these commands in order and printed:
+
+<!-- gate: output -->
+```text
+Creating debugging pod node-debugger-sf-pilot-control-plane-qqwxf with container debugger on node sf-pilot-control-plane.
+Error from server (Forbidden): pods "node-debugger-sf-pilot-control-plane-qqwxf" is forbidden: violates PodSecurity "restricted:latest": host namespaces (hostNetwork=true, hostPID=true, hostIPC=true), privileged (container "debugger" must not set securityContext.privileged=true), allowPrivilegeEscalation != false (container "debugger" must set securityContext.allowPrivilegeEscalation=false), unrestricted capabilities (container "debugger" must set securityContext.capabilities.drop=["ALL"]), restricted volume types (volume "host-root" uses restricted volume type "hostPath"), runAsNonRoot != true (pod or container "debugger" must set securityContext.runAsNonRoot=true), seccompProfile (pod or container "debugger" must set securityContext.seccompProfile.type to "RuntimeDefault" or "Localhost")
+# ...
+Creating debugging pod node-debugger-sf-pilot-control-plane-2ztjk with container debugger on node sf-pilot-control-plane.
+Warning: would violate PodSecurity "restricted:latest": host namespaces (hostNetwork=true, hostPID=true, hostIPC=true), privileged (container "debugger" must not set securityContext.privileged=true), allowPrivilegeEscalation != false (container "debugger" must set securityContext.allowPrivilegeEscalation=false), unrestricted capabilities (container "debugger" must set securityContext.capabilities.drop=["ALL"]), restricted volume types (volume "host-root" uses restricted volume type "hostPath"), runAsNonRoot != true (pod or container "debugger" must set securityContext.runAsNonRoot=true), seccompProfile (pod or container "debugger" must set securityContext.seccompProfile.type to "RuntimeDefault" or "Localhost")
+# ...
+NAME                                         READY   STATUS              RESTARTS   AGE   IP           NODE                     NOMINATED NODE   READINESS GATES
+node-debugger-sf-pilot-control-plane-2ztjk   0/1     ContainerCreating   0          1s    172.18.0.2   sf-pilot-control-plane   <none>           <none>
+# ...
+hostPID=true hostNetwork=true hostIPC=true node=sf-pilot-control-plane
+```
+
+The refusal names every host-level control that failed. The same Pod in
+`node-debug` is created, and the warning it prints is the audit and warn labels
+at work. Its spec shows the three host namespaces set to `true` on the node. A
+namespace that is not registered gets the refusal above, and a namespace that
+is registered gets the Pod.
+
+Keep the rules that follow with the namespace:
+
+- Grant `pods/create` in `node-debug` to on-call only, and treat each use as a
+  breakglass event ([Part 15
   ch.09](../15-day-to-day-production-ops/09-hotfix-workflow-and-breakglass.md)).
 - A sick node is usually cordoned, drained and replaced, not nursed. The
   cordon and drain discipline is in [ch.01](01-cluster-lifecycle.md). On a
   managed cluster the node belongs to the provider, so node debugging there is
   observation, with remediation done by replacing the node.
+- Delete the node debugger Pods when you finish. They hold the node's host
+  namespaces for as long as they run.
+
 
 ## How it works under the hood
 
@@ -701,7 +962,7 @@ DBG='busybox:1.36@sha256:73aaf090f3d85aa34ee199857f03fa3a95c8ede2ffd4cc2cdb5b94e
 kubectl debug -n bookstore <POD> --image="$DBG" --profile=restricted \
   -c debug --target=catalog -- sleep 600              # ephemeral container
 kubectl exec -it -n bookstore <POD> -c debug -- sh    # a shell in it
-kubectl debug -n bookstore <POD> --copy-to=<DBG> \
+kubectl debug -n bookstore <POD> --copy-to=<COPY-NAME> \
   --set-image=catalog="$DBG" --profile=restricted     # a copy, same namespace
 
 # REVERT primitives used above (no canonical manifest is ever edited):

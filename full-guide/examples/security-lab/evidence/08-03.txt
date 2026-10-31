@@ -1,0 +1,249 @@
+# Transcript for 08-day-2-operations/03-troubleshooting-playbook.md.
+# Tier A: a kind cluster the guide's author runs for the guide, shared with
+# other parts of the guide. The lab used its own namespace, p08-03-bookstore. The chapter
+# names the bookstore namespace and applies the same files; the only changes
+# are the namespace name and the .bookstore.svc.cluster.local DNS names in
+# the canonical manifests. Lines that name the lab namespace are kept as
+# captured.
+# Not run here: the kind cluster create and delete, the image build and the
+# kind load (the four Bookstore images were already loaded), the NetworkPolicy
+# branch (the chapter's diagnosis is not induced in this run) and an OOMKilled
+# drill (the bookstore LimitRange sets a 16Mi memory floor).
+# The node-level step (step 11) used a second namespace, p08-03-node-debug, labelled
+# privileged and registered in security/namespace-exceptions.yaml under the
+# name node-debug. The chapter's manifest names it node-debug.
+# The debug image is busybox:1.36 pinned by digest. The digest matches the
+# registry manifest for busybox:1.36, checked with docker buildx imagetools
+# inspect. This header was reworded after the run to state that check; the
+# captured lines below are unchanged.
+
+## step 0: versions and a clean start
+$ kubectl version
+Client Version: v1.37.2
+Server Version: v1.37.0
+$ kubectl get namespace p08-03-bookstore
+Error from server (NotFound): namespaces "p08-03-bookstore" not found
+
+## step 1: the namespace, with the restricted Pod Security labels and quota
+$ kubectl apply -f examples/bookstore/raw-manifests/00-namespace.yaml   # namespace p08-03-bookstore
+namespace/p08-03-bookstore created
+resourcequota/bookstore-quota created
+limitrange/bookstore-limits created
+$ kubectl get namespace p08-03-bookstore --show-labels
+NAME               STATUS   AGE   LABELS
+p08-03-bookstore   Active   1s    app.kubernetes.io/part-of=bookstore,kubernetes.io/metadata.name=p08-03-bookstore,pod-security.kubernetes.io/audit-version=latest,pod-security.kubernetes.io/audit=restricted,pod-security.kubernetes.io/enforce-version=latest,pod-security.kubernetes.io/enforce=restricted,pod-security.kubernetes.io/warn-version=latest,pod-security.kubernetes.io/warn=restricted
+
+## step 2: the data layer and the ServiceAccounts the catalog needs
+$ kubectl apply -f examples/bookstore/raw-manifests/05-serviceaccounts-rbac.yaml   # namespace p08-03-bookstore
+serviceaccount/catalog-sa created
+serviceaccount/storefront-sa created
+serviceaccount/orders-sa created
+serviceaccount/payments-worker-sa created
+serviceaccount/postgres-sa created
+serviceaccount/redis-sa created
+serviceaccount/rabbitmq-sa created
+serviceaccount/migrate-sa created
+role.rbac.authorization.k8s.io/catalog-config-reader created
+rolebinding.rbac.authorization.k8s.io/catalog-config-reader-binding created
+$ kubectl apply -f examples/bookstore/raw-manifests/15-catalog-config.yaml   # namespace p08-03-bookstore
+configmap/catalog-config created
+$ kubectl apply -f examples/bookstore/raw-manifests/16-db-credentials.yaml   # namespace p08-03-bookstore
+secret/db-credentials created
+$ kubectl apply -f examples/bookstore/raw-manifests/12-redis.yaml   # namespace p08-03-bookstore
+deployment.apps/redis created
+$ kubectl apply -f examples/bookstore/raw-manifests/20-postgres-statefulset.yaml   # namespace p08-03-bookstore
+service/postgres created
+statefulset.apps/postgres created
+$ kubectl apply -f examples/bookstore/raw-manifests/40-services.yaml   # namespace p08-03-bookstore
+service/catalog created
+service/storefront created
+service/orders created
+service/redis created
+service/rabbitmq created
+service/payments-worker created
+$ kubectl rollout status statefulset/postgres -n p08-03-bookstore --timeout=420s
+Waiting for 1 pods to be ready...
+partitioned roll out complete: 1 new pods have been updated...
+$ kubectl rollout status deployment/redis -n p08-03-bookstore --timeout=120s
+deployment "redis" successfully rolled out
+$ kubectl apply -f examples/bookstore/raw-manifests/21-db-migrate-job.yaml   # namespace p08-03-bookstore
+job.batch/db-migrate created
+$ kubectl wait --for=condition=complete job/db-migrate -n p08-03-bookstore --timeout=180s
+job.batch/db-migrate condition met
+
+## step 3: the PriorityClass the catalog names (cluster-scoped, read only)
+$ kubectl get priorityclass bookstore-critical
+NAME                 VALUE    GLOBAL-DEFAULT   AGE   PREEMPTIONPOLICY
+bookstore-critical   100000   false            8h    PreemptLowerPriority
+
+## step 4: the catalog Deployment, with the full baseline
+$ kubectl apply -f examples/bookstore/raw-manifests/10-catalog-deploy.yaml   # namespace p08-03-bookstore
+deployment.apps/catalog created
+$ kubectl rollout status deployment/catalog -n p08-03-bookstore --timeout=180s
+Waiting for deployment "catalog" rollout to finish: 0 of 3 updated replicas are available...
+Waiting for deployment "catalog" rollout to finish: 1 of 3 updated replicas are available...
+Waiting for deployment "catalog" rollout to finish: 2 of 3 updated replicas are available...
+deployment "catalog" successfully rolled out
+$ kubectl get pods -n p08-03-bookstore
+NAME                       READY   STATUS      RESTARTS   AGE
+catalog-75d4db6d88-5fl4x   1/1     Running     0          7s
+catalog-75d4db6d88-7dfb9   1/1     Running     0          7s
+catalog-75d4db6d88-hw7w4   1/1     Running     0          7s
+db-migrate-h4c2p           0/1     Completed   0          20s
+postgres-0                 1/1     Running     0          49s
+redis-574bb544f-8dzlq      1/1     Running     0          49s
+
+## step 5: the distroless reality check
+$ kubectl exec -n p08-03-bookstore deploy/catalog -- sh
+error: Internal error occurred: Internal error occurred: error executing command in container: failed to exec in container: failed to start exec "ccc6268df62cdfbb627438b7b2ab53ba88831f0de085435efb8e4b10e12933ab": OCI runtime exec failed: exec failed: unable to start container process: exec: "sh": executable file not found in $PATH
+$ kubectl exec -n p08-03-bookstore statefulset/postgres -- sh -c 'echo postgres has a shell'
+postgres has a shell
+
+## step 6: one ephemeral container per debug profile, with the default image
+$ kubectl debug -n p08-03-bookstore catalog-75d4db6d88-5fl4x --image=busybox:1.36@sha256:73aaf090f3d85aa34ee199857f03fa3a95c8ede2ffd4cc2cdb5b94e566b11662 --profile=general -c dbg-general --target=catalog -- sleep 600
+Targeting container "catalog". If you don't see processes from this container it may be because the container runtime doesn't support this feature.
+Warning: Non-root user is configured for the entire target Pod, and some capabilities granted by debug profile may not work. Please consider using "--custom" with a custom profile that specifies "securityContext.runAsUser: 0".
+Error from server (Forbidden): pods "catalog-75d4db6d88-5fl4x" is forbidden: violates PodSecurity "restricted:latest": allowPrivilegeEscalation != false (container "dbg-general" must set securityContext.allowPrivilegeEscalation=false), unrestricted capabilities (container "dbg-general" must set securityContext.capabilities.drop=["ALL"]; container "dbg-general" must not include "SYS_PTRACE" in securityContext.capabilities.add)
+$ kubectl debug -n p08-03-bookstore catalog-75d4db6d88-5fl4x --image=busybox:1.36@sha256:73aaf090f3d85aa34ee199857f03fa3a95c8ede2ffd4cc2cdb5b94e566b11662 --profile=baseline -c dbg-baseline --target=catalog -- sleep 600
+Targeting container "catalog". If you don't see processes from this container it may be because the container runtime doesn't support this feature.
+Error from server (Forbidden): pods "catalog-75d4db6d88-5fl4x" is forbidden: violates PodSecurity "restricted:latest": allowPrivilegeEscalation != false (container "dbg-baseline" must set securityContext.allowPrivilegeEscalation=false), unrestricted capabilities (container "dbg-baseline" must set securityContext.capabilities.drop=["ALL"])
+$ kubectl debug -n p08-03-bookstore catalog-75d4db6d88-5fl4x --image=busybox:1.36@sha256:73aaf090f3d85aa34ee199857f03fa3a95c8ede2ffd4cc2cdb5b94e566b11662 --profile=restricted -c dbg-restricted --target=catalog -- sleep 600
+Targeting container "catalog". If you don't see processes from this container it may be because the container runtime doesn't support this feature.
+$ kubectl debug -n p08-03-bookstore catalog-75d4db6d88-5fl4x --image=busybox:1.36@sha256:73aaf090f3d85aa34ee199857f03fa3a95c8ede2ffd4cc2cdb5b94e566b11662 --profile=netadmin -c dbg-netadmin --target=catalog -- sleep 600
+Targeting container "catalog". If you don't see processes from this container it may be because the container runtime doesn't support this feature.
+Warning: Non-root user is configured for the entire target Pod, and some capabilities granted by debug profile may not work. Please consider using "--custom" with a custom profile that specifies "securityContext.runAsUser: 0".
+Error from server (Forbidden): pods "catalog-75d4db6d88-5fl4x" is forbidden: violates PodSecurity "restricted:latest": allowPrivilegeEscalation != false (container "dbg-netadmin" must set securityContext.allowPrivilegeEscalation=false), unrestricted capabilities (container "dbg-netadmin" must set securityContext.capabilities.drop=["ALL"]; container "dbg-netadmin" must not include "NET_ADMIN", "NET_RAW" in securityContext.capabilities.add)
+$ kubectl debug -n p08-03-bookstore catalog-75d4db6d88-5fl4x --image=busybox:1.36@sha256:73aaf090f3d85aa34ee199857f03fa3a95c8ede2ffd4cc2cdb5b94e566b11662 --profile=sysadmin -c dbg-sysadmin --target=catalog -- sleep 600
+Targeting container "catalog". If you don't see processes from this container it may be because the container runtime doesn't support this feature.
+Warning: Non-root user is configured for the entire target Pod, and some capabilities granted by debug profile may not work. Please consider using "--custom" with a custom profile that specifies "securityContext.runAsUser: 0".
+Error from server (Forbidden): pods "catalog-75d4db6d88-5fl4x" is forbidden: violates PodSecurity "restricted:latest": privileged (container "dbg-sysadmin" must not set securityContext.privileged=true), allowPrivilegeEscalation != false (container "dbg-sysadmin" must set securityContext.allowPrivilegeEscalation=false), unrestricted capabilities (container "dbg-sysadmin" must set securityContext.capabilities.drop=["ALL"])
+$ kubectl describe pod -n p08-03-bookstore catalog-75d4db6d88-5fl4x
+  dbg-restricted:
+    State:          Running
+
+## step 6b: the grant to add an ephemeral container is an RBAC rule
+$ kubectl auth can-i create pods --subresource=ephemeralcontainers -n p08-03-bookstore --as=system:serviceaccount:p08-03-bookstore:catalog-sa
+no
+$ kubectl auth can-i create pods --subresource=exec -n p08-03-bookstore --as=system:serviceaccount:p08-03-bookstore:catalog-sa
+no
+
+## step 7: restricted with a numeric UID that matches the catalog process
+$ kubectl debug -n p08-03-bookstore catalog-75d4db6d88-5fl4x --image=busybox:1.36@sha256:73aaf090f3d85aa34ee199857f03fa3a95c8ede2ffd4cc2cdb5b94e566b11662 --profile=restricted --custom=dbg-uid.json -c dbg-restricted-uid --target=catalog -- sleep 600
+Targeting container "catalog". If you don't see processes from this container it may be because the container runtime doesn't support this feature.
+$ kubectl exec -n p08-03-bookstore catalog-75d4db6d88-5fl4x -c dbg-restricted-uid -- sh -c 'id -u; wget -qO- http://localhost:8080/healthz; echo; tr "\0" " " < /proc/1/cmdline; echo; tr "\0" "\n" < /proc/1/environ | grep -c "^DB_DSN="'
+65532
+{"status":"ok"}
+
+/catalog 
+1
+
+## step 8: induced failure A, a bad image tag, then the revert
+$ kubectl set image deploy/catalog catalog=bookstore/catalog:nonexistent -n p08-03-bookstore   # deliberate failure
+deployment.apps/catalog image updated
+$ kubectl rollout status deployment/catalog -n p08-03-bookstore --timeout=60s
+Waiting for deployment "catalog" rollout to finish: 1 out of 3 new replicas have been updated...
+error: timed out waiting for the condition
+$ kubectl get pods -n p08-03-bookstore -l app=catalog
+NAME                       READY   STATUS             RESTARTS   AGE
+catalog-59fd579fb-rsj8p    0/1     ImagePullBackOff   0          60s
+catalog-75d4db6d88-5fl4x   1/1     Running            0          76s
+catalog-75d4db6d88-7dfb9   1/1     Running            0          76s
+catalog-75d4db6d88-hw7w4   1/1     Running            0          76s
+$ kubectl describe pod/catalog-59fd579fb-rsj8p -n p08-03-bookstore   # Events only
+Events:
+  Type     Reason     Age                From               Message
+  ----     ------     ----               ----               -------
+  Normal   Scheduled  60s                default-scheduler  Successfully assigned p08-03-bookstore/catalog-59fd579fb-rsj8p to sf-pilot-control-plane
+  Normal   BackOff    23s (x2 over 55s)  kubelet            spec.containers{catalog}: Back-off pulling image "bookstore/catalog:nonexistent"
+  Warning  Failed     23s (x2 over 55s)  kubelet            spec.containers{catalog}: Error: ImagePullBackOff
+  Normal   Pulling    10s (x3 over 58s)  kubelet            spec.containers{catalog}: Pulling image "bookstore/catalog:nonexistent"
+  Warning  Failed     8s (x3 over 56s)   kubelet            spec.containers{catalog}: Failed to pull image "bookstore/catalog:nonexistent": failed to pull and unpack image "docker.io/bookstore/catalog:nonexistent": failed to resolve reference "docker.io/bookstore/catalog:nonexistent": pull access denied, repository does not exist or may require authorization: server message: insufficient_scope: authorization failed
+  Warning  Failed     8s (x3 over 56s)   kubelet            spec.containers{catalog}: Error: ErrImagePull
+$ kubectl set image deploy/catalog catalog=bookstore/catalog:dev -n p08-03-bookstore   # revert
+deployment.apps/catalog image updated
+$ kubectl rollout status deployment/catalog -n p08-03-bookstore --timeout=180s
+deployment "catalog" successfully rolled out
+
+## step 9: induced failure B, a malformed DSN, then the revert
+$ kubectl set env deploy/catalog -n p08-03-bookstore 'DB_DSN=host=postgres.p08-03-bookstore.svc.cluster.local port=5432 sslmode=bogus'   # deliberate failure
+deployment.apps/catalog env updated
+$ kubectl rollout status deployment/catalog -n p08-03-bookstore --timeout=60s
+Waiting for deployment "catalog" rollout to finish: 1 out of 3 new replicas have been updated...
+Waiting for deployment "catalog" rollout to finish: 1 out of 3 new replicas have been updated...
+error: timed out waiting for the condition
+$ kubectl get pods -n p08-03-bookstore -l app=catalog
+NAME                       READY   STATUS             RESTARTS      AGE
+catalog-75d4db6d88-5fl4x   1/1     Running            0             2m18s
+catalog-75d4db6d88-7dfb9   1/1     Running            0             2m18s
+catalog-75d4db6d88-hw7w4   1/1     Running            0             2m18s
+catalog-7988d6fc7-9mm46    0/1     CrashLoopBackOff   3 (21s ago)   61s
+$ kubectl logs -n p08-03-bookstore catalog-7988d6fc7-9mm46 --previous --tail=5
+{"time":"2026-10-31T06:45:45.222355682Z","level":"ERROR","msg":"connect postgres","err":"cannot parse `host=postgres.p08-03-bookstore.svc.cluster.local port=5432 sslmode=bogus`: failed to configure TLS (sslmode is invalid)"}
+$ kubectl apply -f examples/bookstore/raw-manifests/10-catalog-deploy.yaml   # revert to the canonical Deployment
+$ kubectl apply -f examples/bookstore/raw-manifests/10-catalog-deploy.yaml   # namespace p08-03-bookstore
+deployment.apps/catalog configured
+$ kubectl rollout status deployment/catalog -n p08-03-bookstore --timeout=180s
+deployment "catalog" successfully rolled out
+
+## step 10: induced failure C, a readiness probe on the wrong path, then the revert
+$ kubectl patch deploy/catalog -n p08-03-bookstore --type=json -p='[{"op":"replace","path":"/spec/template/spec/containers/0/readinessProbe/httpGet/path","value":"/wrong"}]'   # deliberate failure
+deployment.apps/catalog patched
+$ kubectl rollout status deployment/catalog -n p08-03-bookstore --timeout=60s
+Waiting for deployment "catalog" rollout to finish: 1 out of 3 new replicas have been updated...
+Waiting for deployment "catalog" rollout to finish: 1 out of 3 new replicas have been updated...
+error: timed out waiting for the condition
+$ kubectl get pods -n p08-03-bookstore -l app=catalog
+NAME                       READY   STATUS    RESTARTS   AGE
+catalog-5d686cd8b-jwfxp    0/1     Running   0          60s
+catalog-75d4db6d88-5fl4x   1/1     Running   0          3m19s
+catalog-75d4db6d88-7dfb9   1/1     Running   0          3m19s
+catalog-75d4db6d88-hw7w4   1/1     Running   0          3m19s
+$ kubectl get endpoints catalog -n p08-03-bookstore
+Warning: v1 Endpoints is deprecated in v1.33+; use discovery.k8s.io/v1 EndpointSlice
+NAME      ENDPOINTS                                            AGE
+catalog   10.244.0.35:8080,10.244.0.36:8080,10.244.0.37:8080   4m
+$ kubectl describe pod/catalog-5d686cd8b-jwfxp -n p08-03-bookstore   # Events only
+Events:
+  Type     Reason     Age                From               Message
+  ----     ------     ----               ----               -------
+  Normal   Scheduled  60s                default-scheduler  Successfully assigned p08-03-bookstore/catalog-5d686cd8b-jwfxp to sf-pilot-control-plane
+  Normal   Pulled     59s                kubelet            spec.containers{catalog}: Container image "bookstore/catalog:dev" already present on machine and can be accessed by the pod
+  Normal   Created    59s                kubelet            spec.containers{catalog}: Container created
+  Normal   Started    58s                kubelet            spec.containers{catalog}: Container started
+  Warning  Unhealthy  5s (x11 over 55s)  kubelet            spec.containers{catalog}: Readiness probe failed: HTTP probe failed with statuscode: 404
+$ kubectl patch deploy/catalog -n p08-03-bookstore --type=json -p='[{"op":"replace","path":"/spec/template/spec/containers/0/readinessProbe/httpGet/path","value":"/readyz"}]'   # revert
+deployment.apps/catalog patched
+$ kubectl rollout status deployment/catalog -n p08-03-bookstore --timeout=180s
+deployment "catalog" successfully rolled out
+
+## step 11: node-level debugging: refused in restricted, admitted in a registered privileged namespace
+$ kubectl debug node/sf-pilot-control-plane -n p08-03-bookstore --profile=sysadmin --image=busybox:1.36@sha256:73aaf090f3d85aa34ee199857f03fa3a95c8ede2ffd4cc2cdb5b94e566b11662   # the same Pod, in restricted
+Creating debugging pod node-debugger-sf-pilot-control-plane-qqwxf with container debugger on node sf-pilot-control-plane.
+Error from server (Forbidden): pods "node-debugger-sf-pilot-control-plane-qqwxf" is forbidden: violates PodSecurity "restricted:latest": host namespaces (hostNetwork=true, hostPID=true, hostIPC=true), privileged (container "debugger" must not set securityContext.privileged=true), allowPrivilegeEscalation != false (container "debugger" must set securityContext.allowPrivilegeEscalation=false), unrestricted capabilities (container "debugger" must set securityContext.capabilities.drop=["ALL"]), restricted volume types (volume "host-root" uses restricted volume type "hostPath"), runAsNonRoot != true (pod or container "debugger" must set securityContext.runAsNonRoot=true), seccompProfile (pod or container "debugger" must set securityContext.seccompProfile.type to "RuntimeDefault" or "Localhost")
+$ kubectl apply -f node-debug-namespace.yaml   # namespace p08-03-node-debug
+namespace/p08-03-node-debug created
+$ kubectl debug node/sf-pilot-control-plane -n p08-03-node-debug --profile=sysadmin --image=busybox:1.36@sha256:73aaf090f3d85aa34ee199857f03fa3a95c8ede2ffd4cc2cdb5b94e566b11662
+Creating debugging pod node-debugger-sf-pilot-control-plane-2ztjk with container debugger on node sf-pilot-control-plane.
+Warning: would violate PodSecurity "restricted:latest": host namespaces (hostNetwork=true, hostPID=true, hostIPC=true), privileged (container "debugger" must not set securityContext.privileged=true), allowPrivilegeEscalation != false (container "debugger" must set securityContext.allowPrivilegeEscalation=false), unrestricted capabilities (container "debugger" must set securityContext.capabilities.drop=["ALL"]), restricted volume types (volume "host-root" uses restricted volume type "hostPath"), runAsNonRoot != true (pod or container "debugger" must set securityContext.runAsNonRoot=true), seccompProfile (pod or container "debugger" must set securityContext.seccompProfile.type to "RuntimeDefault" or "Localhost")
+$ kubectl get pods -n p08-03-node-debug -o wide
+NAME                                         READY   STATUS              RESTARTS   AGE   IP           NODE                     NOMINATED NODE   READINESS GATES
+node-debugger-sf-pilot-control-plane-2ztjk   0/1     ContainerCreating   0          1s    172.18.0.2   sf-pilot-control-plane   <none>           <none>
+$ kubectl get pod/node-debugger-sf-pilot-control-plane-2ztjk -n p08-03-node-debug -o jsonpath='hostPID={.spec.hostPID} hostNetwork={.spec.hostNetwork} hostIPC={.spec.hostIPC} node={.spec.nodeName}'
+hostPID=true hostNetwork=true hostIPC=true node=sf-pilot-control-plane
+
+## step 12: back to known-good, then delete the namespaces
+$ kubectl get pods -n p08-03-bookstore
+NAME                       READY   STATUS        RESTARTS   AGE
+catalog-5d686cd8b-jwfxp    0/1     Terminating   0          63s
+catalog-75d4db6d88-5fl4x   1/1     Running       0          3m22s
+catalog-75d4db6d88-7dfb9   1/1     Running       0          3m22s
+catalog-75d4db6d88-hw7w4   1/1     Running       0          3m22s
+db-migrate-h4c2p           0/1     Completed     0          3m35s
+postgres-0                 1/1     Running       0          4m4s
+redis-574bb544f-8dzlq      1/1     Running       0          4m4s
+$ kubectl get deploy catalog -n p08-03-bookstore -o jsonpath='{.spec.template.spec.containers[0].image}'
+bookstore/catalog:dev
+$ kubectl delete namespace p08-03-bookstore --wait --timeout=300s
+namespace "p08-03-bookstore" deleted
+$ kubectl delete namespace p08-03-node-debug --wait --timeout=300s
+namespace "p08-03-node-debug" deleted
