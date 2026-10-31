@@ -30,3 +30,4 @@
 13-grand-capstone-bookstore-platform/
 14-eks-in-production-a-to-z/
 15-day-to-day-production-ops/
+examples/

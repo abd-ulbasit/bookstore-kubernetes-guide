@@ -210,9 +210,9 @@ apply prevents three hours of incident recovery.
 | An unreviewed change is applied | Apply the saved plan from `plan-main`, behind `production` reviewers | |
 | Plan output or artifacts expose account data | Plan text goes to a file; private repository; one-day artifact retention | |
 | A console or out-of-band change goes unnoticed | Nightly `plan -refresh-only`, then CloudTrail | |
-| Misconfigured Terraform is merged | Not enforced by this pipeline. It runs no IaC scanner. A blocking scanner fails on the tree's CRITICAL `trivy config` findings (for example a public API CIDR and unrestricted egress), so accept those with reasons before you add one | [05.03](../05-security/03-supply-chain.md) |
+| Misconfigured Terraform is merged | Not enforced by this pipeline. It runs no IaC scanner. A blocking scanner fails on the tree's CRITICAL `trivy config` findings (for example a public API CIDR and unrestricted egress), so accept those with reasons before you add one | A by-hand `trivy config` run, with the same flags a pipeline step would use: [10.02](../10-cloud-and-managed-kubernetes/02-provisioning-and-iac.md). [05.03](../05-security/03-supply-chain.md) lints Kubernetes manifests only |
 | A pipeline action is swapped for another version | Actions pinned by full commit SHA | [14.12](./12-supply-chain-security.md) |
-| A plan that breaks policy is applied | Not enforced by this pipeline. It runs no policy check on the saved plan | [05.07](../05-security/07-admission-control-and-policy-as-code.md) |
+| A plan that breaks policy is applied | Not enforced by this pipeline. It runs no policy check on the saved plan. [05.07](../05-security/07-admission-control-and-policy-as-code.md) runs Conftest on a committed example plan file, and the Bookstore pipeline runs that file in CI ([07.03](../07-delivery/03-cicd-pipeline.md)); neither is a plan of this tree | [05.07](../05-security/07-admission-control-and-policy-as-code.md) |
 
 ## Diagrams
 

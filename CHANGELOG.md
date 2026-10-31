@@ -48,6 +48,24 @@ versions follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   and Part 05 contents lists and the Appendix F tag index include the new
   chapters, and `.gitattributes` no longer union-merges
   `security/namespace-exceptions.yaml`.
+- A second audit sweep made the chapters say what they run. 05.01 runs
+  anonymous requests and a Pod certificate with a lab signer on kind. 05.08
+  runs the audit policy on a throwaway kind cluster and reads the log. 05.03
+  runs a `not_affected` VEX statement that suppresses a finding. 05.04 teaches
+  the KMS v2 wiring from the upstream page, cited and not run, and 05.05 shows
+  the RuntimeClass, SELinux and Security Profiles Operator shapes, cited and
+  not run. Pointers that named a chapter for something it does not teach now
+  name the one that does, and `docs/design/2026-10-29-security-first-rewrite.md`
+  section 5.8.1 lists where the coverage maps still fall short of the tree.
+- The Bookstore Kyverno policy uses the rule-level `failureAction` in the raw,
+  Helm and Kustomize copies, checked with a server dry run against the chart
+  3.9.2 CRD. The Grype ignore entry is scoped to its package and dated, and the
+  expiry stage reads it.
+- `examples/` joins `.github/security-gates-enforced.txt`, and the nine
+  pod-template files the static gate could not judge (two ML manifests, six
+  kind configs, the operator's `config/default`) are allowlisted with how they
+  were checked. `.github/scripts/check_link_later.py` fails a `link-later`
+  marker whose chapter now exists.
 - `SECURITY-SCAN.md` is rewritten around the exceptions registry
   (`.trivyignore.yaml` and `security/namespace-exceptions.yaml`). It corrects
   the platform RBAC count, the Backstage entry and the "permissive examples"

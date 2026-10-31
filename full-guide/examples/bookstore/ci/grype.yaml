@@ -1,6 +1,9 @@
 # Grype ignore list for the Bookstore pipeline (Part 07 ch.03). The same finding
 # as trivyignore.yaml, with the same reason. Grype has no expiry date on an
-# ignore rule, so Trivy's expired_at is the one that brings the gate back.
-# Delete both files' entries together.
+# ignore rule, so each entry carries a "Revisit by DATE" comment and the
+# pipeline's expiry stage fails on a lapsed one, the way Trivy's expired_at does.
+# The entry is scoped to the one package it is about, so the same CVE in another
+# package, or another CVE, is still reported. Delete both files' entries
+# together.
 ignore:
-  - vulnerability: CVE-2026-111497
+  - {vulnerability: CVE-2026-111497, package: {name: brotli-libs}}  # Revisit by 2026-11-30

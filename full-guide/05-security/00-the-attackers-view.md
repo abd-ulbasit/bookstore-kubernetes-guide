@@ -100,6 +100,28 @@ Escapes from the container into the node are [chapter 02](02-pod-security.md)'s
 subject. Admission policy and runtime detection come later in Part 05. This
 chapter stays with reconnaissance.
 
+### Reading the Bookstore's threat model against this lab
+
+The Bookstore keeps a [threat model](../examples/bookstore/THREAT-MODEL.md) with
+a row, an ID and a status for each threat
+([00.08](../00-foundations/08-security-foundations.md) teaches how to read and
+change it). Each step of the lab below attacks one of those rows, so the model
+is checked here against a working attack, by hand. No gate reads the file.
+
+| Lab step | Rows it exercises | What the model says today |
+|---|---|---|
+| Reading the mounted token and calling the API with it | S1, I4, and the Pod-to-API-server boundary TB3 | `review`: the baseline's `automountServiceAccountToken: false` is a field that only a reviewer checks |
+| Listing what the default identity may do | I2, E6 | `cluster`: one ServiceAccount and one narrow Role per workload, taught in [05.01](01-authn-authz-rbac.md) |
+| Reaching another Pod across namespaces | S3, and the entry point EP8 | `cluster`: default-deny, taught in [02.06](../02-networking/06-network-policies.md) |
+| Reaching the kubelet on port 10250 from the Pod | I3, and the entry point EP3 | `cluster`: anonymous kubelet auth off and webhook authorization, in [05.06](06-control-plane-and-node-hardening.md) |
+
+The reading finds the rows whose control is a convention: S1 and I4 rest on a
+field in each manifest, and the model marks them `review` because neither
+admission nor the static gate rejects a manifest that mounts a token. If a lab
+step succeeds against a row marked `baseline` or `cluster`, the row is wrong and
+the model changes in the same pull request. Cloud metadata is out of scope in
+the model, as it is on kind.
+
 ## Diagrams
 
 ```text

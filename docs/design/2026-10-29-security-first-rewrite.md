@@ -512,6 +512,76 @@ Each topic has one home. Other chapters link to it.
 | Security as a programme: vulnerability management, exceptions, compliance mapping | 05.09 |
 | SAST, DAST, secret detection, CI hardening, posture management (full table in §5.12) | 07.03, 15.02, 05.09 |
 
+### 5.8.1 Where the maps stand
+
+The two maps above (§5.8 and §5.12) are the design. This list records, as of
+2026-10-31, where the guide and its trees fall short of them, so a reader does
+not take a row for a control that runs. A row not listed here is taught in the
+chapter it names, and is either run or labelled cited.
+
+* **API authentication.** 05.01 runs anonymous requests and a bad token on kind.
+  Structured OIDC configuration is a cited fragment, not run.
+* **Workload X.509 identity.** 05.01 runs Pod certificates and a
+  ClusterTrustBundle on kind with a lab signer. No mesh consumes them.
+* **Encryption at rest, KMS.** 05.04 runs a `secretbox` provider. The KMS v2
+  wiring, rotation and failure mode are cited from the upstream page, not run.
+* **seccomp, AppArmor, SELinux, SPO, sandboxed runtimes.** 05.05 runs seccomp.
+  AppArmor needs a host filesystem that the kind lab lacks. The SELinux label,
+  the RuntimeClass and the Security Profiles Operator objects are shown as
+  fragments or manifests and are cited, not run.
+* **Node OS hardening, binary verification, upgrades, CVE response.** The
+  runtime-patching rule is in 00.05 and the CVE procedure in 08.01 (narrated,
+  not run). Node OS hardening is cited and taught nowhere.
+* **Policy as code and image verification at admission.** 05.07 runs the
+  built-in ValidatingAdmissionPolicy and MutatingAdmissionPolicy. The Kyverno
+  install, Audit, Enforce, `verifyImages` and Gatekeeper steps did not run
+  (the full mode failed three times), and the engine taught is the
+  `ClusterPolicy` kind that the chart's CRD marks deprecated. The Bookstore
+  ships its Kyverno policy off, and its only `verifyImages` rule is a commented
+  sketch, so no signature is checked in the bookstore cluster.
+* **Audit logging.** 05.08 runs the audit policy on a throwaway kind cluster and
+  reads the log.
+* **Runtime detection.** 05.08 renders the Falco chart and does not install it.
+  Tetragon is cited, with no TracingPolicy anywhere. The platform Terraform
+  installs Falco off by default, with no Falcosidekick and a priority floor that
+  keeps the shell rule off.
+* **TLS at the edge, certificate management.** 02.04 and 02.05 use a self-signed
+  Secret. The cert-manager `Issuer` and `Certificate` objects are written out,
+  not run, in 11.01 and 13.07.
+* **Signing, provenance, VEX.** 05.03 step 7b runs a `not_affected` statement
+  that suppresses a finding in Trivy. The pipeline passes no VEX file to Trivy
+  or Grype.
+* **Manifest and IaC static analysis; IaC scanning.** 05.03 lints Kubernetes
+  manifests. `trivy config` on Terraform runs by hand in 10.02. The Terraform
+  pipeline in 14.07 runs no IaC scanner. Checkov appears nowhere in the guide.
+* **Policy as code in CI.** Conftest runs in the Bookstore pipeline on the
+  rendered overlay and on a committed example plan file, not on a plan of the
+  platform tree.
+* **CI/CD hardening, SAST, DAST.** The Bookstore pipeline (07.03) runs them for
+  the four services in its matrix. The platform services' workflows (15.02) run
+  lint, Trivy, buildx, cosign, Syft and provenance, and call no reusable
+  pipeline. The operator, the ML images and four platform services have no CI
+  template. DAST is the ZAP baseline only: there is no API scan.
+* **Image scanning.** Trivy writes JSON. No SARIF is produced or uploaded for
+  the image scan.
+* **Dockerfile and image lint.** hadolint is taught in 00.02. Dockle is taught
+  only in 07.03.
+* **Cluster posture.** kube-bench (05.06) and Trivy Operator (05.08) are lab
+  steps. Neither is deployed by the Bookstore tree.
+* **Cloud posture.** Prowler is cited for AWS and not run. There is no GCP
+  equivalent in the guide.
+* **Secrets management.** ESO with Vault is taught in 11.05 and 15.05. SOPS is a
+  comparison bullet with no example in any tree.
+* **Vulnerability management.** Dependency-Track is cited. The Bookstore
+  uploads its SBOM as an artifact and never rescans a published image.
+* **Compliance as code.** 05.09 maps the guide's controls to published
+  references. Nothing in CI maps a gate result to a control.
+* **ML and LLM security.** Serving contains a pickle with the baseline and
+  stamps a SHA-256. No model scanner runs and the predictor still loads with
+  `joblib`.
+* **Threat modelling.** 05.00 reads the model's rows by hand. No gate reads the
+  file.
+
 ### 5.9 Lab evidence
 
 Part 05's labs follow the rule Parts 16 and 17 already state.
@@ -597,12 +667,12 @@ where they are described. The rules:
 | Secret detection | Gitleaks (pre-commit, CI); TruffleHog verified mode as the CI gate | 03.02, 07.03 | pipeline |
 | SAST | Semgrep with custom rules, gosec; CodeQL for deep data flow | 07.03 | pipeline |
 | SCA and reachability | govulncheck, Trivy; Renovate or Dependabot for update PRs | 05.03, 07.03 | pipeline |
-| Dockerfile and image lint | hadolint before the build, Dockle after it | 00.02, 05.03 | pipeline |
-| Image scanning | Trivy (severity, exit code, ignore-unfixed, SARIF) | 05.03 | pipeline |
+| Dockerfile and image lint | hadolint before the build, Dockle after it | 00.02 (hadolint), 07.03 (Dockle) | pipeline |
+| Image scanning | Trivy (severity, exit code, ignore-unfixed); JSON output, no SARIF | 05.03 | pipeline |
 | SBOM | Syft (CycloneDX), scanned by Grype and Trivy | 05.03 | pipeline, attached to the image |
 | Signing and provenance | cosign keyless, SLSA provenance, attestations; VEX for findings that do not apply | 05.03, 15.03 | pipeline, registry |
 | Manifest static analysis | KubeLinter, kubesec, Trivy config | 05.03 | pipeline |
-| IaC scanning | Trivy config, Checkov | 10.02, 14.07 | Terraform pipeline |
+| IaC scanning | Trivy config, run by hand; Checkov is not used | 10.02, 14.07 | not in the Terraform pipeline (§5.8.1) |
 | Policy as code in CI | OPA with Conftest on manifests and Terraform plans, with Rego unit tests | 05.07, 14.07 | a `policy/` tree run in CI |
 | Policy as code at admission | Kyverno in the project; OPA Gatekeeper side by side in the lab; ValidatingAdmissionPolicy | 05.07 | bookstore cluster |
 | Image verification at admission | Kyverno verifyImages against the cosign identities | 05.03, 05.07 | bookstore cluster |

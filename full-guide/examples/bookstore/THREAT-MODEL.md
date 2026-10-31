@@ -109,13 +109,13 @@ guide yet). Part 00 ch.08 names the enforcer of each baseline field.
 
 | ID | Threat | Control | Status | Explained in |
 |----|--------|---------|--------|--------------|
-| RP1 | An apply leaves no record of who made it | API server audit policy, `cluster/audit-policy.yaml` | open until 05.08 | [05.08](../../05-security/08-audit-detection-and-incident-response.md) |
+| RP1 | An apply leaves no record of who made it | API server audit policy. 05.08 runs `examples/security-lab/audit/audit-policy.yaml` on a throwaway kind cluster and reads the log; `cluster/audit-policy.yaml` is the Bookstore's version of the same shape. The guide's standard kind cluster sets no audit flag | later | [05.08](../../05-security/08-audit-detection-and-incident-response.md) |
 
 ### Information disclosure
 
 | ID | Threat | Control | Status | Explained in |
 |----|--------|---------|--------|--------------|
-| I1 | Secrets are read from etcd, which skips RBAC | Encryption at rest, `cluster/encryption-config.yaml`; etcd reached only by the API server | cluster | 03.02; 05.04 |
+| I1 | Secrets are read from etcd, which skips RBAC | Encryption at rest: 05.04 runs a `secretbox` config on kind, and `cluster/encryption-config.yaml` is the Bookstore's file of the same shape; etcd reached only by the API server | cluster | 03.02; 05.04 |
 | I2 | A broad RBAC grant reads Secrets | One ServiceAccount and one narrow Role per workload | cluster | 05.01 |
 | I3 | A caller reads Pod specs or runs commands through the kubelet | Anonymous kubelet auth off, webhook authorization | cluster | [05.06](../../05-security/06-control-plane-and-node-hardening.md) |
 | I4 | Application code reads a mounted ServiceAccount token | `automountServiceAccountToken: false` | review | 01.01, `#baseline-service-account` |
@@ -140,7 +140,7 @@ guide yet). Part 00 ch.08 names the enforcer of each baseline field.
 | E2 | A setuid binary gains privileges | `allowPrivilegeEscalation: false` | baseline | 01.01, `#baseline-privilege-escalation` |
 | E3 | A capability or syscall reaches the kernel | `capabilities.drop: ["ALL"]`, `seccompProfile: RuntimeDefault` | baseline | 01.01, `#baseline-capabilities`, `#baseline-seccomp` |
 | E4 | A Pod asks for host namespaces, privileged mode or a `hostPath` | Pod Security Admission at `restricted` on the namespace | baseline | 01.01, `#baseline-namespace`; 05.02 |
-| E5 | An unpatched runtime lets a container escape, as with CVE-2024-21626 | A patched containerd and runc on every node | cluster | [05.06](../../05-security/06-control-plane-and-node-hardening.md) |
+| E5 | An unpatched runtime lets a container escape, as with CVE-2024-21626 | A patched containerd and runc on every node | cluster | [00.05](../../00-foundations/05-node-components.md#keep-the-runtime-patched); [08.01](../../08-day-2-operations/01-cluster-lifecycle.md) step 5 |
 | E6 | An RBAC grant lets a workload create a privileged Pod | Narrow RBAC, and `restricted` on the namespace | cluster | 05.01; 05.02 |
 | E7 | A mutation adds privilege the Pod did not ask for | A mutating webhook sets only restrictive fields, and only when absent; a validating check runs after it | review | 11.01, `#mental-model` |
 | E9 | The chaos daemon runs privileged on every node, so a compromised daemon reaches the node. The controller can also delete Pods outside the workload under test | The daemon alone is privileged, in its own namespace enforced at `privileged` with audit and warn at `restricted`, and registered; the controller is namespace-scoped (`clusterScoped: false`); optional features are off | review | 11.07, `#threats-and-controls` |

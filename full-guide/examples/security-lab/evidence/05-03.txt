@@ -378,3 +378,38 @@ docker rm -f p05-03-registry
 namespace "p05-03-supply-chain" deleted
 p05-03-registry
 
+
+# Step 7b, recorded later by running examples/security-lab/labs/05-03-vex.sh
+# from full-guide/ on macOS. No cluster is involved. It scans the Go module
+# list of the catalog service (syft with dir:, so no operating system
+# packages), and uses syft 1.55.0, trivy 0.76.1 and govulncheck from the
+# Go toolchain on the client. The script exited 0.
+## step 7b: a not_affected statement, backed by a reachability check
+$ syft dir:"$APP" -q -o cyclonedx-json="$work/catalog.cdx.json"
+jq -r '[.components[].type] | group_by(.) | map("\(.[0]) \(length)")[]' "$work/catalog.cdx.json"
+file 1
+library 17
+
+$ trivy sbom --quiet --format json --scanners vuln "$work/catalog.cdx.json" |
+  jq -r '.Results[]?.Vulnerabilities[]? | .VulnerabilityID + " " + .PkgName + " " + .InstalledVersion + " " + .Severity'
+CVE-2026-39824 golang.org/x/sys v0.34.0 UNKNOWN
+
+$ (cd "$APP" && govulncheck -format json ./... |
+  jq -r --arg id "$ADVISORY" 'select(.finding.osv == $id) | .finding.trace[0] | if .function then "symbol" elif .package then "package" else "module" end' |
+  sort | uniq -c)
+   1 module
+
+$ (cd "$APP" && govulncheck -format json ./... |
+  jq -r --arg id "$ADVISORY" 'select(.osv.id == $id) | .osv.summary')
+Invoking integer overflow in NewNTUnicodeString in golang.org/x/sys/windows
+
+$ jq -r '.statements[] | .status + " " + .justification + " " + .vulnerability.name' "$work/vex.json"
+not_affected vulnerable_code_not_in_execute_path CVE-2026-39824
+
+$ echo "trivy without a statement: $(trivy sbom --quiet --format json --scanners vuln "$work/catalog.cdx.json" | jq '[.Results[]?.Vulnerabilities[]?] | length') finding(s)"
+trivy without a statement: 1 finding(s)
+
+$ echo "trivy with the not_affected statement: $(trivy sbom --quiet --format json --scanners vuln --vex "$work/vex.json" "$work/catalog.cdx.json" | jq '[.Results[]?.Vulnerabilities[]?] | length') finding(s)"
+trivy with the not_affected statement: 0 finding(s)
+
+## done

@@ -393,3 +393,143 @@ certificatesigningrequest.certificates.k8s.io "p05-impostor-csr" deleted
 certificatesigningrequest.certificates.k8s.io "p05-impostor2-csr" deleted
 no lab-owned cluster objects left
 
+
+# Authenticators steps 1 to 4, recorded later by running
+# full-guide/examples/security-lab/labs/05-01-authn.sh with LAB_PREFIX=p00-final,
+# so the namespace is p00-final-pcr where the chapter's manifests say p05-01-pcr.
+# Lines that name it are kept as captured. Same kind cluster as above
+# (Kubernetes v1.37.0, kubectl v1.37.2). The client side of this script ran on
+# macOS, so openssl is LibreSSL and its output differs a little from OpenSSL 3.
+# The script exited 0. The Pod's private key is made by the kubelet and is
+# counted, not printed.
+## authenticators step 1: requests with no credential, and with a bad one
+$ curl -s --cacert cluster-ca.pem -w 'HTTP %{http_code}\n' "$APISERVER/version"
+{
+  "major": "1",
+  "minor": "37",
+  "emulationMajor": "1",
+  "emulationMinor": "37",
+  "minCompatibilityMajor": "1",
+  "minCompatibilityMinor": "36",
+  "gitVersion": "v1.37.0",
+  "gitCommit": "f54c212e3a2f75d674b717a9b29052b20b60aefc",
+  "gitTreeState": "clean",
+  "buildDate": "2026-08-26T10:44:25Z",
+  "goVersion": "go1.26.6",
+  "compiler": "gc",
+  "platform": "linux/amd64"
+}HTTP 200
+
+$ curl -s --cacert cluster-ca.pem -w 'HTTP %{http_code}\n' "$APISERVER/api/v1/namespaces"
+{
+  "kind": "Status",
+  "apiVersion": "v1",
+  "metadata": {},
+  "status": "Failure",
+  "message": "namespaces is forbidden: User \"system:anonymous\" cannot list resource \"namespaces\" in API group \"\" at the cluster scope",
+  "reason": "Forbidden",
+  "details": {
+    "kind": "namespaces"
+  },
+  "code": 403
+}HTTP 403
+
+$ curl -s --cacert cluster-ca.pem -H 'Authorization: Bearer not-a-token' -w 'HTTP %{http_code}\n' "$APISERVER/version"
+{
+  "kind": "Status",
+  "apiVersion": "v1",
+  "metadata": {},
+  "status": "Failure",
+  "message": "Unauthorized",
+  "reason": "Unauthorized",
+  "code": 401
+}HTTP 401
+
+$ kubectl get clusterrolebinding system:public-info-viewer -o jsonpath='{range .subjects[*]}{.kind} {.name}{"\n"}{end}'
+Group system:authenticated
+Group system:unauthenticated
+
+## authenticators step 2: a trust bundle, and a Pod that asks for a certificate
+$ kubectl create namespace "$NS"
+namespace/p00-final-pcr created
+
+$ kubectl label namespace "$NS" pod-security.kubernetes.io/enforce=restricted pod-security.kubernetes.io/enforce-version=v1.37 pod-security.kubernetes.io/audit=restricted pod-security.kubernetes.io/warn=restricted
+namespace/p00-final-pcr labeled
+
+$ kubectl create serviceaccount workload -n "$NS"
+serviceaccount/workload created
+
+$ kubectl create serviceaccount intruder -n "$NS"
+serviceaccount/intruder created
+
+$ kubectl apply -f ctb.yaml
+clustertrustbundle.certificates.k8s.io/lab.example.com:p05-01:ca created
+
+$ kubectl apply -f pod.yaml -f intruder.yaml
+pod/workload created
+pod/intruder created
+
+$ kubectl get pod -n "$NS"
+NAME       READY   STATUS              RESTARTS   AGE
+intruder   0/1     ContainerCreating   0          0s
+workload   0/1     ContainerCreating   0          1s
+
+$ kubectl get podcertificaterequests -n "$NS" -o custom-columns=POD:.spec.podName,SERVICEACCOUNT:.spec.serviceAccountName,SIGNER:.spec.signerName,ISSUED:.status.conditions[*].type
+POD        SERVICEACCOUNT   SIGNER                   ISSUED
+intruder   intruder         lab.example.com/p05-01   <none>
+workload   workload         lab.example.com/p05-01   <none>
+
+## authenticators step 3: the signer decides, and the Pod gets a certificate or a refusal
+$ kubectl get podcertificaterequest "$REQ" -n "$NS" -o jsonpath='{.spec.stubPKCS10Request}' | base64 -d | openssl req -inform DER -out csr.pem
+
+$ openssl req -in csr.pem -noout -verify
+Certificate request self-signature verify OK
+
+$ openssl x509 -req -in csr.pem -CA ca.crt -CAkey ca.key -CAcreateserial -days 1 -sha256 -extfile ext.cnf -out leaf.crt
+Certificate request self-signature ok
+subject=
+
+$ openssl x509 -in leaf.crt -noout -issuer -ext subjectAltName
+issuer=CN=p05-01 lab signer CA
+X509v3 Subject Alternative Name: 
+    URI:spiffe://lab.example.com/ns/p00-final-pcr/sa/workload
+
+$ kubectl patch podcertificaterequest "$REQ" -n "$NS" --subresource=status --type=merge --patch-file issue.json
+podcertificaterequest.certificates.k8s.io/req-wvzf6 patched
+
+$ kubectl patch podcertificaterequest "$BAD" -n "$NS" --subresource=status --type=merge --patch-file deny.json
+podcertificaterequest.certificates.k8s.io/req-vqspg patched
+
+$ kubectl get pod -n "$NS"
+NAME       READY   STATUS              RESTARTS   AGE
+intruder   0/1     ContainerCreating   0          5s
+workload   1/1     Running             0          6s
+
+$ kubectl get podcertificaterequests -n "$NS" -o custom-columns=POD:.spec.podName,STATE:.status.conditions[*].type,REASON:.status.conditions[*].reason
+POD        STATE    REASON
+intruder   Denied   UnknownServiceAccount
+workload   Issued   Issued
+
+## authenticators step 4: what the Pod holds
+$ kubectl exec workload -n "$NS" -- ls /var/run/identity
+ca.pem
+credentialbundle.pem
+
+$ kubectl exec workload -n "$NS" -- cat /var/run/identity/credentialbundle.pem | grep -c 'BEGIN CERTIFICATE'
+2
+
+$ kubectl exec workload -n "$NS" -- cat /var/run/identity/credentialbundle.pem | grep -c 'BEGIN PRIVATE KEY'
+1
+
+$ openssl x509 -in bundle.pem -noout -issuer -ext subjectAltName
+issuer=CN=p05-01 lab signer CA
+X509v3 Subject Alternative Name: 
+    URI:spiffe://lab.example.com/ns/p00-final-pcr/sa/workload
+
+$ openssl verify -CAfile ca-from-pod.pem bundle.pem
+bundle.pem: OK
+
+$ kubectl get clustertrustbundle "$CTB" -o jsonpath='{.spec.signerName}{"\n"}'
+lab.example.com/p05-01
+
+## done: the namespace and the trust bundle are deleted on exit

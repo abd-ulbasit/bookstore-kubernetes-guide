@@ -137,9 +137,9 @@ mode, watch the audit log, build a whitelist, flip to `On`.
 
 | Threat | Control in this chapter | Goes deeper in |
 |---|---|---|
-| Hostile payloads (SQL injection, XSS, path traversal) reach the app | Coraza WAF, OWASP CRS v4, blocks on anomaly score 5 | Steps 5 and 7 here |
-| Abuse volume: one tenant or a bot exhausts shared capacity | Token bucket per tenant on the verified claim; a shared default bucket for the rest | Step 6 here; quotas in 13.02 |
-| Forged tokens at the edge | JWT verification and AuthZ on the Gateway API pods (`edge/jwt-policies.yaml`, a copy of 13.04's policies) | Step 2 here; the issuer is set up in 13.04 |
+| Hostile payloads (SQL injection, XSS, path traversal) reach the app | Coraza WAF, OWASP CRS v4, blocks on anomaly score 5. **Not run:** the chapter's lab did not install Istio, and no block was captured | Steps 5 and 7 here; [Coraza](https://coraza.io/docs/) and [OWASP CRS](https://coreruleset.org/docs/) documentation |
+| Abuse volume: one tenant or a bot exhausts shared capacity | Token bucket per tenant on the verified claim; a shared default bucket for the rest. **Not run:** no request was rate limited in a captured run | Step 6 here; quotas in 13.02; [Envoy local rate limit](https://www.envoyproxy.io/docs/envoy/latest/configuration/http/http_filters/local_rate_limit_filter) |
+| Forged tokens at the edge | JWT verification and AuthZ on the Gateway API pods (`edge/jwt-policies.yaml`, a copy of 13.04's policies). **Not run** here | Step 2 here; the issuer is set up in 13.04 |
 | The edge CA key: whoever holds it can mint certificates clients trust | The CA is a namespaced Issuer, so only Certificates in `bookstore-platform` can use it. Clients trust only the exported `edge-ca.crt`. Reads of the `edge-ca` Secret remain a limit, enforced with RBAC | Step 2 here; RBAC in [Part 05 ch.01](../05-security/01-authn-authz-rbac.md) |
 | Bots that look like buyers (no token, many IPs) | Not built here: a bot-management vendor | Production notes |
 

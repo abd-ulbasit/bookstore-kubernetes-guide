@@ -429,7 +429,12 @@ secret/bookstore-tls created
 ```
 
 A self-signed pair is fine on a laptop. In production this is cert-manager
-issuing and renewing the Secret, as the production note below explains.
+issuing and renewing the Secret, as the production note below explains. This
+guide does not run cert-manager. Its `Issuer` and `Certificate` objects are
+written out, and not run, in [11.01](../11-advanced-production-patterns/01-admission-webhooks.md)
+(a webhook's serving certificate) and in
+[13.07](../13-grand-capstone-bookstore-platform/07-edge-gateway-waf-rate-limiting.md)
+(the edge certificate that a Gateway references).
 
 ### 5. Check the backends directly
 
@@ -896,7 +901,9 @@ the equivalent `51-gateway.yaml`.
 > **In production:** **don't issue certs with `openssl` by hand.** Run
 > **cert-manager** with an ACME issuer (Let's Encrypt) or your private CA: it
 > provisions and **auto-renews** the TLS Secret the Ingress references. Expired
-> certs are a top outage cause; manual certs guarantee one eventually.
+> certs are a top outage cause; manual certs guarantee one eventually. Check
+> expiry with a monitor, not by remembering. Decoding the Secret's `tls.crt`
+> into `openssl x509 -enddate -noout` prints the date to alert on.
 
 > **In production (EKS/GKE/AKS):** the controller is fronted by a **real cloud
 > LB**. A Traefik Service of type `LoadBalancer` gets one from the cloud.

@@ -562,7 +562,7 @@ jobs:
           "$BOOKSTORE/ci/scan.sh" actionlint "$WORKFLOWS"
       - name: Exceptions that have lapsed
         run: |
-          "$BOOKSTORE/ci/scan.sh" expiry "$BOOKSTORE/ci/zap/baseline.conf $BOOKSTORE/ci/kube-linter.yaml"
+          "$BOOKSTORE/ci/scan.sh" expiry "$BOOKSTORE/ci/zap/baseline.conf $BOOKSTORE/ci/kube-linter.yaml $BOOKSTORE/ci/grype.yaml"
       - name: OpenSSF Scorecard (default branch only)
         id: scorecard
         if: contains(fromJSON('["push", "workflow_dispatch"]'), github.event_name) && github.ref == format('refs/heads/{0}', github.event.repository.default_branch)

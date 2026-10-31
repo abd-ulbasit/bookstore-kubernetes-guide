@@ -86,13 +86,23 @@ yours.
 | A metrics token can reach kubelet endpoints that run commands, because `nodes/proxy` covers them all | Fine-grained kubelet authorization, granting `nodes/stats` and `nodes/pods` only | [05.01](01-authn-authz-rbac.md) for RBAC rules |
 | etcd answers any connection, so a Pod on the node network can read its keyspace | `--client-cert-auth=true`, and peer certificates | [05.04](04-secrets-and-cluster-hardening.md) for what etcd holds; [11.08](../11-advanced-production-patterns/08-ha-control-plane-and-etcd.md) for etcd in production |
 | A profiling endpoint exposes runtime data from the API server, the scheduler and the controller manager | `--profiling=false` on each component | the kube-bench triage below, checks `1.2.15`, `1.3.2` and `1.4.1` |
-| A tampered release binary runs on the control plane | A checksum and a signature, checked before the binary runs | [05.03](03-supply-chain.md) for signed images; [15.03](../15-day-to-day-production-ops/03-image-signing-and-provenance.md) for signing in production |
-| A cluster left on an old minor version keeps bugs the release fixed | Upgrades one minor version at a time, cited and not run | [10.01](../10-cloud-and-managed-kubernetes/01-managed-kubernetes-model.md) for a managed control plane |
+| A tampered release binary runs on the control plane | A checksum and a signature, checked before the binary runs | [08.01](../08-day-2-operations/01-cluster-lifecycle.md) step 6 (not run); [05.03](03-supply-chain.md) for signed images; [15.03](../15-day-to-day-production-ops/03-image-signing-and-provenance.md) for signing in production |
+| A cluster left on an old minor version keeps bugs the release fixed | Upgrades one minor version at a time, cited and not run | [08.01](../08-day-2-operations/01-cluster-lifecycle.md) for the upgrade and CVE procedure; [10.01](../10-cloud-and-managed-kubernetes/01-managed-kubernetes-model.md) for a managed control plane |
 
-The operating system under each node has its own hardening: services, file
-permissions and kernel parameters. That is cited in
-[Further reading](#further-reading), because the lab runs on a container and
-cannot show a host's settings.
+The runtime and the operating system under each node have their own
+patching and hardening, and this chapter does not teach either as a lab:
+
+- **Runtime patching and CVE response** are taught elsewhere. [00.05](../00-foundations/05-node-components.md#keep-the-runtime-patched)
+  explains why a flaw in runc is an escape route (CVE-2024-21626 is the
+  example) and checks the runc version on the node.
+  [08.01](../08-day-2-operations/01-cluster-lifecycle.md) step 5 is the
+  triage, patch, drain and verify procedure, and step 6 verifies a release
+  binary before it runs. Both of those steps are narrated there and not run.
+- **Upgrades** are read here and in 08.01 step 7, and not run.
+- **Node operating system hardening**, meaning services, file permissions and
+  kernel parameters, is cited in [Further reading](#further-reading) and not
+  taught. The lab runs on a container and cannot show a host's settings, and
+  no chapter in the guide runs a hardened node image.
 
 ## The lab: a kind cluster, read and probed
 

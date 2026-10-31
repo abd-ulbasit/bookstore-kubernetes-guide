@@ -23,6 +23,11 @@
 > runs Kubernetes v1.37.0 (Debian 13, kernel 7.0.0, containerd 2.3.4), with
 > kubectl v1.37.2.
 >
+> The authenticators lab,
+> [`labs/05-01-authn.sh`](../examples/security-lab/labs/05-01-authn.sh), was
+> recorded later against the same cluster and appended to the transcript. It
+> ran its `kubectl`, `curl` and `openssl` from macOS.
+>
 > **What failed first.** The borrowed-token call first used busybox `wget`, and
 > its TLS handshake with the API server failed (alert 47), so the lab's Pods use
 > `curl`. A later run also missed the API server's pretty-printed JSON, so the
@@ -91,6 +96,8 @@ credential or to escalation. Audit them with
 | Kubelet reads and commands in Pods through `nodes/proxy` | Grant `nodes` read only; never `nodes/proxy` to a person or a dashboard | Lab path E |
 | Listing Secrets returns every value in a namespace | `get` on the one named Secret | [Part 03 ch.02](../03-config-and-storage/02-secrets.md) |
 | Approving a CSR for a signer that honours client certificates | No `approve` on `kubernetes.io/kube-apiserver-client` for any workload | Lab path G |
+| An anonymous request reaches more than `/version` because a binding names `system:anonymous` or `system:unauthenticated` | Bind nothing to those two names; a bad credential is refused, not treated as anonymous | Lab: anonymous requests; the API server setting is in [05.06](06-control-plane-and-node-hardening.md) |
+| A workload proves itself to a peer with a long-lived key, or one whose identity it chose | A Pod certificate: the kubelet makes the key, and the signer chooses the identity from the Pod's ServiceAccount | Lab: workload certificates; a mesh issues its own in [11.04](../11-advanced-production-patterns/04-service-mesh.md) |
 | Standing `system:masters` or cluster-admin identities | Do not issue certificates or tokens that carry them | Built into the API server; see How it works |
 | The default ServiceAccount, or a token nothing needs | A dedicated ServiceAccount, and `automountServiceAccountToken: false` as in the [baseline](../01-core-workloads/01-pods.md#baseline) | Hands-on section 4 |
 
@@ -757,6 +764,323 @@ bullet above), a kubelet exec with
 cluster-admin rights, or any audit record. Those belong to other chapters or
 are cited to upstream.
 
+## Lab: who is asking? Anonymous requests and workload certificates
+
+**Tier A.** The script is
+[`labs/05-01-authn.sh`](../examples/security-lab/labs/05-01-authn.sh), and its
+output is appended to the same transcript as the paths above,
+[`evidence/05-01.txt`](../examples/security-lab/evidence/05-01.txt), under
+"authenticators step 1" to "step 4". Every output block in this section appears
+there verbatim. The recorded run used the prefix `p00-final`, so its namespace
+is `p00-final-pcr` where the manifests below say `p05-01-pcr`. The client side
+of this script ran on macOS, so its `openssl` is LibreSSL.
+
+### Anonymous requests: what a request with no credential gets
+
+A request that no authenticator accepts, and that carries no credential, is not
+rejected by authentication. When anonymous requests are enabled, it becomes the
+user `system:anonymous` in the group `system:unauthenticated`, and RBAC decides
+what that identity may do
+([upstream](https://kubernetes.io/docs/reference/access-authn-authz/authentication/#anonymous-requests)).
+A request with a credential that fails is different: it gets a 401 and never
+falls back to anonymous. The script sends three requests with `curl` and no
+client certificate, because `kubectl` asks for a user name at the terminal when
+its kubeconfig holds no credential.
+
+```sh
+curl -s --cacert cluster-ca.pem -w 'HTTP %{http_code}\n' "$APISERVER/version"
+```
+
+<!-- gate: output -->
+
+```
+  "gitVersion": "v1.37.0",
+# ...
+  "platform": "linux/amd64"
+}HTTP 200
+```
+
+`/version` answers, because a default binding grants it to everyone. Reading
+objects does not:
+
+```sh
+curl -s --cacert cluster-ca.pem -w 'HTTP %{http_code}\n' "$APISERVER/api/v1/namespaces"
+```
+
+<!-- gate: output -->
+
+```
+  "message": "namespaces is forbidden: User \"system:anonymous\" cannot list resource \"namespaces\" in API group \"\" at the cluster scope",
+  "reason": "Forbidden",
+# ...
+  "code": 403
+}HTTP 403
+```
+
+The refusal names `system:anonymous`, so the request was authenticated as that
+user and then denied by RBAC. A bad token takes the other path:
+
+```sh
+curl -s --cacert cluster-ca.pem -H 'Authorization: Bearer not-a-token' -w 'HTTP %{http_code}\n' "$APISERVER/version"
+```
+
+<!-- gate: output -->
+
+```
+  "message": "Unauthorized",
+  "reason": "Unauthorized",
+  "code": 401
+}HTTP 401
+```
+
+The same `/version` that answered 200 above answers 401 here, so a client that
+sends a wrong credential does not become anonymous. The binding that lets an
+anonymous request read `/version` is a built-in one:
+
+```sh
+kubectl get clusterrolebinding system:public-info-viewer -o jsonpath='{range .subjects[*]}{.kind} {.name}{"\n"}{end}'
+```
+
+<!-- gate: output -->
+
+```
+Group system:authenticated
+Group system:unauthenticated
+```
+
+It grants read on a few non-resource URLs (`/healthz`, `/livez`, `/readyz`,
+`/version`) and nothing else. The risk is the binding someone adds later: a
+ClusterRoleBinding or RoleBinding whose subject is `system:unauthenticated` or
+`system:anonymous` hands that access to every client on the network that can
+reach the API server. Audit for it by listing the bindings with
+`kubectl get clusterrolebindings,rolebindings -A -o wide` and searching for
+those two names. [05.06](06-control-plane-and-node-hardening.md) covers the API
+server configuration that switches anonymous access off or limits it to named
+endpoints.
+
+### Workload certificates: Pod certificates and trust bundles
+
+A ServiceAccount token proves a Pod to the API server. A workload that must
+prove itself to another workload, with a certificate, uses the
+`certificates.k8s.io/v1` objects instead. The Kubernetes 1.37 documentation
+marks both stable
+([certificate signing requests](https://kubernetes.io/docs/reference/access-authn-authz/certificate-signing-requests/)):
+
+- A **PodCertificateRequest** is created by the kubelet, not by a user. A Pod
+  asks for one with a `podCertificate` source in a projected volume. The
+  kubelet generates the private key on the node, sends a request that holds
+  only the public key, and writes the key and the issued chain into the volume.
+  The Pod does not start until a certificate has been issued. The request names
+  the Pod, its ServiceAccount and its node, and `NodeRestriction` stops a node
+  from filing one for a Pod that is not running on it.
+- A **ClusterTrustBundle** is a cluster-scoped object that distributes the CA
+  certificates a workload should trust. A bundle linked to a signer must be
+  named after it, with `/` written as `:`, and is projected into the Pod with a
+  `clusterTrustBundle` source.
+- **Kubernetes ships no signer for Pod certificates.** A controller that you
+  run answers each request by writing the certificate chain, or a `Denied`
+  condition, into its status. It needs the `update` verb on
+  `podcertificaterequests/status` and the `sign` verb on the signer's name.
+  The identity in the certificate is the signer's decision: it can read the
+  request's ServiceAccount, namespace and node, and issue only what policy
+  allows.
+
+The lab's signer is a few lines of `openssl`, and it is not for production: its
+CA key sits in a temporary directory, and its only rule is that it issues for
+one ServiceAccount. Its job here is to show where the decision sits. Two Pods
+ask for a certificate from the signer `lab.example.com/p05-01`, one as the
+ServiceAccount `workload` and one as `intruder`. Both Pods are complete, in a
+namespace that enforces `restricted`. The trust bundle's PEM is the lab CA, so
+the first block below is a fragment and the lab script writes the real one.
+
+```yaml
+# Fragment: the trust bundle object has the CA certificate in trustBundle. The
+# lab script writes it from the CA it creates, so it has no kind: line here.
+metadata:
+  name: lab.example.com:p05-01:ca   # the signer name, with / written as :
+spec:
+  signerName: lab.example.com/p05-01
+  trustBundle: <PEM of the lab CA certificate>
+```
+
+```yaml
+apiVersion: v1
+kind: Pod
+metadata:
+  name: workload
+  namespace: p05-01-pcr
+spec:
+  serviceAccountName: workload
+  automountServiceAccountToken: false
+  securityContext:
+    runAsNonRoot: true
+    runAsUser: 65532
+    runAsGroup: 65532
+    fsGroup: 65532
+    seccompProfile:
+      type: RuntimeDefault
+  containers:
+    - name: app
+      image: busybox@sha256:73aaf090f3d85aa34ee199857f03fa3a95c8ede2ffd4cc2cdb5b94e566b11662  # busybox:1.36
+      command: ["sleep", "3600"]
+      securityContext:
+        allowPrivilegeEscalation: false
+        readOnlyRootFilesystem: true
+        capabilities:
+          drop: ["ALL"]
+      volumeMounts:
+        - name: identity
+          mountPath: /var/run/identity
+          readOnly: true
+  volumes:
+    - name: identity
+      projected:
+        sources:
+          - podCertificate:
+              signerName: lab.example.com/p05-01
+              keyType: ECDSAP256
+              maxExpirationSeconds: 86400
+              credentialBundlePath: credentialbundle.pem
+          - clusterTrustBundle:
+              signerName: lab.example.com/p05-01
+              labelSelector:
+                matchLabels: {}
+              path: ca.pem
+```
+
+The `intruder` Pod is the same manifest with its own name and ServiceAccount.
+Both start and wait, because no certificate exists yet:
+
+```sh
+kubectl get pod -n "$NS"
+```
+
+<!-- gate: output -->
+
+```
+NAME       READY   STATUS              RESTARTS   AGE
+intruder   0/1     ContainerCreating   0          0s
+workload   0/1     ContainerCreating   0          1s
+```
+
+The kubelet has filed one request for each, naming the ServiceAccount it saw:
+
+```sh
+kubectl get podcertificaterequests -n "$NS" -o custom-columns=POD:.spec.podName,SERVICEACCOUNT:.spec.serviceAccountName,SIGNER:.spec.signerName,ISSUED:.status.conditions[*].type
+```
+
+<!-- gate: output -->
+
+```
+POD        SERVICEACCOUNT   SIGNER                   ISSUED
+intruder   intruder         lab.example.com/p05-01   <none>
+workload   workload         lab.example.com/p05-01   <none>
+```
+
+The signer reads the request's public key (`spec.stubPKCS10Request`, a minimal
+PKCS#10 request whose signature the API server has already checked), signs it
+with the lab CA, and puts a URI name in the certificate that is built from the
+Pod's namespace and ServiceAccount:
+
+```sh
+kubectl get podcertificaterequest "$REQ" -n "$NS" -o jsonpath='{.spec.stubPKCS10Request}' | base64 -d | openssl req -inform DER -out csr.pem
+```
+
+```sh
+openssl x509 -req -in csr.pem -CA ca.crt -CAkey ca.key -CAcreateserial -days 1 -sha256 -extfile ext.cnf -out leaf.crt
+openssl x509 -in leaf.crt -noout -issuer -ext subjectAltName
+```
+
+<!-- gate: output -->
+
+```
+issuer=CN=p05-01 lab signer CA
+X509v3 Subject Alternative Name: 
+    URI:spiffe://lab.example.com/ns/p00-final-pcr/sa/workload
+```
+
+The script then writes the chain into the `workload` request's status, as the
+`Issued` condition, and a `Denied` condition into the `intruder` request, with
+`kubectl patch --subresource=status`. The `workload` Pod starts, and the
+`intruder` Pod does not:
+
+```sh
+kubectl get pod -n "$NS"
+kubectl get podcertificaterequests -n "$NS" -o custom-columns=POD:.spec.podName,STATE:.status.conditions[*].type,REASON:.status.conditions[*].reason
+```
+
+<!-- gate: output -->
+
+```
+NAME       READY   STATUS              RESTARTS   AGE
+intruder   0/1     ContainerCreating   0          5s
+workload   1/1     Running             0          6s
+```
+
+<!-- gate: output -->
+
+```
+POD        STATE    REASON
+intruder   Denied   UnknownServiceAccount
+workload   Issued   Issued
+```
+
+Inside the `workload` Pod, the volume holds the credential bundle and the CA.
+The bundle is the private key and then the chain, which is one key block and
+two certificate blocks (the leaf and the CA):
+
+```sh
+kubectl exec workload -n "$NS" -- ls /var/run/identity
+kubectl exec workload -n "$NS" -- cat /var/run/identity/credentialbundle.pem | grep -c 'BEGIN CERTIFICATE'
+kubectl exec workload -n "$NS" -- cat /var/run/identity/credentialbundle.pem | grep -c 'BEGIN PRIVATE KEY'
+```
+
+<!-- gate: output -->
+
+```
+ca.pem
+credentialbundle.pem
+```
+
+<!-- gate: output -->
+
+```
+2
+```
+
+<!-- gate: output -->
+
+```
+1
+```
+
+The certificate chains to the CA that the trust bundle delivered, which is what
+a peer does when it checks the workload:
+
+```sh
+openssl verify -CAfile ca-from-pod.pem bundle.pem
+```
+
+<!-- gate: output -->
+
+```
+bundle.pem: OK
+```
+
+What the run shows: the key never left the node, because the request carried
+only the public key. The identity in the certificate came from the signer's
+reading of the request, not from anything the Pod wrote, and a Pod running as
+another ServiceAccount was refused. A peer that trusts the bundle trusts every
+certificate the signer issues, so the signer's policy is the control, and the
+`sign` verb on it belongs to the signing controller alone.
+
+What this lab did not run: the refresh before expiry (the kubelet starts at
+`beginRefreshAt`, which the signer set to twelve hours out), a signer that
+authorizes with a SubjectAccessReview, and a service mesh that consumes the
+bundle. [11.04](../11-advanced-production-patterns/04-service-mesh.md) uses its
+mesh CA instead of this API, and a given mesh's own documentation says whether
+it can take Pod certificates.
+
 ## How it works under the hood
 
 ### Authentication: every credential is "asserted identity"
@@ -793,12 +1117,41 @@ string + a set of group strings). Kubernetes stores **no** user records: it
   this token for a cloud credential, as IRSA and GKE Workload Identity do, is
   taught in [10.03](../10-cloud-and-managed-kubernetes/03-cloud-identity.md).
 - **OIDC.** For *humans*: the API server validates an ID token from your
-  identity provider (`--oidc-issuer-url` etc.); claims map to username/groups.
-  This is how real clusters do SSO, there is still no User object, just a
-  trusted issuer. Human SSO is built in
-  [13.04](../13-grand-capstone-bookstore-platform/04-real-auth-keycloak-irsa-istio-jwt.md).
-  Bind IdP groups to RBAC rather than individuals, so access follows directory
-  membership.
+  identity provider; claims map to username/groups. This is how real clusters
+  do SSO, there is still no User object, just a trusted issuer. Bind IdP groups
+  to RBAC rather than individuals, so access follows directory membership. The
+  `--oidc-*` flags configure one issuer. The structured form is a file passed
+  with `--authentication-config`, which takes several issuers and CEL rules
+  ([upstream](https://kubernetes.io/docs/reference/access-authn-authz/authentication/#using-authentication-configuration)).
+  Its shape, **cited from the upstream page and not run**, because a kind
+  cluster would need a reachable identity provider and an API server flag:
+
+  ```yaml
+  # Fragment: the file the apiserver reads. It is not a Kubernetes object, so
+  # it has no kind: line. Cited from the upstream page and not run.
+  jwt:
+    - issuer:
+        url: https://idp.example.com
+        audiences:
+          - kubernetes
+      claimValidationRules:
+        - expression: 'claims.exp - claims.nbf <= 86400'
+          message: total token lifetime must not exceed 24 hours
+      claimMappings:
+        username:
+          claim: sub
+          prefix: "oidc:"
+        groups:
+          claim: groups
+          prefix: "oidc:"
+  ```
+
+  Setting any `--oidc-*` flag together with `--authentication-config` is a
+  misconfiguration, and the API server exits. The prefixes keep an IdP name
+  from matching a built-in one such as `system:masters`. The customers of the
+  Bookstore storefront are a different case, and
+  [13.04](../13-grand-capstone-bookstore-platform/04-real-auth-keycloak-irsa-istio-jwt.md)
+  verifies their tokens in the mesh, not in the API server.
 - **Webhook / authenticating proxy.** The API server delegates token review to
   an external service (used by managed providers, e.g. EKS's IAM
   authenticator).

@@ -5,8 +5,8 @@
 # catalog GRADUATES from a bare Pod (01/02, in `bookstore`) to a self-healing
 # Deployment in the `bookstore` namespace (ch.03). It carries forward the ch.02
 # health probes + graceful-shutdown lifecycle and the ch.03 requests/limits.
-# The bare-Pod files are kept as frozen teaching seeds and are NOT edited; this
-# is their successor — from here on, this IS the catalog.
+# The bare-Pod files 01- and 02- are the Pod this Deployment replaces; from
+# here on, this IS the catalog.
 #
 # Part 03 increments (each explained in-narrative in its chapter):
 #  • ch.01 ConfigMap: non-secret config (LOG_LEVEL, REDIS_ADDR, demo flags)
@@ -27,8 +27,8 @@
 #  • ch.03 priorityClassName: bookstore-critical (35-) — user-facing tier,
 #    above batch, below the data tier (postgres).
 #
-# Part 05 SECURITY LAYER (ch.01 + ch.02 — additive only; only the fields below
-# were ADDED to template.spec, nothing above was changed):
+# Security baseline in template.spec (Part 01 ch.01, 05.01, 05.02), present
+# from the first manifest of this workload; the fields below carry it:
 #  • ch.01 serviceAccountName: catalog-sa (05-serviceaccounts-rbac.yaml) +
 #    automountServiceAccountToken: false — the Go app never calls kube-apiserver,
 #    so it gets a dedicated identity with NO mounted token (least privilege).

@@ -760,12 +760,29 @@ profile must be loaded on every node where a Pod can land.
 
 SELinux is also a Linux Security Module, and it labels files and processes
 rather than naming paths. Kubernetes sets the label through
-`securityContext.seLinuxOptions`. Step 1 showed that the node exposes no
-SELinux filesystem, so this lab cannot apply a label and see it enforced. The
-mechanism and the field are in the [Linux kernel security
+`securityContext.seLinuxOptions`. The upstream page says the specified labels
+are assigned to the container's processes, and that if the host has security
+policies that affect those labels, the host kernel enforces them. The label is
+a field of the Pod or the container:
+
+```yaml
+# Fragment: the SELinux label of the Pod's processes. Not run: the lab node
+# exposes no SELinux filesystem (step 1), so no label could be enforced here.
+spec:
+  securityContext:
+    seLinuxOptions:
+      level: "s0:c123,c456"
+```
+
+The field does nothing on its own. A node whose operating system enables
+SELinux, with a policy that reads that label, decides what the label allows,
+and the baseline's other fields stay in place. The mechanism and the field are
+in the [Linux kernel security
 constraints](https://kubernetes.io/docs/concepts/security/linux-kernel-security-constraints/)
-page. Distributions that enable SELinux by default are the ones where the
-field matters in practice.
+page, and the steps are in [Assign SELinux labels to a
+container](https://kubernetes.io/docs/tasks/configure-pod-container/security-context/#assign-selinux-labels-to-a-container).
+Distributions that enable SELinux by default are the ones where the field
+matters in practice.
 
 ### gVisor: a sandboxed runtime through a RuntimeClass
 
@@ -1010,7 +1027,41 @@ runs a daemon on each node, so it is a heavy install, and this lab did not run
 it. Its
 [project](https://github.com/kubernetes-sigs/security-profiles-operator) and its
 documentation describe the install and the recording. The lab keeps profiles as
-files, which is the mechanism the Operator automates.
+files, which is the mechanism the Operator automates. The two objects below are
+copied in shape from the project's `examples/` directory and are **not run**.
+The Operator writes each profile object to the nodes as a file under its own
+directory:
+
+```yaml
+# Fragment: a SeccompProfile object. Not run. The apiVersion is
+# security-profiles-operator.x-k8s.io/v1 and the kind is SeccompProfile.
+metadata:
+  name: profile-block-all
+spec:
+  defaultAction: "SCMP_ACT_ERRNO"
+```
+
+A recording turns the Pods that match a label into a profile, so the audit
+step of the lab above is done by the Operator:
+
+```yaml
+# Fragment: a ProfileRecording object. Not run. The apiVersion is
+# security-profiles-operator.x-k8s.io/v1 and the kind is ProfileRecording.
+# Each recorded container yields a SeccompProfile named
+# <recording name>-<container name>.
+metadata:
+  name: test-recording
+spec:
+  kind: SeccompProfile
+  recorder: Bpf
+  podSelector:
+    matchLabels:
+      app: alpine
+```
+
+A Pod then uses the installed profile through a `Localhost` seccomp profile,
+whose path is relative to the node's profile directory (the project's example
+uses `operator/profile-complain-unsafe.json`).
 
 ### Clean up
 

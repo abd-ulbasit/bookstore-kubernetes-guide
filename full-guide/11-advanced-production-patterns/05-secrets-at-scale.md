@@ -92,7 +92,11 @@ value, its rotation, its audit trail, and (ideally) its short lifetime.**
   in-cluster controller decrypts it to a `Secret`. **SOPS** (+ KSOPS/Flux):
   encrypt the values *in the YAML* with a KMS/age key, decrypt at apply. They
   keep cleartext out of Git **without** running Vault — different operational
-  model, not strictly worse (when to use which: How it works).
+  model, not strictly worse (when to use which: How it works). Both are
+  described here for comparison. No example tree in the guide contains a
+  `SealedSecret`, a `.sops.yaml` or an encrypted file, and nothing was run;
+  [07.02](../07-delivery/02-packaging-kustomize.md) names KSOPS as a Kustomize
+  plugin.
 
 The trap to keep in view: **adopting ESO/Vault does not delete the demo
 Secret's lessons — it operationalizes them, and it adds its own footguns**
@@ -272,11 +276,13 @@ helm install vault hashicorp/vault -n vault --version 0.34.1 --wait \
 kubectl -n vault wait --for=condition=Ready pod/vault-0 --timeout=240s
 ```
 
-> **Dev mode is not secure.** Its root token is the chart default, so anyone
-> who reaches port 8200 owns Vault. Its data lives in memory, and its traffic
-> is plain HTTP. The lab uses it because it starts without unseal keys. Do not
-> use these flags for anything that holds real data. Part 15 ch.05 covers the
-> production layout.
+> **Dev mode is a deliberate exception to the guide's secure-form-first rule.**
+> Its root token is the literal `root`, set by the flag above, so anyone who
+> reaches port 8200 owns Vault. Its data lives in memory, and its traffic is
+> plain HTTP. The lab uses it because it starts without unseal keys, and every
+> command below passes that token. Do not use these flags for anything that
+> holds real data. The secure form, with no root token in any command, is in
+> [Part 15 ch.05](../15-day-to-day-production-ops/05-production-secrets-vault-eso.md).
 
 Configure Vault exactly as [`secrets/00-vault-policy-and-role.yaml`](../examples/bookstore/secrets/00-vault-policy-and-role.yaml)
 documents (that file is **not** a kubectl object — it is the `vault` CLI it

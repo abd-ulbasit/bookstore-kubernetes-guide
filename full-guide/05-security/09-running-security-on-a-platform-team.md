@@ -166,9 +166,13 @@ specification](https://github.com/openvex/spec/blob/main/OPENVEX-SPEC.md)).
 
 A Trivy ignore entry says "ignore this". A VEX statement says why, in a field
 a tool can check, so a later scan can read it. This guide's pipeline records
-its decisions as ignore entries. The lab does not run a VEX scan: a
-hand-written SBOM gave Trivy no results to suppress, so the VEX step is cited,
-not run. See the lab header.
+its decisions as ignore entries: it has no VEX document, and neither the Trivy
+nor the Grype stage is passed one. [05.03](03-supply-chain.md) step 7 shows
+a statement that leaves a finding open, and both scanners keep reporting it.
+Step 7b there runs a `not_affected` statement, backed by a `govulncheck` call
+path check, and Trivy stops reporting the finding. That is a lab, not the
+pipeline: wiring an OpenVEX file into the pipeline's Trivy and Grype stages is
+not done.
 
 ### Dependency-Track, fed by the SBOMs
 
@@ -181,8 +185,17 @@ reaches the triage queue without a rebuild. It gives the portfolio view that a
 single-image scan does not.
 
 It needs an API server and a database, which this lab does not run. It is
-cited, not run. The platform's job is to send every image's SBOM to it at
+cited, not run. The platform's job would be to send every image's SBOM to it at
 build time, and to triage what it raises with the four questions above.
+
+**The Bookstore does not do this yet.** Its `sbom` job uploads the SBOM as a
+build artifact, kept for 90 days, and nothing uploads it to Dependency-Track or
+any other service. The image scan runs with `--ignore-unfixed` at build time,
+and the pipeline's own comments say that nothing in the workflow looks at a
+published image again. So a CVE disclosed after a build is not seen by this
+repository until the service is next built. A scheduled rescan of the published
+digests, or the feed this section describes, is the control that closes the gap,
+and neither exists in the tree.
 
 ## Exceptions with an expiry date
 
@@ -755,7 +768,9 @@ each row another way: admission, the gates, or a dated review.
 
 Read the CIS table as a checklist of questions for the platform, not as proof.
 Each row names a control and where it is taught. The platform's evidence is
-the admission result or the gate result for that control.
+the admission result or the gate result for that control. This section is a
+mapping only. Nothing in the pipeline links a gate result to a control number,
+and no compliance artifact is produced from these tables.
 
 ### NSA and CISA Kubernetes Hardening Guidance
 
@@ -834,9 +849,9 @@ the chapter does not show their output.
   15.
 - **Dependency-Track**, described above. Not run: it needs an API server and a
   database.
-- **A VEX scan** that suppresses a finding with a `not_affected` statement.
-  Not run: a hand-written SBOM gave Trivy no results. The specification is
-  cited above.
+- **A VEX file in the pipeline.** The `not_affected` scan runs in 05.03 step 7b,
+  on a module SBOM with Trivy. The pipeline's own stages are passed no VEX file.
+  Not run. The specification is cited above.
 - **A clock-based expiry check in the admission layer.** A policy engine with a
   clock in its expression language could refuse a lapsed exception at admission.
   The engines in this guide are not used for it, and the lab did not test one.
