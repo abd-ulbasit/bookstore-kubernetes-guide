@@ -17,14 +17,16 @@
 > and how Kueue admits a PyTorchJob/RayJob as a `Workload` (deepens
 > [ch.03](03-batch-and-gang-scheduling.md)) — applied by installing the
 > Kubeflow Training Operator and KubeRay (pinned, own namespaces) and
-> **actually training the recommendations model on kind, CPU-only**, in
-> [`examples/bookstore/ml/train/`](../examples/bookstore/ml/train/), then
+> running the CPU-only recommendations training as a `batch/v1` Job on kind,
+> in [`examples/bookstore/ml/train/`](../examples/bookstore/ml/train/), then
 > showing the same training as a `PyTorchJob` and a `RayJob` (CRD-backed,
-> dry-run honest).
+> dry-run honest). The worker traffic is locked down with a NetworkPolicy,
+> the operators' RBAC is read before install, and every training Pod gets its
+> own ServiceAccount.
 
 **Estimated time:** ~60 min read · half-day hands-on
 **Prerequisites:** [Part 12 ch.03](03-batch-and-gang-scheduling.md) — gang scheduling that admits these workloads · [Part 03 ch.05](../03-config-and-storage/05-stateful-data-patterns.md) — PVC patterns checkpointing uses · [Part 10 ch.03](../10-cloud-and-managed-kubernetes/03-cloud-identity.md) — cloud identity for S3/GCS data loading
-**You'll know after this:** • author a Kubeflow PyTorchJob with master + workers + `cleanPodPolicy` + Kueue suspend · • compare PyTorchJob vs RayJob vs raw JobSet for distributed training · • design checkpointing against a PVC or object store for resumable runs · • configure elastic + fault-tolerant training under spot preemption · • load training data via RWX PVC or cloud object store + workload identity
+**You'll know after this:** • author a Kubeflow PyTorchJob with master + workers + `cleanPodPolicy` + Kueue suspend · • compare PyTorchJob vs RayJob vs raw JobSet for distributed training · • design checkpointing against a PVC or object store for resumable runs · • configure elastic + fault-tolerant training under spot preemption · • load training data via RWX PVC or cloud object store + workload identity · • restrict rank-to-rank traffic with a NetworkPolicy and read the operators' RBAC before you install them
 
 <!-- tags: ml, batch, gpu, stateful, kueue -->
 
@@ -56,13 +58,13 @@ deliberately tiny item-kNN / co-occurrence recommender (see
 [`../examples/bookstore/ml/README.md`](../examples/bookstore/ml/README.md)
 and [`dataset/README.md`](../examples/bookstore/ml/dataset/README.md)). The
 **real CPU-only training** in
-[`examples/bookstore/ml/train/`](../examples/bookstore/ml/train/) runs on a
-laptop kind cluster and produces a `model.joblib` the next chapters serve —
-no GPU, no PyTorch all-reduce. The `PyTorchJob` and `RayJob` files in that
-directory are the *CRD shapes* with the same training as a stand-in: real
-operator wiring, real Kueue admission, real PSA-`restricted` securityContext,
-and the CRD-intrinsic header note (`no matches for kind …` until the
-operator is installed) — the same precedent as the rest of this guide.
+[`examples/bookstore/ml/train/`](../examples/bookstore/ml/train/) produces a
+`model.joblib` the next chapters serve. There is no GPU and no PyTorch all-reduce. The
+`PyTorchJob` and `RayJob` files in that directory are the *CRD shapes* with
+the same training as a stand-in: real operator wiring, real Kueue admission,
+real PSA-`restricted` securityContext, and the CRD-intrinsic header note
+(`no matches for kind …` until the operator is installed), the same
+precedent as the rest of this guide.
 
 ## Mental model
 
@@ -109,6 +111,28 @@ the whole shape via `suspend`.**
   training is not a *new* admission story; ch.03's gang/quota mechanics
   cover it the same way they cover a JobSet. The new piece is the
   *workload shape*, not the *queue*.
+
+## Threats and controls
+
+A distributed run is many Pods that trust each other by default. Each rank
+opens ports to the others, the framework's rendezvous and collective traffic
+does not check who is on the other end, and the operators that create the
+Pods hold cluster-wide rights. The threats below are specific to training.
+Everything else about a training Pod is the
+[baseline](../01-core-workloads/01-pods.md#baseline) from 01.01.
+
+| Threat | Control taught here | Goes deeper |
+|---|---|---|
+| A Pod outside the run joins the rendezvous or reads traffic between ranks | A NetworkPolicy that admits only the training group, in [step 3](#3-only-the-training-group-talks-to-itself) | [02.06](../02-networking/06-network-policies.md); mTLS in [11.04](../11-advanced-production-patterns/04-service-mesh.md) |
+| Any client that reaches the Ray head submits a job, and the job runs code on the head | The dashboard and job port are reachable from the group only; the submitter is in the group | [02.06](../02-networking/06-network-policies.md); the CVE under How it works |
+| A compromised training Pod calls out to the internet and sends data or pulls code | Default-deny egress, with DNS and the group as the only destinations | [02.06](../02-networking/06-network-policies.md) |
+| A training image, dependency or data file from outside runs code in the cluster | Images pinned by digest; this chapter's data is generated in-process, so no outside input is read | [05.03](../05-security/03-supply-chain.md); the load-time check in [12.06](06-model-serving-and-inference.md) |
+| Training data is read with a static cloud key that leaks | Workload identity for object storage, with no key on the Pod | [Part 10 ch.03](../10-cloud-and-managed-kubernetes/03-cloud-identity.md) |
+| Two Pods write the model artifact, or a compromised worker replaces the file the server loads | Only one Pod mounts the model PVC read-write; the serving side mounts it read-only | [12.06](06-model-serving-and-inference.md) |
+| A training Pod uses its ServiceAccount token to call the API | A dedicated ServiceAccount with no RoleBinding, and no mounted token | [05.01](../05-security/01-authn-authz-rbac.md) |
+| The operator that creates the Pods holds more rights than it needs | Read the operator's ClusterRole before you install it, and keep the operator in its own namespace | [08.05](../08-day-2-operations/05-operators-and-crds.md) |
+| The operator's own Pod runs as root, and restricted would refuse it | The namespace is labelled at the lowest level that admits the Pod, and the exception is recorded | [05.02](../05-security/02-pod-security.md) |
+| A run with no deadline holds GPUs or CPU for days | `activeDeadlineSeconds` on the run, and a quota per team | [01.03](../01-core-workloads/03-resources-and-qos.md); [ch.03](03-batch-and-gang-scheduling.md) |
 
 ## Diagrams
 
@@ -170,14 +194,23 @@ flowchart TB
 ## Hands-on with the Bookstore
 
 **Assumed working directory: the guide repo root (`full-guide/`).** Requires
-the PSA-`restricted` `bookstore-ml` namespace from
-[ch.01](01-why-ml-on-kubernetes.md) and the Kueue capacity/queue from
-[ch.03](03-batch-and-gang-scheduling.md). This chapter installs the
-**Kubeflow Training Operator** and **KubeRay** (pinned, own namespaces),
-adds the *real CPU training image* + manifests under
+the PSA-`restricted` `bookstore-ml` namespace and its default-deny
+NetworkPolicy from [ch.01](01-why-ml-on-kubernetes.md), and the Kueue
+capacity/queue from [ch.03](03-batch-and-gang-scheduling.md). This chapter
+installs the **Kubeflow Training Operator** and **KubeRay** (pinned, own
+namespaces), adds the CPU training image and manifests under
 [`examples/bookstore/ml/train/`](../examples/bookstore/ml/train/), and proves
 the train -> joblib loop end-to-end on kind. The serving side comes in
 [ch.06](06-model-serving-and-inference.md).
+
+> **What was run here, and what was not.** The captured output in this
+> chapter came from a lab cluster whose node has a different name from the
+> one you will see. The operator checks were dry runs against that cluster
+> and renders of the pinned upstream release. The Training Operator and
+> KubeRay were not installed there, and the training image build did not
+> finish on the shared lab machine, so no training Pod ran. Each captured
+> block is real output from a command the lab ran. Sample output is labelled
+> illustrative.
 
 > **The recommender is tiny and CPU-only by design.** The real artifact
 > ([`train.py`](../examples/bookstore/ml/train/train.py)) is item-kNN /
@@ -187,119 +220,582 @@ the train -> joblib loop end-to-end on kind. The serving side comes in
 > admission, not to fake an all-reduce. The kind-runnable artifact path is
 > the plain `batch/v1 Job`.
 
-### 1. Install the training operators (pinned, own namespaces)
+### 1. Read what the operators can do, then install them
+
+An operator holds more rights than the workloads it creates. Before you
+install one, read its ClusterRole. These commands render the pinned Training
+Operator release and print the rules that matter for training.
 
 ```sh
-# Pin these — bump deliberately (representative versions; check the
-# projects' releases and pin exactly, the same way the guide pins every
-# chart/manifest).
-TRAINING_OP_VERSION="v1.8.1"            # Kubeflow Training Operator release
-KUBERAY_VERSION="1.2.2"                 # KubeRay operator chart (bare semver)
+TRAINING_OP_VERSION="v1.9.4"   # Kubeflow Training Operator release tag
+git clone --depth 1 --branch "$TRAINING_OP_VERSION" \
+  https://github.com/kubeflow/training-operator
+kubectl kustomize training-operator/manifests/overlays/standalone > training-operator.yaml
+grep -B3 -A3 -e '^  - pods/exec$' -e '^  - secrets$' -e '^  - rolebindings$' training-operator.yaml | head -40
+```
 
-# Kubeflow Training Operator — pinned manifest (the project ships a
-# kustomize bundle at a release tag, not a Helm chart):
+<!-- gate: output -->
+
+```text
+- apiGroups:
+  - ""
+  resources:
+  - pods/exec
+  verbs:
+  - create
+- apiGroups:
+  - ""
+  resources:
+  - secrets
+  verbs:
+  - get
+  - list
+--
+- apiGroups:
+  - rbac.authorization.k8s.io
+  resources:
+  - rolebindings
+  verbs:
+  - create
+  - list
+```
+
+The operator's ClusterRole is cluster-wide. It lets the operator create and
+exec into Pods in any namespace, read and update Secrets in any namespace, and
+create RoleBindings. Training across namespaces needs some of that, which is
+why the operator belongs in its own namespace and why each release is read
+before it is applied.
+
+KubeRay's chart carries the same kind of rule. Its ClusterRole can create and
+delete Secrets and RoleBindings:
+
+```sh
+helm repo add kuberay https://ray-project.github.io/kuberay-helm/
+helm template kuberay-operator kuberay/kuberay-operator --version 1.7.1 \
+  -n kuberay-operator --include-crds | grep -B3 -A4 -e '^  - secrets$' -e '^  - rolebindings$' | head -30
+```
+
+<!-- gate: output -->
+
+```text
+- apiGroups:
+  - ""
+  resources:
+  - secrets
+  verbs:
+  - create
+  - delete
+  - get
+--
+- apiGroups:
+  - rbac.authorization.k8s.io
+  resources:
+  - rolebindings
+  verbs:
+  - create
+  - delete
+  - get
+```
+
+Both operators also run in Pods, and those Pods go through Pod Security
+admission like any other. The Training Operator's Deployment sets only
+`allowPrivilegeEscalation: false` on its container:
+
+```sh
+sed -n '/^kind: Deployment/,/^---/p' training-operator.yaml \
+  | grep -n -E 'image:|serviceAccountName|securityContext|runAsNonRoot|seccompProfile|allowPrivilegeEscalation|capabilities'
+```
+
+<!-- gate: output -->
+
+```text
+31:        image: ghcr.io/kubeflow/training-v1/training-operator:v1-93c5489
+52:        securityContext:
+53:          allowPrivilegeEscalation: false
+58:      serviceAccountName: training-operator
+```
+
+Its image records user `0` in its configuration. You can check that without
+pulling the image:
+
+```sh
+docker buildx imagetools inspect ghcr.io/kubeflow/training-v1/training-operator:v1-93c5489 \
+  --format '{{json .Image}}' | python3 -c 'import json,sys; d=json.load(sys.stdin); [print(p, "User", repr(v["config"]["User"])) for p,v in d.items()]'
+```
+
+<!-- gate: output -->
+
+```text
+linux/amd64 User '0'
+linux/arm64 User '0'
+linux/ppc64le User '0'
+```
+
+Those facts decide the namespace level. The next two checks are server dry
+runs. Each builds a Pod from the Training Operator's Deployment template and
+submits it to a namespace. A dry run runs admission, so the answer shows what
+the cluster would refuse. Create two namespaces, one labelled `restricted` and
+one `baseline` with `restricted` warnings:
+
+```sh
+kubectl create namespace pss-check-restricted
+kubectl label namespace pss-check-restricted pod-security.kubernetes.io/enforce=restricted
+kubectl create namespace pss-check-baseline
+kubectl label namespace pss-check-baseline \
+  pod-security.kubernetes.io/enforce=baseline pod-security.kubernetes.io/warn=restricted
+```
+
+Then copy the Deployment's Pod template into a Pod, drop its ServiceAccount
+(a dry run does not need one), and submit it to the `restricted` namespace:
+
+```sh
+python3 -c 'import sys, yaml
+for d in yaml.safe_load_all(sys.stdin):
+    if d and d.get("kind") == "Deployment":
+        spec = d["spec"]["template"]["spec"]
+        spec.pop("serviceAccountName", None)
+        pod = {"apiVersion": "v1", "kind": "Pod", "metadata": {"name": "operator-pod-check"}, "spec": spec}
+        print(yaml.safe_dump(pod, sort_keys=False))
+        break' < training-operator.yaml | kubectl apply --dry-run=server -n pss-check-restricted -f -
+```
+
+<!-- gate: output -->
+
+```text
+Error from server (Forbidden): error when creating "STDIN": pods "operator-pod-check" is forbidden: violates PodSecurity "restricted:latest": unrestricted capabilities (container "training-operator" must set securityContext.capabilities.drop=["ALL"]), runAsNonRoot != true (pod or container "training-operator" must set securityContext.runAsNonRoot=true), seccompProfile (pod or container "training-operator" must set securityContext.seccompProfile.type to "RuntimeDefault" or "Localhost")
+```
+
+The `restricted` namespace refuses the Pod. The same command against
+`pss-check-baseline` is admitted. Baseline does not require a non-root user, so
+the warnings name the restricted rules it reports without enforcing them:
+
+<!-- gate: output -->
+
+```text
+Warning: would violate PodSecurity "restricted:latest": unrestricted capabilities (container "training-operator" must set securityContext.capabilities.drop=["ALL"]), runAsNonRoot != true (pod or container "training-operator" must set securityContext.runAsNonRoot=true), seccompProfile (pod or container "training-operator" must set securityContext.seccompProfile.type to "RuntimeDefault" or "Localhost")
+pod/operator-pod-check created (server dry run)
+```
+
+Delete the two check namespaces once you have the output:
+
+```sh
+kubectl delete namespace pss-check-restricted pss-check-baseline
+```
+
+So the operator namespace is labelled `baseline`, with `audit` and `warn` at
+`restricted`. That is the lowest level at which the pinned release runs as
+shipped. It is recorded in
+[`security/namespace-exceptions.yaml`](../../security/namespace-exceptions.yaml)
+with a reason, the upstream file and an expiry. A non-root run of this image is
+not verified in this chapter. When it is, the Pod moves to `restricted` and the
+exception is removed.
+
+KubeRay's chart sets the container fields that `restricted` needs, including
+`seccompProfile: RuntimeDefault` on the container. Its image runs as UID
+65532. Render the chart's Deployment and read those fields:
+
+```sh
+helm template kuberay-operator kuberay/kuberay-operator --version 1.7.1 -n kuberay-operator --show-only templates/deployment.yaml | grep -n -E 'runAsNonRoot|seccompProfile|readOnlyRootFilesystem|image:|serviceAccountName'
+```
+
+<!-- gate: output -->
+
+```text
+28:      serviceAccountName: kuberay-operator
+36:            readOnlyRootFilesystem: true
+37:            runAsNonRoot: true
+38:            seccompProfile:
+40:          image: "quay.io/kuberay/operator:v1.7.1"
+```
+
+Submit the same Pod template, rendered from the chart, as a dry run to the
+`restricted` namespace. The Pod is admitted:
+
+```sh
+helm template kuberay-operator kuberay/kuberay-operator --version 1.7.1 -n pss-check-restricted --show-only templates/deployment.yaml | python3 -c 'import sys, yaml
+for d in yaml.safe_load_all(sys.stdin):
+    if d and d.get("kind") == "Deployment":
+        spec = d["spec"]["template"]["spec"]
+        spec.pop("serviceAccountName", None)
+        pod = {"apiVersion": "v1", "kind": "Pod", "metadata": {"name": "kr-pod-check"}, "spec": spec}
+        print(yaml.safe_dump(pod, sort_keys=False))
+        break' | kubectl apply --dry-run=server -n pss-check-restricted -f -
+```
+
+<!-- gate: output -->
+
+```text
+pod/kr-pod-check created (server dry run)
+```
+
+So `kuberay-operator` takes `restricted` with no exception. Install both
+operators with the namespace labelled first. These commands are illustrative:
+the lab did not install them, so the reader's install is the first real run.
+
+```sh
+TRAINING_OP_VERSION="v1.9.4"   # Kubeflow Training Operator release tag
+kubectl create namespace kubeflow
+kubectl label namespace kubeflow \
+  pod-security.kubernetes.io/enforce=baseline \
+  pod-security.kubernetes.io/enforce-version=latest \
+  pod-security.kubernetes.io/audit=restricted \
+  pod-security.kubernetes.io/audit-version=latest \
+  pod-security.kubernetes.io/warn=restricted \
+  pod-security.kubernetes.io/warn-version=latest
 kubectl apply --server-side -k \
   "github.com/kubeflow/training-operator/manifests/overlays/standalone?ref=${TRAINING_OP_VERSION}"
 
-# KubeRay operator — pinned Helm OCI chart, own namespace:
-helm install kuberay-operator oci://ghcr.io/ray-project/kuberay/charts/kuberay-operator \
-  --version "$KUBERAY_VERSION" \
-  -n kuberay-operator --create-namespace --wait
-
-# Both operators are now ready — their CRDs appear in api-resources.
-kubectl api-resources | grep -E 'kubeflow.org|ray.io'
-#   pytorchjobs, tfjobs, mpijobs, paddlejobs, mxjobs, xgboostjobs   (kubeflow.org/v1)
-#   rayclusters, rayjobs, rayservices                                (ray.io/v1)
-
-kubectl get pods -n kubeflow
-kubectl get pods -n kuberay-operator
+KUBERAY_CHART="1.7.1"          # KubeRay chart; app image quay.io/kuberay/operator:v1.7.1
+kubectl create namespace kuberay-operator
+kubectl label namespace kuberay-operator \
+  pod-security.kubernetes.io/enforce=restricted \
+  pod-security.kubernetes.io/enforce-version=latest \
+  pod-security.kubernetes.io/audit=restricted \
+  pod-security.kubernetes.io/audit-version=latest \
+  pod-security.kubernetes.io/warn=restricted \
+  pod-security.kubernetes.io/warn-version=latest
+helm install kuberay-operator kuberay/kuberay-operator \
+  --version "$KUBERAY_CHART" -n kuberay-operator --wait
 ```
 
-### 2. Build and load the training image, then train (CPU on kind)
-
-The real CPU training is in
-[`examples/bookstore/ml/train/train.py`](../examples/bookstore/ml/train/train.py):
-deterministic synthetic Bookstore-schema data -> a customer x book sparse
-matrix -> item-item cosine similarity -> top-K neighbours per book ->
-`model.joblib`. The Dockerfile is multi-stage slim Python that runs as
-uid 65532 (PSA-`restricted`-compliant; no root-image footgun).
+KubeRay's chart also ships feature gates for mTLS and a NetworkPolicy
+generator. In the 1.7.1 chart both are off by default, and this chapter writes
+its own policy rather than relying on either:
 
 ```sh
-# Build + load (kind-specific) the train image
-docker build -t bookstore/recommender-train:dev examples/bookstore/ml/train
-kind load docker-image bookstore/recommender-train:dev   # only if using kind
-
-# The plain batch/v1 Job + PVC — the CPU/kind path that produces the model
-kubectl apply -f examples/bookstore/ml/train/recommender-train-job.yaml
-kubectl wait --for=condition=complete job/recommender-train -n bookstore-ml --timeout=300s
-
-kubectl logs -n bookstore-ml -l app.kubernetes.io/component=recommender-train --tail=20
-# [train] config=Config(model_dir='/workspace/model', seed=42, n_books=200, ...)
-# [train] generating 200 books / 5000 orders across 800 synthetic customers (basket proxy)
-# [train] dataset: books=200 orders=5044
-# [train] building customer x book interaction matrix
-# [train] interactions: shape=(800, 200) nnz=4442
-# [train] computing item-item cosine similarity, top_k=10
-# [train] wrote /workspace/model/model.joblib (size=11117 bytes)
-# [train] sample: neighbours(book_id=1) top-3 = [[2, 0.5475...], [3, 0.4537...], ...]
+helm template kuberay-operator kuberay/kuberay-operator --version 1.7.1 -n kuberay-operator --include-crds | grep -o 'RayClusterNetworkPolicy=[a-z]*\|RayClusterMTLS=[a-z]*'
 ```
 
-The `recommender-model` PVC now holds `model.joblib`. That is the artifact
-[ch.06](06-model-serving-and-inference.md) serves. The same Kueue label
-([`kueue.x-k8s.io/queue-name: bookstore-ml-lq`](../examples/bookstore/ml/train/recommender-train-job.yaml))
-gates this Job through the ch.03 ClusterQueue if Kueue is installed; with
-Kueue absent the label is inert and the Job runs directly. Both behaviours
-are correct.
+<!-- gate: output -->
 
-### 3. The same training as a `PyTorchJob` (CRD-backed)
+```text
+RayClusterMTLS=false
+RayClusterNetworkPolicy=false
+```
+
+The chart's version comes from its metadata:
+
+```sh
+helm show chart kuberay/kuberay-operator --version 1.7.1 | grep -E '^(name|version|appVersion):'
+```
+
+<!-- gate: output -->
+
+```text
+name: kuberay-operator
+version: 1.7.1
+```
+
+### 2. Run the CPU training as a Job
+
+The plain Job is the path that produces the artifact. It builds one image,
+loads it into kind, and runs `train.py` once. The Job file creates three
+objects: a ServiceAccount for the training Pods, the `recommender-model` PVC,
+and the Job itself.
+
+```sh
+docker build -t bookstore/recommender-train:dev examples/bookstore/ml/train
+kind load docker-image bookstore/recommender-train:dev   # only if using kind
+kubectl apply -f examples/bookstore/ml/train/recommender-train-job.yaml
+kubectl wait --for=condition=complete job/recommender-train -n bookstore-ml --timeout=300s
+```
+
+Three things in that file are the security shape. The ServiceAccount has no
+RoleBinding, so the Pod has no API rights, and `automountServiceAccountToken:
+false` means no token is mounted at all. The Job runs as UID 65532 with a
+read-only root filesystem and an `emptyDir` for `/tmp`. And only this Job
+mounts `recommender-model` read-write: the serving side in
+[ch.06](06-model-serving-and-inference.md) mounts it read-only, so one Pod
+holds write scope on the artifact.
+
+The Job needs no network. Its data is generated in-process, so the namespace's
+default-deny policy applies to it unchanged, and it needs no allow rule. The
+lab's image build did not finish on the shared machine, so the Job was run as
+a server dry run only. The line for the ServiceAccount says `configured`
+because the lab had already created it in step 3. The command, run against the
+file as written, is:
+
+```sh
+kubectl apply --dry-run=server -f examples/bookstore/ml/train/recommender-train-job.yaml
+```
+
+The lab ran that command on a copy whose namespace was changed, because the lab
+cluster has no `bookstore-ml` namespace. Its output:
+
+<!-- gate: output -->
+
+```text
+serviceaccount/recommender-train configured (server dry run)
+persistentvolumeclaim/recommender-model created (server dry run)
+job.batch/recommender-train created (server dry run)
+```
+
+### 3. Only the training group talks to itself
+
+Ranks in a distributed run trust each other by default. The rendezvous and
+collective traffic between them does not check the identity of the peer, and
+Ray's ports are open to whoever can reach them. The network is the boundary,
+so the boundary needs a rule. A NetworkPolicy selects the Pods of one training
+group by a label, admits traffic only from Pods with the same label, and lets
+those Pods reach DNS and nothing else.
+
+```yaml
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: allow-recommender-train-pt
+  namespace: bookstore-ml
+spec:
+  podSelector:
+    matchLabels:
+      ml.bookstore/training-group: recommender-train-pt
+  policyTypes: ["Ingress", "Egress"]
+  ingress:
+    - from:
+        - podSelector:
+            matchLabels:
+              ml.bookstore/training-group: recommender-train-pt
+  egress:
+    - to:
+        - podSelector:
+            matchLabels:
+              ml.bookstore/training-group: recommender-train-pt
+    - to:
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: kube-system
+          podSelector:
+            matchLabels:
+              k8s-app: kube-dns
+      ports:
+        - { protocol: UDP, port: 53 }
+        - { protocol: TCP, port: 53 }
+```
+
+The same policy is saved as
+[`allow-recommender-train-pt.yaml`](../examples/bookstore/ml/train/allow-recommender-train-pt.yaml),
+which the steps below apply. The group is allowed on every port, because NCCL
+and Ray pick ports at run
+time. Narrowing the rule to the rendezvous port is the next step once a run
+pins its ports. The policy has no effect unless the cluster's network plugin
+enforces NetworkPolicy. [02.06](../02-networking/06-network-policies.md)
+explains how to check that, and the lab result below shows it working here.
+
+The steps that follow use three Pods from
+[`rendezvous-check.yaml`](../examples/bookstore/ml/train/rendezvous-check.yaml).
+`rdzv-master` serves HTTP on TCP 23456, the default PyTorch rendezvous port.
+`rdzv-worker` carries the group label. `rdzv-probe` does not, and it stands
+in for any Pod outside the run. The image is busybox pinned by digest, which
+the check uses only for `httpd` and `wget`:
+
+```sh
+kubectl apply -f examples/bookstore/ml/train/recommender-train-job.yaml   # creates the ServiceAccount
+kubectl apply -f examples/bookstore/ml/train/rendezvous-check.yaml
+kubectl wait --for=condition=Ready pod/rdzv-master pod/rdzv-worker pod/rdzv-probe -n bookstore-ml --timeout=180s
+MASTER=$(kubectl get pod rdzv-master -n bookstore-ml -o jsonpath='{.status.podIP}')
+kubectl exec -n bookstore-ml rdzv-worker -- sh -c "wget -q -O - -T 5 http://$MASTER:23456/ && echo reached || echo 'not reached'"
+```
+
+The worker is a member, so its request is admitted. The probe is a
+**deliberate denied request**: it is not a member, and the policy refuses it:
+
+<!-- gate: output -->
+
+```text
+rendezvous-ok
+reached
+```
+
+<!-- gate: output -->
+
+```text
+wget: download timed out
+not reached
+```
+
+Now remove the allow rule. Default-deny alone refuses the worker too, which
+shows the allow rule is what admits the group. Then apply it again:
+
+```sh
+kubectl delete -n bookstore-ml -f examples/bookstore/ml/train/allow-recommender-train-pt.yaml
+kubectl exec -n bookstore-ml rdzv-worker -- sh -c "wget -q -O - -T 5 http://$MASTER:23456/ && echo reached || echo 'not reached'"
+kubectl apply -f examples/bookstore/ml/train/allow-recommender-train-pt.yaml
+kubectl exec -n bookstore-ml rdzv-worker -- sh -c "wget -q -O - -T 5 http://$MASTER:23456/ && echo reached || echo 'not reached'"
+```
+
+<!-- gate: output -->
+
+```text
+wget: download timed out
+not reached
+```
+
+<!-- gate: output -->
+
+```text
+rendezvous-ok
+reached
+```
+
+Each Pod in the check carries the baseline. The worker's fields, read from
+the running Pod, show the ServiceAccount, the token setting, the user, the
+seccomp profile, the read-only root and the dropped capabilities:
+
+```sh
+kubectl get pod rdzv-worker -n bookstore-ml -o custom-columns=NAME:.metadata.name,SA:.spec.serviceAccountName,AUTOMOUNT:.spec.automountServiceAccountToken,UID:.spec.securityContext.runAsUser,SECCOMP:.spec.securityContext.seccompProfile.type,RO_ROOT:.spec.containers[0].securityContext.readOnlyRootFilesystem,DROP:.spec.containers[0].securityContext.capabilities.drop
+```
+
+<!-- gate: output -->
+
+```text
+NAME          SA                  AUTOMOUNT   UID     SECCOMP          RO_ROOT   DROP
+rdzv-worker   recommender-train   false       65532   RuntimeDefault   true      [ALL]
+```
+
+The ServiceAccount has no RoleBinding, so it cannot read Pods or Secrets in
+its own namespace:
+
+```sh
+kubectl auth can-i get pods -n bookstore-ml --as=system:serviceaccount:bookstore-ml:recommender-train
+```
+
+<!-- gate: output -->
+
+```text
+no
+```
+
+Clean up the check Pods. The allow rule stays, because steps 4 and 5 use it:
+
+```sh
+kubectl delete -n bookstore-ml -f examples/bookstore/ml/train/rendezvous-check.yaml
+```
+
+### 4. The same training as a `PyTorchJob` (not run)
 
 [`recommender-pytorchjob.yaml`](../examples/bookstore/ml/train/recommender-pytorchjob.yaml)
 is the Kubeflow Training Operator path: **master + 1 worker**, restricted
-SC on every Pod, Kueue label for gang admission. The container runs the
-same `train.py` (the recommender does not need PyTorch — see the file
-header for the honest scope). A real distributed PyTorch run would launch
-`torchrun --nproc-per-node=...` and an actual all-reduce.
+SC on every Pod, the same ServiceAccount, and the Kueue label for gang
+admission. The container runs the same `train.py` as a stand-in. A real
+distributed PyTorch run would launch `torchrun --nproc-per-node=...` and an
+actual all-reduce. Two details matter for security. The master is the only
+Pod that mounts the model PVC read-write, because a worker that wrote the same
+file would race the master. The worker writes its own copy under `/tmp`. And
+both Pods carry the training-group label, so the NetworkPolicy from step 3
+covers them.
+
+With the Training Operator installed from step 1, the manifest applies as
+written:
 
 ```sh
-# With the Training Operator installed (step 1), this applies cleanly:
 kubectl apply -f examples/bookstore/ml/train/recommender-pytorchjob.yaml
-
 kubectl get pytorchjob -n bookstore-ml
 kubectl get pods -n bookstore-ml -l training.kubeflow.org/job-name=recommender-train-pt -o wide
-#   recommender-train-pt-master-0 ...   Running
-#   recommender-train-pt-worker-0 ...   Running   (started AFTER the master,
-#                                                  rendezvous to it)
 ```
 
-Without the Training Operator installed the manifest dry-runs as the
-documented CRD-intrinsic message (header):
+Illustrative output, not captured here: the master Pod runs first, and the
+worker starts after the master and rendezvouses with it.
+
+```text
+recommender-train-pt-master-0 ...   Running
+recommender-train-pt-worker-0 ...   Running   (started AFTER the master,
+                                                rendezvous to it)
+```
+
+Without the operator, the same file is refused by the cluster's API. The
+CRD is not there, so the server has no kind for it. The lab cluster had no
+CRD, and its answer is captured here:
 
 ```sh
-kubectl apply --dry-run=client -f examples/bookstore/ml/train/recommender-pytorchjob.yaml
-# error: resource mapping not found ... no matches for kind "PyTorchJob" in version
-#   "kubeflow.org/v1"  — expected; schema is correct, install the operator first.
+kubectl apply --dry-run=server -f examples/bookstore/ml/train/recommender-pytorchjob.yaml
 ```
 
-### 4. The same training as a `RayJob`
+<!-- gate: output -->
+
+```text
+error: resource mapping not found for name: "recommender-train-pt" namespace: "bookstore-ml" from "full-guide/examples/bookstore/ml/train/recommender-pytorchjob.yaml": no matches for kind "PyTorchJob" in version "kubeflow.org/v1"
+ensure CRDs are installed first
+```
+
+The PyTorchJob's run policy and elastic settings are read from the operator's
+CRD. `elasticPolicy` sits under `spec`, next to `runPolicy`, not inside it.
+
+### 5. The same training as a `RayJob` (not run)
 
 [`recommender-rayjob.yaml`](../examples/bookstore/ml/train/recommender-rayjob.yaml)
-is the KubeRay path: an ephemeral `RayCluster` (head + 1 worker) with our
-training image, `entrypoint: "python /workspace/train.py"`,
-`shutdownAfterJobFinishes: true`. The same Kueue label gates the whole
-submission in via `spec.suspend`. The same CRD-intrinsic dry-run applies
-when KubeRay is absent:
+is the KubeRay path: an ephemeral `RayCluster` (head + 1 worker), a submitter
+Pod, and `entrypoint: "python /workspace/train.py"`. Three security points
+carry over from step 4, and one is new.
+
+The submitter is the new one. KubeRay creates the submitter Pod from
+`submitterPodTemplate`, and without that field its default Pod would be
+refused by `bookstore-ml`. The file gives it the restricted shape, the same
+ServiceAccount and the group label. The submitter reaches the head over HTTP
+and needs no Kubernetes API access.
+
+The head's dashboard and job port are the risk. Ray's job submission API has
+no token authentication in the version this chapter pins. NVD records
+CVE-2023-48022 against that API: it allows remote code execution in Ray
+2.6.3 and 2.8.0, and the vendor disputes the report. The NVD record gives
+the CVSS v3.1 score as 9.8, and the vendor states that optional token
+authentication arrived in 2.52.0. The pinned 2.40.0 predates that release, so
+the group NetworkPolicy is the control here, and only the submitter and the
+group's own Pods reach the head.
+
+The image is pinned to `rayproject/ray:2.40.0`. Its digest and user come from
+the registry, and its configuration sets user 1000, so `runAsNonRoot` can be
+verified. The digest comes from the registry:
 
 ```sh
-# With KubeRay installed (step 1):
-kubectl apply -f examples/bookstore/ml/train/recommender-rayjob.yaml
-kubectl get rayjob,raycluster,pods -n bookstore-ml -l ray.io/cluster=recommender-train-ray
-
-# Without KubeRay:
-kubectl apply --dry-run=client -f examples/bookstore/ml/train/recommender-rayjob.yaml
-# error: ... no matches for kind "RayJob" in version "ray.io/v1"   — expected.
+docker buildx imagetools inspect rayproject/ray:2.40.0 | head -4
 ```
 
-### 5. Checkpointing, elastic, and what changes on GPU
+<!-- gate: output -->
+
+```text
+Name:      docker.io/rayproject/ray:2.40.0
+MediaType: application/vnd.docker.distribution.manifest.v2+json
+Digest:    sha256:41d1f003119564fb00dc256881fc54d3ddfe607c79e4bdef49b9bce8ebf78428
+```
+
+The user comes from the image configuration:
+
+```sh
+docker buildx imagetools inspect rayproject/ray:2.40.0 --format '{{json .Image}}' | python3 -c 'import json,sys; print("User", json.load(sys.stdin)["config"]["User"])'
+```
+
+<!-- gate: output -->
+
+```text
+User 1000
+```
+
+The guide's own train image has no Ray, so the RayJob's Pods need the Ray base
+with the recommender's `requirements.txt` added on top. The file does not run
+until such an image exists, and this chapter labels it not run.
+
+With KubeRay installed from step 1, the file applies as written:
+
+```sh
+kubectl apply -f examples/bookstore/ml/train/recommender-rayjob.yaml
+kubectl get rayjob,raycluster,pods -n bookstore-ml -l ray.io/cluster=recommender-train-ray
+```
+
+Without KubeRay, the cluster refuses the file the same way it refused the
+PyTorchJob. The lab captured that answer:
+
+```sh
+kubectl apply --dry-run=server -f examples/bookstore/ml/train/recommender-rayjob.yaml
+```
+
+<!-- gate: output -->
+
+```text
+error: resource mapping not found for name: "recommender-train-ray" namespace: "bookstore-ml" from "full-guide/examples/bookstore/ml/train/recommender-rayjob.yaml": no matches for kind "RayJob" in version "ray.io/v1"
+ensure CRDs are installed first
+```
+
+### 6. Checkpointing, elastic, and data access (not run)
 
 For the recommender the run is seconds, so checkpointing is overkill. For a
 **real** PyTorchJob you would:
@@ -307,7 +803,8 @@ For the recommender the run is seconds, so checkpointing is overkill. For a
 - Mount a checkpoint PVC (RWX-capable, e.g. CSI NFS/EFS/Filestore — see
   [Part 03 ch.05](../03-config-and-storage/05-stateful-data-patterns.md))
   at e.g. `/workspace/checkpoints` and write every N steps. The PVC outlives
-  the Pod, so a re-run resumes from the last checkpoint.
+  the Pod, so a re-run resumes from the last checkpoint. Only the writer
+  mounts it read-write, as in step 4.
 - Use **elastic** torchrun (`torchrun --rdzv-backend c10d
   --max-restarts=5`) inside the master/worker containers; the Training
   Operator's `elasticPolicy` extends the PyTorchJob CRD to expose this
@@ -316,10 +813,14 @@ For the recommender the run is seconds, so checkpointing is overkill. For a
 - On GPU (ch.02), each container requests `limits.nvidia.com/gpu: 1`, the
   base image is CUDA + NCCL, `MASTER_ADDR` is the headless Service, and
   the all-reduce primitive is NCCL over the GPU NICs. The PSA-restricted
-  shape stays the same (the chapter's footgun).
+  shape stays the same (the chapter's footgun). NCCL's ports are chosen at
+  run time, which is why the group policy in step 3 allows the group on all
+  ports.
 - For very large datasets, **read** from object storage via the Pod's cloud
-  identity ([Part 10 ch.03](../10-cloud-and-managed-kubernetes/03-cloud-identity.md)) —
-  no static credentials on the Pod, no per-team-per-bucket secret sprawl.
+  identity ([Part 10 ch.03](../10-cloud-and-managed-kubernetes/03-cloud-identity.md)).
+  The Pod carries no static key, and the training group's egress rule must
+  name the storage endpoint, because default-deny refuses everything else.
+  A key in a Secret is one leak away from every bucket the key reaches.
 - For **spot / preemptible** GPU nodes
   ([Part 10 ch.06](../10-cloud-and-managed-kubernetes/06-node-autoscaling-cost-multicloud.md)),
   *checkpointing is mandatory* (ch.03's last "in production" note): an
@@ -333,9 +834,14 @@ For the recommender the run is seconds, so checkpointing is overkill. For a
   reconciles these into a **headless Service** (per-replica DNS so
   `<JOB>-master-0.<JOB>.<NS>.svc.cluster.local` is stable rendezvous
   address), one Job per replica group, and **env vars on every Pod**:
-  `MASTER_ADDR` (the master's DNS), `MASTER_PORT` (default 23456), `RANK`
-  (the Pod's global rank), `WORLD_SIZE` (master + workers). Your container
-  consumes them: `torchrun --nnodes=$WORLD_SIZE --node-rank=$RANK
+  `MASTER_ADDR` (the master's DNS), `MASTER_PORT` (default 23456; the operator
+  sets this as `PyTorchJobDefaultPort` in
+  [`pkg/apis/kubeflow.org/v1/pytorch_types.go`](https://github.com/kubeflow/training-operator/blob/v1.9.4/pkg/apis/kubeflow.org/v1/pytorch_types.go)
+  at v1.9.4), `RANK` (the Pod's global rank), `WORLD_SIZE` (master + workers).
+  The headless Service is created in
+  [`pkg/controller.v1/common/service.go`](https://github.com/kubeflow/training-operator/blob/v1.9.4/pkg/controller.v1/common/service.go),
+  with `ClusterIP: None`. Your container consumes the variables:
+  `torchrun --nnodes=$WORLD_SIZE --node-rank=$RANK
   --master-addr=$MASTER_ADDR --master-port=$MASTER_PORT train.py`. The
   operator also enforces `cleanPodPolicy`: if the master dies the workers
   are killed (otherwise they hang on an absent rendezvous); a configurable
@@ -361,6 +867,15 @@ For the recommender the run is seconds, so checkpointing is overkill. For a
   reserves quota for the *whole* RayCluster, flips on admission. The
   RayCluster's autoscaler then sizes the worker group within that
   reservation.
+- **Worker traffic has no identity of its own.** The rendezvous store, the
+  collective ports and Ray's GCS and job API accept a connection from any
+  Pod that can route to them. A NetworkPolicy is the only boundary this
+  chapter adds, and it is written per training group, so one job's Pods
+  cannot reach another job's. For Ray, the job API is the sharpest case:
+  CVE-2023-48022 describes remote code execution through it, with a CVSS v3.1
+  score of 9.8 in NVD, published 2023-11-28. The vendor disputes the report,
+  saying Ray is meant for tightly controlled networks. The pinned release
+  predates the optional token authentication the vendor names.
 - **Rendezvous: `c10d` / `etcd-v2`.** PyTorch's distributed runtime needs a
   rendezvous backend so workers can find each other. The default (`c10d`,
   TCPStore-based) is fine for static membership: the master process is the
@@ -371,6 +886,20 @@ For the recommender the run is seconds, so checkpointing is overkill. For a
   PyTorchJob `elasticPolicy` CRD field exposes this declaratively. The
   Bookstore example does not exercise this (the recommender is one CPU
   invocation), but the shape is identical.
+- **Pod Security for training Pods.** The Training Operator does not set a
+  securityContext on your behalf. Your PyTorchJob or RayJob spec must carry
+  `runAsNonRoot`, a non-root UID, dropped capabilities, `RuntimeDefault`
+  seccomp and `allowPrivilegeEscalation: false`. Most PyTorch and CUDA base
+  images default to root, so rebase them or set the fields and hold the
+  line. Step 1 showed the operator's own Pod failing that test, and that is
+  why its namespace is the one exception in this chapter.
+- **The operators' RBAC is the other half.** Step 1 printed the rules. The
+  Training Operator's ClusterRole can exec into Pods and read Secrets in every
+  namespace, and KubeRay's can create and delete Secrets and RoleBindings.
+  Both are scoped cluster-wide by their upstream manifests. Install each
+  operator in its own namespace, read the rules of each release, and treat
+  an operator upgrade like a change to cluster-wide RBAC. The ownership of
+  operator RBAC is in [08.05](../08-day-2-operations/05-operators-and-crds.md).
 - **Checkpoints are the durability primitive.** A training script reads
   `--checkpoint-dir` and on every N steps writes `<STEP>.pt` (or
   `<STEP>.safetensors`). On startup it lists the dir and resumes from the
@@ -412,7 +941,9 @@ For the recommender the run is seconds, so checkpointing is overkill. For a
   are the **distributed-shape paths** — CRD-backed, need their operators,
   documented in their headers; they run the same `train.py` as a stand-in
   so the file is honest about scope. All three are PSA-`restricted`-compliant
-  and labelled onto Kueue's `bookstore-ml-lq`.
+  and labelled onto Kueue's `bookstore-ml-lq`. The network check
+  [`rendezvous-check.yaml`](../examples/bookstore/ml/train/rendezvous-check.yaml)
+  is the one place in the tree that runs a server.
 
 ## Production notes
 
@@ -426,17 +957,15 @@ For the recommender the run is seconds, so checkpointing is overkill. For a
 > **In production:** **install Training Operator + KubeRay via pinned**
 > manifests / Helm charts in their **own namespaces**, treat upgrades like
 > any control-plane component, and run them on the same control-plane
-> cluster as Kueue (so admission and the operator see the same API). The
-> CRD-intrinsic dry-run rule applies — manifests are schema-correct but
-> need the CRDs installed first (every CRD file in this guide carries the
-> header note).
+> cluster as Kueue (so admission and the operator see the same API). Read each
+> release's ClusterRole diff before you upgrade. Step 1 shows how.
 
 > **In production:** **checkpoint to a durable shared volume** every few
 > minutes (or every N steps). On cloud that means **RWX** storage (CSI NFS
 > / EFS / Filestore / Lustre) so a *different* node can resume after
 > preemption, OR object storage accessed via the Pod's cloud identity
-> ([Part 10 ch.03](../10-cloud-and-managed-kubernetes/03-cloud-identity.md)) —
-> never static keys in a Secret. Snapshot the checkpoint PVC nightly
+> ([Part 10 ch.03](../10-cloud-and-managed-kubernetes/03-cloud-identity.md)).
+> Snapshot the checkpoint PVC nightly
 > ([Part 03 ch.05](../03-config-and-storage/05-stateful-data-patterns.md))
 > so a corrupted training run does not corrupt its history. Pair with
 > **elastic** training (`torchrun --max-restarts` or the operator's
@@ -444,14 +973,6 @@ For the recommender the run is seconds, so checkpointing is overkill. For a
 > If the master Pod dies — OOM, node failure — `cleanPodPolicy: All` kills
 > the workers and the whole job restarts; without a checkpoint at
 > `/workspace/checkpoints`, that restart is from step zero.
-
-> **In production:** ML pods are **not** exempt from Pod Security. The
-> Kubeflow Training Operator does not enforce a securityContext on your
-> behalf — *your* PyTorchJob/RayJob spec must carry `runAsNonRoot`,
-> non-root UID, drop ALL caps, seccomp RuntimeDefault, and
-> `allowPrivilegeEscalation: false`. Most PyTorch / CUDA base images
-> default to root; rebase them or set the SC and hold (the same footgun as
-> [ch.02](02-gpus-and-accelerators.md) GPU pods).
 
 > **In production:** pair every long training with **PDB / spot reclaim
 > handling** ([Part 06 ch.05](../06-production-readiness/05-reliability-and-disruptions.md)
@@ -463,19 +984,27 @@ For the recommender the run is seconds, so checkpointing is overkill. For a
 ## Quick Reference
 
 ```sh
-# Install the operators (pinned, own namespaces)
-TRAINING_OP_VERSION="v1.8.1" ; KUBERAY_VERSION="1.2.2"
-kubectl apply --server-side -k \
-  "github.com/kubeflow/training-operator/manifests/overlays/standalone?ref=${TRAINING_OP_VERSION}"
-helm install kuberay-operator oci://ghcr.io/ray-project/kuberay/charts/kuberay-operator \
-  --version "$KUBERAY_VERSION" -n kuberay-operator --create-namespace --wait
+# Read the operator's rules before you install it
+git clone --depth 1 --branch v1.9.4 https://github.com/kubeflow/training-operator
+kubectl kustomize training-operator/manifests/overlays/standalone > training-operator.yaml
+grep -B3 -A3 -e '^  - pods/exec$' -e '^  - secrets$' training-operator.yaml
 
-# Build + load the training image, then train (CPU/kind — the artifact path)
+# Install the operators with the namespace labelled first (illustrative)
+kubectl create namespace kubeflow   # then label baseline; see step 1
+kubectl apply --server-side -k \
+  "github.com/kubeflow/training-operator/manifests/overlays/standalone?ref=v1.9.4"
+helm install kuberay-operator kuberay/kuberay-operator --version 1.7.1 \
+  -n kuberay-operator --wait        # namespace labelled restricted first
+
+# Build the image, then train (CPU/kind: the artifact path)
 docker build -t bookstore/recommender-train:dev examples/bookstore/ml/train
 kind load docker-image bookstore/recommender-train:dev
 kubectl apply -f examples/bookstore/ml/train/recommender-train-job.yaml
 kubectl wait --for=condition=complete job/recommender-train -n bookstore-ml --timeout=300s
-kubectl logs -n bookstore-ml -l app.kubernetes.io/component=recommender-train --tail=20
+
+# Restrict the training group, then check the boundary
+kubectl apply -f examples/bookstore/ml/train/rendezvous-check.yaml
+kubectl exec -n bookstore-ml rdzv-probe -- sh -c "wget -q -O - -T 5 http://<MASTER-IP>:23456/ || echo 'not reached'"
 
 # The CRD-backed paths (need the operators)
 kubectl apply -f examples/bookstore/ml/train/recommender-pytorchjob.yaml
@@ -487,76 +1016,57 @@ kubectl get workloads.kueue.x-k8s.io,pytorchjobs,rayjobs -n bookstore-ml
 kubectl describe workloads.kueue.x-k8s.io -n bookstore-ml <NAME>
 ```
 
-Minimal skeletons:
+Pod template fragment for one training Pod, in the restricted shape. It is a
+fragment, not a manifest, so no `kind:` is shown. The complete manifests are
+in `examples/bookstore/ml/train/`:
 
 ```yaml
-# PyTorchJob — master + workers, Kueue-admitted via runPolicy.suspend
-apiVersion: kubeflow.org/v1
-kind: PyTorchJob
 metadata:
-  name: train
-  namespace: bookstore-ml
-  labels: { kueue.x-k8s.io/queue-name: bookstore-ml-lq }
+  labels:
+    ml.bookstore/training-group: recommender-train-pt
 spec:
-  # suspend: Kueue sets this via webhook — do not set false here
-  runPolicy: { cleanPodPolicy: All }
-  pytorchReplicaSpecs:
-    Master:
-      replicas: 1
-      restartPolicy: OnFailure
-      template:
-        spec:
-          securityContext: { runAsNonRoot: true, runAsUser: 65532,
-                             seccompProfile: { type: RuntimeDefault } }
-          containers:
-            - name: pytorch
-              image: <PYTORCH-IMAGE>
-              # torchrun reads MASTER_ADDR/PORT/RANK/WORLD_SIZE auto-injected.
-              # $(VAR) substitution applies in args[], NOT in command[] —
-              # put torchrun in command and its flags in args.
-              command: ["torchrun"]
-              args: ["--nnodes=$(WORLD_SIZE)", "--node-rank=$(RANK)", "train.py"]
-              securityContext: { allowPrivilegeEscalation: false,
-                                 capabilities: { drop: [ALL] } }
-    Worker:
-      replicas: 1
-      # ... same shape as Master
-```
-
-```yaml
-# RayJob — ephemeral RayCluster + entrypoint, Kueue-admitted via spec.suspend
-apiVersion: ray.io/v1
-kind: RayJob
-metadata:
-  name: train
-  namespace: bookstore-ml
-  labels: { kueue.x-k8s.io/queue-name: bookstore-ml-lq }
-spec:
-  entrypoint: "python train.py"
-  shutdownAfterJobFinishes: true
-  rayClusterSpec:
-    rayVersion: "2.40.0"
-    headGroupSpec:
-      rayStartParams: { dashboard-host: "0.0.0.0" }
-      template: { spec: { containers: [{ name: ray-head, image: <RAY-IMG> }] } }
-    workerGroupSpecs:
-      - groupName: workers
-        replicas: 1
-        minReplicas: 1
-        maxReplicas: 1
-        rayStartParams: {}
-        template: { spec: { containers: [{ name: ray-worker, image: <RAY-IMG> }] } }
+  serviceAccountName: recommender-train
+  automountServiceAccountToken: false
+  securityContext:
+    runAsNonRoot: true
+    runAsUser: 65532
+    runAsGroup: 65532
+    seccompProfile:
+      type: RuntimeDefault
+  containers:
+    - name: pytorch
+      image: bookstore/recommender-train:dev
+      securityContext:
+        allowPrivilegeEscalation: false
+        readOnlyRootFilesystem: true
+        capabilities:
+          drop: ["ALL"]
+      resources:
+        requests: { cpu: 250m, memory: 256Mi }
+        limits: { memory: 512Mi }
+      volumeMounts:
+        - name: tmp
+          mountPath: /tmp
+  volumes:
+    - name: tmp
+      emptyDir: {}
 ```
 
 Checklist:
 
 - [ ] Distributed training is a **PyTorchJob / RayJob** (not a bare Job)
-- [ ] Operator and CRDs installed via **pinned** Helm/manifests, own namespaces
-- [ ] PSA-`restricted` shape on every training Pod (master + worker)
+- [ ] Operator and CRDs installed via **pinned** manifests or chart, in their
+      own namespaces, after their ClusterRole has been read
+- [ ] PSA-`restricted` shape on every training Pod (master, worker, head,
+      submitter), with the baseline fields from [01.01](../01-core-workloads/01-pods.md#baseline)
+- [ ] Each training Pod has its own ServiceAccount with no RoleBinding
+- [ ] A NetworkPolicy admits only the training group, with DNS as the only
+      other egress
+- [ ] Only one Pod mounts the model PVC read-write; serving mounts it read-only
+- [ ] Training data is read through workload identity, with no static key
 - [ ] **Kueue admission** via `runPolicy.suspend` / `spec.suspend` (gang)
 - [ ] **Checkpoints** on durable RWX-capable storage (or object store via cloud identity)
 - [ ] **Elastic** training mode if spot/preempt is in play
-- [ ] CRD-backed manifests carry the **CRD-intrinsic** header note
 - [ ] The kind-runnable artifact path is a plain `batch/v1 Job` (no operator)
 
 ## Test your understanding
@@ -566,7 +1076,7 @@ Checklist:
 1. **What does the Kubeflow Training Operator do that a plain JobSet does not?**
    <details><summary>Show answer</summary>
 
-   The Training Operator (`PyTorchJob`, `TFJob`, `MPIJob`, `PaddleJob`) provides framework-specific semantics: it generates the right environment variables (`MASTER_ADDR`, `MASTER_PORT`, `WORLD_SIZE`, `RANK`) for PyTorch's `dist.init_process_group`, manages MPI runner topology, handles `cleanPodPolicy` (running vs all vs none cleanup), and supports elastic training (`runPolicy.suspend`, replica resizing during training). JobSet is more general — coordinated groups of Jobs without framework knowledge. For PyTorch specifically, both work; the operator removes boilerplate. For multi-framework or simpler patterns, JobSet is cleaner. Kueue admits both as gangs.
+   The Training Operator (`PyTorchJob`, `TFJob`, `MPIJob`, `PaddleJob`) provides framework-specific semantics: it generates the right environment variables (`MASTER_ADDR`, `MASTER_PORT`, `WORLD_SIZE`, `RANK`) for PyTorch's `dist.init_process_group`, manages MPI runner topology, handles `cleanPodPolicy` (running vs all vs none cleanup), and supports elastic training (`elasticPolicy` and replica resizing during training). JobSet is more general — coordinated groups of Jobs without framework knowledge. For PyTorch specifically, both work; the operator removes boilerplate. For multi-framework or simpler patterns, JobSet is cleaner. Kueue admits both as gangs.
 
    </details>
 
@@ -587,14 +1097,28 @@ Checklist:
 4. **You're training on spot instances. AWS reclaims worker 2 mid-training. What does PyTorchJob elastic mode do, and what's the data-side requirement?**
    <details><summary>Show answer</summary>
 
-   With `runPolicy.elastic` and `torchrun --max-restarts=N`, the surviving workers detect worker 2's loss via the rendezvous (etcd or c10d store), rejoin with a new world_size, and resume from the last checkpoint. Data-side requirement: every worker must have read access to the latest checkpoint on durable shared storage (RWX PVC like EFS, or object store via cloud identity from [Part 10 ch.03](../10-cloud-and-managed-kubernetes/03-cloud-identity.md)). If only worker 2 had the latest checkpoint, you lose progress since the last all-reduce barrier. The pattern is: write checkpoints every N steps, write them atomically, write them to shared storage, and design the rendezvous to tolerate replacement.
+   With `spec.elasticPolicy` and `torchrun --max-restarts=N`, the surviving workers detect worker 2's loss via the rendezvous (etcd or c10d store), rejoin with a new world_size, and resume from the last checkpoint. Data-side requirement: every worker must have read access to the latest checkpoint on durable shared storage (RWX PVC like EFS, or object store via cloud identity from [Part 10 ch.03](../10-cloud-and-managed-kubernetes/03-cloud-identity.md)). If only worker 2 had the latest checkpoint, you lose progress since the last all-reduce barrier. The pattern is: write checkpoints every N steps, write them atomically, write them to shared storage, and design the rendezvous to tolerate replacement. Note that the rendezvous must also still admit the replacement Pod: the NetworkPolicy from step 3 has to cover it, which it does because it carries the same group label.
 
    </details>
 
 5. **Hands-on: spin up a 2-worker `PyTorchJob` that trains a tiny model and writes a checkpoint to a PVC. Now `kubectl delete pod` on worker 1 mid-training. What recovery path does the operator take vs what happens with a plain Job?**
    <details><summary>What you should see</summary>
 
-   With `PyTorchJob` and `cleanPodPolicy: Running`, the operator restarts the killed worker; if elastic mode is enabled, training resumes from the latest checkpoint with the same world_size. With a plain `Job` and `parallelism: 2`, deleting a Pod causes the Job controller to start a replacement, but the original PyTorch process group has no way to recover — the surviving worker is blocked on rendezvous, the new worker initializes a fresh process group, and they don't reconnect. The Job hangs. This is why distributed training needs an operator that understands the framework's rendezvous semantics, not just generic Pod orchestration.
+   Expected behaviour, from the operator's documentation; not run in this lab. With `PyTorchJob` and `cleanPodPolicy: Running`, the operator restarts the killed worker; if elastic mode is enabled, training resumes from the latest checkpoint with the same world_size. With a plain `Job` and `parallelism: 2`, deleting a Pod causes the Job controller to start a replacement, but the original PyTorch process group has no way to recover — the surviving worker is blocked on rendezvous, the new worker initializes a fresh process group, and they don't reconnect. The Job hangs. This is why distributed training needs an operator that understands the framework's rendezvous semantics, not just generic Pod orchestration.
+
+   </details>
+
+6. **Your PyTorchJob's master and worker both mount `recommender-model` read-write. A worker is compromised. What can it do, and what do you change?**
+   <details><summary>Show answer</summary>
+
+   A Pod that mounts the PVC read-write can replace `model.joblib`. The serving side loads that file with joblib, which is pickle, so a replaced file is code that runs the moment the server loads it. That is the threat of [12.06](06-model-serving-and-inference.md). The fix has three parts: mount the PVC only in the one Pod that writes, make the other ranks write their copies to scratch, and mount the file read-only where it is served. The load-time check that verifies the artifact before loading it also belongs to 12.06.
+
+   </details>
+
+7. **A RayJob's head exposes the dashboard and job port. The namespace has a default-deny policy and the group policy from step 3, and nothing else. Which Pods should reach the head, and what is the risk if the policy admits the whole namespace?**
+   <details><summary>Show answer</summary>
+
+   Only the submitter and the training group's own Pods should reach the head. Any Pod in the namespace that could reach the job submission API could submit code that runs on the head. CVE-2023-48022 describes that path in older Ray releases, with a CVSS v3.1 score of 9.8 in NVD, and the vendor disputes the report. The pinned release has no token authentication, so the NetworkPolicy is the control, and widening it to the namespace removes it.
 
    </details>
 
@@ -615,3 +1139,8 @@ Checklist:
   <https://kueue.sigs.k8s.io/docs/tasks/run/> (admission via suspend); the
   PyTorch distributed overview
   <https://pytorch.org/docs/stable/distributed.html>.
+- **NVD, CVE-2023-48022** <https://nvd.nist.gov/vuln/detail/CVE-2023-48022>:
+  the Ray job submission API, with the vendor's dispute and token
+  authentication note.
+- **Kubernetes, Pod Security Standards** <https://kubernetes.io/docs/concepts/security/pod-security-standards/>
+  define the baseline and restricted profiles that the operator labels use.

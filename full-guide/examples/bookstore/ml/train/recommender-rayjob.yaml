@@ -9,7 +9,8 @@
 #   installed a client dry-run prints:
 #     no matches for kind "RayJob" in version "ray.io/v1"
 #   EXPECTED and SCHEMA-CORRECT — install the KubeRay operator first (Part 12
-#   ch.04 Hands-on: pinned Helm `kuberay/kuberay-operator` -> ns `kuberay`).
+#   ch.04 Hands-on: pinned Helm chart `kuberay/kuberay-operator`, ns
+#   `kuberay-operator`).
 #   Schema verified against ray.io/v1 RayJob (rayClusterSpec headGroupSpec
 #   + workerGroupSpecs + entrypoint + shutdownAfterJobFinishes).
 #
@@ -26,10 +27,12 @@
 # the ClusterQueue, then flipped) — the same all-or-nothing admission as the
 # PyTorchJob and the JobSet (Part 12 ch.03).
 #
-# PSA — `bookstore-ml` is `enforce: restricted`. Every Pod (head + worker)
-# carries the full restricted shape. Ray's official images default to non-root
-# (`ray` user) but DO NOT bundle the rest of PSA-restricted defaults; the
-# spec below applies them explicitly. For real Ray images: keep this shape.
+# PSA — `bookstore-ml` is `enforce: restricted`. Every Pod (head, worker and
+# the submitter) carries the restricted shape. The images are pinned by digest
+# to rayproject/ray:2.40.0, whose config sets USER 1000, so runAsNonRoot can be
+# verified. The guide's train image has no Ray, so the Ray base is used here.
+# Its recommender requirements.txt must be added on top before this file can
+# run. Until then this file is not run (see ch.04).
 apiVersion: ray.io/v1
 kind: RayJob
 metadata:
@@ -45,6 +48,48 @@ spec:
   entrypoint: "python /workspace/train.py"
   shutdownAfterJobFinishes: true
   ttlSecondsAfterFinished: 600
+  # KubeRay creates the submitter Pod from this template. Without it the
+  # operator's default submitter would be refused by bookstore-ml, so it
+  # carries the restricted shape too. The submitter only calls the head over
+  # HTTP and needs no Kubernetes API access.
+  submitterPodTemplate:
+    metadata:
+      labels:
+        app.kubernetes.io/part-of: bookstore-ml
+        app.kubernetes.io/component: recommender-train
+        ml.bookstore/training-group: recommender-train-ray
+    spec:
+      restartPolicy: Never
+      serviceAccountName: recommender-train
+      automountServiceAccountToken: false
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 65532
+        runAsGroup: 65532
+        seccompProfile:
+          type: RuntimeDefault
+      containers:
+        - name: ray-job-submitter      # the name KubeRay expects
+          # rayproject/ray:2.40.0
+          image: rayproject/ray@sha256:41d1f003119564fb00dc256881fc54d3ddfe607c79e4bdef49b9bce8ebf78428
+          env:
+            - name: HOME               # the image's home is not writable
+              value: /tmp
+          resources:
+            requests: { cpu: "100m", memory: 128Mi }
+            limits: { memory: 256Mi }
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities:
+              drop: ["ALL"]
+          volumeMounts:
+            - name: scratch
+              mountPath: /tmp
+      volumes:
+        - name: scratch
+          emptyDir:
+            sizeLimit: 64Mi
   rayClusterSpec:
     rayVersion: "2.40.0"
     enableInTreeAutoscaling: false   # static cluster: keep the example simple
@@ -58,7 +103,9 @@ spec:
             app.kubernetes.io/part-of: bookstore-ml
             app.kubernetes.io/component: recommender-train
             ml.bookstore/role: ray-head
+            ml.bookstore/training-group: recommender-train-ray
         spec:
+          serviceAccountName: recommender-train
           automountServiceAccountToken: false
           securityContext:                 # pod-level — restricted
             runAsNonRoot: true
@@ -69,7 +116,8 @@ spec:
               type: RuntimeDefault
           containers:
             - name: ray-head
-              image: bookstore/recommender-train:dev
+              # rayproject/ray:2.40.0
+              image: rayproject/ray@sha256:41d1f003119564fb00dc256881fc54d3ddfe607c79e4bdef49b9bce8ebf78428
               imagePullPolicy: IfNotPresent
               # The KubeRay operator overrides the entrypoint to start ray.
               # The `entrypoint` at the top of this spec is what runs against
@@ -117,7 +165,9 @@ spec:
               app.kubernetes.io/part-of: bookstore-ml
               app.kubernetes.io/component: recommender-train
               ml.bookstore/role: ray-worker
+              ml.bookstore/training-group: recommender-train-ray
           spec:
+            serviceAccountName: recommender-train
             automountServiceAccountToken: false
             securityContext:
               runAsNonRoot: true
@@ -127,7 +177,8 @@ spec:
                 type: RuntimeDefault
             containers:
               - name: ray-worker
-                image: bookstore/recommender-train:dev
+                # rayproject/ray:2.40.0
+                image: rayproject/ray@sha256:41d1f003119564fb00dc256881fc54d3ddfe607c79e4bdef49b9bce8ebf78428
                 imagePullPolicy: IfNotPresent
                 resources:
                   requests:

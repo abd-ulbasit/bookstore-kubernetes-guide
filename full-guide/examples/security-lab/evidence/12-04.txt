@@ -1,0 +1,387 @@
+# Transcript for 12-kubernetes-for-machine-learning/04-distributed-training.md.
+# Tier A: kind cluster on a lab machine, Kubernetes v1.37.0 node, kubectl v1.37.2.
+# The lab cluster is shared, so the run used scratch namespaces, and the example
+# files were copied with only the namespace rewritten. The chapter's bookstore-ml
+# is p12-04-ml in the Job and NetworkPolicy steps. The baseline check namespace is
+# recorded as pss-check-baseline, and the restricted check uses p12-04-ml.
+# The operator Pod checks came from a script file with the same steps as the
+# chapter's one-liner. The chapter shows the one-liner.
+# The kind load and the image build ran on the lab machine through its ssh
+# wrapper, which is left out here.
+# Not run: the Kubeflow Training Operator and KubeRay were not installed (the
+# shared heavy-install lock was held). The operator checks use the pinned upstream
+# manifests and chart, rendered and dry-run. The training image build did not
+# finish on the busy lab machine, so the Job was dry-run only and no training Pod
+# ran.
+# Later re-runs of the operator Pod checks were refused: new namespaces did not
+# receive their default ServiceAccount while the lab control plane was unhealthy.
+# Those refused attempts are left out of this record.
+# Paths on the lab machine are shown as <scratch> and <repo>.
+
+$ git clone -q --depth 1 --branch v1.9.4 https://github.com/kubeflow/training-operator <scratch>/to-src && echo cloned v1.9.4
+Note: switching to '4445c12aa62e4345b0c2c6ac9b215a70eca46ed7'.
+
+You are in 'detached HEAD' state. You can look around, make experimental
+changes and commit them, and you can discard any commits you make in this
+state without impacting any branches by switching back to a branch.
+
+If you want to create a new branch to retain commits you create, you may
+do so (now or later) by using -c with the switch command. Example:
+
+  git switch -c <new-branch-name>
+
+Or undo this operation with:
+
+  git switch -
+
+Turn off this advice by setting config variable advice.detachedHead to false
+
+cloned v1.9.4
+$ kubectl kustomize <scratch>/to-src/manifests/overlays/standalone > <scratch>/training-operator.yaml && grep -c '^kind:' <scratch>/training-operator.yaml
+14
+$ grep -n '^kind:' <scratch>/training-operator.yaml | sed 's/^[0-9]*://' | sort | uniq -c
+   1 kind: ClusterRole
+   1 kind: ClusterRoleBinding
+   6 kind: CustomResourceDefinition
+   1 kind: Deployment
+   1 kind: Namespace
+   1 kind: Secret
+   1 kind: Service
+   1 kind: ServiceAccount
+   1 kind: ValidatingWebhookConfiguration
+$ grep -n -B2 -A2 'pods/exec' <scratch>/training-operator.yaml
+51214-  - ""
+51215-  resources:
+51216:  - pods/exec
+51217-  verbs:
+51218-  - create
+$ grep -n -A4 'secrets' <scratch>/training-operator.yaml | head -12
+4108:                                ImagePullSecrets is an optional list of references to secrets in the same namespace to use for pulling any of the images used by this PodSpec.
+4109:                                If specified, these secrets will be passed to individual puller implementations for them to use.
+4110:                                More info: https://kubernetes.io/docs/concepts/containers/images#specifying-imagepullsecrets-on-a-pod
+4111-                              items:
+4112-                                description: |-
+4113-                                  LocalObjectReference contains enough information to let you locate the
+4114-                                  referenced object inside the same namespace.
+--
+7043:                                          contains more than one secret, all secrets are passed to the plugin
+7044-                                          scripts.
+7045-                                        properties:
+7046-                                          name:
+$ grep -n -B3 -A3 'rolebindings' <scratch>/training-operator.yaml | head -14
+51424-- apiGroups:
+51425-  - rbac.authorization.k8s.io
+51426-  resources:
+51427:  - rolebindings
+51428-  verbs:
+51429-  - create
+51430-  - list
+$ sed -n '/^kind: Deployment/,/^---/p' <scratch>/training-operator.yaml | grep -n -E 'image:|serviceAccountName|securityContext|runAsNonRoot|seccompProfile|allowPrivilegeEscalation|capabilities' 
+31:        image: ghcr.io/kubeflow/training-v1/training-operator:v1-93c5489
+52:        securityContext:
+53:          allowPrivilegeEscalation: false
+58:      serviceAccountName: training-operator
+$ docker buildx imagetools inspect ghcr.io/kubeflow/training-v1/training-operator:v1-93c5489 --format '{{json .Image}}' | <scratch>/venv/bin/python -I <scratch>/image-user.py
+linux/amd64 User '0'
+linux/arm64 User '0'
+linux/ppc64le User '0'
+$ docker buildx imagetools inspect rayproject/ray:2.40.0 | head -4
+Name:      docker.io/rayproject/ray:2.40.0
+MediaType: application/vnd.docker.distribution.manifest.v2+json
+Digest:    sha256:41d1f003119564fb00dc256881fc54d3ddfe607c79e4bdef49b9bce8ebf78428
+$ docker buildx imagetools inspect rayproject/ray:2.40.0 --format '{{json .Image}}' | <scratch>/venv/bin/python -I <scratch>/ray-user.py
+User 1000
+$ docker buildx imagetools inspect quay.io/kuberay/operator:v1.7.1 --format '{{json .Image}}' | <scratch>/venv/bin/python -I <scratch>/image-user.py
+linux/amd64 User '65532:65532'
+linux/arm64 User '65532:65532'
+$ helm repo update kuberay >/dev/null && helm show chart kuberay/kuberay-operator --version 1.7.1 | grep -E '^(name|version|appVersion):'
+name: kuberay-operator
+version: 1.7.1
+$ helm template kuberay-operator kuberay/kuberay-operator --version 1.7.1 -n kuberay-operator --include-crds | grep -o 'RayClusterNetworkPolicy=[a-z]*\|RayClusterMTLS=[a-z]*'
+RayClusterMTLS=false
+RayClusterNetworkPolicy=false
+$ helm template kuberay-operator kuberay/kuberay-operator --version 1.7.1 -n kuberay-operator --show-only templates/deployment.yaml | grep -n -E 'runAsNonRoot|seccompProfile|readOnlyRootFilesystem|image:|serviceAccountName'
+28:      serviceAccountName: kuberay-operator
+36:            readOnlyRootFilesystem: true
+37:            runAsNonRoot: true
+38:            seccompProfile:
+40:          image: "quay.io/kuberay/operator:v1.7.1"
+$ helm template kuberay-operator kuberay/kuberay-operator --version 1.7.1 -n kuberay-operator --include-crds | grep -n -E '^ +(submitterPodTemplate|suspend|shutdownAfterJobFinishes):' | head -4
+5311:              suspend:
+5373:                    suspend:
+13655:              suspend:
+22988:                      suspend:
+$ grep -n -E '^ {12,20}(elasticPolicy|cleanPodPolicy|suspend):' <scratch>/training-operator.yaml | head -4
+8156:                  cleanPodPolicy:
+8197:                  suspend:
+8408:              cleanPodPolicy:
+16518:                  cleanPodPolicy:
+$ grep -n -B3 -A4 '^  - secrets$' <scratch>/training-operator.yaml
+51219-- apiGroups:
+51220-  - ""
+51221-  resources:
+51222:  - secrets
+51223-  verbs:
+51224-  - get
+51225-  - list
+51226-  - update
+$ helm template kuberay-operator kuberay/kuberay-operator --version 1.7.1 -n kuberay-operator --include-crds | grep -n -B3 -A4 '^  - secrets$'
+74716-- apiGroups:
+74717-  - ""
+74718-  resources:
+74719:  - secrets
+74720-  verbs:
+74721-  - create
+74722-  - delete
+74723-  - get
+$ helm template kuberay-operator kuberay/kuberay-operator --version 1.7.1 -n kuberay-operator --include-crds | grep -n -A3 '^  - rolebindings$' | head -6
+74889:  - rolebindings
+74890-  verbs:
+74891-  - create
+74892-  - delete
+$ kubectl get ns --no-headers 2>&1 | head -2
+default               Active   13h
+gate-baseline         Active   3h7m
+$ kubectl get clusterrole cluster-admin -o name 2>&1
+clusterrole.rbac.authorization.k8s.io/cluster-admin
+$ grep -B3 -A3 -e '^  - pods/exec$' -e '^  - secrets$' -e '^  - rolebindings$' <scratch>/training-operator.yaml | head -40
+- apiGroups:
+  - ""
+  resources:
+  - pods/exec
+  verbs:
+  - create
+- apiGroups:
+  - ""
+  resources:
+  - secrets
+  verbs:
+  - get
+  - list
+--
+- apiGroups:
+  - rbac.authorization.k8s.io
+  resources:
+  - rolebindings
+  verbs:
+  - create
+  - list
+$ helm template kuberay-operator kuberay/kuberay-operator --version 1.7.1 -n kuberay-operator --include-crds | grep -B3 -A4 -e '^  - secrets$' -e '^  - rolebindings$' | head -30
+- apiGroups:
+  - ""
+  resources:
+  - secrets
+  verbs:
+  - create
+  - delete
+  - get
+--
+- apiGroups:
+  - rbac.authorization.k8s.io
+  resources:
+  - rolebindings
+  verbs:
+  - create
+  - delete
+  - get
+
+$ kubectl create namespace p12-04-ml
+namespace/p12-04-ml created
+$ kubectl label namespace p12-04-ml pod-security.kubernetes.io/enforce=restricted pod-security.kubernetes.io/enforce-version=latest pod-security.kubernetes.io/audit=restricted pod-security.kubernetes.io/audit-version=latest pod-security.kubernetes.io/warn=restricted pod-security.kubernetes.io/warn-version=latest
+namespace/p12-04-ml labeled
+$ kubectl apply -f <scratch>/default-deny.yaml
+networkpolicy.networking.k8s.io/default-deny created
+$ kubectl create namespace pss-check-baseline
+namespace/pss-check-baseline created
+$ kubectl label namespace pss-check-baseline pod-security.kubernetes.io/enforce=baseline pod-security.kubernetes.io/enforce-version=latest pod-security.kubernetes.io/audit=restricted pod-security.kubernetes.io/audit-version=latest pod-security.kubernetes.io/warn=restricted pod-security.kubernetes.io/warn-version=latest
+namespace/pss-check-baseline labeled
+$ kubectl -n kube-system get ds -o name
+daemonset.apps/kindnet
+daemonset.apps/kube-proxy
+$ kubectl get pods -n kube-system -l k8s-app=kube-dns -o name
+pod/coredns-559f6c778d-77g29
+pod/coredns-559f6c778d-xmmqq
+$ kubectl get crd rayjobs.ray.io pytorchjobs.kubeflow.org
+Error from server (NotFound): customresourcedefinitions.apiextensions.k8s.io "rayjobs.ray.io" not found
+Error from server (NotFound): customresourcedefinitions.apiextensions.k8s.io "pytorchjobs.kubeflow.org" not found
+$ kubectl apply --dry-run=server -f full-guide/examples/bookstore/ml/train/recommender-pytorchjob.yaml
+error: resource mapping not found for name: "recommender-train-pt" namespace: "bookstore-ml" from "full-guide/examples/bookstore/ml/train/recommender-pytorchjob.yaml": no matches for kind "PyTorchJob" in version "kubeflow.org/v1"
+ensure CRDs are installed first
+$ kubectl apply --dry-run=server -f full-guide/examples/bookstore/ml/train/recommender-rayjob.yaml
+error: resource mapping not found for name: "recommender-train-ray" namespace: "bookstore-ml" from "full-guide/examples/bookstore/ml/train/recommender-rayjob.yaml": no matches for kind "RayJob" in version "ray.io/v1"
+ensure CRDs are installed first
+$ <scratch>/venv/bin/python -I <scratch>/deployment-only.py <scratch>/training-operator.yaml p12-04-ml | kubectl apply --dry-run=server -n p12-04-ml -f -
+Warning: would violate PodSecurity "restricted:latest": unrestricted capabilities (container "training-operator" must set securityContext.capabilities.drop=["ALL"]), runAsNonRoot != true (pod or container "training-operator" must set securityContext.runAsNonRoot=true), seccompProfile (pod or container "training-operator" must set securityContext.seccompProfile.type to "RuntimeDefault" or "Localhost")
+deployment.apps/training-operator created (server dry run)
+$ <scratch>/venv/bin/python -I <scratch>/deployment-only.py <scratch>/training-operator.yaml pss-check-baseline | kubectl apply --dry-run=server -n pss-check-baseline -f -
+Warning: would violate PodSecurity "restricted:latest": unrestricted capabilities (container "training-operator" must set securityContext.capabilities.drop=["ALL"]), runAsNonRoot != true (pod or container "training-operator" must set securityContext.runAsNonRoot=true), seccompProfile (pod or container "training-operator" must set securityContext.seccompProfile.type to "RuntimeDefault" or "Localhost")
+deployment.apps/training-operator created (server dry run)
+$ helm template kuberay-operator kuberay/kuberay-operator --version 1.7.1 -n p12-04-ml --show-only templates/deployment.yaml | kubectl apply --dry-run=server -n p12-04-ml -f -
+deployment.apps/kuberay-operator created (server dry run)
+$ docker images bookstore/recommender-train --format '{{.Repository}}:{{.Tag}}'
+
+$ <scratch>/venv/bin/python -I <scratch>/pod-from-deployment.py <scratch>/training-operator.yaml p12-04-ml | kubectl apply --dry-run=server -n p12-04-ml -f -
+Error from server (Forbidden): error when creating "STDIN": pods "operator-pod-check" is forbidden: violates PodSecurity "restricted:latest": unrestricted capabilities (container "training-operator" must set securityContext.capabilities.drop=["ALL"]), runAsNonRoot != true (pod or container "training-operator" must set securityContext.runAsNonRoot=true), seccompProfile (pod or container "training-operator" must set securityContext.seccompProfile.type to "RuntimeDefault" or "Localhost")
+$ <scratch>/venv/bin/python -I <scratch>/pod-from-deployment.py <scratch>/training-operator.yaml pss-check-baseline | kubectl apply --dry-run=server -n pss-check-baseline -f -
+Warning: would violate PodSecurity "restricted:latest": unrestricted capabilities (container "training-operator" must set securityContext.capabilities.drop=["ALL"]), runAsNonRoot != true (pod or container "training-operator" must set securityContext.runAsNonRoot=true), seccompProfile (pod or container "training-operator" must set securityContext.seccompProfile.type to "RuntimeDefault" or "Localhost")
+pod/operator-pod-check created (server dry run)
+$ helm template kuberay-operator kuberay/kuberay-operator --version 1.7.1 -n p12-04-ml --show-only templates/deployment.yaml | <scratch>/venv/bin/python -I -c "import sys,yaml; d=[x for x in yaml.safe_load_all(sys.stdin) if x and x.get('kind')=='Deployment'][0]; s=d['spec']['template']['spec']; s.pop('serviceAccountName',None); print(yaml.safe_dump({'apiVersion':'v1','kind':'Pod','metadata':{'name':'kr-pod-check','namespace':'p12-04-ml'},'spec':s}))" | kubectl apply --dry-run=server -n p12-04-ml -f -
+pod/kr-pod-check created (server dry run)
+
+$ kubectl apply -f <scratch>/allow-group.yaml
+networkpolicy.networking.k8s.io/allow-recommender-train-pt created
+$ kubectl apply -f <scratch>/rdzv.yaml
+Error from server (Forbidden): error when creating "<scratch>/rdzv.yaml": pods "rdzv-master" is forbidden: error looking up service account p12-04-ml/recommender-train: serviceaccount "recommender-train" not found
+Error from server (Forbidden): error when creating "<scratch>/rdzv.yaml": pods "rdzv-worker" is forbidden: error looking up service account p12-04-ml/recommender-train: serviceaccount "recommender-train" not found
+Error from server (Forbidden): error when creating "<scratch>/rdzv.yaml": pods "rdzv-probe" is forbidden: error looking up service account p12-04-ml/recommender-train: serviceaccount "recommender-train" not found
+$ kubectl wait --for=condition=Ready pod/rdzv-master pod/rdzv-worker pod/rdzv-probe -n p12-04-ml --timeout=180s
+Error from server (NotFound): pods "rdzv-master" not found
+Error from server (NotFound): pods "rdzv-worker" not found
+Error from server (NotFound): pods "rdzv-probe" not found
+$ kubectl get pod rdzv-master -n p12-04-ml -o jsonpath='{.status.podIP}{"\n"}'
+Error from server (NotFound): pods "rdzv-master" not found
+$ kubectl exec -n p12-04-ml rdzv-worker -- sh -c 'wget -q -O /dev/null -T 5 http://:23456/ && echo reached || echo not reached'
+Error from server (NotFound): pods "rdzv-worker" not found
+$ kubectl exec -n p12-04-ml rdzv-probe -- sh -c 'wget -q -O /dev/null -T 5 http://:23456/ && echo reached || echo not reached'
+Error from server (NotFound): pods "rdzv-probe" not found
+$ kubectl delete -n p12-04-ml -f <scratch>/allow-group.yaml
+networkpolicy.networking.k8s.io "allow-recommender-train-pt" deleted from p12-04-ml namespace
+$ kubectl exec -n p12-04-ml rdzv-worker -- sh -c 'wget -q -O /dev/null -T 5 http://:23456/ && echo reached || echo not reached'
+Error from server (NotFound): pods "rdzv-worker" not found
+$ kubectl apply -f <scratch>/allow-group.yaml
+networkpolicy.networking.k8s.io/allow-recommender-train-pt created
+$ kubectl exec -n p12-04-ml rdzv-worker -- sh -c 'wget -q -O /dev/null -T 5 http://:23456/ && echo reached || echo not reached'
+Error from server (NotFound): pods "rdzv-worker" not found
+$ kubectl get networkpolicy -n p12-04-ml
+NAME                         POD-SELECTOR                                       AGE
+allow-recommender-train-pt   ml.bookstore/training-group=recommender-train-pt   0s
+default-deny                 <none>                                             24m
+$ kubectl apply -f <scratch>/sa-only.yaml
+error: no objects passed to apply
+$ kubectl apply -f <scratch>/rdzv.yaml
+Error from server (Forbidden): error when creating "<scratch>/rdzv.yaml": pods "rdzv-master" is forbidden: error looking up service account p12-04-ml/recommender-train: serviceaccount "recommender-train" not found
+Error from server (Forbidden): error when creating "<scratch>/rdzv.yaml": pods "rdzv-worker" is forbidden: error looking up service account p12-04-ml/recommender-train: serviceaccount "recommender-train" not found
+Error from server (Forbidden): error when creating "<scratch>/rdzv.yaml": pods "rdzv-probe" is forbidden: error looking up service account p12-04-ml/recommender-train: serviceaccount "recommender-train" not found
+$ kubectl wait --for=condition=Ready pod/rdzv-master pod/rdzv-worker pod/rdzv-probe -n p12-04-ml --timeout=180s
+Error from server (NotFound): pods "rdzv-master" not found
+Error from server (NotFound): pods "rdzv-worker" not found
+Error from server (NotFound): pods "rdzv-probe" not found
+$ kubectl get pod rdzv-master -n p12-04-ml -o jsonpath='{.status.podIP}{"\n"}'
+Error from server (NotFound): pods "rdzv-master" not found
+$ kubectl exec -n p12-04-ml rdzv-worker -- sh -c 'wget -q -O /dev/null -T 5 http://:23456/ && echo reached || echo not reached'
+Error from server (NotFound): pods "rdzv-worker" not found
+$ kubectl exec -n p12-04-ml rdzv-probe -- sh -c 'wget -q -O /dev/null -T 5 http://:23456/ && echo reached || echo not reached'
+Error from server (NotFound): pods "rdzv-probe" not found
+$ kubectl delete -n p12-04-ml -f <scratch>/allow-group.yaml
+networkpolicy.networking.k8s.io "allow-recommender-train-pt" deleted from p12-04-ml namespace
+$ kubectl exec -n p12-04-ml rdzv-worker -- sh -c 'wget -q -O /dev/null -T 5 http://:23456/ && echo reached || echo not reached'
+Error from server (NotFound): pods "rdzv-worker" not found
+$ kubectl apply -f <scratch>/allow-group.yaml
+networkpolicy.networking.k8s.io/allow-recommender-train-pt created
+$ kubectl exec -n p12-04-ml rdzv-worker -- sh -c 'wget -q -O /dev/null -T 5 http://:23456/ && echo reached || echo not reached'
+Error from server (NotFound): pods "rdzv-worker" not found
+$ kubectl get networkpolicy -n p12-04-ml
+NAME                         POD-SELECTOR                                       AGE
+allow-recommender-train-pt   ml.bookstore/training-group=recommender-train-pt   1s
+default-deny                 <none>                                             24m
+$ kubectl apply -f <scratch>/sa-only.yaml
+serviceaccount/recommender-train created
+$ kubectl apply -f <scratch>/rdzv.yaml
+pod/rdzv-master created
+pod/rdzv-worker created
+pod/rdzv-probe created
+$ kubectl wait --for=condition=Ready pod/rdzv-master pod/rdzv-worker pod/rdzv-probe -n p12-04-ml --timeout=180s
+pod/rdzv-master condition met
+pod/rdzv-worker condition met
+pod/rdzv-probe condition met
+$ kubectl get pod rdzv-master -n p12-04-ml -o jsonpath='{.status.podIP}{"\n"}'
+10.244.0.236
+$ kubectl exec -n p12-04-ml rdzv-worker -- sh -c 'wget -q -O /dev/null -T 5 http://10.244.0.236:23456/ && echo reached || echo not reached'
+not reached
+wget: server returned error: HTTP/1.1 404 Not Found
+$ kubectl exec -n p12-04-ml rdzv-probe -- sh -c 'wget -q -O /dev/null -T 5 http://10.244.0.236:23456/ && echo reached || echo not reached'
+wget: download timed out
+not reached
+$ kubectl delete -n p12-04-ml -f <scratch>/allow-group.yaml
+networkpolicy.networking.k8s.io "allow-recommender-train-pt" deleted from p12-04-ml namespace
+$ kubectl exec -n p12-04-ml rdzv-worker -- sh -c 'wget -q -O /dev/null -T 5 http://10.244.0.236:23456/ && echo reached || echo not reached'
+wget: download timed out
+not reached
+$ kubectl apply -f <scratch>/allow-group.yaml
+networkpolicy.networking.k8s.io/allow-recommender-train-pt created
+$ kubectl exec -n p12-04-ml rdzv-worker -- sh -c 'wget -q -O /dev/null -T 5 http://10.244.0.236:23456/ && echo reached || echo not reached'
+wget: server returned error: HTTP/1.1 404 Not Found
+not reached
+$ kubectl get networkpolicy -n p12-04-ml
+NAME                         POD-SELECTOR                                       AGE
+allow-recommender-train-pt   ml.bookstore/training-group=recommender-train-pt   1s
+default-deny                 <none>                                             26m
+# second run: the master writes /tmp/index.html, so an allowed request returns 200
+$ kubectl delete -n p12-04-ml pod rdzv-master rdzv-worker rdzv-probe --wait=true
+pod "rdzv-master" deleted from p12-04-ml namespace
+pod "rdzv-worker" deleted from p12-04-ml namespace
+pod "rdzv-probe" deleted from p12-04-ml namespace
+$ kubectl apply -f <scratch>/rdzv.yaml
+pod/rdzv-master created
+pod/rdzv-worker created
+pod/rdzv-probe created
+$ kubectl wait --for=condition=Ready pod/rdzv-master pod/rdzv-worker pod/rdzv-probe -n p12-04-ml --timeout=180s
+pod/rdzv-master condition met
+pod/rdzv-worker condition met
+pod/rdzv-probe condition met
+$ kubectl get pod rdzv-master -n p12-04-ml -o jsonpath='{.status.podIP}{"\n"}'
+10.244.0.242
+$ kubectl exec -n p12-04-ml rdzv-worker -- sh -c 'wget -q -O - -T 5 http://10.244.0.242:23456/ && echo reached || echo not reached'
+rendezvous-ok
+reached
+$ kubectl exec -n p12-04-ml rdzv-probe -- sh -c 'wget -q -O - -T 5 http://10.244.0.242:23456/ && echo reached || echo not reached'
+wget: download timed out
+not reached
+$ kubectl delete -n p12-04-ml -f <scratch>/allow-group.yaml
+networkpolicy.networking.k8s.io "allow-recommender-train-pt" deleted from p12-04-ml namespace
+$ kubectl exec -n p12-04-ml rdzv-worker -- sh -c 'wget -q -O - -T 5 http://10.244.0.242:23456/ && echo reached || echo not reached'
+wget: download timed out
+not reached
+$ kubectl apply -f <scratch>/allow-group.yaml
+networkpolicy.networking.k8s.io/allow-recommender-train-pt created
+$ kubectl exec -n p12-04-ml rdzv-worker -- sh -c 'wget -q -O - -T 5 http://10.244.0.242:23456/ && echo reached || echo not reached'
+rendezvous-ok
+reached
+$ kubectl get networkpolicy -n p12-04-ml
+NAME                         POD-SELECTOR                                       AGE
+allow-recommender-train-pt   ml.bookstore/training-group=recommender-train-pt   1s
+default-deny                 <none>                                             28m
+$ kubectl apply --dry-run=server -f <scratch>/job.yaml
+serviceaccount/recommender-train configured (server dry run)
+persistentvolumeclaim/recommender-model created (server dry run)
+job.batch/recommender-train created (server dry run)
+$ kubectl get pod rdzv-worker -n p12-04-ml -o custom-columns=NAME:.metadata.name,SA:.spec.serviceAccountName,AUTOMOUNT:.spec.automountServiceAccountToken,UID:.spec.securityContext.runAsUser,SECCOMP:.spec.securityContext.seccompProfile.type,RO_ROOT:.spec.containers[0].securityContext.readOnlyRootFilesystem,DROP:.spec.containers[0].securityContext.capabilities.drop
+NAME          SA                  AUTOMOUNT   UID     SECCOMP          RO_ROOT   DROP
+rdzv-worker   recommender-train   false       65532   RuntimeDefault   true      [ALL]
+$ kubectl auth can-i get pods -n p12-04-ml --as=system:serviceaccount:p12-04-ml:recommender-train
+no
+$ kubectl auth can-i list secrets -n p12-04-ml --as=system:serviceaccount:p12-04-ml:recommender-train
+no
+
+$ docker buildx imagetools inspect ghcr.io/kubeflow/training-v1/training-operator:v1-93c5489 --format '{{json .Image}}' | python3 -c 'import json,sys; d=json.load(sys.stdin); [print(p, "User", repr(v["config"]["User"])) for p,v in d.items()]'
+linux/amd64 User '0'
+linux/arm64 User '0'
+linux/ppc64le User '0'
+$ docker buildx imagetools inspect rayproject/ray:2.40.0 --format '{{json .Image}}' | python3 -c 'import json,sys; print("User", json.load(sys.stdin)["config"]["User"])'
+User 1000
+$ helm template kuberay-operator kuberay/kuberay-operator --version 1.7.1 -n kuberay-operator --include-crds | grep -o 'RayClusterNetworkPolicy=[a-z]*\|RayClusterMTLS=[a-z]*'
+RayClusterMTLS=false
+RayClusterNetworkPolicy=false
+$ helm template kuberay-operator kuberay/kuberay-operator --version 1.7.1 -n kuberay-operator --show-only templates/deployment.yaml | grep -n -E 'runAsNonRoot|seccompProfile|readOnlyRootFilesystem|image:|serviceAccountName'
+28:      serviceAccountName: kuberay-operator
+36:            readOnlyRootFilesystem: true
+37:            runAsNonRoot: true
+38:            seccompProfile:
+40:          image: "quay.io/kuberay/operator:v1.7.1"
+$ helm show chart kuberay/kuberay-operator --version 1.7.1 | grep -E '^(name|version|appVersion):'
+name: kuberay-operator
+version: 1.7.1
+$ docker buildx imagetools inspect rayproject/ray:2.40.0 | head -4
+Name:      docker.io/rayproject/ray:2.40.0
+MediaType: application/vnd.docker.distribution.manifest.v2+json
+Digest:    sha256:41d1f003119564fb00dc256881fc54d3ddfe607c79e4bdef49b9bce8ebf78428

@@ -1,0 +1,125 @@
+# Bookstore - Part 12 ch.04, step 3: a check that the training group's
+# NetworkPolicy admits its own Pods and refuses everything else.
+#
+# Three Pods, no training. rdzv-master serves HTTP on TCP 23456, the default
+# PyTorch rendezvous port, as a stand-in for a rank. rdzv-worker carries the
+# training-group label and may reach it. rdzv-probe does not carry the label
+# and must not. The allow policy is in the chapter; the default-deny policy is
+# the one ch.01 creates. Apply recommender-train-job.yaml first: it creates the
+# recommender-train ServiceAccount these Pods use.
+#
+# Image: busybox 1.36, pinned by digest, for httpd and wget only. No training
+# image is needed for this check.
+apiVersion: v1
+kind: Pod
+metadata:
+  name: rdzv-master
+  namespace: bookstore-ml
+  labels:
+    app.kubernetes.io/part-of: bookstore-ml
+    ml.bookstore/training-group: recommender-train-pt
+spec:
+  serviceAccountName: recommender-train
+  automountServiceAccountToken: false
+  securityContext:
+    runAsNonRoot: true
+    runAsUser: 65532
+    runAsGroup: 65532
+    seccompProfile:
+      type: RuntimeDefault
+  containers:
+    - name: rdzv-master
+      # busybox:1.36, pinned by digest
+      image: busybox@sha256:73aaf090f3d85aa34ee199857f03fa3a95c8ede2ffd4cc2cdb5b94e566b11662
+      imagePullPolicy: IfNotPresent
+      command: ["sh", "-c", "echo rendezvous-ok > /tmp/index.html && exec httpd -f -p 23456 -h /tmp"]
+      resources:
+        requests: { cpu: 50m, memory: 32Mi }
+        limits: { memory: 64Mi }
+      securityContext:
+        allowPrivilegeEscalation: false
+        readOnlyRootFilesystem: true
+        capabilities:
+          drop: ["ALL"]
+      volumeMounts:
+        - name: tmp
+          mountPath: /tmp
+  volumes:
+    - name: tmp
+      emptyDir: {}
+---
+apiVersion: v1
+kind: Pod
+metadata:
+  name: rdzv-worker
+  namespace: bookstore-ml
+  labels:
+    app.kubernetes.io/part-of: bookstore-ml
+    ml.bookstore/training-group: recommender-train-pt
+spec:
+  serviceAccountName: recommender-train
+  automountServiceAccountToken: false
+  securityContext:
+    runAsNonRoot: true
+    runAsUser: 65532
+    runAsGroup: 65532
+    seccompProfile:
+      type: RuntimeDefault
+  containers:
+    - name: rdzv-worker
+      # busybox:1.36, pinned by digest
+      image: busybox@sha256:73aaf090f3d85aa34ee199857f03fa3a95c8ede2ffd4cc2cdb5b94e566b11662
+      imagePullPolicy: IfNotPresent
+      command: ["sleep", "86400"]
+      resources:
+        requests: { cpu: 50m, memory: 32Mi }
+        limits: { memory: 64Mi }
+      securityContext:
+        allowPrivilegeEscalation: false
+        readOnlyRootFilesystem: true
+        capabilities:
+          drop: ["ALL"]
+      volumeMounts:
+        - name: tmp
+          mountPath: /tmp
+  volumes:
+    - name: tmp
+      emptyDir: {}
+---
+apiVersion: v1
+kind: Pod
+metadata:
+  name: rdzv-probe
+  namespace: bookstore-ml
+  labels:
+    app.kubernetes.io/part-of: bookstore-ml
+    ml.bookstore/training-group: none        # not a member of the group
+spec:
+  serviceAccountName: recommender-train
+  automountServiceAccountToken: false
+  securityContext:
+    runAsNonRoot: true
+    runAsUser: 65532
+    runAsGroup: 65532
+    seccompProfile:
+      type: RuntimeDefault
+  containers:
+    - name: rdzv-probe
+      # busybox:1.36, pinned by digest
+      image: busybox@sha256:73aaf090f3d85aa34ee199857f03fa3a95c8ede2ffd4cc2cdb5b94e566b11662
+      imagePullPolicy: IfNotPresent
+      command: ["sleep", "86400"]
+      resources:
+        requests: { cpu: 50m, memory: 32Mi }
+        limits: { memory: 64Mi }
+      securityContext:
+        allowPrivilegeEscalation: false
+        readOnlyRootFilesystem: true
+        capabilities:
+          drop: ["ALL"]
+      volumeMounts:
+        - name: tmp
+          mountPath: /tmp
+  volumes:
+    - name: tmp
+      emptyDir: {}
