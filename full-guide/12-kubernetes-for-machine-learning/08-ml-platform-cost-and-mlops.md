@@ -201,7 +201,7 @@ and the one registered exception, the GPU stack, from [ch.02](02-gpus-and-accele
 | The tracker's bundled database and object store ship with their own defaults | Neither is deployed. The backing database and the artifact bucket are external, and their URIs and keys live only in a Secret | [Part 03 ch.02](../03-config-and-storage/02-secrets.md) |
 | Cost data shows spend and cluster shape to anyone who can reach OpenCost's API | ClusterIP only, the MCP server and UI off, and an exporter whose ClusterRole grants get, list and watch and nothing else | [Part 08 ch.05](../08-day-2-operations/05-operators-and-crds.md) |
 | A scaffolder with cluster credentials can create anything its form asks for | The scaffolder holds no cluster credentials. It writes to Git and Argo CD applies. The team name is pattern-checked before any step runs | [Part 11 ch.10](../11-advanced-production-patterns/10-platform-engineering.md), [Part 08 ch.04](../08-day-2-operations/04-multi-tenancy-and-namespaces.md) |
-| A run's lineage points at an image tag someone re-pushed | Training and serving images are recorded by digest in the run's parameters | [Part 05 ch.03](../05-security/03-supply-chain.md) |
+| A run's lineage points at an image tag someone re-pushed | The model's SHA-256 is recorded with the run (ch.07). The images are named by tag in this tree, and recording their digests from the Pod's `imageID` is the production step | [Part 05 ch.03](../05-security/03-supply-chain.md) |
 
 ## Diagrams
 
@@ -392,6 +392,19 @@ spec:
         - protocol: TCP
           port: 9003
   egress:
+    # DNS, so the exporter can resolve the Prometheus Service name.
+    - to:
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: kube-system
+          podSelector:
+            matchLabels:
+              k8s-app: kube-dns
+      ports:
+        - protocol: UDP
+          port: 53
+        - protocol: TCP
+          port: 53
     - to:
         - ipBlock:
             cidr: 192.0.2.10/32   # replaced with the API server address at apply time
@@ -657,216 +670,131 @@ resolve on the registry as of this run, so the chart cannot start as shipped.
 Its default Service type is `LoadBalancer`, and its defaults deploy a
 PostgreSQL and a MinIO, which this guide does not run. This section uses the
 upstream image instead, `ghcr.io/mlflow/mlflow` at `v3.3.2`, pinned by the
-digest of its image index, as a plain Deployment with the baseline.
+digest of its image index.
+
+The upstream image is `pip install mlflow==3.3.2` and nothing more. It has no
+Flask-WTF, which the basic-auth app imports, no PostgreSQL driver for the
+external database, and no boto3 for an `s3://` artifact store. The image in
+[`examples/bookstore/ml/tracking/`](../examples/bookstore/ml/tracking/Dockerfile)
+builds on that digest and adds the three packages at pinned versions. It keeps
+the upstream user, UID 65532, and the Deployment sets the same UID itself.
+
+```sh
+docker build -t bookstore/mlflow-auth:dev examples/bookstore/ml/tracking
+kind load docker-image bookstore/mlflow-auth:dev --name bookstore   # lab cluster only
+```
 
 Basic authentication is built into MLflow and turns on with
-`--app-name basic-auth`. The admin password comes from the
-`MLFLOW_AUTH_ADMIN_PASSWORD` variable or from `admin_password` in the config
-file. The server refuses to start with neither set, so this chapter ships no
-default password. The config's default permission is `READ` for every user, so
-the config below sets `NO_PERMISSIONS`. Its `database_uri` defaults to SQLite
-in the working directory, which a read-only root filesystem does not allow, so
-the config points it at an external database. Sources: the `basic_auth.ini`
-file and the basic HTTP auth page in the MLflow repository.
+`--app-name basic-auth`. The server refuses to start unless two things are set,
+and the chapter sets both:
 
-The upstream image declares no user, so the Deployment sets UID 65532 itself,
-the UID the guide's own Python images run as. The first start is the check that
-the image runs under it. The lab did not start the server.
+- `MLFLOW_FLASK_SERVER_SECRET_KEY`, the key that signs the server's session
+  state. It comes from the Secret.
+- `admin_password` in the `basic_auth.ini` file. In MLflow 3.3.2 the admin
+  password is read from that file, not from a `MLFLOW_AUTH_ADMIN_PASSWORD`
+  variable, so the variable this section used to name does nothing.
 
-Create the secret from three inputs, none of them in Git. The config file is
-`basic_auth.ini`:
+The config's default permission is `READ` for every user, so the config sets
+`NO_PERMISSIONS`. Its `database_uri` defaults to SQLite in the working
+directory, which a read-only root filesystem does not allow, so the config
+points it at an external database. The `basic_auth.ini` file and the basic HTTP
+auth page in the MLflow repository are the sources for these keys.
 
-```ini
-[mlflow]
-default_permission = NO_PERMISSIONS
-database_uri = <the external auth database URI, kept in the Secret only>
-admin_username = admin
-```
+The manifests are in
+[`examples/bookstore/ml/tracking/mlflow.yaml`](../examples/bookstore/ml/tracking/mlflow.yaml).
+They run the tracker as a restricted Pod with no token, a read-only root
+filesystem and all capabilities dropped. Ingress is denied by default and
+allowed only from the `bookstore-ml` namespace, selected by its name. The
+`part-of` label is not used for this, because other namespaces in the guide
+carry the same label. Egress is denied by default too, and the policy allows
+DNS, then PostgreSQL on 5432 and HTTPS on 443 to any address. Those two port
+rules are open until they are narrowed to the database and bucket addresses
+with `ipBlock` rules, which is a production step.
 
-The manifests follow. The default-deny policy admits nothing into the
-namespace except the policy's allow, and that allow admits only the
-`bookstore-ml` namespace on port 5000. Egress to the database and the bucket
-is left open here. Narrow it with the same policy pattern once their addresses
-are known. Save as `mlflow.yaml`:
-
-```yaml
-apiVersion: v1
-kind: Namespace
-metadata:
-  name: mlflow
-  labels:
-    app.kubernetes.io/part-of: mlflow
-    pod-security.kubernetes.io/enforce: restricted
-    pod-security.kubernetes.io/enforce-version: latest
-    pod-security.kubernetes.io/audit: restricted
-    pod-security.kubernetes.io/audit-version: latest
-    pod-security.kubernetes.io/warn: restricted
-    pod-security.kubernetes.io/warn-version: latest
----
-apiVersion: v1
-kind: ServiceAccount
-metadata:
-  name: mlflow
-  namespace: mlflow
-automountServiceAccountToken: false
----
-apiVersion: networking.k8s.io/v1
-kind: NetworkPolicy
-metadata:
-  name: default-deny
-  namespace: mlflow
-spec:
-  podSelector: {}
-  policyTypes: ["Ingress"]
----
-apiVersion: networking.k8s.io/v1
-kind: NetworkPolicy
-metadata:
-  name: allow-bookstore-ml
-  namespace: mlflow
-spec:
-  podSelector:
-    matchLabels:
-      app.kubernetes.io/name: mlflow
-  policyTypes: ["Ingress"]
-  ingress:
-    - from:
-        - namespaceSelector:
-            matchLabels:
-              app.kubernetes.io/part-of: bookstore-ml
-      ports:
-        - protocol: TCP
-          port: 5000
----
-apiVersion: v1
-kind: Service
-metadata:
-  name: mlflow
-  namespace: mlflow
-spec:
-  type: ClusterIP
-  selector:
-    app.kubernetes.io/name: mlflow
-  ports:
-    - name: http
-      port: 5000
-      targetPort: http
----
-apiVersion: apps/v1
-kind: Deployment
-metadata:
-  name: mlflow
-  namespace: mlflow
-spec:
-  replicas: 1
-  selector:
-    matchLabels:
-      app.kubernetes.io/name: mlflow
-  template:
-    metadata:
-      labels:
-        app.kubernetes.io/name: mlflow
-    spec:
-      serviceAccountName: mlflow
-      automountServiceAccountToken: false
-      securityContext:
-        runAsNonRoot: true
-        runAsUser: 65532        # the image declares no user; see the text
-        runAsGroup: 65532
-        seccompProfile:
-          type: RuntimeDefault
-      containers:
-        - name: mlflow
-          # ghcr.io/mlflow/mlflow:v3.3.2, pinned to the image index digest
-          image: ghcr.io/mlflow/mlflow@sha256:b166428a3ab479e396f14d671987a70b27741a8d9b22f9d69a559c1fbf09d551
-          command: ["/bin/sh", "-c"]
-          args:
-            - >-
-              exec mlflow server --host 0.0.0.0 --port 5000
-              --app-name basic-auth
-              --backend-store-uri "$(cat /etc/mlflow-auth/backend-store-uri)"
-              --artifacts-destination "$ARTIFACT_ROOT"
-          env:
-            - name: MLFLOW_AUTH_CONFIG_PATH
-              value: /etc/mlflow-auth/basic_auth.ini
-            - name: MLFLOW_AUTH_ADMIN_PASSWORD
-              valueFrom:
-                secretKeyRef:
-                  name: mlflow-auth
-                  key: admin-password
-            - name: ARTIFACT_ROOT
-              value: s3://example-bucket/mlflow   # placeholder: your bucket
-          ports:
-            - name: http
-              containerPort: 5000
-          securityContext:
-            allowPrivilegeEscalation: false
-            readOnlyRootFilesystem: true
-            capabilities:
-              drop: ["ALL"]
-          resources:
-            requests:
-              cpu: 250m
-              memory: 512Mi
-            limits:
-              memory: 1Gi
-          volumeMounts:
-            - name: tmp
-              mountPath: /tmp
-            - name: auth
-              mountPath: /etc/mlflow-auth
-              readOnly: true
-      volumes:
-        - name: tmp
-          emptyDir: {}
-        - name: auth
-          secret:
-            secretName: mlflow-auth
-            items:
-              - key: basic_auth.ini
-                path: basic_auth.ini
-              - key: backend-store-uri
-                path: backend-store-uri
-```
-
-Before the Secret exists, a server dry run accepts the manifests under
-`restricted`. The namespace line is left out here, since the lab created it
-first:
+The Secret holds three values, none of them in Git: the config file, the
+tracking store URI, and the Flask key. The admin password is generated into the
+config file and never printed. Apply the manifest first, since it creates the
+namespace, and then the Secret:
 
 ```sh
-kubectl apply --dry-run=server -f mlflow.yaml
-```
-
-<!-- gate: output -->
-```
-# ...
-serviceaccount/mlflow created (server dry run)
-networkpolicy.networking.k8s.io/default-deny created (server dry run)
-networkpolicy.networking.k8s.io/allow-bookstore-ml created (server dry run)
-service/mlflow created (server dry run)
-deployment.apps/mlflow created (server dry run)
-```
-
-The `backend-store-uri` file holds one line, the external PostgreSQL URI. Apply
-the manifests, then create the secret. The admin password is generated and
-never printed:
-
-```sh
-kubectl apply -f mlflow.yaml
+kubectl apply -f examples/bookstore/ml/tracking/mlflow.yaml
+umask 077
+printf '[mlflow]\ndefault_permission = NO_PERMISSIONS\ndatabase_uri = %s\nadmin_username = admin\nadmin_password = %s\n' \
+  "$AUTH_DB_URI" "$(openssl rand -base64 24)" > basic_auth.ini
+printf '%s' "$TRACKING_DB_URI" > backend-store-uri
 kubectl create secret generic mlflow-auth -n mlflow \
   --from-file=basic_auth.ini=./basic_auth.ini \
   --from-file=backend-store-uri=./backend-store-uri \
-  --from-literal=admin-password="$(openssl rand -base64 24)"
+  --from-literal=flask-secret-key="$(openssl rand -hex 32)"
+rm basic_auth.ini backend-store-uri
 ```
 
-The artifact bucket needs its own identity, which [Part 10 ch.03](../10-cloud-and-managed-kubernetes/03-cloud-identity.md)
-covers. That identity is the only reason to turn the ServiceAccount token on,
-and it would apply to this ServiceAccount alone.
+`AUTH_DB_URI` is the URI of the authentication store and `TRACKING_DB_URI` the
+URI of the tracking store, both set in the shell from your secret store and
+never written into the repository. They must differ. MLflow records each store's
+schema revision in an `alembic_version` table, so two stores in one database
+collide: the lab's first start, which used one SQLite file for both, failed the
+second migration with `Can't locate revision`. Give each store its own database
+or schema.
 
-Two claims here are not demonstrated. This chapter did not start the server,
-so the refusal of an unauthenticated request is cited to the MLflow repository,
-not captured. And the UID 65532 is a choice the image does not declare. The
-first start is the check that it works.
+The lab had no PostgreSQL. Its first start kept each store in its own SQLite file
+on an `emptyDir` volume, which the manifest marks as a lab-only mount. The lab ran
+the same manifest with the bookstore namespace named `p12-08-ml`, a namespace it
+created for that purpose, and with a namespace outside the allow-list. The
+capture below is step 12 of the lab. The Deployment rolled out under the
+restricted settings, and the server listened on port 5000 after both stores
+migrated. Every request then failed with `500`, including the request from the
+allowed namespace, so this run did not reach the `401` that this section sets
+out to show. The server log names the cause: uvicorn calls the Flask basic-auth
+app with the ASGI signature, and each request raises a `TypeError`, quoted in
+the capture. The lab found no configuration that avoids it. The request from
+outside the allow-list was stopped by the policy, as intended. The scripted
+probe from that namespace hung in `kubectl exec`, so the lab ran it once more by
+hand, and its result is step 14. The generated values are never printed.
+
+<!-- gate: output -->
+```text
+$ kubectl create namespace p12-08-ml (stands in for bookstore-ml) and p12-08-store (outside the allow-list)
+namespace/p12-08-ml created
+namespace/p12-08-store created
+$ python: write the manifest with the lab namespace names (the Namespace object, the policy's namespace and the allowed namespace)
+wrote 7 documents
+$ kubectl apply -f mlflow.yaml (the namespace, the policies, the Service and the Deployment)
+namespace/p12-08-mlflow created
+serviceaccount/mlflow created
+networkpolicy.networking.k8s.io/default-deny created
+networkpolicy.networking.k8s.io/allow-p12-08-ml created
+networkpolicy.networking.k8s.io/allow-tracker-egress created
+service/mlflow created
+deployment.apps/mlflow created
+$ kubectl create secret generic mlflow-auth -n p12-08-mlflow (basic_auth.ini, backend-store-uri and the Flask key, generated; none printed)
+secret/mlflow-auth created
+$ kubectl rollout status deployment/mlflow -n p12-08-mlflow --timeout=300s
+Waiting for deployment "mlflow" rollout to finish: 0 of 1 updated replicas are available...
+deployment "mlflow" successfully rolled out
+$ kubectl apply -f caller.yaml (in p12-08-ml)
+pod/caller created
+pod/caller condition met
+$ kubectl exec -i -n p12-08-ml caller -- python -I - < probe.py
+experiments/search without credentials: HTTP 500
+$ kubectl apply -f stranger.yaml (in p12-08-store)
+pod/stranger created
+pod/stranger condition met
+$ kubectl exec -i -n p12-08-store stranger -- python -I - < probe.py
+$ kubectl logs deployment/mlflow -n p12-08-mlflow --tail=4
+  File "/usr/local/lib/python3.10/site-packages/uvicorn/middleware/asgi2.py", line 14, in __call__
+    instance = self.app(scope)
+TypeError: Flask.__call__() missing 1 required positional argument: 'start_response'
+INFO:     10.244.0.90:37156 - "GET /api/2.0/mlflow/experiments/search HTTP/1.1" 500 Internal Server Error
+```
+
+Three things are still open. The first start answered every request with `500`,
+a `TypeError` in the MLflow 3.3.2 basic-auth path, so the refusal of an
+unauthenticated request is not yet demonstrated. The artifact bucket needs its own identity, which
+[Part 10 ch.03](../10-cloud-and-managed-kubernetes/03-cloud-identity.md)
+covers. That identity is the only reason to turn the ServiceAccount token on,
+and it would apply to this ServiceAccount alone. And the PostgreSQL and bucket
+egress rules stay open to any address until they are narrowed, as noted above.
 
 The pipeline reaches this tracker with its own credential. Promotion stays a
 Git commit, as [ch.07](07-ml-pipelines-and-workflows.md) describes.
@@ -885,8 +813,9 @@ cluster. Each step has appeared in the chapters individually; this is
 the **first time they run as one platform**.
 
 ```sh
-# A. Cluster + namespace
-kind create cluster --config examples/bookstore/cluster/kind-multinode.yaml  # if not already up
+# A. Cluster + namespace (the cluster from Part 00 ch.07)
+kind create cluster --name bookstore \
+  --image kindest/node:v1.37.0@sha256:a1ed56cfb0e7b93589bdf97c8cd566405a265939e3620fc4f5de89adff580ae5  # if not already up
 kubectl create namespace bookstore-ml
 kubectl label namespace bookstore-ml \
   app.kubernetes.io/part-of=bookstore-ml \
@@ -914,26 +843,29 @@ kubectl wait --for=condition=complete job/recommender-train \
 # E. Serving image + Deployment (ch.06 -- kind path, no KServe)
 docker build -t bookstore/recommender-serve:dev examples/bookstore/ml/serve
 kind load docker-image bookstore/recommender-serve:dev
+kubectl apply -f examples/bookstore/ml/serve/recommender-security.yaml
+kubectl create secret generic recommender-caller-token -n bookstore-ml \
+  --from-literal=token="$(openssl rand -hex 32)"
 kubectl apply -f examples/bookstore/ml/serve/recommender-deployment.yaml
 kubectl apply -f examples/bookstore/ml/serve/recommender-service.yaml
 kubectl rollout status deploy/recommender -n bookstore-ml --timeout=120s
 
-# F. The pipeline (ch.07)
+# F. The pipeline (ch.07): its namespaces first, then the pinned charts with
+#    their values files, then the pipeline and its step egress
+kubectl apply -f examples/bookstore/ml/pipeline/namespaces.yaml
 helm repo add argo https://argoproj.github.io/argo-helm
-kubectl create namespace argo
-kubectl label namespace argo \
-  pod-security.kubernetes.io/enforce=restricted \
-  pod-security.kubernetes.io/audit=restricted \
-  pod-security.kubernetes.io/warn=restricted
-helm install argo-workflows argo/argo-workflows \
-  --version 0.42.0 -n argo --wait
+helm install argo-workflows argo/argo-workflows --version 2.0.15 \
+  -n argo -f examples/bookstore/ml/pipeline/argo-workflows-values.yaml --wait
 kubectl apply -f examples/bookstore/ml/pipeline/recommender-workflow.yaml
+kubectl apply -f examples/bookstore/ml/pipeline/workflow-egress.yaml
 kubectl apply -f examples/bookstore/ml/pipeline/recommender-cronworkflow.yaml
 argo submit --from workflowtemplate/recommender-pipeline -n bookstore-ml --watch
 
-# G. The end-to-end check
+# G. The end-to-end check: the caller sends the token the predictor checks
 kubectl port-forward -n bookstore-ml svc/recommender 8080:8080 &
-curl -s "http://localhost:8080/recommend?book_id=1&k=3"
+TOKEN=$(kubectl get secret recommender-caller-token -n bookstore-ml \
+  -o jsonpath='{.data.token}' | base64 -d)
+curl -s -H "Authorization: Bearer $TOKEN" "http://localhost:8080/recommend?book_id=1&k=3"
 #   {"book_id":1,"k":3,"recommendations":[...]}
 # Inspect the registry stamp the pipeline wrote:
 kubectl get configmap -n bookstore-ml \
@@ -1224,26 +1156,41 @@ helm install opencost opencost/opencost --version 2.5.33 \
 kubectl apply -f ml-job-cap.yaml
 kubectl apply -f cap-probe.yaml
 
-# Tracker with authentication (section 3): manifests, then the secret
-kubectl apply -f mlflow.yaml
+# Tracker with authentication (section 3): the image, the manifests, then the secret
+docker build -t bookstore/mlflow-auth:dev examples/bookstore/ml/tracking
+kubectl apply -f examples/bookstore/ml/tracking/mlflow.yaml
+umask 077
+printf '[mlflow]\ndefault_permission = NO_PERMISSIONS\ndatabase_uri = %s\nadmin_username = admin\nadmin_password = %s\n' \
+  "$AUTH_DB_URI" "$(openssl rand -base64 24)" > basic_auth.ini
+printf '%s' "$TRACKING_DB_URI" > backend-store-uri
 kubectl create secret generic mlflow-auth -n mlflow \
   --from-file=basic_auth.ini=./basic_auth.ini \
   --from-file=backend-store-uri=./backend-store-uri \
-  --from-literal=admin-password="$(openssl rand -base64 24)"
+  --from-literal=flask-secret-key="$(openssl rand -hex 32)"
+rm basic_auth.ini backend-store-uri
 
-# Re-summon the full capstone (every prior chapter's slice, in order)
+# Re-summon the full capstone (every prior chapter's slice, in order). Name the
+# files: the batch directory also holds Helm values and deliberate-denial probes.
 kubectl apply -k examples/bookstore/kustomize/overlays/dev
-kubectl apply -f examples/bookstore/ml/batch/                # ch.03
+kubectl apply -f examples/bookstore/ml/batch/kueue-resourceflavor.yaml  # ch.03
+kubectl apply -f examples/bookstore/ml/batch/kueue-clusterqueue.yaml
+kubectl apply -f examples/bookstore/ml/batch/kueue-localqueue.yaml
 kubectl apply -f examples/bookstore/ml/train/recommender-train-job.yaml  # ch.04
 kubectl wait --for=condition=complete job/recommender-train -n bookstore-ml --timeout=300s
-kubectl apply -f examples/bookstore/ml/serve/recommender-deployment.yaml # ch.06
+kubectl apply -f examples/bookstore/ml/serve/recommender-security.yaml   # ch.06
+kubectl create secret generic recommender-caller-token -n bookstore-ml \
+  --from-literal=token="$(openssl rand -hex 32)"
+kubectl apply -f examples/bookstore/ml/serve/recommender-deployment.yaml
 kubectl apply -f examples/bookstore/ml/serve/recommender-service.yaml
 kubectl apply -f examples/bookstore/ml/pipeline/recommender-workflow.yaml  # ch.07
+kubectl apply -f examples/bookstore/ml/pipeline/workflow-egress.yaml
 argo submit --from workflowtemplate/recommender-pipeline -n bookstore-ml --watch
 
-# Verify
+# Verify, with the caller token
 kubectl port-forward -n bookstore-ml svc/recommender 8080:8080 &
-curl -s "http://localhost:8080/recommend?book_id=1&k=3"
+TOKEN=$(kubectl get secret recommender-caller-token -n bookstore-ml \
+  -o jsonpath='{.data.token}' | base64 -d)
+curl -s -H "Authorization: Bearer $TOKEN" "http://localhost:8080/recommend?book_id=1&k=3"
 kubectl get configmap -n bookstore-ml \
   -l app.kubernetes.io/component=recommender-model-registry
 ```

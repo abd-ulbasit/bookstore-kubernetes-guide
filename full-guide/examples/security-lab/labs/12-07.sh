@@ -34,7 +34,7 @@ export HELM_REPOSITORY_CACHE="$WORK/cache"
 trap 'rm -rf "$WORK"' EXIT
 
 echo "# Transcript for 12-kubernetes-for-machine-learning/07-ml-pipelines-and-workflows.md,"
-echo "# lab steps 0 to 8. Recorded by running examples/security-lab/labs/12-07.sh"
+echo "# lab steps 0 to 10. Recorded by running examples/security-lab/labs/12-07.sh"
 echo "# from full-guide/ against the kind cluster sf-pilot (Tier A)."
 echo "# The chapter names the bookstore-ml and argo-events namespaces. The lab used"
 echo "# p12-07-bookstore-ml and p12-07-argo-events, and applied the same files with"
@@ -42,6 +42,8 @@ echo "# only the namespace names replaced. Lines that name the lab namespaces ar
 echo "# kept as captured."
 echo "# No Argo component is installed: the install is heavy, so the chapter cites"
 echo "# it. Step 7 renders the chart and reads the result; it installs nothing."
+echo "# Steps 8 and 9 read image facts with docker run and test the step Pods' egress"
+echo "# in a namespace of their own, with a test default-deny for egress."
 
 # Print a command the way a reader would type it, then run it.
 show() { printf '$ %s\n' "$*"; }
@@ -133,15 +135,114 @@ show "kubectl apply --dry-run=server -f recommender-eventsource.yaml (EventSourc
 drop_kinds "$PIPE/recommender-eventsource.yaml" ServiceAccount | lab_ns | "$K" apply --dry-run=server -f - 2>&1 | head -3
 
 echo
-echo "## step 7: the chart renders the restricted settings (helm template; nothing installed)"
+echo "## step 7: the chart renders the pinned settings (helm template; nothing installed)"
 show "helm repo add argo https://argoproj.github.io/argo-helm"
 "$H" repo add argo https://argoproj.github.io/argo-helm >/dev/null 2>&1
-show "helm template argo-workflows argo/argo-workflows --version 2.0.15 -n argo -f argo-workflows-values.yaml | grep (nonroot executor, seccomp, UID)"
+show "helm template argo-workflows argo/argo-workflows --version 2.0.15 -n argo -f argo-workflows-values.yaml > argo-workflows.yaml"
 "$H" template argo-workflows argo/argo-workflows --version 2.0.15 -n argo \
-  -f "$PIPE/argo-workflows-values.yaml" 2>&1 \
-  | grep -n -e '-nonroot' -e 'seccompProfile' -e 'runAsUser: 8737' | head -12
+  -f "$PIPE/argo-workflows-values.yaml" > "$WORK/argo-workflows.yaml" 2>&1
+show "grep -n -e 'argoexec:' -e 'workflow-controller:' -e 'crdinstaller:' argo-workflows.yaml"
+grep -n -e 'argoexec:' -e 'workflow-controller:' -e 'crdinstaller:' "$WORK/argo-workflows.yaml" 2>&1
+show "sed -n '/^  config: |/,/^    nodeEvents:/p' argo-workflows.yaml"
+sed -n '/^  config: |/,/^    nodeEvents:/p' "$WORK/argo-workflows.yaml" 2>&1
+show "grep -n -B2 -A1 'seccompProfile' argo-workflows.yaml"
+grep -n -B2 -A1 'seccompProfile' "$WORK/argo-workflows.yaml" 2>&1
 
 echo
-echo "## step 8: cleanup"
+echo "## step 8: the image facts the chapter cites (docker run on the remote engine)"
+CG=cgr.dev/chainguard/kubectl:latest-dev@sha256:ee760c803cc3856d99f13dfd989bce461d2b324ae49e70b72c717f3bfaba9cbb
+CURL=curlimages/curl:8.10.1@sha256:d9b4541e214bcd85196d6e92e2753ac6d0ea699f0af5741f8c6cccbfcf00ef4b
+show "docker run --rm --entrypoint /bin/sh $CG -c 'id; kubectl version --client'"
+docker run --rm --entrypoint /bin/sh "$CG" -c 'id; kubectl version --client' 2>&1
+show "docker run --rm --entrypoint /bin/sh $CURL -c 'id'"
+docker run --rm --entrypoint /bin/sh "$CURL" -c 'id' 2>&1
+
+echo
+echo "## step 9: a step Pod's egress: default-deny, then the Workflow Pod allow"
+show "kubectl get endpoints kubernetes -n default (the API server address is read into a variable and not printed)"
+API_IP=$("$K" get endpoints kubernetes -n default -o jsonpath='{.subsets[0].addresses[0].ip}' 2>/dev/null)
+API_PORT=$("$K" get endpoints kubernetes -n default -o jsonpath='{.subsets[0].ports[0].port}' 2>/dev/null)
+echo "endpoint read: ok"
+"$K" create namespace "$NS" >/dev/null 2>&1
+"$K" label namespace "$NS" pod-security.kubernetes.io/enforce=restricted --overwrite >/dev/null 2>&1
+show "kubectl apply -f default-deny-egress (test policy: egress only, every Pod in $NS)"
+cat > "$WORK/deny.yaml" <<EOF2
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: default-deny-egress
+  namespace: $NS
+spec:
+  podSelector: {}
+  policyTypes: [Egress]
+EOF2
+"$K" apply -f "$WORK/deny.yaml" 2>&1
+show "kubectl apply -f workflow-egress.yaml (the chapter's file, namespace replaced, the documentation address replaced with the endpoint)"
+sed -e "s/namespace: bookstore-ml/namespace: $NS/" -e "s|203.0.113.10/32|$API_IP/32|" \
+  "$PIPE/workflow-egress.yaml" | "$K" apply -f - 2>&1
+for POD in workflow-probe stranger; do
+  if [ "$POD" = workflow-probe ]; then
+    LABEL='    workflows.argoproj.io/workflow: p12-07-probe'
+  else
+    LABEL='    app: stranger'
+  fi
+  cat > "$WORK/$POD.yaml" <<EOF3
+apiVersion: v1
+kind: Pod
+metadata:
+  name: $POD
+  namespace: $NS
+  labels:
+$LABEL
+spec:
+  automountServiceAccountToken: false
+  securityContext:
+    runAsNonRoot: true
+    runAsUser: 65532
+    runAsGroup: 65532
+    seccompProfile:
+      type: RuntimeDefault
+  containers:
+    - name: probe
+      image: bookstore/recommender-serve:dev
+      imagePullPolicy: IfNotPresent
+      command: ["sleep", "600"]
+      env:
+        - name: API_ADDR
+          value: "$API_IP:$API_PORT"
+      resources:
+        requests: { cpu: 10m, memory: 32Mi }
+        limits: { memory: 128Mi }
+      securityContext:
+        allowPrivilegeEscalation: false
+        readOnlyRootFilesystem: true
+        capabilities: { drop: ["ALL"] }
+EOF3
+  show "kubectl apply -f $POD.yaml (the Pod's labels: $(echo "$LABEL" | sed 's/^ *//'))"
+  "$K" apply -f "$WORK/$POD.yaml" 2>&1
+  "$K" wait --for=condition=Ready "pod/$POD" -n "$NS" --timeout=120s 2>&1
+done
+cat > "$WORK/probe.py" <<'PY'
+import os, socket, ssl, urllib.error, urllib.request
+host, port = os.environ["API_ADDR"].rsplit(":", 1)
+ctx = ssl._create_unverified_context()
+def check(label, fn):
+    try:
+        print(label, fn())
+    except urllib.error.HTTPError as e:
+        print(label, "HTTP", e.code)
+    except Exception as e:
+        print(label, "failed:", type(e).__name__)
+check("dns kubernetes.default.svc:", lambda: socket.gethostbyname("kubernetes.default.svc"))
+check("https GET /version on the API server:",
+      lambda: "HTTP " + str(urllib.request.urlopen(f"https://{host}:{port}/version", timeout=5, context=ctx).status))
+PY
+show "kubectl exec -i workflow-probe -- python -I - < probe.py (labelled as a Workflow Pod)"
+"$K" exec -i -n "$NS" workflow-probe -- python -I - < "$WORK/probe.py" 2>&1
+show "kubectl exec -i stranger -- python -I - < probe.py (no Workflow label)"
+"$K" exec -i -n "$NS" stranger -- python -I - < "$WORK/probe.py" 2>&1
+
+echo
+echo "## step 10: cleanup"
 show "kubectl delete namespace $NS $EV --wait=false"
 "$K" delete namespace "$NS" "$EV" --wait=false 2>&1

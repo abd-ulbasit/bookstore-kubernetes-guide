@@ -115,8 +115,8 @@ surface is in [Part 01 ch.01](../01-core-workloads/01-pods.md#threats-and-contro
 | Threat | Control taught here | Goes deeper |
 |---|---|---|
 | Any caller that can reach the Service queries the model, because nothing identifies the caller (OWASP API2:2023 Broken Authentication) | The predictor requires a bearer token on every route except the probes, and refuses to start without one. A NetworkPolicy narrows who can connect, where the cluster enforces it. Section 2 shows the policy refusing an unlabelled Pod, and the token refusing a labelled caller that sends none | Per-caller identity with mutual TLS in [Part 11 ch.04](../11-advanced-production-patterns/04-service-mesh.md); NetworkPolicy in [Part 02 ch.06](../02-networking/06-network-policies.md) |
-| A caller drives up cost with a large batch or a loop, and the scale-up follows (denial of wallet; OWASP API4:2023 Unrestricted Resource Consumption, and LLM10:2025 Unbounded Consumption for LLM endpoints) | A cap of 50 instances per request, a replica ceiling, and a namespace quota that a scale-up cannot exceed. Section 3 shows the quota refusing the ninth pod | Quota mechanics in [Part 01 ch.03](../01-core-workloads/03-resources-and-qos.md); cost showback and GPU budgets in [ch.08](08-ml-platform-cost-and-mlops.md) |
-| Loading a model file runs code, because `joblib.load` is pickle (OWASP LLM03:2025 Supply Chain) | The file is mounted read-only, written only by the trainer, and loaded by a Pod that runs as uid 65532 with no token and a read-only root filesystem. Section 1 runs a harmless file that proves the code runs and that the Pod's limits contain it. For new weights, use safetensors, which holds tensors and no code | Provenance and digests in [ch.07](07-ml-pipelines-and-workflows.md); image signing in [Part 05 ch.03](../05-security/03-supply-chain.md) |
+| A caller drives up cost with a large batch or a loop, and the scale-up follows (denial of wallet; OWASP API4:2023 Unrestricted Resource Consumption, and LLM10:2025 Unbounded Consumption for LLM endpoints) | A cap of 50 instances per request, a replica ceiling, and a namespace quota that a scale-up cannot exceed. Section 3 shows the quota refusing the sixth pod | Quota mechanics in [Part 01 ch.03](../01-core-workloads/03-resources-and-qos.md); cost showback and GPU budgets in [ch.08](08-ml-platform-cost-and-mlops.md) |
+| Loading a model file runs code, because `joblib.load` is pickle (OWASP LLM03:2025 Supply Chain) | The serving Pod mounts the file read-only, and a load runs as uid 65532 with a read-only root filesystem and all capabilities dropped. Section 1 runs a harmless file that proves the code runs and that this securityContext refuses its write. Nothing in the cluster yet stops another Pod in the namespace from writing the claim, so writing it only from the trainer is a convention until a policy enforces it. For new weights, use safetensors, which holds tensors and no code | Provenance and digests in [ch.07](07-ml-pipelines-and-workflows.md); image signing in [Part 05 ch.03](../05-security/03-supply-chain.md) |
 | A prompt is treated as trusted instructions (OWASP LLM01:2025 Prompt Injection) | Not in this predictor, which takes numbers and returns numbers. It applies to the LLM runtimes named in the GPU paragraph above. There, treat the prompt as data, cap the output length, and give the generated text no tools | OWASP LLM01:2025; the GPU stack exception is in [ch.02](02-gpus-and-accelerators.md) |
 
 ## Diagrams
@@ -218,9 +218,12 @@ execute arbitrary code during unpickling", and "only unpickle data you trust"
 
 The Bookstore's own `model.joblib` is harmless: the trainer wrote it. The
 control is about who may write the file, and about what a load can do even
-when a file is hostile. Mount it read-only, written only by the training Job,
-and load it in a Pod that has no token, a non-root UID and a read-only root
-filesystem.
+when a file is hostile. The serving Pod mounts the claim read-only, and loads
+it as a non-root UID with a read-only root filesystem. The training Job is the
+only writer this chapter intends. Nothing here enforces that: the pipeline's
+eval Pod mounts the same claim read-write, and any Pod in `bookstore-ml` can
+mount it. The load-time digest check that would close that gap is not in the
+predictor yet.
 
 To see that the code runs, the lab builds a model file that is a pickle which
 calls `exec`. The file prints one line, then tries to write under the root
@@ -281,7 +284,10 @@ The Pod that performed the load is
 [`pickle-check.yaml`](../examples/bookstore/ml/serve/pickle-check.yaml). It is a
 complete manifest with the baseline, and its three choices carry the argument:
 it has the serving ServiceAccount with no token mounted, it runs the image as
-uid 65532 under `RuntimeDefault`, and its root filesystem is read-only. The
+uid 65532 under `RuntimeDefault`, and its root filesystem is read-only. It
+differs from the serving Pod in one place: the serving Pod also mounts the
+caller token at `/workspace/auth`, which the payload has no use for. The
+containment argument rests on the securityContext, which both Pods share. The
 artifact is a ConfigMap mounted read-only at `/artifacts`. The file goes into
 that ConfigMap, so the image never carries it.
 
@@ -626,10 +632,10 @@ registry or release page:
 | Component | Version | How it was confirmed |
 |---|---|---|
 | KServe CRD chart `kserve-crd` | `v0.21.0` | `helm show chart` and a rendered CRD |
-| KServe controller chart `kserve-resources` | `v0.21.0` | `helm template`, which the lab ran |
-| cert-manager | `v1.17.0` | the chart renders, pods restricted (checked) |
-| Knative operator and Knative Serving | `1.21.1` | release assets exist; Serving core pods restricted (checked) |
-| Istio, Knative networking layer | `1.27.1` | release tag exists; its pods are not checked here |
+| KServe controller chart `kserve-resources` | `v0.21.0` | release tag; not rendered in the lab |
+| cert-manager | `v1.17.0` | release tag; not rendered in the lab |
+| Knative operator and Knative Serving | `1.21.1` | release tag exists; not rendered in the lab |
+| Istio, Knative networking layer | `1.27.1` | release tag exists; not rendered in the lab |
 
 The release's own script installs that stack. This chapter does not reproduce
 it, and you should read it before running it:
@@ -639,14 +645,32 @@ it, and you should read it before running it:
 curl -LO https://github.com/kserve/kserve/releases/download/v0.21.0/kserve-knative-mode-full-install-with-manifests.sh
 ```
 
+**Two Knative flags, enabled after the install.** The InferenceService below
+sets a pod-level `securityContext` and mounts a PVC. Knative Serving gates both
+behind feature flags, and the `config-features` ConfigMap ships both as
+`disabled` ([`features.yaml` at the `knative-v1.21.1` tag](https://github.com/knative/serving/blob/knative-v1.21.1/config/core/configmaps/features.yaml),
+lines 136 and 223). With them off, Knative rejects the revision. Turn them on
+once the Serving install is up:
+
+```sh
+kubectl -n knative-serving patch configmap config-features --type merge \
+  -p '{"data":{"kubernetes.podspec-securitycontext":"enabled","kubernetes.podspec-persistent-volume-claim":"enabled"}}'
+```
+
+Knative's own comment on the security-context flag says it
+"Cannot safely be disabled once enabled." Enable it in a cluster you mean to
+keep. The lab did not run this patch, because the lab cluster has no Knative
+Serving installed.
+
 **Namespaces, labelled first.** The script creates its namespaces if they do
 not exist. Create them yourself and label them before the script runs. The
-levels follow from the rendered pods: `kserve`, `knative-serving` and
-`cert-manager` pass `restricted`, because their rendered pods set
+levels are a choice you verify, not a fact this chapter gives you. Render
+each chart and read the pod specs it produces: a pod that sets
 `runAsNonRoot`, `seccompProfile: RuntimeDefault`, no privilege escalation and
-drop ALL capabilities. Istio and the Knative operator were not checked, so do
-not label their namespaces `restricted` on trust. Check their rendered pods
-first. If one needs more than `restricted`, give it its own namespace, the
+drops ALL capabilities passes `restricted`. The lab did not render these
+charts, so the three labels below are the intended level, not a checked one.
+Istio and the Knative operator are not covered at all, so do not label their
+namespaces `restricted` on trust. Check their rendered pods first. If one needs more than `restricted`, give it its own namespace, the
 lowest level it works under, and an entry in
 `security/namespace-exceptions.yaml` in the repository
 with a reason, an upstream citation and an expiry.
@@ -811,7 +835,7 @@ and remember that the policy depends on the cluster enforcing it.
   `securityContext` on the InferenceService propagates to them, and so does the
   `serviceAccountName`. The Knative activator and queue-proxy sidecars are
   injected by the platform. Their securityContext is set by their own manifests,
-  and the lab checked the Knative Serving core pods, not the sidecars injected
+  and the lab did not check the Knative Serving core pods or the sidecars injected
   into your namespace. Check the rendered sidecars with `kubectl get pod -o yaml`
   before you assume restricted for them.
 - **GitOps for models.** [Part 07 ch.04](../07-delivery/04-gitops-argocd.md)
@@ -912,6 +936,8 @@ spec:
         image: bookstore/recommender-serve:dev   # a digest-pinned reference in production
         ports: [{ containerPort: 8080, name: http1 }]
         env:
+          - name: MODEL_DIR
+            value: /workspace/model
           - name: AUTH_TOKEN_FILE
             value: /workspace/auth/token
         resources:
@@ -922,12 +948,19 @@ spec:
           readOnlyRootFilesystem: true
           capabilities: { drop: ["ALL"] }
         volumeMounts:
+          - name: model
+            mountPath: /workspace/model
+            readOnly: true
           - name: caller-token
             mountPath: /workspace/auth
             readOnly: true
           - name: scratch
             mountPath: /tmp
     volumes:
+      - name: model                  # the PVC the train Job wrote
+        persistentVolumeClaim:
+          claimName: recommender-model
+          readOnly: true
       - name: caller-token
         secret:
           secretName: recommender-caller-token

@@ -12,7 +12,7 @@ kind: Namespace
 metadata:
   name: argo
   labels:
-    app.kubernetes.io/part-of: bookstore-ml
+    app.kubernetes.io/part-of: bookstore-ml-platform
     pod-security.kubernetes.io/enforce: restricted
     pod-security.kubernetes.io/enforce-version: latest
     pod-security.kubernetes.io/audit: restricted
@@ -25,7 +25,7 @@ kind: Namespace
 metadata:
   name: argo-events
   labels:
-    app.kubernetes.io/part-of: bookstore-ml
+    app.kubernetes.io/part-of: bookstore-ml-platform
     pod-security.kubernetes.io/enforce: restricted
     pod-security.kubernetes.io/enforce-version: latest
     pod-security.kubernetes.io/audit: restricted

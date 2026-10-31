@@ -10,6 +10,10 @@
 # guide's own images use).
 
 global:
+  image:
+    # The tag names the release; the digest is what runs. Read from quay.io
+    # with `docker buildx imagetools inspect quay.io/argoproj/argo-events:v1.9.11`.
+    tag: "v1.9.11@sha256:fa07b2c9ece6ec60a3a8377866dfe21e8bad062d5b5407f1f181d3f1d24fb861"
   # Pod-level settings for the controller and the webhook pods.
   securityContext:
     runAsNonRoot: true
@@ -19,6 +23,13 @@ global:
       type: RuntimeDefault
 
 controller:
+  # Default: {}. Requests and a memory limit, as the baseline asks.
+  resources:
+    requests:
+      cpu: 100m
+      memory: 128Mi
+    limits:
+      memory: 256Mi
   containerSecurityContext:
     allowPrivilegeEscalation: false
     readOnlyRootFilesystem: true
@@ -26,7 +37,30 @@ controller:
       drop:
         - ALL
 
+# Helm replaces a list when a values file sets it, so this file lists only the
+# NATS version the bookstore EventBus runs (2.10.29, from the chart's own
+# default entry). Each image is pinned by digest, read from the registries with
+# `docker buildx imagetools inspect` on the tags in the comments.
+configs:
+  jetstream:
+    versions:
+      - version: 2.10.29
+        # nats:2.10.29
+        natsImage: "nats:2.10.29@sha256:5498ba57b9471840be3d15b033a4eec554d1c02fa6c2cc0ca2d888637f6c6e2f"
+        # natsio/prometheus-nats-exporter:0.14.0
+        metricsExporterImage: "natsio/prometheus-nats-exporter:0.14.0@sha256:839c59f6a23473a657f6560c2a14dca9b9ce722a017933a41d071a3c9dd3a7d7"
+        # natsio/nats-server-config-reloader:0.14.0
+        configReloaderImage: "natsio/nats-server-config-reloader:0.14.0@sha256:8c28b75bc416bb068761b19edf9a471bf8e35062bf619ea49c8e22af517e383e"
+        startCommand: /nats-server
+
 webhook:
+  # Default: {}. Requests and a memory limit, as the baseline asks.
+  resources:
+    requests:
+      cpu: 50m
+      memory: 64Mi
+    limits:
+      memory: 128Mi
   containerSecurityContext:
     allowPrivilegeEscalation: false
     readOnlyRootFilesystem: true

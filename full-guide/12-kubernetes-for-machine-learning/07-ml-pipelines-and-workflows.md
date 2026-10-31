@@ -170,11 +170,11 @@ covered in [01.01](../01-core-workloads/01-pods.md#baseline),
 
 | Threat | Control in this chapter | Goes deeper |
 |---|---|---|
-| The controller holds cluster-wide rights: it can create, update and delete Pods and create `pods/exec` in every namespace it runs Workflows in. A compromised controller is a cluster compromise. | Install it by the platform team, in its own restricted namespace, with a pinned image. Use the chart's `singleNamespace` mode (a namespaced Role instead of a ClusterRole) when one team owns the install. | [05.01](../05-security/01-authn-authz-rbac.md), [08.05](../08-day-2-operations/05-operators-and-crds.md) |
+| The controller holds cluster-wide rights: it can create, update and delete Pods and create `pods/exec` in every namespace it runs Workflows in. A compromised controller is a cluster compromise. | Install it by the platform team, in its own restricted namespace, with its images pinned by digest. Use the chart's `singleNamespace` mode (a namespaced Role instead of a ClusterRole) when one team owns the install. | [05.01](../05-security/01-authn-authz-rbac.md), [08.05](../08-day-2-operations/05-operators-and-crds.md) |
 | A step's token lets the step act as its ServiceAccount. | Each step has its own identity. Train and eval get no token. Register and promote get only the verbs they use, and promote is limited to one named Deployment. | [05.01](../05-security/01-authn-authz-rbac.md) |
 | Whoever can submit a Workflow can name any ServiceAccount in its namespace, because Kubernetes checks that a ServiceAccount exists, not who may use it. A submitter can therefore run as `recommender-promote`. | Grant `create` on `workflows` in `bookstore-ml` only to the Sensor's ServiceAccount and to the release pipeline, not to people. A person who must run the pipeline by hand gets a short-lived grant. A compromised Sensor is the residual risk: keep its token narrow and admit only its Workflows with an admission policy. | [05.01](../05-security/01-authn-authz-rbac.md) |
 | A `create` verb cannot be narrowed by name. RBAC ignores `resourceNames` on create. | Say so in the Role, keep secrets out of ConfigMaps, and move the registry to its own namespace once it is real ([ch.08](08-ml-platform-cost-and-mlops.md)). | [08.04](../08-day-2-operations/04-multi-tenancy-and-namespaces.md) |
-| A model file is a pickle. Loading one runs code, and a file swapped on the PVC runs under the serving Pod. | Eval records the SHA-256 of the exact bytes it evaluated, and register stamps it. Serving verifies the digest before it loads ([ch.06](06-model-serving-and-inference.md)). Sign the model the way you sign an image. | [05.03](../05-security/03-supply-chain.md) |
+| A model file is a pickle. Loading one runs code, and a file swapped on the PVC runs under the serving Pod. | Eval records the SHA-256 of the exact bytes it evaluated, and register stamps it. Serving does not check that digest yet, so a file swapped on the PVC is not caught at load time ([ch.06](06-model-serving-and-inference.md)). Signing the model the way you sign an image is the next control. | [05.03](../05-security/03-supply-chain.md) |
 | A webhook trigger lets any pod in the cluster start a training run, and spend GPU hours doing it. | A bearer token (`authSecret`) on the EventSource, a NetworkPolicy that admits one label, and TLS in production. | [02.06](../02-networking/06-network-policies.md), [11.04](../11-advanced-production-patterns/04-service-mesh.md) |
 | A promotion reports success when nothing changed. | Promote fails when the Deployment is missing. In production, promotion is a reviewed commit that Argo CD applies. | [07.04](../07-delivery/04-gitops-argocd.md) |
 | An image tag moves under the pipeline. | Third-party images are pinned by digest. The train image is built by this guide and carries its tag. | [05.03](../05-security/03-supply-chain.md) |
@@ -305,6 +305,17 @@ or is shown here in full.
 > `podSpecPatch` matches. The `promote` step uses the same image. No new
 > images to build for this chapter.
 
+Run the pinned digest, and the step's `/bin/sh` and client version come out
+as the chapter says (captured in step 8 of the lab):
+
+<!-- gate: output -->
+```text
+$ docker run --rm --entrypoint /bin/sh cgr.dev/chainguard/kubectl:latest-dev@sha256:ee760c803cc3856d99f13dfd989bce461d2b324ae49e70b72c717f3bfaba9cbb -c 'id; kubectl version --client'
+uid=65532(nonroot) gid=65532(nonroot) groups=65532(nonroot)
+Client Version: v1.37.2
+Kustomize Version: v5.8.1
+```
+
 ### 1. Create the namespaces and install Argo Workflows (pinned)
 
 Create both namespaces first. Their Pod Security labels must be in place
@@ -351,21 +362,51 @@ Roles in `recommender-workflow.yaml`. The UI server is off, because the
 pipeline uses the CLI and kubectl.
 
 Rendering the chart with those values, without installing it, shows the
-settings in place (captured):
-
-```sh
-helm template argo-workflows argo/argo-workflows --version 2.0.15 -n argo \
-  -f examples/bookstore/ml/pipeline/argo-workflows-values.yaml \
-  | grep -n -e '-nonroot' -e 'seccompProfile' -e 'runAsUser: 8737'
-```
+pinned digests and the restricted settings. Run it from
+`examples/bookstore/ml/pipeline` (captured in step 7 of the lab):
 
 <!-- gate: output -->
+```text
+$ helm template argo-workflows argo/argo-workflows --version 2.0.15 -n argo -f argo-workflows-values.yaml > argo-workflows.yaml
+$ grep -n -e 'argoexec:' -e 'workflow-controller:' -e 'crdinstaller:' argo-workflows.yaml
+437:          image: "quay.io/argoproj/workflow-controller:v4.1.6@sha256:a012a639ead374a4a9306093d6b29dfdc7e6c4c1a85c684582cb961a6cc8bcf3"
+444:          - "quay.io/argoproj/argoexec:v4.1.6-nonroot@sha256:07118f5964bf07320ab10bfbeb231143264c0787ca1bc333039ad7c02817130e"
+598:          image: "quay.io/argoproj/argo-workflows-crdinstaller:v4.1.6@sha256:b9be70ef3f4a0709d771e9c098a99fd2d97be1b095c1b160c668a2fde61dc237"
+$ sed -n '/^  config: |/,/^    nodeEvents:/p' argo-workflows.yaml
+  config: |
+    executor:
+      imagePullPolicy: Always
+      securityContext:
+        allowPrivilegeEscalation: false
+        capabilities:
+          drop:
+          - ALL
+        readOnlyRootFilesystem: true
+        runAsNonRoot: true
+        seccompProfile:
+          type: RuntimeDefault
+    nodeEvents:
+$ grep -n -B2 -A1 'seccompProfile' argo-workflows.yaml
+40-        readOnlyRootFilesystem: true
+41-        runAsNonRoot: true
+42:        seccompProfile:
+43-          type: RuntimeDefault
+--
+431-      serviceAccountName: argo-workflows-workflow-controller
+432-      securityContext:
+433:        seccompProfile:
+434-          type: RuntimeDefault
+--
+607-            runAsNonRoot: true
+608-            runAsUser: 8737
+609:            seccompProfile:
+610-              type: RuntimeDefault
 ```
-444:          - "quay.io/argoproj/argoexec:v4.1.6-nonroot"
-# ...
-604:            runAsUser: 8737
-605:            seccompProfile:
-```
+
+The `executor` block sits in the controller's ConfigMap (line 42). The
+controller's pod-level seccomp is at line 433. The third match, line 609, is the
+`argo-workflows-crd-install` hook Job, which runs as UID 8737 and is not the
+controller.
 
 ### 2. The pipeline: train -> eval -> register -> promote
 
@@ -398,15 +439,21 @@ is a `WorkflowTemplate` (re-usable; runnable many times via `argo submit
 Apply the template (and its RBAC scaffolding):
 
 ```sh
-# Prereqs from earlier chapters:
+# Prereqs from earlier chapters: the train Job, then the serving side with its
+# ServiceAccount, allow-list and caller token (ch.06)
 kubectl apply -f examples/bookstore/ml/train/recommender-train-job.yaml
 kubectl wait --for=condition=complete job/recommender-train \
   -n bookstore-ml --timeout=300s
+kubectl apply -f examples/bookstore/ml/serve/recommender-security.yaml
+kubectl create secret generic recommender-caller-token -n bookstore-ml \
+  --from-literal=token="$(openssl rand -hex 32)"
 kubectl apply -f examples/bookstore/ml/serve/recommender-deployment.yaml
 kubectl apply -f examples/bookstore/ml/serve/recommender-service.yaml
+kubectl rollout status deployment/recommender -n bookstore-ml --timeout=120s
 
-# The pipeline:
+# The pipeline, and the egress its step Pods need to reach the API server:
 kubectl apply -f examples/bookstore/ml/pipeline/recommender-workflow.yaml
+kubectl apply -f examples/bookstore/ml/pipeline/workflow-egress.yaml
 kubectl get workflowtemplate -n bookstore-ml
 #   NAME                    AGE
 #   recommender-pipeline    7s
@@ -500,6 +547,39 @@ apply -f` it standalone and see one) is
 > workflow). Honesty over fidelity: the loop runs end-to-end on kind, and
 > the swap-to-real-registry is one step's image away.
 
+The step Pods need one allow that ch.01's default-deny does not give them:
+egress to DNS and to the API server. The `wait` sidecar records task results
+through the API server, and `register` and `promote` call `kubectl` against
+it. [`workflow-egress.yaml`](../examples/bookstore/ml/pipeline/workflow-egress.yaml)
+allows exactly that, for Pods that Argo labels with
+`workflows.argoproj.io/workflow`, and nothing else. The lab tested the same
+policy in a namespace of its own, with a test default-deny for egress. A
+labelled Pod resolved the Service name and reached the API server, and an
+unlabelled Pod failed both (captured in step 9 of the lab; the endpoint address
+is read into a variable and not printed):
+
+<!-- gate: output -->
+```text
+$ kubectl get endpoints kubernetes -n default (the API server address is read into a variable and not printed)
+endpoint read: ok
+$ kubectl apply -f default-deny-egress (test policy: egress only, every Pod in p12-07-bookstore-ml)
+networkpolicy.networking.k8s.io/default-deny-egress created
+$ kubectl apply -f workflow-egress.yaml (the chapter's file, namespace replaced, the documentation address replaced with the endpoint)
+networkpolicy.networking.k8s.io/recommender-workflow-egress created
+$ kubectl apply -f workflow-probe.yaml (the Pod's labels: workflows.argoproj.io/workflow: p12-07-probe)
+pod/workflow-probe created
+pod/workflow-probe condition met
+$ kubectl apply -f stranger.yaml (the Pod's labels: app: stranger)
+pod/stranger created
+pod/stranger condition met
+$ kubectl exec -i workflow-probe -- python -I - < probe.py (labelled as a Workflow Pod)
+dns kubernetes.default.svc: 10.96.0.1
+https GET /version on the API server: HTTP 200
+$ kubectl exec -i stranger -- python -I - < probe.py (no Workflow label)
+dns kubernetes.default.svc: failed: gaierror
+https GET /version on the API server: failed: URLError
+```
+
 ### 3. Schedule nightly retraining (`CronWorkflow`)
 
 [`pipeline/recommender-cronworkflow.yaml`](../examples/bookstore/ml/pipeline/recommender-cronworkflow.yaml)
@@ -565,7 +645,14 @@ kubectl delete pod/recommender-dataset-curl -n argo-events
 ```
 
 The test Pod is written out below in full. Its ServiceAccount has no API
-token, and it runs as UID 100 (the `curl_user` the pinned image declares).
+token, and it runs as UID 100 (the `curl_user` the pinned image declares). The pinned digest
+reports that user (captured in step 8 of the lab):
+
+<!-- gate: output -->
+```text
+$ docker run --rm --entrypoint /bin/sh curlimages/curl:8.10.1@sha256:d9b4541e214bcd85196d6e92e2753ac6d0ea699f0af5741f8c6cccbfcf00ef4b -c 'id'
+uid=100(curl_user) gid=101(curl_group) groups=101(curl_group),101(curl_group)
+```
 
 ```yaml
 apiVersion: v1
@@ -893,8 +980,11 @@ tomorrow.
 > external scheduler. The pattern is **_Daemon Service_** + **_Periodic
 > Job_** (Ibryam): one listener, one pipeline. The webhook EventSource in
 > this tree checks a bearer token and nothing else, and its traffic is plain
-> HTTP. In production, add TLS (`serverCertSecret` and `serverKeySecret`),
-> and put the webhook behind an Ingress with mTLS or OAuth2 Proxy. Or use a
+> HTTP. That is a gap, not a finished control: the bearer token crosses the
+> network unencrypted. Keep the EventSource reachable only from the namespace
+> its NetworkPolicy names. Before any caller outside the cluster uses it, add
+> TLS (`serverCertSecret` and `serverKeySecret`) and an Ingress with mTLS or
+> OAuth2 Proxy. Or use a
 > git, S3 or Pub/Sub EventSource, where authentication is part of the
 > source.
 
@@ -903,13 +993,12 @@ tomorrow.
 > reproduce `model.joblib` from the same dataset. `eval` is retry-safe:
 > it's a pure read of `model.joblib` plus a fresh metric write.
 > `register` is retry-safe: the workflow-id-suffixed ConfigMap is unique
-> per attempt. `promote` is NOT retry-safe: `kubectl annotate` may commit
-> before `rollout restart` fails (e.g., Pod quota exceeded), leaving the
-> registry stamp marked promoted but the serving Deployment still on the
-> old image. If `kubectl annotate` succeeds but the subsequent
-> `rollout restart` fails (a Pod quota was exceeded, a transient API
-> server hiccup), the registry stamp says "promoted" while the serving
-> Deployment still serves the old image — a half-promoted state. In real
+> per attempt. `promote` is NOT retry-safe: `kubectl annotate` may succeed
+> and the `rollout restart` after it fail (a Pod quota was exceeded, or a
+> transient API server error). The Deployment is then annotated while it
+> still serves the old image, a half-promoted state. The `register` stamp is
+> written before `promote` and has no "promoted" field, so it does not
+> change. In real
 > GitOps promotion (PR + Argo CD), the equivalent failure is the PR
 > merged but the sync stuck on a CRD validation error; in both cases,
 > the next reconcile loop resolves it, but a registry stamp is not a
@@ -929,18 +1018,14 @@ tomorrow.
 > failure rate, queue depth. Alert on **success rate dropping** and
 > **p95 duration drifting**.
 
-> **In production:** **PSA on every workflow Pod**. The
-> `WorkflowTemplate.spec.podSpecPatch` + each step's
-> `container.securityContext` keep the workflow Pods restricted-admissible.
-> The Argo Workflows controller lives in `argo` (operator's own
-> namespace); the workflow Pods land in `bookstore-ml`. No exceptions.
+> **In production:** **check the rendered Pods after every chart upgrade**.
+> The settings in the bullet above come from the chart's values, and a chart
+> bump can move them. Read a workflow Pod's spec with `kubectl get pod -o yaml`
+> before you trust the PSA label.
 
-> **In production:** **artifacts in object storage; parameters for scalars**.
-> The PVC artifact path is the kind-runnable fallback; the prod shape is
-> `artifactRepository` pointing at S3/GCS/Azure with Pod cloud identity.
-> Parameters (scores, URIs, hyperparameters) stay inline. The Bookstore's
-> PVC story is the simplest illustrative shape; swap for object storage
-> when artifacts cross PVC zones or grow beyond a few GiB.
+> **In production:** **parameters for scalars**. Scores, URIs and
+> hyperparameters stay inline as Workflow parameters. Keep them small: the
+> artifact store named above carries anything large.
 
 > **In production:** **CRD-backed manifests carry the CRD-intrinsic
 > header note.** A reader who client-dry-runs a `WorkflowTemplate` /
@@ -967,10 +1052,20 @@ helm install argo-workflows argo/argo-workflows --version 2.0.15 \
 helm install argo-events argo/argo-events --version 2.4.27 \
   -n argo-events -f examples/bookstore/ml/pipeline/argo-events-values.yaml --wait
 
+# The serving side the pipeline promotes, and its caller token (ch.06)
+kubectl apply -f examples/bookstore/ml/serve/recommender-security.yaml
+kubectl create secret generic recommender-caller-token -n bookstore-ml \
+  --from-literal=token="$(openssl rand -hex 32)"
+kubectl apply -f examples/bookstore/ml/serve/recommender-deployment.yaml
+kubectl apply -f examples/bookstore/ml/serve/recommender-service.yaml
+
 # The pipeline: identities, template, schedule, event path
 kubectl apply -f examples/bookstore/ml/pipeline/recommender-workflow.yaml
+kubectl apply -f examples/bookstore/ml/pipeline/workflow-egress.yaml
 kubectl apply -f examples/bookstore/ml/pipeline/recommender-cronworkflow.yaml
 kubectl apply -f examples/bookstore/ml/pipeline/recommender-eventbus.yaml
+kubectl -n argo-events create secret generic recommender-dataset-token \
+  --from-literal=token="$(openssl rand -hex 32)"
 kubectl apply -f examples/bookstore/ml/pipeline/recommender-eventsource.yaml
 kubectl apply -f examples/bookstore/ml/pipeline/recommender-eventsource-allow.yaml
 kubectl apply -f examples/bookstore/ml/pipeline/recommender-sensor.yaml
@@ -1051,8 +1146,8 @@ Checklist:
 - [ ] One ServiceAccount per step that calls the API. Train and eval get no
   token. Promote is limited by `resourceNames` to one Deployment
 - [ ] **PSA-`restricted`** on every workflow Pod, the wait sidecar included
-- [ ] The model's SHA-256 is recorded with the score and the dataset URI, and
-  serving verifies it before it loads the model
+- [ ] The model's SHA-256 is recorded with the score and the dataset URI. The
+  serving side does not check it yet ([ch.06](06-model-serving-and-inference.md))
 - [ ] The webhook requires a bearer token, a NetworkPolicy admits only the
   publishers' label, and TLS is on in production
 - [ ] **Promote** fails when its target is missing, and in production it is a
@@ -1106,8 +1201,8 @@ Checklist:
    a short-lived grant when they must run the pipeline by hand. The residual
    case is a compromised Sensor, which can create any Workflow in its
    namespace. Keep its token narrow, and add an admission policy that admits
-   only the Workflows this pipeline builds. Writing that policy is a
-   prerequisite for calling the step identities a control.
+   only the Workflows this pipeline builds. This chapter does not write that policy. Until one exists, the step
+   identities limit what a step can do, not who can start one.
 
    </details>
 

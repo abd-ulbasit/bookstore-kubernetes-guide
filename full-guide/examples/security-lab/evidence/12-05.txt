@@ -185,3 +185,40 @@ $ helm template jupyterhub jupyterhub/jupyterhub --version 4.4.4 -n p12-05-jupyt
       serviceAccountName: hub
         runAsNonRoot: true
             readOnlyRootFilesystem: true
+
+
+## step 11: the singleuser NetworkPolicy, enforced (the chart's render; a probe from two Pods)
+$ helm repo add jupyterhub https://hub.jupyter.org/helm-chart/
+$ helm template jupyterhub jupyterhub/jupyterhub --version 4.4.4 -n p12-05-jupyter -f jupyterhub-values.yaml --show-only templates/singleuser/netpol.yaml
+6:  name: singleuser
+14:    app.kubernetes.io/name: "jupyterhub"
+21:      component: singleuser-server
+47:        - port: notebook-port
+63:        - port: 8081
+79:        - port: 8000
+87:        - port: 8080
+88:        - port: 8443
+91:        - port: 53
+93:        - port: 53
+103:              kubernetes.io/metadata.name: kube-system
+namespace/p12-05-jupyter created
+$ kubectl apply -f netpol.yaml -n p12-05-jupyter
+networkpolicy.networking.k8s.io/singleuser created
+$ kubectl get endpoints kubernetes -n default (the address is read into a variable and not printed)
+$ kubectl apply -f notebook-probe.yaml (labels: component: singleuser-server
+app: jupyterhub
+release: jupyterhub)
+pod/notebook-probe created
+pod/notebook-probe condition met
+$ kubectl apply -f control.yaml (labels: app: control)
+pod/control created
+pod/control condition met
+$ kubectl exec -i notebook-probe -- python -I - < probe.py
+dns kubernetes.default.svc: 10.96.0.1
+https GET /version on the API server: failed: URLError
+$ kubectl exec -i control -- python -I - < probe.py
+dns kubernetes.default.svc: 10.96.0.1
+https GET /version on the API server: HTTP 200
+
+$ kubectl delete namespace p12-05-jupyter --wait=false
+namespace "p12-05-jupyter" deleted

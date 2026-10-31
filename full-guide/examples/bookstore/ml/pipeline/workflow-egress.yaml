@@ -1,0 +1,48 @@
+# Bookstore, Part 12 ch.07 "ML pipelines and workflows": egress for the
+# pipeline's step Pods in bookstore-ml. Part 12 ch.01 applies a default-deny
+# for Ingress and Egress to every Pod in bookstore-ml, so a step Pod reaches
+# neither DNS nor the API server. The wait sidecar records task results
+# through the API server, and register and promote call kubectl against it.
+#
+# This policy selects only Pods that Argo labels as Workflow Pods. It allows
+# DNS and the API server on port 6443, and nothing else.
+#
+# The API server address is a property of your cluster. The address below is
+# a documentation address (RFC 5737). Replace it with your API server's
+# address, which `kubectl get endpoints kubernetes -n default` prints.
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: recommender-workflow-egress
+  namespace: bookstore-ml
+  labels:
+    app.kubernetes.io/part-of: bookstore-ml
+    app.kubernetes.io/component: ml-pipeline
+spec:
+  podSelector:
+    matchExpressions:
+      - key: workflows.argoproj.io/workflow
+        operator: Exists
+  policyTypes:
+    - Egress
+  egress:
+    # DNS, to kube-dns in kube-system.
+    - to:
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: kube-system
+          podSelector:
+            matchLabels:
+              k8s-app: kube-dns
+      ports:
+        - protocol: UDP
+          port: 53
+        - protocol: TCP
+          port: 53
+    # The API server. Replace the documentation address with your own.
+    - to:
+        - ipBlock:
+            cidr: 203.0.113.10/32
+      ports:
+        - protocol: TCP
+          port: 6443

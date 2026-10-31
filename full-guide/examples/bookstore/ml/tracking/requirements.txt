@@ -1,0 +1,8 @@
+# Bookstore, Part 12 ch.08: the packages the MLflow tracker adds to the
+# upstream image. Pinned; bump deliberately.
+#   mlflow[auth]: the basic-auth app needs Flask-WTF, which the base lacks.
+#   psycopg2-binary: the external PostgreSQL backend store URI.
+#   boto3: the s3:// artifact destination.
+mlflow[auth]==3.3.2
+psycopg2-binary==2.9.13
+boto3==1.43.114
