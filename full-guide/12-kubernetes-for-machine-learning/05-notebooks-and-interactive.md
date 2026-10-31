@@ -947,7 +947,7 @@ Checklist:
   <https://www.kubeflow.org/docs/components/notebooks/> (CRD, Profiles,
   Istio integration); **KubeSpawner** docs
   <https://jupyterhub-kubespawner.readthedocs.io/> (the
-  `singleuser.podTemplate` shape and `profileList` semantics).
+  the spawner settings this chapter sets, and `profileList` semantics).
 - Sources checked for the claims in this chapter, at the versions named:
   the Pod Security Standards <https://kubernetes.io/docs/concepts/security/pod-security-standards/>;
   the z2jh chart 4.4.4 templates and values <https://github.com/jupyterhub/zero-to-jupyterhub-k8s>;
