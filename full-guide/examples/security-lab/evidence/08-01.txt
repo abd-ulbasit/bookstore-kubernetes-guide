@@ -2,9 +2,9 @@
 # Tier A: a kind cluster, Kubernetes v1.37.0 (kubelet and kube-apiserver),
 # containerd 2.3.4, kubectl v1.37.2 client. Only the cluster server version is
 # part of the evidence for the captured steps.
-# Cluster: kind, context kind-sf-sched, three nodes (one control plane, two
+# Cluster: kind, context kind-lab, three nodes (one control plane, two
 # workers). The chapter says the output came from a lab cluster with a different
-# name. Node names below are verbatim from that cluster.
+# name. Node names below come from that cluster, with its name shortened to lab.
 # Substitutions: the chapter's commands name the namespace drain-demo; this run
 # used p08-01-drain, and the script writes the same manifests with that name.
 # The Deployment, ServiceAccount and PodDisruptionBudget keep the name drain-demo.
@@ -16,7 +16,7 @@
 # NetworkPolicy that 02.06 asks every namespace to carry, and the script was run
 # again on the same three-node cluster. No node carried a taint this time, so
 # the scheduler put one replica on each worker, and the drain evicted the one
-# Pod on sf-sched-worker2. The budget refused it all the same. The first run's
+# Pod on lab-worker2. The budget refused it all the same. The first run's
 # notes below describe the first run.
 #
 # What did not work first, and was not used as evidence:
@@ -43,9 +43,9 @@ Server Version: v1.37.0
 
 $ kubectl get nodes -o custom-columns=NAME:.metadata.name,KUBELET:.status.nodeInfo.kubeletVersion,RUNTIME:.status.nodeInfo.containerRuntimeVersion,UNSCHEDULABLE:.spec.unschedulable
 NAME                     KUBELET   RUNTIME              UNSCHEDULABLE
-sf-sched-control-plane   v1.37.0   containerd://2.3.4   <none>
-sf-sched-worker          v1.37.0   containerd://2.3.4   <none>
-sf-sched-worker2         v1.37.0   containerd://2.3.4   <none>
+lab-control-plane   v1.37.0   containerd://2.3.4   <none>
+lab-worker          v1.37.0   containerd://2.3.4   <none>
+lab-worker2         v1.37.0   containerd://2.3.4   <none>
 
 $ kubectl api-versions | grep -E '^(policy|flowcontrol)' | sort
 flowcontrol.apiserver.k8s.io/v1
@@ -78,14 +78,14 @@ deployment "drain-demo" successfully rolled out
 
 $ kubectl get pods -n p08-01-drain -o custom-columns=NAME:.metadata.name,NODE:.spec.nodeName,PHASE:.status.phase
 NAME                          NODE               PHASE
-drain-demo-7549c4bbd6-5bq79   sf-sched-worker    Running
-drain-demo-7549c4bbd6-nn5qk   sf-sched-worker2   Running
+drain-demo-7549c4bbd6-5bq79   lab-worker    Running
+drain-demo-7549c4bbd6-nn5qk   lab-worker2   Running
 
-$ kubectl cordon sf-sched-worker2
-node/sf-sched-worker2 cordoned
+$ kubectl cordon lab-worker2
+node/lab-worker2 cordoned
 
-$ kubectl drain sf-sched-worker2 --ignore-daemonsets --delete-emptydir-data --pod-selector app=drain-demo --timeout=45s
-node/sf-sched-worker2 already cordoned
+$ kubectl drain lab-worker2 --ignore-daemonsets --delete-emptydir-data --pod-selector app=drain-demo --timeout=45s
+node/lab-worker2 already cordoned
 evicting pod p08-01-drain/drain-demo-7549c4bbd6-nn5qk
 error when evicting pods/"drain-demo-7549c4bbd6-nn5qk" -n "p08-01-drain" (will retry after 5s): Cannot evict pod as it would violate the pod's disruption budget.
 evicting pod p08-01-drain/drain-demo-7549c4bbd6-nn5qk
@@ -105,25 +105,25 @@ error when evicting pods/"drain-demo-7549c4bbd6-nn5qk" -n "p08-01-drain" (will r
 evicting pod p08-01-drain/drain-demo-7549c4bbd6-nn5qk
 error when evicting pods/"drain-demo-7549c4bbd6-nn5qk" -n "p08-01-drain" (will retry after 5s): Cannot evict pod as it would violate the pod's disruption budget.
 evicting pod p08-01-drain/drain-demo-7549c4bbd6-nn5qk
-There are pending pods in node "sf-sched-worker2" when an error occurred: error when evicting pods/"drain-demo-7549c4bbd6-nn5qk" -n "p08-01-drain": global timeout reached: 45s
+There are pending pods in node "lab-worker2" when an error occurred: error when evicting pods/"drain-demo-7549c4bbd6-nn5qk" -n "p08-01-drain": global timeout reached: 45s
 pod/drain-demo-7549c4bbd6-nn5qk
-error: unable to drain node "sf-sched-worker2" due to error: error when evicting pods/"drain-demo-7549c4bbd6-nn5qk" -n "p08-01-drain": global timeout reached: 45s, continuing command...
+error: unable to drain node "lab-worker2" due to error: error when evicting pods/"drain-demo-7549c4bbd6-nn5qk" -n "p08-01-drain": global timeout reached: 45s, continuing command...
 There are pending nodes to be drained:
- sf-sched-worker2
+ lab-worker2
 error when evicting pods/"drain-demo-7549c4bbd6-nn5qk" -n "p08-01-drain": global timeout reached: 45s
 
 $ kubectl get pdb drain-demo -n p08-01-drain
 NAME         MIN AVAILABLE   MAX UNAVAILABLE   ALLOWED DISRUPTIONS   AGE
 drain-demo   2               N/A               0                     52s
 
-$ kubectl uncordon sf-sched-worker2
-node/sf-sched-worker2 uncordoned
+$ kubectl uncordon lab-worker2
+node/lab-worker2 uncordoned
 
 $ kubectl get nodes -o custom-columns=NAME:.metadata.name,UNSCHEDULABLE:.spec.unschedulable
 NAME                     UNSCHEDULABLE
-sf-sched-control-plane   <none>
-sf-sched-worker          <none>
-sf-sched-worker2         <none>
+lab-control-plane   <none>
+lab-worker          <none>
+lab-worker2         <none>
 
 $ kubectl delete namespace p08-01-drain --wait=true
 namespace "p08-01-drain" deleted
