@@ -1,0 +1,36 @@
+# Bookstore - Part 12 ch.04, step 3: the training group's NetworkPolicy.
+# It selects the Pods of one training group by label, admits traffic only from
+# Pods of the same group, and lets those Pods reach DNS. Everything else stays
+# denied by the default-deny policy from ch.01. The group is allowed on every
+# port, because NCCL and Ray pick ports at run time. Narrow it once a run pins
+# its ports.
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: allow-recommender-train-pt
+  namespace: bookstore-ml
+spec:
+  podSelector:
+    matchLabels:
+      ml.bookstore/training-group: recommender-train-pt
+  policyTypes: ["Ingress", "Egress"]
+  ingress:
+    - from:
+        - podSelector:
+            matchLabels:
+              ml.bookstore/training-group: recommender-train-pt
+  egress:
+    - to:
+        - podSelector:
+            matchLabels:
+              ml.bookstore/training-group: recommender-train-pt
+    - to:
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: kube-system
+          podSelector:
+            matchLabels:
+              k8s-app: kube-dns
+      ports:
+        - { protocol: UDP, port: 53 }
+        - { protocol: TCP, port: 53 }

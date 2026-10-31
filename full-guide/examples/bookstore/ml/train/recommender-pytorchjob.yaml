@@ -62,7 +62,9 @@ spec:
             app.kubernetes.io/part-of: bookstore-ml
             app.kubernetes.io/component: recommender-train
             ml.bookstore/role: master
+            ml.bookstore/training-group: recommender-train-pt
         spec:
+          serviceAccountName: recommender-train
           automountServiceAccountToken: false
           securityContext:                 # pod-level — restricted
             runAsNonRoot: true
@@ -105,7 +107,7 @@ spec:
           volumes:
             - name: model
               persistentVolumeClaim:
-                claimName: recommender-model      # shared with serve/ (RWO)
+                claimName: recommender-model      # the only writer; serve/ mounts it read-only
             - name: scratch
               emptyDir:
                 sizeLimit: 64Mi
@@ -118,7 +120,9 @@ spec:
             app.kubernetes.io/part-of: bookstore-ml
             app.kubernetes.io/component: recommender-train
             ml.bookstore/role: worker
+            ml.bookstore/training-group: recommender-train-pt
         spec:
+          serviceAccountName: recommender-train
           automountServiceAccountToken: false
           securityContext:
             runAsNonRoot: true
@@ -130,10 +134,12 @@ spec:
             - name: pytorch
               image: bookstore/recommender-train:dev
               imagePullPolicy: IfNotPresent
+              # Workers train into scratch. Only the master mounts the model
+              # PVC, so one Pod holds write scope on the artifact.
               command: ["python", "/workspace/train.py"]
               env:
                 - name: MODEL_DIR
-                  value: /workspace/model
+                  value: /tmp/model
                 - name: SEED
                   value: "42"
               resources:

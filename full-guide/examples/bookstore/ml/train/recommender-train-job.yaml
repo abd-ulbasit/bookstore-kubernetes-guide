@@ -41,6 +41,20 @@
 #   kubectl wait --for=condition=complete job/recommender-train -n bookstore-ml --timeout=300s
 #   kubectl logs -n bookstore-ml -l app.kubernetes.io/component=recommender-train --tail=50
 ---
+# ServiceAccount for every training Pod. The training code calls no Kubernetes
+# API, so this account has no RoleBinding and therefore no RBAC rules, and the
+# token is not mounted. The PyTorchJob and RayJob files use it too, so apply
+# this file first. Nothing in the namespace runs as `default`.
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: recommender-train
+  namespace: bookstore-ml
+  labels:
+    app.kubernetes.io/part-of: bookstore-ml
+    app.kubernetes.io/component: recommender-train
+automountServiceAccountToken: false
+---
 # The model PVC — RWO is sufficient for the train Job; the serve Deployment
 # in ../serve/ uses ReadOnlyMany via a separate access mode (or RWO if both
 # pods schedule to the same node on kind). 64Mi is plenty for the joblib
@@ -81,6 +95,7 @@ spec:
         app.kubernetes.io/component: recommender-train
     spec:
       restartPolicy: Never
+      serviceAccountName: recommender-train
       automountServiceAccountToken: false
       securityContext:                 # pod-level — restricted
         runAsNonRoot: true
@@ -126,7 +141,7 @@ spec:
       volumes:
         - name: model
           persistentVolumeClaim:
-            claimName: recommender-model
+            claimName: recommender-model      # the only writer; serve/ mounts it read-only
         - name: scratch                # restricted-allowed volume type
           emptyDir:
             sizeLimit: 64Mi

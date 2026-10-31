@@ -311,3 +311,27 @@ exceptions:
     upstream: https://github.com/aquasecurity/kube-bench/blob/main/job.yaml
     chapter: 05-security/10-capstone-attack-and-harden-the-bookstore.md
     expires: 2027-10-31
+
+  - namespace: kubeflow
+    level: baseline
+    reason: >-
+      The pinned Kubeflow Training Operator release (v1.9.4) runs its controller
+      image as UID 0 (the image configuration records User 0), and its Deployment
+      sets no runAsNonRoot, seccompProfile or capability drop. The restricted
+      profile refuses the Pod as shipped, which the chapter shows with a dry
+      run, and the baseline profile admits it. The namespace keeps audit and
+      warn at restricted. The exception ends once a non-root run of the image is
+      verified.
+    upstream: https://github.com/kubeflow/training-operator/blob/v1.9.4/manifests/base/deployment.yaml
+    chapter: 12-kubernetes-for-machine-learning/04-distributed-training.md
+    expires: 2027-04-30
+
+  - namespace: pss-check-baseline
+    level: baseline
+    reason: >-
+      A throwaway namespace for the step 1 server dry run that asks whether the
+      baseline profile admits the Training Operator's Pod. The chapter deletes it
+      after the check. It exists so the dry run can show what baseline admits.
+    upstream: https://kubernetes.io/docs/concepts/security/pod-security-standards/#baseline
+    chapter: 12-kubernetes-for-machine-learning/04-distributed-training.md
+    expires: 2027-04-30
