@@ -10,7 +10,7 @@
 > the vocabulary; chapters 15.02 onward operationalise each stage.
 
 **Estimated time:** ~15 min read · ~30 min hands-on
-**Prerequisites:** [Part 07 ch.01](../07-delivery/01-packaging-helm.md) — Helm/Kustomize/CI/GitOps that underpin the loop · [Part 11 ch.01](../11-advanced-production-patterns/10-platform-engineering.md) — production maturity framing · [Part 14 ch.10](../14-eks-in-production-a-to-z/10-gitops-bootstrap-fresh-cluster.md) — Argo CD reconcile that closes the loop
+**Prerequisites:** [Part 07 ch.01](../07-delivery/01-packaging-helm.md) — Helm/Kustomize/CI/GitOps that underpin the loop · [Part 11 ch.10](../11-advanced-production-patterns/10-platform-engineering.md) — production maturity framing · [Part 14 ch.10](../14-eks-in-production-a-to-z/10-gitops-bootstrap-fresh-cluster.md) — Argo CD reconcile that closes the loop
 
 **You'll know after this:** • name the eight stages of the PR-to-production loop (commit → PR → CI → review/merge → GitOps repo update → Argo CD reconcile → progressive rollout → SLO gate → done) · • articulate the load-bearing rule "every change to production is a Git commit; nothing else" · • map each subsequent Part 15 chapter onto the stage it operationalizes · • diagnose where in the loop a stuck change is currently sitting · • use the loop diagram as the shared vocabulary across CI/CD, security, and ops conversations
 
@@ -60,12 +60,13 @@ it converges to the latest commit.**
   direction: CI writes to the GitOps repo via a PR, never directly to the
   cluster. The cluster reads from the GitOps repo via Argo CD, never from
   CI.
-- **Stages 1–4 are about *evidence*.** The code change accumulates
-  evidence: tests pass, lint is clean, the image scans cleanly, the
-  binary is signed keyless via OIDC, reviewers approved. By stage 4
-  (merge) we have an *artifact whose provenance is auditable* — a signed
-  image digest, a Rekor log entry, a Cosign cert tied to the merging
-  workflow. The image **exists in the registry but is not yet deployed**.
+- **Stages 1–4 are about *evidence*.** The PR accumulates evidence: tests
+  pass, lint is clean, the change scans cleanly, and reviewers approve.
+  The merge to `main` is the last gate. CI then builds the merge commit,
+  signs the image keyless through its OIDC identity, and pushes it. The
+  signing certificate names the workflow and `refs/heads/main`, and Rekor
+  records the signature: an *artifact whose provenance is auditable*. The
+  image **exists in the registry but is not yet deployed**.
 - **Stages 5–6 are about *intent*.** A separate PR (or auto-bump) updates
   a Kubernetes manifest in the GitOps repo with the new image digest.
   Merging that PR records the *intent* to run this digest in this
@@ -100,6 +101,15 @@ persists invisibly. The discipline: **a change to prod is a commit, even
 if you make it in an incident** (and the chapter on breakglass — 15.09 —
 shows the disciplined exception).
 
+## Threats and controls
+
+| Threat | Control in this chapter | Deeper |
+|---|---|---|
+| A change reaches production outside Git: an emergency `kubectl edit`, or a CI job that runs `kubectl apply` | Git is the only write path to prod. Argo CD is the only component with cluster apply rights, and self-heal reverts drift | [15.09](09-hotfix-workflow-and-breakglass.md) for the controlled exception; [07.04](../07-delivery/04-gitops-argocd.md) for Argo CD |
+| CI holds the keys to the cluster, so one compromised workflow owns production | CI gets registry push and GitOps-repo write, and no kubeconfig. Argo CD's AppProject bounds what it may deploy | [15.02](02-application-cicd-pipelines.md) for CI token scope |
+| Unreviewed or unsigned code reaches the cluster | Branch protection requires reviews and checks on `main`. The image is built and signed only from the merge commit | [15.02](02-application-cicd-pipelines.md), [15.03](03-image-signing-and-provenance.md), [05.03](../05-security/03-supply-chain.md) |
+| The release that was tested is not the one that runs | Promotion moves the same digest by commit. Nothing is rebuilt | [15.04](04-multi-environment-promotion.md) |
+
 ## Diagrams
 
 ### The Bookstore PR-to-production lifecycle (Mermaid)
@@ -112,9 +122,9 @@ via Argo CD.
 flowchart TD
     dev["1. developer commits<br/>(feature branch)"]
     pr["2. PR opened<br/>(app repo)"]
-    ci{"3. CI<br/>lint -> test -> scan -><br/>build -> sign -> push"}
+    ci{"3. CI on the PR<br/>lint -> test -> scan"}
     rev{"4. review + merge<br/>(branch protection,<br/>required reviewers)"}
-    gops["5. GitOps repo updated<br/>(CI opens PR bumping digest)"]
+    gops["5. GitOps repo updated<br/>(CI on main builds, signs and pushes,<br/>then opens the digest-bump PR)"]
     argo["6. Argo CD reconcile<br/>(Part 07 ch.04)"]
     canary{"7. progressive rollout<br/>(Argo Rollouts canary<br/>Part 07 ch.05)"}
     slo{"8. SLO gate<br/>success-rate &gt;= 0.95<br/>p95 &lt;= 0.5s"}
@@ -144,26 +154,21 @@ flowchart TD
  ──────────────────────────────────────────────────────────────────────────────
  1. commit                        developer's editor    n/a (Part 00 onward)
  2. PR                            app repo (GitHub)     15.02 (branch protection)
- 3. CI: lint/test/scan/build/sign GitHub Actions        15.02 + 15.03
+ 3. CI: lint/test/scan (PR)       GitHub Actions        15.02 + 15.03
+    build/sign/push (on main)
  4. review + merge                app repo              15.02 (required checks)
  5. GitOps repo updated           bookstore-gitops repo 15.04 (multi-env promotion)
-                                                       *parallel phase 15b
  6. Argo CD reconcile             argocd ns in cluster  Part 07 ch.04 (deepened
                                                         by 15.04 ApplicationSet)
  7. progressive rollout           bookstore ns          15.06 (deepens 07.05)
-                                                       *parallel phase 15b
  8. SLO gate                      analysis +            15.06 + 15.10 (on-call)
                                   PrometheusRules
  ──────────────────────────────────────────────────────────────────────────────
  Loop-back paths:
    rollback                       git revert + GitOps    15.07
-                                                       *parallel phase 15c
    hotfix                         the loop, compressed   15.09
-                                                       *parallel phase 15c
    incident response              the loop + humans      15.10
-                                                       *parallel phase 15d
    day-to-day cadence             weekly/monthly review  15.11
-                                                       *parallel phase 15d
  ──────────────────────────────────────────────────────────────────────────────
 
  The two-repo structure (single source of truth = the GitOps repo):
@@ -208,7 +213,7 @@ touches:
 
 ```sh
 # app repo (the source-of-code, NOT source-of-deployment):
-ls examples/bookstore-platform/app/                  # services Go sources (parallel phases)
+ls examples/bookstore-platform/app/                  # service Go sources
 ls examples/bookstore-platform/ci/                   # the 5-stage workflows + signing helper
 
 # GitOps repo (the source-of-deployment, separate from app):
@@ -226,6 +231,10 @@ them for readability.
 
 ### 1. Walk the loop without changing anything (the read-only trace)
 
+This trace is reference only. It needs a deployed Bookstore environment
+you own, so this guide's lab does not run it, and the output shown is
+illustrative.
+
 For a deployed Bookstore service, every stage of the loop leaves an
 observable artifact. Trace them:
 
@@ -235,6 +244,7 @@ observable artifact. Trace them:
 # above it has the audit trail.
 cat examples/bookstore-platform/kustomize/regions/us-east/kustomization.yaml \
   | grep -A2 '^images:'
+# Illustrative output (not captured):
 # images:
 # - name: bookstore/catalog
 #   newName: AWS_ACCOUNT_ID.dkr.ecr.AWS_REGION.amazonaws.com/bookstore/catalog
@@ -254,17 +264,17 @@ argocd app history bookstore-prod
 # -> the same digest as the commit history; deploy = commit.
 
 # Stage 7 — Argo Rollouts' record of the canary's progression:
-kubectl argo rollouts history rollout catalog -n bookstore
 kubectl argo rollouts get rollout catalog -n bookstore
 # -> stable revision, the analysis run that gated promotion.
 
-# Stage 8 — the SLO that gated the promotion. PromQL Part 06 ch.01 taught.
-# (Production setup; in a kind cluster `monitoring` ns hosts kube-prom-stack.)
-kubectl -n monitoring exec deploy/prometheus-server -- \
-  promtool query instant 'http://localhost:9090' \
-  'sum(rate(http_requests_total{handler!="metrics",code=~"5.."}[5m])) /
-   sum(rate(http_requests_total{handler!="metrics"}[5m]))'
-# -> success-rate gate value at the moment of the canary.
+# Stage 8: the SLO that gated the promotion. PromQL as in Part 07 ch.05.
+# Port-forward the Prometheus service that Part 06 installs (leave it
+# running), then query its HTTP API from a second terminal:
+kubectl -n monitoring port-forward svc/kube-prometheus-stack-prometheus 9090:9090
+curl -sG http://localhost:9090/api/v1/query --data-urlencode \
+  'query=1 - (sum(rate(http_requests_total{code=~"5..",handler!="metrics"}[5m])) / sum(rate(http_requests_total{handler!="metrics"}[5m])))'
+# -> JSON; .data.result[0].value[1] is the success rate at the canary.
+
 ```
 
 Every artifact above is in Git, in a registry, in a transparency log, or
@@ -302,11 +312,12 @@ A developer fixes a 5xx in `catalog`. Here is the **exact** sequence:
                    PR against bookstore-gitops/kustomize/overlays/dev:
                      'bump: catalog -> abc123'
                    The dev overlay PR auto-merges (low-risk env). The
-                   staging + prod overlays get separate PRs in Part 15
-                   ch.04 (parallel phase 15b) — those need human review.
+                   staging + prod overlays get separate PRs in 15.04 — those
+                   need human review.
 
- 6. Argo CD        in-cluster controller polls bookstore-gitops every 3m
-                   (or via webhook). New commit -> diff -> sync the dev
+ 6. Argo CD        in-cluster controller polls bookstore-gitops on a timer
+                   (two minutes by default) or via webhook. New commit ->
+                   diff -> sync the dev
                    Application. The catalog Rollout's pod template now
                    references the new digest.
 
@@ -321,7 +332,7 @@ A developer fixes a 5xx in `catalog`. Here is the **exact** sequence:
 
  The change is live in dev. To promote it to staging/prod, a *different*
  PR (in the GitOps repo) moves the same digest between overlays — the
- IMAGE IS NEVER REBUILT. Part 15 ch.04 (parallel phase 15b) shows that.
+ IMAGE IS NEVER REBUILT. 15.04 shows that.
 ```
 
 ### 3. What the loop *prevents* — three real-world anti-patterns
@@ -334,8 +345,7 @@ built to make structurally impossible.
                                          Argo CD selfHeal reverts it (Part
                                          07 ch.04). The fix has to be a
                                          commit; even hotfix follows the
-                                         same shape (Part 15 ch.09, parallel
-                                         phase 15c).
+                                         same shape (15.09).
 
  "Promote prod by rebuilding"        <- a rebuild is a DIFFERENT artifact.
                                          CI cache may collide; Trivy may
@@ -350,17 +360,19 @@ built to make structurally impossible.
                                             cluster credential is owned by
                                             Argo CD, scoped by AppProject
                                             (Part 07 ch.04). Push-CD's
-                                            blast radius is unbounded;
-                                            pull-GitOps's is bounded by
-                                            the AppProject + the merged
-                                            PR's diff.
+                                            blast radius is whatever the CI
+                                            credential reaches; pull-GitOps's
+                                            is bounded by the AppProject and
+                                            the merged PR's diff.
 ```
 
+Self-heal is
+[upstream behaviour](https://argo-cd.readthedocs.io/en/stable/user-guide/auto_sync/).
 The point of stating these by name is that *every* stage of Part 15 from
 here onward is enforcing one of them. When ch.02 talks about branch
 protection rules, it is enforcing "the fix has to be a commit". When
 ch.03 talks about `verifyImages`, it is enforcing "the signature covers
-THIS digest". When 15.07 (parallel phase 15c) talks about rollback, it is
+THIS digest". When 15.07 talks about rollback, it is
 enforcing "rollback is a commit, not a kubectl undo".
 
 ## How it works under the hood
@@ -405,7 +417,7 @@ enforcing "rollback is a commit, not a kubectl undo".
   still hit "promote now" / "abort", but the *default* path is
   signal-driven. This is the difference between a *deploy* (we shipped
   the bits) and a *release* (the bits are live for users). Part 07 ch.05
-  explored this; Part 15 ch.06 (parallel phase 15b) deepens it for prod.
+  explored this; 15.06 deepens it for prod.
 
 - **Two repos because two trust boundaries.** The app repo's contributors
   are *developers*; the GitOps repo's contributors are *CI workflows*
@@ -418,13 +430,14 @@ enforcing "rollback is a commit, not a kubectl undo".
   branch-protection lives in the right place.
 
 - **The loop is the same for hotfixes, rollbacks, and breakglass; only
-  the *dials* change.** Part 15 ch.07/.09/.10 (parallel phases 15c/15d)
+  the *dials* change.** 15.07, 15.09 and 15.10
   do not introduce new stages — they tune the existing ones: a hotfix
   has fewer reviewers and may skip the canary (manual approval gate set
   to "skip" with an audit log); a rollback is `git revert` triggering
   stages 5–8 again; breakglass is a documented *exception* in stage 4
   with a follow-up commit that re-creates the cluster state into Git so
-  the loop's invariants restore themselves. The diagram in §Diagrams is
+  the loop's invariants restore themselves. 15.09 covers the audited
+  breakglass account and its monthly rehearsal. The diagram in §Diagrams is
   the same diagram you draw on the incident-response whiteboard at 3am.
 
 - **The loop's failure modes are observable BEFORE they bite.** Each
@@ -434,46 +447,23 @@ enforcing "rollback is a commit, not a kubectl undo".
     - stage 5 GitOps PR: time-from-app-PR-to-GitOps-PR-merge
     - stage 6 Argo CD: time-from-GitOps-merge-to-Synced
     - stage 7–8 rollout: canary success rate, time-to-promote / time-to-abort
-  Part 15 ch.11 (parallel phase 15d) shows the dashboards.
+  15.11 shows the dashboards.
 
 ## Production notes
-
-> **In production: a change to prod is a commit; nothing else.** The
-> single most consequential rule of this entire Part. Every variant of
-> "I'll just `kubectl edit` for now" is the loop being broken; every
-> variant of "let's add a step where CI runs `kubectl apply`" is the
-> trust direction being reversed. The discipline costs ~30 seconds of
-> opening a one-line PR; the *absence* of the discipline is the year-one
-> drift that nobody can audit.
-
-> **In production: keep app repos and the GitOps repo separate.** The
-> branch protection rules are different, the reviewers are different,
-> the cadence is different. Collapsing them is fine for a lab; in prod,
-> the platform team owns the prod-overlay PRs and the app team does not.
-> A teaching shortcut becomes a security regression at scale.
 
 > **In production: dial the same loop differently per environment.**
 > Same eight stages, different dials. Dev: auto-merge GitOps PR, no
 > canary, no manual gate. Staging: human-approve GitOps PR, light canary
 > (10→50→100). Prod: human-approve GitOps PR, full canary (10→25→50→100
 > with two analysis gates), `pause: {}` for human approval before 100%
-> on the riskiest services. Part 15 ch.04 (parallel phase 15b) shows the
-> ApplicationSet shape that makes this a config, not a code, change.
-
-> **In production: budget for the rare loop-bypass.** Some incidents
-> (cert outage, a CD-loop bug, an evil third party) *will* legitimately
-> require a breakglass. Plan it: the breakglass account exists, is
-> audited (every action logged + paged), and the follow-up
-> commit-into-Git is a checklist item. Part 15 ch.09 (parallel phase
-> 15c) is the breakglass discipline; budget for it monthly so the muscle
-> stays warm.
+> on the riskiest services. 15.04 shows the ApplicationSet shape that
+> makes this a config, not a code, change.
 
 > **In production: measure the loop, not just the workloads.** SLIs on
 > the *loop itself* (time to PR, time to merge, time to deploy, canary
 > failure rate) are leading indicators for engineering throughput; they
-> precede incident rate and outage cost. Part 15 ch.11 (parallel phase
-> 15d) builds the platform-SLI dashboards; the loop's signals belong on
-> them.
+> precede incident rate and outage cost. 15.11 builds the platform-SLI
+> dashboards; the loop's signals belong on them.
 
 ## Quick Reference
 
@@ -514,10 +504,11 @@ kubectl argo rollouts abort   catalog -n bookstore   # force rollback
 Rollback variants (all are commits, never `kubectl rollout undo`):
 
 ```sh
-# Soft: revert the GitOps PR (the digest move) — Argo CD reconciles back.
+# Soft: open a revert PR for the GitOps digest move. Merging it makes
+# Argo CD reconcile back.
 gh -R GITHUB_ORG/bookstore-gitops pr revert PR_NUM
-# Hard: revert the app-repo PR (the bug fix itself), let CI re-deploy.
-gh -R GITHUB_ORG/bookstore revert PR_NUM
+# Hard: open a revert PR for the app-repo fix, and let CI re-deploy.
+gh -R GITHUB_ORG/bookstore pr revert PR_NUM
 # Automatic: the canary's analysis already aborted (preferred).
 ```
 
@@ -586,4 +577,6 @@ Checklist:
   <https://opengitops.dev/>; Argo CD docs —
   <https://argo-cd.readthedocs.io/en/stable/>; Argo Rollouts canary —
   <https://argoproj.github.io/argo-rollouts/features/canary/>; Sigstore
-  cosign — <https://docs.sigstore.dev/cosign/overview/>.
+  cosign — <https://docs.sigstore.dev/cosign/overview/>; GitHub protected
+  branches: <https://docs.github.com/en/repositories/configuring-branches-and-merges-in-your-repository/managing-protected-branches/about-protected-branches>;
+  Argo CD automated sync: <https://argo-cd.readthedocs.io/en/stable/user-guide/auto_sync/>.
