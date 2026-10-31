@@ -1,0 +1,367 @@
+# Lab 05.06 recorded on the shared kind cluster sf-pilot (Kubernetes v1.37.0 node, kubectl v1.37.2 on the workstation).
+# In attempt 1 the signing identity is redacted to the variable the final run uses. Attempt 1 is kept because it shows two first-run failures: after every capability was dropped, kube-bench could not read root-owned files; and the kubelet cached authorization decisions while the probes ran. The final run is the second section. Attempts 2 and 3 ran the same steps with those two fixes and are not kept. The cleanup of the final run timed out under host load, and the lab objects were removed by hand afterwards.
+
+=== attempt 1 (before the fixes) ===
+## step 0: the cluster this run used
+$ kubectl version --client
+kubectl get nodes -o wide
+Client Version: v1.37.2
+Kustomize Version: v5.8.1
+NAME                     STATUS   ROLES           AGE   VERSION   INTERNAL-IP   EXTERNAL-IP   OS-IMAGE                       KERNEL-VERSION             CONTAINER-RUNTIME
+sf-pilot-control-plane   Ready    control-plane   10h   v1.37.0   172.18.0.2    <none>        Debian GNU/Linux 13 (trixie)   7.0.0-38-generic (amd64)   containerd://2.3.4
+
+node: sf-pilot-control-plane, internal address: 172.18.0.2
+
+## step 1: the settings the node runs with, read from the node
+$ docker exec $NODE grep -n -E '^readOnlyPort|^  anonymous:|enabled: |^  mode: ' /var/lib/kubelet/config.yaml
+docker exec $NODE grep -n -E 'kube-apiserver$|anonymous|profiling|authorization-mode' /etc/kubernetes/manifests/kube-apiserver.yaml
+docker exec $NODE grep -n -E 'client-cert-auth|listen-client-urls' /etc/kubernetes/manifests/etcd.yaml
+3:  anonymous:
+4:    enabled: false
+7:    enabled: true
+11:  mode: Webhook
+7:    component: kube-apiserver
+9:  name: kube-apiserver
+14:    - kube-apiserver
+17:    - --authorization-mode=Node,RBAC
+55:    name: kube-apiserver
+17:    - --client-cert-auth=true
+23:    - --listen-client-urls=https://127.0.0.1:2379,https://172.18.0.2:2379
+28:    - --peer-client-cert-auth=true
+
+## step 2: kube-bench with no benchmark named, as its upstream Job runs it
+$ kubectl apply -f kube-bench-auto.yaml
+wait_job; echo "job status: $? (0 complete, 1 failed, 2 timed out)"
+kubectl -n p05-kube-bench logs job/kube-bench | tail -4
+kubectl -n p05-kube-bench delete job kube-bench --wait=true
+namespace/p05-kube-bench created
+serviceaccount/kube-bench created
+job.batch/kube-bench created
+job status: 1 (0 complete, 1 failed, 2 timed out)
+Warning: Kubernetes version was not auto-detected because kubectl could not connect to the Kubernetes server. This may be because the kubeconfig information is missing or has credentials that do not match the server. Assuming default version 1.18
+Warning: Kubernetes version was not auto-detected because kubectl could not connect to the Kubernetes server. This may be because the kubeconfig information is missing or has credentials that do not match the server. Assuming default version 1.18
+
+error looking for file /etc/systemd/system/kubelet.service.d/10-kubeadm.conf: stat /etc/systemd/system/kubelet.service.d/10-kubeadm.conf: permission denied
+job.batch "kube-bench" deleted from p05-kube-bench namespace
+
+## step 3: kube-bench pinned to cis-1.12, against the settings above
+$ kubectl apply -f kube-bench.yaml
+wait_job; echo "job status: $?"
+kubectl -n p05-kube-bench logs job/kube-bench > kb-run.txt
+grep -E '^== Summary|checks? (PASS|FAIL|WARN|INFO)' kb-run.txt | head -12
+grep -E '^\[(PASS|FAIL|WARN|INFO)\] (1\.2\.1|1\.2\.15|2\.2|4\.2\.1|4\.2\.2|4\.2\.4) ' kb-run.txt
+kubectl -n p05-kube-bench delete job kube-bench --wait=true
+namespace/p05-kube-bench unchanged
+serviceaccount/kube-bench unchanged
+job.batch/kube-bench created
+job status: 1
+job.batch "kube-bench" deleted from p05-kube-bench namespace
+
+## step 4: attack from a restricted Pod with no token
+$ kubectl apply -f probe.yaml
+kubectl -n p05-attack wait --for=condition=Ready pod/probe --timeout=180s
+namespace/p05-attack created
+serviceaccount/probe created
+pod/probe created
+pod/probe condition met
+
+$ kubectl auth can-i get pods --as=system:anonymous --as-group=system:unauthenticated
+kubectl exec -n p05-attack probe -- sh -c 'curl -s -o /dev/null -w "anonymous, secrets in kube-system: %{http_code}\n" --cacert /etc/cluster-ca/ca.crt https://kubernetes.default.svc/api/v1/namespaces/kube-system/secrets'
+kubectl exec -n p05-attack probe -- sh -c 'curl -s -o /dev/null -w "anonymous, pods in all namespaces: %{http_code}\n" --cacert /etc/cluster-ca/ca.crt https://kubernetes.default.svc/api/v1/pods'
+Error from server (Forbidden): selfsubjectaccessreviews.authorization.k8s.io is forbidden: User "system:anonymous" cannot create resource "selfsubjectaccessreviews" in API group "authorization.k8s.io" at the cluster scope
+anonymous, secrets in kube-system: 403
+anonymous, pods in all namespaces: 403
+
+$ kubectl exec -n p05-attack probe -- env NODE_IP=$NODE_IP sh -c 'curl -s -o /dev/null -w "kubelet read-only port 10255: %{http_code}\n" --max-time 5 http://$NODE_IP:10255/pods; echo "exit code: $?"'
+kubectl exec -n p05-attack probe -- env NODE_IP=$NODE_IP sh -c 'curl -sk -o /dev/null -w "kubelet 10250, anonymous: %{http_code}\n" --max-time 5 https://$NODE_IP:10250/pods'
+kubelet read-only port 10255: 000
+exit code: 7
+kubelet 10250, anonymous: 401
+
+$ kubectl exec -n p05-attack probe -- env NODE_IP=$NODE_IP sh -c 'curl -sSk --max-time 5 https://$NODE_IP:2379/version; echo "exit code: $?"'
+kubectl exec -n p05-attack probe -- env NODE_IP=$NODE_IP sh -c 'curl -sSk --max-time 5 -H "Content-Type: application/json" -d "{\"key\":\"L3JlZ2lzdHJ5L25hbWVzcGFjZXMva3ViZS1zeXN0ZW0=\"}" https://$NODE_IP:2379/v3/kv/range; echo "exit code: $?"'
+curl: (55) OpenSSL SSL_read: OpenSSL/3.5.8: error:0A00045C:SSL routines::tlsv13 alert certificate required, errno 0
+exit code: 55
+curl: (55) OpenSSL SSL_read: OpenSSL/3.5.8: error:0A00045C:SSL routines::texit code: 55
+lsv13 alert certificate required, errno 0
+
+## step 5: fine-grained kubelet authorization, on this cluster
+$ kubectl apply -f stats-agent.yaml
+kubectl apply -f node-stats.yaml
+kubectl -n p05-kubelet-authz wait --for=condition=Ready pod/stats-agent --timeout=180s
+kubectl exec -n p05-kubelet-authz stats-agent -- env NODE_IP=$NODE_IP sh -c 'T=$(cat /var/run/secrets/kubernetes.io/serviceaccount/token); for p in /stats/summary /pods /containerLogs/p05-kubelet-authz/none/none; do curl -sk -o /dev/null -w "$p, nodes/stats only: %{http_code}\n" -H "Authorization: Bearer $T" --max-time 5 https://$NODE_IP:10250$p; done'
+namespace/p05-kubelet-authz created
+serviceaccount/stats-agent created
+pod/stats-agent created
+clusterrole.rbac.authorization.k8s.io/p05-06-node-stats created
+clusterrolebinding.rbac.authorization.k8s.io/p05-06-node-stats created
+pod/stats-agent condition met
+/stats/summary, nodes/stats only: 200
+/pods, nodes/stats only: 403
+/containerLogs/p05-kubelet-authz/none/none, nodes/stats only: 403
+
+$ kubectl apply -f node-pods.yaml
+kubectl exec -n p05-kubelet-authz stats-agent -- env NODE_IP=$NODE_IP sh -c 'T=$(cat /var/run/secrets/kubernetes.io/serviceaccount/token); for p in /stats/summary /pods /containerLogs/p05-kubelet-authz/none/none; do curl -sk -o /dev/null -w "$p, with nodes/pods added: %{http_code}\n" -H "Authorization: Bearer $T" --max-time 5 https://$NODE_IP:10250$p; done'
+clusterrole.rbac.authorization.k8s.io/p05-06-node-pods created
+clusterrolebinding.rbac.authorization.k8s.io/p05-06-node-pods created
+/stats/summary, with nodes/pods added: 200
+/pods, with nodes/pods added: 403
+/containerLogs/p05-kubelet-authz/none/none, with nodes/pods added: 403
+
+$ kubectl apply -f node-proxy.yaml
+kubectl exec -n p05-kubelet-authz stats-agent -- env NODE_IP=$NODE_IP sh -c 'T=$(cat /var/run/secrets/kubernetes.io/serviceaccount/token); curl -sk -o /dev/null -w "/containerLogs, with the broad nodes/proxy grant: %{http_code}\n" -H "Authorization: Bearer $T" --max-time 5 https://$NODE_IP:10250/containerLogs/p05-kubelet-authz/none/none'
+kubectl delete clusterrolebinding p05-06-node-proxy clusterrole p05-06-node-proxy --ignore-not-found
+kubectl exec -n p05-kubelet-authz stats-agent -- env NODE_IP=$NODE_IP sh -c 'T=$(cat /var/run/secrets/kubernetes.io/serviceaccount/token); curl -sk -o /dev/null -w "/containerLogs, after the broad grant is removed: %{http_code}\n" -H "Authorization: Bearer $T" --max-time 5 https://$NODE_IP:10250/containerLogs/p05-kubelet-authz/none/none'
+clusterrole.rbac.authorization.k8s.io/p05-06-node-proxy created
+clusterrolebinding.rbac.authorization.k8s.io/p05-06-node-proxy created
+/containerLogs, with the broad nodes/proxy grant: 403
+clusterrolebinding.rbac.authorization.k8s.io "p05-06-node-proxy" deleted
+/containerLogs, after the broad grant is removed: 403
+
+## step 6: the kubectl binary on this workstation, by checksum and signature
+$ kubectl version --client -o yaml | grep gitVersion
+os=$(uname -s | tr '[:upper:]' '[:lower:]'); arch=$(uname -m); [ "$arch" = x86_64 ] && arch=amd64
+ver=$(kubectl version --client -o yaml | awk '/gitVersion/{print $2; exit}')
+echo "release path: https://dl.k8s.io/release/$ver/bin/$os/$arch/"
+cp "$(command -v kubectl)" kubectl
+curl -sSfL -o kubectl.sha256 "https://dl.k8s.io/release/$ver/bin/$os/$arch/kubectl.sha256"
+echo "$(cat kubectl.sha256)  kubectl" | shasum -a 256 -c
+curl -sSfL -o kubectl.sig "https://dl.k8s.io/release/$ver/bin/$os/$arch/kubectl.sig"
+curl -sSfL -o kubectl.cert "https://dl.k8s.io/release/$ver/bin/$os/$arch/kubectl.cert"
+cosign verify-blob kubectl --signature kubectl.sig --certificate kubectl.cert --certificate-identity "$KREL_IDENTITY" --certificate-oidc-issuer https://accounts.google.com
+  gitVersion: v1.37.2
+release path: https://dl.k8s.io/release/v1.37.2/bin/darwin/arm64/
+kubectl: OK
+Flag --signature has been deprecated, please use --bundle to provide a signature
+Flag --certificate has been deprecated, please use --bundle with --trusted-root to provide the public certificate
+Verified OK
+
+## lab complete
+## cleanup: the lab namespaces and the cluster-scoped objects
+$ kubectl delete ns p05-attack p05-kubelet-authz p05-kube-bench --ignore-not-found --wait=true
+kubectl delete clusterrolebinding p05-06-node-stats p05-06-node-pods p05-06-node-proxy --ignore-not-found
+kubectl delete clusterrole p05-06-node-stats p05-06-node-pods p05-06-node-proxy --ignore-not-found
+namespace "p05-attack" deleted
+namespace "p05-kubelet-authz" deleted
+namespace "p05-kube-bench" deleted
+clusterrolebinding.rbac.authorization.k8s.io "p05-06-node-stats" deleted
+clusterrolebinding.rbac.authorization.k8s.io "p05-06-node-pods" deleted
+clusterrole.rbac.authorization.k8s.io "p05-06-node-stats" deleted
+clusterrole.rbac.authorization.k8s.io "p05-06-node-pods" deleted
+clusterrole.rbac.authorization.k8s.io "p05-06-node-proxy" deleted
+
+LAB EXIT 0
+
+=== final run ===
+## step 0: the cluster this run used
+$ kubectl version --client
+kubectl get nodes -o wide
+Client Version: v1.37.2
+Kustomize Version: v5.8.1
+NAME                     STATUS   ROLES           AGE   VERSION   INTERNAL-IP   EXTERNAL-IP   OS-IMAGE                       KERNEL-VERSION             CONTAINER-RUNTIME
+sf-pilot-control-plane   Ready    control-plane   10h   v1.37.0   172.18.0.2    <none>        Debian GNU/Linux 13 (trixie)   7.0.0-38-generic (amd64)   containerd://2.3.4
+
+node: sf-pilot-control-plane, internal address: 172.18.0.2
+
+## step 1: the settings the node runs with, read from the node
+$ docker exec $NODE grep -n -E '^readOnlyPort|^  anonymous:|enabled: |^  mode: ' /var/lib/kubelet/config.yaml
+docker exec $NODE grep -n -E 'kube-apiserver$|anonymous|profiling|authorization-mode' /etc/kubernetes/manifests/kube-apiserver.yaml
+docker exec $NODE grep -n -E 'client-cert-auth|listen-client-urls' /etc/kubernetes/manifests/etcd.yaml
+3:  anonymous:
+4:    enabled: false
+7:    enabled: true
+11:  mode: Webhook
+7:    component: kube-apiserver
+9:  name: kube-apiserver
+14:    - kube-apiserver
+17:    - --authorization-mode=Node,RBAC
+55:    name: kube-apiserver
+17:    - --client-cert-auth=true
+23:    - --listen-client-urls=https://127.0.0.1:2379,https://172.18.0.2:2379
+28:    - --peer-client-cert-auth=true
+
+## step 2: kube-bench with no benchmark named, as its upstream Job runs it
+$ kubectl apply -f kube-bench-auto.yaml
+wait_job; echo "job status: $? (0 complete, 1 failed, 2 timed out)"
+kubectl -n p05-kube-bench logs job/kube-bench > kb-auto.txt
+head -n 2 kb-auto.txt
+grep -A4 '^== Summary total' kb-auto.txt
+kubectl -n p05-kube-bench delete job kube-bench --wait=true
+namespace/p05-kube-bench created
+serviceaccount/kube-bench created
+job.batch/kube-bench created
+job status: 0 (0 complete, 1 failed, 2 timed out)
+Warning: Kubernetes version was not auto-detected because kubectl could not connect to the Kubernetes server. This may be because the kubeconfig information is missing or has credentials that do not match the server. Assuming default version 1.18
+Warning: Kubernetes version was not auto-detected because kubectl could not connect to the Kubernetes server. This may be because the kubeconfig information is missing or has credentials that do not match the server. Assuming default version 1.18
+== Summary total ==
+69 checks PASS
+12 checks FAIL
+41 checks WARN
+0 checks INFO
+job.batch "kube-bench" deleted from p05-kube-bench namespace
+
+## step 3: kube-bench pinned to cis-1.12, against the settings above
+$ kubectl apply -f kube-bench.yaml
+wait_job; echo "job status: $?"
+kubectl -n p05-kube-bench logs job/kube-bench > kb-run.txt
+grep -A4 '^== Summary total' kb-run.txt
+grep -E '^== Summary (master|etcd|controlplane|node|policies)' -A4 kb-run.txt
+grep -E '^\[FAIL\]' kb-run.txt
+grep -E '^\[(PASS|FAIL|WARN|INFO)\] (1\.2\.1|1\.2\.15|2\.2|4\.2\.1|4\.2\.2|4\.2\.4) ' kb-run.txt
+kubectl -n p05-kube-bench delete job kube-bench --wait=true
+namespace/p05-kube-bench unchanged
+serviceaccount/kube-bench unchanged
+job.batch/kube-bench created
+job status: 0
+== Summary total ==
+63 checks PASS
+12 checks FAIL
+56 checks WARN
+0 checks INFO
+== Summary master ==
+39 checks PASS
+10 checks FAIL
+11 checks WARN
+0 checks INFO
+--
+== Summary etcd ==
+7 checks PASS
+0 checks FAIL
+0 checks WARN
+0 checks INFO
+--
+== Summary controlplane ==
+0 checks PASS
+0 checks FAIL
+5 checks WARN
+0 checks INFO
+--
+== Summary node ==
+17 checks PASS
+2 checks FAIL
+6 checks WARN
+0 checks INFO
+--
+== Summary policies ==
+0 checks PASS
+0 checks FAIL
+34 checks WARN
+0 checks INFO
+[FAIL] 1.1.12 Ensure that the etcd data directory ownership is set to etcd:etcd (Automated)
+[FAIL] 1.2.5 Ensure that the --kubelet-certificate-authority argument is set as appropriate (Automated)
+[FAIL] 1.2.15 Ensure that the --profiling argument is set to false (Automated)
+[FAIL] 1.2.16 Ensure that the --audit-log-path argument is set (Automated)
+[FAIL] 1.2.17 Ensure that the --audit-log-maxage argument is set to 30 or as appropriate (Automated)
+[FAIL] 1.2.18 Ensure that the --audit-log-maxbackup argument is set to 10 or as appropriate (Automated)
+[FAIL] 1.2.19 Ensure that the --audit-log-maxsize argument is set to 100 or as appropriate (Automated)
+[FAIL] 1.2.30 Ensure that the --service-account-extend-token-expiration parameter is set to false (Automated)
+[FAIL] 1.3.2 Ensure that the --profiling argument is set to false (Automated)
+[FAIL] 1.4.1 Ensure that the --profiling argument is set to false (Automated)
+[FAIL] 4.1.1 Ensure that the kubelet service file permissions are set to 600 or more restrictive (Automated)
+[FAIL] 4.1.9 If the kubelet config.yaml configuration file is being used validate permissions set to 600 or more restrictive (Automated)
+[WARN] 1.2.1 Ensure that the --anonymous-auth argument is set to false (Manual)
+[FAIL] 1.2.15 Ensure that the --profiling argument is set to false (Automated)
+[PASS] 2.2 Ensure that the --client-cert-auth argument is set to true (Automated)
+[PASS] 4.2.1 Ensure that the --anonymous-auth argument is set to false (Automated)
+[PASS] 4.2.2 Ensure that the --authorization-mode argument is not set to AlwaysAllow (Automated)
+[PASS] 4.2.4 Verify that if defined, the --read-only-port argument is set to 0 (Manual)
+job.batch "kube-bench" deleted from p05-kube-bench namespace
+
+## step 4: attack from a restricted Pod with no token
+$ kubectl apply -f probe.yaml
+kubectl -n p05-attack wait --for=condition=Ready pod/probe --timeout=180s
+namespace/p05-attack created
+serviceaccount/probe created
+pod/probe created
+pod/probe condition met
+
+$ kubectl auth can-i get pods --as=system:anonymous --as-group=system:unauthenticated
+kubectl exec -n p05-attack probe -- sh -c 'curl -s -o /dev/null -w "anonymous, secrets in kube-system: %{http_code}\n" --cacert /etc/cluster-ca/ca.crt https://kubernetes.default.svc/api/v1/namespaces/kube-system/secrets'
+kubectl exec -n p05-attack probe -- sh -c 'curl -s -o /dev/null -w "anonymous, pods in all namespaces: %{http_code}\n" --cacert /etc/cluster-ca/ca.crt https://kubernetes.default.svc/api/v1/pods'
+Error from server (Forbidden): selfsubjectaccessreviews.authorization.k8s.io is forbidden: User "system:anonymous" cannot create resource "selfsubjectaccessreviews" in API group "authorization.k8s.io" at the cluster scope
+anonymous, secrets in kube-system: 403
+anonymous, pods in all namespaces: 403
+
+$ kubectl exec -n p05-attack probe -- env NODE_IP=$NODE_IP sh -c 'curl -s -o /dev/null -w "kubelet read-only port 10255: %{http_code}\n" --max-time 5 http://$NODE_IP:10255/pods; echo "exit code: $?"'
+kubectl exec -n p05-attack probe -- env NODE_IP=$NODE_IP sh -c 'curl -sk -o /dev/null -w "kubelet 10250, anonymous: %{http_code}\n" --max-time 5 https://$NODE_IP:10250/pods'
+kubelet read-only port 10255: 000
+exit code: 7
+kubelet 10250, anonymous: 401
+
+$ kubectl exec -n p05-attack probe -- env NODE_IP=$NODE_IP sh -c 'curl -sSk --max-time 5 https://$NODE_IP:2379/version 2>&1; echo "exit code: $?"'
+kubectl exec -n p05-attack probe -- env NODE_IP=$NODE_IP sh -c 'curl -sSk --max-time 5 -H "Content-Type: application/json" -d "{\"key\":\"L3JlZ2lzdHJ5L25hbWVzcGFjZXMva3ViZS1zeXN0ZW0=\"}" https://$NODE_IP:2379/v3/kv/range 2>&1; echo "exit code: $?"'
+curl: (55) OpenSSL SSL_read: OpenSSL/3.5.8: error:0A00045C:SSL routines::tlsv13 alert certificate required, errno 0
+exit code: 55
+curl: (55) OpenSSL SSL_read: OpenSSL/3.5.8: error:0A00045C:SSL routines::tlsv13 alert certificate required, errno 0
+exit code: 55
+
+## step 5: fine-grained kubelet authorization, on this cluster
+$ kubectl apply -f stats-agent.yaml
+kubectl apply -f node-stats.yaml
+kubectl -n p05-kubelet-authz wait --for=condition=Ready pod/stats-agent --timeout=180s
+kubectl exec -n p05-kubelet-authz stats-agent -- env NODE_IP=$NODE_IP sh -c 'T=$(cat /var/run/secrets/kubernetes.io/serviceaccount/token); for p in /stats/summary /pods /containerLogs/p05-kubelet-authz/none/none; do curl -sk -o /dev/null -w "$p, nodes/stats only: %{http_code}\n" -H "Authorization: Bearer $T" --max-time 5 https://$NODE_IP:10250$p; done'
+namespace/p05-kubelet-authz created
+serviceaccount/stats-agent created
+pod/stats-agent created
+clusterrole.rbac.authorization.k8s.io/p05-06-node-stats created
+clusterrolebinding.rbac.authorization.k8s.io/p05-06-node-stats created
+pod/stats-agent condition met
+/stats/summary, nodes/stats only: 200
+/pods, nodes/stats only: 403
+/containerLogs/p05-kubelet-authz/none/none, nodes/stats only: 403
+
+$ kubectl apply -f node-pods.yaml
+sleep 35
+kubectl exec -n p05-kubelet-authz stats-agent -- env NODE_IP=$NODE_IP sh -c 'T=$(cat /var/run/secrets/kubernetes.io/serviceaccount/token); for p in /stats/summary /pods /containerLogs/p05-kubelet-authz/none/none; do curl -sk -o /dev/null -w "$p, with nodes/pods added: %{http_code}\n" -H "Authorization: Bearer $T" --max-time 5 https://$NODE_IP:10250$p; done'
+clusterrole.rbac.authorization.k8s.io/p05-06-node-pods created
+clusterrolebinding.rbac.authorization.k8s.io/p05-06-node-pods created
+/stats/summary, with nodes/pods added: 200
+/pods, with nodes/pods added: 200
+/containerLogs/p05-kubelet-authz/none/none, with nodes/pods added: 403
+
+$ kubectl apply -f node-proxy.yaml
+sleep 35
+kubectl exec -n p05-kubelet-authz stats-agent -- env NODE_IP=$NODE_IP sh -c 'T=$(cat /var/run/secrets/kubernetes.io/serviceaccount/token); curl -sk -o /dev/null -w "/containerLogs, with the broad nodes/proxy grant: %{http_code}\n" -H "Authorization: Bearer $T" --max-time 5 https://$NODE_IP:10250/containerLogs/p05-kubelet-authz/none/none'
+kubectl delete clusterrolebinding p05-06-node-proxy clusterrole p05-06-node-proxy --ignore-not-found
+sleep 310
+kubectl exec -n p05-kubelet-authz stats-agent -- env NODE_IP=$NODE_IP sh -c 'T=$(cat /var/run/secrets/kubernetes.io/serviceaccount/token); curl -sk -o /dev/null -w "/containerLogs, after the broad grant is removed: %{http_code}\n" -H "Authorization: Bearer $T" --max-time 5 https://$NODE_IP:10250/containerLogs/p05-kubelet-authz/none/none'
+clusterrole.rbac.authorization.k8s.io/p05-06-node-proxy created
+clusterrolebinding.rbac.authorization.k8s.io/p05-06-node-proxy created
+/containerLogs, with the broad nodes/proxy grant: 404
+clusterrolebinding.rbac.authorization.k8s.io "p05-06-node-proxy" deleted
+/containerLogs, after the broad grant is removed: 403
+
+## step 6: the kubectl binary on this workstation, by checksum and signature
+$ kubectl version --client -o yaml | grep gitVersion
+os=$(uname -s | tr '[:upper:]' '[:lower:]'); arch=$(uname -m); [ "$arch" = x86_64 ] && arch=amd64
+ver=$(kubectl version --client -o yaml | awk '/gitVersion/{print $2; exit}')
+echo "release path: https://dl.k8s.io/release/$ver/bin/$os/$arch/"
+cp "$(command -v kubectl)" kubectl
+curl -sSfL -o kubectl.sha256 "https://dl.k8s.io/release/$ver/bin/$os/$arch/kubectl.sha256"
+echo "$(cat kubectl.sha256)  kubectl" | shasum -a 256 -c
+curl -sSfL -o kubectl.sig "https://dl.k8s.io/release/$ver/bin/$os/$arch/kubectl.sig"
+curl -sSfL -o kubectl.cert "https://dl.k8s.io/release/$ver/bin/$os/$arch/kubectl.cert"
+cosign verify-blob kubectl --signature kubectl.sig --certificate kubectl.cert --certificate-identity "$KREL_IDENTITY" --certificate-oidc-issuer https://accounts.google.com
+  gitVersion: v1.37.2
+release path: https://dl.k8s.io/release/v1.37.2/bin/darwin/arm64/
+kubectl: OK
+Flag --signature has been deprecated, please use --bundle to provide a signature
+Flag --certificate has been deprecated, please use --bundle with --trusted-root to provide the public certificate
+Verified OK
+
+## lab complete
+## cleanup: the lab namespaces and the cluster-scoped objects
+$ kubectl delete ns p05-attack p05-kubelet-authz p05-kube-bench --ignore-not-found --wait=true
+kubectl delete clusterrolebinding p05-06-node-stats p05-06-node-pods p05-06-node-proxy --ignore-not-found
+kubectl delete clusterrole p05-06-node-stats p05-06-node-pods p05-06-node-proxy --ignore-not-found
+Error from server (Timeout): Timeout: request did not complete within requested timeout - context deadline exceeded
+Error from server (Timeout): Timeout: request did not complete within requested timeout - context deadline exceeded
+Unable to connect to the server: unexpected EOF
+Unable to connect to the server: EOF
+Unable to connect to the server: EOF
+Unable to connect to the server: EOF
+Unable to connect to the server: EOF
+Unable to connect to the server: EOF
+Unable to connect to the server: EOF
+
+LAB EXIT 0
