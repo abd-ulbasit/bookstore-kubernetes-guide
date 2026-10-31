@@ -38,9 +38,14 @@ Three things fail the gate that a plain `kubectl apply` would let through:
   secrets operator, so the gate creates a stand-in with a random password, as
   that operator would.
 
-`raw` treats 01-catalog-pod.yaml and 02-catalog-pod-sidecar.yaml as two states
-of one Pod (the chapters delete one before applying the other), so it applies
-each alone, waits for it to be Ready and deletes it before the rest.
+`raw` treats three files as variants, because their own headers say not to run
+them beside the rest. 01-catalog-pod.yaml and 02-catalog-pod-sidecar.yaml are
+two states of one Pod (the chapters delete one before applying the other), so
+the gate applies each alone, waits for it to be Ready and deletes it before the
+rest. 30-catalog-canary.yaml is a second form of catalog ("Do NOT run both
+stacks at once"), so the gate runs it after the rest has passed: it deletes
+10-catalog-deploy.yaml's workloads, applies the canary stacks in their place
+and waits for them. Nothing is skipped.
 
 The gate writes to the cluster, so it refuses to run unless the kubectl
 context is a kind cluster (`kind-` prefix) or one named with --allow-context.
@@ -77,6 +82,8 @@ TREE = "full-guide/examples/bookstore"
 VARIANTS = ("raw", "helm", "kustomize-dev", "kustomize-staging", "kustomize-prod")
 WORKLOAD_KINDS = ("Pod", "Deployment", "StatefulSet", "DaemonSet", "Job", "CronJob")
 SNAPSHOT_FILES = ("01-catalog-pod.yaml", "02-catalog-pod-sidecar.yaml")
+# A file that replaces the workloads of another file, and may not run beside it.
+VARIANT_FILES = {"30-catalog-canary.yaml": ("10-catalog-deploy.yaml",)}
 HEAD_FILES = ("00-namespace.yaml", "05-serviceaccounts-rbac.yaml")
 STAND_IN_SECRET = "db-credentials"
 PSA_WARNING = "would violate PodSecurity"
@@ -148,25 +155,33 @@ def load_docs(text: str, source: str) -> list[Doc]:
     return docs
 
 
-def raw_forms(tree: Path) -> tuple[list[Doc], list[tuple[str, list[Doc]]]]:
-    """Return the documents to apply in order, and the snapshot Pods to run one at a time."""
+Variant = tuple[str, list["Doc"], list["Doc"]]
+
+
+def raw_forms(tree: Path) -> tuple[list[Doc], list[tuple[str, list[Doc]]], list[Variant]]:
+    """Return the documents to apply, the snapshot Pods, and the variants to run afterwards."""
     folder = tree / "raw-manifests"
     files = sorted(folder.glob("*.yaml"))
     if not files:
         raise GateError(f"{folder} holds no manifests")
-    head, snapshots, rest = [], [], []
-    for path in files:
-        docs = load_docs(path.read_text(encoding="utf-8"), path.name)
-        if path.name in SNAPSHOT_FILES:
-            snapshots.append((path.name, docs))
-        elif path.name in HEAD_FILES:
+    loaded = {path.name: load_docs(path.read_text(encoding="utf-8"), path.name) for path in files}
+    head, snapshots, rest, variants = [], [], [], []
+    for name, docs in loaded.items():
+        if name in SNAPSHOT_FILES:
+            snapshots.append((name, docs))
+        elif name in VARIANT_FILES:
+            replaced = [d for old in VARIANT_FILES[name] for d in loaded.get(old, [])]
+            if not replaced:
+                raise GateError(f"{name} replaces {', '.join(VARIANT_FILES[name])}, which holds no documents")
+            variants.append((name, replaced, docs))
+        elif name in HEAD_FILES:
             head += docs
         else:
             rest += docs
-    return head + rest, snapshots
+    return head + rest, snapshots, variants
 
 
-def render(variant: str, tree: Path, helm: str, kubectl: str) -> tuple[list[Doc], list[tuple[str, list[Doc]]]]:
+def render(variant: str, tree: Path, helm: str, kubectl: str) -> tuple[list[Doc], list[tuple[str, list[Doc]]], list[Variant]]:
     if variant == "raw":
         return raw_forms(tree)
     if variant == "helm":
@@ -176,7 +191,7 @@ def render(variant: str, tree: Path, helm: str, kubectl: str) -> tuple[list[Doc]
     rc, out, err = run_tool(argv)
     if rc != 0:
         raise Failure(f"{variant} does not render: {err.strip()[:600]}")
-    return load_docs(out, variant), []
+    return load_docs(out, variant), [], []
 
 
 def current_context(kubectl: str) -> str:
@@ -488,6 +503,23 @@ def run_snapshots(kubectl: str, snapshots: list[tuple[str, list[Doc]]], deadline
             result.workloads[f"{pod.label()} ({name})"] = "ready: applied alone, then deleted"
 
 
+def run_variants(kubectl: str, variants: list[Variant], deadline: float, result: Result) -> None:
+    """Swap each variant in for the workloads it replaces, and wait for it."""
+    for name, replaced, docs in variants:
+        print(f"variant {name}: delete what it replaces, apply it, wait for it", flush=True)
+        for doc in (d for d in replaced if d.kind in WORKLOAD_KINDS):
+            run_tool([kubectl, "delete", doc.kind.lower(), doc.name, "--namespace", NAMESPACE, "--ignore-not-found", "--wait=true"])
+            result.workloads.pop(doc.label(), None)
+        apply_docs(kubectl, docs, name)
+        mine = [d for d in expected_workloads(docs) if d.kind != "CronJob"]
+        try:
+            wait_for(kubectl, mine, deadline, result)
+        finally:
+            for doc in mine:
+                if doc.label() in result.workloads:
+                    result.workloads[f"{doc.label()} ({name})"] = result.workloads.pop(doc.label())
+
+
 def cleanup(kubectl: str, docs: list[Doc]) -> None:
     run_tool([kubectl, "delete", "namespace", NAMESPACE, "--ignore-not-found", "--wait=true", "--timeout=120s"])
     for doc in docs:
@@ -496,12 +528,15 @@ def cleanup(kubectl: str, docs: list[Doc]) -> None:
 
 
 def deploy(args: argparse.Namespace, result: Result) -> list[Doc]:
-    docs, snapshots = render(args.variant, args.tree, args.helm, args.kubectl)
+    docs, snapshots, variants = render(args.variant, args.tree, args.helm, args.kubectl)
     if not docs:
         raise GateError(f"{args.variant} renders no documents")
     served = served_kinds(args.kubectl)
     docs, skipped = split_unserved(docs, served)
     snapshot_docs = [d for _, group in snapshots for d in group]
+    variant_docs = [d for _, _, group in variants for d in group]
+    variant_docs, variant_skipped = split_unserved(variant_docs, served)
+    skipped += variant_skipped
     holding = [d.label() for d in skipped if runs_pods(d)]
     result.skipped = sorted({d.label() for d in skipped})
     if holding:
@@ -518,7 +553,7 @@ def deploy(args: argparse.Namespace, result: Result) -> list[Doc]:
     deadline = time.monotonic() + args.timeout
     head = [d for d in docs if d.kind in ("Namespace", "ResourceQuota", "LimitRange", "ServiceAccount", "PriorityClass", "StorageClass")]
     apply_docs(args.kubectl, head, "the namespace and its governance objects")
-    for name, keys in sorted(missing_secrets(docs + snapshot_docs).items()):
+    for name, keys in sorted(missing_secrets(docs + snapshot_docs + variant_docs).items()):
         if name != STAND_IN_SECRET:
             raise Failure(f"workloads read Secret {name}, and no document creates it")
         apply_docs(args.kubectl, load_docs(yaml.safe_dump(stand_in_manifest(name, keys)), "stand-in"), f"stand-in Secret {name}")
@@ -529,6 +564,8 @@ def deploy(args: argparse.Namespace, result: Result) -> list[Doc]:
     apply_docs(args.kubectl, [d for d in docs if d not in head], f"{args.variant}")
     wait_for(args.kubectl, docs, deadline, result)
     run_cronjobs(args.kubectl, docs, deadline, result)
+    if variants:
+        run_variants(args.kubectl, variants, deadline, result)
     return docs
 
 

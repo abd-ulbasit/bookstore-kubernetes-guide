@@ -390,9 +390,35 @@ class FakeCluster(unittest.TestCase):
         workloads = json.loads(report.read_text())["workloads"]
         self.assertIn("Pod/catalog (01-catalog-pod.yaml)", workloads)
         self.assertIn("Pod/catalog (02-catalog-pod-sidecar.yaml)", workloads)
-        self.assertEqual([k for k, v in json.loads(self.state_path.read_text()).items() if k == "applied"], ["applied"])
         left = [x for x in json.loads(self.state_path.read_text())["applied"] if x[0] == "Pod"]
         self.assertEqual(left, [])
+
+
+    def test_a_variant_replaces_the_workloads_it_names_and_must_come_up(self) -> None:
+        stack = lambda name: doc("Deployment", name, spec={"replicas": 1, "template": {"spec": {"containers": [{"name": "c"}]}}})  # noqa: E731
+        tree = self.tree(
+            {
+                "00-namespace.yaml": [NAMESPACE_DOC],
+                "10-catalog-deploy.yaml": [stack("catalog")],
+                "30-catalog-canary.yaml": [stack("catalog-stable"), stack("catalog-canary")],
+            }
+        )
+        report = self.dir / "report.json"
+        code, out, err = self.gate(tree, "--report", str(report))
+        self.assertEqual(code, 0, out + err)
+        self.assertIn("variant 30-catalog-canary.yaml", out)
+        workloads = json.loads(report.read_text())["workloads"]
+        self.assertIn("Deployment/catalog-stable (30-catalog-canary.yaml)", workloads)
+        self.assertIn("Deployment/catalog-canary (30-catalog-canary.yaml)", workloads)
+        self.assertNotIn("Deployment/catalog", workloads)
+        applied = [name for kind, name in json.loads(self.state_path.read_text())["applied"] if kind == "Deployment"]
+        self.assertEqual(sorted(applied), ["catalog-canary", "catalog-stable"])
+
+    def test_a_variant_that_replaces_nothing_aborts_with_exit_2(self) -> None:
+        tree = self.tree({"00-namespace.yaml": [NAMESPACE_DOC], "10-app.yaml": [deployment("catalog")], "30-catalog-canary.yaml": [deployment("catalog-stable")]})
+        code, _, err = self.gate(tree)
+        self.assertEqual(code, 2)
+        self.assertIn("30-catalog-canary.yaml replaces", err)
 
 
 @unittest.skipUnless(HAVE_RENDERERS, "needs helm and kubectl to render the Bookstore forms")
@@ -400,9 +426,11 @@ class RealForms(unittest.TestCase):
     """The forms the gate deploys in CI must stay deployable in the shapes it expects."""
 
     def forms(self) -> dict[str, tuple[list[rg.Doc], list]]:
+        """Each form's documents, with the snapshot Pods and variants folded into the second item."""
         out = {}
         for variant in rg.VARIANTS:
-            out[variant] = rg.render(variant, TREE, shutil.which("helm") or "helm", shutil.which("kubectl") or "kubectl")
+            docs, snapshots, variants = rg.render(variant, TREE, shutil.which("helm") or "helm", shutil.which("kubectl") or "kubectl")
+            out[variant] = (docs, snapshots + [(name, group) for name, _, group in variants])
         return out
 
     def test_every_form_creates_a_restricted_namespace_and_holds_workloads(self) -> None:
@@ -427,9 +455,20 @@ class RealForms(unittest.TestCase):
                 expected = {"db-credentials"} if variant == "kustomize-prod" else set()
                 self.assertEqual(set(rg.missing_secrets(everything)), expected)
 
-    def test_the_raw_form_holds_two_snapshot_pods(self) -> None:
-        _, snapshots = rg.render("raw", TREE, "helm", "kubectl")
+    def test_the_raw_form_holds_two_snapshot_pods_and_the_canary_variant(self) -> None:
+        docs, snapshots, variants = rg.render("raw", TREE, "helm", "kubectl")
         self.assertEqual([name for name, _ in snapshots], list(rg.SNAPSHOT_FILES))
+        self.assertEqual([name for name, _, _ in variants], list(rg.VARIANT_FILES))
+        (_, replaced, canary), = variants
+        self.assertEqual([d.label() for d in replaced if d.kind == "Deployment"], ["Deployment/catalog"])
+        self.assertEqual(sorted(d.label() for d in canary if d.kind == "Deployment"), ["Deployment/catalog-canary", "Deployment/catalog-stable"])
+        self.assertNotIn("Deployment/catalog-canary", [d.label() for d in docs])
+
+    def test_every_other_form_has_no_snapshots_or_variants(self) -> None:
+        for variant in rg.VARIANTS[1:]:
+            with self.subTest(variant=variant):
+                _, snapshots, variants = rg.render(variant, TREE, shutil.which("helm") or "helm", shutil.which("kubectl") or "kubectl")
+                self.assertEqual((snapshots, variants), ([], []))
 
 
 if __name__ == "__main__":
