@@ -1,15 +1,15 @@
-# 05 — Reliability and disruptions
+# 05: Reliability and disruptions
 
 > Voluntary vs involuntary disruptions, the **PodDisruptionBudget**
 > (`policy/v1`, minAvailable/maxUnavailable, `disruptionsAllowed`, the
 > eviction API vs deletion, `unhealthyPodEvictionPolicy`), multi-replica +
 > anti-affinity/spread for HA (cross-ref Part 04), graceful shutdown +
 > readiness gating (cross-ref Part 01), PodReadinessGates, and **SLI/SLO/error
-> budgets** — applied by adding PDBs for storefront/catalog/orders and proving
+> budgets**, applied by adding PDBs for storefront/catalog/orders and proving
 > a node drain respects them.
 
 **Estimated time:** ~15 min read · ~60 min hands-on
-**Prerequisites:** [Part 04 ch.02](../04-scheduling/02-affinity-taints-topology.md) — anti-affinity / topology spread for HA · [Part 01 ch.02](../01-core-workloads/02-health-and-lifecycle.md) — readiness gating and graceful shutdown · [Part 06 ch.01](01-observability-metrics.md) — SLI/SLO measurement is what disruption budgets protect
+**Prerequisites:** [Part 04 ch.02](../04-scheduling/02-affinity-taints-topology.md): anti-affinity / topology spread for HA · [Part 01 ch.02](../01-core-workloads/02-health-and-lifecycle.md): readiness gating and graceful shutdown · [Part 06 ch.01](01-observability-metrics.md): SLI/SLO measurement is what disruption budgets protect
 **You'll know after this:** • distinguish voluntary from involuntary disruptions and what PDBs actually cover · • write `policy/v1` PodDisruptionBudgets with the right minAvailable / maxUnavailable · • explain how the eviction API differs from deletion and how `unhealthyPodEvictionPolicy` works · • define SLIs, SLOs and error budgets and tie them to alerting · • prove a `kubectl drain` of a Bookstore node respects the catalog PDB
 
 <!-- tags: observability, slo, day-2, core-objects -->
@@ -18,13 +18,13 @@
 
 The Bookstore is observed ([ch.01–03](01-observability-metrics.md)) and
 autoscaled ([ch.04](04-autoscaling.md)). But availability is not just "enough
-replicas exist" — it is "enough replicas **stay Ready through the things that
+replicas exist"; it is "enough replicas **stay Ready through the things that
 take Pods away**". And Pods are taken away constantly in a healthy cluster:
 every node OS patch, Kubernetes upgrade, autoscaler scale-down, and
 `kubectl drain` evicts Pods **on purpose**. Without a guard, a routine
-"upgrade the nodes one by one" can drain a node hosting *all three* catalog
-replicas at once → catalog is briefly down during a **planned, routine**
-operation. That is the most common self-inflicted outage in Kubernetes.
+"upgrade the nodes one by one" drains every Pod on a node. If several catalog
+replicas share that node, catalog loses them together during a **planned,
+routine** operation. That is a self-inflicted outage.
 
 A **PodDisruptionBudget (PDB)** is the contract that says "you may take my
 Pods, but never more than *this many* at once". It converts "all replicas
@@ -35,18 +35,19 @@ reasoning of the [Singleton Service](#further-reading) pattern.
 
 ## Mental model
 
-Two kinds of disruption — the distinction drives everything:
+Two kinds of disruption. The distinction drives everything:
 
-- **Involuntary** — not initiated by anyone: node hardware/kernel crash, OOM
+- **Involuntary**, not initiated by anyone: node hardware/kernel crash, OOM
   kill, network partition, the node simply disappears. A PDB does **not**
   protect against these (nobody asked permission). Your defence is
-  **replicas + spread/anti-affinity** (Part 04 ch.02 — already on catalog/
+  **replicas + spread/anti-affinity** (Part 04 ch.02, already on catalog/
   storefront) so an involuntary loss removes *some* capacity, not all, plus
   good probes so traffic stops hitting the dead Pods.
-- **Voluntary** — deliberately initiated through the API: `kubectl drain` for
-  a node upgrade, cluster-autoscaler/Karpenter scale-down
-  ([ch.04](04-autoscaling.md)), a `kubectl delete pod`, an eviction. These go
-  through the **eviction API**, and **that** is what a PDB governs.
+- **Voluntary**: deliberately initiated: `kubectl drain` for a node upgrade,
+  cluster-autoscaler/Karpenter scale-down ([ch.04](04-autoscaling.md)), and any
+  eviction request. Evictions go through the **eviction API**, and **that** is
+  what a PDB governs. A direct `kubectl delete pod` is voluntary too, but it
+  skips the eviction API, so no PDB checks it.
 
 A PDB declares a floor (`minAvailable: N` or `minAvailable: 75%`) or a ceiling
 (`maxUnavailable`) on **healthy Pods of a selector**. The **eviction API**
@@ -54,7 +55,7 @@ A PDB declares a floor (`minAvailable: N` or `minAvailable: 75%`) or a ceiling
 workload would *stay at or above the floor*; otherwise the eviction is
 **refused** and the drain **blocks and retries** until the controller has
 rescheduled a replacement elsewhere and it is Ready. That backpressure is the
-PDB working — it paces voluntary disruption to the rate the workload can
+PDB working: it paces voluntary disruption to the rate the workload can
 absorb without losing capacity.
 
 Critically: a PDB does **not** move or recreate Pods. It only **gates
@@ -69,6 +70,29 @@ Reliability is the **stack**, not one feature:
 | Don't lose too many at once (voluntary) | **PodDisruptionBudget** | this chapter |
 | Don't drop in-flight requests when a Pod goes | readiness gating + SIGTERM + preStop + grace | [Part 01 ch.02](../01-core-workloads/02-health-and-lifecycle.md) |
 | Know if you're meeting the bar | SLI / SLO / error budget | this chapter + [ch.01](01-observability-metrics.md) |
+
+Availability is one of the three properties security protects, next to
+confidentiality and integrity. A node patch is security work: it replaces a
+kubelet or kernel that has a known fault. A PDB is an availability control,
+and on a node patch it can slow the same work it should protect. A drain that
+never finishes leaves the old node in service. Treat a stuck drain during a
+patch as a security finding, not only as a scheduling delay.
+
+## Threats and controls
+
+A PDB sits where availability and patching meet. The rows below are the
+threats this chapter owns. The rest link to the chapters that own them.
+
+| Threat | Control taught here | Goes deeper |
+|---|---|---|
+| A node stays on an unpatched kubelet or kernel because its drain waits on a budget | Size `minAvailable` to what one node can lose, set `unhealthyPodEvictionPolicy: AlwaysAllow`, and watch `disruptionsAllowed` ([notice a refused patch](#3-notice-a-refused-patch)) | [08.01](../08-day-2-operations/01-cluster-lifecycle.md) |
+| Someone lowers or deletes a budget to push a stuck drain through, unseen | Only named roles may change a PodDisruptionBudget. [Step 3](#3-notice-a-refused-patch) shows the workload's ServiceAccount cannot. Audit records a budget change when the audit policy covers it ([audit docs][audit]) | [05.01](../05-security/01-authn-authz-rbac.md), 05.08 <!-- link-later: 05.08 --> |
+| A compromised Pod keeps running because its budget refuses the eviction | A direct delete is not budget-checked, by design ([disruptions][disruptions]). [Step 3](#3-notice-a-refused-patch) deletes a Pod with its budget at zero. Use a direct delete on purpose and record it | 05.08 <!-- link-later: 05.08 --> |
+| One node failure removes every replica | Replicas and spread across nodes. A PDB cannot stop an involuntary loss | [04.02](../04-scheduling/02-affinity-taints-topology.md) |
+
+The probes that decide when a Pod counts as Ready are owned by
+[01.02](../01-core-workloads/02-health-and-lifecycle.md). This chapter
+relies on them and does not repeat them.
 
 ## Diagrams
 
@@ -87,7 +111,7 @@ sequenceDiagram
     API-->>Op: catalog-1 evicted
     API->>PDB: evict catalog-2? (2 Ready, floor 2)
     PDB-->>API: DENIED (would leave 1 < 2)
-    API-->>Op: 429 Too Many Requests — drain retries
+    API-->>Op: 429 Too Many Requests, drain retries
     RS->>RS: schedule replacement for catalog-1 on node-B
     Note over RS: replacement becomes Ready (3 again)
     API->>PDB: evict catalog-2? (3 Ready, floor 2)
@@ -113,11 +137,16 @@ sequenceDiagram
 
 **Assumed working directory: the guide repo root (`full-guide/`).**
 
-We will: (1) add PDBs for storefront/catalog/orders; (2) recreate a
-**multi-node** kind cluster (so a drain has somewhere to reschedule); (3)
-`kubectl drain` a node and watch the PDB pace it.
+We will: (1) add PDBs for storefront/catalog/orders; (2) read the budget
+before any eviction; (3) watch the budget refuse an eviction, and see that a
+direct delete goes through; (4) optionally drain a node on a **multi-node**
+kind cluster (so a drain has somewhere to reschedule).
 
-### 0. Prerequisites — a multi-node cluster (self-bootstrapping)
+The output blocks come from a lab run on a one-node cluster, so that run did
+not drain a node. Step 4 is the reader's exercise and has no captured output.
+The catalog Pods in the lab were a stand-in, described in step 2.
+
+### 0. Prerequisites: a multi-node cluster (self-bootstrapping)
 
 A single-node kind cluster cannot demonstrate a drain (no other node to
 reschedule onto, and draining the only node evicts everything). Reuse the
@@ -125,8 +154,8 @@ reschedule onto, and draining the only node evicts everything). Reuse the
 not a Bookstore manifest):
 
 ```yaml
-# kind-multinode.yaml — 1 control-plane + 3 workers (same pattern as Part 04
-# ch.02; the dedicated DB node/taint is omitted here — not needed for PDBs).
+# kind-multinode.yaml: 1 control-plane + 3 workers (same pattern as Part 04
+# ch.02; the dedicated DB node/taint is omitted here; not needed for PDBs).
 kind: Cluster
 apiVersion: kind.x-k8s.io/v1alpha4
 nodes:
@@ -164,15 +193,14 @@ kubectl wait --for=condition=complete job/db-migrate -n bookstore --timeout=120s
 kubectl rollout status deployment/catalog -n bookstore
 ```
 
-(catalog's `topologySpreadConstraints` are `DoNotSchedule` — on this 3-worker
+(catalog's `topologySpreadConstraints` are `DoNotSchedule`, on this 3-worker
 cluster the 3 replicas spread one-per-node, which is exactly what makes the
 PDB demo meaningful: draining one node evicts exactly one catalog Pod.)
 
 ### 1. Add PodDisruptionBudgets
 
 New file
-[`examples/bookstore/raw-manifests/84-pdb.yaml`](../examples/bookstore/raw-manifests/84-pdb.yaml)
-— **built-in** `policy/v1` (no CRD; dry-runs cleanly). One PDB per
+[`examples/bookstore/raw-manifests/84-pdb.yaml`](../examples/bookstore/raw-manifests/84-pdb.yaml). The objects are **built-in** `policy/v1` (no CRD; dry-runs cleanly). One PDB per
 front-line workload, `minAvailable` sized to the **real replica counts**:
 
 ```yaml
@@ -204,42 +232,91 @@ spec:
 > **Sizing & selector decisions (in the manifest header).** `minAvailable`
 > matches each Deployment's replica count: catalog 3→2 (tolerate one node
 > down), storefront 2→1, orders 2→1. The selectors are the **exact** pod
-> labels of each Deployment's template (`app: catalog|storefront|orders`) — a
+> labels of each Deployment's template (`app: catalog|storefront|orders`), a
 > PDB whose selector matches no Pods is silently useless; one matching
 > *multiple* workloads is a classic mistake. **payments-worker gets no PDB on
 > purpose**: it is KEDA-scaled and may legitimately be at **0** replicas
 > ([ch.04](04-autoscaling.md)), so a `minAvailable` PDB would be meaningless
-> and could even wedge a drain — autoscaled/scale-to-zero consumers are the
-> documented exception. `unhealthyPodEvictionPolicy: AlwaysAllow` (GA since
-> 1.31, Beta from 1.27; ignored, not rejected, on older clusters) lets the
-> eviction API remove **not-Ready** Pods even at the budget floor — without
+> and could even wedge a drain, autoscaled/scale-to-zero consumers are the
+> documented exception. `unhealthyPodEvictionPolicy: AlwaysAllow` (stable since
+> 1.31) lets the
+> eviction API remove **not-Ready** Pods even at the budget floor, without
 > it, a budget at its limit *plus* a crashed Pod can **deadlock** a drain
 > forever (the broken Pod can't be evicted, so the node never drains).
 
 ```sh
 kubectl apply -f examples/bookstore/raw-manifests/84-pdb.yaml
-kubectl get pdb -n bookstore
-# NAME        MIN AVAILABLE   ALLOWED DISRUPTIONS   AGE
-# catalog     2               1                     ...
-# orders      1               1                     ...
-# storefront  1               1                     ...
 ```
 
-`ALLOWED DISRUPTIONS` is `.status.disruptionsAllowed` — the **live headroom**:
-with 3 Ready catalog Pods and floor 2, exactly **1** may be evicted right now.
-
-### 2. Drain a node and watch the PDB pace it
-
-Pick a worker that runs a catalog Pod, then drain it:
+<!-- gate: output -->
+```text
+poddisruptionbudget.policy/catalog created
+poddisruptionbudget.policy/storefront created
+poddisruptionbudget.policy/orders created
+```
 
 ```sh
-NODE=$(kubectl get pod -n bookstore -l app=catalog \
-  -o jsonpath='{.items[0].spec.nodeName}')
+kubectl get pdb -n bookstore
+```
+
+<!-- gate: output -->
+```text
+NAME         MIN AVAILABLE   MAX UNAVAILABLE   ALLOWED DISRUPTIONS   AGE
+catalog      2               N/A               1                     5s
+orders       1               N/A               0                     5s
+storefront   1               N/A               0                     5s
+```
+
+`ALLOWED DISRUPTIONS` is `.status.disruptionsAllowed`, the **live headroom**:
+with 3 Ready catalog Pods and floor 2, exactly **1** may be evicted right now.
+The lab namespace had no storefront or orders Pods, so their rows show 0. A
+budget allows the Ready Pods above its floor, and with no Pods there is none
+above it.
+
+### 2. Read the budget before an eviction
+
+The eviction API checks the budget, so read it before any drain. The describe
+output shows the numbers the check uses:
+
+```sh
+kubectl describe pdb catalog -n bookstore | sed -n '1,20p'
+```
+
+<!-- gate: output -->
+```text
+Name:           catalog
+# ...
+Min available:  2
+Selector:       app=catalog
+Status:
+    Allowed disruptions:  1
+    Current:              3
+    Desired:              2
+    Total:                3
+Events:                   <none>
+```
+
+`Current` counts the Ready Pods that match the selector, and `Desired` is the
+floor. `Allowed disruptions` is their difference, never below zero. The lab's
+catalog was a stand-in busybox workload with the chapter's labels, the same
+ServiceAccount and this PDB, because the Bookstore catalog needs its database
+to report Ready.
+
+#### Optional: drain a node on the multi-node cluster
+
+Pick a worker that runs a catalog Pod and does **not** run postgres. postgres
+is a single replica whose Pod can only run on the node that holds its volume,
+and no PDB covers it. Draining that node takes the database down until the
+node comes back. List where the Pods run, then choose:
+
+```sh
+kubectl get pods -n bookstore -o wide   # note the node of postgres-0
+NODE=<a worker that runs a catalog Pod but not postgres-0>
 echo "draining $NODE"
 
 # --ignore-daemonsets: DaemonSet Pods aren't drained (they're per-node).
 # --delete-emptydir-data: our Pods use emptyDir scratch (Part 05); acknowledge it.
-#   This discards ONLY ephemeral emptyDir scratch — the Bookstore stateless
+#   This discards ONLY ephemeral emptyDir scratch, the Bookstore stateless
 #   tiers (catalog/storefront/orders) keep nothing there. It does NOT touch
 #   PVC-backed data: a StatefulSet's PersistentVolume (e.g. postgres,
 #   Part 01 ch.05) is bound to its PVC and survives the drain untouched. Do
@@ -254,13 +331,19 @@ Watch in another shell:
 watch kubectl get pods -n bookstore -o wide
 ```
 
-You will see the eviction API evict the catalog Pod on `$NODE`, the Deployment
-immediately schedule a replacement on another worker, and — because
-`minAvailable: 2` — the drain **wait** for that replacement to become Ready
-before it would evict any further catalog Pod. catalog never drops below 2
-Ready. If you drain a *second* node before the first replacement is Ready, the
-drain **blocks** with a PDB message rather than violating the budget — that is
-the guarantee. Uncordon when done:
+`kubectl drain` asks the eviction API for each Pod, so the refusal from step 3
+applies to each eviction. With `minAvailable: 2` and three Ready catalog Pods,
+the first eviction fits the budget. The drain then goes on only when the
+budget allows another, and the Deployment's replacement is what restores the
+count. Two things can keep it waiting. A second drain started before the first
+replacement is Ready is refused with the same budget message. And the
+replacement needs a node the spread rules allow. catalog's `DoNotSchedule`
+hostname spread takes `nodeTaintsPolicy: Ignore` for taints by default, so a
+node that taints exclude still counts as a spread domain ([Part 04
+ch.02](../04-scheduling/02-affinity-taints-topology.md)). A replacement can
+therefore stay Pending while the drained node is cordoned. This run did not
+drain a node, so it did not observe that. Watch `kubectl get pods -o wide`
+during your drain. Uncordon when done:
 
 ```sh
 kubectl uncordon "$NODE"
@@ -268,12 +351,127 @@ kubectl uncordon "$NODE"
 
 > **Eviction vs `kubectl delete pod`.** A PDB only constrains the **eviction
 > API** (what `drain` uses). `kubectl delete pod` is a *direct delete* and is
-> **not** PDB-checked — it will remove the Pod regardless. So a PDB protects
+> **not** PDB-checked, it will remove the Pod regardless. So a PDB protects
 > you from *orderly* operations (drain/upgrade/scale-down), not from someone
 > force-deleting Pods. Node upgrades on managed clusters use the eviction API,
-> so the PDB does its job there.
+> so the PDB does its job there. [Step 3](#3-notice-a-refused-patch) runs both
+> paths on the lab cluster.
 
-### 3. Connection draining recap (why the PDB alone isn't enough)
+### 3. Notice a refused patch
+
+This is the stuck-drain case from the threats table. A budget set to the full
+replica count, which a careless reviewer might write, lets no eviction through.
+Set `minAvailable` to 3, the catalog replica count, and read the budget:
+
+```sh
+kubectl patch pdb catalog -n bookstore --type merge -p '{"spec":{"minAvailable":3}}'
+```
+
+<!-- gate: output -->
+```text
+poddisruptionbudget.policy/catalog patched
+```
+
+```sh
+kubectl get pdb catalog -n bookstore
+```
+
+<!-- gate: output -->
+```text
+NAME      MIN AVAILABLE   MAX UNAVAILABLE   ALLOWED DISRUPTIONS   AGE
+catalog   3               N/A               0                     11s
+```
+
+Now ask the eviction API for one catalog Pod. This is the request `kubectl
+drain` makes for each Pod on a node:
+
+```sh
+POD=$(kubectl get pods -n bookstore -l app=catalog -o jsonpath='{.items[0].metadata.name}')
+printf '{"apiVersion":"policy/v1","kind":"Eviction","metadata":{"name":"%s","namespace":"bookstore"}}' "$POD" > eviction.json
+kubectl create --raw /api/v1/namespaces/bookstore/pods/$POD/eviction -f eviction.json
+```
+
+<!-- gate: output -->
+```text
+Error from server (TooManyRequests): Cannot evict pod as it would violate the pod's disruption budget.
+```
+
+The refusal is a `429`, and the drain retries it. The describe output shows why:
+
+```sh
+kubectl describe pdb catalog -n bookstore | sed -n '1,20p'
+```
+
+<!-- gate: output -->
+```text
+Name:           catalog
+# ...
+Min available:  3
+Selector:       app=catalog
+Status:
+    Allowed disruptions:  0
+    Current:              3
+    Desired:              3
+    Total:                3
+Events:                   <none>
+```
+
+A direct delete is not budget-checked. Delete the same Pod, and the Deployment
+replaces it:
+
+```sh
+kubectl delete pod "$POD" -n bookstore
+kubectl get pods -n bookstore -l app=catalog --no-headers | awk '{print $1, $2, $3}'
+```
+
+<!-- gate: output -->
+```text
+catalog-7d77bf8dcd-9xps5 1/1 Running
+catalog-7d77bf8dcd-fmgl2 1/1 Running
+catalog-7d77bf8dcd-qkk6w 1/1 Running
+```
+
+The delete went through with the budget at zero, so the budget does not guard
+direct deletes. Only the eviction path does. Deletes you make on purpose need a
+record, which is the audit trail in the threats table.
+
+The workload's own ServiceAccount cannot change the budget or request an
+eviction, so a compromised Pod cannot lower the floor to get past it:
+
+```sh
+kubectl auth can-i update poddisruptionbudgets.policy -n bookstore --as=system:serviceaccount:bookstore:catalog-sa
+kubectl auth can-i create pods/eviction -n bookstore --as=system:serviceaccount:bookstore:catalog-sa
+```
+
+<!-- gate: output -->
+```text
+no
+```
+
+<!-- gate: output -->
+```text
+no
+```
+
+Restore the budget to the chapter's value, and the allowance returns:
+
+```sh
+kubectl patch pdb catalog -n bookstore --type merge -p '{"spec":{"minAvailable":2}}'
+kubectl get pdb catalog -n bookstore
+```
+
+<!-- gate: output -->
+```text
+poddisruptionbudget.policy/catalog patched
+```
+
+<!-- gate: output -->
+```text
+NAME      MIN AVAILABLE   MAX UNAVAILABLE   ALLOWED DISRUPTIONS   AGE
+catalog   2               N/A               1                     68s
+```
+
+### 4. Connection draining recap (why the PDB alone isn't enough)
 
 A PDB keeps *enough Pods Ready*; it does not stop the *evicted* Pod from
 dropping its in-flight requests. That is the Part 01 ch.02 contract, still in
@@ -281,14 +479,13 @@ force on every Bookstore workload: on SIGTERM the Pod is removed from Service
 endpoints (readiness), the native `preStop.sleep: 5` lets in-flight requests
 finish and propagation settle, the Go process does a graceful
 `srv.Shutdown(...)` within `terminationGracePeriodSeconds: 30`. PDB +
-graceful shutdown together = a node upgrade with **no capacity loss and no
-dropped connections**. See
+graceful shutdown together = a node upgrade with **no capacity loss**, and
+in-flight requests get to finish first. See
 [Part 01 ch.02](../01-core-workloads/02-health-and-lifecycle.md).
 
 > **PodReadinessGates** extend "Ready" beyond the container probes: a Pod is
 > Ready only when its probes pass **and** every custom condition in
-> `spec.readinessGates` is `True` (a controller — e.g. a cloud load-balancer
-> — sets it once the Pod is registered in the external LB). This closes the
+> `spec.readinessGates` is `True` (a controller, e.g. a cloud load-balancer, sets it once the Pod is registered in the external LB). This closes the
 > race where Kubernetes considers a Pod Ready but the external LB has not yet
 > added it; relevant on managed clusters with LB-backed Services/Ingress.
 
@@ -299,22 +496,22 @@ dropped connections**. See
   admission check: for every PDB whose selector matches the Pod, is
   `currentHealthy - 1 ≥ desiredHealthy`? If any says no, the API returns
   **429** and the Pod is *not* deleted; `drain` backs off and retries. A
-  plain `DELETE` of the Pod skips this entirely — that asymmetry is by
+  plain `DELETE` of the Pod skips this entirely, that asymmetry is by
   design (break-glass must always work).
 - **`disruptionsAllowed` is computed continuously.** The controller tracks
   `currentHealthy` (Ready Pods matching the selector) and `desiredHealthy`
   (from `minAvailable`, or `replicas − maxUnavailable`); `status.disruptionsAllowed
   = max(0, currentHealthy − desiredHealthy)`. It decrements as evictions are
-  admitted and recovers as replacements go Ready — which is precisely why a
+  admitted and recovers as replacements go Ready, which is precisely why a
   drain *paces itself* to the reschedule rate instead of evicting in a burst.
 - **`minAvailable` vs `maxUnavailable`.** `minAvailable` is an absolute/%
   floor of healthy Pods; `maxUnavailable` is the inverse ceiling. Percentages
   are computed against the workload's `.spec.replicas` and **rounded up** for
-  `minAvailable` (conservative — it favours availability). The Bookstore uses
+  `minAvailable` (conservative, it favours availability). The Bookstore uses
   `minAvailable` so the floor is explicit and obvious from the manifest.
 - **The unhealthy-Pod deadlock.** Default eviction policy
   (`IfHealthyBudget`) only counts evicting a *Ready* Pod against the budget,
-  but also won't evict an *unready* Pod once the budget is exhausted — so a
+  but also won't evict an *unready* Pod once the budget is exhausted, so a
   crashing Pod on a node you must drain can never be evicted and the drain
   **hangs indefinitely**. `unhealthyPodEvictionPolicy: AlwaysAllow` (GA
   since 1.31) permits evicting not-Ready Pods regardless of the budget,
@@ -336,6 +533,13 @@ dropped connections**. See
 
 ## Production notes
 
+> **In production:** a budget that stays at zero allowed disruptions past the
+> patch window is a security finding, not a scheduling delay. Alert on
+> `kube_poddisruptionbudget_status_pod_disruptions_allowed == 0` with a `for:`
+> longer than your drain timeout, and page the owner of the workload. Do not
+> delete the budget to finish the patch. Lowering a budget is a policy change,
+> so it gets the same review as any other, and it is recorded when audit is on.
+
 > **In production:** put a PDB on **every** multi-replica workload, sized so a
 > **one-node** voluntary disruption is always allowed (so rolling node
 > upgrades never stall) but a mass eviction is refused. `minAvailable: replicas-1` (or a % that rounds to that) is a sane default for stateless
@@ -344,17 +548,20 @@ dropped connections**. See
 
 > **In production:** a PDB **without** enough replicas, spread, *and*
 > `unhealthyPodEvictionPolicy: AlwaysAllow` causes the very outage it was
-> meant to prevent — a stuck node drain during an upgrade window. Test it:
+> meant to prevent, a stuck node drain during an upgrade window. Test it:
 > `kubectl drain` a node in staging and confirm it completes and capacity
 > holds. An untested PDB is a latent incident.
 
 > **In production:** managed node upgrades **use the eviction API**, so PDBs
-> directly shape them. **EKS** managed node groups, **GKE** node auto-upgrade
-> /surge, **AKS** node image upgrades all evict Pods respecting PDBs — a
-> too-strict PDB (e.g. `minAvailable` = `replicas`, leaving
-> `disruptionsAllowed: 0`) **deadlocks the upgrade forever**; a missing PDB
-> lets the upgrade nuke all replicas at once. There is a correct middle and
-> you must set it.
+> directly shape them. A too-strict PDB (e.g. `minAvailable` = `replicas`,
+> leaving `disruptionsAllowed: 0`) stalls the drain, and what follows depends
+> on the platform. On **EKS**, a managed node group whose Pods do not leave
+> the node within 15 minutes fails with `PodEvictionFailure`, and the force
+> flag then deletes them ([EKS node updates][eks-update]). On **GKE**, surge
+> upgrades respect PDBs for up to one hour, then forcibly evict the Pods still
+> on the node ([GKE upgrade strategies][gke-upgrade]). A plain `kubectl drain`
+> with no `--timeout` keeps retrying. A missing PDB lets the upgrade remove all
+> replicas at once. There is a correct middle, and you must set it.
 
 > **In production:** combine PDB with **PodReadinessGates** behind cloud
 > LBs/Ingress so "Ready" means "actually receiving traffic from the external
@@ -373,6 +580,7 @@ dropped connections**. See
 
 ```sh
 kubectl get pdb -n <NS>                              # MIN AVAILABLE / ALLOWED DISRUPTIONS
+kubectl get pdb -A                                   # zero headroom anywhere before a patch
 kubectl describe pdb <P> -n <NS>                     # status.disruptionsAllowed + events
 kubectl drain <NODE> --ignore-daemonsets --delete-emptydir-data   # respects PDBs
 kubectl uncordon <NODE>                              # undo the cordon
@@ -380,15 +588,16 @@ kubectl get pod -n <NS> -o wide                      # watch reschedule across n
 kubectl get pod <P> -o jsonpath='{.status.conditions}'   # readiness gates included
 ```
 
-Minimal PDB skeleton:
+Minimal PDB, filled in for catalog. Swap in your workload's name, namespace and
+pod labels, and keep the selector equal to the pod-template labels:
 
 ```yaml
 apiVersion: policy/v1
 kind: PodDisruptionBudget
-metadata: { name: <WORKLOAD>, namespace: <NS> }
+metadata: { name: catalog, namespace: bookstore }
 spec:
   minAvailable: 2                       # or maxUnavailable: 1 / a percentage
-  selector: { matchLabels: { app: <WORKLOAD> } }   # EXACT pod-template labels
+  selector: { matchLabels: { app: catalog } }   # EXACT pod-template labels
   unhealthyPodEvictionPolicy: AlwaysAllow           # avoid the drain deadlock
 ```
 
@@ -409,28 +618,28 @@ Checklist:
 1. **A node hard-crashes and takes 3 of catalog's 4 replicas with it. The PDB says `minAvailable: 3`. Does the PDB block this loss? Explain.**
    <details><summary>Show answer</summary>
 
-   No — a PDB only governs **voluntary** disruptions through the eviction API (drain, autoscaler scale-down, `kubectl delete pod`). A node crash is **involuntary**: nobody asked permission, Pods simply vanished. The defence against involuntary loss is `replicas + topology spread + anti-affinity` (Part 04 ch.02) so a single node never holds all replicas. PDBs are necessary but not sufficient — they protect routine ops, not crashes. See §Mental model.
+   No. A PDB only governs **voluntary** disruptions through the eviction API (drain, autoscaler scale-down, an eviction request). A node crash is **involuntary**: nobody asked permission, Pods simply vanished. The defence against involuntary loss is `replicas + topology spread + anti-affinity` (Part 04 ch.02) so a single node never holds all replicas. PDBs are necessary but not sufficient, they protect routine ops, not crashes. See §Mental model.
 
    </details>
 
 2. **You set `minAvailable: 100%` on catalog (replicas=3) thinking "always keep all 3 healthy". The next node upgrade hangs forever. Why?**
    <details><summary>Show answer</summary>
 
-   `minAvailable: 100%` means "no eviction may reduce ready Pods below 3". To drain a node holding a catalog Pod, the eviction must succeed — but evicting reduces ready count to 2, which violates the PDB → the eviction is refused → drain blocks. You've made the workload **un-drainable**, which means no node upgrade, no autoscale-down, no chaos test. The right value is `minAvailable: N-1` (or a percentage that allows one Pod to roll), letting the Deployment controller replace evicted Pods before the next eviction.
+   `minAvailable: 100%` means "no eviction may reduce ready Pods below 3". To drain a node holding a catalog Pod, the eviction must succeed, but evicting reduces ready count to 2, which violates the PDB → the eviction is refused → drain blocks. You've made the workload **un-drainable**, which means no node upgrade, no autoscale-down, no chaos test. The right value is `minAvailable: N-1` (or a percentage that allows one Pod to roll), letting the Deployment controller replace evicted Pods before the next eviction.
 
    </details>
 
-3. **`unhealthyPodEvictionPolicy: AlwaysAllow` — why is it almost always the right setting, and what's the failure mode of the default?**
+3. **`unhealthyPodEvictionPolicy: AlwaysAllow`: why is it almost always the right setting, and what's the failure mode of the default?**
    <details><summary>Show answer</summary>
 
-   The default (`IfHealthyBudget`) counts unhealthy Pods *against* the budget — if 2 of 3 catalog replicas are CrashLoopBackOff and `minAvailable: 2`, the PDB has 0 disruptions allowed (1 ready ≤ 2 floor), so even a `kubectl drain` to evict a broken Pod is refused. This is the "drain deadlock": broken Pods cannot be drained for replacement because they're broken. `AlwaysAllow` says "evict unhealthy Pods freely; only count healthy ones against the budget", which is the operationally correct policy in almost every case.
+   The default (`IfHealthyBudget`) counts unhealthy Pods *against* the budget, if 2 of 3 catalog replicas are CrashLoopBackOff and `minAvailable: 2`, the PDB has 0 disruptions allowed (1 ready ≤ 2 floor), so even a `kubectl drain` to evict a broken Pod is refused. This is the "drain deadlock": broken Pods cannot be drained for replacement because they're broken. `AlwaysAllow` says "evict unhealthy Pods freely; only count healthy ones against the budget", which is the operationally correct policy in almost every case.
 
    </details>
 
-4. **Hands-on extension — prove the PDB. Apply a PDB with `minAvailable: 2` on catalog (replicas=3). Now run `kubectl drain <node>` for the node hosting two catalog Pods. What do you observe in the drain output and `kubectl describe pdb`?**
+4. **Hands-on extension: prove the PDB. Set `minAvailable: 3` on catalog (replicas=3), then ask the eviction API for one catalog Pod. What status comes back, and what does `kubectl get pdb` show? Then set `minAvailable: 2` and read the same field.**
    <details><summary>What you should see</summary>
 
-   The drain *blocks* on the second eviction with `Cannot evict pod as it would violate the pod's disruption budget`. `kubectl describe pdb catalog` shows `disruptionsAllowed: 0` after the first eviction succeeds; once the Deployment controller schedules a replacement elsewhere and it becomes Ready, `disruptionsAllowed` returns to 1 and the drain proceeds. That backpressure is the PDB working as designed — paced eviction, not blocked eviction.
+   At `minAvailable: 3` the eviction returns `TooManyRequests` with `Cannot evict pod as it would violate the pod's disruption budget`, and `ALLOWED DISRUPTIONS` is 0. At `minAvailable: 2` with three Ready Pods it is 1, so one eviction fits. Step 3 shows the first state. A drain follows the same rule Pod by Pod, and it pauses whenever the budget reads 0.
 
    </details>
 
@@ -441,12 +650,19 @@ Checklist:
 
    </details>
 
+6. **A kernel patch is due on a node that runs a catalog Pod. The drain stops on catalog's budget, and a colleague proposes deleting the PDB so the patch can finish. What do you check first, what do you do instead, and what do you record?**
+   <details><summary>Show answer</summary>
+
+   Check whether the budget is at zero because replicas are not Ready (a crash loop, a failed rollout) or because the replica count sits at the floor. `kubectl describe pdb catalog` shows `Current`, `Desired` and `Allowed disruptions`. Fix the cause: restore a Ready replica, or scale up so one eviction fits, and let the drain finish. Deleting the budget removes the guard for every later voluntary disruption, and it is a policy change that needs review. If the patch is urgent enough to bypass the budget, delete individual Pods directly, and record the reason and the time, because that bypass is the break-glass path and it leaves no budget check behind.
+
+   </details>
+
 ## Further reading
 
-- **Rosso et al., _Production Kubernetes_, ch.14 — Application
+- **Rosso et al., _Production Kubernetes_, ch.14, Application
   Considerations** (designing apps to survive disruption: PDBs, graceful
   termination, readiness, SLOs in a production platform).
-- **Ibryam & Huß, _Kubernetes Patterns_ 2e — *Singleton Service* (ch.10)**
+- **Ibryam & Huß, _Kubernetes Patterns_ 2e, *Singleton Service* (ch.10)**
   for the single-instance vs HA reasoning behind disruption budgets and
   availability targets.
 - Official:
@@ -454,3 +670,8 @@ Checklist:
   <https://kubernetes.io/docs/tasks/run-application/configure-pdb/> and the
   drain/eviction reference
   <https://kubernetes.io/docs/tasks/administer-cluster/safely-drain-node/>.
+
+[disruptions]: https://kubernetes.io/docs/concepts/workloads/pods/disruptions/
+[audit]: https://kubernetes.io/docs/tasks/debug/debug-cluster/audit/
+[eks-update]: https://docs.aws.amazon.com/eks/latest/userguide/managed-node-update-behavior.html
+[gke-upgrade]: https://docs.cloud.google.com/kubernetes-engine/docs/concepts/node-pool-upgrade-strategies

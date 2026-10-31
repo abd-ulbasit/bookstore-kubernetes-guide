@@ -1,0 +1,117 @@
+# Transcript for 05-reliability-and-disruptions.md (06.05), lab steps 1 to 8.
+# Tier A: a kind cluster, Kubernetes v1.37.0, kubectl v1.37.2.
+# Host: a Linux lab host. Nothing was created on a cloud account.
+#
+# Substitutions: the chapter's namespace `bookstore` is `p06-05-patch` in every
+# command below. The output came from a lab cluster whose node name differs
+# from the chapter's.
+#
+# What ran: one control-plane node, not the three-worker cluster of step 0. The
+# lab therefore did not drain a node, and the drain in step 2 is the reader's
+# exercise. Steps 1 to 3 of the chapter ran here on that cluster.
+#
+# The catalog Deployment is a stand-in: busybox sleeping, with the chapter's
+# labels, ServiceAccount and PDB. The Bookstore catalog needs its database for
+# readiness, and the database was not running on the lab cluster. The PDB and
+# its selector are the chapter's own objects.
+#
+# The stand-in has no topology spread constraint: a single node cannot satisfy
+# the chapter's maxSkew 1 on hostname.
+#
+# storefront and orders from 84-pdb.yaml have no Pods in this namespace, so
+# their budgets show 0. The lab did not create them.
+#
+# Deliberate failures: step 3 (the eviction refused with 429 TooManyRequests,
+# at minAvailable 3), and the RBAC check that the catalog ServiceAccount cannot
+# change a budget or create an eviction.
+#
+# Not run here: the multi-node drain, the 84-pdb.yaml apply into bookstore, and
+# the audit record of the PDB change. The audit claim is cited upstream.
+
+$ kubectl get pdb -A 2>&1 | head -3
+No resources found
+$ kubectl apply -f ns05.yaml
+namespace/p06-05-patch created
+$ sed 's/namespace: bookstore/namespace: p06-05-patch/' <repo>/full-guide/examples/bookstore/raw-manifests/05-serviceaccounts-rbac.yaml | kubectl apply -f - 2>&1 | head -3
+serviceaccount/catalog-sa created
+serviceaccount/storefront-sa created
+serviceaccount/orders-sa created
+$ kubectl apply -f catalog-standin.yaml
+deployment.apps/catalog created
+$ kubectl wait --for=condition=Available deployment/catalog -n p06-05-patch --timeout=120s
+deployment.apps/catalog condition met
+$ kubectl get pods -n p06-05-patch -o wide
+NAME                       READY   STATUS    RESTARTS   AGE   IP            NODE                     NOMINATED NODE   READINESS GATES
+catalog-7d77bf8dcd-4c6gt   1/1     Running   0          37s   10.244.0.80   sf-pilot-control-plane   <none>           <none>
+catalog-7d77bf8dcd-9xps5   1/1     Running   0          37s   10.244.0.79   sf-pilot-control-plane   <none>           <none>
+catalog-7d77bf8dcd-fmgl2   1/1     Running   0          37s   10.244.0.78   sf-pilot-control-plane   <none>           <none>
+$ sed 's/namespace: bookstore/namespace: p06-05-patch/' <repo>/full-guide/examples/bookstore/raw-manifests/84-pdb.yaml | kubectl apply -f -
+poddisruptionbudget.policy/catalog created
+poddisruptionbudget.policy/storefront created
+poddisruptionbudget.policy/orders created
+$ kubectl get pdb -n p06-05-patch
+NAME         MIN AVAILABLE   MAX UNAVAILABLE   ALLOWED DISRUPTIONS   AGE
+catalog      2               N/A               1                     5s
+orders       1               N/A               0                     5s
+storefront   1               N/A               0                     5s
+$ kubectl describe pdb catalog -n p06-05-patch | sed -n '1,20p'
+Name:           catalog
+Namespace:      p06-05-patch
+Min available:  2
+Selector:       app=catalog
+Status:
+    Allowed disruptions:  1
+    Current:              3
+    Desired:              2
+    Total:                3
+Events:                   <none>
+$ kubectl patch pdb catalog -n p06-05-patch --type merge -p '{"spec":{"minAvailable":3}}'
+poddisruptionbudget.policy/catalog patched
+$ kubectl get pdb catalog -n p06-05-patch
+NAME      MIN AVAILABLE   MAX UNAVAILABLE   ALLOWED DISRUPTIONS   AGE
+catalog   3               N/A               0                     11s
+$ kubectl create --raw /api/v1/namespaces/p06-05-patch/pods/catalog-7d77bf8dcd-4c6gt/eviction -f eviction.json
+Error from server (TooManyRequests): Cannot evict pod as it would violate the pod's disruption budget.
+$ kubectl describe pdb catalog -n p06-05-patch | sed -n '1,20p'
+Name:           catalog
+Namespace:      p06-05-patch
+Min available:  3
+Selector:       app=catalog
+Status:
+    Allowed disruptions:  0
+    Current:              3
+    Desired:              3
+    Total:                3
+Events:                   <none>
+$ kubectl delete pod catalog-7d77bf8dcd-4c6gt -n p06-05-patch
+pod "catalog-7d77bf8dcd-4c6gt" deleted from p06-05-patch namespace
+$ kubectl get pods -n p06-05-patch -l app=catalog --no-headers | awk '{print $1, $2, $3}'
+catalog-7d77bf8dcd-9xps5 1/1 Running
+catalog-7d77bf8dcd-fmgl2 1/1 Running
+catalog-7d77bf8dcd-qkk6w 1/1 Running
+$ kubectl get pdb catalog -n p06-05-patch
+NAME      MIN AVAILABLE   MAX UNAVAILABLE   ALLOWED DISRUPTIONS   AGE
+catalog   3               N/A               0                     62s
+$ kubectl auth can-i update poddisruptionbudgets.policy -n p06-05-patch --as=system:serviceaccount:p06-05-patch:catalog-sa
+no
+$ kubectl auth can-i create pods/eviction -n p06-05-patch --as=system:serviceaccount:p06-05-patch:catalog-sa
+no
+$ kubectl patch pdb catalog -n p06-05-patch --type merge -p '{"spec":{"minAvailable":2}}'
+poddisruptionbudget.policy/catalog patched
+$ kubectl get pdb catalog -n p06-05-patch
+NAME      MIN AVAILABLE   MAX UNAVAILABLE   ALLOWED DISRUPTIONS   AGE
+catalog   2               N/A               1                     68s
+
+## run 2: the eviction request in the form the chapter now shows (printf, not a heredoc)
+$ kubectl patch pdb catalog -n p06-05-patch --type merge -p '{"spec":{"minAvailable":3}}'
+poddisruptionbudget.policy/catalog patched
+$ kubectl get pdb catalog -n p06-05-patch
+NAME      MIN AVAILABLE   MAX UNAVAILABLE   ALLOWED DISRUPTIONS   AGE
+catalog   3               N/A               0                     9m45s
+$ POD=$(kubectl get pods -n p06-05-patch -l app=catalog -o jsonpath='{.items[0].metadata.name}'); printf '{"apiVersion":"policy/v1","kind":"Eviction","metadata":{"name":"%s","namespace":"p06-05-patch"}}' "$POD" > eviction.json && kubectl create --raw /api/v1/namespaces/p06-05-patch/pods/$POD/eviction -f eviction.json
+Error from server (TooManyRequests): Cannot evict pod as it would violate the pod's disruption budget.
+$ kubectl patch pdb catalog -n p06-05-patch --type merge -p '{"spec":{"minAvailable":2}}'
+poddisruptionbudget.policy/catalog patched
+$ kubectl get pdb catalog -n p06-05-patch
+NAME      MIN AVAILABLE   MAX UNAVAILABLE   ALLOWED DISRUPTIONS   AGE
+catalog   2               N/A               1                     9m45s

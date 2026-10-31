@@ -1,17 +1,17 @@
-# Bookstore — Part 06 ch.05 "Reliability and disruptions": PodDisruptionBudgets.
+# Bookstore, Part 06 ch.05 "Reliability and disruptions": PodDisruptionBudgets.
 #
-# BUILT-IN objects (policy/v1, GA since v1.21) — no CRD, so these dry-run
+# BUILT-IN objects (policy/v1, GA since v1.21), no CRD, so these dry-run
 # cleanly. A PDB caps how many Pods of a workload may be down at once due to a
 # VOLUNTARY disruption (node drain for an upgrade, `kubectl drain`, cluster
 # autoscaler scale-down, eviction API). It does NOT protect against
-# INVOLUNTARY disruptions (a node crash, OOM, kernel panic) — for those you
+# INVOLUNTARY disruptions (a node crash, OOM, kernel panic), for those you
 # need replicas + spread/anti-affinity (Part 04 ch.02, already on catalog/
 # storefront) and good probes (Part 01 ch.02).
 #
 # How it bites: the eviction API (which `kubectl drain` uses) refuses to evict
 # a Pod if doing so would drop the workload below the PDB. The drain then
 # BLOCKS (retries) until the Deployment reschedules a replacement elsewhere and
-# it goes Ready. That is the PDB working — it converts "all replicas vanish
+# it goes Ready. That is the PDB working, it converts "all replicas vanish
 # during a node upgrade" into "rolling, one-at-a-time, capacity preserved".
 #
 # Sizing (minAvailable, matched to each Deployment's replica count):
@@ -19,15 +19,15 @@
 #   • storefront replicas 2 (11-)  -> minAvailable: 1  (≤1 down; keep the UI up)
 #   • orders     replicas 2 (14-)  -> minAvailable: 1  (≤1 down)
 # selectors are the EXACT pod labels of each Deployment's template
-# (app: catalog | storefront | orders) — a PDB with a selector matching no
+# (app: catalog | storefront | orders), a PDB with a selector matching no
 # Pods is silently useless, and one matching MULTIPLE workloads is a classic
 # mistake. payments-worker gets NO PDB on purpose: it is KEDA-scaled and may
 # legitimately be at 0 replicas, so a minAvailable PDB would be meaningless
-# (and could wedge a drain) — ch.05 explains why autoscaled/scale-to-zero
+# (and could wedge a drain), ch.05 explains why autoscaled/scale-to-zero
 # consumers are the documented exception.
 #
-# unhealthyPodEvictionPolicy: AlwaysAllow (Beta, k8s 1.27+; the field is
-# ignored — not rejected — on older clusters) lets the eviction API remove
+# unhealthyPodEvictionPolicy: AlwaysAllow (stable since Kubernetes 1.31)
+# lets the eviction API remove
 # Pods that are NOT Ready even while the PDB is otherwise at its limit. Without
 # it, a budget at its floor plus some unhealthy Pods can DEADLOCK a drain
 # (the broken Pods can never be evicted, so the node never drains). This is
