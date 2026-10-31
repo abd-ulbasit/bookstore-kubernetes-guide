@@ -24,6 +24,12 @@
 #
 # Each command is printed the way a reader types it, then run, so the output
 # under it is what that command printed. The cluster is shown as p05-08.
+#
+# The recorded run named the two privileged namespaces p05-08-attack and
+# p05-08-falco. This file and the transcript carry the chapter's names, attack
+# and falco, because the exceptions registry reads Pod Security labels from
+# scripts and transcripts and registers the chapter's namespace, not a lab name.
+# That rename is the only edit made after the run.
 
 set -uo pipefail
 
@@ -52,8 +58,8 @@ cleanup() {
   # on whatever context the caller's kubeconfig points at.
   if [ -s "$WORK/admin.kubeconfig" ] && [ "$(KUBECONFIG="$WORK/admin.kubeconfig" \
       kubectl config current-context 2>/dev/null)" = "$CTX" ]; then
-    KUBECONFIG="$WORK/admin.kubeconfig" kubectl delete namespace p05-08-attack \
-      p05-08-app p05-08-falco p05-08-trivy --ignore-not-found --wait=false \
+    KUBECONFIG="$WORK/admin.kubeconfig" kubectl delete namespace attack \
+      p05-08-app falco p05-08-trivy --ignore-not-found --wait=false \
       >/dev/null 2>&1
   fi
   if [ -n "$TUNNEL" ]; then kill "$TUNNEL" 2>/dev/null; fi
@@ -104,7 +110,7 @@ query_audit() {
 import json
 import sys
 
-LAB = ("p05-08-attack", "p05-08-app")
+LAB = ("attack", "p05-08-app")
 path, mode = sys.argv[1], sys.argv[2]
 
 
@@ -161,7 +167,7 @@ if [ "$LAB_MODE" = shared ]; then
     exit 2
   fi
   # A namespace that is still terminating from an earlier run blocks new objects.
-  for ns in p05-08-attack p05-08-app; do
+  for ns in attack p05-08-app; do
     if kubectl get namespace "$ns" >/dev/null 2>&1; then
       echo "refusing: namespace $ns exists or is terminating; wait for it to go" >&2
       exit 2
@@ -220,7 +226,7 @@ kubectl apply -f - >/dev/null <<'YAML'
 apiVersion: v1
 kind: Namespace
 metadata:
-  name: p05-08-attack
+  name: attack
   labels:
     pod-security.kubernetes.io/enforce: privileged
 ---
@@ -241,19 +247,19 @@ apiVersion: v1
 kind: ServiceAccount
 metadata:
   name: builder
-  namespace: p05-08-attack
+  namespace: attack
 ---
 apiVersion: v1
 kind: ServiceAccount
 metadata:
   name: ops
-  namespace: p05-08-attack
+  namespace: attack
 ---
 apiVersion: rbac.authorization.k8s.io/v1
 kind: Role
 metadata:
   name: builder
-  namespace: p05-08-attack
+  namespace: attack
 rules:
   - apiGroups: [""]
     resources: ["pods"]
@@ -266,11 +272,11 @@ apiVersion: rbac.authorization.k8s.io/v1
 kind: RoleBinding
 metadata:
   name: builder
-  namespace: p05-08-attack
+  namespace: attack
 subjects:
   - kind: ServiceAccount
     name: builder
-    namespace: p05-08-attack
+    namespace: attack
 roleRef:
   apiGroup: rbac.authorization.k8s.io
   kind: Role
@@ -294,7 +300,7 @@ metadata:
 subjects:
   - kind: ServiceAccount
     name: ops
-    namespace: p05-08-attack
+    namespace: attack
 roleRef:
   apiGroup: rbac.authorization.k8s.io
   kind: Role
@@ -311,7 +317,7 @@ stringData:
   password: lab-only-value-not-a-credential
 YAML
 
-make_kubeconfig builder "$(kubectl create token builder -n p05-08-attack --duration=30m)"
+make_kubeconfig builder "$(kubectl create token builder -n attack --duration=30m)"
 show "kubectl --kubeconfig=work/builder.kubeconfig auth whoami" \
   "KUBECONFIG=$WORK/builder.kubeconfig kubectl auth whoami"
 
@@ -326,7 +332,7 @@ apiVersion: v1
 kind: Pod
 metadata:
   name: escape-node
-  namespace: p05-08-attack
+  namespace: attack
 spec:
   serviceAccountName: ops
   containers:
@@ -344,20 +350,20 @@ spec:
 YAML
 show "kubectl --kubeconfig=work/builder.kubeconfig apply -f escape-node.yaml" \
   "KUBECONFIG=$WORK/builder.kubeconfig kubectl apply -f $WORK/escape-node.yaml"
-show "kubectl wait --for=condition=Ready pod/escape-node -n p05-08-attack --timeout=180s" \
-  "kubectl wait --for=condition=Ready pod/escape-node -n p05-08-attack --timeout=180s"
+show "kubectl wait --for=condition=Ready pod/escape-node -n attack --timeout=180s" \
+  "kubectl wait --for=condition=Ready pod/escape-node -n attack --timeout=180s"
 
-show "kubectl --kubeconfig=work/builder.kubeconfig exec -n p05-08-attack escape-node -- sh -c 'test -s /var/run/secrets/kubernetes.io/serviceaccount/token && echo token-file-present'" \
-  "KUBECONFIG=$WORK/builder.kubeconfig kubectl exec -n p05-08-attack escape-node -- sh -c 'test -s /var/run/secrets/kubernetes.io/serviceaccount/token && echo token-file-present'"
+show "kubectl --kubeconfig=work/builder.kubeconfig exec -n attack escape-node -- sh -c 'test -s /var/run/secrets/kubernetes.io/serviceaccount/token && echo token-file-present'" \
+  "KUBECONFIG=$WORK/builder.kubeconfig kubectl exec -n attack escape-node -- sh -c 'test -s /var/run/secrets/kubernetes.io/serviceaccount/token && echo token-file-present'"
 
-OPS_TOKEN=$(KUBECONFIG="$WORK/builder.kubeconfig" kubectl exec -n p05-08-attack escape-node -- \
+OPS_TOKEN=$(KUBECONFIG="$WORK/builder.kubeconfig" kubectl exec -n attack escape-node -- \
   cat /var/run/secrets/kubernetes.io/serviceaccount/token)
 make_kubeconfig ops "$OPS_TOKEN"
 show "kubectl --kubeconfig=work/ops.kubeconfig get secret app-db -n p05-08-app -o name" \
   "KUBECONFIG=$WORK/ops.kubeconfig kubectl get secret app-db -n p05-08-app -o name"
 
-show "kubectl --kubeconfig=work/builder.kubeconfig exec -n p05-08-attack escape-node -- sh -c 'cat /host/etc/hostname; touch /host/tmp/p05-08-marker && echo marker-written'" \
-  "KUBECONFIG=$WORK/builder.kubeconfig kubectl exec -n p05-08-attack escape-node -- sh -c 'cat /host/etc/hostname; touch /host/tmp/p05-08-marker && echo marker-written'"
+show "kubectl --kubeconfig=work/builder.kubeconfig exec -n attack escape-node -- sh -c 'cat /host/etc/hostname; touch /host/tmp/p05-08-marker && echo marker-written'" \
+  "KUBECONFIG=$WORK/builder.kubeconfig kubectl exec -n attack escape-node -- sh -c 'cat /host/etc/hostname; touch /host/tmp/p05-08-marker && echo marker-written'"
 
 ##@ Query the audit log
 
@@ -429,8 +435,8 @@ driver:
   modernEbpf:
     leastPrivileged: true
 YAML
-show "helm template falco falcosecurity/falco --version 9.2.2 --namespace p05-08-falco -f falco-driver.yaml > falco-rendered.yaml" \
-  "helm template falco falcosecurity/falco --version 9.2.2 --namespace p05-08-falco -f $WORK/falco-driver.yaml > $WORK/falco-rendered.yaml"
+show "helm template falco falcosecurity/falco --version 9.2.2 --namespace falco -f falco-driver.yaml > falco-rendered.yaml" \
+  "helm template falco falcosecurity/falco --version 9.2.2 --namespace falco -f $WORK/falco-driver.yaml > $WORK/falco-rendered.yaml"
 show "grep -c 'privileged: true' falco-rendered.yaml" "grep -c 'privileged: true' $WORK/falco-rendered.yaml"
 show "grep -A5 'capabilities:' falco-rendered.yaml | head -6" "grep -A5 'capabilities:' $WORK/falco-rendered.yaml | head -6"
 
@@ -511,7 +517,7 @@ kubectl apply -f - >/dev/null <<'YAML'
 apiVersion: v1
 kind: Namespace
 metadata:
-  name: p05-08-falco
+  name: falco
   labels:
     pod-security.kubernetes.io/enforce: privileged
   annotations:
@@ -535,22 +541,22 @@ falcosidekick:
   config:
     debug: true
 YAML
-show "helm install falco falcosecurity/falco --version 9.2.2 --namespace p05-08-falco -f falco-values.yaml" \
-  "helm install falco falcosecurity/falco --version 9.2.2 --namespace p05-08-falco -f $WORK/falco-values.yaml --wait --timeout 10m"
-show "kubectl rollout status daemonset/falco -n p05-08-falco --timeout=300s" \
-  "kubectl rollout status daemonset/falco -n p05-08-falco --timeout=300s"
+show "helm install falco falcosecurity/falco --version 9.2.2 --namespace falco -f falco-values.yaml" \
+  "helm install falco falcosecurity/falco --version 9.2.2 --namespace falco -f $WORK/falco-values.yaml --wait --timeout 10m"
+show "kubectl rollout status daemonset/falco -n falco --timeout=300s" \
+  "kubectl rollout status daemonset/falco -n falco --timeout=300s"
 
-kubectl delete pod escape-node -n p05-08-attack --wait=true >/dev/null
+kubectl delete pod escape-node -n attack --wait=true >/dev/null
 show "kubectl --kubeconfig=work/builder.kubeconfig apply -f escape-node.yaml" \
   "KUBECONFIG=$WORK/builder.kubeconfig kubectl apply -f $WORK/escape-node.yaml"
-kubectl wait --for=condition=Ready pod/escape-node -n p05-08-attack --timeout=180s >/dev/null
-show "kubectl --kubeconfig=work/builder.kubeconfig exec -n p05-08-attack escape-node -- sh -c 'cat /host/etc/shadow > /dev/null && touch /host/tmp/p05-08-marker-2 && echo second-marker-written'" \
-  "KUBECONFIG=$WORK/builder.kubeconfig kubectl exec -n p05-08-attack escape-node -- sh -c 'cat /host/etc/shadow > /dev/null && touch /host/tmp/p05-08-marker-2 && echo second-marker-written'"
+kubectl wait --for=condition=Ready pod/escape-node -n attack --timeout=180s >/dev/null
+show "kubectl --kubeconfig=work/builder.kubeconfig exec -n attack escape-node -- sh -c 'cat /host/etc/shadow > /dev/null && touch /host/tmp/p05-08-marker-2 && echo second-marker-written'" \
+  "KUBECONFIG=$WORK/builder.kubeconfig kubectl exec -n attack escape-node -- sh -c 'cat /host/etc/shadow > /dev/null && touch /host/tmp/p05-08-marker-2 && echo second-marker-written'"
 sleep 20
-show "kubectl logs -n p05-08-falco ds/falco -c falco --tail=400 | grep -E 'Warning|Critical|Notice' | grep p05-08 | tail -8" \
-  "kubectl logs -n p05-08-falco ds/falco -c falco --tail=400 | grep -E 'Warning|Critical|Notice' | grep p05-08 | tail -8"
-show "kubectl logs -n p05-08-falco deploy/falco-falcosidekick --tail=5" \
-  "kubectl logs -n p05-08-falco deploy/falco-falcosidekick --tail=5"
+show "kubectl logs -n falco ds/falco -c falco --tail=400 | grep -E 'Warning|Critical|Notice' | grep p05-08 | tail -8" \
+  "kubectl logs -n falco ds/falco -c falco --tail=400 | grep -E 'Warning|Critical|Notice' | grep p05-08 | tail -8"
+show "kubectl logs -n falco deploy/falco-falcosidekick --tail=5" \
+  "kubectl logs -n falco deploy/falco-falcosidekick --tail=5"
 
 ##@ Continuous scanning: Trivy Operator
 
@@ -594,29 +600,29 @@ show "helm install trivy aqua/trivy-operator --version 0.38.1 --namespace p05-08
 show "kubectl rollout status deployment/trivy-operator -n p05-08-trivy --timeout=300s" \
   "kubectl rollout status deployment/trivy-operator -n p05-08-trivy --timeout=300s"
 for i in $(seq 1 30); do
-  kubectl get configauditreport pod-escape-node -n p05-08-attack >/dev/null 2>&1 && break
+  kubectl get configauditreport pod-escape-node -n attack >/dev/null 2>&1 && break
   sleep 10
 done
-show "kubectl get configauditreports -n p05-08-attack" \
-  "kubectl get configauditreports -n p05-08-attack"
-show "kubectl get configauditreport pod-escape-node -n p05-08-attack -o jsonpath='{range .report.checks[?(@.success==false)]}{.checkID} {.severity} {.title}{\"\\n\"}{end}'" \
-  "kubectl get configauditreport pod-escape-node -n p05-08-attack -o jsonpath='{range .report.checks[?(@.success==false)]}{.checkID} {.severity} {.title}{\"\\n\"}{end}'"
+show "kubectl get configauditreports -n attack" \
+  "kubectl get configauditreports -n attack"
+show "kubectl get configauditreport pod-escape-node -n attack -o jsonpath='{range .report.checks[?(@.success==false)]}{.checkID} {.severity} {.title}{\"\\n\"}{end}'" \
+  "kubectl get configauditreport pod-escape-node -n attack -o jsonpath='{range .report.checks[?(@.success==false)]}{.checkID} {.severity} {.title}{\"\\n\"}{end}'"
 
 fi
 
 ##@ Respond: a compromised Pod
 
-show "kubectl label pod escape-node -n p05-08-attack quarantine=true" \
-  "kubectl label pod escape-node -n p05-08-attack quarantine=true"
-show "kubectl exec -n p05-08-attack escape-node -- nslookup kubernetes.default.svc.cluster.local | expand -t 4" \
-  "kubectl exec -n p05-08-attack escape-node -- nslookup kubernetes.default.svc.cluster.local | expand -t 4"
+show "kubectl label pod escape-node -n attack quarantine=true" \
+  "kubectl label pod escape-node -n attack quarantine=true"
+show "kubectl exec -n attack escape-node -- nslookup kubernetes.default.svc.cluster.local | expand -t 4" \
+  "kubectl exec -n attack escape-node -- nslookup kubernetes.default.svc.cluster.local | expand -t 4"
 
 cat > "$WORK/quarantine.yaml" <<'YAML'
 apiVersion: networking.k8s.io/v1
 kind: NetworkPolicy
 metadata:
   name: quarantine
-  namespace: p05-08-attack
+  namespace: attack
 spec:
   podSelector:
     matchLabels:
@@ -626,18 +632,18 @@ spec:
     - Egress
 YAML
 show "kubectl apply -f quarantine.yaml" "kubectl apply -f $WORK/quarantine.yaml"
-show "kubectl exec -n p05-08-attack escape-node -- nslookup kubernetes.default.svc.cluster.local | expand -t 4" \
-  "kubectl exec -n p05-08-attack escape-node -- nslookup kubernetes.default.svc.cluster.local | expand -t 4"
+show "kubectl exec -n attack escape-node -- nslookup kubernetes.default.svc.cluster.local | expand -t 4" \
+  "kubectl exec -n attack escape-node -- nslookup kubernetes.default.svc.cluster.local | expand -t 4"
 
 mkdir -p "$WORK/evidence"
-show "kubectl get pod escape-node -n p05-08-attack -o yaml > evidence/pod.yaml" \
-  "kubectl get pod escape-node -n p05-08-attack -o yaml > $WORK/evidence/pod.yaml"
-show "kubectl get events -n p05-08-attack > evidence/events.txt" \
-  "kubectl get events -n p05-08-attack > $WORK/evidence/events.txt"
-show "kubectl describe pod escape-node -n p05-08-attack > evidence/describe.txt" \
-  "kubectl describe pod escape-node -n p05-08-attack > $WORK/evidence/describe.txt"
-show "kubectl logs escape-node -n p05-08-attack > evidence/logs.txt" \
-  "kubectl logs escape-node -n p05-08-attack > $WORK/evidence/logs.txt"
+show "kubectl get pod escape-node -n attack -o yaml > evidence/pod.yaml" \
+  "kubectl get pod escape-node -n attack -o yaml > $WORK/evidence/pod.yaml"
+show "kubectl get events -n attack > evidence/events.txt" \
+  "kubectl get events -n attack > $WORK/evidence/events.txt"
+show "kubectl describe pod escape-node -n attack > evidence/describe.txt" \
+  "kubectl describe pod escape-node -n attack > $WORK/evidence/describe.txt"
+show "kubectl logs escape-node -n attack > evidence/logs.txt" \
+  "kubectl logs escape-node -n attack > $WORK/evidence/logs.txt"
 if [ "$LAB_MODE" != shared ]; then
 show "query: exec and create events for escape-node, from the audit log" \
   "query_audit exec > $WORK/evidence/audit-exec.txt; cat $WORK/evidence/audit-exec.txt"
@@ -650,21 +656,21 @@ fi
 
 show "kubectl delete rolebinding ops-secret-reader -n p05-08-app" \
   "kubectl delete rolebinding ops-secret-reader -n p05-08-app"
-show "kubectl delete pod escape-node -n p05-08-attack" \
-  "kubectl delete pod escape-node -n p05-08-attack --wait=true"
+show "kubectl delete pod escape-node -n attack" \
+  "kubectl delete pod escape-node -n attack --wait=true"
 show "kubectl --kubeconfig=work/ops.kubeconfig get secret app-db -n p05-08-app -o name" \
   "KUBECONFIG=$WORK/ops.kubeconfig kubectl get secret app-db -n p05-08-app -o name"
 show "kubectl --kubeconfig=work/ops.kubeconfig auth whoami" \
   "KUBECONFIG=$WORK/ops.kubeconfig kubectl auth whoami"
 
-show "kubectl delete serviceaccount builder -n p05-08-attack" \
-  "kubectl delete serviceaccount builder -n p05-08-attack"
+show "kubectl delete serviceaccount builder -n attack" \
+  "kubectl delete serviceaccount builder -n attack"
 cat > "$WORK/builder-sa.yaml" <<'YAML'
 apiVersion: v1
 kind: ServiceAccount
 metadata:
   name: builder
-  namespace: p05-08-attack
+  namespace: attack
 YAML
 show "kubectl apply -f builder-sa.yaml" "kubectl apply -f $WORK/builder-sa.yaml"
 show "kubectl --kubeconfig=work/builder.kubeconfig auth whoami" \
@@ -679,11 +685,11 @@ show "kubectl patch secret app-db -n p05-08-app --type merge -p '{\"stringData\"
 ##@ Cleanup: remove what the lab installed, then the throwaway cluster
 
 if [ "$LAB_MODE" != shared ]; then
-show "helm uninstall falco -n p05-08-falco" "helm uninstall falco -n p05-08-falco"
+show "helm uninstall falco -n falco" "helm uninstall falco -n falco"
 show "helm uninstall trivy -n p05-08-trivy" "helm uninstall trivy -n p05-08-trivy"
 fi
-show "kubectl delete namespace p05-08-attack p05-08-app p05-08-falco p05-08-trivy" \
-  "kubectl delete namespace p05-08-attack p05-08-app p05-08-falco p05-08-trivy --ignore-not-found --wait=true"
+show "kubectl delete namespace attack p05-08-app falco p05-08-trivy" \
+  "kubectl delete namespace attack p05-08-app falco p05-08-trivy --ignore-not-found --wait=true"
 if [ "$LAB_MODE" != shared ]; then
 show "$KIND_BIN delete cluster --name p05-08" "on_host '$KIND_BIN delete cluster --name $CLUSTER'"
 show "$KIND_BIN get clusters" "on_host '$KIND_BIN get clusters'"

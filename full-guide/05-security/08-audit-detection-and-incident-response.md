@@ -265,15 +265,15 @@ kubectl --kubeconfig=work/builder.kubeconfig get secret app-db -n app
 <!-- gate: output -->
 ```text
 ATTRIBUTE                                           VALUE
-Username                                            system:serviceaccount:p05-08-attack:builder
+Username                                            system:serviceaccount:attack:builder
 UID                                                 9d0f2f91-59f9-40d9-8d30-f70e579a73c7
-Groups                                              [system:serviceaccounts system:serviceaccounts:p05-08-attack system:authenticated]
+Groups                                              [system:serviceaccounts system:serviceaccounts:attack system:authenticated]
 Extra: authentication.kubernetes.io/credential-id   [JTI=39e889c8-4451-4b5f-a86b-187a19e1775b]
 ```
 
 <!-- gate: output -->
 ```text
-Error from server (Forbidden): secrets "app-db" is forbidden: User "system:serviceaccount:p05-08-attack:builder" cannot get resource "secrets" in API group "" in the namespace "p05-08-app"
+Error from server (Forbidden): secrets "app-db" is forbidden: User "system:serviceaccount:attack:builder" cannot get resource "secrets" in API group "" in the namespace "p05-08-app"
 ```
 
 Next the builder creates a Pod that names `ops` as its ServiceAccount.
@@ -351,7 +351,9 @@ secret/app-db
 
 The last attack step reads the node container's hostname through the mount and
 writes a marker file in its `/tmp`. The lab's objects carry a `p05-08` prefix,
-and this chapter drops it.
+and this chapter drops it. The captured output keeps the prefix, except on the
+two namespaces the exceptions registry names, `attack` and `falco`. They appear
+under the chapter's names, and the transcript header says so.
 
 ```bash
 kubectl --kubeconfig=work/builder.kubeconfig exec -n attack escape-node -- \
@@ -524,7 +526,7 @@ kubectl --kubeconfig=work/ops.kubeconfig auth whoami
 ```text
 rolebinding.rbac.authorization.k8s.io "ops-secret-reader" deleted from p05-08-app namespace
 # ...
-pod "escape-node" deleted from p05-08-attack namespace
+pod "escape-node" deleted from attack namespace
 # ...
 error: You must be logged in to the server (Unauthorized)
 # ...
@@ -552,7 +554,7 @@ kubectl --kubeconfig=work/builder.kubeconfig auth whoami
 
 <!-- gate: output -->
 ```text
-serviceaccount "builder" deleted from p05-08-attack namespace
+serviceaccount "builder" deleted from attack namespace
 # ...
 serviceaccount/builder created
 # ...
@@ -903,7 +905,7 @@ kubectl delete namespace attack app falco trivy
 <!-- gate: output -->
 ```text
 # ...
-namespace "p05-08-attack" deleted
+namespace "attack" deleted
 namespace "p05-08-app" deleted
 namespace "p05-08-trivy" deleted
 ```

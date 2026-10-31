@@ -84,10 +84,10 @@ credential or to escalation. Audit them with
 
 | Threat | Control taught here | Deeper |
 |---|---|---|
-| A Pod, or an object that carries a pod template, runs as a ServiceAccount its author should not use | Only the identities that deploy may create workloads; one ServiceAccount per workload | Admission that restricts `serviceAccountName`: <!-- link-later: 05.07 --> chapter 05.07 |
+| A Pod, or an object that carries a pod template, runs as a ServiceAccount its author should not use | Only the identities that deploy may create workloads; one ServiceAccount per workload | Admission that restricts `serviceAccountName`: [chapter 05.07](07-admission-control-and-policy-as-code.md) |
 | An identity adds rights to its own Role (`escalate`, or `update` and `patch` on roles) | Remove `escalate`, then remove write access to roles | Lab path B |
 | An identity binds itself to a role it does not hold (`bind`) | Remove `bind`; RBAC refuses the rest | Lab path C |
-| An identity impersonates a more privileged ServiceAccount (`impersonate`) | Impersonate named accounts that are no more privileged than the caller, or nothing | Lab path D; audit in <!-- link-later: 05.08 --> chapter 05.08 |
+| An identity impersonates a more privileged ServiceAccount (`impersonate`) | Impersonate named accounts that are no more privileged than the caller, or nothing | Lab path D; audit in [chapter 05.08](08-audit-detection-and-incident-response.md) |
 | Kubelet reads and commands in Pods through `nodes/proxy` | Grant `nodes` read only; never `nodes/proxy` to a person or a dashboard | Lab path E |
 | Listing Secrets returns every value in a namespace | `get` on the one named Secret | [Part 03 ch.02](../03-config-and-storage/02-secrets.md) |
 | Approving a CSR for a signer that honours client certificates | No `approve` on `kubernetes.io/kube-apiserver-client` for any workload | Lab path G |
@@ -340,9 +340,11 @@ which the lab creates from the same manifests. The commands above name the
 > shared `00-namespace.yaml` and are in force the moment you apply it, which
 > is why the debug pod above is restricted-shaped.
 > [ch.03](03-supply-chain.md) covers images and supply chain. Admission
-> **policy** at the validating stage you saw above is chapter 05.07, and the
-> **audit trail** of every authN/authZ decision made here is chapter 05.08:
-> <!-- link-later: 05.07 --> <!-- link-later: 05.08 -->
+> **policy** at the validating stage you saw above is [chapter
+> 05.07](07-admission-control-and-policy-as-code.md), and the
+> **audit trail** of every authN/authZ decision made here is [chapter
+> 05.08](08-audit-detection-and-incident-response.md):
+>
 > [ch.04](04-secrets-and-cluster-hardening.md) covers Secret encryption at rest.
 > RBAC on `secrets` was introduced in
 > [Part 03 ch.02](../03-config-and-storage/02-secrets.md), this chapter is the
@@ -484,7 +486,7 @@ Error from server (Forbidden): error when creating "borrow-deploy.yaml": deploym
 
 Identities that deploy still need to create workloads, and nothing in RBAC stops
 them naming a ServiceAccount. The control for that is admission, which is
-chapter <!-- link-later: 05.07 --> 05.07.
+chapter [05.07](07-admission-control-and-policy-as-code.md).
 
 ### Path B: `escalate` lets an identity grant itself rules
 
@@ -774,10 +776,14 @@ string + a set of group strings). Kubernetes stores **no** user records: it
   issue **bound, projected** tokens via the **TokenRequest** API: the kubelet
   mounts a token that is *audience-scoped* and **bound to the Pod object** (it
   is invalidated when the Pod is deleted). The kubelet asks for a token of about
-  an hour and refreshes it before it expires. The API server's default
-  `--service-account-extend-token-expiration` then raises the token's `exp`
-  claim to one year, so the Pod's token in
-  [00](00-the-attackers-view.md) lasts a year. Treat an automounted token as a
+  an hour and refreshes it before it expires, as the [ServiceAccount admin
+  page](https://kubernetes.io/docs/reference/access-authn-authz/service-accounts-admin/)
+  describes. The API server's `--service-account-extend-token-expiration`
+  defaults to `true`, and the [kube-apiserver
+  reference](https://kubernetes.io/docs/reference/command-line-tools-reference/kube-apiserver/)
+  says it extends the tokens that admission injects, up to one year. So the
+  Pod's token in [00](00-the-attackers-view.md) lasts a year. Treat an
+  automounted token as a
   long-lived credential. The legacy model, a permanent token in a
   `Secret` auto-created per SA, is **deprecated and off by default** (no
   auto-created token Secret in current Kubernetes); a never-expiring token is a
@@ -830,19 +836,29 @@ bolted on). **RBAC** is the one you author:
   group). "Restricting" something means *not granting it* (and ensuring no
   other binding grants it), there is no override. This is why over-broad
   default bindings are dangerous: you can't subtract them, only avoid/remove.
-- **The `system:masters` super-group bypasses RBAC entirely.** Any request
-  whose authenticated groups include `system:masters` is granted
-  *unconditional* cluster-admin by a hard-coded authorizer that runs *before*
-  RBAC, **no RoleBinding is involved and none can revoke it** (RBAC has no
-  deny rules, so you cannot "restrict" `system:masters`). Since kubeadm v1.29
-  the admin kubeconfig carries `O=kubeadm:cluster-admins`, which a
-  ClusterRoleBinding maps to `cluster-admin`. Only
-  `/etc/kubernetes/super-admin.conf` carries `O=system:masters` ([kubeadm
-  implementation
-  details](https://kubernetes.io/docs/reference/setup-tools/kubeadm/implementation-details/)).
-  The `CertificateSubjectRestriction` admission plugin, on by default, refuses
-  a CSR that asks for `system:masters` ([admission
-  controllers](https://kubernetes.io/docs/reference/access-authn-authz/admission-controllers/#CertificateSubjectRestriction));
+- **The `system:masters` super-group bypasses RBAC entirely.** The
+  [authorization
+  page](https://kubernetes.io/docs/reference/access-authn-authz/authorization/#the-system-masters-group)
+  calls it a built-in group with unrestricted access that bypasses the
+  restrictions of RBAC and Webhook authorization. In the v1.37.0 source, the
+  API server adds a privileged-group authorizer for `system:masters` at the
+  front of the authorizer chain, ahead of the configured modes ([the
+  source](https://raw.githubusercontent.com/kubernetes/kubernetes/v1.37.0/pkg/kubeapiserver/authorizer/reload.go)).
+  So a request whose groups include `system:masters` is granted full access
+  with no RoleBinding involved, and no RoleBinding can revoke it (RBAC has no
+  deny rules, so you cannot "restrict" `system:masters`). On a cluster
+  kubeadm creates, the kubeadm [implementation
+  details](https://kubernetes.io/docs/reference/setup-tools/kubeadm/implementation-details/)
+  page says `/etc/kubernetes/admin.conf` carries `O=kubeadm:cluster-admins`,
+  a group bound to the `cluster-admin` ClusterRole during `kubeadm init`, and
+  that `/etc/kubernetes/super-admin.conf` carries `O=system:masters`. That
+  page does not name the version that made the change. kubeadm issue 2414
+  tracked it under the v1.29 milestone, so this applies to clusters created
+  by kubeadm v1.29 or later. The `CertificateSubjectRestriction` admission
+  plugin, which the Kubernetes 1.37 docs list as on by default, rejects a CSR
+  for the `kubernetes.io/kube-apiserver-client` signer that asks for
+  `system:masters` ([admission
+  controllers](https://kubernetes.io/docs/reference/access-authn-authz/admission-controllers/#certificatesubjectrestriction));
   the lab does not run that refusal. The main mitigation is **not issuing**
   certs/tokens that carry that group: treat the `system:masters` kubeconfig as
   a break-glass credential, keep it offline, and give humans/automation
@@ -984,7 +1000,8 @@ Checklist:
 - [ ] Reuse aggregated `view`/`edit`/`admin`; mind that `edit` reads Secrets
 - [ ] `kubectl auth can-i --list --as=…` run for each SA (verified least
   privilege)
-- [ ] Auditing of RBAC changes, `exec` and `impersonate` in place (<!-- link-later: 05.08 --> chapter 05.08)
+- [ ] Auditing of RBAC changes, `exec` and `impersonate` in place ([chapter
+  05.08](08-audit-detection-and-incident-response.md))
 
 ## Test your understanding
 
@@ -1014,21 +1031,41 @@ Checklist:
 4. **Hands-on extension: break impersonation cleanly. Create a ServiceAccount `app-sa` in `bookstore` with a Role that allows only `get configmaps`. Then try `kubectl auth can-i list configmaps --as=system:serviceaccount:bookstore:app-sa`. Now grant yourself `impersonate` on `users`/`groups` and try `--as=system:admin`. Why is impersonation a safer way to test a workload's rights than copying its token?**
    <details><summary>What you should see</summary>
 
-   `can-i list` returns `no` (only `get` is granted). The impersonation attempt as `system:admin` works only while you hold `impersonate` on `users`. Impersonation mints no credential: the request carries the target's rights for that one call, and there is no token to copy, store or replay. Path D of the lab shows the same rule on ServiceAccounts, scoped by `resourceNames`. What the audit trail records for an impersonated request is covered in <!-- link-later: 05.08 --> chapter 05.08.
+   `can-i list` returns `no` (only `get` is granted). The impersonation attempt
+   as `system:admin` works only while you hold `impersonate` on `users`.
+   Impersonation mints no credential: the request carries the target's rights
+   for that one call, and there is no token to copy, store or replay. Path D of
+   the lab shows the same rule on ServiceAccounts, scoped by `resourceNames`.
+   What the audit trail records for an impersonated request is covered in
+   [chapter 05.08](08-audit-detection-and-incident-response.md).
 
    </details>
 
 5. **You discover a `ClusterRoleBinding` that binds `cluster-admin` to `system:authenticated`. Explain in one sentence why this is catastrophic, and what the cluster effectively becomes.**
    <details><summary>Show answer</summary>
 
-   `system:authenticated` is *any* successfully-authenticated principal, every ServiceAccount, every human, every webhook with a valid token, so the binding silently makes the cluster a single-tenant cluster-admin free-for-all where any compromised Pod becomes cluster-admin. RBAC misconfiguration is the most common path to "from container breakout to full cluster compromise"; this is precisely why audit logs (<!-- link-later: 05.08 --> chapter 05.08) must alert on RBAC changes.
+   `system:authenticated` is *any* successfully-authenticated principal, every
+   ServiceAccount, every human, every webhook with a valid token, so the binding
+   silently makes the cluster a single-tenant cluster-admin free-for-all where
+   any compromised Pod becomes cluster-admin. RBAC misconfiguration is the most
+   common path to "from container breakout to full cluster compromise"; this is
+   precisely why audit logs ([chapter
+   05.08](08-audit-detection-and-incident-response.md)) must alert on RBAC
+   changes.
 
    </details>
 
 6. **A developer's Role grants `create` on `deployments` in `bookstore` and nothing on `pods`. Can they run a Pod as `payments-deployer`? Why does removing `create` on pods not stop it, and what does?**
    <details><summary>Show answer</summary>
 
-   Yes. The Deployment controller creates the Pod with its own rights, and the pod template names the ServiceAccount. RBAC cannot restrict which ServiceAccount a template may name, so only the rights to create the workload matter. Stopping it takes two things: no workload-creation rights for identities that do not deploy, and an admission policy that refuses ServiceAccount names outside an allowlist, which is chapter <!-- link-later: 05.07 -->05.07. Path A of the lab shows the Pod form and the Deployment form, and the refusal for both.
+   Yes. The Deployment controller creates the Pod with its own rights, and the
+   pod template names the ServiceAccount. RBAC cannot restrict which
+   ServiceAccount a template may name, so only the rights to create the workload
+   matter. Stopping it takes two things: no workload-creation rights for
+   identities that do not deploy, and an admission policy that refuses
+   ServiceAccount names outside an allowlist, which is chapter
+   [05.07](07-admission-control-and-policy-as-code.md). Path A of the lab shows
+   the Pod form and the Deployment form, and the refusal for both.
 
    </details>
 

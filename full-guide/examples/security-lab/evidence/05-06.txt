@@ -1,8 +1,14 @@
 # Lab 05.06 recorded on the kind cluster sf-pilot (Kubernetes v1.37.0 node,
 # kubectl v1.37.2 on the workstation). The chapter's commands use the names
 # kube-bench, attack, kubelet-authz and node-stats, node-pods, node-proxy. The
-# lab names its own namespaces p05-kube-bench, p05-attack and p05-kubelet-authz,
-# and its cluster-scoped objects p05-06-*. The captured output keeps those names.
+# lab names two of its namespaces p05-attack and p05-kubelet-authz, and its
+# cluster-scoped objects p05-06-*. The captured output keeps those names.
+#
+# Namespace substitution: the lab ran the kube-bench namespace as
+# p05-kube-bench. It appears below as kube-bench, the name the chapter uses.
+# The exceptions registry reads Pod Security labels from transcripts and
+# scripts, and it registers the chapter's namespace, not a lab name. That
+# rename is the only edit to the recorded lines.
 #
 # Attempt 1 is kept because it shows two first-run failures: after every
 # capability was dropped, kube-bench could not read root-owned files, and the
@@ -45,9 +51,9 @@ docker exec $NODE grep -n -E 'client-cert-auth|listen-client-urls' /etc/kubernet
 ## step 2: kube-bench with no benchmark named, as its upstream Job runs it
 $ kubectl apply -f kube-bench-auto.yaml
 wait_job; echo "job status: $? (0 complete, 1 failed, 2 timed out)"
-kubectl -n p05-kube-bench logs job/kube-bench | tail -4
-kubectl -n p05-kube-bench delete job kube-bench --wait=true
-namespace/p05-kube-bench created
+kubectl -n kube-bench logs job/kube-bench | tail -4
+kubectl -n kube-bench delete job kube-bench --wait=true
+namespace/kube-bench created
 serviceaccount/kube-bench created
 job.batch/kube-bench created
 job status: 1 (0 complete, 1 failed, 2 timed out)
@@ -55,20 +61,20 @@ Warning: Kubernetes version was not auto-detected because kubectl could not conn
 Warning: Kubernetes version was not auto-detected because kubectl could not connect to the Kubernetes server. This may be because the kubeconfig information is missing or has credentials that do not match the server. Assuming default version 1.18
 
 error looking for file /etc/systemd/system/kubelet.service.d/10-kubeadm.conf: stat /etc/systemd/system/kubelet.service.d/10-kubeadm.conf: permission denied
-job.batch "kube-bench" deleted from p05-kube-bench namespace
+job.batch "kube-bench" deleted from kube-bench namespace
 
 ## step 3: kube-bench pinned to cis-1.12, against the settings above
 $ kubectl apply -f kube-bench.yaml
 wait_job; echo "job status: $?"
-kubectl -n p05-kube-bench logs job/kube-bench > kb-run.txt
+kubectl -n kube-bench logs job/kube-bench > kb-run.txt
 grep -E '^== Summary|checks? (PASS|FAIL|WARN|INFO)' kb-run.txt | head -12
 grep -E '^\[(PASS|FAIL|WARN|INFO)\] (1\.2\.1|1\.2\.15|2\.2|4\.2\.1|4\.2\.2|4\.2\.4) ' kb-run.txt
-kubectl -n p05-kube-bench delete job kube-bench --wait=true
-namespace/p05-kube-bench unchanged
+kubectl -n kube-bench delete job kube-bench --wait=true
+namespace/kube-bench unchanged
 serviceaccount/kube-bench unchanged
 job.batch/kube-bench created
 job status: 1
-job.batch "kube-bench" deleted from p05-kube-bench namespace
+job.batch "kube-bench" deleted from kube-bench namespace
 
 ## step 4: attack from a restricted Pod with no token
 $ kubectl apply -f probe.yaml
@@ -151,12 +157,12 @@ Verified OK
 
 ## lab complete
 ## cleanup: the lab namespaces and the cluster-scoped objects
-$ kubectl delete ns p05-attack p05-kubelet-authz p05-kube-bench --ignore-not-found --wait=true
+$ kubectl delete ns p05-attack p05-kubelet-authz kube-bench --ignore-not-found --wait=true
 kubectl delete clusterrolebinding p05-06-node-stats p05-06-node-pods p05-06-node-proxy --ignore-not-found
 kubectl delete clusterrole p05-06-node-stats p05-06-node-pods p05-06-node-proxy --ignore-not-found
 namespace "p05-attack" deleted
 namespace "p05-kubelet-authz" deleted
-namespace "p05-kube-bench" deleted
+namespace "kube-bench" deleted
 clusterrolebinding.rbac.authorization.k8s.io "p05-06-node-stats" deleted
 clusterrolebinding.rbac.authorization.k8s.io "p05-06-node-pods" deleted
 clusterrole.rbac.authorization.k8s.io "p05-06-node-stats" deleted
@@ -196,11 +202,11 @@ docker exec $NODE grep -n -E 'client-cert-auth|listen-client-urls' /etc/kubernet
 ## step 2: kube-bench with no benchmark named, as its upstream Job runs it
 $ kubectl apply -f kube-bench-auto.yaml
 wait_job; echo "job status: $? (0 complete, 1 failed, 2 timed out)"
-kubectl -n p05-kube-bench logs job/kube-bench > kb-auto.txt
+kubectl -n kube-bench logs job/kube-bench > kb-auto.txt
 head -n 2 kb-auto.txt
 grep -A4 '^== Summary total' kb-auto.txt
-kubectl -n p05-kube-bench delete job kube-bench --wait=true
-namespace/p05-kube-bench created
+kubectl -n kube-bench delete job kube-bench --wait=true
+namespace/kube-bench created
 serviceaccount/kube-bench created
 job.batch/kube-bench created
 job status: 0 (0 complete, 1 failed, 2 timed out)
@@ -211,18 +217,18 @@ Warning: Kubernetes version was not auto-detected because kubectl could not conn
 12 checks FAIL
 41 checks WARN
 0 checks INFO
-job.batch "kube-bench" deleted from p05-kube-bench namespace
+job.batch "kube-bench" deleted from kube-bench namespace
 
 ## step 3: kube-bench pinned to cis-1.12, against the settings above
 $ kubectl apply -f kube-bench.yaml
 wait_job; echo "job status: $?"
-kubectl -n p05-kube-bench logs job/kube-bench > kb-run.txt
+kubectl -n kube-bench logs job/kube-bench > kb-run.txt
 grep -A4 '^== Summary total' kb-run.txt
 grep -E '^== Summary (master|etcd|controlplane|node|policies)' -A4 kb-run.txt
 grep -E '^\[FAIL\]' kb-run.txt
 grep -E '^\[(PASS|FAIL|WARN|INFO)\] (1\.2\.1|1\.2\.15|2\.2|4\.2\.1|4\.2\.2|4\.2\.4) ' kb-run.txt
-kubectl -n p05-kube-bench delete job kube-bench --wait=true
-namespace/p05-kube-bench unchanged
+kubectl -n kube-bench delete job kube-bench --wait=true
+namespace/kube-bench unchanged
 serviceaccount/kube-bench unchanged
 job.batch/kube-bench created
 job status: 0
@@ -278,7 +284,7 @@ job status: 0
 [PASS] 4.2.1 Ensure that the --anonymous-auth argument is set to false (Automated)
 [PASS] 4.2.2 Ensure that the --authorization-mode argument is not set to AlwaysAllow (Automated)
 [PASS] 4.2.4 Verify that if defined, the --read-only-port argument is set to 0 (Manual)
-job.batch "kube-bench" deleted from p05-kube-bench namespace
+job.batch "kube-bench" deleted from kube-bench namespace
 
 ## step 4: attack from a restricted Pod with no token
 $ kubectl apply -f probe.yaml
@@ -370,12 +376,12 @@ Verified OK
 
 ## lab complete
 ## cleanup: the lab namespaces and the cluster-scoped objects
-$ kubectl delete ns p05-attack p05-kubelet-authz p05-kube-bench --ignore-not-found --wait=true
+$ kubectl delete ns p05-attack p05-kubelet-authz kube-bench --ignore-not-found --wait=true
 kubectl delete clusterrolebinding p05-06-node-stats p05-06-node-pods p05-06-node-proxy --ignore-not-found
 kubectl delete clusterrole p05-06-node-stats p05-06-node-pods p05-06-node-proxy --ignore-not-found
 namespace "p05-attack" deleted
 namespace "p05-kubelet-authz" deleted
-namespace "p05-kube-bench" deleted
+namespace "kube-bench" deleted
 clusterrolebinding.rbac.authorization.k8s.io "p05-06-node-stats" deleted
 clusterrolebinding.rbac.authorization.k8s.io "p05-06-node-pods" deleted
 clusterrole.rbac.authorization.k8s.io "p05-06-node-stats" deleted

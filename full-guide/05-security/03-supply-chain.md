@@ -28,7 +28,8 @@ Supply-chain security is making the path *from source to a running container*
 verifiable: know what's **in** the image (scan + SBOM), prove **who built it
 and that it's unmodified** (sign + attest), and **refuse to run** anything that
 fails those checks (admission policy). The admission half is taught in
-05.07 <!-- link-later: 05.07 -->, which has the cluster check signatures. This
+[05.07](07-admission-control-and-policy-as-code.md), which has the cluster check
+signatures. This
 chapter proves the rest on a lab cluster, so each control is seen to work
 before a policy depends on it.
 
@@ -53,7 +54,7 @@ built in four stages, each answering one question:
    and the signature before the API server stores the Pod. The restricted
    namespace from [ch.02](02-pod-security.md) already refuses the insecure
    manifest in this chapter's lab. Checking signatures at admission is
-   05.07 <!-- link-later: 05.07 -->.
+   [05.07](07-admission-control-and-policy-as-code.md).
 
 A policy that checks images starts in **Audit** mode, so it reports what it
 would block before it blocks anything. Flip it straight to Enforce and you
@@ -71,8 +72,8 @@ cited, not run: steps 11 and 12 need a throwaway cluster.
 | Threat | Control this chapter teaches | Where it goes deeper |
 |---|---|---|
 | A **tag moves**: the name you tested now points at other bytes | [Pin by digest](../01-core-workloads/01-pods.md#baseline-image-digest), so the reference names the bytes | Signed releases in [15.03](../15-day-to-day-production-ops/03-image-signing-and-provenance.md) |
-| A **tampered image** is pushed under a name you trust | Sign the digest, and verify before you deploy | Keyless signing from CI in [07.03](../07-delivery/03-cicd-pipeline.md); admission checks in 05.07 <!-- link-later: 05.07 --> |
-| A **known-vulnerable package** ships in the image | Scan the digest, keep an SBOM to find the image again after a new CVE, and suppress a finding only with a reviewed VEX statement | The image scan stage in [07.03](../07-delivery/03-cicd-pipeline.md); triage and SLAs in 05.09 <!-- link-later: 05.09 --> |
+| A **tampered image** is pushed under a name you trust | Sign the digest, and verify before you deploy | Keyless signing from CI in [07.03](../07-delivery/03-cicd-pipeline.md); admission checks in [05.07](07-admission-control-and-policy-as-code.md) |
+| A **known-vulnerable package** ships in the image | Scan the digest, keep an SBOM to find the image again after a new CVE, and suppress a finding only with a reviewed VEX statement | The image scan stage in [07.03](../07-delivery/03-cicd-pipeline.md); triage and SLAs in [05.09](09-running-security-on-a-platform-team.md) |
 | You **cannot say what built the image**, or from what | A signed SBOM attestation and BuildKit's SLSA provenance | Supply-chain security on EKS, [14.12](../14-eks-in-production-a-to-z/12-supply-chain-security.md) |
 | A manifest asks for **privilege** the workload does not need | KubeLinter, kubesec and Trivy config flag it before it reaches the cluster | The same checks in CI, [07.03](../07-delivery/03-cicd-pipeline.md) |
 
@@ -523,8 +524,8 @@ Error from server (Forbidden): error when creating "insecure.yaml": pods "catalo
 KubeLinter and Trivy both flag `hostNetwork` and privilege, and the namespace
 refuses the same fields. The linters run in review, before a change is
 proposed. The namespace checks every create and update in it. Neither replaces
-the other, and neither checks the image's signature. That check is 05.07
-<!-- link-later: 05.07 -->.
+the other, and neither checks the image's signature. That check is
+[05.07](07-admission-control-and-policy-as-code.md).
 
 ### Step 14: tear down
 
@@ -591,8 +592,9 @@ says the same: tags can be moved, and digests are fixed.
   checks the builder identity too, which is 07.03's pipeline and the
   admission check in 05.07.
 - **Admission is where the cluster checks.** Kyverno's `verifyImages` rule
-  checks signatures when a Pod is admitted, and 05.07
-  <!-- link-later: 05.07 --> installs and tests it. A policy that checks
+  checks signatures when a Pod is admitted, and
+  [05.07](07-admission-control-and-policy-as-code.md)
+ installs and tests it. A policy that checks
   images is best introduced in Audit mode, which reports what it would block
   without blocking it, and then moved to Enforce. The restricted namespace in
   this lab enforces the Pod Security standard, which is why step 13 refuses

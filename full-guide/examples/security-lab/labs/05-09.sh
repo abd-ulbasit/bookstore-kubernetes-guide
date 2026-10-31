@@ -194,11 +194,13 @@ kubectl apply -f policy.yaml
 CMD
 
 echo '## step 4: wait until the binding enforces, using a server dry run'
+# The probe is a dry run of one namespace that step 5 applies and the policy
+# refuses, p05-09-no-expiry. It creates nothing.
 cat >probe.yaml <<'YAML'
 apiVersion: v1
 kind: Namespace
 metadata:
-  name: p05-09-probe
+  name: p05-09-no-expiry
   labels:
     pod-security.kubernetes.io/enforce: baseline
 YAML

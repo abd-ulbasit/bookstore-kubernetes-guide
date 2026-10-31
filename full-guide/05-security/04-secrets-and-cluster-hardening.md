@@ -41,7 +41,8 @@ The flags and the transport that protect etcd belong to
 [Part 05 ch.06](06-control-plane-and-node-hardening.md). The audit trail that
 records Secret reads belongs to
 [Part 05 ch.08](08-audit-detection-and-incident-response.md). The threat model
-over the whole Bookstore is Part 00 ch.08 <!-- link-later: 00.08 -->.
+over the whole Bookstore is [Part 00
+ch.08](../00-foundations/08-security-foundations.md).
 
 ## Mental model
 

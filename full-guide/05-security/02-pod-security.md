@@ -96,15 +96,15 @@ Pod, as [01.01](../01-core-workloads/01-pods.md#debug-containers) does.
 
 | Threat | Control this chapter teaches | Where it goes deeper |
 |---|---|---|
-| Root in the container is UID 0 on the node, and reads files the node's root owns | `runAsNonRoot` with a non-zero `runAsUser`; `hostPath` refused | [user namespaces](https://kubernetes.io/docs/concepts/workloads/pods/user-namespaces/); 05.05 <!-- link-later: 05.05 --> |
+| Root in the container is UID 0 on the node, and reads files the node's root owns | `runAsNonRoot` with a non-zero `runAsUser`; `hostPath` refused | [user namespaces](https://kubernetes.io/docs/concepts/workloads/pods/user-namespaces/); [05.05](05-kernel-isolation.md) |
 | A privileged container holds every capability | no `privileged`; `capabilities.drop: ["ALL"]` | [capabilities(7)](https://man7.org/linux/man-pages/man7/capabilities.7.html) |
 | `hostPID` shows and signals the node's processes, and with privilege it enters them | no host namespaces | [Pod Security Standards](https://kubernetes.io/docs/concepts/security/pod-security-standards/#baseline) |
-| A `hostPath` mount reads the node's files, including a root-only key | no `hostPath` | [Pod Security Standards](https://kubernetes.io/docs/concepts/security/pod-security-standards/#restricted); 05.07 <!-- link-later: 05.07 --> for rules beyond the standards |
-| A mounted runtime socket starts, stops and inspects every container on the node | no socket mount, which `restricted` refuses as `hostPath` | 05.07 <!-- link-later: 05.07 --> |
+| A `hostPath` mount reads the node's files, including a root-only key | no `hostPath` | [Pod Security Standards](https://kubernetes.io/docs/concepts/security/pod-security-standards/#restricted); [05.07](07-admission-control-and-policy-as-code.md) for rules beyond the standards |
+| A mounted runtime socket starts, stops and inspects every container on the node | no socket mount, which `restricted` refuses as `hostPath` | [05.07](07-admission-control-and-policy-as-code.md) |
 | A neighbour Pod with host access writes into another Pod's root filesystem through `/proc` | no privileged Pod with `hostPID` in any namespace; RBAC over who can create Pods | [ch.01](01-authn-authz-rbac.md) |
 | An attacker writes a binary into a running container | `readOnlyRootFilesystem: true` for system paths, `emptyDir` for writes | `/tmp` stays writable and executable, so this field does not end the threat; see the hardened victim section |
 | A setuid binary or file capability gains privilege | `allowPrivilegeEscalation: false`, read as `NoNewPrivs` | [no_new_privs](https://docs.kernel.org/userspace-api/no_new_privs.html) |
-| A rare syscall reaches the kernel | `seccompProfile: RuntimeDefault`, read as `Seccomp` | 05.05 <!-- link-later: 05.05 --> |
+| A rare syscall reaches the kernel | `seccompProfile: RuntimeDefault`, read as `Seccomp` | [05.05](05-kernel-isolation.md) |
 | A Pod with none of the above is admitted at all | Pod Security labels on the namespace | [PSA](https://kubernetes.io/docs/concepts/security/pod-security-admission/) |
 
 ## Lab: attack, harden, re-attack
@@ -772,8 +772,8 @@ neighbour copied busybox into the victim's `/tmp`, and the copy ran there as
 UID 65532. `/tmp` is an `emptyDir`, so it is writable and executable, and a
 read-only root filesystem does not stop a binary copied there. The lab found no
 baseline field that stops execution from an `emptyDir`, so this chapter claims
-none. Detecting a binary that runs from `/tmp` belongs to 05.08
-<!-- link-later: 05.08 -->.
+none. Detecting a binary that runs from `/tmp` belongs to
+[05.08](08-audit-detection-and-incident-response.md).
 
 The victim's fields do not contain a privileged neighbour. The neighbour runs
 as root with the full capability set, and `nsenter -t 1 -m` above shows it
@@ -1112,15 +1112,19 @@ what `restricted` means without a deliberate change.
 `restricted`, and they are not a reason to loosen the default.
 
 - Falco's modern eBPF driver needs at least `CAP_SYS_PTRACE`,
-  `CAP_SYS_RESOURCE`, `CAP_BPF` and `CAP_PERFMON` ([Falco container
-  setup](https://falco.org/docs/setup/container/)). The `restricted` standard
-  lets a Pod add back only `NET_BIND_SERVICE`, and the `baseline` standard
-  refuses added capabilities beyond the runtime's default set. So Falco's
-  lowest working level is `privileged`. - node-exporter's example runs with
-  `--net="host"` and `--pid="host"`, and mounts the node's `/` read-only at
-  `/host` with `--path.rootfs=/host` ([its
+  `CAP_SYS_RESOURCE`, `CAP_BPF` and `CAP_PERFMON`, and the container example
+  on the same page mounts host paths such as `/proc` and `/etc` ([Falco
+  container setup](https://falco.org/docs/setup/container/)). The `restricted`
+  standard lets a Pod add back only `NET_BIND_SERVICE`. The `baseline`
+  standard allows added capabilities only from a short list that holds none of
+  those four, and it forbids `hostPath` volumes ([Pod Security
+  Standards](https://kubernetes.io/docs/concepts/security/pod-security-standards/)).
+  The levels are not stated for Falco anywhere upstream. This is read from the
+  two pages: Falco's lowest working level is `privileged`.
+- node-exporter's example runs with `--net="host"` and `--pid="host"`, and
+  mounts the node's `/` read-only at `/host` with `--path.rootfs=/host` ([its
   README](https://github.com/prometheus/node_exporter#docker)). The `baseline`
-  standard refuses host namespaces and `hostPath`, so node-exporter's lowest
+  standard forbids host namespaces and `hostPath`, so node-exporter's lowest
   working level is also `privileged`.
 
 The labels cannot be tuned to fit. They select a level and a version and nothing
@@ -1138,7 +1142,8 @@ The rules the guide applies:
 - If the privilege is for an optional feature, turn the feature off instead.
 - Record each exception in the one registry with its reason, the chapter that
   owns it, and an expiry within twelve months, so it is revisited rather than
-  forgotten. The registry is taught in 05.09 <!-- link-later: 05.09 -->.
+  forgotten. The registry is taught in
+  [05.09](09-running-security-on-a-platform-team.md).
 - A Pod in a privileged namespace can do what the node allows, so RBAC must
   limit who may create Pods there. [ch.01](01-authn-authz-rbac.md) sets that
   limit.
@@ -1157,12 +1162,13 @@ field does to the running container. The parts specific to Pod security:
   `NoNewPrivs: 1` and `Seccomp: 2`.
 - **AppArmor and SELinux** confine a process with a Linux Security Module, set
   through `securityContext.appArmorProfile` and `securityContext.seLinuxOptions`.
-  Both are covered in 05.05 <!-- link-later: 05.05 -->.
+  Both are covered in [05.05](05-kernel-isolation.md).
 - **PSA is a fixed policy that a namespace label selects.** It evaluates the
   Pod's `securityContext` and volume types against the standard, and it writes
   no rules of its own. Beyond the three standards, a policy engine or a
-  ValidatingAdmissionPolicy does the job, and 05.07 covers that
-  <!-- link-later: 05.07 -->.
+  ValidatingAdmissionPolicy does the job, and
+  [05.07](07-admission-control-and-policy-as-code.md) covers that
+.
 - **PodSecurityPolicy is gone.** It was removed in Kubernetes v1.25, and its
   replacement is the namespace label above. A runbook that tells you to write a
   `PodSecurityPolicy` describes a removed API.

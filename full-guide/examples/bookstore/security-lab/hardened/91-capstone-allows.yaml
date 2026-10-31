@@ -10,8 +10,10 @@
 #
 # Migration: the db-migrate Job's Pods carry app: db-migrate. No base policy
 # names that label, so under the base policies the migration cannot reach
-# postgres. The base has the same gap. This overlay closes it for the capstone
-# only, so the base is unchanged.
+# postgres. The base the lab ran against had the same gap, and this overlay
+# closed it for the capstone only. The current base (Part 02 ch.06) allows both
+# edges in allow-data-tier-ingress and allow-backend-egress, so on it these four
+# policies repeat rules. NetworkPolicies are additive, so the repeat is harmless.
 apiVersion: networking.k8s.io/v1
 kind: NetworkPolicy
 metadata:

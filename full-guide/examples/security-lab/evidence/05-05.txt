@@ -1,3 +1,10 @@
+# Transcript for 05-security/05-kernel-isolation.md, run with P05_RUNTIME=0.
+#
+# Namespace substitution: the lab ran its two namespaces as p05-05-attack and
+# p05-05-restricted. They appear below as kernel-attack and kernel-restricted,
+# the names the chapter uses. The exceptions registry reads Pod Security labels
+# from transcripts, and it registers the chapter's namespace, not a lab name.
+# That rename is the only edit to the recorded lines.
 ## node: sf-pilot-control-plane, kubectl v1.37.2
 
 ## step 1: the node shares the lab host kernel, and sees AppArmor
@@ -11,35 +18,35 @@ apparmor-securityfs-absent
 selinux-absent
 
 ## step 2: two namespaces, one that permits everything and one restricted
-$ kubectl create ns p05-05-attack
-kubectl label ns p05-05-attack pod-security.kubernetes.io/enforce=privileged
-kubectl create ns p05-05-restricted
-kubectl label ns p05-05-restricted \
+$ kubectl create ns kernel-attack
+kubectl label ns kernel-attack pod-security.kubernetes.io/enforce=privileged
+kubectl create ns kernel-restricted
+kubectl label ns kernel-restricted \
   pod-security.kubernetes.io/enforce=restricted \
   pod-security.kubernetes.io/audit=restricted \
   pod-security.kubernetes.io/warn=restricted
-namespace/p05-05-attack created
-namespace/p05-05-attack labeled
-namespace/p05-05-restricted created
-namespace/p05-05-restricted labeled
+namespace/kernel-attack created
+namespace/kernel-attack labeled
+namespace/kernel-restricted created
+namespace/kernel-restricted labeled
 
 ## step 3: seccomp Unconfined against RuntimeDefault, for one personality call
 $ kubectl apply -f unconfined.yaml
 kubectl apply -f runtimedefault.yaml
-kubectl -n p05-05-attack wait --for=condition=Ready pod/unconfined --timeout=180s
-kubectl -n p05-05-restricted wait --for=condition=Ready pod/runtimedefault --timeout=180s
+kubectl -n kernel-attack wait --for=condition=Ready pod/unconfined --timeout=180s
+kubectl -n kernel-restricted wait --for=condition=Ready pod/runtimedefault --timeout=180s
 pod/unconfined created
 pod/runtimedefault created
 pod/unconfined condition met
 pod/runtimedefault condition met
 
 ## step 3a: the Unconfined Pod: no filter, the personality call succeeds
-$ kubectl -n p05-05-attack exec unconfined -- sh -c 'grep "^Seccomp:" /proc/self/status | tr "\t" " "; setarch linux64 -R /bin/true 2>&1; echo exit=$?'
+$ kubectl -n kernel-attack exec unconfined -- sh -c 'grep "^Seccomp:" /proc/self/status | tr "\t" " "; setarch linux64 -R /bin/true 2>&1; echo exit=$?'
 Seccomp: 0
 exit=0
 
 ## step 3b: the RuntimeDefault Pod: the same call is refused by the filter
-$ kubectl -n p05-05-restricted exec runtimedefault -- sh -c 'grep "^Seccomp:" /proc/self/status | tr "\t" " "; setarch linux64 -R /bin/true 2>&1; echo exit=$?'
+$ kubectl -n kernel-restricted exec runtimedefault -- sh -c 'grep "^Seccomp:" /proc/self/status | tr "\t" " "; setarch linux64 -R /bin/true 2>&1; echo exit=$?'
 Seccomp: 2
 linux64: personality(0x40000): Operation not permitted
 exit=1
@@ -50,11 +57,11 @@ Error from server (Forbidden): error when creating "unconfined-restricted.yaml":
 
 ## step 4: audit, then enforce. A custom Localhost profile, logged first
 $ kubectl apply -f audit.yaml
-kubectl -n p05-05-restricted wait --for=condition=Ready pod/audit --timeout=180s
+kubectl -n kernel-restricted wait --for=condition=Ready pod/audit --timeout=180s
 pod/audit created
 pod/audit condition met
 
-$ kubectl -n p05-05-restricted exec audit -- sh -c 'id -u; cat /etc/passwd >/dev/null; ls / >/dev/null; echo done'
+$ kubectl -n kernel-restricted exec audit -- sh -c 'id -u; cat /etc/passwd >/dev/null; ls / >/dev/null; echo done'
 65532
 done
 
@@ -81,12 +88,12 @@ $ docker exec sf-pilot-control-plane cat /var/lib/kubelet/seccomp/profiles/deny-
 }
 
 $ kubectl apply -f enforce.yaml
-kubectl -n p05-05-restricted wait --for=condition=Ready pod/enforce --timeout=180s
+kubectl -n kernel-restricted wait --for=condition=Ready pod/enforce --timeout=180s
 pod/enforce created
 pod/enforce condition met
 
 ## step 4c: enforce: the workload still runs, and the personality call is refused
-$ kubectl -n p05-05-restricted exec enforce -- sh -c 'grep "^Seccomp:" /proc/self/status | tr "\t" " "; id -u; cat /etc/passwd >/dev/null && echo workload-ok; setarch linux64 -R /bin/true 2>&1; echo exit=$?'
+$ kubectl -n kernel-restricted exec enforce -- sh -c 'grep "^Seccomp:" /proc/self/status | tr "\t" " "; id -u; cat /etc/passwd >/dev/null && echo workload-ok; setarch linux64 -R /bin/true 2>&1; echo exit=$?'
 Seccomp: 2
 65532
 workload-ok
@@ -102,10 +109,10 @@ apparmor_parser-absent
 ## step 6: gVisor: not installed. Its install restarts the node containerd, which would interrupt the Pods on the node.
 
 ## step 7: cleanup: the namespaces, the RuntimeClass and the seccomp profiles
-$ kubectl delete ns p05-05-attack p05-05-restricted --wait=true
+$ kubectl delete ns kernel-attack kernel-restricted --wait=true
 kubectl delete runtimeclass gvisor --ignore-not-found
 docker exec sf-pilot-control-plane rm -f /var/lib/kubelet/seccomp/profiles/audit.json /var/lib/kubelet/seccomp/profiles/deny-personality.json
-namespace "p05-05-attack" deleted
-namespace "p05-05-restricted" deleted
+namespace "kernel-attack" deleted
+namespace "kernel-restricted" deleted
 
 ## not run in this lab: Security Profiles Operator (cited in the chapter).

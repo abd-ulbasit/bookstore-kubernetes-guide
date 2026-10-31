@@ -18,7 +18,6 @@
                 "generate_name": null,
                 "labels": {
                   "pod-security.kubernetes.io/audit": "restricted",
-                  "pod-security.kubernetes.io/enforce": "restricted",
                   "pod-security.kubernetes.io/warn": "restricted"
                 },
                 "name": "bookstore"
@@ -57,7 +56,6 @@
               "generate_name": null,
               "labels": {
                 "pod-security.kubernetes.io/audit": "restricted",
-                "pod-security.kubernetes.io/enforce": "privileged",
                 "pod-security.kubernetes.io/warn": "restricted"
               },
               "name": "bookstore"
@@ -115,7 +113,6 @@
                 "labels": {
                   "constant_value": {
                     "pod-security.kubernetes.io/audit": "restricted",
-                    "pod-security.kubernetes.io/enforce": "restricted",
                     "pod-security.kubernetes.io/warn": "restricted"
                   }
                 },

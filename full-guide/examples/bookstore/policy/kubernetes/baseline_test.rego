@@ -187,37 +187,29 @@ test_service_external_ips_fails if {
 	startswith(m, "BK-POL-010")
 }
 
+# namespace_at is a Namespace object that enforces the given level. The tests
+# pass the level in, so each one reads as the case it checks.
+namespace_at(name, level) := {
+	"apiVersion": "v1",
+	"kind": "Namespace",
+	"metadata": {"name": name, "labels": {"pod-security.kubernetes.io/enforce": level}},
+}
+
+# namespace_with_record is the same Namespace carrying the exception record.
+namespace_with_record(name, level) := object.union(namespace_at(name, level), {"metadata": {"annotations": {
+	"security.example/exception-reason": "Host mounts for the Falco driver.",
+	"security.example/exception-expires": "2027-06-30",
+}}})
+
 test_namespace_not_restricted_fails if {
-	bad := {
-		"apiVersion": "v1",
-		"kind": "Namespace",
-		"metadata": {"name": "bookstore", "labels": {"pod-security.kubernetes.io/enforce": "baseline"}},
-	}
-	some m in deny with input as bad
+	some m in deny with input as namespace_at("bookstore", "baseline")
 	startswith(m, "BK-POL-011")
 }
 
 test_excepted_namespace_passes if {
-	ok := {
-		"apiVersion": "v1",
-		"kind": "Namespace",
-		"metadata": {
-			"name": "falco",
-			"labels": {"pod-security.kubernetes.io/enforce": "privileged"},
-			"annotations": {
-				"security.example/exception-reason": "Host mounts for the Falco driver.",
-				"security.example/exception-expires": "2027-06-30",
-			},
-		},
-	}
-	count(deny) == 0 with input as ok
+	count(deny) == 0 with input as namespace_with_record("falco", "privileged")
 }
 
 test_restricted_namespace_passes if {
-	ok := {
-		"apiVersion": "v1",
-		"kind": "Namespace",
-		"metadata": {"name": "bookstore", "labels": {"pod-security.kubernetes.io/enforce": "restricted"}},
-	}
-	count(deny) == 0 with input as ok
+	count(deny) == 0 with input as namespace_at("bookstore", "restricted")
 }

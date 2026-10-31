@@ -141,16 +141,18 @@ a lab cluster and links to them rather than repeating them.
   [`evidence/05-05.txt`](../examples/security-lab/evidence/05-05.txt), run with
   `P05_RUNTIME=0`, the mode that changes no node runtime. Run it only against a
   cluster you own. It refuses any kubectl context that is not `kind-*`.
-- **Namespaces.** Two, named `kernel-attack` and `kernel-restricted` in the
-  commands below. The captured output names them `kernel-attack` and
-  `kernel-restricted`, the lab's own names. `kernel-attack` enforces `privileged`,
-  because one Pod in it runs unconfined. It holds that one marked, insecure Pod
-  only. `kernel-restricted` enforces, audits and warns on `restricted`, and
-  holds every other Pod. A namespace above `restricted` is an exception. Its
-  reason is that this Pod must run unconfined to show what unconfined allows.
-  Its owning chapter is this one. Its expiry is 2027-10-31, within twelve
-  months. The registry that 05.09 keeps is not in this repository yet, so the
-  exception is recorded here <!-- link-later: 05.09 -->.
+- **Namespaces.** Two, `kernel-attack` and `kernel-restricted`. The recorded
+  run named them `p05-05-attack` and `p05-05-restricted`; the script and the
+  transcript carry the chapter's names, and their headers say so.
+  `kernel-attack` enforces `privileged`, because one Pod in it runs unconfined.
+  It holds that one marked, insecure Pod only. `kernel-restricted` enforces,
+  audits and warns on `restricted`, and holds every other Pod. A namespace
+  above `restricted` is an exception. Its reason is that this Pod must run
+  unconfined to show what unconfined allows. Its owning chapter is this one.
+  Its expiry is 2027-10-31, within twelve months. The entry is in
+  `security/namespace-exceptions.yaml` at the repository root, and
+  [05.09](09-running-security-on-a-platform-team.md) explains how the registry
+  is kept.
 - **What did not run.** The AppArmor load, which the lab does not do (see the
   AppArmor section). Step 6, gVisor, needs a runtime installed into the node,
   which restarts the node's containerd and interrupts the Pods on it. Both are
@@ -677,8 +679,8 @@ the node. It prints what remains.
 <!-- gate: output -->
 
 ```
-namespace "p05-05-attack" deleted
-namespace "p05-05-restricted" deleted
+namespace "kernel-attack" deleted
+namespace "kernel-restricted" deleted
 ```
 
 ## How it works under the hood

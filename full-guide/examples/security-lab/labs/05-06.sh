@@ -12,12 +12,19 @@
 #
 # A kind node is a container on the machine that runs kind, and it shares that
 # machine's kernel. The probes run from a Pod on the node network. The only
-# objects this script creates are in namespaces named p05-* and in cluster-scoped
-# objects named p05-06-*, and it deletes them on exit.
+# objects this script creates are in the namespaces kube-bench, p05-attack and
+# p05-kubelet-authz and in cluster-scoped objects named p05-06-*, and it deletes
+# them on exit.
 #
-# Namespace exception: p05-kube-bench is labelled privileged, because the kube-bench
+# Namespace exception: kube-bench is labelled privileged, because the kube-bench
 # Job reads the node's files and process table as root. Chapter 05.06. Expiry
 # 2027-10-31, within twelve months.
+#
+# The recorded run named that namespace p05-kube-bench. This file and the
+# transcript carry the chapter's name, kube-bench, because the exceptions
+# registry reads Pod Security labels from scripts and transcripts and registers
+# the chapter's namespace, not a lab name. That rename is the only edit made
+# after the run.
 set +e
 
 # Read a command from stdin, print it exactly as it runs, then run it.
@@ -34,8 +41,8 @@ BENCH_IMAGE='docker.io/aquasec/kube-bench@sha256:75506f222d1eb6ce2a751a5533bdc0a
 wait_job() {
   local s f
   for _ in $(seq 1 120); do
-    s=$(kubectl -n p05-kube-bench get job kube-bench -o jsonpath='{.status.succeeded}' 2>/dev/null)
-    f=$(kubectl -n p05-kube-bench get job kube-bench -o jsonpath='{.status.failed}' 2>/dev/null)
+    s=$(kubectl -n kube-bench get job kube-bench -o jsonpath='{.status.succeeded}' 2>/dev/null)
+    f=$(kubectl -n kube-bench get job kube-bench -o jsonpath='{.status.failed}' 2>/dev/null)
     [ "$s" = 1 ] && return 0
     [ "$f" = 1 ] && return 1
     sleep 3
@@ -54,7 +61,7 @@ work=$(mktemp -d) && cd "$work" || exit 1
 cleanup() {
   echo '## cleanup: the lab namespaces and the cluster-scoped objects'
   run <<'CMD'
-kubectl delete ns p05-attack p05-kubelet-authz p05-kube-bench --ignore-not-found --wait=true
+kubectl delete ns p05-attack p05-kubelet-authz kube-bench --ignore-not-found --wait=true
 kubectl delete clusterrolebinding p05-06-node-stats p05-06-node-pods p05-06-node-proxy --ignore-not-found
 kubectl delete clusterrole p05-06-node-stats p05-06-node-pods p05-06-node-proxy --ignore-not-found
 CMD
@@ -127,7 +134,7 @@ cat > kube-bench.yaml <<YAML
 apiVersion: v1
 kind: Namespace
 metadata:
-  name: p05-kube-bench
+  name: kube-bench
   labels:
     pod-security.kubernetes.io/enforce: privileged
 ---
@@ -135,7 +142,7 @@ apiVersion: v1
 kind: ServiceAccount
 metadata:
   name: kube-bench
-  namespace: p05-kube-bench
+  namespace: kube-bench
 automountServiceAccountToken: false
 ---
 # INSECURE ON PURPOSE: a diagnostic Job that reads the node's process table and config files as root, so it needs hostPID, hostPath and root. Lab cluster only.
@@ -143,7 +150,7 @@ apiVersion: batch/v1
 kind: Job
 metadata:
   name: kube-bench
-  namespace: p05-kube-bench
+  namespace: kube-bench
 spec:
   backoffLimit: 0
   template:
@@ -402,22 +409,22 @@ echo '## step 2: kube-bench with no benchmark named, as its upstream Job runs it
 run <<'CMD'
 kubectl apply -f kube-bench-auto.yaml
 wait_job; echo "job status: $? (0 complete, 1 failed, 2 timed out)"
-kubectl -n p05-kube-bench logs job/kube-bench > kb-auto.txt
+kubectl -n kube-bench logs job/kube-bench > kb-auto.txt
 head -n 2 kb-auto.txt
 grep -A4 '^== Summary total' kb-auto.txt
-kubectl -n p05-kube-bench delete job kube-bench --wait=true
+kubectl -n kube-bench delete job kube-bench --wait=true
 CMD
 
 echo '## step 3: kube-bench pinned to cis-1.12, against the settings above'
 run <<'CMD'
 kubectl apply -f kube-bench.yaml
 wait_job; echo "job status: $?"
-kubectl -n p05-kube-bench logs job/kube-bench > kb-run.txt
+kubectl -n kube-bench logs job/kube-bench > kb-run.txt
 grep -A4 '^== Summary total' kb-run.txt
 grep -E '^== Summary (master|etcd|controlplane|node|policies)' -A4 kb-run.txt
 grep -E '^\[FAIL\]' kb-run.txt
 grep -E '^\[(PASS|FAIL|WARN|INFO)\] (1\.2\.1|1\.2\.15|2\.2|4\.2\.1|4\.2\.2|4\.2\.4) ' kb-run.txt
-kubectl -n p05-kube-bench delete job kube-bench --wait=true
+kubectl -n kube-bench delete job kube-bench --wait=true
 CMD
 
 echo '## step 4: attack from a restricted Pod with no token'

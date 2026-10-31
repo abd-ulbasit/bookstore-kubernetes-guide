@@ -1,0 +1,13 @@
+# INSECURE ON PURPOSE: the lab namespace enforces privileged, so the foothold Pod is admitted. Lab cluster only.
+#
+# This patch is kept in a file of its own, so that the Pod Security label sits
+# in a Namespace manifest. The exceptions registry reads labels there and
+# registers p05-capstone against chapter 05.10. The hardened overlay does not
+# apply it, so the base's restricted label stands.
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: p05-capstone
+  labels:
+    pod-security.kubernetes.io/enforce: privileged
+    pod-security.kubernetes.io/enforce-version: latest
