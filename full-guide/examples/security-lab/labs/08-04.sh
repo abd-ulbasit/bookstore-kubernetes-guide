@@ -33,6 +33,10 @@ esac
 show() { printf '$ %s\n' "$*"; }
 step() { printf '\n== %s\n' "$*"; }
 
+# Apply a file from the scratch directory, so an error message names the file
+# and not the scratch path.
+apply_here() { (cd "$WORK" && "$K" apply -f "$1" 2>&1); }
+
 # rename FILE OLD NEW: change the namespace of a manifest and nothing else. The
 # Namespace object's own name and every namespace: field move to NEW.
 rename() {
@@ -84,7 +88,7 @@ check create pods --subresource=exec --as="$SA" -n "$AC"
 check get pods --subresource=log --as="$SA" -n "$AC"
 check get secrets --as="$SA" -n "$BS"
 
-step "Section 3: a tenant at its quota, and a Pod from another namespace"
+step "Section 4: a tenant at its quota, and a Pod from another namespace"
 cat > "$WORK/acme-hog.yaml" <<EOF
 apiVersion: v1
 kind: Pod
@@ -122,7 +126,7 @@ spec:
       emptyDir: {}
 EOF
 show "kubectl apply -f acme-hog.yaml   # tenant-acme; asks for the whole 1Gi memory quota"
-"$K" apply -f "$WORK/acme-hog.yaml" 2>&1
+apply_here acme-hog.yaml
 show "kubectl wait --for=condition=Ready pod/acme-hog -n $AC --timeout=180s"
 "$K" wait --for=condition=Ready pod/acme-hog -n "$AC" --timeout=180s 2>&1
 show "kubectl get resourcequota tenant-acme-quota -n $AC"
@@ -130,17 +134,22 @@ show "kubectl get resourcequota tenant-acme-quota -n $AC"
 
 sed -e 's/acme-hog/acme-second/' -e 's/memory: 1Gi/memory: 512Mi/g' "$WORK/acme-hog.yaml" > "$WORK/acme-second.yaml"
 show "kubectl apply -f acme-second.yaml   # tenant-acme; deliberate failure, the quota is full"
-"$K" apply -f "$WORK/acme-second.yaml" 2>&1
+apply_here acme-second.yaml
 
 sed -e 's/acme-hog/acme-big/' -e 's/requests: {cpu: 50m, memory: 1Gi}/requests: {cpu: 50m, memory: 64Mi}/' -e 's/limits: {cpu: 250m, memory: 1Gi}/limits: {cpu: 250m, memory: 2Gi}/' "$WORK/acme-hog.yaml" > "$WORK/acme-big.yaml"
 show "kubectl apply -f acme-big.yaml   # tenant-acme; deliberate failure, over the LimitRange max"
-"$K" apply -f "$WORK/acme-big.yaml" 2>&1
+apply_here acme-big.yaml
 
-show "kubectl create namespace $PR"
-"$K" create namespace "$PR" 2>&1
-show "kubectl label namespace $PR pod-security.kubernetes.io/enforce=restricted"
-"$K" label namespace "$PR" pod-security.kubernetes.io/enforce=restricted 2>&1
 cat > "$WORK/probe.yaml" <<EOF
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: $PR
+  labels:
+    pod-security.kubernetes.io/enforce: restricted
+    pod-security.kubernetes.io/audit: restricted
+    pod-security.kubernetes.io/warn: restricted
+---
 apiVersion: v1
 kind: Pod
 metadata:
@@ -163,21 +172,62 @@ spec:
         readOnlyRootFilesystem: true
         capabilities:
           drop: ["ALL"]
+      resources:
+        requests: {cpu: 10m, memory: 16Mi}
+        limits: {memory: 64Mi}
+---
+apiVersion: v1
+kind: Pod
+metadata:
+  name: peer
+  namespace: $PR
+spec:
+  automountServiceAccountToken: false
+  securityContext:
+    runAsNonRoot: true
+    runAsUser: 65532
+    runAsGroup: 65532
+    seccompProfile:
+      type: RuntimeDefault
+  containers:
+    - name: app
+      image: $DBG
+      command: ["sh", "-c", "echo ok > /tmp/index.html && exec httpd -f -p 8080 -h /tmp"]
+      ports:
+        - containerPort: 8080
+      securityContext:
+        allowPrivilegeEscalation: false
+        readOnlyRootFilesystem: true
+        capabilities:
+          drop: ["ALL"]
+      resources:
+        requests: {cpu: 10m, memory: 16Mi}
+        limits: {memory: 64Mi}
+      volumeMounts:
+        - name: tmp
+          mountPath: /tmp
+  volumes:
+    - name: tmp
+      emptyDir: {}
 EOF
 show "kubectl apply -f probe.yaml   # namespace $PR, no NetworkPolicy of its own"
-"$K" apply -f "$WORK/probe.yaml" 2>&1
-show "kubectl wait --for=condition=Ready pod/probe -n $PR --timeout=180s"
-"$K" wait --for=condition=Ready pod/probe -n "$PR" --timeout=180s 2>&1
-IP=$("$K" get pod acme-hog -n "$AC" -o jsonpath='{.status.podIP}' 2>/dev/null)
-show "kubectl exec -n $PR probe -- wget -T 5 -qO- http://<acme-hog pod IP>:8080/   # deliberate: another tenant's Pod"
-"$K" exec -n "$PR" probe -- wget -T 5 -qO- "http://$IP:8080/" 2>&1
+apply_here probe.yaml
+show "kubectl wait --for=condition=Ready pod/probe pod/peer -n $PR --timeout=180s"
+"$K" wait --for=condition=Ready pod/probe pod/peer -n "$PR" --timeout=180s 2>&1
+PEER_IP=$("$K" get pod peer -n "$PR" -o jsonpath='{.status.podIP}' 2>/dev/null)
+ACME_IP=$("$K" get pod acme-hog -n "$AC" -o jsonpath='{.status.podIP}' 2>/dev/null)
+show "kubectl exec -n $PR probe -- wget -T 5 -qO- http://\$PEER_IP:8080/; echo \"exit status: \$?\"   # control: a Pod in the same namespace"
+"$K" exec -n "$PR" probe -- wget -T 5 -qO- "http://$PEER_IP:8080/" 2>&1
+echo "exit status: $?"
+show "kubectl exec -n $PR probe -- wget -T 5 -qO- http://\$ACME_IP:8080/; echo \"exit status: \$?\"   # deliberate: another tenant's Pod"
+"$K" exec -n "$PR" probe -- wget -T 5 -qO- "http://$ACME_IP:8080/" 2>&1
 echo "exit status: $?"
 
-step "Section 3: a deliberate failure, refused by restricted"
+step "Section 5: a deliberate failure, refused by restricted"
 show "kubectl run escape-probe -n $AC --image=bookstore/catalog:dev --restart=Never --privileged --dry-run=server"
 "$K" run escape-probe -n "$AC" --image=bookstore/catalog:dev --restart=Never --privileged --dry-run=server 2>&1
 
-step "Section 4: environments are overlays of one namespace, not tenants"
+step "Section 6: environments are overlays of one namespace, not tenants"
 show "kubectl kustomize examples/bookstore/kustomize/overlays/dev | grep -m1 'namespace:'"
 "$K" kustomize examples/bookstore/kustomize/overlays/dev 2>&1 | grep -m1 'namespace:'
 show "kubectl kustomize examples/bookstore/kustomize/overlays/prod | grep -m1 'namespace:'"

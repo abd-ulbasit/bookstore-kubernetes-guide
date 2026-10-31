@@ -112,9 +112,9 @@ chapter teaches and where the topic goes deeper.
 |---|---|---|
 | A container escape on a shared node reaches another tenant | None inside a namespace. The chapter names the gap; node isolation and sandboxed runtimes close it | [04.02](../04-scheduling/02-affinity-taints-topology.md) for node isolation; sandboxed runtimes in chapter 05.05 <!-- link-later: 05.05 --> |
 | A tenant raises its own quota, or takes cluster-wide power | A namespaced Role and RoleBinding, with no verbs on `resourcequotas` or `limitranges` | [05.01](../05-security/01-authn-authz-rbac.md) |
-| A noisy tenant starves the others of CPU and memory | ResourceQuota caps the namespace total; LimitRange bounds each container | [01.03](../01-core-workloads/03-resources-and-qos.md); [04.03](../04-scheduling/03-priority-and-preemption.md) |
+| A noisy tenant starves the others of CPU and memory | ResourceQuota caps the namespace total; LimitRange bounds each container. Step 3 shows a Pod refused over each | [01.03](../01-core-workloads/03-resources-and-qos.md); [04.03](../04-scheduling/03-priority-and-preemption.md) |
 | A noisy tenant floods the API server | Not closed here: quota does not count API requests | [11.03](../11-advanced-production-patterns/03-api-priority-and-fairness.md) |
-| A tenant reaches another tenant's Pods over the network | Default-deny NetworkPolicy, plus a same-namespace allow | [02.06](../02-networking/06-network-policies.md) |
+| A tenant reaches another tenant's Pods over the network | Default-deny NetworkPolicy, plus a same-namespace allow. Step 3 shows a request from another namespace dropped | [02.06](../02-networking/06-network-policies.md) |
 | A tenant runs a privileged Pod, or uses exec to read a workload's mounts | PSA `restricted`; no `pods/exec` in the tenant Role | [05.02](../05-security/02-pod-security.md); debugging in [08.03](03-troubleshooting-playbook.md) |
 
 ## Diagrams
@@ -240,10 +240,10 @@ objects, without the Bookstore workloads, so usage reads zero:
 <!-- gate: output -->
 ```
 NAME                            REQUEST                                                 LIMIT                                   AGE
-resourcequota/bookstore-quota   pods: 0/30, requests.cpu: 0/2, requests.memory: 0/2Gi   limits.cpu: 0/4, limits.memory: 0/4Gi   2s
+resourcequota/bookstore-quota   pods: 0/30, requests.cpu: 0/2, requests.memory: 0/2Gi   limits.cpu: 0/4, limits.memory: 0/4Gi   1s
 
 NAME                          CREATED AT
-limitrange/bookstore-limits   2026-10-31T04:16:43Z
+limitrange/bookstore-limits   2026-10-31T07:29:57Z
 ```
 
 ```sh
@@ -254,9 +254,9 @@ kubectl get serviceaccounts -n bookstore
 <!-- gate: output -->
 ```
 NAME                 AGE
-catalog-sa           2s
+catalog-sa           1s
 # ...
-default              2s
+default              1s
 ```
 
 The `default` row is the ServiceAccount every namespace gets. Every Bookstore
@@ -363,7 +363,213 @@ Quota isolation follows from the same rule: ResourceQuota is counted per
 namespace, so tenant-acme exhausting its own total does not change
 bookstore's. The [Kubernetes resource quota
 page](https://kubernetes.io/docs/concepts/policy/resource-quotas/) states
-this. The lab run did not exhaust a quota.
+this. The next three checks show the quota, the LimitRange and the network
+refusing a request.
+
+**A tenant at its quota.** Save this Pod as `acme-hog.yaml`. It runs in
+tenant-acme under the tenant's ServiceAccount, carries the full baseline, and
+requests the whole 1Gi of memory that the tenant's quota allows:
+
+```yaml
+apiVersion: v1
+kind: Pod
+metadata:
+  name: acme-hog
+  namespace: tenant-acme
+spec:
+  serviceAccountName: acme-deployer
+  automountServiceAccountToken: false
+  securityContext:
+    runAsNonRoot: true
+    runAsUser: 65532
+    runAsGroup: 65532
+    seccompProfile:
+      type: RuntimeDefault
+  containers:
+    - name: app
+      image: busybox:1.36@sha256:73aaf090f3d85aa34ee199857f03fa3a95c8ede2ffd4cc2cdb5b94e566b11662
+      command: ["sh", "-c", "echo ok > /tmp/index.html && exec httpd -f -p 8080 -h /tmp"]
+      ports:
+        - containerPort: 8080
+      securityContext:
+        allowPrivilegeEscalation: false
+        readOnlyRootFilesystem: true
+        capabilities:
+          drop: ["ALL"]
+      resources:
+        requests: {cpu: 50m, memory: 1Gi}
+        limits: {cpu: 250m, memory: 1Gi}
+      volumeMounts:
+        - name: tmp
+          mountPath: /tmp
+  volumes:
+    - name: tmp
+      emptyDir: {}
+```
+
+```sh
+kubectl apply -f acme-hog.yaml
+kubectl wait --for=condition=Ready pod/acme-hog -n tenant-acme --timeout=180s
+kubectl get resourcequota tenant-acme-quota -n tenant-acme
+```
+
+The quota now reads `requests.memory: 1Gi/1Gi`:
+
+<!-- gate: output -->
+```
+pod/acme-hog created
+# ...
+pod/acme-hog condition met
+# ...
+NAME                REQUEST                                                                                                                                   LIMIT                                        AGE
+tenant-acme-quota   configmaps: 1/20, persistentvolumeclaims: 0/5, pods: 1/15, requests.cpu: 50m/1, requests.memory: 1Gi/1Gi, secrets: 0/20, services: 0/10   limits.cpu: 250m/2, limits.memory: 1Gi/2Gi   5s
+```
+
+**Deliberate failures.** Two more Pods, each a copy of `acme-hog.yaml` with one
+change, ask for more than the tenant may have. The first requests 512Mi on top
+of the 1Gi already used. The second keeps a small request but sets a 2Gi
+limit, above the LimitRange's 1Gi maximum for one container:
+
+```sh
+sed -e 's/acme-hog/acme-second/' -e 's/memory: 1Gi/memory: 512Mi/g' \
+  acme-hog.yaml > acme-second.yaml
+sed -e 's/acme-hog/acme-big/' \
+  -e 's/requests: {cpu: 50m, memory: 1Gi}/requests: {cpu: 50m, memory: 64Mi}/' \
+  -e 's/limits: {cpu: 250m, memory: 1Gi}/limits: {cpu: 250m, memory: 2Gi}/' \
+  acme-hog.yaml > acme-big.yaml
+kubectl apply -f acme-second.yaml
+kubectl apply -f acme-big.yaml
+```
+
+<!-- gate: output -->
+```
+Error from server (Forbidden): error when creating "acme-second.yaml": pods "acme-second" is forbidden: exceeded quota: tenant-acme-quota, requested: requests.memory=512Mi, used: requests.memory=1Gi, limited: requests.memory=1Gi
+# ...
+Error from server (Forbidden): error when creating "acme-big.yaml": pods "acme-big" is forbidden: maximum memory usage per Container is 1Gi, but limit is 2Gi
+```
+
+Admission refused both at the API server, and neither Pod exists. The first
+error comes from the ResourceQuota (the namespace total) and the second from
+the LimitRange (the per-container bound). That is the control for a noisy
+tenant: it can fill its own quota and no more, and `bookstore`'s quota is a
+separate object.
+
+**A request from another namespace.** tenant-acme's NetworkPolicies are
+default-deny plus `allow-same-namespace-only`. To test them, send a request
+from outside the tenant. Save this file as `probe.yaml`. It holds a plain
+namespace with no NetworkPolicy of its own, a `probe` Pod that makes the
+request, and a `peer` Pod in the same namespace that answers it, as a control:
+
+```yaml
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: probe
+  labels:
+    pod-security.kubernetes.io/enforce: restricted
+    pod-security.kubernetes.io/audit: restricted
+    pod-security.kubernetes.io/warn: restricted
+---
+apiVersion: v1
+kind: Pod
+metadata:
+  name: probe
+  namespace: probe
+spec:
+  automountServiceAccountToken: false
+  securityContext:
+    runAsNonRoot: true
+    runAsUser: 65532
+    runAsGroup: 65532
+    seccompProfile:
+      type: RuntimeDefault
+  containers:
+    - name: app
+      image: busybox:1.36@sha256:73aaf090f3d85aa34ee199857f03fa3a95c8ede2ffd4cc2cdb5b94e566b11662
+      command: ["sleep", "600"]
+      securityContext:
+        allowPrivilegeEscalation: false
+        readOnlyRootFilesystem: true
+        capabilities:
+          drop: ["ALL"]
+      resources:
+        requests: {cpu: 10m, memory: 16Mi}
+        limits: {memory: 64Mi}
+---
+apiVersion: v1
+kind: Pod
+metadata:
+  name: peer
+  namespace: probe
+spec:
+  automountServiceAccountToken: false
+  securityContext:
+    runAsNonRoot: true
+    runAsUser: 65532
+    runAsGroup: 65532
+    seccompProfile:
+      type: RuntimeDefault
+  containers:
+    - name: app
+      image: busybox:1.36@sha256:73aaf090f3d85aa34ee199857f03fa3a95c8ede2ffd4cc2cdb5b94e566b11662
+      command: ["sh", "-c", "echo ok > /tmp/index.html && exec httpd -f -p 8080 -h /tmp"]
+      ports:
+        - containerPort: 8080
+      securityContext:
+        allowPrivilegeEscalation: false
+        readOnlyRootFilesystem: true
+        capabilities:
+          drop: ["ALL"]
+      resources:
+        requests: {cpu: 10m, memory: 16Mi}
+        limits: {memory: 64Mi}
+      volumeMounts:
+        - name: tmp
+          mountPath: /tmp
+  volumes:
+    - name: tmp
+      emptyDir: {}
+```
+
+```sh
+kubectl apply -f probe.yaml
+kubectl wait --for=condition=Ready pod/probe pod/peer -n probe --timeout=180s
+PEER_IP=$(kubectl get pod peer -n probe -o jsonpath='{.status.podIP}')
+ACME_IP=$(kubectl get pod acme-hog -n tenant-acme -o jsonpath='{.status.podIP}')
+
+# Control: a Pod in the probe's own namespace answers.
+kubectl exec -n probe probe -- wget -T 5 -qO- http://$PEER_IP:8080/; echo "exit status: $?"
+```
+
+<!-- gate: output -->
+```
+ok
+exit status: 0
+```
+
+Now the **deliberate action**: the same request, sent to `acme-hog` in
+tenant-acme. That Pod runs the same image and command as `peer`:
+
+```sh
+kubectl exec -n probe probe -- wget -T 5 -qO- http://$ACME_IP:8080/; echo "exit status: $?"
+```
+
+<!-- gate: output -->
+```
+wget: download timed out
+command terminated with exit code 1
+exit status: 1
+```
+
+The request times out. A server that was not listening would refuse the
+connection at once, so the silence points at the NetworkPolicy dropping the
+packets. The control shows that the probe can reach a server in its own
+namespace. The run did not query `acme-hog` from inside tenant-acme, so it
+did not show that Pod answering an allowed client. The lab ran this on the
+[00.07](../00-foundations/07-local-cluster-setup.md) cluster, whose CNI
+enforces NetworkPolicy. A cluster whose CNI ignores policy would answer
+`ok`, so run this check on yours before you rely on the policy ([Part 02
+ch.06](../02-networking/06-network-policies.md)).
 
 **Deliberate failure.** The next request asks for a privileged container. It
 is refused, and the error names each rule the Pod breaks. The image is never
@@ -390,12 +596,6 @@ kubectl get nodes
 #   insufficient: add node isolation (taints/pools, Part 04 ch.02), a virtual
 #   control plane (vCluster), or SEPARATE CLUSTERS. See How it works.
 ```
-
-The NetworkPolicy objects are in place, but whether a dropped packet is
-dropped depends on a policy-enforcing CNI. The kind cluster in Part 00 ch.07
-enforces NetworkPolicy, and that chapter shows a denied request. This lab
-checks the objects, not the traffic
-([Part 02 ch.06](../02-networking/06-network-policies.md)).
 
 ### 4. How envs differ from tenants (the structural point, made concrete)
 
@@ -424,6 +624,7 @@ AppProject per team, not adding more overlays.
 Clean up:
 
 ```sh
+kubectl delete namespace probe --ignore-not-found
 kubectl delete -f examples/bookstore/operators/second-tenant.yaml --ignore-not-found
 kind delete cluster --name bookstore
 ```
