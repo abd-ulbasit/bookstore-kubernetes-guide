@@ -989,7 +989,7 @@ Backup checklist (the production setup is right when all seven are yes):
 3. **A team excludes the `bookstore` namespace from the backup Schedule because "it's all in GitOps anyway." Three months later they need to restore. What's missing and why does the chapter call this the canonical exclusion-list trap?**
    <details><summary>Show answer</summary>
 
-   GitOps stores the *desired* state: the Application manifests, Helm values, Kustomize overlays. It does **not** store cluster-managed state that the controllers create dynamically: Kyverno PolicyExceptions, OpenCost Allocations, Velero's own Backup CRs, any CR a controller creates but doesn't put back in Git. Excluding the namespace skips all of these. The chapter's discipline: default to inclusion, audit the exclusion list with eyes-on, and remember that "we have GitOps" doesn't replace backup — it covers a different layer.
+   GitOps stores the *desired* state: the Application manifests, Helm values, Kustomize overlays. It does **not** store cluster-managed state that the controllers create dynamically: Kyverno PolicyExceptions, OpenCost Allocations, Velero's own Backup CRs, any CR a controller creates but doesn't put back in Git. Excluding the namespace skips all of these. The chapter's discipline: default to inclusion, audit the exclusion list with eyes-on, and remember that "we have GitOps" doesn't replace backup. It covers a different layer.
 
    </details>
 

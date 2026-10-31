@@ -187,7 +187,7 @@ separate fields govern this, and they fire at different moments:
   - `NONE` — Terraform errors out if the resource already exists.
     Safer for green-field installs where a pre-existing resource is
     unexpected.
-- **`resolve_conflicts_on_update`** — applies when EKS updates the add-on.
+- **`resolve_conflicts_on_update`**: applies when EKS updates the add-on.
   Terraform sends an update only when `addon_version`,
   `configuration_values` or the service account role changes. A plain
   `terraform apply` with no such change sends no update and leaves hand
@@ -204,7 +204,7 @@ The bookstore-platform tree uses `OVERWRITE` on both. An add-on that someone
 has patched by hand should be set to `PRESERVE` until the patch is in
 `configuration_values`, and then it stays there.
 
-**Pod Identity Agent — IRSA's replacement.** **EKS Pod Identity** is a
+**Pod Identity Agent: IRSA's replacement.** **EKS Pod Identity** is a
 simpler alternative to IRSA. IRSA requires an OIDC provider, a trust
 policy with a Kubernetes service-account subject, and the cluster's OIDC
 issuer URL in the role. Pod Identity runs an agent pod on each node (the
@@ -787,7 +787,7 @@ Addon-management checklist (the cluster is healthy when all five are yes):
 
    </details>
 
-4. **Hands-on extension — create a fresh cluster with vpc-cni declared as a standalone `aws_eks_addon` resource (not inside `cluster_addons`) and note the timestamps of node registration and vpc-cni ACTIVE.**
+4. **Hands-on extension: create a fresh cluster with vpc-cni declared as a standalone `aws_eks_addon` resource (not inside `cluster_addons`) and note the timestamps of node registration and vpc-cni ACTIVE.**
    <details><summary>What you should see</summary>
 
    Neither form orders vpc-cni before the node group. The standalone resource has no `before_compute` field, and the module's form has no edge to the node group either. The bootstrap order therefore depends on timing. A node that registers first has no Pod IPs until vpc-cni is ACTIVE, and Pods scheduled to it stay in `ContainerCreating` until then. Your timestamps show the gap on your cluster. The example tree does not close it; an explicit dependency does (see the mechanics under How it works).
@@ -800,7 +800,7 @@ Addon-management checklist (the cluster is healthy when all five are yes):
   <https://docs.aws.amazon.com/eks/latest/userguide/eks-add-ons.html>;
   the authoritative reference for the addon API, the catalog, and
   what counts as an EKS-managed addon.
-- **terraform-aws-modules/eks/aws 20.37.2 — `main.tf` and `node_groups.tf`**
+- **terraform-aws-modules/eks/aws 20.37.2: `main.tf` and `node_groups.tf`**
   <https://github.com/terraform-aws-modules/terraform-aws-eks/blob/v20.37.2/main.tf>;
   the `aws_eks_addon.this` and `aws_eks_addon.before_compute` resources, and
   the `time_sleep` that the node groups wait on.

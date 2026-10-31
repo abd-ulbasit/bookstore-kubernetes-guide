@@ -11,7 +11,7 @@
 > of traffic moved off NAT in a 3-AZ cluster.
 
 **Estimated time:** ~30 min read · ~60 min hands-on
-**Prerequisites:** [Part 14 ch.06](./06-cost-guardrails.md) — egress cost is the #1 surprise line · [Part 10 ch.04](../10-cloud-and-managed-kubernetes/04-cloud-networking-and-load-balancing.md) — VPC + NAT topology the bookstore tree already has · [Part 13 ch.01](../13-grand-capstone-bookstore-platform/01-bookstore-2-from-toy-to-platform.md) — bookstore VPC you'll add endpoints to
+**Prerequisites:** [Part 14 ch.06](./06-cost-guardrails.md): egress cost is the #1 surprise line · [Part 10 ch.04](../10-cloud-and-managed-kubernetes/04-cloud-networking-and-load-balancing.md): VPC + NAT topology the bookstore tree already has · [Part 13 ch.01](../13-grand-capstone-bookstore-platform/01-bookstore-2-from-toy-to-platform.md): bookstore VPC you'll add endpoints to
 
 **You'll know after this:** • understand NAT gateway pricing ($0.045/hr + $0.045/GB) and where it dominates the cluster bill · • configure gateway endpoints (free) for S3 and DynamoDB · • configure interface endpoints for ECR, STS, EC2, CloudWatch Logs, KMS and compute their per-cluster break-even · • design private subnets that skip NAT entirely for AWS-API traffic · • debug a Pod that suddenly can't pull from ECR after an endpoint policy change
 
@@ -34,7 +34,7 @@ two dimensions:
   high availability) = ~$99/month standing. The HA configuration is
   the production-shape default; the single-NAT layout the
   bookstore-platform tree ships is a cost-trimmed sandbox shape.
-- **Per-GB data-processing fee** — $0.045/GB processed in either
+- **Per-GB data-processing fee**: $0.045/GB processed in either
   direction through NAT. A 5-GB ECR image pull through NAT costs $0.23
   each time; twenty Pods restarting and re-pulling on a cluster bounce costs
   ~$4.50; an idle production cluster shipping 50 GB/month of
@@ -56,7 +56,7 @@ VPC endpoints close most of this:
   through the endpoint instead of NAT. For a cluster that pulls
   Loki chunks, Velero backups, or ML model artifacts from S3, this
   is the single highest-ROI change in the entire Terraform tree.
-- **Gateway endpoint for DynamoDB** — Free. Same shape. Relevant only
+- **Gateway endpoint for DynamoDB**: Free. Same shape. Relevant only
   when a workload calls DynamoDB.
 - **Interface endpoints** for ECR-API, ECR-DKR, STS, EC2, CloudWatch-Logs,
   KMS, Secrets Manager, etc. — $0.01/hr per AZ per endpoint
@@ -558,7 +558,7 @@ NAT data cost: $12.93              NAT data cost: $7.11
                                    Net change: +$125.63 (cost)
 ```
 
-Whoops — in this illustrative run, the interface endpoints cost more
+Whoops. In this illustrative run, the interface endpoints cost more
 than they saved. The gateway endpoint did the saving, for free. **This
 is the cluster size where you don't enable interface endpoints.** The
 six-endpoint set breaks even near 3,750 GB/month moved off NAT
@@ -656,7 +656,7 @@ this (the traffic isn't going to AWS services, it's pod-to-pod);
 the only mitigation is keeping replicas in the same AZ (which
 defeats the cross-AZ HA story).
 
-**Transit Gateway — when it makes sense.** Transit Gateway (TGW) bills
+**Transit Gateway: when it makes sense.** Transit Gateway (TGW) bills
 per attachment and per GB processed (check the pricing page for your
 Region). For a single VPC, TGW
 is pure overhead. For 10+ VPCs that need to talk to each other +
@@ -847,7 +847,7 @@ are yes):
 1. **Why is the S3 gateway endpoint "always-enable" while interface endpoints are conditional?**
    <details><summary>Show answer</summary>
 
-   The S3 gateway endpoint is **free** — no hourly fee, no per-GB processing fee, just a route-table entry that diverts S3 traffic off NAT. There's no downside. Interface endpoints cost $0.01/hr per AZ + $0.01/GB processed; at 3 AZs that's ~$22/month standing per endpoint, and each one breaks even only once it moves about 625 GB/month off NAT in a 3-AZ cluster. Below that, its standing fee exceeds its data savings.
+   The S3 gateway endpoint is **free**: no hourly fee, no per-GB processing fee, just a route-table entry that diverts S3 traffic off NAT. There's no downside. Interface endpoints cost $0.01/hr per AZ + $0.01/GB processed; at 3 AZs that's ~$22/month standing per endpoint, and each one breaks even only once it moves about 625 GB/month off NAT in a 3-AZ cluster. Below that, its standing fee exceeds its data savings.
 
    </details>
 
@@ -861,7 +861,7 @@ are yes):
 3. **A team enables 7 interface endpoints in a single-AZ dev cluster and the AWS bill goes UP by $50/month. What happened and what's the lesson?**
    <details><summary>Show answer</summary>
 
-   Each interface endpoint costs ~$7.30/month per AZ in standing fees; 7 × 1 AZ = $51/month standing. In a single-AZ cluster with low NAT data volume, the dev cluster doesn't shift enough GB through the endpoints to recover the standing cost — the data-savings line is small, the standing-fee line is large, net cost up. The lesson: enable interface endpoints **after** measuring NAT volume (the break-even is about 208 GB/month per endpoint in one AZ, and about 625 GB/month in three); for dev clusters with low traffic, the free S3 gateway endpoint alone is the right answer.
+   Each interface endpoint costs ~$7.30/month per AZ in standing fees; 7 × 1 AZ = $51/month standing. In a single-AZ cluster with low NAT data volume, the dev cluster doesn't shift enough GB through the endpoints to recover the standing cost; the data-savings line is small, the standing-fee line is large, net cost up. The lesson: enable interface endpoints **after** measuring NAT volume (the break-even is about 208 GB/month per endpoint in one AZ, and about 625 GB/month in three); for dev clusters with low traffic, the free S3 gateway endpoint alone is the right answer.
 
    </details>
 

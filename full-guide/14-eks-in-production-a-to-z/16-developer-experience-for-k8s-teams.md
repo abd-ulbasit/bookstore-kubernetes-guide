@@ -1187,7 +1187,7 @@ Developer-experience checklist (the platform is delivering DX when all six are y
 1. **The chapter calls the GitOps-cycle inner loop a "compounding developer-velocity tax." Why is the illustrative 6-minute round trip worse than it sounds?**
    <details><summary>Show answer</summary>
 
-   Take the illustrative 6-minute round trip per save-and-test cycle. A developer doing 30-50 iterations a day (a normal debug session for a real bug) spends 3-5 hours just *waiting*. Multiply by 10 engineers and the team loses 30-50 person-hours per day to inner-loop friction. That's worse than it sounds because it also shapes *what the engineers attempt* — they avoid riskier experiments (refactors, exploratory rewrites) because the cycle time makes failure expensive. The compounding effect is the team architecting around the friction instead of doing the right thing.
+   Take the illustrative 6-minute round trip per save-and-test cycle. A developer doing 30-50 iterations a day (a normal debug session for a real bug) spends 3-5 hours just *waiting*. Multiply by 10 engineers and the team loses 30-50 person-hours per day to inner-loop friction. That's worse than it sounds because it also shapes *what the engineers attempt*. They avoid riskier experiments (refactors, exploratory rewrites) because the cycle time makes failure expensive. The compounding effect is the team architecting around the friction instead of doing the right thing.
 
    </details>
 

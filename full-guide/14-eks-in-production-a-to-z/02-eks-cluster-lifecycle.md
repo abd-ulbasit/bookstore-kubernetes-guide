@@ -9,7 +9,7 @@
 > clusters for the multi-version-skip case.
 
 **Estimated time:** ~30 min read · ~90 min hands-on
-**Prerequisites:** [Part 14 ch.01](./01-terraform-state-in-production.md) — remote state required before a version bump · [Part 08 ch.01](../08-day-2-operations/01-cluster-lifecycle.md) — kind cluster upgrade dance you'll now adapt for EKS · [Part 10 ch.02](../10-cloud-and-managed-kubernetes/02-provisioning-and-iac.md) — the bookstore EKS module you'll upgrade
+**Prerequisites:** [Part 14 ch.01](./01-terraform-state-in-production.md): remote state required before a version bump · [Part 08 ch.01](../08-day-2-operations/01-cluster-lifecycle.md): kind cluster upgrade dance you'll now adapt for EKS · [Part 10 ch.02](../10-cloud-and-managed-kubernetes/02-provisioning-and-iac.md): the bookstore EKS module you'll upgrade
 
 **You'll know after this:** • understand the 14-month standard vs 12-month extended-support windows and the $0.50/cluster-hour surcharge · • execute the three-plane upgrade (control plane, then nodes and add-ons) in the order the tree enforces · • run `kubent` to hunt deprecated APIs before the upgrade · • choose between in-place version bumps and blue-green clusters for multi-version skips · • rehearse the EKS upgrade against the Bookstore Platform tree before a version deadline
 
@@ -23,7 +23,7 @@ declares `kubernetes_version = "1.37"` in `variables.tf`. That number
 isn't a fixed label — it's a deadline. AWS marks each Kubernetes minor
 version with two date stamps:
 
-1. **End of standard support** — when the version moves into extended
+1. **End of standard support**: when the version moves into extended
    support and its surcharge starts.
    For 1.37, this is **2027-12-01** (14 months from its EKS release on
    2026-10-01). Up to this date, the EKS control-plane fee is
@@ -198,7 +198,7 @@ The extended-support surcharge is spend, not a security threat;
 ```mermaid
 flowchart TB
     pre["Pre-flight<br/>aws eks describe-cluster-versions<br/>kubent (deprecated-API audit)<br/>staging cluster proven on N+1"]
-    cp["Plane 1 — Control plane<br/>terraform apply<br/>kubernetes_version: N -> N+1<br/>endpoint stays available"]
+    cp["Plane 1: Control plane<br/>terraform apply<br/>kubernetes_version: N -> N+1<br/>endpoint stays available"]
     vc["Plane 2a - vpc-cni (before_compute)<br/>default build for the new minor"]
     ad["Plane 2b - kube-proxy, CoreDNS, EBS-CSI<br/>default builds for the new minor<br/>no edge to the node group"]
     mn["Plane 3a - Managed node group<br/>starts after a 30s timer<br/>rolls one node at a time<br/>(PDB and eviction limits apply)"]
@@ -821,7 +821,7 @@ Pre-upgrade checklist (the bump is safe when all five are yes):
 - **Kubernetes version-skew policy**
   <https://kubernetes.io/releases/version-skew-policy/>; the upstream
   policy that bounds what's safe during the upgrade window.
-- **AWS EKS Best Practices Guide — Cluster upgrades**
+- **AWS EKS Best Practices Guide: Cluster upgrades**
   <https://docs.aws.amazon.com/eks/latest/best-practices/cluster-upgrades.html>;
   the AWS team's upgrade guidance, linked from the update-cluster page.
 - **AWS EKS: Kubernetes versions standard support**

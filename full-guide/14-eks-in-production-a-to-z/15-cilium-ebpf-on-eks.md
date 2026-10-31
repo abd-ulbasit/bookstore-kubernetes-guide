@@ -406,7 +406,7 @@ kubectl label namespace kube-system pod-security.kubernetes.io/enforce=privilege
 
 Then rename `cilium-installation.tf.example` to `cilium-installation.tf`, fill
 in the `k8sServiceHost` (the cluster API endpoint hostname, without the
-`https://` prefix — get it from `terraform output cluster_endpoint`),
+`https://` prefix; get it from `terraform output cluster_endpoint`),
 uncomment the variable declaration, then `terraform apply` again. Cilium
 installs. Once Terraform has removed the kube-proxy add-on, its DaemonSet
 should be gone. If one is still present, delete it, as the [kube-proxy-free
@@ -846,7 +846,7 @@ destination Pod identity, L4 protocol, L7 protocol (if applicable), verdict
 (allowed/denied + policy match), timestamp. The Relay aggregates flows across
 nodes; the Hubble UI (a frontend in the `hubble-ui` Deployment) renders the
 service map; the `hubble` CLI streams flows from the Relay over gRPC. The flow
-storage is **in-memory only by default** — a sliding window of the last N
+storage is **in-memory only by default**: a sliding window of the last N
 events per node. For persistent storage, configure the `hubble.export`
 integration to ship flows to OTel or a log aggregator.
 

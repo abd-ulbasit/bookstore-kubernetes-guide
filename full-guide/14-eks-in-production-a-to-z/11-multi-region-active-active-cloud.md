@@ -1093,10 +1093,10 @@ Minimal multi-region active-active checklist (healthy when all 8 are yes):
 
    </details>
 
-5. **Hands-on extension — provision the `multi-region/` Terraform across 3 regions, then take down the writer region (terraform destroy) without first promoting a standby cluster. What happens to writes?**
+5. **Hands-on extension: provision the `multi-region/` Terraform across 3 regions, then take down the writer region (terraform destroy) without first promoting a standby cluster. What happens to writes?**
    <details><summary>What you should see</summary>
 
-   Writes fail immediately at the application layer — the payments-worker in the surviving regions still points at the (now-unreachable) primary's connection string, requests time out, the circuit breaker (if there is one) opens. Route 53 removes the failed region from the rotation, so user-facing reads route around it; writes are dead until a standby is promoted. The lesson: DNS failover handles the read story for free, but the writer story requires the explicit standby promotion + the writer-workload re-deploy. The runbook isn't optional — without it, RTO is "however long it takes the operator to remember the commands."
+   Writes fail immediately at the application layer. The payments-worker in the surviving regions still points at the (now-unreachable) primary's connection string, requests time out, the circuit breaker (if there is one) opens. Route 53 removes the failed region from the rotation, so user-facing reads route around it; writes are dead until a standby is promoted. The lesson: DNS failover handles the read story for free, but the writer story requires the explicit standby promotion + the writer-workload re-deploy. The runbook isn't optional. Without it, RTO is "however long it takes the operator to remember the commands."
 
    </details>
 

@@ -8,7 +8,7 @@
 > the state in code matching the state in cloud.
 
 **Estimated time:** ~30 min read · ~90 min hands-on
-**Prerequisites:** [Part 14 ch.01](./01-terraform-state-in-production.md) — remote state with locking required for CI · [Part 14 ch.02](./02-eks-cluster-lifecycle.md) — upgrade flow that CI must drive · [Part 07 ch.03](../07-delivery/03-cicd-pipeline.md) — the CI pipeline pattern from app delivery
+**Prerequisites:** [Part 14 ch.01](./01-terraform-state-in-production.md): remote state with locking required for CI · [Part 14 ch.02](./02-eks-cluster-lifecycle.md): upgrade flow that CI must drive · [Part 07 ch.03](../07-delivery/03-cicd-pipeline.md): the CI pipeline pattern from app delivery
 
 **You'll know after this:** • configure GitHub Actions with OIDC trust to AWS (no long-lived access keys) · • implement the plan-on-PR, apply-on-merge shape every EKS Terraform tree should reach within its first month · • run nightly `terraform plan -refresh-only -detailed-exitcode` drift checks and act on exit code 2 · • follow the reconciliation runbook when "someone changed it in the console" · • debug a stuck CI apply by inspecting the S3 lock and recovering safely
 
@@ -183,7 +183,7 @@ old form unless they opt in. Pin whatever your token carries.
 | Pattern | Tool | When |
 |---|---|---|
 | Scheduled `terraform plan -refresh-only -detailed-exitcode` | GitHub Actions cron / Jenkins | The simplest and most universal; the Bookstore Platform's `drift-check/nightly-drift.yml` ships this. |
-| `driftctl` | OSS CLI, ex-CloudSkiff | Stronger because it scans the cloud for resources Terraform doesn't manage at all — catches the "someone created a resource by hand" case. Its README says
+| `driftctl` | OSS CLI, ex-CloudSkiff | Stronger because it scans the cloud for resources Terraform doesn't manage at all, so it catches the "someone created a resource by hand" case. Its README says
 it is in maintenance mode. |
 | AWS Config + custom rules | AWS Config service | Cloud-native; useful when the org already uses Config for compliance; aligns drift with the compliance posture. |
 
@@ -897,7 +897,7 @@ customization pays for itself.
 "Terraform as a managed service": you push code, they run the plan,
 they offer a UI to review and approve, they apply on approval. The
 appeal: drift detection, run history, policy-as-code (Sentinel /
-OPA), state encryption, audit logs — all included. The cost is per
+OPA), state encryption, audit logs, all included. The cost is per
 user and changes, so check each vendor's pricing page. At 20+
 engineers, the per-user fee becomes material; at 5 engineers, it's
 noise compared to engineering time saved.
@@ -1077,7 +1077,7 @@ CI/CD-readiness checklist (production-shape when all seven are yes):
 1. **Why does the chapter argue OIDC trust replaces (rather than improves) long-lived AWS access keys in CI?**
    <details><summary>Show answer</summary>
 
-   Long-lived access keys are a credential that exists *outside the run* — stored in GitHub Secrets, copied to dev laptops, sometimes screenshot accidentally. Rotation is post-hoc: by the time you rotate, the leaked key might already have been used. OIDC trust mints a short-lived JWT *per workflow run*, exchanged for STS credentials that live ~1 hour and only inside the runner's environment. There's nothing static to rotate, nothing to leak. The IAM role's trust policy uses `StringEquals` against the GitHub `sub` claim (repo + environment, or repo + branch), so a token minted for any other repo, branch or environment is rejected; a run without `id-token: write` cannot request one.
+   Long-lived access keys are a credential that exists *outside the run*: stored in GitHub Secrets, copied to dev laptops, sometimes screenshot accidentally. Rotation is post-hoc: by the time you rotate, the leaked key might already have been used. OIDC trust mints a short-lived JWT *per workflow run*, exchanged for STS credentials that live ~1 hour and only inside the runner's environment. There's nothing static to rotate, nothing to leak. The IAM role's trust policy uses `StringEquals` against the GitHub `sub` claim (repo + environment, or repo + branch), so a token minted for any other repo, branch or environment is rejected; a run without `id-token: write` cannot request one.
 
    </details>
 
