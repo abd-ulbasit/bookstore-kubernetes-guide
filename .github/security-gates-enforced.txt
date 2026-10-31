@@ -21,6 +21,7 @@
 06-production-readiness/
 07-delivery/03-cicd-pipeline.md
 07-delivery/
+08-day-2-operations/
 10-cloud-and-managed-kubernetes/
 11-advanced-production-patterns/
 13-grand-capstone-bookstore-platform/

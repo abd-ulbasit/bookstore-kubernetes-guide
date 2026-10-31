@@ -150,6 +150,9 @@ versions follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   security-first. The example operator's missing `/convert` route is
   registered and its manager ran on kind, and
   `11-advanced-production-patterns/` joins the enforced list.
+- Part 08 Day-2 operations (08.01 to 08.05) is rewritten security-first, with
+  the 08.01 drill and the 08.04 quota and tenant refusals run on a three-node
+  kind cluster, and `08-day-2-operations/` joins the enforced list.
 
 ### Fixed
 - Standalone EKS add-ons (kube-proxy, CoreDNS, EBS CSI) now follow
