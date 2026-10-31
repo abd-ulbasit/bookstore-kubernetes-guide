@@ -474,6 +474,13 @@ that names the init image, also pinned by digest. Step 4 shows why the worker
 needs them. The KubeRay chart is given its image by digest as well, so neither
 tag can move under the install.
 
+The overlay's `?ref=` names the full commit SHA that tag `v1.9.4` resolves
+to, not the tag (`git ls-remote` printed
+`4445c12aa62e4345b0c2c6ac9b215a70eca46ed7` for it). That follows
+[07.02](../07-delivery/02-packaging-kustomize.md): a tag can be moved, and a
+full SHA cannot. A render with the SHA and a render with the tag came out byte
+for byte the same.
+
 KubeRay's chart also ships feature gates for mTLS and a NetworkPolicy
 generator. In the 1.7.1 chart both are off by default, and this chapter writes
 its own policy rather than relying on either:

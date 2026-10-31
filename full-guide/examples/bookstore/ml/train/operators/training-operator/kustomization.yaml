@@ -22,7 +22,9 @@ apiVersion: kustomize.config.k8s.io/v1beta1
 kind: Kustomization
 namespace: kubeflow
 resources:
-  - github.com/kubeflow/training-operator/manifests/overlays/standalone?ref=v1.9.4
+  # Pinned to the commit that tag v1.9.4 resolves to (git ls-remote), because a
+  # tag can be moved and a full SHA cannot. Bump the SHA and this comment together.
+  - github.com/kubeflow/training-operator/manifests/overlays/standalone?ref=4445c12aa62e4345b0c2c6ac9b215a70eca46ed7
 images:
   - name: ghcr.io/kubeflow/training-v1/training-operator
     digest: sha256:45aa299d92c21a1abc0e9731694f01be637ab5c6c9681a687aedf142b0468d45
