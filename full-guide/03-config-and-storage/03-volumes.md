@@ -207,18 +207,24 @@ kubectl rollout status deployment/catalog -n bookstore
 
 ### 2. A scratch namespace and its ServiceAccount
 
-Create `p03-volumes` for the rest of this chapter. It enforces `restricted`.
-Its ServiceAccount mounts no API token and has no RoleBinding of its own, so a
-Pod that uses it has no API permissions. Every `emptyDir` below has a
-`sizeLimit`. The baseline in [01.01](../01-core-workloads/01-pods.md#baseline)
-shows `emptyDir: {}` for `/tmp`; read that as a placeholder for a size.
+Create `volumes-scratch` for the rest of this chapter. It enforces
+`restricted`. Its ServiceAccount mounts no API token and has no RoleBinding of
+its own, so a Pod that uses it has no API permissions. Every `emptyDir` below
+has a `sizeLimit`. The baseline in
+[01.01](../01-core-workloads/01-pods.md#baseline) shows `emptyDir: {}` for
+`/tmp`; read that as a placeholder for a size.
+
+The recorded run used a scratch namespace named `p03-volumes` on a lab kind
+cluster whose name differs from the guide's. Lines in the output blocks that
+name that namespace are kept as captured. Every command below names
+`volumes-scratch` instead.
 
 ```sh
 kubectl apply -f - <<'EOF'
 apiVersion: v1
 kind: Namespace
 metadata:
-  name: p03-volumes
+  name: volumes-scratch
   labels:
     pod-security.kubernetes.io/enforce: restricted
     pod-security.kubernetes.io/enforce-version: latest
@@ -227,7 +233,7 @@ apiVersion: v1
 kind: ServiceAccount
 metadata:
   name: inspect-sa
-  namespace: p03-volumes
+  namespace: volumes-scratch
 automountServiceAccountToken: false
 EOF
 ```
@@ -251,7 +257,7 @@ apiVersion: v1
 kind: Pod
 metadata:
   name: dapi-peek
-  namespace: p03-volumes
+  namespace: volumes-scratch
   labels:
     app: inspect
 spec:
@@ -307,9 +313,9 @@ spec:
               containerName: peek
               resource: limits.cpu
 EOF
-kubectl wait pod/dapi-peek -n p03-volumes --for=jsonpath='{.status.phase}'=Succeeded --timeout=300s
-kubectl logs dapi-peek -n p03-volumes
-kubectl delete pod dapi-peek -n p03-volumes --now
+kubectl wait pod/dapi-peek -n volumes-scratch --for=jsonpath='{.status.phase}'=Succeeded --timeout=300s
+kubectl logs dapi-peek -n volumes-scratch
+kubectl delete pod dapi-peek -n volumes-scratch --now
 ```
 
 <!-- gate: output -->
@@ -350,7 +356,7 @@ apiVersion: v1
 kind: Pod
 metadata:
   name: ed-demo
-  namespace: p03-volumes
+  namespace: volumes-scratch
 spec:
   serviceAccountName: inspect-sa
   automountServiceAccountToken: false
@@ -408,10 +414,10 @@ spec:
 
 ```sh
 kubectl apply -f ed-demo.yaml
-kubectl wait pod/ed-demo -n p03-volumes --for='jsonpath={.status.containerStatuses[0].restartCount}=1' --timeout=300s
-kubectl logs ed-demo -n p03-volumes --previous -c main
-kubectl logs ed-demo -n p03-volumes -c main
-kubectl get pod ed-demo -n p03-volumes
+kubectl wait pod/ed-demo -n volumes-scratch --for='jsonpath={.status.containerStatuses[0].restartCount}=1' --timeout=300s
+kubectl logs ed-demo -n volumes-scratch --previous -c main
+kubectl logs ed-demo -n volumes-scratch -c main
+kubectl get pod ed-demo -n volumes-scratch
 ```
 
 <!-- gate: output -->
@@ -428,11 +434,11 @@ Now delete the Pod and create it again from the same file. The second Pod gets
 a new, empty `emptyDir`:
 
 ```sh
-kubectl delete pod ed-demo -n p03-volumes --now
+kubectl delete pod ed-demo -n volumes-scratch --now
 kubectl apply -f ed-demo.yaml
-kubectl wait pod/ed-demo -n p03-volumes --for='jsonpath={.status.containerStatuses[0].restartCount}=1' --timeout=300s
-kubectl logs ed-demo -n p03-volumes --previous -c main
-kubectl delete pod ed-demo -n p03-volumes --now
+kubectl wait pod/ed-demo -n volumes-scratch --for='jsonpath={.status.containerStatuses[0].restartCount}=1' --timeout=300s
+kubectl logs ed-demo -n volumes-scratch --previous -c main
+kubectl delete pod ed-demo -n volumes-scratch --now
 ```
 
 <!-- gate: output -->
@@ -459,7 +465,7 @@ apiVersion: v1
 kind: Pod
 metadata:
   name: disk-fill
-  namespace: p03-volumes
+  namespace: volumes-scratch
 spec:
   serviceAccountName: inspect-sa
   automountServiceAccountToken: false
@@ -490,10 +496,10 @@ spec:
       emptyDir:
         sizeLimit: 16Mi
 EOF
-kubectl wait pod/disk-fill -n p03-volumes --for='jsonpath={.status.reason}=Evicted' --timeout=300s
-kubectl get pod disk-fill -n p03-volumes
-kubectl get pod disk-fill -n p03-volumes -o jsonpath='{.status.message}{"\n"}'
-kubectl delete pod disk-fill -n p03-volumes --now
+kubectl wait pod/disk-fill -n volumes-scratch --for='jsonpath={.status.reason}=Evicted' --timeout=300s
+kubectl get pod disk-fill -n volumes-scratch
+kubectl get pod disk-fill -n volumes-scratch -o jsonpath='{.status.message}{"\n"}'
+kubectl delete pod disk-fill -n volumes-scratch --now
 ```
 
 <!-- gate: output -->
@@ -528,7 +534,7 @@ apiVersion: v1
 kind: Pod
 metadata:
   name: ram-fill
-  namespace: p03-volumes
+  namespace: volumes-scratch
 spec:
   serviceAccountName: inspect-sa
   automountServiceAccountToken: false
@@ -567,10 +573,10 @@ spec:
         medium: Memory
         sizeLimit: 16Mi
 EOF
-kubectl wait pod/ram-fill -n p03-volumes --for=condition=Ready --timeout=300s
+kubectl wait pod/ram-fill -n volumes-scratch --for=condition=Ready --timeout=300s
 sleep 5
-kubectl logs ram-fill -n p03-volumes
-kubectl delete pod ram-fill -n p03-volumes --now
+kubectl logs ram-fill -n volumes-scratch
+kubectl delete pod ram-fill -n volumes-scratch --now
 ```
 
 <!-- gate: output -->
@@ -602,7 +608,7 @@ apiVersion: v1
 kind: Secret
 metadata:
   name: demo-creds
-  namespace: p03-volumes
+  namespace: volumes-scratch
 type: Opaque
 stringData:
   token: demo-only-value
@@ -612,7 +618,7 @@ apiVersion: v1
 kind: Pod
 metadata:
   name: creds-denied
-  namespace: p03-volumes
+  namespace: volumes-scratch
 spec:
   serviceAccountName: inspect-sa
   automountServiceAccountToken: false
@@ -645,10 +651,10 @@ spec:
         secretName: demo-creds
         defaultMode: 0400
 EOF
-kubectl wait pod/creds-denied -n p03-volumes --for='jsonpath={.status.phase}=Failed' --timeout=300s
-kubectl logs creds-denied -n p03-volumes
-kubectl get pod creds-denied -n p03-volumes -o jsonpath='{.spec.volumes[0].secret.defaultMode}{"\n"}'
-kubectl delete pod creds-denied -n p03-volumes --now
+kubectl wait pod/creds-denied -n volumes-scratch --for='jsonpath={.status.phase}=Failed' --timeout=300s
+kubectl logs creds-denied -n volumes-scratch
+kubectl get pod creds-denied -n volumes-scratch -o jsonpath='{.spec.volumes[0].secret.defaultMode}{"\n"}'
+kubectl delete pod creds-denied -n volumes-scratch --now
 ```
 
 <!-- gate: output -->
@@ -679,7 +685,7 @@ apiVersion: v1
 kind: Pod
 metadata:
   name: creds-fixed
-  namespace: p03-volumes
+  namespace: volumes-scratch
 spec:
   serviceAccountName: inspect-sa
   automountServiceAccountToken: false
@@ -737,10 +743,10 @@ spec:
                 - path: pod_name
                   fieldRef: { fieldPath: metadata.name }
 EOF
-kubectl wait pod/creds-fixed -n p03-volumes --for='jsonpath={.status.phase}=Succeeded' --timeout=300s
-kubectl logs creds-fixed -n p03-volumes
-kubectl get pod creds-fixed -n p03-volumes -o jsonpath='{.spec.volumes[*].secret.defaultMode}{" "}{.spec.volumes[*].projected.defaultMode}{"\n"}'
-kubectl delete pod creds-fixed -n p03-volumes --now
+kubectl wait pod/creds-fixed -n volumes-scratch --for='jsonpath={.status.phase}=Succeeded' --timeout=300s
+kubectl logs creds-fixed -n volumes-scratch
+kubectl get pod creds-fixed -n volumes-scratch -o jsonpath='{.spec.volumes[*].secret.defaultMode}{" "}{.spec.volumes[*].projected.defaultMode}{"\n"}'
+kubectl delete pod creds-fixed -n volumes-scratch --now
 ```
 
 <!-- gate: output -->
@@ -793,7 +799,7 @@ creates nothing, because `--dry-run=server` stops after admission:
 
 ```sh
 # Deliberate failure: restricted refuses a hostPath volume, read-only or not.
-kubectl run hostpath-probe -n p03-volumes --restart=Never --dry-run=server \
+kubectl run hostpath-probe -n volumes-scratch --restart=Never --dry-run=server \
   --image=busybox:1.36@sha256:73aaf090f3d85aa34ee199857f03fa3a95c8ede2ffd4cc2cdb5b94e566b11662 \
   --overrides='{
     "spec": {
@@ -811,7 +817,7 @@ kubectl run hostpath-probe -n p03-volumes --restart=Never --dry-run=server \
       "volumes": [{"name": "nodefs", "hostPath": {"path": "/", "type": "Directory"}}]
     }
   }'
-kubectl get pods -n p03-volumes
+kubectl get pods -n volumes-scratch
 ```
 
 <!-- gate: output -->
@@ -834,7 +840,7 @@ node agents.
 ### 8. Clean up
 
 ```sh
-kubectl delete namespace p03-volumes --wait=true
+kubectl delete namespace volumes-scratch --wait=true
 ```
 
 <!-- gate: output -->
