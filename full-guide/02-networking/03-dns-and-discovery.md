@@ -23,8 +23,10 @@ cluster** — is **cluster DNS**, and it is the final piece that makes service
 discovery *usable* (not just *possible*).
 
 It is also where a notorious, silent performance problem lives: the
-`ndots:5`-plus-search-domain behavior that turns one DNS lookup into **five
-failed lookups** before the right one — invisible until it's your p99. This
+`ndots:5`-plus-search-domain behavior that turns one DNS lookup into **several
+failed lookups** before the right one: three for the in-cluster search domains,
+and one more for each search domain the host adds. It stays invisible until
+it's your p99. This
 chapter completes the [Service Discovery](#further-reading) pattern: ch.02 was
 the *mechanism* (VIP+endpoints), this is the *naming* over it.
 
@@ -153,10 +155,19 @@ The probe runs the netshoot toolbox, which has `nslookup`, `dig` and `getent`,
 and sleeps so that you can `exec` into it. netshoot declares root in its image
 config, so the Pod runs as UID 65532. The DNS tools need no root. The other
 fields are the baseline from [01.01](../01-core-workloads/01-pods.md#baseline).
-The image is pinned by digest, with its tag in a comment.
+The image is pinned by digest, with its tag in a comment. The probe has its own
+ServiceAccount, so it does not run as `default`, and it mounts no token.
 
 ```sh
 kubectl apply -n bookstore -f - <<'EOF'
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: dns-probe
+  labels:
+    app.kubernetes.io/part-of: bookstore
+automountServiceAccountToken: false
+---
 apiVersion: v1
 kind: Pod
 metadata:
@@ -165,6 +176,7 @@ metadata:
     app.kubernetes.io/name: dns-probe
     app.kubernetes.io/part-of: bookstore
 spec:
+  serviceAccountName: dns-probe
   automountServiceAccountToken: false
   securityContext:
     runAsNonRoot: true
@@ -243,15 +255,32 @@ port from DNS.
 
 A short name works because the search list in `resolv.conf` completes it with
 the caller's own namespace. Read the search list, then ask for the same short
-name from a second namespace. Create that namespace with the `restricted` label
-that `00-namespace.yaml` sets, and apply the probe from step 0 with
-`-n <other-ns>` in place of `-n bookstore`.
+name from a second namespace, `dns-other`. Save this as `dns-other.yaml`. It
+carries the same `restricted` labels as `00-namespace.yaml`:
+
+```yaml
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: dns-other
+  labels:
+    pod-security.kubernetes.io/enforce: restricted
+    pod-security.kubernetes.io/enforce-version: latest
+    pod-security.kubernetes.io/audit: restricted
+    pod-security.kubernetes.io/audit-version: latest
+    pod-security.kubernetes.io/warn: restricted
+    pod-security.kubernetes.io/warn-version: latest
+```
+
+Apply it, then run the step 0 apply again with `-n dns-other` in place of
+`-n bookstore`. The probe and its ServiceAccount are created in that namespace.
 
 ```sh
+kubectl apply -f dns-other.yaml
 kubectl -n bookstore exec dns-probe -- cat /etc/resolv.conf
 kubectl -n bookstore exec dns-probe -- nslookup catalog
-kubectl -n <other-ns> exec dns-probe -- nslookup catalog
-kubectl -n <other-ns> exec dns-probe -- nslookup catalog.bookstore
+kubectl -n dns-other exec dns-probe -- nslookup catalog
+kubectl -n dns-other exec dns-probe -- nslookup catalog.bookstore
 ```
 
 <!-- gate: output -->
@@ -330,9 +359,9 @@ should know. Run these from the other namespace. The last name is made up on
 purpose, and its NXDOMAIN is part of the result.
 
 ```sh
-kubectl -n <other-ns> exec dns-probe -- nslookup catalog.bookstore.svc.cluster.local
-kubectl -n <other-ns> exec dns-probe -- nslookup -type=SRV _http._tcp.catalog.bookstore.svc.cluster.local
-kubectl -n <other-ns> exec dns-probe -- nslookup billing-admin.bookstore.svc.cluster.local
+kubectl -n dns-other exec dns-probe -- nslookup catalog.bookstore.svc.cluster.local
+kubectl -n dns-other exec dns-probe -- nslookup -type=SRV _http._tcp.catalog.bookstore.svc.cluster.local
+kubectl -n dns-other exec dns-probe -- nslookup billing-admin.bookstore.svc.cluster.local
 ```
 
 <!-- gate: output -->
@@ -358,7 +387,7 @@ on a CNI that enforces them.
 
 ```sh
 kubectl -n bookstore delete pod dns-probe
-kubectl delete namespace <other-ns>
+kubectl delete namespace dns-other
 ```
 
 The Bookstore namespace and its Services stay, because later chapters use them.
@@ -465,7 +494,7 @@ Fixes (in order of preference):
    spec:
      dnsConfig:
        options:
-         - { name: ndots, value: "1" }   # only ≥1-dot names use search
+         - { name: ndots, value: "1" }   # a name with 1+ dots is tried as written first
    ```
    Lowers wasted lookups for Pods that mostly call external/long names.
 3. **Use FQDNs internally too** (the Bookstore convention) — fewer surprises
@@ -495,9 +524,9 @@ A short name only resolves within the **caller's** namespace (the search list
 is the caller's). Cross-namespace **must** qualify: `catalog.bookstore` (search
 appends `svc.cluster.local`) or the full
 `catalog.bookstore.svc.cluster.local`. There is **no implicit cross-namespace
-short name** — this is also a security boundary
-([ch.06](06-network-policies.md): DNS resolving a name ≠ being allowed to
-*connect* to it).
+short name**. The search list is a naming convenience, not an access control:
+DNS resolving a name is not being allowed to *connect* to it
+([ch.06](06-network-policies.md)).
 
 ## Production notes
 
