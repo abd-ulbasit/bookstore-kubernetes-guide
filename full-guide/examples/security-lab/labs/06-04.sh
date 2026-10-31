@@ -311,6 +311,12 @@ CMD
 kubectl apply -f load-catalog.yaml
 CMD
   need command kubectl -n bookstore wait --for=condition=Ready pod -l role=load-generator --timeout=180s
+  echo '## step 4: the load Pod reaches catalog through the allow policies'
+  run <<'CMD'
+kubectl -n bookstore exec job/load-catalog -- curl -sS -m 5 -o /dev/null -w '%{http_code}\n' http://catalog.bookstore.svc.cluster.local/books
+CMD
+  code=$(command kubectl -n bookstore exec job/load-catalog -- curl -sS -m 5 -o /dev/null -w '%{http_code}' http://catalog.bookstore.svc.cluster.local/books 2>/dev/null)
+  [ "$code" = 200 ] || { echo "stopping: the load Pod cannot reach catalog (answer: $code)" >&2; exit 3; }
   echo '## step 4a: at the shipped 70 percent target'
   run <<'CMD'
 start=$(date +%s)
