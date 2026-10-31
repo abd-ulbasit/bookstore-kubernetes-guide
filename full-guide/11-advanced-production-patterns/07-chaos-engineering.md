@@ -175,10 +175,14 @@ discipline as the mesh/ESO/operator precedents).
 > output differ from the commands. The run installed Chaos Mesh 2.8.7 and
 > checked its RBAC, its daemon privilege and the chart's admission behaviour.
 > It did not run the three experiments. The lab's control plane was unstable,
-> postgres stayed Pending, and the run never got the catalog to Ready. Treat
-> the experiment steps as checked against the CRD schema and by reading, not
-> as observed here. kube-prometheus-stack and metrics-server were not
-> installed in this run.
+> postgres stayed Pending, and the run never got the catalog to Ready. That
+> run did not apply `12-redis.yaml`, which the bootstrap now applies, because
+> catalog's `/readyz` needs the cache. So the Ready result says nothing about
+> the Redis dependency, and the bootstrap is not re-run here. Treat the
+> experiment steps as checked against the CRD schema and by reading, not as
+> observed here. kube-prometheus-stack and metrics-server were not installed
+> in this run. A later pass checked the stack's workloads against the
+> `restricted` level with a server dry run, without installing it.
 
 We will: (0) self-bootstrap the Bookstore *with* its PDB/HPA/SLO; (1) install
 **Chaos Mesh** (pinned Helm, own namespace) and justify it over Litmus;
@@ -233,6 +237,7 @@ kubectl apply -f examples/bookstore/raw-manifests/16-db-credentials.yaml
 kubectl apply -f examples/bookstore/raw-manifests/35-priorityclasses.yaml
 kubectl apply -f examples/bookstore/raw-manifests/20-postgres-statefulset.yaml
 kubectl rollout status statefulset/postgres -n bookstore
+kubectl apply -f examples/bookstore/raw-manifests/12-redis.yaml   # catalog's /readyz needs the cache
 kubectl apply -f examples/bookstore/raw-manifests/10-catalog-deploy.yaml
 kubectl apply -f examples/bookstore/raw-manifests/11-storefront-deploy.yaml
 kubectl apply -f examples/bookstore/raw-manifests/14-orders-deploy.yaml
@@ -251,17 +256,85 @@ helm repo add prometheus-community https://prometheus-community.github.io/helm-c
 helm repo update
 helm install metrics-server metrics-server/metrics-server \
   -n kube-system --version 3.12.2 --set 'args={--kubelet-insecure-tls}' --wait   # kind only: kubelet certificates do not verify
-helm install kube-prom prometheus-community/kube-prometheus-stack \
-  -n monitoring --create-namespace --version 65.1.1 --wait                       # Prometheus Operator
-kubectl -n monitoring rollout status deploy/kube-prom-kube-prometheus-operator
+kubectl create namespace monitoring
+kubectl label namespace monitoring \
+  pod-security.kubernetes.io/enforce=restricted \
+  pod-security.kubernetes.io/enforce-version=latest \
+  pod-security.kubernetes.io/audit=restricted \
+  pod-security.kubernetes.io/audit-version=latest \
+  pod-security.kubernetes.io/warn=restricted \
+  pod-security.kubernetes.io/warn-version=latest
+helm install kube-prometheus-stack prometheus-community/kube-prometheus-stack \
+  -n monitoring --version 65.1.1 --wait \
+  --set nodeExporter.enabled=false                                                # Prometheus Operator; node-exporter off (see below)
+kubectl -n monitoring rollout status deploy/kube-prometheus-stack-operator
 kubectl apply -f examples/bookstore/raw-manifests/82-hpa-catalog.yaml   # the HPA Experiment 3 tests
 kubectl apply -f examples/bookstore/raw-manifests/80-servicemonitor.yaml   # scrape catalog metrics
 kubectl apply -f examples/bookstore/raw-manifests/81-prometheusrule.yaml   # the SLO ALERTS (the oracle)
 kubectl get hpa catalog -n bookstore                       # the autoscaler under test
 kubectl get servicemonitor,prometheusrule -n bookstore     # the SLO oracle is now live
-# (metrics-server, kube-prometheus-stack install into kube-system/monitoring —
-#  NOT bookstore; the catalog/postgres Pods stay PSA-restricted-compliant.)
+# (metrics-server installs into kube-system and kube-prometheus-stack into
+#  monitoring, NOT bookstore; the catalog/postgres Pods stay PSA-restricted.)
 ```
+
+The release name is part of the contract, and it is not a free choice. The
+chart's Prometheus selects ServiceMonitors and PrometheusRules whose `release`
+label equals the Helm release name. Rendered at release
+`kube-prometheus-stack`, the Prometheus object carries `release:
+"kube-prometheus-stack"` in both selectors, which is the value that
+`80-servicemonitor.yaml` and `81-prometheusrule.yaml` carry. Install under any
+other name and Prometheus silently ignores both objects. The render shows the
+label is set on seven objects:
+
+```sh
+helm template kube-prometheus-stack prometheus-community/kube-prometheus-stack \
+  --version 65.1.1 -n monitoring --set nodeExporter.enabled=false \
+  | grep -c 'release: kube-prometheus-stack'
+```
+
+<!-- gate: output -->
+```text
+7
+```
+
+The chart's own workloads are three Deployments (the operator, kube-state-metrics
+and Grafana) and two admission Jobs. A server dry run into a namespace labelled
+`restricted` prints no PodSecurity warning for any of them. The check is only
+worth something if it can fail, so the same dry run was made with a control
+Deployment whose pod template sets `hostNetwork: true`. The control was written
+for the check and deleted after it. The warning it prints is the one the check
+must give:
+
+<!-- gate: output -->
+```text
+Warning: would violate PodSecurity "restricted:latest": host namespaces (hostNetwork=true), allowPrivilegeEscalation != false (container "app" must set securityContext.allowPrivilegeEscalation=false), unrestricted capabilities (container "app" must set securityContext.capabilities.drop=["ALL"]), runAsNonRoot != true (pod or container "app" must set securityContext.runAsNonRoot=true), seccompProfile (pod or container "app" must set securityContext.seccompProfile.type to "RuntimeDefault" or "Localhost")
+deployment.apps/psa-control created (server dry run)
+```
+
+The chart's workloads, dry-run in the same namespace:
+
+<!-- gate: output -->
+```text
+deployment.apps/kube-prometheus-stack-grafana created (server dry run)
+deployment.apps/kube-prometheus-stack-kube-state-metrics created (server dry run)
+deployment.apps/kube-prometheus-stack-operator created (server dry run)
+job.batch/kube-prometheus-stack-admission-create created (server dry run)
+job.batch/kube-prometheus-stack-admission-patch created (server dry run)
+```
+
+This is not an install. Prometheus and Alertmanager run as Pods that the
+operator creates from custom resources, and the CRDs were not on the lab
+cluster, so those Pods were not checked. The lab did not install the release.
+Run the install above on a cluster you own, then check that the Prometheus
+selector matches the label on `80-` and `81-`.
+
+The monitoring namespace is labelled `restricted` before anything is created
+in it, and node-exporter is turned off. node-exporter is a DaemonSet with host
+networking, host PID and host paths, so it cannot run under `restricted`. The
+oracle does not need it: the SLO alerts in `81-prometheusrule.yaml` read the
+catalog's own request metrics and its `up` series, not host metrics. Turn a
+privileged feature off when the lab does not need it, and the namespace needs
+no entry in the exceptions registry.
 
 ### 1. Install Chaos Mesh in its own namespace
 

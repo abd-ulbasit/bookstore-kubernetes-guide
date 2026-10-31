@@ -1,0 +1,1084 @@
+# Transcript for 11-advanced-production-patterns/05-secrets-at-scale.md.
+# Tier A: a kind cluster, Kubernetes v1.37.0 node (sf-pilot-control-plane),
+# kubectl v1.37.2, Helm v4.1.4. Vault chart 0.34.1 (Vault 2.0.4, dev mode),
+# External Secrets Operator chart 2.12.0 (app v2.12.0). Run on 2026-10-31 against
+# the lab kind cluster sf-pilot. Every name the chapter prints as `bookstore`,
+# `vault` or `external-secrets` is `p11-05-bookstore`, `p11-05-vault` or
+# `p11-05-eso` in the commands and output below. The Vault paths
+# (secret/data/bookstore/db and database/creds/bookstore-app) keep the chapter's
+# names. The Vault role binds the lab namespace p11-05-bookstore.
+# Lab copies of the bookstore manifests: the repo file with the namespace
+# renamed (a perl one-liner, which leaves image names alone), and each
+# priorityClassName line removed. The lab did not create the PriorityClasses,
+# because three bookstore-* PriorityClasses already exist on the shared cluster.
+# The lab applied the Postgres, Redis, catalog and migration objects of section 0,
+# and no orders, storefront or payments objects.
+# Vault dev mode and ESO are small installs (one Vault Pod, three ESO Pods). The
+# heavy-install lock was taken for the ESO install and released after it.
+# Cleanup at the end removed both Helm releases, the ESO CRDs, the Vault and ESO
+# ClusterRoles and bindings, and the three namespaces.
+# Attempts, and what did not work the first time (kept in the run below, in order):
+#   - The first Vault rollout check used `rollout status`. The chart's StatefulSet
+#     uses OnDelete, so the check does not apply. The chapter now waits for the Pod.
+#   - The first ESO install ran before the chart repository was added on this
+#     Mac, so helm refused it. The repository was added and the install repeated.
+#   - The first can-i checks ran before ESO existed and answered no. Only the
+#     checks after the install are shown in the chapter.
+#   - The first SecretStore used a lab copy whose ServiceAccount name had been
+#     renamed too. Vault's role names bookstore-eso, so Vault did not match it, and
+#     the SecretStore stayed not Ready. The copies were made again with only the
+#     namespace renamed, and the SecretStore became Valid.
+#   - The namespace stayed Terminating after the first lab copy was deleted. The
+#     ESO ExternalSecret kept its finalizer after the SecretStore it used was gone.
+#     Its finalizer was cleared with a merge patch, and then the namespace finished.
+#   - The first Bookstore copies also renamed the Postgres user and database, so the
+#     catalog pod could not match its database. Two rebuilds failed before the
+#     third: the namespace was still Terminating, and then a transform joined two
+#     lines of the Namespace copy. The fourth pass built from copies that rename
+#     the namespace only.
+#   - Deleting the synced Secret alone does not start a new sync. The swap was run
+#     again with the ExternalSecret deleted too.
+#   - Deleting the namespace also removed the ESO scoped Role and RoleBinding, so
+#     ESO could not list ExternalSecrets. The release's own RBAC was applied again
+#     from `helm get manifest`, and the scoped checks were repeated.
+#   - The db-migrate Job did not complete inside its wait in this run. No step here
+#     depends on the migration.
+#   - Revoking the lease is queued. The role was gone when the count was read again,
+#     about 7 seconds later.
+#   - `helm uninstall external-secrets` reported a failure at cleanup. The namespace
+#     deletion and the object checks after it found no lab object left.
+# The password checks connect to the Pod's own address, not to loopback. The
+# loopback rules in this Postgres image use trust, so a loopback login would not
+# test the password. The pg_hba listing below shows the rules this login used.
+=== step 0: the Bookstore objects the lab needs, with the namespace renamed ===
+$ perl -ne 'next if /^\s*priorityClassName:/; s/\bbookstore\b(?!\/)/p11-05-bookstore/g; print' '$LAB_REPO/full-guide/examples/bookstore/raw-manifests/00-namespace.yaml' > '$LAB_SCRATCH/tmp/05lab/00-namespace.yaml' && kubectl apply -f '$LAB_SCRATCH/tmp/05lab/00-namespace.yaml'
+namespace/p11-05-bookstore created
+resourcequota/p11-05-bookstore-quota created
+limitrange/p11-05-bookstore-limits created
+[exit=0]
+$ kubectl label namespace p11-05-bookstore pod-security.kubernetes.io/warn-version=latest --overwrite >/dev/null; kubectl get namespace p11-05-bookstore --show-labels | tail -1
+p11-05-bookstore   Active   0s    app.kubernetes.io/part-of=p11-05-bookstore,kubernetes.io/metadata.name=p11-05-bookstore,pod-security.kubernetes.io/audit-version=latest,pod-security.kubernetes.io/audit=restricted,pod-security.kubernetes.io/enforce-version=latest,pod-security.kubernetes.io/enforce=restricted,pod-security.kubernetes.io/warn-version=latest,pod-security.kubernetes.io/warn=restricted
+[exit=0]
+$ perl -ne 'next if /^\s*priorityClassName:/; s/\bbookstore\b(?!\/)/p11-05-bookstore/g; print' '$LAB_REPO/full-guide/examples/bookstore/raw-manifests/05-serviceaccounts-rbac.yaml' > '$LAB_SCRATCH/tmp/05lab/05-serviceaccounts-rbac.yaml' && kubectl apply -f '$LAB_SCRATCH/tmp/05lab/05-serviceaccounts-rbac.yaml'
+serviceaccount/catalog-sa created
+serviceaccount/storefront-sa created
+serviceaccount/orders-sa created
+serviceaccount/payments-worker-sa created
+serviceaccount/postgres-sa created
+serviceaccount/redis-sa created
+serviceaccount/rabbitmq-sa created
+serviceaccount/migrate-sa created
+role.rbac.authorization.k8s.io/catalog-config-reader created
+rolebinding.rbac.authorization.k8s.io/catalog-config-reader-binding created
+[exit=0]
+$ perl -ne 'next if /^\s*priorityClassName:/; s/\bbookstore\b(?!\/)/p11-05-bookstore/g; print' '$LAB_REPO/full-guide/examples/bookstore/raw-manifests/15-catalog-config.yaml' > '$LAB_SCRATCH/tmp/05lab/15-catalog-config.yaml' && kubectl apply -f '$LAB_SCRATCH/tmp/05lab/15-catalog-config.yaml'
+configmap/catalog-config created
+[exit=0]
+$ perl -ne 'next if /^\s*priorityClassName:/; s/\bbookstore\b(?!\/)/p11-05-bookstore/g; print' '$LAB_REPO/full-guide/examples/bookstore/raw-manifests/16-db-credentials.yaml' > '$LAB_SCRATCH/tmp/05lab/16-db-credentials.yaml' && kubectl apply -f '$LAB_SCRATCH/tmp/05lab/16-db-credentials.yaml'
+secret/db-credentials created
+[exit=0]
+$ perl -ne 'next if /^\s*priorityClassName:/; s/\bbookstore\b(?!\/)/p11-05-bookstore/g; print' '$LAB_REPO/full-guide/examples/bookstore/raw-manifests/20-postgres-statefulset.yaml' > '$LAB_SCRATCH/tmp/05lab/20-postgres-statefulset.yaml' && kubectl apply -f '$LAB_SCRATCH/tmp/05lab/20-postgres-statefulset.yaml'
+service/postgres created
+statefulset.apps/postgres created
+[exit=0]
+$ perl -ne 'next if /^\s*priorityClassName:/; s/\bbookstore\b(?!\/)/p11-05-bookstore/g; print' '$LAB_REPO/full-guide/examples/bookstore/raw-manifests/12-redis.yaml' > '$LAB_SCRATCH/tmp/05lab/12-redis.yaml' && kubectl apply -f '$LAB_SCRATCH/tmp/05lab/12-redis.yaml'
+deployment.apps/redis created
+[exit=0]
+$ perl -ne 'next if /^\s*priorityClassName:/; s/\bbookstore\b(?!\/)/p11-05-bookstore/g; print' '$LAB_REPO/full-guide/examples/bookstore/raw-manifests/10-catalog-deploy.yaml' > '$LAB_SCRATCH/tmp/05lab/10-catalog-deploy.yaml' && kubectl apply -f '$LAB_SCRATCH/tmp/05lab/10-catalog-deploy.yaml'
+deployment.apps/catalog created
+[exit=0]
+$ perl -ne 'next if /^\s*priorityClassName:/; s/\bbookstore\b(?!\/)/p11-05-bookstore/g; print' '$LAB_REPO/full-guide/examples/bookstore/raw-manifests/40-services.yaml' > '$LAB_SCRATCH/tmp/05lab/40-services.yaml' && kubectl apply -f '$LAB_SCRATCH/tmp/05lab/40-services.yaml'
+service/catalog created
+service/storefront created
+service/orders created
+service/redis created
+service/rabbitmq created
+service/payments-worker created
+[exit=0]
+$ perl -ne 'next if /^\s*priorityClassName:/; s/\bbookstore\b(?!\/)/p11-05-bookstore/g; print' '$LAB_REPO/full-guide/examples/bookstore/raw-manifests/21-db-migrate-job.yaml' > '$LAB_SCRATCH/tmp/05lab/21-db-migrate-job.yaml' && kubectl apply -f '$LAB_SCRATCH/tmp/05lab/21-db-migrate-job.yaml'
+job.batch/db-migrate created
+[exit=0]
+$ kubectl rollout status statefulset/postgres -n p11-05-bookstore --timeout=300s
+Waiting for 1 pods to be ready...
+partitioned roll out complete: 1 new pods have been updated...
+[exit=0]
+$ kubectl wait --for=condition=complete job/db-migrate -n p11-05-bookstore --timeout=180s
+job.batch/db-migrate condition met
+[exit=0]
+$ kubectl rollout status deployment/redis -n p11-05-bookstore --timeout=180s
+deployment "redis" successfully rolled out
+[exit=0]
+$ kubectl rollout status deployment/catalog -n p11-05-bookstore --timeout=240s
+Waiting for deployment "catalog" rollout to finish: 1 of 3 updated replicas are available...
+Waiting for deployment "catalog" rollout to finish: 2 of 3 updated replicas are available...
+deployment "catalog" successfully rolled out
+[exit=0]
+$ kubectl get pods -n p11-05-bookstore -o wide
+NAME                       READY   STATUS      RESTARTS   AGE   IP             NODE                     NOMINATED NODE   READINESS GATES
+catalog-644c4c9768-j8pv8   1/1     Running     0          36s   10.244.0.150   sf-pilot-control-plane   <none>           <none>
+catalog-644c4c9768-l2hn2   1/1     Running     0          36s   10.244.0.151   sf-pilot-control-plane   <none>           <none>
+catalog-644c4c9768-wlncp   1/1     Running     0          36s   10.244.0.149   sf-pilot-control-plane   <none>           <none>
+db-migrate-jx8tx           0/1     Completed   0          36s   10.244.0.152   sf-pilot-control-plane   <none>           <none>
+postgres-0                 1/1     Running     0          36s   10.244.0.153   sf-pilot-control-plane   <none>           <none>
+redis-574bb544f-ppzxv      1/1     Running     0          36s   10.244.0.148   sf-pilot-control-plane   <none>           <none>
+[exit=0]
+=== step 1: Vault in dev mode, namespace labelled restricted first ===
+$ kubectl create namespace p11-05-vault
+namespace/p11-05-vault created
+[exit=0]
+$ kubectl label namespace p11-05-vault pod-security.kubernetes.io/enforce=restricted pod-security.kubernetes.io/enforce-version=latest pod-security.kubernetes.io/audit=restricted pod-security.kubernetes.io/audit-version=latest pod-security.kubernetes.io/warn=restricted pod-security.kubernetes.io/warn-version=latest
+namespace/p11-05-vault labeled
+[exit=0]
+$ helm install vault hashicorp/vault -n p11-05-vault --version 0.34.1 --wait --set server.dev.enabled=true --set server.dev.devRootToken=root --set injector.enabled=false --set server.image.tag='2.0.4@sha256:5be49781ecf78bfe775c5309c6a4d9f4e9e040b6c885c99eb2b12fb69855e1a2' --set-json 'server.statefulSet.securityContext.pod={"runAsNonRoot":true,"runAsUser":100,"runAsGroup":1000,"fsGroup":1000,"seccompProfile":{"type":"RuntimeDefault"}}' --set-json 'server.statefulSet.securityContext.container={"allowPrivilegeEscalation":false,"readOnlyRootFilesystem":true,"capabilities":{"drop":["ALL"]}}'
+NAME: vault
+LAST DEPLOYED: Sat Oct 31 11:06:40 2026
+NAMESPACE: p11-05-vault
+STATUS: deployed
+REVISION: 1
+DESCRIPTION: Install complete
+NOTES:
+Thank you for installing HashiCorp Vault!
+
+Now that you have deployed Vault, you should look over the docs on using
+Vault with Kubernetes available here:
+
+https://developer.hashicorp.com/vault/docs
+
+
+Your release is named vault. To learn more about the release, try:
+
+  $ helm status vault
+  $ helm get manifest vault
+[exit=0]
+$ kubectl -n p11-05-vault rollout status statefulset/vault
+error: rollout status is only available for RollingUpdate strategy type
+[exit=1]
+=== step 1b: Vault k8s auth, policy, role and the KV value (the chapter's section 1 commands) ===
+$ kubectl -n p11-05-vault exec vault-0 -- env VAULT_TOKEN=root vault auth enable kubernetes
+error: unable to upgrade connection: container not found ("vault")
+[exit=1]
+$ kubectl -n p11-05-vault exec vault-0 -- env VAULT_TOKEN=root sh -c 'vault write auth/kubernetes/config kubernetes_host="https://$KUBERNETES_PORT_443_TCP_ADDR:443"'
+error: unable to upgrade connection: container not found ("vault")
+[exit=1]
+$ kubectl -n p11-05-vault exec -i vault-0 -- env VAULT_TOKEN=root vault policy write bookstore-ro - < '$LAB_SCRATCH/tmp/05lab/bookstore-ro.hcl'
+error: unable to upgrade connection: container not found ("vault")
+[exit=1]
+$ kubectl -n p11-05-vault exec vault-0 -- env VAULT_TOKEN=root vault write auth/kubernetes/role/bookstore-eso bound_service_account_names=bookstore-eso bound_service_account_namespaces=p11-05-bookstore policies=bookstore-ro ttl=15m
+error: unable to upgrade connection: container not found ("vault")
+[exit=1]
+$ kubectl -n p11-05-vault exec vault-0 -- env VAULT_TOKEN=root vault kv put secret/bookstore/db POSTGRES_USER=bookstore POSTGRES_PASSWORD=devpassword POSTGRES_DB=bookstore
+error: unable to upgrade connection: container not found ("vault")
+[exit=1]
+=== step 1a: the Pod is Ready (the chart's StatefulSet uses OnDelete, so rollout status does not apply) ===
+$ kubectl -n p11-05-vault wait --for=condition=Ready pod/vault-0 --timeout=240s
+pod/vault-0 condition met
+[exit=0]
+=== step 1b: Vault k8s auth, policy, role and the KV value (the chapter's section 1 commands) ===
+$ kubectl -n p11-05-vault exec vault-0 -- env VAULT_TOKEN=root vault auth enable kubernetes
+Success! Enabled kubernetes auth method at: kubernetes/
+[exit=0]
+$ kubectl -n p11-05-vault exec vault-0 -- env VAULT_TOKEN=root sh -c 'vault write auth/kubernetes/config kubernetes_host="https://$KUBERNETES_PORT_443_TCP_ADDR:443"'
+Success! Data written to: auth/kubernetes/config
+[exit=0]
+$ kubectl -n p11-05-vault exec -i vault-0 -- env VAULT_TOKEN=root vault policy write bookstore-ro - < '$LAB_SCRATCH/tmp/05lab/bookstore-ro.hcl'
+Success! Uploaded policy: bookstore-ro
+[exit=0]
+$ kubectl -n p11-05-vault exec vault-0 -- env VAULT_TOKEN=root vault write auth/kubernetes/role/bookstore-eso bound_service_account_names=bookstore-eso bound_service_account_namespaces=p11-05-bookstore policies=bookstore-ro ttl=15m
+WARNING! The following warnings were returned from Vault:
+
+  * Role bookstore-eso does not have an audience configured. While audiences
+  are not required, consider specifying one if your use case would benefit
+  from additional JWT claim verification.
+
+[exit=0]
+$ kubectl -n p11-05-vault exec vault-0 -- env VAULT_TOKEN=root vault kv put secret/bookstore/db POSTGRES_USER=bookstore POSTGRES_PASSWORD=devpassword POSTGRES_DB=bookstore
+====== Secret Path ======
+secret/data/bookstore/db
+
+======= Metadata =======
+Key                Value
+---                -----
+created_time       2026-10-31T06:06:59.564436764Z
+custom_metadata    <nil>
+deletion_time      n/a
+destroyed          false
+version            1
+[exit=0]
+=== step 2a: before ESO is installed, the SecretStore dry run names a missing kind ===
+$ kubectl apply --dry-run=server -f '$LAB_SCRATCH/tmp/05lab/10-secretstore-vault.yaml'
+error: resource mapping not found for name: "vault-backend" namespace: "p11-05-bookstore" from "$LAB_SCRATCH/tmp/05lab/10-secretstore-vault.yaml": no matches for kind "SecretStore" in version "external-secrets.io/v1"
+ensure CRDs are installed first
+[exit=1]
+=== step 2b: namespace labelled restricted, then ESO 2.12.0 with its three images pinned ===
+$ kubectl create namespace p11-05-eso
+namespace/p11-05-eso created
+[exit=0]
+$ kubectl label namespace p11-05-eso pod-security.kubernetes.io/enforce=restricted pod-security.kubernetes.io/enforce-version=latest pod-security.kubernetes.io/audit=restricted pod-security.kubernetes.io/audit-version=latest pod-security.kubernetes.io/warn=restricted pod-security.kubernetes.io/warn-version=latest
+namespace/p11-05-eso labeled
+[exit=0]
+$ helm install external-secrets external-secrets/external-secrets -n p11-05-eso --version 2.12.0 --set installCRDs=true --set image.tag='v2.12.0@sha256:7a3c4f7e038fa0f86a3172da19b9388f3f4d846e87e9994ee3474c5b72a9330d' --set webhook.image.tag='v2.12.0@sha256:7a3c4f7e038fa0f86a3172da19b9388f3f4d846e87e9994ee3474c5b72a9330d' --set certController.image.tag='v2.12.0@sha256:7a3c4f7e038fa0f86a3172da19b9388f3f4d846e87e9994ee3474c5b72a9330d' --wait
+Error: INSTALLATION FAILED: repo external-secrets not found
+[exit=1]
+$ kubectl -n p11-05-eso get pods
+No resources found in p11-05-eso namespace.
+[exit=0]
+=== step 2c: the chart's default RBAC, before scoping ===
+$ kubectl auth can-i --as=system:serviceaccount:p11-05-eso:external-secrets get secrets -n kube-system
+no
+[exit=1]
+$ kubectl auth can-i --as=system:serviceaccount:p11-05-eso:external-secrets create serviceaccounts --subresource=token -n kube-system
+no
+[exit=1]
+=== step 2d: scope the controller to p11-05-bookstore ===
+$ helm upgrade external-secrets external-secrets/external-secrets -n p11-05-eso --version 2.12.0 --reuse-values --set scopedRBAC=true --set scopedNamespace=p11-05-bookstore --wait
+Error: repo external-secrets not found
+[exit=1]
+$ kubectl auth can-i --as=system:serviceaccount:p11-05-eso:external-secrets get secrets -n kube-system
+no
+[exit=1]
+$ kubectl auth can-i --as=system:serviceaccount:p11-05-eso:external-secrets get secrets -n p11-05-bookstore
+no
+[exit=1]
+$ kubectl auth can-i --as=system:serviceaccount:p11-05-eso:external-secrets-cert-controller get secrets -n kube-system
+no
+[exit=1]
+$ kubectl get crd | grep external-secrets.io
+[exit=1]
+=== step 2b again: the chart repository was not added in the first attempt; added now, then the install ===
+$ helm repo add external-secrets https://charts.external-secrets.io && helm repo update external-secrets
+"external-secrets" has been added to your repositories
+Hang tight while we grab the latest from your chart repositories...
+...Successfully got an update from the "external-secrets" chart repository
+Update Complete. ⎈Happy Helming!⎈
+[exit=0]
+$ helm install external-secrets external-secrets/external-secrets -n p11-05-eso --version 2.12.0 --set installCRDs=true --set image.tag='v2.12.0@sha256:7a3c4f7e038fa0f86a3172da19b9388f3f4d846e87e9994ee3474c5b72a9330d' --set webhook.image.tag='v2.12.0@sha256:7a3c4f7e038fa0f86a3172da19b9388f3f4d846e87e9994ee3474c5b72a9330d' --set certController.image.tag='v2.12.0@sha256:7a3c4f7e038fa0f86a3172da19b9388f3f4d846e87e9994ee3474c5b72a9330d' --wait
+NAME: external-secrets
+LAST DEPLOYED: Sat Oct 31 11:07:58 2026
+NAMESPACE: p11-05-eso
+STATUS: deployed
+REVISION: 1
+DESCRIPTION: Install complete
+TEST SUITE: None
+NOTES:
+external-secrets has been deployed successfully in namespace p11-05-eso!
+
+In order to begin using ExternalSecrets, you will need to set up a SecretStore
+or ClusterSecretStore resource (for example, by creating a 'vault' SecretStore).
+
+More information on the different types of SecretStores and how to configure them
+can be found in our Github: https://github.com/external-secrets/external-secrets
+[exit=0]
+$ kubectl -n p11-05-eso get pods
+NAME                                                READY   STATUS    RESTARTS   AGE
+external-secrets-787cfb8c45-cjtbb                   1/1     Running   0          2m43s
+external-secrets-cert-controller-7c76d4596b-7hfhk   1/1     Running   0          2m43s
+external-secrets-webhook-587b8655c7-9tjqd           1/1     Running   0          2m43s
+[exit=0]
+=== step 2c: the chart's default RBAC, after the install ===
+$ kubectl auth can-i --as=system:serviceaccount:p11-05-eso:external-secrets get secrets -n kube-system
+yes
+[exit=0]
+$ kubectl auth can-i --as=system:serviceaccount:p11-05-eso:external-secrets create serviceaccounts --subresource=token -n kube-system
+yes
+[exit=0]
+=== step 2d: scope the controller to p11-05-bookstore ===
+$ helm upgrade external-secrets external-secrets/external-secrets -n p11-05-eso --version 2.12.0 --reuse-values --set scopedRBAC=true --set scopedNamespace=p11-05-bookstore --wait
+Release "external-secrets" has been upgraded. Happy Helming!
+NAME: external-secrets
+LAST DEPLOYED: Sat Oct 31 11:10:45 2026
+NAMESPACE: p11-05-eso
+STATUS: deployed
+REVISION: 2
+DESCRIPTION: Upgrade complete
+TEST SUITE: None
+NOTES:
+external-secrets has been deployed successfully in namespace p11-05-eso!
+
+In order to begin using ExternalSecrets, you will need to set up a SecretStore
+or ClusterSecretStore resource (for example, by creating a 'vault' SecretStore).
+
+More information on the different types of SecretStores and how to configure them
+can be found in our Github: https://github.com/external-secrets/external-secrets
+[exit=0]
+$ kubectl auth can-i --as=system:serviceaccount:p11-05-eso:external-secrets get secrets -n kube-system
+no
+[exit=1]
+$ kubectl auth can-i --as=system:serviceaccount:p11-05-eso:external-secrets get secrets -n p11-05-bookstore
+yes
+[exit=0]
+$ kubectl auth can-i --as=system:serviceaccount:p11-05-eso:external-secrets-cert-controller get secrets -n kube-system
+yes
+[exit=0]
+$ kubectl get crd | grep external-secrets.io | cut -d' ' -f1
+acraccesstokens.generators.external-secrets.io
+beyondtrustworkloadcredentialsdynamicsecrets.generators.external-secrets.io
+cloudsmithaccesstokens.generators.external-secrets.io
+clusterexternalsecrets.external-secrets.io
+clustergenerators.generators.external-secrets.io
+clusterpushsecrets.external-secrets.io
+clustersecretstores.external-secrets.io
+ecrauthorizationtokens.generators.external-secrets.io
+externalsecrets.external-secrets.io
+fakes.generators.external-secrets.io
+gcraccesstokens.generators.external-secrets.io
+generatorstates.generators.external-secrets.io
+githubaccesstokens.generators.external-secrets.io
+gitlabdeploytokens.generators.external-secrets.io
+grafanas.generators.external-secrets.io
+mfas.generators.external-secrets.io
+passwords.generators.external-secrets.io
+pushsecrets.external-secrets.io
+quayaccesstokens.generators.external-secrets.io
+secretstores.external-secrets.io
+sshkeys.generators.external-secrets.io
+stssessiontokens.generators.external-secrets.io
+uuids.generators.external-secrets.io
+vaultdynamicsecrets.generators.external-secrets.io
+webhooks.generators.external-secrets.io
+[exit=0]
+=== step 3a: the identity, the SecretStore, and the swap from the demo Secret ===
+$ kubectl apply -f '$LAB_SCRATCH/tmp/05lab/05-eso-serviceaccount.yaml'
+serviceaccount/p11-05-bookstore-eso created
+[exit=0]
+$ kubectl apply -f '$LAB_SCRATCH/tmp/05lab/10-secretstore-vault.yaml'
+secretstore.external-secrets.io/vault-backend created
+[exit=0]
+$ kubectl wait --for=jsonpath='{.status.conditions[?(@.type=="Ready")].status}'=True secretstore/vault-backend -n p11-05-bookstore --timeout=120s
+error: timed out waiting for the condition on secretstores/vault-backend
+[exit=1]
+$ kubectl get secretstore vault-backend -n p11-05-bookstore -o jsonpath='{.status.conditions[?(@.type=="Ready")].reason}{"\n"}'
+InvalidProviderConfig
+[exit=0]
+$ kubectl delete secret db-credentials -n p11-05-bookstore --ignore-not-found
+secret "db-credentials" deleted from p11-05-bookstore namespace
+[exit=0]
+$ kubectl apply -f '$LAB_SCRATCH/tmp/05lab/20-externalsecret-db-credentials.yaml'
+externalsecret.external-secrets.io/db-credentials created
+[exit=0]
+$ kubectl wait --for=jsonpath='{.status.conditions[?(@.type=="Ready")].status}'=True externalsecret/db-credentials -n p11-05-bookstore --timeout=120s
+error: timed out waiting for the condition on externalsecrets/db-credentials
+[exit=1]
+$ kubectl get externalsecret db-credentials -n p11-05-bookstore -o jsonpath='{.status.conditions[?(@.type=="Ready")].reason}{"\n"}'
+SecretSyncedError
+[exit=0]
+$ kubectl get secret db-credentials -n p11-05-bookstore -o jsonpath='{.data.POSTGRES_USER}' | base64 -d; echo
+Error from server (NotFound): secrets "db-credentials" not found
+
+[exit=0]
+$ kubectl get secret db-credentials -n p11-05-bookstore -o jsonpath='{.metadata.labels}{"\n"}'
+Error from server (NotFound): secrets "db-credentials" not found
+[exit=1]
+$ kubectl get secret db-credentials -n p11-05-bookstore -o jsonpath='{.metadata.annotations}{"\n"}'
+Error from server (NotFound): secrets "db-credentials" not found
+[exit=1]
+$ kubectl rollout restart deployment/catalog -n p11-05-bookstore
+deployment.apps/catalog restarted
+[exit=0]
+$ kubectl rollout status deployment/catalog -n p11-05-bookstore --timeout=240s
+Waiting for deployment "catalog" rollout to finish: 1 out of 3 new replicas have been updated...
+error: timed out waiting for the condition
+[exit=1]
+=== step 3b: a failed sync, on two new ExternalSecrets with their own targets ===
+$ kubectl apply -f '$LAB_SCRATCH/tmp/05lab/failing-externalsecrets.yaml'
+externalsecret.external-secrets.io/db-missing-key created
+externalsecret.external-secrets.io/db-forbidden-path created
+[exit=0]
+$ kubectl wait --for=jsonpath='{.status.conditions[?(@.type=="Ready")].status}'=False externalsecret/db-missing-key externalsecret/db-forbidden-path -n p11-05-bookstore --timeout=120s
+externalsecret.external-secrets.io/db-missing-key condition met
+externalsecret.external-secrets.io/db-forbidden-path condition met
+[exit=0]
+$ kubectl get externalsecret db-missing-key db-forbidden-path -n p11-05-bookstore
+NAME                STORETYPE     STORE           REFRESH INTERVAL   STATUS              READY   LAST SYNC
+db-missing-key      SecretStore   vault-backend   1m                 SecretSyncedError   False   
+db-forbidden-path   SecretStore   vault-backend   1m                 SecretSyncedError   False   
+[exit=0]
+$ kubectl get externalsecret db-forbidden-path -n p11-05-bookstore -o jsonpath='{.status.conditions[?(@.type=="Ready")].message}{"\n"}'
+could not get secret data from provider
+[exit=0]
+=== step 3c: a failed rotation of the working db-credentials keeps the keys the workloads read ===
+$ kubectl patch externalsecret db-credentials -n p11-05-bookstore --type=merge -p '{"spec":{"data":[{"secretKey":"POSTGRES_USER","remoteRef":{"key":"bookstore/no-such-path","property":"POSTGRES_USER"}}]}}'
+externalsecret.external-secrets.io/db-credentials patched
+[exit=0]
+$ kubectl wait --for=jsonpath='{.status.conditions[?(@.type=="Ready")].status}'=False externalsecret/db-credentials -n p11-05-bookstore --timeout=120s
+externalsecret.external-secrets.io/db-credentials condition met
+[exit=0]
+$ kubectl get externalsecret db-credentials -n p11-05-bookstore -o jsonpath='{.status.conditions[?(@.type=="Ready")].reason}{"\n"}'
+SecretSyncedError
+[exit=0]
+$ kubectl get secret db-credentials -n p11-05-bookstore -o jsonpath='{.data}' | jq 'keys'
+Error from server (NotFound): secrets "db-credentials" not found
+[exit=0]
+$ kubectl apply -f '$LAB_SCRATCH/tmp/05lab/20-externalsecret-db-credentials.yaml'
+externalsecret.external-secrets.io/db-credentials configured
+[exit=0]
+$ kubectl delete -f '$LAB_SCRATCH/tmp/05lab/failing-externalsecrets.yaml' --ignore-not-found
+externalsecret.external-secrets.io "db-missing-key" deleted from p11-05-bookstore namespace
+externalsecret.external-secrets.io "db-forbidden-path" deleted from p11-05-bookstore namespace
+[exit=0]
+=== step 3a, second attempt: the copies were regenerated with the namespace renamed only (the first attempt renamed the ServiceAccount too, so the Vault role did not match it) ===
+=== step 3a: the identity, the SecretStore, and the swap from the demo Secret ===
+$ kubectl apply -f '$LAB_SCRATCH/tmp/05lab/05-eso-serviceaccount.yaml'
+serviceaccount/bookstore-eso created
+[exit=0]
+$ kubectl apply -f '$LAB_SCRATCH/tmp/05lab/10-secretstore-vault.yaml'
+secretstore.external-secrets.io/vault-backend configured
+[exit=0]
+$ kubectl wait --for=jsonpath='{.status.conditions[?(@.type=="Ready")].status}'=True secretstore/vault-backend -n p11-05-bookstore --timeout=120s
+secretstore.external-secrets.io/vault-backend condition met
+[exit=0]
+$ kubectl get secretstore vault-backend -n p11-05-bookstore -o jsonpath='{.status.conditions[?(@.type=="Ready")].reason}{"\n"}'
+Valid
+[exit=0]
+$ kubectl delete secret db-credentials -n p11-05-bookstore --ignore-not-found
+[exit=0]
+$ kubectl apply -f '$LAB_SCRATCH/tmp/05lab/20-externalsecret-db-credentials.yaml'
+externalsecret.external-secrets.io/db-credentials configured
+[exit=0]
+$ kubectl wait --for=jsonpath='{.status.conditions[?(@.type=="Ready")].status}'=True externalsecret/db-credentials -n p11-05-bookstore --timeout=120s
+externalsecret.external-secrets.io/db-credentials condition met
+[exit=0]
+$ kubectl get externalsecret db-credentials -n p11-05-bookstore -o jsonpath='{.status.conditions[?(@.type=="Ready")].reason}{"\n"}'
+SecretSynced
+[exit=0]
+$ kubectl get secret db-credentials -n p11-05-bookstore -o jsonpath='{.data.POSTGRES_USER}' | base64 -d; echo
+bookstore
+[exit=0]
+$ kubectl get secret db-credentials -n p11-05-bookstore -o jsonpath='{.metadata.labels}{"\n"}'
+{"reconcile.external-secrets.io/created-by":"5b928743007fbb8eef330357201c567df6607d61bf03b871a50f23c3","reconcile.external-secrets.io/managed":"true"}
+[exit=0]
+$ kubectl get secret db-credentials -n p11-05-bookstore -o jsonpath='{.metadata.annotations}{"\n"}'
+{"reconcile.external-secrets.io/data-hash":"48bf42a63d0564020f75e00c6cc35eac9f30ec11c09c6307d5670ab8"}
+[exit=0]
+$ kubectl rollout restart deployment/catalog -n p11-05-bookstore
+deployment.apps/catalog restarted
+[exit=0]
+$ kubectl rollout status deployment/catalog -n p11-05-bookstore --timeout=240s
+Waiting for deployment "catalog" rollout to finish: 1 out of 3 new replicas have been updated...
+Waiting for deployment "catalog" rollout to finish: 1 out of 3 new replicas have been updated...
+error: timed out waiting for the condition
+[exit=1]
+=== step 3b: a failed sync, on two new ExternalSecrets with their own targets ===
+$ kubectl apply -f '$LAB_SCRATCH/tmp/05lab/failing-externalsecrets.yaml'
+externalsecret.external-secrets.io/db-missing-key created
+externalsecret.external-secrets.io/db-forbidden-path created
+[exit=0]
+$ kubectl wait --for=jsonpath='{.status.conditions[?(@.type=="Ready")].status}'=False externalsecret/db-missing-key externalsecret/db-forbidden-path -n p11-05-bookstore --timeout=120s
+externalsecret.external-secrets.io/db-missing-key condition met
+externalsecret.external-secrets.io/db-forbidden-path condition met
+[exit=0]
+$ kubectl get externalsecret db-missing-key db-forbidden-path -n p11-05-bookstore
+NAME                STORETYPE     STORE           REFRESH INTERVAL   STATUS              READY   LAST SYNC
+db-missing-key      SecretStore   vault-backend   1m                 SecretSyncedError   False   
+db-forbidden-path   SecretStore   vault-backend   1m                 SecretSyncedError   False   
+[exit=0]
+$ kubectl get externalsecret db-forbidden-path -n p11-05-bookstore -o jsonpath='{.status.conditions[?(@.type=="Ready")].message}{"\n"}'
+could not get secret data from provider
+[exit=0]
+=== step 3c: a failed rotation of the working db-credentials keeps the keys the workloads read ===
+$ kubectl patch externalsecret db-credentials -n p11-05-bookstore --type=merge -p '{"spec":{"data":[{"secretKey":"POSTGRES_USER","remoteRef":{"key":"bookstore/no-such-path","property":"POSTGRES_USER"}}]}}'
+externalsecret.external-secrets.io/db-credentials patched
+[exit=0]
+$ kubectl wait --for=jsonpath='{.status.conditions[?(@.type=="Ready")].status}'=False externalsecret/db-credentials -n p11-05-bookstore --timeout=120s
+externalsecret.external-secrets.io/db-credentials condition met
+[exit=0]
+$ kubectl get externalsecret db-credentials -n p11-05-bookstore -o jsonpath='{.status.conditions[?(@.type=="Ready")].reason}{"\n"}'
+SecretSyncedError
+[exit=0]
+$ kubectl get secret db-credentials -n p11-05-bookstore -o jsonpath='{.data}' | jq 'keys'
+[
+  "POSTGRES_DB",
+  "POSTGRES_PASSWORD",
+  "POSTGRES_USER"
+]
+[exit=0]
+$ kubectl apply -f '$LAB_SCRATCH/tmp/05lab/20-externalsecret-db-credentials.yaml'
+externalsecret.external-secrets.io/db-credentials configured
+[exit=0]
+$ kubectl delete -f '$LAB_SCRATCH/tmp/05lab/failing-externalsecrets.yaml' --ignore-not-found
+externalsecret.external-secrets.io "db-missing-key" deleted from p11-05-bookstore namespace
+externalsecret.external-secrets.io "db-forbidden-path" deleted from p11-05-bookstore namespace
+[exit=0]
+=== step 0b, second attempt at the Bookstore objects: the first attempt also renamed the Postgres user and database, so the namespace was deleted and the copies were made again with only the namespace renamed ===
+$ kubectl delete namespace p11-05-bookstore --wait=true --timeout=240s
+namespace "p11-05-bookstore" deleted
+error: timed out waiting for the condition on namespaces/p11-05-bookstore
+[exit=1]
+$ perl -ne 'next if /^\s*priorityClassName:/; s/\bnamespace: bookstore\b/namespace: p11-05-bookstore/g; s/\b(-n|--namespace) bookstore\b/$1 p11-05-bookstore/g; s/\.bookstore\.svc/.p11-05-bookstore.svc/g; s/^(\s*name:) bookstore\s*$/$1 p11-05-bookstore/; print' '$LAB_REPO/full-guide/examples/bookstore/raw-manifests/00-namespace.yaml' > '$LAB_SCRATCH/tmp/05lab/00-namespace.yaml' && kubectl apply -f '$LAB_SCRATCH/tmp/05lab/00-namespace.yaml'
+error: error parsing $LAB_SCRATCH/tmp/05lab/00-namespace.yaml: error converting YAML to JSON: yaml: line 34: mapping values are not allowed in this context
+[exit=1]
+$ perl -ne 'next if /^\s*priorityClassName:/; s/\bnamespace: bookstore\b/namespace: p11-05-bookstore/g; s/\b(-n|--namespace) bookstore\b/$1 p11-05-bookstore/g; s/\.bookstore\.svc/.p11-05-bookstore.svc/g; s/^(\s*name:) bookstore\s*$/$1 p11-05-bookstore/; print' '$LAB_REPO/full-guide/examples/bookstore/raw-manifests/05-serviceaccounts-rbac.yaml' > '$LAB_SCRATCH/tmp/05lab/05-serviceaccounts-rbac.yaml' && kubectl apply -f '$LAB_SCRATCH/tmp/05lab/05-serviceaccounts-rbac.yaml'
+Error from server (Forbidden): error when creating "$LAB_SCRATCH/tmp/05lab/05-serviceaccounts-rbac.yaml": serviceaccounts "catalog-sa" is forbidden: unable to create new content in namespace p11-05-bookstore because it is being terminated
+Error from server (Forbidden): error when creating "$LAB_SCRATCH/tmp/05lab/05-serviceaccounts-rbac.yaml": serviceaccounts "storefront-sa" is forbidden: unable to create new content in namespace p11-05-bookstore because it is being terminated
+Error from server (Forbidden): error when creating "$LAB_SCRATCH/tmp/05lab/05-serviceaccounts-rbac.yaml": serviceaccounts "orders-sa" is forbidden: unable to create new content in namespace p11-05-bookstore because it is being terminated
+Error from server (Forbidden): error when creating "$LAB_SCRATCH/tmp/05lab/05-serviceaccounts-rbac.yaml": serviceaccounts "payments-worker-sa" is forbidden: unable to create new content in namespace p11-05-bookstore because it is being terminated
+Error from server (Forbidden): error when creating "$LAB_SCRATCH/tmp/05lab/05-serviceaccounts-rbac.yaml": serviceaccounts "postgres-sa" is forbidden: unable to create new content in namespace p11-05-bookstore because it is being terminated
+Error from server (Forbidden): error when creating "$LAB_SCRATCH/tmp/05lab/05-serviceaccounts-rbac.yaml": serviceaccounts "redis-sa" is forbidden: unable to create new content in namespace p11-05-bookstore because it is being terminated
+Error from server (Forbidden): error when creating "$LAB_SCRATCH/tmp/05lab/05-serviceaccounts-rbac.yaml": serviceaccounts "rabbitmq-sa" is forbidden: unable to create new content in namespace p11-05-bookstore because it is being terminated
+Error from server (Forbidden): error when creating "$LAB_SCRATCH/tmp/05lab/05-serviceaccounts-rbac.yaml": serviceaccounts "migrate-sa" is forbidden: unable to create new content in namespace p11-05-bookstore because it is being terminated
+Error from server (Forbidden): error when creating "$LAB_SCRATCH/tmp/05lab/05-serviceaccounts-rbac.yaml": roles.rbac.authorization.k8s.io "catalog-config-reader" is forbidden: unable to create new content in namespace p11-05-bookstore because it is being terminated
+Error from server (Forbidden): error when creating "$LAB_SCRATCH/tmp/05lab/05-serviceaccounts-rbac.yaml": rolebindings.rbac.authorization.k8s.io "catalog-config-reader-binding" is forbidden: unable to create new content in namespace p11-05-bookstore because it is being terminated
+[exit=1]
+$ perl -ne 'next if /^\s*priorityClassName:/; s/\bnamespace: bookstore\b/namespace: p11-05-bookstore/g; s/\b(-n|--namespace) bookstore\b/$1 p11-05-bookstore/g; s/\.bookstore\.svc/.p11-05-bookstore.svc/g; s/^(\s*name:) bookstore\s*$/$1 p11-05-bookstore/; print' '$LAB_REPO/full-guide/examples/bookstore/raw-manifests/15-catalog-config.yaml' > '$LAB_SCRATCH/tmp/05lab/15-catalog-config.yaml' && kubectl apply -f '$LAB_SCRATCH/tmp/05lab/15-catalog-config.yaml'
+Error from server (Forbidden): error when creating "$LAB_SCRATCH/tmp/05lab/15-catalog-config.yaml": configmaps "catalog-config" is forbidden: unable to create new content in namespace p11-05-bookstore because it is being terminated
+[exit=1]
+$ perl -ne 'next if /^\s*priorityClassName:/; s/\bnamespace: bookstore\b/namespace: p11-05-bookstore/g; s/\b(-n|--namespace) bookstore\b/$1 p11-05-bookstore/g; s/\.bookstore\.svc/.p11-05-bookstore.svc/g; s/^(\s*name:) bookstore\s*$/$1 p11-05-bookstore/; print' '$LAB_REPO/full-guide/examples/bookstore/raw-manifests/16-db-credentials.yaml' > '$LAB_SCRATCH/tmp/05lab/16-db-credentials.yaml' && kubectl apply -f '$LAB_SCRATCH/tmp/05lab/16-db-credentials.yaml'
+Error from server (Forbidden): error when creating "$LAB_SCRATCH/tmp/05lab/16-db-credentials.yaml": secrets "db-credentials" is forbidden: unable to create new content in namespace p11-05-bookstore because it is being terminated
+[exit=1]
+$ perl -ne 'next if /^\s*priorityClassName:/; s/\bnamespace: bookstore\b/namespace: p11-05-bookstore/g; s/\b(-n|--namespace) bookstore\b/$1 p11-05-bookstore/g; s/\.bookstore\.svc/.p11-05-bookstore.svc/g; s/^(\s*name:) bookstore\s*$/$1 p11-05-bookstore/; print' '$LAB_REPO/full-guide/examples/bookstore/raw-manifests/20-postgres-statefulset.yaml' > '$LAB_SCRATCH/tmp/05lab/20-postgres-statefulset.yaml' && kubectl apply -f '$LAB_SCRATCH/tmp/05lab/20-postgres-statefulset.yaml'
+Error from server (Forbidden): error when creating "$LAB_SCRATCH/tmp/05lab/20-postgres-statefulset.yaml": services "postgres" is forbidden: unable to create new content in namespace p11-05-bookstore because it is being terminated
+Error from server (Forbidden): error when creating "$LAB_SCRATCH/tmp/05lab/20-postgres-statefulset.yaml": statefulsets.apps "postgres" is forbidden: unable to create new content in namespace p11-05-bookstore because it is being terminated
+[exit=1]
+$ perl -ne 'next if /^\s*priorityClassName:/; s/\bnamespace: bookstore\b/namespace: p11-05-bookstore/g; s/\b(-n|--namespace) bookstore\b/$1 p11-05-bookstore/g; s/\.bookstore\.svc/.p11-05-bookstore.svc/g; s/^(\s*name:) bookstore\s*$/$1 p11-05-bookstore/; print' '$LAB_REPO/full-guide/examples/bookstore/raw-manifests/12-redis.yaml' > '$LAB_SCRATCH/tmp/05lab/12-redis.yaml' && kubectl apply -f '$LAB_SCRATCH/tmp/05lab/12-redis.yaml'
+Error from server (Forbidden): error when creating "$LAB_SCRATCH/tmp/05lab/12-redis.yaml": deployments.apps "redis" is forbidden: unable to create new content in namespace p11-05-bookstore because it is being terminated
+[exit=1]
+$ perl -ne 'next if /^\s*priorityClassName:/; s/\bnamespace: bookstore\b/namespace: p11-05-bookstore/g; s/\b(-n|--namespace) bookstore\b/$1 p11-05-bookstore/g; s/\.bookstore\.svc/.p11-05-bookstore.svc/g; s/^(\s*name:) bookstore\s*$/$1 p11-05-bookstore/; print' '$LAB_REPO/full-guide/examples/bookstore/raw-manifests/10-catalog-deploy.yaml' > '$LAB_SCRATCH/tmp/05lab/10-catalog-deploy.yaml' && kubectl apply -f '$LAB_SCRATCH/tmp/05lab/10-catalog-deploy.yaml'
+Error from server (Forbidden): error when creating "$LAB_SCRATCH/tmp/05lab/10-catalog-deploy.yaml": deployments.apps "catalog" is forbidden: unable to create new content in namespace p11-05-bookstore because it is being terminated
+[exit=1]
+$ perl -ne 'next if /^\s*priorityClassName:/; s/\bnamespace: bookstore\b/namespace: p11-05-bookstore/g; s/\b(-n|--namespace) bookstore\b/$1 p11-05-bookstore/g; s/\.bookstore\.svc/.p11-05-bookstore.svc/g; s/^(\s*name:) bookstore\s*$/$1 p11-05-bookstore/; print' '$LAB_REPO/full-guide/examples/bookstore/raw-manifests/40-services.yaml' > '$LAB_SCRATCH/tmp/05lab/40-services.yaml' && kubectl apply -f '$LAB_SCRATCH/tmp/05lab/40-services.yaml'
+Error from server (Forbidden): error when creating "$LAB_SCRATCH/tmp/05lab/40-services.yaml": services "catalog" is forbidden: unable to create new content in namespace p11-05-bookstore because it is being terminated
+Error from server (Forbidden): error when creating "$LAB_SCRATCH/tmp/05lab/40-services.yaml": services "storefront" is forbidden: unable to create new content in namespace p11-05-bookstore because it is being terminated
+Error from server (Forbidden): error when creating "$LAB_SCRATCH/tmp/05lab/40-services.yaml": services "orders" is forbidden: unable to create new content in namespace p11-05-bookstore because it is being terminated
+Error from server (Forbidden): error when creating "$LAB_SCRATCH/tmp/05lab/40-services.yaml": services "redis" is forbidden: unable to create new content in namespace p11-05-bookstore because it is being terminated
+Error from server (Forbidden): error when creating "$LAB_SCRATCH/tmp/05lab/40-services.yaml": services "rabbitmq" is forbidden: unable to create new content in namespace p11-05-bookstore because it is being terminated
+Error from server (Forbidden): error when creating "$LAB_SCRATCH/tmp/05lab/40-services.yaml": services "payments-worker" is forbidden: unable to create new content in namespace p11-05-bookstore because it is being terminated
+[exit=1]
+$ perl -ne 'next if /^\s*priorityClassName:/; s/\bnamespace: bookstore\b/namespace: p11-05-bookstore/g; s/\b(-n|--namespace) bookstore\b/$1 p11-05-bookstore/g; s/\.bookstore\.svc/.p11-05-bookstore.svc/g; s/^(\s*name:) bookstore\s*$/$1 p11-05-bookstore/; print' '$LAB_REPO/full-guide/examples/bookstore/raw-manifests/21-db-migrate-job.yaml' > '$LAB_SCRATCH/tmp/05lab/21-db-migrate-job.yaml' && kubectl apply -f '$LAB_SCRATCH/tmp/05lab/21-db-migrate-job.yaml'
+Error from server (Forbidden): error when creating "$LAB_SCRATCH/tmp/05lab/21-db-migrate-job.yaml": jobs.batch "db-migrate" is forbidden: unable to create new content in namespace p11-05-bookstore because it is being terminated
+[exit=1]
+$ kubectl rollout status statefulset/postgres -n p11-05-bookstore --timeout=300s
+Error from server (NotFound): statefulsets.apps "postgres" not found
+[exit=1]
+$ kubectl wait --for=condition=complete job/db-migrate -n p11-05-bookstore --timeout=180s
+Error from server (NotFound): jobs.batch "db-migrate" not found
+[exit=1]
+$ kubectl rollout status deployment/redis -n p11-05-bookstore --timeout=180s
+Error from server (NotFound): deployments.apps "redis" not found
+[exit=1]
+$ kubectl rollout status deployment/catalog -n p11-05-bookstore --timeout=240s
+Error from server (NotFound): deployments.apps "catalog" not found
+[exit=1]
+$ kubectl get pods -n p11-05-bookstore
+No resources found in p11-05-bookstore namespace.
+[exit=0]
+=== step 0c, third attempt: the namespace finished deleting once the leftover ExternalSecret's finalizer was cleared (the SecretStore it used had gone first). The copies now rename the namespace only; the Python transform is in the lab working folder. ===
+$ python3 '$LAB_SCRATCH/tmp/05lab/transform.py' '$LAB_REPO/full-guide/examples/bookstore/raw-manifests/00-namespace.yaml' '$LAB_SCRATCH/tmp/05lab/00-namespace.yaml' && kubectl apply -f '$LAB_SCRATCH/tmp/05lab/00-namespace.yaml'
+error: error parsing $LAB_SCRATCH/tmp/05lab/00-namespace.yaml: error converting YAML to JSON: yaml: line 34: mapping values are not allowed in this context
+[exit=1]
+$ python3 '$LAB_SCRATCH/tmp/05lab/transform.py' '$LAB_REPO/full-guide/examples/bookstore/raw-manifests/05-serviceaccounts-rbac.yaml' '$LAB_SCRATCH/tmp/05lab/05-serviceaccounts-rbac.yaml' && kubectl apply -f '$LAB_SCRATCH/tmp/05lab/05-serviceaccounts-rbac.yaml'
+Error from server (NotFound): error when creating "$LAB_SCRATCH/tmp/05lab/05-serviceaccounts-rbac.yaml": namespaces "p11-05-bookstore" not found
+Error from server (NotFound): error when creating "$LAB_SCRATCH/tmp/05lab/05-serviceaccounts-rbac.yaml": namespaces "p11-05-bookstore" not found
+Error from server (NotFound): error when creating "$LAB_SCRATCH/tmp/05lab/05-serviceaccounts-rbac.yaml": namespaces "p11-05-bookstore" not found
+Error from server (NotFound): error when creating "$LAB_SCRATCH/tmp/05lab/05-serviceaccounts-rbac.yaml": namespaces "p11-05-bookstore" not found
+Error from server (NotFound): error when creating "$LAB_SCRATCH/tmp/05lab/05-serviceaccounts-rbac.yaml": namespaces "p11-05-bookstore" not found
+Error from server (NotFound): error when creating "$LAB_SCRATCH/tmp/05lab/05-serviceaccounts-rbac.yaml": namespaces "p11-05-bookstore" not found
+Error from server (NotFound): error when creating "$LAB_SCRATCH/tmp/05lab/05-serviceaccounts-rbac.yaml": namespaces "p11-05-bookstore" not found
+Error from server (NotFound): error when creating "$LAB_SCRATCH/tmp/05lab/05-serviceaccounts-rbac.yaml": namespaces "p11-05-bookstore" not found
+Error from server (NotFound): error when creating "$LAB_SCRATCH/tmp/05lab/05-serviceaccounts-rbac.yaml": namespaces "p11-05-bookstore" not found
+Error from server (NotFound): error when creating "$LAB_SCRATCH/tmp/05lab/05-serviceaccounts-rbac.yaml": namespaces "p11-05-bookstore" not found
+[exit=1]
+$ python3 '$LAB_SCRATCH/tmp/05lab/transform.py' '$LAB_REPO/full-guide/examples/bookstore/raw-manifests/15-catalog-config.yaml' '$LAB_SCRATCH/tmp/05lab/15-catalog-config.yaml' && kubectl apply -f '$LAB_SCRATCH/tmp/05lab/15-catalog-config.yaml'
+Error from server (NotFound): error when creating "$LAB_SCRATCH/tmp/05lab/15-catalog-config.yaml": namespaces "p11-05-bookstore" not found
+[exit=1]
+$ python3 '$LAB_SCRATCH/tmp/05lab/transform.py' '$LAB_REPO/full-guide/examples/bookstore/raw-manifests/16-db-credentials.yaml' '$LAB_SCRATCH/tmp/05lab/16-db-credentials.yaml' && kubectl apply -f '$LAB_SCRATCH/tmp/05lab/16-db-credentials.yaml'
+Error from server (NotFound): error when creating "$LAB_SCRATCH/tmp/05lab/16-db-credentials.yaml": namespaces "p11-05-bookstore" not found
+[exit=1]
+$ python3 '$LAB_SCRATCH/tmp/05lab/transform.py' '$LAB_REPO/full-guide/examples/bookstore/raw-manifests/20-postgres-statefulset.yaml' '$LAB_SCRATCH/tmp/05lab/20-postgres-statefulset.yaml' && kubectl apply -f '$LAB_SCRATCH/tmp/05lab/20-postgres-statefulset.yaml'
+Error from server (NotFound): error when creating "$LAB_SCRATCH/tmp/05lab/20-postgres-statefulset.yaml": namespaces "p11-05-bookstore" not found
+Error from server (NotFound): error when creating "$LAB_SCRATCH/tmp/05lab/20-postgres-statefulset.yaml": namespaces "p11-05-bookstore" not found
+[exit=1]
+$ python3 '$LAB_SCRATCH/tmp/05lab/transform.py' '$LAB_REPO/full-guide/examples/bookstore/raw-manifests/12-redis.yaml' '$LAB_SCRATCH/tmp/05lab/12-redis.yaml' && kubectl apply -f '$LAB_SCRATCH/tmp/05lab/12-redis.yaml'
+Error from server (NotFound): error when creating "$LAB_SCRATCH/tmp/05lab/12-redis.yaml": namespaces "p11-05-bookstore" not found
+[exit=1]
+$ python3 '$LAB_SCRATCH/tmp/05lab/transform.py' '$LAB_REPO/full-guide/examples/bookstore/raw-manifests/10-catalog-deploy.yaml' '$LAB_SCRATCH/tmp/05lab/10-catalog-deploy.yaml' && kubectl apply -f '$LAB_SCRATCH/tmp/05lab/10-catalog-deploy.yaml'
+Error from server (NotFound): error when creating "$LAB_SCRATCH/tmp/05lab/10-catalog-deploy.yaml": namespaces "p11-05-bookstore" not found
+[exit=1]
+$ python3 '$LAB_SCRATCH/tmp/05lab/transform.py' '$LAB_REPO/full-guide/examples/bookstore/raw-manifests/40-services.yaml' '$LAB_SCRATCH/tmp/05lab/40-services.yaml' && kubectl apply -f '$LAB_SCRATCH/tmp/05lab/40-services.yaml'
+Error from server (NotFound): error when creating "$LAB_SCRATCH/tmp/05lab/40-services.yaml": namespaces "p11-05-bookstore" not found
+Error from server (NotFound): error when creating "$LAB_SCRATCH/tmp/05lab/40-services.yaml": namespaces "p11-05-bookstore" not found
+Error from server (NotFound): error when creating "$LAB_SCRATCH/tmp/05lab/40-services.yaml": namespaces "p11-05-bookstore" not found
+Error from server (NotFound): error when creating "$LAB_SCRATCH/tmp/05lab/40-services.yaml": namespaces "p11-05-bookstore" not found
+Error from server (NotFound): error when creating "$LAB_SCRATCH/tmp/05lab/40-services.yaml": namespaces "p11-05-bookstore" not found
+Error from server (NotFound): error when creating "$LAB_SCRATCH/tmp/05lab/40-services.yaml": namespaces "p11-05-bookstore" not found
+[exit=1]
+$ python3 '$LAB_SCRATCH/tmp/05lab/transform.py' '$LAB_REPO/full-guide/examples/bookstore/raw-manifests/21-db-migrate-job.yaml' '$LAB_SCRATCH/tmp/05lab/21-db-migrate-job.yaml' && kubectl apply -f '$LAB_SCRATCH/tmp/05lab/21-db-migrate-job.yaml'
+Error from server (NotFound): error when creating "$LAB_SCRATCH/tmp/05lab/21-db-migrate-job.yaml": namespaces "p11-05-bookstore" not found
+[exit=1]
+$ kubectl rollout status statefulset/postgres -n p11-05-bookstore --timeout=300s
+Error from server (NotFound): namespaces "p11-05-bookstore" not found
+[exit=1]
+$ kubectl wait --for=condition=complete job/db-migrate -n p11-05-bookstore --timeout=180s
+Error from server (NotFound): namespaces "p11-05-bookstore" not found
+[exit=1]
+$ kubectl rollout status deployment/redis -n p11-05-bookstore --timeout=180s
+Error from server (NotFound): namespaces "p11-05-bookstore" not found
+[exit=1]
+$ kubectl rollout status deployment/catalog -n p11-05-bookstore --timeout=240s
+Error from server (NotFound): namespaces "p11-05-bookstore" not found
+[exit=1]
+$ kubectl get pods -n p11-05-bookstore
+No resources found in p11-05-bookstore namespace.
+[exit=0]
+=== step 0d, fourth attempt: the transform had joined two lines in the Namespace copy; it is fixed and the copies are made again ===
+$ python3 '$LAB_SCRATCH/tmp/05lab/transform.py' '$LAB_REPO/full-guide/examples/bookstore/raw-manifests/00-namespace.yaml' '$LAB_SCRATCH/tmp/05lab/00-namespace.yaml' && kubectl apply -f '$LAB_SCRATCH/tmp/05lab/00-namespace.yaml'
+namespace/p11-05-bookstore created
+resourcequota/bookstore-quota created
+limitrange/bookstore-limits created
+[exit=0]
+$ python3 '$LAB_SCRATCH/tmp/05lab/transform.py' '$LAB_REPO/full-guide/examples/bookstore/raw-manifests/05-serviceaccounts-rbac.yaml' '$LAB_SCRATCH/tmp/05lab/05-serviceaccounts-rbac.yaml' && kubectl apply -f '$LAB_SCRATCH/tmp/05lab/05-serviceaccounts-rbac.yaml'
+serviceaccount/catalog-sa created
+serviceaccount/storefront-sa created
+serviceaccount/orders-sa created
+serviceaccount/payments-worker-sa created
+serviceaccount/postgres-sa created
+serviceaccount/redis-sa created
+serviceaccount/rabbitmq-sa created
+serviceaccount/migrate-sa created
+role.rbac.authorization.k8s.io/catalog-config-reader created
+rolebinding.rbac.authorization.k8s.io/catalog-config-reader-binding created
+[exit=0]
+$ python3 '$LAB_SCRATCH/tmp/05lab/transform.py' '$LAB_REPO/full-guide/examples/bookstore/raw-manifests/15-catalog-config.yaml' '$LAB_SCRATCH/tmp/05lab/15-catalog-config.yaml' && kubectl apply -f '$LAB_SCRATCH/tmp/05lab/15-catalog-config.yaml'
+configmap/catalog-config created
+[exit=0]
+$ python3 '$LAB_SCRATCH/tmp/05lab/transform.py' '$LAB_REPO/full-guide/examples/bookstore/raw-manifests/16-db-credentials.yaml' '$LAB_SCRATCH/tmp/05lab/16-db-credentials.yaml' && kubectl apply -f '$LAB_SCRATCH/tmp/05lab/16-db-credentials.yaml'
+secret/db-credentials created
+[exit=0]
+$ python3 '$LAB_SCRATCH/tmp/05lab/transform.py' '$LAB_REPO/full-guide/examples/bookstore/raw-manifests/20-postgres-statefulset.yaml' '$LAB_SCRATCH/tmp/05lab/20-postgres-statefulset.yaml' && kubectl apply -f '$LAB_SCRATCH/tmp/05lab/20-postgres-statefulset.yaml'
+service/postgres created
+statefulset.apps/postgres created
+[exit=0]
+$ python3 '$LAB_SCRATCH/tmp/05lab/transform.py' '$LAB_REPO/full-guide/examples/bookstore/raw-manifests/12-redis.yaml' '$LAB_SCRATCH/tmp/05lab/12-redis.yaml' && kubectl apply -f '$LAB_SCRATCH/tmp/05lab/12-redis.yaml'
+deployment.apps/redis created
+[exit=0]
+$ python3 '$LAB_SCRATCH/tmp/05lab/transform.py' '$LAB_REPO/full-guide/examples/bookstore/raw-manifests/10-catalog-deploy.yaml' '$LAB_SCRATCH/tmp/05lab/10-catalog-deploy.yaml' && kubectl apply -f '$LAB_SCRATCH/tmp/05lab/10-catalog-deploy.yaml'
+deployment.apps/catalog created
+[exit=0]
+$ python3 '$LAB_SCRATCH/tmp/05lab/transform.py' '$LAB_REPO/full-guide/examples/bookstore/raw-manifests/40-services.yaml' '$LAB_SCRATCH/tmp/05lab/40-services.yaml' && kubectl apply -f '$LAB_SCRATCH/tmp/05lab/40-services.yaml'
+service/catalog created
+service/storefront created
+service/orders created
+service/redis created
+service/rabbitmq created
+service/payments-worker created
+[exit=0]
+$ python3 '$LAB_SCRATCH/tmp/05lab/transform.py' '$LAB_REPO/full-guide/examples/bookstore/raw-manifests/21-db-migrate-job.yaml' '$LAB_SCRATCH/tmp/05lab/21-db-migrate-job.yaml' && kubectl apply -f '$LAB_SCRATCH/tmp/05lab/21-db-migrate-job.yaml'
+job.batch/db-migrate created
+[exit=0]
+$ kubectl rollout status statefulset/postgres -n p11-05-bookstore --timeout=300s
+Waiting for 1 pods to be ready...
+partitioned roll out complete: 1 new pods have been updated...
+[exit=0]
+$ kubectl wait --for=condition=complete job/db-migrate -n p11-05-bookstore --timeout=180s
+error: timed out waiting for the condition on jobs/db-migrate
+[exit=1]
+$ kubectl rollout status deployment/redis -n p11-05-bookstore --timeout=180s
+deployment "redis" successfully rolled out
+[exit=0]
+$ kubectl rollout status deployment/catalog -n p11-05-bookstore --timeout=240s
+deployment "catalog" successfully rolled out
+[exit=0]
+$ kubectl get pods -n p11-05-bookstore
+NAME                       READY   STATUS    RESTARTS   AGE
+catalog-644c4c9768-25m2v   1/1     Running   0          7m27s
+catalog-644c4c9768-67ngb   1/1     Running   0          7m27s
+catalog-644c4c9768-kgn4t   1/1     Running   0          7m27s
+postgres-0                 1/1     Running   0          7m28s
+redis-574bb544f-pqhgf      1/1     Running   0          7m28s
+[exit=0]
+=== step 3-final: the ESO steps again on the rebuilt namespace; the outputs below come from this pass ===
+=== step 3a: the identity, the SecretStore, and the swap from the demo Secret ===
+$ kubectl apply -f '$LAB_SCRATCH/tmp/05lab/05-eso-serviceaccount.yaml'
+serviceaccount/bookstore-eso created
+[exit=0]
+$ kubectl apply -f '$LAB_SCRATCH/tmp/05lab/10-secretstore-vault.yaml'
+secretstore.external-secrets.io/vault-backend created
+[exit=0]
+$ kubectl wait --for=jsonpath='{.status.conditions[?(@.type=="Ready")].status}'=True secretstore/vault-backend -n p11-05-bookstore --timeout=120s
+error: timed out waiting for the condition on secretstores/vault-backend
+[exit=1]
+$ kubectl get secretstore vault-backend -n p11-05-bookstore -o jsonpath='{.status.conditions[?(@.type=="Ready")].reason}{"\n"}'
+
+[exit=0]
+$ kubectl delete secret db-credentials -n p11-05-bookstore --ignore-not-found
+secret "db-credentials" deleted from p11-05-bookstore namespace
+[exit=0]
+$ kubectl apply -f '$LAB_SCRATCH/tmp/05lab/20-externalsecret-db-credentials.yaml'
+externalsecret.external-secrets.io/db-credentials created
+[exit=0]
+$ kubectl wait --for=jsonpath='{.status.conditions[?(@.type=="Ready")].status}'=True externalsecret/db-credentials -n p11-05-bookstore --timeout=120s
+error: timed out waiting for the condition on externalsecrets/db-credentials
+[exit=1]
+$ kubectl get externalsecret db-credentials -n p11-05-bookstore -o jsonpath='{.status.conditions[?(@.type=="Ready")].reason}{"\n"}'
+
+[exit=0]
+$ kubectl get secret db-credentials -n p11-05-bookstore -o jsonpath='{.data.POSTGRES_USER}' | base64 -d; echo
+Error from server (NotFound): secrets "db-credentials" not found
+
+[exit=0]
+$ kubectl get secret db-credentials -n p11-05-bookstore -o jsonpath='{.metadata.labels}{"\n"}'
+Error from server (NotFound): secrets "db-credentials" not found
+[exit=1]
+$ kubectl get secret db-credentials -n p11-05-bookstore -o jsonpath='{.metadata.annotations}{"\n"}'
+Error from server (NotFound): secrets "db-credentials" not found
+[exit=1]
+$ kubectl rollout restart deployment/catalog -n p11-05-bookstore
+deployment.apps/catalog restarted
+[exit=0]
+$ kubectl rollout status deployment/catalog -n p11-05-bookstore --timeout=240s
+Waiting for deployment "catalog" rollout to finish: 1 out of 3 new replicas have been updated...
+error: timed out waiting for the condition
+[exit=1]
+=== step 3b: a failed sync, on two new ExternalSecrets with their own targets ===
+$ kubectl apply -f '$LAB_SCRATCH/tmp/05lab/failing-externalsecrets.yaml'
+externalsecret.external-secrets.io/db-missing-key created
+externalsecret.external-secrets.io/db-forbidden-path created
+[exit=0]
+$ kubectl wait --for=jsonpath='{.status.conditions[?(@.type=="Ready")].status}'=False externalsecret/db-missing-key externalsecret/db-forbidden-path -n p11-05-bookstore --timeout=120s
+=== step 2e: the scoped Role and RoleBinding were removed with the namespace; the release is reapplied from its own manifest ===
+$ kubectl -n p11-05-bookstore get role,rolebinding 2>&1 | tail -3
+
+NAME                                                                  ROLE                         AGE
+rolebinding.rbac.authorization.k8s.io/catalog-config-reader-binding   Role/catalog-config-reader   18m
+[exit=0]
+$ helm get manifest external-secrets -n p11-05-eso | python3 -c 'import sys,yaml; [print(d["kind"]) for d in yaml.safe_load_all(sys.stdin) if d and d.get("kind") in ("Role","RoleBinding") and d["metadata"].get("namespace")=="p11-05-bookstore"]'
+Role
+Role
+Role
+RoleBinding
+[exit=0]
+$ helm get manifest external-secrets -n p11-05-eso | python3 -c 'import sys,yaml; [yaml.safe_dump(d, sys.stdout) for d in yaml.safe_load_all(sys.stdin) if d and d.get("kind") in ("Role","RoleBinding") and d["metadata"].get("namespace")=="p11-05-bookstore"]' | kubectl apply -f -
+Error from server (BadRequest): error when creating "STDIN": RoleBinding in version "v1" cannot be handled as a RoleBinding: strict decoding error: unknown field "rules"
+[exit=1]
+$ kubectl auth can-i --as=system:serviceaccount:p11-05-eso:external-secrets list externalsecrets.external-secrets.io -n p11-05-bookstore
+no
+[exit=1]
+$ kubectl auth can-i --as=system:serviceaccount:p11-05-eso:external-secrets get secrets -n kube-system
+no
+[exit=1]
+$ helm get manifest external-secrets -n p11-05-eso | python3 -c 'import sys,yaml; docs=[d for d in yaml.safe_load_all(sys.stdin) if d and d.get("kind") in ("Role","RoleBinding") and d["metadata"].get("namespace")=="p11-05-bookstore"]; yaml.safe_dump_all(docs, sys.stdout)' > '$LAB_SCRATCH/tmp/05lab/eso-scoped-rbac.yaml' && kubectl apply -f '$LAB_SCRATCH/tmp/05lab/eso-scoped-rbac.yaml'
+role.rbac.authorization.k8s.io/external-secrets-controller created
+role.rbac.authorization.k8s.io/external-secrets-view created
+role.rbac.authorization.k8s.io/external-secrets-edit created
+rolebinding.rbac.authorization.k8s.io/external-secrets-controller created
+[exit=0]
+$ kubectl auth can-i --as=system:serviceaccount:p11-05-eso:external-secrets list externalsecrets.external-secrets.io -n p11-05-bookstore
+yes
+[exit=0]
+$ kubectl auth can-i --as=system:serviceaccount:p11-05-eso:external-secrets get secrets -n kube-system
+no
+[exit=1]
+=== step 3-ok: the ESO steps again, after the scoped Role and RoleBinding were reapplied; the outputs below come from this pass ===
+=== step 3a: the identity, the SecretStore, and the swap from the demo Secret ===
+$ kubectl apply -f '$LAB_SCRATCH/tmp/05lab/05-eso-serviceaccount.yaml'
+serviceaccount/bookstore-eso unchanged
+[exit=0]
+$ kubectl apply -f '$LAB_SCRATCH/tmp/05lab/10-secretstore-vault.yaml'
+secretstore.external-secrets.io/vault-backend unchanged
+[exit=0]
+$ kubectl wait --for=jsonpath='{.status.conditions[?(@.type=="Ready")].status}'=True secretstore/vault-backend -n p11-05-bookstore --timeout=120s
+secretstore.external-secrets.io/vault-backend condition met
+[exit=0]
+$ kubectl get secretstore vault-backend -n p11-05-bookstore -o jsonpath='{.status.conditions[?(@.type=="Ready")].reason}{"\n"}'
+Valid
+[exit=0]
+$ kubectl delete secret db-credentials -n p11-05-bookstore --ignore-not-found
+[exit=0]
+$ kubectl apply -f '$LAB_SCRATCH/tmp/05lab/20-externalsecret-db-credentials.yaml'
+externalsecret.external-secrets.io/db-credentials unchanged
+[exit=0]
+$ kubectl wait --for=jsonpath='{.status.conditions[?(@.type=="Ready")].status}'=True externalsecret/db-credentials -n p11-05-bookstore --timeout=120s
+error: timed out waiting for the condition on externalsecrets/db-credentials
+[exit=1]
+$ kubectl get externalsecret db-credentials -n p11-05-bookstore -o jsonpath='{.status.conditions[?(@.type=="Ready")].reason}{"\n"}'
+SecretSyncedError
+[exit=0]
+$ kubectl get secret db-credentials -n p11-05-bookstore -o jsonpath='{.data.POSTGRES_USER}' | base64 -d; echo
+Error from server (NotFound): secrets "db-credentials" not found
+
+[exit=0]
+$ kubectl get secret db-credentials -n p11-05-bookstore -o jsonpath='{.metadata.labels}{"\n"}'
+Error from server (NotFound): secrets "db-credentials" not found
+[exit=1]
+$ kubectl get secret db-credentials -n p11-05-bookstore -o jsonpath='{.metadata.annotations}{"\n"}'
+Error from server (NotFound): secrets "db-credentials" not found
+[exit=1]
+$ kubectl rollout restart deployment/catalog -n p11-05-bookstore
+deployment.apps/catalog restarted
+[exit=0]
+$ kubectl rollout status deployment/catalog -n p11-05-bookstore --timeout=240s
+Waiting for deployment "catalog" rollout to finish: 0 out of 3 new replicas have been updated...
+Waiting for deployment "catalog" rollout to finish: 1 out of 3 new replicas have been updated...
+Waiting for deployment "catalog" rollout to finish: 1 out of 3 new replicas have been updated...
+Waiting for deployment "catalog" rollout to finish: 1 out of 3 new replicas have been updated...
+Waiting for deployment "catalog" rollout to finish: 1 out of 3 new replicas have been updated...
+Waiting for deployment "catalog" rollout to finish: 1 out of 3 new replicas have been updated...
+Waiting for deployment "catalog" rollout to finish: 2 out of 3 new replicas have been updated...
+Waiting for deployment "catalog" rollout to finish: 2 out of 3 new replicas have been updated...
+Waiting for deployment "catalog" rollout to finish: 2 old replicas are pending termination...
+Waiting for deployment "catalog" rollout to finish: 1 old replicas are pending termination...
+Waiting for deployment "catalog" rollout to finish: 1 old replicas are pending termination...
+Waiting for deployment "catalog" rollout to finish: 1 old replicas are pending termination...
+error: timed out waiting for the condition
+[exit=1]
+=== step 3b: a failed sync, on two new ExternalSecrets with their own targets ===
+$ kubectl apply -f '$LAB_SCRATCH/tmp/05lab/failing-externalsecrets.yaml'
+externalsecret.external-secrets.io/db-missing-key unchanged
+externalsecret.external-secrets.io/db-forbidden-path unchanged
+[exit=0]
+$ kubectl wait --for=jsonpath='{.status.conditions[?(@.type=="Ready")].status}'=False externalsecret/db-missing-key externalsecret/db-forbidden-path -n p11-05-bookstore --timeout=120s
+externalsecret.external-secrets.io/db-missing-key condition met
+externalsecret.external-secrets.io/db-forbidden-path condition met
+[exit=0]
+$ kubectl get externalsecret db-missing-key db-forbidden-path -n p11-05-bookstore
+NAME                STORETYPE     STORE           REFRESH INTERVAL   STATUS              READY   LAST SYNC
+db-missing-key      SecretStore   vault-backend   1m                 SecretSyncedError   False   
+db-forbidden-path   SecretStore   vault-backend   1m                 SecretSyncedError   False   
+[exit=0]
+$ kubectl get externalsecret db-forbidden-path -n p11-05-bookstore -o jsonpath='{.status.conditions[?(@.type=="Ready")].message}{"\n"}'
+could not get secret data from provider
+[exit=0]
+=== step 3c: a failed rotation of the working db-credentials keeps the keys the workloads read ===
+$ kubectl patch externalsecret db-credentials -n p11-05-bookstore --type=merge -p '{"spec":{"data":[{"secretKey":"POSTGRES_USER","remoteRef":{"key":"bookstore/no-such-path","property":"POSTGRES_USER"}}]}}'
+externalsecret.external-secrets.io/db-credentials patched
+[exit=0]
+$ kubectl wait --for=jsonpath='{.status.conditions[?(@.type=="Ready")].status}'=False externalsecret/db-credentials -n p11-05-bookstore --timeout=120s
+externalsecret.external-secrets.io/db-credentials condition met
+[exit=0]
+$ kubectl get externalsecret db-credentials -n p11-05-bookstore -o jsonpath='{.status.conditions[?(@.type=="Ready")].reason}{"\n"}'
+SecretSyncedError
+[exit=0]
+$ kubectl get secret db-credentials -n p11-05-bookstore -o jsonpath='{.data}' | jq 'keys'
+[
+  "POSTGRES_DB",
+  "POSTGRES_PASSWORD",
+  "POSTGRES_USER"
+]
+[exit=0]
+$ kubectl apply -f '$LAB_SCRATCH/tmp/05lab/20-externalsecret-db-credentials.yaml'
+externalsecret.external-secrets.io/db-credentials configured
+[exit=0]
+$ kubectl delete -f '$LAB_SCRATCH/tmp/05lab/failing-externalsecrets.yaml' --ignore-not-found
+externalsecret.external-secrets.io "db-missing-key" deleted from p11-05-bookstore namespace
+externalsecret.external-secrets.io "db-forbidden-path" deleted from p11-05-bookstore namespace
+[exit=0]
+=== step 3d: the swap, run once more with the ExternalSecret deleted too. Deleting only the Secret does not trigger a new sync, so the ExternalSecret was re-created as well ===
+$ kubectl delete externalsecret db-credentials -n p11-05-bookstore --ignore-not-found
+externalsecret.external-secrets.io "db-credentials" deleted from p11-05-bookstore namespace
+[exit=0]
+$ kubectl delete secret db-credentials -n p11-05-bookstore --ignore-not-found
+[exit=0]
+$ kubectl apply -f '$LAB_SCRATCH/tmp/05lab/20-externalsecret-db-credentials.yaml'
+externalsecret.external-secrets.io/db-credentials created
+[exit=0]
+$ kubectl wait --for=jsonpath='{.status.conditions[?(@.type=="Ready")].status}'=True externalsecret/db-credentials -n p11-05-bookstore --timeout=150s
+externalsecret.external-secrets.io/db-credentials condition met
+[exit=0]
+$ kubectl get externalsecret db-credentials -n p11-05-bookstore -o jsonpath='{.status.conditions[?(@.type=="Ready")].reason}{"\n"}'
+SecretSynced
+[exit=0]
+$ kubectl get secret db-credentials -n p11-05-bookstore -o jsonpath='{.data.POSTGRES_USER}' | base64 -d; echo
+bookstore
+[exit=0]
+$ kubectl get secret db-credentials -n p11-05-bookstore -o jsonpath='{.metadata.labels}{"\n"}'
+{"reconcile.external-secrets.io/created-by":"5b928743007fbb8eef330357201c567df6607d61bf03b871a50f23c3","reconcile.external-secrets.io/managed":"true"}
+[exit=0]
+$ kubectl get secret db-credentials -n p11-05-bookstore -o jsonpath='{.metadata.annotations}{"\n"}'
+{"reconcile.external-secrets.io/data-hash":"48bf42a63d0564020f75e00c6cc35eac9f30ec11c09c6307d5670ab8"}
+[exit=0]
+$ kubectl rollout restart deployment/catalog -n p11-05-bookstore
+deployment.apps/catalog restarted
+[exit=0]
+$ kubectl rollout status deployment/catalog -n p11-05-bookstore --timeout=240s
+Waiting for deployment spec update to be observed...
+Waiting for deployment "catalog" rollout to finish: 0 out of 3 new replicas have been updated...
+Waiting for deployment "catalog" rollout to finish: 1 out of 3 new replicas have been updated...
+Waiting for deployment "catalog" rollout to finish: 1 out of 3 new replicas have been updated...
+Waiting for deployment "catalog" rollout to finish: 1 out of 3 new replicas have been updated...
+Waiting for deployment "catalog" rollout to finish: 2 out of 3 new replicas have been updated...
+Waiting for deployment "catalog" rollout to finish: 2 out of 3 new replicas have been updated...
+Waiting for deployment "catalog" rollout to finish: 2 out of 3 new replicas have been updated...
+Waiting for deployment "catalog" rollout to finish: 2 out of 3 new replicas have been updated...
+Waiting for deployment "catalog" rollout to finish: 1 old replicas are pending termination...
+Waiting for deployment "catalog" rollout to finish: 1 old replicas are pending termination...
+deployment "catalog" successfully rolled out
+[exit=0]
+=== step 4: who can log in to Vault: a second ServiceAccount in the same namespace ===
+$ kubectl apply -f '$LAB_SCRATCH/tmp/05lab/sa-bookstore-other.yaml'
+serviceaccount/bookstore-other created
+[exit=0]
+$ kubectl -n p11-05-vault exec vault-0 -- env VAULT_ADDR=http://127.0.0.1:8200 vault write auth/kubernetes/login role=bookstore-eso jwt="$(kubectl -n p11-05-bookstore create token bookstore-other)"
+Error writing data to auth/kubernetes/login: Error making API request.
+
+URL: PUT http://127.0.0.1:8200/v1/auth/kubernetes/login
+Code: 403. Errors:
+
+* service account name not authorized
+command terminated with exit code 2
+[exit=2]
+$ kubectl -n p11-05-vault exec vault-0 -- env VAULT_ADDR=http://127.0.0.1:8200 vault write -format=json auth/kubernetes/login role=bookstore-eso jwt="$(kubectl -n p11-05-bookstore create token bookstore-eso)" | jq '.auth | {policies, lease_duration}'
+{
+  "policies": [
+    "bookstore-ro",
+    "default"
+  ],
+  "lease_duration": 900
+}
+[exit=0]
+$ kubectl -n p11-05-bookstore delete serviceaccount bookstore-other
+serviceaccount "bookstore-other" deleted from p11-05-bookstore namespace
+[exit=0]
+=== step 5: dynamic credentials. The database engine is configured in dev mode with the bootstrap admin (lab only) ===
+$ kubectl -n p11-05-vault exec vault-0 -- env VAULT_TOKEN=root vault secrets enable database
+Success! Enabled the database secrets engine at: database/
+[exit=0]
+$ kubectl -n p11-05-vault exec vault-0 -- env VAULT_TOKEN=root vault write database/config/bookstore-pg plugin_name=postgresql-database-plugin allowed_roles=bookstore-app connection_url='postgresql://{{username}}:{{password}}@postgres.p11-05-bookstore.svc.cluster.local:5432/bookstore?sslmode=disable' username=bookstore password=devpassword
+Success! Data written to: database/config/bookstore-pg
+[exit=0]
+$ kubectl -n p11-05-vault exec vault-0 -- env VAULT_TOKEN=root vault write database/roles/bookstore-app db_name=bookstore-pg creation_statements="CREATE ROLE \"{{name}}\" WITH LOGIN PASSWORD '{{password}}' VALID UNTIL '{{expiration}}'; GRANT SELECT ON ALL TABLES IN SCHEMA public TO \"{{name}}\";" default_ttl=1h max_ttl=24h
+Success! Data written to: database/roles/bookstore-app
+[exit=0]
+$ kubectl apply -f '$LAB_SCRATCH/tmp/05lab/30-externalsecret-dynamic-db.yaml'
+vaultdynamicsecret.generators.external-secrets.io/bookstore-db-dynamic-gen created
+externalsecret.external-secrets.io/bookstore-db-dynamic created
+[exit=0]
+$ kubectl wait --for=jsonpath='{.status.conditions[?(@.type=="Ready")].status}'=True externalsecret/bookstore-db-dynamic -n p11-05-bookstore --timeout=150s
+externalsecret.external-secrets.io/bookstore-db-dynamic condition met
+[exit=0]
+$ kubectl get externalsecret bookstore-db-dynamic -n p11-05-bookstore -o jsonpath='{.status.conditions[?(@.type=="Ready")].reason}{"\n"}'
+SecretSynced
+[exit=0]
+$ kubectl get secret bookstore-db-dynamic -n p11-05-bookstore -o jsonpath='{.data.username}' | base64 -d; echo
+v-kubernet-bookstor-Itgv5E6am1SeW56r1ReQ-1793429845
+[exit=0]
+$ U=$(kubectl get secret bookstore-db-dynamic -n p11-05-bookstore -o jsonpath='{.data.username}' | base64 -d)
+[exit=0]
+$ P=$(kubectl get secret bookstore-db-dynamic -n p11-05-bookstore -o jsonpath='{.data.password}' | base64 -d)
+[exit=0]
+$ kubectl exec -n p11-05-bookstore postgres-0 -- env U="$U" PGPASSWORD="$P" sh -c 'psql -h "$(hostname -i)" -U "$U" -d bookstore -tAc "select current_user"'
+v-kubernet-bookstor-Itgv5E6am1SeW56r1ReQ-1793429845
+[exit=0]
+=== step 5b: the same login with a wrong password, and the pg_hba rules the login went through ===
+$ kubectl exec -n p11-05-bookstore postgres-0 -- env U="$U" PGPASSWORD=wrong-password sh -c 'psql -h "$(hostname -i)" -U "$U" -d bookstore -tAc "select current_user"'
+psql: error: connection to server at "10.244.0.232", port 5432 failed: FATAL:  password authentication failed for user "v-kubernet-bookstor-Itgv5E6am1SeW56r1ReQ-1793429845"
+command terminated with exit code 2
+[exit=2]
+$ kubectl exec -n p11-05-bookstore postgres-0 -- sh -c 'F=$(psql -U bookstore -d bookstore -tAc "show hba_file"); grep -v "^#" "$F" | grep .'
+local   all             all                                     trust
+host    all             all             127.0.0.1/32            trust
+host    all             all             ::1/128                 trust
+local   replication     all                                     trust
+host    replication     all             127.0.0.1/32            trust
+host    replication     all             ::1/128                 trust
+host all all all scram-sha-256
+[exit=0]
+=== step 5c: revoke the lease, then count and retry ===
+$ kubectl exec -n p11-05-bookstore postgres-0 -- psql -U bookstore -d bookstore -tAc "select count(*) from pg_roles where rolname like 'v-%'"
+2
+[exit=0]
+$ kubectl -n p11-05-vault exec vault-0 -- env VAULT_TOKEN=root vault lease revoke -prefix database/creds/bookstore-app
+All revocation operations queued successfully!
+[exit=0]
+$ kubectl exec -n p11-05-bookstore postgres-0 -- psql -U bookstore -d bookstore -tAc "select count(*) from pg_roles where rolname like 'v-%'"
+2
+[exit=0]
+$ kubectl exec -n p11-05-bookstore postgres-0 -- env U="$U" PGPASSWORD="$P" sh -c 'psql -h "$(hostname -i)" -U "$U" -d bookstore -tAc "select current_user"'
+v-kubernet-bookstor-Itgv5E6am1SeW56r1ReQ-1793429845
+[exit=0]
+=== step 5d: the revocation is queued, so the count is read again until the role is gone (up to about 90 seconds) ===
+$ kubectl exec -n p11-05-bookstore postgres-0 -- psql -U bookstore -d bookstore -tAc "select count(*) from pg_roles where rolname like 'v-%'"
+0
+[exit=0]
+$ kubectl exec -n p11-05-bookstore postgres-0 -- psql -U bookstore -d bookstore -tAc "select count(*) from pg_roles where rolname like 'v-%'"
+0
+[exit=0]
+$ kubectl exec -n p11-05-bookstore postgres-0 -- psql -U bookstore -d bookstore -tAc "select count(*) from pg_roles where rolname like 'v-%'"
+0
+[exit=0]
+$ kubectl exec -n p11-05-bookstore postgres-0 -- psql -U bookstore -d bookstore -tAc "select count(*) from pg_roles where rolname like 'v-%'"
+0
+[exit=0]
+$ kubectl exec -n p11-05-bookstore postgres-0 -- psql -U bookstore -d bookstore -tAc "select count(*) from pg_roles where rolname like 'v-%'"
+0
+[exit=0]
+$ kubectl exec -n p11-05-bookstore postgres-0 -- psql -U bookstore -d bookstore -tAc "select count(*) from pg_roles where rolname like 'v-%'"
+0
+[exit=0]
+$ kubectl exec -n p11-05-bookstore postgres-0 -- psql -U bookstore -d bookstore -tAc "select count(*) from pg_roles where rolname like 'v-%'"
+0
+[exit=0]
+$ kubectl exec -n p11-05-bookstore postgres-0 -- psql -U bookstore -d bookstore -tAc "select count(*) from pg_roles where rolname like 'v-%'"
+0
+[exit=0]
+$ kubectl exec -n p11-05-bookstore postgres-0 -- psql -U bookstore -d bookstore -tAc "select count(*) from pg_roles where rolname like 'v-%'"
+0
+[exit=0]
+$ kubectl exec -n p11-05-bookstore postgres-0 -- psql -U bookstore -d bookstore -tAc "select count(*) from pg_roles where rolname like 'v-%'"
+0
+[exit=0]
+$ kubectl exec -n p11-05-bookstore postgres-0 -- psql -U bookstore -d bookstore -tAc "select count(*) from pg_roles where rolname like 'v-%'"
+0
+[exit=0]
+$ kubectl exec -n p11-05-bookstore postgres-0 -- psql -U bookstore -d bookstore -tAc "select count(*) from pg_roles where rolname like 'v-%'"
+0
+[exit=0]
+$ kubectl exec -n p11-05-bookstore postgres-0 -- psql -U bookstore -d bookstore -tAc "select count(*) from pg_roles where rolname like 'v-%'"
+0
+[exit=0]
+$ kubectl exec -n p11-05-bookstore postgres-0 -- env U="$U" PGPASSWORD="$P" sh -c 'psql -h "$(hostname -i)" -U "$U" -d bookstore -tAc "select current_user"'
+Password for user postgres: 
+psql: error: connection to server at "10.244.0.232", port 5432 failed: fe_sendauth: no password supplied
+command terminated with exit code 2
+[exit=2]
+=== step 5e: the synced Secret still holds the revoked pair until its next refresh. The login is retried with that pair, read again from the Secret ===
+$ U=$(kubectl get secret bookstore-db-dynamic -n p11-05-bookstore -o jsonpath='{.data.username}' | base64 -d)
+[exit=0]
+$ P=$(kubectl get secret bookstore-db-dynamic -n p11-05-bookstore -o jsonpath='{.data.password}' | base64 -d)
+[exit=0]
+$ echo "username unchanged: $U"
+username unchanged: v-kubernet-bookstor-Itgv5E6am1SeW56r1ReQ-1793429845
+[exit=0]
+$ kubectl exec -n p11-05-bookstore postgres-0 -- env U="$U" PGPASSWORD="$P" sh -c 'psql -h "$(hostname -i)" -U "$U" -d bookstore -tAc "select current_user"'
+psql: error: connection to server at "10.244.0.232", port 5432 failed: FATAL:  password authentication failed for user "v-kubernet-bookstor-Itgv5E6am1SeW56r1ReQ-1793429845"
+command terminated with exit code 2
+[exit=2]
+$ kubectl exec -n p11-05-bookstore postgres-0 -- psql -U bookstore -d bookstore -tAc "select count(*) from pg_roles where rolname like 'v-%'"
+0
+[exit=0]
+=== cleanup: the lab's own objects, in an order that lets the operator remove its finalizers ===
+$ kubectl delete externalsecret bookstore-db-dynamic db-credentials -n p11-05-bookstore --wait=true --timeout=120s
+externalsecret.external-secrets.io "bookstore-db-dynamic" deleted from p11-05-bookstore namespace
+externalsecret.external-secrets.io "db-credentials" deleted from p11-05-bookstore namespace
+[exit=0]
+$ kubectl delete vaultdynamicsecret bookstore-db-dynamic-gen -n p11-05-bookstore --ignore-not-found
+vaultdynamicsecret.generators.external-secrets.io "bookstore-db-dynamic-gen" deleted from p11-05-bookstore namespace
+[exit=0]
+$ kubectl delete secretstore vault-backend -n p11-05-bookstore --wait=true --timeout=120s
+secretstore.external-secrets.io "vault-backend" deleted from p11-05-bookstore namespace
+[exit=0]
+$ helm uninstall external-secrets -n p11-05-eso
+Error: failed to delete release: external-secrets
+[exit=1]
+$ helm uninstall vault -n p11-05-vault
+release "vault" uninstalled
+[exit=0]
+$ kubectl get crd -o name | grep 'external-secrets.io' | xargs kubectl delete --wait=true --timeout=180s
+Error from server (NotFound): customresourcedefinitions.apiextensions.k8s.io "clustersecretstores.external-secrets.io" not found
+Error from server (NotFound): customresourcedefinitions.apiextensions.k8s.io "secretstores.external-secrets.io" not found
+[exit=1]
+$ kubectl delete clusterrole,clusterrolebinding -l app.kubernetes.io/instance=external-secrets --ignore-not-found
+No resources found
+[exit=0]
+$ kubectl delete clusterrole,clusterrolebinding -l app.kubernetes.io/instance=vault --ignore-not-found
+No resources found
+[exit=0]
+$ kubectl delete namespace p11-05-bookstore p11-05-vault p11-05-eso --wait=true --timeout=300s
+namespace "p11-05-bookstore" deleted
+namespace "p11-05-vault" deleted
+namespace "p11-05-eso" deleted
+E1031 12:04:56.342695   32285 reflector.go:227] "Failed to watch" err="namespaces \"p11-05-bookstore\" is forbidden: User \"kubernetes-admin\" cannot watch resource \"namespaces\" in API group \"\" at the cluster scope - error from a previous attempt: EOF" reflector="k8s.io/client-go/tools/watch/informerwatcher.go:162" type="*unstructured.Unstructured"
+E1031 12:04:57.413297   32285 reflector.go:227] "Failed to watch" err="failed to list *unstructured.Unstructured: namespaces \"p11-05-bookstore\" is forbidden: User \"kubernetes-admin\" cannot list resource \"namespaces\" in API group \"\" at the cluster scope" reflector="k8s.io/client-go/tools/watch/informerwatcher.go:162" type="*unstructured.Unstructured"
+E1031 12:04:59.860250   32285 reflector.go:227] "Failed to watch" err="failed to list *unstructured.Unstructured: namespaces \"p11-05-bookstore\" is forbidden: User \"kubernetes-admin\" cannot list resource \"namespaces\" in API group \"\" at the cluster scope" reflector="k8s.io/client-go/tools/watch/informerwatcher.go:162" type="*unstructured.Unstructured"
+E1031 12:05:03.818406   32285 reflector.go:227] "Failed to watch" err="failed to list *unstructured.Unstructured: namespaces \"p11-05-bookstore\" is forbidden: User \"kubernetes-admin\" cannot list resource \"namespaces\" in API group \"\" at the cluster scope" reflector="k8s.io/client-go/tools/watch/informerwatcher.go:162" type="*unstructured.Unstructured"
+[exit=0]
+$ kubectl get ns,crd,clusterrole,clusterrolebinding 2>/dev/null | grep -c 'p11-05\|external-secrets\|vault' || true
+0
+[exit=0]

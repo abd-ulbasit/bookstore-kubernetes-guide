@@ -270,3 +270,15 @@ error: timed out waiting for the condition on namespaces/p11-08-etcd-probe
 $ kubectl get ns p11-08-etcd-probe 2>&1 | tail -1
 p11-08-etcd-probe   Terminating   12m
 [exit=0]
+=== step 0b: encryption at rest, checked by flag name (review fix) ===
+$ kubectl -n kube-system get pod -l component=kube-apiserver -o jsonpath='{.items[0].spec.containers[0].command}' | tr ',' '\n' | grep -c 'encryption-provider-config'
+0
+[exit=1]
+=== step 5c: the per-member endpoint helper, read-only (review fix; no defrag run) ===
+$ kubectl -n kube-system exec etcd-sf-pilot-control-plane -- etcdctl --endpoints=https://172.18.0.2:2379 --cacert=/etc/kubernetes/pki/etcd/ca.crt --cert=/etc/kubernetes/pki/etcd/server.crt --key=/etc/kubernetes/pki/etcd/server.key endpoint status -w table
+┌─────────────────────────┬─────────────────┬─────────┬─────────────────┬─────────┬────────┬───────────────────────┬────────┬───────────┬────────────┬───────────┬────────────┬────────────────────┬────────┬──────────────────────────┬───────────────────┐
+│        ENDPOINT         │       ID        │ VERSION │ STORAGE VERSION │ DB SIZE │ IN USE │ PERCENTAGE NOT IN USE │ QUOTA  │ IS LEADER │ IS LEARNER │ RAFT TERM │ RAFT INDEX │ RAFT APPLIED INDEX │ ERRORS │ DOWNGRADE TARGET VERSION │ DOWNGRADE ENABLED │
+├─────────────────────────┼─────────────────┼─────────┼─────────────────┼─────────┼────────┼───────────────────────┼────────┼───────────┼────────────┼───────────┼────────────┼────────────────────┼────────┼──────────────────────────┼───────────────────┤
+│ https://172.18.0.2:2379 │ e58c878e0e01014 │   3.7.0 │           3.7.0 │   49 MB │  15 MB │                   70% │ 2.1 GB │      true │      false │         4 │     167150 │             167150 │        │                          │             false │
+└─────────────────────────┴─────────────────┴─────────┴─────────────────┴─────────┴────────┴───────────────────────┴────────┴───────────┴────────────┴───────────┴────────────┴────────────────────┴────────┴──────────────────────────┴───────────────────┘
+[exit=0]

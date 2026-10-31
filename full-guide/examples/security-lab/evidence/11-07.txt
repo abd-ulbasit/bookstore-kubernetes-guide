@@ -4,6 +4,13 @@
 # 2.8.7). Run on 2026-10-31 against the lab kind cluster sf-pilot.
 # Two runs, in order: run A (namespace labels and server dry runs, no controller)
 # and run B (the heavy install, the RBAC checks and the cleanup).
+# Run C was added after review. It rendered kube-prometheus-stack at 65.1.1 and
+# ran server dry runs into a namespace labelled restricted. It installed nothing.
+# Substitution in run C: the chapter prints the namespace `monitoring`; this run
+# used p11-07-monitoring. The control file the chapter calls a control Deployment
+# was named psa-control-p11-07.yaml in the run. The first pass of run C used -n on
+# the whole render and was refused for kube-system objects; the second pass kept
+# the five workload objects and each keeps its own namespace.
 #
 # Substitution: the chapter prints the reader's names. This run used these
 # names in every command below and in the output:
@@ -438,3 +445,147 @@ exit 0
 
 $ heavy_unlock
 released
+
+## Run C: kube-prometheus-stack, rendered at 65.1.1 and dry-run into a restricted namespace (review fix; not installed)
+=== step C1: the namespace, labelled restricted before anything is created in it ===
+$ kubectl create namespace p11-07-monitoring
+namespace/p11-07-monitoring created
+[exit=0]
+$ kubectl label namespace p11-07-monitoring pod-security.kubernetes.io/enforce=restricted pod-security.kubernetes.io/enforce-version=latest pod-security.kubernetes.io/audit=restricted pod-security.kubernetes.io/audit-version=latest pod-security.kubernetes.io/warn=restricted pod-security.kubernetes.io/warn-version=latest
+namespace/p11-07-monitoring labeled
+[exit=0]
+=== step C2: the chart rendered with node-exporter off, and a server dry run (creates nothing) ===
+$ helm template kube-prometheus-stack prometheus-community/kube-prometheus-stack --version 65.1.1 -n p11-07-monitoring --set nodeExporter.enabled=false | grep -c '^kind: '
+118
+[exit=0]
+$ helm template kube-prometheus-stack prometheus-community/kube-prometheus-stack --version 65.1.1 -n p11-07-monitoring --set nodeExporter.enabled=false | grep -c 'release: kube-prometheus-stack'
+7
+[exit=0]
+$ kubectl apply --dry-run=server -n p11-07-monitoring -f kps-p11-07-render.yaml 2>&1 | grep -v 'created (server dry run)\|configured (server dry run)\|unchanged (server dry run)' | head -60
+[the namespace from the provided object "kube-system" does not match the namespace "p11-07-monitoring". You must pass '--namespace=kube-system' to perform this operation., resource mapping not found for name: "kube-prometheus-stack-alertmanager" namespace: "p11-07-monitoring" from "kps-p11-07-render.yaml": no matches for kind "Alertmanager" in version "monitoring.coreos.com/v1"
+ensure CRDs are installed first, resource mapping not found for name: "kube-prometheus-stack-prometheus" namespace: "p11-07-monitoring" from "kps-p11-07-render.yaml": no matches for kind "Prometheus" in version "monitoring.coreos.com/v1"
+ensure CRDs are installed first, resource mapping not found for name: "kube-prometheus-stack-alertmanager.rules" namespace: "p11-07-monitoring" from "kps-p11-07-render.yaml": no matches for kind "PrometheusRule" in version "monitoring.coreos.com/v1"
+ensure CRDs are installed first, resource mapping not found for name: "kube-prometheus-stack-config-reloaders" namespace: "p11-07-monitoring" from "kps-p11-07-render.yaml": no matches for kind "PrometheusRule" in version "monitoring.coreos.com/v1"
+ensure CRDs are installed first, resource mapping not found for name: "kube-prometheus-stack-etcd" namespace: "p11-07-monitoring" from "kps-p11-07-render.yaml": no matches for kind "PrometheusRule" in version "monitoring.coreos.com/v1"
+ensure CRDs are installed first, resource mapping not found for name: "kube-prometheus-stack-general.rules" namespace: "p11-07-monitoring" from "kps-p11-07-render.yaml": no matches for kind "PrometheusRule" in version "monitoring.coreos.com/v1"
+ensure CRDs are installed first, resource mapping not found for name: "kube-prometheus-stack-k8s.rules.container-cpu-usage-seconds-tot" namespace: "p11-07-monitoring" from "kps-p11-07-render.yaml": no matches for kind "PrometheusRule" in version "monitoring.coreos.com/v1"
+ensure CRDs are installed first, resource mapping not found for name: "kube-prometheus-stack-k8s.rules.container-memory-cache" namespace: "p11-07-monitoring" from "kps-p11-07-render.yaml": no matches for kind "PrometheusRule" in version "monitoring.coreos.com/v1"
+ensure CRDs are installed first, resource mapping not found for name: "kube-prometheus-stack-k8s.rules.container-memory-rss" namespace: "p11-07-monitoring" from "kps-p11-07-render.yaml": no matches for kind "PrometheusRule" in version "monitoring.coreos.com/v1"
+ensure CRDs are installed first, resource mapping not found for name: "kube-prometheus-stack-k8s.rules.container-memory-swap" namespace: "p11-07-monitoring" from "kps-p11-07-render.yaml": no matches for kind "PrometheusRule" in version "monitoring.coreos.com/v1"
+ensure CRDs are installed first, resource mapping not found for name: "kube-prometheus-stack-k8s.rules.container-memory-working-set-by" namespace: "p11-07-monitoring" from "kps-p11-07-render.yaml": no matches for kind "PrometheusRule" in version "monitoring.coreos.com/v1"
+ensure CRDs are installed first, resource mapping not found for name: "kube-prometheus-stack-k8s.rules.container-resource" namespace: "p11-07-monitoring" from "kps-p11-07-render.yaml": no matches for kind "PrometheusRule" in version "monitoring.coreos.com/v1"
+ensure CRDs are installed first, resource mapping not found for name: "kube-prometheus-stack-k8s.rules.pod-owner" namespace: "p11-07-monitoring" from "kps-p11-07-render.yaml": no matches for kind "PrometheusRule" in version "monitoring.coreos.com/v1"
+ensure CRDs are installed first, resource mapping not found for name: "kube-prometheus-stack-kube-apiserver-availability.rules" namespace: "p11-07-monitoring" from "kps-p11-07-render.yaml": no matches for kind "PrometheusRule" in version "monitoring.coreos.com/v1"
+ensure CRDs are installed first, resource mapping not found for name: "kube-prometheus-stack-kube-apiserver-burnrate.rules" namespace: "p11-07-monitoring" from "kps-p11-07-render.yaml": no matches for kind "PrometheusRule" in version "monitoring.coreos.com/v1"
+ensure CRDs are installed first, resource mapping not found for name: "kube-prometheus-stack-kube-apiserver-histogram.rules" namespace: "p11-07-monitoring" from "kps-p11-07-render.yaml": no matches for kind "PrometheusRule" in version "monitoring.coreos.com/v1"
+ensure CRDs are installed first, resource mapping not found for name: "kube-prometheus-stack-kube-apiserver-slos" namespace: "p11-07-monitoring" from "kps-p11-07-render.yaml": no matches for kind "PrometheusRule" in version "monitoring.coreos.com/v1"
+ensure CRDs are installed first, resource mapping not found for name: "kube-prometheus-stack-kube-prometheus-general.rules" namespace: "p11-07-monitoring" from "kps-p11-07-render.yaml": no matches for kind "PrometheusRule" in version "monitoring.coreos.com/v1"
+ensure CRDs are installed first, resource mapping not found for name: "kube-prometheus-stack-kube-prometheus-node-recording.rules" namespace: "p11-07-monitoring" from "kps-p11-07-render.yaml": no matches for kind "PrometheusRule" in version "monitoring.coreos.com/v1"
+ensure CRDs are installed first, resource mapping not found for name: "kube-prometheus-stack-kube-scheduler.rules" namespace: "p11-07-monitoring" from "kps-p11-07-render.yaml": no matches for kind "PrometheusRule" in version "monitoring.coreos.com/v1"
+ensure CRDs are installed first, resource mapping not found for name: "kube-prometheus-stack-kube-state-metrics" namespace: "p11-07-monitoring" from "kps-p11-07-render.yaml": no matches for kind "PrometheusRule" in version "monitoring.coreos.com/v1"
+ensure CRDs are installed first, resource mapping not found for name: "kube-prometheus-stack-kubelet.rules" namespace: "p11-07-monitoring" from "kps-p11-07-render.yaml": no matches for kind "PrometheusRule" in version "monitoring.coreos.com/v1"
+ensure CRDs are installed first, resource mapping not found for name: "kube-prometheus-stack-kubernetes-apps" namespace: "p11-07-monitoring" from "kps-p11-07-render.yaml": no matches for kind "PrometheusRule" in version "monitoring.coreos.com/v1"
+ensure CRDs are installed first, resource mapping not found for name: "kube-prometheus-stack-kubernetes-resources" namespace: "p11-07-monitoring" from "kps-p11-07-render.yaml": no matches for kind "PrometheusRule" in version "monitoring.coreos.com/v1"
+ensure CRDs are installed first, resource mapping not found for name: "kube-prometheus-stack-kubernetes-storage" namespace: "p11-07-monitoring" from "kps-p11-07-render.yaml": no matches for kind "PrometheusRule" in version "monitoring.coreos.com/v1"
+ensure CRDs are installed first, resource mapping not found for name: "kube-prometheus-stack-kubernetes-system-apiserver" namespace: "p11-07-monitoring" from "kps-p11-07-render.yaml": no matches for kind "PrometheusRule" in version "monitoring.coreos.com/v1"
+ensure CRDs are installed first, resource mapping not found for name: "kube-prometheus-stack-kubernetes-system-controller-manager" namespace: "p11-07-monitoring" from "kps-p11-07-render.yaml": no matches for kind "PrometheusRule" in version "monitoring.coreos.com/v1"
+ensure CRDs are installed first, resource mapping not found for name: "kube-prometheus-stack-kubernetes-system-kube-proxy" namespace: "p11-07-monitoring" from "kps-p11-07-render.yaml": no matches for kind "PrometheusRule" in version "monitoring.coreos.com/v1"
+ensure CRDs are installed first, resource mapping not found for name: "kube-prometheus-stack-kubernetes-system-kubelet" namespace: "p11-07-monitoring" from "kps-p11-07-render.yaml": no matches for kind "PrometheusRule" in version "monitoring.coreos.com/v1"
+ensure CRDs are installed first, resource mapping not found for name: "kube-prometheus-stack-kubernetes-system-scheduler" namespace: "p11-07-monitoring" from "kps-p11-07-render.yaml": no matches for kind "PrometheusRule" in version "monitoring.coreos.com/v1"
+ensure CRDs are installed first, resource mapping not found for name: "kube-prometheus-stack-kubernetes-system" namespace: "p11-07-monitoring" from "kps-p11-07-render.yaml": no matches for kind "PrometheusRule" in version "monitoring.coreos.com/v1"
+ensure CRDs are installed first, resource mapping not found for name: "kube-prometheus-stack-node-exporter.rules" namespace: "p11-07-monitoring" from "kps-p11-07-render.yaml": no matches for kind "PrometheusRule" in version "monitoring.coreos.com/v1"
+ensure CRDs are installed first, resource mapping not found for name: "kube-prometheus-stack-node-exporter" namespace: "p11-07-monitoring" from "kps-p11-07-render.yaml": no matches for kind "PrometheusRule" in version "monitoring.coreos.com/v1"
+ensure CRDs are installed first, resource mapping not found for name: "kube-prometheus-stack-node-network" namespace: "p11-07-monitoring" from "kps-p11-07-render.yaml": no matches for kind "PrometheusRule" in version "monitoring.coreos.com/v1"
+ensure CRDs are installed first, resource mapping not found for name: "kube-prometheus-stack-node.rules" namespace: "p11-07-monitoring" from "kps-p11-07-render.yaml": no matches for kind "PrometheusRule" in version "monitoring.coreos.com/v1"
+ensure CRDs are installed first, resource mapping not found for name: "kube-prometheus-stack-prometheus-operator" namespace: "p11-07-monitoring" from "kps-p11-07-render.yaml": no matches for kind "PrometheusRule" in version "monitoring.coreos.com/v1"
+ensure CRDs are installed first, resource mapping not found for name: "kube-prometheus-stack-prometheus" namespace: "p11-07-monitoring" from "kps-p11-07-render.yaml": no matches for kind "PrometheusRule" in version "monitoring.coreos.com/v1"
+ensure CRDs are installed first, resource mapping not found for name: "kube-prometheus-stack-grafana" namespace: "p11-07-monitoring" from "kps-p11-07-render.yaml": no matches for kind "ServiceMonitor" in version "monitoring.coreos.com/v1"
+ensure CRDs are installed first, resource mapping not found for name: "kube-prometheus-stack-kube-state-metrics" namespace: "p11-07-monitoring" from "kps-p11-07-render.yaml": no matches for kind "ServiceMonitor" in version "monitoring.coreos.com/v1"
+ensure CRDs are installed first, resource mapping not found for name: "kube-prometheus-stack-alertmanager" namespace: "p11-07-monitoring" from "kps-p11-07-render.yaml": no matches for kind "ServiceMonitor" in version "monitoring.coreos.com/v1"
+ensure CRDs are installed first, resource mapping not found for name: "kube-prometheus-stack-coredns" namespace: "p11-07-monitoring" from "kps-p11-07-render.yaml": no matches for kind "ServiceMonitor" in version "monitoring.coreos.com/v1"
+ensure CRDs are installed first, resource mapping not found for name: "kube-prometheus-stack-apiserver" namespace: "p11-07-monitoring" from "kps-p11-07-render.yaml": no matches for kind "ServiceMonitor" in version "monitoring.coreos.com/v1"
+ensure CRDs are installed first, resource mapping not found for name: "kube-prometheus-stack-kube-controller-manager" namespace: "p11-07-monitoring" from "kps-p11-07-render.yaml": no matches for kind "ServiceMonitor" in version "monitoring.coreos.com/v1"
+ensure CRDs are installed first, resource mapping not found for name: "kube-prometheus-stack-kube-etcd" namespace: "p11-07-monitoring" from "kps-p11-07-render.yaml": no matches for kind "ServiceMonitor" in version "monitoring.coreos.com/v1"
+ensure CRDs are installed first, resource mapping not found for name: "kube-prometheus-stack-kube-proxy" namespace: "p11-07-monitoring" from "kps-p11-07-render.yaml": no matches for kind "ServiceMonitor" in version "monitoring.coreos.com/v1"
+ensure CRDs are installed first, resource mapping not found for name: "kube-prometheus-stack-kube-scheduler" namespace: "p11-07-monitoring" from "kps-p11-07-render.yaml": no matches for kind "ServiceMonitor" in version "monitoring.coreos.com/v1"
+ensure CRDs are installed first, resource mapping not found for name: "kube-prometheus-stack-kubelet" namespace: "p11-07-monitoring" from "kps-p11-07-render.yaml": no matches for kind "ServiceMonitor" in version "monitoring.coreos.com/v1"
+ensure CRDs are installed first, resource mapping not found for name: "kube-prometheus-stack-operator" namespace: "p11-07-monitoring" from "kps-p11-07-render.yaml": no matches for kind "ServiceMonitor" in version "monitoring.coreos.com/v1"
+ensure CRDs are installed first, resource mapping not found for name: "kube-prometheus-stack-prometheus" namespace: "p11-07-monitoring" from "kps-p11-07-render.yaml": no matches for kind "ServiceMonitor" in version "monitoring.coreos.com/v1"
+ensure CRDs are installed first]
+Error from server (Forbidden): error when creating "kps-p11-07-render.yaml": pods "kube-prometheus-stack-grafana-test" is forbidden: error looking up service account p11-07-monitoring/kube-prometheus-stack-grafana-test: serviceaccount "kube-prometheus-stack-grafana-test" not found
+[exit=0]
+=== step C3: cleanup ===
+$ kubectl delete namespace p11-07-monitoring --wait=true --timeout=180s
+namespace "p11-07-monitoring" deleted
+[exit=0]
+$ kubectl get ns p11-07-monitoring 2>&1 | tail -1
+Error from server (NotFound): namespaces "p11-07-monitoring" not found
+[exit=0]
+
+## Run C, second pass: the workload objects only, dry-run into the restricted namespace (review fix)
+# The first pass used -n on the whole render. kubectl refused the kube-system objects, and the helm test Pod
+# needs a ServiceAccount that a dry run cannot create. This pass keeps the five workload objects (three
+# Deployments and two admission Jobs; the test hook is left out), and each keeps its own namespace.
+=== step C4: namespace again, labelled restricted ===
+$ kubectl create namespace p11-07-monitoring
+namespace/p11-07-monitoring created
+[exit=0]
+$ kubectl label namespace p11-07-monitoring pod-security.kubernetes.io/enforce=restricted pod-security.kubernetes.io/enforce-version=latest pod-security.kubernetes.io/audit=restricted pod-security.kubernetes.io/audit-version=latest pod-security.kubernetes.io/warn=restricted pod-security.kubernetes.io/warn-version=latest
+namespace/p11-07-monitoring labeled
+[exit=0]
+=== step C5: server dry run of the workloads; PodSecurity warnings are printed ===
+$ kubectl apply --dry-run=server -f kps-p11-07-workloads.yaml 2>&1
+deployment.apps/kube-prometheus-stack-grafana created (server dry run)
+deployment.apps/kube-prometheus-stack-kube-state-metrics created (server dry run)
+deployment.apps/kube-prometheus-stack-operator created (server dry run)
+job.batch/kube-prometheus-stack-admission-create created (server dry run)
+job.batch/kube-prometheus-stack-admission-patch created (server dry run)
+[exit=0]
+=== step C6: cleanup ===
+$ kubectl delete namespace p11-07-monitoring --wait=true --timeout=180s
+namespace "p11-07-monitoring" deleted
+[exit=0]
+$ kubectl get ns p11-07-monitoring 2>&1 | tail -1
+Error from server (NotFound): namespaces "p11-07-monitoring" not found
+[exit=0]
+=== step C7: control, a Deployment with hostNetwork: true, to show the warning mechanism fires ===
+$ kubectl create namespace p11-07-monitoring
+namespace/p11-07-monitoring created
+[exit=0]
+$ kubectl label namespace p11-07-monitoring pod-security.kubernetes.io/enforce=restricted pod-security.kubernetes.io/enforce-version=latest pod-security.kubernetes.io/audit=restricted pod-security.kubernetes.io/audit-version=latest pod-security.kubernetes.io/warn=restricted pod-security.kubernetes.io/warn-version=latest
+namespace/p11-07-monitoring labeled
+[exit=0]
+$ kubectl apply --dry-run=server -f psa-control-p11-07.yaml 2>&1 | cut -c1-260
+Warning: would violate PodSecurity "restricted:latest": host namespaces (hostNetwork=true), allowPrivilegeEscalation != false (container "app" must set securityContext.allowPrivilegeEscalation=false), unrestricted capabilities (container "app" must set securit
+deployment.apps/psa-control created (server dry run)
+[exit=0]
+$ kubectl apply --dry-run=server -f kps-p11-07-workloads.yaml 2>&1
+deployment.apps/kube-prometheus-stack-grafana created (server dry run)
+deployment.apps/kube-prometheus-stack-kube-state-metrics created (server dry run)
+deployment.apps/kube-prometheus-stack-operator created (server dry run)
+job.batch/kube-prometheus-stack-admission-create created (server dry run)
+job.batch/kube-prometheus-stack-admission-patch created (server dry run)
+[exit=0]
+$ kubectl delete namespace p11-07-monitoring --wait=true --timeout=180s
+namespace "p11-07-monitoring" deleted
+[exit=0]
+$ kubectl get ns p11-07-monitoring 2>&1 | tail -1
+Error from server (NotFound): namespaces "p11-07-monitoring" not found
+[exit=0]
+=== step C8: the same control, full warning line (the C7 line was cut at 260 columns) ===
+$ kubectl create namespace p11-07-monitoring
+namespace/p11-07-monitoring created
+[exit=0]
+$ kubectl label namespace p11-07-monitoring pod-security.kubernetes.io/enforce=restricted pod-security.kubernetes.io/enforce-version=latest pod-security.kubernetes.io/audit=restricted pod-security.kubernetes.io/audit-version=latest pod-security.kubernetes.io/warn=restricted pod-security.kubernetes.io/warn-version=latest
+namespace/p11-07-monitoring labeled
+[exit=0]
+$ kubectl apply --dry-run=server -f psa-control-p11-07.yaml 2>&1
+Warning: would violate PodSecurity "restricted:latest": host namespaces (hostNetwork=true), allowPrivilegeEscalation != false (container "app" must set securityContext.allowPrivilegeEscalation=false), unrestricted capabilities (container "app" must set securityContext.capabilities.drop=["ALL"]), runAsNonRoot != true (pod or container "app" must set securityContext.runAsNonRoot=true), seccompProfile (pod or container "app" must set securityContext.seccompProfile.type to "RuntimeDefault" or "Localhost")
+deployment.apps/psa-control created (server dry run)
+[exit=0]
+$ kubectl delete namespace p11-07-monitoring --wait=true --timeout=180s
+namespace "p11-07-monitoring" deleted
+[exit=0]
+$ kubectl get ns p11-07-monitoring 2>&1 | tail -1
+Error from server (NotFound): namespaces "p11-07-monitoring" not found
+[exit=0]
