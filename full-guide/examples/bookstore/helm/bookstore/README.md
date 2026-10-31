@@ -105,12 +105,15 @@ CRD/operator below or the API server rejects it with `no matches for kind ...`
 
 ## The demo Secret
 
-`dbCredentials.create=true` ships a literal Postgres password from
-`values.yaml`. A Secret is base64, **not** encrypted. This is acceptable only
-because the guide is a throwaway local lab. In production set
+`dbCredentials.create=true` ships literal demo passwords for Postgres and the
+broker from `values.yaml`. A Secret is base64, **not** encrypted. This is
+acceptable only because the guide is a throwaway local lab. In production set
 `dbCredentials.create=false` and provide a Secret named `db-credentials` via
 External Secrets Operator / Sealed Secrets / Vault (this is what
-`values-prod.yaml` does).
+`values-prod.yaml` does). It needs six keys: `POSTGRES_USER`,
+`POSTGRES_PASSWORD` and `POSTGRES_DB`, then `RABBITMQ_DEFAULT_USER` and
+`RABBITMQ_DEFAULT_PASS` for the broker, and `AMQP_URL`, the URL that orders and
+payments-worker read. The broker has no `guest` account.
 
 The KEDA scaler's AMQP URL holds a credential too, so the chart never renders
 a Secret for it and holds no default. With `keda.enabled=true` you create a

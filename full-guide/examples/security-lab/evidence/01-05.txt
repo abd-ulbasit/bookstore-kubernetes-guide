@@ -178,3 +178,15 @@ pvc-2eb0f1fa-584a-41e9-882c-e2302b84dcd9   1Gi        RWO            Delete     
 ## cleanup (continued, a separate check)
 $ kubectl get pv pvc-2eb0f1fa-584a-41e9-882c-e2302b84dcd9 2>&1 | tail -1
 Error from server (NotFound): persistentvolumes "pvc-2eb0f1fa-584a-41e9-882c-e2302b84dcd9" not found
+
+## the postgres environment references, run again after db-credentials gained broker keys (2026-10-31)
+# The StatefulSet took db-credentials through envFrom when the steps above were
+# recorded. It now lists POSTGRES_USER, POSTGRES_PASSWORD and POSTGRES_DB with
+# one secretKeyRef each, because the Secret also holds the broker login. This
+# command ran against a Postgres applied from the same files in p00-shared-raw,
+# the lab namespace of the 03-02 broker-login runs. Its output names no namespace.
+$ kubectl get statefulset postgres -n p00-shared-raw -o jsonpath='{range .spec.template.spec.containers[0].env[*]}{.name}{" "}{.valueFrom.secretKeyRef.name}{"\n"}{end}'
+POSTGRES_USER db-credentials
+POSTGRES_PASSWORD db-credentials
+POSTGRES_DB db-credentials
+PGDATA

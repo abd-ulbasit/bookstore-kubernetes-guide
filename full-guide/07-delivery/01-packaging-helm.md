@@ -465,7 +465,12 @@ created, how to reach it, the CRD-toggle reminders and the demo-Secret warning.
 The captured runs in sections 2 to 6 used the namespace `p07-finish-helm` on a
 shared lab cluster, and a values file that points the three hostnames the chart
 builds from `bookstore` at that namespace. Where your run shows `bookstore`, the
-capture shows `p07-finish-helm`. The top of the install output:
+capture shows `p07-finish-helm`. Those runs came before the broker URL moved
+into the `db-credentials` Secret. The third hostname was the payments-worker's
+`paymentsWorker.amqpUrl`, a value the chart no longer has: the URL now names the
+Service without a namespace, so the chart builds two hostnames from `bookstore`,
+and the `helm get values` capture below still lists the retired value. The top
+of the install output:
 
 <!-- gate: output -->
 ```text
@@ -695,7 +700,7 @@ helm get values bookstore -n bookstore | grep -c "POSTGRES_PASSWORD"
 0
 ```
 
-Prod turns the demo database Secret off:
+Prod turns the demo Secret off:
 
 ```sh
 helm template bookstore examples/bookstore/helm/bookstore -n bookstore \
@@ -724,13 +729,38 @@ helm template bookstore examples/bookstore/helm/bookstore -n bookstore \
 1
 ```
 
-One plain `guest:guest` string is still in the prod render. It is the
-payments-worker's `AMQP_URL`, the stock login of this guide's in-cluster
-RabbitMQ, which still runs with its default user:
+The payments-worker's `AMQP_URL` used to be a plain `guest:guest` string in
+every render, prod included: the stock login of this guide's in-cluster
+RabbitMQ. It is gone. The broker has no `guest` user now. Its login, and the
+`AMQP_URL` that orders and payments-worker read, sit in the same
+`db-credentials` Secret as the database login, and the workloads name that
+Secret with `secretKeyRef`. Prod does not render the Secret, so the prod render
+holds no broker URL at all. Count the stock login and any AMQP URL in it. The
+captures in this part come from a second run of these render checks, made after
+the change:
 
 ```sh
 helm template bookstore examples/bookstore/helm/bookstore -n bookstore \
   -f examples/bookstore/helm/bookstore/values-prod.yaml | grep -c "guest:guest"
+helm template bookstore examples/bookstore/helm/bookstore -n bookstore \
+  -f examples/bookstore/helm/bookstore/values-prod.yaml | grep -c "amqp://"
+```
+
+<!-- gate: output -->
+```text
+0
+```
+
+<!-- gate: output -->
+```text
+0
+```
+
+A zero count means something only if the check can find the string. The default
+render is the control: it carries the demo Secret, and the URL is in it.
+
+```sh
+helm template bookstore examples/bookstore/helm/bookstore -n bookstore | grep -c "amqp://"
 ```
 
 <!-- gate: output -->
@@ -738,9 +768,10 @@ helm template bookstore examples/bookstore/helm/bookstore -n bookstore \
 1
 ```
 
-That is a known gap in the prod path, not a finished control. Moving the URL
-into a Secret also needs a real broker credential, so it is a change to the
-chart and to RabbitMQ's own manifest, and this chapter does not make it.
+That one URL, with the demo broker password in it, is the same in-the-clear
+demo value as the database password above, and it is why prod turns the demo
+Secret off. The Secret that prod needs from the operator now has six keys. The
+chart's README lists them.
 
 ### 4. Override values, upgrade, roll back
 
@@ -970,9 +1001,12 @@ the same way, not fall back to a stock login.
 
 Create the Secret. The value below is a throwaway that `openssl` generates and
 nothing prints. It is enough for a render and a dry run. A scaler that connects
-needs your broker's own URL, which in this guide's lab is the stock `guest`
-login the payments-worker already uses. Pipe the value in, so it never sits on a
-command line:
+needs a broker login that can read the queue. The broker has no `guest` user,
+and the login that orders and payments-worker share is not one to hand to a
+scaler.
+[06.04](../06-production-readiness/04-autoscaling.md) creates a `keda-scaler`
+user with read on the `orders` queue and nothing else. Pipe the value in, so it
+never sits on a command line:
 
 ```sh
 AMQP_URL="amqp://demo:$(openssl rand -hex 12)@rabbitmq:5672/"
@@ -1399,7 +1433,7 @@ Checklist:
 
    </details>
 
-7. **Prod enables KEDA, and the render fails with "keda.enabled=true needs keda.connectionSecretName". A teammate proposes a default of `amqp://guest:guest@...` so the render passes. Why is the failure the better behaviour, and what do you do?**
+7. **Prod enables KEDA, and the render fails with "keda.enabled=true needs keda.connectionSecretName". A teammate proposes a default of `amqp://<USER>:<PASSWORD>@...` so the render passes. Why is the failure the better behaviour, and what do you do?**
    <details><summary>Show answer</summary>
 
 A default is a credential the chart ships to every environment that forgets to

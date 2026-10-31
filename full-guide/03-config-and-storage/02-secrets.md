@@ -127,6 +127,10 @@ node name differ from the guide's. Lines that name that namespace are kept as
 captured. Every command below names `bookstore`. Run this chapter only against
 a kind cluster you own.
 
+The section [The broker login](#the-broker-login) came from two later runs of
+its commands, in another lab namespace, `p00-shared-raw`, kept in the same
+transcript under its own heading.
+
 ### 1. Three ServiceAccounts with no token
 
 Each reader in this chapter is a ServiceAccount, and none of them calls the API
@@ -180,9 +184,11 @@ kubectl get secret db-credentials -n bookstore -o name
 secret/db-credentials
 ```
 
-That Secret holds the demo literal `devpassword`, and the database uses it. The
-official Postgres image reads `POSTGRES_PASSWORD` when it initialises an empty
-data directory, and ignores it after that
+That Secret holds the demo literal `devpassword`, and the database uses it. It
+holds a second demo literal for the message broker, which [The broker
+login](#the-broker-login) replaces. The official Postgres image reads
+`POSTGRES_PASSWORD` when it initialises an empty data directory, and ignores it
+after that
 ([docker-library postgres](https://github.com/docker-library/docs/blob/master/postgres/README.md)).
 So a new value written into `db-credentials` does not change the password the
 database accepts, and the catalog and orders would fail at their next restart.
@@ -256,8 +262,8 @@ annotation as part of the Secret: anyone who can read the Secret can read it.
 
 ### The gap the Bookstore still has
 
-The consumers take the same three keys, and they do not follow the
-file-over-env rule yet. Find the lines that build `DB_DSN`:
+The consumers read their keys into environment variables, and they do not
+follow the file-over-env rule yet. Find the lines that build `DB_DSN`:
 
 ```sh
 grep -n 'password=$(POSTGRES_PASSWORD)' examples/bookstore/raw-manifests/10-catalog-deploy.yaml examples/bookstore/raw-manifests/14-orders-deploy.yaml
@@ -276,13 +282,169 @@ variable. There, `/proc/<pid>/environ` returns it, and child processes inherit
 it. This is a **known gap**: the file form is not used for catalog or orders.
 The Postgres StatefulSet has the same exposure. Its
 [`20-postgres-statefulset.yaml`](../examples/bookstore/raw-manifests/20-postgres-statefulset.yaml)
-takes the three keys with `envFrom.secretRef`, so `postgres-0` gets
-`POSTGRES_PASSWORD` as an environment variable. The db-migrate Job in
+takes the three keys with one `secretKeyRef` each, so `postgres-0` gets
+`POSTGRES_PASSWORD` as an environment variable. The broker URL has the same
+exposure too: orders and payments-worker take `AMQP_URL` as an environment
+variable, and the broker takes its login the same way. The db-migrate Job in
 [`21-db-migrate-job.yaml`](../examples/bookstore/raw-manifests/21-db-migrate-job.yaml)
 reads its keys with `secretKeyRef`, mapped to the libpq `PG*` names. Only the
 throwaway restore Pod in [03.05](05-stateful-data-patterns.md) reads the file
 form, through `POSTGRES_PASSWORD_FILE`. Closing the gap for the services is a
 change to the services, which would read a file. It is not a manifest change.
+
+### The broker login {#the-broker-login}
+
+`db-credentials` holds more than the database login. The same file carries the
+RabbitMQ login in three more keys, so the object counts of the Helm chart and
+the Kustomize overlays stay as they were. `RABBITMQ_DEFAULT_USER` and
+`RABBITMQ_DEFAULT_PASS` are the names the broker image reads. With a default
+user set, the broker creates that one user and no `guest` account. `AMQP_URL` is
+the whole connection URL, with the login in it, that orders and payments-worker
+read. Postgres takes its three keys one by one, so the broker login stays out of
+its environment. The key names are all the next command prints:
+
+```sh
+kubectl get secret db-credentials -n bookstore -o go-template='{{range $k, $v := .data}}{{$k}}{{"\n"}}{{end}}'
+```
+
+<!-- gate: output -->
+```text
+AMQP_URL
+POSTGRES_DB
+POSTGRES_PASSWORD
+POSTGRES_USER
+RABBITMQ_DEFAULT_PASS
+RABBITMQ_DEFAULT_USER
+```
+
+The URL is in no manifest. The two workloads that use it name the key:
+
+```sh
+kubectl get deploy orders payments-worker -n bookstore -o jsonpath='{range .items[*]}{.metadata.name}{" "}{.spec.template.spec.containers[0].env[?(@.name=="AMQP_URL")]}{"\n"}{end}'
+```
+
+<!-- gate: output -->
+```text
+orders {"name":"AMQP_URL","valueFrom":{"secretKeyRef":{"key":"AMQP_URL","name":"db-credentials"}}}
+payments-worker {"name":"AMQP_URL","valueFrom":{"secretKeyRef":{"key":"AMQP_URL","name":"db-credentials"}}}
+```
+
+This section needs the broker, orders and the worker running.
+[02.02](../02-networking/02-services.md) applied the first two, and
+[06.04](../06-production-readiness/04-autoscaling.md) applies the worker later.
+Apply it now if it is not there yet, with the image from Part 00:
+
+```sh
+kubectl apply -f examples/bookstore/raw-manifests/19-payments-worker-deploy.yaml
+kubectl rollout status deployment/payments-worker -n bookstore
+```
+
+The file holds a demo broker password, as it holds a demo database password.
+Replace the broker's with a generated one. The broker creates its default user
+only when it starts with an empty data directory, and an `emptyDir` is empty at
+every Pod start, so a restart picks up the new Secret. Orders and the worker
+read the URL when they start, so they restart too, after the broker. This is the
+env-var rotation cost that the gap above describes. The patch touches the
+broker keys only: the database password stays as it is, for the reason step 2
+gave:
+
+```sh
+MQ="$(openssl rand -hex 16)"
+kubectl patch secret db-credentials -n bookstore --type merge -p "{\"stringData\":{\"RABBITMQ_DEFAULT_PASS\":\"$MQ\",\"AMQP_URL\":\"amqp://bookstore:$MQ@rabbitmq:5672/\"}}"
+unset MQ
+kubectl rollout restart deployment/rabbitmq -n bookstore
+kubectl rollout status deployment/rabbitmq -n bookstore --timeout=600s
+kubectl rollout restart deployment/orders deployment/payments-worker -n bookstore
+kubectl rollout status deployment/orders -n bookstore --timeout=600s
+kubectl rollout status deployment/payments-worker -n bookstore --timeout=600s
+```
+
+<!-- gate: output -->
+```text
+secret/db-credentials patched
+# ...
+deployment.apps/rabbitmq restarted
+# ...
+deployment "rabbitmq" successfully rolled out
+# ...
+deployment.apps/orders restarted
+deployment.apps/payments-worker restarted
+# ...
+deployment "orders" successfully rolled out
+# ...
+deployment "payments-worker" successfully rolled out
+```
+
+The broker now has one user. Ask it to authenticate `guest` with the stock
+password:
+
+```sh
+kubectl exec -n bookstore deploy/rabbitmq -- rabbitmqctl list_users --silent
+kubectl exec -n bookstore deploy/rabbitmq -- rabbitmqctl authenticate_user guest guest
+```
+
+<!-- gate: output -->
+```text
+bookstore   [administrator]
+```
+
+<!-- gate: output -->
+```text
+Authenticating user "guest" ...
+Error:
+Error: failed to authenticate user "guest"
+user 'guest' - invalid credentials
+command terminated with exit code 65
+```
+
+The user list shows one name, and it carries the `administrator` tag. The
+refusal means something only if a login can succeed. Authenticate with the login
+the broker container itself holds. The command reads it from the container's
+environment, so it never passes through your shell:
+
+```sh
+kubectl exec -n bookstore deploy/rabbitmq -- sh -c 'rabbitmqctl authenticate_user "$RABBITMQ_DEFAULT_USER" "$RABBITMQ_DEFAULT_PASS"'
+```
+
+<!-- gate: output -->
+```text
+Authenticating user "bookstore" ...
+Success
+```
+
+Last, orders publishes with that login and the worker consumes with it. Place
+two orders, then read the worker's log. The `cut` leaves out the timestamp:
+
+```sh
+kubectl port-forward -n bookstore svc/orders 18080:80 &
+curl -s -X POST localhost:18080/orders -d '{"book_id":3,"qty":1}'
+curl -s -X POST localhost:18080/orders -d '{"book_id":4,"qty":2}'
+kill %1
+kubectl logs -n bookstore deploy/payments-worker | grep -E 'consuming queue|processed payment' | cut -d, -f2-
+```
+
+<!-- gate: output -->
+```text
+{"order_id":3,"status":"accepted"}
+# ...
+{"order_id":4,"status":"accepted"}
+```
+
+<!-- gate: output -->
+```text
+"level":"INFO","msg":"consuming queue","queue":"orders"}
+"level":"INFO","msg":"processed payment for order","order_id":3}
+"level":"INFO","msg":"processed payment for order","order_id":4}
+```
+
+Each order id the API returned appears in the worker's log, so the message
+crossed the broker under the new login. This is still one login for the
+broker's clients: orders and the worker share it, and it is tagged
+`administrator`. A user per service, with publish-only and consume-only
+permissions, is the next step;
+[06.04](../06-production-readiness/04-autoscaling.md) shows the shape for the
+scaler's read-only user. Nothing here needs cleaning up: this section changed
+`db-credentials` and restarted three workloads, and the later chapters use them.
 
 ### 4. Who can read one Secret: `get` by name
 
@@ -733,8 +895,8 @@ gitleaks dir --config ../.gitleaks.toml --no-banner --no-color --redact examples
 ```text
 8.30.1
 # ...
-7:27AM INF scanned ~162680 bytes (162.68 KB) in 18.8ms
-7:27AM INF no leaks found
+7:34PM INF scanned ~171179 bytes (171.18 KB) in 32ms
+7:34PM INF no leaks found
 ```
 
 The scan passes the demo file, because the default rules do not flag it. A pass

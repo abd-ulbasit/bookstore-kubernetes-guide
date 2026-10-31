@@ -14,7 +14,8 @@
 # bounds, dropping the in-repo demo Secret). securityContext and the full
 # scheduling layer are inherited from base UNCHANGED; no selector is mutated;
 # DB_DSN stays byte-identical (the env-built DSN is in the Deployments, not
-# the Secret — the Secret only supplies POSTGRES_* values at runtime).
+# the Secret — the Secret only supplies values at runtime: the POSTGRES_* keys
+# and the broker keys RABBITMQ_DEFAULT_USER, RABBITMQ_DEFAULT_PASS, AMQP_URL).
 apiVersion: kustomize.config.k8s.io/v1beta1
 kind: Kustomization
 
@@ -185,8 +186,10 @@ patches:
   # PRODUCTION SECRET HANDLING. The in-repo demo Secret `db-credentials`
   # (16-, base64 != encryption, demo-only) is DELETED from the prod render.
   # In prod a Secret of the SAME NAME is created out of band by External
-  # Secrets Operator / Sealed Secrets / Vault; the workloads' secretKeyRef /
-  # envFrom resolve it at runtime exactly the same way. `$patch: delete`
+  # Secrets Operator / Sealed Secrets / Vault; the workloads' secretKeyRef
+  # resolve it at runtime exactly the same way. It needs six keys: the three
+  # POSTGRES_ keys and RABBITMQ_DEFAULT_USER, RABBITMQ_DEFAULT_PASS, AMQP_URL
+  # for the broker, orders and payments-worker. `$patch: delete`
   # removes it from the kustomize output so Git never carries the value and a
   # `kubectl apply -k overlays/prod` will NOT overwrite the externally-managed
   # Secret. (The catalog/orders DB_DSN is built in the Deployment env from

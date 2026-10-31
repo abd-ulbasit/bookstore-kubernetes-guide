@@ -7,11 +7,13 @@
 #
 # RESOLVED in Part 03 ch.02 (Secrets): the Phase-2 inline POSTGRES_PASSWORD
 # STUB is GONE. Credentials now come from the `db-credentials` Opaque Secret
-# (16-db-credentials.yaml) via envFrom.secretRef — that injects POSTGRES_USER /
+# (16-db-credentials.yaml). Three secretKeyRef entries inject POSTGRES_USER /
 # POSTGRES_PASSWORD / POSTGRES_DB (exactly the env names the official postgres
-# image reads). catalog/orders build DB_DSN from the SAME Secret (10-/14-).
-# Only PGDATA (not a secret) stays inline. The DB SCHEMA is created by the
-# migration Job (ch.07, 21-db-migrate-job.yaml).
+# image reads). They are listed one by one, not taken with envFrom, because
+# the Secret also holds the broker login (RABBITMQ_*, AMQP_URL) and the
+# database process has no use for it. catalog/orders build DB_DSN from the SAME
+# Secret (10-/14-). Only PGDATA (not a secret) stays inline. The DB SCHEMA is
+# created by the migration Job (ch.07, 21-db-migrate-job.yaml).
 #
 # Part 04 SCHEDULING LAYER (ch.02 + ch.03 — additive only; everything above is
 # unchanged, only the three fields below were ADDED to template.spec):
@@ -148,13 +150,21 @@ spec:
           ports:
             - name: postgres
               containerPort: 5432
-          envFrom:
-            # POSTGRES_USER / POSTGRES_PASSWORD / POSTGRES_DB now come from the
+          env:
+            # POSTGRES_USER / POSTGRES_PASSWORD / POSTGRES_DB come from the
             # Secret (ch.02). The Phase-2 inline stub is fully removed; this is
             # the single source of truth, shared with catalog/orders (10-/14-).
-            - secretRef:
-                name: db-credentials      # 16-db-credentials.yaml
-          env:
+            # One entry per key (16-db-credentials.yaml): the broker keys in
+            # the same Secret stay out of this container.
+            - name: POSTGRES_USER
+              valueFrom:
+                secretKeyRef: { name: db-credentials, key: POSTGRES_USER }
+            - name: POSTGRES_PASSWORD
+              valueFrom:
+                secretKeyRef: { name: db-credentials, key: POSTGRES_PASSWORD }
+            - name: POSTGRES_DB
+              valueFrom:
+                secretKeyRef: { name: db-credentials, key: POSTGRES_DB }
             - name: PGDATA                # not a secret → stays inline
               value: /var/lib/postgresql/data/pgdata
           # Startup probe: initdb and crash recovery can take longer than the

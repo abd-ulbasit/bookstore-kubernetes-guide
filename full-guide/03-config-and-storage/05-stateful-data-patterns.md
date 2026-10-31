@@ -231,7 +231,8 @@ because `/tmp` is an `emptyDir`, as the baseline requires for every writable
 path.
 
 The password reaches the container as an environment variable. The manifest
-uses `envFrom` on the `db-credentials` Secret, and this command lists only the
+takes `POSTGRES_USER`, `POSTGRES_PASSWORD` and `POSTGRES_DB` from the
+`db-credentials` Secret one key at a time, and this command lists only the
 variable names:
 
 ```sh
@@ -251,8 +252,10 @@ is listed in its documentation as supported for `POSTGRES_PASSWORD`,
 `POSTGRES_USER`, `POSTGRES_DB` and `POSTGRES_INITDB_ARGS` ([docker-library
 postgres](https://github.com/docker-library/docs/blob/master/postgres/README.md)).
 A file keeps the value out of the environment, which `kubectl exec` and the
-Pod spec both show. This manifest still uses `envFrom`, because the Bookstore
-example tree is shared and this chapter reuses it unchanged. Step 4 uses the
+Pod spec both show. This manifest still uses environment variables, because the
+Bookstore example tree is shared and this chapter reuses it unchanged. It lists
+the three keys one by one, not with `envFrom`, because the same Secret also
+holds the broker login and the database has no use for it. Step 4 uses the
 file form. The Go services cannot take the file form at all: they read
 `DB_DSN` from the environment, and [03.02](02-secrets.md) covers that gap.
 
@@ -508,8 +511,9 @@ Events:
 The Pod reads its password from a scratch copy of the Secret. That keeps the
 rotation in step 5 away from the `db-credentials` Secret, which `postgres-0`
 and the apps read. Apply the same manifest with only its name changed. The
-value it carries is the DEMO-ONLY literal from `16-db-credentials.yaml`. That
-is acceptable on this throwaway cluster and nowhere else:
+values it carries are the DEMO-ONLY literals from `16-db-credentials.yaml`,
+the broker login included. That is acceptable on this throwaway cluster and
+nowhere else:
 
 ```sh
 sed -e 's/name: db-credentials$/name: db-credentials-restore/' \

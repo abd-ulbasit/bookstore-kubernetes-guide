@@ -132,13 +132,16 @@ so every addressable tier has a real backend to put a Service in front of.
 > Bookstore narrative but were not yet manifested. Part 02 needs them as
 > concrete **Service/DNS/policy targets**, so this chapter adds deliberately
 > minimal Deployments — `12-redis.yaml` (official `redis:7`) and
-> `13-rabbitmq.yaml` (`rabbitmq:3.13-management`), no persistence/auth. They
-> are **networking scaffolding only**; durable storage/config is
+> `13-rabbitmq.yaml` (`rabbitmq:3.13-management`), no persistence. Redis has no
+> auth. The broker has no `guest` account: its one login comes from the
+> `db-credentials` Secret ([Part 03 ch.02](../03-config-and-storage/02-secrets.md#the-broker-login)).
+> They are **networking scaffolding only**; durable storage/config is
 > [Part 03](../03-config-and-storage/01-configmaps.md), HA is
 > [Part 03 ch.05](../03-config-and-storage/05-stateful-data-patterns.md). The
 > Go services degrade gracefully with `REDIS_ADDR`/`AMQP_URL` unset (see
-> [`app/catalog/main.go`](../examples/bookstore/app/catalog/main.go)), so this
-> is wiring, not a hard dependency yet.
+> [`app/catalog/main.go`](../examples/bookstore/app/catalog/main.go)), but the
+> orders manifest sets `AMQP_URL` from that Secret, so orders publishes to this
+> broker.
 
 ### 1. The backends these Services will select
 
@@ -156,12 +159,13 @@ because the image is distroless — no shell).
 ```sh
 # from the repo root (full-guide/)
 kubectl apply -f examples/bookstore/raw-manifests/12-redis.yaml
+# The broker takes its login from db-credentials, so the Secret goes first.
+kubectl apply -f examples/bookstore/raw-manifests/16-db-credentials.yaml
 kubectl apply -f examples/bookstore/raw-manifests/13-rabbitmq.yaml
 # orders (like catalog) carries DB_DSN, so it needs Postgres + the schema Job.
 # These come from the earlier chapters' prerequisite chain; re-applying is harmless
 # (idempotent) and keeps this chapter runnable on its own. orders' /readyz only
 # goes Ready once the schema exists — gate on the migrate Job completing.
-kubectl apply -f examples/bookstore/raw-manifests/16-db-credentials.yaml
 kubectl apply -f examples/bookstore/raw-manifests/20-postgres-statefulset.yaml
 kubectl rollout status statefulset/postgres -n bookstore
 kubectl apply -f examples/bookstore/raw-manifests/21-db-migrate-job.yaml   # schema

@@ -70,7 +70,7 @@ two copies that could drift — is mitigated by the chapter's equivalence check
 (rendered base ≡ the Helm default 49-object set, `DB_DSN` byte-identical).
 
 **Namespace stays `bookstore` across all envs.** `DB_DSN` /
-`AMQP_URL` / the postgres headless-Service DNS / the NetworkPolicy
+the postgres headless-Service DNS / the NetworkPolicy
 `namespaceSelectors` all hardcode `bookstore`. Renaming the namespace per env
 would silently break those cross-resource references unless every one were
 rewritten coherently — a much larger, error-prone change for no real benefit
@@ -95,9 +95,10 @@ kept as a static manifest so its **demo-only / base64-≠-encryption** warning
 travels verbatim and the catalog/orders `DB_DSN` stays byte-identical. The
 **prod** overlay `$patch: delete`s it entirely — in production a Secret of the
 same name is supplied out of band by **External Secrets Operator / Sealed
-Secrets / Vault** (the `secretKeyRef`/`envFrom` references resolve it at
-runtime; the env-built DSN is unchanged). `configMapGenerator`/
-`secretGenerator` (content-hash suffix → rollout-on-change) and
+Secrets / Vault** (the `secretKeyRef` references resolve it at runtime; the
+env-built DSN is unchanged). It needs six keys: the three `POSTGRES_` keys and
+the broker's `RABBITMQ_DEFAULT_USER`, `RABBITMQ_DEFAULT_PASS` and `AMQP_URL`.
+`configMapGenerator`/`secretGenerator` (content-hash suffix → rollout-on-change) and
 `generatorOptions.disableNameSuffixHash` are taught conceptually in the
 chapter.
 

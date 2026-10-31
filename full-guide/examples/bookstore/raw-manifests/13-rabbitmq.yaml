@@ -4,9 +4,11 @@
 # consumes) needs a broker that exists as a real Deployment + ClusterIP Service
 # so DNS (`rabbitmq.bookstore.svc.cluster.local`), kube-proxy routing, and the
 # NetworkPolicy egress rule (orders -> rabbitmq, ch.06) have a concrete target.
-# Minimal: official `rabbitmq:3.13-management`, default guest/guest, no
-# persistence. Durable storage / clustering is Part 03; until then orders runs
-# with AMQP_URL UNSET and degrades gracefully (app/orders/main.go).
+# Minimal: official `rabbitmq:3.13-management`, no persistence. Durable
+# storage / clustering is Part 03. The login is not the image's stock `guest`:
+# RABBITMQ_DEFAULT_USER and RABBITMQ_DEFAULT_PASS come from the db-credentials
+# Secret (16-), so the broker creates that one user and no `guest` account.
+# orders and payments-worker read the matching AMQP_URL from the same Secret.
 #
 # Two ports: 5672 (AMQP, used by orders/payments-worker) and 15672 (the
 # management UI, handy for `kubectl port-forward` inspection in hands-on).
@@ -27,6 +29,7 @@
 #
 # Requires:
 #   kubectl apply -f examples/bookstore/raw-manifests/00-namespace.yaml
+#   kubectl apply -f examples/bookstore/raw-manifests/16-db-credentials.yaml  # the login
 # Apply:
 #   kubectl apply -f examples/bookstore/raw-manifests/13-rabbitmq.yaml
 apiVersion: apps/v1
@@ -77,6 +80,15 @@ spec:
             readOnlyRootFilesystem: true
             capabilities:
               drop: ["ALL"]
+          # The broker's only user, from the Secret (16-). With a default user
+          # set, the broker does not create the stock `guest` account.
+          env:
+            - name: RABBITMQ_DEFAULT_USER
+              valueFrom:
+                secretKeyRef: { name: db-credentials, key: RABBITMQ_DEFAULT_USER }
+            - name: RABBITMQ_DEFAULT_PASS
+              valueFrom:
+                secretKeyRef: { name: db-credentials, key: RABBITMQ_DEFAULT_PASS }
           ports:
             - name: amqp
               containerPort: 5672

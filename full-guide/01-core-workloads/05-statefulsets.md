@@ -157,8 +157,10 @@ the registry, so no `kind load` is needed. It is pinned by digest, as the
 [baseline](01-pods.md#baseline-image-digest) asks, with the tag in a comment.
 
 > **Credentials come from a Secret.** `POSTGRES_USER`, `POSTGRES_PASSWORD` and
-> `POSTGRES_DB` come from `db-credentials` through `envFrom`. The StatefulSet
-> names the Secret and never holds the password.
+> `POSTGRES_DB` come from `db-credentials`, one `secretKeyRef` per key. The
+> Secret also holds the broker login, so the StatefulSet does not use
+> `envFrom`: the database has no use for that login. The StatefulSet names the
+> Secret and never holds the password.
 > [03.02](../03-config-and-storage/02-secrets.md) explains what a Secret does
 > and does not protect. The password in this repo is a demo value. Its account
 > is a superuser, as the check under *Credentials stay out of the StatefulSet*
@@ -394,20 +396,23 @@ INSERT 0 1
 
 ### Credentials stay out of the StatefulSet
 
-The first command prints the Secret reference the container gets. The second
-counts the lines in the StatefulSet that mention the demo password. `grep -c`
-exits 1 when it finds none, which is why the line ends in `; true`. The third
-command checks the account.
+The first command prints the environment variables the container gets and the
+Secret each one comes from. The second counts the lines in the StatefulSet that
+mention the demo password. `grep -c` exits 1 when it finds none, which is why
+the line ends in `; true`. The third command checks the account.
 
 ```sh
-kubectl get statefulset postgres -n bookstore -o jsonpath='{.spec.template.spec.containers[0].envFrom}'; echo
+kubectl get statefulset postgres -n bookstore -o jsonpath='{range .spec.template.spec.containers[0].env[*]}{.name}{" "}{.valueFrom.secretKeyRef.name}{"\n"}{end}'
 kubectl get statefulset postgres -n bookstore -o yaml | grep -c devpassword; true
 kubectl exec -n bookstore postgres-0 -- psql -U bookstore -d bookstore -tAc 'SELECT rolsuper FROM pg_roles WHERE rolname = current_user;'
 ```
 
 <!-- gate: output -->
 ```text
-[{"secretRef":{"name":"db-credentials"}}]
+POSTGRES_USER db-credentials
+POSTGRES_PASSWORD db-credentials
+POSTGRES_DB db-credentials
+PGDATA
 ```
 
 <!-- gate: output -->

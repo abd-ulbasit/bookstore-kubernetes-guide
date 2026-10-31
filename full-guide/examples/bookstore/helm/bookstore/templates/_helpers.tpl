@@ -22,7 +22,7 @@ bookstore.name — the chart name (override: nameOverride).
 {{/*
 bookstore.fullname — DELIBERATELY the chart name, NOT "<release>-<chart>".
 The Bookstore Services/DNS/DB_DSN are wired by FIXED names across Parts 02–06
-(e.g. postgres.bookstore.svc.cluster.local is baked into DB_DSN and AMQP_URL),
+(e.g. postgres.bookstore.svc.cluster.local is baked into DB_DSN),
 so the chart preserves the raw-manifests object names exactly. Per-object names
 are the literal raw-manifests names (catalog, orders, postgres, ...).
 Override with fullnameOverride only if you must run two parallel copies.
