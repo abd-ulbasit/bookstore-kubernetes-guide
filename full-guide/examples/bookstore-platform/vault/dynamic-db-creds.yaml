@@ -1,0 +1,82 @@
+# Bookstore Platform v2 - Part 15 ch.05: dynamic database credentials for
+# the catalog. Each refresh asks Vault for a new Postgres role, so the
+# credential changes with its lease. Apply in the tenant namespace after
+# secret-store.yaml and the acme-books Vault role exist.
+#
+# Two objects. The VaultDynamicSecret generator makes the Vault call. It is
+# built for engines that mint a credential on each read (the upstream
+# example issues a PKI certificate). The ExternalSecret turns the
+# generator's output into the Secret the catalog reads.
+#
+# !!! CRD-INTRINSIC DRY-RUN
+#   Both kinds are ESO CRDs (generators.external-secrets.io/v1alpha1 and
+#   external-secrets.io/v1). Without ESO installed, a client dry-run prints
+#   "no matches for kind". EXPECTED.
+#
+# Refresh: 30m is half the 1h default_ttl that the rotation script sets on
+# the role, so one missed refresh still leaves a valid credential. Every
+# refresh writes a new password. An env-var consumer keeps the value it
+# started with, so mount this Secret as files and reread them.
+#
+# Apply:
+#   kubectl apply -f examples/bookstore-platform/vault/dynamic-db-creds.yaml
+#   kubectl -n bookstore-platform-acme-books get externalsecret \
+#     catalog-db-credentials \
+#     -o jsonpath='{.status.conditions[*].type}={.status.conditions[*].status}{"\n"}'
+#   # expect Ready=True
+
+apiVersion: generators.external-secrets.io/v1alpha1
+kind: VaultDynamicSecret
+metadata:
+  name: catalog-db-dynamic
+  namespace: bookstore-platform-acme-books
+spec:
+  # GET reads the role and mints a new Postgres user with a lease.
+  path: "/database/creds/bookstore-platform-acme-books"
+  method: "GET"
+  resultType: "Data"
+  provider:
+    server: "https://vault-active.vault.svc.cluster.local:8200"
+    # The CA ConfigMap must sit in this namespace (see secret-store.yaml).
+    caProvider:
+      type: ConfigMap
+      name: vault-server-ca
+      key: ca.crt
+    auth:
+      kubernetes:
+        mountPath: "kubernetes"
+        role: "bookstore-platform-acme-books"
+        serviceAccountRef:
+          name: "bookstore-platform-eso"
+          audiences:
+            - "https://vault.bookstore-platform.example.com"
+---
+apiVersion: external-secrets.io/v1
+kind: ExternalSecret
+metadata:
+  name: catalog-db-credentials
+  namespace: bookstore-platform-acme-books
+  labels:
+    app.kubernetes.io/part-of: bookstore-platform
+    app.kubernetes.io/component: catalog
+    bookstore-platform.example.com/tenant: acme-books
+spec:
+  refreshInterval: "30m"
+  dataFrom:
+    - sourceRef:
+        generatorRef:
+          apiVersion: generators.external-secrets.io/v1alpha1
+          kind: VaultDynamicSecret
+          name: catalog-db-dynamic
+  target:
+    name: catalog-db-credentials
+    creationPolicy: Owner
+    template:
+      type: Opaque
+      data:
+        POSTGRES_USER: "{{ .username }}"
+        POSTGRES_PASSWORD: "{{ .password }}"
+        # The dynamic response carries no database name, so the name is a
+        # literal. It is not a secret.
+        POSTGRES_DB: "bookstore_catalog"
+        DB_DSN: "postgresql://{{ .username }}:{{ .password }}@postgres.bookstore-platform-acme-books.svc.cluster.local:5432/bookstore_catalog?sslmode=require"
