@@ -294,7 +294,7 @@ metadata:
 spec:
   refreshInterval: 1h
   secretStoreRef:
-    name: bookstore-platform-vault
+    name: vault-bookstore-platform
     kind: ClusterSecretStore
   target:
     name: grafana-admin

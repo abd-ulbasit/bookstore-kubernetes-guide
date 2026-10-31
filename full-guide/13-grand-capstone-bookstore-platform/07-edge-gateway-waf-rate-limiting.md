@@ -113,9 +113,10 @@ the application sees it.**
   1. TLS termination (the listener does this).
   2. **WAF (Coraza)**: block known-bad payloads. The `WasmPlugin` runs
      in phase `AUTHN`, before the JWT filter.
-  3. **JWT authn (RequestAuthentication; ch.13.04)**: verify the
-     bearer token and copy its tenant claim to `x-tenant`.
-  4. **AuthZ (AuthorizationPolicy; ch.13.04)**: require a verified
+  3. **JWT authn (RequestAuthentication, `edge/jwt-policies.yaml`)**: verify
+     the bearer token and copy its tenant claim to `x-tenant`. It is a copy
+     of ch.13.04's policy, selecting the Gateway API pods.
+  4. **AuthZ (AuthorizationPolicy, same file)**: require a verified
      principal for `/api/*`.
   5. **Rate limit**: the filter is inserted before the router, which
      places it after the authentication and authorization filters.
@@ -136,8 +137,8 @@ mode, watch the audit log, build a whitelist, flip to `On`.
 |---|---|---|
 | Hostile payloads (SQL injection, XSS, path traversal) reach the app | Coraza WAF, OWASP CRS v4, blocks on anomaly score 5 | Steps 5 and 7 here |
 | Abuse volume: one tenant or a bot exhausts shared capacity | Token bucket per tenant on the verified claim; a shared default bucket for the rest | Step 6 here; quotas in 13.02 |
-| Forged or replayed tokens at the edge | Not this chapter: JWT verification and AuthZ | 13.04 |
-| The edge CA key: whoever holds it can mint certificates clients trust | cert-manager keeps the key in one Secret; clients trust only the exported `edge-ca.crt` | Step 2 here; secret handling in Part 05 ch.04 |
+| Forged tokens at the edge | JWT verification and AuthZ on the Gateway API pods (`edge/jwt-policies.yaml`, a copy of 13.04's policies) | Step 2 here; the issuer is set up in 13.04 |
+| The edge CA key: whoever holds it can mint certificates clients trust | The CA is a namespaced Issuer, so only Certificates in `bookstore-platform` can use it. Clients trust only the exported `edge-ca.crt`. Reads of the `edge-ca` Secret remain a limit, enforced with RBAC | Step 2 here; RBAC in Part 05 ch.04 |
 | Bots that look like buyers (no token, many IPs) | Not built here: a bot-management vendor | Production notes |
 
 ## Diagrams
@@ -197,7 +198,7 @@ When it wins           per-gateway-replica fine     need exact cluster-wide budg
 
 ## Hands-on with the Bookstore Platform
 
-Assumes ch.13.04 ran (Istio installed + JWT verify wired); ch.13.05 and
+Assumes ch.13.04 ran (Istio installed); ch.13.05 and
 13.06 are useful but not strictly required to run this chapter. Every
 output shown in this section is illustrative, not captured: this
 chapter's lab run did not install Istio.
@@ -254,12 +255,13 @@ drops all capabilities and has a read-only root filesystem.
 ```sh
 kubectl apply -f examples/bookstore-platform/edge/edge-ca.yaml
 kubectl apply -f examples/bookstore-platform/edge/gateway.yaml
+kubectl apply -f examples/bookstore-platform/edge/jwt-policies.yaml
 
-kubectl -n cert-manager wait --for=condition=Ready certificate/edge-ca --timeout=120s
+kubectl -n bookstore-platform wait --for=condition=Ready certificate/edge-ca --timeout=120s
 kubectl -n bookstore-platform wait --for=condition=Ready certificate/bookstore-platform-edge --timeout=120s
 
 # Export the CA once. Every later chapter uses --cacert edge-ca.crt.
-kubectl -n cert-manager get secret edge-ca -o jsonpath='{.data.ca\.crt}' \
+kubectl -n bookstore-platform get secret edge-ca -o jsonpath='{.data.ca\.crt}' \
   | base64 -d > edge-ca.crt
 
 kubectl -n bookstore-platform get gateway,httproute
@@ -319,8 +321,9 @@ curl -s --cacert edge-ca.crt -o /dev/null -w "%{http_code}\n" "https://localhost
 curl -s --cacert edge-ca.crt -o /dev/null -w "%{http_code}\n" "https://localhost:8443/api/v2/search?q=<script>alert(1)</script>"
 # 403
 
-# 5d — path traversal (403, rule 930100)
-curl -s --cacert edge-ca.crt -o /dev/null -w "%{http_code}\n" "https://localhost:8443/static/../../../etc/passwd"
+# 5d: path traversal (403, rule 930100). --path-as-is keeps the ../ segments;
+# without it curl squashes them and the WAF never sees the traversal.
+curl -s --path-as-is --cacert edge-ca.crt -o /dev/null -w "%{http_code}\n" "https://localhost:8443/static/../../../etc/passwd"
 # 403
 
 # 5e — known-bad user-agent (sqlmap; 403, rule 913100)
@@ -418,9 +421,10 @@ bucket is empty, requests get 429 + `Retry-After`. The alternative —
 fixed rate. Production picks token-bucket for the edge because the
 operator-visible cost ("X req / Y seconds / tenant") is familiar.
 
-**The tenant key comes from the token, not from parsing it.** ch.13.04's
-RequestAuthentication copies a verified token's `tenant` claim to the
-`x-tenant` header (`outputClaimToHeaders`). A route action reads that header
+**The tenant key comes from the token, not from parsing it.**
+`edge/jwt-policies.yaml`'s RequestAuthentication copies a verified token's
+`tenant` claim to the `x-tenant` header (`outputClaimToHeaders`). A route
+action reads that header
 as the descriptor key. A request with no token has no `x-tenant` and uses
 the default bucket. The Lua filter exists for one reason: a client can send
 its own `x-tenant`, and only the verified token may set it.
@@ -481,7 +485,8 @@ kubectl apply -f https://github.com/kubernetes-sigs/gateway-api/releases/downloa
 # Edge CA, Gateway + Routes (cert-manager installed first, step 2)
 kubectl apply -f examples/bookstore-platform/edge/edge-ca.yaml
 kubectl apply -f examples/bookstore-platform/edge/gateway.yaml
-kubectl -n cert-manager get secret edge-ca -o jsonpath='{.data.ca\.crt}' | base64 -d > edge-ca.crt
+kubectl apply -f examples/bookstore-platform/edge/jwt-policies.yaml
+kubectl -n bookstore-platform get secret edge-ca -o jsonpath='{.data.ca\.crt}' | base64 -d > edge-ca.crt
 
 # WAF + rate limit
 kubectl apply -f examples/bookstore-platform/edge/coraza-wasmplugin.yaml

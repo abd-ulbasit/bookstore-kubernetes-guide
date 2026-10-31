@@ -226,7 +226,9 @@ KSERVE_VERSION="0.13.1"
 KNATIVE_VERSION="v1.15.0"
 CERT_MANAGER_VERSION="v1.15.3"
 
-# 1) cert-manager (KServe's webhook needs serving certs)
+# 1) cert-manager (KServe's webhook needs serving certs). If Part 13 ch.07
+#    step 2 already installed cert-manager under this release name, skip this
+#    step: a second `helm install` of the same name fails.
 helm install cert-manager \
   oci://quay.io/jetstack/charts/cert-manager \
   --version "$CERT_MANAGER_VERSION" \

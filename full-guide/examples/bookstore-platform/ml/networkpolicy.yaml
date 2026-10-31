@@ -1,0 +1,131 @@
+# Bookstore Platform v2: Part 13 ch.08: NetworkPolicies for the ML namespace.
+# The namespace denies traffic by default. The allows admit the EventBus,
+# EventSource and Sensor traffic inside the namespace, the Kafka TLS listener,
+# the MLflow tracking API, and the Kubernetes API for the Sensor.
+#
+# Pods in one namespace reach each other on any port (the EventBus, Workflow
+# and serving pods depend on that). Narrow it per workload in production.
+#
+# The Sensor and the training Workflows reach the Kubernetes API and S3 on 443.
+# These rules admit any address on 443 and 6443. Narrow them to the API server
+# and the S3 endpoint in production.
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: default-deny-all
+  namespace: bookstore-platform-ml
+  labels:
+    app.kubernetes.io/part-of: bookstore-platform
+spec:
+  podSelector: {}
+  policyTypes: ["Ingress", "Egress"]
+---
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: allow-dns-egress
+  namespace: bookstore-platform-ml
+  labels:
+    app.kubernetes.io/part-of: bookstore-platform
+spec:
+  podSelector: {}
+  policyTypes: ["Egress"]
+  egress:
+    - to:
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: kube-system
+          podSelector:
+            matchLabels:
+              k8s-app: kube-dns
+      ports:
+        - protocol: UDP
+          port: 53
+        - protocol: TCP
+          port: 53
+---
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: allow-same-namespace
+  namespace: bookstore-platform-ml
+  labels:
+    app.kubernetes.io/part-of: bookstore-platform
+spec:
+  podSelector: {}
+  policyTypes: ["Ingress", "Egress"]
+  ingress:
+    - from:
+        - podSelector: {}
+  egress:
+    - to:
+        - podSelector: {}
+---
+# Drift detector, EventSource, Sensor and training pods reach the Kafka TLS
+# listener. The brokers live in kafka-system.
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: allow-kafka-tls
+  namespace: bookstore-platform-ml
+  labels:
+    app.kubernetes.io/part-of: bookstore-platform
+spec:
+  podSelector: {}
+  policyTypes: ["Egress"]
+  egress:
+    - to:
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: kafka-system
+          podSelector:
+            matchLabels:
+              strimzi.io/cluster: bookstore-platform-kafka
+      ports:
+        - protocol: TCP
+          port: 9093
+---
+# Training and the drift detector call the MLflow tracking API.
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: allow-mlflow-tracking
+  namespace: bookstore-platform-ml
+  labels:
+    app.kubernetes.io/part-of: bookstore-platform
+spec:
+  podSelector: {}
+  policyTypes: ["Egress"]
+  egress:
+    - to:
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: mlflow
+          podSelector:
+            matchLabels:
+              app.kubernetes.io/name: mlflow
+      ports:
+        - protocol: TCP
+          port: 5000
+---
+# The Sensor submits Workflows through the API server. Training pods push
+# artifacts to S3 on 443.
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: allow-api-and-object-store-egress
+  namespace: bookstore-platform-ml
+  labels:
+    app.kubernetes.io/part-of: bookstore-platform
+spec:
+  podSelector: {}
+  policyTypes: ["Egress"]
+  egress:
+    - to:
+        - ipBlock:
+            cidr: 0.0.0.0/0
+      ports:
+        - protocol: TCP
+          port: 443
+        - protocol: TCP
+          port: 6443

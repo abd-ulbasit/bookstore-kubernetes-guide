@@ -199,9 +199,13 @@ spec:
                       value: ""
           # Map the drift event's payload onto the Workflow parameters. The
           # feature name lands in the drift-feature argument (index 3, the
-          # fourth parameter above). The train step does not read it yet.
+          # fourth parameter above). The train step does not read it.
           parameters:
             - src:
                 dependencyName: drift-event
                 dataKey: body.feature
               dest: spec.arguments.parameters.3.value
+      # At most one retrain an hour. Events past the limit submit no Workflow.
+      rateLimit:
+        unit: Hour
+        requestsPerUnit: 1

@@ -139,8 +139,6 @@ spec:
           # first argument.
           args:
             - "/bin/meilisearch"
-            - "--master-key"
-            - "$(MEILI_MASTER_KEY)"
             - "--http-addr"
             - "0.0.0.0:7700"
             - "--db-path"

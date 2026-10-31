@@ -6,7 +6,11 @@ route, defend (WAF + rate limit), authenticate (JWT verify — ch.13.04).
 ## Files
 
 - `edge-ca.yaml` — the edge CA (a cert-manager self-signed root and a CA
-  issuer) and the gateway's serving certificate. Replaces a literal Secret.
+  issuer, both namespaced in `bookstore-platform`) and the gateway's serving
+  certificate. Replaces a literal Secret.
+- `jwt-policies.yaml`: copies of the ch.13.04 RequestAuthentication and the
+  two AuthorizationPolicies, selecting the Gateway API pods. Also copies the
+  verified `tenant` claim to `x-tenant`.
 - `gateway.yaml` — Gateway API `GatewayClass` + `Gateway`, an HTTP-to-HTTPS
   redirect, three `HTTPRoute`s (public static, API, Stripe webhook) and the
   `ReferenceGrant`s their backends need.
@@ -27,6 +31,7 @@ Run it after ch.13.04 (Istio and the RequestAuthentication).
 #    and the Gateway (ch.13.07 step 2).
 kubectl apply -f examples/bookstore-platform/edge/edge-ca.yaml
 kubectl apply -f examples/bookstore-platform/edge/gateway.yaml
+kubectl apply -f examples/bookstore-platform/edge/jwt-policies.yaml
 
 # 3. WAF and rate limit
 kubectl apply -f examples/bookstore-platform/edge/coraza-wasmplugin.yaml
@@ -41,7 +46,7 @@ kubectl -n bookstore-platform get gateway,httproute,wasmplugin,envoyfilter
 Export the CA once, then reach the gateway through a port-forward:
 
 ```sh
-kubectl -n cert-manager get secret edge-ca -o jsonpath='{.data.ca\.crt}' \
+kubectl -n bookstore-platform get secret edge-ca -o jsonpath='{.data.ca\.crt}' \
   | base64 -d > edge-ca.crt
 kubectl -n bookstore-platform port-forward svc/bookstore-platform-edge-istio 8443:443 >/dev/null 2>&1 &
 

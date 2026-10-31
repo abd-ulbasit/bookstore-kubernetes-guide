@@ -283,7 +283,7 @@ kubectl -n backstage port-forward svc/backstage 7007:7007
 Apply them in this order. Each file says what it is for.
 
 ```sh
-# Credentials from Vault, through the bookstore-platform-vault
+# Credentials from Vault, through the vault-bookstore-platform
 # ClusterSecretStore that the payments path uses (ch.06)
 kubectl apply -f examples/bookstore-platform/backstage/external-secrets.yaml
 

@@ -251,9 +251,11 @@ Kaniko executor, and that image declares no user and sets `USER=root`, so
 the build runs as root. A namespace has one level, so `kafka-system` takes
 `baseline`, the strictest level that admits the build. The exception is
 registered in `security/namespace-exceptions.yaml` with its reason and an
-expiry. This chapter adds no NetworkPolicy to `kafka-system`. The allows it
-needs depend on Kafka's own traffic, so they are a gap to close before
-production.
+expiry. `examples/bookstore-platform/kafka/networkpolicy.yaml` gives
+`kafka-system` a default deny, then allows the TLS listener's clients and
+Strimzi's own traffic. Step 2 applies it. Its allows were written from the
+manifests and the Strimzi docs, so check them against your own clients before
+you rely on them.
 
 Confirm the operator is up. *Illustrative output, not captured.*
 
@@ -273,6 +275,7 @@ kubectl -n kafka-system get pods
 kubectl apply -f examples/bookstore-platform/kafka/cluster.yaml
 kubectl apply -f examples/bookstore-platform/kafka/nodepool.yaml
 kubectl apply -f examples/bookstore-platform/kafka/topics.yaml
+kubectl apply -f examples/bookstore-platform/kafka/networkpolicy.yaml
 
 # Wait for the cluster (~2 minutes on kind)
 kubectl -n kafka-system wait kafka/bookstore-platform-kafka \
@@ -286,6 +289,16 @@ type: simple` then checks each request against that user's ACLs. There is no
 plaintext listener, so a pod without a KafkaUser certificate cannot complete
 the handshake. Step 5 creates the one KafkaUser this chapter needs.
 
+Deliberate denial (illustrative output, not captured): a client with no
+certificate is refused at the handshake, before any ACL is checked.
+
+```sh
+# Run from a pod with no KafkaUser certificate. The listener asks for one.
+openssl s_client -connect bookstore-platform-kafka-kafka-bootstrap.kafka-system.svc.cluster.local:9093 </dev/null 2>&1 \
+  | grep -E 'certificate required|alert|verify' | head -3
+# Illustrative: the handshake ends with a TLS alert that asks for a client certificate.
+```
+
 What landed: a 3-broker KRaft cluster (combined broker + controller
 nodes from the KafkaNodePool) + six topics (`books.cdc`, `orders.placed`,
 `payments.completed`, `payments.failed`, `ml.predictions`, `ml.drift`).
@@ -296,8 +309,12 @@ emptyDir. The storage is per-broker PVCs of 10 GiB each.
 ### 3. Apply Meilisearch
 
 The three ExternalSecrets that fill this chapter's Secrets from Vault are in
-`search/external-secrets.yaml`. They need External Secrets and the
-ClusterSecretStore from [Part 11 ch.05](../11-advanced-production-patterns/05-secrets-at-scale.md), which 13.06 also uses.
+`search/external-secrets.yaml`. They read through the ClusterSecretStore
+`vault-bookstore-platform`, which
+[Part 15 ch.05](../15-day-to-day-production-ops/05-production-secrets-vault-eso.md)
+creates from `examples/bookstore-platform/vault/cluster-secret-store.yaml`.
+13.06 and 13.08 use the same store. Write `master_key` to Vault before you
+apply these, as step 4 shows.
 
 Apply the Meilisearch manifest and the ExternalSecrets, then wait for the
 rollout. The `#` lines show illustrative output, not captured output.
@@ -318,8 +335,8 @@ volume.
 The namespace denies traffic by default. The `allow-index-clients` policy
 admits port 7700 from the tenant namespace and from `kafka-system`, where the
 sink runs. Meilisearch makes no outbound calls, so egress stays denied. A
-NetworkPolicy takes effect only on a CNI that enforces it. kind's default CNI
-does not, so on kind these objects are accepted but not enforced.
+NetworkPolicy takes effect only on a CNI that enforces it; ch.13.02 covers how
+to check that on your cluster.
 
 Test it directly (port-forward; production goes through the Istio
 gateway). *Illustrative output, not captured.*
@@ -335,38 +352,72 @@ curl -s http://localhost:7700/health
 
 Meilisearch auto-creates indexes on first write; explicit pre-creation
 sets the primary-key + searchable-attributes up front. The same master-key
-session creates the two scoped keys that the workloads use:
+session creates the two scoped keys that the workloads use. The master key
+goes in a 0600 curl config file, so it stays out of the process list:
 
 ```sh
-MASTER_KEY=$(kubectl -n bookstore-platform-search get secret meilisearch-master-key -o jsonpath='{.data.master-key}' | base64 -d)
+WORK="$(mktemp -d)"
+chmod 700 "$WORK"
+AUTH_CONF="$WORK/master.conf"
+(umask 077; printf 'header = "Authorization: Bearer %s"\n' \
+  "$(kubectl -n bookstore-platform-search get secret meilisearch-master-key -o jsonpath='{.data.master-key}' | base64 -d)" > "$AUTH_CONF")
 
-curl -s -X POST http://localhost:7700/indexes \
-  -H "Authorization: Bearer $MASTER_KEY" \
+curl -s -K "$AUTH_CONF" -X POST http://localhost:7700/indexes \
   -H "Content-Type: application/json" \
   -d '{"uid":"books-acme-books","primaryKey":"id"}'
 
-curl -s -X POST http://localhost:7700/indexes/books-acme-books/settings/searchable-attributes \
-  -H "Authorization: Bearer $MASTER_KEY" \
+curl -s -K "$AUTH_CONF" -X POST http://localhost:7700/indexes/books-acme-books/settings/searchable-attributes \
   -H "Content-Type: application/json" \
   -d '["title","author"]'
 
 # Sink key: documents.add on books-* only. Search key: search on books-* only.
-curl -s -X POST http://localhost:7700/keys \
-  -H "Authorization: Bearer $MASTER_KEY" \
+# jq keeps the key field, which the API returns once.
+SINK_KEY="$(curl -s -K "$AUTH_CONF" -X POST http://localhost:7700/keys \
   -H "Content-Type: application/json" \
-  -d '{"description":"Debezium sink: add documents to books-* only","actions":["documents.add"],"indexes":["books-*"],"expiresAt":"2027-06-30T00:00:00Z"}'
+  -d '{"description":"Debezium sink: add documents to books-* only","actions":["documents.add"],"indexes":["books-*"],"expiresAt":"2027-06-30T00:00:00Z"}' | jq -r .key)"
 
-curl -s -X POST http://localhost:7700/keys \
-  -H "Authorization: Bearer $MASTER_KEY" \
+SEARCH_KEY="$(curl -s -K "$AUTH_CONF" -X POST http://localhost:7700/keys \
   -H "Content-Type: application/json" \
-  -d '{"description":"books-v2 search service: search books-* only","actions":["search"],"indexes":["books-*"],"expiresAt":"2027-06-30T00:00:00Z"}'
+  -d '{"description":"books-v2 search service: search books-* only","actions":["search"],"indexes":["books-*"],"expiresAt":"2027-06-30T00:00:00Z"}' | jq -r .key)"
+
+# The search key is the one the service and step 6 use. Keep it in a 0600 file.
+SEARCH_AUTH="$WORK/search.conf"
+(umask 077; printf 'header = "Authorization: Bearer %s"\n' "$SEARCH_KEY" > "$SEARCH_AUTH")
 ```
 
 The master key is for setup only. It can create keys, so no workload should
-hold it. Each key response carries the key value once. Store both values in
-Vault at `kv/bookstore-platform/meilisearch` as `sink_key` and `search_key`,
-the properties the ExternalSecrets read from step 3 onward, then discard the
-responses. Both keys expire on 2027-06-30, so rotate them before then.
+hold it. The two scoped keys go to Vault at `kv/bookstore-platform/meilisearch`
+as `sink_key` and `search_key`. The ExternalSecrets read `master_key` and
+`sink_key` from that path, and the Debezium role's password from
+`kv/bookstore-platform/debezium`. The values come from files, so they stay out
+of the process list. *Illustrative: the Vault writes are not captured. Run them against the Vault
+that [Part 15 ch.05](../15-day-to-day-production-ops/05-production-secrets-vault-eso.md)
+installs.*
+
+```sh
+printf '%s' "$SINK_KEY" > "$WORK/sink-key"
+printf '%s' "$SEARCH_KEY" > "$WORK/search-key"
+vault kv patch kv/bookstore-platform/meilisearch \
+  sink_key=@"$WORK/sink-key" search_key=@"$WORK/search-key"
+unset SINK_KEY SEARCH_KEY
+rm -rf "$WORK"
+```
+
+Write `master_key` the same way before the first ExternalSecret syncs: generate
+it into a file with `openssl rand -base64 32`, and `vault kv put` it with
+`master_key=@<file>`. Write the Debezium password the same way, and set the same
+value on the Postgres `debezium` role in ch.13.03. Both keys expire on
+2027-06-30, so rotate them before then.
+
+Deliberate denial (illustrative output, not captured): the search key cannot
+create keys. Only the master key can.
+
+```sh
+curl -s -K "$SEARCH_AUTH" -X POST http://localhost:7700/keys \
+  -H "Content-Type: application/json" \
+  -d '{"description":"should be refused","actions":["search"],"indexes":["*"],"expiresAt":"2027-06-30T00:00:00Z"}'
+# Illustrative: an error response, with no key in the body.
+```
 
 ### 5. Apply the Debezium connector
 
@@ -388,11 +439,16 @@ The KafkaConnect spec mounts two Secrets through Strimzi's
 scoped key, and `debezium-postgres`, which holds the Postgres password. Strimzi
 mounts each Secret under `/opt/kafka/external-configuration/<volume>/`, one
 file per key. The connectors read those files with the
-**DirectoryConfigProvider** and `${dir:<directory>:<file>}`. The sink's header
-is `Authorization: Bearer ${dir:/opt/kafka/external-configuration/meili-sink:api-key}`,
-so neither value appears in the connector spec or in `kubectl describe`
-output. Without the header every sink write returns 401 (Meilisearch runs
-with `--env production`) and the index never receives a row.
+**DirectoryConfigProvider** and `${dir:<directory>:<file>}`. The sink's
+`camel.sink.endpoint.authMethod: Bearer` and `authBearerToken` options send
+`Authorization: Bearer <key>`, with the key read from
+`${dir:/opt/kafka/external-configuration/meili-sink:api-key}`. Neither value
+appears in the connector spec or in `kubectl describe` output. Without that
+header every sink write returns 401 (Meilisearch runs with `--env production`)
+and the index never receives a row. This config does not set a JSON
+`Content-Type`, and Meilisearch rejects a document POST without
+`application/json`. Step 6 shows whether the rows arrive, so check the sink's
+log there if they do not.
 
 The Connect worker authenticates as the KafkaUser `bookstore-platform-connect`
 from the same file. Its certificate lands in a Secret of that name. Its ACLs
@@ -436,8 +492,7 @@ sleep 5
 
 # Verify the document is in Meilisearch. The search uses the search key from
 # step 4, as the service does. The output below is illustrative, not captured.
-curl -s "http://localhost:7700/indexes/books-acme-books/search?q=kubernetes" \
-  -H "Authorization: Bearer $SEARCH_KEY" | jq .
+curl -s -K "$SEARCH_AUTH" "http://localhost:7700/indexes/books-acme-books/search?q=kubernetes" | jq .
 # {
 #   "hits": [
 #     {
