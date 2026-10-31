@@ -1,7 +1,7 @@
 # Bookstore — Part 07 ch.04 "GitOps with Argo CD": the App-of-Apps root.
 #
 # THE BOOTSTRAP. This single Application manages the THREE per-environment
-# Bookstore Applications (dev/staging/prod). Apply ONLY this (+ the AppProject)
+# Bookstore Applications (dev/staging/prod). Apply ONLY this (+ the AppProjects)
 # and Argo CD pulls the `apps/` directory from Git and creates/owns the child
 # Applications — which in turn sync the real kustomize overlays. One root to
 # rule them; the App-of-Apps pattern (Argo CD Up & Running, ch.10).
@@ -42,11 +42,14 @@ metadata:
     # (and, because the children prune, the workloads). Omit to keep children.
     - resources-finalizer.argocd.argoproj.io
 spec:
-  project: bookstore
+  # The root belongs to the `platform` project, the only one allowed to create
+  # Application objects. The children below run in `bookstore`.
+  project: platform
   source:
     repoURL: https://github.com/your-org/bookstore.git   # PLACEHOLDER — replace your-org
     targetRevision: main
     # The directory of child Application manifests (NOT a kustomize path).
+    # Whoever can commit here chooses every child's project. Protect it.
     path: examples/bookstore/argocd/apps
     directory:
       recurse: true        # apply every Application under apps/

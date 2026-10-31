@@ -1,0 +1,259 @@
+# Transcript for 07-delivery/04-gitops-argocd.md.
+# Tier A: kind cluster sf-pilot on Kubernetes v1.37, kubectl v1.37.2, Helm v4.1.4.
+# Run from full-guide/. The chapter prints namespace argocd; the lab used
+# p07-04-argocd. The AppProject file was copied with that namespace substituted.
+# Scratch directories are shortened to file names. Terminal colour codes are
+# removed. Nothing else is edited. The lab cluster and node names are shown as
+# recorded.
+# Order of events. Steps 1 and 2 need no cluster. Step 3 is the first install
+# attempt, and it failed. Steps 4 to 6 found the lab identity refused by the API
+# server, and then unreachable. Step 7 retried after access returned: the second
+# install succeeded and the checks in steps 8 to 10 ran. Step 11 removed what the
+# lab installed.
+## step 1: pin the chart (no cluster)
+$ helm show chart oci://ghcr.io/argoproj/argo-helm/argo-cd --version 10.11.6 2>&1 | grep -E "^(name|version|appVersion|description|kubeVersion):"
+appVersion: v3.5.6
+description: A Helm chart for Argo CD, a declarative, GitOps continuous delivery tool
+kubeVersion: '>=1.25.0-0'
+name: argo-cd
+version: 10.11.6
+$ helm show chart oci://ghcr.io/argoproj/argo-helm/argo-cd 2>&1 | grep -E "^version:"
+version: 10.11.6
+$ helm show values oci://ghcr.io/argoproj/argo-helm/argo-cd --version 10.11.6 > values.yaml 2>values.err; tail -2 values.err
+Pulled: ghcr.io/argoproj/argo-helm/argo-cd:10.11.6
+Digest: sha256:90f462a0695121f65a71cd053619f80023b4efef6bc211f750ffcaaa1628b5b6
+## step 2: render the chapter values (no cluster)
+$ helm template argocd oci://ghcr.io/argoproj/argo-helm/argo-cd --version 10.11.6 -n argocd -f argocd-values.yaml | grep -n -E '^  (url|admin.enabled):'
+233:  admin.enabled: "false"
+339:  url: https://argocd.example.com
+$ helm template argocd oci://ghcr.io/argoproj/argo-helm/argo-cd --version 10.11.6 -n argocd -f argocd-values.yaml | sed -n '/^kind: ClusterRole$/,/^---$/p' | sed -n '/^rules:/,$p' | head -10
+rules:
+  - apiGroups:
+    - '*'
+    resources:
+    - '*'
+    verbs:
+    - '*'
+  - nonResourceURLs:
+    - '*'
+    verbs:
+$ helm template argocd oci://ghcr.io/argoproj/argo-helm/argo-cd --version 10.11.6 -n argocd -f argocd-values.yaml | awk 'BEGIN{RS="\n---\n"} /\nkind: ClusterRole\n/ && /name: argocd-server\n/' | sed -n '/^rules:/,$p' | head -24
+rules:
+  - apiGroups:
+      - '*'
+    resources:
+      - '*'
+    verbs:
+      - delete  # supports deletion a live object in UI
+      - get     # supports viewing live object manifest in UI
+      - patch   # supports `argocd app patch`
+  - apiGroups:
+      - ""
+    resources:
+      - events
+    verbs:
+      - list    # supports listing events in UI
+      - create
+  - apiGroups:
+      - ""
+    resources:
+      - pods
+      - pods/log
+    verbs:
+      - get     # supports viewing pod logs from UI
+  - apiGroups:
+$ grep -n automated examples/bookstore/argocd/apps/*.yaml
+examples/bookstore/argocd/apps/bookstore-dev.yaml:42:    automated:
+examples/bookstore/argocd/apps/bookstore-prod.yaml:7:# reviews the diff and syncs prod (no automated sync; see syncPolicy below).
+examples/bookstore/argocd/apps/bookstore-prod.yaml:40:  # NO `automated` block, on purpose. Argo CD shows the drift and waits. A
+examples/bookstore/argocd/apps/bookstore-staging.yaml:35:    automated:
+$ kubectl kustomize examples/bookstore/kustomize/overlays/dev | grep -c '^kind:'
+45
+$ kubectl kustomize examples/bookstore/kustomize/overlays/staging | grep -c '^kind:'
+49
+$ kubectl kustomize examples/bookstore/kustomize/overlays/prod | grep -c '^kind:'
+48
+## step 3: create the lab namespace and start the install, first attempt (cluster)
+$ kubectl create namespace p07-04-argocd
+namespace/p07-04-argocd created
+$ kubectl label namespace p07-04-argocd pod-security.kubernetes.io/enforce=restricted pod-security.kubernetes.io/audit=restricted pod-security.kubernetes.io/warn=restricted
+namespace/p07-04-argocd labeled
+$ helm install argocd oci://ghcr.io/argoproj/argo-helm/argo-cd --version 10.11.6 -n p07-04-argocd -f argocd-values.yaml --wait --timeout 8m 2>&1 | tail -25
+Pulled: ghcr.io/argoproj/argo-helm/argo-cd:10.11.6
+Digest: sha256:90f462a0695121f65a71cd053619f80023b4efef6bc211f750ffcaaa1628b5b6
+Error: INSTALLATION FAILED: failed pre-install: resource Job/p07-04-argocd/argocd-redis-secret-init not ready. status: InProgress, message: Job in progress
+context deadline exceeded
+## step 4: read the failed install (cluster, about eight minutes later)
+$ kubectl -n p07-04-argocd get pods,jobs 2>&1 | tail -8
+Error from server (Forbidden): pods is forbidden: User "kubernetes-admin" cannot list resource "pods" in API group "" in the namespace "p07-04-argocd"
+Error from server (Forbidden): jobs.batch is forbidden: User "kubernetes-admin" cannot list resource "jobs" in API group "batch" in the namespace "p07-04-argocd"
+$ kubectl -n p07-04-argocd get events --sort-by=.lastTimestamp 2>&1 | tail -12 | cut -c1-240
+Error from server (Forbidden): events is forbidden: User "kubernetes-admin" cannot list resource "events" in API group "" in the namespace "p07-04-argocd"
+## step 5: check what this identity may do (cluster)
+$ kubectl auth can-i --list -n p07-04-argocd 2>&1 | head -5
+Error from server (Forbidden): selfsubjectrulesreviews.authorization.k8s.io is forbidden: User "kubernetes-admin" cannot create resource "selfsubjectrulesreviews" in API group "authorization.k8s.io" at the cluster scope
+$ kubectl auth can-i list pods -n default 2>&1
+Error from server (Forbidden): selfsubjectaccessreviews.authorization.k8s.io is forbidden: User "kubernetes-admin" cannot create resource "selfsubjectaccessreviews" in API group "authorization.k8s.io" at the cluster scope
+$ kubectl get ns --no-headers 2>&1 | head -3
+Error from server (Forbidden): namespaces is forbidden: User "kubernetes-admin" cannot list resource "namespaces" in API group "" at the cluster scope
+$ kubectl -n p07-04-argocd get all 2>&1 | head -5
+Error from server (Forbidden): pods is forbidden: User "kubernetes-admin" cannot list resource "pods" in API group "" in the namespace "p07-04-argocd"
+Error from server (Forbidden): replicationcontrollers is forbidden: User "kubernetes-admin" cannot list resource "replicationcontrollers" in API group "" in the namespace "p07-04-argocd"
+Error from server (Forbidden): services is forbidden: User "kubernetes-admin" cannot list resource "services" in API group "" in the namespace "p07-04-argocd"
+Error from server (Forbidden): daemonsets.apps is forbidden: User "kubernetes-admin" cannot list resource "daemonsets" in API group "apps" in the namespace "p07-04-argocd"
+Error from server (Forbidden): deployments.apps is forbidden: User "kubernetes-admin" cannot list resource "deployments" in API group "apps" in the namespace "p07-04-argocd"
+## step 6: retry the API server, refused then unreachable (cluster)
+$ kubectl get --raw /version 2>&1 | head -3
+Error from server (Forbidden): forbidden: User "kubernetes-admin" cannot get path "/version"
+$ kubectl get --raw /apis/argoproj.io/v1alpha1 2>&1 | head -2
+Error from server (Forbidden): forbidden: User "kubernetes-admin" cannot get path "/apis/argoproj.io/v1alpha1"
+$ kubectl get --raw /version 2>&1 | head -2
+Unable to connect to the server: net/http: TLS handshake timeout
+$ kubectl -n p07-04-argocd get pods 2>&1 | head -3
+Unable to connect to the server: EOF
+$ helm -n p07-04-argocd status argocd 2>&1 | head -4
+Error: kubernetes cluster unreachable: unknown
+$ kubectl get --raw /readyz 2>&1 | head -2
+Error from server (Forbidden): forbidden: User "kubernetes-admin" cannot get path "/readyz"
+## step 7: retry after access returned (cluster)
+$ kubectl get --raw /readyz 2>&1 | head -2
+ok
+$ kubectl get ns p07-04-argocd --no-headers 2>&1 | tail -1
+p07-04-argocd   Active   16m
+$ heavy_lock   # the heavy-install lock was taken again before any heavy step
+LOCK_ACQUIRED
+$ kubectl -n p07-04-argocd get pods,jobs 2>&1 | head -8
+NAME                                 READY   STATUS             RESTARTS      AGE
+pod/argocd-redis-secret-init-jzbwr   0/1     CrashLoopBackOff   5 (98s ago)   16m
+
+NAME                                 STATUS    COMPLETIONS   DURATION   AGE
+job.batch/argocd-redis-secret-init   Running   0/1           16m        16m
+$ kubectl -n p07-04-argocd get events --sort-by=.lastTimestamp 2>&1 | tail -8 | cut -c1-300
+16m         Normal    Scheduled          pod/argocd-redis-secret-init-jzbwr   Successfully assigned p07-04-argocd/argocd-redis-secret-init-jzbwr to sf-pilot-control-plane
+16m         Normal    SuccessfulCreate   job/argocd-redis-secret-init         Created pod: argocd-redis-secret-init-jzbwr
+16m         Normal    Pulling            pod/argocd-redis-secret-init-jzbwr   Pulling image "quay.io/argoproj/argocd:v3.5.6"
+10m         Normal    Pulled             pod/argocd-redis-secret-init-jzbwr   Successfully pulled image "quay.io/argoproj/argocd:v3.5.6" in 5m30.289s (5m30.289s including waiting). Image size: 221671924 bytes.
+3m29s       Normal    Pulled             pod/argocd-redis-secret-init-jzbwr   Container image "quay.io/argoproj/argocd:v3.5.6" already present on machine and can be accessed by the pod
+2m11s       Normal    Created            pod/argocd-redis-secret-init-jzbwr   Container created
+2m1s        Normal    Started            pod/argocd-redis-secret-init-jzbwr   Container started
+23s         Warning   BackOff            pod/argocd-redis-secret-init-jzbwr   Back-off restarting failed container secret-init in pod argocd-redis-secret-init-jzbwr_p07-04-argocd(bf9cb73c-0c85-4f53-859e-2f7241b8d53b)
+$ kubectl -n p07-04-argocd logs job/argocd-redis-secret-init --previous 2>&1 | tail -8 | cut -c1-300
+Checking for initial Redis password in secret p07-04-argocd/argocd-redis at key auth.
+{"level":"fatal","msg":"Post \"https://10.96.0.1:443/api/v1/namespaces/p07-04-argocd/secrets\": net/http: TLS handshake timeout","time":"2026-10-31T03:12:18Z"}
+$ kubectl -n p07-04-argocd describe pod argocd-redis-secret-init-jzbwr 2>&1 | grep -iE "state|reason|exit|message" | head -8 | cut -c1-260
+    State:          Waiting
+      Reason:       CrashLoopBackOff
+    Last State:     Terminated
+      Reason:       Error
+      Exit Code:    20
+  Type     Reason     Age                    From               Message
+$ helm -n p07-04-argocd uninstall argocd 2>&1 | tail -3
+[CustomResourceDefinition] appprojects.argoproj.io
+
+release "argocd" uninstalled
+$ kubectl -n p07-04-argocd get jobs,pods 2>&1 | tail -3
+NAME                                 READY   STATUS             RESTARTS     AGE
+pod/argocd-redis-secret-init-jzbwr   0/1     CrashLoopBackOff   5 (2m ago)   16m
+$ helm install argocd oci://ghcr.io/argoproj/argo-helm/argo-cd --version 10.11.6 -n p07-04-argocd -f argocd-values.yaml --wait --timeout 8m 2>&1 | tail -6
+2. enable ingress in the values file `server.ingress.enabled` and either
+      - Add the annotation for ssl passthrough: https://argo-cd.readthedocs.io/en/stable/operator-manual/ingress/#option-1-ssl-passthrough
+      - Set the `configs.params."server.insecure"` in the values file and terminate SSL at your ingress: https://argo-cd.readthedocs.io/en/stable/operator-manual/ingress/#option-2-multiple-ingress-objects-and-hosts
+
+
+After reaching the UI the first time you can login using Dex or OIDC.
+$ kubectl -n p07-04-argocd get pods 2>&1 | head -12
+NAME                                  READY   STATUS    RESTARTS        AGE
+argocd-application-controller-0       1/1     Running   0               5m12s
+argocd-redis-598cc56dc4-4q76k         1/1     Running   0               5m12s
+argocd-repo-server-59b65b86b9-68wlf   1/1     Running   0               5m12s
+argocd-server-7b4c5bdf58-b426h        1/1     Running   1 (3m20s ago)   5m12s
+## step 8: the admin account and the initial secret (cluster)
+$ kubectl -n p07-04-argocd get secret argocd-initial-admin-secret 2>&1 | head -2
+Error from server (NotFound): secrets "argocd-initial-admin-secret" not found
+$ kubectl -n p07-04-argocd get configmap argocd-cm -o jsonpath='{.data.admin\.enabled}{"\n"}' 2>&1 | head -2
+false
+## step 9: Argo RBAC decisions, from the cluster policy (cluster)
+$ kubectl -n p07-04-argocd exec deploy/argocd-server -- argocd admin settings rbac can role:bookstore-syncer sync applications bookstore/bookstore-prod --namespace p07-04-argocd 2>&1 | tail -3
+No
+command terminated with exit code 1
+$ kubectl -n p07-04-argocd exec deploy/argocd-server -- argocd admin settings rbac can role:bookstore-syncer sync applications bookstore/bookstore-dev --namespace p07-04-argocd 2>&1 | tail -3
+Yes
+$ kubectl -n p07-04-argocd exec deploy/argocd-server -- argocd admin settings rbac can role:bookstore-viewer sync applications bookstore/bookstore-dev --namespace p07-04-argocd 2>&1 | tail -3
+No
+command terminated with exit code 1
+## step 10: the AppProject fence and an out-of-scope Application (cluster)
+$ sed 's/namespace: argocd$/namespace: p07-04-argocd/' 00-appproject.yaml > appproject-lab.yaml; kubectl apply -n p07-04-argocd -f appproject-lab.yaml 2>&1
+Warning: metadata.finalizers: "resources-finalizer.argocd.argoproj.io": prefer a domain-qualified finalizer name including a path (/) to avoid accidental conflicts with other finalizer writers
+appproject.argoproj.io/platform created
+appproject.argoproj.io/bookstore created
+$ kubectl get appprojects -n p07-04-argocd 2>&1
+NAME        AGE
+bookstore   1s
+default     2m32s
+platform    1s
+$ kubectl apply -f probe.yaml 2>&1   # an Application in project bookstore, destination namespace kube-system
+application.argoproj.io/probe-out-of-scope created
+$ kubectl -n p07-04-argocd get application probe-out-of-scope -o jsonpath='{.status.conditions}{"\n"}' 2>&1 | cut -c1-500
+Error from server (Timeout): the server was unable to return a response in the time allotted, but may still be processing the request (get applications.argoproj.io probe-out-of-scope)
+$ kubectl -n p07-04-argocd get application probe-out-of-scope 2>&1 | tail -2
+NAME                 SYNC STATUS   HEALTH STATUS
+probe-out-of-scope   Unknown       Unknown
+$ kubectl -n p07-04-argocd get application probe-out-of-scope -o jsonpath='{.status.conditions}{"\n"}' 2>&1 | cut -c1-500
+Unable to connect to the server: EOF
+$ kubectl -n p07-04-argocd get application probe-out-of-scope -o jsonpath='{.status.conditions}{"\n"}' 2>&1 | cut -c1-500
+Error from server (Forbidden): applications.argoproj.io "probe-out-of-scope" is forbidden: User "kubernetes-admin" cannot get resource "applications" in API group "argoproj.io" in the namespace "p07-04-argocd"
+$ kubectl -n p07-04-argocd get application probe-out-of-scope 2>&1 | tail -1
+probe-out-of-scope   Unknown       Unknown
+$ kubectl -n p07-04-argocd get application probe-out-of-scope -o jsonpath='{.status.conditions}{"\n"}' 2>&1 | cut -c1-500   # bounded retry loop, first attempt answered
+[{"lastTransitionTime":"2026-10-31T03:21:39Z","message":"application destination server 'https://kubernetes.default.svc' and namespace 'kube-system' do not match any of the allowed destinations in project 'bookstore'","type":"InvalidSpecError"}]
+## step 11: remove what the lab installed (cluster)
+$ kubectl -n p07-04-argocd delete application probe-out-of-scope --timeout=60s 2>&1 | tail -1
+application.argoproj.io "probe-out-of-scope" deleted from p07-04-argocd namespace
+$ kubectl -n p07-04-argocd delete -f appproject-lab.yaml --timeout=60s 2>&1 | tail -2
+appproject.argoproj.io "bookstore" deleted from p07-04-argocd namespace
+error: timed out waiting for the condition on appprojects/platform
+$ helm -n p07-04-argocd uninstall argocd 2>&1 | tail -1
+release "argocd" uninstalled
+$ kubectl delete crd applications.argoproj.io appprojects.argoproj.io applicationsets.argoproj.io --timeout=120s 2>&1 | tail -3
+customresourcedefinition.apiextensions.k8s.io "appprojects.argoproj.io" deleted
+customresourcedefinition.apiextensions.k8s.io "applicationsets.argoproj.io" deleted
+error: timed out waiting for the condition on customresourcedefinitions/appprojects.argoproj.io
+$ kubectl delete namespace p07-04-argocd --timeout=180s 2>&1 | tail -1
+error: timed out waiting for the condition on namespaces/p07-04-argocd
+$ kubectl get ns p07-04-argocd 2>&1 | tail -1
+p07-04-argocd   Terminating   33m
+$ kubectl get crd 2>&1 | grep -c argoproj
+1
+$ kubectl get clusterrole 2>&1 | grep -c argocd
+0
+$ heavy_unlock   # the lock was released with the lab objects still terminating
+LOCK_RELEASED
+$ kubectl -n p07-04-argocd get appprojects -o name 2>&1 | tail -3
+appproject.argoproj.io/bookstore
+appproject.argoproj.io/platform
+$ kubectl -n p07-04-argocd patch appproject platform --type merge -p '{"metadata":{"finalizers":null}}' 2>&1 | tail -1
+appproject.argoproj.io/platform patched
+$ kubectl delete crd appprojects.argoproj.io applications.argoproj.io --timeout=120s 2>&1 | tail -2
+customresourcedefinition.apiextensions.k8s.io "appprojects.argoproj.io" deleted
+Error from server (NotFound): customresourcedefinitions.apiextensions.k8s.io "applications.argoproj.io" not found
+$ kubectl get crd 2>&1 | grep argoproj | tail -3
+appprojects.argoproj.io                        Namespaced   v1alpha1(storage)     2026-10-31T03:15:31Z
+$ kubectl get ns p07-04-argocd --no-headers 2>&1 | tail -1
+p07-04-argocd   Terminating   34m
+p07-04-argocd   Terminating   35m
+$ kubectl get appprojects -A -o custom-columns=NS:.metadata.namespace,NAME:.metadata.name,FIN:.metadata.finalizers 2>&1 | head -5
+NS              NAME        FIN
+p07-04-argocd   bookstore   [resources-finalizer.argocd.argoproj.io]
+$ kubectl -n p07-04-argocd patch appproject bookstore --type merge -p '{"metadata":{"finalizers":null}}' 2>&1 | tail -1
+appproject.argoproj.io/bookstore patched
+$ for i in 1 .. 6: kubectl get ns p07-04-argocd (sleep 10 between tries, stop when gone); then:
+NS_GONE
+$ kubectl get crd -o name 2>&1 | grep -c argoproj
+0
+$ kubectl get ns p07-04-argocd --no-headers 2>&1 | tail -1
+Error from server (NotFound): namespaces "p07-04-argocd" not found
+# Final state: the namespace, the Argo CRDs and the chart's ClusterRoles are gone.
+# Two AppProject finalizers were removed by hand, because the controller that
+# clears them was uninstalled first. Those objects were the lab's own.
+# The kind-level refusal (a ClusterRole or a Namespace rejected by the project)
+# was not run. It needs a Git source the lab did not have.
