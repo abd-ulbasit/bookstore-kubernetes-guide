@@ -11,11 +11,11 @@
 
 ## Why this exists
 
-Single-region production runs **until your region fails**. AWS us-east-1
-has had multi-hour outages within living memory; GCP us-central1 has had
-network partitions; Azure South Central US has had cooling failures. For a
-business that takes money, even a 4-hour single-region outage is direct
-revenue loss + customer-trust damage that takes a quarter to recover from.
+Single-region production runs **until your region fails**. Every major
+cloud publishes post-incident reports for regional outages, so treat a
+region as a failure domain. For a business that takes money, a
+single-region outage is direct revenue loss plus customer-trust damage
+that can take a quarter to recover from.
 
 Multi-region active-active is the **default** for production e-commerce
 for three reasons:
@@ -59,9 +59,10 @@ DNS routes by latency and shifts on health.**
   aware of does, without sacrificing consistency or write throughput).
   CloudNativePG does **one primary + N replicas, with streaming
   replication**: writes route to the primary's region; reads are local to
-  each region. On primary loss, promote a replica. The promotion is fast
-  (< 30 s if pre-warmed); the DNS update is slower (TTL-bounded). The
-  failover budget is "minutes", not "seconds" — be honest.
+  each region. On primary loss, promote a standby with an explicit change
+  to its cluster spec. The promotion is quick; the DNS update is slower
+  (TTL-bounded). The failover budget is "minutes", not "seconds" — be
+  honest.
 - **Active workload set differs slightly per region.** Storefront,
   catalog, orders, payments-gateway, events, recommendations all run
   active-active across the three regions. The async **payments-worker**
@@ -76,17 +77,30 @@ DNS routes by latency and shifts on health.**
   product.
 - **Split-brain is the failure mode to fear.** A network partition
   between regions where each side believes it is the writer is the
-  worst-case for any distributed data layer. CNPG's design avoids it
-  (only one primary is ever promoted; a partitioned replica cannot
-  promote itself without operator action). The trade-off: failover
-  requires explicit intent (CNPG's `cnpg promote`), not automatic
-  election. Worth it.
+  worst-case for any distributed data layer. CNPG's design avoids it:
+  a replica cluster becomes primary only when someone changes its
+  `spec.replica.primary`, so a partitioned region cannot promote itself.
+  The trade-off: failover needs explicit intent, not automatic election.
+  Worth it.
 
 The trap to keep in view: **"active-active" sounds like "writes go
 anywhere"**. They don't. Writes go to one region's primary; reads go
 local. Marketing the architecture as "five-9s writes everywhere" is a lie
 that will hurt at the first failover. Sell the truth: "<5 min reader
 failover, <10 min writer failover; writes are routed; reads are local".
+
+## Threats and controls
+
+| Threat | Control in this chapter | Deeper |
+|---|---|---|
+| A region outage takes the only writer with it | A standby in each other region, promoted by an explicit change | [Part 08 ch.02](../08-day-2-operations/02-backup-and-dr.md) |
+| A replication credential is stolen or reused | TLS client certificates with `verify-full`; no shared password; key pairs are copied, never written into a repo | [13.06](06-payments-and-event-sourcing.md) for how secrets reach the cluster |
+| The management Argo CD holds full rights in every region | Each cluster is registered with a narrow ServiceAccount, not the `argocd-manager` default | [13.01](01-bookstore-2-from-toy-to-platform.md) for platform roles, [13.12](12-day-2-runbook-on-call-dr-chaos.md) for break-glass |
+| Personal data leaves its residency region in a replica, backup, log or metric | Per-region buckets and sinks; only the Postgres stream crosses regions, and only where the design names it | [13.09](09-observability-otel-tempo-loki-prometheus-grafana.md), [13.10](10-cost-opencost-per-tenant-finops.md) |
+
+`argocd cluster add` gives the management Argo CD full cluster privileges
+unless you name a ServiceAccount. The CLI prints that warning before it
+writes ([source](https://github.com/argoproj/argo-cd/blob/master/cmd/argocd/commands/cluster.go)).
 
 ## Diagrams
 
@@ -107,7 +121,7 @@ flowchart TB
       us_ev["events"]
       us_pw["payments-worker<br/>(writer-only)"]
       us_rec["recommendations"]
-      us_pg[("CNPG PRIMARY<br/>postgres-bookstore-platform-1<br/>read+write")]
+      us_pg[("CNPG PRIMARY<br/>bookstore-platform-pg-us-east-1<br/>read+write")]
     end
 
     subgraph eu["region eu-west — READER"]
@@ -143,7 +157,7 @@ flowchart TB
     eu_ord -.->|cross-region write| us_pg
     ap_ord -.->|cross-region write| us_pg
 
-    note["On us-east failure: DNS health check removes us-east;<br/>cnpg promotes one standby (eu-west by RPO policy);<br/>payments-worker re-deploys in the new writer region.<br/>Failover budget: &lt;10 min for writers, &lt;5 min for readers."]
+    note["On us-east failure: DNS health check removes us-east;<br/>an operator sets spec.replica.primary on one standby (eu-west in the drill);<br/>payments-worker re-deploys in the new writer region.<br/>Failover target: &lt;10 min for writers, &lt;5 min for readers."]
     us_pg -.-> note
 ```
 
@@ -169,7 +183,7 @@ On us-east loss:
   CNPG -> promote eu-west standby; payments-worker re-deploys in eu-west.
   Argo CD management cluster -> ALSO need to re-target (either run a 2nd
   Argo CD in eu-west passive-active OR rebuild on eu-west from Git — the
-  chapter walks both options + their trade-offs in the DR drill).
+  Production notes walk both options + their trade-offs).
 ```
 
 ## Hands-on with the Bookstore Platform
@@ -179,24 +193,112 @@ This chapter assumes the three kind clusters from
 platform-base is applied in each. We add Argo CD on us-east, register all
 three, fan the platform-base via ApplicationSet, then walk the DR drill.
 
-### 1. Install Argo CD on the management cluster (us-east)
+The commands use the reader's names. The captured output came from one lab
+cluster with a different name, in namespaces prefixed `p13-03-`. The
+transcript in `full-guide/examples/security-lab/evidence/13-03.txt` records
+that substitution.
 
-Pinned-Helm, own namespace — the Part 07 ch.04 install pattern, the
-platform's delivery spine. Use the management context:
+### 1. Create the namespaces with Pod Security labels
+
+Pod Security levels are set on the namespace, so each namespace is created
+with its labels before anything installs into it. `restricted` is the level
+from the [baseline](../01-core-workloads/01-pods.md#baseline). The
+`bookstore-platform-system` namespace already carries these labels from
+platform-base in [13.01](01-bookstore-2-from-toy-to-platform.md).
+
+```sh
+for ctx in \
+  kind-bookstore-platform-us-east \
+  kind-bookstore-platform-eu-west \
+  kind-bookstore-platform-ap-southeast
+do
+  kubectl --context "$ctx" apply -f - <<'EOF'
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: argocd
+  labels:
+    pod-security.kubernetes.io/enforce: restricted
+    pod-security.kubernetes.io/enforce-version: latest
+    pod-security.kubernetes.io/audit: restricted
+    pod-security.kubernetes.io/audit-version: latest
+    pod-security.kubernetes.io/warn: restricted
+    pod-security.kubernetes.io/warn-version: latest
+---
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: cnpg-system
+  labels:
+    pod-security.kubernetes.io/enforce: restricted
+    pod-security.kubernetes.io/enforce-version: latest
+    pod-security.kubernetes.io/audit: restricted
+    pod-security.kubernetes.io/audit-version: latest
+    pod-security.kubernetes.io/warn: restricted
+    pod-security.kubernetes.io/warn-version: latest
+EOF
+done
+```
+
+Check that the label refuses what it should. This is a deliberate denial: the
+request asks for a privileged container, and the server refuses it. Nothing
+is created, because the request is a server-side dry run:
+
+```sh
+kubectl --context kind-bookstore-platform-us-east -n bookstore-platform-system \
+  run privileged-probe --image=bookstore/catalog:dev --privileged \
+  --dry-run=server --restart=Never
+```
+
+<!-- gate: output -->
+```text
+Error from server (Forbidden): pods "privileged-probe" is forbidden: violates PodSecurity "restricted:latest": privileged (container "privileged-probe" must not set securityContext.privileged=true), allowPrivilegeEscalation != false (container "privileged-probe" must set securityContext.allowPrivilegeEscalation=false), unrestricted capabilities (container "privileged-probe" must set securityContext.capabilities.drop=["ALL"]), runAsNonRoot != true (pod or container "privileged-probe" must set securityContext.runAsNonRoot=true), seccompProfile (pod or container "privileged-probe" must set securityContext.seccompProfile.type to "RuntimeDefault" or "Localhost")
+```
+
+### 2. Install Argo CD on the management cluster (us-east)
+
+Argo CD runs on us-east only. Pin the chart, keep the server on TLS, and
+dry-run the chart into the labelled namespace before the install. A
+PodSecurity warning in the output would name a template that breaks
+`restricted`:
 
 ```sh
 kubectl config use-context kind-bookstore-platform-us-east
 
-ARGOCD_CHART_VERSION="7.6.12"   # argo-helm/argo-cd chart; pinned
-
+ARGOCD_CHART_VERSION="10.11.6"   # argo-cd chart; ships Argo CD v3.5.6
 helm repo add argo https://argoproj.github.io/argo-helm
+
+helm template argocd argo/argo-cd --version "$ARGOCD_CHART_VERSION" \
+  -n argocd --include-crds \
+  | kubectl --context kind-bookstore-platform-us-east apply --server-side --dry-run=server -n argocd -f -
+```
+
+<!-- gate: output -->
+```text
+networkpolicy.networking.k8s.io/argocd-application-controller serverside-applied (server dry run)
+# ...
+deployment.apps/argocd-server serverside-applied (server dry run)
+# ...
+job.batch/argocd-redis-secret-init serverside-applied (server dry run)
+```
+
+The chart sets the pod and container security context on every workload it
+renders, so there is nothing to override. The full output has no `Warning:`
+line, and the excerpt above is the part that names the Argo CD workloads.
+Install it:
+
+```sh
 helm install argocd argo/argo-cd \
   --version "$ARGOCD_CHART_VERSION" \
-  -n argocd --create-namespace --wait \
-  --set 'global.podAnnotations.linkerd\.io/inject=enabled=null' \
-  --set 'configs.params."server\.insecure"=true'   # kind-local; remove for production
+  -n argocd --wait
+```
 
-# Login
+Log in through a port-forward. The server's certificate is self-signed on a
+lab cluster, so this first login skips verification with `--insecure`. On a
+real cluster, trust the certificate your ingress serves, and delete the
+initial admin secret once you have named users.
+
+```sh
 ARGOCD_PWD=$(kubectl -n argocd get secret argocd-initial-admin-secret \
   -o jsonpath='{.data.password}' | base64 -d)
 kubectl -n argocd port-forward svc/argocd-server 8080:443 >/dev/null 2>&1 &
@@ -204,24 +306,66 @@ sleep 3
 argocd login localhost:8080 --username admin --password "$ARGOCD_PWD" --insecure
 ```
 
-### 2. Register the three regional clusters with region labels
+### 3. Register the three regional clusters with narrow ServiceAccounts
 
-The Cluster generator selects on labels stamped on the cluster Secret
-Argo CD stores when you `cluster add`. Use the `--label` flag so the
-ApplicationSet template can read the region.
+`argocd cluster add` creates an `argocd-manager` ServiceAccount with full
+cluster privileges unless you pass `--service-account`. The CLI prints that
+warning and asks for confirmation before it writes. Create a ServiceAccount
+on each cluster and register with it instead:
+
+```sh
+for ctx in \
+  kind-bookstore-platform-us-east \
+  kind-bookstore-platform-eu-west \
+  kind-bookstore-platform-ap-southeast
+do
+  kubectl --context "$ctx" apply -f - <<'EOF'
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: argocd-platform-sync
+  namespace: bookstore-platform-system
+automountServiceAccountToken: false
+---
+apiVersion: v1
+kind: Secret
+metadata:
+  name: argocd-platform-sync-token
+  namespace: bookstore-platform-system
+  annotations:
+    kubernetes.io/service-account.name: argocd-platform-sync
+type: kubernetes.io/service-account-token
+EOF
+done
+```
+
+Bind `argocd-platform-sync` to a ClusterRole written from the kinds
+platform-base applies (the manifests in the example tree list them), with no
+wildcard verbs and no right to create role bindings. The token Secret is
+long-lived, because Argo CD keeps the bearer token in its cluster Secret.
+That is why the `argocd` namespace and those cluster Secrets belong under the
+break-glass process in [13.12](12-day-2-runbook-on-call-dr-chaos.md).
+
+The Argo CD cluster registration uses the ServiceAccount's token:
 
 ```sh
 argocd cluster add kind-bookstore-platform-us-east \
+  --service-account argocd-platform-sync \
+  --system-namespace bookstore-platform-system \
   --label bookstore-platform.example.com/region=us-east \
   --label bookstore-platform.example.com/role=writer \
   --yes
 
 argocd cluster add kind-bookstore-platform-eu-west \
+  --service-account argocd-platform-sync \
+  --system-namespace bookstore-platform-system \
   --label bookstore-platform.example.com/region=eu-west \
   --label bookstore-platform.example.com/role=reader \
   --yes
 
 argocd cluster add kind-bookstore-platform-ap-southeast \
+  --service-account argocd-platform-sync \
+  --system-namespace bookstore-platform-system \
   --label bookstore-platform.example.com/region=ap-southeast \
   --label bookstore-platform.example.com/role=reader \
   --yes
@@ -229,27 +373,32 @@ argocd cluster add kind-bookstore-platform-ap-southeast \
 argocd cluster list
 ```
 
+The Cluster generator selects on the labels stamped on each cluster Secret
+that Argo CD stores, so the `--label` flags are what the ApplicationSet
+template reads.
+
 > Note: on kind the cluster API endpoints are `https://127.0.0.1:<PORT>`,
 > which Argo CD running inside the us-east cluster cannot reach directly.
 > Use the `host.docker.internal` workaround documented in
 > [Part 11 ch.06](../11-advanced-production-patterns/06-multi-cluster-and-fleet.md);
 > on real EKS/GKE/AKS the cloud-internal API endpoint resolves naturally.
 
-### 3. Apply the root ApplicationSet
+### 4. Apply the root ApplicationSet
 
 ```sh
 kubectl apply -f examples/bookstore-platform/argocd/applicationset-platform.yaml
 ```
 
 Within seconds the ApplicationSet's Cluster generator enumerates the three
-labelled clusters and creates three Applications:
+labelled clusters and creates three Applications. Illustrative output, not
+captured:
 
-```sh
+```text
 kubectl -n argocd get applications
-# NAME                              SYNC STATUS   HEALTH STATUS
-# platform-base-us-east             Synced        Healthy
-# platform-base-eu-west             Synced        Healthy
-# platform-base-ap-southeast        Synced        Healthy
+NAME                              SYNC STATUS   HEALTH STATUS
+platform-base-us-east             Synced        Healthy
+platform-base-eu-west             Synced        Healthy
+platform-base-ap-southeast        Synced        Healthy
 ```
 
 Each Application points at its region's overlay
@@ -262,20 +411,41 @@ the 13 cluster-wide platform-base objects into the matching cluster.
 > (4 GB+ per cluster). Real cloud equivalent: 3 worker nodes per region,
 > one per AZ.
 
-### 4. Install CloudNativePG and create the multi-region CNPG cluster
+### 5. Install the CloudNativePG operator in each region
 
 The CNPG operator pattern was introduced for the v1 Bookstore in
 [Part 08 ch.05](../08-day-2-operations/05-operators-and-crds.md). Here we
-extend it to cross-region replication. Install the operator into every
-region — the operator is per-cluster and reconciles only its own region's
-CNPG CRs.
+extend it to cross-region replication. The operator is per-cluster and
+reconciles only its own region's CNPG resources.
+
+Dry-run the chart into the labelled namespace first. The operator's pod
+sets `runAsNonRoot`, the `RuntimeDefault` seccomp profile, a read-only root
+filesystem and no capabilities. The dry run checks the chart's templates
+against `restricted` before anything is installed:
 
 ```sh
-CNPG_CHART_VERSION="0.22.1"
-
+CNPG_CHART_VERSION="0.29.1"   # CloudNativePG chart; ships operator 1.30.1
 helm repo add cnpg https://cloudnative-pg.github.io/charts
 helm repo update
 
+helm template cnpg cnpg/cloudnative-pg --version "$CNPG_CHART_VERSION" \
+  -n cnpg-system --include-crds \
+  | kubectl --context kind-bookstore-platform-us-east apply --server-side --dry-run=server -n cnpg-system -f -
+```
+
+<!-- gate: output -->
+```text
+# ...
+customresourcedefinition.apiextensions.k8s.io/clusters.postgresql.cnpg.io serverside-applied (server dry run)
+# ...
+deployment.apps/cnpg-cloudnative-pg serverside-applied (server dry run)
+# ...
+validatingwebhookconfiguration.admissionregistration.k8s.io/cnpg-validating-webhook-configuration serverside-applied (server dry run)
+```
+
+Then install it in every region:
+
+```sh
 for ctx in \
   kind-bookstore-platform-us-east \
   kind-bookstore-platform-eu-west \
@@ -284,18 +454,42 @@ do
   helm --kube-context "$ctx" install cnpg \
     cnpg/cloudnative-pg \
     --version "$CNPG_CHART_VERSION" \
-    -n cnpg-system --create-namespace --wait
+    -n cnpg-system --wait
 done
 ```
 
-Create the primary CNPG Cluster in us-east:
+### 6. Create the CNPG Clusters across regions
+
+The writer is `bookstore-platform-pg-us-east`, and the two standbys replicate
+from it. Each Cluster lists all three clusters in `externalClusters`, its own
+included, as the CNPG distributed-topology example does. Any standby can
+then become the writer later without a new manifest.
+
+Streaming replication runs over TLS client certificates. CNPG creates a
+`-replication` key pair and a `-ca` certificate for each Cluster. Copy the
+six Secrets for the three clusters into each `bookstore-platform-system`
+namespace before the Clusters start. They hold private keys, so move them
+with the secret tooling from [13.06](06-payments-and-event-sourcing.md),
+not by pasting them into a file.
+
+CNPG sets the pod and container security context itself, so these manifests
+leave `securityContext` to the operator. The baseline's
+`automountServiceAccountToken: false` has no field on a Cluster in this
+operator release; the field exists only on Pooler. The baseline's exception
+applies: the instance manager calls the Kubernetes API, and CNPG gives each
+Cluster its own ServiceAccount.
+
+The lab has one cluster and no CNPG CRDs, so it cannot apply these manifests.
+Its check validates both against the chart's CRD schema, offline.
+
+The writer:
 
 ```sh
-kubectl --context kind-bookstore-platform-us-east apply -f - <<EOF
+kubectl --context kind-bookstore-platform-us-east apply -f - <<'EOF'
 apiVersion: postgresql.cnpg.io/v1
 kind: Cluster
 metadata:
-  name: bookstore-platform-pg
+  name: bookstore-platform-pg-us-east
   namespace: bookstore-platform-system
 spec:
   instances: 2
@@ -305,28 +499,68 @@ spec:
     initdb:
       database: bookstore
       owner: bookstore
-  # Self-contained backup config — production points S3 / GCS / Azure Blob.
-  backup:
-    barmanObjectStore:
-      destinationPath: "s3://bookstore-platform-pg-backups/us-east"
-      s3Credentials:
-        accessKeyId: { name: pg-backup-creds, key: ACCESS_KEY_ID }
-        secretAccessKey: { name: pg-backup-creds, key: SECRET_ACCESS_KEY }
-      wal:
-        compression: gzip
+  replica:
+    primary: bookstore-platform-pg-us-east
+    source: bookstore-platform-pg-eu-west
+  externalClusters:
+    - name: bookstore-platform-pg-us-east
+      connectionParameters:
+        host: pg-us-east.bookstore-platform.example.com
+        user: streaming_replica
+        dbname: postgres
+        sslmode: verify-full
+      sslKey:
+        name: bookstore-platform-pg-us-east-replication
+        key: tls.key
+      sslCert:
+        name: bookstore-platform-pg-us-east-replication
+        key: tls.crt
+      sslRootCert:
+        name: bookstore-platform-pg-us-east-ca
+        key: ca.crt
+    - name: bookstore-platform-pg-eu-west
+      connectionParameters:
+        host: pg-eu-west.bookstore-platform.example.com
+        user: streaming_replica
+        dbname: postgres
+        sslmode: verify-full
+      sslKey:
+        name: bookstore-platform-pg-eu-west-replication
+        key: tls.key
+      sslCert:
+        name: bookstore-platform-pg-eu-west-replication
+        key: tls.crt
+      sslRootCert:
+        name: bookstore-platform-pg-eu-west-ca
+        key: ca.crt
+    - name: bookstore-platform-pg-ap-southeast
+      connectionParameters:
+        host: pg-ap-southeast.bookstore-platform.example.com
+        user: streaming_replica
+        dbname: postgres
+        sslmode: verify-full
+      sslKey:
+        name: bookstore-platform-pg-ap-southeast-replication
+        key: tls.key
+      sslCert:
+        name: bookstore-platform-pg-ap-southeast-replication
+        key: tls.crt
+      sslRootCert:
+        name: bookstore-platform-pg-ap-southeast-ca
+        key: ca.crt
 EOF
 ```
 
-Create the standby CNPG `Cluster`s in the other two regions, pointing at
-the primary via the recovery bootstrap:
+The standbys, from the same template with their own name and a
+`pg_basebackup` bootstrap from the writer:
 
 ```sh
-for ctx in kind-bookstore-platform-eu-west kind-bookstore-platform-ap-southeast; do
-  kubectl --context "$ctx" apply -f - <<EOF
+for region in eu-west ap-southeast; do
+  kubectl --context "kind-bookstore-platform-$region" apply -f - <<EOF
 apiVersion: postgresql.cnpg.io/v1
 kind: Cluster
 metadata:
-  name: bookstore-platform-pg
+  name: bookstore-platform-pg-$region
   namespace: bookstore-platform-system
 spec:
   instances: 2
@@ -334,117 +568,145 @@ spec:
     size: 5Gi
   bootstrap:
     pg_basebackup:
-      source: bookstore-platform-pg-source
+      source: bookstore-platform-pg-us-east
   replica:
-    enabled: true
-    source: bookstore-platform-pg-source
+    primary: bookstore-platform-pg-us-east
+    source: bookstore-platform-pg-us-east
   externalClusters:
-    - name: bookstore-platform-pg-source
+    - name: bookstore-platform-pg-us-east
       connectionParameters:
-        host: bookstore-platform-pg-rw.us-east.bookstore-platform.example.com
+        host: pg-us-east.bookstore-platform.example.com
         user: streaming_replica
-        dbname: bookstore
-        sslmode: require
-      password:
-        name: pg-replication-creds
-        key: PASSWORD
+        dbname: postgres
+        sslmode: verify-full
+      sslKey:
+        name: bookstore-platform-pg-us-east-replication
+        key: tls.key
+      sslCert:
+        name: bookstore-platform-pg-us-east-replication
+        key: tls.crt
+      sslRootCert:
+        name: bookstore-platform-pg-us-east-ca
+        key: ca.crt
+    - name: bookstore-platform-pg-eu-west
+      connectionParameters:
+        host: pg-eu-west.bookstore-platform.example.com
+        user: streaming_replica
+        dbname: postgres
+        sslmode: verify-full
+      sslKey:
+        name: bookstore-platform-pg-eu-west-replication
+        key: tls.key
+      sslCert:
+        name: bookstore-platform-pg-eu-west-replication
+        key: tls.crt
+      sslRootCert:
+        name: bookstore-platform-pg-eu-west-ca
+        key: ca.crt
+    - name: bookstore-platform-pg-ap-southeast
+      connectionParameters:
+        host: pg-ap-southeast.bookstore-platform.example.com
+        user: streaming_replica
+        dbname: postgres
+        sslmode: verify-full
+      sslKey:
+        name: bookstore-platform-pg-ap-southeast-replication
+        key: tls.key
+      sslCert:
+        name: bookstore-platform-pg-ap-southeast-replication
+        key: tls.crt
+      sslRootCert:
+        name: bookstore-platform-pg-ap-southeast-ca
+        key: ca.crt
 EOF
 done
 ```
 
-> **In production:** the `externalClusters.host` above is the DNS name
-> that points at the primary's CNPG read-write service. On real cloud the
-> cross-region path goes through a VPC peering + a Service of type
-> `LoadBalancer` with an internal-LB annotation, or a Transit Gateway. On
-> kind the cross-region path is not actually wired; the standby Cluster
-> manifest applies cleanly and shows the SHAPE of cross-region
-> replication, but real `pg_basebackup` across kind clusters needs extra
-> network bridging. The DR drill in §6 below works without real
-> replication wiring.
+The host names are placeholders. With `verify-full`, each host must appear in
+that cluster's server certificate, so the endpoint you expose across regions
+has to be a name that certificate covers. The
+[CNPG replica cluster docs](https://cloudnative-pg.io/documentation/current/replica_cluster/)
+describe the topology.
 
-### 5. Verify the multi-region topology
+### 7. Verify the topology
 
-```sh
-for ctx in \
-  kind-bookstore-platform-us-east \
-  kind-bookstore-platform-eu-west \
-  kind-bookstore-platform-ap-southeast
-do
-  echo "=== $ctx ==="
-  kubectl --context "$ctx" get cluster -n bookstore-platform-system
-done
-# === kind-bookstore-platform-us-east ===
-# NAME                    AGE   INSTANCES   READY   STATUS                     PRIMARY
-# bookstore-platform-pg   1m    2           2       Cluster in healthy state   bookstore-platform-pg-1
-# === kind-bookstore-platform-eu-west ===
-# (standby; INSTANCES 2; PRIMARY shows the local replica's pod name; cross-region wiring varies)
-# === kind-bookstore-platform-ap-southeast ===
-# (standby; INSTANCES 2)
+Illustrative output, not captured:
+
+```text
+=== kind-bookstore-platform-us-east ===
+NAME                            AGE   INSTANCES   READY   STATUS                     PRIMARY
+bookstore-platform-pg-us-east   1m    2           2       Cluster in healthy state   bookstore-platform-pg-us-east-1
+=== kind-bookstore-platform-eu-west ===
+NAME                            AGE   INSTANCES   READY   STATUS                     PRIMARY
+bookstore-platform-pg-eu-west   1m    2           2       Cluster in healthy state   bookstore-platform-pg-us-east-1
 ```
 
-### 6. The DR drill — promote a standby, redirect DNS
+On the standbys, `PRIMARY` names the writer's instance, not a local one. The
+exact status text depends on the replication link, which kind does not wire
+across clusters.
 
-This is the real exercise. Kind makes it cheap: kill the writer cluster
-and watch the failover.
+### 8. The DR drill: promote a standby, move the writes
+
+This is the real exercise. Kind makes the region loss cheap, and the
+promotion is the same declarative change a cloud run makes. Promotion is not
+automatic: you name the new primary. Without a `promotionToken`, the change is
+a failover, so the old writer must be rebuilt before it can rejoin.
 
 ```sh
-# 1) Note the current state.
-kubectl --context kind-bookstore-platform-us-east \
-  get cluster bookstore-platform-pg -n bookstore-platform-system
-# bookstore-platform-pg ... healthy ... PRIMARY: bookstore-platform-pg-1
+# 1) Note the current primary as eu-west sees it.
+kubectl --context kind-bookstore-platform-eu-west -n bookstore-platform-system \
+  get cluster bookstore-platform-pg-eu-west \
+  -o jsonpath='{.spec.replica.primary}{"\n"}'
 
-# 2) Region failure simulation: kill the writer cluster.
+# 2) Region loss: delete the writer's kind cluster.
 kind delete cluster --name bookstore-platform-us-east
 
-# 3) Promote the eu-west standby (the chapter's promotion-policy choice is
-#    "eu-west first by RPO"; ap-southeast is the next failover candidate).
-#    Uses the kubectl-cnpg plugin (install via `kubectl krew install cnpg`
-#    or download from the CNPG releases page; pinned-Helm chart users may
-#    also get it as part of the chart).
-kubectl cnpg promote bookstore-platform-pg -n bookstore-platform-system \
-  --context kind-bookstore-platform-eu-west
+# 3) Promote eu-west by naming it the primary. No promotionToken, so this is a failover.
+kubectl --context kind-bookstore-platform-eu-west -n bookstore-platform-system \
+  patch cluster bookstore-platform-pg-eu-west --type merge \
+  -p '{"spec":{"replica":{"primary":"bookstore-platform-pg-eu-west"}}}'
 
-# Verify eu-west is now writable:
-kubectl --context kind-bookstore-platform-eu-west \
-  get cluster bookstore-platform-pg -n bookstore-platform-system
-# bookstore-platform-pg ... healthy ... PRIMARY: bookstore-platform-pg-1 (in eu-west)
-
-# 4) Redirect DNS. On real cloud: external-dns annotation flip + Route53
-#    health-check toggles. On kind: /etc/hosts edit (the demo equivalent).
-echo "127.0.0.1 us-east.bookstore-platform.example.com eu-west.bookstore-platform.example.com" \
-  | sudo tee -a /etc/hosts
-# (And actually point us-east.* at the eu-west cluster's gateway IP.)
-
-# 5) The payments-worker has to re-deploy in eu-west (it ran writer-only).
-#    The ApplicationSet's region overlay handles this if the writer-tag
-#    selector flips automatically; the chapter's overlay (Phase 13a base)
-#    does NOT yet have a writer-only payments-worker — Phase 13b ch.13.06
-#    adds it and the overlay update.
+# 4) Point the remaining standby at the new primary.
+kubectl --context kind-bookstore-platform-ap-southeast -n bookstore-platform-system \
+  patch cluster bookstore-platform-pg-ap-southeast --type merge \
+  -p '{"spec":{"replica":{"primary":"bookstore-platform-pg-eu-west","source":"bookstore-platform-pg-eu-west"}}}'
 ```
 
-Walk-through of the failover budget honestly:
+`kubectl cnpg promote CLUSTER INSTANCE` moves the primary instance inside one
+cluster. It does not move a region, so it is the wrong tool for this drill.
 
-| Step | Local cost | Real-cloud cost | Requires human? |
-|------|------------|-----------------|-----------------|
+Then move the write endpoint to eu-west. On kind that is an `/etc/hosts` line
+you edit by hand. On a cloud it is a DNS record change with a short TTL.
+
+The payments-worker is writer-only. The base overlay in this chapter does not
+yet include a writer-only payments-worker, so the move is manual here.
+[13.06](06-payments-and-event-sourcing.md) covers the outbox that makes the
+move safe.
+
+Walk-through of the failover budget. These are design targets, not measured
+on the lab:
+
+| Step | Local cost | Real-cloud target | Requires human? |
+|------|------------|-------------------|-----------------|
 | Detect failure | seconds (Argo CD health) | seconds (DNS health check) | No |
-| Promote standby | seconds (`cnpg promote`) | ~30 s | No (Cluster API auto + watchdog) — but practically Yes (page) |
+| Promote standby | seconds (patch) | ~30 s | No (Cluster API auto + watchdog) — but practically Yes (page) |
 | DNS propagate | n/a | 60 - 300 s (TTL) | No |
 | Workloads re-deploy | n/a | seconds (already running) | No |
 | Payments-worker re-locate | seconds (kind) | minutes (image pull on the new writer region) | No |
 | **Total — readers** | <30 s | <5 min | No |
 | **Total — writers** | <30 s | <10 min | Yes — page; promotion is irreversible without rebuild |
 
-### 7. Verify v1 invariants still hold
+### 9. Verify v1 invariants still hold
 
 ```sh
 helm lint examples/bookstore/helm/bookstore | tail -2
 helm template examples/bookstore/helm/bookstore \
-  | kubectl apply --dry-run=client -f - | grep -cE '(configured|created)'   # 49
-kubectl kustomize examples/bookstore/kustomize/overlays/dev | grep -c '^kind:'  # 45
+  | kubectl apply --dry-run=client -f - | grep -cE '(configured|created)'
+kubectl kustomize examples/bookstore/kustomize/overlays/dev | grep -c '^kind:'
 ```
 
-Still 49 / 45 / 49 / 48. v2's multi-region build does not touch the v1
-tree.
+The chart renders 49 objects and the dev overlay 45. v2's multi-region build
+does not touch the v1 tree.
 
 ## How it works under the hood
 
@@ -452,54 +714,52 @@ tree.
 watches `ApplicationSet` objects and renders them into a list of
 `Application` objects. The Cluster generator enumerates **cluster Secrets**
 in argocd's namespace (each `argocd cluster add` writes one) and surfaces
-their labels into the template. The label selector + the template's value
-substitution (`{{ .name }}`, `{{ .values.region }}`) does the rest. When a
-new cluster is added with the matching label, a new Application appears
-within seconds; remove the label, the Application is pruned. No
-copy-paste; Git stays the single source of truth.
+their labels into the template. Each of those Secrets also holds the bearer
+token for its cluster, which is why step 3 registers with a narrow
+ServiceAccount. The label selector + the template's value substitution
+(`{{ .name }}`, `{{ .values.region }}`) does the rest. When a new cluster is
+added with the matching label, a new Application appears within seconds;
+remove the label, the Application is pruned. No copy-paste; Git stays the
+single source of truth.
 
 **CNPG cross-region replication — physical streaming vs logical.** CNPG
 uses **physical streaming replication** (Postgres's built-in
-`pg_basebackup` + WAL streaming). The standby keeps an exact byte-level
-copy of the primary's data files; replication lag is measured in WAL
-bytes streamed but not yet applied (typically << 1 s on a healthy LAN; can
-spike to many MB across a real cross-region link). **Logical
+`pg_basebackup` + WAL streaming). The standby keeps a byte-level copy of the
+primary's data files. Its lag is the WAL it has not yet applied, and that lag
+grows with the link; asynchronous streaming does not bound it. **Logical
 replication** (Postgres's pgoutput plugin, used by Debezium) is what the
-search-index CDC in 13.05 uses; it ships row changes, not WAL bytes — a
-different mechanism for a different purpose. CNPG supports both; the
-replica `Cluster` above uses physical via `pg_basebackup`.
+search-index CDC in [13.05](05-search-and-product-discovery.md) uses; it
+ships row changes, not WAL bytes — a different mechanism for a different
+purpose. CNPG supports both; the replica `Cluster` above uses physical via
+`pg_basebackup`.
 
 **Split-brain — the failure mode CNPG avoids by construction.** A
 multi-master Postgres setup (BDR, BiDirectional Replication) does
 multi-region writes — and pays for it with conflict resolution that is
 either application-level (you write the merge) or "last write wins"
 (stale data wins ties). CNPG declines that trade: there is exactly one
-primary, and promoting a standby requires an explicit human (or
-operator-guarded automation) call to `cnpg promote`. A network partition
-where eu-west cannot see us-east cannot promote itself unilaterally; the
-operator's guardrail is "don't promote if you cannot confirm the primary
-is gone". The trade: more human intent on failover, no split-brain risk
-on healthy replication.
+primary, and a standby becomes primary only when someone changes
+`spec.replica.primary`. A network partition where eu-west cannot see us-east
+cannot promote itself unilaterally. The trade: more human intent on failover,
+and no split-brain from a partition that merely looks like an outage.
 
-**DNS-based failover latency budget.** Three numbers compound:
+**DNS-based failover latency budget.** Three things compound:
 
 1. **Detection time** — how long before the health check decides us-east
-   is down. Route53 health checks default to ~30 s; tuneable to ~10 s at
-   higher cost.
+   is down. Route53 health checks poll every 30 seconds by default, or
+   every 10 seconds with the fast interval, at higher cost.
 2. **TTL propagation** — clients only re-query when their cached TTL
-   expires. Production TTL is typically 60 s for DNS records that need
-   fast failover; lower TTL = more query load = more cost. The
-   distribution of "client refresh" is geometric; budget the 99th
-   percentile.
-3. **Resolver caching** — many corporate / ISP resolvers cap TTL at
-   higher minima than the record specifies (forced 5 - 15 min caching in
-   some networks). That is the "long tail" you cannot control.
+   expires. A short TTL on the records that need fast failover cuts the
+   wait, and raises query load and cost. The distribution of "client
+   refresh" is spread out; budget the 99th percentile.
+3. **Resolver caching** — many corporate and ISP resolvers hold answers
+   longer than the record's TTL. That tail is set by resolvers you do not
+   control.
 
-The honest total: TTL + detection + a long-tail of "users on broken
-resolvers" — 5 minutes for most users, 15 - 30 minutes for the long
-tail. The platform should design for "users see a stale region during
-the failover window"; the alternative is per-request health checking at
-the client, which costs more than it saves at e-commerce scale.
+The honest total is the sum of detection, TTL and that resolver tail. The
+platform should design for "some users see the old region during the
+failover window"; the alternative is per-request health checking at the
+client, which costs more than it saves at e-commerce scale.
 
 ## Production notes
 
@@ -508,30 +768,28 @@ the client, which costs more than it saves at e-commerce scale.
 > tools that have changed, the on-call rotation is different, the
 > failover automation has bit-rotted. The fix is to **run the drill in
 > production, with traffic, on the staging environment, every month**.
-> The 30-minute scripted drill (forward ref — Phase 13c chapter 13.12, not
-> yet authored) is the deliverable.
+> The scripted drill is the deliverable of
+> [13.12](12-day-2-runbook-on-call-dr-chaos.md).
 
 > **In production:** **Cross-region S3 replication is asynchronous.**
-> An asset uploaded to the us-east bucket appears in eu-west / ap-
-> southeast within seconds to minutes (S3 SLA: typical 15 minutes; 99th
-> percentile longer). Do not assume "I uploaded the cover image; the
-> ap-southeast storefront can show it". Either serve assets from a
-> regional bucket per region (origin-shielded CDN in front), or accept
-> that for the first ~15 minutes after upload the asset may 404 in the
-> far region. The Stripe webhook flow in 13.06 covers this for events;
-> for static assets it is a CDN + cache-bust pattern, not a Postgres
-> pattern.
+> An asset uploaded to the us-east bucket can be missing in eu-west or
+> ap-southeast for a while after the upload, and plain replication gives no
+> fixed bound on that delay. Either serve assets from a regional bucket per
+> region (origin-shielded CDN in front), or accept a short 404 window in the
+> far region. The Stripe webhook flow in
+> [13.06](06-payments-and-event-sourcing.md) covers events; for static
+> assets it is a CDN + cache-bust pattern, not a Postgres pattern.
 
 > **In production:** **Don't trust last-minute writes during a regional
 > outage.** A user who pressed "buy" 200 ms before us-east lost network
 > may or may not have a row in Postgres — the WAL may have streamed to
 > eu-west or may have been on the wire. Reconciliation has to be
-> explicit: the **outbox pattern** (13.06 — Phase 13b) keeps the event
-> intent in Postgres alongside the order row, in a single transaction.
-> If the order row exists, the outbox row exists; if eu-west has the
-> order, eu-west has the outbox. The publisher worker replays anything
-> not yet shipped to Kafka after the failover. The combination is the
-> "every order is durably accounted for, eventually" guarantee.
+> explicit: the **outbox pattern** ([13.06](06-payments-and-event-sourcing.md))
+> keeps the event intent in Postgres alongside the order row, in a single
+> transaction. If the order row exists, the outbox row exists; if eu-west
+> has the order, eu-west has the outbox. The publisher worker replays
+> anything not yet shipped to Kafka after the failover. The combination is
+> the "every order is durably accounted for, eventually" guarantee.
 
 > **In production:** **Argo CD itself is a single point of failure.** If
 > the management cluster goes down with us-east, no new GitOps changes
@@ -546,17 +804,7 @@ the client, which costs more than it saves at e-commerce scale.
 >    minutes. Cost: a few minutes of "no reconciliation" during failover.
 >
 > The platform v2 ships pattern (2) for simplicity; pattern (1) is the
-> mature production answer at scale. The DR drill in Phase 13c rehearses
-> pattern (2).
-
-> **In production:** **Regional data residency requires more than
-> "deploy in region X"**. GDPR / DPDP compliance means the data stays in
-> that region — including replicas + backups + log streams + telemetry +
-> any analytics derived from the data. A naive multi-region setup where
-> "all logs ship to us-east" is non-compliant. The platform-team-owned
-> design has to be explicit about every data flow that leaves the region
-> of origin. This chapter does not solve it; 13.09 and 13.10's
-> observability + cost flows have to respect the same boundary.
+> mature production answer at scale.
 
 ## Quick Reference
 
@@ -564,17 +812,18 @@ the client, which costs more than it saves at e-commerce scale.
 # Spin up three regions (from 13.01)
 ./examples/bookstore-platform/clusters/kind-3-region.sh
 
-# Install Argo CD on us-east (management)
-ARGOCD_CHART_VERSION="7.6.12"
+# Argo CD on us-east (management), dry-run first, then install
+ARGOCD_CHART_VERSION="10.11.6"
 helm repo add argo https://argoproj.github.io/argo-helm
 helm --kube-context kind-bookstore-platform-us-east install argocd argo/argo-cd \
-  --version "$ARGOCD_CHART_VERSION" \
-  -n argocd --create-namespace --wait
+  --version "$ARGOCD_CHART_VERSION" -n argocd --wait
 
-# Register all three clusters with region labels
+# Register all three clusters with a narrow ServiceAccount and region labels
 for region in us-east eu-west ap-southeast; do
   role=$( [ "$region" = "us-east" ] && echo writer || echo reader )
   argocd cluster add "kind-bookstore-platform-$region" \
+    --service-account argocd-platform-sync \
+    --system-namespace bookstore-platform-system \
     --label "bookstore-platform.example.com/region=$region" \
     --label "bookstore-platform.example.com/role=$role" --yes
 done
@@ -584,79 +833,35 @@ kubectl apply -f examples/bookstore-platform/argocd/applicationset-platform.yaml
 kubectl -n argocd get applications
 
 # Install CNPG into each region
-CNPG_CHART_VERSION="0.22.1"
+CNPG_CHART_VERSION="0.29.1"
 helm repo add cnpg https://cloudnative-pg.github.io/charts
 helm repo update
 for ctx in kind-bookstore-platform-{us-east,eu-west,ap-southeast}; do
   helm --kube-context "$ctx" install cnpg cnpg/cloudnative-pg \
-    --version "$CNPG_CHART_VERSION" \
-    -n cnpg-system --create-namespace --wait
+    --version "$CNPG_CHART_VERSION" -n cnpg-system --wait
 done
 
-# DR drill (kind)
+# DR drill (kind): simulate region loss, then promote eu-west (failover)
 kind delete cluster --name bookstore-platform-us-east
-# Requires the kubectl-cnpg plugin (`kubectl krew install cnpg`).
-kubectl cnpg promote bookstore-platform-pg -n bookstore-platform-system \
-  --context kind-bookstore-platform-eu-west
-```
-
-Minimal skeleton — CNPG `Cluster` (writer) and replica:
-
-```yaml
-# Writer
-apiVersion: postgresql.cnpg.io/v1
-kind: Cluster
-metadata:
-  name: bookstore-platform-pg
-  namespace: bookstore-platform-system
-spec:
-  instances: 2
-  storage: { size: 5Gi }
-  bootstrap:
-    initdb: { database: bookstore, owner: bookstore }
----
-# Replica
-apiVersion: postgresql.cnpg.io/v1
-kind: Cluster
-metadata:
-  name: bookstore-platform-pg
-  namespace: bookstore-platform-system
-spec:
-  instances: 2
-  storage: { size: 5Gi }
-  bootstrap:
-    pg_basebackup:
-      source: bookstore-platform-pg-source
-  replica:
-    enabled: true
-    source: bookstore-platform-pg-source
-  externalClusters:
-    - name: bookstore-platform-pg-source
-      connectionParameters:
-        host: <PRIMARY-HOSTNAME>
-        user: streaming_replica
-        dbname: bookstore
-        sslmode: require
-      password:
-        name: pg-replication-creds
-        key: PASSWORD
+kubectl --context kind-bookstore-platform-eu-west -n bookstore-platform-system \
+  patch cluster bookstore-platform-pg-eu-west --type merge \
+  -p '{"spec":{"replica":{"primary":"bookstore-platform-pg-eu-west"}}}'
 ```
 
 Checklist (multi-region is healthy when all six are yes):
 
 - [ ] Three Argo CD Applications (`platform-base-us-east`,
       `-eu-west`, `-ap-southeast`) report Synced + Healthy.
-- [ ] CNPG primary Cluster in us-east shows `INSTANCES 2 READY 2 PRIMARY
-      <POD>`.
-- [ ] CNPG standby Clusters in eu-west + ap-southeast report `Cluster
-      in healthy state`.
-- [ ] `cnpg status` shows replication lag bounded under your SLO (< 10 s
-      typical on a healthy WAN).
-- [ ] DR drill: `cnpg promote` on a standby succeeds; reads + writes
-      both succeed against the new primary within 5 minutes.
-- [ ] After failover, the original writer region's Cluster can be re-
-      bootstrapped as a new standby (the rebuild path; the runbook in
-      Phase 13c walks it).
+- [ ] Each cluster's CNPG Cluster reports `Cluster in healthy state`, and
+      the standbys name the writer as their primary.
+- [ ] Every cluster is registered with `argocd-platform-sync`, not the
+      `argocd-manager` default.
+- [ ] `kubectl cnpg status` shows replication lag you can state against
+      your SLO. Async lag is not zero.
+- [ ] DR drill: the promotion patch succeeds, and reads and writes both
+      succeed against the new primary within the target.
+- [ ] After failover, the original writer region's Cluster is rebuilt as a
+      new standby before it rejoins.
 
 ## Test your understanding
 
@@ -672,28 +877,74 @@ Checklist (multi-region is healthy when all six are yes):
 2. **Your DR drill: us-east-1 goes down, you promote the eu-west standby. DNS failover takes 90 seconds. What's the RPO and RTO and what determines them?**
    <details><summary>Show answer</summary>
 
-   **RPO** (Recovery Point Objective) = the data lost = the streaming replication lag at failover time. With CNPG async streaming, this is typically <10s on a healthy WAN. RPO can be 0 with synchronous replication but at the cost of write latency to every transaction. **RTO** (Recovery Time Objective) = time to writes-resume = DNS TTL (60-90s if low) + Argo CD reconcile (30-60s to flip the writer label) + CNPG promote (10-30s) + app reconnect on new primary endpoint (10s with proper connection pool). Total RTO: 2-4 minutes. The drill validates the numbers; the runbook teaches the team to execute under stress.
+**RPO** (Recovery Point Objective) = the data lost = the replication lag at
+   the moment the writer is lost. Asynchronous streaming does not bound that
+   lag, so RPO is a measured number, not zero. Zero needs synchronous
+   replication, paid for on every write. **RTO** (Recovery Time Objective) =
+   time until writes resume = detection + the promotion change + DNS TTL + the
+   application reconnecting to the new primary endpoint. The drill times each
+   step; the runbook in [13.12](12-day-2-runbook-on-call-dr-chaos.md) is what
+   the team executes under stress.
 
    </details>
 
 3. **DNS TTL is set to 300s. You execute the failover. What user-visible behavior do you see in the first 5 minutes?**
    <details><summary>Show answer</summary>
 
-   Clients holding cached DNS resolutions for the old endpoint continue hitting the down region — they get connection refused or timeouts until their resolver re-queries. For mobile clients, DNS caching is opaque (the OS caches independently of TTL). For browsers, ~60s typical. For server-to-server (B2B integrations), Java's DNS cache is forever by default — until the JVM restarts. The 5-minute window has a mix: new connections route correctly, old connections fail, partner integrations may need manual restart. Setting TTL to 30s pre-emptively before known maintenance windows is the trick — but pays cost in DNS query volume the rest of the time.
+Clients holding cached DNS resolutions for the old endpoint continue hitting
+   the down region — they get connection refused or timeouts until their
+   resolver re-queries. For mobile clients, DNS caching is opaque (the OS
+   caches independently of TTL). For browsers, the cache is usually shorter
+   than the TTL. For server-to-server (B2B integrations), JVM DNS caching
+   depends on `networkaddress.cache.ttl`, and a long-lived JVM can keep an
+   address after the TTL has passed. Check that setting before the drill. The
+   5-minute window has a mix: new connections route correctly, old connections
+   fail, partner integrations may need a restart. Lowering the TTL before a
+   known maintenance window helps, but it costs DNS query volume the rest of
+   the time.
 
    </details>
 
 4. **A teammate proposes synchronous cross-region replication "so there's no RPO." Talk them through the trade-offs.**
    <details><summary>Show answer</summary>
 
-   Sync replication means every commit waits for at least one remote replica to acknowledge. WAN RTT us-east-1 ↔ eu-west-1 is ~75ms; ~150ms ↔ ap-southeast-1. That latency is added to every write. The checkout-page p99 goes from 100ms to 250ms. Throughput drops because writes hold longer. If the remote replica is briefly unreachable, writes block. Synchronous replication trades availability for consistency — acceptable for low-volume, high-value financial transactions, awful for high-volume e-commerce checkouts. The right answer is usually: async streaming with bounded lag + an RPO budget you accept + a tested failover.
+Sync replication means every commit waits for at least one remote replica to
+   acknowledge. Each commit then pays a cross-region round trip, so the
+   checkout path gets slower on every write. Throughput drops because writes
+   hold longer. If the remote replica is briefly unreachable, writes block.
+   Synchronous replication trades availability for consistency — acceptable
+   for low-volume, high-value financial transactions, awful for high-volume
+   e-commerce checkouts. The right answer is usually: async streaming with
+   bounded lag + an RPO budget you accept + a tested failover.
 
    </details>
 
 5. **Hands-on: in your three-region setup, kill the writer region's Postgres primary Pod (not the whole cluster). What does CNPG do, and what does the app see?**
    <details><summary>What you should see</summary>
 
-   CNPG detects the primary loss within ~10s, promotes an in-region replica to primary, updates the `<cluster>-rw` Service to point at the new primary. App connections to `<cluster>-rw` are reset; the connection pool reconnects to the new primary. Total downtime: 10-30s, no data loss because in-region replication is synchronous. The cross-region standbys remain standbys — no global failover needed. This is the "in-region HA absorbs the common case; cross-region DR absorbs the rare case" pattern: most failures are handled with seconds of downtime, region-loss is the rare event you drill quarterly.
+CNPG detects the failed primary and promotes an in-region standby on its own,
+   then moves the `-rw` Service to it. Connections to `-rw` reset, and the
+   pool reconnects, so writes pause briefly. In-region replication is
+   asynchronous unless you configure synchronous replication, so a commit the
+   primary acknowledged but had not yet streamed can be lost. The cross-region
+   standbys stay standbys: a region-level failover is a separate, explicit
+   change to `spec.replica.primary`.
+
+   </details>
+
+6. **Your management Argo CD can deploy to every region. An attacker who
+   controls it reaches all three. Name the two controls in this chapter that
+   limit that, and say what neither one stops.**
+   <details><summary>Show answer</summary>
+
+The first is the narrow ServiceAccount per cluster (step 3). It limits Argo CD
+   to the kinds platform-base applies and, with no wildcard verbs and no right
+   to create role bindings, stops it from granting itself more. The second is
+   the `restricted` label on each namespace (step 1). It refuses a privileged
+   container even when Argo CD submits one. Neither stops a compromised Argo
+   CD from deploying an unsafe workload that `restricted` allows, or from
+   reading the bearer tokens in its own cluster Secrets. The break-glass
+   process in [13.12](12-day-2-runbook-on-call-dr-chaos.md) covers those.
 
    </details>
 
@@ -707,8 +958,12 @@ Checklist (multi-region is healthy when all six are yes):
   generalises to cross-region.
 - Official: **CloudNativePG cross-region replication docs**
   <https://cloudnative-pg.io/documentation/current/replica_cluster/>;
+  **CloudNativePG security**
+  <https://cloudnative-pg.io/documentation/current/security/>;
   **Argo CD ApplicationSet docs**
   <https://argo-cd.readthedocs.io/en/stable/operator-manual/applicationset/>;
+  **Argo CD CLI source for `argocd cluster add`**
+  <https://github.com/argoproj/argo-cd/blob/master/cmd/argocd/commands/cluster.go>;
   **Google Cloud Architecture Center — _Multi-region active-active
   application architecture_**
   <https://cloud.google.com/architecture/multi-region-app-architecture>;

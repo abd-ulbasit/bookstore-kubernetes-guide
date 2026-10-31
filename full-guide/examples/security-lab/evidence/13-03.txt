@@ -1,0 +1,243 @@
+# Transcript for 13-grand-capstone-bookstore-platform/03-multi-region-active-active.md
+# Lab: one kind cluster (server v1.37.0, kubectl v1.37.2). The chapter's three
+# kind-bookstore-platform-* contexts are this one cluster in this run.
+# Substitution: argocd -> p13-03-argocd, cnpg-system -> p13-03-cnpg-system,
+# bookstore-platform-system -> p13-03-platform-system. platform-base is not
+# applied here, so the lab creates p13-03-platform-system with the labels
+# platform-base sets. Charts: argo-cd 10.11.6 (Argo CD v3.5.6), cloudnative-pg
+# 0.29.1 (operator 1.30.1).
+# The chapter's SA and token Secret apply runs as a server dry run here.
+# Nothing is installed on the shared cluster: charts are rendered with helm
+# template and dry-run on the server. Chapter CR manifests are checked offline
+# against the chart CRD schemas. Namespaces are deleted at the end.
+
+## step 1: namespaces with Pod Security labels
+$ kubectl config current-context
+kind-sf-pilot
+
+$ kubectl version 2>/dev/null | grep -i 'version'
+Client Version: v1.37.2
+Kustomize Version: v5.8.1
+Server Version: v1.37.0
+
+$ kubectl --context kind-sf-pilot apply -f - <<'X'
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: p13-03-argocd
+  labels:
+    pod-security.kubernetes.io/enforce: restricted
+    pod-security.kubernetes.io/enforce-version: latest
+    pod-security.kubernetes.io/audit: restricted
+    pod-security.kubernetes.io/audit-version: latest
+    pod-security.kubernetes.io/warn: restricted
+    pod-security.kubernetes.io/warn-version: latest
+---
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: p13-03-cnpg-system
+  labels:
+    pod-security.kubernetes.io/enforce: restricted
+    pod-security.kubernetes.io/enforce-version: latest
+    pod-security.kubernetes.io/audit: restricted
+    pod-security.kubernetes.io/audit-version: latest
+    pod-security.kubernetes.io/warn: restricted
+    pod-security.kubernetes.io/warn-version: latest
+---
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: p13-03-platform-system
+  labels:
+    pod-security.kubernetes.io/enforce: restricted
+    pod-security.kubernetes.io/enforce-version: latest
+    pod-security.kubernetes.io/audit: restricted
+    pod-security.kubernetes.io/audit-version: latest
+    pod-security.kubernetes.io/warn: restricted
+    pod-security.kubernetes.io/warn-version: latest
+X
+namespace/p13-03-argocd created
+namespace/p13-03-cnpg-system created
+namespace/p13-03-platform-system created
+
+$ kubectl get namespaces p13-03-argocd p13-03-cnpg-system p13-03-platform-system -L pod-security.kubernetes.io/enforce
+NAME                     STATUS   AGE   ENFORCE
+p13-03-argocd            Active   1s    restricted
+p13-03-cnpg-system       Active   1s    restricted
+p13-03-platform-system   Active   1s    restricted
+
+## step 2: deliberate denial, privileged container in the labelled namespace
+$ kubectl --context kind-sf-pilot -n p13-03-platform-system run privileged-probe --image=bookstore/catalog:dev --privileged --dry-run=server --restart=Never
+Error from server (Forbidden): pods "privileged-probe" is forbidden: violates PodSecurity "restricted:latest": privileged (container "privileged-probe" must not set securityContext.privileged=true), allowPrivilegeEscalation != false (container "privileged-probe" must set securityContext.allowPrivilegeEscalation=false), unrestricted capabilities (container "privileged-probe" must set securityContext.capabilities.drop=["ALL"]), runAsNonRoot != true (pod or container "privileged-probe" must set securityContext.runAsNonRoot=true), seccompProfile (pod or container "privileged-probe" must set securityContext.seccompProfile.type to "RuntimeDefault" or "Localhost")
+
+## step 3: Argo CD chart dry-run into the labelled namespace
+$ helm repo update argo >/dev/null 2>&1; helm template argocd argo/argo-cd --version 10.11.6 -n p13-03-argocd --include-crds | kubectl --context kind-sf-pilot apply --server-side --dry-run=server -n p13-03-argocd -f -
+networkpolicy.networking.k8s.io/argocd-application-controller serverside-applied (server dry run)
+networkpolicy.networking.k8s.io/argocd-notifications-controller serverside-applied (server dry run)
+networkpolicy.networking.k8s.io/argocd-repo-server serverside-applied (server dry run)
+networkpolicy.networking.k8s.io/argocd-server serverside-applied (server dry run)
+networkpolicy.networking.k8s.io/argocd-dex-server serverside-applied (server dry run)
+networkpolicy.networking.k8s.io/argocd-redis serverside-applied (server dry run)
+serviceaccount/argocd-application-controller serverside-applied (server dry run)
+serviceaccount/argocd-applicationset-controller serverside-applied (server dry run)
+serviceaccount/argocd-notifications-controller serverside-applied (server dry run)
+serviceaccount/argocd-repo-server serverside-applied (server dry run)
+serviceaccount/argocd-server serverside-applied (server dry run)
+serviceaccount/argocd-dex-server serverside-applied (server dry run)
+secret/argocd-notifications-secret serverside-applied (server dry run)
+secret/argocd-secret serverside-applied (server dry run)
+configmap/argocd-cm serverside-applied (server dry run)
+configmap/argocd-cmd-params-cm serverside-applied (server dry run)
+configmap/argocd-gpg-keys-cm serverside-applied (server dry run)
+configmap/argocd-notifications-cm serverside-applied (server dry run)
+configmap/argocd-rbac-cm serverside-applied (server dry run)
+configmap/argocd-ssh-known-hosts-cm serverside-applied (server dry run)
+configmap/argocd-tls-certs-cm serverside-applied (server dry run)
+configmap/argocd-redis-health-configmap serverside-applied (server dry run)
+customresourcedefinition.apiextensions.k8s.io/applications.argoproj.io serverside-applied (server dry run)
+customresourcedefinition.apiextensions.k8s.io/applicationsets.argoproj.io serverside-applied (server dry run)
+customresourcedefinition.apiextensions.k8s.io/appprojects.argoproj.io serverside-applied (server dry run)
+clusterrole.rbac.authorization.k8s.io/argocd-application-controller serverside-applied (server dry run)
+clusterrole.rbac.authorization.k8s.io/argocd-notifications-controller serverside-applied (server dry run)
+clusterrole.rbac.authorization.k8s.io/argocd-server serverside-applied (server dry run)
+clusterrolebinding.rbac.authorization.k8s.io/argocd-application-controller serverside-applied (server dry run)
+clusterrolebinding.rbac.authorization.k8s.io/argocd-notifications-controller serverside-applied (server dry run)
+clusterrolebinding.rbac.authorization.k8s.io/argocd-server serverside-applied (server dry run)
+role.rbac.authorization.k8s.io/argocd-application-controller serverside-applied (server dry run)
+role.rbac.authorization.k8s.io/argocd-applicationset-controller serverside-applied (server dry run)
+role.rbac.authorization.k8s.io/argocd-notifications-controller serverside-applied (server dry run)
+role.rbac.authorization.k8s.io/argocd-repo-server serverside-applied (server dry run)
+role.rbac.authorization.k8s.io/argocd-server serverside-applied (server dry run)
+role.rbac.authorization.k8s.io/argocd-dex-server serverside-applied (server dry run)
+rolebinding.rbac.authorization.k8s.io/argocd-application-controller serverside-applied (server dry run)
+rolebinding.rbac.authorization.k8s.io/argocd-applicationset-controller serverside-applied (server dry run)
+rolebinding.rbac.authorization.k8s.io/argocd-notifications-controller serverside-applied (server dry run)
+rolebinding.rbac.authorization.k8s.io/argocd-repo-server serverside-applied (server dry run)
+rolebinding.rbac.authorization.k8s.io/argocd-server serverside-applied (server dry run)
+rolebinding.rbac.authorization.k8s.io/argocd-dex-server serverside-applied (server dry run)
+service/argocd-applicationset-controller serverside-applied (server dry run)
+service/argocd-repo-server serverside-applied (server dry run)
+service/argocd-server serverside-applied (server dry run)
+service/argocd-dex-server serverside-applied (server dry run)
+service/argocd-redis serverside-applied (server dry run)
+deployment.apps/argocd-applicationset-controller serverside-applied (server dry run)
+deployment.apps/argocd-notifications-controller serverside-applied (server dry run)
+deployment.apps/argocd-repo-server serverside-applied (server dry run)
+deployment.apps/argocd-server serverside-applied (server dry run)
+deployment.apps/argocd-dex-server serverside-applied (server dry run)
+deployment.apps/argocd-redis serverside-applied (server dry run)
+statefulset.apps/argocd-application-controller serverside-applied (server dry run)
+serviceaccount/argocd-redis-secret-init serverside-applied (server dry run)
+role.rbac.authorization.k8s.io/argocd-redis-secret-init serverside-applied (server dry run)
+rolebinding.rbac.authorization.k8s.io/argocd-redis-secret-init serverside-applied (server dry run)
+job.batch/argocd-redis-secret-init serverside-applied (server dry run)
+
+## step 3b: control, a privileged Deployment in the same namespace
+$ kubectl --context kind-sf-pilot apply --server-side --dry-run=server -n p13-03-argocd -f - <<'X'
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: privileged-control
+  namespace: p13-03-argocd
+spec:
+  selector:
+    matchLabels: {app: control}
+  template:
+    metadata:
+      labels: {app: control}
+    spec:
+      containers:
+        - name: c
+          image: bookstore/catalog:dev
+          securityContext:
+            privileged: true
+X
+Warning: would violate PodSecurity "restricted:latest": privileged (container "c" must not set securityContext.privileged=true), allowPrivilegeEscalation != false (container "c" must set securityContext.allowPrivilegeEscalation=false), unrestricted capabilities (container "c" must set securityContext.capabilities.drop=["ALL"]), runAsNonRoot != true (pod or container "c" must set securityContext.runAsNonRoot=true), seccompProfile (pod or container "c" must set securityContext.seccompProfile.type to "RuntimeDefault" or "Localhost")
+deployment.apps/privileged-control serverside-applied (server dry run)
+
+## step 4: CloudNativePG chart dry-run into the labelled namespace
+$ helm repo update cnpg >/dev/null 2>&1; helm template cnpg cnpg/cloudnative-pg --version 0.29.1 -n p13-03-cnpg-system --include-crds | kubectl --context kind-sf-pilot apply --server-side --dry-run=server -n p13-03-cnpg-system -f -
+serviceaccount/cnpg-cloudnative-pg serverside-applied (server dry run)
+configmap/cnpg-controller-manager-config serverside-applied (server dry run)
+configmap/cnpg-default-monitoring serverside-applied (server dry run)
+customresourcedefinition.apiextensions.k8s.io/backups.postgresql.cnpg.io serverside-applied (server dry run)
+customresourcedefinition.apiextensions.k8s.io/clusterimagecatalogs.postgresql.cnpg.io serverside-applied (server dry run)
+customresourcedefinition.apiextensions.k8s.io/clusters.postgresql.cnpg.io serverside-applied (server dry run)
+customresourcedefinition.apiextensions.k8s.io/databaseroles.postgresql.cnpg.io serverside-applied (server dry run)
+customresourcedefinition.apiextensions.k8s.io/databases.postgresql.cnpg.io serverside-applied (server dry run)
+customresourcedefinition.apiextensions.k8s.io/failoverquorums.postgresql.cnpg.io serverside-applied (server dry run)
+customresourcedefinition.apiextensions.k8s.io/imagecatalogs.postgresql.cnpg.io serverside-applied (server dry run)
+customresourcedefinition.apiextensions.k8s.io/poolers.postgresql.cnpg.io serverside-applied (server dry run)
+customresourcedefinition.apiextensions.k8s.io/publications.postgresql.cnpg.io serverside-applied (server dry run)
+customresourcedefinition.apiextensions.k8s.io/scheduledbackups.postgresql.cnpg.io serverside-applied (server dry run)
+customresourcedefinition.apiextensions.k8s.io/subscriptions.postgresql.cnpg.io serverside-applied (server dry run)
+clusterrole.rbac.authorization.k8s.io/cnpg-cloudnative-pg serverside-applied (server dry run)
+clusterrole.rbac.authorization.k8s.io/cnpg-cloudnative-pg-view serverside-applied (server dry run)
+clusterrole.rbac.authorization.k8s.io/cnpg-cloudnative-pg-edit serverside-applied (server dry run)
+clusterrolebinding.rbac.authorization.k8s.io/cnpg-cloudnative-pg serverside-applied (server dry run)
+service/cnpg-webhook-service serverside-applied (server dry run)
+deployment.apps/cnpg-cloudnative-pg serverside-applied (server dry run)
+mutatingwebhookconfiguration.admissionregistration.k8s.io/cnpg-mutating-webhook-configuration serverside-applied (server dry run)
+validatingwebhookconfiguration.admissionregistration.k8s.io/cnpg-validating-webhook-configuration serverside-applied (server dry run)
+
+## step 5: ServiceAccount and token Secret for Argo CD registration
+$ kubectl --context kind-sf-pilot apply --dry-run=server -f - <<'X'
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: argocd-platform-sync
+  namespace: p13-03-platform-system
+automountServiceAccountToken: false
+---
+apiVersion: v1
+kind: Secret
+metadata:
+  name: argocd-platform-sync-token
+  namespace: p13-03-platform-system
+  annotations:
+    kubernetes.io/service-account.name: argocd-platform-sync
+type: kubernetes.io/service-account-token
+X
+serviceaccount/argocd-platform-sync created (server dry run)
+secret/argocd-platform-sync-token created (server dry run)
+
+## step 6: helm chart renders for the chapter's pinned versions
+$ helm show chart argo/argo-cd --version 10.11.6 | grep -E '^(version|appVersion)'
+appVersion: v3.5.6
+version: 10.11.6
+
+$ helm show chart cnpg/cloudnative-pg --version 0.29.1 | grep -E '^(version|appVersion)'
+appVersion: 1.30.1
+version: 0.29.1
+
+## step 7: v1 invariants
+$ cd full-guide && helm lint examples/bookstore/helm/bookstore | tail -2
+
+1 chart(s) linted, 0 chart(s) failed
+
+$ cd full-guide && helm template examples/bookstore/helm/bookstore | kubectl --context kind-sf-pilot apply --dry-run=client -f - | grep -cE '(configured|created)'
+49
+
+$ cd full-guide && kubectl kustomize examples/bookstore/kustomize/overlays/dev | grep -c '^kind:'
+45
+
+## step 8: cleanup
+$ kubectl --context kind-sf-pilot delete namespace p13-03-argocd p13-03-cnpg-system p13-03-platform-system --wait=true
+namespace "p13-03-argocd" deleted
+namespace "p13-03-cnpg-system" deleted
+namespace "p13-03-platform-system" deleted
+
+$ kubectl --context kind-sf-pilot get namespaces -o name | grep -c p13-03 || true
+0
+
+
+## step 9: offline schema check of the chapter's CR blocks and the platform ApplicationSet
+$ python3 check-crd-schema (script kept outside the repo; reads the chapter and the chart CRDs)
+Cluster writer-us-east: ok
+Cluster standby-eu-west: ok
+Cluster standby-ap-southeast: ok
+
+$ python3 check-crd-schema (applicationset-platform.yaml against the Argo CD CRD)
+ApplicationSet platform-base: ok
+
