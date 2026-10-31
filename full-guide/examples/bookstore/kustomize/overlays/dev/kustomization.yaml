@@ -16,7 +16,7 @@
 apiVersion: kustomize.config.k8s.io/v1beta1
 kind: Kustomization
 
-# Namespace stays `bookstore` across all envs (DB_DSN / AMQP_URL / headless
+# Namespace stays `bookstore` across all envs (DB_DSN / headless
 # Service DNS / NetworkPolicy namespaceSelectors hardcode it). See ../README.md.
 resources:
   - ../../base

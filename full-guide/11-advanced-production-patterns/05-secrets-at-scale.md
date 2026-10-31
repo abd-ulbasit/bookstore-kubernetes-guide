@@ -132,7 +132,7 @@ flowchart LR
       es["ExternalSecret db-credentials<br/>refreshInterval: 1h"]
       sec[("Secret db-credentials<br/>(SYNCED — same name/keys<br/>as demo 16-)")]
       cat["catalog / orders Pods<br/>secretKeyRef (UNCHANGED)"]
-      pg[("postgres StatefulSet<br/>envFrom (UNCHANGED)")]
+      pg[("postgres StatefulSet<br/>secretKeyRef (UNCHANGED)")]
     end
 
     es -->|references| ss
@@ -410,11 +410,18 @@ needs, and the same message appears before the CRDs exist.
 
 Apply the ESO identity, the `SecretStore`, then the `ExternalSecret` that is
 the **production replacement** for `16-db-credentials.yaml`. The synced
-`Secret` is named **exactly `db-credentials` with the same keys**, so
-catalog/orders (`secretKeyRef`) and postgres (`envFrom`) consume it
+`Secret` is named **exactly `db-credentials` with the same three database
+keys**, so catalog/orders and postgres (all `secretKeyRef`) consume it
 **unchanged** — that byte-identical-keys design is what makes the swap
 transparent. The Deployments build `DB_DSN` from those three keys, so it does
-not change:
+not change.
+
+`16-db-credentials.yaml` also holds the broker login (`RABBITMQ_DEFAULT_USER`,
+`RABBITMQ_DEFAULT_PASS` and `AMQP_URL`). This `ExternalSecret` does not sync
+those three keys, and the recorded lab ran no broker, orders or
+payments-worker. Before you swap a namespace that runs them, put the broker
+login in Vault and add three `data` entries for it. Without them those Pods
+fail to start with a missing-key error.
 
 ```sh
 kubectl apply -f examples/bookstore/secrets/05-eso-serviceaccount.yaml

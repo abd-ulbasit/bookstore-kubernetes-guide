@@ -403,7 +403,7 @@ manifest — KEDA needs a real Deployment to scale. New files:
   never calls the API; same posture as `orders-sa`).
 - [`examples/bookstore/raw-manifests/19-payments-worker-deploy.yaml`](../examples/bookstore/raw-manifests/19-payments-worker-deploy.yaml)
   Its Deployment is complete: restricted security context like catalog's,
-  `AMQP_URL` pointing at the rabbitmq Service, and a scheduling layer that
+  `AMQP_URL` read from the `db-credentials` Secret, and a scheduling layer that
   matches the other workloads. Its decisions are in its header.
 
 > **Decisions (documented in the manifest header).** *No DB_DSN* — the worker
@@ -445,9 +445,12 @@ Waiting for deployment "payments-worker" rollout to finish: 0 of 1 updated repli
 deployment "payments-worker" successfully rolled out
 ```
 
-The worker then logs that it is consuming the queue. Its log, read later in
-the same run, shows that it reached the broker with the credentials in its
-manifest:
+The worker then logs that it is consuming the queue. This capture comes from a
+run that came before the broker login moved into the `db-credentials` Secret.
+Its manifest still carried the stock `guest` login, and the log lines do not
+show the login either way.
+[03.02](../03-config-and-storage/02-secrets.md#the-broker-login) records the
+worker consuming with the Secret's login. The lines captured then:
 
 <!-- gate: output -->
 ```
@@ -719,10 +722,12 @@ helm install keda kedacore/keda --version 2.21.0 \
 kubectl -n keda rollout status deployment/keda-operator
 ```
 
-The scaler's broker credential is a user of its own. The `guest` user that the
-other Pods share is not used. The new user may read the `orders` queue and
-nothing else: its configure and write permissions match no resource. The
-password comes from `openssl`, is never printed, and lives only in the Secret:
+The scaler's broker credential is a user of its own. The broker has no `guest`
+user, and the login that the other Pods share comes from the `db-credentials`
+Secret ([03.02](../03-config-and-storage/02-secrets.md#the-broker-login)); the
+scaler does not use it. The new user may read the `orders` queue and nothing
+else: its configure and write permissions match no resource. The password comes
+from `openssl`, is never printed, and lives only in the Secret:
 
 ```sh
 PW="$(openssl rand -hex 24)"
@@ -907,14 +912,14 @@ the 300 second `scaleDown` window holds the replicas for five minutes before
 they fall. If your host struggles as this one did, lower the Job's concurrency
 before the target: the `seq 10` in its loop sets how many requests run at once.
 
-Orders publishes to the queue only when `AMQP_URL` is set. `14-` leaves it
-unset on purpose (its header explains), so the queue stays empty until that
-changes. The orders log from the lab run shows the unset state:
-
-<!-- gate: output -->
-```
-{"time":"2026-10-31T01:07:16.078833493Z","level":"INFO","msg":"AMQP_URL unset; order events will not be published"}
-```
+Orders publishes to the queue when `AMQP_URL` is set, and `14-` reads it from
+the `db-credentials` Secret, so the queue fills when orders arrive. Each
+`POST /orders` adds one message, and the worker drains it. The lab run of this
+chapter came before that change and its orders log showed `AMQP_URL` unset, so
+it has no queue traffic to report.
+[03.02](../03-config-and-storage/02-secrets.md#the-broker-login) posts two
+orders and shows the worker consuming them. To drive the scaler in your load
+test, post orders as well as reading the catalog.
 
 ## How it works under the hood
 

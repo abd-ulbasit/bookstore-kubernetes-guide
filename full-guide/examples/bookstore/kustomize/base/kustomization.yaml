@@ -37,7 +37,7 @@ kind: Kustomization
 # Every namespaced object lands in `bookstore`. This transformer does NOT
 # stamp a namespace onto cluster-scoped kinds — the three PriorityClasses
 # (35-) render namespace-free (verified). The namespace is kept `bookstore`
-# across ALL overlays on purpose: DB_DSN / AMQP_URL / the postgres headless
+# across ALL overlays on purpose: DB_DSN / the postgres headless
 # Service DNS / the NetworkPolicy namespaceSelectors all hardcode `bookstore`;
 # renaming the namespace would silently break those cross-resource refs unless
 # every one were rewritten coherently. (See ../README.md "Namespace decision".)

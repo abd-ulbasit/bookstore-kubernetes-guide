@@ -297,7 +297,14 @@ def missing_secrets(docs: list[Doc]) -> dict[str, set[str]]:
 def stand_in_manifest(name: str, keys: set[str]) -> dict:
     data = {}
     for key in sorted(k for k in keys if k) or ["value"]:
-        data[key] = "bookstore" if key in ("POSTGRES_USER", "POSTGRES_DB") else secrets.token_urlsafe(18)
+        fixed = ("POSTGRES_USER", "POSTGRES_DB", "RABBITMQ_DEFAULT_USER")
+        data[key] = "bookstore" if key in fixed else secrets.token_urlsafe(18)
+    if "AMQP_URL" in data:
+        # The broker starts with RABBITMQ_DEFAULT_USER and RABBITMQ_DEFAULT_PASS,
+        # so the URL that orders and payments-worker read must carry that login.
+        user = data.get("RABBITMQ_DEFAULT_USER", "bookstore")
+        password = data.get("RABBITMQ_DEFAULT_PASS", secrets.token_urlsafe(18))
+        data["AMQP_URL"] = f"amqp://{user}:{password}@rabbitmq:5672/"
     return {
         "apiVersion": "v1",
         "kind": "Secret",

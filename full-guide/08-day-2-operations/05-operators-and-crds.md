@@ -735,8 +735,10 @@ kubectl delete pod db-migrate-cnpg -n bookstore
 
 Next, deploy catalog and orders. They still carry the canonical `DB_DSN`, which
 names the DIY host, so they are not Ready yet. Redis stays because the catalog
-config sets `REDIS_ADDR`. RabbitMQ is left out: orders publishes only when
-`AMQP_URL` is set, and this chapter leaves it unset.
+config sets `REDIS_ADDR`. RabbitMQ is left out. The orders manifest reads
+`AMQP_URL` from the `db-credentials` Secret, so orders logs a failed publish for
+each order it takes. The publish is best-effort, so the order itself is not
+affected.
 
 ```sh
 kubectl apply -f examples/bookstore/raw-manifests/12-redis.yaml

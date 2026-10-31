@@ -73,7 +73,10 @@ keda:
 
 # !!! Secret comes from External Secrets Operator / Sealed Secrets / Vault,
 # NOT from this file. The chart references a Secret named `db-credentials`;
-# provide it out of band with create=false.
+# provide it out of band with create=false. It needs six keys: POSTGRES_USER,
+# POSTGRES_PASSWORD, POSTGRES_DB, RABBITMQ_DEFAULT_USER, RABBITMQ_DEFAULT_PASS
+# and AMQP_URL (the broker login and the URL that orders and payments-worker
+# read).
 dbCredentials:
   create: false
 

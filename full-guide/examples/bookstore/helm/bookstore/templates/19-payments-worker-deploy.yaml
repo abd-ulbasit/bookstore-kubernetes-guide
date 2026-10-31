@@ -63,7 +63,10 @@ spec:
             - name: LOG_LEVEL
               value: {{ $p.logLevel | quote }}
             - name: AMQP_URL
-              value: {{ $p.amqpUrl | quote }}
+              valueFrom:
+                secretKeyRef:
+                  name: {{ .Values.dbCredentials.secretName }}
+                  key: AMQP_URL
           startupProbe:
             httpGet: { path: /healthz, port: metrics }
             periodSeconds: 5

@@ -5,7 +5,9 @@
   fsGroupChangePolicy OnRootMismatch) and back /var/lib/rabbitmq with an
   emptyDir the kubelet chowns. The root FS is read-only (uid999RW profile);
   the broker writes only to the data emptyDir and to /tmp, as the raw
-  manifest does.
+  manifest does. Its login is the RABBITMQ_DEFAULT_USER and
+  RABBITMQ_DEFAULT_PASS pair in the db-credentials Secret, so no stock
+  `guest` account exists.
 */}}
 {{- if .Values.rabbitmq.enabled }}
 {{- $q := .Values.rabbitmq }}
@@ -48,6 +50,19 @@ spec:
           imagePullPolicy: {{ $q.image.pullPolicy }}
           securityContext:
             {{- include "bookstore.containerSecurityContext" (dict "ctx" . "profile" "uid999RW") | nindent 12 }}
+          # The broker's only user, from the Secret (16-). With a default user
+          # set, the broker does not create the stock `guest` account.
+          env:
+            - name: RABBITMQ_DEFAULT_USER
+              valueFrom:
+                secretKeyRef:
+                  name: {{ .Values.dbCredentials.secretName }}
+                  key: RABBITMQ_DEFAULT_USER
+            - name: RABBITMQ_DEFAULT_PASS
+              valueFrom:
+                secretKeyRef:
+                  name: {{ .Values.dbCredentials.secretName }}
+                  key: RABBITMQ_DEFAULT_PASS
           ports:
             - name: amqp
               containerPort: 5672

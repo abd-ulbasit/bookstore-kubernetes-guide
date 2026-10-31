@@ -111,10 +111,18 @@ catalogConfig:
 dbCredentials:
   create: true
   secretName: db-credentials
-  # Consumed by postgres (envFrom) and by catalog/orders + the jobs (keyRef).
+  # Consumed key by key (secretKeyRef): the three POSTGRES_ keys by postgres,
+  # catalog, orders and the jobs; the three broker keys below by rabbitmq
+  # (the two names the image reads) and, as one URL, by orders and
+  # payments-worker. The broker keys sit in this Secret so the render count
+  # does not move. AMQP_URL repeats the password and names the Service, so it
+  # holds no namespace. With create=false the Secret you provide needs all six.
   POSTGRES_USER: bookstore
   POSTGRES_PASSWORD: "devpassword" # DEMO-ONLY — never a real/committed secret
   POSTGRES_DB: bookstore
+  RABBITMQ_DEFAULT_USER: bookstore
+  RABBITMQ_DEFAULT_PASS: "devbrokerpass" # DEMO-ONLY, never a real secret
+  AMQP_URL: "amqp://bookstore:devbrokerpass@rabbitmq:5672/" # DEMO-ONLY
 
 # Postgres connection coordinates — used to assemble the SINGLE DB_DSN string
 # (templates/_helpers.tpl "bookstore.dbDsn") that catalog AND orders consume
@@ -351,11 +359,8 @@ paymentsWorker:
   nodeSelector: {}
   tolerations: []
   affinity: {}
-  # DEMO-ONLY — never a real/committed credential. guest:guest is the stock
-  # rabbitmq default (13-rabbitmq.yaml runs no extra auth as Part-02
-  # scaffolding). In production the broker has real credentials and this URL
-  # comes from an external Secret (env from secretRef), not values.yaml.
-  amqpUrl: "amqp://guest:guest@rabbitmq.bookstore.svc.cluster.local:5672/"
+  # The broker URL is not a value of this block: AMQP_URL comes from the
+  # dbCredentials Secret by secretKeyRef, like orders. Nothing here holds it.
   logLevel: "info"
   resources:
     requests: { cpu: 50m, memory: 64Mi }

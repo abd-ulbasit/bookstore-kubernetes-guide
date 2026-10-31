@@ -407,3 +407,27 @@ $ helm install bookstore examples/bookstore/helm/bookstore -n bookstore --dry-ru
 $ helm lint examples/bookstore/helm/bookstore | tail -n 2
 
 1 chart(s) linted, 0 chart(s) failed
+
+## step 4b: the render checks, run again after the broker login moved into db-credentials (2026-10-31)
+# The chart's payments-worker AMQP_URL was a plain guest:guest string when the
+# steps above were recorded. It now comes from the db-credentials Secret by
+# secretKeyRef. These render-only commands ran again from full-guide/ on the
+# author's workstation, with Helm v4.1.4 in place of the v3.22.1 that the rest of
+# this transcript used. They read no cluster, and a render count does not depend
+# on the Helm major version.
+$ helm version --short
+v4.1.4+g05fa379
+$ helm template bookstore examples/bookstore/helm/bookstore -n bookstore -f examples/bookstore/helm/bookstore/values-prod.yaml | grep -c "guest:guest"
+0
+$ helm template bookstore examples/bookstore/helm/bookstore -n bookstore -f examples/bookstore/helm/bookstore/values-prod.yaml | grep -c "amqp://"
+0
+$ helm template bookstore examples/bookstore/helm/bookstore -n bookstore | grep -c "amqp://"
+1
+$ helm template bookstore examples/bookstore/helm/bookstore -n bookstore | grep -c "^kind:"
+49
+$ helm template bookstore examples/bookstore/helm/bookstore -n bookstore -f examples/bookstore/helm/bookstore/values-prod.yaml | grep -c "^kind: Secret"
+0
+$ helm template bookstore examples/bookstore/helm/bookstore -n bookstore | grep "POSTGRES_PASSWORD:"
+  POSTGRES_PASSWORD: "devpassword"
+$ helm template bookstore examples/bookstore/helm/bookstore -n bookstore -f examples/bookstore/helm/bookstore/values-prod.yaml | grep -c "name: rabbitmq-conn"
+1

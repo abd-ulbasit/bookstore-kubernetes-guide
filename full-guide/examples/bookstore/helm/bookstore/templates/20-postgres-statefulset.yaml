@@ -6,8 +6,9 @@
   root FS is read-only; postgres writes its socket and lock under
   /var/run/postgresql, so that path and /tmp are emptyDirs, as in the raw
   manifest.
-  Credentials via envFrom the db-credentials Secret. Part 04: data tier
-  priority + tolerate the dedicated-DB-node taint + prefer that node.
+  Credentials from the db-credentials Secret, one secretKeyRef per key. Part
+  04: data tier priority + tolerate the dedicated-DB-node taint + prefer that
+  node.
 */}}
 {{- if .Values.postgres.enabled }}
 {{- $pg := .Values.postgres }}
@@ -74,10 +75,24 @@ spec:
           ports:
             - name: postgres
               containerPort: 5432
-          envFrom:
-            - secretRef:
-                name: {{ .Values.dbCredentials.secretName }}
+          # One entry per key, not envFrom: the Secret also holds the broker
+          # login, which the database process has no use for.
           env:
+            - name: POSTGRES_USER
+              valueFrom:
+                secretKeyRef:
+                  name: {{ .Values.dbCredentials.secretName }}
+                  key: POSTGRES_USER
+            - name: POSTGRES_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: {{ .Values.dbCredentials.secretName }}
+                  key: POSTGRES_PASSWORD
+            - name: POSTGRES_DB
+              valueFrom:
+                secretKeyRef:
+                  name: {{ .Values.dbCredentials.secretName }}
+                  key: POSTGRES_DB
             - name: PGDATA
               value: {{ $pg.pgData | quote }}
           # initdb on a slow disk can outlast liveness. The startup probe holds

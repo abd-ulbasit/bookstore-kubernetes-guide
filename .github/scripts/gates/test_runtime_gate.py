@@ -176,6 +176,12 @@ class ChecksTests(unittest.TestCase):
         self.assertNotEqual(first["stringData"]["POSTGRES_PASSWORD"], second["stringData"]["POSTGRES_PASSWORD"])
         self.assertGreaterEqual(len(first["stringData"]["POSTGRES_PASSWORD"]), 16)
 
+    def test_the_stand_in_broker_url_carries_the_broker_login(self) -> None:
+        keys = {"RABBITMQ_DEFAULT_USER", "RABBITMQ_DEFAULT_PASS", "AMQP_URL"}
+        data = rg.stand_in_manifest("db-credentials", keys)["stringData"]
+        self.assertEqual(data["RABBITMQ_DEFAULT_USER"], "bookstore")
+        self.assertEqual(data["AMQP_URL"], f"amqp://bookstore:{data['RABBITMQ_DEFAULT_PASS']}@rabbitmq:5672/")
+
     def test_cronjobs_and_pods_count_as_workloads_but_services_do_not(self) -> None:
         kinds = [d.kind for d in rg.expected_workloads([doc("CronJob", "c", "batch/v1"), doc("Service", "s", "v1"), doc("Pod", "p", "v1")])]
         self.assertEqual(kinds, ["CronJob", "Pod"])

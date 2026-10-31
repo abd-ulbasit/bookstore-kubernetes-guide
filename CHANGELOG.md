@@ -25,6 +25,21 @@ versions follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 - `BENCHMARKS.md` with k6 latency results against `catalog/`.
 
 ### Changed
+- The Bookstore broker has no `guest` account. RabbitMQ takes its login from
+  the `db-credentials` Secret (`RABBITMQ_DEFAULT_USER`,
+  `RABBITMQ_DEFAULT_PASS`), and orders and payments-worker read `AMQP_URL`
+  from the same Secret by `secretKeyRef`. The keys sit in the existing Secret,
+  so the ADR 0007 counts hold: Helm 49, Kustomize 45, 49 and 48. The raw
+  manifests, the Kustomize base and the Helm chart carry the same keys, and
+  `paymentsWorker.amqpUrl` is gone from the chart values. Postgres now lists
+  its three keys one by one instead of `envFrom`, so the broker login stays
+  out of its environment. A Secret supplied out of band (prod) needs six keys.
+- orders and catalog log an error class (`error_class`) when the Postgres
+  connect call fails, not the driver's text, as Part 06 ch.02 asks.
+- Every `emptyDir` in the raw manifests, the Kustomize base and the Helm
+  templates has a `sizeLimit`; the two teaching Pods (`01-`, `02-`) were the
+  last without one. Chapter 01.01's baseline shows the cap, and its `fsGroup`
+  text says the need depends on the storage driver.
 - `SECURITY-SCAN.md` is rewritten around the exceptions registry
   (`.trivyignore.yaml` and `security/namespace-exceptions.yaml`). It corrects
   the platform RBAC count, the Backstage entry and the "permissive examples"

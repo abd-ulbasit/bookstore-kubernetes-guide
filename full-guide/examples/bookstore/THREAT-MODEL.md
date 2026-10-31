@@ -27,7 +27,7 @@ stable.
 | ID | Asset | Where it lives |
 |----|-------|----------------|
 | A1 | Order and customer records | Postgres, `raw-manifests/20-postgres-statefulset.yaml` |
-| A2 | Database credentials | Secret, `raw-manifests/16-db-credentials.yaml` |
+| A2 | Database and broker credentials | Secret, `raw-manifests/16-db-credentials.yaml` |
 | A3 | Credentials the payments worker uses to reach its provider | A Secret, not the image |
 | A4 | Cluster credentials: kubeconfigs and ServiceAccount tokens | Workstations, CI runners, Pods that mount a token |
 | A5 | Declared state: the manifests in Git | This repository |
@@ -93,6 +93,7 @@ guide yet). Part 00 ch.08 names the enforcer of each baseline field.
 | S7 | A workload logs in to Vault as another workload's identity | Vault Kubernetes auth role bound to one ServiceAccount name and one namespace, with a read-only policy | later | 11.05, section 4 |
 | S6 | A Pod copies a label such as `app: storefront` and is trusted as that workload | Mesh authorization by SPIFFE identity from its ServiceAccount, with default-deny at the waypoint | later | 11.04 (`40-authz-default-deny.yaml`); workload X.509 identity 05.01 |
 | S8 | The hub holds a token for every member, so one leaked token reaches that member's API | One ServiceAccount per member in its own namespace, a Role in the workload namespace only, and a token that lasts 24 hours | review | 11.06, Fleet credentials |
+| S9 | A Pod logs in to the broker with the stock `guest` account, or with a login it was never given | No `guest` account: the broker's only user is the generated login in `db-credentials`, and orders and payments-worker read the URL by `secretKeyRef` | review | 03.02, `#the-broker-login` |
 
 ### Tampering
 
@@ -118,6 +119,7 @@ guide yet). Part 00 ch.08 names the enforcer of each baseline field.
 | I2 | A broad RBAC grant reads Secrets | One ServiceAccount and one narrow Role per workload | cluster | 05.01 |
 | I3 | A caller reads Pod specs or runs commands through the kubelet | Anonymous kubelet auth off, webhook authorization | cluster | [05.06](../../05-security/06-control-plane-and-node-hardening.md) |
 | I4 | Application code reads a mounted ServiceAccount token | `automountServiceAccountToken: false` | review | 01.01, `#baseline-service-account` |
+| I8 | The database process holds the broker login, so a compromised database container reaches the queue | Postgres takes its three keys one by one with `secretKeyRef`, not `envFrom` | review | 03.02, `#the-broker-login` |
 | I6 | A static database password, read from Git or a Secret, stays valid until someone rotates it | Dynamic credentials: Vault mints a lease-bound Postgres role per read, through a `VaultDynamicSecret` generator | later | 11.05, section 5 |
 | I5 | A Pod on the network reads the traffic of an edge that policy allows | Strict mTLS between meshed workloads, so plaintext never crosses the pod network | later | 11.04 (`10-peerauthentication-strict-mtls.yaml`); NetworkPolicy 02.06 still applies underneath |
 | I7 | Clear etcd traffic: a host on the path reads Secrets off etcd traffic, or a client talks to etcd with no certificate | Peer and client TLS, with client certificates required (`--client-cert-auth`, `--peer-client-cert-auth`); port 2379 reached only from control-plane nodes | cluster | 11.08, `#threats-and-controls`; 05.04; [05.06](../../05-security/06-control-plane-and-node-hardening.md) |

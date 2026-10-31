@@ -52,12 +52,12 @@
 # restricted (00-namespace.yaml); this Pod satisfies it (proven by a server
 # dry-run in Part 06 ch.04, the same way ch.02 proved catalog/orders).
 #
-# AMQP_URL points at the rabbitmq Service DNS with the default guest/guest
-# credentials — 13-rabbitmq.yaml runs `rabbitmq:3.13-management` with the
-# stock guest user and no extra auth config (it documents this), and orders
-# (14-) speaks to the same broker. Identical broker, identical "orders" queue
-# (the queue name is a const in BOTH app/orders/main.go and
-# app/payments-worker/main.go), so publisher and consumer agree.
+# AMQP_URL is read whole from the db-credentials Secret (16-) by secretKeyRef.
+# It names the rabbitmq Service and carries the login that 13-rabbitmq.yaml
+# creates from the same Secret; the stock guest user does not exist. orders
+# (14-) reads the same key, so publisher and consumer use one broker and one
+# "orders" queue (the queue name is a const in BOTH app/orders/main.go and
+# app/payments-worker/main.go).
 #
 # Probes — the worker only implements GET /healthz (NO /readyz: a queue
 # consumer has no "ready to receive traffic" notion — nothing routes to it).
@@ -73,6 +73,7 @@
 #   kubectl apply -f examples/bookstore/raw-manifests/00-namespace.yaml
 #   kubectl apply -f examples/bookstore/raw-manifests/05-serviceaccounts-rbac.yaml
 #   kubectl apply -f examples/bookstore/raw-manifests/13-rabbitmq.yaml
+#   kubectl apply -f examples/bookstore/raw-manifests/16-db-credentials.yaml  # AMQP_URL
 #   kubectl apply -f examples/bookstore/raw-manifests/35-priorityclasses.yaml
 #   kind load docker-image bookstore/payments-worker:dev --name bookstore
 # Apply:
@@ -157,12 +158,13 @@ spec:
             - name: LOG_LEVEL
               value: "info"
             # The async edge: consume the same broker + "orders" queue that
-            # orders (14-) publishes to. guest/guest matches 13-rabbitmq.yaml
-            # (stock rabbitmq, default user, no extra auth). Service DNS form
-            # <svc>.<ns>.svc.cluster.local resolves via CoreDNS (NetworkPolicy
-            # 60- allows the DNS egress + the payments-worker->rabbitmq edge).
+            # orders (14-) publishes to. The URL, login included, comes from
+            # the Secret; its host is the Service name, which CoreDNS resolves
+            # (NetworkPolicy 60- allows the DNS egress + the
+            # payments-worker->rabbitmq edge).
             - name: AMQP_URL
-              value: "amqp://guest:guest@rabbitmq.bookstore.svc.cluster.local:5672/"
+              valueFrom:
+                secretKeyRef: { name: db-credentials, key: AMQP_URL }
           # Only /healthz exists (no /readyz — a consumer has no inbound
           # traffic to gate). Both probes hit /healthz: it answers iff the
           # process is alive and its HTTP/worker goroutines are running.

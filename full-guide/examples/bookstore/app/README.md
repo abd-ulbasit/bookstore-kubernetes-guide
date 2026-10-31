@@ -48,7 +48,7 @@ Go services emit **structured JSON logs** (Go `log/slog`), expose Prometheus
 | `LOG_LEVEL` | go services | `info` | `debug`/`info`/`warn`/`error` (slog) |
 | `DB_DSN` | catalog, orders | _(unset)_ | Postgres DSN, e.g. `postgres://user:pass@postgres:5432/bookstore`. Unset → catalog serves sample data; orders log instead of persisting |
 | `REDIS_ADDR` | catalog | _(unset)_ | Redis `host:port`. Set → catalog caches the listing (30s TTL) |
-| `AMQP_URL` | orders, payments-worker | _(unset)_ | RabbitMQ URL, e.g. `amqp://guest:guest@rabbitmq:5672/`. Unset → orders skip publish; worker idles with a 30s heartbeat |
+| `AMQP_URL` | orders, payments-worker | _(unset)_ | RabbitMQ URL, e.g. `amqp://<USER>:<PASSWORD>@rabbitmq:5672/`; the manifests read it from the `db-credentials` Secret. Unset → orders skip publish; worker idles with a 30s heartbeat |
 
 Expected schema when `DB_DSN` is set (created by the migration Job in a later
 chapter):
