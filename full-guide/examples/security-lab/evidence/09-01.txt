@@ -1,0 +1,311 @@
+Lab transcript for 09.01, the end-to-end Bookstore.
+Tier: A (kind). Ran on one shared kind cluster (sf-pilot), Kubernetes v1.37.0,
+one node. The chapter's output was captured from a lab cluster with a
+different name.
+Versions: Traefik chart 42.2.0 (Traefik v3.7.16), helm v4.1.4, kubectl with
+the cluster's v1.37 server, cosign with jq for the digest check.
+Namespace substitution: the chapter's namespaces bookstore, traefik and client
+were run as p09-01-bookstore, p09-01-traefik and p09-01-client. The Traefik
+watch lists and the NetworkPolicy namespace selector name the lab namespace.
+The prod overlay was copied and renamed in the copy. Its images were pointed at
+the kind-loaded dev images, the traefik-rewrite component was added, and the
+demo Secret 16-db-credentials.yaml was applied, as the chapter says for kind.
+Not run here: kube-prometheus-stack (06.01), Argo CD (07.04), Argo Rollouts
+(07.05), KEDA (06.04), Kyverno (05.07), Velero (08.02) and the node drain
+(06.05, which needs two workers).
+What did not work the first time: (1) the db-migrate Job started before
+Postgres was ready and used up its backoffLimit, so it was deleted and the
+overlay applied again; (2) the Postgres volume waited several minutes for the
+local-path provisioner on the loaded node; (3) the first npblock manifest had a
+mangled command, so it was rewritten and applied again.
+Shared-object note: the PriorityClasses bookstore-data, bookstore-critical and
+bookstore-batch already existed on the lab cluster from another run. Applying
+35-priorityclasses.yaml and the overlay in this run updated them, so their
+last-applied annotation and labels changed. Their values match the chapter's
+file, and this run did not delete them. A sed rename of the PriorityClass names
+in the copy did not apply, so the run used the shared names.
+The captured Traefik and namespace names are the lab's; the commands in the
+chapter print the reader's names.
+==== transcript ====
+$ kubectl get nodes
+NAME                     STATUS   ROLES           AGE   VERSION
+sf-pilot-control-plane   Ready    control-plane   18h   v1.37.0
+$ kubectl version
+Server Version: v1.37.0
+$ kubectl apply -f traefik-namespace.yaml
+namespace/p09-01-traefik created
+$ kubectl apply -f bookstore/raw-manifests/00-namespace.yaml
+namespace/p09-01-bookstore created
+resourcequota/bookstore-quota created
+limitrange/bookstore-limits created
+$ kubectl get namespace p09-01-traefik p09-01-bookstore -L pod-security.kubernetes.io/enforce
+NAME               STATUS   AGE   ENFORCE
+p09-01-traefik     Active   1s    restricted
+p09-01-bookstore   Active   1s    restricted
+$ helm show chart traefik/traefik --version 42.2.0
+appVersion: v3.7.16
+name: traefik
+version: 42.2.0
+$ helm install traefik traefik/traefik --version 42.2.0 --namespace p09-01-traefik -f traefik-values.yaml --dry-run=server
+STATUS: pending-install
+$ helm install traefik traefik/traefik --version 42.2.0 --namespace p09-01-traefik -f traefik-values.yaml --wait
+NAME: traefik
+LAST DEPLOYED: Sat Oct 31 13:55:01 2026
+NAMESPACE: p09-01-traefik
+STATUS: deployed
+REVISION: 1
+DESCRIPTION: Install complete
+TEST SUITE: None
+NOTES:
+traefik with docker.io/traefik:v3.7.16@sha256:1336e85aaed293bd63d005086e0dd013b04078b26aaeb1c18b26a2f928af7e65 has been deployed successfully on p09-01-traefik namespace!
+$ kubectl -n p09-01-traefik get pods,svc
+NAME                           READY   STATUS    RESTARTS   AGE
+pod/traefik-5ddfff7755-n28rx   1/1     Running   0          29s
+
+NAME              TYPE       CLUSTER-IP     EXTERNAL-IP   PORT(S)                      AGE
+service/traefik   NodePort   10.96.170.98   <none>        80:30080/TCP,443:30443/TCP   29s
+$ kubectl get ingressclass traefik
+NAME      CONTROLLER                      PARAMETERS   AGE
+traefik   traefik.io/ingress-controller   <none>       29s
+$ openssl req -x509 -newkey rsa:2048 -nodes -days 30 -subj /CN=bookstore.example.com -keyout tls.key -out tls.crt
+exit=0
+$ kubectl -n p09-01-bookstore create secret tls bookstore-tls --cert=tls.crt --key=tls.key
+secret/bookstore-tls created
+$ kubectl apply -f bookstore/raw-manifests/05-serviceaccounts-rbac.yaml -f bookstore/raw-manifests/15-catalog-config.yaml -f bookstore/raw-manifests/16-db-credentials.yaml -f bookstore/raw-manifests/35-priorityclasses.yaml
+serviceaccount/catalog-sa created
+serviceaccount/storefront-sa created
+serviceaccount/orders-sa created
+serviceaccount/payments-worker-sa created
+serviceaccount/postgres-sa created
+serviceaccount/redis-sa created
+serviceaccount/rabbitmq-sa created
+serviceaccount/migrate-sa created
+role.rbac.authorization.k8s.io/catalog-config-reader created
+rolebinding.rbac.authorization.k8s.io/catalog-config-reader-binding created
+configmap/catalog-config created
+secret/db-credentials created
+priorityclass.scheduling.k8s.io/bookstore-data configured
+priorityclass.scheduling.k8s.io/bookstore-critical configured
+priorityclass.scheduling.k8s.io/bookstore-batch configured
+$ kubectl apply -k bookstore/kustomize/overlays/prod
+namespace/p09-01-bookstore configured
+resourcequota/bookstore-quota configured
+serviceaccount/catalog-sa configured
+serviceaccount/migrate-sa configured
+serviceaccount/orders-sa configured
+serviceaccount/payments-worker-sa configured
+serviceaccount/postgres-sa configured
+serviceaccount/rabbitmq-sa configured
+serviceaccount/redis-sa configured
+serviceaccount/storefront-sa configured
+role.rbac.authorization.k8s.io/catalog-config-reader configured
+rolebinding.rbac.authorization.k8s.io/catalog-config-reader-binding configured
+configmap/catalog-config configured
+service/catalog created
+service/orders created
+service/payments-worker created
+service/postgres created
+service/rabbitmq created
+service/redis created
+service/storefront created
+limitrange/bookstore-limits configured
+priorityclass.scheduling.k8s.io/bookstore-batch configured
+priorityclass.scheduling.k8s.io/bookstore-critical configured
+priorityclass.scheduling.k8s.io/bookstore-data configured
+deployment.apps/catalog created
+deployment.apps/orders created
+deployment.apps/payments-worker created
+deployment.apps/rabbitmq created
+deployment.apps/redis created
+deployment.apps/storefront created
+statefulset.apps/postgres created
+cronjob.batch/cleanup created
+poddisruptionbudget.policy/catalog created
+poddisruptionbudget.policy/orders created
+poddisruptionbudget.policy/storefront created
+horizontalpodautoscaler.autoscaling/catalog created
+job.batch/db-migrate created
+ingress.networking.k8s.io/bookstore created
+networkpolicy.networking.k8s.io/allow-backend-egress created
+networkpolicy.networking.k8s.io/allow-data-tier-ingress created
+networkpolicy.networking.k8s.io/allow-dns-egress created
+networkpolicy.networking.k8s.io/allow-ingress-to-http-tiers created
+networkpolicy.networking.k8s.io/allow-monitoring-scrape created
+networkpolicy.networking.k8s.io/allow-orders-to-rabbitmq created
+networkpolicy.networking.k8s.io/allow-payments-worker-egress created
+networkpolicy.networking.k8s.io/allow-storefront-egress created
+networkpolicy.networking.k8s.io/allow-storefront-to-apis created
+networkpolicy.networking.k8s.io/default-deny-all created
+middleware.traefik.io/rewrite-api-prefix created
+$ kubectl wait --for=condition=complete job/db-migrate -n p09-01-bookstore --timeout=180s
+error: timed out waiting for the condition on jobs/db-migrate
+$ kubectl wait --for=condition=available deploy --all -n p09-01-bookstore --timeout=300s
+I1031 13:59:32.297767   42240 reflector.go:664] "Warning: watch ended with error" reflector="k8s.io/client-go/tools/watch/informerwatcher.go:162" type="*unstructured.Unstructured" err="an error on the server (\"unable to decode an event from the watch stream: http2: client connection lost\") has prevented the request from succeeding"
+E1031 14:02:18.668600   42240 reflector.go:227] "Failed to watch" err="deployments.apps \"catalog\" is forbidden: User \"kubernetes-admin\" cannot watch resource \"deployments\" in API group \"apps\" in the namespace \"p09-01-bookstore\" - error from a previous attempt: EOF" reflector="k8s.io/client-go/tools/watch/informerwatcher.go:162" type="*unstructured.Unstructured"
+E1031 14:02:19.778452   42240 reflector.go:227] "Failed to watch" err="failed to list *unstructured.Unstructured: deployments.apps \"catalog\" is forbidden: User \"kubernetes-admin\" cannot list resource \"deployments\" in API group \"apps\" in the namespace \"p09-01-bookstore\"" reflector="k8s.io/client-go/tools/watch/informerwatcher.go:162" type="*unstructured.Unstructured"
+timed out waiting for the condition on deployments/catalog
+timed out waiting for the condition on deployments/orders
+timed out waiting for the condition on deployments/payments-worker
+timed out waiting for the condition on deployments/rabbitmq
+timed out waiting for the condition on deployments/redis
+timed out waiting for the condition on deployments/storefront
+$ kubectl get pods,svc,netpol -n p09-01-bookstore
+NAME                                   READY   STATUS    RESTARTS      AGE
+pod/catalog-59fb44df7d-knjnt           0/1     Running   0             8m3s
+pod/catalog-59fb44df7d-v5xwl           0/1     Running   0             8m3s
+pod/catalog-59fb44df7d-vz7bs           0/1     Running   0             8m3s
+pod/catalog-59fb44df7d-w8wm7           0/1     Running   0             8m3s
+pod/orders-674c456f4d-2gmv4            0/1     Running   0             8m3s
+pod/orders-674c456f4d-52svx            0/1     Running   0             8m3s
+pod/orders-674c456f4d-nks6g            0/1     Running   0             8m3s
+pod/payments-worker-568c996856-t5ngm   1/1     Running   0             8m3s
+pod/postgres-0                         0/1     Pending   0             8m1s
+pod/rabbitmq-5997cbcb5d-5gsl7          0/1     Running   1 (42s ago)   8m3s
+pod/redis-574bb544f-wjm2l              1/1     Running   0             8m3s
+pod/storefront-76cbb89847-2j5fg        1/1     Running   0             8m3s
+pod/storefront-76cbb89847-9z2ws        1/1     Running   0             8m3s
+pod/storefront-76cbb89847-hdp24        1/1     Running   0             8m3s
+
+NAME                      TYPE        CLUSTER-IP      EXTERNAL-IP   PORT(S)              AGE
+service/catalog           ClusterIP   10.96.138.24    <none>        80/TCP               8m5s
+service/orders            ClusterIP   10.96.167.8     <none>        80/TCP               8m4s
+service/payments-worker   ClusterIP   None            <none>        8080/TCP             8m4s
+service/postgres          ClusterIP   None            <none>        5432/TCP             8m4s
+service/rabbitmq          ClusterIP   10.96.64.46     <none>        5672/TCP,15672/TCP   8m4s
+service/redis             ClusterIP   10.96.159.180   <none>        6379/TCP             8m4s
+service/storefront        ClusterIP   10.96.143.90    <none>        80/TCP               8m4s
+
+NAME                                                           POD-SELECTOR                                 AGE
+networkpolicy.networking.k8s.io/allow-backend-egress           app in (catalog,cleanup,db-migrate,orders)   8m1s
+networkpolicy.networking.k8s.io/allow-data-tier-ingress        app in (postgres,redis)                      8m1s
+networkpolicy.networking.k8s.io/allow-dns-egress               <none>                                       8m1s
+networkpolicy.networking.k8s.io/allow-ingress-to-http-tiers    app in (catalog,orders,storefront)           8m1s
+networkpolicy.networking.k8s.io/allow-monitoring-scrape        app in (catalog,orders,payments-worker)      8m1s
+networkpolicy.networking.k8s.io/allow-orders-to-rabbitmq       app=rabbitmq                                 8m1s
+networkpolicy.networking.k8s.io/allow-payments-worker-egress   app=payments-worker                          8m1s
+networkpolicy.networking.k8s.io/allow-storefront-egress        app=storefront                               8m1s
+networkpolicy.networking.k8s.io/allow-storefront-to-apis       app in (catalog,orders)                      8m1s
+networkpolicy.networking.k8s.io/default-deny-all               <none>                                       8m1s
+$ kubectl delete job db-migrate -n p09-01-bookstore   # the first Job ran before Postgres was ready and exhausted its backoffLimit
+job.batch "db-migrate" deleted from p09-01-bookstore namespace
+$ kubectl apply -k bookstore/kustomize/overlays/prod
+priorityclass.scheduling.k8s.io/bookstore-critical configured
+priorityclass.scheduling.k8s.io/bookstore-data configured
+deployment.apps/catalog configured
+statefulset.apps/postgres configured
+poddisruptionbudget.policy/catalog configured
+poddisruptionbudget.policy/orders configured
+poddisruptionbudget.policy/storefront configured
+job.batch/db-migrate created
+$ kubectl wait --for=condition=complete job/db-migrate -n p09-01-bookstore --timeout=180s
+job.batch/db-migrate condition met
+$ kubectl wait --for=condition=available deploy --all -n p09-01-bookstore --timeout=300s
+deployment.apps/catalog condition met
+deployment.apps/orders condition met
+deployment.apps/payments-worker condition met
+deployment.apps/rabbitmq condition met
+deployment.apps/redis condition met
+deployment.apps/storefront condition met
+$ kubectl apply -f client-namespace.yaml
+namespace/p09-01-client created
+$ kubectl apply -f edge-client.yaml
+pod/edge-client created
+$ kubectl wait --for=jsonpath={.status.phase}=Succeeded pod/edge-client -n p09-01-client --timeout=120s
+pod/edge-client condition met
+$ kubectl logs pod/edge-client -n p09-01-client
+HTTP 200
+[]
+$ kubectl apply -f npblock.yaml
+pod/npblock created
+$ kubectl wait --for=jsonpath={.status.phase}=Succeeded pod/npblock -n p09-01-bookstore --timeout=120s
+error: timed out waiting for the condition on pods/npblock
+$ kubectl logs pod/npblock -n p09-01-bookstore
+curl: (2) no URL specified
+curl: try 'curl --help' or 'curl --manual' for more information
+sh: http://postgres.p09-01-bookstore.svc.cluster.local:5432: not found
+sh: syntax error: unexpected "||"
+$ kubectl delete pod npblock -n p09-01-bookstore
+pod "npblock" deleted from p09-01-bookstore namespace
+$ kubectl run psa-bad -n p09-01-bookstore --dry-run=server  # deliberate action: a privileged Pod that restricted must refuse
+Error from server (Forbidden): pods "psa-bad" is forbidden: violates PodSecurity "restricted:latest": privileged (container "psa-bad" must not set securityContext.privileged=true), allowPrivilegeEscalation != false (container "psa-bad" must set securityContext.allowPrivilegeEscalation=false), unrestricted capabilities (container "psa-bad" must set securityContext.capabilities.drop=["ALL"]), runAsNonRoot != true (pod or container "psa-bad" must set securityContext.runAsNonRoot=true), seccompProfile (pod or container "psa-bad" must set securityContext.seccompProfile.type to "RuntimeDefault" or "Localhost")
+exit=1
+$ kubectl auth can-i --list --as=system:serviceaccount:p09-01-bookstore:catalog-sa -n p09-01-bookstore
+Resources                                       Non-Resource URLs                      Resource Names     Verbs
+selfsubjectreviews.authentication.k8s.io        []                                     []                 [create]
+selfsubjectaccessreviews.authorization.k8s.io   []                                     []                 [create]
+selfsubjectrulesreviews.authorization.k8s.io    []                                     []                 [create]
+clustertrustbundles.certificates.k8s.io         []                                     []                 [get list watch]
+                                                [/.well-known/openid-configuration/]   []                 [get]
+                                                [/.well-known/openid-configuration]    []                 [get]
+                                                [/api/*]                               []                 [get]
+                                                [/api]                                 []                 [get]
+                                                [/apis/*]                              []                 [get]
+                                                [/apis]                                []                 [get]
+                                                [/healthz]                             []                 [get]
+$ kubectl apply -f npblock.yaml
+pod/npblock created
+$ kubectl wait --for=jsonpath={.status.phase}=Succeeded pod/npblock -n p09-01-bookstore --timeout=120s
+pod/npblock condition met
+$ kubectl logs pod/npblock -n p09-01-bookstore
+curl: (28) Connection timed out after 5000 milliseconds
+BLOCKED-AS-EXPECTED
+$ kubectl delete pod npblock -n p09-01-bookstore
+pod "npblock" deleted from p09-01-bookstore namespace
+$ kubectl debug -n p09-01-bookstore pod/catalog-59fb44df7d-knjnt --image=gcr.io/distroless/static@sha256:c7b8faacc4439b8f5c41ca7ce4a3f8ff3e8520cb0c3444fae7292f687b00d0dd --target=catalog --profile=restricted --quiet -i -- /busybox/sh -c 'id -u; nc -z -w 3 postgres.p09-01-bookstore.svc.cluster.local 5432 && echo PG-REACHABLE'
+warning: couldn't attach to pod/catalog-59fb44df7d-knjnt, falling back to streaming logs: unable to upgrade connection: container debugger not found in pod catalog-59fb44df7d-knjnt_p09-01-bookstore
+65532
+PG-REACHABLE
+exit=0
+$ cosign verify --certificate-identity https://github.com/abd-ulbasit/bookstore-kubernetes-guide/.github/workflows/bookstore-pipeline.yml@refs/heads/main --certificate-oidc-issuer https://token.actions.githubusercontent.com ghcr.io/abd-ulbasit/bookstore-catalog@sha256:eaa26ada0a2e1575026a5e71e74572ed0bfdde80f50012e91a7be28f0de16ced | jq -r ...
+ghcr.io/abd-ulbasit/bookstore-catalog@sha256:eaa26ada0a2e1575026a5e71e74572ed0bfdde80f50012e91a7be28f0de16ced
+sha256:eaa26ada0a2e1575026a5e71e74572ed0bfdde80f50012e91a7be28f0de16ced
+https://sigstore.dev/cosign/sign/v1
+exit=
+$ kubectl get pods,svc,netpol -n p09-01-bookstore
+NAME                                   READY   STATUS      RESTARTS        AGE
+pod/catalog-59fb44df7d-knjnt           1/1     Running     0               15m
+pod/catalog-59fb44df7d-v5xwl           1/1     Running     0               15m
+pod/catalog-59fb44df7d-vz7bs           1/1     Running     0               15m
+pod/catalog-59fb44df7d-w8wm7           1/1     Running     0               15m
+pod/db-migrate-65dff                   0/1     Completed   0               5m21s
+pod/orders-674c456f4d-2gmv4            1/1     Running     0               15m
+pod/orders-674c456f4d-52svx            1/1     Running     0               15m
+pod/orders-674c456f4d-nks6g            1/1     Running     0               15m
+pod/payments-worker-568c996856-t5ngm   1/1     Running     0               15m
+pod/postgres-0                         1/1     Running     0               15m
+pod/rabbitmq-5997cbcb5d-5gsl7          1/1     Running     1 (7m53s ago)   15m
+pod/redis-574bb544f-wjm2l              1/1     Running     0               15m
+pod/storefront-76cbb89847-2j5fg        1/1     Running     0               15m
+pod/storefront-76cbb89847-9z2ws        1/1     Running     0               15m
+pod/storefront-76cbb89847-hdp24        1/1     Running     0               15m
+
+NAME                      TYPE        CLUSTER-IP      EXTERNAL-IP   PORT(S)              AGE
+service/catalog           ClusterIP   10.96.138.24    <none>        80/TCP               15m
+service/orders            ClusterIP   10.96.167.8     <none>        80/TCP               15m
+service/payments-worker   ClusterIP   None            <none>        8080/TCP             15m
+service/postgres          ClusterIP   None            <none>        5432/TCP             15m
+service/rabbitmq          ClusterIP   10.96.64.46     <none>        5672/TCP,15672/TCP   15m
+service/redis             ClusterIP   10.96.159.180   <none>        6379/TCP             15m
+service/storefront        ClusterIP   10.96.143.90    <none>        80/TCP               15m
+
+NAME                                                           POD-SELECTOR                                 AGE
+networkpolicy.networking.k8s.io/allow-backend-egress           app in (catalog,cleanup,db-migrate,orders)   15m
+networkpolicy.networking.k8s.io/allow-data-tier-ingress        app in (postgres,redis)                      15m
+networkpolicy.networking.k8s.io/allow-dns-egress               <none>                                       15m
+networkpolicy.networking.k8s.io/allow-ingress-to-http-tiers    app in (catalog,orders,storefront)           15m
+networkpolicy.networking.k8s.io/allow-monitoring-scrape        app in (catalog,orders,payments-worker)      15m
+networkpolicy.networking.k8s.io/allow-orders-to-rabbitmq       app=rabbitmq                                 15m
+networkpolicy.networking.k8s.io/allow-payments-worker-egress   app=payments-worker                          15m
+networkpolicy.networking.k8s.io/allow-storefront-egress        app=storefront                               15m
+networkpolicy.networking.k8s.io/allow-storefront-to-apis       app in (catalog,orders)                      15m
+networkpolicy.networking.k8s.io/default-deny-all               <none>                                       15m
+$ helm uninstall traefik -n p09-01-traefik
+release "traefik" uninstalled
+$ kubectl delete namespace p09-01-client p09-01-bookstore p09-01-traefik
+namespace "p09-01-client" deleted
+namespace "p09-01-bookstore" deleted
+namespace "p09-01-traefik" deleted
+$ kubectl get namespace p09-01-bookstore
+Error from server (NotFound): namespaces "p09-01-bookstore" not found
+$ kubectl get ingressclass
+No resources found

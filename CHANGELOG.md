@@ -157,6 +157,10 @@ versions follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   chapters to eleven, with each lab run as attack, harden, re-attack and
   evidence on kind, and `05-security/` joins the enforced list. The full
   Kyverno, Gatekeeper, Falco and Trivy Operator installs are still marked not run.
+- Part 09 end-to-end Bookstore (09.01) is rewritten security-first: the core
+  Bookstore runs behind Traefik under `restricted` on a kind cluster, with the
+  edge answer, a NetworkPolicy refusal and a restricted refusal captured, and
+  `09-end-to-end-bookstore/` joins the enforced list.
 
 ### Fixed
 - Standalone EKS add-ons (kube-proxy, CoreDNS, EBS CSI) now follow
