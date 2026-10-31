@@ -19,3 +19,4 @@
 #
 # The pull request that adds a line must also say how the block was checked.
 # Remove the line when the chapter stops needing it.
+15-day-to-day-production-ops/06-progressive-delivery-in-production.md | Rollout | Checked by hand against the 01.01 baseline, and by jsonschema against the rollouts.argoproj.io CRD of argo-rollouts chart 2.43.8 (app v1.10.1), extracted with helm template. sf-pilot has no Argo Rollouts CRD, so the server dry-run cannot run there.

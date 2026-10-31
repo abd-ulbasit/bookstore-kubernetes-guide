@@ -1,0 +1,71 @@
+apiVersion: argoproj.io/v1alpha1
+kind: AnalysisTemplate
+metadata:
+  name: bookstore-slo-gate
+  namespace: bookstore-platform-catalog
+spec:
+  args:
+    - name: service-name            # the container and pod-name prefix
+    - name: namespace
+    - name: canary-pod-hash         # the canary ReplicaSet's pod-template-hash
+  metrics:
+    # Success rate of the canary's own pods only: 1 - error ratio.
+    - name: success-rate
+      interval: 60s
+      count: 5                      # five samples, five minutes
+      successCondition: len(result) > 0 && result[0] >= 0.999
+      failureLimit: 2
+      provider:
+        prometheus:
+          address: http://kube-prometheus-stack-prometheus.monitoring.svc:9090
+          query: |
+            sum(rate(catalog_http_requests_total{
+              namespace="{{args.namespace}}",
+              pod=~"{{args.service-name}}-{{args.canary-pod-hash}}-.*",
+              status!~"5.."
+            }[2m]))
+            /
+            sum(rate(catalog_http_requests_total{
+              namespace="{{args.namespace}}",
+              pod=~"{{args.service-name}}-{{args.canary-pod-hash}}-.*"
+            }[2m]))
+    # 99th percentile latency of the canary's pods.
+    - name: p99-latency
+      interval: 60s
+      count: 5
+      successCondition: len(result) > 0 && result[0] <= 0.5
+      failureLimit: 2
+      provider:
+        prometheus:
+          address: http://kube-prometheus-stack-prometheus.monitoring.svc:9090
+          query: |
+            histogram_quantile(0.99,
+              sum by (le) (
+                rate(catalog_http_request_duration_seconds_bucket{
+                  namespace="{{args.namespace}}",
+                  pod=~"{{args.service-name}}-{{args.canary-pod-hash}}-.*"
+                }[2m])
+              )
+            )
+    # CPU used by the canary as a share of its CPU request.
+    - name: cpu-saturation
+      interval: 60s
+      count: 5
+      successCondition: len(result) > 0 && result[0] <= 0.85
+      failureLimit: 2
+      provider:
+        prometheus:
+          address: http://kube-prometheus-stack-prometheus.monitoring.svc:9090
+          query: |
+            sum(rate(container_cpu_usage_seconds_total{
+              namespace="{{args.namespace}}",
+              pod=~"{{args.service-name}}-{{args.canary-pod-hash}}-.*",
+              container="{{args.service-name}}"
+            }[2m]))
+            /
+            sum(kube_pod_container_resource_requests{
+              namespace="{{args.namespace}}",
+              pod=~"{{args.service-name}}-{{args.canary-pod-hash}}-.*",
+              container="{{args.service-name}}",
+              resource="cpu"
+            })
