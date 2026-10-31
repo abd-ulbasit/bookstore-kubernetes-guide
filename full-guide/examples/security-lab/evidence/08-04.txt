@@ -2,21 +2,30 @@
 # Tier A: a kind cluster that the lab owns, shared with other lab runs. The
 # Kubernetes server is v1.37.0 and kubectl is v1.37.2.
 # Recorded on 2026-10-31 by running examples/security-lab/labs/08-04.sh from
-# full-guide/.
-# The lab used two namespaces, p08-04-bookstore and p08-04-acme. The chapter
-# prints bookstore and tenant-acme and applies the same files. The script
-# changes only the namespace fields of each file (its rename step), so object
-# names are the chapter's own. Lines that name the lab namespaces are kept as
-# captured. The chapter's output blocks show only lines without a namespace
-# name, and the commands in the chapter use the reader's names.
+# full-guide/. This is the second run: the first had no Section 4, and the
+# Bookstore NetworkPolicy file had since gained an egress policy, so the
+# listings below differ from that first run.
+# The lab used three namespaces: p08-04-bookstore, p08-04-acme and p08-04-probe.
+# The chapter prints bookstore, tenant-acme and probe and applies the same
+# files. The script changes only the namespace fields of each file (its rename
+# step), so object names are the chapter's own. Lines that name the lab
+# namespaces are kept as captured. The chapter's output blocks show only lines
+# without a namespace name, and the commands in the chapter use the reader's
+# names.
 # Section 1 applied the Bookstore namespace's guardrail objects (the namespace
 # with its Pod Security labels, the quota and limits, the ServiceAccounts and
 # RBAC, and the NetworkPolicies). It did not apply the Bookstore workloads, to
 # keep the shared cluster small. The default ServiceAccount in the listing is
 # the one every namespace gets.
 # Section 2 applied second-tenant.yaml with its namespace renamed.
-# The cleanup step deleted both namespaces and the script ended with its last
-# line.
+# Section 4 created three Pods from manifests the script writes: acme-hog in
+# tenant-acme, which takes the whole memory quota, and probe and peer in a
+# plain namespace with no NetworkPolicy. The two refused creates and the
+# refused request are deliberate. The probe namespace is labelled restricted
+# and its Pods carry the full baseline. The shell variables in the two exec
+# commands are shown unexpanded; they held the Pod IPs.
+# The cleanup step deleted all three namespaces and the script ended with its
+# last line.
 
 == Section 1: the Bookstore namespace's guardrails
 $ kubectl apply -f 00-namespace.yaml (namespace p08-04-bookstore)
@@ -45,33 +54,35 @@ networkpolicy.networking.k8s.io/allow-backend-egress created
 networkpolicy.networking.k8s.io/allow-storefront-egress created
 networkpolicy.networking.k8s.io/allow-payments-worker-egress created
 networkpolicy.networking.k8s.io/allow-monitoring-scrape created
+networkpolicy.networking.k8s.io/allow-span-egress created
 $ kubectl get resourcequota,limitrange -n p08-04-bookstore
 NAME                            REQUEST                                                 LIMIT                                   AGE
-resourcequota/bookstore-quota   pods: 0/30, requests.cpu: 0/2, requests.memory: 0/2Gi   limits.cpu: 0/4, limits.memory: 0/4Gi   2s
+resourcequota/bookstore-quota   pods: 0/30, requests.cpu: 0/2, requests.memory: 0/2Gi   limits.cpu: 0/4, limits.memory: 0/4Gi   1s
 
 NAME                          CREATED AT
-limitrange/bookstore-limits   2026-10-31T04:16:43Z
+limitrange/bookstore-limits   2026-10-31T07:29:57Z
 $ kubectl get serviceaccounts -n p08-04-bookstore
 NAME                 AGE
-catalog-sa           2s
-default              2s
+catalog-sa           1s
+default              1s
 migrate-sa           1s
-orders-sa            2s
-payments-worker-sa   2s
-postgres-sa          2s
+orders-sa            1s
+payments-worker-sa   1s
+postgres-sa          1s
 rabbitmq-sa          1s
 redis-sa             1s
-storefront-sa        2s
+storefront-sa        1s
 $ kubectl get networkpolicy -n p08-04-bookstore
 NAME                           POD-SELECTOR                                 AGE
-allow-backend-egress           app in (catalog,cleanup,db-migrate,orders)   1s
-allow-data-tier-ingress        app in (postgres,redis)                      1s
+allow-backend-egress           app in (catalog,cleanup,db-migrate,orders)   0s
+allow-data-tier-ingress        app in (postgres,redis)                      0s
 allow-dns-egress               <none>                                       1s
 allow-ingress-to-http-tiers    app in (catalog,orders,storefront)           1s
-allow-monitoring-scrape        app in (catalog,orders,payments-worker)      1s
-allow-orders-to-rabbitmq       app=rabbitmq                                 1s
-allow-payments-worker-egress   app=payments-worker                          1s
-allow-storefront-egress        app=storefront                               1s
+allow-monitoring-scrape        app in (catalog,orders,payments-worker)      0s
+allow-orders-to-rabbitmq       app=rabbitmq                                 0s
+allow-payments-worker-egress   app=payments-worker                          0s
+allow-span-egress              app in (orders,payments-worker,storefront)   0s
+allow-storefront-egress        app=storefront                               0s
 allow-storefront-to-apis       app in (catalog,orders)                      1s
 default-deny-all               <none>                                       1s
 $ kubectl get networkpolicy default-deny-all -n p08-04-bookstore -o jsonpath='{.spec.policyTypes}'
@@ -97,7 +108,7 @@ NAME                              REQUEST                                       
 resourcequota/tenant-acme-quota   configmaps: 1/20, persistentvolumeclaims: 0/5, pods: 0/15, requests.cpu: 0/1, requests.memory: 0/1Gi, secrets: 0/20, services: 0/10   limits.cpu: 0/2, limits.memory: 0/2Gi   1s
 
 NAME                            CREATED AT
-limitrange/tenant-acme-limits   2026-10-31T04:16:45Z
+limitrange/tenant-acme-limits   2026-10-31T07:29:59Z
 $ kubectl get networkpolicy -n p08-04-acme
 NAME                        POD-SELECTOR   AGE
 allow-dns-egress            <none>         0s
@@ -120,18 +131,46 @@ yes
 $ kubectl auth can-i get secrets --as=system:serviceaccount:p08-04-acme:acme-deployer -n p08-04-bookstore
 no
 
-== Section 3: a deliberate failure, refused by restricted
+== Section 4: a tenant at its quota, and a Pod from another namespace
+$ kubectl apply -f acme-hog.yaml   # tenant-acme; asks for the whole 1Gi memory quota
+pod/acme-hog created
+$ kubectl wait --for=condition=Ready pod/acme-hog -n p08-04-acme --timeout=180s
+pod/acme-hog condition met
+$ kubectl get resourcequota tenant-acme-quota -n p08-04-acme
+NAME                REQUEST                                                                                                                                   LIMIT                                        AGE
+tenant-acme-quota   configmaps: 1/20, persistentvolumeclaims: 0/5, pods: 1/15, requests.cpu: 50m/1, requests.memory: 1Gi/1Gi, secrets: 0/20, services: 0/10   limits.cpu: 250m/2, limits.memory: 1Gi/2Gi   5s
+$ kubectl apply -f acme-second.yaml   # tenant-acme; deliberate failure, the quota is full
+Error from server (Forbidden): error when creating "acme-second.yaml": pods "acme-second" is forbidden: exceeded quota: tenant-acme-quota, requested: requests.memory=512Mi, used: requests.memory=1Gi, limited: requests.memory=1Gi
+$ kubectl apply -f acme-big.yaml   # tenant-acme; deliberate failure, over the LimitRange max
+Error from server (Forbidden): error when creating "acme-big.yaml": pods "acme-big" is forbidden: maximum memory usage per Container is 1Gi, but limit is 2Gi
+$ kubectl apply -f probe.yaml   # namespace p08-04-probe, no NetworkPolicy of its own
+namespace/p08-04-probe created
+pod/probe created
+pod/peer created
+$ kubectl wait --for=condition=Ready pod/probe pod/peer -n p08-04-probe --timeout=180s
+pod/probe condition met
+pod/peer condition met
+$ kubectl exec -n p08-04-probe probe -- wget -T 5 -qO- http://$PEER_IP:8080/; echo "exit status: $?"   # control: a Pod in the same namespace
+ok
+exit status: 0
+$ kubectl exec -n p08-04-probe probe -- wget -T 5 -qO- http://$ACME_IP:8080/; echo "exit status: $?"   # deliberate: another tenant's Pod
+wget: download timed out
+command terminated with exit code 1
+exit status: 1
+
+== Section 5: a deliberate failure, refused by restricted
 $ kubectl run escape-probe -n p08-04-acme --image=bookstore/catalog:dev --restart=Never --privileged --dry-run=server
 Error from server (Forbidden): pods "escape-probe" is forbidden: violates PodSecurity "restricted:latest": privileged (container "escape-probe" must not set securityContext.privileged=true), allowPrivilegeEscalation != false (container "escape-probe" must set securityContext.allowPrivilegeEscalation=false), unrestricted capabilities (container "escape-probe" must set securityContext.capabilities.drop=["ALL"]), runAsNonRoot != true (pod or container "escape-probe" must set securityContext.runAsNonRoot=true), seccompProfile (pod or container "escape-probe" must set securityContext.seccompProfile.type to "RuntimeDefault" or "Localhost")
 
-== Section 4: environments are overlays of one namespace, not tenants
+== Section 6: environments are overlays of one namespace, not tenants
 $ kubectl kustomize examples/bookstore/kustomize/overlays/dev | grep -m1 'namespace:'
   namespace: bookstore
 $ kubectl kustomize examples/bookstore/kustomize/overlays/prod | grep -m1 'namespace:'
   namespace: bookstore
 
 == Cleanup
-$ kubectl delete namespace p08-04-acme p08-04-bookstore --wait=true
+$ kubectl delete namespace p08-04-acme p08-04-bookstore p08-04-probe --wait=true
 namespace "p08-04-acme" deleted
 namespace "p08-04-bookstore" deleted
+namespace "p08-04-probe" deleted
 lab 08.04 done

@@ -558,6 +558,15 @@ for more.
 
 ### 4. Install the operator with its version and digest pinned
 
+Chart 0.29.1 is the newest in the `cnpg` repository (`helm search repo
+cnpg/cloudnative-pg --versions`, checked 2026-10-31), and it ships operator
+1.30.1, the newest release. Upstream's supported-releases page lists
+Kubernetes 1.34 to 1.36 as supported for the 1.30 line and 1.37 as "tested,
+but not supported". The guide's lab cluster is on 1.37, so the operator's
+compatibility with it is not established here, and the chapter's own install
+was not run (see the captured-output note). Read upstream's page again before
+you pin a cluster to this operator.
+
 Dry-run the chart's objects into the restricted namespace first. Nothing is
 stored. A Pod Security violation in the operator's pod template would appear
 here as a warning, because the namespace sets `warn` to restricted. The same
