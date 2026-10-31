@@ -2,8 +2,8 @@
 
 > A topic → resource map: for each Part of this guide, the most relevant
 > chapter(s) from the reference library plus 1–3 curated official-docs links.
-> The book→chapter mapping mirrors the guide's internal citation map exactly;
-> nothing here is invented. This guide is **standalone** — these are for going
+> The book chapters here are the ones each guide chapter cites. A row marked
+> link-later is a plan, checked when its chapter lands. This guide is **standalone** — these are for going
 > *deeper* on what a chapter already taught, not prerequisites.
 
 This is a reference (no nine-section anatomy). Each chapter of the guide also
@@ -150,13 +150,13 @@ and runtime detection, and vulnerability management.
 | [01 — Authn, authz, RBAC](../05-security/01-authn-authz-rbac.md) | KP ch.26 (Access Control) | R ch.10 (Identity); L securing-the-API-server material |
 | [02 — Pod security](../05-security/02-pod-security.md) | KP ch.23 (Process Containment) | R ch.8 (Admission Control); official docs (Pod Security Standards) |
 | [03 — Supply chain](../05-security/03-supply-chain.md) | R ch.15 (Software Supply Chain) | KP ch.30 (Image Builder); official docs (Kyverno/Cosign) |
-| [04 — Secrets at rest and in use](../05-security/04-secrets-and-cluster-hardening.md) | R ch.7 (Secret Management) + R ch.8 (Admission Control) | KP ch.25 (Secure Configuration) |
-| 05: Seccomp, AppArmor, SELinux and RuntimeClass <!-- link-later: 05.05 --> | KP ch.23 (Process Containment) | seccomp and AppArmor docs (below) |
+| [04 — Secrets at rest and in use](../05-security/04-secrets-and-cluster-hardening.md) | R ch.7 (Secret Management) | KP ch.25 (Secure Configuration) |
+| 05: Kernel isolation: seccomp, AppArmor, SELinux, sandboxed runtimes <!-- link-later: 05.05 --> | KP ch.23 (Process Containment) | seccomp and AppArmor docs (below) |
 | 06: Control plane and node hardening <!-- link-later: 05.06 --> | L securing-the-API-server material | CIS Kubernetes Benchmark (below) |
 | 07: Admission control and policy as code <!-- link-later: 05.07 --> | R ch.8 (Admission Control) | Kyverno docs (below) |
-| 08: Audit logs, Falco, Tetragon and incident response <!-- link-later: 05.08 --> | R ch.9 (Observability) | auditing, Falco and Tetragon docs (below) |
-| 09: Vulnerability management <!-- link-later: 05.09 --> | R ch.15 (Software Supply Chain) | OWASP Kubernetes Top Ten (below) |
-| 10: Capstone, hardening a cluster <!-- link-later: 05.10 --> | CISA alert on the NSA and CISA guide (below) | NIST SP 800-190 (below) |
+| 08: Audit logs, runtime detection and incident response <!-- link-later: 05.08 --> | R ch.9 (Observability) | auditing, Falco and Tetragon docs (below) |
+| 09: Running security on a platform team <!-- link-later: 05.09 --> | R ch.15 (Software Supply Chain) | OWASP Kubernetes Top Ten; CISA alert on the NSA and CISA guide; NIST SP 800-190 (all below) |
+| 10: Capstone: attack and harden the bookstore <!-- link-later: 05.10 --> | none; it draws on the Part 05 chapters above | none |
 
 Official docs:
 - Authentication & authorization (RBAC) — <https://kubernetes.io/docs/reference/access-authn-authz/rbac/>
@@ -410,7 +410,8 @@ Standout articles:
 - FinOps Foundation — the FinOps framework + maturity model — <https://www.finops.org/framework/>
 - Spotify's Backstage adoption story — <https://backstage.spotify.com/blog/> (and the canonical "Spotify Engineering Culture" backstage posts at <https://engineering.atspotify.com/>)
 - Debezium outbox-pattern canonical post — <https://debezium.io/blog/2019/02/19/reliable-microservices-data-exchange-with-the-outbox-pattern/>
-- Google Cloud Architecture Center — multi-region active-active patterns — <https://cloud.google.com/architecture/disaster-recovery>- Istio ambient + Coraza WAF — <https://istio.io/latest/blog/> (browse for the WAF + ambient announcements)
+- Google Cloud Architecture Center — multi-region active-active patterns — <https://cloud.google.com/architecture/disaster-recovery>
+- Istio ambient + Coraza WAF — <https://istio.io/latest/blog/> (browse for the WAF + ambient announcements)
 
 ---
 
