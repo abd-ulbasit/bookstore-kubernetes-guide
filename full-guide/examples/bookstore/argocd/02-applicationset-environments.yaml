@@ -1,11 +1,38 @@
-# Bookstore per-environment ApplicationSet (Part 15 ch.04). One Argo CD
-# Application per environment, each pointed at its overlay. Apply it once to
-# the management cluster; Argo CD owns the three Applications after that.
+# Bookstore per-environment ApplicationSet (Part 15 ch.04), with the AppProject
+# its Applications run in. Apply it once to the management cluster; Argo CD owns
+# the three Applications after that.
 #
-# The List generator names the environments. The destination names are the
-# kind contexts used in the chapter's walkthrough. A real fleet matches
-# clusters on the env label instead, with the matrix generator the chapter
-# describes.
+# The AppProject bounds what these Applications may deploy: the Bookstore
+# repository only, the bookstore namespace on the three environment clusters,
+# and the two cluster-scoped kinds the base ships. Without it the Applications
+# would fall into the `default` project, which allows any source and any
+# destination.
+#
+# The List generator names the environments. The destination names are the kind
+# contexts used in the chapter's walkthrough. A real fleet matches clusters on
+# the env label instead, with the matrix generator the chapter describes.
+apiVersion: argoproj.io/v1alpha1
+kind: AppProject
+metadata:
+  name: bookstore-environments
+  namespace: argocd
+spec:
+  description: Bookstore per-environment Applications (Part 15 ch.04).
+  sourceRepos:
+    - "https://github.com/<ORG>/<REPO>"
+  destinations:
+    - name: kind-bookstore-platform-dev
+      namespace: bookstore
+    - name: kind-bookstore-platform-staging
+      namespace: bookstore
+    - name: kind-bookstore-platform-prod
+      namespace: bookstore
+  clusterResourceWhitelist:
+    - group: ""
+      kind: Namespace
+    - group: scheduling.k8s.io
+      kind: PriorityClass
+---
 apiVersion: argoproj.io/v1alpha1
 kind: ApplicationSet
 metadata:
@@ -24,7 +51,7 @@ spec:
     metadata:
       name: "bookstore-{{ .env }}"
     spec:
-      project: default
+      project: bookstore-environments
       source:
         repoURL: "https://github.com/<ORG>/<REPO>"
         targetRevision: main

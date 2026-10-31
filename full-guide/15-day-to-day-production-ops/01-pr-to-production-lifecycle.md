@@ -76,7 +76,7 @@ it converges to the latest commit.**
   Deployment generation is *not* a release: a RollingUpdate moves 100% of
   traffic onto unverified code, gradually. A real release is a
   metric-gated canary via Argo Rollouts (Part 07 ch.05) — the SLO gate
-  (success rate, p95 latency) either promotes or aborts the canary
+  (success rate and latency; 15.06 lists the metrics) either promotes or aborts the canary
   *automatically*, and the loop returns to stage 5 (a rollback is a new
   commit; `git revert` is the durable form).
 - **The loop runs at vastly different cadences in dev vs prod.** Dev sees
@@ -127,7 +127,7 @@ flowchart TD
     gops["5. GitOps repo updated<br/>(CI on main builds, signs and pushes,<br/>then opens the digest-bump PR)"]
     argo["6. Argo CD reconcile<br/>(Part 07 ch.04)"]
     canary{"7. progressive rollout<br/>(Argo Rollouts canary<br/>Part 07 ch.05)"}
-    slo{"8. SLO gate<br/>success-rate &gt;= 0.95<br/>p95 &lt;= 0.5s"}
+    slo{"8. SLO gate<br/>success-rate &gt;= 0.999<br/>(values: 15.06)"}
     prod["live: prod traffic on new version"]
     rollback["rollback<br/>(git revert OR<br/>analysis abort)"]
     next["next ticket"]
@@ -242,22 +242,23 @@ observable artifact. Trace them:
 # Stage 1 — commit on the source side: which commit is currently deployed?
 # The GitOps repo's overlay has the answer (pinned digest), and the git log
 # above it has the audit trail.
-cat examples/bookstore-platform/kustomize/regions/us-east/kustomization.yaml \
-  | grep -A2 '^images:'
-# Illustrative output (not captured):
-# images:
-# - name: bookstore/catalog
+grep -B1 -A2 'name: bookstore/catalog' \
+  full-guide/examples/bookstore/kustomize/overlays/prod/images/kustomization.yaml
+# Illustrative output shape (not captured). The digest is the one promotion
+# wrote into the prod pin file, and it is the bits that run:
+# - digest: sha256:DIGEST-HEX
+#   name: bookstore/catalog
 #   newName: AWS_ACCOUNT_ID.dkr.ecr.AWS_REGION.amazonaws.com/bookstore/catalog
-#   digest: sha256:DIGEST-HEX            <- the deployed bits
 
 # Stage 3 — what CI proved about THAT digest: Rekor log + Cosign cert
 # (read-only public log; works without any cluster access):
 cosign verify \
-  --certificate-identity-regexp '^https://github\.com/GITHUB_ORG/bookstore/\.github/workflows/[^/]+\.yml@refs/heads/main$' \
+  --certificate-identity 'https://github.com/GITHUB_ORG/bookstore/.github/workflows/catalog.yml@refs/heads/main' \
   --certificate-oidc-issuer 'https://token.actions.githubusercontent.com' \
   AWS_ACCOUNT_ID.dkr.ecr.AWS_REGION.amazonaws.com/bookstore/catalog@sha256:DIGEST-HEX
-# -> the cert identity is the workflow that signed this. THIS is Kyverno's
-#    verifyImages check at admission (Part 15 ch.03), reproduced locally.
+# -> the cert identity is the catalog workflow on main, the one that signed
+#    this digest. Kyverno's verifyImages rule at admission (Part 15 ch.03)
+#    checks the same exact identity, so this command reproduces that check.
 
 # Stage 6 — Argo CD's record of WHEN it reconciled this digest:
 argocd app history bookstore-prod
@@ -321,12 +322,12 @@ A developer fixes a 5xx in `catalog`. Here is the **exact** sequence:
                    Application. The catalog Rollout's pod template now
                    references the new digest.
 
- 7. canary         Argo Rollouts: 10% -> pause 60s -> 25% -> pause 60s
-                   -> analysis -> 50% -> pause 60s -> 100%. The analysis
-                   step queries Prometheus.
+ 7. canary         Argo Rollouts: 10% -> pause 5m -> 25% -> pause 10m
+                   -> 50% -> pause 15m -> 100%, with an analysis step after
+                   each weight. The analysis queries Prometheus (15.06).
 
- 8. SLO gate       success-rate >= 0.95 AND p95 <= 0.5s, sampled every
-                   20s, failureLimit 3. Passes -> auto-promote. Fails ->
+ 8. SLO gate       success-rate >= 0.999, sampled every 60s, failureLimit 2
+                   (the production values in 15.06). Passes -> auto-promote. Fails ->
                    automatic rollback (canary -> 0, stable -> 100%).
                    Either way, no `kubectl rollout undo`.
 
@@ -394,9 +395,10 @@ enforcing "rollback is a commit, not a kubectl undo".
   Flagger instead of Argo Rollouts) is a swap, not a rewrite.
 
 - **The "evidence" stages produce *attestations*, not just logs.** Stage 3
-  (CI) writes an SBOM (syft → SPDX-JSON) and a SLSA provenance
-  attestation, both bound to the image digest via cosign attest (Part
-  15 ch.03). A future consumer — a *new* admission controller, a
+  (CI) writes a CycloneDX SBOM (syft), signed and attached to the image
+  digest with cosign attest, and a SLSA provenance attestation from
+  `actions/attest-build-provenance`, bound to the same digest (Part 15
+  ch.02 and ch.03). A future consumer — a *new* admission controller, a
   compliance scanner, an SBOM diff tool — can read these attestations
   *without trusting the pipeline that produced them*; they verify the
   attestation chain back to the Sigstore root. Logs would not give you
@@ -455,7 +457,7 @@ enforcing "rollback is a commit, not a kubectl undo".
 > Same eight stages, different dials. Dev: auto-merge GitOps PR, no
 > canary, no manual gate. Staging: human-approve GitOps PR, light canary
 > (10→50→100). Prod: human-approve GitOps PR, full canary (10→25→50→100
-> with two analysis gates), `pause: {}` for human approval before 100%
+> with an analysis gate after each step, as 15.06 builds it), `pause: {}` for human approval before 100%
 > on the riskiest services. 15.04 shows the ApplicationSet shape that
 > makes this a config, not a code, change.
 
@@ -501,7 +503,8 @@ kubectl argo rollouts promote catalog -n bookstore   # human gate (if any)
 kubectl argo rollouts abort   catalog -n bookstore   # force rollback
 ```
 
-Rollback variants (all are commits, never `kubectl rollout undo`):
+Rollback variants. The first two are commits. The automatic one is not, so
+the prod overlay keeps the new digest until a revert commit lands:
 
 ```sh
 # Soft: open a revert PR for the GitOps digest move. Merging it makes
@@ -509,7 +512,8 @@ Rollback variants (all are commits, never `kubectl rollout undo`):
 gh -R GITHUB_ORG/bookstore-gitops pr revert PR_NUM
 # Hard: open a revert PR for the app-repo fix, and let CI re-deploy.
 gh -R GITHUB_ORG/bookstore pr revert PR_NUM
-# Automatic: the canary's analysis already aborted (preferred).
+# Automatic, not a commit: the aborted canary sends traffic back to the stable
+# ReplicaSet. Follow it with one of the reverts above (15.04 explains why).
 ```
 
 Checklist:
