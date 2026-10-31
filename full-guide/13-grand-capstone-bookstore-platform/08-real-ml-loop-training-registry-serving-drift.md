@@ -391,13 +391,13 @@ kubectl -n bookstore-platform-ml patch inferenceservice recommender --type merge
 
 ### 6. Generate predictions (to feed the drift detector)
 
-`EDGE_CA_FILE` is the edge CA that 13.07 exports. The loop checks the
+`edge-ca.crt` is the edge CA that 13.07 exports once. The loop checks the
 edge's certificate against that CA; it does not skip the check with `-k`.
 
 ```sh
 # Recommendations API (assumes ch.13.08's app/recommendations/ is deployed)
 for i in $(seq 1 1100); do
-  curl -s --cacert "$EDGE_CA_FILE" -H "Authorization: Bearer $JWT" \
+  curl -s --cacert edge-ca.crt -H "Authorization: Bearer $JWT" \
     -X POST \
     -H "Content-Type: application/json" \
     -d "{\"user_id\":\"u-$i\",\"features\":[0.5,0.3,0.2]}" \
@@ -413,7 +413,7 @@ done
 ```sh
 # Send 200 predictions with shifted features (drift the distribution)
 for i in $(seq 1 200); do
-  curl -s --cacert "$EDGE_CA_FILE" -H "Authorization: Bearer $JWT" \
+  curl -s --cacert edge-ca.crt -H "Authorization: Bearer $JWT" \
     -X POST \
     -H "Content-Type: application/json" \
     -d "{\"user_id\":\"u-d-$i\",\"features\":[5.0,3.0,2.0]}" \
