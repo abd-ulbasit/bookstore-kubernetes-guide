@@ -123,9 +123,12 @@ it.
 Tenants share one API server, one set of nodes and one kernel, so this is
 soft isolation. The controls below narrow what a tenant can reach. They do
 not stop a kernel exploit; the hard shapes in the table above do. A
-NetworkPolicy works only where the CNI enforces it. kind's default CNI,
-kindnet, does not document NetworkPolicy enforcement, so use a CNI that
-does before you count the default-deny as proven.
+NetworkPolicy works only where the CNI enforces it. kind has enforced it out
+of the box since v0.24 through
+[kube-network-policies](https://github.com/kubernetes-sigs/kube-network-policies),
+as its release notes say, and a probe on this guide's kind cluster showed both
+ingress and egress refused (13.06, step 4). On any other CNI, check that it
+enforces before you count the default-deny as proven.
 
 The default-deny above covers tenant namespaces only. The platform namespaces
 this part creates (argocd, cnpg-system, keycloak, crossplane-system and the

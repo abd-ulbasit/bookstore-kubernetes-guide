@@ -4,7 +4,7 @@
 > (not behind Argo CD; not behind an Argo Rollout) is regressing. This
 > shape exists on the Bookstore Platform for **addons** and **third-
 > party charts** on the cluster's platform-base path (kube-prometheus-
-> stack, ingress-nginx, external-secrets, cert-manager) — i.e. the
+> stack, traefik, external-secrets, cert-manager), that is, the
 > charts installed by `bootstrap-cluster.sh` before Argo CD takes over
 > the app namespaces. The Helm release ledger (the `Secret` named
 > `sh.helm.release.v1.<RELEASE>.v<N>`) holds the manifests + values for
@@ -33,7 +33,7 @@
 ## Alert / trigger
 
 - A page from an addon's alert: `KubeProxyDown`,
-  `IngressNginxConfigReloadFailing`,
+  `TraefikConfigReloadFailing`,
   `ExternalSecretsControllerNotReady`.
 - A platform engineer's manual decision after upgrading a chart
   (`helm upgrade kube-prometheus-stack ...`) and seeing metric

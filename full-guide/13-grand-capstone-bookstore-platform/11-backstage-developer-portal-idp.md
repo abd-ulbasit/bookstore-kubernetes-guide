@@ -293,6 +293,16 @@ published under `docker.io/bitnami`, so the Application pins the older tag
 under `bitnamilegacy` by digest. Production points at the CNPG cluster from
 ch.13.06 instead.
 
+The Postgres container also has a read-only root filesystem. The Application
+mounts emptyDirs at `/tmp`, `/var/run/postgresql`,
+`/opt/bitnami/postgresql/conf` and `/opt/bitnami/postgresql/tmp`. The last two
+are the paths the current Bitnami chart (18.12.16) mounts when its read-only
+root is on; the lab confirmed that by rendering that chart. The pinned image is
+older than the chart, and the lab never started it: the dry run in section 7
+checks admission only. So whether Postgres starts on these four mounts is
+untested. If the pod crashes, read its log, add the path it names as one more
+emptyDir, or use the CNPG cluster instead.
+
 ### 2. Apply the rest of the Backstage manifests
 
 Apply them in this order. Each file says what it is for. The Application in
@@ -454,7 +464,7 @@ mkdocs.yml
 
 The backend acts with one ServiceAccount, `backstage`, not with the rights of
 the person who signed in. `rbac.yaml` grants it two things: read on workloads
-across the cluster, and create, get and patch on Applications in `argocd`.
+across the cluster, and create and get on Applications in `argocd`.
 List what it may do in a namespace, as the ServiceAccount sees it:
 
 ```sh
@@ -500,7 +510,7 @@ kubectl auth can-i --list -n argocd --as=system:serviceaccount:backstage:backsta
 <!-- gate: output -->
 ```text
 Resources                                       Non-Resource URLs                      Resource Names   Verbs
-applications.argoproj.io                        []                                     []               [create get patch]
+applications.argoproj.io                        []                                     []               [create get]
 # ...
 ```
 
@@ -704,7 +714,7 @@ Checklist (the developer portal closed when all seven are yes):
 - [ ] Not done in this chapter: a deny-by-default permission policy. The
       form stays with the platform team until it exists.
 - [ ] `kubectl auth can-i --list` (section 7) shows reads only in
-      `backstage`, and create, get and patch on Applications in `argocd`.
+      `backstage`, and create and get on Applications in `argocd`.
 
 ## Test your understanding
 

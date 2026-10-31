@@ -254,8 +254,25 @@ registered in `security/namespace-exceptions.yaml` with its reason and an
 expiry. `examples/bookstore-platform/kafka/networkpolicy.yaml` gives
 `kafka-system` a default deny, then allows the TLS listener's clients and
 Strimzi's own traffic. Step 2 applies it. Its allows were written from the
-manifests and the Strimzi docs, so check them against your own clients before
-you rely on them.
+manifests and the Strimzi docs. The lab server-dry-ran the file, and the API
+server accepted all six policies (transcript `13-05.txt`). The lab did not
+apply it to a Kafka cluster, and no client was tested against it, so check the
+allows against your own clients before you rely on them. The dry run, in a
+namespace the lab created for it:
+
+```sh
+kubectl apply --dry-run=server -f examples/bookstore-platform/kafka/networkpolicy.yaml
+```
+
+<!-- gate: output -->
+```text
+networkpolicy.networking.k8s.io/default-deny-all created (server dry run)
+networkpolicy.networking.k8s.io/allow-dns-egress created (server dry run)
+networkpolicy.networking.k8s.io/allow-kafka-tls-clients created (server dry run)
+networkpolicy.networking.k8s.io/allow-strimzi-internal created (server dry run)
+networkpolicy.networking.k8s.io/allow-connect-egress created (server dry run)
+networkpolicy.networking.k8s.io/allow-operator-api-egress created (server dry run)
+```
 
 Confirm the operator is up. *Illustrative output, not captured.*
 

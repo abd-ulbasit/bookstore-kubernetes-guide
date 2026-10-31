@@ -1,0 +1,19 @@
+# Transcript for 13-grand-capstone-bookstore-platform/05-search-and-product-discovery.md, the server dry run of kafka/networkpolicy.yaml (hands-on step 2).
+# Lab cluster: a kind cluster on Kubernetes v1.37, kubectl client v1.37.2. The
+# cluster name differs from the chapter's. The chapter's kafka-system namespace
+# runs as p13-finish-kafka, a namespace this run creates and deletes.
+# Only a server dry run: it shows that the API server accepts the six
+# NetworkPolicy objects. Strimzi is not installed and no Kafka client ran, so
+# nothing here tests whether the allows admit every client the chapter needs.
+## 1. The policies against the API server
+$ kubectl create namespace p13-finish-kafka
+namespace/p13-finish-kafka created
+$ sed s/kafka-system/p13-finish-kafka/g examples/bookstore-platform/kafka/networkpolicy.yaml | kubectl apply --dry-run=server -f -
+networkpolicy.networking.k8s.io/default-deny-all created (server dry run)
+networkpolicy.networking.k8s.io/allow-dns-egress created (server dry run)
+networkpolicy.networking.k8s.io/allow-kafka-tls-clients created (server dry run)
+networkpolicy.networking.k8s.io/allow-strimzi-internal created (server dry run)
+networkpolicy.networking.k8s.io/allow-connect-egress created (server dry run)
+networkpolicy.networking.k8s.io/allow-operator-api-egress created (server dry run)
+$ kubectl delete namespace p13-finish-kafka
+namespace "p13-finish-kafka" deleted

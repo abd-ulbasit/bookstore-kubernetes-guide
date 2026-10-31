@@ -332,6 +332,15 @@ kubectl apply -f examples/bookstore-platform/ml/alibi-detect-drift.yaml
 kubectl apply -f examples/bookstore-platform/ml/argo-events-drift-trigger.yaml
 ```
 
+The lab checked two of these files without running anything from them. The API
+server accepted all six policies in `networkpolicy.yaml` in a server dry run.
+It refused `eventbus.yaml` for want of the `EventBus` CRD, which the lab does
+not have, so the object was checked a different way: a script compared its
+field names with the json tags in the Argo Events v1.8.0 Go types, and every
+name was found. Neither file was applied to a running workload. The EventBus
+never started, so no EventSource or Sensor ran, the drift loop is untested, and
+the policy allows are unproven by traffic (transcript `13-08.txt`, section 6).
+
 `kafka-users.yaml` comes first: the drift detector and the EventSource mount
 the certificates it issues. The InferenceService's `storageUri` is a
 placeholder until step 5 writes the real path.

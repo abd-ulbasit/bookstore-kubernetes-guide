@@ -93,8 +93,8 @@ routed by tenant + region + severity.**
   returns. Put a per-tenant proxy in front of the datasources that
   enforces the tenant from the JWT, or use Grafana Enterprise
   data-source permissions. This chapter's Grafana is internal to the
-  platform team; tenants reach their data through a portal (13.02 owns
-  tenant access).
+  platform team. No chapter in this Part builds a tenant-facing portal for
+  telemetry, so tenants have no read path to it here.
 - **Alertmanager.** Inside `kube-prometheus-stack`. The routing tree
   groups by `{tenant, region, severity}`. `severity=page` routes to
   PagerDuty; `severity=warn` to Slack; `severity=info` to a digest.

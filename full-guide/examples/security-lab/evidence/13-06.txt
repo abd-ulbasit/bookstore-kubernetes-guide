@@ -209,3 +209,62 @@ serviceaccount/payments-worker created (server dry run)
 deployment.apps/payments-worker created (server dry run)
 $ kubectl delete namespace p13-06-payments --timeout=240s
 namespace "p13-06-payments" deleted
+
+## step 14 the payments NetworkPolicies applied and probed (added after review)
+# Kind cluster sf-pilot, CNI kindnet (kindest/kindnetd v20260820-69b56db7). The
+# probes below show it enforced both ingress and egress. The chapter's
+# namespace bookstore-platform-payments runs as p13-finish-pay, and the images
+# are busybox 1.36 stand-ins: a gateway that serves port 8080 (label
+# app=payments-gateway), a payments-worker and a stranger, both idle. The
+# gateway pod IP stands in for the gateway Service. The policy file is the
+# repository's, with only the namespace swapped. The first apply uses the file as
+# it stood before this change (git HEAD at the time), the second the file now.
+$ kubectl create namespace p13-finish-pay
+namespace/p13-finish-pay created
+$ kubectl -n p13-finish-pay apply -f pods.yaml   (a gateway that serves 8080, a payments-worker and a stranger)
+pod/gateway created
+pod/worker created
+pod/stranger created
+$ kubectl -n p13-finish-pay wait --for=condition=Ready pod --all --timeout=120s
+pod/gateway condition met
+pod/stranger condition met
+pod/worker condition met
+# Before any policy: the gateway pod IP stands in for the gateway Service.
+$ kubectl -n p13-finish-pay exec worker -- wget -T 4 http://<gateway-ip>:8080/   (no policy)
+reached
+$ kubectl -n p13-finish-pay exec stranger -- wget -T 4 http://<gateway-ip>:8080/   (no policy)
+reached
+# The file as the chapter shipped it before this change, namespace swapped.
+$ sed s/bookstore-platform-payments/p13-finish-pay/g networkpolicy.yaml | kubectl apply -f -
+networkpolicy.networking.k8s.io/default-deny-all created
+networkpolicy.networking.k8s.io/allow-dns-egress created
+networkpolicy.networking.k8s.io/allow-kafka-clients created
+networkpolicy.networking.k8s.io/allow-outbox-to-postgres created
+networkpolicy.networking.k8s.io/allow-worker-to-gateway created
+networkpolicy.networking.k8s.io/allow-edge-to-webhook created
+networkpolicy.networking.k8s.io/allow-gateway-egress created
+networkpolicy.networking.k8s.io/lab-allow-webhook-probe created
+$ kubectl -n p13-finish-pay exec worker -- wget -T 4 http://<gateway-ip>:8080/
+wget: download timed out
+blocked
+$ kubectl -n p13-finish-pay exec stranger -- wget -T 4 http://<gateway-ip>:8080/
+wget: download timed out
+blocked
+# The file now: it adds allow-worker-egress-to-gateway.
+$ sed s/bookstore-platform-payments/p13-finish-pay/g examples/bookstore-platform/payments/networkpolicy.yaml | kubectl apply -f -
+networkpolicy.networking.k8s.io/default-deny-all unchanged
+networkpolicy.networking.k8s.io/allow-dns-egress unchanged
+networkpolicy.networking.k8s.io/allow-kafka-clients unchanged
+networkpolicy.networking.k8s.io/allow-outbox-to-postgres unchanged
+networkpolicy.networking.k8s.io/allow-worker-egress-to-gateway created
+networkpolicy.networking.k8s.io/allow-worker-to-gateway unchanged
+networkpolicy.networking.k8s.io/allow-edge-to-webhook unchanged
+networkpolicy.networking.k8s.io/allow-gateway-egress unchanged
+networkpolicy.networking.k8s.io/lab-allow-webhook-probe unchanged
+$ kubectl -n p13-finish-pay exec worker -- wget -T 4 http://<gateway-ip>:8080/
+reached
+$ kubectl -n p13-finish-pay exec stranger -- wget -T 4 http://<gateway-ip>:8080/
+wget: download timed out
+blocked
+$ kubectl delete namespace p13-finish-pay
+namespace "p13-finish-pay" deleted

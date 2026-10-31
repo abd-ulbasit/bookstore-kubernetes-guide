@@ -219,7 +219,7 @@ Cross-region failover  (none)                        promote standby + DNS flip
 Auth — humans          shared-HMAC toy JWT           Keycloak OIDC, realm-per-tenant
 Auth — workloads       (same JWT, kind hand-wave)    IRSA / Workload Identity (13.04)
 Mesh JWT verify        (none)                        Istio RequestAuth + AuthZ (13.04)
-Edge                   ingress-nginx                 Istio Gateway + Coraza WAF (13.07)
+Edge                   Traefik Ingress (Part 02)     Istio Gateway + Coraza WAF (13.07)
 Rate limiting          (none)                        per-tenant Envoy local RL (13.07)
 Search                 SQL LIKE                      Meilisearch + Debezium CDC (13.05)
 Payments               RabbitMQ-only toy             Stripe sandbox + outbox + Kafka (13.06)
