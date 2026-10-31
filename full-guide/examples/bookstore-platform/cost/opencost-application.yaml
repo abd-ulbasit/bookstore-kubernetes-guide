@@ -42,7 +42,7 @@ metadata:
     app.kubernetes.io/instance: opencost
     app.kubernetes.io/part-of: bookstore-platform
     app.kubernetes.io/component: cost-aggregator
-    app.kubernetes.io/version: "1.115.0"
+    app.kubernetes.io/version: "1.121.3"
   finalizers:
     - resources-finalizer.argocd.argoproj.io
 spec:
@@ -51,13 +51,20 @@ spec:
     chart: opencost
     repoURL: https://opencost.github.io/opencost-helm-chart
     # Pinned. Production cadence: bump deliberately every quarter.
-    targetRevision: "1.115.0"
+    targetRevision: "2.5.33"
     helm:
       values: |
         opencost:
+          metrics:
+            serviceMonitor:
+              # Lets Prometheus scrape the opencost_* series. Needs the Prometheus
+              # Operator CRDs that kube-prometheus-stack installs (ch.13.09).
+              enabled: true
+          mcp:
+            # The MCP server answers cost queries for every tenant to any pod that
+            # can reach port 8081. Off until a platform agent needs it.
+            enabled: false
           prometheus:
-            # Reuse kube-prometheus-stack's Prometheus — do not
-            # spin up an internal one.
             internal:
               enabled: false
             external:
@@ -65,17 +72,18 @@ spec:
               url: http://kube-prometheus-stack-prometheus.prometheus-system.svc.cluster.local:9090
           exporter:
             defaultClusterId: bookstore-platform-us-east
-            # Inject the platform's cluster + region labels onto every
-            # Allocation row so the per-region aggregation works.
             extraEnv:
-              CLUSTER_ID: bookstore-platform-us-east
               CLUSTER_REGION: us-east-1
-            # PSA — restricted.
             securityContext:
               allowPrivilegeEscalation: false
               readOnlyRootFilesystem: true
               capabilities:
                 drop: ["ALL"]
+            # The collector writes under /var/configs. The root filesystem is read
+            # only, so that path gets an emptyDir.
+            extraVolumeMounts:
+              - name: configs
+                mountPath: /var/configs
             resources:
               requests:
                 cpu: 100m
@@ -84,30 +92,23 @@ spec:
                 cpu: 500m
                 memory: 1Gi
           ui:
-            enabled: true
-            # Read-only; the source of truth is Grafana via the
-            # PrometheusRule + Grafana dashboard. The UI is for
-            # ad-hoc exploration only.
-            securityContext:
-              allowPrivilegeEscalation: false
-              readOnlyRootFilesystem: true
-              capabilities:
-                drop: ["ALL"]
-            resources:
-              requests:
-                cpu: 50m
-                memory: 64Mi
-              limits:
-                cpu: 200m
-                memory: 256Mi
-        # Pod-level security context — fsGroup, runAsNonRoot.
+            # Off. The UI's entrypoint rewrites its own bundle under /var/www at
+            # start, which a read-only root filesystem refuses. The API and the
+            # Grafana dashboards are the read paths.
+            enabled: false
+        # Pod level. The images declare user 1001 and no group.
         podSecurityContext:
           runAsNonRoot: true
-          runAsUser: 65532
-          runAsGroup: 65532
-          fsGroup: 65532
+          runAsUser: 1001
+          runAsGroup: 1001
           seccompProfile:
             type: RuntimeDefault
+        # OpenCost reads pods, nodes and namespaces through the API, so the pods
+        # keep the token. The chart creates a ServiceAccount used by nothing else.
+        podAutomountServiceAccountToken: true
+        extraVolumes:
+          - name: configs
+            emptyDir: {}
   destination:
     server: https://kubernetes.default.svc
     namespace: opencost

@@ -1,0 +1,300 @@
+# Transcript for 13-grand-capstone-bookstore-platform/10-cost-opencost-per-tenant-finops.md, the install, the policy and the ServiceAccount checks (steps 1 to 3).
+# Commands run in order from the repository root. Terminal colour codes are
+# removed. Output is verbatim, including the failed permission checks of an
+# early loop, which used the wrong namespace and is kept as run.
+# Lab cluster: one kind cluster, sf-pilot, Kubernetes v1.37.0, single control-plane
+# node. The chapter prints the reader's names; this cluster has a different name
+# and its node name is printed as the lab printed it.
+# Versions: kubectl v1.37.2, Helm v4.1.4, chart opencost/opencost 2.5.33 (OpenCost
+# 1.121.3, with the image digests the chart pins).
+# Substitutions: every namespace named opencost in the chapter ran as
+# p13-10-opencost, and the ServiceAccount is p13-10-opencost:opencost. The lab
+# has no kube-prometheus-stack and no Prometheus Operator CRDs, so two stand-ins
+# and two overrides were used:
+#   - Prometheus: a single prom/prometheus:v3.15.1 server in namespace
+#     p13-10-prometheus, with no scrape config. OpenCost stops at start without
+#     a Prometheus that answers, so the chart's external URL is set to it with
+#     --set. The cost series are therefore empty.
+#   - ServiceMonitor: opencost.metrics.serviceMonitor.enabled is set to false with
+#     --set, because the CRDs are absent.
+#   - The namespace prometheus-system was not created. The NetworkPolicy's allow
+#     rule selects it and matches no namespace in this cluster.
+#   - Lab-only manifests (the Prometheus stand-in, a copy of the NetworkPolicy and
+#     a copy of the ConfigMap with the namespace changed) are not in the repository.
+# What did not work the first time: the UI crash-looped, because its entrypoint
+# writes under /var/www and the read-only root filesystem refused it, so the
+# values file turns the UI off and the release was upgraded. The exporter exited
+# at start without a reachable Prometheus, and it warned that /var/configs is
+# read only, so that path became an emptyDir. The API server was briefly
+# unavailable (connection refused, then etcd timeouts), which restarted the
+# exporter three times; its final state is Running and ready.
+# The probes in the lab: a pod in p13-10-prometheus asked the OpenCost API. With
+# the two policies removed the request returned the answer; with them applied it
+# timed out. A deliberate failure, shown as such in the chapter.
+# Cleanup: helm uninstall removed the release's ClusterRole and ClusterRoleBinding.
+# Both lab namespaces were deleted, and no namespace or cluster-scoped object of
+# this run remains. No heavy install ran.
+
+$ kubectl create namespace p13-10-opencost
+namespace/p13-10-opencost created
+$ kubectl label namespace p13-10-opencost pod-security.kubernetes.io/enforce=restricted pod-security.kubernetes.io/audit=restricted pod-security.kubernetes.io/warn=restricted
+namespace/p13-10-opencost labeled
+$ kubectl get ns p13-10-opencost --show-labels
+NAME              STATUS   AGE   LABELS
+p13-10-opencost   Active   1s    kubernetes.io/metadata.name=p13-10-opencost,pod-security.kubernetes.io/audit=restricted,pod-security.kubernetes.io/enforce=restricted,pod-security.kubernetes.io/warn=restricted
+$ helm template opencost opencost/opencost --version 2.5.33 -n p13-10-opencost -f examples/bookstore-platform/cost/opencost-values.yaml --set opencost.metrics.serviceMonitor.enabled=false | kubectl apply --dry-run=server -f -
+rendered 6 objects
+serviceaccount/opencost created (server dry run)
+configmap/opencost-ui-nginx-config created (server dry run)
+clusterrole.rbac.authorization.k8s.io/opencost created (server dry run)
+clusterrolebinding.rbac.authorization.k8s.io/opencost created (server dry run)
+service/opencost created (server dry run)
+deployment.apps/opencost created (server dry run)
+$ helm install opencost opencost/opencost --version 2.5.33 -n p13-10-opencost -f full-guide/examples/bookstore-platform/cost/opencost-values.yaml --set opencost.metrics.serviceMonitor.enabled=false
+NAME: opencost
+LAST DEPLOYED: Sat Oct 31 08:20:46 2026
+NAMESPACE: p13-10-opencost
+STATUS: deployed
+REVISION: 1
+DESCRIPTION: Install complete
+TEST SUITE: None
+NOTES:
+Thank you for installing the OpenCost Helm Chart!
+
+Your release is named: opencost
+
+To verify that OpenCost is running, execute the following commands:
+
+1. Check the status of the pods:
+   kubectl get pods -l app.kubernetes.io/instance=opencost -n p13-10-opencost
+
+2. Access the OpenCost UI:
+
+   If the service is only accessible within the cluster, you can use port-forwarding:
+   export SVC_NAME=opencost
+   kubectl port-forward svc/$SVC_NAME 9090 -n p13-10-opencost
+
+   Alternatively, you can port-forward directly to the OpenCost pod:
+   export POD_NAME=$(kubectl get pod -l app.kubernetes.io/instance=opencost -n p13-10-opencost -o jsonpath="{.items[0].metadata.name}")
+   kubectl -n p13-10-opencost port-forward $POD_NAME 9090
+
+For more information, visit the OpenCost documentation:
+https://www.opencost.io/docs/
+$ kubectl -n p13-10-opencost get pods -o wide
+NAME                        READY   STATUS              RESTARTS   AGE   IP       NODE                     NOMINATED NODE   READINESS GATES
+opencost-6d4f5d89cb-vbxmv   0/2     ContainerCreating   0          60s   <none>   sf-pilot-control-plane   <none>           <none>
+$ kubectl -n p13-10-opencost get events --sort-by=.lastTimestamp
+LAST SEEN   TYPE     REASON              OBJECT                           MESSAGE
+59s         Normal   Scheduled           pod/opencost-6d4f5d89cb-vbxmv    Successfully assigned p13-10-opencost/opencost-6d4f5d89cb-vbxmv to sf-pilot-control-plane
+60s         Normal   SuccessfulCreate    replicaset/opencost-6d4f5d89cb   Created pod: opencost-6d4f5d89cb-vbxmv
+60s         Normal   ScalingReplicaSet   deployment/opencost              Scaled up replica set opencost-6d4f5d89cb from 0 to 1
+20s         Normal   Pulled              pod/opencost-6d4f5d89cb-vbxmv    Container image "ghcr.io/opencost/opencost:1.121.3@sha256:4cdd173253e5abba048dfe2cfa968707a5b59d774157d5356940d0d923a6c281" already present on machine and can be accessed by the pod
+$ kubectl -n p13-10-opencost get pods
+NAME                        READY   STATUS              RESTARTS   AGE
+opencost-6d4f5d89cb-vbxmv   0/2     ContainerCreating   0          2m13s
+$ kubectl -n p13-10-opencost get events --sort-by=.lastTimestamp
+Unable to connect to the server: EOF
+$ kubectl -n p13-10-opencost logs deploy/opencost -c opencost --tail=12
+Unable to connect to the server: EOF
+$ helm upgrade opencost opencost/opencost --version 2.5.33 -n p13-10-opencost -f full-guide/examples/bookstore-platform/cost/opencost-values.yaml --set opencost.metrics.serviceMonitor.enabled=false
+Release "opencost" has been upgraded. Happy Helming!
+NAME: opencost
+LAST DEPLOYED: Sat Oct 31 08:25:13 2026
+NAMESPACE: p13-10-opencost
+STATUS: deployed
+REVISION: 2
+DESCRIPTION: Upgrade complete
+TEST SUITE: None
+NOTES:
+Thank you for installing the OpenCost Helm Chart!
+
+Your release is named: opencost
+
+To verify that OpenCost is running, execute the following commands:
+
+1. Check the status of the pods:
+   kubectl get pods -l app.kubernetes.io/instance=opencost -n p13-10-opencost
+
+2. Access the OpenCost UI:
+
+   If the service is only accessible within the cluster, you can use port-forwarding:
+   export SVC_NAME=opencost
+   kubectl port-forward svc/$SVC_NAME 9090 -n p13-10-opencost
+
+   Alternatively, you can port-forward directly to the OpenCost pod:
+   export POD_NAME=$(kubectl get pod -l app.kubernetes.io/instance=opencost -n p13-10-opencost -o jsonpath="{.items[0].metadata.name}")
+   kubectl -n p13-10-opencost port-forward $POD_NAME 9090
+
+For more information, visit the OpenCost documentation:
+https://www.opencost.io/docs/
+$ kubectl -n p13-10-opencost get pods
+NAME                        READY   STATUS              RESTARTS      AGE
+opencost-6d4f5d89cb-vbxmv   0/2     Terminating         4 (58s ago)   5m8s
+opencost-6dbd9fc67d-rflh5   0/1     ContainerCreating   0             40s
+$ kubectl -n p13-10-opencost get pods -o wide
+NAME                        READY   STATUS    RESTARTS   AGE    IP             NODE                     NOMINATED NODE   READINESS GATES
+opencost-6dbd9fc67d-rflh5   0/1     Running   0          4m1s   10.244.0.176   sf-pilot-control-plane   <none>           <none>
+$ kubectl -n p13-10-opencost get pods -o wide
+NAME                        READY   STATUS    RESTARTS   AGE    IP             NODE                     NOMINATED NODE   READINESS GATES
+opencost-6dbd9fc67d-rflh5   0/1     Running   0          4m1s   10.244.0.176   sf-pilot-control-plane   <none>           <none>
+$ kubectl apply -f <lab-only Prometheus stand-in manifest>
+namespace/p13-10-prometheus created
+serviceaccount/prometheus created
+deployment.apps/prometheus created
+service/prometheus created
+$ kubectl -n p13-10-prometheus get pods
+NAME                          READY   STATUS              RESTARTS   AGE
+prometheus-5c7d5df57f-246dh   0/1     ContainerCreating   0          50s
+$ helm upgrade opencost opencost/opencost --version 2.5.33 -n p13-10-opencost -f full-guide/examples/bookstore-platform/cost/opencost-values.yaml --set opencost.metrics.serviceMonitor.enabled=false --set opencost.prometheus.external.url=http://prometheus.p13-10-prometheus.svc.cluster.local:9090
+Release "opencost" has been upgraded. Happy Helming!
+NAME: opencost
+LAST DEPLOYED: Sat Oct 31 08:32:19 2026
+NAMESPACE: p13-10-opencost
+STATUS: deployed
+REVISION: 3
+DESCRIPTION: Upgrade complete
+TEST SUITE: None
+NOTES:
+Thank you for installing the OpenCost Helm Chart!
+
+Your release is named: opencost
+
+To verify that OpenCost is running, execute the following commands:
+
+1. Check the status of the pods:
+   kubectl get pods -l app.kubernetes.io/instance=opencost -n p13-10-opencost
+
+2. Access the OpenCost UI:
+
+   If the service is only accessible within the cluster, you can use port-forwarding:
+   export SVC_NAME=opencost
+   kubectl port-forward svc/$SVC_NAME 9090 -n p13-10-opencost
+
+   Alternatively, you can port-forward directly to the OpenCost pod:
+   export POD_NAME=$(kubectl get pod -l app.kubernetes.io/instance=opencost -n p13-10-opencost -o jsonpath="{.items[0].metadata.name}")
+   kubectl -n p13-10-opencost port-forward $POD_NAME 9090
+
+For more information, visit the OpenCost documentation:
+https://www.opencost.io/docs/
+$ kubectl -n p13-10-opencost get pods -o wide
+NAME                        READY   STATUS    RESTARTS      AGE     IP             NODE                     NOMINATED NODE   READINESS GATES
+opencost-6cb77f78c5-skqzg   1/1     Running   3 (97s ago)   5m28s   10.244.0.184   sf-pilot-control-plane   <none>           <none>
+
+$ kubectl -n p13-10-opencost get pod -l app.kubernetes.io/name=opencost -o jsonpath={.items[0].spec.securityContext}{"
+"}{.items[0].spec.containers[0].securityContext}{"
+"}{.items[0].spec.automountServiceAccountToken}{"
+"}{.items[0].spec.serviceAccountName}{"
+"}
+{"runAsGroup":1001,"runAsNonRoot":true,"runAsUser":1001,"seccompProfile":{"type":"RuntimeDefault"}}
+{"allowPrivilegeEscalation":false,"capabilities":{"drop":["ALL"]},"readOnlyRootFilesystem":true}
+true
+opencost
+
+$ kubectl -n p13-10-opencost get deploy opencost -o jsonpath={.spec.template.spec.containers[*].name}{"
+"}{.spec.template.spec.containers[0].ports}{"
+"}{.spec.template.spec.containers[0].env[?(@.name=="MCP_SERVER_ENABLED")].value}{"
+"}
+opencost
+[{"containerPort":9003,"name":"http","protocol":"TCP"}]
+false
+
+$ kubectl auth can-i get secrets -A --as=system:serviceaccount:opencost:opencost
+error: you must specify two arguments: verb resource or verb resource/resourceName.
+See 'kubectl auth can-i -h' for help and examples.
+$ kubectl auth can-i list pods -A --as=system:serviceaccount:opencost:opencost
+error: you must specify two arguments: verb resource or verb resource/resourceName.
+See 'kubectl auth can-i -h' for help and examples.
+$ kubectl auth can-i get configmaps -A --as=system:serviceaccount:opencost:opencost
+error: you must specify two arguments: verb resource or verb resource/resourceName.
+See 'kubectl auth can-i -h' for help and examples.
+$ kubectl auth can-i get nodes --as=system:serviceaccount:opencost:opencost
+error: you must specify two arguments: verb resource or verb resource/resourceName.
+See 'kubectl auth can-i -h' for help and examples.
+$ kubectl apply -f <copy of opencost-networkpolicy.yaml, namespace p13-10-opencost>
+networkpolicy.networking.k8s.io/opencost-default-deny-ingress created
+networkpolicy.networking.k8s.io/opencost-allow-prometheus-scrape created
+$ kubectl -n p13-10-opencost get networkpolicy
+NAME                               POD-SELECTOR                      AGE
+opencost-allow-prometheus-scrape   app.kubernetes.io/name=opencost   0s
+opencost-default-deny-ingress      <none>                            0s
+$ kubectl auth can-i get secrets -A --as=system:serviceaccount:p13-10-opencost:opencost
+error: you must specify two arguments: verb resource or verb resource/resourceName.
+See 'kubectl auth can-i -h' for help and examples.
+$ kubectl auth can-i list pods -A --as=system:serviceaccount:p13-10-opencost:opencost
+error: you must specify two arguments: verb resource or verb resource/resourceName.
+See 'kubectl auth can-i -h' for help and examples.
+$ kubectl auth can-i get configmaps -A --as=system:serviceaccount:p13-10-opencost:opencost
+error: you must specify two arguments: verb resource or verb resource/resourceName.
+See 'kubectl auth can-i -h' for help and examples.
+$ kubectl auth can-i list nodes --as=system:serviceaccount:p13-10-opencost:opencost
+error: you must specify two arguments: verb resource or verb resource/resourceName.
+See 'kubectl auth can-i -h' for help and examples.
+$ kubectl get --raw /api/v1/namespaces/p13-10-opencost/services/opencost:9003/proxy/allocation?window=24h\&aggregate=namespace
+{"code":200,"data":[{}]}
+$ kubectl auth can-i get secrets -A --as=system:serviceaccount:p13-10-opencost:opencost
+no
+$ kubectl auth can-i list pods -A --as=system:serviceaccount:p13-10-opencost:opencost
+yes
+$ kubectl auth can-i get configmaps -A --as=system:serviceaccount:p13-10-opencost:opencost
+yes
+$ kubectl auth can-i list nodes --as=system:serviceaccount:p13-10-opencost:opencost
+Warning: resource 'nodes' is not namespace scoped
+
+yes
+$ kubectl auth can-i create pods -n p13-10-opencost --as=system:serviceaccount:p13-10-opencost:opencost
+no
+$ kubectl -n p13-10-opencost get pods -o name
+pod/opencost-6cb77f78c5-skqzg
+$ kubectl apply -f <ConfigMap document of budget-alerts.yaml, namespace p13-10-opencost>
+configmap/tenant-budgets created
+$ kubectl -n p13-10-opencost get configmap tenant-budgets -o jsonpath=...
+{"acme-books-monthly-budget":"5000.00","default-monthly-budget":"100.00","foo-books-monthly-budget":"500.00"}
+$ kubectl apply --dry-run=server -f full-guide/examples/bookstore-platform/cost/budget-alerts.yaml
+resource mapping not found for name: "bookstore-platform-budget-alerts" namespace: "prometheus-system" from "full-guide/examples/bookstore-platform/cost/budget-alerts.yaml": no matches for kind "PrometheusRule" in version "monitoring.coreos.com/v1"
+ensure CRDs are installed first
+Error from server (NotFound): error when creating "full-guide/examples/bookstore-platform/cost/budget-alerts.yaml": namespaces "opencost" not found
+Error from server (NotFound): customresourcedefinitions.apiextensions.k8s.io "applications.argoproj.io" not found
+$ kubectl -n p13-10-prometheus run probe --rm -i --restart=Never --image=prom/prometheus:v3.15.1 --overrides=<spec: restricted pod, wget the allocation API>
+All commands and output from this session will be recorded in container logs, including credentials and sensitive information passed through the command prompt.
+If you don't see a command prompt, try pressing enter.
+wget: can't connect to remote host (10.96.39.23): Connection timed out
+pod "probe" deleted from p13-10-prometheus namespace
+pod p13-10-prometheus/probe terminated (Error)
+Error from server (NotFound): pods "probe" not found
+$ kubectl -n p13-10-prometheus run probe --restart=Never --image=prom/prometheus:v3.15.1 --overrides=<spec: restricted pod, wget the allocation API>
+pod/probe created
+pod/probe condition met
+$ kubectl -n p13-10-prometheus logs probe
+Prometheus Server is Healthy.
+prometheus-rc=0
+wget: download timed out
+opencost-rc=1
+$ kubectl -n p13-10-opencost delete networkpolicy opencost-default-deny-ingress opencost-allow-prometheus-scrape
+networkpolicy.networking.k8s.io "opencost-default-deny-ingress" deleted from p13-10-opencost namespace
+networkpolicy.networking.k8s.io "opencost-allow-prometheus-scrape" deleted from p13-10-opencost namespace
+$ kubectl -n p13-10-prometheus run probe-open --restart=Never --image=prom/prometheus:v3.15.1 --overrides=<spec: restricted pod, wget the allocation API>
+pod/probe-open created
+$ kubectl -n p13-10-prometheus logs probe-open
+{"code":200,"data":[{}]}
+opencost-rc=0
+$ kubectl apply -f <lab copy of opencost-networkpolicy.yaml>
+networkpolicy.networking.k8s.io/opencost-default-deny-ingress created
+networkpolicy.networking.k8s.io/opencost-allow-prometheus-scrape created
+$ kubectl -n p13-10-prometheus run probe-closed --restart=Never --image=prom/prometheus:v3.15.1 --overrides=<spec: restricted pod, wget the allocation API>
+pod/probe-closed created
+$ kubectl -n p13-10-prometheus logs probe-closed
+Error from server (BadRequest): container "probe" in pod "probe-closed" is waiting to start: ContainerCreating
+$ kubectl -n p13-10-prometheus run probe-denied --restart=Never --image=prom/prometheus:v3.15.1 --overrides=<spec: restricted pod, wget the allocation API>
+Error from server: etcdserver: request timed out
+Error from server (Timeout): Timeout: request did not complete within requested timeout - context deadline exceeded
+$ kubectl -n p13-10-prometheus exec deploy/prometheus -- sh -c 'wget -qO- -T 5 http://opencost.p13-10-opencost.svc.cluster.local:9003/allocation?window=1h; echo rc=$?'
+wget: download timed out
+rc=1
+$ helm uninstall opencost -n p13-10-opencost
+release "opencost" uninstalled
+$ kubectl delete namespace p13-10-opencost p13-10-prometheus --wait=false
+namespace "p13-10-opencost" deleted
+namespace "p13-10-prometheus" deleted
+$ kubectl get ns | grep p13-10; kubectl get clusterrole,clusterrolebinding | grep -c opencost
+(count of opencost cluster objects below)
+0

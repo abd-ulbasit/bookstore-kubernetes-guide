@@ -1,0 +1,64 @@
+# Bookstore Platform v2 - Part 13 ch.10: values for the opencost/opencost
+# chart, version 2.5.33 (OpenCost 1.121.3). Every key is in the chart's
+# values.yaml (helm show values opencost/opencost --version 2.5.33).
+# opencost-application.yaml carries the same values for Argo CD.
+#
+#   helm install opencost opencost/opencost --version 2.5.33 \
+#     -n opencost -f examples/bookstore-platform/cost/opencost-values.yaml
+#
+# The namespace must already carry the restricted labels (step 1 of the chapter).
+opencost:
+  metrics:
+    serviceMonitor:
+      # Lets Prometheus scrape the opencost_* series. Needs the Prometheus
+      # Operator CRDs that kube-prometheus-stack installs (ch.13.09).
+      enabled: true
+  mcp:
+    # The MCP server answers cost queries for every tenant to any pod that
+    # can reach port 8081. Off until a platform agent needs it.
+    enabled: false
+  prometheus:
+    internal:
+      enabled: false
+    external:
+      enabled: true
+      url: http://kube-prometheus-stack-prometheus.prometheus-system.svc.cluster.local:9090
+  exporter:
+    defaultClusterId: bookstore-platform-us-east
+    extraEnv:
+      CLUSTER_REGION: us-east-1
+    securityContext:
+      allowPrivilegeEscalation: false
+      readOnlyRootFilesystem: true
+      capabilities:
+        drop: ["ALL"]
+    # The collector writes under /var/configs. The root filesystem is read
+    # only, so that path gets an emptyDir.
+    extraVolumeMounts:
+      - name: configs
+        mountPath: /var/configs
+    resources:
+      requests:
+        cpu: 100m
+        memory: 256Mi
+      limits:
+        cpu: 500m
+        memory: 1Gi
+  ui:
+    # Off. The UI's entrypoint rewrites its own bundle under /var/www at
+    # start, which a read-only root filesystem refuses. The API and the
+    # Grafana dashboards are the read paths.
+    enabled: false
+# Pod level. The images declare user 1001 and no group.
+podSecurityContext:
+  runAsNonRoot: true
+  runAsUser: 1001
+  runAsGroup: 1001
+  seccompProfile:
+    type: RuntimeDefault
+# OpenCost reads pods, nodes and namespaces through the API, so the pods
+# keep the token. The chart creates a ServiceAccount used by nothing else.
+podAutomountServiceAccountToken: true
+extraVolumes:
+  - name: configs
+    emptyDir: {}
