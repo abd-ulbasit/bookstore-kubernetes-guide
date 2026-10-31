@@ -71,6 +71,40 @@ resource "aws_security_group" "vpc_endpoints" {
 # S3 gateway endpoint — free. Associated with the private + intra route tables
 # so traffic to s3.<region>.amazonaws.com bypasses NAT entirely.
 ################################################################################
+# Endpoint policy: only buckets owned by this account, plus the ECR layer
+# bucket. Without the ECR statement, image pulls through this endpoint fail.
+# The caller identity data source is declared in locals.tf.
+data "aws_iam_policy_document" "s3_endpoint" {
+  count = var.enable_vpc_endpoints ? 1 : 0
+
+  statement {
+    sid       = "AccountBucketsOnly"
+    effect    = "Allow"
+    actions   = ["s3:*"]
+    resources = ["*"]
+    principals {
+      type        = "*"
+      identifiers = ["*"]
+    }
+    condition {
+      test     = "StringEquals"
+      variable = "s3:ResourceAccount"
+      values   = [data.aws_caller_identity.current.account_id]
+    }
+  }
+
+  statement {
+    sid       = "EcrLayerBucket"
+    effect    = "Allow"
+    actions   = ["s3:GetObject"]
+    resources = ["arn:aws:s3:::prod-${var.region}-starport-layer-bucket/*"]
+    principals {
+      type        = "*"
+      identifiers = ["*"]
+    }
+  }
+}
+
 resource "aws_vpc_endpoint" "s3" {
   count = var.enable_vpc_endpoints ? 1 : 0
 
@@ -78,6 +112,7 @@ resource "aws_vpc_endpoint" "s3" {
   service_name      = "com.amazonaws.${var.region}.s3"
   vpc_endpoint_type = "Gateway"
   route_table_ids   = concat(module.vpc.private_route_table_ids, module.vpc.intra_route_table_ids)
+  policy            = data.aws_iam_policy_document.s3_endpoint[0].json
 
   tags = merge(local.common_tags, {
     Name = "${local.name_prefix}-s3-gw"

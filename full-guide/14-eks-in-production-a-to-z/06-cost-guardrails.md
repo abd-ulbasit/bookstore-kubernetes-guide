@@ -9,7 +9,7 @@
 > 50-NAT-gateway plan before it merges.
 
 **Estimated time:** ~30 min read · ~60 min hands-on
-**Prerequisites:** [Part 14 ch.05](./05-logging-and-metrics-cost.md) — observability is the largest variable-cost line · [Part 11 ch.04](../06-production-readiness/06-capacity-and-cost.md) — multi-tenant cost framing · [Part 13 ch.01](../13-grand-capstone-bookstore-platform/01-bookstore-2-from-toy-to-platform.md) — bookstore tree whose cost you'll guardrail
+**Prerequisites:** [Part 14 ch.05](./05-logging-and-metrics-cost.md): observability is the largest variable-cost line · [Part 06 ch.06](../06-production-readiness/06-capacity-and-cost.md): multi-tenant cost framing · [Part 13 ch.01](../13-grand-capstone-bookstore-platform/01-bookstore-2-from-toy-to-platform.md): bookstore tree whose cost you'll guardrail
 
 **You'll know after this:** • understand the three tiers of cost visibility (AWS Budgets, Cost Explorer, OpenCost) and which question each one answers · • configure AWS Budgets alarms before the monthly invoice ships · • deploy OpenCost for inside-cluster per-namespace + per-tenant breakdown · • wire `infracost diff` into PR CI so a 50-NAT-gateway plan blocks before merge · • choose between cost allocation tags and OpenCost labels for chargeback
 
@@ -82,8 +82,10 @@ chapter is the **EKS production guardrails** layer — the AWS Budgets
 > budget within the first day. Put it in the **account baseline**
 > (`terraform-account-baseline/budget.tf`, on by default), not in the
 > cluster tree, so destroying a cluster cannot destroy the alarm. The
-> cluster tree's own `enable_budget_alarm = true` adds a cluster-scoped
-> budget on top, with notifications at 80% forecast and 100% actual
+> cluster tree's own `enable_budget_alarm = true` adds a second budget on
+> top, owned by the cluster stack. It has no cost filter, so it covers all
+> account spend, not one cluster. Add a `cost_filter` on the cluster tag if
+> you want cluster scope. Notifications go at 80% forecast and 100% actual
 > through an SNS topic. Notification-only budgets are free. The
 > teams that learn this lesson the hard way are the ones whose first
 > AWS bill at $11,000 arrives in the company CFO's inbox before the
@@ -342,25 +344,26 @@ Illustrative output (not captured from a run):
  Name                                                Monthly Qty  Unit                   Monthly Cost
 
  aws_vpc_endpoint.interface["ecr.api"]
-   Per-hour endpoint                                       730    hours                       $7.30
+   Per-hour endpoint                                     2,190    hours                      $21.90
    Data processed                                            ~     GB                          —
 
  aws_vpc_endpoint.interface["ecr.dkr"]
-   Per-hour endpoint                                       730    hours                       $7.30
+   Per-hour endpoint                                     2,190    hours                      $21.90
    Data processed                                            ~     GB                          —
 
- (similar lines for sts, ec2, logs, kms — 5 more endpoints x $7.30 = $36.50)
+ (similar lines for sts, ec2, logs, kms: 4 more endpoints x $21.90 = $87.60)
 
  module.eks.aws_eks_addon["aws-ebs-csi-driver"]
    (no additional)                                          —      —                          $0.00
 
- OVERALL TOTAL                                                                                $51.10
+ OVERALL TOTAL                                                                               $131.40
 ```
 
 In a CI workflow, `infracost comment github` posts this output to the PR
-description, so the reviewer sees `+$51.10/month` next to the
+description, so the reviewer sees `+$131.40/month` next to the
 `enable_vpc_endpoints = true` change and accepts the trade explicitly. The
-tree's workflow template does not run it yet (see the production notes). The discipline is
+tree's workflow template does not run it (see the production notes). The
+discipline is
 **no surprise cost line lands on main**.
 
 ### 4. Enable Cost Explorer + tag your resources
@@ -445,8 +448,8 @@ receivers:
     sns_configs:
       - topic_arn: $SNS_ARN
         sigv4: { region: $REGION }
-        subject: '{{ template "amazon.sns.default.subject" . }}'
-        message: '{{ template "amazon.sns.default.message" . }}'
+        subject: '{{ template "sns.default.subject" . }}'
+        message: '{{ template "sns.default.message" . }}'
 
 route:
   routes:
@@ -455,7 +458,21 @@ route:
 EOF
 ```
 
-Now both the AWS-side budget (the cluster's monthly cap) and the
+Alertmanager's SNS template names are `sns.default.subject` and
+`sns.default.message`, from its built-in `default.tmpl`. A reference to an
+undefined template fails only when a notification is sent, so check the
+route with a test alert. Port-forward the Alertmanager service to
+`localhost:9093` first. The test reaches the real SNS topic, so tell the
+on-call channel before you send it:
+
+```bash
+curl -s -X POST http://localhost:9093/api/v2/alerts \
+  -H 'Content-Type: application/json' \
+  -d '[{"labels":{"alertname":"BookstoreTenantBudgetTest","severity":"warn"}}]'
+```
+
+A message on the topic confirms the route. Now both the AWS-side budget (the
+cluster's monthly cap) and the
 in-cluster per-tenant budgets (acme-books, foo-books, etc.) fire to
 the same SNS topic and the same on-call inbox. One signal, one
 runbook (Step 7), one investigation flow. Give Alertmanager an IAM role,
@@ -548,8 +565,8 @@ Worst case: an actual breach just after an update may not notify until
 the next update, 8 to 12 hours away, plus the billing delay. For
 **runaway-cost** scenarios (a Karpenter loop spinning up
 $1,000/hour of capacity), Budgets is too slow; you want the
-CloudWatch metric alarm path (e.g., `MaximumNetworkInUtilization`
-alarms on the NAT gateway, or an alarm on EC2 instance count
+CloudWatch metric alarm path (e.g., a `BytesOutToDestination` alarm
+on each NAT gateway, or an alarm on EC2 instance count
 crossing a threshold) for the minute-grain signal.
 
 **Cost Explorer — the data model.** Each line is one
@@ -647,7 +664,7 @@ Instances).
 > spend) is a reasonable bar to require a "cost-approved" PR label;
 > hard-blocking under that threshold creates friction with no
 > value. The bookstore-platform's `.github/workflows/terraform.yml`
-> template does not run infracost yet. If you add it to `plan-pr`,
+> template does not run infracost. If you add it to `plan-pr`,
 > post the cost diff without blocking merges; a separate
 > `cost-gate.yml` workflow can enforce the >$50/month policy if your
 > org's discipline requires it.
@@ -659,7 +676,7 @@ Instances).
 > the platform team's runbook repo and link it from the SNS
 > alarm message. The `subject` template in the Alertmanager SNS
 > config can include the runbook URL: `{{ template
-> "amazon.sns.default.subject" . }} [runbook: <RUNBOOK_URL>]`.
+> "sns.default.subject" . }} [runbook: <RUNBOOK_URL>]`.
 
 > **In production:** Showback for a quarter; chargeback when the
 > mapping is stable. The bookstore-platform tree's `BookstoreTenant`
@@ -835,8 +852,8 @@ all six are yes):
   the canonical billing-line export the FinOps team will live in.
 - **infracost.io**
   <https://www.infracost.io/docs/>; the open-source CI cost-diff
-  tool, including the `infracost comment github` integration the
-  bookstore-platform CI uses.
+  tool, including the `infracost comment github` integration you would
+  add to the bookstore-platform CI.
 - **OpenCost docs — Allocation API**
   <https://www.opencost.io/docs/integrations/api>; the
   `aggregate=label:<KEY>` parameter for per-tenant breakdowns.

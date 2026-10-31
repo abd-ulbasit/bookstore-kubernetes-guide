@@ -41,6 +41,15 @@ resource "kubectl_manifest" "ec2nodeclass_default" {
         { tags = { "karpenter.sh/discovery" = var.cluster_name } },
       ]
 
+      # IMDSv2 only, one hop: a Pod cannot reach the node role's credentials.
+      # Set explicitly so an edit cannot drop it silently (14.08).
+      metadataOptions = {
+        httpEndpoint            = "enabled"
+        httpProtocolIPv6        = "disabled"
+        httpPutResponseHopLimit = 1
+        httpTokens              = "required"
+      }
+
       blockDeviceMappings = [
         {
           deviceName = "/dev/xvda"
