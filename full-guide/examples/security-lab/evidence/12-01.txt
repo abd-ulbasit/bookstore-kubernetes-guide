@@ -1,0 +1,46 @@
+# Transcript for 12-kubernetes-for-machine-learning/01-why-ml-on-kubernetes.md,
+# hands-on steps 1 to 4 (step 0 records the versions).
+# Tier A: a kind cluster that the lab owns. Kubernetes v1.37.0 server, kubectl
+# v1.37.2.
+# Recorded by running examples/security-lab/labs/12-01.sh from full-guide/.
+# The lab used its own namespace, p12-01-bookstore-ml. The chapter names the
+# bookstore-ml namespace and applies the same manifests. Lines that name the lab
+# namespace are kept as captured.
+# The lab cluster has a different name from the guide's, and so does its node.
+# The cluster's CNI is kindnet. The default-deny policy is accepted and stored
+# here. No traffic is sent to test it, so this run does not show enforcement.
+# A first attempt lost its connection to the lab API during step 3 and printed a
+# connection error where the admission result belongs. That attempt is not
+# recorded. The namespace it left was deleted before this run, and the script
+# now waits for the namespace's default ServiceAccount before step 3.
+## step 0: versions
+$ kubectl version
+Client Version: v1.37.2
+Kustomize Version: v5.8.1
+Server Version: v1.37.0
+
+## step 1: a restricted namespace and a default-deny NetworkPolicy
+$ kubectl apply -f - <<'EOF'   # Namespace bookstore-ml and default-deny NetworkPolicy
+namespace/p12-01-bookstore-ml created
+networkpolicy.networking.k8s.io/default-deny created
+
+## step 2: the restricted labels, and the policy stored in the namespace
+$ kubectl get namespace p12-01-bookstore-ml -o jsonpath='{.metadata.labels}' | tr ',' '\n' | grep pod-security
+"pod-security.kubernetes.io/audit":"restricted"
+"pod-security.kubernetes.io/audit-version":"latest"
+"pod-security.kubernetes.io/enforce":"restricted"
+"pod-security.kubernetes.io/enforce-version":"latest"
+"pod-security.kubernetes.io/warn":"restricted"
+"pod-security.kubernetes.io/warn-version":"latest"}
+$ kubectl get networkpolicy -n p12-01-bookstore-ml
+NAME           POD-SELECTOR   AGE
+default-deny   <none>         0s
+
+## step 3: a deliberate refusal, a Pod with no securityContext
+$ kubectl run unhardened --image=bookstore/catalog:dev --restart=Never --dry-run=server -n p12-01-bookstore-ml
+Error from server (Forbidden): pods "unhardened" is forbidden: violates PodSecurity "restricted:latest": allowPrivilegeEscalation != false (container "unhardened" must set securityContext.allowPrivilegeEscalation=false), unrestricted capabilities (container "unhardened" must set securityContext.capabilities.drop=["ALL"]), runAsNonRoot != true (pod or container "unhardened" must set securityContext.runAsNonRoot=true), seccompProfile (pod or container "unhardened" must set securityContext.seccompProfile.type to "RuntimeDefault" or "Localhost")
+exit status: 1
+
+## step 4: delete the lab namespace
+$ kubectl delete namespace p12-01-bookstore-ml
+namespace "p12-01-bookstore-ml" deleted
