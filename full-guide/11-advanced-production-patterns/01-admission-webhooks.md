@@ -33,8 +33,8 @@ it used.
 
 ## Why this exists
 
-[Part 05 ch.03](../05-security/03-supply-chain.md) installed **Kyverno** and
-wrote a `ClusterPolicy` in Audit mode; [Part 05
+[Part 05 ch.07](../05-security/07-admission-control-and-policy-as-code.md)
+teaches **Kyverno** and the Audit-to-Enforce lifecycle; [Part 05
 ch.02](../05-security/02-pod-security.md) leaned on **Pod Security Admission**.
 Both are *admission controllers* — they intercept a request at the API server
 *before* it reaches etcd and either mutate it or say no. The guide used them as
@@ -64,7 +64,8 @@ ValidatingAdmissionPolicy and, since v1.36, MutatingAdmissionPolicy) when:
    in depth, and a concrete vehicle for every webhook footgun.
 
 Crucially this is **lower-level** than [Part 05
-ch.03](../05-security/03-supply-chain.md), not a contradiction of it: Kyverno
+ch.07](../05-security/07-admission-control-and-policy-as-code.md), not a
+contradiction of it: Kyverno
 *registers a `ValidatingWebhookConfiguration` for itself* and runs its policy
 engine behind it. Most teams should use Kyverno/Gatekeeper/VAP and never write
 this code. You learn it so the policy layer is no longer magic — and so you can
@@ -199,7 +200,7 @@ sequenceDiagram
                   in-tree (GA v1.30): NO server, NO TLS, NO network hop,
                   NO failurePolicy-as-outage. Bind with a Binding;
                   validationActions: Deny and/or Warn/Audit (the
-                  Audit→Enforce lifecycle, Part 05 ch.03, without an add-on).
+                  Audit→Enforce lifecycle, Part 05 ch.07, without an add-on).
             YES ──────────────────────► VALIDATING WEBHOOK
                   (logic CEL can't do: call inventory, read a ConfigMap
                    profile, complex cross-field). failurePolicy: Fail

@@ -342,7 +342,7 @@ enable_falco = true
 falco_alert_email = "security@example.com"  # optional
 ```
 
-Installs Falco `4.13.x` with the modern eBPF driver. **PSA exception:** Falco's daemonset needs `CAP_BPF + CAP_PERFMON + CAP_SYS_ADMIN` to attach kernel eBPF programs — its namespace (`falco`) runs `pod-security.kubernetes.io/enforce: privileged`. This is the only privileged namespace in the entire tree, documented in `falco.tf`. Output is JSON on stdout (picked up by your log shipper). Optional SNS topic + email subscription.
+Installs Falco `4.13.x` with the modern eBPF driver (the 05.08 lab rendered chart 9.2.2, which this tree has not been re-rendered against). **PSA exception:** the least-privileged driver adds `CAP_BPF`, `CAP_PERFMON`, `CAP_SYS_RESOURCE` and `CAP_SYS_PTRACE` to attach kernel eBPF programs, and the daemonset mounts host paths — so its namespace (`falco`) runs `pod-security.kubernetes.io/enforce: privileged`. It is the only namespace this tree labels privileged; `kube-system`, which holds Cilium, carries no label. Documented in `falco.tf`. Alerts go to stdout only: there is no Falcosidekick, and the `warning` priority floor keeps NOTICE rules such as `Terminal shell in container` off. Output is JSON on stdout (picked up by your log shipper). The optional SNS topic, IRSA role and email subscription are created, but nothing publishes to the topic until an `http_output` is configured; this tree does not ship one.
 
 ### Kyverno image-signing policy
 

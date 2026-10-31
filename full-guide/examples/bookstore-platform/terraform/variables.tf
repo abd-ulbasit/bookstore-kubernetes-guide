@@ -386,7 +386,7 @@ variable "velero_chart_version" {
 ################################################################################
 
 variable "enable_falco" {
-  description = "Install Falco for runtime threat detection. NOTE: Falco's eBPF driver requires CAP_BPF + CAP_PERFMON; its namespace runs PSA enforce=privileged. Falco and kube-system (Cilium) are the two privileged namespaces in the tree; documented in falco.tf."
+  description = "Install Falco for runtime threat detection. NOTE: the least-privileged modern eBPF driver adds CAP_BPF, CAP_PERFMON, CAP_SYS_RESOURCE and CAP_SYS_PTRACE, and the DaemonSet mounts host paths, so its namespace runs PSA enforce=privileged. It is the only namespace this tree labels privileged; kube-system (Cilium) carries no label. Documented in falco.tf."
   type        = bool
   default     = false
 }
@@ -398,7 +398,7 @@ variable "falco_alert_email" {
 }
 
 variable "falco_chart_version" {
-  description = "Falco Helm chart version (falcosecurity/falco). 4.13.x is the current stable line."
+  description = "Falco Helm chart version (falcosecurity/falco). falco.tf was verified against 4.13.0. Chart 9.2.2 (Falco 0.45.2) is what the 05.08 lab rendered, and this tree has not been re-rendered against it, so check the values with helm template before moving."
   type        = string
   default     = "4.13.0"
 }
@@ -452,7 +452,7 @@ variable "image_signing_validation_failure_action" {
 }
 
 variable "kyverno_chart_version" {
-  description = "Kyverno Helm chart version. 3.3.x is the current stable line."
+  description = "Kyverno Helm chart version. The policies here were written for the 3.3 line. The 05.07 lab pulled chart 3.9.2, whose CRD marks the ClusterPolicy kind deprecated, and this tree has not been re-rendered against it."
   type        = string
   default     = "3.3.4"
 }
@@ -501,7 +501,7 @@ variable "enable_external_secrets" {
 }
 
 variable "eso_chart_version" {
-  description = "External Secrets Operator Helm chart version (external-secrets/external-secrets). Pinned to 0.10.7 — the current stable patch in the 0.10.x line; matches ESO controller image v0.10.7."
+  description = "External Secrets Operator Helm chart version (external-secrets/external-secrets). Pinned to 0.10.7, with ESO controller image v0.10.7. The platform manifests use external-secrets.io/v1beta1. The 11.05 lab installs chart 2.12.0 and uses external-secrets.io/v1, so the two trees are on different versions and have not been reconciled."
   type        = string
   default     = "0.10.7"
 }

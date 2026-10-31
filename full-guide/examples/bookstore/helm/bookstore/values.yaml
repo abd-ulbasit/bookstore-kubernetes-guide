@@ -685,7 +685,8 @@ pdb:
 # Kyverno ClusterPolicy (raw-manifests 70-kyverno-policy.yaml) — CRD → OFF
 # ---------------------------------------------------------------------------
 # Audit (not Enforce) ON PURPOSE — Enforce would reject the guide's own
-# bookstore/<svc>:dev images. See ch.01 + the file header.
+# bookstore/<svc>:dev images. See ch.01 + the file header. The template renders
+# validationFailureAction as the rule-level failureAction.
 kyverno:
   enabled: false
   validationFailureAction: Audit

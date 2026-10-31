@@ -1,7 +1,8 @@
 # 14.12 — Supply chain security in production
 
 > [Part 05 ch.03](../05-security/03-supply-chain.md) introduced the
-> four-stage trust chain — **scan, SBOM, sign, admit** — for the kind-
+> four-stage trust chain — **scan and SBOM, pin by digest, sign and
+> attest, admit** — for the kind-
 > local Bookstore. This chapter is the **cloud-deployed path**: AWS
 > **ECR enhanced scanning** (billed by Amazon Inspector, not ECR),
 > **`syft`** for the SBOM-as-build-artifact discipline,
@@ -14,7 +15,7 @@
 > run from L0 to L3, and most teams realistically land at L2.
 
 **Estimated time:** ~30 min read · ~90 min hands-on
-**Prerequisites:** [Part 05 ch.03](../05-security/03-supply-chain.md): four-stage trust chain (scan/SBOM/sign/admit) on kind · [07.03](../07-delivery/03-cicd-pipeline.md): the pipeline that signs and attests the images this chapter verifies · [Part 11 ch.10](../11-advanced-production-patterns/10-platform-engineering.md): admission policy rollout pattern
+**Prerequisites:** [Part 05 ch.03](../05-security/03-supply-chain.md): four-stage trust chain (scan and SBOM, pin, sign and attest, admit) on kind · [07.03](../07-delivery/03-cicd-pipeline.md): the pipeline that signs and attests the images this chapter verifies · [Part 11 ch.10](../11-advanced-production-patterns/10-platform-engineering.md): admission policy rollout pattern
 
 **You'll know after this:** • configure ECR enhanced scanning for continuous CVE tracking, and price it · • lock tags with ECR immutability and pin deployments by digest · • generate SBOMs with `syft` and bind them to image digests as a build artifact · • implement cosign keyless signing in GitHub Actions (OIDC → Fulcio → Rekor) with no long-lived keys · • enforce signatures at admission with Kyverno `ClusterPolicy.verifyImages` in Audit→Enforce rollout · • choose a realistic SLSA Build level (SLSA v1.2 defines L0 to L3)
 
@@ -51,9 +52,10 @@ older v0.1 spec used one track numbered 1 to 4; current versions
 have no level 4.
 
 [Part 05 ch.03](../05-security/03-supply-chain.md) walked the
-four-stage trust chain on a kind cluster with Trivy + a Kyverno
-policy in Audit mode. This chapter is the cloud overlay: ECR's
-scanning instead of Trivy in CI; cosign keyless instead of the
+four-stage trust chain on a kind cluster with Trivy, Syft and cosign;
+[Part 05 ch.07](../05-security/07-admission-control-and-policy-as-code.md)
+teaches the Kyverno policy in Audit mode. This chapter is the cloud overlay:
+ECR's scanning instead of Trivy in CI; cosign keyless instead of the
 optional Cosign sketch; Kyverno with `verifyImages` instead of the
 pattern-matching policies; SLSA as the framing for "how mature is
 our supply chain?".

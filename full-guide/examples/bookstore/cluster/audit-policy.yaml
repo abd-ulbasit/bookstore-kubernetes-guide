@@ -1,4 +1,9 @@
-# Bookstore — Part 05 ch.04 "Secrets and cluster hardening".
+# Bookstore — Part 05 ch.08 "Audit logs, runtime detection and incident
+# response". Chapter 05.08 teaches audit and runs a policy of the same shape
+# on kind: examples/security-lab/audit/audit-policy.yaml, wired by
+# examples/security-lab/kind/audit-cluster.yaml. This file is the Bookstore's
+# own version, with rules for the `bookstore` namespace. THREAT-MODEL.md (A8,
+# RP1) names it as the audit control.
 #
 # !!! THIS IS NOT A `kubectl apply` OBJECT !!!
 # An audit `Policy` (audit.k8s.io/v1) is read by kube-apiserver via
@@ -30,14 +35,14 @@
 # rules FIRST and a broad catch-all LAST. A too-broad RequestResponse rule
 # early on will bury you in (and pay to store) gigabytes of noise.
 #
-# WIRING (conceptual; you do not run this on the local kind lab):
+# WIRING (the flags below are what the kind config in the lab sets):
 #   --audit-policy-file=/etc/kubernetes/audit/audit-policy.yaml
 #   --audit-log-path=/var/log/kubernetes/audit.log   (log backend)  OR
 #   --audit-webhook-config-file=...                  (webhook backend → SIEM)
 #   --audit-log-maxage / --audit-log-maxbackup / --audit-log-maxsize (rotation)
 # kubeadm: add the flags + hostPath mounts to the kube-apiserver static Pod;
 # managed clusters expose audit as a provider feature (EKS control-plane logs,
-# GKE Cloud Audit Logs, AKS diagnostic settings) — see ch.04 production notes.
+# GKE Cloud Audit Logs, AKS diagnostic settings) — see the 05.08 production notes.
 apiVersion: audit.k8s.io/v1
 kind: Policy
 # Drop the RequestReceived stage globally — it doubles event volume for little

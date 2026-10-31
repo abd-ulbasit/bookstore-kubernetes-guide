@@ -1,17 +1,19 @@
-# Bookstore — Part 05 ch.03 "Supply chain security": admission-time image policy.
+# Bookstore — Part 05 ch.07 "Admission control and policy as code": admission-time
+# image policy (the supply chain half is 05.03).
 #
 # !!! CRD DEPENDENCY (intrinsic, like 18-postgres-snapshot / 51-gateway) !!!
 # `ClusterPolicy` is a Kyverno CRD (apiGroup kyverno.io/v1). On a cluster
 # WITHOUT Kyverno installed, `kubectl apply -f` this file fails with:
 #   error: resource mapping not found for ... kind "ClusterPolicy" ...
 #   ensure CRDs are installed first   (no matches for kind "ClusterPolicy")
-# That is EXPECTED and documented (ch.03 / 07-delivery/02). VENDORED copy for
+# That is EXPECTED and documented (05.07 / 07-delivery/02). VENDORED copy for
 # the `kyverno` Kustomize component — install Kyverno with its Helm chart
 # (NOT a releases/latest/download/<pinned-file>.yaml URL, which 404s when a
 # new Kyverno ships; this is the stable path the chapter + this component's
 # kustomization.yaml teach), then enable the component on an overlay:
 #   helm repo add kyverno https://kyverno.github.io/kyverno/ && helm repo update
-#   helm install kyverno kyverno/kyverno -n kyverno --create-namespace
+#   helm install kyverno kyverno/kyverno --version 3.9.2 -n kyverno --create-namespace
+# (3.9.2 is the chart chapter 05.07 pulled and checked.)
 #   kubectl -n kyverno rollout status deploy/kyverno-admission-controller
 #   # then add `- ../../components/kyverno` to an overlay's components: list and
 #   # kubectl apply -k examples/bookstore/kustomize/overlays/<env>
@@ -21,7 +23,7 @@
 # below verified against the Kyverno v1 ClusterPolicy API.
 #
 # !!! AUDIT MODE IS DELIBERATE — READ THIS !!!
-# validationFailureAction: Audit  → violations are REPORTED (PolicyReport +
+# failureAction: Audit (on each rule) → violations are REPORTED (PolicyReport +
 # logs), NOT blocked. It is set to Audit ON PURPOSE because two of these rules
 # would REJECT THE GUIDE'S OWN IMAGES if set to Enforce:
 #   • disallow-latest-tag / require-image-digest: the Bookstore images are
@@ -30,7 +32,7 @@
 #     cluster you just built.
 #   • require-non-root only passes because Part 05 ch.02 already hardened every
 #     workload; it is included to show the supply-chain/runtime overlap.
-# The HONEST production path (ch.03 explains it): your CI builds an immutable
+# The HONEST production path (05.07 explains it): your CI builds an immutable
 # image, pushes it BY DIGEST, signs it (Cosign) and records it in the
 # transparency log; ONLY THEN do you flip this to `Enforce` (and add a real
 # `verifyImages` rule with your public key / keyless identity). Handing a
@@ -54,9 +56,11 @@ metadata:
       the guide's own bookstore/<svc>:dev images — see the file
       header and Part 05 ch.03 for the real Enforce-by-digest+signature path.
 spec:
-  # AUDIT, not Enforce — see the header. This is the single most important
-  # line in this file for the guide's "don't blackhole your own cluster" rule.
-  validationFailureAction: Audit
+  # AUDIT, not Enforce — see the header. The `failureAction: Audit` line in each
+  # rule's `validate` block is the single most important line in this file for
+  # the guide's "don't blackhole your own cluster" rule. It sits on the rule
+  # because the policy-level validationFailureAction is deprecated in the
+  # chart's CRD.
   background: true                  # also report on already-existing Pods
   rules:
     # 1) Disallow an EXPLICIT mutable `:latest` tag. NOTE the limitation:
@@ -72,6 +76,7 @@ spec:
               kinds: ["Pod"]
               namespaces: ["bookstore"]
       validate:
+        failureAction: Audit
         message: >-
           Using a mutable image tag is not allowed. Pin an immutable tag or,
           better, a digest (see Part 05 ch.03). [AUDIT — reported, not blocked]
@@ -90,6 +95,7 @@ spec:
               kinds: ["Pod"]
               namespaces: ["bookstore"]
       validate:
+        failureAction: Audit
         message: >-
           Images should be referenced by immutable digest (name@sha256:...),
           not a tag. [AUDIT — expected to flag the guide's :dev images]
@@ -112,6 +118,7 @@ spec:
               kinds: ["Pod"]
               namespaces: ["bookstore"]
       validate:
+        failureAction: Audit
         message: >-
           Containers must run as non-root: set
           spec.securityContext.runAsNonRoot=true (Part 05 ch.02).
@@ -119,10 +126,12 @@ spec:
           spec:
             =(securityContext):
               =(runAsNonRoot): true
-    # 4) Image-verification PLACEHOLDER (commented). With real Cosign signing
-    #    in CI (ch.03), this rule — switched to Enforce — is what actually
-    #    guarantees provenance. Left commented because the guide's :dev images
-    #    are unsigned and there is no key/identity to verify against locally.
+    # 4) Image-verification SKETCH (commented, so NOT live: this cluster does
+    #    not verify signatures). The identity below is the one bookstore-pipeline
+    #    .yml signs with, the same string 07.03 verifies with `cosign verify`
+    #    (the main branch, since the pipeline signs on pushes to main). Chapter
+    #    05.07 teaches the rule and did not run it. Start it in Audit, and move
+    #    it to Enforce only when every image the namespace runs is signed.
     # - name: verify-image-signature
     #   match:
     #     any:
@@ -130,11 +139,12 @@ spec:
     #           kinds: ["Pod"]
     #           namespaces: ["bookstore"]
     #   verifyImages:
-    #     - imageReferences: ["ghcr.io/your-org/bookstore-*"]
+    #     - imageReferences: ["ghcr.io/<OWNER>/bookstore-*"]
+    #       failureAction: Audit
     #       attestors:
     #         - entries:
     #             - keyless:
-    #                 subject: "https://github.com/your-org/*"
+    #                 subject: "https://github.com/<OWNER>/<REPO>/.github/workflows/bookstore-pipeline.yml@refs/heads/main"
     #                 issuer: "https://token.actions.githubusercontent.com"
     #                 rekor:
     #                   url: https://rekor.sigstore.dev

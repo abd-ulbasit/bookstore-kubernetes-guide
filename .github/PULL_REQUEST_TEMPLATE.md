@@ -26,6 +26,8 @@
 - [ ] `mkdocs build --strict` — clean build
 - [ ] `node .github/scripts/validate-mermaid.mjs full-guide` — every block parses
 - [ ] Relevant `helm lint` / `helm template` / `kubectl kustomize` / `terraform validate` — all pass (which ones apply depends on what you touched)
+- [ ] `make gates-registry`, and `make gates-static SCOPE=<chapter>` for a chapter or manifest you touched ([`docs/security-first-authoring.md`](../docs/security-first-authoring.md), section 8). Every workload you add carries the baseline in that file's section 1
+- [ ] A new third-party install labels its namespace and, if it needs more than `restricted`, adds an entry to `security/namespace-exceptions.yaml`
 
 ## Cross-references
 

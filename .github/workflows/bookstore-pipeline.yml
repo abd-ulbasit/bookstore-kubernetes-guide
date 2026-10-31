@@ -8,9 +8,9 @@ name: bookstore-pipeline
 #
 # sign waits for ALL of them. A signature on a digest therefore says that this
 # workflow built it and that every gate above passed or was skipped on purpose
-# (secrets, manifests and workflow-hardening look at the whole repository, so
-# only the caller's repo-wide leg runs them; dast can be switched off for a
-# service with no web surface). Nothing else is pushed or signed.
+# (secrets, manifests, policy and workflow-hardening look at the whole
+# repository, so only the caller's repo-wide leg runs them; dast can be
+# switched off for a service with no web surface). Nothing else is pushed or signed.
 #
 # The scanner commands live in full-guide/examples/bookstore/ci/scan.sh, each
 # in a container pinned by digest, so a reader runs the same command on a
@@ -356,12 +356,12 @@ jobs:
   # Rekor log. The SBOM and a SLSA provenance statement are attached to the
   # same digest. Nothing here is a stored key.
   #
-  # Why always(): a job that needs a skipped job is skipped too, and three of
-  # the jobs below are skipped on purpose (secrets, manifests and
+  # Why always(): a job that needs a skipped job is skipped too, and five of
+  # the jobs below may be skipped on purpose (secrets, manifests, policy and
   # workflow-hardening when repo-wide is off, dast when dast is off). always()
   # makes this job evaluate its own condition instead. The condition then asks
   # for success from every job that must run, and accepts success or skipped
-  # from the four that may be skipped. A job that failed, was cancelled, or was
+  # from the five that may be skipped. A job that failed, was cancelled, or was
   # skipped because something upstream failed (image-lint) all fail it.
   # ---------------------------------------------------------------------------
   sign:

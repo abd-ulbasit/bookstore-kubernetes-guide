@@ -584,7 +584,7 @@ spec:
 > — **expected and not a defect**, exactly like the Gateway API
 > ([Part 02 ch.05](../02-networking/05-gateway-api.md)), VolumeSnapshot
 > ([Part 03 ch.05](../03-config-and-storage/05-stateful-data-patterns.md)) and
-> Kyverno ([Part 05 ch.03](../05-security/03-supply-chain.md)) objects. After
+> Kyverno ([Part 05 ch.07](../05-security/07-admission-control-and-policy-as-code.md)) objects. After
 > installing the stack the schema is valid and it applies. The same applies to
 > `81-prometheusrule.yaml`.
 

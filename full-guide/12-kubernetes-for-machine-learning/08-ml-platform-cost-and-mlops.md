@@ -355,7 +355,7 @@ metadata:
 ```
 
 Save the policies as `opencost-netpol.yaml`. The default-deny policy comes
-first, as in [02.06](02-gpus-and-accelerators.md). The second admits
+first, as in [02.06](../02-networking/06-network-policies.md). The second admits
 Prometheus to the metrics port and lets the exporter reach the API server
 and Prometheus. The API address is a placeholder that the apply step fills
 in from the cluster's `kubernetes` endpoint:

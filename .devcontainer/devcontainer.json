@@ -10,16 +10,17 @@
   // Docker engine inside docker-in-docker, which follows the feature's own
   // moby packages (the feature itself is pinned to major version 2).
   "features": {
-    // Docker-in-Docker so kind can spin up its own Kubernetes nodes
-    // (kind nodes are Docker containers) without privileged access to the
-    // host Codespace runtime.
+    // Docker-in-Docker so kind can spin up its own Kubernetes nodes (kind
+    // nodes are Docker containers). The feature's own metadata sets
+    // "privileged": true, so this Codespace container runs privileged. kind
+    // needs that here. The app images in 14.16 leave the feature out.
     "ghcr.io/devcontainers/features/docker-in-docker:2": {
       "version": "latest",
       "moby": true
     },
     // kubectl + helm pinned to the versions the guide cites and the CI
     // workflows use. minikube isn't needed — we use kind via the script
-    // below since the guide standardises on kind/k3d.
+    // below since the guide standardises on kind.
     "ghcr.io/devcontainers/features/kubectl-helm-minikube:1": {
       "version": "1.37.2",
       "helm": "3.22.1",

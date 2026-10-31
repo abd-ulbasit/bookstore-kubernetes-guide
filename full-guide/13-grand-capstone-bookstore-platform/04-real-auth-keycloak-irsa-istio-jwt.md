@@ -51,6 +51,12 @@ introduced — applied to a platform-v2 catalog Pod.
 **Two identity planes; the mesh validates the human plane at the edge,
 the cloud validates the workload plane in-flight.**
 
+A third identity question is outside both planes: who is calling the
+Kubernetes API itself. Client certificates, ServiceAccount tokens and the
+authenticator chain answer it, and
+[Part 05 ch.01](../05-security/01-authn-authz-rbac.md) teaches them. This
+chapter's planes cover storefront customers and cloud-bound workloads.
+
 - **Human identity — Keycloak OIDC, realm-per-tenant.** A customer (or
   admin, or developer) signs in via the OIDC authorization-code + PKCE
   flow. Keycloak issues a **JWT** with:

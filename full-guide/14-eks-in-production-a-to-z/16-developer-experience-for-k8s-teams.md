@@ -17,7 +17,7 @@
 > Backstage scaffolder.
 
 **Estimated time:** ~30 min read · ~60 min hands-on
-**Prerequisites:** [Part 13 ch.11](../13-grand-capstone-bookstore-platform/11-backstage-developer-portal-idp.md) — Backstage scaffolder that anchors the onboarding flow · [Part 12 ch.04](../11-advanced-production-patterns/10-platform-engineering.md) — DX principles you'll now operationalize on EKS · [Part 14 ch.10](./10-gitops-bootstrap-fresh-cluster.md) — outer-loop GitOps the inner-loop tools must respect
+**Prerequisites:** [Part 13 ch.11](../13-grand-capstone-bookstore-platform/11-backstage-developer-portal-idp.md) — Backstage scaffolder that anchors the onboarding flow · [Part 11 ch.10](../11-advanced-production-patterns/10-platform-engineering.md) — DX principles you'll now operationalize on EKS · [Part 14 ch.10](./10-gitops-bootstrap-fresh-cluster.md) — outer-loop GitOps the inner-loop tools must respect
 
 **You'll know after this:** • understand why a slow inner loop is a compounding developer-velocity tax · • deploy Telepresence / Mirrord to re-route service traffic to a laptop process · • configure Skaffold / Tilt for file-watch → rebuild → deploy cycles against EKS · • use Devcontainers for "remote EKS, local IDE" workflows · • design a 5-minute developer onboarding that ties Backstage + Telepresence + Skaffold together
 
@@ -245,7 +245,7 @@ only in dev clusters, so production has nothing to intercept through.
 | Anything that reaches the Service and sets the intercept header reaches a laptop | Default-deny NetworkPolicy in the dev namespace, so only platform callers reach the Service | [02.06](../02-networking/06-network-policies.md) |
 | Attaching to a workload copies the container's environment variables to the laptop, Secret values included | Attach only in dev namespaces that hold test keys; grant `attachments` create only in those namespaces (section 2.1) | [05.01](../05-security/01-authn-authz-rbac.md), [Telepresence RBAC](https://telepresence.io/docs/reference/rbac), [Telepresence environment variables](https://telepresence.io/docs/reference/environment) |
 | Developer RBAC wider than one namespace | One Role per developer in their namespace; no Secret reads elsewhere; `restricted` refuses a privileged Pod | [05.01](../05-security/01-authn-authz-rbac.md), [Pod Security Standards](https://kubernetes.io/docs/concepts/security/pod-security-standards/) |
-| Long-lived cloud keys in the dev container | No `~/.aws` bind mount; `aws sso login` in the container; kubeconfig uses the exec plugin, with no static token | [05.04](../05-security/04-secrets-and-cluster-hardening.md) |
+| Long-lived cloud keys in the dev container | No `~/.aws` bind mount; `aws sso login` in the container; kubeconfig uses the exec plugin, with no static token | [10.03](../10-cloud-and-managed-kubernetes/03-cloud-identity.md) |
 | A privileged feature in the dev container | Docker-in-Docker left out: its feature runs the container privileged | [the feature's `privileged` setting](https://github.com/devcontainers/features/blob/main/src/docker-in-docker/devcontainer-feature.json) |
 
 The inner-loop tools widen what a developer can reach, so each row
@@ -871,7 +871,9 @@ the workspace, and attaches the editor. The dev container has:
 - VS Code extensions (Go, Kubernetes, YAML).
 
 It has no Docker daemon, by design. Docker-in-Docker is left out
-because its feature runs the container privileged, so builds go to a
+because its feature runs the container privileged. This guide's own
+Codespace accepts that, because kind nodes are Docker containers and need a
+Docker engine to run. A team image does not, so builds go to a
 remote or in-cluster builder (see the Skaffold documentation's build
 environments). Skaffold and Telepresence are not in the image; install
 them from their own pages at pinned versions. Use Telepresence 2.25.0

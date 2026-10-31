@@ -9,7 +9,8 @@
 > workflow's identity (issuer + subject); and the **audit → enforce
 > migration**, which has to be gradual: audit first, enforce one namespace
 > at a time, and enforce a rule only once every image it covers is signed.
-> Deepens Part 05 ch.03 (the concepts) and Part 14 ch.12 (Kyverno on EKS) by
+> Deepens Part 05 ch.03 (signing, the concepts), Part 05 ch.07 (Kyverno
+> `verifyImages`) and Part 14 ch.12 (Kyverno on EKS) by
 > showing the CI half, the pipeline that *produces* the signed digests
 > Kyverno verifies. Its signing steps match the release run in
 > [Part 07 ch.03](../07-delivery/03-cicd-pipeline.md).
@@ -26,8 +27,8 @@
 Three chapters in this guide say "sign images with cosign keyless and verify
 them with Kyverno". Each says it for a different reader:
 
-- **Part 05 ch.03** introduces cosign keyless and Kyverno `verifyImages` as
-  concepts.
+- **Part 05 ch.03** introduces cosign signing and attestation as a lab, and
+  **Part 05 ch.07** teaches Kyverno `verifyImages` as a concept.
 
 - **Part 07 ch.03** runs the signing for real. Its release run signs the
   digest keylessly with the workflow's identity, attaches a CycloneDX SBOM

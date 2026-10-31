@@ -543,7 +543,8 @@ across every chapter**. Three pieces, each grounded in earlier Parts:
   `25.2.0`, `application-crossplane.yaml` pins `2.4.3`. The same lesson
   Part 07 ch.01 / ch.04 taught for the v1 Bookstore.
 - **Signed images via cosign, supply-chain CI, and per-tenant cost.**
-  Part 05 ch.03 introduced cosign and Kyverno `verifyImages`. The platform's
+  Part 05 ch.03 introduced cosign, and Part 05 ch.07 Kyverno `verifyImages`.
+  The platform's
   CI signs every image at build time, and a Kyverno policy that refuses
   unsigned images ships as an optional Terraform module, off by default.
   Per-tenant cost is OpenCost (Phase 13c) labelled by the tenant label the

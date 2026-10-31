@@ -76,12 +76,13 @@ VPC-CNI's ceilings are also real:
   **L4 + L7 protocols** all in one stream.
 
 [Part 02 ch.06](../02-networking/06-network-policies.md) covered
-NetworkPolicy in the abstract — but ran on Calico (a different CNI)
-to get policy enforcement at all (kind's default CNI doesn't enforce
-NetworkPolicy). That chapter is the prerequisite; this is the
-EKS-specific story: when does it make sense to swap VPC-CNI for
-Cilium, what does the swap look like operationally, and what does
-the trade-off look like in production?
+NetworkPolicy on kind's default CNI, kindnet, which enforces policy
+since kind v0.24.0; the proof there is a denied connection. That
+chapter is the prerequisite. Cilium is not needed for plain L3/L4
+policy. This is the EKS-specific story: L7 rules and FQDN rules are
+the reasons to swap VPC-CNI for Cilium, so what does the swap look
+like operationally, and what does the trade-off look like in
+production?
 
 > **In production:** Cilium is the right call when (a) you need L7
 > NetworkPolicy without a service mesh, (b) you're operating

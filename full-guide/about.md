@@ -24,12 +24,19 @@ open to contributions.
   Internals are explained ("how it works under the hood"), not just "what
   to type." Containers are taught from first principles in Part 00.
 - **One worked example throughout.** Every primitive is introduced because
-  the Bookstore needs it next, then applied to it immediately. The four
-  example trees (`bookstore/`, `bookstore-platform/`,
-  `bookstore-platform/terraform/`, `terraform-account-baseline/`) are
-  versions of the same application at different points along the arc.
-- **Locally reproducible, free.** Parts 00–13 run entirely on local
-  **kind**/`k3d` clusters with only open-source tooling. Parts 14–15 add a
+  the Bookstore needs it next, then applied to it immediately. The example
+  trees (`bookstore/`, `bookstore-platform/` with its `terraform/` and
+  `terraform-account-baseline/` roots, plus `gke/` and `security-lab/`) are
+  versions of the same application at different points along the arc, and
+  the lab scripts and transcripts the chapters quote.
+- **Security-first.** Every workload carries a hardened baseline (non-root,
+  read-only root filesystem, no capabilities, a seccomp profile) from its
+  first manifest, in namespaces that enforce `restricted`. Each chapter has a
+  Threats and controls table, and a control is shown working or labelled as
+  cited and not run. CI gates enforce the baseline; see
+  [`docs/security-first-authoring.md`](https://github.com/abd-ulbasit/bookstore-kubernetes-guide/blob/main/docs/security-first-authoring.md).
+- **Locally reproducible, free.** Parts 00–13 run on a local **kind**
+  cluster with only open-source tooling. Parts 14–15 add a
   Terraform tree that was [live-smoke-tested on AWS EKS](https://github.com/abd-ulbasit/bookstore-kubernetes-guide/blob/main/docs/lessons-from-smoke-test.md)
   for ~$0.20 — every cost-bearing variable defaults to off.
 

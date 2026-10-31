@@ -16,10 +16,15 @@ chapter's hands-on section advances the *same* app.
   taught from first principles in Part 00.
 - **One worked example throughout.** Every primitive is introduced because the
   Bookstore needs it next, then applied to it immediately.
+- **Security-first.** Every workload carries the hardened baseline from its
+  first manifest (Part 01 ch.01 explains each field), the namespaces enforce
+  Pod Security `restricted`, and every chapter has a Threats and controls
+  table. A control is shown working, for example a request that is denied, or
+  it is labelled as cited and not run.
 - **Locally reproducible, free.** Every hands-on step runs on a local
-  **kind** or **k3d** cluster with only open-source tooling. Each chapter also
-  has explicit `> **In production:**` notes on how it differs on managed cloud
-  (EKS/GKE/AKS).
+  **kind** cluster, the one cluster the guide verifies, with only open-source
+  tooling. Each chapter also has explicit `> **In production:**` notes on how
+  it differs on managed cloud (EKS/GKE/AKS).
 - **Diagrams everywhere.** Mermaid for architecture/flow/lifecycle, ASCII for
   quick inline structure.
 - **Cited, never copied.** Each chapter ends with a specific citation into the
@@ -109,23 +114,27 @@ flowchart TB
 
 ## How chapters are structured
 
-Every chapter follows the same nine-section anatomy, in order:
+Every chapter follows the same ten-section anatomy, in order:
 
 1. **Title + one-line summary**
 2. **Why this exists** — the problem it solves (motivation before mechanism)
 3. **Mental model** — a one-paragraph intuition
-4. **Diagram(s)** — Mermaid for flow/architecture/lifecycle, ASCII for inline structure
-5. **Hands-on with the Bookstore** — runnable, copy-pasteable, builds on the previous chapter
-6. **How it works under the hood** — internals depth, not just usage
-7. **Production notes** — HA, cloud differences, pitfalls/anti-patterns (`> **In production:**` callouts)
-8. **Quick Reference** — key `kubectl` commands + a minimal manifest skeleton + a short checklist
-9. **Further reading** — a specific book citation + the official docs URL
+4. **Threats and controls**: a table of the threats specific to the subject, the control the chapter teaches, and where the topic goes deeper
+5. **Diagram(s)** — Mermaid for flow/architecture/lifecycle, ASCII for inline structure
+6. **Hands-on with the Bookstore** — runnable, copy-pasteable, builds on the previous chapter
+7. **How it works under the hood** — internals depth, not just usage
+8. **Production notes** — HA, cloud differences, pitfalls/anti-patterns (`> **In production:**` callouts)
+9. **Quick Reference** — key `kubectl` commands + a minimal manifest skeleton + a short checklist
+10. **Further reading** — a specific book citation + the official docs URL
+
+A **Test your understanding** section, with at least one question on the
+chapter's security dimension, sits before Further reading.
 
 ### Callout legend
 
 > **In production:** Throughout the guide, a block quote that begins with
 > **`In production:`** flags how something differs in a real production / managed
-> cloud environment versus the local kind/k3d setup — HA topology, cloud
+> cloud environment versus the local kind setup — HA topology, cloud
 > provider behavior, scale considerations, and anti-patterns to avoid. When you
 > are only learning locally you can skip these; when you go to production, they
 > are the important part.
@@ -135,9 +144,9 @@ Every chapter follows the same nine-section anatomy, in order:
 ## Prerequisites
 
 - Comfort with a Unix-like command line and basic Linux/HTTP concepts.
-- **Docker** (or another OCI runtime) — kind and k3d run the cluster in containers.
+- **Docker** (or another OCI runtime) — kind runs the cluster in containers.
 - **kubectl** — the Kubernetes CLI (install in [Part 00 ch.07](00-foundations/07-local-cluster-setup.md)).
-- Either **kind** or **k3d** for a local cluster.
+- **kind** for the local cluster.
 - ~4 GB RAM free for the local cluster + Bookstore.
 - (Optional, used in later parts) `helm`, `kustomize` (built into recent
   `kubectl`), and the `argocd` CLI — each installed in the chapter that needs it.
@@ -148,29 +157,18 @@ No cloud account is required for any hands-on.
 
 ## Running the examples locally
 
-Install a local-cluster tool (pick one):
+Install kind. Part 00 ch.07 also installs kubectl with a checksum check:
 
 ```sh
 # kind (Kubernetes IN Docker); v0.33.0 defaults to Kubernetes v1.37.0
 go install sigs.k8s.io/kind@v0.33.0
 #   or: brew install kind, then check that `kind version` says v0.33.0
-#   or: curl -Lo kind https://kind.sigs.k8s.io/dl/v0.33.0/kind-$(uname)-amd64
-#       chmod +x kind
-
-# k3d (k3s in Docker)
-curl -s https://raw.githubusercontent.com/k3d-io/k3d/main/install.sh \
-  | TAG=v5.9.0 bash
-#   or: brew install k3d
 ```
 
 Create a cluster:
 
 ```sh
-# kind
 kind create cluster --name bookstore
-
-# k3d (equivalent); --image pins Kubernetes 1.37
-k3d cluster create bookstore --image rancher/k3s:v1.37.1-k3s1
 
 kubectl cluster-info
 kubectl get nodes
@@ -186,16 +184,13 @@ docker build -t bookstore/orders:dev          ./orders
 docker build -t bookstore/payments-worker:dev ./payments-worker
 docker build -t bookstore/storefront:dev      ./storefront
 
-# kind:
 kind load docker-image bookstore/catalog:dev --name bookstore   # repeat per image
-# k3d:
-k3d image import bookstore/catalog:dev -c bookstore             # repeat per image
 ```
 
 Tear down when done:
 
 ```sh
-kind delete cluster --name bookstore     # or: k3d cluster delete bookstore
+kind delete cluster --name bookstore
 ```
 
 ---
@@ -206,10 +201,10 @@ This guide is authored as plain Markdown — that is the source of truth, and
 the GitHub repository tree is the canonical reading experience. The same
 content is also published as a rendered **MkDocs Material** site:
 
-- **Live site:** `https://<your-username>.github.io/<your-repo>/`
-  (the URL is set in `mkdocs.yml` at the project root; once GitHub Pages is
-  enabled on the repo, every push to `main` rebuilds and redeploys the site
-  via the `.github/workflows/docs.yml` workflow).
+- **Live site:** <https://abd-ulbasit.github.io/bookstore-kubernetes-guide/>
+  (the URL is set in `mkdocs.yml` at the project root; every push to `main`
+  rebuilds and redeploys the site via the `.github/workflows/docs.yml`
+  workflow).
 - **Local preview:** from the project root (one level above `full-guide/`)
 
   ```sh
@@ -320,7 +315,7 @@ Markdown source is authoritative.
 
 ### Part 10 — Cloud & Managed Kubernetes
 
-> *What changes when the kind/k3d cluster is an **EKS / GKE / AKS** cluster instead.*
+> *What changes when the kind cluster is an **EKS / GKE / AKS** cluster instead.*
 > For readers running the Bookstore on a real cloud provider: the shared-
 > responsibility split, cloud identity for workloads, cloud CNI/storage/load-
 > balancing, and node autoscaling/cost — every concept anchored back to its
@@ -358,7 +353,9 @@ Markdown source is authoritative.
 > taxonomy mapped to primitives the guide already built, GPUs and accelerators,
 > gang scheduling, distributed training, notebooks, online serving (KServe),
 > pipelines (Argo Workflows / Kubeflow Pipelines), and the cost/MLOps capstone.
-> Every chapter runs CPU-only on kind, with the GPU path explicitly marked.
+> Every chapter runs CPU-only on kind. The GPU path is cited from upstream and
+> marked not run, and the GPU Operator's privileged namespace is a registered
+> exception ([12.02](12-kubernetes-for-machine-learning/02-gpus-and-accelerators.md)).
 
 - [01 — Why ML on Kubernetes](12-kubernetes-for-machine-learning/01-why-ml-on-kubernetes.md) — the ML workload taxonomy (notebooks / training / tuning / batch inference / serving / pipelines) → Kubernetes primitives, and why Kubernetes is the right substrate.
 - [02 — GPUs and accelerators](12-kubernetes-for-machine-learning/02-gpus-and-accelerators.md) — the device-plugin model, **NVIDIA GPU Operator** (driver / toolkit / device plugin / DCGM / NFD/GFD), MIG, MPS, time-slicing.
