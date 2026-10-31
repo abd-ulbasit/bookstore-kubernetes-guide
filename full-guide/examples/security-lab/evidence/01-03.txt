@@ -1,0 +1,212 @@
+# Transcript for full-guide/01-core-workloads/03-resources-and-qos.md.
+# Tier A: a kind cluster named sf-pilot on one Linux lab host, with a
+# Kubernetes v1.37.0 node and a kubectl v1.37.2 client. The cluster is shared
+# with other workers, so this run used its own namespace, p01-03-bookstore,
+# where the chapter prints bookstore. No other namespace was used.
+# Commands run from full-guide/ with the kubectl context's default namespace
+# set to p01-03-bookstore. Where the chapter writes -n bookstore or
+# namespace: bookstore, this run wrote p01-03-bookstore, and nothing else in
+# the commands or manifests changed. The manifests are shown as applied.
+# The Pods are the chapter's own, with the namespace line rewritten.
+# Timings are wall-clock seconds from the run script, labelled "elapsed".
+# context: kind-sf-pilot
+$ kubectl version
+Client Version: v1.37.2
+Kustomize Version: v5.8.1
+Server Version: v1.37.0
+$ sed -e 's/^  name: bookstore$/  name: p01-03-bookstore/' -e 's/namespace: bookstore$/namespace: p01-03-bookstore/' examples/bookstore/raw-manifests/00-namespace.yaml | kubectl apply -f -
+namespace/p01-03-bookstore created
+resourcequota/bookstore-quota created
+limitrange/bookstore-limits created
+$ kubectl describe resourcequota bookstore-quota -n p01-03-bookstore
+Name:            bookstore-quota
+Namespace:       p01-03-bookstore
+Resource         Used  Hard
+--------         ----  ----
+limits.cpu       0     4
+limits.memory    0     4Gi
+pods             0     30
+requests.cpu     0     2
+requests.memory  0     2Gi
+$ kubectl describe limitrange bookstore-limits -n p01-03-bookstore
+Name:       bookstore-limits
+Namespace:  p01-03-bookstore
+Type        Resource  Min   Max  Default Request  Default Limit  Max Limit/Request Ratio
+----        --------  ---   ---  ---------------  -------------  -----------------------
+Container   cpu       10m   2    100m             500m           -
+Container   memory    16Mi  1Gi  128Mi            256Mi          -
+## step 2: a runaway process reaches its memory limit (deliberate failure)
+$ kubectl apply -f - <<'EOF'
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: demo-sa
+  namespace: p01-03-bookstore
+automountServiceAccountToken: false
+---
+apiVersion: v1
+kind: Pod
+metadata:
+  name: memhog
+  namespace: p01-03-bookstore
+  labels:
+    app: memhog
+spec:
+  serviceAccountName: demo-sa
+  automountServiceAccountToken: false
+  restartPolicy: Never              # keep the terminated state to read
+  securityContext:
+    runAsNonRoot: true
+    runAsUser: 65534
+    runAsGroup: 65534
+    seccompProfile:
+      type: RuntimeDefault
+  containers:
+    - name: hog                     # DELIBERATE: writes past its memory limit
+      image: busybox@sha256:73aaf090f3d85aa34ee199857f03fa3a95c8ede2ffd4cc2cdb5b94e566b11662
+      command: ["sh", "-c", "dd if=/dev/zero of=/scratch/fill bs=1M count=400; echo written; sleep 3600"]
+      securityContext:
+        allowPrivilegeEscalation: false
+        readOnlyRootFilesystem: true
+        capabilities:
+          drop: ["ALL"]
+      resources:
+        requests: { cpu: 50m, memory: 64Mi }
+        limits: { cpu: 250m, memory: 128Mi }
+      volumeMounts:
+        - name: scratch
+          mountPath: /scratch
+  volumes:
+    - name: scratch
+      emptyDir:
+        medium: Memory              # tmpfs: its files count against the memory limit
+---
+apiVersion: v1
+kind: Pod
+metadata:
+  name: cpu-fill
+  namespace: p01-03-bookstore
+  labels:
+    app: cpu-fill
+spec:
+  serviceAccountName: demo-sa
+  automountServiceAccountToken: false
+  securityContext:
+    runAsNonRoot: true
+    runAsUser: 65534
+    runAsGroup: 65534
+    seccompProfile:
+      type: RuntimeDefault
+  containers:
+    - name: fill
+      image: busybox@sha256:73aaf090f3d85aa34ee199857f03fa3a95c8ede2ffd4cc2cdb5b94e566b11662
+      command: ["sleep", "3600"]
+      securityContext:
+        allowPrivilegeEscalation: false
+        readOnlyRootFilesystem: true
+        capabilities:
+          drop: ["ALL"]
+      resources:
+        requests: { cpu: 1500m, memory: 64Mi }
+        limits: { cpu: 1500m, memory: 128Mi }
+EOF
+serviceaccount/demo-sa created
+pod/memhog created
+pod/cpu-fill created
+$ kubectl wait -n p01-03-bookstore --for=jsonpath='{.status.containerStatuses[0].state.terminated.reason}'=OOMKilled pod/memhog --timeout=120s
+pod/memhog condition met
+$ kubectl get pod memhog cpu-fill -n p01-03-bookstore
+NAME       READY   STATUS      RESTARTS   AGE
+memhog     0/1     OOMKilled   0          12s
+cpu-fill   1/1     Running     0          11s
+$ kubectl get pod memhog -n p01-03-bookstore -o jsonpath='{.status.qosClass}{"\n"}'
+Burstable
+$ kubectl get pod memhog -n p01-03-bookstore -o jsonpath='{.status.containerStatuses[0].state.terminated.exitCode}{"\n"}'
+137
+$ kubectl describe resourcequota bookstore-quota -n p01-03-bookstore
+Name:            bookstore-quota
+Namespace:       p01-03-bookstore
+Resource         Used   Hard
+--------         ----   ----
+limits.cpu       1750m  4
+limits.memory    256Mi  4Gi
+pods             2      30
+requests.cpu     1550m  2
+requests.memory  128Mi  2Gi
+## step 3: admission refuses what the namespace cannot hold (deliberate failure)
+$ kubectl apply --dry-run=server -f - <<'EOF'
+apiVersion: v1
+kind: Pod
+metadata:
+  name: too-big
+  namespace: p01-03-bookstore
+spec:
+  serviceAccountName: demo-sa
+  automountServiceAccountToken: false
+  securityContext:
+    runAsNonRoot: true
+    runAsUser: 65534
+    runAsGroup: 65534
+    seccompProfile:
+      type: RuntimeDefault
+  containers:
+    - name: c                       # DELIBERATE: above the 1Gi max
+      image: busybox@sha256:73aaf090f3d85aa34ee199857f03fa3a95c8ede2ffd4cc2cdb5b94e566b11662
+      command: ["sleep", "3600"]
+      securityContext:
+        allowPrivilegeEscalation: false
+        readOnlyRootFilesystem: true
+        capabilities:
+          drop: ["ALL"]
+      resources:
+        requests: { cpu: 50m, memory: 1536Mi }
+        limits: { cpu: 250m, memory: 1536Mi }
+---
+apiVersion: v1
+kind: Pod
+metadata:
+  name: too-much
+  namespace: p01-03-bookstore
+spec:
+  serviceAccountName: demo-sa
+  automountServiceAccountToken: false
+  securityContext:
+    runAsNonRoot: true
+    runAsUser: 65534
+    runAsGroup: 65534
+    seccompProfile:
+      type: RuntimeDefault
+  containers:
+    - name: c                       # DELIBERATE: pushes the namespace past 2 cores
+      image: busybox@sha256:73aaf090f3d85aa34ee199857f03fa3a95c8ede2ffd4cc2cdb5b94e566b11662
+      command: ["sleep", "3600"]
+      securityContext:
+        allowPrivilegeEscalation: false
+        readOnlyRootFilesystem: true
+        capabilities:
+          drop: ["ALL"]
+      resources:
+        requests: { cpu: 800m, memory: 64Mi }
+        limits: { cpu: 800m, memory: 128Mi }
+EOF
+Error from server (Forbidden): error when creating "STDIN": pods "too-big" is forbidden: maximum memory usage per Container is 1Gi, but limit is 1536Mi
+Error from server (Forbidden): error when creating "STDIN": pods "too-much" is forbidden: exceeded quota: bookstore-quota, requested: requests.cpu=800m, used: requests.cpu=1550m, limited: requests.cpu=2
+## cleanup
+$ kubectl delete pod memhog cpu-fill -n p01-03-bookstore --now
+pod "memhog" deleted from p01-03-bookstore namespace
+pod "cpu-fill" deleted from p01-03-bookstore namespace
+$ kubectl get pods -n p01-03-bookstore
+No resources found in p01-03-bookstore namespace.
+$ kubectl describe resourcequota bookstore-quota -n p01-03-bookstore
+Name:            bookstore-quota
+Namespace:       p01-03-bookstore
+Resource         Used  Hard
+--------         ----  ----
+limits.cpu       0     4
+limits.memory    0     4Gi
+pods             0     30
+requests.cpu     0     2
+requests.memory  0     2Gi
+$ kubectl delete namespace p01-03-bookstore --wait=true --timeout=300s
+namespace "p01-03-bookstore" deleted
+LABDONE

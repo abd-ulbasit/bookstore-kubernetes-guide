@@ -61,9 +61,10 @@ covered by the [baseline](01-pods.md#baseline) and are not repeated here.
 | Threat | Control taught here | Goes deeper |
 |---|---|---|
 | A replacement Pod or a scale-down leaves data behind, or a deleted claim takes it with it | One PVC per ordinal from `volumeClaimTemplates`, kept when the Pod or the StatefulSet is deleted. The StorageClass reclaim policy decides what deleting the claim does to the volume | [03.04](../03-config-and-storage/04-persistent-storage.md) |
-| A compromised container changes state that survives its restart | Only the data path is writable: the PVC for `PGDATA`, emptyDirs for the rest, under a read-only root | [05.02](../05-security/02-pod-security.md) |
+| A compromised container rewrites a file in its image | A read-only root filesystem, so the image's own files cannot be written. Each writable path is an emptyDir or the data PVC | [05.02](../05-security/02-pod-security.md) |
+| A compromised database writes to `PGDATA`, and the change survives every restart | None in this chapter. The controls sit around the data: who can `exec` into `postgres-0` or read its volume, what the database role may do, and backups | [03.05](../03-config-and-storage/05-stateful-data-patterns.md) |
 | The database password sits in the manifest, where anyone who can read the StatefulSet sees it | `envFrom` a Secret by name, so the StatefulSet holds a reference and not the value | [03.02](../03-config-and-storage/02-secrets.md) |
-| Any Pod in the cluster can open a connection to port 5432 | None in this chapter. The headless Service gives names, not restrictions | [02.06](../02-networking/06-network-policies.md) |
+| Without a NetworkPolicy, any Pod in the cluster can open a connection to port 5432 | None in this chapter. The headless Service gives names, not restrictions. Pods are non-isolated until a policy selects them ([upstream](https://kubernetes.io/docs/concepts/services-networking/network-policies/)) | [02.06](../02-networking/06-network-policies.md) |
 
 ## Diagrams
 
@@ -125,8 +126,6 @@ restart.
 Writing the data path needs a matching UID or group. The official image runs
 `postgres` as UID and GID 999. The manifest starts the container as that user,
 so the image never needs root to change ownership of the data directory.
-Its entrypoint still tries to chmod the socket directory, and the log shows
-`Operation not permitted` on the lab host before startup carries on.
 `fsGroup: 999` sets the group of a volume to 999 and grants group write, so
 the user can create files in it. `fsGroupChangePolicy: OnRootMismatch` limits
 that work: the kubelet checks the top-level directory first and skips the
@@ -135,15 +134,15 @@ does not walk every file. The [baseline](01-pods.md#baseline-fsgroup) explains
 `fsGroup`. On this kind cluster the emptyDirs show the group change, and the
 PVC root, already mode 777, was not re-owned.
 
-The last row is the hard one. A read-only root protects the image, which is
+The data path is the hard case. A read-only root protects the image, which is
 what an attacker most wants to change. It cannot protect the data, because the
 data is the job. Anything a compromised database writes to `PGDATA` stays
 there across restarts, and a restart does not clean it up. The stateless
 answer, throw away the Pod and its scratch space, does not work when the claim
-outlives the Pod. The controls that do apply sit around the data: who can
-`exec` into `postgres-0` or read its volume, what the database account is
-allowed to do,
-and backups that let you restore to a point before the damage.
+outlives the Pod. This chapter adds no control for that threat. The controls
+that do apply sit around the data: who can `exec` into `postgres-0` or read
+its volume, what the database account is allowed to do, and backups that let
+you restore to a point before the damage.
 
 ## Hands-on with the Bookstore
 
@@ -162,8 +161,9 @@ the registry, so no `kind load` is needed. It is pinned by digest, as the
 > names the Secret and never holds the password.
 > [03.02](../03-config-and-storage/02-secrets.md) explains what a Secret does
 > and does not protect. The password in this repo is a demo value. Its account
-> is a superuser, which step 5 shows. Catalog and orders connect with the same
-> account, and this guide does not call that least privilege.
+> is a superuser, as the check under *Credentials stay out of the StatefulSet*
+> shows. Catalog and orders connect with the same account, and this guide does
+> not call that least privilege.
 
 The repo file is the complete manifest: a headless Service, then the
 StatefulSet. Apply the file rather than copying it. The fragment below shows
@@ -244,18 +244,27 @@ spec:
           requests: { storage: 1Gi }
 ```
 
-`startupProbe` is the one probe this chapter adds to the file. It holds the
-liveness probe back until the first `pg_isready` succeeds, so `initdb` and
-crash recovery are not taken for a hang. The longer liveness window covers a
-disk that stalls for tens of seconds. [01.02](02-health-and-lifecycle.md)
-explains the probe types.
+The `startupProbe` holds the liveness probe back until the first `pg_isready`
+succeeds, so `initdb` and crash recovery are not taken for a hang. The longer
+liveness window covers a disk that stalls for tens of seconds.
+
+The probes are `exec` probes, not `httpGet`. [01.02](02-health-and-lifecycle.md)
+prefers `httpGet` because an `exec` probe needs a program in the image, and
+anyone inside the container can run that program too. Postgres has no HTTP
+endpoint, so it uses `exec`. The official image already ships `pg_isready`, so
+the probe adds nothing to the image. The cost is that `pg_isready` stays
+available to anyone who gets a shell in the container.
 
 ### Apply, and wait for a query rather than a probe
 
-Apply the file and wait for the rollout. The first start is slow on some
-disks. The lab host took several minutes, mostly in `fsync` during `initdb`.
-A Pod can report `Ready` a few seconds before the `bookstore` database answers
-a query, so the last command in this block waits for the query, not the probe.
+[01.04](04-replicasets-and-deployments.md) already applied this file and waited
+for the first query, so a reader who followed it in order sees `unchanged` from
+the first command. The output below comes from a run that started with an empty
+namespace, which is why it shows `created`. Either way, the last command waits
+for the query. The first start is slow on some disks. The lab host took several
+minutes, mostly in `fsync` during `initdb`. A Pod can report `Ready` a few
+seconds before the `bookstore` database answers a query, so the last command in
+this block waits for the query, not the probe.
 
 ```sh
 kubectl apply -f examples/bookstore/raw-manifests/20-postgres-statefulset.yaml
@@ -440,9 +449,9 @@ The name resolves to the Pod's own IP. The lookup ran from inside
 
 Deleting the StatefulSet keeps the claim. Applying the file again brings the
 StatefulSet back, the same claim goes to the same ordinal, and the row is
-still there. The default `standard` class has reclaim policy `Delete`, so deleting a
-claim also deletes its volume. A claim may be the only copy of the data, so
-delete one only with a backup in hand.
+still there. The default `standard` class has reclaim policy `Delete`, so
+deleting a claim also deletes its volume. A claim may be the only copy of the
+data, so delete one only with a backup in hand.
 
 ```sh
 kubectl get storageclass standard -o jsonpath='{.reclaimPolicy}'; echo
@@ -509,11 +518,13 @@ data-postgres-0   Bound    pvc-2eb0f1fa-584a-41e9-882c-e2302b84dcd9   1Gi       
   controller instantiates a PVC named `<TEMPLATE>-<NAME>-<ORDINAL>` (e.g.
   `data-postgres-0`), which the dynamic provisioner
   ([03.04](../03-config-and-storage/04-persistent-storage.md)) binds to
-  a PV. Crucially these PVCs are **owned by the StatefulSet but not deleted with
-  Pods**: deleting/rescheduling `postgres-0` re-binds it to the *same*
-  `data-postgres-0`. (Deleting the StatefulSet itself does **not** delete the
-  PVCs by default — deliberate data-safety; cleanup is manual, or via
-  `persistentVolumeClaimRetentionPolicy`.)
+  a PV. These PVCs are **not deleted with Pods**: deleting or rescheduling
+  `postgres-0` re-binds it to the *same* `data-postgres-0`. Under the default
+  `Retain` policy the StatefulSet sets no owner reference on the claims, so
+  deleting the StatefulSet leaves them too (deliberate data-safety; cleanup is
+  manual). With the `Delete` policies in `persistentVolumeClaimRetentionPolicy`,
+  the StatefulSet sets an owner reference on the claims, and they are removed
+  with their owner.
 - **`podManagementPolicy`.** `OrderedReady` (default): bring Pods up `0→1→2`,
   each **Ready** before the next, and tear down in reverse — needed when later
   members must register with earlier ones (typical for primaries/seeds).
