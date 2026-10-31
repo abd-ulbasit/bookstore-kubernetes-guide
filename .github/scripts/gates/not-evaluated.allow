@@ -20,4 +20,4 @@
 # The pull request that adds a line must also say how the block was checked.
 # Remove the line when the chapter stops needing it.
 15-day-to-day-production-ops/06-progressive-delivery-in-production.md | Rollout | Checked by hand against the 01.01 baseline, and by jsonschema against the rollouts.argoproj.io CRD of argo-rollouts chart 2.43.8 (app v1.10.1), extracted with helm template. sf-pilot has no Argo Rollouts CRD, so the server dry-run cannot run there.
-14-eks-in-production-a-to-z/16-developer-experience-for-k8s-teams.md | Config | skaffold.yaml is a Skaffold build config that only the skaffold CLI reads; the manifest it applies is the 2.2 block, which the static and admission gates check.
+14-eks-in-production-a-to-z/16-developer-experience-for-k8s-teams.md | Config | skaffold.yaml is a Skaffold build config that only the skaffold CLI reads. Its manifests entry lists the 2.2 block, which the static and admission gates check. Its keys follow the Skaffold v4beta14 schema (manifests.rawYaml, deploy.kubectl), checked against the upstream config.go; skaffold itself was not run.

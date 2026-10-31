@@ -255,10 +255,11 @@ Audit the exclusion list with eyes-on; default to inclusion.
 | Threat | Control in this chapter | Goes deeper |
 |---|---|---|
 | Backup objects hold Secret values as JSON, so reading the objects reads the Secrets | Customer-managed KMS key; the Velero role gets decrypt; the bucket refuses plain HTTP and public access | [08.02](../08-day-2-operations/02-backup-and-dr.md) |
-| A Restore copies another namespace's Secrets into one the restorer can read | Create on `restores.velero.io` for platform admins only | [08.02](../08-day-2-operations/02-backup-and-dr.md) |
+| A Restore copies another namespace's Secrets into one the restorer can read | RBAC on the `velero` namespace, where Velero reconciles Restores; Restore create for platform admins only | [08.02](../08-day-2-operations/02-backup-and-dr.md) |
 | The Velero server runs as cluster-admin, so compromising it reads every Secret | Restricted pod in its own namespace; no static AWS key (IRSA, `credentials.useSecret = false`) | [14.03](./03-eks-addon-management.md) |
 | Someone with bucket rights deletes or overwrites backups | Versioning on; Object Lock not set (see below) | [08.02](../08-day-2-operations/02-backup-and-dr.md) |
-| The Velero role snapshots or deletes EBS volumes it did not create | Create and delete conditions on the `velero.io/backup` tag key | [14.03](./03-eks-addon-management.md) |
+| The Velero role deletes EBS volumes or snapshots it did not create | Delete conditioned on the `velero.io/backup` tag key, and create only with that key in the request, so the role deletes only what it made | [14.03](./03-eks-addon-management.md) |
+| The Velero role reads the data of any EBS volume by snapshotting it | Not narrowed in this tree: the create statement names every volume in the account. The trust policy admits only the Velero ServiceAccount, and the role is reviewed as a data-read grant | [14.03](./03-eks-addon-management.md) |
 
 The chart's cluster-admin binding stays on, because restores create any
 kind. Limit who can reach the `velero` namespace and who can create
@@ -273,10 +274,11 @@ decide who can read them:
   Any principal that IAM grants `kms:Decrypt` on that key can read the
   backups too, so review that grant the way you review access to a
   Secret.
-- **A restore is a read.** A user who can create a Restore can copy the
-  Secrets of any backed-up namespace into a namespace where they already
-  read Secrets. Velero writes with its own ServiceAccount, so the user's
-  RBAC does not stop the copy.
+- **A restore is a read.** A user who can create a Restore can have Velero
+  copy a backed-up namespace's Secrets into another namespace, with
+  `--namespace-mappings`. Velero writes with its own ServiceAccount, so the
+  user's RBAC does not stop the copy. Velero reconciles Restore objects only
+  in its own namespace, so the boundary is RBAC on `velero`.
 - **Encryption at rest, and TLS in transit.** SSE-KMS encrypts the
   objects at rest, and the bucket policy refuses requests that are not
   TLS. The example's EBS volumes use the EBS key, so restores need KMS
@@ -614,7 +616,7 @@ The schedule spec mirrors the Terraform `velero.tf`'s schedule
 config — `excludedNamespaces`, `snapshotVolumes: true`, `ttl: 720h`
 (30 days).
 
-### 7. Implement the 23-backup retention scheme (production extension)
+### 7. Implement the 23-backup retention scheme
 
 The default schedule is daily-with-30-day-TTL (30 backups). To
 implement 23-backup, replace it with three Schedules. Save as
@@ -766,7 +768,8 @@ The Velero server's controllers reconcile a set of CRDs:
 - **Backup controller** — watches Backup CRs; when one appears
   (created manually or by a Schedule), it walks the included
   namespaces, lists resources, writes them to S3 as tarballs, and
-  triggers VolumeSnapshot CRs for any PVCs.
+  triggers the AWS plugin to snapshot the EBS-backed PVCs. On the native
+  path this chapter configures, no Kubernetes VolumeSnapshot object is created.
 - **Restore controller** — watches Restore CRs; reads the backup
   from S3, applies the API objects (with namespace remapping, label
   filtering, name remapping as configured), and triggers PV
@@ -812,9 +815,11 @@ document scopes the role to:
   allowed only for grants AWS creates on the role's behalf.
 
 The tag scoping limits what the role can delete. It does not limit what
-the role can read. The role can still snapshot any EBS volume in the
-account, because the create statement does not name a source volume.
-Narrowing that is a production step. These conditions were checked
+the role can read. The create statement does not name a source volume, so
+the role can snapshot any EBS volume in the account. The threats table lists
+that as a residual risk: treat the Velero role as able to read every EBS
+volume. The trust policy names only the Velero ServiceAccount, which limits
+who can assume it. These conditions were checked
 against the tag names in the plugin source. This example has not been
 run against an AWS account.
 
@@ -852,17 +857,15 @@ S3 write per file), but it works on any PV.
 > dedicated `restore-test-<DATE>` namespace, runs a `velero restore`,
 > verifies a known-good query, and tears down.
 
-> **In production:** **Cross-region backup copy** is a Phase 14-R
-> gap. The bucket is single-region; a region-loss event (AWS region
-> down for the duration of the recovery you need) means the backup
-> is unreachable. The production extension: S3 Cross-Region
-> Replication (CRR) onto a peer-region bucket. The CRR config goes
-> into the bucket's replication-configuration; the destination
-> bucket lives in a second region (e.g., us-east-1 primary +
-> us-west-2 DR). The cost: cross-region data transfer and duplicate
-> storage, both billed. Worth it for production; an
-> opt-in in any fork. Chapter 14.17 covers the cross-region DR
-> pattern in detail.
+> **In production:** **Cross-region backup copy** is not in the example. The
+> bucket is single-region, so a region-loss event (AWS region down for the
+> duration of the recovery you need) makes the backup unreachable. Closing
+> that takes S3 Cross-Region Replication (CRR) onto a peer-region bucket. The
+> CRR config goes into the bucket's replication-configuration; the destination
+> bucket lives in a second region (e.g., us-east-1 primary + us-west-2 DR).
+> The cost is cross-region data transfer and duplicate storage, both billed.
+> [Chapter 14.17](17-cross-region-dr-account-baseline-90-day-runbook.md)
+> covers the cross-region DR pattern in detail.
 
 > **In production:** **Backup retention math.** The example's default
 > (daily-30d, 30 backups) is the simple starting point. The 23-backup
@@ -961,7 +964,7 @@ Backup checklist (the production setup is right when all seven are yes):
 - [ ] Object Lock decision recorded: set, or left off with a reason.
 - [ ] EBS snapshots carry the `velero.io/backup` tag; AWS account has
       EBS snapshot quota headroom for the expected backup count.
-- [ ] Cross-region replication configured (production tier) — bucket
+- [ ] Cross-region replication configured: the bucket
       replicates to a peer-region bucket; recovery is possible from
       a region-loss event.
 
@@ -997,7 +1000,7 @@ Backup checklist (the production setup is right when all seven are yes):
 
    </details>
 
-5. **A developer has `create` on `restores.velero.io` in their team namespace. The backup holds a `payments` namespace. They run `velero restore create --from-backup <NAME> --include-namespaces=payments --namespace-mappings payments:team-x`. What can they read afterwards, and what stops it?**
+5. **A developer has `create` on `restores.velero.io` in the `velero` namespace, where Velero reconciles Restores. The backup holds a `payments` namespace. They run `velero restore create --from-backup <NAME> --include-namespaces=payments --namespace-mappings payments:team-x`. What can they read afterwards, and what stops it?**
    <details><summary>Show answer</summary>
 
    The `payments` Secrets are restored into `team-x`, where the developer already reads Secrets. Velero performs the write with its own cluster-admin ServiceAccount, so the developer's RBAC never applies to the copy. What stops it is policy: create on Restore objects belongs to platform admins. Restore rights are read rights on every Secret in the backup, so keep them there, and keep Backup creation there too.

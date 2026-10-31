@@ -13,7 +13,10 @@
 #   1. Set the existing vpc-cni addon to `preserve = false` (so EKS removes
 #      its CNI plugin from /etc/cni/net.d on nodes) OR remove the vpc-cni
 #      entry from module.eks.cluster_addons in eks.tf. Remove the kube-proxy
-#      add-on the same way.
+#      add-on too, but from addons.tf: it is the standalone
+#      `aws_eks_addon.kube_proxy` resource there, not an entry in
+#      cluster_addons. Removing it lets Terraform delete the add-on (the
+#      resource sets preserve = false).
 #
 #   2. kubectl drain every existing node. Workloads will go Pending until
 #      the new CNI is in place.

@@ -29,13 +29,12 @@
 # ────────────────────────────────────────────────────────────────────────────
 #
 # ────────────────────────────────────────────────────────────────────────────
-# PSA EXCEPTION: the falco namespace runs PSA enforce=privileged. The chart
-# runs the container privileged (containerSecurityContext below) and mounts
-# host paths, among them the runtime sockets. The least-privileged option,
-# driver.modernEbpf.leastPrivileged, swaps privileged for CAP_BPF, CAP_PERFMON,
-# CAP_SYS_RESOURCE and CAP_SYS_PTRACE, but restricted allows no capability
-# beyond NET_BIND_SERVICE and no hostPath, so the namespace stays privileged
-# either way. This is the ONLY privileged namespace in this Terraform tree.
+# PSA EXCEPTION: the falco namespace runs PSA enforce=privileged. The container
+# is not privileged: driver.modernEbpf.leastPrivileged replaces privileged with
+# CAP_BPF, CAP_PERFMON, CAP_SYS_RESOURCE and CAP_SYS_PTRACE. The DaemonSet still
+# mounts host paths, among them the runtime sockets, and restricted and baseline
+# both forbid hostPath, so the namespace stays privileged. Falco and kube-system
+# (Cilium) are the two privileged namespaces in this Terraform tree.
 # ────────────────────────────────────────────────────────────────────────────
 ################################################################################
 
@@ -49,9 +48,9 @@ resource "kubernetes_namespace" "falco" {
     name = "falco"
 
     labels = {
-      # Falco's daemonset needs CAP_BPF/CAP_PERFMON + host PID/network.
-      # PSA restricted cannot allow these; we use privileged for this
-      # namespace ONLY. This is the only privileged namespace in the tree.
+      # Falco's daemonset needs CAP_BPF/CAP_PERFMON and hostPath mounts.
+      # PSA restricted cannot allow these. This namespace is one of the two
+      # privileged namespaces in the tree (kube-system is the other).
       "pod-security.kubernetes.io/enforce"         = "privileged"
       "pod-security.kubernetes.io/enforce-version" = "latest"
       "pod-security.kubernetes.io/audit"           = "privileged"
@@ -212,6 +211,10 @@ resource "helm_release" "falco" {
       # supported path on EKS today.
       driver = {
         kind = "modern_ebpf"
+        modernEbpf = {
+          # Least privilege: the four capabilities below replace privileged.
+          leastPrivileged = true
+        }
       }
 
       tty = false
@@ -260,13 +263,16 @@ resource "helm_release" "falco" {
       ]
 
       # ──── containerSecurityContext (container-level) ──────────────────────
-      # Falco's eBPF driver needs to load kernel programs. The chart's
-      # container runs privileged by default; we set it explicitly so the
-      # intent is in code. See the PSA EXCEPTION note at the top.
-      # runAsUser = 0 pins UID 0 explicitly.
+      # Not privileged. Setting this map replaces the chart's own capability
+      # list, so the four capabilities of the least-privileged modern eBPF
+      # driver are repeated here (verified by helm template, chart 4.13.0).
+      # runAsUser = 0 pins UID 0, which the eBPF loader needs. See the PSA
+      # EXCEPTION note at the top.
       containerSecurityContext = {
-        privileged = true
-        runAsUser  = 0
+        runAsUser = 0
+        capabilities = {
+          add = ["BPF", "SYS_RESOURCE", "PERFMON", "SYS_PTRACE"]
+        }
       }
 
       # ──── podSecurityContext (pod-level) ──────────────────────────────────

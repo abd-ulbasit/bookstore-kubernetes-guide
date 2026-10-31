@@ -157,39 +157,14 @@ The three axes:
 **Cilium NetworkPolicy DSL examples.** The expressiveness gap is the
 selling point:
 
-```yaml
-# CiliumNetworkPolicy — HTTP method/path matching.
-apiVersion: cilium.io/v2
-kind: CiliumNetworkPolicy
-metadata:
-  name: storefront-to-catalog-readonly
-  namespace: bookstore
-spec:
-  endpointSelector:
-    matchLabels:
-      app: catalog
-  ingress:
-    - fromEndpoints:
-        - matchLabels:
-            app: storefront
-      toPorts:
-        - ports:
-            - port: "8080"
-              protocol: TCP
-          rules:
-            http:
-              - method: "GET"
-                path: "/api/books"
-              - method: "GET"
-                path: "/api/books/.*"
-```
+Section 3 applies this policy in full: it selects the catalog Pods and
+admits the storefront Pods on port 8080, but only for GET requests to
+`/api/books` paths.
 
-This says: *storefront → catalog port 8080 is allowed, but only
-GET requests to `/api/books` paths*. Stock NetworkPolicy can't
-express the HTTP-level part. To get the same enforcement on
-VPC-CNI, you'd need a service mesh (Istio AuthorizationPolicy at
-L7); Cilium expresses it at the CNI level, with its per-node proxy
-applying the HTTP rule.
+Stock NetworkPolicy can't express the HTTP-level part. To get the same
+enforcement on VPC-CNI, you'd need a service mesh (Istio AuthorizationPolicy
+at L7); Cilium expresses it at the CNI level, with its per-node proxy applying
+the HTTP rule.
 
 ```yaml
 # DNS-based egress allowlist.
@@ -292,7 +267,7 @@ staying around.
 | A workload calls a host it should never reach, named by DNS | `toFQDNs` egress allowlist, with the kube-dns exception | [14.08](08-vpc-endpoints-and-egress.md) for VPC egress |
 | The CNI agent is a host-level process with extra capabilities | `kube-system` labelled privileged and registered as an exception | Runtime detection, Part 05 chapter 05.08 <!-- link-later: 05.08 -->; [14.13](13-runtime-defense-and-container-security.md) |
 | A running-cluster migration leaves two CNIs and mixed policy | Drain in sequence, with a Velero backup first | [14.14](14-backup-and-restore-velero.md) |
-| Hubble flow data shows pod names and HTTP paths | Keep the Hubble relay and UI off public Services | [14.05](05-logging-and-metrics-cost.md) for log retention |
+| Hubble flow data (pod names, HTTP paths) reaches someone outside the cluster | The Hubble relay and UI stay `ClusterIP`, the chart default, and are reached by port-forward or `cilium hubble ui` (section 4); no LoadBalancer or Ingress in front of them | [Hubble setup](https://docs.cilium.io/en/stable/observability/hubble/setup/), [14.05](05-logging-and-metrics-cost.md) for log retention |
 
 ## Diagrams
 
@@ -379,11 +354,11 @@ a fresh cluster from `eks.tf` without the `vpc-cni` addon, then
 install Cilium from boot. The hands-on below documents both paths.
 
 - A test cluster (either fresh or expendable) running EKS 1.37 (the
-  bookstore tree's default) on AL2023-based nodes (kernel 6.x
-  required for modern eBPF). Cilium 1.20, installed below, is
-  e2e-tested on Kubernetes 1.33-1.36. No stable Cilium release lists
-  1.37 yet (main and the latest v1.21 pre-releases do), so on 1.37 you
-  are relying on Kubernetes' backward compatibility.
+  bookstore tree's default) on AL2023-based nodes (Cilium's system
+  requirements ask for kernel 5.10 or later). Cilium 1.20, installed below, is
+  e2e-tested on Kubernetes 1.33-1.36. No stable Cilium release lists 1.37 yet
+  (main and the latest v1.21 pre-releases do), so on 1.37 you are relying on
+  Kubernetes' backward compatibility.
 - `kubectl` configured.
 - `helm` 3.x.
 - `cilium` CLI installed (`brew install cilium-cli` or grab a release
@@ -399,14 +374,18 @@ exception for Cilium's agents.
 ### 1. Greenfield path — fresh cluster with Cilium from boot
 
 In `eks.tf`, comment out (or remove) the `vpc-cni` entry from
-`cluster_addons`:
+`cluster_addons`. In `addons.tf`, remove the `aws_eks_addon.kube_proxy`
+resource. The EKS add-on is a standalone resource there, not an entry in
+`cluster_addons`. Leaving it in place would keep the EKS-managed kube-proxy
+and its DaemonSet running alongside Cilium's replacement.
 
 ```hcl
+# eks.tf
 cluster_addons = {
-  # kube-proxy = { ... }   # REMOVED: Cilium replaces it
-  coredns    = { ... }
-  # vpc-cni    = { ... }   # REMOVED for Cilium clusters
+  # vpc-cni = { ... }   # REMOVED for Cilium clusters
 }
+
+# addons.tf: delete the aws_eks_addon.kube_proxy resource
 ```
 
 Apply (or create the cluster fresh):
@@ -425,13 +404,13 @@ and the namespace registry records this exception:
 kubectl label namespace kube-system pod-security.kubernetes.io/enforce=privileged
 ```
 
-Then rename `cilium-installation.tf.example` to `cilium-installation.tf`,
-fill in the `k8sServiceHost` (the cluster API endpoint hostname,
-without the `https://` prefix — get it from
-`terraform output cluster_endpoint`), uncomment the variable
-declaration, then `terraform apply` again. Cilium installs. Then delete a
-kube-proxy DaemonSet that is still present, as the
-[kube-proxy-free guide](https://docs.cilium.io/en/stable/network/kubernetes/kubeproxy-free/)
+Then rename `cilium-installation.tf.example` to `cilium-installation.tf`, fill
+in the `k8sServiceHost` (the cluster API endpoint hostname, without the
+`https://` prefix — get it from `terraform output cluster_endpoint`),
+uncomment the variable declaration, then `terraform apply` again. Cilium
+installs. Once Terraform has removed the kube-proxy add-on, its DaemonSet
+should be gone. If one is still present, delete it, as the [kube-proxy-free
+guide](https://docs.cilium.io/en/stable/network/kubernetes/kubeproxy-free/)
 shows:
 
 ```bash
@@ -449,8 +428,9 @@ For an existing cluster, the sequence is:
      --include-namespaces='*' --snapshot-volumes --wait
    ```
 
-2. **Remove VPC-CNI** by editing `eks.tf` to delete (or comment) the
-   `vpc-cni` and `kube-proxy` entries from `cluster_addons`, then:
+2. **Remove VPC-CNI and kube-proxy** by commenting out the `vpc-cni` entry
+   in `cluster_addons` in `eks.tf`, and deleting the `aws_eks_addon.kube_proxy`
+   resource in `addons.tf` (the add-on is standalone there). Then:
 
    ```bash
    terraform apply
@@ -571,19 +551,51 @@ Apply:
 kubectl apply -f /tmp/storefront-policy.yaml
 ```
 
-Verify the policy is enforced. Apply a debug Pod that carries the baseline
-and the `app: storefront` label the policy selects. busybox runs as root by
-default, so the Pod sets a non-root UID:
+Verify the policy is enforced with a probe that carries its own label. The
+`storefront` Service selects `app: storefront`, so a probe with that label
+would become a live storefront endpoint and take real traffic. The probe
+below uses `app: l7-probe`, which no Service selects. A second, temporary
+policy admits that label to the same HTTP rules, and you delete it when the
+check is done.
+
+```yaml
+apiVersion: cilium.io/v2
+kind: CiliumNetworkPolicy
+metadata:
+  name: l7-probe-allow
+  namespace: bookstore
+spec:
+  endpointSelector:
+    matchLabels:
+      app: catalog
+  ingress:
+    - fromEndpoints:
+        - matchLabels:
+            app: l7-probe
+      toPorts:
+        - ports:
+            - port: "8080"
+              protocol: TCP
+          rules:
+            http:
+              - method: "GET"
+                path: "/api/books"
+              - method: "GET"
+                path: "/api/books/.*"
+```
+
+Apply it, then the probe. The probe carries the baseline. busybox runs as
+root by default, so the Pod sets a non-root UID:
 
 ```bash
 kubectl apply -f - <<'EOF'
 apiVersion: v1
 kind: Pod
 metadata:
-  name: debug-storefront
+  name: l7-probe
   namespace: bookstore
   labels:
-    app: storefront
+    app: l7-probe
 spec:
   automountServiceAccountToken: false
   securityContext:
@@ -614,18 +626,19 @@ spec:
     - name: tmp
       emptyDir: {}
 EOF
-kubectl -n bookstore wait --for=condition=Ready pod/debug-storefront --timeout=120s
-kubectl -n bookstore exec -it debug-storefront -- sh
+kubectl -n bookstore wait --for=condition=Ready pod/l7-probe --timeout=120s
+kubectl -n bookstore exec -it l7-probe -- sh
 ```
 
-Inside the Pod, run:
+Inside the Pod, run the four requests. The catalog Service listens on port
+80 and forwards to the Pod's port 8080, which is the port the policy names:
 
 ```bash
 # Inside the Pod:
-wget -O- http://catalog.bookstore:8080/api/books         # ALLOWED
-wget -O- http://catalog.bookstore:8080/api/books/123     # ALLOWED
-wget -O- http://catalog.bookstore:8080/api/admin/users   # DENIED on purpose (path)
-wget --post-data='...' http://catalog.bookstore:8080/api/books  # DENIED on purpose (POST)
+wget -O- http://catalog.bookstore/api/books         # ALLOWED
+wget -O- http://catalog.bookstore/api/books/123     # ALLOWED
+wget -O- http://catalog.bookstore/api/admin/users   # DENIED on purpose (path)
+wget --post-data='...' http://catalog.bookstore/api/books  # DENIED on purpose (POST)
 ```
 
 The first two succeed. The last two are deliberate denials: no rule allows
@@ -639,14 +652,15 @@ hubble observe --namespace bookstore --verdict DROPPED --protocol http
 Illustrative output, not captured:
 
 ```text
-2026-05-21T... bookstore/debug-xyz -> bookstore/catalog-abc:8080 \
+2026-05-21T... bookstore/l7-probe-xyz -> bookstore/catalog-abc:8080 \
   HTTP POST /api/books DROPPED (policy denied)
 ```
 
-Delete the debug Pod when you are done:
+Delete the probe and the temporary policy when you are done:
 
 ```bash
-kubectl -n bookstore delete pod debug-storefront
+kubectl -n bookstore delete pod l7-probe
+kubectl -n bookstore delete ciliumnetworkpolicy l7-probe-allow
 ```
 
 ### 4. Hubble — real-time flow observability
@@ -677,6 +691,25 @@ hubble observe --namespace bookstore --verdict DROPPED -f
 The "denied flows" view is the security-incident-response tool —
 during an incident, this stream tells you what an attacker tried
 to reach.
+
+The Hubble UI and relay must not be reachable from outside the cluster.
+Both Services are `ClusterIP`, which is the chart default. Confirm it:
+
+```bash
+kubectl -n kube-system get svc hubble-relay hubble-ui
+```
+
+Illustrative output, not captured:
+
+```text
+NAME           TYPE        CLUSTER-IP      EXTERNAL-IP   PORT(S)   AGE
+hubble-relay   ClusterIP   10.100.x.x      <none>        80/TCP    5m
+hubble-ui      ClusterIP   10.100.x.x      <none>        80/TCP    5m
+```
+
+Reach them with `cilium hubble ui` or `kubectl port-forward`, as the
+[Hubble setup guide](https://docs.cilium.io/en/stable/observability/hubble/setup/)
+shows. Do not put a LoadBalancer or an Ingress in front of either Service.
 
 ### 5. Verify kube-proxy is gone
 
@@ -734,7 +767,8 @@ The rollback works, with the same downtime. Velero restores Kubernetes
 objects and volumes, not node networking, so the CNI change is reversed by
 replacing nodes. The steps:
 
-1. Re-enable `vpc-cni` and `kube-proxy` in `eks.tf`, then apply.
+1. Re-enable `vpc-cni` in `cluster_addons` in `eks.tf`, restore the
+   `aws_eks_addon.kube_proxy` resource in `addons.tf`, then apply.
 2. `helm uninstall cilium -n kube-system`.
 3. Drain every node; Karpenter brings them back with VPC-CNI.
 4. Restore objects from the Velero backup only if workloads were lost.
@@ -745,20 +779,19 @@ maintenance window with the team aware.
 
 ### 8. (Optional) Tetragon alongside Cilium
 
-Tetragon is the Cilium project's kernel-event tool. Its runtime detection
-rules belong to [14.13](13-runtime-defense-and-container-security.md) and
-Part 05 chapter 05.08 <!-- link-later: 05.08 -->, so this section covers the
-install only:
+Tetragon is the Cilium project's kernel-event tool. This chapter does not
+install it, and this guide does not teach its `TracingPolicy` objects.
+[14.13](13-runtime-defense-and-container-security.md) compares it with
+Falco. Read the facts below before you install it anywhere.
 
-```bash
-helm install tetragon cilium/tetragon \
-  --namespace kube-system \
-  --version 1.8.0
-```
-
-Check the chart's security values before you install. If Tetragon needs
-host access, it needs the `kube-system` exception that this chapter
-registers.
+Tetragon's chart runs the agent with `hostNetwork: true`, which the chart
+says it needs for process visibility. It adds five capabilities
+(`SYS_ADMIN`, `SYS_PTRACE`, `SYS_RESOURCE`, `DAC_OVERRIDE` and `SYSLOG`) and
+sets its AppArmor profile to Unconfined. Pod Security `baseline` refuses all
+three, so Tetragon needs the `privileged` level. Installing it means a second
+privileged workload in the namespace it lands in. Register that namespace in
+`security/namespace-exceptions.yaml` with its own reason first. The Cilium
+entry in that registry covers only the Cilium agent and operator.
 
 ## How it works under the hood
 
@@ -805,18 +838,17 @@ program looks up the hashmap (O(1) hash lookup), picks a backend
 forwards. No iptables, no per-service-update reload, no kube-proxy
 DaemonSet.
 
-**Hubble's flow export.** Every eBPF program in Cilium can emit a
-flow event to the per-node Hubble Relay (a sidecar in the
-Cilium agent Pod). The flow event carries: source Pod identity,
-destination Pod identity, L4 protocol, L7 protocol (if applicable),
-verdict (allowed/denied + policy match), timestamp. The Relay
-aggregates flows across nodes; the Hubble UI (a frontend in the
-`hubble-ui` Deployment) renders the service map; the `hubble`
-CLI streams flows from the Relay over gRPC. The flow storage is
-**in-memory only by default** — a sliding window of the last N
-events per node. For persistent storage, configure the
-`hubble.export` integration to ship flows to OTel or a log
-aggregator.
+**Hubble's flow export.** Every eBPF program in Cilium can emit a flow event
+to the Hubble server that runs inside each node's Cilium agent Pod. The Hubble
+Relay, a cluster-wide Deployment, connects to those per-node servers and
+serves the merged stream. The flow event carries: source Pod identity,
+destination Pod identity, L4 protocol, L7 protocol (if applicable), verdict
+(allowed/denied + policy match), timestamp. The Relay aggregates flows across
+nodes; the Hubble UI (a frontend in the `hubble-ui` Deployment) renders the
+service map; the `hubble` CLI streams flows from the Relay over gRPC. The flow
+storage is **in-memory only by default** — a sliding window of the last N
+events per node. For persistent storage, configure the `hubble.export`
+integration to ship flows to OTel or a log aggregator.
 
 **Pod identity vs IP.** Cilium decouples policy enforcement from
 IP addresses by introducing an **Identity** — a stable integer
@@ -974,7 +1006,7 @@ EOF
 
 # Migrate from VPC-CNI (DESTRUCTIVE — needs Velero backup first).
 velero backup create pre-cilium-migration --wait
-# 1. Edit eks.tf to remove vpc-cni from cluster_addons.
+# 1. Edit eks.tf (vpc-cni in cluster_addons) and addons.tf (kube_proxy), then:
 # 2. terraform apply
 # 3. helm install cilium ...
 # 4. for n in $(kubectl get node -o name); do kubectl drain "$n" ...; done
@@ -990,8 +1022,9 @@ Cilium-on-EKS checklist (the production setup is right when all six are yes):
       reachable + Hubble Relay aggregating flows across nodes.
 - [ ] CiliumNetworkPolicy CRs in place for the workloads that need
       L7 enforcement (auth gateway, payments, admin endpoints).
-- [ ] `kube-system` is labelled privileged and registered as the one
-      exception; the operator drops all capabilities.
+- [ ] `kube-system` is labelled privileged and registered as an exception, the
+      second privileged namespace in the bookstore-platform tree after `falco`;
+      the operator drops all capabilities.
 - [ ] `cilium connectivity test` passes (run quarterly + after any
       Cilium version upgrade).
 
@@ -1011,11 +1044,11 @@ Cilium-on-EKS checklist (the production setup is right when all six are yes):
 
    Two active CNIs on one node is the failure mode: expect Pod networking to
    break during the overlap. The chapter's runbook never runs both. It takes a
-   Velero backup, removes `vpc-cni` and `kube-proxy` from `cluster_addons` and
-   applies, labels `kube-system` privileged, installs Cilium with ENI IPAM, and
-   drains the nodes one at a time so Karpenter replaces them with Cilium-only
-   nodes. Greenfield avoids the problem: install Cilium before the first node
-   joins.
+   Velero backup, removes `vpc-cni` from `cluster_addons` and the kube-proxy
+   add-on from `addons.tf`, applies, labels `kube-system` privileged, installs
+   Cilium with ENI IPAM, and drains the nodes one at a time so Karpenter
+   replaces them with Cilium-only nodes. Greenfield avoids the problem:
+   install Cilium before the first node joins.
 
    </details>
 
