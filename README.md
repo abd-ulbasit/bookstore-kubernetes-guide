@@ -4,7 +4,7 @@
 [![example-trees-check](https://github.com/abd-ulbasit/bookstore-kubernetes-guide/actions/workflows/example-trees-check.yml/badge.svg?branch=main&event=schedule)](https://github.com/abd-ulbasit/bookstore-kubernetes-guide/actions/workflows/example-trees-check.yml)
 [![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
 [![Kubernetes](https://img.shields.io/badge/kubernetes-1.37-326CE5?logo=kubernetes&logoColor=white)](https://kubernetes.io)
-[![Terraform](https://img.shields.io/badge/terraform-1.10-7B42BC?logo=terraform&logoColor=white)](https://www.terraform.io)
+[![Terraform](https://img.shields.io/badge/terraform-1.14-7B42BC?logo=terraform&logoColor=white)](https://www.terraform.io)
 [![Helm](https://img.shields.io/badge/helm-3.22-0F1689?logo=helm&logoColor=white)](https://helm.sh)
 [![GitHub last commit](https://img.shields.io/github/last-commit/abd-ulbasit/bookstore-kubernetes-guide?logo=github)](https://github.com/abd-ulbasit/bookstore-kubernetes-guide/commits/main)
 
@@ -67,13 +67,13 @@ both just work. Config: [`.devcontainer/`](.devcontainer/).
 | `full-guide/appendix/` | A–F: glossary, cheat sheets, reading paths, **concept map + tag index** |
 | `full-guide/16-gke-in-production-a-to-z/`, `full-guide/17-ml-platform-on-gke/` | Outlines for the GKE Parts, with no chapters yet. Their labs wait |
 | `full-guide/examples/security-lab/` | The lab scripts and the captured transcripts (`evidence/`) that the chapters quote and CI checks |
-| `full-guide/examples/bookstore/` | Canonical example tree — runs on **kind/k3d** locally, no cloud needed (Parts 02–08) |
+| `full-guide/examples/bookstore/` | Canonical example tree — runs on **kind** locally, no cloud needed (Parts 02–08) |
 | `full-guide/examples/bookstore-platform/` | Platform v2 — multi-tenant, GitOps, Keycloak + IRSA + Istio (Parts 12–13) |
 | `full-guide/examples/bookstore-platform/terraform/` | EKS infrastructure as Terraform — **live-smoke-tested** on AWS EKS 1.35 in `ap-south-1` on 2026-05-20; now defaults to EKS 1.37 with Karpenter 1.15.1, smoke test not yet re-run (Part 14) |
 | `full-guide/examples/bookstore-platform/terraform-account-baseline/` | AWS-account-wide guardrails (CloudTrail, Security Hub, GuardDuty, IAM Access Analyzer) |
 | [`docs/adr/`](docs/adr/) | Architecture Decision Records — the load-bearing technical decisions, why they were made, and the trade-offs |
 | [`docs/lessons-from-smoke-test.md`](docs/lessons-from-smoke-test.md) | Post-mortem of running this guide's Terraform against real EKS — what broke, why, and the five fixes that became Tier-1 defaults |
-| `.github/workflows/` | `docs` (builds + deploys the site, validates every mermaid block) + `example-trees-check` (Helm/Kustomize counts, Terraform fmt+validate, host-path hygiene) + `secret-scan` (gitleaks over the full history, every PR) + `link-check` (external URL rot) + `security-scan` (Trivy incl. every Terraform root, govulncheck over every discovered Go module — triage in [`SECURITY-SCAN.md`](SECURITY-SCAN.md)) |
+| `.github/workflows/` | `docs` (builds + deploys the site, validates every mermaid block) + `example-trees-check` (Helm/Kustomize counts, Terraform fmt+validate, host-path hygiene) + `secret-scan` (gitleaks over the full history, every PR) + `link-check` (external URL rot) + `security-scan` (Trivy incl. every Terraform root, govulncheck over every discovered Go module — triage in [`SECURITY-SCAN.md`](SECURITY-SCAN.md)) + `security-gates` (the baseline, registry, evidence and runtime gates on every chapter and example; the enforced list is `.github/security-gates-enforced.txt`) + `bookstore-pipeline` (the reusable Bookstore delivery pipeline of Part 07 ch.03) + `bookstore-pipeline-check` (runs that pipeline on every service change and plants a flaw for each scanner) + `bookstore-release` (publishes one service by hand) |
 
 ## Reading paths by role
 
@@ -116,8 +116,7 @@ want to read the chapters most relevant to a specific role first:
 Each chapter's hands-on section gives the exact commands. The two starting
 points:
 
-- **Local cluster (Parts 00–11):** `kind create cluster` or
-  `k3d cluster create --image rancher/k3s:v1.37.1-k3s1`
+- **Local cluster (Parts 00–13):** `kind create cluster`
 - **Live AWS (Part 14):** `cd full-guide/examples/bookstore-platform/terraform && terraform init && terraform apply`
   (costs **~$0.20/hour**, every dollar-bearing variable defaults to off; full
   teardown documented in `terraform/cleanup-pre-destroy.sh`)

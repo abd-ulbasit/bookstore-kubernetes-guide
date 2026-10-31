@@ -95,26 +95,27 @@ citation, put the explanation in the chapter that owns it, and give it a date
 no more than 12 months out. When the date comes, either fix it or renew it
 with a fresh reason.
 
-### 0.1) Namespaces above `restricted` (3 entries, checked 2026-10-31)
+### 0.1) Namespaces above `restricted`
 
-| Namespace | Level | Why | Chapter | Expires |
-|---|---|---|---|---|
-| `falco` | `privileged` | The Falco DaemonSet needs `CAP_BPF`, `CAP_PERFMON` and `CAP_SYS_ADMIN` for its modern eBPF driver, plus host PID and network access. `restricted` lets a container add back only `NET_BIND_SERVICE`. [Falco setup docs](https://falco.org/docs/setup/container/). | 14.13 | 2027-06-30 |
-| `psa-lab` | `privileged` | The Part 05 Pod Security lab runs deliberately insecure Pods in a throwaway kind namespace to show what `privileged` allows. The lab creates, labels and deletes it. | 05.02 | 2027-06-30 |
-| `runtime-test` | `baseline` | The Falco test Pod runs a busybox image as root with no `securityContext`, which `restricted` rejects and `baseline` admits. It only reads `/etc/shadow` to trigger a rule. The namespace is throwaway. | 14.13 | 2027-06-30 |
+The list is [`security/namespace-exceptions.yaml`](security/namespace-exceptions.yaml).
+Each entry names the namespace, the Pod Security level it needs, the reason,
+the chapter that explains it, the upstream source and an expiry within 12
+months. This page does not copy the entries, because a copy drifts: the
+registry gate (`make gates-registry`) is what fails when a namespace above
+`restricted` has no entry, when an entry has expired, and when an entry no
+longer matches a namespace in the guide.
 
 This extends [ADR 0005](docs/adr/0005-restricted-psa-default-with-exceptions.md),
 which limited the privileged exceptions to the Terraform tree. The rule now
 covers every namespace the guide creates.
 
-### 0.2) Scanner findings (9 entries, checked 2026-10-31)
+### 0.2) Scanner findings
 
-| Check | Where | Why it is accepted | Expires |
-|---|---|---|---|
-| `KSV-0041`, `-0044`, `-0045`, `-0046`, `-0056` | `bookstore-platform/platform-base/01-rbac.yaml` and the three region overlays that build on it | Break-glass and tenant platform roles, accepted by design (13.01). The file ships ClusterRoles only, so the blast radius is set by each binding and by the human gate in 13.12. Detail in section 1.3. | 2027-06-30 |
-| `KSV-0056` | `bookstore/operator/config/rbac/role.yaml` and `config/default` | The operator's manager role writes the Services of each tenant it reconciles. It grants no Secrets and no wildcards. | 2027-06-30 |
-| `KSV-0053`, `KSV-0056` | `bookstore/operators/second-tenant.yaml` | A tenant admin Role, namespaced to `tenant-acme`, for debugging that tenant's own pods (08.04). | 2027-06-30 |
-| `KSV-0109` | `bookstore-platform/backstage/app-config.yaml` | The ConfigMap names secret keys but holds only `${ENV_VAR}` references. External Secrets supplies the values (13.11). | 2027-06-30 |
+The list is [`.trivyignore.yaml`](.trivyignore.yaml). Each entry names the
+check, the files it covers, the reason and an expiry. The reason also sits in
+the chapter that owns the file. The same gate reads it, and it drops a finding
+only for a sound, unexpired entry. Section 1.3 explains the entries that
+remain visible in the Security tab.
 
 ---
 

@@ -13,6 +13,12 @@ arbiter of truth.
 - **Where the design rationale lives:** [`docs/adr/`](docs/adr/) for the
   load-bearing decisions.
 - **Where the CI is wired:** [`.github/workflows/`](.github/workflows/).
+- **The rules every chapter and manifest follows:**
+  [`docs/security-first-authoring.md`](docs/security-first-authoring.md). The
+  guide is security-first. Every workload carries the hardened baseline from
+  its first manifest, in a namespace that enforces `restricted`, and the
+  security gates in that file's section 8 enforce it. Read it before you add
+  a manifest or a chapter.
 
 ## Open in Codespaces
 
@@ -34,7 +40,13 @@ the versions in `.devcontainer/devcontainer.json` is the manual equivalent.
    mkdocs build --strict
    node .github/scripts/validate-mermaid.mjs full-guide
    helm lint full-guide/examples/bookstore/helm/bookstore
+   make gates-registry
+   make gates-static SCOPE=05-security/02-pod-security.md   # your chapter
    ```
+   `make gates-static` needs Trivy, and `make gates-admission` needs a kind
+   cluster. A chapter or example tree that `.github/security-gates-enforced.txt`
+   names fails CI on a violation. Others only report, so do not read a green
+   run as proof that a new manifest carries the baseline.
 5. **Open the PR**, fill in the template, link the issue.
 
 ## What gets accepted
@@ -52,11 +64,13 @@ the versions in `.devcontainer/devcontainer.json` is the manual equivalent.
 
 ## What gets pushed back
 
-* **Restructuring of the 16-Part skeleton** without a discussion-issue
-  first. The Part ordering is itself a load-bearing decision; restructuring
+* **Restructuring of the Part skeleton** (Parts 00 to 17) without a
+  discussion-issue first. The Part ordering is itself a load-bearing decision; restructuring
   it ripples through every cross-reference.
 * **Single-PR rewrites of multiple chapters.** Even if the rewrite is
-  better, the review surface is too large.
+  better, the review surface is too large. The exception is a Part-wide
+  change that the security-first design calls for, such as a baseline fix
+  applied to every manifest, which a maintainer has asked for.
 * **Tool-version bumps without a corresponding chapter update.** The text
   cites specific versions; CI enforces the count invariants. They have to
   move together.

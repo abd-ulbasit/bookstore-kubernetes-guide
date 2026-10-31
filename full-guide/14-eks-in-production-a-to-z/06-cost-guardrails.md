@@ -241,9 +241,11 @@ Cost of each:
 - The bookstore-platform tree applied; cluster reachable via `kubectl`.
 - AWS CLI v2 configured with permissions to read Budgets, Cost
   Explorer, and Cost and Usage Report.
-- `infracost` installed locally (`brew install infracost` or
-  `curl https://infracost.io/install.sh | sh`). First run requires
-  `infracost auth login` — free, no credit card needed.
+- `infracost` installed locally (`brew install infracost`, or a release
+  tarball from the project's GitHub releases page, checked against the
+  checksum file published beside it; do not pipe an install script into a
+  shell). First run requires `infracost auth login` — free, no credit card
+  needed.
 - OpenCost installed per [Part 13 ch.10](../13-grand-capstone-bookstore-platform/10-cost-opencost-per-tenant-finops.md)
   (the chapter ships the install + per-tenant aggregation).
 
@@ -636,7 +638,7 @@ Instances).
    translates the gap to dollars; the developer changes the request
    in the Helm chart.
 4. **Idle resource culling.** KEDA scale-to-zero for traffic-driven
-   services (Part 09 ch.05); a midnight `CronJob` that scales
+   services ([Part 06 ch.04](../06-production-readiness/04-autoscaling.md)); a midnight `CronJob` that scales
    non-prod environments to zero on weekends.
 
 ## Production notes

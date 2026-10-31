@@ -15,11 +15,11 @@
 #   helm repo update
 #   helm install kyverno kyverno/kyverno -n kyverno --create-namespace
 #
-# !!! THE POLICY IS DELIBERATELY `validationFailureAction: Audit` — NOT
+# !!! THE POLICY IS DELIBERATELY `failureAction: Audit` (on each rule) — NOT
 # Enforce. Two of its rules (disallow-latest-tag / require-image-digest) would
 # REJECT the guide's own `bookstore/<svc>:dev` images if Enforced and
 # blackhole the cluster. Audit reports violations without blocking. The real
-# Enforce-by-digest+signature path is Part 05 ch.03 (do not flip to Enforce
+# Enforce-by-digest+signature path is Part 05 ch.07 (do not flip to Enforce
 # until CI builds immutable, signed images). See raw 70- header.
 #
 # Enable by adding to an overlay's `components:` list, e.g.:

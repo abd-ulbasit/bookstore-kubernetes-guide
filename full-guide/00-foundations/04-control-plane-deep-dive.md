@@ -58,7 +58,7 @@ belong to [ch.05](05-node-components.md) and
 | A caller with no trusted identity reaches the API server | Authentication: a rejected credential gets `401`; a request with no credential is anonymous, and RBAC still decides | [Part 05 ch.01](../05-security/01-authn-authz-rbac.md) |
 | An identity does more than its job needs | Authorization: RBAC denies by default and grants are the only allows; a denied request is shown below | [Part 05 ch.01](../05-security/01-authn-authz-rbac.md) |
 | An allowed request creates an unsafe object | Admission: mutating webhooks, then validating checks such as Pod Security `restricted` | [Part 05 ch.02](../05-security/02-pod-security.md) |
-| Someone reads Secrets straight from etcd, skipping RBAC | Encryption at rest, and etcd that accepts only client certificates | [Part 03 ch.02](../03-config-and-storage/02-secrets.md), [Part 05 ch.04](../05-security/04-secrets-and-cluster-hardening.md) |
+| Someone reads Secrets straight from etcd, skipping RBAC | Encryption at rest, and etcd that accepts only client certificates | [Part 03 ch.02](../03-config-and-storage/02-secrets.md) and [Part 05 ch.04](../05-security/04-secrets-and-cluster-hardening.md) for encryption at rest; [Part 05 ch.06](../05-security/06-control-plane-and-node-hardening.md) for the client certificates |
 
 ## kube-apiserver: the front door
 
@@ -186,11 +186,12 @@ Consequences you must operate around:
   `identity` provider does not encrypt
   ([upstream guide](https://kubernetes.io/docs/tasks/administer-cluster/encrypt-data/)).
   The setup is in
-  [cluster hardening](../05-security/04-secrets-and-cluster-hardening.md).
+  [secrets at rest](../05-security/04-secrets-and-cluster-hardening.md).
 - **Guard etcd access.** On the kind cluster, etcd runs with
   `--client-cert-auth=true` and `--peer-client-cert-auth=true`, so a client
   without a certificate its CA signed is refused. Raw access to etcd is raw
-  access to *everything*.
+  access to *everything*. Checking those flags is part of
+  [control plane and node hardening](../05-security/06-control-plane-and-node-hardening.md).
 - **etcd is latency-sensitive.** It wants fast, low-jitter disks (SSD) and a
   low-latency network between members. Slow etcd disks are a classic cause of a
   sluggish or flapping control plane.

@@ -1,4 +1,4 @@
-# Bookstore — Part 05 ch.04 "Secrets and cluster hardening".
+# Bookstore — Part 05 ch.04 "Secrets at rest and in use".
 #
 # !!! THIS IS NOT A `kubectl apply` OBJECT !!!
 # This is an apiserver-LEVEL config file. `EncryptionConfiguration` is consumed
@@ -9,7 +9,12 @@
 # Validate it only as YAML (e.g. `ruby -ryaml -e 'YAML.load_file(ARGV[0])'`),
 # never as a cluster resource.
 #
-# WHERE IT LIVES / HOW IT IS WIRED (conceptual — you do not run this locally):
+# WHERE IT LIVES / HOW IT IS WIRED. Chapter 05.04 runs the same file shape on
+# kind with a `secretbox` provider and shows a Secret turn into ciphertext in
+# etcd. This copy is the Bookstore's version for a cluster whose API server
+# you configure. It is not applied anywhere by a chapter, and its KMS entry
+# needs a plugin socket that the kind lab does not have (the KMS wiring is
+# cited in 05.04, not run):
 #   • Place the file on every control-plane node, e.g.
 #     /etc/kubernetes/enc/encryption-config.yaml (root-only, 0600).
 #   • Add to the kube-apiserver manifest/flags:
@@ -19,7 +24,7 @@
 #     /etc/kubernetes/manifests/kube-apiserver.yaml (static Pod). kind: the
 #     `kubeadmConfigPatches` / `extraMounts` in the kind cluster config.
 #   • Managed (EKS/GKE/AKS) you do NOT edit the apiserver — you tick the
-#     provider's KMS option instead (see ch.04 production notes).
+#     provider's KMS option instead (see 10.01 and the 05.04 production notes).
 #
 # THREAT MODEL: by default Secrets are stored in etcd as base64 (reversible —
 # Part 03 ch.02 proved it). Anyone with etcd access OR an etcd backup file
@@ -59,12 +64,14 @@ resources:
           name: bookstore-kms
           endpoint: unix:///var/run/kmsplugin/socket.sock
           timeout: 3s
-      # FALLBACK / simpler: a locally-held AES-GCM key. Better than nothing
-      # (etcd + backups become ciphertext) BUT the key sits on the control
-      # plane, so it does NOT protect against a compromised control-plane node.
+      # FALLBACK / simpler: a locally-held secretbox key, the provider 05.04
+      # runs. Better than nothing (etcd + backups become ciphertext) BUT the
+      # key sits on the control plane, so it does NOT protect against a
+      # compromised control-plane node. `aesgcm` is not used here: the upstream
+      # providers table says it needs a key rotation every 200,000 writes.
       # `key1` is a base64-encoded 32-byte key — generate with:
       #   head -c 32 /dev/urandom | base64
-      - aesgcm:
+      - secretbox:
           keys:
             - name: key1
               secret: REPLACE_WITH_BASE64_32_BYTE_KEY==

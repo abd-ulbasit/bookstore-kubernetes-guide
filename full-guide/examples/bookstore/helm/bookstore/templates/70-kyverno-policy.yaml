@@ -4,11 +4,13 @@
   this is behind kyverno.enabled (default FALSE); a plain `helm install` does
   not render it. Install Kyverno first (Helm: kyverno/kyverno).
 
-  validationFailureAction: Audit ON PURPOSE — Enforce would REJECT the guide's
-  own bookstore/<svc>:dev images (mutable tag, no digest) and blackhole the
-  cluster. The honest production path (sign + push by digest in CI, then
-  Enforce + a real verifyImages rule) is in ch.01 / Part 05 ch.03. Scope:
-  Pods in the bookstore namespace.
+  failureAction: Audit ON PURPOSE — Enforce would REJECT the guide's own
+  bookstore/<svc>:dev images (mutable tag, no digest) and blackhole the
+  cluster. The value comes from .Values.kyverno.validationFailureAction and
+  is rendered on each rule, because the policy-level field is deprecated in
+  the chart's CRD. The honest production path (sign + push by digest in CI,
+  then Enforce + a real verifyImages rule) is in ch.01 / Part 05 ch.07.
+  Scope: Pods in the bookstore namespace.
 */}}
 {{- if .Values.kyverno.enabled }}
 {{- $ns := include "bookstore.namespace" . }}
@@ -26,7 +28,6 @@ metadata:
       by digest, or pods not setting pod-level runAsNonRoot. Audit (not
       Enforce) so it cannot reject the guide's own bookstore/<svc>:dev images.
 spec:
-  validationFailureAction: {{ .Values.kyverno.validationFailureAction }}
   background: {{ .Values.kyverno.background }}
   rules:
     - name: disallow-latest-tag
@@ -36,6 +37,7 @@ spec:
               kinds: ["Pod"]
               namespaces: ["{{ $ns }}"]
       validate:
+        failureAction: {{ .Values.kyverno.validationFailureAction }}
         message: >-
           Using a mutable image tag is not allowed. Pin an immutable tag or,
           better, a digest (see Part 05 ch.03). [AUDIT — reported, not blocked]
@@ -50,6 +52,7 @@ spec:
               kinds: ["Pod"]
               namespaces: ["{{ $ns }}"]
       validate:
+        failureAction: {{ .Values.kyverno.validationFailureAction }}
         message: >-
           Images should be referenced by immutable digest (name@sha256:...),
           not a tag. [AUDIT — expected to flag the guide's :dev images]
@@ -64,6 +67,7 @@ spec:
               kinds: ["Pod"]
               namespaces: ["{{ $ns }}"]
       validate:
+        failureAction: {{ .Values.kyverno.validationFailureAction }}
         message: >-
           Containers must run as non-root: set
           spec.securityContext.runAsNonRoot=true (Part 05 ch.02).

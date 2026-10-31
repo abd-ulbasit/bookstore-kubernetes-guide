@@ -102,7 +102,7 @@ guide yet). Part 00 ch.08 names the enforcer of each baseline field.
 | T1 | A process rewrites its image or drops a binary | `readOnlyRootFilesystem: true`, with an `emptyDir` at `/tmp` | baseline | 01.01, `#baseline-read-only-root` |
 | T2 | An image is replaced under the same tag | Digest pins for third-party images; signing and provenance | review (pins), later (signing) | 01.01, `#baseline-image-digest`; 05.03 |
 | T3 | A spec changes outside review | Apply reviewed files from Git, `kubectl diff`, GitOps | cluster | 00.06; 07.04 |
-| T4 | Objects in etcd change without the API server | Only the API server holds etcd credentials | cluster | 00.04; 05.04 |
+| T4 | Objects in etcd change without the API server | Only the API server holds etcd credentials | cluster | 00.04; [05.06](../../05-security/06-control-plane-and-node-hardening.md) |
 | T5 | A webhook configuration is edited, or its backend fails, so a check stops running | RBAC on the webhook configurations, reviewed files applied from Git, a per-webhook `failurePolicy`, and a selector scoped to the app namespace | cluster | 11.01, `#failure-modes-as-attack-surface` |
 
 ### Repudiation

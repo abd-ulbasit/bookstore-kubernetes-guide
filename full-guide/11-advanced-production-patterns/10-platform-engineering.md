@@ -12,7 +12,7 @@
 > TechDocs, plugins); **Score** / portable workload spec; the
 > self-service-with-guardrails stack = everything the guide already built made
 > consumable — PSA-restricted (Part 05) + RBAC (Part 05) + ResourceQuota/
-> LimitRange (Part 01/08) + NetworkPolicy (Part 02) + policy (Part 05 ch.03
+> LimitRange (Part 01/08) + NetworkPolicy (Part 02) + policy (Part 05 ch.07
 > Kyverno / [ch.01](01-admission-webhooks.md)) + GitOps (Part 07) +
 > ApplicationSet ([ch.06](06-multi-cluster-and-fleet.md)) + the BookstoreTenant
 > operator ([ch.02](02-operator-development.md)) — assembled into a "request a
@@ -26,7 +26,7 @@
 > [`examples/bookstore/platform/`](../examples/bookstore/platform/) tree.
 
 **Estimated time:** ~60 min read · half-day hands-on
-**Prerequisites:** [Part 11 ch.02](02-operator-development.md) — operator pattern Crossplane composes with · [Part 11 ch.06](06-multi-cluster-and-fleet.md) — ApplicationSet delivery for the paved road · [Part 05 ch.03](../05-security/03-supply-chain.md) — Kyverno guardrails inside the paved road
+**Prerequisites:** [Part 11 ch.02](02-operator-development.md) — operator pattern Crossplane composes with · [Part 11 ch.06](06-multi-cluster-and-fleet.md) — ApplicationSet delivery for the paved road · [Part 05 ch.07](../05-security/07-admission-control-and-policy-as-code.md) — Kyverno guardrails inside the paved road
 **You'll know after this:** • articulate the "platform as a product" thesis and the golden-path mental model · • author a Crossplane XRD + Composition + Claim that provisions a guarded namespace · • compare Crossplane / Backstage / Score and where each fits the IDP stack · • measure platform success via DORA / adoption / cognitive-load metrics · • decide build-vs-buy between Backstage and commercial IDPs
 
 **Tier A (kind).** The hands-on runs on a disposable kind cluster that you
@@ -266,7 +266,7 @@ flowchart TB
    │ RBAC Role/RoleBinding (least-priv) ... Part 05 ch.01 (authn/authz)    │
    │ ResourceQuota + LimitRange ........... Part 01 ch.03 / Part 08 ch.04  │
    │ NetworkPolicy (default-deny) ......... Part 02 ch.06 (segmentation)   │
-   │ Policy (Kyverno / adm. webhook) ...... Part 05 ch.03 / ch.01          │
+   │ Policy (Kyverno / adm. webhook) ...... Part 05 ch.07 / ch.01          │
    │ BookstoreTenant operator (optional) .. ch.02 (org tenant primitive)   │
    └──────────────────────────────────────────────────────────────────────┘
         |  delivered & kept-true by:

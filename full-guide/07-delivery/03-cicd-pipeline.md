@@ -19,10 +19,12 @@
 
 [ch.01](01-packaging-helm.md) and [ch.02](02-packaging-kustomize.md) made the
 Bookstore **packageable**. [Part 05 ch.03](../05-security/03-supply-chain.md)
-made an image **trustworthy**: a scan, an SBOM, a keyless signature, and a
-Kyverno policy that would require a digest and a verified signature. That
-policy ships in **Audit**, because the guide's own `bookstore/<SVC>:dev`
-images are tag-based and unsigned, and Enforce would blackhole the cluster.
+made an image **trustworthy** on a lab cluster: a scan, an SBOM, a signature
+and an attestation. [05.07](../05-security/07-admission-control-and-policy-as-code.md)
+teaches the Kyverno policy that would require a digest and a verified
+signature. It starts in **Audit**, because the guide's own
+`bookstore/<SVC>:dev` images are tag-based and unsigned, and Enforce would
+blackhole the cluster.
 
 Two gaps remain:
 
@@ -87,14 +89,14 @@ that step can go wrong. The last four rows are about the pipeline itself.
 | Threat | Control taught here | Goes deeper |
 |---|---|---|
 | A credential is committed and lives in history | Gitleaks and TruffleHog verified mode read every commit in CI, and Gitleaks also runs in pre-commit; keyless OIDC, so there is little to leak | [03.02](../03-config-and-storage/02-secrets.md), [15.05](../15-day-to-day-production-ops/05-production-secrets-vault-eso.md) |
-| Your own code carries an injection or a weak primitive | Semgrep with the Bookstore's rules, gosec, CodeQL | [15.02](../15-day-to-day-production-ops/02-application-cicd-pipelines.md) |
+| Your own code carries an injection or a weak primitive | Semgrep with the Bookstore's rules, gosec, CodeQL | Step 3 here. [15.02](../15-day-to-day-production-ops/02-application-cicd-pipelines.md) covers the platform services' workflows, which run none of the three |
 | A dependency you ship or call is vulnerable | govulncheck (what you call), Trivy (what you ship), Dependabot (the fix) | [05.03](../05-security/03-supply-chain.md) |
 | The image runs as root, hides a secret or sits on an end-of-life base | hadolint, Dockle, Trivy on the image | [05.03](../05-security/03-supply-chain.md), [00.02](../00-foundations/02-containers-and-images.md) |
 | Nobody can say what is inside an image when a CVE lands | A Syft SBOM, scanned by Grype and Trivy | [05.03](../05-security/03-supply-chain.md) |
 | The image in the registry is not the one CI built, or is one that failed a gate | Push once, and only after every other job passed; sign the digest keyless; attach SLSA provenance | [15.03](../15-day-to-day-production-ops/03-image-signing-and-provenance.md) |
-| A manifest asks for more than the baseline allows | KubeLinter, kubesec and Trivy config on the rendered overlay | [01.01](../01-core-workloads/01-pods.md#baseline), policy as code in [05.07](../05-security/07-admission-control-and-policy-as-code.md) |
-| The running service leaks through its responses | ZAP baseline against it on a throwaway kind cluster | [15.02](../15-day-to-day-production-ops/02-application-cicd-pipelines.md) |
-| The pipeline is the attack: an injectable expression, a tag that moves, a token that can do too much | SHA-pinned actions, per-job `permissions`, zizmor and actionlint fail the build. Harden-Runner (audit mode) and Scorecard only report | [15.02](../15-day-to-day-production-ops/02-application-cicd-pipelines.md) |
+| A manifest asks for more than the baseline allows | KubeLinter, kubesec and Trivy config on the rendered overlay; Conftest rules, unit-tested with `opa test`, on the overlay and on a Terraform plan fixture | [01.01](../01-core-workloads/01-pods.md#baseline), policy as code in [05.07](../05-security/07-admission-control-and-policy-as-code.md) |
+| The running service leaks through its responses | ZAP baseline against it on a throwaway kind cluster | Step 11 here. The platform services' workflows in 15.02 run no DAST |
+| The pipeline is the attack: an injectable expression, a tag that moves, a token that can do too much | SHA-pinned actions, per-job `permissions`, zizmor and actionlint fail the build. Harden-Runner (audit mode) and Scorecard only report | Step 10 here. The platform services' workflows in [15.02](../15-day-to-day-production-ops/02-application-cicd-pipelines.md) pin actions by SHA and scope `permissions`, but run none of these four tools |
 | A scanner goes quiet and every build passes | A control per scanner against the vulnerable fixture | this chapter |
 | An accepted exception outlives its reason | Every exception carries a date; Trivy enforces its own, and an expiry check enforces the rest | this chapter |
 | CI holds a cluster credential | CI proposes a PR; the in-cluster controller applies it | [07.04](04-gitops-argocd.md) |
@@ -102,11 +104,13 @@ that step can go wrong. The last four rows are about the pipeline itself.
 This chapter makes the signatures and the evidence. It does not make the
 cluster ask for them: checking a signature at admission (Kyverno
 `verifyImages`, with the identity from step 8) is a separate control that
-arrives with [05.07](../05-security/07-admission-control-and-policy-as-code.md).
-The Audit policy from 05.03
-reports a Pod whose image is unsigned and blocks nothing. So what you can rely
-on after this chapter is that a signed digest came from this workflow with
-every gate green. It is not a guarantee that an unsigned image cannot run.
+is taught in [05.07](../05-security/07-admission-control-and-policy-as-code.md),
+and the Bookstore cluster does not run that rule: its manifests ship the
+policy off, and its only `verifyImages` rule is a commented-out sketch. A
+policy in Audit mode would report a Pod whose image is unsigned and block
+nothing. So what you can rely on after this chapter is that a signed digest
+came from this workflow with every gate green. It is not a guarantee that an
+unsigned image cannot run.
 
 ## Diagrams
 
@@ -114,10 +118,10 @@ every gate green. It is not a guarantee that an unsigned image cannot run.
 
 The reusable workflow `.github/workflows/bookstore-pipeline.yml` runs the
 stages below for one service, plus a `build-test` job (`go build`, `go vet`,
-`go test`) that is not a security stage. `manifests`, `workflow-hardening`
-and `dast` run beside the chain. `sign` waits for all of them, so one red job
-anywhere means nothing is pushed and nothing is signed. The dashed boundary is
-the CI/CD seam: CI ends at a **commit**, and the cluster's Argo CD
+`go test`) that is not a security stage. `manifests`, `policy`,
+`workflow-hardening` and `dast` run beside the chain. `sign` waits for all of
+them, so one red job anywhere means nothing is pushed and nothing is signed.
+The dashed boundary is the CI/CD seam: CI ends at a **commit**, and the cluster's Argo CD
 ([ch.04](04-gitops-argocd.md)) pulls from there.
 
 ```mermaid
@@ -130,7 +134,7 @@ flowchart TD
     lint["image-lint<br/>hadolint, build once, Dockle"]
     scan["image-scan<br/>Trivy on the tar"]
     sbom["sbom<br/>Syft -&gt; Grype + Trivy"]
-    side["manifests, workflow-hardening, dast<br/>KubeLinter, zizmor, expiry, ZAP on kind"]
+    side["manifests, policy, workflow-hardening, dast<br/>KubeLinter, Conftest, zizmor, expiry, ZAP on kind"]
     sign["sign (push to main only)<br/>needs every job above green<br/>push, cosign keyless,<br/>SBOM + SLSA provenance"]
     fail["FAIL the build<br/>nothing pushed, nothing signed"]
     bump["bump-manifests<br/>kustomize edit set image<br/>-&gt; promotion PR"]
@@ -601,16 +605,16 @@ and signs that digest. `actions/attest-build-provenance` then adds a **SLSA
 provenance** statement for the same digest.
 
 "Every other job" is the whole `needs` list: `build-test`, `secrets`, `sast`,
-`sca`, `image-lint`, `image-scan`, `sbom`, `manifests`, `workflow-hardening`
-and `dast`. GitHub skips a job whose `needs` include a skipped job unless its
-`if` says otherwise
+`sca`, `image-lint`, `image-scan`, `sbom`, `manifests`, `policy`,
+`workflow-hardening` and `dast`. GitHub skips a job whose `needs` include a
+skipped job unless its `if` says otherwise
 ([`needs`](https://docs.github.com/en/actions/reference/workflows-and-actions/workflow-syntax#jobsjob_idneeds)),
-and four of these are skipped on purpose: `secrets`, `manifests` and
-`workflow-hardening` look at the whole repository, so only one leg of the
+and five of these may be skipped on purpose: `secrets`, `manifests`, `policy`
+and `workflow-hardening` look at the whole repository, so only one leg of the
 matrix runs them, and `dast` is off for `payments-worker`, which has no web
 surface. So `sign` opens with `always()` and then asks for the result itself:
 `success` from the six jobs that always run, and `success` or `skipped` from
-those four. A failed job, a cancelled one, or one skipped because `image-lint`
+those five. A failed job, a cancelled one, or one skipped because `image-lint`
 failed all leave the image unpushed and unsigned. An earlier version waited
 for the two image scans only, so a build that failed Gitleaks, Semgrep or the
 ZAP baseline was still pushed and signed.
@@ -897,9 +901,17 @@ Three readers of the **rendered** production overlay, because that is what
 Argo CD applies. They overlap on purpose: KubeLinter checks shape, kubesec
 scores Pod specs, and Trivy config checks its misconfiguration library, whose
 five core checks are the baseline from
-[Part 01 ch.01](../01-core-workloads/01-pods.md#baseline). Conftest policies
-join them with
-[05.07](../05-security/07-admission-control-and-policy-as-code.md).
+[Part 01 ch.01](../01-core-workloads/01-pods.md#baseline).
+
+The `policy` job runs beside them, on the repository-wide leg only. It runs the
+Rego rules' own tests with `opa test`, so a rule that stopped firing fails
+there. It then runs Conftest on the same rendered overlay and on
+`examples/bookstore/policy/terraform/plan.json`. That plan file is a committed
+fixture for a one-namespace Terraform root. It is not a plan of the platform
+tree, whose pipeline runs no policy check
+([14.07](../14-eks-in-production-a-to-z/07-infrastructure-cicd-and-drift.md)).
+[05.07](../05-security/07-admission-control-and-policy-as-code.md) teaches the
+rules.
 
 ```sh
 kubectl kustomize examples/bookstore/kustomize/overlays/prod > scan-reports/prod-overlay.yaml

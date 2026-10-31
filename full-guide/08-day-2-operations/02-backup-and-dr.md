@@ -105,7 +105,7 @@ integrity*, not just *pod readiness*.
 |---|---|---|
 | A backup copy exposes the Secrets it holds | Private, encrypted, versioned, object-locked store; the Secret demo in Backup security | [14.14](../14-eks-in-production-a-to-z/14-backup-and-restore-velero.md) |
 | Someone who can write to the bucket plants objects that a restore applies | Write access for the Velero key only; restores run from a named group | [05.01](../05-security/01-authn-authz-rbac.md) |
-| A restore recreates Secrets or RBAC with more power than the source had | Restore rights granted like cluster-admin; drills into a scratch namespace | [05.04](../05-security/04-secrets-and-cluster-hardening.md) |
+| A restore recreates Secrets or RBAC with more power than the source had | Restore rights granted like cluster-admin; drills into a scratch namespace | [05.01](../05-security/01-authn-authz-rbac.md) |
 | The chart binds Velero's ServiceAccount to cluster-admin | The chart keeps the binding, because the controller restores cluster-scoped objects. Limit who can drive it: restore rights go to one named group, and no one is granted `pods/exec` in `velero` (the Backup security section) | [05.01](../05-security/01-authn-authz-rbac.md) |
 | An untested backup fails when it is needed | A scheduled restore drill that checks rows, not Pod readiness | Step 4 |
 

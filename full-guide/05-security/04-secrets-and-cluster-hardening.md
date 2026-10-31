@@ -76,9 +76,9 @@ where the topic goes deeper.
 
 | Threat | Control this chapter teaches | Where it goes deeper |
 |---|---|---|
-| Someone reads etcd, or an etcd backup, and every Secret is readable | `EncryptionConfiguration`: the apiserver encrypts a Secret before it reaches etcd | [11.05](../11-advanced-production-patterns/05-secrets-at-scale.md), [15.05](../15-day-to-day-production-ops/05-production-secrets-vault-eso.md) |
-| The key sits on the control plane next to the data it protects | KMS v2: the key-encryption key stays in an external KMS. Cited, not run here | [11.05](../11-advanced-production-patterns/05-secrets-at-scale.md) |
-| A key that never changes outlives everyone who ever held it | Rotation in two phases: the new key is added second, then made first, every Secret is rewritten, then the old key is dropped | [11.05](../11-advanced-production-patterns/05-secrets-at-scale.md) |
+| Someone reads etcd, or an etcd backup, and every Secret is readable | `EncryptionConfiguration`: the apiserver encrypts a Secret before it reaches etcd | What the managed providers encrypt by default: [10.01](../10-cloud-and-managed-kubernetes/01-managed-kubernetes-model.md). Keeping the values out of the cluster: [11.05](../11-advanced-production-patterns/05-secrets-at-scale.md), [15.05](../15-day-to-day-production-ops/05-production-secrets-vault-eso.md) |
+| The key sits on the control plane next to the data it protects | KMS v2: the key-encryption key stays in an external KMS. Cited, not run here; the wiring is under What the lab did not show | [10.01](../10-cloud-and-managed-kubernetes/01-managed-kubernetes-model.md) for the managed providers |
+| A key that never changes outlives everyone who ever held it | Rotation in two phases: the new key is added second, then made first, every Secret is rewritten, then the old key is dropped | KMS rotation by `key_id`: under What the lab did not show. Rotating the values in an external store: [11.05](../11-advanced-production-patterns/05-secrets-at-scale.md) |
 | An environment variable is copied into every process the container starts and is fixed until the Pod restarts | A mounted file, read-only, with `defaultMode: 0440` and `fsGroup` | [03.02](../03-config-and-storage/02-secrets.md) |
 | A cache in an `emptyDir` on the node's disk keeps the plaintext after the app is done with it | `emptyDir` with `medium: Memory` and a `sizeLimit` | [03.03](../03-config-and-storage/03-volumes.md) |
 
@@ -802,13 +802,61 @@ ERROR: failed to delete cluster "p05-enc": failed to delete nodes: command "dock
 The lab uses a `secretbox` key held on the node, so the key sits next to the
 data it protects. The Kubernetes encryption page says a locally stored key "only
 moderately improves your security posture, compared to no encryption". The
-production shape is KMS v2. In that provider, the apiserver calls a plugin over
-a socket, and each write uses a data-encryption key generated from a seed. The
-page says the seed rotates whenever the key-encryption key does. A KMS plugin
-needs a key held outside the cluster, which a kind cluster cannot provide.
-**Not run here:** the KMS v2 path is cited to the upstream page, and its
-operation is covered in
-[11.05](../11-advanced-production-patterns/05-secrets-at-scale.md).
+production shape is KMS v2. A KMS plugin needs a key held outside the cluster,
+which a kind cluster cannot provide. **Not run here:** everything in the next
+section is cited to the upstream
+[KMS provider page](https://kubernetes.io/docs/tasks/administer-cluster/kms-provider/),
+read for Kubernetes 1.37, and no command in it was executed for this chapter.
+
+### KMS v2: the wiring, the rotation and the failure mode (cited, not run)
+
+The provider entry replaces the `secretbox` entry. It names a plugin and the
+socket the plugin listens on. Keep `identity` last while plaintext remains in
+etcd, as in the lab.
+
+```yaml
+# Fragment: the file the apiserver reads. It has no kind: line. Cited from the
+# upstream KMS provider page and not run: no plugin exists on the lab cluster.
+resources:
+  - resources: ["secrets"]
+    providers:
+      - kms:
+          apiVersion: v2
+          name: example-kms
+          endpoint: unix:///var/run/kmsplugin/socket.sock
+          timeout: 3s
+      - identity: {}
+```
+
+- **The socket.** The plugin is a gRPC server that runs on the same host as
+  each apiserver and listens on a Unix domain socket. On a kubeadm control
+  plane the apiserver static Pod would need that socket directory mounted, as
+  the lab mounts the encryption file. `name` cannot change once set, and KMS
+  v2 does not support the `cachesize` field of KMS v1.
+- **What the key encrypts.** The apiserver derives a single-use data-encryption
+  key for each write from a secret seed and random data. The plugin wraps the
+  seed with the key-encryption key, which never leaves the external KMS. Once
+  the apiserver has unwrapped a data-encryption key with a call to the KMS, it
+  caches that key in the clear. A cached key needs no further call, and an
+  uncached key does.
+- **Rotation.** The plugin reports the name of the current key-encryption key
+  as `key_id` in its `Status` answer, and the apiserver polls `Status` about
+  once a minute. A new `key_id` marks data written under the old key as stale.
+  No apiserver restart is needed. After the change has been seen, rewrite
+  every Secret with the same command as the lab uses
+  (`kubectl get secrets --all-namespaces -o json | kubectl replace -f -`), so
+  that each one is stored under the new key. The upstream page advises rotating
+  the key-encryption key at least every 90 days, and warns that a `key_id` must
+  never be reused.
+- **Failure mode.** The apiserver waits `timeout` for the plugin and then
+  returns an error, so a plugin that is down or slow fails a request that
+  needs a call to it, such as a read whose key is not cached. A plugin whose
+  encrypt answer carries a different `key_id` from its `Status` answer is
+  treated as unhealthy. The health check is `/healthz/kms-providers`, and
+  with automatic reload on it is the only KMS health check.
+- **Managed clusters.** On EKS, GKE and AKS the provider runs the plugin and
+  the choice is a setting on the cluster. [10.01](../10-cloud-and-managed-kubernetes/01-managed-kubernetes-model.md)
+  says what each provider encrypts by default.
 
 The lab also ran on one control-plane node. The page requires the encryption
 file to match on every control-plane node, which a single-node lab does not

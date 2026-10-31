@@ -372,7 +372,8 @@ every client that is not meshed yet. Copy the file, change `mode: STRICT` to
 `mode: PERMISSIVE` in the copy, apply it, and confirm in Istio's telemetry that
 every edge already uses mTLS. Then apply the strict file. Do not leave
 PERMISSIVE in place after that window. This is the same staged rollout as the
-Audit→Enforce lifecycle in [Part 05 ch.03](../05-security/03-supply-chain.md)
+Audit→Enforce lifecycle in [Part 05
+ch.07](../05-security/07-admission-control-and-policy-as-code.md)
 and the webhook Ignore→Fail in [ch.01](01-admission-webhooks.md).
 
 ```sh
