@@ -99,4 +99,4 @@ paths = [
   '''full-guide/13-grand-capstone-bookstore-platform/06-payments-and-event-sourcing\.md''',
   '''full-guide/examples/security-lab/evidence/13-06\.txt''',
 ]
-regexes = ['''sk_test_labonly123''']
+regexes = ['''sk_test_labonl[y]123''']
