@@ -6,27 +6,28 @@
 > singleuser servers, profileList for image/resource selection, named-servers
 > + culler) vs **Kubeflow Notebooks** (the Kubeflow-native equivalent with
 > multi-user/RBAC management); **per-user PVC** for the notebook home (data
-> gravity — keep the dataset close); **per-user `ResourceQuota` /
+> gravity: keep the dataset close); a **namespace `ResourceQuota` /
 > `LimitRange`** ([Part 01 ch.03](../01-core-workloads/03-resources-and-qos.md)
 > / [Part 08 ch.04](../08-day-2-operations/04-multi-tenancy-and-namespaces.md)
 > — deepened, not re-taught); **GPU notebooks** (request `nvidia.com/gpu`,
 > the GPU-on-shared-Jupyter pattern from [ch.02](02-gpus-and-accelerators.md));
-> the **PSA-`restricted` notebook footgun** (stock Jupyter `datascience-notebook`
-> runs as `jovyan` uid 1000 + needs writable home/cache/`/tmp`; CUDA notebook
-> images default to *root*) with the compliant `singleuser.podTemplate`
-> shape; and the **dev -> train -> serve** workflow (notebook explores ->
+> the **PSA-`restricted` notebook footgun** (stock Jupyter images run as
+> `jovyan` uid 1000 and need writable home, cache and `/tmp`; other notebook
+> images can default to *root*) with the compliant singleuser Pod shape; and
+> the **dev -> train -> serve** workflow (notebook explores ->
 > exports a training script to Git -> CI builds the train image -> a
 > PyTorchJob/RayJob runs from [ch.04](04-distributed-training.md) -> KServe
 > serves from [ch.06](06-model-serving-and-inference.md)) — applied by
-> installing JupyterHub via pinned z2jh Helm into its own namespace, with a
-> restricted-compliant `singleuser.podTemplate`, a per-user PVC, and a
-> profileList that includes a "GPU notebook" choice plus the CPU default,
-> referencing the stand-alone illustrative PodTemplate in
+> installing JupyterHub via pinned z2jh Helm into its own namespace, with
+> restricted-compliant singleuser Pods (set through KubeSpawner), a per-user
+> PVC, and a profileList that includes a "GPU notebook" choice plus the CPU
+> default, referencing the example Pod shape in
 > [`examples/bookstore/ml/notebook/`](../examples/bookstore/ml/notebook/).
 
 **Estimated time:** ~45 min read · ~120 min hands-on
-**Prerequisites:** [Part 12 ch.02](02-gpus-and-accelerators.md) — GPU model the GPU-notebook profile extends · [Part 08 ch.04](../08-day-2-operations/04-multi-tenancy-and-namespaces.md) — per-user quota the hub depends on · [Part 05 ch.02](../05-security/02-pod-security.md) — PSA-restricted that the notebook image must satisfy
-**You'll know after this:** • install z2jh (pinned Helm) with a restricted-compliant `singleuser.podTemplate` · • configure per-user PVCs to keep dataset gravity in the cluster · • author a `profileList` with a GPU-notebook choice plus a CPU default · • configure idle culling so unused singleuser servers do not bleed cost · • avoid the `datascience-notebook` UID-1000 vs CUDA-image-root footgun under PSA
+**Prerequisites:** [Part 12 ch.02](02-gpus-and-accelerators.md) (the GPU model the GPU-notebook profile extends) · [Part 08 ch.04](../08-day-2-operations/04-multi-tenancy-and-namespaces.md) (the namespace quota the hub depends on) · [Part 05 ch.02](../05-security/02-pod-security.md) (PSA-restricted that the notebook image must satisfy)
+**Lab tier:** A (kind). Run the lab only against a cluster you own.
+**You'll know after this:** • install z2jh (pinned chart) with restricted-compliant notebook Pods · • configure per-user PVCs to keep dataset gravity in the cluster · • author a `profileList` with a GPU-notebook choice plus a CPU default · • configure idle culling so unused singleuser servers do not bleed cost · • check a notebook image's default user before it runs under PSA `restricted`
 
 <!-- tags: ml, gpu, multi-tenancy, psa-restricted, cost -->
 
@@ -80,8 +81,8 @@ Quotas keep one user from ruining the cluster for everyone.**
   **singleuser** Pod (the actual notebook). The
   **Zero-to-JupyterHub (z2jh)** Helm chart is the canonical way to deploy
   this on Kubernetes; pin a release, put it in its own namespace, and
-  configure `singleuser.image` + `singleuser.profileList` + the
-  restricted `singleuser.podTemplate`. **Kubeflow Notebooks** is the
+  set `singleuser.image`, `singleuser.profileList` and the KubeSpawner
+  security settings. **Kubeflow Notebooks** is the
   Kubeflow-native alternative: it integrates with Kubeflow's
   authentication and multi-user `Profile` CRDs, owns `Notebook` CRDs
   per user, and is more "platform" and less "chart". Pick z2jh when
@@ -94,33 +95,45 @@ Quotas keep one user from ruining the cluster for everyone.**
   on a CSI StorageClass with a sensible `reclaimPolicy` and snapshots
   ([Part 03 ch.05](../03-config-and-storage/05-stateful-data-patterns.md))
   for "I deleted the wrong cell in my notebook" recovery.
-- **Per-user quota is the *only* thing between you and runaway costs.**
-  The default Jupyter image is large, the default kernel will gladly hold
-  10 GiB of pandas DataFrames, and a forgotten GPU notebook costs more
-  per hour than every CI runner you have combined. **`ResourceQuota` per
-  notebook namespace + `LimitRange` defaults** (the
-  [Part 08 ch.04](../08-day-2-operations/04-multi-tenancy-and-namespaces.md)
-  multi-tenancy story applied to ML) plus z2jh's **culler**
-  (`cull.timeout` — idle notebooks scaled down) plus
-  `singleuser.profileList` (the *menu* of image/resource pairs the user
-  can pick from — including a "GPU" profile) keep this finite. Without
-  these, notebooks become the single biggest line item on the Kubernetes
-  bill and you only find out at month-end.
-- **PSA-`restricted` is the footgun.** The most popular Jupyter base
-  images (`quay.io/jupyter/datascience-notebook`,
-  `quay.io/jupyter/scipy-notebook`, the CUDA-equipped ones) default to
-  user `jovyan` (uid 1000). Most ML-specific notebook images default to
-  *root* and write everywhere. Out of the box neither is admissible in a
-  PSA-`restricted` namespace; both still want a writable `$HOME` and a
-  writable `/tmp`/`~/.cache`. The
+- **Quota is the only thing between you and runaway costs.** The default
+  Jupyter image is large, the default kernel will gladly hold 10 GiB of
+  pandas DataFrames, and a forgotten GPU notebook costs more per hour than
+  every CI runner you have combined. z2jh puts every singleuser Pod in the
+  hub's namespace, so one **`ResourceQuota`** there caps the whole notebook
+  fleet, not each user ([Part 08 ch.04](../08-day-2-operations/04-multi-tenancy-and-namespaces.md)
+  covers the namespace model). Per-user limits come from three settings:
+  one server per user (`allowNamedServers` stays `false`), the pod limits in
+  `singleuser.cpu` and `singleuser.memory`, and z2jh's **culler**
+  (`cull.timeout`, idle servers stopped). The `singleuser.profileList` menu
+  decides which image and resource pair a user can pick, GPU included.
+  Without these, notebooks become the single biggest line item on the
+  Kubernetes bill and you only find out at month-end.
+- **PSA-`restricted` is the footgun.** The quay.io/jupyter images bake a
+  non-root user: the scipy and CUDA 12 PyTorch images checked for this
+  chapter both have a config `User` of `1000` (`jovyan`). Other notebook
+  images are not so tidy. Some default to root and write everywhere, and
+  `restricted` refuses them. Check the image's config `User` before you use
+  it. Even the good images want a writable `$HOME`, `/tmp` and `~/.cache`
+  once the root filesystem is read-only. The
   [`notebook/singleuser-restricted-podtemplate.yaml`](../examples/bookstore/ml/notebook/singleuser-restricted-podtemplate.yaml)
-  in this tree is the compliant shape: non-root UID 1000, drop ALL caps,
-  seccomp RuntimeDefault, `allowPrivilegeEscalation: false`,
-  `readOnlyRootFilesystem: true`, an `emptyDir` at `/tmp`, an `emptyDir`
-  at `~/.cache`, and the per-user PVC at `/home/jovyan`. Drop *that*
-  shape into z2jh's `singleuser.podTemplate` and you have notebooks that
-  the [Part 05 ch.02](../05-security/02-pod-security.md) admission
-  controller actually accepts.
+  file in this tree is the compliant shape, and the hands-on gives
+  KubeSpawner the same fields. The admission check itself is
+  [Part 05 ch.02](../05-security/02-pod-security.md).
+
+## Threats and controls
+
+| Threat | Control in this chapter | Deeper |
+|---|---|---|
+| A notebook is arbitrary code running in your cluster | Restricted Pod: non-root, no privilege escalation, all capabilities dropped, seccomp, read-only root filesystem | [Part 05 ch.02](../05-security/02-pod-security.md) |
+| Someone reaches the hub, or a notebook, without logging in | The hub authenticates every login. The lab password lives in a Secret. Production puts an IdP in front of the hub | [Part 05 ch.01](../05-security/01-authn-authz-rbac.md) |
+| A notebook calls the cluster API with a ServiceAccount token | Notebook Pods get a dedicated ServiceAccount with no RBAC and no token mounted | [Part 05 ch.01](../05-security/01-authn-authz-rbac.md) |
+| The hub's Role is used to create Pods or read Secrets | One namespaced Role, bound only to the hub's ServiceAccount | [Part 05 ch.01](../05-security/01-authn-authz-rbac.md) |
+| A notebook reaches the cloud metadata server or the internet | NetworkPolicy allows the hub, the proxy and DNS only. The chart's privileged metadata-blocking init container is off | [Part 02 ch.06](../02-networking/06-network-policies.md) |
+| One user, or a forgotten GPU server, exhausts the fleet | Namespace ResourceQuota, pod limits, one server per user, the culler | [Part 01 ch.03](../01-core-workloads/03-resources-and-qos.md), [Part 08 ch.04](../08-day-2-operations/04-multi-tenancy-and-namespaces.md) |
+
+Multi-tenant isolation between teams lives in
+[Part 08 ch.04](../08-day-2-operations/04-multi-tenancy-and-namespaces.md).
+This chapter adds the controls that only a notebook needs.
 
 ## Diagrams
 
@@ -167,7 +180,7 @@ flowchart TB
 
  PSA-RESTRICTED SINGLEUSER POD CHECKLIST (the footgun, made compliant)
    [ ] runAsNonRoot: true + runAsUser: 1000 (the jovyan uid baked into image)
-   [ ] runAsGroup / fsGroup: 1000 (so the per-user PVC is writable)
+   [ ] fsGroup: 100 (the docker-stacks users group, so the PVC is writable)
    [ ] seccompProfile: RuntimeDefault
    [ ] allowPrivilegeEscalation: false
    [ ] capabilities: { drop: ["ALL"] }
@@ -176,6 +189,7 @@ flowchart TB
    [ ] emptyDir at /home/jovyan/.cache  (pip/conda cache, ephemeral)
    [ ] persistentVolumeClaim at /home/jovyan  (per-user, dynamic, RWO)
    [ ] automountServiceAccountToken: false  (notebooks rarely need API token)
+   [ ] no cloud-metadata init container; egress limited by NetworkPolicy
    [ ] image bakes uid 1000 (`jovyan`) — choose a base that does, OR rebuild
    [ ] for GPU notebooks: also tolerate the GPU pool taint + nodeAffinity
    [ ] for GPU notebooks: limits.nvidia.com/gpu: 1 (whole device, ch.02)
@@ -184,122 +198,212 @@ flowchart TB
 ## Hands-on with the Bookstore
 
 **Assumed working directory: the guide repo root (`full-guide/`).** This
-chapter installs **JupyterHub via the pinned z2jh Helm chart** into its own
-namespace (`jupyter`), shows the **restricted-compliant
-`singleuser.podTemplate`** with a per-user PVC, sets up a
-**profileList** with CPU + GPU options, and ties **per-user quota** back to
-[Part 08 ch.04](../08-day-2-operations/04-multi-tenancy-and-namespaces.md).
-The Bookstore example artifact for review is
-[`examples/bookstore/ml/notebook/singleuser-restricted-podtemplate.yaml`](../examples/bookstore/ml/notebook/singleuser-restricted-podtemplate.yaml)
-— a stand-alone illustrative Pod showing the exact PSA shape z2jh consumes.
+chapter installs **JupyterHub from the pinned z2jh chart 4.4.4** into a
+namespace named `jupyter`. Each step below creates the namespace at
+`restricted` first, so the chart is checked at that level before it runs.
+The values file sets the hardening fields the chart exposes and gives
+KubeSpawner the rest. The example Pod shows the shape one notebook Pod takes.
+The Bookstore example for review is
+[`examples/bookstore/ml/notebook/singleuser-restricted-podtemplate.yaml`](../examples/bookstore/ml/notebook/singleuser-restricted-podtemplate.yaml).
 
-> **The Hub itself needs a cluster — there is no faking it.** The
-> end-to-end browser flow (open `https://hub.example/`, log in, click
-> "Start my server", get a notebook) requires the install. We give the
-> *exact* install + the *exact* restricted PodTemplate; the in-browser
-> portion is described, not faked.
+> **What the lab run covered.** The captured output below came from a lab
+> kind cluster whose cluster and node names differ from the ones shown here.
+> The lab used the namespace `p12-05-jupyter` where this chapter says
+> `jupyter`, and the transcript header records that substitution. The
+> transcript is committed at
+> [`evidence/12-05.txt`](../examples/security-lab/evidence/12-05.txt), and the
+> script is [`labs/12-05.sh`](../examples/security-lab/labs/12-05.sh). The run
+> checked the chart and the Pods by server dry run, and it refused one Pod on
+> purpose. The hub did not start in that run, because another install held
+> the lab's heavy-install lock. The in-browser login is described, not run.
 
-### 1. Install JupyterHub via pinned z2jh
+### 1. Create the namespace and the login Secret
+
+The namespace comes first, labelled `restricted`, so every object in it is
+checked at that level. Z2JH is platform infrastructure, so it gets its own
+namespace, not `bookstore-ml`.
 
 ```sh
-# Pin — bump deliberately. The z2jh chart is the canonical way to deploy
-# JupyterHub on Kubernetes (https://z2jh.jupyter.org/).
-Z2JH_VERSION="3.3.7"
-
-helm repo add jupyterhub https://hub.jupyter.org/helm-chart/
-helm repo update
-
-# Install z2jh into its own namespace (NOT bookstore-ml — z2jh is platform
-# infrastructure, like the GPU Operator or Kueue).
-helm install jupyterhub jupyterhub/jupyterhub \
-  --version "$Z2JH_VERSION" \
-  -n jupyter --create-namespace \
-  -f /tmp/z2jh-values.yaml \
-  --wait
-
-kubectl get pods -n jupyter
-#   hub-* (Hub), proxy-* (CHP), user-scheduler-* (kube-scheduler shim)
-kubectl get svc -n jupyter
-#   proxy-public is the front door (LoadBalancer or ClusterIP+Ingress)
+kubectl apply -f - <<'EOF'
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: jupyter
+  labels:
+    pod-security.kubernetes.io/enforce: restricted
+    pod-security.kubernetes.io/enforce-version: latest
+    pod-security.kubernetes.io/audit: restricted
+    pod-security.kubernetes.io/audit-version: latest
+    pod-security.kubernetes.io/warn: restricted
+    pod-security.kubernetes.io/warn-version: latest
+EOF
 ```
 
-### 2. The minimal restricted-compliant `values.yaml`
+<!-- gate: output -->
+```text
+$ kubectl apply -f - <<'EOF'   # Namespace jupyter, labelled restricted
+namespace/p12-05-jupyter created
+```
 
-The values key is `singleuser.podTemplate` (a partial PodSpec the Hub
-splices into the singleuser Pod it spawns). Drop in the same SC the
-stand-alone [`singleuser-restricted-podtemplate.yaml`](../examples/bookstore/ml/notebook/singleuser-restricted-podtemplate.yaml)
-documents, plus the per-user PVC, plus a `profileList` with a GPU option:
+The demo login is one generated password, held in a Secret. The chart reads
+`values.yaml` from the Secret named by `hub.existingSecret` and merges it into
+the hub's configuration, so the password never sits in a values file or in
+Git. The lab's authenticator, `shared-password`, is for a lab only (see
+[How it works](#how-it-works-under-the-hood)).
+
+```sh
+umask 077
+printf 'hub:\n  config:\n    SharedPasswordAuthenticator:\n      user_password: "%s"\n' \
+  "$(openssl rand -hex 24)" > hub-secret-values.yaml
+kubectl create secret generic jupyterhub-hub-secrets -n jupyter \
+  --from-file=values.yaml=hub-secret-values.yaml
+rm hub-secret-values.yaml
+```
+
+<!-- gate: output -->
+```text
+$ kubectl create secret generic jupyterhub-hub-secrets -n p12-05-jupyter --from-file=values.yaml=<generated file>
+secret/jupyterhub-hub-secrets created
+```
+
+Secrets are stored base64-encoded. Unless the cluster encrypts Secrets at
+rest, anyone who can read this Secret can read the password. Use an identity
+provider for anything beyond a lab.
+
+### 2. The values file
+
+Save this as `jupyterhub-values.yaml`. It sets every hardening field the
+chart exposes, and it sets the KubeSpawner settings the chart does not
+expose as values. Images are pinned by digest, with the tag in front of the
+`@`.
 
 ```yaml
-# /tmp/z2jh-values.yaml — minimal restricted-compliant z2jh values.
+# jupyterhub-values.yaml: Zero-to-JupyterHub chart 4.4.4 (JupyterHub 5.5.4).
 hub:
   config:
     JupyterHub:
-      authenticator_class: dummy        # replace with OIDC/GitHub in prod
-    DummyAuthenticator:
-      password: "let-me-in"             # replace with real auth in prod
+      authenticator_class: shared-password  # demo login; production uses an IdP
+  existingSecret: jupyterhub-hub-secrets    # holds the shared password
+  image:
+    name: quay.io/jupyterhub/k8s-hub
+    tag: "4.4.4@sha256:bbce7a924eac0dfe10d738ff2d966cb306a40973519005a160282415561a774b"
+  containerSecurityContext:
+    runAsUser: 1000
+    runAsGroup: 1000
+    allowPrivilegeEscalation: false
+    readOnlyRootFilesystem: true
+    capabilities:
+      drop: ["ALL"]
+  extraVolumes:
+    - name: tmp
+      emptyDir:
+        sizeLimit: 64Mi
+  extraVolumeMounts:
+    - name: tmp
+      mountPath: /tmp
+  extraConfig:
+    notebook-hardening: |
+      c.KubeSpawner.automount_service_account_token = False
+      c.KubeSpawner.pod_security_context = {
+          "runAsNonRoot": True,
+          "seccompProfile": {"type": "RuntimeDefault"},
+      }
+      c.KubeSpawner.container_security_context = {
+          "readOnlyRootFilesystem": True,
+          "capabilities": {"drop": ["ALL"]},
+      }
+
 proxy:
   service:
-    type: ClusterIP                     # add an Ingress in front of this
+    type: ClusterIP                         # no public LoadBalancer; use an Ingress
+  chp:
+    image:
+      name: quay.io/jupyterhub/configurable-http-proxy
+      tag: "5.2.0@sha256:522738d5285e4be758da5023194cbc95249efdadaa62a0998c8ed1aa2890b2da"
+    containerSecurityContext:
+      runAsNonRoot: true
+      runAsUser: 65534
+      runAsGroup: 65534
+      allowPrivilegeEscalation: false
+      readOnlyRootFilesystem: true
+      capabilities:
+        drop: ["ALL"]
+      seccompProfile:
+        type: "RuntimeDefault"
+
+scheduling:
+  userScheduler:
+    enabled: false                          # packing only, not a boundary
+  userPlaceholder:
+    enabled: false
+
+prePuller:
+  hook:
+    enabled: false
+  continuous:
+    enabled: false
+  pullProfileListImages: false              # keeps the GPU image off every node
+
+cull:
+  enabled: true
+  timeout: 3600                             # idle for an hour: server stopped
+  every: 600
+
 singleuser:
   image:
     name: quay.io/jupyter/scipy-notebook
-    tag: "2024-08-12"
+    tag: "2024-08-12@sha256:a8925f5242a701edd718a4c1afc3bdeabb7dcb9ae6ff55116db790379a6f6e04"
+  cmd: start-singleuser.sh
   defaultUrl: /lab
+  uid: 1000
+  fsGid: 100
+  allowPrivilegeEscalation: false
+  serviceAccountName: jupyterhub-singleuser
+  cloudMetadata:
+    blockWithIptables: false                # the default adds a privileged init container
+  networkPolicy:
+    enabled: true
+    egressAllowRules:
+      cloudMetadataServer: false
+      dnsPortsCloudMetadataServer: true
+      dnsPortsKubeSystemNamespace: true
+      dnsPortsPrivateIPs: true
+      nonPrivateIPs: false                  # no internet egress; mirror package indexes
+      privateIPs: false
   storage:
     type: dynamic
-    dynamic:
-      pvcNameTemplate: "claim-{username}{servername}"
-      volumeNameTemplate: "volume-{username}{servername}"
     capacity: 5Gi
     homeMountPath: /home/jovyan
+    extraVolumes:
+      - name: tmp
+        emptyDir:
+          sizeLimit: 256Mi
+      - name: cache
+        emptyDir:
+          sizeLimit: 512Mi
+    extraVolumeMounts:
+      - name: tmp
+        mountPath: /tmp
+      - name: cache
+        mountPath: /home/jovyan/.cache
+  extraEnv:
+    JUPYTER_RUNTIME_DIR: /home/jovyan/.local/share/jupyter/runtime
+    JUPYTER_DATA_DIR: /home/jovyan/.local/share/jupyter
+    PIP_CACHE_DIR: /home/jovyan/.cache/pip
   cpu:
     limit: 2
     guarantee: 0.25
   memory:
     limit: 2G
     guarantee: 0.5G
-  cull:
-    enabled: true
-    timeout: 3600                       # idle 1h → scaled down
-    every: 600
-  extraEnv:
-    JUPYTER_RUNTIME_DIR: /home/jovyan/.local/share/jupyter/runtime
-    JUPYTER_DATA_DIR:    /home/jovyan/.local/share/jupyter
-    PIP_CACHE_DIR:       /home/jovyan/.cache/pip
-  # ----- PSA-restricted shape (the footgun, made compliant) -----
-  podSecurityContext:
-    runAsNonRoot: true
-    runAsUser: 1000
-    runAsGroup: 1000
-    fsGroup: 1000
-    seccompProfile:
-      type: RuntimeDefault
-  containerSecurityContext:
-    allowPrivilegeEscalation: false
-    readOnlyRootFilesystem: true
-    capabilities:
-      drop: ["ALL"]
-  extraVolumeMounts:
-    - { name: tmp,   mountPath: /tmp }
-    - { name: cache, mountPath: /home/jovyan/.cache }
-  extraVolumes:
-    - { name: tmp,   emptyDir: { sizeLimit: 256Mi } }
-    - { name: cache, emptyDir: { sizeLimit: 512Mi } }
-  serviceAccountName: ""                # default; automount stays off:
-  extraPodConfig:
-    automountServiceAccountToken: false
-  # ----- Menu of "what kind of notebook do you want?" -----
   profileList:
     - display_name: "CPU notebook (default)"
-      description: "scipy + pandas + sklearn; PSA-restricted; 2 cpu / 2 GiB"
+      description: "scipy, pandas, scikit-learn; 2 CPU, 2 GiB"
       default: true
-      kubespawner_override:
-        image: quay.io/jupyter/scipy-notebook:2024-08-12
     - display_name: "GPU notebook"
-      description: "CUDA notebook; needs a GPU node (see Part 12 ch.02)"
+      description: "CUDA 12 notebook; needs a GPU node (Part 12 ch.02)"
       kubespawner_override:
-        image: quay.io/jupyter/pytorch-notebook:cuda12-2024-08-12
+        image: quay.io/jupyter/pytorch-notebook:cuda12-2024-08-12@sha256:e1ffb5e44ed261f51e524393b8ae621a79da957e712b084aac00a967fb41f6be
         extra_resource_limits: { "nvidia.com/gpu": "1" }
         node_affinity_required:
           - matchExpressions:
@@ -308,50 +412,264 @@ singleuser:
           - { key: "nvidia.com/gpu", operator: "Exists", effect: "NoSchedule" }
 ```
 
-The GPU profile reuses the [ch.02](02-gpus-and-accelerators.md) recipe
-exactly (taint toleration + nodeAffinity to GPU nodes + `limits.nvidia.com/gpu: 1`).
-On a GPU-less kind cluster the GPU profile sits Pending with the documented
-`Insufficient nvidia.com/gpu` — the same honest behaviour as
-[`gpu/recommender-train-gpu.yaml`](../examples/bookstore/ml/gpu/recommender-train-gpu.yaml).
+Each hardening field, where it first appears:
 
-### 3. Per-user quota (the cost fence)
+- **`readOnlyRootFilesystem: true`** (hub, proxy and notebook). The image
+  filesystem cannot be written. Writes go to an `emptyDir` (`/tmp`, the
+  cache) or to the per-user PVC. Jupyter needs its runtime and data
+  directories under `$HOME` for the same reason, so the env lines point
+  there.
+- **`capabilities.drop: ["ALL"]`**. No Linux capabilities. A notebook needs
+  none.
+- **`allowPrivilegeEscalation: false`**. A setuid binary cannot raise
+  privilege inside the container.
+- **`runAsNonRoot`, `runAsUser`**. The hub image names its user `jovyan`
+  rather than a number. Without `runAsUser`, the kubelet cannot verify
+  non-root for a named user and refuses to start the container, so the chart
+  sets `runAsUser: 1000` numerically.
+- **`seccompProfile: RuntimeDefault`**. The container runtime's default
+  syscall filter.
+- **`c.KubeSpawner.automount_service_account_token = False`**. A notebook
+  Pod gets no API token, even with a ServiceAccount set.
+- **`pod_security_context` and `container_security_context`** (in
+  `hub.extraConfig`). The chart has no value for these. KubeSpawner applies
+  them to every notebook Pod, and profile overrides do not change them.
+- **`singleuser.serviceAccountName`**. A dedicated ServiceAccount, not
+  `default`, with no RBAC (step 5 creates it).
+- **`cloudMetadata.blockWithIptables: false`**. The chart's default adds a
+  privileged init container that runs as root and adds `NET_ADMIN`, to block
+  the metadata server with iptables. Step 5 shows restricted refusing that
+  shape. The NetworkPolicy blocks the metadata server instead.
+- **`networkPolicy.egressAllowRules`**. Notebooks reach the hub, the proxy
+  and DNS. Other internet and private-range traffic is not allowed. Package
+  installs then need a mirror and a rule you add for it.
+- **`userScheduler`, `userPlaceholder`, `prePuller`**. Off. They add objects
+  and images, and the user scheduler is a packing optimisation, not a
+  boundary.
+- **`proxy.service.type: ClusterIP`**. Nothing is published by a LoadBalancer.
+  Put an Ingress that terminates TLS in front of `proxy-public`.
+- **Digests**. The digests were read from the registries for this chapter.
+  Read them again when you bump a tag.
 
-z2jh creates each singleuser Pod in the **same namespace as the Hub** by
-default. Apply a `ResourceQuota` + `LimitRange` on that namespace as the
-[Part 08 ch.04](../08-day-2-operations/04-multi-tenancy-and-namespaces.md)
-recipe says — and on GPU, **also** pair with the Kueue ClusterQueue
-from [ch.03](03-batch-and-gang-scheduling.md) so notebooks compete for
-GPUs fairly with training:
+The image configs behind the `User` claims were read from the registries
+without a pull. Restricted checks the `User` in that config when a Pod does
+not set one, so it is the first thing to look at:
 
-```sh
-kubectl create -n jupyter quota nb-quota \
-  --hard=requests.cpu=8,requests.memory=16Gi,requests.nvidia.com/gpu=2 \
-  --dry-run=client -o yaml | kubectl apply -f -
-kubectl get resourcequota -n jupyter
+<!-- gate: output -->
+```text
+quay.io/jupyter/scipy-notebook:2024-08-12
+  digest=sha256:a8925f5242a701edd718a4c1afc3bdeabb7dcb9ae6ff55116db790379a6f6e04
+  config={'User': '1000', 'Entrypoint': ['tini', '-g', '--', 'start.sh'], 'Cmd': ['start-notebook.py']}
+quay.io/jupyter/pytorch-notebook:cuda12-2024-08-12
+  digest=sha256:e1ffb5e44ed261f51e524393b8ae621a79da957e712b084aac00a967fb41f6be
+  config={'User': '1000', 'Entrypoint': ['tini', '-g', '--', 'start.sh'], 'Cmd': ['start-notebook.py']}
+quay.io/jupyterhub/k8s-hub:4.4.4
+  digest=sha256:bbce7a924eac0dfe10d738ff2d966cb306a40973519005a160282415561a774b
+  config={'User': 'jovyan', 'Entrypoint': ['tini', '--'], 'Cmd': ['jupyterhub', '--config', '/usr/local/etc/jupyterhub/jupyterhub_config.py']}
 ```
 
-This is the *namespace ceiling* (admission **rejects** over-cap). Kueue
-queues *within* it for fair sharing. The per-Pod request defaults come
-from z2jh's `singleuser.cpu/memory.guarantee/limit`; you can also pin a
-`LimitRange` defaulting `nvidia.com/gpu: 0` so a user can't accidentally
-spawn 4 GPUs by editing their profile.
+### 3. Render the chart and dry-run it at restricted
 
-### 4. The stand-alone illustrative PodTemplate (for review / dry-run)
-
-[`examples/bookstore/ml/notebook/singleuser-restricted-podtemplate.yaml`](../examples/bookstore/ml/notebook/singleuser-restricted-podtemplate.yaml)
-is the same shape as a *stand-alone* Pod (with comments mapping each field
-to the z2jh values key). It is **illustrative** — z2jh spawns singleuser
-pods from `singleuser.podTemplate`, not from this file — but it is a real,
-restricted-PSA-compliant Pod for review and for
-`kubectl apply --dry-run=client` validation:
+The chart renders to plain objects. Pipe them to a server dry run in the
+restricted namespace:
 
 ```sh
-kubectl apply --dry-run=client \
+helm repo add jupyterhub https://hub.jupyter.org/helm-chart/
+helm repo update
+helm template jupyterhub jupyterhub/jupyterhub --version 4.4.4 \
+  -n jupyter -f jupyterhub-values.yaml \
+  | kubectl apply --dry-run=server -n jupyter -f -
+```
+
+A server dry run sends the objects to the API server, runs admission, and
+stores nothing. A client dry run skips admission, so `--dry-run=client` cannot
+tell you whether restricted accepts a Pod. The lab output lists what the chart
+creates. It printed no PodSecurity warning. The namespace's `warn` label is
+`restricted`, so a Deployment whose pod template broke the level would have
+printed one. A dry run starts no Pod, so the hub and proxy were not running.
+
+<!-- gate: output -->
+```text
+$ helm template jupyterhub jupyterhub/jupyterhub --version 4.4.4 -n p12-05-jupyter -f jupyterhub-values.yaml | kubectl apply --dry-run=server -n p12-05-jupyter -f -
+networkpolicy.networking.k8s.io/hub created (server dry run)
+networkpolicy.networking.k8s.io/proxy created (server dry run)
+networkpolicy.networking.k8s.io/singleuser created (server dry run)
+serviceaccount/hub created (server dry run)
+secret/hub created (server dry run)
+configmap/hub created (server dry run)
+persistentvolumeclaim/hub-db-dir created (server dry run)
+role.rbac.authorization.k8s.io/hub created (server dry run)
+rolebinding.rbac.authorization.k8s.io/hub created (server dry run)
+service/hub created (server dry run)
+service/proxy-api created (server dry run)
+service/proxy-public created (server dry run)
+deployment.apps/hub created (server dry run)
+deployment.apps/proxy created (server dry run)
+```
+
+The render has no ClusterRole, because the user scheduler is off. The one Role
+is the hub's own permission, and the chart binds it only to the hub's
+ServiceAccount. It grants `get`, `watch`, `list`, `create` and `delete` on
+Pods, PVCs, Secrets and Services in the namespace, and read on events. A
+notebook Pod in the same namespace cannot use that Role, because it has no
+token. That is why the notebook Pods get none.
+
+<!-- gate: output -->
+```text
+rules:
+  - apiGroups: [""]       # "" indicates the core API group
+    resources: ["pods", "persistentvolumeclaims", "secrets", "services"]
+    verbs: ["get", "watch", "list", "create", "delete"]
+  - apiGroups: [""]       # "" indicates the core API group
+    resources: ["events"]
+    verbs: ["get", "watch", "list"]
+---
+```
+
+### 4. Install (what you run; the lab did not)
+
+Pin the chart version and keep the digests in the values file. Never install
+from a `releases/latest` URL, because a moving chart changes the hub's
+defaults without a review. The lab run did not install, so there is no
+captured output for this step. Run it on a cluster you own:
+
+```sh
+helm install jupyterhub jupyterhub/jupyterhub \
+  --version 4.4.4 -n jupyter \
+  -f jupyterhub-values.yaml --wait
+
+kubectl get pods -n jupyter
+#   hub-* and proxy-* should be Running
+```
+
+### 5. One notebook Pod: accepted, and one refused on purpose
+
+Notebook Pods run as a ServiceAccount that exists only to be named. It has
+no RBAC, and automount is off, so no token file appears in the Pod:
+
+```sh
+kubectl apply -n jupyter -f - <<'EOF'
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: jupyterhub-singleuser
+  namespace: jupyter
+automountServiceAccountToken: false
+EOF
+```
+
+Then check the example Pod against restricted. It has the labels the chart's
+NetworkPolicy selects on, `component: singleuser-server`, and the shape
+KubeSpawner builds from the values: the Pod-level `runAsNonRoot`, `fsGroup: 100`
+and seccomp profile, and the container-level user, privilege, root-filesystem
+and capability settings.
+
+```sh
+kubectl apply --dry-run=server -n jupyter \
   -f examples/bookstore/ml/notebook/singleuser-restricted-podtemplate.yaml
-#   pod/jupyter-singleuser-illustrative created (dry run)
 ```
 
-### 5. The dev -> train -> serve loop (how this chapter ties the next two)
+<!-- gate: output -->
+```text
+$ kubectl apply -f - <<'EOF'   # ServiceAccount jupyterhub-singleuser, no token
+serviceaccount/jupyterhub-singleuser created
+$ kubectl apply --dry-run=server -n p12-05-jupyter -f <the example notebook Pod>
+pod/jupyter-singleuser-illustrative created (server dry run)
+```
+
+**Deliberate refusal.** The step below sends a Pod with the chart's default
+init container, on purpose, to show restricted refusing it. Nothing is
+created. The default init container is privileged, runs as root and adds
+`NET_ADMIN`. It is the reason the values file sets
+`blockWithIptables: false`.
+
+<!-- gate: output -->
+```text
+$ kubectl apply --dry-run=server -n p12-05-jupyter -f <Pod with the default init container>
+Error from server (Forbidden): error when creating "STDIN": pods "jupyter-singleuser-privileged-init" is forbidden: violates PodSecurity "restricted:latest": privileged (container "block-cloud-metadata" must not set securityContext.privileged=true), allowPrivilegeEscalation != false (container "block-cloud-metadata" must set securityContext.allowPrivilegeEscalation=false), unrestricted capabilities (container "block-cloud-metadata" must set securityContext.capabilities.drop=["ALL"]; container "block-cloud-metadata" must not include "NET_ADMIN" in securityContext.capabilities.add), runAsUser=0 (container "block-cloud-metadata" must not set runAsUser=0)
+```
+
+### 6. The fleet quota: one ceiling for the namespace
+
+Every notebook Pod in the namespace counts against one set of totals. Admission
+refuses a Pod that would push requests past them, so this is the ceiling for
+the whole fleet. It is not a per-user quota: z2jh creates every notebook in
+the hub's namespace, and KubeSpawner's `namespace` setting is a single string.
+
+```sh
+kubectl create quota nb-quota -n jupyter \
+  --hard=requests.cpu=8,requests.memory=16Gi,requests.nvidia.com/gpu=2 \
+  --dry-run=server
+```
+
+<!-- gate: output -->
+```text
+$ kubectl create quota nb-quota --hard=requests.cpu=8,requests.memory=16Gi,requests.nvidia.com/gpu=2 -n p12-05-jupyter --dry-run=server
+resourcequota/nb-quota created (server dry run)
+```
+
+Per-user limits come from elsewhere: `allowNamedServers` stays `false` in the
+values, so each user has one server, and that server's pod limits come from
+`singleuser.cpu` and `singleuser.memory`.
+
+### 7. Egress, and the network plugin that decides enforcement
+
+The `singleuser` NetworkPolicy in the render allows egress to the hub's
+ports, to the proxy's port, and to DNS. The hub-facing rules select the
+`hub` and `proxy` components, and the DNS rules allow port 53 only, including
+to the metadata address. HTTP to the metadata server and to the internet is
+not in the policy.
+
+<!-- gate: output -->
+```text
+$ helm template jupyterhub jupyterhub/jupyterhub --version 4.4.4 -n p12-05-jupyter -f jupyterhub-values.yaml --show-only templates/singleuser/netpol.yaml | grep "component: \|cidr:\|port: \|metadata.name: "
+    component: singleuser
+    app.kubernetes.io/component: singleuser
+      component: singleuser-server
+        - port: notebook-port
+              component: hub
+        - port: 8081
+              component: proxy
+        - port: 8000
+              component: autohttps
+        - port: 8080
+        - port: 8443
+        - port: 53
+        - port: 53
+            cidr: 169.254.169.254/32
+              kubernetes.io/metadata.name: kube-system
+            cidr: 10.0.0.0/8
+            cidr: 172.16.0.0/12
+            cidr: 192.168.0.0/16
+```
+
+A NetworkPolicy object is only a request until a network plugin enforces it.
+Check which plugin the cluster runs:
+
+<!-- gate: output -->
+```text
+$ kubectl get daemonset kindnet -n kube-system -o name
+daemonset.apps/kindnet
+```
+
+The lab cluster runs kindnet. kindnet accepts NetworkPolicy objects and does
+not enforce them, so the lab could not show a blocked connection. Enforcement
+is the setup in [Part 02 ch.06](../02-networking/06-network-policies.md). Use
+an enforcing plugin before you rely on the egress rules above.
+
+Clean up the lab namespace when you are done:
+
+```sh
+kubectl delete namespace jupyter
+```
+
+<!-- gate: output -->
+```text
+$ kubectl delete namespace p12-05-jupyter --wait=true
+namespace "p12-05-jupyter" deleted
+```
+
+### 8. The dev -> train -> serve loop (how this chapter ties the next two)
 
 The recommendations thread end-to-end:
 
@@ -384,16 +702,25 @@ Notebooks are the *front of the loop*, not a separate thing.
   *shim* (image `registry.k8s.io/kube-scheduler` with a custom config)
   that packs singleuser pods onto already-active notebook nodes (so a
   scaled-down cluster keeps notebook nodes warm rather than draining
-  them) — purely a packing/cost optimisation, not a security boundary.
+  them). It is purely a packing/cost optimisation, not a security boundary,
+  and this chapter's values turn it off.
 - **Spawn lifecycle.** When a logged-in user clicks "Start My Server",
   the hub's **`KubeSpawner`** (the kubernetes-spawner plugin) creates: a
-  PVC (`claim-<USERNAME>`) from `singleuser.storage.dynamic`, a Pod
-  (`jupyter-<USERNAME>`) using `singleuser.image` + `singleuser.podTemplate`
-  + the chosen profile's `kubespawner_override`, a Service pointing at the
-  Pod, and a route on the proxy. The hub watches the Pod's readiness,
-  registers the route once ready, and redirects the user's browser. On
-  idle, the **culler** (a small client running inside the hub) deletes
-  the Pod + Service (the PVC survives — that is the point).
+  PVC from `singleuser.storage.dynamic`, a Pod
+  (`jupyter-<USERNAME>`) using `singleuser.image`, the KubeSpawner
+  security settings and the chosen profile's `kubespawner_override`, a
+  Service pointing at the Pod, and a route on the proxy. The hub watches the
+  Pod's readiness, registers the route once ready, and redirects the user's
+  browser. On idle, the **culler** (a small client running inside the hub)
+  deletes the Pod + Service (the PVC survives: that is the point).
+- **One namespace for the fleet.** KubeSpawner's `namespace` setting is one
+  string, not a per-user function, so z2jh creates every notebook Pod in the
+  hub's namespace. The quota in step 6 and the Role in step 3 therefore cover
+  all users together. A namespace per user is the stronger boundary, because
+  the quota, the NetworkPolicy and the Role can then differ per user. This
+  chapter does not build that. It needs a provisioning step that creates each
+  namespace with its quota and its RoleBinding, which Kubeflow Profiles does
+  for you. Plan it before you open the hub to more than one team.
 - **Why per-user PVC matters operationally.** Without it, a user who
   shuts down their notebook loses everything in `/home/jovyan` —
   uncommitted code, kernel state, a half-trained model. With it, the
@@ -409,7 +736,9 @@ Notebooks are the *front of the loop*, not a separate thing.
   ClusterQueue's GPU `nominalQuota` so a *training* PyTorchJob can
   preempt an idle GPU notebook and reclaim the device. This is the
   ch.02 "keep the expensive GPU busy" loop applied to notebooks: idle
-  notebooks must not hoard GPUs.
+  notebooks must not hoard GPUs. The profile changes no security setting:
+  the GPU Pod gets the same context as the CPU Pod, and nothing in it asks
+  for privilege.
 - **Kubeflow Notebooks, the alternative.** A `Notebook` CRD
   (`kubeflow.org/v1`) holds the same shape — `spec.template.spec` is a
   PodSpec — owned by a Kubeflow `Profile`. The Notebook Controller
@@ -419,46 +748,36 @@ Notebooks are the *front of the loop*, not a separate thing.
   multi-user model is heavier (Profiles, AuthorizationPolicies, Istio)
   and tighter to the rest of Kubeflow (Pipelines, KServe). Pick it if
   you are already running Kubeflow; pick z2jh otherwise.
-- **The PSA-restricted footgun, explained.** Two things bite. First, many
-  popular notebook images default to user `root` (CUDA notebooks
-  especially) — z2jh's defaults assume `jovyan` uid 1000. A root image
-  is **rejected** by `restricted`. The fix is to rebuild on
-  `quay.io/jupyter/*` (which bake `jovyan`) or set the SC + USER
-  yourself. Second, Jupyter wants writable paths it does not expose as
+- **The PSA-restricted footgun, explained.** Two things bite. First, a
+  notebook image that runs as root is **rejected** by `restricted`, because
+  `runAsNonRoot` cannot hold for a root image. An image that names its user
+  rather than giving a number, and a Pod that does not set `runAsUser`, is
+  refused too, because the kubelet cannot verify non-root. Check the image
+  config's `User` first. The quay.io/jupyter images use `1000`, and
+  KubeSpawner sets `runAsUser` from `singleuser.uid`. Second, Jupyter wants
+  writable paths it does not expose as
   options: the kernel writes runtime files, pip writes a cache, sklearn
   writes `__pycache__` everywhere, `/tmp` is needed by half the
   filesystem layer. `readOnlyRootFilesystem: true` breaks all of that
   unless you mount `emptyDir`s at the writable paths *and* point Jupyter
   at them via env (`JUPYTER_RUNTIME_DIR`, `PIP_CACHE_DIR`,
-  `JUPYTER_DATA_DIR`, etc.). The illustrative PodTemplate in this tree
-  does that exhaustively so the shape is real, not theoretical.
+  `JUPYTER_DATA_DIR`, etc.). The example Pod in this tree does that, so the
+  shape is a real Pod that the server dry run accepts, not a sketch.
 - **Auth in front of the Hub.** The Hub's `JupyterHub.authenticator_class`
-  binds to OIDC (Keycloak, Auth0, Okta), GitHub, LDAP, generic OAuth, or
-  the `dummy` authenticator (one shared password — *only* for demos).
-  For production: terminate TLS at an Ingress in front of `proxy-public`,
-  OIDC-authenticate at the Hub, and gate even the Hub login behind your
-  IdP / VPN. The notebook itself does not see the user's identity beyond
-  the hub-injected `JUPYTERHUB_USER` — it is *not* a multi-tenant
-  process, it is per-user-pods, which is the only sane multi-tenancy on
-  a process boundary that runs arbitrary code.
+  picks the login: OIDC (Keycloak, Auth0, Okta), GitHub, LDAP, generic OAuth,
+  or a static password. This chapter uses `shared-password`. JupyterHub's
+  own docstring for it says the password is stored in plain text in config,
+  and anyone with it can log in as any user. The chart's default `dummy`
+  authenticator is weaker: `DummyAuthenticator` accepts any username and
+  password when no password is set. Use the static password for the lab only.
+  In production, terminate TLS at an Ingress in front of `proxy-public`, and
+  authenticate at the Hub against your IdP. The notebook sees only the
+  hub-injected `JUPYTERHUB_USER`. Each user gets their own Pod, which is the
+  process boundary that matters, because a notebook runs arbitrary code.
 
 ## Production notes
 
-> **In production:** put **JupyterHub** (or Kubeflow Notebooks) in its
-> **own namespace** via **pinned Helm** (`jupyterhub/jupyterhub` for z2jh,
-> the Kubeflow installer for Kubeflow Notebooks). Treat it as
-> platform infrastructure: same upgrade discipline as the GPU Operator,
-> KServe, Kueue. **Never** install from a `releases/latest` URL.
-
-> **In production:** every singleuser Pod **must** be PSA-`restricted`-
-> compliant: non-root UID (1000 for the official Jupyter images),
-> drop ALL caps, seccomp RuntimeDefault, `allowPrivilegeEscalation: false`,
-> `readOnlyRootFilesystem: true` + `emptyDir` at `/tmp` and `~/.cache` +
-> a per-user PVC at `/home/jovyan`. CUDA notebook images default to root
-> — rebuild or set the SC + USER explicitly. ML pods are not exempt
-> from PSA.
-
-> **In production:** **per-user PVCs are non-negotiable**, with a
+> **In production:** per-user PVCs are non-negotiable, with a
 > reasonable default (5-20 GiB) and a snapshot policy
 > ([Part 03 ch.05](../03-config-and-storage/05-stateful-data-patterns.md)).
 > Document a path for "I deleted the wrong cell" (PVC snapshot rollback)
@@ -467,15 +786,10 @@ Notebooks are the *front of the loop*, not a separate thing.
 
 > **In production:** **enable the culler** with an aggressive timeout (an
 > hour of idle, not a day). Idle CPU notebooks waste memory; idle GPU
-> notebooks waste *real money*. Pair with **per-namespace
-> `ResourceQuota`** ([Part 08 ch.04](../08-day-2-operations/04-multi-tenancy-and-namespaces.md))
+> notebooks waste *real money*. Pair with a **namespace `ResourceQuota`**
+> ([Part 08 ch.04](../08-day-2-operations/04-multi-tenancy-and-namespaces.md))
 > and, for GPUs, the **Kueue ClusterQueue** ([ch.03](03-batch-and-gang-scheduling.md))
 > so training can preempt idle GPU notebooks.
-
-> **In production:** authenticate the Hub via your IdP (OIDC), not the
-> `dummy` authenticator. Put an Ingress with TLS in front of
-> `proxy-public`. The notebook is *running user code in your cluster*:
-> the only credible auth boundary is the Hub, gated by your IdP.
 
 > **In production:** the data scientist's exit from the notebook is
 > **commit to Git**, not "the kernel still has it in memory". The
@@ -487,69 +801,71 @@ Notebooks are the *front of the loop*, not a separate thing.
 ## Quick Reference
 
 ```sh
-# Install JupyterHub via pinned z2jh (own namespace)
-Z2JH_VERSION="3.3.7"
+# Namespace at restricted, then the chart (pinned)
+kubectl create namespace jupyter
+kubectl label namespace jupyter pod-security.kubernetes.io/enforce=restricted
 helm repo add jupyterhub https://hub.jupyter.org/helm-chart/
-helm repo update
-helm install jupyterhub jupyterhub/jupyterhub \
-  --version "$Z2JH_VERSION" \
-  -n jupyter --create-namespace \
-  -f values.yaml --wait
+helm install jupyterhub jupyterhub/jupyterhub --version 4.4.4 \
+  -n jupyter -f jupyterhub-values.yaml --wait
 
-# Per-namespace quota (the cost fence)
-kubectl create -n jupyter quota nb-quota \
+# Check the render against restricted before you install
+helm template jupyterhub jupyterhub/jupyterhub --version 4.4.4 \
+  -n jupyter -f jupyterhub-values.yaml \
+  | kubectl apply --dry-run=server -n jupyter -f -
+
+# The fleet ceiling for the namespace (not per user)
+kubectl create quota nb-quota -n jupyter \
   --hard=requests.cpu=8,requests.memory=16Gi,requests.nvidia.com/gpu=2
 
-# Dry-run the illustrative restricted-compliant singleuser PodTemplate
-kubectl apply --dry-run=client \
+# One notebook Pod shape, server dry run
+kubectl apply --dry-run=server -n jupyter \
   -f examples/bookstore/ml/notebook/singleuser-restricted-podtemplate.yaml
 ```
 
-Minimal skeleton (z2jh `singleuser.podTemplate` shape — drop into values):
+The notebook settings that matter, as an excerpt of the values file:
 
 ```yaml
+# Excerpt of jupyterhub-values.yaml: the notebook settings that matter.
+hub:
+  existingSecret: jupyterhub-hub-secrets
+  extraConfig:
+    notebook-hardening: |
+      c.KubeSpawner.automount_service_account_token = False
+      c.KubeSpawner.pod_security_context = {"runAsNonRoot": True, "seccompProfile": {"type": "RuntimeDefault"}}
+      c.KubeSpawner.container_security_context = {"readOnlyRootFilesystem": True, "capabilities": {"drop": ["ALL"]}}
 singleuser:
-  podSecurityContext:
-    runAsNonRoot: true
-    runAsUser: 1000
-    runAsGroup: 1000
-    fsGroup: 1000
-    seccompProfile: { type: RuntimeDefault }
-  containerSecurityContext:
-    allowPrivilegeEscalation: false
-    readOnlyRootFilesystem: true
-    capabilities: { drop: ["ALL"] }
-  storage:
-    type: dynamic
-    capacity: 5Gi
-    homeMountPath: /home/jovyan
-  cull: { enabled: true, timeout: 3600, every: 600 }
-  extraVolumes:
-    - { name: tmp,   emptyDir: { sizeLimit: 256Mi } }
-    - { name: cache, emptyDir: { sizeLimit: 512Mi } }
-  extraVolumeMounts:
-    - { name: tmp,   mountPath: /tmp }
-    - { name: cache, mountPath: /home/jovyan/.cache }
-  profileList:
-    - display_name: "CPU notebook (default)"
-      default: true
-      kubespawner_override: { image: "quay.io/jupyter/scipy-notebook:..." }
-    - display_name: "GPU notebook"
-      kubespawner_override:
-        image: "quay.io/jupyter/pytorch-notebook:cuda12-..."
-        extra_resource_limits: { "nvidia.com/gpu": "1" }
+  uid: 1000
+  fsGid: 100
+  allowPrivilegeEscalation: false
+  serviceAccountName: jupyterhub-singleuser
+  cloudMetadata:
+    blockWithIptables: false
+  networkPolicy:
+    egressAllowRules:
+      nonPrivateIPs: false
+      privateIPs: false
 ```
 
 Checklist:
 
-- [ ] JupyterHub / Kubeflow Notebooks installed via **pinned** Helm/manifest in its own namespace
-- [ ] Singleuser Pod is **PSA-`restricted`-compliant** (the footgun, defused)
-- [ ] **Per-user PVC** at `/home/jovyan`, dynamic, sensible default size, snapshotted
-- [ ] **Per-namespace `ResourceQuota` + `LimitRange`** caps the blast radius
-- [ ] **Culler enabled** with an aggressive timeout (idle GPU notebooks are pure cost)
-- [ ] **GPU profile** uses the [ch.02](02-gpus-and-accelerators.md) taint + affinity + `limits.nvidia.com/gpu`
-- [ ] Hub authenticated by your **IdP** (OIDC), not the demo authenticator
-- [ ] Data scientists commit `train.py` to **Git** — the notebook is the front of the loop
+- [ ] JupyterHub installed via a **pinned** chart version in its own namespace
+- [ ] Namespace labelled **`restricted`** before the chart is applied
+- [ ] Hub login from a **Secret**, not a values file, and an IdP in production
+- [ ] Notebook Pods: **no API token**, a dedicated ServiceAccount with no RBAC
+- [ ] **No privileged init container**: `cloudMetadata.blockWithIptables: false`
+- [ ] Egress limited to the hub, the proxy and DNS by NetworkPolicy on an
+  enforcing plugin
+- [ ] **Per-user PVC** at `/home/jovyan`, dynamic, sensible default size,
+  snapshotted
+- [ ] **Namespace `ResourceQuota`** caps the notebook fleet (not per user),
+  with one server per user
+- [ ] **Culler enabled** with an aggressive timeout (idle GPU notebooks are
+  pure cost)
+- [ ] **GPU profile** uses the [ch.02](02-gpus-and-accelerators.md) taint +
+  affinity + `limits.nvidia.com/gpu`
+- [ ] Notebook image's config `User` checked: a numeric non-root user
+- [ ] Data scientists commit `train.py` to **Git** — the notebook is the front
+  of the loop
 
 ## Test your understanding
 
@@ -558,28 +874,63 @@ Checklist:
 1. **Why per-user PVC at `/home/jovyan` and not a shared one?**
    <details><summary>Show answer</summary>
 
-   Notebooks are personal dev environments — datasets being explored, half-written code, secrets pasted into cells, cached Python packages. A shared PVC has every user stepping on each other's files and creates cross-user data exposure (one user's reading another's `client_secret.json` they accidentally cell-magicked into the home dir). Per-user PVC also lets you size and quota individually, snapshot per-user for portability, and delete cleanly when a user offboards. RWX is required only when multiple Pods (e.g. a notebook + a training Job triggered from it) need the same files; even then, per-*user* not per-*Pod*.
+   Notebooks are personal dev environments — datasets being explored,
+   half-written code, secrets pasted into cells, cached Python packages. A
+   shared PVC has every user stepping on each other's files and creates
+   cross-user data exposure (one user's reading another's `client_secret.json`
+   they accidentally cell-magicked into the home dir). Per-user PVC also lets
+   you size and quota individually, snapshot per-user for portability, and
+   delete cleanly when a user offboards. RWX is required only when multiple
+   Pods (e.g. a notebook + a training Job triggered from it) need the same
+   files; even then, per-*user* not per-*Pod*.
 
    </details>
 
 2. **Your data scientist's notebook has been "idle" for 4 days, holding a GPU. The cost dashboard shows it's the single most expensive resource. What's the policy fix?**
    <details><summary>Show answer</summary>
 
-   Enable the **culler**. Z2JH ships with `cull.enabled: true` — set `cull.timeout: 3600` (1 hour idle), `cull.every: 600` (check every 10 min), and `cull.users: true` to also stop the user record. For GPU notebooks specifically, set a tighter cull timeout (30 min) because idle-GPU cost is acute. Also: surface "your notebook will be culled in 5 min" via Jupyter UI extension. Culling doesn't delete the PVC — when the user logs in next, they get a fresh notebook attached to the same volume; their files are intact. Idle GPU cost is the #1 ML notebook problem in production; the culler is the only sustainable answer.
+   Enable the **culler**. Z2JH ships with `cull.enabled: true` — set
+   `cull.timeout: 3600` (1 hour idle), `cull.every: 600` (check every 10 min),
+   and `cull.users: true` to also stop the user record. For GPU notebooks
+   specifically, set a tighter cull timeout (30 min) because idle-GPU cost is
+   acute. Also: surface "your notebook will be culled in 5 min" via Jupyter UI
+   extension. Culling doesn't delete the PVC — when the user logs in next,
+   they get a fresh notebook attached to the same volume; their files are
+   intact. Idle GPU cost is the #1 ML notebook problem in production; the
+   culler is the only sustainable answer.
 
    </details>
 
-3. **The stock Jupyter `datascience-notebook` image runs as uid 1000 `jovyan`. PSA-restricted demands `runAsNonRoot: true` + `runAsUser` set + `allowPrivilegeEscalation: false`. What `singleuser.podTemplate` snippet makes it compliant?**
+3. **A notebook image passes PSA-restricted only if its Pod and container settings meet it. In this chapter's values, which settings supply `runAsNonRoot`, the seccomp profile, the read-only root filesystem and the dropped capabilities? Why does the hub need `hub.extraConfig` for some of them?**
    <details><summary>Show answer</summary>
 
-   Set `singleuser.cmd` and `singleuser.podTemplate.spec.securityContext: { runAsNonRoot: true, runAsUser: 1000, runAsGroup: 100, fsGroup: 100, seccompProfile: { type: RuntimeDefault } }`. Per-container: `containers[0].securityContext: { allowPrivilegeEscalation: false, capabilities: { drop: [ALL] }, runAsNonRoot: true, runAsUser: 1000 }`. The PVC mount needs `fsGroup: 100` (the jovyan group) so the user can write to `/home/jovyan`. For CUDA notebook images that default to root, you also need to either rebuild with USER 1000 or use a non-root CUDA variant. Skipping the `fsGroup` is the classic failure mode — Pod starts but writes to the home PVC fail.
+   At Pod level, `c.KubeSpawner.pod_security_context` gives `runAsNonRoot:
+   True` and `seccompProfile: RuntimeDefault`. The chart has no value for it,
+   which is why it goes in `hub.extraConfig`. At container level,
+   `c.KubeSpawner.container_security_context` gives `readOnlyRootFilesystem:
+   True` and `capabilities.drop: ["ALL"]`, also from `hub.extraConfig`.
+   `singleuser.uid: 1000` sets the container's `runAsUser`, `singleuser.fsGid:
+   100` sets the Pod's `fsGroup` (the docker-stacks users group, which keeps
+   the per-user PVC writable), and `singleuser.allowPrivilegeEscalation:
+   false` sets the privilege flag. Restricted itself requires `runAsNonRoot`
+   and `drop: ALL`, so a Pod missing either is refused.
+   `readOnlyRootFilesystem` is not a restricted rule. It is this Part's
+   baseline, and the chapter sets it anyway.
 
    </details>
 
-4. **Hands-on: install JupyterHub with z2jh on kind. Set per-user `ResourceQuota: requests.cpu=2, limits.memory=8Gi, persistentvolumeclaims=1`. Now a user opens 2 named-servers. What happens?**
-   <details><summary>What you should see</summary>
+4. **Your ResourceQuota is `requests.cpu=8` in the `jupyter` namespace. Ten users log in at once, each on the default CPU profile. What stops them, and what does the quota protect against?**
+   <details><summary>Show answer</summary>
 
-   The first named-server's Pod schedules with 1 CPU / 2Gi RAM (or whatever the profile says). The second named-server tries to schedule but the user's namespace quota is already at 2 CPU consumed (or 8Gi RAM if memory-limited). The Pod becomes `Pending` with a quota-exceeded event, or the controller refuses to create it. Quota is *per user namespace*, not per server. The lesson: named-servers are useful (multiple notebooks for one user) but quota is the same blast-radius cap as ResourceQuota anywhere — see [Part 08 ch.04](../08-day-2-operations/04-multi-tenancy-and-namespaces.md).
+   All ten start. Each default server requests 0.25 CPU
+   (`singleuser.cpu.guarantee`), so ten servers request 2.5 of the 8 CPUs in
+   the quota. The quota stops the fleet at 32 default servers, because CPU
+   runs out first. The 33rd spawn is refused at admission with an "exceeded
+   quota" error, and only that user's spawn fails. The quota is not a per-user
+   limit. One user with one server is capped by the pod limits in the values,
+   and `allowNamedServers: false` keeps each user to one server. A per-user
+   namespace is the design that gives per-user quota, and it is the
+   provisioning step in the "One namespace for the fleet" bullet.
 
    </details>
 
@@ -597,3 +948,10 @@ Checklist:
   Istio integration); **KubeSpawner** docs
   <https://jupyterhub-kubespawner.readthedocs.io/> (the
   `singleuser.podTemplate` shape and `profileList` semantics).
+- Sources checked for the claims in this chapter, at the versions named:
+  the Pod Security Standards <https://kubernetes.io/docs/concepts/security/pod-security-standards/>;
+  the z2jh chart 4.4.4 templates and values <https://github.com/jupyterhub/zero-to-jupyterhub-k8s>;
+  KubeSpawner 7.1.0 (`objects.py`, `spawner.py`) <https://github.com/jupyterhub/kubespawner>;
+  JupyterHub 5.5.4 (`authenticators/shared.py`, `auth.py`) <https://github.com/jupyterhub/jupyterhub>;
+  and the docker-stacks base image, which installs `jupyterhub-singleuser`
+  and `start-singleuser.sh` <https://github.com/jupyter/docker-stacks>.
