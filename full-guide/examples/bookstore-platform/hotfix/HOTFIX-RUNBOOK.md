@@ -179,9 +179,9 @@ gh pr merge <PR_NUMBER> --admin --squash
 # Audit log entry posts to #bookstore-platform-audit:
 #   "@alice merged PR #4321 (HOTFIX:...) via admin bypass"
 
-# Argo CD sync — usually auto-sync picks it up in <60s, but for a
-# hotfix, force the sync to skip the wait.
-argocd app sync bookstore-catalog-us-east --prune
+# Argo CD sync. Auto-sync picks the merge up on its own schedule or on a
+# webhook. This manual sync does not prune (see How it works).
+argocd app sync bookstore-catalog-us-east
 argocd app wait bookstore-catalog-us-east --health --sync
 # Application healthy + synced -> mitigation in flight.
 
@@ -274,8 +274,7 @@ Findings go into the postmortem.
 ### "I used breakglass and forgot to clean up"
 
 The breakglass role's TTL (`cleanup-after-breakglass.md`) is 1 hour.
-After expiry, the credentials are auto-rotated by the Vault auth
-method. **But**: the artifacts the breakglass user created (RDS
+After expiry, the STS credentials expire on their own. **But**: the artifacts the breakglass user created (RDS
 snapshots, IAM users, S3 buckets) outlive the role. The cleanup
 checklist in `cleanup-after-breakglass.md` is mandatory.
 
