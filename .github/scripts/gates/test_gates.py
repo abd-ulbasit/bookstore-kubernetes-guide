@@ -1026,6 +1026,8 @@ class RetargetTests(unittest.TestCase):
         self.assertEqual(doc["metadata"]["namespace"], "ns")
 
 
+TODAY = "2026-10-31"  # the day the admission tests pretend it is
+
 FAKE_KUBECTL = """#!{python}
 import os, sys
 args = sys.argv[1:]
@@ -1046,15 +1048,27 @@ if "api-resources" in args:
     print("namespaces   ns   v1   false   Namespace")
     print("clusterroles      rbac.authorization.k8s.io/v1   false   ClusterRole")
     sys.exit(0)
+if args[:2] == ["get", "serviceaccount"]:
+    sys.exit(1 if os.environ.get("FAKE_NO_DEFAULT_SA") else 0)
 body = sys.stdin.read()
 if "--dry-run=server" not in args:
-    sys.exit(0)  # creating the gate namespace
+    if os.environ.get("FAKE_APPLIED"):
+        with open(os.environ["FAKE_APPLIED"], "a") as applied:
+            applied.write(body + "---\\n")
+    sys.exit(0)  # creating a gate namespace
+level = "restricted"
+for name in ("privileged", "baseline"):
+    if "namespace: gate-" + name in body:
+        level = name
 if "gate-control-violating-nullsc" in body and os.environ.get("FAKE_BLIND_NULLSC"):
     print("deployment.apps/x created (server dry run)")
 elif "gate-control-violating" in body and not os.environ.get("FAKE_BLIND"):
     sys.stderr.write({warn!r})
     print("deployment.apps/gate-control-violating created (server dry run)")
 elif "VIOLATE" in body:
+    sys.stderr.write({warn!r})
+    print("deployment.apps/x created (server dry run)")
+elif ("NEEDS_PRIVILEGED" in body and level != "privileged") or ("NEEDS_BASELINE" in body and level == "restricted"):
     sys.stderr.write({warn!r})
     print("deployment.apps/x created (server dry run)")
 elif "extensions/v1beta1" in body:
@@ -1067,7 +1081,7 @@ elif "BOOM" in body:
     sys.stderr.write("Error from server (Invalid): boom\\n")
     sys.exit(1)
 else:
-    print("object created (server dry run)")
+    print("object created in gate-" + level + " (server dry run)")
 """
 
 
@@ -1105,6 +1119,9 @@ class AdmissionCliTests(unittest.TestCase):
             encoding="utf-8",
         )
         self.kubectl.chmod(self.kubectl.stat().st_mode | stat.S_IEXEC)
+        self.guide = self.tmp / "guide"
+        self.registry = self.tmp / "namespace-exceptions.yaml"
+        self.register()
 
     def manifest(self, entries):
         bodies = []
@@ -1126,7 +1143,11 @@ class AdmissionCliTests(unittest.TestCase):
 
     def run_gate(self, manifest, *args):
         report = self.tmp / "report.json"
-        argv = ["--manifest", str(manifest), "--kubectl", str(self.kubectl), "--report", str(report), *args]
+        argv = [
+            "--manifest", str(manifest), "--kubectl", str(self.kubectl), "--report", str(report),
+            "--root", str(self.guide), "--namespace-registry", str(self.registry), "--today", TODAY,
+            *args,
+        ]  # fmt: skip
         out = io.StringIO()
         with contextlib.redirect_stdout(out), contextlib.redirect_stderr(out):
             rc = ag.main(argv)
@@ -1275,6 +1296,173 @@ class AdmissionCliTests(unittest.TestCase):
         self.assertEqual(rc, 2)
         self.assertIn("violating-null-securitycontext", self.output)
         self.assertIsNone(report)
+
+    # ---- registered exceptions: judged at the registered level, and nothing else ----
+
+    CHAPTER = "01-a/06-x.md"
+
+    def register(self, *overrides):
+        """Write the namespace registry. Each override changes a sound `node-logs` entry."""
+        sound = {
+            "namespace": "node-logs", "level": "privileged",
+            "reason": "the agent reads the node's pod logs through hostPath",
+            "upstream": "https://kubernetes.io/docs/concepts/security/pod-security-standards/#baseline",
+            "chapter": self.CHAPTER, "expires": "2027-06-30",
+        }  # fmt: skip
+        entries = [sound | override for override in overrides]
+        for entry in entries:
+            write(self.guide, entry["chapter"], "# chapter\n")
+        self.registry.write_text(yaml.safe_dump({"exceptions": entries}, sort_keys=False), encoding="utf-8")
+
+    @staticmethod
+    def workload(marker, namespace="node-logs", name="agent"):
+        """A document that the fake cluster refuses below the level its marker names."""
+        space = f"  namespace: {namespace}\n" if namespace else ""
+        return f"apiVersion: v1\nkind: ConfigMap\nmetadata:\n  name: {name}\n{space}data:\n  x: {marker}\n"
+
+    def block(self, *bodies, chapter=CHAPTER, klass="applyable"):
+        return self.manifest_bodies([(chapter, klass, ["ConfigMap"], "---\n".join(bodies))])
+
+    def gate_namespaces(self):
+        """The labels of every gate namespace the run created."""
+        applied = self.tmp / "applied.yaml"
+        if not applied.exists():
+            return {}
+        docs = [d for d in yaml.safe_load_all(applied.read_text(encoding="utf-8")) if isinstance(d, dict)]
+        return {d["metadata"]["name"]: d["metadata"]["labels"] for d in docs if d.get("kind") == "Namespace"}
+
+    def judged(self, manifest, *args):
+        """Run the gate; return (exit code, status of the first block)."""
+        self.set_env("FAKE_APPLIED", str(self.tmp / "applied.yaml"))
+        rc, report = self.run_gate(manifest, *args)
+        return rc, report["blocks"][0]["status"], report
+
+    def test_a_registered_namespace_is_judged_at_its_registered_level(self):
+        self.register({})
+        rc, status, report = self.judged(self.block(self.workload("NEEDS_PRIVILEGED")), "--scope", self.CHAPTER)
+        self.assertEqual((rc, status), (0, "registered"), self.output)
+        self.assertIn("gate-privileged", report["blocks"][0]["detail"])
+        self.assertEqual(report["summary"]["in_scope_judged"], 1, "a registered block is judged")
+        self.assertIn("node-logs", self.output)
+        self.assertEqual(
+            self.gate_namespaces()["gate-privileged"],
+            {"pod-security.kubernetes.io/enforce": "privileged", "pod-security.kubernetes.io/warn": "privileged"},
+        )
+
+    def test_the_same_namespace_from_a_chapter_the_entry_does_not_name_is_a_violation(self):
+        self.register({})
+        manifest = self.block(self.workload("NEEDS_PRIVILEGED"), chapter="01-a/07-y.md")
+        rc, status, _ = self.judged(manifest)
+        self.assertEqual((rc, status), (1, "violation"), self.output)
+        self.assertNotIn("gate-privileged", self.gate_namespaces(), "no exception namespace for a stranger")
+
+    def test_a_privileged_workload_in_a_baseline_only_namespace_is_a_violation(self):
+        self.register({"level": "baseline"})
+        rc, status, _ = self.judged(self.block(self.workload("NEEDS_PRIVILEGED")))
+        self.assertEqual((rc, status), (1, "violation"), self.output)
+        self.assertEqual(
+            self.gate_namespaces()["gate-baseline"],
+            {"pod-security.kubernetes.io/enforce": "baseline", "pod-security.kubernetes.io/warn": "baseline"},
+        )
+        self.assertNotIn("gate-privileged", self.gate_namespaces())
+        # What baseline does admit is registered, in the baseline namespace.
+        rc, status, report = self.judged(self.block(self.workload("NEEDS_BASELINE")))
+        self.assertEqual((rc, status), (0, "registered"), self.output)
+        self.assertIn("gate-baseline", report["blocks"][0]["detail"])
+
+    def test_an_unregistered_namespace_is_a_violation(self):
+        self.register({})
+        manifest = self.block(self.workload("NEEDS_PRIVILEGED", namespace="other-logs"))
+        rc, status, _ = self.judged(manifest)
+        self.assertEqual((rc, status), (1, "violation"), self.output)
+        self.assertNotIn("gate-privileged", self.gate_namespaces())
+
+    def test_an_entry_that_is_expired_or_unsound_grants_nothing(self):
+        cases = {
+            "expired yesterday": {"expires": "2026-10-30"},
+            "expires today": {"expires": "2026-10-31"},
+            "more than 12 months out": {"expires": "2027-11-01"},
+            "no expiry": {"expires": None},
+            "no reason": {"reason": ""},
+            "no citation": {"upstream": ""},
+        }
+        for name, override in cases.items():
+            with self.subTest(name):
+                self.register(override)
+                rc, status, _ = self.judged(self.block(self.workload("NEEDS_PRIVILEGED")))
+                self.assertEqual((rc, status), (1, "violation"), self.output)
+                self.assertIn("node-logs", self.output, "the run says why the entry was not applied")
+        self.register({})
+        (self.guide / self.CHAPTER).unlink()
+        rc, status, _ = self.judged(self.block(self.workload("NEEDS_PRIVILEGED")))
+        self.assertEqual((rc, status), (1, "violation"), "a chapter that is not in the guide")
+        self.assertNotIn("gate-privileged", self.gate_namespaces())
+
+    def test_a_namespace_registered_twice_grants_nothing(self):
+        self.register({}, {"level": "baseline"})
+        rc, status, _ = self.judged(self.block(self.workload("NEEDS_BASELINE")))
+        self.assertEqual((rc, status), (1, "violation"), self.output)
+
+    def test_a_block_that_reaches_outside_the_registered_namespace_is_judged_at_restricted(self):
+        self.register({})
+        for name, other in (
+            ("another namespace", self.workload("OK", namespace="bookstore", name="other")),
+            ("no namespace", self.workload("OK", namespace=None, name="other")),
+        ):
+            with self.subTest(name):
+                rc, status, _ = self.judged(self.block(self.workload("NEEDS_PRIVILEGED"), other))
+                self.assertEqual((rc, status), (1, "violation"), self.output)
+
+    def test_cluster_scoped_documents_do_not_change_where_a_block_is_judged(self):
+        self.register({})
+        namespace = "apiVersion: v1\nkind: Namespace\nmetadata:\n  name: node-logs\n"
+        rc, status, _ = self.judged(self.block(namespace, self.workload("NEEDS_PRIVILEGED")))
+        self.assertEqual((rc, status), (0, "registered"), self.output)
+
+    def test_only_a_pass_becomes_registered(self):
+        self.register({})
+        for marker, status in (("BOOM", "error"), ("VIOLATE", "violation")):
+            with self.subTest(marker):
+                rc, got, _ = self.judged(self.block(self.workload(marker)))
+                self.assertEqual((rc, got), (1, status), self.output)
+
+    def test_the_marker_policy_is_not_relaxed_for_a_registered_namespace(self):
+        self.register({})
+        manifest = self.block(self.workload("NEEDS_PRIVILEGED"), klass="insecure")
+        rc, status, _ = self.judged(manifest)
+        self.assertEqual((rc, status), (1, "error"), self.output)
+
+    def test_an_unreadable_registry_exits_two(self):
+        manifest = self.block(self.workload("NEEDS_PRIVILEGED"))
+        self.registry.write_text("exceptions: [unclosed\n", encoding="utf-8")
+        rc, report = self.run_gate(manifest)
+        self.assertEqual((rc, report), (2, None), self.output)
+        rc, report = self.run_gate(manifest, "--namespace-registry", str(self.tmp / "absent.yaml"))
+        self.assertEqual((rc, report), (2, None), self.output)
+
+    def test_a_gate_namespace_is_ready_for_pods_before_a_block_is_dry_run_in_it(self):
+        log = self.tmp / "kubectl.log"
+        self.set_env("FAKE_LOG", str(log))
+        self.register({})
+        rc, status, _ = self.judged(self.block(self.workload("NEEDS_PRIVILEGED")))
+        self.assertEqual((rc, status), (0, "registered"), self.output)
+        calls = log.read_text(encoding="utf-8").splitlines()
+        wait = "get serviceaccount default -n gate-privileged -o name"
+        self.assertIn(wait, calls)
+        self.assertLess(calls.index(wait), max(i for i, c in enumerate(calls) if "--dry-run=server" in c))
+
+    def test_a_namespace_that_never_gets_its_default_service_account_aborts(self):
+        self.set_env("FAKE_NO_DEFAULT_SA", "1")
+        manifest = self.block(self.workload("OK"))
+        with mock.patch.object(ag, "SERVICE_ACCOUNT_POLLS", 2), mock.patch.object(ag.time, "sleep"):
+            rc, report = self.run_gate(manifest)
+        self.assertEqual((rc, report), (2, None), self.output)
+        self.assertIn("default ServiceAccount", self.output)
+
+    def test_a_registry_with_a_structure_error_grants_nothing(self):
+        self.registry.write_text("exceptions: nope\n", encoding="utf-8")
+        rc, status, _ = self.judged(self.block(self.workload("NEEDS_PRIVILEGED")))
+        self.assertEqual((rc, status), (1, "violation"), self.output)
 
 
 OUTPUT = "<!-- gate: output -->"

@@ -26,6 +26,19 @@ exceptions:
     chapter: 14-eks-in-production-a-to-z/13-runtime-defense-and-container-security.md
     expires: 2027-06-30
 
+  - namespace: node-logs
+    level: privileged
+    reason: >-
+      The chapter's log agent reads the node's pod log directory, /var/log/pods,
+      through a hostPath volume. The Pod Security Standards forbid hostPath at
+      baseline, and the restricted profile does not list it among its allowed
+      volume types, so only privileged admits the agent. The namespace holds that
+      one agent and keeps audit and warn at restricted. The chapter deletes it at
+      the end of the lab.
+    upstream: https://kubernetes.io/docs/concepts/security/pod-security-standards/#baseline
+    chapter: 01-core-workloads/06-daemonsets.md
+    expires: 2027-06-30
+
   - namespace: psa-lab
     level: privileged
     reason: >-

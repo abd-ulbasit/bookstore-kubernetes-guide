@@ -113,6 +113,7 @@ class NamespaceEntry:
     namespace: str
     level: str
     problems: tuple[str, ...] = ()
+    chapter: str = ""  # relative to the guide root, as written in the entry
 
 
 @dataclass
@@ -354,8 +355,26 @@ def load_namespace_registry(
         if namespace in seen:
             registry.problems.append(f"namespace {namespace} is registered twice")
         seen.add(namespace)
-        registry.entries.append(NamespaceEntry(namespace, str(level), tuple(problems)))
+        registry.entries.append(
+            NamespaceEntry(namespace, str(level), tuple(problems), chapter.strip() if isinstance(chapter, str) else "")
+        )
     return registry
+
+
+def usable_exceptions(registry: NamespaceRegistry) -> dict[str, NamespaceEntry]:
+    """Map each namespace to the entry another gate may rely on.
+
+    An entry with any problem (expired, too far out, no reason, no citation,
+    no such chapter) grants nothing. Neither does a namespace registered twice:
+    two entries may disagree on the level, and the gate cannot tell which one
+    was meant.
+    """
+    copies = Counter(entry.namespace for entry in registry.entries)
+    return {
+        entry.namespace: entry
+        for entry in registry.entries
+        if not entry.problems and copies[entry.namespace] == 1
+    }
 
 
 def found_namespaces(scan: TreeScan) -> dict[str, tuple[str, list[str]]]:
