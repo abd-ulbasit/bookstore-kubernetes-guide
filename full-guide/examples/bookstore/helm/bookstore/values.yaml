@@ -568,11 +568,10 @@ gateway:
   # is self-contained for the guide. createGatewayClass=false if pre-created.
   createGatewayClass: true
   className: bookstore-gtw
-  # controllerName is a PLACEHOLDER that no controller claims (ingress-nginx
-  # does not implement Gateway API). Set it to the controller name of the
-  # Gateway implementation you install, e.g. Envoy Gateway's
-  # gateway.envoyproxy.io/gatewayclass-controller.
-  controllerName: k8s.io/ingress-nginx
+  # controllerName is the name the Traefik controller claims for Gateway API
+  # (its chart's GatewayClass uses the same value; ch.05 step 1). A different
+  # Gateway implementation needs its own controllerName here.
+  controllerName: traefik.io/gateway-controller
   host: bookstore.localdev.me
   tls:
     secretName: bookstore-tls

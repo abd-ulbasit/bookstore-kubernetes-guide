@@ -1,0 +1,306 @@
+# Transcript for 02-networking/05-gateway-api.md, steps 1 to 4.
+# Tier A: kind cluster sf-pilot on a Linux lab host, node image Kubernetes
+# v1.37.0 (kind v0.33.0), kubectl v1.37.2, Helm 4.1.4. The lab host has no
+# host port mapping, so the NodePorts are reached from inside the node container
+# with docker exec, and the kubectl commands run from the author's shell.
+# Gateway API CRDs: standard-install.yaml v1.7.0. Traefik chart 42.2.0,
+# app v3.7.16, pinned by digest sha256:1336e85a...
+# Namespaces: the lab names are p02-05-bookstore, p02-05-team-a, p02-05-team-b
+# and p02-05-traefik, where the chapter says bookstore, team-a, team-b and
+# traefik. The shared cluster rule requires the p02- prefix. Manifests are the
+# repository files with the namespace renamed in a scratch copy. The team
+# namespaces, their routes and the ReferenceGrant were written for the lab with
+# the p02-05 names. The NodePort requests were sent from inside the kind node,
+# with bookstore.localdev.me resolved to the node by curl --resolve.
+# Values: the Traefik values file is the chapter's, with the namespace flag set
+# to p02-05-traefik.
+# What did not work the first time, kept in the transcript below:
+#   1. image.versionOverride is a top-level key, not an image key. The chart
+#      rejected the first values file.
+#   2. The first helm install ran past the tool's time limit and left the
+#      release in pending-install. It was uninstalled and installed again (part 3).
+#   3. The scratch copy's rename also renamed the Gateway and HTTPRoute, so the
+#      Gateway was deleted and the stack re-applied from the repository file.
+#   4. With allowedRoutes switched to a label Selector, the Bookstore's own
+#      route stopped attaching (Accepted=False, NotAllowedByListeners) until the
+#      bookstore namespace carried the label too.
+#   5. An apply to the shared cluster timed out in etcd and was re-applied.
+# An earlier apply to a namespace named p02-bookstore, made by another worker,
+# is not part of this run.
+
+## part 1: CRDs, as applied in the lab
+$ kubectl apply -f standard-install.yaml
+customresourcedefinition.apiextensions.k8s.io/backendtlspolicies.gateway.networking.k8s.io created
+customresourcedefinition.apiextensions.k8s.io/gatewayclasses.gateway.networking.k8s.io created
+customresourcedefinition.apiextensions.k8s.io/gateways.gateway.networking.k8s.io created
+customresourcedefinition.apiextensions.k8s.io/grpcroutes.gateway.networking.k8s.io created
+customresourcedefinition.apiextensions.k8s.io/httproutes.gateway.networking.k8s.io created
+customresourcedefinition.apiextensions.k8s.io/listenersets.gateway.networking.k8s.io created
+customresourcedefinition.apiextensions.k8s.io/referencegrants.gateway.networking.k8s.io created
+customresourcedefinition.apiextensions.k8s.io/tcproutes.gateway.networking.k8s.io created
+customresourcedefinition.apiextensions.k8s.io/tlsroutes.gateway.networking.k8s.io created
+customresourcedefinition.apiextensions.k8s.io/udproutes.gateway.networking.k8s.io created
+validatingadmissionpolicy.admissionregistration.k8s.io/safe-upgrades.gateway.networking.k8s.io created
+validatingadmissionpolicybinding.admissionregistration.k8s.io/safe-upgrades.gateway.networking.k8s.io created
+
+## part 2: the lab run, in order
+$ kubectl apply -f 00-namespace.yaml -f 05-serviceaccounts-rbac.yaml -f 15-catalog-config.yaml -f 16-db-credentials.yaml -f 12-redis.yaml -f 20-postgres-statefulset.yaml -f 40-services.yaml
+namespace/p02-05-bookstore created
+resourcequota/bookstore-quota created
+limitrange/bookstore-limits created
+serviceaccount/catalog-sa created
+serviceaccount/orders-sa created
+serviceaccount/payments-worker-sa created
+serviceaccount/postgres-sa created
+serviceaccount/redis-sa created
+serviceaccount/rabbitmq-sa created
+serviceaccount/migrate-sa created
+role.rbac.authorization.k8s.io/catalog-config-reader created
+rolebinding.rbac.authorization.k8s.io/catalog-config-reader-binding created
+configmap/catalog-config created
+secret/db-credentials created
+deployment.apps/redis created
+service/postgres created
+statefulset.apps/postgres created
+service/catalog created
+service/storefront created
+service/orders created
+service/redis created
+service/rabbitmq created
+service/payments-worker created
+Error from server: error when creating "05-serviceaccounts-rbac.yaml": etcdserver: request timed out
+$ kubectl apply -f 10-catalog-deploy.yaml -f 11-storefront-deploy.yaml -f 14-orders-deploy.yaml
+deployment.apps/catalog created
+deployment.apps/storefront created
+deployment.apps/orders created
+$ kubectl apply -f 21-db-migrate-job.yaml
+job.batch/db-migrate created
+$ kubectl apply -f 51-gateway.yaml   # before any Gateway controller is installed
+gatewayclass.gateway.networking.k8s.io/bookstore-gtw created
+gateway.gateway.networking.k8s.io/p02-05-bookstore created
+httproute.gateway.networking.k8s.io/p02-05-bookstore created
+$ kubectl get gateway,httproute -n p02-05-bookstore
+NAME                                                 CLASS           ADDRESS   PROGRAMMED   AGE
+gateway.gateway.networking.k8s.io/p02-05-bookstore   bookstore-gtw             Unknown      2s
+
+NAME                                                   HOSTNAMES                   AGE
+httproute.gateway.networking.k8s.io/p02-05-bookstore   ["bookstore.localdev.me"]   2s
+$ kubectl get gateway bookstore -n p02-05-bookstore -o jsonpath='{.status}'
+Error from server (NotFound): gateways.gateway.networking.k8s.io "bookstore" not found
+
+$ kubectl get gatewayclass bookstore-gtw -o jsonpath='{.status}'
+{"conditions":[{"lastTransitionTime":"1970-01-01T00:00:00Z","message":"Waiting for controller","reason":"Pending","status":"Unknown","type":"Accepted"}]}
+$ # scratch copy fixed: Gateway and HTTPRoute keep the name bookstore (the rename had changed them); removing the two misnamed objects
+gateway.gateway.networking.k8s.io "p02-05-bookstore" deleted from p02-05-bookstore namespace
+Error from server (NotFound): gateways.gateway.networking.k8s.io "httproute" not found
+Error from server (NotFound): gateways.gateway.networking.k8s.io "p02-05-bookstore" not found
+$ kubectl apply -f 51-gateway.yaml
+gatewayclass.gateway.networking.k8s.io/bookstore-gtw unchanged
+gateway.gateway.networking.k8s.io/bookstore created
+httproute.gateway.networking.k8s.io/bookstore created
+$ kubectl delete httproute p02-05-bookstore -n p02-05-bookstore
+httproute.gateway.networking.k8s.io "p02-05-bookstore" deleted from p02-05-bookstore namespace
+$ kubectl get gateway,httproute -n p02-05-bookstore
+NAME                                          CLASS           ADDRESS   PROGRAMMED   AGE
+gateway.gateway.networking.k8s.io/bookstore   bookstore-gtw             Unknown      11s
+
+NAME                                            HOSTNAMES                   AGE
+httproute.gateway.networking.k8s.io/bookstore   ["bookstore.localdev.me"]   10s
+$ kubectl get gatewayclass bookstore-gtw -o jsonpath='{.status}'
+{"conditions":[{"lastTransitionTime":"1970-01-01T00:00:00Z","message":"Waiting for controller","reason":"Pending","status":"Unknown","type":"Accepted"}]}
+$ kubectl get gateway bookstore -n p02-05-bookstore -o jsonpath='{.status}'
+{"conditions":[{"lastTransitionTime":"1970-01-01T00:00:00Z","message":"Waiting for controller","reason":"Pending","status":"Unknown","type":"Accepted"},{"lastTransitionTime":"1970-01-01T00:00:00Z","message":"Waiting for controller","reason":"Pending","status":"Unknown","type":"Programmed"}]}
+$ kubectl apply -f traefik-namespace.yaml   # lab copy: namespace p02-05-traefik instead of traefik
+namespace/p02-05-traefik created
+$ helm upgrade --install traefik traefik/traefik --version 42.2.0 --namespace p02-05-traefik --values traefik-values.yaml --wait --timeout 5m
+Release "traefik" does not exist. Installing it now.
+Error: values don't meet the specifications of the schema(s) in the following chart(s):
+traefik:
+- at '/image': additional properties 'versionOverride' not allowed
+
+$ kubectl create secret tls bookstore-tls -n p02-05-bookstore --cert=tls.crt --key=tls.key
+secret/bookstore-tls created
+$ kubectl get gateway,httproute -n p02-05-bookstore
+NAME                                          CLASS           ADDRESS   PROGRAMMED   AGE
+gateway.gateway.networking.k8s.io/bookstore   bookstore-gtw             True         6m28s
+
+NAME                                            HOSTNAMES                   AGE
+httproute.gateway.networking.k8s.io/bookstore   ["bookstore.localdev.me"]   6m28s
+$ kubectl get gateway bookstore -n p02-05-bookstore -o jsonpath='{range .status.conditions[*]}{.type}={.status}{"
+"}{end}'
+Accepted=True
+Programmed=True
+$ kubectl get httproute bookstore -n p02-05-bookstore -o jsonpath='{range .status.parents[0].conditions[*]}{.type}={.status}{"
+"}{end}'
+Accepted=True
+ResolvedRefs=True
+$ helm upgrade --install traefik traefik/traefik --version 42.2.0 --namespace p02-05-traefik --values traefik-values.yaml --wait --timeout 5m
+Release "traefik" does not exist. Installing it now.
+Release traefik has been cancelled.
+Error: context canceled
+$ kubectl patch gateway bookstore -n p02-05-bookstore --type=json -p='[...]'   # allowedRoutes from Same to a Selector
+gateway.gateway.networking.k8s.io/bookstore patched
+$ kubectl apply -f team-a.yaml
+namespace/p02-05-team-a created
+httproute.gateway.networking.k8s.io/team-a-books created
+$ kubectl apply -f team-b.yaml
+namespace/p02-05-team-b created
+httproute.gateway.networking.k8s.io/takeover created
+$ kubectl get httproute -A
+NAMESPACE          NAME           HOSTNAMES                   AGE
+p02-05-bookstore   bookstore      ["bookstore.localdev.me"]   7m51s
+p02-05-team-a      team-a-books   ["bookstore.localdev.me"]   42s
+p02-05-team-b      takeover       ["bookstore.localdev.me"]   39s
+$ kubectl get httproute team-a-books -n p02-05-team-a -o jsonpath='{range .status.parents[0].conditions[*]}{.type}={.status} {.reason}{"
+"}{end}'
+Accepted=True Accepted
+ResolvedRefs=False RefNotPermitted
+$ kubectl get httproute takeover -n p02-05-team-b -o jsonpath='{range .status.parents[0].conditions[*]}{.type}={.status} {.reason}{"
+"}{end}'
+Accepted=False NotAllowedByListeners
+ResolvedRefs=False RefNotPermitted
+$ kubectl get gatewayclass
+NAME            CONTROLLER                      ACCEPTED   AGE
+bookstore-gtw   traefik.io/gateway-controller   True       13m
+traefik         traefik.io/gateway-controller   True       4m49s
+$ kubectl get gatewayclass traefik -o jsonpath='{.spec.controllerName}'
+traefik.io/gateway-controller
+$ kubectl get gateway bookstore -n p02-05-bookstore -o jsonpath='{range .status.conditions[*]}{.type}={.status}{"
+"}{end}'
+Accepted=True
+Programmed=True
+$ kubectl get gateway bookstore -n p02-05-bookstore -o jsonpath='{range .status.listeners[*]}{.name}: {range .conditions[*]}{.type}={.status} {end}{"
+"}{end}'
+https: Accepted=True ResolvedRefs=True Programmed=True 
+
+$ kubectl get httproute bookstore -n p02-05-bookstore -o jsonpath='{range .status.parents[0].conditions[*]}{.type}={.status}{"
+"}{end}'
+Accepted=False
+ResolvedRefs=True
+$ kubectl get pod -n p02-05-traefik -o jsonpath='{.items[0].spec.serviceAccountName} automount={.items[0].spec.automountServiceAccountToken} runAsNonRoot={.items[0].spec.securityContext.runAsNonRoot}'
+traefik automount=true runAsNonRoot=true
+$ kubectl get httproute bookstore -n p02-05-bookstore -o jsonpath='{range .status.parents[0].conditions[*]}{.type}={.status} {.reason}{"
+"}{end}'
+Accepted=False NotAllowedByListeners
+ResolvedRefs=True ResolvedRefs
+$ kubectl label namespace p02-05-bookstore bookstore-routes=allowed   # the Gateway's own namespace must match the Selector too
+namespace/p02-05-bookstore labeled
+$ kubectl get httproute bookstore -n p02-05-bookstore -o jsonpath='{range .status.parents[0].conditions[*]}{.type}={.status} {.reason}{"
+"}{end}'
+Accepted=True Accepted
+ResolvedRefs=True ResolvedRefs
+$ kubectl get httproute -A
+NAMESPACE          NAME           HOSTNAMES                   AGE
+p02-05-bookstore   bookstore      ["bookstore.localdev.me"]   13m
+p02-05-team-a      team-a-books   ["bookstore.localdev.me"]   6m13s
+p02-05-team-b      takeover       ["bookstore.localdev.me"]   6m10s
+$ kubectl apply -f refgrant.yaml
+referencegrant.gateway.networking.k8s.io/team-a-to-catalog created
+$ kubectl get httproute team-a-books -n p02-05-team-a -o jsonpath='{range .status.parents[0].conditions[*]}{.type}={.status} {.reason}{"
+"}{end}'
+Accepted=True Accepted
+ResolvedRefs=True ResolvedRefs
+$ kubectl get referencegrant -n p02-05-bookstore
+NAME                AGE
+team-a-to-catalog   10s
+[]
+HTTP 200
+[]
+HTTP 200
+$ kubectl delete referencegrant team-a-to-catalog -n p02-05-bookstore
+referencegrant.gateway.networking.k8s.io "team-a-to-catalog" deleted from p02-05-bookstore namespace
+$ kubectl get httproute team-a-books -n p02-05-team-a -o jsonpath='{range .status.parents[0].conditions[*]}{.type}={.status} {.reason}{"
+"}{end}'
+Accepted=True Accepted
+ResolvedRefs=False RefNotPermitted
+$ kubectl get httproute takeover -n p02-05-team-b -o jsonpath='{range .status.parents[0].conditions[*]}{.type}={.status} {.reason}{"
+"}{end}'
+Accepted=False NotAllowedByListeners
+ResolvedRefs=False RefNotPermitted
+$ kubectl get clusterrole traefik-p02-05-traefik -o yaml | grep -A6 'secrets'
+  - secrets
+  verbs:
+  - get
+  - list
+  - watch
+- apiGroups:
+  - extensions
+$ openssl s_client (from inside the kind node) | openssl x509 -noout -subject -ext subjectAltName
+subject=CN=bookstore.localdev.me
+X509v3 Subject Alternative Name: 
+    DNS:bookstore.localdev.me
+
+## part 3: Traefik reinstall after the cancelled release
+$ helm uninstall traefik -n p02-05-traefik --wait
+release "traefik" uninstalled
+$ helm upgrade --install traefik traefik/traefik --version 42.2.0 --namespace p02-05-traefik --values traefik-values.yaml --wait --timeout 8m
+Release "traefik" does not exist. Installing it now.
+NAME: traefik
+LAST DEPLOYED: Sat Oct 31 05:03:32 2026
+NAMESPACE: p02-05-traefik
+STATUS: deployed
+REVISION: 1
+DESCRIPTION: Install complete
+TEST SUITE: None
+NOTES:
+traefik with docker.io/traefik@sha256:1336e85aaed293bd63d005086e0dd013b04078b26aaeb1c18b26a2f928af7e65 has been deployed successfully on p02-05-traefik namespace!
+
+⚠️ DEPRECATION WARNING: Gateway API CRDs will no longer be shipped with this chart in a future major version.
+You will need to install them yourself before deploying Traefik v3.7:
+  kubectl apply -f https://github.com/kubernetes-sigs/gateway-api/releases/download/v1.5.1/standard-install.yaml
+
+## part 4: clean read pass after steps 2 to 4
+$ kubectl get crd | grep gateway.networking.k8s.io
+backendtlspolicies.gateway.networking.k8s.io   Namespaced   v1(storage)           2026-10-30T23:35:45Z
+gatewayclasses.gateway.networking.k8s.io       Cluster      v1(storage),v1beta1   2026-10-30T23:35:47Z
+gateways.gateway.networking.k8s.io             Namespaced   v1(storage),v1beta1   2026-10-30T23:35:48Z
+grpcroutes.gateway.networking.k8s.io           Namespaced   v1(storage)           2026-10-30T23:35:50Z
+httproutes.gateway.networking.k8s.io           Namespaced   v1(storage),v1beta1   2026-10-30T23:35:50Z
+listenersets.gateway.networking.k8s.io         Namespaced   v1(storage)           2026-10-30T23:35:52Z
+referencegrants.gateway.networking.k8s.io      Namespaced   v1,v1beta1(storage)   2026-10-30T23:35:54Z
+tcproutes.gateway.networking.k8s.io            Namespaced   v1(storage)           2026-10-30T23:35:57Z
+tlsroutes.gateway.networking.k8s.io            Namespaced   v1(storage)           2026-10-30T23:35:59Z
+udproutes.gateway.networking.k8s.io            Namespaced   v1(storage)           2026-10-30T23:36:01Z
+$ kubectl get crd httproutes.gateway.networking.k8s.io -o jsonpath='{.metadata.annotations.gateway\.networking\.k8s\.io/channel}{"
+"}'
+standard
+$ kubectl get gatewayclass traefik -o jsonpath='{.spec.controllerName}{"
+"}'
+traefik.io/gateway-controller
+$ kubectl get gatewayclass traefik -o jsonpath='{.status.conditions[?(@.type=="Accepted")].status}{"
+"}'
+True
+$ kubectl get gateway,httproute -n p02-05-bookstore
+NAME                                          CLASS           ADDRESS   PROGRAMMED   AGE
+gateway.gateway.networking.k8s.io/bookstore   bookstore-gtw             True         14m
+
+NAME                                            HOSTNAMES                   AGE
+httproute.gateway.networking.k8s.io/bookstore   ["bookstore.localdev.me"]   14m
+$ kubectl get gateway bookstore -n p02-05-bookstore -o jsonpath='{range .status.conditions[*]}{.type}={.status}{"
+"}{end}'
+Accepted=True
+Programmed=True
+$ kubectl get httproute bookstore -n p02-05-bookstore -o jsonpath='{range .status.parents[0].conditions[*]}{.type}={.status}{"
+"}{end}'
+Accepted=True
+ResolvedRefs=True
+$ kubectl get httproute team-a-books -n p02-05-team-a -o jsonpath='{range .status.parents[0].conditions[*]}{.type}={.status} {.reason}{"
+"}{end}'
+Accepted=True Accepted
+ResolvedRefs=False RefNotPermitted
+
+## part 5: cleanup
+$ kubectl delete namespace p02-05-team-a p02-05-team-b
+namespace "p02-05-team-a" deleted
+namespace "p02-05-team-b" deleted
+$ helm uninstall traefik -n p02-05-traefik
+release "traefik" uninstalled
+$ kubectl delete gatewayclass bookstore-gtw
+gatewayclass.gateway.networking.k8s.io "bookstore-gtw" deleted
+$ kubectl delete namespace p02-05-traefik p02-05-bookstore
+namespace "p02-05-traefik" deleted
+namespace "p02-05-bookstore" deleted
+$ kubectl get ns | grep p02-05
+p02-05-bookstore     Terminating   35m
+$ kubectl get gatewayclass
+No resources found

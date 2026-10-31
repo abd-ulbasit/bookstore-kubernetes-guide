@@ -16,12 +16,12 @@
 # installed first. Without the CRDs, a client dry-run of an overlay including
 # this component prints `no matches for kind "Gateway"` / `"HTTPRoute"` /
 # `"GatewayClass"` — EXPECTED and correct (objects are schema-valid). Install
-# the standard channel CRDs, then a controller:
-#   kubectl apply -f https://github.com/kubernetes-sigs/gateway-api/releases/download/v1.1.0/standard-install.yaml
-# (pin a current version; see raw 51- header). The vendored GatewayClass
-# `controllerName: k8s.io/ingress-nginx` is a PLACEHOLDER that no controller
-# claims (ingress-nginx does not implement Gateway API); swap it to match
-# whatever controller you installed.
+# the v1.7.0 standard channel CRDs, then the Traefik controller with its
+# Gateway provider enabled (ch.05 step 1):
+#   kubectl apply -f https://github.com/kubernetes-sigs/gateway-api/releases/download/v1.7.0/standard-install.yaml
+# The vendored GatewayClass names `controllerName: traefik.io/gateway-controller`,
+# the value the Traefik chart uses. A different Gateway controller needs its
+# own controllerName here.
 #
 # Enable by adding to an overlay's `components:` list, e.g.:
 #   components:
