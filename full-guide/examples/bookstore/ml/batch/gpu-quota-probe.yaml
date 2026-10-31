@@ -6,7 +6,8 @@
 # scheduling. The request is secure (restricted-compliant, the baseline from
 # Part 01 ch.01); it is over quota on purpose so the cap can be seen working.
 #
-# Apply with a server dry run, so nothing is stored:
+# Apply with a server dry run, so nothing is stored. Apply
+# recommender-batch-serviceaccount.yaml first:
 #   kubectl apply --dry-run=server -f gpu-quota-probe.yaml
 #
 # Expected: the API server refuses it with "exceeded quota". Changing the two
@@ -21,6 +22,7 @@ metadata:
     app.kubernetes.io/component: recommender-train
 spec:
   restartPolicy: Never
+  serviceAccountName: recommender-batch   # recommender-batch-serviceaccount.yaml
   automountServiceAccountToken: false
   securityContext:
     runAsNonRoot: true

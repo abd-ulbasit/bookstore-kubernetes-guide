@@ -26,8 +26,15 @@
 #
 # KUEUE — labelled onto bookstore-ml-lq. Kueue's PyTorchJob integration gates
 # the WHOLE training run in via spec.runPolicy.suspend (created suspended,
-# fitted against the ClusterQueue, then flipped). NEVER partially placed
-# (the deadlock Part 12 ch.03 prevents).
+# fitted against the ClusterQueue, then flipped). Quota is reserved for the
+# whole gang first. Pods are still placed by the scheduler, one at a time, so
+# the gang can land in part on a full cluster; waitForPodsReady covers that.
+#
+# OPERATOR INIT CONTAINER: the Training Operator (v1.9.4) adds an init
+# container named init-pytorch to each worker, which this file does not declare.
+# Its securityContext comes from the operator's template, set up by
+# operators/training-operator/ (ch.04 step 1). Without that configuration the
+# worker Pod is refused by bookstore-ml.
 #
 # PSA — `bookstore-ml` is `enforce: restricted` (Part 12 ch.01). Every Pod
 # in this PyTorchJob (master + worker) carries the full restricted shape.

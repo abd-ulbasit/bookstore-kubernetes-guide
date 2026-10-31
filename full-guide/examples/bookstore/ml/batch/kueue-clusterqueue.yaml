@@ -23,6 +23,9 @@
 #                  a HARD per-namespace ResourceQuota on requests.nvidia.com/gpu
 #                  (Part 08 ch.04) as the inviolable ceiling (ch.03 Hands-on §4).
 #
+# The namespaceSelector names bookstore-ml, so only that namespace can use the
+# quota. Keep a selector like that before you add a second tenant.
+#
 # Single-tenant here for the worked example. For real multi-tenant fair-share:
 # give each team its own LocalQueue->ClusterQueue and group the ClusterQueues
 # in a shared `cohortName:` so idle quota is borrowable but reclaimable (Kueue
@@ -34,8 +37,13 @@ metadata:
   labels:
     app.kubernetes.io/part-of: bookstore-ml
 spec:
-  namespaceSelector: {}            # which namespaces may use it ({} = all;
-                                   # the LocalQueue scopes it to bookstore-ml)
+  # Which namespaces may point a LocalQueue at this queue. An empty selector
+  # ({}) matches every namespace, so a LocalQueue in any namespace could draw
+  # this quota. The selector is the name of the bookstore-ml namespace, which
+  # the API server sets and which a namespace owner cannot change.
+  namespaceSelector:
+    matchLabels:
+      kubernetes.io/metadata.name: bookstore-ml
   resourceGroups:
     - coveredResources: ["cpu", "memory", "nvidia.com/gpu"]
       flavors:

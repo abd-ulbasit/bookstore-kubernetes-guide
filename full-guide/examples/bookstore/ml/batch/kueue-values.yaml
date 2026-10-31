@@ -2,7 +2,7 @@
 # Kueue chart (oci://registry.k8s.io/kueue/charts/kueue, version 0.17.0), passed
 # with -f. Everything not listed here is the chart default, copied verbatim.
 #
-# Two changes from the defaults:
+# Three changes from the defaults:
 #
 # 1. manageJobsWithoutQueueName: true. Kueue's configuration reference says that
 #    with this flag set, Jobs that lack the kueue.x-k8s.io/queue-name label are
@@ -12,7 +12,26 @@
 #    namespaces labelled app.kubernetes.io/part-of=bookstore-ml, the label the
 #    ch.01 namespace carries. Other namespaces are not managed at all.
 #
-# 2. The controller image is pinned by digest. The tag v0.17.0 is kept in front
+#    The flag applies to every integration listed under frameworks. The chart
+#    default also lists pod, deployment and statefulset. This file removes
+#    those three: with the flag on, a bare Pod, Deployment or StatefulSet in
+#    bookstore-ml that carries no queue label is suspended and never starts,
+#    so the probes, the rendezvous check and the serving Pods of later chapters
+#    would wait for a queue they are never given. Jobs, JobSets and the
+#    training operators' jobs stay managed. The chart still renders the
+#    mpod, mdeployment and mstatefulset webhooks, with failurePolicy Ignore.
+#    For an integration that is not listed, Kueue installs a no-op handler
+#    there, so those webhooks gate nothing.
+#
+# 2. waitForPodsReady is on. A workload that Kueue admitted must reach
+#    PodsReady within 5 minutes, and blockAdmission stops Kueue from admitting
+#    the next workload until it does. Quota is counted logically, so Kueue can
+#    admit a gang that the scheduler then places only in part. This setting
+#    evicts such a gang after the timeout and holds the queue while it waits.
+#    It does not make placement atomic. In Kueue v0.17.0 the block being
+#    present turns the feature on; the struct has no enable field.
+#
+# 3. The controller image is pinned by digest. The tag v0.17.0 is kept in front
 #    of the digest, so the reference reads as the chart's own tag plus the
 #    digest that was pulled.
 #
@@ -49,10 +68,10 @@ managerConfig:
       qps: 50
       burst: 100
     #pprofBindAddress: :8083
-    #waitForPodsReady:
-    #  timeout: 5m
-    #  recoveryTimeout: 3m
-    #  blockAdmission: false
+    waitForPodsReady:
+      timeout: 5m
+      recoveryTimeout: 3m
+      blockAdmission: true
     #  requeuingStrategy:
     #    timestamp: Eviction
     #    backoffLimitCount: null # null indicates infinite requeuing
@@ -82,9 +101,6 @@ managerConfig:
       - "kubeflow.org/jaxjob"
       - "workload.codeflare.dev/appwrapper"
     #  - "sparkoperator.k8s.io/sparkapplication"
-      - "pod"
-      - "deployment"
-      - "statefulset"
       - "leaderworkerset.x-k8s.io/leaderworkerset"
     #  externalFrameworks:
     #  - "Foo.v1.example.com"

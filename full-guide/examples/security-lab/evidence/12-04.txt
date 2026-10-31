@@ -385,3 +385,43 @@ $ docker buildx imagetools inspect rayproject/ray:2.40.0 | head -4
 Name:      docker.io/rayproject/ray:2.40.0
 MediaType: application/vnd.docker.distribution.manifest.v2+json
 Digest:    sha256:41d1f003119564fb00dc256881fc54d3ddfe607c79e4bdef49b9bce8ebf78428
+
+## Revision run: the worker init container, the Ray group policy and the KubeRay digest
+# The shared heavy-install lock was still held, so the Training Operator and KubeRay were
+# not installed. The worker check is a server dry run of the Pod the operator builds from the
+# PyTorchJob worker template, with the init container rendered from the operator template:
+# the default one from the v1.9.4 source, and the configured one from the repository.
+# The default copy is kept out of the repository. The lab copies were rewritten to the
+# namespace p12-04-ml, and the commands below ran from the lab copies of those files.
+# In the python3 pipelines below, the lab used its own venv interpreter, the same python.
+$ kubectl create namespace p12-04-ml
+namespace/p12-04-ml created
+$ kubectl label namespace p12-04-ml (restricted, enforce audit warn, version latest)
+namespace/p12-04-ml labeled
+$ kubectl apply -f recommender-train-job.yaml (ServiceAccount document only, namespace rewritten to p12-04-ml)
+serviceaccount/recommender-train created
+$ kubectl apply --dry-run=server -f pytorch-worker-pod-check-default.yaml   (the operator's default init container)
+Error from server (Forbidden): error when creating "pytorch-worker-pod-check-default.yaml": pods "recommender-train-pt-worker-check" is forbidden: violates PodSecurity "restricted:latest": allowPrivilegeEscalation != false (container "init-pytorch" must set securityContext.allowPrivilegeEscalation=false), unrestricted capabilities (container "init-pytorch" must set securityContext.capabilities.drop=["ALL"])
+[exit 1]
+$ kubectl apply --dry-run=server -f pytorch-worker-pod-check.yaml   (the configured init container)
+pod/recommender-train-pt-worker-check created (server dry run)
+[exit 0]
+$ kubectl apply --dry-run=server -f allow-recommender-train-ray.yaml
+networkpolicy.networking.k8s.io/allow-recommender-train-ray created (server dry run)
+[exit 0]
+$ helm template kuberay-operator kuberay/kuberay-operator --version 1.7.1 -n kuberay-operator --show-only templates/deployment.yaml --set image.tag="v1.7.1@sha256:e69b9cde8f1d55c6111e4ab9005b7a8f9139e3783a38205069a2c4ac94f6745d" | grep -n -E 'runAsNonRoot|seccompProfile|readOnlyRootFilesystem|image:|serviceAccountName'
+28:      serviceAccountName: kuberay-operator
+36:            readOnlyRootFilesystem: true
+37:            runAsNonRoot: true
+38:            seccompProfile:
+40:          image: "quay.io/kuberay/operator:v1.7.1@sha256:e69b9cde8f1d55c6111e4ab9005b7a8f9139e3783a38205069a2c4ac94f6745d"
+$ kubectl delete namespace p12-04-ml   (cleanup of the namespace this run created)
+namespace "p12-04-ml" deleted
+
+$ docker buildx imagetools inspect alpine:3.10 --format '{{json .Image}}' \
+  | python3 -c 'import json,sys; d=json.load(sys.stdin)["linux/amd64"]; print(d.get("config",{}).get("User") or "<no USER declared>")'
+<no USER declared>
+$ docker buildx imagetools inspect nvidia/cuda@sha256:0f6bfcbf267e65123bcc2287e2153dedfc0f24772fb5ce84afe16ac4b2fada95 \
+  --format '{{json .Image}}' \
+  | python3 -c 'import json,sys; d=json.load(sys.stdin)["linux/amd64"]; print(d.get("config",{}).get("User") or "<no USER declared>")'
+<no USER declared>

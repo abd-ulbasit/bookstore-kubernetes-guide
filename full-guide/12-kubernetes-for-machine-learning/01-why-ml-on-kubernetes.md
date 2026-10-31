@@ -482,14 +482,33 @@ adds its own tree.
 ## Quick Reference
 
 ```sh
-# Create the dedicated, PSA-restricted ML namespace (the Part 12 contract)
-kubectl create namespace bookstore-ml
-kubectl label namespace bookstore-ml \
-  pod-security.kubernetes.io/enforce=restricted \
-  pod-security.kubernetes.io/enforce-version=latest \
-  pod-security.kubernetes.io/audit=restricted \
-  pod-security.kubernetes.io/warn=restricted --overwrite
-kubectl get ns bookstore-ml --show-labels | tr ',' '\n' | grep pod-security
+# Create the dedicated, PSA-restricted ML namespace with its default-deny
+# policy (the Part 12 contract; the same manifest as step 2). The part-of label
+# is the one ch.03's Kueue namespace selector matches, so it must be present.
+kubectl apply -f - <<'EOF'
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: bookstore-ml
+  labels:
+    app.kubernetes.io/part-of: bookstore-ml
+    pod-security.kubernetes.io/enforce: restricted
+    pod-security.kubernetes.io/enforce-version: latest
+    pod-security.kubernetes.io/audit: restricted
+    pod-security.kubernetes.io/audit-version: latest
+    pod-security.kubernetes.io/warn: restricted
+    pod-security.kubernetes.io/warn-version: latest
+---
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: default-deny
+  namespace: bookstore-ml
+spec:
+  podSelector: {}
+  policyTypes: ["Ingress", "Egress"]
+EOF
+kubectl get ns bookstore-ml --show-labels | tr ',' '\n' | grep -E 'part-of|pod-security'
 
 # The ML thread spec (read these — they are the Part 12 plan)
 cat examples/bookstore/ml/README.md

@@ -1,0 +1,45 @@
+# Bookstore - Part 12 ch.04, step 5: the Ray training group's NetworkPolicy.
+# KubeRay gives every Pod of the RayJob (head, workers and submitter) the group
+# label from its pod template, so allow-recommender-train-pt.yaml does not select
+# them. This policy does, and it is the only one that does.
+#
+# Ingress: the group's own Pods on any port, because Ray picks its GCS, object
+# store and worker ports at run time. The KubeRay operator, in its own namespace,
+# reaches the dashboard port only, which it uses to read the job's status.
+# Egress: the group and DNS, and nothing else.
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: allow-recommender-train-ray
+  namespace: bookstore-ml
+spec:
+  podSelector:
+    matchLabels:
+      ml.bookstore/training-group: recommender-train-ray
+  policyTypes: ["Ingress", "Egress"]
+  ingress:
+    - from:
+        - podSelector:
+            matchLabels:
+              ml.bookstore/training-group: recommender-train-ray
+    - from:
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: kuberay-operator
+      ports:
+        - { protocol: TCP, port: 8265 }   # Ray dashboard
+  egress:
+    - to:
+        - podSelector:
+            matchLabels:
+              ml.bookstore/training-group: recommender-train-ray
+    - to:
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: kube-system
+          podSelector:
+            matchLabels:
+              k8s-app: kube-dns
+      ports:
+        - { protocol: UDP, port: 53 }
+        - { protocol: TCP, port: 53 }
