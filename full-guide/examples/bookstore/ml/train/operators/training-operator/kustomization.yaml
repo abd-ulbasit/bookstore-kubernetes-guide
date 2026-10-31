@@ -1,0 +1,60 @@
+# Bookstore - Part 12 ch.04, step 1: the pinned Kubeflow Training Operator,
+# configured so that the worker Pods of a PyTorchJob pass `restricted`.
+#
+# The upstream standalone overlay is the base. This overlay adds three things:
+#   1. the operator image, pinned by digest, in place of the tag;
+#   2. an init-container template for PyTorch workers that runs as a non-root
+#      user with the restricted fields, mounted at /etc/config/initContainer.yaml
+#      (the operator's default template path), from pytorch-init-container.tmpl;
+#   3. the operator arguments that name the init image (also pinned by digest)
+#      and the template file.
+#
+# Without these, the operator adds an init container that the restricted
+# namespace refuses. See the chapter, step 4.
+#
+# The operator's own Deployment is not changed beyond these three things. It runs
+# as UID 0 as shipped, which is why its namespace is registered at baseline in
+# security/namespace-exceptions.yaml.
+#
+# Install into the operator namespace, which the upstream overlay creates:
+#   kubectl apply --server-side -k examples/bookstore/ml/train/operators/training-operator
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+namespace: kubeflow
+resources:
+  - github.com/kubeflow/training-operator/manifests/overlays/standalone?ref=v1.9.4
+images:
+  - name: ghcr.io/kubeflow/training-v1/training-operator
+    digest: sha256:45aa299d92c21a1abc0e9731694f01be637ab5c6c9681a687aedf142b0468d45
+configMapGenerator:
+  - name: pytorch-init-container
+    behavior: create
+    options:
+      disableNameSuffixHash: true
+    files:
+      - initContainer.yaml=pytorch-init-container.tmpl
+patches:
+  - target:
+      kind: Deployment
+      name: training-operator
+    patch: |-
+      apiVersion: apps/v1
+      kind: Deployment
+      metadata:
+        name: training-operator
+      spec:
+        template:
+          spec:
+            containers:
+              - name: training-operator
+                args:
+                  - --pytorch-init-container-image=busybox@sha256:73aaf090f3d85aa34ee199857f03fa3a95c8ede2ffd4cc2cdb5b94e566b11662
+                  - --pytorch-init-container-template-file=/etc/config/initContainer.yaml
+                volumeMounts:
+                  - name: pytorch-init-container
+                    mountPath: /etc/config
+                    readOnly: true
+            volumes:
+              - name: pytorch-init-container
+                configMap:
+                  name: pytorch-init-container

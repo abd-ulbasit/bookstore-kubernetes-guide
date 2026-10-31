@@ -67,7 +67,11 @@ the *mechanics* (gang admission, queue, quota) run on kind with no GPU: the
   manager (Kueue) creates the job *suspended*, decides if the whole thing fits
   within quota *now*, and only then flips `suspend: false` — so Pods appear
   **only** when the gang can run. This is the clean, Kubernetes-native
-  mechanism (no Pods, no partial placement, nothing to clean up if it waits).
+  mechanism: while a job waits there are no Pods, so none is left half-placed.
+  The gate counts quota, not nodes. Once a gang is admitted, the scheduler
+  still places its Pods one by one, so a gang can be placed in part. The
+  [under the hood](#how-it-works-under-the-hood) section and step 1's
+  `waitForPodsReady` setting cover that gap.
 - **Kueue's object model (the part to memorise).** A **`ResourceFlavor`**
   describes a *kind* of capacity (e.g. "on-demand CPU nodes", "GPU nodes" via
   node labels). A **`ClusterQueue`** owns **quota** (`nominalQuota` per
@@ -103,7 +107,7 @@ labels from [Part 05 ch.02](../05-security/02-pod-security.md).
 | Threat | Control taught here | Deeper |
 |---|---|---|
 | A Job or JobSet without the queue label runs at once, outside the queue | `manageJobsWithoutQueueName: true`, scoped by `managedJobsNamespaceSelector` to the `bookstore-ml` label (`kueue-values.yaml`) | [Part 05 ch.02](../05-security/02-pod-security.md) for the namespace label |
-| One team takes every GPU | Kueue `nominalQuota`, `borrowingLimit` and `lendingLimit` for fair share, and a hard `ResourceQuota` on `requests.nvidia.com/gpu` as the ceiling | [Part 01 ch.03](../01-core-workloads/03-resources-and-qos.md), [Part 08 ch.04](../08-day-2-operations/04-multi-tenancy-and-namespaces.md) |
+| One team takes every GPU | Kueue `nominalQuota`, `borrowingLimit` and `lendingLimit` for fair share, a `namespaceSelector` on the ClusterQueue that names `bookstore-ml` by `kubernetes.io/metadata.name`, and a hard `ResourceQuota` on `requests.nvidia.com/gpu` as the ceiling | [Part 01 ch.03](../01-core-workloads/03-resources-and-qos.md), [Part 08 ch.04](../08-day-2-operations/04-multi-tenancy-and-namespaces.md) |
 | A high PriorityClass lets one gang preempt another team's Pods | Not taught here. Kueue preemption is set on the ClusterQueue, and PriorityClass belongs to Part 04 | [Part 04 ch.03](../04-scheduling/03-priority-and-preemption.md) |
 | The Kueue and JobSet controllers hold cluster-wide RBAC | Pinned charts, restricted namespaces, and the charts' own securityContext | [Part 08 ch.05](../08-day-2-operations/05-operators-and-crds.md) |
 
@@ -165,8 +169,9 @@ the PSA-`restricted` `bookstore-ml` namespace from
 [ch.01](01-why-ml-on-kubernetes.md). This chapter installs **Kueue** and the
 **JobSet** controller (pinned Helm, own namespaces) and uses the four files
 already under [`examples/bookstore/ml/batch/`](../examples/bookstore/ml/batch/),
-with three more added here: `kueue-values.yaml`, `gpu-quota-probe.yaml` and
-`unlabelled-probe.yaml`. It changes nothing in the existing Bookstore.
+with four more added here: `kueue-values.yaml`, `recommender-batch-serviceaccount.yaml`,
+`gpu-quota-probe.yaml` and `unlabelled-probe.yaml`. It changes nothing in the
+existing Bookstore.
 
 **What was run.** This path runs on kind (tier A). For this revision the
 charts were rendered with their pinned values, and the Kueue and JobSet objects
@@ -226,8 +231,8 @@ kubectl get pods -n kueue-system
 kubectl api-resources | grep -E 'jobset|kueue'   # JobSet + Kueue CRDs now exist
 ```
 
-The values file is the chart's own default configuration with two changes. The
-first is `manageJobsWithoutQueueName: true`. Kueue's
+The values file is the chart's own default configuration with three changes.
+The first is `manageJobsWithoutQueueName: true`. Kueue's
 [configuration reference](https://kueue.sigs.k8s.io/docs/reference/kueue-config.v1beta2/)
 describes a Job without the queue label, under this flag, as suspended and
 never started until it is assigned a queue. With the chart default, `false`,
@@ -236,7 +241,77 @@ runs outside the ClusterQueue's quota. `managedJobsNamespaceSelector` limits the
 flag to namespaces labelled `app.kubernetes.io/part-of: bookstore-ml`, the label
 the ch.01 namespace carries. The rendered chart copies that selector into the
 admission webhook of each Job integration, so Kueue's webhooks see only those
-namespaces. The second change pins the controller image by digest.
+namespaces.
+
+The flag covers every integration in the `frameworks` list, not only Jobs. The
+chart default lists `pod`, `deployment` and `statefulset` as well. With the flag
+on, a bare Pod, Deployment or StatefulSet in `bookstore-ml` with no queue label
+is suspended and never starts. The probes in this chapter, the rendezvous check
+in [ch.04](04-distributed-training.md) and the serving Pods in later chapters
+would wait for a queue they are never given. The values file removes those three
+integrations. Jobs, JobSets and the training operators' jobs stay managed. The
+chart still renders their webhooks with `failurePolicy: Ignore`, and Kueue
+installs a no-op handler for an integration that is not listed, so they gate
+nothing. Render the chart and read the webhook list to check this.
+
+The second change turns on `waitForPodsReady`. An admitted workload must reach
+`PodsReady` within 5 minutes, and `blockAdmission: true` holds the queue until
+it does. This does not make placement atomic. It only stops Kueue from
+admitting more work on top of a gang that cannot start.
+
+The third change pins the controller image by digest.
+
+Render the chart with these values and read the parts that changed. The
+rendering needs no cluster. The webhooks for `pod`, `deployment` and
+`statefulset` remain, with `failurePolicy: Ignore`, and the `job`, `jobset` and
+`pytorchjob` webhooks keep `failurePolicy: Fail`:
+
+```sh
+helm template kueue oci://registry.k8s.io/kueue/charts/kueue --version 0.17.0 \
+  -n kueue-system -f examples/bookstore/ml/batch/kueue-values.yaml \
+  | grep -A3 -E "name: m(pod|deployment|statefulset|job)\.kb\.io"
+helm template kueue oci://registry.k8s.io/kueue/charts/kueue --version 0.17.0 \
+  -n kueue-system -f examples/bookstore/ml/batch/kueue-values.yaml \
+  | grep -A4 "waitForPodsReady:"
+```
+
+<!-- gate: output -->
+
+```text
+    name: mdeployment.kb.io
+    failurePolicy: Ignore
+    namespaceSelector:
+      matchLabels:
+--
+    name: mjob.kb.io
+    namespaceSelector:
+      matchLabels:
+        app.kubernetes.io/part-of: bookstore-ml
+--
+    name: mpod.kb.io
+    failurePolicy: Ignore
+    namespaceSelector:
+      matchLabels:
+--
+    name: mstatefulset.kb.io
+    failurePolicy: Ignore
+    namespaceSelector:
+      matchLabels:
+```
+
+<!-- gate: output -->
+
+```text
+    waitForPodsReady:
+      blockAdmission: true
+      recoveryTimeout: 3m
+      timeout: 5m
+    webhook:
+```
+
+The `mjob` webhook shows no `failurePolicy` line within those lines, because
+the chart writes `failurePolicy: Fail` above its name. `mjob` is still
+`Fail`, so the Job gate is in force.
 
 Both charts set the restricted-compatible fields in their values:
 `runAsNonRoot`, a `RuntimeDefault` seccomp profile, no privilege escalation, a
@@ -259,7 +334,10 @@ CRDs just must exist first (step 1).
 - [`batch/kueue-clusterqueue.yaml`](../examples/bookstore/ml/batch/kueue-clusterqueue.yaml)
   — a `ClusterQueue` owning **quota**: `cpu`/`memory` (so the demo runs on
   kind) **plus an `nvidia.com/gpu` `nominalQuota`** (the multi-tenant GPU fence;
-  it simply queues GPU jobs when the cluster has no GPUs).
+  it simply queues GPU jobs when the cluster has no GPUs). Its
+  `namespaceSelector` matches `kubernetes.io/metadata.name: bookstore-ml`, so a
+  `LocalQueue` in another namespace cannot draw on this quota. An empty
+  selector would have let every namespace do that.
 - [`batch/kueue-localqueue.yaml`](../examples/bookstore/ml/batch/kueue-localqueue.yaml)
   — the namespaced `LocalQueue` in `bookstore-ml` teams submit to.
 
@@ -270,6 +348,10 @@ CRDs just must exist first (step 1).
 kubectl apply -f examples/bookstore/ml/batch/kueue-resourceflavor.yaml
 kubectl apply -f examples/bookstore/ml/batch/kueue-clusterqueue.yaml
 kubectl apply -f examples/bookstore/ml/batch/kueue-localqueue.yaml
+# The ServiceAccount the three ch.03 workloads run as (see step 3 and step 4).
+# Apply it before any of them, including a dry run: without it a Pod's dry run
+# is refused with `serviceaccount ... not found`.
+kubectl apply -f examples/bookstore/ml/batch/recommender-batch-serviceaccount.yaml
 
 kubectl get clusterqueue bookstore-ml-cq -o wide
 kubectl get localqueue  -n bookstore-ml
@@ -294,7 +376,8 @@ kubectl apply -f examples/bookstore/ml/batch/recommender-jobset.yaml
 kubectl get jobset -n bookstore-ml
 kubectl get workloads.kueue.x-k8s.io -n bookstore-ml  # Kueue Workload: Admitted
 kubectl get pods -n bookstore-ml -l app.kubernetes.io/component=recommender-train -o wide
-#   2 worker pods, created TOGETHER (gang) once admitted — never 1-of-2 wedged
+#   2 worker pods, created together once Kueue admits the gang (the quota
+#   for both was reserved first)
 
 kubectl get jobset recommender-train -n bookstore-ml \
   -o jsonpath='{.status.conditions}'           # Completed when the gang finishes
@@ -436,6 +519,17 @@ priority/preemption model rather than re-implementing it.
   the label `kueue.x-k8s.io/queue-name`. Kueue ships integrations for plain
   `Job`, `JobSet`, and the Kubeflow training operators — it *wraps* them, it
   is not a new workload type.
+- **Quota is not capacity.** Kueue checks a gang against the ClusterQueue's
+  quota, which is a logical count. It does not look at free nodes. So a gang
+  can be admitted and then placed only in part, when fragmentation or a slow
+  autoscaler leaves some Pods Pending. The admitted Pods then hold their
+  share of the quota while they wait. `waitForPodsReady` with
+  `blockAdmission: true` is the guard: Kueue evicts a workload whose Pods are
+  not ready within the timeout, and it admits nothing else until the admitted
+  workload is ready. The Kueue documentation warns that this can still
+  deadlock when the physical availability of resources does not match the
+  configured quotas, and this guard does not change that. Keep the quota no
+  larger than the nodes that can run it.
 - **JobSet, precisely.** A `JobSet` is `replicatedJobs` (each a Job template
   with a replica count), an optional `startupPolicy` (bring groups up in order
   — e.g. a parameter server before workers), a `successPolicy` (when the whole
@@ -443,7 +537,8 @@ priority/preemption model rather than re-implementing it.
   stable DNS to rendezvous. It is the modern, general replacement for
   hand-rolled "N Jobs + a Service" and for per-framework operators when you
   just need coordinated Jobs; combined with Kueue, the *whole* JobSet is the
-  admission unit — true gang behaviour for multi-node training.
+  admission unit, so its quota is reserved as one block. Where the Pods land
+  is still the scheduler's call, as the quota note above describes.
 - **Volcano, and the contrast.** Volcano is an *alternative batch scheduler*:
   you submit a `Volcano Job` or annotate Pods into a **`PodGroup`** with a
   `minMember`; Volcano's scheduler admits the group **only** when `minMember`
@@ -499,9 +594,11 @@ spell Kueue's as `workloads.kueue.x-k8s.io`.
 
 > **In production:** never run distributed training through a bare `Job`. Model
 > it as a **JobSet** (or a training operator) and put **Kueue** in front so the
-> *whole* gang is admitted via `suspend` — otherwise partial placement
-> deadlocks scarce GPUs, the single most expensive ML scheduling failure. Make
-> the queue/quota objects part of the platform, not per-team afterthoughts.
+> *whole* gang is admitted via `suspend`. Without that, the scheduler places
+> Pods one at a time, and two gangs can each hold part of the GPUs while
+> waiting for the rest. Kueue narrows that risk but does not remove it, so
+> keep `waitForPodsReady` on. Make the queue/quota objects part of the
+> platform, not per-team afterthoughts.
 
 > **In production:** size **`ClusterQueue` quota + cohorts** so ML teams share
 > GPUs fairly: each team a `LocalQueue` → its `ClusterQueue`; group them in a
@@ -593,10 +690,15 @@ Checklist:
    installed and round the 60/30/10 split. On prod-train's `nvidia.com/gpu`
    entry, set `lendingLimit: 0` so its 2 GPUs are never lent. Set
    `borrowingLimit: 3` on research and `borrowingLimit: 1` on demo, so each can
-   use idle capacity but not all of it. Set `preemption.reclaimWithinCohort: Any`
-   on prod-train's ClusterQueue, so a pending prod-train Workload can preempt
-   borrowed GPUs to reclaim its share. A per-namespace ResourceQuota still caps
+   use idle capacity but not all of it. A per-namespace ResourceQuota still caps
    each namespace, as step 4 shows.
+
+   Do not also set `preemption.reclaimWithinCohort: Any` on prod-train. With
+   `lendingLimit: 0`, none of prod-train's quota is ever lent, so none of its
+   share is borrowed, and there is nothing to reclaim. The setting would do
+   nothing. The other design is to drop `lendingLimit: 0` on prod-train and set
+   `reclaimWithinCohort: Any` there instead, so a pending prod-train Workload
+   can preempt borrowed GPUs. Pick one design, not both.
 
    </details>
 

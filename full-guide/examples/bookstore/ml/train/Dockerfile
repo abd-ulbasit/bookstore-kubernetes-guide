@@ -17,7 +17,7 @@
 #     -e MODEL_DIR=/workspace/model bookstore/recommender-train:dev
 
 # ---- Stage 1: builder (install wheels into /opt/venv) --------------------
-FROM python:3.12-slim AS builder
+FROM python:3.12-slim@sha256:aa943ce411423c7582288f18707ff66eddcbaeb510502d747a72aeb34f30d159 AS builder
 
 ENV PYTHONDONTWRITEBYTECODE=1 \
     PYTHONUNBUFFERED=1 \
@@ -39,7 +39,7 @@ RUN pip install --upgrade pip \
  && pip install -r /tmp/requirements.txt
 
 # ---- Stage 2: runtime (slim, non-root, copies venv in) -------------------
-FROM python:3.12-slim AS runtime
+FROM python:3.12-slim@sha256:aa943ce411423c7582288f18707ff66eddcbaeb510502d747a72aeb34f30d159 AS runtime
 
 ENV PYTHONDONTWRITEBYTECODE=1 \
     PYTHONUNBUFFERED=1 \

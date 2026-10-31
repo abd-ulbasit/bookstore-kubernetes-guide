@@ -23,7 +23,10 @@
 # GANG via Kueue: the label  kueue.x-k8s.io/queue-name: bookstore-ml-lq  makes
 # Kueue create this JobSet SUSPENDED, check the WHOLE job (2 workers) fits the
 # ClusterQueue quota, then flip suspend=false so ALL worker Pods start
-# together. It is NEVER partially placed (the deadlock ch.03 prevents).
+# together. Kueue reserves quota for the whole gang before any Pod exists.
+# Quota is a logical count, though: the scheduler still places the Pods one at
+# a time, so the gang can land in part on a full cluster. waitForPodsReady in
+# kueue-values.yaml covers that case.
 #
 # PSA: targets the PSA-restricted `bookstore-ml` namespace (ch.01). Every Pod
 # is restricted-COMPLIANT: runAsNonRoot + non-root UID +
@@ -60,6 +63,7 @@ spec:
                 app.kubernetes.io/component: recommender-train
             spec:
               restartPolicy: Never
+              serviceAccountName: recommender-batch   # recommender-batch-serviceaccount.yaml
               automountServiceAccountToken: false
               securityContext:        # pod-level — restricted-compliant
                 runAsNonRoot: true
@@ -85,8 +89,8 @@ spec:
                       echo "2-worker recommendations 'training' (CPU-only)."
                       echo "Stands in for the ch.04 real training: build the"
                       echo "customer x book co-occurrence matrix + top-K."
-                      echo "Both workers were admitted TOGETHER by Kueue"
-                      echo "(gang via spec.suspend) — never 1-of-2 wedged."
+                      echo "Both workers were admitted together by Kueue"
+                      echo "(gang via spec.suspend)."
                       sleep 20
                       echo "[recommender-train] worker complete."
                   resources:

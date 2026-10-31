@@ -33,6 +33,11 @@
 # verified. The guide's train image has no Ray, so the Ray base is used here.
 # Its recommender requirements.txt must be added on top before this file can
 # run. Until then this file is not run (see ch.04).
+#
+# NETWORK: KubeRay gives every Pod here the group label recommender-train-ray.
+# allow-recommender-train-ray.yaml admits that group, and the KubeRay operator
+# on the dashboard port only. allow-recommender-train-pt.yaml does not select
+# these Pods.
 apiVersion: ray.io/v1
 kind: RayJob
 metadata:
@@ -46,6 +51,9 @@ metadata:
     kueue.x-k8s.io/queue-name: bookstore-ml-lq
 spec:
   entrypoint: "python /workspace/train.py"
+  # A hung run ends after 30 minutes. shutdownAfterJobFinishes tears the
+  # cluster down only once the job has ended, so it does not cover a hang.
+  activeDeadlineSeconds: 1800
   shutdownAfterJobFinishes: true
   ttlSecondsAfterFinished: 600
   # KubeRay creates the submitter Pod from this template. Without it the

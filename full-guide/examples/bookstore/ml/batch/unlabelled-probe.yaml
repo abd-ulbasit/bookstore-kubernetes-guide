@@ -24,6 +24,7 @@ spec:
         app.kubernetes.io/part-of: bookstore-ml
     spec:
       restartPolicy: Never
+      serviceAccountName: recommender-batch   # recommender-batch-serviceaccount.yaml
       automountServiceAccountToken: false
       securityContext:
         runAsNonRoot: true

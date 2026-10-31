@@ -1,0 +1,94 @@
+# Bookstore - Part 12 ch.04, step 4: the PyTorch worker Pod that the Training
+# Operator builds, written out so that the restricted check can be run without
+# the operator. The operator appends the init container below to every worker
+# of a PyTorchJob that has a Master. Its fields come from
+# operators/training-operator/pytorch-init-container.tmpl with the image pinned
+# here, so the worker passes `restricted` only with that operator configuration.
+#
+# Dry run it against the namespace:
+#   kubectl apply --dry-run=server -f examples/bookstore/ml/train/pytorch-worker-pod-check.yaml
+#
+# This file is not the operator's Pod, and it is never created. It is a
+# dry-run check of the Pod shape. The operator's own worker Pod is checked when
+# the PyTorchJob runs (step 4).
+apiVersion: v1
+kind: Pod
+metadata:
+  name: recommender-train-pt-worker-check
+  namespace: bookstore-ml
+  labels:
+    app.kubernetes.io/part-of: bookstore-ml
+    app.kubernetes.io/component: recommender-train
+    ml.bookstore/role: worker
+    ml.bookstore/training-group: recommender-train-pt
+    training.kubeflow.org/job-name: recommender-train-pt
+    training.kubeflow.org/replica-type: worker
+    training.kubeflow.org/replica-index: '0'
+spec:
+  serviceAccountName: recommender-train
+  automountServiceAccountToken: false
+  securityContext:
+    runAsNonRoot: true
+    runAsUser: 65532
+    runAsGroup: 65532
+    seccompProfile:
+      type: RuntimeDefault
+  containers:
+  - name: pytorch
+    image: bookstore/recommender-train:dev
+    imagePullPolicy: IfNotPresent
+    command:
+    - python
+    - /workspace/train.py
+    env:
+    - name: MODEL_DIR
+      value: /tmp/model
+    - name: SEED
+      value: '42'
+    resources:
+      requests:
+        cpu: 250m
+        memory: 256Mi
+      limits:
+        cpu: '1'
+        memory: 512Mi
+    securityContext:
+      allowPrivilegeEscalation: false
+      readOnlyRootFilesystem: true
+      capabilities:
+        drop:
+        - ALL
+    volumeMounts:
+    - name: scratch
+      mountPath: /tmp
+  volumes:
+  - name: scratch
+    emptyDir:
+      sizeLimit: 64Mi
+  initContainers:
+  - name: init-pytorch
+    image: busybox@sha256:73aaf090f3d85aa34ee199857f03fa3a95c8ede2ffd4cc2cdb5b94e566b11662
+    imagePullPolicy: IfNotPresent
+    securityContext:
+      runAsNonRoot: true
+      runAsUser: 65532
+      runAsGroup: 65532
+      allowPrivilegeEscalation: false
+      readOnlyRootFilesystem: true
+      capabilities:
+        drop:
+        - ALL
+      seccompProfile:
+        type: RuntimeDefault
+    resources:
+      limits:
+        cpu: 100m
+        memory: 20Mi
+      requests:
+        cpu: 50m
+        memory: 10Mi
+    command:
+    - sh
+    - -c
+    - err=1;for i in $(seq 100); do if nslookup recommender-train-pt-master-0; then
+      err=0 && break; fi;echo waiting for master; sleep 2; done; exit $err

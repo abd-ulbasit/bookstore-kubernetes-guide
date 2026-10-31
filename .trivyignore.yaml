@@ -116,3 +116,55 @@ misconfigurations:
       - full-guide/11-advanced-production-patterns/06-multi-cluster-and-fleet.md
     statement: "The fleet deployer Role in chapter 11.06 writes the Services, NetworkPolicies and Ingresses that the Bookstore base ships, so the deployer must be able to change them. The Role is bound to one member identity in the bookstore namespace only, and that identity's token lasts 24 hours (S8 in THREAT-MODEL.md). A reviewer checks the rendered overlay in Git before each sync (T3)."
     expired_at: 2027-06-30
+  # The Training Operator overlay (ch.04 step 1) builds the pinned upstream v1.9.4
+  # release. Its controller runs as UID 0 and its Deployment sets no
+  # runAsNonRoot, read-only root, seccomp profile, capability drop or default
+  # security context, which is why the kubeflow namespace is registered at
+  # baseline in security/namespace-exceptions.yaml. Its ClusterRole reads and
+  # manages Secrets, exec into Pods, networking and webhook configurations across
+  # namespaces. Chapter 04 step 1 prints those rules before the install.
+  - id: KSV-0012
+    paths:
+      - full-guide/examples/bookstore/ml/train/operators/training-operator
+    statement: "Training Operator v1.9.4 runs its controller as UID 0 as shipped (its image records User 0), so the Deployment cannot declare runAsNonRoot. Accepted for the pinned release under the kubeflow exception; the chapter shows the refusal in a dry run and ends the exception once a non-root run is verified (chapter 12.04 step 1)."
+    expired_at: 2027-04-30
+  - id: KSV-0014
+    paths:
+      - full-guide/examples/bookstore/ml/train/operators/training-operator
+    statement: "Training Operator v1.9.4 does not set readOnlyRootFilesystem on its controller container. Accepted for the pinned release under the kubeflow exception (chapter 12.04 step 1); a non-root, read-only run is the next step once verified."
+    expired_at: 2027-04-30
+  - id: KSV-0003
+    paths:
+      - full-guide/examples/bookstore/ml/train/operators/training-operator
+    statement: "Training Operator v1.9.4 keeps the default capability set on its controller container. Accepted for the pinned release under the kubeflow exception (chapter 12.04 step 1)."
+    expired_at: 2027-04-30
+  - id: KSV-0030
+    paths:
+      - full-guide/examples/bookstore/ml/train/operators/training-operator
+    statement: "Training Operator v1.9.4 sets no seccomp profile on its controller Pod. Accepted for the pinned release under the kubeflow exception (chapter 12.04 step 1)."
+    expired_at: 2027-04-30
+  - id: KSV-0118
+    paths:
+      - full-guide/examples/bookstore/ml/train/operators/training-operator
+    statement: "Training Operator v1.9.4 sets no default security context on its Pod. Accepted for the pinned release under the kubeflow exception (chapter 12.04 step 1)."
+    expired_at: 2027-04-30
+  - id: KSV-0041
+    paths:
+      - full-guide/examples/bookstore/ml/train/operators/training-operator
+    statement: "The upstream Training Operator ClusterRole grants Secrets access across namespaces (chapter 12.04 step 1 prints the rule). Accepted by design for the pinned release."
+    expired_at: 2027-04-30
+  - id: KSV-0053
+    paths:
+      - full-guide/examples/bookstore/ml/train/operators/training-operator
+    statement: "The upstream Training Operator ClusterRole grants pods/exec across namespaces (chapter 12.04 step 1 prints the rule). Accepted by design for the pinned release."
+    expired_at: 2027-04-30
+  - id: KSV-0056
+    paths:
+      - full-guide/examples/bookstore/ml/train/operators/training-operator
+    statement: "The upstream Training Operator ClusterRole grants Service and networking management across namespaces (chapter 12.04 step 1 covers its RBAC). Accepted by design for the pinned release."
+    expired_at: 2027-04-30
+  - id: KSV-0114
+    paths:
+      - full-guide/examples/bookstore/ml/train/operators/training-operator
+    statement: "The upstream Training Operator ClusterRole grants webhook configuration management (chapter 12.04 step 1 covers its RBAC). Accepted by design for the pinned release."
+    expired_at: 2027-04-30

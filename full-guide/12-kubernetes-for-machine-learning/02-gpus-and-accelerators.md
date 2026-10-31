@@ -83,9 +83,10 @@ indivisible by default, request==limit, and gated onto a tainted node pool.**
   node pool is created), give GPU Pods a matching **toleration**, and
   add **nodeAffinity** so they are *attracted* to GPU nodes (a toleration only
   removes the fence; affinity pulls them in). General Bookstore Pods carry no
-  toleration, so they cannot drift onto GPU nodes. A GPU node is often
-  dedicated, so this fence is also the boundary that keeps other teams' Pods
-  off hardware they should not use.
+  toleration, so they cannot drift onto GPU nodes. This fence is a cost
+  control. It is not a security boundary: a Pod author who writes the same
+  toleration and affinity gets onto the GPU nodes, and nothing in this chapter
+  stops an author from writing them.
 - **The GPU Operator installs the whole stack so you don't.** Driver + NVIDIA
   container toolkit + device plugin + DCGM metrics exporter + node feature
   discovery is a lot of node plumbing. The **NVIDIA GPU Operator** is a single
@@ -95,12 +96,12 @@ indivisible by default, request==limit, and gated onto a tainted node pool.**
   namespace in Part 12, because the stack needs host access (below).
 
 The trap to keep in view: PSA `restricted` does **not** exempt GPU pods, and
-most CUDA/framework images default to **root**. The base image this chapter
-uses declares no user, so it runs as root unless the Pod says otherwise. A GPU
-Pod must still be `runAsNonRoot`, drop ALL caps, and set
-`seccompProfile: RuntimeDefault`
-([Part 05 ch.02](../05-security/02-pod-security.md)). The hands-on shows the
-refused root Pod, then the compliant shape.
+most CUDA/framework images default to **root**. The refusal, and the four
+fields it asks for, are shown once in
+[Part 12 ch.01 step 3](01-why-ml-on-kubernetes.md#3-a-refused-pod-the-control-working).
+A GPU Pod needs the same four fields, set the same way
+([Part 05 ch.02](../05-security/02-pod-security.md)). The hands-on checks what
+is specific to the CUDA image and then runs the compliant shape.
 
 A second trap sits under the GPU Pods. The stack that makes the GPU visible
 (driver, container toolkit, device plugin, DCGM exporter, GPU feature discovery
@@ -109,19 +110,29 @@ It gets its own namespace, the registered exception, and no workload shares it.
 
 ## Threats and controls
 
-Each row is specific to GPUs. The cost fence from the mental model is the
-fourth row, and this chapter teaches it as a security boundary too.
+Each row is specific to GPUs. The fourth row is a cost fence. It is not a
+security boundary, and the note below the table says what would be needed to
+make it one.
 
 | Threat | Control taught here | Goes deeper |
 |---|---|---|
 | The GPU stack's node agents run with host access. A compromised driver, toolkit or device plugin is a compromised node | Their own namespace, `gpu-operator`, labelled `privileged` and registered as the one exception in Part 12, with a reason, an upstream citation and an expiry. Step 1 shows which components need what | [05.02](../05-security/02-pod-security.md) for the levels; the registry in `security/namespace-exceptions.yaml` |
-| A GPU workload runs as root, because CUDA images declare no user | Every GPU workload is `restricted`: a non-root UID, dropped capabilities and a seccomp profile. Step 3 shows the refusal | [01.01](../01-core-workloads/01-pods.md#baseline) |
+| A GPU workload runs as root, because CUDA images declare no user | Every GPU workload is `restricted`: a non-root UID, dropped capabilities and a seccomp profile. Step 3 reads the CUDA image's declared user | [01.01](../01-core-workloads/01-pods.md#baseline); the refusal in [Part 12 ch.01](01-why-ml-on-kubernetes.md#3-a-refused-pod-the-control-working) |
 | Two tenants share one GPU and see each other's memory or faults | Exclusive GPUs by default. Time-slicing only where tenants trust each other, and MIG for hardware isolation. Step 5 cites both | [08.04](../08-day-2-operations/04-multi-tenancy-and-namespaces.md) |
-| An ordinary Pod takes a costly GPU node, or a GPU Pod lands where it should not | A taint on the GPU pool, and a toleration and a required nodeAffinity on GPU Pods only | [04.02](../04-scheduling/02-affinity-taints-topology.md) |
+| An ordinary Pod takes a costly GPU node by accident | A taint on the GPU pool, and a toleration and a required nodeAffinity on GPU Pods only. This is a cost fence, so it does not stop a tenant who writes the same toleration on purpose | [04.02](../04-scheduling/02-affinity-taints-topology.md) |
 
 The first row is the exception, and it is the only privileged namespace in
 Part 12. A GPU workload never joins it. A GPU workload that asks for privilege
 is refused like any other Pod.
+
+**Not in this chapter: keeping tenants off the GPU pool.** A toleration is a
+scheduling filter, and any Pod author can add one. Stopping a tenant from
+adding the GPU toleration, or the affinity that pulls its Pods onto GPU nodes,
+needs an admission control. A `ValidatingAdmissionPolicy` that limits which
+namespaces may set those fields, or the `PodTolerationRestriction` admission
+plugin with a namespace-level toleration allow-list, would do it. This chapter
+installs neither, so the taint keeps honest workloads off the pool and does
+not protect it.
 
 ## Diagrams
 
@@ -396,37 +407,30 @@ step 1, because that is the usual failure.
 
 ### 3. The restricted profile refuses the root default (run on kind)
 
-This step is a **deliberate denial**. The command below is what a Pod looks
-like when it leaves out the securityContext from step 2. The API server refuses
-it, and the message names each missing field. The lab ran it on a cluster that
-enforces `restricted`:
+The refusal itself is shown once, in
+[Part 12 ch.01 step 3](01-why-ml-on-kubernetes.md#3-a-refused-pod-the-control-working).
+A GPU Pod built from a root-default CUDA image gets the same four refusals, so
+this step does not repeat that output. What is specific to GPUs is the image.
+The CUDA base image used in this chapter declares no user, so a Pod that leaves
+the user unset runs as root. Read the declared user from the registry, pinned
+by digest:
 
 ```sh
-# nvidia/cuda:12.4.1-base-ubuntu22.04, pinned by its index digest. No
-# securityContext on purpose: this request is refused.
-kubectl run gpu-root-test -n bookstore-ml --restart=Never \
-  --image=nvidia/cuda@sha256:0f6bfcbf267e65123bcc2287e2153dedfc0f24772fb5ce84afe16ac4b2fada95 \
-  -- nvidia-smi
+docker buildx imagetools inspect nvidia/cuda@sha256:0f6bfcbf267e65123bcc2287e2153dedfc0f24772fb5ce84afe16ac4b2fada95 \
+  --format '{{json .Image}}' \
+  | python3 -c 'import json,sys; d=json.load(sys.stdin)["linux/amd64"]; print(d.get("config",{}).get("User") or "<no USER declared>")'
 ```
-
-Captured output:
-
-<!-- gate: output -->
-```
-Error from server (Forbidden): pods "gpu-root-test" is forbidden: violates PodSecurity "restricted:latest": allowPrivilegeEscalation != false (container "gpu-root-test" must set securityContext.allowPrivilegeEscalation=false), unrestricted capabilities (container "gpu-root-test" must set securityContext.capabilities.drop=["ALL"]), runAsNonRoot != true (pod or container "gpu-root-test" must set securityContext.runAsNonRoot=true), seccompProfile (pod or container "gpu-root-test" must set securityContext.seccompProfile.type to "RuntimeDefault" or "Localhost")
-```
-
-The image is the root default. The lab read its declared user for `linux/amd64`
-from the registry with `docker buildx imagetools`. The check printed its
-fallback text, which means the field is empty:
 
 <!-- gate: output -->
 ```
 <no USER declared>
 ```
 
-Admission refuses the Pod before a node runs it, so the image is never pulled.
-The fix is the securityContext in step 2, not a looser namespace.
+Admission refuses a Pod built from this image before a node runs it, so the
+image is never pulled. The fix is the securityContext in step 2, not a looser
+namespace. The UID the Pod sets must also be able to read the CUDA libraries and
+the training code, because the image's files were written for root. Step 4 runs
+the compliant shape.
 
 ### 4. The restricted GPU Job, admitted and then Pending (run on kind)
 
@@ -562,10 +566,10 @@ kubectl get svc -n gpu-operator -l app=nvidia-dcgm-exporter
   driver) shows `nvidia.com/gpu: <none>` and GPU Pods stay `Pending` — exactly
   the failure mode shown honestly in the hands-on.
 - **Why `limits == requests` and no overcommit.** Extended resources have no
-  notion of compressibility or burst. The API server **requires** that for any
-  extended resource, if you set a limit you set an equal request (and you
-  cannot set only a request without the equal limit being implied) — Kubernetes
-  copies `limits["nvidia.com/gpu"]` to `requests`. A whole device is bound to
+  notion of compressibility or burst. For an extended resource the API server
+  accepts two forms: a limit alone, which Kubernetes copies into the request,
+  or a request and a limit with equal values. A request with no limit is
+  refused, so the GPU count is always explicit. A whole device is bound to
   the container; there is no kernel-level fair-share like CFS for CPU. So a
   Pod's GPU "QoS" is effectively always Guaranteed for that resource, and
   *Predictable Demands* ([Part 01 ch.03](../01-core-workloads/03-resources-and-qos.md))
@@ -714,7 +718,7 @@ Checklist:
 1. **Why is `nvidia.com/gpu` declared under `limits` *and* `requests` with the same value, never just `requests`?**
    <details><summary>Show answer</summary>
 
-   Extended resources (devices) can't be overcommitted — a Pod either has the GPU or doesn't. The kubelet's device-plugin manager exposes a finite count of GPUs per node; the scheduler treats them like an integer count, not fungible compute time. Kubernetes requires extended-resource `limits == requests` (you can omit one and it inherits the other). Setting `requests: 1, limits: 0` would be nonsensical because the device is exclusively bound for the Pod's lifetime — there is no "limit" to enforce over time, only "the Pod owns this device or doesn't."
+   Extended resources (devices) can't be overcommitted: a Pod either has the GPU or doesn't. The kubelet's device-plugin manager exposes a finite count of GPUs per node; the scheduler treats them like an integer count, not fungible compute time. For `nvidia.com/gpu` the API server accepts a limit alone, which Kubernetes copies into the request, or a request and a limit with the same value, and it refuses a request with no limit. Setting `requests: 1, limits: 0` is invalid because a request cannot exceed its limit, and the device is exclusively bound for the Pod's lifetime, so there is no limit to enforce over time, only "the Pod owns this device or doesn't."
 
    </details>
 
