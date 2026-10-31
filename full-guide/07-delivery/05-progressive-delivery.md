@@ -1076,7 +1076,8 @@ kubectl get clusterrole,clusterrolebinding | grep -c argo-rollouts
   With a mesh/Ingress (`trafficRouting:` + a canary/stable Service pair) the
   controller programs **exact** percentage weights independent of replica
   counts. The Bookstore stays mesh-free for a self-contained lab; the
-  `trafficRouting` knob is where Istio/NGINX/Gateway/SMI would plug in.
+  `trafficRouting` knob is where Istio, the Gateway API, SMI or an
+  Ingress controller would plug in.
 - **AnalysisTemplate → AnalysisRun.** A canary `analysis` step instantiates
   the referenced `AnalysisTemplate`s into a live **`AnalysisRun`**. Each
   `metric` runs its provider query every `interval`, `count` times; the
@@ -1130,7 +1131,8 @@ kubectl get clusterrole,clusterrolebinding | grep -c argo-rollouts
   production setup needs both before the Git-to-cluster loop covers the canary.
 - **Flagger — the alternative, and the contrast.** **Flagger** is a separate
   operator that drives a canary by **mutating a standard Deployment + a
-  service mesh** (Istio/Linkerd/App Mesh/Gateway API/NGINX) — it does **not**
+  service mesh** (Istio/Linkerd/App Mesh/Gateway API or an Ingress
+  controller) — it does **not**
   introduce a new workload CRD; it reads the mesh's metrics and shifts mesh
   weights, promoting/rolling-back on Prometheus checks just like Rollouts.
   Trade-off: Flagger **requires a mesh/ingress** (its traffic primitive) but

@@ -84,7 +84,7 @@ real cloud LB; ExternalDNS turns the LB's address into a DNS name.**
   **NLB**, GCP/Azure L4 LB) pointing at the Service. An **Ingress** ([Part 02
   ch.04](../02-networking/04-ingress.md)) → an **L7 LB** (AWS **ALB**, GCP
   **GCLB**, Azure **App Gateway via AGIC**) — *or* an in-cluster controller
-  (ingress-nginx) fronted by an L4 LB. The object is desired state; the
+  (Traefik, in this guide) fronted by an L4 LB. The object is desired state; the
   **controller reconciles real cloud LBs** — the [Part 02
   ch.04](../02-networking/04-ingress.md) reconcile loop, with the cloud as the
   dataplane.
@@ -171,8 +171,8 @@ flowchart TB
    LoadBalancer           via AWS LB Ctrl     (built-in)         LB) (built-in)
   Ingress (L7)           ALB                 GCLB (External/    App Gateway via
                           via AWS LB Ctrl     Internal Ingress)  AGIC, OR
-                          (IngressClass=alb)  (built-in Ingress) ingress-nginx+LB
-  in-cluster nginx       ingress-nginx       ingress-nginx      ingress-nginx
+                          (IngressClass=alb)  (built-in Ingress) Traefik+LB
+  in-cluster controller  Traefik             Traefik            Traefik
    (Part 02 ch.04)        + an NLB in front   + an L4 LB         + an L4 LB
   Gateway API            AWS Gateway API     GKE Gateway        Istio/Envoy/
    (Part 02 ch.05)        (VPC Lattice) /     (GCLB, native)     Cilium Gateway
@@ -326,8 +326,9 @@ two as alternatives.
 
 GKE/AKS equivalents: GKE's Ingress/Gateway controllers are built in (no
 controller to install; annotate the object); AKS uses the **App Gateway
-Ingress Controller (AGIC)** add-on or ingress-nginx; ExternalDNS installs the
-same way with `provider=google` or `provider=azure`.
+Ingress Controller (AGIC)** add-on or an in-cluster controller such as
+Traefik; ExternalDNS installs the same way with `provider=google` or
+`provider=azure`.
 
 ### 3. The Bookstore objects, unedited, with cloud overlays
 
@@ -351,21 +352,21 @@ metadata:
     alb.ingress.kubernetes.io/listen-ports: '[{"HTTPS":443}]'
     # IPv4 defaults to 0.0.0.0/0, and dualstack to both ranges. Set them on purpose.
     alb.ingress.kubernetes.io/inbound-cidrs: '0.0.0.0/0,::/0'
-    # The base paths are ingress-nginx regex paths, so the ALB matches them as regex.
-    alb.ingress.kubernetes.io/use-regex-path-match: "true"
-    # The controller does not read ingress-nginx's rewrite-target. A url-rewrite
-    # transform strips the /api/<svc> prefix instead. The name after
-    # "transforms." is the backing Service's name.
+    # The base paths are Prefix paths, which the controller reads as they are.
+    # The services serve /books and /orders, and the base file leaves the strip
+    # of /api to a Traefik Middleware that this controller does not read. A
+    # url-rewrite transform strips the /api/<svc> prefix instead. The name
+    # after "transforms." is the backing Service's name.
     alb.ingress.kubernetes.io/transforms.catalog: '[{"type":"url-rewrite","urlRewriteConfig":{"rewrites":[{"regex":"^/api/books(/|$)(.*)$","replace":"/$2"}]}}]'
     alb.ingress.kubernetes.io/transforms.orders: '[{"type":"url-rewrite","urlRewriteConfig":{"rewrites":[{"regex":"^/api/orders(/|$)(.*)$","replace":"/$2"}]}}]'
     external-dns.alpha.kubernetes.io/hostname: bookstore.your-org.com   # ExternalDNS
 spec:
-  ingressClassName: alb                  # the cloud controller (NOT nginx) owns it
+  ingressClassName: alb                  # the cloud controller owns it, not traefik
   # spec.tls is removed: ACM terminates TLS, and the bookstore-tls Secret belongs
-  # to ingress-nginx.
+  # to Traefik.
   rules:
     - host: bookstore.your-org.com       # the host ExternalDNS publishes
-      # http paths: the same regex paths as 50-ingress.yaml
+      # http paths: the same Prefix paths as 50-ingress.yaml
 ```
 
 ```sh
@@ -378,16 +379,15 @@ kubectl describe ingress bookstore -n bookstore  # events: ALB provisioned/progr
 curl https://bookstore.your-org.com/api/books   # internet -> ALB (transform strips the prefix) -> catalog
 ```
 
-Three changes make the base Ingress work on the ALB. The host becomes the DNS
+Two changes make the base Ingress work on the ALB. The host becomes the DNS
 name ExternalDNS publishes, because the ALB matches the Ingress host and
-`bookstore.localdev.me` is a kind name. The path regexes need
-`use-regex-path-match`, which AWS documents as off by default and as applying
-only to `pathType: ImplementationSpecific`, the type the base paths use
-([AWS LB Controller Ingress annotations][aws-lb-ing]). The `/api/<svc>` strip
-moves into a `transforms` annotation per backend. The AWS page gives the
-`url-rewrite` shape with a `$1` capture reference. The `$2` form above has the
-same shape, but this chapter has not run it on an ALB, so check it in the cloud
-before you rely on it.
+`bookstore.localdev.me` is a kind name. The `/api/<svc>` strip moves from
+Traefik's Middleware into a `transforms` annotation per backend. The paths stay
+as they are, because they are `Prefix` paths and need no regex setting. The AWS
+page gives the `url-rewrite` shape with a `$1` capture reference
+([AWS LB Controller Ingress annotations][aws-lb-ing]). The `$2` form above has
+the same shape, but this chapter has not run it on an ALB, so check it in the
+cloud before you rely on it.
 
 For a pure L4 exposure of just `storefront` (no L7 routing), the Service
 `type: LoadBalancer` form is the alternative. It gets one cloud load balancer
@@ -470,12 +470,12 @@ false
 ```
 
 The load balancer's traffic reaches the Pods from VPC addresses, not from the
-`ingress-nginx` namespace. Without an overlay, the canonical policy drops it
+`traefik` namespace. Without an overlay, the canonical policy drops it
 once the CNI enforces policy, and the targets fail their health checks. The
 fragment below replaces `spec.ingress` of `allow-ingress-to-http-tiers` in
 [`60-networkpolicy.yaml`](../examples/bookstore/raw-manifests/60-networkpolicy.yaml).
 That policy has one ingress rule, so the fragment supplies the whole list and
-repeats the `ingress-nginx` entry. The ALB in IP mode needs the same `ipBlock`.
+repeats the `traefik` entry. The ALB in IP mode needs the same `ipBlock`.
 The `ipBlock` admits every address in the VPC CIDR, which includes other
 workloads in the VPC, so narrow it to the load balancers' subnets for
 production.
@@ -488,7 +488,7 @@ spec:
     - from:
         - namespaceSelector:
             matchLabels:
-              kubernetes.io/metadata.name: ingress-nginx
+              kubernetes.io/metadata.name: traefik
         - ipBlock:
             cidr: 10.0.0.0/16              # the VPC CIDR; narrow it to the LB subnets
       ports:
@@ -559,7 +559,7 @@ kubectl apply --dry-run=client -f examples/bookstore/raw-manifests/60-networkpol
   ip`** registers **Pod IPs directly** in the target group (possible
   *because* the VPC CNI gives Pods VPC IPs) — bypassing the node/NodePort hop,
   so the LB load-balances straight to Pods (the cloud analogue of
-  ingress-nginx proxying to endpoints, [Part 02 ch.04](../02-networking/04-ingress.md)).
+  Traefik proxying to endpoints, [Part 02 ch.04](../02-networking/04-ingress.md)).
   `target-type: instance` uses NodePorts instead. Health checks, TLS (an
   **ACM** cert ARN — no in-cluster TLS Secret needed), scheme
   (internet-facing/internal), and timeouts are all **annotations** on the
@@ -584,7 +584,8 @@ kubectl apply --dry-run=client -f examples/bookstore/raw-manifests/60-networkpol
   ip`: better health-checking and traffic distribution than the old
   NodePort path). AKS uses the **App Gateway Ingress Controller (AGIC)** to
   drive an Azure Application Gateway
-  from Ingress objects, or ingress-nginx behind an Azure L4 LB. Same pattern
+  from Ingress objects, or an in-cluster controller such as Traefik behind an
+  Azure L4 LB. Same pattern
   everywhere: a controller turns the **unchanged** Ingress object into the
   cloud's L7 LB; only the `IngressClass`/annotations differ.
 - **`Service` annotations vs Gateway API on cloud.** Every cloud LB knob is a
@@ -745,7 +746,7 @@ metadata:
     alb.ingress.kubernetes.io/certificate-arn: <ACM-ARN>    # cloud-managed TLS
     external-dns.alpha.kubernetes.io/hostname: <HOST>       # ExternalDNS
 spec:
-  ingressClassName: alb                    # the CLOUD controller (not nginx)
+  ingressClassName: alb                    # the CLOUD controller (not Traefik)
   rules:
     - host: <HOST>                 # the host patch; paths as in 50-ingress.yaml
 ```

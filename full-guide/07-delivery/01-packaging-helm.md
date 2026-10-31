@@ -1356,7 +1356,7 @@ catalog:                              # one block per workload
 securityProfiles:                     # the restricted SC per image (helpers use this)
   goService: { pod: {runAsNonRoot: true, runAsUser: 65532, ...}, container: {...} }
 dbCredentials: { create: true, secretName: db-credentials, ... }   # DEMO-ONLY
-ingress:  { enabled: true,  className: nginx, host: bookstore.localdev.me }
+ingress:  { enabled: true,  className: traefik, host: bookstore.localdev.me }
 gateway:  { enabled: false }          # XOR ingress (render fails if both on)
 hpa: { enabled: true }                # built-in autoscaling/v2 → default ON
 keda: { enabled: false, connectionSecretName: "" }   # CRD → OFF; ON needs your Secret's name
