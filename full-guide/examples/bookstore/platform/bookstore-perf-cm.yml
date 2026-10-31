@@ -1,0 +1,9 @@
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: bookstore-perf-{{.Iteration}}-{{.Replica}}
+  labels:
+    app.kubernetes.io/part-of: bookstore
+    bookstore.example.com/perf: "true"
+data:
+  note: "kube-burner perf object for Part 11 ch.09"
