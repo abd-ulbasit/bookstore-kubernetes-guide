@@ -516,13 +516,13 @@ the device plugin / GPU Operator:
   says so, and it is fine for dev notebooks and bursty, non-critical work. It is
   *never* the choice for guaranteed performance or for tenants who do not trust
   each other: a neighbour's crash or memory use reaches you.
-- **MPS** — CUDA Multi-Process Service gives each client its own GPU address
+- **MPS**: CUDA Multi-Process Service gives each client its own GPU address
   space and runs the clients' kernels concurrently. NVIDIA documents only
   **limited fault containment** for it
   ([MPS memory protection and error containment](https://docs.nvidia.com/deploy/mps/when-to-use-mps.html)).
   It suits cooperating workloads from one trust domain, and throughput is its
   point, not isolation.
-- **MIG** — on supported GPUs, hardware-partitions the card into instances
+- **MIG**: on supported GPUs, hardware-partitions the card into instances
   advertised as, for example, `nvidia.com/mig-1g.10gb`. Each instance has
   dedicated compute and memory. The GPU Operator's sharing page states that MIG
   gives **memory and fault isolation at the hardware layer**, and the
@@ -732,7 +732,7 @@ Checklist:
 3. **You enable time-slicing for the dev environment so multiple notebooks share one GPU. A user complains "my training run takes 4x as long." What's happening?**
    <details><summary>Show answer</summary>
 
-   Time-slicing is exactly what it says: it multiplexes CUDA contexts onto one GPU via the NVIDIA driver, round-robining at the kernel level. If 4 workloads share, each gets ~25% of the GPU's compute time — a training run that takes 1 hour on a dedicated GPU takes ~4 hours sharing 4-way. Time-slicing trades throughput for cost. For dev/notebooks where utilization is bursty, that's a win. Sharing also removes isolation: the replicas have no memory or fault isolation, so one notebook that exhausts GPU memory or faults can take down the training run beside it. For production training, you want MIG (hardware isolation, partitioned GPU memory + compute slices) or dedicated GPUs. The user's complaint is the expected behavior, so surface it in dashboards so people understand.
+   Time-slicing is exactly what it says: it multiplexes CUDA contexts onto one GPU via the NVIDIA driver, round-robining at the kernel level. If 4 workloads share, each gets ~25% of the GPU's compute time. A training run that takes 1 hour on a dedicated GPU takes ~4 hours sharing 4-way. Time-slicing trades throughput for cost. For dev/notebooks where utilization is bursty, that's a win. Sharing also removes isolation: the replicas have no memory or fault isolation, so one notebook that exhausts GPU memory or faults can take down the training run beside it. For production training, you want MIG (hardware isolation, partitioned GPU memory + compute slices) or dedicated GPUs. The user's complaint is the expected behavior, so surface it in dashboards so people understand.
 
    </details>
 

@@ -12,7 +12,7 @@
 > check, a cost ceiling, and a model file that is read as code.
 
 **Estimated time:** ~60 min read · ~120 min hands-on
-**Prerequisites:** [Part 12 ch.04](04-distributed-training.md) — model artifact this chapter serves · [Part 06 ch.04](../06-production-readiness/04-autoscaling.md) — autoscaling primitives Knative/HPA/KEDA build on · [Part 07 ch.05](../07-delivery/05-progressive-delivery.md) — replica-driven canary contrasted with request-driven KServe canary · [01.01](../01-core-workloads/01-pods.md#baseline): the baseline every Pod here carries
+**Prerequisites:** [Part 12 ch.04](04-distributed-training.md): model artifact this chapter serves · [Part 06 ch.04](../06-production-readiness/04-autoscaling.md): autoscaling primitives Knative/HPA/KEDA build on · [Part 07 ch.05](../07-delivery/05-progressive-delivery.md): replica-driven canary contrasted with request-driven KServe canary · [01.01](../01-core-workloads/01-pods.md#baseline): the baseline every Pod here carries
 **You'll know after this:** • author a KServe InferenceService with a custom predictor and `storageUri` · • compare KServe / Seldon / Triton for a given multi-framework workload · • put a bearer-token check in front of a model endpoint, and name what a NetworkPolicy does not do · • cap what one caller can cost with a request limit and a quota · • show that `joblib.load` runs code, and load model weights from safetensors where you can · • configure scale-to-zero serving via Knative and a fall-back HPA/KEDA path
 
 <!-- tags: ml, llm-serving, kserve, autoscaling, gpu, security, pickle, denial-of-wallet -->
@@ -1090,7 +1090,7 @@ had to be turned on. Knative scales a
 ## Further reading
 
 - **Rosso et al., _Production Kubernetes_, ch.13 — "Autoscaling"** and
-  **ch.7 — "Workload Runtimes"**: the production basis for the request-driven
+  **ch.7, "Workload Runtimes"**: the production basis for the request-driven
   autoscaling and runtime-as-component patterns KServe formalises.
 - **Ibryam & Huß, _Kubernetes Patterns_ 2e, *Elastic Scale* (ch.29)** and
   **_Service Mesh_ (ch.17)**: elastic, request-aware scaling, and the mesh layer

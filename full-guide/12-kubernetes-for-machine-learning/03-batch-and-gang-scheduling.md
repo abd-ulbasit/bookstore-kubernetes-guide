@@ -626,8 +626,8 @@ spell Kueue's as `workloads.kueue.x-k8s.io`.
 > gang resumes instead of restarting from zero — fair-sharing/preemption (and
 > spot GPU nodes) *will* interrupt long jobs, and an un-checkpointed 6-hour
 > training that gets preempted at hour 5 is a pure-loss incident. (Checkpoint
-> storage = a PVC; the training-operator chapter ([ch.04](04-distributed-training.md)) builds this — here,
-> know that gang preemption makes checkpointing mandatory, not optional.)
+> storage = a PVC; the training-operator chapter ([ch.04](04-distributed-training.md)) builds this. Note that
+> gang preemption makes checkpointing mandatory, not optional.)
 
 ## Quick Reference
 

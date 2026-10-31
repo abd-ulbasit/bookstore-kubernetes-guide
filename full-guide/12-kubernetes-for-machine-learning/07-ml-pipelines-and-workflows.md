@@ -875,7 +875,7 @@ tomorrow.
   **EventBus** (a NATS JetStream cluster that the controller starts from the
   `EventBus` object in `argo-events`). A **Sensor** subscribes to the
   EventBus, applies a `dependencies:` filter, and on match fires its
-  `triggers[]` — for ML that is the `k8s` trigger creating a `Workflow`. The
+  `triggers[]`: for ML that is the `k8s` trigger creating a `Workflow`. The
   chart does not set a restricted securityContext on the EventSource or Sensor
   Pods, so each manifest sets its own. The Sensor's Pod calls the API with its
   own ServiceAccount, which lives in `argo-events`. Its Role lives in

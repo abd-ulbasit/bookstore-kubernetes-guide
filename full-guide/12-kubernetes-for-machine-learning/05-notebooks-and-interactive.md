@@ -912,7 +912,7 @@ Checklist:
 - [ ] **GPU profile** uses the [ch.02](02-gpus-and-accelerators.md) taint +
   affinity + `limits.nvidia.com/gpu`
 - [ ] Notebook image's config `User` checked: a numeric non-root user
-- [ ] Data scientists commit `train.py` to **Git** — the notebook is the front
+- [ ] Data scientists commit `train.py` to **Git**. The notebook is the front
   of the loop
 
 ## Test your understanding
@@ -922,7 +922,7 @@ Checklist:
 1. **Why per-user PVC at `/home/jovyan` and not a shared one?**
    <details><summary>Show answer</summary>
 
-   Notebooks are personal dev environments — datasets being explored,
+   Notebooks are personal dev environments: datasets being explored,
    half-written code, secrets pasted into cells, cached Python packages. A
    shared PVC has every user stepping on each other's files and creates
    cross-user data exposure (one user's reading another's `client_secret.json`
@@ -937,12 +937,12 @@ Checklist:
 2. **Your data scientist's notebook has been "idle" for 4 days, holding a GPU. The cost dashboard shows it's the single most expensive resource. What's the policy fix?**
    <details><summary>Show answer</summary>
 
-   Enable the **culler**. Z2JH ships with `cull.enabled: true` — set
+   Enable the **culler**. Z2JH ships with `cull.enabled: true`. Set
    `cull.timeout: 3600` (1 hour idle), `cull.every: 600` (check every 10 min),
    and `cull.users: true` to also stop the user record. For GPU notebooks
    specifically, set a tighter cull timeout (30 min) because idle-GPU cost is
    acute. Also: surface "your notebook will be culled in 5 min" via Jupyter UI
-   extension. Culling doesn't delete the PVC — when the user logs in next,
+   extension. Culling doesn't delete the PVC. When the user logs in next,
    they get a fresh notebook attached to the same volume; their files are
    intact. Idle GPU cost is the #1 ML notebook problem in production; the
    culler is the only sustainable answer.
