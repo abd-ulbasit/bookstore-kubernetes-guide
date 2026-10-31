@@ -91,7 +91,7 @@ that step can go wrong. The last four rows are about the pipeline itself.
 | A credential is committed and lives in history | Gitleaks and TruffleHog verified mode read every commit in CI, and Gitleaks also runs in pre-commit; keyless OIDC, so there is little to leak | [03.02](../03-config-and-storage/02-secrets.md), [15.05](../15-day-to-day-production-ops/05-production-secrets-vault-eso.md) |
 | Your own code carries an injection or a weak primitive | Semgrep with the Bookstore's rules, gosec, CodeQL | Step 3 here. [15.02](../15-day-to-day-production-ops/02-application-cicd-pipelines.md) covers the platform services' workflows, which run none of the three |
 | A dependency you ship or call is vulnerable | govulncheck (what you call), Trivy (what you ship), Dependabot (the fix) | [05.03](../05-security/03-supply-chain.md) |
-| The image runs as root, hides a secret or sits on an end-of-life base | hadolint, Dockle, Trivy on the image | [05.03](../05-security/03-supply-chain.md), [00.02](../00-foundations/02-containers-and-images.md) |
+| The image runs as root, hides a secret or sits on an end-of-life base | hadolint, Dockle, Trivy on the image | Step 5 here for hadolint and Dockle; [00.02](../00-foundations/02-containers-and-images.md) teaches hadolint, and [05.03](../05-security/03-supply-chain.md) scans the image |
 | Nobody can say what is inside an image when a CVE lands | A Syft SBOM, scanned by Grype and Trivy | [05.03](../05-security/03-supply-chain.md) |
 | The image in the registry is not the one CI built, or is one that failed a gate | Push once, and only after every other job passed; sign the digest keyless; attach SLSA provenance | [15.03](../15-day-to-day-production-ops/03-image-signing-and-provenance.md) |
 | A manifest asks for more than the baseline allows | KubeLinter, kubesec and Trivy config on the rendered overlay; Conftest rules, unit-tested with `opa test`, on the overlay and on a Terraform plan fixture | [01.01](../01-core-workloads/01-pods.md#baseline), policy as code in [05.07](../05-security/07-admission-control-and-policy-as-code.md) |
@@ -2006,6 +2006,21 @@ itself, once per service. Beside it, a matrix of **controls** runs every
 scanner above through `scan.sh --expect` against the fixture. Both halves
 matter: the first says the services are clean, the second says "clean" can
 still be believed.
+
+**What the pipeline covers.** The matrix holds four services: `catalog`,
+`orders`, `payments-worker` and `storefront`. The other code in the tree does
+not go through it: the admission-webhook operator, the Python images under
+`ml/`, and the platform services (events, payments-gateway, recommendations,
+search) have no pipeline call, their Makefiles run no scanner, and the
+pre-commit `hadolint` hook and the Dependabot configuration list only the
+`app/` services. The platform services' own workflows in
+[15.02](../15-day-to-day-production-ops/02-application-cicd-pipelines.md) run
+lint, Trivy, buildx, cosign, Syft and provenance, and do not call this pipeline.
+The controls have gaps too. The fixture plants a flaw for Gitleaks,
+TruffleHog, one Semgrep rule, gosec, govulncheck, Trivy, hadolint, KubeLinter,
+kubesec, one Conftest rule (the Terraform one), zizmor, actionlint and the
+expiry check. It plants none for CodeQL, the second Semgrep rule, Dockle, the
+image scan, the SBOM scanners, ZAP or the Kubernetes Conftest rules.
 
 ## How it works under the hood
 

@@ -301,6 +301,12 @@ spec:
           from: Same             # only routes in this namespace may attach
 ```
 
+The certificate is the self-signed Secret from [ch.04](04-ingress.md). In
+production cert-manager issues and renews it, and the `Certificate` that does so
+is written out in
+[13.07](../13-grand-capstone-bookstore-platform/07-edge-gateway-waf-rate-limiting.md),
+not run.
+
 The HTTPRoute, which the application team owns. Its rules repeat the Ingress
 routes from [ch.04](04-ingress.md) as typed fields:
 

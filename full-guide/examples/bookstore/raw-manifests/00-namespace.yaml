@@ -3,14 +3,14 @@
 # Introduces the `bookstore` Namespace plus a ResourceQuota (caps the namespace
 # TOTAL) and a LimitRange (per-container defaults + min/max). From ch.04 onward
 # every Bookstore workload (catalog, storefront, postgres, jobs, ...) is created
-# in this namespace. The Part 00 / ch.01-02 single-Pod files are kept WITHOUT a
-# namespace on purpose: they are frozen object-model teaching snapshots, not
-# migrated, and the reader applies them into `bookstore`.
+# in this namespace. The single-Pod files 01- and 02- name no namespace in their
+# metadata, and the reader applies them into `bookstore` with `-n bookstore`.
 #
 # This file is numbered 00- so a combined dry-run/apply of the directory
 # creates the Namespace + governance objects before the namespaced workloads.
 #
-# Part 05 ch.02 (Pod Security) increment — the three PodSecurity labels below.
+# The three PodSecurity labels below make this namespace enforce the baseline
+# from its first manifest (Part 01 ch.01 explains it; Part 05 ch.02 tests it).
 # Pod Security Admission is a BUILT-IN admission controller (PodSecurityPolicy
 # was REMOVED in v1.25). It reads namespace labels and applies one of the Pod
 # Security Standards (privileged | baseline | restricted) in three modes:
@@ -19,10 +19,10 @@
 #   warn    — allow, but return a client-visible warning (great in CI / kubectl)
 # `<mode>-version: latest` pins to the newest ruleset (pin to e.g. v1.30 if you
 # need the policy frozen across upgrades). We set `restricted` for ALL THREE
-# modes: every Bookstore workload (10-/11-/14-/20-) was given a
-# `restricted`-satisfying securityContext in Part 05 ch.02, so enforce:
-# restricted does NOT lock out our own pods (verified in ch.02 with a
-# server-side dry-run — no PodSecurity warnings). audit+warn at the same level
+# modes: every Bookstore workload (10-/11-/14-/20-) carries a
+# `restricted`-satisfying securityContext, so enforce: restricted does NOT lock
+# out our own pods (checked with a server-side dry-run — no PodSecurity
+# warnings). audit+warn at the same level
 # surface any future regression immediately instead of silently.
 #
 # Apply (re-apply after any kind delete/create so the labels exist before

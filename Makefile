@@ -96,7 +96,8 @@ validate-go: ## go vet + go build on every service that has a go.mod.
 	done
 
 .PHONY: validate-links
-validate-links: ## mkdocs build --strict (validates every internal link in the guide).
+validate-links: ## mkdocs build --strict, and no link-later marker whose chapter now exists.
+	$(PY) .github/scripts/check_link_later.py full-guide
 	$(MKDOCS) build --strict
 
 ##@ Security

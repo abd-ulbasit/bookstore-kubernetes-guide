@@ -1,6 +1,6 @@
 # Transcript for lab 05.08, the lab of
 # 05-security/08-audit-detection-and-incident-response.md.
-# Tier A. Two recordings of labs/05-08.sh follow, one for each mode.
+# Tier A. Three recordings of labs/05-08.sh follow, one for each mode.
 #
 # Recording 1 is LAB_MODE=shared on the kind cluster sf-pilot: one node, a
 # Kubernetes v1.37.0 server, kubectl v1.37.2, helm v4.1.4. It was made with an
@@ -80,6 +80,13 @@
 #
 # The Falco log timestamps are UTC. The helm timestamps are in the lab host's
 # local time zone.
+#
+# Recording 3 is LAB_MODE=audit, the only recording that reads the API server
+# audit log. It was made on a throwaway cluster, p05-08, that the script
+# creates with the audit policy and deletes at the end. Recording 2 creates no
+# cluster, so it has no audit steps. Recording 3 was made before the script
+# gained full mode; the steps both versions run print the same commands. Its
+# own comment lines say which client and kind version ran it.
 
 # ===== Recording 1: LAB_MODE=shared =====
 # Lab 05-08: attack and response, shared mode, on the shared kind cluster.
@@ -868,3 +875,208 @@ $ kubectl get crd
 No resources found
 nothing of the lab remains
 control plane restarts: 91 (at the start of this run: 91)
+# ===== Recording 3: LAB_MODE=audit =====
+# Audit mode, recorded later by running examples/security-lab/labs/05-08.sh
+# with LAB_MODE=audit, from a macOS client against kind v0.33.0 on the Linux
+# lab host. This run creates the throwaway cluster p05-08 with the audit
+# policy, runs the attacks, reads the audit log, hardens, reads the log again,
+# responds, and deletes the cluster. It skips the Falco and Trivy Operator
+# installs. The script exited 0. The kind binary is shown here as `kind`; the
+# run called it by its versioned path on the host. The node reports NotReady in
+# the first listing because the CNI had not finished starting; the later steps
+# ran after the node was ready.
+# Lab 05-08: audit, detection and response. Tier A, throwaway cluster p05-08.
+$ kind version
+kind v0.33.0 go1.26.7 linux/amd64
+$ kubectl version --client
+Client Version: v1.37.2
+$ helm version --short
+v4.1.4+g05fa379
+$ kind create cluster --config audit-cluster.yaml --kubeconfig admin.kubeconfig
+Creating cluster "p05-08" ...
+ • Ensuring node image (kindest/node:v1.37.0) 🖼️  ...
+ ✓ Ensuring node image (kindest/node:v1.37.0) 🖼️
+ • Preparing nodes 📦   ...
+ ✓ Preparing nodes 📦 
+ • Writing configuration 📜  ...
+ ✓ Writing configuration 📜
+ • Starting control-plane 🕹️  ...
+ ✓ Starting control-plane 🕹️
+ • Installing CNI 🔌  ...
+ ✓ Installing CNI 🔌
+ • Installing StorageClass 💾  ...
+ ✓ Installing StorageClass 💾
+Set kubectl context to "kind-p05-08"
+You can now use your cluster with:
+
+kubectl cluster-info --context kind-p05-08 --kubeconfig admin.kubeconfig
+
+Have a question, bug, or feature request? Let us know! https://kind.sigs.k8s.io/#community 🙂
+$ kubectl config current-context
+kind-p05-08
+$ kubectl taint nodes p05-08-control-plane node-role.kubernetes.io/control-plane:NoSchedule-
+error: taint "node-role.kubernetes.io/control-plane:NoSchedule" not found
+$ kubectl get nodes -o wide
+NAME                   STATUS     ROLES           AGE   VERSION   INTERNAL-IP   EXTERNAL-IP   OS-IMAGE                       KERNEL-VERSION             CONTAINER-RUNTIME
+p05-08-control-plane   NotReady   control-plane   31s   v1.37.0   172.18.0.6    <none>        Debian GNU/Linux 13 (trixie)   7.0.0-38-generic (amd64)   containerd://2.3.4
+$ docker exec p05-08-control-plane grep -n audit /etc/kubernetes/manifests/kube-apiserver.yaml
+43:    - --audit-policy-file=/etc/kubernetes/policies/audit-policy.yaml
+44:    - --audit-log-path=/var/log/kubernetes/kube-apiserver-audit.log
+86:      name: audit-logs
+88:      name: audit-policies
+115:    name: audit-logs
+119:    name: audit-policies
+$ kubectl --kubeconfig=work/builder.kubeconfig auth whoami
+ATTRIBUTE                                           VALUE
+Username                                            system:serviceaccount:attack:builder
+UID                                                 f13528e6-0203-4f3d-a9ab-31ad41c9dc86
+Groups                                              [system:serviceaccounts system:serviceaccounts:attack system:authenticated]
+Extra: authentication.kubernetes.io/credential-id   [JTI=117427a3-14b2-4f6b-84d7-84d8dd10356e]
+$ kubectl --kubeconfig=work/builder.kubeconfig get secret app-db -n p05-08-app
+Error from server (Forbidden): secrets "app-db" is forbidden: User "system:serviceaccount:attack:builder" cannot get resource "secrets" in API group "" in the namespace "p05-08-app"
+$ kubectl --kubeconfig=work/builder.kubeconfig apply -f escape-node.yaml
+pod/escape-node created
+$ kubectl wait --for=condition=Ready pod/escape-node -n attack --timeout=180s
+pod/escape-node condition met
+$ kubectl --kubeconfig=work/builder.kubeconfig exec -n attack escape-node -- sh -c 'test -s /var/run/secrets/kubernetes.io/serviceaccount/token && echo token-file-present'
+token-file-present
+$ kubectl --kubeconfig=work/ops.kubeconfig get secret app-db -n p05-08-app -o name
+secret/app-db
+$ kubectl --kubeconfig=work/builder.kubeconfig exec -n attack escape-node -- sh -c 'cat /host/etc/hostname; touch /host/tmp/p05-08-marker && echo marker-written'
+p05-08-control-plane
+marker-written
+$ docker exec p05-08-control-plane cat /var/log/kubernetes/kube-apiserver-audit.log > work/audit.log
+$ wc -l < work/audit.log
+    2033
+$ query: who asked for the Secret, and what came back
+kubernetes-admin                             get    secrets/app-db       404
+kubernetes-admin                             create secrets/app-db       201
+attack:builder                               get    secrets/app-db       403
+attack:ops                                   get    secrets/app-db       200
+$ query: Pods created or deleted in the lab namespaces
+attack:builder                               create pods/escape-node  201  sa=ops privileged=false hostPath=/
+$ query: exec sessions in the lab namespaces
+attack:builder                               get    pods/escape-node  403  command=sh -c test -s /var/run/secrets/kubernetes.io/serviceaccount/token && echo token-file-present
+attack:builder                               create pods/escape-node  101  command=sh -c test -s /var/run/secrets/kubernetes.io/serviceaccount/token && echo token-file-present
+attack:builder                               get    pods/escape-node  403  command=cat /var/run/secrets/kubernetes.io/serviceaccount/token
+attack:builder                               create pods/escape-node  101  command=cat /var/run/secrets/kubernetes.io/serviceaccount/token
+attack:builder                               get    pods/escape-node  403  command=sh -c cat /host/etc/hostname; touch /host/tmp/p05-08-marker && echo marker-written
+attack:builder                               create pods/escape-node  101  command=sh -c cat /host/etc/hostname; touch /host/tmp/p05-08-marker && echo marker-written
+$ query: ServiceAccount tokens minted
+kubernetes-admin                             create serviceaccounts/builder 201
+system:node:p05-08-control-plane             create serviceaccounts/ops 201
+$ query: requests refused with 403
+attack:builder                               get    secrets/app-db       403
+attack:builder                               get    namespaces/attack       403
+attack:builder                               get    pods/escape-node  403
+attack:builder                               get    pods/escape-node  403
+attack:builder                               get    pods/escape-node  403
+$ kubectl apply -f escape-app.yaml
+Error from server (Forbidden): error when creating "work/escape-app.yaml": pods "escape-app" is forbidden: violates PodSecurity "restricted:v1.37": privileged (container "app" must not set securityContext.privileged=true), allowPrivilegeEscalation != false (container "app" must set securityContext.allowPrivilegeEscalation=false), unrestricted capabilities (container "app" must set securityContext.capabilities.drop=["ALL"]), restricted volume types (volume "node-root" uses restricted volume type "hostPath"), runAsNonRoot != true (pod or container "app" must set securityContext.runAsNonRoot=true), seccompProfile (pod or container "app" must set securityContext.seccompProfile.type to "RuntimeDefault" or "Localhost")
+$ kubectl --kubeconfig=work/builder.kubeconfig auth can-i create pods -n p05-08-app
+no
+$ docker exec p05-08-control-plane cat /var/log/kubernetes/kube-apiserver-audit.log > work/audit.log
+$ query: requests refused with 403
+attack:builder                               get    secrets/app-db       403
+attack:builder                               get    namespaces/attack       403
+attack:builder                               get    pods/escape-node  403
+attack:builder                               get    pods/escape-node  403
+attack:builder                               get    pods/escape-node  403
+kubernetes-admin                             create pods/escape-app   403
+$ helm repo add falcosecurity https://falcosecurity.github.io/charts --force-update
+"falcosecurity" has been added to your repositories
+$ helm repo add aqua https://aquasecurity.github.io/helm-charts/ --force-update
+"aqua" has been added to your repositories
+$ helm show chart falcosecurity/falco --version 9.2.2 | grep -E '^(version|appVersion)'
+appVersion: 0.45.2
+version: 9.2.2
+$ helm show chart aqua/trivy-operator --version 0.38.1 | grep -E '^(version|appVersion)'
+appVersion: 0.36.1
+version: 0.38.1
+$ kubectl -n kube-system get daemonset -o name
+daemonset.apps/kindnet
+daemonset.apps/kube-proxy
+$ helm template falco falcosecurity/falco --version 9.2.2 --namespace falco -f falco-driver.yaml > falco-rendered.yaml
+$ grep -c 'privileged: true' falco-rendered.yaml
+0
+$ grep -A5 'capabilities:' falco-rendered.yaml | head -6
+            capabilities:
+              add:
+              - BPF
+              - SYS_RESOURCE
+              - PERFMON
+              - SYS_PTRACE
+$ helm template trivy aqua/trivy-operator --version 0.38.1 --namespace p05-08-trivy -f trivy-values.yaml > trivy-rendered.yaml
+$ grep -c 'runAsNonRoot: true' trivy-rendered.yaml
+1
+$ kubectl apply -f trivy-ns.yaml
+namespace/p05-08-trivy created
+$ kubectl apply --dry-run=server -f operator-probe.yaml; echo "server dry-run exit=$?"
+pod/operator-probe created (server dry run)
+server dry-run exit=0
+$ kubectl apply --dry-run=server -f operator-probe-root.yaml; echo "server dry-run exit=$?"
+Error from server (Forbidden): error when creating "operator-probe-root.yaml": pods "operator-probe" is forbidden: violates PodSecurity "restricted:v1.37": runAsNonRoot != true (pod or container "operator" must set securityContext.runAsNonRoot=true)
+server dry-run exit=1
+$ kubectl label pod escape-node -n attack quarantine=true
+pod/escape-node labeled
+$ kubectl exec -n attack escape-node -- nslookup kubernetes.default.svc.cluster.local | expand -t 4
+Server:     10.96.0.10
+Address:    10.96.0.10:53
+
+
+Name:   kubernetes.default.svc.cluster.local
+Address: 10.96.0.1
+
+$ kubectl apply -f quarantine.yaml
+networkpolicy.networking.k8s.io/quarantine created
+$ kubectl exec -n attack escape-node -- nslookup kubernetes.default.svc.cluster.local | expand -t 4
+command terminated with exit code 1
+;; connection timed out; no servers could be reached
+
+$ kubectl get pod escape-node -n attack -o yaml > evidence/pod.yaml
+$ kubectl get events -n attack > evidence/events.txt
+$ kubectl describe pod escape-node -n attack > evidence/describe.txt
+$ kubectl logs escape-node -n attack > evidence/logs.txt
+$ query: exec and create events for escape-node, from the audit log
+attack:builder                               get    pods/escape-node  403  command=sh -c test -s /var/run/secrets/kubernetes.io/serviceaccount/token && echo token-file-present
+attack:builder                               create pods/escape-node  101  command=sh -c test -s /var/run/secrets/kubernetes.io/serviceaccount/token && echo token-file-present
+attack:builder                               get    pods/escape-node  403  command=cat /var/run/secrets/kubernetes.io/serviceaccount/token
+attack:builder                               create pods/escape-node  101  command=cat /var/run/secrets/kubernetes.io/serviceaccount/token
+attack:builder                               get    pods/escape-node  403  command=sh -c cat /host/etc/hostname; touch /host/tmp/p05-08-marker && echo marker-written
+attack:builder                               create pods/escape-node  101  command=sh -c cat /host/etc/hostname; touch /host/tmp/p05-08-marker && echo marker-written
+kubernetes-admin                             get    pods/escape-node  101  command=nslookup kubernetes.default.svc.cluster.local
+kubernetes-admin                             get    pods/escape-node  101  command=nslookup kubernetes.default.svc.cluster.local
+$ ls -1 evidence
+audit-exec.txt
+describe.txt
+events.txt
+logs.txt
+pod.yaml
+$ kubectl cordon p05-08-control-plane
+node/p05-08-control-plane cordoned
+$ kubectl delete rolebinding ops-secret-reader -n p05-08-app
+rolebinding.rbac.authorization.k8s.io "ops-secret-reader" deleted from p05-08-app namespace
+$ kubectl delete pod escape-node -n attack
+pod "escape-node" deleted from attack namespace
+$ kubectl --kubeconfig=work/ops.kubeconfig get secret app-db -n p05-08-app -o name
+error: You must be logged in to the server (Unauthorized)
+$ kubectl --kubeconfig=work/ops.kubeconfig auth whoami
+error: You must be logged in to the server (Unauthorized)
+$ kubectl delete serviceaccount builder -n attack
+serviceaccount "builder" deleted from attack namespace
+$ kubectl apply -f builder-sa.yaml
+serviceaccount/builder created
+$ kubectl --kubeconfig=work/builder.kubeconfig auth whoami
+error: You must be logged in to the server (Unauthorized)
+$ kubectl patch secret app-db -n p05-08-app --type merge -p '{"stringData":{"password":"lab-rotated-value"}}'
+secret/app-db patched
+$ kubectl delete namespace attack p05-08-app falco p05-08-trivy
+namespace "attack" deleted
+namespace "p05-08-app" deleted
+namespace "p05-08-trivy" deleted
+$ kind delete cluster --name p05-08
+Deleting cluster "p05-08" ...
+Deleted nodes: ["p05-08-control-plane"]
+$ kind get clusters
+sf-pilot
+sf-sched

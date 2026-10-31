@@ -5,9 +5,9 @@
 > answer four different questions: the API server audit log records who asked
 > for what, a runtime detector watches what processes do, a scanner reads what
 > running specs allow, and a runbook takes a compromised Pod out of service
-> without destroying the evidence. The lab runs the attacks, the response,
-> Falco and Trivy Operator on lab clusters. The audit log is written out and
-> cited. Its run is not in this chapter, and the lab header says why.
+> without destroying the evidence. The lab runs the attacks, the audit log, the
+> response, Falco and Trivy Operator on lab clusters. Tetragon is written out
+> and cited, and the lab header says so.
 
 **Estimated time:** ~40 min read · ~45 min lab (scripted, lab cluster)
 **Prerequisites:** [Part 05 ch.01](01-authn-authz-rbac.md): RBAC decides which
@@ -88,31 +88,36 @@ a run.
 
 ### Lab header
 
-- **Tier A, two recordings.** The attack and response steps ran on a one-node
-  kind cluster with Kubernetes v1.37.0 and containerd 2.3.4 on Debian 13, on a
-  Linux lab host. Falco and Trivy Operator ran on a three-node kind cluster
-  with the same versions, on the same host. Both clusters have different names
-  from the one this guide uses. kubectl is v1.37.2 and helm is v4.1.4. The
-  script is [`labs/05-08.sh`](../examples/security-lab/labs/05-08.sh), run with
-  `LAB_MODE=shared` for the first recording and `LAB_MODE=full` for the second.
-  Both recordings are in
+- **Tier A, three recordings.** The attack and response steps ran on a
+  one-node kind cluster with Kubernetes v1.37.0 and containerd 2.3.4 on Debian
+  13, on a Linux lab host. Falco and Trivy Operator ran on a three-node kind
+  cluster with the same versions, on the same host. The audit log ran on a
+  third cluster, a throwaway one that the script creates with the audit policy
+  and deletes at the end. The first two clusters have different names from the
+  one this guide uses. kubectl is v1.37.2 and helm is v4.1.4. The script is
+  [`labs/05-08.sh`](../examples/security-lab/labs/05-08.sh), run with
+  `LAB_MODE=shared` for the first recording, `LAB_MODE=full` for the second
+  and `LAB_MODE=audit` for the third. The third creates the cluster `p05-08`,
+  runs every step except the Falco and Trivy Operator installs, and deletes
+  the cluster. All three recordings are in
   [`evidence/05-08.txt`](../examples/security-lab/evidence/05-08.txt), from
   runs on 31 October 2026. The second one ran in 15 invocations, each listed
   in the transcript's header. The versions are Falco 0.45.2 (chart 9.2.2) with
   Falcosidekick 2.32.0, and Trivy Operator 0.36.1 (chart 0.38.1) with Trivy
   0.76.1.
-- **Not run.** The audit log steps, the cordon step and Tetragon. The audit
-  steps need an API server flag, which means a throwaway cluster, and neither
-  recording created one. Cordoning the only node of the one-node cluster would
-  stop other workloads from scheduling, so the shared run skips it, and the
-  full run did not do the response steps. Nothing in this chapter says the
-  audit log recorded anything.
+- **Not run.** Tetragon, and the cordon step on a cluster that other work
+  shares. Cordoning the only node of the one-node cluster would stop other
+  workloads from scheduling, so the shared run skips it, and the full run did
+  not do the response steps. The audit run has a cluster of its own, so it ran
+  the cordon step. Nothing in this chapter says Tetragon recorded anything.
 - **Run only against clusters you own.** In shared mode the script refuses any
   context that is not the lab cluster, and refuses to start while its
   namespaces still exist or are terminating. In full mode it refuses any
-  context but the one `LAB_CONTEXT` names, which must start with `kind-`. It
-  creates `attack` and `app` in shared mode, and `attack`, `app`, `falco` and
-  `trivy` in full mode, and deletes them at the end.
+  context but the one `LAB_CONTEXT` names, which must start with `kind-`. In
+  audit mode it refuses to start while a kind cluster named `p05-08` exists or
+  its API server port is busy. It creates `attack` and `app` in shared mode,
+  and `attack`, `app`, `falco` and `trivy` in full mode, and deletes them at
+  the end. In audit mode it deletes its own cluster.
 - **What did not work the first time.** The throwaway cluster is the first
   problem. Its first kubeadm run timed out: the API server answered about three
   and a half minutes after the manifests were written, because etcd applies took
@@ -120,7 +125,9 @@ a run.
   one-minute default for its first API call. The configuration now raises
   those timeouts
   (see the kind configuration below). Later attempts failed at kind's boot check
-  while the host's load average was between 8 and 11 on four CPUs. The first
+  while the host's load average was between 8 and 11 on four CPUs. The audit
+  run recorded here is a later one: its first attempt failed at the same boot
+  check, and the next attempt a few minutes later went through. The first
   shared run also collided with namespaces that were still terminating from
   the run before it, so the script now refuses to start over them.
 
@@ -435,7 +442,7 @@ no
 
 The refusal names each rule the Pod breaks. It is the admission half of the
 control. The audit half, which records this refusal as a request with its
-status code, is covered in the audit section below, and was not run.
+status code, is in the audit section below, where the log shows it.
 
 ### Respond: isolate, capture, cordon, rotate
 
@@ -525,12 +532,14 @@ pod.yaml
 In production, the audit log for the Pod's requests and the Falco alerts are
 part of this capture. The Falco alerts for `escape-node` are in the detection
 section, and a responder would save them the same way, with `kubectl logs`.
-The audit log was not run here.
+The audit log was read in the audit section below.
 
 **Step 3: cordon the node.** `kubectl cordon <node>` stops the scheduler from
-placing new Pods there while the investigation runs. On the lab cluster the
-script skips it, because cordoning the only node would block every other
-workload. Read the step as the procedure, not as a run.
+placing new Pods there while the investigation runs. On the cluster that other
+work shares, the script skips it, because cordoning the only node would block
+every other workload. The audit run has a cluster of its own, and there it
+ran `kubectl cordon p05-08-control-plane`, which printed
+`node/p05-08-control-plane cordoned`, as the transcript shows.
 
 **Step 4: rotate.** Revoke the access, delete the compromised Pod, rotate the
 credentials it could reach, and check that each old credential is refused.
@@ -603,13 +612,13 @@ what lived on it, including the kubelet's client certificate and any secret the
 node held. The lab does not run this step. Its throwaway cluster is deleted
 instead.
 
-### Audit: what the log would show (not run)
+### Audit: what the log shows
 
 The audit steps need a cluster whose API server writes an audit log, which
-means an API server flag. The policy below is the one the lab would install.
-It was not run on a cluster, so nothing below is evidence. Neither recording
-created a throwaway cluster, so no audit flag was set on the clusters they
-used.
+means an API server flag, so the script's `audit` mode creates a throwaway
+cluster with the flag set, runs the attacks, reads the log, and deletes the
+cluster. The policy below is the one it installs. The output further down is
+from that run and appears in the transcript.
 
 The policy's rules are checked in order, and the first match sets the level.
 Secrets and ConfigMaps are `Metadata`, so the log names who read the Secret
@@ -714,14 +723,130 @@ complete file the lab applies. Apply that file, not the fragment. The lab copies
 the policy and the file to the machine that runs kind before it creates the
 cluster.
 
-What the lab would query, once the log exists: the events for the lab's two
-namespaces, at the `ResponseComplete` stage so each request appears once. For
-each one, the user, the verb, the object, the status code, and for Pod changes
-the `serviceAccountName`, the `privileged` flag and any `hostPath`. For
-`exec`, the command from the request URI. For token requests, who asked for a
-token and for which ServiceAccount. A `403` is a refused request, from RBAC or
-from admission, and the audit event carries that status. The lab's query was
-written for these fields. It did not run.
+The script confirms that the API server was started with both flags:
+
+```sh
+docker exec p05-08-control-plane grep -n audit /etc/kubernetes/manifests/kube-apiserver.yaml
+```
+
+<!-- gate: output -->
+
+```
+43:    - --audit-policy-file=/etc/kubernetes/policies/audit-policy.yaml
+44:    - --audit-log-path=/var/log/kubernetes/kube-apiserver-audit.log
+86:      name: audit-logs
+88:      name: audit-policies
+115:    name: audit-logs
+119:    name: audit-policies
+```
+
+It then runs the attacks of 05.01 and 05.02 against the cluster, copies the log
+out of the node, and reads it with a small script. The script keeps only the
+`ResponseComplete` stage, so each request appears once, and only the lab's two
+namespaces. The log held 2033 events at that point, nearly all of them
+cluster traffic that the script filters out.
+
+**Who asked for the Secret, and what came back.** The first two lines are the
+lab's own setup, as the admin. The `builder` identity was refused. The `ops`
+identity, whose token the attack read from the escape Pod, got the Secret:
+
+<!-- gate: output -->
+
+```
+kubernetes-admin                             get    secrets/app-db       404
+kubernetes-admin                             create secrets/app-db       201
+attack:builder                               get    secrets/app-db       403
+attack:ops                                   get    secrets/app-db       200
+```
+
+The log names `attack:ops`, the identity the token belongs to, and does not
+say that the token was stolen. A defender sees a ServiceAccount that has no
+reason to read that Secret doing so, and the Pod above it that mounted the
+token. The value of the Secret is not in the log, because the rule for Secrets
+is `Metadata`.
+
+**Pods created.** The Pod change is `Request` level, so the log keeps the body
+and the query can read the `serviceAccountName`, the privilege flag and the
+`hostPath` from it:
+
+<!-- gate: output -->
+
+```
+attack:builder                               create pods/escape-node  201  sa=ops privileged=false hostPath=/
+```
+
+The Pod is not privileged. It mounts the node's root as `hostPath: /`, and it
+runs as the `ops` ServiceAccount, which `builder` was never granted. Both facts
+are in one event, created by a user who could create Pods.
+
+**exec.** The command is not in the body, because an exec request has none. It
+is in the request URI, which the query parses. Each exec appears twice. The
+first is a `get` that the `builder` role refused, and the second is the
+`create` that succeeded and returned `101`, the status for a connection that
+switches protocol:
+
+<!-- gate: output -->
+
+```
+attack:builder                               get    pods/escape-node  403  command=sh -c test -s /var/run/secrets/kubernetes.io/serviceaccount/token && echo token-file-present
+attack:builder                               create pods/escape-node  101  command=sh -c test -s /var/run/secrets/kubernetes.io/serviceaccount/token && echo token-file-present
+attack:builder                               get    pods/escape-node  403  command=cat /var/run/secrets/kubernetes.io/serviceaccount/token
+attack:builder                               create pods/escape-node  101  command=cat /var/run/secrets/kubernetes.io/serviceaccount/token
+attack:builder                               get    pods/escape-node  403  command=sh -c cat /host/etc/hostname; touch /host/tmp/p05-08-marker && echo marker-written
+attack:builder                               create pods/escape-node  101  command=sh -c cat /host/etc/hostname; touch /host/tmp/p05-08-marker && echo marker-written
+```
+
+A policy that listed only `create` would miss the refused attempts, and one that
+listed only `get` would miss the successes. That is why the rule lists both.
+The command line is the whole record of what ran: the log does not say what the
+`touch` wrote, only that it was asked for.
+
+**Tokens.** A token request records who asked for a token for which
+ServiceAccount, and not the token. The first is the lab minting the `builder`
+token as the admin. The second is the node, which requests the Pod's token for
+the `ops` ServiceAccount when it starts the escape Pod:
+
+<!-- gate: output -->
+
+```
+kubernetes-admin                             create serviceaccounts/builder 201
+system:node:p05-08-control-plane             create serviceaccounts/ops 201
+```
+
+**Refused requests.** A `403` is a refused request, from RBAC or from
+admission, and the audit event carries that status. The first list was read
+before the hardening step, and so holds only the RBAC refusals. The lab then
+applied the privileged Pod to the `restricted` namespace, which refused it,
+and read the log again. The admission refusal is one more event, and it is the
+admin's:
+
+<!-- gate: output -->
+
+```
+attack:builder                               get    secrets/app-db       403
+attack:builder                               get    namespaces/attack       403
+attack:builder                               get    pods/escape-node  403
+attack:builder                               get    pods/escape-node  403
+attack:builder                               get    pods/escape-node  403
+kubernetes-admin                             create pods/escape-app   403
+```
+
+Admission refused a request from `kubernetes-admin`, because Pod Security
+admission has no exception for a cluster administrator. The event is the only
+trace of the refused Pod. The Pod itself was never stored.
+
+The first `403` list, before the hardening, for comparison:
+
+<!-- gate: output -->
+
+```
+attack:builder                               get    secrets/app-db       403
+attack:builder                               get    namespaces/attack       403
+attack:builder                               get    pods/escape-node  403
+attack:builder                               get    pods/escape-node  403
+attack:builder                               get    pods/escape-node  403
+```
+
 
 ### Detection: Falco, with Falcosidekick
 

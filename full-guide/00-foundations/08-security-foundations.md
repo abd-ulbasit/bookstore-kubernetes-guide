@@ -147,7 +147,7 @@ full list, with IDs, is in `THREAT-MODEL.md`.
 |---|---|---|---|---|
 | S | Spoofing | A Pod calls the API as another identity (S1) | Its own ServiceAccount, `automountServiceAccountToken: false` | review |
 | T | Tampering | A process rewrites its own image (T1) | `readOnlyRootFilesystem: true`, writable `emptyDir` for `/tmp` | baseline |
-| R | Repudiation | An apply leaves no record of who made it (RP1) | API server audit policy | open until [05.08](../05-security/08-audit-detection-and-incident-response.md) |
+| R | Repudiation | An apply leaves no record of who made it (RP1) | API server audit policy | `later`: [05.08](../05-security/08-audit-detection-and-incident-response.md) runs one on a throwaway kind cluster, and the guide's standard cluster has no audit flag |
 | I | Information disclosure | A Secret read straight from etcd (I1) | Encryption at rest, and only the API server reaches etcd | cluster |
 | D | Denial of service | One Pod exhausts a node's memory (D1) | Requests and a memory limit | review |
 | E | Elevation of privilege | A root process reaches host resources (E1) | `runAsNonRoot: true`, UID 65532 | baseline |
@@ -436,8 +436,10 @@ The guide's gates check a chapter in four steps:
 - **Evidence.** Each output block is matched line by line against the lab
   transcript for its chapter.
 
-No gate reads `THREAT-MODEL.md` yet. The model is for people. Part 05 is the
-first place it is checked against the manifests.
+No gate reads `THREAT-MODEL.md`, so the rule that a change to a workload
+changes the model in the same pull request is a review rule, and nothing
+enforces it. The model is for people. [05.00](../05-security/00-the-attackers-view.md)
+reads its rows against a lab, by hand.
 
 ## Production notes
 

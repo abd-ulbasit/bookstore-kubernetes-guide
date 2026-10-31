@@ -126,7 +126,9 @@ run on real GitHub runners.** The shape of the change:
   habit of extending it.
 * **Follow-ups:**
   * The cluster-wide `restricted` default lands last, after every Part
-    complies (chapter 00.07).
+    complies (chapter 00.07). Every Part is now on the enforced list, and the
+    default is still not set: 00.07 runs a plain `kind create cluster`, and
+    Pod Security applies per namespace, through labels.
   * `hostUsers: false` joins the baseline only when it is verified on kind
     on Linux and macOS hosts.
   * The pipeline's signing, provenance and promotion steps are proven by

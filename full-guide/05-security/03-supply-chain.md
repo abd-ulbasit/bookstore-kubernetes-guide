@@ -291,12 +291,75 @@ trivy with vex.json: 1 finding(s)
 ```
 
 Both scanners still report one finding. A statement that leaves a finding
-open does not hide it, and that is the first thing VEX has to get right. The
-lab writes no `not_affected` statement. That claim says the vulnerable code is
-absent or cannot run, and only someone who checks the call path can make it.
-The [OpenVEX specification](https://github.com/openvex/spec) lists the
+open does not hide it, and that is the first thing VEX has to get right. A
+`not_affected` statement is the one that suppresses, and it says the vulnerable
+code is absent or cannot run, which only someone who checks the call path can
+claim. The [OpenVEX specification](https://github.com/openvex/spec) lists the
 justifications a reviewer chooses from, and the status and justification
 values it allows.
+
+### Step 7b: a `not_affected` statement, backed by a call-path check
+
+The step above ran on the catalog image. This one runs on the catalog's Go
+module list, with Syft reading the source directory, so it has no operating
+system packages. It is a second script,
+[`labs/05-03-vex.sh`](../examples/security-lab/labs/05-03-vex.sh), run from
+`full-guide/` with no cluster, and its output is appended to the same
+transcript. Trivy reports one finding on that SBOM, the same advisory as
+above:
+
+```sh
+trivy sbom --quiet --format json --scanners vuln catalog.cdx.json
+```
+
+<!-- gate: output -->
+```text
+CVE-2026-39824 golang.org/x/sys v0.34.0 UNKNOWN
+```
+
+Before anyone writes `not_affected`, the claim needs evidence. `govulncheck`
+reads the Go source and reports an advisory at one of three levels: a symbol
+the code calls, a package it imports, or only a module it requires. Asked
+about the Go advisory that carries this CVE, it answers at module level:
+
+<!-- gate: output -->
+```text
+   1 module
+# ...
+Invoking integer overflow in NewNTUnicodeString in golang.org/x/sys/windows
+```
+
+The vulnerable function is in a Windows-only package, and the catalog does not
+call it. That supports the justification `vulnerable_code_not_in_execute_path`,
+and the statement carries the reason in its `impact_statement` so the next
+reader can check it:
+
+<!-- gate: output -->
+```text
+not_affected vulnerable_code_not_in_execute_path CVE-2026-39824
+```
+
+Trivy, with and without the statement:
+
+<!-- gate: output -->
+```text
+trivy without a statement: 1 finding(s)
+```
+
+<!-- gate: output -->
+```text
+trivy with the not_affected statement: 0 finding(s)
+```
+
+The finding is suppressed, and the statement says why in a field a tool reads.
+Three limits. The statement is tied to a version of the module: when
+`golang.org/x/sys` moves, the statement names a product that is no longer in
+the SBOM, and the scan reports whatever the new version has. The same advisory
+has a different identifier in Grype (step 6), so a statement for one scanner's
+identifier does not suppress the other scanner's finding, and this run used
+Trivy only. And `govulncheck` shows the call path today. A change that calls
+the function makes the statement false without any scanner noticing, which is
+why a `not_affected` statement needs an owner and a review date.
 
 ### Step 8: sign the digest
 

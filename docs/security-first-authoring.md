@@ -47,9 +47,13 @@ spec:
   default-deny NetworkPolicy plus explicit allows.
 - **User namespaces.** `hostUsers: false` joins the baseline only once it is
   verified on kind on Linux and macOS hosts. Until then 05.02 teaches it.
-- **Cluster.** 00.07 builds a cluster that enforces NetworkPolicy and sets
-  `restricted` as the cluster-wide default. The default lands last, after
-  every Part complies.
+- **Cluster.** 00.07 builds a kind cluster whose default CNI enforces
+  NetworkPolicy. It does not yet set `restricted` as the cluster-wide default:
+  it runs plain `kind create cluster`, and Pod Security applies per namespace,
+  through labels. The cluster-wide default is a follow-up that lands last, after
+  every Part complies. Every Part is now enforced, so what remains is the
+  change itself: a kind config that mounts an AdmissionConfiguration for the
+  PodSecurity plugin, and a check that a bare Pod in a new namespace is refused.
 
 ## 2. The chapter contract
 
@@ -110,7 +114,9 @@ misspelt marker cannot leave output unchecked.
 
 **Link later.** A chapter that does not exist yet is named in plain text
 with `<!-- link-later: 05.05 -->` beside it, never linked. The strict build
-passes and a later pass can grep for them.
+passes, and `.github/scripts/check_link_later.py` (run by `make validate-links`
+and by the docs workflow) fails a marker whose chapter now exists, so the
+reference has to become a link.
 
 ## 4. Part 05 and the boundary rule
 

@@ -25,7 +25,7 @@
 #
 # DELIBERATELY EXCLUDED from base (kept vanilla-cluster-clean — zero
 # `no matches for kind` on a plain cluster):
-#   - teaching pods 01-/02- (live in `default`, frozen object-model snapshots)
+#   - the bare-Pod teaching files 01-/02- (applied by hand with `-n bookstore`)
 #   - 17-storageclass (opt-in; postgres binds the cluster default class)
 #   - the CRD-backed / variant extras 18- 30- 51- 70- 80- 81- 83- — these are
 #     Kustomize COMPONENTS under ../components/, opted into per overlay exactly

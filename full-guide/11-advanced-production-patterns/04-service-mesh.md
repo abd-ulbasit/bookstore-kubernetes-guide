@@ -28,7 +28,8 @@ hands-on says which steps are cited instead of captured.
 By [Part 02 ch.06](../02-networking/06-network-policies.md) the Bookstore had a
 default-deny NetworkPolicy: L3/L4 segmentation, who-may-connect-to-whom by
 label. By [Part 05 ch.01](../05-security/01-authn-authz-rbac.md) it had RBAC
-and per-service ServiceAccounts — but that chapter ended on an explicit gap:
+and per-service ServiceAccounts, and that chapter shows the Kubernetes API
+issuing a workload certificate to a Pod. What is still missing is a peer check:
 **a NetworkPolicy proves a packet came from a Pod with label `app: catalog`;
 it does not cryptographically prove the *workload identity* of the caller, and
 nothing encrypts catalog→postgres on the wire.** A compromised Pod that
@@ -729,8 +730,9 @@ kind delete cluster --name bookstore
   the workload; the proxy presents it on every connection and validates the
   peer's. `PeerAuthentication: STRICT` makes a proxy **refuse** any non-mTLS
   connection; `PERMISSIVE` accepts both (the migration mode). This is the
-  cryptographic workload identity [Part 05 ch.01](../05-security/01-authn-authz-rbac.md)
-  pointed at — proven by a rotating certificate chained to the mesh CA, not
+  cryptographic workload identity that [Part 05 ch.01](../05-security/01-authn-authz-rbac.md)
+  shows the Kubernetes API issuing with Pod certificates, proven by a rotating
+  certificate chained to the mesh CA, not
   asserted by a Pod label a compromised neighbour could also carry. Authorization
   policies (Istio `AuthorizationPolicy`) then allow/deny **by SPIFFE identity**
   at L7 — identity-aware authz NetworkPolicy's L3/L4 model cannot express.
@@ -784,10 +786,11 @@ kind delete cluster --name bookstore
   1.35 to 1.36, and stable in 1.37, and ClusterTrustBundle as alpha in 1.27,
   beta in 1.33 to 1.36, and stable in 1.37
   ([feature gates](https://kubernetes.io/docs/reference/command-line-tools-reference/feature-gates/)).
-  This chapter does not use them: the mesh's own CA issues the SVIDs. Workload
-  X.509 identity belongs to [Part 05 ch.01](../05-security/01-authn-authz-rbac.md),
-  and whether a given mesh can consume Pod certificates is a question for that
-  mesh's own documentation.
+  This chapter does not use them: the mesh's own CA issues the SVIDs.
+  [Part 05 ch.01](../05-security/01-authn-authz-rbac.md) runs the API on kind
+  with a lab signer and shows a Pod receiving a certificate, and a second Pod
+  refused. Whether a given mesh can consume Pod certificates is a question for
+  that mesh's own documentation.
 
 ## Production notes
 

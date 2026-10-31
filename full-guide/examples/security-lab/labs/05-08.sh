@@ -17,7 +17,7 @@
 #   LAB_HOST  ssh alias of the Linux host that runs kind. Empty: this machine.
 #   KIND_BIN  kind on that host. Default: kind.
 #   LAB_PORT  API server port to forward to this machine. Default: 36081.
-#   LAB_MODE  throwaway (the default), shared or full. See below.
+#   LAB_MODE  throwaway (the default), audit, shared or full. See below.
 #   LAB_CONTEXT  full mode only: the kubectl context of the kind cluster the
 #             run may use. Required, and it must start with kind-.
 #   LAB_NODE  full mode only: the node that runs Falco and the lab Pod.
@@ -25,9 +25,12 @@
 #   STEPS     full mode only: the steps to run, in order. Default: all of them.
 #
 # LAB_MODE=throwaway makes the p05-08 cluster with the audit policy and runs
-# every step. LAB_MODE=shared runs only the attack and response steps that need
-# no API server flag and no heavy install, on the shared cluster that KUBECONFIG
-# names (kind-sf-pilot). Use shared only on a cluster you own.
+# every step. LAB_MODE=audit makes the same cluster and runs every step except
+# the Falco and Trivy Operator installs, which are heavy, so the audit log can
+# be read on a host that cannot also carry those installs. LAB_MODE=shared runs
+# only the attack and response steps that need no API server flag and no heavy
+# install, on the shared cluster that KUBECONFIG names (kind-sf-pilot). Use
+# shared only on a cluster you own.
 #
 # LAB_MODE=full installs Falco and Trivy Operator, one after the other, on the
 # kind cluster that LAB_CONTEXT names, triggers real detections with a shell
@@ -153,6 +156,7 @@ query_audit() {
   python3 - "$WORK/audit.log" "$1" <<'PY'
 import json
 import sys
+from urllib.parse import parse_qs, urlparse
 
 LAB = ("attack", "p05-08-app")
 path, mode = sys.argv[1], sys.argv[2]
@@ -185,8 +189,9 @@ for line in open(path):
               f"  sa={spec.get('serviceAccountName', '-')}"
               f" privileged={str(priv).lower()} hostPath={','.join(vols) or '-'}")
     elif mode == "exec" and ref.get("subresource") == "exec":
-        cmd = " ".join((e.get("requestObject") or {}).get("command", []))
-        print(f"{user:<44} exec   pods/{name:<12} {code}  command={cmd}")
+        # An exec request has no body, so the command is in the request URI.
+        cmd = " ".join(parse_qs(urlparse(e.get("requestURI", "")).query).get("command", []))
+        print(f"{user:<44} {e['verb']:<6} pods/{name:<12} {code}  command={cmd}")
     elif mode == "tokens" and ref.get("subresource") == "token":
         print(f"{user:<44} {e['verb']:<6} serviceaccounts/{name} {code}")
     elif mode == "refused" and code == 403:
@@ -911,6 +916,9 @@ show "kubectl apply -f escape-app.yaml" "kubectl apply -f $WORK/escape-app.yaml"
 show "kubectl --kubeconfig=work/builder.kubeconfig auth can-i create pods -n p05-08-app" \
   "KUBECONFIG=$WORK/builder.kubeconfig kubectl auth can-i create pods -n p05-08-app"
 if [ "$LAB_MODE" != shared ]; then
+# The log has grown since the first read, so read it again.
+show "docker exec $NODE cat /var/log/kubernetes/kube-apiserver-audit.log > work/audit.log" \
+  "docker exec $NODE cat /var/log/kubernetes/kube-apiserver-audit.log > $WORK/audit.log"
 show "query: requests refused with 403" "query_audit refused"
 fi
 
@@ -988,7 +996,7 @@ show "kubectl apply --dry-run=server -f operator-probe.yaml; echo \"server dry-r
 show "kubectl apply --dry-run=server -f operator-probe-root.yaml; echo \"server dry-run exit=\$?\"" \
   "cd $WORK && kubectl apply --dry-run=server -f operator-probe-root.yaml; echo \"server dry-run exit=\$?\""
 
-if [ "$LAB_MODE" != shared ]; then
+if [ "$LAB_MODE" = throwaway ]; then
 CP0=$(cp_restarts)
 for s in F2 F3 F4 F5 F6 F7; do "step_$s" || exit 1; done
 fi
@@ -1028,6 +1036,7 @@ show "kubectl describe pod escape-node -n attack > evidence/describe.txt" \
 show "kubectl logs escape-node -n attack > evidence/logs.txt" \
   "kubectl logs escape-node -n attack > $WORK/evidence/logs.txt"
 if [ "$LAB_MODE" != shared ]; then
+docker exec "$NODE" cat /var/log/kubernetes/kube-apiserver-audit.log > "$WORK/audit.log"
 show "query: exec and create events for escape-node, from the audit log" \
   "query_audit exec > $WORK/evidence/audit-exec.txt; cat $WORK/evidence/audit-exec.txt"
 fi
