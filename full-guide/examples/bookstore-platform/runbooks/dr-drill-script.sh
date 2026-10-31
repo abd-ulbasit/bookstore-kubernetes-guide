@@ -126,11 +126,14 @@ fi
 # --------------------------------------------------------------------
 log "PHASE 5: verify checkout against $TARGET_REGION"
 VERIFY_START=$(date +%s)
+VERIFIED=0
 for i in 1 2 3; do
-  STATUS=$(curl -sk -o /dev/null -w "%{http_code}" \
-    "https://gateway.bookstore-platform.example.com/healthz" 2>/dev/null || echo "000")
+  # TLS is verified against the edge CA exported in ch.13.07.
+  STATUS=$(curl -s --cacert "${EDGE_CA:-edge-ca.crt}" -o /dev/null -w "%{http_code}" \
+    "${GATEWAY_URL:-https://localhost:8443/static/index.html}" 2>/dev/null || echo "000")
   log "Verify attempt $i: HTTP $STATUS"
   if [[ "$STATUS" == "200" ]]; then
+    VERIFIED=1
     break
   fi
   sleep 5
@@ -161,7 +164,7 @@ cat > "$DRILL_LOG" <<EOF
 - Human action: trend toward zero over months
 
 ## Result
-- **PASS / FAIL**: $([ $RTO_ACTUAL -lt 1800 ] && [ $RPO_ACTUAL -lt 300 ] && echo PASS || echo FAIL)
+- **PASS / FAIL**: $([ $RTO_ACTUAL -lt 1800 ] && [ $RPO_ACTUAL -lt 300 ] && [ $VERIFIED -eq 1 ] && echo PASS || echo FAIL)
 - RTO actual:        ${RTO_ACTUAL}s
 - RPO actual:        ${RPO_ACTUAL}s
 - Human action time: ${HUMAN_ACTION_TIME}s

@@ -107,7 +107,7 @@ are hypothesis-driven, blast-radius-bounded, postmortem-closed.**
   - **Hypothesis** — a falsifiable claim ("storefront stays up
     when one payments-gateway Pod dies").
   - **Safety boundary** — what we WON'T break (no chaos in
-    production; one Pod max; 60 second duration).
+    production; one Pod, one namespace; a stated duration).
   - **Experiment** — the Chaos Mesh CR.
   - **Observe** — against the SLO (the Prometheus dashboard +
     the Grafana panel for active alerts).
@@ -126,6 +126,15 @@ exercised at least once per quarter, either in a chaos game-day
 (intentional) or a real incident (unfortunate). Runbooks not
 exercised in 90 days carry a banner: "STALE — exercise before
 trusting."
+
+## Threats and controls
+
+| Threat | Control in this chapter | Deeper |
+|---|---|---|
+| Break-glass admin access outlives the incident | Humans bind `bookstore-platform-admin` only through the gate in hands-on section 6: a named binding, an expiry annotation, and removal at exit | [05.01](../05-security/01-authn-authz-rbac.md) |
+| A chaos fault reaches past the service it targets | One namespace and `mode: one` per experiment, a stated duration, and game-days in staging only | [11.07](../11-advanced-production-patterns/07-chaos-engineering.md) |
+| The chaos daemon runs privileged on every node | `privileged` is set on the `chaos-mesh` namespace alone; the experiments namespace stays `restricted` | [05.02](../05-security/02-pod-security.md) |
+| A failover serves traffic from data nobody measured | The drill scores RTO, RPO and a checkout check after cutover, and passes only when all three meet target | [08.02](../08-day-2-operations/02-backup-and-dr.md) |
 
 ## Diagrams
 
@@ -199,18 +208,77 @@ flowchart LR
   PagerDuty receiver.
 - ch.13.03 ran. Multi-region clusters exist; ApplicationSet is live.
 - [Part 11 ch.07](../11-advanced-production-patterns/07-chaos-engineering.md)
-  ran or Chaos Mesh is installed:
+  ran or Chaos Mesh is installed. Create the namespace first, labelled
+  `privileged`, because the chaos daemon needs it. Save this as
+  `chaos-mesh-namespace.yaml`:
+
+```yaml
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: chaos-mesh
+  labels:
+    app.kubernetes.io/part-of: bookstore-platform
+    pod-security.kubernetes.io/enforce: privileged
+    pod-security.kubernetes.io/enforce-version: latest
+    pod-security.kubernetes.io/audit: restricted
+    pod-security.kubernetes.io/audit-version: latest
+    pod-security.kubernetes.io/warn: restricted
+    pod-security.kubernetes.io/warn-version: latest
+```
+
+Install into that namespace. `--create-namespace` is left out, because it
+would create the namespace without these labels:
 
 ```sh
 CHAOS_MESH_VERSION="2.7.0"
 
+kubectl apply -f chaos-mesh-namespace.yaml
 helm repo add chaos-mesh https://charts.chaos-mesh.org
 helm install chaos-mesh chaos-mesh/chaos-mesh \
   --version "$CHAOS_MESH_VERSION" \
-  -n chaos-mesh --create-namespace --wait \
+  -n chaos-mesh --wait \
   --set 'chaosDaemon.runtime=containerd' \
-  --set 'chaosDaemon.socketPath=/run/containerd/containerd.sock'
+  --set 'chaosDaemon.socketPath=/run/containerd/containerd.sock' \
+  --set 'dashboard.create=false'
 ```
+
+The chart defaults to `chaosDaemon.privileged: true` ([chart values at
+v2.7.0](https://github.com/chaos-mesh/chaos-mesh/blob/v2.7.0/helm/chaos-mesh/values.yaml)).
+The DaemonSet also sets
+`hostPID: true` even when `privileged` is false, as the chart renders with
+`privileged=false` shows. Baseline forbids host namespaces and privileged
+containers, so the namespace cannot be narrower than `privileged`. The
+dashboard is optional and has a web surface of its own, so this chapter turns
+it off.
+
+The chapter's captured run did not install the chart, because the shared lab
+lock for heavy installs was busy. It checks the daemon with a render and
+server-side dry runs, which creates nothing:
+
+```sh
+helm template chaos-mesh chaos-mesh/chaos-mesh --version "$CHAOS_MESH_VERSION" \
+  -n chaos-mesh \
+  --set 'chaosDaemon.runtime=containerd' \
+  --set 'chaosDaemon.socketPath=/run/containerd/containerd.sock' \
+  --set 'dashboard.create=false' \
+  --show-only templates/chaos-daemon-daemonset.yaml \
+  --show-only templates/controller-manager-deployment.yaml \
+  | kubectl apply --dry-run=server -f -
+```
+
+<!-- gate: output -->
+```text
+Warning: would violate PodSecurity "restricted:latest": host namespaces (hostPID=true), privileged (container "chaos-daemon" must not set securityContext.privileged=true), allowPrivilegeEscalation != false (container "chaos-daemon" must set securityContext.allowPrivilegeEscalation=false), unrestricted capabilities (container "chaos-daemon" must set securityContext.capabilities.drop=["ALL"]; container "chaos-daemon" must not include "SYS_PTRACE" in securityContext.capabilities.add), restricted volume types (volumes "socket-path", "sys-path", "lib-modules" use restricted volume type "hostPath"), runAsNonRoot != true (pod or container "chaos-daemon" must set securityContext.runAsNonRoot=true), seccompProfile (pod or container "chaos-daemon" must set securityContext.seccompProfile.type to "RuntimeDefault" or "Localhost")
+daemonset.apps/chaos-daemon created (server dry run)
+# ...
+```
+
+The output in this chapter came from a kind cluster named `sf-pilot`, and its
+namespaces had lab names (`p13-12-chaos-mesh` and `p13-12-experiments`). The
+output is verbatim, so it keeps those names. The Warning line is Pod Security
+admission reporting what `restricted` would refuse in the daemon, and the
+`privileged` label is what lets the daemon through.
 
 ### 1. Apply the runbook tree
 
@@ -230,9 +298,60 @@ ls examples/bookstore-platform/runbooks/
 kubectl apply -f examples/bookstore-platform/runbooks/chaos-experiments.yaml
 ```
 
+The file creates the `chaos-mesh-experiments` namespace, labelled
+`restricted`, and the Workflow. Until Chaos Mesh is installed, the Workflow is
+refused, and the namespace is still created. The lab ran a copy of this file
+with the namespace renamed, so the output names that copy:
+
+<!-- gate: output -->
+```text
+namespace/p13-12-experiments created
+error: resource mapping not found for name: "bookstore-platform-quarterly-gameday" namespace: "p13-12-experiments" from "chaos-experiments-lab.yaml": no matches for kind "Workflow" in version "chaos-mesh.org/v1alpha1"
+ensure CRDs are installed first
+```
+
+The lab also walked each field of the Workflow against the schema that the
+2.7.0 chart ships in its CRDs. The walk found no field the schema lacks:
+
+<!-- gate: output -->
+```text
+templateType values used: DNSChaos, HTTPChaos, IOChaos, NetworkChaos, PodChaos, Serial, Suspend
+keys checked against the 2.7.0 Workflow schema: 87
+keys not in the 2.7.0 Workflow schema: none
+templates whose body key does not match templateType: none
+```
+
+Experiments have no privilege of their own, so `restricted` stays on their
+namespace. A probe Pod that asks for `privileged` shows the boundary. The
+first is a deliberate failure, and the second is the same request in the
+daemon's namespace:
+
+```sh
+# Deliberate failure: a privileged Pod is refused in the experiments namespace
+kubectl -n chaos-mesh-experiments run probe --image=registry.k8s.io/pause:3.10 \
+  --privileged --dry-run=server -- sleep 60
+```
+
+<!-- gate: output -->
+```text
+Error from server (Forbidden): pods "probe" is forbidden: violates PodSecurity "restricted:latest": privileged (container "probe" must not set securityContext.privileged=true), allowPrivilegeEscalation != false (container "probe" must set securityContext.allowPrivilegeEscalation=false), unrestricted capabilities (container "probe" must set securityContext.capabilities.drop=["ALL"]), runAsNonRoot != true (pod or container "probe" must set securityContext.runAsNonRoot=true), seccompProfile (pod or container "probe" must set securityContext.seccompProfile.type to "RuntimeDefault" or "Localhost")
+```
+
+```sh
+# The daemon's namespace admits the same request
+kubectl -n chaos-mesh run probe --image=registry.k8s.io/pause:3.10 \
+  --privileged --dry-run=server -- sleep 60
+```
+
+<!-- gate: output -->
+```text
+# ...
+pod/probe created (server dry run)
+```
+
 ### 2. Walk a runbook end-to-end
 
-The alert fires at 3am:
+The alert fires at 3am (illustrative output, not captured):
 
 ```text
 [PAGE] BookstoreCatalogP99Latency
@@ -256,7 +375,7 @@ kubectl --context kind-bookstore-platform-us-east -n bookstore-platform-acme-boo
 kubectl --context kind-bookstore-platform-us-east -n prometheus-system exec -ti prometheus-kube-prometheus-stack-prometheus-0 -- \
   promtool query instant http://localhost:9090 \
   'histogram_quantile(0.99, sum by (le) (rate(http_request_duration_seconds_bucket{service="catalog",tenant="acme-books"}[5m])))'
-# 0.873   <- confirmed, real
+# 0.873   <- illustrative result: confirmed, real
 ```
 
 Step 2 (Diagnose): the runbook walks an ordered tree (DB? CPU? Pod
@@ -274,27 +393,26 @@ bash examples/bookstore-platform/runbooks/dr-drill-script.sh \
   --target-region eu-west \
   --dry-run=false
 
-# Sample output:
+# Illustrative output, not captured:
 # [00:00] DR DRILL STARTED — us-east -> eu-west failover
-# [00:01] Pre-flight: checking eu-west cluster health... OK
-# [00:02] Pre-flight: checking CNPG replication lag... 2s (target < 5s) OK
+# [00:02] Pre-flight: CNPG replication lag = 2s (target < 5s)
 # [00:03] PHASE 1: cordon + drain us-east
 # [03:42] PHASE 2: promote eu-west CNPG to primary
-# [05:18] PHASE 3: update Argo CD ApplicationSet target
+# [05:18] PHASE 3: update ApplicationSet target to eu-west
 # [08:33] PHASE 4: update DNS to point at eu-west
-# [12:00] PHASE 5: verify checkout flow against eu-west
-# [12:42] DRILL PASSED
+# [12:00] PHASE 5: verify checkout against eu-west
+# [12:42] DRILL ENDED: the stub's Result line reads PASS
 #   RTO actual:        12m42s   (target: 30m)
 #   RPO actual:        3s       (target: 5m)
 #   Human action time: 2m11s    (last drill: 4m02s)
-# Postmortem: examples/bookstore-platform/runbooks/dr-drill-2026-05-01.md
+# Stub: runbooks/dr-drill-<date>.md. Add the postmortem from postmortem-template.md.
 ```
 
 ### 4. Run a chaos game-day experiment
 
 ```sh
 # The Chaos Mesh Workflow defines 5 experiments + a 10-min observation
-# window. Each experiment has a hypothesis + abort condition.
+# window. Each experiment has a hypothesis and a stop rule.
 kubectl apply -f examples/bookstore-platform/runbooks/chaos-experiments.yaml
 
 # Start with the simplest experiment (pod-kill on payments-gateway)
@@ -314,14 +432,15 @@ spec:
       app: payments-gateway
 EOF
 
-# Watch the storefront stay up
-watch -n 5 'curl -sk -o /dev/null -w "%{http_code} %{time_total}s\n" https://gateway.bookstore-platform.example.com/healthz'
+# Watch the storefront stay up (the port-forward from ch.13.07 step 5 runs)
+watch -n 5 'curl -s --cacert edge-ca.crt -o /dev/null -w "%{http_code} %{time_total}s\n" https://localhost:8443/static/index.html'
+# Illustrative output, not captured:
 # 200 0.012s
 # 200 0.014s
 # 200 0.011s
 # ...
-# (Pod killed; PodDisruptionBudget enforces minAvailable: 2; the
-#  service stays available.)
+# (Illustrative. The storefront stays up only while payments-gateway has
+#  another ready replica. This tree ships no PodDisruptionBudget for it.)
 
 # Inspect the postmortem template
 cat examples/bookstore-platform/runbooks/postmortem-template.md
@@ -334,22 +453,65 @@ The Chaos Mesh Workflow in
 5 Chaos Mesh experiments + an optional cordon-based region-loss
 simulation in `dr-drill-script.sh`. The five Chaos Mesh CRs:
 
-1. **PodChaos — pod-kill** on payments-gateway (test PDB).
+1. **PodChaos — pod-kill** on payments-gateway (tests the replica count and
+   any PodDisruptionBudget you add first).
 2. **NetworkChaos — network-delay** on catalog → orders (test timeouts + retries).
-3. **StressChaos — io-stress** on the CNPG node (test replication failover).
-4. **DNSChaos — region-DNS-loss** (resolve `*.bookstore-platform.example.com`
-   to NXDOMAIN) — disrupts what the *application* sees of remote
+3. **IOChaos — io-latency** on the CNPG primary's data volume (test
+   replication lag and failover).
+4. **DNSChaos — region-DNS-loss** (DNS queries for
+   `*.bookstore-platform.example.com` return an error, in one tenant
+   namespace) — disrupts what the *application* sees of remote
    regions; complements the cordon-based simulation in
    `dr-drill-script.sh` which disrupts what the *cluster* sees of its
    own nodes. Tests the DR runbook + saga compensation.
-5. **HTTPChaos — payments-gateway-failure** (HTTP 500 from Stripe webhook) —
-   tests the saga compensation (ch.13.06).
+5. **HTTPChaos — payments-failure** (the webhook receiver answers 500 for
+   three minutes) — tests the saga compensation (ch.13.06).
 
 Each experiment has:
 - A hypothesis ("storefront stays up").
-- An abort condition (a Prometheus query that fails the experiment).
+- A stop rule: the on-call deletes the Workflow when the burn-rate alert
+  pages. Chaos Mesh's `statusCheck` can abort a Workflow, but only on an
+  HTTP status code (the 2.7.0 Workflow CRD), not on a PromQL value, so an
+  automatic abort needs a probe endpoint that this chapter does not build.
 - A 10-minute observation window.
 - A postmortem requirement (even if the experiment passed).
+
+### 6. Bind the break-glass role only through the gate
+
+`bookstore-platform-admin` is cluster-admin in all but name
+([13.01](01-bookstore-2-from-toy-to-platform.md)), so a human binds it
+through this gate and nothing else does:
+
+1. The responder asks in the incident channel, with the incident ID, and
+   the incident commander approves in the same thread. A bot or a shared
+   account does not qualify.
+2. Bind a named ClusterRoleBinding to that person's OIDC identity, with a
+   label and an expiry:
+
+```sh
+INCIDENT="<incident-id>"
+kubectl create clusterrolebinding "breakglass-$INCIDENT" \
+  --clusterrole=bookstore-platform-admin \
+  --user="<oidc-subject-of-the-responder>"
+kubectl label clusterrolebinding "breakglass-$INCIDENT" \
+  bookstore-platform.example.com/break-glass=true
+kubectl annotate clusterrolebinding "breakglass-$INCIDENT" \
+  bookstore-platform.example.com/expires-at="<UTC time, four hours out>"
+```
+
+3. At the start of each shift, and at the end of the incident, list the
+   bindings that are still open:
+
+```sh
+kubectl get clusterrolebindings -l bookstore-platform.example.com/break-glass=true
+```
+
+4. Delete the binding when the incident ends, and record the time in the
+   postmortem.
+
+Kubernetes does not expire a binding on its own. The shift check reads the
+annotation. The sweeper that would delete expired bindings is listed under
+what we did not build.
 
 ## How it works under the hood
 
@@ -392,12 +554,13 @@ ships them.
 1. **State the hypothesis** clearly. "When one catalog Pod dies,
    the storefront stays up and the catalog p95 latency stays under
    100 ms." Not "let's see what happens."
-2. **Bound the blast radius.** One Pod. 60 seconds. One namespace.
-   No production. The smallest fault that tests the hypothesis.
-3. **Define the abort condition.** A Prometheus query that fails
-   the experiment fast: "5xx rate > 5 % in any 10-second window."
-   Chaos Mesh can read the query (the `statusCheck` field) and
-   abort.
+2. **Bound the blast radius.** `mode: one`, one namespace, and a duration
+   in the manifest. No production. The smallest fault that tests the
+   hypothesis.
+3. **Define the stop rule before the run.** For example, "5xx rate > 5 %
+   in any 10-second window." Chaos Mesh's `statusCheck` can stop a
+   Workflow only on an HTTP status, so the on-call stops it by hand
+   unless a probe endpoint exists.
 4. **Run + observe.** Watch the SLO dashboards. Did the hypothesis
    hold? If yes, the resilience control works; if no, an
    incident-in-staging that you found controlled.
@@ -507,6 +670,9 @@ the core operational story; deliberately deferred to follow-up work:
   An aspirational end-state; v2 keeps the human in the loop for
   every page. Auto-remediation requires deep confidence in the
   mitigation correctness; we are honest that we are not there.
+- **Automatic break-glass expiry.** Kubernetes does not expire a binding,
+  and this chapter builds no sweeper for expired ones. The shift check and
+  the exit step carry the control until one exists.
 
 ## Closing the platform-v2 thread
 
@@ -579,23 +745,29 @@ For the next step:
 ## Quick Reference
 
 ```sh
-# Pinned install (Chaos Mesh; the other stacks are from previous chapters)
+# Pinned install (Chaos Mesh; the other stacks are from previous chapters).
+# The namespace comes first, labelled privileged: section 0 has the manifest.
+kubectl apply -f chaos-mesh-namespace.yaml
 CHAOS_MESH_VERSION="2.7.0"
 
 helm repo add chaos-mesh https://charts.chaos-mesh.org
-helm install chaos-mesh chaos-mesh/chaos-mesh --version "$CHAOS_MESH_VERSION" -n chaos-mesh --create-namespace --wait
+helm install chaos-mesh chaos-mesh/chaos-mesh --version "$CHAOS_MESH_VERSION" \
+  -n chaos-mesh --wait \
+  --set 'chaosDaemon.runtime=containerd' \
+  --set 'chaosDaemon.socketPath=/run/containerd/containerd.sock' \
+  --set 'dashboard.create=false'
 
-# Apply the runbook tree's Chaos Mesh Workflow
+# Apply the experiments namespace and the Workflow (after the install)
 kubectl apply -f examples/bookstore-platform/runbooks/chaos-experiments.yaml
 
-# Run the monthly DR drill
+# Run the monthly DR drill (a dry run unless --dry-run=false is added)
 bash examples/bookstore-platform/runbooks/dr-drill-script.sh --region us-east --target-region eu-west
 
-# Trigger one chaos experiment manually
-kubectl apply -f examples/bookstore-platform/runbooks/chaos-experiments.yaml
+# Break-glass: list the admin bindings that are still open
+kubectl get clusterrolebindings -l bookstore-platform.example.com/break-glass=true
 ```
 
-Minimal skeletons:
+Minimal runbook skeleton:
 
 ```markdown
 # runbook-<ALERT>.md
@@ -620,24 +792,6 @@ Minimal skeletons:
 ## Postmortem
 - Template: ../runbooks/postmortem-template.md
 - Within 48h for P0/P1.
-```
-
-```yaml
-# Chaos Mesh Workflow (sketch — full at runbooks/chaos-experiments.yaml)
-apiVersion: chaos-mesh.org/v1alpha1
-kind: Workflow
-metadata: { name: <NAME>, namespace: chaos-mesh-experiments }
-spec:
-  entry: gameday-q1
-  templates:
-    - name: gameday-q1
-      templateType: Serial
-      children:
-        - pod-kill-payments
-        - network-delay-catalog
-        - io-stress-cnpg
-        - region-loss-us-east
-        - payments-failure
 ```
 
 Closing checklist (the Day-2 story closed when all seven are yes):
@@ -707,6 +861,22 @@ Closing checklist (the Day-2 story closed when all seven are yes):
    <details><summary>Show answer</summary>
 
    Open-ended; common reflections: "**Desired state + reconcile loop**" — every controller (deployment, HPA, Argo CD, Crossplane, KServe, operator) is the same pattern at different layers. Once you see it, Kubernetes stops being a list of resource types and starts being a single idea applied recursively. "**Composition**" — Pod is built from Container + SecurityContext + Volume + Probes; Deployment is built from Pods + replicas + strategy; the platform is built from Deployments + Crossplane + Argo CD; every abstraction up the stack is the same compositional model. "**The seam is the API server**" — workloads, infrastructure, identity, policy, all converge on apiserver objects; if you can describe it as a CRD, you can compose it. The point: the guide is one idea taught at 13 levels of zoom. Pick the framing that resonates and use it as your mental model going forward.
+
+   </details>
+
+8. **Chaos Mesh needs privilege that the rest of the guide forbids.
+   Which namespace carries it, which namespace carries the experiments,
+   and what stops an experiment from placing a privileged Pod in the
+   experiments namespace?**
+   <details><summary>Show answer</summary>
+
+   The daemon's namespace, `chaos-mesh`, is labelled `privileged` for
+   enforce, because the chart's DaemonSet sets `hostPID: true` and runs a
+   privileged container. The experiments namespace stays `restricted`:
+   the Workflow and the chaos objects need no privilege of their own, and
+   admission refuses a privileged Pod placed there, as the probe in
+   hands-on section 1 shows. The exception is one namespace with a
+   registry entry that expires, so it stays visible and bounded.
 
    </details>
 
