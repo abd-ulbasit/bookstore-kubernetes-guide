@@ -100,3 +100,16 @@ paths = [
   '''full-guide/examples/security-lab/evidence/13-06\.txt''',
 ]
 regexes = ['''sk_test_labonl[y]123''']
+
+[[allowlists]]
+description = """07.02 shows that secretGenerator puts a value in the rendered \
+file, using the literal demo-only-value, base64-encoded. It authenticates \
+nothing, and the chapter's point is that the rendered file holds it."""
+targetRules = ["generic-api-key"]
+condition = "AND"
+paths = [
+  '''^full-guide/07-delivery/02-packaging-kustomize\.md$''',
+  '''^full-guide/examples/security-lab/evidence/07-02\.txt$''',
+]
+regexTarget = "line"
+regexes = ['''password: ZGVtby1vbmx5LXZhbHVl''']
