@@ -88,6 +88,27 @@ exceptions:
     chapter: 13-grand-capstone-bookstore-platform/02-tenancy-and-crossplane-onboarding.md
     expires: 2027-06-30
 
+  - namespace: istio-system
+    level: baseline
+    reason: >-
+      Istiod, the Istio control plane, has no pod-level seccomp setting in the
+      istio/istiod 1.30.7 chart, and restricted requires one. The pod admits at
+      baseline. The ingress gateway in the same namespace sets seccomp and
+      admits at restricted. The node agents run in istio-node, not here.
+    upstream: https://kubernetes.io/docs/concepts/security/pod-security-standards/#restricted
+    chapter: 13-grand-capstone-bookstore-platform/04-real-auth-keycloak-irsa-istio-jwt.md
+    expires: 2027-06-30
+
+  - namespace: istio-node
+    level: privileged
+    reason: >-
+      The Istio ambient node agents, istio-cni and ztunnel, need CAP_SYS_ADMIN,
+      CAP_NET_ADMIN and CAP_NET_RAW and mount host paths, which baseline forbids.
+      They also run as root, which restricted forbids. The namespace holds only
+      these two agents, apart from istiod, so only they carry the privilege.
+    upstream: https://kubernetes.io/docs/concepts/security/pod-security-standards/#baseline
+    chapter: 13-grand-capstone-bookstore-platform/04-real-auth-keycloak-irsa-istio-jwt.md
+    expires: 2027-06-30
 
   - namespace: p13-02-crossplane
     level: baseline

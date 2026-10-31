@@ -8,8 +8,12 @@
 # strictly worse — same Part 07 ch.01 / ch.04 "use the upstream chart,
 # pinned" lesson.
 #
-# Pinned chart version: 21.x (Bitnami Keycloak; Keycloak server 24.x). The
-# version is in source — bump deliberately, not silently.
+# Pinned chart 25.2.0 ships Keycloak 26.3.3 (helm show chart). The version is
+# in source; bump it deliberately, not silently.
+#
+# Before the first sync, create the namespace with its Pod Security label and
+# the three Secrets the values read (13.04 step 2). CreateNamespace below
+# reuses the namespace; it does not add the label.
 #
 # !!! CRD-INTRINSIC DRY-RUN
 #   `Application` is `argoproj.io/v1alpha1` — an Argo CD CRD. WITHOUT Argo
@@ -36,7 +40,7 @@ spec:
     repoURL: "https://charts.bitnami.com/bitnami"
     chart: keycloak
     # Pinned. Bump deliberately; never `latest`.
-    targetRevision: "21.4.4"
+    targetRevision: "25.2.0"
     helm:
       releaseName: keycloak
       values: |
@@ -51,32 +55,68 @@ spec:
           - name: realm-import
             mountPath: /opt/bitnami/keycloak/data/import
             readOnly: true
+        # Admin password and database passwords come from Secrets the chart
+        # reads by name; no literal password is in this file. In production,
+        # External Secrets creates them (13.06).
+        auth:
+          adminUser: admin
+          existingSecret: keycloak-admin
+          passwordSecretKey: admin-password
+        # ${ADMIN_PORTAL_CLIENT_SECRET} in the realm file is read from here.
+        extraEnvVarsSecret: keycloak-realm-secrets
+        # Production mode behind the gateway: TLS ends at Istio, and Keycloak
+        # trusts the forwarded headers it sends.
+        production: true
+        proxyHeaders: xforwarded
+        hostnameStrict: true
+        # The issuer every token carries. A full URL pins the scheme and the
+        # default port, so the issuer is the same whatever address Keycloak is
+        # reached on. RequestAuthentication names this exact string.
+        extraEnvVars:
+          - name: KC_HOSTNAME
+            value: https://keycloak.bookstore-platform.example.com
         # Two replicas + Infinispan distributed cache = realm/session HA.
         # On kind this works with 2; in production 3+ + a dedicated DB.
         replicaCount: 2
-        # Use the bundled postgres for the kind path; in production point at
-        # an external DB (CNPG, RDS) via externalDatabase.* — 13.04 calls
-        # this out + 13.06 wires the platform CNPG cluster here.
+        # Keycloak calls no Kubernetes API, so it needs no token mounted.
+        automountServiceAccountToken: false
+        serviceAccount:
+          automountServiceAccountToken: false
+        # Pinned by digest. Tag in the comment. The chart's default repository
+        # no longer serves these tags; the digest below is the legacy
+        # repository's copy, which Bitnami stopped updating. Move to a
+        # maintained image before production.
+        image:
+          repository: bitnamilegacy/keycloak
+          tag: 26.3.3-debian-12-r0
+          digest: sha256:da3df0976a9f9a664bdbde6cb5308b78f03ac94d0abf33b2df355bbb06cbc5b9
+        # Bundled Postgres for the kind path; in production point at an
+        # external DB (CNPG, RDS) via externalDatabase.* — 13.06 wires the
+        # platform CNPG cluster here. Same image caveat as above.
         postgresql:
           enabled: true
+          image:
+            repository: bitnamilegacy/postgresql
+            tag: 17.6.0-debian-12-r0
+            digest: sha256:de520acd66fc954d538faa997771ca791f9fcba8b837419a8bc4d08a08df3762
           auth:
-            postgresPassword: "REPLACE-ME-VIA-ESO-NOT-IN-SOURCE"
-        # PSA-restricted container security context (the chart's defaults
-        # are usually compliant; spell it out so a chart change doesn't break
-        # admission silently).
+            existingSecret: keycloak-db
+        # Restricted-level container context, spelled out so a chart change
+        # cannot weaken it silently. The root filesystem stays read-only: the
+        # chart's prepare-write-dirs init container copies the directories
+        # Keycloak writes into emptyDir volumes.
         containerSecurityContext:
           enabled: true
-          runAsNonRoot: true
           runAsUser: 1001
+          runAsGroup: 1001
+          runAsNonRoot: true
+          privileged: false
+          readOnlyRootFilesystem: true
           allowPrivilegeEscalation: false
-          readOnlyRootFilesystem: false  # Keycloak needs writable /tmp; the chart mounts an emptyDir
           capabilities:
             drop: ["ALL"]
           seccompProfile:
             type: RuntimeDefault
-        # Keycloak HTTPS is terminated at Istio in production; the chart
-        # serves HTTP in-cluster and Istio adds mTLS via ambient mode.
-        proxy: edge
   destination:
     server: https://kubernetes.default.svc
     namespace: keycloak

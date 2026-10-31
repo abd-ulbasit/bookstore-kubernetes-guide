@@ -2,40 +2,33 @@
 # Istio JWT": the Istio RequestAuthentication that verifies a Keycloak JWT at
 # the gateway BEFORE downstream services see the request.
 #
-# In Istio ambient mode the waypoint enforces this. If running sidecar mode,
-# add a workload-specific RequestAuthentication via targetRef (Istio 1.22+) —
-# see Istio Security docs.
-#
-# One declaration here — the gateway-scope RequestAuthentication that covers
-# all edge traffic. All HTTP requests pass this verifier first; ambient
-# waypoints inherit the same posture downstream without an extra object.
+# One declaration, scoped to the ingress gateway, covers all edge traffic.
 #
 # `jwtRules`:
-#   - issuer: MUST match the `iss` claim in the JWT exactly. Mismatch =>
-#     verification fails => Istio returns 401. The realm name is part of the
-#     issuer URL (Keycloak's `/realms/<NAME>` convention).
-#   - jwksUri: where Istio fetches the public keys (cached; refreshed by
-#     `jwksRefresh` defaults). On kind the URL is the in-cluster Keycloak
-#     Service DNS name; in production it is the public OIDC discovery URL.
-#   - audiences: MUST contain the `aud` claim. Two clients (storefront-web +
-#     admin-portal) are listed so either tenant-bound human token passes.
+#   - issuer: MUST match the `iss` claim byte for byte. Keycloak builds `iss`
+#     from KC_HOSTNAME (see argocd/application-keycloak.yaml). A token from any
+#     other issuer is rejected with 401.
+#   - jwksUri: where Istio fetches the public keys. It must be HTTPS. Whoever
+#     can answer this request chooses the keys that verify tokens, so a plain
+#     HTTP answer would let anyone on the path forge a token. Envoy caches the
+#     keys for 10 minutes by default, and no field here changes that.
+#   - audiences: MUST contain the `aud` claim. Each client gets its own
+#     audience mapper in the realm, so a token from either client names it.
 #   - forwardOriginalToken: true so downstream services CAN look at the
 #     claims if they need to (without re-validating — that is the gateway's job).
 #
-# WHY NOT enforce here: RequestAuthentication ONLY VERIFIES. It does NOT
-# enforce that a JWT is present. The complementary AuthorizationPolicy
-# (authorization-policy.yaml) does the "require a valid JWT for /api/*"
-# enforcement. Splitting verification from enforcement is the Istio idiom
-# (13.04 §"How it works"); collapsing them is the #1 footgun.
+# WHY NOT enforce here: RequestAuthentication ONLY VERIFIES. A request with no
+# token passes it. The complementary AuthorizationPolicy
+# (authorization-policy.yaml) requires a principal for /api/*. Verification
+# and enforcement are two objects; collapsing them is the #1 footgun.
 #
 # !!! CRD-INTRINSIC DRY-RUN
 #   `RequestAuthentication` is `security.istio.io/v1` — an Istio CRD.
-#   WITHOUT Istio installed (13.04 cross-refs Part 11 ch.04 for the pinned-
-#   Helm install + ambient enrolment), a client dry-run prints:
+#   WITHOUT Istio installed a client dry-run prints:
 #     no matches for kind "RequestAuthentication" in version "security.istio.io/v1"
 #   EXPECTED. After Istio is installed this applies cleanly.
 #
-# Apply (after Istio is installed; cross-ref Part 11 ch.04):
+# Apply (after Istio is installed; 13.04 step 1 and Part 11 ch.04):
 #   kubectl apply -f examples/bookstore-platform/auth/request-authentication.yaml
 ---
 apiVersion: security.istio.io/v1
@@ -53,9 +46,9 @@ spec:
       istio: ingressgateway
   jwtRules:
     - issuer: "https://keycloak.bookstore-platform.example.com/realms/bookstore-platform"
-      # In-cluster JWKS URL — Istio pods reach Keycloak via Kubernetes DNS.
-      # The discovery doc also lives at /.well-known/openid-configuration.
-      jwksUri: "http://keycloak.keycloak.svc.cluster.local:8080/realms/bookstore-platform/protocol/openid-connect/certs"
+      # Served over HTTPS on the same name as the issuer. The gateway must be
+      # able to resolve the name and trust its certificate.
+      jwksUri: "https://keycloak.bookstore-platform.example.com/realms/bookstore-platform/protocol/openid-connect/certs"
       audiences:
         - storefront-web
         - admin-portal

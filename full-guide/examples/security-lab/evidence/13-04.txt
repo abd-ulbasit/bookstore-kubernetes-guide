@@ -1,0 +1,62 @@
+# Lab transcript for 13.04 (Real auth: Keycloak OIDC + IRSA + Istio JWT).
+# Run on a lab cluster whose name differs from the chapter's. Namespaces were
+# substituted in the commands and output: keycloak -> p13-04-keycloak,
+# istio-system -> p13-04-istio-system, istio-node -> p13-04-istio-node.
+# Resource names are unchanged, and the output below is verbatim.
+# Versions: kubectl v1.37.2 against a Kubernetes 1.37 cluster, helm v4.1.4,
+# bitnami/keycloak 25.2.0 (Keycloak 26.3.3), istio charts 1.30.7.
+# Server dry runs only. No Keycloak, Istio control plane or workload ran.
+# The Istio CRDs were not installed, so the RequestAuthentication and
+# AuthorizationPolicy manifests were not dry-run here.
+
+$ helm show chart bitnami/keycloak --version 25.2.0 | grep -E "^(version|appVersion):"
+appVersion: 26.3.3
+version: 25.2.0
+$ helm show chart istio/istiod --version 1.30.7 | grep -E "^(version|appVersion):"
+appVersion: 1.30.7
+version: 1.30.7
+$ helm template keycloak bitnami/keycloak --version 25.2.0 -n keycloak -f values.yaml | kubectl apply --dry-run=server -f -   (namespace p13-04-keycloak, restricted)
+networkpolicy.networking.k8s.io/keycloak-postgresql created (server dry run)
+networkpolicy.networking.k8s.io/keycloak created (server dry run)
+poddisruptionbudget.policy/keycloak-postgresql created (server dry run)
+poddisruptionbudget.policy/keycloak created (server dry run)
+serviceaccount/keycloak-postgresql created (server dry run)
+serviceaccount/keycloak created (server dry run)
+configmap/keycloak-env-vars created (server dry run)
+service/keycloak-postgresql-hl created (server dry run)
+service/keycloak-postgresql created (server dry run)
+service/keycloak-headless created (server dry run)
+service/keycloak created (server dry run)
+statefulset.apps/keycloak-postgresql created (server dry run)
+statefulset.apps/keycloak created (server dry run)
+$ helm template istio-ingressgateway istio/gateway --version 1.30.7 -n istio-system ... | kubectl apply --dry-run=server -f -   (namespace p13-04-istio-system, baseline, warn restricted)
+== gateway (istio-system)
+serviceaccount/istio-ingressgateway created (server dry run)
+role.rbac.authorization.k8s.io/istio-ingressgateway created (server dry run)
+rolebinding.rbac.authorization.k8s.io/istio-ingressgateway created (server dry run)
+service/istio-ingressgateway created (server dry run)
+deployment.apps/istio-ingressgateway created (server dry run)
+horizontalpodautoscaler.autoscaling/istio-ingressgateway created (server dry run)
+== istiod (istio-system)
+serviceaccount/istiod created (server dry run)
+configmap/values created (server dry run)
+configmap/istio created (server dry run)
+configmap/istio-sidecar-injector created (server dry run)
+role.rbac.authorization.k8s.io/istiod created (server dry run)
+rolebinding.rbac.authorization.k8s.io/istiod created (server dry run)
+service/istiod created (server dry run)
+Warning: would violate PodSecurity "restricted:latest": seccompProfile (pod or container "discovery" must set securityContext.seccompProfile.type to "RuntimeDefault" or "Localhost")
+deployment.apps/istiod created (server dry run)
+horizontalpodautoscaler.autoscaling/istiod created (server dry run)
+== istio-cni (istio-node)
+$ helm template istio-cni istio/cni --version 1.30.7 -n istio-node ... | kubectl apply --dry-run=server -f -   (namespace p13-04-istio-node, privileged, warn restricted)
+serviceaccount/istio-cni created (server dry run)
+configmap/istio-cni-config created (server dry run)
+Warning: spec.template.metadata.annotations[container.apparmor.security.beta.kubernetes.io/install-cni]: deprecated since v1.30; use the "appArmorProfile" field instead
+Warning: would violate PodSecurity "restricted:latest": forbidden AppArmor profile (annotation must not set AppArmor profile type to "container.apparmor.security.beta.kubernetes.io/install-cni="unconfined""), allowPrivilegeEscalation != false (container "install-cni" must set securityContext.allowPrivilegeEscalation=false), unrestricted capabilities (container "install-cni" must not include "DAC_OVERRIDE", "NET_ADMIN", "NET_RAW", "SYS_ADMIN", "SYS_PTRACE" in securityContext.capabilities.add), restricted volume types (volumes "cni-bin-dir", "cni-host-procfs", "cni-ztunnel-sock-dir", "cni-net-dir", "cni-socket-dir", "cni-netns-dir" use restricted volume type "hostPath"), runAsNonRoot != true (container "install-cni" must not set securityContext.runAsNonRoot=false), runAsUser=0 (container "install-cni" must not set runAsUser=0), seccompProfile (pod or container "install-cni" must set securityContext.seccompProfile.type to "RuntimeDefault" or "Localhost")
+daemonset.apps/istio-cni-node created (server dry run)
+== ztunnel (istio-node)
+$ helm template ztunnel istio/ztunnel --version 1.30.7 -n istio-node | kubectl apply --dry-run=server -f -
+serviceaccount/ztunnel created (server dry run)
+Warning: would violate PodSecurity "restricted:latest": allowPrivilegeEscalation != false (container "istio-proxy" must set securityContext.allowPrivilegeEscalation=false), unrestricted capabilities (container "istio-proxy" must not include "NET_ADMIN", "NET_RAW", "SYS_ADMIN" in securityContext.capabilities.add), restricted volume types (volume "cni-ztunnel-sock-dir" uses restricted volume type "hostPath"), runAsNonRoot != true (container "istio-proxy" must not set securityContext.runAsNonRoot=false), runAsUser=0 (container "istio-proxy" must not set runAsUser=0), seccompProfile (pod or container "istio-proxy" must set securityContext.seccompProfile.type to "RuntimeDefault" or "Localhost")
+daemonset.apps/ztunnel created (server dry run)
