@@ -281,12 +281,12 @@ An illustrative block shows the shape to expect and was not captured, so a line
 that differs on your cluster does not by itself mean this text is wrong.
 
 Captured output came from a lab kind cluster whose node has a different name
-from the one on your cluster. The lab ran in namespaces prefixed `p12-07-`
-(where this chapter says `bookstore-ml` and `argo-events`), and applied the
-same files with only the namespace names replaced. Captured lines keep the
-names the lab printed. The lab installed no Argo component, because that
-install is heavy. The Argo parts of this chapter are cited and shown rendered,
-not run.
+from the one on your cluster. The lab ran in namespaces of its own, one for
+each of `bookstore-ml` and `argo-events`, and applied the same files with only
+the namespace names replaced. Captured lines keep the names the lab printed,
+each ending in the name this chapter uses. The lab installed no Argo component,
+because that install is heavy. The Argo parts of this chapter are cited and
+shown rendered, not run.
 
 Each manifest the reader applies is a file in `examples/bookstore/ml/pipeline/`,
 or is shown here in full.
