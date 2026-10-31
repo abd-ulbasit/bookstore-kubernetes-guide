@@ -53,6 +53,26 @@ So: you talk to a name that never moves; Kubernetes keeps the name pointing at
 exactly the healthy Pods, and rewrites your packets to land on one. The Service
 **is the decoupling** between "who I call" and "which Pod answers".
 
+## Threats and controls
+
+A Service is a route, so its threats are about where a route leads and who
+may add to one. A Service is not an access control: it does not decide who
+may connect. [ch.06](06-network-policies.md) does that, and the flat network
+that lets any Pod reach any Service is named in
+[ch.01](01-networking-model.md). The table covers what this chapter teaches
+against the Service itself.
+
+| Threat | Control taught here | Goes deeper |
+|---|---|---|
+| The Service is reachable from outside the cluster because its type was changed without a decision | `ClusterIP` by default. A `NodePort` or `LoadBalancer` is an exposure decision, taken at the edge ([ch.04](04-ingress.md), [ch.05](05-gateway-api.md)) | [10.04](../10-cloud-and-managed-kubernetes/04-cloud-networking-and-load-balancing.md) |
+| Whoever can create a Service with `spec.externalIPs` intercepts traffic to that IP (CVE-2020-8554, unfixed upstream) | No `externalIPs` field. Upstream deprecated it in v1.36 | 05.07 <!-- link-later: 05.07 --> |
+| A Pod that carries a selector's labels becomes an endpoint, whoever created it. A selector wider than one tier sends one tier's traffic to another tier's Pods | Select on the tier's own `app` label, which only that tier's pod template sets | [05.01](../05-security/01-authn-authz-rbac.md) |
+| Write access to Endpoints or EndpointSlices lets a user send a Service's traffic to locations it could not reach otherwise (CVE-2021-25740, unfixed upstream) | No write access to Endpoints or EndpointSlices outside the controllers. Upstream rules out loopback, link-local and ClusterIP endpoints; other addresses are allowed, so the write is the control point | [05.01](../05-security/01-authn-authz-rbac.md) |
+
+The last two rows are RBAC questions. Who may create a Pod with a label, and
+who may write an endpoint, decide whether a selector can be trusted. Both are
+answered in [05.01](../05-security/01-authn-authz-rbac.md).
+
 ## Diagrams
 
 ### client → Service → kube-proxy DNAT → Pod (Mermaid)
@@ -138,7 +158,7 @@ because the image is distroless — no shell).
 kubectl apply -f examples/bookstore/raw-manifests/12-redis.yaml
 kubectl apply -f examples/bookstore/raw-manifests/13-rabbitmq.yaml
 # orders (like catalog) carries DB_DSN, so it needs Postgres + the schema Job.
-# These were brought up in ch.04's prerequisite chain; re-applying is harmless
+# These come from the earlier chapters' prerequisite chain; re-applying is harmless
 # (idempotent) and keeps this chapter runnable on its own. orders' /readyz only
 # goes Ready once the schema exists — gate on the migrate Job completing.
 kubectl apply -f examples/bookstore/raw-manifests/16-db-credentials.yaml
@@ -154,7 +174,9 @@ kubectl get deploy -n bookstore
 
 New file
 [`40-services.yaml`](../examples/bookstore/raw-manifests/40-services.yaml) —
-five ClusterIP Services. Each `selector` is a **subset of the target
+five ClusterIP Services, one per app tier, and a headless Service for
+`payments-worker`. The headless one has no endpoints in this chapter, because
+that Deployment is not applied. Each `selector` is a **subset of the target
 Deployment's pod-template labels** (`app: catalog` matches the
 `10-catalog-deploy.yaml` pods, etc.). The inline catalog Service:
 
@@ -194,39 +216,93 @@ file; `rabbitmq` additionally exposes `15672` for its management UI.)
 # from the repo root (full-guide/)
 kubectl apply -f examples/bookstore/raw-manifests/40-services.yaml
 kubectl get svc -n bookstore
-#   each gets a CLUSTER-IP (stable VIP) and (no type:) is ClusterIP.
 
 # The "address book": endpoints are the READY Pods the selector matched.
 kubectl get endpointslices -n bookstore -l kubernetes.io/service-name=catalog -o wide
-#   ≈3 endpoint IP:8080 (one per Ready catalog Pod). Scale catalog and re-run:
+
+# Scale catalog and watch the address book follow the Ready Pods.
 kubectl scale deploy/catalog -n bookstore --replicas=4
+kubectl rollout status deploy/catalog -n bookstore
 kubectl get endpointslices -n bookstore -l kubernetes.io/service-name=catalog -o wide
-#   the slice now lists ~4 — the controller tracks Ready Pods automatically.
-kubectl scale deploy/catalog -n bookstore --replicas=3   # reset
+kubectl scale deploy/catalog -n bookstore --replicas=3
+kubectl rollout status deploy/catalog -n bookstore
+kubectl get endpointslices -n bookstore -l kubernetes.io/service-name=catalog -o wide
 ```
 
 ### 3. The Service is a stable front door (prove the decoupling)
 
-`catalog` is distroless (no shell) — use an **ephemeral public-image** Pod, not
-`kubectl exec` into catalog:
+`catalog` is distroless, with no shell, so `kubectl exec` into it is not an
+option. Call it from a client Pod instead. The client carries the baseline,
+and its image is pinned by digest with the tag in a comment, as
+[the baseline](../01-core-workloads/01-pods.md#baseline-image-digest) asks.
+Its process is a `sleep`, and `kubectl exec` runs `curl` inside it. Save this
+block as `client.yaml`:
+
+```yaml
+apiVersion: v1
+kind: Pod
+metadata:
+  name: client
+  namespace: bookstore
+  labels:
+    app: client                       # no Service selects this label
+    app.kubernetes.io/part-of: bookstore
+spec:
+  automountServiceAccountToken: false
+  securityContext:
+    runAsNonRoot: true
+    runAsUser: 65532
+    runAsGroup: 65532
+    seccompProfile:
+      type: RuntimeDefault
+  containers:
+    - name: curl
+      image: curlimages/curl@sha256:8addc281f0ea517409209f76832b6ddc2cabc3264feb1ebbec2a2521ffad24e4  # curlimages/curl:8.9.1
+      command: ["sleep", "3600"]      # idle; kubectl exec runs curl in it
+      securityContext:
+        allowPrivilegeEscalation: false
+        readOnlyRootFilesystem: true
+        capabilities:
+          drop: ["ALL"]
+      resources:
+        requests:
+          cpu: 10m
+          memory: 16Mi
+        limits:
+          memory: 64Mi
+      volumeMounts:
+        - name: tmp
+          mountPath: /tmp
+  volumes:
+    - name: tmp
+      emptyDir: {}
+```
 
 ```sh
-# Resolve + call the Service by name (DNS is ch.03; it already works).
-# ns bookstore is PSA `restricted` — the ad-hoc pod MUST carry a restricted
-# securityContext via --overrides (command goes in the override) or PSA rejects:
-kubectl run -n bookstore tmp-curl --rm -i --restart=Never \
-  --image=curlimages/curl:8.9.1 \
-  --overrides='{"apiVersion":"v1","spec":{"securityContext":{"runAsNonRoot":true,"runAsUser":65532,"seccompProfile":{"type":"RuntimeDefault"}},"containers":[{"name":"tmp-curl","image":"curlimages/curl:8.9.1","securityContext":{"allowPrivilegeEscalation":false,"capabilities":{"drop":["ALL"]},"readOnlyRootFilesystem":true},"command":["sh","-c","for i in $(seq 1 6); do curl -s http://catalog.bookstore.svc.cluster.local/books | head -c 60; echo; done"]}]}}'
-#   every call succeeds; requests spread across the catalog Pods (≈ evenly).
+kubectl apply -f client.yaml
+kubectl wait --for=condition=Ready pod/client -n bookstore --timeout=120s
+kubectl get svc catalog -n bookstore -o jsonpath='{.spec.clusterIP}{"\n"}'
+kubectl get pods -n bookstore -l app=catalog -o custom-columns=NAME:.metadata.name,IP:.status.podIP
+kubectl exec -n bookstore client -- sh -c 'for i in 1 2 3 4 5 6; do curl -s http://catalog.bookstore.svc.cluster.local/books | head -c 60; echo; done'
+kubectl exec -n bookstore client -- curl -s http://catalog.bookstore.svc.cluster.local/healthz
+```
 
-# Now roll catalog — Pod IPs all change — and call again. SAME Service IP/name.
+Each call answers from one of the Ready catalog Pods. kube-proxy picks the
+Pod for each new connection, so the caller never names a Pod.
+
+Now roll catalog. Its Pod IPs change, and the Service IP does not. The loop
+runs for a minute while the rollout replaces every catalog Pod, and it counts
+the HTTP status of each call:
+
+```sh
+kubectl exec -n bookstore client -- sh -c 'for i in $(seq 1 60); do curl -s -o /dev/null -w "%{http_code}\n" http://catalog.bookstore.svc.cluster.local/healthz; sleep 1; done | sort | uniq -c' &
 kubectl rollout restart deploy/catalog -n bookstore
-kubectl rollout status  deploy/catalog -n bookstore
-kubectl run -n bookstore tmp-curl --rm -i --restart=Never \
-  --image=curlimages/curl:8.9.1 \
-  --overrides='{"apiVersion":"v1","spec":{"securityContext":{"runAsNonRoot":true,"runAsUser":65532,"seccompProfile":{"type":"RuntimeDefault"}},"containers":[{"name":"tmp-curl","image":"curlimages/curl:8.9.1","securityContext":{"allowPrivilegeEscalation":false,"capabilities":{"drop":["ALL"]},"readOnlyRootFilesystem":true},"command":["curl","-s","http://catalog.bookstore.svc.cluster.local/healthz"]}]}}'
-#   still {"status":"ok"} — the endpoint set was rebuilt under the SAME front
-#   door. THIS is why nothing in the app hardcodes Pod IPs.
+kubectl rollout status deploy/catalog -n bookstore --timeout=240s
+wait
+kubectl get svc catalog -n bookstore -o jsonpath='{.spec.clusterIP}{"\n"}'
+kubectl get pods -n bookstore -l app=catalog -o custom-columns=NAME:.metadata.name,IP:.status.podIP
+kubectl get endpointslices -n bookstore -l kubernetes.io/service-name=catalog -o wide
+kubectl exec -n bookstore client -- curl -s http://catalog.bookstore.svc.cluster.local/healthz
 ```
 
 ### 4. Headless is different — recall postgres
@@ -239,14 +315,68 @@ giving the per-ordinal names `postgres-0.postgres.bookstore.svc.cluster.local`
 want **one VIP that load-balances** (ClusterIP); postgres wants **stable
 per-Pod identity** (headless). Same API object, opposite goals.
 
+```sh
+kubectl get svc postgres -n bookstore
+kubectl get svc -n bookstore
+```
+
+<!-- gate: output -->
+```text
+NAME       TYPE        CLUSTER-IP   EXTERNAL-IP   PORT(S)    AGE
+postgres   ClusterIP   None         <none>        5432/TCP   8m34s
+```
+
+`TYPE` still reads `ClusterIP`, but `CLUSTER-IP` is `None`. That pair is what
+a headless Service looks like.
+
 > **Lineage note.** `40-services.yaml` is the canonical Services layer for the
 > Bookstore from here on. [ch.03](03-dns-and-discovery.md) shows how these
 > names *resolve*; [ch.04](04-ingress.md) (`50-ingress.yaml`) /
 > [ch.05](05-gateway-api.md) (`51-gateway.yaml`) put an **external** entrypoint
 > in front of the `storefront`/`catalog`/`orders` Services;
 > [ch.06](06-network-policies.md) (`60-networkpolicy.yaml`) restricts which Pod
-> may reach which Service. The `postgres` headless Service stays as defined in
-> ch.05 (not duplicated here).
+> may reach which Service. The `postgres` headless Service stays in
+> [`20-postgres-statefulset.yaml`](../examples/bookstore/raw-manifests/20-postgres-statefulset.yaml),
+> from [Part 01 ch.05](../01-core-workloads/05-statefulsets.md), and is not
+> duplicated here.
+
+### 5. What the proxy runs, and what the field says
+
+Check two things on the cluster you use. The kube-proxy config names its
+mode, and the API describes `externalIPs`:
+
+```sh
+kubectl -n kube-system get configmap kube-proxy -o jsonpath='{.data.config\.conf}' | grep -n 'mode:'
+kubectl explain service.spec.externalIPs
+```
+
+<!-- gate: output -->
+```text
+52:mode: iptables
+```
+
+This lab cluster sets `iptables` explicitly. Set the mode yourself on your own
+clusters, as the [kube-proxy modes](#kube-proxy-modes-iptables-vs-nftables-vs-ebpf)
+section below explains, so an upgrade cannot change it. The API's description
+of the field follows. It says the IPs are "not managed by Kubernetes", which
+is why the [threats table](#threats-and-controls) treats the field as a choice
+you make by hand. It does not mention the deprecation. The upstream docs
+record that.
+
+<!-- gate: output -->
+```text
+KIND:       Service
+VERSION:    v1
+
+FIELD: externalIPs <[]string>
+
+DESCRIPTION:
+    externalIPs is a list of IP addresses for which nodes in the cluster will
+    also accept traffic for this service.  These IPs are not managed by
+    Kubernetes.  The user is responsible for ensuring that traffic arrives at a
+    node with this IP.  A common example is external load-balancers that are not
+    part of the Kubernetes system.
+```
 
 ## How it works under the hood
 
@@ -259,16 +389,14 @@ single **Endpoints** object per Service — one object listing *every* endpoint.
 At scale that object is huge and **every Pod change rewrites and re-pushes the
 whole thing to every node's kube-proxy** — an O(N) churn storm.
 
-**EndpointSlices** (the default and the norm on every supported version; the
-v1 `Endpoints` API has been deprecated since v1.33 and is not expected to be
-removed, though conformance may stop requiring the Endpoints controller,
-KEP-4974) shard that list into small slices (≤100 endpoints each by default).
+**EndpointSlices** are the mechanism every current client should read. The
+v1 `Endpoints` API has been deprecated since v1.33. The EndpointSlice
+controller shards the list into slices of at most 100 endpoints by default.
 A Pod change rewrites only its *slice*, dramatically less churn and watch
-traffic; slices also carry richer per-endpoint info (topology zone,
-per-endpoint conditions `ready`/`serving`/`terminating`) enabling
-**topology-aware routing**. The legacy `Endpoints` object still exists for
-compatibility but EndpointSlices are
-the real mechanism — `kubectl get endpointslices -n <NS> -l kubernetes.io/service-name=<SVC>` is the truth.
+traffic. Slices also carry richer per-endpoint info (topology zone,
+per-endpoint conditions `ready`/`serving`/`terminating`) that enables
+**topology-aware routing**. The truth about where a Service sends traffic is
+`kubectl get endpointslices -n <NS> -l kubernetes.io/service-name=<SVC>`.
 
 ### kube-proxy modes: iptables vs. nftables vs. eBPF
 
@@ -283,12 +411,13 @@ forwards:
   (so every packet of one connection goes to the same Pod). Simple, ubiquitous;
   rule evaluation is ~linear, so very large Services (tens of thousands of
   endpoints) get slower to *program* and match.
-- **nftables (GA since v1.33).** The same DNAT-plus-conntrack model, written
-  through nftables, the kernel's successor to the iptables API (needs kernel
-  5.13+). It applies endpoint changes faster than iptables and matches packets
-  more efficiently at very large scale, and upstream plans to make it the
-  default. On 1.37 kube-proxy warns when no mode is set, so set
-  `mode: nftables` (or `iptables`) explicitly in its config.
+- **nftables.** The same DNAT-plus-conntrack model, written through nftables,
+  the kernel's successor to the iptables API. It needs Linux kernel 5.13 or
+  later. It processes endpoint changes faster than iptables and matches
+  packets more efficiently at very large scale. `iptables` is still the
+  default, and upstream plans to change it to `nftables`, so set `mode`
+  explicitly in kube-proxy's config. An upgrade then cannot change the proxy
+  under you.
 - **IPVS (deprecated since v1.35).** Uses the kernel's L4 load balancer (hash
   tables) and was once *the* answer to iptables scaling, but it never covered
   every Service edge case. Upstream expects to disable it by default by v1.40
@@ -326,6 +455,13 @@ records the choice → reply is un-DNATed transparently. No extra hop.
 - **ExternalName** — **no selector, no proxy, no VIP**: DNS returns a **CNAME**
   to an external host. Used to give an out-of-cluster dependency (e.g. a
   managed RDS) a stable in-cluster name.
+- **`spec.externalIPs`**: not a type. Any type can carry a list of IPs that
+  the cluster may not own. Traffic that arrives for one of those IPs on the
+  Service port is routed to the Service's endpoints. Upstream deprecated the
+  field in v1.36 and tells users to migrate away from it, toward an external
+  load balancer controller or a Gateway API implementation. The reason is
+  CVE-2020-8554: whoever can create a Service with the field can intercept
+  traffic to the IP it names.
 
 ### Headless, sessionAffinity, externalTrafficPolicy
 
@@ -367,7 +503,7 @@ only here and in [Part 07 ch.05](../07-delivery/05-progressive-delivery.md)).
 
 > **In production:** choose the kube-proxy mode for scale, and set it
 > explicitly. **iptables** is fine for most clusters; at **thousands of
-> Services/endpoints** move to **nftables** (GA since v1.33) or an **eBPF**
+> Services/endpoints** move to **nftables** (kernel 5.13 or later) or an **eBPF**
 > dataplane (Cilium) — iptables rule programming/matching becomes a
 > measurable latency and control-plane cost. Don't choose **IPVS** for a new
 > cluster: it has been deprecated since v1.35
@@ -388,8 +524,8 @@ only here and in [Part 07 ch.05](../07-delivery/05-progressive-delivery.md)).
 > provider-specific. Bare `kind` has **no** cloud LB (stays `<pending>`).
 
 > **In production:** for in-cluster traffic, **topology-aware routing**
-> (EndpointSlice hints: `spec.trafficDistribution: PreferSameZone`, GA since
-> v1.35, or the older `service.kubernetes.io/topology-mode: Auto` annotation)
+> (EndpointSlice hints: `spec.trafficDistribution: PreferSameZone`, or the
+> older `service.kubernetes.io/topology-mode: Auto` annotation)
 > and `internalTrafficPolicy: Local` keep traffic **in-zone** to cut cross-AZ
 > latency and **cross-AZ data-transfer cost** — but validate it doesn't create
 > hot spots when a zone is light on replicas.
@@ -405,27 +541,31 @@ kubectl get svc <SVC> -n <NS> \
   -o jsonpath='{.spec.clusterIP}{"\n"}'                  # the stable VIP
 # expose for a quick local test WITHOUT changing Service type (ch.04 alt):
 kubectl port-forward -n <NS> svc/<SVC> 8080:80
-# debug from an EPHEMERAL public image (NEVER exec a distroless app Pod):
-kubectl run tmp --rm -it --restart=Never --image=curlimages/curl:8.9.1 -- \
+# call a Service from the baseline client Pod of step 3 (never exec into a
+# distroless app Pod):
+kubectl exec -n <NS> client -- \
   curl -s http://<SVC>.<NS>.svc.cluster.local:<PORT>/<PATH>
 kubectl -n kube-system get ds kube-proxy                 # kube-proxy (mode in its cm)
 ```
 
-Minimal ClusterIP Service skeleton:
+Minimal ClusterIP Service, for the catalog tier (change the name, namespace
+and `app` label for another tier):
 
 ```yaml
 apiVersion: v1
 kind: Service
-metadata: { name: <APP>, namespace: <NS>, labels: { app: <APP> } }
+metadata: { name: catalog, namespace: bookstore, labels: { app: catalog } }
 spec:
   type: ClusterIP                  # default; omittable
-  selector: { app: <APP> }         # subset of the target Pods' labels
+  selector: { app: catalog }       # subset of the target Pods' labels
   ports:
     - name: http
       port: 80                     # stable Service port (clients use this)
       targetPort: http             # container's named port (e.g. 8080)
-# headless variant: spec.clusterIP: None  (DNS → Pod IPs; StatefulSets)
 ```
+
+For a headless Service, set `spec.clusterIP: None`. DNS then returns the Pod
+IPs, which is what StatefulSets use.
 
 Checklist:
 
@@ -433,6 +573,7 @@ Checklist:
 - [ ] `targetPort` uses the container's **named** port (number can change)
 - [ ] Readiness probe trustworthy (it gates endpoint membership)
 - [ ] Type chosen deliberately (ClusterIP default; LB only via Ingress at edge)
+- [ ] No `spec.externalIPs`
 - [ ] Headless **iff** you need per-Pod DNS / client-side LB (StatefulSets)
 - [ ] `externalTrafficPolicy: Local` only with even Pod spread; know the IP/SNAT trade-off
 - [ ] kube-proxy mode (iptables/nftables/eBPF) fits the cluster's Service scale
@@ -459,7 +600,7 @@ Checklist:
 3. **A Service of type `LoadBalancer` stays `<pending>` on a kind cluster. On EKS, the same manifest provisions an LB but you find your team has 30 of them and a surprise cloud bill. Explain both observations.**
    <details><summary>Show answer</summary>
 
-   `kind` has no cloud-controller-manager, so nothing watches Service type=LoadBalancer to allocate an LB — it stays `<pending>` forever. On EKS, the cloud-controller-manager provisions a real cloud LB (NLB/ALB) per Service of type LoadBalancer. Each LB has a fixed monthly charge — 30 Services = 30 LBs. The pattern is one cloud LB for the cluster, fronting an Ingress/Gateway controller that L7-routes to many Services (see §Service types and §Production notes, EKS/GKE/AKS).
+   `kind` has no cloud-controller-manager, so nothing watches Service type=LoadBalancer to allocate an LB, so it stays `<pending>` forever. On EKS, the cloud-controller-manager provisions a real cloud LB (NLB/ALB) per Service of type LoadBalancer. Each one is a separate billed resource, so 30 Services means 30 LBs. The pattern is one cloud LB for the cluster, fronting an Ingress/Gateway controller that L7-routes to many Services (see §Service types and §Production notes, EKS/GKE/AKS).
 
    </details>
 
@@ -477,6 +618,21 @@ Checklist:
 
    </details>
 
+6. **A teammate adds `externalIPs: [203.0.113.10]` to the `catalog` Service so
+   the office network can reach it. What does the field do, what is the
+   threat, and what should they use instead?**
+   <details><summary>Show answer</summary>
+
+   `spec.externalIPs` makes the cluster route traffic for that IP and port to
+   the Service's endpoints, whether or not the cluster owns the address. Anyone
+   who can create a Service with the field can intercept traffic to the IP it
+   names (CVE-2020-8554, unfixed upstream). Upstream deprecated the field in
+   v1.36 and recommends an external load balancer controller or a Gateway API
+   implementation. In this guide that is [ch.05](05-gateway-api.md), and the
+   admission rule that refuses the field is 05.07 <!-- link-later: 05.07 -->.
+
+   </details>
+
 ## Further reading
 
 - **Lukša, _Kubernetes in Action_ 2e, ch.11 — "Exposing Pods with Services"**
@@ -488,3 +644,8 @@ Checklist:
   ("Service") and
   <https://kubernetes.io/docs/concepts/services-networking/endpoint-slices/>
   ("EndpointSlices").
+- CVE-2020-8554: <https://nvd.nist.gov/vuln/detail/CVE-2020-8554> and the
+  upstream issue <https://github.com/kubernetes/kubernetes/issues/97076>.
+- The Kubernetes project blog post of 2026-05-26 on unfixed CVEs, for the
+  status of CVE-2020-8554 and CVE-2021-25740 and the RBAC mitigation:
+  <https://kubernetes.io/blog/2026/05/26/reconciling-unfixed-kubernetes-cves/>.
