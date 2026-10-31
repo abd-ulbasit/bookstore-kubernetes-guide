@@ -361,7 +361,7 @@ metadata:
     alb.ingress.kubernetes.io/transforms.orders: '[{"type":"url-rewrite","urlRewriteConfig":{"rewrites":[{"regex":"^/api/orders(/|$)(.*)$","replace":"/$2"}]}}]'
     external-dns.alpha.kubernetes.io/hostname: bookstore.your-org.com   # ExternalDNS
 spec:
-  ingressClassName: alb                  # the cloud controller owns it, not traefik
+  ingressClassName: alb                  # the cloud controller, not traefik
   # spec.tls is removed: ACM terminates TLS, and the bookstore-tls Secret belongs
   # to Traefik.
   rules:
@@ -559,7 +559,8 @@ kubectl apply --dry-run=client -f examples/bookstore/raw-manifests/60-networkpol
   ip`** registers **Pod IPs directly** in the target group (possible
   *because* the VPC CNI gives Pods VPC IPs) — bypassing the node/NodePort hop,
   so the LB load-balances straight to Pods (the cloud analogue of
-  Traefik proxying to endpoints, [Part 02 ch.04](../02-networking/04-ingress.md)).
+  Traefik proxying to endpoints,
+  [Part 02 ch.04](../02-networking/04-ingress.md)).
   `target-type: instance` uses NodePorts instead. Health checks, TLS (an
   **ACM** cert ARN — no in-cluster TLS Secret needed), scheme
   (internet-facing/internal), and timeouts are all **annotations** on the
