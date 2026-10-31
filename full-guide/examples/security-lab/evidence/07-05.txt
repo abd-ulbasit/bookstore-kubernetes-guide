@@ -7,7 +7,11 @@
 # refused the lab identity or did not answer, so no dry run executed. The
 # chapter cites the Argo Rollouts docs for the runtime behaviour.
 # Recorded by running the chapter's commands from full-guide/. Terminal
-# colour codes are removed. Nothing else is edited.
+# colour codes are removed. Nothing else is edited in steps 0 to 3.
+# Steps 4 to 8 were recorded in a second session, after access returned and
+# while the heavy-install lock was free. They install the pinned Argo Rollouts
+# chart and run the shipped catalog Rollout, with a stand-in metric in place of
+# Prometheus (which was not installed). See the note above step 4.
 ## step 0: tools
 $ kubectl version --client
 Client Version: v1.37.2
@@ -125,3 +129,182 @@ $ cd gate && ../prometheus-3.15.1.darwin-arm64/promtool test rules no-floor.test
   SUCCESS
 
 exit=0
+# Second session, steps 4 to 8. Tier A, the same kind cluster. Helm v3.22.1
+# installs the chart named by its digest in a namespace that enforces
+# restricted. The shared lab cluster has no namespace called bookstore, and
+# nothing here may touch another worker's objects, so the chapter's namespace
+# bookstore is p07-finish-rollouts: every manifest below goes through sed, which
+# swaps `namespace: bookstore` for `namespace: p07-finish-rollouts` and the host
+# suffix `.bookstore.svc` for `.p07-finish-rollouts.svc`. The shipped manifests
+# are otherwise unchanged. The stand-in metric (stand-in.yaml) is the manifest
+# the chapter prints: a busybox httpd that serves a success rate of 0 and a p95
+# of 1000 seconds, which is what the real queries return for a canary that
+# served no traffic, and two AnalysisTemplates with the shipped names that read
+# it with the web provider. The path of that file is shown as stand-in.yaml. The
+# Prometheus gate itself was NOT run here; step 2b of the chapter tests its
+# PromQL offline. A first wait for the Rollout to become Healthy timed out
+# because catalog's /readyz also needs Redis, which the chapter's prerequisites
+# did not apply; step 6b adds it. The first listing in step 7 was taken while
+# the canary ReplicaSet was still scaling down, and step 7b repeats it a minute
+# later. Argo Rollouts started with two controller replicas, the chart default.
+# Everything created here is removed in step 8, the five CRDs included, and the
+# heavy-install lock was taken and released around it.
+## step 4: install Argo Rollouts from the pinned chart (second session)
+$ kubectl get crd 2>&1 | grep -c argoproj
+0
+$ kubectl create namespace p07-finish-rollouts
+namespace/p07-finish-rollouts created
+$ kubectl label namespace p07-finish-rollouts pod-security.kubernetes.io/enforce=restricted
+namespace/p07-finish-rollouts labeled
+$ helm install argo-rollouts oci://ghcr.io/argoproj/argo-helm/argo-rollouts@sha256:09afe23380ec7f804221fb31471e0225cd6328586df2cff4da6093da62aab1ed -n p07-finish-rollouts --wait --timeout 8m 2>&1 | grep -v "^  \|^$" | head -n 9
+Pulled: ghcr.io/argoproj/argo-helm/argo-rollouts@sha256:09afe23380ec7f804221fb31471e0225cd6328586df2cff4da6093da62aab1ed
+Digest: sha256:09afe23380ec7f804221fb31471e0225cd6328586df2cff4da6093da62aab1ed
+NAME: argo-rollouts
+LAST DEPLOYED: Sat Oct 31 11:10:06 2026
+NAMESPACE: p07-finish-rollouts
+STATUS: deployed
+REVISION: 1
+TEST SUITE: None
+$ kubectl -n p07-finish-rollouts rollout status deploy/argo-rollouts
+deployment "argo-rollouts" successfully rolled out
+$ kubectl get crd | grep argoproj | cut -d" " -f1
+analysisruns.argoproj.io
+analysistemplates.argoproj.io
+clusteranalysistemplates.argoproj.io
+experiments.argoproj.io
+rollouts.argoproj.io
+$ kubectl get pods -n p07-finish-rollouts
+NAME                             READY   STATUS    RESTARTS   AGE
+argo-rollouts-6695f965fc-q24wc   1/1     Running   0          89s
+argo-rollouts-6695f965fc-qrwjs   1/1     Running   0          89s
+## step 5: the shipped manifests against the live CRDs, and the prerequisites
+$ for f in examples/bookstore/argocd/rollouts/analysistemplate-success-rate.yaml examples/bookstore/argocd/rollouts/analysistemplate-latency.yaml examples/bookstore/argocd/rollouts/catalog-rollout.yaml; do sed -e 's/namespace: bookstore/namespace: p07-finish-rollouts/' -e 's/\.bookstore\.svc/.p07-finish-rollouts.svc/g' $f | kubectl apply --dry-run=server -f -; done
+analysistemplate.argoproj.io/catalog-success-rate created (server dry run)
+analysistemplate.argoproj.io/catalog-latency-p95 created (server dry run)
+rollout.argoproj.io/catalog created (server dry run)
+$ for f in 05-serviceaccounts-rbac 15-catalog-config 16-db-credentials 40-services 20-postgres-statefulset; do sed -e 's/namespace: bookstore/namespace: p07-finish-rollouts/' -e 's/\.bookstore\.svc/.p07-finish-rollouts.svc/g' examples/bookstore/raw-manifests/$f.yaml | kubectl apply -f - | cut -c1-80; done
+serviceaccount/catalog-sa created
+serviceaccount/storefront-sa created
+serviceaccount/orders-sa created
+serviceaccount/payments-worker-sa created
+serviceaccount/postgres-sa created
+serviceaccount/redis-sa created
+serviceaccount/rabbitmq-sa created
+serviceaccount/migrate-sa created
+role.rbac.authorization.k8s.io/catalog-config-reader created
+rolebinding.rbac.authorization.k8s.io/catalog-config-reader-binding created
+configmap/catalog-config created
+secret/db-credentials created
+service/catalog created
+service/storefront created
+service/orders created
+service/redis created
+service/rabbitmq created
+service/payments-worker created
+service/postgres created
+statefulset.apps/postgres created
+$ kubectl -n p07-finish-rollouts rollout status statefulset/postgres --timeout=300s
+Waiting for statefulset spec update to be observed...
+Waiting for 1 pods to be ready...
+Waiting for 1 pods to be ready...
+partitioned roll out complete: 1 new pods have been updated...
+## step 6: a stand-in metric server and stand-in analysis templates, then the shipped Rollout
+$ sed -e 's/namespace: bookstore/namespace: p07-finish-rollouts/' -e 's/\.bookstore\.svc/.p07-finish-rollouts.svc/g' stand-in.yaml | kubectl apply -f -
+serviceaccount/stand-in-metrics created
+configmap/stand-in-metrics created
+deployment.apps/stand-in-metrics created
+service/stand-in-metrics created
+analysistemplate.argoproj.io/catalog-success-rate created
+analysistemplate.argoproj.io/catalog-latency-p95 created
+$ kubectl -n p07-finish-rollouts rollout status deploy/stand-in-metrics --timeout=180s
+Waiting for deployment "stand-in-metrics" rollout to finish: 0 of 1 updated replicas are available...
+deployment "stand-in-metrics" successfully rolled out
+$ sed -e 's/namespace: bookstore/namespace: p07-finish-rollouts/' -e 's/\.bookstore\.svc/.p07-finish-rollouts.svc/g' examples/bookstore/argocd/rollouts/catalog-rollout.yaml | kubectl apply -f -
+rollout.argoproj.io/catalog created
+$ kubectl wait --for=jsonpath="{.status.phase}"=Healthy rollout/catalog -n p07-finish-rollouts --timeout=420s
+error: timed out waiting for the condition on rollouts/catalog
+$ kubectl get rollout catalog -n p07-finish-rollouts
+NAME      DESIRED   CURRENT   UP-TO-DATE   AVAILABLE   AGE
+catalog   4         4         4                        7m
+$ kubectl get pods -n p07-finish-rollouts -l app=catalog
+NAME                       READY   STATUS    RESTARTS   AGE
+catalog-77b54754cc-64959   0/1     Running   0          7m1s
+catalog-77b54754cc-g4wjg   0/1     Running   0          7m1s
+catalog-77b54754cc-mt7v9   0/1     Running   0          7m1s
+catalog-77b54754cc-q9k2c   0/1     Running   0          7m1s
+## step 6b: catalog also needs Redis to report ready; apply it and wait again
+$ sed -e 's/namespace: bookstore/namespace: p07-finish-rollouts/' -e 's/\.bookstore\.svc/.p07-finish-rollouts.svc/g' examples/bookstore/raw-manifests/12-redis.yaml | kubectl apply -f -
+deployment.apps/redis created
+$ kubectl -n p07-finish-rollouts rollout status deploy/redis --timeout=180s
+Waiting for deployment "redis" rollout to finish: 0 of 1 updated replicas are available...
+deployment "redis" successfully rolled out
+$ kubectl wait --for=jsonpath="{.status.phase}"=Healthy rollout/catalog -n p07-finish-rollouts --timeout=420s
+rollout.argoproj.io/catalog condition met
+$ kubectl get rollout catalog -n p07-finish-rollouts
+NAME      DESIRED   CURRENT   UP-TO-DATE   AVAILABLE   AGE
+catalog   4         4         4            4           7m47s
+$ kubectl get pods -n p07-finish-rollouts -l app=catalog
+NAME                       READY   STATUS    RESTARTS   AGE
+catalog-77b54754cc-64959   1/1     Running   0          7m47s
+catalog-77b54754cc-g4wjg   1/1     Running   0          7m47s
+catalog-77b54754cc-mt7v9   1/1     Running   0          7m47s
+catalog-77b54754cc-q9k2c   1/1     Running   0          7m47s
+## step 7: a new pod template starts a canary, and the failing analysis aborts it
+$ kubectl patch rollout catalog -n p07-finish-rollouts --type=json -p='[{"op":"add","path":"/spec/template/metadata/annotations","value":{"example.bookstore/trial":"silent"}}]'
+rollout.argoproj.io/catalog patched
+$ kubectl wait --for=jsonpath="{.status.phase}"=Degraded rollout/catalog -n p07-finish-rollouts --timeout=480s
+rollout.argoproj.io/catalog condition met
+$ kubectl get rollout catalog -n p07-finish-rollouts -o jsonpath="{.status.phase}{\"\n\"}{.status.message}{\"\n\"}"
+Degraded
+RolloutAborted: Rollout aborted update to revision 2: Step-based analysis phase error/failed: Metric "catalog-success-rate" assessed Failed due to failed (4) > failureLimit (3)
+$ kubectl get analysisrun -n p07-finish-rollouts
+NAME                     STATUS   AGE
+catalog-7c6df5d49c-2-4   Failed   62s
+$ kubectl get replicaset -n p07-finish-rollouts -l app=catalog
+NAME                 DESIRED   CURRENT   READY   AGE
+catalog-77b54754cc   4         4         3       11m
+catalog-7c6df5d49c   1         1         1       3m20s
+## step 7b: the same listing a minute later
+$ sleep 60; kubectl get replicaset -n p07-finish-rollouts -l app=catalog
+NAME                 DESIRED   CURRENT   READY   AGE
+catalog-77b54754cc   4         4         4       12m
+catalog-7c6df5d49c   0         0         0       4m33s
+$ kubectl get pods -n p07-finish-rollouts -l app=catalog
+NAME                       READY   STATUS    RESTARTS   AGE
+catalog-77b54754cc-64959   1/1     Running   0          12m
+catalog-77b54754cc-dh25q   1/1     Running   0          73s
+catalog-77b54754cc-mt7v9   1/1     Running   0          12m
+catalog-77b54754cc-q9k2c   1/1     Running   0          12m
+$ kubectl get rollout catalog -n p07-finish-rollouts -o jsonpath="{.status.phase}{\"\n\"}"
+Degraded
+## step 8: remove it all, including the CRDs
+$ helm uninstall argo-rollouts -n p07-finish-rollouts
+These resources were kept due to the resource policy:
+[CustomResourceDefinition] analysisruns.argoproj.io
+[CustomResourceDefinition] analysistemplates.argoproj.io
+[CustomResourceDefinition] clusteranalysistemplates.argoproj.io
+[CustomResourceDefinition] experiments.argoproj.io
+[CustomResourceDefinition] rollouts.argoproj.io
+
+release "argo-rollouts" uninstalled
+$ kubectl delete namespace p07-finish-rollouts --timeout=240s
+namespace "p07-finish-rollouts" deleted
+$ kubectl delete crd analysisruns.argoproj.io analysistemplates.argoproj.io clusteranalysistemplates.argoproj.io experiments.argoproj.io rollouts.argoproj.io
+customresourcedefinition.apiextensions.k8s.io "analysisruns.argoproj.io" deleted
+customresourcedefinition.apiextensions.k8s.io "analysistemplates.argoproj.io" deleted
+customresourcedefinition.apiextensions.k8s.io "clusteranalysistemplates.argoproj.io" deleted
+customresourcedefinition.apiextensions.k8s.io "experiments.argoproj.io" deleted
+customresourcedefinition.apiextensions.k8s.io "rollouts.argoproj.io" deleted
+$ kubectl get crd 2>&1 | grep -c argoproj
+0
+$ kubectl get clusterrole,clusterrolebinding 2>&1 | grep -c argo-rollouts
+0
+$ kubectl get ns p07-finish-rollouts 2>&1 | tail -n 1
+Error from server (NotFound): namespaces "p07-finish-rollouts" not found
+## step 9: the client dry run on the cluster again, now that the CRDs are gone
+$ kubectl apply --dry-run=client -f examples/bookstore/argocd/rollouts/catalog-rollout.yaml 2>&1 | head -n 2
+error: resource mapping not found for name: "catalog" namespace: "bookstore" from "examples/bookstore/argocd/rollouts/catalog-rollout.yaml": no matches for kind "Rollout" in version "argoproj.io/v1alpha1"
+ensure CRDs are installed first
+$ kubectl apply --dry-run=client -f examples/bookstore/argocd/rollouts/analysistemplate-success-rate.yaml 2>&1 | head -n 2
+error: resource mapping not found for name: "catalog-success-rate" namespace: "bookstore" from "examples/bookstore/argocd/rollouts/analysistemplate-success-rate.yaml": no matches for kind "AnalysisTemplate" in version "argoproj.io/v1alpha1"
+ensure CRDs are installed first

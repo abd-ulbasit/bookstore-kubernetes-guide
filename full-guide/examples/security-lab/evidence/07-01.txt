@@ -4,7 +4,9 @@
 # the render. Step 3 holds the install attempts that failed before the
 # namespace change in the chapter; they are kept as they ran. The cluster
 # stopped answering the admin identity during step 3 (see the note at the end),
-# so nothing after the install is captured.
+# so the first session captured nothing after the install. Steps 6 to 11 come
+# from a second session, after access returned; the note above step 6 says how
+# they were recorded.
 # Lab: one Linux host running a kind v0.33.0 cluster named sf-pilot (a
 # Kubernetes v1.37.0 node, the cluster is shared with other chapters), kubectl
 # v1.37.2, Helm v3.22.1 (the chapter's pin), trivy v0.76.1, cosign on the
@@ -95,7 +97,7 @@ Failures: 12 (HIGH: 7, CRITICAL: 5)
 ## step 3: install the release
 $ helm install bookstore examples/bookstore/helm/bookstore -n p07-01-bookstore --create-namespace -f lab-values.yaml --wait --timeout 10m
 Error: INSTALLATION FAILED: 1 error occurred:
-	* namespaces "p07-01-bookstore" already exists
+    * namespaces "p07-01-bookstore" already exists
 
 
 $ kubectl delete namespace p07-01-bookstore --wait=true --timeout=180s
@@ -119,7 +121,7 @@ Error from server (Forbidden): namespaces "p07-01-bookstore" is forbidden: User 
 $ helm install bookstore examples/bookstore/helm/bookstore -n p07-01-bookstore --set namespace.create=false -f lab-values.yaml --wait --timeout 10m
 Error: INSTALLATION FAILED: Kubernetes cluster unreachable: unknown
 
-# Stopped here. From about 08:04 PKT the admin identity in the lab kubeconfig
+# Stopped here. From about 08:04 local time the admin identity in the lab kubeconfig
 # was denied on every API call (`Forbidden: User "kubernetes-admin" cannot
 # ...`), including reads of /version, namespaces and the cluster-wide RBAC
 # objects. The author did not change RBAC or any cluster-scoped object and
@@ -178,3 +180,230 @@ $ helm template bookstore examples/bookstore/helm/bookstore -n bookstore -f exam
 1
 $ helm template bookstore examples/bookstore/helm/bookstore -n bookstore --set keda.enabled=true --set keda.connectionSecret.create=false | grep -c 'name: rabbitmq-conn'
 1
+# Superseded: the KEDA commands of steps 4 and 5 describe the chart before it
+# stopped rendering the rabbitmq-conn Secret and lost keda.connectionSecret.create
+# and keda.amqpHost. Step 10 is the record for the chart as shipped.
+# Second session. The lab identity was denied on every API call during the first
+# session, and access returned later. A first attempt at steps 6 to 8 in this
+# session: the first upgrade failed with `job db-migrate failed:
+# DeadlineExceeded` (the post-upgrade hook Job passed its 120 second
+# activeDeadlineSeconds) while the lab host was heavily loaded, its load average
+# above 20 when checked. Rerunning the same command passed as the next revision,
+# and the rollback worked. Another attempt was interrupted when the identity
+# was denied again and then the API stopped answering. Neither run is kept,
+# because their namespace was deleted; steps 6 to 11 below are one clean run
+# from a new namespace. They were recorded from full-guide/ with these
+# substitutions: (1) the chart's namespace bookstore is p07-finish-helm and the
+# verification namespace bs-verify is p07-finish-verify; (2) lab-values.yaml
+# sets namespace.name, priorityClasses.create=false, and short service names for
+# database.host, REDIS_ADDR and amqpUrl, and it is passed last so it wins over
+# values-dev.yaml; (3) helm install and upgrade add --timeout 8m and pipe through
+# head -n 6, helm 3.22.1 is used throughout; (4) the diff of step 8 compares
+# kinds, not lines, because Helm applies objects in a different order from the
+# order helm template writes them; (5) kubectl get events is cut to 90 columns;
+# (6) the connection Secret of step 10 holds a throwaway value that openssl
+# generates and nothing prints; (7) the tab characters in Helm's table output
+# (helm list, helm history) are expanded to spaces with four-column tab stops,
+# which is how the chapter's gate reads them, and nothing else in those lines
+# changes. The release password the chart ships, which the
+# chapter already prints from the render, is a demo value; step 7 counts it and
+# does not print it. Nothing else is edited.
+## step 6: install into a namespace that was created and labelled first (second session, access restored)
+$ helm version --short
+v3.22.1+gd6c1a0e
+$ kubectl get ns p07-finish-helm p07-finish-verify 2>&1 | tail -n 2
+Error from server (NotFound): namespaces "p07-finish-helm" not found
+Error from server (NotFound): namespaces "p07-finish-verify" not found
+$ kubectl create namespace p07-finish-helm
+namespace/p07-finish-helm created
+$ kubectl label namespace p07-finish-helm pod-security.kubernetes.io/enforce=restricted pod-security.kubernetes.io/audit=restricted pod-security.kubernetes.io/warn=restricted
+namespace/p07-finish-helm labeled
+$ helm install bookstore examples/bookstore/helm/bookstore -n p07-finish-helm --set namespace.create=false -f lab-values.yaml --wait --timeout 8m | head -n 6
+NAME: bookstore
+LAST DEPLOYED: Sat Oct 31 10:51:47 2026
+NAMESPACE: p07-finish-helm
+STATUS: deployed
+REVISION: 1
+TEST SUITE: None
+$ kubectl get pods -n p07-finish-helm
+NAME                               READY   STATUS    RESTARTS   AGE
+catalog-65b9c66f6d-2dbhn           1/1     Running   0          4m19s
+catalog-65b9c66f6d-9sg97           1/1     Running   0          4m19s
+catalog-65b9c66f6d-t9v6c           1/1     Running   0          4m19s
+orders-7f4d49848c-n6tzm            1/1     Running   0          4m19s
+orders-7f4d49848c-rdxsm            1/1     Running   0          4m19s
+payments-worker-84bdc645d5-qfrrc   1/1     Running   0          4m19s
+postgres-0                         1/1     Running   0          4m18s
+rabbitmq-5d4d4759f4-zb8w4          1/1     Running   0          4m19s
+redis-7886bf6bbb-tnwnl             1/1     Running   0          4m19s
+storefront-5d4785446f-dz5rr        1/1     Running   0          4m19s
+storefront-5d4785446f-n2wzt        1/1     Running   0          4m19s
+$ kubectl get ns p07-finish-helm -o jsonpath='{.metadata.labels}' | tr ',' '\n' | grep pod-security
+"pod-security.kubernetes.io/audit":"restricted"
+"pod-security.kubernetes.io/enforce":"restricted"
+"pod-security.kubernetes.io/warn":"restricted"}
+$ kubectl get job db-migrate -n p07-finish-helm
+Error from server (NotFound): jobs.batch "db-migrate" not found
+$ kubectl get events -n p07-finish-helm --field-selector involvedObject.name=db-migrate | cut -c1-90
+LAST SEEN   TYPE     REASON             OBJECT           MESSAGE
+14s         Normal   SuccessfulCreate   job/db-migrate   Created pod: db-migrate-l9rtd
+1s          Normal   Completed          job/db-migrate   Job completed
+$ kubectl exec -n p07-finish-helm postgres-0 -- psql -U bookstore -d bookstore -c "\dt"
+          List of relations
+ Schema |  Name  | Type  |   Owner   
+--------+--------+-------+-----------
+ public | books  | table | bookstore
+ public | orders | table | bookstore
+(2 rows)
+
+## step 7: inspect the release
+$ helm list -n p07-finish-helm
+NAME        NAMESPACE       REVISION    UPDATED                                 STATUS      CHART           APP VERSION
+bookstore   p07-finish-helm 1           2026-10-31 10:51:47.804924 +0500 PKT    deployed    bookstore-0.1.1 dev        
+$ helm status bookstore -n p07-finish-helm | head -n 6
+NAME: bookstore
+LAST DEPLOYED: Sat Oct 31 10:51:47 2026
+NAMESPACE: p07-finish-helm
+STATUS: deployed
+REVISION: 1
+TEST SUITE: None
+$ helm get manifest bookstore -n p07-finish-helm | grep -c "^kind:"
+44
+$ helm get values bookstore -n p07-finish-helm
+USER-SUPPLIED VALUES:
+catalogConfig:
+  data:
+    REDIS_ADDR: redis:6379
+database:
+  host: postgres
+namespace:
+  create: false
+  name: p07-finish-helm
+paymentsWorker:
+  amqpUrl: amqp://guest:guest@rabbitmq:5672/
+priorityClasses:
+  create: false
+$ helm history bookstore -n p07-finish-helm
+REVISION    UPDATED                     STATUS      CHART           APP VERSION DESCRIPTION     
+1           Sat Oct 31 10:51:47 2026    deployed    bookstore-0.1.1 dev         Install complete
+$ kubectl get secret -n p07-finish-helm -l owner=helm
+NAME                              TYPE                 DATA   AGE
+sh.helm.release.v1.bookstore.v1   helm.sh/release.v1   1      4m22s
+$ kubectl get secret sh.helm.release.v1.bookstore.v1 -n p07-finish-helm -o jsonpath="{.data.release}" | base64 -d | base64 -d | gunzip | grep -o "devpassword" | wc -l
+       2
+$ helm get values bookstore -n p07-finish-helm --all | grep -c "POSTGRES_PASSWORD"
+1
+$ helm get values bookstore -n p07-finish-helm | grep -c "POSTGRES_PASSWORD"
+0
+## step 8: override values, upgrade, roll back
+$ S=$(mktemp -d); helm get manifest bookstore -n p07-finish-helm > "$S/cur.yaml"; helm template bookstore examples/bookstore/helm/bookstore -n p07-finish-helm --set namespace.create=false -f examples/bookstore/helm/bookstore/values-dev.yaml -f lab-values.yaml > "$S/new.yaml"; diff <(grep '^kind:' "$S/cur.yaml" | sort | uniq -c) <(grep '^kind:' "$S/new.yaml" | sort | uniq -c); rm -rf "$S"
+4d3
+<    1 kind: HorizontalPodAutoscaler
+5a5
+>    1 kind: Job
+8d7
+<    3 kind: PodDisruptionBudget
+$ helm upgrade bookstore examples/bookstore/helm/bookstore -n p07-finish-helm --set namespace.create=false -f examples/bookstore/helm/bookstore/values-dev.yaml -f lab-values.yaml --wait --timeout 8m | head -n 6
+Release "bookstore" has been upgraded. Happy Helming!
+NAME: bookstore
+LAST DEPLOYED: Sat Oct 31 10:56:27 2026
+NAMESPACE: p07-finish-helm
+STATUS: deployed
+REVISION: 2
+$ helm upgrade bookstore examples/bookstore/helm/bookstore -n p07-finish-helm --set namespace.create=false -f examples/bookstore/helm/bookstore/values-dev.yaml -f lab-values.yaml --set catalog.image.tag=dev --set catalogConfig.data.LOG_LEVEL=warn --wait --timeout 8m | head -n 6
+Release "bookstore" has been upgraded. Happy Helming!
+NAME: bookstore
+LAST DEPLOYED: Sat Oct 31 10:57:18 2026
+NAMESPACE: p07-finish-helm
+STATUS: deployed
+REVISION: 3
+$ helm history bookstore -n p07-finish-helm
+REVISION    UPDATED                     STATUS      CHART           APP VERSION DESCRIPTION     
+1           Sat Oct 31 10:51:47 2026    superseded  bookstore-0.1.1 dev         Install complete
+2           Sat Oct 31 10:56:27 2026    superseded  bookstore-0.1.1 dev         Upgrade complete
+3           Sat Oct 31 10:57:18 2026    deployed    bookstore-0.1.1 dev         Upgrade complete
+$ kubectl get deploy catalog -n p07-finish-helm
+NAME      READY   UP-TO-DATE   AVAILABLE   AGE
+catalog   1/1     1            1           5m51s
+$ kubectl get events -n p07-finish-helm --field-selector involvedObject.name=db-migrate | cut -c1-90
+LAST SEEN   TYPE     REASON             OBJECT           MESSAGE
+105s        Normal   SuccessfulCreate   job/db-migrate   Created pod: db-migrate-l9rtd
+92s         Normal   Completed          job/db-migrate   Job completed
+36s         Normal   SuccessfulCreate   job/db-migrate   Created pod: db-migrate-pxb5h
+23s         Normal   Completed          job/db-migrate   Job completed
+11s         Normal   SuccessfulCreate   job/db-migrate   Created pod: db-migrate-6cfpg
+1s          Normal   Completed          job/db-migrate   Job completed
+$ helm rollback bookstore 1 -n p07-finish-helm --wait --timeout 8m
+Rollback was a success! Happy Helming!
+$ helm history bookstore -n p07-finish-helm
+REVISION    UPDATED                     STATUS      CHART           APP VERSION DESCRIPTION     
+1           Sat Oct 31 10:51:47 2026    superseded  bookstore-0.1.1 dev         Install complete
+2           Sat Oct 31 10:56:27 2026    superseded  bookstore-0.1.1 dev         Upgrade complete
+3           Sat Oct 31 10:57:18 2026    superseded  bookstore-0.1.1 dev         Upgrade complete
+4           Sat Oct 31 10:57:41 2026    deployed    bookstore-0.1.1 dev         Rollback to 1   
+$ kubectl get deploy catalog -n p07-finish-helm
+NAME      READY   UP-TO-DATE   AVAILABLE   AGE
+catalog   3/3     3            3           8m52s
+## step 9: server dry run of the rendered chart into a namespace that enforces restricted
+$ kubectl create namespace p07-finish-verify
+namespace/p07-finish-verify created
+$ kubectl label namespace p07-finish-verify pod-security.kubernetes.io/enforce=restricted pod-security.kubernetes.io/enforce-version=latest pod-security.kubernetes.io/warn=restricted
+namespace/p07-finish-verify labeled
+$ S=$(mktemp -d); helm template bookstore examples/bookstore/helm/bookstore -n p07-finish-verify --set namespace.create=false --set namespace.name=p07-finish-verify -f lab-values.yaml | kubectl apply --dry-run=server -n p07-finish-verify -f - > "$S/dry.txt" 2>&1; echo "$(grep -c 'created (server dry run)' "$S/dry.txt") created, $(grep -ci warning "$S/dry.txt") warnings"; grep -v 'created (server dry run)' "$S/dry.txt" | head -n 5; rm -rf "$S"
+45 created, 0 warnings
+## step 9b: a deliberate violation, refused by the same namespace
+$ kubectl run bad --image=busybox -n p07-finish-verify --dry-run=server --restart=Never --overrides='{"spec":{"containers":[{"name":"bad","image":"busybox","securityContext":{"privileged":true}}]}}' 2>&1 | head -1
+Error from server (Forbidden): pods "bad" is forbidden: violates PodSecurity "restricted:latest": privileged (container "bad" must not set securityContext.privileged=true), allowPrivilegeEscalation != false (container "bad" must set securityContext.allowPrivilegeEscalation=false), unrestricted capabilities (container "bad" must set securityContext.capabilities.drop=["ALL"]), runAsNonRoot != true (pod or container "bad" must set securityContext.runAsNonRoot=true), seccompProfile (pod or container "bad" must set securityContext.seccompProfile.type to "RuntimeDefault" or "Localhost")
+$ kubectl delete namespace p07-finish-verify --wait=false
+namespace "p07-finish-verify" deleted
+## step 10: the KEDA toggle needs a connection Secret that the operator creates
+# deliberate: no Secret name, so the render must refuse
+$ helm template bookstore examples/bookstore/helm/bookstore -n p07-finish-helm --set keda.enabled=true 2>&1 | head -n 1
+Error: execution error at (bookstore/templates/83-keda-scaledobject.yaml:19:19): keda.enabled=true needs keda.connectionSecretName: the name of an existing Secret, created by the operator, whose key `host` holds the RabbitMQ AMQP URL. The chart renders no connection Secret and carries no default credential.
+$ AMQP_URL="amqp://demo:$(openssl rand -hex 12)@rabbitmq:5672/"; printf "%s" "$AMQP_URL" | kubectl create secret generic rabbitmq-conn -n p07-finish-helm --from-file=host=/dev/stdin
+secret/rabbitmq-conn created
+$ kubectl get secret rabbitmq-conn -n p07-finish-helm
+NAME            TYPE     DATA   AGE
+rabbitmq-conn   Opaque   1      0s
+$ helm template bookstore examples/bookstore/helm/bookstore -n p07-finish-helm --set serviceMonitor.enabled=true --set keda.enabled=true --set keda.connectionSecretName=rabbitmq-conn -f lab-values.yaml | kubectl apply --dry-run=client -f - 2>&1 | grep -E 'ScaledObject|TriggerAuth|ServiceMonitor' | tail
+resource mapping not found for name: "payments-worker" namespace: "p07-finish-helm" from "STDIN": no matches for kind "ScaledObject" in version "keda.sh/v1alpha1"
+resource mapping not found for name: "catalog" namespace: "p07-finish-helm" from "STDIN": no matches for kind "ServiceMonitor" in version "monitoring.coreos.com/v1"
+resource mapping not found for name: "payments-worker" namespace: "p07-finish-helm" from "STDIN": no matches for kind "ServiceMonitor" in version "monitoring.coreos.com/v1"
+resource mapping not found for name: "rabbitmq-trigger-auth" namespace: "p07-finish-helm" from "STDIN": no matches for kind "TriggerAuthentication" in version "keda.sh/v1alpha1"
+$ helm template bookstore examples/bookstore/helm/bookstore -n bookstore -f examples/bookstore/helm/bookstore/values-prod.yaml | grep -c '^kind: Secret'
+0
+$ helm template bookstore examples/bookstore/helm/bookstore -n bookstore -f examples/bookstore/helm/bookstore/values-prod.yaml | grep -c 'name: rabbitmq-conn'
+1
+$ helm template bookstore examples/bookstore/helm/bookstore -n bookstore -f examples/bookstore/helm/bookstore/values-prod.yaml | grep -c 'guest:guest'
+1
+$ helm template bookstore examples/bookstore/helm/bookstore -n bookstore | grep -c '^kind:'
+49
+$ helm template bookstore examples/bookstore/helm/bookstore -n bookstore --set keda.enabled=true --set keda.connectionSecretName=rabbitmq-conn | grep -c '^kind:'
+51
+$ helm template bookstore examples/bookstore/helm/bookstore -n bookstore -f examples/bookstore/helm/bookstore/values-prod.yaml | grep -c '^kind:'
+53
+## step 11: clean up
+$ helm uninstall bookstore -n p07-finish-helm
+release "bookstore" uninstalled
+$ kubectl get pvc -n p07-finish-helm
+NAME              STATUS   VOLUME                                     CAPACITY   ACCESS MODES   STORAGECLASS   VOLUMEATTRIBUTESCLASS   AGE
+data-postgres-0   Bound    pvc-ac9785c0-75b7-4415-b48b-bbd0ed2fda8f   1Gi        RWO            standard       <unset>                 9m21s
+$ kubectl delete namespace p07-finish-helm --timeout=180s
+namespace "p07-finish-helm" deleted
+$ kubectl get ns p07-finish-helm p07-finish-verify 2>&1 | tail -n 2
+Error from server (NotFound): namespaces "p07-finish-helm" not found
+Error from server (NotFound): namespaces "p07-finish-verify" not found
+# Step 12 needs no namespace: the render checks are run after the last chart
+# change, and the dry run only asks the cluster for lookups.
+## step 12: render checks after the last chart change
+$ helm template bookstore examples/bookstore/helm/bookstore -n bookstore | grep 'POSTGRES_PASSWORD:'
+  POSTGRES_PASSWORD: "devpassword"
+$ helm template bookstore examples/bookstore/helm/bookstore -n bookstore --set namespace.create=false --set priorityClasses.create=false --no-hooks | grep -c '^kind:'
+44
+$ helm template bookstore examples/bookstore/helm/bookstore -n bookstore --set namespace.create=false --no-hooks | grep -c '^kind:'
+47
+$ helm install bookstore examples/bookstore/helm/bookstore -n bookstore --dry-run=client -o json --set namespace.create=false --set priorityClasses.create=false | jq -c '[(.manifest|[match("devpassword";"g")]|length), (.chart.values|tostring|[match("devpassword";"g")]|length), (.config|tostring|[match("devpassword";"g")]|length)]'
+[1,1,0]
+$ helm lint examples/bookstore/helm/bookstore | tail -n 2
+
+1 chart(s) linted, 0 chart(s) failed

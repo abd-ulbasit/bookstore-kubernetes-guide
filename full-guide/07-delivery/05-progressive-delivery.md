@@ -168,13 +168,21 @@ ConfigMap/Secret env, byte-identical `DB_DSN`).
 
 We will: (0) fresh cluster + images; (1) install Argo Rollouts; (2) catalog
 prereqs and a trimmed Prometheus; (3) a canary with real traffic that
-promotes; (4) a canary with no traffic that fails closed and rolls back. The captured outputs came from a lab kind cluster named `sf-pilot`, not the `bookstore`
-cluster these commands create. The render and scan steps need no namespace, and they
-were run from a client. During the run the lab cluster stopped accepting the run's
-credentials, so the server dry runs and the Argo Rollouts controller and Prometheus
-installs were not captured. The gate's PromQL is tested offline in step 2b. The rollout
-behaviour on a cluster (steps 3 and 4) is cited to the Argo Rollouts analysis
-documentation rather than captured.
+promotes; (4) a canary with no traffic that fails closed and rolls back. The
+captured outputs came from a lab kind cluster named `sf-pilot`, not the
+`bookstore` cluster these commands create. The render and scan steps need no
+namespace, and they were run from a client. In a second session, once the lab
+cluster accepted the run's credentials again, the lab installed the pinned
+Argo Rollouts chart, ran the shipped manifests through a server dry run
+against its CRDs, ran the shipped catalog Rollout, and captured a real abort
+from a failing analysis. Prometheus was not installed in that session, so the
+analysis read a stand-in metric (section 4b). The Prometheus install, the load
+test and a promoted canary were not run. The gate's PromQL is tested offline
+in step 2b, and what a promoted canary does is cited to the Argo Rollouts
+analysis documentation rather than captured. The lab used the namespace
+`p07-finish-rollouts` for the controller and for everything else, where this
+chapter writes `argo-rollouts` and `bookstore`, so that name appears in the
+captured output.
 
 ### 0. Prerequisites — fresh cluster + the four images (self-bootstrapping)
 
@@ -268,7 +276,33 @@ the chart can narrow it. A scan is a review queue, not a verdict.
 Installing the controller created the `argoproj.io` Rollout CRDs. **That is
 what makes the manifests dry-runnable**: before this, a client dry-run prints
 `no matches for kind "Rollout"` (the documented CRD-intrinsic behaviour; see
-the section after the lab).
+the section after the lab). The lab ran the install above and then listed what
+it left behind:
+
+```sh
+kubectl get crd | grep argoproj | cut -d' ' -f1
+kubectl get pods -n argo-rollouts
+```
+
+<!-- gate: output -->
+```text
+analysisruns.argoproj.io
+analysistemplates.argoproj.io
+clusteranalysistemplates.argoproj.io
+experiments.argoproj.io
+rollouts.argoproj.io
+```
+
+<!-- gate: output -->
+```text
+NAME                             READY   STATUS    RESTARTS   AGE
+argo-rollouts-6695f965fc-q24wc   1/1     Running   0          89s
+argo-rollouts-6695f965fc-qrwjs   1/1     Running   0          89s
+```
+
+The chart's default is two controller replicas, and both are `Running` in a
+namespace that enforces `restricted`, so the controller needed no exception, as
+the render check predicted.
 
 The admission test is the namespace label itself: the Pods in step 3 are what it
 admits or refuses. The render scan above is a check on the chart, not an admission test.
@@ -292,8 +326,10 @@ kubectl apply -f examples/bookstore/raw-manifests/35-priorityclasses.yaml
 kubectl apply -f examples/bookstore/raw-manifests/40-services.yaml      # the shared `catalog` Service
 kubectl apply -f examples/bookstore/raw-manifests/20-postgres-statefulset.yaml
 kubectl -n bookstore rollout status statefulset/postgres
-# catalog's /readyz pings Postgres when DB_DSN is set, so without this step
-# no canary Pod can become Ready.
+kubectl apply -f examples/bookstore/raw-manifests/12-redis.yaml
+kubectl -n bookstore rollout status deploy/redis
+# catalog's /readyz pings Postgres when DB_DSN is set and Redis at REDIS_ADDR,
+# so without these two steps no catalog Pod, canary or stable, becomes Ready.
 
 # Prometheus (Part 06 ch.01's chart, pinned, with only the parts the gate reads):
 kubectl create namespace monitoring
@@ -685,9 +721,11 @@ kubectl delete pod loadgen -n bookstore              # stop the load
 This is the security property the gate exists for. Start a canary and send it
 nothing. A naive gate passes on silence. This one fails.
 
-The lab did not run this step, so its results are expected rather than captured.
-The offline test in step 2b checks the query's value on silence: 0 for the success
-rate, which fails, and 1000 for the latency, which fails too.
+The lab did not run this step with Prometheus, so the results below are
+expected rather than captured. The offline test in step 2b checks the query's
+value on silence: 0 for the success rate, which fails, and 1000 for the
+latency, which fails too. Section 4b runs the same sequence with a stand-in
+metric and shows a real abort.
 
 ```sh
 kubectl patch rollout catalog -n bookstore --type=json \
@@ -712,22 +750,284 @@ tool running about 200 concurrent clients. The canary's p95 then breaks the
 0.5 s threshold, and the AnalysisRun fails. This lab does not capture that run.
 It is the same mechanism with a different query.
 
+### 4b. The abort, captured with a stand-in metric
+
+Prometheus was not installed in the lab, so this section replaces the metric and
+keeps everything else: the shipped Rollout, its steps and its failure limit. A
+busybox web server serves the two numbers the real queries return for a canary
+that served no traffic, a success rate of 0 and a p95 of 1000 seconds (step 2b).
+Its Pod carries the baseline, and its image is pinned by digest with the tag in
+a comment:
+
+```sh
+kubectl apply -f - <<'EOF'
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: stand-in-metrics
+  namespace: bookstore
+automountServiceAccountToken: false
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: stand-in-metrics
+  namespace: bookstore
+data:
+  success-rate.json: '{"value": 0}'
+  latency-p95.json: '{"value": 1000}'
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: stand-in-metrics
+  namespace: bookstore
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: stand-in-metrics
+  template:
+    metadata:
+      labels:
+        app: stand-in-metrics
+    spec:
+      serviceAccountName: stand-in-metrics
+      automountServiceAccountToken: false
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 65534
+        runAsGroup: 65534
+        seccompProfile:
+          type: RuntimeDefault
+      containers:
+        - name: httpd
+          image: busybox@sha256:73aaf090f3d85aa34ee199857f03fa3a95c8ede2ffd4cc2cdb5b94e566b11662  # busybox:1.36
+          command: ["httpd", "-f", "-p", "8080", "-h", "/www"]
+          ports:
+            - containerPort: 8080
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities:
+              drop: ["ALL"]
+          resources:
+            requests:
+              cpu: 10m
+              memory: 16Mi
+            limits:
+              cpu: 50m
+              memory: 32Mi
+          volumeMounts:
+            - name: data
+              mountPath: /www
+              readOnly: true
+            - name: tmp
+              mountPath: /tmp
+      volumes:
+        - name: data
+          configMap:
+            name: stand-in-metrics
+        - name: tmp
+          emptyDir: {}
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: stand-in-metrics
+  namespace: bookstore
+spec:
+  selector:
+    app: stand-in-metrics
+  ports:
+    - port: 8080
+      targetPort: 8080
+EOF
+```
+
+Then two AnalysisTemplates with the shipped names, which the Rollout's analysis
+step already references. They read those numbers with the web provider. Apply
+them in place of the two shipped templates:
+
+```sh
+kubectl apply -f - <<'EOF'
+apiVersion: argoproj.io/v1alpha1
+kind: AnalysisTemplate
+metadata:
+  name: catalog-success-rate
+  namespace: bookstore
+spec:
+  args:
+    - name: service-name
+    - name: namespace
+    - name: canary-hash
+  metrics:
+    - name: catalog-success-rate
+      interval: 20s
+      count: 5
+      successCondition: result >= 0.95
+      failureLimit: 3
+      provider:
+        web:
+          url: http://stand-in-metrics.bookstore.svc.cluster.local:8080/success-rate.json
+          jsonPath: "{$.value}"
+---
+apiVersion: argoproj.io/v1alpha1
+kind: AnalysisTemplate
+metadata:
+  name: catalog-latency-p95
+  namespace: bookstore
+spec:
+  args:
+    - name: service-name
+    - name: namespace
+    - name: canary-hash
+  metrics:
+    - name: catalog-latency-p95
+      interval: 20s
+      count: 5
+      successCondition: result <= 0.5
+      failureLimit: 3
+      provider:
+        web:
+          url: http://stand-in-metrics.bookstore.svc.cluster.local:8080/latency-p95.json
+          jsonPath: "{$.value}"
+EOF
+```
+
+The stand-in proves the rollout mechanics, not the PromQL. Apply the Rollout
+and wait for the first revision, which skips the canary steps because there is
+no stable revision to compare with. If you did not apply Redis in step 2, the
+wait times out. The Pods stay `Running` and never become Ready, because
+catalog's `/readyz` logs `redis not ready`. The lab hit this on its first try:
+
+```sh
+kubectl apply -f examples/bookstore/argocd/rollouts/catalog-rollout.yaml
+kubectl wait --for=jsonpath='{.status.phase}'=Healthy rollout/catalog -n bookstore --timeout=420s
+```
+
+<!-- gate: output -->
+```text
+error: timed out waiting for the condition on rollouts/catalog
+```
+
+With Redis applied, the same wait succeeds, and all four Pods were admitted
+under `enforce: restricted`:
+
+<!-- gate: output -->
+```text
+rollout.argoproj.io/catalog condition met
+# ...
+NAME                       READY   STATUS    RESTARTS   AGE
+catalog-77b54754cc-64959   1/1     Running   0          7m47s
+catalog-77b54754cc-g4wjg   1/1     Running   0          7m47s
+catalog-77b54754cc-mt7v9   1/1     Running   0          7m47s
+catalog-77b54754cc-q9k2c   1/1     Running   0          7m47s
+```
+
+Now start a canary that gets no traffic. A new annotation is a new pod
+template. At analysis the stand-in answers 0, the success check is false, and
+the AnalysisRun fails:
+
+```sh
+kubectl patch rollout catalog -n bookstore --type=json \
+  -p='[{"op":"add","path":"/spec/template/metadata/annotations","value":{"example.bookstore/trial":"silent"}}]'
+kubectl wait --for=jsonpath='{.status.phase}'=Degraded rollout/catalog -n bookstore --timeout=480s
+kubectl get rollout catalog -n bookstore -o jsonpath='{.status.phase}{"\n"}{.status.message}{"\n"}'
+kubectl get analysisrun -n bookstore
+```
+
+<!-- gate: output -->
+```text
+rollout.argoproj.io/catalog patched
+```
+
+<!-- gate: output -->
+```text
+rollout.argoproj.io/catalog condition met
+```
+
+<!-- gate: output -->
+```text
+Degraded
+RolloutAborted: Rollout aborted update to revision 2: Step-based analysis phase error/failed: Metric "catalog-success-rate" assessed Failed due to failed (4) > failureLimit (3)
+```
+
+<!-- gate: output -->
+```text
+NAME                     STATUS   AGE
+catalog-7c6df5d49c-2-4   Failed   62s
+```
+
+The Rollout is `Degraded` with the reason in its status: the metric assessed
+`Failed` four times, past the `failureLimit` of three, so the update was
+aborted. Nobody ran `kubectl rollout undo`. Look at the ReplicaSets:
+
+```sh
+kubectl get replicaset -n bookstore -l app=catalog
+```
+
+<!-- gate: output -->
+```text
+NAME                 DESIRED   CURRENT   READY   AGE
+catalog-77b54754cc   4         4         3       11m
+catalog-7c6df5d49c   1         1         1       3m20s
+```
+
+That listing was taken while the canary ReplicaSet was still scaling down. The
+same listing a minute later shows it at zero, and the stable ReplicaSet
+holding all four ready replicas:
+
+<!-- gate: output -->
+```text
+NAME                 DESIRED   CURRENT   READY   AGE
+catalog-77b54754cc   4         4         4       12m
+catalog-7c6df5d49c   0         0         0       4m33s
+```
+
+A Rollout left `Degraded` has not promoted the new template. To try again, fix
+the cause and change the pod template once more.
+
 ### CRD-intrinsic dry-run (documented, like every prior CRD object)
 
 On a cluster **without** the Argo Rollouts controller, the client dry run
-prints an error like the following. The lines are illustrative and were not
-captured in this lab run, because the server dry runs were not accepted:
+prints an error. The lab captured it after it had removed the CRDs again:
 
 ```sh
-kubectl apply --dry-run=client -f examples/bookstore/argocd/rollouts/catalog-rollout.yaml
-# error: ... no matches for kind "Rollout" in version "argoproj.io/v1alpha1"
-kubectl apply --dry-run=client -f examples/bookstore/argocd/rollouts/analysistemplate-success-rate.yaml
-# error: ... no matches for kind "AnalysisTemplate" in version "argoproj.io/v1alpha1"
+kubectl apply --dry-run=client -f examples/bookstore/argocd/rollouts/catalog-rollout.yaml 2>&1 | head -n 2
+kubectl apply --dry-run=client -f examples/bookstore/argocd/rollouts/analysistemplate-success-rate.yaml 2>&1 | head -n 2
 ```
 
-**Expected and correct**, as [ch.01](01-packaging-helm.md) explains for every CRD-backed
-object: the manifests are schema-correct, and the CRDs must exist first (step 1). After
-install, `kubectl apply --dry-run=server` validates cleanly.
+<!-- gate: output -->
+```text
+error: resource mapping not found for name: "catalog" namespace: "bookstore" from "examples/bookstore/argocd/rollouts/catalog-rollout.yaml": no matches for kind "Rollout" in version "argoproj.io/v1alpha1"
+ensure CRDs are installed first
+```
+
+<!-- gate: output -->
+```text
+error: resource mapping not found for name: "catalog-success-rate" namespace: "bookstore" from "examples/bookstore/argocd/rollouts/analysistemplate-success-rate.yaml": no matches for kind "AnalysisTemplate" in version "argoproj.io/v1alpha1"
+ensure CRDs are installed first
+```
+
+**Expected and correct**, as [ch.01](01-packaging-helm.md) explains for every
+CRD-backed object: the manifests are schema-correct, and the CRDs must exist
+first (step 1). With the CRDs installed, a server dry run validates the
+shipped files against their schemas. The lab ran it on the two templates and
+the Rollout, with the namespace swapped for its own:
+
+```sh
+kubectl apply --dry-run=server -f examples/bookstore/argocd/rollouts/analysistemplate-success-rate.yaml
+kubectl apply --dry-run=server -f examples/bookstore/argocd/rollouts/analysistemplate-latency.yaml
+kubectl apply --dry-run=server -f examples/bookstore/argocd/rollouts/catalog-rollout.yaml
+```
+
+<!-- gate: output -->
+```text
+analysistemplate.argoproj.io/catalog-success-rate created (server dry run)
+analysistemplate.argoproj.io/catalog-latency-p95 created (server dry run)
+rollout.argoproj.io/catalog created (server dry run)
+```
 
 Clean up:
 
@@ -737,6 +1037,25 @@ helm uninstall argo-rollouts -n argo-rollouts
 helm uninstall kube-prometheus-stack -n monitoring
 kind delete cluster --name bookstore
 ```
+
+On a cluster you keep, `helm uninstall` leaves the five Rollouts CRDs behind,
+because the chart marks them to be kept. The lab deleted them by name after it
+removed the namespace, and checked that nothing was left:
+
+```sh
+kubectl delete crd analysisruns.argoproj.io analysistemplates.argoproj.io \
+  clusteranalysistemplates.argoproj.io experiments.argoproj.io rollouts.argoproj.io
+kubectl get crd | grep -c argoproj
+kubectl get clusterrole,clusterrolebinding | grep -c argo-rollouts
+```
+
+<!-- gate: output -->
+```text
+0
+# ...
+0
+```
+
 
 ## How it works under the hood
 

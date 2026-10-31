@@ -165,7 +165,7 @@ flowchart TD
  │                     promotion edits this file and no other
  └── components/                 kind: Component — opt-in via overlay components:
      ├── servicemonitor/  + ServiceMonitor×2 + PrometheusRule  (Prom Operator CRDs)
-     ├── keda/            + ScaledObject + TriggerAuth + Secret (KEDA CRDs)
+     ├── keda/            + ScaledObject + TriggerAuth          (KEDA CRDs)
      ├── gateway/         SWAPS Ingress → Gateway/HTTPRoute     (Gateway API CRDs)
      ├── kyverno/         + ClusterPolicy (Audit, cluster-scoped)(Kyverno CRD)
      ├── snapshot/        + VolumeSnapshot(Class)               (snapshotter CRDs)
@@ -698,7 +698,7 @@ enable it: each row describes what those files contain in this repository.
 | Component | Adds | Removes from the base | What it widens |
 |---|---|---|---|
 | `servicemonitor` | two ServiceMonitors and a PrometheusRule | nothing | scrape endpoints that Prometheus reads |
-| `keda` | a ScaledObject that scales `payments-worker` to zero, a TriggerAuthentication and the Secret `rabbitmq-conn` | nothing | a Secret in the render that holds the RabbitMQ demo login (`guest`), and scale to zero |
+| `keda` | a ScaledObject that scales `payments-worker` to zero and a TriggerAuthentication that names the Secret `rabbitmq-conn` | nothing | scale to zero, and a dependency on a Secret you create first: the component renders none and holds no credential |
 | `gateway` | a GatewayClass, a Gateway with an HTTPS listener and an HTTPRoute | the base Ingress | the entry point moves to a Gateway, which owns the TLS listener and its certificate |
 | `kyverno` | a ClusterPolicy in `Audit` mode | nothing | nothing is blocked; violations are only reported |
 | `snapshot` | a VolumeSnapshotClass and a VolumeSnapshot of `data-postgres-0` | nothing | a second copy of the database volume; whoever can create a volume from it can read the data |
@@ -723,11 +723,18 @@ kubectl kustomize "$S/kz/overlays/devc" > "$S/devc.yaml" && grep -c "^kind:" "$S
 <!-- gate: output -->
 
 ```text
-51
+50
 ```
 
-That is the 45 objects of dev plus three from each component. To add them to
-the real dev overlay, append the same `components:` list to
+That is the 45 objects of dev, three from `servicemonitor` and two from
+`keda`. The `keda` component adds no Secret: its TriggerAuthentication names
+`rabbitmq-conn`, which you create in the `bookstore` namespace before you
+apply (the chart takes the same Secret through `keda.connectionSecretName`,
+see
+[07.01](01-packaging-helm.md#6-toggle-a-crd-backed-extra-and-be-honest-about-operators)).
+Kustomize cannot refuse a render because an external object is missing, so the
+check is yours: `kubectl get secret rabbitmq-conn -n bookstore`. To add the
+components to the real dev overlay, append the same `components:` list to
 `overlays/dev/kustomization.yaml`.
 
 Dry-run the copy against a cluster:
@@ -762,6 +769,14 @@ kubectl label namespace keda pod-security.kubernetes.io/enforce=restricted
 curl -fsSLO https://kedacore.github.io/charts/keda-2.21.0.tgz
 echo "a7da56bf41a33dad9d2fc82a6fdecee552fff947d80bf1e1dbcf4db0f9e26dee  keda-2.21.0.tgz" | shasum -a 256 -c -
 helm install keda ./keda-2.21.0.tgz -n keda --wait
+```
+
+Then create the `rabbitmq-conn` Secret in `bookstore` as [07.01 section
+6](01-packaging-helm.md#6-toggle-a-crd-backed-extra-and-be-honest-about-operators)
+shows, and apply the overlay that lists the component. This guide did not run
+these last steps, because they install an operator:
+
+```sh
 kubectl apply -k examples/bookstore/kustomize/overlays/dev   # ScaledObject now applies
 kubectl get scaledobject,hpa -n bookstore                    # KEDA created the managed HPA
 ```
