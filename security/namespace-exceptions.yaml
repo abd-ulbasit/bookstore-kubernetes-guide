@@ -158,6 +158,8 @@ exceptions:
       chapter shows the same Pod refused in a restricted namespace.
     upstream: https://kubernetes.io/docs/concepts/security/pod-security-standards/#privileged
     chapter: 08-day-2-operations/03-troubleshooting-playbook.md
+    expires: 2027-06-30
+
   - namespace: gpu-operator
     level: privileged
     reason: >-
