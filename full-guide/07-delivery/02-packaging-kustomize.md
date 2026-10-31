@@ -14,8 +14,8 @@
 > Kustomize** (and *both*).
 
 **Estimated time:** ~30 min read · ~90 min hands-on
-**Prerequisites:** [Part 07 ch.01](01-packaging-helm.md) — same problem; different answer (templating vs patching) · [Part 00 ch.06](../00-foundations/06-declarative-api-model.md) — patches are still declarative manifests · [Part 03 ch.01](../03-config-and-storage/01-configmaps.md) — configMapGenerator and the content-hash suffix
-**You'll know after this:** • build a base + overlays layout and explain when an overlay should patch vs replace · • use strategic-merge and JSON6902 patches without the `labels:` immutability footgun · • generate ConfigMaps and Secrets with content-hash suffixes for safe rollouts · • render dev/staging/prod overlays of the Bookstore (45 / 49 / 48 objects) · • articulate when to pick Helm, Kustomize or both (Helm + post-render Kustomize)
+**Prerequisites:** [Part 01 ch.01](../01-core-workloads/01-pods.md#baseline) — the baseline every overlay must keep · [Part 07 ch.01](01-packaging-helm.md) — same problem; different answer (templating vs patching) · [Part 00 ch.06](../00-foundations/06-declarative-api-model.md) — patches are still declarative manifests · [Part 03 ch.01](../03-config-and-storage/01-configmaps.md) — configMapGenerator and the content-hash suffix
+**You'll know after this:** • build a base + overlays layout and explain when an overlay should patch vs replace · • use strategic-merge and JSON6902 patches without the `labels:` immutability footgun · • show that an overlay has stripped a hardening field, by rendering it and scanning the render · • keep a generated Secret's value out of the render and out of Git · • pin a remote base to a commit and keep a promotion a one-file diff · • render dev/staging/prod overlays of the Bookstore (45 / 49 / 48 objects) · • articulate when to pick Helm, Kustomize or both (Helm + post-render Kustomize)
 
 <!-- tags: kustomize, platform-engineering, gitops, ci-cd -->
 
@@ -53,7 +53,8 @@ that renders the **same 49-object set** as the Helm default and the raw
 manifests (every restricted `securityContext`, the Part 04 scheduling layer,
 the byte-identical `catalog`/`orders` `DB_DSN`, the PSA-`restricted`
 namespace), plus **dev/staging/prod overlays** and opt-in **components** for
-the CRD-backed extras — and proves the equivalence.
+the CRD-backed extras. The overlays are where a control can be lost without
+anyone meaning it, so this chapter also shows how each render is judged.
 [ch.01](01-packaging-helm.md) already forward-referenced this chapter as the
 better fit for "same app, few env deltas"; the closing *Helm vs Kustomize*
 section squares the two honestly. [ch.04](04-gitops-argocd.md) has Argo CD
@@ -101,6 +102,23 @@ This is the **Configuration Template** pattern (Ibryam & Huß ch.22) approached
 without a template engine: the invariant app is the base, the variant is a
 declarative patch.
 
+## Threats and controls
+
+An overlay is a small diff on a base that is meant to be safe. Each row is a
+way that diff, or what it points at, can make the app less safe.
+
+| Threat | Control taught here | Goes deeper |
+|---|---|---|
+| A patch removes a hardening field the base sets, and nobody reviews that line | Judge each render: `trivy config` on the rendered output, plus a `restricted` server dry run. The dry run alone misses fields `restricted` does not check | [01.01](../01-core-workloads/01-pods.md#baseline); blocking policy at admission is 05.07 <!-- link-later: 05.07 --> |
+| A remote base changes under an overlay that was reviewed | Pin the remote base to a full commit SHA in `?ref=`, never a branch or tag name | [07.04](04-gitops-argocd.md), [05.03](../05-security/03-supply-chain.md) |
+| A `secretGenerator` writes a secret value into the render, and the render reaches a log or an artifact | No literal values in a generator in Git; treat the render as secret material; prod gets its Secret out of band | [03.02](../03-config-and-storage/02-secrets.md), [15.05](../15-day-to-day-production-ops/05-production-secrets-vault-eso.md) |
+| An opt-in component adds a Secret, a copy of data or an exposure, or removes a control the base has | Name what each component adds and removes, in the components step, and judge its render like any other | this chapter |
+| A promotion is too big to review, so the change that matters hides in it | Image pins live in a one-file Component; a promotion changes that file, and the render diff shows the change | [07.03](03-cicd-pipeline.md#12-the-seam-from-signed-digest-to-git) |
+
+This chapter judges the render. It does not make the cluster refuse a bad
+overlay: that is admission policy (05.07). The Kyverno component in the
+components step reports violations and blocks nothing.
+
 ## Diagrams
 
 ### `kubectl kustomize` build pipeline: base + overlay → transformers → rendered manifests (Mermaid)
@@ -141,7 +159,7 @@ flowchart TD
  │   │             host bookstore.dev.local                 → 45 objects
  │   ├── staging/  2 replicas, moderate resources, HPA/PDB on,
  │   │             host bookstore.staging.example.com       → 49 objects
- │   └── prod/     4/3/3 replicas, tuned, registry images,
+ │   └── prod/     4/3/3 replicas, tuned, image pins from images/,
  │       │         demo Secret $patch:delete'd              → 48 objects
  │       └── images/   kind: Component, only the image pins, so a
  │                     promotion edits this file and no other
@@ -151,8 +169,8 @@ flowchart TD
      ├── gateway/         SWAPS Ingress → Gateway/HTTPRoute     (Gateway API CRDs)
      ├── kyverno/         + ClusterPolicy (Audit, cluster-scoped)(Kyverno CRD)
      ├── snapshot/        + VolumeSnapshot(Class)               (snapshotter CRDs)
-     └── canary/          SWAPS catalog → stable + canary        (no CRD)
- (base renders the SAME 49-object set as the Helm DEFAULT render & raw-manifests.)
+     └── canary/          SWAPS catalog → stable + canary, drops its HPA (no CRD)
+ (base renders the SAME 49-object set as the Helm DEFAULT render.)
 ```
 
 ## Hands-on with the Bookstore
@@ -165,16 +183,19 @@ tree. `kustomize` is **built into `kubectl`** here, so there is nothing extra
 to install.
 
 We will: (0) a clean kind cluster + the four images; (1) `kubectl kustomize`
-and read the render; (2) `kubectl apply -k overlays/dev`; (3) diff dev vs prod
-and inspect the typed knobs (`images:`, `replicas:`, patches); (4) prove
-restricted admission with a server dry-run; (5) enable an optional component
-and see the honest "needs the CRD" behaviour.
+and count the render; (2) `kubectl apply -k overlays/dev`; (3) diff dev vs prod
+and inspect the typed knobs; (4) prove restricted admission with a server
+dry-run; (5) strip a hardening field in a scratch copy and catch it; (6) see a
+generated Secret in the render; (7) pin a remote base to a commit; (8) promote
+one image pin and read the diff; (9) enable optional components and see the
+honest "needs the CRD" behaviour.
 
 ### 0. Prerequisites — a fresh cluster, the images (self-bootstrapping)
 
-Identical self-bootstrap to every prior chapter (the base pulls `postgres:16`,
-`redis:7`, `rabbitmq:3.13-management` from the registry — only the four
-`bookstore/*:dev` images are `kind load`ed):
+Identical self-bootstrap to every prior chapter. The base pulls postgres, redis
+and rabbitmq from the registry, each pinned by digest with its tag in a comment
+(the baseline's image rule). Only the four `bookstore/*:dev` images are
+`kind load`ed:
 
 ```sh
 kind delete cluster --name bookstore 2>/dev/null || true
@@ -204,13 +225,30 @@ exactly what would be applied** — the habit that keeps overlays honest:
 kubectl kustomize examples/bookstore/kustomize/base | less
 ```
 
+Count the objects in each render. ADR 0007 records these counts as invariants,
+so a change to one is a design change, not a formatting one:
+
+```sh
+for o in base overlays/dev overlays/staging overlays/prod; do echo "$o $(kubectl kustomize examples/bookstore/kustomize/$o | grep -c "^kind:")"; done
+```
+
+<!-- gate: output -->
+
+```text
+base 49
+overlays/dev 45
+overlays/staging 49
+overlays/prod 48
+```
+
 Sanity-check it against the API server **without applying** (client dry-run):
 
 ```sh
 kubectl kustomize examples/bookstore/kustomize/base | kubectl apply --dry-run=client -f -
-# ...every object: "<OBJ> created (dry run)"
-# With the BASE, ZERO "no matches for kind" — every object is a built-in kind.
 ```
+
+Each object should report `created (dry run)`. None should report `no matches
+for kind`: every object in the base is a built-in kind.
 
 That zero is by design: every CRD-backed object (ServiceMonitor,
 PrometheusRule, KEDA `ScaledObject`, Gateway, Kyverno `ClusterPolicy`,
@@ -258,24 +296,18 @@ Compare what dev vs prod would apply, with only built-in tooling:
 ```sh
 diff <(kubectl kustomize examples/bookstore/kustomize/overlays/dev) \
      <(kubectl kustomize examples/bookstore/kustomize/overlays/prod) | grep -E '^[<>]' | head -40
-#  replicas 1 vs 4/3/3 ; image bookstore/catalog:dev vs
-#  registry.example.com/bookstore/catalog:1.0.0 ; host bookstore.dev.local vs
-#  bookstore.example.com ; prod has no demo Secret ; LOG_LEVEL debug vs (base) info
 ```
 
 Each difference comes from a **typed transformer or patch**, never a
-hand-edited manifest. From `overlays/prod/kustomization.yaml` (the `images:`
-list sits in `overlays/prod/images/kustomization.yaml`, a Component the overlay
-lists under `components:`; it is shown in place here):
+hand-edited manifest. The differences are the replica counts, the catalog
+resources and HPA bounds, the ingress host, the image pins, and the demo Secret
+that prod removes. The replica and patch part of
+`overlays/prod/kustomization.yaml` looks like this:
 
 ```yaml
 replicas:                              # the replicas: transformer, not edited YAML
   - name: catalog
     count: 4
-images:                                # the images: transformer rewrites name+tag
-  - name: bookstore/catalog
-    newName: registry.example.com/bookstore/catalog
-    newTag: "1.0.0"                     # promotion writes digest: sha256:<DIGEST> instead
 patches:
   - target: { group: apps, version: v1, kind: Deployment, name: catalog }
     patch: |                            # strategic-merge: only resources change
@@ -295,13 +327,32 @@ patches:
         value: 12
 ```
 
-Bump a tag without touching any Deployment — render and confirm:
+The image pins are not in that file. They are in `overlays/prod/images/`, a
+Component that the overlay lists under `components:`. The whole file is the pin
+list, in the shape `kustomize edit` writes:
 
-```sh
-kubectl kustomize examples/bookstore/kustomize/overlays/prod \
-  | grep -m1 'image: .*catalog'
-# image: registry.example.com/bookstore/catalog:1.0.0   ← from images:, not edited YAML
+```yaml
+# overlays/prod/images/kustomization.yaml, fragment: the file also starts with
+# apiVersion and kind: Component
+images:
+- digest: sha256:eaa26ada0a2e1575026a5e71e74572ed0bfdde80f50012e91a7be28f0de16ced
+  name: bookstore/catalog
+  newName: ghcr.io/abd-ulbasit/bookstore-catalog
+- digest: sha256:78ad1a65b9647607b5903035685a864882f8f38f85a45c21d86089f4f7371caf
+  name: bookstore/orders
+  newName: ghcr.io/abd-ulbasit/bookstore-orders
+- name: bookstore/payments-worker
+  newName: registry.example.com/bookstore/payments-worker
+  newTag: 1.0.0
+- name: bookstore/storefront
+  newName: registry.example.com/bookstore/storefront
+  newTag: 1.0.0
 ```
+
+Catalog and orders are pinned by digest, the form a promotion writes.
+payments-worker and storefront are still tags on a placeholder registry; they
+change to digests the same way when they are promoted. The `images:`
+transformer rewrites each reference in the render, so no Deployment is edited.
 
 > **Strategic-merge vs JSON6902, and the legacy spelling.** A
 > **strategic-merge** patch is a partial object merged by the field's patch
@@ -315,88 +366,395 @@ kubectl kustomize examples/bookstore/kustomize/overlays/prod \
 
 ### 4. Prove restricted admission with a server-side dry-run
 
-A client dry-run does not run admission. A **server** dry-run does — including
+A client dry-run does not run admission. A **server** dry-run does, including
 **Pod Security Admission**. Same proof technique as Part 05 ch.02 / Part 06 /
-ch.01; here it certifies the *rendered overlay*:
+ch.01; here it certifies the *rendered overlay*. The namespace is a throwaway
+that enforces `restricted`, not the app's own:
 
 ```sh
-# Throwaway namespace that ENFORCES restricted (don't reuse the app's ns):
+S=$(mktemp -d)
 kubectl create namespace bs-verify
 kubectl label namespace bs-verify \
   pod-security.kubernetes.io/enforce=restricted \
   pod-security.kubernetes.io/enforce-version=latest \
   pod-security.kubernetes.io/warn=restricted
-
-# Render prod, drop the Namespace + cluster-scoped kinds, and strip the
-# hardcoded `namespace: bookstore` so the workloads admit into the labelled
-# throwaway ns (the SAME technique ch.01 used with --set namespace.*):
-kubectl kustomize examples/bookstore/kustomize/overlays/prod \
-  | awk 'BEGIN{RS="\n---\n";ORS="\n---\n"} !/^kind: (Namespace|PriorityClass)/' \
-  | sed '/^  namespace: bookstore$/d' \
-  | kubectl apply --dry-run=server -n bs-verify -f -
-# every workload: "<OBJ> created (server dry run)" — ZERO PodSecurity violations
-
-# Negative control — the ns really enforces restricted:
-kubectl run bad --image=busybox -n bs-verify --dry-run=server --restart=Never \
-  --overrides='{"spec":{"containers":[{"name":"bad","image":"busybox","securityContext":{"privileged":true}}]}}'
-# Error ... violates PodSecurity "restricted:latest": privileged ... (Forbidden)
-
-kubectl delete namespace bs-verify         # leave the cluster as you found it
+for o in dev staging prod; do kubectl kustomize examples/bookstore/kustomize/overlays/$o | awk 'BEGIN{RS="\n---\n";ORS="\n---\n"} !/(^|\n)kind: (Namespace|PriorityClass)(\n|$)/' | sed '/^  namespace: bookstore$/d' | kubectl apply --dry-run=server -n bs-verify -f - > "$S/$o-dry.txt" 2>&1; echo "$o $(grep -c 'created (server dry run)' "$S/$o-dry.txt") created, $(grep -ci warning "$S/$o-dry.txt") warnings"; done
 ```
 
-Every Deployment/StatefulSet/Job/CronJob is admitted under `enforce:
-restricted` with **no PodSecurity warnings** — because the base manifests carry
-the *exact* per-image restricted `securityContext` from Part 05 ch.02 (Go
-services UID 65532 + read-only root FS; storefront UID 101; postgres/rabbitmq
-UID 999 + `fsGroup`, no read-only root FS; redis UID 999 + read-only root FS)
-and the Part 04 scheduling layer — and **no overlay weakens them**: an overlay
-only patches replicas/resources/host/config, never `securityContext` or
-`priorityClassName`/`topologySpreadConstraints`/`affinity`/`tolerations`. (The
-rendered `.spec.selector` and pod-template SC/scheduling are byte-identical
-base ↔ every overlay; that is the *commonLabels footgun* discipline, below,
-made measurable.)
+The `awk` drops the Namespace and the three PriorityClasses. They are
+cluster-scoped, so they are not this namespace's to create. The `sed` strips
+the hardcoded `namespace: bookstore`, so the workloads land in the labelled
+throwaway namespace (the SAME technique ch.01 used with `--set namespace.*`).
+Each overlay then reports its objects:
 
-### 5. Enable an optional component — and be honest about CRDs
+<!-- gate: output -->
 
-The observability/scaling/policy extras are CRD-backed, so the base does not
-include them; each is a **component** an overlay opts into. Stack a couple onto
-the dev overlay by adding a `components:` list (do this in a copy, or append to
-`overlays/dev/kustomization.yaml`):
+```text
+dev 41 created, 0 warnings
+staging 45 created, 0 warnings
+prod 44 created, 0 warnings
+```
+
+Those are the step 1 counts minus the four objects the filter drops: 45 less
+4, 49 less 4 and 48 less 4.
+
+The negative control shows the namespace refusing what the baseline forbids:
+
+```sh
+kubectl run bad --image=busybox -n bs-verify --dry-run=server --restart=Never --overrides='{"spec":{"containers":[{"name":"bad","image":"busybox","securityContext":{"privileged":true}}]}}' 2>&1 | head -1
+```
+
+<!-- gate: output -->
+
+```text
+Error from server (Forbidden): pods "bad" is forbidden: violates PodSecurity "restricted:latest": privileged (container "bad" must not set securityContext.privileged=true), allowPrivilegeEscalation != false (container "bad" must set securityContext.allowPrivilegeEscalation=false), unrestricted capabilities (container "bad" must set securityContext.capabilities.drop=["ALL"]), runAsNonRoot != true (pod or container "bad" must set securityContext.runAsNonRoot=true), seccompProfile (pod or container "bad" must set securityContext.seccompProfile.type to "RuntimeDefault" or "Localhost")
+```
+
+The three overlays pass with no warning, because the base puts the restricted
+`securityContext` from Part 05 ch.02 on every workload. Each of the nine
+containers runs as non-root, drops every capability, sets
+`allowPrivilegeEscalation: false` and sets `readOnlyRootFilesystem: true`. The
+last one makes the container's own filesystem read-only, so a compromised
+process cannot write a new binary into it. Writable paths are `emptyDir`
+mounts. catalog, orders and payments-worker run as UID 65532, storefront as UID
+101, and postgres, rabbitmq, redis and the two batch workloads as UID 999.
+postgres, rabbitmq and redis also set `fsGroup: 999`, so their data volumes are
+writable by that UID. The baseline defines these fields in
+[01.01](../01-core-workloads/01-pods.md#baseline).
+
+No overlay changes them. An overlay patches counts, resources, HPA and PDB
+settings, the ingress host, config and the namespace quota. It never touches
+`securityContext` or the scheduling fields (`priorityClassName`,
+`topologySpreadConstraints`, `affinity`, `tolerations`).
+
+Restricted checks privilege escalation, capabilities, non-root, seccomp and
+volume types. It does **not** check `readOnlyRootFilesystem`, so a dry run is
+blind to that field. The
+[Pod Security Standards](https://kubernetes.io/docs/concepts/security/pod-security-standards/)
+list the restricted fields. Step 5 shows what that blindness costs, and what
+catches it.
+
+### 5. Strip a hardening field, and catch it (deliberate)
+
+**This step is deliberate.** It builds an overlay that breaks the baseline, in
+a scratch copy. The repository does not change.
+
+An overlay can drop a control without changing anything else. This one copies
+the tree and removes one field from the catalog container: a JSON6902 `remove`
+of `readOnlyRootFilesystem`, which the base sets to `true`:
+
+```sh
+cp -R examples/bookstore/kustomize "$S/kz"
+mkdir -p "$S/kz/overlays/bad"
+cat > "$S/kz/overlays/bad/kustomization.yaml" <<'EOF'
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+resources:
+  - ../dev
+patches:
+  - target:
+      kind: Deployment
+      name: catalog
+    patch: |
+      - op: remove
+        path: /spec/template/spec/containers/0/securityContext/readOnlyRootFilesystem
+EOF
+kubectl kustomize "$S/kz/overlays/bad" > "$S/bad.yaml" && grep -c "^kind:" "$S/bad.yaml"
+```
+
+<!-- gate: output -->
+
+```text
+45
+```
+
+```sh
+kubectl kustomize examples/bookstore/kustomize/overlays/dev > "$S/dev.yaml"
+diff "$S/dev.yaml" "$S/bad.yaml"
+```
+
+<!-- gate: output -->
+
+```text
+500d499
+<           readOnlyRootFilesystem: true
+```
+
+The render succeeds, and the diff is one line. Nothing errors: a `remove` of a
+field that exists is valid, and Kustomize does not know which fields are
+controls. A review that reads the replica counts and the image pins never
+reaches this line.
+
+The restricted dry run admits the broken overlay, with the same command as
+step 4:
+
+```sh
+kubectl kustomize "$S/kz/overlays/bad" | awk 'BEGIN{RS="\n---\n";ORS="\n---\n"} !/(^|\n)kind: (Namespace|PriorityClass)(\n|$)/' | sed '/^  namespace: bookstore$/d' | kubectl apply --dry-run=server -n bs-verify -f - > "$S/bad-dry.txt" 2>&1; echo "bad $(grep -c 'created (server dry run)' "$S/bad-dry.txt") created, $(grep -ci warning "$S/bad-dry.txt") warnings"
+```
+
+<!-- gate: output -->
+
+```text
+bad 41 created, 0 warnings
+```
+
+The scanner catches it. Trivy scans a directory, so each render gets its own:
+
+```sh
+mkdir -p "$S/scan-dev" "$S/scan-bad" && cp "$S/dev.yaml" "$S/scan-dev/" && cp "$S/bad.yaml" "$S/scan-bad/"
+cd "$S/scan-dev" && trivy config --quiet --severity HIGH,CRITICAL .
+```
+
+<!-- gate: output -->
+
+```text
+│ dev.yaml │ kubernetes │         0         │
+```
+
+```sh
+cd "$S/scan-bad" && trivy config --quiet --severity HIGH,CRITICAL .
+```
+
+<!-- gate: output -->
+
+```text
+│ bad.yaml │ kubernetes │         1         │
+# ...
+bad.yaml (kubernetes)
+# ...
+Failures: 1 (HIGH: 1, CRITICAL: 0)
+
+KSV-0014 (HIGH): Container 'catalog' of Deployment 'catalog' should set 'securityContext.readOnlyRootFilesystem' to true
+# ...
+See https://avd.aquasec.com/misconfig/ksv-0014
+```
+
+KSV-0014 is the check for `readOnlyRootFilesystem`, and it names the container.
+The clean dev render has no finding. The static gate in this guide runs five
+core checks on every overlay render: KSV-0012 (non-root), KSV-0014 (read-only
+root filesystem), KSV-0001 (no privilege escalation), KSV-0003 (capabilities
+dropped) and KSV-0030 (seccomp profile set). KSV-0014 is the field `restricted`
+leaves out, so the render scan is what sees this overlay. The lesson is the
+pair: the dry run proves admission, the scan proves the fields admission does
+not check, and both run on the render, not on the source.
+
+### 6. A generated Secret is in the render (deliberate)
+
+A `secretGenerator` builds a Secret from literals, and its value is in the
+render. The render is the leak: `kubectl kustomize` prints the Secret to
+stdout, so a pipeline log or a saved artifact carries the value too. This step
+builds one in the scratch directory:
+
+```sh
+mkdir -p "$S/gen"
+cat > "$S/gen/kustomization.yaml" <<'EOF'
+secretGenerator:
+- name: demo-db
+  literals:
+  - password=demo-only-value
+EOF
+kubectl kustomize "$S/gen"
+```
+
+<!-- gate: output -->
+
+```text
+apiVersion: v1
+data:
+  password: ZGVtby1vbmx5LXZhbHVl
+kind: Secret
+metadata:
+  name: demo-db-766bk9t44g
+type: Opaque
+```
+
+The password is one `base64 -d` away:
+
+```sh
+kubectl kustomize "$S/gen" | grep "password:" | awk '{print $2}' | base64 -d; echo
+```
+
+<!-- gate: output -->
+
+```text
+demo-only-value
+```
+
+Base64 is encoding, not encryption. Anyone who can read the render can read the
+password. Trivy's secret scanner reports nothing on the rendered file. The
+table shows `-`, which is not the clean `0`, and that is no evidence the value
+is absent, because the value is in the file:
+
+```sh
+mkdir -p "$S/scan-gen" && kubectl kustomize "$S/gen" > "$S/scan-gen/gen.yaml" && cd "$S/scan-gen" && trivy fs --quiet --scanners secret .
+```
+
+<!-- gate: output -->
+
+```text
+│ Target │ Type │ Secrets │
+# ...
+│   -    │  -   │    -    │
+```
+
+So the control sits upstream of the render. Keep literal values out of a
+generator in Git. The base's `db-credentials` is a static manifest for that
+reason, and it carries the same demo warning (see *How it works* below). In CI,
+treat the render as secret material: do not print it to a log or upload it as
+an artifact. In prod the overlay deletes the demo Secret, and the real one is
+created out of band, by External Secrets Operator, Sealed Secrets or Vault,
+with the name the workloads expect. A value that must live in Git is encrypted
+with SOPS, and KSOPS decrypts it at build time. Turn on encryption at rest for
+Secrets on the API server either way.
+
+### 7. Pin a remote base to a commit
+
+An overlay can name its base in another repository. The `?ref=` in the URL
+decides what the base is:
 
 ```yaml
-# overlays/dev/kustomization.yaml — add:
+resources:
+  - https://github.com/abd-ulbasit/bookstore-kubernetes-guide//full-guide/examples/bookstore/kustomize/base?ref=23c3aa3175a2a2774eaed59a3469bda35d4d260f
+```
+
+That is the guide's own Bookstore base, at one commit of its public repository.
+Render it:
+
+```sh
+kubectl kustomize "https://github.com/abd-ulbasit/bookstore-kubernetes-guide//full-guide/examples/bookstore/kustomize/base?ref=23c3aa3175a2a2774eaed59a3469bda35d4d260f" | grep -c "^kind:"
+```
+
+<!-- gate: output -->
+
+```text
+49
+```
+
+A branch or a tag is a name that can move. The same URL can render a different
+base after the next push, and that change never passes through your review. A
+full commit SHA does not move. Get the SHA you reviewed with
+`git ls-remote <repo-url> refs/heads/main`, and pin that. Argo CD takes the
+same rule in `targetRevision` ([07.04](04-gitops-argocd.md)). Scan a remote
+base's render the way step 5 scans your own.
+
+### 8. Promote one image pin, and read the diff
+
+The promotion job (step 12 of
+[07.03](03-cicd-pipeline.md#12-the-seam-from-signed-digest-to-git)) writes a
+digest into `overlays/prod/images/` and opens a pull request. This step makes
+the same edit in the scratch copy, with a placeholder digest of 64 zeros. The
+render never pulls the image, so any well-formed digest shows the same diff:
+
+```sh
+sed "s/sha256:eaa26ada0a2e1575026a5e71e74572ed0bfdde80f50012e91a7be28f0de16ced/sha256:0000000000000000000000000000000000000000000000000000000000000000/" "$S/kz/overlays/prod/images/kustomization.yaml" > "$S/new-pins.yaml" && mv "$S/new-pins.yaml" "$S/kz/overlays/prod/images/kustomization.yaml"
+diff examples/bookstore/kustomize/overlays/prod/images/kustomization.yaml "$S/kz/overlays/prod/images/kustomization.yaml"
+```
+
+<!-- gate: output -->
+
+```text
+26c26
+< - digest: sha256:eaa26ada0a2e1575026a5e71e74572ed0bfdde80f50012e91a7be28f0de16ced
+---
+> - digest: sha256:0000000000000000000000000000000000000000000000000000000000000000
+```
+
+Now the render, which is what Argo CD or a reviewer compares:
+
+```sh
+diff <(kubectl kustomize examples/bookstore/kustomize/overlays/prod) <(kubectl kustomize "$S/kz/overlays/prod")
+```
+
+<!-- gate: output -->
+
+```text
+446c446
+<         image: ghcr.io/abd-ulbasit/bookstore-catalog@sha256:eaa26ada0a2e1575026a5e71e74572ed0bfdde80f50012e91a7be28f0de16ced
+---
+>         image: ghcr.io/abd-ulbasit/bookstore-catalog@sha256:0000000000000000000000000000000000000000000000000000000000000000
+```
+
+One line of the file changed, and one line of the render: the catalog image.
+That is what a reviewer has to read, and merging the pull request is the
+production deploy. The same edit made with `kustomize edit set image` on the
+whole prod overlay rewrote 288 lines (143 added, 145 removed) in the first
+promotion run. `kustomize edit` rewrites the file it touches, so the pins live
+in a file of their own, where the rewrite can only touch the pins.
+[07.03 step 12](03-cicd-pipeline.md#12-the-seam-from-signed-digest-to-git)
+shows that run.
+
+### 9. Enable an optional component — and be honest about CRDs
+
+The observability, scaling and policy extras are CRD-backed, so the base does
+not include them. Each is a **component** an overlay opts into, the Kustomize
+counterpart of a Helm toggle. The table says what each one adds, what it
+removes from the base, and what it widens. Read a component's files before you
+enable it: each row describes what those files contain in this repository.
+
+| Component | Adds | Removes from the base | What it widens |
+|---|---|---|---|
+| `servicemonitor` | two ServiceMonitors and a PrometheusRule | nothing | scrape endpoints that Prometheus reads |
+| `keda` | a ScaledObject that scales `payments-worker` to zero, a TriggerAuthentication and the Secret `rabbitmq-conn` | nothing | a Secret in the render that holds the RabbitMQ demo login (`guest`), and scale to zero |
+| `gateway` | a GatewayClass, a Gateway with an HTTPS listener and an HTTPRoute | the base Ingress | the entry point moves to a Gateway, which owns the TLS listener and its certificate |
+| `kyverno` | a ClusterPolicy in `Audit` mode | nothing | nothing is blocked; violations are only reported |
+| `snapshot` | a VolumeSnapshotClass and a VolumeSnapshot of `data-postgres-0` | nothing | a second copy of the database volume; whoever can create a volume from it can read the data |
+| `canary` | `catalog-stable` and `catalog-canary` Deployments | the base `catalog` Deployment and its HPA | two catalog tracks behind one Service, and no autoscaling until you add some |
+
+Stack two onto a copy of the dev overlay, so the repository stays unchanged:
+
+```sh
+mkdir -p "$S/kz/overlays/devc"
+cat > "$S/kz/overlays/devc/kustomization.yaml" <<'EOF'
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+resources:
+  - ../dev
 components:
   - ../../components/servicemonitor
   - ../../components/keda
+EOF
+kubectl kustomize "$S/kz/overlays/devc" > "$S/devc.yaml" && grep -c "^kind:" "$S/devc.yaml"
 ```
 
-Render and dry-run:
+<!-- gate: output -->
+
+```text
+51
+```
+
+That is the 45 objects of dev plus three from each component. To add them to
+the real dev overlay, append the same `components:` list to
+`overlays/dev/kustomization.yaml`.
+
+Dry-run the copy against a cluster:
 
 ```sh
-kubectl kustomize examples/bookstore/kustomize/overlays/dev \
-  | kubectl apply --dry-run=client -f - 2>&1 | grep -E 'ScaledObject|ServiceMonitor|no matches'
+kubectl kustomize "$S/kz/overlays/devc" | kubectl apply --dry-run=client -f - 2>&1 | grep -E 'ScaledObject|ServiceMonitor|PrometheusRule|TriggerAuth'
 ```
 
-If KEDA is **not** installed you will see:
+<!-- gate: output -->
 
-```
-... no matches for kind "ScaledObject" in version "keda.sh/v1alpha1"
-... no matches for kind "TriggerAuthentication" in version "keda.sh/v1alpha1"
+```text
+resource mapping not found for name: "payments-worker" namespace: "bookstore" from "STDIN": no matches for kind "ScaledObject" in version "keda.sh/v1alpha1"
+resource mapping not found for name: "rabbitmq-trigger-auth" namespace: "bookstore" from "STDIN": no matches for kind "TriggerAuthentication" in version "keda.sh/v1alpha1"
+resource mapping not found for name: "bookstore-catalog-rules" namespace: "bookstore" from "STDIN": no matches for kind "PrometheusRule" in version "monitoring.coreos.com/v1"
+resource mapping not found for name: "catalog" namespace: "bookstore" from "STDIN": no matches for kind "ServiceMonitor" in version "monitoring.coreos.com/v1"
+resource mapping not found for name: "payments-worker" namespace: "bookstore" from "STDIN": no matches for kind "ServiceMonitor" in version "monitoring.coreos.com/v1"
 ```
 
-That is **expected and correct** — identical to the intrinsic behaviour the
-raw manifests
-([`83-keda-scaledobject.yaml`](../examples/bookstore/raw-manifests/83-keda-scaledobject.yaml),
-`80-`, `51-`, `70-`, `18-`) and ch.01's Helm toggles already documented: the
-*component's objects are schema-correct*, but the **CRD must exist first**.
-Every built-in object (the base 49) still validates; only the component's CRD
-kinds report `no matches`. Install the operator with **Helm / the official
-stable manifest** (never a `releases/latest/download/<PINNED-FILE>.yaml` URL —
-it 404s when a new release ships), then the same component applies cleanly:
+This cluster has neither the KEDA nor the Prometheus Operator CRDs, so the
+client dry-run cannot map those kinds. That is **expected and correct**. The
+component's objects are schema-correct, but the **CRD must exist first**.
+Every built-in object still validates; only the component's kinds report
+`no matches`. Install the operator with **Helm / the official stable manifest**
+(never a `releases/latest/download/<PINNED-FILE>.yaml` URL — it 404s when a new
+release ships), then the same component applies cleanly. Pin the chart version
+you checked (`helm show chart kedacore/keda` reports 2.21.0 at the time of
+writing):
 
 ```sh
 helm repo add kedacore https://kedacore.github.io/charts && helm repo update
-helm install keda kedacore/keda -n keda --create-namespace --wait
+helm install keda kedacore/keda -n keda --create-namespace --version 2.21.0 --wait
 kubectl apply -k examples/bookstore/kustomize/overlays/dev   # ScaledObject now applies
 kubectl get scaledobject,hpa -n bookstore                    # KEDA created the managed HPA
 ```
@@ -418,7 +776,14 @@ deletes the `catalog` Deployment, it also `$patch: delete`s the base catalog
 point at a deleted Deployment and orphan the autoscaler; re-introduce
 autoscaling against `catalog-stable` in the overlay if you want it.
 
-Clean up:
+Clean up the throwaway namespace and the scratch copies first:
+
+```sh
+kubectl delete namespace bs-verify
+rm -rf "$S"
+```
+
+Then the Bookstore:
 
 ```sh
 kubectl delete -k examples/bookstore/kustomize/overlays/dev
@@ -466,7 +831,8 @@ pipeline** — there is no templating step anywhere in it:
    (not a `secretGenerator`) so its demo-only / base64-≠-encryption warning
    travels verbatim and the `DB_DSN` stays byte-identical; the generator
    mechanics are taught here, used in [ch.04](04-gitops-argocd.md)'s GitOps
-   flow where rollout-on-config-change matters.
+   flow where rollout-on-config-change matters. A generated Secret is also a
+   leak in the render: step 6 shows the value.
 4. **Transformers** run in a **fixed order** (not file order): `namespace` →
    `labels`/`annotations` → `namePrefix`/`nameSuffix` → `images` → `replicas`
    → `patches` → reference rewrites. Each is a typed operation on the parsed
@@ -590,8 +956,12 @@ plugin**; Kustomize also supports out-of-tree plugins, deliberately unused here
 output" cost Kustomize exists to avoid).
 
 **Equivalence (why "the base equals the app" is true, not aspirational).** The
-base's 19 files are `cmp`-verified byte-identical copies of the in-scope
-`raw-manifests/*.yaml`, and `kubectl kustomize base` emits the **same
+base's 19 files are copies of the in-scope `raw-manifests/*.yaml`. Sixteen are
+byte-identical. Three differ only in comments, and one of those also differs in
+content: the postgres copy lacks the liveness probe's `failureThreshold: 12`
+that the raw file sets, so the copy's liveness probe uses the default instead.
+That is a defect in the copy. The fix is one line in
+`base/20-postgres-statefulset.yaml`. `kubectl kustomize base` emits the **same
 `(kind, name, namespace)` set as `helm template` with default values — 49
 objects**. `staging` renders that **identical 49-set**; `dev` is 45 (−HPA −3
 PDB, the documented dev knobs); `prod` is 48 (−demo Secret, the documented prod
@@ -602,7 +972,8 @@ user=$(POSTGRES_USER) password=$(POSTGRES_PASSWORD) dbname=$(POSTGRES_DB)
 sslmode=disable`). The namespace carries
 `pod-security.kubernetes.io/enforce: restricted` + `enforce-version`. The
 PriorityClasses render namespace-free. This is the same standard ch.01 held the
-chart to — the packaging changed; the deployed app did not.
+chart to: the packaging changed, and apart from that one probe, the deployed
+app did not.
 
 ## Production notes
 
@@ -619,18 +990,11 @@ chart to — the packaging changed; the deployed app did not.
 
 > **In production: promote environments by overlay, not by editing.** dev →
 > staging → prod is "the same base, three small overlays" — a promotion is a
-> reviewed change to *one small file* (a tag in `images:`, a count in
+> reviewed change to *one small file* (a digest in the image pins, a count in
 > `replicas:`). The base is never edited per environment, so environments
-> cannot silently diverge. Pin image **digests** (`newDigest:`), not tags, in
-> the prod overlay (Part 05 ch.03's supply-chain story); the `images:`
-> transformer takes a digest directly.
->
-> **Keep what a tool edits in a file of its own.** `kustomize edit` re-marshals
-> the whole file it touches: it re-indents lists, sorts keys and hoists
-> comments. Pointed at a full overlay, it turned a one-line image pin into a
-> diff of 288 changed lines (143 added, 145 removed). The Bookstore keeps the prod pins in
-> `overlays/prod/images/` for that reason; [07.03](03-cicd-pipeline.md) shows
-> the run that found it.
+> cannot silently diverge. Pin prod images by **digest**, not tag (step 8;
+> Part 05 ch.03's supply-chain story). The `digest:` field of `images:` takes
+> the digest directly.
 
 > **In production: the `commonLabels` immutability footgun is a real outage.**
 > Adding an env/version label via `commonLabels` (or a `labels:` block without
@@ -640,16 +1004,6 @@ chart to — the packaging changed; the deployed app did not.
 > `includeSelectors: false`; keep `app:`/selector labels stable and identical
 > base↔overlays; put audit/owner metadata in `commonAnnotations:`. Make a CI
 > check that `commonLabels:` never appears.
-
-> **In production: a Secret generator is NOT encryption.** `secretGenerator`
-> (and a static Secret) is base64, not encrypted — the same warning as Part 03
-> ch.02 / Part 05 ch.04 / ch.01. The demo `db-credentials` here is **demo-only**;
-> the prod overlay `$patch: delete`s it and a real Secret is provided by
-> **External Secrets Operator / Sealed Secrets / Vault**. For secret *material*
-> that must live in Git, encrypt it with **SOPS** — Flux integrates SOPS
-> decryption natively, and **KSOPS** is the Kustomize exec-plugin that decrypts
-> a SOPS-encrypted `secretGenerator` at build time. Enable
-> encryption-at-rest on the apiserver regardless.
 
 > **In production: structured edits beat patch sprawl.** Prefer the typed
 > transformers (`images:`, `replicas:`, `namespace:`, `labels:`) over a pile of
@@ -702,6 +1056,12 @@ registry/tag, ingress host, optional components, demo-Secret off in prod) are
 exactly "same app, a few knobs" — Kustomize's sweet spot — which is why this
 guide ships *both* and treats them as peers, not rivals.
 
+The two prod renders have the same shape, not the same images. The Helm prod
+values pin all four images to `registry.example.com` tags. The Kustomize prod
+overlay pins catalog and orders to ghcr digests, and payments-worker and
+storefront to the same placeholder tags as Helm. Compare the images before you
+call two environments equal.
+
 ### Using both: Kustomize-renders-Helm, or Helm-then-Kustomize
 
 The two are not mutually exclusive — there are two well-defined ways to chain
@@ -723,7 +1083,7 @@ them, and they differ in *who is the outer tool*:
   helmCharts:
     - name: bookstore
       repo: oci://registry.example.com/charts   # or a classic repo URL
-      version: 0.1.0
+      version: 0.1.1   # the chart's Chart.yaml version; pin the one you publish
       releaseName: bookstore
       namespace: bookstore
       valuesFile: values-prod.yaml
@@ -747,10 +1107,16 @@ them, and they differ in *who is the outer tool*:
   chart's `values` cannot express:
 
   ```sh
-  # post-renderer.sh — Helm pipes the rendered manifest to this on stdin
+  # post-renderer.sh: Helm pipes the rendered manifests to this on stdin.
+  # The last-mile overlay lists all.yaml under resources:.
   #!/usr/bin/env sh
-  cat > /tmp/all.yaml
-  exec kustomize build /path/to/last-mile-overlay   # overlay resources: [all.yaml]
+  set -eu
+  work=$(mktemp -d)
+  trap 'rm -rf "$work"' EXIT
+  cp -R /path/to/last-mile-overlay "$work/overlay"
+  cat > "$work/overlay/all.yaml"
+  kustomize build "$work/overlay"
+
   helm install bookstore ./chart --post-renderer ./post-renderer.sh
   ```
 
@@ -770,8 +1136,11 @@ kubectl kustomize examples/bookstore/kustomize/overlays/prod \
   | kubectl apply --dry-run=server -f -            # full admission incl. PSA
   # ^ pipes the Namespace + cluster-scoped + ns:bookstore objects: on a FRESH
   #   cluster the bookstore ns must exist first, OR use the throwaway-ns
-  #   technique from the Hands-on PSA step (§4 "Prove restricted admission").
+  #   technique from hands-on step 4 (prove restricted admission).
 kustomize build examples/bookstore/kustomize/overlays/dev   # standalone binary (mind skew)
+
+# Render, then scan the render: the check for a patch that strips a field (step 5)
+mkdir -p "$S/scan" && kubectl kustomize examples/bookstore/kustomize/overlays/prod > "$S/scan/prod.yaml" && trivy config --quiet --severity HIGH,CRITICAL "$S/scan"
 
 # Apply / diff / delete
 kubectl apply -k examples/bookstore/kustomize/overlays/dev
@@ -799,8 +1168,8 @@ labels:
 namespace: bookstore                 # base-level; kept across envs (DNS coherence)
 replicas:
   - { name: catalog, count: 4 }      # counts via transformer, not edited YAML
-images:
-  - { name: bookstore/catalog, newName: registry.example.com/bookstore/catalog, newTag: "1.0.0" }
+images:                              # prod: a digest, written by promotion (step 8)
+  - { name: bookstore/catalog, newName: ghcr.io/abd-ulbasit/bookstore-catalog, digest: "sha256:eaa26ada0a2e1575026a5e71e74572ed0bfdde80f50012e91a7be28f0de16ced" }
 patches:
   - target: { kind: HorizontalPodAutoscaler, name: catalog }
     patch: |                          # JSON6902: surgical field edits
@@ -825,6 +1194,13 @@ Checklist:
 - [ ] Secrets: static demo Secret warned & `$patch: delete`'d in prod
       (External Secrets / SOPS+KSOPS in real life — generators are not encryption)
 - [ ] `kubectl` embedded-Kustomize version pinned == the GitOps controller's
+- [ ] Every render passes `trivy config` and the `restricted` dry run; a patch
+      that drops `readOnlyRootFilesystem` fails the scan (step 5)
+- [ ] No literal secret value in a `secretGenerator` in Git; the render of a
+      generated Secret is treated as secret material (step 6)
+- [ ] Remote bases pinned to a full commit SHA in `?ref=` (step 7)
+- [ ] A promotion changes one file, the images Component, and the render diff
+      shows exactly the pins it moved (step 8)
 
 ## Test your understanding
 
@@ -837,24 +1213,40 @@ Checklist:
 
    </details>
 
-2. **You add `commonLabels: { app: catalog }` to an overlay because a teammate said "labels should be everywhere". Three days later a rolling deployment hangs and the new ReplicaSet shows 0 ready replicas. What did `commonLabels` do?**
+2. **You add `commonLabels: { app: catalog }` to an overlay because a teammate said "labels should be everywhere". The next `kubectl apply` fails with `field is immutable` on a Deployment's `spec.selector`. What did `commonLabels` change, and what should you use instead?**
    <details><summary>Show answer</summary>
 
-   `commonLabels` writes into `.spec.selector.matchLabels` *and* `.spec.template.metadata.labels` — and Deployment selectors are **immutable** after creation. The first apply of the overlay added the label to the new ReplicaSet template, but the existing Deployment's selector now requires the label too; the rolling update created Pods that *do* have it (good) but tried to update a selector field that K8s refuses to mutate (bad). The fix is `labels:` with `includeSelectors: false` (additive labels, no selector mutation), which is exactly what the checklist forbids `commonLabels` for. See §Quick Reference / commonLabels footgun.
+   `commonLabels` writes its labels into every object's `metadata.labels`, and
+   also into `.spec.selector.matchLabels` and the pod template labels. A
+   Deployment's selector is immutable after creation, so the apply is rejected
+   and the upgrade stays stuck until the Deployment is recreated. Use `labels:`
+   with `includeSelectors: false` and `includeTemplates: false`: the labels are
+   added to metadata, and the selectors are left alone. The footgun is in
+   *How it works under the hood*.
 
    </details>
 
-3. **Your `kustomize build overlays/dev` renders fine. Argo CD reports `OutOfSync` even with auto-sync on. You diff desired vs live and see `metadata.annotations.kubectl.kubernetes.io/last-applied-configuration` flicking. Explain.**
+3. **A teammate's overlay adds an `op: remove` for `/spec/template/spec/containers/0/securityContext/readOnlyRootFilesystem` on catalog. The `restricted` server dry run is green. Why is it green, and what catches the change?**
    <details><summary>Show answer</summary>
 
-   That annotation is written by `kubectl apply` itself; if your CI also runs `kubectl apply` *outside* the GitOps loop, both sides keep rewriting it. The Argo CD-recommended sync option is **`ServerSideApply=true`** (which doesn't use that annotation) and remove any imperative apply path. The render is fine; the *applier mode* is fighting itself.
+   `restricted` checks privilege escalation, capabilities, non-root, seccomp and
+   volume types. It does not check `readOnlyRootFilesystem`, so the dry run
+   admits the container. The render shows the change: diffing the dev render
+   against the overlay's render removes one line. The render scan catches it:
+   `trivy config` reports KSV-0014 (HIGH) on the catalog container. Step 5 builds
+   this overlay in a scratch copy and shows both results.
 
    </details>
 
 4. **Hands-on extension — render and count. Run `kubectl kustomize examples/bookstore/kustomize/overlays/dev | grep -c '^kind:'`. Repeat for `overlays/staging` and `overlays/prod`. What do the three numbers tell you, and why are they different?**
    <details><summary>What you should see</summary>
 
-   45 / 49 / 48 (the invariant from the spec). Each overlay toggles **components** on/off (ServiceMonitor, KEDA ScaledObject) and patches/removes specific resources (dev removes one Job; prod removes the demo Secret) — the count delta is the whole point of overlays: a small, declarative, *visible* diff from the base. Helm achieves the same via `if` blocks in templates; Kustomize achieves it via included/excluded components.
+   45 / 49 / 48, the invariant from ADR 0007. No component is enabled in these
+   three overlays. dev removes the HPA and the three PDBs (49 less 4 is 45);
+   staging keeps the whole base set (49); prod removes the demo Secret (49 less
+   1 is 48). The count delta is the point of overlays: a small, declarative,
+   *visible* diff from the base. Helm achieves the same with `if` blocks in
+   templates; Kustomize achieves it with `$patch: delete` and components.
 
    </details>
 
@@ -882,3 +1274,5 @@ Checklist:
   the Kubernetes task
   <https://kubernetes.io/docs/tasks/manage-kubernetes-objects/kustomization/>,
   and <https://kustomize.io>.
+- Kubernetes: Pod Security Standards, the restricted profile's fields
+  <https://kubernetes.io/docs/concepts/security/pod-security-standards/>.
