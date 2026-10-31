@@ -86,6 +86,7 @@ jobs:
           - { tool: trivy-config, file: deployment.json,       expect: KSV-0017 }
           - { tool: kube-linter,  file: deployment.json,       expect: privileged-container }
           - { tool: kubesec,      file: deployment.json,       expect: Privileged }
+          - { tool: conftest,     file: policy/plan.json,      expect: BK-TF-001 }
           - { tool: zizmor,       file: bad-workflow.yml,      expect: template-injection }
           - { tool: actionlint,   file: bad-workflow.yml,      expect: potentially untrusted }
           - { tool: expiry,       file: exceptions.conf,       expect: "lapsed on 2020-01-01" }

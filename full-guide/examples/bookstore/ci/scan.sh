@@ -13,7 +13,8 @@
 #
 # TOOL is one of: gitleaks gitleaks-history trufflehog trufflehog-history
 # semgrep gosec govulncheck trivy-fs trivy-config trivy-image trivy-sbom
-# hadolint dockle syft grype kube-linter kubesec zizmor actionlint expiry zap.
+# hadolint dockle syft grype kube-linter kubesec zizmor actionlint expiry zap
+# conftest opa-test.
 # TARGET defaults to "." and is a path under the repository root. For the image
 # tools it is the path of a `docker save` tar. For the two -history tools it is
 # a git repository: they read every commit, not only the files on disk. For
@@ -49,6 +50,8 @@ KUBESEC=kubesec/kubesec@sha256:6735b7f3d1c8b3abde5c6e49d260759e90693a70d699f9d44
 ZIZMOR=ghcr.io/zizmorcore/zizmor@sha256:42d409dbb851d4c5d35a058cf042b828bea1e3f2884378c526eb0974780e18d9      # 1.31.1
 ACTIONLINT=rhysd/actionlint@sha256:b1934ee5f1c509618f2508e6eb47ee0d3520686341fec936f3b79331f9315667            # 1.7.12
 ZAP=ghcr.io/zaproxy/zaproxy@sha256:030d3df57735dacbb83464854758e674dd9ad01d79d12a129a8e58b1fd384238            # 2.17.0
+CONFTEST=openpolicyagent/conftest@sha256:0e77cdf7c1fcde035f3c579e4aaa6664ee2a8be5777eaa9af9f520cdd02280c0    # v0.71.1
+OPA=openpolicyagent/opa@sha256:895872de1e8dc5b82e04f9410d2d1ada2f72d28fdcdba0e8789d91cfc27ec0d0              # 1.22.0
 GOSEC_VERSION=v2.30.0
 GOVULNCHECK_VERSION=v1.9.0
 
@@ -84,7 +87,7 @@ gorun() {
 }
 
 case "$TOOL" in
-  gitleaks|gitleaks-history|trufflehog|trufflehog-history|semgrep|gosec|govulncheck|trivy-fs|trivy-config|trivy-image|trivy-sbom|hadolint|dockle|syft|grype|kube-linter|kubesec|zizmor|actionlint|expiry|zap) ;;
+  gitleaks|gitleaks-history|trufflehog|trufflehog-history|semgrep|gosec|govulncheck|trivy-fs|trivy-config|trivy-image|trivy-sbom|hadolint|dockle|syft|grype|kube-linter|kubesec|zizmor|actionlint|expiry|zap|conftest|opa-test) ;;
   *) echo "scan.sh: unknown tool '$TOOL'" >&2; exit 64 ;;
 esac
 
@@ -257,6 +260,20 @@ case "$TOOL" in
           exit bad
         }' "$root/$f" >>"$REPORT" || rc=1
     done
+    ;;
+  conftest)
+    # Conftest runs the Bookstore's policy as code (Part 05 ch.07) on a
+    # rendered overlay or on a Terraform plan. Every failure names its rule
+    # (BK-POL-, BK-TF-), so a control can check for the one it planted. The
+    # policy directory is read from the Bookstore, not from the target.
+    REPORT="$out/conftest.json"
+    run -v "$here/../policy:/policy:ro" "$CONFTEST" test --policy /policy \
+      --all-namespaces --output json "/src/$TARGET" >"$REPORT" || rc=$?
+    ;;
+  opa-test)
+    # The rules' own unit tests. A rule that stops firing fails its test here.
+    REPORT="$out/$TOOL.log"
+    run -v "$here/../policy:/policy:ro" "$OPA" test -v /policy || rc=$?
     ;;
   zap)
     # The baseline is passive: it crawls the URL and reads the responses, and

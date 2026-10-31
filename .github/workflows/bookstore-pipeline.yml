@@ -4,7 +4,7 @@ name: bookstore-pipeline
 # runs it once per service. Every stage is a job, in this order:
 #
 #   build-test, secrets, sast, sca -> image-lint -> image-scan + sbom -> sign
-#   manifests, workflow-hardening and dast run beside them.
+#   manifests, policy, workflow-hardening and dast run beside them.
 #
 # sign waits for ALL of them. A signature on a digest therefore says that this
 # workflow built it and that every gate above passed or was skipped on purpose
@@ -365,7 +365,7 @@ jobs:
   # skipped because something upstream failed (image-lint) all fail it.
   # ---------------------------------------------------------------------------
   sign:
-    needs: [build-test, secrets, sast, sca, image-lint, image-scan, sbom, manifests, workflow-hardening, dast]
+    needs: [build-test, secrets, sast, sca, image-lint, image-scan, sbom, manifests, policy, workflow-hardening, dast]
     if: >-
       always() && !cancelled() && inputs.publish
       && needs.build-test.result == 'success'
@@ -376,6 +376,7 @@ jobs:
       && needs.sbom.result == 'success'
       && contains(fromJSON('["success", "skipped"]'), needs.secrets.result)
       && contains(fromJSON('["success", "skipped"]'), needs.manifests.result)
+      && contains(fromJSON('["success", "skipped"]'), needs.policy.result)
       && contains(fromJSON('["success", "skipped"]'), needs.workflow-hardening.result)
       && contains(fromJSON('["success", "skipped"]'), needs.dast.result)
     runs-on: ubuntu-latest
@@ -476,6 +477,48 @@ jobs:
         if: always()
         with:
           name: reports-manifests
+          path: scan-reports/
+          retention-days: 14
+
+  # ---------------------------------------------------------------------------
+  # policy: the Bookstore's policy as code (Part 05 ch.07). The rules are
+  # unit-tested with OPA first, so a rule that stopped firing fails here, not
+  # in review. Then Conftest runs them on the rendered production overlay and
+  # on the Terraform plan of the namespaces. The cluster enforces the same
+  # levels at admission; this stage refuses the object before it gets there.
+  # ---------------------------------------------------------------------------
+  policy:
+    if: inputs.repo-wide
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - uses: step-security/harden-runner@dc2769abcc0fcfbadfc1df54081c1608579ef6b2 # v2.22.2
+        with:
+          egress-policy: audit
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: azure/setup-kubectl@bda439f5f36b99b262ebdcd3613869bddb064c8e # v5.2.0
+        with:
+          version: 'v1.37.2'
+      - name: Render the production overlay
+        run: |
+          mkdir -p scan-reports
+          kubectl kustomize "$BOOKSTORE/kustomize/overlays/prod" > scan-reports/prod-overlay.yaml
+      - name: OPA, the rules' own unit tests
+        run: |
+          "$BOOKSTORE/ci/scan.sh" opa-test
+      - name: Conftest, the baseline on the rendered overlay
+        run: |
+          "$BOOKSTORE/ci/scan.sh" conftest scan-reports/prod-overlay.yaml
+      - name: Conftest, the namespace rule on the Terraform plan
+        run: |
+          "$BOOKSTORE/ci/scan.sh" conftest "$BOOKSTORE/policy/terraform/plan.json"
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        if: always()
+        with:
+          name: reports-policy
           path: scan-reports/
           retention-days: 14
 
