@@ -1,0 +1,128 @@
+# INSECURE ON PURPOSE: the capstone's vulnerable bookstore overlay. Lab cluster only.
+#
+# Every manifest in this directory carries that marker, and the overlay is
+# applied only to the lab's own namespace, p05-capstone. Nothing here belongs
+# in namespace bookstore. The weaknesses and the chapter that closes each one:
+#
+#   namespace label enforce=privileged    02 (Pod Security; closed by restricted)
+#   catalog-sa may create Pods            01 (RBAC; closed by removing the Role)
+#   payments-worker-sa may read Secrets   01 and 04 (closed by the same)
+#   no digest pin on the attack image     03 (closed by a digest in the Pod)
+#   an unencrypted etcd (sf-pilot)        04 (cited, not closed on sf-pilot)
+#   no NetworkPolicy at all: a flat network  02.06 (the base's ten policies are removed here)
+#   no admission rule on images           07 (closed by the hardened VAP)
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+
+namespace: p05-capstone
+
+resources:
+  - ../../kustomize/base
+  - 90-weak-rbac.yaml
+
+components:
+  - ../components/capstone
+
+patches:
+  # Remove the base's ten NetworkPolicies from this overlay only. The hardened
+  # overlay keeps them, so the difference between the two is the policy set.
+  - target:
+      kind: NetworkPolicy
+      name: default-deny-all
+    patch: |-
+      $patch: delete
+      apiVersion: networking.k8s.io/v1
+      kind: NetworkPolicy
+      metadata:
+        name: default-deny-all
+  - target:
+      kind: NetworkPolicy
+      name: allow-catalog-to-postgres
+    patch: |-
+      $patch: delete
+      apiVersion: networking.k8s.io/v1
+      kind: NetworkPolicy
+      metadata:
+        name: allow-catalog-to-postgres
+  - target:
+      kind: NetworkPolicy
+      name: allow-backend-egress
+    patch: |-
+      $patch: delete
+      apiVersion: networking.k8s.io/v1
+      kind: NetworkPolicy
+      metadata:
+        name: allow-backend-egress
+  - target:
+      kind: NetworkPolicy
+      name: allow-dns-egress
+    patch: |-
+      $patch: delete
+      apiVersion: networking.k8s.io/v1
+      kind: NetworkPolicy
+      metadata:
+        name: allow-dns-egress
+  - target:
+      kind: NetworkPolicy
+      name: allow-ingress-to-http-tiers
+    patch: |-
+      $patch: delete
+      apiVersion: networking.k8s.io/v1
+      kind: NetworkPolicy
+      metadata:
+        name: allow-ingress-to-http-tiers
+  - target:
+      kind: NetworkPolicy
+      name: allow-monitoring-scrape
+    patch: |-
+      $patch: delete
+      apiVersion: networking.k8s.io/v1
+      kind: NetworkPolicy
+      metadata:
+        name: allow-monitoring-scrape
+  - target:
+      kind: NetworkPolicy
+      name: allow-orders-to-rabbitmq
+    patch: |-
+      $patch: delete
+      apiVersion: networking.k8s.io/v1
+      kind: NetworkPolicy
+      metadata:
+        name: allow-orders-to-rabbitmq
+  - target:
+      kind: NetworkPolicy
+      name: allow-payments-worker-egress
+    patch: |-
+      $patch: delete
+      apiVersion: networking.k8s.io/v1
+      kind: NetworkPolicy
+      metadata:
+        name: allow-payments-worker-egress
+  - target:
+      kind: NetworkPolicy
+      name: allow-storefront-egress
+    patch: |-
+      $patch: delete
+      apiVersion: networking.k8s.io/v1
+      kind: NetworkPolicy
+      metadata:
+        name: allow-storefront-egress
+  - target:
+      kind: NetworkPolicy
+      name: allow-storefront-to-apis
+    patch: |-
+      $patch: delete
+      apiVersion: networking.k8s.io/v1
+      kind: NetworkPolicy
+      metadata:
+        name: allow-storefront-to-apis
+  - target:
+      kind: Namespace
+    patch: |-
+      apiVersion: v1
+      kind: Namespace
+      metadata:
+        name: p05-capstone
+        labels:
+          pod-security.kubernetes.io/enforce: privileged
+          pod-security.kubernetes.io/enforce-version: latest

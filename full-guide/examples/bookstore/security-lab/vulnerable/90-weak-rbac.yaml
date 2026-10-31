@@ -1,0 +1,61 @@
+# INSECURE ON PURPOSE: catalog-sa may create Pods, and payments-worker-sa may read Secrets. Lab cluster only.
+#
+# Both Roles are the escalation path the capstone walks. A Role that lets one
+# identity create a Pod lets it name any ServiceAccount in the namespace, so
+# catalog-sa can borrow payments-worker-sa. The second Role is the one that
+# reads the database Secret. Chapter 05.01 explains why each rule is wrong.
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: catalog-debugger
+  namespace: p05-capstone
+  labels:
+    app.kubernetes.io/part-of: bookstore
+rules:
+  - apiGroups: [""]
+    resources: ["pods"]
+    verbs: ["create", "get", "list"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: catalog-debugger
+  namespace: p05-capstone
+  labels:
+    app.kubernetes.io/part-of: bookstore
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: Role
+  name: catalog-debugger
+subjects:
+  - kind: ServiceAccount
+    name: catalog-sa
+    namespace: p05-capstone
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: payments-secret-reader
+  namespace: p05-capstone
+  labels:
+    app.kubernetes.io/part-of: bookstore
+rules:
+  - apiGroups: [""]
+    resources: ["secrets"]
+    verbs: ["get", "list"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: payments-secret-reader
+  namespace: p05-capstone
+  labels:
+    app.kubernetes.io/part-of: bookstore
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: Role
+  name: payments-secret-reader
+subjects:
+  - kind: ServiceAccount
+    name: payments-worker-sa
+    namespace: p05-capstone
