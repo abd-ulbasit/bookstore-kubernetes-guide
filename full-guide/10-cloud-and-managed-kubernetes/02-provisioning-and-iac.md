@@ -13,7 +13,7 @@
 
 **Estimated time:** ~45 min read · ~120 min hands-on
 **Prerequisites:** [Part 10 ch.01](01-managed-kubernetes-model.md) — managed-cluster model this chapter provisions · [Part 07 ch.04](../07-delivery/04-gitops-argocd.md) — GitOps pattern extended here to clusters themselves
-**You'll know after this:** • choose between provider CLIs, Terraform, and Cluster API for a given scenario · • author a Terraform module that creates an EKS/GKE/AKS cluster + node pool with remote state · • configure managed node-group surge/rolling upgrades safely · • model "clusters as Kubernetes objects" via Cluster API + clusterctl · • tear down a cloud cluster cleanly and confirm zero residual cost
+**You'll know after this:** • choose between provider CLIs, Terraform, and Cluster API for a given scenario · • author a Terraform module that creates an EKS/GKE/AKS cluster + node pool with remote state · • configure managed node-group rolling upgrades safely · • model "clusters as Kubernetes objects" via Cluster API + clusterctl · • tear down a cloud cluster cleanly and confirm nothing is left billing
 
 <!-- tags: cloud, terraform, gitops, day-2, eks, aks -->
 
@@ -44,15 +44,14 @@ chapter shows the three mainstream ways to do that for the *same* cluster, the
 trade-offs, and how the **unchanged Bookstore** then deploys onto it. The
 reference is *Production Kubernetes* (Deployment Models).
 
-> **This chapter needs a real cloud account.** Provisioning a managed cluster
-> *is* a cloud operation — it cannot run on kind. Per the
-> [ch.01](01-managed-kubernetes-model.md) honesty pattern: the provider/IaC
-> commands shown are the **exact correct ones** (run them with your account +
-> region + a unique cluster name), no output is faked, and the parts that
-> *are* locally verifiable (the Bookstore manifests are unchanged and
-> dry-runnable; the IaC files are plain HCL/YAML you can `validate`) are
-> marked. Generic placeholders only — `$CLUSTER_NAME`, `your-org`,
-> `123456789012`, `us-east-1`, `registry.example.com`.
+> **Scope of this chapter.** No cluster here runs on a cloud. The provider and
+> IaC commands are cited to their upstream documentation, checked 2026-10-31,
+> and are stated as **cited, not run**. What ran locally is named where it
+> appears: the Terraform root module passes `terraform fmt`, `terraform init
+> -backend=false` and `terraform validate`, and Trivy config scans it. Run the
+> cloud commands only against clusters you own. Placeholders only:
+> `$CLUSTER_NAME`, `your-org`, `123456789012`, `us-east-1`,
+> `registry.example.com`.
 
 ## Mental model
 
@@ -91,6 +90,19 @@ group" still means EC2/Compute/VMSS instances on your bill, in an
 autoscaling group the **cluster autoscaler** ([ch.06](06-node-autoscaling-cost-multicloud.md))
 can grow/shrink — provisioning it correctly (size, AZ spread, surge settings)
 is your job, not the provider's.
+
+## Threats and controls
+
+| Threat | Control in this chapter | Goes deeper |
+|---|---|---|
+| Secrets in state. State and plan files hold values in plain text, and `sensitive = true` only hides them from CLI output. | An encrypted, locked backend that only the provisioning role can read and write, and a saved plan handled as a secret. | [14.01](../14-eks-in-production-a-to-z/01-terraform-state-in-production.md), [14.07](../14-eks-in-production-a-to-z/07-infrastructure-cicd-and-drift.md) |
+| Unpinned providers and modules. A floating version can change the cluster's shape on the next `apply`. | Exact pins in the HCL and a committed `.terraform.lock.hcl` that records the provider hashes. | [14.07](../14-eks-in-production-a-to-z/07-infrastructure-cicd-and-drift.md) |
+| Drift and unreviewed change. A console edit, or an apply nobody read. | `terraform plan -out` reviewed before `apply`, and a scheduled drift check. | [14.07](../14-eks-in-production-a-to-z/07-infrastructure-cicd-and-drift.md) |
+| An over-broad provisioning identity. A role that can create or change anything in the account. | A scoped role for the pipeline, and no cluster-admin access for the identity that runs Terraform. | [10.03](03-cloud-identity.md) |
+
+The public endpoint and the network path to it belong to
+[10.04](04-cloud-networking-and-load-balancing.md). The root module below sets
+the endpoint private and does not restate that chapter.
 
 ## Diagrams
 
@@ -162,21 +174,16 @@ flowchart TB
 ## Hands-on with the Bookstore
 
 **Assumed working directory: the guide repo root (`full-guide/`).** This
-chapter adds **no manifests** — the Bookstore is *unchanged* on a managed
-cluster (the entire point of standardising on portable Kubernetes APIs).
-Provisioning needs a cloud account, so the cluster-creation steps are
-**illustrative with exact commands**; the final Bookstore deploy is the
-established repo command with the documented registry-image caveat, and is
-fully runnable as a rehearsal on kind.
+chapter adds **no workload manifests**. The Bookstore is *unchanged* on a
+managed cluster, which is the point of standardising on portable Kubernetes
+APIs. The cluster-creation steps are cited, not run. The Terraform root module
+is the one part checked locally.
 
-> **Honest cloud-account note (read first).** Every `eksctl`/`gcloud`/`az`/
-> `terraform`/`clusterctl` command below is the **real, correct** one — run it
-> with *your* account, region, and a **unique** cluster name (`$CLUSTER_NAME`).
-> Cluster creation takes ~10–20 min and **costs money from the first minute**
-> (control-plane fee + node VMs + LBs). Do step 5 (teardown) when done. What
-> is runnable *now* on kind: the Bookstore overlays are unchanged and
-> dry-runnable (step 4's caveat), so the *workload* half is a faithful local
-> rehearsal; only the *cluster* half needs the account.
+> **Cited, not run.** The `eksctl`, `gcloud`, `az` and `clusterctl` behaviour
+> below comes from upstream documentation, checked 2026-10-31. None of it was
+> run against a cloud. Creating a cluster costs money from the first minute,
+> so run these steps only in an account you own, with a unique cluster name
+> (`$CLUSTER_NAME`), and tear down with step 5.
 
 ### 1. Provision the same cluster via the provider CLI
 
@@ -184,115 +191,236 @@ fully runnable as a rehearsal on kind.
 versionable YAML, not a pile of flags). Save as `cluster-eks.yaml`:
 
 ```yaml
-# illustrative — apply with: eksctl create cluster -f cluster-eks.yaml
+# Cited, not run. Apply with: eksctl create cluster -f cluster-eks.yaml
 apiVersion: eksctl.io/v1alpha5
 kind: ClusterConfig
 metadata:
   name: bookstore                 # $CLUSTER_NAME
   region: us-east-1
-  version: "1.37"                 # a provider-supported minor (ch.01 window)
+  version: "1.37"                 # in EKS standard support (checked 2026-10-31)
+  tags:
+    owner: your-org               # the bill and the orphan sweep find it
+vpc:
+  clusterEndpoints:
+    privateAccess: true           # the API is reachable inside the VPC
+    publicAccess: false           # no internet endpoint; the path is 10.04's
 availabilityZones: [us-east-1a, us-east-1b, us-east-1c]   # multi-AZ (ch.01)
 iam:
-  withOIDC: true                  # REQUIRED for IRSA (ch.03) — set at create
+  withOIDC: true                  # OIDC provider for IRSA (ch.03), at create
 managedNodeGroups:
   - name: ng-stateless
     instanceType: m6i.large
+    privateNetworking: true       # nodes in private subnets
     minSize: 2
     maxSize: 6                    # the autoscaling-group bounds (ch.06)
     desiredCapacity: 3
     availabilityZones: [us-east-1a, us-east-1b, us-east-1c]   # spread the VMs
     volumeSize: 50
     updateConfig:
-      maxUnavailablePercentage: 33   # at most 33% of nodes unavailable at once
-                                     #   during a nodegroup upgrade (honors PDBs)
+      maxUnavailablePercentage: 33   # at most a third of nodes out during an
+                                     # upgrade; PDBs still gate each eviction
 ```
 
 ```sh
-eksctl create cluster -f cluster-eks.yaml      # ~15 min; CP + the node group
+eksctl create cluster -f cluster-eks.yaml
 aws eks update-kubeconfig --name $CLUSTER_NAME --region us-east-1
-kubectl get nodes -L topology.kubernetes.io/zone   # 3 nodes, AZ-spread
+# Run from inside the VPC: the API endpoint is private.
+kubectl get nodes -L topology.kubernetes.io/zone
 ```
 
-**Google — `gcloud` (flag-driven; wrap in a script for repeatability):**
+**Google, `gcloud` (flag-driven, so wrap it in a script for repeatability):**
 
 ```sh
+# Regional cluster: --num-nodes is per zone, so 1 here means 3 nodes in total.
+# The regular channel is the default; the cluster is enrolled in it.
+# Private nodes and a private endpoint keep the nodes and the API off the
+# internet (the network design is 04's). Workload Identity is ch.03's.
 gcloud container clusters create $CLUSTER_NAME \
   --region us-central1 \
   --release-channel regular \
-  --cluster-version 1.37.1-gke.1552000 \
-  `# without it, Regular gives its default (1.36.4-gke.2046003 in Oct 2026)` \
   --num-nodes 1 \
-  `# --num-nodes is PER ZONE: a REGIONAL cluster (3 zones) => 3 nodes total,` \
-  `# not 1. (--min/--max-nodes below are also per-zone-per-nodepool.)` \
   --machine-type e2-standard-4 \
   --enable-autoscaling --min-nodes 1 --max-nodes 3 \
-  --workload-pool=$(gcloud config get-value project).svc.id.goog   # Workload Identity (ch.03)
+  --enable-ip-alias \
+  --enable-private-nodes \
+  --enable-private-endpoint \
+  --workload-pool=$(gcloud config get-value project).svc.id.goog
 gcloud container clusters get-credentials $CLUSTER_NAME --region us-central1
 ```
 
-**Azure — `az aks create`:**
+**Azure, `az aks create`:**
 
 ```sh
+# List the versions AKS offers in your region, then set AKS_VERSION to one.
+az aks get-versions -l eastus -o table
 az group create -n $RG -l eastus
+# --enable-private-cluster gives the API server a private endpoint. The OIDC
+# issuer and the workload identity flag are the Microsoft Entra Workload ID
+# switches that ch.03 uses.
 az aks create -g $RG -n $CLUSTER_NAME \
-  --kubernetes-version 1.37 \
+  --kubernetes-version "$AKS_VERSION" \
   --node-count 3 --node-vm-size Standard_D4s_v5 \
   --enable-cluster-autoscaler --min-count 2 --max-count 6 \
   --zones 1 2 3 \
-  --enable-oidc-issuer --enable-workload-identity   # Workload Identity (ch.03)
+  --enable-private-cluster \
+  --enable-oidc-issuer --enable-workload-identity
 az aks get-credentials -g $RG -n $CLUSTER_NAME
 ```
 
 ### 2. The same cluster as Terraform (declarative, stateful, multi-cloud workflow)
 
-Terraform makes the cluster a reviewable diff with exact teardown. Sketch
-(AWS — uses the community `eks` module; equivalent `google`/`azurerm`
-providers do GKE/AKS the same way):
+Terraform makes the cluster a reviewable diff with exact teardown. The root
+module below is complete. It declares its own variables, pins the Terraform
+binary, the AWS provider and the community `terraform-aws-modules/eks` module,
+and keeps state in an encrypted, locked S3 backend. Save it as `main.tf` in an
+empty directory. Equivalent `google` and `azurerm` roots follow the same shape.
 
 ```hcl
-# illustrative cluster.tf — terraform init && terraform plan && terraform apply
 terraform {
-  required_version = ">= 1.6"
-  backend "s3" {                       # REMOTE STATE — never local for a team
-    bucket         = "your-org-tf-state"
-    key            = "bookstore/eks.tfstate"
-    region         = "us-east-1"
-    dynamodb_table = "your-org-tf-locks"   # state locking (no concurrent apply)
-  }
-  required_providers { aws = { source = "hashicorp/aws", version = "~> 5.0" } }
-}
+  # The exact Terraform binary this chapter was checked with.
+  required_version = "1.14.8"
 
-module "eks" {
-  source          = "terraform-aws-modules/eks/aws"   # pin the version in real use
-  version         = "~> 20.0"
-  cluster_name    = var.cluster_name
-  cluster_version = "1.37"
-  vpc_id          = var.vpc_id
-  subnet_ids      = var.private_subnet_ids            # multi-AZ subnets
-  enable_irsa     = true                              # OIDC provider for ch.03
-  eks_managed_node_groups = {
-    stateless = {
-      ami_type       = "AL2023_x86_64_STANDARD"       # no AL2 AMIs after 1.32
-      instance_types = ["m6i.large"]
-      min_size       = 2
-      max_size       = 6                              # autoscaling-group bounds
-      desired_size   = 3
+  # State holds secrets in plain text, so the backend encrypts it and locks it.
+  backend "s3" {
+    bucket       = "your-org-tf-state"
+    key          = "bookstore/eks.tfstate"
+    region       = "us-east-1"
+    encrypt      = true
+    kms_key_id   = "arn:aws:kms:us-east-1:123456789012:key/your-state-key-id"
+    use_lockfile = true # S3 lock file; DynamoDB locking is deprecated
+  }
+
+  required_providers {
+    aws = {
+      source  = "hashicorp/aws"
+      version = "6.71.0" # exact pin; .terraform.lock.hcl records the hashes
     }
   }
 }
+
+provider "aws" {
+  region = var.region
+
+  default_tags {
+    tags = {
+      owner = var.owner
+    }
+  }
+}
+
+variable "region" {
+  type    = string
+  default = "us-east-1"
+}
+
+variable "owner" {
+  type        = string
+  description = "The team accountable for the cluster and its bill"
+}
+
+variable "cluster_name" {
+  type = string
+}
+
+variable "cluster_version" {
+  type        = string
+  default     = "1.37"
+  description = "An EKS minor version in standard support"
+}
+
+variable "vpc_id" {
+  type = string
+}
+
+variable "private_subnet_ids" {
+  type        = list(string)
+  description = "Private subnets, one or more per Availability Zone"
+}
+
+module "eks" {
+  source  = "terraform-aws-modules/eks/aws"
+  version = "21.29.0"
+
+  name               = var.cluster_name
+  kubernetes_version = var.cluster_version
+  vpc_id             = var.vpc_id
+  subnet_ids         = var.private_subnet_ids
+
+  # Private API endpoint: the control plane is not reachable from the internet.
+  endpoint_public_access = false
+
+  # The identity that runs Terraform gets no cluster-admin access entry.
+  # Grant cluster access to named roles instead.
+  enable_cluster_creator_admin_permissions = false
+
+  # Creates the OIDC provider that IAM roles for ServiceAccounts need.
+  enable_irsa = true
+
+  eks_managed_node_groups = {
+    stateless = {
+      ami_type       = "AL2023_x86_64_STANDARD"
+      instance_types = ["m6i.large"]
+      min_size       = 2
+      max_size       = 6
+      desired_size   = 3
+
+      update_config = {
+        max_unavailable_percentage = 33
+      }
+    }
+  }
+}
+
+output "cluster_name" {
+  value = module.eks.cluster_name
+}
 ```
+
+These checks need no cloud account. This chapter ran them on 2026-10-31 with
+Terraform 1.14.8 and Trivy 0.76.1:
 
 ```sh
-terraform init                 # downloads providers, configures the S3 backend
-terraform validate             # RUNNABLE WITHOUT AN ACCOUNT — pure HCL check
-terraform plan -out tf.plan    # the reviewable diff (desired vs real)
-terraform apply tf.plan        # converge (creates CP + node group); ~15 min
-# kubeconfig: terraform output, or `aws eks update-kubeconfig --name ...`
+terraform fmt -check                  # formatting is part of review
+terraform init -backend=false         # pinned providers and module, no state
+terraform validate                    # pure HCL check
+trivy config --tf-exclude-downloaded-modules --severity HIGH,CRITICAL .
 ```
 
+All four passed. `fmt` and `validate` report no problems, and Trivy reports no
+findings on the root module. Trivy's one CRITICAL sits upstream. Scan the
+downloaded module too (drop `--tf-exclude-downloaded-modules`) and it reports
+AWS-0104 on the module's node security group rule, which allows all egress to
+`0.0.0.0/0`. The module creates that rule by default
+([AVD-AWS-0104](https://avd.aquasec.com/misconfig/aws-0104)). Restricting node
+egress depends on how nodes reach the image registry and AWS APIs, which is the
+design in [14.08](../14-eks-in-production-a-to-z/08-vpc-endpoints-and-egress.md).
+Until you make that choice, record that you accepted the finding, and why.
+
+The cloud steps follow. They are cited, not run:
+
+```sh
+terraform init                        # configures the S3 backend
+terraform plan -out tf.plan           # the reviewable diff: desired vs real
+terraform apply tf.plan               # applies exactly the plan you reviewed
+aws eks update-kubeconfig --name $CLUSTER_NAME --region us-east-1
+```
+
+Four things in the file are the controls. The backend encrypts state with
+`encrypt` and locks it with `use_lockfile`. `dynamodb_table` is deprecated, so
+the chapter does not use it ([S3 backend](https://developer.hashicorp.com/terraform/language/backend/s3)).
+Values in state are stored in plain text whatever the variables say.
+`sensitive = true` hides them from CLI output and logs, but Terraform still
+writes them to state and plan files ([sensitive data in state](https://developer.hashicorp.com/terraform/language/state/sensitive-data)),
+so the bucket and any saved plan need the same access rules. The provider and
+module pins are exact, and `terraform init` writes `.terraform.lock.hcl`, which
+you commit so every run gets the same provider hashes. The module sets
+`endpoint_public_access = false`, so the control plane is reachable only from
+inside the VPC. The `kubectl` steps below run from a host there.
+
 `terraform plan` is the cluster-level analogue of `helm diff` / `kubectl
---dry-run`: **review the infrastructure change before it happens**. `terraform
-validate` needs no cloud account, so the HCL is checkable in CI.
+--dry-run`: **review the infrastructure change before it happens**. The checks
+above run in CI with `terraform init -backend=false`, so the HCL is verified
+before anyone can apply it.
 
 ### 3. The same cluster as a Cluster API object (clusters as Kubernetes)
 
@@ -301,14 +429,20 @@ runs controllers; a **workload cluster** is a `kubectl apply`. The
 [Part 08 ch.01](../08-day-2-operations/01-cluster-lifecycle.md) "an upgrade is
 a declarative version bump" becomes literal here.
 
-```sh
-# On the MANAGEMENT cluster — initialise CAPI + the AWS infra provider (CAPA):
-clusterctl init --infrastructure aws       # installs Cluster/MD/KCP CRDs + ctrls
+Cited, not run. The AWS quick start needs the infrastructure provider's
+credentials bootstrap, and these variables before it generates a cluster:
+`AWS_REGION`, `AWS_SSH_KEY_NAME`, `AWS_CONTROL_PLANE_MACHINE_TYPE` and
+`AWS_NODE_MACHINE_TYPE`. See the [Cluster API quick start](https://cluster-api.sigs.k8s.io/user/quick-start),
+checked 2026-10-31.
 
-# Generate a WORKLOAD cluster manifest and apply it like any object
-# (a v1.37 workload cluster needs Cluster API >= v1.13.6 or >= v1.14.1):
+```sh
+# On the MANAGEMENT cluster: initialise CAPI and the AWS provider.
+clusterctl init --infrastructure aws
+
+# Generate a WORKLOAD cluster manifest, then apply it like any object. The
+# version is the quick start's example; pick one your provider supports.
 clusterctl generate cluster bookstore \
-  --kubernetes-version v1.37.2 \
+  --kubernetes-version v1.37.0 \
   --control-plane-machine-count 3 \
   --worker-machine-count 3 > workload-cluster.yaml
 kubectl apply -f workload-cluster.yaml      # controllers reconcile -> a real cluster
@@ -328,29 +462,24 @@ targets the managed cluster (any of the three paths above), the Bookstore
 deploys with the *same* manifests Parts 00–09 built:
 
 ```sh
-# kubectl context now points at the MANAGED cluster (step 1/2/3).
-# The prod overlay pins registry images that are unpullable until you push
-# the Bookstore images to YOUR registry — same established caveat as Part 07:
-#   docker build/tag/push examples/bookstore/app/* -> registry.example.com/...
-#   then: kubectl kustomize examples/bookstore/kustomize/overlays/prod \
-#           edit set image (per the kustomize README) to your registry,
-#   OR rehearse with the dev overlay (built locally, kind-loaded):
+# kubectl context now points at the MANAGED cluster (step 1, 2 or 3).
+# The prod overlay pins registry.example.com images. Push the Bookstore images
+# to your registry first, then point the overlay at them with
+# `kustomize edit set image` (see the kustomize README). For a local rehearsal,
+# use the dev overlay:
 kubectl apply -k examples/bookstore/kustomize/overlays/dev
 kubectl get pods -n bookstore -w
-# On a real cluster you ALSO need: a cloud StorageClass for postgres (ch.05),
-# a cloud LB/Ingress for storefront (ch.04), and cloud IAM if a tier needs a
-# bucket (ch.03) — those are the NEXT chapters. The workload itself is byte
-# -identical to what you ran on kind; only the surrounding cloud wiring is new.
+# A real cluster also needs a StorageClass for postgres (ch.05), a load balancer
+# or Ingress for storefront (ch.04), and cloud IAM for any tier that uses a
+# bucket (ch.03). The workload itself does not change.
 ```
 
-> **Honest scope.** The `kubectl apply -k …/overlays/dev` line is **runnable
-> verbatim on kind today** (a faithful rehearsal of the workload half) and is
-> *identical* on the managed cluster — that invariance is the deliverable. The
-> prod overlay pins `registry.example.com` images that need pushing to your
-> registry first (the established Part 07 caveat); use
-> `kustomize edit set image …=bookstore/<SVC>:dev` or the dev overlay for a local run. The cloud
-> StorageClass/LB/IAM the app then needs on a *real* cluster are
-> [ch.03](03-cloud-identity.md)–[ch.05](05-cloud-storage-and-data.md).
+> **Scope.** The dev overlay renders the same Bookstore on any cluster, and the
+> repo's `validate-kustomize` target asserts its manifest count. It hard-codes
+> the namespace `bookstore` in its manifests, because the database DSN and the
+> service DNS names depend on that name. This chapter's own checks did not apply
+> it to a shared lab cluster. Rehearse the apply on a local kind cluster. The
+> manifests are identical on the managed cluster, and that is the deliverable.
 
 ### 5. Teardown and cost hygiene (the step people skip — and regret)
 
@@ -397,11 +526,16 @@ kubectl delete cluster bookstore        # CAPI controllers tear down the cloud i
   VMs and their cost are still yours** ([ch.01](01-managed-kubernetes-model.md)
   boundary).
 - **Surge / rolling node upgrades.** Bumping a node group's version does **not**
-  mutate running nodes — it does a **replacement**: new-version nodes are added
-  (the *surge*, bounded by `maxUnavailable`/`maxSurge`), old nodes are
-  **cordoned and drained** (the eviction API → **PDBs honored**, [Part 06
-  ch.05](../06-production-readiness/05-reliability-and-disruptions.md)), then
-  terminated. This is the [Part 08
+  mutate running nodes. It does a **replacement**. The group first grows by up
+  to twice its Availability Zone count, or by `maxUnavailable` if that is
+  larger. Then old nodes are **cordoned and drained** through the eviction API,
+  so **PDBs are honored**: a PDB that blocks every eviction fails the upgrade
+  with `PodEvictionFailure` unless the update is forced ([Part 06
+  ch.05](../06-production-readiness/05-reliability-and-disruptions.md)). The old
+  nodes are then terminated. EKS managed node groups have `maxUnavailable` and
+  `maxUnavailablePercentage` but no `maxSurge` ([EKS node update
+  phases](https://docs.aws.amazon.com/eks/latest/userguide/managed-node-update-behavior.html),
+  checked 2026-10-31). This is the [Part 08
   ch.01](../08-day-2-operations/01-cluster-lifecycle.md) "drain → upgrade
   kubelet → uncordon" loop, automated by the provider — which is why the
   Bookstore's `84-pdb.yaml` is what keeps it available *through* a cluster
@@ -410,9 +544,9 @@ kubectl delete cluster bookstore        # CAPI controllers tear down the cloud i
   `terraform apply` reconciles real infra to the HCL and records the result in
   **state**. Local state on a laptop is unshareable and a lost-state =
   lost-cluster-tracking incident; production uses a **remote backend**
-  (S3+DynamoDB lock / GCS / Azure Blob) so the team shares one state and
-  concurrent applies are serialised. `plan` is the diff (desired vs state vs
-  real); `destroy` removes exactly what state records — *exact* teardown,
+  (S3 with a lock file via `use_lockfile`, GCS or Azure Blob) so the team
+  shares one state and concurrent applies are serialised. `plan` is the diff
+  (desired vs state vs real); `destroy` removes exactly what state records — *exact* teardown,
   unlike a manual click-sweep. **Modules** are parameterised cluster
   definitions (the IaC analogue of a Helm chart / Kustomize base) so dev/
   staging/prod/region clusters are one definition with different variables.
@@ -432,8 +566,9 @@ kubectl delete cluster bookstore        # CAPI controllers tear down the cloud i
   the [Part 00 ch.06](../00-foundations/06-declarative-api-model.md) declarative
   model. Note: CAPI manages *self-managed-style* clusters (it runs the
   Kubeadm control plane on your VMs) — distinct from a *provider-managed*
-  control plane (EKS/GKE/AKS); some infra providers also have a
-  managed-control-plane mode (e.g. CAPA's `AWSManagedControlPlane` for EKS).
+  control plane (EKS/GKE/AKS); some infrastructure providers also offer a
+  provider-managed control-plane mode. Check the provider's docs before you
+  rely on one.
 - **GitOps-for-clusters.** Because a CAPI cluster (or a Terraform plan, or an
   `eksctl` config) is *just versioned text*, the [Part 07
   ch.04](../07-delivery/04-gitops-argocd.md) reconcile loop applies one level
@@ -453,15 +588,16 @@ kubectl delete cluster bookstore        # CAPI controllers tear down the cloud i
 > sets for the app.
 
 > **In production: Terraform state is production-critical infrastructure.**
-> Use a **remote, locked, versioned, encrypted** backend (S3+DynamoDB / GCS /
-> Azure Blob); never local state for a team; restrict who can `apply`; gate
-> `apply` behind a reviewed `plan` (Atlantis / Terraform Cloud / a CI plan
-> comment). A corrupted or lost state file detaches Terraform from reality —
+> Use a **remote, locked, versioned, encrypted** backend (S3 with
+> `use_lockfile`, GCS or Azure Blob); never local state for a team; restrict
+> who can `apply`; gate `apply` behind a reviewed `plan` (Atlantis / Terraform
+> Cloud / a CI plan comment). A corrupted or lost state file detaches Terraform from reality —
 > treat it with the same care as etcd ([Part 08 ch.02](../08-day-2-operations/02-backup-and-dr.md)).
 
 > **In production: size node groups for AZ failure and surge upgrades.** Spread
 > node pools across AZs ([ch.01](01-managed-kubernetes-model.md)); set
-> `maxUnavailable`/`maxSurge` so a version bump is a *rolling, always-available*
+> `maxUnavailable` (EKS's upgrade setting) so a version bump is a *rolling,
+> always-available*
 > replacement that respects the Bookstore's `84-pdb.yaml`
 > ([Part 06 ch.05](../06-production-readiness/05-reliability-and-disruptions.md));
 > separate pools by workload class (stateless/spot vs the data tier) — the
@@ -497,17 +633,19 @@ kubectl delete cluster bookstore        # CAPI controllers tear down the cloud i
 # Provider CLI (fastest; eksctl config = semi-IaC)
 eksctl create cluster -f cluster-eks.yaml          # AWS (declarative YAML)
 gcloud container clusters create $CLUSTER_NAME --region <R> \
-  --release-channel regular --cluster-version 1.37.1-gke.1552000
-az aks create -g $RG -n $CLUSTER_NAME --zones 1 2 3 --enable-cluster-autoscaler
+  --release-channel regular --enable-ip-alias --enable-private-nodes \
+  --enable-private-endpoint
+az aks create -g $RG -n $CLUSTER_NAME --zones 1 2 3 --enable-cluster-autoscaler \
+  --enable-private-cluster --enable-oidc-issuer --enable-workload-identity
 
 # Terraform (declarative, stateful, multi-cloud workflow)
-terraform init && terraform validate               # validate needs NO account
+terraform fmt -check && terraform init -backend=false && terraform validate
 terraform plan -out tf.plan && terraform apply tf.plan
 terraform destroy                                  # exact, state-driven teardown
 
 # Cluster API (clusters AS Kubernetes objects)
-clusterctl init --infrastructure aws|gcp|azure
-clusterctl generate cluster $CLUSTER_NAME --kubernetes-version v1.37.2 \
+clusterctl init --infrastructure aws
+clusterctl generate cluster $CLUSTER_NAME --kubernetes-version v1.37.0 \
   | kubectl apply -f -
 clusterctl describe cluster $CLUSTER_NAME ; kubectl delete cluster $CLUSTER_NAME
 
@@ -515,38 +653,60 @@ clusterctl describe cluster $CLUSTER_NAME ; kubectl delete cluster $CLUSTER_NAME
 kubectl apply -k examples/bookstore/kustomize/overlays/dev
 ```
 
-Minimal IaC skeletons (the shape — pin versions in real use):
+Minimal IaC skeletons (the shape, with pins in real use):
 
 ```yaml
 # eksctl ClusterConfig (versionable)
 apiVersion: eksctl.io/v1alpha5
 kind: ClusterConfig
 metadata: { name: bookstore, region: us-east-1, version: "1.37" }
+vpc: { clusterEndpoints: { privateAccess: true, publicAccess: false } }
 iam: { withOIDC: true }                 # REQUIRED for IRSA (ch.03)
 managedNodeGroups:
-  - { name: ng1, instanceType: m6i.large, minSize: 2, maxSize: 6, desiredCapacity: 3 }
+  - { name: ng1, instanceType: m6i.large, privateNetworking: true, minSize: 2, maxSize: 6, desiredCapacity: 3 }
 ```
 
 ```hcl
-# Terraform (remote state is mandatory for a team)
-terraform { backend "s3" { bucket = "your-org-tf-state"
-  key = "bookstore/eks.tfstate" region = "us-east-1" dynamodb_table = "tf-locks" } }
-module "eks" { source = "terraform-aws-modules/eks/aws" version = "~> 20.0"
-  cluster_name = var.cluster_name  cluster_version = "1.37"  enable_irsa = true
-  eks_managed_node_groups = { stateless = { min_size = 2, max_size = 6,
-    desired_size = 3, ami_type = "AL2023_x86_64_STANDARD" } } }   # no AL2 AMI
+# Terraform: the shape only. The complete root module is in step 2.
+terraform {
+  required_version = "1.14.8"
+  backend "s3" {
+    bucket       = "your-org-tf-state"
+    key          = "bookstore/eks.tfstate"
+    region       = "us-east-1"
+    encrypt      = true
+    use_lockfile = true
+  }
+}
+
+module "eks" {
+  source                 = "terraform-aws-modules/eks/aws"
+  version                = "21.29.0"
+  name                   = var.cluster_name
+  kubernetes_version     = var.cluster_version
+  endpoint_public_access = false
+  enable_irsa            = true
+  eks_managed_node_groups = {
+    stateless = { ami_type = "AL2023_x86_64_STANDARD", min_size = 2, max_size = 6, desired_size = 3 }
+  }
+}
 ```
 
 Checklist:
 
 - [ ] Cluster defined as **versioned, reviewed code** (eksctl config / HCL /
-      CAPI CRDs) — **no click-ops** for anything that matters
-- [ ] Terraform **state remote + locked + encrypted**; `apply` gated behind a
-      reviewed `plan`
+      CAPI CRDs), with **no click-ops** for anything that matters
+- [ ] Terraform **state encrypted, locked and limited** to the provisioning
+      role; `apply` gated behind a reviewed `plan`
 - [ ] Tool, provider/module, and **Kubernetes minor** all **pinned** (within
-      the [ch.01](01-managed-kubernetes-model.md) supported window)
-- [ ] Node pools **AZ-spread**, surge/`maxUnavailable` set so an upgrade
-      honors **PDBs** ([Part 06 ch.05](../06-production-readiness/05-reliability-and-disruptions.md))
+      the [ch.01](01-managed-kubernetes-model.md) supported window), with
+      `.terraform.lock.hcl` committed
+- [ ] API endpoint **private**, or a CIDR-limited public path you chose and
+      recorded ([10.04](04-cloud-networking-and-load-balancing.md))
+- [ ] `trivy config` run on the root module; any module finding recorded with
+      its reason
+- [ ] Node pools **AZ-spread**, `maxUnavailable` set so an upgrade honors
+      **PDBs** ([Part 06 ch.05](../06-production-readiness/05-reliability-and-disruptions.md))
 - [ ] OIDC enabled at create time (`withOIDC` / `--workload-pool` /
       `--enable-oidc-issuer`) so [ch.03](03-cloud-identity.md) identity works
 - [ ] **Teardown by the same code path** + an orphan sweep (LBs/disks/
@@ -572,7 +732,7 @@ Checklist:
 
    </details>
 
-3. **Hands-on: provision an EKS cluster with `eksctl` (one command), then re-provision the *same* cluster shape with Terraform. Time both end-to-end and compare. Now do `terraform destroy` and `eksctl delete cluster`. Which one leaves orphaned resources?**
+3. **Hands-on: provision an EKS cluster with `eksctl` (one command), then re-provision the *same* cluster shape with Terraform, in an account you own. Time both end-to-end and compare. Now do `terraform destroy` and `eksctl delete cluster`. Which one leaves orphaned resources?**
    <details><summary>What you should see</summary>
 
    `eksctl create` is faster to first node-Ready (one CloudFormation stack, opinionated defaults). Terraform forces you to declare every resource (VPC subnets, NAT, route tables, OIDC provider) so it is slower but more explicit. Both `destroy` paths usually leave at least one orphan: an unattached LB created by an in-cluster controller (AWS Load Balancer Controller making an NLB), an unattached EBS volume from a `Retain` reclaim-policy PV, a Route53 record from ExternalDNS, or an EFS access point. The orphan sweep is the production-readiness gate, not the destroy command.
@@ -582,11 +742,37 @@ Checklist:
 4. **A node-pool surge upgrade with `maxSurge: 1, maxUnavailable: 0` is stuck — the new node never goes Ready and the old one cannot be drained. What three things do you check?**
    <details><summary>Show answer</summary>
 
-   First, the new node's bootstrap logs — `aws ec2 get-console-output` or the equivalent — is the image pulling, is the kubelet starting, is the node joining? Second, a PDB on the old node's Pods that is blocking drain (catalog has `minAvailable: 1` and only one replica left). Third, a stuck PreStop or terminationGracePeriodSeconds set too high causing eviction timeouts. The pattern is "new node won't come up" XOR "old node won't go down" — instrument both sides.
+   First, the new node's bootstrap logs — `aws ec2 get-console-output` or the equivalent — is the image pulling, is the kubelet starting, is the node joining? Second, a PDB on the old node's Pods that blocks the drain. The Bookstore's catalog PDB sets `minAvailable: 2`, so with only two ready replicas no eviction is allowed. Third, a stuck PreStop or terminationGracePeriodSeconds set too high causing eviction timeouts. The pattern is "new node won't come up" XOR "old node won't go down" — instrument both sides.
+
+   </details>
+
+5. **Security: a teammate says `sensitive = true` keeps a generated database password out of Terraform state. Is that right, and what do you change?**
+   <details><summary>Show answer</summary>
+
+   No. `sensitive = true` hides the value from CLI output and logs. Terraform still writes it to the state file and to any saved plan, so anyone who can read those files can recover the password. Change three things: an encrypted, locked backend whose access is limited to the provisioning role; a saved plan handled as a secret; and an ephemeral value (`ephemeral = true` on the variable), which Terraform leaves out of state and plan files. See the [Terraform guidance on sensitive data in state](https://developer.hashicorp.com/terraform/language/state/sensitive-data), checked 2026-10-31.
 
    </details>
 
 ## Further reading
+
+Cited upstream, checked 2026-10-31:
+
+- Terraform S3 backend (`encrypt`, `kms_key_id`, `use_lockfile`, and the
+  `dynamodb_table` deprecation): <https://developer.hashicorp.com/terraform/language/backend/s3>
+- Terraform sensitive data in state: <https://developer.hashicorp.com/terraform/language/state/sensitive-data>
+- EKS Kubernetes version lifecycle: <https://docs.aws.amazon.com/eks/latest/userguide/kubernetes-versions.html>
+- EKS managed node group update phases: <https://docs.aws.amazon.com/eks/latest/userguide/managed-node-update-behavior.html>
+- EKS-optimized AMIs (AL2023 is the default from Kubernetes 1.30): <https://docs.aws.amazon.com/eks/latest/userguide/eks-optimized-ami.html>
+- eksctl `ClusterConfig` types: <https://github.com/eksctl-io/eksctl/blob/main/pkg/apis/eksctl.io/v1alpha5/types.go>
+- terraform-aws-modules/eks, version 21.29.0: <https://registry.terraform.io/modules/terraform-aws-modules/eks/aws/21.29.0>
+- GKE regional clusters: <https://docs.cloud.google.com/kubernetes-engine/docs/how-to/creating-a-regional-cluster>
+- GKE private clusters: <https://docs.cloud.google.com/kubernetes-engine/docs/how-to/private-clusters>
+- AKS private clusters: <https://learn.microsoft.com/en-us/azure/aks/private-clusters>
+- AKS Microsoft Entra Workload ID: <https://learn.microsoft.com/en-us/azure/aks/workload-identity-deploy-cluster>
+- Cluster API quick start: <https://cluster-api.sigs.k8s.io/user/quick-start>
+- Trivy check AWS-0104: <https://avd.aquasec.com/misconfig/aws-0104>
+
+Background:
 
 - **Rosso et al., _Production Kubernetes_, ch.2 — Deployment Models**
   (provisioning a production cluster, the operational trade-offs of CLI vs IaC
