@@ -1,62 +1,106 @@
-# Transcript for 05-reliability-and-disruptions.md (06.05), lab steps 1 to 8.
-# Tier A: a kind cluster, Kubernetes v1.37.0, kubectl v1.37.2.
-# Host: a Linux lab host. Nothing was created on a cloud account.
+# Transcript for 06-production-readiness/05-reliability-and-disruptions.md (06.05), lab steps 1 to 5.
+# Tier A: a kind cluster of three nodes (one control-plane and two workers),
+# Kubernetes v1.37.0 nodes, kubectl v1.37.2, kind v0.33.0. Host: a Linux lab
+# host. Nothing was created on a cloud account. Not run on macOS.
 #
-# Substitutions: the chapter's namespace `bookstore` is `p06-05-patch` in every
-# command below. The output came from a lab cluster whose node name differs
-# from the chapter's.
+# Recorded by running examples/security-lab/labs/06-05.sh once, start to end.
+# Everything below is that run's output, unedited. The script creates one
+# namespace and deletes it at the end. It cordons one worker for the drain, and
+# uncordons it in step 4.
 #
-# What ran: one control-plane node, not the three-worker cluster of step 0. The
-# lab therefore did not drain a node, and the drain in step 2 is the reader's
-# exercise. Steps 1 to 3 of the chapter ran here on that cluster.
+# Namespace substitution: the chapter's namespace `bookstore` ran as
+# p06-finish-pdb in every command. The ServiceAccounts and the budgets are the
+# example tree's 05-serviceaccounts-rbac.yaml and 84-pdb.yaml, copied with the
+# namespace renamed. The nodes are named sf-sched-control-plane,
+# sf-sched-worker and sf-sched-worker2.
 #
-# The catalog Deployment is a stand-in: busybox sleeping, with the chapter's
-# labels, ServiceAccount and PDB. The Bookstore catalog needs its database for
-# readiness, and the database was not running on the lab cluster. The PDB and
-# its selector are the chapter's own objects.
+# Differences from the chapter's cluster:
+# - Two workers, not three. The chapter's kind-multinode.yaml has three, and
+#   this lab cluster is shared with other runs, so its shape was fixed. Three
+#   catalog replicas therefore sat two on one worker and one on the other, and
+#   the drain emptied the worker with two.
+# - The three front tiers are stand-ins: a busybox sleeper with the chapter's
+#   labels, ServiceAccounts and restricted settings, ready 10 seconds after it
+#   starts and stopping 5 seconds after SIGTERM. The Bookstore catalog needs its
+#   database to report Ready. The stand-ins have no topology spread constraint:
+#   the control-plane is tainted, so catalog's DoNotSchedule hostname spread
+#   would leave a third replica Pending on two workers.
+# - Neither worker was tainted or cordoned when the run started. The script
+#   waits for that, so it does not place Pods on a node another run reserved.
 #
-# The stand-in has no topology spread constraint: a single node cannot satisfy
-# the chapter's maxSkew 1 on hostname.
+# What did not work the first time:
+# - The first start of the script waited ten minutes and then refused to run,
+#   because another run held a NoSchedule taint (dedicated=database) on one
+#   worker. Nothing was created.
+# - A second start ran while the lab API server was restarting. It printed EOF
+#   and a bare Forbidden for the budget apply, and the stand-ins took longer to
+#   start than the script's wait, because the host's disk was busy. It was
+#   stopped by hand in step 3, and the next start deleted its namespace. The
+#   script then gained a retry for those two API errors, a wait for every Pod to
+#   be Ready, and waits on the budget's own status in place of fixed sleeps.
+# - The third run completed. Its poller printed one job-control line into the
+#   transcript, so the script was changed to end the poller quietly and run
+#   again. The run below is the fourth and last.
 #
-# storefront and orders from 84-pdb.yaml have no Pods in this namespace, so
-# their budgets show 0. The lab did not create them.
-#
-# Deliberate failures: step 3 (the eviction refused with 429 TooManyRequests,
-# at minAvailable 3), and the RBAC check that the catalog ServiceAccount cannot
+# Deliberate failures: the eviction refused with 429 TooManyRequests at
+# minAvailable 3 (step 3), the drain's own retries while the budget reads 0
+# (step 4), and the two RBAC checks that the catalog ServiceAccount cannot
 # change a budget or create an eviction.
 #
-# Not run here: the multi-node drain, the 84-pdb.yaml apply into bookstore, and
-# the audit record of the PDB change. The audit claim is cited upstream.
+# Not run here: the audit record of a budget change, which the chapter cites
+# upstream, and a drain on three workers.
 
-$ kubectl get pdb -A 2>&1 | head -3
-No resources found
-$ kubectl apply -f ns05.yaml
-namespace/p06-05-patch created
-$ sed 's/namespace: bookstore/namespace: p06-05-patch/' <repo>/full-guide/examples/bookstore/raw-manifests/05-serviceaccounts-rbac.yaml | kubectl apply -f - 2>&1 | head -3
+## step 0: the cluster, and a wait until both workers are free of taints and cordons
+$ kubectl get nodes
+NAME                     STATUS   ROLES           AGE    VERSION
+sf-sched-control-plane   Ready    control-plane   133m   v1.37.0
+sf-sched-worker          Ready    <none>          132m   v1.37.0
+sf-sched-worker2         Ready    <none>          132m   v1.37.0
+
+## step 1: the namespace, the ServiceAccounts and three stand-in workloads
+$ kubectl apply -f ns.yaml
+namespace/p06-finish-pdb created
+
+$ kubectl apply -f sa.yaml 2>&1 | grep -E 'catalog-sa|storefront-sa|orders-sa'
 serviceaccount/catalog-sa created
 serviceaccount/storefront-sa created
 serviceaccount/orders-sa created
-$ kubectl apply -f catalog-standin.yaml
+
+$ kubectl apply -f standins.yaml
 deployment.apps/catalog created
-$ kubectl wait --for=condition=Available deployment/catalog -n p06-05-patch --timeout=120s
+deployment.apps/storefront created
+deployment.apps/orders created
+
+$ kubectl wait --for=condition=Available deployment --all -n p06-finish-pdb --timeout=600s
 deployment.apps/catalog condition met
-$ kubectl get pods -n p06-05-patch -o wide
-NAME                       READY   STATUS    RESTARTS   AGE   IP            NODE                     NOMINATED NODE   READINESS GATES
-catalog-7d77bf8dcd-4c6gt   1/1     Running   0          37s   10.244.0.80   sf-pilot-control-plane   <none>           <none>
-catalog-7d77bf8dcd-9xps5   1/1     Running   0          37s   10.244.0.79   sf-pilot-control-plane   <none>           <none>
-catalog-7d77bf8dcd-fmgl2   1/1     Running   0          37s   10.244.0.78   sf-pilot-control-plane   <none>           <none>
-$ sed 's/namespace: bookstore/namespace: p06-05-patch/' <repo>/full-guide/examples/bookstore/raw-manifests/84-pdb.yaml | kubectl apply -f -
+deployment.apps/orders condition met
+deployment.apps/storefront condition met
+
+$ kubectl get pods -n p06-finish-pdb -o wide --sort-by=.metadata.name
+NAME                          READY   STATUS    RESTARTS   AGE   IP            NODE               NOMINATED NODE   READINESS GATES
+catalog-59cfcf98bc-7spns      1/1     Running   0          56s   10.244.1.33   sf-sched-worker    <none>           <none>
+catalog-59cfcf98bc-kmg64      1/1     Running   0          56s   10.244.1.34   sf-sched-worker    <none>           <none>
+catalog-59cfcf98bc-x7l4c      1/1     Running   0          56s   10.244.2.57   sf-sched-worker2   <none>           <none>
+orders-775657dddc-8jzqw       1/1     Running   0          56s   10.244.1.36   sf-sched-worker    <none>           <none>
+orders-775657dddc-9ftct       1/1     Running   0          56s   10.244.2.59   sf-sched-worker2   <none>           <none>
+storefront-67f7fbd969-cqcnt   1/1     Running   0          56s   10.244.1.35   sf-sched-worker    <none>           <none>
+storefront-67f7fbd969-mmw6x   1/1     Running   0          56s   10.244.2.58   sf-sched-worker2   <none>           <none>
+
+## step 2: add the PodDisruptionBudgets (the chapter step 1)
+$ kubectl apply -f pdb.yaml
 poddisruptionbudget.policy/catalog created
 poddisruptionbudget.policy/storefront created
 poddisruptionbudget.policy/orders created
-$ kubectl get pdb -n p06-05-patch
+
+$ kubectl get pdb -n p06-finish-pdb
 NAME         MIN AVAILABLE   MAX UNAVAILABLE   ALLOWED DISRUPTIONS   AGE
-catalog      2               N/A               1                     5s
-orders       1               N/A               0                     5s
-storefront   1               N/A               0                     5s
-$ kubectl describe pdb catalog -n p06-05-patch | sed -n '1,20p'
+catalog      2               N/A               1                     1s
+orders       1               N/A               1                     0s
+storefront   1               N/A               1                     1s
+
+$ kubectl describe pdb catalog -n p06-finish-pdb | sed -n '1,20p'
 Name:           catalog
-Namespace:      p06-05-patch
+Namespace:      p06-finish-pdb
 Min available:  2
 Selector:       app=catalog
 Status:
@@ -65,16 +109,21 @@ Status:
     Desired:              2
     Total:                3
 Events:                   <none>
-$ kubectl patch pdb catalog -n p06-05-patch --type merge -p '{"spec":{"minAvailable":3}}'
+
+## step 3: a budget set to the replica count refuses the eviction (a deliberate action)
+$ kubectl patch pdb catalog -n p06-finish-pdb --type merge -p '{"spec":{"minAvailable":3}}'
 poddisruptionbudget.policy/catalog patched
-$ kubectl get pdb catalog -n p06-05-patch
+
+$ kubectl get pdb catalog -n p06-finish-pdb
 NAME      MIN AVAILABLE   MAX UNAVAILABLE   ALLOWED DISRUPTIONS   AGE
-catalog   3               N/A               0                     11s
-$ kubectl create --raw /api/v1/namespaces/p06-05-patch/pods/catalog-7d77bf8dcd-4c6gt/eviction -f eviction.json
+catalog   3               N/A               0                     2s
+
+$ POD=$(kubectl get pods -n p06-finish-pdb -l app=catalog -o jsonpath='{.items[0].metadata.name}'); printf '{"apiVersion":"policy/v1","kind":"Eviction","metadata":{"name":"%s","namespace":"p06-finish-pdb"}}' "$POD" > eviction.json; kubectl create --raw /api/v1/namespaces/p06-finish-pdb/pods/$POD/eviction -f eviction.json
 Error from server (TooManyRequests): Cannot evict pod as it would violate the pod's disruption budget.
-$ kubectl describe pdb catalog -n p06-05-patch | sed -n '1,20p'
+
+$ kubectl describe pdb catalog -n p06-finish-pdb | sed -n '1,20p'
 Name:           catalog
-Namespace:      p06-05-patch
+Namespace:      p06-finish-pdb
 Min available:  3
 Selector:       app=catalog
 Status:
@@ -83,35 +132,115 @@ Status:
     Desired:              3
     Total:                3
 Events:                   <none>
-$ kubectl delete pod catalog-7d77bf8dcd-4c6gt -n p06-05-patch
-pod "catalog-7d77bf8dcd-4c6gt" deleted from p06-05-patch namespace
-$ kubectl get pods -n p06-05-patch -l app=catalog --no-headers | awk '{print $1, $2, $3}'
-catalog-7d77bf8dcd-9xps5 1/1 Running
-catalog-7d77bf8dcd-fmgl2 1/1 Running
-catalog-7d77bf8dcd-qkk6w 1/1 Running
-$ kubectl get pdb catalog -n p06-05-patch
-NAME      MIN AVAILABLE   MAX UNAVAILABLE   ALLOWED DISRUPTIONS   AGE
-catalog   3               N/A               0                     62s
-$ kubectl auth can-i update poddisruptionbudgets.policy -n p06-05-patch --as=system:serviceaccount:p06-05-patch:catalog-sa
-no
-$ kubectl auth can-i create pods/eviction -n p06-05-patch --as=system:serviceaccount:p06-05-patch:catalog-sa
-no
-$ kubectl patch pdb catalog -n p06-05-patch --type merge -p '{"spec":{"minAvailable":2}}'
-poddisruptionbudget.policy/catalog patched
-$ kubectl get pdb catalog -n p06-05-patch
-NAME      MIN AVAILABLE   MAX UNAVAILABLE   ALLOWED DISRUPTIONS   AGE
-catalog   2               N/A               1                     68s
 
-## run 2: the eviction request in the form the chapter now shows (printf, not a heredoc)
-$ kubectl patch pdb catalog -n p06-05-patch --type merge -p '{"spec":{"minAvailable":3}}'
+$ kubectl delete pod "$(kubectl get pods -n p06-finish-pdb -l app=catalog -o jsonpath='{.items[0].metadata.name}')" -n p06-finish-pdb
+pod "catalog-59cfcf98bc-7spns" deleted from p06-finish-pdb namespace
+
+$ kubectl wait --for=jsonpath='{.status.readyReplicas}'=3 deployment/catalog -n p06-finish-pdb --timeout=120s; kubectl get pods -n p06-finish-pdb -l app=catalog --no-headers | awk '{print $1, $2, $3}'
+deployment.apps/catalog condition met
+catalog-59cfcf98bc-kmg64 1/1 Running
+catalog-59cfcf98bc-ld59l 1/1 Running
+catalog-59cfcf98bc-x7l4c 1/1 Running
+
+$ kubectl auth can-i update poddisruptionbudgets.policy -n p06-finish-pdb --as=system:serviceaccount:p06-finish-pdb:catalog-sa
+no
+
+$ kubectl auth can-i create pods/eviction -n p06-finish-pdb --as=system:serviceaccount:p06-finish-pdb:catalog-sa
+no
+
+$ kubectl patch pdb catalog -n p06-finish-pdb --type merge -p '{"spec":{"minAvailable":2}}'
 poddisruptionbudget.policy/catalog patched
-$ kubectl get pdb catalog -n p06-05-patch
+
+$ kubectl get pdb catalog -n p06-finish-pdb
 NAME      MIN AVAILABLE   MAX UNAVAILABLE   ALLOWED DISRUPTIONS   AGE
-catalog   3               N/A               0                     9m45s
-$ POD=$(kubectl get pods -n p06-05-patch -l app=catalog -o jsonpath='{.items[0].metadata.name}'); printf '{"apiVersion":"policy/v1","kind":"Eviction","metadata":{"name":"%s","namespace":"p06-05-patch"}}' "$POD" > eviction.json && kubectl create --raw /api/v1/namespaces/p06-05-patch/pods/$POD/eviction -f eviction.json
-Error from server (TooManyRequests): Cannot evict pod as it would violate the pod's disruption budget.
-$ kubectl patch pdb catalog -n p06-05-patch --type merge -p '{"spec":{"minAvailable":2}}'
-poddisruptionbudget.policy/catalog patched
-$ kubectl get pdb catalog -n p06-05-patch
-NAME      MIN AVAILABLE   MAX UNAVAILABLE   ALLOWED DISRUPTIONS   AGE
-catalog   2               N/A               1                     9m45s
+catalog   2               N/A               1                     35s
+
+## step 4: drain the worker that holds the most catalog Pods
+$ kubectl get pods -n p06-finish-pdb -o wide --sort-by=.spec.nodeName | awk '{print $1, $2, $3, $7}'
+NAME READY STATUS NODE
+catalog-59cfcf98bc-kmg64 1/1 Running sf-sched-worker
+catalog-59cfcf98bc-ld59l 1/1 Running sf-sched-worker
+orders-775657dddc-8jzqw 1/1 Running sf-sched-worker
+storefront-67f7fbd969-cqcnt 1/1 Running sf-sched-worker
+catalog-59cfcf98bc-x7l4c 1/1 Running sf-sched-worker2
+orders-775657dddc-9ftct 1/1 Running sf-sched-worker2
+storefront-67f7fbd969-mmw6x 1/1 Running sf-sched-worker2
+
+$ echo "draining sf-sched-worker"
+draining sf-sched-worker
+
+$ ( trap 'exit 0' TERM; while :; do kubectl get pdb catalog -n p06-finish-pdb --no-headers | awk '{print $1, $2, $4}'; sleep 2; done ) > pdb-poll.txt 2>&1 &
+POLL=$!
+kubectl drain "sf-sched-worker" --ignore-daemonsets --delete-emptydir-data --timeout=240s
+kill $POLL; wait $POLL
+node/sf-sched-worker cordoned
+Warning: ignoring DaemonSet-managed Pods: kube-system/kindnet-rm62x, kube-system/kube-proxy-pfxbz
+evicting pod p06-finish-pdb/storefront-67f7fbd969-cqcnt
+evicting pod p06-finish-pdb/catalog-59cfcf98bc-kmg64
+evicting pod p06-finish-pdb/catalog-59cfcf98bc-ld59l
+evicting pod p06-finish-pdb/orders-775657dddc-8jzqw
+error when evicting pods/"catalog-59cfcf98bc-ld59l" -n "p06-finish-pdb" (will retry after 5s): Cannot evict pod as it would violate the pod's disruption budget.
+evicting pod p06-finish-pdb/catalog-59cfcf98bc-ld59l
+error when evicting pods/"catalog-59cfcf98bc-ld59l" -n "p06-finish-pdb" (will retry after 5s): Cannot evict pod as it would violate the pod's disruption budget.
+evicting pod p06-finish-pdb/catalog-59cfcf98bc-ld59l
+error when evicting pods/"catalog-59cfcf98bc-ld59l" -n "p06-finish-pdb" (will retry after 5s): Cannot evict pod as it would violate the pod's disruption budget.
+pod/catalog-59cfcf98bc-kmg64 evicted
+pod/orders-775657dddc-8jzqw evicted
+pod/storefront-67f7fbd969-cqcnt evicted
+evicting pod p06-finish-pdb/catalog-59cfcf98bc-ld59l
+error when evicting pods/"catalog-59cfcf98bc-ld59l" -n "p06-finish-pdb" (will retry after 5s): Cannot evict pod as it would violate the pod's disruption budget.
+evicting pod p06-finish-pdb/catalog-59cfcf98bc-ld59l
+error when evicting pods/"catalog-59cfcf98bc-ld59l" -n "p06-finish-pdb" (will retry after 5s): Cannot evict pod as it would violate the pod's disruption budget.
+evicting pod p06-finish-pdb/catalog-59cfcf98bc-ld59l
+error when evicting pods/"catalog-59cfcf98bc-ld59l" -n "p06-finish-pdb" (will retry after 5s): Cannot evict pod as it would violate the pod's disruption budget.
+evicting pod p06-finish-pdb/catalog-59cfcf98bc-ld59l
+error when evicting pods/"catalog-59cfcf98bc-ld59l" -n "p06-finish-pdb" (will retry after 5s): Cannot evict pod as it would violate the pod's disruption budget.
+evicting pod p06-finish-pdb/catalog-59cfcf98bc-ld59l
+pod/catalog-59cfcf98bc-ld59l evicted
+node/sf-sched-worker drained
+
+## step 4b: the budget as the drain moved through it (distinct values, in order)
+$ uniq pdb-poll.txt
+catalog 2 1
+catalog 2 0
+catalog 2 1
+catalog 2 0
+
+$ kubectl get pods -n p06-finish-pdb -o wide --sort-by=.spec.nodeName | awk '{print $1, $2, $3, $7}'
+NAME READY STATUS NODE
+catalog-59cfcf98bc-565kd 0/1 Running sf-sched-worker2
+catalog-59cfcf98bc-hjmdc 1/1 Running sf-sched-worker2
+catalog-59cfcf98bc-x7l4c 1/1 Running sf-sched-worker2
+orders-775657dddc-9ftct 1/1 Running sf-sched-worker2
+orders-775657dddc-hqblr 1/1 Running sf-sched-worker2
+storefront-67f7fbd969-mmw6x 1/1 Running sf-sched-worker2
+storefront-67f7fbd969-rkvlz 1/1 Running sf-sched-worker2
+
+$ kubectl get pdb -n p06-finish-pdb
+NAME         MIN AVAILABLE   MAX UNAVAILABLE   ALLOWED DISRUPTIONS   AGE
+catalog      2               N/A               1                     2m6s
+orders       1               N/A               1                     2m5s
+storefront   1               N/A               1                     2m6s
+
+$ kubectl get nodes
+NAME                     STATUS                     ROLES           AGE    VERSION
+sf-sched-control-plane   Ready                      control-plane   136m   v1.37.0
+sf-sched-worker          Ready,SchedulingDisabled   <none>          136m   v1.37.0
+sf-sched-worker2         Ready                      <none>          136m   v1.37.0
+
+$ kubectl uncordon "sf-sched-worker"
+node/sf-sched-worker uncordoned
+
+$ kubectl get nodes
+NAME                     STATUS   ROLES           AGE    VERSION
+sf-sched-control-plane   Ready    control-plane   136m   v1.37.0
+sf-sched-worker          Ready    <none>          136m   v1.37.0
+sf-sched-worker2         Ready    <none>          136m   v1.37.0
+
+## step 5: clean up
+$ kubectl delete ns p06-finish-pdb --wait=true
+namespace "p06-finish-pdb" deleted
+
+$ kubectl get ns | grep -c 'p06-finish-pdb'
+0
+

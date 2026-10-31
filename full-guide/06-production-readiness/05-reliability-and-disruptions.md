@@ -85,7 +85,7 @@ threats this chapter owns. The rest link to the chapters that own them.
 
 | Threat | Control taught here | Goes deeper |
 |---|---|---|
-| A node stays on an unpatched kubelet or kernel because its drain waits on a budget | Size `minAvailable` to what one node can lose, set `unhealthyPodEvictionPolicy: AlwaysAllow`, and watch `disruptionsAllowed` ([notice a refused patch](#3-notice-a-refused-patch)) | [08.01](../08-day-2-operations/01-cluster-lifecycle.md) |
+| A node stays on an unpatched kubelet or kernel because its drain waits on a budget | Size `minAvailable` to what one node can lose, set `unhealthyPodEvictionPolicy: AlwaysAllow`, and watch `disruptionsAllowed` ([notice a refused patch](#3-notice-a-refused-patch), [a drain paced by the budget](#4-drain-a-node-and-watch-the-budget-pace-it)) | [08.01](../08-day-2-operations/01-cluster-lifecycle.md) |
 | Someone lowers or deletes a budget to push a stuck drain through, unseen | Only named roles may change a PodDisruptionBudget. [Step 3](#3-notice-a-refused-patch) shows the workload's ServiceAccount cannot. Audit records a budget change when the audit policy covers it ([audit docs][audit]) | [05.01](../05-security/01-authn-authz-rbac.md), 05.08 <!-- link-later: 05.08 --> |
 | A compromised Pod keeps running because its budget refuses the eviction | A direct delete is not budget-checked, by design ([disruptions][disruptions]). [Step 3](#3-notice-a-refused-patch) deletes a Pod with its budget at zero. Use a direct delete on purpose and record it | 05.08 <!-- link-later: 05.08 --> |
 | One node failure removes every replica | Replicas and spread across nodes. A PDB cannot stop an involuntary loss | [04.02](../04-scheduling/02-affinity-taints-topology.md) |
@@ -139,12 +139,18 @@ sequenceDiagram
 
 We will: (1) add PDBs for storefront/catalog/orders; (2) read the budget
 before any eviction; (3) watch the budget refuse an eviction, and see that a
-direct delete goes through; (4) optionally drain a node on a **multi-node**
-kind cluster (so a drain has somewhere to reschedule).
+direct delete goes through; (4) drain a node on a **multi-node** kind cluster
+(so a drain has somewhere to reschedule) and watch the budget pace it.
 
-The output blocks come from a lab run on a one-node cluster, so that run did
-not drain a node. Step 4 is the reader's exercise and has no captured output.
-The catalog Pods in the lab were a stand-in, described in step 2.
+The output blocks come from one scripted run on a shared kind cluster of three
+nodes, a control-plane and two workers, whose node names differ from yours. The
+script is `examples/security-lab/labs/06-05.sh` and its transcript is
+`examples/security-lab/evidence/06-05.txt`. The run's namespace was
+`p06-finish-pdb` where this chapter says `bookstore`. A line that would print
+it is elided with `# ...`, except in the drain output, where it is shown as it
+came. The front-tier Pods were stand-ins, described in step 2. Step 0 builds
+three workers, so a spread that gives one Pod per node on your cluster gave two
+and one on the lab's.
 
 ### 0. Prerequisites: a multi-node cluster (self-bootstrapping)
 
@@ -262,16 +268,16 @@ kubectl get pdb -n bookstore
 <!-- gate: output -->
 ```text
 NAME         MIN AVAILABLE   MAX UNAVAILABLE   ALLOWED DISRUPTIONS   AGE
-catalog      2               N/A               1                     5s
-orders       1               N/A               0                     5s
-storefront   1               N/A               0                     5s
+catalog      2               N/A               1                     1s
+orders       1               N/A               1                     0s
+storefront   1               N/A               1                     1s
 ```
 
 `ALLOWED DISRUPTIONS` is `.status.disruptionsAllowed`, the **live headroom**:
 with 3 Ready catalog Pods and floor 2, exactly **1** may be evicted right now.
-The lab namespace had no storefront or orders Pods, so their rows show 0. A
-budget allows the Ready Pods above its floor, and with no Pods there is none
-above it.
+storefront and orders have 2 Ready Pods and a floor of 1, so each allows 1 as
+well. A budget allows the Ready Pods above its floor, and a workload with no
+Ready Pods has none above it.
 
 ### 2. Read the budget before an eviction
 
@@ -298,56 +304,10 @@ Events:                   <none>
 
 `Current` counts the Ready Pods that match the selector, and `Desired` is the
 floor. `Allowed disruptions` is their difference, never below zero. The lab's
-catalog was a stand-in busybox workload with the chapter's labels, the same
-ServiceAccount and this PDB, because the Bookstore catalog needs its database
-to report Ready.
-
-#### Optional: drain a node on the multi-node cluster
-
-Pick a worker that runs a catalog Pod and does **not** run postgres. postgres
-is a single replica whose Pod can only run on the node that holds its volume,
-and no PDB covers it. Draining that node takes the database down until the
-node comes back. List where the Pods run, then choose:
-
-```sh
-kubectl get pods -n bookstore -o wide   # note the node of postgres-0
-NODE=<a worker that runs a catalog Pod but not postgres-0>
-echo "draining $NODE"
-
-# --ignore-daemonsets: DaemonSet Pods aren't drained (they're per-node).
-# --delete-emptydir-data: our Pods use emptyDir scratch (Part 05); acknowledge it.
-#   This discards ONLY ephemeral emptyDir scratch, the Bookstore stateless
-#   tiers (catalog/storefront/orders) keep nothing there. It does NOT touch
-#   PVC-backed data: a StatefulSet's PersistentVolume (e.g. postgres,
-#   Part 01 ch.05) is bound to its PVC and survives the drain untouched. Do
-#   not cargo-cult this flag onto a stateful drain expecting it to be safe;
-#   it's safe HERE precisely because these workers are stateless.
-kubectl drain "$NODE" --ignore-daemonsets --delete-emptydir-data
-```
-
-Watch in another shell:
-
-```sh
-watch kubectl get pods -n bookstore -o wide
-```
-
-`kubectl drain` asks the eviction API for each Pod, so the refusal from step 3
-applies to each eviction. With `minAvailable: 2` and three Ready catalog Pods,
-the first eviction fits the budget. The drain then goes on only when the
-budget allows another, and the Deployment's replacement is what restores the
-count. Two things can keep it waiting. A second drain started before the first
-replacement is Ready is refused with the same budget message. And the
-replacement needs a node the spread rules allow. catalog's `DoNotSchedule`
-hostname spread takes `nodeTaintsPolicy: Ignore` for taints by default, so a
-node that taints exclude still counts as a spread domain ([Part 04
-ch.02](../04-scheduling/02-affinity-taints-topology.md)). A replacement can
-therefore stay Pending while the drained node is cordoned. This run did not
-drain a node, so it did not observe that. Watch `kubectl get pods -o wide`
-during your drain. Uncordon when done:
-
-```sh
-kubectl uncordon "$NODE"
-```
+three front tiers were stand-ins: busybox sleepers with the chapter's labels,
+the chapter's ServiceAccounts and the restricted settings, ready ten seconds
+after they start. The Bookstore catalog needs its database to report Ready.
+The budgets were the chapter's own `84-pdb.yaml`.
 
 > **Eviction vs `kubectl delete pod`.** A PDB only constrains the **eviction
 > API** (what `drain` uses). `kubectl delete pod` is a *direct delete* and is
@@ -379,7 +339,7 @@ kubectl get pdb catalog -n bookstore
 <!-- gate: output -->
 ```text
 NAME      MIN AVAILABLE   MAX UNAVAILABLE   ALLOWED DISRUPTIONS   AGE
-catalog   3               N/A               0                     11s
+catalog   3               N/A               0                     2s
 ```
 
 Now ask the eviction API for one catalog Pod. This is the request `kubectl
@@ -421,14 +381,16 @@ replaces it:
 
 ```sh
 kubectl delete pod "$POD" -n bookstore
+kubectl wait --for=jsonpath='{.status.readyReplicas}'=3 deployment/catalog -n bookstore --timeout=120s
 kubectl get pods -n bookstore -l app=catalog --no-headers | awk '{print $1, $2, $3}'
 ```
 
 <!-- gate: output -->
 ```text
-catalog-7d77bf8dcd-9xps5 1/1 Running
-catalog-7d77bf8dcd-fmgl2 1/1 Running
-catalog-7d77bf8dcd-qkk6w 1/1 Running
+deployment.apps/catalog condition met
+catalog-59cfcf98bc-kmg64 1/1 Running
+catalog-59cfcf98bc-ld59l 1/1 Running
+catalog-59cfcf98bc-x7l4c 1/1 Running
 ```
 
 The delete went through with the budget at zero, so the budget does not guard
@@ -468,10 +430,160 @@ poddisruptionbudget.policy/catalog patched
 <!-- gate: output -->
 ```text
 NAME      MIN AVAILABLE   MAX UNAVAILABLE   ALLOWED DISRUPTIONS   AGE
-catalog   2               N/A               1                     68s
+catalog   2               N/A               1                     35s
 ```
 
-### 4. Connection draining recap (why the PDB alone isn't enough)
+### 4. Drain a node and watch the budget pace it
+
+This is the drain that step 3's eviction request stood in for. Choose the
+worker that runs the most catalog Pods and does **not** run postgres. postgres
+is a single replica whose Pod can only run on the node that holds its volume,
+and no PDB covers it. Draining that node takes the database down until the
+node comes back. List where the Pods run, then choose:
+
+```sh
+kubectl get pods -n bookstore -o wide --sort-by=.spec.nodeName | awk '{print $1, $2, $3, $7}'
+```
+
+The fourth column is the node. On the lab cluster the first worker held two
+catalog Pods, one storefront and one orders, and the second held one of each:
+
+<!-- gate: output -->
+```text
+NAME READY STATUS NODE
+catalog-59cfcf98bc-kmg64 1/1 Running sf-sched-worker
+catalog-59cfcf98bc-ld59l 1/1 Running sf-sched-worker
+orders-775657dddc-8jzqw 1/1 Running sf-sched-worker
+storefront-67f7fbd969-cqcnt 1/1 Running sf-sched-worker
+catalog-59cfcf98bc-x7l4c 1/1 Running sf-sched-worker2
+orders-775657dddc-9ftct 1/1 Running sf-sched-worker2
+storefront-67f7fbd969-mmw6x 1/1 Running sf-sched-worker2
+```
+
+Set `NODE` to the worker you chose. The lab drained the first one:
+
+```sh
+NODE=<a worker that runs a catalog Pod but not postgres-0>
+echo "draining $NODE"
+```
+
+<!-- gate: output -->
+```text
+draining sf-sched-worker
+```
+
+Watch the budget in a second shell with `kubectl get pdb catalog -n bookstore
+-w`, and run the drain:
+
+```sh
+kubectl drain "$NODE" --ignore-daemonsets --delete-emptydir-data --timeout=240s
+```
+
+`--ignore-daemonsets` leaves the DaemonSet Pods alone, because they are per
+node. `--delete-emptydir-data` acknowledges that the Pods use `emptyDir`
+scratch, which the drain discards. That is safe here only because the workers
+hold stateless tiers: a StatefulSet's PersistentVolume is bound to its claim
+and survives the drain untouched, and the flag must not be copied onto a
+stateful drain in the belief that it is safe there. `--timeout` stops the
+command from retrying forever, which a stuck budget would otherwise allow.
+
+The drain cordons the node, then asks the eviction API for every Pod on it at
+once. The lab's output, with the repeated retries trimmed:
+
+<!-- gate: output -->
+```text
+node/sf-sched-worker cordoned
+Warning: ignoring DaemonSet-managed Pods: kube-system/kindnet-rm62x, kube-system/kube-proxy-pfxbz
+evicting pod p06-finish-pdb/storefront-67f7fbd969-cqcnt
+evicting pod p06-finish-pdb/catalog-59cfcf98bc-kmg64
+evicting pod p06-finish-pdb/catalog-59cfcf98bc-ld59l
+evicting pod p06-finish-pdb/orders-775657dddc-8jzqw
+error when evicting pods/"catalog-59cfcf98bc-ld59l" -n "p06-finish-pdb" (will retry after 5s): Cannot evict pod as it would violate the pod's disruption budget.
+evicting pod p06-finish-pdb/catalog-59cfcf98bc-ld59l
+error when evicting pods/"catalog-59cfcf98bc-ld59l" -n "p06-finish-pdb" (will retry after 5s): Cannot evict pod as it would violate the pod's disruption budget.
+# ...
+pod/catalog-59cfcf98bc-kmg64 evicted
+pod/orders-775657dddc-8jzqw evicted
+pod/storefront-67f7fbd969-cqcnt evicted
+# ...
+evicting pod p06-finish-pdb/catalog-59cfcf98bc-ld59l
+pod/catalog-59cfcf98bc-ld59l evicted
+node/sf-sched-worker drained
+```
+
+The first catalog eviction fitted the budget, and the second did not. The
+second is the `429` from step 3, and the drain does not give up on it: it
+retries every five seconds, here seven times, until the replacement for the
+first Pod was Ready on the other worker and the budget allowed one more.
+The other two tiers each had a spare Pod, so their evictions went straight
+through. The lab polled the budget every two seconds while the drain ran. The
+distinct readings, in order, with the budget's name, its floor and its allowed
+disruptions, show the budget used up, restored and used up again:
+
+<!-- gate: output -->
+```text
+catalog 2 1
+catalog 2 0
+catalog 2 1
+catalog 2 0
+```
+
+That is the budget pacing the drain. It converted the node's two catalog Pods
+into two evictions a replacement apart, so catalog never fell below two Ready
+Pods. A drain does not wait for the replacements it triggers, though. Once
+the second eviction was admitted the drain was finished, and its replacement
+was still starting. The Pods then sat on the second worker, with one catalog
+Pod not yet Ready:
+
+```sh
+kubectl get pods -n bookstore -o wide --sort-by=.spec.nodeName | awk '{print $1, $2, $3, $7}'
+```
+
+<!-- gate: output -->
+```text
+NAME READY STATUS NODE
+catalog-59cfcf98bc-565kd 0/1 Running sf-sched-worker2
+catalog-59cfcf98bc-hjmdc 1/1 Running sf-sched-worker2
+catalog-59cfcf98bc-x7l4c 1/1 Running sf-sched-worker2
+orders-775657dddc-9ftct 1/1 Running sf-sched-worker2
+orders-775657dddc-hqblr 1/1 Running sf-sched-worker2
+storefront-67f7fbd969-mmw6x 1/1 Running sf-sched-worker2
+storefront-67f7fbd969-rkvlz 1/1 Running sf-sched-worker2
+```
+
+Once that Pod is Ready the budgets read what they did before the drain. Read
+them, and uncordon the node:
+
+```sh
+kubectl get pdb -n bookstore
+kubectl uncordon "$NODE"
+```
+
+<!-- gate: output -->
+```text
+NAME         MIN AVAILABLE   MAX UNAVAILABLE   ALLOWED DISRUPTIONS   AGE
+catalog      2               N/A               1                     2m6s
+orders       1               N/A               1                     2m5s
+storefront   1               N/A               1                     2m6s
+```
+
+<!-- gate: output -->
+```text
+node/sf-sched-worker uncordoned
+```
+
+Two things can keep a drain waiting, and the lab saw the first. A budget at zero
+holds an eviction until a replacement is Ready, as above. And a replacement
+needs a node that the spread rules allow. catalog's `DoNotSchedule` hostname
+spread takes `nodeTaintsPolicy: Ignore` for taints by default, so a node that
+taints exclude still counts as a spread domain ([Part 04
+ch.02](../04-scheduling/02-affinity-taints-topology.md)). On the lab cluster the
+stand-ins had no spread constraint, so the replacements went to the other
+worker at once. On a cluster where catalog does carry the constraint, a
+replacement can stay Pending while the drained node is cordoned, and the drain
+waits with it. Watch `kubectl get pods -o wide` during your drain.
+
+### 5. Connection draining recap (why the PDB alone isn't enough)
 
 A PDB keeps *enough Pods Ready*; it does not stop the *evicted* Pod from
 dropping its in-flight requests. That is the Part 01 ch.02 contract, still in
