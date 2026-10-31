@@ -14,6 +14,10 @@
 # machine's kernel. The probes run from a Pod on the node network. The only
 # objects this script creates are in namespaces named p05-* and in cluster-scoped
 # objects named p05-06-*, and it deletes them on exit.
+#
+# Namespace exception: p05-kube-bench is labelled privileged, because the kube-bench
+# Job reads the node's files and process table as root. Chapter 05.06. Expiry
+# 2027-10-31, within twelve months.
 set +e
 
 # Read a command from stdin, print it exactly as it runs, then run it.
@@ -440,17 +444,17 @@ run <<'CMD'
 kubectl apply -f stats-agent.yaml
 kubectl apply -f node-stats.yaml
 kubectl -n p05-kubelet-authz wait --for=condition=Ready pod/stats-agent --timeout=180s
-kubectl exec -n p05-kubelet-authz stats-agent -- env NODE_IP=$NODE_IP sh -c 'T=$(cat /var/run/secrets/kubernetes.io/serviceaccount/token); for p in /stats/summary /pods /containerLogs/p05-kubelet-authz/none/none; do curl -sk -o /dev/null -w "$p, nodes/stats only: %{http_code}\n" -H "Authorization: Bearer $T" --max-time 5 https://$NODE_IP:10250$p; done'
+kubectl exec -n p05-kubelet-authz stats-agent -- env NODE_IP=$NODE_IP sh -c 'T=$(cat /var/run/secrets/kubernetes.io/serviceaccount/token); for p in /stats/summary /metrics /pods /healthz /containerLogs/p05-kubelet-authz/none/none; do curl -sk -o /dev/null -w "$p, nodes/stats only: %{http_code}\n" -H "Authorization: Bearer $T" --max-time 5 https://$NODE_IP:10250$p; done'
 CMD
 run <<'CMD'
 kubectl apply -f node-pods.yaml
 sleep 35
-kubectl exec -n p05-kubelet-authz stats-agent -- env NODE_IP=$NODE_IP sh -c 'T=$(cat /var/run/secrets/kubernetes.io/serviceaccount/token); for p in /stats/summary /pods /containerLogs/p05-kubelet-authz/none/none; do curl -sk -o /dev/null -w "$p, with nodes/pods added: %{http_code}\n" -H "Authorization: Bearer $T" --max-time 5 https://$NODE_IP:10250$p; done'
+kubectl exec -n p05-kubelet-authz stats-agent -- env NODE_IP=$NODE_IP sh -c 'T=$(cat /var/run/secrets/kubernetes.io/serviceaccount/token); for p in /stats/summary /metrics /pods /healthz /containerLogs/p05-kubelet-authz/none/none; do curl -sk -o /dev/null -w "$p, with nodes/pods added: %{http_code}\n" -H "Authorization: Bearer $T" --max-time 5 https://$NODE_IP:10250$p; done'
 CMD
 run <<'CMD'
 kubectl apply -f node-proxy.yaml
 sleep 35
-kubectl exec -n p05-kubelet-authz stats-agent -- env NODE_IP=$NODE_IP sh -c 'T=$(cat /var/run/secrets/kubernetes.io/serviceaccount/token); curl -sk -o /dev/null -w "/containerLogs, with the broad nodes/proxy grant: %{http_code}\n" -H "Authorization: Bearer $T" --max-time 5 https://$NODE_IP:10250/containerLogs/p05-kubelet-authz/none/none'
+kubectl exec -n p05-kubelet-authz stats-agent -- env NODE_IP=$NODE_IP sh -c 'T=$(cat /var/run/secrets/kubernetes.io/serviceaccount/token); for p in /metrics /healthz /containerLogs/p05-kubelet-authz/none/none; do curl -sk -o /dev/null -w "$p, with the broad nodes/proxy grant: %{http_code}\n" -H "Authorization: Bearer $T" --max-time 5 https://$NODE_IP:10250$p; done'
 kubectl delete clusterrolebinding p05-06-node-proxy clusterrole p05-06-node-proxy --ignore-not-found
 sleep 310
 kubectl exec -n p05-kubelet-authz stats-agent -- env NODE_IP=$NODE_IP sh -c 'T=$(cat /var/run/secrets/kubernetes.io/serviceaccount/token); curl -sk -o /dev/null -w "/containerLogs, after the broad grant is removed: %{http_code}\n" -H "Authorization: Bearer $T" --max-time 5 https://$NODE_IP:10250/containerLogs/p05-kubelet-authz/none/none'
