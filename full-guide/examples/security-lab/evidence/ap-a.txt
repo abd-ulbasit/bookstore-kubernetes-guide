@@ -1,24 +1,24 @@
 # Transcript for appendix/A-kubectl-cheatsheet.md: the commands whose output
-# the chapter shows (sections 2, 4, 5 and 6).
-# Tier A: a kind cluster named sf-pilot (a lab cluster; the chapter calls its
-# cluster and namespace bookstore). Kubernetes v1.37.0 node, kubectl v1.37.2.
-# Substitution: namespace pap-a-cheat stands in for the chapter's bookstore
-# namespace, and pod target for the chapter's catalog pod. The chapter's output
-# blocks print no namespace name. The node name is verbatim.
-# Each command is shown as it ran. "[exit N]" is the command's exit status.
+# the chapter shows (sections 2 to 6).
+# Tier A: a kind cluster on Kubernetes v1.37.0, kubectl v1.37.2. The chapter
+# names its cluster bookstore. This lab cluster had a different name, and the
+# node name in the output is kept verbatim.
+# Substitution: lab-ns-a stands in for the chapter's bookstore namespace, and
+# target for the chapter's catalog Pod. The scratch namespace name is redacted
+# to lab-ns-a in this copy. The output blocks print no namespace name. Every
+# busybox image is pinned by digest, as 01.01 requires.
+# Each command is echoed with its arguments, and shell quotes are simplified in
+# the echo. "[exit N]" is the command's exit status.
 
 ## step 1: namespace with restricted Pod Security labels
-
-$ kubectl create namespace pap-a-cheat
-namespace/pap-a-cheat created
+$ kubectl create namespace lab-ns-a
+namespace/lab-ns-a created
 [exit 0]
-
-$ kubectl label namespace pap-a-cheat pod-security.kubernetes.io/enforce=restricted pod-security.kubernetes.io/audit=restricted pod-security.kubernetes.io/warn=restricted
-namespace/pap-a-cheat labeled
+$ kubectl label namespace lab-ns-a pod-security.kubernetes.io/enforce=restricted pod-security.kubernetes.io/audit=restricted pod-security.kubernetes.io/warn=restricted
+namespace/lab-ns-a labeled
 [exit 0]
 
 ## step 2: ServiceAccount that does not automount a token, and auth can-i
-
 $ cat sa.yaml
 apiVersion: v1
 kind: ServiceAccount
@@ -26,27 +26,22 @@ metadata:
   name: catalog-sa
 automountServiceAccountToken: false
 [exit 0]
-
-$ kubectl apply -f sa.yaml -n pap-a-cheat
+$ kubectl apply -f sa.yaml -n lab-ns-a
 serviceaccount/catalog-sa created
 [exit 0]
-
-$ kubectl auth can-i get configmap/catalog-config -n pap-a-cheat --as=system:serviceaccount:pap-a-cheat:catalog-sa
+$ kubectl auth can-i get configmap/catalog-config -n lab-ns-a --as=system:serviceaccount:lab-ns-a:catalog-sa
 no
 [exit 1]
 
 ## step 3: secret from a file, then describe (keys and sizes, no values)
-
-$ printf 'devpassword' > pw.txt
+$ sh -c printf 'devpassword' > pw.txt
 [exit 0]
-
-$ kubectl create secret generic db-credentials -n pap-a-cheat --from-file=POSTGRES_PASSWORD=pw.txt
+$ kubectl create secret generic db-credentials -n lab-ns-a --from-file=POSTGRES_PASSWORD=pw.txt
 secret/db-credentials created
 [exit 0]
-
-$ kubectl describe secret db-credentials -n pap-a-cheat
+$ kubectl describe secret db-credentials -n lab-ns-a
 Name:         db-credentials
-Namespace:    pap-a-cheat
+Namespace:    lab-ns-a
 Labels:       <none>
 Annotations:  <none>
 
@@ -57,106 +52,92 @@ Data
 POSTGRES_PASSWORD:  11 bytes
 [exit 0]
 
-## step 4: one-off pod with the full baseline in the override
-
-$ kubectl run sa-peek -n pap-a-cheat --image=busybox:1.36 --restart=Never -i --rm --overrides='{"apiVersion":"v1","spec":{"automountServiceAccountToken":false,"securityContext":{"runAsNonRoot":true,"runAsUser":65532,"runAsGroup":65532,"seccompProfile":{"type":"RuntimeDefault"}},"containers":[{"name":"sa-peek","image":"busybox:1.36","command":["sh","-c","echo restricted-compliant pod OK"],"securityContext":{"allowPrivilegeEscalation":false,"readOnlyRootFilesystem":true,"capabilities":{"drop":["ALL"]}},"resources":{"requests":{"cpu":"10m","memory":"16Mi"},"limits":{"memory":"32Mi"}},"volumeMounts":[{"name":"tmp","mountPath":"/tmp"}]}],"volumes":[{"name":"tmp","emptyDir":{}}]}}'
+## step 4: one-off pod with the full baseline and the workload ServiceAccount
+$ kubectl run sa-peek -n lab-ns-a --image=busybox@sha256:73aaf090f3d85aa34ee199857f03fa3a95c8ede2ffd4cc2cdb5b94e566b11662 --restart=Never -i --rm --pod-running-timeout=5m --overrides={"apiVersion":"v1","spec":{"serviceAccountName":"catalog-sa","automountServiceAccountToken":false,"securityContext":{"runAsNonRoot":true,"runAsUser":65532,"runAsGroup":65532,"seccompProfile":{"type":"RuntimeDefault"}},"containers":[{"name":"sa-peek","image":"busybox@sha256:73aaf090f3d85aa34ee199857f03fa3a95c8ede2ffd4cc2cdb5b94e566b11662","command":["sh","-c","echo restricted-compliant pod OK"],"securityContext":{"allowPrivilegeEscalation":false,"readOnlyRootFilesystem":true,"capabilities":{"drop":["ALL"]}},"resources":{"requests":{"cpu":"10m","memory":"16Mi"},"limits":{"memory":"32Mi"}},"volumeMounts":[{"name":"tmp","mountPath":"/tmp"}]}],"volumes":[{"name":"tmp","emptyDir":{}}]}}
 restricted-compliant pod OK
 All commands and output from this session will be recorded in container logs, including credentials and sensitive information passed through the command prompt.
 If you don't see a command prompt, try pressing enter.
-pod "sa-peek" deleted from pap-a-cheat namespace
+pod "sa-peek" deleted from lab-ns-a namespace
 [exit 0]
 
 ## step 5: deliberate failure, a bare pod with no securityContext
-
-$ kubectl run bare -n pap-a-cheat --image=busybox:1.36 --restart=Never -- sleep 1
+$ kubectl run bare -n lab-ns-a --image=busybox@sha256:73aaf090f3d85aa34ee199857f03fa3a95c8ede2ffd4cc2cdb5b94e566b11662 --restart=Never -- sleep 1
 Error from server (Forbidden): pods "bare" is forbidden: violates PodSecurity "restricted:latest": allowPrivilegeEscalation != false (container "bare" must set securityContext.allowPrivilegeEscalation=false), unrestricted capabilities (container "bare" must set securityContext.capabilities.drop=["ALL"]), runAsNonRoot != true (pod or container "bare" must set securityContext.runAsNonRoot=true), seccompProfile (pod or container "bare" must set securityContext.seccompProfile.type to "RuntimeDefault" or "Localhost")
 [exit 1]
 
 ## step 6: a bare Deployment passes server dry-run with warnings only
-
-$ kubectl create deployment bare-deploy -n pap-a-cheat --image=busybox:1.36 --dry-run=server -- sleep 3600
+$ kubectl create deployment bare-deploy -n lab-ns-a --image=busybox@sha256:73aaf090f3d85aa34ee199857f03fa3a95c8ede2ffd4cc2cdb5b94e566b11662 --dry-run=server -- sleep 3600
 Warning: would violate PodSecurity "restricted:latest": allowPrivilegeEscalation != false (container "busybox" must set securityContext.allowPrivilegeEscalation=false), unrestricted capabilities (container "busybox" must set securityContext.capabilities.drop=["ALL"]), runAsNonRoot != true (pod or container "busybox" must set securityContext.runAsNonRoot=true), seccompProfile (pod or container "busybox" must set securityContext.seccompProfile.type to "RuntimeDefault" or "Localhost")
 deployment.apps/bare-deploy created (server dry run)
 [exit 0]
-
-$ kubectl create deployment bare-deploy -n pap-a-cheat --image=busybox:1.36 -- sleep 3600
+$ kubectl create deployment bare-deploy -n lab-ns-a --image=busybox@sha256:73aaf090f3d85aa34ee199857f03fa3a95c8ede2ffd4cc2cdb5b94e566b11662 -- sleep 3600
 Warning: would violate PodSecurity "restricted:latest": allowPrivilegeEscalation != false (container "busybox" must set securityContext.allowPrivilegeEscalation=false), unrestricted capabilities (container "busybox" must set securityContext.capabilities.drop=["ALL"]), runAsNonRoot != true (pod or container "busybox" must set securityContext.runAsNonRoot=true), seccompProfile (pod or container "busybox" must set securityContext.seccompProfile.type to "RuntimeDefault" or "Localhost")
 deployment.apps/bare-deploy created
 [exit 0]
-
-$ sleep 15; kubectl get replicasets -n pap-a-cheat; kubectl events -n pap-a-cheat --types=Warning
+$ kubectl get replicasets -n lab-ns-a
 NAME                     DESIRED   CURRENT   READY   AGE
-bare-deploy-6645c4d875   1         0         0       15s
-LAST SEEN          TYPE      REASON         OBJECT                              MESSAGE
-16s                Warning   FailedCreate   ReplicaSet/bare-deploy-6645c4d875   Error creating: pods "bare-deploy-6645c4d875-276g5" is forbidden: violates PodSecurity "restricted:latest": allowPrivilegeEscalation != false (container "busybox" must set securityContext.allowPrivilegeEscalation=false), unrestricted capabilities (container "busybox" must set securityContext.capabilities.drop=["ALL"]), runAsNonRoot != true (pod or container "busybox" must set securityContext.runAsNonRoot=true), seccompProfile (pod or container "busybox" must set securityContext.seccompProfile.type to "RuntimeDefault" or "Localhost")
-16s                Warning   FailedCreate   ReplicaSet/bare-deploy-6645c4d875   Error creating: pods "bare-deploy-6645c4d875-v8kcx" is forbidden: violates PodSecurity "restricted:latest": allowPrivilegeEscalation != false (container "busybox" must set securityContext.allowPrivilegeEscalation=false), unrestricted capabilities (container "busybox" must set securityContext.capabilities.drop=["ALL"]), runAsNonRoot != true (pod or container "busybox" must set securityContext.runAsNonRoot=true), seccompProfile (pod or container "busybox" must set securityContext.seccompProfile.type to "RuntimeDefault" or "Localhost")
-16s                Warning   FailedCreate   ReplicaSet/bare-deploy-6645c4d875   Error creating: pods "bare-deploy-6645c4d875-hbbdm" is forbidden: violates PodSecurity "restricted:latest": allowPrivilegeEscalation != false (container "busybox" must set securityContext.allowPrivilegeEscalation=false), unrestricted capabilities (container "busybox" must set securityContext.capabilities.drop=["ALL"]), runAsNonRoot != true (pod or container "busybox" must set securityContext.runAsNonRoot=true), seccompProfile (pod or container "busybox" must set securityContext.seccompProfile.type to "RuntimeDefault" or "Localhost")
-16s                Warning   FailedCreate   ReplicaSet/bare-deploy-6645c4d875   Error creating: pods "bare-deploy-6645c4d875-tp6wh" is forbidden: violates PodSecurity "restricted:latest": allowPrivilegeEscalation != false (container "busybox" must set securityContext.allowPrivilegeEscalation=false), unrestricted capabilities (container "busybox" must set securityContext.capabilities.drop=["ALL"]), runAsNonRoot != true (pod or container "busybox" must set securityContext.runAsNonRoot=true), seccompProfile (pod or container "busybox" must set securityContext.seccompProfile.type to "RuntimeDefault" or "Localhost")
-16s                Warning   FailedCreate   ReplicaSet/bare-deploy-6645c4d875   Error creating: pods "bare-deploy-6645c4d875-flvz2" is forbidden: violates PodSecurity "restricted:latest": allowPrivilegeEscalation != false (container "busybox" must set securityContext.allowPrivilegeEscalation=false), unrestricted capabilities (container "busybox" must set securityContext.capabilities.drop=["ALL"]), runAsNonRoot != true (pod or container "busybox" must set securityContext.runAsNonRoot=true), seccompProfile (pod or container "busybox" must set securityContext.seccompProfile.type to "RuntimeDefault" or "Localhost")
-15s                Warning   FailedCreate   ReplicaSet/bare-deploy-6645c4d875   Error creating: pods "bare-deploy-6645c4d875-9dgh6" is forbidden: violates PodSecurity "restricted:latest": allowPrivilegeEscalation != false (container "busybox" must set securityContext.allowPrivilegeEscalation=false), unrestricted capabilities (container "busybox" must set securityContext.capabilities.drop=["ALL"]), runAsNonRoot != true (pod or container "busybox" must set securityContext.runAsNonRoot=true), seccompProfile (pod or container "busybox" must set securityContext.seccompProfile.type to "RuntimeDefault" or "Localhost")
-15s                Warning   FailedCreate   ReplicaSet/bare-deploy-6645c4d875   Error creating: pods "bare-deploy-6645c4d875-972fk" is forbidden: violates PodSecurity "restricted:latest": allowPrivilegeEscalation != false (container "busybox" must set securityContext.allowPrivilegeEscalation=false), unrestricted capabilities (container "busybox" must set securityContext.capabilities.drop=["ALL"]), runAsNonRoot != true (pod or container "busybox" must set securityContext.runAsNonRoot=true), seccompProfile (pod or container "busybox" must set securityContext.seccompProfile.type to "RuntimeDefault" or "Localhost")
-15s                Warning   FailedCreate   ReplicaSet/bare-deploy-6645c4d875   Error creating: pods "bare-deploy-6645c4d875-tpmjj" is forbidden: violates PodSecurity "restricted:latest": allowPrivilegeEscalation != false (container "busybox" must set securityContext.allowPrivilegeEscalation=false), unrestricted capabilities (container "busybox" must set securityContext.capabilities.drop=["ALL"]), runAsNonRoot != true (pod or container "busybox" must set securityContext.runAsNonRoot=true), seccompProfile (pod or container "busybox" must set securityContext.seccompProfile.type to "RuntimeDefault" or "Localhost")
-14s                Warning   FailedCreate   ReplicaSet/bare-deploy-6645c4d875   Error creating: pods "bare-deploy-6645c4d875-jn668" is forbidden: violates PodSecurity "restricted:latest": allowPrivilegeEscalation != false (container "busybox" must set securityContext.allowPrivilegeEscalation=false), unrestricted capabilities (container "busybox" must set securityContext.capabilities.drop=["ALL"]), runAsNonRoot != true (pod or container "busybox" must set securityContext.runAsNonRoot=true), seccompProfile (pod or container "busybox" must set securityContext.seccompProfile.type to "RuntimeDefault" or "Localhost")
-5s (x3 over 13s)   Warning   FailedCreate   ReplicaSet/bare-deploy-6645c4d875   (combined from similar events): Error creating: pods "bare-deploy-6645c4d875-mtb5r" is forbidden: violates PodSecurity "restricted:latest": allowPrivilegeEscalation != false (container "busybox" must set securityContext.allowPrivilegeEscalation=false), unrestricted capabilities (container "busybox" must set securityContext.capabilities.drop=["ALL"]), runAsNonRoot != true (pod or container "busybox" must set securityContext.runAsNonRoot=true), seccompProfile (pod or container "busybox" must set securityContext.seccompProfile.type to "RuntimeDefault" or "Localhost")
+bare-deploy-568895bc57   1         0         0       20s
 [exit 0]
-
-$ kubectl delete deployment bare-deploy -n pap-a-cheat
-deployment.apps "bare-deploy" deleted from pap-a-cheat namespace
+$ kubectl events -n lab-ns-a --types=Warning
+LAST SEEN          TYPE      REASON         OBJECT                              MESSAGE
+22s                Warning   FailedCreate   ReplicaSet/bare-deploy-568895bc57   Error creating: pods "bare-deploy-568895bc57-g6qfd" is forbidden: violates PodSecurity "restricted:latest": allowPrivilegeEscalation != false (container "busybox" must set securityContext.allowPrivilegeEscalation=false), unrestricted capabilities (container "busybox" must set securityContext.capabilities.drop=["ALL"]), runAsNonRoot != true (pod or container "busybox" must set securityContext.runAsNonRoot=true), seccompProfile (pod or container "busybox" must set securityContext.seccompProfile.type to "RuntimeDefault" or "Localhost")
+22s                Warning   FailedCreate   ReplicaSet/bare-deploy-568895bc57   Error creating: pods "bare-deploy-568895bc57-qzj4d" is forbidden: violates PodSecurity "restricted:latest": allowPrivilegeEscalation != false (container "busybox" must set securityContext.allowPrivilegeEscalation=false), unrestricted capabilities (container "busybox" must set securityContext.capabilities.drop=["ALL"]), runAsNonRoot != true (pod or container "busybox" must set securityContext.runAsNonRoot=true), seccompProfile (pod or container "busybox" must set securityContext.seccompProfile.type to "RuntimeDefault" or "Localhost")
+22s                Warning   FailedCreate   ReplicaSet/bare-deploy-568895bc57   Error creating: pods "bare-deploy-568895bc57-9kngw" is forbidden: violates PodSecurity "restricted:latest": allowPrivilegeEscalation != false (container "busybox" must set securityContext.allowPrivilegeEscalation=false), unrestricted capabilities (container "busybox" must set securityContext.capabilities.drop=["ALL"]), runAsNonRoot != true (pod or container "busybox" must set securityContext.runAsNonRoot=true), seccompProfile (pod or container "busybox" must set securityContext.seccompProfile.type to "RuntimeDefault" or "Localhost")
+22s                Warning   FailedCreate   ReplicaSet/bare-deploy-568895bc57   Error creating: pods "bare-deploy-568895bc57-krc5b" is forbidden: violates PodSecurity "restricted:latest": allowPrivilegeEscalation != false (container "busybox" must set securityContext.allowPrivilegeEscalation=false), unrestricted capabilities (container "busybox" must set securityContext.capabilities.drop=["ALL"]), runAsNonRoot != true (pod or container "busybox" must set securityContext.runAsNonRoot=true), seccompProfile (pod or container "busybox" must set securityContext.seccompProfile.type to "RuntimeDefault" or "Localhost")
+22s                Warning   FailedCreate   ReplicaSet/bare-deploy-568895bc57   Error creating: pods "bare-deploy-568895bc57-6l47s" is forbidden: violates PodSecurity "restricted:latest": allowPrivilegeEscalation != false (container "busybox" must set securityContext.allowPrivilegeEscalation=false), unrestricted capabilities (container "busybox" must set securityContext.capabilities.drop=["ALL"]), runAsNonRoot != true (pod or container "busybox" must set securityContext.runAsNonRoot=true), seccompProfile (pod or container "busybox" must set securityContext.seccompProfile.type to "RuntimeDefault" or "Localhost")
+22s                Warning   FailedCreate   ReplicaSet/bare-deploy-568895bc57   Error creating: pods "bare-deploy-568895bc57-z2ds6" is forbidden: violates PodSecurity "restricted:latest": allowPrivilegeEscalation != false (container "busybox" must set securityContext.allowPrivilegeEscalation=false), unrestricted capabilities (container "busybox" must set securityContext.capabilities.drop=["ALL"]), runAsNonRoot != true (pod or container "busybox" must set securityContext.runAsNonRoot=true), seccompProfile (pod or container "busybox" must set securityContext.seccompProfile.type to "RuntimeDefault" or "Localhost")
+21s                Warning   FailedCreate   ReplicaSet/bare-deploy-568895bc57   Error creating: pods "bare-deploy-568895bc57-gt7dj" is forbidden: violates PodSecurity "restricted:latest": allowPrivilegeEscalation != false (container "busybox" must set securityContext.allowPrivilegeEscalation=false), unrestricted capabilities (container "busybox" must set securityContext.capabilities.drop=["ALL"]), runAsNonRoot != true (pod or container "busybox" must set securityContext.runAsNonRoot=true), seccompProfile (pod or container "busybox" must set securityContext.seccompProfile.type to "RuntimeDefault" or "Localhost")
+21s                Warning   FailedCreate   ReplicaSet/bare-deploy-568895bc57   Error creating: pods "bare-deploy-568895bc57-4qnhj" is forbidden: violates PodSecurity "restricted:latest": allowPrivilegeEscalation != false (container "busybox" must set securityContext.allowPrivilegeEscalation=false), unrestricted capabilities (container "busybox" must set securityContext.capabilities.drop=["ALL"]), runAsNonRoot != true (pod or container "busybox" must set securityContext.runAsNonRoot=true), seccompProfile (pod or container "busybox" must set securityContext.seccompProfile.type to "RuntimeDefault" or "Localhost")
+20s                Warning   FailedCreate   ReplicaSet/bare-deploy-568895bc57   Error creating: pods "bare-deploy-568895bc57-29dmp" is forbidden: violates PodSecurity "restricted:latest": allowPrivilegeEscalation != false (container "busybox" must set securityContext.allowPrivilegeEscalation=false), unrestricted capabilities (container "busybox" must set securityContext.capabilities.drop=["ALL"]), runAsNonRoot != true (pod or container "busybox" must set securityContext.runAsNonRoot=true), seccompProfile (pod or container "busybox" must set securityContext.seccompProfile.type to "RuntimeDefault" or "Localhost")
+1s (x4 over 19s)   Warning   FailedCreate   ReplicaSet/bare-deploy-568895bc57   (combined from similar events): Error creating: pods "bare-deploy-568895bc57-dxb7h" is forbidden: violates PodSecurity "restricted:latest": allowPrivilegeEscalation != false (container "busybox" must set securityContext.allowPrivilegeEscalation=false), unrestricted capabilities (container "busybox" must set securityContext.capabilities.drop=["ALL"]), runAsNonRoot != true (pod or container "busybox" must set securityContext.runAsNonRoot=true), seccompProfile (pod or container "busybox" must set securityContext.seccompProfile.type to "RuntimeDefault" or "Localhost")
+[exit 0]
+$ kubectl delete deployment bare-deploy -n lab-ns-a
+deployment.apps "bare-deploy" deleted from lab-ns-a namespace
 [exit 0]
 
 ## step 7: target pod with the full baseline
-
-$ kubectl apply -f target.yaml -n pap-a-cheat
+$ kubectl apply -f target.yaml -n lab-ns-a
 pod/target created
 [exit 0]
-
-$ kubectl wait --for=condition=Ready pod/target -n pap-a-cheat --timeout=120s
+$ kubectl wait --for=condition=Ready pod/target -n lab-ns-a --timeout=300s
 pod/target condition met
 [exit 0]
 
 ## step 8: ephemeral debug with no profile (deliberate failure)
-
-$ kubectl debug -i pod/target -n pap-a-cheat --image=busybox:1.36 --target=app -- sh -c 'id -u'
+$ kubectl debug -i pod/target -n lab-ns-a --image=busybox@sha256:73aaf090f3d85aa34ee199857f03fa3a95c8ede2ffd4cc2cdb5b94e566b11662 --target=app -- sh -c id -u
 Targeting container "app". If you don't see processes from this container it may be because the container runtime doesn't support this feature.
-Defaulting debug container name to debugger-lpf7v.
+Defaulting debug container name to debugger-rfxpr.
 Warning: Non-root user is configured for the entire target Pod, and some capabilities granted by debug profile may not work. Please consider using "--custom" with a custom profile that specifies "securityContext.runAsUser: 0".
-Error from server (Forbidden): pods "target" is forbidden: violates PodSecurity "restricted:latest": allowPrivilegeEscalation != false (container "debugger-lpf7v" must set securityContext.allowPrivilegeEscalation=false), unrestricted capabilities (container "debugger-lpf7v" must set securityContext.capabilities.drop=["ALL"]; container "debugger-lpf7v" must not include "SYS_PTRACE" in securityContext.capabilities.add)
+Error from server (Forbidden): pods "target" is forbidden: violates PodSecurity "restricted:latest": allowPrivilegeEscalation != false (container "debugger-rfxpr" must set securityContext.allowPrivilegeEscalation=false), unrestricted capabilities (container "debugger-rfxpr" must set securityContext.capabilities.drop=["ALL"]; container "debugger-rfxpr" must not include "SYS_PTRACE" in securityContext.capabilities.add)
 [exit 1]
 
 ## step 9: ephemeral debug with --profile=restricted, output read from the container log
-
-$ kubectl debug pod/target -n pap-a-cheat --container=dbg --image=busybox:1.36 --target=app --profile=restricted -- sh -c 'id -u; ps'
+$ kubectl debug pod/target -n lab-ns-a --container=dbg --image=busybox@sha256:73aaf090f3d85aa34ee199857f03fa3a95c8ede2ffd4cc2cdb5b94e566b11662 --target=app --profile=restricted -- sh -c id -u; ps
 Targeting container "app". If you don't see processes from this container it may be because the container runtime doesn't support this feature.
 [exit 0]
-
-$ sleep 10; kubectl logs pod/target -n pap-a-cheat -c dbg
+$ kubectl logs pod/target -n lab-ns-a -c dbg
 65532
 PID   USER     TIME  COMMAND
     1 65532     0:00 sleep 3600
    14 65532     0:00 ps
 [exit 0]
-
-$ kubectl get pod target -n pap-a-cheat -o jsonpath='{.spec.ephemeralContainers[0].securityContext}{"\n"}'
+$ kubectl get pod target -n lab-ns-a -o jsonpath={.spec.ephemeralContainers[0].securityContext}{"\n"}
 {"allowPrivilegeEscalation":false,"capabilities":{"drop":["ALL"]},"runAsNonRoot":true,"seccompProfile":{"type":"RuntimeDefault"}}
 [exit 0]
-
-$ kubectl get pod target -n pap-a-cheat -o jsonpath='{.spec.ephemeralContainers[0].name}{"\n"}'
+$ kubectl get pod target -n lab-ns-a -o jsonpath={.spec.ephemeralContainers[0].name}{"\n"}
 dbg
 [exit 0]
 
 ## step 10: node debug with the sysadmin profile in a restricted namespace (deliberate failure)
-
-$ kubectl debug node/sf-pilot-control-plane -n pap-a-cheat -i --profile=sysadmin --image=busybox:1.36 -- true
-Creating debugging pod node-debugger-sf-pilot-control-plane-p54r8 with container debugger on node sf-pilot-control-plane.
-Error from server (Forbidden): pods "node-debugger-sf-pilot-control-plane-p54r8" is forbidden: violates PodSecurity "restricted:latest": host namespaces (hostNetwork=true, hostPID=true, hostIPC=true), privileged (container "debugger" must not set securityContext.privileged=true), allowPrivilegeEscalation != false (container "debugger" must set securityContext.allowPrivilegeEscalation=false), unrestricted capabilities (container "debugger" must set securityContext.capabilities.drop=["ALL"]), restricted volume types (volume "host-root" uses restricted volume type "hostPath"), runAsNonRoot != true (pod or container "debugger" must set securityContext.runAsNonRoot=true), seccompProfile (pod or container "debugger" must set securityContext.seccompProfile.type to "RuntimeDefault" or "Localhost")
+$ kubectl debug node/sf-pilot-control-plane -n lab-ns-a -i --profile=sysadmin --image=busybox@sha256:73aaf090f3d85aa34ee199857f03fa3a95c8ede2ffd4cc2cdb5b94e566b11662 -- true
+Creating debugging pod node-debugger-sf-pilot-control-plane-sxs6m with container debugger on node sf-pilot-control-plane.
+Error from server (Forbidden): pods "node-debugger-sf-pilot-control-plane-sxs6m" is forbidden: violates PodSecurity "restricted:latest": host namespaces (hostNetwork=true, hostPID=true, hostIPC=true), privileged (container "debugger" must not set securityContext.privileged=true), allowPrivilegeEscalation != false (container "debugger" must set securityContext.allowPrivilegeEscalation=false), unrestricted capabilities (container "debugger" must set securityContext.capabilities.drop=["ALL"]), restricted volume types (volume "host-root" uses restricted volume type "hostPath"), runAsNonRoot != true (pod or container "debugger" must set securityContext.runAsNonRoot=true), seccompProfile (pod or container "debugger" must set securityContext.seccompProfile.type to "RuntimeDefault" or "Localhost")
 [exit 1]
 
 ## step 11: cleanup
-
-$ kubectl delete namespace pap-a-cheat --wait=true
-namespace "pap-a-cheat" deleted
+$ kubectl delete namespace lab-ns-a --wait=true
+namespace "lab-ns-a" deleted
 [exit 0]
-
-$ kubectl get namespace pap-a-cheat
-Error from server (NotFound): namespaces "pap-a-cheat" not found
+$ kubectl get namespace lab-ns-a
+Error from server (NotFound): namespaces "lab-ns-a" not found
 [exit 1]

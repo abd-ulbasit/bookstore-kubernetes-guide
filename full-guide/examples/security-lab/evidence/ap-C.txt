@@ -1,28 +1,33 @@
-# Transcript for appendix C, YAML and API conventions (ap-C).
-# Tier A: a kind cluster on a Kubernetes v1.37.0 server, kubectl v1.37.2.
-# Recorded by running the chapter's commands in order. The chapter prints the
-# reader's namespace `bookstore`; this run used the namespaces pap-c-open and
-# pap-c-restricted in its place, and the namespace names in the chapter's
-# commands are the substitution. The cluster context is kind-sf-pilot, a lab
-# cluster with a different name from the chapter's bookstore cluster.
-# Exploratory probes before this run are not recorded here. They found that
-# `kubectl apply --dry-run=client` fails against an unreachable server, and that
-# an unquoted `yes` passes the client run but is refused by the server.
+# Transcript for appendix/C-yaml-and-api-conventions.md (ap-C): the commands
+# whose output the chapter shows.
+# Tier A: a kind cluster on Kubernetes v1.37.0, kubectl v1.37.2. The chapter
+# names its namespaces bookstore and restricted-bookstore; this run used two
+# scratch namespaces, lab-ns-c-open and lab-ns-c-restricted (redacted from the
+# lab's names in this copy). The cluster context and the node name are the
+# lab's, kept verbatim. The chapter says its output came from a lab cluster
+# with a different name.
+# Each command is echoed with its arguments, and shell quotes are simplified in
+# the echo. "[exit N]" is the command's exit status. The busybox image is
+# pinned by digest, as 01.01 requires.
+
+## setup: the cluster and two namespaces
 $ kubectl config current-context
 kind-sf-pilot
-
-$ kubectl version 2>&1 | grep -i 'server version'
+[exit 0]
+$ sh -c kubectl version 2>&1 | grep -i 'server version'
 Server Version: v1.37.0
+[exit 0]
+$ kubectl create namespace lab-ns-c-open
+namespace/lab-ns-c-open created
+[exit 0]
+$ kubectl create namespace lab-ns-c-restricted
+namespace/lab-ns-c-restricted created
+[exit 0]
+$ kubectl label namespace lab-ns-c-restricted pod-security.kubernetes.io/enforce=restricted pod-security.kubernetes.io/warn=restricted
+namespace/lab-ns-c-restricted labeled
+[exit 0]
 
-$ kubectl create namespace pap-c-open
-namespace/pap-c-open created
-
-$ kubectl create namespace pap-c-restricted
-namespace/pap-c-restricted created
-
-$ kubectl label namespace pap-c-restricted pod-security.kubernetes.io/enforce=restricted pod-security.kubernetes.io/warn=restricted
-namespace/pap-c-restricted labeled
-
+## the Norway problem: client dry run passes, server dry run refuses
 $ cat cm-yes.yaml
 apiVersion: v1
 kind: ConfigMap
@@ -30,36 +35,78 @@ metadata:
   name: cm-yes
 data:
   flag: yes
-
-$ kubectl apply --dry-run=client -f cm-yes.yaml -n pap-c-open
+[exit 0]
+$ kubectl apply --dry-run=client -f cm-yes.yaml -n lab-ns-c-open
 configmap/cm-yes created (dry run)
-
-$ kubectl apply --dry-run=server -f cm-yes.yaml -n pap-c-open
+[exit 0]
+$ kubectl apply --dry-run=server -f cm-yes.yaml -n lab-ns-c-open
 Error from server (BadRequest): error when creating "cm-yes.yaml": ConfigMap in version "v1" cannot be handled as a ConfigMap: json: cannot unmarshal bool into Go struct field ConfigMap.data of type string
+[exit 1]
 
-$ KUBECONFIG=bogus.kubeconfig timeout 60 kubectl apply --dry-run=client --request-timeout=5s -f cm.yaml 2>&1 | cut -c1-160
-error: error validating "cm.yaml": error validating data: failed to download openapi: Get "https://127.0.0.1:9/openapi/v2?timeout=5s": dial tcp 127.0.0.1:9: con
+## the client dry run needs an API server to read its schema (deliberate failure)
+$ cat cm.yaml
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: cm
+data:
+  flag: "no"
+[exit 0]
+$ env KUBECONFIG=bogus.kubeconfig timeout 60 kubectl apply --dry-run=client --request-timeout=5s -f cm.yaml
+error: error validating "cm.yaml": error validating data: failed to download openapi: Get "https://127.0.0.1:9/openapi/v2?timeout=5s": dial tcp 127.0.0.1:9: connect: connection refused; if you choose to ignore these errors, turn validation off with --validate=false
+[exit 1]
 
-$ kubectl apply -f catalog.yaml -n pap-c-open
+## the immutable selector: a patch the API server refuses
+$ kubectl apply -f catalog.yaml -n lab-ns-c-open
 deployment.apps/catalog created
-
-$ kubectl patch deployment catalog -n pap-c-open --type merge -p '{"spec":{"selector":{"matchLabels":{"app":"catalog-v2"}},"template":{"metadata":{"labels":{"app":"catalog-v2"}}}}}'
+[exit 0]
+$ kubectl patch deployment catalog -n lab-ns-c-open --type merge -p {"spec":{"selector":{"matchLabels":{"app":"catalog-v2"}},"template":{"metadata":{"labels":{"app":"catalog-v2"}}}}}
 The Deployment "catalog" is invalid: spec.selector: Invalid value: {"matchLabels":{"app":"catalog-v2"}}: field is immutable
+[exit 1]
+$ kubectl label namespace lab-ns-c-open pod-security.kubernetes.io/enforce-version=v1.37
+namespace/lab-ns-c-open labeled
+[exit 0]
 
-$ kubectl label namespace pap-c-open pod-security.kubernetes.io/enforce-version=v1.37
-namespace/pap-c-open labeled
-
-$ kubectl apply --dry-run=server -f bare-catalog.yaml -n pap-c-restricted
+## a bare workload in a restricted namespace: warning, then the ReplicaSet
+$ kubectl apply --dry-run=server -f bare-catalog.yaml -n lab-ns-c-restricted
 Warning: would violate PodSecurity "restricted:latest": allowPrivilegeEscalation != false (container "catalog" must set securityContext.allowPrivilegeEscalation=false), unrestricted capabilities (container "catalog" must set securityContext.capabilities.drop=["ALL"]), runAsNonRoot != true (pod or container "catalog" must set securityContext.runAsNonRoot=true), seccompProfile (pod or container "catalog" must set securityContext.seccompProfile.type to "RuntimeDefault" or "Localhost")
 deployment.apps/bare-catalog created (server dry run)
+[exit 0]
 
-$ kubectl apply --dry-run=server -f null-sc.yaml -n pap-c-restricted
+## null and empty securityContext in a restricted namespace (deliberate failures)
+$ cat null-sc.yaml
+apiVersion: v1
+kind: Pod
+metadata:
+  name: null-sc
+spec:
+  securityContext:
+  containers:
+    - name: app
+      image: busybox@sha256:73aaf090f3d85aa34ee199857f03fa3a95c8ede2ffd4cc2cdb5b94e566b11662
+      command: ["sleep", "3600"]
+[exit 0]
+$ kubectl apply --dry-run=server -f null-sc.yaml -n lab-ns-c-restricted
 Error from server (Forbidden): error when creating "null-sc.yaml": pods "null-sc" is forbidden: violates PodSecurity "restricted:latest": allowPrivilegeEscalation != false (container "app" must set securityContext.allowPrivilegeEscalation=false), unrestricted capabilities (container "app" must set securityContext.capabilities.drop=["ALL"]), runAsNonRoot != true (pod or container "app" must set securityContext.runAsNonRoot=true), seccompProfile (pod or container "app" must set securityContext.seccompProfile.type to "RuntimeDefault" or "Localhost")
-
-$ kubectl apply --dry-run=server -f empty-sc.yaml -n pap-c-restricted
+[exit 1]
+$ cat empty-sc.yaml
+apiVersion: v1
+kind: Pod
+metadata:
+  name: empty-sc
+spec:
+  securityContext: {}
+  containers:
+    - name: app
+      image: busybox@sha256:73aaf090f3d85aa34ee199857f03fa3a95c8ede2ffd4cc2cdb5b94e566b11662
+      command: ["sleep", "3600"]
+[exit 0]
+$ kubectl apply --dry-run=server -f empty-sc.yaml -n lab-ns-c-restricted
 Error from server (Forbidden): error when creating "empty-sc.yaml": pods "empty-sc" is forbidden: violates PodSecurity "restricted:latest": allowPrivilegeEscalation != false (container "app" must set securityContext.allowPrivilegeEscalation=false), unrestricted capabilities (container "app" must set securityContext.capabilities.drop=["ALL"]), runAsNonRoot != true (pod or container "app" must set securityContext.runAsNonRoot=true), seccompProfile (pod or container "app" must set securityContext.seccompProfile.type to "RuntimeDefault" or "Localhost")
+[exit 1]
 
-$ kubectl delete namespace pap-c-open pap-c-restricted --wait=true --timeout=180s
-namespace "pap-c-open" deleted
-namespace "pap-c-restricted" deleted
-
+## cleanup
+$ kubectl delete namespace lab-ns-c-open lab-ns-c-restricted --wait=true --timeout=180s
+namespace "lab-ns-c-open" deleted
+namespace "lab-ns-c-restricted" deleted
+[exit 0]

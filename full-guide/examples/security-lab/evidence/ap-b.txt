@@ -1,33 +1,45 @@
 # Appendix B (glossary) check: does kindnet enforce NetworkPolicy on kind?
-# Tier A (kind). Lab cluster context: kind-sf-pilot. The chapter prints namespace bookstore;
-# this run used namespace pap-appb-np. Lab node name is verbatim.
-# Run from the repository's full-guide checkout, against a cluster the author owns.
+# Tier A: a kind cluster on Kubernetes v1.37.0, kubectl v1.37.2. The chapter
+# names its cluster and namespaces bookstore. This run used the scratch
+# namespace lab-ns-appb (redacted from the lab's name in this copy). The
+# cluster context and the node name are the lab's, kept verbatim.
+# The pods use busybox pinned by digest, as 01.01 requires. Each command is
+# echoed with its arguments; shell quotes are simplified in the echo.
 $ kubectl version
 Client Version: v1.37.2
+Kustomize Version: v5.8.1
 Server Version: v1.37.0
+[exit 0]
 $ kubectl get nodes
 NAME                     STATUS   ROLES           AGE   VERSION
-sf-pilot-control-plane   Ready    control-plane   12h   v1.37.0
+sf-pilot-control-plane   Ready    control-plane   13h   v1.37.0
+[exit 0]
 $ kubectl -n kube-system get pods -l app=kindnet
 NAME            READY   STATUS    RESTARTS   AGE
-kindnet-8659k   1/1     Running   0          12h
-$ kubectl create namespace pap-appb-np
-namespace/pap-appb-np created
-$ kubectl apply -f pods.yaml
+kindnet-8659k   1/1     Running   0          13h
+[exit 0]
+$ kubectl create namespace lab-ns-appb
+namespace/lab-ns-appb created
+[exit 0]
+$ kubectl apply -f pods.yaml -n lab-ns-appb
 pod/web created
 pod/client created
-$ kubectl -n pap-appb-np wait --for=condition=Ready pod/web pod/client --timeout=120s
+[exit 0]
+$ kubectl -n lab-ns-appb wait --for=condition=Ready pod/web pod/client --timeout=300s
 pod/web condition met
 pod/client condition met
-# web pod IP: 10.244.0.109
-$ kubectl -n pap-appb-np exec client -- wget -q -O - -T 5 http://<web-ip>:8080/   (no policy yet)
+[exit 0]
+# web pod IP: 10.244.0.198
+$ kubectl -n lab-ns-appb exec client -- wget -q -O - -T 5 http://10.244.0.198:8080/
 ok
-exit=0
-$ kubectl apply -f deny.yaml
+[exit 0]
+$ kubectl apply -f deny.yaml -n lab-ns-appb
 networkpolicy.networking.k8s.io/default-deny-ingress created
-$ kubectl -n pap-appb-np exec client -- wget -q -O - -T 5 http://<web-ip>:8080/   (default-deny ingress applied)
+[exit 0]
+$ kubectl -n lab-ns-appb exec client -- wget -q -O - -T 5 http://10.244.0.198:8080/
 wget: download timed out
 command terminated with exit code 1
-exit=1
-$ kubectl delete namespace pap-appb-np
-namespace "pap-appb-np" deleted
+[exit 1]
+$ kubectl delete namespace lab-ns-appb --wait=true
+namespace "lab-ns-appb" deleted
+[exit 0]
