@@ -19,7 +19,7 @@
 > staying on VPC-CNI is the right call.
 
 **Estimated time:** ~45 min read · ~half-day hands-on
-**Prerequisites:** [Part 14 ch.03](./03-eks-addon-management.md) — vpc-cni is the addon Cilium replaces · [Part 04 ch.04](../02-networking/06-network-policies.md) — NetworkPolicy fundamentals you'll extend to L7 · [Part 13 ch.04](../11-advanced-production-patterns/04-service-mesh.md) — mesh-vs-CNI trade-off
+**Prerequisites:** [Part 14 ch.03](./03-eks-addon-management.md): vpc-cni is the addon Cilium replaces · [Part 02 ch.06](../02-networking/06-network-policies.md): NetworkPolicy fundamentals you'll extend to L7 · [Part 11 ch.04](../11-advanced-production-patterns/04-service-mesh.md): mesh-vs-CNI trade-off
 
 **You'll know after this:** • compare VPC-CNI and Cilium across NetworkPolicy (L3/L4 vs L7), service routing (kube-proxy vs eBPF), and observability (VPC Flow Logs vs Hubble) · • migrate from VPC-CNI to Cilium safely (it's not a `kubectl apply` — VPC-CNI must be removed first) · • author L7 NetworkPolicy that matches HTTP methods, gRPC services, or Kafka topics · • read Hubble flow data to debug a Pod-to-Pod connectivity issue · • choose when staying on VPC-CNI is the right call (small clusters, AWS-only feature parity needs)
 
@@ -62,17 +62,12 @@ VPC-CNI's ceilings are also real:
   endpoint"* — that's L7, and stock NetworkPolicy can't express it.
   A service mesh (Istio, Linkerd) can; so can Cilium's L7
   NetworkPolicy.
-- **kube-proxy iptables don't scale linearly.** On a cluster with
-  ~1000 Services and ~10k endpoints, every kube-proxy node has
-  ~50k iptables rules. The `iptables-restore` invocation that
-  applies a Service-update reload takes 100ms-2s on large clusters
-  — every kube-proxy across the cluster pauses momentarily on every
-  Service change. The `nftables` mode (GA since 1.33) is faster
-  (near-O(1) lookup via verdict maps vs iptables O(n)) but still has
-  overhead; the `ipvs` mode is deprecated. Cilium's
-  kube-proxy-replacement does service routing in eBPF — O(1)
-  lookups, no iptables rules at all, zero per-Service-change
-  cluster-wide pause.
+- **kube-proxy's iptables mode slows as Services grow.** Each Service
+  change updates rules on every node. The
+  [Kubernetes docs](https://kubernetes.io/docs/reference/networking/virtual-ips/)
+  compare the modes at scale. The `nftables` mode is GA from 1.33, and
+  the `ipvs` mode is deprecated. Cilium's kube-proxy replacement does
+  service lookup in eBPF maps and creates no iptables rules.
 - **Observability gap.** "What just happened between Pod A and
   Pod B?" is hard to answer from VPC Flow Logs (which see ENI
   traffic but lose Pod identity behind Services) and harder still
@@ -121,7 +116,9 @@ The three axes:
     routing. Service-to-Pod (ClusterIP) goes through kube-proxy
     iptables.
   - **Cilium (native routing mode, recommended on EKS):** Pod has
-    an IP from the VPC's CIDR (same as VPC-CNI). Pod-to-Pod traffic
+    a secondary private IP from a VPC subnet, but only with ENI IPAM
+    (`ipam.mode=eni`). The chart default is cluster-pool, which hands out
+    IPs from a separate pod CIDR. Pod-to-Pod traffic
     goes through eBPF programs attached to each Pod's veth +
     network namespace. Service-to-Pod routing is done by eBPF
     programs replacing kube-proxy entirely (`kubeProxyReplacement:
@@ -136,14 +133,15 @@ The three axes:
 - **Axis 2 — Policy enforcement.** What policies can the CNI
   evaluate?
   - **VPC-CNI + NetworkPolicy:** L3/L4 only. CIDR + port + protocol.
-    Enforced by AWS Network Policy Engine (eBPF-based, the official
-    enforcement path since 2023) or earlier by Calico-in-policy-only
-    mode. The CRD is stock `networking.k8s.io/NetworkPolicy`.
+    Enforced by the VPC CNI network policy engine
+    ([eBPF-based](https://docs.aws.amazon.com/eks/latest/userguide/cni-network-policy-configure.html),
+    off on new clusters until enabled) or by a third-party engine such as
+    Calico. The CRD is stock `networking.k8s.io/NetworkPolicy`.
   - **Cilium NetworkPolicy:** L3/L4 + L7. Adds CRDs
     `CiliumNetworkPolicy` and `CiliumClusterwideNetworkPolicy` with
     a richer DSL: HTTP method/path matching, gRPC method filtering,
-    Kafka topic + role filtering, DNS-based selection. Enforced in
-    eBPF programs.
+    Kafka topic + role filtering, DNS-based selection. L3/L4 enforced in
+    eBPF. L7 rules go to a per-node Envoy proxy.
 
 - **Axis 3 — Observability.** What can you see about cluster
   networking?
@@ -190,7 +188,8 @@ This says: *storefront → catalog port 8080 is allowed, but only
 GET requests to `/api/books` paths*. Stock NetworkPolicy can't
 express the HTTP-level part. To get the same enforcement on
 VPC-CNI, you'd need a service mesh (Istio AuthorizationPolicy at
-L7); Cilium expresses it natively at the CNI level.
+L7); Cilium expresses it at the CNI level, with its per-node proxy
+applying the HTTP rule.
 
 ```yaml
 # DNS-based egress allowlist.
@@ -199,13 +198,25 @@ spec:
     matchLabels:
       app: catalog
   egress:
+    - toEndpoints:
+        - matchLabels:
+            "k8s:io.kubernetes.pod.namespace": kube-system
+            "k8s:k8s-app": kube-dns
+      toPorts:
+        - ports:
+            - port: "53"
+              protocol: ANY
+          rules:
+            dns:
+              - matchPattern: "*"
     - toFQDNs:
         - matchName: "api.stripe.com"
       toPorts:
         - ports: [{port: "443", protocol: "TCP"}]
 ```
 
-Egress is allowed to `api.stripe.com` only (resolved at DNS-lookup
+The kube-dns rule lets lookups through Cilium's DNS proxy, which tracks
+the answers. Egress is allowed to `api.stripe.com` only (resolved at DNS-lookup
 time; Cilium hooks DNS responses to maintain the IP allowlist).
 Stock NetworkPolicy uses CIDR-based egress only — no FQDNs.
 
@@ -243,8 +254,8 @@ from VPC-CNI to Cilium on a running cluster is NOT `kubectl apply`:
    Pod evaluates stock NetworkPolicy. Production migrations do this
    off-hours with full smoke testing post-migration.
 
-A typical mid-size cluster's migration: 4-6 hours of careful drain +
-re-provision. A greenfield cluster (Cilium from boot) is 30 minutes.
+Size the window of a running-cluster migration from a rehearsal in
+staging. A greenfield cluster (Cilium from boot) skips the drain.
 **The greenfield path is the right one for any new EKS cluster
 where Cilium is desired.**
 
@@ -258,7 +269,8 @@ management, no per-call mTLS by default — but it's the simplest
 way to make Pods in cluster B reach Services in cluster A. The
 trade-off vs Istio multi-cluster: Cluster Mesh is lighter (no
 sidecar tax) but offers fewer features (no canary across clusters,
-no shared SPIFFE identity unless you wire mTLS).
+Cilium mutual authentication does not run across a mesh). All clusters in a
+mesh form one trust domain, so connect only clusters with equivalent security.
 
 The trap to keep in view: **`kubeProxyReplacement: true` removes
 kube-proxy entirely.** Cilium provides Service routing, and the
@@ -271,6 +283,16 @@ the headline feature; but if a workload depends on the old
 iptables-based path, configure `kubeProxyReplacement: false` (or
 the `partial` middle mode) and accept the kube-proxy DaemonSet
 staying around.
+
+## Threats and controls
+
+| Threat | Control in this chapter | Goes deeper |
+|---|---|---|
+| A pod reaches an HTTP method or path its caller should not use | CiliumNetworkPolicy with HTTP rules (section 3) | [02.06](../02-networking/06-network-policies.md) for L3/L4 policy |
+| A workload calls a host it should never reach, named by DNS | `toFQDNs` egress allowlist, with the kube-dns exception | [14.08](08-vpc-endpoints-and-egress.md) for VPC egress |
+| The CNI agent is a host-level process with extra capabilities | `kube-system` labelled privileged and registered as an exception | Runtime detection, Part 05 chapter 05.08 <!-- link-later: 05.08 -->; [14.13](13-runtime-defense-and-container-security.md) |
+| A running-cluster migration leaves two CNIs and mixed policy | Drain in sequence, with a Velero backup first | [14.14](14-backup-and-restore-velero.md) |
+| Hubble flow data shows pod names and HTTP paths | Keep the Hubble relay and UI off public Services | [14.05](05-logging-and-metrics-cost.md) for log retention |
 
 ## Diagrams
 
@@ -292,7 +314,7 @@ flowchart TB
     subgraph cilium["Cilium datapath (native routing)"]
       cpod1["Pod A<br/>10.0.1.5 (eBPF veth)"]
       cpod2["Pod B<br/>10.0.2.7 (eBPF veth)"]
-      ebpf1["eBPF program on Pod A's veth:<br/>L7 policy check + Service lookup<br/>(in-kernel hashmap)"]
+      ebpf1["eBPF program on Pod A's veth:<br/>L3/L4 policy check + Service lookup<br/>(in-kernel hashmap)"]
       ebpf2["eBPF program on Pod B's veth:<br/>L7 policy check + ingress filter"]
       eni3["Node 1 ENI<br/>(routes packet to VPC)"]
       eni4["Node 2 ENI<br/>(routes packet from VPC)"]
@@ -304,7 +326,7 @@ flowchart TB
     end
 
     note1["VPC-CNI: standard Linux routing,<br/>iptables for ClusterIP,<br/>NetworkPolicy enforced L3/L4 only"]
-    note2["Cilium native: same VPC routing,<br/>eBPF for ClusterIP + L7 policy,<br/>Hubble for flow observability"]
+    note2["Cilium native: same VPC routing,<br/>eBPF for ClusterIP + L3/L4 policy,<br/>L7 via per-node Envoy,<br/>Hubble for flow observability"]
 
     vpccni -.-> note1
     cilium -.-> note2
@@ -332,16 +354,14 @@ Cross-cluster service routing       NO        NO                Cluster    Istio
                                                                  Mesh
 ─────────────────────────────────  ────────  ────────────────  ─────────  ─────────────────
 Operational complexity              LOW       LOW (managed)     MEDIUM     HIGH
-Per-node overhead (CPU)             ~1%       ~2%               ~3-5%      ~10-15%
-                                                                           (Envoy sidecars)
 AWS support owns the bugs           YES       YES               NO         NO
 ─────────────────────────────────  ────────  ────────────────  ─────────  ─────────────────
 RECOMMENDATION FOR BOOKSTORE-PLATFORM:
-  Default (Phase 14-R):     VPC-CNI + AWS Network Policy Engine.
+  Default (Phase 14-R):     VPC-CNI, with its network policy engine off until enabled.
   L7 needed, no mesh:       Cilium native (this chapter).
   Service-mesh + L7:        Cilium + Istio (Part 11 ch.04 + Cilium chapter).
 
-¹ Cilium offers WireGuard + IPsec node-to-node encryption (not Pod-to-Pod mTLS by default).
+¹ Cilium offers WireGuard + IPsec node-to-node encryption (not Pod-to-Pod mTLS by default). Its opt-in mutual authentication is beta, SPIRE-only, and off by default.
 ² Cilium supports VPC secondary CIDR but with different config than VPC-CNI's IPv4PoolName.
 ```
 
@@ -383,9 +403,9 @@ In `eks.tf`, comment out (or remove) the `vpc-cni` entry from
 
 ```hcl
 cluster_addons = {
-  kube-proxy = { ... }   # KEEP — Cilium replaces it at install
+  # kube-proxy = { ... }   # REMOVED: Cilium replaces it
   coredns    = { ... }
-  # vpc-cni    = { ... }   # COMMENTED OUT for Cilium clusters
+  # vpc-cni    = { ... }   # REMOVED for Cilium clusters
 }
 ```
 
@@ -396,14 +416,27 @@ terraform apply
 ```
 
 The new cluster boots with no CNI. **Workloads will be stuck in
-Pending** until Cilium is installed (this is expected; the cluster
-is intentionally network-less for ~2 minutes).
+Pending** until Cilium is installed (this is expected).
 
-Rename `cilium-installation.tf.example` to `cilium-installation.tf`,
+Label `kube-system` first. The Cilium agent needs the privileged level,
+and the namespace registry records this exception:
+
+```bash
+kubectl label namespace kube-system pod-security.kubernetes.io/enforce=privileged
+```
+
+Then rename `cilium-installation.tf.example` to `cilium-installation.tf`,
 fill in the `k8sServiceHost` (the cluster API endpoint hostname,
 without the `https://` prefix — get it from
 `terraform output cluster_endpoint`), uncomment the variable
-declaration, then `terraform apply` again. Cilium installs.
+declaration, then `terraform apply` again. Cilium installs. Then delete a
+kube-proxy DaemonSet that is still present, as the
+[kube-proxy-free guide](https://docs.cilium.io/en/stable/network/kubernetes/kubeproxy-free/)
+shows:
+
+```bash
+kubectl -n kube-system delete ds kube-proxy --ignore-not-found
+```
 
 ### 2. Migration path — running cluster
 
@@ -417,7 +450,7 @@ For an existing cluster, the sequence is:
    ```
 
 2. **Remove VPC-CNI** by editing `eks.tf` to delete (or comment) the
-   `vpc-cni` entry from `cluster_addons`, then:
+   `vpc-cni` and `kube-proxy` entries from `cluster_addons`, then:
 
    ```bash
    terraform apply
@@ -426,7 +459,14 @@ For an existing cluster, the sequence is:
    The vpc-cni DaemonSet is deleted; **existing Pods keep their IPs
    until restart**.
 
-3. **Install Cilium** (still in the migration window):
+3. **Install Cilium** (still in the migration window). Label `kube-system`
+   first, as in section 1:
+
+   ```bash
+   kubectl label namespace kube-system pod-security.kubernetes.io/enforce=privileged
+   ```
+
+   Then install:
 
    ```bash
    # Get the cluster API endpoint hostname:
@@ -439,6 +479,9 @@ For an existing cluster, the sequence is:
      --set k8sServiceHost="$K8S_HOST" \
      --set k8sServicePort=443 \
      --set routingMode=native \
+     --set eni.enabled=true \
+     --set ipam.mode=eni \
+     --set egressMasqueradeInterfaces=eth0 \
      --set endpointRoutes.enabled=true \
      --set bpf.masquerade=true \
      --set hubble.enabled=true \
@@ -446,13 +489,18 @@ For an existing cluster, the sequence is:
      --set hubble.ui.enabled=true
    ```
 
+   In ENI mode the operator, not the agent, makes the EC2 calls that create
+   and attach ENIs ([ENI IPAM](https://docs.cilium.io/en/stable/network/concepts/ipam/eni/)).
+   Grant those permissions to the operator's service account through IRSA
+   ([14.03](03-eks-addon-management.md)), not to the node role.
+
    Watch:
 
    ```bash
    cilium status --wait
    ```
 
-   Expected (all green):
+   Illustrative output, not captured (all green):
 
    ```text
    Cluster Pods:    N/N managed by Cilium
@@ -464,20 +512,14 @@ For an existing cluster, the sequence is:
 4. **Drain every node** — Karpenter (or the MNG) replaces them; new
    nodes get Cilium-only networking:
 
-   ```bash
-   for n in $(kubectl get node -o name); do
-     kubectl drain "$n" --ignore-daemonsets --delete-emptydir-data --force
-   done
-   ```
-
-   For stateful workloads, drain one node at a time with PDB checks:
+   `kubectl drain` respects PodDisruptionBudgets, so a blocked drain stops
+   the loop (`|| break`):
 
    ```bash
    for n in $(kubectl get node -o name); do
-     kubectl drain "$n" --ignore-daemonsets --delete-emptydir-data
-     # Wait for the node's Pods to fully reschedule + Ready elsewhere:
-     sleep 60
-     kubectl wait --for=condition=Ready pod --all -A --timeout=300s
+     kubectl drain "$n" --ignore-daemonsets --delete-emptydir-data || break
+     # Check for Pods that are not Running or Completed:
+     kubectl get pods -A --no-headers | grep -vE ' (Running|Completed) ' || true
    done
    ```
 
@@ -529,33 +571,82 @@ Apply:
 kubectl apply -f /tmp/storefront-policy.yaml
 ```
 
-Verify the policy is enforced:
+Verify the policy is enforced. Apply a debug Pod that carries the baseline
+and the `app: storefront` label the policy selects. busybox runs as root by
+default, so the Pod sets a non-root UID:
 
 ```bash
-# Spawn a debug Pod labelled app=storefront:
-kubectl run debug --image=public.ecr.aws/docker/library/busybox:1.36 \
-  --labels=app=storefront --restart=Never --rm -it -- sh
+kubectl apply -f - <<'EOF'
+apiVersion: v1
+kind: Pod
+metadata:
+  name: debug-storefront
+  namespace: bookstore
+  labels:
+    app: storefront
+spec:
+  automountServiceAccountToken: false
+  securityContext:
+    runAsNonRoot: true
+    runAsUser: 65534
+    runAsGroup: 65534
+    seccompProfile:
+      type: RuntimeDefault
+  containers:
+    - name: app
+      image: public.ecr.aws/docker/library/busybox@sha256:73aaf090f3d85aa34ee199857f03fa3a95c8ede2ffd4cc2cdb5b94e566b11662 # busybox:1.36
+      command: ["sleep", "3600"]
+      securityContext:
+        allowPrivilegeEscalation: false
+        readOnlyRootFilesystem: true
+        capabilities:
+          drop: ["ALL"]
+      resources:
+        requests:
+          cpu: 10m
+          memory: 16Mi
+        limits:
+          memory: 64Mi
+      volumeMounts:
+        - name: tmp
+          mountPath: /tmp
+  volumes:
+    - name: tmp
+      emptyDir: {}
+EOF
+kubectl -n bookstore wait --for=condition=Ready pod/debug-storefront --timeout=120s
+kubectl -n bookstore exec -it debug-storefront -- sh
+```
 
+Inside the Pod, run:
+
+```bash
 # Inside the Pod:
 wget -O- http://catalog.bookstore:8080/api/books         # ALLOWED
 wget -O- http://catalog.bookstore:8080/api/books/123     # ALLOWED
-wget -O- http://catalog.bookstore:8080/api/admin/users   # DENIED (policy)
-wget --post-data='...' http://catalog.bookstore:8080/api/books  # DENIED (POST)
+wget -O- http://catalog.bookstore:8080/api/admin/users   # DENIED on purpose (path)
+wget --post-data='...' http://catalog.bookstore:8080/api/books  # DENIED on purpose (POST)
 ```
 
-The first two succeed; the last two return connection refused (or
-hang then timeout — Cilium's deny behavior is configurable). Hubble
-sees the denied flows:
+The first two succeed. The last two are deliberate denials: no rule allows
+them, so Cilium's proxy answers HTTP 403, not a dropped connection. Hubble
+records them:
 
 ```bash
-hubble observe --namespace bookstore --type drop --output compact
+hubble observe --namespace bookstore --verdict DROPPED --protocol http
 ```
 
-Expected:
+Illustrative output, not captured:
 
 ```text
 2026-05-21T... bookstore/debug-xyz -> bookstore/catalog-abc:8080 \
   HTTP POST /api/books DROPPED (policy denied)
+```
+
+Delete the debug Pod when you are done:
+
+```bash
+kubectl -n bookstore delete pod debug-storefront
 ```
 
 ### 4. Hubble — real-time flow observability
@@ -595,14 +686,15 @@ If `kubeProxyReplacement: true` was set:
 kubectl -n kube-system get pods -l k8s-app=kube-proxy
 ```
 
-Expected: `No resources found in kube-system namespace.` Cilium has
+Illustrative output, not captured: `No resources found in
+kube-system namespace.` Cilium has
 replaced kube-proxy entirely; the DaemonSet is gone.
 
 Service routing happens in eBPF:
 
 ```bash
 # Show Cilium's service map (what would have been iptables rules):
-kubectl -n kube-system exec -it ds/cilium -- cilium service list | head -20
+kubectl -n kube-system exec -it ds/cilium -- cilium-dbg service list | head -20
 ```
 
 Output is a flat list: each ClusterIP, the Service's backends, the
@@ -631,21 +723,21 @@ cilium clustermesh connect --destination-context cluster-a
 cilium clustermesh status --wait
 ```
 
-Services labelled `io.cilium/global-service: "true"` become visible
+Services marked with `io.cilium/global-service: "true"` become visible
 across both clusters. A Pod in cluster B can resolve `catalog.bookstore`
 to endpoints in cluster A and route there. The full pattern is in
 the Cilium docs; ch.14.17 covers the cross-region applicability.
 
 ### 7. Roll back (the unhappy path)
 
-The migration is reversible **if you have a Velero backup** and
-accept the same downtime. The steps:
+The rollback works, with the same downtime. Velero restores Kubernetes
+objects and volumes, not node networking, so the CNI change is reversed by
+replacing nodes. The steps:
 
-1. Velero-restore the cluster state (`velero restore create
-   --from-backup pre-cilium-migration-...`).
-2. Re-enable `vpc-cni` in `eks.tf`.
-3. `helm uninstall cilium -n kube-system`.
-4. Drain every node; Karpenter brings them back with VPC-CNI.
+1. Re-enable `vpc-cni` and `kube-proxy` in `eks.tf`, then apply.
+2. `helm uninstall cilium -n kube-system`.
+3. Drain every node; Karpenter brings them back with VPC-CNI.
+4. Restore objects from the Velero backup only if workloads were lost.
 5. Workloads resume.
 
 The data plane is offline for the duration. Run only in a
@@ -653,46 +745,20 @@ maintenance window with the team aware.
 
 ### 8. (Optional) Tetragon alongside Cilium
 
-If you've already chosen Cilium, **Tetragon is the natural runtime-
-defense sibling** (cross-ref ch.14.13's runtime defense). Install
-via Helm:
+Tetragon is the Cilium project's kernel-event tool. Its runtime detection
+rules belong to [14.13](13-runtime-defense-and-container-security.md) and
+Part 05 chapter 05.08 <!-- link-later: 05.08 -->, so this section covers the
+install only:
 
 ```bash
 helm install tetragon cilium/tetragon \
   --namespace kube-system \
-  --version 1.2.0
+  --version 1.8.0
 ```
 
-A `TracingPolicy` then expresses kernel-event detection (analogous
-to a Falco rule but with in-kernel filtering):
-
-```yaml
-apiVersion: cilium.io/v1alpha1
-kind: TracingPolicy
-metadata:
-  name: file-monitoring
-spec:
-  kprobes:
-    - call: "fd_install"
-      syscall: false
-      args:
-        - index: 0
-          type: "int"
-        - index: 1
-          type: "file"
-      selectors:
-        - matchArgs:
-            - index: 1
-              operator: "Equal"
-              values:
-                - "/etc/shadow"
-                - "/etc/passwd"
-```
-
-Tetragon emits events to a stream; Hubble can join them with Cilium's
-network flows for unified security observability. This is the
-combined-platform answer that justifies Cilium in many production
-environments.
+Check the chart's security values before you install. If Tetragon needs
+host access, it needs the `kube-system` exception that this chapter
+registers.
 
 ## How it works under the hood
 
@@ -718,17 +784,14 @@ endpoint's Pod (on the same node, via the veth pair; on another
 node, via the network device). No iptables NAT, no kube-proxy
 DaemonSet, no per-rule lookup overhead.
 
-**The L7 policy enforcement path.** L7 policies (HTTP method/path,
-Kafka topic) require the eBPF program to **understand the
-application-layer protocol**. Cilium's approach is **TLS-terminated
-in-kernel inspection** (for HTTP/2 + gRPC) or **proxy-in-Pod** (for
-HTTP/1.1 + TLS — Cilium injects an Envoy sidecar-style proxy into
-the same Pod network namespace, transparently). When a Pod sends an
-HTTP request, the eBPF program either inspects the cleartext
-HTTP/2 frames directly (with TLS visibility configured) or routes
-through the in-namespace Envoy for parsing. The L7 policy is
-evaluated; allowed requests pass; denied requests get a 403
-response (or connection drop, configurable).
+**The L7 policy enforcement path.** L3/L4 rules are checked in eBPF. L7
+rules (HTTP method and path, Kafka topic) need the protocol parsed, so
+eBPF redirects matching traffic to a per-node Envoy proxy. That proxy runs
+as a DaemonSet or inside the agent, depending on configuration; it is not
+a sidecar in each Pod. Allowed requests pass. A request that breaks an
+HTTP rule gets a [403 from Envoy](https://docs.cilium.io/en/stable/security/policy/layer7/).
+Cilium cannot apply an HTTP rule to traffic it cannot read, such as an
+encrypted connection it does not terminate.
 
 **The kubeProxyReplacement mechanism.** Cilium implements every
 Kubernetes Service type — ClusterIP, NodePort, LoadBalancer,
@@ -761,48 +824,49 @@ assigned to a *set of labels*. Pods with the same labels share an
 identity; the eBPF programs evaluate policy against identity
 (integers in the hashmap), not IPs. Why this matters: when a Pod
 restarts and gets a new IP, identity stays the same (same labels)
-— no policy re-evaluation needed. Across a cluster of 10k Pods,
-the eBPF policy hashmap stores ~100s of identities (typically),
-not 10k IPs.
+so the policy entry does not change.
 
-**The Cluster Mesh internals.** Two Cilium clusters in mesh have
-each agent connected to the *other* cluster's etcd (via a
-proxied connection through the Cilium operator). Each agent reads
-the other cluster's Services + Endpoints. When a Pod in cluster
-B sends a request to a global Service hosted in cluster A,
-Cluster B's Cilium agent's eBPF program looks up the Service in
-cluster A's endpoint list and forwards directly to the destination
-Pod's IP (cross-cluster routing via the underlying VPC peering or
-TGW). No tunneling overhead beyond the VPC fabric.
+**The Cluster Mesh internals.** Each cluster runs `clustermesh-apiserver`,
+which exposes its local state to remote clusters over mTLS and pulls the
+remote state in. Each agent reads the other cluster's Services and
+Endpoints from that state. When a Pod in cluster B sends a request to a
+global Service hosted in cluster A, Cluster B's eBPF program looks up the
+Service in cluster A's endpoint list and forwards to the destination Pod's
+IP over the network that joins the clusters (VPC peering or TGW).
 
 **The Operator vs Agent.** Cilium has two components:
 
 - **Cilium Agent** — DaemonSet on every node. Manages eBPF programs
-  + reads from the local kernel. Runs **privileged** (CAP_NET_ADMIN,
-  CAP_BPF, CAP_SYS_ADMIN — same PSA exception as Falco). Lives in
-  `kube-system`.
+  + reads from the local kernel. The chart's default render uses host
+  networking, hostPath mounts, capabilities such as NET_ADMIN and
+  SYS_ADMIN, and Unconfined seccomp and AppArmor profiles. It is not a
+  `privileged: true` container, but the baseline forbids each of those
+  settings, so it needs the privileged namespace level
+  ([Pod Security Standards](https://kubernetes.io/docs/concepts/security/pod-security-standards/)).
+  Lives in `kube-system`.
 - **Cilium Operator** — Deployment (typically 2 replicas). Manages
   cluster-wide state: identity allocation, IP address management
-  (IPAM), garbage collection. Does NOT need privileged — runs in
-  a normal restricted-PSA security context. The `cilium-installation.tf.example`
-  explicitly pins the operator to a restricted security context to
-  prevent the chart's default from accidentally promoting it.
+  (IPAM), garbage collection. It does not load eBPF programs and drops
+  all capabilities, but its chart default is `hostNetwork: true`, which
+  restricted forbids. The `cilium-installation.tf.example` pins its
+  container security context explicitly so the chart cannot promote it
+  by accident.
 
 **Cilium agents in kube-system + the PSA constraint.** Phase 14-R
-keeps Cilium in `kube-system` (chart default). `kube-system` is
-PSA-privileged because the Cilium **agent** runs there with kernel
-capabilities. The operator is in `kube-system` too but with a
-narrower securityContext (explicitly set in `cilium-installation.tf.example`).
-A future refinement is to split: agents stay in `kube-system`
-(privileged), operator moves to a separate restricted-PSA namespace.
+keeps Cilium in `kube-system` (chart default). Both migration paths label
+`kube-system` at the privileged level, because the **agent** needs it. The
+operator shares the namespace; its chart default `hostNetwork` keeps it from
+meeting restricted, so moving it to a restricted namespace would also change
+its networking. The exception is registered in
+`security/namespace-exceptions.yaml`.
 
 ## Production notes
 
 > **In production:** **Sticking with VPC-CNI is right for most
 > teams.** Cilium is powerful but introduces operational surface:
 > Helm chart upgrades, Cilium-specific debugging, Hubble dashboards
-> the team has to learn, and a CNI that AWS support won't help
-> with. For a 5-10 service cluster without specific L7 policy or
+> the team has to learn, and a CNI outside the EKS support boundary.
+> For a 5-10 service cluster without specific L7 policy or
 > kube-proxy-scale needs, VPC-CNI is the productive default.
 > Reach for Cilium when the platform has matured to where the
 > ceilings are felt.
@@ -812,54 +876,47 @@ A future refinement is to split: agents stay in `kube-system`
 > AWS-native properties: Pod IPs are no longer VPC-routable from
 > outside the cluster (RDS Security Groups can't reference them,
 > Transit Gateway can't route to them, on-prem connections can't
-> reach them). Native mode preserves the "Pods have real VPC IPs"
+> reach them). Native mode with `ipam.mode=eni` preserves the
+> "Pods have real VPC IPs"
 > property that VPC-CNI established; the cluster gains Cilium's
 > features without losing AWS integration.
 
 > **In production:** **The migration window is the risk surface.**
 > Greenfield Cilium clusters are easy; migration of a running
-> cluster is a 4-6 hour operation that requires careful drain
+> cluster needs a window sized by a staging rehearsal, and careful drain
 > sequencing. Production migrations: book a maintenance window,
 > communicate to dependent teams, take a Velero backup, have a
-> rollback runbook (every step reversible with the backup), and
+> rollback runbook (section 7), and
 > monitor SLOs during the drain.
 
 > **In production:** **Hubble flow storage is in-memory.** The
 > default Hubble setup keeps the last N flows per node in memory
 > — a sliding window that loses old flows. For incident
-> investigation more than ~1 hour back, configure
-> `hubble.export.fileMaxSizeMb` to write flows to disk (per node)
+> investigation further back, set `hubble.export.static.enabled=true`
+> to write flows to a file on each node; `hubble.export.static.fileMaxSizeMb`
+> caps its size.
 > + ship to a log aggregator (Loki, CloudWatch Logs, S3 via OTel
 > Collector). Without this, "what was happening yesterday" is
 > answered from the application logs, not Hubble.
 
 > **In production:** **The cost of L7 policy enforcement.** L7
-> CiliumNetworkPolicy uses an in-namespace Envoy for HTTP/1.1
-> parsing (Cilium's modern modes do more in-eBPF, but Envoy is
-> still part of the L7 path for many policies). The overhead is
-> single-digit milliseconds added per request, plus ~10-30 MB
-> memory per Pod with L7 policies attached. For high-RPS services,
-> measure the latency impact before committing to L7-everywhere.
+> CiliumNetworkPolicy sends HTTP-rule traffic through the per-node Envoy.
+> L7 rules add per-request latency and load on that proxy. For high-RPS
+> services, measure both before committing to L7-everywhere.
 > The typical pattern: L4 policy for most services + L7 policy
 > for security-sensitive ones (the auth gateway, the payment
 > service, the admin endpoints).
 
-> **In production:** **Cluster Mesh requires careful identity
-> coordination.** Two clusters in mesh share Service routing but
-> NOT identity by default — a Pod labelled `app=catalog` in
-> cluster A and one in cluster B are different identities. For
-> cross-cluster policy enforcement (e.g., *"only catalog Pods in
-> cluster A can reach payments in cluster B"*), enable
-> `cluster.id` aware policies. The cross-region applicability is
-> in ch.14.17.
+> **In production:** **Cluster Mesh joins trust domains.** Every cluster
+> in a mesh forms one trust domain, so a compromised cluster can affect
+> the others. Connect only clusters with equivalent security. Cilium
+> mutual authentication does not run across a mesh. The cross-region
+> applicability is in ch.14.17.
 
-> **In production:** **AWS support won't help with Cilium.** If
-> the cluster has a networking issue and Cilium is the CNI, AWS
-> support will say "this is a Cilium issue, not an EKS issue."
-> The Cilium community + Isovalent (the company behind Cilium)
-> are the support channel. For teams that need vendor-backed
-> support, Isovalent offers commercial support; otherwise the
-> team owns the operational depth.
+> **In production:** **Cilium is outside the EKS support boundary.** EKS
+> manages the VPC CNI as an add-on; Cilium is a chart you install and
+> upgrade. Plan the support path, community or a commercial vendor,
+> before the migration.
 
 ## Quick Reference
 
@@ -871,6 +928,9 @@ helm install cilium cilium/cilium --version 1.20.4 \
   --set k8sServiceHost="<API-ENDPOINT>" \
   --set k8sServicePort=443 \
   --set routingMode=native \
+  --set eni.enabled=true \
+  --set ipam.mode=eni \
+  --set egressMasqueradeInterfaces=eth0 \
   --set hubble.enabled=true \
   --set hubble.relay.enabled=true \
   --set hubble.ui.enabled=true
@@ -894,10 +954,8 @@ hubble observe --namespace <NS> --verdict DROPPED -f
 hubble observe --namespace <NS> --protocol http -f
 
 # List Cilium-managed Services (kube-proxy-replacement state).
-kubectl -n kube-system exec ds/cilium -- cilium service list
+kubectl -n kube-system exec ds/cilium -- cilium-dbg service list
 
-# List eBPF programs attached to a node.
-kubectl -n kube-system exec ds/cilium -- cilium bpf prog list
 
 # Apply a CiliumNetworkPolicy.
 kubectl apply -f - <<EOF
@@ -932,8 +990,8 @@ Cilium-on-EKS checklist (the production setup is right when all six are yes):
       reachable + Hubble Relay aggregating flows across nodes.
 - [ ] CiliumNetworkPolicy CRs in place for the workloads that need
       L7 enforcement (auth gateway, payments, admin endpoints).
-- [ ] Operator pinned to a restricted-PSA-compliant securityContext
-      (the agent must be privileged; the operator must not be).
+- [ ] `kube-system` is labelled privileged and registered as the one
+      exception; the operator drops all capabilities.
 - [ ] `cilium connectivity test` passes (run quarterly + after any
       Cilium version upgrade).
 
@@ -951,21 +1009,27 @@ Cilium-on-EKS checklist (the production setup is right when all six are yes):
 2. **A team decides to swap VPC-CNI for Cilium during a Monday-morning maintenance window. They run `helm install cilium` on a live cluster with VPC-CNI still installed. What happens?**
    <details><summary>Show answer</summary>
 
-   The migration is **destructive** — running both CNIs at the same time causes IP-allocation conflicts, broken Pod networking, and undefined behavior. The chapter's migration runbook makes the order explicit: (1) drain nodes; (2) `kubectl delete daemonset aws-node -n kube-system` to remove VPC-CNI; (3) install Cilium with `kubeProxyReplacement: true` and `routingMode: native`; (4) cordon-off old nodes and let Karpenter provision new ones with Cilium pre-installed; (5) drain the old nodes. Live-installing without first removing aws-node is the canonical "I lost cluster connectivity for the workday" incident — the chapter explicitly calls this out. The safe path for greenfield is to install Cilium **before** the first node joins, not after.
+   Two active CNIs on one node is the failure mode: expect Pod networking to
+   break during the overlap. The chapter's runbook never runs both. It takes a
+   Velero backup, removes `vpc-cni` and `kube-proxy` from `cluster_addons` and
+   applies, labels `kube-system` privileged, installs Cilium with ENI IPAM, and
+   drains the nodes one at a time so Karpenter replaces them with Cilium-only
+   nodes. Greenfield avoids the problem: install Cilium before the first node
+   joins.
 
    </details>
 
 3. **A workload owner asks for a NetworkPolicy that says "frontend can call catalog's `/api/books` GET but not POST." Why can't they do it with stock NetworkPolicy + VPC-CNI?**
    <details><summary>Show answer</summary>
 
-   Stock `networking.k8s.io/NetworkPolicy` is L3/L4 only — it can express "frontend Pods can talk to catalog Pods on port 8080" but nothing about HTTP methods, paths, or headers. Path-level + method-level enforcement is L7, which requires either a service mesh (Istio AuthorizationPolicy) or Cilium's `CiliumNetworkPolicy` with the L7 HTTP rules block. The chapter's example shows the exact `CiliumNetworkPolicy` DSL: `toPorts.rules.http.method: "GET"`, `toPorts.rules.http.path: "/api/books"`. Cilium evaluates this in the eBPF program attached to the Pod's veth, so the enforcement is in-kernel and fast.
+   Stock `networking.k8s.io/NetworkPolicy` is L3/L4 only: it can express "frontend Pods can talk to catalog Pods on port 8080" but nothing about HTTP methods, paths, or headers. Path-level + method-level enforcement is L7, which requires either a service mesh (Istio AuthorizationPolicy) or Cilium's `CiliumNetworkPolicy` with the L7 HTTP rules block. The chapter's example shows the exact `CiliumNetworkPolicy` DSL: `toPorts.rules.http.method: "GET"`, `toPorts.rules.http.path: "/api/books"`. The method and path checks run in the per-node Envoy proxy that eBPF redirects matching traffic to; the port check stays in eBPF.
 
    </details>
 
-4. **Hands-on extension — on a Cilium-enabled cluster, deploy two Pods (`A` and `B`), apply a default-deny CiliumNetworkPolicy, then watch Hubble (`cilium hubble observe --pod A`) while curling B from A.**
+4. **Hands-on extension : on a Cilium-enabled cluster, deploy two Pods (`A` and `B`), apply a default-deny CiliumNetworkPolicy, then watch Hubble (`hubble observe --pod A`) while curling B from A.**
    <details><summary>What you should see</summary>
 
-   Hubble streams the dropped flow events in real time: source identity (the A Pod's labels), destination identity (the B Pod), L4 (TCP:80), and verdict (DROPPED — by Cilium policy). The verdict carries the policy identity (the CRD that matched). Without Hubble, you'd see a connection timeout on the curl with no signal about who dropped it. Hubble's flow stream answers "what just happened between Pod A and Pod B?" in seconds; the VPC-CNI equivalent (VPC Flow Logs) sees the ENI traffic but loses Pod identity once Pods are on the same node.
+   Hubble streams the dropped flow events in real time: source identity (the A Pod's labels), destination identity (the B Pod), L4 (TCP:80), and verdict (DROPPED by Cilium policy). Without Hubble, you'd see a connection timeout on the curl with no signal about who dropped it. Hubble's flow stream answers "what just happened between Pod A and Pod B?" in seconds; VPC Flow Logs record traffic at network interfaces and carry no Pod names.
 
    </details>
 
@@ -994,6 +1058,14 @@ Cilium-on-EKS checklist (the production setup is right when all six are yes):
   <https://ebpf.io/>; the canonical eBPF community site with
   introductory + advanced learning materials for the kernel-level
   technology Cilium is built on.
+- **Cilium system requirements and ENI IPAM**
+  <https://docs.cilium.io/en/stable/operations/system_requirements/>
+  and <https://docs.cilium.io/en/stable/network/concepts/ipam/eni/>.
+- **Cilium Layer 7 policy and mutual authentication**
+  <https://docs.cilium.io/en/stable/security/policy/layer7/> and
+  <https://docs.cilium.io/en/stable/network/servicemesh/mutual-authentication/mutual-authentication/>.
+- **Kubernetes Pod Security Standards**
+  <https://kubernetes.io/docs/concepts/security/pod-security-standards/>.
 - **AWS VPC-CNI documentation**
   <https://docs.aws.amazon.com/eks/latest/userguide/pod-networking.html>;
   the AWS-side reference for what VPC-CNI is and the features
