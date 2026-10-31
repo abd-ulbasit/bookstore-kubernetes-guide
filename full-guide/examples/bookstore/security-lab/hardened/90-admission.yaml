@@ -19,12 +19,21 @@ spec:
         apiVersions: ["v1"]
         operations: ["CREATE", "UPDATE"]
         resources: ["pods"]
+      # kubectl debug adds an ephemeral container through this subresource,
+      # which is an UPDATE of pods/ephemeralcontainers, not of pods.
+      - apiGroups: [""]
+        apiVersions: ["v1"]
+        operations: ["UPDATE"]
+        resources: ["pods/ephemeralcontainers"]
   validations:
     - expression: >-
         object.spec.containers.all(c, c.image.contains('@sha256:') ||
         c.image.startsWith('bookstore/')) &&
         (!has(object.spec.initContainers) ||
         object.spec.initContainers.all(c, c.image.contains('@sha256:') ||
+        c.image.startsWith('bookstore/'))) &&
+        (!has(object.spec.ephemeralContainers) ||
+        object.spec.ephemeralContainers.all(c, c.image.contains('@sha256:') ||
         c.image.startsWith('bookstore/')))
       message: "p05-capstone: every third-party image must be pinned by digest (05.03)."
 ---

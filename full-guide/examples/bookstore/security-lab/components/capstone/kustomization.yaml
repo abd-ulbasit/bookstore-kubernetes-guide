@@ -6,7 +6,7 @@
 #    catalog, postgres, the migration Job and the ServiceAccounts stay.
 #    Storefront, orders, payments-worker and RabbitMQ are removed, with
 #    their PodDisruptionBudgets, the autoscaler and the cleanup CronJob, so
-#    one lab host can run the set. Redis stays: the catalog's readiness
+#    one small kind cluster can run the set. Redis stays: the catalog's readiness
 #    check dials it, and a catalog that is not ready never joins its
 #    Service. The payments-worker ServiceAccount stays, because the attack
 #    borrows its identity. Drop this component to render the full bookstore.
@@ -83,7 +83,7 @@ patches:
       metadata:
         name: storefront
   # The base's postgres probes allow one second per check, and the liveness
-  # probe restarts the container after three misses. On a shared lab host
+  # probe restarts the container after three misses. On a small lab cluster
   # under load the first initdb outlived those probes, and a restart in the
   # middle of it left a data directory that never created the database. The
   # capstone allows more time to start and to answer. The base keeps its
@@ -126,7 +126,7 @@ patches:
         path: /spec/template/spec/containers/0/env/5/value
         value: "host=postgres.p05-capstone.svc.cluster.local port=5432 user=$(POSTGRES_USER) password=$(POSTGRES_PASSWORD) dbname=$(POSTGRES_DB) sslmode=disable"
   # The base gives the migration Job 120 seconds in total, including the
-  # time its Pod takes to start. On a shared lab host, postgres and the Pod
+  # time its Pod takes to start. On a small lab cluster, postgres and the Pod
   # sandbox can take longer than that, and the Job then fails with
   # DeadlineExceeded before the schema exists. This raises the cap for the
   # capstone only. The base keeps its 120 seconds.
