@@ -98,7 +98,7 @@ The trap to keep in view: **adopting ESO/Vault does not delete the demo
 Secret's lessons — it operationalizes them, and it adds its own footguns**
 (an injected Vault-agent sidecar in a PSA-`restricted` namespace; a
 too-broad Vault policy; a `refreshInterval` longer than the Vault dynamic
-lease, so the credential expires before the next refresh; the synced `Secret` is still a `Secret` — RBAC on it still discloses
+lease, so the credential expires before the next refresh; the synced `Secret` is still a `Secret`, and RBAC on it still discloses
 cleartext, [Part 03 ch.02](../03-config-and-storage/02-secrets.md)).
 
 ## Threats and controls
@@ -829,7 +829,7 @@ kind delete cluster --name bookstore
   authenticates to the backend, fetches each `remoteRef`, applies the optional
   `template`, and **creates/updates a normal `Secret`** (with
   `creationPolicy: Owner` it also deletes it when the `ExternalSecret` is
-  removed — which is why the revert in step 6 cleanly drops `db-credentials`).
+  removed, which is why the revert in step 6 cleanly drops `db-credentials`).
   Every `refreshInterval` it re-fetches and re-reconciles — that loop *is* the
   rotation mechanism. The workloads only ever see a `Secret`; ESO is the part
   that knows about Vault.
@@ -1083,7 +1083,7 @@ Checklist:
 4. **Hands-on: replace the canonical `16-db-credentials.yaml` with an ESO-managed `ExternalSecret` syncing from Vault. Run `kubectl get secret db-credentials -o yaml` before and after. What is byte-identical, and what changed?**
    <details><summary>What you should see</summary>
 
-   Byte-identical: the `data` keys (`POSTGRES_USER`, `POSTGRES_PASSWORD`, `POSTGRES_DB`) and their values, so the consuming Pods don't notice. Changed: `metadata.labels` gains ESO's ownership labels, `reconcile.external-secrets.io/managed: "true"` and `reconcile.external-secrets.io/created-by`, and the `reconcile.external-secrets.io/data-hash` annotation records the data it wrote. With `creationPolicy: Owner`, ESO removes the Secret when the ExternalSecret is deleted. The point of the additive swap is that no downstream consumer needs to know — `DB_DSN` is the contract, and the contract is preserved.
+   Byte-identical: the `data` keys (`POSTGRES_USER`, `POSTGRES_PASSWORD`, `POSTGRES_DB`) and their values, so the consuming Pods don't notice. Changed: `metadata.labels` gains ESO's ownership labels, `reconcile.external-secrets.io/managed: "true"` and `reconcile.external-secrets.io/created-by`, and the `reconcile.external-secrets.io/data-hash` annotation records the data it wrote. With `creationPolicy: Owner`, ESO removes the Secret when the ExternalSecret is deleted. The point of the additive swap is that no downstream consumer needs to know: `DB_DSN` is the contract, and the contract is preserved.
 
    </details>
 

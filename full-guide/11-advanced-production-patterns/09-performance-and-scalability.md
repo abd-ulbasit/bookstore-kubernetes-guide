@@ -142,12 +142,11 @@ state — never averages, never one run.**
   resource-scope p99 **≤1 s**, namespace- or cluster-scope reads p99 **≤30 s**,
   and pod-startup p99 **≤5 s** (image already present). Watch propagation is a
   work-in-progress measure with no threshold yet. These are *guarantees of
-  the test envelope*, not hard caps — but past them you are unsupported and
+  the test envelope*, not hard caps, but past them you are unsupported and
   the answer is **more clusters** ([ch.06](06-multi-cluster-and-fleet.md)),
   not a bigger one.
 - **Profiling localises; load testing proves.** The apiserver,
-  controller-manager and scheduler expose **`/debug/pprof`** (CPU, heap, goroutines)
-  — on kubeadm, the scheduler and controller-manager listen only on
+  controller-manager and scheduler expose **`/debug/pprof`** (CPU, heap, goroutines). On kubeadm, the scheduler and controller-manager listen only on
   localhost, so pull a profile from the control-plane node with a read-only
   token (section 2) and read a flame graph to find *where the
   time/RAM goes*. **kube-burner** / **clusterloader2** *generate* controlled
@@ -953,7 +952,7 @@ exercise; the answer is the check.
    append-entry, which calls disk fsync on the leader plus quorum followers
    before acknowledging. The apiserver cannot return success until that
    round-trip completes. If fsync p99 is 30ms, no amount of apiserver tuning
-   brings write latency below 30ms — the floor is the disk. The fix is faster
+   brings write latency below 30ms; the floor is the disk. The fix is faster
    storage (local NVMe), not bigger apiserver flags. This is why production
    etcd runs on dedicated low-latency disks, not shared cloud storage.
 
@@ -973,7 +972,7 @@ exercise; the answer is the check.
    `apiserver_request_duration_seconds` p99 spikes. Pagination (`limit` +
    `continue`) only bounds each response; the fix is a watch with a
    resourceVersion to receive only deltas. Better: use a SharedInformer /
-   client-go cache — never pull a full snapshot in a loop. This anti-pattern
+   client-go cache. Never pull a full snapshot in a loop. This anti-pattern
    is the #1 cause of large-cluster apiserver pressure.
 
    </details>
@@ -987,8 +986,8 @@ exercise; the answer is the check.
    Tuning the legacy flags higher just raises the ceiling; APF still
    partitions traffic per priority level and queues. The real diagnostic is
    `apiserver_flowcontrol_nominal_limit_seats` per level vs
-   `apiserver_flowcontrol_current_inqueue_requests` — see
-   [ch.03](03-api-priority-and-fairness.md). Likely the bottleneck is a slow
+   `apiserver_flowcontrol_current_inqueue_requests` (see
+   [ch.03](03-api-priority-and-fairness.md)). Likely the bottleneck is a slow
    admission webhook, a watch-cache miss path, audit logging, or etcd write
    pressure. Always profile (`/debug/pprof`) before tuning concurrency.
 
@@ -1003,10 +1002,10 @@ exercise; the answer is the check.
    `etcd_disk_backend_commit_duration_seconds` and
    `etcd_disk_wal_fsync_duration_seconds`.
    `apiserver_flowcontrol_current_inqueue_requests` for APF queueing.
-   `apiserver_resource_objects` by resource — Pods will be 30k, Endpoints will
+   `apiserver_resource_objects` by resource: Pods will be 30k, Endpoints will
    be 10k, ReplicaSets 10k. Scheduler
-   `scheduler_scheduling_attempt_duration_seconds`. Run two passes — once at
-   baseline, once with the change — and compare *percentiles*, not means. If
+   `scheduler_scheduling_attempt_duration_seconds`. Run two passes: once at
+   baseline, once with the change, and compare *percentiles*, not means. If
    anything degrades 2x at the percentile, you've found your regression.
 
    </details>

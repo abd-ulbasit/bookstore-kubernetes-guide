@@ -727,7 +727,7 @@ Secrets the snapshot holds, plus a store that only the backup role can read.
 **Compaction** discards MVCC history below a revision. The Kubernetes
 apiserver auto-compacts by default, every `--etcd-compaction-interval`
 (`5m0s`), but compaction frees space *logically only*. **Defragmentation**
-physically rewrites the backend file to reclaim it — and it **blocks the
+physically rewrites the backend file to reclaim it, and it **blocks the
 member it runs on** (it holds the backend while rewriting), so it is done
 **one member at a time**, off-peak, **and the current Raft leader LAST**:
 defragging the leader stops it long enough to trigger a leader **re-election**
@@ -886,7 +886,7 @@ as the API front; kind v0.32.0 replaced HAProxy with Envoy, per the
 lab's v0.33.0 keeps it), a faithful, laptop-sized HA control plane:
 
 ```sh
-# It is a KIND config, not a k8s object — validate it's well-formed YAML,
+# It is a KIND config, not a k8s object; validate it's well-formed YAML,
 # never `kubectl apply` it (the real artefact is the create command):
 python3 -c 'import yaml,sys; list(yaml.safe_load_all(open("examples/bookstore/platform/ha-kind-3cp.yaml"))); print("ha-kind-3cp.yaml: valid YAML (kind Cluster config)")'
 
@@ -901,7 +901,7 @@ kubectl -n kube-system get pods -l component=kube-apiserver       # 3 apiservers
 
 The Bookstore (the four `bookstore/*:dev` images + the standard raw-manifests
 chain from [Part 08 ch.02](../08-day-2-operations/02-backup-and-dr.md) step 0)
-runs on the **workers** — bring it up so there is real cluster state in etcd
+runs on the **workers**; bring it up so there is real cluster state in etcd
 and a real app to keep available through the failures below:
 
 ```sh
@@ -926,7 +926,7 @@ kubectl apply -f examples/bookstore/raw-manifests/19-payments-worker-deploy.yaml
 kubectl apply -f examples/bookstore/raw-manifests/21-db-migrate-job.yaml
 kubectl wait --for=condition=complete job/db-migrate -n bookstore --timeout=120s
 kubectl wait --for=condition=available deploy --all -n bookstore --timeout=180s
-# seed a row — proves later that an etcd/control-plane failure does NOT lose it:
+# seed a row; it proves later that an etcd/control-plane failure does NOT lose it:
 kubectl exec -n bookstore postgres-0 -- psql -U bookstore -d bookstore -c \
   "CREATE TABLE IF NOT EXISTS ha_demo(note text); INSERT INTO ha_demo VALUES ('survives-cp-loss');"
 ```
@@ -1189,7 +1189,7 @@ ETCD="kubectl -n kube-system exec $E0 -- etcdctl \
 $ETCD --endpoints=https://127.0.0.1:2379 member list -w table                 # members; quorum = floor(n/2)+1
 $ETCD --endpoints=https://127.0.0.1:2379 endpoint status --cluster -w table   # LEADER, DB SIZE, RAFT TERM/INDEX
 $ETCD --endpoints=https://127.0.0.1:2379 endpoint health  --cluster -w table  # quorum heartbeat
-$ETCD --endpoints=https://127.0.0.1:2379 alarm list                           # NOSPACE/CORRUPT — check FIRST
+$ETCD --endpoints=https://127.0.0.1:2379 alarm list                           # NOSPACE/CORRUPT: check FIRST
 kubectl -n kube-system exec $E0 -- etcdctl --endpoints=<ONE-EP> \
   --cacert=/etc/kubernetes/pki/etcd/ca.crt --cert=/etc/kubernetes/pki/etcd/server.crt \
   --key=/etc/kubernetes/pki/etcd/server.key defrag   # ONE at a time, off-peak, LEADER LAST
@@ -1267,7 +1267,7 @@ Checklist:
 2. **Your etcd cluster shows steady backend-DB growth and `etcd_disk_backend_commit_duration_seconds` p99 is climbing. What do you check and in what order?**
    <details><summary>Show answer</summary>
 
-   (1) `etcdctl endpoint status` — is the DB size near the `--quota-backend-bytes` limit? If yes, you're about to get a `NOSPACE` alarm. (2) `etcdctl compact` and `etcdctl defrag`: post-compaction defrag releases space; do it one member at a time to avoid taking quorum offline. (3) `etcdctl alarm list` — if `NOSPACE` is set, after freeing space you must `etcdctl alarm disarm` (the sticky-alarm step everyone forgets). (4) Long-term: enable auto-compaction (`--auto-compaction-mode=periodic --auto-compaction-retention=8h`), raise the quota, and audit what's writing — runaway controllers writing to large Lease objects, large ConfigMaps, or huge audit events that aren't supposed to be in etcd.
+   (1) `etcdctl endpoint status`: is the DB size near the `--quota-backend-bytes` limit? If yes, you're about to get a `NOSPACE` alarm. (2) `etcdctl compact` and `etcdctl defrag`: post-compaction defrag releases space; do it one member at a time to avoid taking quorum offline. (3) `etcdctl alarm list`: if `NOSPACE` is set, after freeing space you must `etcdctl alarm disarm` (the sticky-alarm step everyone forgets). (4) Long-term: enable auto-compaction (`--auto-compaction-mode=periodic --auto-compaction-retention=8h`), raise the quota, and audit what's writing: runaway controllers writing to large Lease objects, large ConfigMaps, or huge audit events that aren't supposed to be in etcd.
 
    </details>
 

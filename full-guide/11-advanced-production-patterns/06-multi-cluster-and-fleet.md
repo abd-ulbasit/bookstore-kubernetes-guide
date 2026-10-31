@@ -137,7 +137,7 @@ flowchart TB
       appHub["Application bookstore-hub<br/>→ fleet-overlays/dev"]
       appEast["Application bookstore-east<br/>→ fleet-overlays/staging"]
       appWest["Application bookstore-west<br/>→ a prod overlay (not shipped here)"]
-      proj["AppProject bookstore-fleet<br/>(guardrail — this chapter)"]
+      proj["AppProject bookstore-fleet<br/>(guardrail: this chapter)"]
     end
 
     subgraph hubc["HUB cluster — bookstore ns (PSA restricted)"]
@@ -232,7 +232,7 @@ is a **not-applied doc carrier** (same honesty pattern as the apiserver-level
 `cluster/` files). Its header lists the commands the chapter runs, in the
 chapter's order. The real artifacts are the `kind` commands here and the
 `register_member` function in section 3, not `argocd cluster add`, which the
-chapter forbids. Two clusters — a **hub** (runs Argo CD) and a member:
+chapter forbids. Two clusters: a **hub** (runs Argo CD) and a member:
 
 ```sh
 kind delete cluster --name bookstore-hub  2>/dev/null || true
@@ -784,7 +784,7 @@ overlays target `bookstore` today, and the example does not add that.
 > *mechanics* (generator → N Applications → per-cluster overlay) are not
 > faked; only the repo location is substituted.
 
-### 5. Cross-cluster networking & data gravity — the honest reality
+### 5. Cross-cluster networking & data gravity: the honest reality
 
 The Bookstore now runs on **two clusters**, but each cluster's `catalog`
 **cannot** reach the *other* cluster's `postgres` — Services are
@@ -832,16 +832,16 @@ kind delete cluster --name bookstore-east
   exactly as in [Part 07 ch.04](../07-delivery/04-gitops-argocd.md) — nothing
   about the per-Application sync changes). It is purely *additive* over Part 07
   ch.04: same `Application`, a fleet `AppProject` guardrail, same Kustomize
-  overlays with the cluster-scoped objects dropped — just *machine-generated*
+  overlays with the cluster-scoped objects dropped; what changes is *machine-generated*
   instead of hand-written, which is the only thing that scales to a fleet.
 - **The generators.** **clusters** — one params set per cluster `Secret`
   Argo CD stores, selectable by the Secret's labels, exposing `{{.name}}`,
   `{{.server}}`, and the Secret's labels (the Bookstore uses an `env` label
-  to pick the overlay). **git** — one params set per directory or file matched
+  to pick the overlay). **git**: one params set per directory or file matched
   in the repo (so adding `fleet-overlays/<X>/` adds Applications with no
-  edit). **list** — a static inline list. **matrix** — the Cartesian product
+  edit). **list**: a static inline list. **matrix**: the Cartesian product
   of two child generators (clusters × git = "every env on every cluster"). The
-  generator is *data*; the template is *one* Application shape — that
+  generator is *data*; the template is *one* Application shape. That
   separation is why a fleet change is a one-line generator/label edit, not N
   file edits.
 - **Cluster registration and the hub model.** Each member is a Secret in the
@@ -1041,7 +1041,7 @@ Checklist:
 2. **An `ApplicationSet` with a cluster generator is supposed to deploy to 5 clusters, but only 3 received the workload. What's the diagnostic order?**
    <details><summary>Show answer</summary>
 
-   (1) `kubectl get applicationset -n argocd <name> -o yaml` and read `status.resources`: the generated Applications and their status. A member missing from the list means the generator did not see it. (2) `kubectl get secrets -n argocd -l argocd.argoproj.io/secret-type=cluster` — is the missing member's Secret there, and labelled `bookstore.example.com/fleet=true`? (3) Check the Secret's `env` label against the overlay path it selects. (4) Check the member's token. A token issued for 24 hours and not re-minted leaves the member unreachable; read the Application's connection status. (5) If the Applications exist but do not sync, check the AppProject's `destinations` (the Argo CD cluster names) and the member identity's Role.
+   (1) `kubectl get applicationset -n argocd <name> -o yaml` and read `status.resources`: the generated Applications and their status. A member missing from the list means the generator did not see it. (2) `kubectl get secrets -n argocd -l argocd.argoproj.io/secret-type=cluster`. Is the missing member's Secret there, and labelled `bookstore.example.com/fleet=true`? (3) Check the Secret's `env` label against the overlay path it selects. (4) Check the member's token. A token issued for 24 hours and not re-minted leaves the member unreachable; read the Application's connection status. (5) If the Applications exist but do not sync, check the AppProject's `destinations` (the Argo CD cluster names) and the member identity's Role.
 
    </details>
 
