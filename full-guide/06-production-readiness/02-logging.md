@@ -1,92 +1,110 @@
 # 02 — Logging
 
-> The Kubernetes logging architecture (stdout/stderr → CRI log files → node;
-> **no built-in cluster logging**), the **node-level agent** pattern
-> (DaemonSet: Fluent Bit/Vector/Alloy) → store (Loki/Elasticsearch/OpenSearch/
-> cloud), the sidecar pattern and when *not* to use it, structured JSON
-> logging, correlation/trace IDs, multiline handling, retention/cost/PII —
-> applied by shipping the Bookstore's existing JSON logs into Loki and
-> querying a single request.
+> The Kubernetes logging architecture (stdout and stderr to CRI files on the
+> node, with **no built-in cluster logging**), the node agent pattern
+> (a DaemonSet that reads pod logs and ships them to a store), the sidecar
+> pattern and when *not* to use it, structured JSON logging, and the controls
+> that keep secrets and personal data out of logs and out of the store.
+> Applied by shipping the Bookstore's JSON logs into Loki through a locked
+> down agent, then planting a fake secret to show what reaches the store.
 
-**Estimated time:** ~15 min read · ~60 min hands-on
-**Prerequisites:** [Part 06 ch.01](01-observability-metrics.md) — metrics show *that* it broke, logs show *why* · [Part 01 ch.06](../01-core-workloads/06-daemonsets.md) — the node-level agent pattern · [Part 01 ch.01](../01-core-workloads/01-pods.md) — stdout/stderr is the container log boundary
-**You'll know after this:** • explain why Kubernetes has no built-in cluster logging and what fills the gap · • deploy a node-level log agent (Fluent Bit / Vector / Alloy) as a DaemonSet · • choose between the sidecar and DaemonSet patterns for shipping logs · • write structured JSON logs with trace IDs that correlate across services · • query the Bookstore's logs in Loki for a single user request
+**Estimated time:** ~20 min read · ~60 min hands-on
+**Prerequisites:** [Part 06 ch.01](01-observability-metrics.md), metrics show *that* it broke and logs show *why* · [Part 01 ch.06](../01-core-workloads/06-daemonsets.md), the node agent pattern · [Part 01 ch.01](../01-core-workloads/01-pods.md), stdout and stderr are the container log boundary · [Part 02 ch.06](../02-networking/06-network-policies.md), the policies that lock the store
+**You'll know after this:** • explain why Kubernetes has no cluster logging and what fills the gap · • keep secrets and personal data out of logs, at the source and in the pipeline · • deploy a log agent that runs at `restricted` and reads through the API, not hostPath · • lock a log store so that only the agent writes and only Grafana reads · • name who can read the raw lines, and why an agent's RBAC is also a read path
 
-<!-- tags: observability, day-2, opentelemetry -->
+<!-- tags: observability, day-2, security, opentelemetry -->
 
 ## Why this exists
 
-[ch.01](01-observability-metrics.md) tells you *that* catalog's error rate
-rose. Logs tell you *why this specific request* failed — the stack trace, the
-bad input, the DB timeout. Metrics are aggregates; logs are the event detail.
+[ch.01](01-observability-metrics.md) tells you that catalog's error rate rose.
+Logs tell you why this one request failed: the stack trace, the bad input, the
+database timeout. Metrics are aggregates; logs are the event detail.
 
-And here is the part newcomers are always surprised by: **Kubernetes has no
-cluster logging system at all.** What it provides is deliberately minimal —
-the container runtime captures a container's stdout/stderr to a file on the
-node, and `kubectl logs` reads that file. That's it. There is no aggregation,
-no search across Pods, no retention beyond the node, and **the logs are gone
-when the Pod is deleted or the node is recycled** (rollout, scale-down,
-eviction, autoscaler). Centralised logging is something you **add** with a
-node agent that ships those files to a store. This is the logging half of the
-[Observability](#further-reading) concern from *Production Kubernetes*.
+Kubernetes has no cluster logging system. The container runtime captures a
+container's stdout and stderr to a file on the node, and `kubectl logs` reads
+that file. There is no aggregation, no search across Pods, and no retention
+beyond the node. The logs are gone when the Pod is deleted or the node is
+recycled. Centralised logging is something you add, with a node agent that
+ships those files to a store.
+
+Adding a store creates a new exposure. A value the app wrote to stdout is now
+in the node file, in the agent's stream, in the store, and in every backup of
+the store. One service that logs a token can expose tokens from every service
+that reads the same store. So the controls come in order: what the app writes,
+what the agent keeps, who can query the store, and who can read the raw node
+files.
 
 ## Mental model
 
 Follow one log line:
 
-1. The Bookstore Go service writes a **JSON line to stdout** (it already does
-   — `slog.NewJSONHandler(os.Stdout, ...)` in `app/catalog/main.go`).
-2. The **container runtime** (containerd via the CRI) captures stdout/stderr
-   and writes it to a file on the node, conventionally
-   `/var/log/pods/<NS>_<POD>_<UID>/<CONTAINER>/0.log`, in the CRI log format
-   (`<RFC3339NANO_TIMESTAMP> <STREAM> <P|F> <MESSAGE>`).
-3. `kubectl logs` just streams that file back. Useful for one Pod, now;
-   useless for "show me every error across all catalog replicas yesterday".
-4. To centralise, a **node-level logging agent** — one Pod per node, i.e. a
-   **DaemonSet** ([Part 01 ch.06](../01-core-workloads/06-daemonsets.md)) —
-   tails every `/var/log/pods/...` file, parses it, attaches Kubernetes
-   metadata (namespace, pod, labels) from the API server, and pushes to a
-   **log store** (Loki, Elasticsearch/OpenSearch, or a cloud service).
-5. You query the *store* (LogQL/Lucene/cloud query), filtered by label and
-   time, correlated with metrics and traces.
+1. The Bookstore Go service writes a **JSON line to stdout**. It already does:
+   `slog.NewJSONHandler(os.Stdout, ...)` in `app/catalog/main.go`.
+2. The container runtime (containerd, via the CRI) captures stdout and stderr
+   and writes them to `/var/log/pods/<NS>_<POD>_<UID>/<CONTAINER>/0.log`, in
+   the CRI format. The file is raw. Nothing has been removed from it.
+3. `kubectl logs` streams that file back for one Pod, now. Anyone with
+   `pods/log` in the namespace reads the raw line.
+4. A **node agent**, one Pod per node, which is a DaemonSet
+   ([Part 01 ch.06](../01-core-workloads/06-daemonsets.md)), reads each
+   container's log, attaches Kubernetes metadata, and pushes to a store: Loki,
+   Elasticsearch or a cloud service. The agent in this chapter reads through
+   the API server, so it needs no hostPath.
+5. You query the store by label and time, as you query metrics.
 
-The application's only job is **log structured JSON to stdout** and never
-manage log files itself. The platform's job is the agent + store. Keep those
-two responsibilities separate and logging "just works" through every restart,
-rollout, and node replacement.
+Each step is a control point, and the rules below follow them in order:
+
+- **Step 1, the app.** Only the app can keep a value out of the line. After
+the write, the only cleanup left is in the store, and the node file keeps the
+raw text.
+- **Step 3, RBAC.** `pods/log` decides who reads the raw line on the node.
+- **Step 4, the agent.** The agent can remove values before they are pushed.
+- **Step 5, the store.** The network path and the query path decide who reads
+the copy.
 
 Three architectures, and when each applies:
 
-- **Node agent (DaemonSet) — the default.** One agent per node tails all
-  containers' stdout. Zero per-app change, lowest overhead, the standard.
-- **Sidecar.** An extra logging container in the Pod. Use **only** when the
-  app *cannot* log to stdout (legacy app that only writes to a file inside
-  the container, or you must split one stream into several). Cost: a sidecar
-  per Pod (CPU/memory/complexity). Not the default — a last resort.
-- **App ships directly.** The app library writes to the log backend over the
-  network itself. Couples the app to the logging vendor and loses logs
-  during app crashes/buffering — generally an anti-pattern.
+- **Node agent (DaemonSet), the default.** One agent per node reads every
+container's output. No per-app change, lowest overhead.
+- **Sidecar.** An extra logging container in the Pod. Use it only when the app
+*cannot* write stdout, for example a legacy app that writes a file inside the
+container. It costs a container per Pod, so it is the last resort.
+- **App ships directly.** The app library sends logs to the backend over the
+network itself. This couples the app to the vendor, and logs are lost when the
+app crashes with a batch still buffered. Generally an anti-pattern.
+
+## Threats and controls
+
+| Threat | Control taught here | Goes deeper |
+|---|---|---|
+| A secret or personal data reaches stdout | The service logs IDs and error classes, never values. The agent replaces a token and a URL password before the push. | [03.02](../03-config-and-storage/02-secrets.md) |
+| Anyone who can reach the store reads all of it | Loki takes writes from the agent and reads from Grafana only, enforced by a NetworkPolicy. | [02.06](../02-networking/06-network-policies.md) |
+| The agent can read every namespace's logs | A ClusterRole with `pods` read and `pods/log` get, no hostPath, namespace at `restricted`. The file-tailing variant and its exception are in [01.06](../01-core-workloads/06-daemonsets.md). | [05.01](../05-security/01-authn-authz-rbac.md) |
+| A chart grants more than the agent needs | The values turn off the chart's sidecar, which would read every ConfigMap and Secret, and the chart's own RBAC. | [05.01](../05-security/01-authn-authz-rbac.md) |
+| Whoever holds `pods/log` reads the raw lines | Namespaced read grants to named ServiceAccounts only. Removal at the source is the real fix. | [05.01](../05-security/01-authn-authz-rbac.md) |
+| Old logs keep a leaked value readable | Seven-day retention in the Loki values. | (none) |
 
 ## Diagrams
 
-### A log line: container → stdout → CRI file → node agent → store (Mermaid)
+### A log line: container to stdout to CRI file to agent to store (Mermaid)
 
 ```mermaid
 flowchart LR
     subgraph node["Each node"]
-      app["catalog container<br/>slog JSON -> stdout"]
-      cri["containerd (CRI)<br/>writes /var/log/pods/.../0.log"]
-      agent["log agent (DaemonSet)<br/>tail + parse + add k8s metadata"]
+      app["catalog container<br/>slog JSON to stdout"]
+      cri["containerd (CRI)<br/>raw file in /var/log/pods"]
+      agent["alloy (DaemonSet)<br/>reads pods/log, redacts"]
     end
+    api["kube-apiserver<br/>RBAC on pods/log"]
     subgraph store["logging namespace"]
-      loki["Loki<br/>(label-indexed log store)"]
+      loki["Loki<br/>NetworkPolicy: agent writes, Grafana reads"]
     end
-    graf["Grafana<br/>(LogQL: query by label)"]
-    kctl["kubectl logs<br/>(one Pod, no history)"]
+    graf["Grafana<br/>(LogQL)"]
+    kctl["kubectl logs<br/>(raw line, RBAC on pods/log)"]
 
     app --> cri
-    cri --> agent
     cri -.-> kctl
+    api -->|log stream| agent
     agent -->|push| loki
     graf -->|query| loki
 ```
@@ -94,294 +112,1007 @@ flowchart LR
 ### Logging architecture options (ASCII)
 
 ```
- OPTION A — NODE AGENT (DaemonSet)         <- default, use this
+ OPTION A: NODE AGENT (DaemonSet)            <- default, use this
    app -> stdout -> CRI file -> [agent per node] -> store
-   + no app change  + 1 agent/node  + survives Pod death
-   - agent needs node-level read of /var/log (trusted system component)
+   + no app change  + 1 agent per node  + survives Pod death
+   - the agent reads every namespace's logs: a privileged position, so it
+     needs the strictest RBAC and the tightest store access
 
- OPTION B — SIDECAR
+ OPTION B: SIDECAR
    app -> file in Pod -> [sidecar in same Pod] -> store
-   + works for apps that can't use stdout
-   - +1 container PER POD (cost, complexity); only when A impossible
+   + works for apps that cannot use stdout
+   - one more container per Pod (cost, complexity); only when A is impossible
 
- OPTION C — APP SHIPS DIRECTLY
+ OPTION C: APP SHIPS DIRECTLY
    app --(vendor SDK over network)--> store
-   - couples app to backend; logs lost on crash/buffer; anti-pattern
+   - couples the app to the backend; logs lost on crash or buffer; anti-pattern
 
- WHY NOT log to a file inside the container:
-   ephemeral FS dies with the Pod; readOnlyRootFilesystem (Part 05 ch.02)
-   forbids it anyway; nothing tails it. stdout is the contract.
+ WHY NOT A FILE INSIDE THE CONTAINER:
+   the writable layer dies with the Pod; readOnlyRootFilesystem (Part 05
+   ch.02) forbids it anyway; nothing tails it. stdout is the contract.
 ```
 
 ## Hands-on with the Bookstore
 
 **Assumed working directory: the guide repo root (`full-guide/`).**
 
-We will: (1) confirm the Bookstore already logs structured JSON to stdout;
-(2) install **Loki** + a **Grafana Alloy** (the current Grafana log agent;
-Promtail's successor) DaemonSet into a `logging` namespace; (3) query a single
-Bookstore request by label in Grafana.
+The output in this chapter came from a lab cluster whose name differs from
+yours, and from namespaces with a different name prefix. Everything else is
+verbatim. The lab script `examples/security-lab/labs/06-02.sh` runs these
+steps on a kind cluster you own and keeps the transcript in
+`examples/security-lab/evidence/06-02.txt`.
 
-### 0. Prerequisites (self-bootstrapping)
+We will: (1) see what the services already write; (2) show what the app does
+with a value it should never log; (3) remove values at the source, then at the
+agent; (4) run Loki and an Alloy agent that reads through the API; (5) query
+one request; (6) show the denied paths; (7) show what a log reader can see.
 
-Bring up the cluster + the Bookstore exactly as in
-[ch.01 step 0](01-observability-metrics.md) (namespace → SAs → config/secret →
-priorityclasses → catalog/orders → Services; images built and `kind load`ed).
-If you did ch.01, the cluster is ready and Grafana is already installed (we
-reuse the ch.01 Grafana). If not, install just Grafana:
+### 0. Prerequisites
 
-```sh
-helm repo add grafana https://grafana.github.io/helm-charts && helm repo update
-```
-
-### 1. See what the app already emits
-
-The Go services log JSON to stdout with `log/slog` (one line per event,
-machine-parseable). No app change is needed — verify it:
+Bring up the Bookstore as the earlier chapters did: the `bookstore` namespace
+with ServiceAccounts, config, redis, postgres, catalog, orders, the Services
+and the network policies. The Deployments name the Part 04 priority classes,
+so those must exist first.
 
 ```sh
-# catalog is distroless (no shell) but `kubectl logs` reads the CRI file, not
-# the container — it works regardless of the image having a shell.
-kubectl logs -n bookstore deploy/catalog --tail=5
-# e.g. {"time":"...","level":"INFO","msg":"catalog listening","addr":":8080"}
-kubectl logs -n bookstore deploy/orders  --tail=5
-# orders logs e.g. {"time":"...","level":"INFO","msg":"order placed",
-#                    "order_id":..., "book_id":..., "qty":...}
+kubectl apply -f examples/bookstore/raw-manifests/00-namespace.yaml \
+  -f examples/bookstore/raw-manifests/05-serviceaccounts-rbac.yaml \
+  -f examples/bookstore/raw-manifests/15-catalog-config.yaml \
+  -f examples/bookstore/raw-manifests/16-db-credentials.yaml
+kubectl apply -f examples/bookstore/raw-manifests/12-redis.yaml \
+  -f examples/bookstore/raw-manifests/20-postgres-statefulset.yaml \
+  -f examples/bookstore/raw-manifests/40-services.yaml \
+  -f examples/bookstore/raw-manifests/60-networkpolicy.yaml
+kubectl apply -f examples/bookstore/raw-manifests/10-catalog-deploy.yaml \
+  -f examples/bookstore/raw-manifests/14-orders-deploy.yaml
+kubectl -n bookstore rollout status deploy/catalog
+kubectl -n bookstore rollout status deploy/orders
+kubectl apply -f examples/bookstore/raw-manifests/21-db-migrate-job.yaml
+kubectl -n bookstore wait --for=condition=complete job/db-migrate
 ```
 
-Structured fields (`level`, `msg`, `order_id`, `book_id`) are what makes
-centralised logs queryable — you filter on `level="ERROR"` or pivot on
-`order_id`, not grep raw text.
+The migrate Job creates the `orders` table. Without it, orders cannot persist
+an order, so `POST /orders` fails with a 500 and writes no `order placed` line.
 
-### 2. Install Loki + an Alloy DaemonSet (own namespace)
-
-The agent runs as a **trusted system DaemonSet** in its **own** namespace —
-**not** in `bookstore`. This is the legitimate exception to Part 05's
-hardening: to read every container's log file the agent needs
-`hostPath: /var/log` and to run as a privileged-ish system component. That is
-correct for a platform log collector and exactly why it must **not** live in
-the PSA-`restricted` `bookstore` namespace (where hostPath is forbidden) — it
-is infrastructure, like node-exporter in [ch.01](01-observability-metrics.md).
+### 1. See what the services already write
 
 ```sh
-kubectl create namespace logging
-
-# Loki (single-binary mode is fine for local) — the label-indexed log store.
-helm install loki grafana/loki \
-  --namespace logging \
-  --set deploymentMode=SingleBinary \
-  --set loki.auth_enabled=false \
-  --set loki.storage.type=filesystem \
-  --set singleBinary.replicas=1 --wait
-  # (singleBinary.replicas=1 already governs the single-replica topology;
-  #  loki.commonConfig.replication_factor is redundant in SingleBinary mode.)
-
-# Grafana Alloy as a per-node DaemonSet that tails pod logs and pushes to Loki.
-# (Promtail is deprecated in favour of Alloy; the pattern is identical.)
-helm install alloy grafana/alloy \
-  --namespace logging \
-  --set controller.type=daemonset --wait
-
-# Point Grafana (installed in ch.01's monitoring ns) at Loki as a datasource,
-# or add it in the Grafana UI: Connections -> Data sources -> Loki ->
-#   URL: http://loki.logging.svc.cluster.local:3100
+kubectl logs -n bookstore deploy/catalog --tail=2
+kubectl logs -n bookstore deploy/orders --tail=2
 ```
 
-> **Why hostPath here is acceptable.** The agent's job is to read
-> `/var/log/pods` on the node — that *requires* a `hostPath` mount and node
-> access. A log collector is a trusted, audited platform component running in
-> its own namespace; it is the textbook case where the `restricted` standard
-> is intentionally not applied. The rule from Part 05 still holds for *your*
-> workloads: `bookstore` stays `enforce: restricted` and nothing app-side
-> gets a hostPath. Never relax the app namespace to make logging work — run
-> the agent beside it instead.
+Each line is one event with fixed fields: `time`, `level`, `msg`, and then the
+event's own fields. An order placed shows `order_id`, `book_id` and `qty`. The
+request body is `{"book_id":1,"qty":2}`, which holds no personal data. The
+schema stays stable, so you filter on `level` or `order_id` rather than grep
+free text.
 
-### 3. Query one Bookstore request by label
+Decide what may appear before you write any log call. The list is short:
 
-Generate traffic, then query Loki via Grafana (**Explore** → Loki). catalog is
-distroless, so drive load from a restricted-compliant ephemeral Pod (same
-pattern as [ch.01](01-observability-metrics.md)):
+- **Credentials.** Passwords, tokens, API keys, and any DSN or URL that holds
+a password.
+- **Personal data.** Names, emails, card numbers, addresses. Today's order
+request carries none. The rule still applies the day a field is added.
+- **Anything a dump would expose.** Request headers, whole environment maps,
+and whole request bodies.
+
+Log IDs, counts, durations and error classes. Those are what the queries need.
+
+### 2. A value the app should never log (deliberate)
+
+This Pod is a deliberate failure, labelled so you can tell it from the
+hardened workloads. It hands the orders service a DSN in URL form with an
+invalid escape (`%zz`). The password comes from a Secret, the way the example
+builds `DB_DSN`, so it never appears in the manifest. The service cannot parse
+the DSN and logs the error.
 
 ```sh
-kubectl run loadgen -n bookstore --rm -it --restart=Never \
-  --image=curlimages/curl:8.10.1 \
-  --overrides='{"spec":{"securityContext":{"runAsNonRoot":true,"runAsUser":65534,"seccompProfile":{"type":"RuntimeDefault"}},"containers":[{"name":"loadgen","image":"curlimages/curl:8.10.1","command":["sh","-c","for i in $(seq 1 50); do curl -s -o /dev/null http://catalog.bookstore.svc.cluster.local/books; curl -s -o /dev/null -XPOST http://orders.bookstore.svc.cluster.local/orders -d \"{\\\"book_id\\\":1,\\\"qty\\\":2}\"; done; echo done"],"securityContext":{"allowPrivilegeEscalation":false,"capabilities":{"drop":["ALL"]},"readOnlyRootFilesystem":true}}]}}'
+kubectl -n bookstore create secret generic dsn-demo \
+  --from-literal=PASSWORD=FAKE-PLANTED-PASSWORD
 ```
 
-LogQL queries (Grafana → Explore → datasource Loki):
-
-```logql
-# All catalog logs (label selectors come from the agent's k8s metadata):
-{namespace="bookstore", app="catalog"}
-
-# Only errors, parsed as JSON, across the orders tier:
-{namespace="bookstore", app="orders"} | json | level="ERROR"
-
-# Follow one order end-to-end by its structured field:
-{namespace="bookstore", app="orders"} | json | order_id=`1700000000000000000`
+```yaml
+apiVersion: v1
+kind: Pod
+metadata:
+  name: dsn-demo
+  namespace: bookstore
+  labels:
+    app: dsn-demo
+spec:
+  serviceAccountName: orders-sa
+  automountServiceAccountToken: false
+  securityContext:
+    runAsNonRoot: true
+    runAsUser: 65532
+    runAsGroup: 65532
+    seccompProfile:
+      type: RuntimeDefault
+  containers:
+    - name: orders
+      image: bookstore/orders:dev
+      securityContext:
+        allowPrivilegeEscalation: false
+        readOnlyRootFilesystem: true
+        capabilities:
+          drop: ["ALL"]
+      env:
+        - name: PORT
+          value: "8080"
+        - name: PW
+          valueFrom:
+            secretKeyRef: { name: dsn-demo, key: PASSWORD }
+        - name: DB_DSN
+          value: "postgres://app:$(PW)%zz@localhost:5432/books"
+      resources:
+        requests: { cpu: 50m, memory: 64Mi }
+        limits: { memory: 128Mi }
+      volumeMounts:
+        - name: tmp
+          mountPath: /tmp
+  volumes:
+    - name: tmp
+      emptyDir:
+        sizeLimit: 64Mi
 ```
 
-The `{namespace=..., app=...}` **labels are indexed** (cheap); the `| json`
-parse and field filters operate on the line **content** (Loki's model: index
-labels, not full text — which is why bounded labels matter here too, just like
-metric cardinality in [ch.01](01-observability-metrics.md)).
+```sh
+kubectl apply -f dsn-demo.yaml
+kubectl -n bookstore logs dsn-demo --tail=3
+```
 
-## How it works under the hood
+<!-- gate: output -->
+```text
+{"time":"2026-10-31T02:05:57.164867808Z","level":"ERROR","msg":"connect postgres","err":"cannot parse `postgres://app:xxxxxx@localhost:5432/books`: failed to parse as URL (invalid URL escape \"%zz\")"}
+```
 
-- **The runtime owns log capture.** The kubelet asks the CRI runtime
-  (containerd) to run the container; containerd redirects the container's
-  stdout/stderr through its logging driver to
-  `/var/log/pods/<NS>_<POD>_<UID>/<CONTAINER>/<RESTART_COUNT>.log` in the CRI
-  log format. The kubelet also rotates these files (`containerLogMaxSize`,
-  `containerLogMaxFiles`). `kubectl logs` is an API call the kubelet serves
-  by reading that file — there is no database behind it, which is why it has
-  no cross-Pod search and no post-deletion history.
-- **`kubectl logs --previous` reads the prior file.** On a container restart
-  the runtime starts a new `N.log`; `--previous` serves `N-1.log`. After the
-  *Pod* is deleted the directory is removed and even that is gone — the
-  motivation for shipping logs off-node.
-- **The agent does tail + enrich + push.** A node agent (Alloy/Fluent
-  Bit/Vector) watches the `/var/log/pods` tree, tails new lines, parses
-  (JSON/regex/CRI), and — crucially — joins each line to its Pod's metadata
-  by calling the API server (namespace, pod, labels, node) so logs are
-  queryable by the same labels you use elsewhere. It tracks a byte offset per
-  file so a restart resumes without dup/loss, and buffers + retries so a
-  brief store outage doesn't drop logs. One agent per node (DaemonSet) means
-  cost scales with nodes, not Pods.
-- **Loki indexes labels, not content.** Unlike Elasticsearch (full-text
-  index of every line), Loki indexes only the **label set** per stream and
-  stores compressed log chunks in object storage; queries are
-  *label-selector then brute-scan over the matched chunks*. Far cheaper to
-  run; the trade-off is that **labels must be low-cardinality** — a label per
-  request ID would explode the index exactly like a high-cardinality
-  Prometheus label ([ch.01](01-observability-metrics.md)).
-- **Structured logs are the contract.** Because the agent can parse JSON into
-  fields, `level=ERROR` / `order_id=...` become first-class filters. Plain
-  unstructured text forces fragile regex at query time. `log/slog`'s JSON
-  handler (already used) emits a stable schema; adding a request/trace ID
-  field is what makes a single request greppable across services — the bridge
-  to tracing ([ch.03](03-tracing.md)).
-- **Multiline.** A stack trace is many stdout lines but one logical event.
-  Agents reassemble them with a multiline rule (a "new event" start pattern,
-  e.g. the timestamp/JSON-`{` prefix). Logging JSON sidesteps most of this:
-  one event = one line by construction.
+The planted password does not appear. The driver masked it: the error shows
+`xxxxxx` in its place. That is the library's behaviour in this version, not a
+control you own. The rule is the one that holds for every version: the service
+must not put a DSN in a log call at all. The example services log the driver's
+error on their connect paths, and that is safe here only because of the
+masking.
+
+### 3. Remove values at the source first
+
+The app is the only place that knows what a value is, so it removes values
+first. Four habits do most of the work:
+
+- **Log IDs and error classes.** Log `order_id`, not the whole order. Log
+"dsn parse failed" and the class of error, not the text that carries the
+input.
+- **Keep secrets as references.** Env vars that come from a Secret stay
+references. Never copy a secret value into a log field, a config string or a
+debug print.
+- **Never log input "for debugging".** The debug line is the one that ships to
+production. If an error can echo its input, log a fixed message and keep the
+error text out.
+- **Clean the node file at the source.** The runtime writes what the app
+wrote. Only the app can make the node file safe, so this habit matters even
+when the agent also redacts.
+
+### 4. Run a log agent that reads through the API
+
+#### 4.1 The namespace, the agent's RBAC and the network path
+
+The `logging` namespace enforces `restricted`, like every other namespace in
+this guide. The agent needs no exception. It reads pod logs through the API
+server, so it needs no hostPath and no node file access.
+
+```yaml
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: logging
+  labels:
+    pod-security.kubernetes.io/enforce: restricted
+    pod-security.kubernetes.io/enforce-version: latest
+    pod-security.kubernetes.io/audit: restricted
+    pod-security.kubernetes.io/audit-version: latest
+    pod-security.kubernetes.io/warn: restricted
+    pod-security.kubernetes.io/warn-version: latest
+---
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: alloy
+  namespace: logging
+automountServiceAccountToken: true   # the agent is an API client: its own token
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: alloy-log-reader
+rules:
+  - apiGroups: [""]
+    resources: ["pods"]
+    verbs: ["get", "list", "watch"]
+  - apiGroups: [""]
+    resources: ["pods/log"]
+    verbs: ["get"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: alloy-log-reader
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: alloy-log-reader
+subjects:
+  - kind: ServiceAccount
+    name: alloy
+    namespace: logging
+```
+
+Three points about that RBAC:
+
+- The reach is **every namespace**. `pods/log` in a ClusterRole reads every
+container's log, the way a hostPath collector reads every file. So the store
+holds everything logged, and it needs the same care as the node. Nothing in
+the rule reads Secrets, ConfigMaps or Nodes.
+- The ServiceAccount is dedicated and sets `automountServiceAccountToken:
+  true`
+explicitly, which the baseline allows for a workload that calls the API.
+- The chart's own ClusterRole would add rules for nodes and node metrics. The
+values below turn it off, so this one is the only grant.
+
+The NetworkPolicies lock the namespace. Loki accepts writes from the agent and
+reads from Grafana in `monitoring`. Nothing else reaches port 3100.
+
+```yaml
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: default-deny-all
+  namespace: logging
+spec:
+  podSelector: {}
+  policyTypes: ["Ingress", "Egress"]
+---
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: allow-dns-egress
+  namespace: logging
+spec:
+  podSelector: {}
+  policyTypes: ["Egress"]
+  egress:
+    - to:
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: kube-system
+          podSelector:
+            matchLabels:
+              k8s-app: kube-dns
+      ports:
+        - { protocol: UDP, port: 53 }
+        - { protocol: TCP, port: 53 }
+---
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: allow-agent-egress
+  namespace: logging
+spec:
+  podSelector:
+    matchLabels:
+      app.kubernetes.io/name: alloy
+  policyTypes: ["Egress"]
+  egress:
+    - to:                                  # push to Loki, nothing else here
+        - podSelector:
+            matchLabels:
+              app.kubernetes.io/name: loki
+      ports:
+        - { protocol: TCP, port: 3100 }
+    - ports:                               # read logs from the API server
+        - { protocol: TCP, port: 443 }     # no `to`: the API server sits on a
+        - { protocol: TCP, port: 6443 }    # node address that differs per cluster
+---
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: allow-reads-to-loki
+  namespace: logging
+spec:
+  podSelector:
+    matchLabels:
+      app.kubernetes.io/name: loki
+  policyTypes: ["Ingress"]
+  ingress:
+    - from:
+        - podSelector:                     # the agent writes
+            matchLabels:
+              app.kubernetes.io/name: alloy
+        - namespaceSelector:               # Grafana reads, from monitoring only
+            matchLabels:
+              kubernetes.io/metadata.name: monitoring
+          podSelector:
+            matchLabels:
+              app.kubernetes.io/name: grafana
+      ports:
+        - { protocol: TCP, port: 3100 }
+```
+
+The baseline fields for these workloads are explained in
+[01.01](../01-core-workloads/01-pods.md#baseline). Save the two blocks above
+as `logging-base.yaml` and apply it.
+
+```sh
+kubectl apply -f logging-base.yaml
+```
+
+#### 4.2 Loki and the Alloy agent
+
+Loki runs in single-binary mode. The values pin its image by digest, run it as
+the UID the image declares, and turn off everything this lab does not use.
+
+```yaml
+deploymentMode: SingleBinary
+loki:
+  image:
+    digest: "sha256:44148ad243c07957113baea950ee5ba9b0c8eff8d7e38ff3cc1c0af705790945"  # 3.6.11
+  auth_enabled: false
+  podSecurityContext:
+    runAsNonRoot: true
+    runAsUser: 10001
+    runAsGroup: 10001
+    fsGroup: 10001
+    seccompProfile:
+      type: RuntimeDefault
+  commonConfig:
+    replication_factor: 1
+  schemaConfig:
+    configs:
+      - from: "2024-04-01"
+        store: tsdb
+        object_store: filesystem
+        schema: v13
+        index:
+          prefix: loki_index_
+          period: 24h
+  storage:
+    type: filesystem
+  limits_config:
+    retention_period: 168h
+  compactor:
+    retention_enabled: true
+    delete_request_store: filesystem
+singleBinary:
+  replicas: 1
+  persistence:
+    size: 1Gi
+  resources:
+    requests:
+      cpu: 100m
+      memory: 256Mi
+    limits:
+      memory: 1Gi
+write:
+  replicas: 0
+read:
+  replicas: 0
+backend:
+  replicas: 0
+gateway:
+  enabled: false
+chunksCache:
+  enabled: false
+resultsCache:
+  enabled: false
+minio:
+  enabled: false
+lokiCanary:
+  enabled: false
+test:
+  enabled: false
+rbac:
+  create: false
+serviceAccount:
+  automountServiceAccountToken: false
+sidecar:
+  rules:
+    enabled: false
+monitoring:
+  selfMonitoring:
+    enabled: false
+  lokiCanary:
+    enabled: false
+  dashboards:
+    enabled: false
+  rules:
+    enabled: false
+  serviceMonitor:
+    enabled: false
+```
+
+Four of those choices are security decisions, not defaults you can ignore:
+
+- **`auth_enabled: false`.** Loki has no user accounts in this setup, so no
+identity is checked on a query. The NetworkPolicy above is the boundary: who
+reaches port 3100 reads the logs. Put an authenticating proxy in front before
+anyone outside the cluster reads them.
+- **The sidecar is off.** The chart's rule sidecar watches ConfigMaps and
+Secrets, and the chart grants it read on both in every namespace. This lab
+uses no ruler, so the grant is not needed.
+- **Retention is 168 hours.** A value that leaks into the store stays readable
+until the compactor deletes it, so the window is the exposure.
+- **The image's user.** Loki's image declares UID 10001, and the pod uses it.
+
+The Alloy agent is a DaemonSet. Its config reads only the pods on its own
+node, redacts two patterns, and pushes to Loki.
+
+```yaml
+image:
+  digest: "sha256:8ab871206bd2d8f89277f53abffee5f452a293980788d52f85fa183a87a505a4"  # v1.21.3
+global:
+  podSecurityContext:
+    runAsNonRoot: true
+    runAsUser: 473                       # the alloy account in the image
+    runAsGroup: 473
+    seccompProfile:
+      type: RuntimeDefault
+controller:
+  type: daemonset
+  volumes:
+    extra:
+      - name: tmp
+        emptyDir: {}
+alloy:
+  enableReporting: false                 # no usage reports leave the cluster
+  securityContext:
+    allowPrivilegeEscalation: false
+    readOnlyRootFilesystem: true
+    capabilities:
+      drop: ["ALL"]
+  mounts:
+    extra:
+      - name: tmp
+        mountPath: /tmp
+  resources:
+    requests:
+      cpu: 50m
+      memory: 128Mi
+    limits:
+      memory: 256Mi
+  configMap:
+    content: |
+      discovery.kubernetes "pods" {
+        role = "pod"
+        selectors {
+          role  = "pod"
+          field = "spec.nodeName=" + sys.env("K8S_NODE_NAME")
+        }
+      }
+
+      discovery.relabel "pods" {
+        targets = discovery.kubernetes.pods.targets
+
+        rule {
+          source_labels = ["__meta_kubernetes_namespace"]
+          target_label  = "namespace"
+        }
+        rule {
+          source_labels = ["__meta_kubernetes_pod_name"]
+          target_label  = "pod"
+        }
+        rule {
+          source_labels = ["__meta_kubernetes_pod_container_name"]
+          target_label  = "container"
+        }
+        rule {
+          source_labels = ["__meta_kubernetes_pod_label_app"]
+          target_label  = "app"
+        }
+      }
+
+      loki.source.kubernetes "pods" {
+        targets    = discovery.relabel.pods.output
+        forward_to = [loki.process.redact.receiver]
+      }
+
+      loki.process "redact" {
+        stage.replace {
+          expression = "\"token\":\"([^\"]*)\""
+          replace    = "[REDACTED]"
+        }
+        stage.replace {
+          expression = "://[^:/@\\s]+:([^@\\s]+)@"
+          replace    = "[REDACTED]"
+        }
+        forward_to = [loki.write.loki.receiver]
+      }
+
+      loki.write "loki" {
+        endpoint {
+          url = "http://loki.logging.svc.cluster.local:3100/loki/api/v1/push"
+        }
+      }
+rbac:
+  create: false
+serviceAccount:
+  create: false
+  name: alloy
+configReloader:
+  enabled: false
+```
+
+The agent's `runAsUser` comes from the image's own `alloy` account, UID 473.
+The image declares no user, so the pod sets one. Reading the node's pods needs
+no node access, so the namespace stays at `restricted`.
+
+The redaction runs in the agent, after the line leaves the node and before it
+reaches the store. It is the second line of defence, and step 3 is the first.
+The first pattern replaces a JSON `token` value. The second replaces the
+password in a URL.
+
+Install the store and the agent:
+
+```sh
+helm repo add grafana https://grafana.github.io/helm-charts
+helm install loki grafana/loki --version 7.5.0 --namespace logging \
+  -f loki-values.yaml --wait
+helm install alloy grafana/alloy --version 1.15.0 --namespace logging \
+  -f alloy-values.yaml --wait
+kubectl get ds -n logging alloy
+kubectl get pods -n logging
+```
+
+<!-- gate: output -->
+```text
+NAME    DESIRED   CURRENT   READY   UP-TO-DATE   AVAILABLE   NODE SELECTOR   AGE
+alloy   1         1         1       1            1           <none>          65s
+NAME          READY   STATUS    RESTARTS   AGE
+alloy-s4pt6   1/1     Running   0          65s
+loki-0        1/1     Running   0          2m10s
+```
+
+Check the agent's reach with the API, not by trusting the manifest:
+
+```sh
+kubectl auth can-i get pods/log -n bookstore --as=system:serviceaccount:logging:alloy
+kubectl auth can-i list pods -n bookstore --as=system:serviceaccount:logging:alloy
+kubectl auth can-i create pods -n bookstore --as=system:serviceaccount:logging:alloy
+kubectl auth can-i get secrets -n bookstore --as=system:serviceaccount:logging:alloy
+kubectl auth can-i get pods/log -n logging --as=system:serviceaccount:logging:alloy
+```
+
+<!-- gate: output -->
+```text
+yes
+yes
+no
+no
+yes
+```
+
+The agent reads logs and lists pods. It cannot create Pods or read Secrets, in
+any namespace.
+
+### 5. Plant a fake secret, and see what the store keeps
+
+This Pod stands in for an app that logs a token and a DSN with a password. It
+is deliberately bad, and it runs at `restricted` like everything else. It
+writes one line every five seconds. The values are fake.
+
+```yaml
+apiVersion: v1
+kind: Pod
+metadata:
+  name: leaky-app
+  namespace: bookstore
+  labels:
+    app: leaky-app
+spec:
+  automountServiceAccountToken: false
+  securityContext:
+    runAsNonRoot: true
+    runAsUser: 65534
+    runAsGroup: 65534
+    seccompProfile:
+      type: RuntimeDefault
+  containers:
+    - name: app
+      image: busybox@sha256:73aaf090f3d85aa34ee199857f03fa3a95c8ede2ffd4cc2cdb5b94e566b11662  # busybox:1.36
+      command:
+        - sh
+        - -c
+        - 'while true; do echo "{\"level\":\"INFO\",\"msg\":\"upstream call\",\"token\":\"FAKE-PLANTED-TOKEN\",\"dsn\":\"postgres://app:FAKE-PLANTED-PASSWORD@localhost:5432/books\"}"; sleep 5; done'
+      securityContext:
+        allowPrivilegeEscalation: false
+        readOnlyRootFilesystem: true
+        capabilities:
+          drop: ["ALL"]
+      resources:
+        requests: { cpu: 10m, memory: 16Mi }
+        limits: { memory: 64Mi }
+```
+
+```sh
+kubectl apply -f leaky-app.yaml
+kubectl -n bookstore logs leaky-app --tail=1
+```
+
+<!-- gate: output -->
+```text
+{"level":"INFO","msg":"upstream call","token":"FAKE-PLANTED-TOKEN","dsn":"postgres://app:FAKE-PLANTED-PASSWORD@localhost:5432/books"}
+```
+
+`kubectl logs` shows the raw line. The node file was never redacted, and that
+is why the source matters. Now query the store. The lab has no Grafana, so the
+query goes to the Loki API through a port-forward. Grafana's Explore sends the
+same LogQL.
+
+```sh
+kubectl -n logging port-forward svc/loki 3100:3100 &
+curl -sG http://127.0.0.1:3100/loki/api/v1/query_range \
+  --data-urlencode 'query={namespace="bookstore", app="leaky-app"} |= "FAKE-PLANTED-PASSWORD"' \
+  --data-urlencode 'since=30m' | jq '[.data.result[].values[]] | length'
+curl -sG http://127.0.0.1:3100/loki/api/v1/query_range \
+  --data-urlencode 'query={namespace="bookstore", app="leaky-app"} |= "FAKE-PLANTED-TOKEN"' \
+  --data-urlencode 'since=30m' | jq '[.data.result[].values[]] | length'
+curl -sG http://127.0.0.1:3100/loki/api/v1/query_range \
+  --data-urlencode 'query={namespace="bookstore", app="leaky-app"} |= "REDACTED"' \
+  --data-urlencode 'since=30m' --data-urlencode 'limit=1' | jq -r '.data.result[].values[][1]'
+```
+
+<!-- gate: output -->
+```text
+0
+0
+```
+
+The redacted line, from the same query for the word REDACTED:
+
+<!-- gate: output -->
+```text
+{"level":"INFO","msg":"upstream call","token":"[REDACTED]","dsn":"postgres://app:[REDACTED]@localhost:5432/books"}
+```
+
+Both secret strings are absent from the store, and the line is there with its
+redactions. The store never saw the raw value. The node file still has it, so
+anyone with `pods/log` on that namespace still sees it, which step 7 shows.
+
+### 6. One request by label and by a field of the line
+
+Generate traffic from a Pod labelled `app: storefront`. The storefront is the
+real caller of orders, so this Pod gets the same network path the storefront
+has.
+
+```yaml
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: loadgen
+  namespace: bookstore
+spec:
+  backoffLimit: 0
+  template:
+    metadata:
+      labels:
+        app: storefront
+    spec:
+      restartPolicy: Never
+      automountServiceAccountToken: false
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 65534
+        runAsGroup: 65534
+        seccompProfile:
+          type: RuntimeDefault
+      containers:
+        - name: loadgen
+          image: curlimages/curl@sha256:d9b4541e214bcd85196d6e92e2753ac6d0ea699f0af5741f8c6cccbfcf00ef4b  # curlimages/curl:8.10.1
+          command:
+            - sh
+            - -c
+            - 'for i in $(seq 1 20); do curl -s -o /dev/null -XPOST http://orders.bookstore.svc.cluster.local/orders -H "Content-Type: application/json" -d "{\"book_id\":1,\"qty\":2}"; done; echo done'
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities:
+              drop: ["ALL"]
+          resources:
+            requests: { cpu: 10m, memory: 16Mi }
+            limits: { memory: 64Mi }
+```
+
+```sh
+kubectl apply -f loadgen.yaml
+kubectl -n bookstore wait --for=condition=complete job/loadgen --timeout=180s
+curl -sG http://127.0.0.1:3100/loki/api/v1/query_range \
+  --data-urlencode 'query={namespace="bookstore", app="orders"} | json | msg="order placed"' \
+  --data-urlencode 'since=30m' --data-urlencode 'limit=3' | jq -r '.data.result[].values[][1]'
+curl -sG http://127.0.0.1:3100/loki/api/v1/query \
+  --data-urlencode 'query=sum by (level) (count_over_time({namespace="bookstore", app="orders"} | json [30m]))' \
+  | jq -r '.data.result[] | "\(.metric.level) \(.value[1])"'
+```
+
+<!-- gate: output -->
+```text
+{"time":"2026-10-31T02:09:36.603258553Z","level":"INFO","msg":"order placed","order_id":17,"book_id":1,"qty":2}
+{"time":"2026-10-31T02:09:36.570666227Z","level":"INFO","msg":"order placed","order_id":16,"book_id":1,"qty":2}
+{"time":"2026-10-31T02:09:36.54732799Z","level":"INFO","msg":"order placed","order_id":15,"book_id":1,"qty":2}
+```
+
+The level counts for the same stream, from the instant query:
+
+<!-- gate: output -->
+```text
+INFO 23
+WARN 11
+```
+
+Labels are cheap and content is searched. `namespace`, `app`, `pod` and
+`container` are labels, so the store indexes them. `order_id` lives in the
+line, so `| json` filters it at query time. A label per request would create
+one stream per request and exhaust the index, just as a per-request Prometheus
+label would ([ch.01](01-observability-metrics.md)).
+
+### 7. Who can reach the store, and who can read the raw lines
+
+Two Pods are denied. One is in a namespace with no policies of its own. The
+other is labelled `app: other` in the Bookstore, where default-deny egress
+applies. Both should time out with curl's exit code 28.
+
+```sh
+kubectl create namespace client
+kubectl label namespace client pod-security.kubernetes.io/enforce=restricted
+```
+
+```yaml
+apiVersion: v1
+kind: Pod
+metadata:
+  name: probe-client
+  namespace: client
+  labels:
+    app: client
+spec:
+  automountServiceAccountToken: false
+  securityContext:
+    runAsNonRoot: true
+    runAsUser: 65534
+    runAsGroup: 65534
+    seccompProfile:
+      type: RuntimeDefault
+  restartPolicy: Never
+  containers:
+    - name: probe
+      image: curlimages/curl@sha256:d9b4541e214bcd85196d6e92e2753ac6d0ea699f0af5741f8c6cccbfcf00ef4b  # curlimages/curl:8.10.1
+      command: ["sh", "-c", "curl -s -m 5 -o /dev/null -w 'status=%{http_code}\\n' http://loki.logging.svc.cluster.local:3100/ready; echo rc=$?"]
+      securityContext:
+        allowPrivilegeEscalation: false
+        readOnlyRootFilesystem: true
+        capabilities:
+          drop: ["ALL"]
+      resources:
+        requests: { cpu: 10m, memory: 16Mi }
+        limits: { memory: 64Mi }
+```
+
+The Bookstore probe is the same Pod with `app: other` in the `bookstore`
+namespace. Apply both.
+
+```sh
+kubectl apply -f probe-client.yaml -f probe-bookstore.yaml
+kubectl -n client logs probe-client
+kubectl -n bookstore logs probe-bookstore
+```
+
+<!-- gate: output -->
+```text
+status=000
+rc=28
+status=000
+rc=28
+```
+
+Those two denials are the two boundaries: the store refuses a caller it has no
+rule for, and the Bookstore refuses to call out to a store it has no rule for.
+A policy that allowed the whole cluster would make that first line disappear.
+
+Now the readers. A log reader is anyone who holds `pods/log`. Grant it with a
+Role in one namespace, to one named ServiceAccount.
+
+```yaml
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: log-reader
+  namespace: bookstore
+automountServiceAccountToken: false
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: log-reader
+  namespace: bookstore
+rules:
+  - apiGroups: [""]
+    resources: ["pods", "pods/log"]
+    verbs: ["get", "list"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: log-reader
+  namespace: bookstore
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: Role
+  name: log-reader
+subjects:
+  - kind: ServiceAccount
+    name: log-reader
+    namespace: bookstore
+```
+
+```sh
+kubectl apply -f log-reader.yaml
+kubectl auth can-i get pods/log -n bookstore --as=system:serviceaccount:bookstore:log-reader
+kubectl auth can-i get pods/log -n logging --as=system:serviceaccount:bookstore:log-reader
+kubectl auth can-i get secrets -n bookstore --as=system:serviceaccount:bookstore:log-reader
+kubectl -n bookstore logs leaky-app --tail=1 --as=system:serviceaccount:bookstore:log-reader
+```
+
+<!-- gate: output -->
+```text
+yes
+no
+no
+```
+
+The raw line, read with that identity:
+
+<!-- gate: output -->
+```text
+{"level":"INFO","msg":"upstream call","token":"FAKE-PLANTED-TOKEN","dsn":"postgres://app:FAKE-PLANTED-PASSWORD@localhost:5432/books"}
+```
+
+The reader sees the raw line, the planted password included, because the node
+holds it. That is the reach of `pods/log`. The fix is the one in step 3: the
+app does not write the value. Scoping the Role to one namespace limits who
+sees it, and the agent's ClusterRole, which is wider, is the reason the store
+needs the tight network path above.
+
+Clean up:
+
+```sh
+helm uninstall alloy -n logging
+helm uninstall loki -n logging
+kubectl delete clusterrolebinding alloy-log-reader loki-clusterrolebinding
+kubectl delete clusterrole alloy-log-reader loki-clusterrole
+kubectl delete namespace logging client
+kubectl delete -f log-reader.yaml -f loadgen.yaml -f leaky-app.yaml -f dsn-demo.yaml
+```
 
 ## Production notes
 
-> **In production:** the app logs **structured JSON to stdout and nothing
-> else** — no log files in the container, no log rotation logic in the app,
-> no logging-vendor SDK in the request path. `readOnlyRootFilesystem: true`
-> (Part 05 ch.02, already on every Bookstore Go service) actively enforces
-> "no in-container log files". The node agent + store is the platform's
-> responsibility, decoupled from the app.
+> **In production:** the choice of store and agent changes, not the model.
+> **EKS**: a Fluent Bit DaemonSet ships to CloudWatch Logs or OpenSearch.
+> **GKE**: Cloud Logging is on by default and the node agent is managed for
+> you. **AKS**: Azure Monitor with Container Insights. All of them consume
+> stdout and stderr, so the "JSON to stdout" contract is portable. Only the
+> backend and the query language change. The access rules in steps 4 and 7
+> still apply to each backend.
 
-> **In production:** run the agent as a **trusted DaemonSet in its own
-> namespace** with the node access it needs — never relax the application
-> namespace's Pod Security to accommodate logging. The Bookstore namespace
-> stays `enforce: restricted`; the collector lives beside it, like
-> node-exporter.
+> **In production:** decide retention and cost deliberately. Logs are usually
+> the largest telemetry stream. Set retention per tenant, and sample or drop
+> chatty debug lines in the agent. Put a correlation or trace ID on every line
+> and carry it across services with W3C `traceparent` ([ch.03](03-tracing.md)),
+> so "every log for the request that failed" is one query.
 
-> **In production:** managed logging changes the *store/agent*, not the
-> model. **EKS**: Fluent Bit DaemonSet → CloudWatch Logs (or OpenSearch);
-> **GKE**: Cloud Logging is on by default (the node agent is managed for
-> you); **AKS**: Azure Monitor / Container Insights. All consume
-> stdout/stderr — your "log JSON to stdout" contract is portable; only the
-> backend and query language change.
+## How it works under the hood
 
-> **In production:** decide **retention, cost and PII** deliberately. Logs
-> are usually the largest and most expensive telemetry stream; set
-> per-tenant retention, sample or drop chatty debug lines at the agent, and
-> **never log secrets/PII** (tokens, card numbers, personal data) — once in
-> the store it is an exfiltration and compliance problem. Redact at the app
-> or scrub at the agent.
-
-> **In production:** put a **correlation/trace ID** on every log line and
-> propagate it across services (W3C `traceparent`, [ch.03](03-tracing.md)).
-> "Show me every log for the request that failed" is impossible without it
-> and trivial with it — it is the join key between logs, traces and metrics.
+- **The runtime owns capture.** The kubelet asks containerd to run the
+container, and containerd writes its stdout and stderr to
+`/var/log/pods/<NS>_<POD>_<UID>/<CONTAINER>/<RESTART_COUNT>.log` in the CRI
+format. The kubelet rotates these files (`containerLogMaxSize`,
+`containerLogMaxFiles`). `kubectl logs` is an API call the kubelet serves by
+reading that file. There is no database behind it.
+- **`kubectl logs --previous` reads the prior file.** On a restart the runtime
+starts a new `N.log`, and `--previous` serves `N-1.log`. After the Pod is
+deleted the directory is removed, which is the reason to ship logs off the
+node.
+- **The agent discovers and reads through the API.** The Alloy pipeline lists
+the pods whose `spec.nodeName` is its own node, then opens a log stream per
+container with `pods/log`. Each line gets the pod's labels. The redaction
+stages run on the stream, before the push. A collector that tails files
+instead reads `/var/log/pods` through a hostPath; that variant is in
+[01.06](../01-core-workloads/06-daemonsets.md).
+- **Loki indexes labels, not content.** Elasticsearch indexes every word of
+every line. Loki indexes only the label set of each stream and stores
+compressed chunks. A query selects streams by label and then scans the chunks.
+Cheap to run; the trade-off is that labels must stay low-cardinality.
+- **Structured logs are the contract.** A stable schema means `level` and
+`order_id` become filters. Free text forces regex at query time, and regex
+against free text is where secrets slip through unnoticed.
+- **Multiline.** A stack trace is many lines but one event. Agents rejoin them
+with a start pattern. JSON logging avoids most of this, because one event is
+one line by construction.
 
 ## Quick Reference
 
 ```sh
-kubectl logs -n <NS> deploy/<D> --tail=20 -f          # one workload, live
-kubectl logs -n <NS> <POD> -c <CONTAINER> --previous  # crashed container's prior log
-kubectl logs -n <NS> -l app=catalog --max-log-requests=10  # across replicas (best-effort)
-kubectl get ds -n logging                              # the node agent DaemonSet
+kubectl logs -n <NS> deploy/<D> --tail=20 -f            # one workload, live
+kubectl logs -n <NS> <POD> -c <CONTAINER> --previous    # the prior run's raw log
+kubectl auth can-i get pods/log -n <NS> --as=system:serviceaccount:<NS>:<SA>
+kubectl get ds -n logging alloy                         # the node agent
 ```
 
 ```logql
-{namespace="bookstore", app="catalog"}                       # by label (indexed)
-{namespace="bookstore", app="orders"} | json | level="ERROR" # parse + filter content
-sum by (level) (count_over_time({app="catalog"} | json [5m])) # log-derived metric
-```
-
-Minimal logging-agent shape (the agent is a DaemonSet; the app needs nothing):
-
-```yaml
-# Pattern only — Helm installs the real thing. The agent is a DaemonSet in its
-# OWN namespace with a hostPath read of the node log dir (trusted component):
-kind: DaemonSet            # one agent Pod per node
-spec:
-  template:
-    spec:
-      containers:
-        - name: agent       # fluent-bit / vector / grafana-alloy
-          volumeMounts:
-            - { name: varlog, mountPath: /var/log, readOnly: true }
-      volumes:
-        - name: varlog
-          hostPath: { path: /var/log }   # node log files (NOT allowed in a
-                                         # restricted app namespace — agent only)
+{namespace="bookstore", app="catalog"}                        # by label (indexed)
+{namespace="bookstore", app="orders"} | json | level="ERROR"  # parse and filter
+sum by (level) (count_over_time({app="orders"} | json [5m]))  # log-derived metric
 ```
 
 Checklist:
 
-- [ ] App logs **structured JSON to stdout** only (no in-container files)
-- [ ] Node agent runs as a DaemonSet in its **own** (non-restricted) namespace
-- [ ] App namespace stays `enforce: restricted` (no hostPath app-side)
-- [ ] Store labels are low-cardinality (no per-request label)
-- [ ] Retention + PII/secret redaction policy defined
-- [ ] A correlation/trace ID is on every line and propagated across services
+- [ ] The app logs structured JSON to stdout, IDs and error classes only
+- [ ] No DSN, token or password ever reaches a log call, even in an error path
+- [ ] The agent runs `restricted` in its own namespace, with no hostPath
+- [ ] The agent's RBAC is `pods` read and `pods/log` get, and nothing else
+- [ ] The chart's sidecar and its RBAC are off, or granted nothing
+- [ ] The store accepts writes from the agent and reads from Grafana only
+- [ ] Retention is set, and the store's labels are low-cardinality
+- [ ] Readers of `pods/log` are named ServiceAccounts or groups, scoped to a
+  namespace
 
 ## Test your understanding
 
 > Try each before opening the answer drawer. The act of trying is the exercise; the answer is the check.
 
-1. **`kubectl logs <pod>` works perfectly. Why does the chapter still insist you need a logging stack?**
+1. **`kubectl logs <pod>` works perfectly. Why does the chapter still insist
+   you need a logging stack?**
    <details><summary>Show answer</summary>
 
-   `kubectl logs` reads the node-local CRI log file for one container; it has no aggregation across replicas, no search beyond text-grep, no retention beyond the node, and the logs **vanish when the Pod is deleted** (rollout, scale-down, eviction, node recycle). "Show me every error for catalog yesterday across 12 replicas" is impossible with `kubectl logs` and trivial with Loki/Elasticsearch. See §Why this exists.
+   `kubectl logs` reads the node-local file for one container. It has no aggregation across replicas, no search beyond text, no retention beyond the node, and the logs vanish when the Pod is deleted. Step 6 is impossible with `kubectl logs` and simple with Loki.
 
    </details>
 
-2. **A junior engineer adds `log.SetOutput(os.Open("/var/log/myapp.log"))` to the Go service "for cleaner output." What breaks, and what should they do instead?**
+2. **A junior engineer writes logs to `/var/log/myapp.log` inside the
+   container "for cleaner output". What breaks, and what should they do?**
    <details><summary>Show answer</summary>
 
-   The log file lives **inside the container's ephemeral writable layer** — it disappears on every restart, the DaemonSet log agent (which tails `/var/log/pods/...` from the *node*) never sees it, and `kubectl logs` is empty. The fix is to log **JSON to stdout** (which the container runtime captures to `/var/log/pods/...` automatically). The Twelve-Factor logging rule: the app is a stream; the platform handles storage.
+   The file lives in the container's writable layer. It disappears on restart, the agent never sees it, and `kubectl logs` is empty. Log JSON to stdout. The runtime captures it, and the agent reads it from there.
 
    </details>
 
-3. **You enable Loki and ship a label `customer_id` from every request. Two days later Loki is unresponsive. What happened?**
+3. **You ship `customer_id` as a label on every request. Loki becomes
+   unresponsive. What happened?**
    <details><summary>Show answer</summary>
 
-   Loki's storage cost is roughly proportional to **active label permutations** (called "streams"). Per-customer labels create unbounded cardinality — the same trap as Prometheus ([ch.01](01-observability-metrics.md)). High-cardinality identifiers belong in the **log line body** (where they're indexed by content via `| json`), not as **labels** (which build the storage index). Keep labels low-cardinality: `namespace`, `app`, `pod`, maybe `level`.
+   Storage cost follows the number of distinct label sets, or streams. One stream per customer is unbounded cardinality, the same trap as Prometheus. Put the identifier in the line and filter with `| json`. Keep labels to `namespace`, `app`, `pod`, `container`.
 
    </details>
 
-4. **Hands-on extension — verify the ephemeral-log claim. `kubectl exec` into a pod, write to a log file (`/tmp/test.log`), then `kubectl delete pod`. Recreate the pod via the Deployment. Where did your log go?**
+4. **Hands-on extension: a service logs a bearer token in an error path. Name
+   the two controls that keep it out of the store, and say which one keeps it
+   off the node.**
    <details><summary>What you should see</summary>
 
-   Gone. The new Pod is a *new container instance* with a fresh filesystem — `/tmp/test.log` doesn't exist. Same Pod, same image, same Deployment, *zero* log carry-over. Now repeat the same experiment but write the line to stdout (`logger "hello"`/`echo hello`); after the recreate, `kubectl logs --previous` (within the brief window) and a node-level agent shipping to Loki will both still have it. That's the entire architectural argument for "JSON to stdout, store off-box".
+   Removing the value at the source keeps it off the node and out of the store. The agent's redaction keeps it out of the store only. The node file still holds the raw text, and anyone with `pods/log` reads it, as step 7 shows. So the source control is the one that matters, and the agent is the backstop.
+
+   </details>
+
+5. **A teammate asks for `pods/log` on every namespace for the whole dev
+   group, "so people can debug". What does that grant, and what would you give
+   instead?**
+   <details><summary>Show answer</summary>
+
+   It grants reading the raw line of every container in the cluster, including any token or password an app wrote. Grant `pods/log` in a Role per namespace, to the named ServiceAccount or a narrow group that needs it. Remove the values at the source so there is less to read.
 
    </details>
 
 ## Further reading
 
-- **Rosso et al., _Production Kubernetes_, ch.9 — Observability** (the
-  logging pipeline, node agents, store choices, retention/cost trade-offs as
-  a platform concern).
+- **Rosso et al., _Production Kubernetes_, ch.9: Observability** (the logging
+pipeline, node agents, store choices, and retention and cost trade-offs).
 - Official:
-  <https://kubernetes.io/docs/concepts/cluster-administration/logging/>
-  (cluster logging architecture, node-agent vs sidecar, why there is no
-  built-in cluster logging) and
-  <https://kubernetes.io/docs/concepts/cluster-administration/system-logs/>.
+<https://kubernetes.io/docs/concepts/cluster-administration/logging/> (cluster
+logging architecture, node-agent vs sidecar, and why there is no built-in
+cluster logging) and
+<https://kubernetes.io/docs/concepts/cluster-administration/system-logs/>.
