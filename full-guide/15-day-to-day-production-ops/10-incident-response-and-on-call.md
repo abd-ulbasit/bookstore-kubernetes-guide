@@ -10,7 +10,7 @@
 > postmortem next week" trap that wastes 60 % of postmortems.
 
 **Estimated time:** ~45 min read · ~90 min hands-on
-**Prerequisites:** [Part 13 ch.12](../13-grand-capstone-bookstore-platform/12-day-2-runbook-on-call-dr-chaos.md) — Part 13 runbook/on-call/postmortem foundation · [Part 11 ch.03](../06-production-readiness/01-observability-metrics.md) — SLOs that drive paging thresholds · [Part 15 ch.09](./09-hotfix-workflow-and-breakglass.md) — hotfix lane the resolve phase often invokes
+**Prerequisites:** [Part 13 ch.12](../13-grand-capstone-bookstore-platform/12-day-2-runbook-on-call-dr-chaos.md) — Part 13 runbook/on-call/postmortem foundation · [Part 06 ch.01](../06-production-readiness/01-observability-metrics.md) — SLOs that drive paging thresholds · [Part 15 ch.09](./09-hotfix-workflow-and-breakglass.md) — hotfix lane the resolve phase often invokes
 
 **You'll know after this:** • run the full lifecycle — detect → triage → resolve → learn — with the artefact that operationalizes each phase · • wire Alertmanager → PagerDuty for detect, severity matrix for triage, runbook + IC discipline for resolve, blameless postmortem for learn · • walk the `incident/` artefact tree end-to-end against a real Bookstore page · • avoid the three production traps (alerts without runbooks, services without owners, "we'll write the postmortem next week") · • measure incident maturity via on-call review weekly, MTTR per service, postmortem-completion-rate
 
@@ -101,18 +101,22 @@ The four phases visualized:
   Open the runbook (URL is in the page body). Run Step 1 (Check) of
   the runbook. Decide: is this a real incident? If yes, claim or
   declare the IC (whoever takes the IC role: type "IC: \<name\>" in
-  the incident Slack channel). Open the status-page entry.
+  the incident Slack channel). Open the status-page entry. A security
+  signal (an unexpected shell in a running container, or a credential used
+  from an unknown place) takes the compromised-workload steps in hands-on
+  section 7 before any clean-up.
 - **Phase 3 — Resolve (minutes to hours; on-call + responders).** Walk
   Steps 2-4 of the runbook (Diagnose → Mitigate). The goal is
   **mitigation**, not root-cause fix. Rollback. Scale. Patch. Three
-  example mitigations + their time-to-effect:
-  - **Rollback** (Argo Rollouts abort → previous version): 60-180
-    seconds. Always the first option if the cause is "a recent
+  example mitigations:
+  - **Rollback** (Argo Rollouts abort → previous version): usually the
+    quickest. Always the first option if the cause is "a recent
     deploy."
-  - **Scale-up** (kubectl scale deployment → more replicas): 30-90
-    seconds + Karpenter node provisioning. The mitigation for
+  - **Scale-up** (kubectl scale deployment → more replicas): quick when
+    the pods fit on existing nodes; new nodes take longer. The mitigation for
     capacity-related failures.
-  - **Patch** (ConfigMap edit → rolling restart): 2-5 minutes. The
+  - **Patch** (ConfigMap edit → rolling restart): a rolling restart after
+    the edit. The
     mitigation when a misconfiguration is the cause and rollback
     isn't viable.
   Customer-visible impact ends; status page updates to "monitoring";
@@ -123,7 +127,8 @@ The four phases visualized:
   fact). Within 5 business days: summary + customer impact + timeline
   + root cause (5 Whys) + action items + lessons + sign-off. Published
   in `#bookstore-platform-postmortems`. Action items tracked in the
-  GitHub Project board; >80 % closure rate by the quarterly review.
+  GitHub Project board, with a closure target of 80 % by the quarterly
+  review.
 
 Each phase has time-budget anti-patterns to watch:
 
@@ -134,9 +139,9 @@ Each phase has time-budget anti-patterns to watch:
   exercise quarterly.
 - **Triage anti-pattern: skipping the severity decision.** The
   on-call starts debugging without typing "P0" or "P1" anywhere; no
-  status-page entry; no IC. The defence: the incident-channel bot
-  posts "what severity?" within 30 seconds of the page and refuses
-  to advance until the on-call answers.
+  status-page entry; no IC. The defence: the severity goes into the
+  incident channel as the first message, before any debugging, and the
+  status-page entry follows from it.
 - **Resolve anti-pattern: chasing root cause during the incident.**
   The on-call says "let me figure out why" instead of "let me stop
   the bleeding." The customer pays for every minute of "let me
@@ -146,8 +151,8 @@ Each phase has time-budget anti-patterns to watch:
   Next week never comes; the incident details fade; the postmortem
   either never appears or appears 2 months late with half the
   timeline guessed. The defence: 5-business-day rule + a
-  `postmortem_overdue` P3 alert that pages the on-call primary if
-  the doc isn't published by deadline.
+  `postmortem_overdue` alert, routed as P3 to Slack and tracked by the
+  platform lead (severity-matrix.md).
 
 The most important conceptual move in this chapter: **mitigation is
 not the same as fix**. Mitigation is what stops the bleeding;
@@ -155,6 +160,14 @@ mitigation buys you the time to write the postmortem at human pace.
 The fix is in the action items. A team that conflates the two will
 either ship rushed fixes (high risk; introduces new bugs) or stay
 in the incident loop longer than necessary (high customer impact).
+
+## Threats and controls
+
+| Threat | Control | Deeper |
+|---|---|---|
+| A compromised workload keeps acting while the team debates, or a delete destroys the evidence | Isolate first with a quarantine label and a deny-all NetworkPolicy, capture what kubectl can read, then delete (hands-on section 7) | 05.08 <!-- link-later: 05.08 --> for the attack and capture beyond kubectl |
+| Routing keys or other credentials typed into the response stay in shell history or chat | Deliver them as an ExternalSecret from Vault, and rotate on exposure | [15.05](./05-production-secrets-vault-eso.md), [11.05](../11-advanced-production-patterns/05-secrets-at-scale.md) |
+| Emergency access granted during the incident and never taken back | A time-boxed breakglass role that alerts on use | [15.09](./09-hotfix-workflow-and-breakglass.md) |
 
 ## Diagrams
 
@@ -226,7 +239,7 @@ flowchart TB
     p1r2["pagerduty-p1<br/>(error urgency<br/>repeat every 1h)"]
     p2r2["pagerduty-p2<br/>(warning urgency<br/>repeat every 12h)"]
     p3r2["slack-low-priority<br/>(#bookstore-alerts)"]
-    nonefp["slack-hygiene<br/>(alert needs severity label)"]
+    nonefp["slack-default-hygiene<br/>(alert needs severity label)"]
 
     a --> route
     route --> p0r --> p0r2
@@ -252,19 +265,15 @@ flowchart TB
   routing keys; you'll need at least one PD service to receive pages.
 - Slack workspace + a Slack app with `chat:write` + `channels:manage`
   scopes (for the incident-channel-bot wire-up).
+- A SecretStore named `vault-monitoring` in `monitoring`, built the way
+  [15.05](./05-production-secrets-vault-eso.md) builds the tenant stores,
+  for the routing keys in step 2.
 
 ### 1. Apply the artefact tree
 
 ```bash
 # The tree we'll walk through.
 ls examples/bookstore-platform/incident/
-# README.md
-# pagerduty-integration.yaml      <- Alertmanager AlertmanagerConfig
-# incident-channel-bot-config.md  <- wiring (vendor-neutral)
-# severity-matrix.md              <- P0/P1/P2/P3 contract
-# postmortem-template.md          <- fuller template (5 Whys)
-# sample-postmortem-2026-04-15.md <- fully-worked example
-# oncall-handoff-template.md      <- weekly handoff
 ```
 
 The README walks the four phases and which file owns each. Read it
@@ -276,26 +285,52 @@ The `AlertmanagerConfig` CR (`monitoring.coreos.com/v1beta1`) plugs
 into the kube-prometheus-stack-installed Alertmanager:
 
 ```bash
-# Inspect the routing tree first.
+# Inspect the routing tree first. P0 goes to pagerduty-p0, P1 to
+# pagerduty-p1, P2 to pagerduty-p2 and P3 to slack-low-priority.
 yq '.spec.route.routes[] | {severity: .matchers[0].value, receiver: .receiver}' \
   examples/bookstore-platform/incident/pagerduty-integration.yaml
-# severity: P0  receiver: pagerduty-p0
-# severity: P1  receiver: pagerduty-p1
-# severity: P2  receiver: pagerduty-p2
-# severity: P3  receiver: slack-low-priority
+```
 
-# Provision the routing keys secret (placeholder values here;
-# production uses ExternalSecrets from Vault — ch.15.05).
-kubectl create secret generic pagerduty-keys -n monitoring \
-  --from-literal=p0-routing-key="<P0-32CHAR-KEY-FROM-PD>" \
-  --from-literal=p1-routing-key="<P1-32CHAR-KEY-FROM-PD>" \
-  --from-literal=p2-routing-key="<P2-32CHAR-KEY-FROM-PD>"
+Keep the routing keys out of the terminal. Vault holds them, and an
+ExternalSecret syncs them into the `pagerduty-keys` Secret that the receivers
+read. Do not use `kubectl create secret --from-literal` for this: the literal
+lands in your shell history. Store each key in Vault once, through the Vault
+UI or with `vault kv put` and the `key=@file` form, so the value stays off the
+command line. Save the block below as `pagerduty-keys-externalsecret.yaml`. It
+uses the `vault-monitoring` SecretStore from the prerequisites.
 
-# Apply the AlertmanagerConfig + sample PrometheusRule.
+```yaml
+apiVersion: external-secrets.io/v1
+kind: ExternalSecret
+metadata:
+  name: pagerduty-keys
+  namespace: monitoring
+spec:
+  refreshInterval: "1h"
+  secretStoreRef:
+    name: vault-monitoring
+    kind: SecretStore
+  target:
+    name: pagerduty-keys
+    creationPolicy: Owner
+  data:
+    - secretKey: p0-routing-key
+      remoteRef: { key: bookstore/pagerduty, property: p0-routing-key }
+    - secretKey: p1-routing-key
+      remoteRef: { key: bookstore/pagerduty, property: p1-routing-key }
+    - secretKey: p2-routing-key
+      remoteRef: { key: bookstore/pagerduty, property: p2-routing-key }
+```
+
+`ExternalSecret` is a CRD from External Secrets Operator. Until the operator
+is installed, a dry-run reports `no matches for kind "ExternalSecret"`.
+
+```bash
+kubectl apply -f pagerduty-keys-externalsecret.yaml
+kubectl -n monitoring get externalsecret pagerduty-keys
+
+# Apply the AlertmanagerConfig and the sample PrometheusRule.
 kubectl apply -f examples/bookstore-platform/incident/pagerduty-integration.yaml
-# alertmanagerconfig.monitoring.coreos.com/bookstore-pagerduty created
-# secret/pagerduty-keys configured
-# prometheusrule.monitoring.coreos.com/bookstore-sample-alerts created
 ```
 
 The `AlertmanagerConfig` is a CRD-intrinsic resource: the
@@ -346,8 +381,9 @@ test should take < 5 minutes end-to-end.
 
 ### 4. Walk a real incident end-to-end
 
-Trigger a real-shape failure: kill the `payments-gateway` deployment
-in the bookstore namespace.
+Trigger a real-shape failure on purpose: scale the `payments-gateway`
+deployment to zero in the bookstore namespace. This is a deliberate
+action for the drill; never run it against production traffic.
 
 ```bash
 # (Run in a dedicated terminal; this is the "incident" being created)
@@ -447,6 +483,104 @@ template's structure forces the conversation that closes the "the
 incoming on-call didn't know about the open issue from last week"
 anti-pattern.
 
+### 7. Isolate a compromised workload before you delete it
+
+Use this path when the signal is a security one: an unexpected shell in a
+running container, a credential used from an address you do not know, or a
+process nobody can explain. Rollback is still the usual fix for a bad
+deploy, but it deletes the pods it replaces, so run the first three steps
+before any rollback or delete. The order is isolate, capture, rotate, then
+delete. Isolation keeps the pod and its state alive. Capture reads what
+kubectl can see before anything goes away. Rotation waits for isolation, so
+the pod cannot read the new values.
+
+Keep this policy in the namespace before any incident, so that the response
+is one label. A NetworkPolicy that selects pods and lists no rules denies all
+their traffic in both directions ([Kubernetes NetworkPolicy
+docs](https://kubernetes.io/docs/concepts/services-networking/network-policies/)).
+Save the block as `quarantine-deny-all.yaml` and apply it once:
+
+```yaml
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: quarantine-deny-all
+  namespace: bookstore-platform-acme-books
+spec:
+  podSelector:
+    matchLabels:
+      quarantine: "true"
+  policyTypes:
+    - Ingress
+    - Egress
+```
+
+```bash
+kubectl apply -f quarantine-deny-all.yaml
+```
+
+Policies add up. An allow policy that also selects the pod, such as a
+namespace-wide allow with an empty `podSelector`, still lets its traffic
+through. Check the namespace for one before you rely on the quarantine.
+
+**Isolate.** Removing the `app` label takes the pod out of the Service and the
+ReplicaSet, which the bookstore manifests select on. The ReplicaSet starts a
+replacement, and the suspect pod keeps running:
+
+```bash
+NS=bookstore-platform-acme-books
+POD=suspect-pod-name   # the suspect pod's name
+kubectl -n "$NS" label pod "$POD" quarantine=true app-
+```
+
+If the image is the suspect, roll the Deployment back to a known-good digest
+([15.07](./07-rollback-playbook.md)) before you remove the label. The
+replacement starts at once, and it runs the same image otherwise.
+
+**Capture.** Save what kubectl can read before the pod restarts or goes away:
+
+```bash
+mkdir -p "evidence/$POD"
+kubectl -n "$NS" get pod "$POD" -o yaml > "evidence/$POD/pod.yaml"
+kubectl -n "$NS" describe pod "$POD" > "evidence/$POD/describe.txt"
+kubectl -n "$NS" logs "$POD" --all-containers --timestamps \
+  > "evidence/$POD/logs.txt"
+kubectl -n "$NS" get events \
+  --field-selector "involvedObject.name=$POD" > "evidence/$POD/events.txt"
+```
+
+Add `--previous` to the logs command if a container restarted. Record the
+image digest from `.status.containerStatuses[].imageID` in `pod.yaml`, not
+the tag, since a tag can move ([15.04](./04-multi-environment-promotion.md)).
+Evidence files can hold sensitive values, such as environment literals and
+tokens that reached a log line, so keep them where only the incident team can
+read them. The steps above do not capture process memory or the
+container's disk.
+That capture belongs to the attack analysis in 05.08
+<!-- link-later: 05.08 -->.
+
+**Rotate.** Rotate the credentials the pod could read, through the
+ExternalSecret path in [15.05](./05-production-secrets-vault-eso.md), so the
+values it holds stop working. Then remove the pod's ServiceAccount from its
+RoleBindings, as [05.01](../05-security/01-authn-authz-rbac.md) describes, so
+its token stops authorizing API calls. A dedicated ServiceAccount keeps this
+from touching other workloads.
+
+**Delete.** Only now:
+
+```bash
+kubectl -n "$NS" delete pod "$POD"
+```
+
+The Deployment starts a replacement from the digest it names. Pin that digest
+to one that [15.03](./03-image-signing-and-provenance.md) verified.
+
+Check that the policy holds. From a healthy pod in the namespace, send a
+request to the quarantined pod's IP with a short timeout, for example
+`curl --max-time 3`. The expected result, which this chapter has not captured,
+is usually a timeout rather than a connection refused, because most
+policy engines drop packets instead of rejecting them. The request is a deliberate test of a denial.
+
 ## How it works under the hood
 
 ### Why the severity-label-based route tree
@@ -485,7 +619,7 @@ annotation**. Without it, the page body lacks the runbook link; the
 on-call has to search for the runbook by alert name; the precious
 first 60 seconds is wasted on navigation instead of triage.
 
-The alert-hygiene review (quarterly; see ch.15.11) tags alerts that
+The alert-hygiene review (see ch.15.11) tags alerts that
 fail this check + creates a P3 action item per failing alert.
 Alerts without runbooks are not deleted (some are too new) but they
 ARE tracked.
@@ -495,8 +629,9 @@ private wiki that the on-call doesn't have access to at 3am (the
 SSO timed out; the VPN is broken; the wiki is down because the
 incident took it down). The defence: runbook URLs point to the
 GitHub repo (markdown rendered by GitHub), not Confluence/Notion;
-GitHub auth is the on-call's existing GitHub identity; GitHub never
-goes down during a self-hosted incident.
+GitHub auth is the on-call's existing GitHub identity; the repo sits
+outside your cluster, so a cluster outage does not take the runbook down
+with it.
 
 ### The inhibit rules — suppressing the cascade
 
@@ -518,45 +653,38 @@ synthetic test that triggers both a P0 region-down AND a P1
 service-latency for the same region, then verifies only the P0
 paged.
 
-### The 5-business-day postmortem deadline (why 5, not 7)
+### The 5-business-day postmortem deadline
 
-We measured. At the 7-day mark, the publish rate of postmortems we
-tracked dropped to ~40 %. At the 14-day mark, ~12 %. At the 5-day
-mark, ~78 %. **5 days is the inflection point.** Past 5, the
-incident details fade; the responders move to the next thing; the
-postmortem either never appears or appears stale.
+Five business days is a policy, and `severity-matrix.md` states it. The
+reason matches the 48-hour draft: incident details fade, and a postmortem
+written weeks later rebuilds the timeline from memory instead of recording
+it. Pick a deadline the team will meet, and make a miss visible. A deadline
+with no consequence is only a suggestion.
 
-The implementation: a `postmortem_overdue` P3 PrometheusRule that
-fires when an open incident in the tracking system (Incident.io,
-Rootly, or a custom system) has no postmortem doc + the all-clear
-timestamp is older than 5 business days. The rule pages the on-call
-primary; the on-call primary's escape hatch is "I'll write it
-tomorrow" — and the rule fires again tomorrow. The pain is
-proportional to the slip.
+The implementation: a `postmortem_overdue` rule fires when an open incident
+in the tracking system (Incident.io, Rootly, or a custom system) has no
+postmortem doc and its all-clear is more than five business days old. The
+severity matrix routes it as P3, so it reaches Slack, and the platform lead
+tracks it. It stays open until the doc is published.
 
 This is one of the few cases where **the alert is the policy**. The
 policy is "5 business days." The alert is what makes the policy
 real.
 
-> **Reconciling with Part 13 ch.12's 48-hour deadline:** Part 13
-> ch.12 introduced a 48-hour postmortem deadline; that timestamp is
-> the **draft-by** target — the incident commander has the timeline
-> + summary written within 48 hours while the details are fresh.
-> The **publish-by** target is 5 business days — when action items
-> are filed, owners assigned, and the platform lead has signed off.
-> The 48h-draft + 5-day-publish flow is the same discipline at two
-> granularities: 48h captures the raw facts before memory fades;
-> 5 days allows the deeper root-cause analysis, action-item
-> prioritisation, and sign-off that make a postmortem actionable.
+> **Reconciling with Part 13 ch.12's 48-hour deadline:** Part 13 ch.12 set
+> a 48-hour postmortem target. This chapter keeps 48 hours for the
+> **draft**: the incident commander has the timeline and summary written
+> while the details are fresh. **Publication** takes up to five business
+> days, which is the severity matrix's rule. The extra days cover
+> root-cause analysis, action-item priorities and sign-off.
 
 ### Why mitigation, not root-cause fix, during the incident
 
-The math: a P0 outage at 78 % error rate costs customers
-$1,500/minute of deferred revenue (for the bookstore example;
-generalize for your business). Every minute of "let me figure out
-why" is $1,500. A rollback that costs 90 seconds — even if the
-rollback DOESN'T fix the root cause, just patches around it —
-saves $58,500 vs. a 40-minute root-cause investigation.
+The arithmetic needs no revenue figure. Let each minute of customer impact
+cost R. A rollback that takes about one minute costs about R. A 40-minute
+root-cause investigation costs 40R before the fix lands. The rollback wins at
+any value of R, even if it only patches around the root cause. (The one
+minute and the 40 minutes are illustrative, not measured.)
 
 The root cause goes in the postmortem; the action item ships the
 real fix at human pace. The discipline is:
@@ -568,36 +696,34 @@ real fix at human pace. The discipline is:
 
 The bookstore Spring Sale incident
 ([`sample-postmortem-2026-04-15.md`](../examples/bookstore-platform/incident/sample-postmortem-2026-04-15.md))
-applied this: mitigation 1 (scale-up) at 14:19 reduced impact from
-78 % to 31 %; mitigation 2 (config patch) at 14:27 closed the
-remaining 31 %. Total mitigation time: 13 minutes. The actual root
-cause (cross-service invariant gap) was identified DURING the
-postmortem, and the fix shipped 11 days later via Action Item A1
-— exactly as the discipline prescribes.
+applied this. Its first mitigation, a scale-up, cut the error rate from
+78 % to 31 % within three minutes. Its second, a body-size limit change,
+closed the rest within five. The sample's root cause, a cross-service
+invariant that no check covered, is written up in its review section.
 
 ## Production notes
 
 > **In production:** **The "page that wasn't actionable" anti-pattern
-> is the single biggest source of on-call burnout.** An alert fires;
+> is a common source of on-call burnout.** An alert fires;
 > the on-call wakes up, opens the dashboard, and… can't tell what to
 > do. The page has no runbook URL; the alert name doesn't match any
 > documented service; the on-call ends up debugging from scratch at
 > 3am with no context.
 >
 > The defence: **every alert MUST have a `runbook_url` annotation.**
-> No exceptions. The alert-hygiene review (quarterly; ch.15.11)
+> No exceptions. The alert-hygiene review (ch.15.11)
 > catches alerts that lack the annotation and creates action items
 > to either add the runbook or delete the alert. The choice is
 > binary: an alert is either actionable (has a runbook) or it
 > shouldn't page (delete it / route to Slack-only).
 >
-> Bookstore platform v2 enforces this via a CI lint on the
-> `PrometheusRule` files: a rule without a `runbook_url` annotation
-> fails the lint. New alerts must ship with the runbook; legacy
-> alerts get a 30-day grace period.
+> The guide's example repo does not ship this lint yet. A team that
+> adopts the rule adds one to CI: a rule without a `runbook_url`
+> annotation fails the build. New alerts ship with their runbook;
+> existing alerts get a grace period that the team sets.
 
 > **In production:** **The "we didn't know who to page" gap is the
-> second biggest source of on-call confusion.** An alert fires for
+> common source of on-call confusion.** An alert fires for
 > a service; the on-call doesn't know which team owns it. The page
 > goes to the platform team by default; the platform team has to
 > figure out which application team to escalate to; 20 minutes pass
@@ -611,33 +737,25 @@ postmortem, and the fix shipped 11 days later via Action Item A1
 > the PrometheusRule's `team` label), and pages the right
 > team directly.
 >
-> The bookstore v2 ships this via Backstage's catalog (Part 11
-> ch.10): the service's `catalog-info.yaml` carries `spec.owner:
-> team-payments`, and the Alertmanager routing tree branches on
-> the team label. The chain is: PrometheusRule has `team:
-> payments` label → Alertmanager routes to the `team-payments`
-> receiver → receiver uses the `team-payments` PD routing key.
+> Part 13 ch.11 sets up the Backstage catalog, where the service's
+> `catalog-info.yaml` carries `spec.owner: team-payments`. The example
+> in this chapter routes on severity only. A team label extends it: a
+> PrometheusRule with `team: payments` routes to a `team-payments`
+> receiver, which uses that team's PD routing key.
 
 > **In production:** **The "we'll write the postmortem next week"
-> trap wastes ~60 % of postmortems.** We measured during the
-> platform v1 phase: 58 % of postmortems started after Friday of
-> the incident week never shipped. Of the remaining 42 %, the
-> median publish date was 11 business days after the all-clear —
-> well past the point of remembering the timeline accurately.
+> trap is a common way postmortems die.** Each week of delay costs
+> detail, and a draft started after the incident week is usually a
+> guess. Start the draft during the incident, as Phase 4 describes.
 >
-> The defence: **5-business-day rule + the `postmortem_overdue`
-> alert that pages the on-call primary if the deadline slips.**
-> The alert fires when an open Incident.io / Rootly incident has
-> no postmortem doc + the all-clear timestamp is older than 5
-> business days. Snoozing the alert isn't possible; the only way
-> to silence it is to publish the doc.
->
-> With this enforcement, the v2 publish rate is ~92 % on time.
-> The remaining 8 % are typically the cases where the IC is on
-> PTO; the platform lead handles the postmortem in their stead.
+> The defence: **the 5-business-day rule plus a `postmortem_overdue`
+> alert.** The alert fires when an open Incident.io / Rootly incident
+> has no postmortem doc and its all-clear is older than 5 business
+> days. Publishing the doc is what clears it. When the IC is away, the
+> platform lead writes the postmortem in their stead.
 
 > **In production:** **Status-page silence during incidents is the
-> single most common breach of customer trust.** A customer sees
+> common breach of customer trust.** A customer sees
 > an error; they refresh; the error persists; they check the
 > status page; the page says "all systems operational." They lose
 > faith in everything you ship after that.
@@ -666,19 +784,17 @@ postmortem, and the fix shipped 11 days later via Action Item A1
 > updates, customer email, and recorder assignment.
 >
 > The defence: **the incident-channel bot prompts "who is the IC?"
-> within 30 seconds of the page; the first responder to react with
+> when the incident opens; the first responder to react with
 > :raised_hand: becomes the IC; if no one claims within 5 minutes,
 > the platform lead pages.** The automation prevents the gap by
 > making the IC role a default expectation, not an afterthought.
 
-> **In production:** **Page volume is itself a metric.** A
-> rotation receiving >5 pages per shift is in alert-hygiene
-> trouble; >10 means the rotation itself is a P1. The platform
-> lead tracks pages-per-shift weekly + flags trends. See
+> **In production:** **Page volume is itself a metric.** The
 > [`severity-matrix.md`](../examples/bookstore-platform/incident/severity-matrix.md)
-> for the four-band action ladder (normal / elevated / high /
-> critical) and chapter 15.11 for the weekly on-call review
-> that closes the loop.
+> sets four bands for pages per shift: normal (0 to 2), elevated (3 to
+> 5), high (6 to 10) and critical (11 to 20). Above 20, the rotation
+> itself is a P1. The platform lead tracks pages per shift weekly, and
+> chapter 15.11 holds the weekly review that closes the loop.
 
 ## What's next
 
@@ -703,18 +819,15 @@ over a production EKS platform.
 # 1. Apply the routing tree + sample rule
 kubectl apply -f examples/bookstore-platform/incident/pagerduty-integration.yaml
 
-# 2. Provision the PagerDuty routing keys (production: ExternalSecrets)
-kubectl create secret generic pagerduty-keys -n monitoring \
-  --from-literal=p0-routing-key=<KEY-FROM-PD-EVENTS-V2> \
-  --from-literal=p1-routing-key=<KEY-FROM-PD-EVENTS-V2> \
-  --from-literal=p2-routing-key=<KEY-FROM-PD-EVENTS-V2>
+# 2. Sync the PagerDuty routing keys from Vault (ExternalSecret, step 2)
+kubectl apply -f pagerduty-keys-externalsecret.yaml
 
 # 3. Test the route tree with a synthetic alert
 kubectl -n monitoring port-forward svc/alertmanager-operated 9093:9093 &
 curl -X POST http://localhost:9093/api/v2/alerts -H "Content-Type: application/json" \
   -d '[{"labels":{"alertname":"BookstoreSynthetic","severity":"P0","service":"checkout","region":"us-east-1"},"annotations":{"summary":"test","runbook_url":"https://example.com/runbook","dashboard_url":"https://example.com/dashboard"}}]'
 
-# 4. Walk a real-shape incident (kill payments-gateway)
+# 4. Walk a real-shape incident (scale payments-gateway to zero, as a drill)
 kubectl -n bookstore-platform-acme-books scale deployment payments-gateway --replicas=0
 # wait for page; ack; open runbook; mitigate
 kubectl -n bookstore-platform-acme-books scale deployment payments-gateway --replicas=3
@@ -725,45 +838,41 @@ $PAGER examples/bookstore-platform/incident/sample-postmortem-2026-04-15.md
 # 6. Weekly handoff
 cp examples/bookstore-platform/incident/oncall-handoff-template.md \
    docs/handoffs/$(date -u +%Y-%m-%d).md
+
+# 7. Security signal: quarantine the pod (label it, do not delete it)
+kubectl -n bookstore-platform-acme-books label pod "$POD" quarantine=true app-
 ```
 
-Minimal `PrometheusRule` skeleton (the labels + annotations every
-alert must have to route correctly):
+Minimal rule fragment: the labels and annotations every alert must have to
+route correctly. It is one entry under `rules:` and has no kind field. The
+complete PrometheusRule is in the example file.
 
 ```yaml
-apiVersion: monitoring.coreos.com/v1
-kind: PrometheusRule
-metadata:
-  name: <ALERT-GROUP>
-  namespace: monitoring
-spec:
-  groups:
-  - name: <GROUP-NAME>
-    rules:
-    - alert: <AlertName>
-      expr: <PROMQL>
-      for: <DURATION>
-      labels:
-        severity: <P0|P1|P2|P3>    # routes the alert
-        service:  <SERVICE>        # surfaces in PD details
-        region:   <REGION>         # surfaces in PD details
-        team:     <TEAM>           # (optional) per-team escalation
-      annotations:
-        summary: "<one-line summary>"
-        description: "<detailed description>"
-        runbook_url: "<URL to the runbook>"      # MANDATORY
-        dashboard_url: "<URL to the dashboard>"  # MANDATORY
+- alert: <AlertName>
+  expr: <PROMQL>
+  for: <DURATION>
+  labels:
+    severity: <P0|P1|P2|P3>    # routes the alert
+    service:  <SERVICE>        # surfaces in PD details
+    region:   <REGION>         # surfaces in PD details
+    team:     <TEAM>           # (optional) per-team escalation
+  annotations:
+    summary: "<one-line summary>"
+    description: "<detailed description>"
+    runbook_url: "<URL to the runbook>"      # MANDATORY
+    dashboard_url: "<URL to the dashboard>"  # MANDATORY
 ```
 
 Incident-response checklist (the lifecycle is healthy when all six are yes):
 
 - [ ] Every PrometheusRule has `runbook_url` + `dashboard_url`
-      annotations (CI-enforced via lint).
+      annotations (a CI lint should enforce this; the example repo does not
+      ship one).
 - [ ] Every service in Backstage has `spec.owner` + an on-call
       mapping.
 - [ ] Alertmanager routing tree is severity-keyed + inhibit-tested.
-- [ ] Incident-channel automation creates the channel within 30
-      seconds of a P0/P1 page.
+- [ ] Incident-channel automation opens the channel when a P0/P1 page
+      fires.
 - [ ] IC role claimed within 5 minutes of a P0 page; if not, the
       bot escalates.
 - [ ] Postmortem published within 5 business days for every P0/P1;
@@ -783,7 +892,7 @@ Incident-response checklist (the lifecycle is healthy when all six are yes):
 2. **A team's postmortems consistently land 5 days after the chapter's 5-business-day deadline. The IC says "we got busy." What's the chapter's stance and what's the mechanism for fixing it?**
    <details><summary>Show answer</summary>
 
-   "Postmortem 5 days late" is one of the chapter's three production traps. The mechanism is a `postmortem_overdue` P3 alert that pages the on-call primary if the doc isn't published by the deadline — turning the postmortem from an aspirational task into an alert with consequences. The deeper problem is cultural: postmortems are most valuable in the first 48 hours when the incident details are fresh; a week later, half the timeline is guessed and the action items are vague. The chapter's discipline: the IC starts the postmortem doc *during* the incident (timeline scribed live), so by the time the resolve phase ends, 60% of the postmortem is already drafted. "Got busy" is the symptom; the prevention is making the postmortem a load-bearing part of the incident itself, not a separate-week task.
+   "Postmortem 5 days late" is one of the chapter's three production traps. The mechanism is a `postmortem_overdue` alert, routed as P3 and tracked by the platform lead, which turns the deadline from an aspiration into a visible miss. The deeper problem is cultural: postmortems are most valuable in the first 48 hours when the incident details are fresh; a week later, half the timeline is guessed and the action items are vague. The chapter's discipline: the IC starts the postmortem doc *during* the incident (timeline scribed live), so the draft exists before the incident ends. "Got busy" is the symptom; the prevention is making the postmortem a load-bearing part of the incident itself, not a separate-week task.
 
    </details>
 
@@ -797,7 +906,7 @@ Incident-response checklist (the lifecycle is healthy when all six are yes):
 4. **An alert fires at 03:14 with no `runbook_url` annotation. The on-call has 5 minutes to triage. What does the chapter say should happen — both to this incident and to the alert definition?**
    <details><summary>Show answer</summary>
 
-   For *this* incident: the on-call has to do the runbook walk from scratch — dashboard URL (also mandatory), then guess based on the alert name. This is the worst-case triage shape; expected time-to-mitigation is 2-5x longer than with a runbook. For the *alert definition*: the chapter's discipline is CI-lint that fails any PR adding a `PrometheusRule` without both `runbook_url` and `dashboard_url` annotations. The post-incident action item ships the missing runbook before the next quarter. The general principle: an un-actionable page is a noise contribution to burnout — and most "noisy" alert systems are noisy because too many alerts lack the metadata to triage.
+   For *this* incident: the on-call has to do the runbook walk from scratch — dashboard URL (also mandatory), then guess based on the alert name. This is the worst-case triage shape; expected time-to-mitigation is 2-5x longer than with a runbook. For the *alert definition*: the chapter's discipline is a CI lint that fails any PR adding a `PrometheusRule` without both `runbook_url` and `dashboard_url` annotations. The example repo does not ship that lint yet, so a team adds it. The post-incident action item ships the missing runbook before the next quarter. The general principle: an un-actionable page is a noise contribution to burnout — and most "noisy" alert systems are noisy because too many alerts lack the metadata to triage.
 
    </details>
 
@@ -805,6 +914,23 @@ Incident-response checklist (the lifecycle is healthy when all six are yes):
    <details><summary>What you should see</summary>
 
    Phase 1 (Detect): the PrometheusRule fires, Alertmanager routes it to the test PagerDuty service, the test phone rings. Phase 2 (Triage): on-call acks, decides P1, types `IC: <name>` in the incident channel, opens the runbook from the page's `runbook_url`. Phase 3 (Resolve): the runbook says "check Argo Rollouts status; abort canary if recent deploy" — execute, customer-visible impact ends. Phase 4 (Learn): IC drafts the postmortem during the incident; within 24h the doc has summary + timeline + 5 Whys + action items + lessons. The drill exposes runbook gaps — every "what does this metric mean?" moment is a runbook revision. The lesson: the lifecycle is mechanical when drilled; it's chaotic when invented mid-incident.
+
+   </details>
+
+6. **Security dimension: a pod shows an unexpected shell at 02:10, and the
+   on-call deletes it "to stop the bleeding." What is lost, and what should
+   have happened first?**
+   <details><summary>Show answer</summary>
+
+   Deleting the pod removes its running state and its container filesystem.
+   The process list, open connections and files the attacker touched go with
+   it, and so do the logs of the current container. The Deployment's
+   replacement can come up from the same image, which may be the problem.
+   Section 7 orders the response differently: isolate while the pod still
+   runs (remove its `app` label and apply the deny-all policy), capture what
+   kubectl can read, rotate what the pod could read, then delete. For a
+   security signal, the first mitigation is to cut the pod off from the
+   network and its API rights, not to remove it.
 
    </details>
 
@@ -830,9 +956,6 @@ Incident-response checklist (the lifecycle is healthy when all six are yes):
   <https://www.atlassian.com/incident-management>; the
   alternative-vendor view; useful for teams on Statuspage /
   Opsgenie.
-- **Rosso et al., *Production Kubernetes* ch.14 — Application
-  Considerations**; the chapter that motivates "structured runbooks
-  per alert" as a production-readiness criterion.
 - **Allspaw — *Blameless PostMortems and a Just Culture***
   <https://www.etsy.com/codeascraft/blameless-postmortems>; the
   foundational essay on blameless culture; the philosophy behind
