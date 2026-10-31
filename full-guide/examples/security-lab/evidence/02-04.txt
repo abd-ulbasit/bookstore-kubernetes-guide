@@ -1003,3 +1003,151 @@ Error from server (NotFound): ingressclasses.networking.k8s.io "traefik" not fou
 
 $ kubectl get ingressclass traefik -o jsonpath="{.metadata.annotations.meta\.helm\.sh/release-namespace}{\"\n\"}"
 Error from server (NotFound): ingressclasses.networking.k8s.io "traefik" not found
+
+
+# ===== run 3: the tree's Ingress files against Traefik, after the tree moved to Traefik =====
+# Tier A, the same cluster and tool versions as above: kind node on Kubernetes
+# v1.37.0, kubectl v1.37.2, helm v4.1.4, chart traefik/traefik 42.2.0 (app
+# v3.7.16), installed under the heavy lock with the chapter's values file and
+# namespace manifest. Names differ from the chapter's only in the namespaces:
+# p02-finish-np for bookstore and p02-finish-traefik for traefik, including the
+# two watch lists and defaultTLSResourcesNamespace in the values file and the
+# namespace in the Middleware annotation. The manifests are scratch copies of
+# the repository's raw-manifests files, renamed the same way.
+# What ran: the repository's 50-ingress-traefik.yaml (Middleware and Ingress),
+# then requests through the Traefik Service by port-forward, then
+# 50-ingress.yaml (the portable Ingress, no annotation) over it, which loses the
+# rewrite, then 50-ingress-traefik.yaml again. Orders and rabbitmq were not
+# started, because the requests use storefront and catalog only; the /api/orders
+# route has the same Middleware and was exercised in the earlier runs.
+# The TLS pair is a one-day certificate made for this run, and its key is not
+# in this transcript. The /api/booksx request is cut with head -c 150 here; the
+# chapter's block for it is the earlier run's full output.
+# The Helm-rendered form of the same two objects (ingress.traefikRewrite.enabled
+# true) was applied in a separate command and returned the same two responses,
+# 200 for /healthz and 200 with [] for /api/books. That command is not part of
+# this transcript.
+## Traefik: the ch.04 install, chart 42.2.0, ch.04 values (watch lists and TLS namespace renamed to the lab names)
+$ kubectl apply -f 00-traefik-namespace.yaml
+namespace/p02-finish-traefik created
+
+$ helm install traefik traefik/traefik --version 42.2.0 --namespace p02-finish-traefik -f traefik-values.yaml --wait --timeout 6m
+NAME: traefik
+LAST DEPLOYED: Sat Oct 31 07:53:58 2026
+NAMESPACE: p02-finish-traefik
+STATUS: deployed
+REVISION: 1
+DESCRIPTION: Install complete
+TEST SUITE: None
+NOTES:
+traefik with docker.io/traefik:v3.7.16@sha256:1336e85aaed293bd63d005086e0dd013b04078b26aaeb1c18b26a2f928af7e65 has been deployed successfully on p02-finish-traefik namespace!
+
+## workloads (ch.04 step 3, minus orders and rabbitmq)
+$ kubectl apply -f 00-namespace.yaml -f 05-serviceaccounts-rbac.yaml -f 15-catalog-config.yaml -f 16-db-credentials.yaml -f 20-postgres-statefulset.yaml -f 12-redis.yaml
+namespace/p02-finish-np created
+resourcequota/bookstore-quota created
+limitrange/bookstore-limits created
+serviceaccount/catalog-sa created
+serviceaccount/storefront-sa created
+serviceaccount/orders-sa created
+serviceaccount/payments-worker-sa created
+serviceaccount/postgres-sa created
+serviceaccount/redis-sa created
+serviceaccount/rabbitmq-sa created
+serviceaccount/migrate-sa created
+role.rbac.authorization.k8s.io/catalog-config-reader created
+rolebinding.rbac.authorization.k8s.io/catalog-config-reader-binding created
+configmap/catalog-config created
+secret/db-credentials created
+service/postgres created
+statefulset.apps/postgres created
+deployment.apps/redis created
+
+$ kubectl rollout status statefulset/postgres -n p02-finish-np --timeout=300s
+Waiting for 1 pods to be ready...
+partitioned roll out complete: 1 new pods have been updated...
+
+$ kubectl apply -f 21-db-migrate-job.yaml
+job.batch/db-migrate created
+
+$ kubectl wait --for=condition=complete job/db-migrate -n p02-finish-np --timeout=300s
+job.batch/db-migrate condition met
+
+$ kubectl apply -f 10-catalog-deploy.yaml -f 11-storefront-deploy.yaml -f 40-services.yaml
+deployment.apps/catalog created
+deployment.apps/storefront created
+service/catalog created
+service/storefront created
+service/orders created
+service/redis created
+service/rabbitmq created
+service/payments-worker created
+
+$ kubectl rollout status deploy/catalog -n p02-finish-np --timeout=300s
+Waiting for deployment "catalog" rollout to finish: 0 of 3 updated replicas are available...
+Waiting for deployment "catalog" rollout to finish: 1 of 3 updated replicas are available...
+Waiting for deployment "catalog" rollout to finish: 2 of 3 updated replicas are available...
+deployment "catalog" successfully rolled out
+
+$ kubectl rollout status deploy/storefront -n p02-finish-np --timeout=300s
+Waiting for deployment "storefront" rollout to finish: 0 of 2 updated replicas are available...
+Waiting for deployment "storefront" rollout to finish: 1 of 2 updated replicas are available...
+deployment "storefront" successfully rolled out
+
+$ kubectl create secret tls bookstore-tls -n p02-finish-np --cert=tls.crt --key=tls.key
+secret/bookstore-tls created
+
+## ch.04 step 6: the Traefik form, with its Middleware
+$ kubectl apply --dry-run=server -f 50-ingress-traefik.yaml
+middleware.traefik.io/rewrite-api-prefix created (server dry run)
+ingress.networking.k8s.io/bookstore created (server dry run)
+
+$ kubectl apply -f 50-ingress-traefik.yaml
+middleware.traefik.io/rewrite-api-prefix created
+ingress.networking.k8s.io/bookstore created
+
+$ kubectl get ingress -n p02-finish-np
+NAME        CLASS     HOSTS                   ADDRESS   PORTS     AGE
+bookstore   traefik   bookstore.localdev.me             80, 443   0s
+
+## ch.04 step 7: the requests
+$ curl -s --cacert tls.crt --resolve bookstore.localdev.me:8443:127.0.0.1 -w "\n%{http_code}\n" https://bookstore.localdev.me:8443/healthz
+{"status":"ok"}
+200
+
+$ curl -s --cacert tls.crt --resolve bookstore.localdev.me:8443:127.0.0.1 -w "\n%{http_code}\n" https://bookstore.localdev.me:8443/api/books
+[]
+200
+
+$ curl -s --cacert tls.crt --resolve bookstore.localdev.me:8443:127.0.0.1 -w "\n%{http_code}\n" https://bookstore.localdev.me:8443/api/booksx | head -c 150
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>B
+## ch.04 step 7: deliberate failure, the portable Ingress without the Middleware
+$ kubectl apply -f 50-ingress.yaml
+ingress.networking.k8s.io/bookstore configured
+
+$ curl -s --cacert tls.crt --resolve bookstore.localdev.me:8443:127.0.0.1 -w "\n%{http_code}\n" https://bookstore.localdev.me:8443/api/books
+404 page not found
+
+404
+
+$ kubectl apply -f 50-ingress-traefik.yaml
+middleware.traefik.io/rewrite-api-prefix unchanged
+ingress.networking.k8s.io/bookstore configured
+
+$ curl -s --cacert tls.crt --resolve bookstore.localdev.me:8443:127.0.0.1 -w "\n%{http_code}\n" https://bookstore.localdev.me:8443/api/books
+[]
+200
+
+## cleanup
+$ helm uninstall traefik -n p02-finish-traefik
+release "traefik" uninstalled
+
+$ kubectl delete namespace p02-finish-np p02-finish-traefik --wait=true --timeout=240s
+namespace "p02-finish-np" deleted
+namespace "p02-finish-traefik" deleted
+
