@@ -128,7 +128,7 @@ without a distracting domain.
 
 | Threat | Control in this chapter | Deeper |
 |---|---|---|
-| E8: the controller's own RBAC grant is wider than its reconcile loop, so a compromised operator acts anywhere the grant reaches | Markers grant only the verbs the loop calls, and the generated role is read before it ships ([RBAC](#3-rbac-the-markers-the-role-and-a-wide-marker)) | [Part 05 ch.01](../05-security/01-authn-authz-rbac.md) for RBAC; the namespace scope left over is 05.07 <!-- link-later: 05.07 --> |
+| E8: the controller's own RBAC grant is wider than its reconcile loop, so a compromised operator acts anywhere the grant reaches | Markers grant only the verbs the loop calls, and the generated role is read before it ships ([RBAC](#3-rbac-the-markers-the-role-and-a-wide-marker)) | [Part 05 ch.01](../05-security/01-authn-authz-rbac.md) for RBAC; the namespace scope left over is [05.07](../05-security/07-admission-control-and-policy-as-code.md) |
 
 The webhook threats (T5, E7, EP9) belong to [11.01](01-admission-webhooks.md).
 The tenant Pod the operator emits holds the
@@ -587,7 +587,9 @@ namespaced Role and RoleBinding per tenant would replace the cluster-wide
 Deployment and ConfigMap grants, at the cost of letting the operator create
 RoleBindings, which is its own escalation path. A ValidatingAdmissionPolicy
 could refuse the operator's writes outside `bookstore-tenant-*` names. Policy as
-code is the subject of 05.07 <!-- link-later: 05.07 -->. This chapter keeps
+code is the subject of
+[05.07](../05-security/07-admission-control-and-policy-as-code.md). This chapter
+keeps
 the ClusterRole, because the reconciler must create the cluster-scoped
 Namespace it owns, and no namespaced grant can do that.
 

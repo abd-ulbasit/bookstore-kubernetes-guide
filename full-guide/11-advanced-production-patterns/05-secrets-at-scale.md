@@ -392,7 +392,8 @@ The first check now answers `no`, and the second `yes`. The third answers
 ServiceAccount, and the chart still gives it a cluster-wide read on Secrets,
 because it manages the webhook certificates. Treat that ServiceAccount as a
 privileged identity: limit who can run as it, and enforce that with policy as
-code (Part 05 ch.07 <!-- link-later: 05.07 -->).
+code ([Part 05
+ch.07](../05-security/07-admission-control-and-policy-as-code.md)).
 
 Installing ESO created the `external-secrets.io` CRDs (`SecretStore`,
 `ClusterSecretStore`, `ExternalSecret`), and the dry-run above now succeeds.

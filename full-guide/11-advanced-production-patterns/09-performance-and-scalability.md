@@ -191,7 +191,7 @@ row does not cover it.
 
 A Namespace is cluster-scoped, and no namespace's quota counts it, so who may
 create Namespaces is an RBAC decision. Policy checks on that belong to policy
-as code (05.07) <!-- link-later: 05.07 -->.
+as code ([05.07](../05-security/07-admission-control-and-policy-as-code.md)).
 
 ## Diagrams
 

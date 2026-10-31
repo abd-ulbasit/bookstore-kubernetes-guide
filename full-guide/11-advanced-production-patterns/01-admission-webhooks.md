@@ -610,7 +610,8 @@ state that it has been stable since v1.36 and is enabled by default. Keep a
 **webhook** for mutation or validation that needs general code or external
 I/O. The `PodDefaulter` stays a webhook in this chapter to teach the
 mechanics. Diagram B draws the decision. Policy as code at fleet scale, with
-VAP and MAP, is in <!-- link-later: 05.07 -->Part 05 ch.07.
+VAP and MAP, is in [Part 05
+ch.07](../05-security/07-admission-control-and-policy-as-code.md).
 
 ## Failure modes as attack surface
 
@@ -848,7 +849,8 @@ yes
 The probe's ServiceAccount has no such permission, and neither should any
 workload identity. Only identities you grant the verb can change the
 configuration, so keep that list short. Every change to these objects should
-also leave an audit record, which Part 05 ch.08 <!-- link-later: 05.08 -->
+also leave an audit record, which [Part 05
+ch.08](../05-security/08-audit-detection-and-incident-response.md)
 covers.
 
 ### TLS, timeouts, reinvocation and side effects
@@ -1077,7 +1079,15 @@ Checklist:
 4. **A teammate's pipeline patches the validating webhook's `failurePolicy` from `Fail` to `Ignore` during a deploy, and the backend is down. Which identities can make that change, what does the apiserver do with the next Pod the webhook would refuse, and which controls would have caught it?**
    <details><summary>Show answer</summary>
 
-   Any identity with `patch` or `update` on `validatingwebhookconfigurations`. The lab's probe ServiceAccount could not make the change, and a cluster administrator can. With `Ignore`, the apiserver skips the call when the backend is unreachable, so a Pod that the webhook would refuse is admitted, and no error is raised. The controls are RBAC that keeps the verb to a short list, and applying from Git with `kubectl diff`, so the drift shows at the next apply (T3). The audit record of the change is the detection step, covered in Part 05 ch.08 <!-- link-later: 05.08 -->.
+   Any identity with `patch` or `update` on `validatingwebhookconfigurations`.
+   The lab's probe ServiceAccount could not make the change, and a cluster
+   administrator can. With `Ignore`, the apiserver skips the call when the
+   backend is unreachable, so a Pod that the webhook would refuse is admitted,
+   and no error is raised. The controls are RBAC that keeps the verb to a short
+   list, and applying from Git with `kubectl diff`, so the drift shows at the
+   next apply (T3). The audit record of the change is the detection step,
+   covered in [Part 05
+   ch.08](../05-security/08-audit-detection-and-incident-response.md).
 
    </details>
 
