@@ -22,6 +22,7 @@
 # Enable by adding to an overlay's `components:` list:
 #   components:
 #     - ../../components/traefik-rewrite
+# Do not combine with the gateway component: it has no Ingress to attach to, which leaves an orphan Middleware.
 apiVersion: kustomize.config.k8s.io/v1alpha1
 kind: Component
 

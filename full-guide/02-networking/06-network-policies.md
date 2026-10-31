@@ -116,6 +116,8 @@ flowchart TB
    · = not applicable / not part of the app's required edges
    redis takes inbound traffic only from catalog (rule 5), and catalog's
    egress to it is rule 7.
+   The storefront row carries traffic only if you enable the /api/ proxy in
+   app/storefront/nginx.conf, which ships commented out.
 ```
 
 ## Hands-on with the Bookstore
@@ -332,7 +334,9 @@ The rules, in order:
   controller from ch.04 and ch.05 runs, to storefront, catalog and orders on
   `:8080`.
 - **rule 4** `allow-storefront-to-apis`: storefront to catalog and orders on
-  `:8080`, the ingress side of that edge.
+  `:8080`, the ingress side of that edge. It carries traffic only if you enable
+  the server-side `/api/` proxy in `app/storefront/nginx.conf`, which ships
+  commented out; the guide keeps it to show that a connection needs both ends.
 - **rule 5** `allow-data-tier-ingress`: one policy that selects both data
   pods. Its first rule admits catalog, orders, `db-migrate` and `cleanup` to
   postgres on `:5432`. Its second admits catalog alone to redis on `:6379`.
@@ -346,7 +350,8 @@ The rules, in order:
   and 6): orders may send to redis here, and redis refuses it. Rules 5 and 6
   alone still fail.
 - **rule 8** `allow-storefront-egress`: the egress side of storefront to catalog
-  and orders.
+  and orders. Like rule 4, it carries traffic only if you enable the server-side
+  `/api/` proxy in `app/storefront/nginx.conf`, which ships commented out.
 
 Rules 9 and 10 come from later Parts (the payments worker, and the monitoring
 scrape). They follow the same pattern.

@@ -69,7 +69,12 @@ spec:
       ports:
         - { protocol: TCP, port: 8080 }
 ---
-# 4) storefront -> catalog and storefront -> orders (the UI calls the APIs).
+# 4) storefront -> catalog and storefront -> orders. These two edges carry
+#    traffic only if you enable the server-side proxy block in
+#    app/storefront/nginx.conf, which ships commented out. The browser reaches
+#    the APIs through the edge, which rule 3 covers. The guide keeps these
+#    edges because chapter 02.06 uses them to show that a connection needs both
+#    ends. In a real cluster you delete an allow nothing uses.
 apiVersion: networking.k8s.io/v1
 kind: NetworkPolicy
 metadata:
@@ -194,7 +199,11 @@ spec:
       ports:
         - { protocol: TCP, port: 5672 }
 ---
-# 8) Egress side of storefront -> catalog/orders.
+# 8) Egress side of storefront -> catalog/orders. These carry traffic only if
+#    you enable the server-side proxy block in app/storefront/nginx.conf, which
+#    ships commented out. The guide keeps this rule because chapter 02.06 uses
+#    the edge to show that a connection needs both ends. In a real cluster you
+#    delete an allow nothing uses.
 apiVersion: networking.k8s.io/v1
 kind: NetworkPolicy
 metadata:
