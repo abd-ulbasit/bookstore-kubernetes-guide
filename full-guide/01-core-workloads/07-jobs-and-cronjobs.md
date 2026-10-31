@@ -69,13 +69,14 @@ what belongs to the batch workload.
 | A finished Job keeps its Pods, logs and status in the namespace | `ttlSecondsAfterFinished`, and history limits on a CronJob | |
 | A stuck or retried Job holds CPU, memory and a database connection | `activeDeadlineSeconds`, `backoffLimit`, requests and a memory limit | [01.03](03-resources-and-qos.md) |
 | Two runs of a cleanup overlap and contend for the same rows | `concurrencyPolicy: Forbid` and `startingDeadlineSeconds` | |
-| Someone who can create a CronJob runs code in the namespace every night | The `restricted` namespace refuses Pods that lack the fields that level requires, and RBAC limits who may create Jobs and CronJobs | [05.01](../05-security/01-authn-authz-rbac.md), [05.02](../05-security/02-pod-security.md) |
+| Someone who can create a CronJob runs code in the namespace every night | RBAC on every workload kind that makes Pods: CronJobs, Jobs, Deployments and bare Pods. The `restricted` namespace limits what such a Pod may do, not who creates it | [05.01](../05-security/01-authn-authz-rbac.md), [05.02](../05-security/02-pod-security.md) |
 | The database password is copied into the manifest | `secretKeyRef` to the `db-credentials` Secret | [03.02](../03-config-and-storage/02-secrets.md) |
 
 One threat this chapter does not close is the database login. `POSTGRES_USER`
 is the superuser that the official `postgres` image creates on its first start,
-as the [image documentation](https://hub.docker.com/_/postgres) states. The migration and cleanup Jobs can therefore do anything the database
-allows, whatever their ServiceAccount cannot. RBAC limits what a Pod may ask
+as the [image documentation](https://hub.docker.com/_/postgres) states. The
+migration and cleanup Jobs can therefore do anything the database allows,
+whatever their ServiceAccount cannot. RBAC limits what a Pod may ask
 the API server to do. It says nothing about what a database role may change.
 Narrowing that role is a database task, and this part does not cover it.
 
@@ -106,8 +107,8 @@ flowchart TB
 flowchart TD
     T["CronJob cleanup: schedule 0 3 * * *, Etc/UTC<br/>concurrencyPolicy Forbid"]
     D1["<b>Day 1, 03:00</b><br/>controller creates Job cleanup-1<br/>the Job runs its DELETE and exits 0"]
-    D1b["<b>Day 1, 03:00 plus 30 s</b><br/>cleanup-1 is Complete<br/>successfulJobsHistoryLimit keeps it, the TTL deletes it 10 min later"]
-    D2["<b>Day 2, 03:00</b><br/>controller creates cleanup-2<br/>if cleanup-1 is still running, Forbid skips this tick"]
+    D1b["<b>Day 1, 03:00 plus 30 s</b><br/>cleanup-1 is Complete<br/>the TTL deletes it 10 min later, overriding the history limit"]
+    D2["<b>Day 2, 03:00</b><br/>controller creates cleanup-2<br/>if cleanup-1 is still running, Forbid skips this run; the tick starts a Job only if cleanup-1 ends within 300 s of the tick"]
     D3["<b>Day 3, 03:00 to 03:06</b><br/>controller offline<br/>at 03:06 the 03:00 tick is 6 min late, past startingDeadlineSeconds 300, so it is skipped"]
     D4["<b>Day 4, 03:00</b><br/>controller creates cleanup-4<br/>steady state"]
     T --> D1 --> D1b --> D2 --> D3 --> D4
@@ -364,33 +365,13 @@ kubectl exec -n bookstore postgres-0 -- psql -U bookstore -d bookstore -c '\dt'
 (2 rows)
 ```
 
-### Deliberate refusal: a Job without the restricted fields
+### A refusal shown in 01.04: a Job without the restricted fields
 
-Pod Security admission checks the Pods a Job creates, not the Job object. A bare
-Job is therefore accepted, and its Pod is refused. This step is a deliberate
-action, not a pattern to copy. It creates a Job with no `securityContext` to
-show the refusal:
-
-```sh
-kubectl create job -n bookstore unrestricted-probe --image=postgres:16
-kubectl get events -n bookstore --field-selector reason=FailedCreate
-kubectl delete job -n bookstore unrestricted-probe
-```
-
-<!-- gate: output -->
-```text
-Warning: would violate PodSecurity "restricted:latest": allowPrivilegeEscalation != false (container "unrestricted-probe" must set securityContext.allowPrivilegeEscalation=false), unrestricted capabilities (container "unrestricted-probe" must set securityContext.capabilities.drop=["ALL"]), runAsNonRoot != true (pod or container "unrestricted-probe" must set securityContext.runAsNonRoot=true), seccompProfile (pod or container "unrestricted-probe" must set securityContext.seccompProfile.type to "RuntimeDefault" or "Localhost")
-job.batch/unrestricted-probe created
-```
-
-The events show the refusal on the Job. The Job controller retries, so several
-rows follow. The first is shown:
-
-<!-- gate: output -->
-```text
-LAST SEEN   TYPE      REASON         OBJECT                   MESSAGE
-16s         Warning   FailedCreate   job/unrestricted-probe   Error creating: pods "unrestricted-probe-x7799" is forbidden: violates PodSecurity "restricted:latest": allowPrivilegeEscalation != false (container "unrestricted-probe" must set securityContext.allowPrivilegeEscalation=false), unrestricted capabilities (container "unrestricted-probe" must set securityContext.capabilities.drop=["ALL"]), runAsNonRoot != true (pod or container "unrestricted-probe" must set securityContext.runAsNonRoot=true), seccompProfile (pod or container "unrestricted-probe" must set securityContext.seccompProfile.type to "RuntimeDefault" or "Localhost")
-```
+Pod Security admission checks the Pods a Job creates, not the Job object, as
+[01.04](04-replicasets-and-deployments.md#5-a-deployment-that-breaks-restricted-deliberate-action)
+shows for a Deployment. A bare Job is therefore accepted and its Pod refused.
+The Jobs in this chapter carry the fields the level requires, so no refusal is
+shown here.
 
 ### Deliberate failure: the token is not mounted
 
@@ -427,10 +408,10 @@ metadata:
 spec:
   schedule: "0 3 * * *"              # 03:00 every day
   timeZone: "Etc/UTC"                # read the schedule in this zone
-  concurrencyPolicy: Forbid          # skip a tick while the last run is still going
-  startingDeadlineSeconds: 300       # a tick more than 5 minutes late is skipped
-  successfulJobsHistoryLimit: 3      # finished successful Jobs kept
-  failedJobsHistoryLimit: 1          # finished failed Jobs kept
+  concurrencyPolicy: Forbid          # skip a run while the last one is still going
+  startingDeadlineSeconds: 300       # skip a run that would start more than 5 minutes late
+  successfulJobsHistoryLimit: 3      # unless the TTL below removes them first
+  failedJobsHistoryLimit: 1          # unless the TTL below removes it first
   jobTemplate:
     spec:
       backoffLimit: 2
@@ -500,18 +481,26 @@ The fields that control time and overlap are these:
 - `timeZone: "Etc/UTC"` reads the schedule in a named zone. Without it the
   controller's own zone applies, and a change of zone or a daylight-saving rule
   moves the run to another hour. Time zone support is stable since v1.27.
-- `concurrencyPolicy: Forbid` is a resource control. A tick that arrives while
-  the previous run is still going is skipped. `Allow` is the default and lets
-  runs overlap. `Replace` stops the running Job and starts a new one, which can
-  leave a half-finished delete behind. The policy governs only Jobs of the same
-  CronJob, as the
+- `concurrencyPolicy: Forbid` is a resource control. A run that would start while
+  the previous one is still going is skipped. The tick is not dropped: when the
+  running Job ends, the controller starts a Job for that tick, as long as the
+  tick is still inside `startingDeadlineSeconds`. `Allow` is the default and
+  lets runs overlap. `Replace` stops the running Job and starts a new one. The policy
+  governs only Jobs of the same CronJob, as the
   [CronJob docs](https://kubernetes.io/docs/concepts/workloads/controllers/cron-jobs/)
   state.
-- `startingDeadlineSeconds: 300` skips a tick the controller cannot start
-  within 300 seconds. It is not replayed, so a long outage does not start a
-  burst of catch-up runs against the database.
-- The history limits keep three finished successful Jobs and one failed Job, the
-  documented defaults written out. The TTL removes the rest.
+- `startingDeadlineSeconds: 300` skips the run for a tick that the controller
+  cannot start within 300 seconds of it. Without the field, a run for a tick
+  missed by hours still starts when the controller recovers, late. The field
+  decides only whether that late run happens. After an outage the controller
+  starts at most one Job, for the most recent missed tick, whatever the field
+  says.
+- `ttlSecondsAfterFinished: 600` deletes each finished Job, Complete or Failed,
+  with its Pods and logs, 10 minutes after it ends. The TTL overrides the
+  history limits: with one run a day, the limits keep nothing the TTL has not
+  already deleted. A failed run's logs are gone about 10 minutes after the run
+  ends, so ship them off the node within that time, or raise the TTL, to keep
+  failure evidence.
 
 The lab does not wait for a tick, so `Forbid` is cited here, not run. To test a
 CronJob without waiting for 03:00, run its template now with `kubectl create
@@ -615,7 +604,7 @@ Jobs add a stable per-Pod index for static work partitioning.
 |---|---|
 | `schedule` | standard cron (`m h dom mon dow`), or a macro such as `@hourly` |
 | `timeZone` | IANA zone the schedule is read in. Stable since v1.27. Default: the controller's zone |
-| `concurrencyPolicy` | `Allow` (default, runs may overlap), **`Forbid`** (skip the tick while the previous run is still going), or `Replace` (stop the running Job and start a new one) |
+| `concurrencyPolicy` | `Allow` (default, runs may overlap), **`Forbid`** (skip a run while the previous one is still going; its tick can still start a Job when that one ends, inside `startingDeadlineSeconds`), or `Replace` (stop the running Job and start a new one) |
 | `startingDeadlineSeconds` | if a scheduled time was missed, start only within this many seconds. Otherwise count the tick as missed |
 | `successfulJobsHistoryLimit` / `failedJobsHistoryLimit` | finished Jobs kept. Defaults 3 and 1 |
 | `suspend` | `true` pauses scheduling without deleting the CronJob |
@@ -640,8 +629,8 @@ Jobs add a stable per-Pod index for static work partitioning.
 - **A CronJob only creates Jobs.** On each tick the CronJob controller
   instantiates a Job from `jobTemplate`. All run-to-completion behavior comes
   from that Job. `concurrencyPolicy` decides what happens when the previous Job
-  is still running at the next tick. `startingDeadlineSeconds` decides what
-  happens to missed ticks, so that a recovered controller does not stampede.
+  is still running at the next tick. `startingDeadlineSeconds` decides whether
+  a missed run still starts when the controller recovers, or is skipped as late.
 - **Migrations belong in a Job ordered before the rollout.** An init container
   runs on every Pod start, so N replicas race the same migration. A Job runs
   once, and the pipeline holds the Deployment back until it succeeds. A
@@ -704,14 +693,25 @@ Checklist:
 3. **A CronJob has `schedule: "*/5 * * * *"` and `concurrencyPolicy: Forbid`. A run starts at 12:00 and takes 8 minutes. What happens at 12:05 and 12:10?**
    <details><summary>Show answer</summary>
 
-   At 12:05 the previous Job is still running, so `Forbid` skips the tick and creates no Job. At 12:08 the running Job completes. At 12:10 the next tick starts a new Job. The skipped 12:05 is not run later. Use `Allow` if you want overlap, and `Replace` if the new run should stop the old one. A tight schedule with a long job needs this choice made on purpose (see the CronJob fields table).
+   At 12:05 the previous Job is still running, so `Forbid` skips that run and
+   creates no Job. The tick is not recorded as scheduled, though. At 12:08 the
+   12:00 Job completes, and with no deadline set the controller starts a Job for
+   the 12:05 tick then. If that Job is still running at 12:10, the 12:10 tick is
+   skipped too. Use `Allow` if you want overlap, and `Replace` if the new run
+   should stop the old one. A tight schedule with a long job needs this choice
+   made on purpose (see the CronJob fields table).
 
    </details>
 
 4. **The cleanup controller is down from 02:00 to 04:00. The schedule is `0 3 * * *` and `startingDeadlineSeconds: 300`. What happens when the controller recovers, and why is that the right design?**
    <details><summary>Show answer</summary>
 
-   At 04:00 the controller checks whether the 03:00 tick is still within 300 seconds of its scheduled time. It is 60 minutes late, so the tick is recorded as missed and not run. The next run is the following 03:00. Without `startingDeadlineSeconds`, a long outage would queue every missed tick to fire on recovery, and a database would take the burst (see How it works under the hood).
+   At 04:00 the controller checks whether the 03:00 tick is still within 300
+   seconds of its scheduled time. It is 60 minutes late, so that run is skipped
+   and no Job starts for it. The next run is the following 03:00. Without
+   `startingDeadlineSeconds`, the controller would start one Job for the 03:00
+   tick at 04:00, an hour late. The deadline exists to skip that run (see
+   How it works under the hood).
 
    </details>
 

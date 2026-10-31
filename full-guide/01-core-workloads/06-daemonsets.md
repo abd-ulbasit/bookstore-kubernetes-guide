@@ -60,7 +60,7 @@ come from [01.01](01-pods.md#baseline) and are not repeated here.
 | The agent runs as root on every node | A non-root UID, with group 0 for the root-owned log files | [05.02](../05-security/02-pod-security.md) |
 | The agent runs on nodes it was never meant for | Tolerate the taint the agent must reach, not every taint | [04.02](../04-scheduling/02-affinity-taints-topology.md) |
 | A bad rollout breaks the agent on every node at once | `RollingUpdate` with `maxUnavailable: 1` | [01.08](08-deployment-strategies.md) |
-| Whoever can create or edit a DaemonSet decides what runs on every node | Grant create and update on `daemonsets` only where that is intended | [05.01](../05-security/01-authn-authz-rbac.md) |
+| Whoever can create or edit a DaemonSet decides what runs on every node | RBAC on `daemonsets`, and on Pods and the other workload kinds that create them (Deployments, Jobs, CronJobs), granted only where intended | [05.01](../05-security/01-authn-authz-rbac.md) |
 
 ## Diagrams
 
@@ -107,7 +107,7 @@ flowchart TB
 Save the manifests in this section in one directory and run the commands from
 there. Use a kind cluster from
 [00.07](../00-foundations/07-local-cluster-setup.md). The output below comes
-from a one-node lab cluster named `sf-pilot`. Your node names will differ.
+from a one-node lab cluster with a different name. Your node names will differ.
 
 **No Bookstore manifest in this chapter.** The Bookstore's services are
 Deployments and a StatefulSet, not per-node agents, so a DaemonSet here would be
@@ -125,7 +125,7 @@ them first:
 kubectl get daemonset -A
 kubectl get pod -n kube-system -o wide -l k8s-app=kube-proxy
 kubectl get ds kube-proxy -n kube-system -o jsonpath='{.spec.updateStrategy}{"\n"}'
-kubectl describe node sf-pilot-control-plane | grep -A1 '^Taints'
+kubectl describe node -l node-role.kubernetes.io/control-plane | grep -A1 '^Taints'
 kubectl get pod -n kube-system -l k8s-app=kube-proxy -o jsonpath='{range .items[0].spec.tolerations[*]}{.key}{" "}{.operator}{" "}{.effect}{"\n"}{end}'
 kubectl get pod -n kube-system -l k8s-app=kube-proxy -o jsonpath='{.items[0].spec.affinity.nodeAffinity}{"\n"}'
 ```
@@ -366,18 +366,19 @@ LAST SEEN   TYPE      REASON         OBJECT                MESSAGE
 3s          Warning   FailedCreate   daemonset/log-agent   (combined from similar events): Error creating: pods "log-agent-r2th9" is forbidden: violates PodSecurity "restricted:latest": restricted volume types (volume "pod-logs" uses restricted volume type "hostPath")
 ```
 
-The API server checks the Pods a controller creates, not the DaemonSet object
-itself, so it can only warn about the DaemonSet. The controller's Pods are
-refused, and the events name the rule that refused them. No agent runs.
+Pod Security admission checks the Pods a controller creates, not the DaemonSet
+object, as [01.04](04-replicasets-and-deployments.md#5-a-deployment-that-breaks-restricted-deliberate-action)
+shows for a Deployment. The controller's Pods are refused, and the events name
+the rule that refused them. No agent runs.
 
 ### 4. The lowest level that admits it, and the registry
 
 `hostPath` is forbidden at `baseline` and at `restricted`. The
 [Pod Security Standards](https://kubernetes.io/docs/concepts/security/pod-security-standards/)
 list it under baseline, and the restricted policy's allowed volume types
-leave it out. Only `privileged` admits it. That makes `privileged` the lowest level
-that works for this agent. Give the exception its own namespace, so no other
-workload inherits it:
+leave it out. Only `privileged` admits it. That makes `privileged` the lowest
+level that works for this agent. Give the exception its own namespace, so no
+other workload inherits it:
 
 ```sh
 kubectl label namespace node-logs pod-security.kubernetes.io/enforce=privileged --overwrite
@@ -429,11 +430,26 @@ reports on every apply, what `restricted` would refuse. The exception stays
 visible, and the warnings show when the agent drifts from the rest of the
 baseline.
 
-The exception also goes in the registry. Record it in
-`security/namespace-exceptions.yaml`, the one exceptions registry. The entry
-records the namespace, the reason (the agent reads host logs), this chapter,
-and an expiry no more than 12 months away. A privileged namespace with no
-entry breaks the rule.
+The exception also goes in the guide's registry,
+`security/namespace-exceptions.yaml`, at the root of the repository. Each entry
+records the namespace, the level, the reason (the agent reads host logs), the
+upstream citation, this chapter, and an expiry no more than 12 months away. A
+privileged namespace with no entry breaks the rule. The guide's entry stays for
+as long as this chapter labels the namespace `privileged`. On your own cluster,
+keep an entry of the same shape in your own registry. This illustrative sample
+is not captured output:
+
+```yaml
+exceptions:
+  - namespace: node-logs
+    level: privileged
+    reason: >-
+      The log agent reads /var/log/pods through a hostPath volume, which
+      baseline and restricted both forbid.
+    upstream: https://kubernetes.io/docs/concepts/security/pod-security-standards/#baseline
+    chapter: 01-core-workloads/06-daemonsets.md
+    expires: 2027-06-30
+```
 
 ### 5. What the agent can and cannot do
 
@@ -493,8 +509,8 @@ kubectl delete namespace node-logs
 ```
 
 Delete the DaemonSet first, then the namespace. The namespace can stay
-`Terminating` for a few minutes after the delete. Remove its registry entry
-when the namespace goes.
+`Terminating` for a few minutes after the delete. The guide's registry entry
+stays, because this chapter still labels the namespace `privileged`.
 
 ### Optional: a two-node cluster
 
@@ -547,8 +563,11 @@ toleration, a DaemonSet on the same cluster would show 1.
   `hostPath` to do its job. Baseline and restricted both forbid it, so the Pod
   can only run in a namespace at `privileged`. That namespace belongs to one
   agent, is recorded in the registry, and keeps the rest of the baseline on
-  every Pod it runs. A compromised agent reaches every node it runs on, so the
-  namespace boundary is the whole argument.
+  every Pod it runs. A compromised agent reaches every node it runs on. The
+  namespace limits the exception to that agent, but not who may run a Pod
+  there. Anyone who can create a Pod, or a Deployment, Job or CronJob that makes
+  one, can run a privileged Pod in that namespace, so RBAC on the namespace is
+  the real gate.
 - **Singleton and leader election are different.** A DaemonSet gives one Pod per
   node, not one Pod per cluster. For a single active controller, run replicas
   that perform **leader election**, so only one acts
@@ -674,7 +693,7 @@ Checklist:
 6. **On a multi-node kind cluster, `kubectl cordon` one node, then run `kubectl drain` on it without flags. What happens to its DaemonSet Pods, and what changes with `--ignore-daemonsets`?**
    <details><summary>What you should see</summary>
 
-   `drain` stops with an error while DaemonSet Pods are on the node, unless you pass `--ignore-daemonsets`. The flag defaults to false, as `kubectl drain --help` shows. With the flag, `drain` evicts the other Pods and leaves the DaemonSet Pods running. The controller ignores the unschedulable marking, and the agent's toleration keeps it on the node. Deleting one of those Pods by hand makes the controller recreate it. Removing the node from the selector, or deleting the Node object, is what removes the agent.
+   `drain` stops with an error while DaemonSet Pods are on the node, unless you pass `--ignore-daemonsets`. The flag defaults to false, as `kubectl drain --help` shows. With the flag, `drain` evicts the other Pods and leaves the DaemonSet Pods running. The toleration the controller adds for `node.kubernetes.io/unschedulable` keeps the agent Pod on the node. Deleting one of those Pods by hand makes the controller recreate it. Removing the node from the selector, or deleting the Node object, is what removes the agent.
 
    </details>
 
