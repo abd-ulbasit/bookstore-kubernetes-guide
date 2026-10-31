@@ -386,7 +386,7 @@ variable "velero_chart_version" {
 ################################################################################
 
 variable "enable_falco" {
-  description = "Install Falco for runtime threat detection. NOTE: Falco's eBPF driver requires CAP_BPF + CAP_PERFMON — its namespace runs PSA enforce=privileged. This is the only privileged namespace in the tree; documented in falco.tf."
+  description = "Install Falco for runtime threat detection. NOTE: Falco's eBPF driver requires CAP_BPF + CAP_PERFMON; its namespace runs PSA enforce=privileged. Falco and kube-system (Cilium) are the two privileged namespaces in the tree; documented in falco.tf."
   type        = bool
   default     = false
 }

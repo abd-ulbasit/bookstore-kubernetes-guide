@@ -80,9 +80,9 @@ The three pattern families that solve this:
    a *dev container* running on a developer-shared EKS cluster (or
    a per-user Karpenter-scaled instance) with all tools pre-
    installed. The "laptop" is just a thin client; the actual code +
-   build + run happens in-cluster. The Cloud Native Computing
-   Foundation's *Devfile* spec + the *Dev Container* spec are the
-   primitives.
+   build + run happens in-cluster. The *Devfile* spec and the *Dev
+   Container* spec are the primitives; the Dev Container spec is an open
+   specification that the devcontainers community maintains.
 
 [Part 13 ch.11](../13-grand-capstone-bookstore-platform/11-backstage-developer-portal-idp.md)
 shipped Backstage as the IDP (Internal Developer Portal); the
@@ -178,11 +178,13 @@ not authentication. Anything that can reach the Service and set the
 header reaches the laptop, so reachability is the real boundary.
 
 **The Mirrord approach.** Mirrord's twist: it doesn't install a
-sidecar; it injects an init container that re-routes the *target
-Pod's* file descriptors and network sockets to a mirrord-agent
-DaemonSet which proxies them back to the developer's laptop
-process. The developer runs their Go binary locally as a normal
-process; mirrord makes its syscalls land in the cluster.
+sidecar into the target Pod. A `mirrord-agent` Kubernetes Job runs in
+the target Pod's Linux namespaces, reads its network and file view, and
+relays those calls to the developer's laptop process. The developer
+runs their Go binary locally as a normal process; mirrord makes its
+syscalls land in the cluster. The agent needs Linux capabilities that
+Pod Security refuses in the `restricted` developer namespaces this
+chapter builds, so the hands-on uses Telepresence and Skaffold instead.
 Sub-options: *steal mode* (the laptop process gets all traffic;
 the real Pod is bypassed) vs *mirror mode* (the laptop process
 gets a copy of the traffic but doesn't reply; the real Pod still
@@ -239,9 +241,9 @@ only in dev clusters, so production has nothing to intercept through.
 
 | Threat | Control | Goes deeper |
 |---|---|---|
-| Global intercept or steal mode sends production traffic to a laptop | Never intercept production; Traffic Manager only in dev clusters | [08.04](../08-day-2-operations/04-multi-tenancy-and-namespaces.md) |
+| Global intercept or steal mode sends production traffic to a laptop | Never intercept production; Traffic Manager only in dev clusters; `intercept.allowGlobalIntercepts=false` rejects intercepts without a header filter | [08.04](../08-day-2-operations/04-multi-tenancy-and-namespaces.md) |
 | Anything that reaches the Service and sets the intercept header reaches a laptop | Default-deny NetworkPolicy in the dev namespace, so only platform callers reach the Service | [02.06](../02-networking/06-network-policies.md) |
-| A caller with `pods/portforward` in the namespace receives the intercepted container's environment, including Secret values | Intercept only dev namespaces that hold test keys; set `security.authorization.requiredGrant` explicitly in the chart | [05.01](../05-security/01-authn-authz-rbac.md), [Telepresence RBAC](https://telepresence.io/docs/reference/rbac) |
+| Attaching to a workload copies the container's environment variables to the laptop, Secret values included | Attach only in dev namespaces that hold test keys; grant `attachments` create only in those namespaces (section 2.1) | [05.01](../05-security/01-authn-authz-rbac.md), [Telepresence RBAC](https://telepresence.io/docs/reference/rbac), [Telepresence environment variables](https://telepresence.io/docs/reference/environment) |
 | Developer RBAC wider than one namespace | One Role per developer in their namespace; no Secret reads elsewhere; `restricted` refuses a privileged Pod | [05.01](../05-security/01-authn-authz-rbac.md), [Pod Security Standards](https://kubernetes.io/docs/concepts/security/pod-security-standards/) |
 | Long-lived cloud keys in the dev container | No `~/.aws` bind mount; `aws sso login` in the container; kubeconfig uses the exec plugin, with no static token | [05.04](../05-security/04-secrets-and-cluster-hardening.md) |
 | A privileged feature in the dev container | Docker-in-Docker left out: its feature runs the container privileged | [the feature's `privileged` setting](https://github.com/devcontainers/features/blob/main/src/docker-in-docker/devcontainer-feature.json) |
@@ -266,7 +268,7 @@ flowchart TB
     user --> storefront --> catalog_svc --> agent
 
     note1["Default: agent forwards<br/>all traffic to catalog Pod"]
-    note2["After 'telepresence intercept catalog --header=x-dev=alice':<br/>requests WITHOUT x-dev=alice go to catalog Pod;<br/>requests WITH x-dev=alice go to alice's laptop"]
+    note2["After 'telepresence intercept catalog --http-header=x-dev=alice':<br/>requests WITHOUT x-dev=alice go to catalog Pod;<br/>requests WITH x-dev=alice go to alice's laptop"]
 
     agent -->|"x-dev != alice"| catalog_pod
     agent -->|"x-dev = alice"| tp_router --> laptop
@@ -373,13 +375,176 @@ tool's docs page.)
 
 ### 2. Strategy A — Telepresence (traffic re-routing)
 
-#### 2.1 Connect to the cluster
+#### 2.1 Set up the cluster side, then connect
+
+The Traffic Manager runs in the `ambassador` namespace. Create that
+namespace first and label it `restricted`, so the install is held to the
+same rule as the developer namespace. The chart's container defaults set
+`readOnlyRootFilesystem`, `runAsNonRoot` and UID 1000, but leave out
+`allowPrivilegeEscalation`, the capability drop and the seccomp profile.
+The flags below set those three:
 
 ```bash
-telepresence helm install
-# Installs the Traffic Manager Deployment to the ambassador namespace
-# (one-time per cluster; idempotent on re-run).
+kubectl create namespace ambassador
+kubectl label namespace ambassador \
+  pod-security.kubernetes.io/enforce=restricted \
+  pod-security.kubernetes.io/audit=restricted \
+  pod-security.kubernetes.io/warn=restricted
 
+telepresence helm install \
+  --set securityContext.allowPrivilegeEscalation=false \
+  --set 'securityContext.capabilities.drop[0]=ALL' \
+  --set podSecurityContext.seccompProfile.type=RuntimeDefault \
+  --set intercept.allowGlobalIntercepts=false
+# Installs the Traffic Manager Deployment into the ambassador namespace
+# (one-time per cluster; idempotent on re-run). The last flag rejects
+# global intercepts, so only header-filtered intercepts such as the one
+# in 2.3 are accepted. By default the manager gets a ClusterRole. The RBAC
+# page describes a static namespace selector that confines it to named
+# namespaces.
+```
+
+Telepresence checks each connect and attach request against the caller's
+own RBAC. Give alice the four objects below. They follow the
+[Telepresence RBAC page](https://telepresence.io/docs/reference/rbac)
+for a manager with no external endpoint: one Role in `ambassador` to
+open the port-forward to the manager, and one Role in her namespace to
+attach. `pods/portforward` reaches any Pod in the namespace it is granted
+in, so keep each developer namespace to that developer's workloads.
+Replace `<DEVELOPER-IDENTITY>` with the name your cluster's authenticator
+gives alice.
+
+```yaml
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: traffic-manager-connect
+  namespace: ambassador
+rules:
+  - apiGroups: [""]
+    resources: ["pods/portforward"]
+    resourceNames: ["traffic-manager-0"]
+    verbs: ["create"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: alice-traffic-manager-connect
+  namespace: ambassador
+subjects:
+  - kind: User
+    name: <DEVELOPER-IDENTITY>
+    apiGroup: rbac.authorization.k8s.io
+roleRef:
+  kind: Role
+  name: traffic-manager-connect
+  apiGroup: rbac.authorization.k8s.io
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: telepresence-attach
+  namespace: bookstore-dev-alice
+rules:
+  - apiGroups: [""]
+    resources: ["pods/portforward"]
+    verbs: ["create"]
+  - apiGroups: ["telepresence.io"]
+    resources: ["attachments"]
+    verbs: ["create", "get"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: alice-telepresence-attach
+  namespace: bookstore-dev-alice
+subjects:
+  - kind: User
+    name: <DEVELOPER-IDENTITY>
+    apiGroup: rbac.authorization.k8s.io
+roleRef:
+  kind: Role
+  name: telepresence-attach
+  apiGroup: rbac.authorization.k8s.io
+```
+
+`attachments` with `create` authorizes intercept, replace and wiretap, and
+`get` authorizes ingest, so this Role is the whole attach permission.
+
+Now the namespace policy. The default-deny policy blocks all ingress into
+`bookstore-dev-alice`, so no Service in the namespace takes traffic from
+anywhere but the allowed sources. The allow policy admits what the
+Telepresence pieces need into the payments-gateway Pod, and limits that
+Pod's own egress to DNS and the manager. The ports come from the chart
+values: the manager's API (`apiPort`, 8081), the traffic agent
+(`agent.port`, 9900) and the agent's Envoy listener
+(`agent.envoy.serverPort`, 18000).
+
+```yaml
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: default-deny
+  namespace: bookstore-dev-alice
+spec:
+  podSelector: {}
+  policyTypes: ["Ingress"]
+---
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: allow-telepresence
+  namespace: bookstore-dev-alice
+spec:
+  podSelector:
+    matchLabels:
+      app: payments-gateway
+  policyTypes: ["Ingress", "Egress"]
+  ingress:
+    - from:
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: ambassador
+      ports:
+        - { port: 8080, protocol: TCP }
+        - { port: 9900, protocol: TCP }
+        - { port: 18000, protocol: TCP }
+  egress:
+    - to:
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: kube-system
+          podSelector:
+            matchLabels:
+              k8s-app: kube-dns
+      ports:
+        - { port: 53, protocol: UDP }
+        - { port: 53, protocol: TCP }
+    - to:
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: ambassador
+      ports:
+        - { port: 8081, protocol: TCP }
+```
+
+A policy object does nothing until the CNI enforces it. On EKS the VPC CNI
+policy engine is off by default (its chart value is `enableNetworkPolicy:
+"false"`). Turn it on in the `vpc-cni` entry of `cluster_addons` in
+`eks.tf`, then apply:
+
+```hcl
+configuration_values = jsonencode({
+  enableNetworkPolicy = "true"
+})
+```
+
+The deny is checked in step 2.2, once the Service exists. Until that
+check passes, the isolation claims in this chapter are untested.
+
+Connect your laptop:
+
+```bash
 telepresence connect
 # Sets up the VPN tunnel from your laptop into the cluster.
 # Your laptop now resolves cluster DNS names such as
@@ -467,6 +632,53 @@ kubectl apply -f dev/payments-gateway.yaml
 kubectl -n bookstore-dev-alice wait pod -l app=payments-gateway --for=condition=Ready --timeout=120s
 ```
 
+Check the deny before you rely on it. A Pod in the same namespace, which
+the policy does not admit, makes a deliberate denied request to the
+Service. Its own egress is open, so the request reaches the policy
+rather than failing at DNS:
+
+```bash
+kubectl -n bookstore-dev-alice apply -f - <<'EOF'
+apiVersion: v1
+kind: Pod
+metadata:
+  name: denied-probe
+  namespace: bookstore-dev-alice
+spec:
+  automountServiceAccountToken: false
+  securityContext:
+    runAsNonRoot: true
+    runAsUser: 65534
+    runAsGroup: 65534
+    seccompProfile:
+      type: RuntimeDefault
+  containers:
+    - name: probe
+      image: public.ecr.aws/docker/library/busybox@sha256:73aaf090f3d85aa34ee199857f03fa3a95c8ede2ffd4cc2cdb5b94e566b11662 # busybox:1.36
+      command: ["sleep", "3600"]
+      securityContext:
+        allowPrivilegeEscalation: false
+        readOnlyRootFilesystem: true
+        capabilities:
+          drop: ["ALL"]
+      resources:
+        requests: { cpu: 10m, memory: 16Mi }
+        limits: { memory: 64Mi }
+EOF
+kubectl -n bookstore-dev-alice wait pod/denied-probe --for=condition=Ready --timeout=120s
+kubectl -n bookstore-dev-alice exec denied-probe -- wget -qO- -T 5 http://payments-gateway:8080/healthz
+```
+
+Illustrative output, not captured:
+
+```text
+wget: download timed out
+```
+
+A health body in place of the timeout means the CNI is not enforcing the
+policy. Stop there and fix the engine before you intercept anything.
+Remove the probe with `kubectl -n bookstore-dev-alice delete pod denied-probe`.
+
 #### 2.3 Intercept the payments-gateway Service to alice's laptop
 
 ```bash
@@ -546,11 +758,15 @@ build:
     - image: <YOUR-ECR>/bookstore/payments-gateway
       docker:
         dockerfile: Dockerfile
+manifests:
+  rawYaml:
+    - dev/payments-gateway.yaml
 deploy:
-  kubectl:
-    manifests:
-      - dev/payments-gateway.yaml
+  kubectl: {}
 ```
+
+The `manifests` block lists the files Skaffold reads. `deploy.kubectl`
+applies them with `kubectl apply`.
 
 #### 3.2 Run the dev loop
 
@@ -574,8 +790,8 @@ cycle; this chapter does not claim a figure for it.
 
 #### 3.3 Tear down
 
-`Ctrl-C` on the `skaffold dev` terminal: Skaffold cleans up the
-deployed resources automatically (deletes the Helm release).
+`Ctrl-C` on the `skaffold dev` terminal: Skaffold runs `kubectl delete`
+on the objects it applied from `dev/payments-gateway.yaml`.
 
 ### 4. Strategy C — Tilt (alternative file-watch-rebuild-deploy)
 
@@ -684,16 +900,16 @@ A scaffolder template (Backstage, ch.13.11) creates:
 - A `.devcontainer/devcontainer.json` in the service repo
   pre-configured to attach to the cluster-side container.
 
-Day 1 onboarding: open Backstage → click "Onboard new engineer"
-form → submit → 5 minutes later → open the service repo in VS Code
-→ "Reopen in Container" → editor attached → `skaffold dev` works
-against the developer's namespace. Zero local tool installation;
-the engineer was reading docs for the time it took the platform
-to provision their environment.
+Day 1 onboarding: open Backstage → click "Onboard new engineer" form → submit
+→ a few minutes later (the target is 5) → open the service repo in VS Code →
+"Reopen in Container" → editor attached → `skaffold dev` works against the
+developer's namespace. Zero local tool installation; the engineer was reading
+docs for the time it took the platform to provision their environment.
 
 ### 6. The 5-minute onboarding pattern (end-to-end)
 
-The composition of Phase 13/14 patterns that hits the 5-minute mark:
+The composition of Phase 13/14 patterns that aims at the 5-minute target.
+The timings in step 2 and step 5 are illustrative, not measured:
 
 ```text
 0. Engineer's laptop arrives with: macOS / Linux + a browser + VS Code.
@@ -744,7 +960,7 @@ telepresence quit
 telepresence helm uninstall   # one-time per cluster; only if no other devs are using it
 
 # If you used Skaffold:
-# Ctrl-C on the dev loop terminal — Skaffold cleans up the Helm release.
+# Ctrl-C on the dev loop terminal: Skaffold deletes the objects it applied.
 
 # Tear down the developer namespace:
 kubectl delete namespace bookstore-dev-alice
@@ -780,11 +996,17 @@ Instead, when the developer runs `mirrord exec -- ./my-binary`, the
 laptop's mirrord CLI:
 
 1. Reads the target Pod's spec (via the K8s API).
-2. Launches a small DaemonSet of `mirrord-agent` Pods (one per node)
-   in the cluster (or reuses existing ones).
-3. The mirrord-agent Pods work against the target Pod's network and
-   process view. Check the agent chart's security settings before it
-   runs in a namespace that enforces `restricted`.
+2. Starts a `mirrord-agent` Job next to the target Pod, in the target
+   Pod's Linux namespaces.
+3. The agent works against the target Pod's network and process view.
+   It is not a privileged container, but it needs four capabilities:
+   `CAP_NET_ADMIN` and `CAP_NET_RAW` to change routing, `CAP_SYS_PTRACE`
+   to read the target's environment, and `CAP_SYS_ADMIN` to join its
+   network namespace. Pod Security `baseline` and `restricted` both
+   refuse added capabilities, so the agent cannot run in the developer
+   namespaces this chapter builds. The agent can drop any of the four
+   with the `agent.disabled_capabilities` setting, which limits what
+   mirrord can do ([mirrord config](https://metalbear.com/mirrord/docs/config#agent.disabled_capabilities)).
 4. The local binary runs with a mirrord library injected via
    `LD_PRELOAD` (Linux) — every syscall the binary makes (`socket`,
    `connect`, `accept`, `open`, etc.) is intercepted by the library
@@ -828,14 +1050,13 @@ process:
    new file without process restart (or the chart to be configured
    for hot-reload).
 
-**The Devcontainer spec.** The `.devcontainer/devcontainer.json`
-file is a CNCF-blessed JSON schema for declaring a development
-container. The schema defines: base image, features (composable
-add-ons like `kubectl`, `helm`, language runtimes), mounts (bind-
-mount the workspace + host directories like `~/.aws`),
-postCreateCommand (one-time setup), and editor customizations.
-VS Code's Dev Containers extension reads it; JetBrains has its
-own Dev Containers integration; the OpenVSCode-Server (a remote-
+**The Devcontainer spec.** The `.devcontainer/devcontainer.json` file
+declares a development container under an open specification that the
+devcontainers community maintains. The schema defines: base image, features (composable add-ons like
+`kubectl`, `helm`, language runtimes), mounts (bind- mount the workspace +
+host directories like `~/.aws`), postCreateCommand (one-time setup), and
+editor customizations. VS Code's Dev Containers extension reads it; JetBrains
+has its own Dev Containers integration; the OpenVSCode-Server (a remote-
 hostable VS Code) reads it identically. The dev-container spec is
 **editor-portable** — the same JSON works across editors.
 
@@ -873,13 +1094,12 @@ Backstage form is the only thing the engineer interacts with.
 > Crossplane (Part 13 ch.02) is the right tool for provisioning
 > developer-namespace resources at scale.
 
-> **In production:** **The 5-minute onboarding is a marketing-grade
-> SLA, not a feel-good number.** When a team hits it, retention
-> goes up; when a team misses it, day-1 frustration is the
-> compounding cost. Bookstore-platform-v2's scaffolder template
-> targets 5 minutes (in measured runs); production forks add
-> telemetry (the scaffolder records its execution time per step;
-> the team reviews "slow steps" monthly).
+> **In production:** **Treat the 5-minute onboarding as a target you
+> measure, not a promise.** When a team misses it, day-1 frustration is
+> the compounding cost. This chapter has no measured run of the
+> scaffolder template, so time your own onboarding first. Production
+> forks add telemetry: the scaffolder records its execution time per
+> step, and the team reviews the slow steps monthly.
 
 > **In production:** **The dev-container image is a platform
 > artifact.** A dev-container image with the wrong Go version, an
@@ -917,7 +1137,7 @@ Backstage form is the only thing the engineer interacts with.
 
 ```bash
 # Telepresence: connect, intercept, leave (2.25.0 or later).
-telepresence helm install                # one-time per dev cluster
+telepresence helm install ...            # one-time per cluster; flags in section 2.1
 telepresence connect                     # per-laptop session
 telepresence intercept <SERVICE> \
   --namespace=<DEV-NS> \
@@ -954,8 +1174,8 @@ Developer-experience checklist (the platform is delivering DX when all six are y
 - [ ] At least one of Skaffold / Tilt has a working `skaffold dev`
       / `tilt up` recipe per service (in the service's repo).
 - [ ] The "new engineer onboarding" Backstage template provisions a
-      developer namespace + dev-container in under 5 minutes
-      (measured + tracked).
+      developer namespace + dev-container in the target time
+      (measured and tracked against the 5-minute target).
 - [ ] Quarterly DX survey: engineers report < 30-second
       iteration cycles for their typical workflow; bottlenecks
       drive the platform's next quarter investments.
@@ -1011,7 +1231,7 @@ Developer-experience checklist (the platform is delivering DX when all six are y
   <https://docs.tilt.dev/>; the canonical Tilt reference, including
   the Tiltfile DSL + the `live_update` pattern.
 - **Dev Container specification**
-  <https://containers.dev/>; the CNCF-blessed schema for
+  <https://containers.dev/>; the open schema for
   `.devcontainer/devcontainer.json` that this chapter's
   Devcontainer setup conforms to.
 - **VS Code Dev Containers extension**
@@ -1021,7 +1241,9 @@ Developer-experience checklist (the platform is delivering DX when all six are y
 - **Telepresence RBAC reference**
   <https://telepresence.io/docs/reference/rbac>; the intercept
   authorization default, the `pods/portforward` check, and the
-  `security.authorization.requiredGrant` chart setting.
+  the `attachments` and `connections` grants, and the chart's
+  `managerRbac` and `clientRbac` values for limiting them to named
+  namespaces.
 - **Create a kubeconfig with `aws eks update-kubeconfig`**
   <https://docs.aws.amazon.com/eks/latest/userguide/create-kubeconfig.html>;
   the exec-plugin kubeconfig that 5.3 relies on.

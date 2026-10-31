@@ -1,17 +1,16 @@
 # 14.13 — Runtime defense & container security
 
-> **Admission control stops bad images. PSA stops bad Pod specs. Image
-> signing proves provenance. None of those mechanisms can see what
-> happens *inside* a running container at 3am — a process being
-> spawned, a sensitive file being read, an unexpected outbound TCP
-> connection.** Runtime defense is the layer that watches the kernel
-> itself: **Falco** + **Tetragon** for syscall-level rules,
-> **GuardDuty** for AWS-side detections, and the alerting glue (SNS →
-> PagerDuty → human) that closes the loop from "syscall fired" to
-> "engineer triaging on their laptop." Falco's namespace is the **one**
-> privileged PSA namespace in the bookstore-platform Terraform tree,
-> because its eBPF driver needs capabilities and host paths that
-> `restricted` does not allow.
+> **Admission control stops bad images. PSA stops bad Pod specs. Image signing
+> proves provenance. None of those mechanisms can see what happens *inside* a
+> running container at 3am — a process being spawned, a sensitive file being
+> read, an unexpected outbound TCP connection.** Runtime defense is the layer
+> that watches the kernel itself: **Falco** + **Tetragon** for syscall-level
+> rules, **GuardDuty** for AWS-side detections, and the alerting glue (SNS →
+> PagerDuty → human) that closes the loop from "syscall fired" to "engineer
+> triaging on their laptop." Falco's namespace is one of the **two**
+> privileged PSA namespaces in the bookstore-platform Terraform tree
+> (kube-system, for Cilium, is the other), because its eBPF driver mounts host
+> paths that `restricted` does not allow.
 
 **Estimated time:** ~30 min read · ~90 min hands-on
 **Prerequisites:** [Part 05 ch.02](../05-security/02-pod-security.md): PSA stops bad Pod specs but not syscalls · [Part 14 ch.12](./12-supply-chain-security.md): admission stops bad images but not behavior · [Part 05 ch.03](../05-security/03-supply-chain.md): image signing and SBOMs
@@ -54,7 +53,8 @@ A signed, scanned, admission-passed image can still:
 - **Spawn a shell.** Web shells (a malicious request that causes the
   application to `exec /bin/sh`) are still one of the top attack
   patterns in 2026. The image is correct; the running process is
-  doing the wrong thing.
+  doing the wrong thing. The hands-on shows what the default rules
+  catch, and the threats table says what they do not.
 
 The threat model post-admission is **container escape, privilege
 escalation, lateral movement, cryptojacking, credential theft, web
@@ -62,8 +62,9 @@ shells**. The bookstore-platform tree ships [`falco.tf`](../examples/bookstore-p
 gated by `var.enable_falco = false`. It is off by default because runtime
 defense adds a per-node eBPF agent that needs serious privilege, a
 privileged-PSA namespace, and an alert pipeline you actually intend to
-read at 3am. Off-by-default until you wire all three is the honest
-default.
+read. The tree therefore ships Falco off (`enable_falco = false`). Set it
+to `true` once an alert destination and a triage owner exist; step 7 wires
+the alert output.
 
 The complementary layer is **GuardDuty**, AWS's managed threat-detection
 service. GuardDuty analyses CloudTrail management events, VPC flow logs
@@ -84,9 +85,9 @@ attempting to use it suspiciously?
 > **In production:** Runtime defense is the layer most teams skip and
 > regret. The half-day setup (Falco + an alert email + a triage
 > runbook) prevents the multi-week incident retrospective that ends
-> with "we had no visibility into the cluster at runtime." Falco
-> off-by-default in the bookstore tree is a *teaching* default —
-> production should flip it on.
+> with "we had no visibility into the cluster at runtime." Turn Falco on
+> with `enable_falco = true` only together with the alert destination and
+> the triage runbook; the tree does not ship a second, "production" form.
 
 ## Mental model
 
@@ -160,22 +161,22 @@ rule such as *Terminal shell in container* therefore does not run.
 `notice` is verbose (you'll see warnings on legitimate ops); `info` is
 firehose territory (every `execve` in every container).
 
-**Privileged-PSA exception.** Falco's eBPF driver loads a kernel eBPF
-program. The chart runs the container privileged by default, and
-`falco.tf` sets `privileged = true` explicitly. The chart's
-least-privileged option, `driver.modernEbpf.leastPrivileged`, replaces
-privileged with four capabilities: `CAP_BPF`, `CAP_PERFMON`,
-`CAP_SYS_RESOURCE` and `CAP_SYS_PTRACE`. The DaemonSet also mounts host
-paths, among them `/etc`, `/usr`, `/lib/modules` and the container runtime
-sockets. The PSA `restricted` profile
-forbids privileged containers, allows no capability beyond
-`NET_BIND_SERVICE`, and forbids hostPath volumes
-([Pod Security Standards](https://kubernetes.io/docs/concepts/security/pod-security-standards/)).
-Either form therefore needs the `falco` namespace at `privileged`. The
-namespace is labelled `pod-security.kubernetes.io/enforce=privileged`, it
-is the only privileged namespace in the bookstore-platform Terraform tree,
-and `security/namespace-exceptions.yaml` records it with its reason and
-expiry.
+**Privileged-PSA exception.** Falco's eBPF driver loads a kernel eBPF program.
+The chart's default runs the container privileged. `falco.tf` sets the chart's
+least-privileged option instead, `driver.modernEbpf.leastPrivileged`, which
+replaces privileged with four capabilities: `CAP_BPF`, `CAP_PERFMON`,
+`CAP_SYS_RESOURCE` and `CAP_SYS_PTRACE`. The DaemonSet also mounts host paths,
+among them `/etc`, `/usr`, `/lib/modules` and the container runtime sockets.
+The PSA `restricted` profile forbids privileged containers, allows no
+capability beyond `NET_BIND_SERVICE`, and forbids hostPath volumes. `baseline`
+forbids the hostPath volumes too ([Pod Security
+Standards](https://kubernetes.io/docs/concepts/security/pod-security-standards/)).
+The namespace therefore needs the `privileged` level even with the
+least-privileged option. It is labelled
+`pod-security.kubernetes.io/enforce=privileged`. It is one of two privileged
+namespaces in the bookstore-platform Terraform tree; kube-system, for Cilium,
+is the other. `security/namespace-exceptions.yaml` records it with its reason
+and expiry.
 
 **The alert pipeline.** A Falco rule firing produces:
 
@@ -209,10 +210,15 @@ up with a high-signal alert stream.
 
 | Threat | Control in this chapter | Deeper |
 |---|---|---|
-| Unexpected process or shell in a container (cryptomining, web shell) | Falco rules at warning and above, routed to an alert pipeline (hands-on steps 3 to 5, 7) | 05.08 <!-- link-later: 05.08 -->, [15.10](../15-day-to-day-production-ops/10-incident-response-and-on-call.md) |
+| Unexpected binary or reverse shell in a container | Falco rules at warning and above (drop-and-execute is critical, a netcat reverse shell is warning), routed to an alert pipeline (hands-on steps 3, 7) | 05.08 <!-- link-later: 05.08 -->, [15.10](../15-day-to-day-production-ops/10-incident-response-and-on-call.md) |
 | Credential read from a file (IRSA token, mounted secret) | Falco sensitive-file rule, and a custom rule for paths the defaults miss (steps 3, 6) | [14.03](./03-eks-addon-management.md) for IRSA scoping |
 | Container escape or activity directly on the node | Triage order: evidence first, then node replacement (Triage section) | [15.10](../15-day-to-day-production-ops/10-incident-response-and-on-call.md) |
 | Control-plane misuse, such as `kubectl exec` into kube-system | GuardDuty EKS Audit Log Monitoring (step 8) | [14.05](./05-logging-and-metrics-cost.md) for audit log retention |
+
+The table above does not list web shells. The default terminal-shell rule is
+notice-level and needs a tty, and a web shell usually has none, so the tree at
+`warning` does not alert on one. Closing that gap needs a rule written for
+your server processes, which this chapter does not ship.
 
 Image provenance is the earlier layer: see [14.12](./12-supply-chain-security.md)
 and [05.03](../05-security/03-supply-chain.md). This chapter starts after
@@ -287,6 +293,19 @@ kubectl get ns falco -o jsonpath='{.metadata.labels.pod-security\.kubernetes\.io
 If that returns `restricted` or empty, the Falco Pods are refused:
 `restricted` forbids the privileged container and host paths the
 DaemonSet needs. The exception is documented in `falco.tf`'s file header.
+
+The container itself is not privileged. Its security context carries the
+least-privileged capability list:
+
+```bash
+kubectl -n falco get ds falco -o jsonpath='{.spec.template.spec.containers[0].securityContext}'
+```
+
+Illustrative output, not captured:
+
+```text
+{"capabilities":{"add":["BPF","SYS_RESOURCE","PERFMON","SYS_PTRACE"]},"runAsUser":0}
+```
 
 ### 2. Inspect the loaded ruleset
 
@@ -662,8 +681,9 @@ kubectl exec <TARGET> -n <NS> -- ss -anptu > /tmp/pod-net.txt
 Runtime-defense checklist (the production setup is right when all six are yes):
 
 - [ ] Falco DaemonSet running on every node (`enable_falco = true`).
-- [ ] `falco` namespace labelled PSA `enforce=privileged`, and no other
-      privileged namespace in the Terraform tree.
+- [ ] `falco` namespace labelled PSA `enforce=privileged`, registered in
+      `security/namespace-exceptions.yaml`. The other privileged namespace in
+      the Terraform tree is `kube-system` (Cilium), registered the same way.
 - [ ] Falco's IRSA role has `sns:Publish` to the alerts topic and *only*
       that topic, and the output that uses it is wired (step 7).
 - [ ] The alerts reach on-call: a tested page from PagerDuty, not just an
