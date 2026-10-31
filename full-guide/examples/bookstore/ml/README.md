@@ -39,12 +39,13 @@ Y"*, derived from the Bookstore's own data.
 
 | Dir | Phase | Status |
 |---|---|---|
-| `dataset/` | data shape (synthetic, generated) | **this phase (X3a)** — stub |
-| `gpu/` | a restricted GPU training Pod (the scale-up path) | **this phase (X3a)** — ch.02 |
-| `batch/` | Kueue queue/flavor + a JobSet "training" (CPU, gang) | **this phase (X3a)** — ch.03 |
-| `train/` | the real CPU training Job + model artifact | X3b (forward-ref) |
-| `serve/` | the recommendations serving Deployment/KServe | X3b (forward-ref) |
-| `pipeline/` | the whole loop as a pipeline | X3c (forward-ref) |
+| `dataset/` | data shape (synthetic, generated) | ch.01 (stub) |
+| `notebook/` | a restricted singleuser PodTemplate for JupyterHub | ch.05 |
+| `gpu/` | a restricted GPU training Pod (the scale-up path) | ch.02 |
+| `batch/` | Kueue queue/flavor + a JobSet "training" (CPU, gang) | ch.03 |
+| `train/` | the real CPU training Job + model artifact | ch.04 |
+| `serve/` | the recommendations serving Deployment (or KServe) | ch.06 |
+| `pipeline/` | the whole loop as a pipeline | ch.07 |
 
 ## The namespace contract (read this before applying anything)
 
@@ -63,6 +64,9 @@ kubectl label namespace bookstore-ml \
   pod-security.kubernetes.io/warn=restricted \
   pod-security.kubernetes.io/warn-version=latest --overwrite
 ```
+
+The namespace also gets a default-deny NetworkPolicy from ch.01. Each later
+chapter adds an allow for its own workload.
 
 **Every Pod in this tree is restricted-compliant**: `runAsNonRoot: true`, a
 non-root `runAsUser`, `allowPrivilegeEscalation: false`,

@@ -4,9 +4,9 @@ The recommendations model (Part 12) trains on the Bookstore's own data. **No
 data file is committed here.** This document is the *spec* for the (synthetic)
 training data: which Bookstore tables it derives from, and the
 item-co-occurrence matrix the training step builds from them. The training Job
-in **X3b** generates the synthetic source rows and produces the matrix; this
-phase (X3a) only fixes the shape so ch.03's gang-scheduled "training" demo and
-X3b's real training agree.
+in **ch.04** generates the synthetic source rows and produces the matrix; this
+chapter (ch.01) only fixes the shape so ch.03's gang-scheduled "training" demo
+and ch.04's real training agree.
 
 ## Source: the real Bookstore schema
 
@@ -28,7 +28,7 @@ modulo grouping over `created_at`/`id`. This is *good enough for a teaching
 recommender* and is stated honestly; a production system would carry a real
 basket/session id.
 
-## Synthetic generation (done by the X3b training Job, not here)
+## Synthetic generation (done by the ch.04 training Job, not here)
 
 - ~50–500 synthetic books (id, title, author, price) consistent with the
   catalog shape.
@@ -37,8 +37,8 @@ basket/session id.
   the learned neighbours are non-trivial.
 - Fully deterministic given a fixed **seed** (pinned in the training Job's
   config) — so the dataset, and therefore the model, is **reproducible** (the
-  Part 12 ch.01 reproducibility requirement). Tiny by design → trains in
-  seconds, CPU-only, on kind.
+  Part 12 ch.01 reproducibility requirement). Tiny by design, so it should
+  train in seconds on CPU.
 
 ## Derived artifact: the item co-occurrence matrix
 
@@ -61,7 +61,7 @@ The training step (CPU, NumPy/scikit-learn-class):
  └────────────────┘
 ```
 
-The serving artifact (X3b) is just this top-K map (JSON / a small binary)
+The serving artifact (ch.04) is just this top-K map (JSON / a small binary)
 loaded by the recommendations API: `GET /recommend?book_id=<ID>` → the top-K
 co-bought `book_id`s. Small enough to fit in a ConfigMap-or-PVC and serve from
 a tiny CPU Deployment — and large enough that ch.02/03 can *honestly* use it as
@@ -71,5 +71,5 @@ the "scale training up onto a GPU" example without faking anything.
 
 - Keeps the repo free of a binary/data blob and keeps the example
   **reproducible from a seed** (re-generate, get the identical model).
-- The shape is stable and small so ch.03's 2-worker gang "training" and X3b's
-  real training operate on the same contract without a GPU.
+- The shape is stable and small so ch.03's 2-worker gang "training" and
+  ch.04's real training operate on the same contract without a GPU.

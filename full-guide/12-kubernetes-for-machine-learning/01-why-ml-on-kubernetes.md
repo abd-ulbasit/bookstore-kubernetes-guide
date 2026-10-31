@@ -14,15 +14,18 @@
 > Bookstore **recommendations** use case and the new
 > [`examples/bookstore/ml/`](../examples/bookstore/ml/README.md) thread.
 
-**Estimated time:** ~30 min read · (no hands-on)
+**Estimated time:** ~30 min read · short hands-on on a kind cluster
 **Prerequisites:** [Part 01 ch.01](../01-core-workloads/01-pods.md) — Pod baseline ML workloads extend · [Part 06 ch.06](../06-production-readiness/06-capacity-and-cost.md) — cost framing this part deepens for GPUs
-**You'll know after this:** • map each ML workload (notebook / train / tune / serve / pipeline) onto a K8s primitive · • articulate why Kubernetes is the unifying ML substrate (vs bespoke ML infra) · • describe the MLOps loop (data → train → register → serve → monitor → retrain) · • name what is structurally different about ML (GPUs as countable, gang scheduling, data gravity) · • place Kubeflow / Ray / KServe / Kueue / Volcano on a one-page map
+**You'll know after this:** • map each ML workload (notebook / train / tune / serve / pipeline) onto a K8s primitive · • articulate why Kubernetes is the unifying ML substrate (vs bespoke ML infra) · • describe the MLOps loop (data → train → register → serve → monitor → retrain) · • name what is structurally different about ML (GPUs as countable, gang scheduling, data gravity) · • name the ML-specific threats and the Part 12 chapter that owns each · • place Kubeflow / Ray / KServe / Kueue / Volcano on a one-page map
+
+**Tier A (kind).** The hands-on runs on a kind cluster. Run it only against
+a cluster you own.
 
 <!-- tags: ml, mental-model, foundations -->
 
 ## Why this exists
 
-The guide spent fifty chapters making the Bookstore a **stateless-ish web
+The earlier Parts of this guide made the Bookstore a **stateless-ish web
 system**: Deployments that scale on CPU, a StatefulSet for Postgres, Jobs for
 migrations, all hardened to PSA `restricted`, delivered by GitOps. That is the
 overwhelmingly common Kubernetes workload — and it is *not* what a machine
@@ -50,6 +53,11 @@ It also introduces the worked example for the whole part: the Bookstore
 runs **CPU-only on kind**, with GPUs as the honestly-marked "now scale it up"
 path. This is the [Batch Job](#further-reading) and
 [Elastic Scale](#further-reading) patterns applied to ML.
+
+ML also brings a security problem the web tier mostly did not have. The
+hardware is expensive enough to steal, the data a training job reads is
+concentrated in one place, and a model file can run code when it is loaded.
+The next section names those threats and the chapter that owns each.
 
 ## Mental model
 
@@ -97,6 +105,67 @@ reproducible experiment — the *Configuration Template* idea from
 The trap, stated up front: Kubernetes does *not* make GPUs cheap or training
 fast — it makes them *schedulable, shareable, and reproducible*. The hard ML
 problems (model quality, data) are still yours.
+
+## Threats and controls
+
+Part 12 keeps the baseline from
+[01.01](../01-core-workloads/01-pods.md#baseline) on every workload. The
+baseline answers the generic threats: a root process, a privilege escalation,
+a writable image. The threats below come with this subject. Each has one
+owner chapter that holds the control, and every other chapter links to it
+rather than adding a second one.
+
+### What is new
+
+- **Expensive hardware is a theft target.** An accelerator hour costs far more
+  than a CPU hour. A Pod that can reach one can spend that money on work nobody
+  approved, such as cryptomining or a training run no team asked for. The
+  attacker needs no data to profit. OWASP's Unbounded Consumption entry covers
+  this class of abuse (LLM10, below).
+- **Data access is concentrated.** A training Job reads a whole dataset in one
+  run, from a PVC or an object store, and often holds credentials for other
+  systems to do it. A Pod compromised during training can read all of that
+  data, or change it, from one place.
+- **Loading a file runs code.** Model artifacts are commonly stored in Python's
+  pickle format. The
+  [Python `pickle` documentation](https://docs.python.org/3/library/pickle.html)
+  warns that malicious pickle data can run arbitrary code during the load, and
+  says to unpickle only data you trust. The training chapter writes
+  `model.joblib`, and joblib writes pickle-based files. A model file from an
+  unverified source is code, so the artifact is the attack path.
+
+| Threat | Control taught in this chapter | Owner, where it goes deeper |
+|---|---|---|
+| A root-by-default image runs as root on a shared node | The namespace enforces `restricted` before any Pod lands | [02](02-gpus-and-accelerators.md) for a compliant GPU Pod; [05.02](../05-security/02-pod-security.md) for the mechanism |
+| Accelerator hours spent on unapproved work | Accelerators are requested per Pod as countable devices; no ML Pod is privileged | [02](02-gpus-and-accelerators.md) for the GPU stack and sharing; [03](03-batch-and-gang-scheduling.md) for queues and quota; [08](08-ml-platform-cost-and-mlops.md) for cost abuse |
+| Untrusted training inputs: images, data, pretrained weights | None taught here | [04](04-distributed-training.md) |
+| Notebook code runs what its user types | None taught here; a notebook is an ordinary restricted Pod | [05](05-notebooks-and-interactive.md) |
+| A model file runs code when loaded | Named here; the artifact is treated as code | [06](06-model-serving-and-inference.md) verifies before load; [07](07-ml-pipelines-and-workflows.md) records the digest |
+| A serving endpoint that anyone in the cluster can reach | A default-deny NetworkPolicy in the namespace | [02.06](../02-networking/06-network-policies.md) for enforcement; [06](06-model-serving-and-inference.md) for serving auth |
+| Pipeline steps holding broad rights | None taught here | [07](07-ml-pipelines-and-workflows.md) |
+| Tracking, scaffolding and cost data read by other teams | None taught here | [08](08-ml-platform-cost-and-mlops.md) |
+
+### OWASP LLM Top 10 as a map
+
+The
+[OWASP Top 10 for LLM Applications, 2025 edition](https://genai.owasp.org/llm-top-10/)
+is written for applications built on large language models. The recommender in
+this part takes no prompt, so several items do not apply to it. The list is
+still the common vocabulary for ML and LLM risk, so this part uses it as a map.
+Each row says where Part 12 meets the risk, or why it does not.
+
+| OWASP item | Where Part 12 meets it | Owner |
+|---|---|---|
+| LLM01 Prompt Injection | Not present: the recommender takes no prompt. It returns if an LLM is served. | not in this part |
+| LLM02 Sensitive Information Disclosure | Training data is order history; notebooks and serving can expose it | 04, 05, 06 |
+| LLM03 Supply Chain | Pretrained weights, base images, and the pickle loader | 02, 04, 06 |
+| LLM04 Data and Model Poisoning | Training inputs and the model file itself | 04, 07 |
+| LLM05 Improper Output Handling | Not present: the output is a list of book ids, not free text | not in this part |
+| LLM06 Excessive Agency | Pipeline steps and the scaffolder act with broad rights | 07, 08 |
+| LLM07 System Prompt Leakage | Not present: there is no system prompt | not in this part |
+| LLM08 Vector and Embedding Weaknesses | Not present: the recommender keeps no vector store | not in this part |
+| LLM09 Misinformation | A poor recommendation is a quality problem, handled by evaluation, not a security control | 07 |
+| LLM10 Unbounded Consumption | Accelerator hours and serving capacity, abused as cost | 02, 03, 08 |
 
 ## Diagrams
 
@@ -151,12 +220,20 @@ flowchart LR
 ## Hands-on with the Bookstore
 
 **Assumed working directory: the guide repo root (`full-guide/`).** This is the
-framing chapter, so the hands-on is **setup, not a running model yet**: it
-creates the new `examples/bookstore/ml/` thread (its README + a dataset stub)
-and a dedicated, PSA-`restricted` `bookstore-ml` namespace that *every* Part 12
-ML workload uses. No model trains until ch.03 (gang-scheduled CPU "training")
-and X3b (the real train→serve). This chapter changes **nothing** in the
-existing Bookstore (`raw-manifests/`, `helm/`, `kustomize/`, the 50 chapters).
+framing chapter, so the hands-on is **setup, not a running model yet**. It
+creates the `examples/bookstore/ml/` thread's files, a PSA-`restricted`
+`bookstore-ml` namespace that *every* Part 12 ML workload uses, and a
+default-deny NetworkPolicy in that namespace. No model trains here. ch.03 runs
+a gang-scheduled CPU demo, and ch.04 trains the model. Nothing in the existing
+Bookstore changes.
+
+**Tier A (kind).** The recorded run is in
+[`examples/security-lab/evidence/12-01.txt`](../examples/security-lab/evidence/12-01.txt),
+made by
+[`examples/security-lab/labs/12-01.sh`](../examples/security-lab/labs/12-01.sh).
+It ran in its own namespace, `p12-01-bookstore-ml`, on a kind cluster whose name
+and node name differ from the guide's. Lines that name that namespace are kept
+as captured. Every command below names `bookstore-ml`.
 
 ### 1. The ML thread overview and dataset stub (already created)
 
@@ -170,7 +247,7 @@ The Part 12 example tree is introduced here:
 - [`examples/bookstore/ml/dataset/README.md`](../examples/bookstore/ml/dataset/README.md)
   — the **data shape**: it is *synthetic and generated, not shipped*; this stub
   documents exactly which Bookstore tables it derives from and the
-  item-co-occurrence matrix the training Job (X3b) builds.
+  item-co-occurrence matrix the training Job (ch.04) builds.
 
 Read both now — they are the spec the rest of Part 12 implements. Confirm they
 exist:
@@ -181,64 +258,133 @@ ls examples/bookstore/ml examples/bookstore/ml/dataset
 cat examples/bookstore/ml/README.md          # the thread overview / contract
 ```
 
-### 2. The dedicated ML namespace — PSA `restricted`, like the app
+### 2. The dedicated ML namespace and its default-deny policy
 
 ML work is a **new concern**, so it gets its **own namespace**, not the
-`bookstore` one. Two reasons: (a) **blast radius / quota** — GPU and
+`bookstore` one. Two reasons: (a) **blast radius and quota**: GPU and
 long-running training quota (ch.03) is set per ML team, separate from the
-app's; (b) **the PSA footgun, taught up front** — many GPU/training/ML base
-images (CUDA images, framework images, notebook images) default to **root**.
-PSA `restricted` does **not** exempt ML pods. So `bookstore-ml` is labelled
-`restricted` *exactly like* `bookstore`
-([Part 05 ch.02](../05-security/02-pod-security.md)), and every ML Pod the rest
-of Part 12 ships is made restricted-compliant. Naming the namespace `restricted`
-and then running a stock root CUDA image is a real, common production failure —
-ch.02 shows the compliant `securityContext` that still works.
+app's; (b) **the PSA footgun, taught up front**: many GPU, training and
+notebook base images default to **root**. PSA `restricted` does **not** exempt
+ML pods. So `bookstore-ml` is labelled `restricted` *exactly like* `bookstore`
+([Part 05 ch.02](../05-security/02-pod-security.md)), and every ML Pod in Part 12
+is made restricted-compliant. Naming the namespace `restricted` and then running
+a stock root CUDA image is a real, common production failure. ch.02 shows the
+compliant `securityContext` that still works on a GPU image.
 
-Create the namespace (a one-off `kubectl` — Part 12's manifests live under
-`examples/bookstore/ml/`, kept separate from the canonical app trees so the
-guide's invariants are untouched):
+The same apply creates the default-deny NetworkPolicy that the later chapters
+build on. It selects every Pod in the namespace and allows no traffic in or
+out. Each later chapter adds an allow for its own workload. The namespace comes
+first, in the same manifest:
 
 ```sh
-kubectl create namespace bookstore-ml
-kubectl label namespace bookstore-ml \
-  app.kubernetes.io/part-of=bookstore-ml \
-  pod-security.kubernetes.io/enforce=restricted \
-  pod-security.kubernetes.io/enforce-version=latest \
-  pod-security.kubernetes.io/audit=restricted \
-  pod-security.kubernetes.io/audit-version=latest \
-  pod-security.kubernetes.io/warn=restricted \
-  pod-security.kubernetes.io/warn-version=latest --overwrite
-
-kubectl get ns bookstore-ml -o jsonpath='{.metadata.labels}' \
-  | tr ',' '\n' | grep pod-security
-#  pod-security.kubernetes.io/enforce:restricted   (+ audit + warn, version latest)
+kubectl apply -f - <<'EOF'
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: bookstore-ml
+  labels:
+    app.kubernetes.io/part-of: bookstore-ml
+    pod-security.kubernetes.io/enforce: restricted
+    pod-security.kubernetes.io/enforce-version: latest
+    pod-security.kubernetes.io/audit: restricted
+    pod-security.kubernetes.io/audit-version: latest
+    pod-security.kubernetes.io/warn: restricted
+    pod-security.kubernetes.io/warn-version: latest
+---
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: default-deny
+  namespace: bookstore-ml
+spec:
+  podSelector: {}
+  policyTypes: ["Ingress", "Egress"]
+EOF
 ```
 
-> **This is the contract for all of Part 12.** Every manifest under
-> `examples/bookstore/ml/` targets `bookstore-ml` and is restricted-compliant
-> (runAsNonRoot, non-root UID, allowPrivilegeEscalation:false,
-> capabilities.drop:["ALL"], seccompProfile RuntimeDefault, only
-> `restricted`-allowed volumes). ch.02 proves a GPU Pod satisfies this; ch.03
-> proves the gang-scheduled "training" Jobs do. The same
-> `kubectl apply --dry-run=server` proof technique Part 05 ch.02 used certifies
-> them.
+<!-- gate: output -->
 
-### 3. Where the rest of Part 12 goes (forward map)
+```text
+namespace/p12-01-bookstore-ml created
+networkpolicy.networking.k8s.io/default-deny created
+```
 
-Nothing more *runs* here — this chapter is the map. The thread proceeds:
+The lab cluster's CNI is kindnet, the one that comes with kind. This lab checks
+that the policy is accepted and stored. It sends no traffic, so it does not
+show enforcement.
+[Part 02 ch.06](../02-networking/06-network-policies.md) covers enforcement,
+which needs a CNI that enforces the policy.
+
+Check that the Pod Security labels landed and the policy is stored. The
+`-version` labels tell the admission check to use the newest Pod Security rules
+this cluster supports:
+
+```sh
+kubectl get namespace bookstore-ml -o jsonpath='{.metadata.labels}' \
+  | tr ',' '\n' | grep pod-security
+kubectl get networkpolicy -n bookstore-ml
+```
+
+<!-- gate: output -->
+
+```text
+"pod-security.kubernetes.io/audit":"restricted"
+"pod-security.kubernetes.io/audit-version":"latest"
+"pod-security.kubernetes.io/enforce":"restricted"
+"pod-security.kubernetes.io/enforce-version":"latest"
+"pod-security.kubernetes.io/warn":"restricted"
+"pod-security.kubernetes.io/warn-version":"latest"}
+```
+
+<!-- gate: output -->
+
+```text
+NAME           POD-SELECTOR   AGE
+default-deny   <none>         0s
+```
+
+### 3. A refused Pod: the control working
+
+**Deliberate failure.** The next command is meant to fail. It asks for a Pod
+built from the catalog image with no `securityContext`, which is the state a
+root-by-default image leaves a workload in. A server-side dry run sends the Pod
+through admission and stores nothing.
+
+```sh
+kubectl run unhardened --image=bookstore/catalog:dev --restart=Never \
+  --dry-run=server -n bookstore-ml
+```
+
+<!-- gate: output -->
+
+```text
+Error from server (Forbidden): pods "unhardened" is forbidden: violates PodSecurity "restricted:latest": allowPrivilegeEscalation != false (container "unhardened" must set securityContext.allowPrivilegeEscalation=false), unrestricted capabilities (container "unhardened" must set securityContext.capabilities.drop=["ALL"]), runAsNonRoot != true (pod or container "unhardened" must set securityContext.runAsNonRoot=true), seccompProfile (pod or container "unhardened" must set securityContext.seccompProfile.type to "RuntimeDefault" or "Localhost")
+```
+
+The refusal names four baseline fields, one per check:
+`allowPrivilegeEscalation`, `capabilities`, `runAsNonRoot` and `seccompProfile`.
+Each is explained against its threat in
+[01.01](../01-core-workloads/01-pods.md#baseline). ch.02 builds a GPU Pod that
+sets all four and passes this check. Before you set `enforce` on a namespace
+that already runs workloads, run a server dry run like this one. `warn` and
+`audit` only report, so they will not stop a workload from landing.
+
+### 4. Where the rest of Part 12 goes (forward map)
+
+Nothing more *runs* here. The thread proceeds:
 
 | Step on the MLOps loop | Part 12 chapter | `examples/bookstore/ml/` |
 |---|---|---|
-| accelerators for *train* | **ch.02** GPUs & accelerators | `gpu/` (a restricted GPU train Pod) |
-| schedule *train* at scale | **ch.03** batch & gang scheduling | `batch/` (Kueue + a JobSet) |
-| the *train* step itself (CPU) | X3b | `train/` (forward-ref — not yet) |
-| *register* + *serve* | X3b | `serve/` (forward-ref — not yet) |
-| the whole *loop* as a pipeline | X3c | `pipeline/` (forward-ref — not yet) |
+| interactive notebook work | ch.05 | `notebook/` |
+| accelerators for *train* | ch.02 | `gpu/` (a restricted GPU train Pod) |
+| schedule *train* at scale | ch.03 | `batch/` (Kueue + a JobSet) |
+| the *train* step itself (CPU) | ch.04 | `train/` |
+| *register* (tracking server) | ch.08 | (no tree) |
+| *serve* | ch.06 | `serve/` |
+| the whole *loop* as a pipeline | ch.07 | `pipeline/` |
 
-(X3b/X3c add `ml/train`, `ml/serve`, `ml/pipeline`; this phase deliberately
-creates only `ml/README.md`, `ml/dataset/`, `ml/gpu/` (ch.02), `ml/batch/`
-(ch.03).)
+This chapter creates only `ml/README.md` and `ml/dataset/`. Each later chapter
+adds its own tree.
 
 ## How it works under the hood
 
@@ -252,8 +398,8 @@ creates only `ml/README.md`, `ml/dataset/`, `ml/gpu/` (ch.02), `ml/batch/`
   overcommit a physical GPU by default — sharing needs explicit MIG/time-slicing,
   ch.02). So the *Predictable Demands* pattern
   ([Part 01 ch.03](../01-core-workloads/03-resources-and-qos.md)) becomes
-  load-bearing: a training Pod that under-requests does not get throttled, it
-  gets *no GPU*. ch.02 is the full mechanism.
+  load-bearing. By default, a Pod that asks for one GPU owns one whole device,
+  and sharing is an explicit setting that ch.02 covers.
 - **Why distributed training breaks default Job scheduling.** A multi-worker
   training job is N Pods that must rendezvous (all-reduce / parameter server).
   The default scheduler places Pods *independently* and *greedily*: with 8 GPUs
@@ -307,12 +453,10 @@ creates only `ml/README.md`, `ml/dataset/`, `ml/gpu/` (ch.02), `ml/batch/`
 > 11 ch.06](../11-advanced-production-patterns/06-multi-cluster-and-fleet.md)
 > multi-cluster decision, not a default.
 
-> **In production:** put ML workloads in their **own namespace(s)** with their
-> own ResourceQuota (especially `requests.nvidia.com/gpu`), RBAC, and PSA
-> `restricted` — exactly as this chapter does with `bookstore-ml`. ML images
-> are a notorious PSA footgun (root-by-default CUDA/notebook/framework images);
-> *test restricted admission* (`--dry-run=server`) before flipping `enforce`,
-> never label-and-hope ([Part 05 ch.02](../05-security/02-pod-security.md)).
+> **In production:** give each ML team its **own namespace(s)**, a ResourceQuota
+> that caps `requests.nvidia.com/gpu`, and its own RBAC. The quota turns a
+> runaway job into a refused request instead of an invoice. ch.03 sets the quota
+> up. Each such namespace gets the `restricted` labels from section 2.
 
 > **In production:** budget for **GPU scarcity and cost from day one**. GPU
 > nodes are expensive, often supply-constrained, and do not bin-pack like CPU.
@@ -343,6 +487,7 @@ kubectl create namespace bookstore-ml
 kubectl label namespace bookstore-ml \
   pod-security.kubernetes.io/enforce=restricted \
   pod-security.kubernetes.io/enforce-version=latest \
+  pod-security.kubernetes.io/audit=restricted \
   pod-security.kubernetes.io/warn=restricted --overwrite
 kubectl get ns bookstore-ml --show-labels | tr ',' '\n' | grep pod-security
 
@@ -359,17 +504,21 @@ train (1 node) .. Job / Indexed Job  (+ nvidia.com/gpu — ch.02)
 train (N nodes) . JobSet + gang scheduling (Kueue/Volcano — ch.03)
 tuning .......... parallel/Indexed Jobs + a search controller
 batch inference . Indexed Job (sharded)
-serving ......... Deployment + Service + HPA  (KServe — fwd-ref)
-pipeline ........ CRD + controller (a pipeline engine — fwd-ref)
+serving ......... Deployment + Service + HPA  (KServe, ch.06)
+pipeline ........ CRD + controller (a pipeline engine, ch.07)
 ```
 
 Checklist (before any ML workload lands):
 
 - [ ] ML work is in its **own** namespace, PSA `enforce: restricted` + `audit`/`warn`
+- [ ] A default-deny NetworkPolicy is in the namespace, and the cluster's CNI
+  enforces it
 - [ ] You can name the primitive each ML workload maps to (no bespoke control plane)
 - [ ] GPU is treated as a countable, request==limit extended resource (ch.02)
 - [ ] Distributed training is gang-scheduled, never default-scheduled (ch.03)
 - [ ] Dataset/image/hyperparameters are pinned; model version is recorded
+- [ ] A model file is loaded only after its digest matches the record from the
+  training run (ch.06, ch.07)
 - [ ] GPU utilisation is (or will be) observable; quota/fair-sharing planned
 - [ ] Ecosystem adopted incrementally, not "all of Kubeflow on day one"
 
@@ -398,10 +547,17 @@ Checklist (before any ML workload lands):
 
    </details>
 
-4. **Hands-on: deploy a "fake training" Job that sleeps 30s then writes a file to a PVC, plus a "fake serving" Deployment that returns 200 OK on `/predict`. Now block PSA-restricted on both. What footguns appear?**
-   <details><summary>What you should see</summary>
+4. **The training image runs as root by default. What does `restricted` do with a Pod that uses it, and which fields change?**
+   <details><summary>Show answer</summary>
 
-   The training Job's container probably runs as root (CUDA base images default to root); the Job will be rejected by PSA-restricted. The serving Deployment is fine if you use a distroless or restricted-friendly base. The fix for the training Job: set `runAsUser: 1000`, `runAsNonRoot: true`, `allowPrivilegeEscalation: false`, `seccompProfile: RuntimeDefault`. For real CUDA images you usually need to add a uid via Dockerfile (`useradd -u 1000 mluser`) — this is the PSA-restricted GPU-pod footgun [ch.02](02-gpus-and-accelerators.md) details.
+   `restricted` refuses the Pod at admission, with one message per failed check: `allowPrivilegeEscalation`, `capabilities`, `runAsNonRoot` and `seccompProfile`. The fix is the baseline from 01.01: set those fields and a numeric `runAsUser` that the image declares. Setting `runAsNonRoot: true` on an image that runs as root does not help, because the kubelet refuses to start the container. The image itself has to get a non-root user in its Dockerfile. ch.02 works through this footgun for a GPU image.
+
+   </details>
+
+5. **A data scientist wants to load `model.joblib` from a bucket another team owns. What is the risk, and which control comes first?**
+   <details><summary>Show answer</summary>
+
+   joblib files are pickle-based, and unpickling can run arbitrary code during the load, as the [Python `pickle` documentation](https://docs.python.org/3/library/pickle.html) warns. Loading the file runs the file author's code, so treat the artifact as code. The first control is to load only an artifact whose digest matches the record from the training run, from a read-only mount in a restricted Pod. ch.06 covers the load-time check, and ch.07 records the digest.
 
    </details>
 
@@ -414,6 +570,11 @@ Checklist (before any ML workload lands):
 - **Rosso et al., _Production Kubernetes_, ch.13 — "Autoscaling"** and
   **ch.12 — "Multitenancy"** — scaling and fair multi-tenant resource sharing,
   which become acute once scarce GPUs are shared across ML teams.
+- OWASP, _Top 10 for LLM Applications_ (2025 edition)
+  <https://genai.owasp.org/llm-top-10/>, the risk map used in the threats
+  section above.
+- Python documentation, the `pickle` module and its security warning
+  <https://docs.python.org/3/library/pickle.html>.
 - Official: Kubernetes scheduling/extended-resources overview
   <https://kubernetes.io/docs/concepts/scheduling-eviction/>, the Kubeflow
   project overview <https://www.kubeflow.org/docs/started/introduction/>, and
