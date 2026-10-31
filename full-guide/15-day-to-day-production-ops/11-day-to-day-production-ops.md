@@ -13,7 +13,7 @@
 **Estimated time:** ~30 min read · ~60 min hands-on
 **Prerequisites:** [Part 15 ch.10](./10-incident-response-and-on-call.md) — the reactive side this chapter complements with the proactive side · [Part 14 ch.06](../14-eks-in-production-a-to-z/06-cost-guardrails.md) — cost-review inputs · [Part 11 ch.04](../06-production-readiness/06-capacity-and-cost.md) — proactive ops framing
 
-**You'll know after this:** • run the weekly/monthly/quarterly ops cadence (Monday cost review, biweekly capacity review, weekly on-call review, monthly postmortem review) · • make scaling decisions intentionally — when to add a NodePool, when to bump the system-node-group, when (mostly never) to add Cluster Autoscaler alongside Karpenter · • execute the 90-day check-in "do we still have the right cluster shape" · • avoid the three production traps (no one owns ops, "we'll automate that later", ops-time-vs-feature-time imbalance) · • measure team ops maturity via a small ratio dashboard (ops-time%, hotfix-PR-count, missed-postmortem-count)
+**You'll know after this:** • run the weekly/monthly/quarterly ops cadence (Monday cost review, biweekly capacity review, weekly on-call review, monthly postmortem review) · • make scaling decisions intentionally — when to add a NodePool, when to bump the system-node-group, when (mostly never) to add Cluster Autoscaler alongside Karpenter · • execute the 90-day check-in "do we still have the right cluster shape" · • avoid the three production traps (no one owns ops, "we'll automate that later", ops-time-vs-feature-time imbalance) · • measure team ops maturity via a small ratio dashboard (ops-time%, hotfix-PR-count, missed-postmortem-count) · • keep security controls from expiring quietly (exception renewals, access review, digest patch review)
 
 <!-- tags: day-2, finops, on-call, autoscaling, platform-engineering -->
 
@@ -46,7 +46,8 @@ the Backstage scaffolder updates).
 
 The 40/60 ratio is healthy for a **maturing** platform. New platforms
 (first 6 months) trend higher on toil (60 %); mature platforms
-(2+ years) trend lower (20-30 %). If your team is over 60 % on toil
+(2+ years) trend lower (20-30 %). These are this guide's rule of thumb,
+not survey data. If your team is over 60 % on toil
 for more than a quarter, the toil itself is a platform feature gap:
 something is missing from the platform that's forcing humans to
 intervene. That's an action item.
@@ -84,8 +85,8 @@ The cadence visualized:
   or consistently above 80 % (resize)?
 - **Friday afternoon — weekly on-call review (30 min).** The
   outgoing primary + the platform lead review the week's pages.
-  Pages-per-shift; MTTD (mean time to detect); MTTR (mean time to
-  resolve); any pages that should have been a different severity.
+  Pages-per-shift; time to acknowledge; MTTR (mean time to resolve);
+  any pages that should have been a different severity.
   Output: a list of alert-hygiene action items + the handoff doc
   for next week.
 - **First Tuesday of each month — monthly postmortem review (60
@@ -154,6 +155,18 @@ from Cluster Autoscaler to Karpenter and need to keep CA running
 on legacy node groups while Karpenter takes over. The transition
 should take weeks, not months.
 
+## Threats and controls
+
+The cadence is also a set of controls, and a control nobody reviews decays.
+These are the threats that decay brings. The reviews in this chapter are the
+controls against them.
+
+| Threat | Control | Deeper |
+|---|---|---|
+| A security exception outlives its reason. A namespace stays at `baseline` or `privileged` after the workload that needed it is gone | Every exception carries a reason and an expiry no more than 12 months out. The monthly review renews or removes each one before it lapses | [05.02](../05-security/02-pod-security.md) for the Pod Security levels |
+| A grant made for one incident is still bound months later | A quarterly access review of cluster-admin and standing bindings, in the 90-day check-in | [05.01](../05-security/01-authn-authz-rbac.md) for RBAC, [15.09](09-hotfix-workflow-and-breakglass.md) for breakglass |
+| A pinned image falls behind its patch, and the pin never moves | A monthly patch review: compare each digest pin with its upstream image. A patched digest ships as a pull request through the pipeline | [15.04](04-multi-environment-promotion.md) for digest promotion, [15.02](02-application-cicd-pipelines.md) for the pipeline |
+
 ## Diagrams
 
 ### Diagram A — the four cadence loops (Mermaid)
@@ -221,6 +234,10 @@ The next sprint's biggest feature: automate the highest-volume toil.
 
 ## Hands-on with the Bookstore Platform
 
+> **Not run.** These steps reach your production cluster, your cloud
+> console, Slack and PagerDuty. This guide did not run them against any
+> cloud or chat service. The outputs shown are illustrative.
+
 ### 0. Prerequisites
 
 - [Chapter 15.10](./10-incident-response-and-on-call.md) ran. The
@@ -230,8 +247,9 @@ The next sprint's biggest feature: automate the highest-volume toil.
   ran. OpenCost is installed; the per-tenant cost dashboard is
   accessible at
   `https://grafana.bookstore-platform.example.com/d/opencost`.
-- Karpenter is installed (from Part 13 ch.01's bookstore-platform
-  Terraform tree) and the cluster has at least one NodePool.
+- Karpenter is installed (from the bookstore-platform Terraform tree in
+  `examples/bookstore-platform/terraform/`) and the cluster has at least
+  one NodePool.
 - The platform team has at least 3 engineers (otherwise the
   cadence below is over-engineered; with < 3 engineers the entire
   team does ad-hoc reviews).
@@ -313,39 +331,45 @@ cluster headroom:
 ```bash
 # Look at Karpenter's recent consolidation activity (the "did pods
 # get bin-packed or did Karpenter add nodes?" question)
-kubectl logs -n karpenter -l app.kubernetes.io/name=karpenter \
+kubectl logs -n kube-system -l app.kubernetes.io/name=karpenter \
   --since=14d | grep -E "(consolidat|disrupt)" | head -50
 
 # Cluster-wide CPU/memory utilization (last 14 days)
 # (assuming kube-prometheus-stack installed)
 kubectl -n monitoring port-forward svc/prometheus-operated 9090:9090 &
 
-# Query: cluster CPU utilization 95th percentile, last 14d
-# 1 - avg(rate(node_cpu_seconds_total{mode="idle"}[5m])) over 14d
-# The 95th percentile of this is your peak utilization.
+# Peak cluster CPU over 14 days, in the Prometheus UI:
+#   quantile_over_time(0.95,
+#     (1 - avg(rate(node_cpu_seconds_total{mode="idle"}[5m])))[14d:5m])
 
-# Per-NodePool utilization
-kubectl get nodepool -o json | jq '.items[].metadata.name'
-# karpenter-bookstore-stable
-# karpenter-bookstore-batch
-# karpenter-bookstore-arm
+# NodePool inventory
+kubectl get nodepool -o json | jq -r '.items[].metadata.name'
+# general
+# spot
+# graviton
+
+# Per-NodePool CPU use against its limit, from Karpenter's metrics
+# (karpenter_nodepools_usage and karpenter_nodepools_limit), in Prometheus:
+#   sum by (nodepool) (karpenter_nodepools_usage{resource_type="cpu"})
+#     / sum by (nodepool) (karpenter_nodepools_limit{resource_type="cpu"})
 
 # Right-sizing recommendation from VPA (if installed; ch.13.10)
 kubectl get verticalpodautoscaler -A -o json | jq \
   '.items[] | {name: .metadata.name, lower: .status.recommendation.containerRecommendations[0].lowerBound, target: .status.recommendation.containerRecommendations[0].target, upper: .status.recommendation.containerRecommendations[0].upperBound}'
 ```
 
-Decide based on the decision tree:
+Decide based on the decision tree. The examples below are illustrative,
+not observed on any cluster:
 
 ```text
-Observation: karpenter-bookstore-stable at 84% CPU utilization for 9 of last 14 days.
-Decision: bump the pool's limits.cpu from 200 to 320.
+Observation: general at 84% of its CPU limit for 9 of the last 14 days.
+Decision: raise the general pool's CPU limit from 200 to 320.
 
-Observation: karpenter-bookstore-batch at 22% utilization for the last 14 days.
-Decision: merge the pool into karpenter-bookstore-stable (delete the batch pool).
+Observation: spot at 22% of its CPU limit for the last 14 days.
+Decision: merge the spot pool into general (delete the spot pool).
 
-Observation: system-node-group at 71% memory.
-Decision: bump from m6i.large to m6i.xlarge; rolling-replace one node at a time.
+Observation: system node group at 71% memory.
+Decision: bump from m6i.large to m6i.xlarge; roll one node at a time.
 ```
 
 Output: a doc in `docs/capacity-reviews/YYYY-MM-DD.md` + the
@@ -354,13 +378,13 @@ Terraform PRs to land the decisions:
 ```bash
 # The biweekly Friday: open Terraform PRs for the decisions
 cd examples/bookstore-platform/terraform/
-$EDITOR karpenter.tf
-# bump limits.cpu on karpenter-bookstore-stable to 320
-git checkout -b "capacity/2026-05-22-bump-stable-pool"
-git commit -am "capacity: bump karpenter-bookstore-stable to 320 CPU"
-git push -u origin "capacity/2026-05-22-bump-stable-pool"
-gh pr create --title "Capacity review 2026-05-22: bump stable pool" \
-  --body "From capacity review on 2026-05-22. The pool was at 84% utilization for 9 of last 14 days."
+$EDITOR karpenter-pools.tf
+# raise the general pool's CPU limit (karpenter_general_cpu_limit)
+git checkout -b "capacity/2026-05-22-raise-general-limit"
+git commit -am "capacity: raise general NodePool CPU limit"
+git push -u origin "capacity/2026-05-22-raise-general-limit"
+gh pr create --title "Capacity review 2026-05-22: raise general limit" \
+  --body "From capacity review on 2026-05-22. The general pool was at 84% of its CPU limit for 9 of the last 14 days."
 ```
 
 The capacity review is the discipline that turns "Karpenter is
@@ -379,8 +403,9 @@ is finalized. The outgoing primary walks the week's pages:
 # GNU date: date -u -d '7 days ago' +%Y-%m-%d  |  macOS: date -u -v-7d +%Y-%m-%d
 open "https://your-org.pagerduty.com/incidents?status=all&since=$(date -u -d '7 days ago' +%Y-%m-%d)&until=$(date -u +%Y-%m-%d)"
 
-# Compute MTTD + MTTR from the PagerDuty data
-# MTTD = mean(ack_time - alert_time)
+# Compute time to acknowledge and MTTR from the PagerDuty data
+# Time to acknowledge = mean(ack_time - alert_time). PagerDuty records
+# no fault start time, so this is the nearest measure to MTTD.
 # MTTR = mean(resolve_time - alert_time)
 # (PagerDuty's reports tab has these; or pull via API)
 
@@ -393,7 +418,7 @@ open "https://your-org.pagerduty.com/incidents?status=all&since=$(date -u -d '7 
 
 The output: a section in the on-call handoff doc
 ([`oncall-handoff-template.md`](../examples/bookstore-platform/incident/oncall-handoff-template.md))
-that walks the incoming primary through the week:
+that walks the incoming primary through the week. Figures are illustrative:
 
 ```markdown
 ## On-call review — week of 2026-05-19
@@ -401,13 +426,13 @@ that walks the incoming primary through the week:
 - P0 count: 0 (last week: 1)
 - P1 count: 2 (last week: 3)
 - Total pages: 17 (last week: 23)
-- MTTD: 47 sec
+- Time to acknowledge: 47 sec
 - MTTR (P0+P1): 38 min
 - Alert-hygiene action items added: 3 (PLAT-1342, 1343, 1344)
 ```
 
 The trends matter more than the absolute numbers. A team that's
-been going for 6 months should see MTTD trending down (better
+been going for 6 months should see time to acknowledge trending down (better
 alerting); MTTR trending down (better runbooks + automation); page
 count trending down (better alert hygiene). If any trend reverses,
 flag at the next monthly postmortem review.
@@ -437,6 +462,14 @@ Walk each postmortem with the team:
 4. **Are any action items stuck?** (item with no progress for >2
    sprints; either re-prioritize or close as "won't do")
 
+The same slot runs two control checks, because an expiring control pages
+no one. Renew or remove every exception that expires before the next review:
+renew it with a new reason, or remove it. This guide keeps its own registry in
+`security/namespace-exceptions.yaml`, and its CI runs `make gates-registry`,
+which fails an entry whose expiry has passed. For each third-party image,
+compare its digest pin with the upstream tag it came from. A patched digest
+ships as a pull request through the pipeline, not as an in-place edit.
+
 Output: a quarterly platform health doc updated with:
 
 - Action-item closure rate this month (target >80 %)
@@ -458,7 +491,7 @@ strategic questions about the platform itself:
 QUESTION                                                    OWNER FOR DECISION    ARTEFACT
 ─────────────────────────────────────────────────────────   ──────────────────    ────────────────────
 Are we still on a supported Kubernetes version?            Platform lead         Version-bump PR if not
-(Or within the next 6 months of going extended-support?)
+(Check the standard-support end date for each version you run.)
 Are the instance families we use still the best fit?       Platform lead          Karpenter NodePool update
 (e.g. m6i -> m7i; arm available; spot effective)
 Is the NodePool inventory still right?                     Platform eng           Add / merge / delete pools
@@ -470,6 +503,7 @@ What's the cluster's CRD inventory?                        Platform eng         
 What's the LoadBalancer / IngressClass inventory?          Platform eng           Lb/Ingress audit
 What's the storage-class default + cost trajectory?       Platform eng           Storage class review (ch.14.04)
 Are we still happy with the auth + admission stack?       Security eng           Admission policy audit
+Who still holds cluster-admin and standing grants?      Security eng           RBAC audit PR, breakglass check
 ─────────────────────────────────────────────────────────   ──────────────────    ────────────────────
 ```
 
@@ -513,8 +547,8 @@ sources more honestly.
 ### Why the four cadences (and not three, or five)
 
 We considered alternative cadences (everything monthly; everything
-weekly; ad-hoc-as-needed). The four cadences emerged from observing
-~20 platform teams over the v1 phase:
+weekly; ad-hoc-as-needed). Each of the four follows how fast its
+signal changes:
 
 - **Cost requires weekly review** because cost surprises compound.
   A 20 % budget overrun caught in week 1 is a $X surprise; the
@@ -533,7 +567,7 @@ weekly; ad-hoc-as-needed). The four cadences emerged from observing
   individual-postmortem review happens during the 5-day publication
   window (chapter 15.10); the cross-postmortem pattern review needs
   enough data to see patterns. Monthly is the right cadence: you
-  have 2-8 postmortems to look at; patterns are visible; the
+  have a few postmortems to look at; patterns are visible; the
   decision-makers can stay engaged.
 
 The 90-day check-in is the strategic layer above all four. Quarterly
@@ -665,20 +699,10 @@ running "just in case"; it isn't earning its operational cost.
 > = the team is either ignoring ops (it'll catch up) or running a
 > very mature platform (rare; verify).
 >
-> The math: a 5-engineer platform team at 40/60 has 2
-> engineer-FTE on toil and 3 on features. The 2 FTE on toil
-> handles: the cadence reviews (~10 hours/week total); on-call
-> response (~5 hours/week average across the rotation);
-> postmortem writing (~5 hours/week); ad-hoc operational asks
-> (~10 hours/week). Total: ~30 hours/week / 1 engineer-FTE per
-> the 50-hour-FTE accounting; 2 FTE has slack for the unpredictable.
->
-> If your team is significantly larger or smaller, the
-> per-FTE math doesn't change; the absolute hours do. A 2-engineer
-> team can't sustain 40/60 because the toil is below a
-> critical-mass threshold; below 3 engineers, the team does ops
-> ad-hoc and the cadence collapses into "we'll meet when something
-> breaks."
+> The split is a share of the team's people, not of its hours. In a
+> small team each cadence point falls on fewer people, so a missed one is
+> felt sooner. Below 3 engineers, the team does ops ad hoc and the cadence
+> collapses into "we'll meet when something breaks."
 
 > **In production:** **Cost reviews catch the budget surprises
 > that the AWS Budgets alert won't.** AWS Budgets fires when
@@ -700,16 +724,17 @@ running "just in case"; it isn't earning its operational cost.
 > picture + the workload inventory and asks: do these still match
 > what we have, or has the cluster drifted? Common findings:
 >
-> - We're running on m6i.large; m7i.large is now available and
->   ~10 % cheaper per vCPU. Migrate.
+> - We're running on m6i.large; a newer generation may cost less per
+>   vCPU. Check the current price list before a migration.
 > - We have 6 NodePools; 2 of them have been at <20 % utilization
 >   for 60 days. Merge or delete.
 > - We're single-region; the business growth means single-region
 >   is no longer acceptable. Plan multi-region rollout (Part 14
 >   ch.11).
-> - We're on Kubernetes 1.35; EKS standard support for it ends
->   2027-03-27, about five months out. Plan the upgrade (1.36, then
->   1.37).
+> - We're on a Kubernetes version whose standard support is close to
+>   ending. Plan the upgrade one minor version at a time, before the
+>   end date. The EKS release calendar lists the dates:
+>   <https://docs.aws.amazon.com/eks/latest/userguide/kubernetes-versions.html>
 >
 > The 90-day check-in is the strategic moment; the weekly /
 > biweekly / monthly cadences are the tactical moments. Both are
@@ -751,7 +776,7 @@ $EDITOR docs/cost-reviews/$(date -u +%Y-%m-%d).md  # fill in
 
 # BIWEEKLY FRIDAY — capacity review (45 min, eng-on-deck)
 kubectl get nodepool -o yaml > docs/capacity-reviews/$(date -u +%Y-%m-%d)-nodepools.yaml
-kubectl logs -n karpenter -l app.kubernetes.io/name=karpenter --since=14d | \
+kubectl logs -n kube-system -l app.kubernetes.io/name=karpenter --since=14d | \
   grep -E "(consolidat|disrupt)" > docs/capacity-reviews/$(date -u +%Y-%m-%d)-karpenter.log
 $EDITOR docs/capacity-reviews/$(date -u +%Y-%m-%d).md  # write doc + decisions
 
@@ -767,15 +792,12 @@ ls docs/postmortems/INC-$(date -u -d '1 month ago' +%Y-%m)-*.md
 $EDITOR docs/platform-health/$(date -u +%Y-%m).md
 
 # QUARTERLY — 90-day check-in (3 hours, platform lead)
-# Portable quarter: $(( ($(date -u +%m) - 1) / 3 + 1 ))
-$EDITOR docs/cluster-shape/$(date -u +%Y)-Q$(( ($(date -u +%m) - 1) / 3 + 1 )).md
+# Portable quarter: $(( (10#$(date -u +%m) - 1) / 3 + 1 ))
+$EDITOR docs/cluster-shape/$(date -u +%Y)-Q$(( (10#$(date -u +%m) - 1) / 3 + 1 )).md
 
 # SCALING DECISIONS (from capacity review)
-# Bump pool limits
-$EDITOR examples/bookstore-platform/terraform/karpenter.tf
-# Add a new NodePool
-cp examples/bookstore-platform/terraform/karpenter.tf{,.new}
-$EDITOR examples/bookstore-platform/terraform/karpenter.tf.new
+# Bump pool limits, or add a NodePool (both in karpenter-pools.tf)
+$EDITOR examples/bookstore-platform/terraform/karpenter-pools.tf
 # Bump system-node-group
 $EDITOR examples/bookstore-platform/terraform/eks.tf
 ```
@@ -860,6 +882,20 @@ Day-to-day ops checklist (the cadence is healthy when all six are yes):
 
    </details>
 
+5. **A privileged namespace has a security exception with a 12-month
+   expiry. Nobody renewed it or removed it. What catches it, and what must an
+   entry carry?**
+   <details><summary>Show answer</summary>
+
+   The monthly review. It renews or removes every exception that expires
+   before the next review. An entry must carry a reason and an expiry date no
+   more than 12 months out. This guide's CI runs `make gates-registry`, which
+   fails an entry whose expiry has passed, so the registry cannot rot
+   silently. Renew with a new reason, or remove the exception and bring the
+   namespace back to `restricted`.
+
+   </details>
+
 ## Further reading
 
 - **Google SRE Book ch.5 — Eliminating Toil**
@@ -883,8 +919,6 @@ Day-to-day ops checklist (the cadence is healthy when all six are yes):
 - **FinOps Foundation framework**
   <https://www.finops.org/framework/>; the cross-organizational
   discipline this chapter's cost-review cadence belongs to.
-- **Rosso et al., *Production Kubernetes* ch.13 — Day 2 operations**;
-  the chapter that motivates "operations is a discipline, not a
-  side activity"; the foundation of this chapter's mental model.
-- **Ibryam & Huß, *Kubernetes Patterns* 2e — *Capacity Planning***;
-  the pattern this chapter's biweekly capacity review embodies.
+- **Karpenter metrics reference**
+  <https://karpenter.sh/docs/reference/metrics/>; the `karpenter_nodepools_*`
+  gauges the capacity review reads.
