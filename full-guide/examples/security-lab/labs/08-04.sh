@@ -2,19 +2,22 @@
 # Lab 08.04: Multi-tenancy and namespaces. Tier A (kind).
 #
 # Run this ONLY against a kind cluster you own, from the guide's full-guide/
-# directory. It creates two namespaces, p08-04-bookstore and p08-04-acme. It
-# applies the Bookstore namespace's guardrail objects (the namespace with its
-# Pod Security labels, the quota and limits, the ServiceAccounts and RBAC, and
-# the NetworkPolicies) without its workloads. It applies the chapter's
-# second-tenant.yaml with only the namespace renamed. Object names stay as the
-# chapter has them. The script runs the checks the chapter shows, then deletes
-# both namespaces. The chapter prints the namespaces as bookstore and
-# tenant-acme; the transcript carries the p08-04 names.
+# directory. It creates three namespaces: p08-04-bookstore and p08-04-acme, and
+# p08-04-probe, a plain namespace with no NetworkPolicy of its own that holds a
+# Pod from outside the tenant. It applies the Bookstore namespace's guardrail
+# objects (the namespace with its Pod Security labels, the quota and limits, the
+# ServiceAccounts and RBAC, and the NetworkPolicies) without its workloads. It
+# applies the chapter's second-tenant.yaml with only the namespace renamed. Object
+# names stay as the chapter has them. The script runs the checks the chapter
+# shows, then deletes all three namespaces. The chapter prints the namespaces as
+# bookstore, tenant-acme and probe; the transcript carries the p08-04 names.
 set +e
 
 K="${KUBECTL:-kubectl}"
 BS=p08-04-bookstore
 AC=p08-04-acme
+PR=p08-04-probe
+DBG='busybox:1.36@sha256:73aaf090f3d85aa34ee199857f03fa3a95c8ede2ffd4cc2cdb5b94e566b11662'
 MANI=examples/bookstore/raw-manifests
 TEN=examples/bookstore/operators/second-tenant.yaml
 WORK=$(mktemp -d)
@@ -81,6 +84,95 @@ check create pods --subresource=exec --as="$SA" -n "$AC"
 check get pods --subresource=log --as="$SA" -n "$AC"
 check get secrets --as="$SA" -n "$BS"
 
+step "Section 3: a tenant at its quota, and a Pod from another namespace"
+cat > "$WORK/acme-hog.yaml" <<EOF
+apiVersion: v1
+kind: Pod
+metadata:
+  name: acme-hog
+  namespace: $AC
+spec:
+  serviceAccountName: acme-deployer
+  automountServiceAccountToken: false
+  securityContext:
+    runAsNonRoot: true
+    runAsUser: 65532
+    runAsGroup: 65532
+    seccompProfile:
+      type: RuntimeDefault
+  containers:
+    - name: app
+      image: $DBG
+      command: ["sh", "-c", "echo ok > /tmp/index.html && exec httpd -f -p 8080 -h /tmp"]
+      ports:
+        - containerPort: 8080
+      securityContext:
+        allowPrivilegeEscalation: false
+        readOnlyRootFilesystem: true
+        capabilities:
+          drop: ["ALL"]
+      resources:
+        requests: {cpu: 50m, memory: 1Gi}
+        limits: {cpu: 250m, memory: 1Gi}
+      volumeMounts:
+        - name: tmp
+          mountPath: /tmp
+  volumes:
+    - name: tmp
+      emptyDir: {}
+EOF
+show "kubectl apply -f acme-hog.yaml   # tenant-acme; asks for the whole 1Gi memory quota"
+"$K" apply -f "$WORK/acme-hog.yaml" 2>&1
+show "kubectl wait --for=condition=Ready pod/acme-hog -n $AC --timeout=180s"
+"$K" wait --for=condition=Ready pod/acme-hog -n "$AC" --timeout=180s 2>&1
+show "kubectl get resourcequota tenant-acme-quota -n $AC"
+"$K" get resourcequota tenant-acme-quota -n "$AC" 2>&1
+
+sed -e 's/acme-hog/acme-second/' -e 's/memory: 1Gi/memory: 512Mi/g' "$WORK/acme-hog.yaml" > "$WORK/acme-second.yaml"
+show "kubectl apply -f acme-second.yaml   # tenant-acme; deliberate failure, the quota is full"
+"$K" apply -f "$WORK/acme-second.yaml" 2>&1
+
+sed -e 's/acme-hog/acme-big/' -e 's/requests: {cpu: 50m, memory: 1Gi}/requests: {cpu: 50m, memory: 64Mi}/' -e 's/limits: {cpu: 250m, memory: 1Gi}/limits: {cpu: 250m, memory: 2Gi}/' "$WORK/acme-hog.yaml" > "$WORK/acme-big.yaml"
+show "kubectl apply -f acme-big.yaml   # tenant-acme; deliberate failure, over the LimitRange max"
+"$K" apply -f "$WORK/acme-big.yaml" 2>&1
+
+show "kubectl create namespace $PR"
+"$K" create namespace "$PR" 2>&1
+show "kubectl label namespace $PR pod-security.kubernetes.io/enforce=restricted"
+"$K" label namespace "$PR" pod-security.kubernetes.io/enforce=restricted 2>&1
+cat > "$WORK/probe.yaml" <<EOF
+apiVersion: v1
+kind: Pod
+metadata:
+  name: probe
+  namespace: $PR
+spec:
+  automountServiceAccountToken: false
+  securityContext:
+    runAsNonRoot: true
+    runAsUser: 65532
+    runAsGroup: 65532
+    seccompProfile:
+      type: RuntimeDefault
+  containers:
+    - name: app
+      image: $DBG
+      command: ["sleep", "600"]
+      securityContext:
+        allowPrivilegeEscalation: false
+        readOnlyRootFilesystem: true
+        capabilities:
+          drop: ["ALL"]
+EOF
+show "kubectl apply -f probe.yaml   # namespace $PR, no NetworkPolicy of its own"
+"$K" apply -f "$WORK/probe.yaml" 2>&1
+show "kubectl wait --for=condition=Ready pod/probe -n $PR --timeout=180s"
+"$K" wait --for=condition=Ready pod/probe -n "$PR" --timeout=180s 2>&1
+IP=$("$K" get pod acme-hog -n "$AC" -o jsonpath='{.status.podIP}' 2>/dev/null)
+show "kubectl exec -n $PR probe -- wget -T 5 -qO- http://<acme-hog pod IP>:8080/   # deliberate: another tenant's Pod"
+"$K" exec -n "$PR" probe -- wget -T 5 -qO- "http://$IP:8080/" 2>&1
+echo "exit status: $?"
+
 step "Section 3: a deliberate failure, refused by restricted"
 show "kubectl run escape-probe -n $AC --image=bookstore/catalog:dev --restart=Never --privileged --dry-run=server"
 "$K" run escape-probe -n "$AC" --image=bookstore/catalog:dev --restart=Never --privileged --dry-run=server 2>&1
@@ -92,6 +184,6 @@ show "kubectl kustomize examples/bookstore/kustomize/overlays/prod | grep -m1 'n
 "$K" kustomize examples/bookstore/kustomize/overlays/prod 2>&1 | grep -m1 'namespace:'
 
 step "Cleanup"
-show "kubectl delete namespace $AC $BS --wait=true"
-"$K" delete namespace "$AC" "$BS" --wait=true 2>&1
+show "kubectl delete namespace $AC $BS $PR --wait=true"
+"$K" delete namespace "$AC" "$BS" "$PR" --wait=true 2>&1
 echo "lab 08.04 done"
