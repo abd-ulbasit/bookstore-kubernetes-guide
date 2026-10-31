@@ -1,35 +1,35 @@
 #!/usr/bin/env bash
 # Lab 06.04: autoscaling as a cost attack. Tier A (kind).
 #
-# Run this ONLY against a three-node kind cluster you own, from any
-# directory, one phase at a time:
+# Run this ONLY against a three-node kind cluster you own, from any directory,
+# one phase at a time:
 #
 #   06-04.sh metrics    metrics-server, the refusal, then kubelet serving
 #                       certificates (the secure fix)
 #   06-04.sh bookstore  the pieces of the Bookstore that catalog needs
-#   06-04.sh spread     place catalog's third replica (see the note below)
+#   06-04.sh spread     catalog's three replicas, placed on the two workers
 #   06-04.sh idle       the chapter's HPA at its shipped target, left idle
 #   06-04.sh load1      the 06.06 load Job, watched at the shipped target
-#   06-04.sh load2 N    the same Job, with the CPU target lowered to N percent
-#                       (written, not run: the first run stopped in load1)
-#   06-04.sh after      the HPA after the Job has ended (written, not run)
+#   06-04.sh load2 N    the same Job, with the CPU target lowered to N percent,
+#                       until the HPA holds at maxReplicas
+#   06-04.sh after      the HPA after the Job has ended: the scale-in
 #   06-04.sh cleanup    remove everything the phases made, then check
 #
-# The phases split the run so that each fits one foreground command. Nothing
-# runs in the background. Set LAB_WORK to one directory for all phases.
+# The phases split the run so that each fits one foreground command. The
+# workflow lab-on-runner.yml runs them in this order on a GitHub Actions
+# runner, which has room for the load. Set LAB_WORK to one directory for all
+# phases.
 #
-# Watch the control plane while the Job runs. The Job is a tight loop of ten
-# parallel curl calls, and on a small shared host it drove the load average
-# near 30 on four cores, slowed the API and coincided with a restart of
-# kube-controller-manager and kube-scheduler. The first run deleted the Job and
-# ran cleanup at that point. If your control plane restarts, do the same, or
-# lower the `seq 10` in the Job's loop first.
+# The Job is a tight loop of ten parallel curl calls. On a small shared host it
+# drove the load average near 30 on four cores, slowed the API and coincided
+# with a restart of kube-controller-manager and kube-scheduler, so the first
+# run on such a host stopped and cleaned up. If your control plane restarts,
+# do the same, or lower the `seq 10` in the Job's loop first.
 #
-# The spread phase exists because catalog spreads over kubernetes.io/hostname
-# with DoNotSchedule, and a tainted control-plane node counts as an empty
-# domain, so only one replica per worker can be placed and the Deployment
-# never reaches three ready. The phase patches nodeTaintsPolicy: Honor on the
-# Deployment in the cluster. The shipped manifest is not edited.
+# Catalog spreads over kubernetes.io/hostname with DoNotSchedule. The shipped
+# Deployment sets nodeTaintsPolicy: Honor on that constraint, so the tainted
+# control-plane node is not counted as an empty domain and all three replicas
+# land on the two workers. The spread phase shows that placement.
 #
 # It creates two namespaces, metrics-server and bookstore, under the
 # chapter's own names, so it refuses to start a phase if either exists. It
@@ -243,26 +243,19 @@ CMD
 
 spread)
   command kubectl get ns bookstore >/dev/null 2>&1 || { echo 'refusing to run: run the bookstore phase first' >&2; exit 2; }
-  echo '## step 0g: the third catalog replica, and the lab-only change that places it'
-  need command kubectl -n bookstore wait --for=jsonpath='{.status.readyReplicas}'=2 deployment/catalog --timeout=300s
-  run <<'CMD'
-kubectl get pods -n bookstore -l app=catalog -o wide
-CMD
-  run <<'CMD'
-kubectl get events -n bookstore --field-selector reason=FailedScheduling
-CMD
+  echo '## step 0g: the third catalog replica, placed on the two workers'
+  need command kubectl -n bookstore rollout status deployment/catalog --timeout=300s
   run <<'CMD'
 kubectl get deployment catalog -n bookstore -o jsonpath='{.spec.template.spec.topologySpreadConstraints}{"\n"}'
 CMD
-  run <<'CMD'
-kubectl patch deployment catalog -n bookstore --type json -p '[{"op":"add","path":"/spec/template/spec/topologySpreadConstraints/0/nodeTaintsPolicy","value":"Honor"}]'
-CMD
-  need command kubectl -n bookstore rollout status deployment/catalog --timeout=300s
   run <<'CMD'
 kubectl rollout status deployment/catalog -n bookstore
 CMD
   run <<'CMD'
 kubectl get pods -n bookstore -l app=catalog -o wide
+CMD
+  run <<'CMD'
+kubectl get events -n bookstore --field-selector reason=FailedScheduling
 CMD
   ;;
 
@@ -341,14 +334,20 @@ kubectl get hpa catalog -n bookstore -o jsonpath='min={.spec.minReplicas} max={.
 CMD
   run <<'CMD'
 start=$(date +%s)
+held=0
 while [ $(( $(date +%s) - start )) -lt 300 ]; do
   echo "t=+$(( $(date +%s) - start ))s"
   kubectl get hpa catalog -n bookstore --no-headers
   kubectl top pods -n bookstore --no-headers
+  if [ "$(kubectl get hpa catalog -n bookstore -o jsonpath='{.status.currentReplicas}')" = 6 ]; then held=$((held + 1)); fi
+  if [ "$held" = 3 ]; then
+    echo "-- the HPA has read 6 replicas on 3 samples, with the Job still running"
+    kubectl describe hpa catalog -n bookstore | sed -n '/^Conditions:/,/^Events:/p'
+  fi
   sleep 20
 done
 CMD
-  echo '## step 4c: the HPA at the ceiling'
+  echo '## step 4c: the HPA at the ceiling, and the end of the Job'
   run <<'CMD'
 kubectl describe hpa catalog -n bookstore | sed -n '/^Reference:/,$p'
 CMD
