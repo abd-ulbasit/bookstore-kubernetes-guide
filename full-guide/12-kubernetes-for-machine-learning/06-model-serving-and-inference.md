@@ -192,12 +192,15 @@ need the restricted `bookstore-ml` namespace from [ch.01](01-why-ml-on-kubernete
 
 > **Where the output came from.** Every command in this chapter ran in the
 > lab script [`12-06.sh`](../examples/security-lab/labs/12-06.sh) on a kind
-> cluster the guide's authors own (tier A). The lab used its own namespaces in
-> place of `bookstore-ml` and `bookstore`, and applied the same files with only
-> those names replaced. The cluster's only node is named
-> `sf-pilot-control-plane`, and the captured output keeps that name, so the
-> node names you see on your cluster will differ. Output in blocks marked captured is verbatim from the recorded
-> transcript. Any other output is illustrative.
+> cluster the guide's authors own (tier A), except the docs-route check in
+> section 2, which ran later in
+> [`12-06-docs.sh`](../examples/security-lab/labs/12-06-docs.sh) as steps 10
+> and 11 of the same transcript. The lab used its own namespaces in place of
+> `bookstore-ml` and `bookstore`, and applied the same files with only those
+> names replaced. The cluster's only node is named `sf-pilot-control-plane`,
+> and the captured output keeps that name, so the node names you see on your
+> cluster will differ. Output in blocks marked captured is verbatim from the
+> recorded transcript. Any other output is illustrative.
 
 > **Two serving paths, both real.** The plain Deployment + Service is the
 > kind-runnable path: built-ins, no CRDs, and it ran end to end in the lab. The
@@ -211,9 +214,13 @@ need the restricted `bookstore-ml` namespace from [ch.01](01-why-ml-on-kubernete
 `predictor.py` loads its model with `joblib.load(...)`. The joblib format is
 pickle with some framing, and pickle is a stack machine. A pickle can name any
 importable callable and call it with arguments that the file holds. Loading the
-file therefore runs whatever it names. The Python documentation says so in its
-own warning: it is "possible to construct malicious pickle data which will
-execute arbitrary code during unpickling", and "only unpickle data you trust"
+file therefore runs whatever it names. joblib's own reference for the function
+warns that `joblib.load` relies on the pickle module, can run arbitrary Python
+code, and should never load files from untrusted sources
+([joblib, `joblib.load`](https://joblib.readthedocs.io/en/stable/generated/joblib.load.html)).
+The Python documentation says the same in its own warning: it is "possible to
+construct malicious pickle data which will execute arbitrary code during
+unpickling", and "only unpickle data you trust"
 ([docs.python.org, pickle](https://docs.python.org/3/library/pickle.html)).
 
 The Bookstore's own `model.joblib` is harmless: the trainer wrote it. The
@@ -553,6 +560,44 @@ nothing. A policy that the cluster does not enforce protects nothing, so check
 enforcement on your cluster before you rely on it. The same check applies to
 the default-deny from ch.01. [Part 00 ch.07](../00-foundations/07-local-cluster-setup.md)
 builds a cluster that enforces NetworkPolicy.
+
+**The interactive docs are off.** FastAPI serves an OpenAPI document and two
+interactive pages, at `/openapi.json`, `/docs` and `/redoc`, and none of them
+sits behind the check above. Left on, they would list every route and its
+schema for any caller that can connect. `predictor.py` sets the three URLs to
+`None`, which is how FastAPI turns them off
+([FastAPI, metadata and docs URLs](https://fastapi.tiangolo.com/tutorial/metadata/)).
+The lab started the image's own server in a Pod with a two-book stand-in model,
+because the predictor will not start without a model and a token, and asked
+for each route without a token. The first try used the older image from the
+main run of this chapter, built before that change, and `/docs`, `/redoc` and
+`/openapi.json` all answered `200`. The capture below is the second try, from
+an image built from the current file:
+
+<!-- gate: output -->
+```text
+$ kubectl create namespace p12-finish-docs (restricted)
+namespace/p12-finish-docs created
+$ kubectl apply -f docs-check.yaml (one Pod: the predictor on localhost and a probe)
+pod/docs-check created
+$ kubectl wait --for=jsonpath='{.status.phase}'=Succeeded pod/docs-check -n p12-finish-docs --timeout=180s
+pod/docs-check condition met
+$ kubectl logs docs-check -n p12-finish-docs
+2026-10-31 07:53:36,487 INFO recommender loading model artifact from /tmp/model/model.joblib
+2026-10-31 07:53:36,488 INFO recommender model loaded kind=stand-in version=lab n_books=2 top_k=1
+GET /healthz without a token: 200
+GET /recommend?book_id=1 without a token: 401
+GET /docs without a token: 404
+GET /redoc without a token: 404
+GET /openapi.json without a token: 404
+GET /recommend?book_id=1 with the token: 200
+```
+
+The three routes answer `404`, the probe stays open, a route that needs the
+token answers `401` without it, and the same route answers `200` with it. If
+you built your image before this change, rebuild it, because a stale image
+keeps the docs open. Disabling the pages hides the route list. It does not
+replace the token, which protects the routes themselves.
 
 For identity per caller, a token is shared, so it cannot say which catalog Pod
 called. Mutual TLS through a service mesh gives each workload an identity from
@@ -1102,6 +1147,10 @@ had to be turned on. Knative scales a
   Unrestricted Resource Consumption: <https://api-security.owasp.org/editions/2023/en/0x11-t10>.
 - **Python `pickle` documentation**, the security warning and the note on
   `pickletools`: <https://docs.python.org/3/library/pickle.html>.
+- **joblib**, `joblib.load` and its warning about untrusted files:
+  <https://joblib.readthedocs.io/en/stable/generated/joblib.load.html>.
+- **FastAPI**, metadata and docs URLs, where `docs_url=None` turns the
+  interactive docs off: <https://fastapi.tiangolo.com/tutorial/metadata/>.
 - **safetensors**, the format and its goal of storing tensors "safely (as
   opposed to pickle)": <https://github.com/huggingface/safetensors>.
 - Official: **KServe** release v0.21.0 and its install scripts
