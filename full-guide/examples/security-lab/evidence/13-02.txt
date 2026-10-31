@@ -1,0 +1,95 @@
+# Transcript for 13-grand-capstone-bookstore-platform/02-tenancy-and-crossplane-onboarding.md, the provider RBAC and reach checks (hands-on section 1) and the reserved tenant name rule (section 2).
+# Lab cluster: a kind cluster on Kubernetes v1.37, kubectl client v1.37.2. The
+# cluster and node names are as the lab printed them. The chapter prints the
+# reader's names; this run used these stand-ins: namespace crossplane-system is
+# p13-02-crossplane, namespace bookstore-platform-acme-books is p13-02-tenant,
+# ClusterRole bookstore-platform-provider-kubernetes is p13-02-provider-kubernetes,
+# ClusterRole bookstore-platform-tenant-admin is p13-02-tenant-admin (a stand-in
+# with get, list, watch and create on pods and secrets), and the BookstoreTenant
+# CRD is a stand-in in group p13-02.example.com that carries the same tenantName
+# rule as the XRD. Crossplane itself was not installed: the lab has no Crossplane
+# CRDs and this run installs no cluster-wide controller.
+# Recorded by running the commands below in order. Terminal colour codes are
+# removed. Section 6 deletes every object this run created.
+## 1. Cluster and client
+$ kubectl version --client
+Client Version: v1.37.2
+Kustomize Version: v5.8.1
+$ kubectl config current-context
+kind-sf-pilot
+$ kubectl get nodes -o name
+node/sf-pilot-control-plane
+$ kubectl get crd -o name | grep -ci crossplane
+0
+
+## 2. Namespace labels and the Crossplane pod template
+$ kubectl create namespace p13-02-crossplane
+namespace/p13-02-crossplane created
+$ kubectl label namespace p13-02-crossplane pod-security.kubernetes.io/enforce=baseline pod-security.kubernetes.io/audit=restricted pod-security.kubernetes.io/warn=restricted
+namespace/p13-02-crossplane labeled
+$ helm template crossplane crossplane-stable/crossplane --version 2.4.3 -n p13-02-crossplane (keep the crossplane Deployment)
+extracted Deployment crossplane
+$ kubectl apply --dry-run=server -f crossplane-deployment.yaml
+Warning: would violate PodSecurity "restricted:latest": unrestricted capabilities (containers "crossplane-init", "crossplane" must set securityContext.capabilities.drop=["ALL"]), runAsNonRoot != true (pod or containers "crossplane-init", "crossplane" must set securityContext.runAsNonRoot=true), seccompProfile (pod or containers "crossplane-init", "crossplane" must set securityContext.seccompProfile.type to "RuntimeDefault" or "Localhost")
+deployment.apps/crossplane created (server dry run)
+
+## 3. Scoped provider ServiceAccount and ClusterRole
+$ kubectl -n p13-02-crossplane create serviceaccount provider-kubernetes
+serviceaccount/provider-kubernetes created
+$ kubectl create namespace p13-02-tenant
+namespace/p13-02-tenant created
+$ kubectl create clusterrole p13-02-tenant-admin --verb=get,list,watch,create --resource=pods,secrets
+clusterrole.rbac.authorization.k8s.io/p13-02-tenant-admin created
+$ kubectl apply -f clusterrole.yaml (without the bind rule)
+clusterrole.rbac.authorization.k8s.io/p13-02-provider-kubernetes created
+$ kubectl create clusterrolebinding p13-02-provider-kubernetes --clusterrole=p13-02-provider-kubernetes --serviceaccount=p13-02-crossplane:provider-kubernetes
+clusterrolebinding.rbac.authorization.k8s.io/p13-02-provider-kubernetes created
+$ kubectl create rolebinding bookstore-tenant-admin -n p13-02-tenant --clusterrole=p13-02-tenant-admin --group=oidc:tenant-acme-books-admins --dry-run=server --as=system:serviceaccount:p13-02-crossplane:provider-kubernetes
+error: failed to create rolebinding: rolebindings.rbac.authorization.k8s.io "bookstore-tenant-admin" is forbidden: user "system:serviceaccount:p13-02-crossplane:provider-kubernetes" (groups=["system:serviceaccounts" "system:serviceaccounts:p13-02-crossplane" "system:authenticated"]) is attempting to grant RBAC permissions not currently held:
+{APIGroups:[""], Resources:["pods"], Verbs:["get" "list" "watch" "create"]}
+{APIGroups:[""], Resources:["secrets"], Verbs:["get" "list" "watch" "create"]}
+$ kubectl apply -f clusterrole.yaml (with the bind rule)
+clusterrole.rbac.authorization.k8s.io/p13-02-provider-kubernetes configured
+$ kubectl create rolebinding bookstore-tenant-admin -n p13-02-tenant --clusterrole=p13-02-tenant-admin --group=oidc:tenant-acme-books-admins --dry-run=server --as=system:serviceaccount:p13-02-crossplane:provider-kubernetes
+rolebinding.rbac.authorization.k8s.io/bookstore-tenant-admin created (server dry run)
+
+## 4. What the provider identity can reach
+$ kubectl auth can-i create namespaces --as=system:serviceaccount:p13-02-crossplane:provider-kubernetes
+Warning: resource 'namespaces' is not namespace scoped
+
+yes
+$ kubectl auth can-i create networkpolicies -n p13-02-tenant --as=system:serviceaccount:p13-02-crossplane:provider-kubernetes
+yes
+$ kubectl auth can-i get secrets -n p13-02-tenant --as=system:serviceaccount:p13-02-crossplane:provider-kubernetes
+no
+$ kubectl auth can-i create clusterrolebindings --as=system:serviceaccount:p13-02-crossplane:provider-kubernetes
+Warning: resource 'clusterrolebindings' is not namespace scoped in group 'rbac.authorization.k8s.io'
+
+no
+$ kubectl auth can-i '*' '*' --as=system:serviceaccount:p13-02-crossplane:provider-kubernetes
+no
+
+## 5. Reserved tenant names on the BookstoreTenant API
+$ kubectl apply -f stand-in-crd.yaml
+customresourcedefinition.apiextensions.k8s.io/bookstoretenants.p13-02.example.com created
+$ kubectl wait --for=condition=Established crd/bookstoretenants.p13-02.example.com --timeout=120s
+customresourcedefinition.apiextensions.k8s.io/bookstoretenants.p13-02.example.com condition met
+$ kubectl apply --dry-run=server -f tenant-system.yaml
+The BookstoreTenant "system" is invalid: spec.tenantName: Invalid value: "system": tenantName is reserved for a platform namespace
+$ kubectl apply --dry-run=server -f tenant-acme-books.yaml
+bookstoretenant.p13-02.example.com/acme-books created (server dry run)
+
+## 6. Cleanup
+$ kubectl delete namespace p13-02-crossplane p13-02-tenant
+namespace "p13-02-crossplane" deleted
+namespace "p13-02-tenant" deleted
+$ kubectl delete clusterrolebinding p13-02-provider-kubernetes
+clusterrolebinding.rbac.authorization.k8s.io "p13-02-provider-kubernetes" deleted
+$ kubectl delete clusterrole p13-02-provider-kubernetes p13-02-tenant-admin
+clusterrole.rbac.authorization.k8s.io "p13-02-provider-kubernetes" deleted
+clusterrole.rbac.authorization.k8s.io "p13-02-tenant-admin" deleted
+$ kubectl delete crd bookstoretenants.p13-02.example.com
+customresourcedefinition.apiextensions.k8s.io "bookstoretenants.p13-02.example.com" deleted
+$ kubectl get ns,clusterrole,clusterrolebinding,crd -o name | grep -c p13-02
+0
+done

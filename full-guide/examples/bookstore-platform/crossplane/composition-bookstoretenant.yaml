@@ -63,7 +63,7 @@ spec:
           # --- 1. Namespace bookstore-platform-<TENANT> (PSA restricted) ---
           - name: namespace
             base:
-              apiVersion: kubernetes.crossplane.io/v1alpha1
+              apiVersion: kubernetes.crossplane.io/v1alpha2
               kind: Object
               spec:
                 providerConfigRef: { name: default }
@@ -100,7 +100,7 @@ spec:
           # --- 2. ResourceQuota (tier-aware via transform) ---
           - name: resourcequota
             base:
-              apiVersion: kubernetes.crossplane.io/v1alpha1
+              apiVersion: kubernetes.crossplane.io/v1alpha2
               kind: Object
               spec:
                 providerConfigRef: { name: default }
@@ -138,7 +138,7 @@ spec:
           # --- 3. LimitRange (per-container defaults + min/max) ---
           - name: limitrange
             base:
-              apiVersion: kubernetes.crossplane.io/v1alpha1
+              apiVersion: kubernetes.crossplane.io/v1alpha2
               kind: Object
               spec:
                 providerConfigRef: { name: default }
@@ -173,7 +173,7 @@ spec:
           # --- 4. RoleBinding -> bookstore-platform-tenant-admin ---
           - name: rolebinding-tenant-admin
             base:
-              apiVersion: kubernetes.crossplane.io/v1alpha1
+              apiVersion: kubernetes.crossplane.io/v1alpha2
               kind: Object
               spec:
                 providerConfigRef: { name: default }
@@ -219,7 +219,7 @@ spec:
           # --- 5. NetworkPolicy default-deny (ingress + egress) ---
           - name: networkpolicy-default-deny
             base:
-              apiVersion: kubernetes.crossplane.io/v1alpha1
+              apiVersion: kubernetes.crossplane.io/v1alpha2
               kind: Object
               spec:
                 providerConfigRef: { name: default }
@@ -253,7 +253,7 @@ spec:
           # --- 6. Kueue LocalQueue -> bookstore-platform-ml-cq ---
           - name: kueue-localqueue
             base:
-              apiVersion: kubernetes.crossplane.io/v1alpha1
+              apiVersion: kubernetes.crossplane.io/v1alpha2
               kind: Object
               spec:
                 providerConfigRef: { name: default }
@@ -292,7 +292,7 @@ spec:
           #
           # - name: kyverno-policy-tenant
           #   base:
-          #     apiVersion: kubernetes.crossplane.io/v1alpha1
+          #     apiVersion: kubernetes.crossplane.io/v1alpha2
           #     kind: Object
           #     spec:
           #       providerConfigRef: { name: default }

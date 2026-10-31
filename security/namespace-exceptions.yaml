@@ -76,3 +76,27 @@ exceptions:
     upstream: https://kubernetes.io/docs/concepts/security/pod-security-standards/
     chapter: 06-production-readiness/01-observability-metrics.md
     expires: 2027-10-31
+  - namespace: crossplane-system
+    level: baseline
+    reason: >-
+      The Crossplane chart's pods, and the default pod template Crossplane gives
+      the provider and function pods it runs here, set no seccomp profile and do
+      not drop all capabilities. The restricted profile rejects that; baseline
+      admits it, since no pod is privileged or uses a host namespace. Audit and
+      warn stay at restricted to show the gap.
+    upstream: https://github.com/crossplane/crossplane/blob/v2.4.3/internal/controller/pkg/runtime/runtime.go
+    chapter: 13-grand-capstone-bookstore-platform/02-tenancy-and-crossplane-onboarding.md
+    expires: 2027-06-30
+
+
+  - namespace: p13-02-crossplane
+    level: baseline
+    reason: >-
+      The captured run for 13.02 labelled a stand-in for crossplane-system, the
+      namespace this chapter's Crossplane install uses, at the same levels. The
+      run deleted it at the end, and the transcript records the substitution.
+      The reason is the one given for crossplane-system.
+    upstream: https://github.com/crossplane/crossplane/blob/v2.4.3/internal/controller/pkg/runtime/runtime.go
+    chapter: 13-grand-capstone-bookstore-platform/02-tenancy-and-crossplane-onboarding.md
+    expires: 2027-06-30
+
