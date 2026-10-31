@@ -9,7 +9,7 @@ were run as p09-01-bookstore, p09-01-traefik and p09-01-client. The Traefik
 watch lists and the NetworkPolicy namespace selector name the lab namespace.
 The prod overlay was copied and renamed in the copy. Its images were pointed at
 the kind-loaded dev images, the traefik-rewrite component was added, and the
-demo Secret 16-db-credentials.yaml was applied, as the chapter says for kind.
+demo Secret 16-db-credentials.yaml was applied, as the chapter said for kind at the time of this run.
 Not run here: kube-prometheus-stack (06.01), Argo CD (07.04), Argo Rollouts
 (07.05), KEDA (06.04), Kyverno (05.07), Velero (08.02) and the node drain
 (06.05, which needs two workers).
@@ -26,6 +26,13 @@ file, and this run did not delete them. A sed rename of the PriorityClass names
 in the copy did not apply, so the run used the shared names.
 The captured Traefik and namespace names are the lab's; the commands in the
 chapter print the reader's names.
+Review re-checks: after the chapter was corrected, the Secret step in (d.2) was
+rewritten to create db-credentials with a generated password. This run applied the
+demo file 16-db-credentials.yaml, which holds the same three keys. No captured
+output below depends on which Secret was used. The catalog ServiceAccount check,
+the cosign checks and the Kyverno chart check were run again for that review. The
+scratch namespace p09-01-rbac was created for the ServiceAccount check and deleted
+after it.
 ==== transcript ====
 $ kubectl get nodes
 NAME                     STATUS   ROLES           AGE   VERSION
@@ -309,3 +316,51 @@ $ kubectl get namespace p09-01-bookstore
 Error from server (NotFound): namespaces "p09-01-bookstore" not found
 $ kubectl get ingressclass
 No resources found
+
+==== review re-checks ====
+$ kubectl create namespace p09-01-rbac
+namespace/p09-01-rbac created
+$ kubectl apply -f 05-serviceaccounts-rbac.yaml   (namespace bookstore renamed to p09-01-rbac in a scratch copy)
+serviceaccount/catalog-sa created
+serviceaccount/storefront-sa created
+serviceaccount/orders-sa created
+serviceaccount/payments-worker-sa created
+serviceaccount/postgres-sa created
+serviceaccount/redis-sa created
+serviceaccount/rabbitmq-sa created
+serviceaccount/migrate-sa created
+role.rbac.authorization.k8s.io/catalog-config-reader created
+rolebinding.rbac.authorization.k8s.io/catalog-config-reader-binding created
+$ kubectl auth can-i --list --as=system:serviceaccount:p09-01-rbac:catalog-sa -n p09-01-rbac | grep -E '^(Resources|configmaps)'
+Resources                                       Non-Resource URLs                      Resource Names     Verbs
+configmaps                                      []                                     [catalog-config]   [get]
+$ kubectl auth can-i get secrets --as=system:serviceaccount:p09-01-rbac:catalog-sa -n p09-01-rbac
+no
+(exit 1)
+$ kubectl delete namespace p09-01-rbac
+namespace "p09-01-rbac" deleted
+$ cosign verify --certificate-identity 'https://github.com/abd-ulbasit/bookstore-kubernetes-guide/.github/workflows/bookstore-pipeline.yml@refs/heads/main' --certificate-oidc-issuer https://token.actions.githubusercontent.com ghcr.io/abd-ulbasit/bookstore-catalog@sha256:eaa26ada0a2e1575026a5e71e74572ed0bfdde80f50012e91a7be28f0de16ced | jq -r '.[0].critical | .identity["docker-reference"], .image["docker-manifest-digest"], .type' ; echo exit=$?
+
+Verification for ghcr.io/abd-ulbasit/bookstore-catalog@sha256:eaa26ada0a2e1575026a5e71e74572ed0bfdde80f50012e91a7be28f0de16ced --
+The following checks were performed on each of these signatures:
+  - The cosign claims were validated
+  - Existence of the claims in the transparency log was verified offline
+  - The code-signing certificate was verified using trusted certificate authority certificates
+ghcr.io/abd-ulbasit/bookstore-catalog@sha256:eaa26ada0a2e1575026a5e71e74572ed0bfdde80f50012e91a7be28f0de16ced
+sha256:eaa26ada0a2e1575026a5e71e74572ed0bfdde80f50012e91a7be28f0de16ced
+https://sigstore.dev/cosign/sign/v1
+exit=0
+$ cosign verify --certificate-identity 'https://github.com/abd-ulbasit/bookstore-kubernetes-guide/.github/workflows/bookstore-pipeline.yml@refs/heads/feature-x' --certificate-oidc-issuer https://token.actions.githubusercontent.com ghcr.io/abd-ulbasit/bookstore-catalog@sha256:eaa26ada0a2e1575026a5e71e74572ed0bfdde80f50012e91a7be28f0de16ced | jq -r '.[0].critical | .identity["docker-reference"], .image["docker-manifest-digest"], .type' ; echo exit=$?
+Error: no matching attestations: failed to verify certificate identity: no matching CertificateIdentity found, last error: expected SAN value "https://github.com/abd-ulbasit/bookstore-kubernetes-guide/.github/workflows/bookstore-pipeline.yml@refs/heads/feature-x", got "https://github.com/abd-ulbasit/bookstore-kubernetes-guide/.github/workflows/bookstore-pipeline.yml@refs/heads/main"
+failed to verify certificate identity: no matching CertificateIdentity found, last error: expected SAN value "https://github.com/abd-ulbasit/bookstore-kubernetes-guide/.github/workflows/bookstore-pipeline.yml@refs/heads/feature-x", got "https://github.com/abd-ulbasit/bookstore-kubernetes-guide/.github/workflows/bookstore-pipeline.yml@refs/heads/main"
+failed to verify certificate identity: no matching CertificateIdentity found, last error: expected SAN value "https://github.com/abd-ulbasit/bookstore-kubernetes-guide/.github/workflows/bookstore-pipeline.yml@refs/heads/feature-x", got "https://github.com/abd-ulbasit/bookstore-kubernetes-guide/.github/workflows/bookstore-pipeline.yml@refs/heads/main"
+error during command execution: no matching attestations: failed to verify certificate identity: no matching CertificateIdentity found, last error: expected SAN value "https://github.com/abd-ulbasit/bookstore-kubernetes-guide/.github/workflows/bookstore-pipeline.yml@refs/heads/feature-x", got "https://github.com/abd-ulbasit/bookstore-kubernetes-guide/.github/workflows/bookstore-pipeline.yml@refs/heads/main"
+failed to verify certificate identity: no matching CertificateIdentity found, last error: expected SAN value "https://github.com/abd-ulbasit/bookstore-kubernetes-guide/.github/workflows/bookstore-pipeline.yml@refs/heads/feature-x", got "https://github.com/abd-ulbasit/bookstore-kubernetes-guide/.github/workflows/bookstore-pipeline.yml@refs/heads/main"
+failed to verify certificate identity: no matching CertificateIdentity found, last error: expected SAN value "https://github.com/abd-ulbasit/bookstore-kubernetes-guide/.github/workflows/bookstore-pipeline.yml@refs/heads/feature-x", got "https://github.com/abd-ulbasit/bookstore-kubernetes-guide/.github/workflows/bookstore-pipeline.yml@refs/heads/main"
+exit=1
+$ helm repo add kyverno https://kyverno.github.io/kyverno/
+"kyverno" already exists with the same configuration, skipping
+$ helm show chart kyverno/kyverno --version 3.9.2 | grep -E '^(appVersion|name|version):'
+appVersion: v1.19.2
+name: kyverno
+version: 3.9.2
