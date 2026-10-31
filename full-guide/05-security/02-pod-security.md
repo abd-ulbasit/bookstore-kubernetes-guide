@@ -116,7 +116,7 @@ Pod, as [01.01](../01-core-workloads/01-pods.md#debug-containers) does.
   `kubectl` is v1.37.2. This lab has not been run on macOS.
 - **Script and transcript.**
   [`labs/05-02.sh`](../examples/security-lab/labs/05-02.sh) runs every command
-  below and deletes what it creates. Its recorded output is
+  below and deletes the namespaces it creates. Its recorded output is
   [`evidence/05-02.txt`](../examples/security-lab/evidence/05-02.txt). Run it
   only against a kind cluster you own. The script refuses any kubectl context
   that is not `kind-*`.
@@ -130,10 +130,11 @@ Pod, as [01.01](../01-core-workloads/01-pods.md#debug-containers) does.
 - **What did not work the first time.** A new namespace has no `default`
   ServiceAccount for a moment, and the API server refuses Pods in it until the
   controller creates one. The first run failed that way, so the script now
-  waits for each namespace's ServiceAccount before it creates a Pod. In the
-  final run the rabbitmq rollout did not report ready within 300 seconds, and
-  an exec into its container failed with a deadline error. This lab does not
-  show rabbitmq starting ([the Bookstore](#the-bookstore-under-restricted),
+  waits for each namespace's ServiceAccount before it creates a Pod. Earlier
+  runs also timed out on rabbitmq. Its broker raised a memory alarm during boot
+  under the 512Mi limit the manifest first had, and port 5672 stayed closed past
+  the rollout wait. The manifest now sets a 1Gi limit and a startup probe, and
+  the final run reached Ready ([the Bookstore](#the-bookstore-under-restricted),
   below). The user namespace Pod never started
   ([User namespaces](#user-namespaces), below).
 - **Audit is labelled, not shown.** `p05-02-restricted` carries an `audit`
@@ -142,7 +143,12 @@ Pod, as [01.01](../01-core-workloads/01-pods.md#debug-containers) does.
   script's first check counts that as `0`.
 - **Cluster-scoped objects.** The script applies the Bookstore's
   PriorityClasses, which the postgres StatefulSet needs. On a cluster that
-  already has them, that apply can reconfigure them to match the file.
+  already has them, that apply can reconfigure them to match the file. The
+  script leaves them in place, because another lab or the reader may use them.
+  Delete them with `kubectl delete priorityclass` when you no longer need them.
+- **Cluster name.** The captured output is from a lab cluster named `sf-pilot`,
+  so its node is `sf-pilot-control-plane`. A kind cluster you create has its own
+  name, and the node name in your output will differ.
 
 The versions come first, so that each claim in this header has a captured
 source:
@@ -160,7 +166,22 @@ Kustomize Version: v5.8.1
 Server Version: v1.37.0
 # ...
 NAME                     KUBELET   KERNEL             RUNTIME              OS
-lab-control-plane   v1.37.0   7.0.0-38-generic   containerd://2.3.4   Debian GNU/Linux 13 (trixie)
+sf-pilot-control-plane   v1.37.0   7.0.0-38-generic   containerd://2.3.4   Debian GNU/Linux 13 (trixie)
+```
+
+Save each manifest below as `<name>.yaml` in one working directory, and run the
+commands from there. The lab creates the five namespaces first:
+
+```sh
+kubectl create namespace p05-02-attack
+kubectl label namespace p05-02-attack pod-security.kubernetes.io/enforce=privileged
+kubectl create namespace p05-02-baseline
+kubectl label namespace p05-02-baseline pod-security.kubernetes.io/enforce=baseline pod-security.kubernetes.io/enforce-version=latest pod-security.kubernetes.io/warn=restricted pod-security.kubernetes.io/warn-version=latest
+kubectl create namespace p05-02-restricted
+kubectl label namespace p05-02-restricted pod-security.kubernetes.io/enforce=restricted pod-security.kubernetes.io/enforce-version=latest pod-security.kubernetes.io/audit=restricted pod-security.kubernetes.io/audit-version=latest pod-security.kubernetes.io/warn=restricted pod-security.kubernetes.io/warn-version=latest
+kubectl create namespace p05-02-bookstore
+kubectl label namespace p05-02-bookstore pod-security.kubernetes.io/enforce=restricted pod-security.kubernetes.io/enforce-version=latest pod-security.kubernetes.io/audit=restricted pod-security.kubernetes.io/audit-version=latest pod-security.kubernetes.io/warn=restricted pod-security.kubernetes.io/warn-version=latest
+kubectl create namespace p05-02-unlabelled
 ```
 
 The attacks run from the smallest field to the largest, so that each Pod shows
@@ -231,8 +252,8 @@ CapBnd: 000001ffffffffff
 PID   COMMAND
     1 sleep 3600
    20 sh -c ps -o pid,args | head -5
-   26 ps -o pid,args
-   27 head -5
+   27 ps -o pid,args
+   28 head -5
 # ...
 devices in privileged: 229
 # ...
@@ -365,7 +386,7 @@ head -c 10 /host/etc/kubernetes/pki/ca.key; echo'
 ```
 0
 CapEff: 0000000000000000
-lab-control-plane
+sf-pilot-control-plane
 600 root /host/etc/kubernetes/pki/ca.key
 -----BEGIN
 ```
@@ -427,7 +448,7 @@ head -c 10 /host/etc/kubernetes/pki/ca.key; echo'
 ```
 65532
 CapEff: 0000000000000000
-lab-control-plane
+sf-pilot-control-plane
 600 root /host/etc/kubernetes/pki/ca.key
 head: /host/etc/kubernetes/pki/ca.key: Permission denied
 ```
@@ -486,8 +507,8 @@ crictl -r $R ps --name kube-apiserver -o table 2>/dev/null |
 <!-- gate: output -->
 
 ```
-containers visible: 33
-kube-apiserver-lab-control-plane
+containers visible: 24
+kube-apiserver-sf-pilot-control-plane
 ```
 
 The socket lists every container on the node, the control plane included. The
@@ -537,7 +558,7 @@ pod/escape-node created
 # ...
 pod/escape-node condition met
 # ...
-lab-control-plane
+sf-pilot-control-plane
 # ...
 -rw------- 1 root root 5666 Oct 30 14:28 /etc/kubernetes/super-admin.conf
 # ...
@@ -567,7 +588,7 @@ kubectl exec -n p05-02-attack victim -- /tmp/busybox id
 <!-- gate: output -->
 
 ```
-victim pid 165360
+victim pid 867048
 copied to /tmp/busybox
 # ...
 uid=0(root) gid=0(root) groups=0(root),10(wheel)
@@ -626,6 +647,8 @@ ServiceAccount, a non-root UID, no capabilities, no escalation,
 kubectl delete pod victim -n p05-02-attack --wait=true
 ```
 
+Save the two objects as `victim-hardened.yaml`:
+
 ```yaml
 apiVersion: v1
 kind: ServiceAccount
@@ -669,6 +692,11 @@ spec:
   volumes:
     - name: tmp
       emptyDir: {}
+```
+
+```sh
+kubectl apply -f victim-hardened.yaml
+kubectl wait --for=condition=Ready pod/victim -n p05-02-restricted --timeout=120s
 ```
 
 The victim's own writes come first. Then the read-outs show what the baseline
@@ -726,32 +754,39 @@ kubectl exec -n p05-02-restricted victim -- /tmp/id
 <!-- gate: output -->
 
 ```
-victim pid 174572
-cp: can't create '/proc/174572/root/usr/bin/implant': Read-only file system
+victim pid 868993
+cp: can't create '/proc/868993/root/usr/bin/implant': Read-only file system
 command terminated with exit code 1
 # ...
-victim pid 174572
+victim pid 868993
 copied to /tmp/id
 # ...
 uid=65532 gid=65532 groups=65532
 ```
 
-The baseline stopped every write to a system path, every capability, every
-escalation and every unfiltered syscall. It did not stop the copy into `/tmp`.
-`/tmp` is an `emptyDir`, so it is writable and executable, and a copied binary
-runs there. A read-only root filesystem does not make the binary drop a dead
-end. The lab found no baseline field that stops execution from an `emptyDir`,
-so this chapter claims none. Detecting a binary that runs from `/tmp` belongs to
-05.08 <!-- link-later: 05.08 -->.
+The one write the neighbour tried into a system path failed: its `cp` into
+`/usr/bin` returned `Read-only file system`. The lab tried no other write into
+the victim's system paths, and it made no capability, setuid or syscall test
+from inside the victim, so this chapter claims none of those. The same
+neighbour copied busybox into the victim's `/tmp`, and the copy ran there as
+UID 65532. `/tmp` is an `emptyDir`, so it is writable and executable, and a
+read-only root filesystem does not stop a binary copied there. The lab found no
+baseline field that stops execution from an `emptyDir`, so this chapter claims
+none. Detecting a binary that runs from `/tmp` belongs to 05.08
+<!-- link-later: 05.08 -->.
 
-What stopped the neighbour was not a label on the victim's namespace. A label on
-`p05-02-restricted` governs only Pods created in that namespace, and the
-neighbour was created in `p05-02-attack`, which admits privilege. The control
-that matters is that no namespace admits a Pod with both `hostPID` and
-privilege. That means `restricted` in every namespace that could hold one, and
-RBAC that limits who can create Pods in a privileged namespace
-([ch.01](01-authn-authz-rbac.md)). The refusals above show the first half in
-one namespace.
+The victim's fields do not contain a privileged neighbour. The neighbour runs
+as root with the full capability set, and `nsenter -t 1 -m` above shows it
+reaches the node's mount namespace, so nothing in the victim's
+`securityContext` limits what it does to the victim's filesystem. What stopped
+the one refused write was the victim's read-only root. The control that
+matters is that no namespace admits a Pod with both `hostPID` and privilege.
+That means `restricted` in every namespace that could hold one, and RBAC that
+limits who can create Pods in a privileged namespace
+([ch.01](01-authn-authz-rbac.md)). A label on `p05-02-restricted` governs only
+Pods created in that namespace, and the neighbour was created in
+`p05-02-attack`, which admits privilege. The refusals above show the first
+half in one namespace.
 
 ### User namespaces: an observed failure {#user-namespaces}
 
@@ -827,8 +862,8 @@ pod/userns-probe created
 # ...
 error: timed out waiting for the condition on pods/userns-probe
 # ...
-37s         Warning   FailedCreatePodSandBox   pod/userns-probe   Failed to create pod sandbox: rpc error: code = Unknown desc = failed to start sandbox "b03ba5c4c0b8f9c23302fd6b7358a8132268bea422bd33aeac80f0a2b6b994bf": failed to create containerd task: failed to create shim task: OCI runtime create failed: runc create failed: unable to start container process: error during container init: error mounting "sysfs" to rootfs at "/sys": mount src=sysfs, dst=/sys, dstFd=/proc/thread-self/fd/11, flags=MS_RDONLY|MS_NOSUID|MS_NODEV|MS_NOEXEC: operation not permitted
-9s          Warning   FailedCreatePodSandBox   pod/userns-probe   Failed to create pod sandbox: rpc error: code = Unknown desc = failed to start sandbox "15bbde8e47347523f15cb87117e4858c2b76069261aa78aae35b8055fd51b74e": failed to create containerd task: failed to create shim task: OCI runtime create failed: runc create failed: unable to start container process: error during container init: error mounting "sysfs" to rootfs at "/sys": mount src=sysfs, dst=/sys, dstFd=/proc/thread-self/fd/11, flags=MS_RDONLY|MS_NOSUID|MS_NODEV|MS_NOEXEC: operation not permitted
+28s         Warning   FailedCreatePodSandBox   pod/userns-probe   Failed to create pod sandbox: rpc error: code = Unknown desc = failed to start sandbox "1ec1897fb7dc4140f53d3ffcb0cdea23664aebaab3a724216daf19deaf3127d0": failed to create containerd task: failed to create shim task: OCI runtime create failed: runc create failed: unable to start container process: error during container init: error mounting "sysfs" to rootfs at "/sys": mount src=sysfs, dst=/sys, dstFd=/proc/thread-self/fd/11, flags=MS_RDONLY|MS_NOSUID|MS_NODEV|MS_NOEXEC: operation not permitted
+12s         Warning   FailedCreatePodSandBox   pod/userns-probe   Failed to create pod sandbox: rpc error: code = Unknown desc = failed to start sandbox "500d252cb2bab574b62239661fff8c05c21b2e837a8b12f7d54c0dff5aae8c50": failed to create containerd task: failed to create shim task: OCI runtime create failed: runc create failed: unable to start container process: error during container init: error mounting "sysfs" to rootfs at "/sys": mount src=sysfs, dst=/sys, dstFd=/proc/thread-self/fd/11, flags=MS_RDONLY|MS_NOSUID|MS_NODEV|MS_NOEXEC: operation not permitted
 ```
 
 The API server admitted the Pod, so `restricted` raised no objection to
@@ -888,15 +923,15 @@ Error from server (Forbidden): error when creating "STDIN": pods "escape-hostpid
 Error from server (Forbidden): error when creating "STDIN": pods "escape-hostpath" is forbidden: violates PodSecurity "baseline:latest": hostPath volumes (volume "nodefs")
 ```
 
-The Pod with no `securityContext` is admitted, because `baseline` does not require
-one. The `warn` label returns the `restricted` list as a client warning, and the
-Pod is created anyway. The two dry runs show what `baseline` refuses: the
-`hostPID` Pod is refused for host namespaces alone, and the `hostPath` Pod is
-refused for its volume alone. Neither message mentions `runAsNonRoot`,
-`seccompProfile` or the capability drop, because `baseline` does not require
-them. That is the difference between the two lists. A migration uses it: put
-the namespace at `warn` for `restricted`, read the warnings, fix each workload,
-then move `enforce` to `restricted`.
+The Pod with no `securityContext` is admitted, because `baseline` does not
+require one. The `warn` label returns the `restricted` list as a client
+warning, and the Pod is created anyway. The two dry runs show what `baseline`
+refuses: the `hostPID` Pod is refused for host namespaces alone, and the
+`hostPath` Pod is refused for its volume alone. Neither message mentions
+`runAsNonRoot`, `seccompProfile` or the capability drop, because `baseline`
+does not require them. That is the difference between the two lists. A
+migration uses it: put the namespace at `warn` for `restricted`, read the
+warnings, fix each workload, then move `enforce` to `restricted`.
 
 ### The Bookstore under restricted
 
@@ -923,8 +958,9 @@ deployment.apps/unhardened created (server dry run)
 deployment.apps/unhardened created (server dry run)
 ```
 
-The labelled namespace prints the warning, and the unlabelled one prints nothing
-but the object line. A clean dry run in a namespace with no labels means nothing.
+The labelled namespace prints the warning, and the unlabelled one prints
+nothing but the object line. A clean dry run in a namespace with no labels
+means nothing.
 
 Next, the Bookstore's ServiceAccounts go into the lab namespace, so the Pods
 that name them can be admitted. Then the loop checks every workload manifest in
@@ -993,56 +1029,49 @@ done
 <!-- gate: output -->
 
 ```
-secret/db-credentials created
-# ...
-priorityclass.scheduling.k8s.io/bookstore-data configured
-priorityclass.scheduling.k8s.io/bookstore-critical configured
-priorityclass.scheduling.k8s.io/bookstore-batch configured
-# ...
-deployment.apps/redis created
-# ...
-deployment.apps/rabbitmq created
-# ...
-service/postgres created
-statefulset.apps/postgres created
-# ...
 Waiting for deployment "redis" rollout to finish: 0 of 1 updated replicas are available...
 deployment "redis" successfully rolled out
 # ...
 Waiting for deployment "rabbitmq" rollout to finish: 0 of 1 updated replicas are available...
-error: timed out waiting for the condition
+deployment "rabbitmq" successfully rolled out
+# ...
+NAME                        READY   RESTARTS
+rabbitmq-64d9d7659b-r4q2c   true    0
+# ...
+Server startup complete; 5 plugins started
+Time to start RabbitMQ: 47061 ms
 # ...
 partitioned roll out complete: 1 new pods have been updated...
 # ...
 uid=999(redis) gid=999(redis) groups=999(redis)
 touch: cannot touch '/usr/bin/backdoor': Read-only file system
 # ...
-error: Internal error occurred: Internal error occurred: error executing command in container: failed to exec in container: failed to load task: context deadline exceeded
+uid=999(rabbitmq) gid=999(rabbitmq) groups=999(rabbitmq)
+touch: cannot touch '/usr/bin/backdoor': Read-only file system
 # ...
 uid=999(postgres) gid=999(postgres) groups=999(postgres),101(ssl-cert)
 touch: cannot touch '/usr/bin/backdoor': Read-only file system
 ```
 
-Redis and postgres start as UID 999, not as root, inside a namespace that
-enforces `restricted`, with a read-only root, and each refuses the write into
-`/usr/bin`. Postgres sets `fsGroup: 999`, so its data volume is writable by its
-own UID, and it mounts `emptyDir` for `/tmp`, as
+Redis, rabbitmq and postgres start as UID 999, not as root, inside a namespace
+that enforces `restricted`, with a read-only root, and each refuses the write
+into `/usr/bin`. Postgres sets `fsGroup: 999`, so its data volume is writable
+by its own UID, and it mounts `emptyDir` for `/tmp`, as
 [01.01](../01-core-workloads/01-pods.md#baseline-read-only-root) describes.
 Those fields are there so the image boots. The `restricted` verdict does not
 depend on them.
 
-rabbitmq is not shown. Its rollout did not report ready in the final run, and
-the exec into its container failed with a deadline error. The chapter claims
-only what the committed transcript shows, so it does not claim that rabbitmq
-boots as UID 999. Its image is in the Bookstore manifests, and a later run on a
-quieter cluster can add the check.
+rabbitmq reaches Ready as UID 999 with the same read-only root. The
+`Time to start RabbitMQ` line in the output is the boot time the lab recorded,
+and the startup probe in the manifest holds the liveness probe off until the
+port opens.
 
 ### Clean up
 
 Delete the five namespaces. This removes every Pod, Deployment and Job the lab
-created. In the final run the bookstore namespace was still terminating when
-the wait ran out. It was gone a few seconds later, so the script's exit status
-reports that timeout, and namespace deletion can take longer than the wait:
+created. Namespace deletion can take longer than the wait. The script's exit
+status reports a timeout if it does, and a later check shows whether the
+namespaces are gone:
 
 ```sh
 kubectl delete namespace p05-02-attack p05-02-baseline p05-02-restricted p05-02-bookstore p05-02-unlabelled --wait=true --timeout=300s
@@ -1056,7 +1085,6 @@ namespace "p05-02-baseline" deleted
 namespace "p05-02-restricted" deleted
 namespace "p05-02-bookstore" deleted
 namespace "p05-02-unlabelled" deleted
-error: timed out waiting for the condition on namespaces/p05-02-bookstore
 ```
 
 ## Pod Security: levels, modes, and exceptions
@@ -1083,17 +1111,17 @@ what `restricted` means without a deliberate change.
 **Exceptions, not exemptions.** Some legitimate workloads cannot run under
 `restricted`, and they are not a reason to loosen the default.
 
-- Falco's modern eBPF driver needs at least `CAP_SYS_PTRACE`, `CAP_SYS_RESOURCE`,
-  `CAP_BPF` and `CAP_PERFMON`
-  ([Falco container setup](https://falco.org/docs/setup/container/)). The
-  `restricted` standard lets a Pod add back only `NET_BIND_SERVICE`, and the
-  `baseline` standard refuses added capabilities beyond the runtime's default
-  set. So Falco's lowest working level is `privileged`.
-- node-exporter's example runs with `--net="host"` and `--pid="host"`, and mounts
-  the node's `/` read-only at `/host` with `--path.rootfs=/host`
-  ([its README](https://github.com/prometheus/node_exporter#docker)). The
-  `baseline` standard refuses host namespaces and `hostPath`, so node-exporter's
-  lowest working level is also `privileged`.
+- Falco's modern eBPF driver needs at least `CAP_SYS_PTRACE`,
+  `CAP_SYS_RESOURCE`, `CAP_BPF` and `CAP_PERFMON` ([Falco container
+  setup](https://falco.org/docs/setup/container/)). The `restricted` standard
+  lets a Pod add back only `NET_BIND_SERVICE`, and the `baseline` standard
+  refuses added capabilities beyond the runtime's default set. So Falco's
+  lowest working level is `privileged`. - node-exporter's example runs with
+  `--net="host"` and `--pid="host"`, and mounts the node's `/` read-only at
+  `/host` with `--path.rootfs=/host` ([its
+  README](https://github.com/prometheus/node_exporter#docker)). The `baseline`
+  standard refuses host namespaces and `hostPath`, so node-exporter's lowest
+  working level is also `privileged`.
 
 The labels cannot be tuned to fit. They select a level and a version and nothing
 between them, so there is no "baseline plus host networking". The other route is
@@ -1122,20 +1150,11 @@ Never weaken an application namespace to fit an agent. Move the agent.
 [01.01](../01-core-workloads/01-pods.md#baseline) explains what each baseline
 field does to the running container. The parts specific to Pod security:
 
-- **Capabilities** split root's power into separate permissions. `drop: ["ALL"]`
-  removes the default set, and `add` grants back only what is proven necessary.
-  The lab read `CapEff` as the full mask on the privileged Pod and as zero on
-  the hardened one.
-- **`allowPrivilegeEscalation: false`** sets `no_new_privs` on the container
-  process, so a setuid binary or a file capability cannot raise its privilege.
-  The lab reads `NoNewPrivs: 0` on the default victim and `NoNewPrivs: 1` on the
-  hardened one. It did not run a setuid exploit.
-- **seccomp** filters the system calls a process may make. Without a
-  `seccompProfile`, the container runs unconfined unless the kubelet's
-  `seccompDefault` setting is on
-  ([seccomp tutorial](https://kubernetes.io/docs/tutorials/security/seccomp/)).
-  The default victim reads `Seccomp: 0`, and the hardened victim reads
-  `Seccomp: 2`. This lab did not change the kubelet setting.
+- **Capabilities, `no_new_privs` and seccomp** are explained field by field in
+  [01.01](../01-core-workloads/01-pods.md#baseline). The read-outs above show
+  what each one did in this lab: `CapEff` is the full mask on the privileged
+  Pod and zero on the hardened one, and the hardened victim reads
+  `NoNewPrivs: 1` and `Seccomp: 2`.
 - **AppArmor and SELinux** confine a process with a Linux Security Module, set
   through `securityContext.appArmorProfile` and `securityContext.seLinuxOptions`.
   Both are covered in 05.05 <!-- link-later: 05.05 -->.
@@ -1223,8 +1242,8 @@ Checklist:
 - [ ] `readOnlyRootFilesystem: true`, with an `emptyDir` for each writable path,
   remembering that an `emptyDir` is executable too
 - [ ] Only `restricted`-allowed volume types, and no `hostPath`, host ports or
-  host namespaces
-- [ ] Namespace labelled `enforce: restricted` (+ `audit`, `warn` and `-version`)
+  host namespaces - [ ] Namespace labelled `enforce: restricted` (+ `audit`,
+  `warn` and `-version`)
 - [ ] Server dry run of every workload shows no `Warning:` line, in a namespace
   that carries the labels
 
@@ -1261,19 +1280,18 @@ Checklist:
    `restricted`. What do you tell them, and what is the right fix?**
    <details><summary>Show answer</summary>
 
-   node-exporter's example needs host networking, host PID and a read-only mount
-   of the node's root, and `restricted` and `baseline` both refuse all three. Do
-   not weaken the application namespace. Put node-exporter in its own namespace
-   labelled `privileged`, which is the lowest standard it works under, and record
-   the exception with its reason, owning chapter and an expiry within twelve
-   months. See "Exceptions, not exemptions" above.
+   node-exporter's example needs host networking, host PID and a read-only
+   mount of the node's root, and `restricted` and `baseline` both refuse all
+   three. Do not weaken the application namespace. Put node-exporter in its
+   own namespace labelled `privileged`, which is the lowest standard it works
+   under, and record the exception with its reason, owning chapter and an
+   expiry within twelve months. See "Exceptions, not exemptions" above.
 
    </details>
 
-4. **The baseline namespace admitted a default Pod with a warning, but refused the
-   `hostPID` Pod. Which field refused it, and why was the default Pod still
-   admitted?**
-   <details><summary>Show answer</summary>
+4. **The baseline namespace admitted a default Pod with a warning, but refused
+   the `hostPID` Pod. Which field refused it, and why was the default Pod
+   still admitted?** <details><summary>Show answer</summary>
 
    The `hostPID` Pod was refused for host namespaces, which `baseline` forbids.
    The default Pod has no `securityContext` and no host field, so `baseline`

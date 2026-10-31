@@ -3,7 +3,6 @@
 # Node runtime: containerd v2.3.4, node kernel 7.0.0 on a Linux lab host.
 # Images: curlimages/curl:8.22.0 and busybox:1.36, both pinned by digest.
 # Recorded by running examples/security-lab/labs/05-00.sh from full-guide/.
-# kubectl ran from a macOS workstation over a tunnel to the API server.
 #
 # What did not work the first time: the first full run showed BusyBox
 # nslookup returning NXDOMAIN for a short name, because the image's nslookup

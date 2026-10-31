@@ -14,7 +14,8 @@
 #     > full-guide/examples/security-lab/evidence/05-02.txt
 #
 # Each command is printed the way a reader types it, then run, so the output
-# under it is what that command printed. The cluster name is shown as `lab`.
+# under it is what that command printed. The output is not redacted: the node
+# name is the lab cluster's own, sf-pilot-control-plane.
 
 set -uo pipefail
 
@@ -37,7 +38,7 @@ for ns in $NAMESPACES; do
   fi
 done
 
-redact() { sed -e "s/${CLUSTER}/lab/g"; }
+redact() { cat; }
 
 show() {
   printf '$ %s\n' "$(printf '%s\n' "$1" | redact)"
@@ -104,7 +105,7 @@ printf '%s\n' \
   "# Transcript for 05-security/02-pod-security.md." \
   "# Tier A: kind on a Linux host, node $NODE_VERSION." \
   "# Recorded by running labs/05-02.sh against a kind cluster the lab owns." \
-  "# The cluster name is shown as \`lab\`."
+  "# The output is not redacted: the node is the lab cluster's own, sf-pilot-control-plane."
 
 cd "$WORK" || exit 2
 
@@ -438,6 +439,8 @@ for f in 16-db-credentials 35-priorityclasses 12-redis 13-rabbitmq 20-postgres-s
 done
 show "kubectl rollout status -n p05-02-bookstore deployment/redis --timeout=180s"
 show "kubectl rollout status -n p05-02-bookstore deployment/rabbitmq --timeout=300s"
+show "kubectl get pods -n p05-02-bookstore -l app=rabbitmq -o custom-columns=NAME:.metadata.name,READY:.status.containerStatuses[0].ready,RESTARTS:.status.containerStatuses[0].restartCount"
+show "kubectl logs -n p05-02-bookstore deployment/rabbitmq | grep -o -e 'Time to start RabbitMQ: [0-9]* ms' -e 'Server startup complete; [0-9]* plugins started'"
 show "kubectl rollout status -n p05-02-bookstore statefulset/postgres --timeout=180s"
 for w in deployment/redis deployment/rabbitmq statefulset/postgres; do
   show "kubectl exec -n p05-02-bookstore $w -- sh -c 'id; touch /usr/bin/backdoor || true'"

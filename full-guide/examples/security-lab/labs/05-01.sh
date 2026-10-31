@@ -2,8 +2,10 @@
 # Lab 05.01: RBAC escalation paths. Tier A (kind).
 #
 # Run this ONLY against a kind cluster you own, from any directory. It creates
-# one namespace, p05-rbac, and a few cluster-scoped objects whose names start
-# with p05-, and it deletes all of them at the end. Seven identities each hold
+# two namespaces, p05-rbac and p05-01-bookstore (the latter checks the
+# Bookstore's identities under restricted), and a few cluster-scoped objects
+# whose names start with p05-, and it deletes all of them at the end. The
+# prose in the chapter names the Bookstore namespace `bookstore`. Seven identities each hold
 # one over-broad grant. Each grant is used to reach a Secret or to act as
 # another identity. The grant is then removed, or narrowed, and the same step
 # is refused.
@@ -35,10 +37,12 @@ case "$ctx" in
   *) echo "refusing to run: kubectl context '$ctx' is not a kind cluster" >&2; exit 2 ;;
 esac
 
+# The Bookstore manifests live beside this script's guide root.
+GUIDE=$(cd "$(dirname "$0")/../../.." && pwd)
 work=$(mktemp -d) && cd "$work" || exit 1
 
 # Leftovers from an earlier run.
-kubectl delete ns "$NS" --ignore-not-found --wait=true >/dev/null 2>&1
+kubectl delete ns "$NS" p05-01-bookstore --ignore-not-found --wait=true >/dev/null 2>&1
 kubectl delete clusterrolebinding p05-node-proxy p05-csr-approver --ignore-not-found >/dev/null 2>&1
 kubectl delete clusterrole p05-node-proxy p05-csr-approver --ignore-not-found >/dev/null 2>&1
 kubectl delete csr p05-impostor-csr p05-impostor2-csr --ignore-not-found >/dev/null 2>&1
@@ -561,6 +565,33 @@ sed 's/p05-impostor-csr/p05-impostor2-csr/' impostor-csr.yaml > impostor2-csr.ya
 run <<'CMD'
 kubectl --kubeconfig approver.kubeconfig apply -f impostor2-csr.yaml
 kubectl --kubeconfig approver.kubeconfig certificate approve p05-impostor2-csr
+CMD
+
+# ---------------------------------------------------------------- bookstore identities
+
+echo '## bookstore: one identity per workload, and what the catalog identity may do'
+run <<'CMD'
+kubectl create ns p05-01-bookstore
+kubectl label ns p05-01-bookstore pod-security.kubernetes.io/enforce=restricted pod-security.kubernetes.io/enforce-version=latest
+CMD
+until kubectl get sa default -n p05-01-bookstore >/dev/null 2>&1; do sleep 1; done
+( cd "$GUIDE" && run <<'CMD'
+sed 's/namespace: bookstore/namespace: p05-01-bookstore/' examples/bookstore/raw-manifests/05-serviceaccounts-rbac.yaml | kubectl apply -f -
+CMD
+)
+run <<'CMD'
+kubectl auth can-i get configmap/catalog-config -n p05-01-bookstore --as=system:serviceaccount:p05-01-bookstore:catalog-sa
+kubectl auth can-i list configmaps -n p05-01-bookstore --as=system:serviceaccount:p05-01-bookstore:catalog-sa
+kubectl auth can-i get secret/db-credentials -n p05-01-bookstore --as=system:serviceaccount:p05-01-bookstore:catalog-sa
+kubectl auth can-i --list -n p05-01-bookstore --as=system:serviceaccount:p05-01-bookstore:orders-sa
+CMD
+
+echo '## bookstore: the catalog identity in a Pod, with no token mounted'
+run <<'CMD'
+kubectl run sa-peek -n p05-01-bookstore --image=busybox@sha256:73aaf090f3d85aa34ee199857f03fa3a95c8ede2ffd4cc2cdb5b94e566b11662 --restart=Never -i --rm </dev/null --overrides='{"spec":{"serviceAccountName":"catalog-sa","automountServiceAccountToken":false,"securityContext":{"runAsNonRoot":true,"runAsUser":65532,"runAsGroup":65532,"seccompProfile":{"type":"RuntimeDefault"}},"volumes":[{"name":"tmp","emptyDir":{}}],"containers":[{"name":"sa-peek","image":"busybox@sha256:73aaf090f3d85aa34ee199857f03fa3a95c8ede2ffd4cc2cdb5b94e566b11662","securityContext":{"allowPrivilegeEscalation":false,"readOnlyRootFilesystem":true,"capabilities":{"drop":["ALL"]}},"resources":{"requests":{"cpu":"10m","memory":"16Mi"},"limits":{"memory":"32Mi"}},"volumeMounts":[{"name":"tmp","mountPath":"/tmp"}],"command":["sh","-c","ls /var/run/secrets/kubernetes.io/serviceaccount 2>&1 || echo NO-TOKEN-MOUNTED"]}]}}'
+CMD
+run <<'CMD'
+kubectl delete ns p05-01-bookstore --wait=true
 CMD
 
 # ---------------------------------------------------------------- teardown
