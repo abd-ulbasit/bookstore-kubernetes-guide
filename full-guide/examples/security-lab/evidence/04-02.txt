@@ -1,0 +1,392 @@
+# Transcript for full-guide/04-scheduling/02-affinity-taints-topology.md.
+# Tier A: a kind cluster named sf-sched on one Linux lab host, with one
+# control plane and two workers. Kubernetes v1.37.0 nodes, kubectl v1.37.2.
+# context: kind-sf-sched
+# The lab nodes are sf-sched-control-plane, sf-sched-worker and
+# sf-sched-worker2. The chapter's reader cluster names its nodes differently,
+# and the chapter's placeholders stand for these names. Node names below are
+# the lab's, verbatim. The lab nodes carry no topology.kubernetes.io/zone
+# labels, which the chapter's kind config adds; no command here reads them.
+# The cluster is shared with other workers, so this run used its own namespace,
+# p04-02-bookstore, where the chapter prints bookstore, and the p04-02- prefix
+# for the taint key. Substitutions, applied to the chapter's manifests with sed:
+#   namespace bookstore -> p04-02-bookstore (also the DNS name in DB_DSN)
+#   taint key dedicated -> p04-02-dedicated (the toleration uses it too)
+#   nodeName POOL_NODE -> sf-sched-worker (pin-probe)
+# PriorityClass names were not substituted: bookstore-data, bookstore-critical
+# and bookstore-batch were applied under their chapter names, and deleted by
+# name at cleanup (see the cleanup section).
+# What did not work the first time, in order: the postgres image pull took
+# about 4m25s on this host, and the migration Job's 120 s activeDeadlineSeconds
+# expired during it, so the Job was applied again once the image was on the
+# node. Catalog's readiness also pings redis, so 12-redis.yaml was applied, and
+# then 40-services.yaml, whose redis Service the chapter had not applied. The
+# catalog rollout passed after kube-proxy programmed the new Service. That
+# rollout had also exceeded its progress deadline before redis and its Service
+# existed. A few client watch calls in the redis rollout were refused with a
+# transient RBAC Forbidden for kubernetes-admin; the rollout went on and
+# succeeded. The transcript keeps every attempt, failed ones included.
+# The label node-restriction.kubernetes.io/pool keeps its chapter name.
+# Commands run from full-guide/. Manifests are shown as applied.
+# Node identity checks use kubectl --as=system:node:<node> with server-side
+# dry runs. They write nothing.
+$ kubectl version
+Client Version: v1.37.2
+Kustomize Version: v5.8.1
+Server Version: v1.37.0
+$ kubectl get nodes
+NAME                     STATUS   ROLES           AGE   VERSION
+sf-sched-control-plane   Ready    control-plane   22m   v1.37.0
+sf-sched-worker          Ready    <none>          21m   v1.37.0
+sf-sched-worker2         Ready    <none>          21m   v1.37.0
+$ sed -e 's/^  name: bookstore$/  name: p04-02-bookstore/' -e 's/namespace: bookstore$/namespace: p04-02-bookstore/' -e 's/\.bookstore\.svc/.p04-02-bookstore.svc/g' -e 's/bookstore-\(data\|critical\|batch\)/p04-02-bookstore-\1/g' -e 's/key: dedicated$/key: p04-02-dedicated/' examples/bookstore/raw-manifests/00-namespace.yaml | kubectl apply -f -
+namespace/p04-02-bookstore created
+resourcequota/bookstore-quota created
+limitrange/bookstore-limits created
+$ sed -e 's/^  name: bookstore$/  name: p04-02-bookstore/' -e 's/namespace: bookstore$/namespace: p04-02-bookstore/' -e 's/\.bookstore\.svc/.p04-02-bookstore.svc/g' -e 's/bookstore-\(data\|critical\|batch\)/p04-02-bookstore-\1/g' -e 's/key: dedicated$/key: p04-02-dedicated/' examples/bookstore/raw-manifests/05-serviceaccounts-rbac.yaml | kubectl apply -f -
+serviceaccount/catalog-sa created
+serviceaccount/storefront-sa created
+serviceaccount/orders-sa created
+serviceaccount/payments-worker-sa created
+serviceaccount/postgres-sa created
+serviceaccount/redis-sa created
+serviceaccount/rabbitmq-sa created
+serviceaccount/migrate-sa created
+role.rbac.authorization.k8s.io/catalog-config-reader created
+rolebinding.rbac.authorization.k8s.io/catalog-config-reader-binding created
+$ sed -e 's/^  name: bookstore$/  name: p04-02-bookstore/' -e 's/namespace: bookstore$/namespace: p04-02-bookstore/' -e 's/\.bookstore\.svc/.p04-02-bookstore.svc/g' -e 's/bookstore-\(data\|critical\|batch\)/p04-02-bookstore-\1/g' -e 's/key: dedicated$/key: p04-02-dedicated/' examples/bookstore/raw-manifests/15-catalog-config.yaml | kubectl apply -f -
+configmap/catalog-config created
+$ sed -e 's/^  name: bookstore$/  name: p04-02-bookstore/' -e 's/namespace: bookstore$/namespace: p04-02-bookstore/' -e 's/\.bookstore\.svc/.p04-02-bookstore.svc/g' -e 's/bookstore-\(data\|critical\|batch\)/p04-02-bookstore-\1/g' -e 's/key: dedicated$/key: p04-02-dedicated/' examples/bookstore/raw-manifests/16-db-credentials.yaml | kubectl apply -f -
+secret/db-credentials created
+$ sed -e 's/^  name: bookstore$/  name: p04-02-bookstore/' -e 's/namespace: bookstore$/namespace: p04-02-bookstore/' -e 's/\.bookstore\.svc/.p04-02-bookstore.svc/g' -e 's/bookstore-\(data\|critical\|batch\)/p04-02-bookstore-\1/g' -e 's/key: dedicated$/key: p04-02-dedicated/' examples/bookstore/raw-manifests/35-priorityclasses.yaml | kubectl apply -f -
+priorityclass.scheduling.k8s.io/bookstore-data created
+priorityclass.scheduling.k8s.io/bookstore-critical created
+priorityclass.scheduling.k8s.io/bookstore-batch created
+$ kubectl --as=system:node:sf-sched-worker --as-group=system:nodes label node sf-sched-worker node-restriction.kubernetes.io/pool=database --dry-run=server
+Error from server (Forbidden): nodes "sf-sched-worker" is forbidden: is not allowed to modify labels: node-restriction.kubernetes.io/pool
+$ kubectl --as=system:node:sf-sched-worker --as-group=system:nodes label node sf-sched-worker topology.kubernetes.io/zone=zone-a --dry-run=server
+node/sf-sched-worker labeled (server dry run)
+$ kubectl label node sf-sched-worker node-restriction.kubernetes.io/pool=database
+node/sf-sched-worker labeled
+$ kubectl taint node sf-sched-worker p04-02-dedicated=database:NoSchedule
+node/sf-sched-worker tainted
+$ kubectl get nodes -L node-restriction.kubernetes.io/pool
+NAME                     STATUS   ROLES           AGE   VERSION   POOL
+sf-sched-control-plane   Ready    control-plane   22m   v1.37.0   
+sf-sched-worker          Ready    <none>          21m   v1.37.0   database
+sf-sched-worker2         Ready    <none>          21m   v1.37.0   
+$ kubectl --as=system:node:sf-sched-worker --as-group=system:nodes taint node sf-sched-worker p04-02-dedicated:NoSchedule- --dry-run=server
+Error from server (Forbidden): nodes "sf-sched-worker" is forbidden: node "sf-sched-worker" is not allowed to modify taints
+$ kubectl apply -f - <<EOF
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: pool-tenant-sa
+  namespace: p04-02-bookstore
+automountServiceAccountToken: false
+---
+apiVersion: v1
+kind: Pod
+metadata:
+  name: pool-tenant
+  namespace: p04-02-bookstore
+  labels:
+    app: pool-tenant
+spec:
+  serviceAccountName: pool-tenant-sa
+  automountServiceAccountToken: false
+  securityContext:
+    runAsNonRoot: true
+    runAsUser: 65535
+    runAsGroup: 65535
+    seccompProfile:
+      type: RuntimeDefault
+  tolerations:
+    - key: p04-02-dedicated
+      operator: Equal
+      value: database
+      effect: NoSchedule
+  affinity:
+    nodeAffinity:
+      requiredDuringSchedulingIgnoredDuringExecution:
+        nodeSelectorTerms:
+          - matchExpressions:
+              - key: node-restriction.kubernetes.io/pool
+                operator: In
+                values: ["database"]
+  containers:
+    - name: app
+      image: registry.k8s.io/pause@sha256:ee6521f290b2168b6e0935a181d4cff9be1ac3f505666ef0e3c98fae8199917a  # pause:3.10
+      securityContext:
+        allowPrivilegeEscalation: false
+        readOnlyRootFilesystem: true
+        capabilities:
+          drop: ["ALL"]
+      resources:
+        requests:
+          cpu: 10m
+          memory: 16Mi
+        limits:
+          memory: 32Mi
+      volumeMounts:
+        - name: tmp
+          mountPath: /tmp
+  volumes:
+    - name: tmp
+      emptyDir: {}
+EOF
+serviceaccount/pool-tenant-sa created
+pod/pool-tenant created
+$ kubectl wait --for=condition=Ready pod/pool-tenant -n p04-02-bookstore --timeout=120s
+pod/pool-tenant condition met
+$ kubectl get pod pool-tenant -n p04-02-bookstore -o custom-columns=POD:.metadata.name,NODE:.spec.nodeName,PHASE:.status.phase
+POD           NODE              PHASE
+pool-tenant   sf-sched-worker   Running
+$ kubectl apply -f - <<EOF
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: pin-probe-sa
+  namespace: p04-02-bookstore
+automountServiceAccountToken: false
+---
+apiVersion: v1
+kind: Pod
+metadata:
+  name: pin-probe
+  namespace: p04-02-bookstore
+  labels:
+    app: pin-probe
+spec:
+  nodeName: sf-sched-worker
+  serviceAccountName: pin-probe-sa
+  automountServiceAccountToken: false
+  securityContext:
+    runAsNonRoot: true
+    runAsUser: 65535
+    runAsGroup: 65535
+    seccompProfile:
+      type: RuntimeDefault
+  containers:
+    - name: app
+      image: registry.k8s.io/pause@sha256:ee6521f290b2168b6e0935a181d4cff9be1ac3f505666ef0e3c98fae8199917a  # pause:3.10
+      securityContext:
+        allowPrivilegeEscalation: false
+        readOnlyRootFilesystem: true
+        capabilities:
+          drop: ["ALL"]
+      resources:
+        requests:
+          cpu: 10m
+          memory: 16Mi
+        limits:
+          memory: 32Mi
+      volumeMounts:
+        - name: tmp
+          mountPath: /tmp
+  volumes:
+    - name: tmp
+      emptyDir: {}
+EOF
+serviceaccount/pin-probe-sa created
+pod/pin-probe created
+$ kubectl wait --for=condition=Ready pod/pin-probe -n p04-02-bookstore --timeout=60s
+pod/pin-probe condition met
+$ kubectl get pod pin-probe -n p04-02-bookstore -o custom-columns=POD:.metadata.name,NODE:.spec.nodeName,PHASE:.status.phase,REASON:.status.reason,MESSAGE:.status.message
+POD         NODE              PHASE     REASON   MESSAGE
+pin-probe   sf-sched-worker   Running   <none>   <none>
+$ kubectl delete pod pool-tenant pin-probe -n p04-02-bookstore --wait=true
+pod "pool-tenant" deleted from p04-02-bookstore namespace
+pod "pin-probe" deleted from p04-02-bookstore namespace
+$ kubectl auth can-i create pods -n p04-02-bookstore --as=system:serviceaccount:p04-02-bookstore:catalog-sa
+no
+$ kubectl auth can-i create pods -n p04-02-bookstore
+yes
+$ sed -e 's/^  name: bookstore$/  name: p04-02-bookstore/' -e 's/namespace: bookstore$/namespace: p04-02-bookstore/' -e 's/\.bookstore\.svc/.p04-02-bookstore.svc/g' -e 's/bookstore-\(data\|critical\|batch\)/p04-02-bookstore-\1/g' -e 's/key: dedicated$/key: p04-02-dedicated/' examples/bookstore/raw-manifests/20-postgres-statefulset.yaml | kubectl apply -f -
+service/postgres created
+statefulset.apps/postgres created
+$ kubectl rollout status statefulset/postgres -n p04-02-bookstore --timeout=240s
+Waiting for statefulset spec update to be observed...
+Waiting for 1 pods to be ready...
+Waiting for 1 pods to be ready...
+error: timed out waiting for the condition
+$ kubectl get pods -n p04-02-bookstore -o custom-columns=POD:.metadata.name,NODE:.spec.nodeName,PHASE:.status.phase
+POD          NODE              PHASE
+postgres-0   sf-sched-worker   Pending
+$ sed -e 's/^  name: bookstore$/  name: p04-02-bookstore/' -e 's/namespace: bookstore$/namespace: p04-02-bookstore/' -e 's/\.bookstore\.svc/.p04-02-bookstore.svc/g' -e 's/bookstore-\(data\|critical\|batch\)/p04-02-bookstore-\1/g' -e 's/key: dedicated$/key: p04-02-dedicated/' examples/bookstore/raw-manifests/21-db-migrate-job.yaml | kubectl apply -f -
+job.batch/db-migrate created
+$ kubectl wait --for=condition=complete job/db-migrate -n p04-02-bookstore --timeout=240s
+# The wait above was stopped by the script's time limit. Its Job had already failed:
+# the image pull on this node took about 4m25s, past the Job's 120 s activeDeadlineSeconds.
+# The Job is deleted and applied again below, with the image now on the node.
+$ kubectl rollout status statefulset/postgres -n p04-02-bookstore --timeout=240s
+partitioned roll out complete: 1 new pods have been updated...
+$ kubectl get pods -n p04-02-bookstore -o custom-columns=POD:.metadata.name,NODE:.spec.nodeName,PHASE:.status.phase
+POD          NODE              PHASE
+postgres-0   sf-sched-worker   Running
+$ kubectl get job db-migrate -n p04-02-bookstore -o jsonpath='{.status.conditions[*].reason}'
+DeadlineExceeded DeadlineExceeded$ kubectl delete job db-migrate -n p04-02-bookstore --wait=true
+job.batch "db-migrate" deleted from p04-02-bookstore namespace
+$ sed -e 's/^  name: bookstore$/  name: p04-02-bookstore/' -e 's/namespace: bookstore$/namespace: p04-02-bookstore/' -e 's/\.bookstore\.svc/.p04-02-bookstore.svc/g' -e 's/bookstore-\(data\|critical\|batch\)/p04-02-bookstore-\1/g' -e 's/key: dedicated$/key: p04-02-dedicated/' examples/bookstore/raw-manifests/21-db-migrate-job.yaml | kubectl apply -f -
+job.batch/db-migrate created
+$ kubectl wait --for=condition=complete job/db-migrate -n p04-02-bookstore --timeout=240s
+job.batch/db-migrate condition met
+$ kubectl get pods -n p04-02-bookstore -o custom-columns=POD:.metadata.name,NODE:.spec.nodeName,PHASE:.status.phase
+POD                NODE               PHASE
+db-migrate-kcjjz   sf-sched-worker2   Succeeded
+postgres-0         sf-sched-worker    Running
+$ sed -e 's/^  name: bookstore$/  name: p04-02-bookstore/' -e 's/namespace: bookstore$/namespace: p04-02-bookstore/' -e 's/\.bookstore\.svc/.p04-02-bookstore.svc/g' -e 's/bookstore-\(data\|critical\|batch\)/p04-02-bookstore-\1/g' -e 's/key: dedicated$/key: p04-02-dedicated/' examples/bookstore/raw-manifests/10-catalog-deploy.yaml | kubectl apply -f -
+deployment.apps/catalog created
+$ kubectl rollout status deployment/catalog -n p04-02-bookstore --timeout=240s
+Waiting for deployment "catalog" rollout to finish: 0 of 3 updated replicas are available...
+error: timed out waiting for the condition
+$ sed -e 's/^  name: bookstore$/  name: p04-02-bookstore/' -e 's/namespace: bookstore$/namespace: p04-02-bookstore/' -e 's/\.bookstore\.svc/.p04-02-bookstore.svc/g' -e 's/bookstore-\(data\|critical\|batch\)/p04-02-bookstore-\1/g' -e 's/key: dedicated$/key: p04-02-dedicated/' examples/bookstore/raw-manifests/11-storefront-deploy.yaml | kubectl apply -f -
+deployment.apps/storefront created
+$ kubectl rollout status deployment/storefront -n p04-02-bookstore --timeout=240s
+Waiting for deployment spec update to be observed...
+Waiting for deployment spec update to be observed...
+Waiting for deployment "storefront" rollout to finish: 0 out of 2 new replicas have been updated...
+Waiting for deployment "storefront" rollout to finish: 0 of 2 updated replicas are available...
+deployment "storefront" successfully rolled out
+$ kubectl get pods -n p04-02-bookstore -o custom-columns=POD:.metadata.name,NODE:.spec.nodeName,PHASE:.status.phase
+POD                           NODE               PHASE
+catalog-686cc96476-6vkxm      sf-sched-worker2   Running
+catalog-686cc96476-8fjtv      sf-sched-worker2   Running
+catalog-686cc96476-kn7c8      sf-sched-worker2   Running
+db-migrate-kcjjz              sf-sched-worker2   Succeeded
+postgres-0                    sf-sched-worker    Running
+storefront-6df7977c84-s2p6g   sf-sched-worker2   Running
+storefront-6df7977c84-v6j8c   sf-sched-worker2   Running
+# The catalog rollout above failed: /readyz also pings redis (REDIS_ADDR in catalog-config),
+# and the chapter had not applied redis. 12-redis.yaml is applied here as a prerequisite.
+$ sed -e 's/^  name: bookstore$/  name: p04-02-bookstore/' -e 's/namespace: bookstore$/namespace: p04-02-bookstore/' -e 's/\.bookstore\.svc/.p04-02-bookstore.svc/g' -e 's/bookstore-\(data\|critical\|batch\)/p04-02-bookstore-\1/g' -e 's/key: dedicated$/key: p04-02-dedicated/' examples/bookstore/raw-manifests/12-redis.yaml | kubectl apply -f -
+deployment.apps/redis created
+$ kubectl rollout status deployment/redis -n p04-02-bookstore --timeout=240s
+Waiting for deployment spec update to be observed...
+Waiting for deployment spec update to be observed...
+Waiting for deployment "redis" rollout to finish: 0 out of 1 new replicas have been updated...
+Waiting for deployment "redis" rollout to finish: 0 of 1 updated replicas are available...
+E1031 08:22:40.686538   84890 reflector.go:227] "Failed to watch" err="deployments.apps \"redis\" is forbidden: User \"kubernetes-admin\" cannot watch resource \"deployments\" in API group \"apps\" in the namespace \"p04-02-bookstore\" - error from a previous attempt: EOF" reflector="k8s.io/client-go/tools/watch/informerwatcher.go:162" type="*unstructured.Unstructured"
+E1031 08:22:42.123212   84890 reflector.go:227] "Failed to watch" err="failed to list *unstructured.Unstructured: deployments.apps \"redis\" is forbidden: User \"kubernetes-admin\" cannot list resource \"deployments\" in API group \"apps\" in the namespace \"p04-02-bookstore\"" reflector="k8s.io/client-go/tools/watch/informerwatcher.go:162" type="*unstructured.Unstructured"
+Waiting for deployment "redis" rollout to finish: 0 of 1 updated replicas are available...
+deployment "redis" successfully rolled out
+$ kubectl rollout status deployment/catalog -n p04-02-bookstore --timeout=240s
+Waiting for deployment "catalog" rollout to finish: 0 of 3 updated replicas are available...
+error: deployment "catalog" exceeded its progress deadline
+$ kubectl get pods -n p04-02-bookstore -o custom-columns=POD:.metadata.name,NODE:.spec.nodeName,PHASE:.status.phase
+POD                           NODE               PHASE
+catalog-686cc96476-6vkxm      sf-sched-worker2   Running
+catalog-686cc96476-8fjtv      sf-sched-worker2   Running
+catalog-686cc96476-kn7c8      sf-sched-worker2   Running
+postgres-0                    sf-sched-worker    Running
+redis-574bb544f-vsv52         sf-sched-worker2   Running
+storefront-6df7977c84-s2p6g   sf-sched-worker2   Running
+storefront-6df7977c84-v6j8c   sf-sched-worker2   Running
+$ kubectl get pods -n p04-02-bookstore -l app=catalog -o custom-columns=POD:.metadata.name,NODE:.spec.nodeName,PHASE:.status.phase
+POD                        NODE               PHASE
+catalog-686cc96476-6vkxm   sf-sched-worker2   Running
+catalog-686cc96476-8fjtv   sf-sched-worker2   Running
+catalog-686cc96476-kn7c8   sf-sched-worker2   Running
+# The Services were missing: redis's name is in 40-services.yaml, which the chapter did not apply.
+# 40-services.yaml is applied now, and catalog's readiness is checked again.
+$ sed -e 's/^  name: bookstore$/  name: p04-02-bookstore/' -e 's/namespace: bookstore$/namespace: p04-02-bookstore/' -e 's/\.bookstore\.svc/.p04-02-bookstore.svc/g' -e 's/bookstore-\(data\|critical\|batch\)/p04-02-bookstore-\1/g' -e 's/key: dedicated$/key: p04-02-dedicated/' examples/bookstore/raw-manifests/40-services.yaml | kubectl apply -f -
+service/catalog created
+service/storefront created
+service/orders created
+service/redis created
+service/rabbitmq created
+service/payments-worker created
+$ kubectl rollout status deployment/catalog -n p04-02-bookstore --timeout=240s
+error: deployment "catalog" exceeded its progress deadline
+$ kubectl get pods -n p04-02-bookstore -o custom-columns=POD:.metadata.name,NODE:.spec.nodeName,PHASE:.status.phase
+POD                           NODE               PHASE
+catalog-686cc96476-6vkxm      sf-sched-worker2   Running
+catalog-686cc96476-8fjtv      sf-sched-worker2   Running
+catalog-686cc96476-kn7c8      sf-sched-worker2   Running
+postgres-0                    sf-sched-worker    Running
+redis-574bb544f-vsv52         sf-sched-worker2   Running
+storefront-6df7977c84-s2p6g   sf-sched-worker2   Running
+storefront-6df7977c84-v6j8c   sf-sched-worker2   Running
+# Hard spread on the same layout: the catalog template with DoNotSchedule.
+$ sed -e 's/^  name: bookstore$/  name: p04-02-bookstore/' -e 's/namespace: bookstore$/namespace: p04-02-bookstore/' -e 's/\.bookstore\.svc/.p04-02-bookstore.svc/g' -e 's/bookstore-\(data\|critical\|batch\)/p04-02-bookstore-\1/g' -e 's/key: dedicated$/key: p04-02-dedicated/' -e 's/whenUnsatisfiable: ScheduleAnyway/whenUnsatisfiable: DoNotSchedule/' examples/bookstore/raw-manifests/10-catalog-deploy.yaml | kubectl apply -f -
+deployment.apps/catalog configured
+$ kubectl get pods -n p04-02-bookstore -l app=catalog -o custom-columns=POD:.metadata.name,NODE:.spec.nodeName,PHASE:.status.phase
+POD                        NODE               PHASE
+catalog-56fbd99bd7-s5fww   <none>             Pending
+catalog-686cc96476-6vkxm   sf-sched-worker2   Running
+catalog-686cc96476-8fjtv   sf-sched-worker2   Running
+catalog-686cc96476-kn7c8   sf-sched-worker2   Running
+$ kubectl get events -n p04-02-bookstore --field-selector reason=FailedScheduling -o custom-columns=OBJECT:.involvedObject.name,MESSAGE:.message
+OBJECT                     MESSAGE
+catalog-56fbd99bd7-s5fww   0/3 nodes are available: 1 node(s) didn't match pod topology spread constraints, 2 node(s) had untolerated taint(s). preemption: 0/3 nodes are available: 1 node(s) didn't match pod topology spread constraints, 2 Preemption is not helpful for scheduling.
+$ sed -e 's/^  name: bookstore$/  name: p04-02-bookstore/' -e 's/namespace: bookstore$/namespace: p04-02-bookstore/' -e 's/\.bookstore\.svc/.p04-02-bookstore.svc/g' -e 's/bookstore-\(data\|critical\|batch\)/p04-02-bookstore-\1/g' -e 's/key: dedicated$/key: p04-02-dedicated/' examples/bookstore/raw-manifests/10-catalog-deploy.yaml | kubectl apply -f -
+deployment.apps/catalog configured
+$ kubectl rollout status deployment/catalog -n p04-02-bookstore --timeout=240s
+deployment "catalog" successfully rolled out
+$ kubectl get pods -n p04-02-bookstore -l app=catalog -o custom-columns=POD:.metadata.name,NODE:.spec.nodeName,PHASE:.status.phase
+POD                        NODE               PHASE
+catalog-686cc96476-6vkxm   sf-sched-worker2   Running
+catalog-686cc96476-8fjtv   sf-sched-worker2   Running
+catalog-686cc96476-kn7c8   sf-sched-worker2   Running
+# IgnoredDuringExecution: remove the pool label while postgres-0 runs on the pool node.
+$ kubectl label node sf-sched-worker node-restriction.kubernetes.io/pool-
+node/sf-sched-worker unlabeled
+$ kubectl get pod postgres-0 -n p04-02-bookstore -o custom-columns=POD:.metadata.name,NODE:.spec.nodeName,PHASE:.status.phase
+POD          NODE              PHASE
+postgres-0   sf-sched-worker   Running
+# Cleanup: the namespace, the three PriorityClasses and the taint are removed.
+$ kubectl delete namespace p04-02-bookstore --wait=true --timeout=300s
+namespace "p04-02-bookstore" deleted
+$ kubectl delete priorityclass p04-02-bookstore-data p04-02-bookstore-critical p04-02-bookstore-batch
+Error from server (NotFound): priorityclasses.scheduling.k8s.io "p04-02-bookstore-data" not found
+Error from server (NotFound): priorityclasses.scheduling.k8s.io "p04-02-bookstore-critical" not found
+Error from server (NotFound): priorityclasses.scheduling.k8s.io "p04-02-bookstore-batch" not found
+$ kubectl taint node sf-sched-worker p04-02-dedicated:NoSchedule-
+node/sf-sched-worker untainted
+$ kubectl get nodes -L node-restriction.kubernetes.io/pool
+NAME                     STATUS   ROLES           AGE   VERSION   POOL
+sf-sched-control-plane   Ready    control-plane   50m   v1.37.0   
+sf-sched-worker          Ready    <none>          49m   v1.37.0   
+sf-sched-worker2         Ready    <none>          49m   v1.37.0   
+$ kubectl get nodes -o custom-columns=NAME:.metadata.name,TAINTS:.spec.taints
+NAME                     TAINTS
+sf-sched-control-plane   [map[effect:NoSchedule key:node-role.kubernetes.io/control-plane]]
+sf-sched-worker          <none>
+sf-sched-worker2         <none>
+$ kubectl get namespaces
+NAME                 STATUS   AGE
+default              Active   50m
+kube-node-lease      Active   50m
+kube-public          Active   50m
+kube-system          Active   50m
+local-path-storage   Active   49m
+p04-03-bookstore     Active   48s
+p04-03-team-a        Active   48s
+$ kubectl get priorityclass
+NAME                        VALUE        GLOBAL-DEFAULT   AGE   PREEMPTIONPOLICY
+bookstore-batch             1000         false            27m   Never
+bookstore-critical          100000       false            27m   PreemptLowerPriority
+bookstore-data              1000000      false            27m   PreemptLowerPriority
+p04-03-bookstore-batch      1000         false            48s   Never
+p04-03-bookstore-critical   100000       false            48s   PreemptLowerPriority
+p04-03-bookstore-data       1000000      false            48s   PreemptLowerPriority
+system-cluster-critical     2000000000   false            50m   PreemptLowerPriority
+system-node-critical        2000001000   false            50m   PreemptLowerPriority
+# The PriorityClasses above were not renamed: the sed rule for them uses a regex
+# alternation, which the macOS sed used here does not read, so phase A applied
+# bookstore-data, bookstore-critical and bookstore-batch under their chapter names.
+# They were created by this run at 02:59:44Z and no Pod in any namespace used them
+# when they were deleted below under those names. The header is corrected to say so.
+$ kubectl delete priorityclass bookstore-data bookstore-critical bookstore-batch
+priorityclass.scheduling.k8s.io "bookstore-data" deleted
+priorityclass.scheduling.k8s.io "bookstore-critical" deleted
+priorityclass.scheduling.k8s.io "bookstore-batch" deleted
+$ kubectl get priorityclass
+NAME                        VALUE        GLOBAL-DEFAULT   AGE   PREEMPTIONPOLICY
+p04-03-bookstore-batch      1000         false            86s   Never
+p04-03-bookstore-critical   100000       false            86s   PreemptLowerPriority
+p04-03-bookstore-data       1000000      false            86s   PreemptLowerPriority
+system-cluster-critical     2000000000   false            50m   PreemptLowerPriority
+system-node-critical        2000001000   false            50m   PreemptLowerPriority
+$ kubectl get namespaces,priorityclass,nodes -o name | grep -c p04-02
+0

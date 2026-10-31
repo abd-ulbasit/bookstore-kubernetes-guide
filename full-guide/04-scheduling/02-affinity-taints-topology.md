@@ -12,7 +12,7 @@
 
 **Estimated time:** ~30 min read · ~60 min hands-on
 **Prerequisites:** [Part 04 ch.01](01-scheduler-and-nodes.md) — the scheduling pipeline you're influencing · [Part 01 ch.04](../01-core-workloads/04-replicasets-and-deployments.md) — replicas you're spreading
-**You'll know after this:** • configure required vs. preferred node affinity and know what *IgnoredDuringExecution* really means · • use inter-pod (anti-)affinity with `topologyKey` for HA without exploding scheduling cost · • apply taints and tolerations (NoSchedule / PreferNoSchedule / NoExecute) for dedicated nodes · • design `topologySpreadConstraints` with the right `maxSkew` and `whenUnsatisfiable` · • spread Bookstore replicas across zones and pin Postgres to a dedicated node
+**You'll know after this:** • configure required vs. preferred node affinity and know what *IgnoredDuringExecution* really means · • use inter-pod (anti-)affinity with `topologyKey` for HA without exploding scheduling cost · • build a dedicated node pool from a taint, a toleration and required node affinity, and say which part of it the scheduler does not enforce · • design `topologySpreadConstraints` with the right `maxSkew` and `whenUnsatisfiable`, and say why spread is availability, not security · • pin Postgres to the dedicated pool and keep the stateless tiers off it
 
 <!-- tags: scheduling, affinity, taints-tolerations, topology-spread, ha -->
 
@@ -37,6 +37,12 @@ domains"). This is the heart of the [Automated Placement](#further-reading)
 pattern, and it is what makes the Bookstore *highly available* instead of merely
 *running*. We apply all four to real Bookstore manifests in this chapter.
 
+Placement is also a security question, and the scheduler does not answer it.
+A taint keeps other Pods off a node, but any author who can create a Pod can
+write the matching toleration. A Pod that sets `nodeName` skips the scheduler,
+and on the lab node the taint did not stop it. Each case is shown below with
+the control that answers it.
+
 ## Mental model
 
 Two of these mechanisms **attract**, two **repel** — and they combine:
@@ -54,8 +60,9 @@ Two of these mechanisms **attract**, two **repel** — and they combine:
 - **Taints & tolerations** — the **node's** side. A *taint* on a node repels all
   Pods; only a Pod with a matching *toleration* may (still must be otherwise
   attracted to) land there. Taint = repel-by-default; toleration = "I'm allowed
-  past this particular fence". A toleration grants *permission*, never
-  *attraction* — pair it with affinity to actually pull the Pod in.
+  past this particular fence". A toleration lifts the taint's refusal
+  and never attracts; pair it with affinity to pull the Pod in. It is not an
+  authorization: the scheduler does not check who wrote it.
 - **Topology spread constraints** — declare the **maximum imbalance**
   (`maxSkew`) of *my* Pods across a set of domains (`topologyKey`), and whether
   violating it is a hard error (`DoNotSchedule`) or just disfavoured
@@ -63,8 +70,25 @@ Two of these mechanisms **attract**, two **repel** — and they combine:
   superseding the blunt hard-anti-affinity trick for most cases.
 
 Rule of thumb the Bookstore uses: **spread the stateless tiers** (catalog,
-storefront) across nodes/zones for HA; **isolate the stateful tier** (postgres)
-onto a dedicated, tainted node it is attracted to.
+storefront) across nodes/zones for HA; **isolate the sensitive workload**
+(postgres, the data tier) on a **dedicated node pool**, with a taint, a
+toleration and required node affinity together.
+
+## Threats and controls
+
+| Threat | Control taught here | Deeper |
+|---|---|---|
+| General Pods drift onto the dedicated pool | `NoSchedule` taint on the pool node | none |
+| A sensitive Pod lands on a general node | required node affinity on the pool label, not preferred | none |
+| Any Pod author writes the toleration and lands on the pool | RBAC on who may create Pods (in the lab, `catalog-sa` may not); the taint itself is not a boundary | RBAC: [05.01](../05-security/01-authn-authz-rbac.md); restricting tolerations by admission: 05.07 <!-- link-later: 05.07 --> |
+| A Pod sets `nodeName` and skips the scheduler's taint check | none in the scheduler: the lab kubelet admitted the Pod on the tainted node | deny `nodeName` in sensitive namespaces, [Part 04 ch.01](01-scheduler-and-nodes.md); admission 05.07 <!-- link-later: 05.07 --> |
+| A node labels itself into the pool, or removes its own taint | NodeRestriction refuses both (tested below) | none |
+| Pods share a node, so they share its kernel | not solved by placement | 05.05 <!-- link-later: 05.05 --> |
+
+Topology spread is availability, not security. It limits what one node or
+zone failure takes down, and it does nothing against an author who can create
+Pods. Scheduling is not a security boundary by itself: each row above is a
+placement rule, or a check on who may write one.
 
 ## Diagrams
 
@@ -78,13 +102,13 @@ flowchart TB
     end
     subgraph zoneB["zone b"]
         n3["node-3"]
-        n4["node-4 (tainted dedicated=database)"]
+        n4["node-4 (pool: tainted dedicated=database, labelled node-restriction pool=database)"]
     end
 
     c1["catalog replica 1"]
     c2["catalog replica 2"]
     c3["catalog replica 3"]
-    pg["postgres-0<br/>tolerates taint + node-affinity dedicated=database"]
+    pg["postgres-0<br/>tolerates the taint, requires the pool label"]
     x["general Pod<br/>(no toleration)"]
 
     c1 --> n1
@@ -93,7 +117,7 @@ flowchart TB
     pg --> n4
     x -. repelled by NoSchedule taint .-x n4
 
-    note["topologySpread maxSkew=1 over hostname<br/>=> at most 1 catalog per node;<br/>anti-affinity also keeps them apart"]
+    note["topologySpread maxSkew=1, ScheduleAnyway<br/>=> a preference: catalog spreads when it can;<br/>preferred anti-affinity adds a nudge"]
     note -. applies to .-> c1
     note -. applies to .-> c2
     note -. applies to .-> c3
@@ -134,91 +158,112 @@ unchanged; only placement fields are added.**
 
 ### 1. A multi-node kind cluster (so spreading has somewhere to spread)
 
-A default `kind create cluster` is **single-node** — `topologySpread` with
-`whenUnsatisfiable: DoNotSchedule` cannot place a 2nd/3rd replica there (there
-is only one `kubernetes.io/hostname` domain). For this chapter, recreate the
-cluster from a multi-node config. Save this as `kind-multinode.yaml` (anywhere;
-it is infra, not a Bookstore manifest):
-
-```yaml
-# kind-multinode.yaml — 1 control-plane + 3 workers; worker-3 is the dedicated
-# DB node: an extra node label plus a NoSchedule taint registered at join time
-# via kubeadmConfigPatches -> JoinConfiguration.nodeRegistration.taints (kind's
-# supported way to taint a node from the cluster config). Synthetic zone labels
-# let us demo zone spreading locally (real clusters get
-# topology.kubernetes.io/zone from the cloud provider).
-kind: Cluster
-apiVersion: kind.x-k8s.io/v1alpha4
-nodes:
-  - role: control-plane
-  - role: worker
-    labels:
-      topology.kubernetes.io/zone: zone-a
-  - role: worker
-    labels:
-      topology.kubernetes.io/zone: zone-b
-  - role: worker
-    labels:
-      topology.kubernetes.io/zone: zone-b
-      dedicated: database          # the label postgres' nodeAffinity prefers
-    kubeadmConfigPatches:
-      - |
-        kind: JoinConfiguration
-        nodeRegistration:
-          taints:
-            - key: dedicated
-              value: database
-              effect: NoSchedule    # repels everything lacking the toleration
-```
-
-```sh
-# Recreate the cluster with topology.
-kind delete cluster --name bookstore
-kind create cluster --name bookstore --config kind-multinode.yaml
-kubectl get nodes -L topology.kubernetes.io/zone,dedicated
-```
-
-**A recreated cluster is empty** — the namespace, config, secrets, and the
-PriorityClasses from earlier chapters are gone. Re-establish the prerequisites
-**in this order** before applying any workload (this is just the cumulative
-manifest set, re-applied):
+A default `kind create cluster` is **single-node**, and a spread over
+`kubernetes.io/hostname` has only one domain there. This chapter uses a
+three-node config instead: one control plane and two workers. It sits beside
+the Part 05 lab cluster config, as
+[`cluster-three-node.yaml`](../examples/security-lab/kind/cluster-three-node.yaml).
+It is infrastructure, not a Bookstore manifest, and it carries no label or
+taint: the pool is made by an administrator, below.
 
 ```sh
 # from the repo root (full-guide/)
-# 1) namespace + quota/limits (Part 01 ch.03)
-kubectl apply -f examples/bookstore/raw-manifests/00-namespace.yaml
-# 2) config + DB credentials the workloads consume (Part 03 ch.01/ch.02)
-kubectl apply -f examples/bookstore/raw-manifests/15-catalog-config.yaml
-kubectl apply -f examples/bookstore/raw-manifests/16-db-credentials.yaml
-# 3) PriorityClasses — cluster-scoped; defined & explained in ch.03. Apply now
-#    so the cumulative manifests (which reference priorityClassName) validate
-#    and pods are not rejected by the Priority admission plugin (forward-ref).
-kubectl apply -f examples/bookstore/raw-manifests/35-priorityclasses.yaml
-# 4) re-load the Bookstore images into the fresh cluster (per the README).
-#    catalog/storefront/orders are kind-loaded, not pulled:
-kind load docker-image bookstore/catalog:dev    --name bookstore
-kind load docker-image bookstore/storefront:dev --name bookstore
-kind load docker-image bookstore/orders:dev     --name bookstore
-# (postgres uses the public postgres:16 image — pulled, no load needed.)
+kind delete cluster --name bookstore
+kind create cluster --name bookstore --config examples/security-lab/kind/cluster-three-node.yaml
+kubectl get nodes -L topology.kubernetes.io/zone
 ```
 
-Now the workload manifests below will apply cleanly.
+Pick one worker as the **dedicated pool** and give it the pool label and the
+taint, as an administrator. Replace `<POOL-WORKER>` with its name:
 
-The dedicated DB node now carries label `dedicated=database` **and** taint
-`dedicated=database:NoSchedule`. If you stay on a single-node cluster instead,
-the `preferred`/soft rules below still work; only the **hard**
-`topologySpread`/anti-affinity needs the extra nodes (or scale those Deployments
-to 1).
+```sh
+kubectl label node <POOL-WORKER> node-restriction.kubernetes.io/pool=database
+kubectl taint node <POOL-WORKER> dedicated=database:NoSchedule
+kubectl get nodes -L node-restriction.kubernetes.io/pool
+```
 
-> If the `kubeadmConfigPatches` taint does not take on your kind/Kubernetes
-> build (older kind, or you prefer to keep the config minimal), drop the
-> `kubeadmConfigPatches:` block and taint + label the node **after creation**
-> instead — same result:
-> `kubectl taint nodes <WORKER-3> dedicated=database:NoSchedule` and
-> `kubectl label nodes <WORKER-3> dedicated=database`
-> (find the node name with `kubectl get nodes`).
+The label sits under `node-restriction.kubernetes.io/`, the prefix
+NodeRestriction protects. A kubelet cannot set it, so the config does not try:
+the admin sets it after the node has joined. The next section shows the refusal.
 
-### 2. Spread `catalog` & `storefront` across nodes (HA)
+**A recreated cluster is empty**: the namespace, config, secrets, and the
+PriorityClasses from earlier chapters are gone. Re-establish the prerequisites
+**in this order** before applying any workload. Each file is complete, and the
+order matters: the namespace and ServiceAccounts come before the workloads that
+name them.
+
+```sh
+# from the repo root (full-guide/)
+# 1) namespace and quota (Part 01 ch.03), then the ServiceAccounts (Part 05 ch.01)
+kubectl apply -f examples/bookstore/raw-manifests/00-namespace.yaml
+kubectl apply -f examples/bookstore/raw-manifests/05-serviceaccounts-rbac.yaml
+# 2) config and DB credentials the workloads consume (Part 03 ch.01/ch.02)
+kubectl apply -f examples/bookstore/raw-manifests/15-catalog-config.yaml
+kubectl apply -f examples/bookstore/raw-manifests/16-db-credentials.yaml
+# 3) PriorityClasses: cluster-scoped, explained in Part 04 ch.03
+kubectl apply -f examples/bookstore/raw-manifests/35-priorityclasses.yaml
+# 4) Services and redis. catalog's /readyz pings redis (REDIS_ADDR in
+#    catalog-config), so catalog is not Ready until redis answers.
+kubectl apply -f examples/bookstore/raw-manifests/40-services.yaml
+kubectl apply -f examples/bookstore/raw-manifests/12-redis.yaml
+# 5) re-load the kind-built images. postgres is pinned by digest and pulled.
+kind load docker-image bookstore/catalog:dev    --name bookstore
+kind load docker-image bookstore/storefront:dev --name bookstore
+```
+
+Now the workload manifests below apply cleanly. Until the admin step above is
+done, postgres stays Pending: its required affinity has no node to match.
+
+### 2. NodeRestriction: a node cannot label or taint itself into the pool
+
+This check is a deliberate failure. It asks the API server to act as the
+kubelet of the pool node, and the server refuses. `--dry-run=server` runs
+admission without writing anything. The output below is from the lab cluster,
+whose nodes are named `sf-sched-control-plane`, `sf-sched-worker` and
+`sf-sched-worker2`. Your node names differ, and the lab's names appear in the
+output verbatim.
+
+```sh
+# Deliberate failure: the pool node's identity tries to label itself.
+kubectl --as=system:node:<POOL-WORKER> --as-group=system:nodes \
+  label node <POOL-WORKER> node-restriction.kubernetes.io/pool=database --dry-run=server
+```
+
+<!-- gate: output -->
+```text
+Error from server (Forbidden): nodes "sf-sched-worker" is forbidden: is not allowed to modify labels: node-restriction.kubernetes.io/pool
+```
+
+The same identity may label a node outside the protected prefix, such as the
+zone label:
+
+```sh
+kubectl --as=system:node:<POOL-WORKER> --as-group=system:nodes \
+  label node <POOL-WORKER> topology.kubernetes.io/zone=zone-a --dry-run=server
+```
+
+<!-- gate: output -->
+```text
+node/sf-sched-worker labeled (server dry run)
+```
+
+It cannot take the pool's taint off either:
+
+```sh
+kubectl --as=system:node:<POOL-WORKER> --as-group=system:nodes \
+  taint node <POOL-WORKER> dedicated:NoSchedule- --dry-run=server
+```
+
+<!-- gate: output -->
+```text
+Error from server (Forbidden): nodes "sf-sched-worker" is forbidden: node "sf-sched-worker" is not allowed to modify taints
+```
+
+A compromised kubelet therefore cannot put itself into the pool or take the
+pool's taint off, and the affinity keyed on the protected label stays true. The
+lab's API server runs this check with `--enable-admission-plugins=NodeRestriction`.
+
+### 3. Spread `catalog` & `storefront` across nodes (HA)
 
 The scheduling layer added to
 [`10-catalog-deploy.yaml`](../examples/bookstore/raw-manifests/10-catalog-deploy.yaml)
@@ -247,54 +292,88 @@ containers/volumes/probes:
 
 `storefront`
 ([`11-storefront-deploy.yaml`](../examples/bookstore/raw-manifests/11-storefront-deploy.yaml))
-gets the same shape with `app: storefront`. Why **both** spread *and*
-anti-affinity? `topologySpreadConstraints` enforces *even* distribution
-(`maxSkew`); the `preferred` anti-affinity adds a soft "really, prefer separate
-nodes" nudge while staying schedulable on a single-node cluster. The
-spread constraint is the hard guarantee; anti-affinity is the belt-and-braces.
+gets the same shape with `app: storefront` and `whenUnsatisfiable:
+ScheduleAnyway`. The `preferred` anti-affinity term is a score on each node. The
+spread constraint is the one to make hard later, once the layout has enough
+general nodes; the next paragraphs say why it is soft here.
 
 ```sh
 # from the repo root (full-guide/)
-# PriorityClass is cluster-scoped and is explained in ch.03; apply it FIRST so
-# these manifests (which now set priorityClassName) validate and the Priority
-# admission plugin does not reject the pods. (Forward-ref to ch.03; harmless to
-# re-apply if you already ran the prerequisite block above.)
-kubectl apply -f examples/bookstore/raw-manifests/35-priorityclasses.yaml
-
-# catalog carries DB_DSN, so it needs Postgres + the schema Job to go Ready
-# (its /readyz pings Postgres). Bring those up and gate on the Job before the
-# rollout wait; idempotent if already applied. (Postgres on its dedicated DB
-# node is the topic of a later section — this is just the readiness gate.)
+# catalog carries DB_DSN and its readiness pings Postgres, so bring postgres up
+# and gate on the schema Job first. Postgres itself is the next section.
 kubectl apply -f examples/bookstore/raw-manifests/20-postgres-statefulset.yaml
 kubectl rollout status statefulset/postgres -n bookstore
-kubectl apply -f examples/bookstore/raw-manifests/21-db-migrate-job.yaml   # schema
+kubectl apply -f examples/bookstore/raw-manifests/21-db-migrate-job.yaml
 kubectl wait --for=condition=complete job/db-migrate -n bookstore --timeout=120s
 kubectl apply -f examples/bookstore/raw-manifests/10-catalog-deploy.yaml
 kubectl apply -f examples/bookstore/raw-manifests/11-storefront-deploy.yaml
 kubectl rollout status deployment/catalog -n bookstore
 
-# Replicas spread across the available (untainted) nodes — NODE column varies.
-kubectl get pods -n bookstore -l app=catalog -o wide
 kubectl get pods -n bookstore -l app=catalog \
-  -o custom-columns='POD:.metadata.name,NODE:.spec.nodeName'
+  -o custom-columns='POD:.metadata.name,NODE:.spec.nodeName,PHASE:.status.phase'
 ```
 
-On the 3-worker config above, **worker-3 is tainted
-`dedicated=database:NoSchedule`** and `catalog` has no matching toleration, so
-`catalog` only fits **worker-1 and worker-2** — 3 replicas spread **2 + 1**
-across those two nodes (at most 2 per node, never on the tainted DB node).
-A *true* 3-way one-per-node spread would need **3 general (untainted) nodes**;
-this is the taint isolation and the spread constraint working together exactly
-as intended, not a failure.
+<!-- gate: output -->
+```text
+POD                        NODE               PHASE
+catalog-686cc96476-6vkxm   sf-sched-worker2   Running
+catalog-686cc96476-8fjtv   sf-sched-worker2   Running
+catalog-686cc96476-kn7c8   sf-sched-worker2   Running
+```
 
-> On a single-node cluster the **hard** `DoNotSchedule` will leave replicas 2–3
-> `Pending` with a `node(s) didn't match pod topology spread constraints`
-> Event — that is the constraint working as designed. Either use the multi-node
-> config above, or `kubectl scale deployment/catalog -n bookstore --replicas=1`
-> for the single-node case. (This is exactly the Pending-diagnosis skill from
-> [ch.01](01-scheduler-and-nodes.md).)
+All three replicas sit on the general worker. None is on the pool node: the
+taint keeps catalog off it, because catalog has no toleration. The spread constraint is soft, so the scheduler places a
+replica it cannot spread rather than leave it Pending.
 
-### 3. Pin `postgres` to the dedicated DB node (taint + toleration + affinity)
+Why not `DoNotSchedule`? Try the hard form on this layout. This is a deliberate
+failure: the rollout refuses to proceed.
+
+```sh
+# Deliberate failure: the hard form of the spread on a two-worker layout.
+sed 's/whenUnsatisfiable: ScheduleAnyway/whenUnsatisfiable: DoNotSchedule/' \
+  examples/bookstore/raw-manifests/10-catalog-deploy.yaml | kubectl apply -f -
+kubectl get pods -n bookstore -l app=catalog \
+  -o custom-columns='POD:.metadata.name,NODE:.spec.nodeName,PHASE:.status.phase'
+kubectl get events -n bookstore --field-selector reason=FailedScheduling \
+  -o custom-columns='OBJECT:.involvedObject.name,MESSAGE:.message'
+```
+
+<!-- gate: output -->
+```text
+POD                        NODE               PHASE
+catalog-56fbd99bd7-s5fww   <none>             Pending
+catalog-686cc96476-6vkxm   sf-sched-worker2   Running
+catalog-686cc96476-8fjtv   sf-sched-worker2   Running
+catalog-686cc96476-kn7c8   sf-sched-worker2   Running
+```
+
+<!-- gate: output -->
+```text
+OBJECT                     MESSAGE
+catalog-56fbd99bd7-s5fww   0/3 nodes are available: 1 node(s) didn't match pod topology spread constraints, 2 node(s) had untolerated taint(s). preemption: 0/3 nodes are available: 1 node(s) didn't match pod topology spread constraints, 2 Preemption is not helpful for scheduling.
+```
+
+The rollout stalls. `maxUnavailable: 0` keeps the three old replicas running,
+and the one new replica waits. The event names two reasons: the spread
+constraint, and the untolerated taint on the two nodes that are not the general
+worker, which are the control plane and the pool. The constraint refuses
+because the pool still counts. `nodeTaintsPolicy` defaults to `Ignore`, so a
+node the Pod cannot use stays in the domain count with zero catalog Pods. The
+fourth replica on the general worker would leave a skew of 4 against it. Setting
+`nodeTaintsPolicy: Honor` removes the pool from the count. Then the general
+worker is the only domain, the skew is always zero, and the constraint passes
+without separating anything. On a layout with one general node, a hostname
+spread is either blocked or empty. That is why this chapter uses
+`ScheduleAnyway`: apply the file from the block above again, and the rollout
+completes with the replicas back on the general worker.
+
+If the migration Job reports `DeadlineExceeded`, the image pull took longer than
+its 120 s `activeDeadlineSeconds`. On the lab host the first postgres pull took
+about four minutes, and the Job failed that way. Applying it again, once the
+image was on the node, let it complete. On a slow registry, pull the image onto
+the nodes before the Job runs.
+
+### 4. Pin `postgres` to the dedicated pool (taint, toleration, required affinity)
 
 The scheduling layer added to
 [`20-postgres-statefulset.yaml`](../examples/bookstore/raw-manifests/20-postgres-statefulset.yaml)
@@ -304,57 +383,263 @@ volumeClaimTemplates untouched):
 ```yaml
     spec:
       priorityClassName: bookstore-data        # ch.03 (35-): highest tier
-      tolerations:                             # PERMISSION to enter the tainted node
+      tolerations:                             # lifts the taint's refusal
         - key: dedicated
           operator: Equal
           value: database
           effect: NoSchedule                   # must match the taint exactly
       affinity:
-        nodeAffinity:                          # ATTRACTION to that node
-          preferredDuringSchedulingIgnoredDuringExecution:
-            - weight: 100
-              preference:
-                matchExpressions:
-                  - key: dedicated
+        nodeAffinity:                          # REQUIRED: only the pool node
+          requiredDuringSchedulingIgnoredDuringExecution:
+            nodeSelectorTerms:
+              - matchExpressions:
+                  - key: node-restriction.kubernetes.io/pool
                     operator: In
                     values: ["database"]
       # ... existing terminationGracePeriodSeconds / containers UNCHANGED ...
 ```
 
-This is the canonical "dedicated node" recipe and shows why **two** mechanisms
-are needed: the **toleration** lets postgres *past the taint* (without it the
-scheduler refuses the node); the **node affinity** *pulls* postgres *toward*
-that node (without it, postgres could schedule anywhere — a toleration only
-removes a barrier, it does not create a preference). General Bookstore Pods
-(catalog/orders/storefront) have **no** toleration, so the `NoSchedule` taint
-keeps them off the DB node automatically — exactly the isolation we wanted.
+The dedicated pool needs all three parts, and each answers a different threat:
+
+- The **taint** keeps general Pods off the pool. Catalog has no toleration, so
+  the taint alone keeps it out.
+- The **toleration** lifts the taint's refusal, so postgres may enter the pool.
+  It is not an authorization: section 5 shows any Pod author writing one.
+- The **required node affinity** keeps postgres on the pool. A preferred rule is
+  only a score, so with one the data tier could land on a general node.
 
 ```sh
 kubectl apply -f examples/bookstore/raw-manifests/20-postgres-statefulset.yaml
 kubectl rollout status statefulset/postgres -n bookstore
-
-# postgres-0 lands on the dedicated node; catalog/storefront never do:
-kubectl get pod -n bookstore \
-  -l 'app in (postgres,catalog,storefront)' \
-  -o custom-columns='POD:.metadata.name,NODE:.spec.nodeName'
-kubectl describe node <DEDICATED-WORKER> | sed -n '/Taints:/,/Unschedulable/p'
+kubectl get pods -n bookstore \
+  -o custom-columns='POD:.metadata.name,NODE:.spec.nodeName,PHASE:.status.phase'
 ```
 
-Affinity is `preferred` (not `required`) **on purpose**: with `required`
-node affinity, a single-node or differently-labelled cluster would leave
-postgres permanently `Pending`. `preferred` keeps the guide runnable
-everywhere while still demonstrating the attraction. The
-[Production notes](#production-notes) explain when to harden it to `required`.
+<!-- gate: output -->
+```text
+POD          NODE              PHASE
+postgres-0   sf-sched-worker   Running
+```
 
-### 4. Watch `IgnoredDuringExecution` actually mean what it says
+`postgres-0` runs on the pool node. Pool membership is a required rule, so the
+replacement for a deleted postgres Pod can only land on a node that carries the
+label. Required is the choice for the data tier: postgres waits for its pool
+rather than running somewhere else. The [Production notes](#production-notes)
+cover what that costs.
+
+### 5. A toleration is not an authorization
+
+Any author who can create a Pod in the namespace can write the toleration and
+the required affinity from section 4. This Pod does exactly that, as a
+deliberate demonstration of the gap. It is complete and carries the baseline.
+Its image is the pause image, pinned by digest. On linux/amd64 its image config
+declares UID 65535, and the Pod runs as that UID. It has its own ServiceAccount
+with no token mounted, as every workload has.
+
+```yaml
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: pool-tenant-sa
+  namespace: bookstore
+automountServiceAccountToken: false
+---
+apiVersion: v1
+kind: Pod
+metadata:
+  name: pool-tenant
+  namespace: bookstore
+  labels:
+    app: pool-tenant
+spec:
+  serviceAccountName: pool-tenant-sa
+  automountServiceAccountToken: false
+  securityContext:
+    runAsNonRoot: true
+    runAsUser: 65535
+    runAsGroup: 65535
+    seccompProfile:
+      type: RuntimeDefault
+  tolerations:
+    - key: dedicated
+      operator: Equal
+      value: database
+      effect: NoSchedule
+  affinity:
+    nodeAffinity:
+      requiredDuringSchedulingIgnoredDuringExecution:
+        nodeSelectorTerms:
+          - matchExpressions:
+              - key: node-restriction.kubernetes.io/pool
+                operator: In
+                values: ["database"]
+  containers:
+    - name: app
+      image: registry.k8s.io/pause@sha256:ee6521f290b2168b6e0935a181d4cff9be1ac3f505666ef0e3c98fae8199917a  # pause:3.10
+      securityContext:
+        allowPrivilegeEscalation: false
+        readOnlyRootFilesystem: true
+        capabilities:
+          drop: ["ALL"]
+      resources:
+        requests:
+          cpu: 10m
+          memory: 16Mi
+        limits:
+          memory: 32Mi
+      volumeMounts:
+        - name: tmp
+          mountPath: /tmp
+  volumes:
+    - name: tmp
+      emptyDir: {}
+```
 
 ```sh
-# Label/unlabel a node AFTER catalog Pods are running. Pods do NOT move:
-# *IgnoredDuringExecution* = the rule gates SCHEDULING only, never eviction.
-kubectl label node <SOME-WORKER> tier=experiment
-kubectl get pods -n bookstore -l app=catalog -o wide   # unchanged placement
-kubectl label node <SOME-WORKER> tier-                  # undo
+# Save the manifest as pool-tenant.yaml, then:
+kubectl apply -f pool-tenant.yaml
+kubectl wait --for=condition=Ready pod/pool-tenant -n bookstore --timeout=120s
+kubectl get pod pool-tenant -n bookstore \
+  -o custom-columns='POD:.metadata.name,NODE:.spec.nodeName,PHASE:.status.phase'
 ```
+
+<!-- gate: output -->
+```text
+POD           NODE              PHASE
+pool-tenant   sf-sched-worker   Running
+```
+
+The scheduler placed the Pod on the pool node. It did not ask who wrote the
+toleration, and it cannot tell an authorized author from anyone else. The
+control sits in front of the scheduler: who may create or update Pods in the
+namespace. The lab's `catalog-sa` has no Role that grants that, and it is
+refused:
+
+```sh
+kubectl auth can-i create pods -n bookstore --as=system:serviceaccount:bookstore:catalog-sa
+```
+
+<!-- gate: output -->
+```text
+no
+```
+
+A subject granted `create` on `pods` in this namespace could write the
+toleration, which is why RBAC on Pods is the first control. [Authentication,
+authorization and RBAC](../05-security/01-authn-authz-rbac.md) teaches the Role
+itself. Restricting which tolerations a namespace may use is an admission
+policy, which this chapter does not build: 05.07 <!-- link-later: 05.07 -->.
+
+```sh
+kubectl delete pod pool-tenant -n bookstore
+```
+
+### 6. `nodeName` skips the scheduler, and with it the taint
+
+A Pod with `spec.nodeName` is bound to that node before the scheduler looks at
+it, so the scheduler's filters never run for it. This Pod names the pool node
+and has no toleration. It is a deliberate failure: it is the bypass that the
+control has to stop. Save it as `pin-probe.yaml`, replacing `pool-worker` with the
+pool node's name:
+
+```yaml
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: pin-probe-sa
+  namespace: bookstore
+automountServiceAccountToken: false
+---
+apiVersion: v1
+kind: Pod
+metadata:
+  name: pin-probe
+  namespace: bookstore
+  labels:
+    app: pin-probe
+spec:
+  nodeName: pool-worker
+  serviceAccountName: pin-probe-sa
+  automountServiceAccountToken: false
+  securityContext:
+    runAsNonRoot: true
+    runAsUser: 65535
+    runAsGroup: 65535
+    seccompProfile:
+      type: RuntimeDefault
+  containers:
+    - name: app
+      image: registry.k8s.io/pause@sha256:ee6521f290b2168b6e0935a181d4cff9be1ac3f505666ef0e3c98fae8199917a  # pause:3.10
+      securityContext:
+        allowPrivilegeEscalation: false
+        readOnlyRootFilesystem: true
+        capabilities:
+          drop: ["ALL"]
+      resources:
+        requests:
+          cpu: 10m
+          memory: 16Mi
+        limits:
+          memory: 32Mi
+      volumeMounts:
+        - name: tmp
+          mountPath: /tmp
+  volumes:
+    - name: tmp
+      emptyDir: {}
+```
+
+```sh
+kubectl apply -f pin-probe.yaml
+kubectl wait --for=condition=Ready pod/pin-probe -n bookstore --timeout=60s
+kubectl get pod pin-probe -n bookstore \
+  -o custom-columns='POD:.metadata.name,NODE:.spec.nodeName,PHASE:.status.phase,REASON:.status.reason,MESSAGE:.status.message'
+```
+
+<!-- gate: output -->
+```text
+POD         NODE              PHASE     REASON   MESSAGE
+pin-probe   sf-sched-worker   Running   <none>   <none>
+```
+
+On the lab node the kubelet did not check the taint for a Pod that named the
+node, and the Pod runs there with no toleration. A taint keeps the scheduler
+off a node. It does not keep out a Pod whose author sets `nodeName`. Scheduling
+is not a security boundary by itself. The control is to deny `nodeName` in
+sensitive namespaces, which [Part 04 ch.01](01-scheduler-and-nodes.md) owns,
+and the admission policy that enforces it is 05.07
+<!-- link-later: 05.07 -->.
+
+```sh
+kubectl delete pod pin-probe -n bookstore
+```
+
+### 7. Watch `IgnoredDuringExecution` actually mean what it says
+
+Remove the pool label while postgres runs on the pool node. Postgres does not
+move:
+
+```sh
+kubectl label node <POOL-WORKER> node-restriction.kubernetes.io/pool-
+kubectl get pod postgres-0 -n bookstore \
+  -o custom-columns='POD:.metadata.name,NODE:.spec.nodeName,PHASE:.status.phase'
+```
+
+<!-- gate: output -->
+```text
+node/sf-sched-worker unlabeled
+```
+
+<!-- gate: output -->
+```text
+POD          NODE              PHASE
+postgres-0   sf-sched-worker   Running
+```
+
+The rule gates scheduling only, never eviction. The label is the one
+NodeRestriction protects, so a kubelet cannot put it back. If postgres-0 were
+deleted now, its replacement could not be placed until an administrator
+restored the label.
 
 Nothing reschedules. That is the entire meaning of the verbose name: node/pod
 **affinity** is enforced **only at schedule time**; once a Pod is bound, later
@@ -421,14 +706,16 @@ on running Pods is a **`NoExecute` taint** — covered next — which is why
   signal only. Refinements: **`minDomains`** (GA in 1.30) forces the scheduler to
   treat the topology as having *at least* N domains — so 3 replicas don't all
   pack into the only 1 domain currently present; **`nodeAffinityPolicy`** /
-  **`nodeTaintsPolicy`** (`Honor`|`Ignore`) decide whether nodes filtered out by
-  the Pod's own nodeAffinity / by taints are excluded from the domain
-  denominator (default `Honor` for affinity, `Ignore` for taints in current
-  versions — be explicit if it matters); **`matchLabelKeys`** (Beta) adds pod-
+  **`nodeTaintsPolicy`** (`Honor`|`Ignore`; beta since 1.26, GA in 1.33) decide
+  whether nodes the Pod cannot use, by its own nodeAffinity or by taints, are
+  left out of the domain count. The defaults are `Honor` for affinity and
+  `Ignore` for taints. Under `Ignore` a pool node that the Pod cannot enter
+  still counts as an empty domain, which is why the hard spread stalled in the
+  lab (section 3); **`matchLabelKeys`** (beta since 1.27) adds pod-
   template-hash-like keys to the implicit selector so a *rolling update's* new
   and old ReplicaSet Pods are spread independently rather than fighting each
   other's counts. Kubernetes also applies **cluster-level default constraints**
-  (a `maxSkew: 3` spread over hostname and zone, `ScheduleAnyway`) to Pods that
+  (`maxSkew: 3` over hostname and `maxSkew: 5` over zone, both `ScheduleAnyway`) to Pods that
   declare none, via the scheduler's `PodTopologySpread` plugin defaults — a
   gentle built-in spreading even when you specify nothing.
 - **How they combine, in pipeline terms.** All of these are scheduler
@@ -437,11 +724,13 @@ on running Pods is a **`NoExecute` taint** — covered next — which is why
   **Filter** (the hard/`required`/`NoSchedule`/`DoNotSchedule` parts) **and** at
   **Score** (the `preferred`/`PreferNoSchedule`/`ScheduleAnyway` parts). Hard
   constraints intersect (a node must pass *all* required predicates); soft ones
-  are weighted and summed. So postgres' placement is: Filter keeps only nodes
-  whose taints it tolerates → Score boosts the `dedicated=database` node via the
-  preferred nodeAffinity → it lands there; catalog's is: Filter drops nodes that
-  would break `maxSkew` → among the rest, anti-affinity Score prefers
-  emptier-of-catalog nodes.
+  are weighted and summed. So postgres' placement is: NodeAffinity's Filter
+  keeps only the pool node, because the affinity is required; TaintToleration's
+  Filter then admits that node, because postgres tolerates the taint; it lands
+  there. Catalog's placement is: under `DoNotSchedule`, Filter drops nodes that
+  would break `maxSkew`; under `ScheduleAnyway`, the constraint only scores.
+  A Pod with `spec.nodeName` skips this pipeline altogether. Section 6 shows a
+  NoSchedule taint did not stop such a Pod on the lab node.
 
 ## Production notes
 
@@ -459,13 +748,12 @@ on running Pods is a **`NoExecute` taint** — covered next — which is why
 > node" cases (e.g. a quorum's members). Keep anti-affinity `preferred` unless
 > the separation is a correctness requirement.
 
-> **In production:** the choice between `preferred` and `required` node affinity
-> is a **reliability trade-off**. `required` guarantees placement on the right
-> hardware (GPU, local NVMe, licensed node) but turns "no such node right now"
-> into an outage (Pending). For the Bookstore's Postgres on a dedicated node,
-> `required` node affinity + the toleration is the *production* choice when that
-> node pool is guaranteed to exist (and cluster-autoscaler can grow it); the
-> guide uses `preferred` only so it runs on any local cluster.
+> **In production:** `required` node affinity turns "no such pool node right
+> now" into a Pending data tier. Keep the pool in a node group that
+> cluster-autoscaler can grow, and alert on Pending Pods in the data namespace.
+> Check the pool label on a real node after it joins. NodeRestriction stops a
+> kubelet from setting that prefix itself, so the label has to come from an
+> administrator or from the provider's node-pool configuration.
 
 > **In production:** use **dedicated node pools + taints** for stateful or
 > special-hardware workloads (databases, GPU jobs). Taint the pool
@@ -489,13 +777,14 @@ on running Pods is a **`NoExecute` taint** — covered next — which is why
 
 ```sh
 # Inspect node labels & taints (the inputs to all four mechanisms)
-kubectl get nodes -L topology.kubernetes.io/zone,dedicated
+kubectl get nodes -L topology.kubernetes.io/zone,node-restriction.kubernetes.io/pool
 kubectl describe node <NODE> | sed -n '/Taints:/,/Unschedulable/p'
 
-# Add/remove a taint and a label
+# Pool taint and pool label (administrator; a kubelet cannot set the label)
 kubectl taint nodes <NODE> dedicated=database:NoSchedule       # add
 kubectl taint nodes <NODE> dedicated=database:NoSchedule-      # remove (trailing -)
-kubectl label nodes <NODE> dedicated=database                  # add label
+kubectl label nodes <NODE> node-restriction.kubernetes.io/pool=database   # add
+kubectl label nodes <NODE> node-restriction.kubernetes.io/pool-           # remove
 
 # Verify spreading worked. A Pod has its NODE in spec.nodeName, but NOT its
 # zone — zone is a NODE label. Get the Pod→node mapping, then the node→zone
@@ -506,37 +795,28 @@ kubectl get pods -n <NS> -l <SEL> \
 kubectl get nodes -L topology.kubernetes.io/zone   # NODE → ZONE (node label)
 ```
 
-Minimal skeletons:
+Dedicated pool (sensitive Pods need the toleration **and** the required affinity):
 
 ```yaml
 spec:
-  # required node affinity (hard) + preferred (soft, weighted)
+  tolerations:
+    - { key: dedicated, operator: Equal, value: database, effect: NoSchedule }
   affinity:
     nodeAffinity:
       requiredDuringSchedulingIgnoredDuringExecution:
         nodeSelectorTerms:
           - matchExpressions:
-              - { key: disktype, operator: In, values: ["ssd"] }
-      preferredDuringSchedulingIgnoredDuringExecution:
-        - weight: 50
-          preference:
-            matchExpressions:
-              - { key: topology.kubernetes.io/zone, operator: In, values: ["zone-a"] }
-    podAntiAffinity:                       # HA: never 2 replicas per host
-      # WARNING: with REQUIRED anti-affinity, if replicas > available
-      # <topologyKey> domains (here: nodes), the surplus Pods stay Pending
-      # forever. Use preferredDuringScheduling... for a SOFT spread that still
-      # schedules when domains run out.
-      requiredDuringSchedulingIgnoredDuringExecution:
-        - topologyKey: kubernetes.io/hostname
-          labelSelector: { matchLabels: { app: myapp } }
-  tolerations:
-    - { key: dedicated, operator: Equal, value: database, effect: NoSchedule }
+              - { key: node-restriction.kubernetes.io/pool, operator: In, values: ["database"] }
+```
+
+Spread (a preference on a small layout; see the Production notes for zones):
+
+```yaml
+spec:
   topologySpreadConstraints:
     - maxSkew: 1
-      minDomains: 3                         # GA 1.30: assume ≥3 domains
-      topologyKey: topology.kubernetes.io/zone
-      whenUnsatisfiable: DoNotSchedule      # or ScheduleAnyway (soft)
+      topologyKey: kubernetes.io/hostname
+      whenUnsatisfiable: ScheduleAnyway
       labelSelector: { matchLabels: { app: myapp } }
 ```
 
@@ -544,9 +824,10 @@ Checklist:
 
 - [ ] Stateless replicated tiers have `topologySpreadConstraints` over zone (and/or host)
 - [ ] Hard pod anti-affinity used only for true "must not co-locate" cases
-- [ ] Dedicated/special nodes are **tainted** *and* the intended Pods have a matching toleration
-- [ ] A toleration is always paired with affinity (permission ≠ attraction)
-- [ ] `preferred` vs `required` chosen as a deliberate reliability trade-off
+- [ ] Pool nodes are **tainted**, and the pool label sits under `node-restriction.kubernetes.io/`, set by an administrator
+- [ ] Sensitive Pods have the toleration **and** required node affinity to the pool
+- [ ] A toleration is never treated as authorization: RBAC limits who may write Pods, and admission limits tolerations (05.07 <!-- link-later: 05.07 -->)
+- [ ] Pods that set `spec.nodeName` are denied in sensitive namespaces ([Part 04 ch.01](01-scheduler-and-nodes.md))
 - [ ] Relied on `IgnoredDuringExecution`: affinity gates scheduling, not eviction
 - [ ] Did not blanket-tolerate built-in taints (`not-ready`, control-plane)
 
@@ -557,14 +838,14 @@ Checklist:
 1. **A teammate adds a toleration to a Pod for the `dedicated=database:NoSchedule` taint but the Pod is still scheduled on a random node — not the dedicated one. Why, and what's missing?**
    <details><summary>Show answer</summary>
 
-   Tolerations grant **permission** to enter a tainted node, not **attraction** to it. Without `nodeAffinity` (or `nodeSelector`) pulling the Pod toward `dedicated=database`, the scheduler treats the dedicated node as just one of many feasible nodes and may pick any. The canonical "dedicated node" recipe is **taint + toleration + node affinity** — all three (see §3. Pin postgres to the dedicated DB node).
+   Tolerations lift the taint's refusal. They never attract a Pod to a node. Without `nodeAffinity` (or `nodeSelector`) pulling the Pod toward the pool, the scheduler treats the pool node as one of many feasible nodes and may pick any. The dedicated-pool recipe is **taint + toleration + required node affinity**, all three (see §4. Pin postgres to the dedicated pool).
 
    </details>
 
 2. **You set `requiredDuringSchedulingIgnoredDuringExecution` node affinity on a Deployment, then later remove the matching label from the node. The running Pods stay there. Walk through the suffix's literal meaning.**
    <details><summary>Show answer</summary>
 
-   `…DuringScheduling` = the rule is applied when the scheduler places the Pod. `IgnoredDuringExecution` = once running, label changes are ignored for that Pod — it is not evicted. The only mechanism that *does* evict running Pods on a node-side change is a `NoExecute` taint, which is why that effect exists separately. There is no `RequiredDuringExecution` for affinity (see §4. Watch IgnoredDuringExecution actually mean what it says).
+   `…DuringScheduling` = the rule is applied when the scheduler places the Pod. `IgnoredDuringExecution` = once running, label changes are ignored for that Pod — it is not evicted. The only mechanism that *does* evict running Pods on a node-side change is a `NoExecute` taint, which is why that effect exists separately. There is no `RequiredDuringExecution` for affinity (see §7. Watch IgnoredDuringExecution actually mean what it says).
 
    </details>
 
@@ -582,10 +863,10 @@ Checklist:
 
    </details>
 
-5. **Hands-on extension: on a 3-worker kind cluster with one node tainted `dedicated=database:NoSchedule`, set `replicas: 5` on the catalog Deployment with `topologySpreadConstraints` `maxSkew: 1` `topologyKey: kubernetes.io/hostname`. What do you observe, and why?**
-   <details><summary>What you should see</summary>
+5. **A teammate with `create` on Pods in `bookstore` writes a Pod with the same toleration and required affinity as postgres. It lands on the pool node. Which control would have stopped it, and why can neither the taint nor the affinity do that?**
+   <details><summary>Show answer</summary>
 
-   With 2 untainted nodes and `maxSkew: 1`, the constraint allows at most a 3-2 split, totaling 5 Pods — so all 5 schedule (3 on one node, 2 on the other). If you set `replicas: 6`, replica 6 stays `Pending` with event "node(s) didn't match pod topology spread constraints" — the only nodes that can fit catalog are full of catalog. The tainted DB node never receives a catalog Pod because catalog has no matching toleration (see §2. Spread catalog and storefront across nodes).
+   Neither the taint nor the affinity checks who wrote the Pod. The scheduler reads what the Pod says, and this Pod says the right things. The control sits before the scheduler: RBAC decides who may create or update Pods in the namespace (in §5 the lab's `catalog-sa` was refused), and an admission policy can reject tolerations for the pool key from namespaces that may not use the pool. That policy is 05.07 <!-- link-later: 05.07 -->. A related case: a Pod that sets `nodeName` skips the scheduler and the taint, so the control is to deny `nodeName` in sensitive namespaces ([Part 04 ch.01](01-scheduler-and-nodes.md)).
 
    </details>
 

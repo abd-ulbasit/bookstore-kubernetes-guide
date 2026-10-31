@@ -21,7 +21,7 @@
 # Part 04 SCHEDULING LAYER (ch.02 + ch.03 — additive only; nothing above is
 # changed, only the three fields below are ADDED to template.spec):
 #  • ch.02 topologySpreadConstraints: spread the 3 catalog replicas across
-#    nodes (maxSkew 1) so one node/zone failure cannot take the whole tier.
+#    nodes (maxSkew 1) as a preference (ScheduleAnyway, see the block below).
 #  • ch.02 podAntiAffinity (preferred): bias replicas onto DIFFERENT nodes —
 #    "preferred", so a single-node kind cluster still schedules all 3.
 #  • ch.03 priorityClassName: bookstore-critical (35-) — user-facing tier,
@@ -92,14 +92,15 @@ spec:
       # --- Part 04 ch.03: priority/preemption tier (35-priorityclasses.yaml).
       # User-facing service: above bookstore-batch, below bookstore-data.
       priorityClassName: bookstore-critical
-      # --- Part 04 ch.02: spread replicas across nodes for HA. maxSkew 1 means
-      # the replica counts on any two nodes differ by at most 1. DoNotSchedule
-      # makes it a HARD rule; on a 1-node kind cluster scale to 1 OR see ch.02's
-      # multi-node kind config. labelSelector matches THIS Deployment's Pods.
+      # --- Part 04 ch.02: spread replicas across nodes. maxSkew 1 means the
+      # replica counts on any two nodes differ by at most 1. ScheduleAnyway
+      # makes it a preference: on the two-worker kind cluster of ch.02 one
+      # worker is the dedicated pool, so DoNotSchedule would hold replicas
+      # Pending. labelSelector matches THIS Deployment's Pods.
       topologySpreadConstraints:
         - maxSkew: 1
           topologyKey: kubernetes.io/hostname     # one "domain" per node
-          whenUnsatisfiable: DoNotSchedule
+          whenUnsatisfiable: ScheduleAnyway
           labelSelector:
             matchLabels:
               app: catalog
