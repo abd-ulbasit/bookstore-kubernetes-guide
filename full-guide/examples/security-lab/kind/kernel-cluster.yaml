@@ -4,21 +4,15 @@
 #   kind create cluster --config kernel-cluster.yaml
 #
 # The node image is the same Kubernetes 1.37.0 image as cluster.yaml, pinned
-# by digest. The one addition is the extraMounts entry: it bind-mounts the lab
-# host's securityfs into the node, so the node's containerd and kubelet can see
-# that AppArmor is enabled in the kernel they share. Without it the node shows
-# no /sys/kernel/security/apparmor and AppArmor profiles cannot be applied.
-#
-# This mount exposes the host's securityfs to a privileged kind node, which
-# already sees the host's /sys. Use this cluster only on a Linux host you own,
-# and only for the lab. The lab asks AppArmor to load one profile, and removes
-# it when it finishes.
+# by digest. This config adds no mounts. The lab does not load an AppArmor
+# profile: a profile is kernel state shared with the host, so loading one
+# from inside a node would change the host's policy. The only step that
+# needs this cluster is the optional gVisor step, which installs runsc into
+# the node and restarts the node's containerd. Run the labs only on a cluster
+# you own.
 kind: Cluster
 apiVersion: kind.x-k8s.io/v1alpha4
 name: security-lab-kernel
 nodes:
   - role: control-plane
     image: kindest/node:v1.37.0@sha256:a1ed56cfb0e7b93589bdf97c8cd566405a265939e3620fc4f5de89adff580ae5
-    extraMounts:
-      - hostPath: /sys/kernel/security
-        containerPath: /sys/kernel/security

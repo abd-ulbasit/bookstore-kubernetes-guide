@@ -75,14 +75,15 @@ replacement for it.
 
 ## Threats and controls
 
-Each threat is something a process inside a container can do to the kernel or to
-the node. The lab lands the first four and shows the controls working. It runs
-no kernel exploit, and the last row is not run here.
+Each threat is something a process inside a container can do to the kernel or
+to the node. The lab shows two of these controls working, the first two rows.
+The rest are cited, and the text after the table says why none of them ran. It
+runs no kernel exploit.
 
 | Threat | Control this chapter teaches | Where it goes deeper |
 |---|---|---|
-| A rarely used system call reaches a kernel bug | A seccomp profile that allows only the calls the workload makes: `RuntimeDefault`, then a `Localhost` profile derived from an audit | [Kubernetes seccomp tutorial](https://kubernetes.io/docs/tutorials/security/seccomp/) |
-| A Pod runs with **no** seccomp filter at all | `seccompProfile: RuntimeDefault`. Pod Security `restricted` refuses `Unconfined`, which the lab shows at admission | [Pod Security Standards](https://kubernetes.io/docs/concepts/security/pod-security-standards/) |
+| A rarely used system call reaches a kernel bug | A seccomp filter that refuses calls the workload does not need. `RuntimeDefault` is the baseline, and [02](02-pod-security.md) teaches it. A `Localhost` profile is shown as the mechanism for a custom filter, not as a finished profile | [Kubernetes seccomp tutorial](https://kubernetes.io/docs/tutorials/security/seccomp/) |
+| A Pod runs with **no** seccomp filter at all | `restricted` refuses `Unconfined`, which the lab shows at admission. [02](02-pod-security.md) sets the baseline `RuntimeDefault` | [Pod Security Standards](https://kubernetes.io/docs/concepts/security/pod-security-standards/) |
 | A program is copied into a writable volume and run there | An AppArmor profile that denies execute under `/tmp` and `/dev/shm`, applied with `securityContext.appArmorProfile` | [Kubernetes AppArmor tutorial](https://kubernetes.io/docs/tutorials/security/apparmor/) |
 | A label-based policy must separate workloads on a shared host | SELinux labels through `seLinuxOptions`, cited, not run on this lab host | [SELinux](https://kubernetes.io/docs/concepts/security/linux-kernel-security-constraints/) |
 | A kernel bug is reached through the container's own system calls | A sandboxed runtime: gVisor selected by a RuntimeClass. Its user-space kernel answers the calls first | [gVisor](https://gvisor.dev/docs/), [RuntimeClass](https://kubernetes.io/docs/concepts/containers/runtime-class/) |
@@ -90,9 +91,10 @@ no kernel exploit, and the last row is not run here.
 
 The first two rows need the baseline's `seccompProfile` field and the
 `restricted` level, so the lab sets both on every hardened Pod. The third row
-needs AppArmor on the node, which the shared cluster does not expose. The
-fourth and fifth rows need a runtime the lab host does not provide by default,
-so their install is described and not run here.
+needs AppArmor loaded on the node. The lab loads no profile, because a profile
+is kernel state shared with the Docker host, so that row is cited. The fourth
+and fifth rows need a runtime the lab host does not provide by default, so
+their install is described and not run here.
 
 ## What a kind node can and cannot show
 
@@ -100,8 +102,10 @@ A kind node is a container. It runs systemd, containerd and the kubelet, and it
 shares the lab host's kernel. That fact sets what this lab can show truthfully.
 
 - **A profile loaded in a node is loaded into the host's kernel.** AppArmor
-  profiles are kernel state. The lab loads one profile for its own Pod and
-  removes it at the end, so the host kernel is left as it was.
+  profiles are kernel state, shared by every container on the host. The lab
+  therefore loads none. An earlier version loaded one and removed it at the
+  end, but the host's policy still changed while it was loaded, so that step
+  was removed.
 - **A payload in a Pod is a process of the host's kernel.** A kernel escape
   would reach the lab host, not just the node. The lab runs no kernel exploit.
   Its payloads read `/proc`, copy busybox into a Pod's `/tmp`, run it, and ask
@@ -113,10 +117,10 @@ shares the lab host's kernel. That fact sets what this lab can show truthfully.
 
 Parts 10, 14 and 15 cover operating these controls on managed clusters, where
 the node image, the runtime and the admission policy belong to the platform
-team. The
-[managed Kubernetes model](../10-cloud-and-managed-kubernetes/01-managed-kubernetes-model.md)
-says what the provider owns, and
-[runtime defence and container security](../14-eks-in-production-a-to-z/13-runtime-defense-and-container-security.md)
+team. The [managed Kubernetes
+model](../10-cloud-and-managed-kubernetes/01-managed-kubernetes-model.md) says
+what the provider owns, and [runtime defence and container
+security](../14-eks-in-production-a-to-z/13-runtime-defense-and-container-security.md)
 covers the production side of detection. This chapter teaches the mechanism on
 a lab cluster and links to them rather than repeating them.
 
@@ -124,10 +128,12 @@ a lab cluster and links to them rather than repeating them.
 
 ### Lab header
 
-- **Tier A, partly run.** The seccomp steps ran on the shared `sf-pilot` kind
-  cluster: a node on Kubernetes v1.37.0, with containerd 2.3.4, on a Linux host
-  whose kernel is 7.0.0 with AppArmor enabled. `kubectl` is v1.37.2. The
-  AppArmor load and the gVisor install did not run (see below). This lab has
+- **Tier A, partly run.** The seccomp steps ran on a kind cluster named
+  `sf-pilot`, with a node on Kubernetes v1.37.0 and containerd 2.3.4, on a Linux
+  host whose kernel is 7.0.0 with AppArmor enabled. `kubectl` is v1.37.2. The
+  lab's config names its cluster `security-lab-kernel`, so the captured node
+  name differs from the one the commands would print. The gVisor install did
+  not run, and the AppArmor steps are cited (see below). This lab has
   not been run on macOS, which has no AppArmor.
 - **Script and transcript.**
   [`labs/05-05.sh`](../examples/security-lab/labs/05-05.sh) runs the steps
@@ -135,33 +141,35 @@ a lab cluster and links to them rather than repeating them.
   [`evidence/05-05.txt`](../examples/security-lab/evidence/05-05.txt), run with
   `P05_RUNTIME=0`, the mode that changes no node runtime. Run it only against a
   cluster you own. It refuses any kubectl context that is not `kind-*`.
-- **Namespaces.** Two, both `p05-05-*`. `p05-05-attack` enforces `privileged`,
+- **Namespaces.** Two, named `kernel-attack` and `kernel-restricted` in the
+  commands below. The captured output names them `kernel-attack` and
+  `kernel-restricted`, the lab's own names. `kernel-attack` enforces `privileged`,
   because one Pod in it runs unconfined. It holds that one marked, insecure Pod
-  only. `p05-05-restricted` enforces, audits and warns on `restricted`, and
+  only. `kernel-restricted` enforces, audits and warns on `restricted`, and
   holds every other Pod. A namespace above `restricted` is an exception. Its
   reason is that this Pod must run unconfined to show what unconfined allows.
   Its owning chapter is this one. Its expiry is 2027-10-31, within twelve
-  months. The registry that 05.09 keeps is not in the repository yet, so the
-  exception is recorded here for now <!-- link-later: 05.09 -->.
-- **What did not run.** Step 5, AppArmor, needs a node that exposes the
-  kernel's AppArmor filesystem, and a throwaway kind cluster is the only place
-  to get one. Step 6, gVisor, needs a runtime installed into the node, which
-  restarts its containerd. A shared cluster must not be restarted for that. Both
-  are described below and cited, not shown as results.
+  months. The registry that 05.09 keeps is not in this repository yet, so the
+  exception is recorded here <!-- link-later: 05.09 -->.
+- **What did not run.** The AppArmor load, which the lab does not do (see the
+  AppArmor section). Step 6, gVisor, needs a runtime installed into the node,
+  which restarts the node's containerd and interrupts the Pods on it. Both are
+  described below and cited, not shown as results.
 - **What did not work the first time.** The audit step did not produce what
   the lab wanted, and the chapter says what it produced instead. A fresh kind
-  cluster on the lab host stalled in `kubeadm init` on six attempts, with and
-  without the securityfs mount, so the AppArmor and gVisor steps had no node to
-  run on.
+  cluster on the lab host stalled in `kubeadm init` on six attempts, so the
+  gVisor step had no node to run on.
 
 ### Step 1: the node shares the lab host's kernel
 
 A kind node is a container. It runs systemd, containerd and the kubelet, and it
 uses the host's kernel. So the kernel release it reports is the host's, and an
 AppArmor profile loaded inside it is loaded into that host kernel. The lab
-asks the node four questions.
+asks the node four questions. First set `NODE` to the kind node's name, and
+keep it set for the rest of the lab:
 
 ```sh
+NODE=$(kubectl get nodes -o jsonpath='{.items[0].metadata.name}')
 docker exec "$NODE" uname -r
 docker exec "$NODE" cat /sys/module/apparmor/parameters/enabled
 docker exec "$NODE" sh -c 'test -d /sys/kernel/security/apparmor && echo apparmor-securityfs-present || echo apparmor-securityfs-absent'
@@ -178,21 +186,25 @@ selinux-absent
 ```
 
 The kernel is the host's, and AppArmor is enabled in it (`Y`). The node does
-not expose the AppArmor filesystem, so it cannot load a profile, and nothing in
-the node can apply one. The node has no SELinux filesystem, so this lab cannot
-show SELinux labels. Both results are why the AppArmor and SELinux parts below
-are cited, not run, on this cluster.
+not expose the AppArmor filesystem, so no profile can be loaded into it from
+the node, and the lab does not try. The node has no SELinux filesystem, so
+this lab cannot show SELinux labels. Both results are why the AppArmor and
+SELinux parts below are cited, not run, on this cluster.
 
 ### Seccomp, first: RuntimeDefault against Unconfined
+
+[02](02-pod-security.md) teaches `RuntimeDefault` and the refusal of
+`Unconfined`. This part repeats them only to set up the `Localhost` lesson: one
+workload, run with no filter and with the default filter.
 
 Create the two namespaces. The `privileged` one exists only for the Pod that
 runs unconfined.
 
 ```sh
-kubectl create ns p05-05-attack
-kubectl label ns p05-05-attack pod-security.kubernetes.io/enforce=privileged
-kubectl create ns p05-05-restricted
-kubectl label ns p05-05-restricted \
+kubectl create ns kernel-attack
+kubectl label ns kernel-attack pod-security.kubernetes.io/enforce=privileged
+kubectl create ns kernel-restricted
+kubectl label ns kernel-restricted \
   pod-security.kubernetes.io/enforce=restricted \
   pod-security.kubernetes.io/audit=restricted \
   pod-security.kubernetes.io/warn=restricted
@@ -209,8 +221,8 @@ marker line above the fence is the lab's record that it is insecure on purpose.
 apiVersion: v1
 kind: Pod
 metadata:
-  name: p05-unconfined
-  namespace: p05-05-attack
+  name: unconfined
+  namespace: kernel-attack
 spec:
   automountServiceAccountToken: false
   securityContext:
@@ -251,8 +263,8 @@ the runtime's own filter.
 apiVersion: v1
 kind: Pod
 metadata:
-  name: p05-runtimedefault
-  namespace: p05-05-restricted
+  name: runtimedefault
+  namespace: kernel-restricted
 spec:
   automountServiceAccountToken: false
   securityContext:
@@ -291,8 +303,8 @@ wait for both to be Ready. Then ask each Pod for its seccomp mode, from
 differ on except the filter.
 
 ```sh
-kubectl -n p05-05-attack exec p05-unconfined -- sh -c 'grep "^Seccomp:" /proc/self/status | tr "\t" " "; setarch linux64 -R /bin/true 2>&1; echo exit=$?'
-kubectl -n p05-05-restricted exec p05-runtimedefault -- sh -c 'grep "^Seccomp:" /proc/self/status | tr "\t" " "; setarch linux64 -R /bin/true 2>&1; echo exit=$?'
+kubectl -n kernel-attack exec unconfined -- sh -c 'grep "^Seccomp:" /proc/self/status | tr "\t" " "; setarch linux64 -R /bin/true 2>&1; echo exit=$?'
+kubectl -n kernel-restricted exec runtimedefault -- sh -c 'grep "^Seccomp:" /proc/self/status | tr "\t" " "; setarch linux64 -R /bin/true 2>&1; echo exit=$?'
 ```
 
 <!-- gate: output -->
@@ -316,8 +328,47 @@ same call and the filter returns `EPERM`. The Pod has no capability in either
 case, so the refusal comes from the filter alone.
 
 Restricted also refuses the unconfined spec before any Pod runs. The lab copies
-the insecure Pod into `p05-05-restricted` and asks the admission chain, with a
+the insecure Pod into `kernel-restricted` and asks the admission chain, with a
 server dry run that creates nothing.
+
+<!-- gate: insecure-on-purpose -->
+```yaml
+# INSECURE ON PURPOSE: the Unconfined spec, offered to restricted. Dry run only. Lab cluster only.
+apiVersion: v1
+kind: Pod
+metadata:
+  name: unconfined-restricted
+  namespace: kernel-restricted
+spec:
+  automountServiceAccountToken: false
+  securityContext:
+    runAsNonRoot: true
+    runAsUser: 65532
+    runAsGroup: 65532
+    seccompProfile:
+      type: Unconfined
+  containers:
+    - name: app
+      image: busybox@sha256:73aaf090f3d85aa34ee199857f03fa3a95c8ede2ffd4cc2cdb5b94e566b11662
+      command: ["sleep", "3600"]
+      securityContext:
+        allowPrivilegeEscalation: false
+        readOnlyRootFilesystem: true
+        capabilities:
+          drop: ["ALL"]
+      resources:
+        requests:
+          cpu: 10m
+          memory: 16Mi
+        limits:
+          memory: 64Mi
+      volumeMounts:
+        - name: tmp
+          mountPath: /tmp
+  volumes:
+    - name: tmp
+      emptyDir: {}
+```
 
 ```sh
 kubectl apply --dry-run=server -f unconfined-restricted.yaml
@@ -326,15 +377,15 @@ kubectl apply --dry-run=server -f unconfined-restricted.yaml
 <!-- gate: output -->
 
 ```
-Error from server (Forbidden): error when creating "unconfined-restricted.yaml": pods "p05-unconfined-restricted" is forbidden: violates PodSecurity "restricted:latest": seccompProfile (pod must not set securityContext.seccompProfile.type to "Unconfined")
+Error from server (Forbidden): error when creating "unconfined-restricted.yaml": pods "unconfined-restricted" is forbidden: violates PodSecurity "restricted:latest": seccompProfile (pod must not set securityContext.seccompProfile.type to "Unconfined")
 ```
 
 ### Seccomp, then a custom profile: audit, then enforce
 
 A `Localhost` profile is a JSON file on the node. The kubelet resolves the
 `localhostProfile` path under its seccomp root, `/var/lib/kubelet/seccomp`. So
-`profiles/p05-audit.json` in the lab is the file
-`/var/lib/kubelet/seccomp/profiles/p05-audit.json` on the node. The audit
+`profiles/audit.json` in the lab is the file
+`/var/lib/kubelet/seccomp/profiles/audit.json` on the node. The audit
 profile changes one thing from allowing everything: its default action is
 `SCMP_ACT_LOG`. Every system call is logged and still allowed.
 
@@ -347,14 +398,18 @@ profile changes one thing from allowing everything: its default action is
 
 Copy the file into the node, for example with `docker exec -i` and a redirect.
 That works on a local or a remote engine, where a bind mount would not. Then run
-the audited Pod. It is the baseline, with its profile set to the file.
+the audited Pod. It is the baseline with its profile set to the file, and it is
+a deliberate exception to `RuntimeDefault`: this profile allows every call and
+restricts nothing.
 
 ```yaml
+# DELIBERATE EXCEPTION to the baseline seccompProfile (RuntimeDefault): a Localhost
+# profile that allows every call but one. It is weaker than RuntimeDefault.
 apiVersion: v1
 kind: Pod
 metadata:
-  name: p05-audit
-  namespace: p05-05-restricted
+  name: audit
+  namespace: kernel-restricted
 spec:
   automountServiceAccountToken: false
   securityContext:
@@ -363,7 +418,7 @@ spec:
     runAsGroup: 65532
     seccompProfile:
       type: Localhost
-      localhostProfile: profiles/p05-audit.json
+      localhostProfile: profiles/audit.json
   containers:
     - name: app
       image: busybox@sha256:73aaf090f3d85aa34ee199857f03fa3a95c8ede2ffd4cc2cdb5b94e566b11662 # busybox:1.36
@@ -389,13 +444,14 @@ spec:
 
 Run a short workload in it, then read the kernel's audit records from the
 host's kernel log. Without an audit daemon, a seccomp `log` record goes to the
-kernel's printk path, and the kernel rate-limits that path. The lab reads the
-journal. `-o cat` keeps only the record text, so no host name reaches the
-transcript.
+kernel's printk path, and the kernel rate-limits that path. The lab records
+the time with `SINCE=$(date +%s)` before the workload and reads the journal
+from that epoch time, so the window holds on any host time zone. `-o cat`
+keeps only the record text, so no host name reaches the transcript.
 
 ```sh
-kubectl -n p05-05-restricted exec p05-audit -- sh -c 'id -u; cat /etc/passwd >/dev/null; ls / >/dev/null; echo done'
-journalctl -k -o cat --since "$SINCE" --no-pager > audit-journal.txt
+kubectl -n kernel-restricted exec audit -- sh -c 'id -u; cat /etc/passwd >/dev/null; ls / >/dev/null; echo done'
+journalctl -k -o cat --since "@$SINCE" --no-pager > audit-journal.txt
 grep -c 'type=1326' audit-journal.txt
 grep -c 'exe="/bin/busybox"' audit-journal.txt
 grep 'callbacks suppressed' audit-journal.txt | tail -1
@@ -404,13 +460,13 @@ grep 'callbacks suppressed' audit-journal.txt | tail -1
 <!-- gate: output -->
 
 ```
-20
+8
 0
-kauditd_printk_skb: 401 callbacks suppressed
+kauditd_printk_skb: 515 callbacks suppressed
 ```
 
-This is the honest result, and it changes the lesson. The kernel printed twenty
-records and dropped 401. Not one busybox record reached the journal. An
+This is the honest result, and it changes the lesson. The kernel printed eight
+records and dropped 515. Not one busybox record reached the journal. An
 allowlist derived from this log would be empty, and the first enforcing run
 would break every process in the Pod. The audit method works only when something
 consumes every record: an audit daemon, or a logging pipeline that reads the
@@ -418,8 +474,11 @@ audit socket. A lab host without one does not, and the chapter does not
 pretend otherwise.
 
 So the enforce step below is a deny-list, not an allowlist. It allows every call
-except `personality`, which the audit exists to find. Its default is `ALLOW`,
-which is the weaker form, and the chapter says so.
+except `personality`. The audit did not find that call. The lab chose it because
+step 3 showed `RuntimeDefault` refusing it. The default is `ALLOW`, so the
+profile is weaker than `RuntimeDefault`, which refuses many more calls. That is
+why the two Pods that use a `Localhost` profile are deliberate exceptions to the
+baseline, and why neither is a model for a production profile.
 
 ```json
 {
@@ -438,6 +497,13 @@ which is the weaker form, and the chapter says so.
 The lab installs that profile and prints it back from the node, so the
 transcript shows the file the node holds.
 
+In production nobody copies a profile file into a node by hand. The profile
+belongs to the node image, or to an operator that distributes it, and it is
+versioned with the image, so a node that lacks the profile is caught before a
+Pod lands on it. The lab's `docker exec` copy shows the mechanism without that
+discipline. Start from `RuntimeDefault`, and build a custom allowlist only once
+the audit records are complete, which needs a consumer for every record.
+
 <!-- gate: output -->
 
 ```
@@ -455,14 +521,17 @@ transcript shows the file the node holds.
 ```
 
 The enforcing Pod is the baseline with the deny-list profile. It is the second
-restricted Pod that uses a `Localhost` profile.
+restricted Pod that uses a `Localhost` profile, and a deliberate exception to
+the baseline's `RuntimeDefault`.
 
 ```yaml
+# DELIBERATE EXCEPTION to the baseline seccompProfile (RuntimeDefault): a Localhost
+# profile that allows every call but one. It is weaker than RuntimeDefault.
 apiVersion: v1
 kind: Pod
 metadata:
-  name: p05-enforce
-  namespace: p05-05-restricted
+  name: enforce
+  namespace: kernel-restricted
 spec:
   automountServiceAccountToken: false
   securityContext:
@@ -471,7 +540,7 @@ spec:
     runAsGroup: 65532
     seccompProfile:
       type: Localhost
-      localhostProfile: profiles/p05-deny-personality.json
+      localhostProfile: profiles/deny-personality.json
   containers:
     - name: app
       image: busybox@sha256:73aaf090f3d85aa34ee199857f03fa3a95c8ede2ffd4cc2cdb5b94e566b11662 # busybox:1.36
@@ -498,7 +567,7 @@ spec:
 Run the same workload, then the personality call, under the enforcing profile.
 
 ```sh
-kubectl -n p05-05-restricted exec p05-enforce -- sh -c 'grep "^Seccomp:" /proc/self/status | tr "\t" " "; id -u; cat /etc/passwd >/dev/null && echo workload-ok; setarch linux64 -R /bin/true 2>&1; echo exit=$?'
+kubectl -n kernel-restricted exec enforce -- sh -c 'grep "^Seccomp:" /proc/self/status | tr "\t" " "; id -u; cat /etc/passwd >/dev/null && echo workload-ok; setarch linux64 -R /bin/true 2>&1; echo exit=$?'
 ```
 
 <!-- gate: output -->
@@ -517,22 +586,24 @@ undo it.
 
 ### AppArmor: a profile the node cannot load on this cluster
 
-AppArmor confines a process by path. A profile is compiled by `apparmor_parser`
-and written into the kernel through the AppArmor filesystem. A container then
-names the loaded profile in `securityContext.appArmorProfile`. The profile in
-[`profiles/p05-no-tmp-exec`](../examples/security-lab/profiles/p05-no-tmp-exec)
-allows the file access a container normally needs, and it denies execute under
-`/tmp` and `/dev/shm`. Those are the two writable volumes the baseline gives
-a Pod, which is why they matter: `readOnlyRootFilesystem` does not stop a binary
-being copied into the `/tmp` emptyDir and run from there.
+AppArmor confines a process by path. A profile is compiled by
+`apparmor_parser` and written into the kernel through the AppArmor filesystem.
+A container then names the loaded profile in
+`securityContext.appArmorProfile`. The profile in
+[`profiles/no-tmp-exec`](../examples/security-lab/profiles/no-tmp-exec) allows
+the file access a container normally needs, and it denies execute under `/tmp`
+and `/dev/shm`. The baseline gives a Pod one writable volume, `/tmp`, from its
+emptyDir. `/dev/shm` is a tmpfs that the runtime mounts. Both are writable,
+which is why they matter: `readOnlyRootFilesystem` does not stop a binary
+being copied into a writable path and run from there.
 
-Step 5 of the script does the test on a throwaway cluster. It installs the
-AppArmor userspace into the node, loads the profile with `apparmor_parser`,
-applies it to a Pod, and tries to run a copy of busybox from `/tmp`. Its
-expected result is a refusal from the AppArmor policy, and a `DENIED` record in
-the kernel log. Nothing here has run to completion. The shared cluster's node
-has no AppArmor filesystem, and no `apparmor_parser`, so the read-only check
-says so and the lab stops at the check.
+The lab does not load this profile. A profile is kernel state, and the kernel
+is the Docker host's, so a load from the node would change the host's policy.
+Step 5 runs read-only checks instead: whether the node exposes the AppArmor
+filesystem, and whether it has `apparmor_parser`. The expected result on a node
+that exposes both is a refusal from the policy for a copy of busybox run from
+`/tmp`, and a `DENIED` record in the kernel log. That result is cited, not
+shown, because the captured node has neither.
 
 <!-- gate: output -->
 
@@ -541,15 +612,13 @@ apparmor-securityfs-absent
 apparmor_parser-absent
 ```
 
-The throwaway cluster is the only place that could show the rest. Its
-configuration mounts the host's AppArmor filesystem into the node
-([`kind/kernel-cluster.yaml`](../examples/security-lab/kind/kernel-cluster.yaml)).
-The attempt to create it stalled in `kubeadm init` on this host, so until a
-throwaway node starts, this part is not run. The mechanism stands on the
-AppArmor tutorial. That page states that the field has been stable since
-Kubernetes 1.31, and that a profile must be loaded on every node where a Pod
-can land. What the kubelet does with a Pod whose profile is missing is covered
-there, and this lab did not reach that point.
+The kind config in the repository,
+[`kind/kernel-cluster.yaml`](../examples/security-lab/kind/kernel-cluster.yaml),
+mounts no host filesystem, so this lab cannot show the profile on a node. The
+mechanism stands on the AppArmor tutorial. That page states that the field has
+been stable since Kubernetes 1.31, and that a profile must be loaded on every
+node where a Pod can land. What the kubelet does with a Pod whose profile is
+missing is covered there, and this lab did not reach that point.
 
 ### SELinux: cited, not run
 
@@ -557,10 +626,10 @@ SELinux is also a Linux Security Module, and it labels files and processes
 rather than naming paths. Kubernetes sets the label through
 `securityContext.seLinuxOptions`. Step 1 showed that the node exposes no
 SELinux filesystem, so this lab cannot apply a label and see it enforced. The
-mechanism and the field are in the
-[Linux kernel security constraints](https://kubernetes.io/docs/concepts/security/linux-kernel-security-constraints/)
-page. Distributions that enable SELinux by default are the ones where the field
-matters in practice.
+mechanism and the field are in the [Linux kernel security
+constraints](https://kubernetes.io/docs/concepts/security/linux-kernel-security-constraints/)
+page. Distributions that enable SELinux by default are the ones where the
+field matters in practice.
 
 ### gVisor: a sandboxed runtime through a RuntimeClass: not run
 
@@ -572,16 +641,17 @@ Pod selects the sandbox with `runtimeClassName` and the cluster-scoped
 RuntimeClass decides which handler runs it.
 
 Step 6 of the script installs gVisor into a throwaway node. It fetches the
-release tarball and its SHA-512 checksum from the upstream bucket, verifies the
-checksum, copies `runsc`, its shim and its sidecar binaries into the node, adds
-a `runsc` entry to the node's containerd configuration, restarts containerd, and
-then runs a Pod through a RuntimeClass with `handler: runsc`. The Pod reports a
-kernel of its own. Step 6 did not run. Installing it on the shared cluster means
-restarting that node's containerd, which the rule for the shared cluster does
-not allow, and the throwaway cluster did not start. The install is described in
-the [gVisor install guide](https://gvisor.dev/docs/user_guide/install/), and the
-sandbox's cost is stated in the
-[Linux kernel security constraints](https://kubernetes.io/docs/concepts/security/linux-kernel-security-constraints/)
+release tarball and its SHA-512 checksum from the upstream bucket, verifies
+the checksum, copies `runsc`, its shim and its sidecar binaries into the node,
+adds a `runsc` entry to the node's containerd configuration, restarts
+containerd, and then runs a Pod through a RuntimeClass with `handler: runsc`.
+The Pod reports a kernel of its own. Step 6 did not run. Installing it means
+restarting the node's containerd, which would interrupt every Pod on that
+node, so the captured run did not do it. A fresh kind node has also stalled in
+`kubeadm init` on the lab host. The install is described in the [gVisor
+install guide](https://gvisor.dev/docs/user_guide/install/), and the sandbox's
+cost is stated in the [Linux kernel security
+constraints](https://kubernetes.io/docs/concepts/security/linux-kernel-security-constraints/)
 page: sandboxes "require more compute resources on your nodes".
 
 Two limits hold even when a sandbox runs. The sandbox is still a process on the
@@ -601,15 +671,14 @@ files, which is the mechanism the Operator automates.
 
 ### Clean up
 
-The lab deletes its namespaces, removes the seccomp profiles it copied into the
-node, and unloads the AppArmor profile if one is loaded. It prints what remains.
+The lab deletes its namespaces and removes the seccomp profiles it copied into
+the node. It prints what remains.
 
 <!-- gate: output -->
 
 ```
 namespace "p05-05-attack" deleted
 namespace "p05-05-restricted" deleted
-p05-no-tmp-exec is not loaded
 ```
 
 ## How it works under the hood
@@ -618,13 +687,16 @@ p05-no-tmp-exec is not loaded
   before the kernel handles the call. It reads the call's number and its
   argument registers. It returns one action per call: allow, return an errno,
   log and allow, kill or trap. An unprivileged process may install a filter only
-  with `no_new_privs` set. The baseline's `allowPrivilegeEscalation: false`
-  sets it, so a setuid binary inside the Pod cannot loosen the filter. See
+  if it has `CAP_SYS_ADMIN` or `no_new_privs` is set. The baseline's
+  `allowPrivilegeEscalation: false` sets `no_new_privs`, so that no unprivileged
+  process can install a filter that changes how a setuid program runs. Filters
+  are never loosened: when several apply, the action with the highest precedence
+  wins. See
   [seccomp(2)](https://man7.org/linux/man-pages/man2/seccomp.2.html).
 - **A log action leaves the kernel by the audit path.** `SCMP_ACT_LOG` writes an
   audit record, `type=1326`, for each call. When no audit daemon consumes the
   records, the kernel prints them, and the printk path is rate-limited. The lab
-  saw 401 records dropped in one window. A consumer that reads the audit socket
+  saw 515 records dropped in one window. A consumer that reads the audit socket
   keeps them all.
 - **AppArmor attaches on exec.** A profile is loaded into the kernel by
   `apparmor_parser`, through the AppArmor filesystem. A process that execs
@@ -642,16 +714,12 @@ p05-no-tmp-exec is not loaded
 
 ## Production notes
 
-In production nobody copies a profile file into a node by hand. The profile
-belongs to the node image, or to an operator that distributes it, and it is
-versioned with the image, so a node that lacks the profile is caught before a
-Pod lands on it. The lab's `docker exec` copy is the mechanism without that
-discipline. A deny-list is a stopgap. Start from `RuntimeDefault`, and move to
-an allowlist only once the audit records are complete. Managed clusters decide
-the node image and the default seccomp and AppArmor behaviour for you, which
-[the managed Kubernetes model](../10-cloud-and-managed-kubernetes/01-managed-kubernetes-model.md)
-explains, and production runtime detection is covered in
-[runtime defence and container security](../14-eks-in-production-a-to-z/13-runtime-defense-and-container-security.md).
+Managed clusters decide the node image and the default seccomp and AppArmor
+behaviour for you, which [the managed Kubernetes
+model](../10-cloud-and-managed-kubernetes/01-managed-kubernetes-model.md)
+explains, and production runtime detection is covered in [runtime defence and
+container
+security](../14-eks-in-production-a-to-z/13-runtime-defense-and-container-security.md).
 
 ## Quick Reference
 
@@ -695,7 +763,7 @@ runtimeClassName: <runtimeclass name>
 
    </details>
 
-2. **The audit log in this lab showed twenty records and 401 dropped. A
+2. **The audit log in this lab showed eight records and 515 dropped. A
    teammate proposes building the enforcing allowlist from the journal. What do
    you tell them, and what would make the log usable?**
    <details><summary>Show answer</summary>
