@@ -41,15 +41,12 @@
 #   from the restricted level. Its install failed while the first lab
 #   cluster's control plane was restarting, and was rolled back. That
 #   recording is the one removed above.
-# - The install of the new layout (step 2) did not finish either. Helm gave
+# - The install of the new layout did not finish on the lab host. Helm gave
 #   up on Grafana after eight minutes, kube-state-metrics was in
-#   CrashLoopBackOff, and the API server restarted twice (its restart count
-#   went from 15 to 17) while the install ran, so the run was stopped and
-#   removed (steps 2c and 2d), with the CRDs and the kubelet Service that the
-#   operator creates in kube-system. Step 2b shows the state it was stopped
-#   in. Because of this there is no captured Prometheus target list and no
-#   captured Grafana login attempt, and the chapter labels both not run.
-#   Step 14 is a server-side dry run of the new layout instead.
+#   CrashLoopBackOff and the API server restarted twice (its restart count
+#   went from 15 to 17), so the run was stopped and removed. That recording
+#   is not kept in this file. The runner recording at the end of this file
+#   is the install, run again on a machine with room for it.
 # - The first Bookstore apply (step 3) failed while the API server did not
 #   answer; the chain was applied again with retries.
 # - metrics-server with its default verification refused the kubelet
@@ -69,6 +66,16 @@
 # The Grafana admin secret was created with a generated password that this
 # transcript does not show. The load loop in step 6 used wget -q, so its
 # failed requests were silent. The API server address is redacted.
+#
+# Recording 3 ran on a GitHub Actions runner, not on the lab host. It is the
+# section from the line "# Runner recording for" to the end of this file,
+# and its own header gives the versions. Run URL:
+# https://github.com/abd-ulbasit/bookstore-kubernetes-guide/actions/runs/41216368151
+# It installed kube-prometheus-stack with the chapter's values and read
+# Prometheus's active targets, a node_ series, Grafana's answer with and
+# without credentials, the catalog target behind the default-deny policy and
+# the three rules. Steps 2 to 2d of the first recording, the install that
+# did not finish, are no longer in this file.
 ## step 1: metrics-server, the resource-metrics plane
 $ kubectl create namespace p06-01-metrics-server
 namespace/p06-01-metrics-server created
@@ -137,90 +144,6 @@ $ helm template kube-prometheus-stack prometheus-community/kube-prometheus-stack
 $ grep -E '^kind: (DaemonSet|Deployment|StatefulSet)$' kps.yaml | sort | uniq -c
    1 kind: DaemonSet
    3 kind: Deployment
-$ helm install kube-prometheus-stack prometheus-community/kube-prometheus-stack --version 92.16.1 --namespace monitoring --values monitoring-values.yaml --wait --timeout 8m
-I1031 17:11:31.890334   59522 warnings.go:107] "Warning: would violate PodSecurity \"restricted:latest\": host namespaces (hostNetwork=true), restricted volume types (volumes \"proc\", \"sys\", \"root\" use restricted volume type \"hostPath\")"
-Error: INSTALLATION FAILED: resource Deployment/monitoring/kube-prometheus-stack-grafana not ready. status: InProgress, message: Available: 0/1
-context deadline exceeded
-## step 2b: what happened to that install: Grafana did not become ready in 8 minutes and the control plane restarted
-# Before the install the kube-system restart counts were kube-apiserver 15, kube-controller-manager 37, kube-scheduler 39. The install printed the Helm error above after eight minutes, and the API server then answered 'Unable to connect to the server: EOF' and, after it came back, Forbidden for a while, as it did in the first run.
-$ kubectl --request-timeout=60s -n kube-system get pods | grep -E 'NAME|kube-apiserver|kube-controller-manager|kube-scheduler|etcd'
-NAME                                             READY   STATUS    RESTARTS         AGE
-etcd-demo-lab-control-plane                      1/1     Running   0                9h
-kube-apiserver-demo-lab-control-plane            1/1     Running   17 (60s ago)     9h
-kube-controller-manager-demo-lab-control-plane   1/1     Running   38 (4m1s ago)    9h
-kube-scheduler-demo-lab-control-plane            0/1     Running   40 (3m54s ago)   9h
-$ kubectl --request-timeout=60s -n monitoring get pods
-NAME                                                        READY   STATUS             RESTARTS      AGE
-alertmanager-kube-prometheus-stack-alertmanager-0           2/2     Running            0             11m
-kube-prometheus-stack-grafana-57d9867647-jmfnk              2/3     Running            1 (45s ago)   12m
-kube-prometheus-stack-kube-state-metrics-78dc75b868-d62m8   0/1     CrashLoopBackOff   5 (68s ago)   12m
-kube-prometheus-stack-operator-dbf7f9444-p2826              1/1     Running            0             12m
-prometheus-kube-prometheus-stack-prometheus-0               2/2     Running            0             11m
-$ kubectl --request-timeout=60s -n node-exporter get pods
-NAME                                                   READY   STATUS    RESTARTS   AGE
-kube-prometheus-stack-prometheus-node-exporter-b6cbm   1/1     Running   0          12m
-kube-prometheus-stack-prometheus-node-exporter-jm6d5   1/1     Running   0          12m
-kube-prometheus-stack-prometheus-node-exporter-wf8kh   1/1     Running   0          12m
-$ kubectl --request-timeout=60s get events -A --field-selector reason=FailedCreate
-No resources found
-## step 2c: stop and remove it, because the control plane was restarting
-$ helm list -n monitoring --failed
-NAME                 	NAMESPACE 	REVISION	UPDATED                             	STATUS	CHART                        	APP VERSION
-kube-prometheus-stack	monitoring	1       	2026-10-31 17:11:00.726121	failed	kube-prometheus-stack-92.16.1	v0.94.2    
-$ helm uninstall kube-prometheus-stack --namespace monitoring --timeout 5m
-release "kube-prometheus-stack" uninstalled
-$ kubectl --request-timeout=120s delete namespace monitoring node-exporter --timeout=4m
-namespace "monitoring" deleted
-namespace "node-exporter" deleted
-$ kubectl --request-timeout=120s delete crd alertmanagerconfigs.monitoring.coreos.com alertmanagers.monitoring.coreos.com podmonitors.monitoring.coreos.com probes.monitoring.coreos.com prometheusagents.monitoring.coreos.com prometheuses.monitoring.coreos.com prometheusrules.monitoring.coreos.com scrapeconfigs.monitoring.coreos.com servicemonitors.monitoring.coreos.com thanosrulers.monitoring.coreos.com
-customresourcedefinition.apiextensions.k8s.io "alertmanagerconfigs.monitoring.coreos.com" deleted
-customresourcedefinition.apiextensions.k8s.io "alertmanagers.monitoring.coreos.com" deleted
-customresourcedefinition.apiextensions.k8s.io "podmonitors.monitoring.coreos.com" deleted
-customresourcedefinition.apiextensions.k8s.io "probes.monitoring.coreos.com" deleted
-customresourcedefinition.apiextensions.k8s.io "prometheusagents.monitoring.coreos.com" deleted
-customresourcedefinition.apiextensions.k8s.io "prometheuses.monitoring.coreos.com" deleted
-customresourcedefinition.apiextensions.k8s.io "prometheusrules.monitoring.coreos.com" deleted
-customresourcedefinition.apiextensions.k8s.io "scrapeconfigs.monitoring.coreos.com" deleted
-customresourcedefinition.apiextensions.k8s.io "servicemonitors.monitoring.coreos.com" deleted
-customresourcedefinition.apiextensions.k8s.io "thanosrulers.monitoring.coreos.com" deleted
-## step 2d: nothing of the install is left
-$ kubectl --request-timeout=60s get validatingwebhookconfigurations,mutatingwebhookconfigurations
-No resources found
-$ kubectl --request-timeout=60s get crd -o name | wc -l
-       0
-$ kubectl --request-timeout=60s get clusterrole,clusterrolebinding -o name | grep -c -E 'kube-prometheus-stack|prometheus-node-exporter'
-0
-$ kubectl --request-timeout=60s -n kube-system get svc,servicemonitor -o name 2>&1 | grep -c kube-prometheus-stack
-1
-$ kubectl --request-timeout=60s get namespace
-NAME                 STATUS   AGE
-default              Active   9h
-gate-baseline        Active   7h35m
-gate-privileged      Active   7h36m
-gate-restricted      Active   7h36m
-kube-node-lease      Active   9h
-kube-public          Active   9h
-kube-system          Active   9h
-local-path-storage   Active   9h
-$ kubectl --request-timeout=60s -n kube-system get pods | grep -E 'NAME|kube-apiserver|kube-controller-manager|kube-scheduler|etcd'
-NAME                                             READY   STATUS    RESTARTS         AGE
-etcd-demo-lab-control-plane                      1/1     Running   0                9h
-kube-apiserver-demo-lab-control-plane            1/1     Running   17 (99s ago)     9h
-kube-controller-manager-demo-lab-control-plane   1/1     Running   38 (4m40s ago)   9h
-kube-scheduler-demo-lab-control-plane            1/1     Running   40 (4m33s ago)   9h
-# The Prometheus operator, not Helm, creates the kubelet Service in kube-system, so helm uninstall leaves it. The count above is that Service; it is deleted here.
-$ kubectl --request-timeout=60s -n kube-system get svc,endpoints,endpointslices -o name | grep prometheus
-Warning: v1 Endpoints is deprecated in v1.33+; use discovery.k8s.io/v1 EndpointSlice
-service/kube-prometheus-stack-kubelet
-endpoints/kube-prometheus-stack-kubelet
-endpointslice.discovery.k8s.io/kube-prometheus-stack-kubelet-rq69n
-$ kubectl --request-timeout=60s -n kube-system delete service kube-prometheus-stack-kubelet
-service "kube-prometheus-stack-kubelet" deleted from kube-system namespace
-$ kubectl --request-timeout=60s -n kube-system get svc,endpoints,endpointslices -o name | grep -c prometheus
-Warning: v1 Endpoints is deprecated in v1.33+; use discovery.k8s.io/v1 EndpointSlice
-0
-$ kubectl --request-timeout=60s get validatingwebhookconfigurations,mutatingwebhookconfigurations,crd,namespace -o name | grep -E 'monitoring|node-exporter|webhook|admission' | wc -l
-       0
 ## step 3: the Bookstore, in the lab namespace p06-01-bookstore (the chapter's names with the lab substitution)
 $ kubectl apply -f 00-namespace.yaml
 namespace/p06-01-bookstore created
@@ -961,3 +884,306 @@ $ for p in /metrics /books/metrics /api/books/metrics; do curl -s -o /dev/null -
 404 /books/metrics
 404 /api/books/metrics
 $ kill %1
+
+# Runner recording for 06-production-readiness/01-observability-metrics.md.
+# It ran on a GitHub Actions runner, not on the lab host. Run URL:
+# https://github.com/abd-ulbasit/bookstore-kubernetes-guide/actions/runs/41216368151 (attempt 1)
+# Commit: e13de995e375b84118be911ceb08807d6c375240
+# Tier A: a kind cluster of 3 nodes, Kubernetes v1.37.0 (kind v0.33.0,
+# node image pinned by digest in examples/security-lab/kind), kubectl
+# v1.37.2, Helm v3.22.1. Node runtime: containerd://2.3.4.
+# Host: Ubuntu 26.04.1 LTS, kernel 7.0.0-1017-azure, 4 vCPU, about 16 GiB of
+# memory, Docker 29.4.2. Recorded by running
+# examples/security-lab/labs/06-01.sh from the workflow lab-on-runner.yml.
+# Paths of the runner's checkout and temporary directory are written as
+# <repo> and <tmp>. Terminal colour codes are removed. Nothing else is
+# edited.
+#
+# Runner recording, from examples/security-lab/labs/06-01.sh.
+## runner step 0: the cluster
+$ kubectl get nodes
+NAME                      STATUS   ROLES           AGE   VERSION
+bookstore-control-plane   Ready    control-plane   35s   v1.37.0
+bookstore-worker          Ready    <none>          20s   v1.37.0
+bookstore-worker2         Ready    <none>          20s   v1.37.0
+
+$ kubectl version
+Client Version: v1.37.2
+Kustomize Version: v5.8.1
+Server Version: v1.37.0
+
+$ helm version --short
+v3.22.1+gd6c1a0e
+
+## runner step 1: two namespaces and the Grafana admin Secret
+$ helm show chart prometheus-community/kube-prometheus-stack --version 92.16.1 | grep -E '^(name|version|appVersion):'
+appVersion: v0.94.2
+name: kube-prometheus-stack
+version: 92.16.1
+
+$ kubectl create namespace monitoring
+kubectl label namespace monitoring \
+  pod-security.kubernetes.io/enforce=restricted \
+  pod-security.kubernetes.io/audit=restricted \
+  pod-security.kubernetes.io/warn=restricted
+kubectl create namespace node-exporter
+kubectl label namespace node-exporter \
+  pod-security.kubernetes.io/enforce=privileged \
+  pod-security.kubernetes.io/audit=restricted \
+  pod-security.kubernetes.io/warn=restricted
+kubectl -n monitoring create secret generic grafana-admin \
+  --from-literal=admin-user=admin \
+  --from-literal=admin-password="$(openssl rand -base64 24)"
+namespace/monitoring created
+namespace/monitoring labeled
+namespace/node-exporter created
+namespace/node-exporter labeled
+secret/grafana-admin created
+
+## runner step 2: the chapter's values file, taken from the chapter
+$ cat monitoring-values.yaml
+grafana:
+  admin:
+    existingSecret: grafana-admin
+prometheus-node-exporter:
+  namespaceOverride: node-exporter
+  hostPID: false
+  securityContext:
+    seccompProfile:
+      type: RuntimeDefault
+  containerSecurityContext:
+    allowPrivilegeEscalation: false
+    capabilities:
+      drop: ["ALL"]
+
+## runner step 3: the install, with --wait
+$ helm install kube-prometheus-stack \
+  prometheus-community/kube-prometheus-stack \
+  --version 92.16.1 \
+  --namespace monitoring \
+  --values monitoring-values.yaml \
+  --wait --timeout 10m
+I1031 15:47:23.218863   12624 warnings.go:107] "Warning: would violate PodSecurity \"restricted:latest\": host namespaces (hostNetwork=true), restricted volume types (volumes \"proc\", \"sys\", \"root\" use restricted volume type \"hostPath\")"
+NAME: kube-prometheus-stack
+LAST DEPLOYED: Sat Oct 31 15:47:17 2026
+NAMESPACE: monitoring
+STATUS: deployed
+REVISION: 1
+NOTES:
+kube-prometheus-stack has been installed. Check its status by running:
+  kubectl --namespace monitoring get pods -l "release=kube-prometheus-stack"
+
+Get Grafana 'admin' user password by running:
+
+  kubectl --namespace monitoring get secrets kube-prometheus-stack-grafana -o jsonpath="{.data.admin-password}" | base64 -d ; echo
+
+Access Grafana local instance:
+
+  export POD_NAME=$(kubectl --namespace monitoring get pod -l "app.kubernetes.io/name=grafana,app.kubernetes.io/instance=kube-prometheus-stack" -oname)
+  kubectl --namespace monitoring port-forward $POD_NAME 3000
+
+Get your grafana admin user password by running:
+
+  kubectl get secret --namespace monitoring -l app.kubernetes.io/component=admin-secret -o jsonpath="{.items[0].data.admin-password}" | base64 --decode ; echo
+
+
+Visit https://github.com/prometheus-operator/kube-prometheus for instructions on how to create & configure Alertmanager and Prometheus instances using the Operator.
+
+# install took 46 seconds
+
+$ kubectl get pods -n monitoring
+NAME                                                        READY   STATUS    RESTARTS   AGE
+alertmanager-kube-prometheus-stack-alertmanager-0           2/2     Running   0          32s
+kube-prometheus-stack-grafana-57d9867647-n5z8x              3/3     Running   0          37s
+kube-prometheus-stack-kube-state-metrics-78dc75b868-rbdpz   1/1     Running   0          37s
+kube-prometheus-stack-operator-dbf7f9444-qd8td              1/1     Running   0          37s
+prometheus-kube-prometheus-stack-prometheus-0               1/2     Running   0          30s
+
+$ kubectl get pods -n node-exporter
+NAME                                                   READY   STATUS    RESTARTS   AGE
+kube-prometheus-stack-prometheus-node-exporter-cv6b9   1/1     Running   0          37s
+kube-prometheus-stack-prometheus-node-exporter-fwl4n   1/1     Running   0          37s
+kube-prometheus-stack-prometheus-node-exporter-js2fm   1/1     Running   0          37s
+
+$ kubectl get events -A --field-selector reason=FailedCreate
+No resources found
+
+$ kubectl -n node-exporter get daemonset -o jsonpath='{.items[0].metadata.name} hostNetwork={.items[0].spec.template.spec.hostNetwork} hostPID={.items[0].spec.template.spec.hostPID}{"\n"}'
+kube-prometheus-stack-prometheus-node-exporter hostNetwork=true hostPID=
+
+## runner step 4: Prometheus and Grafana through port-forwards
+$ kubectl -n monitoring port-forward svc/kube-prometheus-stack-prometheus 9090:9090 >/dev/null 2>&1 &
+kubectl -n monitoring port-forward svc/kube-prometheus-stack-grafana 3000:80 >/dev/null 2>&1 &
+sleep 8
+
+$ curl -s 'localhost:9090/api/v1/targets?state=active' \
+  | jq -r '.data.activeTargets[] | [.labels.job, .labels.namespace, .health] | @tsv' | sort
+apiserver   default up
+coredns kube-system up
+coredns kube-system up
+kube-controller-manager kube-system down
+kube-etcd   kube-system down
+kube-prometheus-stack-alertmanager  monitoring  up
+kube-prometheus-stack-alertmanager  monitoring  up
+kube-prometheus-stack-grafana   monitoring  up
+kube-prometheus-stack-operator  monitoring  up
+kube-prometheus-stack-prometheus    monitoring  up
+kube-prometheus-stack-prometheus    monitoring  up
+kube-proxy  kube-system down
+kube-proxy  kube-system down
+kube-proxy  kube-system down
+kube-scheduler  kube-system down
+kube-state-metrics  monitoring  up
+kubelet kube-system up
+kubelet kube-system up
+kubelet kube-system up
+kubelet kube-system up
+kubelet kube-system up
+kubelet kube-system up
+kubelet kube-system up
+kubelet kube-system up
+kubelet kube-system up
+node-exporter   node-exporter   up
+node-exporter   node-exporter   up
+node-exporter   node-exporter   up
+
+$ curl -s 'localhost:9090/api/v1/targets?state=active' \
+  | jq -r '.data.activeTargets[] | .health' | sort | uniq -c
+      6 down
+     22 up
+
+$ curl -s 'localhost:9090/api/v1/targets?state=active' \
+  | jq -r '.data.activeTargets[] | select(.health!="up") | [.labels.job, .scrapeUrl, .lastError] | @tsv' | sort
+kube-controller-manager https://172.18.0.2:10257/metrics    Get "https://172.18.0.2:10257/metrics": dial tcp 172.18.0.2:10257: connect: connection refused
+kube-etcd   http://172.18.0.2:2381/metrics  Get "http://172.18.0.2:2381/metrics": dial tcp 172.18.0.2:2381: connect: connection refused
+kube-proxy  http://172.18.0.2:10249/metrics Get "http://172.18.0.2:10249/metrics": dial tcp 172.18.0.2:10249: connect: connection refused
+kube-proxy  http://172.18.0.3:10249/metrics Get "http://172.18.0.3:10249/metrics": dial tcp 172.18.0.3:10249: connect: connection refused
+kube-proxy  http://172.18.0.4:10249/metrics Get "http://172.18.0.4:10249/metrics": dial tcp 172.18.0.4:10249: connect: connection refused
+kube-scheduler  https://172.18.0.2:10259/metrics    Get "https://172.18.0.2:10259/metrics": dial tcp 172.18.0.2:10259: connect: connection refused
+
+## runner step 4b: node-exporter, in its own namespace, still feeds node_ series
+$ curl -s 'localhost:9090/api/v1/query' --data-urlencode 'query=count(node_cpu_seconds_total) by (namespace)' \
+  | jq -r '.data.result[] | [.metric.namespace, .value[1]] | @tsv'
+node-exporter   96
+
+$ curl -s 'localhost:9090/api/v1/query' --data-urlencode 'query=count(up{job="node-exporter"} == 1)' \
+  | jq -r '.data.result[0].value[1]'
+3
+
+## runner step 4c: Grafana without credentials, then with them
+$ curl -s -o /dev/null -w '%{http_code}\n' localhost:3000/api/org
+401
+
+## runner step 4d: the positive control, so the refusal above means something
+$ curl -s -o /dev/null -w '%{http_code}\n' -u "admin:$GPW" localhost:3000/api/org
+200
+
+## runner step 5: the Bookstore catalog behind default-deny, scraped by the real Prometheus
+$ kubectl apply -f examples/bookstore/raw-manifests/00-namespace.yaml
+kubectl apply -f examples/bookstore/raw-manifests/05-serviceaccounts-rbac.yaml
+kubectl apply -f examples/bookstore/raw-manifests/15-catalog-config.yaml
+kubectl apply -f examples/bookstore/raw-manifests/16-db-credentials.yaml
+kubectl apply -f examples/bookstore/raw-manifests/35-priorityclasses.yaml
+namespace/bookstore created
+resourcequota/bookstore-quota created
+limitrange/bookstore-limits created
+serviceaccount/catalog-sa created
+serviceaccount/storefront-sa created
+serviceaccount/orders-sa created
+serviceaccount/payments-worker-sa created
+serviceaccount/postgres-sa created
+serviceaccount/redis-sa created
+serviceaccount/rabbitmq-sa created
+serviceaccount/migrate-sa created
+role.rbac.authorization.k8s.io/catalog-config-reader created
+rolebinding.rbac.authorization.k8s.io/catalog-config-reader-binding created
+configmap/catalog-config created
+secret/db-credentials created
+priorityclass.scheduling.k8s.io/bookstore-data created
+priorityclass.scheduling.k8s.io/bookstore-critical created
+priorityclass.scheduling.k8s.io/bookstore-batch created
+
+$ kubectl apply -f examples/bookstore/raw-manifests/20-postgres-statefulset.yaml
+kubectl -n bookstore rollout status statefulset/postgres --timeout=300s
+kubectl apply -f examples/bookstore/raw-manifests/21-db-migrate-job.yaml
+kubectl -n bookstore wait --for=condition=complete job/db-migrate --timeout=300s
+service/postgres created
+statefulset.apps/postgres created
+Waiting for 1 pods to be ready...
+partitioned roll out complete: 1 new pods have been updated...
+job.batch/db-migrate created
+job.batch/db-migrate condition met
+
+$ kubectl apply -f examples/bookstore/raw-manifests/12-redis.yaml
+kubectl apply -f examples/bookstore/raw-manifests/10-catalog-deploy.yaml
+kubectl apply -f examples/bookstore/raw-manifests/40-services.yaml
+kubectl apply -f examples/bookstore/raw-manifests/60-networkpolicy.yaml
+kubectl -n bookstore rollout status deployment/catalog --timeout=300s
+deployment.apps/redis created
+deployment.apps/catalog created
+service/catalog created
+service/storefront created
+service/orders created
+service/redis created
+service/rabbitmq created
+service/payments-worker created
+networkpolicy.networking.k8s.io/default-deny-all created
+networkpolicy.networking.k8s.io/allow-dns-egress created
+networkpolicy.networking.k8s.io/allow-ingress-to-http-tiers created
+networkpolicy.networking.k8s.io/allow-storefront-to-apis created
+networkpolicy.networking.k8s.io/allow-data-tier-ingress created
+networkpolicy.networking.k8s.io/allow-orders-to-rabbitmq created
+networkpolicy.networking.k8s.io/allow-backend-egress created
+networkpolicy.networking.k8s.io/allow-storefront-egress created
+networkpolicy.networking.k8s.io/allow-payments-worker-egress created
+networkpolicy.networking.k8s.io/allow-monitoring-scrape created
+networkpolicy.networking.k8s.io/allow-span-egress created
+Waiting for deployment "catalog" rollout to finish: 0 of 3 updated replicas are available...
+Waiting for deployment "catalog" rollout to finish: 1 of 3 updated replicas are available...
+Waiting for deployment "catalog" rollout to finish: 2 of 3 updated replicas are available...
+deployment "catalog" successfully rolled out
+
+## runner step 5b: the ServiceMonitor and the PrometheusRule (section 3 and 6)
+$ kubectl apply -f examples/bookstore/raw-manifests/80-servicemonitor.yaml
+kubectl apply -f examples/bookstore/raw-manifests/81-prometheusrule.yaml
+servicemonitor.monitoring.coreos.com/catalog created
+servicemonitor.monitoring.coreos.com/payments-worker created
+prometheusrule.monitoring.coreos.com/bookstore-catalog-rules created
+
+## runner step 5c: the Prometheus pods the rule admits, and the Bookstore targets
+$ kubectl -n monitoring get pods -l app.kubernetes.io/name=prometheus
+NAME                                            READY   STATUS    RESTARTS   AGE
+prometheus-kube-prometheus-stack-prometheus-0   2/2     Running   0          2m14s
+
+$ curl -s 'localhost:9090/api/v1/targets?state=active' \
+  | jq -r '.data.activeTargets[] | select(.labels.namespace=="bookstore") | [.labels.job, .labels.namespace, .health] | @tsv' | sort
+catalog bookstore   up
+catalog bookstore   up
+catalog bookstore   up
+
+$ curl -s 'localhost:9090/api/v1/rules' \
+  | jq -r '.data.groups[] | select(.name=="bookstore-catalog.rules") | .rules[] | [.name, .state, .health] | @tsv'
+CatalogHighErrorRate    inactive    ok
+CatalogHighLatencyP95   inactive    ok
+CatalogAbsent   inactive    ok
+
+## runner step 5d: the rules again, once the targets have been scraped
+$ curl -s 'localhost:9090/api/v1/rules' \
+  | jq -r '.data.groups[] | select(.name=="bookstore-catalog.rules") | .rules[] | [.name, .state, .health] | @tsv'
+CatalogHighErrorRate    inactive    ok
+CatalogHighLatencyP95   inactive    ok
+CatalogAbsent   inactive    ok
+
+$ curl -s 'localhost:9090/api/v1/query' --data-urlencode 'query=sum(rate(http_requests_total{namespace="bookstore",handler!="metrics"}[2m])) by (handler)' \
+  | jq -r '.data.result[] | .metric.handler' | sort
+healthz
+readyz
+
+## runner step 6: the state at the end
+$ kubectl get pods -A --no-headers | awk '{print $4}' | sort | uniq -c
+      1 Completed
+     26 Running
+
+$ helm list -A
+NAME                    NAMESPACE   REVISION    UPDATED                                 STATUS      CHART                           APP VERSION
+kube-prometheus-stack   monitoring  1           2026-10-31 15:47:17.091729446 +0000 UTC deployed    kube-prometheus-stack-92.16.1   v0.94.2    

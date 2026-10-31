@@ -42,8 +42,9 @@ nodes=$(kubectl get nodes --no-headers 2>/dev/null | wc -l | tr -d ' ' || true)
   echo "# memory, Docker ${docker_v}. Recorded by running"
   echo "# examples/security-lab/labs/${script} from the workflow lab-on-runner.yml."
   echo "# Paths of the runner's checkout and temporary directory are written as"
-  echo "# <repo> and <tmp>. Terminal colour codes are removed. Nothing else is"
-  echo "# edited."
+  echo "# <repo> and <tmp>. Terminal colour codes are removed, and tabs become spaces"
+  echo "# (tab stops every 4 columns, as the evidence gate reads a chapter's code"
+  echo "# blocks). Nothing else is edited."
   echo "#"
 } > "$out"
 
@@ -52,7 +53,7 @@ sed -E \
   -e "s#${GITHUB_WORKSPACE}#<repo>#g" \
   -e "s#${RUNNER_TEMP}#<tmp>#g" \
   -e "s#${HOME}#<home>#g" \
-  "$raw" >> "$out"
+  "$raw" | expand -t 4 >> "$out"
 
 python3 -I - "$here/../gates" "$out" <<'PY'
 import sys

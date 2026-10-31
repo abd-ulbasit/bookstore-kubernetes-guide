@@ -106,7 +106,7 @@ helm install kube-prometheus-stack \
   --version 92.16.1 \
   --namespace monitoring \
   --values monitoring-values.yaml \
-  --wait --timeout 10m
+  --wait --timeout 8m
 CMD
 code=$(helm status kube-prometheus-stack -n monitoring -o json 2>/dev/null | grep -o '"status":"[a-z-]*"' | head -1)
 echo "# install took $(( $(date +%s) - start )) seconds"

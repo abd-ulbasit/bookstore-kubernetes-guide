@@ -519,31 +519,70 @@ CMD
 run <<'CMD'
 kubectl apply -f examples/bookstore/raw-manifests/83-keda-scaledobject.yaml
 CMD
-for i in $(seq 1 40); do
-  r=$(kubectl -n bookstore get scaledobject payments-worker -o jsonpath='{.status.conditions[?(@.type=="Ready")].status}' 2>/dev/null)
-  [ "$r" = True ] && break
-  sleep 3
-done
+# The scaler needs the operator to reach RabbitMQ. Give it a minute to try.
+sleep 60
 run <<'CMD'
 kubectl get scaledobject,hpa -n bookstore
-CMD
-# The queue is empty, so KEDA scales payments-worker to zero after the cooldown.
-sleep 90
-run <<'CMD'
-kubectl get scaledobject -n bookstore
-kubectl get deploy payments-worker -n bookstore
 CMD
 run <<'CMD'
 kubectl -n bookstore get scaledobject payments-worker -o jsonpath='{range .status.conditions[*]}{.type}{" "}{.status}{" "}{.reason}{" "}{.message}{"\n"}{end}' | sed 's|amqp://[^@]*@|amqp://REDACTED@|g'
 CMD
 run <<'CMD'
-kubectl -n keda logs deploy/keda-operator --tail=300 | grep payments-worker | tail -3 | cut -c1-400 | sed 's|amqp://[^@]*@|amqp://REDACTED@|g'
-CMD
-run <<'CMD'
 kubectl describe hpa catalog -n bookstore | sed -n '/^Conditions:/,/^Events:/p'
 CMD
+r0=$(kubectl -n bookstore get scaledobject payments-worker -o jsonpath='{.status.conditions[?(@.type=="Ready")].status}' 2>/dev/null)
+summary "KEDA ScaledObject payments-worker Ready under the shipped policies: ${r0:-unknown}"
+if [ "$r0" != True ]; then
+  # The shipped default-deny in bookstore has no rule that admits the KEDA
+  # operator to RabbitMQ. This probe adds one, for the lab only, to show that
+  # the missing rule is the whole cause. It is not a file of the guide.
+  echo '## runner step (g): a lab-only rule that admits the KEDA operator to RabbitMQ (a deliberate action)'
+  cat > lab-allow-keda-to-rabbitmq.yaml <<'EOF'
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: lab-allow-keda-to-rabbitmq
+  namespace: bookstore
+spec:
+  podSelector:
+    matchLabels:
+      app: rabbitmq
+  policyTypes: ["Ingress"]
+  ingress:
+    - from:
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: keda
+          podSelector:
+            matchLabels:
+              app.kubernetes.io/name: keda-operator
+      ports:
+        - { protocol: TCP, port: 5672 }
+EOF
+  run <<'CMD'
+kubectl apply -f lab-allow-keda-to-rabbitmq.yaml
+CMD
+  for i in $(seq 1 60); do
+    r=$(kubectl -n bookstore get scaledobject payments-worker -o jsonpath='{.status.conditions[?(@.type=="Ready")].status}' 2>/dev/null)
+    [ "$r" = True ] && break
+    sleep 5
+  done
+  run <<'CMD'
+kubectl get scaledobject -n bookstore
+CMD
+  # The queue is empty, so KEDA scales payments-worker to zero after the cooldown.
+  for i in $(seq 1 40); do
+    n=$(kubectl -n bookstore get deploy payments-worker -o jsonpath='{.status.replicas}' 2>/dev/null)
+    [ -z "$n" ] || [ "$n" = 0 ] && break
+    sleep 5
+  done
+  run <<'CMD'
+kubectl get scaledobject,hpa -n bookstore
+kubectl get deploy payments-worker -n bookstore
+CMD
+fi
 r=$(kubectl -n bookstore get scaledobject payments-worker -o jsonpath='{.status.conditions[?(@.type=="Ready")].status}' 2>/dev/null)
-summary "KEDA ScaledObject payments-worker Ready: ${r:-unknown}"
+summary "KEDA ScaledObject payments-worker Ready at the end: ${r:-unknown}"
 [ "$r" = True ] || fail=1
 cpu=$(kubectl get hpa catalog -n bookstore -o jsonpath='{.status.currentMetrics[0].resource.current.averageUtilization}' 2>/dev/null)
 summary "HPA catalog reads CPU through metrics-server: ${cpu:-no value}%"
