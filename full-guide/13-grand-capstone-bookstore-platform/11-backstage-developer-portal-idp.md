@@ -300,8 +300,8 @@ step 1 is already running, so its pods wait in `CreateContainerConfigError`
 until the ConfigMap and the Secrets below exist.
 
 ```sh
-# Credentials from Vault, through the vault-bookstore-platform
-# ClusterSecretStore that the payments path uses (ch.06)
+# Credentials from Vault, through the platform ClusterSecretStore
+# vault-bookstore-platform (not shipped in this tree; see ch.13.05 step 3)
 kubectl apply -f examples/bookstore-platform/backstage/external-secrets.yaml
 
 # What the ServiceAccount may do (section 7 checks it)
