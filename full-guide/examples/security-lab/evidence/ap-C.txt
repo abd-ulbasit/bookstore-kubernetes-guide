@@ -1,0 +1,65 @@
+# Transcript for appendix C, YAML and API conventions (ap-C).
+# Tier A: a kind cluster on a Kubernetes v1.37.0 server, kubectl v1.37.2.
+# Recorded by running the chapter's commands in order. The chapter prints the
+# reader's namespace `bookstore`; this run used the namespaces pap-c-open and
+# pap-c-restricted in its place, and the namespace names in the chapter's
+# commands are the substitution. The cluster context is kind-sf-pilot, a lab
+# cluster with a different name from the chapter's bookstore cluster.
+# Exploratory probes before this run are not recorded here. They found that
+# `kubectl apply --dry-run=client` fails against an unreachable server, and that
+# an unquoted `yes` passes the client run but is refused by the server.
+$ kubectl config current-context
+kind-sf-pilot
+
+$ kubectl version 2>&1 | grep -i 'server version'
+Server Version: v1.37.0
+
+$ kubectl create namespace pap-c-open
+namespace/pap-c-open created
+
+$ kubectl create namespace pap-c-restricted
+namespace/pap-c-restricted created
+
+$ kubectl label namespace pap-c-restricted pod-security.kubernetes.io/enforce=restricted pod-security.kubernetes.io/warn=restricted
+namespace/pap-c-restricted labeled
+
+$ cat cm-yes.yaml
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: cm-yes
+data:
+  flag: yes
+
+$ kubectl apply --dry-run=client -f cm-yes.yaml -n pap-c-open
+configmap/cm-yes created (dry run)
+
+$ kubectl apply --dry-run=server -f cm-yes.yaml -n pap-c-open
+Error from server (BadRequest): error when creating "cm-yes.yaml": ConfigMap in version "v1" cannot be handled as a ConfigMap: json: cannot unmarshal bool into Go struct field ConfigMap.data of type string
+
+$ KUBECONFIG=bogus.kubeconfig timeout 60 kubectl apply --dry-run=client --request-timeout=5s -f cm.yaml 2>&1 | cut -c1-160
+error: error validating "cm.yaml": error validating data: failed to download openapi: Get "https://127.0.0.1:9/openapi/v2?timeout=5s": dial tcp 127.0.0.1:9: con
+
+$ kubectl apply -f catalog.yaml -n pap-c-open
+deployment.apps/catalog created
+
+$ kubectl patch deployment catalog -n pap-c-open --type merge -p '{"spec":{"selector":{"matchLabels":{"app":"catalog-v2"}},"template":{"metadata":{"labels":{"app":"catalog-v2"}}}}}'
+The Deployment "catalog" is invalid: spec.selector: Invalid value: {"matchLabels":{"app":"catalog-v2"}}: field is immutable
+
+$ kubectl label namespace pap-c-open pod-security.kubernetes.io/enforce-version=v1.37
+namespace/pap-c-open labeled
+
+$ kubectl apply --dry-run=server -f bare-catalog.yaml -n pap-c-restricted
+Warning: would violate PodSecurity "restricted:latest": allowPrivilegeEscalation != false (container "catalog" must set securityContext.allowPrivilegeEscalation=false), unrestricted capabilities (container "catalog" must set securityContext.capabilities.drop=["ALL"]), runAsNonRoot != true (pod or container "catalog" must set securityContext.runAsNonRoot=true), seccompProfile (pod or container "catalog" must set securityContext.seccompProfile.type to "RuntimeDefault" or "Localhost")
+deployment.apps/bare-catalog created (server dry run)
+
+$ kubectl apply --dry-run=server -f null-sc.yaml -n pap-c-restricted
+Error from server (Forbidden): error when creating "null-sc.yaml": pods "null-sc" is forbidden: violates PodSecurity "restricted:latest": allowPrivilegeEscalation != false (container "app" must set securityContext.allowPrivilegeEscalation=false), unrestricted capabilities (container "app" must set securityContext.capabilities.drop=["ALL"]), runAsNonRoot != true (pod or container "app" must set securityContext.runAsNonRoot=true), seccompProfile (pod or container "app" must set securityContext.seccompProfile.type to "RuntimeDefault" or "Localhost")
+
+$ kubectl apply --dry-run=server -f empty-sc.yaml -n pap-c-restricted
+Error from server (Forbidden): error when creating "empty-sc.yaml": pods "empty-sc" is forbidden: violates PodSecurity "restricted:latest": allowPrivilegeEscalation != false (container "app" must set securityContext.allowPrivilegeEscalation=false), unrestricted capabilities (container "app" must set securityContext.capabilities.drop=["ALL"]), runAsNonRoot != true (pod or container "app" must set securityContext.runAsNonRoot=true), seccompProfile (pod or container "app" must set securityContext.seccompProfile.type to "RuntimeDefault" or "Localhost")
+
+$ kubectl delete namespace pap-c-open pap-c-restricted --wait=true --timeout=180s
+namespace "pap-c-open" deleted
+namespace "pap-c-restricted" deleted
+
