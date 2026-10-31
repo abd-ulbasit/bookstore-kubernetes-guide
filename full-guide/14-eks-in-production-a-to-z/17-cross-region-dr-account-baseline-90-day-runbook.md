@@ -49,11 +49,11 @@ way:
    wired Kyverno admission. **Both are per-cluster.** The account-
    level controls — GuardDuty, Security Hub, Config, CloudTrail, IAM
    Access Analyzer — live one layer below; they wrap every cluster
-   in the account. Phase 14-R ships them as a separate Terraform tree
+   in the account. They ship as a separate Terraform tree
    at [`../examples/bookstore-platform/terraform-account-baseline/`](../examples/bookstore-platform/terraform-account-baseline/),
-   var-gated default-off. This chapter is the *user manual* for
-   that tree: what each variable buys you, what each costs, and
-   the order to turn them on.
+   var-gated; every control defaults to off except the budget alarm.
+   This chapter is the *user manual* for that tree: what each variable
+   buys you, what each costs, and the order to turn them on.
 
 3. **A 90-day onboarding runbook for the team taking over.** Most
    teams inherit a Kubernetes platform; very few build one from
@@ -102,9 +102,9 @@ is opinionated and adapts to team stage.**
   | Tool | Backs up | RPO target | Restore mechanism |
   |---|---|---|---|
   | Velero | K8s API objects + EBS PVs | 24h (daily schedule) | `velero restore create` against fresh cluster |
-  | CNPG `ReplicaCluster` | Postgres WAL + base backups | < 5s (streaming) | `kubectl cnpg promote` on the standby |
-  | S3 Cross-Region Replication (CRR) | S3 bucket contents (object store, Velero backup metadata, CloudTrail logs) | < 15 min (replication lag) | Re-point applications at the DR-region bucket |
-  | RDS Automated Backups (if used) | RDS data + PITR | 5-min PITR window | Restore-to-point-in-time in the DR region |
+  | CNPG `ReplicaCluster` | Postgres WAL + base backups | < 5s (streaming) | Set `spec.replica.primary` on the DR cluster |
+  | S3 Cross-Region Replication (CRR) | S3 bucket contents (Velero backup metadata; CloudTrail logs if you add replication) | 15 min with Replication Time Control (99.9% of objects) | Re-point applications at the DR-region bucket |
+  | RDS Automated Backups (if used) | RDS data + PITR | Point-in-time within the retention window | Restore-to-point-in-time in the DR region |
   | Terraform state (the S3 backend from [ch.14.01](./01-terraform-state-in-production.md)) | IAM roles, cluster config, every variable | Per commit | `terraform apply` against the DR region |
 
   The runbook in this chapter walks all five in sequence; missing
@@ -121,17 +121,27 @@ is opinionated and adapts to team stage.**
     no AWS ETA might be. The runbook has explicit "do not failover
     if X is true" guards because failing over and failing back is
     20× the disruption of riding out the outage.
-  - **Phase 2: DNS failover.** Route 53 failover routing policy
-    (or update the latency-routing weight to zero in the primary
-    region). Per [ch.14.11](./11-multi-region-active-active-cloud.md),
-    health checks take ~90s to fire; resolver TTL caches add up to
-    15 minutes long-tail. So DNS-only failover is a 5-15 minute
-    window before most traffic reaches the DR region.
-  - **Phase 3: Postgres promote.** `kubectl cnpg promote` on the
-    standby in the DR region. ~30s wall-clock per ch.14.11. **RPO
-    is whatever streaming lag existed at failure** — typically
-    < 5s with sync replication, can spike to minutes during WAN
-    incidents. The runbook records the actual RPO from
+  - **Phase 2: DNS failover.** Use a Route 53 failover routing policy,
+    or a health check that marks the primary record unhealthy. Latency
+    records have no weight, so a weight of zero is not an option
+    ([latency records](https://docs.aws.amazon.com/Route53/latest/DeveloperGuide/resource-record-sets-values-latency.html)).
+    Health checks run every 10 or 30 seconds, and the failure threshold
+    you set decides how many misses count: a 30-second interval with a
+    threshold of 3 takes about 90 seconds ([health checks](https://docs.aws.amazon.com/Route53/latest/DeveloperGuide/dns-failover-determining-health-of-endpoints.html)).
+    Records with a health check should have a TTL of 60 seconds or less,
+    so resolvers pick up the change quickly. Expect minutes, not seconds,
+    before most clients reach the DR region.
+    [ch.14.11](./11-multi-region-active-active-cloud.md) covers the topology.
+  - **Phase 3: Postgres promote.** Make the DR replica cluster the
+    primary by setting its `spec.replica.primary` to its own name,
+    with no promotion token, because the old primary is unreachable.
+    CNPG treats a missing token as a failover, and the former primary
+    must be rebuilt before it can rejoin ([replica clusters](https://cloudnative-pg.io/docs/current/replica_cluster/)).
+    `kubectl cnpg promote` is a switchover between instances inside one
+    cluster, so it does not move the primary region
+    ([kubectl plugin](https://github.com/cloudnative-pg/cloudnative-pg/blob/main/docs/src/kubectl-plugin.md)). **RPO is whatever
+    streaming lag existed at failure**, and it can spike to minutes
+    during WAN incidents. The runbook records the actual RPO from
     `pg_stat_replication`'s last `replay_lsn` before promote.
   - **Phase 4: Argo CD reconciles into the DR cluster.** Per
     [ch.14.10](./10-gitops-bootstrap-fresh-cluster.md), Argo CD
@@ -146,30 +156,35 @@ is opinionated and adapts to team stage.**
   time. The recommended order:
 
   1. **`enable_iam_access_analyzer = true`** (free, do it Day 1).
-     Finds resources granting external access. Zero monthly cost.
-  2. **`enable_cloudtrail = true`** (~free for management events;
-     data events extra). The forensic API log; required by every
-     compliance framework. Do it Day 1-30.
-  3. **`enable_guardduty = true`** ($1-3/month small account; can
-     reach $20-50/month at scale with all features). EKS Audit Log
+     Finds resources granting external access. The external access
+     analyzer has no charge; unused-access analysis is billed
+     separately ([pricing](https://aws.amazon.com/iam/access-analyzer/pricing/)).
+  2. **`enable_cloudtrail = true`** (the first copy of management
+     events is free; data events are billed,
+     [pricing](https://aws.amazon.com/cloudtrail/pricing/)). The
+     forensic API log. Do it Day 1-30.
+  3. **`enable_guardduty = true`** (billed per feature; EKS Runtime
+     Monitoring is $1.50 per vCPU per month for the first 500 vCPUs in
+     US East, [pricing](https://aws.amazon.com/guardduty/pricing/)).
+     EKS Audit Log
      Monitoring + EKS Runtime Monitoring + EBS Malware Protection +
      S3 Protection. Catches credential abuse, crypto-mining,
      anomalous API calls before your in-cluster Falco does. Do it
      Day 31-60.
-  4. **`enable_securityhub = true`** (~$5/month small account).
+  4. **`enable_securityhub = true`**.
      Aggregates GuardDuty + Config + Inspector findings into one
      console; subscribes to FSBP + CIS v3 + NIST 800-53 r5
      standards. Do it Day 61-90.
-  5. **`enable_config = true`** ($15-50/month small account; can
-     reach hundreds at scale). Records every resource-state change;
-     evaluates conformance packs (EKS, CIS, NIST). The expensive
-     one. **Scope it before enabling** — record only the resource
-     types you care about; recording everything is how account
-     baseline costs surprise people.
+  5. **`enable_config = true`** (billed per configuration item recorded
+     and per rule evaluation,
+     [pricing](https://aws.amazon.com/config/pricing/)). Records every
+     resource-state change; the example attaches an EKS conformance
+     pack. The expensive one. **Scope it before enabling** — record only
+     the resource types you care about; recording everything is how
+     account baseline costs surprise people.
 
-  At full enablement on a small account: $25-75/month. At scale:
-  hundreds, sometimes thousands. The chapter is honest that this
-  is a real budget line, not a rounding error.
+  The total depends on how many resources each control records, so
+  measure one control's bill before you turn on the next.
 
 - **The 90-day runbook — three 30-day phases.** Day 1-30 builds
   trust ("does what's there actually work?"); Day 31-60 builds
@@ -190,6 +205,21 @@ drill's scoring sheet includes a "what was different this time?"
 field; if the answer is "nothing", the drill is theatrical.
 [Part 13 ch.12](../13-grand-capstone-bookstore-platform/12-day-2-runbook-on-call-dr-chaos.md)
 introduced this discipline; this chapter applies it to cross-region.
+
+## Threats and controls
+
+| Threat | Control in this chapter | Goes deeper |
+|---|---|---|
+| Account-level logging or detection is turned off or drifts | Account baseline toggles; CloudTrail as the audit record | 05.09 <!-- link-later: 05.09 --> |
+| The audit log is read or changed by someone without cause | KMS encryption, TLS-only requests and versioning on the trail bucket | 05.09 <!-- link-later: 05.09 --> |
+| Public or cross-account access goes unnoticed | IAM Access Analyzer external access findings | 05.09 <!-- link-later: 05.09 --> |
+| Cloud posture slips from its benchmark unseen | Prowler, read-only, with failures triaged | 05.09 <!-- link-later: 05.09 --> |
+| A failover fires on a false signal, or a guard is skipped | Do-not-failover guards in Phase 1; failover changes reviewed like code | [14.11](./11-multi-region-active-active-cloud.md) |
+
+Backup, replication and restore threats, such as Secrets inside a
+backup, belong to [14.14](./14-backup-and-restore-velero.md) and
+[08.02](../08-day-2-operations/02-backup-and-dr.md). They are linked
+here, not repeated.
 
 ## Diagrams
 
@@ -222,7 +252,7 @@ flowchart TB
     cluster_b -.->|"restores from"| s3_b
     s3_b -->|"velero restore"| velero_b
     velero_b -.->|"recreates K8s objects in"| cluster_b
-    cnpg_b -.->|"cnpg promote -> new primary"| cluster_b
+    cnpg_b -.->|"replica.primary set -> new primary"| cluster_b
 
     cluster_a --> ct
     cluster_b --> ct
@@ -233,6 +263,9 @@ flowchart TB
 ```
 
 ### Diagram B — DR runbook timeline (ASCII)
+
+Illustrative: the times and LSN values are a sketch of the drill targets,
+not measured results.
 
 ```text
 PHASE    ACTION                              CLOCK   CUMULATIVE   RPO/RTO IMPACT
@@ -251,7 +284,7 @@ T+05m    Phase 2: DNS failover               0s      5m           Route 53 healt
          marks primary unhealthy)
 T+06m    Watch DNS propagation               1m      6m           ~90s to fire + TTL window
                                                                   for resolver caches
-T+10m    Phase 3: cnpg promote in DR         30s     10m          RPO = last replay_lsn lag
+T+10m    Phase 3: promote DR cluster         30s     10m          RPO = last replay_lsn lag
          region                                                   (< 5s typical, log
                                                                   the actual number)
 T+11m    Verify new primary is writable      1m      11m          SELECT pg_is_in_recovery()
@@ -283,6 +316,7 @@ one acts as primary, one as DR; the procedures are byte-identical to
 the cloud version — the only difference is `kind` vs `eksctl/eks-
 managed`). The cloud version of the same steps adds the AWS-side
 DNS + CNPG cross-region details from [ch.14.11](./11-multi-region-active-active-cloud.md).
+Output shown in `#` comments is illustrative. It was not captured from a run.
 
 ### 0. Prerequisites
 
@@ -293,12 +327,13 @@ DNS + CNPG cross-region details from [ch.14.11](./11-multi-region-active-active-
 - [ch.14.11](./11-multi-region-active-active-cloud.md) walked the
   cloud-shaped multi-region setup; the kind simulation here is a
   scaled-down analogue.
-- `kind` ≥ v0.33.0 (its default node image is Kubernetes v1.37.0),
-  `kubectl` 1.36-1.38, `velero` CLI ≥ 1.14 installed.
+- `kind` v0.33.0 with node image `kindest/node:v1.37.0` (the lab config,
+  `full-guide/examples/security-lab/kind/cluster.yaml`, pins it by digest),
+  `kubectl` 1.37.2, and the `velero` CLI installed.
 - The `bookstore-platform/runbooks/` tree from
   [Part 13 ch.12](../13-grand-capstone-bookstore-platform/12-day-2-runbook-on-call-dr-chaos.md)
-  is in place; this chapter adds **one new runbook file** to it:
-  `runbook-dr-cross-region.md` (the procedure walked below).
+  is in place. Create `runbooks/dr-cross-region.md` from the skeleton in
+  the Quick Reference; it is the procedure walked below.
 
 ### 1. Apply the account-baseline (optional, but the chapter assumes you've reviewed it)
 
@@ -314,6 +349,8 @@ cd examples/bookstore-platform/terraform-account-baseline
 cat > my.tfvars <<'EOF'
 region                     = "us-east-1"
 account_prefix             = "<YOUR-ACCOUNT-PREFIX>"
+# Required while the budget alarm (on by default) is enabled.
+budget_alarm_email         = "<YOUR-EMAIL>"
 enable_iam_access_analyzer = true
 enable_cloudtrail          = true
 
@@ -325,20 +362,38 @@ EOF
 
 make init
 terraform plan -var-file=my.tfvars -out=tfplan
-make up
+terraform apply tfplan
 
 # Verify
 aws accessanalyzer list-analyzers --region us-east-1
 aws cloudtrail describe-trails --region us-east-1
 ```
 
-The CloudTrail bucket has KMS encryption + 90-day lifecycle to
-Glacier + cross-region replication; the bucket policy denies non-
-TLS reads (per the file at
+The CloudTrail bucket is KMS-encrypted, moves objects to Glacier
+Instant Retrieval after 90 days, and denies requests not sent over
+TLS (per the file at
 [`../examples/bookstore-platform/terraform-account-baseline/cloudtrail.tf`](../examples/bookstore-platform/terraform-account-baseline/cloudtrail.tf)).
-If you're going to fail over to a DR region, the CloudTrail in the
-DR region needs to be writable — multi-region trails handle that
-automatically; single-region trails do not.
+The trail is multi-region, so events from every Region land in this one
+bucket. The example does not replicate it; decide on replication before
+you rely on this trail in a DR drill.
+
+Prowler runs its checks against the account and lists the ones that
+fail, mapped to compliance frameworks. It is open source under Apache
+2.0 ([repository](https://github.com/prowler-cloud/prowler)). Run it
+with a read-only role. The AWS managed
+[SecurityAudit](https://docs.aws.amazon.com/aws-managed-policy/latest/reference/SecurityAudit.html)
+policy grants read access to security configuration metadata. The
+latest PyPI release was 5.47.0 when these links were checked on
+2026-10-31.
+
+```bash
+# Illustrative: not run against any account for this chapter.
+pip install prowler==5.47.0
+prowler aws -p <READ-ONLY-PROFILE>
+```
+
+Triage the failures as you triage GuardDuty findings: fix each one, or
+record why it stays.
 
 ### 2. Simulate kind-cluster-A goes down — preserve the Velero backup state
 
@@ -396,7 +451,7 @@ kubectl --context "$DR_CTX" -n velero get backups
 # nightly-20260521-020000    Completed  3h ago        0       0         29d
 # (the primary's backups, visible from the DR cluster)
 
-# Sync the backup inventory if needed:
+# Velero reads backups from the location itself; this shows its status:
 velero --kubeconfig <(kind get kubeconfig --name bookstore-dr) \
   backup-location get
 ```
@@ -429,10 +484,12 @@ velero --kubeconfig <(kind get kubeconfig --name bookstore-dr) \
 
 ```bash
 # In the kind setup, CNPG runs as a ReplicaCluster bootstrapped from
-# the primary's pg_basebackup. The "promote" turns it into a writable
-# primary.
-kubectl --context "$DR_CTX" cnpg promote bookstore-pg \
-  -n bookstore-platform-system
+# the primary's pg_basebackup. The primary region is gone, so there is no
+# promotion token. Without a token CNPG treats this as a failover, and the
+# former primary must be rebuilt before it can rejoin.
+kubectl --context "$DR_CTX" -n bookstore-platform-system patch cluster \
+  bookstore-pg --type merge \
+  -p '{"spec":{"replica":{"primary":"bookstore-pg"}}}'
 
 # Verify it's writable
 kubectl --context "$DR_CTX" -n bookstore-platform-system \
@@ -446,9 +503,9 @@ kubectl --context "$DR_CTX" -n bookstore-platform-system \
 kubectl --context "$DR_CTX" -n bookstore-platform-system \
   exec bookstore-pg-1 -c postgres -- \
   psql -U postgres -c "SELECT pg_last_wal_replay_lsn();"
-# Compare to the primary's last sent_lsn before failure (from the
-# pre-disaster snapshot of pg_stat_replication). Typical: < 1 KB
-# diff = < 1 second of writes lost.
+# Compare it with the sent_lsn recorded before the failure (from the
+# pre-disaster snapshot of pg_stat_replication). The byte difference is
+# the WAL the DR cluster never replayed.
 ```
 
 ### 6. Verify the bookstore-platform services come back up
@@ -467,7 +524,7 @@ kubectl --context "$DR_CTX" -n bookstore-platform get pods \
 # Hit the storefront health endpoint via kind's NodePort
 PORT=$(kubectl --context "$DR_CTX" -n bookstore-platform \
   get svc bookstore-storefront -o jsonpath='{.spec.ports[0].nodePort}')
-curl -sk "http://localhost:${PORT}/healthz"
+curl -s "http://localhost:${PORT}/healthz"
 # {"status":"ok","database":"connected","region":"dr"}
 ```
 
@@ -500,28 +557,28 @@ during business hours, with one tool intentionally unavailable).
 (JSON metadata, K8s API object tarballs, the snapshot ID references)
 in an S3 bucket via the `BackupStorageLocation`. The bucket can have
 **S3 Cross-Region Replication (CRR)** enabled to mirror everything
-to a DR region; the lifecycle policy keeps stale copies in Glacier
+to a DR region; a lifecycle rule can move older copies to Glacier
 for long-term retention. **This is why the DR cluster can see the
 primary's backups after the primary cluster is gone**: Velero's
 state-of-record isn't the cluster, it's the bucket. The EBS
 snapshots themselves are region-scoped (an EBS snapshot in us-east-1
 cannot be attached in eu-west-1 directly); to enable cross-region
-restore you either (1) enable **cross-region EBS snapshot copy** via
-AWS Backup (extra cost, ~$0.05/GB transferred + storage in the DR
-region), or (2) accept that EBS-snapshot restore only works in-region
-and rely on **Restic/Kopia file-mode backup** (slower but region-
-independent) for cross-region PV restore. The bookstore-platform
-default ships option 2 (Kopia) for cross-region; option 1 is the
-production-grade upgrade.
+restore you either (1) copy the snapshots with **cross-region EBS
+snapshot copy** (through AWS Backup or the EC2 API; extra cost), or (2)
+turn on **Velero file-system backup** for those volumes, which copies
+the data to the bucket: slower, but not tied to the snapshot's region.
+The example takes CSI snapshots (`snapshotVolumes = true`) and leaves
+file-system backup off (`defaultVolumesToFsBackup = false`), so the
+choice is yours; option 1 is the production-grade upgrade.
 
 **Why CNPG `ReplicaCluster` over native Postgres streaming alone.**
 Native Postgres streaming replication is fine for in-cluster
 standbys; CNPG's `ReplicaCluster` wraps it with Kubernetes-shaped
 lifecycle: the replica region's Cluster CR specifies a
 `bootstrap.pg_basebackup.source` and a `replica.source`; CNPG
-operator handles the WAL streaming, replica re-bootstrap on schema
-changes, and the `cnpg promote` API that flips the role. **The
-promote is the only manual step in DR; the rest is operator-
+operator handles the WAL streaming and the replica lifecycle, and the
+`spec.replica.primary` field flips the role. **The promotion is the
+only manual step in DR; the rest is operator-
 reconciled.** [Chapter 14.11](./11-multi-region-active-active-cloud.md)
 walks the cross-region CNPG topology in detail; this chapter is the
 runbook that wraps it.
@@ -529,15 +586,17 @@ runbook that wraps it.
 **Why S3 CRR for the Velero bucket — not multi-bucket writes.**
 Two designs were considered for the Velero state durability:
 
-1. **Velero writes to one bucket; S3 CRR replicates async.** The
-   replication lag is typically < 15 min (S3 SLA: 99.99% of objects
-   in 15 min; the median is < 1 min). Cost: ~$0.02/GB transferred
-   + storage in the DR region.
+1. **Velero writes to one bucket; S3 CRR replicates async.** With
+   Replication Time Control, 99.9% of objects replicate within 15
+   minutes ([S3 RTC](https://docs.aws.amazon.com/AmazonS3/latest/userguide/replication-time-control.html));
+   without it the page sets no time target. The example configures no
+   replication for the Velero bucket, so you add it and pay for the
+   transfer and the DR-region storage.
 2. **Velero writes to two buckets simultaneously.** Higher write
    cost, higher consistency. Not natively supported; would require
    a custom plugin.
 
-The bookstore-platform chose **option 1**; the 15-minute RPO ceiling
+The bookstore-platform chose **option 1**; a 15-minute target
 on the backup metadata is acceptable because the **RPO on the actual
 data** is < 5s (CNPG streaming). If Velero's backup metadata is 15
 min stale, you lose 15 min of *new K8s object definitions* (a
@@ -549,8 +608,9 @@ reasons, named in [`../examples/bookstore-platform/terraform-account-baseline/RE
 1. **Different blast radius.** A cluster operator's `terraform apply`
    should never be one typo away from destroying CloudTrail history.
    Separate state means separate IAM, separate `terraform destroy`
-   discipline. The cluster tree's IAM (`../terraform/iam.tf`) does
-   NOT have permission to delete the CloudTrail bucket.
+   discipline. The cluster tree's IAM policy
+   (`../examples/bookstore-platform/terraform/iam.tf`) names no CloudTrail
+   resources.
 2. **Different cadence.** Cluster Terraform changes monthly (K8s
    upgrades, addon bumps, new IRSA roles). Account baseline changes
    yearly (compliance review, new framework). Two cadences = two
@@ -559,29 +619,26 @@ reasons, named in [`../examples/bookstore-platform/terraform-account-baseline/RE
    tree's `terraform destroy`) doesn't touch the account baseline.
    Spinning up a test cluster doesn't disturb Security Hub findings.
 
-**Why GuardDuty's EKS Runtime Monitoring at $1-3/month (small) but
-$20-50+ at scale.** GuardDuty pricing has a free component (basic
-threat detection on CloudTrail/VPC Flow Logs/DNS) and per-feature
-add-ons. **EKS Runtime Monitoring** is the priciest add-on: it
-deploys a managed agent (a DaemonSet) to every node; pricing scales
-with **vCPU-hours of monitored nodes**, roughly $1.50/vCPU/month.
-A 10-node cluster with 4 vCPU per node = 40 vCPU × $1.50 = $60/month
-just for that one feature. For a $1k/month EKS cluster, that's 6%;
-worth it for the threat coverage. For a $50k/month fleet, it's
-$3k/month; the chapter is honest that this is a real budget line.
+**Why GuardDuty's EKS Runtime Monitoring is priced by vCPU.** GuardDuty
+bills per feature. Runtime Monitoring deploys a managed agent to every
+node and is billed per vCPU of protected workload: $1.50 per vCPU per
+month for the first 500 vCPUs in US East
+([pricing](https://aws.amazon.com/guardduty/pricing/)). A 10-node cluster
+with 4 vCPU per node is 40 vCPUs, or $60 a month for that one feature.
+Weigh that against the threats it covers at the scale your team runs.
 
 **Why AWS Config is the expensive one — the recorder model.**
 Config records **every state change of every recorded resource type**
-into S3 + evaluates **conformance pack rules** against each. Pricing:
-$0.003/recorded-config-item (every change = one item) + $0.001/rule
-evaluation. A medium AWS account has ~10k recorded items per day
-(includes auto-scaling group changes, EBS volume attach/detach,
-security group rule updates) and ~50 rules × 10k items = 500k
-evaluations/day. That's $30 + $15 = $45/day, or **$1,300/month**.
-The fix: **scope the recorder** to only the resource types you care
-about (`recording_group.resource_types = ["AWS::EKS::Cluster",
-"AWS::IAM::Role", ...]`) and only the conformance packs you actually
-audit. The variable
+into S3 + evaluates **conformance pack rules** against each. It bills
+per configuration item recorded and per rule evaluation: $0.003 per
+item recorded, and $0.001 per evaluation for the first 100,000 a month,
+in US East ([pricing](https://aws.amazon.com/config/pricing/)). A busy
+cluster with Karpenter node churn records many items, so the bill
+follows the change rate. The fix: **scope the recorder** to the
+resource types you audit (`recording_group.resource_types`), and attach
+only the conformance packs you use. The example does neither yet:
+`config.tf` sets `all_supported = true`, so narrow its
+`recording_group` before you enable Config. The variable
 [`enable_config`](../examples/bookstore-platform/terraform-account-baseline/variables.tf)
 is default-off because turning it on without scoping it is how
 account-baseline costs surprise people.
@@ -642,10 +699,10 @@ Three things go wrong without structure:
 > [Part 13 ch.12's](../13-grand-capstone-bookstore-platform/12-day-2-runbook-on-call-dr-chaos.md)
 > "runbooks decay" rule applied to backup procedures.
 
-> **In production:** **Account-baseline is a multi-thousand-dollar
-> commitment at scale; phase it in.** The temptation is to
-> `terraform apply` all five gates at once; the result is a $3k
-> first invoice (mostly from Config recording everything). The
+> **In production:** **Account-baseline can be a real budget line at
+> scale; phase it in.** The temptation is to `terraform apply` all five
+> gates at once; the first invoice is then dominated by Config, which
+> records every supported type in the example. The
 > recommended phase-in: free controls Day 1 (Access Analyzer +
 > CloudTrail management events), GuardDuty Day 31-60 (after the
 > team has triaged a month of in-cluster Falco alerts and knows
@@ -653,7 +710,8 @@ Three things go wrong without structure:
 > what findings to ignore), Config last (after the team has
 > scoped which resource types are worth recording). The variable
 > defaults in [`terraform-account-baseline/variables.tf`](../examples/bookstore-platform/terraform-account-baseline/variables.tf)
-> are all `false` for this reason.
+> are `false` for this reason, except the budget alarm, which defaults to
+> `true` and needs an address.
 
 > **In production:** **The 90-day plan is opinionated; teams
 > adapt the cadence.** A team inheriting a 5-year-old production
@@ -763,7 +821,7 @@ production artifact:
   laptop does, but reviewed + audited).
 - **ch.14.08** — VPC endpoints & egress economics (when each
   endpoint pays back, NAT vs S3 Gateway endpoint math).
-- **ch.14.09** — ARM/Graviton on EKS (40% price-performance, the
+- **ch.14.09** — ARM/Graviton on EKS (the
   multi-arch image build pattern).
 - **ch.14.10** — GitOps bootstrap on a fresh EKS cluster (Argo
   CD via Terraform, App-of-Apps, self-management).
@@ -852,8 +910,8 @@ engineer uses on top of it. Part 15 lives at
 the reader who finishes Part 14 should read Part 15 next.
 
 For the next step inside Part 14:
-- Appendix D ("Continuous learning paths") names the books +
-  conferences + open-source communities that keep this discipline
+- Appendix D ("Further reading") lists the books the guide cites to
+  keep this discipline
   current.
 - The source code lives in
   [`../examples/bookstore-platform/terraform/`](../examples/bookstore-platform/terraform/)
@@ -899,7 +957,8 @@ Goal: verify what exists; page nobody; learn the cluster.
 - [ ] **Day 20-25: Account-baseline review (free controls).** If not
       already done, `terraform apply` with `enable_iam_access_analyzer
       = true` and `enable_cloudtrail = true` in
-      `terraform-account-baseline/`. Teaches: ch.14.17 (this chapter).
+      `terraform-account-baseline/`. Run Prowler read-only and triage its
+      failures. Teaches: ch.14.17 (this chapter).
 - [ ] **Day 25-30: Secrets bootstrap.** If `enable_vault = true`,
       complete the Vault bootstrap; verify ExternalSecrets references
       resolve. If using AWS Secrets Manager + ESO instead, verify
@@ -975,11 +1034,12 @@ quarterly chaos game-day.
       one fewer responder, during business hours, etc.). Score it
       against the runbook. Teaches: Part 13 ch.12 + this chapter.
 - [ ] **Day 80-85: Turn on Config (scoped).** `enable_config = true`,
-      BUT scope the recorder to only the resource types the org's
-      compliance program audits (start with `AWS::EKS::Cluster`,
-      `AWS::IAM::Role`, `AWS::S3::Bucket`); attach 1-2 conformance
-      packs only. Watch the first week's bill; expand as confidence
-      grows. Teaches: ch.14.17.
+      BUT narrow the recorder in `config.tf` (the example records every
+      supported type) to the resource types the org's compliance program
+      audits (start with `AWS::EKS::Cluster`, `AWS::IAM::Role`,
+      `AWS::S3::Bucket`), and keep only the conformance packs you audit.
+      Watch the first week's bill; expand as confidence grows. Teaches:
+      ch.14.17.
 - [ ] **Day 85-90: Handoff completion review.** Confirm the team
       can handle a P0 without escalating to the previous owner. If
       yes, declare ownership; the giving team's role ends. If no,
@@ -995,15 +1055,15 @@ game-day) is calendared.
 ### Pinned-Helm install commands (for reference; everything is in Terraform already)
 
 ```sh
-# All cluster-tree controllers (already in Phase 14-R Terraform):
-#   Argo CD             — argocd_helm_chart_version          (Phase 14-R)
-#   Velero              — velero_chart_version               (Phase 14-R)
-#   External Secrets    — eso_chart_version                  (Phase 14-R)
-#   Vault               — vault_chart_version                (Phase 14-R)
-#   Karpenter           — karpenter_chart_version            (Phase 14-R)
-#   AWS LB Controller   — lb_controller_chart_version        (Phase 14-R)
-#   Falco               — falco_chart_version                (Phase 14-R)
-#   Kyverno             — kyverno_chart_version              (Phase 14-R)
+# All cluster-tree controllers (already in the cluster Terraform):
+#   Argo CD             — argocd_helm_chart_version
+#   Velero              — velero_chart_version
+#   External Secrets    — eso_chart_version
+#   Vault               — vault_chart_version
+#   Karpenter           — karpenter_chart_version
+#   AWS LB Controller   — lb_controller_chart_version
+#   Falco               — falco_chart_version
+#   Kyverno             — kyverno_chart_version
 
 # Account-baseline (the account-level Terraform; per-account, not per-cluster):
 cd examples/bookstore-platform/terraform-account-baseline
@@ -1014,7 +1074,7 @@ terraform apply -var-file=my.tfvars
 ### The DR runbook skeleton (per Phase 1 + Phase 2 + Phase 3 + Phase 4 of the runbook)
 
 ```markdown
-# runbook-dr-cross-region.md
+# runbooks/dr-cross-region.md
 ## Trigger
 - Alert: <ALERT-NAME-FOR-REGIONAL-FAILURE>
 - Severity: P0
@@ -1028,12 +1088,12 @@ terraform apply -var-file=my.tfvars
 
 ## Phase 2: DNS failover
 1. Mark primary region's Route 53 health check as unhealthy (forced):
-   aws route53 update-health-check --health-check-id <ID> --inverted true
-2. Verify resolver TTL (60s default; 5-15 min long-tail)
+   aws route53 update-health-check --health-check-id <ID> --inverted
+2. Verify the record TTL is 60 seconds or less
 3. Synthetic monitoring should show DR-region pickup within 5 min
 
 ## Phase 3: Postgres promote (CNPG)
-1. kubectl --context <DR-CTX> cnpg promote bookstore-pg -n bookstore-platform-system
+1. kubectl --context <DR-CTX> -n bookstore-platform-system patch cluster bookstore-pg --type merge -p '{"spec":{"replica":{"primary":"bookstore-pg"}}}'
 2. Verify: kubectl --context <DR-CTX> exec ... -- psql -c 'SELECT pg_is_in_recovery();'
 3. Record RPO from pg_last_wal_replay_lsn diff against pre-failure sent_lsn
 
@@ -1065,7 +1125,7 @@ yes):
       Completed, zero Errors; the BackupStorageLocation is in S3
       with CRR enabled to a DR region.
 - [ ] CNPG `ReplicaCluster` is healthy in at least one DR region;
-      `pg_stat_replication` shows < 1MB lag; the `cnpg promote`
+      `pg_stat_replication` shows < 1MB lag; the CNPG promotion
       drill has been exercised in the last 90 days.
 - [ ] The 90-day runbook is cloned into the team's wiki; the Day
       30 / Day 60 / Day 90 review meetings are calendared; the
@@ -1091,14 +1151,14 @@ yes):
 2. **A region goes dark at 02:00 UTC. Walk through the four-phase failover runbook with explicit RPO/RTO numbers and the "do not failover" guards.**
    <details><summary>Show answer</summary>
 
-   (1) **Confirm the region is actually lost** — verify against AWS Health Dashboard, your synthetic monitoring (Datadog/Pingdom external probes), and Route 53 health-check status. The runbook's "do not failover if X is true" guards: AWS has posted an ETA < 30 min, the failure is partial (one AZ vs region), or the issue is your own network connectivity to AWS rather than AWS itself. Failing over and failing back is 20x the disruption of riding out a short outage. (2) **DNS failover** — flip Route 53 latency-set record weight to zero on the failed region (or trigger health-check failover). Detection ~30-60s, TTL ~60s, resolver caching adds 5-15min long-tail; happy-path 90s, long-tail 15min. (3) **Postgres promote** — `kubectl cnpg promote <standby>` in the DR region. Record `replay_lsn` from `pg_stat_replication` first — that's your actual RPO (typically < 5s sync, can spike to minutes during WAN incidents). ~30s wall-clock. (4) **Argo CD reconciles into DR cluster** — ApplicationSet already enumerates both regions; with the writer-region label flipped, the writer workloads (payments-worker) deploy in the DR region. Webhook-driven sync in seconds. Total writer RTO target: 5-10min when drilled monthly; reader RTO: 5min after DNS settles.
+   (1) **Confirm the region is actually lost** — verify against AWS Health Dashboard, your synthetic monitoring (Datadog/Pingdom external probes), and Route 53 health-check status. The runbook's "do not failover if X is true" guards: AWS has posted an ETA < 30 min, the failure is partial (one AZ vs region), or the issue is your own network connectivity to AWS rather than AWS itself. Failing over and failing back is 20x the disruption of riding out a short outage. (2) **DNS failover** — fail the health check on the failed region's latency record (latency records have no weight). Detection follows the health check interval (10 or 30 seconds) and failure threshold; the record TTL should be 60 seconds or less. (3) **Postgres promote** — set `spec.replica.primary` on the DR cluster, with no promotion token. Record `replay_lsn` from `pg_stat_replication` first — that's your actual RPO (it can spike to minutes during WAN incidents). (4) **Argo CD reconciles into DR cluster** — ApplicationSet already enumerates both regions; the writer workloads (payments-worker) move to the DR region, as ch.14.11 describes. Total writer RTO target: 5-10min when drilled monthly; reader RTO: 5min after DNS settles.
 
    </details>
 
 3. **The account-baseline Terraform tree has 5 control gates. What's the chapter's recommended turn-on order and why does it matter?**
    <details><summary>Show answer</summary>
 
-   (1) **IAM Access Analyzer** — free, finds resources granting external access; do Day 1 because it costs nothing and immediately surfaces the misconfigured trust policies that account-takeovers exploit. (2) **CloudTrail** — ~free for management events; the forensic API log every compliance framework requires; Day 1-30. (3) **GuardDuty** — $1-50/month depending on scale; catches credential abuse, cryptojacking, anomalous API calls; Day 31-60. (4) **Config** — costliest of the recurring controls; rules-driven compliance scanning; Day 60-90 if compliance requires it. (5) **Security Hub** — the aggregator, only valuable after the others feed it findings; last. The order matters because turning them on backwards (Security Hub first) shows an empty pane that suggests "we're secure" before the data sources actually exist; turning on Config first generates a recurring cost without a clear before/after comparison. Free → cheap → expensive, with each layer building on the prior.
+   (1) **IAM Access Analyzer** — free, finds resources granting external access; do Day 1 because it costs nothing and immediately surfaces the misconfigured trust policies that account-takeovers exploit. (2) **CloudTrail** — the first copy of management events is free; the forensic API log; Day 1-30. (3) **GuardDuty** — billed per feature; catches credential abuse, cryptojacking, anomalous API calls; Day 31-60. (4) **Config** — costliest of the recurring controls; rules-driven compliance scanning; Day 60-90 if compliance requires it. (5) **Security Hub** — the aggregator, only valuable after the others feed it findings; last. The order matters because turning them on backwards (Security Hub first) shows an empty pane that suggests "we're secure" before the data sources actually exist; turning on Config first generates a recurring cost without a clear before/after comparison. Free → cheap → expensive, with each layer building on the prior.
 
    </details>
 
@@ -1154,14 +1214,14 @@ yes):
   Velero restore reference, including namespace mapping + the
   `--from-backup` flag this chapter cites.
 - **CloudNativePG ReplicaCluster + promote docs**
-  <https://cloudnative-pg.io/documentation/current/replica_cluster/>;
-  the cross-region streaming + the `kubectl cnpg promote` API this
-  chapter's Phase 3 calls.
+  <https://cloudnative-pg.io/docs/current/replica_cluster/>;
+  the cross-region streaming and the `spec.replica.primary` promotion
+  this chapter's Phase 3 uses.
 - **Google SRE Book ch.32 — Evolving SRE Engagement Model**
   <https://sre.google/sre-book/evolving-sre-engagement-model/>;
   the discipline of handing a service from one team to another
   that this chapter's 90-day plan applies.
-- **Rosso et al., *Production Kubernetes*, ch.16 — Day 2
+- **Rosso et al., *Production Kubernetes*, Day 2
   operations**; the operational-discipline framework this chapter
   applies to EKS specifically.
 - **Werner Vogels, *Cell-Based Architecture***
