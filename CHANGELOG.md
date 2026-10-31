@@ -34,6 +34,7 @@ versions follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   `paymentsWorker.amqpUrl` is gone from the chart values. Postgres now lists
   its three keys one by one instead of `envFrom`, so the broker login stays
   out of its environment. A Secret supplied out of band (prod) needs six keys.
+- Part 03 ch.02 has a new section, The broker login, that explains those keys and where the Bookstore reads them.
 - orders and catalog log an error class (`error_class`) when the Postgres
   connect call fails, not the driver's text, as Part 06 ch.02 asks.
 - Every `emptyDir` in the raw manifests, the Kustomize base and the Helm
