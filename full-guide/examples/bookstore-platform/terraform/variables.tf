@@ -364,7 +364,7 @@ variable "argocd_target_revision" {
 ################################################################################
 
 variable "enable_velero" {
-  description = "Install Velero for cluster backups (etcd snapshots are EKS-managed, but Velero handles Kubernetes resources + EBS volume snapshots). Adds an S3 bucket (versioned, KMS-encrypted) + IRSA role. ~$5-15/month for a small backup retention window."
+  description = "Install Velero for cluster backups (etcd snapshots are EKS-managed, but Velero handles Kubernetes resources + EBS volume snapshots). Adds an S3 bucket (versioned, customer-managed KMS key) + IRSA role. Cost follows backup size and retention."
   type        = bool
   default     = false
 }
@@ -376,9 +376,9 @@ variable "velero_backup_bucket" {
 }
 
 variable "velero_chart_version" {
-  description = "Velero Helm chart version (vmware-tanzu/velero). 7.2.x is the current stable line."
+  description = "Velero Helm chart version (vmware-tanzu/velero). 12.2.x installs Velero 1.18.x."
   type        = string
-  default     = "7.2.1"
+  default     = "12.2.2"
 }
 
 ################################################################################
