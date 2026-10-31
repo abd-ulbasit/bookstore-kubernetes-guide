@@ -38,8 +38,8 @@
 # DirectoryConfigProvider (`${dir:...}`), so the connector spec holds only
 # references.
 #
-# Apply (after kafka/ + Strimzi + CNPG with wal_level=logical + the
-# ClusterSecretStore from Part 11 ch.05):
+# Apply (after kafka/ + Strimzi + CNPG with wal_level=logical + the platform
+# ClusterSecretStore that this tree does not ship; see ch.13.05 step 3):
 #   kubectl apply -f examples/bookstore-platform/search/debezium-connector.yaml
 ---
 

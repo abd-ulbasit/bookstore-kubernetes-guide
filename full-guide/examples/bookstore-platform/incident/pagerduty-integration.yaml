@@ -291,7 +291,8 @@ spec:
 # The routing keys and the Slack webhook: ExternalSecrets, not literal Secrets
 # ---------------------------------------------------------------------------
 # The Secrets pagerduty-keys and slack-webhooks are written by External Secrets
-# from Vault (ch.13.06), in the namespace of the AlertmanagerConfig. Each
+# from Vault, in the namespace of the AlertmanagerConfig, through the platform
+# store that ch.13.05 step 3 says this tree does not ship. Each
 # routing key is a 32-character Events API V2 key, one per PagerDuty service,
 # rotated quarterly. No key or webhook is committed here.
 # ---------------------------------------------------------------------------
@@ -337,7 +338,7 @@ metadata:
 spec:
   refreshInterval: 1h
   secretStoreRef:
-    name: bookstore-platform-vault
+    name: vault-bookstore-platform
     kind: ClusterSecretStore
   target:
     name: slack-webhooks

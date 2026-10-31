@@ -309,12 +309,17 @@ emptyDir. The storage is per-broker PVCs of 10 GiB each.
 ### 3. Apply Meilisearch
 
 The three ExternalSecrets that fill this chapter's Secrets from Vault are in
-`search/external-secrets.yaml`. They read through the ClusterSecretStore
-`vault-bookstore-platform`, which
+`search/external-secrets.yaml`. They read through a ClusterSecretStore named
+`vault-bookstore-platform`, and this tree does not ship it.
 [Part 15 ch.05](../15-day-to-day-production-ops/05-production-secrets-vault-eso.md)
-creates from `examples/bookstore-platform/vault/cluster-secret-store.yaml`.
-13.06 and 13.08 use the same store. Write `master_key` to Vault before you
-apply these, as step 4 shows.
+replaced the shared store with one namespaced SecretStore per tenant, because a
+shared store logs in as one identity for every namespace that uses it. The
+platform namespaces of this Part need a store of their own. Write a
+ClusterSecretStore that lists those namespaces under `spec.conditions`, so that
+no tenant namespace can use it, and a Vault role and policy that read only the
+platform paths. Neither is written here, and nothing in this Part has been run
+against one. 13.06, 13.08, 13.09 and 13.11 read through the same store. Write
+`master_key` to Vault before you apply these, as step 4 shows.
 
 Apply the Meilisearch manifest and the ExternalSecrets, then wait for the
 rollout. The `#` lines show illustrative output, not captured output.
@@ -386,19 +391,23 @@ SEARCH_AUTH="$WORK/search.conf"
 ```
 
 The master key is for setup only. It can create keys, so no workload should
-hold it. The two scoped keys go to Vault at `kv/bookstore-platform/meilisearch`
-as `sink_key` and `search_key`. The ExternalSecrets read `master_key` and
-`sink_key` from that path, and the Debezium role's password from
-`kv/bookstore-platform/debezium`. The values come from files, so they stay out
-of the process list. *Illustrative: the Vault writes are not captured. Run them against the Vault
+hold it. The sink key goes to Vault at `kv/bookstore-platform/meilisearch` as
+`sink_key`. The ExternalSecrets in the platform namespaces read `master_key`
+and `sink_key` from that path, and the Debezium role's password from
+`kv/bookstore-platform/debezium`. The search key is the tenant's: it goes to
+`secret/bookstore-platform/acme-books/meilisearch` as `search_key`, under the
+prefix the tenant's Vault policy reads, and the tenant's SecretStore from 15.05
+fills it into the tenant namespace. The values come from files, so they stay
+out of the process list. *Illustrative: the Vault writes are not captured. Run them against the Vault
 that [Part 15 ch.05](../15-day-to-day-production-ops/05-production-secrets-vault-eso.md)
 installs.*
 
 ```sh
 printf '%s' "$SINK_KEY" > "$WORK/sink-key"
 printf '%s' "$SEARCH_KEY" > "$WORK/search-key"
-vault kv patch kv/bookstore-platform/meilisearch \
-  sink_key=@"$WORK/sink-key" search_key=@"$WORK/search-key"
+vault kv patch kv/bookstore-platform/meilisearch sink_key=@"$WORK/sink-key"
+vault kv put -mount=secret bookstore-platform/acme-books/meilisearch \
+  search_key=@"$WORK/search-key"
 unset SINK_KEY SEARCH_KEY
 rm -rf "$WORK"
 ```
