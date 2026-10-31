@@ -72,6 +72,21 @@ versions follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   the images it built, so a promoted digest does not break it.
 - OpenSSF Scorecard runs on a dispatch from the default branch, not only on a
   push, so the release workflow gets a score.
+- The `sast` job no longer tries to upload the CodeQL database. It has no
+  `security-events` permission, so the first release run retried the upload
+  for nearly two minutes and left an error annotation on a green job.
+- Chapter 07.03 (steps 3, 8, 10, 12 and 13) and `evidence/07-03.txt` record
+  the first real signing and promotion instead of reading them: the signature,
+  SBOM attestation and provenance verified from outside, Scorecard's first
+  score (6.7 / 10), what Harden-Runner and CodeQL showed, and the five defects
+  the first release run found, including the promotion PR that rewrote 288
+  lines. The end of step 12 lists what is still unproven. SECURITY-SCAN.md
+  section 8 is updated to match.
+- The promotion PR's `gh attestation verify` pins the identity with
+  `--cert-identity`, because `--repo` alone accepts any workflow in the
+  repository. The workflow header and the PR body now say what GitHub did with
+  the bot-opened PR's `pull_request` runs: created them with no jobs and left
+  them at `action_required`.
 
 ### Fixed
 - Standalone EKS add-ons (kube-proxy, CoreDNS, EBS CSI) now follow

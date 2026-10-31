@@ -85,8 +85,10 @@ jobs:
   #     cannot merge its own PR;
   #   - "Allow GitHub Actions to create and approve pull requests"
   #     (Settings -> Actions -> General);
-  #   - a GitHub App token for the PR if its checks must run: a PR opened
-  #     with GITHUB_TOKEN does not trigger other workflows.
+  #   - a GitHub App token for the PR if its checks must run: the
+  #     pull_request runs GitHub creates for a PR opened with GITHUB_TOKEN
+  #     never start a job. (The guide's own release workflow dispatches the
+  #     checks on the PR's branch instead; see bookstore-release.yml.)
   # ---------------------------------------------------------------------------
   bump-manifests:
     name: bump-manifests (GitOps source -> Argo syncs)

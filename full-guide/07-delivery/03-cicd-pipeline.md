@@ -133,7 +133,7 @@ flowchart TD
     sign["sign (push to main only)<br/>needs every job above green<br/>push, cosign keyless,<br/>SBOM + SLSA provenance"]
     fail["FAIL the build<br/>nothing pushed, nothing signed"]
     bump["bump-manifests<br/>kustomize edit set image<br/>-&gt; promotion PR"]
-    git[("Git repo<br/>kustomize/overlays/prod<br/>(PR merged by a human)")]
+    git[("Git repo<br/>kustomize/overlays/prod/images<br/>(PR merged by a human)")]
     argo["Argo CD in-cluster<br/>detects commit -&gt; diff<br/>-&gt; sync -&gt; reconcile"]
 
     push --> bt & secrets & sast & sca & lint & side
@@ -151,7 +151,8 @@ flowchart TD
       ├─ overlays/dev      latest main digest   (auto-sync, ch.04)
       ├─ overlays/staging  same digest, prod shape at half scale
       └─ overlays/prod     SAME digest, written by `kustomize edit set
-                           image` in a PR (a human merges it)
+                           image` into overlays/prod/images, in a PR
+                           (a human merges it)
  Promotion = a reviewed COMMIT moving a digest between overlays, not a
  rebuild: a rebuild is a different artifact, bits you never tested.
 ```
@@ -178,16 +179,25 @@ The pipeline is two workflow files and one script:
   container image **pinned by digest**. The workflow calls it and so do you,
   so the command on your laptop is the command in CI.
 
+The guide's own repository adds a third workflow file,
+`.github/workflows/bookstore-release.yml`. A reader does not copy it. It is how
+the guide proves `sign` and the promotion: one dispatch runs the pipeline for
+one service with `publish` on, opens the promotion PR, and dispatches the
+checks on it (steps 8 and 12).
+
 > **Honesty note.** The guide's own pull-request CI runs four things that no
 > laptop can: CodeQL, the ZAP baseline on a kind cluster, Harden-Runner in
 > audit mode, and the permission ceiling. Each is reported where it appears
 > below. Push, keyless signing, the SBOM attestation, provenance, the
 > promotion PR and Scorecard need a registry, GitHub's OIDC token or the
-> default branch. The release workflow `bookstore-release.yml` is how they run,
-> and it has not been dispatched yet, so they are real, valid steps that this
-> chapter **reads, not runs**, and the `if:` that lets `sign` run is read the
-> same way. Dependabot is not run either. Every other stage runs below.
-> `<OWNER>` stands for your GitHub user or organization.
+> default branch, so a pull request cannot run them. The release workflow
+> `bookstore-release.yml` does, and it was dispatched on `main` twice. The
+> first run signed correctly and found five defects in the workflows around
+> the signing; the second run is the one that worked. Steps 8, 10 and 12
+> quote what the runs showed, in blocks the evidence check reads like the
+> rest, and the end of step 12 lists what is still unproven. Those runs are
+> the guide repository's own, so the output there names it; the commands use
+> `<OWNER>` and `<REPO>`. Dependabot is not run. Every other stage runs below.
 
 ### 0. The scanner runner
 
@@ -366,6 +376,36 @@ local files that need no network or account. **gosec** knows Go's pitfalls
 across functions, which the other two cannot; it runs only on GitHub's
 runners, and the job counts its SARIF so a fork PR still gets the gate. It
 has run there for each Go service (CodeQL CLI 2.27.3) and reported no results.
+The release run's `catalog` leg shows the counts. Its first run also showed an
+error annotation on a green job, because the analyze step tries to upload the
+CodeQL database, the job has no `security-events` permission, and the upload
+retried for nearly two minutes before giving up. The job counts the SARIF
+itself, so the upload is now off (`upload-database: false`).
+
+```sh
+SAST=<ID of the "release (catalog) / sast" job in the second run>
+gh api repos/$REPO/actions/jobs/$SAST/logs | sed -E 's/^[0-9T:.-]+Z //' | grep -E '^(\[36/36 eval|CodeQL results:|  upload-database:)'
+gh api repos/$REPO/actions/jobs/<ID of the first run's job>/logs | sed -E 's/^[0-9T:.-]+Z //' | grep -E '^(CodeQL results:|##\[error\]|##\[warning\]Failed to upload)' | cut -c1-110
+```
+
+<!-- gate: output -->
+
+```text
+  upload-database: false
+[36/36 eval 148ms] Evaluation done; writing results to codeql/go-queries/Security/CWE-681/IncorrectIntegerConversionQuery.bqrs.
+CodeQL results: 0
+```
+
+<!-- gate: output -->
+
+```text
+##[error]Maximum retry attempts exhausted (4), aborting database upload
+##[warning]Failed to upload database for go: Resource not accessible by integration - https://docs.github.com/
+CodeQL results: 0
+```
+
+The first block is the second run: 36 of 36 queries evaluated, 0 results, no
+database upload. The second is the first run: 0 results and the failed upload.
 
 ```sh
 $scan semgrep examples/bookstore/app
@@ -544,7 +584,7 @@ scan.sh: control ok, grype reported CVE-2021-38561 on scan-reports/sbom.cdx.json
 scan.sh: control ok, trivy-sbom reported CVE-2021-38561 on scan-reports/sbom.cdx.json
 ```
 
-### 8. `sign`: push, keyless signature, SBOM, provenance (read, not run)
+### 8. `sign`: push, keyless signature, SBOM, provenance
 
 This job runs only on a push to `main`, and only when **every other job**
 passed. It loads the tar, pushes it, **reads the digest the registry computed**
@@ -598,8 +638,175 @@ This one does not. It is also only as strong as who can write to `main`; see
 the Production notes. The identity names the reusable workflow's file because
 that job requests the token.
 
-This is the one stage with no run here; its first proof is the first CI run
-on a repo with a registry.
+**The first real run.** A pull request cannot run this stage, so the guide's
+repository proves it with `bookstore-release.yml`, which refuses to run
+anywhere but the default branch and sends one service through the pipeline
+with `publish` on:
+
+```sh
+gh workflow run bookstore-release.yml --ref main -f service=catalog
+REPO=<OWNER>/<REPO>
+RUN=<RUN_ID>
+gh run view $RUN --repo $REPO --json event,headBranch,conclusion,jobs --jq '"\(.event) on \(.headBranch): \(.conclusion)", (.jobs[] | "  \(.name): \(.conclusion)")'
+```
+
+It was dispatched twice. The first run proved the signing and found defects in
+the promotion that follows it (step 12). This is the second, and every job in
+it passed, `sign` among them:
+
+<!-- gate: output -->
+
+```text
+workflow_dispatch on main: success
+  release (catalog) / workflow-hardening: success
+  release (catalog) / secrets: success
+  release (catalog) / sast: success
+  release (catalog) / sca: success
+  release (catalog) / image-lint: success
+  release (catalog) / build-test: success
+  release (catalog) / manifests: success
+  release (catalog) / sbom: success
+  release (catalog) / image-scan: success
+  release (catalog) / dast: success
+  release (catalog) / sign: success
+  promote (catalog): success
+  checks on the promotion PR (catalog): success
+```
+
+Inside `sign`, these are its steps and what the attestation step logged,
+including the Rekor entry that makes the signature publicly auditable:
+
+```sh
+SIGN=<ID of the "release (catalog) / sign" job>
+gh api repos/$REPO/actions/jobs/$SIGN --jq '.steps[] | select(.name | test("Push|Cosign|attest")) | "\(.name): \(.conclusion)"'
+gh api repos/$REPO/actions/jobs/$SIGN/logs | sed -E 's/^[0-9T:.-]+Z //' | grep -E -A1 'Attestation (signature uploaded|uploaded to repository)'
+```
+
+<!-- gate: output -->
+
+```text
+Push, and read the digest the registry computed: success
+Cosign, sign the digest and attach the SBOM: success
+Run actions/attest-build-provenance@4d101475d8b20a2381f78447822ac1eab6504dd8: success
+```
+
+<!-- gate: output -->
+
+```text
+Attestation signature uploaded to Rekor transparency log
+https://search.sigstore.dev?logIndex=3607069208
+Attestation uploaded to repository
+https://github.com/abd-ulbasit/bookstore-kubernetes-guide/attestations/62001352
+```
+
+The registry computed the digest, so the workflow read it back from its own
+log, and so does a consumer. Verify from the outside, as a consumer would, with
+an empty `DOCKER_CONFIG` so that no stored login helps. The identity is the
+exact string from above:
+
+```sh
+IMAGE=ghcr.io/<OWNER>/bookstore-catalog@sha256:<DIGEST>
+ID="https://github.com/$REPO/.github/workflows/bookstore-pipeline.yml@refs/heads/main"
+cosign verify --certificate-identity "$ID" \
+  --certificate-oidc-issuer https://token.actions.githubusercontent.com "$IMAGE" 2>&1 >/dev/null | grep -E '^(Verification for|  - )'
+```
+
+<!-- gate: output -->
+
+```text
+Verification for ghcr.io/abd-ulbasit/bookstore-catalog@sha256:eaa26ada0a2e1575026a5e71e74572ed0bfdde80f50012e91a7be28f0de16ced --
+  - The cosign claims were validated
+  - Existence of the claims in the transparency log was verified offline
+  - The code-signing certificate was verified using trusted certificate authority certificates
+```
+
+The same command with the branch changed to `other` is refused, and the error
+says what the certificate actually names. This tests the identity match. It
+does not test a signature made from another branch, because the `if:` stops
+one from existing:
+
+```sh
+cosign verify --certificate-identity "${ID%main}other" --certificate-oidc-issuer https://token.actions.githubusercontent.com "$IMAGE" 2>&1 | head -1; echo "exit status: ${PIPESTATUS[0]}"
+```
+
+<!-- gate: output -->
+
+```text
+Error: no matching attestations: failed to verify certificate identity: no matching CertificateIdentity found, last error: expected SAN value "https://github.com/abd-ulbasit/bookstore-kubernetes-guide/.github/workflows/bookstore-pipeline.yml@refs/heads/other", got "https://github.com/abd-ulbasit/bookstore-kubernetes-guide/.github/workflows/bookstore-pipeline.yml@refs/heads/main"
+exit status: 1
+```
+
+The SBOM is attached to the same digest as a CycloneDX attestation signed by
+the same identity. Verified, decoded and counted:
+
+```sh
+cosign verify-attestation --type cyclonedx --certificate-identity "$ID" --certificate-oidc-issuer https://token.actions.githubusercontent.com "$IMAGE" 2>/dev/null | jq -r .payload | base64 -d | jq '{bomFormat: .predicate.bomFormat, specVersion: .predicate.specVersion, components: (.predicate.components | length)}'
+```
+
+<!-- gate: output -->
+
+```text
+{
+  "bomFormat": "CycloneDX",
+  "specVersion": "1.7",
+  "components": 972
+}
+```
+
+The SLSA provenance is checked with `gh attestation verify`, which prints its
+report only on a terminal, hence `GH_FORCE_TTY` here. `--repo` alone is looser
+than the cosign check above: the policy it enforces ends at the repository
+name, so it accepts any workflow and branch in the repository:
+
+```sh
+GH_FORCE_TTY=100 gh attestation verify oci://$IMAGE --repo $REPO 2>&1 | grep 'Subject Alternative Name'
+```
+
+<!-- gate: output -->
+
+```text
+- Subject Alternative Name must match regex: (?i)^https://github.com/abd-ulbasit/bookstore-kubernetes-guide/
+```
+
+So pin the identity here as well, with `--cert-identity`. The report says which
+workflow built the image and which one signed it:
+
+```sh
+GH_FORCE_TTY=100 gh attestation verify oci://$IMAGE --repo $REPO --cert-identity "$ID"
+```
+
+<!-- gate: output -->
+
+```text
+- Subject Alternative Name must match:... https://github.com/abd-ulbasit/bookstore-kubernetes-guide/.github/workflows/bookstore-pipeline.yml@refs/heads/main
+- OIDC Issuer must match:................ https://token.actions.githubusercontent.com
+✓ Verification succeeded!
+# ...
+- Attestation #1
+  - Build repo:..... abd-ulbasit/bookstore-kubernetes-guide
+  - Build workflow:. .github/workflows/bookstore-release.yml@refs/heads/main
+  - Signer repo:.... abd-ulbasit/bookstore-kubernetes-guide
+  - Signer workflow: .github/workflows/bookstore-pipeline.yml@refs/heads/main
+```
+
+Last, the package is public. An anonymous token from ghcr.io fetches the
+manifest without any login:
+
+```sh
+TOKEN=$(curl -fsS "https://ghcr.io/token?scope=repository:<OWNER>/bookstore-catalog:pull" | jq -r .token)
+curl -fsS -o /dev/null -w '%{http_code}\n' -H "Authorization: Bearer $TOKEN" -H 'Accept: application/vnd.oci.image.index.v1+json, application/vnd.oci.image.manifest.v1+json' "https://ghcr.io/v2/<OWNER>/bookstore-catalog/manifests/$DIGEST"
+```
+
+<!-- gate: output -->
+
+```text
+200
+```
+
+What that shows: one workflow, on `main`, pushed this digest, signed it with
+its own identity, and attached an SBOM and a provenance statement that a
+consumer checks with public tools and no login. What it does not show is in the
+list at the end of step 12.
 
 ### 9. `manifests`: KubeLinter, kubesec, Trivy config
 
@@ -688,10 +895,10 @@ scan.sh: control ok, expiry reported lapsed on 2020-01-01 on full-guide/examples
 scan.sh: control ok, expiry reported no Revisit by DATE on full-guide/examples/bookstore/ci/fixtures/vulnerable/exceptions.conf
 ```
 
-Two more tools sit in the pipeline's jobs, and neither gates the build.
-Harden-Runner has run in the guide's own CI. Scorecard has not, because it
-runs only on the default branch. What is said about both of them here comes
-from their documentation, except where it says a run showed it.
+Two more tools sit in the pipeline's jobs, and neither gates the build. Both
+have run: Harden-Runner is the first step of every job in every run, and
+Scorecard ran once, in the second release run. What is said about them here
+comes from their documentation, except where it says a run showed it.
 
 - **Harden-Runner** is the first step of every job, in `egress-policy: audit`.
   Per its [documentation](https://docs.stepsecurity.io/harden-runner), audit
@@ -718,8 +925,194 @@ from their documentation, except where it says a run showed it.
 
 - **Scorecard** grades the repository's habits (branch protection, pinned
   dependencies, token permissions; the list of
-  [checks](https://github.com/ossf/scorecard#scorecard-checks)) and runs on
-  the default branch only. It produces a score and fails nothing.
+  [checks](https://github.com/ossf/scorecard#scorecard-checks)). It produces a
+  score and fails nothing, and it runs on the default branch only, on a push or
+  a dispatch.
+
+**What the release runs showed about Harden-Runner.** In the second run all
+thirteen jobs ran it. For `workflow-hardening` it printed its three markers and
+a link to the job's insights page:
+
+```sh
+HARDEN=<ID of the "release (catalog) / workflow-hardening" job>
+gh api repos/$REPO/actions/jobs/$HARDEN/logs | sed -E 's/^[0-9T:.-]+Z //' | grep -E '^(\[harden-runner\]|https://app.stepsecurity.io)'
+```
+
+<!-- gate: output -->
+
+```text
+[harden-runner] pre-step
+https://app.stepsecurity.io/github/abd-ulbasit/bookstore-kubernetes-guide/actions/runs/41154561661
+[harden-runner] main-step
+https://app.stepsecurity.io/github/abd-ulbasit/bookstore-kubernetes-guide/actions/runs/41154561661
+[harden-runner] post-step
+```
+
+Its post step lists every outbound host, with the process that called it.
+These are all the hosts `workflow-hardening` reached:
+
+```sh
+gh api repos/$REPO/actions/jobs/$HARDEN/logs | sed -E 's/^[0-9T:.-]+Z //' | grep -o 'domain: [^,]*' | sort | uniq -c
+```
+
+<!-- gate: output -->
+
+```text
+   1 domain: api.deps.dev.
+   1 domain: api.github.com.
+   1 domain: api.osv.dev.
+   2 domain: auth.docker.io.
+   1 domain: codeload.github.com.
+   1 domain: gcr.io.
+   1 domain: ghcr.io.
+   1 domain: github.com.
+   1 domain: index.docker.io.
+   1 domain: oss-fuzz-build-logs.storage.googleapis.com.
+   1 domain: pkg-containers.githubusercontent.com.
+   1 domain: production.cloudfront.docker.com.
+   1 domain: productionresultssa17.blob.core.windows.net.
+   1 domain: registry-1.docker.io.
+   1 domain: results-receiver.actions.githubusercontent.com.
+   1 domain: tuf-repo-cdn.sigstore.dev.
+   1 domain: www.bestpractices.dev.
+```
+
+Nine of those were called by the `scorecard-action` process, which reads
+GitHub, OSV, deps.dev, the OpenSSF badge site, Docker Hub, gcr.io and OSS-Fuzz's
+build logs to grade the repository:
+
+```sh
+gh api repos/$REPO/actions/jobs/$HARDEN/logs | sed -E 's/^[0-9T:.-]+Z //' | grep 'process: scorecard-action' | grep -o 'domain: [^,]*' | sort -u
+```
+
+<!-- gate: output -->
+
+```text
+domain: api.deps.dev.
+domain: api.github.com.
+domain: api.osv.dev.
+domain: auth.docker.io.
+domain: codeload.github.com.
+domain: gcr.io.
+domain: index.docker.io.
+domain: oss-fuzz-build-logs.storage.googleapis.com.
+domain: www.bestpractices.dev.
+```
+
+In `sign`, the hosts the `cosign` process called are Sigstore's (the TUF mirror,
+Fulcio, the timestamp authority and Rekor), GitHub's OIDC endpoint and ghcr.io:
+
+```sh
+gh api repos/$REPO/actions/jobs/$SIGN/logs | sed -E 's/^[0-9T:.-]+Z //' | grep 'process: cosign' | grep -o 'domain: [^,]*' | sort -u
+```
+
+<!-- gate: output -->
+
+```text
+domain: fulcio.sigstore.dev.
+domain: ghcr.io.
+domain: rekor.sigstore.dev.
+domain: run-actions-1-azure-eastus.actions.githubusercontent.com.
+domain: timestamp.sigstore.dev.
+domain: tuf-repo-cdn.sigstore.dev.
+```
+
+A block-mode list for either job would have to carry those. It would also be
+one run's record, not a promise about the next run.
+
+**What the release runs showed about Scorecard.** It did not run in the first
+release run. Its step said `push`, a release is a dispatch, and the step was
+`skipped`. The step now accepts a dispatch from the default branch, and ran in
+the second run. The two runs, side by side:
+
+```sh
+gh api repos/$REPO/actions/jobs/<ID of the first run's job> --jq '.steps[] | select(.name | test("Scorecard")) | "\(.name): \(.conclusion)"'
+gh api repos/$REPO/actions/jobs/$HARDEN --jq '.steps[] | select(.name | test("Scorecard")) | "\(.name): \(.conclusion)"'
+```
+
+<!-- gate: output -->
+
+```text
+OpenSSF Scorecard (default branch only): skipped
+```
+
+<!-- gate: output -->
+
+```text
+OpenSSF Scorecard (default branch only): success
+Scorecard aggregate score: success
+Scorecard produced no result: skipped
+```
+
+The action reported the trigger it saw, then the aggregate score the workflow
+prints from Scorecard's JSON, and each check:
+
+```sh
+gh api repos/$REPO/actions/jobs/$HARDEN/logs | sed -E 's/^[0-9T:.-]+Z //' | grep -E '^  (Event name|Default branch|Publication enabled):'
+gh api repos/$REPO/actions/jobs/$HARDEN/logs | sed -E 's/^[0-9T:.-]+Z //' | grep -A18 '^Scorecard aggregate score'
+```
+
+<!-- gate: output -->
+
+```text
+  Event name: workflow_dispatch
+  Publication enabled: false
+  Default branch: main
+```
+
+<!-- gate: output -->
+
+```text
+Scorecard aggregate score: 6.7 / 10
+  10    Maintained
+  0 Code-Review
+  10    Security-Policy
+  10    Dependency-Update-Tool
+  10    Dangerous-Workflow
+  10    Token-Permissions
+  10    Binary-Artifacts
+  0 CII-Best-Practices
+  10    SAST
+  10    Packaging
+  10    License
+  0 Vulnerabilities
+  0 Fuzzing
+  3 Branch-Protection
+  -1    Signed-Releases
+  0 Contributors
+  6 Pinned-Dependencies
+  10    CI-Tests
+```
+
+That is **6.7 out of 10** for this repository, Scorecard v5.6.0 run through the
+v2.5.0 action: one run's reading, not a trend. The checks under 10 give their
+reasons in Scorecard's own words:
+
+```sh
+gh api repos/$REPO/actions/jobs/$HARDEN/logs | sed -E 's/^[0-9T:.-]+Z //' | grep '^{"date"' | jq -r '.checks[] | select(.score < 10) | "\(.name) \(.score): \(.reason)"'
+```
+
+<!-- gate: output -->
+
+```text
+Code-Review 0: Found 0/2 approved changesets -- score normalized to 0
+CII-Best-Practices 0: no effort to earn an OpenSSF best practices badge detected
+Vulnerabilities 0: 49 existing vulnerabilities detected
+Fuzzing 0: project is not fuzzed
+Branch-Protection 3: branch protection is not maximal on development and all release branches
+Signed-Releases -1: no releases found
+Contributors 0: project has 0 contributing companies or organizations -- score normalized to 0
+Pinned-Dependencies 6: dependency not pinned by hash detected -- score normalized to 6
+```
+
+Read them against the repository, not the number. Code-Review and
+Branch-Protection describe how `main` is run; this repository's ruleset on it
+blocks deleting the branch and force pushes and requires no review and no
+check (step 12 records that). Vulnerabilities reports 49 known vulnerabilities
+in the repository's dependencies. This chapter did not look into them, and a 0
+there is a prompt to, not a finding about the Bookstore services, whose own
+dependencies `sca` scans. Signed-Releases is -1 because the repository has no
+releases.
 
 Go back into `full-guide/` and reset the variable for the last stage:
 
@@ -821,25 +1214,320 @@ WARN-NEW: Session Management Response Identified [10112] x 1
 FAIL-NEW: 0     FAIL-INPROG: 0  WARN-NEW: 3     WARN-INPROG: 0  INFO: 6 IGNORE: 0       PASS: 59
 ```
 
-### 12. The seam: from signed digest to Git (local approximation)
+### 12. The seam: from signed digest to Git
 
 `bump-manifests` is the only job that writes to Git, and it writes a **pull
-request**, not a push. You can run what it does against a placeholder digest
-(it needs the standalone `kustomize` binary):
+request**, not a push. In the guide's repository the same job is `promote` in
+`bookstore-release.yml`. It edits one small file,
+`overlays/prod/images/kustomization.yaml`: a Kustomize Component that holds only
+the image pins, which the prod overlay lists under `components:`. The local form
+needs the standalone `kustomize` binary and a placeholder digest. It was not
+recorded for this chapter; the runner's own output below was:
 
 ```sh
-cd examples/bookstore/kustomize/overlays/prod
+cd examples/bookstore/kustomize/overlays/prod/images
 kustomize edit set image \
   bookstore/catalog=ghcr.io/<OWNER>/bookstore-catalog@sha256:0000000000000000000000000000000000000000000000000000000000000000
-git diff kustomization.yaml     # THIS diff is what Argo CD would sync
+git diff --stat .               # one file, a few lines
 git checkout -- kustomization.yaml
-cd ../../../../..               # back to full-guide/
+cd ../../../../../..            # back to full-guide/
 ```
 
-That edit and a merge are the whole "deploy". CI holds no cluster
-credential. The job installs kustomize from a pinned release **and checks its
-sha256**, then opens the PR with `peter-evans/create-pull-request`. Require a
-review by branch protection, or the bot can merge its own promotion.
+That edit and a merge are the whole "deploy". CI holds no cluster credential.
+The job installs kustomize from a pinned release **and checks its sha256**,
+then opens the PR with `peter-evans/create-pull-request`. Require a review by
+branch protection, or the bot can merge its own promotion.
+
+#### The first promotion could not be reviewed
+
+The first dispatch signed and attested correctly, and then opened a pull
+request nobody could review. Its job had run `kustomize edit set image` in
+`overlays/prod`, on the file that held the pins together with the patches, the
+comments and the namespace quota. `kustomize edit` writes a file back from its
+own model of it; it does not change the one line you meant. The job logged what
+it had done:
+
+```sh
+gh api repos/$REPO/actions/jobs/<ID of the first run's promote job>/logs | sed -E 's/^[0-9T:.-]+Z //' | grep -B1 -E '^ [0-9]+ files? changed' | head -2
+```
+
+<!-- gate: output -->
+
+```text
+ .../kustomize/overlays/prod/kustomization.yaml     | 288 ++++++++++-----------
+ 1 file changed, 143 insertions(+), 145 deletions(-)
+```
+
+One image pin had become 143 added and 145 removed lines: the lists
+re-indented, the patches moved below the images, the comments left above
+patches that were no longer there. Merging that pull request is the production
+deploy, so this is a security defect, not a cosmetic one. A reviewer cannot see
+what is about to be deployed in a rewrite of 288 lines.
+
+It had two more defects. Its body held the template's `OWNER`, `REPO` and
+`DIGEST` unfilled, so the verification command in it could not be pasted. And
+that command matched the signing identity with a regular expression ending in
+`@.*`, which accepts a signature from any branch, the mistake step 8 warns about:
+
+```sh
+gh pr view 8 --repo $REPO --json body --jq .body | grep -E 'OWNER|REPO|DIGEST'
+```
+
+<!-- gate: output -->
+
+```text
+    cosign verify ghcr.io/OWNER/bookstore-catalog@DIGEST \
+      --certificate-identity-regexp 'https://github.com/OWNER/REPO/.github/workflows/bookstore-pipeline.yml@.*' \
+```
+
+And it showed no checks:
+
+```sh
+gh pr view 8 --repo $REPO --json statusCheckRollup --jq '.statusCheckRollup | length'
+```
+
+<!-- gate: output -->
+
+```text
+0
+```
+
+The docs say why. Events triggered by the `GITHUB_TOKEN` do not create new
+workflow runs, except `workflow_dispatch` and `repository_dispatch`
+([GITHUB_TOKEN](https://docs.github.com/en/actions/concepts/security/github_token),
+section "When GITHUB_TOKEN triggers workflow runs"). The run list shows a little
+more than that. When the second promotion PR opened, GitHub did create the five
+`pull_request` runs, with no jobs, and left them at `action_required`; none of
+them ever produced a check. The three `failure` rows are the same kind of run
+from the first PR, as they read after it was closed:
+
+```sh
+gh run list --repo $REPO --branch ci/promote-catalog --limit 10 --json databaseId,workflowName,status,conclusion,event,headSha --jq '.[]|[.databaseId,.workflowName,.status,.conclusion,.event,.headSha[0:7]]|@tsv'
+```
+
+<!-- gate: output -->
+
+```text
+41155073279 security-gates  in_progress     workflow_dispatch   0a137b8
+41155071392 example-trees-check in_progress     workflow_dispatch   0a137b8
+41155056676 secret-scan completed   action_required pull_request    0a137b8
+41155056641 security-gates  completed   action_required pull_request    0a137b8
+41155056931 docs    completed   action_required pull_request    0a137b8
+41155056744 security-scan   completed   action_required pull_request    0a137b8
+41155056756 example-trees-check completed   action_required pull_request    0a137b8
+41152171565 docs    completed   failure pull_request    0c95d61
+41152171727 secret-scan completed   failure pull_request    0c95d61
+41152171604 security-gates  completed   failure pull_request    0c95d61
+```
+
+The fixes are in `bookstore-release.yml` and the tree:
+
+- **The pins live in their own file.** They moved out of the prod overlay into
+  `overlays/prod/images/`, a Component that holds only an `images:` list, in
+  the shape `kustomize edit` writes. The prod, staging and dev renders are
+  byte-identical to before the move (`cmp` on `kubectl kustomize`), and prod is
+  still 48 objects. The promote job fails before it opens the PR if its edit
+  touches any other file or changes more than 8 lines.
+- **The body is written from the run's own values**: owner, repository,
+  digest, a link to the run, a `cosign verify` with the exact identity and a
+  `gh attestation verify --cert-identity` with the same one.
+- **The PR gets checks.** A separate `checks` job, with `actions: write` and no
+  other permission, dispatches `example-trees-check.yml` (the prod overlay still
+  renders 48 objects) and `security-gates.yml` (the gates, including the
+  runtime gate that deploys the prod overlay) on the PR's branch. A dispatch is
+  exempt from the `GITHUB_TOKEN` rule, and creating one needs the Actions
+  permission at write level
+  ([permissions](https://docs.github.com/en/rest/authentication/permissions-required-for-github-apps)).
+  If the checks are missing, closing and reopening the PR as a person runs the
+  `pull_request` workflows normally; the second PR was reopened to test that.
+
+#### The second promotion
+
+The same dispatch from the fixed `main` produced the run quoted in step 8. The
+promote job logged its own guard: the diff stat, then the count it checks
+against the limit of 8.
+
+```sh
+PROMOTE=<ID of the "promote (catalog)" job>
+gh api repos/$REPO/actions/jobs/$PROMOTE/logs | sed -E 's/^[0-9T:.-]+Z //' | grep -B2 '^changed lines:'
+```
+
+<!-- gate: output -->
+
+```text
+ .../bookstore/kustomize/overlays/prod/images/kustomization.yaml     | 6 +++---
+ 1 file changed, 3 insertions(+), 3 deletions(-)
+changed lines: 6
+```
+
+The whole pull request, as a reviewer saw it:
+
+```sh
+gh pr diff 10 --repo $REPO
+```
+
+<!-- gate: output -->
+
+```text
+diff --git a/full-guide/examples/bookstore/kustomize/overlays/prod/images/kustomization.yaml b/full-guide/examples/bookstore/kustomize/overlays/prod/images/kustomization.yaml
+index 8e7c6f0..79b21a7 100644
+--- a/full-guide/examples/bookstore/kustomize/overlays/prod/images/kustomization.yaml
++++ b/full-guide/examples/bookstore/kustomize/overlays/prod/images/kustomization.yaml
+@@ -23,9 +23,9 @@
+ apiVersion: kustomize.config.k8s.io/v1alpha1
+ kind: Component
+ images:
+-- name: bookstore/catalog
+-  newName: registry.example.com/bookstore/catalog
+-  newTag: 1.0.0
++- digest: sha256:eaa26ada0a2e1575026a5e71e74572ed0bfdde80f50012e91a7be28f0de16ced
++  name: bookstore/catalog
++  newName: ghcr.io/abd-ulbasit/bookstore-catalog
+ - name: bookstore/orders
+   newName: registry.example.com/bookstore/orders
+   newTag: 1.0.0
+```
+
+The digest is the one `sign` pushed, and the body has no placeholders left:
+
+```sh
+gh pr view 10 --repo $REPO --json body --jq .body | grep -c -E 'OWNER|REPO|DIGEST'
+```
+
+<!-- gate: output -->
+
+```text
+0
+```
+
+The `checks` job dispatched both workflows, using the `GITHUB_TOKEN` and the one
+permission it holds:
+
+```sh
+CHECKS=<ID of the "checks on the promotion PR" job>
+gh api repos/$REPO/actions/jobs/$CHECKS/logs | sed -E 's/^[0-9T:.-]+Z //' | grep '^dispatched'
+```
+
+<!-- gate: output -->
+
+```text
+dispatched example-trees-check.yml on ci/promote-catalog
+dispatched security-gates.yml on ci/promote-catalog
+```
+
+Both finished green on the PR's branch. The security gates include the runtime
+gate for `kustomize-prod`, which deploys the prod overlay into a `restricted`
+namespace with the promoted digest in place:
+
+```sh
+gh run view <ID of the dispatched security-gates run> --repo $REPO --json jobs --jq '.jobs[] | select(.name | test("runtime")) | "\(.name): \(.conclusion)"'
+```
+
+<!-- gate: output -->
+
+```text
+G4 runtime (kustomize-prod): success
+G4 runtime (kustomize-dev): success
+G4 runtime (helm): success
+G4 runtime (kustomize-staging): success
+G4 runtime (raw): success
+```
+
+<!-- gate: output -->
+
+```text
+kustomize-counts: success
+```
+
+That gate needed a fix to survive this. It used to retag the local image to the
+tag in the prod overlay, and a digest pin leaves no tag to retag to. This was
+found by reading the gate before the promotion could break it, and the old form
+was not run against a digest. The gate now deploys a copy of the tree in which
+only `overlays/prod/images/kustomization.yaml` points each pin at the image the
+gate built.
+
+The PR was closed and reopened by a person to test the fallback. After that its
+`pull_request` workflows ran for real, beside the bot's five that had failed
+when the PR was closed:
+
+```sh
+gh api "repos/$REPO/actions/runs?branch=ci/promote-catalog&per_page=50" --jq '.workflow_runs[] | select(.event == "pull_request" and (.head_sha | startswith("<SHA>"))) | "\(.name) by \(.triggering_actor.login): \(.conclusion)"' | sort
+```
+
+<!-- gate: output -->
+
+```text
+docs by abd-ulbasit: success
+docs by github-actions[bot]: failure
+example-trees-check by abd-ulbasit: success
+example-trees-check by github-actions[bot]: failure
+secret-scan by abd-ulbasit: success
+secret-scan by github-actions[bot]: failure
+security-gates by abd-ulbasit: success
+security-gates by github-actions[bot]: failure
+security-scan by abd-ulbasit: success
+security-scan by github-actions[bot]: failure
+```
+
+Merging it was the deploy. On `main`, the prod overlay still renders 48 objects
+and pins the promoted digest:
+
+```sh
+git log -1 --format=%s
+kubectl kustomize examples/bookstore/kustomize/overlays/prod | grep -c '^kind:'
+kubectl kustomize examples/bookstore/kustomize/overlays/prod | grep 'image:.*catalog'
+```
+
+<!-- gate: output -->
+
+```text
+ci: promote catalog to prod (signed digest)
+```
+
+<!-- gate: output -->
+
+```text
+48
+```
+
+<!-- gate: output -->
+
+```text
+        image: ghcr.io/abd-ulbasit/bookstore-catalog@sha256:eaa26ada0a2e1575026a5e71e74572ed0bfdde80f50012e91a7be28f0de16ced
+```
+
+#### What is still unproven
+
+- **A failing gate on a publishing run.** Both dispatches passed every gate.
+  That a failed gate leaves nothing pushed and nothing signed rests on the `if:`
+  of `sign`, which is read here, not run.
+- **A cluster that pulls the digest.** The merge changed what `overlays/prod`
+  names. No Argo CD synced it and no cluster pulled the image from ghcr.io, and
+  nothing at admission checks the signature (05.07 does that). The runtime gate
+  runs images it builds itself from the same Dockerfiles, not the pushed digest.
+- **The other three services.** Only `catalog` was released. The `orders`,
+  `payments-worker` and `storefront` pins still name the placeholder registry.
+- **Block mode and trend.** Harden-Runner has only run in audit mode, and the
+  Scorecard result is a single reading.
+
+And one gap that is a setting, not a test. The ruleset on `main` here is:
+
+```sh
+gh api repos/$REPO/rulesets/<ID> --jq '[.name, .enforcement, (.rules | map(.type) | join(", "))] | join(": ")'
+```
+
+<!-- gate: output -->
+
+```text
+protect main: active: deletion, non_fast_forward
+```
+
+It blocks deleting `main` and force pushes, and requires no pull request, no
+review and no check. The promotion was merged by pushing its commit, and
+nothing in the repository's settings asked for a second person or a passing
+check first. The setting that lets Actions open pull requests is one switch for
+two powers: it also lets a workflow approve one. Pair it with a ruleset that
+requires a human review, as the Production notes say.
 
 ### 13. What the first run found
 
@@ -855,6 +1543,15 @@ reason, and each one that accepts a risk carries a date:
 | `image-lint` | Dockle read `KEY_SHA512` in nginx's build script as a secret | Accepted in `scan.sh`: it is the checksum of nginx's public key |
 | `manifests` | KubeLinter: `no-anti-affinity` on orders, `job-ttl-seconds-after-finished` on the cleanup CronJob | Excluded in `ci/kube-linter.yaml`: availability and operations, not the baseline |
 | `dast` | Nine ZAP rules across catalog, orders and storefront | Accepted as INFO in `ci/zap/baseline.conf` |
+| `promote` | `kustomize edit set image` rewrote the whole prod overlay: 143 lines added and 145 removed for one pin | **Fixed**: the pins live in `overlays/prod/images/`, and the job fails on any other file or more than 8 changed lines |
+| `promote` | The PR body kept `OWNER`, `REPO` and `DIGEST`, and its `cosign verify` accepted a signature from any branch | **Fixed**: written from the run's values, with the exact identity |
+| `promote` | The PR showed no checks, because the `pull_request` runs GitHub created for it never started | **Fixed**: a `checks` job dispatches the overlay check and the gates on the PR's branch |
+| `workflow-hardening` | Scorecard was skipped: its condition said `push` and a release is a dispatch | **Fixed**: it runs on a dispatch from the default branch; the result is in step 10 |
+| `sast` | The CodeQL database upload retried for nearly two minutes and left an error annotation on a green job | **Fixed**: `upload-database: false`, because the job counts the SARIF itself |
+| G4, `kustomize-prod` | A digest pin leaves no tag for the gate to retag the local image to | **Fixed** before it failed: found by reading, not by a run |
+
+The last six rows came from the release workflow's first run, which exercised
+what no pull request can.
 
 Dates are enforced in two ways, and only two. Trivy honors `expired_at` itself,
 so the brotli-libs entry stops applying on its date and the build goes red
@@ -967,7 +1664,7 @@ $scan syft scan-out/catalog.tar && $scan grype scan-reports/sbom.cdx.json
 The CI to GitOps seam, as `bump-manifests` runs it (placeholder digest):
 
 ```sh
-cd examples/bookstore/kustomize/overlays/prod
+cd examples/bookstore/kustomize/overlays/prod/images
 kustomize edit set image bookstore/catalog=ghcr.io/<OWNER>/bookstore-catalog@sha256:<DIGEST>
 git add kustomization.yaml && git commit -m "ci: bump catalog digest"   # Argo CD (ch.04) syncs this
 ```
@@ -1007,6 +1704,10 @@ Checklist:
 - [ ] Every `uses:` is a **commit SHA**; `permissions: {}` at the top, scoped
       per job; zizmor and actionlint clean; Harden-Runner on every job,
       moved from `audit` to `block` once its allowlist is recorded
+- [ ] The promotion edits a file that holds **only the pins** and fails if it
+      changes anything else; a reviewer can read the whole diff
+- [ ] The promotion PR gets **checks** (dispatch them, or have a person reopen
+      it), and the signature is verified by **exact identity** before the merge
 - [ ] Every accepted exception has a **date that something enforces**
       (Trivy's `expired_at`, or the `expiry` check)
 - [ ] `cosign verify` names the **exact identity, branch included**

@@ -29,12 +29,15 @@ name: bookstore-release
 # could not tell what was being deployed. The job also fails, before it opens
 # the PR, if the edit touches any other file or changes more than 8 lines.
 #
-# WHY THE PR HAS NO CHECKS OF ITS OWN. A pull request opened with GITHUB_TOKEN
-# triggers no workflows: the docs say that events triggered by the GITHUB_TOKEN
-# do not create a new workflow run, except workflow_dispatch and
-# repository_dispatch
+# WHY THE PR HAS NO CHECKS OF ITS OWN. The docs say that events triggered by
+# the GITHUB_TOKEN do not create a new workflow run, except workflow_dispatch
+# and repository_dispatch
 # (https://docs.github.com/en/actions/concepts/security/github_token, section
-# "When GITHUB_TOKEN triggers workflow runs"). So the `checks` job dispatches
+# "When GITHUB_TOKEN triggers workflow runs"). What happened here is a little
+# different: for a PR opened this way GitHub created the five pull_request runs
+# (docs, example-trees-check, secret-scan, security-gates, security-scan) with
+# no jobs and left them at action_required, and closing the PR turned them into
+# failures. Either way the PR showed no checks. So the `checks` job dispatches
 # the two workflows that judge what this PR changes, on the PR's branch:
 #
 #   example-trees-check.yml   the prod overlay still renders 48 objects (ADR 0007)
@@ -55,8 +58,8 @@ name: bookstore-release
 # this file. secret-scan is left out: its failure job files a rolling issue on
 # any non-PR event.
 # If the checks are missing (the dispatch failed, or you want the PR event),
-# close the PR and reopen it: a person's reopen triggers the pull_request
-# workflows.
+# close the PR and reopen it. That was tested: a person's reopen made all five
+# pull_request workflows run, and they passed.
 #
 # Set up once in the repository (Settings, Actions, General): allow GitHub
 # Actions to create pull requests. Without it the promotion job fails after
@@ -206,15 +209,19 @@ jobs:
                 --certificate-oidc-issuer https://token.actions.githubusercontent.com \\
                 ${image}
 
-              gh attestation verify oci://${image} --repo ${REPOSITORY}
+              gh attestation verify oci://${image} --repo ${REPOSITORY} \\
+                --cert-identity '${identity}'
 
-          The identity is matched exactly, branch included, so a signature made from
-          any other branch is refused.
+          The identity is matched exactly, branch included, in both commands, so a
+          signature made from any other branch is refused. \`gh attestation verify\`
+          prints its report only on a terminal.
 
-          This PR changes one file. Its checks (the prod overlay still renders, and
-          the security gates) are dispatched on this branch by the \`checks\` job,
-          because a pull request opened with GITHUB_TOKEN triggers no workflows. If
-          they are missing, close and reopen this PR.
+          This PR changes one file. A pull request opened with GITHUB_TOKEN gets no
+          checks of its own: the pull_request runs GitHub creates for it never start
+          a job. The \`checks\` job therefore dispatched the overlay render check and
+          the security gates on this branch, and they appear below. If they are
+          missing, close and reopen this PR, which runs the pull_request workflows
+          normally.
 
           Merging this PR is the production deploy. To roll back, revert it.
           EOF

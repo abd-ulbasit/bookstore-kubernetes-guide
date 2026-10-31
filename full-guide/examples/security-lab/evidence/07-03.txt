@@ -222,3 +222,278 @@ WARN-NEW: Cookie without SameSite Attribute [10054] x 1
 WARN-NEW: Session Management Response Identified [10112] x 1 
 FAIL-NEW: 0     FAIL-INPROG: 0  WARN-NEW: 3     WARN-INPROG: 0  INFO: 6 IGNORE: 0       PASS: 59
 
+# Steps 8, 10 and 12, recorded on 2026-10-31 from GitHub's own runs.
+# Unlike steps 1 to 11, these were not run on the Linux machine. They were
+# run from a Mac with gh 2.90.0, cosign v3.1.4, jq 1.8.1 and kubectl v1.37.2
+# (embedded Kustomize v5.8.1), against the public image and the repository's
+# own Actions runs: run 41154561661 (the second dispatch of
+# bookstore-release.yml, which is the one that worked) and, where a step says
+# so, run 41151540459 (the first, which found the defects). Every section ran
+# with DOCKER_CONFIG pointing at an empty directory, so no stored registry
+# login could help a command. Job logs were fetched with `gh api` and the
+# leading timestamps removed with sed. As above, terminal colour codes are
+# removed and tabs are expanded to spaces. The recorded names are the guide
+# repository's real ones, because the runs are.
+## step 8, the release run (run 41154561661, service catalog)
+$ REPO=abd-ulbasit/bookstore-kubernetes-guide
+$ RUN=41154561661
+$ gh run view $RUN --repo $REPO --json event,headBranch,conclusion,jobs --jq '"\(.event) on \(.headBranch): \(.conclusion)", (.jobs[] | "  \(.name): \(.conclusion)")'
+workflow_dispatch on main: success
+  release (catalog) / workflow-hardening: success
+  release (catalog) / secrets: success
+  release (catalog) / sast: success
+  release (catalog) / sca: success
+  release (catalog) / image-lint: success
+  release (catalog) / build-test: success
+  release (catalog) / manifests: success
+  release (catalog) / sbom: success
+  release (catalog) / image-scan: success
+  release (catalog) / dast: success
+  release (catalog) / sign: success
+  promote (catalog): success
+  checks on the promotion PR (catalog): success
+$ SIGN=$(gh run view $RUN --repo $REPO --json jobs --jq '.jobs[] | select(.name == "release (catalog) / sign") | .databaseId')
+$ gh api repos/$REPO/actions/jobs/$SIGN --jq '.steps[] | select(.name | test("Push|Cosign|attest")) | "\(.name): \(.conclusion)"'
+Push, and read the digest the registry computed: success
+Cosign, sign the digest and attach the SBOM: success
+Run actions/attest-build-provenance@4d101475d8b20a2381f78447822ac1eab6504dd8: success
+$ gh api repos/$REPO/actions/jobs/$SIGN/logs | sed -E 's/^[0-9T:.-]+Z //' | grep -E -A1 'Attestation (signature uploaded|uploaded to repository)'
+Attestation signature uploaded to Rekor transparency log
+https://search.sigstore.dev?logIndex=3607069208
+Attestation uploaded to repository
+https://github.com/abd-ulbasit/bookstore-kubernetes-guide/attestations/62001352
+$ D=$(gh api repos/$REPO/actions/jobs/$SIGN/logs | grep -oE 'digest: sha256:[0-9a-f]{64}' | head -1 | cut -d' ' -f2)
+$ echo $D
+sha256:eaa26ada0a2e1575026a5e71e74572ed0bfdde80f50012e91a7be28f0de16ced
+$ IMAGE=ghcr.io/abd-ulbasit/bookstore-catalog@$D
+$ ID="https://github.com/$REPO/.github/workflows/bookstore-pipeline.yml@refs/heads/main"
+$ cosign verify --certificate-identity "$ID" --certificate-oidc-issuer https://token.actions.githubusercontent.com "$IMAGE" 2>&1 >/dev/null | grep -E '^(Verification for|  - )'
+Verification for ghcr.io/abd-ulbasit/bookstore-catalog@sha256:eaa26ada0a2e1575026a5e71e74572ed0bfdde80f50012e91a7be28f0de16ced --
+  - The cosign claims were validated
+  - Existence of the claims in the transparency log was verified offline
+  - The code-signing certificate was verified using trusted certificate authority certificates
+$ cosign verify --certificate-identity "${ID%main}other" --certificate-oidc-issuer https://token.actions.githubusercontent.com "$IMAGE" 2>&1 | head -1; echo "exit status: ${PIPESTATUS[0]}"
+Error: no matching attestations: failed to verify certificate identity: no matching CertificateIdentity found, last error: expected SAN value "https://github.com/abd-ulbasit/bookstore-kubernetes-guide/.github/workflows/bookstore-pipeline.yml@refs/heads/other", got "https://github.com/abd-ulbasit/bookstore-kubernetes-guide/.github/workflows/bookstore-pipeline.yml@refs/heads/main"
+exit status: 1
+$ cosign verify-attestation --type cyclonedx --certificate-identity "$ID" --certificate-oidc-issuer https://token.actions.githubusercontent.com "$IMAGE" 2>/dev/null | jq -r .payload | base64 -d | jq '{bomFormat: .predicate.bomFormat, specVersion: .predicate.specVersion, components: (.predicate.components | length)}'
+{
+  "bomFormat": "CycloneDX",
+  "specVersion": "1.7",
+  "components": 972
+}
+$ GH_FORCE_TTY=100 gh attestation verify oci://$IMAGE --repo $REPO 2>&1 | grep 'Subject Alternative Name'
+- Subject Alternative Name must match regex: (?i)^https://github.com/abd-ulbasit/bookstore-kubernetes-guide/
+$ GH_FORCE_TTY=100 gh attestation verify oci://$IMAGE --repo $REPO --cert-identity "$ID"
+Loaded digest sha256:eaa26ada0a2e1575026a5e71e74572ed0bfdde80f50012e91a7be28f0de16ced for oci://ghcr.io/abd-ulbasit/bookstore-catalog@sha256:eaa26ada0a2e1575026a5e71e74572ed0bfdde80f50012e91a7be28f0de16ced
+Loaded 1 attestation from GitHub API
+
+The following policy criteria will be enforced:
+- Predicate type must match:............. https://slsa.dev/provenance/v1
+- Source Repository Owner URI must match: https://github.com/abd-ulbasit
+- Source Repository URI must match:...... https://github.com/abd-ulbasit/bookstore-kubernetes-guide
+- Subject Alternative Name must match:... https://github.com/abd-ulbasit/bookstore-kubernetes-guide/.github/workflows/bookstore-pipeline.yml@refs/heads/main
+- OIDC Issuer must match:................ https://token.actions.githubusercontent.com
+
+✓ Verification succeeded!
+
+The following 1 attestation matched the policy criteria
+
+- Attestation #1
+  - Build repo:..... abd-ulbasit/bookstore-kubernetes-guide
+  - Build workflow:. .github/workflows/bookstore-release.yml@refs/heads/main
+  - Signer repo:.... abd-ulbasit/bookstore-kubernetes-guide
+  - Signer workflow: .github/workflows/bookstore-pipeline.yml@refs/heads/main
+
+$ TOKEN=$(curl -fsS "https://ghcr.io/token?scope=repository:abd-ulbasit/bookstore-catalog:pull" | jq -r .token)
+$ curl -fsS -o /dev/null -w '%{http_code}\n' -H "Authorization: Bearer $TOKEN" -H 'Accept: application/vnd.oci.image.index.v1+json, application/vnd.oci.image.manifest.v1+json' "https://ghcr.io/v2/abd-ulbasit/bookstore-catalog/manifests/$D"
+200
+
+## step 10, workflow-hardening and sast in the same run
+$ REPO=abd-ulbasit/bookstore-kubernetes-guide
+$ RUN=41154561661
+$ HARDEN=$(gh run view $RUN --repo $REPO --json jobs --jq '.jobs[] | select(.name == "release (catalog) / workflow-hardening") | .databaseId')
+$ gh api repos/$REPO/actions/jobs/$HARDEN --jq '.steps[] | select(.name | test("Scorecard")) | "\(.name): \(.conclusion)"'
+OpenSSF Scorecard (default branch only): success
+Scorecard aggregate score: success
+Scorecard produced no result: skipped
+$ gh api repos/$REPO/actions/jobs/$HARDEN/logs | sed -E 's/^[0-9T:.-]+Z //' | grep -E '^  (Event name|Default branch|Publication enabled):'
+  Event name: workflow_dispatch
+  Publication enabled: false
+  Default branch: main
+$ gh api repos/$REPO/actions/jobs/$HARDEN/logs | sed -E 's/^[0-9T:.-]+Z //' | grep -A18 '^Scorecard aggregate score'
+Scorecard aggregate score: 6.7 / 10
+  10    Maintained
+  0 Code-Review
+  10    Security-Policy
+  10    Dependency-Update-Tool
+  10    Dangerous-Workflow
+  10    Token-Permissions
+  10    Binary-Artifacts
+  0 CII-Best-Practices
+  10    SAST
+  10    Packaging
+  10    License
+  0 Vulnerabilities
+  0 Fuzzing
+  3 Branch-Protection
+  -1    Signed-Releases
+  0 Contributors
+  6 Pinned-Dependencies
+  10    CI-Tests
+$ gh api repos/$REPO/actions/jobs/$HARDEN/logs | sed -E 's/^[0-9T:.-]+Z //' | grep '^{"date"' | jq -r '.checks[] | select(.score < 10) | "\(.name) \(.score): \(.reason)"'
+Code-Review 0: Found 0/2 approved changesets -- score normalized to 0
+CII-Best-Practices 0: no effort to earn an OpenSSF best practices badge detected
+Vulnerabilities 0: 49 existing vulnerabilities detected
+Fuzzing 0: project is not fuzzed
+Branch-Protection 3: branch protection is not maximal on development and all release branches
+Signed-Releases -1: no releases found
+Contributors 0: project has 0 contributing companies or organizations -- score normalized to 0
+Pinned-Dependencies 6: dependency not pinned by hash detected -- score normalized to 6
+$ gh api repos/$REPO/actions/jobs/$HARDEN/logs | sed -E 's/^[0-9T:.-]+Z //' | grep -E '^(\[harden-runner\]|https://app.stepsecurity.io)'
+[harden-runner] pre-step
+https://app.stepsecurity.io/github/abd-ulbasit/bookstore-kubernetes-guide/actions/runs/41154561661
+[harden-runner] main-step
+https://app.stepsecurity.io/github/abd-ulbasit/bookstore-kubernetes-guide/actions/runs/41154561661
+[harden-runner] post-step
+$ gh api repos/$REPO/actions/jobs/$HARDEN/logs | sed -E 's/^[0-9T:.-]+Z //' | grep -o 'domain: [^,]*' | sort | uniq -c
+   1 domain: api.deps.dev.
+   1 domain: api.github.com.
+   1 domain: api.osv.dev.
+   2 domain: auth.docker.io.
+   1 domain: codeload.github.com.
+   1 domain: gcr.io.
+   1 domain: ghcr.io.
+   1 domain: github.com.
+   1 domain: index.docker.io.
+   1 domain: oss-fuzz-build-logs.storage.googleapis.com.
+   1 domain: pkg-containers.githubusercontent.com.
+   1 domain: production.cloudfront.docker.com.
+   1 domain: productionresultssa17.blob.core.windows.net.
+   1 domain: registry-1.docker.io.
+   1 domain: results-receiver.actions.githubusercontent.com.
+   1 domain: tuf-repo-cdn.sigstore.dev.
+   1 domain: www.bestpractices.dev.
+$ gh api repos/$REPO/actions/jobs/$HARDEN/logs | sed -E 's/^[0-9T:.-]+Z //' | grep 'process: scorecard-action' | grep -o 'domain: [^,]*' | sort -u
+domain: api.deps.dev.
+domain: api.github.com.
+domain: api.osv.dev.
+domain: auth.docker.io.
+domain: codeload.github.com.
+domain: gcr.io.
+domain: index.docker.io.
+domain: oss-fuzz-build-logs.storage.googleapis.com.
+domain: www.bestpractices.dev.
+$ SIGN=$(gh run view $RUN --repo $REPO --json jobs --jq '.jobs[] | select(.name == "release (catalog) / sign") | .databaseId')
+$ gh api repos/$REPO/actions/jobs/$SIGN/logs | sed -E 's/^[0-9T:.-]+Z //' | grep 'process: cosign' | grep -o 'domain: [^,]*' | sort -u
+domain: fulcio.sigstore.dev.
+domain: ghcr.io.
+domain: rekor.sigstore.dev.
+domain: run-actions-1-azure-eastus.actions.githubusercontent.com.
+domain: timestamp.sigstore.dev.
+domain: tuf-repo-cdn.sigstore.dev.
+$ SAST=$(gh run view $RUN --repo $REPO --json jobs --jq '.jobs[] | select(.name == "release (catalog) / sast") | .databaseId')
+$ gh api repos/$REPO/actions/jobs/$SAST/logs | sed -E 's/^[0-9T:.-]+Z //' | grep -E '^(\[36/36 eval|CodeQL results:|  upload-database:)'
+  upload-database: false
+[36/36 eval 148ms] Evaluation done; writing results to codeql/go-queries/Security/CWE-681/IncorrectIntegerConversionQuery.bqrs.
+CodeQL results: 0
+$ gh run view 41151540459 --repo $REPO --json jobs --jq '.jobs[] | select(.name | test("workflow-hardening")) | .databaseId'
+124388967169
+$ gh api repos/$REPO/actions/jobs/124388967169 --jq '.steps[] | select(.name | test("Scorecard")) | "\(.name): \(.conclusion)"'
+OpenSSF Scorecard (default branch only): skipped
+$ gh api repos/$REPO/actions/jobs/124388967226/logs | sed -E 's/^[0-9T:.-]+Z //' | grep -E '^(CodeQL results:|##\[error\]|##\[warning\]Failed to upload)' | cut -c1-110
+##[error]Maximum retry attempts exhausted (4), aborting database upload
+##[warning]Failed to upload database for go: Resource not accessible by integration - https://docs.github.com/
+CodeQL results: 0
+
+## step 12, what the promotion did, first and second time
+$ REPO=abd-ulbasit/bookstore-kubernetes-guide
+$ RUN=41154561661
+$ gh api repos/$REPO/actions/jobs/124390881605/logs | sed -E 's/^[0-9T:.-]+Z //' | grep -B1 -E '^ [0-9]+ files? changed' | head -2
+ .../kustomize/overlays/prod/kustomization.yaml     | 288 ++++++++++-----------
+ 1 file changed, 143 insertions(+), 145 deletions(-)
+$ gh pr view 8 --repo $REPO --json state,changedFiles,additions,deletions --jq '"PR 8 (\(.state)): \(.changedFiles) file, +\(.additions) -\(.deletions)"'
+PR 8 (CLOSED): 1 file, +143 -145
+$ gh pr view 8 --repo $REPO --json body --jq .body | grep -E 'OWNER|REPO|DIGEST'
+    cosign verify ghcr.io/OWNER/bookstore-catalog@DIGEST \
+      --certificate-identity-regexp 'https://github.com/OWNER/REPO/.github/workflows/bookstore-pipeline.yml@.*' \
+$ gh pr view 8 --repo $REPO --json statusCheckRollup --jq '.statusCheckRollup | length'
+0
+$ PROMOTE=$(gh run view $RUN --repo $REPO --json jobs --jq '.jobs[] | select(.name == "promote (catalog)") | .databaseId')
+$ gh api repos/$REPO/actions/jobs/$PROMOTE/logs | sed -E 's/^[0-9T:.-]+Z //' | grep -B2 '^changed lines:'
+ .../bookstore/kustomize/overlays/prod/images/kustomization.yaml     | 6 +++---
+ 1 file changed, 3 insertions(+), 3 deletions(-)
+changed lines: 6
+$ gh pr view 10 --repo $REPO --json state,changedFiles,additions,deletions --jq '"PR 10 (\(.state)): \(.changedFiles) file, +\(.additions) -\(.deletions)"'
+PR 10 (MERGED): 1 file, +3 -3
+$ gh pr diff 10 --repo $REPO
+diff --git a/full-guide/examples/bookstore/kustomize/overlays/prod/images/kustomization.yaml b/full-guide/examples/bookstore/kustomize/overlays/prod/images/kustomization.yaml
+index 8e7c6f0..79b21a7 100644
+--- a/full-guide/examples/bookstore/kustomize/overlays/prod/images/kustomization.yaml
++++ b/full-guide/examples/bookstore/kustomize/overlays/prod/images/kustomization.yaml
+@@ -23,9 +23,9 @@
+ apiVersion: kustomize.config.k8s.io/v1alpha1
+ kind: Component
+ images:
+-- name: bookstore/catalog
+-  newName: registry.example.com/bookstore/catalog
+-  newTag: 1.0.0
++- digest: sha256:eaa26ada0a2e1575026a5e71e74572ed0bfdde80f50012e91a7be28f0de16ced
++  name: bookstore/catalog
++  newName: ghcr.io/abd-ulbasit/bookstore-catalog
+ - name: bookstore/orders
+   newName: registry.example.com/bookstore/orders
+   newTag: 1.0.0
+$ gh pr view 10 --repo $REPO --json body --jq .body | grep -c -E 'OWNER|REPO|DIGEST'
+0
+$ CHECKS=$(gh run view $RUN --repo $REPO --json jobs --jq '.jobs[] | select(.name | startswith("checks on")) | .databaseId')
+$ gh api repos/$REPO/actions/jobs/$CHECKS/logs | sed -E 's/^[0-9T:.-]+Z //' | grep '^dispatched'
+dispatched example-trees-check.yml on ci/promote-catalog
+dispatched security-gates.yml on ci/promote-catalog
+$ gh run view 41155073279 --repo $REPO --json workflowName,event,headBranch,conclusion --jq '"\(.workflowName), \(.event) on \(.headBranch): \(.conclusion)"'
+security-gates, workflow_dispatch on ci/promote-catalog: success
+$ gh run view 41155073279 --repo $REPO --json jobs --jq '.jobs[] | select(.name | test("runtime")) | "\(.name): \(.conclusion)"'
+G4 runtime (kustomize-prod): success
+G4 runtime (kustomize-dev): success
+G4 runtime (helm): success
+G4 runtime (kustomize-staging): success
+G4 runtime (raw): success
+$ gh run view 41155071392 --repo $REPO --json workflowName,event,headBranch,conclusion --jq '"\(.workflowName), \(.event) on \(.headBranch): \(.conclusion)"'
+example-trees-check, workflow_dispatch on ci/promote-catalog: success
+$ gh run view 41155071392 --repo $REPO --json jobs --jq '.jobs[] | select(.name == "kustomize-counts") | "\(.name): \(.conclusion)"'
+kustomize-counts: success
+$ gh api "repos/$REPO/actions/runs?branch=ci/promote-catalog&per_page=50" --jq '.workflow_runs[] | select(.event == "pull_request" and (.head_sha | startswith("0a137b8"))) | "\(.name) by \(.triggering_actor.login): \(.conclusion)"' | sort
+docs by abd-ulbasit: success
+docs by github-actions[bot]: failure
+example-trees-check by abd-ulbasit: success
+example-trees-check by github-actions[bot]: failure
+secret-scan by abd-ulbasit: success
+secret-scan by github-actions[bot]: failure
+security-gates by abd-ulbasit: success
+security-gates by github-actions[bot]: failure
+security-scan by abd-ulbasit: success
+security-scan by github-actions[bot]: failure
+$ git log -1 --format=%s
+ci: promote catalog to prod (signed digest)
+$ kubectl kustomize examples/bookstore/kustomize/overlays/prod | grep -c '^kind:'
+48
+$ kubectl kustomize examples/bookstore/kustomize/overlays/prod | grep 'image:.*catalog'
+        image: ghcr.io/abd-ulbasit/bookstore-catalog@sha256:eaa26ada0a2e1575026a5e71e74572ed0bfdde80f50012e91a7be28f0de16ced
+
+## step 12, the runs GitHub created for the bot's PR (output captured at 01:23 UTC, before the PR was closed and reopened)
+$ gh run list --repo $REPO --branch ci/promote-catalog --limit 10 --json databaseId,workflowName,status,conclusion,event,headSha --jq '.[]|[.databaseId,.workflowName,.status,.conclusion,.event,.headSha[0:7]]|@tsv'
+41155073279 security-gates  in_progress     workflow_dispatch   0a137b8
+41155071392 example-trees-check in_progress     workflow_dispatch   0a137b8
+41155056676 secret-scan completed   action_required pull_request    0a137b8
+41155056641 security-gates  completed   action_required pull_request    0a137b8
+41155056931 docs    completed   action_required pull_request    0a137b8
+41155056744 security-scan   completed   action_required pull_request    0a137b8
+41155056756 example-trees-check completed   action_required pull_request    0a137b8
+41152171565 docs    completed   failure pull_request    0c95d61
+41152171727 secret-scan completed   failure pull_request    0c95d61
+41152171604 security-gates  completed   failure pull_request    0c95d61
+
+## step 12, the ruleset on main
+$ REPO=abd-ulbasit/bookstore-kubernetes-guide
+$ gh api repos/$REPO/rulesets/25746874 --jq '[.name, .enforcement, (.rules | map(.type) | join(", "))] | join(": ")'
+protect main: active: deletion, non_fast_forward
+
