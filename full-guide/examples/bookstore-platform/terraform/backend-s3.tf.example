@@ -7,7 +7,7 @@
 #     a second laptop touches this Terraform, local state breaks.
 #   - S3 backend gives you durable, versioned, encrypted state with shared
 #     access — and the `use_lockfile = true` option provides native locking
-#     via S3 conditional writes (GA in **Terraform 1.11**, experimental in
+#     via S3 conditional writes (GA in **Terraform 1.11**, introduced in
 #     1.10). **DynamoDB lock table is no longer required** (and DynamoDB
 #     locking is deprecated). The S3 backend is built into Terraform itself;
 #     the hashicorp/aws provider version does not matter here.
@@ -23,7 +23,7 @@
 #   5. (Optional) `rm terraform.tfstate terraform.tfstate.backup` once you
 #      confirm S3 state works.
 #
-# COST: S3 storage for the state file is < $0.01/month even for huge states.
+# COST: S3 storage for the state file is small; see S3 pricing for your region.
 #   Versioning + 90-day lifecycle (set by bootstrap-state.sh) caps growth.
 #
 # TEARDOWN: Before `terraform destroy`, the state must be readable. The S3
@@ -46,12 +46,13 @@ terraform {
     # Must match the bucket's region (S3 bucket regions are immutable once set).
     region = "ap-south-1"
 
-    # Server-side encryption for the state at rest. bootstrap-state.sh sets
-    # the bucket default (SSE-S3, or SSE-KMS when given a key ARN).
+    # Server-side encryption for each state and lock write. bootstrap-state.sh
+    # sets the bucket default. Without kms_key_id, Terraform still requests
+    # SSE-S3, which overrides an SSE-KMS bucket default.
     encrypt = true
 
     # **NATIVE S3 STATE LOCKING — no DynamoDB table required.**
-    # GA in Terraform 1.11 (experimental in 1.10). The previous pattern of
+    # GA in Terraform 1.11 (introduced in 1.10). The previous pattern of
     # `dynamodb_table = "tf-locks"` is deprecated and can be deleted.
     # The lock is the object <key>.tflock: whoever plans/applies with a lock
     # needs s3:GetObject, s3:PutObject and s3:DeleteObject on it. A run killed
@@ -63,10 +64,13 @@ terraform {
     # SSE-S3, s3:GetObject on the bucket is enough to read state, and state
     # holds every attribute Terraform manages (README: "What is in state").
     # With a CMK, reading state also needs kms:Decrypt under a key policy you
-    # control, and every decrypt is in CloudTrail. Whoever reads state then
+    # control, and CloudTrail records each decrypt unless a trail excludes KMS
+    # events. Whoever reads state then
     # needs kms:Decrypt on the key; whoever writes state or the .tflock
     # object also needs kms:GenerateDataKey (and the key policy must allow
     # both). The CI roles are listed in .github/workflows/terraform.yml.
+    # Set kms_key_id to the ARN you passed to bootstrap-state.sh. Without it,
+    # encrypt = true writes SSE-S3 objects whatever the bucket default is.
     #   kms_key_id = "arn:aws:kms:ap-south-1:<ACCOUNT-ID>:key/<KEY-ID>"
   }
 }

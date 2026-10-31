@@ -2,15 +2,16 @@
 
 > Why local Terraform state is a one-laptop fiction and every team running
 > EKS hits the wall the moment a second human or a CI runner shows up; the
-> S3 backend with **`use_lockfile = true`** (native S3 locking, Terraform
-> 1.11+, experimental in 1.10, **no DynamoDB**); bucket bootstrap via `bootstrap-state.sh`; the
-> four `terraform state` commands every operator needs; and the
+> S3 backend with **`use_lockfile = true`** (native S3 locking, GA in
+> Terraform 1.11, introduced in 1.10, **no DynamoDB**); bucket bootstrap via
+> `bootstrap-state.sh`; the `terraform state` commands every operator needs;
+> and the
 > blast-radius rule that decides how many state files you actually want.
 
 **Estimated time:** ~30 min read · ~60 min hands-on
 **Prerequisites:** [Part 13 ch.01](../13-grand-capstone-bookstore-platform/01-bookstore-2-from-toy-to-platform.md) — Bookstore Platform Terraform tree you'll move to remote state · [Part 10 ch.01](../10-cloud-and-managed-kubernetes/01-managed-kubernetes-model.md) — why cloud K8s requires shared state from day one
 
-**You'll know after this:** • understand why local Terraform state breaks the moment a second operator or CI runner appears · • configure an S3 backend with `use_lockfile = true` (GA in Terraform 1.11, no DynamoDB) · • bootstrap the state bucket with `bootstrap-state.sh` without a chicken-and-egg loop · • run the four `terraform state` commands (`list`, `show`, `mv`, `rm`) safely · • choose blast-radius boundaries that decide how many state files your tree actually wants
+**You'll know after this:** • understand why local Terraform state breaks the moment a second operator or CI runner appears · • configure an S3 backend with `use_lockfile = true` (GA in Terraform 1.11, no DynamoDB) · • bootstrap the state bucket with `bootstrap-state.sh` without a chicken-and-egg loop · • run the core `terraform state` commands (`list`, `show`, `mv`, `rm`) safely · • choose blast-radius boundaries that decide how many state files your tree actually wants
 
 <!-- tags: terraform, cloud, day-2, finops, foundations -->
 
@@ -72,8 +73,8 @@ Platform itself was introduced in
 [Part 13 ch.01](../13-grand-capstone-bookstore-platform/01-bookstore-2-from-toy-to-platform.md);
 its single-region EKS substrate sits under
 [`../examples/bookstore-platform/terraform/`](../examples/bookstore-platform/terraform/).
-Phase 14-R added the `bootstrap-state.sh` + `backend-s3.tf.example`
-artifacts; this chapter is the user-facing walkthrough.
+The example tree ships `bootstrap-state.sh` and `backend-s3.tf.example`
+as artifacts; this chapter walks through them.
 
 ## Mental model
 
@@ -84,42 +85,46 @@ delivers all four with one bucket, no DynamoDB, no companion services.**
 
 The four dimensions and how the S3-with-lockfile backend addresses each:
 
-- **Durability.** State must survive any single machine loss. S3 stores
-  state across multiple AZs with 99.999999999% (11 nines) annual
-  durability. A laptop disk has roughly one nine on a good year.
+- **Durability.** State must survive any single machine loss. S3 is
+  designed to exceed 99.999999999% (11 nines) durability and stores each
+  object across at least three Availability Zones by default
+  ([S3 storage classes](https://aws.amazon.com/s3/storage-classes/)). A
+  laptop disk carries no such design target.
 - **Concurrency.** Two `terraform apply` invocations against the same
   state simultaneously is undefined behavior — both reading the same
   pre-apply state, both writing back their own post-apply states, the
   second clobbering the first. Locking serializes them: the first apply
-  takes the lock, the second waits (or fails fast with `-lock-timeout=0`).
-  Terraform 1.11+ (1.10 experimentally) writes a `.tflock` object to the state bucket using
-  S3's `If-None-Match` conditional-write semantics; if the object
-  already exists, the second writer is rejected. When the apply
+  takes the lock, and the second fails with a lock error (or retries for as
+  long as `-lock-timeout` allows). Terraform 1.10+ writes a `.tflock` object
+  to the state bucket with S3's `If-None-Match` conditional write
+  ([S3 conditional writes](https://docs.aws.amazon.com/AmazonS3/latest/userguide/conditional-writes.html)).
+  If the object already exists, S3 returns `412 Precondition Failed` and the
+  second writer is rejected. When the apply
   completes the lock object is deleted.
 - **History.** S3 versioning keeps every prior state file. A bad apply
   that corrupted state, a `terraform state rm` that removed the wrong
   resource, a typo that resource-graphed a destroy — all recoverable by
-  pulling the prior version from S3 and `terraform state push`-ing it
-  back. The bootstrap script's 90-day lifecycle on noncurrent versions
-  caps storage cost at the price of one apply's worth of history
-  retention.
+  restoring a prior version (see the production notes). The bootstrap
+  script's lifecycle rule expires noncurrent versions after 90 days, which
+  bounds storage and how far back recovery reaches.
 - **Access control.** IAM policies on the S3 bucket scope who can read
   state (read = "can see every resource Terraform manages, including
   any secrets stored inline — the IAM access keys in
-  `aws_iam_access_key.foo.secret`") and who can write (write = "can
-  break production"). The bootstrap script's public-access-block kills
-  the most common misconfiguration (an accidentally public state
-  bucket leaking everything).
+  `aws_iam_access_key.foo.secret`, [written to state in plaintext](https://registry.terraform.io/providers/hashicorp/aws/latest/docs/resources/iam_access_key)") and who can write (write = "can
+  break production"). The bootstrap script turns on all four
+  public-access-block settings, so an ACL or bucket policy cannot make the
+  bucket public.
 
-Terraform 1.10 (late 2024) introduced `use_lockfile = true` on the S3
-backend as an experimental feature, and Terraform 1.11 made it GA,
-**deprecating the long-standing DynamoDB lock-table pattern**.
+Terraform 1.10 (November 2024) introduced `use_lockfile = true` on the S3
+backend, and Terraform 1.11 (February 2025) made it generally available
+([changelog](https://github.com/hashicorp/terraform/blob/v1.11/CHANGELOG.md)).
+The backend docs now mark **`dynamodb_table` as deprecated**.
 The legacy pattern needed a separate DynamoDB table (one more resource,
 one more IAM policy, one more capacity-mode decision); the new pattern
 needs only the S3 bucket itself. Teams that still have
 `dynamodb_table = "tf-locks"` in their backend block are running
-legacy infrastructure that costs $1-3/month and adds a second
-failure-mode for no benefit. **Migrate.**
+legacy infrastructure: a second table, its IAM policy and a capacity
+setting, for no benefit. **Migrate.**
 
 The trap to keep in view: **the state file is not just metadata about
 your resources; it is the canonical authority on what exists**. If the
@@ -129,6 +134,15 @@ cluster does not exist", Terraform will plan to create it again, even
 if the real cluster is sitting there serving traffic. Treat state with
 the same care as production database backups: versioned, encrypted,
 access-controlled, recoverable.
+
+## Threats and controls
+
+| Threat | Control in this chapter | Deeper |
+|---|---|---|
+| Someone who should not see state reads it. It holds every attribute in plaintext | Private bucket, TLS-only policy, IAM read scope, SSE-KMS with a key policy | [14.07](07-infrastructure-cicd-and-drift.md) |
+| A bad or hostile apply rewrites or deletes state | Versioning, IAM write scope, the restore runbook | [14.07](07-infrastructure-cicd-and-drift.md) |
+| Concurrent applies corrupt state, or a live lock is cleared | `use_lockfile` conditional write; `force-unlock` only after checking | None beyond this chapter |
+| The bucket or its versions are deleted | Object Lock or MFA Delete (step 10) | [14.17](17-cross-region-dr-account-baseline-90-day-runbook.md) |
 
 ## Diagrams
 
@@ -162,17 +176,17 @@ flowchart TB
 ### Diagram B — backend choice matrix (ASCII)
 
 ```text
-BACKEND               LOCKING                HISTORY        VENDOR LOCK-IN   COST           WHEN TO USE
+BACKEND               LOCKING                HISTORY        VENDOR LOCK-IN   COST DRIVER    WHEN TO USE
 ────────────────────  ─────────────────────  ─────────────  ───────────────  ─────────────  ───────────────────────────
-local                 none                   none           none             $0             single-laptop dev only
-S3 + use_lockfile     native (S3 lockfile)   versioning     low (HCL std)    $0.01-0.05/mo  default for AWS teams
-S3 + DynamoDB lock    DynamoDB (legacy)      versioning     low              $1-3/mo        legacy; migrate to use_lockfile
-Terraform Cloud       built-in               built-in       high (HashiCorp) free-$70+/mo   small teams; UI matters
-GitLab managed state  built-in (HTTP)        on GitLab      medium           bundled        already on GitLab CI
-Spacelift             built-in               built-in       high             $$$$           large platform teams
+local                 none                   none           none             none           single-laptop dev only
+S3 + use_lockfile     native (S3 lockfile)   versioning     low (HCL std)    S3 requests    default for AWS teams
+S3 + DynamoDB lock    DynamoDB (legacy)      versioning     low              S3 + table     legacy; migrate to use_lockfile
+Terraform Cloud       built-in               built-in       high (HashiCorp) vendor plan    small teams; UI matters
+GitLab managed state  built-in (HTTP)        on GitLab      medium           GitLab plan    already on GitLab CI
+Spacelift             built-in               built-in       high             vendor plan    large platform teams
 ────────────────────  ─────────────────────  ─────────────  ───────────────  ─────────────  ───────────────────────────
 THE BOOKSTORE PLATFORM CHOICE: S3 + use_lockfile.
-  Reasons: AWS-native (one less vendor relationship), free at our scale,
+  Reasons: AWS-native (one less vendor relationship), low cost at our scale,
   HCL-standard backend block (no proprietary syntax), Terraform 1.11+
   native locking removes the last reason to add DynamoDB.
 ```
@@ -184,8 +198,8 @@ THE BOOKSTORE PLATFORM CHOICE: S3 + use_lockfile.
 - AWS CLI v2 configured: `aws sts get-caller-identity` returns the
   account you expect to own the state bucket.
 - Terraform `>= 1.11` (verifiable via `terraform version`), where
-  `use_lockfile` is GA. 1.10 has it as an experimental feature; earlier
-  versions do not support it.
+  `use_lockfile` is GA. Terraform 1.10 introduced it; earlier versions do
+  not support it.
 - The bookstore-platform Terraform tree applied or partially-applied
   to local state. If you've never run `terraform apply` against it,
   the migration step below is a no-op (Terraform just writes an empty
@@ -193,7 +207,7 @@ THE BOOKSTORE PLATFORM CHOICE: S3 + use_lockfile.
 
 ### 1. Read what already exists
 
-Phase 14-R put two artifacts in the tree:
+The example tree ships two artifacts:
 
 - [`../examples/bookstore-platform/terraform/bootstrap-state.sh`](../examples/bookstore-platform/terraform/bootstrap-state.sh)
   — idempotent script that creates the bucket with versioning, default
@@ -222,16 +236,31 @@ export TFSTATE_REGION="ap-south-1"
 If your initials are already taken, append a digit. Keep the name
 under 63 chars (S3 limit).
 
-### 3. Run the bootstrap script
+### 3. Create a KMS key and run the bootstrap script
+
+State holds every attribute in plaintext: IAM policies, subnet and key IDs,
+and any secret a resource returns. This tree holds no cluster token, but its
+state is still an account map ([platform README](../examples/bookstore-platform/terraform/README.md),
+"What is in state"). Encrypt it with a customer-managed key.
+Terraform needs `kms:Encrypt`, `kms:Decrypt` and `kms:GenerateDataKey` on the
+key ([S3 backend docs](https://developer.hashicorp.com/terraform/language/backend/s3)),
+so grant them only to the roles that run Terraform. The key costs $1 a month,
+and symmetric requests cost $0.03 per 10,000
+([AWS KMS pricing](https://aws.amazon.com/kms/pricing/)).
 
 From the repo root:
 
 ```bash
+export TFSTATE_KMS_ARN="$(aws kms create-key \
+  --region "$TFSTATE_REGION" \
+  --description "Terraform state" \
+  --query KeyMetadata.Arn --output text)"
+
 cd examples/bookstore-platform/terraform
-./bootstrap-state.sh "$TFSTATE_BUCKET" "$TFSTATE_REGION"
+./bootstrap-state.sh "$TFSTATE_BUCKET" "$TFSTATE_REGION" "$TFSTATE_KMS_ARN"
 ```
 
-Expected output (truncated):
+Illustrative output (truncated):
 
 ```text
 Bootstrap S3 state backend
@@ -242,9 +271,8 @@ Bootstrap S3 state backend
 [ok] Bucket created
 [..] Enabling versioning
 [ok] Versioning enabled
-[..] Enabling default encryption (SSE-S3). Pass a KMS key ARN as the
-     third argument to use SSE-KMS instead (recommended beyond a lab).
-[ok] SSE-S3 enabled
+[..] Enabling default encryption (SSE-KMS, arn:aws:kms:ap-south-1:<ACCOUNT-ID>:key/<KEY-ID>)
+[ok] SSE-KMS enabled. Set kms_key_id in backend-s3.tf to the same ARN.
 [..] Blocking public access
 [ok] Public access blocked
 [..] Applying TLS-only bucket policy
@@ -253,9 +281,28 @@ Bootstrap S3 state backend
 [ok] Lifecycle rule set
 ```
 
-The script is idempotent — re-running it on an existing bucket
-verifies (and re-applies) the same settings. Use this when you're
-unsure whether someone hand-edited the bucket in the console.
+Re-run the script with the same key ARN only. Without the third argument it
+sets the bucket default back to SSE-S3.
+
+The script is idempotent: re-running it with the same arguments verifies and
+re-applies the same settings. Use this when you're unsure whether someone
+hand-edited the bucket in the console.
+
+### 3a. Check the controls fail closed
+
+This step fails on purpose. The TLS-only policy should refuse a plain-HTTP
+request, and the public-access block should report all four settings on.
+
+```bash
+aws s3api head-object --bucket "$TFSTATE_BUCKET" \
+  --key bookstore-platform/terraform.tfstate \
+  --endpoint-url "http://s3.${TFSTATE_REGION}.amazonaws.com"
+
+aws s3api get-public-access-block --bucket "$TFSTATE_BUCKET"
+```
+
+Illustrative result: the first command fails with a 403 Forbidden error, and
+the second prints all four settings as `true`.
 
 ### 4. Copy and edit the backend block
 
@@ -271,9 +318,15 @@ backend "s3" {
   key          = "bookstore-platform/terraform.tfstate"
   region       = "ap-south-1"                    # YOUR region
   encrypt      = true
+  kms_key_id   = "<KMS-KEY-ARN>"                 # the ARN from step 3
   use_lockfile = true
 }
 ```
+
+`encrypt = true` asks S3 to encrypt each state and lock write. Without
+`kms_key_id`, Terraform sends `AES256` (SSE-S3), and that request header
+overrides the bucket's KMS default, so set both
+([Terraform source](https://github.com/hashicorp/terraform/blob/main/internal/backend/remote-state/s3/client.go)).
 
 The single most important line is `use_lockfile = true`. Without it,
 two concurrent applies race; with it, S3's conditional-write atomicity
@@ -286,7 +339,7 @@ terraform init -migrate-state
 ```
 
 Terraform detects the local `terraform.tfstate`, sees the new S3
-backend, and prompts:
+backend, and prompts (illustrative):
 
 ```text
 Do you want to copy existing state to the new backend?
@@ -320,7 +373,7 @@ In a second terminal, while the apply is mid-flight:
 aws s3 ls "s3://${TFSTATE_BUCKET}/bookstore-platform/" --recursive
 ```
 
-You'll see one of two states:
+The output looks like this (illustrative):
 
 ```text
 # Mid-apply (lock held):
@@ -347,11 +400,9 @@ aws s3api list-object-versions \
 
 You should see two or three versions: one from the initial migrate,
 one from the no-op apply, possibly one from a prior partial apply.
-This is your insurance. If a future apply mangles state, restore the
-prior version with `terraform state pull > backup.tfstate`, edit the
-object's version, and `terraform state push backup.tfstate` — or, in
-the disaster scenario, use `aws s3api copy-object` to restore an
-older version as the current one.
+This is your insurance. If a future apply damages state, restore a prior
+version with the runbook in the production notes, and only while no apply
+is running.
 
 ### 8. Clean up local state
 
@@ -362,13 +413,14 @@ rm terraform.tfstate terraform.tfstate.backup
 ```
 
 This is the point of no return. Local state files are now strictly
-out-of-date — every plan/apply hits S3.
+out-of-date — every plan/apply hits S3. Local copies hold the same secrets,
+so delete any others too, including editor backups and synced folders.
 
 ### 9. Troubleshoot — lock stuck after a crash
 
 If `terraform apply` was killed (SIGKILL, lost SSH, network drop)
 while holding the lock, the `.tflock` object remains. Subsequent
-applies fail with:
+applies fail with (illustrative):
 
 ```text
 Error: Error acquiring the state lock
@@ -390,6 +442,31 @@ The UUID is in the error message. Force-unlock removes the `.tflock`
 object. **Do this only after confirming no apply is in flight** —
 force-unlocking a live apply is the path to state corruption.
 
+### 10. Guard against deletion
+
+The policy from step 3 blocks plain HTTP and public access. It does not stop
+a principal that holds `s3:DeleteObjectVersion`. Deleting a bucket needs every
+version gone first, so the guard must block version deletes, not only the
+bucket delete. Choose one:
+
+- **Object Lock** keeps each object version until its retention ends. In
+  compliance mode nobody can delete it, root included. In governance mode,
+  users with `s3:BypassGovernanceRetention` can override it. It needs
+  versioning, which step 3 enables. Locked versions stay past the 90-day
+  cleanup rule until their retention ends
+  ([Object Lock](https://docs.aws.amazon.com/AmazonS3/latest/userguide/object-lock.html)).
+- **MFA Delete** requires an MFA code to delete a version permanently or to
+  change the bucket's versioning. Only the bucket owner's root account can
+  enable it, and only with the CLI or API
+  ([MFA Delete](https://docs.aws.amazon.com/AmazonS3/latest/userguide/MultiFactorAuthenticationDelete.html)).
+  It cannot be combined with a lifecycle configuration, so enabling it means
+  dropping the 90-day rule.
+
+Keep an offline copy of state as well. Run `terraform state pull >
+backup.tfstate` on a schedule, and store the copy outside the state bucket,
+encrypted. Record the choice in the account baseline
+([14.17](17-cross-region-dr-account-baseline-90-day-runbook.md)).
+
 ## How it works under the hood
 
 **The `use_lockfile = true` mechanism.** Terraform 1.10+'s S3 backend
@@ -397,14 +474,13 @@ writes a small JSON `.tflock` object to the state bucket using S3's
 `PutObject` API with an `If-None-Match: *` header. S3 honors that
 header as a conditional write: the put succeeds only if no object
 exists at that key, otherwise S3 returns `412 Precondition Failed`.
-The first apply wins the race; the second sees the `412` and either
-retries (default) or fails fast (`-lock-timeout=0`). When the apply
-completes, Terraform issues `DeleteObject` on the lock key. This is
-the same primitive S3 uses for object versioning — Terraform just
-borrows the conditional-write semantics.
+The first apply wins the race. The second sees the `412`, reports a lock
+error, and retries for as long as `-lock-timeout` allows. When the apply
+completes, Terraform issues `DeleteObject` on the lock key.
 
-**Why DynamoDB used to be needed.** Before 2024-08, S3 didn't expose
-conditional writes via `If-None-Match` for backends. The workaround
+**Why DynamoDB used to be needed.** Before S3 offered conditional writes
+with `If-None-Match`, the backend had no atomic create-if-absent on S3.
+The workaround
 was a DynamoDB table with a single primary-key item per state file:
 take the lock by `PutItem` with `ConditionExpression: attribute_not_exists(LockID)`;
 release by `DeleteItem`. DynamoDB exposed the same atomicity that S3
@@ -414,15 +490,15 @@ to register the change.
 
 **Versioning vs lifecycle.** S3 versioning keeps every PUT as a new
 version; the latest is "current", prior ones are "noncurrent". Without
-a lifecycle rule, noncurrent versions accumulate forever — at $0.023/GB-month
-for a state file growing 5-10 KB per apply, this is negligible, but
-on a busy team with hundreds of applies/week, it adds up over years.
+a lifecycle rule, noncurrent versions accumulate forever. A state file is
+small, so each version costs little, but a busy team with hundreds of
+applies a week keeps versions for years.
 The bootstrap script's 90-day noncurrent expiration is a balance:
 90 days of state history is enough to recover from any humanly-
 detectable mistake; older history is rarely actionable (the resources
 the state described are usually long-gone).
 
-**The four `terraform state` commands every operator must know.**
+**The `terraform state` commands every operator must know.**
 
 | Command | Purpose | When you reach for it |
 |---|---|---|
@@ -432,7 +508,7 @@ the state described are usually long-gone).
 | `terraform import` | Pull an existing AWS resource into state | When something exists in AWS but Terraform doesn't know about it |
 | `terraform state replace-provider <SOURCE-ADDRESS> <TARGET-ADDRESS>` | Re-source a provider in state when migrating from a legacy provider address | When moving from `registry.terraform.io/hashicorp/aws` to a community fork, or after a provider namespace change |
 
-These four are the difference between "Terraform fights you" and
+These are the difference between "Terraform fights you" and
 "Terraform serves you". Memorize the syntax; rehearse them on a
 throwaway resource before you need them in anger.
 
@@ -498,37 +574,14 @@ never be able to take down the other.
 > recent prior version, then `aws s3api copy-object --copy-source
 > "$TFSTATE_BUCKET/bookstore-platform/terraform.tfstate?versionId=<ID>"
 > --bucket "$TFSTATE_BUCKET" --key "bookstore-platform/terraform.tfstate"`
-> to promote it back to the current version. Run `terraform init`
+> to promote it back to the current version, with no apply running.
+> Run `terraform init`
 > against the restored backend, then `terraform plan` to verify zero
 > diff.
 >
-> **Bucket deletion is a different category of disaster.** S3
-> versioning only helps if the bucket still exists — deleting the
-> bucket destroys all versions with it. Recovery then requires a
-> manual backup: periodically run `terraform state pull >
-> backup.tfstate` and store it somewhere safe (a separate S3 bucket,
-> a secrets manager, an encrypted offline copy). AWS Backup covering
-> the state bucket is the managed alternative. The durable defense is
-> to enable **S3 Object Lock** (WORM — write-once-read-many) or
-> **MFA-delete** on the state bucket so accidental or malicious bucket
-> deletion requires explicit human consent that leaves an audit trail.
+> **Bucket deletion** is a separate failure, and versioning does not stop it.
+> Step 10 covers the deletion guard and an offline copy of state.
 > Document this runbook in your team wiki *before* you need it.
-
-> **In production:** KMS-encrypted state (SSE-KMS with a customer-
-> managed CMK) is the upgrade from SSE-S3 (AWS-managed key) when state
-> contains literal secrets — provider credentials inline (don't, but
-> some patterns force this), RDS master passwords stored as Terraform
-> outputs (don't, use secrets manager), API tokens in `tfvars` files.
-> This tree's state holds no cluster token (its Kubernetes providers
-> use the `aws eks get-token` exec plugin), but it does hold IAM
-> policy documents and Helm values (inventory in the platform README,
-> "What is in state"). `bootstrap-state.sh` takes a KMS key ARN as its
-> third argument to set SSE-KMS as the bucket default, and it always
-> adds a bucket policy that denies non-TLS requests.
-> The `backend "s3"` block accepts `kms_key_id = "arn:..."`. Cost: KMS
-> charges per-request (\$0.03 per 10k requests) plus \$1/month per CMK.
-> For typical Terraform usage (tens of applies/day), KMS adds pennies
-> to the monthly bill.
 
 > **In production:** Your state file is your blast radius. One root
 > module that manages 500 resources is one apply that can destroy 500
@@ -550,8 +603,8 @@ never be able to take down the other.
 ## Quick Reference
 
 ```bash
-# Bootstrap the state bucket (once per bucket per region).
-./bootstrap-state.sh tfstate-bookstore-<INITIALS> ap-south-1
+# Bootstrap the state bucket (once per bucket and region; same key on re-runs).
+./bootstrap-state.sh tfstate-bookstore-<INITIALS> ap-south-1 <KMS-KEY-ARN>
 
 # Copy + edit the backend file.
 cp backend-s3.tf.example backend-s3.tf
@@ -586,20 +639,23 @@ terraform {
     key          = "<PROJECT>/terraform.tfstate"
     region       = "<REGION>"
     encrypt      = true
+    kms_key_id   = "<KMS-KEY-ARN>"
     use_lockfile = true
   }
 }
 ```
 
-State-backend checklist (the migration is done when all six are yes):
+State-backend checklist (the migration is done when all seven are yes):
 
 - [ ] Bucket versioning is ON (`aws s3api get-bucket-versioning`).
-- [ ] Bucket encryption is ON (SSE-S3 or SSE-KMS; check
-      `get-bucket-encryption`).
+- [ ] Bucket default encryption is SSE-KMS with the key from step 3, and
+      `kms_key_id` in the backend matches it (`get-bucket-encryption`).
 - [ ] Public-access-block is ON on all four dimensions
       (`get-public-access-block`).
 - [ ] Lifecycle expires noncurrent versions
-      (`get-bucket-lifecycle-configuration`); 90 days is the default.
+      (`get-bucket-lifecycle-configuration`); 90 days, unless you chose MFA
+      Delete (step 10).
+- [ ] A deletion guard is set: Object Lock or MFA Delete (step 10).
 - [ ] `use_lockfile = true` is in the backend block; **NO**
       `dynamodb_table = "..."` line.
 - [ ] State file is under ~10 MB (`aws s3 ls --summarize`); anything
@@ -612,7 +668,7 @@ State-backend checklist (the migration is done when all six are yes):
 1. **Why does the chapter say `use_lockfile = true` replaces the DynamoDB lock table, and what changed in S3 that made this possible?**
    <details><summary>Show answer</summary>
 
-   S3 added strong read-after-write consistency plus conditional writes (If-None-Match), which lets the backend create a `<key>.tflock` object atomically and refuse to overwrite it while another apply holds it. Terraform 1.10+ implements (GA from 1.11) its lock protocol against that primitive, so the DynamoDB table — which used to provide the locking — is no longer needed.
+   S3 added conditional writes. A `PutObject` with `If-None-Match: *` succeeds only when no object exists at that key, and otherwise fails with `412 Precondition Failed`. Terraform 1.10+ creates the `<key>.tflock` object that way and deletes it when the run ends. That atomic create-if-absent is what lets the backend drop the DynamoDB table that used to provide it.
 
    </details>
 
@@ -623,17 +679,17 @@ State-backend checklist (the migration is done when all six are yes):
 
    </details>
 
-3. **You inherit a Terraform tree whose state file is 180 MB and `terraform plan` takes 12 minutes. What's the chapter's signal here and what's the fix shape?**
+3. **Your state holds an `aws_iam_access_key` secret in plaintext. Which controls limit who can read it, and why is SSE-S3 alone not enough?**
    <details><summary>Show answer</summary>
 
-   The 100 MB threshold is the chapter's re-architect signal — a state file that large means too many resources share one blast radius. The fix is splitting along natural boundaries (networking / EKS cluster / addons / data plane) into separate root modules with their own state, using `terraform state mv` to migrate resources without re-creating them.
+   The public-access block and the TLS-only policy keep the bucket private and force HTTPS. IAM decides who holds `s3:GetObject`, and with SSE-S3 every one of those principals reads the secret in plaintext. SSE-KMS adds a second gate: reading state also needs `kms:Decrypt` under a key policy, and CloudTrail records each decrypt unless a trail excludes KMS events. The stronger fix is upstream: avoid long-lived access keys in Terraform, or pass a `pgp_key`, which keeps the secret out of plaintext state at the cost of automation.
 
    </details>
 
 4. **Hands-on extension — point the bookstore-platform tree at a brand-new S3 bucket without running `bootstrap-state.sh` first; run `terraform init`.**
    <details><summary>What you should see</summary>
 
-   `terraform init` errors with an S3 `NoSuchBucket` / `AccessDenied` because the backend can't write the state object to a bucket that doesn't yet exist. That's the chicken-and-egg this chapter resolves: the bootstrap script creates the bucket (with versioning + encryption + public-access-block + lifecycle) using local state, and only then does `init -migrate-state` move the tree's real state in. Skipping bootstrap is how teams accidentally lose state files.
+   `terraform init` errors with an S3 `NoSuchBucket` / `AccessDenied` because the backend can't write the state object to a bucket that doesn't yet exist. That's the chicken-and-egg this chapter resolves: the bootstrap script creates the bucket (with versioning + encryption + public-access-block + lifecycle) using the AWS CLI, and only then does `init -migrate-state` move the tree's real state in. A bucket created by hand skips these settings unless someone checks each one, so run the script.
 
    </details>
 
@@ -643,18 +699,19 @@ State-backend checklist (the migration is done when all six are yes):
   <https://developer.hashicorp.com/terraform/language/backend/s3>; the
   authoritative reference for every backend setting this chapter
   touches, including `use_lockfile` semantics.
-- **Terraform 1.10 upgrade guide**
-  <https://developer.hashicorp.com/terraform/language/v1.10.x/upgrade-guides>;
-  the official upgrade guide covering the `use_lockfile` addition and
-  the deprecation of DynamoDB lock tables.
+- **Terraform CHANGELOG, 1.10.0 and 1.11.0**
+  <https://github.com/hashicorp/terraform/blob/v1.11/CHANGELOG.md>; the
+  release entries for native S3 locking (1.10.0, November 2024) and its
+  general availability (1.11.0, February 2025).
 - **AWS S3 conditional writes documentation**
   <https://docs.aws.amazon.com/AmazonS3/latest/userguide/conditional-writes.html>;
   the `If-None-Match` semantics `use_lockfile` relies on.
-- **Rosso et al., *Production Kubernetes* ch.6 — Infrastructure**;
-  the discipline of treating infrastructure-as-code state as a
-  first-class operational concern.
-- **Ibryam & Huß, *Kubernetes Patterns* 2e — *Declarative Deployment***;
-  the broader IaC discipline this chapter applies at the storage layer.
+- **AWS S3 Object Lock**
+  <https://docs.aws.amazon.com/AmazonS3/latest/userguide/object-lock.html>;
+  the retention modes behind step 10.
+- **AWS S3 MFA Delete**
+  <https://docs.aws.amazon.com/AmazonS3/latest/userguide/MultiFactorAuthenticationDelete.html>;
+  who can enable it and what it blocks.
 - **AWS Well-Architected Framework — Operational Excellence pillar**
   <https://docs.aws.amazon.com/wellarchitected/latest/operational-excellence-pillar/welcome.html>;
   the design principles this chapter's "state as canonical source of
