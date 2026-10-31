@@ -6,11 +6,15 @@
 # bookstore namespace and applies the same files. Pod addresses are redacted
 # to <pod-ip> in the output.
 #
-# What did not work the first time: step 5's can-i lines used a flag this
-# kubectl does not have, so they printed "unknown flag". The script no longer
-# has those two lines. The raw API requests in step 5 carry the same check.
-# In step 9 the first connection attempt, before the rotation, was refused, and
-# every attempt after it connected. The first refusal was not traced further.
+# The restore Pod reads a scratch Secret, db-credentials-restore, made from the
+# 16- manifest with only its name changed. The shared db-credentials Secret is
+# never patched in this run.
+#
+# In step 9 the first psql attempt over TCP was refused right after the Pod was
+# Ready. The script then waits with pg_isready until TCP accepts connections,
+# and every check after that connected. The run did not trace the Pod's phase at
+# the refusal. The count in step 10 is taken right after the namespace delete.
+# The script exits with status 1 because its last command finds no namespace.
 ## step 0: versions and a clean start
 $ kubectl version
 Client Version: v1.37.2
@@ -28,7 +32,7 @@ namespace/p03-05-stateful created
 $ kubectl label namespace p03-05-stateful pod-security.kubernetes.io/enforce=restricted pod-security.kubernetes.io/audit=restricted pod-security.kubernetes.io/warn=restricted
 namespace/p03-05-stateful labeled
 
-## step 2: the ServiceAccounts and the database Secret
+## step 2: the ServiceAccounts and the database Secrets
 $ sed 's/namespace: bookstore/namespace: p03-05-stateful/' examples/bookstore/raw-manifests/05-serviceaccounts-rbac.yaml | kubectl apply -f -
 serviceaccount/catalog-sa created
 serviceaccount/storefront-sa created
@@ -42,6 +46,8 @@ role.rbac.authorization.k8s.io/catalog-config-reader created
 rolebinding.rbac.authorization.k8s.io/catalog-config-reader-binding created
 $ sed 's/namespace: bookstore/namespace: p03-05-stateful/' examples/bookstore/raw-manifests/16-db-credentials.yaml | kubectl apply -f -
 secret/db-credentials created
+$ sed -e 's/name: db-credentials$/name: db-credentials-restore/' -e 's/namespace: bookstore/namespace: p03-05-stateful/' examples/bookstore/raw-manifests/16-db-credentials.yaml | kubectl apply -f -
+secret/db-credentials-restore created
 
 ## step 3: the Postgres StatefulSet under restricted
 $ sed 's/namespace: bookstore/namespace: p03-05-stateful/' examples/bookstore/raw-manifests/20-postgres-statefulset.yaml | kubectl apply -f -
@@ -54,7 +60,7 @@ Waiting for 1 pods to be ready...
 partitioned roll out complete: 1 new pods have been updated...
 $ kubectl get pod postgres-0 -n p03-05-stateful
 NAME         READY   STATUS    RESTARTS   AGE
-postgres-0   1/1     Running   0          49s
+postgres-0   1/1     Running   0          80s
 $ kubectl get pod postgres-0 -n p03-05-stateful -o jsonpath='{.spec.serviceAccountName}{" automount="}{.spec.automountServiceAccountToken}'
 postgres-sa automount=false
 $ kubectl get pod postgres-0 -n p03-05-stateful -o jsonpath='{.spec.securityContext}'
@@ -80,19 +86,13 @@ $ kubectl apply -f -   # ServiceAccount, Role and RoleBinding, namespace p03-05-
 serviceaccount/snapshot-job created
 role.rbac.authorization.k8s.io/snapshotter created
 rolebinding.rbac.authorization.k8s.io/snapshot-job created
-$ kubectl auth can-i create volumesnapshots --group=snapshot.storage.k8s.io -n p03-05-stateful --as=system:serviceaccount:p03-05-stateful:snapshot-job
-error: unknown flag: --group
-See 'kubectl auth can-i --help' for usage.
-$ kubectl auth can-i create volumesnapshots --group=snapshot.storage.k8s.io -n p03-05-stateful --as=system:serviceaccount:p03-05-stateful:postgres-sa
-error: unknown flag: --group
-See 'kubectl auth can-i --help' for usage.
 $ kubectl get --raw /apis/snapshot.storage.k8s.io/v1/namespaces/p03-05-stateful/volumesnapshots --as=system:serviceaccount:p03-05-stateful:postgres-sa
 Error from server (Forbidden): volumesnapshots.snapshot.storage.k8s.io is forbidden: User "system:serviceaccount:p03-05-stateful:postgres-sa" cannot list resource "volumesnapshots" in API group "snapshot.storage.k8s.io" in the namespace "p03-05-stateful"
 $ kubectl get --raw /apis/snapshot.storage.k8s.io/v1/namespaces/p03-05-stateful/volumesnapshots --as=system:serviceaccount:p03-05-stateful:snapshot-job
 Error from server (NotFound): the server could not find the requested resource
 
 ## step 6: the VolumeSnapshotClass and VolumeSnapshot, on a cluster without the CRDs
-$ sed 's/namespace: bookstore/namespace: p03-05-stateful/' examples/bookstore/raw-manifests/18-postgres-snapshot.yaml | kubectl apply -f -
+$ kubectl apply -f - < examples/bookstore/raw-manifests/18-postgres-snapshot.yaml   # namespace set to p03-05-stateful
 resource mapping not found for name: "bookstore-csi-snapclass" namespace: "" from "STDIN": no matches for kind "VolumeSnapshotClass" in version "snapshot.storage.k8s.io/v1"
 ensure CRDs are installed first
 resource mapping not found for name: "postgres-snap-0" namespace: "p03-05-stateful" from "STDIN": no matches for kind "VolumeSnapshot" in version "snapshot.storage.k8s.io/v1"
@@ -105,11 +105,19 @@ $ kubectl apply -f -   # restore PVC with dataSource, namespace p03-05-stateful
 persistentvolumeclaim/data-postgres-restore created
 $ kubectl get pvc data-postgres-restore -n p03-05-stateful
 NAME                    STATUS    VOLUME   CAPACITY   ACCESS MODES   STORAGECLASS   VOLUMEATTRIBUTESCLASS   AGE
-data-postgres-restore   Pending                                      standard       <unset>                 0s
+data-postgres-restore   Pending                                      standard       <unset>                 1s
 $ kubectl delete pvc data-postgres-restore -n p03-05-stateful --ignore-not-found
 persistentvolumeclaim "data-postgres-restore" deleted from p03-05-stateful namespace
-$ kubectl apply -f -   # the same PVC without dataSource, which this cluster can satisfy
+$ kubectl apply -f -   # the same PVC without dataSource, a control for the Pending claim
 persistentvolumeclaim/data-postgres-restore created
+$ kubectl get pvc data-postgres-restore -n p03-05-stateful
+NAME                    STATUS    VOLUME   CAPACITY   ACCESS MODES   STORAGECLASS   VOLUMEATTRIBUTESCLASS   AGE
+data-postgres-restore   Pending                                      standard       <unset>                 1s
+$ kubectl describe pvc data-postgres-restore -n p03-05-stateful | sed -n '/^Events:/,$p'
+Events:
+  Type    Reason                Age   From                         Message
+  ----    ------                ----  ----                         -------
+  Normal  WaitForFirstConsumer  1s    persistentvolume-controller  waiting for first consumer to be created before binding
 
 ## step 8: the restore Pod, under restricted, with the password from a file
 $ kubectl apply -f -   # restore Pod, namespace p03-05-stateful
@@ -118,15 +126,18 @@ $ kubectl wait --for=condition=Ready pod/postgres-restore -n p03-05-stateful --t
 pod/postgres-restore condition met
 $ kubectl get pod postgres-restore -n p03-05-stateful
 NAME               READY   STATUS    RESTARTS   AGE
-postgres-restore   1/1     Running   0          113s
+postgres-restore   1/1     Running   0          118s
+$ kubectl get pvc data-postgres-restore -n p03-05-stateful
+NAME                    STATUS   VOLUME                                     CAPACITY   ACCESS MODES   STORAGECLASS   VOLUMEATTRIBUTESCLASS   AGE
+data-postgres-restore   Bound    pvc-e0e46b1c-5c54-4db7-8c13-88ddaaef39ce   1Gi        RWO            standard       <unset>                 2m
 $ kubectl exec -n p03-05-stateful postgres-restore -- sh -c 'id; ls -l /run/secrets/db/; touch /run/secrets/db/x; echo "exit=$?"'
 uid=999(postgres) gid=999(postgres) groups=999(postgres),101(ssl-cert)
 total 0
-lrwxrwxrwx 1 root postgres 15 Oct 31 00:19 password -> ..data/password
+lrwxrwxrwx 1 root postgres 15 Oct 31 00:56 password -> ..data/password
 touch: cannot touch '/run/secrets/db/x': Read-only file system
 exit=1
 
-## step 9: the restore keeps the old password; the Secret value is not applied
+## step 9: the database keeps the password it was initialised with; a Secret change is not applied
 $ kubectl exec -n p03-05-stateful postgres-restore -- sh -c 'grep -v "^#" /var/lib/postgresql/data/pgdata/pg_hba.conf | grep .'
 local   all             all                                     trust
 host    all             all             127.0.0.1/32            trust
@@ -139,13 +150,18 @@ $ kubectl exec -n p03-05-stateful postgres-restore -- sh -c 'PGPASSWORD="$(cat /
 psql: error: connection to server at "<pod-ip>", port 5432 failed: Connection refused
 	Is the server running on that host and accepting TCP/IP connections?
 command terminated with exit code 2
-$ kubectl patch secret db-credentials -n p03-05-stateful --type merge --patch-file <generated patch file>
-secret/db-credentials patched
+$ kubectl exec -n p03-05-stateful postgres-restore -- sh -c 'pg_isready -h <pod-ip> -p 5432'
+<pod-ip>:5432 - accepting connections
+$ kubectl exec -n p03-05-stateful postgres-restore -- sh -c 'PGPASSWORD="$(cat /run/secrets/db/password)" psql -h <pod-ip> -U bookstore -d bookstore -tAc "select 1"'
+1
+$ OLD_PW=$(kubectl get secret db-credentials-restore -n p03-05-stateful -o jsonpath='{.data.POSTGRES_PASSWORD}' | base64 -d)
+$ kubectl patch secret db-credentials-restore -n p03-05-stateful --type merge --patch-file <generated patch file>
+secret/db-credentials-restore patched
 secret volume carries the new value
 $ kubectl exec -n p03-05-stateful postgres-restore -- sh -c 'PGPASSWORD="$(cat /run/secrets/db/password)" psql -h <pod-ip> -U bookstore -d bookstore -tAc "select 1"'
 psql: error: connection to server at "<pod-ip>", port 5432 failed: FATAL:  password authentication failed for user "bookstore"
 command terminated with exit code 2
-$ kubectl exec -n p03-05-stateful postgres-restore -- sh -c 'PGPASSWORD=devpassword psql -h <pod-ip> -U bookstore -d bookstore -tAc "select 1"'
+$ printf '%s' "$OLD_PW" | kubectl exec -i -n p03-05-stateful postgres-restore -- sh -c 'PGPASSWORD="$(cat)" psql -h <pod-ip> -U bookstore -d bookstore -tAc "select 1"'
 1
 $ kubectl exec -i -n p03-05-stateful postgres-restore -- sh -c 'psql -h /var/run/postgresql -U bookstore -d bookstore -v ON_ERROR_STOP=1' <<SQL
 \set pw `cat /run/secrets/db/password`
@@ -153,7 +169,7 @@ ALTER ROLE bookstore PASSWORD :'pw';
 ALTER ROLE
 $ kubectl exec -n p03-05-stateful postgres-restore -- sh -c 'PGPASSWORD="$(cat /run/secrets/db/password)" psql -h <pod-ip> -U bookstore -d bookstore -tAc "select 1"'
 1
-$ kubectl exec -n p03-05-stateful postgres-restore -- sh -c 'PGPASSWORD=devpassword psql -h <pod-ip> -U bookstore -d bookstore -tAc "select 1"'
+$ printf '%s' "$OLD_PW" | kubectl exec -i -n p03-05-stateful postgres-restore -- sh -c 'PGPASSWORD="$(cat)" psql -h <pod-ip> -U bookstore -d bookstore -tAc "select 1"'
 psql: error: connection to server at "<pod-ip>", port 5432 failed: FATAL:  password authentication failed for user "bookstore"
 command terminated with exit code 2
 
