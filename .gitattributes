@@ -2,4 +2,5 @@
 .github/security-gates-enforced.txt merge=union
 CHANGELOG.md merge=union
 .github/scripts/gates/not-evaluated.allow merge=union
-security/namespace-exceptions.yaml merge=union
+# security/namespace-exceptions.yaml is not unioned: a union merge dropped an
+# expiry line from an entry, so a conflict there is resolved by hand.
