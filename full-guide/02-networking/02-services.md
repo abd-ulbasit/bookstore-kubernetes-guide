@@ -216,18 +216,118 @@ file; `rabbitmq` additionally exposes `15672` for its management UI.)
 # from the repo root (full-guide/)
 kubectl apply -f examples/bookstore/raw-manifests/40-services.yaml
 kubectl get svc -n bookstore
+```
 
+<!-- gate: output -->
+```text
+service/catalog created
+service/storefront created
+service/orders created
+service/redis created
+service/rabbitmq created
+service/payments-worker created
+```
+
+<!-- gate: output -->
+```text
+NAME              TYPE        CLUSTER-IP      EXTERNAL-IP   PORT(S)              AGE
+catalog           ClusterIP   10.96.82.50     <none>        80/TCP               1s
+orders            ClusterIP   10.96.43.23     <none>        80/TCP               0s
+payments-worker   ClusterIP   None            <none>        8080/TCP             0s
+postgres          ClusterIP   None            <none>        5432/TCP             68s
+rabbitmq          ClusterIP   10.96.60.96     <none>        5672/TCP,15672/TCP   0s
+redis             ClusterIP   10.96.243.123   <none>        6379/TCP             0s
+storefront        ClusterIP   10.96.16.125    <none>        80/TCP               0s
+```
+
+`payments-worker` and `postgres` show `None`: both are headless, and
+`payments-worker` has no endpoints in this chapter. The other five have a
+virtual IP. The lab ran without `orders` and `rabbitmq`, which no step here
+calls, so those two Services have no endpoints either.
+
+Wait for catalog before you read its endpoints. With `15-catalog-config.yaml`
+applied, catalog reads `REDIS_ADDR`, and its readiness check opens a
+connection to `redis.bookstore.svc.cluster.local`, a name this file has just
+created. The Pods therefore turn Ready only once the Services exist. In the
+lab run they took about a minute after the Services appeared, and a wait placed
+before this step timed out at 300 seconds with 0 of 3 Pods available.
+
+```sh
+kubectl rollout status deploy/catalog -n bookstore --timeout=300s
 # The "address book": endpoints are the READY Pods the selector matched.
 kubectl get endpointslices -n bookstore -l kubernetes.io/service-name=catalog -o wide
+```
 
-# Scale catalog and watch the address book follow the Ready Pods.
+<!-- gate: output -->
+```text
+Waiting for deployment "catalog" rollout to finish: 0 of 3 updated replicas are available...
+# ...
+deployment "catalog" successfully rolled out
+```
+
+<!-- gate: output -->
+```text
+NAME            ADDRESSTYPE   PORTS   ENDPOINTS                             AGE
+catalog-7864s   IPv4          8080    10.244.0.64,10.244.0.66,10.244.0.65   73s
+```
+
+One EndpointSlice holds the three Pod IPs, on the container port 8080 that the
+Service's named `targetPort` resolves to. The `-o wide` view prints at most
+three addresses and then `+ N more...`, so the scale steps below read the
+slice with a `jsonpath` that prints every address and its `ready` flag.
+
+Scale catalog up and watch the address book follow the Ready Pods:
+
+```sh
 kubectl scale deploy/catalog -n bookstore --replicas=4
 kubectl rollout status deploy/catalog -n bookstore
-kubectl get endpointslices -n bookstore -l kubernetes.io/service-name=catalog -o wide
+kubectl get endpointslices -n bookstore -l kubernetes.io/service-name=catalog \
+  -o jsonpath='{range .items[*].endpoints[*]}{.addresses[0]}{" ready="}{.conditions.ready}{"\n"}{end}'
+```
+
+<!-- gate: output -->
+```text
+10.244.0.64 ready=true
+10.244.0.66 ready=true
+10.244.0.65 ready=true
+10.244.0.75 ready=true
+```
+
+Four Ready Pods, four addresses. Scale back down. The slice is read twice,
+right away and after 35 seconds:
+
+```sh
 kubectl scale deploy/catalog -n bookstore --replicas=3
 kubectl rollout status deploy/catalog -n bookstore
-kubectl get endpointslices -n bookstore -l kubernetes.io/service-name=catalog -o wide
+kubectl get endpointslices -n bookstore -l kubernetes.io/service-name=catalog \
+  -o jsonpath='{range .items[*].endpoints[*]}{.addresses[0]}{" ready="}{.conditions.ready}{"\n"}{end}'
+sleep 35
+kubectl get endpointslices -n bookstore -l kubernetes.io/service-name=catalog \
+  -o jsonpath='{range .items[*].endpoints[*]}{.addresses[0]}{" ready="}{.conditions.ready}{"\n"}{end}'
 ```
+
+<!-- gate: output -->
+```text
+10.244.0.64 ready=true
+10.244.0.66 ready=true
+10.244.0.65 ready=true
+10.244.0.75 ready=false
+```
+
+<!-- gate: output -->
+```text
+10.244.0.64 ready=true
+10.244.0.66 ready=true
+10.244.0.65 ready=true
+```
+
+Right after the scale-down the fourth address is still in the slice, marked
+`ready=false`. That Pod is terminating: the catalog Deployment gives it a 5 s
+`preStop` sleep and a 30 s grace period. An endpoint that is not Ready gets no
+new connections from kube-proxy, and the slice drops it once the Pod is gone
+([EndpointSlice conditions](https://kubernetes.io/docs/concepts/services-networking/endpoint-slices/#conditions)).
+So the address book follows readiness, and a removed Pod stops receiving
+traffic before it disappears.
 
 ### 3. The Service is a stable front door (prove the decoupling)
 
@@ -298,8 +398,50 @@ kubectl exec -n bookstore client -- sh -c 'for i in 1 2 3 4 5 6; do curl -s http
 kubectl exec -n bookstore client -- curl -s http://catalog.bookstore.svc.cluster.local/healthz
 ```
 
+<!-- gate: output -->
+```text
+serviceaccount/client created
+pod/client created
+```
+
+<!-- gate: output -->
+```text
+pod/client condition met
+```
+
+<!-- gate: output -->
+```text
+10.96.82.50
+```
+
+<!-- gate: output -->
+```text
+NAME                       IP
+catalog-7c8b656664-crv7n   10.244.0.64
+catalog-7c8b656664-l85wm   10.244.0.65
+catalog-7c8b656664-rg88p   10.244.0.66
+```
+
+<!-- gate: output -->
+```text
+[]
+[]
+[]
+[]
+[]
+[]
+```
+
+<!-- gate: output -->
+```text
+{"status":"ok"}
+```
+
 Each call answers from one of the Ready catalog Pods. kube-proxy picks the
-Pod for each new connection, so the caller never names a Pod.
+Pod for each new connection, so the caller never names a Pod. The list is
+empty because the migration creates the tables and adds no books. The six
+identical lines do not show which Pod answered. The point is that the caller
+used one name and one Service IP, `10.96.82.50`, while three Pods sat behind it.
 
 Now roll catalog. Its Pod IPs change, and the Service IP does not. The loop
 runs for a minute while the rollout replaces every catalog Pod, and it counts
@@ -315,6 +457,50 @@ kubectl get pods -n bookstore -l app=catalog -o custom-columns=NAME:.metadata.na
 kubectl get endpointslices -n bookstore -l kubernetes.io/service-name=catalog -o wide
 kubectl exec -n bookstore client -- curl -s http://catalog.bookstore.svc.cluster.local/healthz
 ```
+
+<!-- gate: output -->
+```text
+     60 200
+```
+
+All 60 calls answered `200` while every catalog Pod was replaced. The
+Deployment's `maxUnavailable: 0` keeps the old Pods until the new ones are
+Ready, and the `preStop` sleep gives the endpoint controller time to drop a
+terminating Pod before it stops answering.
+
+<!-- gate: output -->
+```text
+10.96.82.50
+```
+
+<!-- gate: output -->
+```text
+NAME                       IP
+catalog-7cb8c65f6b-2kqj4   10.244.0.85
+catalog-7cb8c65f6b-bv4ss   10.244.0.83
+catalog-7cb8c65f6b-r6xhb   10.244.0.82
+```
+
+<!-- gate: output -->
+```text
+NAME            ADDRESSTYPE   PORTS   ENDPOINTS                             AGE
+catalog-7864s   IPv4          8080    10.244.0.82,10.244.0.83,10.244.0.85   3m35s
+```
+
+<!-- gate: output -->
+```text
+{"status":"ok"}
+```
+
+Compare the two Pod lists. All three names and all three IPs changed, from
+`10.244.0.64` to `.66` before the restart and `.82` to `.85` after. The Service
+IP stayed `10.96.82.50`, the EndpointSlice kept its name and now lists the new
+Pods, and the client's call by name never failed. The client is the proof that
+a Service name is the stable thing to depend on, and a Pod IP is not.
+
+The lab names differ from the commands above in one place: the namespace was
+`p02-finish-svc`, so the DNS name in the commands read
+`catalog.p02-finish-svc.svc.cluster.local` there.
 
 ### 4. Headless is different — recall postgres
 

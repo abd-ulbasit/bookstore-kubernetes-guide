@@ -9,6 +9,8 @@
 # postgres restarted under load on the shared host (kube-controller-manager and
 # kube-scheduler also restarted). The run was stopped and the chapter's output
 # blocks are limited to the checks below, which completed.
+# Steps 2 and 3 were run again later, on a repaired lab, and that record is run 2
+# at the end of this file. Run 1 above was stopped before they produced output.
 ## step 4: headless is different
 $ kubectl get svc postgres -n p02-02-bookstore
 NAME       TYPE        CLUSTER-IP   EXTERNAL-IP   PORT(S)    AGE
@@ -140,3 +142,195 @@ Error from server (NotFound): pods "client" not found
 $ kubectl delete namespace p02-02-bookstore --wait=true --timeout=180s
 namespace "p02-02-bookstore" deleted
 error: timed out waiting for the condition on namespaces/p02-02-bookstore
+
+
+# ===== run 2: steps 2 and 3 on the repaired lab =====
+# Tier A: kind v0.33.0 cluster, one node on Kubernetes v1.37.0, kubectl v1.37.2,
+# kube-proxy in iptables mode. The cluster is shared with other lab workers.
+# Namespace substitution: the chapter says bookstore, this run used
+# p02-finish-svc. The manifests are a scratch copy of the repository's
+# raw-manifests with the namespace renamed in the objects, in the Service DNS
+# names (catalog.p02-finish-svc.svc.cluster.local) and in the Namespace object.
+# The database user and name keep the name bookstore. client.yaml is the
+# chapter's block with the namespace changed. Nothing else differs.
+# Setup is step 1 without orders and rabbitmq, which steps 2 and 3 do not use.
+# 40-services.yaml still creates their Services, which have no endpoints.
+# What it showed on the way: two earlier attempts of this run waited for the
+# catalog rollout before creating the Services, and the wait timed out at 300 s
+# with 0 of 3 Pods available. Catalog's readiness check opens REDIS_ADDR, which
+# is the redis Service name, and 40-services.yaml creates that Service. The Pods
+# turned Ready about a minute after the Services existed. This record applies
+# the Services first, as the chapter now orders it. In those attempts kubectl
+# printed at most three addresses in `-o wide` ("+ 1 more..."), so the chapter
+# reads endpoints with a jsonpath that prints each address and its ready flag.
+# The endpoint of a Pod being removed stays in the slice, with ready=false,
+# until the Pod is gone: the catalog Deployment has a 5 s preStop sleep and a
+# 30 s grace period. The record shows both states, then the end state after 35 s.
+# The rollout-continuity loop sends 60 requests, one per second, while
+# `kubectl rollout restart` replaces every catalog Pod.
+# The namespace delete at the end ran while the lab host was loaded: the client
+# timed out and printed a watch error, and the API server was unreachable for
+# several minutes. The namespace was gone when the API came back.
+
+## setup: the prerequisites of step 1 that catalog needs (rabbitmq and orders are not used by steps 2 and 3, so they were not started)
+$ kubectl apply -f 00-namespace.yaml -f 05-serviceaccounts-rbac.yaml -f 15-catalog-config.yaml -f 16-db-credentials.yaml -f 12-redis.yaml -f 20-postgres-statefulset.yaml
+namespace/p02-finish-svc created
+resourcequota/bookstore-quota created
+limitrange/bookstore-limits created
+serviceaccount/catalog-sa created
+serviceaccount/storefront-sa created
+serviceaccount/orders-sa created
+serviceaccount/payments-worker-sa created
+serviceaccount/postgres-sa created
+serviceaccount/redis-sa created
+serviceaccount/rabbitmq-sa created
+serviceaccount/migrate-sa created
+role.rbac.authorization.k8s.io/catalog-config-reader created
+rolebinding.rbac.authorization.k8s.io/catalog-config-reader-binding created
+configmap/catalog-config created
+secret/db-credentials created
+deployment.apps/redis created
+service/postgres created
+statefulset.apps/postgres created
+
+$ kubectl rollout status statefulset/postgres -n p02-finish-svc --timeout=300s
+Waiting for 1 pods to be ready...
+partitioned roll out complete: 1 new pods have been updated...
+
+$ kubectl apply -f 21-db-migrate-job.yaml
+job.batch/db-migrate created
+
+$ kubectl wait --for=condition=complete job/db-migrate -n p02-finish-svc --timeout=300s
+job.batch/db-migrate condition met
+
+$ kubectl apply -f 10-catalog-deploy.yaml
+deployment.apps/catalog created
+
+## step 2: a ClusterIP Service per tier
+$ kubectl apply -f 40-services.yaml
+service/catalog created
+service/storefront created
+service/orders created
+service/redis created
+service/rabbitmq created
+service/payments-worker created
+
+$ kubectl get svc -n p02-finish-svc
+NAME              TYPE        CLUSTER-IP      EXTERNAL-IP   PORT(S)              AGE
+catalog           ClusterIP   10.96.82.50     <none>        80/TCP               1s
+orders            ClusterIP   10.96.43.23     <none>        80/TCP               0s
+payments-worker   ClusterIP   None            <none>        8080/TCP             0s
+postgres          ClusterIP   None            <none>        5432/TCP             68s
+rabbitmq          ClusterIP   10.96.60.96     <none>        5672/TCP,15672/TCP   0s
+redis             ClusterIP   10.96.243.123   <none>        6379/TCP             0s
+storefront        ClusterIP   10.96.16.125    <none>        80/TCP               0s
+
+$ kubectl rollout status deploy/catalog -n p02-finish-svc --timeout=300s
+Waiting for deployment "catalog" rollout to finish: 0 of 3 updated replicas are available...
+Waiting for deployment "catalog" rollout to finish: 1 of 3 updated replicas are available...
+Waiting for deployment "catalog" rollout to finish: 2 of 3 updated replicas are available...
+deployment "catalog" successfully rolled out
+
+$ kubectl get endpointslices -n p02-finish-svc -l kubernetes.io/service-name=catalog -o wide
+NAME            ADDRESSTYPE   PORTS   ENDPOINTS                             AGE
+catalog-7864s   IPv4          8080    10.244.0.64,10.244.0.66,10.244.0.65   73s
+
+$ kubectl scale deploy/catalog -n p02-finish-svc --replicas=4
+deployment.apps/catalog scaled
+
+$ kubectl rollout status deploy/catalog -n p02-finish-svc --timeout=240s
+Waiting for deployment "catalog" rollout to finish: 3 of 4 updated replicas are available...
+deployment "catalog" successfully rolled out
+
+$ kubectl get endpointslices -n p02-finish-svc -l kubernetes.io/service-name=catalog -o jsonpath='{range .items[*].endpoints[*]}{.addresses[0]}{" ready="}{.conditions.ready}{"\n"}{end}'
+10.244.0.64 ready=true
+10.244.0.66 ready=true
+10.244.0.65 ready=true
+10.244.0.75 ready=true
+
+$ kubectl scale deploy/catalog -n p02-finish-svc --replicas=3
+deployment.apps/catalog scaled
+
+$ kubectl rollout status deploy/catalog -n p02-finish-svc --timeout=240s
+deployment "catalog" successfully rolled out
+
+$ kubectl get endpointslices -n p02-finish-svc -l kubernetes.io/service-name=catalog -o jsonpath='{range .items[*].endpoints[*]}{.addresses[0]}{" ready="}{.conditions.ready}{"\n"}{end}'
+10.244.0.64 ready=true
+10.244.0.66 ready=true
+10.244.0.65 ready=true
+10.244.0.75 ready=false
+
+$ sleep 35; kubectl get endpointslices -n p02-finish-svc -l kubernetes.io/service-name=catalog -o jsonpath='{range .items[*].endpoints[*]}{.addresses[0]}{" ready="}{.conditions.ready}{"\n"}{end}'
+10.244.0.64 ready=true
+10.244.0.66 ready=true
+10.244.0.65 ready=true
+
+## step 3: the Service is a stable front door
+$ kubectl apply -f client.yaml
+serviceaccount/client created
+pod/client created
+
+$ kubectl wait --for=condition=Ready pod/client -n p02-finish-svc --timeout=120s
+pod/client condition met
+
+$ kubectl get svc catalog -n p02-finish-svc -o jsonpath='{.spec.clusterIP}{"\n"}'
+10.96.82.50
+
+$ kubectl get pods -n p02-finish-svc -l app=catalog -o custom-columns=NAME:.metadata.name,IP:.status.podIP
+NAME                       IP
+catalog-7c8b656664-crv7n   10.244.0.64
+catalog-7c8b656664-l85wm   10.244.0.65
+catalog-7c8b656664-rg88p   10.244.0.66
+
+$ kubectl exec -n p02-finish-svc client -- sh -c 'for i in 1 2 3 4 5 6; do curl -s http://catalog.p02-finish-svc.svc.cluster.local/books | head -c 60; echo; done'
+[]
+[]
+[]
+[]
+[]
+[]
+
+$ kubectl exec -n p02-finish-svc client -- curl -s http://catalog.p02-finish-svc.svc.cluster.local/healthz
+{"status":"ok"}
+
+$ # rollout continuity: the loop, a restart, then the state after
+$ kubectl rollout restart deploy/catalog -n p02-finish-svc
+deployment.apps/catalog restarted
+
+$ kubectl rollout status deploy/catalog -n p02-finish-svc --timeout=240s
+Waiting for deployment "catalog" rollout to finish: 1 out of 3 new replicas have been updated...
+Waiting for deployment "catalog" rollout to finish: 1 out of 3 new replicas have been updated...
+Waiting for deployment "catalog" rollout to finish: 1 out of 3 new replicas have been updated...
+Waiting for deployment "catalog" rollout to finish: 2 out of 3 new replicas have been updated...
+Waiting for deployment "catalog" rollout to finish: 2 out of 3 new replicas have been updated...
+Waiting for deployment "catalog" rollout to finish: 2 out of 3 new replicas have been updated...
+Waiting for deployment "catalog" rollout to finish: 1 old replicas are pending termination...
+Waiting for deployment "catalog" rollout to finish: 1 old replicas are pending termination...
+Waiting for deployment "catalog" rollout to finish: 1 old replicas are pending termination...
+Waiting for deployment "catalog" rollout to finish: 1 old replicas are pending termination...
+deployment "catalog" successfully rolled out
+
+     60 200
+
+$ kubectl get svc catalog -n p02-finish-svc -o jsonpath='{.spec.clusterIP}{"\n"}'
+10.96.82.50
+
+$ kubectl get pods -n p02-finish-svc -l app=catalog -o custom-columns=NAME:.metadata.name,IP:.status.podIP
+NAME                       IP
+catalog-7cb8c65f6b-2kqj4   10.244.0.85
+catalog-7cb8c65f6b-bv4ss   10.244.0.83
+catalog-7cb8c65f6b-r6xhb   10.244.0.82
+
+$ kubectl get endpointslices -n p02-finish-svc -l kubernetes.io/service-name=catalog -o wide
+NAME            ADDRESSTYPE   PORTS   ENDPOINTS                             AGE
+catalog-7864s   IPv4          8080    10.244.0.82,10.244.0.83,10.244.0.85   3m35s
+
+$ kubectl exec -n p02-finish-svc client -- curl -s http://catalog.p02-finish-svc.svc.cluster.local/healthz
+{"status":"ok"}
+
+## cleanup
+$ kubectl delete namespace p02-finish-svc --wait=true --timeout=180s
+namespace "p02-finish-svc" deleted
+E1031 07:40:44.998860   40293 reflector.go:227] "Failed to watch" err="context deadline exceeded - error from a previous attempt: EOF" reflector="k8s.io/client-go/tools/watch/informerwatcher.go:162" type="*unstructured.Unstructured"
+error: timed out waiting for the condition on namespaces/p02-finish-svc
+

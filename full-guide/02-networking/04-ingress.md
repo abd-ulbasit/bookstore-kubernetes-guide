@@ -494,8 +494,24 @@ and the annotation that attaches it. The annotation's value is
 and a replacement with `$1` capture references
 ([Traefik docs](https://doc.traefik.io/traefik/reference/routing-configuration/http/middlewares/replacepathregex/)).
 
-Save both objects as `50-ingress-traefik.yaml`. The tree's `50-ingress.yaml`
-is the ingress-nginx form of this routing, so apply this file instead.
+Something at the edge has to strip `/api`. The storefront calls `/api/books`
+and `/api/orders` (`app/storefront/index.html`), and the services serve
+`/books` and `/orders` (`app/catalog/main.go`, `app/orders/main.go`). Step 5
+showed the catalog answering `/api/books` with a 404. The Ingress API has no
+rewrite field, and Traefik's reference lists no Ingress annotation that
+rewrites a path, only `router.middlewares`, which attaches a Middleware
+([Traefik Ingress reference](https://doc.traefik.io/traefik/reference/routing-configuration/kubernetes/ingress/)).
+
+The block below is the tree's
+`examples/bookstore/raw-manifests/50-ingress-traefik.yaml`. Save it as
+`50-ingress-traefik.yaml`, or use the tree file. The tree's `50-ingress.yaml` is
+the same Ingress without the annotation and without the Middleware: the
+portable form, which step 7 uses to show what the Middleware does. The Helm
+chart and the Kustomize base carry the portable form as well and add the pair
+on request (`ingress.traefikRewrite.enabled`, and the `traefik-rewrite`
+component). A Middleware is a custom resource, so keeping it out of the
+default renders keeps them free of CRD kinds and keeps their object counts
+unchanged.
 
 ```yaml
 apiVersion: traefik.io/v1alpha1
@@ -720,6 +736,48 @@ curl -s --cacert tls.crt --resolve bookstore.localdev.me:8443:127.0.0.1 -w "\n%{
 It reaches the storefront, which answers `200` with its own page, and not the
 catalog. The `/` rule took it, because `strictPrefixMatching` keeps `/api/books`
 from matching it.
+
+Last, the portable Ingress without the Middleware. **Deliberate action:**
+apply the tree's `50-ingress.yaml` over the Traefik form. It names the same
+Ingress, so Kubernetes reports `configured`, and it removes the annotation.
+Then repeat the catalog request:
+
+```sh
+kubectl apply -f examples/bookstore/raw-manifests/50-ingress.yaml
+curl -s --cacert tls.crt --resolve bookstore.localdev.me:8443:127.0.0.1 -w "\n%{http_code}\n" https://bookstore.localdev.me:8443/api/books
+```
+
+<!-- gate: output -->
+```text
+ingress.networking.k8s.io/bookstore configured
+```
+
+<!-- gate: output -->
+```text
+404 page not found
+404
+```
+
+The route is still there, and the request reaches the catalog as `/api/books`,
+which the catalog does not serve. Nothing stripped the prefix. Put the pair
+back:
+
+```sh
+kubectl apply -f 50-ingress-traefik.yaml
+curl -s --cacert tls.crt --resolve bookstore.localdev.me:8443:127.0.0.1 -w "\n%{http_code}\n" https://bookstore.localdev.me:8443/api/books
+```
+
+<!-- gate: output -->
+```text
+middleware.traefik.io/rewrite-api-prefix unchanged
+ingress.networking.k8s.io/bookstore configured
+```
+
+<!-- gate: output -->
+```text
+[]
+200
+```
 
 ```sh
 kill %1

@@ -93,7 +93,7 @@ flowchart TB
     cat -->|"ALLOW :5432 (rules 5+7)"| pg
     ord -->|"ALLOW :5672 (rules 6+7)"| mq
     sf  -.->|"DENIED (no rule): UI must not hit the DB"| pg
-    cat -->|"ALLOW :6379 (rules 11+12)"| rd
+    cat -->|"ALLOW :6379 (rules 5+7)"| rd
     ord -.->|"DENIED (no rule): no orders→redis path"| rd
     bk  ===>|"ALLOW UDP/TCP 53 to kube-dns (rule 2 — MANDATORY)"| dns
 
@@ -114,8 +114,8 @@ flowchart TB
  ─────────────────────────────────────────────────────────────────────────────────────
    ✔ = explicitly allowed (rule #)   ✗ = denied by default-deny (no allow)
    · = not applicable / not part of the app's required edges
-   redis takes inbound traffic only from catalog (rule 11), and catalog's
-   egress to it is rule 12.
+   redis takes inbound traffic only from catalog (rule 5), and catalog's
+   egress to it is rule 7.
 ```
 
 ## Hands-on with the Bookstore
@@ -134,9 +134,9 @@ Secret) or from [ch.05](05-gateway-api.md). The policy admits the `traefik`
 namespace, where both stacks run Traefik.
 
 The steps run in order. Each one changes one thing and repeats the same
-request, so every result is a policy decision. The captured output comes from lab copies of the namespaces called
-`p02-06-bookstore` and `p02-06-traefik`; in your cluster they are `bookstore`
-and `traefik`.
+request, so every result is a policy decision. The captured output comes from
+lab copies of the namespaces called `p02-finish-np` and `p02-finish-traefik`;
+in your cluster they are `bookstore` and `traefik`.
 
 ### 0. Check that the cluster's CNI enforces policy
 
@@ -304,8 +304,9 @@ well, so that a later change which quietly removes a policy fails the build.
 
 ### 3. The Bookstore's allows, then the same request
 
-Apply the file. It holds the default deny, the DNS allow, one allow for each
-edge on both ends, and the redis pair that catalog's readiness check needs.
+Apply the file. It holds ten policies: the default deny, the DNS allow, and
+one allow for each edge on both ends, including the data tier that catalog's
+readiness check needs.
 
 ```sh
 kubectl apply -f examples/bookstore/raw-manifests/60-networkpolicy.yaml
@@ -317,14 +318,12 @@ networkpolicy.networking.k8s.io/default-deny-all configured
 networkpolicy.networking.k8s.io/allow-dns-egress configured
 networkpolicy.networking.k8s.io/allow-ingress-to-http-tiers created
 networkpolicy.networking.k8s.io/allow-storefront-to-apis created
-networkpolicy.networking.k8s.io/allow-catalog-to-postgres created
+networkpolicy.networking.k8s.io/allow-data-tier-ingress created
 networkpolicy.networking.k8s.io/allow-orders-to-rabbitmq created
 networkpolicy.networking.k8s.io/allow-backend-egress created
 networkpolicy.networking.k8s.io/allow-storefront-egress created
 networkpolicy.networking.k8s.io/allow-payments-worker-egress created
 networkpolicy.networking.k8s.io/allow-monitoring-scrape created
-networkpolicy.networking.k8s.io/allow-catalog-to-redis created
-networkpolicy.networking.k8s.io/allow-catalog-egress-redis created
 ```
 
 The rules, in order:
@@ -334,21 +333,28 @@ The rules, in order:
   `:8080`.
 - **rule 4** `allow-storefront-to-apis`: storefront to catalog and orders on
   `:8080`, the ingress side of that edge.
-- **rule 5** `allow-catalog-to-postgres` and **rule 6**
-  `allow-orders-to-rabbitmq`: the ingress side of the backend edges.
-- **rule 7** `allow-backend-egress`: the egress side of catalog to postgres and
-  orders to rabbitmq. Rules 5 and 6 alone still fail.
+- **rule 5** `allow-data-tier-ingress`: one policy that selects both data
+  pods. Its first rule admits catalog, orders, `db-migrate` and `cleanup` to
+  postgres on `:5432`. Its second admits catalog alone to redis on `:6379`.
+  Each rule names its port, so a source reaches only the data pod that
+  listens there.
+- **rule 6** `allow-orders-to-rabbitmq`: the ingress side of orders to the
+  broker.
+- **rule 7** `allow-backend-egress`: the egress side for catalog, orders,
+  `db-migrate` and `cleanup`, to postgres, redis and rabbitmq. It grants a
+  superset on purpose, because each destination decides who it admits (rules 5
+  and 6): orders may send to redis here, and redis refuses it. Rules 5 and 6
+  alone still fail.
 - **rule 8** `allow-storefront-egress`: the egress side of storefront to catalog
   and orders.
 
 Rules 9 and 10 come from later Parts (the payments worker, and the monitoring
-scrape). They follow the same pattern. Rules 11 and 12, the redis pair, use the
-same both-ends pattern: catalog's readiness check pings Redis.
+scrape). They follow the same pattern.
 
 Catalog's readiness check pings Redis (`REDIS_ADDR` in
-`15-catalog-config.yaml`), so without the pair catalog would stop being Ready
-once the default deny is in force. Check the request, and the Ready state of
-catalog:
+`15-catalog-config.yaml`), so rule 5's redis rule and the redis egress of rule
+7 are what keep catalog Ready once the default deny is in force. Check the
+request, and the Ready state of catalog:
 
 ```sh
 kubectl exec -n bookstore probe -- curl -sS --max-time 5 http://$CATALOG_IP:8080/healthz
@@ -381,7 +387,7 @@ kubectl apply -f examples/bookstore/raw-manifests/60-networkpolicy.yaml
 
 <!-- gate: output -->
 ```text
-networkpolicy.networking.k8s.io "allow-storefront-egress" deleted from p02-06-bookstore namespace
+networkpolicy.networking.k8s.io "allow-storefront-egress" deleted from p02-finish-np namespace
 ```
 
 <!-- gate: output -->
@@ -396,14 +402,12 @@ networkpolicy.networking.k8s.io/default-deny-all unchanged
 networkpolicy.networking.k8s.io/allow-dns-egress unchanged
 networkpolicy.networking.k8s.io/allow-ingress-to-http-tiers unchanged
 networkpolicy.networking.k8s.io/allow-storefront-to-apis unchanged
-networkpolicy.networking.k8s.io/allow-catalog-to-postgres unchanged
+networkpolicy.networking.k8s.io/allow-data-tier-ingress unchanged
 networkpolicy.networking.k8s.io/allow-orders-to-rabbitmq unchanged
 networkpolicy.networking.k8s.io/allow-backend-egress unchanged
 networkpolicy.networking.k8s.io/allow-storefront-egress created
 networkpolicy.networking.k8s.io/allow-payments-worker-egress unchanged
 networkpolicy.networking.k8s.io/allow-monitoring-scrape unchanged
-networkpolicy.networking.k8s.io/allow-catalog-to-redis unchanged
-networkpolicy.networking.k8s.io/allow-catalog-egress-redis unchanged
 ```
 
 The controller reaches the same tiers from its own namespace, through rule 3.
@@ -442,7 +446,7 @@ kubectl apply -f examples/bookstore/raw-manifests/60-networkpolicy.yaml
 
 <!-- gate: output -->
 ```text
-networkpolicy.networking.k8s.io "allow-dns-egress" deleted from p02-06-bookstore namespace
+networkpolicy.networking.k8s.io "allow-dns-egress" deleted from p02-finish-np namespace
 ```
 
 <!-- gate: output -->
@@ -457,7 +461,7 @@ networkpolicy.networking.k8s.io/default-deny-all unchanged
 networkpolicy.networking.k8s.io/allow-dns-egress created
 networkpolicy.networking.k8s.io/allow-ingress-to-http-tiers unchanged
 networkpolicy.networking.k8s.io/allow-storefront-to-apis unchanged
-networkpolicy.networking.k8s.io/allow-catalog-to-postgres unchanged
+networkpolicy.networking.k8s.io/allow-data-tier-ingress unchanged
 networkpolicy.networking.k8s.io/allow-orders-to-rabbitmq unchanged
 networkpolicy.networking.k8s.io/allow-backend-egress unchanged
 networkpolicy.networking.k8s.io/allow-storefront-egress unchanged
@@ -529,21 +533,6 @@ kubectl label pod probe -n bookstore app=scratch-egress --overwrite
 
 <!-- gate: output -->
 ```text
-apiVersion: networking.k8s.io/v1
-kind: NetworkPolicy
-metadata: { name: scratch-https-except-metadata, namespace: p02-06-bookstore }
-spec:
-  podSelector:
-    matchLabels: { app: scratch-egress }
-  policyTypes: ["Egress"]
-  egress:
-    - to:
-        - ipBlock:
-            cidr: 0.0.0.0/0
-            except: ["169.254.169.254/32"]   # cloud instance metadata
-      ports: [ { protocol: TCP, port: 443 } ]
-EOF2
-kubectl apply -f scratch-egress.yaml
 networkpolicy.networking.k8s.io/scratch-https-except-metadata created
 ```
 
@@ -607,7 +596,7 @@ kubectl delete pod probe -n bookstore
 
 <!-- gate: output -->
 ```text
-networkpolicy.networking.k8s.io "scratch-https-except-metadata" deleted from p02-06-bookstore namespace
+networkpolicy.networking.k8s.io "scratch-https-except-metadata" deleted from p02-finish-np namespace
 ```
 
 <!-- gate: output -->
@@ -617,7 +606,7 @@ pod/probe labeled
 
 <!-- gate: output -->
 ```text
-pod "probe" deleted from p02-06-bookstore namespace
+pod "probe" deleted from p02-finish-np namespace
 ```
 
 > **Lineage note.** `60-networkpolicy.yaml` is the Bookstore's segmentation

@@ -137,11 +137,12 @@ in `bookstore` (created in [ch.04](04-ingress.md) step 4, reused as-is).
 
 ### 1. Install the Gateway API CRDs and the Traefik Gateway provider
 
-Gateway API is **not** in core Kubernetes. Install the CRDs for the latest
-release, v1.7.0 at the time of writing, then turn on the Gateway provider in
-Traefik. Traefik is the controller [ch.04](04-ingress.md) installs for
-Ingress. One Traefik serves both APIs: the Ingress provider stays on, and the
-Gateway provider joins it.
+Gateway API is **not** in core Kubernetes. Install the CRDs, then turn on the
+Gateway provider in Traefik. Traefik is the controller [ch.04](04-ingress.md)
+installs for Ingress. One Traefik serves both APIs: the Ingress provider stays
+on, and the Gateway provider joins it. The CRD version is a decision, and the
+note after the controller check explains it: this lab ran v1.7.0, and
+Traefik's documentation names v1.6.3.
 
 ```sh
 kubectl apply -f \
@@ -228,10 +229,20 @@ The value is `traefik.io/gateway-controller`, and `51-gateway.yaml` uses it.
 Use the `controllerName` your own controller advertises for any other
 implementation.
 
-The chart's installer notes name Gateway API v1.5.1 for Traefik v3.7. This
-chapter ran v1.7.0 with the Gateway accepted and programmed, but check
-Traefik's compatibility notes before you change CRD versions on a cluster you
-keep.
+**Which CRD version.** Three versions are in play, and they disagree. The
+chart's installer notes, printed by the upgrade above, name Gateway API v1.5.1
+for Traefik v3.7. Traefik's v3.7 documentation says "This provider supports
+Standard version v1.6.3 of the Gateway API specification", and gives the
+`standard-install.yaml` of that release as the install
+([Traefik Gateway API provider](https://doc.traefik.io/traefik/reference/install-configuration/providers/kubernetes/kubernetes-gateway/)).
+This chapter ran v1.7.0, which is newer than both. The Gateway was accepted and
+programmed and every request below behaved, but the documentation does not
+promise that pairing. Follow the documentation: the chart note sits oddly
+beside it and looks out of date. On a cluster you keep, install v1.6.3 by
+changing the version in the URL of step 1.
+The kinds listed there are v1.7.0's, so your list may differ. The lab's CRDs
+are v1.7.0 because the first run of this chapter installed them and left them
+in place: they are cluster-scoped and the cluster is shared.
 
 The kind cluster needs a host port for each NodePort. Add these two mappings
 under the control-plane node in the cluster config from
@@ -901,8 +912,10 @@ Checklist:
   route binding through `allowedRoutes` (including the risk of relying on
   labels that teams can set), hostname hijacking, and `ReferenceGrant`.
 - ReferenceGrant design: <https://gateway-api.sigs.k8s.io/geps/gep-709/>.
-- Release notes for v1.7.0, the version used here:
-  <https://github.com/kubernetes-sigs/gateway-api/releases/tag/v1.7.0>.
+- Release notes for v1.7.0, the version the lab ran, and for v1.6.3, the one
+  Traefik's documentation names:
+  <https://github.com/kubernetes-sigs/gateway-api/releases/tag/v1.7.0> and
+  <https://github.com/kubernetes-sigs/gateway-api/releases/tag/v1.6.3>.
 - Traefik's Gateway API provider, including its listener-port rule and the
   chart values used in step 1:
   <https://doc.traefik.io/traefik/reference/routing-configuration/kubernetes/gateway-api/>.
