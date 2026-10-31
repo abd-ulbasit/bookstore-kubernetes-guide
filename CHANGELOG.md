@@ -50,13 +50,14 @@ versions follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   `security/namespace-exceptions.yaml`.
 - A second audit sweep made the chapters say what they run. 05.01 runs
   anonymous requests and a Pod certificate with a lab signer on kind. 05.08
-  runs the audit policy on a throwaway kind cluster and reads the log. 05.03
-  runs a `not_affected` VEX statement that suppresses a finding. 05.04 teaches
-  the KMS v2 wiring from the upstream page, cited and not run, and 05.05 shows
-  the RuntimeClass, SELinux and Security Profiles Operator shapes, cited and
-  not run. Pointers that named a chapter for something it does not teach now
-  name the one that does, and `docs/design/2026-10-29-security-first-rewrite.md`
-  section 5.8.1 lists where the coverage maps still fall short of the tree.
+  runs the audit policy on a throwaway kind cluster and reads the log, as a
+  third recording beside its Falco and Trivy Operator runs. 05.03 runs a
+  `not_affected` VEX statement that suppresses a finding. 05.04 teaches the
+  KMS v2 wiring from the upstream page, cited and not run, and 05.05 shows the
+  SELinux and Security Profiles Operator shapes, cited and not run. Pointers
+  that named a chapter for something it does not teach now name the one that
+  does, and `docs/design/2026-10-29-security-first-rewrite.md` section 5.8.1
+  lists where the coverage maps still fall short of the tree.
 - The Bookstore Kyverno policy uses the rule-level `failureAction` in the raw,
   Helm and Kustomize copies, checked with a server dry run against the chart
   3.9.2 CRD. The Grype ignore entry is scoped to its package and dated, and the
@@ -206,7 +207,8 @@ versions follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 - Part 05 Security (05.00 to 05.10) is rewritten security-first, from four
   chapters to eleven, with each lab run as attack, harden, re-attack and
   evidence on kind, and `05-security/` joins the enforced list. The full
-  Kyverno, Gatekeeper, Falco and Trivy Operator installs are still marked not run.
+  Kyverno, Gatekeeper, Falco and Trivy Operator installs were marked not run
+  then; the heavy labs entry below records their later runs.
 - Part 09 end-to-end Bookstore (09.01) is rewritten security-first: the core
   Bookstore runs behind Traefik under `restricted` on a kind cluster, with the
   edge answer, a NetworkPolicy refusal and a restricted refusal captured, and

@@ -525,26 +525,32 @@ chapter it names, and is either run or labelled cited.
   ClusterTrustBundle on kind with a lab signer. No mesh consumes them.
 * **Encryption at rest, KMS.** 05.04 runs a `secretbox` provider. The KMS v2
   wiring, rotation and failure mode are cited from the upstream page, not run.
-* **seccomp, AppArmor, SELinux, SPO, sandboxed runtimes.** 05.05 runs seccomp.
-  AppArmor needs a host filesystem that the kind lab lacks. The SELinux label,
-  the RuntimeClass and the Security Profiles Operator objects are shown as
-  fragments or manifests and are cited, not run.
+* **seccomp, AppArmor, SELinux, SPO, sandboxed runtimes.** 05.05 runs seccomp
+  and a gVisor sandbox chosen through a RuntimeClass, and shows a node refusing
+  a Pod that names an AppArmor profile it cannot load. A profile's denial needs
+  a host filesystem that the kind lab lacks, so it is cited, not run. The
+  SELinux label and the Security Profiles Operator objects are shown as
+  fragments and are cited, not run.
 * **Node OS hardening, binary verification, upgrades, CVE response.** The
   runtime-patching rule is in 00.05 and the CVE procedure in 08.01 (narrated,
   not run). Node OS hardening is cited and taught nowhere.
 * **Policy as code and image verification at admission.** 05.07 runs the
-  built-in ValidatingAdmissionPolicy and MutatingAdmissionPolicy. The Kyverno
-  install, Audit, Enforce, `verifyImages` and Gatekeeper steps did not run
-  (the full mode failed three times), and the engine taught is the
-  `ClusterPolicy` kind that the chart's CRD marks deprecated. The Bookstore
-  ships its Kyverno policy off, and its only `verifyImages` rule is a commented
-  sketch, so no signature is checked in the bookstore cluster.
+  built-in ValidatingAdmissionPolicy and MutatingAdmissionPolicy. Its full mode
+  runs Kyverno (Audit, Enforce, and a `verifyImages` rule that admitted the
+  Bookstore's signed catalog image and refused an unsigned one) and Gatekeeper
+  (`dryrun` and `deny`) on kind. The Kyverno removal, in the form the script
+  now has, did not run. The engine taught is the `ClusterPolicy` kind that the
+  chart's CRD marks deprecated. The Bookstore ships its Kyverno policy off, and
+  its only `verifyImages` rule is a commented sketch, so no signature is
+  checked in the bookstore cluster.
 * **Audit logging.** 05.08 runs the audit policy on a throwaway kind cluster and
-  reads the log.
-* **Runtime detection.** 05.08 renders the Falco chart and does not install it.
-  Tetragon is cited, with no TracingPolicy anywhere. The platform Terraform
-  installs Falco off by default, with no Falcosidekick and a priority floor that
-  keeps the shell rule off.
+  reads the log, in its own recording, apart from the Falco and Trivy Operator
+  runs.
+* **Runtime detection.** 05.08 installs Falco with Falcosidekick on kind and
+  captures its alerts for a shell and a sensitive-file read. Tetragon is cited,
+  with no TracingPolicy anywhere. The platform Terraform installs Falco off by
+  default, with no Falcosidekick and a priority floor that keeps the shell rule
+  off.
 * **TLS at the edge, certificate management.** 02.04 and 02.05 use a self-signed
   Secret. The cert-manager `Issuer` and `Certificate` objects are written out,
   not run, in 11.01 and 13.07.
