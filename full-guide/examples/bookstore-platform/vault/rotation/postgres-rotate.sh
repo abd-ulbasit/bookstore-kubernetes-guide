@@ -128,8 +128,16 @@ revoke() {
     echo "       List with: vault list sys/leases/lookup/database/creds/${ROLE_NAME}" >&2
     exit 1
   fi
+  case "${lease_id}" in
+    database/creds/bookstore-platform-*) ;;
+    *)
+      echo "ERROR: ${lease_id} is outside database/creds/bookstore-platform-*" >&2
+      exit 1
+      ;;
+  esac
   echo "Revoking lease ${lease_id}..."
-  vault lease revoke "${lease_id}"
+  # -prefix, because the admin policy grants only the scoped revoke-prefix path.
+  vault lease revoke -prefix "${lease_id}"
   echo "Vault ran the revocation SQL; the Postgres role is now DROPped."
 }
 

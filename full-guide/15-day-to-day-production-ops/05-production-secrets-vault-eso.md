@@ -480,7 +480,8 @@ catalog; the Production notes explain why.
 
 ```sh
 # Revoke one lease to force a rotation. The revoke subcommand uses the admin
-# token and VAULT_ADDR from step 4, and needs sys/leases/revoke in the policy.
+# token and VAULT_ADDR from step 4, through the policy's scoped revoke-prefix
+# path, which also takes one full lease ID.
 LEASE_ID=$(vault_in_pod vault list -format=json \
   sys/leases/lookup/database/creds/bookstore-platform-acme-books \
   | jq -r '.[0]')
