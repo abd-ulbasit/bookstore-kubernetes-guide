@@ -84,15 +84,11 @@ misconfigurations:
     statement: "The operator manager ClusterRole writes Services because it creates the child kinds of each BookstoreTenant, Services among them (header of operator/config/rbac/role.yaml, Part 08 ch.05). It grants no Secrets and no wildcards, so the finding is the reconciler's own scope, accepted by design."
     expired_at: 2027-06-30
   # The second-tenant example is a worked tenant Role, namespaced to tenant-acme.
-  - id: KSV-0053
-    paths:
-      - full-guide/examples/bookstore/operators/second-tenant.yaml
-    statement: "The tenant admin Role grants pods/exec and pods/ephemeralcontainers so the tenant can debug its own pods (chapter 08.04). The Role is namespaced to tenant-acme and bound only to that tenant's own identities, so the exec reach stops at its own namespace."
-    expired_at: 2027-06-30
+  # Its Role grants no exec (KSV-0053 is fixed in the manifest, not accepted).
   - id: KSV-0056
     paths:
       - full-guide/examples/bookstore/operators/second-tenant.yaml
-    statement: "The tenant admin Role manages its own Services alongside its workloads (chapter 08.04). The Role is namespaced to tenant-acme and bound only to that tenant's own identities, so the networking reach stops at its own namespace."
+    statement: "The tenant admin Role creates and edits Services in tenant-acme, because a tenant exposes its own workloads (chapter 08.04). It grants no write on endpoints, endpointslices, NetworkPolicies or Ingresses, and a Service selects only Pods in its own namespace, so the networking reach stops at tenant-acme."
     expired_at: 2027-06-30
   # The provider's ClusterRole writes NetworkPolicies in each tenant namespace
   # (chapter 11.10, Threats and controls, E10). Trivy flags the write verbs.
