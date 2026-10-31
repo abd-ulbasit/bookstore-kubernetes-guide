@@ -1,0 +1,292 @@
+# Transcript for full-guide/11-advanced-production-patterns/03-api-priority-and-fairness.md.
+# Tier A: a kind cluster named sf-pilot, with one Kubernetes v1.37.0 node and
+# a kubectl v1.37.2 client. The cluster is shared with other workers, so every
+# namespace this run created is prefixed p11-03-. The node name in the output
+# below is the lab cluster's own, not the one a reader's kind cluster prints.
+# Run on 2026-10-31.
+# No heavy install ran: the chapter installs nothing beyond its own objects,
+# so heavy_lock was not taken.
+# Substitution: the chapter prints `noisy-tenant` for the noisy client's
+# namespace. This run created p11-03-noisy-tenant in its place, and the lab
+# copies of the noisy-tenant manifests were rewritten with
+#   sed 's/namespace: noisy-tenant/namespace: p11-03-noisy-tenant/'
+# The operator's objects keep the reader's names. The run did not create the
+# bookstore-operator-system namespace; the operator's ServiceAccount is
+# impersonated with --as, so the classification it gets is real and the
+# ServiceAccount itself is not needed for it.
+# The FlowSchemas and PriorityLevelConfigurations named bookstore-operator and
+# noisy-tenant are cluster-scoped and were created under the reader's names.
+# They were deleted at the end of the run, separately from the namespace.
+# Command paths start at the repository root. The chapter's commands start at
+# full-guide/, so examples/... in the chapter is full-guide/examples/... here.
+# The noisy-tenant namespace was created with kubectl create namespace and
+# labelled with the chapter's three Pod Security labels. Its ServiceAccount
+# and RoleBinding were applied from a heredoc with the chapter's content,
+# rewritten by sed. The noisy FlowSchema and PriorityLevelConfiguration were
+# applied from a heredoc with the same rewrite.
+# Two requests of the step 2 command were made before recording began, while
+# the command was checked. The operator-level dispatched count of 2 includes
+# them.
+# Late in the run the admin identity stopped having cluster-admin rights. Its
+# groups are now kubeadm:cluster-admins and system:authenticated, and reads of
+# /version, /metrics and clusterrolebindings return Forbidden. Nothing was
+# changed to restore them: that is for the lab owner. The Forbidden lines
+# below are the real replies. The chapter uses no output from them.
+# The ServiceAccount token was held in a shell variable and never printed.
+$ kubectl config current-context
+kind-sf-pilot
+$ kubectl version 2>&1 | grep -v Kustomize
+Client Version: v1.37.2
+Server Version: v1.37.0
+$ kubectl get flowschema --sort-by=.spec.matchingPrecedence
+NAME                           PRIORITYLEVEL     MATCHINGPRECEDENCE   DISTINGUISHERMETHOD   AGE   MISSINGPL
+exempt                         exempt            1                    <none>                13h   False
+probes                         exempt            2                    <none>                13h   False
+system-leader-election         leader-election   100                  ByUser                13h   False
+system-node-high               node-high         400                  ByUser                13h   False
+system-nodes                   system            500                  ByUser                13h   False
+kube-controller-manager        workload-high     800                  ByNamespace           13h   False
+kube-scheduler                 workload-high     800                  ByNamespace           13h   False
+kube-system-service-accounts   workload-high     900                  ByNamespace           13h   False
+service-accounts               workload-low      9000                 ByUser                13h   False
+global-default                 global-default    9900                 ByUser                13h   False
+catch-all                      catch-all         10000                ByUser                13h   False
+$ kubectl get prioritylevelconfiguration
+NAME              TYPE      NOMINALCONCURRENCYSHARES   QUEUES   HANDSIZE   QUEUELENGTHLIMIT   AGE
+catch-all         Limited   5                          <none>   <none>     <none>             13h
+exempt            Exempt    <none>                     <none>   <none>     <none>             13h
+global-default    Limited   20                         128      6          50                 13h
+leader-election   Limited   10                         16       4          50                 13h
+node-high         Limited   40                         64       6          50                 13h
+system            Limited   30                         64       6          50                 13h
+workload-high     Limited   40                         128      6          50                 13h
+workload-low      Limited   100                        128      6          50                 13h
+$ kubectl get flowschema bookstore-operator noisy-tenant -o name
+Error from server (NotFound): flowschemas.flowcontrol.apiserver.k8s.io "bookstore-operator" not found
+Error from server (NotFound): flowschemas.flowcontrol.apiserver.k8s.io "noisy-tenant" not found
+$ kubectl get prioritylevelconfiguration bookstore-operator noisy-tenant -o name
+Error from server (NotFound): prioritylevelconfigurations.flowcontrol.apiserver.k8s.io "bookstore-operator" not found
+Error from server (NotFound): prioritylevelconfigurations.flowcontrol.apiserver.k8s.io "noisy-tenant" not found
+$ kubectl get namespace bookstore-operator-system noisy-tenant -o name
+Error from server (NotFound): namespaces "bookstore-operator-system" not found
+Error from server (NotFound): namespaces "noisy-tenant" not found
+$ kubectl apply --dry-run=server -f full-guide/examples/bookstore/operator/config/apf/bookstore-operator-apf.yaml
+prioritylevelconfiguration.flowcontrol.apiserver.k8s.io/bookstore-operator created (server dry run)
+flowschema.flowcontrol.apiserver.k8s.io/bookstore-operator created (server dry run)
+$ kubectl apply -f full-guide/examples/bookstore/operator/config/apf/bookstore-operator-apf.yaml
+prioritylevelconfiguration.flowcontrol.apiserver.k8s.io/bookstore-operator created
+flowschema.flowcontrol.apiserver.k8s.io/bookstore-operator created
+$ kubectl get flowschema bookstore-operator -o wide
+NAME                 PRIORITYLEVEL        MATCHINGPRECEDENCE   DISTINGUISHERMETHOD   AGE   MISSINGPL
+bookstore-operator   bookstore-operator   600                  ByNamespace           0s    False
+$ kubectl get prioritylevelconfiguration bookstore-operator
+NAME                 TYPE      NOMINALCONCURRENCYSHARES   QUEUES   HANDSIZE   QUEUELENGTHLIMIT   AGE
+bookstore-operator   Limited   10                         16       4          25                 1s
+$ kubectl get flowschema bookstore-operator -o jsonpath="{.metadata.uid}{\"\n\"}"
+3f3208cd-36c4-458c-9e17-5538f97417a0
+$ kubectl get prioritylevelconfiguration bookstore-operator -o jsonpath="{.metadata.uid}{\"\n\"}"
+3a537671-e452-41b2-a5f5-14faf29ce94d
+$ kubectl get flowschema service-accounts global-default -o custom-columns=NAME:.metadata.name,UID:.metadata.uid
+NAME               UID
+service-accounts   a11bbaa6-f3f5-4161-a99d-6f0ad416c259
+global-default     d0875b51-ee1b-4d17-a50a-65f897a70dda
+$ kubectl get prioritylevelconfiguration workload-low global-default catch-all -o custom-columns=NAME:.metadata.name,UID:.metadata.uid
+NAME             UID
+workload-low     c5e6d839-83ff-483e-bb07-5d6f825f7995
+global-default   337f0d63-7e03-480a-9f94-cdf99df7ba0c
+catch-all        ce6b3e56-7acb-4793-8a1d-521b48fafc5d
+$ kubectl create namespace p11-03-noisy-tenant
+namespace/p11-03-noisy-tenant created
+$ kubectl label namespace p11-03-noisy-tenant pod-security.kubernetes.io/enforce=restricted pod-security.kubernetes.io/audit=restricted pod-security.kubernetes.io/warn=restricted --overwrite
+namespace/p11-03-noisy-tenant labeled
+$ kubectl get namespace p11-03-noisy-tenant --show-labels
+NAME                  STATUS   AGE   LABELS
+p11-03-noisy-tenant   Active   1s    kubernetes.io/metadata.name=p11-03-noisy-tenant,pod-security.kubernetes.io/audit=restricted,pod-security.kubernetes.io/enforce=restricted,pod-security.kubernetes.io/warn=restricted
+$ sed 's/noisy-tenant/p11-03-noisy-tenant/g' <<'EOF' | kubectl apply -f -
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: ci-runner
+  namespace: noisy-tenant
+automountServiceAccountToken: false
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: ci-runner-view
+  namespace: noisy-tenant
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: view
+subjects:
+  - kind: ServiceAccount
+    name: ci-runner
+    namespace: noisy-tenant
+EOF
+TOKEN=$(kubectl create token ci-runner -n p11-03-noisy-tenant --duration=10m)
+APISERVER=$(kubectl config view --minify -o jsonpath='{.clusters[0].cluster.server}')
+CA=$(mktemp)
+kubectl config view --minify --raw -o jsonpath='{.clusters[0].cluster.certificate-authority-data}' | base64 -d > "$CA"
+URL="$APISERVER/api/v1/namespaces/p11-03-noisy-tenant/configmaps?limit=500"
+curl -s -D - -o /dev/null --cacert "$CA" -H "Authorization: Bearer $TOKEN" "$URL" | grep -i '^HTTP/\|x-kubernetes-pf'
+kubectl get flowschema service-accounts -o custom-columns=NAME:.metadata.name,UID:.metadata.uid
+kubectl get prioritylevelconfiguration workload-low -o custom-columns=NAME:.metadata.name,UID:.metadata.uid
+kubectl get --raw=/metrics | grep '^apiserver_flowcontrol_dispatched_requests_total{flow_schema="service-accounts"'
+seq 1 1000 | xargs -P 20 -I{} curl -s -o /dev/null -w '%{http_code}\n' --cacert "$CA" -H "Authorization: Bearer $TOKEN" "$URL" | sort | uniq -c
+kubectl get --raw=/metrics | grep '^apiserver_flowcontrol_dispatched_requests_total{flow_schema="service-accounts"'
+rm -f "$CA"
+serviceaccount/ci-runner created
+rolebinding.rbac.authorization.k8s.io/ci-runner-view created
+HTTP/2 200 
+x-kubernetes-pf-flowschema-uid: a11bbaa6-f3f5-4161-a99d-6f0ad416c259
+x-kubernetes-pf-prioritylevel-uid: c5e6d839-83ff-483e-bb07-5d6f825f7995
+NAME               UID
+service-accounts   a11bbaa6-f3f5-4161-a99d-6f0ad416c259
+NAME           UID
+workload-low   c5e6d839-83ff-483e-bb07-5d6f825f7995
+apiserver_flowcontrol_dispatched_requests_total{flow_schema="service-accounts",priority_level="workload-low"} 48
+1000 200
+apiserver_flowcontrol_dispatched_requests_total{flow_schema="service-accounts",priority_level="workload-low"} 1049
+$ sed 's/namespace: noisy-tenant/namespace: p11-03-noisy-tenant/' <<'EOF' | kubectl apply -f -
+apiVersion: flowcontrol.apiserver.k8s.io/v1
+kind: PriorityLevelConfiguration
+metadata:
+  name: noisy-tenant
+spec:
+  type: Limited
+  limited:
+    nominalConcurrencyShares: 1
+    lendablePercent: 0
+    borrowingLimitPercent: 0
+    limitResponse:
+      type: Queue
+      queuing:
+        queues: 2
+        handSize: 1
+        queueLengthLimit: 4
+---
+apiVersion: flowcontrol.apiserver.k8s.io/v1
+kind: FlowSchema
+metadata:
+  name: noisy-tenant
+spec:
+  matchingPrecedence: 700
+  priorityLevelConfiguration:
+    name: noisy-tenant
+  distinguisherMethod:
+    type: ByUser
+  rules:
+    - subjects:
+        - kind: ServiceAccount
+          serviceAccount:
+            name: ci-runner
+            namespace: noisy-tenant
+      resourceRules:
+        - verbs: ["get", "list", "watch"]
+          apiGroups: [""]
+          resources: ["configmaps"]
+          namespaces: ["*"]
+EOF
+sleep 3
+kubectl get flowschema noisy-tenant -o wide
+kubectl get prioritylevelconfiguration noisy-tenant
+TOKEN=$(kubectl create token ci-runner -n p11-03-noisy-tenant --duration=10m)
+APISERVER=$(kubectl config view --minify -o jsonpath='{.clusters[0].cluster.server}')
+CA=$(mktemp)
+kubectl config view --minify --raw -o jsonpath='{.clusters[0].cluster.certificate-authority-data}' | base64 -d > "$CA"
+URL="$APISERVER/api/v1/namespaces/p11-03-noisy-tenant/configmaps?limit=500"
+D=$(mktemp -d)
+seq 1 1000 | xargs -P 20 -I{} curl -s -D "$D/h{}" -o /dev/null -w '%{http_code}\n' --cacert "$CA" -H "Authorization: Bearer $TOKEN" "$URL" | sort | uniq -c
+F=$(grep -l '^HTTP/2 429' "$D"/h* | head -1)
+echo "--- one 429 response, headers only ---"
+tr -d '\r' < "$F" | grep -iv '^$'
+kubectl get --raw=/metrics | grep '^apiserver_flowcontrol_\(dispatched_requests_total\|rejected_requests_total\)' | grep 'noisy-tenant'
+kubectl get --raw=/metrics | grep '^apiserver_request_total{code="429".*resource="configmaps"' | grep 'verb="LIST"' | grep -v 'namespace' | head -3
+kubectl get --raw=/metrics | grep 'bookstore-operator' | grep '^apiserver_flowcontrol_\(dispatched\|rejected\|current_inqueue_requests\)'
+rm -rf "$D" "$CA"
+prioritylevelconfiguration.flowcontrol.apiserver.k8s.io/noisy-tenant created
+flowschema.flowcontrol.apiserver.k8s.io/noisy-tenant created
+NAME           PRIORITYLEVEL   MATCHINGPRECEDENCE   DISTINGUISHERMETHOD   AGE   MISSINGPL
+noisy-tenant   noisy-tenant    700                  ByUser                3s    False
+NAME           TYPE      NOMINALCONCURRENCYSHARES   QUEUES   HANDSIZE   QUEUELENGTHLIMIT   AGE
+noisy-tenant   Limited   1                          2        1          4                  3s
+ 910 200
+  90 429
+--- one 429 response, headers only ---
+HTTP/2 429 
+audit-id: f36a2334-116c-4e63-932a-3a20ed9a4672
+cache-control: no-cache, private
+content-type: text/plain; charset=utf-8
+retry-after: 1
+x-content-type-options: nosniff
+x-kubernetes-pf-flowschema-uid: 3e152e8c-4323-43c5-a6bb-4e13c26966b8
+x-kubernetes-pf-prioritylevel-uid: 1e41e1e6-ff47-44fa-bd1c-aa5e45d787d2
+content-length: 43
+date: Sat, 31 Oct 2026 03:54:48 GMT
+apiserver_flowcontrol_dispatched_requests_total{flow_schema="noisy-tenant",priority_level="noisy-tenant"} 910
+apiserver_flowcontrol_rejected_requests_total{flow_schema="noisy-tenant",priority_level="noisy-tenant",reason="queue-full"} 90
+apiserver_flowcontrol_current_inqueue_requests{flow_schema="bookstore-operator",priority_level="bookstore-operator"} 0
+apiserver_flowcontrol_dispatched_requests_total{flow_schema="bookstore-operator",priority_level="bookstore-operator"} 2
+$ kubectl get --raw=/metrics | grep '^apiserver_flowcontrol_\(nominal_limit_seats\|current_limit_seats\){priority_level="\(noisy-tenant\|bookstore-operator\|workload-low\)"}'
+kubectl get --raw=/debug/api_priority_and_fairness/dump_priority_levels | grep -m1 -A0 'PriorityLevelName' ; kubectl get --raw=/debug/api_priority_and_fairness/dump_priority_levels | grep -A3 '^noisy-tenant' | head -6
+kubectl get --raw='/api/v1/namespaces/default/configmaps' --as=system:serviceaccount:bookstore-operator-system:bookstore-operator-controller-manager -v=8 2>&1 | grep -i 'x-kubernetes-pf-\|Response" status' | sed 's/^[[:space:]]*//' | cut -c1-120
+kubectl get prioritylevelconfiguration exempt -o custom-columns=NAME:.metadata.name,UID:.metadata.uid
+kubectl patch flowschema noisy-tenant --type=merge -p '{"spec":{"priorityLevelConfiguration":{"name":"exempt"}}}'
+sleep 3
+TOKEN=$(kubectl create token ci-runner -n p11-03-noisy-tenant --duration=10m)
+APISERVER=$(kubectl config view --minify -o jsonpath='{.clusters[0].cluster.server}')
+CA=$(mktemp)
+kubectl config view --minify --raw -o jsonpath='{.clusters[0].cluster.certificate-authority-data}' | base64 -d > "$CA"
+curl -s -D - -o /dev/null --cacert "$CA" -H "Authorization: Bearer $TOKEN" "$APISERVER/api/v1/namespaces/p11-03-noisy-tenant/configmaps?limit=500" | grep -i '^HTTP/\|x-kubernetes-pf-prioritylevel'
+kubectl patch flowschema noisy-tenant --type=merge -p '{"spec":{"priorityLevelConfiguration":{"name":"noisy-tenant"}}}'
+sleep 3
+curl -s -D - -o /dev/null --cacert "$CA" -H "Authorization: Bearer $TOKEN" "$APISERVER/api/v1/namespaces/p11-03-noisy-tenant/configmaps?limit=500" | grep -i '^HTTP/\|x-kubernetes-pf-prioritylevel'
+kubectl get flowschema noisy-tenant -o jsonpath='{.spec.priorityLevelConfiguration.name}{"\n"}'
+rm -f "$CA"
+apiserver_flowcontrol_current_limit_seats{priority_level="bookstore-operator"} 27
+apiserver_flowcontrol_current_limit_seats{priority_level="noisy-tenant"} 3
+apiserver_flowcontrol_current_limit_seats{priority_level="workload-low"} 52
+apiserver_flowcontrol_nominal_limit_seats{priority_level="bookstore-operator"} 24
+apiserver_flowcontrol_nominal_limit_seats{priority_level="noisy-tenant"} 3
+apiserver_flowcontrol_nominal_limit_seats{priority_level="workload-low"} 235
+PriorityLevelName,  ActiveQueues, IsIdle, IsQuiescing, WaitingRequests, ExecutingRequests, DispatchedRequests, RejectedRequests, TimedoutRequests, CancelledRequests
+noisy-tenant,       0,            true,   false,       0,               0,                 910,                90,               0,                0
+system,             0,            true,   false,       0,               0,                 347,                0,                0,                0
+workload-high,      0,            true,   false,       0,               0,                 4747,               0,                0,                0
+workload-low,       0,            true,   false,       0,               0,                 1049,               0,                0,                0
+I1031 08:55:35.564155   16383 round_trippers.go:632] "Response" status="403 Forbidden" headers=<
+X-Kubernetes-Pf-Flowschema-Uid: 3f3208cd-36c4-458c-9e17-5538f97417a0
+X-Kubernetes-Pf-Prioritylevel-Uid: 3a537671-e452-41b2-a5f5-14faf29ce94d
+NAME     UID
+exempt   9284f3fe-578d-47a4-a904-db2fb99268ce
+flowschema.flowcontrol.apiserver.k8s.io/noisy-tenant patched
+HTTP/2 200 
+x-kubernetes-pf-prioritylevel-uid: 9284f3fe-578d-47a4-a904-db2fb99268ce
+flowschema.flowcontrol.apiserver.k8s.io/noisy-tenant patched
+HTTP/2 200 
+x-kubernetes-pf-prioritylevel-uid: 1e41e1e6-ff47-44fa-bd1c-aa5e45d787d2
+noisy-tenant
+$ kubectl delete flowschema noisy-tenant bookstore-operator
+flowschema.flowcontrol.apiserver.k8s.io "noisy-tenant" deleted
+flowschema.flowcontrol.apiserver.k8s.io "bookstore-operator" deleted
+$ kubectl delete prioritylevelconfiguration noisy-tenant bookstore-operator
+prioritylevelconfiguration.flowcontrol.apiserver.k8s.io "noisy-tenant" deleted
+prioritylevelconfiguration.flowcontrol.apiserver.k8s.io "bookstore-operator" deleted
+$ kubectl delete namespace p11-03-noisy-tenant
+namespace "p11-03-noisy-tenant" deleted
+$ kubectl get flowschema noisy-tenant bookstore-operator -o name
+Error from server (NotFound): flowschemas.flowcontrol.apiserver.k8s.io "noisy-tenant" not found
+Error from server (NotFound): flowschemas.flowcontrol.apiserver.k8s.io "bookstore-operator" not found
+$ kubectl get prioritylevelconfiguration noisy-tenant bookstore-operator -o name
+Error from server (NotFound): prioritylevelconfigurations.flowcontrol.apiserver.k8s.io "noisy-tenant" not found
+Error from server (NotFound): prioritylevelconfigurations.flowcontrol.apiserver.k8s.io "bookstore-operator" not found
+$ kubectl get namespace p11-03-noisy-tenant -o name
+Error from server (NotFound): namespaces "p11-03-noisy-tenant" not found
+$ kubectl get flowschema --sort-by=.spec.matchingPrecedence -o name | wc -l
+      11
+$ kubectl get --raw=/metrics | grep -c '^apiserver_flowcontrol_request_concurrency_limit'
+kubectl get --raw=/metrics | grep -E '^# HELP apiserver_flowcontrol_(dispatched_requests_total|current_inqueue_requests|rejected_requests_total|nominal_limit_seats|current_limit_seats|request_wait_duration_seconds) ' | cut -c1-150
+Error from server (Forbidden): forbidden: User "kubernetes-admin" cannot get path "/metrics"
+0
+Error from server (Forbidden): forbidden: User "kubernetes-admin" cannot get path "/metrics"

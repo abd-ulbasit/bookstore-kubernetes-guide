@@ -119,6 +119,7 @@ guide yet). Part 00 ch.08 names the enforcer of each baseline field.
 |----|--------|---------|--------|--------------|
 | D1 | One Pod exhausts node memory and evicts its neighbours | Requests and a memory limit on every container | review | 01.01, `#baseline-resources`; 01.03 |
 | D2 | A flood of traffic overwhelms the storefront | None in the baseline | open | none yet |
+| D3 | One client starves the apiserver: a hot-looping controller, a `--kube-api-qps` set far too high, or a bulk `LIST` from one identity | A bounded PriorityLevel per identity with its own fair queue; `429` past the queue; write access to FlowSchema limited to cluster administrators | cluster | 11.03 |
 
 ### Elevation of privilege
 

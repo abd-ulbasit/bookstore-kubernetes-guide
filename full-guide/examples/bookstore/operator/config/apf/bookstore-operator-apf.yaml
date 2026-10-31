@@ -1,29 +1,25 @@
-# Bookstore — Part 11 ch.03 "API Priority & Fairness": bound the BookstoreTenant
-# operator's apiserver traffic into its OWN PriorityLevel + FlowSchema so a
-# buggy reconcile (a hot-loop LIST/WATCH/UPDATE storm) cannot starve the
-# control plane for everyone else. This is the noisy-neighbor protection the
-# chapter builds.
+# Bookstore — Part 11 ch.03 "API Priority & Fairness": give the BookstoreTenant
+# operator's apiserver traffic its OWN PriorityLevel and FlowSchema, so a buggy
+# reconcile (a hot-loop LIST/WATCH/UPDATE storm) drains only its own queue and
+# cannot starve the control plane for everyone else.
 #
-# !!! NOT CRD-BACKED — FlowSchema and PriorityLevelConfiguration are BUILT-IN
-# (flowcontrol.apiserver.k8s.io/v1, GA since v1.29). So unlike the CRD/webhook
-# files this one dry-runs/applies CLEAN on any v1.30+ cluster with no operator,
-# no CRD, nothing installed:
-#   kubectl apply --dry-run=client -f config/apf/bookstore-operator-apf.yaml
-#   flowschema.../...  created (dry run)
-#   prioritylevelconfiguration.../... created (dry run)
-# (No CRD-intrinsic caveat — stated explicitly, the inverse of the CRD files.)
+# FlowSchema and PriorityLevelConfiguration are built-in objects
+# (flowcontrol.apiserver.k8s.io/v1, GA in Kubernetes v1.29). Unlike the CRD and
+# webhook files in this directory, this file needs no operator, CRD or
+# controller installed before the server accepts it:
+#   kubectl apply --dry-run=server -f config/apf/bookstore-operator-apf.yaml
 #
-# Model: a request is matched by the HIGHEST-precedence FlowSchema whose rules
-# fit (subject + verb + resource); that names a PriorityLevelConfiguration,
-# which gives the request a concurrency share and a fair queue. A Limited level
-# that floods only drains ITS OWN queue — other levels (and the built-in
-# system / leader-election / workload-* levels) are unaffected.
+# Model: the apiserver tries FlowSchemas in matchingPrecedence order (lowest
+# number first) and uses the first one whose subjects and rules match the
+# request. That FlowSchema names a PriorityLevelConfiguration, which gives the
+# request a share of concurrency and a fair queue. A flood that matches this
+# FlowSchema fills only this level's queues.
 apiVersion: flowcontrol.apiserver.k8s.io/v1
 kind: PriorityLevelConfiguration
 metadata:
   name: bookstore-operator
 spec:
-  type: Limited # bounded (NOT Exempt — Exempt = unthrottled, for system only)
+  type: Limited # bounded (NOT Exempt — Exempt is unthrottled, for system traffic only)
   limited:
     # Share of the apiserver's total concurrency this level may use. Low on
     # purpose: a teaching operator should never be able to crowd out workload
@@ -45,11 +41,12 @@ kind: FlowSchema
 metadata:
   name: bookstore-operator
 spec:
-  # Lower number = higher precedence. The default catch-all is 9000 and
-  # workload-leader-election is ~200; 500 places the operator's traffic into
-  # its bounded level BEFORE it falls through to the global catch-all (where a
-  # busy operator WOULD compete with every other unclassified client).
-  matchingPrecedence: 500
+  # Lower number = higher precedence. system-nodes is 500, service-accounts is
+  # 9000 and global-default is 9900 (see the built-in list in the chapter). 600
+  # matches the operator's traffic before the service-accounts flow, so it
+  # lands in its bounded level instead of the shared workload-low bucket. The
+  # value is not 500 because two FlowSchemas at the same precedence tie.
+  matchingPrecedence: 600
   priorityLevelConfiguration:
     name: bookstore-operator
   distinguisherMethod:
