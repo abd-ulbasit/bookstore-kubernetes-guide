@@ -513,7 +513,7 @@ PW="$(openssl rand -hex 24)"
 kubectl -n bookstore exec deploy/rabbitmq -- rabbitmqctl add_user keda-scaler "$PW"
 kubectl -n bookstore exec deploy/rabbitmq -- rabbitmqctl set_permissions -p / keda-scaler '^$' '^$' '^orders$'
 kubectl -n bookstore create secret generic rabbitmq-conn \
-  --from-literal=host="amqp://keda-scaler:$PW@rabbitmq.bookstore.svc.cluster.local:5672/"
+  --from-literal=host="amqp://keda-scaler:${PW}@rabbitmq.bookstore.svc.cluster.local:5672/"
 unset PW
 CMD
 run <<'CMD'
@@ -605,7 +605,13 @@ echo '## runner step (h): Kyverno in Audit mode over the running workloads'
 run <<'CMD'
 kubectl apply -f examples/bookstore/raw-manifests/70-kyverno-policy.yaml
 CMD
-sleep 90
+# Background scans take a moment to write the reports.
+for i in $(seq 1 30); do
+  n=$(kubectl get policyreport -n bookstore --no-headers 2>/dev/null | wc -l | tr -d ' ')
+  [ "$n" -ge 25 ] && break
+  sleep 5
+done
+sleep 30
 run <<'CMD'
 kubectl get clusterpolicy
 CMD
@@ -643,6 +649,8 @@ sleep 20 | kubectl debug -n bookstore pod/$POD --target=catalog --profile=restri
   --image=gcr.io/distroless/static@sha256:c7b8faacc4439b8f5c41ca7ce4a3f8ff3e8520cb0c3444fae7292f687b00d0dd \
   --container=debugger -i --quiet -- /busybox/sh -c \
   'id -u; nc -z -w 3 postgres.bookstore.svc.cluster.local 5432 && echo PG-REACHABLE'
+echo "attach exit: $?"
+kubectl logs -n bookstore $POD -c debugger
 CMD
 
 echo '## runner step (c): the platform and the Bookstore together'

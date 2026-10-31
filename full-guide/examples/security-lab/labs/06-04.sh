@@ -374,12 +374,15 @@ kubectl get job load-catalog -n bookstore
 CMD
   run <<'CMD'
 start=$(date +%s)
-while [ $(( $(date +%s) - start )) -lt 480 ]; do
+while [ $(( $(date +%s) - start )) -lt 660 ]; do
   echo "t=+$(( $(date +%s) - start ))s"
   kubectl get hpa catalog -n bookstore --no-headers
   kubectl top pods -n bookstore -l app=catalog --no-headers
   sleep 30
 done
+CMD
+  run <<'CMD'
+kubectl describe hpa catalog -n bookstore | sed -n '/^Events:/,$p'
 CMD
   ;;
 
