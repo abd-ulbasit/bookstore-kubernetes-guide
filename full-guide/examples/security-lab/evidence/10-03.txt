@@ -1,0 +1,37 @@
+# Transcript for 10-cloud-and-managed-kubernetes/03-cloud-identity.md.
+# Tier A: a kind cluster, Kubernetes v1.37.0 node, kubectl v1.37.2.
+# Run on 2026-10-31. Scope: the Kubernetes-side steps only. The cloud steps
+# (IAM roles and trust, the Pod Identity association, the GKE and Entra
+# bindings, IMDS settings) were not run; they are cited upstream, not run.
+# Substitution: the chapter prints `bookstore`. This run used the namespace
+# p10-03-bookstore for every `bookstore` the chapter names; the sed commands
+# below rewrite the reader's names into it. The cluster is a lab kind cluster
+# named sf-pilot, not the reader's cluster; its node name is shown as captured.
+# Paths in the commands are shortened to the repository root and a lab/ folder.
+# The probe Pod was applied as a server dry run: nothing was created or run.
+# The stored shape comes from the dry-run result.
+$ kubectl config current-context
+kind-sf-pilot
+$ kubectl get namespace p10-03-bookstore -o name || true
+Error from server (NotFound): namespaces "p10-03-bookstore" not found
+$ sed -e 's/bookstore/p10-03-bookstore/g' full-guide/examples/bookstore/raw-manifests/00-namespace.yaml | kubectl apply -f -
+namespace/p10-03-bookstore created
+resourcequota/p10-03-bookstore-quota created
+limitrange/p10-03-bookstore-limits created
+$ sed -e 's/bookstore/p10-03-bookstore/g' full-guide/examples/bookstore/raw-manifests/05-serviceaccounts-rbac.yaml | kubectl apply -f - > /dev/null && echo 'serviceaccounts and RBAC from 05 applied'
+serviceaccounts and RBAC from 05 applied
+$ kubectl get sa catalog-sa -n p10-03-bookstore -o jsonpath='{.automountServiceAccountToken}{"\n"}'
+false
+$ kubectl get secrets -n p10-03-bookstore -o jsonpath='{range .items[*]}{.metadata.name}{"\n"}{end}'
+$ sed -e 's/namespace: bookstore/namespace: p10-03-bookstore/' lab/catalog-sa-irsa.yaml | kubectl apply -f -
+serviceaccount/catalog-sa configured
+$ sed -e 's/namespace: bookstore/namespace: p10-03-bookstore/' lab/probe.yaml | kubectl apply --dry-run=server -f - -o jsonpath='{.spec.automountServiceAccountToken}{"\n"}{range .spec.volumes[*]}{.name}{" "}{.projected.sources[0].serviceAccountToken.audience}{"\n"}{end}'
+false
+tmp 
+aws-iam-token sts.amazonaws.com
+$ sed -e 's/namespace: bookstore/namespace: p10-03-bookstore/' lab/hostnet.yaml | kubectl apply --dry-run=server -f - || true
+Error from server (Forbidden): error when creating "STDIN": pods "catalog-hostnet-probe" is forbidden: violates PodSecurity "restricted:latest": host namespaces (hostNetwork=true)
+$ kubectl get sa orders-sa -n p10-03-bookstore -o yaml | grep -c -E 'role-arn|gcp-service-account|client-id' || true
+0
+$ kubectl delete namespace p10-03-bookstore --wait=true
+namespace "p10-03-bookstore" deleted
