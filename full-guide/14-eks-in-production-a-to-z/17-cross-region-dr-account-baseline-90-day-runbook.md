@@ -875,7 +875,7 @@ production artifact:
   laptop does, but reviewed + audited).
 - **ch.14.08** — VPC endpoints & egress economics (when each
   endpoint pays back, NAT vs S3 Gateway endpoint math).
-- **ch.14.09** — ARM/Graviton on EKS (the
+- **ch.14.09**: ARM/Graviton on EKS (the
   multi-arch image build pattern).
 - **ch.14.10** — GitOps bootstrap on a fresh EKS cluster (Argo
   CD via Terraform, App-of-Apps, self-management).
@@ -1111,14 +1111,14 @@ game-day) is calendared.
 
 ```sh
 # All cluster-tree controllers (already in the cluster Terraform):
-#   Argo CD             — argocd_helm_chart_version
-#   Velero              — velero_chart_version
-#   External Secrets    — eso_chart_version
-#   Vault               — vault_chart_version
-#   Karpenter           — karpenter_chart_version
-#   AWS LB Controller   — lb_controller_chart_version
-#   Falco               — falco_chart_version
-#   Kyverno             — kyverno_chart_version
+#   Argo CD             - argocd_helm_chart_version
+#   Velero              - velero_chart_version
+#   External Secrets    - eso_chart_version
+#   Vault               - vault_chart_version
+#   Karpenter           - karpenter_chart_version
+#   AWS LB Controller   - lb_controller_chart_version
+#   Falco               - falco_chart_version
+#   Kyverno             - kyverno_chart_version
 
 # Account-baseline (the account-level Terraform; per-account, not per-cluster):
 cd examples/bookstore-platform/terraform-account-baseline
@@ -1221,14 +1221,14 @@ yes):
 2. **A region goes dark at 02:00 UTC. Walk through the four-phase failover runbook with explicit RPO/RTO numbers and the "do not failover" guards.**
    <details><summary>Show answer</summary>
 
-   (1) **Confirm the region is actually lost** — verify against AWS Health Dashboard, your synthetic monitoring (Datadog/Pingdom external probes), and Route 53 health-check status. The runbook's "do not failover if X is true" guards: AWS has posted an ETA < 30 min, the failure is partial (one AZ vs region), or the issue is your own network connectivity to AWS rather than AWS itself. Failing over and then failing back is two cutovers, so a short outage is often cheaper to ride out. (2) **DNS failover** — the failed region's health check reports unhealthy, and Route 53 stops answering with its latency record (latency records have no weight). Only a check that still reports healthy needs a reviewed `--inverted` to force the failover. Detection follows the health check interval (10 or 30 seconds) and failure threshold; the record TTL should be 60 seconds or less. (3) **Postgres promote** — set `spec.replica.enabled` to `false` on the DR cluster. CNPG calls this irreversible, so fence the old region first. Record the RPO estimate first, from the DR side: the last `cnpg_pg_replication_lag` before the outage, and the replay backlog from `pg_stat_wal_receiver`. It is an estimate, not the lost WAL, and it can spike to minutes during WAN incidents. (4) **Argo CD reconciles into DR cluster** — ApplicationSet already enumerates both regions; the writer workloads (payments-worker) move to the DR region, as ch.14.11 describes. Total writer RTO target: 5-10min when drilled monthly; reader RTO: 5min after DNS settles.
+   (1) **Confirm the region is actually lost**: verify against AWS Health Dashboard, your synthetic monitoring (Datadog/Pingdom external probes), and Route 53 health-check status. The runbook's "do not failover if X is true" guards: AWS has posted an ETA < 30 min, the failure is partial (one AZ vs region), or the issue is your own network connectivity to AWS rather than AWS itself. Failing over and then failing back is two cutovers, so a short outage is often cheaper to ride out. (2) **DNS failover**: the failed region's health check reports unhealthy, and Route 53 stops answering with its latency record (latency records have no weight). Only a check that still reports healthy needs a reviewed `--inverted` to force the failover. Detection follows the health check interval (10 or 30 seconds) and failure threshold; the record TTL should be 60 seconds or less. (3) **Postgres promote**: set `spec.replica.enabled` to `false` on the DR cluster. CNPG calls this irreversible, so fence the old region first. Record the RPO estimate first, from the DR side: the last `cnpg_pg_replication_lag` before the outage, and the replay backlog from `pg_stat_wal_receiver`. It is an estimate, not the lost WAL, and it can spike to minutes during WAN incidents. (4) **Argo CD reconciles into DR cluster**: ApplicationSet already enumerates both regions; the writer workloads (payments-worker) move to the DR region, as ch.14.11 describes. Total writer RTO target: 5-10min when drilled monthly; reader RTO: 5min after DNS settles.
 
    </details>
 
 3. **The account-baseline Terraform tree has 5 control gates. What's the chapter's recommended turn-on order and why does it matter?**
    <details><summary>Show answer</summary>
 
-   (1) **IAM Access Analyzer** — no charge for external access findings; do Day 1 because it surfaces the misconfigured trust policies that account takeovers exploit. (2) **CloudTrail** — the first copy of management events has no charge, but the trail's KMS key and S3 bucket are billed; the forensic API log; Day 1. (3) **GuardDuty** — billed per feature; catches credential abuse, cryptojacking, anomalous API calls; Day 31-60. (4) **Config**, scoped — the costliest of the recurring controls; rules-driven compliance scanning, and Security Hub's Config-based controls need its recording first ([Security Hub prerequisites](https://docs.aws.amazon.com/securityhub/latest/userguide/securityhub-setup-prereqs.html)); Day 61-65. (5) **Security Hub** — the aggregator, only valuable after the others feed it findings; last, Day 80-85. The order matters because turning them on backwards (Security Hub first) shows an empty pane that suggests "we're secure" before the data sources actually exist; turning on Config before its scope is set generates a recurring cost without a clear before/after comparison. Cheapest and most basic first, with each layer building on the prior.
+   (1) **IAM Access Analyzer**: no charge for external access findings; do Day 1 because it surfaces the misconfigured trust policies that account takeovers exploit. (2) **CloudTrail**: the first copy of management events has no charge, but the trail's KMS key and S3 bucket are billed; the forensic API log; Day 1. (3) **GuardDuty**: billed per feature; catches credential abuse, cryptojacking, anomalous API calls; Day 31-60. (4) **Config**, scoped: the costliest of the recurring controls; rules-driven compliance scanning, and Security Hub's Config-based controls need its recording first ([Security Hub prerequisites](https://docs.aws.amazon.com/securityhub/latest/userguide/securityhub-setup-prereqs.html)); Day 61-65. (5) **Security Hub**: the aggregator, only valuable after the others feed it findings; last, Day 80-85. The order matters because turning them on backwards (Security Hub first) shows an empty pane that suggests "we're secure" before the data sources actually exist; turning on Config before its scope is set generates a recurring cost without a clear before/after comparison. Cheapest and most basic first, with each layer building on the prior.
 
    </details>
 
@@ -1256,7 +1256,7 @@ yes):
 7. **Hands-on extension — run the "we lost the primary region" drill in a non-production environment. Time each phase. What do you measure to know the drill was valuable?**
    <details><summary>What you should see</summary>
 
-   Time each of the four phases (confirm-loss / DNS failover / Postgres promote / Argo CD reconcile) to wall-clock, then compare against the runbook's stated RTO numbers. Capture the RPO estimate from the DR side (hands-on step 5) immediately before promote. Note every step where the team paused to figure out what to do next — those are runbook gaps. After the drill, write a 1-2 page postmortem: what was the actual RTO vs the target, what was the actual RPO, what surprises did the team hit, what's the next runbook revision? The drill is valuable if (1) the team executed without consulting docs mid-flight, (2) the measured RTO is within target, (3) every "surprise" produces a runbook update merged within 5 days. A drill where everyone said "smooth" but nobody timed anything is theatre — measurement is what makes it real.
+   Time each of the four phases (confirm-loss / DNS failover / Postgres promote / Argo CD reconcile) to wall-clock, then compare against the runbook's stated RTO numbers. Capture the RPO estimate from the DR side (hands-on step 5) immediately before promote. Note every step where the team paused to figure out what to do next. Those are runbook gaps. After the drill, write a 1-2 page postmortem: what was the actual RTO vs the target, what was the actual RPO, what surprises did the team hit, what's the next runbook revision? The drill is valuable if (1) the team executed without consulting docs mid-flight, (2) the measured RTO is within target, (3) every "surprise" produces a runbook update merged within 5 days. A drill where everyone said "smooth" but nobody timed anything is theatre. Measurement is what makes it real.
 
    </details>
 

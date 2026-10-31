@@ -466,7 +466,7 @@ rm terraform.tfstate terraform.tfstate.backup
 ```
 
 This is the point of no return. Local state files are now strictly
-out-of-date — every plan/apply hits S3. Local copies hold the same secrets,
+out-of-date. Every plan/apply hits S3. Local copies hold the same secrets,
 so delete any others too, including editor backups and synced folders.
 
 ### 9. Troubleshoot — lock stuck after a crash

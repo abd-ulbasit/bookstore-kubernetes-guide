@@ -10,9 +10,9 @@
 > binding mode that keeps Pods and their volumes in the same AZ.
 
 **Estimated time:** ~30 min read · ~60 min hands-on
-**Prerequisites:** [Part 14 ch.03](./03-eks-addon-management.md) — EBS-CSI addon required first · [Part 10 ch.05](../10-cloud-and-managed-kubernetes/05-cloud-storage-and-data.md) — kind→cloud storage transition · [Part 03 ch.05](../03-config-and-storage/05-stateful-data-patterns.md) — StatefulSet binding semantics on EBS
+**Prerequisites:** [Part 14 ch.03](./03-eks-addon-management.md): EBS-CSI addon required first · [Part 10 ch.05](../10-cloud-and-managed-kubernetes/05-cloud-storage-and-data.md): kind→cloud storage transition · [Part 03 ch.05](../03-config-and-storage/05-stateful-data-patterns.md): StatefulSet binding semantics on EBS
 
-**You'll know after this:** • understand why gp2 (default) should be replaced with gp3 on day one — 20% cheaper, tunable IOPS, no burst-credit footgun · • encrypt every volume the default StorageClass provisions with a customer-managed KMS key · • use `WaitForFirstConsumer` to keep Pods and volumes in the same AZ · • design a snapshot lifecycle for production EBS volumes · • debug the AZ-local reality of EBS when a Pod can't reschedule across zones
+**You'll know after this:** • understand why gp2 (default) should be replaced with gp3 on day one: 20% cheaper, tunable IOPS, no burst-credit footgun · • encrypt every volume the default StorageClass provisions with a customer-managed KMS key · • use `WaitForFirstConsumer` to keep Pods and volumes in the same AZ · • design a snapshot lifecycle for production EBS volumes · • debug the AZ-local reality of EBS when a Pod can't reschedule across zones
 
 <!-- tags: storage, ebs-csi, eks, cloud, day-2 -->
 
@@ -141,7 +141,7 @@ existing volume or snapshot cannot be changed, so
 to move data under the CMK, copy the snapshot with the new key and
 restore it. A key costs $1 a month, plus $0.03 per 10,000 requests.
 
-**gp2 vs gp3 vs io1/io2** — the trade-off matrix:
+**gp2 vs gp3 vs io1/io2**: the trade-off matrix:
 
 | Type | Baseline | Max IOPS | Max throughput | Use case |
 |---|---|---|---|---|
@@ -580,7 +580,7 @@ external-snapshotter sidecar (on the EBS-CSI controller) to call
 `CreateSnapshot` against AWS EC2. AWS allocates a snapshot ID and copies the
 changed blocks to its own storage in the background. The snapshot is
 **point-in-time consistent at the EBS level** (crash-consistent, not
-application-consistent — in-flight database writes may or may not be in the
+application-consistent: in-flight database writes may or may not be in the
 snapshot). For application-consistent snapshots, the workload must quiesce (a
 CNPG `Backup` CR, a Postgres `pg_start_backup()` / `pg_stop_backup()`).
 
@@ -701,21 +701,21 @@ Storage-class checklist (the production setup is right when all six are yes):
 1. **Why is gp3 ~20% cheaper than gp2 at the same performance, and what's the cost trap if you don't swap the default?**
    <details><summary>Show answer</summary>
 
-   gp2's IOPS scales with size (3 IOPS per GiB, minimum 100) — so to get 3000 sustained IOPS you have to provision about 1 TiB even if you only need 100 GiB of space. gp3 decouples IOPS from size and gives a flat 3000 IOPS / 125 MiB/s baseline, and AWS prices it 20% lower per GiB than gp2. The cost trap: every fresh EKS cluster ships gp2 as the default, so PVCs created without explicit `storageClassName` (the bookstore's Loki, Tempo, Prometheus, CNPG, Strimzi all start this way) end up on gp2 unless you flip the default to gp3 on day one. A 10-cluster fleet running 5 TB of EBS without the swap pays ~$100/month more than necessary for identical performance.
+   gp2's IOPS scales with size (3 IOPS per GiB, minimum 100). To get 3000 sustained IOPS you have to provision about 1 TiB even if you only need 100 GiB of space. gp3 decouples IOPS from size and gives a flat 3000 IOPS / 125 MiB/s baseline, and AWS prices it 20% lower per GiB than gp2. The cost trap: every fresh EKS cluster ships gp2 as the default, so PVCs created without explicit `storageClassName` (the bookstore's Loki, Tempo, Prometheus, CNPG, Strimzi all start this way) end up on gp2 unless you flip the default to gp3 on day one. A 10-cluster fleet running 5 TB of EBS without the swap pays ~$100/month more than necessary for identical performance.
 
    </details>
 
 2. **You set `volumeBindingMode: Immediate` on the StorageClass and now your StatefulSet's pods are stuck `Pending` with `0/3 nodes available: 1 node(s) had volume node affinity conflict`. What's happening?**
    <details><summary>Show answer</summary>
 
-   With `Immediate`, the CSI driver provisions the EBS volume in an AZ it picks (a zone the provisioner chooses) **before** the Pod is scheduled. The PV's `nodeAffinity` is then pinned to that AZ. If the scheduler can't find a node in that AZ with the required capacity/taints/anti-affinity, the Pod stays Pending forever. `WaitForFirstConsumer` defers volume creation until the scheduler picks a node, so the volume is provisioned in the node's AZ instead — the scheduler keeps its freedom. Switching the SC back to `WaitForFirstConsumer` fixes this; existing PVs already pinned wrong need to be recreated.
+   With `Immediate`, the CSI driver provisions the EBS volume in an AZ it picks (a zone the provisioner chooses) **before** the Pod is scheduled. The PV's `nodeAffinity` is then pinned to that AZ. If the scheduler can't find a node in that AZ with the required capacity/taints/anti-affinity, the Pod stays Pending forever. `WaitForFirstConsumer` defers volume creation until the scheduler picks a node, so the volume is provisioned in the node's AZ instead; the scheduler keeps its freedom. Switching the SC back to `WaitForFirstConsumer` fixes this; existing PVs already pinned wrong need to be recreated.
 
    </details>
 
 3. **A team says their CNPG primary-to-standby WAL replication is generating an unexplained AWS data-transfer charge. The replicas sync fine. What's going on and what would you do?**
    <details><summary>Show answer</summary>
 
-   It's cross-AZ data-transfer charges. AWS bills traffic between AZs in a Region, and a CNPG primary in 1a streaming WAL to standbys in 1b and 1c pays that rate for every byte it sends. Price it from the EC2 pricing page for your Region. The fix is not "stop replicating" — it's accept the cost as the price of HA, OR rearchitect to fewer replicas, OR colocate the primary + standbys in the same AZ (kills your AZ-failure-tolerance). The chapter's lesson: forecast cross-AZ transfer before HA-ing stateful workloads; the FinOps team needs to know.
+   It's cross-AZ data-transfer charges. AWS bills traffic between AZs in a Region, and a CNPG primary in 1a streaming WAL to standbys in 1b and 1c pays that rate for every byte it sends. Price it from the EC2 pricing page for your Region. The fix is not "stop replicating": the answer is to accept the cost as the price of HA, OR rearchitect to fewer replicas, OR colocate the primary + standbys in the same AZ (kills your AZ-failure-tolerance). The chapter's lesson: forecast cross-AZ transfer before HA-ing stateful workloads; the FinOps team needs to know.
 
    </details>
 

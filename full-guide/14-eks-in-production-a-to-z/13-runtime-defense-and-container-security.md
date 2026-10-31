@@ -2,7 +2,7 @@
 
 > **Admission control stops bad images. PSA stops bad Pod specs. Image signing
 > proves provenance. None of those mechanisms can see what happens *inside* a
-> running container at 3am — a process being spawned, a sensitive file being
+> running container at 3am: a process being spawned, a sensitive file being
 > read, an unexpected outbound TCP connection.** Runtime defense is the layer
 > that watches the kernel itself: **Falco** + **Tetragon** for syscall-level
 > rules, **GuardDuty** for AWS-side detections, and the alerting glue (SNS →

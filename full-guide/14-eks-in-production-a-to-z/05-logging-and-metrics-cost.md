@@ -10,7 +10,7 @@
 > follows your investigation window and it is never sampled.
 
 **Estimated time:** ~30 min read · ~60 min hands-on
-**Prerequisites:** [Part 14 ch.02](./02-eks-cluster-lifecycle.md) — EKS control-plane log streams enabled on the cluster · [Part 06 ch.01](../06-production-readiness/01-observability-metrics.md) and [Part 06 ch.02](../06-production-readiness/02-logging.md) — the metrics and logging wiring you now must cost-tune · [Part 06 ch.06](../06-production-readiness/06-capacity-and-cost.md) — generic observability cost framing
+**Prerequisites:** [Part 14 ch.02](./02-eks-cluster-lifecycle.md): EKS control-plane log streams enabled on the cluster · [Part 06 ch.01](../06-production-readiness/01-observability-metrics.md) and [Part 06 ch.02](../06-production-readiness/02-logging.md): the metrics and logging wiring you now must cost-tune · [Part 06 ch.06](../06-production-readiness/06-capacity-and-cost.md): generic observability cost framing
 
 **You'll know after this:** • understand CloudWatch Logs pricing ($0.50/GB ingest + $0.03/GB-month store) and where the runaway-cost incident lives · • set retention on every log group, with the audit window chosen as evidence, not cost · • choose between CloudWatch vs Loki for app logs based on access pattern · • apply the three cost levers (sample, scrub, retain) before the bill arrives · • debug metrics-cardinality blowups (label explosions, Prometheus series spikes) in production
 
@@ -751,7 +751,7 @@ curl -s 'http://localhost:9090/api/v1/query' \
 ```
 
 A `route` label whose value count keeps rising with traffic is the
-smoking gun — the
+smoking gun. The
 application is exporting one series per *exact URL path* instead of
 per *route template* (`/users/123` vs `/users/{id}`). The fix lives
 in the app's metrics exporter; Prometheus cannot fix this at scrape
@@ -1016,7 +1016,7 @@ when all seven are yes):
 1. **What are the three cost levers (sample, scrub, retain) and in what order do they have the most leverage?**
    <details><summary>Show answer</summary>
 
-   **Sample at the source** has the highest ingestion-cost leverage — dropping DEBUG logs in prod or scraping at 30s instead of 5s can cut ingestion by a large multiple, depending on what the app emits. Audit events are the exception: sample nothing there. **Scrub at the boundary** strips PII / high-cardinality fields before they cross an ingestion boundary; bounded cost saving but huge compliance-scope reduction. **Cap retention at the sink** is the cheapest lever (one Terraform variable) and the highest dollar-impact for *storage* costs but doesn't reduce ingestion. Order matters: sample first (kills volume), scrub second (kills compliance scope), retain third (caps the accumulator).
+   **Sample at the source** has the highest ingestion-cost leverage: dropping DEBUG logs in prod or scraping at 30s instead of 5s can cut ingestion by a large multiple, depending on what the app emits. Audit events are the exception: sample nothing there. **Scrub at the boundary** strips PII / high-cardinality fields before they cross an ingestion boundary; bounded cost saving but huge compliance-scope reduction. **Cap retention at the sink** is the cheapest lever (one Terraform variable) and the highest dollar-impact for *storage* costs but doesn't reduce ingestion. Order matters: sample first (kills volume), scrub second (kills compliance scope), retain third (caps the accumulator).
 
    </details>
 

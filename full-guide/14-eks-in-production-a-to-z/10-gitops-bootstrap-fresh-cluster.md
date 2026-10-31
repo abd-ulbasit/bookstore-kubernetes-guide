@@ -13,7 +13,7 @@
 > miniature.
 
 **Estimated time:** ~30 min read · ~90 min hands-on
-**Prerequisites:** [Part 14 ch.02](./02-eks-cluster-lifecycle.md) — fresh cluster you'll bootstrap into · [Part 07 ch.04](../07-delivery/04-gitops-argocd.md) — Argo CD + App-of-Apps fundamentals · [Part 13 ch.01](../13-grand-capstone-bookstore-platform/01-bookstore-2-from-toy-to-platform.md) — bookstore Git tree that becomes the source of truth
+**Prerequisites:** [Part 14 ch.02](./02-eks-cluster-lifecycle.md): fresh cluster you'll bootstrap into · [Part 07 ch.04](../07-delivery/04-gitops-argocd.md): Argo CD + App-of-Apps fundamentals · [Part 13 ch.01](../13-grand-capstone-bookstore-platform/01-bookstore-2-from-toy-to-platform.md): bookstore Git tree that becomes the source of truth
 
 **You'll know after this:** • resolve the GitOps chicken-and-egg (Argo CD must exist before it can reconcile from Git) via Terraform one-shot install · • design an App-of-Apps root Application that pulls every other workload from Git · • configure Argo CD to manage itself on subsequent syncs · • give External Secrets its access through IRSA, with no static AWS key · • scope AppProjects so no Application reaches past its repos or namespaces · • execute a full fresh-cluster bootstrap on the bookstore-platform tree from `terraform apply` to "all green"
 
@@ -30,7 +30,7 @@ because most teams want to control the GitOps bootstrap order
 explicitly. When you flip it on, Terraform creates the `argocd`
 namespace, installs the Argo CD Helm chart, and applies a root
 `AppProject` (`platform-bootstrap`) and a single root `Application`
-(`root-app`) that points at your GitOps repo's `argocd/apps/` directory. Every other Application — for cert-manager,
+(`root-app`) that points at your GitOps repo's `argocd/apps/` directory. Every other Application: for cert-manager,
 External Secrets Operator, Istio, the bookstore workloads, anything
 — is a child Application under that root, discovered via the
 **App-of-Apps** pattern.
